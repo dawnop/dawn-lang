@@ -12,8 +12,11 @@
 # would disagree if the opaque `Cursor` were leaking its representation --
 # the surrogate pair below is there to say so.
 #
-# No numbers in the input on purpose: `JNum` holds a Float, and float
-# formatting is a documented divergence between the two backends.
+# Number cases below pin the package policy through both backends. The `bits`
+# labels came from an independent Python oracle:
+# `struct.pack(">d", float(decimal_text)).hex()`. Dawn cannot bit-cast a Float,
+# so each line also exposes the rounded value (and, for zero, its reciprocal)
+# to make the labelled bit pattern observable rather than decorative.
 #
 # One line of the expectation pins something the language does not promise:
 # the key order of a two-key object is std/hamt's iteration order. That is
@@ -22,10 +25,41 @@
 use std/io
 use json/parser
 use json/render
+use json/value.{JInt, JNum}
 
 fn round(label: String, src: String) -> Unit !io =
   match parser.parse(src) {
     Ok(j) -> io.println(label ++ " = " ++ render.render(j))
+    Err(e) -> io.println(label ++ " ! " ++ e)
+  }
+
+fn exact_int(label: String, src: String, expected: Int) -> Unit !io =
+  match parser.parse(src) {
+    Ok(JInt(v)) ->
+      io.println(label ++ " = JInt " ++ to_string(v) ++ " exact=" ++ to_string(v == expected))
+    Ok(j) -> io.println(label ++ " = wrong-kind " ++ render.render(j))
+    Err(e) -> io.println(label ++ " ! " ++ e)
+  }
+
+fn rounded_float(label: String, bits: String, src: String, expected: Float) -> Unit !io =
+  match parser.parse(src) {
+    Ok(JNum(v)) ->
+      io.println(label ++ " = bits=" ++ bits ++ " value=" ++ to_string(v) ++
+          " exact=" ++ to_string(v == expected))
+    Ok(j) -> io.println(label ++ " = wrong-kind " ++ render.render(j))
+    Err(e) -> io.println(label ++ " ! " ++ e)
+  }
+
+fn underflow_zero(label: String, bits: String, src: String, negative: Bool) -> Unit !io =
+  match parser.parse(src) {
+    Ok(JNum(v)) -> {
+      let reciprocal = 1.0 / v
+      let sign_ok = if negative { reciprocal < 0.0 } else { reciprocal > 0.0 }
+      io.println(label ++ " = bits=" ++ bits ++ " value=" ++ to_string(v) ++
+          " reciprocal=" ++ to_string(reciprocal) ++
+          " exact=" ++ to_string(v == 0.0 && sign_ok))
+    }
+    Ok(j) -> io.println(label ++ " = wrong-kind " ++ render.render(j))
     Err(e) -> io.println(label ++ " ! " ++ e)
   }
 
@@ -37,4 +71,17 @@ pub fn main() -> Unit !io = {
   round("spaces", "  {  \"a\" :  [ true ]  }  ")
   round("bad", "{\"a\": }")
   round("truncated", "[\"unterminated")
+
+  exact_int("integer-2^53+1", "9007199254740993", 9007199254740993)
+  rounded_float("fraction-2^53+1", "4340000000000000", "9007199254740993.0",
+    9007199254740992.0)
+  rounded_float("tie-even-down", "3ff0000000000000",
+    "1.00000000000000011102230246251565404236316680908203125", 1.0)
+  rounded_float("tie-even-up", "3ff0000000000002",
+    "1.00000000000000033306690738754696212708950042724609375", 1.0000000000000004)
+  underflow_zero("underflow-positive", "0000000000000000", "1e-400", false)
+  underflow_zero("underflow-negative", "8000000000000000", "-1e-400", true)
+  rounded_float("maximum-finite", "7fefffffffffffff", "1.7976931348623157e308",
+    1.7976931348623157e308)
+  round("overflow", "1e400")
 }

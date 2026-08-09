@@ -61,7 +61,14 @@
 - **影响：** Web/LSP/config tooling 要取 error kind/offset 只能解析人类文本，文案调整会破坏调用方。
 - **建议：** breaking change 为 `JsonError { kind, offset, message }`；若需过渡，另留 `parse_message` wrapper。
 
-## LIB-09 — P3 — JSON number 注释与真实 IEEE 策略相反
+## LIB-09 — P3 — JSON number 注释与真实 IEEE 策略相反（已修）
+
+> **后续处置（2026-08-09）：已修。** `Json` 与 parser 文档现明确区分两条路径：
+> `Int` 范围内的整数词素精确保留为 `JInt`；fraction/exponent 按 IEEE-754 binary64
+> ties-to-even 舍入为 `JNum`，有限下溢接受为有符号零，只有非有限溢出被拒。
+> `json_lib` 跨后端语料使用 Python `struct.pack` 派生的位标签，并由规范化 value/exact
+> 与 ±0 reciprocal 间接验证 2^53+1、两侧 tie-even、正负下溢零和最大有限值；同时固定
+> `1e400` 拒绝与大整数的逐位保真。
 
 - **证据：S。** value comment 声称不能精确表示的 decimal 会被拒：`packages/json/src/value.dawn:8`；parser/test 明确接受 `1e-400` 并 underflow 为 `0.0`：`packages/json/src/parser.dawn:203`。
 - **影响：** caller 会误以为 Json number 保证 decimal exactness。

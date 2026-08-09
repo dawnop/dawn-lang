@@ -36,12 +36,12 @@ fn is_finite(f: Float) -> Bool = f - f == 0.0
 # units, counters and epoch timestamps all live in exactly that range, so the
 # old path could rewrite them with no error anywhere.
 #
-# Out-of-range literals are now an error rather than a rounded answer. RFC 8259
-# §6 explicitly lets an implementation set limits on the range and precision of
-# numbers, and JSONTestSuite files every such case under `i_` (implementation
-# defined) — no `y_` fixture needs an integer wider than 64 bits. Refusing beats
-# answering wrongly; a caller that genuinely wants arbitrary-precision numbers
-# needs a decimal model in `Json`, not a lossier parser.
+# Integer literals outside `Int` are errors. Fraction/exponent literals instead
+# use the host-independent `parse_float` contract: nearest IEEE-754 binary64,
+# ties to even. Finite rounded results (including signed zero after underflow)
+# are accepted; only overflow to NaN or Infinity is rejected. RFC 8259 §6 lets
+# implementations set these range and precision limits. A caller that needs
+# exact decimal arithmetic needs a decimal model in `Json`.
 fn number_of(src: String, i: Cursor, lit: String) -> Result[Json, String] =
   if is_int_literal(lit) {
     match parse_int(lit) {
@@ -172,7 +172,9 @@ fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), St
 ## Parse one complete JSON document (RFC 8259). `Err` carries a message ending
 ## in the code-point offset it was noticed at; anything but whitespace after the
 ## value is an error. Never panics. An integer literal becomes `JInt`, any other
-## number `JNum`; out-of-range literals are refused rather than rounded.
+## number `JNum`. Integers must fit `Int`; fraction/exponent literals use
+## IEEE-754 binary64 ties-to-even rounding, accept finite underflow as signed
+## zero, and reject overflow when the result is non-finite.
 pub fn parse(input: String) -> Result[Json, String] = {
   let (v, j) = parse_value(input, cursor.start(input), 0)?
   let k = skip_ws(input, j)
@@ -200,7 +202,7 @@ test "integers beyond 2^53 keep every digit" {
   assert parse("-9223372036854775808") == Ok(JInt(-9223372036854775807 - 1))
 }
 
-test "out-of-range numbers are refused, not rounded" {
+test "integer and non-finite overflow are refused, finite underflow is accepted" {
   # used to saturate to Long.MAX_VALUE
   assert parse("99999999999999999999") ==
     Err("integer out of Int range: 99999999999999999999 at offset 0")
