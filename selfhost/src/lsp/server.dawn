@@ -15,7 +15,10 @@ use std/bytes
 use json/parser
 use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 use json/render.{render}
-use driver/analyze.{Program, CheckedMod, analyze_document, analyze_standalone, canon}
+use driver/analyze.{
+  Program, CheckedMod, ProjectPlan, DocumentAnalysis,
+  analyze_document_planned, analyze_standalone, canon
+}
 use ir/interp.{ct_default}
 use check/jsig.{Jsig}
 use driver/stdlib.{StdCtx, load_std}
@@ -393,8 +396,15 @@ type Doc = {
   view: SourceView,
   ls: List[Int],
   prog: Program,
-  entry: String
+  entry: String,
+  plan: Option[ProjectPlan]
 }
+
+fn completion_modules(d: Doc) -> Option[Map[String, String]] =
+  match d.plan {
+    Some(plan) -> Some(plan.modules.by_use)
+    None -> None
+  }
 
 fn doc_qcx(st: LspState, d: Doc) -> Option[QCx] = {
   let entry = list.find(d.prog.modules, cm => cm.mod_path == d.entry)
@@ -1037,9 +1047,13 @@ fn get_or_null(j: Json, k: String) -> Json =
 fn update_doc(st0: LspState, uri: String, text: String) -> LspState !io = {
   var st = st0
   let path = uri_to_path(uri)
-  let (prog, entry) = match path {
-    Some(p) -> analyze_document(p, text, st.std, ct_default(), st.jsig)
-    None -> (analyze_standalone("<lsp>", text, st.std, ct_default(), st.jsig), "main")
+  let analyzed: DocumentAnalysis = match path {
+    Some(p) -> analyze_document_planned(p, text, st.std, ct_default(), st.jsig)
+    None -> DocumentAnalysis {
+      prog: analyze_standalone("<lsp>", text, st.std, ct_default(), st.jsig),
+      entry: "main",
+      plan: None
+    }
   }
   let d = Doc {
     uri: uri,
@@ -1047,8 +1061,9 @@ fn update_doc(st0: LspState, uri: String, text: String) -> LspState !io = {
     text: text,
     view: view_of(text),
     ls: line_starts_of(text),
-    prog: prog,
-    entry: entry
+    prog: analyzed.prog,
+    entry: analyzed.entry,
+    plan: analyzed.plan
   }
   st = LspState { ..st, docs: map.insert(st.docs, uri, d) }
   var diags: List[Json] = []
@@ -1084,7 +1099,7 @@ fn handle_completion(st: LspState, params: Json) -> Json !io = {
       match doc_qcx(st, d) {
         Some(qc) -> {
           var items: List[Json] = []
-          for it in completions_at(qc, d.text, pos_offset(d, params)) {
+          for it in completions_at(qc, completion_modules(d), d.text, pos_offset(d, params)) {
             var fields: List[(String, Json)] = [("label", JStr(it.label))]
             fields = fields ++ [("kind", JInt(it.kind))]
             match it.detail {

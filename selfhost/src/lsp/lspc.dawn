@@ -9,8 +9,8 @@
 # segment at a time, then the module's exported names inside `.{ }`. That is
 # the toolchain half of "the directory tree IS the namespace" (#179) -- the
 # tree is only a namespace you can navigate if something enumerates it, and
-# until now nothing did. It is also the one branch here that touches the disk,
-# because the answer is a directory listing and nothing else knows it.
+# until now nothing did. Project-aware documents receive the directory index
+# during analysis; this branch reads disk only for unloaded module declarations.
 
 use std/io
 use std/str
@@ -215,14 +215,20 @@ fn add(it: Items, name: String, kind: Int, detail: Option[String], rank: String)
 fn path_char(c: Char) -> Bool = is_word(c) || c == '/'
 
 ## Everything a `use` line admits at the cursor.
-fn use_completions(qc: QCx, tail: List[Char]) -> List[CItem] !io = {
+fn use_completions(
+  qc: QCx,
+  candidates: Map[String, String],
+  tail: List[Char]
+) -> List[CItem] !io = {
   let n = len(tail)
   var i = 0
   while i < n && path_char(tail[i]) { i = i + 1 }
   let path = from_code_points(slice_cps(tail, 0, i))
   let rest = slice_cps(tail, i, n)
-  if len(rest) == 0 { return path_items(qc, path) }
-  if rest[0] == '.' { return import_items(qc, path, slice_cps(rest, 1, len(rest))) }
+  if len(rest) == 0 { return path_items(qc, candidates, path) }
+  if rest[0] == '.' {
+    return import_items(qc, candidates, path, slice_cps(rest, 1, len(rest)))
+  }
   # `use java "com.x.Y"` names a class, not a module path. The quoted name is
   # already suppressed as a string (lex_ctx), so this is the gap before it,
   # where a module path would go and a class name cannot be guessed.
@@ -268,11 +274,15 @@ fn seg_items(it0: Items, prefix: List[String], paths: List[String], rank: String
 ## Two sources, and they are ranked apart only because the first segment is
 ## where they meet: below it a path is either under `std/` or it is not, so
 ## the groups never interleave again.
-fn path_items(qc: QCx, typed: String) -> List[CItem] !io = {
+fn path_items(
+  qc: QCx,
+  candidates: Map[String, String],
+  typed: String
+) -> List[CItem] !io = {
   let parts = str.split(typed, "/")
   let prefix = list.take(parts, len(parts) - 1)
   var it = Items { out: [], seen: set.empty() }
-  it = seg_items(it, prefix, sort(map.keys(use_candidates(qc.entry.path))), "0")
+  it = seg_items(it, prefix, sort(map.keys(candidates)), "0")
   it = seg_items(it, prefix, sort(map.keys(qc.std.exports)), "1")
   if len(prefix) == 0 {
     let d: Option[String] = Some("`use java \"com.x.Y\"` — import a Java class")
@@ -283,7 +293,12 @@ fn path_items(qc: QCx, typed: String) -> List[CItem] !io = {
 
 ## The names inside `use a/b.{ }`. `after` is everything between the `.` and
 ## the word being typed.
-fn import_items(qc: QCx, path: String, after: List[Char]) -> List[CItem] !io = {
+fn import_items(
+  qc: QCx,
+  candidates: Map[String, String],
+  path: String,
+  after: List[Char]
+) -> List[CItem] !io = {
   let none: List[CItem] = []
   let n = len(after)
   # `use a/b.` — a selective import is the only thing a `.` can open, and it
@@ -303,7 +318,7 @@ fn import_items(qc: QCx, path: String, after: List[Char]) -> List[CItem] !io = {
   match map.get(qc.exports_env, path) {
     Some(ex) -> exported_items(qc, it, ex)
     None ->
-      match map.get(use_candidates(qc.entry.path), path) {
+      match map.get(candidates, path) {
         Some(f) ->
           match io.read_file(f) {
             Ok(text) -> declared_items(it, text)
@@ -371,7 +386,12 @@ pub fn keywords() -> List[String] =
     "match", "if", "else", "for", "in", "while", "return", "break", "continue",
     "comptime", "unsafe_pure", "test", "assert", "with", "true", "false", "not"]
 
-pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] !io = {
+pub fn completions_at(
+  qc: QCx,
+  project_modules: Option[Map[String, String]],
+  text: String,
+  offset: Int
+) -> List[CItem] !io = {
   let v = view_of(text)
   let cps = v.cps
   let n = len(cps)
@@ -408,7 +428,15 @@ pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] !io = {
     return none
   }
   match use_tail(before) {
-    Some(tail) -> return use_completions(qc, tail)
+    Some(tail) -> {
+      # Project-aware documents reuse the module index captured during their
+      # analysis. Only standalone buffers plan afresh, once for this request.
+      let candidates = match project_modules {
+        Some(modules) -> modules
+        None -> use_candidates(qc.entry.path)
+      }
+      return use_completions(qc, candidates, tail)
+    }
     None -> ()
   }
   if nb > 0 && before[nb - 1] == '.' {

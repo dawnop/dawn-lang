@@ -49,6 +49,22 @@ pub type LocDiag = { path: String, d: Diag }
 
 pub type LoadResult = { modules: List[LoadedModule], diags: List[LocDiag] }
 
+## The source files visible from one captured source plan. `project_files`
+## keeps the caller-facing spellings used by loader diagnostics, including
+## files whose names are not legal module paths. `by_use` is the filtered,
+## canonical reverse index used by completion.
+pub type ModuleIndex = {
+  project_files: List[String],
+  by_use: Map[String, String]
+}
+
+## Compiler-side source planning: the Java-neutral planner result plus the
+## module index captured during the same planning pass.
+pub type ProjectPlan = {
+  source: source.SourcePlan,
+  modules: ModuleIndex
+}
+
 ## A path in the one spelling the compiler compares module identities by:
 ## absolute and normalized. The language server needs the same answer, and
 ## used to reach it through its own copy of this line.
@@ -150,7 +166,7 @@ pub fn load_directory(dir: String) -> LoadResult !io = {
       "a Dawn project keeps its modules under src/, with entry src/main.dawn")]
     return LoadResult { modules: [], diags: diags }
   }
-  let plan = source.source_plan(source.ProjectDirectory(dir))
+  let plan = project_plan(source.ProjectDirectory(dir))
   let main_path = root ++ "/main.dawn"
   let main_ok = match io.read_file(main_path) {
     Ok(_) -> true
@@ -168,9 +184,9 @@ pub fn load_directory(dir: String) -> LoadResult !io = {
       "add src/main.dawn with `pub fn main() -> Unit !io`")]
   }
   # load every module under src/ (spec §10.5: unreferenced modules still check)
-  diags = diags ++ planner_diags(plan.diags)
   let no_over: Map[String, String] = map.empty()
-  resolve(root, walk_dawn(root), diags, false, plan.pkgs, no_over)
+  let loaded = load_entries_over(plan, plan.modules.project_files, no_over)
+  LoadResult { modules: loaded.modules, diags: diags ++ loaded.diags }
 }
 
 ## Canonicalize a package module's `use` paths to the name-qualified spelling
@@ -248,15 +264,29 @@ pub fn load_file(file: String) -> LoadResult !io = {
 
 ## `load_file` with editor-buffer overrides.
 pub fn load_file_over(file: String, over: Map[String, String]) -> LoadResult !io = {
-  let plan = source.source_plan(source.SourceFile(file))
-  resolve(plan.source_root, [file], planner_diags(plan.diags), true, plan.pkgs, over)
+  let plan = project_plan(source.SourceFile(file))
+  load_entries_over(plan, [file], over)
 }
+
+## Load entries against one already captured plan. This boundary deliberately
+## has no target from which it could silently rediscover a newer manifest.
+pub fn load_entries_over(
+  plan: ProjectPlan,
+  entries: List[String],
+  over: Map[String, String]
+) -> LoadResult !io =
+  resolve(
+    plan.source.source_root,
+    entries,
+    planner_diags(plan.source.diags),
+    plan.source.pkgs,
+    over
+  )
 
 fn resolve(
   root: String,
   seed_files: List[String],
   diags0: List[LocDiag],
-  follow_only: Bool,
   pkgs: Map[String, source.PkgR],
   over: Map[String, String]
 ) -> LoadResult !io = {
@@ -579,6 +609,14 @@ pub type CheckedMod = {
 
 pub type Program = { modules: List[CheckedMod], diags: List[LocDiag] }
 
+## One editor analysis plus the source plan captured for project-aware
+## completion. A truly standalone buffer has no project plan.
+pub type DocumentAnalysis = {
+  prog: Program,
+  entry: String,
+  plan: Option[ProjectPlan]
+}
+
 fn empty_tmodule() -> TModule = {
   let no_syms: Map[Int, Sym] = map.empty()
   TModule { fns: [], consts: [], tests: [], syms: no_syms }
@@ -685,22 +723,52 @@ fn has_module_use(text: String) -> Bool = {
 fn is_ws(cp: Char) -> Bool =
   cp == ' ' || cp == '\t' || cp == '\n' || cp == '\u{000B}' || cp == '\u{000C}' || cp == '\r'
 
-## Every `.dawn` file under `root`, as `prefix` ++ its module path → the file.
-## `std/...` is skipped wherever it comes from: the prefix is reserved for the
-## bundled library, and `resolve` rejects a project module that claims it.
-fn add_tree(
+## Add one already-walked tree to the reverse module index. `std/...` is
+## skipped wherever it comes from: the prefix is reserved for the bundled
+## library, and `resolve` rejects a project module that claims it.
+fn index_files(
   out0: Map[String, String],
   root: String,
-  prefix: String
+  prefix: String,
+  files: List[String]
 ) -> Map[String, String] !io = {
   var out = out0
-  for f in walk_dawn(root) {
-    let mp = prefix ++ module_path_of(root, f)
+  let root_abs = canon(root)
+  for f in files {
+    let file_abs = canon(f)
+    let mp = prefix ++ module_path_of(root_abs, file_abs)
     if len(bad_segments(mp)) == 0 && mp != "std" && not str.starts_with(mp, "std/") {
-      out = map.insert(out, mp, f)
+      out = map.insert(out, mp, file_abs)
     }
   }
   out
+}
+
+## Capture source resolution and derive every compiler-facing module path from
+## it. The project tree is walked once. Direct dependencies sharing one source
+## root reuse the same walk while still receiving each consumer alias prefix.
+pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !io = {
+  let source_plan = source.source_plan(target)
+  let project_files = walk_dawn(source_plan.source_root)
+  var by_use: Map[String, String] = map.empty()
+  by_use = index_files(by_use, source_plan.source_root, "", project_files)
+  var dependency_files: Map[String, List[String]] = map.empty()
+  for dep_alias in map.keys(source_plan.pkgs) {
+    let pkg = map.get(source_plan.pkgs, dep_alias).expect("resolved dep")
+    let files = match map.get(dependency_files, pkg.root) {
+      Some(cached) -> cached
+      None -> {
+        let walked = walk_dawn(pkg.root)
+        dependency_files = map.insert(dependency_files, pkg.root, walked)
+        walked
+      }
+    }
+    by_use = index_files(by_use, pkg.root, dep_alias ++ "/", files)
+  }
+  ProjectPlan {
+    source: source_plan,
+    modules: ModuleIndex { project_files: project_files, by_use: by_use }
+  }
 }
 
 ## Every module path a `use` in `file` could name, mapped to the file behind
@@ -717,23 +785,18 @@ fn add_tree(
 ## project, and its exports are already in the server's hand (StdCtx), which
 ## is a better source than a path that may not exist.
 ##
-## Dependency resolution is the loader's own, so a cold url dep is fetched
-## here the way `dawn check` would fetch it. In the editor the buffer's own
-## analysis has just run the same resolution, so the cache is warm and this
-## costs the walk only.
+## This compatibility wrapper is for callers that did not retain a
+## ProjectPlan. A cold url dep is fetched here the way `dawn check` would fetch
+## it; the LSP's project-aware path instead reuses the index captured during
+## analysis.
 pub fn use_candidates(file: String) -> Map[String, String] !io = {
-  var out: Map[String, String] = map.empty()
   # a buffer with no file behind it (`<lsp>`) has no tree to walk, and canon()
   # would resolve that placeholder against the server's own directory
-  if not str.ends_with(file, ".dawn") { return out }
-  let plan = source.source_plan(source.SourceFile(file))
-  let root = canon(plan.source_root)
-  out = add_tree(out, root, "")
-  for key in map.keys(plan.pkgs) {
-    let p = map.get(plan.pkgs, key).expect("resolved dep")
-    out = add_tree(out, p.root, key ++ "/")
+  if not str.ends_with(file, ".dawn") {
+    let none: Map[String, String] = map.empty()
+    return none
   }
-  out
+  project_plan(source.SourceFile(file)).modules.by_use
 }
 
 ## The module path a file's *name* alone would give it: the basename minus
@@ -800,6 +863,44 @@ pub fn analyze_standalone(
 ## Returns the whole program (cross-file definition targets need the other
 ## modules' ASTs) plus the entry's mod_path; the entry's own diagnostics are
 ## the prog.diags rows whose path is the entry file.
+pub fn analyze_document_planned(
+  path: String,
+  text: String,
+  std: StdCtx,
+  opts: CtOpts,
+  js: Jsig
+) -> DocumentAnalysis !io = {
+  if not has_module_use(text) {
+    return DocumentAnalysis {
+      prog: analyze_standalone(path, text, std, opts, js),
+      entry: "main",
+      plan: None
+    }
+  }
+  let abs = canon(path)
+  var over: Map[String, String] = map.empty()
+  over = map.insert(over, abs, text)
+  let plan = project_plan(source.SourceFile(path))
+  let loaded = load_entries_over(plan, [path], over)
+  var entry = ""
+  for mf in loaded.modules {
+    if entry == "" && canon(mf.path) == abs { entry = mf.mod_path }
+  }
+  if entry == "" {
+    return DocumentAnalysis {
+      prog: analyze_standalone(path, text, std, opts, js),
+      entry: "main",
+      plan: Some(plan)
+    }
+  }
+  DocumentAnalysis {
+    prog: analyze_program(loaded, std, opts, js),
+    entry: entry,
+    plan: Some(plan)
+  }
+}
+
+## Compatibility entry for callers that do not retain project planning.
 pub fn analyze_document(
   path: String,
   text: String,
@@ -807,21 +908,8 @@ pub fn analyze_document(
   opts: CtOpts,
   js: Jsig
 ) -> (Program, String) !io = {
-  if not has_module_use(text) {
-    return (analyze_standalone(path, text, std, opts, js), "main")
-  }
-  let abs = canon(path)
-  var over: Map[String, String] = map.empty()
-  over = map.insert(over, abs, text)
-  let loaded = load_file_over(path, over)
-  var entry = ""
-  for mf in loaded.modules {
-    if entry == "" && canon(mf.path) == abs { entry = mf.mod_path }
-  }
-  if entry == "" {
-    return (analyze_standalone(path, text, std, opts, js), "main")
-  }
-  (analyze_program(loaded, std, opts, js), entry)
+  let analyzed = analyze_document_planned(path, text, std, opts, js)
+  (analyzed.prog, analyzed.entry)
 }
 
 # ---- tests ----

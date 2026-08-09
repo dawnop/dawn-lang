@@ -1,0 +1,52 @@
+# Behavioral probe for ProjectPlan's captured-manifest boundary. It changes a
+# project's dependency after planning, then compares the plan-aware loader with
+# the compatibility wrapper that intentionally captures a fresh plan.
+
+use std/io
+use std/map
+use std/list
+use std/str
+use compiler/driver/analyze.{LoadResult, project_plan, load_entries_over, load_file}
+use compiler_plan/source.{SourceFile}
+
+fn has_module(loaded: LoadResult, path: String) -> Bool =
+  list.any(loaded.modules, m => m.mod_path == path)
+
+fn require(ok: Bool, message: String) -> Unit =
+  if ok { () } else { panic(message) }
+
+pub fn main() -> Unit !io = {
+  let fixture = io.getenv("DAWN_PROJECT_PLAN_FIXTURE").expect("fixture root")
+  let app = fixture ++ "/app"
+  let entry = app ++ "/src/main.dawn"
+  let plan = project_plan(SourceFile(entry))
+
+  require(list.contains(plan.modules.project_files, entry),
+    "project plan lost the entry's diagnostic path spelling")
+  require(list.contains(plan.modules.project_files, app ++ "/src/bad-name.dawn"),
+    "project plan omitted an invalid source file needed for diagnostics")
+  let indexed = map.get(plan.modules.by_use, "dep/api").expect("captured dependency module")
+  require(str.ends_with(indexed, "/a/src/api.dawn"),
+    "project plan did not index dependency A canonically")
+
+  let manifest_b =
+    "schema = 1\nname = \"app\"\n\n[deps]\ndep = \"../b\"\n"
+  match io.write_file(app ++ "/dawn.toml", manifest_b) {
+    Ok(_) -> ()
+    Err(e) -> panic("cannot switch fixture manifest: " ++ e.message)
+  }
+
+  let no_over: Map[String, String] = map.empty()
+  let captured = load_entries_over(plan, [entry], no_over)
+  require(has_module(captured, "pkg_a/api"),
+    "captured plan did not retain dependency A")
+  require(not has_module(captured, "pkg_b/api"),
+    "captured plan leaked dependency B")
+
+  let fresh = load_file(entry)
+  require(has_module(fresh, "pkg_b/api"),
+    "fresh loader did not observe dependency B")
+  require(not has_module(fresh, "pkg_a/api"),
+    "fresh loader retained dependency A")
+  io.println("captured-plan: OK")
+}

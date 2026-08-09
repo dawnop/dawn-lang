@@ -146,6 +146,11 @@ pub fn analyze_document_planned(
   compatibility wrapper。
 - 删除未使用的 `resolve.follow_only`，不借机改变 load 范围或诊断。
 
+这条 seam 有一项明确成本：每次 fresh file-mode plan 会遍历完整 project source tree，并对每个
+唯一的直接 dependency root 遍历一次；它不解析全部文件，指向同一 root 的重复 alias 共享一次
+walk。第一刀接受这项正确性成本，D 刀由 workspace 持有 plan，消除编辑器会话内的重复遍历；
+CLI 是否再加缓存必须先量测，不能在没有失效协议时偷加全局状态。
+
 第一刀里 `Doc` **暂时仍各持一份 `Program`**，只新增 `plan: Option[ProjectPlan]`。completion
 不把 module index 塞进通用 `QCx`，而是显式接收 completion-specific 参数：
 
