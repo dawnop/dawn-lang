@@ -1,0 +1,122 @@
+# The public JsigLease contract runs outside the compiler package so it can
+# prove that no private loader handle leaks into the API. The contract appends
+# one same-module resource observer to its temporary subject copy; that observer
+# shares the production lease constructor and exists only to see getResource
+# before and after the public close closure runs.
+
+use compiler/check/jsig.{Jsig}
+use compiler/jvm/jreflect.{JsigResourceProbe, jsig_real, jsig_for, jsig_resource_probe}
+
+fn require(ok: Bool, message: String) -> Unit = if ok { () } else { panic(message) }
+
+fn has_class(js: Jsig, fqcn: String) -> Bool !io =
+  match js.find_class(fqcn) {
+    Some(_) -> true
+    None -> false
+  }
+
+fn has_method(js: Jsig, fqcn: String, name: String) -> Bool !io = {
+  for method in js.methods_of(fqcn) {
+    if method.name == name { return true }
+  }
+  false
+}
+
+fn has_ctor(js: Jsig, fqcn: String, params: List[String]) -> Bool !io = {
+  for ctor in js.ctors_of(fqcn) {
+    if ctor.param_cls == params { return true }
+  }
+  false
+}
+
+fn has_field(js: Jsig, fqcn: String, name: String) -> Bool !io = {
+  for field in js.static_fields_of(fqcn) {
+    if field.name == name { return true }
+  }
+  false
+}
+
+fn has_sam(js: Jsig, fqcn: String, name: String) -> Bool !io =
+  match js.sam_of(fqcn) {
+    Some(method) -> method.name == name
+    None -> false
+  }
+
+fn fail_after_load(probe: JsigResourceProbe) -> Int !io = {
+  require(has_class(probe.lease.jsig, "fixture.Api"),
+    "FAIL bracket-close: fixture vanished before the panic")
+  panic("intentional lease failure")
+}
+
+pub fn main() -> Unit !io = {
+  let first_jar = args()[0]
+  let second_jar = args()[1]
+  let resource = "fixture/unique.txt"
+
+  let system = jsig_real()
+  require(not has_class(system, "fixture.Api"),
+    "FAIL system-loader: system loader resolved fixture.Api")
+  require(has_class(system, "host.Leak"),
+    "FAIL platform-parent: host application class is absent from the system loader")
+  println("PASS  system loader excludes target fixtures")
+
+  let first = jsig_for([first_jar])
+  let second = jsig_for([second_jar])
+  require(has_class(first.jsig, "fixture.Api"),
+    "FAIL isolation: first lease did not resolve fixture.Api")
+  require(has_class(second.jsig, "fixture.Api"),
+    "FAIL isolation: second lease did not resolve fixture.Api")
+  require(not has_class(first.jsig, "host.Leak") && not has_class(second.jsig, "host.Leak"),
+    "FAIL platform-parent: target lease leaked host.Leak")
+  println("PASS  platform-parent leases exclude host classes")
+
+  require(first.jsig.class_info("fixture.Api").simple == "Api" &&
+      second.jsig.class_info("fixture.Api").simple == "Api",
+    "FAIL isolation: class_info did not use the target loaders")
+  require(has_method(first.jsig, "fixture.Api", "onlyA") &&
+      not has_method(first.jsig, "fixture.Api", "onlyB"),
+    "FAIL isolation: first lease API mismatch")
+  require(has_method(second.jsig, "fixture.Api", "onlyB") &&
+      not has_method(second.jsig, "fixture.Api", "onlyA"),
+    "FAIL isolation: second lease API mismatch")
+  require(has_ctor(first.jsig, "fixture.Api", ["int"]) &&
+      has_ctor(second.jsig, "fixture.Api", ["java.lang.String"]),
+    "FAIL isolation: constructors crossed target loaders")
+  require(has_field(first.jsig, "fixture.Api", "A_FIELD") &&
+      not has_field(first.jsig, "fixture.Api", "B_FIELD") &&
+      has_field(second.jsig, "fixture.Api", "B_FIELD") &&
+      not has_field(second.jsig, "fixture.Api", "A_FIELD"),
+    "FAIL isolation: static fields crossed target loaders")
+  require(first.jsig.is_assignable("fixture.Parent", "fixture.Api") &&
+      not second.jsig.is_assignable("fixture.Parent", "fixture.Api"),
+    "FAIL isolation: assignability crossed target loaders")
+  require(has_sam(first.jsig, "fixture.Action", "onlyA") &&
+      has_sam(second.jsig, "fixture.Action", "onlyB"),
+    "FAIL isolation: SAM queries crossed target loaders")
+  require(first.jsig.component_of("[Lfixture.Api;") == Some("fixture.Api") &&
+      second.jsig.component_of("[Lfixture.Api;") == Some("fixture.Api"),
+    "FAIL isolation: component queries did not use the target loaders")
+  first.close()
+  second.close()
+  println("PASS  all eight signature queries stay target-local")
+
+  let normal = jsig_resource_probe([first_jar])
+  require(normal.resource_visible(resource),
+    "FAIL close: unique resource was not visible before normal close")
+  normal.lease.close()
+  require(not normal.resource_visible(resource),
+    "FAIL close: unique resource remained visible after normal close")
+  println("PASS  normal close releases the unique resource")
+
+  let guarded = jsig_resource_probe([first_jar])
+  let outcome: Result[Int, ForeignError] = catch_panic(() =>
+      bracket(guarded, probe => probe.lease.close(), fail_after_load))
+  let caught = match outcome {
+    Ok(_) -> false
+    Err(error) -> error.message == "intentional lease failure"
+  }
+  require(caught, "FAIL bracket-close: intentional panic was not preserved")
+  require(not guarded.resource_visible(resource),
+    "FAIL bracket-close: unique resource remained visible after panic")
+  println("PASS  bracket closes after a panic")
+}

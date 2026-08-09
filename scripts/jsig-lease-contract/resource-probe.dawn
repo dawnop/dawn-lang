@@ -1,0 +1,19 @@
+## A contract-only view of the loader resource state. This declaration is
+## appended to a temporary copy of jreflect, where it can reuse the private
+## production constructor without adding a loader handle to JsigLease.
+pub type JsigResourceProbe = {
+  lease: JsigLease,
+  resource_visible: fn(String) -> Bool !io
+}
+
+pub fn jsig_resource_probe(jars: List[String]) -> JsigResourceProbe !io = {
+  let loader = loader_for(jars)
+  JsigResourceProbe {
+    lease: lease_with(loader),
+    resource_visible: name =>
+      match loader.closeable.getResource(name) {
+        Some(_) -> true
+        None -> false
+      }
+  }
+}

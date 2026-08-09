@@ -2,9 +2,11 @@
 # the Kotlin checker makes against Class<*> objects, wrapped into the plain-data
 # records `jsig` declares, so the checker proper never touches a Java object —
 # or this module: it consumes the queries through the `Jsig` hook record, and
-# `jsig_real()` is how the JVM main wires these implementations in. Arrays from
-# getMethods()/getParameterTypes() are walked with java.lang.reflect.Array —
-# the sanctioned detour around Dawn's no-array-indexing rule (spec §9.5).
+# `jsig_real()` is how the JVM main wires the system-loader implementations in;
+# `jsig_for()` instead captures one target-local loader behind the same hooks.
+# Arrays from getMethods()/getParameterTypes() are walked with
+# java.lang.reflect.Array — the sanctioned detour around Dawn's no-array-
+# indexing rule (spec §9.5).
 #
 # Everything here is honestly !io (reflection reads the world's class path),
 # which makes the checker itself !io — that is the true story.
@@ -12,10 +14,12 @@
 use std/str
 use std/list
 use std/set
-use check/jsig.{JClass, JMethod, JCtor, JField, Jsig}
+use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, JsigLease}
+use java "java.io.File"
 use java "java.lang.Object"
 use java "java.lang.Class"
 use java "java.lang.ClassLoader"
+use java "java.net.URLClassLoader"
 use java "java.lang.reflect.Array"
 use java "java.lang.reflect.Method"
 use java "java.lang.reflect.Constructor"
@@ -24,6 +28,8 @@ use java "java.lang.reflect.Modifier"
 use java "java.util.Objects"
 use java "java.lang.invoke.MethodHandles"
 use java "java.lang.invoke.MethodHandle"
+
+type TargetLoader = { base: ClassLoader, closeable: URLClassLoader }
 
 ## The oracle these implementations add up to — what the JVM main hands the
 ## checker in place of the refusal `cx_new` starts with.
@@ -42,16 +48,64 @@ pub fn jsig_real() -> Jsig =
 
 fn sys_loader() -> ClassLoader !io = ClassLoader.getSystemClassLoader().expect("system loader")
 
-fn try_forname(name: String) -> Option[Class] !io =
-  match catch_fault(() => Class.forName(name, false, sys_loader()).expect("forName")) {
+fn try_forname_with(loader: ClassLoader, name: String) -> Option[Class] !io =
+  match catch_fault(() => Class.forName(name, false, loader).expect("forName")) {
     Ok(c) -> Some(c)
     Err(e) -> None
   }
 
+fn loader_for(jars: List[String]) -> TargetLoader !io = {
+  let url_class = Class.forName("java.net.URL").expect("URL class")
+  let url_array_class = Class.forName("[Ljava.net.URL;").expect("URL array class")
+  let loader_class = Class.forName("java.net.URLClassLoader").expect("URLClassLoader class")
+  let parent_class = Class.forName("java.lang.ClassLoader").expect("ClassLoader class")
+  let urls = Array.newInstance(url_class, len(jars)).expect("URL array")
+  var index = 0
+  for jar in jars {
+    let url = File.new(jar).toURI().expect("jar URI").toURL().expect("jar URL")
+    Array.set(urls, index, url)
+    index = index + 1
+  }
+  let ctor = loader_class.getConstructor(url_array_class, parent_class).expect("URLClassLoader constructor")
+  let parent = ClassLoader.getPlatformClassLoader().expect("platform loader")
+  let raw = ctor.newInstance(urls, parent).expect("URLClassLoader instance")
+  let closeable_claim: Result[URLClassLoader, ForeignError] = cast(raw)
+  let closeable = match closeable_claim {
+    Ok(loader) -> loader
+    Err(e) -> panic("jreflect.loader_for: not a URLClassLoader: " ++ e.message)
+  }
+  let base_claim: Result[ClassLoader, ForeignError] = cast(raw)
+  let base = match base_claim {
+    Ok(loader) -> loader
+    Err(e) -> panic("jreflect.loader_for: not a ClassLoader: " ++ e.message)
+  }
+  TargetLoader { base: base, closeable: closeable }
+}
+
+fn jsig_with(loader: ClassLoader) -> Jsig =
+  Jsig {
+    on: true,
+    find_class: fqcn => find_class_with(loader, fqcn),
+    class_info: fqcn => class_info_with(loader, fqcn),
+    methods_of: fqcn => methods_of_with(loader, fqcn),
+    ctors_of: fqcn => ctors_of_with(loader, fqcn),
+    static_fields_of: fqcn => static_fields_of_with(loader, fqcn),
+    is_assignable: (sup, sub) => is_assignable_with(loader, sup, sub),
+    sam_of: fqcn => sam_of_with(loader, fqcn),
+    component_of: fqcn => component_of_with(loader, fqcn)
+  }
+
+fn lease_with(loader: TargetLoader) -> JsigLease =
+  JsigLease { jsig: jsig_with(loader.base), close: () => loader.closeable.close() }
+
+## A target-local oracle. Its platform parent exposes the JDK but not the
+## compiler process's application class path.
+pub fn jsig_for(jars: List[String]) -> JsigLease !io = lease_with(loader_for(jars))
+
 ## Resolve a `use java` name (spec §9.1): the fqcn as written, then trailing
 ## dots walked into `$` so nested classes read naturally.
-pub fn find_class_raw(fqcn: String) -> Option[Class] !io = {
-  match try_forname(fqcn) {
+fn find_class_raw_with(loader: ClassLoader, fqcn: String) -> Option[Class] !io = {
+  match try_forname_with(loader, fqcn) {
     Some(c) -> return Some(c)
     None -> ()
   }
@@ -59,13 +113,15 @@ pub fn find_class_raw(fqcn: String) -> Option[Class] !io = {
   while str.contains(name, ".") {
     let i = str.last_index_of(name, ".").expect("contains dot")
     name = str.take(name, i) ++ "$" ++ str.drop(name, i + 1)
-    match try_forname(name) {
+    match try_forname_with(loader, name) {
       Some(c) -> return Some(c)
       None -> ()
     }
   }
   None
 }
+
+pub fn find_class_raw(fqcn: String) -> Option[Class] !io = find_class_raw_with(sys_loader(), fqcn)
 
 ## The display name for a TyJava: readable array names ("byte[]"), else the
 ## fqcn's simple tail (Kotlin: canonicalName ?: fqcn, substringAfterLast('.')).
@@ -99,18 +155,22 @@ fn jclass_of(c: Class) -> JClass !io =
   }
 
 ## Resolve a class name to plain data; None when nothing on the class path matches.
-pub fn find_class(fqcn: String) -> Option[JClass] !io =
-  match find_class_raw(fqcn) {
+fn find_class_with(loader: ClassLoader, fqcn: String) -> Option[JClass] !io =
+  match find_class_raw_with(loader, fqcn) {
     Some(c) -> Some(jclass_of(c))
     None -> None
   }
 
+pub fn find_class(fqcn: String) -> Option[JClass] !io = find_class_with(sys_loader(), fqcn)
+
 ## Class data for a name that is known to resolve (e.g. came from a Method).
-pub fn class_info(fqcn: String) -> JClass !io =
-  match find_class(fqcn) {
+fn class_info_with(loader: ClassLoader, fqcn: String) -> JClass !io =
+  match find_class_with(loader, fqcn) {
     Some(j) -> j
     None -> panic("class vanished between queries: " ++ fqcn)
   }
+
+pub fn class_info(fqcn: String) -> JClass !io = class_info_with(sys_loader(), fqcn)
 
 # The five reflective walks below all reclaim an erased `Array.get` element as
 # the class the JDK declared the array to hold — `getMethods()` is `Method[]`,
@@ -156,8 +216,8 @@ fn method_of(m: Method) -> JMethod !io = {
 
 ## Every public method of `fqcn`, bridges and synthetics already dropped
 ## (the Kotlin checker filters them at every use site).
-pub fn methods_of(fqcn: String) -> List[JMethod] !io = {
-  let c = find_class_raw(fqcn).expect("methods_of on unresolved class")
+fn methods_of_with(loader: ClassLoader, fqcn: String) -> List[JMethod] !io = {
+  let c = find_class_raw_with(loader, fqcn).expect("methods_of on unresolved class")
   let arr = c.getMethods().expect("methods")
   var out: List[JMethod] = []
   let n = Array.getLength(arr)
@@ -174,9 +234,11 @@ pub fn methods_of(fqcn: String) -> List[JMethod] !io = {
   out
 }
 
+pub fn methods_of(fqcn: String) -> List[JMethod] !io = methods_of_with(sys_loader(), fqcn)
+
 ## Every public constructor of `fqcn`, synthetics dropped.
-pub fn ctors_of(fqcn: String) -> List[JCtor] !io = {
-  let c = find_class_raw(fqcn).expect("ctors_of on unresolved class")
+fn ctors_of_with(loader: ClassLoader, fqcn: String) -> List[JCtor] !io = {
+  let c = find_class_raw_with(loader, fqcn).expect("ctors_of on unresolved class")
   let arr = c.getConstructors().expect("constructors")
   var out: List[JCtor] = []
   let n = Array.getLength(arr)
@@ -199,10 +261,12 @@ pub fn ctors_of(fqcn: String) -> List[JCtor] !io = {
   out
 }
 
+pub fn ctors_of(fqcn: String) -> List[JCtor] !io = ctors_of_with(sys_loader(), fqcn)
+
 ## Every public static field of `fqcn` (Class.getFields() returns only public
 ## members, including inherited ones; we keep the static ones). Spec §9.1.
-pub fn static_fields_of(fqcn: String) -> List[JField] !io = {
-  let c = find_class_raw(fqcn).expect("static_fields_of on unresolved class")
+fn static_fields_of_with(loader: ClassLoader, fqcn: String) -> List[JField] !io = {
+  let c = find_class_raw_with(loader, fqcn).expect("static_fields_of on unresolved class")
   let arr = c.getFields().expect("fields")
   var out: List[JField] = []
   let n = Array.getLength(arr)
@@ -225,16 +289,20 @@ pub fn static_fields_of(fqcn: String) -> List[JField] !io = {
   out
 }
 
+pub fn static_fields_of(fqcn: String) -> List[JField] !io = static_fields_of_with(sys_loader(), fqcn)
+
 ## Class.isAssignableFrom over names: may `sub` stand where `sup` is expected?
-pub fn is_assignable(sup: String, sub: String) -> Bool !io =
-  match find_class_raw(sup) {
+fn is_assignable_with(loader: ClassLoader, sup: String, sub: String) -> Bool !io =
+  match find_class_raw_with(loader, sup) {
     None -> false
     Some(s) ->
-      match find_class_raw(sub) {
+      match find_class_raw_with(loader, sub) {
         None -> false
         Some(b) -> s.isAssignableFrom(b)
       }
   }
+
+pub fn is_assignable(sup: String, sub: String) -> Bool !io = is_assignable_with(sys_loader(), sup, sub)
 
 ## What makes two methods the same overload: the name and the parameter list.
 ## A class name cannot contain a comma, so joining them is a faithful key.
@@ -248,16 +316,16 @@ fn sig_key(m: JMethod) -> String = m.name ++ "(" ++ join(m.param_cls, ",") ++ ")
 ## loop -- and the first of them re-enumerated `java.lang.Object`'s methods
 ## reflectively on every candidate, so a wide interface paid for Object once
 ## per method it declares.
-pub fn sam_of(fqcn: String) -> Option[JMethod] !io = {
-  let j = class_info(fqcn)
+fn sam_of_with(loader: ClassLoader, fqcn: String) -> Option[JMethod] !io = {
+  let j = class_info_with(loader, fqcn)
   if not j.is_interface { return None }
   var from_object: Set[String] = set.empty()
-  for om in methods_of("java.lang.Object") {
+  for om in methods_of_with(loader, "java.lang.Object") {
     from_object = set.insert(from_object, sig_key(om))
   }
   var found: List[JMethod] = []
   var seen: Set[String] = set.empty()
-  for m in methods_of(fqcn) {
+  for m in methods_of_with(loader, fqcn) {
     let key = sig_key(m)
     if m.is_abstract && not set.has(from_object, key) && not set.has(seen, key) {
       seen = set.insert(seen, key)
@@ -267,9 +335,11 @@ pub fn sam_of(fqcn: String) -> Option[JMethod] !io = {
   if len(found) == 1 { Some(found[0]) } else { None }
 }
 
+pub fn sam_of(fqcn: String) -> Option[JMethod] !io = sam_of_with(sys_loader(), fqcn)
+
 ## The component type name of an array class, or None.
-pub fn component_of(fqcn: String) -> Option[String] !io =
-  match find_class_raw(fqcn) {
+fn component_of_with(loader: ClassLoader, fqcn: String) -> Option[String] !io =
+  match find_class_raw_with(loader, fqcn) {
     None -> None
     Some(c) ->
       match c.getComponentType() {
@@ -277,6 +347,8 @@ pub fn component_of(fqcn: String) -> Option[String] !io =
         None -> None
       }
   }
+
+pub fn component_of(fqcn: String) -> Option[String] !io = component_of_with(sys_loader(), fqcn)
 
 # ---- tests ----
 
@@ -287,6 +359,18 @@ test "classes resolve, including nested ones via the dollar walk" {
     None -> { assert false }
   }
   assert find_class("no.such.Klass") == None
+}
+
+test "target-local leases retain the platform classes" {
+  let lease = jsig_for([])
+  let found: Option[JClass] = bracket(lease, held => held.close(), held => {
+    let find = held.jsig.find_class
+    find("java.lang.String")
+  })
+  match found {
+    Some(j) -> { assert j.simple == "String" }
+    None -> { assert false }
+  }
 }
 
 test "methods carry their shapes" {
