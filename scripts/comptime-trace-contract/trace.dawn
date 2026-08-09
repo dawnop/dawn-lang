@@ -1,0 +1,65 @@
+# One failed const per call shape keeps the public diagnostic contract visible
+# without depending on private interpreter helpers. The long chain is written
+# out because generated source would hide which names the nearest-frame policy
+# is required to retain.
+
+fn fuel_outer() -> List[Int] = map(range(0, 100), x => x + 1)
+
+const FUEL: List[Int] = fuel_outer()
+
+trait Defaulted[T] {
+  fn explode(x: T) -> Int = panic("default")
+}
+
+type Empty = Empty
+
+impl Defaulted[Empty] {}
+
+fn via_default() -> Int = explode(Empty)
+
+const DEFAULT: Int = via_default()
+
+trait Required[T] {
+  fn burst(x: T) -> Int
+}
+
+type Filled = Filled
+
+impl Required[Filled] {
+  fn burst(x: Filled) -> Int = panic("impl")
+}
+
+fn via_impl() -> Int = burst(Filled)
+
+const IMPL: Int = via_impl()
+
+fn dyn_boom() -> Int = panic("dynamic")
+
+fn invoke(f: fn() -> Int) -> Int = f()
+
+const DYNAMIC: Int = invoke(dyn_boom)
+
+fn limit_00() -> Int = limit_01()
+fn limit_01() -> Int = limit_02()
+fn limit_02() -> Int = limit_03()
+fn limit_03() -> Int = limit_04()
+fn limit_04() -> Int = limit_05()
+fn limit_05() -> Int = limit_06()
+fn limit_06() -> Int = limit_07()
+fn limit_07() -> Int = limit_08()
+fn limit_08() -> Int = limit_09()
+fn limit_09() -> Int = limit_10()
+fn limit_10() -> Int = limit_11()
+fn limit_11() -> Int = limit_12()
+fn limit_12() -> Int = limit_13()
+fn limit_13() -> Int = limit_14()
+fn limit_14() -> Int = limit_15()
+fn limit_15() -> Int = limit_16()
+fn limit_16() -> Int = limit_17()
+fn limit_17() -> Int = limit_18()
+fn limit_18() -> Int = limit_19()
+fn limit_19() -> Int = panic("bottom")
+
+const LIMIT: Int = limit_00()
+
+pub fn main() -> Unit = ()

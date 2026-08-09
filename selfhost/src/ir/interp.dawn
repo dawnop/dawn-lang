@@ -16,10 +16,10 @@
 # depth (turns a would-be stack overflow into a decent message), and the
 # function bodies lowered so far.
 #
-# Diagnostics carry no span of their own: Core has no source positions, so a
-# failure is reported at the const or comptime block being folded. That is
-# the span a user can act on anyway -- both are small by construction, and
-# the message says what happened.
+# Core still carries no precise source positions. Interpreter failures stay
+# structured until the fold boundary, though: the original actionable hint
+# is separate from a bounded call chain, and only that boundary chooses the
+# enclosing const/comptime span and constructs a public diagnostic.
 #
 # The Kotlin interpreter ran on a dedicated 64MB thread; this one recurses on
 # the host stack, so the selfhost JVM is launched with -Xss512m instead.
@@ -64,8 +64,26 @@ use check/cx.{ModExports, Cx, cx_new}
 use check/checker.{check_module, exports_of}
 use check/jsig.{Jsig, JClass, JMethod, jsig_refused}
 
+type CtFrame =
+  | FDirect(owner: String, name: String)
+  | FDynamic(owner: String, name: String)
+  | FImpl(owner: String, trait_name: String, trait_id: Int, subject: String, method: String)
+  | FDefault(owner: String, trait_name: String, trait_id: Int, method: String)
+
+type CtOrigin = { lo: Int, hi: Int }
+
+type CtFailure = {
+  msg: String,
+  hint: String,
+  # nearest failure frame first; outer frames are the ones discarded at cap
+  frames: List[CtFrame],
+  truncated: Bool,
+  # Core cannot fill this yet. The fold boundary records its enclosing span.
+  origin: Option[CtOrigin]
+}
+
 type Ctl =
-  | KErr(d: Diag)
+  | KErr(failure: CtFailure)
   | KReturn(v: CValue)
 # break and continue name their loop: lowering turns a `match` into a
 # once-loop, so a `break` inside an arm leaves a loop that is not the
@@ -177,13 +195,88 @@ type ICx = {
 # worse than an honest constant.
 const MAX_CALL_DEPTH: Int = 100000
 
+const MAX_FAILURE_FRAMES: Int = 16
+
 fn no_impls() -> Map[(Int, String, String), (String, TFun)] = map.empty()
 
+fn ct_failure(msg: String, hint: String) -> CtFailure =
+  CtFailure { msg: msg, hint: hint, frames: [], truncated: false, origin: None }
+
 fn cerr(st: ESt, env: Env, msg: String) -> ER =
-  Err((st, env, KErr(Diag { msg: "comptime: " ++ msg, lo: 0, hi: 0, hint: "" })))
+  Err((st, env, KErr(ct_failure(msg, ""))))
 
 fn cerrh(st: ESt, env: Env, msg: String, hint: String) -> ER =
-  Err((st, env, KErr(Diag { msg: "comptime: " ++ msg, lo: 0, hi: 0, hint: hint })))
+  Err((st, env, KErr(ct_failure(msg, hint))))
+
+fn push_failure_frame(failure: CtFailure, frame: CtFrame) -> CtFailure =
+  if len(failure.frames) < MAX_FAILURE_FRAMES {
+    CtFailure { ..failure, frames: failure.frames ++ [frame] }
+  } else {
+    CtFailure { ..failure, truncated: true }
+  }
+
+fn frame_error(
+  err: (ESt, Env, Ctl),
+  frame: CtFrame
+) -> (ESt, Env, Ctl) = {
+  let (st, env, ctl) = err
+  match ctl {
+    KErr(failure) -> (st, env, KErr(push_failure_frame(failure, frame)))
+    _ -> err
+  }
+}
+
+fn framed(result: ER, frame: CtFrame) -> ER =
+  match result {
+    Ok(value) -> Ok(value)
+    Err(err) -> Err(frame_error(err, frame))
+  }
+
+fn trait_frame_name(icx: ICx, trait_id: Int) -> String =
+  match map.get(icx.traits, trait_id) {
+    Some(tr) -> tr.name
+    None -> "trait"
+  }
+
+fn render_frame(frame: CtFrame) -> String =
+  match frame {
+    FDirect(owner, name) -> "direct `" ++ owner ++ "." ++ name ++ "`"
+    FDynamic(owner, name) -> "dynamic `" ++ owner ++ "." ++ name ++ "`"
+    FImpl(owner, trait_name, trait_id, subject, method) ->
+      "impl `" ++ owner ++ "::" ++ trait_name ++ "#" ++ to_string(trait_id) ++
+        "[" ++ subject ++ "]." ++ method ++ "`"
+    FDefault(owner, trait_name, trait_id, method) ->
+      "default `" ++ owner ++ "::" ++ trait_name ++ "#" ++ to_string(trait_id) ++
+        "." ++ method ++ "`"
+  }
+
+fn render_call_chain(failure: CtFailure) -> String = {
+  if len(failure.frames) == 0 { return "" }
+  var lines = ["comptime call chain (innermost first):"]
+  for frame in failure.frames { lines = lines ++ ["  at " ++ render_frame(frame)] }
+  if failure.truncated { lines = lines ++ ["  ... outer calls omitted"] }
+  join(lines, "\n")
+}
+
+fn failure_diag(failure0: CtFailure, lo: Int, hi: Int) -> Diag = {
+  let failure =
+    match failure0.origin {
+      Some(_) -> failure0
+      None -> CtFailure { ..failure0, origin: Some(CtOrigin { lo: lo, hi: hi }) }
+    }
+  let origin = failure.origin.expect("comptime failure origin")
+  let chain = render_call_chain(failure)
+  let hint =
+    if chain == "" { failure.hint }
+    else if failure.hint == "" { chain }
+    else { failure.hint ++ "\n\n" ++ chain }
+  Diag {
+    msg: "comptime: " ++ failure.msg,
+    lo: origin.lo,
+    hi: origin.hi,
+    hint: hint
+  }
+}
 
 fn burn(st: ESt, env: Env) -> ER =
   if st.fuel - 1 < 0 {
@@ -534,12 +627,15 @@ fn call_cfun(
   st: ESt,
   env: Env,
   cf: CFun,
+  frame: CtFrame,
   caps: Map[Int, CValue],
   args: List[CValue]
 ) -> ER !io = {
   if st.depth + 1 > MAX_CALL_DEPTH {
-    return cerrh(st, env, "call depth limit (" ++ to_string(MAX_CALL_DEPTH) ++ ") exceeded",
-      "deep recursion does not fit comptime; use a loop or fold")
+    return framed(
+      cerrh(st, env, "call depth limit (" ++ to_string(MAX_CALL_DEPTH) ++ ") exceeded",
+        "deep recursion does not fit comptime; use a loop or fold"),
+      frame)
   }
   var fenv = caps
   var i = 0
@@ -569,7 +665,7 @@ fn call_cfun(
       let (st1, _, ctl) = t
       match ctl {
         KReturn(v) -> Ok((ESt { ..st1, depth: st1.depth - 1 }, env, v))
-        _ -> Err((ESt { ..st1, depth: st1.depth - 1 }, env, ctl))
+        _ -> Err(frame_error((ESt { ..st1, depth: st1.depth - 1 }, env, ctl), frame))
       }
     }
   }
@@ -580,20 +676,33 @@ fn call_default(
   icx: ICx,
   st: ESt,
   env: Env,
+  owner: String,
   tid: Int,
   method: String,
   args: List[CValue]
 ) -> ER !io = {
-  let (st1, cf) = get_trait_cfun(icx, st, env, tid, "\$default", method)?
-  let no_caps: Map[Int, CValue] = map.empty()
-  call_cfun(icx, st1, env, cf, no_caps, args)
+  let frame = FDefault(owner, trait_frame_name(icx, tid), tid, method)
+  match get_trait_cfun(icx, st, env, tid, "\$default", method) {
+    Err(err) -> Err(frame_error(err, frame))
+    Ok(pair) -> {
+      let (st1, cf) = pair
+      let no_caps: Map[Int, CValue] = map.empty()
+      call_cfun(icx, st1, env, cf, frame, no_caps, args)
+    }
+  }
 }
 
 fn apply_fn(icx: ICx, st: ESt, env: Env, f: CValue, args: List[CValue]) -> ER !io =
   match f {
     VClosure(owner, name, caps) -> {
-      let (st1, cf) = get_cfun(icx, st, env, owner, name)?
-      call_cfun(icx, st1, env, cf, caps, args)
+      let frame = FDynamic(owner, name)
+      match get_cfun(icx, st, env, owner, name) {
+        Err(err) -> Err(frame_error(err, frame))
+        Ok(pair) -> {
+          let (st1, cf) = pair
+          call_cfun(icx, st1, env, cf, frame, caps, args)
+        }
+      }
     }
     _ -> cerr(st, env, "cannot call a non-function value")
   }
@@ -609,27 +718,16 @@ fn call_named(
   name: String,
   args: List[CValue]
 ) -> ER !io = {
+  let frame = FDirect(owner, name)
   if owner == "std/hamt" {
-    return cerr(st, env, "Map and Set operations are not available at comptime")
+    return framed(cerr(st, env, "Map and Set operations are not available at comptime"), frame)
   }
-  let (st1, cf) = get_cfun(icx, st, env, owner, name)?
-  let no_caps: Map[Int, CValue] = map.empty()
-  # a failure inside std has no location the user can act on, so say where it
-  # came from instead
-  let in_std = set.has(icx.std_names, name) || str.starts_with(owner, "std/")
-  match call_cfun(icx, st1, env, cf, no_caps, args) {
-    Ok(t) -> Ok(t)
-    Err(t) -> {
-      if not in_std { return Err(t) }
-      let (st2, env2, ctl) = t
-      match ctl {
-        KErr(d) ->
-          Err((st2, env2, KErr(Diag {
-            ..d,
-            hint: "raised inside the standard library function `" ++ name ++ "`"
-          })))
-        _ -> Err((st2, env2, ctl))
-      }
+  match get_cfun(icx, st, env, owner, name) {
+    Err(err) -> Err(frame_error(err, frame))
+    Ok(pair) -> {
+      let (st1, cf) = pair
+      let no_caps: Map[Int, CValue] = map.empty()
+      call_cfun(icx, st1, env, cf, frame, no_caps, args)
     }
   }
 }
@@ -1132,9 +1230,10 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
                   } else {
                     match dd.slots[idx] {
                       CSlotFn(o, n) -> call_named(icx, st2, env2, o, n, vals ++ [dv])
-                      CSlotDefault(_, _) ->
+                      CSlotDefault(o, _) ->
                         match map.get(icx.traits, dd.trait_id) {
-                          Some(_) -> call_default(icx, st2, env2, dd.trait_id, m, vals ++ [dv])
+                          Some(_) ->
+                            call_default(icx, st2, env2, o, dd.trait_id, m, vals ++ [dv])
                           None -> cerr(st2, env2, "unknown trait behind `" ++ m ++ "`")
                         }
                     }
@@ -1144,12 +1243,18 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
             _ -> cerr(st2, env2, "`" ++ m ++ "` dispatched on a non-dictionary")
           }
         }
-        CImpl(_, tid, subject, m) -> {
-          let (st2, cf) = get_trait_cfun(icx, st1, env1, tid, subject_key(subject), m)?
-          let no_caps: Map[Int, CValue] = map.empty()
-          call_cfun(icx, st2, env1, cf, no_caps, vals)
+        CImpl(owner, tid, subject, m) -> {
+          let frame = FImpl(owner, trait_frame_name(icx, tid), tid, ty_key(subject), m)
+          match get_trait_cfun(icx, st1, env1, tid, subject_key(subject), m) {
+            Err(err) -> Err(frame_error(err, frame))
+            Ok(pair) -> {
+              let (st2, cf) = pair
+              let no_caps: Map[Int, CValue] = map.empty()
+              call_cfun(icx, st2, env1, cf, frame, no_caps, vals)
+            }
+          }
         }
-        CDefault(_, tid, m) -> call_default(icx, st1, env1, tid, m, vals)
+        CDefault(owner, tid, m) -> call_default(icx, st1, env1, owner, tid, m, vals)
       }
     }
     CIntrinsic(name, args, _) -> {
@@ -1583,13 +1688,9 @@ fn fold_expr(icx: ICx, fuel: Int, e: TExpr, lo: Int, hi: Int) -> Result[CValue, 
     Err(r) -> {
       let (_, _, ctl) = r
       match ctl {
-        KErr(d) -> Err(Diag { ..d, lo: lo, hi: hi })
-        _ -> Err(Diag {
-          msg: "comptime: control flow escaped the folded expression (interpreter bug)",
-          lo: lo,
-          hi: hi,
-          hint: ""
-        })
+        KErr(failure) -> Err(failure_diag(failure, lo, hi))
+        _ -> Err(failure_diag(
+          ct_failure("control flow escaped the folded expression (interpreter bug)", ""), lo, hi))
       }
     }
   }
@@ -1885,8 +1986,8 @@ fn probe_builtin(icx: ICx, name: String) -> String !io = {
         Err(t) -> {
           let (_, _, ctl) = t
           match ctl {
-            KErr(d) ->
-              if d.msg == "comptime: " ++ no_arm_msg(name) { "refused" } else { "arm" }
+            KErr(failure) ->
+              if failure.msg == no_arm_msg(name) { "refused" } else { "arm" }
             _ -> "arm"
           }
         }
@@ -2163,6 +2264,175 @@ test "interpreter identity tables keep direct, impl, and default spellings separ
   }
 }
 
+test "a standard helper keeps the fuel hint beside its inner and outer frames" {
+  let helper_src = "pub fn burn() -> Int = {\n" ++
+    "  var n = 0\n" ++
+    "  while true { n = n + 1 }\n" ++
+    "  n\n" ++
+    "}\n" ++
+    "pub fn wrap() -> Int = burn()\n"
+  let (helper_m, helper_pdiags) = parser.parse_module(helper_src)
+  assert len(helper_pdiags) == 0
+  let empty_env: Map[String, ModExports] = map.empty()
+  let (helper_cx, helper_tm) =
+    check_module(cx_new(Some("std/helper"), Some("helper.dawn")), helper_m, empty_env)
+  assert len(helper_cx.diags) == 0
+  let helper_exp = exports_of(helper_cx, helper_m, "std/helper", "std/helper")
+
+  let caller_src = "use std/helper.{wrap}\n" ++
+    "fn outer() -> Int = wrap()\n" ++
+    "const VALUE: Int = outer()\n"
+  let (caller_m, caller_pdiags) = parser.parse_module(caller_src)
+  assert len(caller_pdiags) == 0
+  let caller_env = map.from([("std/helper", helper_exp)])
+  let caller0 = cx_new(Some("caller"), Some("caller.dawn"))
+  let (caller_cx, caller_tm) = check_module(
+    Cx { ..caller0, next_id: helper_cx.next_id }, caller_m, caller_env)
+  assert len(caller_cx.diags) == 0
+
+  var helper_direct: Map[String, TFun] = map.empty()
+  for f in helper_tm.fns { helper_direct = note_direct_fn(helper_direct, f) }
+  let owners = map.from([("std/helper", helper_direct)])
+  let out = eval_comptime(caller_tm, helper_direct, owners, no_impls(), set.empty(),
+    caller_cx.adts, caller_cx.traits, caller_cx.impl_table, "caller", ct_fuel(250))
+  assert len(out.diags) == 1
+  let hint = out.diags[0].hint
+  assert str.starts_with(hint,
+    "raise it with --comptime-fuel, or simplify the computation\n\n")
+  assert str.contains(hint, "at direct `std/helper.burn`")
+  assert str.contains(hint, "at direct `std/helper.wrap`")
+  assert str.contains(hint, "at direct `caller.outer`")
+}
+
+test "same-named direct failures retain their resolved owners" {
+  let empty_env: Map[String, ModExports] = map.empty()
+  let (left_m, left_pdiags) =
+    parser.parse_module("pub fn same() -> Int = panic(\"left\")\n")
+  assert len(left_pdiags) == 0
+  let (left_cx, left_tm) =
+    check_module(cx_new(Some("left"), Some("left.dawn")), left_m, empty_env)
+  assert len(left_cx.diags) == 0
+  let left_exp = exports_of(left_cx, left_m, "left", "left")
+
+  let (right_m, right_pdiags) =
+    parser.parse_module("pub fn same() -> Int = panic(\"right\")\n")
+  assert len(right_pdiags) == 0
+  let right0 = cx_new(Some("right"), Some("right.dawn"))
+  let (right_cx, right_tm) =
+    check_module(Cx { ..right0, next_id: left_cx.next_id }, right_m, empty_env)
+  assert len(right_cx.diags) == 0
+  let right_exp = exports_of(right_cx, right_m, "right", "right")
+
+  let caller_src = "use left\nuse right\n" ++
+    "const LEFT: Int = left.same()\n" ++
+    "const RIGHT: Int = right.same()\n"
+  let (caller_m, caller_pdiags) = parser.parse_module(caller_src)
+  assert len(caller_pdiags) == 0
+  let caller_env = map.from([("left", left_exp), ("right", right_exp)])
+  let caller0 = cx_new(Some("caller"), Some("caller.dawn"))
+  let (caller_cx, caller_tm) = check_module(
+    Cx { ..caller0, next_id: right_cx.next_id }, caller_m, caller_env)
+  assert len(caller_cx.diags) == 0
+
+  var left_direct: Map[String, TFun] = map.empty()
+  for f in left_tm.fns { left_direct = note_direct_fn(left_direct, f) }
+  var right_direct: Map[String, TFun] = map.empty()
+  for f in right_tm.fns { right_direct = note_direct_fn(right_direct, f) }
+  var flat = left_direct
+  for f in right_tm.fns { flat = note_direct_fn(flat, f) }
+  let owners = map.from([("left", left_direct), ("right", right_direct)])
+  let out = eval_comptime(caller_tm, flat, owners, no_impls(), set.empty(), caller_cx.adts,
+    caller_cx.traits, caller_cx.impl_table, "caller", ct_fuel(1000000))
+  assert len(out.diags) == 2
+  assert str.contains(out.diags[0].hint, "at direct `left.same`")
+  assert not str.contains(out.diags[0].hint, "at direct `right.same`")
+  assert str.contains(out.diags[1].hint, "at direct `right.same`")
+  assert not str.contains(out.diags[1].hint, "at direct `left.same`")
+}
+
+test "dynamic, impl, and default failures each carry their real frame" {
+  let src = "trait Defaulted[T] {\n" ++
+    "  fn explode(x: T) -> Int = panic(\"default\")\n" ++
+    "}\n" ++
+    "type Empty = Empty\n" ++
+    "impl Defaulted[Empty] {}\n" ++
+    "fn via_default() -> Int = explode(Empty)\n" ++
+    "trait Required[T] { fn burst(x: T) -> Int }\n" ++
+    "type Filled = Filled\n" ++
+    "impl Required[Filled] { fn burst(x: Filled) -> Int = panic(\"impl\") }\n" ++
+    "fn via_impl() -> Int = burst(Filled)\n" ++
+    "fn dyn_boom() -> Int = panic(\"dynamic\")\n" ++
+    "fn invoke(f: fn() -> Int) -> Int = f()\n" ++
+    "const DEFAULT: Int = via_default()\n" ++
+    "const IMPL: Int = via_impl()\n" ++
+    "const DYNAMIC: Int = invoke(dyn_boom)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("m"), Some("frames.dawn")), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 3
+
+  let default_hint = out.diags[0].hint
+  assert str.contains(default_hint, "at default `m::Defaulted#")
+  assert str.contains(default_hint, ".explode`")
+  assert str.contains(default_hint, "at direct `m.via_default`")
+
+  let impl_hint = out.diags[1].hint
+  assert str.contains(impl_hint, "at impl `m::Required#")
+  assert str.contains(impl_hint, ".burst`")
+  assert str.contains(impl_hint, "at direct `m.via_impl`")
+
+  let dynamic_hint = out.diags[2].hint
+  assert str.contains(dynamic_hint, "at dynamic `m.")
+  assert str.contains(dynamic_hint, "at direct `m.dyn_boom`")
+  assert str.contains(dynamic_hint, "at direct `m.invoke`")
+}
+
+test "comptime call chains retain the nearest sixteen frames" {
+  let src = "fn limit_00() -> Int = limit_01()\n" ++
+    "fn limit_01() -> Int = limit_02()\n" ++
+    "fn limit_02() -> Int = limit_03()\n" ++
+    "fn limit_03() -> Int = limit_04()\n" ++
+    "fn limit_04() -> Int = limit_05()\n" ++
+    "fn limit_05() -> Int = limit_06()\n" ++
+    "fn limit_06() -> Int = limit_07()\n" ++
+    "fn limit_07() -> Int = limit_08()\n" ++
+    "fn limit_08() -> Int = limit_09()\n" ++
+    "fn limit_09() -> Int = limit_10()\n" ++
+    "fn limit_10() -> Int = limit_11()\n" ++
+    "fn limit_11() -> Int = limit_12()\n" ++
+    "fn limit_12() -> Int = limit_13()\n" ++
+    "fn limit_13() -> Int = limit_14()\n" ++
+    "fn limit_14() -> Int = limit_15()\n" ++
+    "fn limit_15() -> Int = limit_16()\n" ++
+    "fn limit_16() -> Int = limit_17()\n" ++
+    "fn limit_17() -> Int = limit_18()\n" ++
+    "fn limit_18() -> Int = limit_19()\n" ++
+    "fn limit_19() -> Int = panic(\"bottom\")\n" ++
+    "const VALUE: Int = limit_00()\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("m"), Some("limit.dawn")), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 1
+  let hint = out.diags[0].hint
+  assert len(str.split(hint, "\n  at ")) == MAX_FAILURE_FRAMES + 1
+  assert str.contains(hint, "at direct `m.limit_19`")
+  assert str.contains(hint, "at direct `m.limit_04`")
+  assert not str.contains(hint, "at direct `m.limit_03`")
+  assert str.ends_with(hint, "  ... outer calls omitted")
+}
+
 test "Map and Set calls have signatures but remain ordinary comptime refusals" {
   let src = "const M: Int = {\n" ++
     "  let m: Map[Int, Int] = map_empty()\n" ++
@@ -2363,6 +2633,12 @@ fn ffi_java_src() -> String =
   "const S: String = unsafe_pure { Long.toHexString(255) }.expect(\"hex\")\n" ++
   "use java \"java.lang.Long\"\n"
 
+fn nested_ffi_java_src() -> String =
+  "use java \"java.lang.Math\"\n" ++
+  "fn leaf() -> Int = unsafe_pure { Math.abs(-5) }\n" ++
+  "fn outer() -> Int = leaf()\n" ++
+  "const F: Int = outer()\n"
+
 # A hand-written signature oracle for the two classes ffi_java_src touches:
 # these tests exercise the *comptime* refusal, which only fires after the
 # program checks, and checking may not reach for jreflect here — this module
@@ -2473,6 +2749,25 @@ test "route C is refused by default, however well vouched the call is" {
   assert str.contains(out.diags[0].msg, "compile-time Java calls are disabled")
   assert str.contains(out.diags[0].hint, "--comptime-ffi")
   assert map.get(out.consts, "F") == None
+}
+
+test "nested route C refusal keeps its actionable hint before the call chain" {
+  let (m, pdiags) = parser.parse_module(nested_ffi_java_src())
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let cx0 = cx_new(Some("std/t"), None)
+  let (cx1, tm) = check_module(Cx { ..cx0, jsig: fake_jsig() }, m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "std/t", ct_fuel(1000000))
+  assert len(out.diags) == 1
+  let hint = out.diags[0].hint
+  assert str.starts_with(hint, "folding this would invoke `Math.abs` inside the compiler;")
+  assert str.contains(hint, "\n\ncomptime call chain (innermost first):")
+  assert str.contains(hint, "at direct `std/t.leaf`")
+  assert str.contains(hint, "at direct `std/t.outer`")
 }
 
 test "fuel exhaustion becomes a diagnostic" {

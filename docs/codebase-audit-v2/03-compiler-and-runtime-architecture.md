@@ -148,11 +148,35 @@
 - **影响：** 地址空间受限环境难以启动；native executable 强制 pthread 与大 virtual stack，降低 embedding/容器适配；真正 stack exhaustion 仍可能是 silent crash，只是阈值被推远。
 - **建议：** 分阶段削减：parser/checker 对抗性 recursion 先改 iterative，运行期一般 tail call/关键 std recursion 再处理；把 stack size 变为有上限的可配置策略并记录实际 high-water，而非永久 ABI 常量。
 
-## ARC-11 — P3 — comptime 诊断只剩外层 initializer span
+## ARC-11 — P3 — comptime 诊断只剩外层 initializer span（部分修复）
 
-- **证据：S。** Core 不保留 source positions：`selfhost/src/ir/interp.dawn:19`；内部 error 先以 `(0,0)` 建立：`selfhost/src/ir/interp.dawn:180`，最终统一覆盖为 const/comptime block span：`selfhost/src/ir/interp.dawn:1588`。
-- **影响：** 复杂 const 调用 shared helper 时，用户只知道整个 initializer 失败，没有 callee/callsite trace。“块很小”不是语法约束。
-- **建议：** 用紧凑 `OriginId` 边表，不必把 full Span 塞进每个 Core node；interpreter frame 保存 function 与 callsite，输出短 comptime trace。
+> **部分修复（2026-08-09，ARC-11A）：** 解释器内部不再过早构造、传递 `Diag`；私有
+> `CtFailure` 分离保存 message、原始 actionable hint、调用帧、截断状态与可选粗 origin，
+> 只在 `fold_expr` 对外边界一次转换为 `Diag`。`call_named`、`call_cfun`、动态函数值调用、
+> `CImpl`、`CDefault` 与字典 default/bridge 的真实路径统一追加结构化 frame；direct/dynamic、
+> impl/default 分种类渲染，owner、trait identity、subject 与 method 足以区分同名跨模块 helper。
+> 原 hint 保持为第一段，调用链另以“innermost first”追加；空 hint 也能单独显示链。帧最多保留
+> 最靠近失败点的 16 个，外层溢出只留下明确截断标记，深递归不会把诊断无界放大。此前 std
+> 调用逐层覆盖 hint 的逻辑已删除，因此 fuel 与 `--comptime-ffi` 建议不会再被“raised inside
+> standard library”替换。
+>
+> 门禁包括 selfhost 的 nested std/fuel、nested FFI、dynamic、impl/default、同名不同 owner 与
+> 20 层调用链；`scripts/comptime-trace-contract/run.sh` 从真实 CLI 固定用户可见形状，并携带四个
+> 活 mutation：恢复 `call_named` 覆盖 hint、分别漏掉 impl/default frame、取消 16 帧上限，均由
+> 各自目标测试见红。
+>
+> **仍开放（ARC-11B）：** Core 仍无精确 source origin，最终主诊断位置仍是外围 const / comptime
+> block；当前 frame 只有函数 identity，没有 callsite span，也没有正式的跨文件 related-location
+> 协议。紧凑 `OriginId` / 边表与跨模块位置恢复须等 **ARC-07-JVM** 的 lowered-product 身份边界，
+> 并与 **ARC-12** 的跨 expression lowering cache 一起设计稳定 key；本切片没有预做这两项。
+
+- **历史证据（修复前基线，S）：** Core 不保留 source positions；内部 error 曾直接以 `(0,0)`
+  `Diag` 建立，最终统一覆盖为 const/comptime block span。复杂 const 调 shared helper 时，用户只
+  能看到外围 initializer；std frame 还会覆盖真正可执行的 hint。
+- **剩余影响：** 现在可见 callee identity 与有界调用链，但无法直接跳到失败子表达式或跨模块
+  callsite；“块很小”仍不是语法约束。
+- **后续建议：** 在 ARC-07-JVM / ARC-12 的稳定身份基础上增加紧凑 `OriginId` 边表；不要把 full
+  Span 塞进每个 Core node，也不要在本项顺手扩一套正式 related-location API。
 
 ## ARC-12 — P3 — lowering cache 只活一个 comptime expression
 
