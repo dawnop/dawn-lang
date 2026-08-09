@@ -59,6 +59,7 @@ echo "PASS  bare return delimiters parse and remain checker-constrained"
 mutant="$work/drop-opaque-anchor"
 mkdir -p "$mutant"
 cp -R "$root/selfhost" "$mutant/selfhost"
+cp -R "$root/compiler-plan" "$mutant/compiler-plan"
 ln -s "$root/packages" "$mutant/packages"
 
 python3 - "$mutant/selfhost/src/front/parser.dawn" <<'PY'
@@ -102,6 +103,7 @@ echo "PASS  drop-opaque-anchor compiles, then turns the owning recovery test red
 return_mutant="$work/drop-rbracket-return-boundary"
 mkdir -p "$return_mutant"
 cp -R "$root/selfhost" "$return_mutant/selfhost"
+cp -R "$root/compiler-plan" "$return_mutant/compiler-plan"
 ln -s "$root/packages" "$return_mutant/packages"
 
 python3 - "$return_mutant/selfhost/src/front/parser.dawn" <<'PY'

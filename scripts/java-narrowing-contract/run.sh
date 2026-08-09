@@ -117,6 +117,7 @@ PY
 }
 
 ln -s "$root/packages" "$work/packages"
+cp -R "$root/compiler-plan" "$work/compiler-plan"
 
 checker_mutant="$work/checker-mutant"
 cp -R "$root/selfhost" "$checker_mutant"
