@@ -434,7 +434,8 @@ debounce:  FAIL / freshness: FAIL
 `analyze_document` 每次重跑 lex/parse/module graph。缓存它们需要失效判定
 （哪些模块受这次改动影响），而那要先有模块图的增量表示。
 **不在本文范围**——debounce 之后延迟已经从「每次按键」降到「停下来之后一次」，
-先量一量还剩多少痛再决定。
+先量一量还剩多少痛再决定。workspace snapshot 与 target-scoped Java classpath 的后续边界见
+[`../lsp-workspace-design.md`](../lsp-workspace-design.md)；该方案明确先修正确性，不提前做 checker cache。
 
 ## 三、为什么不顺手把 X 也改了
 
