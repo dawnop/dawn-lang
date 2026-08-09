@@ -34,7 +34,7 @@ use pkg/vendor
 use jvm/jarw
 use front/fmt
 use doc
-use lsp/server
+use lsp/server.{LspLeaseHost, run_lsp}
 use jvm/testrun.{TESTMAIN_CLASS, gen_test_main}
 use java "java.lang.System"
 use java "java.lang.ProcessBuilder"
@@ -68,6 +68,7 @@ use c/emitc
 use c/cdriver
 use jvm/jfold.{fold_call}
 use jvm/jreflect.{jsig_real, jsig_for}
+use check/jsig.{JsigLease}
 use c/emitc.{EmitMod}
 use check/tast.{TModule}
 use ir/interp.{CtOut, CtOpts, ct_default, DEFAULT_FUEL}
@@ -956,6 +957,33 @@ fn analyze_target_scoped(
     held => analyze_program(loaded, std, ct_default(), held.jsig)
   ))
 }
+
+fn lsp_lease_problem(path: String, message: String) -> LocDiag =
+  LocDiag { path: path, d: Diag {
+    msg: message,
+    lo: 0,
+    hi: 0,
+    hint: "save to retry lock or transient setup failures; after changing dawn.toml, close every document in this project and reopen one to capture a fresh plan"
+  } }
+
+fn lsp_target_lease(plan: source.SourcePlan) -> Result[JsigLease, LocDiag] !io = {
+  let no_jars: List[String] = []
+  let jars = if len(plan.diags) > 0 {
+    no_jars
+  } else {
+    match maven.fetch_checked_report(plan.project, plan.java_coords) {
+      Ok(found) -> found
+      Err(e) -> return Err(lsp_lease_problem(e.path, e.message))
+    }
+  }
+  match catch_fault(() => jsig_for(jars)) {
+    Ok(lease) -> Ok(lease)
+    Err(e) -> Err(lsp_lease_problem(plan.project ++ "/dawn.toml",
+      "cannot create the target Java classpath: " ++ e.message))
+  }
+}
+
+fn lsp_standalone_lease() -> JsigLease !io = jsig_for([])
 
 ## `dawn lock [--check] [<dir>]` — write (or verify) the resolved [java-deps]
 ## closure. This is the only command that rewrites dawn.lock; every other one
@@ -1983,7 +2011,10 @@ pub fn main() -> Unit !io = {
           Err(e) -> cli_error(e)
         }
       } else if mode == "lsp" {
-        server.run_lsp("std", jsig_real())
+        run_lsp("std", LspLeaseHost {
+          standalone: lsp_standalone_lease,
+          project: lsp_target_lease
+        })
       } else if mode == "lock" {
         run_lock(rest)
       } else if mode == "cache" {

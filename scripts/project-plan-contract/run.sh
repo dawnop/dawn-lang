@@ -139,7 +139,7 @@ import sys
 
 source = Path(sys.argv[1])
 text = source.read_text()
-old = 'completions_at(qc, completion_modules(d), d.text, pos_offset(d, params))'
+old = 'completions_at(qc, analysis.modules, d.text, pos_offset(d, params))'
 new = 'completions_at(qc, None, d.text, pos_offset(d, params))'
 if text.count(old) != 1:
     raise SystemExit('completion mutation anchor moved')

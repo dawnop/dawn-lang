@@ -1,9 +1,10 @@
 # The language server (the Kotlin Server.kt): LSP over stdio until the client
 # disconnects. lsp4j is replaced by a hand-rolled JSON-RPC layer over
 # packages/json — Content-Length framing (bytes, UTF-8), requests answered in
-# order, publishDiagnostics pushed on every document update. One open document
-# = text + line index + fresh analysis, rebuilt on every *settled* change: the
-# read loop debounces document syncs, so a burst of keystrokes is analysed once
+# order, publishDiagnostics pushed on every document update. Project documents
+# share one root-scoped program, full live overlay and target Java lease;
+# standalone buffers keep private programs behind the same query seam. The read
+# loop debounces document syncs, so a burst of keystrokes is analysed once
 # (LSP-04, docs/audit/lsp-robustness-design.md §2.2).
 
 use std/char
@@ -11,18 +12,20 @@ use std/io
 use std/str
 use std/map
 use std/list
+use std/set
 use std/bytes
 use json/parser
 use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 use json/render.{render}
 use driver/analyze.{
-  Program, CheckedMod, ProjectPlan, DocumentAnalysis,
-  analyze_document_planned, analyze_standalone, canon
+  Program, ProjectPlan, LocDiag,
+  analyze_program, analyze_standalone, project_plan, project_module_path,
+  load_entries_over, canon
 }
+use compiler_plan/source
 use ir/interp.{ct_default}
-use check/jsig.{Jsig}
+use check/jsig.{JsigLease}
 use driver/stdlib.{StdCtx, load_std}
-use check/cx.{ModExports}
 use check/checker.{exports_of, visible_bins}
 use lsp/lspq.{QCx, Target, find_target}
 use lsp/lspc.{CItem, completions_at}
@@ -30,7 +33,7 @@ use front/lexer.{line_starts_of, view_of, SourceView}
 use front/diag.{utf16_len}
 use check/types.{Sig, builtins, sig_render}
 use front/ast.{
-  Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect, FnDecl
+  Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect
 }
 use front/token.{Diag}
 use front/fmt
@@ -387,36 +390,136 @@ pub fn path_to_uri(path: String) -> String = {
 fn hex_digit(v: Int) -> Char =
   char_of_code(if v < 10 { char.code('0') + v } else { char.code('A') + v - 10 })
 
-# ---- one open document ----
+# ---- document and workspace ownership ----
+
+## Host-specific Java setup without leaking Java-backed modules into this
+## shared server. A project failure is already located at dawn.toml/dawn.lock
+## so the server can publish it as an ordinary project diagnostic.
+pub type LspLeaseHost = {
+  standalone: fn() -> JsigLease !io,
+  project: fn(source.SourcePlan) -> Result[JsigLease, LocDiag] !io
+}
+
+type WorkspaceIdentity = {
+  source_root: String,
+  lookup_key: String
+}
+
+## Length-prefixed components make the canonical path pair injective without
+## assuming that any ordinary path character is unavailable as a separator.
+fn workspace_key_part(value: String) -> String =
+  to_string(str.len(value)) ++ ":" ++ value
+
+fn workspace_identity(plan: ProjectPlan) -> WorkspaceIdentity !io = {
+  let project = canon(plan.source.project)
+  let source_root = canon(plan.source.source_root)
+  WorkspaceIdentity {
+    source_root: source_root,
+    lookup_key: workspace_key_part(project) ++ workspace_key_part(source_root)
+  }
+}
+
+type DocAnalysis =
+  | Standalone(prog: Program, entry: String, modules: Option[Map[String, String]])
+  | WorkspaceMember(identity: WorkspaceIdentity)
 
 type Doc = {
   uri: String,
   path: Option[String],
+  canonical_path: Option[String],
   text: String,
   view: SourceView,
   ls: List[Int],
-  prog: Program,
-  entry: String,
-  plan: Option[ProjectPlan]
+  analysis: DocAnalysis
 }
 
-fn completion_modules(d: Doc) -> Option[Map[String, String]] =
-  match d.plan {
-    Some(plan) -> Some(plan.modules.by_use)
-    None -> None
+## A target whose Java setup succeeded. `prog = None` is an intentional
+## fail-closed conflict snapshot, never the previous successful program.
+type Workspace = {
+  plan: ProjectPlan,
+  path_by_uri: Map[String, String],
+  prog: Option[Program],
+  entry_by_uri: Map[String, String],
+  lease: JsigLease,
+  diag_by_uri: Map[String, List[Json]]
+}
+
+## Maven, lock or loader setup failed before a usable workspace existed. Open
+## buffers remain here for formatting and a later explicit retry, but semantic
+## queries cannot observe a stale or half-installed program.
+type UnavailableWorkspace = {
+  plan: ProjectPlan,
+  path_by_uri: Map[String, String],
+  problem: LocDiag,
+  diag_by_uri: Map[String, List[Json]]
+}
+
+type WorkspaceSlot = Ready(workspace: Workspace) | Unavailable(workspace: UnavailableWorkspace)
+
+type Analysis = {
+  prog: Program,
+  entry: String,
+  modules: Option[Map[String, String]],
+  workspace_key: Option[String],
+  definition_root: Option[String]
+}
+
+fn workspace_modules(ws: Workspace, current_uri: String) -> Map[String, String] = {
+  let current_entry = map.get(ws.entry_by_uri, current_uri).expect("current workspace entry")
+  var out = map.remove(ws.plan.modules.by_use, current_entry)
+  for uri in sort(map.keys(ws.entry_by_uri)) {
+    let entry = map.get(ws.entry_by_uri, uri).expect("workspace entry")
+    if entry != current_entry {
+      let path = map.get(ws.path_by_uri, uri).expect("workspace path")
+      out = map.insert(out, entry, path)
+    }
+  }
+  out
+}
+
+## The only semantic ownership seam. Every feature either gets one coherent
+## analysis or fails closed while a workspace is unavailable/conflicted.
+fn analysis_of(st: LspState, d: Doc) -> Option[Analysis] =
+  match d.analysis {
+    Standalone(prog, entry, modules) -> Some(Analysis {
+      prog: prog,
+      entry: entry,
+      modules: modules,
+      workspace_key: None,
+      definition_root: None
+    })
+    WorkspaceMember(identity) ->
+      match map.get(st.workspaces, identity.lookup_key) {
+        Some(Ready(ws)) ->
+          match ws.prog {
+            Some(prog) ->
+              match map.get(ws.entry_by_uri, d.uri) {
+                Some(entry) -> Some(Analysis {
+                  prog: prog,
+                  entry: entry,
+                  modules: Some(workspace_modules(ws, d.uri)),
+                  workspace_key: Some(identity.lookup_key),
+                  definition_root: Some(identity.source_root)
+                })
+                None -> None
+              }
+            None -> None
+          }
+        _ -> None
+      }
   }
 
-fn doc_qcx(st: LspState, d: Doc) -> Option[QCx] = {
-  let entry = list.find(d.prog.modules, cm => cm.mod_path == d.entry)
+fn doc_qcx(st: LspState, analysis: Analysis) -> Option[QCx] = {
+  let entry = list.find(analysis.prog.modules, cm => cm.mod_path == analysis.entry)
   match entry {
     Some(e) -> {
       var env = st.std.exports
-      for cm in d.prog.modules {
+      for cm in analysis.prog.modules {
         env = map.insert(env, cm.mod_path, exports_of(cm.cx, cm.m, cm.mod_path, cm.class_name))
       }
       Some(QCx {
         entry: e,
-        prog: d.prog,
+        prog: analysis.prog,
         std: st.std,
         exports_env: env,
         bins: visible_bins(st.bins, e.cx)
@@ -424,22 +527,6 @@ fn doc_qcx(st: LspState, d: Doc) -> Option[QCx] = {
     }
     None -> None
   }
-}
-
-## The document's own diagnostics (the Kotlin Analyzed.diagnostics).
-fn doc_diags(d: Doc) -> List[Diag] = {
-  var out: List[Diag] = []
-  match d.path {
-    Some(p) -> {
-      for ld in d.prog.diags {
-        if ld.path == p { out = out ++ [ld.d] }
-      }
-    }
-    None -> {
-      for ld in d.prog.diags { out = out ++ [ld.d] }
-    }
-  }
-  out
 }
 
 type Lifecycle = PreInit | Running | Shutdown
@@ -456,8 +543,36 @@ type LspState = {
   std: StdCtx,
   bins: Map[String, Sig],
   docs: Map[String, Doc],
-  jsig: Jsig,
+  workspaces: Map[String, WorkspaceSlot],
+  standalone: Option[JsigLease],
+  host: LspLeaseHost,
   lifecycle: Lifecycle
+}
+
+## Close one lease without allowing its failure to skip the remaining leases.
+fn close_lease(lease: JsigLease) -> Unit !io =
+  match catch_panic(() => lease.close()) {
+    Ok(_) -> ()
+    Err(e) -> io.eprintln("lsp: failed to close a Java signature lease: " ++ e.message)
+  }
+
+## Release every host resource exactly once. Clearing ownership in the
+## returned state makes shutdown followed by exit harmless.
+fn close_all_leases(st0: LspState) -> LspState !io = {
+  var st = st0
+  for workspace_key in sort(map.keys(st.workspaces)) {
+    match map.get(st.workspaces, workspace_key).expect("workspace") {
+      Ready(ws) -> close_lease(ws.lease)
+      Unavailable(_) -> ()
+    }
+  }
+  match st.standalone {
+    Some(lease) -> close_lease(lease)
+    None -> ()
+  }
+  let none: Option[JsigLease] = None
+  let no_workspaces: Map[String, WorkspaceSlot] = map.empty()
+  LspState { ..st, workspaces: no_workspaces, standalone: none }
 }
 
 fn has_request_id(msg: Json) -> Bool =
@@ -510,20 +625,22 @@ fn lifecycle_gate(lifecycle: Lifecycle, msg: Json) -> LifecycleGate = {
 
 # ---- the server loop ----
 
-## `js` is the driver's Java signature oracle, passed straight through to
-## analysis: the JVM main wires jreflect's, so `use java` programs check in
-## the editor exactly as they compile; a native driver would pass the refusal
-## and the editor would show the same refusal the compiler gives.
-pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
+## The driver supplies resource factories rather than one process-global Java
+## oracle. The JVM host creates a platform-only standalone lease and one lease
+## per target; the native host creates lifecycle-compatible refusals.
+pub fn run_lsp(std_dir: String, host: LspLeaseHost) -> Unit !io = {
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
+  let standalone = host.standalone()
   var st = LspState {
     std: std,
     bins: builtins(),
     docs: map.empty(),
-    jsig: js,
+    workspaces: map.empty(),
+    standalone: Some(standalone),
+    host: host,
     lifecycle: PreInit
   }
   # The newest text of the one document whose analysis has not run yet.
@@ -535,6 +652,7 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
   # is Full sync and each one supersedes the last.
   var pending: Option[(String, String)] = None
   var serving = true
+  var exit_status: Option[Int] = None
   while serving {
     # Three branches, and the third is what makes the second safe. Readiness
     # never reports end of input (std/io.stdin_ready says why), so a loop that
@@ -582,6 +700,7 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
               pending = None
               st = LspState { ..st, lifecycle: Shutdown }
               st = handle(st, msg)
+              st = close_all_leases(st)
             }
             LgReject(code, message) -> {
               let id = match oget(msg, "id") {
@@ -593,7 +712,7 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
             LgIgnore -> ()
             LgExit(code) -> {
               pending = None
-              let _ = io.exit(code)
+              exit_status = Some(code)
               serving = false
             }
           }
@@ -622,6 +741,11 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
       st = flush(st, pending)
       pending = None
     }
+  }
+  st = close_all_leases(st)
+  match exit_status {
+    Some(code) -> { let _ = io.exit(code) }
+    None -> ()
   }
 }
 
@@ -1006,11 +1130,10 @@ fn handle(st0: LspState, msg: Json) -> LspState !io = {
   } else if method == "textDocument/didClose" {
     let td = get_or_null(params, "textDocument")
     let uri = ostr(td, "uri")
-    st = LspState { ..st, docs: map.remove(st.docs, uri) }
-    notify("textDocument/publishDiagnostics",
-      jobj([("uri", JStr(uri)), ("diagnostics", JArr([]))]))
+    st = close_doc(st, uri)
   } else if method == "textDocument/didSave" {
-    ()
+    let td = get_or_null(params, "textDocument")
+    st = retry_unavailable(st, ostr(td, "uri"))
   } else if method == "textDocument/completion" {
     respond(id, handle_completion(st, params))
   } else if method == "textDocument/hover" {
@@ -1044,42 +1167,495 @@ fn get_or_null(j: Json, k: String) -> Json =
 
 # ---- document sync ----
 
-fn update_doc(st0: LspState, uri: String, text: String) -> LspState !io = {
-  var st = st0
-  let path = uri_to_path(uri)
-  let analyzed: DocumentAnalysis = match path {
-    Some(p) -> analyze_document_planned(p, text, st.std, ct_default(), st.jsig)
-    None -> DocumentAnalysis {
-      prog: analyze_standalone("<lsp>", text, st.std, ct_default(), st.jsig),
-      entry: "main",
-      plan: None
+type WorkspaceInputs =
+  | InputsReady(
+    overlay: Map[String, String],
+    entries: List[String],
+    entry_by_uri: Map[String, String]
+  )
+  | InputsConflict(paths: Set[String])
+
+fn diagnostic_json(view: SourceView, ls: List[Int], dg: Diag) -> Json = {
+  let message = if dg.hint != "" { dg.msg ++ "\nhint: " ++ dg.hint } else { dg.msg }
+  jobj([
+    ("range", jrange(view, ls, dg.lo, dg.hi)),
+    ("severity", JInt(1)),
+    ("source", JStr("dawn")),
+    ("message", JStr(message))
+  ])
+}
+
+fn append_diagnostic(
+  out0: Map[String, List[Json]],
+  uri: String,
+  value: Json
+) -> Map[String, List[Json]] = {
+  let before = match map.get(out0, uri) {
+    Some(values) -> values
+    None -> []
+  }
+  map.insert(out0, uri, before ++ [value])
+}
+
+fn add_loc_diag(
+  st: LspState,
+  path_by_uri: Map[String, String],
+  out0: Map[String, List[Json]],
+  ld: LocDiag
+) -> Map[String, List[Json]] !io = {
+  var out = out0
+  let target = canon(ld.path)
+  var matched = false
+  for uri in sort(map.keys(path_by_uri)) {
+    if map.get(path_by_uri, uri).expect("workspace path") == target {
+      match map.get(st.docs, uri) {
+        Some(d) -> {
+          out = append_diagnostic(out, uri, diagnostic_json(d.view, d.ls, ld.d))
+          matched = true
+        }
+        None -> ()
+      }
     }
   }
-  let d = Doc {
+  if not matched {
+    let text = match io.read_file(target) {
+      Ok(found) -> found
+      Err(_) -> ""
+    }
+    out = append_diagnostic(out, path_to_uri(target),
+      diagnostic_json(view_of(text), line_starts_of(text), ld.d))
+  }
+  out
+}
+
+fn diagnostics_of_program(
+  st: LspState,
+  path_by_uri: Map[String, String],
+  prog: Program
+) -> Map[String, List[Json]] !io = {
+  var out: Map[String, List[Json]] = map.empty()
+  for ld in prog.diags { out = add_loc_diag(st, path_by_uri, out, ld) }
+  out
+}
+
+fn diagnostics_of_problem(
+  st: LspState,
+  path_by_uri: Map[String, String],
+  problem: LocDiag
+) -> Map[String, List[Json]] !io = {
+  let out: Map[String, List[Json]] = map.empty()
+  add_loc_diag(st, path_by_uri, out, problem)
+}
+
+fn workspace_inputs(
+  st: LspState,
+  plan: ProjectPlan,
+  path_by_uri: Map[String, String]
+) -> WorkspaceInputs !io = {
+  var texts: Map[String, String] = map.empty()
+  var overlay: Map[String, String] = map.empty()
+  var entries: List[String] = []
+  var entry_by_uri: Map[String, String] = map.empty()
+  var conflicts: Set[String] = set.empty()
+  for uri in sort(map.keys(path_by_uri)) {
+    let path = map.get(path_by_uri, uri).expect("workspace path")
+    let d = map.get(st.docs, uri).expect("workspace document")
+    match map.get(texts, path) {
+      Some(before) -> {
+        if before != d.text { conflicts = set.insert(conflicts, path) }
+      }
+      None -> {
+        texts = map.insert(texts, path, d.text)
+        overlay = map.insert(overlay, path, d.text)
+      }
+    }
+    entries = entries ++ [path]
+    let entry = project_module_path(plan, path).expect("valid workspace member")
+    entry_by_uri = map.insert(entry_by_uri, uri, entry)
+  }
+  if set.is_empty(conflicts) {
+    InputsReady(overlay, entries, entry_by_uri)
+  } else {
+    InputsConflict(conflicts)
+  }
+}
+
+fn conflict_diagnostics(
+  st: LspState,
+  path_by_uri: Map[String, String],
+  paths: Set[String]
+) -> Map[String, List[Json]] = {
+  var out: Map[String, List[Json]] = map.empty()
+  let dg = Diag {
+    msg: "multiple open documents resolve to the same file with different text",
+    lo: 0,
+    hi: 0,
+    hint: "close one duplicate URI or make their contents identical"
+  }
+  for uri in sort(map.keys(path_by_uri)) {
+    let path = map.get(path_by_uri, uri).expect("workspace path")
+    if set.has(paths, path) {
+      let d = map.get(st.docs, uri).expect("workspace document")
+      out = append_diagnostic(out, uri, diagnostic_json(d.view, d.ls, dg))
+    }
+  }
+  out
+}
+
+## Rebuild one coherent workspace snapshot. Conflict detection happens before the
+## overlay map can overwrite either live text, and discards the old program.
+fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !io =
+  match workspace_inputs(st, ws0.plan, ws0.path_by_uri) {
+    InputsConflict(paths) -> {
+      let no_entries: Map[String, String] = map.empty()
+      let no_prog: Option[Program] = None
+      Workspace {
+        ..ws0,
+        prog: no_prog,
+        entry_by_uri: no_entries,
+        diag_by_uri: conflict_diagnostics(st, ws0.path_by_uri, paths)
+      }
+    }
+    InputsReady(overlay, entries, entry_by_uri) -> {
+      let loaded = load_entries_over(ws0.plan, entries, overlay)
+      let prog = analyze_program(loaded, st.std, ct_default(), ws0.lease.jsig)
+      Workspace {
+        ..ws0,
+        prog: Some(prog),
+        entry_by_uri: entry_by_uri,
+        diag_by_uri: diagnostics_of_program(st, ws0.path_by_uri, prog)
+      }
+    }
+  }
+
+fn unavailable_workspace(
+  st: LspState,
+  plan: ProjectPlan,
+  path_by_uri: Map[String, String],
+  problem: LocDiag
+) -> UnavailableWorkspace !io =
+  UnavailableWorkspace {
+    plan: plan,
+    path_by_uri: path_by_uri,
+    problem: problem,
+    diag_by_uri: diagnostics_of_problem(st, path_by_uri, problem)
+  }
+
+## Construct the lease before installing a ready workspace. Failure installs
+## only an explicit unavailable state, never a platform/system fallback.
+fn activate_workspace(
+  st: LspState,
+  plan: ProjectPlan,
+  path_by_uri: Map[String, String]
+) -> WorkspaceSlot !io =
+  match st.host.project(plan.source) {
+    Ok(lease) -> {
+      let no_prog: Option[Program] = None
+      let no_entries: Map[String, String] = map.empty()
+      let no_diags: Map[String, List[Json]] = map.empty()
+      let candidate = Workspace {
+        plan: plan,
+        path_by_uri: path_by_uri,
+        prog: no_prog,
+        entry_by_uri: no_entries,
+        lease: lease,
+        diag_by_uri: no_diags
+      }
+      match catch_panic(() => rebuild_workspace(st, candidate)) {
+        Ok(workspace) -> Ready(workspace)
+        Err(e) -> {
+          close_lease(lease)
+          panic("lsp workspace rebuild failed before installation: " ++ e.message)
+        }
+      }
+    }
+    Err(problem) -> Unavailable(unavailable_workspace(st, plan, path_by_uri, problem))
+  }
+
+fn slot_paths(slot: WorkspaceSlot) -> Map[String, String] =
+  match slot {
+    Ready(ws) -> ws.path_by_uri
+    Unavailable(ws) -> ws.path_by_uri
+  }
+
+fn slot_diagnostics(slot: WorkspaceSlot) -> Map[String, List[Json]] =
+  match slot {
+    Ready(ws) -> ws.diag_by_uri
+    Unavailable(ws) -> ws.diag_by_uri
+  }
+
+fn add_uris(out0: Set[String], values: List[String]) -> Set[String] = {
+  var out = out0
+  for value in values { out = set.insert(out, value) }
+  out
+}
+
+fn slot_uris(slot: WorkspaceSlot) -> Set[String] = {
+  var out: Set[String] = set.empty()
+  out = add_uris(out, map.keys(slot_paths(slot)))
+  add_uris(out, map.keys(slot_diagnostics(slot)))
+}
+
+fn standalone_diagnostics(d: Doc, prog: Program) -> List[Json] !io = {
+  var out: List[Json] = []
+  for ld in prog.diags {
+    let own = match d.canonical_path {
+      Some(path) -> canon(ld.path) == path
+      None -> true
+    }
+    if own { out = out ++ [diagnostic_json(d.view, d.ls, ld.d)] }
+  }
+  out
+}
+
+## Aggregate every root's contribution before publishing one URI. This is the
+## clearing rule that prevents one root from erasing another root's diagnostic
+## when both point at the same manifest, lock or dependency file.
+fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !io = {
+  var out: List[Json] = []
+  for workspace_key in sort(map.keys(st.workspaces)) {
+    let slot = map.get(st.workspaces, workspace_key).expect("workspace")
+    match map.get(slot_diagnostics(slot), uri) {
+      Some(values) -> { out = out ++ values }
+      None -> ()
+    }
+  }
+  match map.get(st.docs, uri) {
+    Some(d) ->
+      match d.analysis {
+        Standalone(prog, _, _) -> { out = out ++ standalone_diagnostics(d, prog) }
+        WorkspaceMember(_) -> ()
+      }
+    None -> ()
+  }
+  out
+}
+
+fn publish_uris(st: LspState, uris: Set[String]) -> Unit !io = {
+  for uri in sort(set.to_list(uris)) {
+    notify("textDocument/publishDiagnostics", jobj([
+      ("uri", JStr(uri)),
+      ("diagnostics", JArr(diagnostics_for_uri(st, uri)))
+    ]))
+  }
+}
+
+fn install_workspace(
+  st0: LspState,
+  identity: WorkspaceIdentity,
+  slot: WorkspaceSlot,
+  affected0: Set[String]
+) -> LspState !io = {
+  var affected = add_uris(affected0, set.to_list(slot_uris(slot)))
+  let st = LspState {
+    ..st0,
+    workspaces: map.insert(st0.workspaces, identity.lookup_key, slot)
+  }
+  publish_uris(st, affected)
+  st
+}
+
+fn standalone_doc(
+  st: LspState,
+  uri: String,
+  path: Option[String],
+  canonical_path: Option[String],
+  text: String,
+  modules: Option[Map[String, String]]
+) -> Doc !io = {
+  let source_path = match path {
+    Some(found) -> found
+    None -> "<lsp>"
+  }
+  let prog = match st.standalone {
+    Some(lease) -> analyze_standalone(source_path, text, st.std, ct_default(), lease.jsig)
+    None -> panic("standalone LSP lease used after shutdown")
+  }
+  Doc {
     uri: uri,
     path: path,
+    canonical_path: canonical_path,
     text: text,
     view: view_of(text),
     ls: line_starts_of(text),
-    prog: analyzed.prog,
-    entry: analyzed.entry,
-    plan: analyzed.plan
+    analysis: Standalone(prog, "main", modules)
   }
-  st = LspState { ..st, docs: map.insert(st.docs, uri, d) }
-  var diags: List[Json] = []
-  for dg in doc_diags(d) {
-    let message = if dg.hint != "" { dg.msg ++ "\nhint: " ++ dg.hint } else { dg.msg }
-    diags = diags ++ [jobj([
-      ("range", jrange(d.view, d.ls, dg.lo, dg.hi)),
-      ("severity", JInt(1)),
-      ("source", JStr("dawn")),
-      ("message", JStr(message))
-    ])]
-  }
-  notify("textDocument/publishDiagnostics",
-    jobj([("uri", JStr(uri)), ("diagnostics", JArr(diags))]))
-  st
 }
+
+fn open_new_doc(st0: LspState, uri: String, text: String) -> LspState !io =
+  match uri_to_path(uri) {
+    None -> {
+      let no_path: Option[String] = None
+      let no_modules: Option[Map[String, String]] = None
+      let d = standalone_doc(st0, uri, no_path, no_path, text, no_modules)
+      let st = LspState { ..st0, docs: map.insert(st0.docs, uri, d) }
+      publish_uris(st, set.from([uri]))
+      st
+    }
+    Some(path) -> {
+      let canonical_path = canon(path)
+      let plan = project_plan(source.SourceFile(path))
+      match project_module_path(plan, path) {
+        None -> {
+          let modules: Option[Map[String, String]] = Some(plan.modules.by_use)
+          let d = standalone_doc(st0, uri, Some(path), Some(canonical_path), text, modules)
+          let st = LspState { ..st0, docs: map.insert(st0.docs, uri, d) }
+          publish_uris(st, set.from([uri]))
+          st
+        }
+        Some(_) -> {
+          let identity = workspace_identity(plan)
+          let d = Doc {
+            uri: uri,
+            path: Some(path),
+            canonical_path: Some(canonical_path),
+            text: text,
+            view: view_of(text),
+            ls: line_starts_of(text),
+            analysis: WorkspaceMember(identity)
+          }
+          var st = LspState { ..st0, docs: map.insert(st0.docs, uri, d) }
+          let old = map.get(st0.workspaces, identity.lookup_key)
+          var affected: Set[String] = set.empty()
+          let captured = match old {
+            Some(slot) -> {
+              affected = slot_uris(slot)
+              match slot {
+                Ready(ws) -> ws.plan
+                Unavailable(ws) -> ws.plan
+              }
+            }
+            None -> plan
+          }
+          var paths = match old {
+            Some(slot) -> slot_paths(slot)
+            None -> {
+              let empty: Map[String, String] = map.empty()
+              empty
+            }
+          }
+          paths = map.insert(paths, uri, canonical_path)
+          let slot = match old {
+            Some(Ready(ws)) -> Ready(rebuild_workspace(st, Workspace { ..ws, path_by_uri: paths }))
+            Some(Unavailable(_)) -> activate_workspace(st, captured, paths)
+            None -> activate_workspace(st, captured, paths)
+          }
+          install_workspace(st, identity, slot, affected)
+        }
+      }
+    }
+  }
+
+fn update_existing_doc(st0: LspState, old: Doc, text: String) -> LspState !io =
+  match old.analysis {
+    Standalone(_, entry, modules) -> {
+      let source_path = match old.path {
+        Some(found) -> found
+        None -> "<lsp>"
+      }
+      let prog = match st0.standalone {
+        Some(lease) -> analyze_standalone(source_path, text, st0.std, ct_default(), lease.jsig)
+        None -> panic("standalone LSP lease used after shutdown")
+      }
+      let d = Doc {
+        ..old,
+        text: text,
+        view: view_of(text),
+        ls: line_starts_of(text),
+        analysis: Standalone(prog, entry, modules)
+      }
+      let st = LspState { ..st0, docs: map.insert(st0.docs, old.uri, d) }
+      publish_uris(st, set.from([old.uri]))
+      st
+    }
+    WorkspaceMember(identity) -> {
+      let d = Doc {
+        ..old,
+        text: text,
+        view: view_of(text),
+        ls: line_starts_of(text)
+      }
+      var st = LspState { ..st0, docs: map.insert(st0.docs, old.uri, d) }
+      let before = map.get(st.workspaces, identity.lookup_key).expect("workspace member identity")
+      let affected = slot_uris(before)
+      let slot = match before {
+        Ready(ws) -> Ready(rebuild_workspace(st, ws))
+        Unavailable(ws) -> Unavailable(unavailable_workspace(
+          st, ws.plan, ws.path_by_uri, ws.problem))
+      }
+      install_workspace(st, identity, slot, affected)
+    }
+  }
+
+fn update_doc(st: LspState, uri: String, text: String) -> LspState !io =
+  match map.get(st.docs, uri) {
+    Some(old) -> update_existing_doc(st, old, text)
+    None -> open_new_doc(st, uri, text)
+  }
+
+## An unavailable root retries only at an explicit low-frequency boundary.
+## didChange never reaches this function; new members use `activate_workspace`
+## directly, and a fully closed root is newly planned when reopened.
+fn retry_unavailable(st: LspState, uri: String) -> LspState !io =
+  match map.get(st.docs, uri) {
+    Some(d) ->
+      match d.analysis {
+        WorkspaceMember(identity) ->
+          match map.get(st.workspaces, identity.lookup_key) {
+            Some(Unavailable(ws)) -> {
+              let affected = slot_uris(Unavailable(ws))
+              let slot = activate_workspace(st, ws.plan, ws.path_by_uri)
+              install_workspace(st, identity, slot, affected)
+            }
+            _ -> st
+          }
+        Standalone(_, _, _) -> st
+      }
+    None -> st
+  }
+
+fn close_doc(st0: LspState, uri: String) -> LspState !io =
+  match map.get(st0.docs, uri) {
+    None -> {
+      publish_uris(st0, set.from([uri]))
+      st0
+    }
+    Some(d) ->
+      match d.analysis {
+        Standalone(_, _, _) -> {
+          let st = LspState { ..st0, docs: map.remove(st0.docs, uri) }
+          publish_uris(st, set.from([uri]))
+          st
+        }
+        WorkspaceMember(identity) -> {
+          let before = map.get(st0.workspaces, identity.lookup_key)
+            .expect("workspace member identity")
+          var affected = slot_uris(before)
+          affected = set.insert(affected, uri)
+          let paths = map.remove(slot_paths(before), uri)
+          var st = LspState { ..st0, docs: map.remove(st0.docs, uri) }
+          if len(map.keys(paths)) == 0 {
+            st = LspState {
+              ..st,
+              workspaces: map.remove(st.workspaces, identity.lookup_key)
+            }
+            publish_uris(st, affected)
+            match before {
+              Ready(ws) -> close_lease(ws.lease)
+              Unavailable(_) -> ()
+            }
+            st
+          } else {
+            let slot = match before {
+              Ready(ws) -> Ready(rebuild_workspace(st, Workspace { ..ws, path_by_uri: paths }))
+              Unavailable(ws) -> Unavailable(unavailable_workspace(
+                st, ws.plan, paths, ws.problem))
+            }
+            install_workspace(st, identity, slot, affected)
+          }
+        }
+      }
+  }
 
 fn doc_of(st: LspState, params: Json) -> Option[Doc] = {
   let td = get_or_null(params, "textDocument")
@@ -1096,24 +1672,28 @@ fn pos_offset(d: Doc, params: Json) -> Int = {
 fn handle_completion(st: LspState, params: Json) -> Json !io = {
   match doc_of(st, params) {
     Some(d) ->
-      match doc_qcx(st, d) {
-        Some(qc) -> {
-          var items: List[Json] = []
-          for it in completions_at(qc, completion_modules(d), d.text, pos_offset(d, params)) {
-            var fields: List[(String, Json)] = [("label", JStr(it.label))]
-            fields = fields ++ [("kind", JInt(it.kind))]
-            match it.detail {
-              Some(dt) -> { fields = fields ++ [("detail", JStr(dt))] }
-              None -> ()
+      match analysis_of(st, d) {
+        Some(analysis) ->
+          match doc_qcx(st, analysis) {
+            Some(qc) -> {
+              var items: List[Json] = []
+              for it in completions_at(qc, analysis.modules, d.text, pos_offset(d, params)) {
+                var fields: List[(String, Json)] = [("label", JStr(it.label))]
+                fields = fields ++ [("kind", JInt(it.kind))]
+                match it.detail {
+                  Some(dt) -> { fields = fields ++ [("detail", JStr(dt))] }
+                  None -> ()
+                }
+                match it.sort_text {
+                  Some(s2) -> { fields = fields ++ [("sortText", JStr(s2))] }
+                  None -> ()
+                }
+                items = items ++ [jobj(fields)]
+              }
+              JArr(items)
             }
-            match it.sort_text {
-              Some(s2) -> { fields = fields ++ [("sortText", JStr(s2))] }
-              None -> ()
-            }
-            items = items ++ [jobj(fields)]
+            None -> JArr([])
           }
-          JArr(items)
-        }
         None -> JArr([])
       }
     None -> JArr([])
@@ -1123,16 +1703,20 @@ fn handle_completion(st: LspState, params: Json) -> Json !io = {
 fn handle_hover(st: LspState, params: Json) -> Json !io = {
   match doc_of(st, params) {
     Some(d) ->
-      match doc_qcx(st, d) {
-        Some(qc) ->
-          match find_target(qc, pos_offset(d, params)) {
-            Some(t) -> jobj([
-              ("contents", jobj([
-                ("kind", JStr("markdown")),
-                ("value", JStr("```dawn\n" ++ t.hover ++ "\n```"))
-              ])),
-              ("range", jrange(d.view, d.ls, t.lo, t.hi))
-            ])
+      match analysis_of(st, d) {
+        Some(analysis) ->
+          match doc_qcx(st, analysis) {
+            Some(qc) ->
+              match find_target(qc, pos_offset(d, params)) {
+                Some(t) -> jobj([
+                  ("contents", jobj([
+                    ("kind", JStr("markdown")),
+                    ("value", JStr("```dawn\n" ++ t.hover ++ "\n```"))
+                  ])),
+                  ("range", jrange(d.view, d.ls, t.lo, t.hi))
+                ])
+                None -> JNull
+              }
             None -> JNull
           }
         None -> JNull
@@ -1144,18 +1728,30 @@ fn handle_hover(st: LspState, params: Json) -> Json !io = {
 fn handle_definition(st: LspState, params: Json) -> Json !io = {
   match doc_of(st, params) {
     Some(d) ->
-      match doc_qcx(st, d) {
-        Some(qc) ->
-          match find_target(qc, pos_offset(d, params)) {
-            Some(t) ->
-              match t.def {
-                Some(sp) -> {
-                  let (dlo, dhi) = sp
-                  match location_of(st, d, t.def_path, dlo, dhi) {
-                    Some(loc) -> JArr([loc])
+      match analysis_of(st, d) {
+        Some(analysis) ->
+          match doc_qcx(st, analysis) {
+            Some(qc) ->
+              match find_target(qc, pos_offset(d, params)) {
+                Some(t) ->
+                  match t.def {
+                    Some(sp) -> {
+                      let (dlo, dhi) = sp
+                      match location_of(
+                        st,
+                        d,
+                        analysis.workspace_key,
+                        analysis.definition_root,
+                        t.def_path,
+                        dlo,
+                        dhi
+                      ) {
+                        Some(loc) -> JArr([loc])
+                        None -> JArr([])
+                      }
+                    }
                     None -> JArr([])
                   }
-                }
                 None -> JArr([])
               }
             None -> JArr([])
@@ -1168,13 +1764,32 @@ fn handle_definition(st: LspState, params: Json) -> Json !io = {
 
 ## Resolve a definition site to a Location: a None def_path (or one naming the
 ## requesting document) maps through the live buffer; another file maps
-## through its open buffer if the client has it open, else the text on disk.
-fn location_of(st: LspState, d: Doc, def_path: Option[String], lo: Int, hi: Int) -> Option[Json] !io = {
+## through a live buffer only when it belongs to the requesting source root,
+## else the text on disk. The lookup key is never interpreted as a path, and a
+## standalone analysis never borrows another document's world.
+fn path_in_root(path: String, root: String) -> Bool =
+  if path == root {
+    true
+  } else if root == "/" {
+    str.starts_with(path, "/")
+  } else {
+    str.starts_with(path, root ++ "/")
+  }
+
+fn location_of(
+  st: LspState,
+  d: Doc,
+  workspace_key: Option[String],
+  definition_root: Option[String],
+  def_path: Option[String],
+  lo: Int,
+  hi: Int
+) -> Option[Json] !io = {
   let same = match def_path {
     None -> true
     Some(dp) ->
-      match d.path {
-        Some(p) -> canon(dp) == canon(p)
+      match d.canonical_path {
+        Some(p) -> canon(dp) == p
         None -> false
       }
   }
@@ -1186,20 +1801,33 @@ fn location_of(st: LspState, d: Doc, def_path: Option[String], lo: Int, hi: Int)
     None -> return None
   }
   let dc = canon(dp)
-  for pr in map.entries(st.docs) {
-    let (u2, d2) = pr
-    match d2.path {
-      Some(p2) ->
-        if canon(p2) == dc {
-          return Some(jobj([("uri", JStr(u2)), ("range", jrange(d2.view, d2.ls, lo, hi))]))
-        }
-      None -> ()
-    }
+  let slot = match workspace_key {
+    Some(key) -> map.get(st.workspaces, key)
+    None -> None
   }
-  match io.read_file(dp) {
+  match slot {
+    Some(Ready(ws)) ->
+      match definition_root {
+        Some(root) ->
+          if path_in_root(dc, root) {
+            for uri in sort(map.keys(ws.path_by_uri)) {
+              if map.get(ws.path_by_uri, uri).expect("workspace path") == dc {
+                let d2 = map.get(st.docs, uri).expect("workspace document")
+                return Some(jobj([
+                  ("uri", JStr(uri)),
+                  ("range", jrange(d2.view, d2.ls, lo, hi))
+                ]))
+              }
+            }
+          }
+        None -> ()
+      }
+    _ -> ()
+  }
+  match io.read_file(dc) {
     Ok(text) -> {
       Some(jobj([
-        ("uri", JStr(path_to_uri(dp))),
+        ("uri", JStr(path_to_uri(dc))),
         ("range", jrange(view_of(text), line_starts_of(text), lo, hi))
       ]))
     }
@@ -1210,17 +1838,21 @@ fn location_of(st: LspState, d: Doc, def_path: Option[String], lo: Int, hi: Int)
 fn handle_symbols(st: LspState, params: Json) -> Json !io = {
   match doc_of(st, params) {
     Some(d) ->
-      match doc_qcx(st, d) {
-        Some(qc) -> {
-          var out: List[Json] = []
-          for dc in qc.entry.m.decls {
-            match decl_symbol(qc, d, dc) {
-              Some(j) -> { out = out ++ [j] }
-              None -> ()
+      match analysis_of(st, d) {
+        Some(analysis) ->
+          match doc_qcx(st, analysis) {
+            Some(qc) -> {
+              var out: List[Json] = []
+              for dc in qc.entry.m.decls {
+                match decl_symbol(qc, d, dc) {
+                  Some(j) -> { out = out ++ [j] }
+                  None -> ()
+                }
+              }
+              JArr(out)
             }
+            None -> JArr([])
           }
-          JArr(out)
-        }
         None -> JArr([])
       }
     None -> JArr([])

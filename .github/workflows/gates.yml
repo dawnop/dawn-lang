@@ -435,6 +435,22 @@ jobs:
       - name: check and doc target Java classpaths
         run: ./scripts/java-target-classpath-contract/run.sh
 
+  # Slice D owns private source overlays, a fixture-only Maven repository and
+  # eighteen compiling selfhost mutants. It shares no mutable fixture state
+  # with the broad test job, so keeping it independent makes failures
+  # attributable and keeps the same gate in branch and release workflows.
+  lsp-workspace:
+    runs-on: ubuntu-latest
+    # Cold runners compile one observed server plus every mutant from scratch.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: LSP workspace ownership and mutants
+        run: ./scripts/lsp-workspace-contract/run.sh
+
   # Acceptance gate 1 of docs/native-backend-plan.md 5. Its own job because it
   # was 390s of the 860s test job (2026-08-07) and shares nothing with the rest
   # of that list but the toolchain.

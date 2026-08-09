@@ -30,7 +30,7 @@ use front/token.{Diag}
 use front/diag
 use driver/stdlib.{StdCtx, load_std}
 use ir/interp.{ct_default}
-use check/jsig.{jsig_refused}
+use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease}
 use driver/analyze.{Program, LocDiag, load_directory, load_file, analyze_program}
 use check/tast.{TModule}
 use c/cdriver
@@ -38,8 +38,15 @@ use version.{VERSION}
 use front/fmt
 use doc
 use pkg/add
-use lsp/server
+use lsp/server.{LspLeaseHost, run_lsp}
 use compiler_plan/pkgfetch
+use compiler_plan/source
+
+fn native_lsp_standalone_lease() -> JsigLease !io = jsig_refused_lease()
+
+fn native_lsp_target_lease(
+  _plan: source.SourcePlan
+) -> Result[JsigLease, LocDiag] !io = Ok(jsig_refused_lease())
 
 fn usage() -> String =
   join([
@@ -666,7 +673,10 @@ pub fn main() -> Unit !io = {
           Err(e) -> cli_error(e)
         }
       } else if mode == "lsp" {
-        server.run_lsp("std", jsig_refused())
+        run_lsp("std", LspLeaseHost {
+          standalone: native_lsp_standalone_lease,
+          project: native_lsp_target_lease
+        })
       } else if mode == "version" || mode == "--version" {
         println("dawnc " ++ VERSION ++ " (native)")
       } else {
