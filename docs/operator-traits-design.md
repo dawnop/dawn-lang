@@ -487,9 +487,12 @@ ImplI { trait_id: INDEX_ID, subject: TyMap(mk, mv), tparams: [mk, mv],
         assoc_bindings: [("Idx", mk), ("Item", mv)], … }
 ```
 
-`provided: []` 是关键：`primitive_subject`（lower.dawn:1756-1764）据此判定
-「no body anywhere」，于是 `lower_trait_call` 走 `prim_relation` 而不是找 impl 方法。
-这与 prelude 的标量 `Eq`/`Ord` 是同一条判词，不是新特例。
+这里的关键是 `derived: true`：当前 `primitive_subject` 对 derived impl 走
+`prim_relation`；另一种可走 primitive 的有表项情形，是 compiler-owned 的
+`owner == None && src_path == None && provided == []` prelude row。`provided: []`
+只描述「没有 source method body」，不能单独决定 primitive——用户空 impl 同样可能是
+`provided: []`，但它有 owner/path，并应继承 trait default。两条 `Index` impl 因为是
+derived，仍与 prelude 标量关系走同一条 primitive 路由，而不是新增特例。
 
 `constraints` 按 tparam 下标对齐 `type_args_of(subject)`，所以 Map 的三条 bound 落在 `K`、
 `V` 无 bound——`sub_goals` 的合同（types.dawn:737-756）。

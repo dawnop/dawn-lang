@@ -22,7 +22,7 @@ use check/types.{
 use check/tast.{TFun, TModule}
 use check/cx.{ModExports, cx_new, Cx}
 use check/checker.{check_module, exports_of}
-use ir/interp.{eval_comptime, note_trait_fn, CtOut, ct_default}
+use ir/interp.{eval_comptime, note_direct_fn, note_trait_fn, CtOut, ct_default}
 use ir/core.{VStr, VBool}
 use front/parser
 use front/lexer
@@ -37,9 +37,9 @@ pub type StdCtx = {
   std_fns: Map[String, Sig],
   # removed flat spelling → how to write it now
   moved: Map[String, String],
-  # flat name → typed fn (last wins), for the comptime interpreter
+  # flat name → direct typed fn, for the comptime interpreter
   fn_decls: Map[String, TFun],
-  # className → (name → typed fn): module-qualified comptime calls
+  # className → (name → direct typed fn): qualified comptime calls
   by_owner: Map[String, Map[String, TFun]],
   # std's impl methods and trait defaults, by the identity Core names them
   # with. Separate from by_owner because two impls in one module can define
@@ -210,8 +210,8 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     exports = map.insert(exports, mod_path, exp)
     var own: Map[String, TFun] = map.empty()
     for f in tm.fns {
-      fn_decls = map.insert(fn_decls, f.name, f)
-      own = map.insert(own, f.name, f)
+      fn_decls = note_direct_fn(fn_decls, f)
+      own = note_direct_fn(own, f)
       impl_fns = note_trait_fn(impl_fns, mod_path, f)
     }
     by_owner = map.insert(by_owner, mod_path, own)
@@ -334,6 +334,43 @@ test "the loader's id counter opens past every prelude id" {
     if a.name == "IdProbe" { probe_id = i }
   }
   assert probe_id >= first_minted_id()
+}
+
+test "production comptime body tables contain only direct std functions" {
+  let std = match load_std("std") {
+    Ok(s) -> s
+    Err(e) -> panic("std: " ++ e)
+  }
+
+  # The real bundle supplies many impl bodies (std/list alone supplies Iter,
+  # Eq, Hash, Ord and Show), so this is not a vacuous shape check. Bundled std
+  # has no source trait default today; default_of is still checked because the
+  # production table contract excludes both identities by the same rule.
+  var saw_bundled_impl = false
+  for entry in std.mods {
+    let (mod_path, _cx, tm, _ct) = entry
+    if mod_path == "std/list" {
+      for f in tm.fns {
+        match f.impl_of {
+          Some(_) -> { saw_bundled_impl = true }
+          None -> ()
+        }
+      }
+    }
+  }
+  assert saw_bundled_impl
+
+  for f in map.values(std.fn_decls) {
+    assert f.impl_of == None
+    assert f.default_of == None
+  }
+  for owner in map.keys(std.by_owner) {
+    let tbl = map.get(std.by_owner, owner).expect("loaded owner table")
+    for f in map.values(tbl) {
+      assert f.impl_of == None
+      assert f.default_of == None
+    }
+  }
 }
 
 test "the numeric parsers still have somewhere to land" {

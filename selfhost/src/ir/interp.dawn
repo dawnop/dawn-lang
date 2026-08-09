@@ -36,12 +36,13 @@ use check/tast.{
   XStr, XLambda, XApply, XJava, XPropagate, XUnwrap, XReturn, XIndex,
   XCallDyn, XCallBuiltin, XCallFn, XCtor, XField, XListLit, XTupleLit,
   XBinary, XUnary, XIf, XMatch, XBlock, XComptime, XUnsafePure,
+  XError,
   TSPText, TSPInterp,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor
 }
 use check/types.{
-  Ty, Sym, Sig, Traits, ImplI, Impls, Adts, adt_of, intrinsics, OPTION_ID,
-  TyList, TyMap, TySet, TyArray, TyTuple
+  Ty, TyInt, TyUnit, TyError, TyAdt, Sym, Sig, Traits, ImplI, Impls, Adts, adt_of,
+  intrinsics, OPTION_ID, EPure, TyList, TyMap, TySet, TyArray, TyTuple
 }
 use ir/core.{
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
@@ -60,7 +61,7 @@ use ir/core.{
 use ir/lower
 use front/parser
 use check/cx.{ModExports, Cx, cx_new}
-use check/checker.{check_module}
+use check/checker.{check_module, exports_of}
 use check/jsig.{Jsig, JClass, JMethod, jsig_refused}
 
 type Ctl =
@@ -134,9 +135,9 @@ pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { fuel: n, ffi: false, jcall: jcall_re
 ## The interpreter's static context: how to find a function body, the tables
 ## lowering needs, and the results already folded.
 type ICx = {
-  # flat name → typed fn (module fns over std fns; local shadows std)
+  # flat name → direct typed fn (module fns over std fns; local shadows std)
   fns: Map[String, TFun],
-  # owner → (name → typed fn): module-qualified calls resolve by owner
+  # owner → (name → direct typed fn): qualified calls resolve by owner
   by_owner: Map[String, Map[String, TFun]],
   # flat name → the owner it was found under, so a function lowered on
   # demand resolves its own module's calls first
@@ -151,6 +152,9 @@ type ICx = {
   owner: String,
   traits: Traits,
   impls: Impls,
+  # Every CDirect signature lowering may consult, keyed by resolved owner.
+  # CImpl/CDefault signatures come from `traits`/`impls`, not this lossy key.
+  prog_fns: Map[(String, String), Sig],
   # Every impl method and trait default in the program, by the identity a
   # `CImpl`/`CDefault` node carries. A flat table is not a shortcut: coherence
   # means one impl per (trait, head) program-wide, so the key is unique --
@@ -172,8 +176,6 @@ type ICx = {
 # depth-per-stack is JIT-dependent, and a limit you only learn by running is
 # worse than an honest constant.
 const MAX_CALL_DEPTH: Int = 100000
-
-fn no_sigs() -> Map[(String, String), Sig] = map.empty()
 
 fn no_impls() -> Map[(Int, String, String), (String, TFun)] = map.empty()
 
@@ -367,32 +369,24 @@ fn list_eq(xs: List[CValue], ys: List[CValue]) -> Bool = {
 # ---- lowering on demand ----
 
 ## Lower one function and remember it, along with every lambda it lifted.
-## A panic in lowering becomes a diagnostic rather than killing the compiler:
-## what lowering refuses is close to what comptime refuses anyway.
+## Lowering panics are phase-invariant failures and deliberately cross this
+## boundary; expected comptime refusals are returned by the interpreter.
 fn lower_into(
   icx: ICx,
   st: ESt,
   env: Env,
   owner: String,
   f: TFun
-) -> Result[(ESt, CFun), (ESt, Env, Ctl)] !io =
-  match catch_panic(() =>
-      lower.lower_fn_only(owner, f, icx.traits, icx.impls, icx.adts, no_sigs(),
-        icx.syms, st.next_lam)) {
-    Err(e) ->
-      match cerr(st, env, "`" ++ f.name ++ "` cannot be evaluated at compile time (" ++ e.message ++ ")") {
-        Err(t) -> Err(t)
-        Ok(_) -> panic("unreachable")
-      }
-    Ok(t) -> {
-      let (cf, lifted, dicts, next) = t
-      var tbl = map.insert(st.lowered, cache_key(owner, f), cf)
-      for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
-      var dts = st.dicts
-      for d in dicts { dts = map.insert(dts, d.key, d) }
-      Ok((ESt { ..st, lowered: tbl, dicts: dts, next_lam: next }, cf))
-    }
-  }
+) -> Result[(ESt, CFun), (ESt, Env, Ctl)] !io = {
+  let (cf, lifted, dicts, next) =
+    lower.lower_fn_only(owner, f, icx.traits, icx.impls, icx.adts, icx.prog_fns,
+      icx.syms, st.next_lam)
+  var tbl = map.insert(st.lowered, cache_key(owner, f), cf)
+  for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
+  var dts = st.dicts
+  for d in dicts { dts = map.insert(dts, d.key, d) }
+  Ok((ESt { ..st, lowered: tbl, dicts: dts, next_lam: next }, cf))
+}
 
 ## The subject half of that identity: its *head*, because an impl method's
 ## `impl_of` names the declared subject (`List[T]`) while a `CImpl` node names
@@ -407,6 +401,17 @@ fn subject_key(t: Ty) -> String =
     TyTuple(es) -> "Tup" ++ to_string(len(es))
     _ -> ty_key(t)
   }
+
+## A TFun belongs in the spelling-keyed direct-call tables exactly when Core
+## may name it as CDirect. Impl methods and trait defaults are legal name
+## collisions; their identities live in `impl_fns` instead.
+fn is_direct_fn(f: TFun) -> Bool = f.impl_of == None && f.default_of == None
+
+## Add one direct function to a spelling-keyed table. The std loader and the
+## module evaluator share this door so neither can silently reintroduce
+## last-wins collisions with impl/default bodies.
+pub fn note_direct_fn(tbl: Map[String, TFun], f: TFun) -> Map[String, TFun] =
+  if is_direct_fn(f) { map.insert(tbl, f.name, f) } else { tbl }
 
 ## Record one function under the identity a `CImpl` or `CDefault` node names,
 ## if it is one. Shared by std's loader and the module being folded so the two
@@ -604,6 +609,9 @@ fn call_named(
   name: String,
   args: List[CValue]
 ) -> ER !io = {
+  if owner == "std/hamt" {
+    return cerr(st, env, "Map and Set operations are not available at comptime")
+  }
   let (st1, cf) = get_cfun(icx, st, env, owner, name)?
   let no_caps: Map[Int, CValue] = map.empty()
   # a failure inside std has no location the user can act on, so say where it
@@ -1560,40 +1568,28 @@ fn fresh_st(fuel: Int) -> ESt = {
 fn fold_expr(icx: ICx, fuel: Int, e: TExpr, lo: Int, hi: Int) -> Result[CValue, Diag] !io = {
   let st = fresh_st(fuel)
   let env: Env = map.empty()
-  let lowered = catch_panic(() =>
-      lower.lower_expr_only(icx.owner, e, icx.traits, icx.impls, icx.adts,
-        no_sigs(), icx.syms, 0))
-  match lowered {
-    Err(msg) ->
-      Err(Diag {
-        msg: "comptime: this cannot be evaluated at compile time (" ++ msg.message ++ ")",
-        lo: lo,
-        hi: hi,
-        hint: ""
-      })
-    Ok(t) -> {
-      let (ce, lifted, dicts, next) = t
-      var tbl: Map[String, CFun] = map.empty()
-      for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
-      var dts: Map[String, CDictDef] = map.empty()
-      for d in dicts { dts = map.insert(dts, d.key, d) }
-      match ceval(icx, ESt { ..st, lowered: tbl, dicts: dts, next_lam: next }, env, ce) {
-        Ok(r) -> {
-          let (_, _, v) = r
-          Ok(v)
-        }
-        Err(r) -> {
-          let (_, _, ctl) = r
-          match ctl {
-            KErr(d) -> Err(Diag { ..d, lo: lo, hi: hi })
-            _ -> Err(Diag {
-              msg: "comptime: control flow escaped the folded expression (interpreter bug)",
-              lo: lo,
-              hi: hi,
-              hint: ""
-            })
-          }
-        }
+  let (ce, lifted, dicts, next) =
+    lower.lower_expr_only(icx.owner, e, icx.traits, icx.impls, icx.adts,
+      icx.prog_fns, icx.syms, 0)
+  var tbl: Map[String, CFun] = map.empty()
+  for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
+  var dts: Map[String, CDictDef] = map.empty()
+  for d in dicts { dts = map.insert(dts, d.key, d) }
+  match ceval(icx, ESt { ..st, lowered: tbl, dicts: dts, next_lam: next }, env, ce) {
+    Ok(r) -> {
+      let (_, _, v) = r
+      Ok(v)
+    }
+    Err(r) -> {
+      let (_, _, ctl) = r
+      match ctl {
+        KErr(d) -> Err(Diag { ..d, lo: lo, hi: hi })
+        _ -> Err(Diag {
+          msg: "comptime: control flow escaped the folded expression (interpreter bug)",
+          lo: lo,
+          hi: hi,
+          hint: ""
+        })
       }
     }
   }
@@ -1737,6 +1733,31 @@ fn walk_stmt(icx: ICx, fuel: Int, s: TStmt, out: CtOut) -> CtOut !io =
     }
   }
 
+## The direct-function signature table lowering needs while evaluating one
+## module. `by_owner` contains every previously loaded std module; the current
+## module has not yet joined it, so its checked direct functions are added
+## explicitly. The predicate is repeated defensively on `by_owner`: production
+## builds it through `note_direct_fn`, but accepting a method body here would
+## make this boundary lossy again for any other caller.
+fn program_sigs(
+  by_owner: Map[String, Map[String, TFun]],
+  tm: TModule,
+  owner: String
+) -> Map[(String, String), Sig] = {
+  var out: Map[(String, String), Sig] = map.empty()
+  for o in map.keys(by_owner) {
+    let tbl = map.get(by_owner, o).expect("owner table")
+    for pr in map.entries(tbl) {
+      let (name, f) = pr
+      if is_direct_fn(f) { out = map.insert(out, (o, name), f.sig) }
+    }
+  }
+  for f in tm.fns {
+    if is_direct_fn(f) { out = map.insert(out, (owner, f.name), f.sig) }
+  }
+  out
+}
+
 ## Evaluate all comptime constructs of a checked module: consts in declaration
 ## order (each gets a fresh fuel budget), then comptime blocks in function and
 ## test bodies. Failures become ordinary diagnostics.
@@ -1756,7 +1777,7 @@ pub fn eval_comptime(
   # std is implicitly visible, so a const may call it; a local definition
   # still shadows it, matching the checker's local → std → builtin order
   var fns = std_fns
-  for f in tm.fns { fns = map.insert(fns, f.name, f) }
+  for f in tm.fns { fns = note_direct_fn(fns, f) }
   # the owner each flat name came from, so a std function lowered on demand
   # resolves its own module's calls before falling back
   var owner_of: Map[String, String] = map.empty()
@@ -1764,7 +1785,10 @@ pub fn eval_comptime(
     let tbl = map.get(by_owner, o).expect("owner table")
     for n in map.keys(tbl) { owner_of = map.insert(owner_of, n, o) }
   }
-  for f in tm.fns { owner_of = map.insert(owner_of, f.name, owner) }
+  for f in tm.fns {
+    if is_direct_fn(f) { owner_of = map.insert(owner_of, f.name, owner) }
+  }
+  let prog_fns = program_sigs(by_owner, tm, owner)
   # this module's own impl methods and trait defaults join std's
   var impl_fns = std_impl_fns
   for f in tm.fns { impl_fns = note_trait_fn(impl_fns, owner, f) }
@@ -1782,6 +1806,7 @@ pub fn eval_comptime(
     owner: owner,
     traits: traits,
     impls: impls,
+    prog_fns: prog_fns,
     impl_fns: impl_fns,
     syms: tm.syms,
     ffi: opts.ffi,
@@ -1832,6 +1857,7 @@ fn probe_icx() -> ICx = {
     owner: "probe",
     traits: cx.traits,
     impls: cx.impl_table,
+    prog_fns: map.empty(),
     impl_fns: no_impls(),
     syms: no_syms,
     ffi: false,
@@ -1910,6 +1936,285 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    numbers this file states are asserted rather than asserted-by-nobody.
   assert len(arms) == 40
   assert len(rejects) == 63
+}
+
+fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =
+  Sig {
+    name: name,
+    param_tys: params,
+    param_names: [],
+    param_defaults: [],
+    ret: ret,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [],
+    constraints: [],
+    owner: None,
+    trait_id: None,
+    op_of: None,
+    inferring: false
+  }
+
+fn test_tfun(name: String, params: List[Ty], ret: Ty, body: TExpr) -> TFun =
+  TFun {
+    name: name,
+    sig: test_sig(name, params, ret),
+    param_syms: [],
+    dict_syms: [],
+    ev_syms: [],
+    defaults: [],
+    body: body,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+
+test "an empty user impl calls its default; explicit methods still call their bodies" {
+  let src = "trait Defaulted[T] {\n" ++
+    "  fn defaulted(x: T) -> Int = 42\n" ++
+    "}\n" ++
+    "type Empty = Empty\n" ++
+    "impl Defaulted[Empty] {\n" ++
+    "}\n" ++
+    "const A: Int = defaulted(Empty)\n" ++
+    "trait Required[T] {\n" ++
+    "  fn required(x: T) -> Int\n" ++
+    "}\n" ++
+    "type Filled = Filled\n" ++
+    "impl Required[Filled] {\n" ++
+    "  fn required(x: Filled) -> Int = 41\n" ++
+    "}\n" ++
+    "const B: Int = required(Filled)\n" ++
+    "trait Overridden[T] {\n" ++
+    "  fn overridden(x: T) -> Int = 1\n" ++
+    "}\n" ++
+    "type Override = Override\n" ++
+    "impl Overridden[Override] {\n" ++
+    "  fn overridden(x: Override) -> Int = 43\n" ++
+    "}\n" ++
+    "const C: Int = overridden(Override)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("m"), Some("traits.dawn")), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "A") == Some(VInt(42))
+  assert map.get(out.consts, "B") == Some(VInt(41))
+  assert map.get(out.consts, "C") == Some(VInt(43))
+
+  let sigs = program_sigs(no_owner, tm, "m")
+  let lowered = (i: Int) => {
+    let (ce, _lifted, _dicts, _next) = lower.lower_expr_only("m", tm.consts[i].init,
+      cx1.traits, cx1.impl_table, cx1.adts, sigs, tm.syms, 0)
+    ce
+  }
+  match lowered(0) {
+    CCall(CDefault(_, _, "defaulted"), _, _) -> ()
+    _ -> { assert false }
+  }
+  match lowered(1) {
+    CCall(CImpl(_, _, _, "required"), _, _) -> ()
+    _ -> { assert false }
+  }
+  match lowered(2) {
+    CCall(CImpl(_, _, _, "overridden"), _, _) -> ()
+    _ -> { assert false }
+  }
+}
+
+test "interpreter identity tables keep direct, impl, and default spellings separate" {
+  # Importing a trait by name does not inject its methods. A local direct
+  # function may therefore legally use the same spelling as the imported
+  # trait's default and this module's impl method.
+  let defs_src = "pub trait Same[T] {\n" ++
+    "  fn same(x: T) -> Int = 9\n" ++
+    "}\n"
+  let (defs_m, defs_pdiags) = parser.parse_module(defs_src)
+  assert len(defs_pdiags) == 0
+  let empty_env: Map[String, ModExports] = map.empty()
+  let (defs_cx, defs_tm) =
+    check_module(cx_new(Some("defs"), Some("defs.dawn")), defs_m, empty_env)
+  assert len(defs_cx.diags) == 0
+  let defs_exp = exports_of(defs_cx, defs_m, "defs", "defs")
+
+  let src = "use defs.{Same}\n" ++
+    "pub type Empty = Empty\n" ++
+    "pub type Explicit = Explicit\n" ++
+    "pub fn same(a: Int, b: Int) -> Int = a + b\n" ++
+    "impl Same[Empty] {\n" ++
+    "}\n" ++
+    "impl Same[Explicit] {\n" ++
+    "  fn same(x: Explicit) -> Int = 7\n" ++
+    "}\n" ++
+    "const DIRECT: Int = same(20, 22)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env = map.from([("defs", defs_exp)])
+  let cx0 = cx_new(Some("same_impl"), Some("same_impl.dawn"))
+  let (cx1, tm) = check_module(Cx { ..cx0, next_id: defs_cx.next_id }, m, env)
+  assert len(cx1.diags) == 0
+  let impl_exp = exports_of(cx1, m, "same_impl", "same_impl")
+  let tid = map.get(cx1.traits_by_name, "Same").expect("Same trait")
+  let explicit_id = map.get(cx1.adts_by_name, "Explicit").expect("Explicit ADT")
+
+  # `defs` contains only the default body. It must not enter either direct
+  # table, while the same-spelled local impl must not replace the direct fn.
+  var defs_direct: Map[String, TFun] = map.empty()
+  var all_impls = no_impls()
+  for f in defs_tm.fns {
+    defs_direct = note_direct_fn(defs_direct, f)
+    all_impls = note_trait_fn(all_impls, "defs", f)
+  }
+  assert map.get(defs_direct, "same") == None
+  var local_direct: Map[String, TFun] = map.empty()
+  var prior_direct = defs_direct
+  var explicit_fn: Option[TFun] = None
+  for f in tm.fns {
+    local_direct = note_direct_fn(local_direct, f)
+    prior_direct = note_direct_fn(prior_direct, f)
+    all_impls = note_trait_fn(all_impls, "same_impl", f)
+    match f.impl_of {
+      Some(_) -> { explicit_fn = Some(f) }
+      None -> ()
+    }
+  }
+  let direct_fn = map.get(local_direct, "same").expect("direct same")
+  let impl_fn = explicit_fn.expect("impl same")
+  let default_fn = defs_tm.fns[0]
+  assert direct_fn.sig.param_tys == [TyInt, TyInt]
+  assert impl_fn.sig.param_tys == [TyAdt(explicit_id, [])]
+  assert default_fn.sig.param_tys != direct_fn.sig.param_tys
+  assert default_fn.sig.param_tys != impl_fn.sig.param_tys
+
+  let defs_owners = map.from([("defs", defs_direct)])
+  let direct_out = eval_comptime(tm, defs_direct, defs_owners, all_impls, set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "same_impl", ct_fuel(1000000))
+  assert len(direct_out.diags) == 0
+  assert map.get(direct_out.consts, "DIRECT") == Some(VInt(42))
+
+  # A third, ordinary source module imports the trait method and the two
+  # subjects, so the checker -- not this test -- produces the CImpl/CDefault
+  # call inputs. The evaluator context below is deliberately hand-assembled
+  # from all three modules. Production driver/analyze does not yet carry prior
+  # user modules' direct or trait bodies into eval_comptime; this is an
+  # interpreter identity test, not an end-to-end cross-module comptime claim.
+  let caller_src = "use defs.{same}\n" ++
+    "use same_impl.{Empty, Explicit}\n" ++
+    "const IMPL: Int = same(Explicit)\n" ++
+    "const DEFAULT: Int = same(Empty)\n"
+  let (caller_m, caller_pdiags) = parser.parse_module(caller_src)
+  assert len(caller_pdiags) == 0
+  let caller_env = map.from([("defs", defs_exp), ("same_impl", impl_exp)])
+  let caller0 = cx_new(Some("caller"), Some("caller.dawn"))
+  let caller_seed = Cx {
+    ..caller0,
+    next_id: cx1.next_id,
+    impl_table: cx1.impl_table
+  }
+  let (caller_cx, caller_tm) = check_module(caller_seed, caller_m, caller_env)
+  assert len(caller_cx.diags) == 0
+  let owners = map.from([("defs", defs_direct), ("same_impl", local_direct)])
+  let out = eval_comptime(caller_tm, prior_direct, owners, all_impls, set.empty(), caller_cx.adts,
+    caller_cx.traits, caller_cx.impl_table, "caller", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "IMPL") == Some(VInt(7))
+  assert map.get(out.consts, "DEFAULT") == Some(VInt(9))
+
+  let direct_sigs = program_sigs(defs_owners, tm, "same_impl")
+  assert map.get(direct_sigs, ("defs", "same")) == None
+  assert map.get(direct_sigs, ("same_impl", "same")).expect("direct signature").param_tys ==
+    [TyInt, TyInt]
+  let (direct_core, _direct_lifted, _direct_dicts, _direct_next) =
+    lower.lower_expr_only("same_impl", tm.consts[0].init, cx1.traits, cx1.impl_table,
+      cx1.adts, direct_sigs, tm.syms, 0)
+  match direct_core {
+    CCall(CDirect(o, "same"), _, _) -> { assert o == "same_impl" }
+    _ -> { assert false }
+  }
+
+  let caller_sigs = program_sigs(owners, caller_tm, "caller")
+  assert map.get(caller_sigs, ("defs", "same")) == None
+  assert map.get(caller_sigs, ("same_impl", "same")).expect("direct signature").param_tys ==
+    [TyInt, TyInt]
+  let lowered = (i: Int) => {
+    let (ce, _lifted, _dicts, _next) = lower.lower_expr_only("caller", caller_tm.consts[i].init,
+      caller_cx.traits, caller_cx.impl_table, caller_cx.adts, caller_sigs, caller_tm.syms, 0)
+    ce
+  }
+  match lowered(0) {
+    CCall(CImpl(o, got_tid, subject, "same"), _, _) -> {
+      assert o == "same_impl"
+      assert got_tid == tid
+      assert subject == TyAdt(explicit_id, [])
+    }
+    _ -> { assert false }
+  }
+  match lowered(1) {
+    CCall(CDefault(o, got_tid, "same"), _, _) -> {
+      assert o == "defs"
+      assert got_tid == tid
+    }
+    _ -> { assert false }
+  }
+}
+
+test "Map and Set calls have signatures but remain ordinary comptime refusals" {
+  let src = "const M: Int = {\n" ++
+    "  let m: Map[Int, Int] = map_empty()\n" ++
+    "  map_size(m)\n" ++
+    "}\n" ++
+    "fn set_count() -> Int = {\n" ++
+    "  let s: Set[Int] = set_from([1])\n" ++
+    "  set_size(s)\n" ++
+    "}\n" ++
+    "const S: Int = set_count()\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("std/t"), Some("collections.dawn")), m, env)
+  assert len(cx1.diags) == 0
+
+  var hamt: Map[String, TFun] = map.empty()
+  hamt = map.insert(hamt, "empty",
+    test_tfun("empty", [], TyMap(TyInt, TyInt), XError(0, 0)))
+  hamt = map.insert(hamt, "sfrom",
+    test_tfun("sfrom", [TyError], TySet(TyInt), XError(0, 0)))
+  hamt = map.insert(hamt, "count",
+    test_tfun("count", [TyError], TyInt, XError(0, 0)))
+  var owners: Map[String, Map[String, TFun]] = map.empty()
+  owners = map.insert(owners, "std/hamt", hamt)
+  let no_fns: Map[String, TFun] = map.empty()
+  let out = eval_comptime(tm, no_fns, owners, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "std/t", ct_fuel(1000000))
+  assert len(out.diags) == 2
+  assert out.diags[0].msg == "comptime: Map and Set operations are not available at comptime"
+  assert out.diags[1].msg == "comptime: Map and Set operations are not available at comptime"
+  assert map.get(out.consts, "M") == None
+  assert map.get(out.consts, "S") == None
+}
+
+test "lowering invariant panics cross both comptime lowering boundaries" {
+  let icx0 = probe_icx()
+  match catch_panic(() => fold_expr(icx0, 1000, XError(3, 4), 3, 4)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "lower: XError reached lowering" }
+  }
+
+  let bad = test_tfun("bad", [], TyUnit, XError(5, 6))
+  let fns = map.insert(icx0.fns, "bad", bad)
+  let owner_of = map.insert(icx0.owner_of, "bad", "probe")
+  let sigs = map.insert(icx0.prog_fns, ("probe", "bad"), bad.sig)
+  let icx = ICx { ..icx0, fns: fns, owner_of: owner_of, prog_fns: sigs }
+  let env: Env = map.empty()
+  match catch_panic(() => call_named(icx, fresh_st(1000), env, "probe", "bad", [])) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "lower: XError reached lowering" }
+  }
 }
 
 test "consts evaluate in declaration order and fold across references" {

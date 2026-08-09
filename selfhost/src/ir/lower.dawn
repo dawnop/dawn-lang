@@ -93,9 +93,12 @@ pub type LSt = {
   traits: Traits,
   impls: Impls,
   adts: Adts,
-  # every function's declared signature, so a call site can box its
-  # arguments against the DECLARED parameter types rather than leaving each
-  # backend to recompute "is this slot a type variable"
+  # every directly-called function's declared signature, so a call site can
+  # box its arguments against the DECLARED parameter types rather than leaving
+  # each backend to recompute "is this slot a type variable". Trait calls do
+  # not use this table: their signatures come from `traits` and are
+  # specialised against `impls`, whose identities cannot collapse to a bare
+  # (owner, name).
   prog_fns: Map[(String, String), Sig],
   dicts: List[CDictDef],
   # The dictionaries in scope right here, by the type each one witnesses
@@ -1966,11 +1969,11 @@ fn subject_of(w: WitRef) -> Ty =
 
 ## Does this call have to reach `prim_relation` rather than a method body?
 ##
-## The table says so. An impl that neither provides a method nor was derived
-## has no body anywhere -- that is the prelude's scalar Eq/Hash/Ord -- and no
-## impl at all means Eq/Hash's structural default. This used to be three
-## hand-written conditions (a witness kind, `is_eq_scalar`, `is_ord_scalar`);
-## they were three spellings of one question the table already answers.
+## The table says so. A derived impl is compiler-owned by definition; an
+## underived bodyless impl is primitive only when it is one of the prelude
+## rows minted without a source owner. A user's empty impl can inherit trait
+## defaults, so treating every empty `provided` list as primitive skips the
+## `CDefault` body. No impl at all means Eq/Hash's structural default.
 fn primitive_witness(st: LSt, w: WitRef, tid: Int) -> Bool =
   match w {
     WConcrete(_, subject) -> primitive_subject(st, tid, subject)
@@ -1984,7 +1987,8 @@ fn primitive_subject(st: LSt, tid: Int, subject: Ty) -> Bool =
     # defines it, which is the same answer the prelude's scalar impls give.
     # It used to be the opposite, and that is how the derived comparison
     # ended up written twice: once in bytecode, never in Core.
-    Some(imp) -> imp.derived || len(imp.provided) == 0
+    Some(imp) -> imp.derived ||
+      (imp.owner == None && imp.src_path == None && len(imp.provided) == 0)
     None -> tid == EQ_ID || tid == HASH_ID
   }
 

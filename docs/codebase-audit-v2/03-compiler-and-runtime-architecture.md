@@ -72,7 +72,52 @@
 
 ## ARC-06 — P2 — comptime 把 lowering invariant panic 伪装成用户拒绝
 
-- **证据：S。** comptime 对 `lower_fn_only` / `lower_expr_only` 使用无差别 `catch_panic`：`selfhost/src/ir/interp.dawn:369`、`:379`、`:1563`。lowering 同时包含真正的阶段 invariant panic，例如缺 witness、`XError` 穿透、constructor field 缺失：`selfhost/src/ir/lower.dawn:2072`、`:2430`、`:2760`。
+> **已修**（2026-08-09）：`lower_into` 与 `fold_expr` 不再用 blanket
+> `catch_panic` 包住 lowering；`XError` 等阶段不变量现在穿透为 compiler panic，预期的
+> 用户拒绝继续由解释器的 `Result` / `cerr` 返回。修复同时清除了两个会让合法程序先
+> 撞进 lowering panic 的邻接根因：用户空 impl 不再因 `provided == []` 被误判为
+> primitive，而是生成并执行 `CDefault`；comptime 的 `ICx` 一次构建并携带
+> `(owner, fn) -> Sig` 的 **direct-only** 表，传给 `lower_fn_only` /
+> `lower_expr_only`。复查所有消费点后确认该表只服务无 `trait_id` 的 `XCallFn`
+> （生成 `CDirect`）和 `std/hamt` direct 调用；`CImpl` / `CDefault` 的签名由
+> `trait_method_sig` 与 `subst_subject` 从 trait/impl 表取得，函数体则由
+> `(trait_id, subject_key, method)` 身份表取得，不能也不需要压进 `(owner, name)`。
+> 为避免合法同名产生 last-wins，当前 `TModule` 的签名表、解释器 flat body 表与
+> `owner_of` 都过滤 `impl_of` / `default_of`；std loader 的 `fn_decls` 和 `by_owner`
+> 也经同一 `note_direct_fn` 入口只收普通 direct function，而每个 impl/default 仍经
+> `note_trait_fn` 进入完整身份表。production invariant test 在真实 bundled std 上确认
+> `fn_decls` 与每个 `by_owner` 表都不含 `impl_of` / `default_of`，并确认 std/list 确有
+> impl bodies，避免空表假绿。补全签名后 Map/Set 本可继续进入 `std/hamt`，因此
+> 解释器在执行该 `CDirect` 前固定返回
+> `Map and Set operations are not available at comptime`，保持既有能力边界而不伪造
+> folded value。门禁覆盖空 impl 默认方法折叠为 42 且 Core 为 `CDefault`、显式必需
+> 方法与覆盖仍走 `CImpl`、Map 的表达式 lowering 与 Set helper 的函数 lowering、两条
+> `XError` invariant 穿透，以及除零诊断逐字不变。追加的**解释器层身份夹具**由 checker
+> 检查三个真实模块，但随后手工把三模块 direct/impl/default body tables 交给
+> `eval_comptime`；它验证不同签名的同名函数在该层分别折叠为 42/7/9，Core 分别为
+> `CDirect` / `CImpl` / `CDefault`，不代表 production driver 已能提供这些跨模块表。
+> 把统一过滤器临时恢复成“所有 `TFun` 均插入”（即原全量 last-wins）后，该夹具立即在
+> default 污染 direct owner 表的断言见红；另把 stdlib loader 的两处
+> `note_direct_fn` 单独恢复为 `map.insert`，production invariant test 也会在真实 std impl
+> 进入 `by_owner` 时见红。
+>
+> **剩余能力边界（未冒称已修）：**（1）production `driver/analyze` 对每个用户模块调用
+> `eval_comptime` 时仍只传 std 的 `fn_decls` / `by_owner` / `impl_fns`，没有提供前序用户
+> 模块的跨模块 direct、impl 或 default 函数体。因此真实三模块 const 当前不是 42/7/9：
+> trait 路由会得到普通诊断“comptime: missing impl method `same`”；跨模块 direct helper
+> 同样没有 body 可执行。（2）prelude primitive 的“编译器拥有”目前以
+> `owner == None && src_path == None && provided == []` 代理；生产 checker 生成的用户
+> impl 带 owner/path，但测试或未来阶段若合成一个 ownerless、underived、空 impl，仍可能
+> 被误判，长期应有显式 provenance。（3）Map/Set 能力栅栏目前按整个 `std/hamt` owner
+> 拒绝，而不是按具体操作/capability；若该模块未来加入可安全 comptime 的 direct helper，
+> 也会被过度拒绝。这三项均是能力/模型债，不再被 lowering panic 隐藏，但不属于本项的
+> invariant 错误通道修复。
+
+- **历史证据（修复前基线，S）：** 基线代码曾在 comptime 的 `lower_into` 与
+  `fold_expr` 边界用无差别 `catch_panic` 包住 `lower_fn_only` / `lower_expr_only`；同一
+  lowering 阶段又包含缺 witness、`XError` 穿透、constructor field 缺失等真正的
+  invariant panic。现代码已删除这两处 blanket catch，本段只记录 ARC-06 的发现来源，
+  不表示当前实现仍存在该行为。
 - **影响：** checker→lower regression 会变成“cannot evaluate at compile time”一类用户诊断，隐藏 compiler bug，也可能让只期待某条诊断的负例假绿。
 - **建议：** 预期拒绝用 `Result[..., LowerRefusal]`；只转换该 variant。阶段不变量失败继续作为内部错误并保留上下文。
 
