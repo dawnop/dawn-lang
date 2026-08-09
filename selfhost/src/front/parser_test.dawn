@@ -570,6 +570,37 @@ test "type grouping disambiguates outer and inner function effects" {
   assert str.contains(empty[0].msg, "tuple type needs at least 2 elements")
 }
 
+test "bare type constructors are parser-owned independent of spelling" {
+  for ctor in ["Int", "Char", "Float", "Bool", "String", "Bytes", "Unit", "Red"] {
+    let (m, ds) = parse_module("type Wrapped = " ++ ctor)
+    assert len(ds) == 0
+    assert len(m.decls) == 1
+    match m.decls[0] {
+      DType(t) -> {
+        assert len(t.ctors) == 1
+        assert t.ctors[0].name == ctor
+        assert len(t.ctors[0].fields) == 0
+      }
+      _ -> { assert false }
+    }
+  }
+}
+
+test "type alias hints stay parser-owned by syntax" {
+  for src in [
+    "type Wrong = fn(Int) -> Int",
+    "type Wrong = (Int, Int)",
+    "type Wrong = (Int)",
+    "type Wrong = List[Int]"
+  ] {
+    let (_, ds) = parse_module(src)
+    assert len(ds) == 1
+    assert ds[0].msg ==
+      "`type` declares a nominal type (constructors or a record); this is an alias"
+    assert ds[0].hint == "write `alias Wrong = ...` instead"
+  }
+}
+
 test "application is a postfix: call results and groups apply directly" {
   # each of these was a syntax error before the postfix arm existed
   let (_, ds) = parse_module("fn f() -> Int = add(3)(4)\n")

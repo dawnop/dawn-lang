@@ -169,9 +169,6 @@ jobs:
       - name: grammar corpus
         run: ./scripts/grammar-corpus/run.sh
 
-      - name: declaration recovery contract
-        run: ./scripts/syntax-small-contract/run.sh
-
       # SYN-08 crosses lexer state, parser folding, comptime and both emitters.
       # The grammar corpus pins rejection, while this contract checks the JVM
       # and native answers against a written oracle and inspects generated C
@@ -497,7 +494,10 @@ jobs:
   # quietly regress either.
   checker-corpus:
     runs-on: ubuntu-latest
-    # measured 123s and 131s
+    # measured 123s and 131s before SYN-11 moved the five-mutant syntax
+    # contract here; the expanded contract measured 65s locally. The broad
+    # test job is already near its 15-minute budget, while this job shares the
+    # same toolchain and keeps a 10-minute failure bound.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -506,6 +506,13 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: checker diagnostic corpus
         run: ./scripts/checker-corpus/run.sh
+
+      # Parser ownership, checker-owned builtin alias hints, and the nominal
+      # singleton/nullary boundary are each exercised by a compiling mutant.
+      # The two earlier recovery mutants remain here too, so this step owns all
+      # five small syntax mutations without adding another cold-start job.
+      - name: syntax ownership and recovery contract
+        run: ./scripts/syntax-small-contract/run.sh
 
       # SEM-06: an erased Java Object must not acquire a hidden CHECKCAST just
       # because an overload wants a concrete reference. The contract also

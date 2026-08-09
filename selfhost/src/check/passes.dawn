@@ -620,8 +620,23 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
         None -> false
       }
       if builtin_ctor {
-        cx1 = cerr(cx1, "constructor `" ++ c.name ++ "` collides with a builtin type name",
-          c.nlo, c.nhi)
+        # A bare TYPEIDENT is a constructor syntactically. Only this pass can
+        # tell that the one-constructor, no-payload spelling was an attempted
+        # alias to a compiler-owned nongeneric type. Keep every other nominal
+        # shape on the ordinary constructor-collision path.
+        let builtin_alias = len(d.ctors) == 1 && len(c.fields) == 0
+        if builtin_alias {
+          let brackets = if len(d.tparams) == 0 { "" } else {
+            "[" ++ join(d.tparams, ", ") ++ "]"
+          }
+          cx1 = cerr_h(cx1,
+            "`type` declares a nominal type (constructors or a record); this is an alias",
+            d.lo, c.hi,
+            "write `alias " ++ d.name ++ brackets ++ " = ...` instead")
+        } else {
+          cx1 = cerr(cx1, "constructor `" ++ c.name ++ "` collides with a builtin type name",
+            c.nlo, c.nhi)
+        }
       } else if map.has(cbn, c.name) {
         cx1 = cerr(cx1, "constructor `" ++ c.name ++
             "` is already defined (constructors share one module-wide namespace)", c.nlo, c.nhi)

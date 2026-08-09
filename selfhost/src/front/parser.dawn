@@ -483,12 +483,6 @@ fn alias_decl(p: P, st: St, is_pub: Bool, is_opaque: Bool) -> PR[Decl] = {
   })))
 }
 
-fn is_builtin_scalar(name: String) -> Bool =
-  match name {
-    "Int" | "Float" | "Bool" | "String" | "Unit" -> true
-    _ -> false
-  }
-
 fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   let (st1, kw) = want(p, st, TYPE, "`type`")?
   let (st2, name) = want(p, st1, TYPEIDENT, "a type name (uppercase)")?
@@ -504,12 +498,11 @@ fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   if at_kind(p, st4, LBRACE) {
     return record_decl(p, st4, is_pub, kw, name, tparams)
   }
-  # `type` declares a nominal type only; an RHS that cannot begin a constructor
-  # list is an alias, and aliases have their own keyword (spec §2.6)
-  let builtin_scalar = at_kind(p, st4, TYPEIDENT) && is_builtin_scalar(cur(p, st4).text) &&
-    kind_ahead(p, st4, 1) != LPAREN
+  # `type` declares a nominal type only. The parser recognizes alias shapes,
+  # not names: a bare TYPEIDENT is always a constructor, and the checker owns
+  # whether that constructor name collides with a compiler-owned type.
   let aliasish = at_kind(p, st4, FN) || at_kind(p, st4, LPAREN) ||
-    (at_kind(p, st4, TYPEIDENT) && kind_ahead(p, st4, 1) == LBRACKET) || builtin_scalar
+    (at_kind(p, st4, TYPEIDENT) && kind_ahead(p, st4, 1) == LBRACKET)
   if aliasish {
     let (st5, target) = type_ref(p, st4)?
     let brackets = if len(tparams) == 0 { "" } else { "[" ++ join(tparams, ", ") ++ "]" }

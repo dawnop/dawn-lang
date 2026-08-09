@@ -112,7 +112,23 @@
 - **影响：** 分隔是否成功取决于下一 pattern 的首 token和当前 expression postfix 集；新增 pattern/postfix 还可能改变旧代码 parse。
 - **建议：** 破坏性要求 NEWLINE 或 `,` 分隔 arm，并为缺分隔符提供专门诊断。
 
-## SYN-11 — P2 — parser 复制 builtin type 表且已经漂移
+## SYN-11 — P2 — parser 复制 builtin type 表且已经漂移（已处置）
+
+- **后续处置（2026-08-10）：已修。** parser 删除五项 builtin 名字表，只把 `fn`、
+  tuple/group 和 `TYPEIDENT[...]` 这三类纯语法形状判为 alias 误写；裸 `TYPEIDENT` RHS
+  不再因拼写而改变 AST。checker 在声明名冲突之后，借既有 `ty_named` 判断“唯一且
+  nullary 的 constructor”是否其实是七个公开 nongeneric compiler-owned 类型之一，并给出
+  原有可操作 alias hint；没有新增第二份字符串 registry。multi-constructor、payload
+  constructor、普通 `type Color = Red` 仍走 nominal 路径，`type Int = Char` 仍由声明名
+  重定义优先，失败声明继续保留既有空 constructor shell，避免 `unknown type` 级联。
+- **门禁：** parser tests 固定七个 builtin 与普通大写名字采用同一 AST，并固定
+  `fn`/tuple/group/generic alias hint 仍由 parser 发出；checker corpus 逐 span、消息、hint
+  固定七条统一诊断及 sum/payload/声明名边界。`syntax-small-contract` 的三项新增 compiling
+  mutant 分别恢复旧五名 parser 分支、排除 `Char`/`Bytes`、删除 singleton/nullary 边界，
+  各自只击穿归属断言；连同原有两项 recovery mutant，合同移至现有 checker-corpus job，
+  不新增冷启动 job。
+- **留存余账：** unknown-type 建议 inventory、LSP 类型补全、spec builtin taxonomy 和
+  `doc --builtins` 双向完整性属于 B200-1B，本项不冒充一并修复。
 
 - **证据：V。** `type`/`alias` 误写提示只硬编码五个 scalar：`selfhost/src/front/parser.dawn:452`；checker 的真实 builtin 表包含 `Char`、`Bytes`：`selfhost/src/check/types.dawn:337`。
 - **边界：** `type Letter = Char` 被解析成含 nullary constructor `Char` 的 ADT，最后报 constructor collision，而不是建议 `alias Letter = Char`。
