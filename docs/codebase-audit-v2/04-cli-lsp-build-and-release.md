@@ -7,7 +7,7 @@
 ## 本专题结论
 
 - 对用户最危险的是 `dawn check` 假绿与 `dawn fmt` 对任意文件原地写回；两者都是默认接口语义，而不是隐藏调试命令的小问题。
-- LSP 已有 debounce、URI/UTF-8 修复和跨后端前端，但缺 workspace snapshot、工程 Java classpath、frame limit 与 lifecycle state，尚不适合把“与 build 一致”作为承诺。
+- LSP 已有 debounce、URI/UTF-8 修复、跨后端前端与有界 framing，但仍缺 workspace snapshot、工程 Java classpath 与 lifecycle state，尚不适合把“与 build 一致”作为承诺。
 - 包/自举链的问题集中在**一件事有两张图或两份身份**：source graph vs Java graph、artifact coordinate vs basename、seed jar vs seed std、gate recipe vs release recipe。
 
 ## TOOL-01 — P1 — `dawn check` 有诊断仍退出 0
@@ -55,12 +55,27 @@
 - **影响：** editor 和 API docs 对正式 build 产生系统性假错误。
 - **建议：** 抽出权威 project dependency plan，check/doc/lsp/build/run/test 共用；LSP 按 workspace root 缓存解析 classpath。
 
-## TOOL-07 — P1 — LSP header/body 没有长度上限
+## TOOL-07 — P1 — LSP header/body 没有长度上限（已修）
 
 - **证据：S。** header 逐 byte 无限累积：`selfhost/src/lsp/server.dawn:575`；`Content-Length` 无最大值即交给 read primitive：`:603`。JVM 把 Int64 直接 `L2I`：`selfhost/src/jvm/rtclasses.dawn:1445`；native 按声明长度分配：`runtime/c/dawn_rt.c:1971`。
 - **边界：** 无终止空行可无限增长 header；大于 `2^31-1` 的 body length 在 JVM 截断，native 可能巨量分配或阻塞。
 - **影响：** malformed/hostile client 可 OOM、hang 或让两个后端分叉。
 - **建议：** header/body hard cap；拒绝 duplicate、negative、overflow length，在 host-int conversion 前校验；超限回 JSON-RPC parse error 后关闭连接。
+- **后续处置：已修。** 共享 `server.dawn` 现将完整 header（含 `CRLF CRLF`）限制为
+  8192 bytes、body 限制为 67108864 bytes，并在 `io.read_stdin(length)` 前完成 ASCII-only
+  header 行、字段名/十进制值、`Int` overflow、body cap 与全部重复字段一致性验证。第 8192
+  byte 恰好完成可收，未完成则当场 fatal；未知但语法正确的 header 可忽略，无冒号或空/非法
+  字段名不可；`0` 合法。
+- **恢复边界：** 只有完整有界 body 的 JSON parse error 属于可恢复 `Malformed`。partial
+  header/body、缺失/非法/冲突/超限长度与 header 超限统一进入 `Fatal`：只发一次固定
+  `-32700` / `id: null` parse error，随后关闭 read loop；clean EOF 仍静默。完整 body 的非法
+  UTF-8 也回 `-32700` 后继续，但会在 replacement decoder 前拒绝，不能被 U+FFFD 修成合法 JSON。
+- **门禁：** `server.dawn` 纯测试覆盖 8192/8193、0/00042、64 MiB 边界、近似非法拼写、
+  `2^63`/`2^31` 与重复字段；`scripts/lsp-framing.py` 以真实流固定致命/可恢复分界、坏帧后
+  不再解释合法 `initialize`、严格 response framing oracle、launcher 先退出时仍清理同组
+  child，以及 Linux RSS 天花板。harness self-test 11/11，JVM/native 真实流各 28/28；普通
+  gate 跑 JVM，`scripts/native-cli-diff.sh` 另以 native release 形状 binary 跑独立 leg。完整理由见
+  [`lsp-framing-design.md`](../lsp-framing-design.md)。
 
 ## TOOL-08 — P2 — LSP 没有 initialize/shutdown 状态机
 

@@ -24,7 +24,7 @@ Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 D
 ### 截至 v0.62.0 后当前 main 的状态层
 
 > 本节是冻结基线之后的**后续状态**，以 tag `v0.62.0`（`f2d4e79`）为已发布基点，
-> 并计入其后收口的 TOOL-03/TOOL-04、SYN-08 与 SYN-10；它不重写、重判或重新计数原审计的严重度、
+> 并计入其后收口的 TOOL-03/TOOL-04/TOOL-07、SYN-08 与 SYN-10；它不重写、重判或重新计数原审计的严重度、
 > 证据与 P1 索引。下文仍按 v0.60.0 原文阅读。
 
 | 状态 | 本层含义 |
@@ -33,12 +33,12 @@ Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 D
 | **部分** | 已有实质修复，但明细所指出的至少一个边界在当前代码中仍成立，不能冒称关闭。 |
 | **开放** | 截至本层快照没有足够证据宣告关闭；未改、只做设计或只做前置重构都归此类。 |
 
-**已修（36）**
+**已修（37）**
 
 - 语法（8）：`SYN-01`、`SYN-02`、`SYN-06`–`SYN-08`、`SYN-10`、`SYN-14`、`SYN-18`。
 - 语义（5）：`SEM-01`、`SEM-02`、`SEM-03`、`SEM-11`、`SEM-17`。
 - 架构（3）：`ARC-03`、`ARC-04`、`ARC-05`。
-- 工具链（11）：`TOOL-01`–`TOOL-04`、`TOOL-09`、`TOOL-11`、`TOOL-12`、
+- 工具链（12）：`TOOL-01`–`TOOL-04`、`TOOL-07`、`TOOL-09`、`TOOL-11`、`TOOL-12`、
   `TOOL-14`、`TOOL-15`、`TOOL-16`、`TOOL-17`。
 - 库（4）：`LIB-01`、`LIB-02`、`LIB-03`、`LIB-11`。
 - 治理（5）：`GOV-01`、`GOV-02`、`GOV-06`、`GOV-07`、`GOV-09`。
@@ -50,13 +50,13 @@ Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 D
 - [`LIB-10`](codebase-audit-v2/05-stdlib-and-packages.md)：明细要求 CORS 包住最终 error response；当前 `with_cors` 已处理 handler 的 `Ok`/`Err`，但 `server.dawn` 的 dot-segment 400 与 body-limit 413 在 Request 和 middleware 之前产生，仍没有 CORS headers。
 - [`GOV-08`](codebase-audit-v2/06-docs-tests-and-governance.md)：明细列出的 release asset 名已更正，但当前 `CONTRIBUTING.md` 的 quick fmt 仍比 `gates.yml` 漏 `std`/`examples`，里程碑文档路径也仍写根目录而非 `docs/history/`。
 
-**开放（57）**
+**开放（56）**
 
 - 语法（11）：`SYN-03`–`SYN-05`、`SYN-09`、`SYN-11`–`SYN-13`、
   `SYN-15`–`SYN-17`、`SYN-19`。
 - 语义（12）：`SEM-04`–`SEM-10`、`SEM-12`–`SEM-16`。
 - 架构（7）：`ARC-06`–`ARC-12`。
-- 工具链（6）：`TOOL-05`–`TOOL-08`、`TOOL-10`、`TOOL-13`。
+- 工具链（5）：`TOOL-05`、`TOOL-06`、`TOOL-08`、`TOOL-10`、`TOOL-13`。
 - 库（14）：`LIB-04`–`LIB-09`、`LIB-12`–`LIB-19`。
 - 治理（7）：`GOV-03`、`GOV-04`、`GOV-05`、`GOV-10`–`GOV-13`。
 
@@ -71,8 +71,8 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 `scripts/native-cli-diff.sh`；#206 与 release/bootstrap 收口见 `fde3203`、`2683638`、
 `c4761ce`、`3a3ad4b`、`77374c9`、`086ea95` 及 `scripts/bootstrap-guards/run.sh`。
 
-计数自检：**36 已修 + 4 部分 + 57 开放 = 97**；六专题分别覆盖
-19 / 17 / 12 / 17 / 19 / 13 项，与冻结总数一致且无重复、遗漏。
+计数自检：**37 已修 + 4 部分 + 56 开放 = 97**；按当前状态层逐专题相加，语法 / 语义 /
+架构 / 工具链 / 库 / 治理仍分别覆盖 19 / 17 / 12 / 17 / 19 / 13 项，与冻结总数一致且无重复、遗漏。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -166,7 +166,7 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 ### 6.4 两后端一致性要覆盖失败与工具，不只覆盖正常 stdout
 
 - failure payload 的 ownership、nested failure、message bytes、cleanup leak 必须成为 backend contract。
-- JVM/native CLI 的 reject/exit/arity 需要共享 fixture；LSP frame overflow 也要双后端负例。
+- JVM/native CLI 的 reject/exit/arity 需要共享 fixture；LSP frame overflow 的双后端负例已由 TOOL-07 收口。
 - differential 不能替代 independent oracle；dtoa、ZIP/DEFLATE 与 grammar diagnostics 都需要外部或完整预期。
 
 ## 7. 架构建议

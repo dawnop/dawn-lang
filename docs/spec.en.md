@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 74b1995c51e47441 -->
+<!-- doc-check: translation-of docs/spec.md @ 0ee06426f8745862 -->
 
 # Dawn Language Specification
 
@@ -2561,6 +2561,35 @@ release; it needs neither a JVM nor this repository):
 | `dawnc test <target>` | Compiles the variant that includes the test blocks and runs it |
 | `dawnc fmt` / `doc` / `add` / `lsp` | Output is **byte-for-byte identical** to `dawn`'s subcommands of the same name (`scripts/native-cli-diff.sh` pins these four to the JVM's bytes) |
 | `dawnc version` | The version number (it reports `(native)` itself, so it is not literally identical to `dawn --version`) |
+
+The two `lsp` subcommands share one stdio-framing implementation. A header, from its
+first byte through `CRLF CRLF`, is at most 8192 bytes: a terminator completed exactly on
+byte 8192 is valid, while an incomplete header that reaches the limit is rejected
+immediately. A body is at most 67108864 bytes. Every nonempty header line must have the
+shape `1*tchar ":" field-value`; `tchar` is an
+ASCII letter or digit, any of `! # $ % & ' * + - . ^ _ | ~`, or a backtick. A missing
+colon, an empty field name, or a space/parenthesis in the field name is therefore a framing
+failure, while a syntactically valid unknown header is ignored. The field name
+`Content-Length` is compared ASCII-case-insensitively. Its value is one or more ASCII
+decimal digits, optionally padded
+at either end by SP/HTAB only. Empty values, signs, fractions, exponents, underscores,
+Unicode digits, `Int` overflow and values above the body limit are invalid; `0` is valid.
+Duplicate fields are valid only when every independently parsed numeric value is equal, so
+leading zeroes do not conflict; an invalid occurrence or a numeric conflict rejects the
+frame.
+
+The body must be strict UTF-8. If a complete bounded frame has invalid UTF-8 or an invalid
+JSON body, the server replies with `-32700`, `id: null`, and continues with the next frame;
+a replacement decoder must not repair invalid wire bytes into valid JSON. Every other
+framing failure (a malformed or partial header, a partial body, a missing, invalid,
+conflicting or oversized length, or an oversized header) produces exactly one copy of the
+parse error below and closes the read loop; bytes after the failure are never interpreted
+as another frame. Clean EOF with zero header bytes is silent. Header syntax and all length
+validation are checked before the underlying stdin-read primitive is called.
+
+```json
+{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}
+```
 
 The two drivers parse argv independently, but target cardinality is one shared contract
 (TOOL-04):

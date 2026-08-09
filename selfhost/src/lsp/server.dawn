@@ -491,17 +491,22 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
               st = handle(st, msg)
             }
           }
-        # A bad frame is not end of input. This used to collapse into the same
-        # `None` as EOF, so one malformed message — a truncated header from a
-        # crashing client, a stray write into the pipe — made the server exit
-        # without a word, and the editor showed a language server that had simply
-        # stopped. JSON-RPC 2.0 §4.2 asks for an error response instead; the read
-        # is resynchronised on a frame boundary, so the session continues.
+        # The declared body was read in full, so malformed JSON leaves the next
+        # frame boundary known and the session can continue.
         Malformed(code, why) -> {
           st = flush(st, pending)
           pending = None
           send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
             ("error", jobj([("code", JInt(code)), ("message", JStr(why))]))]))
+        }
+        # A framing failure has no trustworthy resynchronisation point. Emit
+        # one fixed parse error and stop reading; bytes after the failure are
+        # deliberately never interpreted as another frame.
+        Fatal -> {
+          pending = None
+          send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
+            ("error", jobj([("code", JInt(-32700)), ("message", JStr("Parse error"))]))]))
+          running = false
         }
       }
     } else {
@@ -567,19 +572,243 @@ fn update_of(msg: Json) -> Option[(String, String)] = {
   }
 }
 
-## The outcome of one read: a message, clean end of input, or a frame that could
-## not be understood but left the stream positioned at the next one.
-type Frame = Eof | Message(value: Json) | Malformed(code: Int, why: String)
+const HEADER_MAX_BYTES: Int = 8192
+const BODY_MAX_BYTES: Int = 67108864
+
+fn ascii_ci_equal(left: String, right: String) -> Bool = {
+  let left_cps = code_points(left)
+  let right_cps = code_points(right)
+  if len(left_cps) != len(right_cps) { return false }
+  var index = 0
+  while index < len(left_cps) {
+    let left_code = char.code(left_cps[index])
+    let right_code = char.code(right_cps[index])
+    let left_folded = if left_code >= char.code('A') && left_code <= char.code('Z') {
+      left_code + 32
+    } else {
+      left_code
+    }
+    let right_folded = if right_code >= char.code('A') && right_code <= char.code('Z') {
+      right_code + 32
+    } else {
+      right_code
+    }
+    if left_folded != right_folded { return false }
+    index = index + 1
+  }
+  true
+}
+
+fn is_header_pad(code: Int) -> Bool = code == char.code(' ') || code == char.code('\t')
+
+fn is_header_name_code(code: Int) -> Bool =
+  (code >= char.code('a') && code <= char.code('z')) ||
+  (code >= char.code('A') && code <= char.code('Z')) ||
+  (code >= char.code('0') && code <= char.code('9')) ||
+  code == char.code('!') || code == char.code('#') || code == char.code('$') ||
+  code == char.code('%') || code == char.code('&') || code == char.code('\'') ||
+  code == char.code('*') || code == char.code('+') || code == char.code('-') ||
+  code == char.code('.') || code == char.code('^') || code == char.code('_') ||
+  code == char.code('`') || code == char.code('|') || code == char.code('~')
+
+fn valid_header_name(name: String) -> Bool = {
+  let cps = code_points(name)
+  if len(cps) == 0 { return false }
+  for cp in cps {
+    if not is_header_name_code(char.code(cp)) { return false }
+  }
+  true
+}
+
+## Content-Length is deliberately not parsed by the language's general
+## `parse_int`: the wire grammar has no sign and trims only SP/HTAB. Accumulate
+## negatively so an oversized decimal is rejected before any host conversion.
+fn parse_content_length_value(raw: String) -> Option[Int] = {
+  let cps = code_points(raw)
+  var first = 0
+  var last = len(cps)
+  while first < last && is_header_pad(char.code(cps[first])) { first = first + 1 }
+  while last > first && is_header_pad(char.code(cps[last - 1])) { last = last - 1 }
+  if first == last { return None }
+
+  let limit = 0 - 9223372036854775807
+  let multmin = limit / 10
+  var value = 0
+  var index = first
+  while index < last {
+    let code = char.code(cps[index])
+    if code < char.code('0') || code > char.code('9') { return None }
+    let digit = code - char.code('0')
+    if value < multmin { return None }
+    value = value * 10
+    if value < limit + digit { return None }
+    value = value - digit
+    index = index + 1
+  }
+  Some(0 - value)
+}
+
+## Parse the completed header block. Duplicate Content-Length fields agree by
+## value, not spelling; any invalid occurrence poisons the whole frame.
+fn parse_content_length(header: String) -> Option[Int] = {
+  if str.len(header) > HEADER_MAX_BYTES || not str.ends_with(header, "\r\n\r\n") {
+    return None
+  }
+  var found: Option[Int] = None
+  for line in str.split(header, "\r\n") {
+    if line != "" {
+      match str.index_of(line, ":") {
+        Some(colon) -> {
+          let name = str.take(line, colon)
+          if not valid_header_name(name) { return None }
+          if ascii_ci_equal(name, "Content-Length") {
+            let raw = str.drop(line, colon + 1)
+            let parsed = match parse_content_length_value(raw) {
+              Some(value) -> value
+              None -> return None
+            }
+            if parsed > BODY_MAX_BYTES { return None }
+            match found {
+              Some(previous) -> if previous != parsed { return None }
+              None -> { found = Some(parsed) }
+            }
+          }
+        }
+        None -> return None
+      }
+    }
+  }
+  found
+}
+
+test "Content-Length accepts exact wire bounds and ASCII spelling variants" {
+  let suffix = "\r\nContent-Length: 0\r\n\r\n"
+  let exact = "X:" ++ str.repeat("a", HEADER_MAX_BYTES - 2 - str.len(suffix)) ++ suffix
+  assert str.len(exact) == HEADER_MAX_BYTES
+  assert parse_content_length(exact) == Some(0)
+  assert parse_content_length("X:a" ++ exact) == None
+
+  assert parse_content_length("Content-Length: 0\r\n\r\n") == Some(0)
+  assert parse_content_length("cOnTeNt-LeNgTh:\t 00042 \t\r\n\r\n") == Some(42)
+  assert parse_content_length("Content-Length: 67108864\r\n\r\n") == Some(67108864)
+  assert parse_content_length("Content-Length: 67108865\r\n\r\n") == None
+}
+
+test "Content-Length is unsigned ASCII decimal within Int range" {
+  for value in [
+    "", "+1", "-0", "1.0", "1e2", "1_0", "４",
+    "9223372036854775808", "2147483648"
+  ] {
+    assert parse_content_length("Content-Length: " ++ value ++ "\r\n\r\n") == None
+  }
+}
+
+test "duplicate Content-Length fields agree by parsed value" {
+  assert parse_content_length(
+    "Content-Length: 42\r\ncontent-length:\t00042 \t\r\n\r\n"
+  ) == Some(42)
+  assert parse_content_length(
+    "Content-Length: 42\r\nCONTENT-LENGTH: 43\r\n\r\n"
+  ) == None
+  assert parse_content_length(
+    "Content-Length: 42\r\nCONTENT-LENGTH: +42\r\n\r\n"
+  ) == None
+  assert parse_content_length("X-Test: value\r\n\r\n") == None
+}
+
+test "header lines require a nonempty ASCII token name" {
+  assert parse_content_length(
+    "X-Test: ignored\r\nContent-Length: 0\r\n\r\n"
+  ) == Some(0)
+  for line in ["NoColon", ": value", "Bad Name: value", "Bad(Name): value"] {
+    assert parse_content_length(line ++ "\r\nContent-Length: 0\r\n\r\n") == None
+  }
+}
+
+fn is_utf8_continuation(byte: Int) -> Bool = byte >= 0x80 && byte <= 0xBF
+
+## The public bytes decoder deliberately replaces malformed input. LSP JSON
+## must instead reject it, so validate the wire bytes before decoding without
+## changing the language-wide replacement contract.
+fn valid_utf8(raw: Bytes) -> Bool = {
+  let total = bytes.len(raw)
+  var index = 0
+  while index < total {
+    let first = bytes.at(raw, index)
+    if first <= 0x7F {
+      index = index + 1
+    } else if first >= 0xC2 && first <= 0xDF {
+      if index + 1 >= total || not is_utf8_continuation(bytes.at(raw, index + 1)) {
+        return false
+      }
+      index = index + 2
+    } else if first >= 0xE0 && first <= 0xEF {
+      if index + 2 >= total { return false }
+      let second = bytes.at(raw, index + 1)
+      let third = bytes.at(raw, index + 2)
+      let second_ok = if first == 0xE0 {
+        second >= 0xA0 && second <= 0xBF
+      } else if first == 0xED {
+        second >= 0x80 && second <= 0x9F
+      } else {
+        is_utf8_continuation(second)
+      }
+      if not second_ok || not is_utf8_continuation(third) { return false }
+      index = index + 3
+    } else if first >= 0xF0 && first <= 0xF4 {
+      if index + 3 >= total { return false }
+      let second = bytes.at(raw, index + 1)
+      let third = bytes.at(raw, index + 2)
+      let fourth = bytes.at(raw, index + 3)
+      let second_ok = if first == 0xF0 {
+        second >= 0x90 && second <= 0xBF
+      } else if first == 0xF4 {
+        second >= 0x80 && second <= 0x8F
+      } else {
+        is_utf8_continuation(second)
+      }
+      let rest_ok = is_utf8_continuation(third) && is_utf8_continuation(fourth)
+      if not second_ok || not rest_ok {
+        return false
+      }
+      index = index + 4
+    } else {
+      return false
+    }
+  }
+  true
+}
+
+fn bytes_of(values: List[Int]) -> Bytes = {
+  var out = bytes.buf()
+  for value in values { out = bytes.put(out, value) }
+  bytes.freeze(out)
+}
+
+test "LSP bodies require strict UTF-8 before replacement decoding" {
+  assert valid_utf8(bytes.utf8("\"plain 中😀�\""))
+  # Replacement decoding turns these bytes into the valid JSON string "�";
+  # accepting the decoded text would therefore hide an invalid wire body.
+  assert not valid_utf8(bytes_of([0x22, 0x80, 0x22]))
+  assert not valid_utf8(bytes_of([0xC0, 0xAF]))
+  assert not valid_utf8(bytes_of([0xED, 0xA0, 0x80]))
+  assert not valid_utf8(bytes_of([0xF4, 0x90, 0x80, 0x80]))
+  assert not valid_utf8(bytes_of([0xE2, 0x82]))
+}
+
+## The outcome of one read. `Malformed` is reserved for a complete, bounded
+## frame whose JSON body is bad and therefore leaves the next boundary known;
+## framing errors are fatal because their next byte cannot be trusted.
+type Frame = Eof | Message(value: Json) | Malformed(code: Int, why: String) | Fatal
 
 ## One framed message: headers to CRLFCRLF, then Content-Length bytes of JSON.
 fn read_message() -> Frame !io = {
   var header: List[Int] = []
   var state = 0
-  var eof = false
-  while state < 4 && not eof {
+  while state < 4 {
     let one = io.read_stdin(1)
     if bytes.len(one) == 0 {
-      eof = true
+      return if len(header) == 0 { Eof } else { Fatal }
     } else {
       let b = bytes.at(one, 0)
       header = header ++ [b]
@@ -595,30 +824,25 @@ fn read_message() -> Frame !io = {
       } else {
         state = if b == char.code('\r') { 1 } else { 0 }
       }
+      # Completion on byte 8192 is legal. Anything still incomplete at that
+      # point is fatal immediately; byte 8193 is never read or accumulated.
+      if state < 4 && len(header) >= HEADER_MAX_BYTES { return Fatal }
     }
   }
-  if eof { return Eof }
-  # header bytes are ASCII, so each byte is its own code point
+  # Preserve one code point per byte; Content-Length itself is ASCII-only.
   let htext = from_code_points(list.map(header, b => char_of_code(b)))
-  var clen = -1
-  for line in str.split(htext, "\n") {
-    let t = str.trim(line)
-    if str.starts_with(t, "Content-Length:") {
-      match parse_int(str.trim(str.strip_prefix(t, "Content-Length:").unwrap_or(t))) {
-        Some(n) -> { clen = n }
-        None -> ()
-      }
-    }
+  let clen = match parse_content_length(htext) {
+    Some(value) -> value
+    None -> return Fatal
   }
-  # No Content-Length: nothing to read for this frame, but the header block was
-  # consumed up to CRLFCRLF, so the stream is already at the next one.
-  if clen < 0 { return Malformed(-32600, "Invalid Request: missing Content-Length header") }
+  # The cap was checked by the pure parser before this call. Neither JVM's
+  # L2I nor native's allocation can therefore observe an unbounded value.
   let body = io.read_stdin(clen)
-  # A short body is genuinely end of input — the declared bytes are not coming.
-  if bytes.len(body) < clen { return Eof }
+  if bytes.len(body) < clen { return Fatal }
+  if not valid_utf8(body) { return Malformed(-32700, "Parse error: invalid UTF-8") }
   match parser.parse(bytes.decode_utf8(body)) {
     Ok(j) -> Message(j)
-    # exactly clen bytes were consumed, so the next frame starts where it should
+    # Exactly clen bytes were consumed, so the next frame starts where it should.
     Err(e) -> Malformed(-32700, "Parse error: " ++ e)
   }
 }

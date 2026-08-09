@@ -2053,6 +2053,27 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 | `dawnc fmt` / `doc` / `add` / `lsp` | 与 `dawn` 的同名子命令输出**逐字节一致**（`scripts/native-cli-diff.sh` 把这四件钉在 JVM 的字节上） |
 | `dawnc version` | 版本号（自报 `(native)`，故不与 `dawn --version` 逐字相同） |
 
+两个 `lsp` 子命令共用同一份 stdio framing。头部从首字节到 `CRLF CRLF` 最多
+8192 bytes：终止符恰好落在第 8192 byte 合法，到达上限仍未完成则立即拒绝。body 最多
+67108864 bytes。每个非空 header 行必须是 `1*tchar ":" field-value`；`tchar` 是 ASCII
+字母、数字，以及 `! # $ % & ' * + - . ^ _ | ~` 和反引号，所以无冒号、空字段名、字段名中的
+空格/括号等都属于 framing failure。语法正确的未知 header 可忽略。字段名 `Content-Length` 仅按 ASCII
+大小写不敏感比较；字段值只能是两端
+可有 SP/HTAB 的一个或多个 ASCII 十进制数字。空值、符号、小数、指数、下划线、Unicode
+数字、`Int` 溢出与超出 body 上限都非法；`0` 合法。重复字段仅在每次独立解析所得数值相同
+时合法，故前导零不构成冲突；任一副本非法或数值冲突都拒绝。
+
+body 必须是严格 UTF-8。完整且有界的 frame 若 UTF-8 或 JSON body 解析失败，server 回
+`-32700`、`id: null`，随后继续读下一帧；替换式 UTF-8 decoding 不得把非法 wire bytes
+修成合法 JSON。其他 framing failure（畸形/部分 header、部分 body、缺失/非法/冲突/超限
+长度、header 超限）统一只回一次下面的 parse error，并关闭读循环；失败后的字节不得再
+解释成新帧。零 header byte 的 clean EOF 静默退出。header 语法与长度必须在调用底层
+stdin read 之前完成上述校验。
+
+```json
+{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}
+```
+
 两个驱动各自解析 argv，但 target 基数是一份共同契约（TOOL-04）：
 
 | 子命令 | target / selector 基数 |

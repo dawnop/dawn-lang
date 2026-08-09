@@ -485,6 +485,13 @@ pair "add (invalid manifest)" add ../nowhere --dir "$BADTOML"
 echo "== lsp vs N-1, native backend =="
 DAWN_SELF="$DAWNC" ./scripts/selfhost-lsp-diff.sh
 
+# ---- leg 4b: raw LSP framing, native backend independently ----
+# The transcript above starts from valid frames and normalizes JSON. Run the
+# byte-level framing contract directly against the release artifact as well;
+# the ordinary gates run the same script against the JVM driver.
+echo "== lsp framing boundaries, native backend =="
+if LSP_FRAMING_LABEL=native ./scripts/lsp-framing.py "$DAWNC" lsp; then :; else fail=1; fi
+
 # ---- leg 5: lsp answers a client that has not closed the connection ----
 # selfhost-lsp-diff.sh writes the whole session, closes stdin and reads the
 # transcript at EOF, so it cannot see *when* a byte left the server — and a
@@ -867,4 +874,4 @@ PYEOF
 then :; else fail=1; fi
 
 [ "$fail" = 0 ] || { echo "FAIL: the native driver and the JVM driver disagree"; exit 1; }
-echo "OK: fmt/doc/add/lsp/test agree across both backends, native fmt/lsp match the previous release, both lsp servers answer mid-session, and the test reports account for themselves"
+echo "OK: fmt/doc/add/lsp/test agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, and the test reports account for themselves"
