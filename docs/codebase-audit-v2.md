@@ -1,7 +1,7 @@
 # Dawn 代码库精细审查 v2
 
 > 状态：**current** —— 保留 v0.60.0 / `86f6a0f63960` 的冻结审查基线，并以
-> `bfc358a6116303623a4968f8247689bcd5645793` 记录当前状态订正；详细证据在
+> `24d5d2fc7cd1e4dddb085c22aefb1ddf3907762a` 记录当前状态订正；详细证据在
 > `docs/codebase-audit-v2/`。
 >
 > 审查方式：六专题并行只读审查 + 主审去重、静态复核和少量无副作用探针。
@@ -9,7 +9,7 @@
 
 ## 1. 一句话结论
 
-Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 Dawn 集合与相当完整的门禁，旧审查中的两个 P0 和多项协议缺陷已经不再成立；v0.60.0 冻结基线记录 **1 个未动态验证的 P0 候选、29 个 P1、55 个 P2、12 个 P3**，该严重度表不随后续处置重写。到当前 HEAD，97 项的状态是 **56 fixed / 5 partial / 34 open / 2 retracted**；当前最高优先级是 LSP workspace/classpath、Cursor 契约裁决，以及四项尚未闭合的 P1 部分修复。
+Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 Dawn 集合与相当完整的门禁，旧审查中的两个 P0 和多项协议缺陷已经不再成立；v0.60.0 冻结基线记录 **1 个未动态验证的 P0 候选、29 个 P1、55 个 P2、12 个 P3**，该严重度表不随后续处置重写。截至 `24d5d2f`，97 项的状态是 **57 fixed / 5 partial / 33 open / 2 retracted**；当前最高优先级是 LSP workspace/classpath、Cursor 契约裁决，以及四项尚未闭合的 P1 部分修复。
 
 ## 2. 基线与口径
 
@@ -83,11 +83,12 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 （顺序均为已修/部分/开放）；各专题仍分别覆盖 19 / 17 / 12 / 17 / 19 / 13 项，
 与冻结总数一致且无重复、遗漏。
 
-### 截至当前 main（`bfc358a`）的订正状态层
+### 截至 SYN-12 验收基线（`24d5d2f`）的订正状态层
 
 > R-AUDIT 在 `bfc358a6116303623a4968f8247689bcd5645793` 逐一核对六份明细的 97 个 ID；
-> 本节是当前口径。上一个三状态快照不删除、不改写其 ID 清单；这里增加 `retracted`，把
-> “实现修好”与“复核后不再认定为缺陷”分开。
+> 此后 `38f625a` / `24d5d2f` 关闭 `SYN-12`，本节据此推进到该验收基线口径。上一个三状态快照
+> 不删除、不改写其 ID 清单；这里增加 `retracted`，把“实现修好”与“复核后不再认定为
+> 缺陷”分开。
 
 | 状态 | 当前含义 |
 |---|---|
@@ -96,9 +97,9 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（56）
+#### 当前 fixed（57）
 
-- 语法（11）：`SYN-01`–`SYN-03`、`SYN-06`–`SYN-08`、`SYN-10`、`SYN-14`、`SYN-15`、`SYN-18`、`SYN-19`。
+- 语法（12）：`SYN-01`–`SYN-03`、`SYN-06`–`SYN-08`、`SYN-10`、`SYN-12`、`SYN-14`、`SYN-15`、`SYN-18`、`SYN-19`。
 - 语义（8）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-11`、`SEM-12`、`SEM-15`、`SEM-17`。
 - 架构（4）：`ARC-03`–`ARC-06`。
 - 工具链（13）：`TOOL-01`–`TOOL-04`、`TOOL-07`–`TOOL-12`、`TOOL-15`–`TOOL-17`。
@@ -111,9 +112,9 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 工具链（1）：`TOOL-14`。
 - 库（1）：`LIB-10`。
 
-#### 当前 open（34）
+#### 当前 open（33）
 
-- 语法（8）：`SYN-04`、`SYN-05`、`SYN-09`、`SYN-11`、`SYN-12`、`SYN-13`、`SYN-16`、`SYN-17`。
+- 语法（7）：`SYN-04`、`SYN-05`、`SYN-09`、`SYN-11`、`SYN-13`、`SYN-16`、`SYN-17`。
 - 语义（7）：`SEM-04`、`SEM-07`、`SEM-09`、`SEM-10`、`SEM-13`、`SEM-14`、`SEM-16`。
 - 架构（5）：`ARC-07`–`ARC-10`、`ARC-12`。
 - 工具链（3）：`TOOL-05`、`TOOL-06`、`TOOL-13`。
@@ -124,11 +125,11 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**56 fixed + 5 partial + 34 open + 2 retracted = 97**。逐专题矩阵：
-语法 **11/0/8/0**、语义 **8/0/7/2**、架构 **4/3/5/0**、工具链 **13/1/3/0**、
+当前计数自检：**57 fixed + 5 partial + 33 open + 2 retracted = 97**。逐专题矩阵：
+语法 **12/0/7/0**、语义 **8/0/7/2**、架构 **4/3/5/0**、工具链 **13/1/3/0**、
 库 **8/1/10/0**、治理 **12/0/1/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
-`TOOL-14` fixed → partial、`SEM-05`/`SEM-08` retracted。
+`TOOL-14` fixed → partial、`SEM-05`/`SEM-08` retracted、`SYN-12` fixed。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -318,7 +319,7 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - workspace-level LSP + single dependency plan。
 - stable IDs 与 typed stage products；逐步退出 512 MB stack。
 
-### D. 当前订正顺序（`bfc358a`）
+### D. 当前订正顺序（`24d5d2f`）
 
 1. **先闭合仅剩的自治 open P1：** 合并推进 `TOOL-05` workspace snapshot 与 `TOOL-06`
    target-scoped Java classpath；二者共享 `SourcePlan`/workspace lifetime，拆开会制造第三份状态。
@@ -326,7 +327,7 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
    的 symbol edge/source origin；`LIB-10` 的 middleware 前 error response。
 3. **把 `SEM-04` 留给维护者裁决：** Cursor 是携带 owner 的值还是 generative identity，以及
    不同 owner 的 Eq/Ord 是否拒绝；裁决前只保留静态候选，不写 workaround。
-4. **低耦合自治批：** `SYN-11/12/16`、`SEM-07`，再按依赖推进 `SYN-04 → SYN-13` 与
+4. **低耦合自治批：** `SYN-11/16`、`SEM-07`，再按依赖推进 `SYN-04 → SYN-13` 与
    `SYN-09 → SYN-05`；`SYN-17` 只留在 D/P3 关键字预算设计队列。
 5. **类型化阶段产品：** `ARC-07` 后接 `ARC-08`，再以稳定 lowered identity 推进
    `ARC-11B/ARC-12`；不把 `ARC-09/10` 的 HOLD 项混入自治队列。

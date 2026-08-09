@@ -10,9 +10,9 @@
 - 审查期间主分支前进到 `86f6a0f6396084871b6d663fbf6092af66a3991a`（v0.60.0）。前两次提交只改版本号、双语规范版本标记、seed release 与 checksum；最后一次把 `jvmops/jvmhelp/lsp/lsp/front/dump` 重命名为 `ops/help/lsp/server/front/lexdump` 并更新引用，没有改变本报告评估的行为。
 - 最终引用均按 `86f6a0f63960` 复核并迁到新路径。并发代理没有编辑本报告文件；写报告前工作树为空。
 - 旧报告 `docs/codebase-audit.md` 的实现基线是 dawn 0.11.0。它继续保留历史价值，但不再作为当前风险台账。
-- 后续状态由 R-AUDIT 在 `bfc358a6116303623a4968f8247689bcd5645793` 对六份明细的
-  97 个 ID 逐项重算；冻结严重度与原始证据不改写，当前状态另分 fixed / partial / open /
-  retracted 四类。
+- 后续状态先由 R-AUDIT 在 `bfc358a6116303623a4968f8247689bcd5645793` 对六份明细的
+  97 个 ID 逐项重算，再计入 `38f625a` / `24d5d2f` 对 `SYN-12` 的关闭；冻结严重度与
+  原始证据不改写，当前状态另分 fixed / partial / open / retracted 四类。
 
 ## 2. 范围与分工
 
@@ -113,11 +113,11 @@ v0.60 冻结基线的最高风险项 `SEM-01` 只给出 **S / P0 候选**。遵�
 
 “已知”只能降低发现的新颖性，不能降低语义影响；“明确取舍”只有在规范、实现、工具和错误模型都一致时才可作为驳回理由。
 
-## 8. `bfc358a` 状态订正与撤回边界
+## 8. `24d5d2f` 状态订正与撤回边界
 
-当前状态必须与严重度分开读：严重度回答“v0.60 发现时若成立有多重”，状态回答“到当前
-HEAD 如何处置”。`retracted` 只用于后续复核认定原项不是缺陷，不能拿来包装“尚未实现”或
-“修了一半”。本轮逐 ID 结果为 **56 fixed / 5 partial / 34 open / 2 retracted = 97**。
+当前状态必须与严重度分开读：严重度回答“v0.60 发现时若成立有多重”，状态回答“到该验收
+基线如何处置”。`retracted` 只用于后续复核认定原项不是缺陷，不能拿来包装“尚未实现”或
+“修了一半”。本轮逐 ID 结果为 **57 fixed / 5 partial / 33 open / 2 retracted = 97**。
 
 - **`SEM-05` retracted。** `cursor.char -> Int` 与 `-1` sentinel 是规范明确列出的底层扫描
   例外，调用方使用 `done`/`char` 的前置条件也是有意的 scanner contract；`Char` 并未承诺取代
@@ -129,6 +129,11 @@ HEAD 如何处置”。`retracted` 只用于后续复核认定原项不是缺陷
   closure 偏好当成规范矛盾，应撤回而非“修复”。
 - **`SEM-01` fixed。** 后续动态复现确认其 soundness 风险，#188 删除错误 evidence
   subtraction 并收紧函数值效果边界；它从当前 P0 候选移出，但冻结 P0 行仍保留。
+- **`SYN-12` fixed。** 顶层 dispatch 与 recovery 已共用 typed declaration-head classifier；
+  完整 contextual `opaque type` 是恢复锚点，防止扫描跳过 `opaque` 后从其内部 `TYPE` 把声明
+  误解为普通 type/alias；非法 `opaque` 拼法不是锚点，扫描会继续并可在随后真正的 `fn` 等
+  声明头恢复，避免在无效 `opaque` 处额外停一次并产生级联 opaque 诊断。grammar fixture 与
+  可编译 mutant 已固定该边界。
 - **当前最高风险只记三项未验证静态候选：** `SYN-04` effectful guard 可能因 alternative
   重复求值、`SEM-04` comptime/runtime Cursor 偏移可能跨模型失配、`LIB-18` streaming clean
   truncation 可能静默成功。三者不新增 ID、不提升冻结严重度，也不冒称动态确认。

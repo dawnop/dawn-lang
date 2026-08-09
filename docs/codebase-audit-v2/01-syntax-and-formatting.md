@@ -119,7 +119,20 @@
 - **影响：** 每加 builtin 都要同步 parser/checker；遗漏改变 AST 和诊断，而不仅是少一个 hint。
 - **建议：** 移除 parser 的语义猜测，在 checker 的唯一 type registry 上生成 alias hint；或提供 front/check 共享的 generated inventory。
 
-## SYN-12 — P2 — declaration recovery 遗漏 contextual `opaque`
+## SYN-12 — P2 — declaration recovery 遗漏 contextual `opaque`（已由 `38f625a` / `24d5d2f` 处置）
+
+> **后续处置（2026-08-09）：已修。** `classify_top_decl` 以 typed declaration-head
+> classifier 同时驱动正常 dispatch 与 recovery，不再维护 hard-token 双表；完整
+> `opaque type` / `pub opaque type` 归为 `HOpaqueType` 恢复锚点，使扫描停在 `opaque`，不会
+> 跳过它后从内部 `TYPE` 把声明误解为普通 type/alias。非法 contextual 拼法 `HBadOpaque`
+> 则明确不是 recovery anchor：扫描会继续，并可在随后真正的 `fn` 等声明头恢复，避免在
+> 无效 `opaque` 处额外停一次并产生级联 opaque 诊断。parser tests 覆盖直接与恢复后的
+> `pub opaque type`、全部顶层声明头，以及 malformed `opaque` 后继续恢复且只保留原始
+> 诊断；grammar corpus 固定坏声明后仍保留 opaque declaration。
+> `scripts/syntax-small-contract/run.sh` 还会复制私有 selfhost、删除 `HOpaqueType` recovery
+> anchor，先要求 mutant 成功编译，再要求 owning parser test 转红。
+> Core 记录中 normalized 变化仅有 `front.parser`；exact 另见 `driver.analyze` 与
+> `pkg.manifestv`，二者是全局 ID 漂移，不是本刀新增行为面。
 
 - **证据：V。** `sync_decl` 声称与 `top_decl` anchors 一致，但只认硬 token：`selfhost/src/front/parser.dawn:174`；`opaque type` 实际由 `IDENT("opaque")` 特判：`selfhost/src/front/parser.dawn:199`。
 - **边界：** 前一坏声明后跟 `opaque type UserId = Int`，恢复会跳过 `opaque`，从 `type` 重启，并把后续合法声明误报成 alias 误写。
