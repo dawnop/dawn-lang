@@ -130,6 +130,25 @@
 
 ## SYN-15 — P2 — VS Code TextMate grammar 已落后于语言
 
+- **后续处置（2026-08-09，二审纠偏后）：已修。** 官方 grammar 已覆盖当前 Unicode
+  identifier（part 精确到 `Nd`）、raw/普通/三引号字符串、Char、两种插值、十六/二进制/
+  指数数字、range、`!Ask`、`!(io)`、`!(Ask)`、effect union，以及完整 operator token 集。
+  interpolation 使用不含 comment 的 code pattern，因此 `${x # local }` 中 `#` 不会吞掉
+  `}` 与同行后续。contract 从 `selfhost/src/front/token.dawn` 提取当前 29 个 hard keyword，
+  从 `TokKind` 与 `selfhost/src/front/lexer.dawn` 的 operator 表提取当前 30 个拼写；二者都与
+  grammar 的结构化 inventory 双向精确对账，再逐项交给真实 `vscode-textmate` +
+  `vscode-oniguruma` tokenization 验 scope。`java` 继续按硬 token 检查；contextual inventory
+  精确固定为 `opaque`、`as`、`derive`、`handle`，并同时固定语法位置、普通标识符位置及
+  `bogus` 非关键字。依赖以精确版本写入 package 与 lockfile，CI 使用独立 editor grammar
+  job。scope corpus 共 8 组、152 项 scope 断言；另对 15 组 operator prefix-overlap 逐对要求
+  长项排在短项之前，总计 167 项。hard 漏项/多项、contextual 漏项/多项、三引号、braced
+  interpolation、interpolation comment 边界、括号单 effect、Unicode `Nd` 边界、指数数字、
+  operator 漏项，以及 metadata inventory 与 regex 同步把短项前置，共 12 项持久负控均已
+  实跑见红后恢复。
+- **残余边界：** TextMate 是词法着色器，不承担 parser 合法性判断；除 hard keyword 外的
+  token 形状仍由 grammar 表达式维护，但现在由真实引擎语料约束，不再以 grep 代替行为测试。
+  仓内历史 `dawn-lang-0.1.0.vsix` 未在本刀重打包；发布扩展时仍须从当前源码重新 package。
+
 - **证据：S。** keyword 缺 `effect` 却全局高亮 contextual `derive`：`editors/vscode/syntaxes/dawn.tmLanguage.json:24`；effect 规则不识别 `!Ask`/union：`:42`；无 Char/triple string：`:52`；number 漏 `2e3`：`:69`；identifier 只认 ASCII：`:77`；operator 漏 `! & | ^ ~ @`：`:94`。
 - **影响：** 官方编辑器错误高亮当前有效源码；语言越快演进，手抄 grammar 越不可信。
 - **建议：** 从 lexer token/keyword inventory 生成大部分 TextMate 规则；至少增加一份包含每类当前 token 的 snapshot fixture。

@@ -1,0 +1,145 @@
+{
+  "why": "These cases exercise the official grammar through TextMate and Oniguruma so editor support cannot drift into a second, regex-only approximation of Dawn's lexer.",
+  "cases": [
+    {
+      "name": "unicode identifiers",
+      "source": "let café_变量2 = ΔValue\nlet λ = café_变量2\nlet 变量 = λ\nlet decimal_digit = foo٢\nlet superscript = foo²\nlet circled = foo①",
+      "expect": [
+        { "line": 0, "text": "café_变量2", "scope": "variable.other.dawn" },
+        { "line": 0, "text": "ΔValue", "scope": "entity.name.type.dawn" },
+        { "line": 1, "text": "λ", "scope": "variable.other.dawn" },
+        { "line": 2, "text": "变量", "scope": "variable.other.dawn" },
+        { "line": 3, "text": "foo٢", "scope": "variable.other.dawn" },
+        { "line": 4, "text": "foo", "scope": "variable.other.dawn" },
+        { "line": 4, "text": "²", "scope": "source.dawn", "notScope": "variable.other.dawn" },
+        { "line": 5, "text": "foo", "scope": "variable.other.dawn" },
+        { "line": 5, "text": "①", "scope": "source.dawn", "notScope": "variable.other.dawn" }
+      ]
+    },
+    {
+      "name": "contextual keywords",
+      "source": "opaque type UserId = Int\nuse alpha/beta as renamed\ntype Item = Item(Int)\nderive Eq, Hash\nwith handle Ask { perform() }\nwith handle <- make()\nlet opaque = as\nlet derive = handle\nuse java \"java.lang.String\"\nlet ordinary = bogus",
+      "expect": [
+        { "line": 0, "text": "opaque", "scope": "keyword.contextual.dawn" },
+        { "line": 1, "text": "as", "scope": "keyword.contextual.dawn" },
+        { "line": 3, "text": "derive", "scope": "keyword.contextual.dawn" },
+        { "line": 4, "text": "handle", "scope": "keyword.contextual.dawn" },
+        { "line": 5, "text": "handle", "scope": "variable.other.dawn", "notScope": "keyword.contextual.dawn" },
+        { "line": 6, "text": "opaque", "scope": "variable.other.dawn", "notScope": "keyword.contextual.dawn" },
+        { "line": 6, "text": "as", "scope": "variable.other.dawn", "notScope": "keyword.contextual.dawn" },
+        { "line": 7, "text": "derive", "scope": "variable.other.dawn", "notScope": "keyword.contextual.dawn" },
+        { "line": 7, "text": "handle", "scope": "variable.other.dawn", "notScope": "keyword.contextual.dawn" },
+        { "line": 8, "text": "java", "scope": "keyword.declaration.dawn", "notScope": "keyword.contextual.dawn" },
+        { "line": 9, "text": "bogus", "scope": "variable.other.dawn", "notScopes": ["keyword.declaration.dawn", "keyword.contextual.dawn"] }
+      ]
+    },
+    {
+      "name": "raw and normal strings",
+      "source": "let raw = `effect ${not_code} 2e3`\nlet normal = \"hello $名字 ${call(2e3)} \\n\"\nlet recovered = \"${x # local }\" ++ \"tail\"",
+      "expect": [
+        { "line": 0, "text": "effect", "scope": "string.quoted.raw.dawn", "notScope": "keyword.declaration.dawn" },
+        { "line": 0, "text": "${not_code}", "scope": "string.quoted.raw.dawn", "notScope": "meta.embedded.interpolation.dawn" },
+        { "line": 0, "text": "2e3", "scope": "string.quoted.raw.dawn", "notScope": "constant.numeric.float.dawn" },
+        { "line": 1, "text": "$名字", "scope": "meta.embedded.interpolation.simple.dawn" },
+        { "line": 1, "text": "名字", "scope": "variable.other.interpolation.dawn" },
+        { "line": 1, "text": "${", "scope": "punctuation.section.interpolation.begin.dawn" },
+        { "line": 1, "text": "call", "scope": "entity.name.function.call.dawn" },
+        { "line": 1, "text": "2e3", "scope": "constant.numeric.float.dawn" },
+        { "line": 1, "text": "\\n", "scope": "constant.character.escape.dawn" },
+        { "line": 2, "text": "#", "scope": "meta.embedded.interpolation.dawn", "notScope": "comment.line.number-sign.dawn" },
+        { "line": 2, "text": "}", "scope": "punctuation.section.interpolation.end.dawn" },
+        { "line": 2, "text": "++", "scope": "keyword.operator.dawn" },
+        { "line": 2, "text": "\"tail\"", "scope": "string.quoted.double.dawn" }
+      ]
+    },
+    {
+      "name": "triple strings and interpolation",
+      "source": "let triple = \"\"\"\n  hello $名字 ${call({0x2A})}\n  tail\n\"\"\"",
+      "expect": [
+        { "line": 0, "text": "\"\"\"", "scope": "string.quoted.triple.dawn" },
+        { "line": 1, "text": "$名字", "scope": "meta.embedded.interpolation.simple.dawn" },
+        { "line": 1, "text": "${", "scope": "punctuation.section.interpolation.begin.dawn" },
+        { "line": 1, "text": "{", "occurrence": 1, "scope": "meta.braces.interpolation.dawn" },
+        { "line": 1, "text": "0x2A", "scope": "constant.numeric.hex.dawn" },
+        { "line": 3, "text": "\"\"\"", "scope": "string.quoted.triple.dawn" }
+      ]
+    },
+    {
+      "name": "character literals",
+      "source": "let chars = ['界', '\\n', '\\u{1F642}']",
+      "expect": [
+        { "line": 0, "text": "'界'", "scope": "string.quoted.single.dawn" },
+        { "line": 0, "text": "\\n", "scope": "constant.character.escape.dawn" },
+        { "line": 0, "text": "\\u{1F642}", "scope": "constant.character.escape.dawn" }
+      ]
+    },
+    {
+      "name": "numeric forms and range",
+      "source": "let ints = [0, 1_000, 0xCA_FE, 0b1010_0011]\nlet floats = [2e3, 1.5e-2]\nlet range = 0..3",
+      "expect": [
+        { "line": 0, "text": "0", "scope": "constant.numeric.integer.dawn" },
+        { "line": 0, "text": "1_000", "scope": "constant.numeric.integer.dawn" },
+        { "line": 0, "text": "0xCA_FE", "scope": "constant.numeric.hex.dawn" },
+        { "line": 0, "text": "0b1010_0011", "scope": "constant.numeric.binary.dawn" },
+        { "line": 1, "text": "2e3", "scope": "constant.numeric.float.dawn" },
+        { "line": 1, "text": "1.5e-2", "scope": "constant.numeric.float.dawn" },
+        { "line": 2, "text": "0", "scope": "constant.numeric.integer.dawn" },
+        { "line": 2, "text": "..", "scope": "keyword.operator.dawn" },
+        { "line": 2, "text": "3", "scope": "constant.numeric.integer.dawn" }
+      ]
+    },
+    {
+      "name": "effect annotations",
+      "source": "fn reads() -> Unit !io = ()\nfn asks() -> Int !Ask = 0\nfn both() -> Unit !(io | Ask) = ()\nfn wrapped_io() -> Unit !(io) = ()\nfn wrapped_ask() -> Int !(Ask) = 0",
+      "expect": [
+        { "line": 0, "text": "!", "scope": "storage.modifier.effect.dawn" },
+        { "line": 0, "text": "io", "scope": "entity.name.type.effect.dawn" },
+        { "line": 1, "text": "!", "scope": "storage.modifier.effect.dawn" },
+        { "line": 1, "text": "Ask", "scope": "entity.name.type.effect.dawn" },
+        { "line": 2, "text": "!(", "scope": "meta.effect.annotation.dawn" },
+        { "line": 2, "text": "io", "scope": "entity.name.type.effect.dawn" },
+        { "line": 2, "text": "|", "scope": "keyword.operator.effect.union.dawn" },
+        { "line": 2, "text": "Ask", "scope": "entity.name.type.effect.dawn" },
+        { "line": 3, "text": "!(", "scope": "meta.effect.annotation.dawn" },
+        { "line": 3, "text": "io", "occurrence": 1, "scope": "entity.name.type.effect.dawn" },
+        { "line": 4, "text": "!(", "scope": "meta.effect.annotation.dawn" },
+        { "line": 4, "text": "Ask", "scope": "entity.name.type.effect.dawn" }
+      ]
+    },
+    {
+      "name": "operators",
+      "source": "let shifts = a << b >> c >>> d\nlet logic = a < b > c == d != e <= f >= g && h || i\nlet math = a + b - c * d / e % f ++ g\nlet bits = a & b | c ^ ~d\nlet pipe = a |> f\nlet tagged = @tag value! ? other\nwith item <- next()\nlet arrow = x => x\nfn returns() -> Int = 0\nlet assigned = value = other",
+      "expect": [
+        { "line": 0, "text": "<<", "scope": "keyword.operator.dawn" },
+        { "line": 0, "text": ">>", "scope": "keyword.operator.dawn" },
+        { "line": 0, "text": ">>>", "scope": "keyword.operator.dawn" },
+        { "line": 1, "text": "<", "scope": "keyword.operator.dawn" },
+        { "line": 1, "text": ">", "scope": "keyword.operator.dawn" },
+        { "line": 1, "text": "==", "scope": "keyword.operator.dawn" },
+        { "line": 1, "text": "!=", "scope": "keyword.operator.dawn" },
+        { "line": 1, "text": "<=", "scope": "keyword.operator.dawn" },
+        { "line": 1, "text": ">=", "scope": "keyword.operator.dawn" },
+        { "line": 1, "text": "&&", "scope": "keyword.operator.dawn" },
+        { "line": 1, "text": "||", "scope": "keyword.operator.dawn" },
+        { "line": 2, "text": "+", "scope": "keyword.operator.dawn" },
+        { "line": 2, "text": "-", "scope": "keyword.operator.dawn" },
+        { "line": 2, "text": "*", "scope": "keyword.operator.dawn" },
+        { "line": 2, "text": "/", "scope": "keyword.operator.dawn" },
+        { "line": 2, "text": "%", "scope": "keyword.operator.dawn" },
+        { "line": 2, "text": "++", "scope": "keyword.operator.dawn" },
+        { "line": 3, "text": "&", "scope": "keyword.operator.dawn" },
+        { "line": 3, "text": "|", "scope": "keyword.operator.dawn" },
+        { "line": 3, "text": "^", "scope": "keyword.operator.dawn" },
+        { "line": 3, "text": "~", "scope": "keyword.operator.dawn" },
+        { "line": 4, "text": "|>", "scope": "keyword.operator.dawn" },
+        { "line": 5, "text": "@", "scope": "keyword.operator.dawn" },
+        { "line": 5, "text": "!", "scope": "keyword.operator.dawn" },
+        { "line": 5, "text": "?", "scope": "keyword.operator.dawn" },
+        { "line": 6, "text": "<-", "scope": "keyword.operator.dawn" },
+        { "line": 7, "text": "=>", "scope": "keyword.operator.dawn" },
+        { "line": 8, "text": "->", "scope": "keyword.operator.dawn" },
+        { "line": 9, "text": "=", "scope": "keyword.operator.dawn" }
+      ]
+    }
+  ]
+}

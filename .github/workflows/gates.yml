@@ -39,6 +39,25 @@ jobs:
       - name: no server identity in the repo
         run: python3 scripts/check-no-server-identity.py
 
+  # The extension grammar is editor behavior, not documentation. Exercise it
+  # with VS Code's TextMate engine and Oniguruma WASM in a standalone job so a
+  # broken scope rule cannot hide behind the compiler toolchain setup.
+  editor-grammar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: VS Code TextMate scope contract
+        working-directory: editors/vscode
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test --silent
+
   test:
     runs-on: ubuntu-latest
     # Every timeout in this file is roughly 3x the job's own measured wall
