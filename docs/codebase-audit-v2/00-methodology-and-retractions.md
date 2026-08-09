@@ -113,11 +113,11 @@ v0.60 冻结基线的最高风险项 `SEM-01` 只给出 **S / P0 候选**。遵�
 
 “已知”只能降低发现的新颖性，不能降低语义影响；“明确取舍”只有在规范、实现、工具和错误模型都一致时才可作为驳回理由。
 
-## 8. `24d5d2f` 状态订正与撤回边界
+## 8. `60e174a` 状态订正与撤回边界
 
 当前状态必须与严重度分开读：严重度回答“v0.60 发现时若成立有多重”，状态回答“到该验收
 基线如何处置”。`retracted` 只用于后续复核认定原项不是缺陷，不能拿来包装“尚未实现”或
-“修了一半”。本轮逐 ID 结果为 **57 fixed / 5 partial / 33 open / 2 retracted = 97**。
+“修了一半”。本轮逐 ID 结果为 **58 fixed / 5 partial / 32 open / 2 retracted = 97**。
 
 - **`SEM-05` retracted。** `cursor.char -> Int` 与 `-1` sentinel 是规范明确列出的底层扫描
   例外，调用方使用 `done`/`char` 的前置条件也是有意的 scanner contract；`Char` 并未承诺取代
@@ -134,6 +134,12 @@ v0.60 冻结基线的最高风险项 `SEM-01` 只给出 **S / P0 候选**。遵�
   误解为普通 type/alias；非法 `opaque` 拼法不是锚点，扫描会继续并可在随后真正的 `fn` 等
   声明头恢复，避免在无效 `opaque` 处额外停一次并产生级联 opaque 诊断。grammar fixture 与
   可编译 mutant 已固定该边界。
+- **`SYN-16` fixed。** 裸 `return` 现在只委托给专用 `is_bare_return_boundary`：在原有
+  NEWLINE、`}`、`)`、`,`、EOF 集合上精确补入 `]`，没有泛化到 colon、arrow 或通用
+  expression terminator。`(return)`、`[return]`、`f(return)`、`(return, 1)`、`{ return }`
+  五种形状均由 parser fixture 固定；checker 仍会拒绝 `Int` 返回函数中的裸 `return`。与
+  `SYN-12` 共用的组合 contract 里，`drop-rbracket-return-boundary` mutant 先成功编译，再由
+  owning parser test 转红；normalized Core 仅 `front.parser` 改变。
 - **当前最高风险只记三项未验证静态候选：** `SYN-04` effectful guard 可能因 alternative
   重复求值、`SEM-04` comptime/runtime Cursor 偏移可能跨模型失配、`LIB-18` streaming clean
   truncation 可能静默成功。三者不新增 ID、不提升冻结严重度，也不冒称动态确认。

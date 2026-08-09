@@ -184,10 +184,21 @@
 
 ## SYN-16 — P3 — 裸 `return` 的终止符遗漏 `]`
 
+- **后续处置（2026-08-09，`79df07f` / `60e174a`）：已修。** parser 新增专用
+  `is_bare_return_boundary`，只在既有 NEWLINE、`}`、`)`、`,`、EOF 边界上补入 `]`；没有把
+  colon、arrow 纳入，也没有把不同 production 的停止集合泛化成通用 expression terminator。
+  parser test 与 grammar fixture 精确覆盖 `(return)`、`[return]`、`f(return)`、
+  `(return, 1)`、`{ return }` 五种语法形状；`fn wrong() -> Int = [return]` 仍由 checker 的
+  return-type 规则拒绝。与 `SYN-12` 共用的 `syntax-small-contract` 同时固定两项边界；
+  `drop-rbracket-return-boundary` mutant 在私有 selfhost 中先成功编译，再由 owning test
+  `bare return stops at every delimiter boundary` 转红。normalized Core 仅 `front.parser` 改变。
+- **方案裁决：** 原建议中的“统一 expression-terminator predicate”未采用；专用 exact
+  predicate 既消除 `return` 分支内的散落条件，也不把本 production 的边界误推广到其他语法。
 - **证据：V。** parser 只把 NEWLINE、`}`、`)`、`,`、EOF 当裸 return 边界：`selfhost/src/front/parser.dawn:1647`。
 - **边界：** `(return)` 可解析，`[return]` 却在 `]` 报 expected expression。
 - **冲突：** 规范把 `return` 定义为 `Never` expression，可出现在表达式位置：`docs/spec.md:843`。
-- **建议：** 加入 `RBRACKET`，并用统一的 expression-terminator predicate 避免下一种容器再漏。
+- **原建议：** 加入 `RBRACKET`，并用统一的 expression-terminator predicate 避免下一种容器再漏；
+  前半已落地，后半因不同 production 的停止集合并不相同而明确拒绝。
 
 ## SYN-17 — P3 — `java` 是全局硬关键字
 
