@@ -432,7 +432,71 @@ fn doc_diags(d: Doc) -> List[Diag] = {
   out
 }
 
-type LspState = { std: StdCtx, bins: Map[String, Sig], docs: Map[String, Doc], jsig: Jsig }
+type Lifecycle = PreInit | Running | Shutdown
+
+type LifecycleGate =
+  | LgActivate
+  | LgDispatch
+  | LgBeginShutdown
+  | LgReject(code: Int, message: String)
+  | LgIgnore
+  | LgExit(code: Int)
+
+type LspState = {
+  std: StdCtx,
+  bins: Map[String, Sig],
+  docs: Map[String, Doc],
+  jsig: Jsig,
+  lifecycle: Lifecycle
+}
+
+fn has_request_id(msg: Json) -> Bool =
+  match oget(msg, "id") {
+    Some(_) -> true
+    None -> false
+  }
+
+const ABNORMAL_EXIT_STATUS: Int = 1
+
+fn lifecycle_gate(lifecycle: Lifecycle, msg: Json) -> LifecycleGate = {
+  let method = ostr(msg, "method")
+  let request = has_request_id(msg)
+  match lifecycle {
+    PreInit -> {
+      if method == "exit" && not request {
+        LgExit(ABNORMAL_EXIT_STATUS)
+      } else if method == "initialize" && request {
+        LgActivate
+      } else if request {
+        LgReject(-32002, "Server not initialized")
+      } else {
+        LgIgnore
+      }
+    }
+    Running -> {
+      if method == "exit" && not request {
+        LgExit(ABNORMAL_EXIT_STATUS)
+      } else if method == "exit" && request {
+        LgReject(-32600, "Invalid Request")
+      } else if method == "initialize" {
+        if request { LgReject(-32600, "Invalid Request") } else { LgIgnore }
+      } else if method == "shutdown" {
+        if request { LgBeginShutdown } else { LgIgnore }
+      } else {
+        LgDispatch
+      }
+    }
+    Shutdown -> {
+      if method == "exit" && not request {
+        LgExit(0)
+      } else if request {
+        LgReject(-32600, "Invalid Request")
+      } else {
+        LgIgnore
+      }
+    }
+  }
+}
 
 # ---- the server loop ----
 
@@ -445,7 +509,13 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
-  var st = LspState { std: std, bins: builtins(), docs: map.empty(), jsig: js }
+  var st = LspState {
+    std: std,
+    bins: builtins(),
+    docs: map.empty(),
+    jsig: js,
+    lifecycle: PreInit
+  }
   # The newest text of the one document whose analysis has not run yet.
   #
   # At most one, and that is what makes deferring the work invisible: an
@@ -454,8 +524,8 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
   # the same document coalesce — which is the whole point, since `didChange`
   # is Full sync and each one supersedes the last.
   var pending: Option[(String, String)] = None
-  var running = true
-  while running {
+  var serving = true
+  while serving {
     # Three branches, and the third is what makes the second safe. Readiness
     # never reports end of input (std/io.stdin_ready says why), so a loop that
     # only ever waited on it would spin the moment its client went away. With
@@ -467,30 +537,57 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
     }
     if take {
       match read_message() {
-        Eof -> { running = false }
-        Message(msg) ->
-          match update_of(msg) {
-            Some(u) -> {
-              let (uri, text) = u
-              match pending {
-                Some(p0) -> {
-                  let (uri0, _) = p0
-                  if uri0 != uri { st = flush(st, pending) }
-                }
-                None -> ()
-              }
-              pending = Some((uri, text))
-            }
-            # Anything else may read the analysed program or write about it,
-            # so the deferred work has to have happened first. That is also
-            # why the deferral is not observable: every answer about a
-            # document passes this point.
-            None -> {
-              st = flush(st, pending)
-              pending = None
+        Eof -> { serving = false }
+        Message(msg) -> {
+          let gate = lifecycle_gate(st.lifecycle, msg)
+          match gate {
+            LgActivate -> {
+              st = LspState { ..st, lifecycle: Running }
               st = handle(st, msg)
             }
+            LgDispatch ->
+              match update_of(msg) {
+                Some(u) -> {
+                  let (uri, text) = u
+                  match pending {
+                    Some(p0) -> {
+                      let (uri0, _) = p0
+                      if uri0 != uri { st = flush(st, pending) }
+                    }
+                    None -> ()
+                  }
+                  pending = Some((uri, text))
+                }
+                # Anything else may read the analysed program or write about it,
+                # so the deferred work has to have happened first. That is also
+                # why the deferral is not observable: every answer about a
+                # document passes this point.
+                None -> {
+                  st = flush(st, pending)
+                  pending = None
+                  st = handle(st, msg)
+                }
+              }
+            LgBeginShutdown -> {
+              pending = None
+              st = LspState { ..st, lifecycle: Shutdown }
+              st = handle(st, msg)
+            }
+            LgReject(code, message) -> {
+              let id = match oget(msg, "id") {
+                Some(value) -> value
+                None -> JNull
+              }
+              respond_error(id, code, message)
+            }
+            LgIgnore -> ()
+            LgExit(code) -> {
+              pending = None
+              let _ = io.exit(code)
+              serving = false
+            }
           }
+        }
         # The declared body was read in full, so malformed JSON leaves the next
         # frame boundary known and the session can continue.
         Malformed(code, why) -> {
@@ -506,7 +603,7 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
           pending = None
           send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
             ("error", jobj([("code", JInt(-32700)), ("message", JStr("Parse error"))]))]))
-          running = false
+          serving = false
         }
       }
     } else {
@@ -856,6 +953,13 @@ fn send(j: Json) -> Unit !io = {
 fn respond(id: Json, result: Json) -> Unit !io =
   send(jobj([("jsonrpc", JStr("2.0")), ("id", echo_id(id)), ("result", result)]))
 
+fn respond_error(id: Json, code: Int, message: String) -> Unit !io =
+  send(jobj([
+    ("jsonrpc", JStr("2.0")),
+    ("id", echo_id(id)),
+    ("error", jobj([("code", JInt(code)), ("message", JStr(message))]))
+  ]))
+
 fn notify(method: String, params: Json) -> Unit !io =
   send(jobj([("jsonrpc", JStr("2.0")), ("method", JStr(method)), ("params", params)]))
 
@@ -909,15 +1013,9 @@ fn handle(st0: LspState, msg: Json) -> LspState !io = {
     respond(id, handle_formatting(st, params))
   } else if method == "shutdown" {
     respond(id, JNull)
-  } else if method == "exit" {
-    io.exit(0)
   } else {
     # a request we do not implement: MethodNotFound; notifications are ignored
-    let has_id = match oget(msg, "id") {
-      Some(_) -> true
-      None -> false
-    }
-    if has_id {
+    if has_request_id(msg) {
       send(jobj([("jsonrpc", JStr("2.0")), ("id", echo_id(id)),
         ("error", jobj([
           ("code", JInt(-32601)),

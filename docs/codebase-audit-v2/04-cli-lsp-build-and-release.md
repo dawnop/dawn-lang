@@ -7,7 +7,7 @@
 ## 本专题结论
 
 - 对用户最危险的是 `dawn check` 假绿与 `dawn fmt` 对任意文件原地写回；两者都是默认接口语义，而不是隐藏调试命令的小问题。
-- LSP 已有 debounce、URI/UTF-8 修复、跨后端前端与有界 framing，但仍缺 workspace snapshot、工程 Java classpath 与 lifecycle state，尚不适合把“与 build 一致”作为承诺。
+- LSP 已有 debounce、URI/UTF-8 修复、跨后端前端、有界 framing 与 lifecycle state，但仍缺 workspace snapshot 和工程 Java classpath，尚不适合把“与 build 一致”作为承诺。
 - 包/自举链的问题集中在**一件事有两张图或两份身份**：source graph vs Java graph、artifact coordinate vs basename、seed jar vs seed std、gate recipe vs release recipe。
 
 ## TOOL-01 — P1 — `dawn check` 有诊断仍退出 0
@@ -77,11 +77,13 @@
   gate 跑 JVM，`scripts/native-cli-diff.sh` 另以 native release 形状 binary 跑独立 leg。完整理由见
   [`lsp-framing-design.md`](../lsp-framing-design.md)。
 
-## TOOL-08 — P2 — LSP 没有 initialize/shutdown 状态机
+## TOOL-08 — P2 — LSP 没有 initialize/shutdown 状态机（已修）
 
-- **证据：S。** `LspState` 无 lifecycle state：`selfhost/src/lsp/server.dawn:435`；`shutdown` 只回 response：`:686`，`exit` 无条件 status 0：`:688`。
-- **影响：** shutdown 后仍回答普通 request；未 shutdown 的 abnormal exit 也被报告为正常，影响 editor restart/fault detection。
-- **建议：** `PreInit | Running | Shutdown`；shutdown 后只接受 exit，未 shutdown 的 exit 使用非零状态。
+- **原证据：S。** `LspState` 没有 lifecycle state；`shutdown` 只回 response，`exit` 无条件 status 0，因此 shutdown 后仍回答普通 request，未 shutdown 的异常退出也被编辑器误认成正常。
+- **当前契约：** `PreInit` 只接受带 id 的 `initialize` request，其他 request 回 `-32002`，notification 丢弃，`exit` 为 status 1；`Running` 拒绝重复 initialize，shutdown notification 不迁移状态，只有 shutdown request 进入 `Shutdown`；`Shutdown` 只接受 exit 并以 status 0 结束，request 回 `-32600`，notification 丢弃。
+- **实现：** `Lifecycle = PreInit | Running | Shutdown` 与纯 `lifecycle_gate` 位于 `selfhost/src/lsp/server.dawn:435`、`:461`；主循环在 `update_of`、pending flush 与 `update_doc` 分析前先执行 gate：`:542`、`:549`。进入 shutdown 的分支先丢弃 pending 再回应：`:571`，所以最后一次 `didChange` 不会在 shutdown/exit 前发布 diagnostics。clean EOF 与 fatal framing 分支保持原边界。
+- **门禁：** `scripts/lsp-lifecycle.py` 的七类真实会话覆盖初始化前 request/notification、重复 initialize、shutdown notification、shutdown 后 request、初始化前/运行中异常 exit、正常 exit 与 pending 丢弃；`scripts/lsp-lifecycle-contract/run.sh` 的五个私有 selfhost mutant 分别把 gate 移到 update 后、异常 exit 改 0、shutdown 后继续服务、shutdown 前 flush、重复 initialize 放行，均成功编译运行并由目标会话见红。`scripts/lsp-framing.py` 的前导零合法值改用 initialize request，不再用初始化前 shutdown 伪造 framing 正例。
+- **结论：已修。** 生命周期消息不能再绕过 gate 触发 document update、pending analysis 或普通 request dispatch；合法 shutdown/exit 与异常提前退出有可区分的 process status。
 
 ## TOOL-09 — P1 — origin guard 会给预置的伪造 cache “祝圣”
 

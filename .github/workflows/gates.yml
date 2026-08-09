@@ -355,6 +355,11 @@ jobs:
       - name: lsp framing boundaries and fatal recovery
         run: ./scripts/lsp-framing.py
 
+      # Lifecycle messages gate document updates and pending analysis: no open
+      # buffer may become observable before initialize or after shutdown.
+      - name: lsp lifecycle sequencing and mutants
+        run: ./scripts/lsp-lifecycle-contract/run.sh
+
       # `use`-line completion, against the tree it describes. The transcript
       # gate cannot assert this (it compares against a release that has no such
       # feature) and liveness reads no payloads, so without this the answers
@@ -437,6 +442,13 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: checker diagnostic corpus
         run: ./scripts/checker-corpus/run.sh
+
+      # SEM-06: an erased Java Object must not acquire a hidden CHECKCAST just
+      # because an overload wants a concrete reference. The contract also
+      # compiles the safe widening/Bytes/SAM/List paths and runs both source
+      # mutants, including the structurally forbidden backend fallback.
+      - name: Java narrowing contract
+        run: ./scripts/java-narrowing-contract/run.sh
 
   # TEST-04: the documentation's own examples, links and anchors. The audit
   # found a wrong README example, an install command that did not run and an

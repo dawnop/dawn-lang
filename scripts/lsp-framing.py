@@ -555,12 +555,12 @@ def main():
     run_check(results, "zero length is recoverable JSON", lambda:
               expect_recovery(cmd, b"", zero_id))
 
-    shutdown = json_body({"id": 42, "method": "shutdown"})
-    shutdown += b" " * (42 - len(shutdown))
-    run_check(results, "leading-zero length", lambda: expect_frames(
+    leading_zero_initialize = initialize(42)
+    run_check(results, "leading-zero length", lambda: expect_initialize(
         cmd,
-        frame(shutdown, value="00042", name=b"cOnTeNt-LeNgTh"),
-        [{"jsonrpc": "2.0", "id": 42, "result": None}],
+        frame(leading_zero_initialize, value="%05d" % len(leading_zero_initialize),
+              name=b"cOnTeNt-LeNgTh"),
+        42,
     ))
 
     bad_values = [
