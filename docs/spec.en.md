@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 0ee06426f8745862 -->
+<!-- doc-check: translation-of docs/spec.md @ 0a3ece2fc96e45b4 -->
 
 # Dawn Language Specification
 
@@ -8,7 +8,7 @@
 > When the implementation conflicts with this document, this document wins and the implementation
 > is a bug — unless some clause here is explicitly marked "superseded by X".
 >
-> The title read "v0.1 draft" for a long time; by the day that was changed the toolchain had
+> The title read "v0.1 draft" for a long time; by the day that was changed the toolchain had<!-- doc-check: historical-v0-1 -->
 > already reached 0.11. A document that calls itself a draft cannot act as a judge, and this is
 > the only document in the repository qualified to judge disputes about semantics. The version
 > number follows `VERSION`; it is no longer numbered separately.
@@ -20,7 +20,7 @@ as a reference, not as a judge. When the grammar is in dispute, this document an
 `selfhost/src/front/parser.dawn` win; the executable expectations live in `scripts/grammar-corpus/`.
 
 Wording of this specification: **must** (violating it is a compile error), **guaranteed**
-(behaviour the implementation promises), **undefined** (not promised in v0.1; do not rely on it).
+(behaviour the implementation promises), **undefined** (not promised by this specification; do not rely on it).
 
 ---
 
@@ -29,7 +29,7 @@ Wording of this specification: **must** (violating it is a compile error), **gua
 ### 1.1 Source files
 
 - UTF-8 encoded, extension `.dawn`.
-- One file is one module (see §11).
+- One file is one module (see §10).
 
 ### 1.2 Comments
 
@@ -76,9 +76,10 @@ true false not
 ```
 
 Keywords cannot be used as identifiers. `panic` and `todo` are built-in functions, not keywords.
-There are three further **contextual keywords**, which remain ordinary identifiers elsewhere:
+There are four further **contextual keywords**, which remain ordinary identifiers elsewhere:
 `derive` (only at the tail of a `type` declaration), `as` (only in the renaming position of `use`,
-§10.2), and `handle` (after `with`, when the next token is not `<-`, §6.5).
+§10.2), `handle` (after `with`, when the next token is not `<-`, §6.5), and `opaque` (only directly
+before `type`, where it introduces an opaque type, §2.7).
 
 **Symbol tokens take the longest match** (as with `>>>`/`>=`/`->`/`|>`). The binding arrow `<-` of
 the `with` statement (§4.10) follows the same rule: `a<-b` reads as `a <- b`, not `a < (-b)`. The
@@ -337,7 +338,7 @@ the field, bind it first with `let g = r.f`; to call the function, name it direc
   `fn map[T, U](xs: List[T], f: fn(T) -> U !e) -> List[U] !e`
 - Monomorphism: type parameters must be fully inferable at every call site; higher-kinded types
   (HKT) are not supported.
-- Implemented as erasure + boxing (v0.1); monomorphisation is left as a later optimisation and does
+- Implemented as erasure + boxing; monomorphisation is an optional later optimisation and does
   not affect semantics.
 - **No subtyping, no inheritance, no variance.** Types are either equal or different.
 - A local annotation inside a function body may refer to the signature's type parameters
@@ -451,7 +452,7 @@ target type's; the orphan rule counts an opaque type as a local type of the modu
 ## 3. Declarations
 
 Only these are allowed at module top level: `use`, `type` (including `opaque type`), `alias`,
-`const`, `fn`, `test`, `trait`, `impl`. There is no top-level mutable state.
+`const`, `fn`, `test`, `trait`, `impl`, `effect`. There is no top-level mutable state.
 
 ### 3.1 Functions
 
@@ -465,15 +466,21 @@ fn greet(name: String) -> Unit !io = {
 
 - **Parameter types must be written out in full** (for every function); a `pub fn` must write
   the return type as well — a public signature is an API contract.
-- **A private function may omit the return type**: `fn double(x: Int) = x * 2`. When it is
-  omitted, both the return type and the effects are inferred from the body (write `!io` anyway
-  if you want to force the effect). Three kinds of function **must** annotate the return type:
+- **A private function may omit the return type**: `fn double(x: Int) = x * 2`. The body then
+  determines the return type; if every effect annotation is omitted too, the base effect is
+  determined on that same inference path. Three kinds of function **must** annotate the return type:
   (1) `pub`; (2) recursive / mutually recursive ones (the compiler infers in topological order
   over the call graph, and on a cycle there is nothing to infer from); (3) ones whose body uses
   `return` or `?` (both need a known return type).
-- A function that does write `-> T` keeps the original rule: omitting the effect means pure, and
-  **io appearing in the body while the signature does not declare it is an error** — the
-  signature is a promise.
+- **The base effect is inferred only in the double-omission form**: only a private function that
+  **omits both its return type and every effect annotation** has its return type and base effect
+  (pure / `!io`) inferred from the body. Writing `-> T` while omitting the effect annotation is a
+  `pure` promise, not a request for inference; performing IO in that body is an error. If the return
+  type is omitted but an effect row is written, only the return type is inferred and the written row
+  stays fixed. Named effects are never inferred and must be declared explicitly; once any named
+  effect is written, the whole effect row is a fixed promise and io is not added automatically. For
+  example, a function declared `!Ask` that also performs IO must write `!(io | Ask)`; `!Ask` alone
+  is an error.
 - The function body is the single expression after `=`; a block `{ }` is an expression too (§4.2).
 - Default parameter values exist (below); no varargs, no overloading.
 
@@ -548,7 +555,7 @@ pure and reducible to a constant.
 ### 3.3 Visibility
 
 All declarations are module-private by default; `pub` exports. `pub` can be used on `fn`, `type`,
-`alias`, `const`. `pub type` exports its constructors and fields as well.
+`alias`, `const`, `trait`, `effect`. `pub type` exports its constructors and fields as well.
 
 ### 3.4 Test blocks
 
@@ -1278,7 +1285,7 @@ difference of finite sets.
    compile error (the error points out which call introduced io, and suggests adding `!io` to
    the signature or eliminating that call).
 3. Marked `!io` but the body is pure → allowed (room reserved for evolution); a "redundant `!io`"
-   lint needs type analysis, and v0.1's `dawn fmt --check` only checks formatting — that hint is
+   lint needs type analysis, and the current `dawn fmt --check` only checks formatting — that hint is
    **not implemented** (left for later).
 4. A pure function is **guaranteed**: same arguments return the same value, no observable side
    effects. The compiler may fold it, deduplicate it, and call it at comptime on that basis.
@@ -1399,14 +1406,14 @@ effect State {
 
 - Effect names are UpperCamelCase and share one namespace with types and traits.
 - An operation is an ordinary function signature: no body, and it **must not carry an effect
-  annotation of its own** (an operation's effect is the effect it belongs to); in v1 it must not
+  annotation of its own** (an operation's effect is the effect it belongs to); it currently must not
   carry type parameters either.
 - Operation names enter the module's function namespace: sharing a name with any top-level
   declaration of this module (an ordinary function / a trait method / another effect's operation)
   is a redefinition error; sharing a name with something **introduced from elsewhere** (including a
   same-named operation brought in by another effect) is an error too. The operations of a
   `pub effect` come in together with `use m.{Ask}`, and `m.ask(…)` can also be written.
-- An effect itself carries no type parameters (`effect Yield[T]` is left to a later roadmap).
+- An effect itself carries no type parameters; `effect Yield[T]` is currently unsupported.
 
 #### Spelling and propagation
 
@@ -1553,8 +1560,8 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
 ### 7.3 Explicitly out of scope
 
 comptime **cannot** generate types, cannot generate declarations, and cannot introspect
-the AST. It is only "run a piece of pure Dawn code ahead of time". Metaprogramming is not
-a goal for v0.1.
+the AST. It is only "run a piece of pure Dawn code ahead of time". This specification provides
+no metaprogramming facility.
 
 ---
 
@@ -1574,9 +1581,10 @@ fn parse_config(path: String) -> Result[Config, String] !io = {
   **the current function** return `Err(e)` immediately. Likewise for `Option[T]` (`None`
   returns `None` early).
 - The return type of the function containing the `?` must be a compatible
-  `Result`/`Option` (the `E` types must agree; v0.1 has no automatic error-type
-  conversion).
-- This is the only non-local control flow in v0.1.
+  `Result`/`Option` (the `E` types must agree; there is no automatic error-type conversion).
+- `?` is the **expression-level propagation shorthand** for `Option`/`Result`: it propagates the
+  current expression's `None`/`Err` branch as the current function's return. `return`, `break`, and
+  `continue` are separate explicit jumps, not part of this shorthand.
 
 **Across error types: write a local helper, don't wait for the language to give you one.**
 `?` requires `E` to agree, so a function returning `Result[_, HttpError]` cannot `?` a
@@ -1685,7 +1693,7 @@ fn build() -> String !io = {
 - Class resolution happens by **reflection at compile time**: JDK classes are always
   visible; a third-party class must be supplied with `--cp <jars>` (common to
   `dawn run/test/build`, §12.1), and compilation and execution share one classpath. LSP
-  v0.1 only resolves JDK classes; a third-party class is reported as not found in the
+  currently resolves only JDK classes; a third-party class is reported as not found in the
   editor but compiles on the command line.
 - **Nested classes are written with a dot**:
   `use java "java.net.http.HttpResponse.BodyHandlers"` (not `$` — `$` inside a string is
@@ -1739,9 +1747,8 @@ rules; each has its basis:
 
 Primitive return values are not wrapped in Option; a `short`/`byte`/`int` return is
 widened to `Int` automatically, `float` to `Float`. `char` in argument and return
-position is not supported in v0.1; arrays go through as opaque values (§9.5). **Passing
-null for an `Option` argument** is deferred likewise (v0.1 cannot pass null from the
-Dawn side to Java).
+position is currently unsupported; arrays go through as opaque values (§9.5). **Passing
+null for an `Option` argument** is unsupported as well (Dawn currently cannot pass null to Java).
 
 ### 9.3 Overload resolution
 
@@ -1906,7 +1913,7 @@ reference type (a primitive, or no expected type, is rejected at compile time).
 > exception** (LANG-02) — `cast` used to throw `ClassCastException`, which is exactly the
 > exit a pure signature is supposed to exclude. Failure is now a value. The three stages
 > the migration went through (including a transitional spelling that lived for exactly
-> one release) are recorded in `docs/audit/error-model-design.md` §6.10–§6.12, and it is
+> one release) are recorded in [`error-model-design.md`](audit/error-model-design.md) §6.10–§6.12, and it is
 > closed.
 
 ### 9.6 The List bridge: a Dawn `List` reaches a collection parameter directly
@@ -1920,13 +1927,13 @@ Scala's `asJava` and Clojure's persistent collections.
 - The element type `T` is limited to: `Int` / `Float` / `Bool` / `String` / an imported
   or opaque reference class. An element that is a `List`/`Map`/`Set`/ADT/tuple/record/
   function value is rejected (a compile error) — zero-copy on a nested container would
-  leak the inner mutability, and v0.1 does not do deep wrapping.
+  leak the inner mutability; there is currently no deep wrapping.
 - Elements arrive in the boxed representation of §9.2 (`Int` → `java.lang.Long`). Generic
   erasure means an API expecting `List<Integer>` will `ClassCastException` when it reads
-  them; v0.1 does not rescue that, so pick your APIs with care.
+  them; the current bridge does not repair that, so pick your APIs with care.
 - The direction is Dawn → Java only; a collection returned by Java is still an opaque
   reference plus `Option` (§9.2), and can be chained on. A `Map`/`Set` bridge is not
-  provided in v0.1.
+  currently provided.
 
 ### 9.7 Limits
 
@@ -1943,7 +1950,7 @@ into Dawn values (§9.6); passing null for an `Option` argument is unsupported (
 > Up to v0.30.0 this builtin was called `java_try`; v0.31.0 renamed it. What it
 > intercepts is a **fault** — a failure caused by the outside world — and ever since
 > native grew failure kinds that classification has been shared by both backends
-> (native-backend-plan §14.9) and has nothing to do with Java; the name outlived its
+> ([`native-backend-plan.md`](native-backend-plan.md) §14.9) and has nothing to do with Java; the name outlived its
 > reason by a while. The old name gets you "`java_try` is not a builtin; renamed to
 > `catch_fault`".
 
@@ -2241,7 +2248,7 @@ use java "java.lang.Math"      # Java interop (§9), form unchanged
 
 ### 10.4 Visibility
 
-All declarations are module-private by default; `pub` exports `fn`/`type`/`alias`/`const`
+All declarations are module-private by default; `pub` exports `fn`/`type`/`alias`/`const`/`trait`/`effect`
 (`pub type` brings the constructors and fields with it, see §3.3). Accessing or importing a
 non-`pub` item → error (`` `parse` is private to module json/parser ``, with a hint: add
 `pub`).
@@ -2406,8 +2413,8 @@ they return a bare `String` rather than an `Option` (the history is in
 hex and base64 are pure Dawn byte arithmetic (no `use java`, so both backends share one
 definition), and the rules are normative: `to_hex` writes two digits per byte and **lower
 case** is the canonical spelling, `from_hex` accepts either case and nothing else;
-`to_base64` uses the standard alphabet of RFC 4648 §4 and pads with `=`, `to_base64_url`
-uses the url/filename-safe alphabet of §5 and **does not pad with `=`**; the two decoders
+`to_base64` uses the standard alphabet of RFC 4648 section 4 and pads with `=`, `to_base64_url`
+uses the url/filename-safe alphabet of section 5 and **does not pad with `=`**; the two decoders
 each recognise only their own alphabet (guessing the alphabet would turn misspelled input
 into wrong bytes), padding is optional, but the spare low bits of the final group must be
 zero — otherwise one byte string would have several spellings. The decoders in this family
@@ -2705,7 +2712,7 @@ The output is an ordinary executable compiled by `cc`, and the runtime lives in
 
 **Self-recursive tail calls are guaranteed** to compile to a loop (the stack does not
 grow) — for top-level functions and for **local named functions** (§3.1) alike. Mutually
-recursive tail calls are not guaranteed in v0.1. The rule: a call to the function itself
+recursive tail calls are not guaranteed. The rule: a call to the function itself
 inside its body sits in tail position (return position, the tail position of a match/if
 branch, the last expression of a block).
 
@@ -2721,7 +2728,12 @@ use java "java.nio.file.Files"
 pub type Color = | Red | Green | Blue derive Show
 type Point = { x: Float, y: Float }
 alias Distance = Float           # transparent alias (§2.6)
+pub opaque type UserId = Int     # opaque outside this module (§2.7)
 const ORIGIN: Point = Point { x: 0.0, y: 0.0 }
+
+pub trait Named[T] { fn name(x: T) -> String }
+impl Named[Point] { fn name(p: Point) -> String = "point" }
+pub effect Ask { fn ask() -> Int }
 
 pub fn dist(a: Point, b: Point) -> Float =
   sqrt(pow(a.x - b.x, 2.0) + pow(a.y - b.y, 2.0))
@@ -2755,14 +2767,3 @@ test "dist is symmetric" {
   assert dist(p, q) == dist(q, p)
 }
 ```
-
----
-
-## 14. Future directions (explicitly not in v0.1)
-
-In priority order: trait v2 (conditional impls, generic subjects, supertraits, more
-derives), finer-grained effects (`!fs`, `!net`), mutually recursive tail calls, passing
-Dawn lambdas to Java, newtype, monomorphisation optimisations, a `Rune` type.
-(`break`/`continue` landed in 2026-07, see §4.7.)
-(trait v1 — single-parameter typeclasses + dictionary passing — landed in 2026-07, see
-§3.5 and trait.md.)

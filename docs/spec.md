@@ -5,7 +5,7 @@
 > 状态：**normative（权威）**。适用版本：0.62.0（`selfhost/src/version.dawn` 的 `VERSION`）。<!-- doc-check: version -->
 > 实现与本文冲突时，以本文为准并把实现当 bug——除非本文某条被显式标注为「已被 X 取代」。
 >
-> 标题曾长期写「v0.1 草案」，改掉它那天工具链已经到 0.11：一份自称草案的文档没法充当裁判，
+> 标题曾长期写「v0.1 草案」，改掉它那天工具链已经到 0.11：一份自称草案的文档没法充当裁判，<!-- doc-check: historical-v0-1 -->
 > 而这是仓库里唯一有资格裁判语义争议的文档。版本号跟 `VERSION` 走，不再单独编号。
 
 本文是语法与语义的权威定义。设计动机见 [design.md](design.md)。
@@ -14,7 +14,7 @@
 `selfhost/src/front/parser.dawn` 为准，可执行的那份期望在 `scripts/grammar-corpus/`。
 
 规范用词：**必须**（违反即编译错误）、**保证**（实现承诺的行为）、
-**未定义**（v0.1 不承诺，勿依赖）。
+**未定义**（本规范不承诺，勿依赖）。
 
 ---
 
@@ -23,7 +23,7 @@
 ### 1.1 源文件
 
 - 编码 UTF-8，扩展名 `.dawn`。
-- 一个文件即一个模块（见 §11）。
+- 一个文件即一个模块（见 §10）。
 
 ### 1.2 注释
 
@@ -65,9 +65,10 @@ trait impl effect
 true false not
 ```
 
-关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有三个，
+关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有四个，
 它们在别处仍是普通标识符：`derive`（只出现在 `type` 声明尾部）、`as`（只出现在
-`use` 的重命名位，§10.2）、`handle`（`with` 之后且下一个 token 不是 `<-` 时，§6.5）。
+`use` 的重命名位，§10.2）、`handle`（`with` 之后且下一个 token 不是 `<-` 时，§6.5）、
+`opaque`（只在紧接 `type` 时引入不透明类型，§2.7）。
 
 **符号 token 取最长匹配**（同 `>>>`/`>=`/`->`/`|>`）。`with` 语句的绑定箭头
 `<-`（§4.10）也照这条：`a<-b` 读作 `a <- b`，不是 `a < (-b)`。写了空格的
@@ -277,7 +278,7 @@ let d = p.x                        # 字段访问
 
 - 类型参数用 `[T, U]` 声明在名字后：`fn map[T, U](xs: List[T], f: fn(T) -> U !e) -> List[U] !e`
 - 单态性：类型参数在每个调用点必须能完全推导，不支持高阶类型（HKT）。
-- 实现为擦除 + 装箱（v0.1）；单态化留作后续优化，不影响语义。
+- 实现为擦除 + 装箱；单态化是可选的后续优化，不影响语义。
 - **没有子类型、没有继承、没有变型（variance）**。类型要么相等要么不同。
 - 函数体内的局部标注可以引用签名的类型参数（`let acc: List[T] = []`）——
   刚性类型参数在推断里视同已知的具体类型。
@@ -372,7 +373,7 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 
 ## 3. 声明
 
-模块顶层只允许：`use`、`type`（含 `opaque type`）、`alias`、`const`、`fn`、`test`、`trait`、`impl`。
+模块顶层只允许：`use`、`type`（含 `opaque type`）、`alias`、`const`、`fn`、`test`、`trait`、`impl`、`effect`。
 没有顶层可变状态。
 
 ### 3.1 函数
@@ -386,11 +387,17 @@ fn greet(name: String) -> Unit !io = {
 ```
 
 - **参数类型必须写全**（所有函数）；`pub fn` 还必须写返回类型——公开签名是 API 契约。
-- **私有函数可以省略返回类型**：`fn double(x: Int) = x * 2`。省略时返回类型与效果
-  都从函数体推导（想强制效果仍可写 `!io`）。三类函数**必须**标注返回类型：
+- **私有函数可以省略返回类型**：`fn double(x: Int) = x * 2`。返回类型省略时由函数体
+  推断；如果同时完全省略效果注记，base effect 也在同一条推断路径中确定。三类函数
+  **必须**标注返回类型：
   ① `pub`；② 递归/互递归（编译器按调用图拓扑序推导，环上无法推导）；
   ③ 体内用了 `return` 或 `?`（二者需要已知的返回类型）。
-- 写了 `-> T` 的函数维持原规则：效果省略即纯，**体内出现 io 而签名未标则报错**——签名是承诺。
+- **base effect 只在双省略形态中推断**：只有私有函数**同时省略返回类型和全部效果注记**，
+  checker 才从函数体推断返回类型与 base effect（pure / `!io`）。显式写出 `-> T` 却省略
+  效果注记，表示 `pure` 承诺而不是请求推断；函数体做 IO 会报错。如果省略返回类型但写出
+  效果行，则只推断返回类型，效果行按所写内容固定。具名效果从不推断，必须显式声明；一旦
+  写出任一具名效果，整条效果行就是固定承诺，不会再自动补 io。例如一个 `!Ask` 函数同时
+  做 IO，必须写 `!(io | Ask)`；只写 `!Ask` 会报错。
 - 函数体是 `=` 后的单个表达式；块 `{ }` 也是表达式（§4.2）。
 - 有默认参数（见下）；没有变长参数、没有重载。
 
@@ -450,7 +457,7 @@ const SIN_TABLE: List[Float] = comptime {
 
 ### 3.3 可见性
 
-所有声明默认模块私有；`pub` 导出。`pub` 可用于 `fn`、`type`、`alias`、`const`。
+所有声明默认模块私有；`pub` 导出。`pub` 可用于 `fn`、`type`、`alias`、`const`、`trait`、`effect`。
 `pub type` 同时导出其构造器与字段。
 
 ### 3.4 测试块
@@ -1043,7 +1050,7 @@ match shape {
 2. 签名未标 `!io` 的函数，体内出现 io 效果 → 编译错误
    （报错指出哪个调用引入了 io，并建议在签名加 `!io` 或消除该调用）。
 3. 标了 `!io` 但体是纯的 → 允许（预留演化空间）；「多余 `!io`」的 lint 需要类型分析，
-   v0.1 的 `dawn fmt --check` 只做格式检查、**未实现**该提示（留待后续）。
+   当前 `dawn fmt --check` 只做格式检查、**未实现**该提示（留待后续）。
 4. 纯函数**保证**：给定相同参数返回相同值、无可观测副作用。
    编译器可据此折叠、消重、在 comptime 调用。
    这条保证此前对具名效果**不成立**：一个装了 io 臂的 handler 造出的闭包，
@@ -1098,7 +1105,7 @@ pub fn sqrt(x: Float) -> Float = unsafe_pure { Math.sqrt(x) }   # 仅 std 模块
 > 留着它是给未来 std 底层包装的机制，不是语言表面。
 
 被包裹的必须是**静态方法调用**：Dawn 原生类型（String/List/Bytes/Map/Set）不是 Java 类型，
-`s.substring(…)` 这种实例调用今天走不通（`pure-ffi-design.md` §九）。
+`s.substring(…)` 这种实例调用今天走不通（[`pure-ffi-design.md`](pure-ffi-design.md) §九）。
 
 - **只改效果，不放松类型**：块内类型检查、重载消解一律照常；被盖的只有「效果」这一维。
 - **拒绝屏蔽效果变量**：块内若出现效果多态调用（`!e`，如高阶 `map`/`fold`），报错——
@@ -1141,12 +1148,12 @@ effect State {
 
 - 效果名是 UpperCamelCase，与类型、trait 共享一个命名空间。
 - 操作是普通函数签名：无体、**不得再带效果注记**（操作的效果就是它所属的效果本身），
-  v1 也不得带类型参数。
+  当前也不得带类型参数。
 - 操作名进入模块的函数命名空间：与本模块的任何顶层声明（普通函数 / trait 方法 /
   另一个效果的操作）同名是重定义错误；与**另一处引入**的名字（含另一个效果带进来的
   同名操作）同名也是错误。`pub effect` 的操作随 `use m.{Ask}` 一起进来，
   也可以写 `m.ask(…)`。
-- 效果本身不带类型参数（`effect Yield[T]` 留给后续路线）。
+- 效果本身不带类型参数；`effect Yield[T]` 当前不支持。
 
 #### 拼写与传播
 
@@ -1268,7 +1275,7 @@ fn lookup(d: Int) -> Float =
 ### 7.3 明确不做
 
 comptime **不能**生成类型、不能生成声明、不能内省 AST。
-它只是"提前跑一段纯 Dawn 代码"。元编程不是 v0.1 的目标。
+它只是“提前跑一段纯 Dawn 代码”。本规范不提供元编程能力。
 
 ---
 
@@ -1287,8 +1294,9 @@ fn parse_config(path: String) -> Result[Config, String] !io = {
 - 后缀 `?` 作用于 `Result[T, E]`：`Ok(v)` 解出 `v`，`Err(e)` 使**当前函数**
   立即返回 `Err(e)`。对 `Option[T]` 同理（`None` 提前返回 `None`）。
 - `?` 所在函数的返回类型必须是相容的 `Result`/`Option`（`E` 类型必须一致，
-  v0.1 无自动错误类型转换）。
-- 这是 v0.1 中唯一的非局部控制流。
+  没有自动错误类型转换）。
+- `?` 是 `Option`/`Result` 的**表达式级传播简写**：它把当前表达式的 `None`/`Err`
+  分支传播为当前函数的返回。`return`、`break`、`continue` 是独立的显式 jump，不属于这套简写。
 
 **跨错误类型：写个本地 helper，别等语言给。** `?` 要求 `E` 一致，所以返回
 `Result[_, HttpError]` 的函数不能直接 `?` 一个 `Result[_, String]`。解法是
@@ -1375,7 +1383,7 @@ fn build() -> String !io = {
   不透明类型、可继续链式调用）；只有要在签名里**写出类型名**才需要 `use java` 导入。
 - 类解析发生在**编译期反射**：JDK 类恒可见；第三方类须以 `--cp <jars>` 提供
   （`dawn run/test/build` 通用，§12.1），编译与运行共用同一份 classpath。
-  LSP v0.1 仅解析 JDK 类，第三方类在编辑器里报未找到但命令行可编译。
+  LSP 目前仅解析 JDK 类，第三方类在编辑器里报未找到但命令行可编译。
 - **嵌套类用点号写**：`use java "java.net.http.HttpResponse.BodyHandlers"`
   （不是 `$`——`$` 在字符串里会被当插值）。解析时先整体反射，失败则从右往左把
   `.` 逐个换成 `$` 重试，故任意嵌套深度都能用点号书写；绑定名取最后一段
@@ -1420,8 +1428,8 @@ dawn-lang.org
   既然分不出，就只能一律包：宁可让 `!` 显式承担风险，也不把 null 放进 Dawn。
 
 基本类型返回值不包 Option；`short`/`byte`/`int` 返回自动加宽为 `Int`，`float` 加宽为
-`Float`。`char` 出入参 v0.1 不支持；数组走不透明直通（§9.5）。**Option 实参传 null**
-同样推迟（v0.1 无法从 Dawn 侧传 null 给 Java）。
+`Float`。`char` 出入参当前不支持；数组走不透明直通（§9.5）。**Option 实参传 null**
+同样不支持（Dawn 侧目前不能把 null 传给 Java）。
 
 ### 9.3 重载消解
 
@@ -1551,7 +1559,7 @@ fn slurp(p: String) -> String !io = {
 
 > **签名为纯的函数不该能用宿主异常退出**（LANG-02）——`cast` 从前抛 `ClassCastException`，
 > 那正是纯签名本该排除的那条出口。现在失败是值。迁移经过的三期（含一个只活一个
-> 版本的过渡拼法）记在 `docs/audit/error-model-design.md` §6.10–§6.12，已收尾。
+> 版本的过渡拼法）记在 [`error-model-design.md`](audit/error-model-design.md) §6.10–§6.12，已收尾。
 
 ### 9.6 List 桥接：Dawn `List` 直达集合形参
 
@@ -1562,11 +1570,11 @@ Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iter
 
 - 元素类型 `T` 限：`Int` / `Float` / `Bool` / `String` / 已导入或不透明的引用类。
   元素是 `List`/`Map`/`Set`/ADT/元组/record/函数值时拒绝（编译错误）——嵌套容器
-  零拷贝会泄漏内层可变性，v0.1 不做深包装。
+  零拷贝会泄漏内层可变性；当前不做深包装。
 - 元素按 §9.2 的装箱表示直达（`Int` → `java.lang.Long`）。泛型擦除意味着期待
-  `List<Integer>` 的 API 会在取用时 `ClassCastException`，v0.1 不救，选 API 时留意。
+  `List<Integer>` 的 API 会在取用时 `ClassCastException`；当前不额外修复，选 API 时留意。
 - 方向仅 Dawn → Java；Java 返回的集合仍是不透明引用 + `Option`（§9.2），可链式调用。
-  `Map`/`Set` 桥接 v0.1 未提供。
+  `Map`/`Set` 桥接当前未提供。
 
 ### 9.7 限制
 
@@ -1580,7 +1588,7 @@ Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iter
 
 > 这个内建到 v0.30.0 为止叫 `java_try`，v0.31.0 改名。它拦的是 **fault**——外部世界
 > 造成的失败——而这个分类自 native 有了失败种类之后就是两个后端共用的
-> （native-backend-plan §14.9），和 Java 无关了；名字比理由多活了一阵。
+> （[`native-backend-plan.md`](native-backend-plan.md) §14.9），和 Java 无关了；名字比理由多活了一阵。
 > 用旧名字会得到「`java_try` is not a builtin; renamed to `catch_fault`」。
 
 Dawn 无异常：Java 调用抛出的异常默认原样穿透并终止程序（等同 panic 语义）。
@@ -1664,7 +1672,7 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
 > `catch_fault_e`/`catch_panic_e` 落地（v0.32.0），发一次 release 教会上一代编译器，
 > 迁调用点并翻转原名的表项（v0.33.0），再把调用点迁回原名、删掉过渡拼法（本版）。
 > 那对名字在 v0.32.0/v0.33.0 的 `dawn doc --builtins` 里出现过，此后不再存在。
-> 分期见 `docs/audit/error-model-design.md` §六。
+> 分期见 [`error-model-design.md`](audit/error-model-design.md) §六。
 
 #### 9.8.2 释放，而不是拦截：`bracket`
 
@@ -1814,7 +1822,8 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 
 ### 10.4 可见性
 
-所有声明默认模块私有；`pub` 导出 `fn`/`type`/`alias`/`const`（`pub type` 连带构造器与字段，见 §3.3）。
+所有声明默认模块私有；`pub` 导出 `fn`/`type`/`alias`/`const`/`trait`/`effect`
+（`pub type` 连带构造器与字段，见 §3.3）。
 访问或引入非 `pub` 项 → 错误（`` `parse` is private to module json/parser ``，附 hint：加 `pub`）。
 
 > **加载范围（2026-07-30，LANG-07）**：`dawn run/test/build <dir>` 默认加载 `src/` 下
@@ -1935,7 +1944,8 @@ UTF-16 码元。`char_is_letter`/`_digit`/`_alnum`/`_upper`/`_lower`/`_space` �
 
 hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份定义），规则是规范性的：
 `to_hex` 每字节两位、**小写**为规范拼写，`from_hex` 大小写皆收、其余一概不收；`to_base64`
-用 RFC 4648 §4 标准字母表并以 `=` 补齐，`to_base64_url` 用 §5 的 url/文件名安全字母表且
+用 RFC 4648 section 4 的标准字母表并以 `=` 补齐，`to_base64_url` 用 section 5 的
+url/文件名安全字母表且
 **不补 `=`**；两个解码器各只认自己的字母表（猜字母表会把拼错的输入变成错的字节），padding
 可有可无，但末组的空余低位必须为零——否则同一串字节会有多个拼写。这一族的解码器都属判据 2：
 外来文本是要校验的，不是要断言的。
@@ -1969,7 +1979,7 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 `Cursor`，除 `use std/cursor` 外还要 `use std/cursor.{Cursor}`（前者绑模块别名、后者绑名字，
 是两件事）。`cursor.seek` / `cursor.offset` 是两套位置货币之间的桥，各一趟 O(n)，用在**边界**
 上（外面来的 `Int` 下标进来、位置要报给外面时）；放进循环就变回它要消灭的 O(n²)。
-单串一次调用用下标版没问题，**循环里必须用游标版**——`docs/seq6-research.md` §五之补有实测。
+单串一次调用用下标版没问题，**循环里必须用游标版**——[`seq6-research.md`](seq6-research.md) §五之补有实测。
 
 **容器的表示。** `Map`/`Set` 的表示是纯 Dawn 的 `std/hamt`（持久 HAMT）、`List` 的是
 `std/pvec`（持久向量），它们是**内部模块**：`use std/hamt` / `use std/pvec` 在 std 之外是
@@ -2167,7 +2177,7 @@ JNI（Java 互操作走普通 invoke）。因此 `--native` 构建不需要 reac
 ### 12.4 尾调用
 
 **自递归尾调用保证**编译为循环（不长栈）——顶层函数与**局部命名函数**（§3.1）皆然。
-互递归尾调用 v0.1 不保证。判定规则：函数体内对自身的调用处于尾位置（返回位置、
+互递归尾调用不保证。判定规则：函数体内对自身的调用处于尾位置（返回位置、
 match/if 分支的尾位置、块的末表达式）。
 
 ---
@@ -2182,7 +2192,12 @@ use java "java.nio.file.Files"
 pub type Color = | Red | Green | Blue derive Show
 type Point = { x: Float, y: Float }
 alias Distance = Float           # 透明别名（§2.6）
+pub opaque type UserId = Int     # 模块外看不穿（§2.7）
 const ORIGIN: Point = Point { x: 0.0, y: 0.0 }
+
+pub trait Named[T] { fn name(x: T) -> String }
+impl Named[Point] { fn name(p: Point) -> String = "point" }
+pub effect Ask { fn ask() -> Int }
 
 pub fn dist(a: Point, b: Point) -> Float =
   sqrt(pow(a.x - b.x, 2.0) + pow(a.y - b.y, 2.0))
@@ -2216,13 +2231,3 @@ test "dist is symmetric" {
   assert dist(p, q) == dist(q, p)
 }
 ```
-
----
-
-## 14. 未来方向（明确不在 v0.1）
-
-按优先级：trait v2（条件 impl、泛型主体、supertrait、更多 derive）、
-细分效果（`!fs`、`!net`）、互递归尾调用、
-Dawn lambda 传给 Java、newtype、单态化优化、`Rune` 类型。
-（`break`/`continue` 已于 2026-07 落地，见 §4.7。）
-（trait v1——单参数 typeclass + 字典传递——已于 2026-07 落地，见 §3.5 与 trait.md。）

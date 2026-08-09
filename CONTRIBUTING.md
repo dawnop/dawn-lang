@@ -3,7 +3,7 @@
 这里只写一件事：**特性是怎么从想法走到代码的**。
 
 提交格式、跑测试、代码风格那些，通用模板里都有，而且 CI 会管
-（`./bin/dawn test selfhost`、`./bin/dawn fmt site selfhost packages --check`、金样差分）——
+（`./bin/dawn test selfhost`、`./bin/dawn fmt std site selfhost packages examples --check`、金样差分）——
 文档写不写它们都一样。真正没被机器管住、又值得写下来的，是下面这套流程。它不是理论，
 是 `docs/` 里八篇设计文档跑出来的。
 
@@ -47,11 +47,11 @@
 
 草案不是写完就扔的。落地后：
 
-- 大改动开一份 `docs/m<N>-progress.md`，逐条记状态，**回填提交哈希**，
+- 大改动开一份 `docs/history/m<N>-progress.md`，逐条记状态，**回填提交哈希**，
   写明「供中断后接续」（见 [`docs/history/m7-progress.md`](docs/history/m7-progress.md)）。
   跨仓的活儿要注明两边的哈希——语言本体在 `dawn-lang/`，后端在 `dawnop-site/backend-dawn/`。
 - 草案里被现实推翻的前提，**回头改掉那份草案**，别留着骗人。
-- 里程碑做完写 `docs/m<N>-retro.md`：复盘 + 排下一批的修复优先级表
+- 里程碑做完写 `docs/history/m<N>-retro.md`：复盘 + 排下一批的修复优先级表
   （[`docs/history/m6-retro.md`](docs/history/m6-retro.md) 那张表直接变成了 M7 的序 1–6）。
 
 > 历史哈希是会失效的：仓库为清理 trailer 重写过一次历史，随后专门发了一个提交回填

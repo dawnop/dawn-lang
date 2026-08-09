@@ -14,7 +14,9 @@ gets disabled, and then it protects nothing):
   anchors   every `#fragment` link -- same-file *and* cross-file -- matches a
             heading in the file it points at
   sections  every `§N` cross-reference whose target document is stated
-            explicitly matches a numbered heading in that document
+            explicitly, plus every bare reference in the two normative specs,
+            matches a numbered heading in that document; external RFC
+            references are classified and skipped rather than treated as spec-local
   version   every documented claim about the *current* toolchain version
             equals `selfhost/src/version.dawn`
   blocks    every fenced block marked ```dawn run / ```dawn compile is
@@ -32,9 +34,8 @@ gets disabled, and then it protects nothing):
   transl    every translated document registers the digest of the original it
             was translated from, that digest is still the original's, and its
             fenced blocks line up one-for-one with the original's
-  contracts  settled failure-barrier clauses occur in both language versions
-             of the spec; this is a targeted semantic pin, not full translation
-             comparison
+  contracts  settled semantic and repository-governance clauses remain present;
+             this is a targeted pin, not full prose comparison
 
 Blocks are opt-in rather than opt-out: most examples in the spec are
 fragments -- a type declaration, three lines of a match -- and demanding
@@ -126,17 +127,19 @@ check whose blind spot is undocumented gets mistaken for a check:
     files and never to fragments. It is kept rather than deleted because it
     is the trap for the first docs/ link that does carry one, and the
     printed zero is what stops that being mistaken for coverage.
-  * sections: only references whose target document is written down --
+  * sections: outside the two normative specs, only references whose target document is written down --
     `[x](y.md) §3`, `y.md §3`, `本文 §3`, `§3 of y.md`, or a sibling in a
     `§3/§4` run.
-    A bare `§3` is skipped, because in this corpus prose refers to other
+    A bare `§3` is otherwise skipped, because in this corpus prose refers to other
     documents by nickname (`native 计划 §7`, `台账 §3.7`, `那份 §七`) far
     more often than one would guess: assuming "bare means this file" was
     measured against the whole corpus and misfired on 474 of the 1422 bare
     sites. Making that check sound is not a matter of a better regex, and
     a lint that is wrong one time in three gets switched off within a week.
-    The 119 references that do name their target are checked; the rest are
-    counted as skipped, not silently counted as passing.
+    The normative specs are the deliberate exception: their bare references
+    are same-file navigation, while cross-document references must name or link
+    their `.md` target. The references that do name their target are checked;
+    the rest outside the specs are counted as skipped, not silently counted as passing.
   * status: the *presence* of the line, never its truth. Nothing here can
     tell `> 状态：current` from `> 状态：动工计划`, on a plan that shipped a
     week ago, and pretending otherwise would be worse than the gap.
@@ -160,10 +163,10 @@ check whose blind spot is undocumented gets mistaken for a check:
     documents show the same examples in the same order. A fence added, dropped
     or retyped on one side only is caught; a comment translated inside one is
     not, and must not be.
-  * contracts: only the settled clauses in SPEC_CONTRACTS. It deliberately does
-    not compare whole paragraphs or infer translation quality; it catches the
-    known failure mode where one side silently loses a normative clause while
-    its source digest remains valid.
+  * contracts: only the settled clauses in SPEC_CONTRACTS and the structural
+    checks in repository_contract_problems. It
+    deliberately does not compare whole paragraphs or infer translation
+    quality; it catches known failure modes without turning prose into snapshots.
   * count: the number is read only off lines carrying the
     `<!-- doc-check: doc-count -->` marker, for the same reason version does
     not match a bare semver -- most numbers in this corpus are counts of
@@ -189,6 +192,7 @@ gone blind, and this repository has been bitten by that difference.
   ./scripts/doc-check.py
 """
 
+import fnmatch
 import hashlib
 import os
 import pathlib
@@ -255,15 +259,6 @@ TRANSLATIONS = {
 
 SPEC_CONTRACTS = (
     (
-        "effect-polymorphic bracket signature",
-        (
-            ("docs/spec.md", "fn bracket[A, B](resource: A, release: fn(A) -> "
-             "Unit !e, use: fn(A) -> B !e) -> B !e"),
-            ("docs/spec.en.md", "fn bracket[A, B](resource: A, release: fn(A) -> "
-             "Unit !e, use: fn(A) -> B !e) -> B !e"),
-        ),
-    ),
-    (
         "failure payload contract",
         (
             ("docs/spec.md", "**载荷契约**（对每个后端）："),
@@ -324,6 +319,51 @@ SPEC_CONTRACTS = (
             ("docs/spec.en.md", "**The effect row is a variable `!e`**"),
         ),
     ),
+)
+
+SPEC_PATHS = {ROOT / "docs/spec.md", ROOT / "docs/spec.en.md"}
+
+HISTORICAL_V01_MARKER = "<!-- doc-check: historical-v0-1 -->"
+
+AUDIT_STATUS = re.compile(r"^\*\*(已修|部分|开放)（(\d+)）\*\*$", re.M)
+AUDIT_SELF_CHECK = re.compile(
+    r"计数自检：\*\*(\d+) 已修 \+ (\d+) 部分 \+ (\d+) 开放 = (\d+)\*\*")
+AUDIT_TOPIC_TOTALS = (
+    ("语法", 19),
+    ("语义", 17),
+    ("架构", 12),
+    ("工具链", 17),
+    ("库", 19),
+    ("治理", 13),
+)
+AUDIT_PREFIX_TOTALS = {
+    "SYN": 19,
+    "SEM": 17,
+    "ARC": 12,
+    "TOOL": 17,
+    "LIB": 19,
+    "GOV": 13,
+}
+AUDIT_TOPIC_PREFIX = {
+    "语法": "SYN",
+    "语义": "SEM",
+    "架构": "ARC",
+    "工具链": "TOOL",
+    "库": "LIB",
+    "治理": "GOV",
+}
+AUDIT_ID_RANGE = re.compile(
+    r"`?(SYN|SEM|ARC|TOOL|LIB|GOV)-(\d{2})`?"
+    r"(?:\s*–\s*`?(?:(SYN|SEM|ARC|TOOL|LIB|GOV)-)?(\d{2})`?)?")
+AUDIT_ANY_ID = re.compile(r"`?([A-Z]+)-(\d{2})`?")
+AUDIT_DETAIL_HEADING = re.compile(r"^##\s+([A-Z]+)-(\d{2})\b", re.M)
+AUDIT_DETAIL_FILES = (
+    ("SYN", "docs/codebase-audit-v2/01-syntax-and-formatting.md"),
+    ("SEM", "docs/codebase-audit-v2/02-types-effects-and-semantics.md"),
+    ("ARC", "docs/codebase-audit-v2/03-compiler-and-runtime-architecture.md"),
+    ("TOOL", "docs/codebase-audit-v2/04-cli-lsp-build-and-release.md"),
+    ("LIB", "docs/codebase-audit-v2/05-stdlib-and-packages.md"),
+    ("GOV", "docs/codebase-audit-v2/06-docs-tests-and-governance.md"),
 )
 
 VERSION_SRC = ROOT / "selfhost" / "src" / "version.dawn"
@@ -476,9 +516,12 @@ REF_VIA_SELF = re.compile(
     r"(?:本文|本节|本篇|(?i:this document|this section|this doc))"
     r"\s*(?:" + GENITIVE + r"\s*)?$")
 REF_VIA_OF = re.compile(r"^\s*of\s+(?:\[[^\]]*\]\()?([\w./-]+\.md)", re.I)
-# `§10.1/§10.2`, `§1.5、§2.6、§11`: the later reference inherits the earlier
-# one's document, because nothing but a separator stands between them.
-REF_SEPARATOR = re.compile(r"[/、,，]")
+EXTERNAL_STANDARD = re.compile(
+    r"\bRFC\s+\d+(?:\.\d+)?\s*(?:(?:" + GENITIVE + r")\s*)?$", re.I)
+# `§10.1/§10.2`, `§1.5、§2.6、§11`, `§6.10–§6.12`: the later reference
+# inherits the earlier one's document, because nothing but a separator stands
+# between them.
+REF_SEPARATOR = re.compile(r"[/、,，\-–—~至]")
 
 CJK_DIGITS = "一二三四五六七八九"
 CJK_NUMERALS = {c: str(i + 1) for i, c in enumerate(CJK_DIGITS)}
@@ -508,14 +551,186 @@ def slug(heading: str) -> str:
     return h.replace(" ", "-")
 
 
+def without_html_comments(text: str) -> str:
+    """Blank comments while preserving every source offset and line ending."""
+    return re.sub(r"<!--[\s\S]*?-->",
+                  lambda match: re.sub(r"[^\r\n]", " ", match.group(0)), text)
+
+
+MARKDOWN_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)$")
+
+
+def markdown_structure(text: str) -> str:
+    """Blank fenced blocks while preserving source offsets.
+
+    Both CommonMark fence characters are recognized, including language/info
+    strings. A closing fence uses the same character and at least the opener's
+    width. Keeping offsets lets section extraction return the original text.
+    """
+    visible = without_html_comments(text)
+    output: list[str] = []
+    fence_char: str | None = None
+    fence_width = 0
+    for line in visible.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if fence_char is not None:
+            close = re.match(
+                rf"^ {{0,3}}{re.escape(fence_char)}{{{fence_width},}}[ \t]*$", body)
+            output.append(re.sub(r"[^\r\n]", " ", line))
+            if close:
+                fence_char = None
+                fence_width = 0
+            continue
+        opener = MARKDOWN_FENCE_OPEN.match(body)
+        if opener and not (opener.group(1).startswith("`") and
+                           "`" in opener.group(2)):
+            fence_char = opener.group(1)[0]
+            fence_width = len(opener.group(1))
+            output.append(re.sub(r"[^\r\n]", " ", line))
+            continue
+        output.append(line)
+    return "".join(output)
+
+
 def prose_only(text: str) -> str:
-    """Markdown with code removed. Dawn's own syntax collides with the link
-    form -- `map[T](xs: List[T])` reads as a link to a file called
-    "xs: List[T]" -- so fenced blocks and inline spans are blanked (newlines
-    kept, so nothing downstream needs to care about offsets)."""
-    out = re.sub(r"^```.*?^```", lambda m: "\n" * m.group(0).count("\n"), text,
-                 flags=re.M | re.S)
-    return re.sub(r"`[^`\n]*`", "", out)
+    """Human-visible prose with examples, comments and inline code removed."""
+    return re.sub(r"`[^`\n]*`", "", markdown_structure(text))
+
+
+def active_markdown(text: str) -> str:
+    """Markdown outside fenced examples and HTML comments, with inline code intact."""
+    return markdown_structure(text)
+
+
+def policy_prose(text: str) -> str:
+    """Human-visible prose only; comments, examples and inline code cannot satisfy policy."""
+    return prose_only(text)
+
+
+def normalize_prose(text: str) -> str:
+    return " ".join(policy_prose(text).split())
+
+
+def normalize_active_markdown(text: str) -> str:
+    """Visible prose plus inline-code tokens, insensitive to ordinary wrapping."""
+    return " ".join(active_markdown(text).split())
+
+
+def markdown_list_items(text: str) -> list[str]:
+    """Top-level list items from visible Markdown, returned as raw source slices."""
+    structure = active_markdown(text)
+    pattern = re.compile(r"^-\s+.*?(?=^-\s+|^#{1,6}\s+|\Z)", re.M | re.S)
+    return [text[match.start():match.end()] for match in pattern.finditer(structure)]
+
+
+def markdown_section(text: str, heading: str) -> str | None:
+    """The raw body under one exact heading, through the next peer/parent heading."""
+    structure = markdown_structure(text)
+    match = re.search(
+        r"^(#{2,6})\s+" + re.escape(heading) + r"[ \t]*\r?$", structure, re.M)
+    if not match:
+        return None
+    level = len(match.group(1))
+    next_heading = re.search(
+        r"^#{1," + str(level) + r"}\s+", structure[match.end():], re.M)
+    end = len(text) if next_heading is None else match.end() + next_heading.start()
+    return text[match.end():end]
+
+
+def markdown_section_lead(text: str, heading: str) -> str | None:
+    body = markdown_section(text, heading)
+    if body is None:
+        return None
+    child = re.search(r"^#{3,6}\s+", markdown_structure(body), re.M)
+    return body if child is None else body[:child.start()]
+
+
+def check_markdown_section_selftest() -> tuple[list[str], int]:
+    """Fenced pseudo-headings stay inside a section; real headings terminate it."""
+    sample = """# Test
+## 1. Kept
+before
+```dawn
+## 88. Backtick pseudo-heading
+````
+between
+~~~yaml
+## 89. Tilde pseudo-heading
+~~~~
+after
+## 2. Real
+real body
+"""
+    first = markdown_section(sample, "1. Kept")
+    if first is None or "after" not in first:
+        return ["Markdown section self-test: a fenced heading truncated its section"], 0
+    if "real body" in first:
+        return ["Markdown section self-test: a real peer heading did not terminate a section"], 0
+    if section_index(sample) != {"1", "2"}:
+        return ["Markdown section self-test: fenced pseudo-headings entered the section index"], 0
+    if markdown_section(sample, "88. Backtick pseudo-heading") is not None:
+        return ["Markdown section self-test: a fenced pseudo-heading became addressable"], 0
+    if markdown_section(sample, "3. Missing") is not None:
+        return ["Markdown section self-test: a missing heading unexpectedly resolved"], 0
+    return [], 5
+
+
+def markdown_intro(text: str) -> str:
+    """The active introduction after H1, before the first example or next heading."""
+    text = without_html_comments(text)
+    heading = re.search(r"^#\s+.+$", text, re.M)
+    if not heading:
+        return ""
+    tail = text[heading.end():]
+    stop = re.search(r"^(?: {0,3}(?:`{3,}|~{3,})|#{1,6}\s+)", tail, re.M)
+    return tail if stop is None else tail[:stop.start()]
+
+
+def inline_code_spans(text: str) -> set[str]:
+    return set(re.findall(r"`([^`\n]+)`", active_markdown(text)))
+
+
+def expand_braces(pattern: str) -> list[str]:
+    match = re.search(r"\{([^{}]+)\}", pattern)
+    if not match:
+        return [pattern]
+    out: list[str] = []
+    for choice in match.group(1).split(","):
+        expanded = pattern[:match.start()] + choice + pattern[match.end():]
+        out += expand_braces(expanded)
+    return out
+
+
+def editor_glob_matches(pattern: str, relative_path: str) -> bool:
+    candidate = relative_path.replace(os.sep, "/")
+    for expanded in expand_braces(pattern):
+        if "/" in expanded:
+            if fnmatch.fnmatchcase(candidate, expanded.lstrip("/")):
+                return True
+        elif fnmatch.fnmatchcase(pathlib.PurePosixPath(candidate).name, expanded):
+            return True
+    return False
+
+
+def editorconfig_value(text: str, relative_path: str, key: str) -> str | None:
+    """Minimal EditorConfig evaluator: ordered sections and last effective property."""
+    section: str | None = None
+    value: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if "=" not in line:
+            continue
+        name, candidate = (part.strip() for part in line.split("=", 1))
+        if name.lower() != key.lower():
+            continue
+        if section is None or editor_glob_matches(section, relative_path):
+            value = None if candidate.lower() == "unset" else candidate
+    return value
 
 
 def headings_of(text: str) -> list[str]:
@@ -528,9 +743,7 @@ def headings_of(text: str) -> list[str]:
     `with handle`` anchors as `65-具名效果与-with-handle`), so blanking it would
     silently compute the wrong anchor for 267 of this repository's 1410
     headings. That was written the wrong way round first."""
-    unfenced = re.sub(r"^```.*?^```", lambda m: "\n" * m.group(0).count("\n"),
-                      text, flags=re.M | re.S)
-    return HEADING.findall(unfenced)
+    return HEADING.findall(markdown_structure(text))
 
 
 def anchor_index(text: str) -> set[str]:
@@ -625,15 +838,39 @@ def count_anchor_refs(path: pathlib.Path, text: str, anchors: dict) -> int:
     return n
 
 
-def check_sections(path: pathlib.Path, text: str, sections: dict) -> tuple[list[str], int]:
-    """`§N` cross-references, for the subset whose target document is stated.
+def resolve_section_document(path: pathlib.Path, name: str, sections: dict,
+                             allow_unique_basename: bool) -> pathlib.Path:
+    """Resolve explicit document spellings without inventing a missing target.
 
-    See the module docstring for what is deliberately not checked and why the
-    obvious wider rule ("a bare §N means this file") is unsound here."""
+    Prose in docs/ uses both sibling paths and repository-root `docs/...`
+    paths. A bare filename may also name the one indexed document with that
+    basename; ambiguity deliberately falls back to the literal missing path.
+    Markdown link targets never receive that basename fallback.
+    """
+    local = (path.parent / name).resolve()
+    if local in sections:
+        return local
+    if name.startswith("docs/"):
+        rooted = (ROOT / name).resolve()
+        if rooted in sections:
+            return rooted
+    if allow_unique_basename and "/" not in name:
+        candidates = [candidate for candidate in sections if candidate.name == name]
+        if len(candidates) == 1:
+            return candidates[0]
+    return local
+
+
+def check_sections(path: pathlib.Path, text: str, sections: dict) -> tuple[list[str], int]:
+    """Check explicit `§N` targets and bare references in the normative specs.
+
+    See the module docstring for why "a bare §N means this file" remains
+    deliberately unsound everywhere else in the repository."""
     bad: list[str] = []
     checked = 0
     text = prose_only(text)
-    carry: tuple[pathlib.Path, int] | None = None
+    # `None` as the carried target means an explicitly external standard.
+    carry: tuple[pathlib.Path | None, int] | None = None
     for m in SECTION_REF.finditer(text):
         label = m.group(1)
         if re.match(r"\.\D", text[m.end():m.end() + 2]):
@@ -647,12 +884,31 @@ def check_sections(path: pathlib.Path, text: str, sections: dict) -> tuple[list[
         name = None if link else REF_VIA_NAME.search(line)
         of = None if (link or name) else REF_VIA_OF.match(rest)
         if link or name or of:
-            hit = (path.parent / (link or name or of).group(1)).resolve()
-            target = hit if hit in sections else None
+            reference = (link or name or of).group(1)
+            hit = resolve_section_document(
+                path, reference, sections, allow_unique_basename=link is None)
+            if hit not in sections:
+                checked += 1
+                why = "does not exist" if not hit.exists() else "is not in the document index"
+                bad.append(f"{path.relative_to(ROOT)}: explicit section target "
+                           f"{hit.relative_to(ROOT) if hit.is_relative_to(ROOT) else hit} {why}")
+                carry = None
+                continue
+            target = hit
         elif REF_VIA_SELF.search(line):
             target = path
         elif carry and REF_SEPARATOR.fullmatch(text[carry[1]:m.start()].strip() or "x"):
+            if carry[0] is None:
+                checked += 1
+                carry = (None, m.end())
+                continue
             target = carry[0]
+        elif EXTERNAL_STANDARD.search(line):
+            checked += 1
+            carry = (None, m.end())
+            continue
+        elif path in SPEC_PATHS:
+            target = path
         carry = (target, m.end()) if target else None
         if target is None or not sections[target]:
             continue
@@ -661,6 +917,36 @@ def check_sections(path: pathlib.Path, text: str, sections: dict) -> tuple[list[
             bad.append(f"{path.relative_to(ROOT)}: §{label} names no section of "
                        f"{target.relative_to(ROOT)}")
     return bad, checked
+
+
+def check_sections_selftest() -> tuple[list[str], int]:
+    """Exercise missing explicit targets, external standards and spec-local refs."""
+    path = ROOT / "docs/spec.md"
+    other = ROOT / "docs/spec.en.md"
+    sections = {path: {"1"}, other: {"1", "2"}}
+    missing, _ = check_sections(path, "missing.md §9\n", sections)
+    if not any("explicit section target" in problem and "does not exist" in problem
+               for problem in missing):
+        return ["section self-test: an explicit missing.md target was silently skipped"], 0
+    absent, _ = check_sections(path, "spec.en.md §9\n", sections)
+    if not any("§9 names no section" in problem for problem in absent):
+        return ["section self-test: an explicit missing section was silently skipped"], 0
+    external, count = check_sections(path, "RFC 9110 §99\n", sections)
+    if external or count != 1:
+        return ["section self-test: RFC 9110 §N was misread as a spec-local section"], 0
+    chained, count = check_sections(path, "RFC 9110 §9/§10\n", sections)
+    if chained or count != 2:
+        return ["section self-test: a chained RFC reference fell back to the local spec"], 0
+    crossline, count = check_sections(path, "RFC 9110 §9/\n§10\n", sections)
+    if crossline or count != 2:
+        return ["section self-test: an external chain was not inherited across a separator line"], 0
+    inherited, count = check_sections(path, "spec.en.md §1/\n§2\n", sections)
+    if inherited or count != 2:
+        return ["section self-test: an explicit document chain was not inherited across lines"], 0
+    local, count = check_sections(path, "see §1\n", sections)
+    if local or count != 1:
+        return ["section self-test: a valid bare normative-spec reference failed"], 0
+    return [], 7
 
 
 def toolchain_version() -> str:
@@ -896,8 +1182,114 @@ def check_translations() -> tuple[list[str], int]:
     return bad, seen
 
 
-def check_spec_contracts(texts: dict) -> tuple[list[str], int]:
-    normalized = {path: " ".join(text.split()) for path, text in texts.items()}
+def effect_contract_problems(rel: str, text: str) -> tuple[list[str], int]:
+    """Check the checker's return/effect branches from visible normative structure."""
+    heading = "3.1 函数" if rel == "docs/spec.md" else "3.1 Functions"
+    section = markdown_section(text, heading)
+    if section is None:
+        return [f"{rel}: missing normative function section for effect contracts"], 0
+    item = next((candidate for candidate in markdown_list_items(section)
+                 if {"!Ask", "!(io | Ask)"}.issubset(inline_code_spans(candidate))), None)
+    if item is None:
+        return [f"{rel}: no visible function-policy item relates !Ask to !(io | Ask)"], 0
+
+    prose = normalize_prose(item).replace("*", "")
+    active = normalize_active_markdown(item).replace("*", "")
+    spans = inline_code_spans(item)
+    bad: list[str] = []
+    seen = 0
+    if rel == "docs/spec.md":
+        joint_inference = (
+            re.search(r"(?:只有|仅(?:当|在)?).{0,32}私有函数.{0,24}同时.{0,16}省略返回类型"
+                      r".{0,20}(?:全部|所有|每个)效果(?:注记|标注)", prose)
+            and re.search(r"(?:推断|推导).{0,16}返回类型.{0,24}(?:base effect|基础效果)", prose)
+        )
+        explicit_pure = (
+            {"-> T", "pure"}.issubset(spans)
+            and re.search(r"显式.{0,20}-> T.{0,24}省略.{0,16}效果(?:注记|标注)", active)
+            and re.search(r"pure.{0,12}承诺", active, re.I)
+            and re.search(r"IO.{0,20}(?:报错|错误|拒绝)", active, re.I)
+        )
+        named_never = re.search(
+            r"具名效果.{0,24}(?:从不|永不|不会|不得|不能).{0,16}(?:推断|推导)", prose)
+        fixed_row = (re.search(r"效果行.{0,32}(?:固定|钉死|承诺)", prose)
+                     and re.search(r"(?:不会|不再|不得).{0,16}(?:自动)?补.{0,8}io", prose, re.I))
+        combined = (re.search(r"同时.{0,16}(?:做|执行).{0,8}IO", active, re.I)
+                    and re.search(r"(?:必须|需要|应当).{0,12}(?:写|声明)", active))
+    else:
+        folded = prose.casefold()
+        active_folded = active.casefold()
+        joint_inference = (
+            re.search(r"\bonly\b.{0,24}private function.{0,24}omit(?:s|ted|ting)? both"
+                      r".{0,20}return type.{0,24}every effect annotation", folded)
+            and (re.search(r"infer.{0,24}return type.{0,24}base effect", folded)
+                 or re.search(r"return type and base effect.{0,24}infer", folded))
+        )
+        explicit_pure = (
+            {"-> T", "pure"}.issubset(spans)
+            and re.search(r"writing.{0,16}-> t.{0,24}omitting.{0,20}effect annotation",
+                          active_folded)
+            and re.search(r"pure.{0,12}promise", active_folded)
+            and re.search(r"performing io.{0,20}(?:error|rejected)", active_folded)
+        )
+        named_never = (re.search(r"named effects?.{0,24}(?:never|not).{0,16}infer", folded)
+                       or re.search(r"named effects?.{0,24}must not be inferred", folded))
+        fixed_row = (re.search(r"effect row.{0,32}(?:fixed|pinned|promise)", folded)
+                     and (re.search(r"io.{0,24}not added automatically", folded)
+                          or re.search(r"does not.{0,24}automatically.{0,12}io", folded)))
+        combined = (re.search(r"also.{0,16}(?:perform|do).{0,8}io", active_folded)
+                    and re.search(r"must.{0,12}(?:write|declare)", active_folded))
+
+    for condition, name in (
+        (joint_inference,
+         "return and base effects are jointly inferred only after both annotations are omitted"),
+        (explicit_pure,
+         "an explicit return type with no effect annotation is a checked pure promise"),
+        (named_never, "named effects are never inferred"),
+        (fixed_row, "an explicit named-effect row is fixed and does not gain io"),
+        (combined and {"!Ask", "!(io | Ask)", "!io"}.issubset(spans),
+         "a !Ask function doing IO must explicitly write !(io | Ask)"),
+    ):
+        if condition:
+            seen += 1
+        else:
+            bad.append(f"{rel}: effect contract does not establish that {name}")
+    return bad, seen
+
+
+def propagation_contract_problems(rel: str, text: str) -> tuple[list[str], int]:
+    """Check `?` as propagation shorthand and keep explicit jumps distinct."""
+    heading = ("8.1 可恢复：Result / Option + `?`" if rel == "docs/spec.md"
+               else "8.1 Recoverable: Result / Option + `?`")
+    section = markdown_section(text, heading)
+    if section is None:
+        return [f"{rel}: missing normative Result/Option propagation section"], 0
+    required = {"?", "Option", "Result", "return", "break", "continue"}
+    item = next((candidate for candidate in markdown_list_items(section)
+                 if required.issubset(inline_code_spans(candidate))), None)
+    if item is None:
+        return [f"{rel}: no visible policy item distinguishes ? from explicit jumps"], 0
+    prose = normalize_prose(item).replace("*", "")
+    if rel == "docs/spec.md":
+        propagation = ("表达式级" in prose and "传播" in prose
+                       and re.search(r"(?:简写|缩写)", prose))
+        jumps = (re.search(r"(?:独立|分开|单独).{0,24}(?:显式|明确).{0,12}(?:jump|跳转)",
+                           prose, re.I))
+    else:
+        folded = prose.casefold()
+        propagation = ("expression-level" in folded and "propagation" in folded
+                       and "shorthand" in folded)
+        jumps = re.search(r"separate.{0,24}explicit jumps", folded)
+    bad: list[str] = []
+    if not propagation:
+        bad.append(f"{rel}: ? is not defined as expression-level Option/Result propagation shorthand")
+    if not jumps:
+        bad.append(f"{rel}: return/break/continue are not distinguished as explicit jumps")
+    return bad, int(bool(propagation)) + int(bool(jumps))
+
+
+def spec_contract_problems(texts: dict[pathlib.Path, str]) -> tuple[list[str], int]:
+    normalized = {path: normalize_prose(text) for path, text in texts.items()}
     bad: list[str] = []
     seen = 0
     for name, clauses in SPEC_CONTRACTS:
@@ -908,12 +1300,658 @@ def check_spec_contracts(texts: dict) -> tuple[list[str], int]:
                 bad.append(f"{rel}: cannot check settled spec contract {name!r}; "
                            "the document is not in the documentation index")
                 continue
-            expected = " ".join(fragment.split())
+            expected = normalize_prose(fragment)
+            if not expected:
+                bad.append(f"{rel}: spec contract {name!r} has no prose to check")
+                continue
             if expected not in text:
                 bad.append(f"{rel}: missing settled spec contract {name!r}")
                 continue
             seen += 1
+    for rel in ("docs/spec.md", "docs/spec.en.md"):
+        path = ROOT / rel
+        text = texts.get(path)
+        if text is None:
+            bad.append(f"{rel}: cannot check structured semantic contracts; document missing")
+            continue
+        problems, count = effect_contract_problems(rel, text)
+        bad += problems
+        seen += count
+        problems, count = propagation_contract_problems(rel, text)
+        bad += problems
+        seen += count
     return bad, seen
+
+
+def check_spec_contracts(texts: dict[pathlib.Path, str]) -> tuple[list[str], int]:
+    return spec_contract_problems(texts)
+
+
+def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[str], int]:
+    """Each language independently rejects wrong effect and `?` semantics."""
+    zh = ROOT / "docs/spec.md"
+    baseline, _ = spec_contract_problems(texts)
+    if baseline:
+        return [f"spec contract self-test baseline is invalid: {baseline[0]}"], 0
+
+    mutated = dict(texts)
+    clause = "失败（raise 而不接）则顶掉原失败、无 suppressed 链"
+    if clause not in mutated[zh]:
+        return ["spec contract self-test: release precedence fixture is absent"], 0
+    mutated[zh] = mutated[zh].replace(clause, "release 失败时保留原失败", 1)
+    mutated[zh] += f"\n<!-- {clause} -->\n"
+    bad, _ = spec_contract_problems(mutated)
+    if not any("release failure precedence" in problem for problem in bad):
+        return ["spec contract self-test: an HTML comment falsely satisfied a clause"], 0
+
+    fixtures = (
+        (ROOT / "docs/spec.md", "3.1 函数",
+         "同时省略返回类型和全部效果注记", "只省略全部效果注记",
+         "8.1 可恢复：Result / Option + `?`", "表达式级传播简写", "唯一的非局部控制流"),
+        (ROOT / "docs/spec.en.md", "3.1 Functions",
+         "omits both its return type and every effect annotation",
+         "omits every effect annotation",
+         "8.1 Recoverable: Result / Option + `?`",
+         "expression-level propagation shorthand", "only non-local control flow"),
+    )
+    for path, function_heading, condition, wrong, propagation_heading, phrase, obsolete in fixtures:
+        rel = str(path.relative_to(ROOT))
+
+        wrong_condition = dict(texts)
+        function_section = markdown_section(wrong_condition[path], function_heading)
+        if function_section is None or condition not in function_section:
+            return [f"spec contract self-test: {rel} inference-condition fixture is absent"], 0
+        changed = function_section.replace(condition, wrong, 1)
+        wrong_condition[path] = wrong_condition[path].replace(function_section, changed, 1)
+        wrong_condition[path] += f"\n<!-- {condition} -->\n"
+        bad, _ = spec_contract_problems(wrong_condition)
+        if not any(problem.startswith(rel + ":") and "jointly inferred only" in problem
+                   for problem in bad):
+            return [f"spec contract self-test: {rel} accepted the wrong inference condition"], 0
+
+        missing_row = dict(texts)
+        function_section = markdown_section(missing_row[path], function_heading)
+        if function_section is None or "`!(io | Ask)`" not in function_section:
+            return [f"spec contract self-test: {rel} named-effect union fixture is absent"], 0
+        changed = function_section.replace("`!(io | Ask)`", "`!Ask`", 1)
+        missing_row[path] = missing_row[path].replace(function_section, changed, 1)
+        missing_row[path] += "\n```dawn\n# fake policy: `!(io | Ask)`\n```\n"
+        bad, _ = spec_contract_problems(missing_row)
+        if not any(problem.startswith(rel + ":") and "relates !Ask to !(io | Ask)" in problem
+                   for problem in bad):
+            return [f"spec contract self-test: {rel} accepted a missing named-effect union"], 0
+
+        wrong_propagation = dict(texts)
+        propagation_section = markdown_section(wrong_propagation[path], propagation_heading)
+        if propagation_section is None or phrase not in propagation_section:
+            return [f"spec contract self-test: {rel} propagation fixture is absent"], 0
+        changed = propagation_section.replace(phrase, obsolete, 1)
+        wrong_propagation[path] = wrong_propagation[path].replace(
+            propagation_section, changed, 1)
+        wrong_propagation[path] += f"\n<!-- {phrase} -->\n"
+        bad, _ = spec_contract_problems(wrong_propagation)
+        if not any(problem.startswith(rel + ":")
+                   and "expression-level Option/Result propagation" in problem for problem in bad):
+            return [f"spec contract self-test: {rel} accepted obsolete ? semantics"], 0
+    return [], 7
+
+
+def check_effect_inference_probe() -> tuple[list[str], int]:
+    """Pin the checker's annotated-pure and double-omission branches end to end."""
+    sources = {
+        "explicit_return.dawn": """fn writes_io() -> Unit = {
+  println("explicit")
+}
+
+pub fn main() -> Unit !io = writes_io()
+""",
+        "double_omission.dawn": """fn infers_io() = {
+  println("inferred")
+}
+
+pub fn main() -> Unit !io = infers_io()
+""",
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        work = pathlib.Path(tmp)
+        for name, source in sources.items():
+            (work / name).write_text(source, encoding="utf-8")
+        explicit = run_example([str(DAWN), "check", str(work / "explicit_return.dawn")],
+                               cwd=ROOT)
+        inferred = run_example([str(DAWN), "check", str(work / "double_omission.dawn")],
+                               cwd=ROOT)
+    if explicit is None or inferred is None:
+        return ["effect inference probe did not finish within the example timeout"], 0
+    if explicit.returncode == 0 or "not declared !io" not in explicit.stderr:
+        return ["effect inference probe: explicit -> Unit without an effect was not checked pure"], 0
+    if inferred.returncode != 0:
+        detail = (inferred.stderr or inferred.stdout).strip().splitlines()
+        return ["effect inference probe: double omission did not infer io: " +
+                (detail[0] if detail else f"exit {inferred.returncode}")], 0
+    return [], 2
+
+
+REPOSITORY_POLICY_FILES = (
+    ".editorconfig",
+    "CONTRIBUTING.md",
+    "README.md",
+    "README.zh-CN.md",
+    "docs/package-design.md",
+    "docs/spec.md",
+    "docs/spec.en.md",
+)
+
+
+def repository_contract_problems(files: dict[str, str]) -> tuple[list[str], int]:
+    """Validate repository policy by Markdown structure and configuration semantics."""
+    bad: list[str] = []
+    seen = 0
+
+    missing = [rel for rel in REPOSITORY_POLICY_FILES if rel not in files]
+    if missing:
+        return [f"{rel}: repository policy file is missing" for rel in missing], 0
+
+    contributing_spans = inline_code_spans(files["CONTRIBUTING.md"])
+    for literal, name in (
+        ("./bin/dawn fmt std site selfhost packages examples --check", "complete formatter scope"),
+        ("docs/history/m<N>-progress.md", "milestone progress path"),
+        ("docs/history/m<N>-retro.md", "milestone retro path"),
+    ):
+        if literal not in contributing_spans:
+            bad.append(f"CONTRIBUTING.md: missing active inline-code policy {name!r}")
+        else:
+            seen += 1
+
+    editor = files[".editorconfig"]
+    for sample, expected in (
+        ("src/sample.dawn", "2"),
+        ("config/sample.yml", "2"),
+        ("config/sample.yaml", "2"),
+        ("scripts/sample.py", "4"),
+        ("src/Sample.java", "4"),
+    ):
+        got = editorconfig_value(editor, sample, "indent_size")
+        if got != expected:
+            bad.append(f".editorconfig: {sample} resolves indent_size={got!r}, expected {expected}")
+        else:
+            seen += 1
+
+    for rel, module_pattern, line_pattern in (
+        ("README.md", r"\b\d+\s+modules\b", r"\b[\d,]+\s+lines\b"),
+        ("README.zh-CN.md", r"\d+\s*个模块", r"(?:[\d.]+\s*万|[\d,]+)\s*行"),
+    ):
+        intro = markdown_intro(files[rel])
+        for pattern, name in ((module_pattern, "volatile module count"),
+                              (line_pattern, "volatile line count")):
+            if re.search(pattern, intro, re.I):
+                bad.append(f"{rel}: active introduction contains {name}")
+            else:
+                seen += 1
+
+    package = files["docs/package-design.md"]
+    lock = markdown_section(package, "4.6 `dawn.lock` schema 1 冻结 Java 依赖闭包")
+    if lock is None:
+        bad.append("docs/package-design.md: missing current 4.6 dawn.lock policy section")
+    else:
+        lock_prose = normalize_prose(lock)
+        for fragment, name in (
+            ("前两行是生成注释，首个非注释数据行是", "lock header shape"),
+            ("只冻结 Maven/Java 依赖闭包", "lock scope"),
+        ):
+            if fragment not in lock_prose:
+                bad.append(f"docs/package-design.md: missing current {name}")
+            else:
+                seen += 1
+        for pattern in (r"项目 A 不做 lockfile", r"不需要 lock 也可复现"):
+            if re.search(pattern, lock_prose, re.I):
+                bad.append("docs/package-design.md: current lock policy restored an obsolete no-lock claim")
+            else:
+                seen += 1
+    schema = markdown_section(package, "2. 每个文件第一行写 schema 版本")
+    if schema is None or "将来的 lock" in normalize_prose(schema):
+        bad.append("docs/package-design.md: schema policy still describes dawn.lock as future work")
+    else:
+        seen += 1
+
+    for rel, source_heading, module_clause in (
+        ("docs/spec.md", "1.1 源文件", "一个文件即一个模块（见 §10）"),
+        ("docs/spec.en.md", "1.1 Source files", "One file is one module (see §10)"),
+    ):
+        source = markdown_section(files[rel], source_heading)
+        if source is None or module_clause not in normalize_prose(source):
+            bad.append(f"{rel}: source-file policy does not point at module-system §10")
+        else:
+            seen += 1
+
+    for rel, declaration_heading, keyword_heading, visibility_headings, quick_heading in (
+        ("docs/spec.md", "3. 声明", "1.4 关键字", ("3.3 可见性", "10.4 可见性"),
+         "13. 语法速查"),
+        ("docs/spec.en.md", "3. Declarations", "1.4 Keywords",
+         ("3.3 Visibility", "10.4 Visibility"), "13. Syntax cheat sheet"),
+    ):
+        spec = files[rel]
+        lead = markdown_section_lead(spec, declaration_heading)
+        declared = inline_code_spans(lead or "")
+        required = {"use", "type", "opaque type", "alias", "const", "fn", "test",
+                    "trait", "impl", "effect"}
+        if lead is None or not required.issubset(declared):
+            bad.append(f"{rel}: top-level declaration inventory is incomplete")
+        else:
+            seen += 1
+        keywords = markdown_section(spec, keyword_heading)
+        if keywords is None or "opaque" not in inline_code_spans(keywords):
+            bad.append(f"{rel}: contextual keyword inventory omits opaque")
+        else:
+            seen += 1
+        for heading in visibility_headings:
+            visibility = markdown_section(spec, heading)
+            spans = inline_code_spans(visibility or "")
+            if visibility is None or not {"pub", "trait", "effect"}.issubset(spans):
+                bad.append(f"{rel}: {heading} omits pub trait/effect visibility")
+            else:
+                seen += 1
+        quick = markdown_section(spec, quick_heading)
+        dawn_fences = [body for info, body, _ in fences(quick or "") if info == "dawn"]
+        quick_body = dawn_fences[0] if dawn_fences else ""
+        for pattern, name in (
+            (r"(?m)^pub opaque type\s+", "opaque type"),
+            (r"(?m)^pub trait\s+", "pub trait"),
+            (r"(?m)^impl\s+", "impl"),
+            (r"(?m)^pub effect\s+", "pub effect"),
+        ):
+            if not re.search(pattern, quick_body):
+                bad.append(f"{rel}: syntax cheat sheet omits {name}")
+            else:
+                seen += 1
+
+    for rel in ("docs/spec.md", "docs/spec.en.md"):
+        text = files[rel]
+        marked_lines = [line for line in text.splitlines() if HISTORICAL_V01_MARKER in line]
+        occurrences = [(number, line) for number, line in enumerate(text.splitlines(), 1)
+                       if re.search(r"v0\.1", line, re.I)]
+        if len(marked_lines) != 1 or len(occurrences) != 1 or \
+                HISTORICAL_V01_MARKER not in occurrences[0][1]:
+            bad.append(f"{rel}: every v0.1 occurrence must be the one explicitly marked history")
+        elif re.search(r"^##\s+14\.", text, re.M):
+            bad.append(f"{rel}: stale normative roadmap section returned")
+        else:
+            seen += 1
+    return bad, seen
+
+
+def check_repository_contracts() -> tuple[list[str], int]:
+    files = {rel: (ROOT / rel).read_text(encoding="utf-8")
+             for rel in REPOSITORY_POLICY_FILES if (ROOT / rel).exists()}
+    return repository_contract_problems(files)
+
+
+def check_repository_contracts_selftest() -> tuple[list[str], int]:
+    files = {rel: (ROOT / rel).read_text(encoding="utf-8")
+             for rel in REPOSITORY_POLICY_FILES}
+    baseline, _ = repository_contract_problems(files)
+    if baseline:
+        return [f"repository policy self-test baseline is invalid: {baseline[0]}"], 0
+
+    editor = dict(files)
+    editor[".editorconfig"] = editor[".editorconfig"].replace(
+        "[*.{dawn,yml,yaml}]\nindent_size = 2",
+        "[*.{dawn,yml,yaml}]\nindent_size = 8\n# indent_size = 2",
+        1,
+    )
+    if editor[".editorconfig"] == files[".editorconfig"]:
+        return ["repository policy self-test: EditorConfig fixture was not mutated"], 0
+    bad, _ = repository_contract_problems(editor)
+    if not any("sample.dawn resolves indent_size='8'" in problem for problem in bad):
+        return ["repository policy self-test: indent 8 plus a fake comment stayed green"], 0
+    restored = dict(editor)
+    restored[".editorconfig"] = restored[".editorconfig"].replace(
+        "indent_size = 8\n# indent_size = 2",
+        "indent_size = 2\n# indent_size = 2",
+        1,
+    )
+    bad, _ = repository_contract_problems(restored)
+    if bad:
+        return [f"repository policy self-test: restoring the real indent stayed red: {bad[0]}"], 0
+
+    comment = dict(files)
+    command = "./bin/dawn fmt std site selfhost packages examples --check"
+    comment["CONTRIBUTING.md"] = comment["CONTRIBUTING.md"].replace(
+        command, "./bin/dawn fmt site selfhost packages --check", 1)
+    comment["CONTRIBUTING.md"] += f"\n<!-- `{command}` -->\n"
+    bad, _ = repository_contract_problems(comment)
+    if not any("complete formatter scope" in problem for problem in bad):
+        return ["repository policy self-test: an HTML comment satisfied formatter scope"], 0
+
+    fenced = dict(files)
+    fact = "前两行是生成注释，首个非注释数据行是"
+    fenced["docs/package-design.md"] = fenced["docs/package-design.md"].replace(
+        fact, "文件第一行就是", 1)
+    fenced["docs/package-design.md"] += f"\n```text\n{fact}\n```\n"
+    bad, _ = repository_contract_problems(fenced)
+    if not any("lock header shape" in problem for problem in bad):
+        return ["repository policy self-test: a fenced example satisfied lock policy"], 0
+
+    active_readme = dict(files)
+    active_readme["README.md"] = active_readme["README.md"].replace(
+        "# Dawn\n", "# Dawn\n\nThe compiler has 10 modules and 3,300 lines.\n", 1)
+    bad, _ = repository_contract_problems(active_readme)
+    if not any("active introduction contains volatile" in problem for problem in bad):
+        return ["repository policy self-test: a volatile metric in the active intro stayed green"], 0
+
+    active_lock = dict(files)
+    lock_heading = "4.6 `dawn.lock` schema 1 冻结 Java 依赖闭包"
+    lock_section = markdown_section(active_lock["docs/package-design.md"], lock_heading)
+    if lock_section is None:
+        return ["repository policy self-test: current lock section fixture is absent"], 0
+    changed = lock_section + "\n项目 A 不做 lockfile。\n"
+    active_lock["docs/package-design.md"] = active_lock["docs/package-design.md"].replace(
+        lock_section, changed, 1)
+    bad, _ = repository_contract_problems(active_lock)
+    if not any("obsolete no-lock claim" in problem for problem in bad):
+        return ["repository policy self-test: a no-lock claim in active policy stayed green"], 0
+
+    active_v01 = dict(files)
+    active_v01["docs/spec.md"] = active_v01["docs/spec.md"].replace(
+        "本文是语法与语义的权威定义。", "active v0.1 roadmap。\n\n本文是语法与语义的权威定义。", 1)
+    bad, _ = repository_contract_problems(active_v01)
+    if not any("explicitly marked history" in problem for problem in bad):
+        return ["repository policy self-test: an unmarked active v0.1 claim stayed green"], 0
+
+    historical = dict(files)
+    for rel in ("docs/spec.md", "docs/spec.en.md"):
+        historical[rel] = historical[rel].replace(
+            HISTORICAL_V01_MARKER,
+            "historical denial: the roadmap is retired; " + HISTORICAL_V01_MARKER,
+            1,
+        )
+    history_heading = "落地记录：项目 B v1（2026-07-22）"
+    history_section = markdown_section(historical["docs/package-design.md"], history_heading)
+    if history_section is None:
+        return ["repository policy self-test: package history section fixture is absent"], 0
+    changed = "\n历史否定：项目 A 不做 lockfile 是旧方案。\n" + history_section
+    historical["docs/package-design.md"] = historical["docs/package-design.md"].replace(
+        history_section, changed, 1)
+    bad, _ = repository_contract_problems(historical)
+    if bad:
+        return [f"repository policy self-test: scoped historical prose was rejected: {bad[0]}"], 0
+    return [], 8
+
+
+def read_audit_details() -> dict[str, str]:
+    return {rel: (ROOT / rel).read_text(encoding="utf-8")
+            for _prefix, rel in AUDIT_DETAIL_FILES}
+
+
+def audit_detail_universe(detail_texts: dict[str, str]) -> tuple[set[str], list[str]]:
+    """Derive the finding universe from the six detailed audit heading sets."""
+    universe: set[str] = set()
+    owners: dict[str, str] = {}
+    bad: list[str] = []
+    for expected_prefix, rel in AUDIT_DETAIL_FILES:
+        text = detail_texts.get(rel)
+        if text is None:
+            bad.append(f"audit detail {rel} is missing")
+            continue
+        family_count = 0
+        for prefix, number in AUDIT_DETAIL_HEADING.findall(text):
+            audit_id = f"{prefix}-{number}"
+            if prefix != expected_prefix:
+                bad.append(f"audit detail {rel} contains wrong-family heading {audit_id}")
+                continue
+            family_count += 1
+            if audit_id in owners:
+                bad.append(f"audit finding {audit_id} is duplicated in {owners[audit_id]} and {rel}")
+                continue
+            owners[audit_id] = rel
+            universe.add(audit_id)
+        expected_total = AUDIT_PREFIX_TOTALS[expected_prefix]
+        if family_count != expected_total:
+            bad.append(f"audit detail {rel} contains {family_count} {expected_prefix} headings, "
+                       f"expected frozen total {expected_total}")
+    if len(universe) != 97:
+        bad.append(f"audit details contain {len(universe)} unique finding IDs, expected 97")
+    return universe, bad
+
+
+def audit_status_blocks(text: str) -> tuple[dict[str, tuple[int, int, str]], list[str]]:
+    """Return each state block through its last list line, before explanatory prose."""
+    matches = list(AUDIT_STATUS.finditer(text))
+    bad: list[str] = []
+    if [match.group(1) for match in matches] != ["已修", "部分", "开放"]:
+        return {}, ["audit status headings must appear once in 已修/部分/开放 order"]
+    blocks: dict[str, tuple[int, int, str]] = {}
+    for index, match in enumerate(matches):
+        limit = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        tail = text[match.end():limit]
+        offset = 0
+        seen_list = False
+        end = len(tail)
+        for line in tail.splitlines(keepends=True):
+            stripped = line.rstrip("\r\n")
+            if stripped.startswith("- "):
+                seen_list = True
+            elif seen_list and stripped and not stripped.startswith("  "):
+                end = offset
+                break
+            offset += len(line)
+        if not seen_list:
+            bad.append(f"audit status {match.group(1)} has no ID list")
+        body_end = match.end() + end
+        blocks[match.group(1)] = (match.start(), body_end, text[match.end():body_end])
+    return blocks, bad
+
+
+def expand_audit_ids(body: str) -> tuple[set[str], list[str]]:
+    ids: set[str] = set()
+    bad: list[str] = []
+    for prefix, number in AUDIT_ANY_ID.findall(body):
+        if prefix not in AUDIT_PREFIX_TOTALS:
+            bad.append(f"unknown audit ID family {prefix}-{number}")
+    for match in AUDIT_ID_RANGE.finditer(body):
+        prefix, start_text, end_prefix, end_text = match.groups()
+        if end_prefix and end_prefix != prefix:
+            bad.append(f"cross-family audit range {match.group(0)}")
+            continue
+        start = int(start_text)
+        end = start if end_text is None else int(end_text)
+        if start > end:
+            bad.append(f"descending audit range {match.group(0)}")
+            continue
+        maximum = AUDIT_PREFIX_TOTALS[prefix]
+        if start < 1 or end > maximum:
+            bad.append(f"out-of-range audit ID {match.group(0)}")
+            continue
+        for number in range(start, end + 1):
+            audit_id = f"{prefix}-{number:02d}"
+            if audit_id in ids:
+                bad.append(f"duplicate audit ID {audit_id} inside one status")
+            ids.add(audit_id)
+    return ids, bad
+
+
+def parse_audit_state(text: str) -> tuple[dict[str, set[str]], dict[str, int], list[str]]:
+    blocks, bad = audit_status_blocks(text)
+    states: dict[str, set[str]] = {}
+    headings = {name: int(value) for name, value in AUDIT_STATUS.findall(text)}
+    for name in ("已修", "部分", "开放"):
+        if name not in blocks:
+            states[name] = set()
+            continue
+        ids, problems = expand_audit_ids(blocks[name][2])
+        states[name] = ids
+        bad += [f"{name}: {problem}" for problem in problems]
+    return states, headings, bad
+
+
+def audit_status_problems(text: str, detail_texts: dict[str, str] | None = None) -> list[str]:
+    """Validate status as an exact partition of the six detail heading sets."""
+    states, headings, bad = parse_audit_state(text)
+    universe, detail_bad = audit_detail_universe(
+        read_audit_details() if detail_texts is None else detail_texts)
+    bad += detail_bad
+    if set(headings) != {"已修", "部分", "开放"}:
+        bad.append("audit status layer must contain one 已修/部分/开放 heading")
+        return bad
+
+    owner: dict[str, str] = {}
+    for status, ids in states.items():
+        if len(ids) != headings[status]:
+            bad.append(f"audit status {status} heading says {headings[status]}, "
+                       f"but its ID list contains {len(ids)}")
+        for audit_id in ids:
+            if audit_id in owner:
+                bad.append(f"audit ID {audit_id} appears in both {owner[audit_id]} and {status}")
+            owner[audit_id] = status
+    actual = set(owner)
+    missing = sorted(universe - actual)
+    extra = sorted(actual - universe)
+    if missing:
+        bad.append(f"audit status layer omits {', '.join(missing)}")
+    if extra:
+        bad.append(f"audit status layer contains invalid IDs {', '.join(extra)}")
+    if len(actual) != len(universe):
+        bad.append(f"audit status layer contains {len(actual)} unique IDs, but details define "
+                   f"{len(universe)}")
+
+    checks = AUDIT_SELF_CHECK.findall(text)
+    if len(checks) != 1:
+        bad.append("audit status layer must contain one machine-readable count self-check")
+    else:
+        fixed, partial, opened, total = map(int, checks[0])
+        stated = {"已修": fixed, "部分": partial, "开放": opened}
+        if stated != headings:
+            bad.append(f"audit self-check {stated} disagrees with status headings {headings}")
+        if fixed + partial + opened != total or total != 97:
+            bad.append("audit status counts must add up to the frozen 97 findings")
+
+    for topic, expected_total in AUDIT_TOPIC_TOTALS:
+        prefix = AUDIT_TOPIC_PREFIX[topic]
+        actual_triple = tuple(sum(1 for audit_id in states[status]
+                                  if audit_id.startswith(prefix + "-"))
+                              for status in ("已修", "部分", "开放"))
+        pattern = re.compile(re.escape(topic) + r" \*\*(\d+)/(\d+)/(\d+)\*\*")
+        matches = pattern.findall(text)
+        if len(matches) != 1:
+            bad.append(f"audit topic {topic} must have one fixed/partial/open triple")
+            continue
+        stated_triple = tuple(map(int, matches[0]))
+        if stated_triple != actual_triple:
+            bad.append(f"audit topic {topic} says {stated_triple}, ID lists say {actual_triple}")
+        if sum(actual_triple) != expected_total:
+            bad.append(f"audit topic {topic} must cover {expected_total} frozen findings")
+    return bad
+
+
+def check_audit_status() -> tuple[list[str], int]:
+    path = ROOT / "docs/codebase-audit-v2.md"
+    text = path.read_text(encoding="utf-8")
+    bad = [f"{path.relative_to(ROOT)}: {problem}"
+           for problem in audit_status_problems(text, read_audit_details())]
+    return bad, 0 if bad else 1
+
+
+def audit_counts(states: dict[str, set[str]]) -> dict[str, int]:
+    return {status: len(ids) for status, ids in states.items()}
+
+
+def rewrite_audit_summaries(text: str, states: dict[str, set[str]]) -> str:
+    counts = audit_counts(states)
+    for status in ("已修", "部分", "开放"):
+        text = re.sub(r"^\*\*" + status + r"（\d+）\*\*$",
+                      f"**{status}（{counts[status]}）**", text, count=1, flags=re.M)
+    text = AUDIT_SELF_CHECK.sub(
+        (f"计数自检：**{counts['已修']} 已修 + {counts['部分']} 部分 + "
+         f"{counts['开放']} 开放 = 97**"), text, count=1)
+    for topic, _ in AUDIT_TOPIC_TOTALS:
+        prefix = AUDIT_TOPIC_PREFIX[topic]
+        triple = tuple(sum(1 for audit_id in states[status]
+                           if audit_id.startswith(prefix + "-"))
+                       for status in ("已修", "部分", "开放"))
+        text = re.sub(re.escape(topic) + r" \*\*\d+/\d+/\d+\*\*",
+                      f"{topic} **{triple[0]}/{triple[1]}/{triple[2]}**",
+                      text, count=1)
+    return text
+
+
+def render_audit_statuses(text: str, states: dict[str, set[str]]) -> str:
+    blocks, problems = audit_status_blocks(text)
+    if problems:
+        return text
+    topic_name = {prefix: topic for topic, prefix in AUDIT_TOPIC_PREFIX.items()}
+    rendered: list[str] = []
+    for status in ("已修", "部分", "开放"):
+        rendered.append(f"**{status}（{len(states[status])}）**\n")
+        for prefix in AUDIT_PREFIX_TOTALS:
+            ids = sorted(audit_id for audit_id in states[status]
+                         if audit_id.startswith(prefix + "-"))
+            if ids:
+                rendered.append(f"- {topic_name[prefix]}（{len(ids)}）：" +
+                                "、".join(f"`{audit_id}`" for audit_id in ids) + ".\n")
+        rendered.append("\n")
+    start = blocks["已修"][0]
+    end = blocks["开放"][1]
+    return rewrite_audit_summaries(text[:start] + "\n".join(rendered).rstrip() +
+                                   "\n\n" + text[end:].lstrip("\n"), states)
+
+
+def check_audit_status_selftest() -> tuple[list[str], int]:
+    """Counts, membership, uniqueness and complete coverage move together."""
+    path = ROOT / "docs/codebase-audit-v2.md"
+    text = path.read_text(encoding="utf-8")
+    details = read_audit_details()
+    baseline = audit_status_problems(text, details)
+    if baseline:
+        return [f"audit status self-test baseline is invalid: {baseline[0]}"], 0
+    states, _, _ = parse_audit_state(text)
+    if not states["开放"]:
+        return ["audit status self-test: no open finding available for migration"], 0
+    moved = sorted(states["开放"])[0]
+    claimed = {status: set(ids) for status, ids in states.items()}
+    claimed["开放"].remove(moved)
+    claimed["已修"].add(moved)
+    numbers_only = rewrite_audit_summaries(text, claimed)
+    if not audit_status_problems(numbers_only, details):
+        return ["audit status self-test: changing only counts without moving an ID stayed green"], 0
+    migrated = render_audit_statuses(text, claimed)
+    problems = audit_status_problems(migrated, details)
+    if problems:
+        return [f"audit status self-test: a coherent open-to-fixed migration failed: "
+                f"{problems[0]}"], 0
+
+    duplicated = {status: set(ids) for status, ids in states.items()}
+    duplicated["已修"].add(moved)
+    problems = audit_status_problems(render_audit_statuses(text, duplicated), details)
+    if not any(f"audit ID {moved} appears in both" in problem for problem in problems):
+        return ["audit status self-test: a duplicate ID across statuses stayed green"], 0
+
+    omitted = {status: set(ids) for status, ids in states.items()}
+    omitted["开放"].remove(moved)
+    problems = audit_status_problems(render_audit_statuses(text, omitted), details)
+    if not any(f"omits {moved}" in problem for problem in problems):
+        return ["audit status self-test: an omitted ID stayed green"], 0
+
+    detail_path = AUDIT_DETAIL_FILES[0][1]
+    added_detail = dict(details)
+    added_detail[detail_path] += "\n## SYN-20 — P3 — detail-universe self-test\n"
+    problems = audit_status_problems(text, added_detail)
+    if not any("contains 20 SYN headings" in problem for problem in problems):
+        return ["audit status self-test: a finding added to a detail stayed green"], 0
+
+    duplicate_detail = dict(details)
+    duplicate_detail[detail_path] += "\n## SYN-01 — P1 — duplicate self-test\n"
+    problems = audit_status_problems(text, duplicate_detail)
+    if not any("audit finding SYN-01 is duplicated" in problem for problem in problems):
+        return ["audit status self-test: a duplicate detail finding stayed green"], 0
+
+    missing_detail = dict(details)
+    missing_detail[detail_path], changed = re.subn(
+        r"^## SYN-19\b[^\n]*\n", "", missing_detail[detail_path], count=1, flags=re.M)
+    if changed != 1:
+        return ["audit status self-test: missing-detail fixture was not mutated"], 0
+    problems = audit_status_problems(text, missing_detail)
+    if not any("contains 18 SYN headings" in problem for problem in problems):
+        return ["audit status self-test: a finding omitted from a detail stayed green"], 0
+    return [], 7
 
 
 def fence_shape_mismatch(rel_tr: str, tr_text: str,
@@ -1116,7 +2154,7 @@ def main() -> None:
     problems: list[str] = []
     blocks = anchors_seen = sections_seen = claims_seen = recorded = 0
     status_seen = counts_seen = indexed_seen = pages_seen = transl_seen = 0
-    contracts_seen = fences_seen = 0
+    contracts_seen = policies_seen = audit_seen = fences_seen = selftests_seen = 0
     version = toolchain_version()
     # What docs/README.md's opening sentence counts: the Markdown documents
     # under docs/, which is DOCS minus the top-level files it does not index
@@ -1136,6 +2174,28 @@ def main() -> None:
     problems += bad
     bad, contracts_seen = check_spec_contracts(texts)
     problems += bad
+    bad, n = check_spec_contracts_selftest(texts)
+    problems += bad
+    selftests_seen += n
+    bad, n = check_effect_inference_probe()
+    problems += bad
+    selftests_seen += n
+    bad, policies_seen = check_repository_contracts()
+    problems += bad
+    bad, n = check_repository_contracts_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_markdown_section_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_sections_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, audit_seen = check_audit_status()
+    problems += bad
+    bad, n = check_audit_status_selftest()
+    problems += bad
+    selftests_seen += n
 
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp)
@@ -1175,7 +2235,10 @@ def main() -> None:
           f"{claims_seen} version claim(s), {status_seen} status line(s), "
           f"{indexed_seen} index entr(ies), {counts_seen} document count(s) "
           f"and {transl_seen} translation(s) resolved; {contracts_seen} pinned "
-          f"spec contract clause(s), 0 unknown")
+          f"spec contract clause(s), {policies_seen} repository policy check(s) and "
+          f"{audit_seen} audit status check(s), {selftests_seen} negative-control "
+          f"self-test(s), "
+          f"0 unknown")
 
 
 if __name__ == "__main__":

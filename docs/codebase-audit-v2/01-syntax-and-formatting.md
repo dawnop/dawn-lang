@@ -157,7 +157,11 @@
 - **影响：** formatter、文档与 grammar corpus 对 canonical spelling 不一致。
 - **建议：** 选择并机器化一条规则。建议使用紧凑 `a..b`；若保留 `a ..b`，规范和教程必须同步。
 
-## SYN-19 — P3 — normative declaration inventory 不完整
+## SYN-19 — P3 — normative declaration inventory 不完整（已修）
+
+> **后续处置（2026-08-09）：已修。** 双语规范的关键字、顶层声明、两处 visibility 与
+> syntax cheat sheet 已统一补入 `opaque type`、`trait`、`impl`、`effect`、`pub trait` 与
+> `pub effect`；`doc-check` 对这些稳定 inventory 做防回退检查。
 
 - **证据：S。** 顶层声明清单漏 `effect`：`docs/spec.md:351`；`pub` 清单漏 `trait` 与 `effect`：`docs/spec.md:399`、`docs/spec.md:1674`；contextual keyword 清单漏 `opaque`：`docs/spec.md:68`。parser 实际支持 `pub trait`、`pub effect` 与 `opaque type`：`selfhost/src/front/parser.dawn:199`、`:217`、`:805`。
 - **影响：** 规范内部不同章节给出不同语法集合，读者无法从总览推导有效表面语法。

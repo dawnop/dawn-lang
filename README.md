@@ -4,12 +4,11 @@
 
 A **small, elegant functional language**: immutable data, algebraic data types with
 exhaustive pattern matching, effects written into the type signature. The language is
-small and so is the implementation — a standard library of 10 modules and 3,300 lines
-with **zero `use java`**; a compiler that is **self-hosted, and the only one there is**
-(`selfhost/`, 54,000 lines of Dawn; the original Kotlin implementation is archived at
-the `kotlin-final` tag). Two **peer** backends: **JVM bytecode** and **C** (handed on
-to `cc`). That the same source gives the same answer on both is held true by a gate,
-not by a promise.
+small and so is the implementation — a compact standard library with **zero `use java`**;
+a compiler that is **self-hosted, and the only one there is** (the original Kotlin
+implementation is archived at the `kotlin-final` tag). Two **peer** backends: **JVM
+bytecode** and **C** (handed on to `cc`). That the same source gives the same answer on
+both is held true by a gate, not by a promise.
 
 ```dawn run
 type Shape =

@@ -24,7 +24,11 @@
 - **影响：** 权威速查直接教给读者不可编译排版，且门禁因 opt-in 没发现。
 - **建议：** 修合法换行；为 fragment 增加 `dawn parse` fence mode，允许 semantic placeholder 但必须 parse。
 
-## GOV-03 — P2 — normative spec 仍混用废弃 v0.1 roadmap
+## GOV-03 — P2 — normative spec 仍混用废弃 v0.1 roadmap（已修）
+
+> **后续处置（2026-08-09）：已修。** 双语 normative spec 已把有效限制改写成当前合同，
+> 删除陈旧 future-directions roadmap；仅保留标题曾叫 “v0.1 draft” 的历史说明。
+> `doc-check` 拒绝第二个 `v0.1` 活动性标签或恢复 §14 roadmap。
 
 - **证据：S。** spec 声明版本跟工具链：`docs/spec.md:5`、`:8`，仍在 `:17`、`:1973` 使用 v0.1 限定；roadmap `:2023`–`:2027` 把 conditional impl、generic body、SAM conversion、newtype/Rune 列为未来。
 - 同文已经定义 conditional impl：`docs/spec.md:468`、SAM conversion：`:1353`、`Char`：`:88`。
@@ -60,7 +64,11 @@
 - **影响：** 当前五包都覆盖，但新增 package 是确定 blind spot。
 - **建议：** `scripts/package-tests.sh` 遍历 `packages/*/dawn.toml`；没有 test block 的 package 也应明确失败或登记豁免。playground 可单列。
 
-## GOV-08 — P2 — CONTRIBUTING 的可执行指令已经失真
+## GOV-08 — P2 — CONTRIBUTING 的可执行指令已经失真（已修）
+
+> **后续处置（2026-08-09）：已修。** quick fmt scope 已与 gate 对齐为
+> `std site selfhost packages examples`，里程碑 progress/retro 路径统一到
+> `docs/history/`；release asset 的既有修复继续保留。`doc-check` 固定命令与路径。
 
 - **证据：S。** quick fmt command 漏 `std`、`examples`：`CONTRIBUTING.md:6`，真实 gate 包含：`.github/workflows/gates.yml:305`；文档要求新建根目录 `docs/m<N>-progress.md`/retro：`CONTRIBUTING.md:50`、`:54`，当前层次是 `docs/history/`：`docs/README.md:141`；release 说明上传 `dawn.jar`：`CONTRIBUTING.md:100`，真实 asset 是 `dawn-selfhost.jar`：`.github/workflows/release.yml:119`。
 - **影响：** 贡献者照做会漏 formatter scope、把文档放错层、寻找不存在的 release asset。
@@ -72,25 +80,39 @@
 - **影响：** 灾难恢复/手工验证时才使用的命令在最需要时失败。
 - **建议：** 删除废弃参数，以当前脚本命令为唯一可执行展开；doc-check 对 runbook command shape 做 smoke。
 
-## GOV-10 — P3 — `.editorconfig` 与 formatter 的缩进相反
+## GOV-10 — P3 — `.editorconfig` 与 formatter 的缩进相反（已修）
+
+> **后续处置（2026-08-09）：已修。** EditorConfig 现在按扩展名规定 Dawn/YAML 两空格、
+> Python/Java 四空格，避免全局四空格与 formatter 冲突；`doc-check` 固定两个配置块。
 
 - **证据：S。** `.editorconfig:3` 对所有文件生效，`:9` 指定四 spaces；Dawn formatter 用两 spaces：`selfhost/src/front/fmt.dawn:5`，CI 强制 formatter：`.github/workflows/gates.yml:305`。
 - **影响：** 支持 EditorConfig 的 editor 主动生成会被官方 formatter 改写的 Dawn/YAML。
 - **建议：** 按 extension 配置：Dawn/YAML 2，Python/Java 4；不要用全局 indent size 覆盖所有语言。
 
-## GOV-11 — P3 — README 的规模指标已显著失真
+## GOV-11 — P3 — README 的规模指标已显著失真（已修）
+
+> **后续处置（2026-08-09）：已修。** 双语 README 删除标准库模块数、标准库/编译器行数
+> 等无决策价值且快速腐烂的精确规模，保留可验证的架构描述；`doc-check` 拒绝旧指标模式。
 
 - **证据：S。** 英文 README 称 std 10 modules/3300 lines：`README.md:7`；中文同步复制：`README.zh-CN.md:8`。当前 `std/modules.txt:4`–`:20` 登记 11 modules，本轮静态计数约 5,690 Dawn lines。
 - **影响：** translation digest 只能证明两份同时，不能证明事实真实；精确数字快速腐烂。
 - **建议：** 从 modules.txt/tracked source 生成 metrics，或删除无决策价值的精确行数。
 
-## GOV-12 — P3 — 同文档 `§N` 引用不校验，spec 已有错链
+## GOV-12 — P3 — 同文档 `§N` 引用不校验，spec 已有错链（已修）
+
+> **后续处置（2026-08-09）：已修。** module system 错链已由 §11 改为 §10；
+> `doc-check` 对双语 normative spec 的 bare `§N` 一律按同文件章节校验，显式 `.md`
+> 跨文档引用继续按目标文件校验。RFC 章节改写为 “section N”，避免把外部标准误当本 spec。
 
 - **证据：S。** `docs/spec.md:26` 把 module system 指向 §11；实际 module system 是 `docs/spec.md:1582` 的 §10，§11 是 std：`:1733`。doc-check 只检查显式带目标文件的 `§N`：`scripts/doc-check.py:548`，无法推断目标时跳过：`:577`。
 - **影响：** normative spec 的导航错误无法被门禁发现。
 - **建议：** 至少对 spec/spec.en 的 bare `§N` 当作同文件引用；跨文档引用要求显式 filename 或 escape marker。
 
-## GOV-13 — P3 — current package design 同时说 lock 已落地和“不做 lock”
+## GOV-13 — P3 — current package design 同时说 lock 已落地和“不做 lock”（已修）
+
+> **后续处置（2026-08-09）：已修。** current design 现描述真实 schema 1：`dawn lock`
+> 记录直接坐标及 resolved artifact 的文件名/摘要，`--check` 与 build/run/test 核对，
+> 并明确只冻结 Maven/Java 闭包且不能恢复删除的上游 artifact。旧 no-lock 结论被门禁禁止。
 
 - **证据：S。** header 声明 package/Maven 项目已落地：`docs/package-design.md:3`；正文仍把 project lockfile 列为砍掉：`:245`，并说 exact Maven coordinate 不需要 lock：`:247`。实现与仓库已有 lock：`selfhost/src/pkg/maven.dawn:188`、`selfhost/dawn.lock:1`。
 - **影响：** 标 current 的单一设计说明给出相反 reproducibility model。

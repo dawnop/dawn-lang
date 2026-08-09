@@ -242,19 +242,22 @@ hashtable problem。
 | **自建 sumdb / 透明日志** | 给「不信任 proxy」用的。我们没有 proxy。**但 hash 字段先留在格式里。** |
 | **上界约束 / exclude / 传递 exclude** | 见 §4.5，会当场炸掉 MVS 的 Horn 结构。 |
 | **版本区间语法** | MVS 只要最小版本。将来升区间无损，反之有损。 |
-| **lockfile（项目 A）** | 见 §4.6。 |
+### 4.6 `dawn.lock` schema 1 冻结 Java 依赖闭包
 
-### 4.6 项目 A 不做 lockfile，靠「禁 SNAPSHOT + 禁区间」换可复现
+精确的直接坐标仍不足以独自保证复现：Coursier 会解析传递 POM，镜像可能返回不同字节，
+上游传递图也可能改变。当前实现因此使用独立的 `dawn.lock`，而不是让 manifest 兼任 lockfile。
 
-Go 的形态是 **manifest 兼任 lockfile**（1.17 图剪枝后 go.mod 显式列全部传递依赖）。
-Filippo Valsorda 说得对——"go.mod serves as both manifest and lockfile"；
-**别学 Go 官方宣传「我们不需要 lockfile」**，我们需要 lockfile 的功能，只是把它并进一个文件。
+- `dawn lock [<dir>]` 解析 `[java-deps]`，把直接坐标和最终 artifact 的文件名、SHA-256
+  写入工程旁的 `dawn.lock`；前两行是生成注释，首个非注释数据行是 `schema 1`，其余记录
+  排序以便稳定 diff。
+- `dawn lock --check [<dir>]` 只验证、不写回；文件缺失、坐标变化、artifact 增减或字节摘要
+  变化都失败。
+- `build`、`run`、`test` 在 lock 存在时重新解析并逐项核对；只有 `dawn lock` 会重写它。
+- schema 1 只冻结 Maven/Java 依赖闭包，不冻结 source package 的 MVS 图，也不能让已删除的
+  上游 artifact 重新出现；它能准确指出缺失或漂移，但不承诺离线恢复。
 
-项目 A 更简单：直接坐标是**精确版本**，Maven Central 的 release 版本**不可变**，
-所以只要**禁掉 SNAPSHOT 和版本区间**，coursier 的解析结果就是确定的——不需要 lock 也可复现。
-这条纪律与 §4.5 的 MVS 红线同源（都是「不准有上界」）。
-
-将来若发现传递依赖里有区间，再加 `dawn.lock`（schema 版本让这一步无痛）。
+`SNAPSHOT` 与版本区间仍被禁止；这既保持直接声明简单，也避免给 MVS 引入上界语义，
+但它们不再被当作 lockfile 的替代品。
 
 ### 4.7 模块路径的分隔符钉死 `/`（用户定案 2026-08-07）
 
@@ -288,7 +291,7 @@ Filippo Valsorda 说得对——"go.mod serves as both manifest and lockfile"；
 
 ### 2. 每个文件第一行写 schema 版本
 
-`dawn.toml`、将来的 lock、hash 字符串本身都要。这是唯一一条**把不可逆变可逆**的技巧
+`dawn.toml`、已经落地的 `dawn.lock`、hash 字符串本身都要。这是唯一一条**把不可逆变可逆**的技巧
 （"Version the schema, not the tool"）。
 
 Zig 是活体教材：它承诺过 hash 格式变更给一个 release 的宽限期，**没做到**

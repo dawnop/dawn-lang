@@ -102,7 +102,13 @@
 - **影响：** effect system 系统性过度近似；pure library 无法用语言提供的唯一 cleanup/barrier primitive。
 - **建议：** 改成 effect-polymorphic：barrier 返回 thunk/release/use effect union。`catch_fault` 是否应保持 IO-only可单独由 fault source 决定，不应把 panic 与 cleanup 一并绑死。
 
-## SEM-12 — P2 — “私有函数推断效果”实际只推断 base IO
+## SEM-12 — P2 — “私有函数推断效果”实际只推断 base IO（已修）
+
+> **后续处置（2026-08-09）：已修。** 双语规范现按 checker 的真实分支写明：私有函数
+> 省略返回类型时进入返回类型推断；只有它同时完全省略效果注记，才在同一路径推断 base
+> pure / `!io`。显式 `-> T` 而不写效果是 pure 承诺，函数体做 IO 会报错；若省略返回类型
+> 但显式写效果行，则只推断返回类型。具名 effect 从不推断；一旦写出 `!Ask`，效果行固定，
+> 同时做 IO 必须声明 `!(io | Ask)`。`doc-check` 以双语结构契约和真实 checker 探针固定这些边界。
 
 - **证据：S。** 规范称省略 private signature 时推断 return 与 effect：`docs/spec.md:366`；实现只推断 base effect并拒绝 named label：`selfhost/src/check/checker.dawn:7111`、`:7127`。
 - **影响：** `!io` 与用户 effect 的书写纪律不正交；文档让用户期待不写 annotation，实际 named effect 必须手写。
@@ -121,7 +127,11 @@
 - **影响：** 用户不能声明发散函数；退出后的代码被视为可达，branch/callback type 不精确。
 - **建议：** 暴露 reserved builtin `Never`，限制 value construction，完善 JVM/C unreachable return lowering，并把 `io.exit` 改为 `-> Never !io`。
 
-## SEM-15 — P2 — `bracket` 的双失败语义未定义且文字承诺过强
+## SEM-15 — P2 — `bracket` 的双失败语义未定义且文字承诺过强（已修）
+
+> **后续处置（2026-08-09，状态纠偏）：已修。** #193 已把双失败定为 release-wins：
+> release 自己逃逸的失败顶掉原失败，且没有 suppressed chain；双语规范、native/JVM
+> spike 与 `doc-check` 已共同固定。这里此前只是状态层漏更新，没有新的语义改动。
 
 - **证据：S。** 规范保证 release 后“原失败原样继续”：`docs/spec.md:1565`。JVM 在 catch path 调 release 后才执行原 `ATHROW`：`selfhost/src/jvm/rtclasses.dawn:907`；native 也先调用 release：`runtime/c/dawn_rt.c:913`。release 自己失败时后续 rethrow 不会执行。
 - **边界：** use panic `"use"`，release panic `"release"`，最终传播 release failure，原根因丢失。

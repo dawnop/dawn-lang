@@ -1,14 +1,13 @@
-<!-- doc-check: translation-of README.md @ 0ad6a7309435e5eb -->
+<!-- doc-check: translation-of README.md @ f5e70f5f105cbc90 -->
 
 # Dawn
 
 *[English](README.md) — 正本是英文；本文是它的译本，`scripts/doc-check.py` 盯着两者不脱节。*
 
 一门**小而优雅的函数式语言**：不可变数据、代数数据类型与穷尽的模式匹配、把效果写进
-类型签名。语言小，实现也小——标准库 10 个模块 3,300 行、**零 `use java`**；编译器
-**已自举且只此一套**（`selfhost/`，用 Dawn 写的 5.4 万行，最初的 Kotlin 实现归档在
-`kotlin-final` tag）。两个**平级**后端：**JVM 字节码**与 **C**（再交给 `cc`）；同一份源码
-在两边给出同一个答案，这件事由门禁机器管着，不是一句承诺。
+类型签名。语言小，实现也小——紧凑的标准库保持**零 `use java`**；编译器**已自举且只此一套**
+（最初的 Kotlin 实现归档在 `kotlin-final` tag）。两个**平级**后端：**JVM 字节码**与 **C**
+（再交给 `cc`）；同一份源码在两边给出同一个答案，这件事由门禁机器管着，不是一句承诺。
 
 ```dawn run
 type Shape =
