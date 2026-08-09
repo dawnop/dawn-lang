@@ -6,6 +6,7 @@
 # wrapper was a Java stream class.
 
 use std/bytes
+use std/bytes.{Buf}
 use deflate
 use crc32
 
@@ -17,73 +18,137 @@ const FHCRC: Int = 2
 const FEXTRA: Int = 4
 const FNAME: Int = 8
 const FCOMMENT: Int = 16
+const RESERVED: Int = 0xE0
+const MASK32: Int = 0xFFFFFFFF
 
-fn at(b: Bytes, i: Int) -> Int = if i < bytes.len(b) { bytes.at(b, i) } else { -1 }
+type Member = { out: Bytes, next: Int }
 
-## Skip a NUL-terminated field, returning the index just past the NUL.
-fn skip_cstr(b: Bytes, from: Int) -> Int = {
+fn le16(b: Bytes, i: Int) -> Int = bytes.at(b, i) | (bytes.at(b, i + 1) << 8)
+
+fn le32(b: Bytes, i: Int) -> Int =
+  bytes.at(b, i) | (bytes.at(b, i + 1) << 8) | (bytes.at(b, i + 2) << 16) |
+(bytes.at(b, i + 3) << 24)
+
+fn room(b: Bytes, from: Int, n: Int) -> Bool =
+  from >= 0 && from <= bytes.len(b) && n >= 0 && n <= bytes.len(b) - from
+
+## Skip one of gzip's NUL-terminated optional fields without fabricating the
+## terminator at EOF.
+fn skip_cstr(b: Bytes, from: Int, label: String) -> Result[Int, String] = {
   var i = from
   while i < bytes.len(b) && bytes.at(b, i) != 0 {
     i = i + 1
   }
-  i + 1
+  if i >= bytes.len(b) {
+    Err("gzip: truncated " ++ label ++ " (missing NUL terminator)")
+  } else {
+    Ok(i + 1)
+  }
 }
 
-## Decompress a gzip member. Trailing members (gzip allows concatenation) are
-## not read: nothing produces them here, and silently dropping data would be
-## worse than not supporting it.
-pub fn gunzip(src: Bytes) -> Result[Bytes, String] = gunzip_bounded(src, None)
-
-## The same, with a ceiling on the uncompressed size -- enforced while the
-## output is being built, so a member that expands to gigabytes is refused
-## instead of materialised and then measured. `None` is no ceiling.
-pub fn gunzip_bounded(src: Bytes, cap: Option[Int]) -> Result[Bytes, String] = {
-  if bytes.len(src) < 18 { return Err("gzip: too short to be an archive") }
-  if at(src, 0) != MAGIC0 || at(src, 1) != MAGIC1 {
+## Validate one member header and return the DEFLATE start. FHCRC is the low
+## 16 bits of the CRC-32 over every header byte before the checksum itself.
+fn header_end(src: Bytes, start: Int) -> Result[Int, String] = {
+  if not room(src, start, 10) { return Err("gzip: truncated member header") }
+  if bytes.at(src, start) != MAGIC0 || bytes.at(src, start + 1) != MAGIC1 {
     return Err("gzip: not a gzip archive (bad magic)")
   }
-  if at(src, 2) != DEFLATE_METHOD {
-    return Err("gzip: compression method " ++ to_string(at(src, 2)) ++ " is not deflate")
+  if bytes.at(src, start + 2) != DEFLATE_METHOD {
+    return Err("gzip: compression method " ++ to_string(bytes.at(src, start + 2)) ++
+        " is not deflate")
   }
-  let flags = at(src, 3)
-  var i = 10
-  if flags & FEXTRA != 0 {
-    let xlen = at(src, i) | (at(src, i + 1) << 8)
-    i = i + 2 + xlen
+  let flags = bytes.at(src, start + 3)
+  if flags & RESERVED != 0 {
+    return Err("gzip: reserved flags are set")
   }
-  if flags & FNAME != 0 { i = skip_cstr(src, i) }
-  if flags & FCOMMENT != 0 { i = skip_cstr(src, i) }
-  if flags & FHCRC != 0 { i = i + 2 }
-  if i >= bytes.len(src) - 8 { return Err("gzip: header runs past the end") }
 
-  # the last eight bytes are CRC-32 and ISIZE, not deflate data
-  let body = bytes.slice(src, i, bytes.len(src) - 8)
-  let out = match deflate.inflate_end(body, cap) {
-    Ok(pr) -> {
-      let (o, used) = pr
-      # Everything between the header and the trailer belongs to this member,
-      # so a deflate stream that ends before the trailer leaves bytes nobody
-      # accounted for -- a second member, or damage.
-      if used != bytes.len(body) {
-        return Err("gzip: the member ends " ++ to_string(bytes.len(body) - used) ++
-            " bytes before its trailer")
-      }
-      o
+  var i = start + 10
+  if flags & FEXTRA != 0 {
+    if not room(src, i, 2) { return Err("gzip: truncated extra-field length") }
+    let xlen = le16(src, i)
+    i = i + 2
+    if not room(src, i, xlen) { return Err("gzip: truncated extra field") }
+    i = i + xlen
+  }
+  if flags & FNAME != 0 {
+    i = match skip_cstr(src, i, "original filename") {
+      Ok(next) -> next
+      Err(e) -> return Err(e)
     }
+  }
+  if flags & FCOMMENT != 0 {
+    i = match skip_cstr(src, i, "comment") {
+      Ok(next) -> next
+      Err(e) -> return Err(e)
+    }
+  }
+  if flags & FHCRC != 0 {
+    if not room(src, i, 2) { return Err("gzip: truncated header checksum") }
+    let got = le16(src, i)
+    let want = crc32.sum(bytes.slice(src, start, i)) & 0xFFFF
+    if got != want { return Err("gzip: header checksum mismatch") }
+    i = i + 2
+  }
+  Ok(i)
+}
+
+fn member(src: Bytes, start: Int, cap: Option[Int]) -> Result[Member, String] = {
+  let body = match header_end(src, start) {
+    Ok(i) -> i
     Err(e) -> return Err(e)
   }
-  let n = bytes.len(src)
-  let isize = at(src, n - 4) | (at(src, n - 3) << 8) | (at(src, n - 2) << 16) |
-  (at(src, n - 1) << 24)
-  # ISIZE is the size mod 2^32, so this compares what the format actually says
-  if bytes.len(out) & 0xFFFFFFFF != isize & 0xFFFFFFFF {
-    return Err("gzip: decompressed " ++ to_string(bytes.len(out)) ++
-        " bytes, the archive says " ++ to_string(isize))
+  let inflated = match deflate.inflate_from(src, body, cap) {
+    Ok(p) -> p
+    Err(e) -> return Err(e)
   }
-  # The length agreeing says almost nothing -- a flipped bit does not change
-  # it. The CRC is the check that catches damage.
-  let want = at(src, n - 8) | (at(src, n - 7) << 8) | (at(src, n - 6) << 16) |
-  (at(src, n - 5) << 24)
-  if crc32.sum(out) != want { return Err("gzip: checksum mismatch") }
-  Ok(out)
+  let (out, deflate_end) = inflated
+  let trailer = deflate_end
+  if not room(src, trailer, 8) { return Err("gzip: truncated member trailer") }
+
+  let want_crc = le32(src, trailer)
+  if crc32.sum(out) != want_crc { return Err("gzip: checksum mismatch") }
+  let want_size = le32(src, trailer + 4)
+  if bytes.len(out) & MASK32 != want_size & MASK32 {
+    return Err("gzip: decompressed " ++ to_string(bytes.len(out)) ++
+        " bytes, the member says " ++ to_string(want_size))
+  }
+  Ok(Member { out: out, next: trailer + 8 })
+}
+
+fn limit_of(cap: Option[Int]) -> Result[Int, String] =
+  match cap {
+    None -> Ok(-1)
+    Some(n) ->
+      if n < 0 { Err("deflate: a negative output limit (" ++ to_string(n) ++ ")") } else { Ok(n) }
+  }
+
+fn remaining_limit(lim: Int, out: Buf) -> Option[Int] =
+  if lim < 0 { None } else { Some(lim - bytes.size(out)) }
+
+## Decompress every gzip member and concatenate their uncompressed payloads in
+## member order. Bytes after the final trailer are another member or damage;
+## they are never ignored.
+pub fn gunzip(src: Bytes) -> Result[Bytes, String] = gunzip_bounded(src, None)
+
+## The same, with one ceiling over the aggregate uncompressed output. Each
+## member receives only the remaining budget, so concatenation cannot reset the
+## limit. `None` is no ceiling.
+pub fn gunzip_bounded(src: Bytes, cap: Option[Int]) -> Result[Bytes, String] = {
+  let n = bytes.len(src)
+  if n == 0 { return Err("gzip: too short to be an archive") }
+  let lim = match limit_of(cap) {
+    Ok(v) -> v
+    Err(e) -> return Err(e)
+  }
+  var out = bytes.buf()
+  var cursor = 0
+  while cursor < n {
+    let parsed = match member(src, cursor, remaining_limit(lim, out)) {
+      Ok(m) -> m
+      Err(e) -> return Err(e)
+    }
+    out = bytes.put_bytes(out, parsed.out)
+    cursor = parsed.next
+  }
+  Ok(bytes.freeze(out))
 }

@@ -30,11 +30,50 @@
 - **影响：** truncated stream 可能被接受，破坏 archive validator 的“完整读取”前提。
 - **建议：** bit read 返回 `Result`/exhausted flag；EOB 也必须证明实际 bits 足够；container mode 要求 compressed slice 精确消费。
 
-## LIB-04 — P2 — GZIP 忽略 reserved flags 与 header CRC
+## LIB-04 — P2 — GZIP header 与 member 边界不完整（已修）
 
-- **证据：S。** 读取 flags 后不拒绝高三位：`packages/inflate/src/gzip.dawn:43`；`FHCRC` 只跳两 bytes：`:51`。
-- **影响：** 格式明确标记的非法 reserved bits 与 header corruption 都被接受。
-- **建议：** `flags & 0xE0 != 0` hard error；存在 FHCRC 时验证 header CRC16。
+> **后续处置（2026-08-09）：已修。** `gunzip`/`gunzip_bounded` 的公开签名不变，内部改为
+> 迭代读取 RFC 1952 member 序列。每个 member 从真实 DEFLATE consumed offset 定位自己的
+> trailer，分别验证 CRC32/ISIZE，再把 payload 追加到同一个 `bytes.Buf`；trailer 后若还有
+> bytes，它们必须构成下一个完整 member，故合法 concatenated gzip 被接受、尾随垃圾被拒绝：
+> `packages/inflate/src/gzip.dawn:95`、`:136`。同一 `deflate` 模块非破坏性新增公开低层 cursor
+> API `inflate_from(src, from, cap)`：它直接从原始 `Bytes` 的绝对 offset 解码、返回绝对 end
+> offset，并严格拒绝负数或超过输入长度的 `from`，因而不为每个 member 复制一次剩余 suffix：
+> `packages/inflate/src/deflate.dawn:246`。原有 `inflate`/`inflate_bounded`/`inflate_end` 的签名
+> 与从 byte 0 解码的语义不变，但不能声称整个 DEFLATE 公开 API 未变。Dawn 只有 module-private、
+> 没有通用 package-private；把 cursor 放进另一个带 `pub` seam 的 “internal” 模块仍是用户可达
+> API，所以实现保持单一 `deflate.dawn` 并诚实记录这个公开新增。
+>
+> 版本纪律同步落地：`inflate` 从 1.0.0 升至 1.1.0，因为新增公开函数属于 backward-compatible
+> minor，而非可留在原 patch version 下的实现修正：`packages/inflate/dawn.toml:3`。版本提升与
+> API 变更同批完成，避免 MVS 在同一 name/version 下观察到不同内容；README 也明确旧三个入口
+> 兼容及 1.1.0 的新增范围：`packages/inflate/README.md:6`。
+>
+> header parser 现在拒绝 `FLG & 0xE0 != 0`，逐项证明 FEXTRA 长度与内容存在、FNAME/FCOMMENT
+> 含 NUL terminator，并在 FHCRC 存在时对 checksum 字段之前的完整 header 计算 CRC32 低 16 位：
+> `packages/inflate/src/gzip.dawn:61`、`:88`。这里订正旧审计的合规措辞：reserved bits 非零是 RFC
+> 明确要求 compliant decompressor 报错的条件；RFC 的最低合规条款只要求能跳过 optional
+> fields，并不强制验证 FHCRC。因此旧实现的 FHCRC 行为是完整性缺口，不宜单独称为最低合规
+> 违规；本次仍选择验证，因为字段既然存在就不应静默接受已检测出的 header corruption。
+>
+> bounded 语义按聚合输出扣减剩余预算，不在 member 间重置；member 自身仍在 DEFLATE 写入前
+> 拒绝超限：`packages/inflate/src/gzip.dawn:126`。循环与 `bytes.Buf` 使大量小 member 不依赖
+> 递归，也不反复拼接累计结果；每个 payload 仅在 trailer 验证后线性追加一次。
+>
+> `inflate-contract` 覆盖空 member、2/3 members、多个空 member、完整 optional header、第二
+> member 的合法 FHCRC 及坏 CRC/ISIZE/magic/FHCRC/reserved bit、FEXTRA 截断、FNAME/FCOMMENT
+> 缺 NUL、尾随垃圾、聚合 cap 与 512 个 tiny members，并以同一纯 Dawn 语料对拍 JVM/native：
+> `scripts/inflate-contract/gzip_cases.dawn:125`、`:156`、`:194`。六个持久行为负控分别删除
+> member loop、恢复“文件最后 8 bytes 是 trailer”、按 member 重置 cap、跳过 reserved/FHCRC 验证，以及把
+> FHCRC checksum 起点从当前 member 错改成 archive 0；每个 mutant 都必须成功编译运行并由
+> 对应 case 把合同打红：`scripts/inflate-contract/run.sh:90`。
+
+- **修复前证据：S。** flags 高三位未拒绝；FHCRC 只前移 cursor；代码把整个文件最后 8 bytes
+  当作唯一 trailer，因而拒绝合法 concatenated members。
+- **修复前影响：** 非法 reserved flags 与 header corruption 被接受；合法多 member gzip 被拒，
+  且 container framing 依赖“最后 trailer”而不是真实 DEFLATE end。
+- **处置：** 已以严格、迭代、aggregate-bounded 的 member parser 替换，并由双后端行为合同与
+  六项 mutation 常驻守门。
 
 ## LIB-05 — P2 — `bytes.index_of` 的范围判断可 Int overflow（已修）
 

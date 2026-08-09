@@ -1,0 +1,197 @@
+# Pure Dawn boundary contract for RFC 1952 member framing.
+#
+# The Java differential proves that ordinary streams interoperate with another
+# implementation. These hand-built stored members ask the container questions
+# Java's GZIPOutputStream cannot express: optional headers, FHCRC, concatenated
+# members, aggregate limits and damage after the first member. Keeping the
+# builder here, outside the package, prevents test-only constructors from
+# becoming production API or Core.
+
+use std/bytes
+use std/bytes.{Buf}
+use std/io
+use std/str
+use inflate/gzip
+use inflate/crc32
+
+const FHCRC: Int = 2
+const FEXTRA: Int = 4
+const FNAME: Int = 8
+const FCOMMENT: Int = 16
+
+fn values(out0: Buf, xs: List[Int]) -> Buf = {
+  var out = out0
+  for x in xs { out = bytes.put(out, x) }
+  out
+}
+
+fn little32(out0: Buf, n: Int) -> Buf =
+  values(out0, [n, n >>> 8, n >>> 16, n >>> 24])
+
+fn fixed_header(flags: Int) -> Buf =
+  values(bytes.buf(), [0x1F, 0x8B, 8, flags, 0, 0, 0, 0, 0, 0xFF])
+
+## One stored DEFLATE block inside one gzip member. The contract uses only
+## small payloads, so the stored block's 16-bit length is sufficient.
+fn stored_member(
+  data: Bytes,
+  flags: Int,
+  extra: Bytes,
+  name: Bytes,
+  comment: Bytes,
+) -> Bytes = {
+  var out = fixed_header(flags)
+  if flags & FEXTRA != 0 {
+    let n = bytes.len(extra)
+    out = values(out, [n, n >>> 8])
+    out = bytes.put_bytes(out, extra)
+  }
+  if flags & FNAME != 0 {
+    out = bytes.put_bytes(out, name)
+    out = bytes.put(out, 0)
+  }
+  if flags & FCOMMENT != 0 {
+    out = bytes.put_bytes(out, comment)
+    out = bytes.put(out, 0)
+  }
+  if flags & FHCRC != 0 {
+    let hcrc = crc32.sum(bytes.freeze(out)) & 0xFFFF
+    out = values(out, [hcrc, hcrc >>> 8])
+  }
+
+  let n = bytes.len(data)
+  let inverse = ~n & 0xFFFF
+  out = values(out, [1, n, n >>> 8, inverse, inverse >>> 8])
+  out = bytes.put_bytes(out, data)
+  out = little32(out, crc32.sum(data))
+  out = little32(out, n)
+  bytes.freeze(out)
+}
+
+fn plain(s: String) -> Bytes =
+  stored_member(bytes.utf8(s), 0, bytes.utf8(""), bytes.utf8(""), bytes.utf8(""))
+
+fn concat(parts: List[Bytes]) -> Bytes = {
+  var out = bytes.buf()
+  for part in parts { out = bytes.put_bytes(out, part) }
+  bytes.freeze(out)
+}
+
+fn flip_mask(b: Bytes, i: Int, mask: Int) -> Bytes = {
+  var out = bytes.buf()
+  var k = 0
+  while k < bytes.len(b) {
+    out = bytes.put(out, if k == i { bytes.at(b, k) ^ mask } else { bytes.at(b, k) })
+    k = k + 1
+  }
+  bytes.freeze(out)
+}
+
+fn flip(b: Bytes, i: Int) -> Bytes = flip_mask(b, i, 0x80)
+
+fn short_header(flags: Int, tail: List[Int]) -> Bytes =
+  bytes.freeze(values(fixed_header(flags), tail))
+
+fn expect_bytes(label: String, got: Result[Bytes, String], want: Bytes) -> Int !io =
+  match got {
+    Ok(out) ->
+      if out == want {
+        0
+      } else {
+        io.println(label ++ ": returned the wrong bytes")
+        1
+      }
+    Err(e) -> {
+      io.println(label ++ ": was refused: " ++ e)
+      1
+    }
+  }
+
+fn expect_error(label: String, got: Result[Bytes, String], reason: String) -> Int !io =
+  match got {
+    Ok(_) -> {
+      io.println(label ++ ": damaged input was accepted")
+      1
+    }
+    Err(e) ->
+      if str.contains(e, reason) {
+        0
+      } else {
+        io.println(label ++ ": wrong refusal `" ++ e ++ "`, wanted `" ++ reason ++ "`")
+        1
+      }
+  }
+
+pub fn check() -> Int !io = {
+  var bad = 0
+  let empty = plain("")
+  let first = plain("a")
+  let second = plain("bc")
+  let third = plain("def")
+  let pair = concat([first, second])
+
+  bad = bad + expect_bytes("empty member", gzip.gunzip(empty), bytes.utf8(""))
+  bad = bad + expect_bytes("concatenated members", gzip.gunzip(pair), bytes.utf8("abc"))
+  bad = bad + expect_bytes("three members", gzip.gunzip(concat([first, second, third])),
+    bytes.utf8("abcdef"))
+  bad = bad + expect_bytes("multiple empty members", gzip.gunzip(concat([empty, empty, empty])),
+    bytes.utf8(""))
+
+  let all_flags = FHCRC | FEXTRA | FNAME | FCOMMENT
+  let optional = stored_member(bytes.utf8("ok"), all_flags, bytes.utf8("xyz"),
+    bytes.utf8("name.txt"), bytes.utf8("comment"))
+  bad = bad + expect_bytes("all optional fields", gzip.gunzip(optional), bytes.utf8("ok"))
+
+  let second_at = bytes.len(first)
+  bad = bad + expect_error("bad CRC in second member",
+    gzip.gunzip(flip(pair, second_at + bytes.len(second) - 8)), "checksum mismatch")
+  bad = bad + expect_error("bad ISIZE in second member",
+    gzip.gunzip(flip(pair, second_at + bytes.len(second) - 1)), "member says")
+  bad = bad + expect_error("bad header in second member", gzip.gunzip(flip(pair, second_at)),
+    "bad magic")
+
+  let checked = stored_member(bytes.utf8("z"), FHCRC, bytes.utf8(""), bytes.utf8(""),
+    bytes.utf8(""))
+  let checked_pair = concat([first, checked])
+  bad = bad + expect_bytes("valid FHCRC in second member", gzip.gunzip(checked_pair),
+    bytes.utf8("az"))
+  bad = bad + expect_error("bad FHCRC in second member",
+    gzip.gunzip(flip(checked_pair, second_at + 10)), "header checksum")
+  for bit in [0x20, 0x40, 0x80] {
+    bad = bad + expect_error("reserved flags in later member",
+      gzip.gunzip(flip_mask(pair, second_at + 3, bit)), "reserved flags")
+  }
+
+  bad = bad + expect_error("truncated extra length", gzip.gunzip(short_header(FEXTRA, [3])),
+    "extra-field length")
+  bad = bad + expect_error("truncated extra data",
+    gzip.gunzip(short_header(FEXTRA, [3, 0, 1, 2])), "extra field")
+  bad = bad + expect_error("filename without NUL",
+    gzip.gunzip(short_header(FNAME, [97, 98])), "original filename")
+  bad = bad + expect_error("comment without NUL",
+    gzip.gunzip(short_header(FCOMMENT, [97, 98])), "comment")
+  bad = bad + expect_error("truncated FHCRC", gzip.gunzip(short_header(FHCRC, [1])),
+    "header checksum")
+  bad = bad + expect_error("trailing garbage", gzip.gunzip(concat([first, bytes.utf8("x")])),
+    "member header")
+
+  bad = bad + expect_bytes("aggregate cap exact", gzip.gunzip_bounded(pair, Some(3)),
+    bytes.utf8("abc"))
+  bad = bad + expect_error("aggregate cap is not reset", gzip.gunzip_bounded(pair, Some(2)),
+    "byte limit")
+  bad = bad + expect_bytes("empty members fit a zero cap",
+    gzip.gunzip_bounded(concat([empty, empty]), Some(0)), bytes.utf8(""))
+
+  let tiny = plain("x")
+  var many = bytes.buf()
+  var want_many = bytes.buf()
+  var i = 0
+  while i < 512 {
+    many = bytes.put_bytes(many, tiny)
+    want_many = bytes.put(want_many, 120)
+    i = i + 1
+  }
+  bad = bad + expect_bytes("many tiny members", gzip.gunzip(bytes.freeze(many)),
+    bytes.freeze(want_many))
+  bad
+}

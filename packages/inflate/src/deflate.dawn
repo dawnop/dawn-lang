@@ -32,7 +32,8 @@ use std/str
 ## ended there would have: `past_end` is true and `bit` is 0 in both cases.
 type Bits = { src: Bytes, pos: Int, bit: Int, over: Bool }
 
-fn bits_of(src: Bytes) -> Bits = Bits { src: src, pos: 0, bit: 0, over: false }
+fn bits_from(src: Bytes, from: Int) -> Bits =
+  Bits { src: src, pos: from, bit: 0, over: false }
 
 ## `n` bits as an integer, low bit first.
 fn take(b: Bits, n: Int) -> (Int, Bits) = {
@@ -234,12 +235,24 @@ pub fn inflate_bounded(src: Bytes, cap: Option[Int]) -> Result[Bytes, String] =
 ## something; without this it has to take the decompressor's word that whatever
 ## followed the final block was not part of the member.
 pub fn inflate_end(src: Bytes, cap: Option[Int]) -> Result[(Bytes, Int), String] = {
+  inflate_from(src, 0, cap)
+}
+
+## Decompress a raw DEFLATE stream beginning at `from`, and return the output
+## together with the absolute byte index immediately after the stream. Gzip
+## needs this cursor form because slicing off the remaining suffix for every
+## concatenated member would copy that suffix every time and make many small
+## members quadratic in the archive size.
+pub fn inflate_from(src: Bytes, from: Int, cap: Option[Int]) -> Result[(Bytes, Int), String] = {
+  if from < 0 || from > bytes.len(src) {
+    return Err("deflate: start offset " ++ to_string(from) ++ " is out of range")
+  }
   let lim = match limit_of(cap) {
     Ok(n) -> n
     Err(e) -> return Err(e)
   }
   var out = bytes.buf()
-  var st = bits_of(src)
+  var st = bits_from(src, from)
   var last = false
   while not last {
     if past_end(st) { return Err("deflate: truncated before the final block") }
@@ -454,9 +467,31 @@ fn raw(xs: List[Int]) -> Bytes = {
 # one's complement, and the two literal bytes.
 fn stored_hi() -> Bytes = raw([0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105])
 
-test "a stored block round-trips and reports what it consumed" {
+test "the original entry points still decode from byte zero" {
   assert inflate(stored_hi()) == Ok(bytes.utf8("hi"))
-  assert inflate_end(stored_hi(), None) == Ok((bytes.utf8("hi"), 7))
+  let suffixed = raw([0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105, 0xCC])
+  assert inflate_end(suffixed, None) == Ok((bytes.utf8("hi"), 7))
+}
+
+test "the cursor starts at a prefix and returns an absolute end offset" {
+  let prefixed = raw([0xAA, 0xBB, 0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105, 0xCC])
+  assert inflate_from(prefixed, 2, None) == Ok((bytes.utf8("hi"), 9))
+  assert inflate_from(prefixed, 2, Some(2)) == Ok((bytes.utf8("hi"), 9))
+  match inflate_from(prefixed, 2, Some(1)) {
+    Err(e) -> { assert str.contains(e, "1 byte limit") }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "the cursor refuses starts outside the source" {
+  match inflate_from(stored_hi(), 0 - 1, None) {
+    Err(e) -> { assert str.contains(e, "start offset -1 is out of range") }
+    Ok(_) -> { assert false }
+  }
+  match inflate_from(stored_hi(), 8, None) {
+    Err(e) -> { assert str.contains(e, "start offset 8 is out of range") }
+    Ok(_) -> { assert false }
+  }
 }
 
 test "a truncated fixed block is not finished off with bits that are not there" {
