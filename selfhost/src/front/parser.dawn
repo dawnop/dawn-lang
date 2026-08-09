@@ -60,6 +60,22 @@ type St = { pos: Int, diags: List[Diag] }
 
 alias PR[T] = Result[(St, T), (St, Diag)]
 
+type TopDeclKind =
+  | HFn
+  | HType
+  | HAlias
+  | HConst
+  | HTrait
+  | HImpl
+  | HEffect
+  | HUse
+  | HTest
+  | HOpaqueType
+  | HBadOpaque
+  | HBadPub
+
+type TopDeclHead = { kind: TopDeclKind, st: St, is_pub: Bool }
+
 fn cur(p: P, st: St) -> Token = tok_at(p, st.pos, 0)
 
 fn tok_at(p: P, pos: Int, ahead: Int) -> Token = {
@@ -171,77 +187,95 @@ pub fn parse_module(text: String) -> (Module, List[Diag]) = {
   (Module { decls: decls }, st.diags)
 }
 
-## After a broken declaration: skip forward to the next plausible declaration start.
-##
-## The anchors are exactly the keywords `top_decl` dispatches on. They were not:
-## `use` and `test` were missing, so a broken declaration followed by either one
-## swallowed it and everything up to the next `fn` -- one bad line reported as
-## a file with no imports.
-fn sync_decl(p: P, st: St) -> St = {
-  var s = st
-  if not at_kind(p, s, EOF) { s = adv1(p, s) }
-  while not at_kind(p, s, EOF) && not at_kind(p, s, FN) && not at_kind(p, s, PUB) &&
-    not at_kind(p, s, TYPE) && not at_kind(p, s, ALIAS) && not at_kind(p, s, CONST) &&
-    not at_kind(p, s, TRAIT) && not at_kind(p, s, IMPL) && not at_kind(p, s, EFFECT) &&
-    not at_kind(p, s, USE) && not at_kind(p, s, TEST) {
-      s = adv1(p, s)
-    }
-  s
-}
-
-fn top_decl(p: P, st: St) -> PR[Decl] = {
+fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
   var st0 = st
   var is_pub = false
   if at_kind(p, st0, PUB) {
     st0 = adv1(p, st0)
     is_pub = true
   }
-  # `opaque` is a soft keyword: only `opaque type` means anything, so a
-  # variable or function called `opaque` keeps working
-  if at_kind(p, st0, IDENT) && cur(p, st0).text == "opaque" {
-    if kind_ahead(p, st0, 1) != TYPE {
-      return Err((st0, perr(p, st0, "`opaque` introduces `opaque type Name = ...`")))
-    }
-    return alias_decl(p, adv1(p, st0), is_pub, true)
-  }
   let k = kind_of(p, st0)
-  if k == FN {
-    let (st1, f) = fn_decl(p, st0, is_pub, false)?
-    Ok((st1, DFn(f)))
-  } else if k == TYPE {
-    type_decl(p, st0, is_pub)
-  } else if k == ALIAS {
-    alias_decl(p, st0, is_pub, false)
-  } else if k == CONST {
-    const_decl(p, st0, is_pub)
-  } else if k == TRAIT {
-    trait_decl(p, st0, is_pub)
-  } else if k == EFFECT {
-    effect_decl(p, st0, is_pub)
-  } else if k == IMPL {
-    if is_pub {
-      Err((st0, perr(p, st0, "an impl cannot be pub (its visibility follows the trait)")))
-    } else {
-      impl_decl(p, st0)
+  let kind: Option[TopDeclKind] =
+    if k == FN { Some(HFn) }
+    else if k == TYPE { Some(HType) }
+    else if k == ALIAS { Some(HAlias) }
+    else if k == CONST { Some(HConst) }
+    else if k == TRAIT { Some(HTrait) }
+    else if k == IMPL { Some(HImpl) }
+    else if k == EFFECT { Some(HEffect) }
+    else if k == USE { Some(HUse) }
+    else if k == TEST { Some(HTest) }
+    else if k == IDENT && cur(p, st0).text == "opaque" {
+      if kind_ahead(p, st0, 1) == TYPE { Some(HOpaqueType) } else { Some(HBadOpaque) }
     }
-  } else if k == TEST {
-    if is_pub {
-      Err((st0, perr(p, st0, "test blocks cannot be pub")))
-    } else {
-      test_decl(p, st0)
-    }
-  } else if k == USE {
-    if is_pub {
-      Err((st0, perr(p, st0, "use declarations cannot be pub")))
-    } else {
-      use_decl(p, st0)
-    }
-  } else {
-    Err((st0, perr(p, st0,
-      "only declarations (use, fn, type, alias, const, trait, impl, effect, test) " ++
-        "are allowed at module top level")))
+    else if is_pub { Some(HBadPub) }
+    else { None }
+  match kind {
+    Some(head) -> Some(TopDeclHead { kind: head, st: st0, is_pub: is_pub })
+    None -> None
   }
 }
+
+fn starts_top_decl(p: P, st: St) -> Bool =
+  match classify_top_decl(p, st) {
+    Some(head) -> match head.kind {
+      HBadOpaque -> false
+      _ -> true
+    }
+    None -> false
+  }
+
+## After a broken declaration: skip forward to the next plausible declaration start.
+fn sync_decl(p: P, st: St) -> St = {
+  var s = st
+  if not at_kind(p, s, EOF) { s = adv1(p, s) }
+  while not at_kind(p, s, EOF) && not starts_top_decl(p, s) { s = adv1(p, s) }
+  s
+}
+
+fn top_decl_error(p: P, st: St) -> PR[Decl] =
+  Err((st, perr(p, st,
+    "only declarations (use, fn, type, alias, const, trait, impl, effect, test) " ++
+      "are allowed at module top level")))
+
+fn top_decl(p: P, st: St) -> PR[Decl] =
+  match classify_top_decl(p, st) {
+    None -> top_decl_error(p, st)
+    Some(head) -> match head.kind {
+      HFn -> {
+        let (st1, f) = fn_decl(p, head.st, head.is_pub, false)?
+        Ok((st1, DFn(f)))
+      }
+      HType -> type_decl(p, head.st, head.is_pub)
+      HAlias -> alias_decl(p, head.st, head.is_pub, false)
+      HConst -> const_decl(p, head.st, head.is_pub)
+      HTrait -> trait_decl(p, head.st, head.is_pub)
+      HEffect -> effect_decl(p, head.st, head.is_pub)
+      HImpl ->
+        if head.is_pub {
+          Err((head.st, perr(p, head.st,
+            "an impl cannot be pub (its visibility follows the trait)")))
+        } else {
+          impl_decl(p, head.st)
+        }
+      HTest ->
+        if head.is_pub {
+          Err((head.st, perr(p, head.st, "test blocks cannot be pub")))
+        } else {
+          test_decl(p, head.st)
+        }
+      HUse ->
+        if head.is_pub {
+          Err((head.st, perr(p, head.st, "use declarations cannot be pub")))
+        } else {
+          use_decl(p, head.st)
+        }
+      HOpaqueType -> alias_decl(p, adv1(p, head.st), head.is_pub, true)
+      HBadOpaque -> Err((head.st,
+        perr(p, head.st, "`opaque` introduces `opaque type Name = ...`")))
+      HBadPub -> top_decl_error(p, head.st)
+    }
+  }
 
 # ---- use declarations ----
 

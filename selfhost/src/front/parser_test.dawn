@@ -129,6 +129,79 @@ test "a broken declaration is reported and the next one still parses" {
   }
 }
 
+test "declaration recovery anchors at contextual opaque type" {
+  let src = "fn broken( = 0\n\nopaque type UserId = List[Int]"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 1
+  assert ds[0].msg == "expected a parameter name, found `=`"
+  assert len(m.decls) == 1
+  match m.decls[0] {
+    DType(t) -> {
+      assert t.name == "UserId"
+      assert t.is_opaque
+    }
+    _ -> { assert false }
+  }
+}
+
+test "public opaque type parses directly and through recovery" {
+  let (direct, direct_diags) = parse_module("pub opaque type UserId = List[Int]")
+  assert len(direct_diags) == 0
+  match direct.decls[0] {
+    DType(t) -> {
+      assert t.is_pub
+      assert t.is_opaque
+    }
+    _ -> { assert false }
+  }
+
+  let src = "fn broken( = 0\n\npub opaque type UserId = List[Int]"
+  let (recovered, recovered_diags) = parse_module(src)
+  assert len(recovered_diags) == 1
+  assert recovered_diags[0].msg == "expected a parameter name, found `=`"
+  match recovered.decls[0] {
+    DType(t) -> {
+      assert t.is_pub
+      assert t.is_opaque
+    }
+    _ -> { assert false }
+  }
+}
+
+test "opaque is contextual around functions and ordinary identifiers" {
+  for src in ["opaque fn kept() = 1", "pub opaque fn kept() = 1"] {
+    let (m, ds) = parse_module(src)
+    assert len(ds) == 1
+    assert ds[0].msg == "`opaque` introduces `opaque type Name = ...`"
+    match m.decls[0] {
+      DFn(f) -> { assert f.name == "kept" }
+      _ -> { assert false }
+    }
+  }
+
+  let (m, ds) = parse_module("fn opaque(opaque: Int) -> Int = opaque")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) -> {
+      assert f.name == "opaque"
+      assert f.params[0].name == "opaque"
+    }
+    _ -> { assert false }
+  }
+}
+
+test "recovery skips malformed opaque and resumes at fn" {
+  let src = "fn broken( = 0\n\nopaque fn kept() = 1"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 1
+  assert ds[0].msg == "expected a parameter name, found `=`"
+  assert len(m.decls) == 1
+  match m.decls[0] {
+    DFn(f) -> { assert f.name == "kept" }
+    _ -> { assert false }
+  }
+}
+
 test "a binary operator may lead its continuation line" {
   # && at the start of the next line continues the expression (spec §1.7)
   let (m, ds) = parse_module("const A: Bool = x\n  && y")
@@ -528,18 +601,24 @@ test "unterminated string in an interpolation-free file recovers" {
   assert ds[0].msg == "unterminated string"
 }
 
-test "recovery stops at every keyword a declaration can start with" {
-  # `x = 1` is not a declaration, so top_decl errors and sync_decl skips to the
-  # next anchor. The anchor set has to be the set top_decl dispatches on: `use`
-  # and `test` were missing from it, so the skip ran straight past them to the
-  # `fn` and one bad line cost the module its import and its test block.
-  let src = "x = 1\nuse std/str\ntest \"t\" {\n  assert true\n}\nfn f() -> Int = 1"
-  let (m, ds) = parse_module(src)
-  assert len(ds) > 0
-  assert len(m.decls) == 3
-  match m.decls[0] {
-    DUseModule(_, _, _, _, _, _, _) -> ()
-    _ -> { assert false }
+test "recovery stops at every top-level declaration head" {
+  for next in [
+    "fn kept() = 1",
+    "pub fn kept() -> Int = 1",
+    "type Kept = Kept",
+    "alias Kept = Int",
+    "const KEPT: Int = 1",
+    "trait Kept[T] { fn keep(x: T) -> T }",
+    "impl Kept[Int] { fn keep(x: Int) -> Int = x }",
+    "effect Kept { fn keep() -> Int }",
+    "use std/str",
+    "test \"kept\" { assert true }",
+    "opaque type Kept = List[Int]",
+    "pub opaque type Kept = List[Int]"
+  ] {
+    let (m, ds) = parse_module("x = 1\n" ++ next)
+    assert len(ds) == 1
+    assert len(m.decls) == 1
   }
 }
 
