@@ -43,7 +43,15 @@
 - **原因：** `scripts/doc-check.py:621` 只检查 status line 存在，`:644` 不验证受控值或 index/body consistency；`docs/README.md:143` 已承认该限制。
 - **建议：** 稳定 task ID + 受控 `open/done/rejected/historical` metadata；单一 registry 生成 index，design header 只引用 registry，不再手抄状态。
 
-## GOV-05 — P2 — examples gate 不执行多数 `main`
+## GOV-05 — P2 — examples gate 不执行多数 `main`（已修）
+
+> **后续处置（2026-08-09）：已修。**
+> `scripts/example-main-contract/registry.json` 为 gallery 自动发现的 16 个
+> 用户入口登记 17 组 `argv/stdin/stdout/stderr/exit` 契约；执行器要求
+> gallery unit discovery 与 registry 精确双射、schema 字段闭集，入口
+> 合法性只由真实 `dawn run` 判定；每次运行以独立进程组和 120 秒上限
+> 逐字节核对 stdout/stderr，正常返回后也清理残留后代。CI 继续分别保留 test-block、
+> JSONTestSuite 与 N-vs-N−1 run differential，四者不再互相代替。
 
 - **证据：S。** `scripts/example-tests.sh:2` 明说只跑 test blocks，命令是 `dawn test`：`:40`；test mode 合成 TestMain：`selfhost/src/main.dawn:992`、`:1040`，不调用 example main。
 - N-vs-N−1 只选择 calc/interop/handlers/chars/barriers 等少数入口：`scripts/selfhost-run-diff.sh:47`、`:71`；site 却承诺每个 example 可直接运行：`site/src/gen/examples.dawn:23`。

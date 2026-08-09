@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Run the test blocks of every example.
+# Run the test blocks of every example. Entry points are a separate contract:
+# scripts/example-main-contract/run.py executes every gallery `main` with its
+# registered argv/stdin and checks stdout, stderr, and exit byte-for-byte.
 #
 # Discovery, not a list. The gate this replaced named two files by hand, so the
 # other eleven examples carried assertions nothing ever executed -- and a new
 # example joined them by default, silently, because forgetting to extend a list
 # looks exactly like not having written one. Here a file that exists is a file
-# that runs, and the only way to leave an example untested is to delete it.
+# whose test blocks run; the main-contract gate independently covers programs.
 #
 # The unit rule is the site generator's (site/src/gen/examples.dawn): under
 # examples/<group>/, a directory with a src/ in it is one multi-module project,
