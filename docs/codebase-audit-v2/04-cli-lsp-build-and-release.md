@@ -142,6 +142,20 @@ snapshot 与 TOOL-06 classloader，本刀不冒称解决；TOOL-10 在这里仅�
 
 ## TOOL-14 — P1 — launcher stamp 未覆盖真实 compiler build inputs
 
+> **后续处置（2026-08-09）：partial，订正此前 fixed。** launcher 已把 root 的三个直接
+> local source deps、`dawn.lock`、seed jar/std checksum、resolver 与 recipe 加入摘要，关闭了
+> 原证据的大半；但尚有三条原边界的同源残余：
+>
+> 1. 找不到 `sha256sum`/`shasum` 时回退到 mtime，并继续允许 cache hit：`bin/dawn:89`、`:172`；
+>    trust primitive 缺失仍是 fail-open。
+> 2. `dep_dirs` 只以启动前 `sed` 读取 root manifest 的直接 path deps：`bin/dawn:112`；它不消费
+>    `SourcePlan` 的最终递归 roots，A → B 的传递 local source 修改仍可能漏 stamp。
+> 3. `source_stamp` 以 `path + newline + raw contents` 直接串接，没有 record length/type framing：
+>    `bin/dawn:144`；不同 path/content 分割可形成同一输入字节流。
+>
+> 完整关闭需要 fail-closed hasher、由权威递归 plan 导出的版本化输入清单，以及长度前缀记录；
+> 因此本项从 fixed 降为 partial，不新增 finding。
+
 - **证据：S。** stamp 只覆盖 `selfhost/src`、manifest、std 与 seed release：`bin/dawn:97`；`selfhost/dawn.toml:12` 还有三个 local source deps。stamp 也漏 `selfhost/dawn.lock`、`scripts/seed-checksums.txt`、`scripts/seedjar.sh` 与 build recipe `bin/dawn`。
 - cache hit 直接执行旧 jar：`bin/dawn:169`；只有决定 rebuild 后才重新验证 seed：`:141`。
 - **影响：** 修改 `packages/json`/`sha2`/`inflate`、lock、checksum policy 或 launcher 后，`bin/dawn` 可继续运行旧 compiler；撤销 seed trust 也不触发重建。

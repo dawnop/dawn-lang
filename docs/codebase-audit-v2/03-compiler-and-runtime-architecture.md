@@ -8,9 +8,16 @@
 
 - Core IR、checker split 与两个独立后端都是真实进展；“没有 lowered IR”“大文件就继续拆”应撤回。
 - 当前主要风险已经从物理文件大小转为**阶段契约没有类型化**：裸名字构依赖图、平行 List 靠下标对齐、稳定 identity 与临时 ID 共用全局计数器、内部 panic 被用户错误通道吞掉。
-- native failure runtime 是当前最集中的后端语义债：固定 512 字节全局 payload、nested bracket overwrite 与 longjmp 引用泄漏互相关联，应作为一项 runtime redesign 处理。
+- native failure runtime 的三项 P1 已由 #193 收口；当前结构债转为 `ARC-01/02/11` 的
+  partial 边界，以及 `ARC-07/08/12` 的 typed-product / stable-origin 前置。
 
 ## ARC-01 — P1 — 返回类型推断把局部名字当顶层依赖
+
+> **后续处置（2026-08-09）：partial。** `RefScope` 现已排除参数、lambda、pattern/local
+> binding 与 module alias，原最小参数重名反例关闭；但非 module receiver 的
+> `EMethod(target, name, ...)` 仍无条件把裸 `name` 记为本模块函数边：
+> `selfhost/src/check/checker.dawn:2326`、`:2330`。真实成员若与待推断顶层函数同名，仍可制造
+> 伪循环；只有 symbol-resolution edge 才能完整关闭本项。
 
 - **证据：V。** `name_refs` 记录所有 `EVar` 和 method name，却不维护 lambda 参数、函数参数、pattern/local binding scope：`selfhost/src/check/checker.dawn:2210`、`:2214`、`:2227`、`:2301`。结果只按字符串与待推断顶层函数名相交：`selfhost/src/check/checker.dawn:7330`。
 - **最小复现：** `fn a(b: Int) = b` 与 `fn b() = a(1)`。参数 `b` 被当作对顶层 `b` 的边，而顶层 `b` 真依赖 `a`，两者都在 `selfhost/src/check/checker.dawn:7362` 被报 mutually recursive。
@@ -18,6 +25,11 @@
 - **建议：** 依赖遍历维护 lexical binding set；更稳妥的是先做轻量 name resolution，以 symbol ID 构图。不要继续用裸字符串模拟 call graph。
 
 ## ARC-02 — P1 — JVM classfile 硬边界变成无源码位置的内部异常
+
+> **后续处置（2026-08-09）：partial。** `ldc_str` 已按 modified UTF-8 精确分块，class
+> finalize 也把 ASM failure 转成可读 compiler failure；但 `LMod`/Core finalize 仍没有对应
+> source span。超限 method/class 最多指出 class/ASM method 文本，不能定位源码函数，也没有
+> outlining/分片，因此原发现的 source-actionable 边界仍开放。
 
 - **证据：S。** Core String 直接进入 `visitLdcInsn`：`selfhost/src/jvm/emit.dawn:1344`；模块函数集中写进单一 class：`selfhost/src/jvm/emit.dawn:1389`、`:1445`；最终 `toByteArray` 结果只经 `expect("bytes")`：`selfhost/src/jvm/emit.dawn:1792`、`selfhost/src/jvm/help.dawn:37`。
 - **边界：** 超过 classfile `CONSTANT_Utf8` 65,535 bytes 的 literal、超 64 KiB Code 的 method、常量池过大或模块 class 过大，都可能让 ASM 抛异常。
@@ -136,12 +148,22 @@
 
 ## ARC-09 — P2 — 一个全局 `next_id` 混合稳定身份与临时身份
 
+> **后续处置（2026-08-09）：open/HOLD。** 既有裁决不在尚无 incremental cache contract 时
+> 为“更稳定的 golden”重排全部 ID；这会制造大面积无语义产物变化，却没有消费者能验证收益。
+> 重开条件是增量检查、跨 expression cache 或持久 symbol identity 先提出稳定 key 契约；条件
+> 未满足前不进入自治 TODO。
+
 - **证据：S。** `Cx.next_id` 同时分配 type var、ADT、effect、trait、local symbol：`selfhost/src/check/cx.dawn:87`、`:313`，以及 `selfhost/src/check/passes.dawn:44`、`:633`、`:1003`、`:1112`、`selfhost/src/check/checker.dawn:109`。
 - 计数器跨模块传递：`selfhost/src/driver/analyze.dawn:1023`、`:1044`、`:1065`；ID 又进入 type key 与 generated symbol：`selfhost/src/ir/core.dawn:349`、`selfhost/src/ir/lower.dawn:735`、`selfhost/src/c/emitc.dawn:1160`。
 - **影响：** 前一模块多一个 local/type variable，会让后续 nominal ID 与 C symbol 大面积漂移，扩大 cache invalidation 与无语义 golden diff。
 - **建议：** 拆成 `NominalId/TraitId/EffectId/SymId/TyVarId/TempId`；nominal 按 module declaration 稳定分配，temporary 限在 function/module。
 
 ## ARC-10 — P2 — 512 MB 栈被当作通用递归策略
+
+> **后续处置（2026-08-09）：open/HOLD。** `ceval-trampoline-verdict` 已否决“只 trampoline
+> comptime 就摘掉大栈”的旧方案；用户程序深递归、parser/checker 对抗输入、JVM/native entry
+> 与失败方式必须一起裁。除非先有 measured high-water、默认栈/可配置上限与 recursion policy，
+> 不单独下调 `-Xss`/`DAWN_STACK_BYTES`，也不放回自治 TODO。
 
 - **性质：K/D。** launcher 默认 `-Xss512m`：`bin/dawn:61`；编译器 spawn 的用户程序也固定同值：`selfhost/src/main.dawn:949`；native runtime 把每个 Dawn entry 放在 `DAWN_STACK_BYTES` thread：`runtime/c/dawn_rt.h:373`、`runtime/c/dawn_rt.c:69`。
 - 现有裁决正确指出“只 trampoline comptime”不能摘掉它：`docs/audit/ceval-trampoline-verdict.md:245`；因此本项不是复活旧方案。

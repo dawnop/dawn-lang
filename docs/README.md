@@ -31,13 +31,13 @@
 
 | 文档 | 状态 | 说明 |
 |---|---|---|
-| [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60 冻结基线 + v0.62 状态层 + 详细证据；原分级、证据与 P1 索引不随后续修复重写。 |
-| [codebase-audit-v2/00-methodology-and-retractions.md](codebase-audit-v2/00-methodology-and-retractions.md) | current | 基线、证据等级、严重度，以及旧审查已修/已驳回结论的撤回边界。 |
-| [codebase-audit-v2/01-syntax-and-formatting.md](codebase-audit-v2/01-syntax-and-formatting.md) | current | lexer、parser、formatter、尾块、pattern 与 VS Code grammar；SYN-14 的旧 `fn` 尾闭包分歧已由 #206 处置。 |
-| [codebase-audit-v2/02-types-effects-and-semantics.md](codebase-audit-v2/02-types-effects-and-semantics.md) | current | 类型、trait、associated type、具名效果、Cursor/Char 与 nominal abstraction。 |
-| [codebase-audit-v2/03-compiler-and-runtime-architecture.md](codebase-audit-v2/03-compiler-and-runtime-architecture.md) | current | checker/Core/comptime、JVM/C 后端、native failure runtime 与阶段契约。 |
-| [codebase-audit-v2/04-cli-lsp-build-and-release.md](codebase-audit-v2/04-cli-lsp-build-and-release.md) | current | CLI、LSP、依赖规划、lock/vendor、自举与发布链。 |
-| [codebase-audit-v2/05-stdlib-and-packages.md](codebase-audit-v2/05-stdlib-and-packages.md) | current | std、inflate、JSON、Web 与 SHA-2 的 API/协议边界。 |
+| [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60 冻结基线 + `bfc358a` 当前状态层；97 项为 56 fixed / 5 partial / 34 open / 2 retracted，原严重度、证据与 29 行 P1 索引不随后续处置重写。 |
+| [codebase-audit-v2/00-methodology-and-retractions.md](codebase-audit-v2/00-methodology-and-retractions.md) | current | 基线、证据等级、严重度、fixed/retracted 边界，以及 HOLD/延后能力不进入自治 TODO 的口径。 |
+| [codebase-audit-v2/01-syntax-and-formatting.md](codebase-audit-v2/01-syntax-and-formatting.md) | current | lexer、parser、formatter、pattern 与编辑器语法；SYN-04 guard 只记静态候选，SYN-17 是 D/P3 关键字预算设计项。 |
+| [codebase-audit-v2/02-types-effects-and-semantics.md](codebase-audit-v2/02-types-effects-and-semantics.md) | current | 类型、效果、Cursor/Char 与 nominal abstraction；SEM-05/08 已撤回，SEM-09/10 延后，SEM-16 HOLD。 |
+| [codebase-audit-v2/03-compiler-and-runtime-architecture.md](codebase-audit-v2/03-compiler-and-runtime-architecture.md) | current | checker/Core/comptime 与双后端；ARC-11 部分修复，ARC-09/10 按既有重开条件 HOLD。 |
+| [codebase-audit-v2/04-cli-lsp-build-and-release.md](codebase-audit-v2/04-cli-lsp-build-and-release.md) | current | CLI、LSP、依赖与发布链；TOOL-08 已修，TOOL-14 因递归输入/fail-open 残余为 partial。 |
+| [codebase-audit-v2/05-stdlib-and-packages.md](codebase-audit-v2/05-stdlib-and-packages.md) | current | std、inflate、JSON、Web 与 SHA-2；LIB-07 已修，LIB-18 clean truncation 仅为未验证静态候选。 |
 | [codebase-audit-v2/06-docs-tests-and-governance.md](codebase-audit-v2/06-docs-tests-and-governance.md) | current | normative spec、文档状态、examples/packages/contract gates 与仓库治理。 |
 
 ## 当前架构与流程
@@ -51,8 +51,8 @@
 | [trait.md](trait.md) | current | trait/impl/derive 与 `Ord`。§落地记录里 Float 比较那段已被实现取代（见文内标注）。 |
 | [tutorial.md](tutorial.md) | current | 上手教程，**英文正本**。标 `dawn run` 的代码块由 `scripts/doc-check.py` 真编真跑并核对 `output`。 |
 | [tutorial.zh-CN.md](tutorial.zh-CN.md) | current | 上面那篇的**中文译本**。改教程先改英文，再改这里；两者不脱节由 `doc-check.py` 的 transl 检查盯着。 |
-| [codebase-audit.md](codebase-audit.md) | current | 2026-07-25 的全仓审查，76 条逐条带处置结论（已修 / 驳回 / 待办）。 |
-| [audit/README.md](audit/README.md) | current | 上面那份审查遗留待办的**作业计划**：`docs/audit/` 十三份文档的索引 + 修复顺序 + 逐份状态。已不再报待办总数，理由写在它的状态行里。 |
+| [codebase-audit.md](codebase-audit.md) | historical | 2026-07-25 的全仓审查，76 条逐条带当时的处置结论；保留证据与排期，不作当前风险台账。 |
+| [audit/README.md](audit/README.md) | historical | 上面那份旧审查遗留待办的历史作业计划：十三份材料的索引、依赖、修复顺序与“不做”理由均保留；当前顺序看审查 v2。 |
 | [audit/native-plan-overlap.md](audit/native-plan-overlap.md) | current | 上面那批待办与 native-backend-plan.md 的**撞车登记**：谁让位、谁冻结、谁要改写。动 `audit/` 里任何一份之前先读它。 |
 | [native-backend-plan.md](native-backend-plan.md) | current | native 后端的分阶段计划（Phase −1 → 6）与落地日志。**Phase −1…6 全部完成**，Phase 6（native 自举）于 2026-07-30 达成（§14.23，提交 `83def2d`，`scripts/native-fixpoint.sh` 验 B==C + 裸目录 smoke）；重排后的 S0–S4 也已结清。仍开着的只有 `use c` FFI（推迟，见 B 线 K-B6）与 S5「std 收口」（[std-audit.md](std-audit.md)）。 |
 | [native-driver-plan.md](native-driver-plan.md) | current | **B 线**：native 驱动补全 + 把后端契约摆到明面上——K-B 刀表、「5,373 行零 `use java`」的核对、以及那条最重要的更正：几条差分脚本的被测方原本写死 `./bin/dawn`，**接上线不会自动覆盖 native**（已由 `native-cli-diff.sh` 修掉）。**七刀已结**：K-B1–K-B5 与 K-B7 落地（逐刀带红演示与阴性对照），K-B6（`use c` FFI）明确推迟。 |

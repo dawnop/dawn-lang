@@ -45,6 +45,12 @@
 
 ## SYN-04 — P2 — or-pattern 不是 Pattern，规范承诺也未实现
 
+> **当前静态候选（未验证，不改严重度）：** `lower_match` 在 `for p in arm.pats` 内分别
+> lowering 同一 arm 的 guard：`selfhost/src/ir/lower.dawn:2882`、`:2897`。若多个 alternative
+> 对同一 scrutinee 同时匹配，前一个 guard 返回 false 后还会尝试后一个 alternative，effectful
+> guard 因而可能重复求值。这里只记录 R-AUDIT 的静态候选；没有运行探针，也不把本项从冻结
+> P2 提升为 P0/P1。修 `POr` 时必须把“一个 arm 的 guard 最多求值一次”写入 contract。
+
 - **证据：V。** 规范允许 alternatives 绑定同名同类型变量：`docs/spec.md:912`；checker 却拒绝任何带绑定的 alternative：`selfhost/src/check/checker.dawn:6339`。parser 只在 match arm 顶层收集 `|`：`selfhost/src/front/parser.dawn:2252`。
 - **边界：** `A(x) | B(x) -> x` 同时得到“不得绑定”和重复绑定诊断；`Some(0 | 1)` 不能作为嵌套模式。
 - **影响：** 规范与实现直接冲突，且 AST 让正确实现绑定集合合并更困难。
@@ -171,6 +177,11 @@
 - **建议：** 加入 `RBRACKET`，并用统一的 expression-terminator predicate 避免下一种容器再漏。
 
 ## SYN-17 — P3 — `java` 是全局硬关键字
+
+> **后续处置（2026-08-09）：维持 open，但归 D/P3 关键字预算设计项。** 当前 parser、规范与
+> TextMate grammar 对 hard keyword 身份一致，没有实现 bug；是否为 `java` 归还普通标识符空间
+> 是早期语言可做的破坏性表面设计。它不进入自治小刀；只有在统一 contextual-keyword 方案中
+> 裁决，且必须同时迁 lexer/parser/formatter/editor inventory。
 
 - **证据：S。** `java` 在 token 表中全局保留：`selfhost/src/front/token.dawn:200`，特殊含义却只存在于 `use java`。
 - **影响：** 用户不能把自然名称 `java` 用作局部、字段或模块 alias；关键字预算被一个上下文语法永久占用。

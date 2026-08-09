@@ -6,7 +6,9 @@
 
 ## 本专题结论
 
-- JSON 旧有大整数、非有限输出与控制字符问题已经修复，不应重复；当前最高风险转到纯 Dawn inflate 的边界与 Web tempfile lifecycle。
+- JSON 旧有大整数、非有限输出与控制字符问题已经修复，不应重复；inflate 的三项 P1 与 Web
+  tempfile ownership 也已关闭。当前剩余风险集中在 Web 公开 invariant、协议边界，以及
+  `LIB-18` 尚未验证的 streaming clean-truncation 候选。
 - packages 的共同问题是 public record/Map/String 过早丢掉 invariant：Digest 可伪造、Response 可构造非法状态、query/form 丢重复值、JSON error 只有人类字符串。
 - early language/package 允许 breaking change，应优先把无效状态从公开类型中移除，而不是在 write boundary 继续 sanitizer/默认值补丁。
 
@@ -147,6 +149,12 @@
 
 ## LIB-10 — P1 — CORS headers 不覆盖 error response
 
+> **后续处置（2026-08-09）：partial。** `with_cors` 已不再用 `?` 提前传播，handler 的
+> `Ok(Response)` 与 `Err(HttpError)` 都会写入 CORS headers：`packages/web/src/middleware.dawn:81`。
+> 但 dot-segment 400 与 body-limit 413 在 Request/middleware 之前生成：
+> `packages/web/src/server.dawn:458`、`:484`，仍无 CORS。只有让 CORS 包住最终 Response 或把
+> early error 也交给同一 response transform，才能关闭原发现。
+
 - **证据：S。** allowed-origin path 通过 `next(req)?` 提前传播 error：`packages/web/src/middleware.dawn:68`；404/405 是 `Err`：`packages/web/src/server.dawn:391`；error 在 middleware chain 外 render：`:449`。
 - **影响：** 浏览器能发跨域请求，却无法读取合法 origin 收到的 4xx/5xx body/header；生产 debugging 与 API client behavior 分叉。
 - **建议：** CORS 同时 transform `Ok(Response)` 和 `Err(HttpError)`，把 headers 写入 error；更整齐的 architecture 是 middleware 包装最终 Response，而非半途 Result。
@@ -200,6 +208,12 @@
 - **建议：** 禁止 negative；用 `Option[Int]` 表示 unlimited；所有入口复用同一 validator。
 
 ## LIB-18 — P2 — streaming response 吞掉所有 fault 与 panic
+
+> **当前静态候选（未验证，不改严重度）：** streaming 分支把 `transferTo` 放进
+> `catch_panic` 后丢弃整个结果，且 `ResponseBody.Stream` 不携带 expected length：
+> `packages/web/src/server.dawn:163`、`:171`。除异常 disconnect/fault 外，上游若以 clean EOF
+> 提前结束，当前层也可能把截短 body 当正常完成。R-AUDIT 没有构造网络探针；这里只记录
+> clean-truncation 可能性，不新增 P0/P1，也不冒称已确认。
 
 - **证据：S。** transfer 被 `catch_panic` 包裹，返回 Result 立即丢弃：`packages/web/src/server.dawn:162`。
 - **影响：** client disconnect、upstream IO failure 与 program invariant panic 都无 log/metric且不可区分；request 看似正常结束。

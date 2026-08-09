@@ -6,7 +6,8 @@
 
 ## 本专题结论
 
-- 有一个必须优先由维护者复核的 **P0 候选**：词法 handler evidence 可随闭包逃逸，但闭包效果仍保留原标签，可能让另一处纯 handler 消掉标签后执行旧 handler 的 IO arm。
+- v0.60 的 **P0 候选** `SEM-01` 后来已动态确认并由 #188 修复；当前最高风险只保留
+  `SEM-04` 的未验证 Cursor 静态候选，不重算冻结严重度。
 - 多数 P2 不是“少一个高级特性”，而是现有核心抽象之间不能组合：associated type 没有 bound、trait 不能带具名效果、Unit 破坏泛型闭合、受约束函数不是函数值。
 - 早期语言适合一次性收敛：effect row 只保留一套 substitution；public surface 做 effective visibility；`Never`、`Char`、Cursor 与 barrier 的类型都应表达真实语义。
 
@@ -44,6 +45,11 @@
 
 ## SEM-04 — P1 — Cursor 没有绑定所属 String，且表示跨后端不同
 
+> **当前静态候选（未验证，不改严重度）：** comptime 把 Cursor 解释为 code-point index，
+> JVM/native 分别发射 UTF-16 offset 与 UTF-8 byte offset。如果 comptime 折叠出的 opaque
+> Cursor 值进入运行期操作，偏移可能跨执行模型失配。R-AUDIT 只完成静态追踪，未证明可达
+> 程序；本项保持 open/P1，等待 owner/value 与 Eq/Ord 契约裁决，不先写 workaround。
+
 - **证据：S。** `Cursor` 只是 opaque `Int`：`std/cursor.dawn:18`，所有操作重新接收任意 String：`std/cursor.dawn:22`、`:28`、`:31`、`:40`。源码甚至承认另一个 String 的 cursor 会“数到某个 end”：`std/cursor.dawn:126`。
 - JVM offset 是 UTF-16 unit，native 是 UTF-8 byte，comptime interpreter 是 code-point index：`selfhost/src/jvm/rtclasses.dawn:2290`、`runtime/c/dawn_rt.c:1344`、`selfhost/src/ir/interp.dawn:850`。
 - **边界：** 把 `cursor.end("😀")` 传给 `cursor.offset("abcd", c)`，三个执行模型可分别看见 2、4、1；把 `cursor.end("a")` 用于 `"😀"` 可落在 surrogate/continuation byte 中部。
@@ -51,6 +57,11 @@
 - **建议：** 破坏性改为 Cursor 自带 source identity/value，操作不再另收 String；或引入 generative `Cursor[S]`。至少在 runtime 验证 owner 与 code-point boundary，并禁止不同 owner 的 Eq/Ord。
 
 ## SEM-05 — P2 — `cursor.char` 用 `Int/-1` 绕开已经落地的 `Char`
+
+> **后续处置（2026-08-09）：retracted。** 规范把 `cursor.char -> Int`/`-1` 明列为底层
+> scanner 例外，`Char` 从未承诺替换这条 primitive currency；实现、双后端与调用约定一致。
+> `peek -> Option[Char]` 可以作为增量 convenience API 另行设计，但原项把有意的底层契约当作
+> 语义缺陷，不应记为 fixed 或继续进入 TODO。
 
 - **性质：D。** `std/cursor.dawn:30` 返回 code point Int，并用 `-1` 表示 end；规范把它列为唯一例外：`docs/spec.md:104`。
 - **问题：** 用户必须在 `done` 与 `char` 之间维持外部前置条件，遍历 primitive 输出的又不是语言的字符类型；`Char` 的类型安全只覆盖上层随机访问 API。
@@ -83,6 +94,11 @@
 
 ## SEM-08 — P2 — Unit 字段禁令可由泛型实例化绕过
 
+> **后续处置（2026-08-09）：retracted。** 规范明确说“构造子字段不能直接写 `Unit`”是
+> 声明点的建模规则：无载荷分支应写裸构造子，不是表示限制；同一节也明确允许 `Unit` 作为
+> generic argument。因此 `Box[Unit]`/`Result[Unit,E]` 合法不是绕过，原项要求 substitution
+> closure 是另一种语言偏好，不构成当前规范/实现冲突。
+
 - **证据：S。** 规范允许 `Unit` 作为 generic argument，却禁止直接 constructor field：`docs/spec.md:164`；checker 只在声明字段时检查：`selfhost/src/check/passes.dawn:741`。`Unit` 又不在结构 `Eq/Hash/Show` scalar 集：`selfhost/src/check/types.dawn:1353`。
 - **边界：** `Box[Unit]` 合法，形状等价的 `Direct(value: Unit)` 非法；`Result[Unit,E]` 可以存在，却不能自然参与某些 derived/generic 操作。
 - **影响：** generic abstraction 对类型替换不闭合，同一数据形状因为“直接写”或“经 type parameter”得到不同能力。
@@ -90,11 +106,20 @@
 
 ## SEM-09 — P2 — associated type 不能声明或接收 bound
 
+> **后续处置（2026-08-09）：open，intentional delayed capability。** 现行 v1 明确延期
+> projection witness/bound evidence；它限制表达力，但不是当前实现漏做已承诺语义。只有关联
+> witness 的表示、dictionary 传播与 `where C.Item: Trait` 语法一起定稿后才重开，不进入自治
+> 修 bug 队列。
+
 - **证据：S。** `type Item` 语法没有 bound 位置：`docs/spec.md:472`；checker 说明 bound 无法到达 projection：`selfhost/src/check/checker.dawn:816`，对 projection witness 直接拒绝：`selfhost/src/check/checker.dawn:2752`；方案把它列为延期项：`docs/assoc-types-design.md:221`。
 - **影响：** `Iter`/`Index` 的 generic consumer 不能声明 `C.Item: Show/Eq/Hash`，关联类型只能被搬运，难以用于真实算法。
 - **建议：** 支持 `type Item: Show` 与 `where C.Item: Show`/projection equality；dictionary 携带选中 impl 导出的关联证据。
 
 ## SEM-10 — P2 — trait/impl 与具名 effect 不能组合
+
+> **后续处置（2026-08-09）：open，intentional delayed ABI。** v1 ABI 有意只允许 pure /
+> `!io` trait method；放开 named effect 会决定 dictionary 是否携带 evidence、evidence 的捕获
+> lifetime 与跨模块签名形状。它保留为语言能力账，但必须先作 ABI 裁决，不进入自治 TODO。
 
 - **证据：S。** v1 规则把 trait/impl method 限为 pure 或 `!io`：`docs/spec.md:1106`；pass 明确拒绝 named effect/effect var：`selfhost/src/check/passes.dawn:1158`。
 - **影响：** 无法定义泛型 state、parser、service、transaction trait；用户被迫在 trait API 退回 `Result`/`!io`，形成与语言效果系统并行的第二套抽象。
@@ -150,6 +175,10 @@
 - **建议：** 明确选择并测试：要么文档承认 release-wins；更好的模型是保留 use failure，把 release failure 放入 `cause`/suppressed chain。
 
 ## SEM-16 — P2 — `Char` 的默认显示仍是整数码点
+
+> **后续处置（2026-08-09）：open/HOLD。** 当前规范明确选择码点显示，std 与派生显示一致；
+> R-AUDIT 没有发现新的实现分叉。既有“不做”条件继续生效：除非维护者重开 user-facing
+> `Show`/`Display` 边界，否则不以 bug 名义迁移输出，也不进入自治 TODO。
 
 - **性质：D。** 规范明确 `${c}` 沿用 Int rendering：`docs/spec.md:90`；`std/char.dawn:34` 也把它作为 opaque-target 继承规则。
 - **问题：** 名为 `Char` 的值在 interpolation、`to_string`、List/record 派生显示中出现 `97` 而非 `a`；用户必须记住 `str.from_char(c)` 才得到字符文本。

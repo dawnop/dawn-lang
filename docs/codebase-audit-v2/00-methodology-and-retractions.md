@@ -10,6 +10,9 @@
 - 审查期间主分支前进到 `86f6a0f6396084871b6d663fbf6092af66a3991a`（v0.60.0）。前两次提交只改版本号、双语规范版本标记、seed release 与 checksum；最后一次把 `jvmops/jvmhelp/lsp/lsp/front/dump` 重命名为 `ops/help/lsp/server/front/lexdump` 并更新引用，没有改变本报告评估的行为。
 - 最终引用均按 `86f6a0f63960` 复核并迁到新路径。并发代理没有编辑本报告文件；写报告前工作树为空。
 - 旧报告 `docs/codebase-audit.md` 的实现基线是 dawn 0.11.0。它继续保留历史价值，但不再作为当前风险台账。
+- 后续状态由 R-AUDIT 在 `bfc358a6116303623a4968f8247689bcd5645793` 对六份明细的
+  97 个 ID 逐项重算；冻结严重度与原始证据不改写，当前状态另分 fixed / partial / open /
+  retracted 四类。
 
 ## 2. 范围与分工
 
@@ -39,7 +42,7 @@
 | **K** | 仓库自己的注释或方案已经承认该差异，但仍未修复；本报告评估的是当前影响。 |
 | **D** | 设计缺口或人体工学问题；行为可能是刻意的，但早期语言仍值得破坏性重审。 |
 
-最高风险项 `SEM-01` 只给出 **S / P0 候选**。遵照此前要求，没有运行能让“纯函数实际执行 IO”的动态探针，也没有动态测试 `unsafe_pure`。native failure 的嵌套覆盖、长消息截断和 unwind 泄漏同样只依据源码与仓库已有说明，不构造破坏性压力输入。
+v0.60 冻结基线的最高风险项 `SEM-01` 只给出 **S / P0 候选**。遵照当时要求，没有运行能让“纯函数实际执行 IO”的动态探针，也没有动态测试 `unsafe_pure`。native failure 的嵌套覆盖、长消息截断和 unwind 泄漏同样只依据源码与仓库已有说明，不构造破坏性压力输入。`SEM-01` 后来已由 #188 动态确认并修复；这条后续事实不反写冻结证据。
 
 本轮实际做过的安全探针包括：
 
@@ -94,7 +97,10 @@
 | comptime 必须整体 trampoline 化 | 现有实测裁决合理否决了这一个方案；v2 另报 512 MB 栈策略和诊断/缓存问题，不把旧方案复活。 |
 | 文件行数大即应继续拆 | 物理拆分已经发生；v2 只报告位置对齐、全局 ID、错误吞没等具体耦合。 |
 
-## 7. “仓库已承认”不等于“问题已消失”
+## 7. “仓库已承认”不等于“问题已消失”（冻结基线）
+
+> 本节保留 v0.60 当时“已知但未修”的例子。其后 `ARC-03/04/05` 已修；associated bound、
+> trait effect 与大栈策略的当前执行状态在下一节订正，不能继续把本节当作 TODO 队列。
 
 以下项目在源码或方案里已有说明，但仍影响当前用户，因此保留：
 
@@ -106,3 +112,26 @@
 - grammar EBNF、若干历史设计与当前状态不同，但只有仍标 current/normative 的矛盾才在 v2 计问题。
 
 “已知”只能降低发现的新颖性，不能降低语义影响；“明确取舍”只有在规范、实现、工具和错误模型都一致时才可作为驳回理由。
+
+## 8. `bfc358a` 状态订正与撤回边界
+
+当前状态必须与严重度分开读：严重度回答“v0.60 发现时若成立有多重”，状态回答“到当前
+HEAD 如何处置”。`retracted` 只用于后续复核认定原项不是缺陷，不能拿来包装“尚未实现”或
+“修了一半”。本轮逐 ID 结果为 **56 fixed / 5 partial / 34 open / 2 retracted = 97**。
+
+- **`SEM-05` retracted。** `cursor.char -> Int` 与 `-1` sentinel 是规范明确列出的底层扫描
+  例外，调用方使用 `done`/`char` 的前置条件也是有意的 scanner contract；`Char` 并未承诺取代
+  这条 primitive currency。增加 `Option[Char]` convenience API 可以是新特性，但不能继续把
+  现行、双端一致的已裁规则计成缺陷。
+- **`SEM-08` retracted。** “构造子字段不能直接写 `Unit`”是声明点的建模规则：无载荷分支
+  应写裸构造子，不是表示能力限制。规范同时明确 `Unit` 可作 generic argument；因此
+  `Box[Unit]`/`Result[Unit,E]` 合法不是绕过，而是两条规则有意共存。原项把 substitution
+  closure 偏好当成规范矛盾，应撤回而非“修复”。
+- **`SEM-01` fixed。** 后续动态复现确认其 soundness 风险，#188 删除错误 evidence
+  subtraction 并收紧函数值效果边界；它从当前 P0 候选移出，但冻结 P0 行仍保留。
+- **当前最高风险只记三项未验证静态候选：** `SYN-04` effectful guard 可能因 alternative
+  重复求值、`SEM-04` comptime/runtime Cursor 偏移可能跨模型失配、`LIB-18` streaming clean
+  truncation 可能静默成功。三者不新增 ID、不提升冻结严重度，也不冒称动态确认。
+- **执行状态不等于 finding 状态。** `SEM-09/10` 是 intentional delayed capability/ABI，
+  仍 open 但不进自治修 bug；`ARC-09/10` 与 `SEM-16` 按既有不做/重开条件置于 HOLD；
+  `SYN-17` 是 D/P3 的关键字预算设计项。只有条件满足或维护者重开时才进入实现队列。
