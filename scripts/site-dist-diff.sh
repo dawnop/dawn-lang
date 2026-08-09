@@ -37,8 +37,8 @@
 # What is snapshotted and what is not: the generator's *data* -- docs/,
 # examples/, site/, packages/ -- is copied. The toolchain (bin/dawn,
 # selfhost/src, std/, runtime/c) cannot be, because the JVM leg runs through
-# `bin/dawn`, which rebuilds itself from those sources on demand. So the
-# toolchain is fingerprinted instead, before and after; a change there aborts
+# `bin/dawn`, which rebuilds itself from the recursive Planner source closure on
+# demand. So the toolchain is fingerprinted instead, before and after; a change there aborts
 # with "toolchain moved" rather than being reported as a backend divergence.
 # That is the residual hole, named rather than papered over.
 #
@@ -52,20 +52,25 @@ OUT=${TMPDIR:-/tmp}/site-dist-diff.$$
 mkdir -p "$OUT"
 if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi
 
-# Everything the *compiler* is made of. Hashed rather than copied: bin/dawn
-# rebuilds from these whenever they change, so a mid-run edit would have the
-# JVM leg and the C leg compiled by two different compilers -- a real
-# difference in the output, and not one either backend is guilty of.
+# Everything the *compiler* is made of. bin/dawn's source stamp consumes the
+# Planner's recursive source-input manifest, so compiler-plan and its local
+# dependencies move this fingerprint without another hand-maintained package
+# list. runtime/c is added separately because the native leg links it after the
+# compiler has emitted C.
 toolchain_fingerprint() {
-  while IFS= read -r -d '' f; do
-    if [ -f "$f" ]; then
-      sha256sum "$f"
-    elif ! git ls-files --deleted --error-unmatch -- "$f" > /dev/null 2>&1; then
-      echo "ERROR: tracked toolchain input is unreadable: $f" >&2
-      return 1
-    fi
-  done < <(git ls-files -z bin selfhost/src selfhost/dawn.toml std runtime/c \
-      scripts/seed-release.txt) | sha256sum | cut -d' ' -f1
+  local source_fingerprint
+  source_fingerprint=$(DAWN_PRINT_STAMP=1 "$ROOT/bin/dawn") || return 1
+  {
+    printf 'source\t%s\n' "$source_fingerprint"
+    while IFS= read -r -d '' f; do
+      if [ -f "$f" ]; then
+        sha256sum "$f"
+      elif ! git ls-files --deleted --error-unmatch -- "$f" > /dev/null 2>&1; then
+        echo "ERROR: tracked toolchain input is unreadable: $f" >&2
+        return 1
+      fi
+    done < <(git ls-files -z runtime/c)
+  } | sha256sum | cut -d' ' -f1
 }
 
 FP_BEFORE=$(toolchain_fingerprint)

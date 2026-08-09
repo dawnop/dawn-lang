@@ -26,9 +26,9 @@ use driver/checkdump
 use ir/coredump
 use driver/stdlib.{StdCtx, load_std}
 use driver/analyze.{
-  CheckedMod, LocDiag, load_directory, load_file, source_plan, bootstrap_source_input_manifest,
-  analyze_program
+  CheckedMod, LocDiag, load_directory, load_file, analyze_program
 }
+use compiler_plan/source
 use pkg/vendor
 use jvm/jarw
 use front/fmt
@@ -73,11 +73,11 @@ use ir/interp.{CtOut, CtOpts, ct_default, DEFAULT_FUEL}
 use check/cx.{Cx}
 use java "java.io.File"
 use java "java.util.Map"
-use pkg/fspath
+use fspath/fspath
 use version.{VERSION}
 use front/diag
 use front/token.{Diag}
-use pkg/pkgfetch
+use compiler_plan/pkgfetch
 use pkg/maven
 use pkg/add
 
@@ -719,6 +719,19 @@ fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
   ()
 }
 
+# Planner diagnostics have the same rendering fields but belong to an
+# independent package type. Keep the conversion at the CLI boundary.
+fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
+  var out: List[LocDiag] = []
+  for ld in ds {
+    out = out ++ [LocDiag {
+      path: ld.path,
+      d: Diag { msg: ld.d.msg, lo: ld.d.lo, hi: ld.d.hi, hint: ld.d.hint }
+    }]
+  }
+  out
+}
+
 ## Render the lexer diagnostics that made `fmt` refuse a file, say plainly that
 ## nothing was written, and exit 1. Separate from `fail_compile` because the
 ## last line is the whole point: the user asked for a rewrite and did not get
@@ -832,9 +845,10 @@ fn run_source_inputs(rest: List[String]) -> Unit !io = {
   if not io.is_dir(target) {
     return cli_error("__source-inputs requires a project directory: " ++ target)
   }
-  let plan = source_plan(target)
-  if len(plan.diags) > 0 { return fail_compile(plan.diags) }
-  match bootstrap_source_input_manifest(plan, base) {
+  let plan = source.source_plan(source.ProjectDirectory(target))
+  let pdiags = planner_diags(plan.diags)
+  if len(pdiags) > 0 { return fail_compile(pdiags) }
+  match source.bootstrap_source_input_manifest(plan, base) {
     Ok(text) -> print(text)
     Err(e) -> {
       io.eprintln("error: " ++ e)
@@ -880,8 +894,11 @@ fn resolve_java_deps(target: String) -> List[String] !io = {
   let none: List[String] = []
   if not io.exists(target) { return none }
   if not io.is_dir(target) && not str.ends_with(target, ".dawn") { return none }
-  let plan = source_plan(target)
-  if len(plan.diags) > 0 { fail_compile(plan.diags) }
+  let planner_target =
+    if io.is_dir(target) { source.ProjectDirectory(target) } else { source.SourceFile(target) }
+  let plan = source.source_plan(planner_target)
+  let pdiags = planner_diags(plan.diags)
+  if len(pdiags) > 0 { fail_compile(pdiags) }
   let coords = plan.java_coords
   if len(coords) == 0 { return none }
   io.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
@@ -933,8 +950,9 @@ fn run_lock(rest: List[String]) -> Unit !io = {
     }
   }
   if not io.is_dir(target) { return cli_error("not a directory: " ++ target) }
-  let plan = source_plan(target)
-  if len(plan.diags) > 0 { fail_compile(plan.diags) }
+  let plan = source.source_plan(source.ProjectDirectory(target))
+  let pdiags = planner_diags(plan.diags)
+  if len(pdiags) > 0 { fail_compile(pdiags) }
   let path = maven.lock_path(plan.project)
   let coords = plan.java_coords
   if len(coords) == 0 {

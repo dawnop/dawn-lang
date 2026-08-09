@@ -6,24 +6,46 @@
 
 ## 本专题结论
 
-- 对用户最危险的是 `dawn check` 假绿与 `dawn fmt` 对任意文件原地写回；两者都是默认接口语义，而不是隐藏调试命令的小问题。
+- 原审查中对用户最危险的 `dawn check` 假绿与 `dawn fmt` 任意文件写回均已关闭；当前默认接口
+  风险集中在 LSP workspace/classpath 与尚未完整闭合的 bootstrap stamp。
 - LSP 已有 debounce、URI/UTF-8 修复、跨后端前端、有界 framing 与 lifecycle state，但仍缺 workspace snapshot 和工程 Java classpath，尚不适合把“与 build 一致”作为承诺。
-- 包/自举链的问题集中在**一件事有两张图或两份身份**：source graph vs Java graph、artifact coordinate vs basename、seed jar vs seed std、gate recipe vs release recipe。
+- 原审查中的包/自举缺陷大多来自**一件事有两张图或两份身份**；source/Java graph、artifact
+  identity、seed jar/std 与 gate/release recipe 已分别收口，当前只剩 manifest/lock 原子写入和
+  bootstrap v2 残余。
 
-## TOOL-01 — P1 — `dawn check` 有诊断仍退出 0
+## TOOL-01 — P1 — `dawn check` 有诊断仍退出 0（已修）
 
-- **证据：V。** 规范推荐 `dawn check` 守全仓 CI：`docs/spec.md:1681`；公开 `check` 与隐藏 `__check` 共用实现：`selfhost/src/main.dawn:1634`。实现只输出 `checkdump`：`selfhost/src/main.dawn:1601`、`:1622`，把诊断编码成 `D\t...`：`selfhost/src/driver/checkdump.dawn:45`，没有失败出口。
-- **最小复现：** 对确定的 return-inference diagnostics 执行 `./bin/dawn check file.dawn`，stdout 有两行 `D`，shell exit status 仍为 0。
-- **旁证：** `scripts/doc-check.py:903` 被迫自己解析 `D` 行，说明调用者不能依赖 exit code。
-- **影响：** 按规范写的第三方 CI 会在类型/语法错误时假绿；JVM `dawn check` 与 native `dawnc check` 的 exit semantics 也不同。
-- **建议：** 破坏性修正公开 `check`：正常 renderer + 有诊断 exit 1 + usage error exit 2；只有 `__check` 保留 machine golden dump。
+> **后续处置：已修。** 公开 `check` 现在以正常 renderer 输出聚合诊断并退出 1，clean target
+> 输出 `ok` 并退出 0，usage/path/target 错误退出 2；机器可读、无论诊断都退出 0 的 golden dump
+> 只保留在隐藏 `__check`。JVM 与 native driver 采用同一公开 verdict contract。
 
-## TOOL-02 — P1 — `fmt` 会覆盖任意直接指定的文件
+- **修复前证据：V。** 规范推荐 `dawn check` 守全仓 CI；当时公开 `check` 与隐藏 `__check`
+  共用只输出 `D\t...` dump、没有失败出口的实现。
+- **修复前最小复现：** 对确定的 return-inference diagnostics 执行
+  `./bin/dawn check file.dawn`，stdout 有诊断而 shell exit status 仍为 0；`doc-check` 被迫解析
+  dump 行判断成败。
+- **当前实现：** `selfhost/src/main.dawn` 的 `run_check` 与 `run_checkdump` 已分离；
+  `selfhost/src/nmain.dawn` 的 `cmd_check` 按同一 0/1/2 语义返回。
+- **门禁：** `scripts/selfhost-run-diff.sh` 固定 clean、diagnostic、missing target 与 usage 的 verdict；
+  `scripts/native-cli-diff.sh` 另以 clean/diagnostic/missing target 对拍 JVM 与 native，
+  `scripts/doc-check.py` 的 compile fence 直接依赖公开 exit status。
+- **结论：已修。** 第三方 CI 不再因类型或语法诊断假绿，machine dump 也没有与人类接口混用。
 
-- **证据：S。** help 声明 target 是 `.dawn`：`selfhost/src/main.dawn:516`；目录扫描过滤扩展名，但 direct file 不检查：`selfhost/src/main.dawn:1367`，随后原地写回：`selfhost/src/main.dawn:1385`。native 同样：`selfhost/src/nmain.dawn:312`、`:330`。
-- **边界：** `dawn fmt README.md` 会把 Markdown 交给 Dawn formatter 并覆盖原文件；与目录模式的安全规则不同。
-- **影响：** 一次 path typo 就能破坏非源码文件。结合 `SYN-01` 的 lexer-diagnostic 丢弃，风险更高。
-- **建议：** direct file 也必须拒绝非 `.dawn` 并 exit 2。若要 formatter stdin/任意文本，使用不写回的显式模式。
+## TOOL-02 — P1 — `fmt` 会覆盖任意直接指定的文件（已修）
+
+> **后续处置：已修。** JVM/native 的 direct-file 路径都先要求 `.dawn` 后缀；lexer 不能完整
+> 读取的 Dawn 文件也只报告诊断，不进入写回。目录模式仍只发现 `.dawn` 文件，批处理中 lexer
+> 拒绝不妨碍收集其余诊断并最终退出 1；target/path usage 拒绝保持 exit 2。
+
+- **修复前证据：S。** help 声明 target 是 `.dawn`，目录扫描也过滤扩展名；direct file 却不检查，
+  随后原地写回。`dawn fmt README.md` 因而会把 Markdown 交给 Dawn formatter 并覆盖原文件。
+- **修复前影响：** 一次 path typo 就能破坏非源码文件；当时 lexer diagnostic 还可能被 formatter
+  丢弃，非法字符会随重排消失。
+- **当前实现：** `selfhost/src/main.dawn` 的 `run_fmt` 与 `selfhost/src/nmain.dawn` 的 `cmd_fmt`
+  在读取前拒绝具名非 Dawn 文件，并只对 `fmt.format` 返回 `Ok` 的文本执行写回。
+- **门禁：** `scripts/native-cli-diff.sh` 把非 `.dawn` 文件和 lexer 失败文件分别交给两个 driver，
+  随后逐字节复核原文件未变；`scripts/selfhost-run-diff.sh` 的只读 `--check` verdict leg 固定同一拒绝。
+- **结论：已修。** direct-file 与 directory mode 的安全边界一致，拒绝路径不会再损坏输入。
 
 ## TOOL-03 — P2 — `dawn run` 没有 compiler/program 参数边界（已修）
 
@@ -85,54 +107,94 @@
 - **门禁：** `scripts/lsp-lifecycle.py` 的七类真实会话覆盖初始化前 request/notification、重复 initialize、shutdown notification、shutdown 后 request、初始化前/运行中异常 exit、正常 exit 与 pending 丢弃；`scripts/lsp-lifecycle-contract/run.sh` 的五个私有 selfhost mutant 分别把 gate 移到 update 后、异常 exit 改 0、shutdown 后继续服务、shutdown 前 flush、重复 initialize 放行，均成功编译运行并由目标会话见红。`scripts/lsp-framing.py` 的前导零合法值改用 initialize request，不再用初始化前 shutdown 伪造 framing 正例。
 - **结论：已修。** 生命周期消息不能再绕过 gate 触发 document update、pending analysis 或普通 request dispatch；合法 shutdown/exit 与异常提前退出有可区分的 process status。
 
-## TOOL-09 — P1 — origin guard 会给预置的伪造 cache “祝圣”
+## TOOL-09 — P1 — origin guard 会给预置的伪造 cache “祝圣”（已修）
 
-- **证据：S。** 下载 tree 得到真实 hash 后，若 target dir 已存在就不替换也不验证：`selfhost/src/pkg/pkgfetch.dawn:527`、`:532`；随后仍写 origin record：`:494`、`:507`。`check_origin` 只比较下载到的 `actual` 与声明：`:579`；resolver 继续使用旧 target：`selfhost/src/driver/analyze.dawn:265`。
-- **边界：** 预建一个内容被篡改、目录名却是合法 hash 的 cache entry，并删除 origin；首次 build 下载正确内容后仍编译旧目录，同时写下合法 origin。
-- **影响：** 一次 local cache injection 变成持久“可信”状态，违背无记录旧条目应验证的设计。
-- **建议：** 记录 origin 前对实际 target 执行 `verify_cached(target, actual)`；不符则 hard fail 或原子替换 staged tree。
+> **后续处置：已修。** `compiler-plan/src/pkgfetch.dawn` 的 `fetch_into` 区分新发布与 adopted
+> target；若同 hash 目录已经存在，必须先用 `verify_cached(target, actual)` 重新计算其树摘要。
+> 验证失败直接返回，外层 `fetch_and_hash` 因而不会写 origin record。
+
+- **修复前证据：S。** fetch 得到真实 hash 后，若 target dir 已存在就既不替换也不验证；调用者
+  随后仍记录“该 URL 产生该 hash”。`check_origin` 只比较新下载的 actual 与声明，resolver 最终
+  使用的却是原有 target。
+- **修复前边界：** 预建一个内容被篡改、目录名却是合法 hash 的 cache entry，并删除 origin；
+  首次 build 下载正确内容后仍编译旧目录，同时写下合法 origin。
+- **门禁：** `scripts/pkg-origin-contract/run.sh` 植入合法 hash 名、错误内容且无 origin 的 cache
+  entry，要求 build 以“目录内容与自身名字不符”失败，并确认没有生成 origin record。
+- **结论：已修。** 新下载内容不能再替一个未经验证的既有目录背书，local cache injection
+  不会被 origin metadata 持久化为可信事实。
 
 ## TOOL-10 — P1 — source deps 与 Java deps 由两张不同的图规划
 
-**状态：已修（双事实源范围）。** `source_plan(target)` 现在先抓取 source package、完成 MVS，再只从最终
-`PkgR` 图收集 Java 坐标；根坐标优先、package children-before-parent、声明序、canonical root
-visited 与完整坐标首见去重由纯测试固定。`manifestv` 以绝对 source span 稳定合并 `[deps]`
+**状态：已修（双事实源范围）。** 独立无 Java 的 `compiler-plan/` 包实现
+`source_plan(target)`：它先抓取 source package、完成
+MVS，再只从最终 `PkgR` 图收集 Java 坐标；
+根坐标优先、package children-before-parent、声明序、canonical root visited 与完整坐标首见去重
+由该包的测试固定。`compiler-plan/src/manifestv.dawn` 以绝对 source span 稳定合并 `[deps]`
 path entry 与 `[deps.<alias>]` URL table，因此混合声明序也会进入最终图；同一 archive 的 fetch
 failure 以 `(hash, url)` 去重，使同一坏镜像跨 alias/阶段只尝试一次、同 hash 的其他镜像仍可
 回退；missing subdir 则按 `(hash, subdir)` 去重。目录与 `.dawn` 文件目标
-共用这一规划算法，`resolve_java_deps` / `dawn lock` 都消费 `SourcePlan.java_coords`。`pkg/maven.dawn` 只接收
-`manifestv.MCoord`，light manifest parser、重复 coordinate parser 与 cache graph walk 已删除。
+共用这一规划算法，`resolve_java_deps` / `dawn lock` 都消费 `SourcePlan.java_coords`。
+`selfhost/src/pkg/maven.dawn` 只接收 `compiler_plan/manifestv.MCoord`（owner 为
+`compiler-plan/src/manifestv.dawn`），light manifest parser、重复
+coordinate parser 与 cache graph walk 已删除。
 完全离线的 `scripts/source-plan-contract/run.sh` 用两个 alias 要求同名 package 的 1.0/1.1：
 loser 携带不存在的 `g:poison:1`，winner 携带本地 `g:selected:1`；冷/热 cache 的文件目标都能
-build，lock 只含 winner；隔离 cache 的 inspector 直接读取公开 `source_plan`，固定 URL/path
+build，lock 只含 winner；隔离 cache 的 inspector 只依赖 Planner 公开 API，固定 URL/path
 混合声明的双向顺序与 root-first；冷、热 JAR 都实际运行并精确输出 `winner:42`，且 bad-first /
 good-second 的同 hash 镜像可恢复、同一坏 URL 跨 alias/阶段仍只报告一次。设计与边界见
 [`source-plan-design.md`](../source-plan-design.md)。
 
-**残余边界：** JVM CLI 的 parent 先调用 `source_plan` 取得 classpath，re-exec 后 child loader
-会再次调用它；两次共享唯一事实源，但不是同一个 snapshot，中间修改 manifest/cache/path package
+bootstrap source-input 协议已拆到 `scripts/bootstrap-input-manifest-contract/run.sh`；三个 compiling
+mutant 只复制并编译 Planner 与薄 producer probe。两个合同均已删除临时 ASM fixture，正式
+`selfhost` 的 ASM 依赖不受影响。
+
+**残余边界：** JVM CLI 的 parent 调用 `source_plan` 取得 classpath，re-exec 后 child loader
+再次调用；
+两次共享唯一事实源，但不是同一个 snapshot，中间修改 manifest/cache/path package
 仍有 TOCTOU。跨进程传递递归 plan 或取消 re-exec 会扩散到完整 `ProjectPlan`、TOOL-05 workspace
 snapshot 与 TOOL-06 classloader，本刀不冒称解决；TOOL-10 在这里仅关闭“双 parser/双 graph”。
 
-- **证据：S。** Java dependency collector 在正式 source load 前运行：`selfhost/src/main.dawn:858`；远端 package 只看已有 cache：`selfhost/src/pkg/maven.dawn:68`。source resolver 之后才 fetch + MVS：`selfhost/src/driver/analyze.dawn:343`、`:376`。
-- 两者还用不同 manifest parser；light parser 会在 quoted String 内的 `#` 处截断：`selfhost/src/pkg/manifest.dawn:35`，正式 loader 用 `manifestv`：`selfhost/src/driver/analyze.dawn:176`。
+- **原证据：S。** 修复前 Java dependency collector 先于正式 source load，source resolver 随后才
+  fetch + MVS；当前两条入口都消费 `compiler-plan/src/source.dawn` 的同一规划结果。
+- 修复前两者还使用不同 manifest parser；light parser 会在 quoted String 内的 `#` 处截断：
+  `selfhost/src/pkg/manifest.dawn:35`。当前正式 validator 的 owner 是
+  `compiler-plan/src/manifestv.dawn`。
 - **边界：** cold cache 的远端 source package 声明 `[java-deps]` 时，第一次 build 跳过 jar，第二次 cache warm 后行为改变；未被 MVS 选中的 cached version 也可能污染 classpath。
 - **影响：** build 结果依赖 cache history，lock/classpath 不是最终 source graph 的函数。
 - **建议：** 先完成唯一 source dependency plan 与版本选择，再只从最终 roots 收集 Java coordinates；删除第二套 manifest/graph parser。
 
-## TOOL-11 — P1 — lock 与 vendoring 用 jar basename 当 artifact identity
+## TOOL-11 — P1 — lock 与 vendoring 用 jar basename 当 artifact identity（已修）
 
-- **证据：S。** lock artifact 只有 `(basename, hash)`：`selfhost/src/pkg/maven.dawn:213`、`:270`；compare 按 basename：`:293`。build 把依赖复制到同一个 `lib/<basename>`：`selfhost/src/main.dawn:1108`、`:1113`。
-- **边界：** `group.a:util:1.0` 与 `group.b:util:1.0` 都产出 `util-1.0.jar`；lock identity 歧义，vendor 后者静默覆盖前者。
-- **影响：** lock 可能无法验证自己生成的集合；deployment jar 缺少编译期存在的 dependency。
-- **建议：** lock schema 使用完整 coordinate/type/classifier/hash；vendor filename 含 coordinate 或 content hash。迁移前至少 collision hard fail。
+> **后续处置：已修。** Maven 层先把每个 resolved jar 变成 `Artifact { path, name, hash }`。
+> basename 不冲突时保持原名；同 basename 的不同内容会让组内每个成员都使用
+> `<short-content-hash>-<basename>`，同一内容的重复路径则去重。lock 与 vendor 共同消费这份
+> artifact list，且 lock parser 拒绝重复 name。
 
-## TOOL-12 — P1 — executable JAR `Class-Path` 没有正确 URI/byte wrapping
+- **修复前证据：S。** lock 只保存 `(basename, hash)` 并按 basename 比较，build 又把依赖复制到
+  同一个 `lib/<basename>`。
+- **修复前边界：** `group.a:util:1.0` 与 `group.b:util:1.0` 都产出 `util-1.0.jar`；lock identity
+  歧义，vendor 后者静默覆盖前者。
+- **门禁：** `selfhost/src/pkg/maven.dawn` 的 inline tests 构造两份同名不同内容 jar，要求二者
+  都存活、组内两项都带 content qualifier、lock 能自验证；另一个测试要求重复 name 的 lock
+  直接拒绝。
+- **结论：已修。** lock 验证与部署 vendoring 使用同一组唯一 artifact 名，原 basename collision
+  不再丢依赖。
 
-- **证据：S。** `--cp` path 直接变相对字符串或 `"file:" ++ abs`：`selfhost/src/main.dawn:1143`；manifest 以空格拼 entry：`selfhost/src/jvm/jarw.dawn:68`；72-byte wrapping 实际用 code-point length：`:72`。
-- **边界：** space 会拆成两个 token，`#` 变 URI fragment，非 ASCII path 的 UTF-8 bytes 可超过 physical line limit。
-- **影响：** compile 成功的 executable jar 在 `java -jar` 时找不到依赖。
-- **建议：** 每项转换成 RFC-compliant URI reference并 percent-encode；按 UTF-8 octet wrap continuation line。
+## TOOL-12 — P1 — executable JAR `Class-Path` 没有正确 URI/byte wrapping（已修）
+
+> **后续处置：已修。** Class-Path entry 先按 UTF-8 bytes percent-encode，`/` 与 URI unreserved
+> 字符保留；相对 entry 与 base 外的 `file:` entry 走同一编码。manifest physical line 按 UTF-8
+> byte 数限制到 72，continuation 的前导空格计入本行宽度，且重组后保持原值。
+
+- **修复前证据：S。** `--cp` path 直接变相对字符串或 `file:` 加绝对路径，manifest 再以空格拼
+  entry；72-byte wrapping 实际按 code point 计数。
+- **修复前边界：** space 会拆成两个 token，`#` 变 URI fragment，非 ASCII path 的 UTF-8 bytes
+  可超过 physical line limit。
+- **门禁：** `selfhost/src/main.dawn` 的 URI inline test 固定普通路径、space、`#` 与非 ASCII；
+  `selfhost/src/jvm/jarw.dawn` 的 tests 对每条 physical line 逐字节计数，并验证 continuation
+  重组后的 Class-Path 完全等于输入。
+- **结论：已修。** executable jar 的 dependency path 不再因 URI tokenization 或 byte wrapping
+  在 `java -jar` 阶段失效。
 
 ## TOOL-13 — P2 — `dawn.toml` 与 `dawn.lock` 写入不原子
 
@@ -140,39 +202,67 @@ snapshot 与 TOOL-06 classloader，本刀不冒称解决；TOOL-10 在这里仅�
 - **影响：** disk full、process termination 或 write error 可把受版本控制文件留成 truncated state。
 - **建议：** 在目标目录写 temp，flush/close/validate 后 atomic rename，保留原 mode；失败不动旧文件。
 
-## TOOL-14 — P1 — launcher stamp 未覆盖真实 compiler build inputs
+## TOOL-14 — P1 — launcher stamp 未覆盖真实 compiler build inputs（部分修复）
 
-> **后续处置（2026-08-09）：partial，订正此前 fixed。** launcher 已把 root 的三个直接
-> local source deps、`dawn.lock`、seed jar/std checksum、resolver 与 recipe 加入摘要，关闭了
-> 原证据的大半；但尚有三条原边界的同源残余：
+> **后续处置（2026-08-09）：partial，订正此前 fixed。** 本轮已关闭 direct-only discovery 与
+> v1 consumer 的静默降级：
 >
-> 1. 找不到 `sha256sum`/`shasum` 时回退到 mtime，并继续允许 cache hit：`bin/dawn:89`、`:172`；
->    trust primitive 缺失仍是 fail-open。
-> 2. `dep_dirs` 只以启动前 `sed` 读取 root manifest 的直接 path deps：`bin/dawn:112`；它不消费
->    `SourcePlan` 的最终递归 roots，A → B 的传递 local source 修改仍可能漏 stamp。
-> 3. `source_stamp` 以 `path + newline + raw contents` 直接串接，没有 record length/type framing：
->    `bin/dawn:144`；不同 path/content 分割可形成同一输入字节流。
+> - source graph 来自 Planner 的递归 `dawn-source-inputs-v1`；首次 clean checkout 才使用受限、
+>   checkout-local 的递归 path fallback，Planner、fspath、sha2、inflate 都进入 stamp；
+> - 当前 JAR 的 Producer 非零、空输出或坏 manifest 会保留错误并终止，绝不退回 fallback；
+> - consumer 保留并验证 `F/O/T`，required/optional/tree 的缺失、类型、symlink、遍历和读取错误
+>   都 fail closed；header、record、scope 与 repo-relative path spelling 也严格解析；
+> - `R` 记录和 fallback dependency 都不能逃出 checkout；`A` 只用于 Producer 明确给出的 base 外
+>   absolute package，不能由 fallback 扩权生成。
 >
-> 完整关闭需要 fail-closed hasher、由权威递归 plan 导出的版本化输入清单，以及长度前缀记录；
-> 因此本项从 fixed 降为 partial，不新增 finding。
+> 仍开放的真实边界只有：
+>
+> 1. 找不到 `sha256sum`/`shasum` 时仍返回 `no-sha256` 并用 mtime 决定 cache hit，trust primitive
+>    缺失是 fail-open；
+> 2. stamp payload 仍拼接 `path + newline + raw contents`，没有 type/length framing，存在分割歧义；
+> 3. build 前后没有由 stage1/final candidate 各自 re-plan 并比较，同一 invocation 不具备
+>    pre/post source snapshot，ABA 仍可能穿过；
+> 4. 只提升 jar 与单值 stamp，没有持久化 inputs/jar digest、candidate staging 与可恢复
+>    commit-marker/concurrency 协议。
+>
+> 因此本项保持 partial。完整边界见
+> [`bootstrap-input-manifest-design.md`](../bootstrap-input-manifest-design.md)。
 
-- **证据：S。** stamp 只覆盖 `selfhost/src`、manifest、std 与 seed release：`bin/dawn:97`；`selfhost/dawn.toml:12` 还有三个 local source deps。stamp 也漏 `selfhost/dawn.lock`、`scripts/seed-checksums.txt`、`scripts/seedjar.sh` 与 build recipe `bin/dawn`。
-- cache hit 直接执行旧 jar：`bin/dawn:169`；只有决定 rebuild 后才重新验证 seed：`:141`。
-- **影响：** 修改 `packages/json`/`sha2`/`inflate`、lock、checksum policy 或 launcher 后，`bin/dawn` 可继续运行旧 compiler；撤销 seed trust 也不触发重建。
-- **建议：** 从权威 dependency plan 生成 content-addressed input manifest，至少覆盖 transitive source、lock、seed checksum/resolver 与 recipe。
+- **修复前证据：S。** stamp 曾只覆盖 `selfhost/src`、manifest、std 与 seed release，漏 local
+  source deps、lock、checksum/resolver 与 launcher recipe；root manifest 的 direct-only shell
+  读取也看不到传递 package。
+- **当前门禁：** `scripts/bootstrap-input-manifest-contract/run.sh` 固定 Producer 的递归、去重、
+  project-only 与 fail-closed 输出；`scripts/bootstrap-guards/run.sh` 逐文件证明完整 compiler closure
+  会移动 stamp，并以 fake current JAR 覆盖 producer failure、坏 v1 scope/path/kind、缺失或错误
+  `F/O/T`、`find`/`cat` 失败及 missing optional 正例。
+- **当前影响：** 递归 source、lock、checksum policy、launcher recipe、producer 错误与 checkout
+  边界已进入可观测合同；剩余风险只来自上列 hasher、framing、snapshot 与 promotion 残余。
+- **建议：** 按设计文档完成 fail-closed known-vector hasher、framed v2 stamp、pre/post re-plan 与
+  可恢复 promotion，不要把“递归 roots 已覆盖”等同于整个 bootstrap cache 协议已关闭。
 
-## TOOL-15 — P1 — seed jar 已校验，配对 seed std 未校验
+## TOOL-15 — P1 — seed jar 已校验，配对 seed std 未校验（已修）
 
-- **证据：S。** jar cache hit 每次校验：`scripts/seedjar.sh:68`、`:78`；seed std cache hit 只检查 `modules.txt` 存在：`:90`、`:93`，首次内容来自 tag archive：`:98`。stage 1 与 release 都使用该目录：`bin/dawn:156`、`.github/workflows/release.yml:61`。
-- **影响：** writable cache 或被移动的 tag 可改变 bootstrap input，而 jar checksum 与现有 trust narrative 看不见。
-- **建议：** 为 seed std 记录并每次验证 canonical tree hash，或从已校验 release artifact 提取；cache 更新使用 atomic directory replacement。
+> **后续处置：已修。** `scripts/seed-std-checksums.txt` 为每个 seed tag 记录 canonical std tree
+> hash；`seed_std_dir` 在 cache hit 与 staged tag archive 提升前都验证完整树，stage 1 因而消费同一
+> release 下分别经过摘要验证的 jar/std pair。
 
-## TOOL-16 — P1 — 默认 seed 验证在前提缺失时 fail-open
+- **修复前证据：S。** jar cache hit 每次校验，seed std cache hit 却只检查 `modules.txt` 存在；
+  writable cache 或被移动的 tag 可以替换半个 bootstrap input，而 jar checksum 仍为绿。
+- **门禁：** `scripts/bootstrap-guards/run.sh` 固定 matching tree 正例，并分别修改现有文件、添加
+  新文件、删除该 tag 的摘要记录；三种负例都必须拒绝 seed std。
+- **结论：已修。** seed std 与 seed jar 现在处于同一 fail-closed trust boundary。
 
-- **证据：S。** tag 没有 checksum 时只 warning 并成功：`scripts/seedjar.sh:37`；没有 SHA-256 tool 时也只 warning：`:42`。release 只打印“请登记摘要”的 notice：`.github/workflows/release.yml:101`。
-- **边界：** 未来 bump `seed-release.txt` 却漏加 checksum，所有默认 bootstrap/CI 静默使用未验证 compiler。
-- **影响：** 一次普通 release omission 就关闭信任门禁。
-- **建议：** pinned/default seed 必须 fail-closed；historical replay 或 local escape 用显式 `--allow-unverified`/env，不能复用默认路径。
+## TOOL-16 — P1 — 默认 seed 验证在前提缺失时 fail-open（已修）
+
+> **后续处置：已修。** pinned/default seed 缺记录摘要、摘要不符或没有可用 SHA-256 工具时均
+> 失败；无法验证的历史 replay 只能通过显式 `--allow-unverified`，本地逃生对应显式
+> `DAWN_SEED_ALLOW_UNVERIFIED=1`，默认路径不再继承豁免。
+
+- **修复前证据：S。** tag 没有 checksum 或系统没有 SHA-256 tool 时只 warning 并成功；未来
+  bump `seed-release.txt` 漏登记一行即可让所有 bootstrap/CI 使用未验证 compiler。
+- **门禁：** `scripts/bootstrap-guards/run.sh` 固定 matching digest 正例，并分别驱动摘要不符、
+  摘要缺失、hasher 缺失与显式 opt-out；前三者必须失败，只有显式 opt-out 恢复未验证路径。
+- **结论：已修。** 普通 release omission 或 host tool 缺失不能再静默关闭默认种子验证。
 
 ## TOOL-17 — P2 — release JAR 自举配方是第二份实现
 

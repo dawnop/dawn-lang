@@ -1035,7 +1035,7 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 
 > **【已修】**
 >
-> `pkgfetch.dawn` 现在有五道闸：
+> 当前 owner `compiler-plan/src/pkgfetch.dawn` 有五道闸：
 >
 > - HTTP **connect timeout 30s** 与 **request timeout 300s**（此前一个都没有，
 >   一个不应答的主机能把编译器挂到天荒地老）；
@@ -1050,10 +1050,11 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 内存效率问题，不是安全问题。
 
 
-- `selfhost/src/pkg/pkgfetch.dawn:170` 通过 `BodyHandlers.ofByteArray` 整体下载到内存。
+- 原始审查时 compiler-local `pkgfetch` 通过 `BodyHandlers.ofByteArray` 整体下载到内存；当前 owner
+  已迁至 `compiler-plan/src/pkgfetch.dawn`，这里保留的是当时证据。
 - HTTP client 未设置 connect/request timeout。
-- zip 每个 entry 使用 `readAllBytes`（`pkgfetch.dawn:260`）。
-- tar.gz 先把整个解压结果 `readAllBytes` 到内存（`pkgfetch.dawn:337`）。
+- 原始审查时旧 compiler-local 实现对每个 zip entry 使用 `readAllBytes`。
+- 原始审查时旧 compiler-local 实现先把整个 tar.gz 解压结果 `readAllBytes` 到内存。
 - 没有 compressed size、expanded size、entry count、单文件大小或压缩比限制。
 
 一个 zip/tar bomb 或慢连接能耗尽编译器内存/时间。建议流式下载到临时文件，设置网络超时、
@@ -1065,7 +1066,8 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 目录名比对（内容寻址让目录名本身就是声明，无需 marker 文件），配套
 > `dawn cache verify` 全量扫描。实测 7MB 树 ~0.9s；篡改单文件被当场检出。
 >
-> **【更正 —— 2026-08-07】「命中即重算」在构建路径上没生效**：`analyze.url_pkg_root`
+> **【更正 —— 2026-08-07】「命中即重算」在构建路径上没生效**：当前位于
+> `compiler-plan/src/source.dawn:392` 的 `url_pkg_root`
 > 热命中直接 `return`，压根不进 `ensure_cached`（那行 fast path 比本条修复还老，
 > 修复时没回头看它）。于是 `ensure_cached` 的重算只在「条目在、`subdir` 不在」这个
 > 角落触发。今天挡住篡改的实际只有 `dawn cache verify` 这条手动全量扫描。
@@ -1084,7 +1086,7 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 这是一个小特性，该有自己的设计文档。
 
 
-`selfhost/src/pkg/pkgfetch.dawn:482` 明确“fetch 时验证一次，之后信任本地副本”；
+`compiler-plan/src/pkgfetch.dawn:630` 仍记录“fetch 时验证一次，之后信任本地副本”的边界；
 目录存在就直接返回。用户、磁盘损坏或并发半成品都能改变 cache 内容而不被发现。
 建议至少验证一个带版本的 marker/hash，或使用只写临时目录+原子 rename+只读权限，并提供
 `dawn cache verify`。
@@ -1102,11 +1104,11 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 全部示例、文档和用户项目里，改名的破坏面远大于收益，而收益只是命名洁癖。
 >
 > **接受的那一半**（「在文件头和错误中明确不是通用 TOML」）是对的，
-> `selfhost/src/pkg/toml.dawn` 的文件头已经写明它是子集并列出拒绝的构造。
+> `compiler-plan/src/toml.dawn` 的文件头已经写明它是子集并列出拒绝的构造。
 > 用户碰到的是一条明确的错误信息，不是静默的误解析。
 
 
-`selfhost/src/pkg/toml.dawn` 807 行，另有 661 行 manifest validator；它明确拒绝标准 TOML 的
+当前 owner 为 `compiler-plan/src/toml.dawn` 与 `compiler-plan/src/manifestv.dawn`；它明确拒绝标准 TOML 的
 literal string、float、inline table、quoted key、dotted key 等。用户会自然使用 TOML 工具和语法，
 却得到 Dawn 专用子集。
 
@@ -1867,7 +1869,7 @@ Content-Length，204/304/HEAD 也会进入 body 路径。建议由 ResponseBody 
 >   「对**上一 release** 字节稳定（`selfhost-prev-diff.sh`）」，Kotlin 原件注明在
 >   `kotlin-final` tag。`parser_test.dawn` 里指向已删除的
 >   `scripts/selfhost-parse-diff.sh` 也改了。
-> - 顺带：`toml.dawn` 的文件头重写（见 PKG-03）、`selfhost/dawn.toml` 的
+> - 顺带：`compiler-plan/src/toml.dawn` 的文件头重写（见 PKG-03）、`selfhost/dawn.toml` 的
 >   `compiler/build.gradle.kts` lock-step 注释重写（见 DOC-09）。
 
 

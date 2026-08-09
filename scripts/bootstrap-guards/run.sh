@@ -32,6 +32,20 @@ bad() {
   fail=1
 }
 
+is_digest() {
+  [[ $1 =~ ^[0-9a-f]{64}$ ]]
+}
+
+file_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # TOOL-14: everything the built jar is a function of reaches the stamp.
 #
@@ -49,18 +63,84 @@ cp "$root/selfhost/dawn.toml" "$root/selfhost/dawn.lock" "$fake/selfhost/"
 cp -r "$root/selfhost/src" "$fake/selfhost/src"
 cp -r "$root/std" "$fake/std"
 cp -r "$root/packages" "$fake/packages"
+cp -r "$root/compiler-plan" "$fake/compiler-plan"
 
 stamp() { DAWN_PRINT_STAMP=1 "$fake/bin/dawn"; }
 
-base="$(stamp)"
-if [ -z "$base" ] || [ "$base" = "no-sha256" ]; then
-  echo "FAIL: no usable sha256 tool, so the stamp cannot be checked here" >&2
+base=""
+if ! base="$(stamp)"; then
+  echo "FAIL: the zero-toolchain fallback could not produce a baseline stamp" >&2
   exit 1
 fi
+if ! is_digest "$base"; then
+  echo "FAIL: the baseline stamp is not a 64-character lowercase SHA-256 digest" >&2
+  exit 1
+fi
+ok "the zero-toolchain fallback produces a valid stamp"
 
-# The declared input set, one file from each member. packages/* are there
-# because they are selfhost's [deps] -- the case that was missing, and the one
-# a hand-written path list gets wrong again the next time a package is added.
+# A URL dependency table requires the real Planner: the zero-toolchain shell
+# fallback must reject it, never silently stop the local-dependency walk and
+# hash a partial graph. Failure must not leave a digest-looking stdout value.
+cat >> "$fake/selfhost/dawn.toml" <<'EOF'
+
+[deps.remote]
+url = "file:///bootstrap-guards/remote.zip"
+version = "1.0.0"
+hash = "d1:0000000000000000000000000000000000000000000000000000000000000000"
+EOF
+remote_stamp=""
+if remote_stamp="$(stamp 2> "$work/remote-dep.err")"; then
+  bad "the zero-toolchain fallback accepted a URL dependency table"
+elif [ -n "$remote_stamp" ]; then
+  bad "the rejected URL dependency table still produced a usable stamp"
+else
+  ok "the zero-toolchain fallback rejects URL dependency tables without a stamp"
+fi
+cp "$root/selfhost/dawn.toml" "$fake/selfhost/dawn.toml"
+if restored="$(stamp)" && [ "$restored" = "$base" ]; then
+  ok "restoring the local-only manifest restores the baseline stamp"
+else
+  bad "the URL dependency negative control contaminated later stamp checks"
+fi
+
+# The fallback is intentionally checkout-local. Absolute path dependencies and
+# relative spellings that resolve outside the copied root must not expand its
+# authority beyond the checkout while no Planner is available.
+outside="$work/outside-package"
+mkdir -p "$outside/src"
+printf 'schema = 1\nname = "outside"\n' > "$outside/dawn.toml"
+printf 'pub fn value() -> Int = 1\n' > "$outside/src/value.dawn"
+
+expect_fallback_dep_rejection() {
+  local label=$1 dep=$2 output=""
+  cat >> "$fake/selfhost/dawn.toml" <<EOF
+
+[deps]
+outside = "$dep"
+EOF
+  if output="$(stamp 2> "$work/fallback-$label.err")"; then
+    bad "the zero-toolchain fallback accepted $label"
+  elif [ -n "$output" ]; then
+    bad "the rejected $label still produced a usable stamp"
+  else
+    ok "the zero-toolchain fallback rejects $label"
+  fi
+  cp "$root/selfhost/dawn.toml" "$fake/selfhost/dawn.toml"
+}
+
+expect_fallback_dep_rejection "an absolute dependency" "$outside"
+expect_fallback_dep_rejection "a dependency escaping the checkout" "../../outside-package"
+if restored="$(stamp)" && is_digest "$restored" && [ "$restored" = "$base" ]; then
+  ok "fallback boundary rejections leave the baseline unchanged"
+else
+  bad "fallback boundary negative controls contaminated later stamp checks"
+fi
+
+# The declared input set, one file from each member. compiler-plan is a direct
+# selfhost dependency; fspath is deliberately only Planner's dependency, so its
+# probe turns red if the no-toolchain fallback regresses to a direct-only walk.
+# sha2/inflate are named too: diamonds must be harmless, not an excuse to omit
+# either route to a real compiler input.
 for target in \
   selfhost/src/main.dawn \
   selfhost/dawn.toml \
@@ -71,13 +151,23 @@ for target in \
   scripts/seed-std-checksums.txt \
   scripts/seedjar.sh \
   bin/dawn \
+  compiler-plan/dawn.toml \
+  compiler-plan/src/source.dawn \
+  packages/fspath/src/fspath.dawn \
   packages/json/src/parser.dawn \
   packages/sha2/src/sha256.dawn \
   packages/inflate/src/deflate.dawn; do
   printf '\n# bootstrap-guards probe\n' >> "$fake/$target"
-  moved="$(stamp)"
+  moved=""
+  if ! moved="$(stamp)"; then
+    bad "$target made the stamp command fail"
+    cp "$root/$target" "$fake/$target"
+    continue
+  fi
   cp "$root/$target" "$fake/$target"
-  if [ "$moved" = "$base" ]; then
+  if ! is_digest "$moved"; then
+    bad "$target produced a non-digest stamp"
+  elif [ "$moved" = "$base" ]; then
     bad "$target does not reach the build stamp"
   fi
 done
@@ -88,10 +178,189 @@ done
 printf 'not an input\n' > "$fake/README.md"
 mkdir -p "$fake/docs"
 printf 'not an input\n' > "$fake/docs/notes.md"
-if [ "$(stamp)" != "$base" ]; then
+outside_stamp=""
+if ! outside_stamp="$(stamp)"; then
+  bad "an unrelated file made the stamp command fail"
+elif ! is_digest "$outside_stamp"; then
+  bad "an unrelated file produced a non-digest stamp"
+elif [ "$outside_stamp" != "$base" ]; then
   bad "the stamp moved for a file that is not a build input"
 else
   ok "a file outside the input set leaves the stamp alone"
+fi
+
+# Once a current jar exists, its versioned manifest is authoritative. A fake
+# java executable makes this a process-boundary test without a JVM or network,
+# and an explicit JAVA_HOME prevents the caller's environment bypassing it.
+consumer="$work/current-root"
+cp -R "$fake" "$consumer"
+mkdir -p "$consumer/build" "$consumer/fake-java-home/bin" \
+  "$consumer/consumer-tree"
+: > "$consumer/build/dawn-selfhost.jar"
+printf 'required\n' > "$consumer/consumer-required.txt"
+printf 'optional\n' > "$consumer/consumer-optional.txt"
+printf 'tree leaf\n' > "$consumer/consumer-tree/leaf.txt"
+printf 'tabbed\n' > "$consumer/consumer-input	with-tab.txt"
+cat > "$consumer/fake-java-home/bin/java" <<'EOF'
+#!/bin/sh
+case ${FAKE_SOURCE_MODE:-valid} in
+  nonzero)
+    echo "fake producer failed" >&2
+    exit 23
+    ;;
+  empty) exit 0 ;;
+  bad-header) printf 'not-a-source-input-manifest\n' ;;
+  header-only) printf 'dawn-source-inputs-v1\n' ;;
+  bad-record) printf 'dawn-source-inputs-v1\nmalformed\n' ;;
+  blank-record) printf 'dawn-source-inputs-v1\n\n' ;;
+  unterminated-record) printf 'dawn-source-inputs-v1\nR\tF\tconsumer-required.txt' ;;
+  unknown-scope) printf 'dawn-source-inputs-v1\nX\tF\tconsumer-required.txt\n' ;;
+  unknown-kind) printf 'dawn-source-inputs-v1\nR\tX\tconsumer-required.txt\n' ;;
+  a-relative) printf 'dawn-source-inputs-v1\nA\tF\tconsumer-required.txt\n' ;;
+  r-absolute) printf 'dawn-source-inputs-v1\nR\tF\t/consumer-required.txt\n' ;;
+  r-empty) printf 'dawn-source-inputs-v1\nR\tF\t\n' ;;
+  r-parent) printf 'dawn-source-inputs-v1\nR\tF\t../consumer-required.txt\n' ;;
+  r-inner-parent) printf 'dawn-source-inputs-v1\nR\tF\tdir/../consumer-required.txt\n' ;;
+  r-dot) printf 'dawn-source-inputs-v1\nR\tF\t./consumer-required.txt\n' ;;
+  r-double-slash) printf 'dawn-source-inputs-v1\nR\tF\tdir//consumer-required.txt\n' ;;
+  r-trailing-slash) printf 'dawn-source-inputs-v1\nR\tF\tconsumer-required.txt/\n' ;;
+  a-dot) printf 'dawn-source-inputs-v1\nA\tF\t/tmp/./consumer-required.txt\n' ;;
+  a-parent) printf 'dawn-source-inputs-v1\nA\tF\t/tmp/../consumer-required.txt\n' ;;
+  a-double-slash) printf 'dawn-source-inputs-v1\nA\tF\t/tmp//consumer-required.txt\n' ;;
+  a-trailing-slash) printf 'dawn-source-inputs-v1\nA\tF\t/tmp/consumer-required.txt/\n' ;;
+  valid)
+    printf 'dawn-source-inputs-v1\n'
+    printf 'R\tF\tconsumer-required.txt\n'
+    printf 'R\tO\tconsumer-optional.txt\n'
+    printf 'R\tT\tconsumer-tree\n'
+    printf 'R\tF\tconsumer-input\twith-tab.txt\n'
+    ;;
+  *) exit 24 ;;
+esac
+EOF
+real_find=$(command -v find)
+cat > "$consumer/fake-java-home/bin/find" <<EOF
+#!/bin/sh
+if [ "\${FAKE_IO_FAILURE:-}" = "find" ] && [ "\$1" = "$consumer/consumer-tree" ]; then
+  echo "fake find failed" >&2
+  exit 25
+fi
+exec "$real_find" "\$@"
+EOF
+real_cat=$(command -v cat)
+cat > "$consumer/fake-java-home/bin/cat" <<EOF
+#!/bin/sh
+if [ "\${FAKE_IO_FAILURE:-}" = "cat" ] && [ "\$1" = "$consumer/consumer-required.txt" ]; then
+  echo "fake cat failed" >&2
+  exit 26
+fi
+exec "$real_cat" "\$@"
+EOF
+chmod +x "$consumer/fake-java-home/bin/java" \
+  "$consumer/fake-java-home/bin/find" "$consumer/fake-java-home/bin/cat"
+
+current_stamp() {
+  JAVA_HOME="$consumer/fake-java-home" \
+    PATH="$consumer/fake-java-home/bin:$PATH" \
+    FAKE_SOURCE_MODE=$1 FAKE_IO_FAILURE=${2:-} \
+    DAWN_PRINT_STAMP=1 "$consumer/bin/dawn"
+}
+
+expect_current_failure() {
+  local label=$1 mode=$2 io_failure=${3:-}
+  local expected_error=${4:-}
+  local output="$work/current-$1.out" error="$work/current-$1.err"
+  if current_stamp "$mode" "$io_failure" > "$output" 2> "$error"; then
+    bad "the current-jar consumer accepted $label"
+  elif [ -s "$output" ]; then
+    bad "the current-jar consumer emitted a digest for $label"
+  elif [ ! -s "$error" ]; then
+    bad "the current-jar consumer rejected $label without a diagnostic"
+  elif [ -n "$expected_error" ] && ! grep -Fq "$expected_error" "$error"; then
+    bad "the current-jar consumer rejected $label after manifest parsing"
+  else
+    ok "the current-jar consumer rejects $label without a digest"
+  fi
+}
+
+current_base=""
+if current_base="$(current_stamp valid)" && is_digest "$current_base"; then
+  ok "the current-jar consumer accepts typed inputs and tabbed paths"
+else
+  bad "the current-jar consumer rejected a valid typed manifest"
+fi
+expect_current_failure "producer failure" nonzero
+if ! grep -q 'fake producer failed' "$work/current-producer failure.err"; then
+  bad "the current-jar consumer swallowed producer stderr"
+fi
+expect_current_failure "empty producer output" empty
+expect_current_failure "a bad header" bad-header
+expect_current_failure "a header-only manifest" header-only
+expect_current_failure "a malformed record" bad-record
+expect_current_failure "a blank record" blank-record
+expect_current_failure "an unterminated record" unterminated-record
+expect_current_failure "an unknown scope" unknown-scope
+expect_current_failure "an unknown kind" unknown-kind
+expect_current_failure "a relative A path" a-relative
+expect_current_failure "an absolute R path" r-absolute
+expect_current_failure "an empty R path" r-empty
+expect_current_failure "an R path escaping with parent traversal" r-parent
+expect_current_failure "an R path with internal parent traversal" r-inner-parent
+expect_current_failure "a non-canonical R path" r-dot
+expect_current_failure "an R path with repeated separators" r-double-slash
+expect_current_failure "an R path with a trailing slash" r-trailing-slash "" \
+  "error: invalid repo-relative source input path"
+expect_current_failure "an A path with a dot segment" a-dot "" \
+  "error: non-canonical absolute source input path"
+expect_current_failure "an A path with a parent segment" a-parent "" \
+  "error: non-canonical absolute source input path"
+expect_current_failure "an A path with repeated separators" a-double-slash "" \
+  "error: non-canonical absolute source input path"
+expect_current_failure "an A path with a trailing slash" a-trailing-slash "" \
+  "error: non-canonical absolute source input path"
+
+rm "$consumer/consumer-required.txt"
+expect_current_failure "a missing required file" valid
+printf 'required\n' > "$consumer/consumer-required.txt"
+mv "$consumer/consumer-required.txt" "$consumer/consumer-required-target.txt"
+ln -s consumer-required-target.txt "$consumer/consumer-required.txt"
+expect_current_failure "a symbolic-link required file" valid
+rm "$consumer/consumer-required.txt"
+mv "$consumer/consumer-required-target.txt" "$consumer/consumer-required.txt"
+mv "$consumer/consumer-required.txt" "$consumer/consumer-required-file.txt"
+mkdir "$consumer/consumer-required.txt"
+expect_current_failure "a non-regular required file" valid
+rmdir "$consumer/consumer-required.txt"
+mv "$consumer/consumer-required-file.txt" "$consumer/consumer-required.txt"
+expect_current_failure "a required file read failure" valid cat
+rm -rf "$consumer/consumer-tree"
+expect_current_failure "a missing required tree" valid
+mkdir -p "$consumer/consumer-tree"
+printf 'tree leaf\n' > "$consumer/consumer-tree/leaf.txt"
+mv "$consumer/consumer-tree" "$consumer/consumer-tree-target"
+ln -s consumer-tree-target "$consumer/consumer-tree"
+expect_current_failure "a symbolic-link required tree" valid
+rm "$consumer/consumer-tree"
+mv "$consumer/consumer-tree-target" "$consumer/consumer-tree"
+ln -s leaf.txt "$consumer/consumer-tree/link.txt"
+expect_current_failure "a symbolic link inside a required tree" valid
+rm "$consumer/consumer-tree/link.txt"
+mkfifo "$consumer/consumer-tree/pipe"
+expect_current_failure "a non-regular entry inside a required tree" valid
+rm "$consumer/consumer-tree/pipe"
+expect_current_failure "a required tree traversal failure" valid find
+rm "$consumer/consumer-optional.txt"
+ln -s consumer-required.txt "$consumer/consumer-optional.txt"
+expect_current_failure "a symbolic-link optional file" valid
+rm "$consumer/consumer-optional.txt"
+mkdir "$consumer/consumer-optional.txt"
+expect_current_failure "a non-regular optional file" valid
+rmdir "$consumer/consumer-optional.txt"
+optional_stamp=""
+if optional_stamp="$(current_stamp valid)" && is_digest "$optional_stamp"; then
+  ok "the current-jar consumer accepts a missing optional file"
+else
+  bad "the current-jar consumer rejected a missing optional file"
 fi
 
 # ---------------------------------------------------------------------------
@@ -110,7 +379,10 @@ mkdir -p "$sroot/scripts" "$sroot/.dawn/seeds/v9.9.9"
 cp "$root/scripts/seedjar.sh" "$sroot/scripts/"
 printf 'v9.9.9\n' > "$sroot/scripts/seed-release.txt"
 printf 'this is the seed jar\n' > "$sroot/.dawn/seeds/v9.9.9/seed.jar"
-want=$(sha256sum "$sroot/.dawn/seeds/v9.9.9/seed.jar" | cut -d' ' -f1)
+if ! want=$(file_sha256 "$sroot/.dawn/seeds/v9.9.9/seed.jar"); then
+  echo "FAIL: no usable SHA-256 tool for the seed fixture" >&2
+  exit 1
+fi
 
 # resolve the seed in a subshell so an `exit 1` inside it stops there
 try_seed() { # -> exit code, output in $work/seed.txt

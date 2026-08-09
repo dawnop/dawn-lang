@@ -13,13 +13,26 @@
 use std/str
 use std/list
 use std/io
-use pkg/toml.{TomlDoc, parse, render, set_string, remove, remove_table}
-use pkg/manifestv.{validate, mcoord_parse, mcoord_show, ManifestV, SemV, semv_show, bad_subdir}
+use compiler_plan/toml.{TomlDoc, parse, render, set_string, remove, remove_table}
+use compiler_plan/manifestv.{
+  validate, mcoord_parse, mcoord_show, ManifestV, SemV, semv_show, bad_subdir
+}
+use compiler_plan/diagnostic
 use front/token.{Diag}
 use front/diag.{render_manifest}
-use pkg/pkgfetch
+use compiler_plan/pkgfetch
 
 const USAGE: String = "usage: dawn add <spec> [--subdir <p>] [--as <as_name>] [--dir <project>]"
+
+# Manifest parsing belongs to compiler_plan, while span rendering belongs to
+# the compiler frontend. Convert the package-local diagnostic record here.
+fn render_plan_manifest(path: String, text: String, ds: List[diagnostic.Diag]) -> String = {
+  var front_ds: List[Diag] = []
+  for d in ds {
+    front_ds = front_ds ++ [Diag { msg: d.msg, lo: d.lo, hi: d.hi, hint: d.hint }]
+  }
+  render_manifest(path, text, front_ds)
+}
 
 ## The added package's manifest, validated with rendered diagnostics.
 fn read_pkg(dir: String) -> Result[ManifestV, String] !io = {
@@ -31,7 +44,7 @@ fn read_pkg(dir: String) -> Result[ManifestV, String] !io = {
   match validate(dir, text) {
     Ok(m) -> Ok(m)
     Err(ds) ->
-      Err(path ++ " does not validate:\n" ++ str.trim(render_manifest(path, text, ds)))
+      Err(path ++ " does not validate:\n" ++ str.trim(render_plan_manifest(path, text, ds)))
   }
 }
 
@@ -145,12 +158,12 @@ pub fn add_dependency(
       if len(perrs) > 0 {
         let all = perrs ++ perrs
         return Err(mf_path ++ " does not validate; fix it first:\n" ++
-            str.trim(render_manifest(mf_path, text, all)))
+            str.trim(render_plan_manifest(mf_path, text, all)))
       }
     Err(ds) -> {
       let all = perrs ++ ds
       return Err(mf_path ++ " does not validate; fix it first:\n" ++
-          str.trim(render_manifest(mf_path, text, all)))
+          str.trim(render_plan_manifest(mf_path, text, all)))
     }
   }
   let edit = if str.contains(spec, "://") {
@@ -168,7 +181,7 @@ pub fn add_dependency(
         Ok(_) -> ()
         Err(ds) ->
           return Err("internal: the edited manifest does not validate:\n" ++
-              str.trim(render_manifest(mf_path, rendered, ds)))
+              str.trim(render_plan_manifest(mf_path, rendered, ds)))
       }
       match io.write_file(mf_path, rendered) {
         Ok(_) -> Ok(e.summary)

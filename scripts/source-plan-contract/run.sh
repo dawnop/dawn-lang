@@ -52,59 +52,6 @@ with zipfile.ZipFile(target, "w") as archive:
 PY
 }
 
-make_asm_fixture() {
-  python3 - "$1" "$2" <<'PY'
-import sys
-import zipfile
-
-source, target = sys.argv[1:]
-prefix = "org/objectweb/asm/"
-sentinel = prefix + "Opcodes.class"
-
-try:
-    with zipfile.ZipFile(source) as source_jar:
-        entries = sorted(
-            {
-                name for name in source_jar.namelist()
-                if name.startswith(prefix) and name.endswith(".class")
-            }
-        )
-        if sentinel not in entries:
-            print(f"current toolchain jar is missing {sentinel}", file=sys.stderr)
-            raise SystemExit(1)
-        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as fixture:
-            for name in entries:
-                fixture.writestr(name, source_jar.read(name))
-except (OSError, zipfile.BadZipFile) as error:
-    print(f"cannot read current toolchain jar: {error}", file=sys.stderr)
-    raise SystemExit(1)
-PY
-}
-
-relock_asm_fixture() {
-  python3 - "$1" "$2" <<'PY'
-import hashlib
-import pathlib
-import re
-import sys
-
-fixture_name, lock_name = sys.argv[1:]
-fixture = pathlib.Path(fixture_name)
-lock = pathlib.Path(lock_name)
-digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
-text = lock.read_text()
-updated, count = re.subn(
-    r"(?m)^artifact [0-9a-f]{64}  asm-9\.7\.1\.jar$",
-    f"artifact {digest}  asm-9.7.1.jar",
-    text,
-)
-if count != 1:
-    print(f"ASM artifact lock entry occurs {count} times in {lock}", file=sys.stderr)
-    raise SystemExit(1)
-lock.write_text(updated)
-PY
-}
-
 make_package() {
   local dir=$1 version=$2 coord=$3 marker=$4
   mkdir -p "$dir/src"
@@ -121,32 +68,20 @@ pub fn marker() -> String = "$marker"
 EOF
 }
 
-toolchain_jar="$root/build/dawn-selfhost.jar"
+# Initialize the repository toolchain before replacing Maven's repositories.
+# The compiler itself legitimately declares ASM; every fixture below is local
+# and the Planner inspector has no dependency on the compiler package.
 if ! "$dawn" --version > "$work/version.out" 2> "$work/version.err"; then
   cat "$work/version.out" >&2
   cat "$work/version.err" >&2
   fail "$dawn could not initialize the current toolchain"
 fi
-test -f "$toolchain_jar" || fail "current toolchain jar is missing after $dawn --version"
 
-mkdir -p "$work/java-src/g" "$work/java-classes" "$work/maven/g/selected/1" \
-  "$work/maven/org/ow2/asm/asm/9.7.1"
-asm_fixture="$work/maven/org/ow2/asm/asm/9.7.1/asm-9.7.1.jar"
-if ! make_asm_fixture "$toolchain_jar" "$asm_fixture"; then
-  fail "could not build an ASM fixture from $toolchain_jar"
-fi
-cat > "$work/maven/org/ow2/asm/asm/9.7.1/asm-9.7.1.pom" <<'POM'
-<project xmlns="http://maven.apache.org/POM/4.0.0">
-  <modelVersion>4.0.0</modelVersion>
-  <groupId>org.ow2.asm</groupId>
-  <artifactId>asm</artifactId>
-  <version>9.7.1</version>
-</project>
-POM
+mkdir -p "$work/java-src/g" "$work/java-classes" "$work/maven/g/selected/1"
 
-# Isolate both source and Maven caches only after the current toolchain has
-# supplied the local ASM fixture. Every contract invocation below sees only
-# this file:// mirror and cannot fall back to the public network or ~/.dawn.
+# Every contract fixture sees only these temporary caches and the file://
+# repository assembled below. No fixture can fall back to the public network
+# or a package/Coursier cache left by another checkout.
 export DAWN_PKG_CACHE="$work/cache"
 export COURSIER_CACHE="$work/coursier-cache"
 export DAWN_MAVEN_MIRROR="file://$work/maven"
@@ -265,29 +200,55 @@ url = "file://$work/lib-1.1.zip"
 version = "1.1.0"
 hash = "$hash_11"
 EOF
-cat > "$work/inspector/dawn.toml" <<EOF
-schema = 1
-name = "source_plan_inspector"
+python3 - "$root/scripts/source-plan-contract/fixtures/inspector/dawn.toml.in" \
+    "$work/inspector/dawn.toml" "$root/compiler-plan" <<'PY'
+import pathlib
+import sys
 
-[deps]
-compiler = "$root/selfhost"
-EOF
-cat > "$work/inspector/src/main.dawn" <<EOF
-use compiler/driver/analyze.{source_plan}
-use compiler/pkg/manifestv.{mcoord_show}
+source, target, compiler_plan = sys.argv[1:]
+text = pathlib.Path(source).read_text()
+if text.count("@COMPILER_PLAN@") != 1:
+    raise SystemExit("inspector manifest must contain one @COMPILER_PLAN@ placeholder")
+pathlib.Path(target).write_text(text.replace("@COMPILER_PLAN@", compiler_plan))
+PY
+cp "$root/scripts/source-plan-contract/fixtures/inspector/src/main.dawn" \
+  "$work/inspector/src/main.dawn"
+if ! python3 - "$root/compiler-plan/dawn.toml" "$work/inspector/dawn.toml" \
+    "$root/compiler-plan" <<'PY'
+import pathlib
+import sys
+import tomllib
 
-fn show(label: String, target: String) -> Unit !io = {
-  println(label)
-  let plan = source_plan(target)
-  if len(plan.diags) != 0 { panic("unexpected SourcePlan diagnostics") }
-  for coord in plan.java_coords { println(mcoord_show(coord)) }
+planner_name, inspector_name, planner_path = sys.argv[1:]
+
+with pathlib.Path(planner_name).open("rb") as source:
+    planner = tomllib.load(source)
+with pathlib.Path(inspector_name).open("rb") as source:
+    inspector = tomllib.load(source)
+
+expected_planner_deps = {
+    "fspath": "../packages/fspath",
+    "sha2": "../packages/sha2",
+    "inflate": "../packages/inflate",
 }
-
-pub fn main() -> Unit !io = {
-  show("url-first", "$work/order-url-first")
-  show("path-first", "$work/order-path-first")
-}
-EOF
+if planner.get("deps") != expected_planner_deps:
+    raise SystemExit(
+        "compiler-plan dependencies must remain exactly fspath, sha2, and inflate"
+    )
+if "java-deps" in planner:
+    raise SystemExit("compiler-plan must not declare Java dependencies")
+if inspector.get("deps") != {"compiler_plan": planner_path}:
+    raise SystemExit("SourcePlan inspector must depend only on compiler-plan")
+if "java-deps" in inspector:
+    raise SystemExit("SourcePlan inspector must not declare Java dependencies")
+PY
+then
+  fail "Planner package dependency boundary drifted"
+fi
+if grep -R -n '^use java' "$root/compiler-plan/src"; then
+  fail "compiler-plan acquired a Java dependency"
+fi
+echo "PASS  Planner and its inspector are independent of compiler Java dependencies"
 cat > "$work/order.expected" <<'EOF'
 url-first
 g:root:1
@@ -298,7 +259,8 @@ g:root:1
 g:path:1
 g:selected:1
 EOF
-"$dawn" run "$work/inspector" > "$work/order.out" 2> "$work/order.err" || {
+"$dawn" run "$work/inspector" -- "$work/order-url-first" "$work/order-path-first" \
+    > "$work/order.out" 2> "$work/order.err" || {
   cat "$work/order.err" >&2
   fail "SourcePlan order inspector failed"
 }
@@ -422,298 +384,3 @@ for forbidden in \
   fi
 done
 echo "PASS  duplicate parser and graph helpers are absent"
-
-# Bootstrap input-manifest producer.
-input_root="$work/input-manifest"
-input_base="$input_root/repo"
-input_app="$input_base/app"
-input_alpha="$input_base/pkg-alpha"
-input_charlie="$input_base/pkg-charlie"
-input_shared="$input_root/external/shared"
-mkdir -p "$input_app/src" "$input_alpha/src" "$input_charlie/src" "$input_shared/src"
-cat > "$input_app/dawn.toml" <<'EOF'
-schema = 1
-name = "input_app"
-
-[deps]
-alpha = "../pkg-alpha"
-charlie = "../pkg-charlie"
-EOF
-cat > "$input_app/src/main.dawn" <<'DAWN'
-pub fn main() -> Unit = ()
-DAWN
-cat > "$input_alpha/dawn.toml" <<'EOF'
-schema = 1
-name = "alpha"
-
-[deps]
-shared = "../../external/shared"
-EOF
-cat > "$input_alpha/src/value.dawn" <<'DAWN'
-pub fn alpha() -> Int = 1
-DAWN
-cat > "$input_charlie/dawn.toml" <<'EOF'
-schema = 1
-name = "charlie"
-
-[deps]
-shared = "../../external/shared"
-EOF
-cat > "$input_charlie/src/value.dawn" <<'DAWN'
-pub fn charlie() -> Int = 3
-DAWN
-cat > "$input_shared/dawn.toml" <<'EOF'
-schema = 1
-name = "shared"
-EOF
-cat > "$input_shared/src/value.dawn" <<'DAWN'
-pub fn shared() -> Int = 2
-DAWN
-
-cat > "$work/inputs.expected" <<EOF
-dawn-source-inputs-v1
-A	F	$input_shared/dawn.toml
-A	T	$input_shared/src
-R	F	app/dawn.toml
-R	F	pkg-alpha/dawn.toml
-R	F	pkg-charlie/dawn.toml
-R	O	app/dawn.lock
-R	T	app/src
-R	T	pkg-alpha/src
-R	T	pkg-charlie/src
-EOF
-
-run_input_manifest() {
-  local compiler=$1 base=$2 target=$3 output=$4
-  if [[ "$compiler" == *.jar ]]; then
-    java -Xss512m -Xmx2g -jar "$compiler" __source-inputs --base "$base" "$target" \
-      > "$output.out" 2> "$output.err"
-  else
-    "$compiler" __source-inputs --base "$base" "$target" \
-      > "$output.out" 2> "$output.err"
-  fi
-}
-
-if ! run_input_manifest "$dawn" "$input_base" "$input_app" "$work/inputs"; then
-  cat "$work/inputs.err" >&2
-  fail "source input manifest command failed"
-fi
-if ! cmp -s "$work/inputs.expected" "$work/inputs.out" || [ -s "$work/inputs.err" ]; then
-  diff -u "$work/inputs.expected" "$work/inputs.out" >&2 || true
-  cat "$work/inputs.err" >&2
-  fail "source input manifest did not match the selected recursive graph"
-fi
-if [ "$(grep -Fxc $'A\tF\t'"$input_shared/dawn.toml" "$work/inputs.out")" -ne 1 ] ||
-    [ "$(grep -Fxc $'A\tT\t'"$input_shared/src" "$work/inputs.out")" -ne 1 ]; then
-  fail "diamond package root was not emitted exactly once"
-fi
-grep -Fqx $'R\tO\tapp/dawn.lock' "$work/inputs.out" ||
-  fail "missing optional dawn.lock record"
-echo "PASS  source input manifest is recursive, typed, and diamond-deduplicated"
-
-moved_base="$input_root/moved-repo"
-cp -R "$input_base" "$moved_base"
-if ! run_input_manifest "$dawn" "$moved_base" "$moved_base/app" "$work/moved-inputs"; then
-  cat "$work/moved-inputs.err" >&2
-  fail "moved source input manifest command failed"
-fi
-if ! cmp -s "$work/inputs.expected" "$work/moved-inputs.out" ||
-    [ -s "$work/moved-inputs.err" ]; then
-  diff -u "$work/inputs.expected" "$work/moved-inputs.out" >&2 || true
-  cat "$work/moved-inputs.err" >&2
-  fail "repo-local source inputs retained an absolute checkout path"
-fi
-if grep -Fq "$input_base/" "$work/moved-inputs.out"; then
-  fail "moved manifest still names the old checkout"
-fi
-echo "PASS  repo-local source inputs survive checkout relocation"
-
-direct_base="$input_root/direct-file"
-direct_file="$direct_base/project/src/main.dawn"
-mkdir -p "$direct_base/project/src"
-cat > "$direct_base/project/dawn.toml" <<'EOF'
-schema = "invalid if planning is reached"
-name = "direct_file"
-EOF
-cat > "$direct_file" <<'DAWN'
-pub fn main() -> Unit = ()
-DAWN
-set +e
-run_input_manifest "$dawn" "$direct_base" "$direct_file" "$work/direct-file"
-direct_rc=$?
-set -e
-if [ "$direct_rc" -ne 2 ]; then
-  cat "$work/direct-file.err" >&2
-  fail "direct-file source input rejection exited $direct_rc instead of 2"
-fi
-test ! -s "$work/direct-file.out" || fail "direct-file rejection wrote stdout"
-printf 'error: __source-inputs requires a project directory: %s\n' \
-  "$direct_file" > "$work/direct-file.expected"
-if ! cmp -s "$work/direct-file.expected" "$work/direct-file.err"; then
-  diff -u "$work/direct-file.expected" "$work/direct-file.err" >&2 || true
-  fail "direct-file source input rejection drifted or reached SourcePlan"
-fi
-echo "PASS  source input manifest rejects direct files before planning"
-
-expect_input_failure() {
-  local label=$1 base=$2 target=$3 expected=$4
-  if run_input_manifest "$dawn" "$base" "$target" "$work/failure-$label"; then
-    fail "$label input manifest unexpectedly succeeded"
-  fi
-  if [ -s "$work/failure-$label.out" ]; then
-    cat "$work/failure-$label.out" >&2
-    fail "$label input failure leaked a partial manifest"
-  fi
-  printf '%s\n' "$expected" > "$work/failure-$label.expected"
-  if ! cmp -s "$work/failure-$label.expected" "$work/failure-$label.err"; then
-    diff -u "$work/failure-$label.expected" "$work/failure-$label.err" >&2 || true
-    fail "$label input failure diagnostic drifted"
-  fi
-}
-
-newline_path="$input_app/src/bad
-name.dawn"
-printf 'not parsed\n' > "$newline_path"
-expect_input_failure newline "$input_base" "$input_app" \
-  "error: source input path contains LF: $input_app/src/bad\\nname.dawn"
-rm "$newline_path"
-
-ln -s main.dawn "$input_app/src/link.dawn"
-expect_input_failure symlink "$input_base" "$input_app" \
-  "error: source input path crosses a symbolic link: $input_app/src/link.dawn"
-rm "$input_app/src/link.dawn"
-
-mkdir -p "$input_root/wrong-type/app"
-cat > "$input_root/wrong-type/app/dawn.toml" <<'EOF'
-schema = 1
-name = "wrong_type"
-EOF
-printf 'not a directory\n' > "$input_root/wrong-type/app/src"
-expect_input_failure wrong-type "$input_root/wrong-type" "$input_root/wrong-type/app" \
-  "error: source input must be a directory tree: $input_root/wrong-type/app/src"
-
-mkdir -p "$input_root/unreadable/app/src/blocked"
-cat > "$input_root/unreadable/app/dawn.toml" <<'EOF'
-schema = 1
-name = "unreadable"
-EOF
-printf 'hidden\n' > "$input_root/unreadable/app/src/blocked/value.dawn"
-chmod 000 "$input_root/unreadable/app/src/blocked"
-if run_input_manifest "$dawn" "$input_root/unreadable" "$input_root/unreadable/app" \
-    "$work/failure-traversal"; then
-  chmod 700 "$input_root/unreadable/app/src/blocked"
-  fail "unreadable input tree unexpectedly produced a manifest"
-fi
-chmod 700 "$input_root/unreadable/app/src/blocked"
-test ! -s "$work/failure-traversal.out" || fail "traversal failure leaked a partial manifest"
-printf 'error: source input tree cannot be traversed: %s\n' \
-  "$input_root/unreadable/app/src/blocked" > "$work/failure-traversal.expected"
-if ! cmp -s "$work/failure-traversal.expected" "$work/failure-traversal.err"; then
-  diff -u "$work/failure-traversal.expected" "$work/failure-traversal.err" >&2 || true
-  fail "traversal failure diagnostic drifted"
-fi
-echo "PASS  source input manifest fails closed before stdout"
-
-if "$dawn" --help | grep -q '__source-inputs'; then
-  fail "bootstrap source input command leaked into public help"
-fi
-echo "PASS  source input manifest command remains hidden"
-
-mutate_source_inputs() {
-  python3 - "$1" "$2" <<'PY'
-import pathlib
-import sys
-
-mutation, name = sys.argv[1:]
-path = pathlib.Path(name)
-text = path.read_text()
-
-if mutation == "drop-deps-recursion":
-    old = '''  for key in map.keys(pkg.deps) {
-    let child = map.get(pkg.deps, key).expect("resolved package")
-    let (next, visited) = collect_source_pkg_inputs(child, inputs, seen)
-    inputs = next
-    seen = visited
-  }
-  (inputs, seen)
-'''
-    new = '''  (inputs, seen)
-'''
-elif mutation == "drop-package-manifest":
-    old = '''    SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" },
-    SourceInput { kind: InputTree, path: root }
-'''
-    new = '''    SourceInput { kind: InputTree, path: root }
-'''
-elif mutation == "persist-internal-absolute":
-    old = '''      if str.starts_with(input.path, prefix) {
-        ("R", str.drop(input.path, str.len(prefix)))
-      } else {
-        ("A", input.path)
-      }
-'''
-    new = '''      if str.starts_with(input.path, prefix) {
-        ("A", input.path)
-      } else {
-        ("A", input.path)
-      }
-'''
-else:
-    raise SystemExit(f"unknown mutation: {mutation}")
-
-count = text.count(old)
-if count != 1:
-    raise SystemExit(f"{mutation} anchor occurs {count} times")
-path.write_text(text.replace(old, new))
-PY
-}
-
-expect_input_mutant_red() {
-  local mutation=$1 mutant="$work/mutant-$1" output="$work/mutant-$1.manifest"
-  mkdir -p "$mutant"
-  cp -R "$root/selfhost" "$mutant/selfhost"
-  cp -R "$root/packages" "$mutant/packages"
-  if ! relock_asm_fixture "$asm_fixture" "$mutant/selfhost/dawn.lock"; then
-    fail "$mutation mutant lock could not adopt the local ASM fixture"
-  fi
-  mutate_source_inputs "$mutation" "$mutant/selfhost/src/driver/analyze.dawn"
-  if ! "$dawn" build "$mutant/selfhost" -o "$mutant/compiler.jar" --std "$root/std" \
-      > "$mutant/build.out" 2>&1; then
-    cat "$mutant/build.out" >&2
-    fail "$mutation mutant did not compile"
-  fi
-  if ! run_input_manifest "$mutant/compiler.jar" "$input_base" "$input_app" "$output"; then
-    cat "$output.err" >&2
-    fail "$mutation mutant did not execute the source input command"
-  fi
-  if cmp -s "$work/inputs.expected" "$output.out"; then
-    fail "$mutation mutant stayed green"
-  fi
-  if [ -s "$output.err" ]; then
-    cat "$output.err" >&2
-    fail "$mutation mutant failed outside its owning contract"
-  fi
-  case "$mutation" in
-    drop-deps-recursion)
-      if grep -Fqx $'A\tF\t'"$input_shared/dawn.toml" "$output.out"; then
-        fail "$mutation mutant still emitted the transitive package manifest"
-      fi
-      ;;
-    drop-package-manifest)
-      if grep -Fqx $'R\tF\tpkg-alpha/dawn.toml' "$output.out"; then
-        fail "$mutation mutant still emitted the package manifest"
-      fi
-      ;;
-    persist-internal-absolute)
-      if grep -Fqx $'R\tF\tapp/dawn.toml' "$output.out" ||
-          ! grep -Fqx $'A\tF\t'"$input_app/dawn.toml" "$output.out"; then
-        fail "$mutation mutant missed the repo-relative scope boundary"
-      fi
-      ;;
-  esac
-  echo "PASS  $mutation mutant compiles and turns its input-manifest contract red"
-}
-
-expect_input_mutant_red drop-deps-recursion
-expect_input_mutant_red drop-package-manifest
-expect_input_mutant_red persist-internal-absolute

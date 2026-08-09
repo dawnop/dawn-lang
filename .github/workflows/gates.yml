@@ -98,6 +98,12 @@ jobs:
       - name: site tests
         run: ./bin/dawn test site
 
+      # compiler-plan is an internal top-level package, not one of the
+      # publishable packages/* discovered below. Its inline tests own the
+      # manifest/MVS/source-input planning boundary and must run explicitly.
+      - name: compiler Planner tests
+        run: ./bin/dawn test compiler-plan
+
       # source packages (packages/, docs/package-design.md 项目 B): every
       # package with a suite of its own, plus playground consuming them via
       # [deps]. sha2 and inflate carry published test vectors -- the ones that
@@ -209,6 +215,12 @@ jobs:
       # loser must never reach Coursier or dawn.lock.
       - name: source plan contract
         run: ./scripts/source-plan-contract/run.sh
+
+      # The source-input wire protocol is consumed by bootstrap tooling, not by
+      # Maven/MVS planning. Keep its real hidden-CLI checks and compiling
+      # Planner mutants independently attributable.
+      - name: bootstrap input manifest contract
+        run: bash ./scripts/bootstrap-input-manifest-contract/run.sh
 
       # TEST-01: every emitted class force-linked through the JVM verifier.
       # The differentials prove the backends agree, never that the bytes are
@@ -394,7 +406,7 @@ jobs:
       # last Dawn in the repo the formatter was not pointed at, and it is the
       # code most readers see first.
       - name: formatting
-        run: ./bin/dawn fmt std site selfhost packages examples --check
+        run: ./bin/dawn fmt compiler-plan std site selfhost packages examples --check
 
   # Acceptance gate 1 of docs/native-backend-plan.md 5. Its own job because it
   # was 390s of the 860s test job (2026-08-07) and shares nothing with the rest

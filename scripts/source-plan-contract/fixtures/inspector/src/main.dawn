@@ -1,0 +1,20 @@
+# This fixture observes Planner ordering through its public package API. It is
+# deliberately independent of selfhost so the contract needs no compiler-only
+# Java dependencies or hidden SourcePlan CLI surface.
+
+use compiler_plan/manifestv.{mcoord_show}
+use compiler_plan/source.{ProjectDirectory, source_plan}
+
+fn show(label: String, target: String) -> Unit !io = {
+  println(label)
+  let plan = source_plan(ProjectDirectory(target))
+  if len(plan.diags) != 0 { panic("unexpected SourcePlan diagnostics") }
+  for coord in plan.java_coords { println(mcoord_show(coord)) }
+}
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  if len(argv) != 2 { panic("source plan inspector expects two project paths") }
+  show("url-first", argv[0])
+  show("path-first", argv[1])
+}

@@ -7,7 +7,7 @@
 
 源码依赖与 Java 依赖曾沿两条独立路径解析同一份 `dawn.toml`：
 
-- `driver/analyze.dawn` 使用 `manifestv`，抓取远端源码包并完成 MVS，再构造最终 source 图；
+- 当时的 `driver/analyze.dawn` 使用 `manifestv`，抓取远端源码包并完成 MVS，再构造最终 source 图；
 - `pkg/maven.dawn` 使用 line-oriented light parser，重新遍历目标目录与已有 package cache。
 
 这使 classpath 和 lock 依赖 cache history：冷 cache 时远端包尚未存在，第二条遍历会静默漏掉
@@ -16,8 +16,20 @@
 
 ## 定稿方案
 
-保留 `driver/analyze.dawn` 现有 resolver seam，不新建 `driver/plan.dawn`。`source_plan` 的每次
-调用都按以下顺序完成工作：
+**2026-08-09 用户终裁推翻了这里原有的“不拆 `analyze` seam”裁决。**原因不是缺一层
+转发器，而是合同为了读取公开 `SourcePlan` 被迫依赖整个 `selfhost`，连带引入只属于 JVM
+后端的 ASM；这说明 seam 仍放错了所有权。现行方案是顶层内部包 `compiler-plan/`（包名
+`compiler_plan`），它不是 `packages/*` 下的发布包，不声明 `[java-deps]`，也不含 `use java`。
+
+Planner 的公开边界位于：
+
+- `compiler-plan/src/source.dawn`：`source_plan`、`bootstrap_source_input_manifest`、
+  `PkgR`、`SourcePlan` 与 `LocDiag`；
+- `compiler-plan/src/manifestv.dawn`、`toml.dawn`：唯一 manifest validator 与 TOML 子集；
+- `compiler-plan/src/pkgfetch.dawn`：源码包 cache/fetch/hash；
+- `compiler-plan/src/diagnostic.dawn`：不依赖 compiler frontend 的规划诊断形状。
+
+`source_plan` 的每次调用都按以下顺序完成工作：
 
 1. 以完整 `ManifestV` cache 遍历 source requirements，抓取并校验远端包；
 2. 用 `SemV` / `semv_lt` 完成 MVS；
@@ -27,6 +39,10 @@
 公开形状为：
 
 ```dawn
+pub type SourceTarget =
+  ProjectDirectory(path: String) |
+  SourceFile(path: String)
+
 pub type PkgR = {
   name: String,
   root: String,
@@ -35,16 +51,25 @@ pub type PkgR = {
 }
 
 pub type SourcePlan = {
+  target: SourceTarget,
   project: String,
+  source_root: String,
   pkgs: Map[String, PkgR],
   java_coords: List[MCoord],
   diags: List[LocDiag]
 }
 ```
 
-目录目标保留调用者给出的项目路径拼写；文件目标通过最近的 `src/` 推导项目根。存在性与
-“不是目录也不是 `.dawn`”的 CLI 前置判断仍留在 `main.dawn`，因为 LSP 必须能为尚未落盘的
-`.dawn` buffer 规划工程。
+调用者必须显式构造 `ProjectDirectory` 或 `SourceFile`；`source_plan` 不再用当下 filesystem
+状态猜 target kind，因而文件暂时不存在、路径随后变成目录等变化不会静默切换加载语义。
+目录目标保留调用者给出的项目路径拼写；文件目标通过最近的 `src/` 推导项目根，并把唯一
+推导结果放进 `SourcePlan.source_root`，各 loader 不再各自重算。存在性与“不是目录也不是
+`.dawn`”的 CLI 前置判断仍留在 `main.dawn`，因为 LSP 必须能为尚未落盘的 `.dawn` buffer
+规划工程。
+
+bootstrap source-input 序列化是更窄的接口：它只接受 `target = ProjectDirectory(...)` 的
+plan，并在检查 base 或输入树之前稳定拒绝 `SourceFile(...)`。不能把一个文件 plan 扩大成
+“最近项目的全部输入”；若未来需要 standalone-file 的 bootstrap 模型，须另立协议。
 
 ## Java 坐标顺序
 
@@ -57,13 +82,13 @@ pub type SourcePlan = {
 4. canonical package root 只访问一次，diamond 不重复；
 5. 按完整 `group:artifact:version` 去重，保留首见；不同版本不折叠。
 
-`manifestv` 先按 source span 恢复 path/table 混合声明序；`Map` 再保证插入序，因此 resolver
+`compiler_plan/manifestv` 先按 source span 恢复 path/table 混合声明序；`Map` 再保证插入序，因此 resolver
 构造的依赖 map 就是 manifest 声明序，不再额外排序。根 `[java-deps]` 仍独立地排在所有
 source package 坐标之前。
 
 ## Maven 边界
 
-`pkg/maven.dawn` 只消费 `manifestv.MCoord`。删除 `Coord`、第二套 coordinate parser、
+`selfhost/src/pkg/maven.dawn` 只消费 `compiler_plan/manifestv.MCoord`。删除 `Coord`、第二套 coordinate parser、
 light manifest parser 与第二次 package graph traversal；`fetch` 和 `lock_of` 的输入因此只能来自
 `SourcePlan.java_coords`。lock 文本仍排序以获得稳定 diff，但排序不反向定义规划顺序。
 
@@ -72,16 +97,23 @@ light manifest parser 与第二次 package graph traversal；`fetch` 和 `lock_o
 `scripts/source-plan-contract/run.sh` 隔离 `DAWN_PKG_CACHE` 与 Coursier cache，并把 source URL
 和 Maven mirror 都限制为 `file://`。它构造两个同名远端包版本：MVS loser 声明合法但不存在的
 `g:poison:1`，winner 声明本地可取的 `g:selected:1`；冷、热 cache 分别 build 文件目标，且
-`dawn lock` 只记录 selected。另一个临时 Dawn inspector 直接调用公开 `source_plan`，双向断言
-URL table/path entry 的混合顺序，并固定 root `[java-deps]` 始终最先。隔离的失败场景还要求同一
+`dawn lock` 只记录 selected。固定 fixture inspector **只依赖 `compiler-plan/`**，通过
+`compiler_plan/source` 与 `compiler_plan/manifestv` 的公开 API 双向断言 URL table/path entry
+的混合顺序，并固定 root `[java-deps]` 始终最先。隔离的失败场景还要求同一
 archive 的同一坏 URL 跨 alias/subdir 与 winner 阶段只产生一次 fetch diagnostic，同时坏镜像
 在前、同 hash 的可用镜像在后仍必须成功；静态检查拒绝第二
-parser/graph helper 复生。`manifestv.dawn` validator 测试固定 span merge；`analyze.dawn` 的
-纯测试固定 mirror failure 以 `(hash, url)` 为身份、同 URL 只尝试一次且不同 URL 不被抑制，
+parser/graph helper 复生。`compiler-plan` 的 inline tests 固定 validator span merge、mirror
+failure 以 `(hash, url)` 为身份、同 URL 只尝试一次且不同 URL 不被抑制，
 并继续覆盖 children-before-parent、diamond visited、完整坐标去重。冷、热两个可执行 JAR 都会
 实际运行并精确输出 `winner:42`，不能只靠 build 成功假绿。
 
-落地时实际执行并恢复了六类变异：
+bootstrap 输入清单已从本脚本拆到
+`scripts/bootstrap-input-manifest-contract/run.sh`。两个合同的 fixture 都不复制或编译
+`selfhost`；Planner probe 无 Java 依赖，旧的临时 ASM JAR、POM、relock 与从工具链 JAR 抽类的
+workaround 已删除。`__source-inputs` 仍是 bootstrap 的真实黑盒入口；没有新增隐藏
+`__source-plan` 命令。
+
+落地时实际执行并恢复了八类变异：
 
 | 变异 | 转红原因 |
 |---|---|

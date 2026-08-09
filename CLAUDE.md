@@ -49,11 +49,12 @@ parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改�
 
 ```bash
 ./bin/dawn --version                     # 首次自动拉种子并重建工具链
-./bin/dawn test selfhost                 # 编译器自身的测试（145 个）
+./bin/dawn test selfhost                 # 编译器主体测试
+./bin/dawn test compiler-plan            # 独立 Planner/manifest 测试
 ./bin/dawn run examples/data/shapes.dawn      # 单文件
 ./bin/dawn run examples/projects/hello_mod     # 多模块项目
 ./bin/dawn test site                     # 站点生成器的 Dawn 测试
-./bin/dawn fmt std site selfhost packages examples --check  # Dawn 代码格式检查
+./bin/dawn fmt compiler-plan std site selfhost packages examples --check  # Dawn 代码格式检查
 ./site/build.sh                          # 端到端建站（含 Playground 前端 bundle）
 
 ./scripts/selfhost-fixpoint.sh           # 自举固定点：种子→A→B→C，B==C
@@ -71,20 +72,21 @@ parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改�
 ## 目录结构
 
 ```
-selfhost/          编译器（Dawn 写 Dawn）：lexer→parser→checker→interp(comptime)→codegen→cli/lsp
+selfhost/          编译器主体（Dawn 写 Dawn）；消费 compiler-plan，ASM 只属于这里的 JVM 后端
+compiler-plan/     无 Java 的 source/manifest/MVS/fetch 规划包；不是 packages/* 发布包
 selfhost/src/      分九个目录，依赖单向向下（拓扑序即下面的顺序），入口留根：
                    embed/  生成物，不许手改（stdsrc rtsrc unicode_case unicode_class）
                    front/  词法/语法/诊断/格式化（token lexer parser ast diag suggest fmt lexdump astdump）
                    check/  类型与检查（types tast exhaustive jsig cx passes checker）
                    ir/     Core IR 及其上的 pass（core lower interp reach coredump）
                    jvm/    JVM 后端（codegen emit ops help jreflect rtclasses jarw testrun jfold）
-                   pkg/    包与清单（manifest manifestv maven toml pkgfetch vendor add fspath）
+                   pkg/    compiler-facing 包操作（maven vendor add）；规划基础在 compiler-plan/
                    driver/ 模块图与整程序驱动（analyze stdlib checkdump）
                    c/      native 后端（emitc cdriver ctestrun rc）
                    lsp/    语言服务（server lspc lspq）
                    根：main.dawn nmain.dawn doc.dawn version.dawn
 std/               标准库源（构建 selfhost 时编译进独立 jar 的 stdsrc 模块）
-packages/          源码包（json、web），[deps] 消费
+packages/          可发布/复用源码包（json、web、fspath、sha2、inflate），[deps] 消费
 site/              用 Dawn 自己写的静态站生成器（自举）
 site/play-ui/      Playground 编辑器（TypeScript + Vite + CodeMirror 6）
 playground/        Dawn 写的 playground 后端
@@ -125,7 +127,11 @@ Kotlin 实现（compiler/，1170 项测试、386 个黄金文件）已随 `kotli
 
 ## 测试
 
-`./bin/dawn test selfhost` 跑编译器自身的 test 块（就写在 `selfhost/src/` 源文件里）。
+`./bin/dawn test selfhost` 跑编译器主体的 test 块；`compiler-plan` 的 inline tests 覆盖
+Planner 与 manifest 纯逻辑，由 `./bin/dawn test compiler-plan` 单独执行，不能只跑前者。
+source-input 线协议、CLI producer 边界与变异负控由
+`scripts/bootstrap-input-manifest-contract/run.sh` 独立覆盖；launcher consumer 的 fail-closed
+边界由 `scripts/bootstrap-guards/run.sh` 覆盖，不能把它们冒充成 package inline tests。
 输出层面的回归由**差分**守护：`selfhost-prev-diff.sh`（emit 语料逐字节 vs 上一
 release）、`selfhost-run-diff.sh`（CLI 转写）、`selfhost-fmt-diff.sh`（格式化）、
 `selfhost-lsp-diff.sh`（LSP 会话）。**故意改变输出**（报错文案、格式化结果、CLI

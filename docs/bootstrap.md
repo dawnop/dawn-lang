@@ -12,7 +12,8 @@
 
 **现行形态（M8 后）**：种子 = `scripts/seed-release.txt` 钉住的上一 release 的
 `dawn-selfhost.jar`。`bin/dawn` 首次运行自动下载到 `.dawn/seeds/` 并用它编译
-HEAD 工具链（`DAWN_SEED=<jar>` 指本地 jar 逃生）。种子 jar 自带一切：编译器类、
+HEAD 工具链（`selfhost/` 加独立 `compiler-plan/` 及其 local dependency closure；
+`DAWN_SEED=<jar>` 指本地 jar 逃生）。种子 jar 自带一切：编译器类、
 由 std 源编译出的 `stdsrc` 模块、vendored 的 ASM / coursier interface；后两样二进制
 像 OCaml 的 `boot/` 一样**随种子逐代续传**（vendor 从当前运行 jar 的类路径拷出），
 在库没有对应源码。stage A 的类型检查仍配对使用该 release 的 std 源树，
@@ -42,8 +43,10 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 > [m8-selfhost-only.md](history/m8-selfhost-only.md)，本文只留现行链。
 
 **现行的 oracle**：`scripts/selfhost-prev-diff.sh`——上一 release 与 HEAD 编同一
-语料 + 生态扫描，未声明的字节差异红灯（声明方式：提交信息里的 `Emit-Change(<label glob>):` 行），
-同时机器强制种子特性纪律（N−1 的 jar 必须仍能编 HEAD 的 `selfhost/src`）。
+语料 + 生态扫描，未声明的字节差异红灯。提交信息必须为每个实际变化的检查逐项写
+`Emit-Change(<label>): <说明>`，其中 label 必须逐字出现在 `scripts/emit-labels.txt`；通配与
+裸 `Emit-Change:` 都是错误。同时机器强制种子特性纪律（N−1 的 jar 必须仍能编 HEAD 的
+`selfhost/src`）。
 配套还有 `selfhost-run-diff.sh`（CLI 转写）、`selfhost-fmt-diff.sh`（格式化）、
 `selfhost-lsp-diff.sh`（LSP 会话）。
 
@@ -79,8 +82,8 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
    下面的链条表记的是**种子形态变过的那几环**，不是每一次 bump——每次 bump 的记录
    就是上述三文件和它们的提交，再抄一遍只会过期（这张表一度写着「逐条记」，却停在
    v0.8.0，中间二十一个 release 一个没记）。
-4. **特性纪律**：`selfhost/src`（连同它引用的 `std/`）只准用**当前种子已支持**
-   的语言特性。想用新特性：先在 selfhost 实现 → 发 release（过祝圣）→
+4. **特性纪律**：`selfhost/src`、`compiler-plan/src` 及这条编译 closure（连同它引用的
+   `std/`）只准用**当前种子已支持**的语言特性。想用新特性：先在 selfhost 实现 → 发 release（过祝圣）→
    用上述单一入口推进三文件 → 下一轮才能自用。（Rust stage0 的规矩，
    CI 机器强制：种子编不动 HEAD 直接红。）
 5. **链条可重放**：`scripts/replay-bootstrap.sh <seed-jar | vX.Y.Z>` 从任一环
@@ -104,7 +107,7 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 #    （bin/dawn 自动下载缓存；信任链根 v0.6.0 的 Kotlin jar 也可作种，
 #    或从 kotlin-final tag 现编：git checkout kotlin-final && ./gradlew :compiler:fatJar）
 
-# 1) 种子编 HEAD → A；A 编 HEAD → B（HEAD 编 HEAD，规范产物）；
+# 1) 种子编 HEAD 工具链 closure → A；A 编同一 closure → B（HEAD 编 HEAD，规范产物）；
 #    B 编 HEAD → C；cmp B C 逐字节相同 = 固定点 + 闭包一步到位。
 #    A 配对 seed release 的 std，B/C 使用当前 std；vendor 逐代续传。
 ./scripts/selfhost-fixpoint.sh
@@ -117,6 +120,20 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 recipe 的参数；`scripts/selfhost-fixpoint.sh` 只是丢弃产物的兼容 wrapper，**在 CI**
 （ci.yml）每次 push 重验；
 `scripts/replay-bootstrap.sh <seed|vX.Y.Z>` 从任一环重放（发版前手动过）。
+
+## launcher 的源码输入边界
+
+`bin/dawn` 的 rebuild stamp 不再只读 `selfhost/dawn.toml` 的直接 `[deps]`。已有当前工具链时，
+它调用隐藏的 `__source-inputs`，消费 `compiler-plan/src/source.dawn` 产出的版本化递归清单；
+因此 `compiler-plan`、`fspath`、`sha2`、`inflate` 等传递 local package 都是 compiler build input。
+首次 clean checkout 还没有当前 JAR，不能要求当前 Planner 先运行；launcher 此时只为仓库采用的
+local path 形状执行递归、fail-closed fallback，当前 JAR 一出现即让位给 Planner producer。
+
+`scripts/bootstrap-guards/run.sh` 在无 JVM、无下载的复制根里逐项修改 Planner 与传递依赖，要求
+stamp 随之改变；`scripts/bootstrap-input-manifest-contract/run.sh` 则固定 v1 线协议、CLI 边界与
+producer mutants。当前仍未关闭 hasher 缺失时的 mtime fallback、无长度 framing、pre/post
+re-plan 与多文件 promotion；这些残余不能被“递归输入已覆盖”代替，见
+[`bootstrap-input-manifest-design.md`](bootstrap-input-manifest-design.md)。
 
 ## 为什么字节级一致做得到
 
@@ -134,7 +151,8 @@ __emit` 全仓逐字节对拍）已随 `kotlin-final` 完成使命；现行 orac
 **N vs N−1**（`selfhost-prev-diff.sh`：上一 release 与 HEAD 编同一语料 +
 backend-dawn 生态扫描，未声明的字节差异红灯）加 CLI/格式化/LSP 三条转写差分
 （`selfhost-run-diff.sh` / `selfhost-fmt-diff.sh` / `selfhost-lsp-diff.sh`）。
-故意改变输出的提交在信息里声明 `Emit-Change(<label glob>): <说明>`（裸声明=通配，兼容历史）。
+故意改变输出的提交要为每个受影响检查逐项声明 `Emit-Change(<label>): <说明>`；label 是
+`scripts/emit-labels.txt` 的闭集，不接受 `emit *` 等通配，也不接受裸 `Emit-Change:`。
 
 ## 运行注意
 

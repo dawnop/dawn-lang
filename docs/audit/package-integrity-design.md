@@ -6,7 +6,7 @@
 > `dawn cache verify` 全量扫描；内容寻址使 marker 文件可省——目录名就是声明，
 > 重算即全部校验。实测 7MB 树 ~0.9s、典型源码包毫秒级，默认校验成立）。
 > **2026-08-07 更正**：「命中即重算」只对 `ensure_cached` 成立，而构建路径热命中
-> 不经过它（`analyze.url_pkg_root` 直接 return），所以每次构建的自动校验实际不存在，
+> 不经过它（当前 `compiler-plan/src/source.dawn:392` 的 `url_pkg_root` 直接 return），所以每次构建的自动校验实际不存在，
 > 只剩 `dawn cache verify` 手动扫描。详见 codebase-audit.md 的 PKG-02 更正条。
 > **§2.2 也已落地（同日）**，但形状与本文所写有一处诚实的偏离：lock 记录的是
 > **整个解析闭包的字节**（`artifact <sha256>  <basename>` + 直依赖坐标），不是
@@ -34,7 +34,7 @@
 
 ### 1.1 cache 命中就信任（PKG-02）
 
-`selfhost/src/pkg/pkgfetch.dawn` 的策略是明说的：**fetch 时验证一次，之后信任本地副本**。
+当前 owner `compiler-plan/src/pkgfetch.dawn` 的策略是明说的：**fetch 时验证一次，之后信任本地副本**。
 目录存在就直接返回，不再看内容。
 
 于是用户手改、磁盘损坏、并发抓取留下的半成品，都能改变 cache 内容而不被发现。
@@ -42,7 +42,7 @@
 **对照**：种子 jar 的同一个病 2026-07-25 已经治了——
 `scripts/seedjar.sh` 现在每次使用前校验，不只是下载后。源码包该走同一条路。
 
-好消息是**材料已经有了**：`pkgfetch.dawn` 已经实现了 d1 canonical tree hash
+好消息是**材料已经有了**：`compiler-plan/src/pkgfetch.dawn` 已经实现了 d1 canonical tree hash
 （`d1:` + SHA-256 over `relpath \0 size \0 bytes` 的排序文件树），
 fetch 时就是用它验证的。缺的只是「把它记下来，下次再算一遍比对」。
 
@@ -161,10 +161,10 @@ lock 让你知道要什么，不让它凭空出现。文档里要写明这一点
 
 | 步 | 文件 | 测试 |
 |---|---|---|
-| 1 | `selfhost/src/pkg/pkgfetch.dawn`：marker 写入 + 原子 rename | 「rename 前 marker 已在临时目录」 |
+| 1 | `compiler-plan/src/pkgfetch.dawn`：marker 写入 + 原子 rename | 「rename 前 marker 已在临时目录」 |
 | 2 | 同上：cache 命中重算 d1 | 「手改 cache 里一个字节 → 报错并给出两个 hash」 |
 | 3 | `selfhost/src/main.dawn`：`dawn cache verify` | 遍历并报告 |
-| 4 | `selfhost/src/pkg/maven.dawn` + `manifestv.dawn`：`dawn.lock` 读写 | 「lock 与 toml 直依赖不一致 → 报错」「sha256 不匹配 → 报错」 |
+| 4 | `selfhost/src/pkg/maven.dawn` + `compiler-plan/src/manifestv.dawn`：`dawn.lock` 读写 | 「lock 与 toml 直依赖不一致 → 报错」「sha256 不匹配 → 报错」 |
 | 5 | `selfhost/src/main.dawn`：`dawn lock` / `dawn lock --check` | CI 用 `--check` |
 | 6 | `docs/package-design.md`：改掉过强的可复现论证，写明 lock 覆盖什么、不覆盖什么 | — |
 

@@ -318,7 +318,8 @@ C 一节的标题就是「先给标准库函数，不给语法」。**所以在�
 **但「都是直线体」是幸存者偏差**，两条证据：
 
 1. **有人为了让 release 单出口，把体挪进了兄弟函数。**
-   `selfhost/src/pkg/pkgfetch.dawn:435` 取临时目录、调 `fetch_into(url, work)`、`delete_tree(work)`；
+   写作时 compiler-local `pkgfetch` 取临时目录、调 `fetch_into(url, work)`、`delete_tree(work)`；
+   当前 owner 是 `compiler-plan/src/pkgfetch.dawn:510`，对应 `fetch_into` 位于 `:533`；
    而 `fetch_into` 的体是**连着四个 `return Err(e)`**。受保护区间本来就是早退形状，
    只是被搬下去一帧，好让释放能写成直线。
 2. **没搬的地方就在漏。** `selfhost/src/main.dawn:1086` `run_build` 取了临时目录，
@@ -353,7 +354,7 @@ C 一节的标题就是「先给标准库函数，不给语法」。**所以在�
 `FileOutputStream`。走查只盯 `catch_panic`/`catch_fault` 的调用点会看不见它们——**这类站点
 一个屏障也没有**，它就是「直线写下来、最后一行 close」。
 
-**更正三：`pkgfetch.dawn:435` 那条「为了单出口把体挪进兄弟函数」的证据，`with` 之后仍然成立，
+**更正三：当前 `compiler-plan/src/pkgfetch.dawn:510` 那条「为了单出口把体挪进兄弟函数」的证据，`with` 之后仍然成立，
 但原因换了。** `fetch_and_hash` 现在是 `with work <- bracket(staged, delete_tree)` + 一行
 `fetch_into(url, work)`；`fetch_into` 没有被并回去，因为糖区内拒 `return`，而它的四个
 `return Err(e)` 里有三个能改成 `?`、第四个（`rename` 失败后再看一眼 target 是否已存在）
@@ -607,7 +608,8 @@ C2 冻结时的反对论证（「绑死 JVM」）针对的是 codegen 特例，�
 而站点迁移不改发射、只改调用方，是单阶段安全的。混在一起会让「这次改动改了什么字节」
 这个问题多一个答案。先落原语、发版、再迁站点。
 
-`selfhost/src/` 里那些站点（`pkgfetch`/`vendor`/`jarw`/`nmain`/`main`）另有一条约束：
+写作时 `selfhost/src/` 里的那些站点（`pkgfetch`/`vendor`/`jarw`/`nmain`/`main`）另有一条约束；
+其中 `pkgfetch` 当前已迁至 `compiler-plan/src/pkgfetch.dawn`：
 它们要过两张表（种子 + HEAD），所以任何签名变更走三期两发布——这条是 §6.2 的老规矩，
 但迁移到一个**新增**的函数不改任何已有签名，**不受它约束**。
 

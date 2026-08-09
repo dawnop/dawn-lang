@@ -1,0 +1,41 @@
+# This probe drives the Planner producer without linking compiler internals. It
+# also makes post-plan filesystem mutations explicit, so fail-closed validation
+# is tested after a valid graph exists rather than conflated with plan errors.
+
+use std/io
+use compiler_plan/source.{ProjectDirectory, bootstrap_source_input_manifest, source_plan}
+
+fn fail(message: String) -> Unit !io = {
+  io.eprintln("error: " ++ message)
+  let _ = io.exit(1)
+}
+
+fn emit(base: String, target: String, mutation: String) -> Unit !io = {
+  let plan = source_plan(ProjectDirectory(target))
+  if len(plan.diags) != 0 { panic("producer probe received SourcePlan diagnostics") }
+  if mutation == "--remove-manifest" {
+    let _ = io.delete(target ++ "/dawn.toml")
+  } else if mutation == "--manifest-directory" {
+    let _ = io.delete(target ++ "/dawn.toml")
+    let _ = io.mkdirs(target ++ "/dawn.toml")
+  } else if mutation == "--lock-directory" {
+    let _ = io.mkdirs(target ++ "/dawn.lock")
+  } else if mutation != "" {
+    panic("unknown producer probe mutation")
+  }
+  match bootstrap_source_input_manifest(plan, base) {
+    Ok(text) -> print(text)
+    Err(error) -> fail(error)
+  }
+}
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  if len(argv) == 2 {
+    emit(argv[0], argv[1], "")
+  } else if len(argv) == 3 {
+    emit(argv[1], argv[2], argv[0])
+  } else {
+    panic("producer probe expects <base> <project> or <mutation> <base> <project>")
+  }
+}

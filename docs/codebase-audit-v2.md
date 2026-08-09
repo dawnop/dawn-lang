@@ -240,7 +240,7 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | `TOOL-10` | fixed | source 与 Java dependency 已由唯一 `SourcePlan` 规划。 |
 | `TOOL-11` | fixed | lock/vendor artifact identity 已脱离 basename。 |
 | `TOOL-12` | fixed | JAR `Class-Path` URI 与 byte wrapping 已闭合。 |
-| `TOOL-14` | partial | 已扩充直接输入，但 no-hasher、递归 source deps 与无长度 framing 仍开放。 |
+| `TOOL-14` | partial | 递归 source inputs、typed consumer 与 checkout 边界已关闭；no-hasher、无长度 framing、pre/post re-plan 与可恢复 promotion 仍开放。 |
 | `TOOL-15` | fixed | seed std 已纳入摘要验证。 |
 | `TOOL-16` | fixed | 默认 seed 缺摘要/工具时已 fail closed。 |
 | `LIB-01` | fixed | bounded inflate 在 materialize 前限制输出。 |
@@ -324,8 +324,9 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 1. **先闭合仅剩的自治 open P1：** 合并推进 `TOOL-05` workspace snapshot 与 `TOOL-06`
    target-scoped Java classpath；二者共享 `SourcePlan`/workspace lifetime，拆开会制造第三份状态。
-2. **再收口 partial P1：** `TOOL-14` 的 fail-closed、递归输入清单与无歧义摘要；`ARC-01/02`
-   的 symbol edge/source origin；`LIB-10` 的 middleware 前 error response。
+2. **再收口 partial P1：** `TOOL-14` 的 fail-closed hasher、无歧义摘要、pre/post re-plan 与
+   可恢复 promotion；`ARC-01/02` 的 symbol edge/source origin；`LIB-10` 的 middleware 前
+   error response。
 3. **把 `SEM-04` 留给维护者裁决：** Cursor 是携带 owner 的值还是 generative identity，以及
    不同 owner 的 Eq/Ord 是否拒绝；裁决前只保留静态候选，不写 workaround。
 4. **低耦合自治批：** `SYN-11`、`SEM-07`，再按依赖推进 `SYN-04 → SYN-13` 与

@@ -146,8 +146,8 @@ native 免费,`stdlib.dawn` 最后一个 `use java` 归零,缝 3 变成「结构
 
 1. ~~**分层落地**:fspath 降级为包;substrate(hamt/pvec)加可见性层级或命名约定;
    分层判据进 spec 或 CONTRIBUTING。~~ **已做(2026-08-01,#109 破坏批)**:fspath 成
-   `packages/fspath`(编译器另留一份四函数的 `selfhost/src/pkg/fspath.dawn`,不能依赖包);
-   hamt/pvec 由 `checker.internal_std_modules` 拦住 std 之外的 `use`;判据进
+   `packages/fspath`;当前 `compiler-plan` 与 `selfhost` 都直接复用这一份实现,旧的
+   compiler-local 子集已删除;hamt/pvec 由 `checker.internal_std_modules` 拦住 std 之外的 `use`;判据进
    CONTRIBUTING「命名族」。
 2. **迭代协议 trait 化**:#44(关联类型)落地后,`for` 从「按名解析 std/list 私有函数」
    改走 Iter trait;用户类型获得接入 `for` 的能力;那四个函数的特例除名。

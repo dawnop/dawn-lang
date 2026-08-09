@@ -6,11 +6,10 @@
 # the compiler needed two of these functions the day the module was written --
 # a reason to write it, not a reason to bundle it.
 #
-# > **Two copies exist, deliberately.** `selfhost/src/pkg/fspath.dawn` holds the
-# > four functions the compiler itself uses, because the compiler cannot take a
-# > package dependency -- it is what resolves them. That copy is a subset and
-# > not a fork: this file is the user-facing one, and a change here belongs in
-# > both. See RD-09 in docs/audit/re-audit-2026-07-30.md.
+# > **One shared implementation.** `compiler-plan` and `selfhost` both depend on
+# > this package directly. The former compiler-local subset is gone, so path
+# > behaviour is changed and tested here once. See RD-09 in
+# > docs/audit/re-audit-2026-07-30.md for the earlier package boundary.
 #
 # Named `fspath` and not `path` because Dawn puts an imported module's alias in
 # the same namespace as local names, and `path` is one of the most common local
@@ -98,12 +97,12 @@ pub fn parent(p: String) -> Option[String] = {
   }
 }
 
-# ---- the four the compiler happened not to need ----
+# ---- the broader package surface ----
 #
-# This module started as exactly what `analyze.canon` and `lsp.canon` spelled
-# in Java and nothing else, which left 41 call sites writing `dir ++ "/" ++ n`
-# by hand, three hand-written basenames, and two places subtracting a literal
-# 5 because that is `str.len(".dawn")` (audit RD-09).
+# This module started as exactly what the former `analyze.canon` and
+# `lsp.canon` spelled in Java and nothing else, which left 41 call sites writing
+# `dir ++ "/" ++ n` by hand, three hand-written basenames, and two places
+# subtracting a literal 5 because that is `str.len(".dawn")` (audit RD-09).
 
 ## `p` resolved against directory `base`, normalized.
 ##

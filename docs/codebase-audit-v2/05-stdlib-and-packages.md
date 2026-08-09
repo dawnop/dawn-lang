@@ -12,25 +12,51 @@
 - packages 的共同问题是 public record/Map/String 过早丢掉 invariant：Digest 可伪造、Response 可构造非法状态、query/form 丢重复值、JSON error 只有人类字符串。
 - early language/package 允许 breaking change，应优先把无效状态从公开类型中移除，而不是在 write boundary 继续 sanitizer/默认值补丁。
 
-## LIB-01 — P1 — 解压上限在完整 materialize 之后才检查
+## LIB-01 — P1 — 解压上限在完整 materialize 之后才检查（已修）
 
-- **证据：K/S。** DEFLATE API 无 output limit：`packages/inflate/src/deflate.dawn:170`，back-reference copy 持续扩 buffer：`:356`；ZIP 一次性解压全部 entries：`packages/inflate/src/zip.dawn:203`。package manager 事后才检查：`selfhost/src/pkg/pkgfetch.dawn:278`；tar.gz 也先完整 gunzip：`:380`，注释承认检查太晚：`:386`。
-- **影响：** 声称的 64/256 MB 上限不能限制 peak memory；compression bomb 在 guard 生效前 OOM。旧审查“archive limit 已修”不适用于现在的纯 Dawn inflate 路径。
-- **建议：** `inflate_bounded/gunzip_bounded` 在每次 output growth 前检查；ZIP 提供 metadata iterator或逐 entry callback，单项/总量/数量上限都在 materialize 前执行。
+> **后续处置：已修。** `packages/inflate/src/deflate.dawn` 的 bounded 入口在 stored write、literal
+> append 与 back-reference copy **之前**检查剩余预算；`gzip.gunzip_bounded` 按多 member 聚合输出
+> 扣减同一预算。ZIP 拆成只读 metadata 的 `headers` 与逐 entry 的 `read_bounded`，Planner 的
+> `compiler-plan/src/pkgfetch.dawn` 先检查 entry count/declared size，再把单项与总量剩余额度交给
+> bounded decoder。
 
-## LIB-02 — P1 — ZIP central directory 损坏被当作正常结束
+- **修复前证据：K/S。** DEFLATE API 没有 output limit，back-reference copy 持续扩 buffer；ZIP
+  一次性解压全部 entries，package manager 与 tar.gz 路径都在完整 materialize 后才检查 64/256 MB
+  上限。
+- **修复前影响：** compression bomb 在 guard 生效前即可 OOM；事后长度检查不是 peak-memory
+  上限。
+- **门禁：** `scripts/inflate-contract/run.sh` 用独立 Java compressor 固定 exact-cap 与 one-byte-under
+  边界；另在 256 MB heap 内展开 512 MB bomb，要求 bounded decoder 在 1024 bytes 处正常拒绝而
+  不是 OOM。`deflate.dawn` 的 inline tests 还覆盖 stored block、zero 与 negative cap。
+- **结论：已修。** archive ceiling 已移动到每次 output growth 之前，原 materialize-first 边界关闭。
 
-- **证据：S。** EOCD 只取 central directory start，未使用 directory size/count：`packages/inflate/src/zip.dawn:69`；loop 遇到第一个非 `CD_SIG` 就返回已收集 entries 的成功：`:203`。
-- **边界：** 两 entry ZIP 破坏第二个 central directory signature，会返回只含第一项的 `Ok`，不是 corrupt archive。
-- **影响：** archive completeness/integrity 失效，表现为静默文件缺失；package tree hash只看到被接受的残缺结果。
-- **建议：** 验证 EOCD/ZIP64 disk、entry count 与 directory byte size；精确读取声明数量并要求结束位置吻合。
+## LIB-02 — P1 — ZIP central directory 损坏被当作正常结束（已修）
 
-## LIB-03 — P1 — DEFLATE bit reader 在 EOF 后伪造零位
+> **后续处置：已修。** `packages/inflate/src/zip.dawn` 从 EOCD/ZIP64 取得 disk、entry count、
+> directory start 与 byte size，精确读取声明数量；遇到坏 signature、提前结束、跨出声明区间，
+> 或最终 consumed bytes 与 directory size 不一致都返回 corrupt archive，而不是已有 entry 的部分成功。
 
-- **证据：S。** `take` 越界后把 byte 当 0：`packages/inflate/src/deflate.dawn:27`；EOB branch 在统一 truncation check 前可成功返回：`:322`。
-- **边界：** 截短的 fixed block 可由补零恰好拼出 EOB；`inflate` 又不返回 consumed offset，container 无法严格拒绝 trailing garbage。
-- **影响：** truncated stream 可能被接受，破坏 archive validator 的“完整读取”前提。
-- **建议：** bit read 返回 `Result`/exhausted flag；EOB 也必须证明实际 bits 足够；container mode 要求 compressed slice 精确消费。
+- **修复前证据：S。** parser 只取 central directory start，不使用 size/count；loop 遇到第一个非
+  central-directory signature 就返回已经收集的 entries。
+- **修复前边界：** 两 entry ZIP 破坏第二个 central directory signature，会返回只含第一项的
+  `Ok`，不是 corrupt archive。
+- **门禁：** `scripts/inflate-contract/probe.dawn` 用 Java 生成两 entry ZIP，再翻转第二条 central
+  record 的 signature；`scripts/inflate-contract/run.sh` 要求该输入以 central-directory 错误拒绝，
+  不能降成一条 entry 的成功。
+- **结论：已修。** archive completeness 由 EOCD 声明边界定义，损坏不再静默表现为文件缺失。
+
+## LIB-03 — P1 — DEFLATE bit reader 在 EOF 后伪造零位（已修）
+
+> **后续处置：已修。** bit reader 仍可返回占位值以保持内部形状，但会永久记录越界；final
+> block/EOB 成功前检查该状态。低层 `inflate_from`/`inflate_end` 同时返回真实 consumed offset，
+> gzip 用它定位 member trailer，ZIP 要求该 offset 与 central directory 的 compressed size 一致。
+
+- **修复前证据：S。** `take` 越界后把 byte 当 0，EOB branch 又可在统一 truncation check 前成功；
+  container 也拿不到 consumed offset。
+- **修复前边界：** 截短的 fixed block 可由补零恰好拼出七个零位的 EOB，返回看似完整的 output。
+- **门禁：** `scripts/inflate-contract/probe.dawn` 对 Java level 1/6/9 的真实 raw DEFLATE 分别删除
+  最后一个 byte，三者都必须拒绝；`deflate.dawn` 的 inline test 另固定最小 truncated fixed block。
+- **结论：已修。** 人工补零不能再构成合法结束，container 也能验证精确消费边界。
 
 ## LIB-04 — P2 — GZIP header 与 member 边界不完整（已修）
 

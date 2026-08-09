@@ -946,8 +946,9 @@ harness 也改了一处:两个后端的运行都把 stdin 接到 `/dev/null`。�
 - **`analyze.canon` 与 `lsp.canon` 是逐字重复的同一个函数**,现在是 analyze 里一个 `pub fn canon`,
   建在新的 `fspath` 上。**模块叫 `fspath` 不叫 `path`**:模块别名和局部名共用一个命名空间,
   而 `path` 是这个编译器里十几个函数的形参名。这是语言的一处人体工学缺口,不是模块的问题,先绕开。
-  (它当初落在 `std/fspath`;审计 RD-09 判它不该在 std,现在是 `packages/fspath` 包,
-  编译器自己另有一份只含四个函数的 `selfhost/src/pkg/fspath.dawn`——编译器不能依赖包。)
+  (它当初落在 `std/fspath`;审计 RD-09 判它不该在 std,本节落地时 `packages/fspath`
+  与 compiler-local 子集仍并存。当前 `compiler-plan` 与 `selfhost` 已直接共享
+  `packages/fspath`,旧子集删除。)
 - **`fspath` 的验收物是它替掉的那个东西**(`scripts/path-contract`,已进 CI)。写它的时候
   在文档注释里**声明了一处与 Java 的偏离**——`..` 爬过根目录——跑完发现 **Java 也是这么做的**,
   于是那三个用例从「声明的偏离」变成普通的一致性用例,注释改成记录这件事本身。

@@ -95,30 +95,225 @@ else
   sha256() { cat >/dev/null; echo "no-sha256"; }
 fi
 
-# The local source packages selfhost [deps] names, resolved against the
-# manifest's own directory.
-#
-# Their contents are build inputs and nothing recorded them: editing
-# packages/json, packages/sha2 or packages/inflate left the stamp unchanged,
-# and every later command went on running a compiler built from the previous
-# version of them -- the exact failure the stamp replaced mtime to avoid, one
-# level down. A url dep needs no entry: its hash is in the manifest, and the
-# manifest is hashed.
-#
-# One `sed`, because a TOML parser is what the compiler is for and this runs
-# before there is one. It reads the shape `[deps]` actually has here --
-# `name = "path"` under a `[deps]` table -- and a shape it cannot read costs a
-# rebuild it did not need, never a stale jar.
-dep_dirs() {
-  sed -n '/^\[deps\]/,/^\[[^d]/p' "$ROOT/selfhost/dawn.toml" 2>/dev/null |
-    sed -n 's/^[A-Za-z0-9_-]* *= *"\([^"]*\)".*/\1/p' |
-    while IFS= read -r d; do
-      case $d in
-        /*) printf '%s\n' "$d" ;;
-        *) printf '%s\n' "$ROOT/selfhost/$d" ;;
+# Convert the Planner's versioned source-input protocol into typed absolute
+# inputs. Only the first two tabs delimit fields, so tabs in paths survive.
+# Parse into a temporary file before exposing anything to the stamp consumer:
+# a malformed late record must not become a valid-looking partial manifest.
+source_manifest_inputs() {
+  manifest_file=$1
+  tab=$(printf '\t')
+  record_count=0
+  last_byte=$(tail -c 1 "$manifest_file") || {
+    echo "error: cannot read source input manifest" >&2
+    return 1
+  }
+  if [ -n "$last_byte" ]; then
+    echo "error: source input manifest record is not newline-terminated" >&2
+    return 1
+  fi
+  {
+    if ! IFS= read -r header; then
+      echo "error: source input manifest is empty" >&2
+      return 1
+    fi
+    if [ "$header" != "dawn-source-inputs-v1" ]; then
+      echo "error: invalid source input manifest header" >&2
+      return 1
+    fi
+    while IFS= read -r record || [ -n "$record" ]; do
+      if [ -z "$record" ]; then
+        echo "error: malformed source input manifest record" >&2
+        return 1
+      fi
+      case $record in
+        *"$tab"*) scope=${record%%"$tab"*}; rest=${record#*"$tab"} ;;
+        *)
+          echo "error: malformed source input manifest record" >&2
+          return 1
+          ;;
       esac
+      case $rest in
+        *"$tab"*) kind=${rest%%"$tab"*}; path=${rest#*"$tab"} ;;
+        *)
+          echo "error: malformed source input manifest record" >&2
+          return 1
+          ;;
+      esac
+      case $kind in
+        F|O|T) ;;
+        *)
+          echo "error: unknown source input manifest kind: $kind" >&2
+          return 1
+          ;;
+      esac
+      case $scope in
+        R)
+          case $path in
+            ".") path="$ROOT" ;;
+            ""|/*|./*|../*|*/.|*/./*|..|*/..|*/../*|*//*|*/)
+              echo "error: invalid repo-relative source input path" >&2
+              return 1
+              ;;
+            *) path="$ROOT/$path" ;;
+          esac
+          case $ROOT in
+            /) ;;
+            *)
+              case $path in
+                "$ROOT"|"$ROOT"/*) ;;
+                *)
+                  echo "error: repo-relative source input escapes the repository" >&2
+                  return 1
+                  ;;
+              esac
+              ;;
+          esac
+          ;;
+        A)
+          case $path in
+            "/") ;;
+            /*)
+              case $path in
+                *//*|*/.|*/./*|*/..|*/../*|*/)
+                  echo "error: non-canonical absolute source input path" >&2
+                  return 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "error: invalid absolute source input path" >&2
+              return 1
+              ;;
+          esac
+          ;;
+        *)
+          echo "error: unknown source input manifest scope: $scope" >&2
+          return 1
+          ;;
+      esac
+      printf '%s\t%s\n' "$kind" "$path" || return 1
+      record_count=$((record_count + 1))
     done
+  } < "$manifest_file"
+  if [ "$record_count" -eq 0 ]; then
+    echo "error: source input manifest has no records" >&2
+    return 1
+  fi
 }
+
+# The no-toolchain bootstrap fallback understands the local path-dependency
+# shape used by this checkout. It is recursive, so compiler-plan and its own
+# fspath/sha2/inflate dependencies cannot disappear from the first stamp. An
+# unfamiliar [deps] entry or an implausibly deep graph fails closed; once a
+# current jar exists, the Planner producer above is authoritative instead.
+manifest_local_deps() {
+  awk '
+    /^[[:space:]]*\[deps\.[^][]+\][[:space:]]*$/ {
+      bad = 1
+      in_deps = 0
+      next
+    }
+    /^[[:space:]]*\[deps\][[:space:]]*$/ { in_deps = 1; next }
+    /^[[:space:]]*\[/ { in_deps = 0 }
+    in_deps {
+      line = $0
+      if (line ~ /^[[:space:]]*($|#)/) next
+      if (line !~ /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=[[:space:]]*"/) {
+        bad = 1
+        next
+      }
+      sub(/^[^"]*"/, "", line)
+      if (line !~ /"/) {
+        bad = 1
+        next
+      }
+      sub(/".*/, "", line)
+      print line
+    }
+    END { if (bad) exit 1 }
+  ' "$1"
+}
+
+fallback_source_inputs() (
+  depth=$1
+  package_dir=$2
+  if [ "$depth" -gt 64 ]; then
+    echo "error: local source dependency graph exceeds bootstrap fallback depth" >&2
+    exit 1
+  fi
+  manifest="$package_dir/dawn.toml"
+  printf 'F\t%s\nO\t%s\nT\t%s\n' \
+    "$manifest" "$package_dir/dawn.lock" "$package_dir/src"
+  deps=$(manifest_local_deps "$manifest") || exit 1
+  printf '%s\n' "$deps" |
+    while IFS= read -r dep; do
+      [ -n "$dep" ] || continue
+      case $dep in
+        /*)
+          echo "error: absolute local source dependency is unsupported during bootstrap: $dep" >&2
+          exit 1
+          ;;
+        *) candidate=$package_dir/$dep ;;
+      esac
+      dep_dir=$(CDPATH= cd "$candidate" 2>/dev/null && pwd -P) || {
+        echo "error: local source dependency does not exist: $candidate" >&2
+        exit 1
+      }
+      case $ROOT in
+        /) ;;
+        *)
+          case $dep_dir in
+            "$ROOT"|"$ROOT"/*) ;;
+            *)
+              echo "error: local source dependency escapes the checkout: $candidate" >&2
+              exit 1
+              ;;
+          esac
+          ;;
+      esac
+      fallback_source_inputs $((depth + 1)) "$dep_dir" || exit 1
+    done
+)
+
+source_inputs() (
+  manifest_file=
+  parsed_file=
+  cleanup_source_inputs() {
+    [ -z "$manifest_file" ] || rm -f "$manifest_file"
+    [ -z "$parsed_file" ] || rm -f "$parsed_file"
+  }
+  trap cleanup_source_inputs 0
+  trap 'exit 1' 1 2 15
+  if [ ! -e "$SJAR" ] && [ ! -L "$SJAR" ]; then
+    fallback_source_inputs 0 "$ROOT/selfhost"
+    return
+  fi
+
+  manifest_file=$(mktemp "${TMPDIR:-/tmp}/dawn-source-manifest.XXXXXX") || {
+    echo "error: cannot create source input manifest temporary file" >&2
+    return 1
+  }
+  parsed_file=$(mktemp "${TMPDIR:-/tmp}/dawn-source-inputs.XXXXXX") || {
+    rm -f "$manifest_file"
+    echo "error: cannot create source input list temporary file" >&2
+    return 1
+  }
+  if ! "$JAVA" $DAWN_JVM_OPTS -jar "$SJAR" \
+      __source-inputs --base "$ROOT" "$ROOT/selfhost" > "$manifest_file"; then
+    echo "error: current toolchain failed to produce source input manifest" >&2
+    return 1
+  fi
+  if [ ! -s "$manifest_file" ]; then
+    echo "error: current toolchain produced an empty source input manifest" >&2
+    return 1
+  fi
+  if ! source_manifest_inputs "$manifest_file" > "$parsed_file"; then
+    return 1
+  fi
+  if ! cat "$parsed_file"; then
+    return 1
+  fi
+)
 
 # Everything the built jar is a function of.
 #
@@ -128,32 +323,180 @@ dep_dirs() {
 # should have been. Withdrawing trust from a seed used not to trigger a
 # rebuild at all.
 stamp_inputs() {
-  printf '%s\n' \
-    "$ROOT/selfhost/src" \
-    "$ROOT/selfhost/dawn.toml" \
-    "$ROOT/selfhost/dawn.lock" \
+  printf 'T\t%s\nF\t%s\nF\t%s\nF\t%s\nF\t%s\nF\t%s\n' \
     "$STD" \
     "$ROOT/scripts/seed-release.txt" \
     "$ROOT/scripts/seed-checksums.txt" \
     "$ROOT/scripts/seed-std-checksums.txt" \
     "$ROOT/scripts/seedjar.sh" \
     "$ROOT/bin/dawn"
-  dep_dirs
+  source_inputs
 }
 
-source_stamp() {
+source_stamp() (
   # -print0/-exec sort would need GNU find; LC_ALL fixes the collation so the
   # same tree hashes the same on every machine.
-  stamp_inputs |
-    while IFS= read -r p; do
-      find "$p" -type f 2>/dev/null
-    done |
-    LC_ALL=C sort |
-    while IFS= read -r f; do
-      printf '%s\n' "$f"
-      cat "$f"
-    done | sha256
-}
+  input_file=$(mktemp "${TMPDIR:-/tmp}/dawn-stamp-inputs.XXXXXX") || exit 1
+  file_list=$(mktemp "${TMPDIR:-/tmp}/dawn-stamp-files.XXXXXX") || {
+    rm -f "$input_file"
+    exit 1
+  }
+  tree_list=$(mktemp "${TMPDIR:-/tmp}/dawn-stamp-tree.XXXXXX") || {
+    rm -f "$input_file" "$file_list"
+    exit 1
+  }
+  sorted_list=$(mktemp "${TMPDIR:-/tmp}/dawn-stamp-sorted.XXXXXX") || {
+    rm -f "$input_file" "$file_list" "$tree_list"
+    exit 1
+  }
+  payload=$(mktemp "${TMPDIR:-/tmp}/dawn-stamp-payload.XXXXXX") || {
+    rm -f "$input_file" "$file_list" "$tree_list" "$sorted_list"
+    exit 1
+  }
+  trap 'rm -f "$input_file" "$file_list" "$tree_list" "$sorted_list" "$payload"' 0
+  trap 'exit 1' 1 2 15
+  if ! stamp_inputs > "$input_file"; then
+    exit 1
+  fi
+
+  tab=$(printf '\t')
+  while IFS= read -r record || [ -n "$record" ]; do
+    case $record in
+      *"$tab"*) kind=${record%%"$tab"*}; path=${record#*"$tab"} ;;
+      *)
+        echo "error: malformed typed stamp input" >&2
+        exit 1
+        ;;
+    esac
+    if [ -z "$path" ]; then
+      echo "error: stamp input path is empty" >&2
+      exit 1
+    fi
+    case $kind in
+      F)
+        if [ -L "$path" ] || [ ! -f "$path" ]; then
+          echo "error: required stamp input is not a regular non-symbolic-link file: $path" >&2
+          exit 1
+        fi
+        printf '%s\n' "$path" >> "$file_list" || exit 1
+        ;;
+      O)
+        if [ -L "$path" ]; then
+          echo "error: optional stamp input is a symbolic link: $path" >&2
+          exit 1
+        fi
+        if [ -e "$path" ]; then
+          if [ ! -f "$path" ]; then
+            echo "error: optional stamp input is not a regular file: $path" >&2
+            exit 1
+          fi
+          printf '%s\n' "$path" >> "$file_list" || exit 1
+        fi
+        ;;
+      T)
+        if [ -L "$path" ] || [ ! -d "$path" ]; then
+          echo "error: required stamp input is not a non-symbolic-link directory tree: $path" >&2
+          exit 1
+        fi
+        if ! find "$path" -type l -print -quit > "$tree_list"; then
+          echo "error: cannot traverse stamp input tree: $path" >&2
+          exit 1
+        fi
+        if [ -s "$tree_list" ]; then
+          tree_entry=$(sed -n '1p' "$tree_list")
+          echo "error: stamp input tree contains a symbolic link: $tree_entry" >&2
+          exit 1
+        fi
+        if ! find "$path" ! -type d ! -type f ! -type l -print -quit > "$tree_list"; then
+          echo "error: cannot traverse stamp input tree: $path" >&2
+          exit 1
+        fi
+        if [ -s "$tree_list" ]; then
+          tree_entry=$(sed -n '1p' "$tree_list")
+          echo "error: stamp input tree contains a non-regular entry: $tree_entry" >&2
+          exit 1
+        fi
+        if ! find "$path" -type f -print > "$tree_list"; then
+          echo "error: cannot traverse stamp input tree: $path" >&2
+          exit 1
+        fi
+        while IFS= read -r tree_file || [ -n "$tree_file" ]; do
+          if [ -L "$tree_file" ] || [ ! -f "$tree_file" ]; then
+            echo "error: stamp input tree entry is not a regular non-symbolic-link file: $tree_file" >&2
+            exit 1
+          fi
+          printf '%s\n' "$tree_file" >> "$file_list" || exit 1
+        done < "$tree_list"
+        ;;
+      *)
+        echo "error: unknown typed stamp input kind: $kind" >&2
+        exit 1
+        ;;
+    esac
+  done < "$input_file"
+
+  if ! LC_ALL=C sort -u "$file_list" > "$sorted_list"; then
+    echo "error: cannot sort stamp inputs" >&2
+    exit 1
+  fi
+  while IFS= read -r file || [ -n "$file" ]; do
+    if [ -L "$file" ] || [ ! -f "$file" ]; then
+      echo "error: stamp input changed type before it could be read: $file" >&2
+      exit 1
+    fi
+    if ! printf '%s\n' "$file" >> "$payload" || ! cat "$file" >> "$payload"; then
+      echo "error: cannot read stamp input: $file" >&2
+      exit 1
+    fi
+  done < "$sorted_list"
+  if ! sha256 < "$payload"; then
+    echo "error: cannot hash stamp inputs" >&2
+    exit 1
+  fi
+)
+
+stamp_inputs_are_newer() (
+  input_file=$(mktemp "${TMPDIR:-/tmp}/dawn-newer-inputs.XXXXXX") || exit 2
+  match_file=$(mktemp "${TMPDIR:-/tmp}/dawn-newer-match.XXXXXX") || {
+    rm -f "$input_file"
+    exit 2
+  }
+  trap 'rm -f "$input_file" "$match_file"' 0
+  trap 'exit 2' 1 2 15
+  if ! stamp_inputs > "$input_file"; then
+    exit 2
+  fi
+  tab=$(printf '\t')
+  while IFS= read -r record || [ -n "$record" ]; do
+    case $record in
+      *"$tab"*) kind=${record%%"$tab"*}; path=${record#*"$tab"} ;;
+      *)
+        echo "error: malformed typed stamp input" >&2
+        exit 2
+        ;;
+    esac
+    case $kind in
+      O)
+        if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+          continue
+        fi
+        ;;
+      F|T) ;;
+      *)
+        echo "error: unknown typed stamp input kind: $kind" >&2
+        exit 2
+        ;;
+    esac
+    if ! find "$path" -type f -newer "$SJAR" -print -quit > "$match_file"; then
+      echo "error: cannot check stamp input modification time: $path" >&2
+      exit 2
+    fi
+    if [ -s "$match_file" ]; then
+      exit 0
+    fi
+  done < "$input_file"
+  exit 1
+)
 
 WANT="$(source_stamp)"
 
@@ -170,11 +513,13 @@ needs_build=0
 if [ ! -f "$SJAR" ]; then
   needs_build=1
 elif [ "$WANT" = "no-sha256" ]; then
-  newer=$(stamp_inputs | while IFS= read -r p; do
-    find "$p" -type f -newer "$SJAR" -print -quit 2>/dev/null
-  done)
-  if [ -n "$newer" ]; then
+  if stamp_inputs_are_newer; then
     needs_build=1
+  else
+    newer_status=$?
+    if [ "$newer_status" -ne 1 ]; then
+      exit "$newer_status"
+    fi
   fi
 elif [ ! -f "$STAMP" ] || [ "$WANT" != "$(cat "$STAMP")" ]; then
   needs_build=1
