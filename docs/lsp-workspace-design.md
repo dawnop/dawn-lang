@@ -1,83 +1,50 @@
 # LSP workspace 与目标级 Java classpath 设计（TOOL-05/06）
 
-> 状态：**proposed / open**。本批基于 `62715aa`。A（`10b3052`）与 B（`7eb2f25`）已实现并
-> 推到 `origin/main`，包含两刀的远端 CI 全绿；C 由本批实现，D 尚未实现。本文只覆盖仍开放的
-> TOOL-05 与 TOOL-06，不能因前三刀落地就把任一条标成 fixed。
+> 状态：**current / implemented**。A（`10b3052`）、B（`7eb2f25`）、C（`9f914d4`）与
+> D（`18fb3d6`）均已实现；TOOL-05 与 TOOL-06 据此标记为 **fixed**。D 的本地 18×18
+> 行为合同已通过；远端 [CI run 31337782587](https://github.com/dawnop/dawn-lang/actions/runs/31337782587)
+> 为 **11/11 success**，其中独立 `lsp-workspace` job 用时 3m10s。
 
-## 1. 范围与已完成前置
+## 1. 收口范围
 
-旧的 v0.60 草案把 workspace、framing、lifecycle、两套依赖图、缓存和 classloader 混成一批。
-当前代码已经换了地基，执行范围必须收窄：
+旧 v0.60 草案把 workspace、framing、lifecycle、两套依赖图、缓存和 classloader 混在一起。
+最终实现只关闭下列相互依赖的边界，不重开已经定稿的协议问题：
 
-| 条目 | 当前状态 | 与本文的关系 |
+| 条目 | 当前状态 | 最终边界 |
 |---|---|---|
-| TOOL-07 | 已完成 | `server.read_message` 已在共享 Dawn 层限制 8 KiB header、64 MiB body，并在不可重同步时终止读循环；见 [lsp-framing-design.md](lsp-framing-design.md) |
-| TOOL-08 | 已完成 | `server.Lifecycle` 已实现 initialize/shutdown/exit 状态机 |
-| TOOL-10 | 已完成 | [source-plan-design.md](source-plan-design.md) 已把 manifest、MVS、fetch、最终 source 图与 Java 坐标统一进 Java-free `compiler-plan.SourcePlan` |
-| TOOL-05 | open | A 已建立 captured-plan seam；D 的共享 workspace、全 overlay 与全量 diagnostics 尚未实现 |
-| TOOL-06 | open | B 已提供 target-local lease，C 已把 `check`/`doc` 接到各自 target classpath；D 的 LSP 接线尚未实现 |
+| TOOL-05 | **fixed** | 同一 canonical `(project, source_root)` 只有一份 captured plan、live overlay 集合、共享 `Program`、诊断贡献与 target lease |
+| TOOL-06 | **fixed** | JVM `check`、`doc` 与 LSP 都按 target 的最终 `SourcePlan` 使用隔离 Java classpath；native 保持显式 refusal |
+| TOOL-07 | fixed | 共享 Dawn framing 层限制 8 KiB header、64 MiB body；见 [lsp-framing-design.md](lsp-framing-design.md) |
+| TOOL-08 | fixed | `server.Lifecycle` 实现 initialize/shutdown/exit 状态机 |
+| TOOL-10 | fixed | Java-free `compiler-plan.SourcePlan` 统一 manifest、MVS、最终 source 图与 Java 坐标；见 [source-plan-design.md](source-plan-design.md) |
 
-本文不重开前三项；TOOL-05/06 仍须等 D 的 workspace/LSP 边界落地后才能标成 fixed。
+四刀的责任边界如下：
 
-| 刀 | 状态 | 已落地或待完成的边界 |
+| 刀 | 提交 | 实现 |
 |---|---|---|
-| A | **implemented，`10b3052`，远端全绿** | `ProjectPlan`、captured loader、captured completion；行为与输出差分均通过 |
-| B | **implemented，`7eb2f25`，远端全绿** | `JsigLease`、platform-parent loader、显式 loader 查询；行为与输出差分均通过 |
-| C | **implemented in this batch** | JVM `check`/`doc` 按 target 获取、校验、关闭 Java lease |
-| D | **not implemented** | LSP 每 root 共享 snapshot、lease、diagnostics 与关闭回滚 |
+| A | `10b3052` | `ProjectPlan`、captured loader 与 captured completion seam |
+| B | `7eb2f25` | `JsigLease`、platform-parent target loader 与显式 loader 查询 |
+| C | `9f914d4` | JVM `check`/`doc` 按 target fetch、校验、使用并关闭 Java lease |
+| D | `18fb3d6` | LSP 共享 workspace、target lease、失败态、诊断聚合、关闭回滚与完整行为合同 |
 
-## 2. 当前实现证据
+## 2. 三层所有权
 
-以下事实均按本批工作树的源码符号重新核对，不沿用旧草案行号。
+三层只允许向上组合，不复制下层事实。
 
-1. `compiler-plan/src/source.dawn` 已公开显式的 `SourceTarget` 与唯一 `SourcePlan`；后者持有
-   `project`、`source_root`、最终 `PkgR`、`java_coords` 与规划诊断。`compiler-plan/dawn.toml`
-   只有 `fspath`、`sha2`、`inflate` 三个源码依赖，没有 `[java-deps]` 或 `use java`。
-2. A 已在 `driver/analyze.dawn` 落地 `ModuleIndex`、`ProjectPlan`、`project_plan` 与
-   `load_entries_over`。兼容 loader 会 fresh plan，但 captured loader 只有 plan 入参，不能静默
-   重读 manifest；`analyze_document_planned` 把实际 plan 交给 LSP。
-3. A 也已让一次 `use` completion 显式消费同一张 `plan.modules.by_use`；`path_items` 与
-   `import_items` 不再自行规划。只有 standalone/fallback 的 `None` 分支仍会调用一次
-   `use_candidates`，通用 `lspq.QCx` 没有增加 completion-only 字段。
-4. `server.dawn` 的 `Doc` 现在同时保存 `Program`、`entry`、`plan`；每个查询仍经 `doc_qcx`
-   读取自己的私有快照。`update_doc` 只分析当前 buffer、只发布当前 URI；`didClose` 只删当前
-   `Doc` 并清空该 URI，没有让其他文档按磁盘回落后重分析。
-5. `analyze_document_planned` 仍以“文本里是否出现小写 module `use`”决定 project/standalone，
-   project 分支也仍只构造 `{当前 canonical path -> 当前文本}` 的单元素 overlay。因此没有 `use`
-   的合法 `lib.dawn` 不会把 unsaved export 提供给 caller，其他 open buffer 仍从磁盘读取。
-6. `location_of` 仍遍历全局 `st.docs` 寻找 canonical path；它没有 workspace root 过滤，会把另一
-   root 的 live buffer 当作当前 project 的 definition source。
-7. B 已在 Java-free `check/jsig.dawn` 落地 `JsigLease`，并在 `jvm/jreflect.dawn` 将八类查询拆成
-   显式 loader 版本。`jsig_for(jars)` 使用 platform parent；原 `jsig_real()` 与直接 wrapper
-   仍使用 system loader。C 已让 `main.dawn` 的 `check`、`doc` 消费 target lease；`lsp` 尚未消费，
-   `LspState` 也仍只有一份全局 `Jsig`。
-8. `pkg/maven.dawn` 直接使用 `coursierapi.*`；C 已在 `selfhost/dawn.toml` 显式声明
-   `io.get-coursier:interface:1.0.28`，使 selfhost 的 platform-parent target loader 不依赖
-   compiler application classpath 泄漏 Coursier。
-9. build/run/test 的 re-exec 暂时仍有生产消费者：`jvm/emit.dawn` 在 varargs component 与
-   interface 判断处直接问 `jreflect`，`jvm/jfold.dawn` 的 comptime Java FFI 也直接反射。
-   因此“checker 有 target loader”不能推出“可以删除 re-exec”。
-10. `driver/analyze.canon` 只是 `fspath.absolute`：绝对化后做词法 `.`/`..` 归一，不解析 symlink，
-    也不做 case-fold。D 的 identity 与冲突检测先沿用这一定义，更强的文件身份留作 residual。
+### 2.1 `compiler-plan.SourcePlan`
 
-现有 `server.dawn` 关于“编辑器中的 `use java` 与 compile 完全一致”的注释与当前宿主 wiring 冲突；
-D 落地时应一起改正，不能继续把 system classpath 当作 target classpath。
-
-## 3. 三层所有权
-
-三层只允许向上组合，不允许复制下层字段。
-
-### 3.1 `compiler-plan.SourcePlan`
-
-`SourcePlan` 继续独占：
+`SourcePlan` 独占：
 
 - 显式 `ProjectDirectory` / `SourceFile` target；
 - manifest 校验、源码包 fetch、MVS 与最终 `PkgR`；
-- `project`、`source_root`、Java coordinates 与规划诊断。
+- `project`、`source_root`、Java coordinates 与全部 planner diagnostics。
 
-Maven artifact fetch、`dawn.lock` 校验、Java 对象和 classloader 永远不进 `compiler-plan/`。
+Maven artifact fetch、`dawn.lock` 校验、Java 对象和 classloader 不进入 `compiler-plan/`。
+当 planner diagnostics 非空时，LSP 不触发 Maven/网络；它仍创建 zero-jar target lease，继续
+`load_entries_over` / `analyze_program`，由 `Program.diags` 原样携带并发布全部 planner diagnostics。
+这些诊断不是 `Unavailable` setup failure，也不能被压成一条。
 
-### 3.2 selfhost `ProjectPlan`
+### 2.2 selfhost `ProjectPlan`
 
 `ProjectPlan` 只包一份 `SourcePlan`，再派生 compiler-facing 模块索引：
 
@@ -93,153 +60,153 @@ pub type ProjectPlan = {
 }
 ```
 
-`project_files` 是一次稳定排序的项目 source-tree walk，保留调用者路径拼写，也保留模块名非法的
-`.dawn` 文件，让 loader 继续产生现有诊断。`by_use` 只含合法、非 `std` 的 module path，值是
-canonical file path；项目模块与直接 `[deps]` 包继续使用现有消费者 alias 拼写。
+`project_files` 是稳定排序的项目 source-tree walk；`by_use` 只含合法、非 `std` 的 module path。
+`load_entries_over(plan, entries, overlay)` 只消费 captured plan，不在内部重新规划。LSP workspace
+因此能在会话内固定 source graph、module index 与 Java coordinates，避免按键时重读 manifest。
 
-`ProjectPlan` **不复制** `project/source_root/pkgs/java_coords/diags`，也不持有 `Program`、`Cx`、
-`ModExports`、Maven jars、lock 状态或 classloader。它放在 `driver/analyze.dawn`，复用已有的
-`module_path_of`、`bad_segments`、`walk_dawn` 和 alias 规则，不新建一份 module-path 算法。
+### 2.3 LSP identity、`Doc` 与 `Workspace`
 
-### 3.3 LSP `Workspace`
+文件模式下，同一 project 可以产生不同 `source_root`。例如 `app/rogue.dawn` 的 source root
+可能是 `app/`，而 `app/src/main.dawn` 的 source root 是 `app/src/`；只按 project 建 key 会让
+打开顺序决定两个文档共享哪张图。因此最终 workspace identity 是 canonical：
 
-只有 `Workspace` 持有 project 会话活状态：一个 root 的全部 open-buffer overlay、一份共享
-`Program`，以及一份 target-scoped `JsigLease`。不同 canonical root 的所有这些值完全隔离。
-
-```dawn
-type DocAnalysis =
-  | Standalone(
-      prog: Program,
-      entry: String,
-      modules: Option[Map[String, String]]
-    )
-  | WorkspaceMember(root: String)
-
-type Doc = {
-  uri: String,
-  path: Option[String],
-  canonical_path: Option[String],
-  text: String,
-  view: SourceView,
-  ls: List[Int],
-  analysis: DocAnalysis
-}
+```text
+(canon(plan.source.project), canon(plan.source.source_root))
 ```
 
-这是 D 的所有权接缝，不是给同一份结果起两个名字：只有 `Standalone` 持有私有
-`Program`/`entry`；`WorkspaceMember(root)` 必须经 `root` 找到 workspace 的共享 `Program` 与
-`entry_by_uri`。`Standalone.modules` 只服务 completion：非文件 URI 为 `None`，非法 module path
-回退时可以保留定位过程中捕获的 module index。`Doc` 本身不再持有 project `Program`/`entry`，
-也不复制 workspace plan。
+两部分分别用“十进制长度 + `:` + 原值”编码后连接，形成无碰撞的 opaque `lookup_key`。
+`lookup_key` 只用于 `LspState.workspaces` 查表，**绝不解释为文件路径**。真实 canonical
+`source_root` 单独保留，供 definition 的文件系统边界判断使用；查表 identity 与 filesystem
+boundary 是两个不同概念。
+
+```dawn
+type WorkspaceIdentity = {
+  source_root: String,
+  lookup_key: String
+}
+
+type DocAnalysis =
+  | Standalone(prog: Program, entry: String, modules: Option[Map[String, String]])
+  | WorkspaceMember(identity: WorkspaceIdentity)
+```
+
+`Doc` 只保存 URI/path、canonical path、live `text`/`SourceView`/line starts 与上述身份。
+只有 standalone 文档私有持有 `Program`；workspace member 不复制 plan、Program、entry 或 lease。
 
 ```dawn
 type Workspace = {
   plan: ProjectPlan,
   path_by_uri: Map[String, String],
-  overlay: Map[String, String],
-  prog: Program,
+  prog: Option[Program],
   entry_by_uri: Map[String, String],
-  java: JsigLease,
-  published_external_diag_uris: Set[String]
-}
-```
-
-`LspState.workspaces: Map[String, Workspace]` 的 key 就是 canonical project root，记录内部不再
-重复 `key`。`path_by_uri` 明确表示 URI -> canonical path；传给 loader 的 entry path 列表按稳定
-URI 顺序从它派生，不能再用含糊的 `entries` 同时表示两件事。`published_external_diag_uris`
-记录上次实际发布过 planner、manifest、Maven、lock 等 project diagnostics 的 URI，供恢复或
-关闭时逐个发送空数组。JVM `LspState` 另持一份 server-lifetime zero-jar standalone lease；
-native 对应位置持有 no-op 的 refused lease。
-
-## 4. A（已实现）：captured-plan seam
-
-A 在 `10b3052` 建立了可复用边界，但没有宣称修复 TOOL-05/06。
-
-```dawn
-pub type DocumentAnalysis = {
-  prog: Program,
-  entry: String,
-  plan: Option[ProjectPlan]
+  lease: JsigLease,
+  diag_by_uri: Map[String, List[Json]]
 }
 
-pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !io
-
-pub fn load_entries_over(
+type UnavailableWorkspace = {
   plan: ProjectPlan,
-  entries: List[String],
-  overlay: Map[String, String]
-) -> LoadResult !io
-
-pub fn analyze_document_planned(
-  path: String,
-  text: String,
-  std: StdCtx,
-  opts: CtOpts,
-  js: Jsig
-) -> DocumentAnalysis !io
+  path_by_uri: Map[String, String],
+  problem: LocDiag,
+  diag_by_uri: Map[String, List[Json]]
+}
 ```
 
-已落地边界：
+`Workspace` 不持久保存 overlay。每次 rebuild 都以 `Doc.text` 为唯一 live-text 权威，现场构造
+完整 overlay；这样不存在 `Doc.text` 与第二份缓存漂移。`WorkspaceSlot` 有两种显式状态：
 
-- `load_entries_over` 只消费传入的 `plan.source.source_root`、`plan.source.pkgs` 与规划诊断，
-  **不得**在内部再次调用 `source_plan` / `project_plan`。
-- `load_directory(dir)` 保留现有 `src/` 前置拒绝顺序，再以
-  `ProjectDirectory(dir)` 构造 plan，以 `plan.modules.project_files` 作为 entries。
-- `load_file_over(file, overlay)` 以 `SourceFile(file)` 构造 plan，再以 `[file]` 作为 entries；
-  `load_file` 签名与行为不变。
-- `analyze_document_planned` 的 standalone 分支返回 `plan = None`；project 分支返回实际用于
-  load 的同一个 `ProjectPlan`。旧 `analyze_document -> (Program, String)` 保留为丢弃 plan 的
-  compatibility wrapper。
-- 删除未使用的 `resolve.follow_only`，不借机改变 load 范围或诊断。
+- `Ready(workspace)`：target setup 成功。正常时 `prog = Some(...)`；duplicate canonical path
+  冲突时保留同一 lease 和成员，但把 `prog` 置为 `None`，表示 fail-closed conflict snapshot。
+- `Unavailable(workspace)`：Maven、lock 或 loader factory setup 失败，只有一条已定位的
+  `LocDiag`；buffer 与 formatting 保留，所有语义查询不可用，也没有旧 `Program` 或 fallback loader。
 
-这条 seam 有一项明确成本：每次 fresh file-mode plan 会遍历完整 project source tree，并对每个
-唯一的直接 dependency root 遍历一次；它不解析全部文件，指向同一 root 的重复 alias 共享一次
-walk。第一刀接受这项正确性成本，D 刀由 workspace 持有 plan，消除编辑器会话内的重复遍历；
-CLI 是否再加缓存必须先量测，不能在没有失效协议时偷加全局状态。
+## 3. Workspace 成员与 captured-plan 刷新
 
-第一刀里 `Doc` **暂时仍各持一份 `Program`**，只新增 `plan: Option[ProjectPlan]`。completion
-不把 module index 塞进通用 `QCx`，而是显式接收 completion-specific 参数：
+### 3.1 `didOpen` 与身份定位
 
-```dawn
-pub fn completions_at(
-  qc: QCx,
-  project_modules: Option[Map[String, String]],
-  text: String,
-  offset: Int
-) -> List[CItem] !io
-```
+- 新本地 URI 可以执行一次 fresh `project_plan(SourceFile(path))`，用它确定 canonical
+  `(project, source_root)` identity。
+- 只有以 `.dawn` 结尾且 `project_module_path` 合法的本地文件能成为 workspace member。
+  extensionless 小写文件即使位于项目内也保持 standalone，不能被误认成合法 module。
+- 非 `file:` URI、非法 module path 与其他不能形成项目成员身份的 buffer 保持 standalone。
+- identity 已存在时，新 plan 只用于定位并立即丢弃；成员使用 workspace 已捕获的 plan 与 lease。
+  若该 slot 是 `Unavailable`，新成员是允许重试 setup 的低频边界，但仍使用旧 captured plan。
+- 同一 project、不同 source root 必须落入不同 `lookup_key`；两个打开顺序都产生相同隔离结果。
 
-只有确认 cursor 位于 `use` completion 后才取得候选表：`Some` 直接复用文档分析捕获的
-`plan.modules.by_use`；`None`（例如尚未完成的 `use ` 或 standalone buffer）最多调用一次
-兼容 `use_candidates`。`path_items` 与 `import_items` 接收同一张表，自己不得重新规划。
+### 3.2 `didChange`、`didSave` 与 manifest 更新
 
-A 的 captured-plan、loader mutant 与 completion mutant 合同已通过；`selfhost-lsp-diff.sh`、
-`selfhost-prev-diff.sh` 实测字节不变，Core review 只接受了 `driver.analyze`、`lsp.server`、
-`lsp.lspc` 的预期 owner，包含该提交的远端 CI 已通过。
+已有 `WorkspaceMember` 的 `didChange` 不 replan、不 fetch、不调用 host factory。Ready workspace
+只重建语义快照；Unavailable workspace 只更新 buffer/view 和诊断映射，保持 fail closed，避免每次
+按键触发网络重试。
 
-## 5. TOOL-06：`JsigLease`，不是进程 classpath
+`didSave` 是 Unavailable 的显式 setup 重试点，但它仍使用 captured plan。保存可以重试 lock 或
+瞬态 Maven/loader failure；它**不会**读取新的 `dawn.toml` 并替换 source graph。修改 manifest 后，
+必须关闭该 identity/source root 的全部文档，再 reopen 一个文档，才会 fresh plan。未来若增加
+显式 refresh，也必须先完整构造新 plan/lease，再原子替换，最后关闭旧 lease。
 
-### 5.1 B 已验证并实现的构造路径
+### 3.3 Duplicate canonical path conflict
 
-真实 spike 已推翻旧注释“reflection here cannot do”的前提：
+一次 rebuild 按 URI 稳定排序成员，在写入 overlay 之前比较 canonical path 对应的全部 live text。
+两个 URI 若归一到同一路径且文本不同：
 
-- 直接调用 `URLClassLoader.new(urls, parent)` 会因 `urls` 的 Dawn 静态类型是 `Object` 而稳定
-  报“没有 `(Object, ClassLoader)` 构造器”；这条直接路线不可用。
-- 现有 FFI 已能用 `Array.newInstance(URL, n)` + `Array.set` 造真实 `URL[]`，再经
-  `Class.getConstructor(Class...)` 与 `Constructor.newInstance(Object...)` 调构造器，最后
-  `cast[URLClassLoader]`。
-- parent 使用 `ClassLoader.getPlatformClassLoader()`，避免把编译器自身 application classpath
-  泄漏给 target，同时仍由 JVM delegation 看见 JDK classes。
-- 两个包含相同 FQCN、不同 API 的 JAR 可被两份 loader 同时正确解析；system loader 看不见
-  fixture class。两线程各重复查询 200 次没有串类；关闭 loader 后其独有 resource 不再可见，
-  异常路径上的 `bracket` 也完成关闭。
+- 不选择排序靠后的文本，不安装 last-wins overlay；
+- 丢弃旧 `Program`，语义查询返回空结果；
+- 向冲突 URI 发布定位在各自 live view 的诊断；
+- 文本恢复一致或其中一个 URI 关闭后，下一次 rebuild 自动恢复 Ready program。
 
-这些能力已在 B（`7eb2f25`）实现，无需新增 Dawn 语法、`URL[]` 表面类型、Java helper 或 seed
-runtime helper。
+## 4. 一次 workspace rebuild
 
-### 5.2 B 已实现的 API
+每次 settled update 对一个 identity 执行固定流程：
 
-Java-free `check/jsig.dawn` 已增加生命周期记录，JVM 实现在 `jvm/jreflect.dawn`：
+1. 按 URI 稳定排序所有成员，从 `path_by_uri` 与各自 `Doc.text` 构造完整 overlay、entries 与
+   `entry_by_uri`；冲突检查先于 `Map` 覆盖。
+2. 无冲突时恰好一次调用 `load_entries_over(ws.plan, entries, overlay)`，再恰好一次调用
+   `analyze_program(..., ws.lease.jsig)`，形成该 workspace 的唯一 `Program`。
+3. `load_entries_over` 把 `plan.source.diags` 放进加载结果，因此一次分析会保留全部 planner
+   diagnostics；它们不会因 Maven 被跳过而消失。
+4. 新 `Program`、entry map 与诊断完整形成后一起替换 workspace；所有 completion、hover、
+   definition、documentSymbol 等查询都经统一 `analysis_of` seam 取得同一快照。
+
+completion 的 module 候选以 captured `plan.modules.by_use` 为基线，先删除当前 entry，再补入
+其他 live entries。另一个 duplicate URI 若 entry 与当前文档相同，也不得把当前 module 插回；
+其余尚未落盘的合法 live module 会被补入，无需重跑 planner。
+
+当前 server 保持同步 debounce，不引入 generation、异步 task 或 cancellation。Slice D 先保证
+语义世界唯一且可预测，不承诺增量 checker 性能。
+
+## 5. Definition 与 source-root 边界
+
+`analysis_of` 同时返回 opaque workspace lookup key 与真实 `definition_root`：
+
+- lookup key 只选择当前 workspace slot；
+- definition root 只判断目标 canonical path 是否位于当前 source root；
+- 目标属于该 root 且在同一 workspace live-open 时，definition 使用目标文档的 live
+  `SourceView` 和 line starts；
+- 目标不属于该 root、目标只在另一 identity 打开，或当前分析是 standalone 时，一律读磁盘，
+  不遍历全局 `st.docs` 借用别人的 live world。
+
+这个分离同时阻止两类泄漏：编码 key 被误当路径，以及同一 project 的不同 source root 互相
+借用 live definition。
+
+## 6. Diagnostics 所有权与聚合
+
+每个 Ready/Unavailable slot 保存自己对 `URI -> diagnostics` 的贡献。一次 install、rebuild、
+恢复或关闭会对“旧贡献 URI ∪ 新贡献 URI ∪ 相关 open/closed URI”发布结果，包括显式空数组。
+range 始终用诊断目标文档自己的 live view；未打开的 manifest、lock 或 dependency 文件按磁盘
+内容定位。
+
+发布前，server 会稳定遍历**全部 workspace**，聚合同一 URI 的所有贡献。撤销一个 root 只删除
+该 root 的 contribution，再发布其余聚合结果；不能因为两个 workspace 都指向同一个
+`dawn.toml`、`dawn.lock` 或 dependency file，就由先关闭者把后者诊断清空。
+
+Maven/lock/loader setup failure 由 JVM host 转为 `LocDiag`：manifest/factory 错误定位
+`dawn.toml`，lock 错误定位 `dawn.lock`。`Unavailable.problem` 只承载这类单项 setup failure；
+planner 的多条 source diagnostics 仍走正常 zero-jar analysis 路径。
+
+## 7. Target-scoped `JsigLease`
+
+### 7.1 B：隔离 loader
+
+Java-free `check/jsig.dawn` 公开：
 
 ```dawn
 pub type JsigLease = {
@@ -250,191 +217,100 @@ pub type JsigLease = {
 pub fn jsig_for(jars: List[String]) -> JsigLease !io
 ```
 
-`jreflect` 已把八类查询拆成显式 loader 参数的内部函数；`jsig_for` 的闭包捕获同一 loader。
-既有 `jsig_real()` 与直接 `jreflect` wrapper 继续走 system loader，供仍依赖 re-exec 的
-build/run/test emitter 与 comptime FFI 使用。B 的 owning contract 已证明双 JAR 同 FQCN 隔离、
-platform parent 不泄漏 application classpath、正常/异常关闭；五个 compiling mutant 均已打红。
+JVM `jsig_for` 使用 platform parent：target 能看见 JDK classes，但看不见编译器 application
+classpath。显式 loader 版本的反射查询绑定同一 loader；两个含相同 FQCN、不同 API 的 target
+可以并存而不串类。已有 build/run/test emitter 与 comptime FFI 仍保留 system-loader 路径，
+因此本轮不删除其 re-exec。
 
-### 5.3 C：`check` / `doc` target wiring（本批实现）
+### 7.2 C：`check` / `doc`
 
-C 补出 plan-aware loader，避免 source load 与 Java coordinates 各自规划：
+JVM `check`/`doc` 对每个 target 只规划一次，以同一 captured plan：
+
+1. `load_planned(plan)` 加载 source；
+2. `fetch_checked` 解析 Maven artifacts 并校验 `dawn.lock`；
+3. `jsig_for(jars)` 构造 target lease；
+4. 在 bracket 内只运行 `analyze_program`；
+5. 关闭 lease 后再 render、print 或 exit。
+
+多 target `check` 不合并 jars。Maven/lock/loader setup failure fail closed；native `check`/`doc`
+继续 `jsig_refused()`，不 import Maven/Coursier/JVM reflection。selfhost 的固定 ASM bridge 只在
+target loader 能解析 ASM 时叠加数据签名，不能借 system loader 泄漏宿主 ASM。
+
+### 7.3 D：显式 LSP host factory
+
+共享 Java-free server 接收：
 
 ```dawn
-pub fn load_planned(plan: ProjectPlan) -> LoadResult !io
+pub type LspLeaseHost = {
+  standalone: fn() -> JsigLease !io,
+  project: fn(source.SourcePlan) -> Result[JsigLease, LocDiag] !io
+}
 ```
 
-它按 `plan.source.target` 保持现有 directory/file 语义，只消费已捕获的 plan。directory target 的
-`src/` 不存在拒绝必须仍发生在 `project_plan` 之前，不能因引入 helper 而先解析 manifest 或抓包。
+- JVM project factory 使用 `fetch_checked` + `jsig_for`；`jsig_for` 的宿主/I/O failure 由
+  `catch_fault` 转为 `dawn.toml` 诊断，compiler invariant panic 不会被降格成用户错误。
+- planner diagnostics 非空时 factory 跳过 Maven/网络，以 `jsig_for([])` 继续分析并发布全部
+  planner diagnostics。
+- JVM standalone 在 server lifetime 内共享一份 `jsig_for([])` lease；可见 JDK，不可见
+  编译器 ASM/Coursier。native standalone/project 都返回 `jsig_refused_lease()` no-op lease。
+- setup 先完整构造 lease，再安装 workspace。首次 rebuild 若 unexpected panic，关闭尚未安装的
+  lease 后重新 panic，不把半成品留在 state。
 
-`pkg/maven.dawn` 保持 selfhost 所有权，可抽出一个不打印、不退出的 helper：
+## 8. 关闭、回滚与异常退出
 
-```dawn
-pub fn fetch_checked(
-  project: String,
-  coords: List[MCoord]
-) -> Result[List[String], String] !io
-```
+`didClose` 先移除 URI 与 `Doc`，再处理所属 slot：
 
-它完成 Coursier fetch 与已有 lock parse/hash/check，并保持 Coursier 返回的 JAR 顺序。不存在
-lock 才表示“无 lock”；文件已存在但不可读、格式错误、hash drift 都是 `Err`。即使 `coords=[]`
-也要拒绝已有 stale lock。helper 不打印、不退出；失败时 fail closed，绝不退回 system loader。
+- 还有成员时，以剩余 `Doc.text` 重建；被关闭 buffer 不再进入 overlay，依赖读取其磁盘版本，
+  未落盘文件则正常产生缺失模块诊断；
+- 最后一个成员关闭时，先从 state 删除 workspace 并发布聚合后的清空/剩余诊断，再关闭 lease；
+- Unavailable 没有 lease，关闭只撤销其诊断贡献；全部关闭后 reopen 会 fresh plan。
 
-`selfhost/src/pkg/maven.dawn` 自己直接引用 `coursierapi.*`，所以 C 在
-`selfhost/dawn.toml` 显式加入 `io.get-coursier:interface:1.0.28`，并同步更新 `selfhost/dawn.lock`。
-这是真实 target dependency，不允许用 application parent 特判 selfhost，否则 TOOL-06 的隔离
-定义会被编译器自身悄悄绕过。
+shutdown request、正常/异常 `exit`、EOF 与 fatal framing 都执行 `close_all_leases`。单个
+`lease.close` 由 `catch_panic` 隔离并记录错误，不能阻止其他 workspace 或 standalone lease
+继续关闭；state 随后清空所有 lease ownership，shutdown 后再 exit 不会重复关闭。
 
-selfhost 还直接导入编译器生成的 `dawn.rt.Asm` / `dawn.rt.AsmWriter`。target `Jsig` 只允许在
-target loader 自己能解析 `org.objectweb.asm.ClassWriter` 时，为这两个固定类名叠加固定的纯数据
-签名；不得查询 system loader、改用 application parent，或按 project name 特判。两类从
-`Object` / `ClassWriter` 继承的方法与字段及其 assignability 仍通过 target loader 查询，不能复制
-宿主 ASM 的反射结果。程序显式导入任一 bridge 时必须同时发射两个 bridge class，使通过检查的
-target JAR 能独立链接；target 没有 ASM 时两个 bridge 都不可见。
+## 9. 18×18 行为合同
 
-JVM `check`/`doc` 对每个 target 的固定流程是：先完成 target 前置校验；只调用一次
-`project_plan`；以 `load_planned(plan)` 加载；以同一 `plan.source` 调 `fetch_checked`；构造
-`jsig_for(jars)`；在 `bracket` 内只运行 `analyze_program`；bracket 返回并关闭 loader 后，才允许
-render、print、`fail_compile`、`fail_doc`、`cli_error` 或 `io.exit`。任何会退出进程的函数都不能
-出现在 bracket body，因为 `System.exit` 不会替它执行普通 finally。
+`scripts/lsp-workspace-contract/` 在私有 selfhost 副本上运行 18 个真实 JSON-RPC 正例，并为
+每个边界编译一个 mutant。每个 mutant 必须先编译成功，再只运行 owning case；只有出现该 case
+唯一的 failure label 才算负控见红，build failure、timeout、协议错误或无关 assertion 都不算。
 
-多 target `check` 逐 target 创建并关闭 lease，不合并 jars。Maven/lock/loader setup failure
-fail-fast，退出码为 1；普通源码 diagnostics 仍在所有 target 的 lease 都关闭后聚合报告。成功的
-`check`/`doc` 不新增 dependency progress 输出。native `check`/`doc` 继续使用
-`jsig_refused()`，不 import Maven/Coursier/jreflect，也不创建 loader。
+18 个正例覆盖：
 
-### 5.4 D：LSP 宿主边界与生命周期（未实现）
+- 全 live overlay、未落盘模块、当前模块 completion 自排除；
+- extensionless 本地 buffer 保持 standalone；
+- 同一 project 的不同 source root 按两种打开顺序隔离，definition/module resolution 均不串；
+- close rollback、duplicate canonical path conflict、root-scoped definition；
+- 当前 URI、空数组与各自 live source view 的全量 diagnostics；
+- 多 root external-diagnostic aggregation；
+- 同 FQCN Java target 按两种打开顺序隔离；
+- standalone classpath 隔离；
+- last close、shutdown、running exit、EOF、fatal framing 与 injected close failure 的 cleanup；
+- Unavailable 在 `didChange` 不重试、在 `didSave` 才重试。
 
-共享的 `lsp/server.dawn` 不能 import Java-backed Maven/jreflect。`run_lsp` 改为接收宿主提供的
-“`SourcePlan` -> Result[JsigLease, String]`”工厂：JVM main 用 `fetch_checked` + `jsig_for`，
-native main 返回 target-local 的 `jsig_refused()` no-op lease。这样 server 仍是零 `use java` 的
-共享前端，fetch/lock 失败也能成为 project diagnostic，而不是伪造一份可用 lease。
+对应 18 个 compiling mutants 包括退化为 project-only identity。该 mutant 由
+`source-root-identity` case 的唯一 `SOURCE_ROOT_WORKSPACE_MERGED` assertion 定向打红；合同不只
+计数 lease，还验证两侧 diagnostics、definition 与 module resolution。
 
-- LSP 每个 workspace 独占一份 lease。新 workspace 先完整构造 plan、jars 与 lease，成功后才
-  安装；构造失败发布 project diagnostic，不安装半成品。D 不自动替换已有 root 的 captured
-  plan/lease；未来若增加显式 replan，才按“先建新值、原子替换、最后关闭旧 lease”执行。
-- JVM standalone 文档统一使用一份 `jsig_for([])`：platform parent 允许 JDK classes，但看不见
-  编译器 application classpath；native standalone 继续使用 `jsig_refused()`。standalone 不能
-  退回 `jsig_real()`。
-- 关闭最后一个 workspace 文档、正常 `exit`、EOF 与 fatal framing 退出都关闭对应 lease。
-  server-lifetime standalone lease 也在这些退出路径关闭；关闭后不得再查询。
-- 当前 server 同步执行，第一轮没有 close/query 竞态；未来若引入并发分析，必须另加引用计数
-  或等待 in-flight query，不能复用本轮假设。
+## 10. Residuals 与明确不做
 
-## 6. TOOL-05：workspace 正确性
+下列边界不把 TOOL-05/06 重新标成 open：
 
-### 6.1 成员资格与 captured root
+- **symlink/case-fold identity。** 当前 `canon` 只做绝对化与词法 `.`/`..` 归一，不解析 symlink，
+  也不做平台 case-fold；duplicate conflict 只能覆盖当前 canonical 定义识别出的同一路径。
+- **manifest refresh。** `didSave` 只重试 captured plan 的 lock/瞬态 setup；修改 `dawn.toml` 后
+  必须关闭该 root identity 的全部文档再 reopen，才会 fresh plan。
+- **传递 Java 坐标来源。** manifest 语法合法、但 resolver 在传递 Maven coordinate 上失败时，
+  setup diagnostic 仍可能只定位根 `dawn.toml`，尚不能精确指出贡献该坐标的 dependency manifest。
+- **已安装 workspace 的 unexpected panic。** 新 lease 在安装前 rebuild panic 会显式关闭；若
+  已安装 workspace 的后续 rebuild 遇到 compiler invariant panic，当前依赖进程退出后的宿主资源
+  回收，未建立可恢复的逐 workspace unwind 协议。
+- **不做 checker cache。** `analyze_program` 的全局 ID 与 `ModExports` identity 尚未证明可稳定
+  复用；Slice D 接受每次 settled update 的全 workspace 重分析成本。
+- **不删除 build/run/test re-exec。** emitter 与 comptime FFI 仍查 system loader；跨进程
+  plan snapshot 与 TOCTOU 另案处理。
+- **不改 framing/lifecycle、增量 text sync、文件 watcher 或并发 cancellation。** 这些边界与
+  本轮 workspace 正确性独立。
 
-- 每个合法本地 `file:` `.dawn` 文件都进入其 project workspace，**即使文本没有 `use`**。
-  workspace 身份由 path、`ProjectPlan.source` 与合法 module path 决定，不再由内容启发式决定；
-  这样未写 `use` 的 open `lib.dawn` 也能把 unsaved export 提供给 caller。
-- 非 `file:` URI 保留 private standalone analysis；本地文件若不能产生合法 module path，也回退
-  standalone，同时保留非法文件名/module path 诊断。两者都不得伪造 project workspace。
-- 已有文档的 `didChange` 必须复用 `WorkspaceMember(root)`，不得重新规划。新 URI 可以调用一次
-  `project_plan(SourceFile(path))` 来定位 canonical root；若 `st.workspaces` 已有该 root，fresh plan
-  立即丢弃，继续使用旧 workspace 的 captured plan 与 lease。只有创建新 root 时才安装新 plan。
-- 两个 URI 若归一到同一 canonical path 且 live text 不同，更新必须 fail closed：不按 URI 排序
-  选择“最后一个”覆盖 overlay，不安装含歧义的新 snapshot，并向两个 URI 发布冲突诊断。文本
-  恢复一致或其中一个关闭后再重建。
-
-### 6.2 一次 workspace update
-
-一次 settled update 对所属 workspace 执行以下固定流程：
-
-1. 按 URI 稳定排序全部成员，从 `path_by_uri` 与各 `Doc.text` 构造完整 canonical path -> live text
-   overlay；冲突检查必须发生在 `Map` 插入覆盖信息之前。
-2. 以相同 URI 顺序派生 entry path 列表，恰好调用一次
-   `load_entries_over(ws.plan, paths, overlay)`，再恰好调用一次
-   `analyze_program(..., ws.java.jsig)`，形成唯一 `Program` 与 `entry_by_uri`；新 snapshot 完整成功
-   后才原子替换旧 workspace。
-3. 对该 workspace 的**每个** open URI 发布 diagnostics，包括空数组；每条 range 使用目标文档
-   自己的 live `SourceView` 与 line starts，不能拿触发编辑的 buffer 或磁盘文本代算。
-4. planner、manifest、Maven、lock 等 project diagnostic 发布到各自 external URI。每轮对“上轮
-   `published_external_diag_uris` ∪ 本轮 URI”稳定遍历，没有新诊断的 URI 也发送 `[]`，再把集合
-   更新为本轮实际非空集合；manifest 没打开不等于可以静默丢失或永不清理。
-
-旧 `ModuleIndex` 不会包含尚未落盘的新文件。completion 候选必须以
-`ws.plan.modules.by_use` 为基线，再把 live `entry_by_uri` 对应的 `path_by_uri` 补入；不能因为
-文件不在 captured tree walk 中就让 `use new_module` 的 completion 永久缺席，也不能为补它重跑
-planner。
-
-### 6.3 查询、关闭与 root 隔离
-
-查询先经统一 `analysis_of(st, doc)`：`Standalone` 读取自身 `Program`/`entry`，
-`WorkspaceMember(root)` 读取 `st.workspaces[root].prog` 与当前 URI 的 `entry_by_uri`。completion、
-hover、symbols 与 definition 不再绕过这条所有权接缝。
-
-`location_of` 查 live definition 时只遍历**同一个 root 的成员**。目标 path 不属于本 workspace 的
-live doc 时读取磁盘，禁止遍历全局 `st.docs`；即使另一个 root 恰好打开了同一 canonical path，
-也不能借用其 live `SourceView`。
-
-`didClose` 先移除该 URI 的 `path_by_uri`、overlay 与成员关系，再按剩余成员重建 workspace：若
-关闭的 unsaved 文件仍被其他 open doc 引用，loader 回落磁盘；若文件从未落盘，则正常产生缺失
-模块诊断。随后清空已关闭 URI，重发所有剩余 URI，并按上一节清理 stale external diagnostics。
-最后一个成员关闭时，先清空全部 `published_external_diag_uris`，再关闭 lease、删除 workspace。
-
-多 root 以 canonical project root 为外层 map key。overlay、Program、module index、diagnostics 与
-loader 均不得跨 root 查询；两个 root 即使 module path 或依赖 FQCN 相同，也必须得到各自答案。
-
-第一轮继续使用现有同步 debounce。**不加** `gen`、异步 task 或 cancellation：没有并发分析，
-就没有旧 generation 覆盖新结果的竞态。workspace correctness 先求答案一致，不承诺增量性能。
-
-## 7. 分刀顺序与输出纪律
-
-| 刀 | 状态与 API/行为边界 | 主要门禁与负控 | 输出结论或裁决规则 |
-|---|---|---|---|
-| A | **已实现 `10b3052`**：`ProjectPlan`、captured loader、Doc 暂存 plan、completion 显式复用 module index | captured-plan contract；fresh replan loader 与 fresh completion mutants 均已打红 | LSP/prev 实测字节不变 |
-| B | **已实现 `7eb2f25`**：`JsigLease`、platform-parent loader、loader-parameterized reflection | system query/parent、合并 loader、drop close、bypass bracket 五类 mutants 均已打红 | LSP/prev 实测字节不变 |
-| C | **已实现（本批）**：同一 captured plan + `load_planned` + `fetch_checked` + bracketed lease；target ASM 条件式固定 bridge overlay 与成对发射；native refusal 不变 | check/doc target deps；多 target 同 FQCN；with-ASM/no-ASM、linked JAR、drop-overlay；system leak、合并 lease、跳 lock、绕 bracket mutants | 无预授权；先跑差分并逐项 review |
-| D | **未实现**：完整 overlay、单一 Program、每 root lease、全量发布、didClose rollback | unsaved export/new module、root definition、duplicate URI、standalone zero-jar、全 diagnostics | 无预授权；先跑差分并逐项 review |
-
-每个 mutant 必须先成功构建，再由 owning contract 精确打红；grep 只能补结构边界，不能替代行为
-负控。任何输出差异声明都只能在门禁和人工 diff review **之后**按闭集 label 写，本文不提前
-放行 C/D 的任何输出变化。
-
-## 8. 验收矩阵
-
-| 合同 | 正例 | 必红变异 |
-|---|---|---|
-| captured plan | 先规划 alias -> 包 A，再把磁盘 manifest 改成包 B；old plan 仍加载 A，fresh wrapper 加载 B | `load_entries_over` 内重跑 `project_plan(plan.source.target)` |
-| captured completion | didOpen 后改磁盘 manifest；当前 Doc 的 `use alias/module.{` 仍列旧包导出，新会话列新包导出 | 忽略显式 module index，恢复 fresh `use_candidates` |
-| loader 隔离 | system loader 看不见 fixture；两份 target lease 对相同 FQCN 分别看到 A/B API | 改回 system loader；或把两个 target 合并进一份 loader |
-| loader 释放 | 正常 close 与异常 bracket 后，JAR 独有 resource 都不可见 | 删除 `close`；让异常路径绕过 bracket |
-| check/doc target classpath | 带 `[java-deps]` 的 check/doc 成功；同一次 multi-target check 的同 FQCN 不串；malformed/hash drift/stale/unreadable lock 均退出 1 | 改回 `jsig_real()`；循环外共享 lease；跳过 lock；在 bracket 内 exit |
-| selfhost ASM bridge | target 带 ASM 时两 bridge 可检查，导入任一 bridge 都发射两类且独立 JAR 可链接运行；target 不带 ASM 时两者都不可见 | 删除条件式 bridge overlay，with-ASM case 精确丢失两 bridge；或无条件 overlay 使 no-ASM case 错误通过 |
-| unsaved export | 两文档都 open；只在被依赖 buffer 改 `pub` 名，依赖方立即按 live 文本重新诊断/补全/definition | overlay 退回单元素，或仍从各 Doc.Program 查询 |
-| 新建未落盘模块 | 新 open `new_module.dawn` 尚未落盘且没有 `use`；caller completion 立即列出 `new_module` 与 live exports | completion 只读 captured `plan.modules.by_use` |
-| didClose rollback | 关闭未保存的被依赖文件后，剩余文档按磁盘版本重分析 | 只删 Doc/清 diagnostics，不重分析 workspace |
-| 全量 diagnostics | 一次 edit 后所有 open URI 都收到最新数组，含 `[]`；不同换行与 astral 字符的 range 各用自己的 live view | 只发当前 URI、跳过空数组，或所有 range 复用触发文档 view |
-| external diagnostics | manifest/Maven/lock 错误发布到对应 URI；恢复与最后关闭都显式发 `[]` | 不记录已发布 external URI，恢复后遗留旧诊断 |
-| root-scoped definition | A 的 definition 指向共享 dependency 的磁盘文件；同一 canonical path 在另一 root 以不同 live text 打开，A 仍按 A root 的成员或磁盘算位置 | `location_of` 恢复遍历全局 `st.docs` |
-| 多 root | 两 root 的 overlay、Program、diagnostics 与同 FQCN Java API 互不泄漏，两个打开顺序都正确 | workspace key 退回全局值，或所有 root 复用首个 lease |
-| duplicate canonical URI | 两 URI 映到同一 canonical path 且文本不同；两者收到冲突诊断，不安装 last-wins snapshot；关闭一个后恢复 | 按排序把后一文本写进 overlay |
-| standalone zero-jar | JVM untitled buffer 可见 JDK class、看不见编译器自带 ASM/Coursier；native 对 `use java` 仍拒绝 | standalone 退回 `jsig_real()` 或 native 创建 JVM loader |
-
-已完成的 A/B owning contracts、Core review、LSP/prev 差分与远端 CI 均通过。C 本批验收及 D 后续
-落地时至少运行：
-`./bin/dawn test selfhost`、`./bin/dawn test compiler-plan`、新 contract mutants、
-`scripts/lsp-use-completion.py`、`scripts/lsp-lifecycle-contract/run.sh`、
-`scripts/selfhost-lsp-diff.sh`、`scripts/selfhost-prev-diff.sh`、Core golden review、formatter 与
-`scripts/doc-check.py`。差分出现任何字节变化都先查明 owner 与行为，再决定是否接受，不能从本稿
-推导出预先批准的 label。
-
-## 9. Residuals 与明确不做
-
-- **Maven/lock 留在 selfhost。** `SourcePlan` 只给 coordinates；网络、artifact bytes 与 lock I/O
-  不进入 Java-free planner，`ProjectPlan` 也不缓存 jars。
-- **保留 build/run/test re-exec。** emitter 与 comptime FFI 仍查 system loader；删除 re-exec
-  必须先把这些消费者也 loader-parameterize，并另做行为合同。
-- **re-exec TOCTOU 后续处理。** parent 规划 classpath、child 再规划 source 的时间窗仍在；本轮
-  check/doc/LSP 可做到单进程 captured plan，不借此冒称 build/run/test 已有 invocation snapshot。
-- **不做 T2 checker cache。** `analyze_program` 的全局 ID 连续分配，`ModExports` 又携带完整 ID
-  表；没有先证明 identity 可稳定复用前，缓存 checked module 会制造错绑。本文没有性能目标。
-- **不做 `PlanStamp`/fingerprint。** 首轮允许 workspace 创建时重新 walk；正确性完成后再测，
-  不能用未实测的性能断言倒逼缓存设计。
-- **不做异步 generation/cancellation。** 当前同步 server 没有 stale-result race；需要并发时另案。
-- **canonical identity 仍是词法 identity。** 当前 `canon` 不解析 symlink，也不做平台 case-fold；
-  duplicate URI 的 fail-closed 规则只能覆盖现有 canonical 定义识别出的冲突。真实文件身份另案。
-- **不让 completion 数据污染 `QCx`。** module index 是 completion 请求的显式参数，不属于 hover、
-  definition 等通用 typed query context。
-- **不改增量 text sync、文件 watcher或协议 framing/lifecycle。** 它们与本轮正确性边界独立。
-- **不更新审计 fixed 状态。** TOOL-05/06 只有在 A-D 全部实现、负控打红、门禁通过后才能关账。
+截至 `18fb3d6`，A-D 的实现、18×18 行为负控、clean-checkout 重建与远端 11/11 CI 已共同关闭
+TOOL-05/06。

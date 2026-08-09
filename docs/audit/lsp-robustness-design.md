@@ -1,13 +1,13 @@
 # LSP：URI、UTF-8 与响应性
 
-> 动码前的**调研与方案**，不是设计定稿。
+> 历史上的动码前**调研与方案**，不是当前设计定稿。
 > 覆盖 codebase-audit.md 的 **LSP-01（P1）**、**LSP-02（P1）**、**LSP-04（P2）**。
 > （LSP-03「畸形 frame 让服务器静默退出」已于 2026-07-25 修复。）
-> 状态：**LSP-01 / LSP-02 已落地（2026-07-30），LSP-04 未落地**——它卡在一个缺失的运行时
-> 原语上。LSP-01 的落地形态与本文原方案相反：不换 JDK（缝 1 之后 `lsp.dawn` 是零 `use java`
-> 的共享前端），而是把手写 decoder 改成校验的。LSP-04 的设计题已于 2026-08-04 用两个探针
-> 答完（`io_stdin_ready(timeout_ms) -> Bool !io`，语义 B），验收实验 `scripts/lsp-liveness.py`
-> 的三条断言已进 CI 并被变异体逐条打红。**2b / 2c / 2d 已于 2026-08-05 全部落地**：C 后端
+> 状态：**LSP-01 / LSP-02 / LSP-04 均已落地**。LSP-01/02 于 2026-07-30 完成；LSP-04
+> 的设计题于 2026-08-04 用两个探针答完（`io_stdin_ready(timeout_ms) -> Bool !io`，语义 B），
+> 2b / 2c / 2d 于 2026-08-05 全部落地。LSP-01 的落地形态与本文原方案相反：不换 JDK
+> （缝 1 之后 `lsp.dawn` 是零 `use java` 的共享前端），而是把手写 decoder 改成校验的。
+> `scripts/lsp-liveness.py` 的三条断言已进 CI 并被变异体逐条打红；C 后端
 > 两个 stdin 读取器都改走 `read(2)`（不再有 stdio 缓冲挡在就绪查询前面），`io_stdin_ready`
 > 进了原语表并在两个后端上答出同一张真值表，`lsp.dawn` 的读循环 debounce 了。
 > **LSP-04 至此关账**（§六的 3 与 4 是尾款：`$/cancelRequest` 与窗口取值的实测）。
@@ -434,8 +434,9 @@ debounce:  FAIL / freshness: FAIL
 `analyze_document` 每次重跑 lex/parse/module graph。缓存它们需要失效判定
 （哪些模块受这次改动影响），而那要先有模块图的增量表示。
 **不在本文范围**——debounce 之后延迟已经从「每次按键」降到「停下来之后一次」，
-先量一量还剩多少痛再决定。workspace snapshot 与 target-scoped Java classpath 的后续边界见
-[`../lsp-workspace-design.md`](../lsp-workspace-design.md)；该方案明确先修正确性，不提前做 checker cache。
+先量一量还剩多少痛再决定。workspace snapshot 与 target-scoped Java classpath 已于
+`18fb3d6` 按 [`../lsp-workspace-design.md`](../lsp-workspace-design.md) 落地；该实现仍明确只修
+正确性，不提前做 checker cache。
 
 ## 三、为什么不顺手把 X 也改了
 

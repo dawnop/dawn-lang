@@ -1,7 +1,7 @@
 # Dawn 代码库精细审查 v2
 
 > 状态：**current** —— 保留 v0.60.0 / `86f6a0f63960` 的冻结审查基线，并以
-> `60e174a116a501d68bc926c3e6656fe68f31ea92` 记录当前状态订正；详细证据在
+> `18fb3d63ebb995ef20332e68585066036e6b2e6a` 记录当前状态订正；详细证据在
 > `docs/codebase-audit-v2/`。
 >
 > 审查方式：六专题并行只读审查 + 主审去重、静态复核和少量无副作用探针。
@@ -9,7 +9,7 @@
 
 ## 1. 一句话结论
 
-Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 Dawn 集合与相当完整的门禁，旧审查中的两个 P0 和多项协议缺陷已经不再成立；v0.60.0 冻结基线记录 **1 个未动态验证的 P0 候选、29 个 P1、55 个 P2、12 个 P3**，该严重度表不随后续处置重写。截至 `60e174a`，97 项的状态是 **58 fixed / 5 partial / 32 open / 2 retracted**；当前最高优先级是 LSP workspace/classpath、Cursor 契约裁决，以及四项尚未闭合的 P1 部分修复。
+Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 Dawn 集合与相当完整的门禁，旧审查中的两个 P0 和多项协议缺陷已经不再成立；v0.60.0 冻结基线记录 **1 个未动态验证的 P0 候选、29 个 P1、55 个 P2、12 个 P3**，该严重度表不随后续处置重写。截至 `18fb3d6`，97 项的状态是 **60 fixed / 5 partial / 30 open / 2 retracted**；TOOL-05/06 已随共享 LSP workspace 与 target-scoped Java classpath 关闭，当前 P1 优先级是四项 partial 的边界收口，以及仍需维护者裁决的 Cursor 契约。
 
 ## 2. 基线与口径
 
@@ -67,9 +67,9 @@ Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 D
 
 `74b3121` 当时只完成 #194 knife 1a：把 project dependency resolution 抽成一个 seam；
 该提交本身既没有让 LSP/`doc` 加载 `[java-deps]`，也没有让 source 与 Java dependency
-从同一最终图规划，因此当时未关闭 `TOOL-06` 或 `TOOL-10`。本次 SourcePlan 收口后，
-source 与 Java dependency 已统一由最终选中图规划，`TOOL-10` 已关闭；LSP/`doc` 的
-classpath 加载仍未完成，`TOOL-06` 保持开放。
+从同一最终图规划，因此当时未关闭 `TOOL-06` 或 `TOOL-10`。后续 SourcePlan 收口关闭
+`TOOL-10`，`9f914d4` 又把 `check`/`doc` 接到 target classpath，最终由 `18fb3d6` 的共享 LSP
+workspace 与每 identity lease 关闭 `TOOL-05/06`。这段演进不改写上面的历史快照计数。
 
 代表性提交与验证来源（不取代明细中的原证据）：A1–A3 见 `60256bc`、`cd3cfc1`、
 `a0d7800`、`cfb3bb8`、`dd51afc`、`a18b09a`、`77b0c07` 及 grammar/checker/package/dtoa
@@ -83,11 +83,12 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 （顺序均为已修/部分/开放）；各专题仍分别覆盖 19 / 17 / 12 / 17 / 19 / 13 项，
 与冻结总数一致且无重复、遗漏。
 
-### 截至 SYN-16 验收基线（`60e174a`）的订正状态层
+### 截至 LSP workspace 验收基线（`18fb3d6`）的订正状态层
 
 > R-AUDIT 在 `bfc358a6116303623a4968f8247689bcd5645793` 逐一核对六份明细的 97 个 ID；
 > 此后 `38f625a` / `24d5d2f` 关闭 `SYN-12`，`79df07f` / `60e174a` 关闭 `SYN-16`，
-> 本节据此推进到该验收基线口径。上一个三状态快照
+> `9f914d4` / `18fb3d6` 关闭 `TOOL-06` / `TOOL-05`，本节据此推进到该验收基线口径。
+> 上一个三状态快照
 > 不删除、不改写其 ID 清单；这里增加 `retracted`，把“实现修好”与“复核后不再认定为
 > 缺陷”分开。
 
@@ -98,12 +99,12 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（58）
+#### 当前 fixed（60）
 
 - 语法（13）：`SYN-01`–`SYN-03`、`SYN-06`–`SYN-08`、`SYN-10`、`SYN-12`、`SYN-14`–`SYN-16`、`SYN-18`、`SYN-19`。
 - 语义（8）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-11`、`SEM-12`、`SEM-15`、`SEM-17`。
 - 架构（4）：`ARC-03`–`ARC-06`。
-- 工具链（13）：`TOOL-01`–`TOOL-04`、`TOOL-07`–`TOOL-12`、`TOOL-15`–`TOOL-17`。
+- 工具链（15）：`TOOL-01`–`TOOL-12`、`TOOL-15`–`TOOL-17`。
 - 库（8）：`LIB-01`–`LIB-05`、`LIB-07`、`LIB-09`、`LIB-11`。
 - 治理（12）：`GOV-01`–`GOV-03`、`GOV-05`–`GOV-13`。
 
@@ -113,12 +114,12 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 工具链（1）：`TOOL-14`。
 - 库（1）：`LIB-10`。
 
-#### 当前 open（32）
+#### 当前 open（30）
 
 - 语法（6）：`SYN-04`、`SYN-05`、`SYN-09`、`SYN-11`、`SYN-13`、`SYN-17`。
 - 语义（7）：`SEM-04`、`SEM-07`、`SEM-09`、`SEM-10`、`SEM-13`、`SEM-14`、`SEM-16`。
 - 架构（5）：`ARC-07`–`ARC-10`、`ARC-12`。
-- 工具链（3）：`TOOL-05`、`TOOL-06`、`TOOL-13`。
+- 工具链（1）：`TOOL-13`。
 - 库（10）：`LIB-06`、`LIB-08`、`LIB-12`–`LIB-19`。
 - 治理（1）：`GOV-04`。
 
@@ -126,11 +127,12 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**58 fixed + 5 partial + 32 open + 2 retracted = 97**。逐专题矩阵：
-语法 **13/0/6/0**、语义 **8/0/7/2**、架构 **4/3/5/0**、工具链 **13/1/3/0**、
+当前计数自检：**60 fixed + 5 partial + 30 open + 2 retracted = 97**。逐专题矩阵：
+语法 **13/0/6/0**、语义 **8/0/7/2**、架构 **4/3/5/0**、工具链 **15/1/1/0**、
 库 **8/1/10/0**、治理 **12/0/1/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
-`TOOL-14` fixed → partial、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed。
+`TOOL-14` fixed → partial、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed，
+`TOOL-05`/`TOOL-06` fixed。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -233,8 +235,8 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | `ARC-05` | fixed | native recoverable unwind 已运行 cleanup。 |
 | `TOOL-01` | fixed | 公开 `check` 的诊断与 exit contract 已闭合。 |
 | `TOOL-02` | fixed | direct-file `fmt` 已限制 Dawn 源文件并保护写回。 |
-| `TOOL-05` | open | LSP 仍缺 workspace-level shared snapshot/overlay。 |
-| `TOOL-06` | open | LSP/`doc` 的工程 Java classpath 尚未闭合。 |
+| `TOOL-05` | fixed | canonical `(project, source_root)` 共享 plan、live overlay、Program、诊断与关闭回滚已闭合。 |
+| `TOOL-06` | fixed | `check`/`doc`/LSP 已按 target 使用隔离 `JsigLease`，setup failure fail closed。 |
 | `TOOL-07` | fixed | LSP framing 已有 header/body 上限与双端合同。 |
 | `TOOL-09` | fixed | cache origin 不再给未验证旧目录背书。 |
 | `TOOL-10` | fixed | source 与 Java dependency 已由唯一 `SourcePlan` 规划。 |
@@ -250,8 +252,8 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | `LIB-11` | fixed | request-body tempfile 从创建起即有 owner。 |
 | `GOV-01` | fixed | dtoa 独立 oracle 已进入持续门禁。 |
 
-逐行重算结果：**22 fixed / 4 partial / 3 open = 29**。三项 open 仅为 `SEM-04`、
-`TOOL-05`、`TOOL-06`；四项 partial 为 `ARC-01`、`ARC-02`、`TOOL-14`、`LIB-10`。
+逐行重算结果：**24 fixed / 4 partial / 1 open = 29**。唯一 open 为 `SEM-04`；四项
+partial 为 `ARC-01`、`ARC-02`、`TOOL-14`、`LIB-10`。
 
 ## 6. 语言设计建议
 
@@ -292,7 +294,7 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 1. **阶段产物带 identity。** 用 `RegisteredImpl`、`LoweredFn` 等具名结构替代平行 List + index；所有 mismatch 在边界报 compiler invariant。
 2. **symbol identity 分层。** nominal/effect/trait ID 与 local/typevar/temp ID 分开，避免前一模块的小改动重排后续全局产物。
-3. **workspace/project 只有一份计划。** LSP live overlay、source dependency graph、Java classpath、lock 与 build inputs 从同一 project plan 派生。
+3. **workspace/project 只有一份计划。** 该原则已由 TOOL-05/06 的 canonical workspace identity、captured `ProjectPlan` 与 target lease 落地；后续不得重新引入按文档或按请求规划。
 4. **可恢复 failure 不再依赖裸 `longjmp` 丢帧。** 若继续使用 setjmp，必须有显式 cleanup/payload stack；否则采用 Result-style unwind ABI。
 5. **大栈是临时策略，不是语言 ABI。** 512 MB stack 的裁决有历史依据，但应以 measured high-water 和 iterative pass 逐步下降。
 
@@ -317,14 +319,14 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - escaping effect handler soundness；trait + named effects + associated bounds。
 - native failure payload/cleanup redesign。
-- workspace-level LSP + single dependency plan。
+- workspace-level LSP + single dependency plan（TOOL-05/06 已由 A-D 落地）。
 - stable IDs 与 typed stage products；逐步退出 512 MB stack。
 
-### D. 当前订正顺序（`60e174a`）
+### D. 当前订正顺序（`18fb3d6`）
 
-1. **先闭合仅剩的自治 open P1：** 合并推进 `TOOL-05` workspace snapshot 与 `TOOL-06`
-   target-scoped Java classpath；二者共享 `SourcePlan`/workspace lifetime，拆开会制造第三份状态。
-2. **再收口 partial P1：** `TOOL-14` 的 fail-closed hasher、无歧义摘要、pre/post re-plan 与
+1. **TOOL-05/06 已关账：** `18fb3d6` 以 canonical `(project, source_root)` workspace、共享
+   `Program`、诊断聚合与每 identity lease 完成收口，不再占用当前修复队列。
+2. **先收口 partial P1：** `TOOL-14` 的 fail-closed hasher、无歧义摘要、pre/post re-plan 与
    可恢复 promotion；`ARC-01/02` 的 symbol edge/source origin；`LIB-10` 的 middleware 前
    error response。
 3. **把 `SEM-04` 留给维护者裁决：** Cursor 是携带 owner 的值还是 generative identity，以及

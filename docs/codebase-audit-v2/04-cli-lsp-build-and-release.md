@@ -6,9 +6,10 @@
 
 ## 本专题结论
 
-- 原审查中对用户最危险的 `dawn check` 假绿与 `dawn fmt` 任意文件写回均已关闭；当前默认接口
-  风险集中在 LSP workspace/classpath 与尚未完整闭合的 bootstrap stamp。
-- LSP 已有 debounce、URI/UTF-8 修复、跨后端前端、有界 framing 与 lifecycle state，但仍缺 workspace snapshot 和工程 Java classpath，尚不适合把“与 build 一致”作为承诺。
+- 原审查中对用户最危险的 `dawn check` 假绿、`dawn fmt` 任意文件写回、LSP 文档级私有快照与
+  LSP/`doc` 工程 classpath 缺失均已关闭；当前默认接口风险集中在尚未完整闭合的 bootstrap stamp。
+- LSP 现有 debounce、URI/UTF-8 修复、跨后端共享前端、有界 framing、lifecycle state，以及按
+  canonical `(project, source_root)` 共享的 captured plan、live snapshot、target lease 和诊断聚合。
 - 原审查中的包/自举缺陷大多来自**一件事有两张图或两份身份**；source/Java graph、artifact
   identity、seed jar/std 与 gate/release recipe 已分别收口，当前只剩 manifest/lock 原子写入和
   bootstrap v2 残余。
@@ -63,19 +64,58 @@
 - **门禁：** `scripts/native-cli-diff.sh` 对六个命令逐项钉最小、合法上边界与冲突边界；reject case 同时核对完整诊断和绝对 exit 2，不再以“两个后端给出同一个错误答案”为绿。`build` 的合法边界分别验证 JAR/native executable，`emitc` 比较 C 文本。
 - **结论：已修。** 第二个 positional 不再被 native 静默覆盖；所有基数错误都在 target load/codegen 前以一致字节与 exit 2 拒绝。
 
-## TOOL-05 — P1 — 每个 LSP 文档拥有互相矛盾的工程快照
+## TOOL-05 — P1 — 每个 LSP 文档拥有互相矛盾的工程快照（已修）
 
-- **证据：S。** 每个 `Doc` 保存完整 `Program`：`selfhost/src/lsp/server.dawn:389`，query 读取该私有 snapshot：`:399`。更新只把当前文件放进 overlay：`selfhost/src/driver/analyze.dawn:1243`，state 也只替换当前 doc：`selfhost/src/lsp/server.dawn:715`；diagnostics 只发布当前 URI：`:732`。
-- **边界：** 未保存修改 `lib.dawn` 的 export，再编辑 caller；caller 的 analysis 仍从磁盘读旧 lib。两个 tab 对同一 workspace 拥有不同 semantic world。
-- **影响：** 正常多文件编辑产生假诊断、错误 hover/definition 与不刷新的跨文件诊断。
-- **建议：** workspace-level state：统一 URI→live text overlay、dependency graph、generation 与 shared analysis snapshot；一处更新后重算并发布所有受影响 open docs。
+- **原问题：S。** 每个 `Doc` 曾私有持有完整 `Program`，update 只覆盖当前文件并只发布当前 URI；
+  未保存修改依赖模块后，caller 仍从磁盘读旧文本，多个 tab 因而处在不同 semantic world。
+- **实现：** `18fb3d6` 让 `Doc` 只持 `Standalone | WorkspaceMember(identity)`。identity 是 canonical
+  `(project, source_root)` 的长度前缀无碰撞编码；opaque lookup key 与真实 definition source-root
+  边界分离，同一 project 的不同 file-mode source root 不会再由打开顺序合并。每个 identity 捕获
+  一份 `ProjectPlan`，并持一份共享 `Program`、URI→entry/path、诊断贡献与 target lease。
+- **更新与查询：** 每次 settled change 以该 root 全部 `Doc.text` 现场构造唯一 overlay，恰好一次
+  `load_entries_over` / `analyze_program`。duplicate canonical path 的不同 live text 进入 conflict，
+  丢弃旧 `Program` 并让语义查询 fail closed；冲突解除后恢复。completion、hover、definition 与
+  documentSymbol 都经 `analysis_of`，definition 只借用同 identity 且位于真实 source root 内的
+  live view。completion 会删除当前 entry，也不会被同 entry 的 duplicate URI 重新插回。
+- **诊断与关闭：** 每次变更发布全部相关 URI，包含 `[]`；外部 diagnostics 按所有 root 的贡献
+  全局聚合，撤销一个 root 不会清掉另一个 root 的同 URI 诊断。`didClose` 删除 live overlay 来源，
+  以剩余文档和磁盘回落重建；最后成员关闭 lease 并删除 workspace。
+- **行为负控：** `scripts/lsp-workspace-contract/` 的 18 个真实会话与 18 个 compiling mutants
+  覆盖 single-overlay、current-module self-completion、duplicate last-wins、global definition、
+  didClose 不重建和 project-only identity 等退化。每个 mutant 先编译，再由唯一 owning label
+  定向见红；同 project/different source root 两种打开顺序会让 project-only mutant 精确触发
+  `SOURCE_ROOT_WORKSPACE_MERGED`，并实际核对两侧 diagnostics、definition 与 module resolution。
+- **已知边界：** `canon` 尚不解析 symlink 或平台 case-fold；manifest 变更须关闭该 root 全部文档
+  后 reopen 才 fresh plan；已安装 workspace 的 unexpected compiler panic 依赖进程退出回收资源。
+  这些是后续 identity/refresh/unwind 能力，不把原“每文档矛盾快照”问题重新打开。
+- **结论：已修。** 一个 canonical `(project, source_root)` 在任一时刻只有一个可查询语义世界。
 
-## TOOL-06 — P1 — LSP 与 `doc` 不加载工程 `[java-deps]`
+## TOOL-06 — P1 — LSP 与 `doc` 不加载工程 `[java-deps]`（已修）
 
-- **证据：S。** dependency re-exec 只覆盖 build/run/test：`selfhost/src/main.dawn:855`、`:1642`；`doc` 直接用当前 process classpath：`:1442`，`lsp` 直接启动：`:1660`。LSP 注释却称 `use java` 与 compile 一致：`selfhost/src/lsp/server.dawn:439`。
-- **边界：** 工程通过 `[java-deps]` 引入 class 后，build/run 成功，LSP 与 `dawn doc` 报 class not found。
-- **影响：** editor 和 API docs 对正式 build 产生系统性假错误。
-- **建议：** 抽出权威 project dependency plan，check/doc/lsp/build/run/test 共用；LSP 按 workspace root 缓存解析 classpath。
+- **原问题：S。** build/run/test 通过 dependency re-exec 看见工程 JAR，`doc` 与 LSP 却使用宿主
+  process classpath；正式 build 成功的 `use java` 会在编辑器和 API 文档中产生系统性假错误。
+- **实现：** `SourcePlan` 是 source graph 与 Java coordinates 的唯一事实源。`7eb2f25` 提供
+  platform-parent `JsigLease`；`9f914d4` 让 JVM `check`/`doc` 对每个 target 以同一 captured plan
+  `fetch_checked`、校验 lock、构造 lease、在 bracket 内分析并在输出/退出前关闭；多 target 不合并
+  jars。`18fb3d6` 又让 Java-free LSP server 接显式 host factory，每个 workspace identity 独占一份
+  target lease，native 使用 refused/no-op lease。
+- **失败边界：** planner diagnostics 非空时跳过 Maven/网络，以 zero-jar target lease 继续分析并
+  原样发布全部 planner diagnostics。Maven、lock 或 loader setup failure 则进入显式
+  `Unavailable`，保留 buffer/formatting、语义查询 fail closed，绝不回退 system loader 或旧
+  `Program`。`didChange` 不调用 factory；新成员与 `didSave` 才重试，且 `didSave` 不刷新 captured
+  plan。JVM `jsig_for` 的宿主/I/O failure 用 `catch_fault` 转为 `LocDiag`，不吞 compiler panic。
+- **生命周期：** JVM standalone 是 server-lifetime `jsig_for([])`，只见 JDK、不见 compiler
+  ASM/Coursier；shutdown、exit、EOF、fatal framing 与最后成员关闭都 best-effort 释放 lease，
+  单个 close panic 不阻止其余资源关闭。首次 rebuild 若在安装前 panic，会先关闭已构造 lease。
+- **行为负控：** `scripts/jsig-lease-contract/` 固定 platform-parent、同 FQCN 隔离与释放；
+  `scripts/java-target-classpath-contract/` 让 system-loader、合并 multi-target lease、跳 lock、绕过
+  bracket 与 ASM bridge 退化先编译再定向转红；`scripts/lsp-workspace-contract/` 进一步固定两 root
+  Java 隔离、standalone zero-jar、Unavailable 重试边界及 last-close/shutdown/EOF/fatal cleanup。
+- **已知边界：** 语法合法但 resolver 在传递 Maven coordinate 上失败时，诊断来源仍可能只定位
+  根 `dawn.toml`，尚不能精确指出贡献坐标的 dependency manifest；这不等于 target classpath
+  再次缺失。
+- **结论：已修。** `check`、`doc` 与 LSP 的 Java 查询都绑定 captured target plan 和显式 lease，
+  setup failure 以用户可见诊断 fail closed。
 
 ## TOOL-07 — P1 — LSP header/body 没有长度上限（已修）
 
@@ -151,8 +191,9 @@ mutant 只复制并编译 Planner 与薄 producer probe。两个合同均已删�
 **残余边界：** JVM CLI 的 parent 调用 `source_plan` 取得 classpath，re-exec 后 child loader
 再次调用；
 两次共享唯一事实源，但不是同一个 snapshot，中间修改 manifest/cache/path package
-仍有 TOCTOU。跨进程传递递归 plan 或取消 re-exec 会扩散到完整 `ProjectPlan`、TOOL-05 workspace
-snapshot 与 TOOL-06 classloader，本刀不冒称解决；TOOL-10 在这里仅关闭“双 parser/双 graph”。
+仍有 TOCTOU。TOOL-05/06 已关闭单进程 `check`/`doc`/LSP 的 captured workspace 与 classloader；
+跨进程传递递归 plan 或取消 build/run/test re-exec 仍是独立工作，本刀不冒称解决。
+TOOL-10 在这里仅关闭“双 parser/双 graph”。
 
 - **原证据：S。** 修复前 Java dependency collector 先于正式 source load，source resolver 随后才
   fetch + MVS；当前两条入口都消费 `compiler-plan/src/source.dawn` 的同一规划结果。

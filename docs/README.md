@@ -31,12 +31,12 @@
 
 | 文档 | 状态 | 说明 |
 |---|---|---|
-| [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60 冻结基线 + `bfc358a` 当前状态层；97 项为 56 fixed / 5 partial / 34 open / 2 retracted，原严重度、证据与 29 行 P1 索引不随后续处置重写。 |
+| [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60 冻结基线 + `18fb3d6` 当前状态层；97 项为 60 fixed / 5 partial / 30 open / 2 retracted，原严重度、证据与 29 行 P1 索引不随后续处置重写。 |
 | [codebase-audit-v2/00-methodology-and-retractions.md](codebase-audit-v2/00-methodology-and-retractions.md) | current | 基线、证据等级、严重度、fixed/retracted 边界，以及 HOLD/延后能力不进入自治 TODO 的口径。 |
 | [codebase-audit-v2/01-syntax-and-formatting.md](codebase-audit-v2/01-syntax-and-formatting.md) | current | lexer、parser、formatter、pattern 与编辑器语法；SYN-04 guard 只记静态候选，SYN-17 是 D/P3 关键字预算设计项。 |
 | [codebase-audit-v2/02-types-effects-and-semantics.md](codebase-audit-v2/02-types-effects-and-semantics.md) | current | 类型、效果、Cursor/Char 与 nominal abstraction；SEM-05/08 已撤回，SEM-09/10 延后，SEM-16 HOLD。 |
 | [codebase-audit-v2/03-compiler-and-runtime-architecture.md](codebase-audit-v2/03-compiler-and-runtime-architecture.md) | current | checker/Core/comptime 与双后端；ARC-11 部分修复，ARC-09/10 按既有重开条件 HOLD。 |
-| [codebase-audit-v2/04-cli-lsp-build-and-release.md](codebase-audit-v2/04-cli-lsp-build-and-release.md) | current | CLI、LSP、依赖与发布链；TOOL-08 已修，TOOL-14 因递归输入/fail-open 残余为 partial。 |
+| [codebase-audit-v2/04-cli-lsp-build-and-release.md](codebase-audit-v2/04-cli-lsp-build-and-release.md) | current | CLI、LSP、依赖与发布链；TOOL-05/06/08 已修，TOOL-14 因递归输入/fail-open 残余为 partial。 |
 | [codebase-audit-v2/05-stdlib-and-packages.md](codebase-audit-v2/05-stdlib-and-packages.md) | current | std、inflate、JSON、Web 与 SHA-2；LIB-07 已修，LIB-18 clean truncation 仅为未验证静态候选。 |
 | [codebase-audit-v2/06-docs-tests-and-governance.md](codebase-audit-v2/06-docs-tests-and-governance.md) | current | normative spec、文档状态、examples/packages/contract gates 与仓库治理。 |
 
@@ -67,7 +67,7 @@
 | [int-min-literal-design.md](int-min-literal-design.md) | current | SYN-08 的定稿：三进制共用无溢出 magnitude parser，仅直接一元负号消费精确 `2^63` marker；双后端与生成 C 契约固定 `INT64_MIN`。 |
 | [lsp-framing-design.md](lsp-framing-design.md) | current | TOOL-07 的定稿：共享层在 stdin read 前限制 8 KiB header/64 MiB body，严格解析重复 `Content-Length`，并把不可重同步的 framing failure 固定为一次错误后关读循环。 |
 | [source-plan-design.md](source-plan-design.md) | current | TOOL-10 的定稿及 2026-08-09 架构修订：独立无 Java 的 `compiler-plan/` 先形成唯一最终图，再从选中 `PkgR` 收 Java 坐标。 |
-| [lsp-workspace-design.md](lsp-workspace-design.md) | proposed | TOOL-05/06 的重基线方案：`SourcePlan`、selfhost `ProjectPlan`、LSP `Workspace` 三层边界，以及 target-scoped `JsigLease`。 |
+| [lsp-workspace-design.md](lsp-workspace-design.md) | current | TOOL-05/06 的已实现设计：canonical `(project, source_root)` workspace、captured `ProjectPlan`、共享 `Program`/诊断与 target-scoped `JsigLease`。 |
 | [delete-outcome-design.md](delete-outcome-design.md) | current | LIB-07 的定稿：`io.delete` 以 `Deleted` / `NotFound` / `Err` 区分成功、缺失与 host refusal，底层仍保留 Bool intrinsic ABI。 |
 | [cli-arity-design.md](cli-arity-design.md) | current | TOOL-04 的定稿契约：`check`/`fmt` 为 1..N，`test`/`doc` 的 selector 互斥，`build`/`emitc` 恰一个 target；两端保留独立 argv parser，由绝对 exit/stdout/stderr oracle 防止共谋假绿。 |
 | [run-argv-boundary-design.md](run-argv-boundary-design.md) | current | TOOL-03 的定稿契约：`run` 只在 target 前解析 compiler option，以 `--` 开启逐字透传的 program argv；JVM 一次顺序解析且 dependency re-exec 保留原始 rest，两端独立 parser 由绝对 oracle 约束。 |
@@ -85,7 +85,7 @@
 | 文档 | 覆盖 | 状态 |
 |---|---|---|
 | [audit/web-api-v2-design.md](audit/web-api-v2-design.md) | WEB-03/04/06/07/09/10 | **proposed，未动**——只发了 WEB-09 的不破坏半；破坏性 API 变更，先发 tag |
-| [audit/lsp-robustness-design.md](audit/lsp-robustness-design.md) | LSP-01/02/04 | LSP-01/02 **已落地**（07-30）；**LSP-04 未落地**，卡在缺失的 `io_stdin_ready` 原语上 |
+| [audit/lsp-robustness-design.md](audit/lsp-robustness-design.md) | LSP-01/02/04 | **均已落地**：LSP-01/02 于 07-30 完成，LSP-04 debounce 于 08-05 完成；本文保留历史方案与负控记录 |
 | [audit/nominal-types-design.md](audit/nominal-types-design.md) | LANG-04/05 | 步 1–3 **驳回**（`opaque type` 已提供该机制）；**LANG-04 仍是活账** |
 | [audit/module-access-design.md](audit/module-access-design.md) | LANG-06/07 | **已落地**（2026-07-30 当日全部发出） |
 | [audit/package-integrity-design.md](audit/package-integrity-design.md) | PKG-02/04 | **已落地**（`dawn cache verify` + `dawn lock --check`） |

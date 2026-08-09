@@ -7,10 +7,10 @@
 >
 > **这行不再报待办总数。**「28 条」是 07-25 那天的定格（`../codebase-audit.md` §0 自己写明
 > 不重新计数），而 07-30 的第二轮复审又带进 53 条走另一套 ID 空间的发现——一个数字说不清
-> 读者该看哪个池子，只会年久失修。**今天真正没动的是三条线**：`packages/web` 2.0
+> 读者该看哪个池子，只会年久失修。**今天真正没动的是两条线**：`packages/web` 2.0
 > （WEB-03/04/06/07/10 + WEB-09 的破坏半，[web-api-v2-design.md](web-api-v2-design.md)，
-> 本目录唯一仍是 proposed 的方案）、LSP-04 的 debounce（卡在缺失的 `io_stdin_ready` 原语上，
-> 验收已先进 CI）、LANG-04 的 `'a'` → `Char`（Phase 6 已出口，前提解除、活没干）。
+> 本目录唯一仍是 proposed 的方案）与 LANG-04 的 `'a'` → `Char`（Phase 6 已出口，前提解除、
+> 活没干）。LSP-04 debounce 已于 2026-08-05 落地。
 > 其余或已落地、或经重估裁决不做，逐条见 §一的表。**表与文档头部冲突时以文档头部为准。**
 >
 > **2026-07-30 合并与解冻**：分支于当日选择性合入 main（合并提交 `fa2a85f`，
@@ -54,7 +54,7 @@
 | [application-syntax-design.md](application-syntax-design.md) | SYN-02 SYN-03 | 否（语法放宽） | **已落地**（2026-07-30 加法 + 07-31 统一） |
 | [nominal-types-design.md](nominal-types-design.md) | LANG-04 LANG-05 | 部分 | 步 1–3 **驳回**（机制已由 `opaque type` 提供）／**LANG-04 仍是活账**，前提已解除 |
 | [module-access-design.md](module-access-design.md) | LANG-06 LANG-07 | 否 | **已落地**（2026-07-30 当日全部发出，spec §10.3/§10.4） |
-| [lsp-robustness-design.md](lsp-robustness-design.md) | LSP-01 LSP-02 LSP-04 | 否 | LSP-01/02 **已落地**（07-30，形态与原方案相反）／**LSP-04 未落地**，卡缺失的 `io_stdin_ready` |
+| [lsp-robustness-design.md](lsp-robustness-design.md) | LSP-01 LSP-02 LSP-04 | 否 | **全部已落地**：LSP-01/02 于 07-30 完成（形态与原方案相反），LSP-04 debounce 于 08-05 完成 |
 | [package-integrity-design.md](package-integrity-design.md) | PKG-02 PKG-04 | 否 | **两半均已落地**（`dawn cache verify` + `dawn lock --check`） |
 | [web-api-v2-design.md](web-api-v2-design.md) | WEB-03/04/06/07/09/10 | **是**（packages/web 2.0） | **proposed，未动**（只发了 WEB-09 的不破坏半）——本目录唯一 |
 
