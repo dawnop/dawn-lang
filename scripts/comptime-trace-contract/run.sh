@@ -130,6 +130,7 @@ expect_mutant_red() {
   echo "PASS  $name mutant turns its comptime trace test red"
 }
 
+cp -R "$root/compiler-plan" "$work/compiler-plan"
 ln -s "$root/packages" "$work/packages"
 
 expect_mutant_red overwrite-direct-hint \

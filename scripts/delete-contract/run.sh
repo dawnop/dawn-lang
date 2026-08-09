@@ -290,6 +290,7 @@ expect_mutant_red "C all-failures-false" "$work/c-mutant/out"
 # and execute the same probe so the generated dawn/rt/Io is what is exercised.
 mkdir -p "$work/jvm-mutant"
 cp -R "$root/selfhost" "$work/jvm-mutant/selfhost"
+cp -R "$root/compiler-plan" "$work/jvm-mutant/compiler-plan"
 cp -R "$root/packages" "$work/jvm-mutant/packages"
 python3 - "$work/jvm-mutant/selfhost/src/jvm/rtclasses.dawn" <<'PY'
 import pathlib
@@ -331,6 +332,7 @@ expect_mutant_red "JVM File.delete" "$work/jvm-mutant/out"
 # a caught fault rather than the public false result.
 mkdir -p "$work/jvm-query-mutant"
 cp -R "$root/selfhost" "$work/jvm-query-mutant/selfhost"
+cp -R "$root/compiler-plan" "$work/jvm-query-mutant/compiler-plan"
 cp -R "$root/packages" "$work/jvm-query-mutant/packages"
 python3 - "$work/jvm-query-mutant/selfhost/src/jvm/rtclasses.dawn" <<'PY'
 import pathlib

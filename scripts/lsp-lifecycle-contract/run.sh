@@ -95,6 +95,7 @@ expect_mutant_red() {
   local mutant="$work/mutant-$name"
   mkdir -p "$mutant"
   cp -R "$root/selfhost" "$mutant/selfhost"
+  cp -R "$root/compiler-plan" "$mutant/compiler-plan"
   ln -s "$root/packages" "$mutant/packages"
   mutate "$name" "$mutant/selfhost/src/lsp/server.dawn"
   if ! java -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
