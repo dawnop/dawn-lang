@@ -302,6 +302,38 @@ pub fn check_lock(l: Lock, fresh: Lock) -> Result[Unit, String] = {
   Ok(())
 }
 
+## Resolve one captured source plan's Java coordinates and, when a lock is
+## present beside its manifest, verify the resolved bytes before exposing any
+## jar. A present but unreadable lock is an error, not another spelling of no
+## lock. The original Coursier order is retained for classloader precedence.
+pub fn fetch_checked(
+  project: String,
+  coords: List[MCoord]
+) -> Result[List[String], String] !io = {
+  let jars = match fetch(coords) {
+    Ok(found) -> found
+    Err(e) -> return Err(e)
+  }
+  let path = lock_path(project)
+  if not io.exists(path) { return Ok(jars) }
+  let text = match io.read_file(path) {
+    Ok(found) -> found
+    Err(e) -> return Err("cannot read " ++ path ++ ": " ++ e.message)
+  }
+  let locked = match parse_lock(text) {
+    Ok(found) -> found
+    Err(e) -> return Err(path ++ ": " ++ e)
+  }
+  let fresh = match lock_of(coords, jars) {
+    Ok(found) -> found
+    Err(e) -> return Err(e)
+  }
+  match check_lock(locked, fresh) {
+    Ok(_) -> Ok(jars)
+    Err(e) -> Err(e)
+  }
+}
+
 ## `pkgfetch.delete_tree` is not usable as a value across a module boundary,
 ## so the test's cleanup names it here.
 fn rmtree(path: String) -> Unit !io = pkgfetch.delete_tree(path)

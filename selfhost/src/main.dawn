@@ -26,7 +26,8 @@ use driver/checkdump
 use ir/coredump
 use driver/stdlib.{StdCtx, load_std}
 use driver/analyze.{
-  CheckedMod, LocDiag, load_directory, load_file, analyze_program
+  CheckedMod, LocDiag, LoadResult, Program, ProjectPlan,
+  load_directory, load_file, load_planned, project_plan_for_load, analyze_program
 }
 use compiler_plan/source
 use pkg/vendor
@@ -66,7 +67,7 @@ use c/rc
 use c/emitc
 use c/cdriver
 use jvm/jfold.{fold_call}
-use jvm/jreflect.{jsig_real}
+use jvm/jreflect.{jsig_real, jsig_for}
 use c/emitc.{EmitMod}
 use check/tast.{TModule}
 use ir/interp.{CtOut, CtOpts, ct_default, DEFAULT_FUEL}
@@ -144,18 +145,22 @@ fn imports_java(cx0: Cx, fqcn: String) -> Bool = {
 ## `dawn/rt/Asm` names `org/objectweb/asm/ClassWriter`, which no ordinary
 ## program has -- and emitting a class that references an absent type into
 ## every program is a cost paid by everyone for a class only the compiler
-## itself can use. A module that imports `ClassWriter` is exactly a program
-## whose class path carries ASM, because `use java` does not resolve
-## otherwise. The compiler is such a program (emit/codegen/rtclasses/testrun
-## all import it), and since phase 2 it is also the only program that calls
-## the adapters -- so the trigger stays exactly as wide as it needs to be.
+## itself can use. A resolved `ClassWriter` import proves ASM is present;
+## explicit imports of either generated bridge make the same promise and must
+## also make emission match what target-scoped checking accepted.
 fn program_has_asm(std_mods: List[(String, Cx, TModule, CtOut)], mods: List[CheckedMod]) -> Bool = {
   for sm in std_mods {
     let (_cls, cx0, _tm, _ct) = sm
-    if imports_java(cx0, "org.objectweb.asm.ClassWriter") { return true }
+    if imports_java(cx0, "org.objectweb.asm.ClassWriter") ||
+      imports_java(cx0, "dawn.rt.Asm") || imports_java(cx0, "dawn.rt.AsmWriter") {
+        return true
+      }
   }
   for cm in mods {
-    if imports_java(cm.cx, "org.objectweb.asm.ClassWriter") { return true }
+    if imports_java(cm.cx, "org.objectweb.asm.ClassWriter") ||
+      imports_java(cm.cx, "dawn.rt.Asm") || imports_java(cm.cx, "dawn.rt.AsmWriter") {
+        return true
+      }
   }
   false
 }
@@ -754,6 +759,14 @@ fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
   ()
 }
 
+## Maven and lock setup is neither a usage mistake nor a source diagnostic.
+## It fails the command at status 1 after any target lease has been released.
+fn fail_target_setup(msg: String) -> Unit !io = {
+  io.eprintln("error: " ++ msg)
+  let _ = io.exit(1)
+  ()
+}
+
 ## Print the Kotlin CLI's error shape and exit 2.
 ## Refuse a second bare positional.
 ##
@@ -858,9 +871,8 @@ fn run_source_inputs(rest: List[String]) -> Unit !io = {
   }
 }
 
-# ---- [java-deps]: resolve once, then re-exec with the jars on the class path
-# (the checker's `use java` reflection reads the system class path; the Kotlin
-# CLI swaps in a URLClassLoader instead, which reflection here cannot do) ----
+# ---- [java-deps]: target loaders for check/doc; re-exec remains for emission
+# and comptime Java FFI, whose direct reflection still reads the system path ----
 
 ## Pull a boolean `--flag` out of an argument list.
 fn extract_flag(rest: List[String], flag: String) -> (Bool, List[String]) = {
@@ -900,36 +912,49 @@ fn resolve_java_deps(target: String) -> List[String] !io = {
   let pdiags = planner_diags(plan.diags)
   if len(pdiags) > 0 { fail_compile(pdiags) }
   let coords = plan.java_coords
-  if len(coords) == 0 { return none }
-  io.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
-      plan.project ++ "/dawn.toml...")
-  let jars = match maven.fetch(coords) {
+  if len(coords) > 0 {
+    io.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
+        plan.project ++ "/dawn.toml...")
+  }
+  match maven.fetch_checked(plan.project, coords) {
     Ok(js) -> js
     Err(e) -> {
       cli_error(e)
-      return none
+      none
     }
   }
-  # PKG-04: with a dawn.lock beside the manifest, the resolution has to agree
-  # with it by bytes -- a moved transitive version, a mirror answering
-  # differently or a damaged cache all stop here instead of building
-  match io.read_file(maven.lock_path(plan.project)) {
-    Err(_) -> ()
-    Ok(text) ->
-      match maven.parse_lock(text) {
-        Err(e) -> cli_error(maven.lock_path(plan.project) ++ ": " ++ e)
-        Ok(locked) ->
-          match maven.lock_of(coords, jars) {
-            Err(e) -> cli_error(e)
-            Ok(fresh) ->
-              match maven.check_lock(locked, fresh) {
-                Err(e) -> cli_error(e)
-                Ok(_) -> ()
-              }
-          }
-      }
+}
+
+fn source_target(target: String) -> source.SourceTarget !io =
+  if io.is_dir(target) { source.ProjectDirectory(target) } else { source.SourceFile(target) }
+
+## Analyze one already planned and loaded target under only its resolved Java
+## dependencies. Returning errors keeps every render, print and process exit
+## outside the bracket that owns the classloader.
+fn analyze_target_scoped(
+  plan: ProjectPlan,
+  loaded: LoadResult,
+  std: StdCtx
+) -> Result[Program, String] !io = {
+  let no_jars: List[String] = []
+  let jars = if len(plan.source.diags) > 0 {
+    # Planner diagnostics keep their existing precedence. In particular, an
+    # invalid manifest must not make a stale lock or the network the command's
+    # answer; analysis can still report source diagnostics through a platform-
+    # only lease.
+    no_jars
+  } else {
+    match maven.fetch_checked(plan.source.project, plan.source.java_coords) {
+      Ok(found) -> found
+      Err(e) -> return Err(e)
+    }
   }
-  jars
+  let lease = jsig_for(jars)
+  Ok(bracket(
+    lease,
+    held => held.close(),
+    held => analyze_program(loaded, std, ct_default(), held.jsig)
+  ))
 }
 
 ## `dawn lock [--check] [<dir>]` — write (or verify) the resolved [java-deps]
@@ -1668,8 +1693,21 @@ fn run_doc(rest: List[String]) -> Unit !io = {
   if not io.exists(target) {
     return cli_error("no such file or directory: " ++ target)
   }
-  let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
-  let prog = analyze_program(loaded, std, ct_default(), jsig_real())
+  let plan = match project_plan_for_load(source_target(target)) {
+    Ok(found) -> found
+    Err(rejected) -> {
+      fail_doc(rejected.diags)
+      return
+    }
+  }
+  let loaded = load_planned(plan)
+  let prog = match analyze_target_scoped(plan, loaded, std) {
+    Ok(found) -> found
+    Err(e) -> {
+      fail_target_setup(e)
+      return
+    }
+  }
   if len(prog.diags) > 0 { fail_doc(prog.diags) }
   print(doc.project_json(prog))
 }
@@ -1878,9 +1916,16 @@ fn run_check(rest: List[String]) -> Unit !io = {
   let std = check_std(std_dir)
   var all: List[LocDiag] = []
   for t in targets {
-    let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
-    let prog = analyze_program(loaded, std, ct_default(), jsig_real())
-    all = all ++ prog.diags
+    match project_plan_for_load(source_target(t)) {
+      Err(rejected) -> { all = all ++ rejected.diags }
+      Ok(plan) -> {
+        let loaded = load_planned(plan)
+        match analyze_target_scoped(plan, loaded, std) {
+          Ok(prog) -> { all = all ++ prog.diags }
+          Err(e) -> return fail_target_setup(e)
+        }
+      }
+    }
   }
   if len(all) > 0 { return fail_compile(all) }
   println("ok")

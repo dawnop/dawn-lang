@@ -1,8 +1,8 @@
 # LSP workspace 与目标级 Java classpath 设计（TOOL-05/06）
 
-> 状态：**proposed / open**。当前源码基线为 `7eb2f25`。A（`10b3052`）与
-> B（`7eb2f25`）已实现并推到 `origin/main`，包含两刀的远端 CI 全绿；C/D 尚未实现。
-> 本文只覆盖仍开放的 TOOL-05 与 TOOL-06，不能因前两刀落地就把任一条标成 fixed。
+> 状态：**proposed / open**。本批基于 `62715aa`。A（`10b3052`）与 B（`7eb2f25`）已实现并
+> 推到 `origin/main`，包含两刀的远端 CI 全绿；C 由本批实现，D 尚未实现。本文只覆盖仍开放的
+> TOOL-05 与 TOOL-06，不能因前三刀落地就把任一条标成 fixed。
 
 ## 1. 范围与已完成前置
 
@@ -15,20 +15,20 @@
 | TOOL-08 | 已完成 | `server.Lifecycle` 已实现 initialize/shutdown/exit 状态机 |
 | TOOL-10 | 已完成 | [source-plan-design.md](source-plan-design.md) 已把 manifest、MVS、fetch、最终 source 图与 Java 坐标统一进 Java-free `compiler-plan.SourcePlan` |
 | TOOL-05 | open | A 已建立 captured-plan seam；D 的共享 workspace、全 overlay 与全量 diagnostics 尚未实现 |
-| TOOL-06 | open | B 已提供 target-local lease；C/D 尚未把 `check`、`doc`、LSP 接到各自 target classpath |
+| TOOL-06 | open | B 已提供 target-local lease，C 已把 `check`/`doc` 接到各自 target classpath；D 的 LSP 接线尚未实现 |
 
-本文不重开前三项，也不在实现前把 TOOL-05/06 标成 fixed。
+本文不重开前三项；TOOL-05/06 仍须等 D 的 workspace/LSP 边界落地后才能标成 fixed。
 
 | 刀 | 状态 | 已落地或待完成的边界 |
 |---|---|---|
 | A | **implemented，`10b3052`，远端全绿** | `ProjectPlan`、captured loader、captured completion；行为与输出差分均通过 |
 | B | **implemented，`7eb2f25`，远端全绿** | `JsigLease`、platform-parent loader、显式 loader 查询；行为与输出差分均通过 |
-| C | **not implemented** | JVM `check`/`doc` 按 target 获取、校验、关闭 Java lease |
+| C | **implemented in this batch** | JVM `check`/`doc` 按 target 获取、校验、关闭 Java lease |
 | D | **not implemented** | LSP 每 root 共享 snapshot、lease、diagnostics 与关闭回滚 |
 
 ## 2. 当前实现证据
 
-以下事实均按 `7eb2f25` 的源码符号重新核对，不沿用旧草案行号。
+以下事实均按本批工作树的源码符号重新核对，不沿用旧草案行号。
 
 1. `compiler-plan/src/source.dawn` 已公开显式的 `SourceTarget` 与唯一 `SourcePlan`；后者持有
    `project`、`source_root`、最终 `PkgR`、`java_coords` 与规划诊断。`compiler-plan/dawn.toml`
@@ -49,11 +49,11 @@
    root 的 live buffer 当作当前 project 的 definition source。
 7. B 已在 Java-free `check/jsig.dawn` 落地 `JsigLease`，并在 `jvm/jreflect.dawn` 将八类查询拆成
    显式 loader 版本。`jsig_for(jars)` 使用 platform parent；原 `jsig_real()` 与直接 wrapper
-   仍使用 system loader。`main.dawn` 的 `check`、`doc`、`lsp` 尚未消费 lease，`LspState` 也仍
-   只有一份全局 `Jsig`。
-8. `pkg/maven.dawn` 直接使用 `coursierapi.*`，但 `selfhost/dawn.toml` 当前只显式声明 ASM。
-   一旦 selfhost 自身改用 platform-parent target loader，编译器 application classpath 不再泄漏
-   Coursier；C 必须把 Coursier interface 变成 selfhost 的真实 target dependency。
+   仍使用 system loader。C 已让 `main.dawn` 的 `check`、`doc` 消费 target lease；`lsp` 尚未消费，
+   `LspState` 也仍只有一份全局 `Jsig`。
+8. `pkg/maven.dawn` 直接使用 `coursierapi.*`；C 已在 `selfhost/dawn.toml` 显式声明
+   `io.get-coursier:interface:1.0.28`，使 selfhost 的 platform-parent target loader 不依赖
+   compiler application classpath 泄漏 Coursier。
 9. build/run/test 的 re-exec 暂时仍有生产消费者：`jvm/emit.dawn` 在 varargs component 与
    interface 判断处直接问 `jreflect`，`jvm/jfold.dawn` 的 comptime Java FFI 也直接反射。
    因此“checker 有 target loader”不能推出“可以删除 re-exec”。
@@ -61,7 +61,7 @@
     也不做 case-fold。D 的 identity 与冲突检测先沿用这一定义，更强的文件身份留作 residual。
 
 现有 `server.dawn` 关于“编辑器中的 `use java` 与 compile 完全一致”的注释与当前宿主 wiring 冲突；
-TOOL-06 落地时应一起改正，不能继续把 system classpath 当作 target classpath。
+D 落地时应一起改正，不能继续把 system classpath 当作 target classpath。
 
 ## 3. 三层所有权
 
@@ -255,9 +255,9 @@ pub fn jsig_for(jars: List[String]) -> JsigLease !io
 build/run/test emitter 与 comptime FFI 使用。B 的 owning contract 已证明双 JAR 同 FQCN 隔离、
 platform parent 不泄漏 application classpath、正常/异常关闭；五个 compiling mutant 均已打红。
 
-### 5.3 C：`check` / `doc` target wiring（未实现）
+### 5.3 C：`check` / `doc` target wiring（本批实现）
 
-C 先补 plan-aware loader，避免 source load 与 Java coordinates 各自规划：
+C 补出 plan-aware loader，避免 source load 与 Java coordinates 各自规划：
 
 ```dawn
 pub fn load_planned(plan: ProjectPlan) -> LoadResult !io
@@ -279,10 +279,17 @@ pub fn fetch_checked(
 lock 才表示“无 lock”；文件已存在但不可读、格式错误、hash drift 都是 `Err`。即使 `coords=[]`
 也要拒绝已有 stale lock。helper 不打印、不退出；失败时 fail closed，绝不退回 system loader。
 
-`selfhost/src/pkg/maven.dawn` 自己直接引用 `coursierapi.*`，所以 C 必须在
+`selfhost/src/pkg/maven.dawn` 自己直接引用 `coursierapi.*`，所以 C 在
 `selfhost/dawn.toml` 显式加入 `io.get-coursier:interface:1.0.28`，并同步更新 `selfhost/dawn.lock`。
 这是真实 target dependency，不允许用 application parent 特判 selfhost，否则 TOOL-06 的隔离
 定义会被编译器自身悄悄绕过。
+
+selfhost 还直接导入编译器生成的 `dawn.rt.Asm` / `dawn.rt.AsmWriter`。target `Jsig` 只允许在
+target loader 自己能解析 `org.objectweb.asm.ClassWriter` 时，为这两个固定类名叠加固定的纯数据
+签名；不得查询 system loader、改用 application parent，或按 project name 特判。两类从
+`Object` / `ClassWriter` 继承的方法与字段及其 assignability 仍通过 target loader 查询，不能复制
+宿主 ASM 的反射结果。程序显式导入任一 bridge 时必须同时发射两个 bridge class，使通过检查的
+target JAR 能独立链接；target 没有 ASM 时两个 bridge 都不可见。
 
 JVM `check`/`doc` 对每个 target 的固定流程是：先完成 target 前置校验；只调用一次
 `project_plan`；以 `load_planned(plan)` 加载；以同一 `plan.source` 调 `fetch_checked`；构造
@@ -377,7 +384,7 @@ loader 均不得跨 root 查询；两个 root 即使 module path 或依赖 FQCN 
 |---|---|---|---|
 | A | **已实现 `10b3052`**：`ProjectPlan`、captured loader、Doc 暂存 plan、completion 显式复用 module index | captured-plan contract；fresh replan loader 与 fresh completion mutants 均已打红 | LSP/prev 实测字节不变 |
 | B | **已实现 `7eb2f25`**：`JsigLease`、platform-parent loader、loader-parameterized reflection | system query/parent、合并 loader、drop close、bypass bracket 五类 mutants 均已打红 | LSP/prev 实测字节不变 |
-| C | **未实现**：同一 captured plan + `load_planned` + `fetch_checked` + bracketed lease；native refusal 不变 | check/doc target deps；多 target 同 FQCN；system leak、合并 lease、跳 lock、绕 bracket mutants | 无预授权；先跑差分并逐项 review |
+| C | **已实现（本批）**：同一 captured plan + `load_planned` + `fetch_checked` + bracketed lease；target ASM 条件式固定 bridge overlay 与成对发射；native refusal 不变 | check/doc target deps；多 target 同 FQCN；with-ASM/no-ASM、linked JAR、drop-overlay；system leak、合并 lease、跳 lock、绕 bracket mutants | 无预授权；先跑差分并逐项 review |
 | D | **未实现**：完整 overlay、单一 Program、每 root lease、全量发布、didClose rollback | unsaved export/new module、root definition、duplicate URI、standalone zero-jar、全 diagnostics | 无预授权；先跑差分并逐项 review |
 
 每个 mutant 必须先成功构建，再由 owning contract 精确打红；grep 只能补结构边界，不能替代行为
@@ -393,6 +400,7 @@ loader 均不得跨 root 查询；两个 root 即使 module path 或依赖 FQCN 
 | loader 隔离 | system loader 看不见 fixture；两份 target lease 对相同 FQCN 分别看到 A/B API | 改回 system loader；或把两个 target 合并进一份 loader |
 | loader 释放 | 正常 close 与异常 bracket 后，JAR 独有 resource 都不可见 | 删除 `close`；让异常路径绕过 bracket |
 | check/doc target classpath | 带 `[java-deps]` 的 check/doc 成功；同一次 multi-target check 的同 FQCN 不串；malformed/hash drift/stale/unreadable lock 均退出 1 | 改回 `jsig_real()`；循环外共享 lease；跳过 lock；在 bracket 内 exit |
+| selfhost ASM bridge | target 带 ASM 时两 bridge 可检查，导入任一 bridge 都发射两类且独立 JAR 可链接运行；target 不带 ASM 时两者都不可见 | 删除条件式 bridge overlay，with-ASM case 精确丢失两 bridge；或无条件 overlay 使 no-ASM case 错误通过 |
 | unsaved export | 两文档都 open；只在被依赖 buffer 改 `pub` 名，依赖方立即按 live 文本重新诊断/补全/definition | overlay 退回单元素，或仍从各 Doc.Program 查询 |
 | 新建未落盘模块 | 新 open `new_module.dawn` 尚未落盘且没有 `use`；caller completion 立即列出 `new_module` 与 live exports | completion 只读 captured `plan.modules.by_use` |
 | didClose rollback | 关闭未保存的被依赖文件后，剩余文档按磁盘版本重分析 | 只删 Doc/清 diagnostics，不重分析 workspace |
@@ -403,7 +411,8 @@ loader 均不得跨 root 查询；两个 root 即使 module path 或依赖 FQCN 
 | duplicate canonical URI | 两 URI 映到同一 canonical path 且文本不同；两者收到冲突诊断，不安装 last-wins snapshot；关闭一个后恢复 | 按排序把后一文本写进 overlay |
 | standalone zero-jar | JVM untitled buffer 可见 JDK class、看不见编译器自带 ASM/Coursier；native 对 `use java` 仍拒绝 | standalone 退回 `jsig_real()` 或 native 创建 JVM loader |
 
-已完成的 A/B owning contracts、Core review、LSP/prev 差分与远端 CI 均通过。C/D 落地时至少运行：
+已完成的 A/B owning contracts、Core review、LSP/prev 差分与远端 CI 均通过。C 本批验收及 D 后续
+落地时至少运行：
 `./bin/dawn test selfhost`、`./bin/dawn test compiler-plan`、新 contract mutants、
 `scripts/lsp-use-completion.py`、`scripts/lsp-lifecycle-contract/run.sh`、
 `scripts/selfhost-lsp-diff.sh`、`scripts/selfhost-prev-diff.sh`、Core golden review、formatter 与

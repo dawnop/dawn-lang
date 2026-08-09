@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 2703d8720720ee29 -->
+<!-- doc-check: translation-of docs/spec.md @ 92ba69611a29541d -->
 
 # Dawn Language Specification
 
@@ -1705,10 +1705,11 @@ fn build() -> String !io = {
   can still be chained on); `use java` is only needed in order to **write the type name**
   in a signature.
 - Class resolution happens by **reflection at compile time**: JDK classes are always
-  visible; a third-party class must be supplied with `--cp <jars>` (common to
-  `dawn run/test/build`, §12.1), and compilation and execution share one classpath. LSP
-  currently resolves only JDK classes; a third-party class is reported as not found in the
-  editor but compiles on the command line.
+  visible; third-party classes may come from the project's `[java-deps]`
+  (`dawn check/doc/run/test/build`), or from `--cp <jars>` (common to
+  `dawn run/test/build`, §12.1). Commands that run a program use the same classpath for
+  compilation and execution. LSP currently resolves only JDK classes; a third-party class
+  is reported as not found in the editor but compiles on the command line.
 - **Nested classes are written with a dot**:
   `use java "java.net.http.HttpResponse.BodyHandlers"` (not `$` — `$` inside a string is
   taken as interpolation). Resolution first reflects on the whole name, and on failure
@@ -2153,10 +2154,10 @@ compile error.
 
 **How the module root is determined**:
 
-- **Directory mode** `dawn run|test|build <dir>`: root = `<dir>/src`, entry =
+- **Directory mode** `dawn check|doc|run|test|build <dir>`: root = `<dir>/src`, entry =
   `<dir>/src/main.dawn` (if it is missing, the compiler reports it and prints the expected
   path).
-- **File mode** `dawn run|test|build <file.dawn>`: starting from the file's directory,
+- **File mode** `dawn check|doc|run|test|build <file.dawn>`: starting from the file's directory,
   **walk up to the nearest ancestor directory named `src`** and take that as the root; if
   there is none, the root = the file's own directory. The LSP uses the same heuristic, so
   opening a single submodule file on its own still resolves its `use`s relative to the
@@ -2193,9 +2194,11 @@ aliased import is normalised to the real name at load time. `dawn add <coordinat
 can write these entries for you (fetching the archive and computing the hash, preserving
 hand-written formatting).
 
-`dawn run|test|build` fetches `[java-deps]` (including those declared by each dependency
-package — the union) and puts them on the classpath (merged with `--cp`); `dawn build`
-additionally copies them into a `lib/` next to the jar. The repository address comes from
+`dawn check|doc|run|test|build` fetches `[java-deps]` (including those declared by each
+dependency package — the union) for compile-time `use java` resolution. Each target of
+`check`/`doc` gets an independent classpath; `run`/`test`/`build` instead merge it with
+`--cp` and use the result for both compilation and execution. `dawn build` additionally
+copies `[java-deps]` into a `lib/` next to the jar. The repository address comes from
 `$DAWN_MAVEN_MIRROR` and does not go into the manifest.
 
 **A manifest is always data, never code** — there is no executable `build.dawn`. The

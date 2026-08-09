@@ -31,6 +31,154 @@ use java "java.lang.invoke.MethodHandle"
 
 type TargetLoader = { base: ClassLoader, closeable: URLClassLoader }
 
+const ASM_BRIDGE_CLASS: String = "dawn.rt.Asm"
+const ASM_WRITER_BRIDGE_CLASS: String = "dawn.rt.AsmWriter"
+const ASM_CLASS_WRITER: String = "org.objectweb.asm.ClassWriter"
+
+fn bridge_jclass(fqcn: String, simple: String) -> JClass =
+  JClass {
+    fqcn: fqcn,
+    simple: simple,
+    display: simple,
+    is_interface: false,
+    is_primitive: false,
+    is_array: false
+  }
+
+fn bridge_class(fqcn: String) -> Option[JClass] =
+  if fqcn == ASM_BRIDGE_CLASS {
+    Some(bridge_jclass(fqcn, "Asm"))
+  } else if fqcn == ASM_WRITER_BRIDGE_CLASS {
+    Some(bridge_jclass(fqcn, "AsmWriter"))
+  } else {
+    None
+  }
+
+fn bridge_static(owner: String, name: String, params: List[String], ret: String) -> JMethod =
+  JMethod {
+    name: name,
+    param_cls: params,
+    ret_cls: ret,
+    is_static: true,
+    is_varargs: false,
+    is_abstract: false,
+    desc: "public static " ++ ret ++ " " ++ owner ++ "." ++ name ++
+      "(" ++ join(params, ",") ++ ")",
+    decl_cls: owner
+  }
+
+fn asm_bridge_methods() -> List[JMethod] =
+  [bridge_static(ASM_BRIDGE_CLASS, "plain", ["int"], ASM_CLASS_WRITER),
+    bridge_static(ASM_BRIDGE_CLASS, "beginOn",
+      [ASM_CLASS_WRITER, "int", "int", "java.lang.String", "java.lang.String"], "void"),
+    bridge_static(ASM_BRIDGE_CLASS, "beginOnWithInterface",
+      [ASM_CLASS_WRITER, "int", "int", "java.lang.String", "java.lang.String",
+        "java.lang.String"], "void"),
+    bridge_static(ASM_BRIDGE_CLASS, "fieldOn",
+      [ASM_CLASS_WRITER, "int", "java.lang.String", "java.lang.String"], "void"),
+    bridge_static(ASM_BRIDGE_CLASS, "methodOn",
+      [ASM_CLASS_WRITER, "int", "java.lang.String", "java.lang.String"],
+      "org.objectweb.asm.MethodVisitor")]
+
+fn asm_writer_bridge_methods() -> List[JMethod] =
+  [bridge_static(ASM_WRITER_BRIDGE_CLASS, "of", ["int", "java.util.List"], ASM_CLASS_WRITER)]
+
+fn target_has_asm(loader: ClassLoader) -> Bool !io =
+  match find_class_raw_with(loader, ASM_CLASS_WRITER) {
+    Some(_) -> true
+    None -> false
+  }
+
+fn target_find_class_with(
+  loader: ClassLoader,
+  asm_bridge: Bool,
+  fqcn: String
+) -> Option[JClass] !io =
+  match bridge_class(fqcn) {
+    Some(j) -> if asm_bridge { Some(j) } else { None }
+    None -> find_class_with(loader, fqcn)
+  }
+
+fn target_class_info_with(loader: ClassLoader, asm_bridge: Bool, fqcn: String) -> JClass !io =
+  match target_find_class_with(loader, asm_bridge, fqcn) {
+    Some(j) -> j
+    None -> panic("class vanished between target queries: " ++ fqcn)
+  }
+
+fn target_methods_of_with(
+  loader: ClassLoader,
+  asm_bridge: Bool,
+  fqcn: String
+) -> List[JMethod] !io =
+  if asm_bridge && fqcn == ASM_BRIDGE_CLASS {
+    asm_bridge_methods() ++ methods_of_with(loader, "java.lang.Object")
+  } else if asm_bridge && fqcn == ASM_WRITER_BRIDGE_CLASS {
+    asm_writer_bridge_methods() ++ methods_of_with(loader, ASM_CLASS_WRITER)
+  } else {
+    methods_of_with(loader, fqcn)
+  }
+
+fn target_ctors_of_with(loader: ClassLoader, asm_bridge: Bool, fqcn: String) -> List[JCtor] !io =
+  if asm_bridge && (fqcn == ASM_BRIDGE_CLASS || fqcn == ASM_WRITER_BRIDGE_CLASS) {
+    []
+  } else {
+    ctors_of_with(loader, fqcn)
+  }
+
+fn target_static_fields_of_with(
+  loader: ClassLoader,
+  asm_bridge: Bool,
+  fqcn: String
+) -> List[JField] !io =
+  if asm_bridge && fqcn == ASM_BRIDGE_CLASS {
+    static_fields_of_with(loader, "java.lang.Object")
+  } else if asm_bridge && fqcn == ASM_WRITER_BRIDGE_CLASS {
+    static_fields_of_with(loader, ASM_CLASS_WRITER)
+  } else {
+    static_fields_of_with(loader, fqcn)
+  }
+
+fn target_is_assignable_with(
+  loader: ClassLoader,
+  asm_bridge: Bool,
+  sup: String,
+  sub: String
+) -> Bool !io =
+  if asm_bridge && sup == sub &&
+  (sub == ASM_BRIDGE_CLASS || sub == ASM_WRITER_BRIDGE_CLASS) {
+    true
+  } else if asm_bridge && sub == ASM_BRIDGE_CLASS {
+    is_assignable_with(loader, sup, "java.lang.Object")
+  } else if asm_bridge && sub == ASM_WRITER_BRIDGE_CLASS {
+    is_assignable_with(loader, sup, ASM_CLASS_WRITER)
+  } else if asm_bridge && (sup == ASM_BRIDGE_CLASS || sup == ASM_WRITER_BRIDGE_CLASS) {
+    false
+  } else {
+    is_assignable_with(loader, sup, sub)
+  }
+
+fn target_sam_of_with(
+  loader: ClassLoader,
+  asm_bridge: Bool,
+  fqcn: String
+) -> Option[JMethod] !io =
+  if asm_bridge && (fqcn == ASM_BRIDGE_CLASS || fqcn == ASM_WRITER_BRIDGE_CLASS) {
+    None
+  } else {
+    sam_of_with(loader, fqcn)
+  }
+
+fn target_component_of_with(
+  loader: ClassLoader,
+  asm_bridge: Bool,
+  fqcn: String
+) -> Option[String] !io =
+  if asm_bridge && (fqcn == ASM_BRIDGE_CLASS || fqcn == ASM_WRITER_BRIDGE_CLASS) {
+    None
+  } else {
+    component_of_with(loader, fqcn)
+  }
+
 ## The oracle these implementations add up to — what the JVM main hands the
 ## checker in place of the refusal `cx_new` starts with.
 pub fn jsig_real() -> Jsig =
@@ -82,25 +230,30 @@ fn loader_for(jars: List[String]) -> TargetLoader !io = {
   TargetLoader { base: base, closeable: closeable }
 }
 
-fn jsig_with(loader: ClassLoader) -> Jsig =
+fn jsig_with(loader: ClassLoader, asm_bridge: Bool) -> Jsig =
   Jsig {
     on: true,
-    find_class: fqcn => find_class_with(loader, fqcn),
-    class_info: fqcn => class_info_with(loader, fqcn),
-    methods_of: fqcn => methods_of_with(loader, fqcn),
-    ctors_of: fqcn => ctors_of_with(loader, fqcn),
-    static_fields_of: fqcn => static_fields_of_with(loader, fqcn),
-    is_assignable: (sup, sub) => is_assignable_with(loader, sup, sub),
-    sam_of: fqcn => sam_of_with(loader, fqcn),
-    component_of: fqcn => component_of_with(loader, fqcn)
+    find_class: fqcn => target_find_class_with(loader, asm_bridge, fqcn),
+    class_info: fqcn => target_class_info_with(loader, asm_bridge, fqcn),
+    methods_of: fqcn => target_methods_of_with(loader, asm_bridge, fqcn),
+    ctors_of: fqcn => target_ctors_of_with(loader, asm_bridge, fqcn),
+    static_fields_of: fqcn => target_static_fields_of_with(loader, asm_bridge, fqcn),
+    is_assignable: (sup, sub) => target_is_assignable_with(loader, asm_bridge, sup, sub),
+    sam_of: fqcn => target_sam_of_with(loader, asm_bridge, fqcn),
+    component_of: fqcn => target_component_of_with(loader, asm_bridge, fqcn)
   }
 
-fn lease_with(loader: TargetLoader) -> JsigLease =
-  JsigLease { jsig: jsig_with(loader.base), close: () => loader.closeable.close() }
+fn lease_with(loader: TargetLoader, asm_bridge: Bool) -> JsigLease =
+  JsigLease { jsig: jsig_with(loader.base, asm_bridge), close: () => loader.closeable.close() }
 
 ## A target-local oracle. Its platform parent exposes the JDK but not the
-## compiler process's application class path.
-pub fn jsig_for(jars: List[String]) -> JsigLease !io = lease_with(loader_for(jars))
+## compiler process's application class path. The two generated ASM bridges
+## are plain-data overlays enabled only by ClassWriter in this same loader;
+## their inherited answers never fall back to the system loader.
+pub fn jsig_for(jars: List[String]) -> JsigLease !io = {
+  let loader = loader_for(jars)
+  lease_with(loader, target_has_asm(loader.base))
+}
 
 ## Resolve a `use java` name (spec §9.1): the fqcn as written, then trailing
 ## dots walked into `$` so nested classes read naturally.

@@ -1394,8 +1394,9 @@ fn build() -> String !io = {
   `this` 或状态码；「不得悄悄丢弃」规则只保护 Dawn 值。
 - 返回值里出现**未导入的引用类**（如 `Path.of` 的 `Path`）时，值仍可用（自动成为
   不透明类型、可继续链式调用）；只有要在签名里**写出类型名**才需要 `use java` 导入。
-- 类解析发生在**编译期反射**：JDK 类恒可见；第三方类须以 `--cp <jars>` 提供
-  （`dawn run/test/build` 通用，§12.1），编译与运行共用同一份 classpath。
+- 类解析发生在**编译期反射**：JDK 类恒可见；第三方类可由项目 `[java-deps]` 提供
+  （`dawn check/doc/run/test/build`），或由 `--cp <jars>` 提供
+  （`dawn run/test/build` 通用，§12.1）；需要运行程序的命令在编译与运行时共用同一份 classpath。
   LSP 目前仅解析 JDK 类，第三方类在编辑器里报未找到但命令行可编译。
 - **嵌套类用点号写**：`use java "java.net.http.HttpResponse.BodyHandlers"`
   （不是 `$`——`$` 在字符串里会被当插值）。解析时先整体反射，失败则从右往左把
@@ -1751,9 +1752,9 @@ with f <- bracket(open(path), close)
 
 **模块根的确定**：
 
-- **目录模式** `dawn run|test|build <dir>`：根 = `<dir>/src`，入口 = `<dir>/src/main.dawn`
+- **目录模式** `dawn check|doc|run|test|build <dir>`：根 = `<dir>/src`，入口 = `<dir>/src/main.dawn`
   （缺失则报错并给出预期路径）。
-- **文件模式** `dawn run|test|build <file.dawn>`：从该文件所在目录**向上找最近的名为
+- **文件模式** `dawn check|doc|run|test|build <file.dawn>`：从该文件所在目录**向上找最近的名为
   `src` 的祖先目录**作为根；找不到则根 = 文件所在目录。LSP 用同一条启发式，故单独打开
   一个子模块文件也能解析它相对根的 `use`。
 
@@ -1784,8 +1785,10 @@ manifest 里的 `name`——类名命名空间、版本求解、全程序一名�
 别名引入会在装载时规范化为真名。`dawn add <坐标|url|路径>` 可代写这些条目
 （抓取并计算 hash，保留手写格式）。
 
-`dawn run|test|build` 会拉取 `[java-deps]`（含各依赖包声明的，取并集）并挂上
-classpath（与 `--cp` 合并）；`dawn build` 另把它们复制进 jar 同级的 `lib/`。
+`dawn check|doc|run|test|build` 会拉取 `[java-deps]`（含各依赖包声明的，取并集），供
+编译期 `use java` 使用；`check`/`doc` 的每个 target 使用独立 classpath，
+`run`/`test`/`build` 则把它与 `--cp` 合并后同时用于编译和运行。`dawn build` 另把
+`[java-deps]` 复制进 jar 同级的 `lib/`。
 仓库地址走 `$DAWN_MAVEN_MIRROR`，不进 manifest。
 
 **manifest 永远是数据，不是代码**——不存在可执行的 `build.dawn`。理由与完整设计见

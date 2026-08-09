@@ -82,7 +82,10 @@ def replace_once(text, old, new):
 if name == "queries-use-system":
     reflect = replace_once(
         reflect,
-        "pub fn jsig_for(jars: List[String]) -> JsigLease !io = lease_with(loader_for(jars))",
+        """pub fn jsig_for(jars: List[String]) -> JsigLease !io = {
+  let loader = loader_for(jars)
+  lease_with(loader, target_has_asm(loader.base))
+}""",
         """pub fn jsig_for(jars: List[String]) -> JsigLease !io = {
   let loader = loader_for(jars)
   JsigLease { jsig: jsig_real(), close: () => loader.closeable.close() }
@@ -97,15 +100,20 @@ elif name == "parent-is-system":
 elif name == "merge-loaders":
     reflect = replace_once(
         reflect,
-        "pub fn jsig_for(jars: List[String]) -> JsigLease !io = lease_with(loader_for(jars))",
-        f"""pub fn jsig_for(jars: List[String]) -> JsigLease !io =
-  lease_with(loader_for([{json.dumps(first_jar)}, {json.dumps(second_jar)}]))""",
+        """pub fn jsig_for(jars: List[String]) -> JsigLease !io = {
+  let loader = loader_for(jars)
+  lease_with(loader, target_has_asm(loader.base))
+}""",
+        f"""pub fn jsig_for(jars: List[String]) -> JsigLease !io = {{
+  let loader = loader_for([{json.dumps(first_jar)}, {json.dumps(second_jar)}])
+  lease_with(loader, target_has_asm(loader.base))
+}}""",
     )
 elif name == "drop-close":
     reflect = replace_once(
         reflect,
-        "JsigLease { jsig: jsig_with(loader.base), close: () => loader.closeable.close() }",
-        "JsigLease { jsig: jsig_with(loader.base), close: () => () }",
+        "JsigLease { jsig: jsig_with(loader.base, asm_bridge), close: () => loader.closeable.close() }",
+        "JsigLease { jsig: jsig_with(loader.base, asm_bridge), close: () => () }",
     )
 elif name == "bypass-bracket":
     probe = replace_once(

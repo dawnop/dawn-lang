@@ -156,17 +156,36 @@ fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
   out
 }
 
-## Directory mode: root = <dir>/src, entry = <dir>/src/main.dawn (spec §10.1).
-pub fn load_directory(dir: String) -> LoadResult !io = {
+fn missing_source_root(dir: String) -> LoadResult = {
   let root = dir ++ "/src"
-  var diags: List[LocDiag] = []
-  if not io.is_dir(root) {
-    diags = diags ++ [synthetic(dir,
+  LoadResult {
+    modules: [],
+    diags: [synthetic(dir,
       "project directory has no `src/` folder (expected " ++ root ++ ")",
       "a Dawn project keeps its modules under src/, with entry src/main.dawn")]
-    return LoadResult { modules: [], diags: diags }
   }
-  let plan = project_plan(source.ProjectDirectory(dir))
+}
+
+## Reject a directory without src/ before source planning can read its
+## manifest or fetch a package. Callers that need both the plan and the load
+## result use this seam rather than planning first and trying to undo it.
+pub fn project_plan_for_load(
+  target: source.SourceTarget
+) -> Result[ProjectPlan, LoadResult] !io =
+  match target {
+    source.ProjectDirectory(dir) ->
+      if io.is_dir(dir ++ "/src") {
+        Ok(project_plan(target))
+      } else {
+        Err(missing_source_root(dir))
+      }
+    source.SourceFile(_) -> Ok(project_plan(target))
+  }
+
+fn load_directory_planned(dir: String, plan: ProjectPlan) -> LoadResult !io = {
+  let root = dir ++ "/src"
+  if not io.is_dir(root) { return missing_source_root(dir) }
+  var diags: List[LocDiag] = []
   let main_path = root ++ "/main.dawn"
   let main_ok = match io.read_file(main_path) {
     Ok(_) -> true
@@ -188,6 +207,23 @@ pub fn load_directory(dir: String) -> LoadResult !io = {
   let loaded = load_entries_over(plan, plan.modules.project_files, no_over)
   LoadResult { modules: loaded.modules, diags: diags ++ loaded.diags }
 }
+
+## Load exactly the target captured by `plan`, without source replanning.
+pub fn load_planned(plan: ProjectPlan) -> LoadResult !io =
+  match plan.source.target {
+    source.ProjectDirectory(dir) -> load_directory_planned(dir, plan)
+    source.SourceFile(file) -> {
+      let no_over: Map[String, String] = map.empty()
+      load_entries_over(plan, [file], no_over)
+    }
+  }
+
+## Directory mode: root = <dir>/src, entry = <dir>/src/main.dawn (spec §10.1).
+pub fn load_directory(dir: String) -> LoadResult !io =
+  match project_plan_for_load(source.ProjectDirectory(dir)) {
+    Ok(plan) -> load_planned(plan)
+    Err(rejected) -> rejected
+  }
 
 ## Canonicalize a package module's `use` paths to the name-qualified spelling
 ## (`use types` → `use web/types`; an aliased dep gains the dep's real name),
