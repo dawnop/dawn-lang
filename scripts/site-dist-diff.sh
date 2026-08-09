@@ -57,9 +57,15 @@ if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi
 # JVM leg and the C leg compiled by two different compilers -- a real
 # difference in the output, and not one either backend is guilty of.
 toolchain_fingerprint() {
-  git ls-files -z bin selfhost/src selfhost/dawn.toml std runtime/c \
-      scripts/seed-release.txt |
-    xargs -0 sha256sum | sha256sum | cut -d' ' -f1
+  while IFS= read -r -d '' f; do
+    if [ -f "$f" ]; then
+      sha256sum "$f"
+    elif ! git ls-files --deleted --error-unmatch -- "$f" > /dev/null 2>&1; then
+      echo "ERROR: tracked toolchain input is unreadable: $f" >&2
+      return 1
+    fi
+  done < <(git ls-files -z bin selfhost/src selfhost/dawn.toml std runtime/c \
+      scripts/seed-release.txt) | sha256sum | cut -d' ' -f1
 }
 
 FP_BEFORE=$(toolchain_fingerprint)

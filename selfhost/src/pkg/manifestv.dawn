@@ -86,6 +86,34 @@ pub fn vdep_alias(d: VDep) -> String =
     VUrl(a, _, _, _, _, _, _) -> a
   }
 
+fn vdep_source_start(d: VDep) -> Int =
+  match d {
+    VPath(_, _, lo, _) -> lo
+    VUrl(_, _, _, _, _, lo, _) -> lo
+  }
+
+## `[deps]` entries and `[deps.<alias>]` headers are collected by separate
+## validation passes. Merge their already absolute source spans stably so the
+## resolved graph follows TOML declaration order rather than dependency form
+## or alias spelling.
+fn deps_in_source_order(deps: List[VDep]) -> List[VDep] = {
+  var out: List[VDep] = []
+  for dep in deps {
+    var next: List[VDep] = []
+    var inserted = false
+    for current in out {
+      if not inserted && vdep_source_start(dep) < vdep_source_start(current) {
+        next = next ++ [dep]
+        inserted = true
+      }
+      next = next ++ [current]
+    }
+    if not inserted { next = next ++ [dep] }
+    out = next
+  }
+  out
+}
+
 ## A validated manifest: identity plus dependencies.
 pub type ManifestV = {
   name: String,
@@ -407,7 +435,8 @@ fn validate_doc(doc: TomlDoc, dir: String) -> (Option[ManifestV], List[Diag]) = 
     }
   }
 
-  # [deps]: local path entries, then [deps.<aname>] url tables
+  # Validate local path entries and url tables separately, then stable-merge
+  # them by their absolute declaration spans before returning ManifestV.
   var deps: List[VDep] = []
   for e in table_full(doc, Some("deps")) {
     let (key, klo, khi, tv) = e
@@ -512,7 +541,12 @@ fn validate_doc(doc: TomlDoc, dir: String) -> (Option[ManifestV], List[Diag]) = 
     }
   }
 
-  (Some(ManifestV { name: name, version: version, java_deps: jdeps, deps: deps }), errs)
+  (Some(ManifestV {
+    name: name,
+    version: version,
+    java_deps: jdeps,
+    deps: deps_in_source_order(deps)
+  }), errs)
 }
 
 ## Parse and validate `text` (the dawn.toml beside `dir`): the manifest, or
@@ -549,6 +583,45 @@ test "a clean manifest validates with deps in declaration order" {
       }
       assert len(m.java_deps) == 1
       assert m.java_deps[0].artifact == "gson"
+    }
+    Err(_) -> { assert false }
+  }
+}
+
+test "path entries and url tables keep their mixed source order" {
+  let hash = "d1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  let url_first = "schema = 1\nname = \"app\"\n\n[deps.remote]\n" ++
+    "url = \"file:///remote.zip\"\nversion = \"1.0.0\"\nhash = \"" ++ hash ++
+    "\"\n\n[deps]\nlocal = \"../local\"\n"
+  match validate("/p", url_first) {
+    Ok(m) -> {
+      assert len(m.deps) == 2
+      match m.deps[0] {
+        VUrl(aname, _, _, _, _, _, _) -> { assert aname == "remote" }
+        _ -> { assert false }
+      }
+      match m.deps[1] {
+        VPath(aname, _, _, _) -> { assert aname == "local" }
+        _ -> { assert false }
+      }
+    }
+    Err(_) -> { assert false }
+  }
+
+  let path_first = "schema = 1\nname = \"app\"\n\n[deps]\nlocal = \"../local\"\n\n" ++
+    "[deps.remote]\nurl = \"file:///remote.zip\"\nversion = \"1.0.0\"\nhash = \"" ++
+    hash ++ "\"\n"
+  match validate("/p", path_first) {
+    Ok(m) -> {
+      assert len(m.deps) == 2
+      match m.deps[0] {
+        VPath(aname, _, _, _) -> { assert aname == "local" }
+        _ -> { assert false }
+      }
+      match m.deps[1] {
+        VUrl(aname, _, _, _, _, _, _) -> { assert aname == "remote" }
+        _ -> { assert false }
+      }
     }
     Err(_) -> { assert false }
   }

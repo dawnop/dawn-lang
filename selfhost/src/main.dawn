@@ -25,7 +25,7 @@ use front/astdump
 use driver/checkdump
 use ir/coredump
 use driver/stdlib.{StdCtx, load_std}
-use driver/analyze.{CheckedMod, LocDiag, load_directory, load_file, analyze_program}
+use driver/analyze.{CheckedMod, LocDiag, load_directory, load_file, source_plan, analyze_program}
 use pkg/vendor
 use jvm/jarw
 use front/fmt
@@ -73,7 +73,6 @@ use java "java.util.Map"
 use pkg/fspath
 use version.{VERSION}
 use front/diag
-use pkg/manifestv
 use front/token.{Diag}
 use pkg/pkgfetch
 use pkg/maven
@@ -852,22 +851,14 @@ fn peek_target(rest: List[String]) -> String = {
 ## The target's resolved java-deps jars, with the Kotlin CLI's progress line.
 fn resolve_java_deps(target: String) -> List[String] !io = {
   let none: List[String] = []
-  if not io.is_dir(target) { return none }
-  let mftext = match io.read_file(target ++ "/dawn.toml") {
-    Ok(t) -> t
-    Err(_) -> return none
-  }
-  match manifestv.validate(target, mftext) {
-    Ok(_) -> ()
-    Err(ds) -> {
-      io.eprint(diag.render_manifest(target ++ "/dawn.toml", mftext, ds))
-      let _ = io.exit(1)
-    }
-  }
-  let coords = maven.collect_java_deps(target)
+  if not io.exists(target) { return none }
+  if not io.is_dir(target) && not str.ends_with(target, ".dawn") { return none }
+  let plan = source_plan(target)
+  if len(plan.diags) > 0 { fail_compile(plan.diags) }
+  let coords = plan.java_coords
   if len(coords) == 0 { return none }
   io.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
-      target ++ "/dawn.toml...")
+      plan.project ++ "/dawn.toml...")
   let jars = match maven.fetch(coords) {
     Ok(js) -> js
     Err(e) -> {
@@ -878,11 +869,11 @@ fn resolve_java_deps(target: String) -> List[String] !io = {
   # PKG-04: with a dawn.lock beside the manifest, the resolution has to agree
   # with it by bytes -- a moved transitive version, a mirror answering
   # differently or a damaged cache all stop here instead of building
-  match io.read_file(maven.lock_path(target)) {
+  match io.read_file(maven.lock_path(plan.project)) {
     Err(_) -> ()
     Ok(text) ->
       match maven.parse_lock(text) {
-        Err(e) -> cli_error(maven.lock_path(target) ++ ": " ++ e)
+        Err(e) -> cli_error(maven.lock_path(plan.project) ++ ": " ++ e)
         Ok(locked) ->
           match maven.lock_of(coords, jars) {
             Err(e) -> cli_error(e)
@@ -915,11 +906,13 @@ fn run_lock(rest: List[String]) -> Unit !io = {
     }
   }
   if not io.is_dir(target) { return cli_error("not a directory: " ++ target) }
-  let path = maven.lock_path(target)
-  let coords = maven.collect_java_deps(target)
+  let plan = source_plan(target)
+  if len(plan.diags) > 0 { fail_compile(plan.diags) }
+  let path = maven.lock_path(plan.project)
+  let coords = plan.java_coords
   if len(coords) == 0 {
     if io.exists(path) {
-      return cli_error(path ++ " exists but " ++ target ++
+      return cli_error(path ++ " exists but " ++ plan.project ++
           "/dawn.toml declares no [java-deps]\n  delete the lock, or add the dependency back")
     }
     println("no [java-deps] to lock")

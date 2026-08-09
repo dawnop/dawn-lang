@@ -6,11 +6,10 @@
 # manifest one — the same manifest must work on both sides of a slow link.
 
 use std/str
-use std/list
 use std/set
 use std/map
 use std/io
-use pkg/manifest.{read_manifest, DepSrc, DPath, DRemote}
+use pkg/manifestv.{MCoord, mcoord_show}
 use pkg/pkgfetch
 use sha2/sha256
 use java "java.lang.System"
@@ -20,104 +19,9 @@ use java "coursierapi.MavenRepository"
 use java "java.util.List"
 use java "java.io.File"
 
-pub type Coord = { group: String, artifact: String, version: String }
-
-## `group:artifact:version`, or None for anything else — callers report; the
-## fine-grained errors are `manifestv`'s, which is the validation authority.
-pub fn parse_coord(spec: String) -> Option[Coord] = {
-  let parts = str.split(spec, ":")
-  if len(parts) != 3 { return None }
-  if parts[0] == "" || parts[1] == "" || parts[2] == "" { return None }
-  Some(Coord { group: parts[0], artifact: parts[1], version: parts[2] })
-}
-
-fn coord_show(c: Coord) -> String = c.group ++ ":" ++ c.artifact ++ ":" ++ c.version
-
-## The distinct java-deps coordinates of `dir`: its own manifest's first, then
-## every linked source package's (children before their parent, each source
-## root visited once) — the same union the Kotlin CLI resolves.
-pub fn collect_java_deps(dir: String) -> List[Coord] !io = {
-  var seen_coord: Set[String] = set.empty()
-  var out: List[Coord] = []
-  var seen_dir: Set[String] = set.empty()
-  match read_manifest(dir) {
-    Some(m) -> {
-      for jd in m.java_deps {
-        match parse_coord(jd.coord) {
-          Some(c) -> {
-            if not set.has(seen_coord, coord_show(c)) {
-              seen_coord = set.insert(seen_coord, coord_show(c))
-              out = out ++ [c]
-            }
-          }
-          None -> ()
-        }
-      }
-      for dep in m.deps {
-        let (o2, sc2, sd2) = walk_pkg(dep_root(dir, dep.src), out, seen_coord, seen_dir)
-        out = o2
-        seen_coord = sc2
-        seen_dir = sd2
-      }
-    }
-    None -> ()
-  }
-  out
-}
-
-fn dep_root(dir: String, src: DepSrc) -> Option[String] !io =
-  match src {
-    DPath(pdir) -> if io.is_dir(pdir) { Some(pdir) } else { None }
-    DRemote(_, _, hash, sub) -> {
-      let entry = pkgfetch.cache_dir(hash)
-      let root = if sub == "" { entry } else { entry ++ "/" ++ sub }
-      if io.is_dir(root) { Some(root) } else { None }
-    }
-  }
-
-fn walk_pkg(
-  root: Option[String],
-  out0: List[Coord],
-  seen_coord0: Set[String],
-  seen_dir0: Set[String]
-) -> (List[Coord], Set[String], Set[String]) !io = {
-  var out = out0
-  var seen_coord = seen_coord0
-  var seen_dir = seen_dir0
-  let dir = match root {
-    Some(d) -> d
-    None -> return (out, seen_coord, seen_dir)
-  }
-  if set.has(seen_dir, dir) { return (out, seen_coord, seen_dir) }
-  seen_dir = set.insert(seen_dir, dir)
-  match read_manifest(dir) {
-    Some(m) -> {
-      for dep in m.deps {
-        let (o2, sc2, sd2) = walk_pkg(dep_root(dir, dep.src), out, seen_coord, seen_dir)
-        out = o2
-        seen_coord = sc2
-        seen_dir = sd2
-      }
-      for jd in m.java_deps {
-        match parse_coord(jd.coord) {
-          Some(c) -> {
-            if not set.has(seen_coord, coord_show(c)) {
-              seen_coord = set.insert(seen_coord, coord_show(c))
-              out = out ++ [c]
-            }
-          }
-          None -> ()
-        }
-      }
-    }
-    None -> ()
-  }
-  (out, seen_coord, seen_dir)
-}
-
 ## Resolve to absolute jar paths, newest-wins across the transitive graph.
 ## Empty input returns empty without touching the network.
-pub fn fetch(coords: List[Coord]) -> Result[List[String], String] !io = {
+pub fn fetch(coords: List[MCoord]) -> Result[List[String], String] !io = {
   if len(coords) == 0 {
     let empty: List[String] = []
     return Ok(empty)
@@ -164,9 +68,9 @@ pub fn fetch(coords: List[Coord]) -> Result[List[String], String] !io = {
 
 ## Lead with what the user should do; keep coursier's detail (it names the
 ## coordinate and the urls tried).
-fn explain(detail: String, coords: List[Coord], mirror: Option[String]) -> String = {
+fn explain(detail: String, coords: List[MCoord], mirror: Option[String]) -> String = {
   let what = if len(coords) == 1 {
-    "dependency " ++ coord_show(coords[0])
+    "dependency " ++ mcoord_show(coords[0])
   } else {
     to_string(len(coords)) ++ " dependencies"
   }
@@ -342,9 +246,9 @@ pub fn parse_lock(text: String) -> Result[Lock, String] = {
 
 ## Hash the jars a resolution produced into a Lock, next to the coordinates
 ## they came from.
-pub fn lock_of(coords: List[Coord], jars: List[String]) -> Result[Lock, String] !io = {
+pub fn lock_of(coords: List[MCoord], jars: List[String]) -> Result[Lock, String] !io = {
   var cs: List[String] = []
-  for c in coords { cs = cs ++ [coord_show(c)] }
+  for c in coords { cs = cs ++ [mcoord_show(c)] }
   let found = match artifacts(jars) {
     Ok(a) -> a
     Err(e) -> return Err(e)
@@ -431,7 +335,7 @@ test "one jar file name, two artifacts: both survive, distinctly named" {
   assert str.ends_with(got[1].name, "-util-1.0.jar")
   # ...and a lock built from that set can verify itself, which is the thing a
   # name-keyed lock could not do
-  let l = match lock_of([Coord { group: "g", artifact: "a", version: "1" }],
+  let l = match lock_of([MCoord { group: "g", artifact: "a", version: "1", aname: "a" }],
     [r ++ "/a/util-1.0.jar", r ++ "/b/util-1.0.jar", r ++ "/c/asm-9.jar"]) {
     Ok(x) -> x
     Err(e) -> panic(e)
@@ -522,21 +426,8 @@ test "check_lock names the first disagreement" {
   }
 }
 
-test "coordinates parse and render" {
-  match parse_coord("org.xerial:sqlite-jdbc:3.36.0.3") {
-    Some(c) -> {
-      assert c.group == "org.xerial"
-      assert c.artifact == "sqlite-jdbc"
-      assert coord_show(c) == "org.xerial:sqlite-jdbc:3.36.0.3"
-    }
-    None -> { assert false }
-  }
-  assert parse_coord("a:b") == None
-  assert parse_coord("a::c") == None
-}
-
 test "explain names the single coordinate and the mirror" {
-  let c = Coord { group: "g", artifact: "a", version: "1" }
+  let c = MCoord { group: "g", artifact: "a", version: "1", aname: "a" }
   let m = explain("boom", [c], Some("https://mirror"))
   assert str.contains(m, "could not resolve dependency g:a:1 from https://mirror")
   assert str.contains(m, "the mirror in \$DAWN_MAVEN_MIRROR may not carry it")

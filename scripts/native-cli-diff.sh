@@ -333,7 +333,14 @@ DAWN_SELF="$DAWNC" ./scripts/selfhost-fmt-diff.sh
 CHK="$OUT/fmtcheck"
 mkdir -p "$CHK/b/c"
 i=0
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
+  if [ ! -f "$f" ]; then
+    if git ls-files --deleted --error-unmatch -- "$f" > /dev/null 2>&1; then
+      continue
+    fi
+    echo "ERROR: tracked Dawn corpus entry is unreadable: $f" >&2
+    exit 1
+  fi
   i=$((i + 1))
   if [ "$i" -gt 24 ]; then break; fi
   case $((i % 3)) in
@@ -342,7 +349,7 @@ while IFS= read -r f; do
     *) d="$CHK/b/c" ;;
   esac
   sed -e 's/^[[:space:]]*//' -e 's/   */ /g' "$f" > "$d/$i.dawn"
-done < <(git ls-files 'selfhost/src/*.dawn')
+done < <(git ls-files -z 'selfhost/src/*.dawn')
 pair "fmt --check (walk order)" fmt --check "$CHK"
 pair "fmt --check (a clean file)" fmt --check "$ROOT/selfhost/src/version.dawn"
 

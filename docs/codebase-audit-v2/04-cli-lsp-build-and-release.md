@@ -92,6 +92,26 @@
 
 ## TOOL-10 — P1 — source deps 与 Java deps 由两张不同的图规划
 
+**状态：已修（双事实源范围）。** `source_plan(target)` 现在先抓取 source package、完成 MVS，再只从最终
+`PkgR` 图收集 Java 坐标；根坐标优先、package children-before-parent、声明序、canonical root
+visited 与完整坐标首见去重由纯测试固定。`manifestv` 以绝对 source span 稳定合并 `[deps]`
+path entry 与 `[deps.<alias>]` URL table，因此混合声明序也会进入最终图；同一 archive 的 fetch
+failure 以 `(hash, url)` 去重，使同一坏镜像跨 alias/阶段只尝试一次、同 hash 的其他镜像仍可
+回退；missing subdir 则按 `(hash, subdir)` 去重。目录与 `.dawn` 文件目标
+共用这一规划算法，`resolve_java_deps` / `dawn lock` 都消费 `SourcePlan.java_coords`。`pkg/maven.dawn` 只接收
+`manifestv.MCoord`，light manifest parser、重复 coordinate parser 与 cache graph walk 已删除。
+完全离线的 `scripts/source-plan-contract/run.sh` 用两个 alias 要求同名 package 的 1.0/1.1：
+loser 携带不存在的 `g:poison:1`，winner 携带本地 `g:selected:1`；冷/热 cache 的文件目标都能
+build，lock 只含 winner；隔离 cache 的 inspector 直接读取公开 `source_plan`，固定 URL/path
+混合声明的双向顺序与 root-first；冷、热 JAR 都实际运行并精确输出 `winner:42`，且 bad-first /
+good-second 的同 hash 镜像可恢复、同一坏 URL 跨 alias/阶段仍只报告一次。设计与边界见
+[`source-plan-design.md`](../source-plan-design.md)。
+
+**残余边界：** JVM CLI 的 parent 先调用 `source_plan` 取得 classpath，re-exec 后 child loader
+会再次调用它；两次共享唯一事实源，但不是同一个 snapshot，中间修改 manifest/cache/path package
+仍有 TOCTOU。跨进程传递递归 plan 或取消 re-exec 会扩散到完整 `ProjectPlan`、TOOL-05 workspace
+snapshot 与 TOOL-06 classloader，本刀不冒称解决；TOOL-10 在这里仅关闭“双 parser/双 graph”。
+
 - **证据：S。** Java dependency collector 在正式 source load 前运行：`selfhost/src/main.dawn:858`；远端 package 只看已有 cache：`selfhost/src/pkg/maven.dawn:68`。source resolver 之后才 fetch + MVS：`selfhost/src/driver/analyze.dawn:343`、`:376`。
 - 两者还用不同 manifest parser；light parser 会在 quoted String 内的 `#` 处截断：`selfhost/src/pkg/manifest.dawn:35`，正式 loader 用 `manifestv`：`selfhost/src/driver/analyze.dawn:176`。
 - **边界：** cold cache 的远端 source package 声明 `[java-deps]` 时，第一次 build 跳过 jar，第二次 cache warm 后行为改变；未被 MVS 选中的 cached version 也可能污染 classpath。
