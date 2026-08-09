@@ -12,12 +12,11 @@
 use std/char
 use std/list
 use std/str
-use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyJava}
+use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes}
 use check/tast.{TBinOp, BEq, BNeq, BLt, BLe, BGt}
 use ir/core.{ty_key}
 use jvm/codegen.{jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of, is_ref}
 use jvm/rtclasses.{obj, PANIC_CLASS, STRINGS_CLASS, PVEC_CLASS, ARRAY_CLASS}
-use jvm/jreflect
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
 use java "org.objectweb.asm.Type"
@@ -26,7 +25,7 @@ use java "java.lang.Long"
 use java "java.lang.Integer"
 use java "java.lang.Double"
 use jvm/ops.{
-  OP_ANEWARRAY, OP_ASTORE, OP_ATHROW, OP_BIPUSH, OP_CHECKCAST, OP_D2F, OP_DCMPG, OP_DCMPL,
+  OP_ANEWARRAY, OP_ASTORE, OP_ATHROW, OP_BIPUSH, OP_D2F, OP_DCMPG, OP_DCMPL,
   OP_DSTORE, OP_DUP, OP_DUP2, OP_GOTO, OP_I2L, OP_ICONST_0, OP_ICONST_1, OP_IFEQ, OP_IFGE,
   OP_IFGT, OP_IFLE, OP_IFLT, OP_IFNE, OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL,
   OP_ISTORE, OP_IXOR, OP_L2I, OP_LCMP, OP_LCONST_0, OP_LSTORE, OP_NEW, OP_NEWARRAY, OP_POP,
@@ -329,14 +328,6 @@ pub fn adapt_java_arg(m: MethodVisitor, dawn_ty: Ty, param_cls: String) -> Unit 
     m.visitInsn(OP_L2I)
   } else if dawn_ty == TyFloat && param_cls == "float" {
     m.visitInsn(OP_D2F)
-  } else {
-    match dawn_ty {
-      TyJava(fqcn, _) ->
-        if not is_prim_name(param_cls) && not jreflect.is_assignable(param_cls, fqcn) {
-          m.visitTypeInsn(OP_CHECKCAST, internal_of(param_cls))
-        }
-      _ -> ()
-    }
   }
   ()
 }

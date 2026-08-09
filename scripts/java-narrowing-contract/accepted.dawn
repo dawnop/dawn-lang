@@ -1,0 +1,41 @@
+# Java interop paths that remain implicit because they are safe widenings or
+# representation-preserving bridges. Object-to-subtype is deliberately absent:
+# the one such flow below first goes through the checked `cast` builtin.
+
+use std/bytes
+use java "java.lang.Object"
+use java "java.nio.file.Files"
+use java "java.nio.file.Path"
+use java "java.util.Objects"
+use java "java.util.Arrays"
+use java "java.util.ArrayList"
+use java "java.lang.Math"
+
+fn erase_path(path: Path) -> Object !io =
+  Objects.requireNonNull(path).expect("path")
+
+fn checked_path(value: Object) -> Bool !io = {
+  let claimed: Result[Path, ForeignError] = cast(value)
+  match claimed {
+    Ok(path) -> Files.exists(path)
+    Err(_) -> false
+  }
+}
+
+fn require(ok: Bool, message: String) -> Unit =
+  if ok { () } else { panic(message) }
+
+pub fn main() -> Unit !io = {
+  let path = Path.of(".").expect("path")
+  require(checked_path(erase_path(path)), "explicit cast failed")
+
+  let raw = bytes.utf8("abc")
+  require(Arrays.equals(raw, raw), "Bytes bridge failed")
+
+  let values = ArrayList.new(["a", "b"])
+  values.forEach((value: Object) => ())
+  require(values.size() == 2, "List or SAM bridge failed")
+
+  require(Math.abs(-3) == 3, "overload selection failed")
+  println("ok")
+}

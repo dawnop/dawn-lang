@@ -1555,15 +1555,11 @@ fn slurp(p: String) -> String !io = {
 禁令没跟着撤，2026-07-27 撤掉。）`Bytes` 不参与 comptime 常量折叠，也不能作 bare 一等函数值
 （用 lambda 包一层）。
 
-**不透明值收窄回具体引用形参**：擦除泛型的返回（§9.2）落成不透明 `Object`，但业务
-常需把它**原样喂回**某个要具体引用类型的 Java 形参——例如 `HttpResponse.body()`
-以 `BodyHandlers.ofByteArray()` 取到的 `Object` 实为 `byte[]`，要写进
-`OutputStream.write(byte[])`。此时重载消解允许不透明 `Object` 实参匹配具体引用形参，
-桥接处插一次运行期 `CHECKCAST`（失败即 `ClassCastException` 穿透，非静默）。方向与
-§9.3 的「宽化到 `Object`」相反、成对：宽化是丢类型信息传出，收窄是运行期认领回来。
-不透明值仍**不可命名、不可索引**——收窄只发生在跨边界传参的隐式适配处，Dawn 代码
-拿不到该类型的名字。这让「取二进制体 → 透传出去」这类管道无需把字节读进 Dawn 值
-（省一次全量拷贝，大文件不顶爆内存）。
+**擦除的 `Object` 只可显式认领。** 擦除泛型的返回（§9.2）落成不透明
+`Object`；重载消解只按普通 Java assignability 使用这个静态类型，因此它可传给
+`Object` 形参，却不能反向匹配 `Path`、`InputStream`、`byte[]` 等具体引用
+形参。编译器不会在参数桥接处插隐藏 `CHECKCAST`，也不会让同一次失败在显式写法中
+成为值、在隐式写法中却穿透宿主异常。
 
 若确知某个擦除泛型的不透明 `Object` 运行期是某个具体引用类型（如 `HttpResponse.body()` 配
 `BodyHandlers.ofByteArray()` 时是 `byte[]`），用泛型内建
@@ -1571,7 +1567,8 @@ fn slurp(p: String) -> String !io = {
 （T 取自调用点的期望类型，如 `let b: Result[Bytes, ForeignError] = cast(...)`）——
 认领处做一次运行期检查，**类型不符是 `Err` 而不是穿透的异常**，载荷见 §9.8.1
 （JVM 上 `kind` 是 `java.lang.ClassCastException`）。T 须是引用类型
-（编译期拒绝 primitive / 无期望类型）。
+（编译期拒绝 primitive / 无期望类型）。当前表面无法命名的 Java array 或参数化类型也
+不获得隐式例外；真实用例需要它们时，应先补可书写的目标类型。
 
 > **签名为纯的函数不该能用宿主异常退出**（LANG-02）——`cast` 从前抛 `ClassCastException`，
 > 那正是纯签名本该排除的那条出口。现在失败是值。迁移经过的三期（含一个只活一个

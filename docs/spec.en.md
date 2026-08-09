@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ ca195b6534f0494b -->
+<!-- doc-check: translation-of docs/spec.md @ 2703d8720720ee29 -->
 
 # Dawn Language Specification
 
@@ -1902,20 +1902,13 @@ content the ban did not get withdrawn along with them, and was withdrawn on 2026
 `Bytes` does not take part in comptime constant folding, and cannot be a bare first-class
 function value either (wrap it in a lambda).
 
-**Narrowing an opaque value back to a concrete reference parameter**: the return of an
-erased generic (§9.2) lands as an opaque `Object`, but real code often needs to **feed it
-straight back** into some Java parameter that wants a concrete reference type — for
-example the `Object` that `HttpResponse.body()` yields with `BodyHandlers.ofByteArray()`
-is really a `byte[]`, and has to be written into `OutputStream.write(byte[])`. Overload
-resolution therefore lets an opaque `Object` argument match a concrete reference
-parameter, with one runtime `CHECKCAST` inserted at the bridge (a failure is a
-`ClassCastException` passing through, not silence). This is the opposite of, and paired
-with, "widening to `Object`" in §9.3: widening throws type information away on the way
-out, narrowing claims it back at runtime. An opaque value is still **unnameable and
-unindexable** — narrowing only happens in the implicit adaptation where an argument
-crosses the boundary, and Dawn code never gets hold of that type's name. This lets a
-pipeline like "take the binary body → pass it straight through" avoid reading the bytes
-into a Dawn value (one whole copy saved, so a large file does not blow up memory).
+**An erased `Object` may be claimed only explicitly.** The return of an erased generic
+(§9.2) lands as an opaque `Object`. Overload resolution uses that static type only through
+ordinary Java assignability: it can be passed to an `Object` parameter, but it cannot match a
+concrete reference parameter such as `Path`, `InputStream`, or `byte[]` in the other
+direction. The compiler inserts no hidden `CHECKCAST` at the argument bridge; the same
+conversion cannot fail as a value when written explicitly but escape through a host exception
+when inserted implicitly.
 
 If you know for certain that some opaque `Object` from an erased generic is at runtime a
 particular concrete reference type (such as `byte[]` when `HttpResponse.body()` is paired
@@ -1925,7 +1918,9 @@ from the expected type at the call site, e.g.
 `let b: Result[Bytes, ForeignError] = cast(...)`) — the claim does one runtime
 check, and **a type mismatch is an `Err`, not an exception passing through**; for the
 payload see §9.8.1 (on the JVM the `kind` is `java.lang.ClassCastException`). T must be a
-reference type (a primitive, or no expected type, is rejected at compile time).
+reference type (a primitive, or no expected type, is rejected at compile time). Java array or
+parameterized targets that cannot currently be named in Dawn get no implicit exception either;
+when a real use case needs one, the surface must first gain a writable target type.
 
 > **A function with a pure signature should not be able to exit through a host
 > exception** (LANG-02) — `cast` used to throw `ClassCastException`, which is exactly the

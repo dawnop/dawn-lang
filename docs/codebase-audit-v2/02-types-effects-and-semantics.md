@@ -57,11 +57,22 @@
 - **影响：** scanner 和 parser 大量继续比较裸整数/`char.code`，早期语言新增 `Char` 的收益被最核心遍历接口抵消。
 - **建议：** 分成 `current(c) -> Char`（要求 not done，越界 panic）与 `peek(c) -> Option[Char]`；性能敏感的内部 intrinsic 可保留 sentinel，但不应成为 public std contract。
 
-## SEM-06 — P1 — Java `Object` 隐式窄化插入隐藏 `CHECKCAST`
+## SEM-06 — P1（已修）— Java `Object` 隐式窄化插入隐藏 `CHECKCAST`
 
-- **证据：S。** 规范总体声称没有隐式转换：`docs/spec.md:177`，显式 `cast` 用 `Result` 表达失败：`docs/spec.md:1430`；但另一个 interop 规则允许 `Object` 隐式窄化：`docs/spec.md:1420`，overload scorer 接受该转换：`selfhost/src/check/checker.dawn:5461`。
+> **后续处置（2026-08-09）：已修。** Java overload scorer 现在只接受 exact match 与
+> `is_assignable(parameter, argument)` 为真的引用宽化；静态类型为 `Object` 的实参不再
+> 反向匹配具体引用形参。JVM 参数适配器也只保留 `Int → int` 与
+> `Float → float` 两个已由 checker 选定的 scalar narrowing，不再拥有引用
+> `CHECKCAST` fallback。`cast` 返回 `Result`，成为 Object-to-subtype 的唯一认领路径。
+> `scripts/java-narrowing-contract/run.sh` 固定隐式拒绝、显式 cast、合法 widening、
+> Bytes、SAM、List bridge 与 overload 行为；恢复 scorer 特例的可执行 mutant 会打红
+> checker 单测，恢复后端 fallback 的可编译 mutant 会打红结构门禁。
+
+- **原证据：S。** 规范总体声称没有隐式转换，而旧 interop 规则与 overload scorer
+  允许 `Object` 隐式窄化；JVM helper 随后补发隐藏 `CHECKCAST`。
 - **影响：** 同一转换显式写是值级错误，编译器自动插入时却是隐藏异常；Java overload 集变化还可能改变被选方法与失败方式。
-- **建议：** 删除隐式窄化，要求 checked cast。若 Java array/parameterized target 当前不可命名，应先补可写的 target type，而不是用不安全转换绕过表面语法。
+- **处置：** 删除隐式窄化并要求 checked cast。Java array/parameterized target 当前不可命名时
+  不再借不安全转换绕过表面语法；需要时先增加可书写的 target type。
 
 ## SEM-07 — P2 — public surface 可泄露 private type/trait/effect
 
