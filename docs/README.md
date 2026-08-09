@@ -1,17 +1,17 @@
 # docs/ 索引
 
-> 状态：**current** —— 全目录的分层索引与状态登记处。**每篇文档的权威状态在它自己的
-> 文件头**；这张索引与文件头冲突时以文件头为准，并请顺手改这里。
+> 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
+> 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
 `docs/` 下现有 83 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
-这份索引把它们分层，并给每篇标状态。**篇数与「每篇都在索引里」这两件事都由
+这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
 `scripts/doc-check.py` 核对**，所以上面那个数字不会像它的前任（长期停在 43）那样烂掉。
 
-**状态取值**
+**文档生命周期取值**
 
-| 状态 | 含义 |
+| 生命周期 | 含义 |
 |---|---|
 | **normative** | 权威定义。实现与它冲突就是实现的 bug。只有一篇。 |
 | **current** | 描述当前的架构或流程，可以照着做。 |
@@ -21,7 +21,7 @@
 
 ## 权威规范
 
-| 文档 | 状态 | 说明 |
+| 文档 | 生命周期 | 说明 |
 |---|---|---|
 | [spec.md](spec.md) | **normative** | 语言的权威定义（词法、类型、效果、comptime、互操作、编译模型）。 |
 | [spec.en.md](spec.en.md) | **normative** | 上面那篇的**英文译本**。改规范先改中文，再改这里；两者不脱节由 `doc-check.py` 的 transl 检查盯着。 |
@@ -29,20 +29,20 @@
 
 ## 当前全仓审查（v2）
 
-| 文档 | 状态 | 说明 |
+| 文档 | 生命周期 | 说明 |
 |---|---|---|
-| [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60 冻结基线 + `18fb3d6` 当前状态层；97 项为 60 fixed / 5 partial / 30 open / 2 retracted，原严重度、证据与 29 行 P1 索引不随后续处置重写。 |
-| [codebase-audit-v2/00-methodology-and-retractions.md](codebase-audit-v2/00-methodology-and-retractions.md) | current | 基线、证据等级、严重度、fixed/retracted 边界，以及 HOLD/延后能力不进入自治 TODO 的口径。 |
-| [codebase-audit-v2/01-syntax-and-formatting.md](codebase-audit-v2/01-syntax-and-formatting.md) | current | lexer、parser、formatter、pattern 与编辑器语法；SYN-04 guard 只记静态候选，SYN-17 是 D/P3 关键字预算设计项。 |
-| [codebase-audit-v2/02-types-effects-and-semantics.md](codebase-audit-v2/02-types-effects-and-semantics.md) | current | 类型、效果、Cursor/Char 与 nominal abstraction；SEM-05/08 已撤回，SEM-09/10 延后，SEM-16 HOLD。 |
-| [codebase-audit-v2/03-compiler-and-runtime-architecture.md](codebase-audit-v2/03-compiler-and-runtime-architecture.md) | current | checker/Core/comptime 与双后端；ARC-11 部分修复，ARC-09/10 按既有重开条件 HOLD。 |
-| [codebase-audit-v2/04-cli-lsp-build-and-release.md](codebase-audit-v2/04-cli-lsp-build-and-release.md) | current | CLI、LSP、依赖与发布链；TOOL-05/06/08 已修，TOOL-14 因递归输入/fail-open 残余为 partial。 |
-| [codebase-audit-v2/05-stdlib-and-packages.md](codebase-audit-v2/05-stdlib-and-packages.md) | current | std、inflate、JSON、Web 与 SHA-2；LIB-07 已修，LIB-18 clean truncation 仅为未验证静态候选。 |
+| [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60 冻结严重度与证据、机器权威的当前四状态分区、冻结 P1 映射和执行顺序。 |
+| [codebase-audit-v2/00-methodology-and-retractions.md](codebase-audit-v2/00-methodology-and-retractions.md) | current | 基线、证据等级、严重度、历史快照与处置边界。 |
+| [codebase-audit-v2/01-syntax-and-formatting.md](codebase-audit-v2/01-syntax-and-formatting.md) | current | lexer、parser、formatter、pattern 与编辑器语法。 |
+| [codebase-audit-v2/02-types-effects-and-semantics.md](codebase-audit-v2/02-types-effects-and-semantics.md) | current | 类型、效果、Cursor/Char 与 nominal abstraction。 |
+| [codebase-audit-v2/03-compiler-and-runtime-architecture.md](codebase-audit-v2/03-compiler-and-runtime-architecture.md) | current | checker、Core、comptime 与双后端架构。 |
+| [codebase-audit-v2/04-cli-lsp-build-and-release.md](codebase-audit-v2/04-cli-lsp-build-and-release.md) | current | CLI、LSP、依赖、自举与发布链。 |
+| [codebase-audit-v2/05-stdlib-and-packages.md](codebase-audit-v2/05-stdlib-and-packages.md) | current | std、inflate、JSON、Web 与 SHA-2。 |
 | [codebase-audit-v2/06-docs-tests-and-governance.md](codebase-audit-v2/06-docs-tests-and-governance.md) | current | normative spec、文档状态、examples/packages/contract gates 与仓库治理。 |
 
 ## 当前架构与流程
 
-| 文档 | 状态 | 说明 |
+| 文档 | 生命周期 | 说明 |
 |---|---|---|
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
 | [bootstrap-input-manifest-design.md](bootstrap-input-manifest-design.md) | current | TOOL-14 的 project-only Producer、已落地的递归 launcher discovery，以及尚未落地的 framed v2 stamp/可恢复 commit-marker 边界。 |
@@ -74,33 +74,29 @@
 | [std-audit.md](std-audit.md) | current | std 的交付方式、优雅性判据与欠账台账（S5）。骨架五条已做掉大半，仍在册的欠账逐条写在它的状态行里。 |
 | [stdlib-impl-notes.md](stdlib-impl-notes.md) | current | std 里几个函数**为什么长成这样**：被否掉的写法、实测数字、逼出今天形状的两后端分歧。std 的 `##` 注释只留契约，这些话从那里搬来。 |
 
-## 审查待办的设计方案（`docs/audit/`）
+## 旧审查设计材料（`docs/audit/`）
 
-2026-07-25 那次全仓审查剩下的待办，动码前的方案。索引、顺序与逐份状态见
-[audit/README.md](audit/README.md)，**与 native 那条线的撞车见
-[audit/native-plan-overlap.md](audit/native-plan-overlap.md)**。
+2026-07-25 全仓审查衍生的方案、裁决与复审记录。下表只登记路径、覆盖、材料类型和
+破坏性边界；设计任务结果读各文档文件头与正文，当前 finding 状态只读
+[审查 v2 总纲](codebase-audit-v2.md)。历史依赖见 [audit/README.md](audit/README.md)，
+与 native 计划的边界见 [audit/native-plan-overlap.md](audit/native-plan-overlap.md)。
 
-这一节曾整体标着「全部 proposed」，**今天只剩一份还名副其实**：
+| 文档 | 覆盖 | 材料类型 | 破坏性边界 |
+|---|---|---|---|
+| [audit/web-api-v2-design.md](audit/web-api-v2-design.md) | WEB-03/04/06/07/09/10 | API 设计 | 是（packages/web 代际迁移） |
+| [audit/lsp-robustness-design.md](audit/lsp-robustness-design.md) | LSP-01/02/04 | 鲁棒性设计与负控记录 | 否 |
+| [audit/nominal-types-design.md](audit/nominal-types-design.md) | LANG-04/05 | nominal/Char 方案与裁决记录 | 是（字面量与公开类型边界） |
+| [audit/module-access-design.md](audit/module-access-design.md) | LANG-06/07 | 模块访问设计 | 否（语法与能力放宽） |
+| [audit/package-integrity-design.md](audit/package-integrity-design.md) | PKG-02/04 | cache/lock 完整性设计 | 否 |
+| [audit/application-syntax-design.md](audit/application-syntax-design.md) | SYN-02/03 | application 语法设计 | 否（语法放宽） |
+| [audit/purity-boundary-design.md](audit/purity-boundary-design.md) | LANG-01 P0 + ARCH-06 | purity boundary 设计 | 是（语言能力收窄） |
+| [audit/error-model-design.md](audit/error-model-design.md) | ERR-02/03 + LANG-02 | 错误模型设计 | 是（公开错误与 cast API） |
+| [audit/lowered-ir-design.md](audit/lowered-ir-design.md) | ARCH-01/02/03/04 | Core IR 补充材料 | 否（发射输出保持不变） |
+| [audit/ceval-trampoline-verdict.md](audit/ceval-trampoline-verdict.md) | purity boundary 的 comptime 栈方案 | 收益重估与裁决记录 | 否 |
+| [audit/re-audit-2026-07-30.md](audit/re-audit-2026-07-30.md) | RP/RX/RC/RD 共 53 条 | 第二轮复审记录 | 否（只读审查） |
+| [audit/re-audit-b-decisions.md](audit/re-audit-b-decisions.md) | 复审 B 批八条契约件 | 裁决记录 | 依各契约件 |
 
-| 文档 | 覆盖 | 状态 |
-|---|---|---|
-| [audit/web-api-v2-design.md](audit/web-api-v2-design.md) | WEB-03/04/06/07/09/10 | **proposed，未动**——只发了 WEB-09 的不破坏半；破坏性 API 变更，先发 tag |
-| [audit/lsp-robustness-design.md](audit/lsp-robustness-design.md) | LSP-01/02/04 | **均已落地**：LSP-01/02 于 07-30 完成，LSP-04 debounce 于 08-05 完成；本文保留历史方案与负控记录 |
-| [audit/nominal-types-design.md](audit/nominal-types-design.md) | LANG-04/05 | 步 1–3 **驳回**（`opaque type` 已提供该机制）；**LANG-04 仍是活账** |
-| [audit/module-access-design.md](audit/module-access-design.md) | LANG-06/07 | **已落地**（2026-07-30 当日全部发出） |
-| [audit/package-integrity-design.md](audit/package-integrity-design.md) | PKG-02/04 | **已落地**（`dawn cache verify` + `dawn lock --check`） |
-| [audit/application-syntax-design.md](audit/application-syntax-design.md) | SYN-02/03 | **已落地**（2026-07-31 结清） |
-| [audit/purity-boundary-design.md](audit/purity-boundary-design.md) | LANG-01 P0 + ARCH-06 | **已关账**：步 1 落地、步 2 被吞并、步 3 裁决不做 |
-| [audit/error-model-design.md](audit/error-model-design.md) | ERR-02/03 + LANG-02 | A/B **已落地**，**C2 关档不做** |
-| [audit/lowered-ir-design.md](audit/lowered-ir-design.md) | ARCH-01/02/03/04 | **降级为 Core IR 的补充材料**，不是任何一条待办的方案 |
-| [audit/ceval-trampoline-verdict.md](audit/ceval-trampoline-verdict.md) | purity-boundary 步 3 的收益重估 | **裁决：不做**（07-31，翻案条件写在文里） |
-| [audit/re-audit-2026-07-30.md](audit/re-audit-2026-07-30.md) | 第二轮复审 53 条发现 | current（发现记录），§六已 triage 并逐批消化 |
-| [audit/re-audit-b-decisions.md](audit/re-audit-b-decisions.md) | 复审 B 批八条契约件 | **已裁决**（07-31，全部按建议），降为过程记录 |
-
-（[arch-split-design.md](arch-split-design.md) 曾在此列，**2026-08-03 已落地**，
-移到下一节。）
-
-## 设计方案（已落地，作为特性的「为什么」）
+## 特性设计与实现理由
 
 [bytes-design.md](bytes-design.md) ·
 [cast-interop.md](cast-interop.md) ·

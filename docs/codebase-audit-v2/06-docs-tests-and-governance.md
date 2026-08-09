@@ -7,7 +7,7 @@
 ## 本专题结论
 
 - 仓库的门禁数量很多，且多个历史缺口已经修复；问题不是“没有测试”，而是个别独立 oracle 没接 CI、发现式原则没有覆盖 packages、某些 reject harness 只找子串。
-- 文档治理已经有 status/index/link/version 检查，但状态值与正文是否真实仍靠人工；当前恰好出现 Web v2、LSP debounce、Char 三条同时陈旧，证明这一缺口已产生结果。
+- 文档治理已有 status/index/link/version 检查；GOV-04 又把 finding 当前状态收成一个精确分区，并禁止两级索引复制设计任务进度，避免 Web v2、LSP debounce、Char 那类成批漂移重现。
 - normative spec 混入过期 roadmap 和不可编译 quick reference，会让“实现与规范冲突时谁是 bug”失去可操作性。
 
 ## GOV-01 — P1 — dtoa 独立契约没有接入 CI
@@ -35,13 +35,24 @@
 - **影响：** 已落地、已否决与真正未实现混在 normative roadmap，后续设计者无法知道哪些是 contract。
 - **建议：** normative spec 只保留当前 contract；roadmap 移到单独 current plan，已完成/否决进入 historical log。
 
-## GOV-04 — P2 — current audit indexes 与源码状态成批漂移
+## GOV-04 — P2 — current audit indexes 与源码状态成批漂移（已修）
 
-- **证据：S。** `docs/README.md:61` 称 Web v2 proposed，`:62` 称 LSP-04 未落地，`:63` 称 Char 仍是活账；`docs/audit/README.md:8` 也称这三条“真正没动”。
-- 实际 Web v2 完成：`docs/audit/web-api-v2-design.md:3`；Char 完成：`docs/audit/nominal-types-design.md:3`；LSP doc 自己在同一 header 先说未落地、后说完成：`docs/audit/lsp-robustness-design.md:6`、`:13`，实现已用 debounce：`selfhost/src/lsp/server.dawn:464`。
-- `docs/codebase-audit.md:3` 仍标 current，基线却是 dawn 0.11.0；它的两个 P0 都已撤回。
-- **原因：** `scripts/doc-check.py:621` 只检查 status line 存在，`:644` 不验证受控值或 index/body consistency；`docs/README.md:143` 已承认该限制。
-- **建议：** 稳定 task ID + 受控 `open/done/rejected/historical` metadata；单一 registry 生成 index，design header 只引用 registry，不再手抄状态。
+> **后续处置（2026-08-10）：已修。** `docs/codebase-audit-v2.md` 的
+> `fixed/partial/open/retracted` 四状态层现由 `scripts/doc-check.py` 对六份明细标题派生的
+> 97 个 ID 做精确分区校验，并交叉核对声明计数、专题矩阵和冻结 29 行 P1 映射。旧三状态层
+> 只作为历史快照继续校验。`docs/README.md` 与 `docs/audit/README.md` 的设计材料表只保留
+> 路径、覆盖、材料类型和破坏性边界，不再复制任务进度；文档生命周期仍由各自文件头表达。
+> 同一门禁还用相对路径关系判定 `docs/` 范围，仓库祖先目录名含 `docs` 时不会再误判根文件。
+> 错计数、重复/遗漏/未知 ID、P1 映射冲突、索引恢复任务状态列/单元格与路径误判均有
+> 定向变异负控。
+
+- **审查时证据：S。** 两级索引曾同时把 Web v2 写成 proposed、LSP debounce 写成未落地、
+  Char 写成活账，而三份设计材料的文件头与实现已经给出不同结论；旧 `codebase-audit.md`
+  也曾把历史基线标成 current。
+- **根因：** finding 处置、设计任务结果和文档生命周期混用一套“状态”概念，并在索引中
+  手抄自由文本副本；原门禁只检查状态行存在，审计分区也只读取已明确降为历史的三状态层。
+- **裁决：** 不新增 JSON/YAML registry。finding 处置只认总纲四状态精确分区；设计材料的
+  生命周期与任务结果只认其文件头和正文；索引只做发现导航，不承担任务状态副本。
 
 ## GOV-05 — P2 — examples gate 不执行多数 `main`（已修）
 

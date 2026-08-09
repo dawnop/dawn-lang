@@ -11,8 +11,9 @@
 - 最终引用均按 `86f6a0f63960` 复核并迁到新路径。并发代理没有编辑本报告文件；写报告前工作树为空。
 - 旧报告 `docs/codebase-audit.md` 的实现基线是 dawn 0.11.0。它继续保留历史价值，但不再作为当前风险台账。
 - 后续状态先由 R-AUDIT 在 `bfc358a6116303623a4968f8247689bcd5645793` 对六份明细的
-  97 个 ID 逐项重算，再计入 `38f625a` / `24d5d2f` 对 `SYN-12` 的关闭；冻结严重度与
-  原始证据不改写，当前状态另分 fixed / partial / open / retracted 四类。
+  97 个 ID 逐项重算，再计入后续关闭项；冻结严重度与原始证据不改写。总纲中截至
+  `76491bb` 的 54 已修 / 3 部分 / 40 开放三状态分区是明确的历史快照，继续接受完整性
+  校验，但绝不是 current registry；97 项的唯一当前状态源是总纲的四状态层。
 
 ## 2. 范围与分工
 
@@ -113,11 +114,12 @@ v0.60 冻结基线的最高风险项 `SEM-01` 只给出 **S / P0 候选**。遵�
 
 “已知”只能降低发现的新颖性，不能降低语义影响；“明确取舍”只有在规范、实现、工具和错误模型都一致时才可作为驳回理由。
 
-## 8. `18fb3d6` 状态订正与撤回边界
+## 8. `18fb3d6` 历史状态快照与撤回边界
 
-当前状态必须与严重度分开读：严重度回答“v0.60 发现时若成立有多重”，状态回答“到该验收
-基线如何处置”。`retracted` 只用于后续复核认定原项不是缺陷，不能拿来包装“尚未实现”或
-“修了一半”。本轮逐 ID 结果为 **60 fixed / 5 partial / 30 open / 2 retracted = 97**；
+本节只记录 `18fb3d6` 验收时点，不是 current registry；后续处置只更新总纲的机器权威
+四状态层。严重度回答“v0.60 发现时若成立有多重”，本快照状态回答“到该验收基线如何
+处置”。`retracted` 只用于后续复核认定原项不是缺陷，不能拿来包装“尚未实现”或
+“修了一半”。该时点逐 ID 结果为 **60 fixed / 5 partial / 30 open / 2 retracted = 97**；
 相对 `60e174a`，`TOOL-05`/`TOOL-06` 由 open 转为 fixed，其余 ID 状态不变。
 
 - **`SEM-05` retracted。** `cursor.char -> Int` 与 `-1` sentinel 是规范明确列出的底层扫描
@@ -141,9 +143,9 @@ v0.60 冻结基线的最高风险项 `SEM-01` 只给出 **S / P0 候选**。遵�
   五种形状均由 parser fixture 固定；checker 仍会拒绝 `Int` 返回函数中的裸 `return`。与
   `SYN-12` 共用的组合 contract 里，`drop-rbracket-return-boundary` mutant 先成功编译，再由
   owning parser test 转红；normalized Core 仅 `front.parser` 改变。
-- **当前最高风险只记三项未验证静态候选：** `SYN-04` effectful guard 可能因 alternative
+- **该快照最高风险只记三项未验证静态候选：** `SYN-04` effectful guard 可能因 alternative
   重复求值、`SEM-04` comptime/runtime Cursor 偏移可能跨模型失配、`LIB-18` streaming clean
   truncation 可能静默成功。三者不新增 ID、不提升冻结严重度，也不冒称动态确认。
-- **执行状态不等于 finding 状态。** `SEM-09/10` 是 intentional delayed capability/ABI，
+- **执行状态不等于 finding 状态。** 该快照中 `SEM-09/10` 是 intentional delayed capability/ABI，
   仍 open 但不进自治修 bug；`ARC-09/10` 与 `SEM-16` 按既有不做/重开条件置于 HOLD；
   `SYN-17` 是 D/P3 的关键字预算设计项。只有条件满足或维护者重开时才进入实现队列。

@@ -7,7 +7,7 @@ and the EBNF disagreed with the parser in several places -- all found by a
 human reading, none by a test. This script is the part of that gap a script
 can close.
 
-Eleven checks, each unambiguous on purpose (a doc lint with false positives
+Twelve checks, each unambiguous on purpose (a doc lint with false positives
 gets disabled, and then it protects nothing):
 
   links     every relative Markdown link resolves to a file in the repo
@@ -34,6 +34,9 @@ gets disabled, and then it protects nothing):
   transl    every translated document registers the digest of the original it
             was translated from, that digest is still the original's, and its
             fenced blocks line up one-for-one with the original's
+  audit     the current four-state audit registry exactly partitions all 97
+            detail-heading IDs and agrees with its counts, topic matrix and
+            frozen P1 mapping; audit indexes do not copy task progress
   contracts  settled semantic and repository-governance clauses remain present;
              this is a targeted pin, not full prose comparison
 
@@ -140,9 +143,12 @@ check whose blind spot is undocumented gets mistaken for a check:
     are same-file navigation, while cross-document references must name or link
     their `.md` target. The references that do name their target are checked;
     the rest outside the specs are counted as skipped, not silently counted as passing.
-  * status: the *presence* of the line, never its truth. Nothing here can
+  * status: the *presence* of the document-lifecycle line, never its truth. Nothing here can
     tell `> 状态：current` from `> 状态：动工计划`, on a plan that shipped a
     week ago, and pretending otherwise would be worse than the gap.
+    Audit finding disposition is different: its finite ID universe and current
+    registry are checked by the audit contract below. Free-form design-task
+    progress remains authoritative only in each design document.
   * transl: whether the marker was *earned*. Re-registering the digest
     without touching a word of the translation makes this green, and nothing
     here can tell that from a real re-translation -- the marker is a human
@@ -325,9 +331,21 @@ SPEC_PATHS = {ROOT / "docs/spec.md", ROOT / "docs/spec.en.md"}
 
 HISTORICAL_V01_MARKER = "<!-- doc-check: historical-v0-1 -->"
 
-AUDIT_STATUS = re.compile(r"^\*\*(已修|部分|开放)（(\d+)）\*\*$", re.M)
-AUDIT_SELF_CHECK = re.compile(
+HISTORICAL_AUDIT_HEADING = "冻结后的历史状态层（截至 `76491bb`）"
+CURRENT_AUDIT_HEADING = "机器权威的当前四状态层"
+HISTORICAL_AUDIT_STATES = ("已修", "部分", "开放")
+CURRENT_AUDIT_STATES = ("fixed", "partial", "open", "retracted")
+HISTORICAL_AUDIT_STATUS = re.compile(r"^\*\*(已修|部分|开放)（(\d+)）\*\*$", re.M)
+CURRENT_AUDIT_STATUS = re.compile(
+    r"^#### 当前 (fixed|partial|open|retracted)（(\d+)）$", re.M)
+HISTORICAL_AUDIT_SELF_CHECK = re.compile(
     r"计数自检：\*\*(\d+) 已修 \+ (\d+) 部分 \+ (\d+) 开放 = (\d+)\*\*")
+CURRENT_AUDIT_SELF_CHECK = re.compile(
+    r"当前计数自检：\*\*(\d+) fixed \+ (\d+) partial \+ (\d+) open \+ "
+    r"(\d+) retracted = (\d+)\*\*")
+AUDIT_P1_SELF_CHECK = re.compile(
+    r"逐行重算结果：\*\*(\d+) fixed / (\d+) partial / (\d+) open / "
+    r"(\d+) retracted = (\d+)\*\*")
 AUDIT_TOPIC_TOTALS = (
     ("语法", 19),
     ("语义", 17),
@@ -357,6 +375,8 @@ AUDIT_ID_RANGE = re.compile(
     r"(?:\s*–\s*`?(?:(SYN|SEM|ARC|TOOL|LIB|GOV)-)?(\d{2})`?)?")
 AUDIT_ANY_ID = re.compile(r"`?([A-Z]+)-(\d{2})`?")
 AUDIT_DETAIL_HEADING = re.compile(r"^##\s+([A-Z]+)-(\d{2})\b", re.M)
+AUDIT_P1_DETAIL_HEADING = re.compile(
+    r"^##\s+([A-Z]+)-(\d{2})\s+—\s+P1\b", re.M)
 AUDIT_DETAIL_FILES = (
     ("SYN", "docs/codebase-audit-v2/01-syntax-and-formatting.md"),
     ("SEM", "docs/codebase-audit-v2/02-types-effects-and-semantics.md"),
@@ -364,6 +384,18 @@ AUDIT_DETAIL_FILES = (
     ("TOOL", "docs/codebase-audit-v2/04-cli-lsp-build-and-release.md"),
     ("LIB", "docs/codebase-audit-v2/05-stdlib-and-packages.md"),
     ("GOV", "docs/codebase-audit-v2/06-docs-tests-and-governance.md"),
+)
+
+AUDIT_INDEX_TABLES = (
+    ("docs/README.md", "旧审查设计材料（`docs/audit/`）",
+     ("文档", "覆盖", "材料类型", "破坏性边界")),
+    ("docs/audit/README.md", "一、材料索引：方案、台账、裁决与过程记录",
+     ("文档", "覆盖", "破坏性", "材料类型")),
+)
+INDEX_TASK_STATUS = re.compile(
+    r"\b(?:proposed|done|open|fixed|partial|retracted)\b|"
+    r"(?:已|未)(?:落地|完成|关账|修复|裁决|驳回)|仍开放|活账|未动",
+    re.I,
 )
 
 VERSION_SRC = ROOT / "selfhost" / "src" / "version.dawn"
@@ -643,6 +675,42 @@ def markdown_section_lead(text: str, heading: str) -> str | None:
         return None
     child = re.search(r"^#{3,6}\s+", markdown_structure(body), re.M)
     return body if child is None else body[:child.start()]
+
+
+def markdown_table(text: str, heading: str) -> tuple[tuple[str, ...],
+                                                     list[tuple[str, ...]],
+                                                     list[str]]:
+    """Return the first pipe table in an exact section."""
+    body = markdown_section(text, heading)
+    if body is None:
+        return (), [], [f"missing section {heading!r}"]
+    lines = active_markdown(body).splitlines()
+    for index in range(len(lines) - 1):
+        header = markdown_table_row(lines[index])
+        separator = markdown_table_row(lines[index + 1])
+        if not header or len(separator) != len(header):
+            continue
+        if not all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", ""))
+                   for cell in separator):
+            continue
+        rows: list[tuple[str, ...]] = []
+        for line in lines[index + 2:]:
+            row = markdown_table_row(line)
+            if not row:
+                break
+            if len(row) != len(header):
+                return header, rows, [f"table under {heading!r} has a row with "
+                                      f"{len(row)} cells, expected {len(header)}"]
+            rows.append(row)
+        return header, rows, []
+    return (), [], [f"section {heading!r} has no Markdown table"]
+
+
+def markdown_table_row(line: str) -> tuple[str, ...]:
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return ()
+    return tuple(cell.strip() for cell in stripped[1:-1].split("|"))
 
 
 def check_markdown_section_selftest() -> tuple[list[str], int]:
@@ -984,7 +1052,8 @@ def check_version(path: pathlib.Path, text: str, version: str) -> tuple[list[str
     return bad, claims
 
 
-def check_status(path: pathlib.Path, text: str) -> tuple[list[str], int]:
+def check_status(path: pathlib.Path, text: str,
+                 root: pathlib.Path = ROOT) -> tuple[list[str], int]:
     """DOC-10: a reader must be able to tell whether a document still applies
     without reading it. 28 documents had accumulated by the audit -- plans,
     surveys, landing logs, specs and runbooks in one pile -- and the fix is a
@@ -1004,14 +1073,32 @@ def check_status(path: pathlib.Path, text: str) -> tuple[list[str], int]:
     `> Status: …` counts too. Everything under docs/ is Chinese today, so that
     branch adjudicates nothing yet -- it is here so that the first English
     document under docs/ fails for the reason it deserves rather than for its
-    language."""
-    if "docs/" not in str(path):
+    language.
+
+    Scope is a path relationship, not a substring. A clean worktree named
+    `dawn-lsp-docs` once made its root README look like a docs/ document because
+    the absolute path happened to contain `docs/`."""
+    if not path.is_relative_to(root / "docs"):
         return [], 0
     if any(STATUS_LINE.match(line) for line in text.split("\n")[:12]):
         return [], 1
-    return [f"{path.relative_to(ROOT)}: no `> 状态：…` / `> Status: …` line in the "
+    display = path.relative_to(root) if path.is_relative_to(root) else path
+    return [f"{display}: no `> 状态：…` / `> Status: …` line in the "
             f"first 12 lines "
             f"(normative / current / historical / proposed -- see docs/README.md)"], 0
+
+
+def check_status_selftest() -> tuple[list[str], int]:
+    """A parent name containing docs does not widen the docs/ subtree."""
+    root = pathlib.Path("/tmp/dawn-lsp-docs")
+    bad, seen = check_status(root / "README.md", "# Root\n", root)
+    if bad or seen != 0:
+        return ["status scope self-test: a root file under a docs-named worktree "
+                "was treated as a docs/ document"], 0
+    bad, seen = check_status(root / "docs" / "missing.md", "# Actual doc\n", root)
+    if not bad or seen != 0:
+        return ["status scope self-test: an actual docs/ file escaped the status check"], 0
+    return [], 2
 
 
 def check_doc_count(path: pathlib.Path, text: str, total: int) -> tuple[list[str], int]:
@@ -1037,11 +1124,11 @@ def check_doc_count(path: pathlib.Path, text: str, total: int) -> tuple[list[str
 def check_index_coverage(texts: dict) -> tuple[list[str], int]:
     """Every document under docs/ is linked from docs/README.md.
 
-    The index is where this repository keeps each document's status, so a
-    document missing from it has, in effect, no status: twelve were, when this
-    was written, including three the index's own prose referred to. The count
-    check alone would not have found them -- 58 documents and 46 index entries
-    both read as "some number" to a human, and the number was 43."""
+    The index is where this repository makes each document discoverable, so a
+    document missing from it also hides its authoritative lifecycle header:
+    twelve were missing when this was written. The count check alone would not
+    have found them -- 58 documents and 46 index entries both read as "some
+    number" to a human, and the number was 43."""
     index = ROOT / "docs" / "README.md"
     linked = set()
     for target in LINK.findall(prose_only(texts[index])):
@@ -1059,7 +1146,7 @@ def check_index_coverage(texts: dict) -> tuple[list[str], int]:
         seen += 1
         if path not in linked:
             bad.append(f"{path.relative_to(ROOT)}: not linked from docs/README.md "
-                       f"(the index is where a document's status is registered)")
+                       f"(the index is where a document and its lifecycle are discovered)")
     return bad, seen
 
 
@@ -1714,12 +1801,33 @@ def audit_detail_universe(detail_texts: dict[str, str]) -> tuple[set[str], list[
     return universe, bad
 
 
-def audit_status_blocks(text: str) -> tuple[dict[str, tuple[int, int, str]], list[str]]:
-    """Return each state block through its last list line, before explanatory prose."""
-    matches = list(AUDIT_STATUS.finditer(text))
+def audit_p1_universe(detail_texts: dict[str, str]) -> tuple[set[str], list[str]]:
+    """Derive the frozen P1 set from detail-heading severities, not the index."""
+    p1_ids: set[str] = set()
     bad: list[str] = []
-    if [match.group(1) for match in matches] != ["已修", "部分", "开放"]:
-        return {}, ["audit status headings must appear once in 已修/部分/开放 order"]
+    for _expected_prefix, rel in AUDIT_DETAIL_FILES:
+        text = detail_texts.get(rel)
+        if text is None:
+            continue
+        for prefix, number in AUDIT_P1_DETAIL_HEADING.findall(text):
+            audit_id = f"{prefix}-{number}"
+            if audit_id in p1_ids:
+                bad.append(f"frozen P1 detail heading {audit_id} is duplicated")
+            p1_ids.add(audit_id)
+    if len(p1_ids) != 29:
+        bad.append(f"audit details contain {len(p1_ids)} P1 headings, expected frozen 29")
+    return p1_ids, bad
+
+
+def audit_status_blocks(text: str, status_pattern: re.Pattern,
+                        state_order: tuple[str, ...],
+                        layer: str) -> tuple[dict[str, tuple[int, int, str]], list[str]]:
+    """Return each state block through its last list line, before explanatory prose."""
+    matches = list(status_pattern.finditer(text))
+    bad: list[str] = []
+    if [match.group(1) for match in matches] != list(state_order):
+        return {}, [f"{layer} status headings must appear once in "
+                    f"{'/'.join(state_order)} order"]
     blocks: dict[str, tuple[int, int, str]] = {}
     for index, match in enumerate(matches):
         limit = matches[index + 1].start() if index + 1 < len(matches) else len(text)
@@ -1736,7 +1844,7 @@ def audit_status_blocks(text: str) -> tuple[dict[str, tuple[int, int, str]], lis
                 break
             offset += len(line)
         if not seen_list:
-            bad.append(f"audit status {match.group(1)} has no ID list")
+            bad.append(f"{layer} status {match.group(1)} has no ID list")
         body_end = match.end() + end
         blocks[match.group(1)] = (match.start(), body_end, text[match.end():body_end])
     return blocks, bad
@@ -1770,11 +1878,13 @@ def expand_audit_ids(body: str) -> tuple[set[str], list[str]]:
     return ids, bad
 
 
-def parse_audit_state(text: str) -> tuple[dict[str, set[str]], dict[str, int], list[str]]:
-    blocks, bad = audit_status_blocks(text)
+def parse_audit_state(text: str, status_pattern: re.Pattern,
+                      state_order: tuple[str, ...],
+                      layer: str) -> tuple[dict[str, set[str]], dict[str, int], list[str]]:
+    blocks, bad = audit_status_blocks(text, status_pattern, state_order, layer)
     states: dict[str, set[str]] = {}
-    headings = {name: int(value) for name, value in AUDIT_STATUS.findall(text)}
-    for name in ("已修", "部分", "开放"):
+    headings = {name: int(value) for name, value in status_pattern.findall(text)}
+    for name in state_order:
         if name not in blocks:
             states[name] = set()
             continue
@@ -1784,62 +1894,187 @@ def parse_audit_state(text: str) -> tuple[dict[str, set[str]], dict[str, int], l
     return states, headings, bad
 
 
-def audit_status_problems(text: str, detail_texts: dict[str, str] | None = None) -> list[str]:
-    """Validate status as an exact partition of the six detail heading sets."""
-    states, headings, bad = parse_audit_state(text)
-    universe, detail_bad = audit_detail_universe(
-        read_audit_details() if detail_texts is None else detail_texts)
-    bad += detail_bad
-    if set(headings) != {"已修", "部分", "开放"}:
-        bad.append("audit status layer must contain one 已修/部分/开放 heading")
-        return bad
+def audit_partition_problems(text: str, universe: set[str],
+                             status_pattern: re.Pattern,
+                             state_order: tuple[str, ...],
+                             self_check_pattern: re.Pattern,
+                             layer: str) -> tuple[dict[str, set[str]], list[str]]:
+    """Validate one historical or current layer as an exact finding partition."""
+    states, headings, bad = parse_audit_state(
+        text, status_pattern, state_order, layer)
+    if set(headings) != set(state_order):
+        bad.append(f"{layer} status layer must contain one "
+                   f"{'/'.join(state_order)} heading")
+        return states, bad
 
     owner: dict[str, str] = {}
-    for status, ids in states.items():
+    for status in state_order:
+        ids = states[status]
         if len(ids) != headings[status]:
-            bad.append(f"audit status {status} heading says {headings[status]}, "
+            bad.append(f"{layer} status {status} heading says {headings[status]}, "
                        f"but its ID list contains {len(ids)}")
         for audit_id in ids:
             if audit_id in owner:
-                bad.append(f"audit ID {audit_id} appears in both {owner[audit_id]} and {status}")
-            owner[audit_id] = status
+                bad.append(f"{layer} audit ID {audit_id} appears in both "
+                           f"{owner[audit_id]} and {status}")
+            else:
+                owner[audit_id] = status
     actual = set(owner)
     missing = sorted(universe - actual)
     extra = sorted(actual - universe)
     if missing:
-        bad.append(f"audit status layer omits {', '.join(missing)}")
+        bad.append(f"{layer} status layer omits {', '.join(missing)}")
     if extra:
-        bad.append(f"audit status layer contains invalid IDs {', '.join(extra)}")
+        bad.append(f"{layer} status layer contains invalid IDs {', '.join(extra)}")
     if len(actual) != len(universe):
-        bad.append(f"audit status layer contains {len(actual)} unique IDs, but details define "
-                   f"{len(universe)}")
+        bad.append(f"{layer} status layer contains {len(actual)} unique IDs, "
+                   f"but details define {len(universe)}")
 
-    checks = AUDIT_SELF_CHECK.findall(text)
+    checks = self_check_pattern.findall(text)
     if len(checks) != 1:
-        bad.append("audit status layer must contain one machine-readable count self-check")
+        bad.append(f"{layer} status layer must contain one machine-readable count self-check")
     else:
-        fixed, partial, opened, total = map(int, checks[0])
-        stated = {"已修": fixed, "部分": partial, "开放": opened}
+        values = tuple(map(int, checks[0]))
+        stated = dict(zip(state_order, values[:-1]))
+        total = values[-1]
         if stated != headings:
-            bad.append(f"audit self-check {stated} disagrees with status headings {headings}")
-        if fixed + partial + opened != total or total != 97:
-            bad.append("audit status counts must add up to the frozen 97 findings")
+            bad.append(f"{layer} self-check {stated} disagrees with "
+                       f"status headings {headings}")
+        if sum(values[:-1]) != total or total != 97:
+            bad.append(f"{layer} status counts must add up to the frozen 97 findings")
 
     for topic, expected_total in AUDIT_TOPIC_TOTALS:
         prefix = AUDIT_TOPIC_PREFIX[topic]
-        actual_triple = tuple(sum(1 for audit_id in states[status]
+        actual_counts = tuple(sum(1 for audit_id in states[status]
                                   if audit_id.startswith(prefix + "-"))
-                              for status in ("已修", "部分", "开放"))
-        pattern = re.compile(re.escape(topic) + r" \*\*(\d+)/(\d+)/(\d+)\*\*")
+                              for status in state_order)
+        groups = "/".join(r"(\d+)" for _status in state_order)
+        pattern = re.compile(re.escape(topic) + r" \*\*" + groups + r"\*\*")
         matches = pattern.findall(text)
         if len(matches) != 1:
-            bad.append(f"audit topic {topic} must have one fixed/partial/open triple")
+            bad.append(f"{layer} audit topic {topic} must have one "
+                       f"{'/'.join(state_order)} tuple")
             continue
-        stated_triple = tuple(map(int, matches[0]))
-        if stated_triple != actual_triple:
-            bad.append(f"audit topic {topic} says {stated_triple}, ID lists say {actual_triple}")
-        if sum(actual_triple) != expected_total:
-            bad.append(f"audit topic {topic} must cover {expected_total} frozen findings")
+        stated_counts = tuple(map(int, matches[0]))
+        if stated_counts != actual_counts:
+            bad.append(f"{layer} audit topic {topic} says {stated_counts}, "
+                       f"ID lists say {actual_counts}")
+        if sum(actual_counts) != expected_total:
+            bad.append(f"{layer} audit topic {topic} must cover "
+                       f"{expected_total} frozen findings")
+    return states, bad
+
+
+def audit_p1_mapping_problems(text: str, current_states: dict[str, set[str]],
+                              detail_texts: dict[str, str]) -> list[str]:
+    """The frozen P1 index and its current mapping remain a checked bijection."""
+    bad: list[str] = []
+    p1_universe, p1_bad = audit_p1_universe(detail_texts)
+    bad += p1_bad
+    frozen_header, frozen_rows, problems = markdown_table(text, "5. 全部 P1 索引")
+    bad += [f"frozen P1 index: {problem}" for problem in problems]
+    if frozen_header and frozen_header != ("ID", "摘要", "专题"):
+        bad.append(f"frozen P1 index has columns {frozen_header}, expected ID/摘要/专题")
+    frozen_ids = audit_table_ids(frozen_rows, "frozen P1 index", bad)
+    if len(frozen_rows) != 29:
+        bad.append(f"frozen P1 index has {len(frozen_rows)} rows, expected 29")
+    if frozen_ids != p1_universe:
+        missing = sorted(p1_universe - frozen_ids)
+        extra = sorted(frozen_ids - p1_universe)
+        if missing:
+            bad.append(f"frozen P1 index omits {', '.join(missing)}")
+        if extra:
+            bad.append(f"frozen P1 index contains non-P1 IDs {', '.join(extra)}")
+
+    mapping_heading = "5.1 冻结 P1 的当前逐项映射"
+    mapping_header, mapping_rows, problems = markdown_table(text, mapping_heading)
+    bad += [f"current P1 mapping: {problem}" for problem in problems]
+    if mapping_header and mapping_header != ("ID", "当前状态", "复核结果"):
+        bad.append(f"current P1 mapping has columns {mapping_header}, "
+                   "expected ID/当前状态/复核结果")
+    mapping_ids = audit_table_ids(mapping_rows, "current P1 mapping", bad)
+    if len(mapping_rows) != 29:
+        bad.append(f"current P1 mapping has {len(mapping_rows)} rows, expected 29")
+    if mapping_ids != frozen_ids:
+        missing = sorted(frozen_ids - mapping_ids)
+        extra = sorted(mapping_ids - frozen_ids)
+        if missing:
+            bad.append(f"current P1 mapping omits {', '.join(missing)}")
+        if extra:
+            bad.append(f"current P1 mapping contains non-frozen IDs {', '.join(extra)}")
+
+    owner = {audit_id: status for status, ids in current_states.items()
+             for audit_id in ids}
+    mapping_counts = {status: 0 for status in CURRENT_AUDIT_STATES}
+    for row in mapping_rows:
+        audit_id = parse_audit_table_id(row[0])
+        status = row[1].strip()
+        if status not in CURRENT_AUDIT_STATES:
+            bad.append(f"current P1 mapping {audit_id or row[0]} has unknown state {status!r}")
+            continue
+        mapping_counts[status] += 1
+        if audit_id in owner and owner[audit_id] != status:
+            bad.append(f"current P1 mapping {audit_id} says {status}, "
+                       f"current registry says {owner[audit_id]}")
+
+    mapping_section = markdown_section(text, mapping_heading)
+    checks = [] if mapping_section is None else AUDIT_P1_SELF_CHECK.findall(mapping_section)
+    if len(checks) != 1:
+        bad.append("current P1 mapping must contain one machine-readable count self-check")
+    else:
+        values = tuple(map(int, checks[0]))
+        stated = dict(zip(CURRENT_AUDIT_STATES, values[:-1]))
+        if stated != mapping_counts:
+            bad.append(f"current P1 self-check {stated} disagrees with rows {mapping_counts}")
+        if sum(values[:-1]) != values[-1] or values[-1] != 29:
+            bad.append("current P1 counts must add up to the frozen 29 rows")
+    return bad
+
+
+def parse_audit_table_id(cell: str) -> str | None:
+    match = re.fullmatch(r"`([A-Z]+-\d{2})`", cell.strip())
+    return None if match is None else match.group(1)
+
+
+def audit_table_ids(rows: list[tuple[str, ...]], label: str,
+                    bad: list[str]) -> set[str]:
+    ids: set[str] = set()
+    for row in rows:
+        audit_id = parse_audit_table_id(row[0])
+        if audit_id is None:
+            bad.append(f"{label} has invalid ID cell {row[0]!r}")
+            continue
+        if audit_id in ids:
+            bad.append(f"{label} duplicates {audit_id}")
+        ids.add(audit_id)
+    return ids
+
+
+def audit_status_problems(text: str,
+                          detail_texts: dict[str, str] | None = None) -> list[str]:
+    """Validate historical evidence and the machine-authoritative current registry."""
+    details = read_audit_details() if detail_texts is None else detail_texts
+    universe, bad = audit_detail_universe(details)
+
+    historical = markdown_section(text, HISTORICAL_AUDIT_HEADING)
+    if historical is None:
+        bad.append("historical audit status section is missing")
+    else:
+        _historical_states, problems = audit_partition_problems(
+            historical, universe, HISTORICAL_AUDIT_STATUS,
+            HISTORICAL_AUDIT_STATES, HISTORICAL_AUDIT_SELF_CHECK, "historical")
+        bad += problems
+
+    current = markdown_section(text, CURRENT_AUDIT_HEADING)
+    current_states = {status: set() for status in CURRENT_AUDIT_STATES}
+    if current is None:
+        bad.append("machine-authoritative current audit status section is missing")
+    else:
+        current_states, problems = audit_partition_problems(
+            current, universe, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES,
+            CURRENT_AUDIT_SELF_CHECK, "current")
+        bad += problems
+    bad += audit_p1_mapping_problems(text, current_states, details)
     return bad
 
 
@@ -1848,72 +2083,159 @@ def check_audit_status() -> tuple[list[str], int]:
     text = path.read_text(encoding="utf-8")
     bad = [f"{path.relative_to(ROOT)}: {problem}"
            for problem in audit_status_problems(text, read_audit_details())]
-    return bad, 0 if bad else 1
+    return bad, 0 if bad else 3
+
+
+def audit_index_status_problems(index_texts: dict[str, str] | None = None) -> list[str]:
+    """Audit indexes navigate material; they never mirror design-task progress."""
+    texts = ({rel: (ROOT / rel).read_text(encoding="utf-8")
+              for rel, _heading, _columns in AUDIT_INDEX_TABLES}
+             if index_texts is None else index_texts)
+    bad: list[str] = []
+    forbidden_columns = {"状态", "任务状态", "进度", "任务进度"}
+    for rel, heading, expected_columns in AUDIT_INDEX_TABLES:
+        text = texts.get(rel)
+        if text is None:
+            bad.append(f"audit index {rel} is missing")
+            continue
+        columns, rows, problems = markdown_table(text, heading)
+        bad += [f"{rel}: {problem}" for problem in problems]
+        copied = forbidden_columns.intersection(columns)
+        if copied:
+            bad.append(f"{rel}: audit material table copies task-status column(s) "
+                       f"{', '.join(sorted(copied))}")
+        if columns and columns != expected_columns:
+            bad.append(f"{rel}: audit material table has columns {columns}, "
+                       f"expected {expected_columns}")
+        for row_number, row in enumerate(rows, 1):
+            for cell in row:
+                if INDEX_TASK_STATUS.search(normalize_active_markdown(cell)):
+                    bad.append(f"{rel}: audit material table row {row_number} "
+                               f"copies task status in cell {cell!r}")
+    return bad
+
+
+def check_audit_indexes() -> tuple[list[str], int]:
+    bad = audit_index_status_problems()
+    return bad, 0 if bad else len(AUDIT_INDEX_TABLES)
 
 
 def audit_counts(states: dict[str, set[str]]) -> dict[str, int]:
     return {status: len(ids) for status, ids in states.items()}
 
 
-def rewrite_audit_summaries(text: str, states: dict[str, set[str]]) -> str:
+def rewrite_audit_summaries(text: str, states: dict[str, set[str]],
+                            status_pattern: re.Pattern,
+                            state_order: tuple[str, ...],
+                            self_check_pattern: re.Pattern,
+                            status_line, self_check_line) -> str:
     counts = audit_counts(states)
-    for status in ("已修", "部分", "开放"):
-        text = re.sub(r"^\*\*" + status + r"（\d+）\*\*$",
-                      f"**{status}（{counts[status]}）**", text, count=1, flags=re.M)
-    text = AUDIT_SELF_CHECK.sub(
-        (f"计数自检：**{counts['已修']} 已修 + {counts['部分']} 部分 + "
-         f"{counts['开放']} 开放 = 97**"), text, count=1)
+    text = status_pattern.sub(
+        lambda match: status_line(match.group(1), counts[match.group(1)]), text)
+    text = self_check_pattern.sub(self_check_line(counts), text, count=1)
     for topic, _ in AUDIT_TOPIC_TOTALS:
         prefix = AUDIT_TOPIC_PREFIX[topic]
-        triple = tuple(sum(1 for audit_id in states[status]
-                           if audit_id.startswith(prefix + "-"))
-                       for status in ("已修", "部分", "开放"))
-        text = re.sub(re.escape(topic) + r" \*\*\d+/\d+/\d+\*\*",
-                      f"{topic} **{triple[0]}/{triple[1]}/{triple[2]}**",
-                      text, count=1)
+        topic_counts = tuple(sum(1 for audit_id in states[status]
+                                 if audit_id.startswith(prefix + "-"))
+                             for status in state_order)
+        old_counts = "/".join(r"\d+" for _status in state_order)
+        rendered = "/".join(str(value) for value in topic_counts)
+        text = re.sub(re.escape(topic) + r" \*\*" + old_counts + r"\*\*",
+                      f"{topic} **{rendered}**", text, count=1)
     return text
 
 
-def render_audit_statuses(text: str, states: dict[str, set[str]]) -> str:
-    blocks, problems = audit_status_blocks(text)
+def render_audit_statuses(text: str, states: dict[str, set[str]],
+                          status_pattern: re.Pattern,
+                          state_order: tuple[str, ...], layer: str,
+                          status_line, self_check_pattern: re.Pattern,
+                          self_check_line) -> str:
+    blocks, problems = audit_status_blocks(text, status_pattern, state_order, layer)
     if problems:
         return text
     topic_name = {prefix: topic for topic, prefix in AUDIT_TOPIC_PREFIX.items()}
     rendered: list[str] = []
-    for status in ("已修", "部分", "开放"):
-        rendered.append(f"**{status}（{len(states[status])}）**\n")
-        for prefix in AUDIT_PREFIX_TOTALS:
+    for status in state_order:
+        rendered.append(status_line(status, len(states[status])) + "\n")
+        prefixes = list(AUDIT_PREFIX_TOTALS)
+        prefixes += sorted({audit_id.split("-", 1)[0] for audit_id in states[status]}
+                           - set(prefixes))
+        for prefix in prefixes:
             ids = sorted(audit_id for audit_id in states[status]
                          if audit_id.startswith(prefix + "-"))
             if ids:
-                rendered.append(f"- {topic_name[prefix]}（{len(ids)}）：" +
+                rendered.append(f"- {topic_name.get(prefix, prefix)}（{len(ids)}）：" +
                                 "、".join(f"`{audit_id}`" for audit_id in ids) + ".\n")
         rendered.append("\n")
-    start = blocks["已修"][0]
-    end = blocks["开放"][1]
-    return rewrite_audit_summaries(text[:start] + "\n".join(rendered).rstrip() +
-                                   "\n\n" + text[end:].lstrip("\n"), states)
+    start = blocks[state_order[0]][0]
+    end = blocks[state_order[-1]][1]
+    updated = text[:start] + "\n".join(rendered).rstrip() + "\n\n" + text[end:].lstrip("\n")
+    return rewrite_audit_summaries(
+        updated, states, status_pattern, state_order, self_check_pattern,
+        status_line, self_check_line)
 
 
-def check_audit_status_selftest() -> tuple[list[str], int]:
-    """Counts, membership, uniqueness and complete coverage move together."""
+def historical_status_line(status: str, count: int) -> str:
+    return f"**{status}（{count}）**"
+
+
+def historical_self_check_line(counts: dict[str, int]) -> str:
+    return (f"计数自检：**{counts['已修']} 已修 + {counts['部分']} 部分 + "
+            f"{counts['开放']} 开放 = 97**")
+
+
+def current_status_line(status: str, count: int) -> str:
+    return f"#### 当前 {status}（{count}）"
+
+
+def current_self_check_line(counts: dict[str, int]) -> str:
+    return (f"当前计数自检：**{counts['fixed']} fixed + {counts['partial']} partial + "
+            f"{counts['open']} open + {counts['retracted']} retracted = 97**")
+
+
+def rewrite_historical_audit_summaries(text: str,
+                                       states: dict[str, set[str]]) -> str:
+    return rewrite_audit_summaries(
+        text, states, HISTORICAL_AUDIT_STATUS, HISTORICAL_AUDIT_STATES,
+        HISTORICAL_AUDIT_SELF_CHECK, historical_status_line,
+        historical_self_check_line)
+
+
+def render_historical_audit_statuses(text: str,
+                                     states: dict[str, set[str]]) -> str:
+    return render_audit_statuses(
+        text, states, HISTORICAL_AUDIT_STATUS, HISTORICAL_AUDIT_STATES,
+        "historical", historical_status_line, HISTORICAL_AUDIT_SELF_CHECK,
+        historical_self_check_line)
+
+
+def render_current_audit_statuses(text: str,
+                                  states: dict[str, set[str]]) -> str:
+    return render_audit_statuses(
+        text, states, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current",
+        current_status_line, CURRENT_AUDIT_SELF_CHECK, current_self_check_line)
+
+
+def check_historical_audit_status_selftest() -> tuple[list[str], int]:
+    """The old three-state evidence remains checked, but never supplies current state."""
     path = ROOT / "docs/codebase-audit-v2.md"
     text = path.read_text(encoding="utf-8")
     details = read_audit_details()
     baseline = audit_status_problems(text, details)
     if baseline:
         return [f"audit status self-test baseline is invalid: {baseline[0]}"], 0
-    states, _, _ = parse_audit_state(text)
+    states, _, _ = parse_audit_state(
+        text, HISTORICAL_AUDIT_STATUS, HISTORICAL_AUDIT_STATES, "historical")
     if not states["开放"]:
         return ["audit status self-test: no open finding available for migration"], 0
     moved = sorted(states["开放"])[0]
     claimed = {status: set(ids) for status, ids in states.items()}
     claimed["开放"].remove(moved)
     claimed["已修"].add(moved)
-    numbers_only = rewrite_audit_summaries(text, claimed)
+    numbers_only = rewrite_historical_audit_summaries(text, claimed)
     if not audit_status_problems(numbers_only, details):
         return ["audit status self-test: changing only counts without moving an ID stayed green"], 0
-    migrated = render_audit_statuses(text, claimed)
+    migrated = render_historical_audit_statuses(text, claimed)
     problems = audit_status_problems(migrated, details)
     if problems:
         return [f"audit status self-test: a coherent open-to-fixed migration failed: "
@@ -1921,13 +2243,13 @@ def check_audit_status_selftest() -> tuple[list[str], int]:
 
     duplicated = {status: set(ids) for status, ids in states.items()}
     duplicated["已修"].add(moved)
-    problems = audit_status_problems(render_audit_statuses(text, duplicated), details)
+    problems = audit_status_problems(render_historical_audit_statuses(text, duplicated), details)
     if not any(f"audit ID {moved} appears in both" in problem for problem in problems):
         return ["audit status self-test: a duplicate ID across statuses stayed green"], 0
 
     omitted = {status: set(ids) for status, ids in states.items()}
     omitted["开放"].remove(moved)
-    problems = audit_status_problems(render_audit_statuses(text, omitted), details)
+    problems = audit_status_problems(render_historical_audit_statuses(text, omitted), details)
     if not any(f"omits {moved}" in problem for problem in problems):
         return ["audit status self-test: an omitted ID stayed green"], 0
 
@@ -1953,6 +2275,106 @@ def check_audit_status_selftest() -> tuple[list[str], int]:
     if not any("contains 18 SYN headings" in problem for problem in problems):
         return ["audit status self-test: a finding omitted from a detail stayed green"], 0
     return [], 7
+
+
+def check_current_audit_status_selftest() -> tuple[list[str], int]:
+    """Current counts, IDs, P1 states and coherent migrations move together."""
+    path = ROOT / "docs/codebase-audit-v2.md"
+    text = path.read_text(encoding="utf-8")
+    details = read_audit_details()
+    baseline = audit_status_problems(text, details)
+    if baseline:
+        return [f"current audit status self-test baseline is invalid: {baseline[0]}"], 0
+    states, _, _ = parse_audit_state(
+        text, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current")
+    p1_ids, _ = audit_p1_universe(details)
+    candidates = sorted(states["open"] - p1_ids)
+    if not candidates:
+        return ["current audit status self-test: no non-P1 open finding is available"], 0
+    moved = candidates[0]
+
+    wrong_count = re.sub(r"^#### 当前 fixed（\d+）$",
+                         "#### 当前 fixed（999）", text, count=1, flags=re.M)
+    problems = audit_status_problems(wrong_count, details)
+    if not any("current status fixed heading says 999" in problem for problem in problems):
+        return ["current audit status self-test: a wrong declared count stayed green"], 0
+
+    migrated = {status: set(ids) for status, ids in states.items()}
+    migrated["open"].remove(moved)
+    migrated["fixed"].add(moved)
+    problems = audit_status_problems(render_current_audit_statuses(text, migrated), details)
+    if problems:
+        return [f"current audit status self-test: a coherent migration failed: "
+                f"{problems[0]}"], 0
+
+    duplicated = {status: set(ids) for status, ids in states.items()}
+    duplicated["fixed"].add(moved)
+    problems = audit_status_problems(render_current_audit_statuses(text, duplicated), details)
+    if not any(f"audit ID {moved} appears in both" in problem for problem in problems):
+        return ["current audit status self-test: a duplicate current ID stayed green"], 0
+
+    omitted = {status: set(ids) for status, ids in states.items()}
+    omitted["open"].remove(moved)
+    problems = audit_status_problems(render_current_audit_statuses(text, omitted), details)
+    if not any(f"omits {moved}" in problem for problem in problems):
+        return ["current audit status self-test: an omitted current ID stayed green"], 0
+
+    unknown = {status: set(ids) for status, ids in states.items()}
+    unknown["fixed"].add("NOPE-01")
+    problems = audit_status_problems(render_current_audit_statuses(text, unknown), details)
+    if not any("unknown audit ID family NOPE-01" in problem for problem in problems):
+        return ["current audit status self-test: an unknown current ID stayed green"], 0
+
+    p1_mismatch, changed = re.subn(
+        r"^(\| `SYN-01` \|) fixed (\| formatter 词法失败不再写回。 \|)$",
+        r"\1 open \2", text, count=1, flags=re.M)
+    if changed != 1:
+        return ["current audit status self-test: P1 mapping fixture was not mutated"], 0
+    problems = audit_status_problems(p1_mismatch, details)
+    if not any("current P1 mapping SYN-01 says open, current registry says fixed" in problem
+               for problem in problems):
+        return ["current audit status self-test: a P1/current-state mismatch stayed green"], 0
+    return [], 6
+
+
+def check_audit_index_status_selftest() -> tuple[list[str], int]:
+    """Both audit indexes reject task-status columns and task-status cells."""
+    texts = {rel: (ROOT / rel).read_text(encoding="utf-8")
+             for rel, _heading, _columns in AUDIT_INDEX_TABLES}
+    baseline = audit_index_status_problems(texts)
+    if baseline:
+        return [f"audit index status self-test baseline is invalid: {baseline[0]}"], 0
+    seen = 0
+    for rel, heading, expected_columns in AUDIT_INDEX_TABLES:
+        columns, rows, problems = markdown_table(texts[rel], heading)
+        if problems or not rows:
+            return [f"audit index status self-test: {rel} fixture table is missing"], 0
+        material_index = columns.index("材料类型")
+        header_line = "| " + " | ".join(expected_columns) + " |"
+        status_columns = list(expected_columns)
+        status_columns[material_index] = "状态"
+        mutated_header = texts[rel].replace(
+            header_line, "| " + " | ".join(status_columns) + " |", 1)
+        mutated = dict(texts)
+        mutated[rel] = mutated_header
+        problems = audit_index_status_problems(mutated)
+        if not any(f"{rel}: audit material table copies task-status column" in problem
+                   for problem in problems):
+            return [f"audit index status self-test: {rel} accepted a task-status column"], 0
+        seen += 1
+
+        first_row = list(rows[0])
+        source_line = "| " + " | ".join(first_row) + " |"
+        first_row[material_index] += " proposed"
+        mutated = dict(texts)
+        mutated[rel] = texts[rel].replace(
+            source_line, "| " + " | ".join(first_row) + " |", 1)
+        problems = audit_index_status_problems(mutated)
+        if not any(f"{rel}: audit material table row 1 copies task status" in problem
+                   for problem in problems):
+            return [f"audit index status self-test: {rel} accepted a task-status cell"], 0
+        seen += 1
+    return [], seen
 
 
 def fence_shape_mismatch(rel_tr: str, tr_text: str,
@@ -2192,9 +2614,21 @@ def main() -> None:
     bad, n = check_sections_selftest()
     problems += bad
     selftests_seen += n
+    bad, n = check_status_selftest()
+    problems += bad
+    selftests_seen += n
     bad, audit_seen = check_audit_status()
     problems += bad
-    bad, n = check_audit_status_selftest()
+    bad, n = check_audit_indexes()
+    problems += bad
+    audit_seen += n
+    bad, n = check_historical_audit_status_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_current_audit_status_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_audit_index_status_selftest()
     problems += bad
     selftests_seen += n
 

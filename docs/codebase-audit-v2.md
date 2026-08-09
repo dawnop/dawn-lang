@@ -1,7 +1,7 @@
 # Dawn 代码库精细审查 v2
 
-> 状态：**current** —— 保留 v0.60.0 / `86f6a0f63960` 的冻结审查基线，并以
-> `18fb3d63ebb995ef20332e68585066036e6b2e6a` 记录当前状态订正；详细证据在
+> 状态：**current** —— 保留 v0.60.0 / `86f6a0f63960` 的冻结审查基线；本文件的
+> “机器权威的当前四状态层”是 97 项 finding 处置的唯一当前状态源，详细证据在
 > `docs/codebase-audit-v2/`。
 >
 > 审查方式：六专题并行只读审查 + 主审去重、静态复核和少量无副作用探针。
@@ -9,7 +9,7 @@
 
 ## 1. 一句话结论
 
-Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 Dawn 集合与相当完整的门禁，旧审查中的两个 P0 和多项协议缺陷已经不再成立；v0.60.0 冻结基线记录 **1 个未动态验证的 P0 候选、29 个 P1、55 个 P2、12 个 P3**，该严重度表不随后续处置重写。截至 `18fb3d6`，97 项的状态是 **60 fixed / 5 partial / 30 open / 2 retracted**；TOOL-05/06 已随共享 LSP workspace 与 target-scoped Java classpath 关闭，当前 P1 优先级是四项 partial 的边界收口，以及仍需维护者裁决的 Cursor 契约。
+Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 Dawn 集合与相当完整的门禁，旧审查中的两个 P0 和多项协议缺陷已经不再成立；v0.60.0 冻结基线记录 **1 个未动态验证的 P0 候选、29 个 P1、55 个 P2、12 个 P3**，该严重度表不随后续处置重写。97 项 finding 的当前处置只读 §2 的机器权威四状态层；TOOL-05/06 已随共享 LSP workspace 与 target-scoped Java classpath 关闭，GOV-04 已由单一状态源与行为负控关闭，当前 P1 优先级是四项 partial 的边界收口，以及仍需维护者裁决的 Cursor 契约。
 
 ## 2. 基线与口径
 
@@ -83,14 +83,15 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 （顺序均为已修/部分/开放）；各专题仍分别覆盖 19 / 17 / 12 / 17 / 19 / 13 项，
 与冻结总数一致且无重复、遗漏。
 
-### 截至 LSP workspace 验收基线（`18fb3d6`）的订正状态层
+### 机器权威的当前四状态层
 
 > R-AUDIT 在 `bfc358a6116303623a4968f8247689bcd5645793` 逐一核对六份明细的 97 个 ID；
 > 此后 `38f625a` / `24d5d2f` 关闭 `SYN-12`，`79df07f` / `60e174a` 关闭 `SYN-16`，
-> `9f914d4` / `18fb3d6` 关闭 `TOOL-06` / `TOOL-05`，本节据此推进到该验收基线口径。
-> 上一个三状态快照
-> 不删除、不改写其 ID 清单；这里增加 `retracted`，把“实现修好”与“复核后不再认定为
-> 缺陷”分开。
+> `9f914d4` / `18fb3d6` 关闭 `TOOL-06` / `TOOL-05`，GOV-04 又把本节收成机器校验的
+> 唯一当前状态源。上一个三状态快照不删除、不改写其 ID 清单；这里增加 `retracted`，
+> 把“实现修好”与“复核后不再认定为缺陷”分开。六份明细中的 97 个 finding 标题定义
+> ID universe；本节必须对它无重复、无遗漏、无未知 ID 地精确分区，并与专题矩阵和冻结
+> P1 映射一致。
 
 | 状态 | 当前含义 |
 |---|---|
@@ -99,14 +100,14 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（60）
+#### 当前 fixed（61）
 
 - 语法（13）：`SYN-01`–`SYN-03`、`SYN-06`–`SYN-08`、`SYN-10`、`SYN-12`、`SYN-14`–`SYN-16`、`SYN-18`、`SYN-19`。
 - 语义（8）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-11`、`SEM-12`、`SEM-15`、`SEM-17`。
 - 架构（4）：`ARC-03`–`ARC-06`。
 - 工具链（15）：`TOOL-01`–`TOOL-12`、`TOOL-15`–`TOOL-17`。
 - 库（8）：`LIB-01`–`LIB-05`、`LIB-07`、`LIB-09`、`LIB-11`。
-- 治理（12）：`GOV-01`–`GOV-03`、`GOV-05`–`GOV-13`。
+- 治理（13）：`GOV-01`–`GOV-13`。
 
 #### 当前 partial（5）
 
@@ -114,25 +115,24 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 工具链（1）：`TOOL-14`。
 - 库（1）：`LIB-10`。
 
-#### 当前 open（30）
+#### 当前 open（29）
 
 - 语法（6）：`SYN-04`、`SYN-05`、`SYN-09`、`SYN-11`、`SYN-13`、`SYN-17`。
 - 语义（7）：`SEM-04`、`SEM-07`、`SEM-09`、`SEM-10`、`SEM-13`、`SEM-14`、`SEM-16`。
 - 架构（5）：`ARC-07`–`ARC-10`、`ARC-12`。
 - 工具链（1）：`TOOL-13`。
 - 库（10）：`LIB-06`、`LIB-08`、`LIB-12`–`LIB-19`。
-- 治理（1）：`GOV-04`。
 
 #### 当前 retracted（2）
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**60 fixed + 5 partial + 30 open + 2 retracted = 97**。逐专题矩阵：
+当前计数自检：**61 fixed + 5 partial + 29 open + 2 retracted = 97**。逐专题矩阵：
 语法 **13/0/6/0**、语义 **8/0/7/2**、架构 **4/3/5/0**、工具链 **15/1/1/0**、
-库 **8/1/10/0**、治理 **12/0/1/0**（顺序均为 fixed/partial/open/retracted）。
+库 **8/1/10/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed，
-`TOOL-05`/`TOOL-06` fixed。
+`TOOL-05`/`TOOL-06`/`GOV-04` fixed。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -252,7 +252,7 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | `LIB-11` | fixed | request-body tempfile 从创建起即有 owner。 |
 | `GOV-01` | fixed | dtoa 独立 oracle 已进入持续门禁。 |
 
-逐行重算结果：**24 fixed / 4 partial / 1 open = 29**。唯一 open 为 `SEM-04`；四项
+逐行重算结果：**24 fixed / 4 partial / 1 open / 0 retracted = 29**。唯一 open 为 `SEM-04`；四项
 partial 为 `ARC-01`、`ARC-02`、`TOOL-14`、`LIB-10`。
 
 ## 6. 语言设计建议

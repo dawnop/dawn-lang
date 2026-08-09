@@ -1,33 +1,10 @@
 # 审查待办：设计文档索引与修复顺序
 
-> 状态：**historical** —— 这是 2026-07-25 那次全仓审查
-> （[../codebase-audit.md](../codebase-audit.md)）遗留待办的历史作业计划；保留原依赖、排期与
-> “不做”理由，不再作为当前 TODO 队列。当前 97 项状态与修复顺序以
-> [审查 v2 总纲](../codebase-audit-v2.md)为准。审查本身当时处置了 40 条、驳回 8 条。
->
-> **这行不再报待办总数。**「28 条」是 07-25 那天的定格（`../codebase-audit.md` §0 自己写明
-> 不重新计数），而 07-30 的第二轮复审又带进 53 条走另一套 ID 空间的发现——一个数字说不清
-> 读者该看哪个池子，只会年久失修。**今天真正没动的是两条线**：`packages/web` 2.0
-> （WEB-03/04/06/07/10 + WEB-09 的破坏半，[web-api-v2-design.md](web-api-v2-design.md)，
-> 本目录唯一仍是 proposed 的方案）与 LANG-04 的 `'a'` → `Char`（Phase 6 已出口，前提解除、
-> 活没干）。LSP-04 debounce 已于 2026-08-05 落地。
-> 其余或已落地、或经重估裁决不做，逐条见 §一的表。**表与文档头部冲突时以文档头部为准。**
->
-> **2026-07-30 合并与解冻**：分支于当日选择性合入 main（合并提交 `fa2a85f`，
-> 逐条对着已前进 30+ 提交的主线重判——保留仍成立的、按今日形状重实现的、
-> 丢弃被取代的，明细见该提交信息）。同日 §二/§三所等的三个信号**全部到期**：
-> Phase 0（Core IR）早已落地、R6 已决（interp 吃 Core）、**Phase 6 当日出口**
-> （native fixpoint B==C，`../native-backend-plan.md` §14.23）。第 3 批全部解冻；
-> 第 0 批第 1 条 REL-02 已做（`scripts/emitchange.sh`，声明格式
-> `Emit-Change(<label glob>): ...`，裸声明保持通配兼容）。
-> purity-boundary 步骤 2 所修的洞已被缝 2（CtOpts.jcall 默认拒绝 + --comptime-ffi
-> 闸）覆盖大半，重判后再动。
->
-> 本文回答两个问题：**每条待办的方案在哪份文档里**，以及**按什么顺序做**。
-> 这些文档当初都是 proposed——按 CONTRIBUTING.md 第一条，动码前先写下来，
-> 因为写下来会杀死一批方案，而在编辑器里杀死方案比在 4000 行 diff 之后便宜。
-> **今天它们已不是清一色的 proposed**：只剩 web-api-v2 一份没动过，其余分别是已落地、
-> 已驳回、已裁决不做、或降级为过程记录与补充材料。逐份见 §一的表。
+> 状态：**historical** —— 这是 2026-07-25 全仓审查
+> （[../codebase-audit.md](../codebase-audit.md)）衍生材料与当时依赖/排期的历史索引，不是当前
+> TODO 队列，也不复制任何设计任务进度。当前 97 项 finding 状态只读
+> [审查 v2 总纲](../codebase-audit-v2.md)；各材料的生命周期与任务结果只读其文件头和正文。
+> 本索引只保留路径、覆盖、材料类型、破坏性边界，以及理解历史方案所需的依赖关系。
 
 > **动手前先读 [native-plan-overlap.md](native-plan-overlap.md)。**
 > [`../native-backend-plan.md`](../native-backend-plan.md)（07-25 在 main 上定稿）
@@ -39,24 +16,24 @@
 > 高危论断已逐条独立复核。含 triage：立即可做的正确性小刀 / 待裁决契约件 /
 > 并入已立项任务的侧面 / 独立排期的结构清理 / 等窗口的破坏性变更。
 
-## 一、十三份文档：方案、台账、裁决与过程记录
+## 一、材料索引：方案、台账、裁决与过程记录
 
-| 文档 | 覆盖 | 破坏性 | 状态 |
+| 文档 | 覆盖 | 破坏性 | 材料类型 |
 |---|---|---|---|
-| [re-audit-2026-07-30.md](re-audit-2026-07-30.md) | 第二轮复审：RP/RX/RC/RD 共 53 条 | 分级见其 §六 | **current（发现记录）**，§六已 triage 并逐批消化 |
-| [re-audit-b-decisions.md](re-audit-b-decisions.md) | 复审 B 批八条契约件的一页纸（裁决，非方案） | — | **已裁决（07-31，全部按建议）**，降为过程记录 |
-| [native-plan-overlap.md](native-plan-overlap.md) | 撞车登记（台账，非方案） | — | current |
-| [purity-boundary-design.md](purity-boundary-design.md) | **LANG-01(P0)** ARCH-06 | 是（语言收窄） | **已关账**：步 1 已落地／步 2 被吞并／**步 3 不做** |
-| [ceval-trampoline-verdict.md](ceval-trampoline-verdict.md) | purity-boundary 步 3 的收益重估（裁决，非方案） | — | **current（不做，07-31）** |
-| [lowered-ir-design.md](lowered-ir-design.md) | ARCH-04 ARCH-01 ARCH-02 ARCH-03 | 否（输出必须逐字节不变） | **整篇降级为补充材料**——§3.2/§3.3 的 `Cx`/`Gen` 方案已被 [../arch-split-design.md](../arch-split-design.md) 复测取代 |
-| [../arch-split-design.md](../arch-split-design.md) | **ARCH-01 ARCH-02**（任务 #88） | 否（发射字节必须逐字节不变） | **已落地**（2026-08-03，十二刀，`4ae6b61`→`94109b7`，见该文 §10）｜余账 **#126** |
-| [error-model-design.md](error-model-design.md) | ERR-02 ERR-03 LANG-02 | 是 | A、B 已落地／**C2 不做**（07-31 关档） |
-| [application-syntax-design.md](application-syntax-design.md) | SYN-02 SYN-03 | 否（语法放宽） | **已落地**（2026-07-30 加法 + 07-31 统一） |
-| [nominal-types-design.md](nominal-types-design.md) | LANG-04 LANG-05 | 部分 | 步 1–3 **驳回**（机制已由 `opaque type` 提供）／**LANG-04 仍是活账**，前提已解除 |
-| [module-access-design.md](module-access-design.md) | LANG-06 LANG-07 | 否 | **已落地**（2026-07-30 当日全部发出，spec §10.3/§10.4） |
-| [lsp-robustness-design.md](lsp-robustness-design.md) | LSP-01 LSP-02 LSP-04 | 否 | **全部已落地**：LSP-01/02 于 07-30 完成（形态与原方案相反），LSP-04 debounce 于 08-05 完成 |
-| [package-integrity-design.md](package-integrity-design.md) | PKG-02 PKG-04 | 否 | **两半均已落地**（`dawn cache verify` + `dawn lock --check`） |
-| [web-api-v2-design.md](web-api-v2-design.md) | WEB-03/04/06/07/09/10 | **是**（packages/web 2.0） | **proposed，未动**（只发了 WEB-09 的不破坏半）——本目录唯一 |
+| [re-audit-2026-07-30.md](re-audit-2026-07-30.md) | 第二轮复审：RP/RX/RC/RD 共 53 条 | 分级见其 §六 | 发现与 triage 记录 |
+| [re-audit-b-decisions.md](re-audit-b-decisions.md) | 复审 B 批八条契约件 | 依各契约件 | 裁决记录 |
+| [native-plan-overlap.md](native-plan-overlap.md) | 审查方案与 native 计划的九处边界 | 依各撞车项 | 冲突台账 |
+| [purity-boundary-design.md](purity-boundary-design.md) | LANG-01(P0) ARCH-06 | 是（语言收窄） | purity boundary 设计 |
+| [ceval-trampoline-verdict.md](ceval-trampoline-verdict.md) | purity boundary 的 comptime 栈方案 | 否 | 收益重估与裁决记录 |
+| [lowered-ir-design.md](lowered-ir-design.md) | ARCH-04 ARCH-01 ARCH-02 ARCH-03 | 否（输出必须逐字节不变） | Core IR 补充材料 |
+| [../arch-split-design.md](../arch-split-design.md) | ARCH-01 ARCH-02 | 否（发射字节必须逐字节不变） | 架构拆分设计与落地记录 |
+| [error-model-design.md](error-model-design.md) | ERR-02 ERR-03 LANG-02 | 是（公开错误与 cast API） | 错误模型设计 |
+| [application-syntax-design.md](application-syntax-design.md) | SYN-02 SYN-03 | 否（语法放宽） | application 语法设计 |
+| [nominal-types-design.md](nominal-types-design.md) | LANG-04 LANG-05 | 是（字面量与公开类型边界） | nominal/Char 方案与裁决记录 |
+| [module-access-design.md](module-access-design.md) | LANG-06 LANG-07 | 否（语法与能力放宽） | 模块访问设计 |
+| [lsp-robustness-design.md](lsp-robustness-design.md) | LSP-01 LSP-02 LSP-04 | 否 | 鲁棒性设计与负控记录 |
+| [package-integrity-design.md](package-integrity-design.md) | PKG-02 PKG-04 | 否 | cache/lock 完整性设计 |
+| [web-api-v2-design.md](web-api-v2-design.md) | WEB-03/04/06/07/09/10 | 是（packages/web 代际迁移） | API 设计 |
 
 **不需要设计文档的四条**，直接做（见 §三·第 0 批）：
 TEST-01（classfile 过 CheckClassAdapter）、TEST-04（文档 CI）、
