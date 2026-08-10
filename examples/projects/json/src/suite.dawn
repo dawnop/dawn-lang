@@ -19,6 +19,7 @@ use std/str
 use std/list
 use json/parser.{parse}
 use json/render.{render}
+use json/value.{error_text}
 
 pub type Tally = { pass: Int, fail: Int, impl_ok: Int, impl_no: Int }
 
@@ -36,10 +37,10 @@ fn add(t: Tally, u: Tally) -> Tally =
 # control-character bug, which no accept/reject verdict could ever have seen.
 fn round_trips(text: String) -> Result[Unit, String] =
   match parse(text) {
-    Err(e) -> Err("parse: " ++ e)
+    Err(e) -> Err("parse: " ++ error_text(e))
     Ok(v) ->
       match parse(render(v)) {
-        Err(e) -> Err("re-parse of rendered output: " ++ e)
+        Err(e) -> Err("re-parse of rendered output: " ++ error_text(e))
         Ok(v2) -> if v == v2 { Ok(()) } else { Err("render changed the value") }
       }
   }
@@ -59,7 +60,7 @@ fn verdict(dir: String, name: String) -> Result[String, String] !io =
     Err(e) -> Err("not UTF-8: " ++ e.message)
     Ok(text) ->
       match parse(text) {
-        Err(e) -> Err(e)
+        Err(e) -> Err(error_text(e))
         Ok(_) -> Ok(text)
       }
   }
