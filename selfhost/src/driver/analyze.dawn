@@ -22,7 +22,7 @@ use check/passes.{
 use check/checker.{check_module, exports_of, check_fn, check_fn_inferred}
 use ir/interp.{eval_comptime, CtOut, CtOpts, ct_default}
 use check/jsig.{Jsig, jsig_refused}
-use driver/stdlib.{StdCtx, load_std}
+use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use check/tast.{TFun, TModule}
 use check/types.{Sym}
 use front/parser
@@ -979,7 +979,7 @@ test "a two-module project analyzes end to end" {
     "use util\npub fn main() -> Unit !io = println(util.greet(\" dawn \"))\n")
   let std = match load_std("std") {
     Ok(sc) -> sc
-    Err(e) -> panic("std: " ++ e)
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
   }
   let loaded = load_directory(root)
   assert len(loaded.diags) == 0
@@ -1000,7 +1000,7 @@ test "the representation modules are closed to user code (audit RD-06)" {
   # with "does not check", so the two halves are one test.
   let std = match load_std("std") {
     Ok(sc) -> sc
-    Err(e) -> panic("std: " ++ e)
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
   }
   let root = "/tmp/dawn-selfhost-analyze/substrate"
   mkdirs(root ++ "/src")
@@ -1034,7 +1034,7 @@ test "an impl is in force in every module, not just its own (spec §3.5)" {
       "  ++ to_string(Box { n: 4 }.sizey()) ++ to_string(Box { n: 5 }))\n")
   let std = match load_std("std") {
     Ok(sc) -> sc
-    Err(e) -> panic("std: " ++ e)
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
   }
   let loaded = load_directory(root)
   assert len(loaded.diags) == 0
@@ -1063,7 +1063,7 @@ test "a second module cannot supply a rival impl" {
       "pub fn main() -> Unit !io = ()\n")
   let std = match load_std("std") {
     Ok(sc) -> sc
-    Err(e) -> panic("std: " ++ e)
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
   }
   let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
   assert len(prog.diags) == 1
@@ -1118,7 +1118,7 @@ test "a module alias collides with an imported name in either source order" {
   # pair reversed used to pass and `b` became a binding *and* an alias (#185).
   let std = match load_std("std") {
     Ok(sc) -> sc
-    Err(e) -> panic("std: " ++ e)
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
   }
 
   let root = "/tmp/dawn-selfhost-analyze/alias-order"
@@ -1218,7 +1218,7 @@ test "the editor's standalone path judges the buffer's name too" {
   mkdirs(root)
   let std = match load_std("std") {
     Ok(sc) -> sc
-    Err(e) -> panic("std: " ++ e)
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
   }
   let src = "pub fn main() -> Unit !io = ()\n"
 

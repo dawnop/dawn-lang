@@ -646,6 +646,26 @@ jobs:
       - name: Java member dispatch contract
         run: ./scripts/java-member-dispatch-contract/run.sh
 
+  # What a toolchain says when the std it loaded is not the std it shipped
+  # with (#226). Every failure used to be one sentence, and on the native
+  # driver that sentence blamed the installation for a std the user's working
+  # directory had shadowed in.
+  std-version:
+    runs-on: ubuntu-latest
+    # Seven private compiler builds: one per mutant, plus the probe that
+    # corrupts the compiled-in std. 63s locally. java-member-dispatch's ten
+    # builds cost 158s locally and 292s on the runner, which puts this one at
+    # about 205s here; restate the number from the first run that carries it.
+    # budget: 3x 205s predicted from java-member-dispatch's local/runner ratio
+    timeout-minutes: 11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Std version contract
+        run: ./scripts/std-version-contract/run.sh
+
   # TEST-04: the documentation's own examples, links and anchors. The audit
   # found a wrong README example, an install command that did not run and an
   # EBNF out of step with the parser -- all by human reading. Marking the

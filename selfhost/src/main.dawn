@@ -24,7 +24,7 @@ use front/lexdump
 use front/astdump
 use driver/checkdump
 use ir/coredump
-use driver/stdlib.{StdCtx, load_std}
+use driver/stdlib.{StdCtx, StdLoadError, load_std, std_load_error_text, std_load_is_bug}
 use driver/analyze.{
   CheckedMod, LocDiag, LoadResult, Program, ProjectPlan,
   load_directory, load_file, load_planned, project_plan_for_load, analyze_program
@@ -231,7 +231,7 @@ fn collect_program(
     }
     let std = match load_std(std_dir) {
       Ok(sc) -> sc
-      Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+      Err(e) -> fail_std(e)
     }
     std_mods = std.mods
     for pr in map.entries(std.adts) {
@@ -799,6 +799,17 @@ fn cli_error(msg: String) -> Unit !io = {
   io.eprintln("error: " ++ msg)
   let _ = io.exit(2)
   ()
+}
+
+## A std that will not load. Only the copy compiled into this jar is the
+## compiler's own fault; a directory is the user's environment, so it gets
+## `error:` and the CLI exit code instead of a panic. `cli_error` exits, so the
+## panic under it is the unreachable value this function's type needs.
+fn fail_std(e: StdLoadError) -> StdCtx !io = {
+  let text = std_load_error_text(e)
+  if std_load_is_bug(e) { panic(text) }
+  cli_error(text)
+  panic(text)
 }
 
 ## `dawn cache verify` — re-hash every entry in the package cache and compare
@@ -1711,7 +1722,7 @@ fn run_doc(rest: List[String]) -> Unit !io = {
   )
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
-    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+    Err(e) -> fail_std(e)
   }
   if stdlib_mode {
     print(doc.stdlib_json(std))
@@ -1772,7 +1783,7 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   }
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
-    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+    Err(e) -> fail_std(e)
   }
   let t = targets[0]
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
@@ -1877,7 +1888,7 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   }
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
-    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+    Err(e) -> fail_std(e)
   }
   let t = target
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
@@ -1917,7 +1928,7 @@ fn check_args(rest: List[String]) -> (String, List[String]) = {
 fn check_std(std_dir: String) -> StdCtx !io =
   match load_std(std_dir) {
     Ok(sc) -> sc
-    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+    Err(e) -> fail_std(e)
   }
 
 ## `dawn check [--std <dir>] <target>...` — type-check and report.

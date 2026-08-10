@@ -28,7 +28,7 @@ use std/io
 use std/str
 use front/token.{Diag}
 use front/diag
-use driver/stdlib.{StdCtx, load_std}
+use driver/stdlib.{StdCtx, StdLoadError, load_std, std_load_error_text, std_load_is_bug}
 use ir/interp.{ct_default}
 use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease}
 use driver/analyze.{Program, LocDiag, load_directory, load_file, analyze_program}
@@ -94,6 +94,18 @@ fn cli_error(msg: String) -> Unit !io = {
   io.eprintln("error: " ++ msg)
   let _ = io.exit(2)
   ()
+}
+
+## A std that will not load, said out loud. Only the copy compiled into this
+## binary is the compiler's own fault; a directory is the user's environment,
+## so it gets `error:` and the CLI exit code rather than a panic reading as
+## "reinstall the toolchain". `cli_error` exits, so the panic under it is the
+## unreachable value this function's type needs.
+fn fail_std(e: StdLoadError) -> StdCtx !io = {
+  let text = std_load_error_text(e)
+  if std_load_is_bug(e) { panic(text) }
+  cli_error(text)
+  panic(text)
 }
 
 ## Refuse a second positional for commands whose contract has one target.
@@ -221,7 +233,7 @@ fn check_args(rest: List[String]) -> (String, List[String]) = {
 fn load_or_die(std_dir: String) -> StdCtx !io =
   match load_std(std_dir) {
     Ok(sc) -> sc
-    Err(e) -> panic("bundled std is broken: " ++ e)
+    Err(e) -> fail_std(e)
   }
 
 fn analyzed(std: StdCtx, target: String) -> Program !io = {
@@ -523,7 +535,7 @@ fn cmd_doc(rest: List[String]) -> Unit !io = {
   )
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
-    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+    Err(e) -> fail_std(e)
   }
   if stdlib_mode {
     print(doc.stdlib_json(std))

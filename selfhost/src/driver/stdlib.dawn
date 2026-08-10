@@ -6,8 +6,14 @@
 # Each module is parsed and checked once in modules.txt order, its pub
 # surface handed to every user module. std is checked with no std of its
 # own in scope — only the prelude, the builtins and explicit `use` edges —
-# keeping the bootstrap acyclic. A broken bundled std is a compiler bug:
-# fail loudly.
+# keeping the bootstrap acyclic.
+#
+# A std that fails to load is a compiler bug only when it is the embedded one.
+# The directory can be any release, and `std` relative to the working
+# directory is the default, so a toolchain run inside somebody else's checkout
+# loads their std without being asked to. `StdLoadError` carries which half
+# answered and what the directory stamps itself with, so the two cases can be
+# told apart in words instead of both saying "bundled std is broken".
 
 use std/io
 use std/str
@@ -28,6 +34,7 @@ use front/parser
 use front/lexer
 use embed/stdsrc
 use ir/lower.{parser_impl}
+use version.{VERSION}
 
 ## Everything user-module analysis needs from std.
 pub type StdCtx = {
@@ -138,21 +145,71 @@ fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
   out
 }
 
+## Which half of `std_read` answered for a file.
+##
+## The two are not interchangeable in a diagnostic. The embedded copy is
+## compiled into the binary alongside the compiler that reads it, so it cannot
+## be a release out of step; a directory can be anything, including a `std`
+## that happened to sit in the current directory. Folding both into the phrase
+## "bundled std" is what made a version skew read as a corrupt install.
+pub type StdOrigin =
+  | StdFromDir(dir: String)
+  | StdEmbedded
+
+## Why the std did not load. One variant per thing that can go wrong, so the
+## driver can render them apart instead of concatenating them all onto one
+## sentence. `StdVersionSkew` is the directory declaring a release this
+## toolchain is not; `StdFileMissing` is a name in modules.txt that is in
+## neither the directory nor the embedded copy.
+pub type StdFail =
+  | StdVersionSkew
+  | StdFileMissing(file: String, why: String)
+  | StdModuleParse(mod_path: String, diag: String)
+  | StdModuleCheck(mod_path: String, diag: String)
+  | StdModuleEval(mod_path: String, diag: String)
+
+## A failed `load_std`, with enough context to say which std failed and why.
+pub type StdLoadError = {
+  origin: StdOrigin,
+  # what the std says its release is: `None` for a directory with no VERSION
+  # file, which is every std published before the stamp existed and every
+  # hand-assembled one a test builds
+  declared: Option[String],
+  why: StdFail
+}
+
 ## A std source file: the directory first (repo development edits win), then
-## the embedded copy `stdsrc.dawn` carries.
-fn std_read(dir: String, name: String) -> Result[String, String] !io =
+## the embedded copy `stdsrc.dawn` carries. The flag says which one answered.
+fn std_read_from(dir: String, name: String) -> Result[(String, Bool), String] !io =
   match io.read_file(dir ++ "/" ++ name) {
-    Ok(t) -> Ok(t)
+    Ok(t) -> Ok((t, true))
     Err(e) ->
       match stdsrc.source(name) {
-        Some(t) -> Ok(t)
+        Some(t) -> Ok((t, false))
         None -> Err(e.message)
       }
   }
 
-## Read modules.txt: one name per line, `#` comments, blanks skipped.
-pub fn read_index(dir: String) -> Result[List[String], String] !io = {
-  let text = std_read(dir, "modules.txt")?
+fn std_read(dir: String, name: String) -> Result[String, String] !io = {
+  let (text, _) = std_read_from(dir, name)?
+  Ok(text)
+}
+
+## The release a std *directory* stamps itself with, or `None` when it carries
+## no stamp.
+##
+## Deliberately not `std_read`: falling back to the embedded copy would answer
+## with this binary's own version for every directory, and a comparison that
+## reads one side twice can only ever agree. The absent case is a real answer
+## rather than an error, because a std that predates the stamp, and the
+## one-module stds tests assemble, both land there.
+fn dir_declared_version(dir: String) -> Option[String] !io =
+  match io.read_file(dir ++ "/VERSION") {
+    Ok(t) -> Some(str.trim(t))
+    Err(_) -> None
+  }
+
+fn index_names(text: String) -> List[String] = {
   var names: List[String] = []
   for line in str.split(text, "\n") {
     let cut = match str.index_of(line, "#") {
@@ -162,12 +219,118 @@ pub fn read_index(dir: String) -> Result[List[String], String] !io = {
     let t = str.trim(cut)
     if t != "" { names = names ++ [t] }
   }
-  Ok(names)
+  names
+}
+
+## Read modules.txt: one name per line, `#` comments, blanks skipped.
+pub fn read_index(dir: String) -> Result[List[String], String] !io = {
+  let text = std_read(dir, "modules.txt")?
+  Ok(index_names(text))
+}
+
+## The directory as a reader can act on it: a relative one is resolved against
+## the working directory it was resolved against, because `std` on its own does
+## not say which `std`, and the default `--std` is exactly that spelling.
+fn located(dir: String) -> String !io =
+  if str.starts_with(dir, "/") {
+    dir
+  } else {
+    dir ++ " (under " ++ io.cwd() ++ ")"
+  }
+
+fn origin_text(o: StdOrigin) -> String !io =
+  match o {
+    StdFromDir(d) -> "the std in " ++ located(d)
+    StdEmbedded -> "the std compiled into this toolchain"
+  }
+
+fn why_text(w: StdFail) -> String =
+  match w {
+    StdVersionSkew -> ""
+    StdFileMissing(f, m) -> "`" ++ f ++ "` is in neither the directory nor the embedded copy: " ++ m
+    StdModuleParse(mp, d) -> "module `" ++ mp ++ "` does not parse: " ++ d
+    StdModuleCheck(mp, d) -> "module `" ++ mp ++ "` does not check: " ++ d
+    StdModuleEval(mp, d) -> "module `" ++ mp ++ "` does not evaluate: " ++ d
+  }
+
+## Whether this failure is the compiler's own fault. Only the embedded std is:
+## it ships inside the same binary, so nothing a user did can make it disagree
+## with the compiler that reads it.
+pub fn std_load_is_bug(e: StdLoadError) -> Bool =
+  match e.origin {
+    StdEmbedded -> true
+    StdFromDir(_) -> false
+  }
+
+## What to do about a std that failed for a reason other than its version.
+## Three different answers, because three different things are wrong: the
+## compiler is broken, the directory has been edited, or the directory is an
+## unknown release and the version could not rule it in or out.
+fn advice(e: StdLoadError) -> String =
+  match e.origin {
+    StdEmbedded ->
+      "  This is a bug in dawn " ++ VERSION ++ ", not a problem with your project."
+    StdFromDir(_) ->
+      match e.declared {
+        Some(v) ->
+          "  That directory says it is " ++ v ++
+          ", which is what this toolchain is, so the std has been edited."
+        None ->
+          join([
+            "  That directory carries no VERSION stamp, so it is either older than " ++
+              VERSION ++ " or assembled by hand.",
+            "  Name a " ++ VERSION ++ " std with `--std <dir>`, or run where no `std`" ++
+              " directory shadows the one compiled in."
+          ], "\n")
+      }
+  }
+
+## The one place a failed std load turns into words; both drivers render
+## through it, so `scripts/native-cli-diff.sh` compares the same sentences.
+pub fn std_load_error_text(e: StdLoadError) -> String !io = {
+  let head = origin_text(e.origin)
+  match e.why {
+    StdVersionSkew -> {
+      let said = match e.declared {
+        Some(v) -> v
+        None -> "nothing"
+      }
+      join([
+        "std version mismatch: " ++ head ++ " is " ++ said ++
+          ", this toolchain is " ++ VERSION,
+        "  a toolchain only ever checked the std it was released with.",
+        "  Use the " ++ VERSION ++ " std, or run the " ++ said ++ " toolchain."
+      ], "\n")
+    }
+    _ -> join([head ++ " does not load", "  " ++ why_text(e.why), advice(e)], "\n")
+  }
 }
 
 ## Load, check and comptime-evaluate the bundled std from a directory.
-pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
-  let names = read_index(dir)?
+pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !io = {
+  # modules.txt decides the whole load, so whichever half answers for it is
+  # the std being loaded, and that is what the diagnostics below name.
+  let (idx_text, idx_from_dir) = match std_read_from(dir, "modules.txt") {
+    Ok(pair) -> pair
+    Err(m) -> return Err(StdLoadError {
+      origin: StdEmbedded,
+      declared: Some(VERSION),
+      why: StdFileMissing("modules.txt", m)
+    })
+  }
+  let origin = if idx_from_dir { StdFromDir(dir) } else { StdEmbedded }
+  let declared = if idx_from_dir { dir_declared_version(dir) } else { Some(VERSION) }
+  # Checked before a single module is parsed: a skewed std fails much further
+  # in, as a type error inside std that reads like a compiler bug, and by then
+  # the version is not part of the story any more.
+  match declared {
+    Some(v) ->
+      if v != VERSION {
+        return Err(StdLoadError { origin: origin, declared: declared, why: StdVersionSkew })
+      }
+    None -> ()
+  }
+  let names = index_names(idx_text)
   var exports: Map[String, ModExports] = map.empty()
   var std_fns: Map[String, Sig] = map.empty()
   var moved: Map[String, String] = map.empty()
@@ -187,24 +350,38 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
   var srcs: List[(String, String, Module)] = []
   for n in names {
     let mod_path = "std/" ++ n
-    let text = std_read(dir, n ++ ".dawn")?
+    let text = match std_read_from(dir, n ++ ".dawn") {
+      Ok(pair) -> {
+        let (t, _) = pair
+        t
+      }
+      Err(m) -> return Err(StdLoadError {
+        origin: origin, declared: declared, why: StdFileMissing(n ++ ".dawn", m)
+      })
+    }
     let (m, pdiags) = parser.parse_module(text)
     if len(pdiags) > 0 {
-      return Err("bundled std module `" ++ mod_path ++ "` does not parse: " ++ pdiags[0].msg)
+      return Err(StdLoadError {
+        origin: origin, declared: declared, why: StdModuleParse(mod_path, pdiags[0].msg)
+      })
     }
     var cx = cx_new(Some(mod_path), None)
     cx = Cx { ..cx, line_starts: lexer.line_starts_of(text), next_id: nid, impl_table: impls }
     # no std_fns here: std cannot implicitly import itself
     let (cx1, tm) = check_module(cx, m, exports)
     if len(cx1.diags) > 0 {
-      return Err("bundled std module `" ++ mod_path ++ "` does not check: " ++ cx1.diags[0].msg)
+      return Err(StdLoadError {
+        origin: origin, declared: declared, why: StdModuleCheck(mod_path, cx1.diags[0].msg)
+      })
     }
     # std folds with no host FFI: it has no `use java` at all, and ct_default()
     # is where that stops being a convention
     let ct = eval_comptime(tm, fn_decls, by_owner, impl_fns, set.empty(), cx1.adts,
       cx1.traits, cx1.impl_table, mod_path, ct_default())
     if len(ct.diags) > 0 {
-      return Err("bundled std module `" ++ mod_path ++ "` does not evaluate: " ++ ct.diags[0].msg)
+      return Err(StdLoadError {
+        origin: origin, declared: declared, why: StdModuleEval(mod_path, ct.diags[0].msg)
+      })
     }
     let exp = exports_of(cx1, m, mod_path, mod_path)
     exports = map.insert(exports, mod_path, exp)
@@ -321,7 +498,7 @@ test "the loader's id counter opens past every prelude id" {
   put(root ++ "/idprobe.dawn", "pub type IdProbe = | IpA | IpB\n")
   let probe = match load_std(root) {
     Ok(sc) -> sc
-    Err(e) -> panic("probe std: " ++ e)
+    Err(e) -> panic("probe std: " ++ std_load_error_text(e))
   }
   # the prelude ADTs came through unreplaced
   assert adt_of(probe.adts, OPTION_ID).name == "Option"
@@ -339,7 +516,7 @@ test "the loader's id counter opens past every prelude id" {
 test "production comptime body tables contain only direct std functions" {
   let std = match load_std("std") {
     Ok(s) -> s
-    Err(e) -> panic("std: " ++ e)
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
   }
 
   # The real bundle supplies many impl bodies (std/list alone supplies Iter,
@@ -390,7 +567,7 @@ test "the numeric parsers still have somewhere to land" {
   # it names the two ends instead of printing a mangled symbol.
   let std = match load_std("std") {
     Ok(s) -> s
-    Err(e) -> panic("std: " ++ e)
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
   }
   let own = match map.get(std.by_owner, "std/fmt") {
     Some(o) -> o
@@ -417,7 +594,7 @@ test "float rendering and parsing fold through std/fmt, not the host" {
   # them out from under the spec and this test is what would say so.
   let std = match load_std("std") {
     Ok(s) -> s
-    Err(e) -> panic("std: " ++ e)
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
   }
   let src = "const A: String = comptime { to_string(0.1) }\n" ++
     "const B: String = comptime { to_string(3.0e-7) }\n" ++
@@ -474,7 +651,99 @@ test "the bundled std loads, checks and evaluates" {
       assert set.has(std.std_names, "trim")
     }
     Err(e) -> {
-      println("STD LOAD FAILED: " ++ e)
+      println("STD LOAD FAILED: " ++ std_load_error_text(e))
+      assert false
+    }
+  }
+}
+
+test "std/ stamps itself with this toolchain's version" {
+  # The stamp is only worth reading if it is kept true, and nothing about
+  # editing `version.dawn` touches `std/VERSION`. This is what makes a release
+  # that bumped one and not the other fail here instead of shipping a
+  # toolchain that refuses its own std.
+  let stamped = match io.read_file("std/VERSION") {
+    Ok(t) -> str.trim(t)
+    Err(e) -> panic("std/VERSION: " ++ e.message)
+  }
+  if stamped != VERSION {
+    println("std/VERSION says " ++ stamped ++ " but version.dawn says " ++ VERSION)
+  }
+  assert stamped == VERSION
+}
+
+test "a std directory from another release is refused by version, not by symptom" {
+  # The reachability half of the diagnostic. Before this, a std out of step
+  # with the compiler surfaced wherever it first failed to type-check, and the
+  # message that came out named a std module and a type error: true, and no
+  # help at all in working out that the two halves came from different
+  # releases.
+  let root = "/tmp/dawn-selfhost-stdlib/skew"
+  let _ = io.mkdirs(root)
+  put(root ++ "/VERSION", "0.0.1-not-this-one\n")
+  put(root ++ "/modules.txt", "skew\n")
+  put(root ++ "/skew.dawn", "pub fn skew() -> Int = 1\n")
+  match load_std(root) {
+    Ok(_) -> {
+      println("a std stamped 0.0.1-not-this-one loaded into a " ++ VERSION ++ " toolchain")
+      assert false
+    }
+    Err(e) -> {
+      # not the compiler's fault, and it says so rather than panicking
+      assert not std_load_is_bug(e)
+      let text = std_load_error_text(e)
+      assert str.contains(text, "std version mismatch")
+      # both halves are named, which is the whole point: one version alone
+      # cannot tell you which of the two to change
+      assert str.contains(text, "0.0.1-not-this-one")
+      assert str.contains(text, VERSION)
+      assert str.contains(text, root)
+      # and the sentence that says what to do about it
+      assert str.contains(text, "Use the " ++ VERSION ++ " std")
+    }
+  }
+}
+
+test "an unstamped std directory that will not load is not called a compiler bug" {
+  # The other side of the same rule. A directory with no VERSION file is every
+  # std published before the stamp existed, so it must stay loadable and its
+  # failures must still point at the directory. Only the copy compiled into
+  # this binary earns "this is a bug in dawn".
+  let root = "/tmp/dawn-selfhost-stdlib/unstamped"
+  let _ = io.mkdirs(root)
+  put(root ++ "/modules.txt", "broken\n")
+  put(root ++ "/broken.dawn", "pub fn broken() -> Int = \"not an Int\"\n")
+  match load_std(root) {
+    Ok(_) -> {
+      println("a std whose only module does not check loaded anyway")
+      assert false
+    }
+    Err(e) -> {
+      assert not std_load_is_bug(e)
+      let text = std_load_error_text(e)
+      # the failure it actually hit, not a version claim it cannot make
+      assert str.contains(text, "does not check")
+      assert not str.contains(text, "std version mismatch")
+      # the directory is named, and so is the reason there is no version to
+      # compare against
+      assert str.contains(text, root)
+      assert str.contains(text, "no VERSION stamp")
+      assert not str.contains(text, "bug in dawn")
+    }
+  }
+}
+
+test "a std directory with no modules.txt falls back to the embedded copy" {
+  # `--std` pointed somewhere that has nothing to do with std is not a skew:
+  # the embedded index answers, so the load is the embedded std's and must
+  # succeed. This is the negative control for the version check, an absent
+  # directory must not be reported as a version mismatch.
+  let root = "/tmp/dawn-selfhost-stdlib/absent"
+  let _ = io.mkdirs(root)
+  match load_std(root ++ "/nothing-here") {
+    Ok(std) -> { assert map.has(std.exports, "std/str") }
+    Err(e) -> {
+      println("embedded fallback failed: " ++ std_load_error_text(e))
       assert false
     }
   }

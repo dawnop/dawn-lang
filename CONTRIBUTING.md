@@ -96,7 +96,10 @@
 - 两边一起改的过渡期，那边把 `.dawn-version` 写成 `main` 现编，但**别让它长期留在 main 上**——
   那期间可复现性是没有的。
 
-发布：改 `selfhost/src/version.dawn` 的 `VERSION` → 提交 → `git push origin main` 并等
+发布：改 `selfhost/src/version.dawn` 的 `VERSION` **和 `std/VERSION`**（std 目录自己盖的
+release 戳，编译器拿它认出「这个 std 不是我发布时那个」，见 `driver/stdlib.load_std`；
+两者不一致时 `driver/stdlib` 的 `std/ stamps itself with this toolchain's version`
+测试会红）→ 提交 → `git push origin main` 并等
 main CI 通过 → `git tag v0.9.0` → `git push origin refs/tags/v0.9.0`。禁止
 `git push --tags`，它会把无关 tag 一起发布。`release.yml` 会校验 tag 与 version 一致、
 跑全量测试、把 `dawn-selfhost.jar` 与 native 资产传上 Release。四件资产发布完成后只运行

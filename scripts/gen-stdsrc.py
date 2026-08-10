@@ -11,6 +11,12 @@ code (docs/std-audit.md §2, native-backend-plan §14.20).
 Deterministic: output is a pure function of the std/ files. The round-trip
 test in stdlib.dawn ("the embedded std matches std/ on disk") fails when this
 file is stale, so CI catches a std edit that forgot to regenerate.
+
+std/VERSION is deliberately not embedded. The embedded std's version is the
+version of the compiler it is compiled into, by construction, and a second
+copy of that number inside the binary would be one more thing that can drift
+without being one more thing that can be checked. stdlib.load_std reads the
+stamp from the directory only, for the same reason.
 """
 
 import pathlib

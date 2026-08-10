@@ -216,6 +216,23 @@ pair_expect_error \
 pair_expect_exit 0 "check (one target)" check "$ARITY_A"
 pair_expect_exit 0 "check (multiple targets)" check "$ARITY_A" "$ARITY_B"
 
+# A std stamped with another release. The two drivers used to word this class
+# of failure differently (`main.dawn` named the directory, `nmain.dawn` said
+# "bundled std is broken"), so it is exactly the kind of sentence that drifts
+# when only one of them is edited. Both render it through driver/stdlib now,
+# and this is what holds them to that (#226).
+SKEW_STD="$OUT/skew-std"
+mkdir -p "$SKEW_STD"
+cp "$ROOT"/std/*.dawn "$ROOT/std/modules.txt" "$SKEW_STD/"
+printf '0.0.1-native-cli-diff\n' > "$SKEW_STD/VERSION"
+DAWN_VERSION=$(sed -n 's/^pub const VERSION: String = "\(.*\)"$/\1/p' "$ROOT/selfhost/src/version.dawn")
+SKEW_EXPECT="error: std version mismatch: the std in $SKEW_STD is 0.0.1-native-cli-diff,"
+SKEW_EXPECT="$SKEW_EXPECT this toolchain is $DAWN_VERSION"$'\n'
+SKEW_EXPECT="$SKEW_EXPECT  a toolchain only ever checked the std it was released with."$'\n'
+SKEW_EXPECT="$SKEW_EXPECT  Use the $DAWN_VERSION std, or run the 0.0.1-native-cli-diff toolchain."$'\n'
+pair_expect_error "$SKEW_EXPECT" \
+  "check (std stamped with another release)" check --std "$SKEW_STD" "$ARITY_A"
+
 pair_expect_error \
   $'error: usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib\n' \
   "test (zero targets)" test
