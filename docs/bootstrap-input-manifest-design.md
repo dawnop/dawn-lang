@@ -1,8 +1,9 @@
 # 自举输入清单协议
 
-> 状态：**Producer、严格 v1 consumer 与递归 launcher discovery 已落地**。完整的
-> fail-closed hasher、framed v2 stamp、pre/post re-plan 与可恢复 commit-marker 仍是二期残余，
-> 本文逐项区分现状与待办。
+> 状态：**current** —— Producer、严格 v1 consumer 与完整 v2 launcher generation
+> （fail-closed known-vector hasher、framed digests、stage1/candidate pre/post re-plan、
+> 持久化 inputs 与可恢复 commit-marker）均已落地；v1 时代的 zero-toolchain shell
+> fallback 已随 v2 删除。
 
 ## 问题
 
@@ -30,8 +31,9 @@ dawn __source-inputs --base <repo> <project-dir>
 - 参数形状错误退出 2。命令保持隐藏，不加入公开 `--help`。
 
 旧 seed 的职责仍只有“用当前源码构建 stage1”，launcher 不要求它认识 `__source-inputs`。
-启动时若已有认识该命令的当前工具链 JAR 就直接消费 Producer；否则走下文限定的首次递归
-fallback。完整 v2 将由 stage1 及后续 candidate 做 pre/post re-plan，仍不把命令下推给 seed。
+命中缓存的启动直接消费已持久化的 manifest；重建时由 stage1 与最终 candidate 各自执行
+`__source-inputs` 做 pre/post re-plan，命令从不下推给 seed，shell 端也不再解析任何
+manifest——cold checkout 的第一份清单同样来自 seed 构建出的 stage1。
 
 ## 清单内容
 
@@ -101,50 +103,42 @@ Producer 在向 stdout 写任何字节前验证完整清单：
 验证不是 snapshot。源码可在 preflight 后改变；TOOL-05 记录的两次 plan TOCTOU 与
 filesystem 的 A→B→A（ABA）仍然存在，不能借本协议宣称关闭。
 
-## launcher consumer：已落地边界与二期残余
+## launcher consumer：已落地的 v2 generation
 
 Producer 清单只替代 launcher 对 source graph 的自行解析。consumer 仍须把它与 launcher
 拥有的静态 recipe inputs 合并：`std/`、`scripts/seed-release.txt`、
 `scripts/seed-checksums.txt`、`scripts/seed-std-checksums.txt`、`scripts/seedjar.sh` 与
 `bin/dawn`；不能因为 source graph 有了权威清单，就漏掉 seed/std/recipe identity。
 
-现行 `bin/dawn` 在已有当前工具链 JAR 时执行 `__source-inputs`，把 v1 的 `R/A`、`F/O/T`
-记录原样保留为 typed stamp input；`F` 必须是可读的普通文件，`O` 只允许缺失或普通文件，`T`
-必须是可遍历目录树，树内 symlink、非普通叶、`find`/`cat` 失败和遍历中的类型变化都 fail
-closed。因此 `compiler-plan` 以及它传递依赖的 `fspath`、`sha2`、`inflate` 都会进入摘要。
-Producer 非零退出、空输出或坏 manifest 均直接终止，stderr 保留；**不会**因为已有 JAR 的
-Producer 出错而回退到 shell parser。
+现行 `bin/dawn` 把 v1 的 `R/A`、`F/O/T` 记录原样保留为 typed digest input；`F` 必须是可读
+的普通文件，`O` 只允许缺失或普通文件，`T` 必须是可遍历目录树，树内 symlink、非普通叶、
+`find`/`cat` 失败和遍历中的类型变化都 fail closed。因此 `compiler-plan` 以及它传递依赖的
+`fspath`、`sha2`、`inflate` 都会进入摘要。Producer 非零退出、空输出或坏 manifest 均直接
+终止，stderr 保留；shell 端没有任何 manifest parser 可以回退。
 
-只有当前工具链 JAR 完全不存在的首次 checkout 才使用受限递归 fallback。它只接受本仓采用的
-`[deps] name = "relative-path"` 形状，按每份 manifest 自身目录解析；URL/table 或其他陌生形状、
-绝对依赖、解析后逃出 checkout 的依赖、缺失目录和超过深度上限的图全部 fail closed。它是
-zero-toolchain 引导器，不是第二个 validator/MVS resolver；只要当前 JAR 存在，该次启动就让位给
-Producer。
+v1 时代曾有一个受限递归 shell fallback 回答 zero-toolchain 引导边界；v2 用两段 plan 取消了
+它的存在理由——cold checkout 先由 seed 构建 stage1（seed 不需要清单），第一份权威清单来自
+stage1 自己的 `__source-inputs`。fallback 及其 manifest parser 已整体删除。
 
-这一 fallback 是为解决 zero-toolchain 引导边界作出的架构裁决。原“绝不 fallback”条款没有
-回答“当前工具链尚不存在时由谁运行当前 Producer”，实际只能漏传递依赖或形成鸡生蛋。
-递归输入覆盖由 `scripts/bootstrap-guards/run.sh` 对 Planner 及其传递依赖逐文件变异固定。
-
-以下完整 v2 consumer 协议仍待整体落地，不能因递归发现已经修好就冒称 TOOL-14 全部关闭：
+完整 v2 consumer 协议已按以下条款落地：
 
 1. legacy stamp 或缺少 `dawn-selfhost.inputs` 一律 cache miss。
-2. 旧 seed 只构建 stage1；不得要求旧 seed 执行隐藏命令。首次 fallback 只覆盖 checkout-local
-   path closure，不能扩张成另一套 URL/MVS/manifest validator。
+2. 旧 seed 只构建 stage1；不得要求旧 seed 执行隐藏命令。
 3. stage1 生成 `inputs.pre` 与 `source.pre`，再构建 final candidate；candidate 重新 plan，
    生成 `inputs.post` 与 `source.post`。两份 inputs 与 source digest 必须分别相同，否则报告
    `bootstrap inputs changed during build`，不提升。
 4. SHA-256 工具启动时先验证 `abc` known vector。无工具、启动失败、空输出、非 64-hex、
-   或摘要值错误全部 fail closed；删除 mtime 与 `no-sha256` fallback。
+   或摘要值错误全部 fail closed；mtime 与 `no-sha256` fallback 已删除。
 5. digest 输入使用 `frame(x) = byte_length ":" raw_bytes`。record、scope、kind、path、树根、
    相对叶路径、存在/缺失状态和内容分别 framing；空树与 optional missing 也有显式 frame，
    不再拼接 `path + newline + contents`。
 6. bootstrap identity 同时覆盖默认 seed 与 `DAWN_SEED` override；撤掉 override 后不得复用
    未验证 seed 构建的 jar。
-7. v2 stamp 至少记录 `source`、`bootstrap`、`inputs` 与 `jar` 四个 SHA-256。正常启动复验
+7. v2 stamp 记录 `source`、`bootstrap`、`inputs` 与 `jar` 四个 SHA-256。正常启动复验
    inputs 与 jar 摘要，任一缺失、损坏或交错都重建，不执行旧 jar 兜底。
 8. 每个 builder 在唯一 staging 目录完成 candidate、inputs 与 stamp。验证后按
-   jar → inputs → stamp 的顺序 rename，stamp 是 commit marker；提升后再次复验，遇到并发
-   交错最多重试两次。
+   jar → inputs → stamp 的顺序 rename，stamp 是 commit marker；提升后与 exec 前再次配对
+   复验，遇到并发交错最多重试两次。
 
 固定三个目标文件不能形成真正的多文件原子事务。以上只能称**可恢复 commit-marker 协议**：
 进程若在 jar 与 inputs 之间崩溃，旧 stamp 摘要会让下次重建；不能称“原子三文件事务”。它也
@@ -167,20 +161,23 @@ SourcePlan/MVS 的顺序、mirror、cache 与 lock 断言留在
 `scripts/source-plan-contract/run.sh`。拆分后两边均不制造 ASM fixture，也不复制或编译整套
 `selfhost`；真实 CLI 正例仍由 `dawn __source-inputs` 驱动，probe 只服务 post-plan 边界和 mutant。
 
-`scripts/bootstrap-guards/run.sh` 另以 fake Java/current-JAR 进程边界固定 consumer：producer
-非零、空输出、坏 header/record/scope/kind/path 都必须失败且不产出 digest；缺失/错误类型的
-`F/T` 必须失败，缺失 `O` 必须成功，遍历与读取错误必须传播。zero-toolchain leg 还拒绝 URL
-table、绝对依赖和逃出 checkout 的相对依赖，并逐文件证明递归 closure 会改变 stamp。
+`scripts/bootstrap-guards/launcher-contract.sh`（由 `run.sh` 驱动、进 CI）以 fake compiler
+角色在进程边界端到端固定 consumer 与 generation 协议：cold/hot、声明的每个输入移动
+generation 与无关文件不移动的控制、producer 非零/空输出/坏 header/record/scope/kind/path
+的 fail-closed（不留 commit marker）、缺失或 symlink/fifo 的 `F/T` 与缺失 `O` 正例、
+持久化 inputs 缺失/损坏/重排、legacy stamp、jar 摘要错配、hasher known-vector 与
+status/shape 失败、分界碰撞、发散 pre/post plan、promotion 顺序与崩溃恢复、并发唯一
+staging，以及提升后与 exec 前的两次配对复验。
 
-二期还必须补 hasher known-vector、无长度定界碰撞、持久化 v2 inputs 的缺失或摘要错配、
-jar/inputs digest 漏记、旧 seed 被提前调用、删除 final re-plan、共享 staging 并发和 stamp
-提前提升等 consumer mutants。这里的“坏 inputs”指尚未落地的持久化 v2 artifact，不是已经有
-负控的 v1 producer stdout。
+上述每个 assertion family 各有一个可编译 launcher mutant 作负控
+（`scripts/bootstrap-guards/mutate-launcher.py`，21 个）：hasher known-vector/status/shape、
+mtime 兜底、legacy 拼接、漏记 inputs/bootstrap/jar digest、旧 seed 执行隐藏命令、删除
+final re-plan、inputs-only re-plan、共享 staging、stamp 提前提升、删除两次配对复验、漏记
+静态输入、追踪无关文件、放行坏 header/逃逸路径/symlink。每个 mutant 必须由 owning
+assertion 转红，纯语法失败不算。
 
 ## 不做的（记录理由）
 
-- **不因递归 discovery 已接入就提前升级 stamp schema。** 当前切换只关闭 direct-only 漏输入；
-  hasher、framing、持久化 inputs 与 promotion 恢复必须连同各自负控按完整 v2 一次关闭。
 - **不把绝对路径写回 `SourcePlan`。** 调用者拼写属于公开诊断语义，只有序列化层需要
   可迁移 canonical spelling。
 - **不支持 direct-file target。** selfhost bootstrap 构建的是有 manifest 与 `src/` 的项目；

@@ -55,11 +55,25 @@ runtime_input_stamp() {
   digest_file "$manifest"
 }
 
+# The launcher's generation marker is the strict five-line v2 stamp; anything
+# else (a legacy single digest, an error string, a truncated file) means the
+# inputs are not guarded and the gate must not start.
+stamp_is_v2() {
+  local stamp="$1"
+  [ "$(printf '%s\n' "$stamp" | wc -l | tr -d '[:space:]')" -eq 5 ] || return 1
+  printf '%s\n' "$stamp" | sed -n '1p' | grep -qx 'dawn-selfhost-stamp-v2' || return 1
+  printf '%s\n' "$stamp" | sed -n '2p' | grep -qxE 'source=[0-9a-f]{64}' || return 1
+  printf '%s\n' "$stamp" | sed -n '3p' | grep -qxE 'bootstrap=[0-9a-f]{64}' || return 1
+  printf '%s\n' "$stamp" | sed -n '4p' | grep -qxE 'inputs=[0-9a-f]{64}' || return 1
+  printf '%s\n' "$stamp" | sed -n '5p' | grep -qxE 'jar=[0-9a-f]{64}' || return 1
+}
+
 # generation A: the JVM toolchain emits the native driver
 "$root/bin/dawn" --version > /dev/null   # rebuild build/dawn-selfhost.jar if stale
 expected_source_stamp="$(DAWN_PRINT_STAMP=1 "$root/bin/dawn")"
-if [ -z "$expected_source_stamp" ] || [ "$expected_source_stamp" = "no-sha256" ]; then
-  echo "FAIL: cannot guard native fixpoint inputs without a content stamp" >&2
+if ! stamp_is_v2 "$expected_source_stamp"; then
+  echo "FAIL: cannot guard native fixpoint inputs without a strict v2 generation stamp" >&2
+  echo "  printed stamp: $expected_source_stamp" >&2
   exit 1
 fi
 if [ ! -f "$root/build/dawn-selfhost.stamp" ]; then

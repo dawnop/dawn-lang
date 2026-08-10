@@ -45,7 +45,7 @@
 | 文档 | 生命周期 | 说明 |
 |---|---|---|
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
-| [bootstrap-input-manifest-design.md](bootstrap-input-manifest-design.md) | current | TOOL-14 的 project-only Producer、已落地的递归 launcher discovery，以及尚未落地的 framed v2 stamp/可恢复 commit-marker 边界。 |
+| [bootstrap-input-manifest-design.md](bootstrap-input-manifest-design.md) | current | TOOL-14 的 project-only Producer 与已落地的完整 v2 launcher generation：framed digests、pre/post re-plan、可恢复 commit-marker。 |
 | [package-design.md](package-design.md) | current | 源码包（`[deps]`）与 Maven 依赖（`[java-deps]`）的清单与解析。 |
 | [runtime-intrinsics-design.md](runtime-intrinsics-design.md) | current | 运行时 intrinsic 契约——每个 primitive 归哪个运行时模块。**表已从 `emit.dawn` 的 `(class, method)` 收成 `types.dawn` 的 `Rt`/`Intr`（文中的 `rt_intrinsic_target` 是旧名，已不存在）；§8 的三步 Move 表已被 [core-move2-design.md](core-move2-design.md) 更正**。 |
 | [core-move2-design.md](core-move2-design.md) | historical | 上面那张表里「Move 2 控制流/match」的**结账盘点**：主体已随 Core IR Phase 0 落地；残余 `CSProtect`（error-model 的 C2）已于 2026-07-31 裁决**关档不做**。`bracket` + `with` + 当时的 `fn` 尾闭包随 v0.39.0/v0.40.0 发布；尾闭包拼写后来由 #206 尾块取代。 |
