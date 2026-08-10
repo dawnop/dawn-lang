@@ -238,6 +238,32 @@ fn std/io.temp_dir -> Result[String, ForeignError]
         local v2 : fn() -> String !io
     drop v2
     local v3 : Result[String, ForeignError]
+fn std/io.temp_file -> Result[String, ForeignError]
+  param v0 : String owned
+  param v1 : String owned
+  block : Result[String, ForeignError]
+    let v2 : fn() -> String !io
+      closure std/io.lambda$8 : fn() -> String !io
+        local v0 : String
+        local v1 : String
+    let v3 : Result[String, ForeignError]
+      intrinsic catch_fault : Result[String, ForeignError]
+        local v2 : fn() -> String !io
+    drop v2
+    local v3 : Result[String, ForeignError]
+fn std/io.copy_permissions -> Result[Unit, ForeignError]
+  param v0 : String owned
+  param v1 : String owned
+  block : Result[Unit, ForeignError]
+    let v2 : fn() -> Unit !io
+      closure std/io.lambda$9 : fn() -> Unit !io
+        local v0 : String
+        local v1 : String
+    let v3 : Result[Unit, ForeignError]
+      intrinsic catch_fault : Result[Unit, ForeignError]
+        local v2 : fn() -> Unit !io
+    drop v2
+    local v3 : Result[Unit, ForeignError]
 fn std/io.is_symlink -> Bool
   param v0 : String owned
   block : Bool
@@ -246,6 +272,431 @@ fn std/io.is_symlink -> Bool
         local v0 : String
     drop v0
     local v1 : Bool
+fn std/io.atomic_write_file -> Result[Unit, ForeignError]
+  param v0 : String owned
+  param v1 : String owned
+  if : Result[Unit, ForeignError]
+    binary eq : Bool
+      local v0 : String
+      str ""
+    block : Result[Unit, ForeignError]
+      let v2 : Result[Unit, ForeignError]
+        ctor Result/Err : Result[Unit, ForeignError]
+          box from=ForeignError
+            ctor ForeignError/ForeignError : ForeignError
+              str "io.invalid_atomic_write_path"
+              str "io.atomic_write_file: path must not be empty"
+              ctor Option/None : Option[String]
+      drop v1
+      drop v0
+      local v2 : Result[Unit, ForeignError]
+    if : Result[Unit, ForeignError]
+      call direct std/str.ends_with : Bool
+        dup
+          local v0 : String
+        str "/"
+      block : Result[Unit, ForeignError]
+        let v3 : Result[Unit, ForeignError]
+          ctor Result/Err : Result[Unit, ForeignError]
+            box from=ForeignError
+              ctor ForeignError/ForeignError : ForeignError
+                str "io.invalid_atomic_write_path"
+                str "io.atomic_write_file: path must not end with '/'"
+                ctor Option/None : Option[String]
+        drop v1
+        drop v0
+        local v3 : Result[Unit, ForeignError]
+      if : Result[Unit, ForeignError]
+        call direct std/io.is_symlink : Bool
+          dup
+            local v0 : String
+        block : Result[Unit, ForeignError]
+          let v4 : Result[Unit, ForeignError]
+            ctor Result/Err : Result[Unit, ForeignError]
+              box from=ForeignError
+                ctor ForeignError/ForeignError : ForeignError
+                  str "io.atomic_write_target_is_symlink"
+                  binary concat : String
+                    str "io.atomic_write_file: refusing to replace a symbolic link: "
+                    local v0 : String
+                  ctor Option/None : Option[String]
+          drop v1
+          drop v0
+          local v4 : Result[Unit, ForeignError]
+        block : Result[Unit, ForeignError]
+          block : Result[Unit, ForeignError]
+            let v5 : Result[String, ForeignError]
+              call direct std/io.temp_file : Result[String, ForeignError]
+                call direct std/io.parent_dir : String
+                  dup
+                    local v0 : String
+                str ".dawn-atomic-"
+            let v6 : Result[Unit, ForeignError]
+              intrinsic null_ref : Result[Unit, ForeignError]
+            sif
+              isctor Result/Err
+                local v5 : Result[String, ForeignError]
+              block : Unit
+                let v7 : ForeignError
+                  unbox to=ForeignError
+                    dup
+                      field Result/Err.0 : E
+                        local v5 : Result[String, ForeignError]
+                drop v0
+                drop v1
+                drop v5
+                let v8 : Result[Unit, ForeignError]
+                  ctor Result/Err : Result[Unit, ForeignError]
+                    box from=ForeignError
+                      local v7 : ForeignError
+                drop v6
+                assign v6
+                  local v8 : Result[Unit, ForeignError]
+              block : Unit
+                sif
+                  isctor Result/Ok
+                    local v5 : Result[String, ForeignError]
+                  block : Unit
+                    let v9 : String
+                      unbox to=String
+                        dup
+                          field Result/Ok.0 : T
+                            local v5 : Result[String, ForeignError]
+                    drop v5
+                    let v10 : Result[Unit, ForeignError]
+                      call direct std/io.stage_replace : Result[Unit, ForeignError]
+                        local v0 : String
+                        local v1 : String
+                        local v9 : String
+                    drop v6
+                    assign v6
+                      local v10 : Result[Unit, ForeignError]
+                  block : Unit
+                    discard
+                      intrinsic panic : Never
+                        str "unreachable match"
+                    drop v0
+                    drop v1
+                    drop v5
+            local v6 : Result[Unit, ForeignError]
+fn std/io.parent_dir -> String
+  param v0 : String owned
+  block : String
+    let v1 : Option[Int]
+      call direct std/str.last_index_of : Option[Int]
+        dup
+          local v0 : String
+        str "/"
+    let v2 : String
+      str ""
+    sif
+      isctor Option/None
+        local v1 : Option[Int]
+      block : Unit
+        let v3 : String
+          str "."
+        drop v2
+        assign v2
+          local v3 : String
+        drop v0
+        drop v1
+      block : Unit
+        sif
+          isctor Option/Some
+            local v1 : Option[Int]
+          block : Unit
+            let v4 : Int
+              unbox to=Int
+                field Option/Some.0 : T
+                  local v1 : Option[Int]
+            drop v1
+            let v5 : String
+              if : String
+                binary eq : Bool
+                  local v4 : Int
+                  int 0
+                block : String
+                  let v6 : String
+                    str "/"
+                  drop v0
+                  local v6 : String
+                block : String
+                  call direct std/str.slice : String
+                    local v0 : String
+                    int 0
+                    local v4 : Int
+            drop v2
+            assign v2
+              local v5 : String
+          block : Unit
+            discard
+              intrinsic panic : Never
+                str "unreachable match"
+            drop v0
+            drop v1
+    local v2 : String
+fn std/io.stage_replace -> Result[Unit, ForeignError]
+  param v0 : String owned
+  param v1 : String owned
+  param v2 : String owned
+  block : Result[Unit, ForeignError]
+    let v3 : Result[Unit, ForeignError]
+      call direct std/io.write_file : Result[Unit, ForeignError]
+        dup
+          local v2 : String
+        dup
+          local v1 : String
+    let v4 : Result[Unit, ForeignError]
+      intrinsic null_ref : Result[Unit, ForeignError]
+    sif
+      isctor Result/Err
+        local v3 : Result[Unit, ForeignError]
+      block : Unit
+        let v5 : ForeignError
+          unbox to=ForeignError
+            dup
+              field Result/Err.0 : E
+                local v3 : Result[Unit, ForeignError]
+        drop v0
+        drop v1
+        drop v3
+        let v6 : Result[Unit, ForeignError]
+          call direct std/io.abandon : Result[Unit, ForeignError]
+            local v2 : String
+            local v5 : ForeignError
+        drop v4
+        assign v4
+          local v6 : Result[Unit, ForeignError]
+      block : Unit
+        sif
+          isctor Result/Ok
+            local v3 : Result[Unit, ForeignError]
+          block : Unit
+            let v7 : Result[Unit, ForeignError]
+              block : Result[Unit, ForeignError]
+                let v8 : Result[Bytes, ForeignError]
+                  call direct std/io.read_bytes : Result[Bytes, ForeignError]
+                    dup
+                      local v2 : String
+                drop v3
+                let v9 : Result[Unit, ForeignError]
+                  intrinsic null_ref : Result[Unit, ForeignError]
+                sif
+                  isctor Result/Err
+                    local v8 : Result[Bytes, ForeignError]
+                  block : Unit
+                    let v10 : ForeignError
+                      unbox to=ForeignError
+                        dup
+                          field Result/Err.0 : E
+                            local v8 : Result[Bytes, ForeignError]
+                    drop v0
+                    drop v1
+                    drop v8
+                    let v11 : Result[Unit, ForeignError]
+                      call direct std/io.abandon : Result[Unit, ForeignError]
+                        local v2 : String
+                        local v10 : ForeignError
+                    drop v9
+                    assign v9
+                      local v11 : Result[Unit, ForeignError]
+                  block : Unit
+                    sif
+                      isctor Result/Ok
+                        local v8 : Result[Bytes, ForeignError]
+                      block : Unit
+                        let v12 : Bytes
+                          unbox to=Bytes
+                            dup
+                              field Result/Ok.0 : T
+                                local v8 : Result[Bytes, ForeignError]
+                        drop v8
+                        let v13 : Result[Unit, ForeignError]
+                          if : Result[Unit, ForeignError]
+                            block : Bool
+                              let v14 : Bytes
+                                local v12 : Bytes
+                              let v15 : Bytes
+                                intrinsic bytes_utf8 : Bytes
+                                  local v1 : String
+                              let v16 : Bool
+                                binary ne : Bool
+                                  local v14 : Bytes
+                                  local v15 : Bytes
+                              drop v15
+                              drop v14
+                              local v16 : Bool
+                            block : Result[Unit, ForeignError]
+                              let v17 : Result[Unit, ForeignError]
+                                call direct std/io.abandon : Result[Unit, ForeignError]
+                                  local v2 : String
+                                  ctor ForeignError/ForeignError : ForeignError
+                                    str "io.atomic_write_verify_failed"
+                                    block : String
+                                      let v18 : String
+                                        str "io.atomic_write_file: the staged file did not read back "
+                                      let v19 : String
+                                        binary concat : String
+                                          str "as it was written: "
+                                          local v0 : String
+                                      let v20 : String
+                                        binary concat : String
+                                          local v18 : String
+                                          local v19 : String
+                                      drop v19
+                                      drop v18
+                                      local v20 : String
+                                    ctor Option/None : Option[String]
+                              drop v1
+                              drop v0
+                              local v17 : Result[Unit, ForeignError]
+                            block : Result[Unit, ForeignError]
+                              block : Result[Unit, ForeignError]
+                                let v21 : Result[Unit, ForeignError]
+                                  call direct std/io.carry_permissions : Result[Unit, ForeignError]
+                                    dup
+                                      local v0 : String
+                                    dup
+                                      local v2 : String
+                                drop v1
+                                let v22 : Result[Unit, ForeignError]
+                                  intrinsic null_ref : Result[Unit, ForeignError]
+                                sif
+                                  isctor Result/Err
+                                    local v21 : Result[Unit, ForeignError]
+                                  block : Unit
+                                    let v23 : ForeignError
+                                      unbox to=ForeignError
+                                        dup
+                                          field Result/Err.0 : E
+                                            local v21 : Result[Unit, ForeignError]
+                                    drop v0
+                                    drop v21
+                                    let v24 : Result[Unit, ForeignError]
+                                      call direct std/io.abandon : Result[Unit, ForeignError]
+                                        local v2 : String
+                                        local v23 : ForeignError
+                                    drop v22
+                                    assign v22
+                                      local v24 : Result[Unit, ForeignError]
+                                  block : Unit
+                                    sif
+                                      isctor Result/Ok
+                                        local v21 : Result[Unit, ForeignError]
+                                      block : Unit
+                                        let v25 : Result[Unit, ForeignError]
+                                          block : Result[Unit, ForeignError]
+                                            let v26 : Result[Unit, ForeignError]
+                                              call direct std/io.rename : Result[Unit, ForeignError]
+                                                dup
+                                                  local v2 : String
+                                                local v0 : String
+                                            drop v21
+                                            let v27 : Result[Unit, ForeignError]
+                                              intrinsic null_ref : Result[Unit, ForeignError]
+                                            sif
+                                              isctor Result/Err
+                                                local v26 : Result[Unit, ForeignError]
+                                              block : Unit
+                                                let v28 : ForeignError
+                                                  unbox to=ForeignError
+                                                    dup
+                                                      field Result/Err.0 : E
+                                                        local v26 : Result[Unit, ForeignError]
+                                                drop v26
+                                                let v29 : Result[Unit, ForeignError]
+                                                  call direct std/io.abandon : Result[Unit, ForeignError]
+                                                    local v2 : String
+                                                    local v28 : ForeignError
+                                                drop v27
+                                                assign v27
+                                                  local v29 : Result[Unit, ForeignError]
+                                              block : Unit
+                                                sif
+                                                  isctor Result/Ok
+                                                    local v26 : Result[Unit, ForeignError]
+                                                  block : Unit
+                                                    let v30 : Result[Unit, ForeignError]
+                                                      ctor Result/Ok : Result[Unit, ForeignError]
+                                                        box from=Unit
+                                                          unit
+                                                    drop v27
+                                                    assign v27
+                                                      local v30 : Result[Unit, ForeignError]
+                                                    drop v2
+                                                    drop v26
+                                                  block : Unit
+                                                    discard
+                                                      intrinsic panic : Never
+                                                        str "unreachable match"
+                                                    drop v2
+                                                    drop v26
+                                            local v27 : Result[Unit, ForeignError]
+                                        drop v22
+                                        assign v22
+                                          local v25 : Result[Unit, ForeignError]
+                                      block : Unit
+                                        discard
+                                          intrinsic panic : Never
+                                            str "unreachable match"
+                                        drop v0
+                                        drop v2
+                                        drop v21
+                                local v22 : Result[Unit, ForeignError]
+                        drop v9
+                        assign v9
+                          local v13 : Result[Unit, ForeignError]
+                      block : Unit
+                        discard
+                          intrinsic panic : Never
+                            str "unreachable match"
+                        drop v0
+                        drop v1
+                        drop v2
+                        drop v8
+                local v9 : Result[Unit, ForeignError]
+            drop v4
+            assign v4
+              local v7 : Result[Unit, ForeignError]
+          block : Unit
+            discard
+              intrinsic panic : Never
+                str "unreachable match"
+            drop v0
+            drop v1
+            drop v2
+            drop v3
+    local v4 : Result[Unit, ForeignError]
+fn std/io.carry_permissions -> Result[Unit, ForeignError]
+  param v0 : String owned
+  param v1 : String owned
+  if : Result[Unit, ForeignError]
+    call direct std/io.exists : Bool
+      dup
+        local v0 : String
+    block : Result[Unit, ForeignError]
+      call direct std/io.copy_permissions : Result[Unit, ForeignError]
+        local v0 : String
+        local v1 : String
+    block : Result[Unit, ForeignError]
+      let v2 : Result[Unit, ForeignError]
+        ctor Result/Ok : Result[Unit, ForeignError]
+          box from=Unit
+            unit
+      drop v1
+      drop v0
+      local v2 : Result[Unit, ForeignError]
+fn std/io.abandon -> Result[Unit, ForeignError]
+  param v0 : String owned
+  param v1 : ForeignError owned
+  block : Result[Unit, ForeignError]
+    let v2 : Result[DeleteOutcome, ForeignError]
+      call direct std/io.delete : Result[DeleteOutcome, ForeignError]
+        local v0 : String
+    drop v2
+    ctor Result/Err : Result[Unit, ForeignError]
+      box from=ForeignError
+        local v1 : ForeignError
 fn std/io.read_stdin -> Bytes
   param v0 : Int owned
   intrinsic io_read_stdin : Bytes
@@ -265,7 +716,7 @@ fn std/io.list_dir -> Result[List[String], ForeignError]
         let v1 : Result[List[String], ForeignError]
           block : Result[List[String], ForeignError]
             let v2 : fn() -> List[String] !io
-              closure std/io.lambda$8 : fn() -> List[String] !io
+              closure std/io.lambda$10 : fn() -> List[String] !io
                 local v0 : String
             let v3 : Result[List[String], ForeignError]
               intrinsic catch_fault : Result[List[String], ForeignError]
@@ -353,7 +804,7 @@ fn std/io.run -> Result[Int, ForeignError]
     block : Result[Int, ForeignError]
       block : Result[Int, ForeignError]
         let v4 : fn() -> Int !io
-          closure std/io.lambda$9 : fn() -> Int !io
+          closure std/io.lambda$11 : fn() -> Int !io
             local v0 : List[String]
             local v1 : String
             local v2 : String
@@ -434,7 +885,28 @@ fn std/io.lambda$7 -> String
     drop v0
     drop v1
     local v2 : String
-fn std/io.lambda$8 -> List[String]
+fn std/io.lambda$8 -> String
+  capture v0 : String owned
+  capture v1 : String owned
+  block : String
+    let v2 : String
+      intrinsic io_temp_file : String
+        local v0 : String
+        local v1 : String
+    drop v0
+    drop v1
+    local v2 : String
+fn std/io.lambda$9 -> Unit
+  capture v0 : String owned
+  capture v1 : String owned
+  block : Unit
+    discard
+      intrinsic io_copy_permissions : Unit
+        local v0 : String
+        local v1 : String
+    drop v0
+    drop v1
+fn std/io.lambda$10 -> List[String]
   capture v0 : String owned
   block : List[String]
     let v1 : List[String]
@@ -456,7 +928,7 @@ fn std/io.prim$0$String$cmp -> Int
     drop v0
     drop v1
     local v3 : Int
-fn std/io.lambda$9 -> Int
+fn std/io.lambda$11 -> Int
   capture v0 : List[String] owned
   capture v1 : String owned
   capture v2 : String owned

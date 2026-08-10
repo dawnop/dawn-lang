@@ -1,0 +1,38 @@
+# One scenario, run once per injected host failure: replace a file that is
+# already there, in a directory that holds nothing else.
+#
+# The golden for this probe is not a file but three lines the runner checks,
+# because what varies between the runs is the first one. The other two are the
+# whole point and never vary: whatever step failed, the destination still holds
+# what it held, and the staging file is gone.
+use std/io
+use std/str
+
+pub fn main() -> Unit !io = {
+  let r = io.atomic_write_file("target.toml", "new\n")
+  io.println("result = " ++ verdict(r))
+  io.println("content = " ++ slurp("target.toml"))
+  io.println("entries = " ++ entries("."))
+}
+
+fn verdict(r: Result[Unit, ForeignError]) -> String =
+  match r {
+    Ok(_) -> "ok"
+    Err(e) -> if str.starts_with(e.kind, "io.") || str.starts_with(e.kind, "inject.") {
+      e.kind
+    } else {
+      "err"
+    }
+  }
+
+fn slurp(path: String) -> String !io =
+  match io.read_file(path) {
+    Ok(s) -> str.trim(s)
+    Err(_) -> "<unreadable>"
+  }
+
+fn entries(dir: String) -> String !io =
+  match io.list_dir(dir) {
+    Ok(xs) -> to_string(xs)
+    Err(_) -> "<unlistable>"
+  }

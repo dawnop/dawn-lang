@@ -1884,6 +1884,29 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(bsig("io_rename", [TyString, TyString], ["src", "dst"], TyUnit), EIo),
     # `parent == ""` means the system temp directory.
     eff1(bsig("io_temp_dir", [TyString, TyString], ["parent", "prefix"], TyString), EIo),
+    # The file half of `io_temp_dir`, and the half an atomic replace needs: a
+    # freshly *created* sibling whose name nothing else can be holding. Both
+    # backends create it exclusively -- `Files.createTempFile`, `mkstemp(3)` --
+    # so the name is claimed by the same call that picks it, and a caller that
+    # instead spelled a name and opened it would have a window between the two.
+    # The name is unpredictable for the same reason those two calls make it so:
+    # a guessable staging name in a directory another user can write is a
+    # symlink attack, and the destination directory of a project manifest is
+    # not always private.
+    eff1(bsig("io_temp_file", [TyString, TyString], ["parent", "prefix"], TyString), EIo),
+    # Carry `src`'s permissions onto `dst`. It exists because publishing a file
+    # by writing a *new* one and renaming it over the old one loses whatever
+    # mode the old one had -- the new file's mode comes from the creating call
+    # and the umask, and nothing else remembers what the caller is replacing.
+    #
+    # `src` is inspected without following a link, so the mode copied is the
+    # one on the object named and never one a link points at. POSIX hosts copy
+    # the permission bits; a host with no POSIX permission model copies the
+    # read-only flag and nothing else, which is all such a host has to copy.
+    # ACLs and extended attributes are out of scope on both -- the primitive
+    # promises the mode bits it can name, not everything a filesystem may
+    # attach to a file.
+    eff1(bsig("io_copy_permissions", [TyString, TyString], ["src", "dst"], TyUnit), EIo),
     eff1(bsig("io_is_symlink", [TyString], ["path"], TyBool), EIo),
     # Exactly `n` bytes, short only at end of input -- so a short read *is* the
     # EOF signal. stdin is a channel like stderr, and for the same reason it
@@ -2054,7 +2077,8 @@ pub fn intrinsics() -> Map[String, Intr] = {
   }
   let io_in_rt = ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
-    "delete", "rename", "temp_dir", "is_symlink", "read_stdin", "stdin_ready"]
+    "delete", "rename", "temp_dir", "temp_file", "copy_permissions", "is_symlink", "read_stdin",
+    "stdin_ready"]
   for op in io_in_rt {
     rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
   }
@@ -2519,7 +2543,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 91
+  assert map_size2(bs) == 93
 }
 
 test "the reclaim's failure is a value, under the one name left" {

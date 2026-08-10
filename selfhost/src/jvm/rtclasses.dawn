@@ -1437,6 +1437,9 @@ fn gen_io_bytes_files(cw: ClassWriter) -> Unit !io = {
   tv.visitInsn(OP_ARETURN)
   close_mv(tv)
 
+  gen_io_temp_file(cw)
+  gen_io_copy_permissions(cw)
+
   # io_is_symlink(path) = Files.isSymbolicLink(path) — does not follow the link
   let sv = open_static(cw, "io_is_symlink", "(Ljava/lang/String;)Z")
   return_false_if_nul_path(sv, 0)
@@ -1445,6 +1448,99 @@ fn gen_io_bytes_files(cw: ClassWriter) -> Unit !io = {
     "(Ljava/nio/file/Path;)Z", false)
   sv.visitInsn(OP_IRETURN)
   close_mv(sv)
+}
+
+## io_temp_file(parent, prefix) = Files.createTempFile — the file half of
+## io_temp_dir, resolving an empty parent the same way so there is one call
+## shape rather than two.
+##
+## `createTempFile` is what claims the name: it creates the file, so no second
+## call can be handed the same one, and on a POSIX host it creates it readable
+## and writable by the owner alone. Both properties are the reason the staging
+## step of an atomic replace uses this rather than a name it spelled itself.
+fn gen_io_temp_file(cw: ClassWriter) -> Unit !io = {
+  let tv = open_static(cw, "io_temp_file",
+    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
+  let have = Label.new()
+  tv.visitVarInsn(OP_ALOAD, 0)
+  tv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "isEmpty", "()Z", false)
+  tv.visitJumpInsn(OP_IFEQ, have)
+  tv.visitLdcInsn("java.io.tmpdir")
+  tv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "getProperty",
+    "(Ljava/lang/String;)Ljava/lang/String;", false)
+  tv.visitVarInsn(OP_ASTORE, 0)
+  tv.visitLabel(have)
+  push_path(tv, 0)
+  tv.visitVarInsn(OP_ALOAD, 1)
+  tv.visitLdcInsn(".tmp")
+  push_empty_options(tv, "java/nio/file/attribute/FileAttribute")
+  tv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "createTempFile",
+    "(Ljava/nio/file/Path;Ljava/lang/String;Ljava/lang/String;" ++
+      "[Ljava/nio/file/attribute/FileAttribute;)Ljava/nio/file/Path;", false)
+  tv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Object", "toString",
+    "()Ljava/lang/String;", false)
+  tv.visitInsn(OP_ARETURN)
+  close_mv(tv)
+}
+
+## io_copy_permissions(src, dst): carry src's mode onto dst.
+##
+## `src` is read with NOFOLLOW_LINKS, so a link's own mode is what gets copied
+## and never its target's -- a primitive that silently followed would let the
+## thing being replaced choose which file's permissions the caller publishes.
+##
+## The catch arm is the whole of the portability claim. `getPosixFilePermissions`
+## throws `UnsupportedOperationException` on a filesystem with no POSIX
+## permission view (Windows), where the only permission there is to copy is the
+## read-only flag, and `File.setWritable` is how a JVM sets it. It is deliberately
+## a fallback and not a first choice: `File`'s three booleans cannot express the
+## group and other bits, so using them everywhere would quietly drop mode bits on
+## the hosts that do have them. Nothing on a POSIX host reaches this arm, which
+## is why the contract script cannot exercise it; the alternative was to let the
+## primitive fault on Windows, and a fault here becomes "cannot publish" rather
+## than "published with the wrong mode", so the arm is the smaller lie.
+fn gen_io_copy_permissions(cw: ClassWriter) -> Unit !io = {
+  let cv = open_static(cw, "io_copy_permissions",
+    "(Ljava/lang/String;Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let handler = Label.new()
+  let done = Label.new()
+  cv.visitTryCatchBlock(try_start, try_end, handler, "java/lang/UnsupportedOperationException")
+  cv.visitLabel(try_start)
+  push_path(cv, 1)
+  push_path(cv, 0)
+  cv.visitInsn(OP_ICONST_1)
+  cv.visitTypeInsn(OP_ANEWARRAY, "java/nio/file/LinkOption")
+  cv.visitInsn(OP_DUP)
+  cv.visitInsn(OP_ICONST_0)
+  cv.visitFieldInsn(OP_GETSTATIC, "java/nio/file/LinkOption", "NOFOLLOW_LINKS",
+    "Ljava/nio/file/LinkOption;")
+  cv.visitInsn(OP_AASTORE)
+  cv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "getPosixFilePermissions",
+    "(Ljava/nio/file/Path;[Ljava/nio/file/LinkOption;)Ljava/util/Set;", false)
+  cv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "setPosixFilePermissions",
+    "(Ljava/nio/file/Path;Ljava/util/Set;)Ljava/nio/file/Path;", false)
+  cv.visitInsn(OP_POP)
+  cv.visitLabel(try_end)
+  cv.visitJumpInsn(OP_GOTO, done)
+  cv.visitLabel(handler)
+  cv.visitInsn(OP_POP)
+  cv.visitTypeInsn(OP_NEW, "java/io/File")
+  cv.visitInsn(OP_DUP)
+  cv.visitVarInsn(OP_ALOAD, 1)
+  cv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  cv.visitTypeInsn(OP_NEW, "java/io/File")
+  cv.visitInsn(OP_DUP)
+  cv.visitVarInsn(OP_ALOAD, 0)
+  cv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  cv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "canWrite", "()Z", false)
+  cv.visitInsn(OP_ICONST_1)
+  cv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "setWritable", "(ZZ)Z", false)
+  cv.visitInsn(OP_POP)
+  cv.visitLabel(done)
+  return_unit(cv)
+  close_mv(cv)
 }
 
 ## io_read_stdin(n): exactly n bytes, short only at end of input. `System.in` is

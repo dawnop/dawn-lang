@@ -338,6 +338,15 @@ jobs:
       - name: Error model contract
         run: ./scripts/error-contract/run.sh
 
+      # The atomic manifest write, its six failure steps, and a live mutant per
+      # promise. It lands in this job rather than next to the delete contract
+      # (which spike-native's full corpus run owns) because it wants both a JVM
+      # compile and a `cc`, and `native-diff` is the critical path while this
+      # job is not: 25s measured locally, and `contracts` was 225s of a 12min
+      # budget before it.
+      - name: atomic write contract
+        run: ./scripts/atomic-write-contract/run.sh
+
       # Reference counting, checked in C: `rc.dawn` decides where every dup and
       # drop goes, and this drives the runtime half of that contract directly.
       # The oracle is AddressSanitizer -- a drop that fails to recurse is a leak,

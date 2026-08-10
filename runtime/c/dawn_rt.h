@@ -477,6 +477,8 @@ dawn_unit dawn_io_write_bytes(dawn_str *path, const dawn_bytes *content);
 bool dawn_io_delete(dawn_str *path); /* false only for ENOENT; other failures fault */
 dawn_unit dawn_io_rename(dawn_str *src, dawn_str *dst); /* rename(2): atomic or panic */
 dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix); /* "" parent = $TMPDIR */
+dawn_str *dawn_io_temp_file(dawn_str *parent, dawn_str *prefix); /* mkstemp: created, mode 0600 */
+dawn_unit dawn_io_copy_permissions(dawn_str *src, dawn_str *dst); /* lstat + chmod, no follow */
 bool dawn_io_is_symlink(dawn_str *path); /* false for absent or invalid paths */
 dawn_bytes *dawn_io_read_stdin(int64_t n); /* short only at end of input */
 /* At least one byte readable now; end of input is not readiness. Both stdin

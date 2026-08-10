@@ -135,10 +135,157 @@ pub fn rename(src: String, dst: String) -> Result[Unit, ForeignError] !io =
 pub fn temp_dir(parent: String, prefix: String) -> Result[String, ForeignError] !io =
   catch_fault(() => io_temp_dir(parent, prefix))
 
+## A fresh, empty file under `parent`, named after `prefix`. An empty `parent`
+## means the system temporary directory.
+##
+## The host picks the name *and creates the file* in one step (`mkstemp(3)`,
+## `Files.createTempFile`), which is the difference that matters: a caller that
+## spelled a name and opened it afterwards has a window in which another
+## process can put something else -- a symbolic link, say -- at that name. On a
+## POSIX host the file arrives readable and writable by its owner alone.
+pub fn temp_file(parent: String, prefix: String) -> Result[String, ForeignError] !io =
+  catch_fault(() => io_temp_file(parent, prefix))
+
+## Give `dst` the permissions `src` has.
+##
+## `src` is inspected without following a link. POSIX hosts copy the mode bits;
+## a host with no POSIX permission model copies the read-only flag, which is
+## the whole of what it has. Neither copies ACLs or extended attributes.
+##
+## This exists because publishing by rename loses them: the file that ends up
+## at the destination is a *new* file, whose mode came from the call that
+## created it and the umask, and nothing else remembers what it replaced.
+pub fn copy_permissions(src: String, dst: String) -> Result[Unit, ForeignError] !io =
+  catch_fault(() => io_copy_permissions(src, dst))
+
 ## Whether `path` is a symbolic link. The link itself is examined, not its
 ## target, so a link to a directory is a link and not a directory. Invalid host
 ## path spellings, including an embedded NUL, answer `false`.
 pub fn is_symlink(path: String) -> Bool !io = io_is_symlink(path)
+
+## Write `content` to `path` so that a reader ever only sees the old file or
+## the new one, never a half-written one and never nothing at all.
+##
+## The staging file is created by `temp_file` in the destination's own
+## directory -- the host picks its name, so nothing can be squatting on it, and
+## the shared directory is what keeps the final `rename` on one filesystem and
+## therefore atomic. What is written is read back and compared before anything
+## is published, the destination's permissions are carried over when it already
+## exists, and only then does a single `rename` install it. Any step that fails
+## takes the staging file away and leaves the destination exactly as it was.
+##
+## What this does **not** promise:
+##
+## - **Durability.** It orders nothing against a power cut: no `fsync` of the
+##   file and none of the directory. The guarantee is about what a *reader*
+##   can observe on a running system, which is what a manifest rewrite needs;
+##   surviving a crash is a different (and much more expensive) property.
+## - **Anything about concurrent writers.** Two of these racing both succeed
+##   and the last `rename` wins. Detecting that someone else changed the file
+##   since it was read is a compare-and-set, and that is a different primitive
+##   with a different signature.
+## - **Link identity.** A destination with other hard links to it is detached:
+##   this directory entry gets the new file and the other links keep the old
+##   one. Writing through to the shared inode is the opposite of what is wanted
+##   here -- it is exactly the non-atomic overwrite this replaces.
+##
+## A destination that *is* a symbolic link is refused rather than followed
+## (`io.atomic_write_target_is_symlink`). Following would let whatever placed
+## the link choose which file gets written, and a caller publishing a file it
+## named is not asking to write wherever that name currently points.
+##
+## The three failure kinds minted here are `io.invalid_atomic_write_path`,
+## `io.atomic_write_target_is_symlink` and `io.atomic_write_verify_failed`;
+## every other `Err` carries whatever the backend called the failure, as
+## everywhere else in this module.
+pub fn atomic_write_file(path: String, content: String) -> Result[Unit, ForeignError] !io =
+  if path == "" {
+    Err(ForeignError {
+      kind: "io.invalid_atomic_write_path",
+      message: "io.atomic_write_file: path must not be empty",
+      cause: None
+    })
+  } else if str.ends_with(path, "/") {
+    Err(ForeignError {
+      kind: "io.invalid_atomic_write_path",
+      message: "io.atomic_write_file: path must not end with '/'",
+      cause: None
+    })
+  } else if is_symlink(path) {
+    Err(ForeignError {
+      kind: "io.atomic_write_target_is_symlink",
+      message: "io.atomic_write_file: refusing to replace a symbolic link: " ++ path,
+      cause: None
+    })
+  } else {
+    match temp_file(parent_dir(path), ".dawn-atomic-") {
+      Err(e) -> Err(e)
+      Ok(tmp) -> stage_replace(path, content, tmp)
+    }
+  }
+
+## The directory `path` names a file in. Not a general path library: it answers
+## the one question `atomic_write_file` asks, which is where to stage, and a
+## staging directory that is merely *equivalent* to the destination's is enough
+## for both properties wanted of it -- same filesystem, and reachable.
+fn parent_dir(path: String) -> String =
+  match str.last_index_of(path, "/") {
+    None -> "."
+    Some(i) -> if i == 0 { "/" } else { str.slice(path, 0, i) }
+  }
+
+## Everything after the staging file exists. Split out because every failure
+## from here on has to take that file away again, and a single expression with
+## five nested `match`es would have five copies of the same cleanup.
+fn stage_replace(path: String, content: String, tmp: String) -> Result[Unit, ForeignError] !io =
+  match write_file(tmp, content) {
+    Err(e) -> abandon(tmp, e)
+    Ok(_) ->
+      match read_bytes(tmp) {
+        Err(e) -> abandon(tmp, e)
+        Ok(seen) ->
+          # Read back, rather than trust the write: `write_file` reports what
+          # the host accepted, and a host can accept bytes it did not keep --
+          # a short write on a full filesystem is the ordinary way. The
+          # comparison is on bytes and not on the string, because the string
+          # would come back through a decoder that replaces what it cannot
+          # read, and a corruption that decodes to the same text is still a
+          # corruption. `bytes_utf8` is the intrinsic behind `std/bytes.utf8`,
+          # spelled directly so this module gains no import for one call.
+          if seen != bytes_utf8(content) {
+            abandon(tmp, ForeignError {
+              kind: "io.atomic_write_verify_failed",
+              message: "io.atomic_write_file: the staged file did not read back " ++
+                "as it was written: " ++ path,
+              cause: None
+            })
+          } else {
+            match carry_permissions(path, tmp) {
+              Err(e) -> abandon(tmp, e)
+              Ok(_) ->
+                match rename(tmp, path) {
+                  Err(e) -> abandon(tmp, e)
+                  Ok(_) -> Ok(())
+                }
+            }
+          }
+      }
+  }
+
+## Carry the destination's permissions onto the staging file, when there is a
+## destination to carry them from. A path that does not exist yet has no mode
+## to preserve, and the new file keeps the one its creation gave it.
+fn carry_permissions(path: String, tmp: String) -> Result[Unit, ForeignError] !io =
+  if exists(path) { copy_permissions(path, tmp) } else { Ok(()) }
+
+## Give up: take the staging file away and hand back the failure that caused
+## it. The delete's own outcome is dropped on purpose -- the caller is being
+## told why the write did not happen, and replacing that with "and also the
+## cleanup failed" would lose the reason.
+fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !io = {
+  let _ = delete(tmp)
+  Err(e)
+}
 
 ## Exactly `n` bytes of standard input, shorter only at end of input -- so a
 ## short read is how end of input is reported.

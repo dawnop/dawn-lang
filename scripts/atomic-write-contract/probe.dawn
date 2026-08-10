@@ -1,0 +1,108 @@
+# The observable contract of `io.atomic_write_file`, as lines of text.
+#
+# Every case runs against a fixture the runner prepared in the current
+# directory, and every line is printed on both backends and compared to the
+# same golden file -- so a difference between the JVM and native answers is a
+# failure of this gate rather than something a reader has to notice.
+#
+# Nothing here prints a host failure message. A `kind` minted by std is the
+# same string on every backend and is worth pinning; one that came from the
+# host is not (std/io says why), so those cases print `err` and the property
+# that matters -- what survived -- is printed next to it.
+use std/io
+use std/set
+use std/str
+
+pub fn main() -> Unit !io = {
+  # a/ -- the ordinary pair: a destination that does not exist yet, and one
+  # that does. `created.toml` is written first so both listings below name it.
+  say("create", io.atomic_write_file("a/created.toml", "new\n"))
+  line("create content", slurp("a/created.toml"))
+  say("overwrite", io.atomic_write_file("a/target.toml", "new\n"))
+  line("overwrite content", slurp("a/target.toml"))
+  line("create entries", entries("a"))
+
+  # b/ -- a symbolic link is refused, not followed. Both halves matter: the
+  # link is still a link, and what it points at is untouched.
+  say("symlink", io.atomic_write_file("b/link.toml", "new\n"))
+  line("symlink still link", to_string(io.is_symlink("b/link.toml")))
+  line("symlink target", slurp("b/secret.txt"))
+  line("symlink entries", entries("b"))
+
+  # c/ -- a second hard link to the destination keeps the old contents. The
+  # directory entry is replaced; the inode is not written through.
+  say("hardlink", io.atomic_write_file("c/hard.toml", "new\n"))
+  line("hardlink this", slurp("c/hard.toml"))
+  line("hardlink other", slurp("c/hard.other"))
+
+  # d/ -- the destination is an existing directory, so the final rename is the
+  # step that fails. The directory must survive it.
+  say("dir target", io.atomic_write_file("d/target.toml", "new\n"))
+  line("dir target is dir", to_string(io.is_dir("d/target.toml")))
+  line("dir target entries", entries("d"))
+
+  # e/ -- something is already sitting on the name a fixed staging name would
+  # have taken. A host-chosen name is not that name, so the write goes through.
+  say("squat", io.atomic_write_file("e/target.toml", "new\n"))
+  line("squat content", slurp("e/target.toml"))
+  line("squat entries", entries("e"))
+
+  # f/ -- the directory is not writable but the destination file is, which is
+  # the one shape where staging fails and an unguarded direct write would not.
+  say("readonly dir", io.atomic_write_file("f/target.toml", "new\n"))
+  line("readonly dir content", slurp("f/target.toml"))
+
+  # The two spellings refused before any backend sees them.
+  say("empty path", io.atomic_write_file("", "new\n"))
+  say("trailing slash", io.atomic_write_file("a/", "new\n"))
+
+  # Staging names are picked by the host, one per call, and the file is there
+  # when the call returns -- the two properties an exclusive create buys.
+  temp_names()
+}
+
+fn temp_names() -> Unit !io = {
+  var made: List[String] = []
+  var i = 0
+  while i < 16 {
+    match io.temp_file("g", ".dawn-atomic-") {
+      Ok(p) -> { made = made ++ [p] }
+      Err(_) -> { made = made ++ ["<failed>"] }
+    }
+    i = i + 1
+  }
+  var all_there = true
+  for p in made {
+    if not io.exists(p) { all_there = false }
+    let _ = io.delete(p)
+  }
+  line("temp names distinct", to_string(set.len(set.from(made)) == 16))
+  line("temp names created", to_string(all_there))
+  line("temp names cleaned", entries("g"))
+}
+
+fn say(label: String, r: Result[Unit, ForeignError]) -> Unit !io =
+  line(label, verdict(r))
+
+## A std-minted kind is the same everywhere and is printed; anything the host
+## worded is collapsed to `err`, because the two backends have no reason to
+## agree on it and this file is compared byte for byte across them.
+fn verdict(r: Result[Unit, ForeignError]) -> String =
+  match r {
+    Ok(_) -> "ok"
+    Err(e) -> if str.starts_with(e.kind, "io.") { e.kind } else { "err" }
+  }
+
+fn line(label: String, value: String) -> Unit !io = io.println(label ++ " = " ++ value)
+
+fn slurp(path: String) -> String !io =
+  match io.read_file(path) {
+    Ok(s) -> str.trim(s)
+    Err(_) -> "<unreadable>"
+  }
+
+fn entries(dir: String) -> String !io =
+  match io.list_dir(dir) {
+    Ok(xs) -> to_string(xs)
+    Err(_) -> "<unlistable>"
+  }

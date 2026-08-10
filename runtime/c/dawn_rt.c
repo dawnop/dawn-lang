@@ -2115,6 +2115,60 @@ dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix) {
   return s;
 }
 
+/* The file half of io_temp_dir. mkstemp(3) is the whole point: it picks the
+ * name and creates the file in one step, with mode 0600, so no second caller
+ * can be handed the same name and no other user can have pre-created it as a
+ * symlink. A name spelled here and opened afterwards would have a window
+ * between the two, which is exactly what an atomic replace must not have. */
+dawn_str *dawn_io_temp_file(dawn_str *parent, dawn_str *prefix) {
+  char *pbuf = NULL;
+  const char *base;
+  if (parent->len == 0) {
+    base = getenv("TMPDIR");
+    if (base == NULL || base[0] == '\0') base = "/tmp";
+  } else {
+    pbuf = dawn_cpath(parent);
+    base = pbuf;
+  }
+  char *pre = dawn_cpath(prefix);
+  size_t bl = strlen(base);
+  size_t pl = strlen(pre);
+  char *tmpl = (char *)dawn_alloc(bl + 1 + pl + 7);
+  memcpy(tmpl, base, bl);
+  tmpl[bl] = '/';
+  memcpy(tmpl + bl + 1, pre, pl);
+  memcpy(tmpl + bl + 1 + pl, "XXXXXX", 7); /* the NUL rides along */
+  free(pre);
+  free(pbuf);
+  int fd = mkstemp(tmpl);
+  if (fd < 0) {
+    free(tmpl);
+    dawn_fault(DAWN_LIT("io_temp_file: cannot create a temporary file"));
+  }
+  close(fd);
+  /* `prefix` was already a string, but the base may be `$TMPDIR` */
+  dawn_str *s = dawn_str_from_os(tmpl, (int64_t)strlen(tmpl));
+  free(tmpl);
+  return s;
+}
+
+/* lstat(2), not stat(2): the mode copied is the one on the object named, never
+ * the one a symlink points at. There is no POSIX-permission fallback branch
+ * here the way there is on the JVM, because this runtime has no host without
+ * st_mode to fall back for. */
+dawn_unit dawn_io_copy_permissions(dawn_str *src, dawn_str *dst) {
+  char *a = dawn_cpath(src);
+  char *b = dawn_cpath(dst);
+  struct stat st;
+  bool bad = lstat(a, &st) != 0 || chmod(b, st.st_mode & 07777) != 0;
+  free(a);
+  free(b);
+  if (bad) {
+    dawn_fault(DAWN_LIT("io_copy_permissions: cannot copy the file mode"));
+  }
+  return DAWN_UNIT;
+}
+
 bool dawn_io_is_symlink(dawn_str *path) {
   if (dawn_has_nul(path)) return false;
   char *p = dawn_cpath(path);
