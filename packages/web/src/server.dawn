@@ -18,7 +18,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, text, binary, header, headers_all}
+use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, text, binary, header, headers_all, query, query_all}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -294,13 +294,46 @@ pub fn parse_query(q: String) -> List[(String, String)] !io =
     (pct_decode(parts[0]), pct_decode(join_with(tail(parts), "=")))
   })
 
-# Parse an application/x-www-form-urlencoded body into a map. Same grammar and
-# the same decoding as a query string — this used to replace '+' with a space
-# and stop there, so every percent escape in a form field reached the handler
-# still encoded (`%40` for '@' in an email, and so on).
-## An `application/x-www-form-urlencoded` body as a map (last value wins for a
-## repeated name).
-pub fn parse_form(body: String) -> Map[String, String] !io = map.from(parse_query(body))
+# Fold decoded key/value pairs into a multimap, keeping every value of a
+# repeated name in wire order. `map.from` collapses a repeat onto its last
+# value, which is what the query map and the form map both used to do — and a
+# form is the place it bites hardest, since a set of checkboxes with one name is
+# how HTML has always submitted a multi-select.
+fn multimap(ps: List[(String, String)]) -> Map[String, List[String]] =
+  fold(ps, map.empty(), (acc, p) => {
+    let (k, v) = p
+    match map.get(acc, k) {
+      Some(vs) -> map.insert(acc, k, vs ++ [v])
+      None -> map.insert(acc, k, [v])
+    }
+  })
+
+# Parse an application/x-www-form-urlencoded body into a multimap. Same grammar
+# and the same decoding as a query string — this used to replace '+' with a
+# space and stop there, so every percent escape in a form field reached the
+# handler still encoded (`%40` for '@' in an email, and so on).
+## An `application/x-www-form-urlencoded` body as a multimap: every value of a
+## repeated name survives in wire order, the same shape `Request.query` and
+## `Request.headers` have. Read one value with `form_value`, all of them with
+## `form_all`. It used to be `Map[String, String]`, where a multi-select (the
+## reason HTML forms repeat a name at all) silently kept only its last option.
+pub fn parse_form(body: String) -> Map[String, List[String]] !io =
+  multimap(parse_query(body))
+
+## One form field, or None when absent. Of a repeated name this is the *first*
+## value, matching `web/types.query` and `web/types.header`.
+pub fn form_value(form: Map[String, List[String]], name: String) -> Option[String] =
+  match map.get(form, name) {
+    Some(vs) -> get(vs, 0)
+    None -> None
+  }
+
+## Every value of a repeated form field, in wire order; [] when absent.
+pub fn form_all(form: Map[String, List[String]], name: String) -> List[String] =
+  match map.get(form, name) {
+    Some(vs) -> vs
+    None -> []
+  }
 
 fn tail(xs: List[String]) -> List[String] =
   map(range(1, len(xs)), i => xs[i])
@@ -320,13 +353,15 @@ fn rev[T](xs: List[T]) -> List[T] =
 
 fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, errors: ErrorFormat) -> Result[Request, HttpError] !io = {
   let uri = ex.getRequestURI()!
-  let no_query: Map[String, String] = map.from([])
+  let no_params: Map[String, String] = map.from([])
+  let no_query: Map[String, List[String]] = map.empty()
   # getRawQuery, not getQuery: the split into parameters must see the encoded
   # form, or a client can put an encoded '&' in a value and forge a parameter.
   # Each component is decoded afterwards with form-urlencoded semantics ('+' is
-  # a space), matching Starlette/FastAPI.
+  # a space), matching Starlette/FastAPI. A repeated name keeps every value, in
+  # wire order, exactly as a repeated header does.
   let q = match uri.getRawQuery() {
-    Some(s) -> map.from(parse_query(s))
+    Some(s) -> multimap(parse_query(s))
     None -> no_query
   }
   # A "stream-body" route never sees the body in memory: it goes to a temp file
@@ -351,7 +386,7 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, error
     method: method,
     path: path,
     raw_path: raw_path,
-    params: no_query,
+    params: no_params,
     query: q,
     headers: hs,
     body: body,
@@ -656,12 +691,24 @@ test "an encoded separator stays inside its value" {
 
 test "form bodies parse, with + as space and %XX decoded" {
   let f = parse_form("username=admin&password=a+b+c")
-  assert map.get(f, "username") == Some("admin")
-  assert map.get(f, "password") == Some("a b c")
+  assert form_value(f, "username") == Some("admin")
+  assert form_value(f, "password") == Some("a b c")
   # percent escapes used to reach the handler still encoded
   let g = parse_form("email=a%40b.com&note=1%262")
-  assert map.get(g, "email") == Some("a@b.com")
-  assert map.get(g, "note") == Some("1&2")
+  assert form_value(g, "email") == Some("a@b.com")
+  assert form_value(g, "note") == Some("1&2")
+  assert form_value(g, "missing") == None
+}
+
+test "a repeated form field keeps every value, in wire order" {
+  # a multi-select posts one name several times; map.from kept only "c"
+  let f = parse_form("tag=a&tag=b&name=x&tag=c")
+  assert form_all(f, "tag") == ["a", "b", "c"]
+  assert form_value(f, "tag") == Some("a")
+  assert form_all(f, "name") == ["x"]
+  assert form_all(f, "missing") == []
+  # an empty value is a value: `tag=&tag=b` is two of them
+  assert form_all(parse_form("tag=&tag=b"), "tag") == ["", "b"]
 }
 
 # ---- test-only HTTP client: the streaming test needs a real client to pump
@@ -759,6 +806,9 @@ fn echo_name(req: Request) -> Result[Response, HttpError] !io =
 
 fn echo_cookies(req: Request) -> Result[Response, HttpError] !io =
   Ok(text(200, unwrap_or(header(req, "Cookie"), "-") ++ "|" ++ join_with(headers_all(req, "cookie"), ";")))
+
+fn echo_tags(req: Request) -> Result[Response, HttpError] !io =
+  Ok(text(200, unwrap_or(query(req, "tag"), "-") ++ "|" ++ join_with(query_all(req, "tag"), ";")))
 
 test "body_length: -1 for no body, exact bytes for text/binary, 0 (chunked) for streams" {
   assert body_length(200, Empty) == -1
@@ -952,6 +1002,23 @@ test "two Cookie headers both arrive: header() the first, headers_all both" {
     "GET /c HTTP/1.1\r\nHost: t\r\nCookie: a=1\r\nCookie: b=2\r\nConnection: close\r\n\r\n")
   assert str.starts_with(resp, "HTTP/1.1 200")
   assert str.contains(resp, "a=1|a=1;b=2")
+  srv.stop(0)
+}
+
+test "a query parameter repeated on the wire arrives whole" {
+  let routes = [route_get("/q", echo_tags)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  # `?tag=a&tag=b` used to reach the handler as just "b"
+  let resp = raw_http(port, get_line("/q?tag=a&tag=b"))
+  assert str.starts_with(resp, "HTTP/1.1 200")
+  assert str.contains(resp, "a|a;b")
+  # a single value is unchanged, and query() still answers it
+  assert str.contains(raw_http(port, get_line("/q?tag=only")), "only|only")
+  # absent: neither view invents anything
+  assert str.contains(raw_http(port, get_line("/q")), "-|")
   srv.stop(0)
 }
 

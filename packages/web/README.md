@@ -28,6 +28,29 @@ lowercase the name they are given, and the server lowercases keys when it
 builds the map; that pair of lowercasings is the whole case-insensitivity
 contract.
 
+## Query strings and form bodies (3.0)
+
+`Request.query` is a multimap (`Map[String, List[String]]`), the same shape as
+`Request.headers`, and so is what `parse_form` returns. A query string is a list
+of pairs rather than a mapping, and `?tag=a&tag=b` is how a client spells a set;
+`<select multiple>` submits the same way. Both used to be
+`Map[String, String]`, where the last value silently won and nothing recorded
+that anything had been dropped.
+
+| read | one value | all of them |
+|---|---|---|
+| query | `query(req, name)` | `query_all(req, name)` |
+| form | `form_value(f, name)` | `form_all(f, name)` |
+| header | `header(req, name)` | `headers_all(req, name)` |
+
+The single-value readers return the **first** value, which is what the
+single-value map effectively held for a caller that never repeats a name.
+`query_int_bounded` reads through `query`, so it is unaffected.
+
+`Request.params` stays `Map[String, String]`: a duplicate capture name is a
+route-table error that `validate_routes` refuses at startup, so a path parameter
+has exactly one value by construction and there is nothing for a list to hold.
+
 ## CORS and OPTIONS (2.1)
 
 `with_cors` answers a **preflight** itself and lets everything else through to

@@ -33,7 +33,14 @@ pub type Request = {
   # (%2F) stays inside its segment instead of minting a route boundary (WEB-03).
   raw_path: String,
   params: Map[String, String],
-  query: Map[String, String],
+  # the query string as a multimap: every value of a repeated name survives in
+  # wire order, exactly as `headers` below does. A query string is a list of
+  # pairs, not a mapping, and `?tag=a&tag=b` is the ordinary way clients spell a
+  # set; this used to be Map[String, String], where the last one silently won
+  # and there was no way to ask whether anything had been dropped. `query`
+  # returns the first value (what the single-value map effectively held for
+  # readers that never repeat a name) and `query_all` returns them all.
+  query: Map[String, List[String]],
   # request headers as a lowercase-keyed multimap: every value of a repeated
   # name (Cookie, Forwarded, ...) survives in wire order (WEB-04). The
   # case-insensitivity contract is one rule applied at both ends: the server
@@ -411,8 +418,22 @@ pub fn opt_param_int(req: Request, name: String) -> Option[Int] =
     None -> None
   }
 
-## One query-string parameter, exactly as it was decoded; None when absent.
-pub fn query(req: Request, name: String) -> Option[String] = map.get(req.query, name)
+## One query-string parameter, exactly as it was decoded; None when absent. Of
+## a repeated name this is the *first* value — same rule as `header`.
+pub fn query(req: Request, name: String) -> Option[String] =
+  match map.get(req.query, name) {
+    Some(vs) -> get(vs, 0)
+    None -> None
+  }
+
+## Every value of a repeated query parameter, in wire order; [] when the name
+## is absent. `?tag=a&tag=b` is how a client spells a set, and until the query
+## map became a multimap only the last one survived.
+pub fn query_all(req: Request, name: String) -> List[String] =
+  match map.get(req.query, name) {
+    Some(vs) -> vs
+    None -> []
+  }
 
 ## Strict pagination reader in the shape of FastAPI's Query(ge=lo, le=hi): an
 ## absent param yields the default; a present one that is non-integer or out of
@@ -421,7 +442,7 @@ pub fn query(req: Request, name: String) -> Option[String] = map.get(req.query, 
 ## FastAPI's own error handler uses a fullwidth colon there, which is why the
 ## separator is configurable rather than written in.
 pub fn query_int_bounded_with(fmt: ErrorFormat, req: Request, name: String, default: Int, lo: Int, hi: Int) -> Result[Int, HttpError] =
-  match map.get(req.query, name) {
+  match query(req, name) {
     None -> Ok(default)
     Some(s) -> {
       let at = name ++ fmt.param_separator
@@ -463,7 +484,7 @@ pub fn headers_all(req: Request, name: String) -> List[String] =
 
 test "param reads captures and flags missing ones" {
   let h: Map[String, List[String]] = map.empty()
-  let q: Map[String, String] = map.empty()
+  let q: Map[String, List[String]] = map.empty()
   let req = Request {
     method: "GET", path: "/a/42", raw_path: "/a/42",
     params: map.from([("id", "42")]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
@@ -479,36 +500,36 @@ test "param reads captures and flags missing ones" {
 
 test "query_int_bounded: absent uses default, out-of-range and non-int are 422" {
   let h: Map[String, List[String]] = map.empty()
-  let mk = (q: Map[String, String]) => Request {
+  let mk = (q: Map[String, List[String]]) => Request {
     method: "GET", path: "/a", raw_path: "/a", params: map.empty(), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
   # absent -> default
   assert query_int_bounded(mk(map.empty()), "page", 1, 1, -1) == Ok(1)
   # in range
-  assert query_int_bounded(mk(map.from([("size", "20")])), "size", 10, 1, 100) == Ok(20)
+  assert query_int_bounded(mk(map.from([("size", ["20"])])), "size", 10, 1, 100) == Ok(20)
   # below min -> 422
-  match query_int_bounded(mk(map.from([("page", "0")])), "page", 1, 1, -1) {
+  match query_int_bounded(mk(map.from([("page", ["0"])])), "page", 1, 1, -1) {
     Err(e) -> { assert e.status == 422 }
     Ok(_) -> { assert false }
   }
   # above max -> 422
-  match query_int_bounded(mk(map.from([("size", "999")])), "size", 10, 1, 50) {
+  match query_int_bounded(mk(map.from([("size", ["999"])])), "size", 10, 1, 50) {
     Err(e) -> { assert e.status == 422 }
     Ok(_) -> { assert false }
   }
   # non-integer -> 422
-  match query_int_bounded(mk(map.from([("page", "abc")])), "page", 1, 1, -1) {
+  match query_int_bounded(mk(map.from([("page", ["abc"])])), "page", 1, 1, -1) {
     Err(e) -> { assert e.status == 422 }
     Ok(_) -> { assert false }
   }
   # no upper bound (hi < 0): a huge page is fine
-  assert query_int_bounded(mk(map.from([("page", "99999")])), "page", 1, 1, -1) == Ok(99999)
+  assert query_int_bounded(mk(map.from([("page", ["99999"])])), "page", 1, 1, -1) == Ok(99999)
 }
 
 test "param_int rejects non-numbers as a client error" {
   let h: Map[String, List[String]] = map.empty()
-  let q: Map[String, String] = map.empty()
+  let q: Map[String, List[String]] = map.empty()
   let req = Request {
     method: "GET", path: "/a/x", raw_path: "/a/x",
     params: map.from([("id", "x")]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
@@ -530,6 +551,22 @@ test "header lookup is case-insensitive" {
   assert header(req, "Authorization") == Some("Bearer xyz")
   assert header(req, "CONTENT-TYPE") == Some("application/json")
   assert header(req, "missing") == None
+}
+
+test "a repeated query parameter keeps every value, in wire order" {
+  let req = Request {
+    method: "GET", path: "/a", raw_path: "/a", params: map.empty(),
+    query: map.from([("tag", ["a", "b", "c"]), ("page", ["2"])]),
+    headers: map.empty(), body: "", raw: bytes.utf8(""), body_file: None, route: None,
+  }
+  # query() is the single-value view: the first, matching header()
+  assert query(req, "tag") == Some("a")
+  # ...and nothing is dropped any more. The map used to be Map[String, String],
+  # so `?tag=a&tag=b&tag=c` reached the handler as just "c".
+  assert query_all(req, "tag") == ["a", "b", "c"]
+  assert query_all(req, "page") == ["2"]
+  assert query(req, "missing") == None
+  assert query_all(req, "missing") == []
 }
 
 test "repeated request headers keep every value" {
@@ -708,11 +745,11 @@ test "the error body's key is the default one, and configurable" {
 
 test "the 422 wording separates name from complaint, by configuration" {
   let h: Map[String, List[String]] = map.empty()
-  let mk = (q: Map[String, String]) => Request {
+  let mk = (q: Map[String, List[String]]) => Request {
     method: "GET", path: "/a", raw_path: "/a", params: map.empty(), query: q, headers: h,
     body: "", raw: bytes.utf8(""), body_file: None, route: None,
   }
-  let over = mk(map.from([("size", "999")]))
+  let over = mk(map.from([("size", ["999"])]))
   # default: an ASCII colon and a space
   match query_int_bounded(over, "size", 10, 1, 50) {
     Err(e) -> { assert e.message == "size: Input should be less than or equal to 50" }
@@ -725,13 +762,13 @@ test "the 422 wording separates name from complaint, by configuration" {
     Err(e) -> { assert e.message == "size：Input should be less than or equal to 50" }
     Ok(_) -> { assert false }
   }
-  match query_int_bounded_with(pydantic, mk(map.from([("page", "abc")])), "page", 1, 1, -1) {
+  match query_int_bounded_with(pydantic, mk(map.from([("page", ["abc"])])), "page", 1, 1, -1) {
     Err(e) -> {
       assert e.message == "page：Input should be a valid integer, unable to parse string as an integer"
     }
     Ok(_) -> { assert false }
   }
-  match query_int_bounded_with(pydantic, mk(map.from([("page", "0")])), "page", 1, 1, -1) {
+  match query_int_bounded_with(pydantic, mk(map.from([("page", ["0"])])), "page", 1, 1, -1) {
     Err(e) -> { assert e.message == "page：Input should be greater than or equal to 1" }
     Ok(_) -> { assert false }
   }
