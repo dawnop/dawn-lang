@@ -61,8 +61,39 @@ while IFS= read -r f; do
   cp "$OUT/k/m$i.dawn" "$OUT/d/m$i.dawn"
 done < "$SHARED"
 
-"$DAWN" fmt "$OUT/k" > /dev/null
-"$SELF" fmt "$OUT/d" > /dev/null
+# Both sides may legitimately refuse: scripts/grammar-corpus/reject/ is corpus
+# that must not lex, and the differential domain is a path intersection, so a
+# reject file enters it one release after it lands. Until v0.63.0 none ever
+# had, and the assumption that `fmt` exits 0 went unnoticed -- under `set -e`
+# the first refusal killed this script at the invocation below, before a single
+# byte was compared. The gate was green because it had never met its own
+# corpus, which is the one reason a green says nothing.
+#
+# Refusal is behavior, so it is part of what the two toolchains must agree on:
+# same exit status, same diagnostics (modulo the tree each ran over), and the
+# refused files left unchanged so the byte comparison below still means what it
+# says.
+k_status=0
+"$DAWN" fmt "$OUT/k" > "$OUT/k.log" 2>&1 || k_status=$?
+d_status=0
+"$SELF" fmt "$OUT/d" > "$OUT/d.log" 2>&1 || d_status=$?
+
+if [ "$k_status" -ne "$d_status" ]; then
+  echo "FAIL: $TAG exited $k_status but $SELF exited $d_status over the same corpus" >&2
+  echo "--- $TAG ---" >&2
+  head -20 "$OUT/k.log" >&2
+  echo "--- $SELF ---" >&2
+  head -20 "$OUT/d.log" >&2
+  exit 1
+fi
+
+sed "s|$OUT/k/|<corpus>/|g" "$OUT/k.log" > "$OUT/k.log.norm"
+sed "s|$OUT/d/|<corpus>/|g" "$OUT/d.log" > "$OUT/d.log.norm"
+if ! diff "$OUT/k.log.norm" "$OUT/d.log.norm" > "$OUT/log-diff.txt"; then
+  echo "FAIL: $TAG and $SELF disagree on what they say about the corpus" >&2
+  head -40 "$OUT/log-diff.txt" >&2
+  exit 1
+fi
 
 . scripts/emitchange.sh
 emitchange_load
@@ -71,4 +102,7 @@ if diff -r "$OUT/k" "$OUT/d" > "$OUT/diff.txt" 2>&1; then
 else
   emit_gate "fmt" 1 || { head -40 "$OUT/diff.txt"; exit 1; }
 fi
-echo "OK: $SELF agrees with $TAG over $i shared live files (plus mangled copies; $current_only HEAD-only and $previous_only N-1-only path(s) reported outside the differential domain)"
+refused=$(grep -c '^error: ' "$OUT/k.log" || true)
+echo "OK: $SELF agrees with $TAG over $i shared live files (plus mangled copies; \
+both exited $k_status with the same $refused diagnostic(s); $current_only HEAD-only \
+and $previous_only N-1-only path(s) reported outside the differential domain)"
