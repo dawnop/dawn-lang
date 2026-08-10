@@ -249,7 +249,10 @@ run_mutant() { # mutation
       cat "$work/nc.out" >&2
       fail "$mutation: the negative control compiled a program after all"
     fi
-    grep -Fq 'bundled std module `std/cursor` does not parse' "$work/nc.out" || {
+    # Match the substance, not one release's wording: which module stopped
+    # parsing. The surrounding sentence is the std loader's, and that loader
+    # says where the std came from, so it changes when the loader learns to.
+    grep -Fq 'module `std/cursor` does not parse' "$work/nc.out" || {
       cat "$work/nc.out" >&2
       fail "$mutation: the negative control failed for another reason"
     }
