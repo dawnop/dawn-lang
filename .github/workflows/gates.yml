@@ -560,6 +560,27 @@ jobs:
       - name: Java narrowing contract
         run: ./scripts/java-narrowing-contract/run.sh
 
+  # SYN-09: which Java member `recv.name(args)` reaches. Its own job for the
+  # same reason java-target-classpath is: the subject is a javac-built fixture
+  # handed over with --cp, and the ten negative controls rebuild ten private
+  # selfhost JARs, which is more than any existing job has room for -- adding
+  # it to checker-corpus (354s) would have made that job the critical path.
+  java-member-dispatch:
+    runs-on: ubuntu-latest
+    # 200s predicted (158s measured locally plus ~40s setup); the runner is
+    # slower at the ten builds, and java-target-classpath's nine cost 270s
+    # there, so this bound is 3x that neighbour rather than 3x the local
+    # figure. Re-derive it from the first run, as the 2026-08-10 split did.
+    # budget: 3x 300s predicted (java-target-classpath's nine builds cost 270s)
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Java member dispatch contract
+        run: ./scripts/java-member-dispatch-contract/run.sh
+
   # TEST-04: the documentation's own examples, links and anchors. The audit
   # found a wrong README example, an install command that did not run and an
   # EBNF out of step with the parser -- all by human reading. Marking the

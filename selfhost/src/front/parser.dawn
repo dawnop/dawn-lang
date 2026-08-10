@@ -1597,8 +1597,13 @@ fn postfix_tail(p: P, st: St, initial: Expr, nb: Bool) -> PR[Expr] = {
       let st2 = adv1(p, st1)
       let nt = cur(p, st2)
       if nt.kind == TYPEIDENT {
-        # `Class.FIELD` static field access (spec §9.1) — field names are
-        # UPPERCASE, so an uppercase name after `.` is always a field, not a call
+        # A member reference whose name happens to start uppercase. The shape
+        # says nothing about what the member IS: `Class.FIELD` reads a static
+        # field, `Class.FIELD(args)` calls a method of that name, and the two
+        # can coexist on one class. check_apply decides, from the call suffix
+        # and the receiver, which one this is (SYN-09) -- the parser used to
+        # claim uppercase meant "always a field, not a call", which silently
+        # made Java members reachable or not by their host's naming style.
         let st3 = adv1(p, st2)
         e = EFieldAcc(e, nt.text, nt.lo, nt.hi, e_lo(e), nt.hi)
         st1 = st3

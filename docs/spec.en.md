@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ bfceb2829a04fcf3 -->
+<!-- doc-check: translation-of docs/spec.md @ 07a89a53aed9cb83 -->
 
 # Dawn Language Specification
 
@@ -1706,6 +1706,18 @@ fn build() -> String !io = {
   a `.` a keyword is unambiguous and is always taken as a member name. So `System.in`
   (the field name `in` is a keyword) and `obj.type()` (the method name `type`) can both
   be written directly, with no detour through reflection.
+- **A member name is matched against the JVM declaration exactly; case does not decide
+  what kind of member it is.** `Class.member` reads a public static field,
+  `Class.member(args)` calls a public static method, and `value.member(args)` calls a
+  public instance method — a field and a method of the same name (Java's two namespaces
+  may collide) are told apart by **whether there is a `(...)` suffix**. So
+  `Math.IEEEremainder(a, b)` is a method call, not a field read. A wrong case is not
+  folded (`Math.ieeeremainder(a, b)` reports "no static method"), and staticness is part
+  of the match as well: a static method cannot be called through an instance, nor an
+  instance method through the class. Dawn's own qualified spellings win over the Java
+  lookup: `m.C(args)` is a qualified constructor, and when `m` is a module alias the whole
+  thing is resolved by §10.3 (a qualified constant with `(...)` still reports that it is
+  not callable).
 - Constructors are uniformly `Type.new(args)` and **return `T` itself** (a constructor
   never returns null, so it is not wrapped in Option); instance methods use
   `.method(args)`.

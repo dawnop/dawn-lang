@@ -614,6 +614,22 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           } else {
             q = walk_apply_value(qc, q, target, args, te)
           }
+        # `recv.member(args)` that resolved to a Java call: the callee is not a
+        # value, and the typed node holds the receiver and the arguments in its
+        # own fields rather than under an XApply (SYN-09). Without this arm the
+        # walk would try `EFieldAcc` against an `XJava` and drop the types of
+        # everything inside the call.
+        EFieldAcc(recv, _, _, _, _, _) ->
+          match te {
+            Some(XJava(call, _, _, _)) -> {
+              match call.target {
+                Some(tt) -> { q = walk_e(qc, q, recv, Some(tt)) }
+                None -> { q = walk_e(qc, q, recv, None) }
+              }
+              q = walk_list(qc, q, args, opt_list(call.args))
+            }
+            _ -> { q = walk_apply_value(qc, q, target, args, te) }
+          }
         _ -> { q = walk_apply_value(qc, q, target, args, te) }
       }
     }

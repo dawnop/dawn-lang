@@ -102,9 +102,9 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（63）
+#### 当前 fixed（64）
 
-- 语法（14）：`SYN-01`–`SYN-03`、`SYN-06`–`SYN-08`、`SYN-10`–`SYN-12`、`SYN-14`–`SYN-16`、`SYN-18`、`SYN-19`。
+- 语法（15）：`SYN-01`–`SYN-03`、`SYN-06`–`SYN-12`、`SYN-14`–`SYN-16`、`SYN-18`、`SYN-19`。
 - 语义（8）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-11`、`SEM-12`、`SEM-15`、`SEM-17`。
 - 架构（4）：`ARC-03`–`ARC-06`。
 - 工具链（16）：`TOOL-01`–`TOOL-12`、`TOOL-14`–`TOOL-17`。
@@ -116,9 +116,9 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 架构（3）：`ARC-01`、`ARC-02`、`ARC-11`。
 - 库（1）：`LIB-10`。
 
-#### 当前 open（28）
+#### 当前 open（27）
 
-- 语法（5）：`SYN-04`、`SYN-05`、`SYN-09`、`SYN-13`、`SYN-17`。
+- 语法（4）：`SYN-04`、`SYN-05`、`SYN-13`、`SYN-17`。
 - 语义（7）：`SEM-04`、`SEM-07`、`SEM-09`、`SEM-10`、`SEM-13`、`SEM-14`、`SEM-16`。
 - 架构（5）：`ARC-07`–`ARC-10`、`ARC-12`。
 - 工具链（1）：`TOOL-13`。
@@ -128,13 +128,13 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**63 fixed + 4 partial + 28 open + 2 retracted = 97**。逐专题矩阵：
-语法 **14/0/5/0**、语义 **8/0/7/2**、架构 **4/3/5/0**、工具链 **16/0/1/0**、
+当前计数自检：**64 fixed + 4 partial + 27 open + 2 retracted = 97**。逐专题矩阵：
+语法 **15/0/4/0**、语义 **8/0/7/2**、架构 **4/3/5/0**、工具链 **16/0/1/0**、
 库 **8/1/10/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
 fixed）、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed，
-`TOOL-05`/`TOOL-06`/`GOV-04`/`SYN-11` fixed。
+`TOOL-05`/`TOOL-06`/`GOV-04`/`SYN-11`/`SYN-09` fixed。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -334,7 +334,7 @@ partial 为 `ARC-01`、`ARC-02`、`LIB-10`。
 3. **把 `SEM-04` 留给维护者裁决：** Cursor 是携带 owner 的值还是 generative identity，以及
    不同 owner 的 Eq/Ord 是否拒绝；裁决前只保留静态候选，不写 workaround。
 4. **低耦合自治批：** `SYN-11` 与 B200-1B 后续已关账；下一项 `SEM-07`，再按依赖推进 `SYN-04 → SYN-13` 与
-   `SYN-09 → SYN-05`；`SYN-17` 只留在 D/P3 关键字预算设计队列。
+   `SYN-09` 已关账，解锁 `SYN-05`；`SYN-17` 只留在 D/P3 关键字预算设计队列。
 5. **类型化阶段产品：** `ARC-07` 后接 `ARC-08`，再以稳定 lowered identity 推进
    `ARC-11B/ARC-12`；不把 `ARC-09/10` 的 HOLD 项混入自治队列。
 6. **破坏性 package API：** `LIB-08`、`LIB-12`–`LIB-19` 按 package major 与迁移窗口分批；

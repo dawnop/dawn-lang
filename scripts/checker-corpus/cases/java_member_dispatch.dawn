@@ -1,0 +1,31 @@
+# checker.dawn: `Class.Member(args)` is a Java call, so its failures are Java
+# member failures (SYN-09). Before the dispatch existed the parser had already
+# decided that an uppercase name after `.` was a field, and every line below
+# reported "cannot call a value of type ..." instead -- an answer about the
+# field's value, for a call that never wanted the field.
+#
+# JDK subjects only: this corpus runs on the compiler's own class path.
+# `Math.IEEEremainder` and `Date.UTC` are public static methods with those exact
+# spellings since Java 1.0, and `Integer.MAX_VALUE` a public static field.
+use java "java.lang.Math"
+use java "java.lang.Integer"
+use java "java.util.Date"
+
+# a static field with a call suffix: the class has no method of that name
+pub fn field_called() -> Int !io = Integer.MAX_VALUE(1)
+
+# the right method, the wrong case, in both directions: a Java name is matched
+# against the JVM declaration exactly, and nothing is case-folded on the way
+pub fn wrong_case_down() -> Float !io = Math.ieeeremainder(5.0, 3.0)
+
+pub fn wrong_case_up() -> Float !io = Math.IEEEREMAINDER(5.0, 3.0)
+
+# staticness is part of the match: a static method is not reachable through an
+# instance, whatever the spelling of its name
+pub fn static_on_instance() -> Float !io = {
+  let d = Date.new()
+  d.UTC(1, 2, 3, 4, 5, 6)
+}
+
+# the arguments are still checked, and the overload report names the candidates
+pub fn no_overload() -> Float !io = Math.IEEEremainder("a", 3.0)

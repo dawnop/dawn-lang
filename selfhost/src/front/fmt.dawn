@@ -555,6 +555,27 @@ test "a call hugs its callee even when the callee is not a name" {
   assert fmt_of("fn b(g: fn(Int) -> Int) -> Int = { g } (1)\n") == r
 }
 
+test "a member call has one spelling whatever the case of its name" {
+  # SYN-09 gave `Class.Member(args)` a second meaning -- a Java method call --
+  # without giving it a second shape: it is still an application over a member
+  # reference, and the formatter is not told which one the checker decided on.
+  # So the two capitalizations print alike, and a member call cannot acquire a
+  # layout of its own by being uppercase. The formatter itself was not touched;
+  # this is the assertion that says so.
+  let u = "fn f(x: Float) -> Float !io = Math.IEEEremainder(x, 3.0)\n"
+  assert fmt_of(u) == u
+  assert fmt_of(fmt_of(u)) == u
+  let l = "fn f(x: Float) -> Float !io = Math.max(x, 3.0)\n"
+  assert fmt_of(l) == l
+  # a bare member reference is unchanged either way, with or without a receiver
+  # that is itself a call
+  let r = "fn f() -> Int !io = Integer.MAX_VALUE\n"
+  assert fmt_of(r) == r
+  let c = "fn f(b: StringBuilder) -> Int !io = b.LENGTH(1)\n"
+  assert fmt_of(c) == c
+  assert fmt_of("fn f(b: StringBuilder) -> Int !io = b.LENGTH (1)\n") == c
+}
+
 ## The oracle here is parser.lead_op, not taste: `-` cannot lead a continuation
 ## line, so a `-` at the start of one opens a statement. Both halves of getting
 ## that wrong are pinned -- the space, and the indent that made a top-level

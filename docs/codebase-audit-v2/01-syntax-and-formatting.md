@@ -95,6 +95,28 @@
 
 ## SYN-09 — P2 — 大写 Java member 被 parser 预判为字段
 
+- **后续处置（2026-08-10）：已修。** AST 不变：`check_apply` 对
+  `EApply(EFieldAcc(recv, name), args)` 做语义分派，`qual_ctor` 分支先行、receiver 是未被
+  局部值遮蔽的模块别名时整条让给 §10.3，其余委托既有 `check_method_call`，且在通用
+  named-argument refusal 之前分派以保留 Java 专属诊断。于是名字按 JVM 声明逐字匹配、
+  大小写不决定成员种类，`Class.member` 与 `Class.member(args)` 可以是同名的字段与方法，
+  staticness 仍是匹配的一部分，wrong-case 不折叠，裸 `EFieldAcc` 与 `Class.new(args)` 不变。
+  parser 只改了那条误导注释；formatter 实现未动。LSP 同批补上
+  `EApply(EFieldAcc)+XJava` 的 receiver/argument child mapping。
+- **动态证据（重跑于 v0.62.0 编译器）：** 三条同时成立，且都不是 jsig/JVM 问题——真实
+  Maven target classpath、`javac --release 21` 与 `-Xverify` 探针均显示名称与 staticness
+  metadata 完整。`Syn09.UpperStatic(1)` 报「没有静态字段 `UpperStatic`」；
+  `v.UpperInstance(1)` 报「`.` field access needs a record value」；`Syn09.PICK(1)`
+  在 `PICK` 同时是字段和方法时报「cannot call a value of type Int」，即调用了字段的值。
+  修后同一程序返回 2 / 4 / 101。
+- **门禁：** `scripts/java-member-dispatch-contract/run.sh`。JDK 里没有公开的大写实例方法，
+  也没有任何 exported 类同时公开同名字段与方法，故 subject 是 `javac --release 21` 编出、
+  经 `--cp` 交进来的 `fixture.Syn09`；accept 各腿按**返回值**判定（解析到错误成员仍能通过
+  类型检查）。JDK 可见的那部分诊断另录进 `scripts/checker-corpus/cases/java_member_dispatch`。
+  十个 compiling mutant 各自击穿一句断言：删分派、只支持 static、Java 抢在 Dawn 限定拼写前、
+  删模块别名护栏、call suffix 仍优先 field、case-fold、漏 staticness、裸成员走 method、
+  parser 把大写 call 改 `EMethod`、漏 LSP child mapping。
+
 - **证据：S。** `.` 后 `TYPEIDENT` 无条件生成 `EFieldAcc`：`selfhost/src/front/parser.dawn:1532`；只有小写/keyword 路径形成 `EMethod`：`selfhost/src/front/parser.dawn:1539`；checker 随后按静态字段处理：`selfhost/src/check/checker.dawn:3443`。
 - **冲突：** interop 规范称成员名可为任意 word：`docs/spec.md:1252`。Java 允许大写方法名。
 - **影响：** Java API 可访问性依赖命名风格；`x.UPPER()` 被解析成“调用字段值”而不是方法调用。

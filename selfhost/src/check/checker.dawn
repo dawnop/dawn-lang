@@ -294,6 +294,22 @@ fn qual_ctor(cx: Cx, target: Expr, fname: String) -> Option[(Int, Int)] = {
   }
 }
 
+## Is the receiver of `recv.name(args)` a whole-module alias that no local
+## value shadows? Such a receiver is not a value at all, so a Java member
+## lookup on it can only mislead; the qualified value/function/constructor
+## rules of spec §10.3 own it. Same predicate as check_method_call's own
+## module branch, asked one level earlier because check_apply must decide
+## whether to delegate at all.
+fn module_alias_receiver(cx: Cx, recv: Expr) -> Bool = {
+  let alias_name = match recv {
+    ECtor(cn, cargs, sp, hp, _, _, _, _) ->
+      if hp || len(cargs) > 0 || sp != None { return false } else { cn }
+    EVar(n, _, _) -> n
+    _ -> return false
+  }
+  lookup(cx, alias_name) == None && map.has(cx.module_aliases, alias_name)
+}
+
 # ---- tests ----
 
 test "scalar and container types resolve" {
@@ -4353,7 +4369,21 @@ fn check_apply(
         Some(k) ->
           return check_ctor_call(cx, fname, args0, None, true, no_expected(), Some(k),
             flo, fhi, lo, hi)
-        None -> ()
+        # `recv.member(args)` where the parser could not know `member` names a
+        # method: after `.` an UPPERCASE word is EFieldAcc and a lowercase one
+        # is EMethod, which made a Java member's ACCESSIBILITY depend on the
+        # host's naming style (SYN-09). The call suffix is what distinguishes a
+        # member read from a member call, so both spellings go to the same
+        # place, and `Class.NAME` / `Class.NAME(args)` can be a field and a
+        # method of the same name.
+        #
+        # A module alias is excluded rather than delegated: `m.CONST(1)` and
+        # `m.missing(1)` have Dawn answers (a constant that is not callable, an
+        # unexported name) that a Java lookup would overwrite with a worse one.
+        None ->
+          if not module_alias_receiver(cx, recv) {
+            return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)
+          }
       }
     _ -> ()
   }
