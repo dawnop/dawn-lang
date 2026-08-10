@@ -1046,7 +1046,10 @@ fn run_lock(rest: List[String]) -> Unit !io = {
         }
     }
   } else {
-    match io.write_file(path, maven.render_lock(fresh)) {
+    # Same reason as the manifest in pkg/add: this is the only writer of
+    # dawn.lock and every other command refuses to disagree with it, so a
+    # half-written lock would fail all of them rather than just this one.
+    match io.atomic_write_file(path, maven.render_lock(fresh)) {
       Ok(_) -> println("wrote " ++ path ++ " (" ++ to_string(len(fresh.arts)) ++
           " artifacts from " ++ to_string(len(coords)) ++ " direct)")
       Err(e) -> cli_error("cannot write " ++ path ++ ": " ++ e.message)

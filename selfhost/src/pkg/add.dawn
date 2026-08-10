@@ -183,7 +183,10 @@ pub fn add_dependency(
           return Err("internal: the edited manifest does not validate:\n" ++
               str.trim(render_plan_manifest(mf_path, rendered, ds)))
       }
-      match io.write_file(mf_path, rendered) {
+      # Published, not overwritten: the manifest is read by every other command
+      # and by whatever editor has it open, so a failed rewrite has to leave the
+      # old one whole rather than a truncated file nothing can parse.
+      match io.atomic_write_file(mf_path, rendered) {
         Ok(_) -> Ok(e.summary)
         Err(we) -> Err("cannot write " ++ mf_path ++ ": " ++ we.message)
       }

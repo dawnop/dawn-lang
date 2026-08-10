@@ -434,4 +434,205 @@ if [ "$after" = 640 ]; then
 fi
 echo "PASS  mutant: permissions not carried over (owning assertion 'stat a/target.toml = 640' turned red, saw $after)"
 
-echo "OK: atomic-write contract, six injections and seven mutants"
+# ---------------------------------------------------------------- call sites
+#
+# Everything above tests the primitive. None of it can tell whether anything
+# calls it: every mutant so far edits std/io.dawn, and a `dawn add` that still
+# wrote its manifest with `io.write_file` would leave all seven green. The two
+# writers TOOL-13 was raised for are compiler source, so the mutants here are
+# private selfhost JARs -- the same harness the target-classpath contract uses,
+# ~5s a build.
+#
+# The fixture is mutant 1's shape for mutant 1's reason: a directory that
+# refuses new entries while the file inside it stays writable is the one place
+# where staging fails and a plain overwrite would have succeeded. So "the
+# command failed and the old bytes are still there" is precisely what a call
+# site that regressed to `io.write_file` cannot produce -- and the writable
+# half of each pair is there so that a mutant which merely broke the command
+# cannot be mistaken for one that lost atomicity.
+#
+# Maven resolution is real but offline: a fixture repository under file:// with
+# one empty jar, since `dawn lock` reaches its write only after a fetch and the
+# fetch's contents are nothing this contract is about.
+
+cs="$work/callsites"
+mkdir -p "$cs/repo/fixture/dep/1"
+python3 - "$cs/repo/fixture/dep/1/dep-1.jar" <<'PY'
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    z.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+PY
+cat > "$cs/repo/fixture/dep/1/dep-1.pom" <<'EOF'
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>fixture</groupId>
+  <artifactId>dep</artifactId>
+  <version>1</version>
+</project>
+EOF
+
+# The lock is seeded with a hash that is deliberately not the jar's, so that a
+# successful rewrite is visible as a change. `dawn lock` without --check does
+# not read it first, so this is stale rather than invalid.
+cs_project() { # dir, dir-mode
+  local d="$1" mode="$2"
+  rm -rf "$d"
+  mkdir -p "$d/src"
+  cat > "$d/dawn.toml" <<'EOF'
+schema = 1
+name = "fixture_app"
+
+[java-deps]
+dep = "fixture:dep:1"
+EOF
+  printf 'pub fn main() -> Unit !io = ()\n' > "$d/src/main.dawn"
+  printf 'schema 1\ncoord fixture:dep:1\nartifact %064d  dep-1.jar\n' 0 > "$d/dawn.lock"
+  chmod 666 "$d/dawn.toml" "$d/dawn.lock"
+  chmod "$mode" "$d"
+}
+
+cs_state() { # file, reference
+  if cmp -s "$1" "$2"; then echo old; else echo new; fi
+}
+
+cs_entries() { # dir
+  ( cd "$1" && find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort |
+      sed 's/^/"/; s/$/"/' | paste -sd, - | sed 's/,/, /g; s/^/[/; s/$/]/' )
+}
+
+cs_run() { # jar, args...
+  local jar="$1"
+  shift
+  if env "DAWN_MAVEN_MIRROR=file://$cs/repo" "COURSIER_CACHE=$cs/coursier" \
+      "DAWN_PKG_CACHE=$cs/pkg" "DAWN_SELFHOST_CP=" \
+      "$JAVA_BIN" -Xss512m -Xmx2g -jar "$jar" "$@" > "$cs/last.out" 2> "$cs/last.err"; then
+    echo ok
+  else
+    echo err
+  fi
+}
+
+# One probe, four scenarios, run against whichever compiler it is handed.
+cs_probe() { # jar, out
+  local jar="$1" out="$2" r
+  : > "$out"
+
+  cs_project "$cs/add-ro" 500
+  r="$(cs_run "$jar" add org.example:thing:1.2.3 --dir "$cs/add-ro")"
+  chmod 700 "$cs/add-ro"
+  {
+    echo "add readonly result = $r"
+    echo "add readonly manifest = $(cs_state "$cs/add-ro/dawn.toml" "$cs/manifest.ref")"
+    echo "add readonly entries = $(cs_entries "$cs/add-ro")"
+  } >> "$out"
+
+  cs_project "$cs/add-rw" 700
+  r="$(cs_run "$jar" add org.example:thing:1.2.3 --dir "$cs/add-rw")"
+  {
+    echo "add writable result = $r"
+    echo "add writable manifest = $(cs_state "$cs/add-rw/dawn.toml" "$cs/manifest.ref")"
+    echo "add writable manifest has thing = $(
+      grep -Fq 'org.example:thing:1.2.3' "$cs/add-rw/dawn.toml" && echo true || echo false)"
+  } >> "$out"
+
+  cs_project "$cs/lock-ro" 500
+  r="$(cs_run "$jar" lock "$cs/lock-ro")"
+  chmod 700 "$cs/lock-ro"
+  {
+    echo "lock readonly result = $r"
+    echo "lock readonly lockfile = $(cs_state "$cs/lock-ro/dawn.lock" "$cs/lock.ref")"
+    echo "lock readonly entries = $(cs_entries "$cs/lock-ro")"
+  } >> "$out"
+
+  cs_project "$cs/lock-rw" 700
+  r="$(cs_run "$jar" lock "$cs/lock-rw")"
+  {
+    echo "lock writable result = $r"
+    echo "lock writable lockfile = $(cs_state "$cs/lock-rw/dawn.lock" "$cs/lock.ref")"
+    echo "lock writable lockfile has coord = $(
+      grep -Fq 'coord fixture:dep:1' "$cs/lock-rw/dawn.lock" && echo true || echo false)"
+  } >> "$out"
+}
+
+# The reference copies the probe compares against: what a project holds before
+# any command has touched it.
+cs_project "$cs/ref" 700
+cp "$cs/ref/dawn.toml" "$cs/manifest.ref"
+cp "$cs/ref/dawn.lock" "$cs/lock.ref"
+
+JAVA_BIN="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+command -v "$JAVA_BIN" > /dev/null || JAVA_BIN=java
+
+# A private compiler built from a copy of selfhost, optionally with one call
+# site put back the way it was. The baseline is built the same way as the
+# mutants so that the only difference between the two runs is the mutation.
+cs_build() { # name, sed-target-or-empty
+  local name="$1" mutate="$2"
+  local dir="$cs/build-$name"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  cp -R "$root/selfhost" "$dir/selfhost"
+  cp -R "$root/compiler-plan" "$dir/compiler-plan"
+  ln -s "$root/packages" "$dir/packages"
+  if [ -n "$mutate" ]; then
+    python3 - "$dir/selfhost/src/$mutate" <<'PY'
+import pathlib
+import sys
+
+p = pathlib.Path(sys.argv[1])
+text = p.read_text()
+if text.count("io.atomic_write_file(") != 1:
+    raise SystemExit(f"{p}: expected exactly one atomic write call site")
+p.write_text(text.replace("io.atomic_write_file(", "io.write_file("))
+PY
+  fi
+  if ! DAWN_SELFHOST_CP="" "$root/bin/dawn" build "$dir/selfhost" -o "$dir/compiler.jar" \
+      --std "$root/std" --vendor org/objectweb/asm --vendor coursierapi \
+      > "$dir/build.out" 2> "$dir/build.err"; then
+    cat "$dir/build.out" "$dir/build.err" >&2
+    fail "$name private selfhost did not compile"
+  fi
+  CS_JAR="$dir/compiler.jar"
+}
+
+cs_build baseline ""
+cs_probe "$CS_JAR" "$work/callsites.out"
+cmp -s "$here/callsites-expected.txt" "$work/callsites.out" || {
+  diff -u "$here/callsites-expected.txt" "$work/callsites.out" >&2 || true
+  fail "the call sites do not behave as the contract says"
+}
+echo "PASS  call sites: dawn add and dawn lock publish rather than overwrite"
+
+# Each call-site mutant owns one line, and must leave the other call site's
+# lines alone -- an owning assertion that also moves for the other mutation is
+# not owned by either.
+cs_expect_red() { # label, out, assertion, untouched-prefix
+  if cmp -s "$here/callsites-expected.txt" "$2"; then
+    fail "$1 mutant stayed green"
+  fi
+  if grep -qx "$3" "$2"; then
+    diff -u "$here/callsites-expected.txt" "$2" >&2 || true
+    fail "$1 mutant did not move its owning assertion: $3"
+  fi
+  if ! diff <(grep "^$4" "$here/callsites-expected.txt") <(grep "^$4" "$2") > /dev/null; then
+    diff -u "$here/callsites-expected.txt" "$2" >&2 || true
+    fail "$1 mutant also moved the '$4' lines, so the assertion above is not owned"
+  fi
+  local moved
+  moved="$(diff "$here/callsites-expected.txt" "$2" | grep -c '^>' || true)"
+  echo "PASS  mutant: $1 (owning assertion '$3' turned red; $moved line(s) moved)"
+}
+
+cs_build add-plain-write pkg/add.dawn
+cs_probe "$CS_JAR" "$work/callsites-m-add.out"
+cs_expect_red "dawn add back to io.write_file" "$work/callsites-m-add.out" \
+  'add readonly manifest = old' 'lock '
+
+cs_build lock-plain-write main.dawn
+cs_probe "$CS_JAR" "$work/callsites-m-lock.out"
+cs_expect_red "dawn lock back to io.write_file" "$work/callsites-m-lock.out" \
+  'lock readonly lockfile = old' 'add '
+
+echo "OK: atomic-write contract, six injections, seven primitive mutants and two call-site mutants"
