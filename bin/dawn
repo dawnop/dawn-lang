@@ -84,8 +84,10 @@ fi
 # The hash covers the inputs the build reads -- the Planner's recursive
 # source-input manifest plus `write_static_records` below, and getting that
 # list wrong is the same failure in a different place -- so it changes exactly
-# when the output should. Reading ~2MB costs a few milliseconds against a
-# multi-second build.
+# when the output should. It is recomputed before every exec, not only before a
+# rebuild, so the cost lands on each `bin/dawn` call: ~3MB framed and hashed,
+# ~0.16s of shell. That is why the stream below is assembled in bulk -- the
+# per-file loop it replaced cost 0.69s a call and took CI over its timeout.
 STAMP="$ROOT/build/dawn-selfhost.stamp"
 INPUTS="$ROOT/build/dawn-selfhost.inputs"
 

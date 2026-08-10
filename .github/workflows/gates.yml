@@ -17,12 +17,17 @@ name: gates
 # The gates are spread over independent jobs rather than run in one. That is
 # scheduling and nothing else — no gate was dropped, weakened or made
 # conditional, and a job boundary is drawn only where the steps on either side
-# share nothing but the toolchain. Three steps were 70% of the wall clock
-# (2026-08-07, run 31158133138: the native differential 390s of the test job's
-# 860s, the checker corpus 104s, the documentation checks 105s), and each of
-# them waited on the other two for no reason. The setup they now each repeat
-# is ~40s and comes out of .github/actions/dawn-toolchain, which exists so
-# that the copies cannot drift.
+# share nothing but the toolchain. The first split (2026-08-07) took the three
+# steps that were 70% of one job's wall clock and gave each its own; the second
+# (2026-08-10) finished the job. `test` was still carrying 43 gates and was
+# still the whole critical path — 731s of a 731s run (31353623211) while five
+# jobs sat under six minutes — so its steps were dealt out to the jobs already
+# paying for the same toolchain, plus one new job (`contracts`) for the
+# emit/std contract block. No job may `needs:` another: they all start at once,
+# and the run is as long as the longest one.
+#
+# The setup they each repeat is ~40s and comes out of
+# .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
 on:
   workflow_call:
 
@@ -33,6 +38,8 @@ jobs:
   # the reusable gate set that both branch CI and release tags execute.
   tree-policy:
     runs-on: ubuntu-latest
+    # measured 6s. Seconds-scale jobs get a floor rather than 3x their own
+    # time, which would be a bound no slow runner could meet.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +51,7 @@ jobs:
   # broken scope rule cannot hide behind the compiler toolchain setup.
   editor-grammar:
     runs-on: ubuntu-latest
+    # measured 6s; a floor, for the reason tree-policy gives.
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -58,26 +66,20 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm test --silent
 
+  # The core suite: the compiler's own tests, the self-hosting proof and the
+  # gates that read the compiler's source or grammar rather than its products.
   test:
     runs-on: ubuntu-latest
     # Every timeout in this file is roughly 3x the job's own measured wall
-    # clock over the first two split runs (2026-08-07, 31160611693 cold and
-    # 31161006590 warm), so a gate that got slower says so by failing rather
-    # than by being edited, and a gate that hangs is killed in minutes instead
-    # of burning the 6h default -- which is what "no timeout-minutes" means, on
-    # a runner nobody is watching. This job: 248s and 260s.
-    timeout-minutes: 15
+    # clock, re-measured after the 2026-08-10 redistribution (run 31353623211
+    # for the steps, which moved between jobs but did not change cost), so a
+    # gate that got slower says so by failing rather than by being edited, and
+    # a gate that hangs is killed in minutes instead of burning the 6h default
+    # -- which is what "no timeout-minutes" means, on a runner nobody is
+    # watching. This job: 264s (was 731s before the redistribution).
+    timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
-
-      # site/build.sh builds the Playground editor bundle, so CI needs npm.
-      # This job is the only one that builds the site, so it is the only one
-      # that sets up node.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 'lts/*'
-          cache: npm
-          cache-dependency-path: site/play-ui/package-lock.json
 
       - uses: ./.github/actions/dawn-toolchain
         with:
@@ -94,9 +96,6 @@ jobs:
       # learned a flag instead.
       - name: standard library tests
         run: ./bin/dawn test --stdlib
-
-      - name: site tests
-        run: ./bin/dawn test site
 
       # compiler-plan is an internal top-level package, not one of the
       # publishable packages/* discovered below. Its inline tests own the
@@ -133,11 +132,6 @@ jobs:
           python3 scripts/example-main-contract/selftest.py
           python3 scripts/example-main-contract/run.py
 
-      # JSONTestSuite as a gate, not a claim: y_ accepted + round-trips,
-      # n_ rejected, i_ only counted (scripts/json-suite.sh has the story)
-      - name: JSON suite
-        run: ./scripts/json-suite.sh
-
       - name: selfhost tests
         run: ./bin/dawn test selfhost
 
@@ -151,15 +145,6 @@ jobs:
       # reproduces itself byte-identically from its own output.
       - name: selfhost fixed point (B == C)
         run: ./scripts/selfhost-fixpoint.sh
-
-      # `__emit` compares bytes, which covers Core only where a shipping
-      # backend reads it. CModule.dicts has no shipping reader at all, and
-      # CParam.mode / CDup / CSDrop are emitted as nothing by `__emit`, which
-      # is the JVM emitter -- all three can be rewritten with every other gate
-      # staying green (the counting nodes reach only the C backend). This
-      # is what sees them, and it is the "Core unchanged" evidence R4 rests on.
-      - name: Core IR golden
-        run: ./scripts/selfhost-core-diff.sh
 
       # TEST-04's other half: the grammar as executable expectations. The EBNF
       # is historical because a hand-kept second grammar re-rots; this corpus
@@ -183,6 +168,187 @@ jobs:
       # No JVM, no seed, no history: it runs anywhere the repo does.
       - name: Emit-Change declaration parser
         run: ./scripts/emitchange-selftest.sh
+
+      # `std` is on this list as of 2026-08-06. It had been off it since the
+      # list existed, which nothing noticed while std was 3900 lines nobody
+      # was adding to -- the first suite written into it arrived unformatted
+      # in two modules, and `dawn fmt --check` was green because it was never
+      # pointed at them. `examples` joined for the same reason: it was the
+      # last Dawn in the repo the formatter was not pointed at, and it is the
+      # code most readers see first.
+      - name: formatting
+        run: ./bin/dawn fmt compiler-plan std site selfhost packages examples --check
+
+  # What the compiler emits and what std computes, checked against something
+  # that is not the compiler: the JVM verifier, a javac-built reference, the
+  # JDK's own Schubfach and Unicode tables, java.util.zip, AddressSanitizer.
+  # These share nothing with the suite above but the toolchain, and together
+  # they were 180s of the old `test` job.
+  contracts:
+    runs-on: ubuntu-latest
+    # measured 180s of steps plus ~38s setup; see the note in `test`.
+    timeout-minutes: 11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # TEST-01: every emitted class force-linked through the JVM verifier.
+      # The differentials prove the backends agree, never that the bytes are
+      # legal; lazy linking means a class no test touches is never verified.
+      - name: classfile verification
+        run: ./scripts/classfile-verify/run.sh
+
+      # K-A7: the compiler emits `dawn/rt/Asm`, the five null adapters that
+      # used to be the last handwritten Java in the trusted base. Every other
+      # gate here is green whatever that class contains, including nothing --
+      # this one drives both surfaces and compares the class files they
+      # produce, against the reference Java source from `kotlin-final`.
+      #
+      # That reference being compiled by javac, from an archived tag, is the
+      # only step in the chain that does not pass through the Dawn compiler,
+      # and the adapter now emits itself -- so it is also the only thing
+      # standing between us and a self-propagating defect (#134, §5.7). Read
+      # run.sh's header before changing anything here: several plausible
+      # simplifications leave this step green and prove nothing.
+      - name: ASM adapter contract (emitted dawn/rt/Asm vs dawn.tool.AdtClassWriter)
+        run: ./scripts/asm-adapter-contract/run.sh
+
+      # K-A7 phase 2, the other half: the contract above says the two adapters
+      # are interchangeable, which is exactly why nothing else can tell whether
+      # the 114 call sites moved. This reads the emitted constant pools and
+      # answers it -- no `dawn/tool` reference left, and `dawn/rt/Asm` actually
+      # reached (either assertion alone passes on an empty directory).
+      - name: adapter call sites (emitted compiler names dawn/rt/Asm only)
+        run: |
+          rm -rf /tmp/gate-emit && mkdir -p /tmp/gate-emit
+          ./bin/dawn __emit selfhost -o /tmp/gate-emit > /dev/null
+          ./scripts/adapter-callsites.py /tmp/gate-emit
+
+      # `__emit` compares bytes, which covers Core only where a shipping
+      # backend reads it. CModule.dicts has no shipping reader at all, and
+      # CParam.mode / CDup / CSDrop are emitted as nothing by `__emit`, which
+      # is the JVM emitter -- all three can be rewritten with every other gate
+      # staying green (the counting nodes reach only the C backend). This
+      # is what sees them, and it is the "Core unchanged" evidence R4 rests on.
+      - name: Core IR golden
+        run: ./scripts/selfhost-core-diff.sh
+
+      # Spec 2.7 promises an opaque type *is* its target at run time, and that
+      # promise is one a script can hold: run each case twice, once with
+      # `opaque type` replaced by `alias`, and require the output to match.
+      # Twelve functions were breaking it on 2026-07-27, two of them by
+      # answering wrongly rather than crashing -- and a comment describing the
+      # hazard sat thirty lines above one of them, so this is here because
+      # documentation demonstrably did not transfer.
+      # Both sides of every comparison capture stderr, so until the liveness
+      # checks landed a toolchain that failed identically on both printed `ok`
+      # for every case and exited 0 -- and one case had been dead that way since
+      # RD-06 removed the `list.head` it called. --self-check drives three
+      # broken toolchains through the script and requires each to be refused;
+      # it runs no real compilation, so it costs milliseconds.
+      - name: opaque twin (an opaque type behaves as its target)
+        run: |
+          ./scripts/opaque-twin/run.sh --self-check
+          ./scripts/opaque-twin/run.sh
+
+      # Float rendering's only independent oracle. std/fmt.dawn says outright
+      # that it does not re-test dtoa because this script pins it byte for
+      # byte -- and until 2026-08-08 the script ran nowhere, so the claim
+      # pointed at nothing. Everything else that touches Float rendering
+      # compares the two backends, and both compile the same Dawn source: a
+      # wrong shortest-round-trip rule is a *shared* wrong answer there and
+      # invisible. The JDK's Schubfach is the outside opinion.
+      #
+      # The full 200,000-sample default runs on every push; it costs ~14s
+      # wall, so there is no reason for a reduced push tier.
+      - name: dtoa contract (Float rendering vs the JDK)
+        run: ./scripts/dtoa-contract/run.sh
+
+      # Java compresses, Dawn decompresses. That direction is the point: a
+      # round trip through one implementation proves only self-consistency.
+      - name: Inflate contract
+        run: ./scripts/inflate-contract/run.sh
+
+      # Case folding and classification are the two operations with a table
+      # behind them rather than a derivation, so the backends cannot share an
+      # implementation -- only the data. This checks that both answer from the
+      # compiler's tables, and that those tables still match the JDK they were
+      # generated from.
+      - name: Unicode contract
+        run: ./scripts/unicode-contract/run.sh
+
+      # The one collection primitive a backend owes the language. Its in-place
+      # append is a contract clause, not an optimization -- losing it makes the
+      # accumulation loop quadratic again, and nothing else here would notice.
+      - name: Array contract
+        run: ./scripts/array-contract/run.sh
+
+      - name: Collection contracts
+        run: |
+          ./scripts/hamt-contract/run.sh
+          ./scripts/pvec-contract/run.sh
+
+      # std/fspath replaces a `use java` the compiler spelled in two places, so
+      # the thing it replaces is the oracle.
+      - name: Path contract
+        run: ./scripts/path-contract/run.sh
+
+      # JSONTestSuite as a gate, not a claim: y_ accepted + round-trips,
+      # n_ rejected, i_ only counted (scripts/json-suite.sh has the story)
+      - name: JSON suite
+        run: ./scripts/json-suite.sh
+
+      # Those tables are pruned to what a program can reach, and "can reach"
+      # has to mean what the artifact actually holds -- test blocks included,
+      # since the JVM emits them. selfhost cannot notice a shortfall here: its
+      # own non-test code uses every table.
+      - name: table freight
+        run: ./scripts/table-freight/run.sh
+
+      # The other half of the intrinsic contract. `types.Intr.rt` makes a
+      # runtime-owned primitive impossible to implement on one backend only;
+      # the ones each backend writes inline had no such guard, just a `panic`
+      # in each emitter that fired in the *user's* compile if a corpus ever
+      # reached that name. This walks the table instead.
+      - name: intrinsic parity (both backends, the same primitives)
+        run: ./scripts/intrinsic-parity.py
+
+      # `ForeignError.kind` is the backend's own name for a failure class, so
+      # the native differential can only ask whether it is a name at all --
+      # one expectation, two backends, different names. This is where the JVM's
+      # names are written down, and what stops the handler drifting back to the
+      # `toString()` rendering the string barrier still hands back.
+      - name: Error model contract
+        run: ./scripts/error-contract/run.sh
+
+      # Reference counting, checked in C: `rc.dawn` decides where every dup and
+      # drop goes, and this drives the runtime half of that contract directly.
+      # The oracle is AddressSanitizer -- a drop that fails to recurse is a leak,
+      # one that recurses twice is a double free -- plus a small-stack run,
+      # because drop walks a 200k-node chain and must not do it by recursing.
+      - name: RC contract
+        run: ./scripts/rc-contract/run.sh
+
+  # Slice C's classpath contract owns a fixture-only Maven repository and
+  # private caches, so it cannot share dependency state with the broad test
+  # job. Its compiling negative controls rebuild nine private selfhost JARs.
+  #
+  # The supply-chain guards below joined it on 2026-08-10: they are the other
+  # gates that resolve dependencies, read dawn.lock or drive the planner's
+  # fetch, and they cost 68s in a job that had room for them.
+  java-target-classpath:
+    runs-on: ubuntu-latest
+    # measured 194s + 68s moved in; see the note in `test`.
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: check and doc target Java classpaths
+        run: ./scripts/java-target-classpath-contract/run.sh
 
       # The guards in front of the bootstrap, none of which a green build can
       # see: bin/dawn's cache generation (input coverage, fail-closed manifest
@@ -227,135 +393,32 @@ jobs:
       - name: bootstrap input manifest contract
         run: bash ./scripts/bootstrap-input-manifest-contract/run.sh
 
-      # TEST-01: every emitted class force-linked through the JVM verifier.
-      # The differentials prove the backends agree, never that the bytes are
-      # legal; lazy linking means a class no test touches is never verified.
-      - name: classfile verification
-        run: ./scripts/classfile-verify/run.sh
+      # Target Java signatures come from one platform-parent loader per lease;
+      # behavior mutants pin query isolation, parent choice and both close paths.
+      - name: target-scoped Java signature leases
+        run: ./scripts/jsig-lease-contract/run.sh
 
-      # K-A7: the compiler emits `dawn/rt/Asm`, the five null adapters that
-      # used to be the last handwritten Java in the trusted base. Every other
-      # gate here is green whatever that class contains, including nothing --
-      # this one drives both surfaces and compares the class files they
-      # produce, against the reference Java source from `kotlin-final`.
-      #
-      # That reference being compiled by javac, from an archived tag, is the
-      # only step in the chain that does not pass through the Dawn compiler,
-      # and the adapter now emits itself -- so it is also the only thing
-      # standing between us and a self-propagating defect (#134, §5.7). Read
-      # run.sh's header before changing anything here: several plausible
-      # simplifications leave this step green and prove nothing.
-      - name: ASM adapter contract (emitted dawn/rt/Asm vs dawn.tool.AdtClassWriter)
-        run: ./scripts/asm-adapter-contract/run.sh
-
-      # K-A7 phase 2, the other half: the contract above says the two adapters
-      # are interchangeable, which is exactly why nothing else can tell whether
-      # the 114 call sites moved. This reads the emitted constant pools and
-      # answers it -- no `dawn/tool` reference left, and `dawn/rt/Asm` actually
-      # reached (either assertion alone passes on an empty directory).
-      - name: adapter call sites (emitted compiler names dawn/rt/Asm only)
-        run: |
-          rm -rf /tmp/gate-emit && mkdir -p /tmp/gate-emit
-          ./bin/dawn __emit selfhost -o /tmp/gate-emit > /dev/null
-          ./scripts/adapter-callsites.py /tmp/gate-emit
-
-      # Spec 2.7 promises an opaque type *is* its target at run time, and that
-      # promise is one a script can hold: run each case twice, once with
-      # `opaque type` replaced by `alias`, and require the output to match.
-      # Twelve functions were breaking it on 2026-07-27, two of them by
-      # answering wrongly rather than crashing -- and a comment describing the
-      # hazard sat thirty lines above one of them, so this is here because
-      # documentation demonstrably did not transfer.
-      # Both sides of every comparison capture stderr, so until the liveness
-      # checks landed a toolchain that failed identically on both printed `ok`
-      # for every case and exited 0 -- and one case had been dead that way since
-      # RD-06 removed the `list.head` it called. --self-check drives three
-      # broken toolchains through the script and requires each to be refused;
-      # it runs no real compilation, so it costs milliseconds.
-      - name: opaque twin (an opaque type behaves as its target)
-        run: |
-          ./scripts/opaque-twin/run.sh --self-check
-          ./scripts/opaque-twin/run.sh
-
-      # The one collection primitive a backend owes the language. Its in-place
-      # append is a contract clause, not an optimization -- losing it makes the
-      # accumulation loop quadratic again, and nothing else here would notice.
-      - name: Array contract
-        run: ./scripts/array-contract/run.sh
-
-      - name: Collection contracts
-        run: |
-          ./scripts/hamt-contract/run.sh
-          ./scripts/pvec-contract/run.sh
-
-      # std/fspath replaces a `use java` the compiler spelled in two places, so
-      # the thing it replaces is the oracle.
-      - name: Path contract
-        run: ./scripts/path-contract/run.sh
-
-      # Java compresses, Dawn decompresses. That direction is the point: a
-      # round trip through one implementation proves only self-consistency.
-      - name: Inflate contract
-        run: ./scripts/inflate-contract/run.sh
-
-      # Float rendering's only independent oracle. std/fmt.dawn says outright
-      # that it does not re-test dtoa because this script pins it byte for
-      # byte -- and until 2026-08-08 the script ran nowhere, so the claim
-      # pointed at nothing. Everything else that touches Float rendering
-      # compares the two backends, and both compile the same Dawn source: a
-      # wrong shortest-round-trip rule is a *shared* wrong answer there and
-      # invisible. The JDK's Schubfach is the outside opinion.
-      #
-      # The full 200,000-sample default runs on every push; it costs ~14s
-      # wall, so there is no reason for a reduced push tier.
-      - name: dtoa contract (Float rendering vs the JDK)
-        run: ./scripts/dtoa-contract/run.sh
-
-      # Case folding and classification are the two operations with a table
-      # behind them rather than a derivation, so the backends cannot share an
-      # implementation -- only the data. This checks that both answer from the
-      # compiler's tables, and that those tables still match the JDK they were
-      # generated from.
-      - name: Unicode contract
-        run: ./scripts/unicode-contract/run.sh
-
-      # The other half of the intrinsic contract. `types.Intr.rt` makes a
-      # runtime-owned primitive impossible to implement on one backend only;
-      # the ones each backend writes inline had no such guard, just a `panic`
-      # in each emitter that fired in the *user's* compile if a corpus ever
-      # reached that name. This walks the table instead.
-      - name: intrinsic parity (both backends, the same primitives)
-        run: ./scripts/intrinsic-parity.py
-
-      # Those tables are pruned to what a program can reach, and "can reach"
-      # has to mean what the artifact actually holds -- test blocks included,
-      # since the JVM emits them. selfhost cannot notice a shortfall here: its
-      # own non-test code uses every table.
-      - name: table freight
-        run: ./scripts/table-freight/run.sh
-
-      # `ForeignError.kind` is the backend's own name for a failure class, so
-      # the native differential can only ask whether it is a name at all --
-      # one expectation, two backends, different names. This is where the JVM's
-      # names are written down, and what stops the handler drifting back to the
-      # `toString()` rendering the string barrier still hands back.
-      - name: Error model contract
-        run: ./scripts/error-contract/run.sh
-
-      # Reference counting, checked in C: `rc.dawn` decides where every dup and
-      # drop goes, and this drives the runtime half of that contract directly.
-      # The oracle is AddressSanitizer -- a drop that fails to recurse is a leak,
-      # one that recurses twice is a double free -- plus a small-stack run,
-      # because drop walks a 200k-node chain and must not do it by recursing.
-      - name: RC contract
-        run: ./scripts/rc-contract/run.sh
-
-      # The playground runs a public endpoint that compiles and executes code
-      # strangers send it, and nothing here ever ran its contract test: the
-      # sandbox timeout, the 413 on oversized bodies, and the check that compile
-      # errors do not leak host paths were all trusted rather than exercised.
-      - name: playground contract
-        run: ./playground/test/contract.sh
+  # Slice D owns private source overlays, a fixture-only Maven repository and
+  # eighteen compiling selfhost mutants. It shares no mutable fixture state
+  # with the broad test job, so keeping it independent makes failures
+  # attributable and keeps the same gate in branch and release workflows.
+  #
+  # Every other gate that speaks LSP moved here on 2026-08-10. They start
+  # language servers and read their traffic, which is this job's subject; the
+  # project-plan contract is here because analysis and completion are its two
+  # consumers.
+  lsp-workspace:
+    runs-on: ubuntu-latest
+    # Cold runners compile one observed server plus every mutant from scratch.
+    # measured 196s + 168s moved in; see the note in `test`.
+    timeout-minutes: 21
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: LSP workspace ownership and mutants
+        run: ./scripts/lsp-workspace-contract/run.sh
 
       # The language server's *scheduling*, which nothing else here can see:
       # selfhost-lsp-diff.sh compares output bytes, and a server that spins a
@@ -395,74 +458,13 @@ jobs:
       - name: project plan capture and completion consistency
         run: ./scripts/project-plan-contract/run.sh
 
-      # Target Java signatures come from one platform-parent loader per lease;
-      # behavior mutants pin query isolation, parent choice and both close paths.
-      - name: target-scoped Java signature leases
-        run: ./scripts/jsig-lease-contract/run.sh
-
-      - name: site builds end-to-end (incl. the Playground editor bundle)
-        run: ./site/build.sh
-
-      # site/README.md has called "JVM and native write the same dist, byte for
-      # byte" a project tradition since M5, and until now nothing enforced it --
-      # it was a `diff -r` somebody ran by hand, over the live working tree, so
-      # it could not tell a backend disagreement from an input that moved
-      # between the two builds (it reported the latter as the former on
-      # 2026-08-04). Two `use java` lines had also made the native side
-      # impossible to build at all for a milestone, with the claim still on the
-      # page. Read the script's header before touching it.
-      - name: site dist, JVM vs native
-        run: ./scripts/site-dist-diff.sh
-
-      # `std` is on this list as of 2026-08-06. It had been off it since the
-      # list existed, which nothing noticed while std was 3900 lines nobody
-      # was adding to -- the first suite written into it arrived unformatted
-      # in two modules, and `dawn fmt --check` was green because it was never
-      # pointed at them. `examples` joined for the same reason: it was the
-      # last Dawn in the repo the formatter was not pointed at, and it is the
-      # code most readers see first.
-      - name: formatting
-        run: ./bin/dawn fmt compiler-plan std site selfhost packages examples --check
-
-  # Slice C's classpath contract owns a fixture-only Maven repository and
-  # private caches, so it cannot share dependency state with the broad test
-  # job. Its compiling negative controls rebuild nine private selfhost JARs;
-  # keeping that multi-minute cost here prevents the already-heavy test job
-  # from serializing unrelated gates behind those builds.
-  java-target-classpath:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: check and doc target Java classpaths
-        run: ./scripts/java-target-classpath-contract/run.sh
-
-  # Slice D owns private source overlays, a fixture-only Maven repository and
-  # eighteen compiling selfhost mutants. It shares no mutable fixture state
-  # with the broad test job, so keeping it independent makes failures
-  # attributable and keeps the same gate in branch and release workflows.
-  lsp-workspace:
-    runs-on: ubuntu-latest
-    # Cold runners compile one observed server plus every mutant from scratch.
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: LSP workspace ownership and mutants
-        run: ./scripts/lsp-workspace-contract/run.sh
-
   # Acceptance gate 1 of docs/native-backend-plan.md 5. Its own job because it
   # was 390s of the 860s test job (2026-08-07) and shares nothing with the rest
   # of that list but the toolchain.
   native-diff:
     runs-on: ubuntu-latest
-    # measured 290s and 281s
-    timeout-minutes: 15
+    # measured 365s; see the note in `test`.
+    timeout-minutes: 19
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -496,11 +498,8 @@ jobs:
   # quietly regress either.
   checker-corpus:
     runs-on: ubuntu-latest
-    # measured 123s and 131s before SYN-11 moved the five-mutant syntax
-    # contract here; the expanded contract measured 65s locally. The broad
-    # test job is already near its 15-minute budget, while this job shares the
-    # same toolchain and keeps a 10-minute failure bound.
-    timeout-minutes: 10
+    # measured 348s; see the note in `test`.
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -528,12 +527,26 @@ jobs:
   # EBNF out of step with the parser -- all by human reading. Marking the
   # front-page example `dawn run` failed on the first run (it called a `sum`
   # that does not exist), which is the whole argument.
+  #
+  # The site and playground gates joined it on 2026-08-10: the site is the
+  # documentation's other output, and this is now the only job that sets up
+  # node.
   docs:
     runs-on: ubuntu-latest
-    # measured 127s and 134s
-    timeout-minutes: 10
+    # measured 254s + 47s moved in (plus ~3s for setup-node); see `test`.
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
+
+      # site/build.sh builds the Playground editor bundle, so CI needs npm.
+      # This job is the only one that builds the site, so it is the only one
+      # that sets up node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: site/play-ui/package-lock.json
+
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -546,6 +559,32 @@ jobs:
       - name: builtin type inventory contract
         run: ./scripts/builtin-type-contract/run.sh
 
+      - name: site tests
+        run: ./bin/dawn test site
+
+      # The playground runs a public endpoint that compiles and executes code
+      # strangers send it, and nothing here ever ran its contract test: the
+      # sandbox timeout, the 413 on oversized bodies, and the check that compile
+      # errors do not leak host paths were all trusted rather than exercised.
+      - name: playground contract
+        run: ./playground/test/contract.sh
+
+      # This one builds site/play-ui/dist, which is not tracked and which the
+      # differential below reads. They stay in this order.
+      - name: site builds end-to-end (incl. the Playground editor bundle)
+        run: ./site/build.sh
+
+      # site/README.md has called "JVM and native write the same dist, byte for
+      # byte" a project tradition since M5, and until now nothing enforced it --
+      # it was a `diff -r` somebody ran by hand, over the live working tree, so
+      # it could not tell a backend disagreement from an input that moved
+      # between the two builds (it reported the latter as the former on
+      # 2026-08-04). Two `use java` lines had also made the native side
+      # impossible to build at all for a milestone, with the claim still on the
+      # page. Read the script's header before touching it.
+      - name: site dist, JVM vs native
+        run: ./scripts/site-dist-diff.sh
+
   # N vs N-1 (scripts/selfhost-prev-diff.sh): the previous release and HEAD
   # compile the same corpus and any byte difference must be declared in a
   # commit message. This is the oracle now that the Kotlin reference is
@@ -555,8 +594,8 @@ jobs:
   # the N-1 toolchain, the successors of the old Kotlin golden diffs.
   prev-diff:
     runs-on: ubuntu-latest
-    # measured 106s and 120s
-    timeout-minutes: 10
+    # measured 210s; see the note in `test`.
+    timeout-minutes: 11
     steps:
       - uses: actions/checkout@v4
         with:
@@ -585,11 +624,12 @@ jobs:
   # The native half of the same comparison, split off because it is the longer
   # one (172s of prev-diff's 314s on 2026-08-07) and because the two steps in
   # it are joined to each other and to nothing else: the differential reuses
-  # the binary the release step built.
+  # the binary the release step built. Since the 2026-08-10 redistribution it
+  # is the critical path: 484s, and nothing in it can be moved elsewhere.
   prev-diff-native:
     runs-on: ubuntu-latest
-    # measured 198s and 200s
-    timeout-minutes: 12
+    # measured 484s; see the note in `test`.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:

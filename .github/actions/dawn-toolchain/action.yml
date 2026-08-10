@@ -1,9 +1,10 @@
 name: dawn toolchain
 description: >
   GraalVM, the cached bootstrap seed, and the selfhost toolchain built from it.
-  gates.yml is six jobs now rather than two, and this is the setup all of them
-  share -- written once, because six hand-kept copies of it drift the way the
-  gate list itself once drifted between ci.yml and release.yml.
+  gates.yml is eleven jobs now rather than two, nine of which need a toolchain,
+  and this is the setup they share -- written once, because nine hand-kept
+  copies of it drift the way the gate list itself once drifted between ci.yml
+  and release.yml.
 
 inputs:
   github-token:
@@ -39,15 +40,16 @@ runs:
         path: .dawn/seeds
         key: dawn-seed-${{ hashFiles('scripts/seed-release.txt', 'scripts/seed-checksums.txt', 'scripts/seed-std-checksums.txt') }}
 
-    # [java-deps] resolution, so six jobs do not each ask Maven Central for the
+    # [java-deps] resolution, so nine jobs do not each ask Maven Central for the
     # same asm jar. dawn.lock is the key because it *is* the resolved closure;
-    # `dawn lock --check selfhost` still runs in the test job, so a cache that
-    # somehow held a different closure fails there rather than passing quietly.
+    # `dawn lock --check selfhost` still runs in java-target-classpath, so a
+    # cache that somehow held a different closure fails there rather than
+    # passing quietly.
     #
     # Not a speed-up, measured: this whole setup took 24-29s per job on the
     # cold run (31160611693) and 23-27s on the warm one (31161006590) -- the
     # asm jar is ~120 KB and the restore costs about what the download did.
-    # It is here to take Maven Central off six jobs' critical path, which is
+    # It is here to take Maven Central off nine jobs' critical path, which is
     # the only claim it can support.
     - name: cache resolved java-deps
       uses: actions/cache@v4
