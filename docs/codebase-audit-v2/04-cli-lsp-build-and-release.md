@@ -7,12 +7,13 @@
 ## 本专题结论
 
 - 原审查中对用户最危险的 `dawn check` 假绿、`dawn fmt` 任意文件写回、LSP 文档级私有快照与
-  LSP/`doc` 工程 classpath 缺失均已关闭；当前默认接口风险集中在尚未完整闭合的 bootstrap stamp。
+  LSP/`doc` 工程 classpath 缺失均已关闭；bootstrap cache generation 也已随 v2 stamp 闭合，
+  当前默认接口风险只剩 manifest/lock 的原子写入。
 - LSP 现有 debounce、URI/UTF-8 修复、跨后端共享前端、有界 framing、lifecycle state，以及按
   canonical `(project, source_root)` 共享的 captured plan、live snapshot、target lease 和诊断聚合。
 - 原审查中的包/自举缺陷大多来自**一件事有两张图或两份身份**；source/Java graph、artifact
-  identity、seed jar/std 与 gate/release recipe 已分别收口，当前只剩 manifest/lock 原子写入和
-  bootstrap v2 残余。
+  identity、seed jar/std 与 gate/release recipe 已分别收口，当前只剩 manifest/lock
+  原子写入。
 
 ## TOOL-01 — P1 — `dawn check` 有诊断仍退出 0（已修）
 
@@ -243,43 +244,41 @@ TOOL-10 在这里仅关闭“双 parser/双 graph”。
 - **影响：** disk full、process termination 或 write error 可把受版本控制文件留成 truncated state。
 - **建议：** 在目标目录写 temp，flush/close/validate 后 atomic rename，保留原 mode；失败不动旧文件。
 
-## TOOL-14 — P1 — launcher stamp 未覆盖真实 compiler build inputs（部分修复）
+## TOOL-14 — P1 — launcher stamp 未覆盖真实 compiler build inputs（已修）
 
-> **后续处置（2026-08-09）：partial，订正此前 fixed。** 本轮已关闭 direct-only discovery 与
-> v1 consumer 的静默降级：
+> **后续处置（2026-08-10）：已修。** `3e13645` 落地完整 v2 launcher generation，此前
+> partial 复核所列的四个开放边界逐一关闭：
 >
-> - source graph 来自 Planner 的递归 `dawn-source-inputs-v1`；首次 clean checkout 才使用受限、
->   checkout-local 的递归 path fallback，Planner、fspath、sha2、inflate 都进入 stamp；
-> - 当前 JAR 的 Producer 非零、空输出或坏 manifest 会保留错误并终止，绝不退回 fallback；
-> - consumer 保留并验证 `F/O/T`，required/optional/tree 的缺失、类型、symlink、遍历和读取错误
->   都 fail closed；header、record、scope 与 repo-relative path spelling 也严格解析；
-> - `R` 记录和 fallback dependency 都不能逃出 checkout；`A` 只用于 Producer 明确给出的 base 外
->   absolute package，不能由 fallback 扩权生成。
+> - SHA-256 工具启动即验 `abc` known vector，每次调用检查 status 与输出形状；无工具、
+>   启动失败、空输出、非 64-hex 全部 fail closed，`no-sha256`/mtime fallback 已删除；
+> - source/inputs digest 改为 type/length framing（`byte_length ":" raw_bytes`，record、
+>   scope、kind、path、树根、相对叶路径、存在/缺失状态与内容分别 frame），拼接分割歧义
+>   由真实碰撞用例钉住；
+> - stage1 与最终 candidate 各自 re-plan，manifest 与 framed source stream 逐字节比较，
+>   发散即 `bootstrap inputs changed during build` 且不提升；
+> - 持久化 `dawn-selfhost.inputs`，v2 stamp 绑定 source/bootstrap/inputs/jar 四摘要与
+>   seed identity（含 `DAWN_SEED` override）；唯一 staging 目录按 jar → inputs → stamp
+>   提升，stamp 是 commit marker，提升后与 exec 前配对复验，最多两次有界重试。
+>   v1 时代的 zero-toolchain shell fallback 连同其 manifest parser 一并删除——cold
+>   checkout 的第一份权威清单来自 seed 构建出的 stage1。
 >
-> 仍开放的真实边界只有：
->
-> 1. 找不到 `sha256sum`/`shasum` 时仍返回 `no-sha256` 并用 mtime 决定 cache hit，trust primitive
->    缺失是 fail-open；
-> 2. stamp payload 仍拼接 `path + newline + raw contents`，没有 type/length framing，存在分割歧义；
-> 3. build 前后没有由 stage1/final candidate 各自 re-plan 并比较，同一 invocation 不具备
->    pre/post source snapshot，ABA 仍可能穿过；
-> 4. 只提升 jar 与单值 stamp，没有持久化 inputs/jar digest、candidate staging 与可恢复
->    commit-marker/concurrency 协议。
->
-> 因此本项保持 partial。完整边界见
-> [`bootstrap-input-manifest-design.md`](../bootstrap-input-manifest-design.md)。
+> 协议全文见 [`bootstrap-input-manifest-design.md`](../bootstrap-input-manifest-design.md)。
 
 - **修复前证据：S。** stamp 曾只覆盖 `selfhost/src`、manifest、std 与 seed release，漏 local
   source deps、lock、checksum/resolver 与 launcher recipe；root manifest 的 direct-only shell
-  读取也看不到传递 package。
-- **当前门禁：** `scripts/bootstrap-input-manifest-contract/run.sh` 固定 Producer 的递归、去重、
-  project-only 与 fail-closed 输出；`scripts/bootstrap-guards/run.sh` 逐文件证明完整 compiler closure
-  会移动 stamp，并以 fake current JAR 覆盖 producer failure、坏 v1 scope/path/kind、缺失或错误
-  `F/O/T`、`find`/`cat` 失败及 missing optional 正例。
-- **当前影响：** 递归 source、lock、checksum policy、launcher recipe、producer 错误与 checkout
-  边界已进入可观测合同；剩余风险只来自上列 hasher、framing、snapshot 与 promotion 残余。
-- **建议：** 按设计文档完成 fail-closed known-vector hasher、framed v2 stamp、pre/post re-plan 与
-  可恢复 promotion，不要把“递归 roots 已覆盖”等同于整个 bootstrap cache 协议已关闭。
+  读取也看不到传递 package；后又查明 no-hasher fail-open、无长度 framing、无 pre/post
+  re-plan 与不可恢复 promotion 四个残余边界。
+- **门禁：** `scripts/bootstrap-input-manifest-contract/run.sh` 固定 Producer 的递归、去重、
+  project-only 与 fail-closed 输出；`scripts/bootstrap-guards/launcher-contract.sh`（由
+  `run.sh` 驱动、进 CI）以 fake compiler 角色离线固定 66 项 generation 断言——输入覆盖与
+  无关文件控制、坏 manifest/文件系统的 fail-closed、framing 碰撞、发散 pre/post plan、
+  promotion 顺序与崩溃恢复、并发唯一 staging、两次配对复验——每个 assertion family 由
+  `mutate-launcher.py` 的 21 个可编译 launcher mutant 之一转红。
+- **验收（2026-08-10）：** clean checkout 从 v0.62.0 种子冷自建（v2 stamp、热命中零重建）、
+  `native-fixpoint.sh`（已迁移到 v2 stamp 校验）A==B==C、`selfhost-prev-diff.sh` 零新增
+  Emit-Change 全部通过。
+- **结论：已修。** launcher cache 从"内容寻址的单值 stamp"升级为可恢复的多产物
+  generation，输入遗漏、摘要歧义、构建期漂移与提升竞态都有 owning assertion 看守。
 
 ## TOOL-15 — P1 — seed jar 已校验，配对 seed std 未校验（已修）
 
