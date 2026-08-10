@@ -2573,8 +2573,41 @@ def check_site_pages() -> tuple[list[str], int]:
     return bad, seen
 
 
+def warm_toolchain() -> list[str]:
+    """Build the toolchain once, outside the per-example bound.
+
+    EXAMPLE_TIMEOUT is a hang detector sized for examples that take a couple
+    of seconds, and it assumes the toolchain is already built -- which holds
+    in CI, where gates.yml builds it first. It does not hold in a fresh
+    checkout or worktree, and there the assumption fails in the worst
+    available way: the first example pays for the whole build (measured 3m32s
+    on a cold worktree, most of it resolving java-deps), the bound kills it
+    partway, `build/dawn-selfhost.jar` is therefore never published, and the
+    next example starts the same build from nothing. Every document times out
+    in turn and the report names ~140 hangs, none of which are hangs.
+
+    So the build gets its own step with no bound on it, and a toolchain that
+    will not build is one named failure instead of a cascade of wrong ones.
+    """
+    p = subprocess.run([str(ROOT / "bin" / "dawn"), "--version"],
+                       capture_output=True, text=True, cwd=ROOT)
+    if p.returncode == 0:
+        return []
+    detail = (p.stderr or p.stdout).strip() or f"exit status {p.returncode}"
+    return ["the toolchain would not build, so no example could have run:\n"
+            + detail]
+
+
 def main() -> None:
     problems: list[str] = []
+
+    # Before anything that spawns `bin/dawn` -- the examples, the tutorial
+    # fences, the site programs and the effect-inference probe all do.
+    if bad := warm_toolchain():
+        for p in bad:
+            print(p, file=sys.stderr)
+        print(f"FAIL: {len(bad)} documentation problem(s)", file=sys.stderr)
+        sys.exit(1)
     blocks = anchors_seen = sections_seen = claims_seen = recorded = 0
     status_seen = counts_seen = indexed_seen = pages_seen = transl_seen = 0
     contracts_seen = policies_seen = audit_seen = fences_seen = selftests_seen = 0
