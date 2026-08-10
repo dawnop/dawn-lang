@@ -186,59 +186,91 @@ pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Resp
 # A header field value is one line by definition (RFC 9110 §5.5). A CR or LF
 # inside one does not travel as data — it ends the field and starts another, so
 # any value built from request input (a filename, a redirect target, a proxied
-# name) is a response-splitting vector until something removes them. Nothing
-# did: `attachment` spliced a filename straight into a quoted-string and
-# `redirect` passed its Location through untouched.
+# name) is a response-splitting vector until something stops them. Nothing did:
+# `attachment` spliced a filename straight into a quoted-string and `redirect`
+# passed its Location through untouched.
 #
-# Stripping rather than rejecting, because for every value that was already
-# legal this is the identity, and for the rest no encoding would have
-# transmitted them anyway. SP and HTAB stay (both are field-content); the other
-# C0 controls and DEL go.
-## Strip what may not appear in a header field value: CR, LF and the other C0
-## controls plus DEL (SP and HTAB stay). Every header this framework emits goes
-## through it, so response splitting is not reachable from request input.
-pub fn header_value(v: String) -> String = {
-  let cs = code_points(v)
-  var out: List[Char] = []
-  var i = 0
-  while i < len(cs) {
-    let c = unwrap_or(get(cs, i), ' ')
-    if c == '\t' || (c >= ' ' && c != '\u{007F}') {
-      out = out ++ [c]
-    }
-    i = i + 1
+# These used to *delete* the offending characters, which closed the injection
+# and opened a quieter hole in its place. `/download?next=/a\r\nX: 1` came back
+# as a Location of `/aX: 1` — a redirect to a URL nobody asked for, emitted with
+# no error anywhere, and the caller had no way to find out that the value it
+# handed over is not the value that went on the wire. A header is not a
+# best-effort medium: either the value can travel as written or it cannot, and
+# a framework that silently rewrites it has taken a decision that belongs to
+# the application. So they are predicates now, and the emitters refuse.
+#
+# SP and HTAB are legal in a value (both are field-content); the other C0
+# controls and DEL are not.
+## Whether `v` can travel as an HTTP header field value: SP, HTAB and any
+## character from `!` up, but no CR, LF, other C0 control or DEL.
+pub fn valid_header_value(v: String) -> Bool = {
+  for c in code_points(v) {
+    if not (c == '\t' || (c >= ' ' && c != '\u{007F}')) { return false }
   }
-  from_code_points(out)
+  true
 }
 
-# A field name is a token (RFC 9110 §5.1) — no separators, no whitespace, no
-# controls. Anything else would let a name carry its own `:` and inject a field.
-fn header_name(n: String) -> String = {
+## Whether `n` is a header field name: a non-empty RFC 9110 §5.1 token. A name
+## carrying its own `:`, a space or a control would inject a field of its own.
+pub fn valid_header_name(n: String) -> Bool = {
   let cs = code_points(n)
-  var out: List[Char] = []
-  var i = 0
-  while i < len(cs) {
-    let c = unwrap_or(get(cs, i), ' ')
+  if len(cs) == 0 { return false }
+  for c in cs {
     let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
     let punct = c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' ||
       c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' ||
       c == '|' || c == '~'
-    if alnum || punct {
-      out = out ++ [c]
-    }
-    i = i + 1
+    if not (alnum || punct) { return false }
   }
-  from_code_points(out)
+  true
 }
 
-## Append one response header, sanitizing both name and value (see
-## `header_value`). Records are immutable — this returns a new Response.
+# The refusal, worded once, used by both `with_header` (as a panic) and
+# `try_with_header` (as a 400).
+fn header_problem(name: String, value: String) -> Option[String] =
+  if not valid_header_name(name) {
+    Some("illegal header name: " ++ to_string(name))
+  } else if not valid_header_value(value) {
+    Some("illegal value for header " ++ name ++ ": " ++ to_string(value))
+  } else {
+    None
+  }
+
+## Append one response header. Records are immutable — this returns a new
+## Response.
+##
+## A name that is not a token, or a value carrying a character that cannot
+## travel in a field value, **panics**: this is the constructor for a header the
+## program builds out of its own strings, and one it cannot send is a bug in the
+## caller. (Per-request panic isolation turns it into a 500, not a dropped
+## connection.) For a name or value derived from request input, either check it
+## first with `valid_header_name`/`valid_header_value` or use `try_with_header`,
+## which answers 400 instead.
 pub fn with_header(r: Response, name: String, value: String) -> Response =
-  Response { ..r, headers: r.headers ++ [(header_name(name), header_value(value))] }
+  match header_problem(name, value) {
+    Some(p) -> panic(p)
+    None -> Response { ..r, headers: r.headers ++ [(name, value)] }
+  }
+
+## `with_header` for a name or value derived from request input: an illegal one
+## is a 400 the handler can propagate with `?`, not a panic and never a silent
+## edit of the value.
+pub fn try_with_header(r: Response, name: String, value: String) -> Result[Response, HttpError] =
+  match header_problem(name, value) {
+    Some(p) -> Err(http_error(400, p))
+    None -> Ok(Response { ..r, headers: r.headers ++ [(name, value)] })
+  }
 
 ## A redirect: status (301/302/303/307) plus a Location header, empty body.
+## A Location that cannot travel as a field value panics (see `with_header`);
+## `try_redirect` is the form for a target built from request input.
 pub fn redirect(status: Int, location: String) -> Response =
   with_header(raw(status, "text/plain; charset=utf-8", ""), "Location", location)
+
+## `redirect` for a target built from request input: an illegal Location is a
+## 400 rather than a panic.
+pub fn try_redirect(status: Int, location: String) -> Result[Response, HttpError] =
+  try_with_header(raw(status, "text/plain; charset=utf-8", ""), "Location", location)
 
 # Percent-encode as RFC 5987 attr-char: everything but ALPHA / DIGIT and the
 # fifteen listed punctuation marks, over the *UTF-8 bytes* rather than the code
@@ -527,18 +559,63 @@ test "response header helpers" {
       "attachment; filename=\"post.md\"; filename*=UTF-8''post.md")]
 }
 
-test "header values cannot carry a second header" {
-  # CRLF injection: the classic response-splitting payload
-  let r = with_header(raw(200, "text/plain", ""), "Location",
-    "/next\r\nSet-Cookie: admin=1")
-  assert r.headers == [("Location", "/nextSet-Cookie: admin=1")]
-  # a bare LF, and the other C0 controls, go the same way; SP and HTAB stay
-  assert header_value("a\nb") == "ab"
-  assert header_value("a\u{0}b\u{7f}c") == "abc"
-  assert header_value("a b\tc") == "a b\tc"
+test "a header that cannot travel is refused, not quietly edited" {
+  # CRLF injection: the classic response-splitting payload. It used to come
+  # back as ("Location", "/nextSet-Cookie: admin=1") -- a redirect to a URL
+  # nobody asked for, emitted with no error anywhere.
+  match catch_panic(() => with_header(raw(200, "text/plain", ""), "Location",
+      "/next\r\nSet-Cookie: admin=1")) {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert str.contains(m.message, "illegal value for header Location") }
+  }
   # names are tokens: a ':' or a space in one would inject a field of its own
-  let n = with_header(raw(200, "text/plain", ""), "X-Bad: y\r\nZ", "1")
-  assert n.headers == [("X-BadyZ", "1")]
+  match catch_panic(() => with_header(raw(200, "text/plain", ""), "X-Bad: y\r\nZ", "1")) {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert str.contains(m.message, "illegal header name") }
+  }
+  # a legal header is untouched -- in particular it is no longer copied
+  # character by character, so it is the very string the caller handed over
+  assert with_header(raw(200, "text/plain", ""), "X-A", "a b\tc").headers == [("X-A", "a b\tc")]
+}
+
+test "the header predicates say exactly what may travel" {
+  # SP and HTAB are field-content; CR, LF, the other C0 controls and DEL are not
+  assert valid_header_value("a b\tc") == true
+  assert valid_header_value("") == true
+  assert valid_header_value("a\nb") == false
+  assert valid_header_value("a\rb") == false
+  assert valid_header_value("a\u{0}b") == false
+  assert valid_header_value("a\u{7f}b") == false
+  # a token: alphanumerics and the fifteen listed marks, and never empty
+  assert valid_header_name("X-Request-Id") == true
+  assert valid_header_name("!#$%&'*+-.^_`|~09aZ") == true
+  assert valid_header_name("") == false
+  assert valid_header_name("X Bad") == false
+  assert valid_header_name("X:Bad") == false
+  assert valid_header_name("X\r\nBad") == false
+}
+
+test "try_with_header answers 400 where with_header would panic" {
+  # the form for a value built from request input: a handler can propagate it
+  match try_with_header(raw(200, "text/plain", ""), "Location", "/next\r\nX: 1") {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.status == 400
+      assert str.contains(e.message, "illegal value for header Location")
+    }
+  }
+  match try_with_header(raw(200, "text/plain", ""), "X Bad", "1") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.status == 400 }
+  }
+  # a legal one is the same Response with_header builds
+  assert try_with_header(json_ok(JStr("hi")), "X-A", "1") == Ok(with_header(json_ok(JStr("hi")), "X-A", "1"))
+  # try_redirect is the same refusal on the constructor that carries a target
+  match try_redirect(302, "/ok\r\nX-Evil: 1") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.status == 400 }
+  }
+  assert try_redirect(302, "/here") == Ok(redirect(302, "/here"))
 }
 
 test "attachment quotes and encodes the filename" {
@@ -559,8 +636,13 @@ test "attachment quotes and encodes the filename" {
 }
 
 test "redirect targets cannot inject headers either" {
-  let r = redirect(302, "/ok\r\nX-Evil: 1")
-  assert r.headers == [("Location", "/okX-Evil: 1")]
+  # it used to answer ("Location", "/okX-Evil: 1"): injection closed, but the
+  # client sent somewhere the application never named
+  match catch_panic(() => redirect(302, "/ok\r\nX-Evil: 1")) {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert str.contains(m.message, "illegal value for header Location") }
+  }
+  assert redirect(302, "/here").headers == [("Location", "/here")]
 }
 
 test "constructors keep their shapes: status, content type, body kind" {

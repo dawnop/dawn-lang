@@ -50,6 +50,32 @@ branch was written `next(req)?`, which handed the `Err` past the stamp — a
 cross-origin `4xx`/`5xx` arrived with no `Access-Control-*` at all and the
 browser refused to let the page read the error body.
 
+## Response headers (3.0)
+
+A field value is one line by definition (RFC 9110 §5.5) and a field name is a
+token, so neither a `CR`/`LF` nor a `:` can travel inside one. `with_header`
+**refuses** what cannot travel: an illegal name or value panics, which the
+per-request isolation renders as a `500`.
+
+Until 3.0 it deleted the offending characters instead. That closed the
+response-splitting injection and opened a quieter hole in its place:
+`?next=/a%0d%0aX:%201` came back as `Location: /aX: 1`, a redirect to a URL the
+application never named, with no error anywhere and no way for the caller to
+learn that the value it handed over is not the value that went on the wire.
+`pub fn header_value(v) -> String` is gone; `valid_header_name` and
+`valid_header_value` are the predicates it should have been.
+
+For a name or value derived from request input there is `try_with_header` /
+`try_redirect`, which answer `400` instead of panicking:
+
+```dawn
+let r = try_redirect(302, next_from_query)?
+```
+
+`attachment` needs neither: `filename=` is escaped into a quoted-string and
+`filename*=` is percent-encoded per RFC 5987, so both parameters are legal by
+construction whatever the filename is.
+
 ## Error wording (2.1)
 
 The framework renders three strings of its own: the JSON key of an error body,
