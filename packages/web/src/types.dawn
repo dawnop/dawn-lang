@@ -32,7 +32,16 @@ pub type Request = {
   # *this* on "/" and decodes each segment on its own, so an encoded slash
   # (%2F) stays inside its segment instead of minting a route boundary (WEB-03).
   raw_path: String,
-  params: Map[String, String],
+  # path captures, each held as the *segments* it matched: one for a `{name}`
+  # capture, however many remain for a trailing `{name*}`. A tail capture used
+  # to arrive pre-joined with "/", which put back exactly the ambiguity WEB-03
+  # removed — a decoded slash inside one segment became a separator again and
+  # `/dav/a%2Fb/c` was indistinguishable from `/dav/a/b/c`. Read a `{name}`
+  # capture with `param`, a `{name*}` one with `param_segs`.
+  #
+  # Repetition is not why this is a list: a duplicate capture name is a route
+  # table error `validate_routes` refuses at startup, so no name has two values.
+  params: Map[String, List[String]],
   # the query string as a multimap: every value of a repeated name survives in
   # wire order, exactly as `headers` below does. A query string is a list of
   # pairs, not a mapping, and `?tag=a&tag=b` is the ordinary way clients spell a
@@ -394,11 +403,28 @@ pub fn error_response(e: HttpError) -> Response = error_response_with(default_er
 # ---- request accessors ----
 
 ## A path parameter captured by a `{name}` pattern segment. Missing means the
-## route table and the handler disagree — a programming error, hence 500.
+## route table and the handler disagree — a programming error, hence 500. So
+## does a capture that matched anything other than exactly one segment: that is
+## a trailing `{name*}`, whose value is a path and must be read with
+## `param_segs`, since joining it here is what LIB-14 was about.
 pub fn param(req: Request, name: String) -> Result[String, HttpError] =
   match map.get(req.params, name) {
-    Some(v) -> Ok(v)
+    Some([v]) -> Ok(v)
+    Some(_) -> Err(http_error(500,
+      "path parameter $name is a tail capture; read it with param_segs"))
     None -> Err(http_error(500, "missing path parameter: $name"))
+  }
+
+## A trailing `{name*}` capture, as the path segments it matched — each decoded
+## on its own, none of them joined. `[]` when the capture matched nothing (the
+## bare prefix) and also when the name is absent. Joining these with "/" is the
+## old behavior and is the caller's decision now: a segment may legitimately
+## contain a "/" (it arrived as `%2F`), and only the caller knows whether that
+## distinction matters to it.
+pub fn param_segs(req: Request, name: String) -> List[String] =
+  match map.get(req.params, name) {
+    Some(vs) -> vs
+    None -> []
   }
 
 ## `param` parsed as an integer; a non-numeric capture is a 400.
@@ -414,7 +440,8 @@ pub fn param_int(req: Request, name: String) -> Result[Int, HttpError] = {
 ## their own error instead of taking the one `param_int` picks.
 pub fn opt_param_int(req: Request, name: String) -> Option[Int] =
   match map.get(req.params, name) {
-    Some(v) -> parse_int(v)
+    Some([v]) -> parse_int(v)
+    Some(_) -> None
     None -> None
   }
 
@@ -487,7 +514,7 @@ test "param reads captures and flags missing ones" {
   let q: Map[String, List[String]] = map.empty()
   let req = Request {
     method: "GET", path: "/a/42", raw_path: "/a/42",
-    params: map.from([("id", "42")]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
+    params: map.from([("id", ["42"])]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
   assert param(req, "id") == Ok("42")
@@ -532,7 +559,7 @@ test "param_int rejects non-numbers as a client error" {
   let q: Map[String, List[String]] = map.empty()
   let req = Request {
     method: "GET", path: "/a/x", raw_path: "/a/x",
-    params: map.from([("id", "x")]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
+    params: map.from([("id", ["x"])]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
   match param_int(req, "id") {

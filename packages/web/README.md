@@ -18,6 +18,18 @@ decoded `Request.path` is kept for logs and display only.
 | Duplicate slash (`/a//b`) | The empty segment is kept: `/a//b` has three segments and does not match `/a/b`. A capture matches an empty segment; a literal never does. Merging slashes is path rewriting — the application's business. |
 | Trailing slash (`/a/`) | Tolerated, as the router always has: it matches the same route as `/a`. |
 
+Captures are held as the **segments** they matched (`Request.params` is
+`Map[String, List[String]]`): one for a `{name}` capture, however many remain
+for a trailing `{name*}`. Read them with `param` and `param_segs`.
+
+Until 3.0 a tail capture was handed over as `join(segments, "/")`, which put
+back exactly the ambiguity the raw-path split removes: a `/` that arrived
+percent-encoded inside one segment became a separator again, so a WebDAV
+handler could not tell `/dav/a%2Fb/c` from `/dav/a/b/c` and resolved both to the
+same file. `param` refuses to read a tail capture (500, naming `param_segs`)
+rather than silently picking one segment; a caller that does want a joined path
+joins them itself, and thereby says so.
+
 ## Request headers (WEB-04)
 
 `Request.headers` is a lowercase-keyed multimap (`Map[String, List[String]]`):

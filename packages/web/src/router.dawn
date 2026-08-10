@@ -59,8 +59,11 @@ pub fn route_meta(r: Route) -> RouteMeta =
 ## all, or a path that exists but not under this method (404 vs 405). Found carries
 ## the whole Route so the server can both execute (route.handler) and expose its
 ## metadata to middleware without a second lookup.
+##
+## A capture's value is a *list of path segments*: one for a `{name}` capture,
+## however many remain for a trailing `{name*}`. See `match_segs`.
 pub type Dispatch =
-  | Found(route: Route, params: Map[String, String])
+  | Found(route: Route, params: Map[String, List[String]])
   | NoPath
   | WrongMethod
 
@@ -72,7 +75,8 @@ fn is_capture(seg: String) -> Bool =
 fn capture_name(seg: String) -> String = str.slice(seg, 1, str.len(seg) - 1)
 
 # A tail capture `{name*}` matches the rest of the path (zero or more segments),
-# joined by "/". Only meaningful as the last pattern segment (WebDAV /dav/{rest*}).
+# and keeps them as segments. Only meaningful as the last pattern segment
+# (WebDAV /dav/{rest*}).
 fn is_tail(seg: String) -> Bool =
   str.starts_with(seg, "{") && str.ends_with(seg, "*}") && str.len(seg) > 3
 
@@ -81,16 +85,31 @@ fn tail_name(seg: String) -> String = str.slice(seg, 1, str.len(seg) - 2)
 ## Match one pattern against one path string, split with the legacy
 ## empty-dropping rule. The server does not route through this any more — it
 ## splits the *raw* path itself and calls match via dispatch_segs (WEB-03).
-pub fn match_path(pattern: String, path: String) -> Option[List[(String, String)]] =
+pub fn match_path(pattern: String, path: String) -> Option[List[(String, List[String])]] =
   match_segs(pattern, segs(path))
 
+# A tail capture used to be handed over as `join(rest, "/")`.
+#
+# That undoes WEB-03 in the one place it matters most. The server splits the raw
+# path and decodes each segment on its own precisely so that an encoded slash
+# stays inside its segment; joining the decoded segments back together with "/"
+# turns that literal slash into a separator again, and by the time the handler
+# sees the string there is no way to tell `/dav/a%2Fb/c` from `/dav/a/b/c`. For
+# the consumer this matters for -- a file server resolving the capture to a path
+# under a root -- those are two different files, and the difference is chosen by
+# whoever wrote the URL.
+#
+# So a capture's value is the segments, not a string: one segment for `{name}`,
+# the remainder for `{name*}`. A caller that genuinely wants a joined path joins
+# them itself and thereby says so.
 ## Match one pattern against already-split path segments; Some(captures) on
 ## success. The caller owns the split — the server hands in raw-split,
 ## per-segment-decoded segments, so an encoded slash never minted a boundary
 ## here. An interior empty segment is a real segment: a capture accepts it, a
-## literal does not. A trailing `{name*}` captures all remaining segments
-## (possibly empty) as one joined value.
-pub fn match_segs(pattern: String, xs: List[String]) -> Option[List[(String, String)]] = {
+## literal does not. A `{name}` capture yields a one-segment list; a trailing
+## `{name*}` yields all remaining segments (possibly none), unjoined, so that a
+## slash *inside* a segment stays distinguishable from a segment boundary.
+pub fn match_segs(pattern: String, xs: List[String]) -> Option[List[(String, List[String])]] = {
   let ps = segs(pattern)
   let n = len(ps)
   if n > 0 && is_tail(ps[n - 1]) {
@@ -100,7 +119,7 @@ pub fn match_segs(pattern: String, xs: List[String]) -> Option[List[(String, Str
       match match_prefix(ps, xs, n - 1, 0, []) {
         None -> None
         Some(acc) -> {
-          let rest = join(map(range(n - 1, len(xs)), i => xs[i]), "/")
+          let rest = map(range(n - 1, len(xs)), i => xs[i])
           Some(acc ++ [(tail_name(ps[n - 1]), rest)])
         }
       }
@@ -118,15 +137,15 @@ fn match_prefix(
   xs: List[String],
   k: Int,
   i: Int,
-  acc: List[(String, String)],
-) -> Option[List[(String, String)]] =
+  acc: List[(String, List[String])],
+) -> Option[List[(String, List[String])]] =
   if i == k {
     Some(acc)
   } else {
     let p = ps[i]
     let x = xs[i]
     if is_capture(p) {
-      match_prefix(ps, xs, k, i + 1, acc ++ [(capture_name(p), x)])
+      match_prefix(ps, xs, k, i + 1, acc ++ [(capture_name(p), [x])])
     } else if p == x {
       match_prefix(ps, xs, k, i + 1, acc)
     } else {
@@ -138,15 +157,15 @@ fn match_from(
   ps: List[String],
   xs: List[String],
   i: Int,
-  acc: List[(String, String)],
-) -> Option[List[(String, String)]] =
+  acc: List[(String, List[String])],
+) -> Option[List[(String, List[String])]] =
   if i == len(ps) {
     Some(acc)
   } else {
     let p = ps[i]
     let x = xs[i]
     if is_capture(p) {
-      match_from(ps, xs, i + 1, acc ++ [(capture_name(p), x)])
+      match_from(ps, xs, i + 1, acc ++ [(capture_name(p), [x])])
     } else if p == x {
       match_from(ps, xs, i + 1, acc)
     } else {
@@ -309,8 +328,8 @@ fn dispatch_from(routes: List[Route], method: String, xs: List[String], i: Int, 
 test "literal and capture segments match" {
   assert match_path("/health", "/health") == Some([])
   assert match_path("/api/articles/{slug}", "/api/articles/dawn-lang") ==
-    Some([("slug", "dawn-lang")])
-  assert match_path("/a/{x}/b/{y}", "/a/1/b/2") == Some([("x", "1"), ("y", "2")])
+    Some([("slug", ["dawn-lang"])])
+  assert match_path("/a/{x}/b/{y}", "/a/1/b/2") == Some([("x", ["1"]), ("y", ["2"])])
 }
 
 test "mismatches: wrong literal, wrong depth, empty capture name" {
@@ -329,26 +348,41 @@ test "an interior empty segment is a real segment (WEB-03 policy)" {
   # /a//b has three segments; a two-segment pattern does not swallow it
   assert match_segs("/a/b", ["a", "", "b"]) == None
   # a capture accepts the empty segment explicitly, a literal never does
-  assert match_segs("/a/{x}/b", ["a", "", "b"]) == Some([("x", "")])
+  assert match_segs("/a/{x}/b", ["a", "", "b"]) == Some([("x", [""])])
   match dispatch_segs([route_get("/a/b", dummy)], "GET", ["a", "", "b"]) {
     NoPath -> { assert true }
     _ -> { assert false }
   }
 }
 
-test "tail capture matches zero or more remaining segments" {
-  assert match_path("/dav/{rest*}", "/dav") == Some([("rest", "")])
-  assert match_path("/dav/{rest*}", "/dav/") == Some([("rest", "")])
-  assert match_path("/dav/{rest*}", "/dav/a.txt") == Some([("rest", "a.txt")])
-  assert match_path("/dav/{rest*}", "/dav/a/b/c.txt") == Some([("rest", "a/b/c.txt")])
+test "tail capture matches zero or more remaining segments, unjoined" {
+  assert match_path("/dav/{rest*}", "/dav") == Some([("rest", [])])
+  assert match_path("/dav/{rest*}", "/dav/") == Some([("rest", [])])
+  assert match_path("/dav/{rest*}", "/dav/a.txt") == Some([("rest", ["a.txt"])])
+  assert match_path("/dav/{rest*}", "/dav/a/b/c.txt") == Some([("rest", ["a", "b", "c.txt"])])
   # a leading single-capture still works alongside a tail
-  assert match_path("/x/{id}/{rest*}", "/x/7/a/b") == Some([("id", "7"), ("rest", "a/b")])
+  assert match_path("/x/{id}/{rest*}", "/x/7/a/b") == Some([("id", ["7"]), ("rest", ["a", "b"])])
+}
+
+test "a tail capture keeps a slash that arrived inside one segment" {
+  # the server hands in raw-split, per-segment-decoded segments: `/dav/a%2Fb/c`
+  # is three of them, the middle one containing a literal "/". Joining them with
+  # "/" -- which is what the tail capture used to do -- makes that segment
+  # boundary and that character the same thing again, and undoes WEB-03 for the
+  # one route shape that reads a whole path out of the URL.
+  let encoded = match_segs("/dav/{rest*}", ["dav", "a/b", "c"])
+  let plain = match_segs("/dav/{rest*}", ["dav", "a", "b", "c"])
+  assert encoded == Some([("rest", ["a/b", "c"])])
+  assert plain == Some([("rest", ["a", "b", "c"])])
+  # the whole point: the handler can tell them apart. Both used to arrive as
+  # the single string "a/b/c".
+  assert encoded != plain
 }
 
 test "Method route dispatches an arbitrary verb" {
   let routes = [route_method_of("PROPFIND", "/dav/{rest*}", dummy)]
   match dispatch(routes, "PROPFIND", "/dav/a/b") {
-    Found(_, params) -> { assert map.get(params, "rest") == Some("a/b") }
+    Found(_, params) -> { assert map.get(params, "rest") == Some(["a", "b"]) }
     _ -> { assert false }
   }
   match dispatch(routes, "GET", "/dav/a/b") {
@@ -366,7 +400,7 @@ test "HEAD dispatches against GET routes, explicit HEAD route wins" {
   match dispatch(routes, "HEAD", "/a/7") {
     Found(r, params) -> {
       assert r.method == "GET"
-      assert map.get(params, "id") == Some("7")
+      assert map.get(params, "id") == Some(["7"])
     }
     _ -> { assert false }
   }
@@ -391,7 +425,7 @@ test "HEAD dispatches against GET routes, explicit HEAD route wins" {
 test "dispatch: found, 404, and 405 are distinguished" {
   let routes = [route_get("/a/{id}", dummy), route_post("/run", dummy)]
   match dispatch(routes, "GET", "/a/7") {
-    Found(_, params) -> { assert map.get(params, "id") == Some("7") }
+    Found(_, params) -> { assert map.get(params, "id") == Some(["7"]) }
     _ -> { assert false }
   }
   match dispatch(routes, "GET", "/nope") {
