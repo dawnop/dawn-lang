@@ -265,7 +265,7 @@ fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
     (st, CStr("()"))
   } else {
     match t {
-      TyOpaque(_, _, _, tgt) ->
+      TyOpaque(_, _, _, _, tgt) ->
         if has_own_show(st, t) { show_at(st, e, t) } else { to_str(st, e, tgt, wit) }
       TyVar(_, _) ->
         match wit {
@@ -1226,7 +1226,7 @@ fn conj_or_true(acc: Option[CExpr]) -> CExpr =
 ## of its own is its target (spec §2.7), which is the peel `eq_at` does below.
 fn eq_subject(st: LSt, t: Ty) -> Ty =
   match t {
-    TyOpaque(_, _, _, tgt) ->
+    TyOpaque(_, _, _, _, tgt) ->
       if has_impl_at(st.impls, EQ_ID, t) { t } else { eq_subject(st, tgt) }
     _ -> t
   }
@@ -1251,7 +1251,7 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
   # declaring one -- and before `is_ground`, which would send it to
   # `foreign_eq` and panic.
   match t {
-    TyOpaque(_, _, _, tgt) -> return eq_at(st, a, b, tgt)
+    TyOpaque(_, _, _, _, tgt) -> return eq_at(st, a, b, tgt)
     _ -> ()
   }
   if is_ground(t) {
@@ -1489,7 +1489,7 @@ fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
   }
   # as in eq_at: the target's ordering, once the impl has had its chance
   match t {
-    TyOpaque(_, _, _, tgt) -> return cmp_at(st, a, b, tgt)
+    TyOpaque(_, _, _, _, tgt) -> return cmp_at(st, a, b, tgt)
     _ -> ()
   }
   if is_ground(t) {
@@ -1675,7 +1675,7 @@ fn hash_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   # as in eq_at: an opaque type hashes as its target, once its own impl has
   # had its chance
   match t {
-    TyOpaque(_, _, _, tgt) -> return hash_at(st, x, tgt)
+    TyOpaque(_, _, _, _, tgt) -> return hash_at(st, x, tgt)
     _ -> ()
   }
   if is_ground(t) {
@@ -1841,7 +1841,7 @@ fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   # on the other side of the barrier is that target. Placed *after* the impl
   # check, because an `impl Show[Id]` is exactly the reason to declare one.
   match t {
-    TyOpaque(_, _, _, tgt) -> return show_at(st, x, tgt)
+    TyOpaque(_, _, _, _, tgt) -> return show_at(st, x, tgt)
     _ -> ()
   }
   if is_ground(t) && expandable(t) {

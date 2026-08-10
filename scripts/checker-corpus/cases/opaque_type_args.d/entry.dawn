@@ -1,0 +1,16 @@
+# checker.dawn: an opaque type's arguments are part of its identity.
+#
+# `opaque type Phantom[T] = Unit` is the shape that makes this checkable: the
+# argument leaves no trace in the target, so a checker that matched two
+# `TyOpaque`s by comparing their *targets* -- which is what it did before the
+# arguments were carried on the type -- called `Phantom[Int]` and
+# `Phantom[String]` one type and accepted the call below. The declaring module
+# sees through the wrapper and so cannot witness this; the refusal only exists
+# for a module that does not.
+use lib.{of_int, of_string, require}
+
+# accepted: the witness and the tag agree
+pub fn ok() -> Unit = require("s", of_string())
+
+# refused: `T` is bound to String by the witness, and the tag is a Phantom[Int]
+pub fn bad() -> Unit = require("s", of_int())

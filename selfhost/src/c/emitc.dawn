@@ -348,7 +348,7 @@ pub type CRepr =
 ## Deliberately without a wildcard.
 pub fn c_repr(t: Ty) -> CRepr =
   match t {
-    TyOpaque(_, _, _, tgt) -> c_repr(tgt)
+    TyOpaque(_, _, _, _, tgt) -> c_repr(tgt)
     TyInt -> RInt64
     TyFloat -> RFloat64
     TyBool -> RBoolean
@@ -1361,7 +1361,7 @@ fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
     TyBool -> if prefix == "dawn_hash" { prefix ++ "_bool" } else { no_rt(what, t) }
     TyBytes -> if prefix == "dawn_hash" { prefix ++ "_bytes" } else { no_rt(what, t) }
     # an opaque type is its target at run time, here as everywhere
-    TyOpaque(_, _, _, tgt) -> scalar_rt(prefix, tgt, what)
+    TyOpaque(_, _, _, _, tgt) -> scalar_rt(prefix, tgt, what)
     # Cursor has no native representation yet (bytes-design.md): an honest
     # gap, not a wrong answer
     _ -> no_rt(what, t)
@@ -2196,7 +2196,7 @@ test "a slot member and the ref classification agree about every repr" {
   # never got compiled -- and the harness marks emitc `blocked` whenever the
   # JVM run fails, which is why a whole family stayed invisible.
   assert slot_of(TyUnit) == "u"
-  assert slot_of(TyOpaque(0, "H", "m", TyUnit)) == "u"
+  assert slot_of(TyOpaque(0, "H", "m", [], TyUnit)) == "u"
   assert not is_ref_ty(TyUnit)
   assert box_call("x", TyUnit) == "dawn_box_unit(x)"
   assert c_type(TyUnit) == "dawn_unit"
@@ -2222,7 +2222,7 @@ test "a slot member and the ref classification agree about every repr" {
     TyError, TyBytes, TyVar("T", 0), TyAdt(0, []), TyTuple([TyInt]),
     TyFn([], TyInt, EPure), TyList(TyInt), TyMap(TyInt, TyInt), TySet(TyInt),
     TyArray(TyInt), TyJava("java.lang.Object", "Object"),
-    TyOpaque(0, "H", "m", TyBytes), TyOpaque(1, "I", "m", TyInt)
+    TyOpaque(0, "H", "m", [], TyBytes), TyOpaque(1, "I", "m", [], TyInt)
   ]
   for t in every {
     assert is_ref_ty(t) == (slot_of(t) == "p")

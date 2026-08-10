@@ -245,7 +245,7 @@ fn box_ty(m: MethodVisitor, t: Ty) -> Unit !io = {
 fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
   let m = g.mv
   match t {
-    TyOpaque(_, _, _, tgt) -> unerase(gx, g, tgt)
+    TyOpaque(_, _, _, _, tgt) -> unerase(gx, g, tgt)
     TyInt -> {
       m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
       m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
@@ -289,7 +289,7 @@ fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
 ## accepts everything, which is the same answer as no check at all.
 fn unerase_class(adts: Adts, t: Ty) -> String =
   match t {
-    TyOpaque(_, _, _, tgt) -> unerase_class(adts, tgt)
+    TyOpaque(_, _, _, _, tgt) -> unerase_class(adts, tgt)
     TyInt -> "java/lang/Long"
     TyFloat -> "java/lang/Double"
     TyBool -> "java/lang/Boolean"
@@ -439,7 +439,8 @@ fn subst_tvar(t: Ty, vid: Int, to: Ty) -> Ty =
   match t {
     TyVar(_, v) -> if v == vid { to } else { t }
     TyAssoc(s, tid, n) -> TyAssoc(subst_tvar(s, vid, to), tid, n)
-    TyOpaque(id, n, ow, tgt) -> TyOpaque(id, n, ow, subst_tvar(tgt, vid, to))
+    TyOpaque(id, n, ow, args, tgt) -> TyOpaque(id, n, ow,
+      map(args, a => subst_tvar(a, vid, to)), subst_tvar(tgt, vid, to))
     TyList(e) -> TyList(subst_tvar(e, vid, to))
     TyMap(k, v2) -> TyMap(subst_tvar(k, vid, to), subst_tvar(v2, vid, to))
     TySet(e) -> TySet(subst_tvar(e, vid, to))

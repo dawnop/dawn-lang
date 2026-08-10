@@ -593,9 +593,10 @@ fn resolve_qual(
         None -> TyError
       }
       if target == TyError { return (cx, TyError) }
-      if len(al.tparams) == 0 { return (cx, wrap_opaque(al, target)) }
+      if len(al.tparams) == 0 { return (cx, wrap_opaque(al, [], target)) }
       var cx2 = cx
       var m2: Map[Int, Ty] = map.empty()
+      var args: List[Ty] = []
       var i = 0
       for v in al.tparams {
         match v {
@@ -603,13 +604,14 @@ fn resolve_qual(
             let (cx3, at) = resolve_type(cx2, targs[i])
             cx2 = cx3
             m2 = map.insert(m2, id, at)
+            args = args ++ [at]
           }
           _ -> ()
         }
         i = i + 1
       }
       let em: Map[Int, Eff] = map.empty()
-      return (cx2, wrap_opaque(al, subst(target, m2, em)))
+      return (cx2, wrap_opaque(al, args, subst(target, m2, em)))
     }
     None -> ()
   }
@@ -666,9 +668,10 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
       }
       let (cx1, target) = resolve_alias_target(cx, al, lo, hi)
       if target == TyError { return (cx1, TyError) }
-      if len(al.tparams) == 0 { return (cx1, wrap_opaque(al, target)) }
+      if len(al.tparams) == 0 { return (cx1, wrap_opaque(al, [], target)) }
       var cx2 = cx1
       var m: Map[Int, Ty] = map.empty()
+      var args: List[Ty] = []
       var i = 0
       for v in al.tparams {
         match v {
@@ -676,13 +679,14 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
             let (cx3, at) = resolve_type(cx2, targs[i])
             cx2 = cx3
             m = map.insert(m, id, at)
+            args = args ++ [at]
           }
           _ -> ()
         }
         i = i + 1
       }
       let em: Map[Int, Eff] = map.empty()
-      return (cx2, wrap_opaque(al, subst(target, m, em)))
+      return (cx2, wrap_opaque(al, args, subst(target, m, em)))
     }
     None -> ()
   }
@@ -756,9 +760,11 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
 # ---- opacity and const-serializability ----
 
 ## An `alias` resolves to its target; an `opaque type` resolves to itself,
-## carrying the target for the backends and `owner` for the check below.
-pub fn wrap_opaque(al: AliasE, target: Ty) -> Ty =
-  if al.is_opaque { TyOpaque(al.id, al.name, al.owner, target) } else { target }
+## carrying the target for the backends, `owner` for the check below, and the
+## arguments it was applied to — which the target cannot always give back,
+## since a target need not mention every parameter.
+pub fn wrap_opaque(al: AliasE, args: List[Ty], target: Ty) -> Ty =
+  if al.is_opaque { TyOpaque(al.id, al.name, al.owner, args, target) } else { target }
 
 ## Can the compiler rebuild this value at class-init time? Int/Float/Bool/
 ## String/Unit and List/tuple/record/ADT built from them, plus an opaque type
@@ -782,7 +788,7 @@ pub fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
     TyUnit -> true
     # Serializability is a question about the representation, so an opaque
     # type is exactly as serializable as its target.
-    TyOpaque(_, _, _, tgt) -> is_const_serializable(cx, tgt, visited)
+    TyOpaque(_, _, _, _, tgt) -> is_const_serializable(cx, tgt, visited)
     TyList(e) -> is_const_serializable(cx, e, visited)
     TyTuple(elems) -> {
       for e in elems {

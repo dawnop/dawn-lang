@@ -47,7 +47,7 @@ use jvm/rtclasses.{
 pub fn desc_of(adts: Adts, t: Ty) -> String =
   match t {
     # an opaque type has no representation of its own -- it IS its target
-    TyOpaque(_, _, _, tgt) -> desc_of(adts, tgt)
+    TyOpaque(_, _, _, _, tgt) -> desc_of(adts, tgt)
     TyInt -> "J"
     TyFloat -> "D"
     TyBool -> "Z"
@@ -106,7 +106,7 @@ pub type JvmRepr =
 ## a one-liner, rather than silently inherit a default in a dozen callers.
 pub fn jvm_repr(t: Ty) -> JvmRepr =
   match t {
-    TyOpaque(_, _, _, tgt) -> jvm_repr(tgt)
+    TyOpaque(_, _, _, _, tgt) -> jvm_repr(tgt)
     TyInt -> RLong
     TyFloat -> RDouble
     TyBool -> RBool
@@ -177,7 +177,7 @@ test "a Unit is an ordinary reference, and only the bottom types are void" {
   # every shape below was a ClassFormatError while `Unit` said `V`: `V` is a
   # return descriptor and the JVM rejects it in a parameter or a field
   assert desc_of(adts, TyUnit) == "Ldawn/rt/Unit;"
-  assert desc_of(adts, TyOpaque(0, "Handle", "m", TyUnit)) == "Ldawn/rt/Unit;"
+  assert desc_of(adts, TyOpaque(0, "Handle", "m", [], TyUnit)) == "Ldawn/rt/Unit;"
   assert method_desc(adts, [TyUnit, TyInt], TyBool) == "(Ldawn/rt/Unit;J)Z"
   assert slots_of(TyUnit) == 1
   assert is_ref(TyUnit)
@@ -282,7 +282,7 @@ pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
   match t {
     # opacity hides the representation from other modules, not from the
     # language: an opaque Int hashes, compares and renders as that Int
-    TyOpaque(_, _, _, tgt) -> hash_of(m, tgt)
+    TyOpaque(_, _, _, _, tgt) -> hash_of(m, tgt)
     TyInt -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
     TyFloat -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "hashCode", "(D)I", false)
@@ -681,7 +681,7 @@ pub fn subject_name(adts: Adts, t: Ty) -> String =
     TyArray(_) -> "Array"
     TyUnit -> "Unit"
     # an opaque type is its own subject -- its impl is not its target's
-    TyOpaque(_, name, _, _) -> name
+    TyOpaque(_, name, _, _, _) -> name
     _ -> panic("invalid impl subject")
   }
 
@@ -697,7 +697,7 @@ pub fn dict_class(owner: String, key: String) -> String =
 ## Recover the concrete type from an erased Object on the stack (unerase).
 pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
   match t {
-    TyOpaque(_, _, _, tgt) -> emit_unerase(m, adts, tgt)
+    TyOpaque(_, _, _, _, tgt) -> emit_unerase(m, adts, tgt)
     TyInt -> {
       m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
       m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)

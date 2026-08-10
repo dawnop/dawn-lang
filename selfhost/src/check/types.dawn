@@ -250,7 +250,14 @@ pub type Ty =
 # time an opaque type simply IS its target, and so is its equality, hash,
 # order and rendering. The only thing `id` buys is that outside the declaring
 # module the checker refuses to confuse the two.
-  | TyOpaque(id: Int, name: String, owner: String, target: Ty)
+#
+# `args` carries what the name was applied to, separately from the target it
+# was substituted into. The target is not enough to recover them: an argument
+# the target does not mention (`opaque type Phantom[T] = Unit`) leaves no
+# trace there, so a `Phantom[Int]` and a `Phantom[String]` that compared
+# targets would be one type. It also makes an opaque type answer
+# `type_args_of` and render as `N[A, B]` like every other constructor.
+  | TyOpaque(id: Int, name: String, owner: String, args: List[Ty], target: Ty)
 # a projection `T.Item` (docs/assoc-types-design.md): an associated type read
 # off the impl chosen for `subject`. Canonical-form invariant: a ground type
 # never contains one -- reduction is eager (D3), so a projection only survives
@@ -269,7 +276,7 @@ pub type Ty =
 ## declaring module, keeps the two apart.
 pub fn peel_opaque(t: Ty) -> Ty =
   match t {
-    TyOpaque(_, _, _, tgt) -> peel_opaque(tgt)
+    TyOpaque(_, _, _, _, tgt) -> peel_opaque(tgt)
     _ -> t
   }
 
@@ -290,7 +297,7 @@ pub fn peel_opaque(t: Ty) -> Ty =
 ## sixteen bytes. Literals are immortal statics, so they still cost nothing.
 pub fn is_ref_ty(t: Ty) -> Bool =
   match t {
-    TyOpaque(_, _, _, tgt) -> is_ref_ty(tgt)
+    TyOpaque(_, _, _, _, tgt) -> is_ref_ty(tgt)
     TyInt -> false
     TyFloat -> false
     TyBool -> false
@@ -343,7 +350,7 @@ pub fn is_errorish(t: Ty) -> Bool = t == TyError || t == TyNever
 pub const CHAR_OPAQUE_ID: Int = -2
 
 ## The type of a character literal: `Char`, an opaque `Int`.
-pub fn ty_char() -> Ty = TyOpaque(CHAR_OPAQUE_ID, "Char", "std/char", TyInt)
+pub fn ty_char() -> Ty = TyOpaque(CHAR_OPAQUE_ID, "Char", "std/char", [], TyInt)
 
 ## Who may write a compiler-owned type name today. This is surface policy,
 ## not a permanent property: SEM-14 may add return-position access for Never
@@ -516,7 +523,12 @@ fn ty_show_at(adts: Adts, t: Ty, group_fn: Bool) -> String =
     TyJava(_, display) -> display
     # the name, never the target: a diagnostic outside the declaring module
     # must not leak what the module is hiding
-    TyOpaque(_, name, _, _) -> name
+    TyOpaque(_, name, _, args, _) ->
+      if len(args) == 0 {
+        name
+      } else {
+        name ++ "[" ++ join(map(args, x => ty_show_at(adts, x, false)), ", ") ++ "]"
+      }
     TyTuple(elems) -> "(" ++ join(map(elems, x => ty_show_at(adts, x, false)), ", ") ++ ")"
     TyFn(params, ret, eff) -> {
       let shown = "fn(" ++ join(map(params, x => ty_show_at(adts, x, false)), ", ") ++
@@ -677,7 +689,7 @@ pub fn ty_map_children(t: Ty, f: fn(Ty) -> Ty) -> Ty =
     TySet(e) -> TySet(f(e))
     TyArray(e) -> TyArray(f(e))
     TyTuple(elems) -> TyTuple(map(elems, f))
-    TyOpaque(id, n, ow, tgt) -> TyOpaque(id, n, ow, f(tgt))
+    TyOpaque(id, n, ow, args, tgt) -> TyOpaque(id, n, ow, map(args, f), f(tgt))
     # a projection's subject is a type, so it is a child like any other; what
     # the projection itself becomes is the caller's rule, not this walk's
     TyAssoc(s, tid, n) -> TyAssoc(f(s), tid, n)
@@ -697,7 +709,7 @@ pub fn ty_any_child(t: Ty, f: fn(Ty) -> Bool) -> Bool =
     TySet(e) -> f(e)
     TyArray(e) -> f(e)
     TyTuple(elems) -> list.any(elems, f)
-    TyOpaque(_, _, _, tgt) -> f(tgt)
+    TyOpaque(_, _, _, args, tgt) -> list.any(args, f) || f(tgt)
     TyAssoc(s, _, _) -> f(s)
     TyFn(params, ret, _) -> list.any(params, f) || f(ret)
     TyVar(_, _) -> false
@@ -924,7 +936,7 @@ pub fn head_of(t: Ty) -> Option[Head] =
     TyArray(_) -> Some(HArray)
     TyJava(fqcn, _) -> Some(HJava(fqcn))
     # an opaque type may carry its own impl, distinct from its target's
-    TyOpaque(id, _, _, _) -> Some(HOpaque(id))
+    TyOpaque(id, _, _, _, _) -> Some(HOpaque(id))
     _ -> None
   }
 
@@ -939,6 +951,7 @@ pub fn type_args_of(t: Ty) -> List[Ty] =
     TySet(e) -> [e]
     TyArray(e) -> [e]
     TyMap(k, v) -> [k, v]
+    TyOpaque(_, _, _, args, _) -> args
     _ -> []
   }
 
@@ -2345,6 +2358,12 @@ test "type rendering" {
   assert sig_render(adts, traits, outer) == "fn outer() -> (fn() -> Int) !io"
   assert ty_show(adts, TyError) == "?"
   assert ty_show(adts, TyJava("java.sql.Connection", "Connection")) == "Connection"
+  let phantom_int = TyOpaque(40, "Phantom", "m", [TyInt], TyUnit)
+  let phantom_string = TyOpaque(40, "Phantom", "m", [TyString], TyUnit)
+  assert phantom_int != phantom_string
+  assert ty_show(adts, phantom_int) == "Phantom[Int]"
+  assert ty_show(adts, phantom_string) == "Phantom[String]"
+  assert type_args_of(phantom_int) == [TyInt]
 }
 
 test "substitution reaches every position" {
@@ -2370,7 +2389,7 @@ test "mentioning a type variable reaches every position substitution does" {
   assert ty_mentions_var(TyFn([TyInt], t, EPure), 5)
   assert ty_mentions_var(TyFn([t], TyInt, EPure), 5)
   assert ty_mentions_var(TyTuple([TyBool, t]), 5)
-  assert ty_mentions_var(TyOpaque(0, "N", "m", TyList(t)), 5)
+  assert ty_mentions_var(TyOpaque(0, "N", "m", [], TyList(t)), 5)
   assert ty_mentions_var(TyAssoc(t, ITER_ID, "Item"), 5)
   # the same shapes with the other variable: a walk that answered `true`
   # everywhere would pass the block above and fail here
@@ -2399,7 +2418,8 @@ test "the traversal kernels reach every child of every parameterised variant" {
   assert ty_map_children(TyArray(t), to_int) == TyArray(TyInt)
   assert ty_map_children(TyTuple([TyBool, t]), to_int) == TyTuple([TyBool, TyInt])
   assert ty_map_children(opt_ty(t), to_int) == opt_ty(TyInt)
-  assert ty_map_children(TyOpaque(0, "N", "m", t), to_int) == TyOpaque(0, "N", "m", TyInt)
+  assert ty_map_children(TyOpaque(0, "N", "m", [t], t), to_int) ==
+    TyOpaque(0, "N", "m", [TyInt], TyInt)
   assert ty_map_children(TyAssoc(t, ITER_ID, "Item"), to_int) ==
     TyAssoc(TyInt, ITER_ID, "Item")
   # both a function type's parameters and its result, and the effect rides
@@ -2422,7 +2442,7 @@ test "the traversal kernels reach every child of every parameterised variant" {
   assert ty_any_child(TyArray(t), is_t)
   assert ty_any_child(TyTuple([TyBool, t]), is_t)
   assert ty_any_child(opt_ty(t), is_t)
-  assert ty_any_child(TyOpaque(0, "N", "m", t), is_t)
+  assert ty_any_child(TyOpaque(0, "N", "m", [], t), is_t)
   assert ty_any_child(TyAssoc(t, ITER_ID, "Item"), is_t)
   assert ty_any_child(TyFn([t], TyBool, EIo), is_t)
   assert ty_any_child(TyFn([TyBool], t, EIo), is_t)
