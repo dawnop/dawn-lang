@@ -11,6 +11,7 @@ use java "com.sun.net.httpserver.HttpExchange"
 use java "com.sun.net.httpserver.Headers"
 use java "java.net.InetSocketAddress"
 use java "java.util.concurrent.Executors"
+use java "java.util.concurrent.ExecutorService"
 use java "java.util.concurrent.CountDownLatch"
 use java "java.io.OutputStreamWriter"
 use java "java.lang.String"
@@ -539,11 +540,17 @@ pub const DEFAULT_MAX_BODY: Int = 8388608
 pub type ServerConfig = { host: String, port: Int, max_body: Int, errors: ErrorFormat }
 
 ## A running server. `port` is the real bound port — the point of port 0.
-## `done` is what lets join/stop compose over jdk.httpserver, which has a stop
-## but no join: join awaits the latch, stop opens it after stopping the JDK
-## server. (The design sketched the handle as server + port only; without the
-## latch there is nothing for join to block on.)
-pub type ServerHandle = { server: HttpServer, port: Int, done: CountDownLatch }
+## `executor` is the request pool `start` created, owned by the handle so that
+## `stop` can shut it down: jdk.httpserver's own `stop` does not touch an
+## executor it was handed. `done` is what lets join/stop compose over
+## jdk.httpserver, which has a stop but no join: join awaits the latch, stop
+## opens it after stopping the JDK server.
+##
+## (The design sketched the handle as server + port only. Without the latch
+## there is nothing for join to block on; without the executor there is nothing
+## to shut down, and a start/stop cycle left one behind every time — a test
+## suite or a reloading server accumulates them for the life of the process.)
+pub type ServerHandle = { server: HttpServer, port: Int, executor: ExecutorService, done: CountDownLatch }
 
 # Bind cfg.host:cfg.port, serve requests on virtual threads, and return
 # immediately with the handle. The caller decides what the rest of the
@@ -563,25 +570,46 @@ pub fn start(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware
   let addr = InetSocketAddress.new(cfg.host, cfg.port)
   let server = HttpServer.create(addr, 0)!
   server.createContext("/", ex => handle(routes, middleware, cfg.max_body, cfg.errors, ex))
-  server.setExecutor(Executors.newVirtualThreadPerTaskExecutor()!)
+  # the pool goes into the handle, not just into the server: `stop` is the only
+  # place that can shut it down, and it needs a reference to do so
+  let pool = Executors.newVirtualThreadPerTaskExecutor()!
+  server.setExecutor(pool)
   server.start()
   # No println here: start is a library call and the handle reports the port.
   # (A port-0 test transcript with a random port in it broke run-diff, which
   # rightly treats test stdout as a deterministic artifact.) The classic
   # entry points below keep the message.
-  ServerHandle { server: server, port: server.getAddress()!.getPort(), done: CountDownLatch.new(1) }
+  ServerHandle {
+    server: server,
+    port: server.getAddress()!.getPort(),
+    executor: pool,
+    done: CountDownLatch.new(1),
+  }
 }
 
 ## Block until stop() releases this handle. A server's main() usually ends
 ## here — returning would let the JVM exit out from under the request threads.
 pub fn join(h: ServerHandle) -> Unit !io = h.done.await()
 
-## Stop the server: the listening socket closes at once, in-flight exchanges
-## get up to grace_secs to finish (the JDK's stop blocks for that), and then
-## every join() blocked on this handle returns.
-pub fn stop(h: ServerHandle, grace_secs: Int) -> Unit !io = {
-  h.server.stop(grace_secs)
+# What stop releases, on every way out of it. Bracketed rather than written
+# after `server.stop`, because `server.stop` can throw: a stop that failed
+# halfway used to leave the executor running *and* every join() blocked
+# forever, so the one call whose job is to end things was the one that could
+# not be relied on to end them. The executor goes first (it is the resource
+# the handle owns); the latch last, since releasing it is what lets another
+# thread observe the shutdown as finished.
+fn release_handle(h: ServerHandle) -> Unit !io = {
+  let _ = catch_fault(() => h.executor.shutdown())
   h.done.countDown()
+}
+
+## Stop the server: the listening socket closes at once, in-flight exchanges
+## get up to grace_secs to finish (the JDK's stop blocks for that), the request
+## executor is shut down, and then every join() blocked on this handle returns.
+## Every one of those happens even if the JDK's own stop throws.
+pub fn stop(h: ServerHandle, grace_secs: Int) -> Unit !io = {
+  with held <- bracket(h, release_handle)
+  held.server.stop(grace_secs)
 }
 
 ## The old shape, kept: start + join on 127.0.0.1, default body ceiling,
@@ -946,6 +974,34 @@ test "lifecycle: port 0 binds a real port, serves, and join returns after stop" 
     }
     Err(_) -> ()
   }
+}
+
+test "stop shuts the request executor down, and does so even if the JDK's stop throws" {
+  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY, errors: default_errors() }
+  let h = start(cfg, [route_get("/hello", hello_handler)], [])
+  # the pool is live while the server is: it answers a request on it
+  assert h.executor.isShutdown() == false
+  let (st, _b) = test_fetch_bytes("http://127.0.0.1:${h.port}/hello")
+  assert st == 200
+  stop(h, 0)
+  # ...and the handle owns it, so stopping the server shut it down. Before it
+  # was in the handle nothing ever did, and each start/stop cycle left one.
+  assert h.executor.isShutdown() == true
+
+  # the release is bracketed, so a failing server.stop still shuts the pool
+  # down and still opens the latch. `stop(grace)` with a negative grace is the
+  # JDK's own documented IllegalArgumentException, so no fake is needed.
+  let h2 = start(cfg, [route_get("/hello", hello_handler)], [])
+  match catch_fault(() => stop(h2, -1)) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  assert h2.executor.isShutdown() == true
+  # the latch opened too: join returns rather than blocking forever
+  join(h2)
+  # nothing is listening on h2's port any more either -- shutting the executor
+  # down leaves the JDK server unstopped, so clean up before the test ends
+  h2.server.stop(0)
 }
 
 test "start refuses a broken route table before binding a socket" {
