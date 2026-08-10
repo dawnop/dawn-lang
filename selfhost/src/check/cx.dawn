@@ -15,6 +15,7 @@ use front/token.{Diag}
 use front/ast.{TypeRef, TNamed, TQual, TAssoc, TTuple, TFn}
 use check/types.{
   Adts, AdtI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
+  Audience, AWorld,
   TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   EPure, EIo, EffVar, ELabeled, eff_union, eff_base, eff_labels,
@@ -42,9 +43,35 @@ pub type AliasE = {
   is_opaque: Bool,
   id: Int,
   owner: String,
+  # who may name this alias (SEM-07). An opaque type is a nominal identity and
+  # this is what SEM-07 checks at every reference; a transparent alias is a
+  # spelling, and its audience only decides whether the alias is a surface
+  # root — a private one that expands to public types is not a leak (design
+  # §5.2), so this field never rejects a *use* of a transparent alias.
+  audience: Audience,
   nlo: Int,
   nhi: Int
 }
+
+## Where one node of a resolved type came from. `resolve_type` builds this
+## alongside the `Ty` it returns, so the two trees are isomorphic by
+## construction rather than by a later attempt to walk the AST and the type in
+## lockstep — which cannot work, because a transparent alias expands into a
+## `Ty` subtree that has no `TypeRef` under it.
+##
+## `kids` is empty exactly where the type has no further *written* structure:
+## a leaf, or an expanded alias. A consumer that runs out of kids is standing
+## on the innermost token the author actually wrote, which is the span SEM-07
+## wants (design §八).
+pub type TySpan = { lo: Int, hi: Int, kids: List[TySpan] }
+
+## The span node for a type's `i`th child, or this node itself where the child
+## has no written form of its own.
+pub fn ty_span_kid(sp: TySpan, i: Int) -> TySpan =
+  match get(sp.kids, i) {
+    Some(k) -> k
+    None -> TySpan { lo: sp.lo, hi: sp.hi, kids: [] }
+  }
 
 ## The part of the checker state that an isolated body -- a comptime block or a
 ## const initializer, which are `enter_isolated`'s only two callers -- saves on
@@ -162,7 +189,17 @@ pub type Cx = {
   # whole-module imports: alias → the exporter's surface (for call diagnostics)
   module_exports: Map[String, ModExports],
   # loop-stack indices that saw a break/continue (drives TSWhile/TSFor has_jumps)
-  loop_jumps: Set[Int]
+  loop_jumps: Set[Int],
+  # the source span of every `TypeRef` this module has resolved, keyed by that
+  # ref's own `(lo, hi)` — which is a unique identity, since two type
+  # references cannot occupy the same offsets. SEM-07 reads it to put a
+  # diagnostic on the innermost token the author wrote (design §八).
+  ty_spans: Map[(Int, Int), TySpan],
+  # is `resolve_type` filling `ty_spans`? True for the header passes, whose
+  # results the public surface validator reads, and false afterwards: a body's
+  # type annotations have no public surface, so recording them would be a map
+  # insert per annotation that nothing ever looks up.
+  record_ty_spans: Bool
 }
 
 ## One lambda's frame. `sugar` says the parser synthesized this lambda from a
@@ -259,7 +296,9 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     line_starts: [],
     moved: map.empty(),
     module_exports: map.empty(),
-    loop_jumps: set.empty()
+    loop_jumps: set.empty(),
+    ty_spans: map.empty(),
+    record_ty_spans: false
   }
 }
 
@@ -416,6 +455,46 @@ fn is_upper_name(s: String) -> Bool = {
 
 # ---- type resolution ----
 
+## The `(lo, hi)` of a written type reference — its identity in `Cx.ty_spans`.
+pub fn tref_span(ref: TypeRef) -> (Int, Int) =
+  match ref {
+    TNamed(_, _, lo, hi) -> (lo, hi)
+    TQual(_, _, _, lo, hi) -> (lo, hi)
+    TAssoc(_, _, lo, hi) -> (lo, hi)
+    TTuple(_, lo, hi) -> (lo, hi)
+    TFn(_, _, _, lo, hi) -> (lo, hi)
+  }
+
+## The span tree recorded for a written type reference. A ref that was never
+## resolved (or resolved while recording was off) answers with its own span
+## and no children, which is the same degradation an expanded alias gets: the
+## enclosing written token.
+pub fn ty_span_of(cx: Cx, ref: TypeRef) -> TySpan = {
+  let (lo, hi) = tref_span(ref)
+  match map.get(cx.ty_spans, (lo, hi)) {
+    Some(sp) -> sp
+    None -> TySpan { lo: lo, hi: hi, kids: [] }
+  }
+}
+
+## Record that the type reference spanning `lo..hi` resolved to something whose
+## written children are `kids`, in the resolved type's own child order.
+##
+## `kids` is empty wherever the resolved type has no written structure under
+## it: a leaf, a Java class, a projection, and — the case this table exists for
+## — a transparent alias, whose target is a type the author did not write here.
+fn record_span_at(cx: Cx, lo: Int, hi: Int, kids: List[TypeRef]) -> Cx =
+  if not cx.record_ty_spans {
+    cx
+  } else {
+    var ks: List[TySpan] = []
+    for k in kids { ks = ks ++ [ty_span_of(cx, k)] }
+    Cx {
+      ..cx,
+      ty_spans: map.insert(cx.ty_spans, (lo, hi), TySpan { lo: lo, hi: hi, kids: ks })
+    }
+  }
+
 ## Resolve an alias target once, memoized; TyError (and an error) on a cycle.
 pub fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty) !io = {
   match map.get(cx.alias_resolved, al.name) {
@@ -500,7 +579,7 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
         out = out ++ [t]
         i = i + 1
       }
-      (cx1, TyTuple(out))
+      (record_span_at(cx1, lo, hi, elems), TyTuple(out))
     }
     TFn(params, ret, effs, lo, hi) -> {
       let (cx1, eff) = resolve_eff_at(cx, effs, lo, hi)
@@ -515,12 +594,21 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
         ps = ps ++ [t]
       }
       let (cx4, rt) = resolve_type(cx2, ret)
-      (cx4, TyFn(ps, rt, eff2))
+      # a function type's written children are its parameters then its return
+      # type, which is exactly TyFn's child order
+      (record_span_at(cx4, lo, hi, params ++ [ret]), TyFn(ps, rt, eff2))
     }
     TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi)
     TQual(q, name, targs, lo, hi) -> resolve_qual(cx, q, name, targs, lo, hi)
-    TAssoc(subj, name, lo, hi) -> resolve_assoc(cx, subj, name, lo, hi)
+    TAssoc(subj, name, lo, hi) -> {
+      # `T.Item` has no written sub-reference: the subject is a bare name
+      let (cx1, t) = resolve_assoc(cx, subj, name, lo, hi)
+      (record_span_at(cx1, lo, hi, no_trefs()), t)
+    }
   }
+
+## `[]` at `List[TypeRef]`, for the record sites that have no written children.
+fn no_trefs() -> List[TypeRef] = []
 
 ## `T.Item` -- the subject must be a type parameter in scope, and exactly one
 ## of its bounds must declare `name` (assoc-types-design.md D2). Zero declarers
@@ -593,7 +681,9 @@ fn resolve_qual(
         None -> TyError
       }
       if target == TyError { return (cx, TyError) }
-      if len(al.tparams) == 0 { return (cx, wrap_opaque(al, [], target)) }
+      if len(al.tparams) == 0 {
+        return (record_span_at(cx, lo, hi, no_trefs()), wrap_opaque(al, [], target))
+      }
       var cx2 = cx
       var m2: Map[Int, Ty] = map.empty()
       var args: List[Ty] = []
@@ -611,7 +701,8 @@ fn resolve_qual(
         i = i + 1
       }
       let em: Map[Int, Eff] = map.empty()
-      return (cx2, wrap_opaque(al, args, subst(target, m2, em)))
+      let kids = if al.is_opaque { targs } else { no_trefs() }
+      return (record_span_at(cx2, lo, hi, kids), wrap_opaque(al, args, subst(target, m2, em)))
     }
     None -> ()
   }
@@ -629,7 +720,7 @@ fn resolve_qual(
         cx1 = cx2
         args = args ++ [t]
       }
-      (cx1, TyAdt(aid, args))
+      (record_span_at(cx1, lo, hi, targs), TyAdt(aid, args))
     }
     None -> {
       let pool = map.keys(exp.types_by_name) ++ map.keys(exp.aliases)
@@ -656,7 +747,7 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
         return (cerr(cx, "type parameter `" ++ name ++ "` cannot take type arguments", lo, hi),
           TyError)
       }
-      return (cx, v)
+      return (record_span_at(cx, lo, hi, no_trefs()), v)
     }
     None -> ()
   }
@@ -668,7 +759,9 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
       }
       let (cx1, target) = resolve_alias_target(cx, al, lo, hi)
       if target == TyError { return (cx1, TyError) }
-      if len(al.tparams) == 0 { return (cx1, wrap_opaque(al, [], target)) }
+      if len(al.tparams) == 0 {
+        return (record_span_at(cx1, lo, hi, no_trefs()), wrap_opaque(al, [], target))
+      }
       var cx2 = cx1
       var m: Map[Int, Ty] = map.empty()
       var args: List[Ty] = []
@@ -686,7 +779,10 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
         i = i + 1
       }
       let em: Map[Int, Eff] = map.empty()
-      return (cx2, wrap_opaque(al, args, subst(target, m, em)))
+      # an opaque type keeps the arguments as its children; a transparent one
+      # expands into a target the author did not write here, so it has none
+      let kids = if al.is_opaque { targs } else { no_trefs() }
+      return (record_span_at(cx2, lo, hi, kids), wrap_opaque(al, args, subst(target, m, em)))
     }
     None -> ()
   }
@@ -709,7 +805,7 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
         cx1 = cx2
         args = args ++ [ty]
       }
-      return (cx1, builtin_type_apply(info, args))
+      return (record_span_at(cx1, lo, hi, targs), builtin_type_apply(info, args))
     }
     None -> ()
   }
@@ -724,7 +820,7 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
       # recursive subsystem. Resolving a type reads the host's class path, so
       # the pass chain above says !io too; check_module already did.
       let j = cx.jsig.class_info(fqcn)
-      return (cx, TyJava(fqcn, j.display))
+      return (record_span_at(cx, lo, hi, no_trefs()), TyJava(fqcn, j.display))
     }
     None -> ()
   }
@@ -752,7 +848,7 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
         cx1 = cx2
         args = args ++ [t]
       }
-      (cx1, TyAdt(aid, args))
+      (record_span_at(cx1, lo, hi, targs), TyAdt(aid, args))
     }
   }
 }

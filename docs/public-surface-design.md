@@ -1,8 +1,9 @@
 # SEM-07：public API surface validator
 
-> 状态：**current / accepted design，implementation pending** —— 本文固定 SEM-07 的
+> 状态：**current / accepted design，阶段一与阶段二已落地** —— 本文固定 SEM-07 的
 > audience、验证顺序、类型遍历、导出 metadata、工具消费与三阶段落地边界；实现不得用
 > 会穿透 opaque representation 且遗漏函数 effect row 的通用类型 walker 代替专用验证器。
+> 落地后的实现现状、两处刻意保留的临时件与两条今天没有见证者的分支，见 §十五。
 
 ## 一、问题与目标
 
@@ -359,3 +360,58 @@ clean checkout、Core、N/N-1 与 Emit 四类证据缺一不可。单跑 `./bin/
 - 不在本刀扩 doc JSON schema：只过滤不可见 impl，缩小兼容面。
 - 不让 doc 或 LSP 重新决定 visibility：它们只能消费 checker 的 validated result。
 - 不预写 `Emit-Change`：先跑门禁看到真实差异，再按唯一 label 声明。
+
+## 十五、实现现状（阶段二落地后记录）
+
+本节只记录实现事实，不改变以上任何裁决。
+
+### 15.1 已落地
+
+阶段一（`TyOpaque` 带 `args`）与阶段二（visibility pass）都在 selfhost 里：
+`check/types.dawn` 的 `Audience = AWorld | AStdOnly | AModule(owner)` 与 `audience_covers`
+是唯一的可见性词汇；`AdtI`、`EffectI` 与 `AliasE` 各存一个 `audience` 字段，由**声明模块**
+决定后随 `ModExports` 整体嫁接过去，所以导入方不必重新解释别人的 `pub`；`TraitI` 是四种身份
+记录里唯一本来就同时带 `is_pub` 与 `owner` 的，因此它的 audience 由 `trait_audience` 推导，
+存一份副本只会有机会和导出器读的 `is_pub` 说法不一。校验器是 `check/passes.dawn` 的
+`pass_export_surface`，调用点在 `check_module` 的 `pass_main_check` 之后、任何 body 之前。
+
+`Array` 的 `StdOnly` 不是一句约定：`std/pvec` 的 `pub fn to_array` 合法，而同样在 std 里、
+同样能拼写 `Array` 的 `std/bytes` 若加一个 `pub fn f(a: Array[Int])` 会被拒——两条都在
+`scripts/export-surface-contract/run.sh` 里，前者靠捆绑 std 能加载证明，后者靠一份加了料的
+std 副本证明。二值公私模型两条都表达不了。
+
+### 15.2 span：`resolve_type` 侧记的边表
+
+§八 要求诊断落在最内层违规 token，而校验器读的是已解析的 `Ty`，不带 span。实现的做法是
+让 `resolve_type` 在 header 阶段顺手记一棵与 `Ty` 同构的 `TySpan { lo, hi, kids }`，按每个
+`TypeRef` 自己的 `(lo, hi)` 存进 `Cx.ty_spans`——那是一个天然唯一的键，两个类型引用不可能
+占同一段偏移。走查时 `Ty` 与 `TySpan` 并行下降，`kids` 用完就停在作者真正写下的那个 token 上。
+
+这条路是相对「事后拿 AST 与 `Ty` 对着走」选的：透明别名展开后两棵树不再同构，`List[Secret]`
+底下没有任何 `TypeRef`，事后对齐必然失真。侧记则天然正确：别名节点的 `kids` 是空的，于是
+诊断落在别名名字上，展开路径由消息给出——正是 §八 要的那两件。
+
+### 15.3 两件临时的、点名在案的
+
+- **`EffectRef` 尚未引入。** AST 仍把声明的 effect 存成裸字符串，所以一条 effect label 的
+  泄漏诊断落在 **root 的名字 token** 上，而不是那条 label 上。§八 允许这个 fallback，
+  §九 阶段二把 `EffectRef { name, lo, hi }` 列为要做的事——它没做，这里点名它是临时件，
+  不是成品。`surface_sig_leaks` 里的注释同样点名。
+- **mutant #15（`doc_json_omits_private_impl`）属于阶段三。** 它拥有的规则是 doc 过滤器，
+  过滤器还不存在，所以这个 mutant 没有东西可以拿掉；它与过滤器同批落地。
+
+### 15.4 两条今天没有见证者的分支
+
+§5.2 要求 `TyAssoc` 的 subject 与 trait 各有 owning mutant，§5.1 要求递归函数类型的完整
+effect row。实现里两条分支都在，但今天的语言写不出它们的反例：
+
+- **projection 的 subject 永远是刚性类型变量。** 归约是急切的（assoc-types-design D3），
+  ground 类型里不会留下 `TyAssoc`，而 `TAssoc` 的 subject 在语法上只能是一个裸名字，
+  必须解析成作用域里的类型参数。所以 subject 不可能是私有身份。
+- **写下的函数类型不能命名声明的 effect。** `refuse_written_label`
+  （effects-soundness-design §4.1）在解析函数类型时就拒绝，并把行降成 base，
+  所以 header 里的 `TyFn` 的 label 集恒为空。
+
+两条分支保留，因为规则说的是类型，不是今天的 parser 允许作者写什么：其中任一条一旦放宽，
+遍历已经是对的。它们没有 compiling mutant，因为 mutant 必须先编译并运行**再**打红一条断言，
+而这两条今天打不红任何东西——记在这里，好过用一个永远绿的断言冒充负控。

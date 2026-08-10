@@ -68,7 +68,7 @@
 | [lsp-framing-design.md](lsp-framing-design.md) | current | TOOL-07 的定稿：共享层在 stdin read 前限制 8 KiB header/64 MiB body，严格解析重复 `Content-Length`，并把不可重同步的 framing failure 固定为一次错误后关读循环。 |
 | [source-plan-design.md](source-plan-design.md) | current | TOOL-10 的定稿及 2026-08-09 架构修订：独立无 Java 的 `compiler-plan/` 先形成唯一最终图，再从选中 `PkgR` 收 Java 坐标。 |
 | [lsp-workspace-design.md](lsp-workspace-design.md) | current | TOOL-05/06 的已实现设计：canonical `(project, source_root)` workspace、captured `ProjectPlan`、共享 `Program`/诊断与 target-scoped `JsigLease`。 |
-| [public-surface-design.md](public-surface-design.md) | current | SEM-07 的定稿设计：World/StdOnly/Module audience、opaque nominal args、exporter-side surface validator、精确诊断与 doc/LSP 消费边界；实现待分三阶段落地。 |
+| [public-surface-design.md](public-surface-design.md) | current | SEM-07 的定稿设计：World/StdOnly/Module audience、opaque nominal args、exporter-side surface validator、精确诊断与 doc/LSP 消费边界。阶段一、二已落地（§十五 记实现现状、`EffectRef` 临时 fallback 与两条无见证者的分支），doc/LSP 过滤是阶段三。 |
 | [atomic-write-design.md](atomic-write-design.md) | current | TOOL-13 的定稿：manifest/lock 的 same-directory 原子写。宿主能力两件新增（`io_temp_file` 独占创建、`io_copy_permissions` 不跟随链接的权限搬运），算法在 `std/io.atomic_write_file`（stage → read-back → 权限 → 单次 rename，失败一律清理且原文件不动）。symlink fail-closed、hardlink detach，不承诺持久性、不做 CAS。**调用点迁移被种子纪律推到下一轮**，理由在其末节。 |
 | [delete-outcome-design.md](delete-outcome-design.md) | current | LIB-07 的定稿：`io.delete` 以 `Deleted` / `NotFound` / `Err` 区分成功、缺失与 host refusal，底层仍保留 Bool intrinsic ABI。 |
 | [cli-arity-design.md](cli-arity-design.md) | current | TOOL-04 的定稿契约：`check`/`fmt` 为 1..N，`test`/`doc` 的 selector 互斥，`build`/`emitc` 恰一个 target；两端保留独立 argv parser，由绝对 exit/stdout/stderr oracle 防止共谋假绿。 |

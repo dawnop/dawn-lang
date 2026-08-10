@@ -18,12 +18,16 @@ use front/ast.{
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_uses, DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod,
   Param, Expr, Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects,
+  DEffect, EffectDeclR, EffectOp, AssocBind,
   e_lo, e_hi
 }
 
 use check/types.{
-  Ty, TyInt, TyFloat, TyBool, TyBytes, TyUnit, TyError, TyVar, TyAssoc, TyAdt, TyList,
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, TyError, TyVar,
+  TyAssoc, TyAdt, TyList, TyJava,
   TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, ELabeled,
+  Audience, AWorld, AStdOnly, AModule, audience_covers, decl_audience, declared_audience,
+  trait_audience, builtin_type_audience, internal_std_modules,
   eff_subsumes, eff_suffix, eff_labels, EffectI, ev_record_name, AdtI, CtorI, FieldI,
   TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, ty_show, fn_return_show, sig_render, subst,
   reduce_via_bindings, ty_named, builtin_type_at, builtin_type_visible, peel_opaque,
@@ -36,7 +40,8 @@ use check/types.{
 use check/cx.{
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
   cerr_h, cerr_o, fresh, alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
-  resolve_alias_target, resolve_type, is_const_serializable, no_sig
+  resolve_alias_target, resolve_type, is_const_serializable, no_sig,
+  TySpan, ty_span_kid, ty_span_of
 }
 
 use front/suggest
@@ -576,6 +581,7 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
               Some(c) -> c
               None -> ""
             },
+            audience: decl_audience(cx1.owner_class, d.is_pub),
             nlo: d.nlo,
             nhi: d.nhi
           })
@@ -654,7 +660,8 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
       ctors: ctor_infos,
       derives_show: derives_show,
       derives_ord: derives_ord,
-      owner: cx1.owner_class
+      owner: cx1.owner_class,
+      audience: decl_audience(cx1.owner_class, d.is_pub)
     }
     cx1 = Cx {
       ..cx1,
@@ -1045,6 +1052,10 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       cx1 = bind_fn(cx1, op.name, sig, OLocal("operation"), op.nlo, op.nhi)
     }
     let rec_name = ev_record_name(d.name)
+    # the evidence record is unspellable (`ev$E`), so it can never appear in a
+    # written header -- but it shares the effect's audience so that nothing
+    # downstream has to special-case a record with no answer
+    let ev_audience = decl_audience(cx1.owner_class, d.is_pub)
     let info = AdtI {
       id: eid,
       name: rec_name,
@@ -1053,7 +1064,8 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       ctors: [CtorI { adt: eid, name: rec_name, fields: fields }],
       derives_show: false,
       derives_ord: false,
-      owner: cx1.owner_class
+      owner: cx1.owner_class,
+      audience: ev_audience
     }
     cx1 = Cx {
       ..cx1,
@@ -1063,6 +1075,7 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
         id: eid,
         name: d.name,
         owner: cx1.owner_class,
+        audience: ev_audience,
         ops: op_names
       })
     }
@@ -2246,6 +2259,581 @@ test "main shape violations are reported" {
   assert cx2.diags[1].msg == "main must be pub"
 }
 
+# ---- SEM-07: the public surface validator (docs/public-surface-design.md) ----
+#
+# What this validates is that every identity a public declaration *names* can
+# be named by the audience that declaration is published to. Not that the
+# module has no private types, and not that the body avoids them: `pub` used
+# to answer only "is this exported", leaving a module free to export an
+# interface its callers cannot write down.
+#
+# The walker below is deliberately its own rather than `ty_map_children` or
+# `ty_any_child`. Those peel an opaque type's target, which is the one descent
+# this walk must never make, and one of them does not visit a function type's
+# effect row at all (design §五). A flag on a shared walker would put two
+# opposite contracts in one traversal.
+
+## One leaked identity, with the innermost written token to blame for it.
+type SurfaceLeak = {
+  # "type" / "trait" / "effect" -- the noun the message uses
+  kind: String,
+  name: String,
+  # who may actually name it. Decides both the adjective ("private" vs
+  # "standard-library-internal") and the fix, because "make `Array` public" is
+  # advice nobody can follow.
+  audience: Audience,
+  # the shortest route from the root that reached it
+  path: String,
+  lo: Int,
+  hi: Int
+}
+
+fn no_leaks() -> List[SurfaceLeak] = []
+
+fn no_tparam_decls() -> List[TypeParamDecl] = []
+
+fn plain_span(lo: Int, hi: Int) -> TySpan = TySpan { lo: lo, hi: hi, kids: [] }
+
+fn leak_word(a: Audience) -> String =
+  match a {
+    AStdOnly -> "standard-library-internal"
+    _ -> "private"
+  }
+
+fn leak_fix(a: Audience, name: String) -> String =
+  match a {
+    AStdOnly -> "only the standard library may name `" ++ name ++
+      "`; remove it from this public surface"
+    _ -> "make `" ++ name ++ "` public or remove it from this public surface"
+  }
+
+fn leak_at(kind: String, name: String, a: Audience, path: String, sp: TySpan) -> SurfaceLeak =
+  SurfaceLeak {
+    kind: kind,
+    name: name,
+    audience: a,
+    path: path ++ " -> " ++ leak_word(a) ++ " " ++ kind ++ " `" ++ name ++ "`",
+    lo: sp.lo,
+    hi: sp.hi
+  }
+
+# ---- the audience of one identity ----
+
+## The audience a module publishes its `pub` declarations to: the world, or --
+## for the two bundled modules that exist to hold a representation -- the
+## standard library only.
+fn module_root_audience(cx: Cx) -> Audience =
+  match cx.owner_class {
+    None -> AWorld
+    Some(ow) -> declared_audience(ow)
+  }
+
+## A local opaque type answers from its own alias entry. An imported one is in
+## this module's scope only because it was exported, so its declaration was
+## `pub` and its owner decides the rest.
+fn opaque_audience(cx: Cx, id: Int, name: String, owner: String) -> Audience = {
+  match map.get(cx.aliases, name) {
+    Some(al) -> if al.is_opaque && al.id == id { return al.audience } else { () }
+    None -> ()
+  }
+  declared_audience(owner)
+}
+
+fn effect_audience(cx: Cx, eid: Int) -> Audience =
+  match map.get(cx.effect_infos, eid) {
+    Some(e) -> e.audience
+    None -> AWorld
+  }
+
+# ---- poison ----
+
+## Does this type carry a resolution failure? Then something already reported
+## it, and SEM-07 stays quiet about *that root* -- not about the module
+## (design §八: a whole-module `diags` switch would hide independent leaks).
+##
+## Shaped like the walker below, opaque target included: a representation that
+## failed to resolve is not a public-surface problem.
+fn ty_poisoned(t: Ty) -> Bool =
+  match t {
+    TyError -> true
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyUnit | TyNever -> false
+    TyVar(_, _) -> false
+    TyJava(_, _) -> false
+    TyAdt(_, args) -> list.any(args, a => ty_poisoned(a))
+    TyList(e) -> ty_poisoned(e)
+    TyMap(k, v) -> ty_poisoned(k) || ty_poisoned(v)
+    TySet(e) -> ty_poisoned(e)
+    TyArray(e) -> ty_poisoned(e)
+    TyOpaque(_, _, _, args, _) -> list.any(args, a => ty_poisoned(a))
+    TyAssoc(s, _, _) -> ty_poisoned(s)
+    TyTuple(es) -> list.any(es, e => ty_poisoned(e))
+    TyFn(ps, r, _) -> list.any(ps, p => ty_poisoned(p)) || ty_poisoned(r)
+  }
+
+fn sig_poisoned(sig: Sig) -> Bool =
+  list.any(sig.param_tys, p => ty_poisoned(p)) || ty_poisoned(sig.ret)
+
+# ---- the walker ----
+
+## Every leak `t` carries, in walk order. `sp` is the span tree `resolve_type`
+## built beside `t`, so each recursion lands on the token the author wrote for
+## that node -- and, where there is none (an expanded alias), on the innermost
+## enclosing token that they did write.
+fn surface_ty_leaks(cx: Cx, root: Audience, t: Ty, sp: TySpan, path: String) -> List[SurfaceLeak] =
+  match t {
+    # scalars, `Never`, type variables and Java identities are nameable
+    # wherever the root is (design §5.1)
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyUnit | TyNever -> no_leaks()
+    TyVar(_, _) -> no_leaks()
+    TyJava(_, _) -> no_leaks()
+    TyError -> no_leaks()
+    TyAdt(id, args) -> {
+      let info = adt_of(cx.adts, id)
+      var out = no_leaks()
+      if not audience_covers(info.audience, root) {
+        out = [leak_at("type", info.name, info.audience, path, sp)]
+      }
+      # the nominal identity and each written argument, and never the fields:
+      # a field is checked where its own ADT is the root (design §5.2), so a
+      # recursive type does not walk forever and a public name stays one
+      # question rather than a re-validation of its whole definition
+      var i = 0
+      for a in args {
+        out = out ++ surface_ty_leaks(cx, root, a, ty_span_kid(sp, i),
+          path ++ " type argument #" ++ to_string(i + 1))
+        i = i + 1
+      }
+      out
+    }
+    TyList(e) -> surface_ty_leaks(cx, root, e, ty_span_kid(sp, 0), path ++ " list element")
+    TyMap(k, v) ->
+      surface_ty_leaks(cx, root, k, ty_span_kid(sp, 0), path ++ " map key") ++
+      surface_ty_leaks(cx, root, v, ty_span_kid(sp, 1), path ++ " map value")
+    TySet(e) -> surface_ty_leaks(cx, root, e, ty_span_kid(sp, 0), path ++ " set element")
+    TyArray(e) -> {
+      # `Array` is a compiler-owned name with an audience of its own: the
+      # bundled standard library may write it, a `pub` root of a world-facing
+      # module may not -- including one inside std, which can spell it
+      let a = builtin_type_audience("Array")
+      var out = no_leaks()
+      if not audience_covers(a, root) { out = [leak_at("type", "Array", a, path, sp)] }
+      out ++ surface_ty_leaks(cx, root, e, ty_span_kid(sp, 0), path ++ " array element")
+    }
+    TyOpaque(id, name, owner, args, _) -> {
+      let a = opaque_audience(cx, id, name, owner)
+      var out = no_leaks()
+      if not audience_covers(a, root) { out = [leak_at("type", name, a, path, sp)] }
+      # the explicit arguments, and never the representation (design §5.3).
+      # That holds inside the declaring module too: the module can see through
+      # its own opaque type, but the audience it publishes to cannot.
+      var i = 0
+      for arg in args {
+        out = out ++ surface_ty_leaks(cx, root, arg, ty_span_kid(sp, i),
+          path ++ " opaque `" ++ name ++ "` type argument #" ++ to_string(i + 1))
+        i = i + 1
+      }
+      out
+    }
+    TyAssoc(subject, tid, name) -> {
+      let tr = trait_of(cx.traits, tid)
+      let ta = trait_audience(tr)
+      var out = no_leaks()
+      if not audience_covers(ta, root) {
+        out = [leak_at("trait", tr.name, ta, path ++ " projection `" ++ name ++ "` trait", sp)]
+      }
+      # the member name has no audience of its own: whether `T.Item` can be
+      # written is decided by the subject and the trait together (design §5.2)
+      out ++ surface_ty_leaks(cx, root, subject, sp,
+        path ++ " projection `" ++ name ++ "` subject")
+    }
+    TyTuple(elems) -> {
+      var out = no_leaks()
+      var i = 0
+      for e in elems {
+        out = out ++ surface_ty_leaks(cx, root, e, ty_span_kid(sp, i),
+          path ++ " tuple element #" ++ to_string(i + 1))
+        i = i + 1
+      }
+      out
+    }
+    TyFn(params, ret, eff) -> {
+      var out = no_leaks()
+      var i = 0
+      for p in params {
+        out = out ++ surface_ty_leaks(cx, root, p, ty_span_kid(sp, i),
+          path ++ " function parameter #" ++ to_string(i + 1))
+        i = i + 1
+      }
+      out = out ++ surface_ty_leaks(cx, root, ret, ty_span_kid(sp, len(params)),
+        path ++ " function return type")
+      # a nested function type's effect row is surface too, and it is exactly
+      # the row a general-purpose type walker forgets (design §五)
+      out ++ surface_eff_leaks(cx, root, eff, path ++ " function effect row", sp)
+    }
+  }
+
+## Every named label of a row whose effect the audience cannot name. The row's
+## base -- `io`, an effect variable, a union of them -- carries no nominal
+## identity and so no audience (design §5.1).
+fn surface_eff_leaks(
+  cx: Cx,
+  root: Audience,
+  e: Eff,
+  path: String,
+  sp: TySpan
+) -> List[SurfaceLeak] = {
+  var out = no_leaks()
+  for label in eff_labels(e) {
+    let (eid, name) = label
+    let a = effect_audience(cx, eid)
+    if not audience_covers(a, root) { out = out ++ [leak_at("effect", name, a, path, sp)] }
+  }
+  out
+}
+
+## The token for type parameter `i`'s bound on `name`. The resolved constraint
+## list and the written one come from the same declaration, but a bound that
+## failed to resolve is dropped from the resolved side -- so the token is found
+## by name first and by position second.
+fn bound_span(tps: List[TypeParamDecl], i: Int, name: String, j: Int, fb: TySpan) -> TySpan =
+  match get(tps, i) {
+    None -> fb
+    Some(tp) -> {
+      for b in tp.bounds {
+        if b.name == name { return plain_span(b.lo, b.hi) }
+      }
+      match get(tp.bounds, j) {
+        Some(b) -> plain_span(b.lo, b.hi)
+        None -> plain_span(tp.lo, tp.hi)
+      }
+    }
+  }
+
+fn surface_constraints_leaks(
+  cx: Cx,
+  root: Audience,
+  constraints: List[List[Int]],
+  tps: List[TypeParamDecl],
+  path: String,
+  fb: TySpan
+) -> List[SurfaceLeak] = {
+  var out = no_leaks()
+  var i = 0
+  for bounds in constraints {
+    var j = 0
+    for tid in bounds {
+      let tr = trait_of(cx.traits, tid)
+      let a = trait_audience(tr)
+      if not audience_covers(a, root) {
+        out = out ++ [leak_at("trait", tr.name, a,
+          path ++ " type parameter #" ++ to_string(i + 1) ++ " bound",
+          bound_span(tps, i, tr.name, j, fb))]
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+## One signature's whole surface: bounds, parameters, return type, effect row.
+## `params`/`ret` are the *written* references, used only to find spans; the
+## types come from the resolved `Sig`, because that is what a caller in another
+## module actually receives.
+fn surface_sig_leaks(
+  cx: Cx,
+  root: Audience,
+  sig: Sig,
+  tps: List[TypeParamDecl],
+  params: List[Param],
+  ret: Option[TypeRef],
+  path: String,
+  fb: TySpan
+) -> List[SurfaceLeak] = {
+  var out = surface_constraints_leaks(cx, root, sig.constraints, tps, path, fb)
+  var i = 0
+  for pt in sig.param_tys {
+    let sp = match get(params, i) {
+      Some(p) -> ty_span_of(cx, p.tref)
+      None -> fb
+    }
+    let pname = match get(sig.param_names, i) {
+      Some(n) -> " `" ++ n ++ "`"
+      None -> ""
+    }
+    out = out ++ surface_ty_leaks(cx, root, pt, sp, path ++ " parameter" ++ pname)
+    i = i + 1
+  }
+  let rsp = match ret {
+    Some(r) -> ty_span_of(cx, r)
+    None -> fb
+  }
+  out = out ++ surface_ty_leaks(cx, root, sig.ret, rsp, path ++ " return type")
+  # The effect row has no span of its own: the AST keeps a declared effect as a
+  # bare string, so a leaking label falls back to the root's name token. Design
+  # §八 asks for an `EffectRef { name, lo, hi }` and allows this stand-in until
+  # one exists -- it is a temporary fallback, not the finished span rule.
+  out ++ surface_eff_leaks(cx, root, sig.eff, path ++ " effect row", fb)
+}
+
+## Report one root's leaks in walk order, one diagnostic per (token, identity).
+## Recursion and alias expansion can reach the same name by more than one
+## route; two genuinely different occurrences keep two diagnostics, because
+## design §八 refuses to make the author recompile to find the next one.
+fn surface_report(cx: Cx, entry: String, leaks: List[SurfaceLeak]) -> Cx = {
+  var cx1 = cx
+  var seen: Set[(Int, Int, String)] = set.empty()
+  for lk in leaks {
+    let key = (lk.lo, lk.hi, lk.kind ++ " " ++ lk.name)
+    if set.has(seen, key) { continue }
+    seen = set.insert(seen, key)
+    cx1 = cerr_h(cx1,
+      entry ++ " exposes " ++ leak_word(lk.audience) ++ " " ++ lk.kind ++ " `" ++ lk.name ++ "`",
+      lk.lo, lk.hi, lk.path ++ "; " ++ leak_fix(lk.audience, lk.name))
+  }
+  cx1
+}
+
+# ---- the roots (design §四: a closed list) ----
+
+fn surface_fn(cx: Cx, root: Audience, d: FnDecl) -> Cx = {
+  let sig = match map.get(cx.fns, d.name) {
+    Some(s) -> s
+    None -> return cx
+  }
+  # `pub fn` must annotate its return type (the parser refuses otherwise), so
+  # a public root is never still inferring at this point
+  if sig.inferring || sig_poisoned(sig) { return cx }
+  surface_report(cx, "public function `" ++ d.name ++ "`",
+    surface_sig_leaks(cx, root, sig, d.tparams, d.params, d.ret,
+      "function `" ++ d.name ++ "`", plain_span(d.nlo, d.nhi)))
+}
+
+fn surface_const(
+  cx: Cx,
+  root: Audience,
+  name: String,
+  ann: TypeRef,
+  nlo: Int,
+  nhi: Int
+) -> Cx = {
+  let ty = match map.get(cx.consts, name) {
+    Some(t) -> t
+    None -> return cx
+  }
+  if ty_poisoned(ty) { return cx }
+  surface_report(cx, "public constant `" ++ name ++ "`",
+    surface_ty_leaks(cx, root, ty, ty_span_of(cx, ann), "constant `" ++ name ++ "` type"))
+}
+
+fn field_span(cx: Cx, d: TypeDeclR, cname: String, fname: String, fb: TySpan) -> TySpan = {
+  for c in d.ctors {
+    if c.name == cname {
+      for f in c.fields {
+        if f.name == fname { return ty_span_of(cx, f.tref) }
+      }
+    }
+  }
+  fb
+}
+
+fn surface_adt(cx: Cx, root: Audience, d: TypeDeclR) -> Cx = {
+  let id = match map.get(cx.adts_by_name, d.name) {
+    Some(i) -> i
+    None -> return cx
+  }
+  let info = adt_of(cx.adts, id)
+  let fb = plain_span(d.nlo, d.nhi)
+  for ctor in info.ctors {
+    for f in ctor.fields {
+      if ty_poisoned(f.ty) { return cx }
+    }
+  }
+  var leaks = no_leaks()
+  for ctor in info.ctors {
+    for f in ctor.fields {
+      let where = if info.is_record {
+        "type `" ++ d.name ++ "` field `" ++ f.name ++ "`"
+      } else {
+        "type `" ++ d.name ++ "` constructor `" ++ ctor.name ++ "` field `" ++ f.name ++ "`"
+      }
+      leaks = leaks ++
+        surface_ty_leaks(cx, root, f.ty, field_span(cx, d, ctor.name, f.name, fb), where)
+    }
+  }
+  surface_report(cx, "public type `" ++ d.name ++ "`", leaks)
+}
+
+fn surface_type_decl(cx: Cx, root: Audience, d: TypeDeclR) -> Cx =
+  match d.alias_target {
+    None -> surface_adt(cx, root, d)
+    Some(target) ->
+      # `pub opaque type` publishes a name and the arguments it is applied to,
+      # never its representation (design §四). Dawn's opaque parameters carry
+      # no bounds, so an opaque *root* has nothing left to check -- which is
+      # why `pub opaque type Buf = Array[Int]` in std/bytes is legal. The
+      # arguments are checked at every reference, in the `TyOpaque` arm.
+      if d.is_opaque {
+        cx
+      } else {
+        match map.get(cx.alias_resolved, d.name) {
+          None -> cx
+          Some(t) ->
+            if ty_poisoned(t) {
+              cx
+            } else {
+              # a transparent alias is a spelling, so what is published is the
+              # target it expands to -- the alias's own `pub` is not the
+              # question (design §5.2)
+              surface_report(cx, "public alias `" ++ d.name ++ "`",
+                surface_ty_leaks(cx, root, t, ty_span_of(cx, target),
+                  "alias `" ++ d.name ++ "` target"))
+            }
+        }
+      }
+  }
+
+fn surface_effect(cx: Cx, root: Audience, d: EffectDeclR) -> Cx = {
+  var cx1 = cx
+  for op in d.ops {
+    match map.get(cx1.fns, op.name) {
+      None -> ()
+      Some(sig) ->
+        if not sig_poisoned(sig) {
+          cx1 = surface_report(cx1,
+            "public effect `" ++ d.name ++ "` operation `" ++ op.name ++ "`",
+            surface_sig_leaks(cx1, root, sig, no_tparam_decls(), op.params, Some(op.ret),
+              "effect `" ++ d.name ++ "` operation `" ++ op.name ++ "`",
+              plain_span(op.nlo, op.nhi)))
+        }
+    }
+  }
+  cx1
+}
+
+fn surface_trait(
+  cx: Cx,
+  root: Audience,
+  name: String,
+  methods: List[TraitMethod],
+  nlo: Int,
+  nhi: Int
+) -> Cx = {
+  let id = match map.get(cx.traits_by_name, name) {
+    Some(i) -> i
+    None -> return cx
+  }
+  let tr = trait_of(cx.traits, id)
+  var cx1 = cx
+  for entry in tr.methods {
+    let (mname, ms) = entry
+    if sig_poisoned(ms.sig) { continue }
+    var fb = plain_span(nlo, nhi)
+    var mparams: List[Param] = []
+    var mret: Option[TypeRef] = None
+    for pm in methods {
+      if pm.name == mname {
+        fb = plain_span(pm.nlo, pm.nhi)
+        mparams = pm.params
+        mret = Some(pm.ret)
+      }
+    }
+    cx1 = surface_report(cx1, "public trait `" ++ name ++ "` method `" ++ mname ++ "`",
+      surface_sig_leaks(cx1, root, ms.sig, no_tparam_decls(), mparams, mret,
+        "trait `" ++ name ++ "` method `" ++ mname ++ "`", fb))
+  }
+  cx1
+}
+
+fn impl_at_span(cx: Cx, lo: Int, hi: Int) -> Option[ImplI] = {
+  for i in cx.local_impls {
+    if i.lo == lo && i.hi == hi { return Some(i) }
+  }
+  None
+}
+
+fn assoc_span(cx: Cx, assoc: List[AssocBind], name: String, fb: TySpan) -> TySpan = {
+  for a in assoc {
+    if a.name == name { return ty_span_of(cx, a.tref) }
+  }
+  fb
+}
+
+## An impl is a root exactly when the audience can name both halves of its
+## head (design §四): its trait and its subject. One rule with two halves --
+## a private trait and a private subject each make the impl unobservable, and
+## then its bounds and associated bindings are private business. Refusing them
+## would reject the ordinary shape of a module that implements its own trait
+## for its own type.
+fn impl_is_observable(cx: Cx, root: Audience, tr: TraitI, imp: ImplI, head: TySpan) -> Bool =
+  audience_covers(trait_audience(tr), root) &&
+  len(surface_ty_leaks(cx, root, imp.subject, head, "impl subject")) == 0
+
+fn surface_impl(
+  cx: Cx,
+  root: Audience,
+  tps: List[TypeParamDecl],
+  assoc: List[AssocBind],
+  tlo: Int,
+  thi: Int,
+  lo: Int,
+  hi: Int
+) -> Cx = {
+  let imp = match impl_at_span(cx, lo, hi) {
+    Some(i) -> i
+    None -> return cx
+  }
+  let tr = trait_of(cx.traits, imp.trait_id)
+  let head = plain_span(tlo, thi)
+  if ty_poisoned(imp.subject) { return cx }
+  if not impl_is_observable(cx, root, tr, imp, head) { return cx }
+  let shown = tr.name ++ "[" ++ ty_show(cx.adts, imp.subject) ++ "]"
+  let path = "impl `" ++ shown ++ "`"
+  var leaks = surface_constraints_leaks(cx, root, imp.constraints, tps, path, head)
+  for b in imp.assoc_bindings {
+    let (aname, aty) = b
+    if not ty_poisoned(aty) {
+      leaks = leaks ++ surface_ty_leaks(cx, root, aty, assoc_span(cx, assoc, aname, head),
+        path ++ " associated type `" ++ aname ++ "`")
+    }
+  }
+  surface_report(cx, "observable impl `" ++ shown ++ "`", leaks)
+}
+
+## Validate this module's whole public surface. Runs once the headers are
+## registered and before any body is checked (design §三): a public contract's
+## error belongs on the declaration, not wherever an unrelated body happened to
+## fail, and `dawn doc`, the LSP and the exporter all read the same header
+## result rather than each deciding visibility again.
+##
+## Declarations are visited in source order, so the diagnostics of a module
+## come out in the order its author reads it.
+pub fn pass_export_surface(cx: Cx, m: Module) -> Cx = {
+  let root = module_root_audience(cx)
+  var cx1 = cx
+  for d in m.decls {
+    match d {
+      DFn(f) -> { if f.is_pub { cx1 = surface_fn(cx1, root, f) } }
+      DType(t) -> { if t.is_pub { cx1 = surface_type_decl(cx1, root, t) } }
+      DConst(name, is_pub, ann, _, _, _, nlo, nhi) -> {
+        if is_pub { cx1 = surface_const(cx1, root, name, ann, nlo, nhi) }
+      }
+      DEffect(e) -> { if e.is_pub { cx1 = surface_effect(cx1, root, e) } }
+      DTrait(name, _, _, _, methods, _, is_pub, _, _, nlo, nhi) -> {
+        if is_pub { cx1 = surface_trait(cx1, root, name, methods, nlo, nhi) }
+      }
+      # an impl has no `pub` to read: observability is decided from its head.
+      # Derived impls have no written head to visit at all, and their surface
+      # is the deriving type's, which is a root in its own right.
+      DImpl(tps, _, tlo, thi, _, _, assoc, ilo, ihi) -> {
+        cx1 = surface_impl(cx1, root, tps, assoc, tlo, thi, ilo, ihi)
+      }
+      _ -> ()
+    }
+  }
+  cx1
+}
+
 # ---- expression checking (pass 5 groundwork) ----
 #
 # Each check function returns (Cx, Ty, TExpr): the type for the checker's own
@@ -2253,17 +2841,6 @@ test "main shape violations are reported" {
 # type onto the AST node; here the TExpr simply carries what it needs.
 
 # ---- module exports and imports (spec §10) ----
-
-## The bundled modules that exist to hold a representation, not to be called:
-## `Map`/`Set` are `std/hamt` and `List` is `std/pvec`. They are `pub` because
-## std/map, std/set and the lowering of a list primitive call into them, and
-## bundled std has no visibility level below `pub` — so the boundary is here
-## instead, next to `internal_builtins`, which draws the same line for the
-## `map_*`/`array_*` intrinsic names (audit RD-06).
-##
-## The point is that the representation can be replaced whole. Nothing outside
-## std may name it, so replacing it cannot break a program.
-pub fn internal_std_modules() -> List[String] = ["std/hamt", "std/pvec"]
 
 ## Subject and verb together: one substrate is plural and the other is not, so
 ## the sentence cannot hardcode either.

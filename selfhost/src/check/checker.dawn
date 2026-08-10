@@ -57,7 +57,8 @@ use check/types.{
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   head_of, impl_at, has_impl_at,
-  is_eq_scalar, is_ground, expandable, type_args_of, sub_goals
+  is_eq_scalar, is_ground, expandable, type_args_of, sub_goals,
+  AWorld
 }
 use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, jsig_refused}
 use check/exhaustive.{
@@ -68,12 +69,13 @@ use check/cx.{
   AliasE, Cx, Frame, LambdaCx, ModExports,
   cx_new, test_cx,
   cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
-  resolve_type, is_const_serializable, no_sig
+  resolve_type, is_const_serializable, no_sig, TySpan
 }
 use check/passes.{
   seed_prelude, pass_java_uses, pass_imports, pass_type_shells, pass_ctor_fields,
   pass_effects, pass_resolve_aliases, pass_register_traits, pass_register_impls,
-  pass_fn_signatures, pass_const_decls, pass_main_check, fresh_tvar, impl_shape_bad
+  pass_fn_signatures, pass_const_decls, pass_main_check, pass_export_surface,
+  fresh_tvar, impl_shape_bad
 }
 use front/suggest
 use front/parser
@@ -1807,7 +1809,8 @@ test "field access follows record shape with substitution" {
     ctors: [CtorI { adt: aid, name: "Box", fields: [FieldI { name: "v", ty: tv }] }],
     derives_show: false,
     derives_ord: false,
-    owner: None
+    owner: None,
+    audience: AWorld
   }
   cx = Cx {
     ..cx1,
@@ -8190,6 +8193,10 @@ fn no_tfun() -> Option[TFun] = None
 ## trait defaults, tests.
 pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TModule) !io = {
   var cx1 = seed_prelude(cx)
+  # the header passes below record where each written type reference sat, so
+  # the public surface validator can blame the innermost token the author
+  # wrote rather than the declaration's name (docs/public-surface-design.md §八)
+  cx1 = Cx { ..cx1, record_ty_spans: true }
   cx1 = pass_java_uses(cx1, m)
   cx1 = pass_imports(cx1, m, env)
   let (cxa, shells) = pass_type_shells(cx1, m)
@@ -8205,6 +8212,13 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   let (cxd, const_tys) = pass_const_decls(cx1, m)
   cx1 = cxd
   cx1 = pass_main_check(cx1, m, sigs)
+  # SEM-07: the public surface is settled once the headers are, and it is
+  # validated here rather than after the bodies on purpose (design §三). A
+  # public contract's error then lands on its declaration whatever an
+  # unrelated body does, and it lands *before* that body's diagnostics.
+  cx1 = pass_export_surface(cx1, m)
+  let no_spans: Map[(Int, Int), TySpan] = map.empty()
+  cx1 = Cx { ..cx1, record_ty_spans: false, ty_spans: no_spans }
   # 5. inferred functions first, in call-dependency order — every callee's
   # signature is final before any caller is checked; a cycle must annotate
   let fnds = module_fns(m)

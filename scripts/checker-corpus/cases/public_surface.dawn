@@ -1,0 +1,86 @@
+# SEM-07: what a public declaration may name (docs/public-surface-design.md).
+use java "java.lang.StringBuilder"
+
+type Secret = | Secret
+alias SecretAlias = Secret
+alias Count = Int
+opaque type HiddenId = Int
+pub opaque type Token = Secret
+pub opaque type Vault[T] = Secret
+
+trait HiddenBound[T] {
+  fn hidden(x: T) -> Bool
+}
+
+effect HiddenEffect {
+  fn hidden_effect() -> Int
+}
+
+pub effect PublicEffect {
+  fn public_effect() -> Int
+}
+
+pub type Packet = | Packet(value: Secret)
+pub type Holder[T] = { value: T }
+type Private = | Private
+
+pub alias Published = SecretAlias
+pub alias PublicCount = Count
+
+pub fn leak_opaque() -> HiddenId = 1
+pub fn leak_bound[T: HiddenBound](x: T) -> T = x
+pub fn leak_effect() -> Int !HiddenEffect = hidden_effect()
+pub fn keep_opaque() -> Token = Secret
+pub fn keep_opaque_representation() -> Vault[Int] = Secret
+pub fn leak_opaque_arg() -> Vault[Secret] = Secret
+pub fn keep_effect() -> Int !PublicEffect = public_effect()
+pub const LEAK: Secret = Secret
+
+# containers, tuples and function types each recurse on their own
+pub fn leak_list() -> List[Secret] = []
+pub fn leak_map(m: Map[Secret, Set[Secret]]) -> Int = 0
+pub fn leak_tuple() -> (Int, Secret) = (0, Secret)
+pub fn leak_fn(f: fn(Secret) -> Secret) -> Int = 0
+
+# a legal Java identity is nameable wherever the root is
+pub fn keep_java(b: StringBuilder) -> Int = 0
+
+# an unresolved header type poisons its own root and nothing else: the unknown
+# type is reported once, and SEM-07 does not cascade a second diagnostic
+pub fn poisoned() -> NoSuchType = 0
+
+pub effect PublicOps {
+  fn reveal() -> Secret
+}
+
+pub trait PublicTrait[T] {
+  fn expose(x: T) -> Secret
+}
+
+fn private_default() -> Int = 1
+
+pub trait WithDefault[T] {
+  fn value(x: T) -> Int = private_default()
+}
+
+pub trait HasItem[T] {
+  type Item
+  fn item(x: T) -> T.Item
+}
+
+impl[T] HasItem[Vault[T]] {
+  type Item = List[Vault[Secret]]
+  fn item(x: Vault[T]) -> List[Vault[Secret]] = []
+}
+
+impl[T: HiddenBound] HasItem[Holder[T]] {
+  type Item = T
+  fn item(x: Holder[T]) -> T = x.value
+}
+
+# neither the trait nor the subject is public, so this impl is nobody's root
+# and its private associated type is private business
+impl HasItem[Private] {
+  type Item = Secret
+  fn item(x: Private) -> Secret = Secret
+}

@@ -450,6 +450,94 @@ pub fn ty_named(name: String) -> Option[Ty] =
     None -> None
   }
 
+# ---- audience (SEM-07; docs/public-surface-design.md §二) ----
+
+## The bundled modules that exist to hold a representation, not to be called:
+## `Map`/`Set` are `std/hamt` and `List` is `std/pvec`. They are `pub` because
+## std/map, std/set and the lowering of a list primitive call into them, and
+## bundled std has no visibility level below `pub` — so the boundary is here
+## instead, next to `builtin_type_inventory`, which draws the same line for
+## `Array` (audit RD-06).
+##
+## The point is that the representation can be replaced whole. Nothing outside
+## std may name it, so replacing it cannot break a program.
+pub fn internal_std_modules() -> List[String] = ["std/hamt", "std/pvec"]
+
+## Who may write a name. The whole of SEM-07's visibility vocabulary: every
+## source of an identity — builtin, prelude, imported module, local
+## declaration — is normalised to one of these three before the validator
+## compares anything, so no read point gets to rebuild "public enough" out of
+## a boolean and a guess.
+##
+##   World          any module that can `use` the declarer may name it
+##   StdOnly        only the bundled standard library may name it
+##   Module(owner)  only `owner` itself may name it
+pub type Audience =
+  | AWorld
+  | AStdOnly
+  | AModule(owner: String)
+
+## Is `path` part of the bundled standard library? The same test `cx_new` runs
+## to set `is_std_module`, kept here so an owner string read off an `AdtI` can
+## be asked the question without a `Cx` in hand.
+pub fn is_std_path(path: String) -> Bool =
+  path == "std" || str.starts_with(path, "std/")
+
+## The audience a `pub` declaration in `owner` actually reaches. Bundled std
+## has no visibility level below `pub`, so an internal-std module's exports
+## stop at `StdOnly` however they are spelled; everything else reaches the
+## world.
+pub fn declared_audience(owner: String) -> Audience =
+  if list.contains(internal_std_modules(), owner) { AStdOnly } else { AWorld }
+
+## Does an identity with audience `identity` cover a root published to
+## `audience`? This is the design's table, and it is deliberately not an
+## ordering comparison: `StdOnly` covers a `Module(m)` root when `m` is a std
+## module, which no enum ordinal can express.
+pub fn audience_covers(identity: Audience, root: Audience) -> Bool =
+  match identity {
+    AWorld -> true
+    AStdOnly ->
+      match root {
+        AWorld -> false
+        AStdOnly -> true
+        AModule(m) -> is_std_path(m)
+      }
+    AModule(owner) ->
+      match root {
+        AWorld -> false
+        AStdOnly -> false
+        AModule(m) -> m == owner
+      }
+  }
+
+## The audience of a declaration in `owner` that is `pub` or not. `owner` is
+## `None` only where there is no module identity at all (a bare `cx_new(None,
+## None)`, which the driver never builds): nothing can be private to a module
+## that does not exist, so those declarations are World.
+pub fn decl_audience(owner: Option[String], is_pub: Bool) -> Audience =
+  match owner {
+    None -> AWorld
+    Some(ow) -> if is_pub { declared_audience(ow) } else { AModule(ow) }
+  }
+
+## A compiler-owned type name's audience, read off the inventory rather than
+## restated: `builtin_type_visible` already refuses `Array` outside std, and a
+## second copy of that policy here would be free to drift from it.
+pub fn builtin_type_audience(name: String) -> Audience =
+  match builtin_type_at(name) {
+    Some(info) ->
+      match info.access {
+        BtPublic -> AWorld
+        BtStdOnly -> AStdOnly
+        # `Never` is the only one, and it is unwritable in every module, so no
+        # header reference reaches here -- the walker passes it as a scalar
+        # (design §5.1) without asking.
+        BtCompilerOnly -> AWorld
+      }
+    None -> AWorld
+  }
+
 # ---- ADT / ctor / field info (id + table; docs/selfhost-checker.md §二) ----
 
 pub type FieldI = { name: String, ty: Ty }
@@ -464,7 +552,12 @@ pub type AdtI = {
   ctors: List[CtorI],
   derives_show: Bool,
   derives_ord: Bool,
-  owner: Option[String]
+  owner: Option[String],
+  # who may name this type (SEM-07). Stored rather than derived from a
+  # `is_pub` flag because the answer belongs to the *declaring* module: an
+  # imported `AdtI` is grafted whole, so its audience arrives already decided
+  # and the importer never has to guess what `pub` meant over there.
+  audience: Audience
 }
 
 pub alias Adts = Map[Int, AdtI]
@@ -858,6 +951,9 @@ pub type EffectI = {
   id: Int,
   name: String,
   owner: Option[String],
+  # who may name this effect label (SEM-07), decided by the declaring module
+  # for the same reason `AdtI.audience` is
+  audience: Audience,
   # operation names in declaration order = the evidence record's field order
   ops: List[String]
 }
@@ -1088,6 +1184,12 @@ pub fn trait_of(traits: Traits, id: Int) -> TraitI =
     None -> panic("unknown trait id: ${id}")
   }
 
+## Who may name this trait (SEM-07). Derived rather than stored, because
+## `TraitI` — alone among the four identity records — already carries both
+## halves of the answer, and a stored copy could disagree with the `is_pub`
+## the exporter reads.
+pub fn trait_audience(t: TraitI) -> Audience = decl_audience(t.owner, t.is_pub)
+
 pub fn impl_display(adts: Adts, traits: Traits, i: ImplI) -> String =
   trait_of(traits, i.trait_id).name ++ "[" ++ ty_show(adts, i.subject) ++ "]"
 
@@ -1219,7 +1321,8 @@ pub fn prelude_adts() -> Adts = {
     ],
     derives_show: true,
     derives_ord: false,
-    owner: None
+    owner: None,
+    audience: AWorld
   }
   let rt = TyVar("T", -12)
   let re = TyVar("E", -13)
@@ -1234,7 +1337,8 @@ pub fn prelude_adts() -> Adts = {
     ],
     derives_show: true,
     derives_ord: false,
-    owner: None
+    owner: None,
+    audience: AWorld
   }
   # A record, so a caller reads `e.kind` with no `match` in the way, and with
   # three fields chosen for what every backend can answer:
@@ -1270,7 +1374,8 @@ pub fn prelude_adts() -> Adts = {
     ],
     derives_show: true,
     derives_ord: false,
-    owner: None
+    owner: None,
+    audience: AWorld
   }
   map.from([(OPTION_ID, option), (RESULT_ID, result), (FOREIGN_ERROR_ID, ferr)])
 }
