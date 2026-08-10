@@ -286,17 +286,19 @@ elif name == "parser-uppercase-method":
 elif name == "drop-lsp-children":
     replace_once(
         "lspq",
-        """        EFieldAcc(recv, _, _, _, _, _) ->
-          match te {
-            Some(XJava(call, _, _, _)) -> {
+        # Only the Java arm, not the whole EFieldAcc match: SYN-05 gave the
+        # same match an XCtor arm, and deleting all of it would break the
+        # qualified-constructor sentence too -- a mutant two assertions redden
+        # is a mutant neither of them owns. Without this arm an XJava call
+        # falls through to walk_apply_value, whose shapes do not match, and
+        # every type inside the call is dropped.
+        """            Some(XJava(call, _, _, _)) -> {
               match call.target {
                 Some(tt) -> { q = walk_e(qc, q, recv, Some(tt)) }
                 None -> { q = walk_e(qc, q, recv, None) }
               }
               q = walk_list(qc, q, args, opt_list(call.args))
             }
-            _ -> { q = walk_apply_value(qc, q, target, args, te) }
-          }
 """,
         "",
     )
