@@ -1,0 +1,33 @@
+# checker.dawn: what the pipe hands over (SYN-05)
+#
+# `|>` inserts an argument into an ordinary call and stops there. Every refusal
+# below is therefore an ordinary call diagnostic that happens to have been
+# reached through a pipe -- not a second, pipe-shaped rulebook in the parser.
+# The parser used to own the first three of these as "the right side of `|>`
+# must be a call, a function name, or a lambda", which said nothing about what
+# was actually wrong.
+use std/str
+
+type Rec = { a: Int, b: Int }
+
+type Sum = Zero | One(x: Int)
+
+# a module's functions are not bare function values, piped or written out
+pub fn module_member(n: String) -> Bool = n |> str.starts_with
+
+# a record is built with braces however the application was spelled
+pub fn piped_record(n: Int) -> Rec = n |> Rec(2)
+
+# `n |> Rec { ... }` applies a record *value* to `n`; it does not fill a field
+pub fn piped_record_literal(n: Int) -> Rec = n |> Rec { a: 1, b: 2 }
+
+# arity, named-argument and callability answers all come from the call
+pub fn piped_arity(n: Int) -> Sum = n |> One(2)
+
+pub fn piped_named_twice(n: Int) -> Sum = n |> One(x: 2)
+
+pub fn piped_value(n: Int, k: Int) -> Int = n |> k
+
+# a receiver is not an argument: the left side lands after it, so this asks for
+# `len(xs, xs)` and is refused as the arity error it is
+pub fn piped_receiver(xs: List[Int]) -> Int = xs |> xs.len()

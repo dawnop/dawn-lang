@@ -614,19 +614,28 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           } else {
             q = walk_apply_value(qc, q, target, args, te)
           }
-        # `recv.member(args)` that resolved to a Java call: the callee is not a
-        # value, and the typed node holds the receiver and the arguments in its
-        # own fields rather than under an XApply (SYN-09). Without this arm the
-        # walk would try `EFieldAcc` against an `XJava` and drop the types of
-        # everything inside the call.
-        EFieldAcc(recv, _, _, _, _, _) ->
+        # `recv.member(args)`, whose callee is never a value: the checker
+        # decides what it is, and each answer parks the receiver and the
+        # arguments in its own typed node rather than under an `XApply`. Left
+        # to `walk_apply_value` the shapes would not match and every type
+        # inside the call would be dropped.
+        EFieldAcc(recv, _, flo, fhi, _, _) ->
           match te {
+            # a Java call (SYN-09): receiver and arguments hang off TJavaCall
             Some(XJava(call, _, _, _)) -> {
               match call.target {
                 Some(tt) -> { q = walk_e(qc, q, recv, Some(tt)) }
                 None -> { q = walk_e(qc, q, recv, None) }
               }
               q = walk_list(qc, q, args, opt_list(call.args))
+            }
+            # `m.C(a, b)`: a module-qualified construction (LANG-06), which is
+            # an `XCtor` exactly as the unqualified `C(a, b)` is. The receiver
+            # is a module alias, not a value, so it is not walked -- and the
+            # constructor's signature belongs at the *name's* span, which is
+            # what `flo`/`fhi` carry.
+            Some(XCtor(_, _, _, _, _, _, _, _)) -> {
+              q = walk_ctor_call(qc, q, args0, None, flo, fhi, te)
             }
             _ -> { q = walk_apply_value(qc, q, target, args, te) }
           }
@@ -878,8 +887,14 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   q
 }
 
-## UFCS/method children: the typed args carry the receiver first when the
-## counts line up; otherwise walk parse-only.
+## The children of a dotted call. Two arities reach here and they mean
+## different things: UFCS (`xs.map(f)`) passes the receiver as the first
+## argument, so the typed list is one longer than the written one; a
+## module-qualified call (`m.f(a)`) has no receiver value at all -- `m` is an
+## alias, not an expression -- so the lists are the same length. Only the first
+## was handled, which sent every `m.f(a)` down the parse-only path and dropped
+## the type of every argument in it. Anything else is a shape the checker did
+## not produce for this node, and walking parse-only is the honest answer.
 fn walk_method_children(qc: QCx, q0: Q, target: Expr, args: List[Expr], targs: List[TExpr]) -> Q = {
   var q = q0
   if len(targs) == len(args) + 1 {
@@ -888,6 +903,13 @@ fn walk_method_children(qc: QCx, q0: Q, target: Expr, args: List[Expr], targs: L
     for a in args {
       q = walk_e(qc, q, a, get(targs, i + 1))
       i = i + 1
+    }
+  } else if len(targs) == len(args) {
+    q = walk_e(qc, q, target, None)
+    var j = 0
+    for a in args {
+      q = walk_e(qc, q, a, get(targs, j))
+      j = j + 1
     }
   } else {
     q = walk_e(qc, q, target, None)

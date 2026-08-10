@@ -1313,19 +1313,25 @@ fn pipe_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
     if p.toks[look].kind != PIPEGT { break }
     let st2 = skip_nl(p, St { ..st1, pos: look + 1 })
     let (st3, rhs) = or_expr(p, st2, nb)?
-    # `x |> f(a)` is `f(x, a)`: the pipe inserts `left` as the first argument of
-    # a *named* call, or applies a bare name / lambda to it. Deliberately not
-    # every application node -- `x |> make()(1)` and `x |> Some(1)` stay the
-    # errors they were before calls became a general postfix (SYN-02).
+    # `x |> f(a)` is `f(x, a)`: the pipe is argument insertion into an ordinary
+    # call, and nothing else (SYN-05). When the right side already ends in a
+    # call suffix -- `f(a)`, `m.g(a)`, `recv.m(a)`, `make()(a)` -- `left` goes
+    # in front of that call's *written* arguments; otherwise the right side is
+    # applied to `left` alone. A method's receiver is not an argument, so it is
+    # left where it is rather than being pushed along.
+    #
+    # No node is invented for the pipe: the result is the same tree the reader
+    # would get by writing the call out, which is why the evaluation order is
+    # the ordinary one (target first, then arguments in written order) and why
+    # callability, arity, named-argument and record rules are the checker's,
+    # not a second set living here. `x |> Some(1)` reaching the checker as an
+    # arity error rather than a parse error is that consolidation, not a new
+    # permission.
     left = match rhs {
-      EApply(EVar(name, vlo, vhi), args, _, rhi) ->
-        EApply(EVar(name, vlo, vhi), [pos_arg(left)] ++ args, e_lo(left), rhi)
-      EVar(name, vlo, vhi) -> EApply(EVar(name, vlo, vhi), [pos_arg(left)], e_lo(left), vhi)
-      ELambda(ps, b, sg, llo, lhi) ->
-        EApply(ELambda(ps, b, sg, llo, lhi), [pos_arg(left)], e_lo(left), lhi)
-      other -> return Err((st3, pd_h(
-        "the right side of `|>` must be a call, a function name, or a lambda",
-        e_lo(other), e_hi(other), "x |> f(a) is equivalent to f(x, a)")))
+      EApply(t, args, _, rhi) -> EApply(t, [pos_arg(left)] ++ args, e_lo(left), rhi)
+      EMethod(t, mname, args, mnlo, mnhi, _, rhi) ->
+        EMethod(t, mname, [pos_arg(left)] ++ args, mnlo, mnhi, e_lo(left), rhi)
+      other -> EApply(other, [pos_arg(left)], e_lo(left), e_hi(other))
     }
     st1 = st3
   }

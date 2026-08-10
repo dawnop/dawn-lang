@@ -7,7 +7,7 @@ use std/str
 use front/parser.{parse_module}
 use front/astdump.{render_module}
 use front/ast.{
-  Expr, EInt, EVar, EApply, EBinary, ECtor, EBlock, ELambda, EMatch, EPropagate,
+  Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EMatch, EPropagate,
   BinOp, OpAdd, OpMul,
   PLit,
   Stmt, SWhile,
@@ -52,32 +52,176 @@ test "multiplication binds tighter than addition" {
   }
 }
 
-test "pipe rewrites into a call with the left side first" {
-  let (m, ds) = parse_module("fn f() = x |> g(y)")
+## The single source of truth for what `|>` builds. Every check below is the
+## only one that fails for exactly one way of getting the desugar wrong, so a
+## regression names itself.
+fn piped_body(src: String) -> Expr = {
+  let (m, ds) = parse_module(src)
+  if len(ds) > 0 { panic("expected `${src}` to parse, got: ${ds[0].msg}") }
   match m.decls[0] {
-    DFn(f) ->
-      match f.body {
-        EApply(callee, args, c, d) -> {
-          match callee {
-            EVar(n, a, b) -> { assert n == "g" }
-            _ -> { assert false }
-          }
-          assert len(args) == 2
-          match args[0].e {
-            EVar(n, e2, f2) -> { assert n == "x" }
-            _ -> { assert false }
-          }
+    DFn(f) -> f.body
+    _ -> panic("expected a function declaration")
+  }
+}
+
+test "pipe rewrites into a call with the left side first" {
+  match piped_body("fn f() = x |> g(y)") {
+    EApply(callee, args, c, d) -> {
+      match callee {
+        EVar(n, a, b) -> { assert n == "g" }
+        _ -> { assert false }
+      }
+      # first, not last: appending would still typecheck for a symmetric
+      # signature and silently pipe into the wrong parameter
+      assert len(args) == 2
+      match args[0].e {
+        EVar(n, e2, f2) -> { assert n == "x" }
+        _ -> { assert false }
+      }
+      match args[1].e {
+        EVar(n, e2, f2) -> { assert n == "y" }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  # a bare name applies to the left side alone
+  match piped_body("fn f() = x |> g") {
+    EApply(callee, args, c, d) -> {
+      match callee {
+        EVar(n, a, b) -> { assert n == "g" }
+        _ -> { assert false }
+      }
+      assert len(args) == 1
+    }
+    _ -> { assert false }
+  }
+}
+
+test "pipe inserts into whatever call the right side already is" {
+  # SYN-05: the right side is an ordinary expression, so a construction, a
+  # returned function and a qualified name are calls like any other. These
+  # three were parse errors while the pipe kept its own whitelist of shapes;
+  # the arity and callability answers now come from the checker.
+  match piped_body("fn f() = x |> Some(1)") {
+    EApply(callee, args, c, d) -> {
+      match callee {
+        ECtor(n, cargs, sp, hp, a, b, e2, f2) -> {
+          assert n == "Some"
+          assert hp == false
         }
         _ -> { assert false }
       }
+      assert len(args) == 2
+    }
     _ -> { assert false }
   }
-  # the pipe still only takes a named call, a bare name or a lambda on the
-  # right: a construction or an applied call result is an error, as before
-  let (_, ds2) = parse_module("fn f() = x |> Some(1)")
-  assert len(ds2) > 0
-  let (_, ds3) = parse_module("fn f() = x |> make()(1)")
-  assert len(ds3) > 0
+  # the outer call's arguments are what changes -- wrapping the call instead
+  # would give `make()(1)(x)`, a second application with one argument
+  match piped_body("fn f() = x |> make()(1)") {
+    EApply(callee, args, c, d) -> {
+      assert len(args) == 2
+      match args[0].e {
+        EVar(n, a, b) -> { assert n == "x" }
+        _ -> { assert false }
+      }
+      match callee {
+        EApply(inner, iargs, e2, f2) -> { assert len(iargs) == 0 }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+}
+
+test "pipe keeps a receiver a receiver" {
+  # `x |> r.m(y)` is `r.m(x, y)`, not `m(x, r, y)` and not `r.m(y)(x)`: the
+  # receiver is not an argument, so the left side goes in front of the
+  # *written* arguments and the dot stays where it was.
+  match piped_body("fn f() = x |> r.m(y)") {
+    EMethod(recv, name, args, nlo, nhi, a, b) -> {
+      assert name == "m"
+      match recv {
+        EVar(n, c, d) -> { assert n == "r" }
+        _ -> { assert false }
+      }
+      assert len(args) == 2
+      match args[0].e {
+        EVar(n, c, d) -> { assert n == "x" }
+        _ -> { assert false }
+      }
+      match args[1].e {
+        EVar(n, c, d) -> { assert n == "y" }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  # a receiver with no written arguments still takes only the left side
+  match piped_body("fn f() = x |> r.m()") {
+    EMethod(recv, name, args, nlo, nhi, a, b) -> {
+      assert name == "m"
+      assert len(args) == 1
+    }
+    _ -> { assert false }
+  }
+}
+
+test "pipe carries the argument metadata it inserted in front of" {
+  # a named argument and a tail block are properties of the *arguments*, and
+  # rebuilding the list is where they get dropped
+  match piped_body("fn f() = x |> g(a, k: b)") {
+    EApply(callee, args, c, d) -> {
+      assert len(args) == 3
+      assert args[0].name == None
+      assert args[1].name == None
+      assert args[2].name == Some("k")
+    }
+    _ -> { assert false }
+  }
+  match piped_body("fn f() = x |> g(a) { y => y }") {
+    EApply(callee, args, c, d) -> {
+      assert len(args) == 3
+      assert args[0].trailing == false
+      assert args[2].trailing == true
+    }
+    _ -> { assert false }
+  }
+}
+
+test "pipe is the loosest operator and associates left" {
+  # `a ++ b |> f` is `f(a ++ b)`: everything binds tighter than `|>`
+  match piped_body("fn f() = a ++ b |> g") {
+    EApply(callee, args, c, d) -> {
+      assert len(args) == 1
+      match args[0].e {
+        EBinary(op, l, r, e2, f2, g2, h2) -> { assert true }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  # `x |> f |> g` is `g(f(x))`, not `f(x, g)`
+  match piped_body("fn f() = x |> g |> h") {
+    EApply(callee, args, c, d) -> {
+      match callee {
+        EVar(n, a, b) -> { assert n == "h" }
+        _ -> { assert false }
+      }
+      assert len(args) == 1
+      match args[0].e {
+        EApply(inner, iargs, e2, f2) -> {
+          match inner {
+            EVar(n, a, b) -> { assert n == "g" }
+            _ -> { assert false }
+          }
+          assert len(iargs) == 1
+        }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
 }
 
 test "every call is one application node" {

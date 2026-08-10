@@ -44,6 +44,8 @@ pub type Shape =
 
 pub type Point = { x: Int, y: Int }
 
+pub type Combine = Op(f: fn(Int, Int) -> Int)
+
 pub const LIMIT: Int = 42
 
 pub fn area(s: Shape) -> Float =
@@ -57,6 +59,8 @@ EOF
 
 cat > "$OUT/proj/src/app.dawn" <<'EOF'
 use std/str
+use std/list
+use util as u
 use util.{Shape, Circle, Rect, area, helper, LIMIT, Point}
 
 trait Greet[T] {
@@ -75,6 +79,8 @@ fn compute(n: Int) -> Int = {
   let t = str.trim("  hi  ")
   let xs = [1, 2, 3]
   let total = fold(xs, 0, (acc, x) => acc + x)
+  let mapped = list.map(xs, y => y + 1)
+  let op = u.Op((lhs, rhs) => lhs + rhs)
   # a comment line
   let msg = "sum ${total} of ${p.x}"
   match s {
@@ -166,6 +172,9 @@ for needle, occ, delta in [
     ("hi(x: Point)", 1, 0), # impl method name
     ("double(n)", 1, 1),    # local fn call
     ("Point { x:", 1, 1),   # record ctor
+    ("y => y + 1", 1, 0),   # lambda param inside a module-qualified call
+    ("u.Op", 1, 2),         # qualified constructor name
+    ("(lhs, rhs) =>", 1, 1), # lambda param inside a qualified construction
 ]:
     req("textDocument/hover", at(app_uri, app_text, needle, occ, delta))
 

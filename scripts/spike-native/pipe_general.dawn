@@ -1,0 +1,71 @@
+# The general pipe (SYN-05). `|>` inserts its left side as the first *written*
+# argument of an ordinary call, whatever the callee happens to be -- a name, a
+# module-qualified name, a method, a function-typed field, or a function some
+# other call returned. Only the first three lines below were writable before;
+# the rest were parse errors, because the pipe kept its own list of right-hand
+# shapes while every other call had stopped caring what the callee was.
+#
+# The last block is the half a type checker cannot see. The pipe invents no
+# node, so a piped call happens in the order the written-out call happens in:
+# the target first, then the arguments left to right -- and the left side is
+# just the first argument, not something hoisted in front of the callee. Two
+# compilers folding the same constants cannot tell us that; two programs
+# printing as they evaluate can, which is why `maker` and `note` announce
+# themselves.
+use std/str
+
+type Handler = { name: String, run: fn(Int) -> Int }
+
+type Box = { v: Int }
+
+trait Scale[T] {
+  fn scale(x: T, k: Int) -> Int
+}
+
+impl Scale[Box] {
+  fn scale(b: Box, k: Int) -> Int = b.v * k
+}
+
+fn twice(n: Int) -> Int = n * 2
+
+fn shift(n: Int, by: Int) -> Int = n + by
+
+fn note(tag: String, v: Int) -> Int !io = {
+  println("eval ${tag}")
+  v
+}
+
+fn maker(tag: String) -> (fn(Int, Int) -> Int) !io = {
+  println("eval ${tag}")
+  (a, b) => a + b
+}
+
+pub fn main() -> Unit !io = {
+  # the three shapes the pipe always took
+  println("${21 |> twice}")
+  println("${40 |> shift(2)}")
+  println("${20 |> (n => n + 1)}")
+
+  # a module-qualified call: the alias is not a receiver, so the left side is
+  # the first argument and nothing is inserted in front of it
+  println("${"dawn" |> str.starts_with("da")}")
+
+  # a method call keeps its receiver: `1 |> xs.get()` is `xs.get(1)`, which is
+  # `get(xs, 1)` -- the left side lands after the receiver, not before it
+  println("${1 |> [10, 20, 30].get()}")
+  let b = Box { v: 7 }
+  println("${3 |> b.scale()}")
+
+  # a function-typed field, called dynamically through the field read
+  let h = Handler { name: "h", run: n => n * 10 }
+  println("${5 |> h.run}")
+
+  # a function a call returned: the callee is itself a call, and it is not
+  # re-wrapped -- the left side goes into the *outer* argument list
+  println("${1 |> maker("outer")(2)}")
+
+  # written-out order, observed: callee, then the piped left side, then the
+  # arguments after it
+  let total = note("lhs", 1) |> maker("callee")(note("arg", 2))
+  println("total=${total}")
+}

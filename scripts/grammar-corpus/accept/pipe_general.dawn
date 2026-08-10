@@ -1,0 +1,44 @@
+# EBNF `pipe_expr = or_expr { "|>" or_expr }`, which is what the production
+# always said and what the parser finally does (SYN-05). The right side used to
+# be narrowed *after* parsing to a named call, a bare name or a lambda, so the
+# forms below -- a construction, a qualified name, a method, a function-typed
+# field, a function some other call returned -- were rejected by the parser
+# even though the grammar admitted every one of them.
+#
+# Whether a piped call type-checks is a type rule and lives in
+# scripts/checker-corpus/cases/pipe.dawn; this corpus only parses.
+use std/str
+use std/list
+
+type Sum = Zero | One(x: Int)
+
+type Handler = { run: fn(Int) -> Int }
+
+fn twice(n: Int) -> Int = n * 2
+
+fn maker() -> fn(Int, Int) -> Int = (a, b) => a + b
+
+fn always_took(xs: List[Int]) -> List[Int] =
+  xs |> map(x => x * 2) |> filter(x => x > 0)
+
+fn a_bare_name(n: Int) -> Int = n |> twice
+
+fn a_lambda(n: Int) -> Int = n |> (k => k + 1)
+
+fn a_construction(n: Int) -> Sum = n |> One
+
+fn an_applied_construction(n: Int) -> Sum = n |> One()
+
+fn a_qualified_call(s: String) -> Bool = s |> str.starts_with("da")
+
+fn a_method_call(xs: List[Int]) -> Option[Int] = 0 |> xs.get()
+
+fn a_function_field(h: Handler, n: Int) -> Int = n |> h.run
+
+fn a_returned_function(n: Int) -> Int = n |> maker()(1)
+
+# `|>` may still lead its continuation line, and it still associates left
+fn vertical(xs: List[Int]) -> Int =
+  xs
+  |> map(x => x + 1)
+  |> fold(0, (a, x) => a + x)

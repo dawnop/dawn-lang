@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 07a89a53aed9cb83 -->
+<!-- doc-check: translation-of docs/spec.md @ 0c44645b1cdfa28f -->
 
 # Dawn Language Specification
 
@@ -351,6 +351,14 @@ let d = p.x                        # field access
 
 A record is sugar for a single-constructor product type, and supports pattern matching just the
 same. Fields are immutable — "modification" is functional update.
+
+**A record can only be built with braces.** `Point(1.0, 2.0)`, `Point(x: 1.0, y: 2.0)` and
+`Point()` are all errors ("record `Point` must be built with braces"), whether the parentheses
+were written directly or produced by a pipeline (§4.4). The reason is that spelling and meaning
+correspond one to one: fields in the brace form must be named, and filling a record positionally
+would turn field order into an ABI; a record's bare name is not a constructor function either
+(§2.3, last bullet). `x |> Point { ... }` is not "filling in fields" — it **calls a record value**,
+and is reported as not callable.
 
 **A field of fn type can be called directly**: `r.f(x)` calls the function value stored in the
 field, equivalent to `let g = r.f` followed by `g(x)`; the field's effects are unioned into the
@@ -1021,6 +1029,38 @@ implementations are cross-checked against this, "happens to agree" is not allowe
 `x |> f(a, b)` is equivalent to `f(x, a, b)` — it puts the left-hand side into the **first
 parameter**. `x |> f` is equivalent to `f(x)`. Standard library APIs are all designed around
 "the main datum is the first parameter" so that they work with pipelines.
+
+**`|>` is argument insertion into an ordinary call, and nothing else.** The right-hand side is
+parsed as one expression by the postfix rules of §4.3; if its outermost form **already is a call**
+(`f(a)`, `m.f(a)`, `r.m(a)`, `make()(a)`), the left-hand side goes in front of that call's
+**written** arguments; otherwise the whole right-hand side is applied to the left-hand side.
+
+```dawn
+x |> f(a)          # f(x, a)
+x |> f             # f(x)
+x |> m.f(a)        # m.f(x, a)        a module alias is not a receiver
+x |> r.m(a)        # r.m(x, a)        the receiver stays put, it is not re-inserted
+x |> make()(a)     # make()(x, a)     not make()(a)(x)
+x |> One(a)        # One(x, a)        a constructor is just another thing being called
+```
+
+The pipeline **introduces no node of its own**, and so:
+
+- **Evaluation order is the order of the call written out: the target first (a dynamic callee or
+  a receiver), then each argument in written order**, with the left-hand side being nothing but the
+  first argument. `lhs |> make()(arg)` runs `make()`, then `lhs`, then `arg`. This is specified,
+  not an accident of the implementation — a static callee has no evaluation effect, which is why a
+  common pipeline still *looks* as if the left-hand side runs first. No hidden temporary is
+  introduced to make the left-hand side run first visually.
+- **Callability, arity, duplicate named arguments and the record restriction are all decided as
+  for any call.** `x |> One(1, 2)` reports an arity error, `x |> k` (with `k: Int`) reports "not a
+  function", `x |> Point { ... }` reports "not callable", and `x |> Point(1)` reports that a record
+  must be built with braces (§2.4).
+- **A module's functions are still not bare function values** (§10.3): `x |> m.f` reports that the
+  module exports no such value. Only `x |> m.f(a)`, with the `(...)`, is a call; the difference
+  between the two has nothing to do with the pipeline.
+- A **function-valued field** of a record is called dynamically as usual: `x |> r.callback` is
+  `r.callback(x)`.
 
 ### 4.5 Lambda
 

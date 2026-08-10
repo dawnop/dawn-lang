@@ -3666,8 +3666,12 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       }
     }
     EUnsafePure(body, lo, hi) -> check_unsafe_pure(cx, body, expected, lo, hi)
-    ECtor(cname, cargs, spread, has_parens, cclo, cchi, lo, hi) ->
-      check_ctor_call(cx, cname, cargs, spread, has_parens, expected, None, cclo, cchi, lo, hi)
+    ECtor(cname, cargs, spread, has_braces, cclo, cchi, lo, hi) ->
+      # the ECtor node itself is only ever a head: bare, or the braced record
+      # literal. The parenthesised spelling is an EApply over the bare head and
+      # reaches check_ctor_call from check_apply, tagged CApply.
+      check_ctor_call(cx, cname, cargs, spread, if has_braces { CBraces } else { CBare },
+        expected, None, cclo, cchi, lo, hi)
     ELambda(params, body, sugar, lo, hi) ->
       check_lambda(cx, params, body, sugar, false, expected, lo, hi)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
@@ -3691,7 +3695,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
           match qual_ctor(cx, target, fname) {
             Some(k) -> {
               let no_args: List[Arg] = []
-              check_ctor_call(cx, fname, no_args, None, false, expected, Some(k),
+              check_ctor_call(cx, fname, no_args, None, CBare, expected, Some(k),
                 flo, fhi, lo, hi)
             }
             None ->
@@ -4381,7 +4385,7 @@ fn check_apply(
   match target {
     ECtor(cname, cargs, sp, hp, cclo, cchi, _, _) ->
       if not hp && len(cargs) == 0 && sp == None {
-        return check_ctor_call(cx, cname, args0, None, true, expected, None, cclo, cchi, lo, hi)
+        return check_ctor_call(cx, cname, args0, None, CApply, expected, None, cclo, cchi, lo, hi)
       }
     EFieldAcc(recv, fname, flo, fhi, _, _) ->
       match qual_ctor(cx, recv, fname) {
@@ -4389,7 +4393,7 @@ fn check_apply(
         # has never seen it, and threading it in is an inference change, not
         # part of unifying the syntax.
         Some(k) ->
-          return check_ctor_call(cx, fname, args0, None, true, no_expected(), Some(k),
+          return check_ctor_call(cx, fname, args0, None, CApply, no_expected(), Some(k),
             flo, fhi, lo, hi)
         # `recv.member(args)` where the parser could not know `member` names a
         # method: after `.` an UPPERCASE word is EFieldAcc and a lowercase one
@@ -5565,6 +5569,22 @@ fn infer_blocked_by_missing(ci: CtorI, slots: List[Option[Int]], vid: Int) -> Bo
   in_missing && not in_present
 }
 
+## How the constructor was *spelled* at this use site. This used to be one
+## `has_parens: Bool`, and that Bool could not tell `Point { x: 1 }` from
+## `Point(1)`: both arrived as `true`, so the braces-only rule for records
+## (spec §2.4) checked nothing on the parenthesised spelling and `Point(1, 2)`
+## compiled. Three spellings, three cases -- the record rule then falls out of
+## a match instead of out of a negation nobody could read.
+type CtorUse =
+  # `None`, `Point` -- no arguments written at all
+  | CBare
+# `Point { x: 1 }` / `Point { ..p }` -- the record literal, the only way to
+# build a record
+  | CBraces
+# `Some(1)` / `m.C(1)` -- the general application postfix over a constructor
+# head (SYN-02), including the one a pipe writes for you (SYN-05)
+  | CApply
+
 ## Ctor(args) / Record { fields } / bare Name (the Kotlin checkCtorCall): also
 ## the landing site for SCREAMING_SNAKE constant references.
 ## `pre` is the constructor already resolved by the caller -- how a qualified
@@ -5577,7 +5597,7 @@ fn check_ctor_call(
   cname: String,
   cargs: List[Arg],
   spread: Option[Expr],
-  has_parens: Bool,
+  spelling: CtorUse,
   expected: Option[Ty],
   pre: Option[(Int, Int)],
   cclo: Int,
@@ -5585,6 +5605,7 @@ fn check_ctor_call(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) !io = {
+  let spelled_out = spelling != CBare
   var cx1 = cx
   let has_spread = match spread {
     Some(_) -> true
@@ -5606,7 +5627,7 @@ fn check_ctor_call(
       if visible { cd = map.get(cx1.consts, cname) }
       match cd {
         Some(ct) -> {
-          if has_parens || len(cargs) > 0 || has_spread {
+          if spelled_out || len(cargs) > 0 || has_spread {
             return (cerr(cx1, "`" ++ cname ++ "` is a constant, not a constructor", cclo, cchi),
               TyError, XError(lo, hi))
           }
@@ -5661,7 +5682,18 @@ fn check_ctor_call(
     }
     _ -> ()
   }
-  if not has_parens && n > 0 {
+  # a record is built with braces and with nothing else (spec §2.4). `Point(1, 2)`
+  # is the spelling this rule exists to refuse, and until CtorUse existed it was
+  # indistinguishable here from `Point { x: 1, y: 2 }` -- so it compiled. The
+  # check sits on the spelling rather than on the arguments because `Point()` is
+  # the same mistake with nothing inside it, and because the pipe (SYN-05) can
+  # now write an application over any head, including this one.
+  if spelling == CApply && ad.is_record {
+    return (cerr_h(cx1,
+      "record `" ++ ci.name ++ "` must be built with braces: " ++ ci.name ++ " { ... }",
+      lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci)), TyError, XError(lo, hi))
+  }
+  if spelling == CBare && n > 0 {
     # a bare constructor with fields, in a function-typed position, is a function value
     if not ad.is_record && exp_is_fn {
       return check_ctor_value(cx1, aid, cslot, exp_fn_ps, exp_fn_ret, exp_fn_eff, lo, hi)
@@ -5676,7 +5708,7 @@ fn check_ctor_call(
       TyError, XError(lo, hi))
   }
   # a bare nullary constructor where a function is expected: a value, not a function
-  if not has_parens && n == 0 && exp_is_fn {
+  if spelling == CBare && n == 0 && exp_is_fn {
     return (cerr_h(cx1, "`" ++ ci.name ++ "` is a value, not a function (it takes no fields)",
       lo, hi, "use it directly; only constructors with fields can be passed as functions"),
       TyError, XError(lo, hi))

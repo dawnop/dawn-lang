@@ -58,6 +58,38 @@
 
 ## SYN-05 — P2 — pipe 仍绑定旧调用 AST 形状
 
+- **后续处置（2026-08-10）：已修。** 取「pipe 只做参数插入」一路，不新增
+  AST/TAST/Core 节点：RHS 最外层是 `EApply` 就把左侧插进它的 args 首位，是 `EMethod`
+  就插进它的 args 首位（**接收者不动、不重复插入**），否则形成 `rhs(left)`。于是
+  构造器、限定调用、方法、函数值字段与「调用返回的函数」都按普通调用走，
+  可调用性、元数、重名参数与记录限制全部由 checker 回答；原先 pipe 专有的那条
+  parser 诊断随之退役，换成普通的调用诊断。既有合法 pipe 的 AST 逐字段不变
+  （三条旧分支重建的节点与直接透传的节点相同），故 `parse backend-dawn` 无字节差。
+  **求值顺序按普通调用规定为 target-first**（先动态 callee/接收者，再按写序求参数，
+  左侧只是第一个参数），写进规范 §4.4 而不是留给实现；不为「视觉上左侧在前」引入
+  隐藏临时变量或 `EPipe`。`x |> m.f`（无括号）仍拒绝——模块函数不是裸函数值（§10.3）。
+- **顺带修掉的漏洞：** parser 与 checker 共用一个 `has_parens: Bool`，它分不开
+  `Point { x: 1 }` 与 `Point(1)`——两者都是 `true`，于是记录的 braces-only 规则
+  （§2.4）在带括号的拼写上根本没生效，`Point(1, 2)` 一直能编过。checker 改用
+  `CtorUse = Bare | Braces | Apply`，`Apply + record`（含 pipe 生成的）统一报
+  「record must be built with braces」；`x |> Point { ... }` 是**调用一个记录值**，
+  报不可调用。树内两处依赖该漏洞的 checker corpus fixture（`effect_row_verify` 的
+  `Thunk(...)`、`effect_settle` 的 `Box(...)`）已改成花括号，各自原本要钉的
+  effect-row 诊断不变。
+- **LSP 同批：** `EApply(EFieldAcc) + XCtor`（限定构造，如 `m.C(a)`）此前落到
+  `walk_apply_value` 与 `XApply` 对不上，构造器签名与每个实参的类型全丢；
+  `walk_method_children` 只认「typed args 比写下来的多一个」的 UFCS 形状，
+  于是模块限定调用 `m.f(a)` 的实参类型也全丢。两条都已补上。
+- **门禁：** parser 内联测试（插入位置、接收者、named/trailing metadata、优先级与
+  结合性）、`scripts/checker-corpus/cases/pipe.dawn` 与 `records.dawn`（记录 Apply
+  三种拼写）、`scripts/grammar-corpus/accept/pipe_general.dawn`、
+  `scripts/spike-native/pipe_general.dawn`（**双后端跑一个会打印的程序**，把
+  target-first 顺序钉成 `eval callee / eval lhs / eval arg` 这三行）、
+  `scripts/selfhost-lsp-diff.sh` 新增三个 hover 探针。九个 compiling mutant 各自
+  击穿一句断言：恢复 RHS whitelist、漏 method prepend、左侧 append、包裹最外层 call、
+  丢 named/trailing metadata、改优先级/结合性、args-before-callee、漏 record Apply
+  拒绝、把裸 module member 偷转成函数值。
+
 - **证据：S。** pipe 只接受 `EApply(EVar)`、裸 `EVar` 或 lambda：`selfhost/src/front/parser.dawn:1251`；一般 postfix application 已在 `selfhost/src/front/parser.dawn:1567` 落地。
 - **边界：** `x |> Some`、`x |> Some(1)`、`x |> list.fold(...)`、`x |> sink.put()`、`x |> make()(1)` 都不能按普通调用模型工作。
 - **影响：** 构造器、模块限定函数、方法和函数值在 `()` 中是一等 callee，在 pipe 中却不是；库无法围绕统一的“首参数数据”API 设计。
