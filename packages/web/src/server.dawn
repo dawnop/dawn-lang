@@ -18,8 +18,8 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, text, binary, header, headers_all, query, query_all, param, param_segs}
-use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get}
+use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, with_header}
+use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, tagged}
 use java "java.net.Socket"
 use java "java.io.InputStream"
 use java "java.io.OutputStream"
@@ -351,7 +351,11 @@ fn join_with(xs: List[String], sep: String) -> String =
 fn rev[T](xs: List[T]) -> List[T] =
   map(range(0, len(xs)), i => xs[len(xs) - 1 - i])
 
-fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, errors: ErrorFormat) -> Result[Request, HttpError] !io = {
+# Everything a Request holds that comes off the request line and the headers,
+# which is everything except the body. Reading it cannot fail and cannot leave
+# anything on disk, which is what makes it usable on the paths where the body is
+# deliberately never read (`handle`'s two early refusals).
+fn bodyless_request(ex: HttpExchange, meta: Option[RouteMeta]) -> Request !io = {
   let uri = ex.getRequestURI()!
   let no_params: Map[String, List[String]] = map.empty()
   let no_query: Map[String, List[String]] = map.empty()
@@ -364,6 +368,21 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, error
     Some(s) -> multimap(parse_query(s))
     None -> no_query
   }
+  Request {
+    method: ex.getRequestMethod()!,
+    path: uri.getPath()!,
+    raw_path: uri.getRawPath()!,
+    params: no_params,
+    query: q,
+    headers: read_headers(ex),
+    body: "",
+    raw: bytes.utf8(""),
+    body_file: None,
+    route: meta,
+  }
+}
+
+fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, errors: ErrorFormat) -> Result[Request, HttpError] !io = {
   # A "stream-body" route never sees the body in memory: it goes to a temp file
   # and the handler gets the path. Everything else reads as before, under the
   # ceiling — except routes tagged "raw-body" (uploads bounded by nginx's
@@ -376,24 +395,10 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, error
   # left below is record construction, which cannot. (These reads used to sit
   # inside the record literal, after the spill — a malformed request line
   # faulting there left the temp file with no owner.)
-  let method = ex.getRequestMethod()!
-  let path = uri.getPath()!
-  let raw_path = uri.getRawPath()!
-  let hs = read_headers(ex)
+  let base = bodyless_request(ex, meta)
   let (body, raw) = if streaming { ("", bytes.utf8("")) } else { read_body(ex, limit)? }
   let bf: Option[String] = if streaming { Some(spill_body(errors, ex)?) } else { None }
-  Ok(Request {
-    method: method,
-    path: path,
-    raw_path: raw_path,
-    params: no_params,
-    query: q,
-    headers: hs,
-    body: body,
-    raw: raw,
-    body_file: bf,
-    route: meta,
-  })
+  Ok(Request { ..base, body: body, raw: raw, body_file: bf })
 }
 
 # The ownership rule for a spilled body, with its two moving parts passed in so
@@ -491,59 +496,94 @@ fn meta_of(d: Dispatch) -> Option[RouteMeta] =
     WrongMethod -> None
   }
 
+# Compose the middleware and run `core` under them, rendering whatever comes
+# back. First middleware in the list is outermost: [a, b] runs a(b(core)).
+#
+# Every answer this server gives goes through here, which is the point: a
+# response the middleware never saw is a response with no access-log line and no
+# Access-Control-* headers, and a browser will not let the page read a
+# cross-origin error it cannot see the headers of.
+fn serve_through(
+  middleware: List[Middleware],
+  errors: ErrorFormat,
+  req: Request,
+  core: Handler,
+) -> Response !io = {
+  let app = fold(rev(middleware), core, (h, m) => m(h))
+  match catch_panic(() => app(req)) {
+    Ok(Ok(r)) -> r
+    Ok(Err(e)) -> error_response_with(errors, e)
+    Err(m) -> {
+      println("request panicked: ${m.message}")
+      error_response_with(errors, http_error(500, errors.internal_message))
+    }
+  }
+}
+
 fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, errors: ErrorFormat, ex: HttpExchange) -> Unit !io = {
   # a handler panic is isolated to this request: catch_panic turns it into a 500
   # instead of resetting the connection or leaking the virtual thread (spec §9.8).
   let outcome = catch_panic(() => {
     let raw_path = ex.getRequestURI()!.getRawPath()!
-    # WEB-03: a dot segment ("." / "..", raw or percent-encoded) is refused
-    # here, before dispatch — so the 400 covers every route, including paths
-    # nothing would match. Like the 413 below, this happens before any
-    # middleware runs: there is no Request yet.
-    if has_dot_segment(raw_path) {
-      println("${ex.getRequestMethod()!} $raw_path -> 400 (dot segment)")
-      error_response_with(errors, http_error(400, "path contains a dot segment"))
-    } else {
-      # Dispatch BEFORE touching the body: method and path come from the request
-      # line, and the matched route's tags decide how the body is read at all
-      # ("stream-body" spills it to disk instead of into memory). The same decision
-      # is executed by run_dispatch below — no second table walk.
-      #
-      # WEB-03: routing runs on the *raw* path, split on "/" first, each segment
-      # percent-decoded on its own — an encoded slash (%2F) stays inside its
-      # segment instead of minting a route boundary.
-      let d = dispatch_segs(routes, ex.getRequestMethod()!, map(raw_segs(raw_path), s => decode_path_seg(s)))
-      # An oversized body is refused before it is read, which also means before any
-      # middleware runs: there is no Request to hand them. That costs the 413 its
-      # access-log line and its CORS headers, and is the price of the refusal
-      # happening early enough to be worth anything.
-      match build_request(ex, meta_of(d), max_body, errors) {
-        Err(e) -> {
-          println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
-          error_response_with(errors, e)
-        }
-        Ok(req) -> {
-          # the temp body file lives exactly as long as this branch, and the
-          # bracket is what makes that true on every way out — including the ones
-          # the catch_panic below does not see, such as a panic while rendering
-          # the 500 for a panic. It is the *first* thing here so that nothing at
-          # all sits between build_request handing ownership over and this
-          # taking it; build_request itself deletes the file on every path where
-          # it fails.
-          with held <- bracket(req, drop_body_file)
-          # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
-          # still wraps the core, so CORS preflight and logging cover unmatched requests.
-          let app = fold(rev(middleware), (rq: Request) => run_dispatch(d, rq), (h, m) => m(h))
-          let served = catch_panic(() => app(held))
-          match served {
-            Ok(Ok(r)) -> r
-            Ok(Err(e)) -> error_response_with(errors, e)
-            Err(m) -> {
-              println("request panicked: ${m.message}")
-              error_response_with(errors, http_error(500, errors.internal_message))
-            }
+    # Dispatch BEFORE touching the body: method and path come from the request
+    # line, and the matched route's tags decide how the body is read at all
+    # ("stream-body" spills it to disk instead of into memory). The same decision
+    # is executed by run_dispatch below — no second table walk.
+    #
+    # WEB-03: routing runs on the *raw* path, split on "/" first, each segment
+    # percent-decoded on its own — an encoded slash (%2F) stays inside its
+    # segment instead of minting a route boundary.
+    let d = dispatch_segs(routes, ex.getRequestMethod()!, map(raw_segs(raw_path), s => decode_path_seg(s)))
+    let meta = meta_of(d)
+    # The two refusals below happen before the body is read, and used to happen
+    # before the middleware chain as well, on the grounds that there was no
+    # Request to hand it. There is: everything a Request holds apart from the
+    # body comes off the request line and the headers, and `bodyless_request`
+    # reads exactly that. So they go through the chain like every other answer,
+    # and a cross-origin 400 or 413 now carries the Access-Control-* headers
+    # without which a browser refuses to let the page read the error body — the
+    # one case where reading it matters most (LIB-10).
+    #
+    # What the middleware sees on these two paths is honest but partial: `raw`
+    # and `body` are empty, because not reading the body is the entire point of
+    # refusing this early. A middleware that inspects the body sees an empty one
+    # here; one that inspects the method, path, headers or route tags sees the
+    # truth. `with_body_limit` is in the second group, and passes.
+    #
+    # The dot-segment check runs after dispatch rather than before so that the
+    # 400 carries the matched route's tags: a WebDAV path is "no-cors" whether
+    # or not it contains a dot segment, and the refusal should not be the one
+    # answer on that route that gets stamped.
+    let attempt: Result[Request, HttpError] =
+      # WEB-03: a dot segment ("." / "..", raw or percent-encoded) is refused on
+      # every route, including paths nothing would match. Dispatch has already
+      # run, but no handler has: the decision is only read for its tags.
+      if has_dot_segment(raw_path) {
+        println("${ex.getRequestMethod()!} $raw_path -> 400 (dot segment)")
+        Err(http_error(400, "path contains a dot segment"))
+      } else {
+        # an oversized body is refused before it is read, which is the whole
+        # value of the refusal; a spill that failed is a 500 the same way
+        match build_request(ex, meta, max_body, errors) {
+          Err(e) -> {
+            println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
+            Err(e)
           }
+          Ok(req) -> Ok(req)
         }
+      }
+    match attempt {
+      Err(e) -> serve_through(middleware, errors, bodyless_request(ex, meta), _rq => Err(e))
+      Ok(req) -> {
+        # the temp body file lives exactly as long as this branch, and the
+        # bracket is what makes that true on every way out — including the ones
+        # the catch_panic inside serve_through does not see, such as a panic
+        # while rendering the 500 for a panic. It is the *first* thing here so
+        # that nothing at all sits between build_request handing ownership over
+        # and this taking it; build_request itself deletes the file on every
+        # path where it fails.
+        with held <- bracket(req, drop_body_file)
+        serve_through(middleware, errors, held, (rq: Request) => run_dispatch(d, rq))
       }
     }
   })
@@ -809,6 +849,22 @@ fn echo_name(req: Request) -> Result[Response, HttpError] !io =
 fn echo_rest(req: Request) -> Result[Response, HttpError] !io =
   Ok(text(200, join_with(param_segs(req, "rest"), "|")))
 
+# A stand-in for with_cors, shaped the same way: it stamps both branches and
+# skips a route tagged "no-cors". Written here rather than imported so that
+# server.dawn does not take a dependency on middleware.dawn for a test; that
+# with_cors turns "the chain ran" into Access-Control-* headers is middleware's
+# own contract, tested there.
+fn stamping(next: Handler) -> Handler =
+  req =>
+  if meta_has_tag(req.route, "no-cors") {
+    next(req)
+  } else {
+    match next(req) {
+      Ok(r) -> Ok(with_header(r, "X-Stamped", "1"))
+      Err(e) -> Err(HttpError { ..e, headers: e.headers ++ [("X-Stamped", "1")] })
+    }
+  }
+
 fn echo_cookies(req: Request) -> Result[Response, HttpError] !io =
   Ok(text(200, unwrap_or(header(req, "Cookie"), "-") ++ "|" ++ join_with(headers_all(req, "cookie"), ";")))
 
@@ -1038,6 +1094,49 @@ test "dot segments are 400 before routing, on routed and unrouted paths alike" {
   assert str.starts_with(raw_http(port, get_line("/zzz/../q")), "HTTP/1.1 400")
   # sanity: the clean path still routes
   assert str.starts_with(raw_http(port, get_line("/b")), "HTTP/1.1 200")
+  srv.stop(0)
+}
+
+test "the early 400 and 413 go through the middleware chain, so they carry CORS" {
+  # LIB-10: both refusals happen before the body is read and used to happen
+  # before the middleware too, so a cross-origin 400/413 arrived with no
+  # Access-Control-* at all and the browser would not let the page read it.
+  let routes = [route_post("/p", hello_handler), route_get("/b", hello_handler)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  # max_body 4, so a five-byte body is refused before it is read
+  srv.createContext("/", ex => handle(routes, [stamping], 4, default_errors(), ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+
+  # the response text is lowercased before the header check: jdk.httpserver
+  # title-cases the names it writes, so `X-Stamped` goes out as `X-stamped`
+  let dot = raw_http(port, get_line("/a/../b"))
+  assert str.starts_with(dot, "HTTP/1.1 400")
+  assert str.contains(str.to_lower(dot), "x-stamped: 1")
+
+  let big = raw_http(port,
+    "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+  assert str.starts_with(big, "HTTP/1.1 413")
+  assert str.contains(str.to_lower(big), "x-stamped: 1")
+
+  # and an ordinary answer is unchanged
+  let ok = raw_http(port, get_line("/b"))
+  assert str.starts_with(ok, "HTTP/1.1 200")
+  assert str.contains(str.to_lower(ok), "x-stamped: 1")
+  srv.stop(0)
+}
+
+test "an early refusal on a no-cors route is not stamped" {
+  # the dot-segment check runs after dispatch precisely so this holds: a WebDAV
+  # path is no-cors whether or not it contains a dot segment, and the refusal
+  # must not be the one answer on that route that carries CORS headers
+  let routes = [tagged(route_get("/dav/{rest*}", hello_handler), ["no-cors"])]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [stamping], DEFAULT_MAX_BODY, default_errors(), ex))
+  srv.start()
+  let resp = raw_http(srv.getAddress()!.getPort(), get_line("/dav/../secret"))
+  assert str.starts_with(resp, "HTTP/1.1 400")
+  assert not str.contains(str.to_lower(resp), "x-stamped")
   srv.stop(0)
 }
 

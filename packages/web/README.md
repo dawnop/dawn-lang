@@ -85,6 +85,17 @@ branch was written `next(req)?`, which handed the `Err` past the stamp — a
 cross-origin `4xx`/`5xx` arrived with no `Access-Control-*` at all and the
 browser refused to let the page read the error body.
 
+Since 3.0 it covers the server's own two early refusals too — the `400` for a
+dot segment and the `413` for an oversized body. Both are decided before the
+body is read, and used to be rendered before the middleware chain on the grounds
+that there was no `Request` yet. There is: everything a `Request` holds apart
+from the body comes off the request line and the headers. What the middleware
+sees on those paths is honest but partial — `body` and `raw` are empty, because
+not reading the body is the whole point of refusing this early — and
+`with_body_limit`, which reads `raw`, passes. The dot-segment check runs after
+dispatch so that its `400` carries the matched route's tags: a WebDAV path is
+`no-cors` whether or not it contains a dot segment.
+
 ## Response headers (3.0)
 
 A field value is one line by definition (RFC 9110 §5.5) and a field name is a
