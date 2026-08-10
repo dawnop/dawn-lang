@@ -204,10 +204,11 @@ jobs:
     # of steps and the job came in *faster* than the previous 225s -- runner
     # variance, which is exactly why the bound is the worse of the two figures
     # and not the one that just happened. Its call-site section then added 28s
-    # measured locally (25s -> 53s), so the bound moves to 277s on the same
-    # rule: predicted from the worse figure, not from the lucky one.
-    # budget: 3x 277s worst observed
-    timeout-minutes: 14
+    # locally (25s -> 53s) but 42s on the runner (25s -> 67s), where the two
+    # private compiler builds it makes are not competing with a laptop's other
+    # cores; 295s measured in run 31375903534, and that is the figure below.
+    # budget: 3x 295s worst observed
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -349,8 +350,8 @@ jobs:
       # `io.write_file`. It lands in this job rather than next to the delete
       # contract (which spike-native's full corpus run owns) because it wants
       # both a JVM compile and a `cc`, and `native-diff` is the critical path
-      # while this job is not: 53s measured locally, and `contracts` was 218s
-      # of a 13min budget before the call-site section.
+      # while this job is not: 67s on the runner (53s locally), and `contracts`
+      # was 218s of a 13min budget before the call-site section.
       - name: atomic write contract
         run: ./scripts/atomic-write-contract/run.sh
 
