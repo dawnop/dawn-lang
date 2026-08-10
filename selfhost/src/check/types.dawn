@@ -345,17 +345,102 @@ pub const CHAR_OPAQUE_ID: Int = -2
 ## The type of a character literal: `Char`, an opaque `Int`.
 pub fn ty_char() -> Ty = TyOpaque(CHAR_OPAQUE_ID, "Char", "std/char", TyInt)
 
-## The builtin scalar for a name, or None.
+## Who may write a compiler-owned type name today. This is surface policy,
+## not a permanent property: SEM-14 may add return-position access for Never
+## here without inventing another inventory.
+pub type BuiltinTypeAccess =
+  | BtPublic
+  | BtStdOnly
+  | BtCompilerOnly
+
+pub type BuiltinTypeBuild =
+  | BtLeaf(ty: Ty)
+  | BtList
+  | BtMap
+  | BtSet
+  | BtArray
+
+## One compiler-owned type name. `params` is both its arity and its rendered
+## generic spelling; consumers filter the current `access` policy.
+pub type BuiltinTypeI = {
+  name: String,
+  params: List[String],
+  access: BuiltinTypeAccess,
+  build: BuiltinTypeBuild
+}
+
+## The compiler-owned type inventory, in user-facing display order.
+## Prelude ADTs are deliberately absent: Option/Result/ForeignError are
+## nominal declarations in `prelude_adts()`, not builtin constructors.
+pub fn builtin_type_inventory() -> List[BuiltinTypeI] = [
+  BuiltinTypeI { name: "Int", params: [], access: BtPublic, build: BtLeaf(TyInt) },
+  BuiltinTypeI { name: "Char", params: [], access: BtPublic, build: BtLeaf(ty_char()) },
+  BuiltinTypeI { name: "Float", params: [], access: BtPublic, build: BtLeaf(TyFloat) },
+  BuiltinTypeI { name: "Bool", params: [], access: BtPublic, build: BtLeaf(TyBool) },
+  BuiltinTypeI { name: "String", params: [], access: BtPublic, build: BtLeaf(TyString) },
+  BuiltinTypeI { name: "Bytes", params: [], access: BtPublic, build: BtLeaf(TyBytes) },
+  BuiltinTypeI { name: "Unit", params: [], access: BtPublic, build: BtLeaf(TyUnit) },
+  BuiltinTypeI { name: "List", params: ["T"], access: BtPublic, build: BtList },
+  BuiltinTypeI { name: "Map", params: ["K", "V"], access: BtPublic, build: BtMap },
+  BuiltinTypeI { name: "Set", params: ["T"], access: BtPublic, build: BtSet },
+  BuiltinTypeI { name: "Array", params: ["T"], access: BtStdOnly, build: BtArray },
+  BuiltinTypeI { name: "Never", params: [], access: BtCompilerOnly, build: BtLeaf(TyNever) }
+]
+
+pub fn builtin_type_at(name: String) -> Option[BuiltinTypeI] = {
+  for info in builtin_type_inventory() {
+    if info.name == name { return Some(info) }
+  }
+  None
+}
+
+pub fn builtin_type_visible(info: BuiltinTypeI, is_std: Bool) -> Bool =
+  match info.access {
+    BtPublic -> true
+    BtStdOnly -> is_std
+    BtCompilerOnly -> false
+  }
+
+pub fn public_builtin_types() -> List[BuiltinTypeI] = {
+  var out: List[BuiltinTypeI] = []
+  for info in builtin_type_inventory() {
+    if info.access == BtPublic { out = out ++ [info] }
+  }
+  out
+}
+
+pub fn public_builtin_type_names() -> List[String] =
+  map(public_builtin_types(), info => info.name)
+
+pub fn builtin_type_render(info: BuiltinTypeI) -> String =
+  if len(info.params) == 0 {
+    info.name
+  } else {
+    info.name ++ "[" ++ join(info.params, ", ") ++ "]"
+  }
+
+## Build a type after the resolver has checked arity and resolved every arg.
+pub fn builtin_type_apply(info: BuiltinTypeI, args: List[Ty]) -> Ty =
+  match info.build {
+    BtLeaf(ty) -> ty
+    BtList -> TyList(args[0])
+    BtMap -> TyMap(args[0], args[1])
+    BtSet -> TySet(args[0])
+    BtArray -> TyArray(args[0])
+  }
+
+## The public nongeneric compiler-owned type for a name, or None.
+## SYN-11 intentionally reads this narrow view: generic, std-only and
+## compiler-only entries must not turn a bare constructor into an alias hint.
 pub fn ty_named(name: String) -> Option[Ty] =
-  match name {
-    "Int" -> Some(TyInt)
-    "Char" -> Some(ty_char())
-    "Float" -> Some(TyFloat)
-    "Bool" -> Some(TyBool)
-    "String" -> Some(TyString)
-    "Bytes" -> Some(TyBytes)
-    "Unit" -> Some(TyUnit)
-    _ -> None
+  match builtin_type_at(name) {
+    Some(info) ->
+      if info.access == BtPublic && len(info.params) == 0 {
+        Some(builtin_type_apply(info, []))
+      } else {
+        None
+      }
+    None -> None
   }
 
 # ---- ADT / ctor / field info (id + table; docs/selfhost-checker.md §二) ----
@@ -2360,6 +2445,46 @@ test "prelude shapes" {
   assert not is_ord_scalar(TyFloat)
   assert is_eq_scalar(TyFloat)
   assert not is_hash_scalar(TyFloat)
+}
+
+test "builtin type inventory keeps its surface boundaries" {
+  assert public_builtin_type_names() ==
+    ["Int", "Char", "Float", "Bool", "String", "Bytes", "Unit", "List", "Map", "Set"]
+  var std_only: List[String] = []
+  var compiler_only: List[String] = []
+  for info in builtin_type_inventory() {
+    match info.access {
+      BtPublic -> { assert builtin_type_visible(info, false) }
+      BtStdOnly -> {
+        std_only = std_only ++ [info.name]
+        assert not builtin_type_visible(info, false)
+        assert builtin_type_visible(info, true)
+      }
+      BtCompilerOnly -> {
+        compiler_only = compiler_only ++ [info.name]
+        assert not builtin_type_visible(info, false)
+        assert not builtin_type_visible(info, true)
+      }
+    }
+  }
+  assert std_only == ["Array"]
+  assert compiler_only == ["Never"]
+  assert ty_named("Char") == Some(ty_char())
+  assert ty_named("Bytes") == Some(TyBytes)
+  assert ty_named("List") == None
+  assert ty_named("Array") == None
+  assert ty_named("Never") == None
+  let li = builtin_type_at("List").expect("List")
+  let ma = builtin_type_at("Map").expect("Map")
+  assert builtin_type_render(li) == "List[T]"
+  assert builtin_type_render(ma) == "Map[K, V]"
+  assert builtin_type_apply(li, [TyInt]) == TyList(TyInt)
+  assert builtin_type_apply(ma, [TyString, TyInt]) == TyMap(TyString, TyInt)
+
+  # Prelude ADTs are a separate nominal layer, not compiler-owned type names.
+  let prelude = prelude_adts()
+  let prelude_names = sort(map(map.keys(prelude), id => adt_of(prelude, id).name))
+  assert prelude_names == ["ForeignError", "Option", "Result"]
 }
 
 test "builtin table renders signatures" {

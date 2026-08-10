@@ -127,8 +127,12 @@
   mutant 分别恢复旧五名 parser 分支、排除 `Char`/`Bytes`、删除 singleton/nullary 边界，
   各自只击穿归属断言；连同原有两项 recovery mutant，合同移至现有 checker-corpus job，
   不新增冷启动 job。
-- **留存余账：** unknown-type 建议 inventory、LSP 类型补全、spec builtin taxonomy 和
-  `doc --builtins` 双向完整性属于 B200-1B，本项不冒充一并修复。
+- **B200-1B 后续（2026-08-10）：已收口。** checker 现以分层 inventory 统一驱动类型解析、
+  声明冲突、unknown-type 建议，LSP 与 `doc --builtins` 只读取 public view；`Array` 保持
+  std-only，`Never` 保持 compiler-only，prelude ADT 仍由自己的名义表负责。parser 不读取
+  这张语义 inventory，SYN-11 的 singleton/nullary 边界不变。`doc --builtins` 同时发布公开
+  类型表，并对 public function 表做双向、无重复完整性检查；独立 compiling mutants 固定
+  checker、LSP 与 doc 三个消费边界。
 
 - **证据：V。** `type`/`alias` 误写提示只硬编码五个 scalar：`selfhost/src/front/parser.dawn:452`；checker 的真实 builtin 表包含 `Char`、`Bytes`：`selfhost/src/check/types.dawn:337`。
 - **边界：** `type Letter = Char` 被解析成含 nullary constructor `Char` 的 ADT，最后报 constructor collision，而不是建议 `alias Letter = Char`。

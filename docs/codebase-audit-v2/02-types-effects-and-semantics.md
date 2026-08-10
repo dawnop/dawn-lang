@@ -159,9 +159,14 @@
 
 ## SEM-14 — P2 — `Never` 是内部类型，却不能由用户命名
 
-- **证据：S。** checker 有 `TyNever`：`selfhost/src/check/types.dawn:210`，builtin name resolver 没有 `Never`：`selfhost/src/check/types.dawn:336`；规范已经使用该概念：`docs/spec.md:1200`。`io.exit` 因而只能声明 `Unit`：`std/io.dawn:47`、`selfhost/src/check/types.dawn:1697`。
+- **证据：S。** checker 有 `TyNever`，分层 builtin inventory 也把 `Never` 明确归为
+  compiler-only；当前 public resolver 仍有意不接受它。规范已经使用该概念，`io.exit`
+  因而只能声明 `Unit`。B200-1B 只消除了 inventory 漂移，没有提前执行本项的公开语义裁决。
 - **影响：** 用户不能声明发散函数；退出后的代码被视为可达，branch/callback type 不精确。
-- **建议：** 暴露 reserved builtin `Never`，限制 value construction，完善 JVM/C unreachable return lowering，并把 `io.exit` 改为 `-> Never !io`。
+- **建议：** 把 `Never` 暴露为硬保留的 compiler-owned bottom，但首版只允许在函数返回位
+  直接书写；参数、字段、const 与 generic storage 位置继续拒绝。JVM direct/dynamic bottom call
+  必须统一发 verifier 可见的终止序列，native 同步固定 non-fallthrough。`io.exit` 维持
+  `-> Unit !io`，不随本项改签名。
 
 ## SEM-15 — P2 — `bracket` 的双失败语义未定义且文字承诺过强（已修）
 

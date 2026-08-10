@@ -18,7 +18,9 @@ use check/types.{
   TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   EPure, EIo, EffVar, ELabeled, eff_union, eff_base, eff_labels,
-  adt_of, trait_of, subst, ty_named,
+  adt_of, trait_of, subst,
+  builtin_type_at, builtin_type_visible, builtin_type_apply, builtin_type_render,
+  public_builtin_type_names,
   builtins, internal_builtins,
   prelude_adts, prelude_traits, first_minted_id
 }
@@ -412,9 +414,6 @@ fn is_upper_name(s: String) -> Bool = {
   false
 }
 
-pub fn builtin_type_names() -> List[String] =
-  ["Int", "Float", "Bool", "String", "Bytes", "Unit", "List", "Map", "Set"]
-
 # ---- type resolution ----
 
 ## Resolve an alias target once, memoized; TyError (and an error) on a cycle.
@@ -687,44 +686,26 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
     }
     None -> ()
   }
-  if name == "List" {
-    if len(targs) != 1 {
-      return (cerr(cx, "List takes exactly one type argument: List[T]", lo, hi), TyError)
-    }
-    let (cx1, e) = resolve_type(cx, targs[0])
-    return (cx1, TyList(e))
-  }
-  if name == "Map" {
-    if len(targs) != 2 {
-      return (cerr(cx, "Map takes exactly two type arguments: Map[K, V]", lo, hi), TyError)
-    }
-    let (cx1, k) = resolve_type(cx, targs[0])
-    let (cx2, v) = resolve_type(cx1, targs[1])
-    return (cx2, TyMap(k, v))
-  }
-  # Array is the backend's collection primitive, not part of the language's
-  # surface: only std may name it, so outside std the name falls through to the
-  # ordinary lookups and a user type called `Array` still means their own.
-  if name == "Array" && cx.is_std_module {
-    if len(targs) != 1 {
-      return (cerr(cx, "Array takes exactly one type argument: Array[T]", lo, hi), TyError)
-    }
-    let (cx1, e) = resolve_type(cx, targs[0])
-    return (cx1, TyArray(e))
-  }
-  if name == "Set" {
-    if len(targs) != 1 {
-      return (cerr(cx, "Set takes exactly one type argument: Set[T]", lo, hi), TyError)
-    }
-    let (cx1, e) = resolve_type(cx, targs[0])
-    return (cx1, TySet(e))
-  }
-  match ty_named(name) {
-    Some(t) -> {
-      if len(targs) > 0 {
-        return (cerr(cx, "`" ++ name ++ "` is not generic", lo, hi), TyError)
+  match builtin_type_at(name) {
+    Some(info) -> if builtin_type_visible(info, cx.is_std_module) {
+      let arity = len(info.params)
+      if len(targs) != arity {
+        if arity == 0 {
+          return (cerr(cx, "`" ++ name ++ "` is not generic", lo, hi), TyError)
+        }
+        let count = if arity == 1 { "one" } else { "two" }
+        let plural = if arity == 1 { "" } else { "s" }
+        return (cerr(cx, name ++ " takes exactly " ++ count ++ " type argument" ++ plural ++
+            ": " ++ builtin_type_render(info), lo, hi), TyError)
       }
-      return (cx, t)
+      var cx1 = cx
+      var args: List[Ty] = []
+      for arg in targs {
+        let (cx2, ty) = resolve_type(cx1, arg)
+        cx1 = cx2
+        args = args ++ [ty]
+      }
+      return (cx1, builtin_type_apply(info, args))
     }
     None -> ()
   }
@@ -746,11 +727,11 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
   match map.get(cx.adts_by_name, name) {
     None -> {
       let pool = map.keys(cx.adts_by_name) ++ map.keys(cx.aliases) ++
-        map.keys(cx.java_classes) ++ builtin_type_names()
+        map.keys(cx.java_classes) ++ public_builtin_type_names()
       let hint = match suggest.hint(name, pool) {
         Some(h) -> h
-        None -> "builtin types: Int, Float, Bool, String, Unit, List — or declare `type " ++
-          name ++ " = ...`"
+        None -> "builtin types: " ++ join(public_builtin_type_names(), ", ") ++
+          " — or declare `type " ++ name ++ " = ...`"
       }
       (cerr_h(cx, "unknown type: " ++ name, lo, hi, hint), TyError)
     }

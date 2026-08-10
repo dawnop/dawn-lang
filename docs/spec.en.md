@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 92ba69611a29541d -->
+<!-- doc-check: translation-of docs/spec.md @ bfceb2829a04fcf3 -->
 
 # Dawn Language Specification
 
@@ -219,7 +219,10 @@ broke are kept).
 
 ### 2.1 Basic types
 
-`Int` (64-bit), `Float` (double), `Bool`, `String`, `Unit`.
+The non-generic, compiler-owned basic types users may name directly are `Int` (64-bit), `Char`
+(a Unicode scalar value), `Float` (double), `Bool`, `String`, `Bytes` (an immutable byte sequence),
+and `Unit`. These seven names, together with the three public generic names in the next section,
+are the complete public builtin type surface.
 
 `Unit` is a first-class value (its only value is `()`) and **may appear anywhere a value can
 appear**: parameters, local variables, closure captures, tuple elements, return values, and as an
@@ -239,7 +242,10 @@ There are only two exceptions, and neither is a restriction of the representatio
 `Option[T]`.
 **There are no implicit conversions.** `Int` → `Float` must be written explicitly as `to_float(n)`.
 
-### 2.2 Built-in composite types
+### 2.2 Composite types and naming layers
+
+The generic, compiler-owned types users may name directly are exactly `List[T]`, `Map[K, V]`, and
+`Set[T]`:
 
 - `List[T]` — an immutable persistent list. The implementation is a **persistent vector: a 32-way
   trie plus a tail block** (`std/pvec`, pure Dawn source, built on the `Array` primitive): indexing
@@ -249,12 +255,20 @@ There are only two exceptions, and neither is a restriction of the representatio
   accumulating loop `acc = acc ++ [x]` is **linear, O(1) amortised**. Structure is shared and a
   published list never changes; appending to an old version does not copy the whole table, only its
   own small piece.
-- `Option[T]` — `Some(T) | None`
-- `Result[T, E]` — `Ok(T) | Err(E)`
 - `Map[K, V]` — an immutable map (see below)
 - `Set[T]` — an immutable set (see below)
-- Tuples `(A, B, ...)`
-- Function types `fn(A, B) -> C !e` (`!e` may be omitted, meaning pure)
+
+The remaining composite types do not belong to that builtin-name inventory:
+
+- Tuples `(A, B, ...)` and function types `fn(A, B) -> C !e` are **structural types**, with no
+  nominal type name; `!e` may be omitted, meaning pure.
+- `Option[T]` (`Some(T) | None`), `Result[T, E]` (`Ok(T) | Err(E)`), and `ForeignError` are ordinary
+  nominal ADTs injected by the prelude; they are not compiler-owned builtin types.
+- `Array[T]` is a compiler-owned representation primitive nameable by the bundled std. A user
+  module cannot reach that primitive through this name; an `Array` declared outside std is simply
+  the user's own nominal type.
+- `Never` is currently a compiler-owned internal type. It has no user-spellable type name and is
+  absent from public completion and `dawn doc --builtins`.
 
 In type position, `(T)` is **grouping** only: after parsing it is still `T`, with no extra type
 node. A tuple still has at least two elements: `(A, B)` is a tuple, `(T,)` is not a one-element
@@ -270,7 +284,7 @@ fn() -> (fn() -> Int) !io        # !io outer function, pure returned function
 fn() -> (fn() -> Int !io) !io    # both layers are !io
 ```
 
-`Option` and `Result` are ordinary ADTs, defined in the standard library, with no special status
+`Option` and `Result` are ordinary prelude ADTs, with no special status
 (the `?` operator has syntactic support for them, see §8.1).
 
 **`Map[K, V]` / `Set[T]`** are built-in persistent containers on a par with `List`. They have no

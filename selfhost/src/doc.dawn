@@ -7,6 +7,7 @@ use std/char
 use std/str
 use std/list
 use std/map
+use std/set
 use std/io
 use front/lexer
 use front/parser
@@ -22,7 +23,8 @@ use check/tast.{TModule}
 use ir/interp.{CtOut}
 use check/types.{
   Adts, Traits, AdtI, CtorI, ImplI, Sig, adt_of, trait_of, ty_show, sig_render,
-  prelude_traits, prelude_trait_ids, builtins
+  prelude_traits, prelude_trait_ids, builtins, internal_builtins,
+  public_builtin_types
 }
 
 # ---- the JSON writer (JsonWriter, as a threaded record) ----
@@ -454,15 +456,22 @@ fn builtin_groups() -> List[(String, List[(String, String)])] = [
     ("to_string", "render any printable value (numbers, strings, derive Show data)"),
     ("join", "concatenate with a separator"),
     ("parse_int", "parse a decimal integer; None on malformed input"),
-    ("parse_float", "parse a floating point number; None on malformed input")
+    ("parse_float", "parse a floating point number; None on malformed input"),
+    ("parse_int_radix", "parse an integer in base 2 through 36; None on malformed input")
   ]),
   ("interop", [
     ("cast",
       "reclaim an erased Java Object as a concrete reference type T, taken from the expected type at the call site (interop escape; a runtime CHECKCAST guards it, and a miss is an Err rather than a throw)")
   ]),
   ("char", [
-    ("code_points", "split into Unicode code points (a character is its code point Int)"),
-    ("from_code_points", "assemble a string from code points")
+    ("code_points", "split a string into Unicode scalar-value characters"),
+    ("from_code_points", "assemble a string from characters"),
+    ("char_is_letter", "whether a character is a Unicode letter"),
+    ("char_is_digit", "whether a character is a decimal digit"),
+    ("char_is_alnum", "whether a character is a letter or decimal digit"),
+    ("char_is_upper", "whether a character is upper-case"),
+    ("char_is_lower", "whether a character is lower-case"),
+    ("char_is_space", "whether a character is whitespace")
   ]),
   ("option", [
     ("expect", "unwrap a Some or panic with a message"),
@@ -478,15 +487,57 @@ fn builtin_groups() -> List[(String, List[(String, String)])] = [
   ])
 ]
 
-## The reference covers the builtin table and the bundled std as one list of
-## groups: the hand-written groups above resolve their signatures against the
-## builtin table (falling back to the std prelude, where functions migrate),
-## and each std module contributes a group named after itself with prose from
-## its `##` doc comments.
+## The hand-written reference is intentionally prose, but its membership is a
+## contract: every public compiler builtin appears exactly once, and every
+## documented name resolves either there or in the prelude migrated to std.
+fn validate_builtin_groups(std: StdCtx) -> Unit = {
+  let bi = builtins()
+  let hidden = internal_builtins()
+  var seen: Set[String] = set.empty()
+  for grp in builtin_groups() {
+    let (_, fns) = grp
+    for pr in fns {
+      let (name, _) = pr
+      if set.has(seen, name) {
+        panic("the builtin reference names a function twice: " ++ name)
+      }
+      seen = set.insert(seen, name)
+      if not map.has(bi, name) && not map.has(std.std_fns, name) {
+        panic("the builtin reference names an unknown function: " ++ name)
+      }
+    }
+  }
+  for name in map.keys(bi) {
+    if not set.has(hidden, name) && not set.has(seen, name) {
+      panic("the builtin reference omits a public function: " ++ name)
+    }
+  }
+  for name in map.keys(std.std_fns) {
+    if not set.has(seen, name) {
+      panic("the builtin reference omits a public function: " ++ name)
+    }
+  }
+}
+
+fn builtin_types_json(w0: W) -> W = {
+  var w = w0
+  for info in public_builtin_types() {
+    w = open_obj(w)
+    w = w_field(w, "name", info.name)
+    w = w_key(w, "params")
+    w = open_arr(w)
+    for param in info.params { w = w_str(w, param) }
+    w = close_arr(w, len(info.params) > 0)
+    w = close_obj(w)
+  }
+  w
+}
+
 ## The hand-written groups, resolved against the builtin table (falling back to
 ## the std prelude, where functions migrate). Shared by both output modes so
 ## the two references cannot drift into two answers.
 fn builtin_groups_json(w0: W, std: StdCtx, traits: Traits) -> W = {
+  validate_builtin_groups(std)
   let bi = builtins()
   var w = w0
   for grp in builtin_groups() {
@@ -521,6 +572,10 @@ pub fn builtins_json(std: StdCtx) -> String = {
   let traits = prelude_traits()
   var w = w_new()
   w = open_obj(w)
+  w = w_key(w, "types")
+  w = open_arr(w)
+  w = builtin_types_json(w)
+  w = close_arr(w, true)
   w = w_key(w, "groups")
   w = open_arr(w)
   w = builtin_groups_json(w, std, traits)

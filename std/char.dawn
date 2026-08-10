@@ -4,37 +4,11 @@
 # Short names, module-qualified at the call site: `use std/char`, then
 # `char.code(c)` / `char.is_digit(c)`.
 #
-# ---------------------------------------------------------------------------
-# Why this module exists a release before it has anything to do
-#
-# `Char` is still a transparent spelling of `Int` (spec §1.5), so every
-# function here is an identity or a range test today, and `code(c)` cannot
-# fail to typecheck on anything. The module is not here for what it does now.
-# It is here so that the *seed* has it.
-#
-# `bin/dawn` stage 1 compiles today's `selfhost/src` with the pinned seed and
-# **the std that seed released with** (scripts/seedjar.sh `seed_std_dir`). So
-# the release that flips `'a'` from `Int` to `Char` needs a `selfhost/src`
-# that converts between the two -- its lexer accumulates `\u{...}` digits into
-# an integer, and stores a literal's code point in `Token.ival` -- and a
-# module the previous release did not ship is a module that stage 1 cannot
-# resolve. Measured 2026-08-06 rather than assumed: a builtin added in the
-# same commit that calls it fails stage 1 with `undefined function`, and the
-# seed's extracted std directory has no `char.dawn` to import.
-#
-# Landing it early costs nothing, because "transparent" means no existing
-# program can tell: `of` and `code` are the same functions before and after,
-# and every test below asserts something that is true in both worlds.
-# The type name `Char` itself was landed a release early for exactly this
-# reason (spec §1.5's transition note); this is the same seam, one level down,
-# and the design record is docs/audit/nominal-types-design.md §7.6.
-#
-# ---------------------------------------------------------------------------
-#
-# After the flip `Char` is an opaque type over `Int` minted by the compiler
-# (types.ty_char) with this module named as its owner, which is what lets the
-# two conversions below stay two lines instead of two intrinsics. Everything
-# else about it is ordinary `opaque type` (spec §2.7): the representation is
+# `Char` is an opaque type over `Int` minted by the compiler (`types.ty_char`)
+# because character literals need a type before any module is in scope. This
+# module is its owner, which is what lets the two conversions below stay two
+# lines instead of two intrinsics. Everything else about it is ordinary
+# `opaque type` (spec §2.7): the representation is
 # `Int`, so it costs nothing, and `==`, `<`, hashing and `${...}` are the
 # Int's -- including the last one, so `"${c}"` renders a code point and
 # `str.from_char(c)` stays the way to get a one-character string.
@@ -82,11 +56,8 @@ pub fn is_space(c: Char) -> Bool = char_is_space(c)
 
 # ---- tests ----
 #
-# Every assertion here holds both while `Char` is transparent and after it
-# stops being: that is the property that makes shipping this module early
-# safe, so it is also the property the tests are chosen for. Nothing below
-# asserts `Char` and `Int` are interchangeable -- the one thing that is true
-# today and must not be relied on (spec §1.5).
+# These tests exercise the explicit `Char`/`Int` boundary. Nothing below
+# assumes the two types are interchangeable (spec §1.5).
 
 test "of admits the scalar values and refuses the rest" {
   assert code(of(97).expect("a")) == 97

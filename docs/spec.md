@@ -184,7 +184,9 @@ println("got $n items, first = ${list.get(0)}")
 
 ### 2.1 基础类型
 
-`Int`（64 位）、`Float`（double）、`Bool`、`String`、`Unit`。
+用户可直接命名、由编译器拥有的非泛型基础类型是：`Int`（64 位）、`Char`（Unicode
+scalar value）、`Float`（double）、`Bool`、`String`、`Bytes`（不可变字节序列）与 `Unit`。
+这七个名字与下节三个公开泛型名字构成完整的 public builtin type surface。
 
 `Unit` 是一等值（唯一值 `()`），**可出现在任何值能出现的位置**：形参、局部变量、
 闭包捕获、元组元素、返回值，以及实例化类型参数（`Result[Unit, E]`、`List[Unit]`、
@@ -200,19 +202,28 @@ C 后端给它一个字节。
 **没有 null。** 所有类型的值都必然有效；可缺失用 `Option[T]` 表达。
 **没有隐式转换。** `Int` → `Float` 必须显式 `to_float(n)`。
 
-### 2.2 内建复合类型
+### 2.2 复合类型与命名层次
+
+用户可直接命名、由编译器拥有的泛型类型恰为 `List[T]`、`Map[K, V]` 与 `Set[T]`：
 
 - `List[T]` — 不可变持久列表。实现是**32 叉 trie + 尾块的持久向量**（`std/pvec`，纯 Dawn 源，
   建在 `Array` 原语之上）：索引 O(log32 n)——长度 ≤32 时全在尾块、即一次数组读；
   `++` 逐元素追加，尾块未满时只复制尾块（≤32 槽），每 32 次把尾块压进 trie、复制一条
   根到叶的路径，故 `acc = acc ++ [x]` 的累积循环是**线性的、O(1) 摊还**。
   结构共享，已发布的列表永不改变；追加到旧版本不复制整表，只复制它自己的那一小块。
-- `Option[T]` — `Some(T) | None`
-- `Result[T, E]` — `Ok(T) | Err(E)`
 - `Map[K, V]` — 不可变映射（见下）
 - `Set[T]` — 不可变集合（见下）
-- 元组 `(A, B, ...)`
-- 函数类型 `fn(A, B) -> C !e`（`!e` 可省略，表示纯）
+
+其余复合类型不属于这张 builtin 名字表：
+
+- 元组 `(A, B, ...)` 与函数类型 `fn(A, B) -> C !e` 是**结构类型**，没有名义类型名；
+  `!e` 可省略，表示纯。
+- `Option[T]`（`Some(T) | None`）、`Result[T, E]`（`Ok(T) | Err(E)`）与
+  `ForeignError` 是 prelude 注入的普通名义 ADT；它们不是 compiler-owned builtin type。
+- `Array[T]` 是 bundled std 可命名的 compiler-owned 表示原语。用户模块不能借这个名字
+  访问该原语；在 std 外声明的 `Array` 只是用户自己的名义类型。
+- `Never` 当前是 compiler-owned 内部类型，没有可由用户书写的类型名，也不进入公开补全
+  或 `dawn doc --builtins`。
 
 类型位置的 `(T)` 只做**分组**，解析后仍是 `T`，不会产生额外类型节点。元组仍至少有
 两个元素：`(A, B)` 是元组，`(T,)` 不是单元素元组，空的 `()` 也不是类型（单位类型写
@@ -227,7 +238,7 @@ fn() -> (fn() -> Int) !io        # 外层 !io，返回的函数纯
 fn() -> (fn() -> Int !io) !io    # 两层都是 !io
 ```
 
-`Option` 与 `Result` 就是普通 ADT，在标准库中定义，无特殊地位
+`Option` 与 `Result` 就是 prelude 的普通 ADT，无特殊地位
 （`?` 运算符对它们有语法支持，见 §8.1）。
 
 **`Map[K, V]` / `Set[T]`** 是与 `List` 同级的内建持久容器，无字面量语法，全部经

@@ -266,7 +266,8 @@ partial 为 `ARC-01`、`ARC-02`、`TOOL-14`、`LIB-10`。
 - or-pattern 应是 `Pattern` 节点，不是 match-arm 外挂 list；`for` 应复用不可反驳 binding grammar。
 - lambda 不应“普通位置禁 `fn`、尾调用位置只许 `fn`”；#206 已选择不与 curried
   application 冲突的 `{ ... }` 尾块作为唯一 trailing form，本条按期 2 收口。
-- parser 的 builtin type/decl-start inventory、TextMate keyword inventory 与 spec 表格应生成或至少由 contract test 对齐。
+- compiler-owned builtin type 已由分层 inventory 驱动 checker/LSP/doc，parser 保持只读语法
+  形状；decl-start、TextMate keyword inventory 与 spec 表格仍应生成或至少由 contract test 对齐。
 
 ### 6.2 让 effect system 先闭合再继续扩展
 
@@ -331,7 +332,7 @@ partial 为 `ARC-01`、`ARC-02`、`TOOL-14`、`LIB-10`。
    error response。
 3. **把 `SEM-04` 留给维护者裁决：** Cursor 是携带 owner 的值还是 generative identity，以及
    不同 owner 的 Eq/Ord 是否拒绝；裁决前只保留静态候选，不写 workaround。
-4. **低耦合自治批：** `SYN-11` 已关账；下一项 `SEM-07`，再按依赖推进 `SYN-04 → SYN-13` 与
+4. **低耦合自治批：** `SYN-11` 与 B200-1B 后续已关账；下一项 `SEM-07`，再按依赖推进 `SYN-04 → SYN-13` 与
    `SYN-09 → SYN-05`；`SYN-17` 只留在 D/P3 关键字预算设计队列。
 5. **类型化阶段产品：** `ARC-07` 后接 `ARC-08`，再以稳定 lowered identity 推进
    `ARC-11B/ARC-12`；不把 `ARC-09/10` 的 HOLD 项混入自治队列。
