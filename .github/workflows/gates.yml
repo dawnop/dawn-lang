@@ -626,18 +626,26 @@ jobs:
   # owned by exactly one sentence of the desugar, and that property rots
   # silently: SYN-09's persisted mutants are how an anchor drift was caught
   # when SYN-05 added an `XCtor` arm to the same match (2d5f19a), and the pipe
-  # had no equivalent until now. Every shard re-runs the fixture, editor and
-  # formatter contracts, which are seconds, so no shard is a partial verdict.
+  # had no equivalent until now. So every mutant runs the whole assertion set
+  # and its red set is diffed against a recorded matrix; asserting only that a
+  # mutant reddens its owner would leave the ownership itself unchecked, which
+  # is the same failure one level up. Every shard re-runs the fixture, editor
+  # and formatter contracts and validates the whole ownership structure, which
+  # reads the record and needs no build, so no shard is a partial verdict.
   pipe-contract-1:
     runs-on: ubuntu-latest
-    # 82s and 72s locally for the two shards (7 and 6 builds, plus the fixture
-    # contract), but the whole suite measured 125s and 156s on two runs of the
-    # same tree, so the budget takes 156s: a bound derived from the luckier of
-    # two observations is a bound that fails on a Tuesday, and a whole-suite
-    # figure is an upper bound on either shard. Re-derive from the first run to
-    # carry them, the way 30af350 did for export-surface.
-    # budget: 3x 156s worst observed
-    timeout-minutes: 8
+    # 152s and 140s locally for the two shards (7 and 6 builds each, plus the
+    # fixture contract); 300s for the whole suite. Running all 22 assertions
+    # against every mutant rather than only its owner roughly doubled this
+    # (82s and 72s before), so the build does *not* dominate the way it looked
+    # like it would: an already-built mutant still pays a JVM start per
+    # assertion. It buys the ownership property, which was prose until the
+    # matrix became the gate. 258s predicted on the runner from
+    # export-surface's measured 122s -> 206s ratio for the same kind of work;
+    # the budget takes the worse of the two, as `test` explains. Re-derive from
+    # the first run to carry them, the way 30af350 did for export-surface.
+    # budget: 3x 258s worst observed
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -648,8 +656,8 @@ jobs:
 
   pipe-contract-2:
     runs-on: ubuntu-latest
-    # budget: 3x 156s worst observed
-    timeout-minutes: 8
+    # budget: 3x 258s worst observed
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain

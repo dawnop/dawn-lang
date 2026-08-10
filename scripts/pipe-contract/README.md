@@ -24,6 +24,8 @@ protection for the pipe.
     ./scripts/pipe-contract/run.sh                        # everything
     ./scripts/pipe-contract/run.sh --shard 1/2            # CI's split
     ./scripts/pipe-contract/run.sh --only append-left-argument
+    ./scripts/pipe-contract/run.sh --record               # re-record matrix.txt
+    ./scripts/pipe-contract/matrix.py --selftest          # the gate's own control
 
 Three halves:
 
@@ -46,6 +48,40 @@ once. That guard is the load-bearing part: a rewrite of `pipe_expr` moves every
 anchor at once, and a mutation that silently matched nothing would leave a gate
 that still prints PASS while testing an unmutated compiler.
 
+## The matrix is the gate
+
+Every mutant runs the **whole** assertion set, and the set of assertions it
+reddens is diffed against `matrix.txt`. Asserting only that a mutant reddens
+its own owner would record the ownership in prose and enforce nothing: if a
+later change made `append-left-argument` redden `named_arg_refused` as well,
+that assertion would be owned by neither and nothing would go red. The
+measurement that chose the owners has to be the gate, not a thing that happened
+once.
+
+Overlaps are recorded rather than forbidden, because several are by design: a
+module-qualified call is an `EMethod`, so `drop-method-prepend` reddens
+`qualified`, `probe_runs` and the piped hover probe too. What may not overlap
+is an *owner*. `matrix.py` checks three rules:
+
+1. every counted mutant has an owner, and that owner is in its own red set;
+2. no other counted mutant reddens that owner, which is what "owns" means;
+3. the observed red set equals the recorded one, in both directions.
+
+Rules 1 and 2 read the record alone, so every shard validates the whole
+ownership structure even though it builds half the mutants. Rule 3 catches an
+owner that stops going red and a collision that appears where the record says
+there was none.
+
+`--record` rewrites the red sets and nothing else; the `owner` lines stay a
+hand edit, because a recorder that could reassign owners would launder the
+collision it exists to catch.
+
+`matrix.py --selftest` perturbs a known-good record once per rule and requires
+each perturbation to be refused, so this gate has been seen failing. The aim
+side was checked the same way: re-aiming `wrap-nested-call` at every `EApply`
+(its designed form) makes the run fail by name on `order`, `assoc` and
+`eval_callee_first`, which are three other mutants' owners.
+
 ## The mutants and the assertion that owns each
 
 | mutant | the sentence it removes | owning assertion |
@@ -64,9 +100,9 @@ that still prints PASS while testing an unmutated compiler.
 | `drop-lsp-qualified-ctor` | and a qualified construction's, which is an `XCtor` | hover `qualified ctor, written` |
 
 Each owner was chosen by building the mutant and reading which assertions
-actually went red, not by predicting it. Four of the twelve are aimed
-somewhere narrower than the designed mutant was, and one assertion is
-deliberately weaker than it could be.
+actually went red, not by predicting it, and `matrix.txt` is that reading kept
+under diff. Four of the twelve are aimed somewhere narrower than the designed
+mutant was, and one assertion is deliberately weaker than it could be.
 
 ### The four retargets
 
@@ -116,6 +152,10 @@ load the bundled standard library (`std/cursor` fails first) and no assertion
 it reddens says anything about the pipe. That is the designed mutant with no
 compiling form, and the harness pins the failure so that "it does not build" is
 a fact on the record instead of a mutant quietly dropped from the list.
+
+Its red set is recorded anyway, and it is 21 of the 22: only `fmt_fixpoint`
+survives, because the formatter is lexical and never loads std. That is why it
+is excluded from the ownership rules. Counted, it would redden every owner.
 
 ## Not here
 
