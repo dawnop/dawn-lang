@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` 下现有 83 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 84 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
@@ -68,6 +68,7 @@
 | [lsp-framing-design.md](lsp-framing-design.md) | current | TOOL-07 的定稿：共享层在 stdin read 前限制 8 KiB header/64 MiB body，严格解析重复 `Content-Length`，并把不可重同步的 framing failure 固定为一次错误后关读循环。 |
 | [source-plan-design.md](source-plan-design.md) | current | TOOL-10 的定稿及 2026-08-09 架构修订：独立无 Java 的 `compiler-plan/` 先形成唯一最终图，再从选中 `PkgR` 收 Java 坐标。 |
 | [lsp-workspace-design.md](lsp-workspace-design.md) | current | TOOL-05/06 的已实现设计：canonical `(project, source_root)` workspace、captured `ProjectPlan`、共享 `Program`/诊断与 target-scoped `JsigLease`。 |
+| [public-surface-design.md](public-surface-design.md) | current | SEM-07 的定稿设计：World/StdOnly/Module audience、opaque nominal args、exporter-side surface validator、精确诊断与 doc/LSP 消费边界；实现待分三阶段落地。 |
 | [delete-outcome-design.md](delete-outcome-design.md) | current | LIB-07 的定稿：`io.delete` 以 `Deleted` / `NotFound` / `Err` 区分成功、缺失与 host refusal，底层仍保留 Bool intrinsic ABI。 |
 | [cli-arity-design.md](cli-arity-design.md) | current | TOOL-04 的定稿契约：`check`/`fmt` 为 1..N，`test`/`doc` 的 selector 互斥，`build`/`emitc` 恰一个 target；两端保留独立 argv parser，由绝对 exit/stdout/stderr oracle 防止共谋假绿。 |
 | [run-argv-boundary-design.md](run-argv-boundary-design.md) | current | TOOL-03 的定稿契约：`run` 只在 target 前解析 compiler option，以 `--` 开启逐字透传的 program argv；JVM 一次顺序解析且 dependency re-exec 保留原始 rest，两端独立 parser 由绝对 oracle 约束。 |
