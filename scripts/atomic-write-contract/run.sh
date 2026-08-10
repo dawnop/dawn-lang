@@ -172,13 +172,24 @@ echo "PASS  mode preserved on replace, secure mode on create"
 
 # Every injection asserts the same two things about the destination, whatever
 # the step that failed and whatever it was called.
-expect_inject() { # label, expected-result, expected-content, out
-  local label="$1" want="$2" content="$3" out="$4"
+# The fifth argument is whether this step's message names the staging file --
+# the randomly named one the caller never created. It is pinned per step rather
+# than asserted uniformly, because the two steps that still do differ from the
+# one that was fixed: `create` used to report *nothing but* the staging name,
+# while `replace` reports it alongside the destination and the reason. Only the
+# first was rewritten (io.atomic_write_staging_failed). Pinning the rest as
+# `yes` keeps the gap in the gate's face instead of exempting it: whoever fixes
+# `replace` gets a red here and updates the line, and nobody can quietly
+# reintroduce the leak in a step that reads `no`.
+expect_inject() { # label, expected-result, expected-content, out, names-staging
+  local label="$1" want="$2" content="$3" out="$4" staging="${5:-no}"
   grep -qx "result = $want" "$out" || { cat "$out" >&2; fail "$label: result was not '$want'"; }
   grep -qx "content = $content" "$out" ||
     { cat "$out" >&2; fail "$label: the destination did not survive unchanged"; }
   grep -qx 'entries = \["target.toml"\]' "$out" ||
     { cat "$out" >&2; fail "$label: a staging file was left behind"; }
+  grep -qx "message-names-staging = $staging" "$out" ||
+    { cat "$out" >&2; fail "$label: expected message-names-staging = $staging"; }
   echo "PASS  injection: $label"
 }
 
@@ -195,7 +206,8 @@ fn inject_bytes_fault(step: String) -> Result[Bytes, ForeignError] !io =
 prepare_inject_readonly "$work/inj-create"
 run_jvm "$root/std" "$work/inj-create" "$here/inject_probe.dawn" "$work/inj-create.out" ||
   { cat "$work/inj-create.out.err" >&2; fail "create injection did not run"; }
-expect_inject "create (unwritable directory)" err old "$work/inj-create.out"
+expect_inject "create (unwritable directory)" io.atomic_write_staging_failed old \
+  "$work/inj-create.out"
 
 # 2. write
 fork_std "$work/std-inj-write"
@@ -285,7 +297,8 @@ expect_inject permission inject.permission old "$work/inj-perm.out"
 prepare_inject_dir_target "$work/inj-replace"
 run_jvm "$root/std" "$work/inj-replace" "$here/inject_probe.dawn" "$work/inj-replace.out" ||
   { cat "$work/inj-replace.out.err" >&2; fail "replace injection did not run"; }
-expect_inject "replace (destination is a directory)" err "<unreadable>" "$work/inj-replace.out"
+expect_inject "replace (destination is a directory)" err "<unreadable>" \
+  "$work/inj-replace.out" yes
 [ -d "$work/inj-replace/target.toml" ] || fail "replace injection: the destination stopped being a directory"
 
 # ---------------------------------------------------------------- concurrency
@@ -345,7 +358,12 @@ mutant_run() { # name, stddir
 #    cannot, which is the unwritable directory holding a writable file.
 fork_std "$work/std-m1"
 patch_std "$work/std-m1" "mutant direct-fallback" \
-  '      Err(e) -> Err(e)
+  '      Err(e) -> Err(ForeignError {
+        kind: "io.atomic_write_staging_failed",
+        message: "io.atomic_write_file: cannot create a staging file in "
+          ++ parent_dir(path),
+        cause: Some(e.kind ++ ": " ++ e.message)
+      })
       Ok(tmp) -> stage_replace(path, content, tmp)' \
   '      Err(_) -> write_file(path, content)
       Ok(tmp) -> stage_replace(path, content, tmp)'
@@ -433,6 +451,28 @@ if [ "$after" = 640 ]; then
   fail "no-permission-copy mutant stayed green: mode is still 640"
 fi
 echo "PASS  mutant: permissions not carried over (owning assertion 'stat a/target.toml = 640' turned red, saw $after)"
+
+# 8. the staging failure passed through as the host worded it -- which is what
+#    this function did until the message was re-attributed to the directory.
+#    Its witness is the message and not the kind: a mutant that renamed the kind
+#    but still leaked the staging path would be caught by the line above it, and
+#    an assertion two mutants can redden is owned by neither.
+fork_std "$work/std-m8"
+patch_std "$work/std-m8" "mutant staging-message-passthrough" \
+  '      Err(e) -> Err(ForeignError {
+        kind: "io.atomic_write_staging_failed",
+        message: "io.atomic_write_file: cannot create a staging file in "
+          ++ parent_dir(path),
+        cause: Some(e.kind ++ ": " ++ e.message)
+      })' \
+  '      Err(e) -> Err(ForeignError {
+        kind: "io.atomic_write_staging_failed",
+        message: e.message,
+        cause: None
+      })'
+mutant_run m8 "$work/std-m8"
+expect_red "staging message passed through" "$work/mutant-m8.out" \
+  'readonly dir names staging = no'
 
 # ---------------------------------------------------------------- call sites
 #
@@ -635,4 +675,4 @@ cs_probe "$CS_JAR" "$work/callsites-m-lock.out"
 cs_expect_red "dawn lock back to io.write_file" "$work/callsites-m-lock.out" \
   'lock readonly lockfile = old' 'add '
 
-echo "OK: atomic-write contract, six injections, seven primitive mutants and two call-site mutants"
+echo "OK: atomic-write contract, six injections, eight primitive mutants and two call-site mutants"

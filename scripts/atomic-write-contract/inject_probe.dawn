@@ -13,7 +13,18 @@ pub fn main() -> Unit !io = {
   io.println("result = " ++ verdict(r))
   io.println("content = " ++ slurp("target.toml"))
   io.println("entries = " ++ entries("."))
+  # The staging file is the primitive's own device with a random name. It must
+  # not turn up in a message a caller would print: `dawn lock` into a directory
+  # it cannot write once reported a `.dawn-atomic-...tmp` the user had never
+  # created. Asserted on every injection, not just the one that regressed.
+  io.println("message-names-staging = " ++ names_staging(r))
 }
+
+fn names_staging(r: Result[Unit, ForeignError]) -> String =
+  match r {
+    Ok(_) -> "no"
+    Err(e) -> if str.contains(e.message, ".dawn-atomic-") { "yes" } else { "no" }
+  }
 
 fn verdict(r: Result[Unit, ForeignError]) -> String =
   match r {

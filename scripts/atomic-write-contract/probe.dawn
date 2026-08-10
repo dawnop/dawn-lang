@@ -51,6 +51,11 @@ pub fn main() -> Unit !io = {
   # the one shape where staging fails and an unguarded direct write would not.
   say("readonly dir", io.atomic_write_file("f/target.toml", "new\n"))
   line("readonly dir content", slurp("f/target.toml"))
+  # The staging file is this primitive's own device, named at random. A caller
+  # printing this message must not be shown a file it never created, so the
+  # message is checked for the staging prefix and not merely for its kind.
+  line("readonly dir names staging",
+    names_staging(io.atomic_write_file("f/target.toml", "new\n")))
 
   # The two spellings refused before any backend sees them.
   say("empty path", io.atomic_write_file("", "new\n"))
@@ -91,6 +96,12 @@ fn verdict(r: Result[Unit, ForeignError]) -> String =
   match r {
     Ok(_) -> "ok"
     Err(e) -> if str.starts_with(e.kind, "io.") { e.kind } else { "err" }
+  }
+
+fn names_staging(r: Result[Unit, ForeignError]) -> String =
+  match r {
+    Ok(_) -> "no"
+    Err(e) -> if str.contains(e.message, ".dawn-atomic-") { "yes" } else { "no" }
   }
 
 fn line(label: String, value: String) -> Unit !io = io.println(label ++ " = " ++ value)

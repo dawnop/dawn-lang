@@ -194,10 +194,16 @@ pub fn is_symlink(path: String) -> Bool !io = io_is_symlink(path)
 ## the link choose which file gets written, and a caller publishing a file it
 ## named is not asking to write wherever that name currently points.
 ##
-## The three failure kinds minted here are `io.invalid_atomic_write_path`,
-## `io.atomic_write_target_is_symlink` and `io.atomic_write_verify_failed`;
-## every other `Err` carries whatever the backend called the failure, as
-## everywhere else in this module.
+## The four failure kinds minted here are `io.invalid_atomic_write_path`,
+## `io.atomic_write_target_is_symlink`, `io.atomic_write_staging_failed` and
+## `io.atomic_write_verify_failed`; every other `Err` carries whatever the
+## backend called the failure, as everywhere else in this module.
+##
+## `io.atomic_write_staging_failed` is the one place that rewrites a backend
+## message instead of passing it on, and it earns the exception: the failure is
+## about a randomly named file this function invented, so passing it on would
+## name that file to a caller who never asked for it. The backend's own words
+## are kept in `cause`.
 pub fn atomic_write_file(path: String, content: String) -> Result[Unit, ForeignError] !io =
   if path == "" {
     Err(ForeignError {
@@ -219,7 +225,20 @@ pub fn atomic_write_file(path: String, content: String) -> Result[Unit, ForeignE
     })
   } else {
     match temp_file(parent_dir(path), ".dawn-atomic-") {
-      Err(e) -> Err(e)
+      # The staging file is this function's own device, and its name is a
+      # random one nobody asked for. Passing the backend's message through
+      # verbatim -- the way every other failure here does -- would put that
+      # name in front of a caller who never created it: `dawn lock` into an
+      # unwritable directory used to report a `.dawn-atomic-...tmp` it had
+      # never heard of. So this one failure is re-attributed to the directory
+      # that actually refused, and the backend's own words move to `cause`,
+      # which is where the layer below belongs (spec §9.8.1).
+      Err(e) -> Err(ForeignError {
+        kind: "io.atomic_write_staging_failed",
+        message: "io.atomic_write_file: cannot create a staging file in "
+          ++ parent_dir(path),
+        cause: Some(e.kind ++ ": " ++ e.message)
+      })
       Ok(tmp) -> stage_replace(path, content, tmp)
     }
   }

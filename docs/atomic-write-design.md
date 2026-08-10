@@ -103,9 +103,24 @@ install:     rename(tmp, path)
 任一步失败:   delete(tmp); 返回该步的 Err
 ```
 
-三个 std 自铸的 kind：`io.invalid_atomic_write_path`、
-`io.atomic_write_target_is_symlink`、`io.atomic_write_verify_failed`。
-其余 `Err` 一律是后端自己的说法，跟这个模块里所有别的函数一样。
+四个 std 自铸的 kind：`io.invalid_atomic_write_path`、
+`io.atomic_write_target_is_symlink`、`io.atomic_write_staging_failed`、
+`io.atomic_write_verify_failed`。其余 `Err` 一律是后端自己的说法，跟这个模块里
+所有别的函数一样。
+
+`io.atomic_write_staging_failed` 是唯一一处**改写**后端消息而不是转交它的地方，
+而它担得起这个例外：那次失败讲的是一个本函数自己发明、随机命名的文件。原样转交
+等于把这个名字摆到一个从没创建过它的调用方面前——`dawn lock` 写进不可写目录时
+曾经报出一个它从没听说过的 `.dawn-atomic-….tmp`，**而且那条消息里连目标和原因都
+没有**。所以这一处归因到真正拒绝了写入的那个目录，后端的原话移进 `cause`。
+
+**同族还剩一处，被门禁钉住而不是被豁免**：`replace` 那步（目标是目录）的消息里
+仍会出现 staging 名，因为宿主把 `rename` 的源和目标写在同一句里。它与上面那处的
+分量不同——它**同时**带着目标和原因（`… -> …/target.toml: Is a directory`），
+只是难看，不像 `create` 那处是「只有一个陌生文件名」。契约脚本因此**逐步骤钉住**
+「这一步的消息是否出现 staging 名」的确切当前值（`create` 为 `no`、`replace` 为
+`yes`），谁把 `replace` 也修了就会在门禁上得到一个红并顺手更新那行，而任何一步想
+悄悄把泄漏加回来都会撞上 `no`。
 
 read-back 比的是**字节**不是字符串：字符串要经过一个「读不懂就换 U+FFFD」
 的解码器，而一次「解码后文本相同」的损坏仍然是损坏。
@@ -141,6 +156,7 @@ read-back 比的是**字节**不是字符串：字符串要经过一个「读不
   | 跟随 symlink | `symlink still link = true` | `= false`（2 行动） |
   | 漏清理 temp | `dir target entries = ["target.toml"]` | 多出 `.dawn-atomic-*.tmp`（1 行动） |
   | 漏权限复制 | `stat a/target.toml = 640` | `600`（探针输出**一字不变**） |
+  | staging 消息原样转交 | `readonly dir names staging = no` | `= yes`（1 行动） |
 
   最后一条是刻意的：权限的见证者是脚本外部的 `stat`，不是被测代码自己的
   输出。所以那个 mutant 的判据额外要求探针输出**必须没变**——否则说明抓到
