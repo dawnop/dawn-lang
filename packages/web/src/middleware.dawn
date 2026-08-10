@@ -46,13 +46,22 @@ fn route_has_tag(req: Request, tag: String) -> Bool =
 # It also measures `raw`, the bytes, rather than `str.len(body)`, which counts
 # code points. The message always said "bytes" while the check counted
 # characters, so a body of CJK or emoji got up to 3-4x the stated budget.
+#
+# `limit <= 0` is unbounded, which is the meaning the server has always given
+# the same number (server.read_body reads without a ceiling below 1, and
+# serve_app_bounded documents 0 as unbounded). This used to compare `> limit`
+# with no floor, so the two layers disagreed on exactly the values a caller is
+# likeliest to reach for: `0` meant "reject every non-empty body" here and "read
+# anything" there, and a negative limit rejected the empty body too. One
+# meaning, stated once, obeyed in both places.
 ## Reject bodies over a byte budget (the bytes, not the code points) before
-## the handler sees them. Routes tagged "raw-body" opt out — an upload is
+## the handler sees them. `limit <= 0` is unbounded, the same reading the
+## server gives its own ceiling. Routes tagged "raw-body" opt out — an upload is
 ## bounded in front, by nginx. A policy check, not a memory guard: the server's
 ## own ceiling (`server.DEFAULT_MAX_BODY`) is what bounds the allocation.
 pub fn with_body_limit(limit: Int, next: Handler) -> Handler =
   req =>
-  if route_has_tag(req, "raw-body") == false && bytes.len(req.raw) > limit {
+  if limit > 0 && route_has_tag(req, "raw-body") == false && bytes.len(req.raw) > limit {
     Err(http_error(413, "request body exceeds $limit bytes"))
   } else {
     next(req)
@@ -308,5 +317,29 @@ test "with_body_limit counts bytes, not code points" {
   match app(mk("12345678")) {
     Ok(r) -> { assert r.status == 200 }
     Err(_) -> { assert false }
+  }
+}
+
+test "a limit of zero or less is unbounded, the same reading the server gives it" {
+  let mk = (body: String) => Request { ..req_of("POST", map.empty()), body: body, raw: bytes.utf8(body) }
+  # 0 used to mean "reject every non-empty body" here while server.read_body
+  # read the same request without any ceiling at all
+  match with_body_limit(0, ok_handler)(mk("123456789")) {
+    Ok(r) -> { assert r.status == 200 }
+    Err(_) -> { assert false }
+  }
+  # a negative limit used to reject even the empty body
+  match with_body_limit(-1, ok_handler)(mk("")) {
+    Ok(r) -> { assert r.status == 200 }
+    Err(_) -> { assert false }
+  }
+  match with_body_limit(-1, ok_handler)(mk("123456789")) {
+    Ok(r) -> { assert r.status == 200 }
+    Err(_) -> { assert false }
+  }
+  # and a positive one still bounds
+  match with_body_limit(4, ok_handler)(mk("12345")) {
+    Err(e) -> { assert e.status == 413 }
+    Ok(_) -> { assert false }
   }
 }
