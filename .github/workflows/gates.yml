@@ -76,7 +76,11 @@ jobs:
     # gate that got slower says so by failing rather than by being edited, and
     # a gate that hangs is killed in minutes instead of burning the 6h default
     # -- which is what "no timeout-minutes" means, on a runner nobody is
-    # watching. This job: 264s (was 731s before the redistribution).
+    # watching. Each job's own figure below is the worst of its predicted and
+    # its measured time in the first run after the move (31355056313), because
+    # a bound derived from the luckier of two observations is a bound that
+    # fails on a Tuesday. This job: 264s predicted, 216s measured (was 731s
+    # before the redistribution).
     timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
@@ -186,8 +190,9 @@ jobs:
   # they were 180s of the old `test` job.
   contracts:
     runs-on: ubuntu-latest
-    # measured 180s of steps plus ~38s setup; see the note in `test`.
-    timeout-minutes: 11
+    # 218s predicted (180s of steps plus ~38s setup), 225s measured; see the
+    # note in `test`.
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -340,7 +345,7 @@ jobs:
   # fetch, and they cost 68s in a job that had room for them.
   java-target-classpath:
     runs-on: ubuntu-latest
-    # measured 194s + 68s moved in; see the note in `test`.
+    # 262s predicted (194s + 68s moved in), 270s measured; see `test`.
     timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
@@ -410,7 +415,7 @@ jobs:
   lsp-workspace:
     runs-on: ubuntu-latest
     # Cold runners compile one observed server plus every mutant from scratch.
-    # measured 196s + 168s moved in; see the note in `test`.
+    # 403s predicted (196s + 168s moved in), 370s measured; see `test`.
     timeout-minutes: 21
     steps:
       - uses: actions/checkout@v4
@@ -463,8 +468,12 @@ jobs:
   # of that list but the toolchain.
   native-diff:
     runs-on: ubuntu-latest
-    # measured 365s; see the note in `test`.
-    timeout-minutes: 19
+    # This is the one gate whose cost is not reproducible: 281s, 365s and 533s
+    # on three observations of an unchanged script, because run.sh drives the
+    # corpus four at a time on a 4-vCPU runner and how that lands is not ours
+    # to decide. The bound is 3x the worst of them, not 3x the average -- an
+    # average would put a routinely-observed run inside the kill window.
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -498,7 +507,7 @@ jobs:
   # quietly regress either.
   checker-corpus:
     runs-on: ubuntu-latest
-    # measured 348s; see the note in `test`.
+    # 348s before the move, 354s measured after it; see the note in `test`.
     timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
@@ -533,7 +542,7 @@ jobs:
   # node.
   docs:
     runs-on: ubuntu-latest
-    # measured 254s + 47s moved in (plus ~3s for setup-node); see `test`.
+    # 305s predicted (254s + 47s moved in + setup-node), 307s measured.
     timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
@@ -594,7 +603,7 @@ jobs:
   # the N-1 toolchain, the successors of the old Kotlin golden diffs.
   prev-diff:
     runs-on: ubuntu-latest
-    # measured 210s; see the note in `test`.
+    # 210s before the move and 210s after it; see the note in `test`.
     timeout-minutes: 11
     steps:
       - uses: actions/checkout@v4
@@ -628,7 +637,7 @@ jobs:
   # is the critical path: 484s, and nothing in it can be moved elsewhere.
   prev-diff-native:
     runs-on: ubuntu-latest
-    # measured 484s; see the note in `test`.
+    # 484s before the move, 475s after; see the note in `test`.
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
