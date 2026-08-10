@@ -6,7 +6,8 @@
 >
 > 勘察基线 `abe5105`（2026-08-08），编译器 `dawn 0.60.0 (selfhost)`；落地基线
 > `138adb9`（同日，含 #199/#197 两批——与本文相关的文件 `runtime/c/`、`selfhost/src/c/`、
-> spike 脚本在两基线间零改动，file:line 引用仍然成立）。复现程序已收编为
+> spike 脚本在两基线间零改动，file:line 引用当时成立；此后落地各刀与 2026-08-10 的 CI
+> 重排让 §3.4 那批引用失效，已改按 job 名/测试名定位）。复现程序已收编为
 > `scripts/spike-native/` 语料（对应关系见 §5.2 与 §6 刀 0）；本文所有带「实测」的
 > 数字都出自它们的前身，没有实测的判断一律标「推断」。
 
@@ -237,13 +238,18 @@ emitter 侧几乎不参与：`catch_fault` / `catch_panic` / `bracket` 走的是
 
 ### 3.4 门禁现状（含两个洞）
 
-| 门禁 | 位置 | 与本题的关系 |
+> 本节是**勘察当时（基线 `abe5105`）的快照**，描述的是修之前的门禁状态；今天的状态见
+> §6 各刀的「落地」行——两个洞都已堵上，`.leaks-on-catch` 机制连同最后一个 marker 已删。
+> 表里按 CI **job 名**而不是行号定位，行号会随 job 编排变动（2026-08-10 的 CI 重排就
+> 让原先那批行号全部失效）。
+
+| 门禁 | 位置 | 与本题的关系（勘察时） |
 |---|---|---|
-| spike-native 差分 + asan/lsan | `scripts/spike-native/run.sh`，CI job `native-diff`（`gates.yml:347-348`） | 主战场 |
-| `.leaks-on-catch` 豁免 | `run.sh:211-213` | **ARC-05 的 oracle 就是这个开关**，今天有 7 个文件开着 |
-| rc-contract | `scripts/rc-contract/run.sh`，CI（`gates.yml:265-266`） | 运行时 dup/drop 的 C 级契约 |
-| native-cli-diff | CI（`gates.yml:460-461`） | **`:397-405` 刻意把消息压在 512 以下**，注释直说这是真分歧 |
-| native-fixpoint（B==C） | `scripts/native-fixpoint.sh` | **不在 CI**（`native-fixpoint.sh:8-10` 有意），手动里程碑门禁 |
+| spike-native 差分 + asan/lsan | `scripts/spike-native/run.sh`，CI job `native-diff` | 主战场 |
+| `.leaks-on-catch` 豁免 | `run.sh` 的 marker 机制（**已随刀 4 删除**） | **ARC-05 的 oracle 就是这个开关**，勘察时有 7 个文件开着 |
+| rc-contract | `scripts/rc-contract/run.sh`，CI job `contracts` | 运行时 dup/drop 的 C 级契约 |
+| native-cli-diff | `scripts/native-cli-diff.sh`，CI job `prev-diff-native` | **勘察时刻意把消息压在 512 以下**，注释直说这是真分歧；刀 1 之后反了过来，`test "a message past 512 bytes arrives whole"` 专门越过 512 钉住载荷所有权 |
+| native-fixpoint（B==C） | `scripts/native-fixpoint.sh` | **不在 CI**（脚本头注有意说明），手动里程碑门禁 |
 | 五语料 / prev-diff | `scripts/selfhost-prev-diff.sh` | 只有改到 `rtsrc.dawn` 或 emitter 才会红（§7） |
 
 7 个 `.leaks-on-catch`：`bracket`、`bracket_fatal`、`catch_kinds`、`foreign_error`、

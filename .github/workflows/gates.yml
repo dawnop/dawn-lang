@@ -40,11 +40,18 @@ jobs:
     runs-on: ubuntu-latest
     # measured 6s. Seconds-scale jobs get a floor rather than 3x their own
     # time, which would be a bound no slow runner could meet.
+    # budget: floor (seconds-scale job)
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: no server identity in the repo
         run: python3 scripts/check-no-server-identity.py
+
+      # The 3x rule below was prose until 2026-08-10, and prose drifted: two
+      # jobs sat three seconds under their own bound for a day. It reads the
+      # workflow files, so it belongs in the job that needs no toolchain.
+      - name: every timeout is backed by an observation
+        run: python3 scripts/check-gate-budgets.py
 
   # The extension grammar is editor behavior, not documentation. Exercise it
   # with VS Code's TextMate engine and Oniguruma WASM in a standalone job so a
@@ -52,6 +59,7 @@ jobs:
   editor-grammar:
     runs-on: ubuntu-latest
     # measured 6s; a floor, for the reason tree-policy gives.
+    # budget: floor (seconds-scale job)
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -81,6 +89,7 @@ jobs:
     # a bound derived from the luckier of two observations is a bound that
     # fails on a Tuesday. This job: 264s predicted, 216s measured (was 731s
     # before the redistribution).
+    # budget: 3x 265s worst observed
     timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
@@ -192,6 +201,7 @@ jobs:
     runs-on: ubuntu-latest
     # 218s predicted (180s of steps plus ~38s setup), 225s measured; see the
     # note in `test`.
+    # budget: 3x 226s worst observed
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
@@ -345,8 +355,10 @@ jobs:
   # fetch, and they cost 68s in a job that had room for them.
   java-target-classpath:
     runs-on: ubuntu-latest
-    # 262s predicted (194s + 68s moved in), 270s measured; see `test`.
-    timeout-minutes: 14
+    # 262s predicted (194s + 68s moved in); 270s then 281s measured on two
+    # consecutive runs of the same tree, so the budget follows the worse one.
+    # budget: 3x 281s worst observed
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -415,8 +427,11 @@ jobs:
   lsp-workspace:
     runs-on: ubuntu-latest
     # Cold runners compile one observed server plus every mutant from scratch.
-    # 403s predicted (196s + 168s moved in), 370s measured; see `test`.
-    timeout-minutes: 21
+    # 403s predicted (196s + 168s moved in); 370s then 421s measured on two
+    # consecutive runs of the same tree -- a 14% spread on identical work, the
+    # same non-reproducibility `native-diff` documents. Budget the worse one.
+    # budget: 3x 421s worst observed
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -473,6 +488,7 @@ jobs:
     # corpus four at a time on a 4-vCPU runner and how that lands is not ours
     # to decide. The bound is 3x the worst of them, not 3x the average -- an
     # average would put a routinely-observed run inside the kill window.
+    # budget: 3x 533s worst observed
     timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
@@ -508,6 +524,7 @@ jobs:
   checker-corpus:
     runs-on: ubuntu-latest
     # 348s before the move, 354s measured after it; see the note in `test`.
+    # budget: 3x 354s worst observed
     timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
@@ -543,6 +560,7 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     # 305s predicted (254s + 47s moved in + setup-node), 307s measured.
+    # budget: 3x 307s worst observed
     timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
@@ -604,6 +622,7 @@ jobs:
   prev-diff:
     runs-on: ubuntu-latest
     # 210s before the move and 210s after it; see the note in `test`.
+    # budget: 3x 210s worst observed
     timeout-minutes: 11
     steps:
       - uses: actions/checkout@v4
@@ -638,6 +657,7 @@ jobs:
   prev-diff-native:
     runs-on: ubuntu-latest
     # 484s before the move, 475s after; see the note in `test`.
+    # budget: 3x 484s worst observed
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
