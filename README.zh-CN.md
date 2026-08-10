@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 6e4269f6bf576a7c -->
+<!-- doc-check: translation-of README.md @ f5283ae0b3c79c82 -->
 
 # Dawn
 
@@ -26,6 +26,57 @@ pub fn main() -> Unit !io =
     |> fold(0.0, (a, x) => a + x)
     |> t => println("total: $t")
 ```
+
+## 安装
+
+每个 release 挂四件资产：两个产物，外加各自的 SHA-256。**请核对摘要**。工具链自举用的种子
+每次使用前都要验一遍，安装这一步如果跳过同样的核对，那这套纪律就只在这里断了。
+
+**不装 JVM**（linux-x86_64）：一个静态可执行文件，`std` 与 C 运行时都在里面。
+
+```bash
+base=https://github.com/dawnop/dawn-lang/releases/latest/download
+curl -fsSLO $base/dawnc-linux-x86_64
+curl -fsSLO $base/dawnc-linux-x86_64.sha256
+sha256sum -c dawnc-linux-x86_64.sha256
+chmod +x dawnc-linux-x86_64 && sudo mv dawnc-linux-x86_64 /usr/local/bin/dawnc
+
+printf 'pub fn main() -> Unit !io = println("hello, dawn")\n' > hello.dawn
+dawnc run hello.dawn
+```
+
+**装 JVM**（JDK 21 及以上，任意平台）：工具链 jar 自带 `std`，所以这个 jar 本身就是整套工具链。
+
+```bash
+base=https://github.com/dawnop/dawn-lang/releases/latest/download
+curl -fsSLO $base/dawn-selfhost.jar
+curl -fsSLO $base/dawn-selfhost.jar.sha256
+sha256sum -c dawn-selfhost.jar.sha256      # macOS 上是 shasum -a 256 -c
+
+printf 'pub fn main() -> Unit !io = println("hello, dawn")\n' > hello.dawn
+java -jar dawn-selfhost.jar run hello.dawn
+```
+
+这两件是**两个不同的编译器**，不是同一个东西的两种下载方式。`dawnc` 是 C 后端，它拒绝
+`use java`；jar 是 JVM 工具链。该选哪个、各自做不到什么，见下面的[工具链](#工具链)一节。
+
+**从仓库检出**（本文其余部分默认的就是这条路）：`./bin/dawn` 首次运行会下载种子、按
+`scripts/seed-checksums.txt` 验它，再用它编译 HEAD。
+
+### 一个项目
+
+一个项目就是一个装着 `src/main.dawn` 的目录。没有别的东西要创建，所以也没有 `dawn new`：
+
+```text
+myapp/
+├── dawn.toml     # 有依赖之后才需要
+└── src/
+    └── main.dawn # pub fn main() -> Unit !io
+```
+
+`dawn run myapp` 编译并运行它；`src/` 下放多少个模块都行，`examples/projects/hello_mod`
+就是这个形状、里面放了三个。`dawn.toml` 起手是两行 `schema = 1` 与 `name = "myapp"`，
+之后交给 `dawn add <spec> --dir myapp` 维护。
 
 ## 特别在哪儿
 

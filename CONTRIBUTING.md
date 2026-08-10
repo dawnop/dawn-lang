@@ -1,178 +1,266 @@
-# 怎么在这个仓库里做事
+# How work gets done in this repository
 
-这里只写一件事：**特性是怎么从想法走到代码的**。
+*[中文版](CONTRIBUTING.zh-CN.md)*
 
-提交格式、跑测试、代码风格那些，通用模板里都有，而且 CI 会管
-（`./bin/dawn test selfhost`、`./bin/dawn test compiler-plan`、
-`./bin/dawn fmt compiler-plan std site selfhost packages examples --check`、金样差分）——
-文档写不写它们都一样。真正没被机器管住、又值得写下来的，是下面这套流程。它不是理论，
-是 `docs/` 里八篇设计文档跑出来的。
+This file covers one thing: **how a feature travels from an idea to code**.
 
-## 一、动码前先写 `docs/<特性>-design.md`
+Commit format, running the tests, code style: a generic template already has all
+of that, and CI holds it anyway (`./bin/dawn test selfhost`,
+`./bin/dawn test compiler-plan`,
+`./bin/dawn fmt compiler-plan std site selfhost packages examples --check`, the
+golden differentials), so writing it down changes nothing. What follows is the
+part no machine holds and that is still worth writing down. It is not theory. It
+is what eight design documents under `docs/` actually did.
 
-不是仪式，是因为**写下来会杀死一批方案**，而在编辑器里杀死方案比在 4000 行 diff 之后
-杀死便宜得多。草案开头要自报状态，别让读者猜：
+## 1. Before writing code, write `docs/<feature>-design.md`
+
+Not a ritual. **Writing a plan down kills some of them**, and killing a plan in
+the editor is far cheaper than killing it after a 4,000-line diff. A draft
+declares its own status at the top so a reader does not have to guess:
 
 > 动码前的**调研与方案**，不是设计定稿。
-
-一份草案大致长这样（见 [`docs/unwrap-design.md`](docs/unwrap-design.md)）：
-
-| 节 | 写什么 |
-|---|---|
-| 问题 | 现在**具体**哪儿疼。给真实的代码片段，不给形容词 |
-| 复盘原方案 | 上一版的想法为什么不行——**最好带实测** |
-| 方案 | 要做的那个 |
-| 为什么不顺手把 X 也改了 | 划边界，防止范围滑坡 |
-| 语法与冲突分析 | 新语法跟已有的哪儿打架 |
-| 落地点 | 动哪些文件、加哪些测试 |
-| **不做的（记录理由）** | 见下，这节最容易省、也最不该省 |
-
-## 二、调研可以推翻前提——那是成功，不是失败
-
-[`docs/seq6-research.md`](docs/seq6-research.md) 是这套流程最值钱的一次输出：它奉命去做
-「值类型特化」，实测后发现 **retro 对问题的描述与代码现状有实质出入**——痛的是「物化」
-不是「装箱」，而原方案对主要场景一分钱不省。于是序 6 被搁置，省下的是几千行白写的代码。
-
-所以：**草案里的每个数字都要有出处**。「一篇文章正文 = 百万个装箱 Int」听起来很有说服力，
-实测是 ASCII 下根本不成立（`Long.valueOf` 缓存 −128..127）。没实测过的性能断言，不要写进
-草案，更不要写进 README——`README:99` 曾挂着一句「native 二进制启动约 7ms」，
-没有任何 harness 支撑，是 `seq6-research.md` 顺手抓出来的。
-
-## 三、「不做的（记录理由）」
-
-每份草案末尾都有这一节。它的作用是**让三个月后的你不用把同一个方案再想一遍**——
-尤其当那个方案看起来很显然、而当初否掉它的理由并不显然的时候。
-`unwrap-design.md` 的「为什么保留 Option 包装（不顺手取消）」就是这类。
-
-## 四、实现完，回填
-
-草案不是写完就扔的。落地后：
-
-- 大改动开一份 `docs/history/m<N>-progress.md`，逐条记状态，**回填提交哈希**，
-  写明「供中断后接续」（见 [`docs/history/m7-progress.md`](docs/history/m7-progress.md)）。
-  跨仓的活儿要注明两边的哈希——语言本体在 `dawn-lang/`，后端在 `dawnop-site/backend-dawn/`。
-- 草案里被现实推翻的前提，**回头改掉那份草案**，别留着骗人。
-- 里程碑做完写 `docs/history/m<N>-retro.md`：复盘 + 排下一批的修复优先级表
-  （[`docs/history/m6-retro.md`](docs/history/m6-retro.md) 那张表直接变成了 M7 的序 1–6）。
-
-> 历史哈希是会失效的：仓库为清理 trailer 重写过一次历史，随后专门发了一个提交回填
-> 文档里失效的 11 处引用。回填哈希时留意这件事。
-
-## 五、提交信息
-
-一行英文祈使句，不带 `type(scope):` 前缀——这个仓库的代码、注释、提交信息统一用英文
-（`docs/` 用中文）。正文写**读代码看不出来的东西**：根因、被推翻的方案、实测数据、
-验证手段。不写「改了什么」——那个 diff 里有。
-
-**改变工具链输出**（发出来的字节码、C 文本、CLI 文本、格式化结果、LSP 响应）时，正文里
-**为每一个被改动的检查 label 各加一行** `Emit-Change(<label>): <说明>`。label 是差分脚本
-打印的那个检查名——`emit selfhost`、`emit packages/json`、`run calc (args)`、`fmt`、`lsp`——
-必须逐字出现在 [`scripts/emit-labels.txt`](scripts/emit-labels.txt) 里。
-`selfhost-prev-diff.sh` / `run-diff` / `fmt-diff` / `lsp-diff` 会拿 HEAD 和上一个 tag 对拍，
-**没有匹配声明的差异是 CI 红灯**（REL-02，`scripts/emitchange.sh`）。
-
-> **不接受通配，也不接受裸 `Emit-Change:`**（#124）。`emit *` 会把**将来才新增的
-> label** 一起豁免，同一句提交信息随语料增长而放行得越来越多；而裸 `Emit-Change:` 最
-> 常见的历史写法是 `Emit-Change: none`——作者想说「什么都没变」，效果却是放行**所有**
-> 差分的**所有** label。改动真的动了六个语料就写六行：v0.48.0 那次改 class-file 版本
-> 就是这么写的，代价就是六行。解析不了的声明、以及 `emit-labels.txt` 不认识的 label，
-> 一律报错而不是变成一条永远匹配不上的规则。完整规则与推翻掉的方案写在
-> `scripts/emitchange.sh` 头部，`scripts/emitchange-selftest.sh` 是它自己的门禁。
 >
-> 有个坑没变：脚本查的是**上个 tag 到 HEAD 整段**里的声明，不是逐个提交查。
-> 所以同段里一条声明会替后面同 label 的差异挡灯。**先跑门禁、再写这一行**，
-> 否则你看到的绿是别人的声明挡出来的。#124 把「没人看过的 label 也被豁免」这半
-> 堵死了，剩下的一半——同一个 label 的差异变大——只有 golden 快照进仓库才能关，
-> 记在 `docs/codebase-audit.md` 的 REL-02 里，没做。
+> (Investigation and proposal, before any code. Not a settled design.)
 
-**绝不加 Claude 署名**（`Co-Authored-By` / `Claude-Session` 一概不要）。本项目以开源为标准。
+A draft looks roughly like this (see
+[`docs/unwrap-design.md`](docs/unwrap-design.md)):
 
-## 六、契约：别单方面改
+| Section | What goes in it |
+|---|---|
+| Problem | Where it hurts **today**, concretely. Real code, not adjectives |
+| Post-mortem of the previous plan | Why the last idea does not work, **measured if at all possible** |
+| Plan | The one you are going to do |
+| Why X was not fixed along the way | Draw the boundary. This is what stops scope creep |
+| Syntax and conflict analysis | Where new syntax collides with what is already there |
+| Landing points | Which files move, which tests are added |
+| **Not doing (with reasons)** | See below. The easiest section to skip and the one to skip least |
 
-后端 [`dawnop-site`](https://github.com/dawnop/dawnop-site) 的生产服务跑在这个编译器
-产出的代码上。它按 `.dawn-version` 钉住某个 release，所以：
+## 2. Investigation may overturn its own premise, and that is a success
 
-- 语言的破坏性改动要先发 tag，再由那边提一个 bump `.dawn-version` 的提交；
-- 两边一起改的过渡期，那边把 `.dawn-version` 写成 `main` 现编，但**别让它长期留在 main 上**——
-  那期间可复现性是没有的。
+[`docs/seq6-research.md`](docs/seq6-research.md) is the most valuable thing this
+process has produced. It was sent to do "value-type specialization" and found,
+by measuring, that **the retro's description of the problem and the state of the
+code were materially different**: what hurt was materialization, not boxing, and
+the original plan saved nothing at all in the main scenario. Sequence 6 was
+shelved, and what that bought was several thousand lines nobody had to write.
 
-发布：改 `selfhost/src/version.dawn` 的 `VERSION` **和 `std/VERSION`**（std 目录自己盖的
-release 戳，编译器拿它认出「这个 std 不是我发布时那个」，见 `driver/stdlib.load_std`；
-两者不一致时 `driver/stdlib` 的 `std/ stamps itself with this toolchain's version`
-测试会红）→ 提交 → `git push origin main` 并等
-main CI 通过 → `git tag v0.9.0` → `git push origin refs/tags/v0.9.0`。禁止
-`git push --tags`，它会把无关 tag 一起发布。`release.yml` 会校验 tag 与 version 一致、
-跑全量测试、把 `dawn-selfhost.jar` 与 native 资产传上 Release。四件资产发布完成后只运行
-`./scripts/advance-seed.sh v0.9.0`；它会校验 GitHub Release 的 JAR 与远端 tag archive
-的 std，并按摘要清单、std 清单、指针的顺序同步推进三份 seed 文件，不得只手改
-`seed-release.txt`（完整协议见 docs/bootstrap.md）。
-`doc-check.py` 会把文档里声称「当前工具链是几」的那几处也一起校到 `version.dawn`，
-所以改完 `VERSION` 那一趟 CI 会点名剩下没跟上的行——README 那句曾经落后 38 个小版本，
-靠人读发现的。
+So: **every number in a draft names its source**. "The body of one article is a
+million boxed `Int`s" sounds convincing; measured, it does not hold in ASCII at
+all (`Long.valueOf` caches `-128..127`). An unmeasured performance claim does not
+go into a draft, and certainly not into the README: `README:99` carried the
+sentence "the native binary starts in about 7ms" with no harness behind it,
+until `seq6-research.md` caught it in passing.
 
-## 七、命名族：std 的准入判据
+## 3. "Not doing (with reasons)"
 
-一次审计（`docs/audit/re-audit-2026-07-30.md` RD-06）数出长度四个名字、判空只在一个
-零调用者的模块存在、转换五种命名法。下面这几条是那次收口留下的**准入判据**——
-新加一个 std 或包的 pub 名字时对着看，不是历史记录。
+Every draft ends with this section. Its job is to **stop you from having the
+same idea again in three months**, which matters most when the idea looks
+obvious and the reason it was rejected does not. "Why the `Option` wrapper stays
+(and was not removed along the way)" in `unwrap-design.md` is one of these.
 
-- **一个概念一个名字。** 长度是 `len`，判空是 `is_empty`，`str`/`list`/`map`/`set`/`bytes`
-  五处逐字相同。具名例外只有两个，都出在 `Buf` 上、都是同一个原因（Dawn 无重载，
-  而 `Bytes` 那一侧先占住了对的名字）：`bytes.size(b: Buf)` 让开 `bytes.len(b: Bytes)`，
-  `bytes.buf_at(b: Buf, i)` 让开 `bytes.at(b: Bytes, i)`。例外要**在代码里写明为什么**，
-  否则下一个人会照抄成惯例。让路的方向也是判据的一部分：**把对的名字挪走给错的名字腾地方
-  是反的**——`bytes.at` 按下面的三判据已经叫对了，所以改名的是 `Buf` 那一侧。
-- **名字要说出越界时会发生什么（spec §4.8 三判据）。** 这是 v0.54.0/v0.55.0 那批改名的
-  唯一依据，`at` / `get` / 区间函数各归其一：
-  - **判据 1（断言，panic）** 的词是 `at` 与 `[]`：参数是一个**位置**，调用方声称它存在，
-    越界是 bug。`str.at`、`bytes.at`、`pvec.index`/`nth`。
-  - **判据 2（问询，`Option`/`Bool`）** 的词是 `get`：越界/缺席是调用方要分的正常分支。
-    `list.get`、`map.get`、`index_of` 族。
-  - **判据 3（钳位，永不 panic）** 是区间函数：`slice`、`take`、`drop`、`seek`。参数是
-    一个**区间或落点**，说的是「要这一段里有的部分」，不断言端点存在。
-  一个名字**不能同时扛两条政策**。`cursor.at` 曾经是钳位的、`str.at` 是 panic 的，
-  同一个词的含义取决于读者当时在哪个模块里——那不是取舍，是缺陷；解法是改名
-  （`cursor.at` → `cursor.seek`），不是把两者统一到一条政策上，因为两者各自都是对的。
-  `bytes.get(b: Buf, i)` 是同一类缺陷的另一面：它 panic，却用了判据 2 的词。
-- **改破坏性的名字走「一代转发器」。** 新名字与旧名字同期上线，旧的降为一行转发器并在
-  文档注释里写明「下一版删除」；下一个 release 才删旧名、迁调用点。理由是机器的：
-  `bin/dawn` 的 stage 1 用**种子自带的那份 std**编译今天的 `selfhost/src`（见脚本里的
-  注释），所以 selfhost 的调用点**必须晚一代**才能改；一期做完的改名会在自举第一步就红。
-  先例：RD-06 的 `of_array`、本批的 `str.slice`/`cursor.seek`/`bytes.buf_at`。
-- **转换是 `to_X` / `from_X`。** `to_hex`/`from_hex`、`to_base64`/`from_base64`、
-  `to_array`/`from_array`、`to_list`。领域动词只在**名字本身承载语义**时留下：
-  `bytes.freeze` 是「结束 `Buf` 的扩展契约」，不是「转成 Bytes」；`bytes.utf8` 点名的是
-  编码而不是目标类型。判据是「换成 `to_X` 会丢掉一句话吗」——会，就留动词。
-- **增删按容器种类分。** 有键的容器是 `insert`/`remove`（`map`、`set`）；
-  只往末尾追加的构造器是 `put`/`push`（`bytes.Buf`、`Array`）。同一个模块里不要两套。
-- **表示是内部模块。** `std/hamt`、`std/pvec` 持有 `Map`/`Set`/`List` 的表示，
-  std 之外 `use` 它们是编译错误（`checker.internal_std_modules`）。判据是
-  「换掉这份实现会不会破坏别人的程序」——会，说明它不该是公开的。
-  同一条判据在包里更硬：包的 `pub` 有版本号背书（RD-12）。
+## 4. When it is implemented, write back
 
-## 八、对外文案：先改英文
+A draft is not something you write and throw away. Once it lands:
 
-这个仓库的代码、注释、诊断、提交信息一律英文，`docs/` 一律中文——这两条没变。
-变的是**对外那一层**：
+- A large change gets a `docs/history/m<N>-progress.md`: one line of status per
+  item, **with the commit hashes filled in**, and a note saying it exists to be
+  picked up after an interruption (see
+  [`docs/history/m7-progress.md`](docs/history/m7-progress.md)). Cross-repository
+  work records both hashes: the language itself is in `dawn-lang/`, the backend
+  in `dawnop-site/backend-dawn/`.
+- **Go back and fix the draft** wherever reality overturned one of its premises.
+  Leaving it is leaving a lie.
+- A finished milestone gets a `docs/history/m<N>-retro.md`: a post-mortem plus a
+  priority table for the next batch of fixes. The table in
+  [`docs/history/m6-retro.md`](docs/history/m6-retro.md) became sequences 1 to 6
+  of M7 directly.
 
-- **`README.md` 是英文原文**，`README.zh-CN.md` 是它的译本。
-- **站点 `/` 出英文**（`site/pages/home.md`），`/zh/` 出中文（`home.zh.md`）。
-- **教程与标准库导语**同样以英文为正本，中文是译本。
-- **规范与设计笔记反过来**：中文是正本、英文是译本（`spec.en.md` / `design.en.md`）。
-  它们是活文档，每次改语言都在中文里改，让英文当正本等于要求每次语言改动先写英文——
-  这么贵的规矩会被跳过，而跳过之后腐烂又回到看不见的那一面。
-- `docs/` 其余部分（设计方案、计划、落地日志）**只有中文，不翻译**，站点每一版首页都写明。
+> Historical hashes expire. This repository rewrote its history once to strip
+> trailers, and a commit afterwards went back and repaired the 11 references in
+> the documentation that this had invalidated. Keep that in mind when filling
+> hashes in.
 
-**改对外文案时先改英文，再改中文译本。** 译本头上带
-`<!-- doc-check: translation-of <原文> @ <digest> -->`，`scripts/doc-check.py` 会算原文的
-摘要跟它比；英文动了而中文没跟，CI 红。登记表在那个脚本的 `TRANSLATIONS`——**摘要没了
-不等于不检查**，删掉标记同样红。
+## 5. Commit messages
 
-为什么对外层是这个方向：派生的那一份才会腐烂，而对外层的读者大多不读中文。让英文当派生物，
-等于把腐烂藏在最多人看、最没人校对的那一面；反过来腐烂落在中文上，而中文的读者是作者本人。
-唯一的代价是作者用中文思考，所以这条规矩不靠记性，靠上面那道门禁——**规范与设计笔记正是
-代价压过收益的那一对，所以它们的正本留在中文，门禁照样两头盯**。
+One line, English, imperative, no `type(scope):` prefix. The code, the comments
+and the commit messages in this repository are English; `docs/` is Chinese. The
+body carries **what reading the diff will not tell you**: the root cause, the
+plan that got overturned, the measurements, how it was verified. Not "what
+changed", which is what the diff is.
 
-摘要算什么、不算什么（段落重排不算改、代码块逐行算改、版本号不算——`check_version`
-已经独立管着两边）写在 `translation_digest` 的注释里。**不设「译本落后」的豁免**：
-一个可以永远开着的豁免等于没有门禁。
+When you **change the toolchain's output** (emitted bytecode, C text, CLI text,
+formatting results, LSP responses), the body carries **one line per check label
+you moved**: `Emit-Change(<label>): <what and why>`. The label is the check name
+the differential scripts print (`emit selfhost`, `emit packages/json`,
+`run calc (args)`, `fmt`, `lsp`) and it must appear verbatim in
+[`scripts/emit-labels.txt`](scripts/emit-labels.txt).
+`selfhost-prev-diff.sh` / `run-diff` / `fmt-diff` / `lsp-diff` compare HEAD
+against the previous tag, and **a difference with no matching declaration is a
+red build** (REL-02, `scripts/emitchange.sh`).
+
+> **Wildcards are not accepted, and neither is a bare `Emit-Change:`** (#124).
+> `emit *` exempts **labels that do not exist yet**, so one commit message goes
+> on permitting more and more as the corpus grows; and the commonest historical
+> spelling of a bare `Emit-Change:` was `Emit-Change: none`, where the author
+> meant "nothing changed" and the effect was to permit **every** label of
+> **every** differential. If the change really moved six corpora, write six
+> lines: the v0.48.0 class-file version change did exactly that, and six lines
+> was the whole price. A declaration that will not parse, and a label
+> `emit-labels.txt` does not know, are errors rather than rules that can never
+> match.
+>
+> One trap has not changed: the script reads the declarations across the
+> **whole span from the last tag to HEAD**, not per commit. So one declaration
+> in that span shields every later difference carrying the same label.
+> **Run the gate first, write the line second**, or the green you are looking at
+> is somebody else's declaration. #124 closed the half where a label nobody had
+> ever seen got exempted; the other half, a difference under an existing label
+> growing, can only be closed by putting golden snapshots in the repository. It
+> is recorded as REL-02 in `docs/codebase-audit.md` and it is not done.
+
+**Never add a Claude attribution** (no `Co-Authored-By`, no `Claude-Session`).
+This project is held to open-source standards.
+
+## 6. Contracts: do not change them unilaterally
+
+The production service of the [`dawnop-site`](https://github.com/dawnop/dawnop-site)
+backend runs on code this compiler produced. It pins a release through
+`.dawn-version`, so:
+
+- a breaking language change ships as a tag first, and that repository then
+  raises `.dawn-version` in a commit of its own;
+- while both sides are being changed together it may write `main` into
+  `.dawn-version` and compile from source, but **it must not sit on main for
+  long**: there is no reproducibility during that window.
+
+Releasing: change `VERSION` in `selfhost/src/version.dawn` **and `std/VERSION`**
+(the release stamp the `std` directory puts on itself, which is how the compiler
+recognizes "this std is not the one I shipped with"; see `driver/stdlib.load_std`.
+When the two disagree, the `std/ stamps itself with this toolchain's version`
+test in `driver/stdlib` goes red) → commit → `git push origin main` and wait for
+main CI → `git tag v0.9.0` → `git push origin refs/tags/v0.9.0`. Never
+`git push --tags`; it publishes unrelated tags along with it. `release.yml`
+checks the tag against the version, runs the full test suite, and uploads
+`dawn-selfhost.jar` and the native assets to the Release. Only once all four
+assets are published, run `./scripts/advance-seed.sh v0.9.0`. It validates the
+GitHub Release JAR and the std in the remote tag archive, then advances the three
+seed files in order (digest manifest, std manifest, pointer); hand-editing
+`seed-release.txt` alone is not allowed (the full protocol is in
+docs/bootstrap.md). `doc-check.py` also holds every place in the documentation
+that claims "the current toolchain is N" against `version.dawn`, so the CI run
+after a `VERSION` change names the lines that did not keep up. The sentence in
+README was once 38 minor versions behind, and a human found it.
+
+## 7. Name families: the admission test for `std`
+
+An audit (`docs/audit/re-audit-2026-07-30.md`, RD-06) counted four names for
+length, an emptiness test that existed in exactly one module with no callers,
+and five naming conventions for conversion. What follows is the **admission
+test** that cleanup left behind. It is not a historical record: check a new
+`pub` name in `std` or in a package against it.
+
+- **One concept, one name.** Length is `len`, emptiness is `is_empty`, and
+  `str`/`list`/`map`/`set`/`bytes` spell both identically. There are exactly two
+  named exceptions, both on `Buf` and both for the same reason (Dawn has no
+  overloading, and the `Bytes` side got the right name first):
+  `bytes.size(b: Buf)` yields to `bytes.len(b: Bytes)`, and
+  `bytes.buf_at(b: Buf, i)` yields to `bytes.at(b: Bytes, i)`. An exception
+  **says why in the code**, or the next person copies it as a convention. Which
+  side yields is part of the test too: **moving the right name out of the way to
+  make room for the wrong one is backwards**. `bytes.at` is already correctly
+  named under the three criteria below, so the side that got renamed was `Buf`.
+- **A name says what happens when you go out of bounds (spec §4.8, three
+  criteria).** This was the sole basis for the v0.54.0 / v0.55.0 renames, and it
+  puts `at`, `get` and the range functions each in one bucket:
+  - **Criterion 1 (assertion, panics)** is spelled `at` and `[]`: the argument
+    is a **position**, the caller asserts it exists, and out of bounds is a bug.
+    `str.at`, `bytes.at`, `pvec.index` / `nth`.
+  - **Criterion 2 (question, `Option` / `Bool`)** is spelled `get`: out of
+    bounds or absent is a normal branch the caller handles. `list.get`,
+    `map.get`, the `index_of` family.
+  - **Criterion 3 (clamping, never panics)** is the range functions: `slice`,
+    `take`, `drop`, `seek`. The argument is a **range or a landing point**, it
+    asks for "whatever part of this stretch exists", and it asserts nothing
+    about the endpoints.
+
+  One name **cannot carry two policies**. `cursor.at` used to clamp while
+  `str.at` panicked, so the meaning of one word depended on which module the
+  reader was in; that is not a tradeoff but a defect, and the fix is a rename
+  (`cursor.at` → `cursor.seek`) rather than unifying the two under one policy,
+  because each of the two was right on its own. `bytes.get(b: Buf, i)` is the
+  same defect from the other side: it panics, under a criterion 2 word.
+- **A breaking rename goes through a one-generation forwarder.** The new name
+  and the old ship together, the old demoted to a one-line forwarder whose doc
+  comment says "removed in the next version"; the next release is when the old
+  name goes and the call sites move. The reason is mechanical: stage 1 of
+  `bin/dawn` compiles today's `selfhost/src` with **the std the seed carries**
+  (see the comment in the script), so selfhost call sites **must** be one
+  generation late. A rename done in one go is red at the first step of the
+  bootstrap. Precedents: RD-06's `of_array`, and this batch's `str.slice` /
+  `cursor.seek` / `bytes.buf_at`.
+- **Conversions are `to_X` / `from_X`.** `to_hex`/`from_hex`,
+  `to_base64`/`from_base64`, `to_array`/`from_array`, `to_list`. A domain verb
+  survives only where **the name itself carries the meaning**: `bytes.freeze` is
+  "end the extension contract of a `Buf`", not "convert to Bytes", and
+  `bytes.utf8` names an encoding rather than a target type. The test is "does
+  rewriting it as `to_X` lose a sentence?" If it does, keep the verb.
+- **Insert and remove are spelled per container kind.** Keyed containers get
+  `insert` / `remove` (`map`, `set`); constructors that only append at the end
+  get `put` / `push` (`bytes.Buf`, `Array`). Not both in one module.
+- **A representation is an internal module.** `std/hamt` and `std/pvec` hold the
+  representation of `Map`/`Set`/`List`, and a `use` of them from outside `std` is
+  a compile error (`checker.internal_std_modules`). The test is "would replacing
+  this implementation break somebody's program?" If it would, it should not have
+  been public. The same test is harder inside a package, where a `pub` name is
+  backed by a version number (RD-12).
+
+## 8. Outward-facing copy: English first
+
+The code, the comments, the diagnostics and the commit messages in this
+repository are English, and `docs/` is Chinese. Neither of those has changed.
+What changed is the **outward layer**:
+
+- **`README.md` is the original**, in English. `README.zh-CN.md` is its
+  translation.
+- **This file is the original**, in English. `CONTRIBUTING.zh-CN.md` is its
+  translation. It joined the outward layer late, and the reason it was missed is
+  worth naming: the scope used to be drawn as "everything the website renders",
+  which is a good proxy for "documents a stranger reads" everywhere except here.
+  GitHub renders this file to every would-be contributor, and it was the one
+  document where the proxy and the thing it stood for disagreed.
+- **The site serves English at `/`** (`site/pages/home.md`) and Chinese at
+  `/zh/` (`home.zh.md`).
+- **The tutorial and the standard library introduction** are likewise English
+  originals with Chinese translations.
+- **The specification and the design notes run the other way**: Chinese is the
+  original, English the translation (`spec.en.md` / `design.en.md`). They are
+  living documents, edited in Chinese by every change to the language, and
+  making English the original would require writing each language change in
+  English first. A rule that expensive gets skipped, and once it is skipped the
+  rot is back on the side nobody looks at.
+- The rest of `docs/` (design proposals, plans, landing logs) is **Chinese only
+  and not translated**. Every face of the site says so on its front page.
+
+**When you change outward-facing copy, change the English first, then the
+Chinese translation.** A translation carries
+`<!-- doc-check: translation-of <original> @ <digest> -->` at its head;
+`scripts/doc-check.py` computes the original's digest and compares. The English
+moving without the Chinese following is a red build. The registry is
+`TRANSLATIONS` in that script, and **a missing digest is not an absent check**:
+deleting the marker is red as well.
+
+Why the outward layer runs in this direction: the derived copy is the one that
+rots, and most readers of the outward layer do not read Chinese. Making English
+the derived copy would hide the rot on the side that is read the most and
+proofread the least. The other way round the rot lands on the Chinese, whose
+reader is the author. The only cost is that the author thinks in Chinese, which
+is why this rule does not rely on memory but on the gate above. **The
+specification and the design notes are precisely the pair where that cost
+outweighs the benefit, so their original stays Chinese, and the gate watches
+both ends either way.**
+
+What the digest counts and what it does not (re-wrapping a paragraph is not a
+change, a code block counts line by line, version numbers do not count, because
+`check_version` already holds both sides independently) is written in the
+comments on `translation_digest`. **There is no "the translation is behind"
+exemption**: an exemption that can stay open forever is the same as no gate.

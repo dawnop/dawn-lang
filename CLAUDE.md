@@ -147,7 +147,8 @@ Windows 的 WinNAT 保留了大片低端口，8097 bind 会报 "Address already 
 
 ## 怎么加特性
 
-见 [CONTRIBUTING.md](CONTRIBUTING.md)。摘要：**动码前先写 `docs/<特性>-design.md`**，
+见 [CONTRIBUTING.md](CONTRIBUTING.md)（英文正本，中文译本是
+[CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)）。摘要：**动码前先写 `docs/<特性>-design.md`**，
 里面的性能断言必须有实测出处，末尾记「不做的（理由）」；实现后回填
 `docs/m<N>-progress.md`（含提交哈希）。调研推翻原前提是**成果**而非失败
 （[`docs/seq6-research.md`](docs/seq6-research.md) 是范例）。

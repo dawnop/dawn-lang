@@ -28,6 +28,65 @@ pub fn main() -> Unit !io =
     |> t => println("total: $t")
 ```
 
+## Install
+
+Every release publishes four assets: two artifacts and the SHA-256 of each.
+Check the digest. The seed the toolchain bootstraps from is verified on every
+single use, and an install step that skipped the same check would be the one
+place where that discipline stopped.
+
+**Without a JVM** (linux-x86_64): one static executable, with `std` and the C
+runtime inside it.
+
+```bash
+base=https://github.com/dawnop/dawn-lang/releases/latest/download
+curl -fsSLO $base/dawnc-linux-x86_64
+curl -fsSLO $base/dawnc-linux-x86_64.sha256
+sha256sum -c dawnc-linux-x86_64.sha256
+chmod +x dawnc-linux-x86_64 && sudo mv dawnc-linux-x86_64 /usr/local/bin/dawnc
+
+printf 'pub fn main() -> Unit !io = println("hello, dawn")\n' > hello.dawn
+dawnc run hello.dawn
+```
+
+**With a JVM** (JDK 21 or newer, any platform): the toolchain jar carries `std`,
+so the jar on its own is the whole toolchain.
+
+```bash
+base=https://github.com/dawnop/dawn-lang/releases/latest/download
+curl -fsSLO $base/dawn-selfhost.jar
+curl -fsSLO $base/dawn-selfhost.jar.sha256
+sha256sum -c dawn-selfhost.jar.sha256      # macOS: shasum -a 256 -c
+
+printf 'pub fn main() -> Unit !io = println("hello, dawn")\n' > hello.dawn
+java -jar dawn-selfhost.jar run hello.dawn
+```
+
+These two are different compilers, not two downloads of one. `dawnc` is the C
+backend and it refuses `use java`; the jar is the JVM toolchain. Which you want,
+and what each cannot do, is under [The toolchain](#the-toolchain) below.
+
+**From a checkout**, which is what the rest of this file assumes: `./bin/dawn`
+downloads the seed on first use, verifies it against
+`scripts/seed-checksums.txt`, and builds HEAD with it.
+
+### A project
+
+A project is a directory with `src/main.dawn` in it. There is nothing else to
+create, and so there is no `dawn new`:
+
+```text
+myapp/
+├── dawn.toml     # only once you have dependencies
+└── src/
+    └── main.dawn # pub fn main() -> Unit !io
+```
+
+`dawn run myapp` compiles and runs it; `src/` may hold as many modules as you
+like, and `examples/projects/hello_mod` is this shape with three of them.
+`dawn.toml` starts as two lines, `schema = 1` and `name = "myapp"`, after which
+`dawn add <spec> --dir myapp` maintains it for you.
+
 ## What is different about it
 
 Each item names, in parentheses, **something you can go and check**: a gate, a

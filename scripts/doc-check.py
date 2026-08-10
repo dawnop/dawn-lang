@@ -240,21 +240,27 @@ DOCS = sorted(
 # the file it checks stops existing. With the registry, deleting the marker is
 # a failure.
 #
-# Scope, decided rather than drifted into: everything the website renders --
-# the README, the front page, the tutorial, the standard library's
-# introduction, the specification and the design notes. Those are the
-# documents a stranger reads. The rest of docs/ is design notes, plans and
-# landing logs whose reader is the author; translating them would produce
-# fifty-odd more documents to keep level, and a half-translated corpus is
-# worse than an honestly monolingual one. Every face of the site says so in
-# its own closing paragraph, so a reader is told rather than left to find out
-# by clicking.
+# Scope, decided rather than drifted into: the documents a stranger reads. The
+# rest of docs/ is design notes, plans and landing logs whose reader is the
+# author; translating them would produce fifty-odd more documents to keep level,
+# and a half-translated corpus is worse than an honestly monolingual one. Every
+# face of the site says so in its own closing paragraph, so a reader is told
+# rather than left to find out by clicking.
+#
+# That scope used to be written as "everything the website renders", which is a
+# good proxy for it and was wrong in exactly one place. CONTRIBUTING.md is
+# rendered by GitHub to every would-be contributor and by the website to nobody,
+# so under the proxy it stayed Chinese-only while being, by the criterion the
+# proxy stood for, squarely in the outward layer. It is registered below now,
+# and the scope is stated as the criterion so the next document in that position
+# is judged by it rather than by where it happens to be published.
 #
 # Not on this list and not an oversight: the standard library's entries. They
 # are the compiler's doc comments, and this repository's code is English --
 # both /stdlib.html and /zh/stdlib.html show the same English signatures under
 # their own introductions.
 TRANSLATIONS = {
+    "CONTRIBUTING.zh-CN.md": "CONTRIBUTING.md",
     "README.zh-CN.md": "README.md",
     "docs/tutorial.zh-CN.md": "docs/tutorial.md",
     "docs/spec.en.md": "docs/spec.md",
@@ -1626,6 +1632,7 @@ def check_named_effect_status_selftest() -> tuple[list[str], int]:
 
 REPOSITORY_POLICY_FILES = (
     ".editorconfig",
+    ".github/workflows/release.yml",
     "CONTRIBUTING.md",
     "README.md",
     "README.zh-CN.md",
@@ -1633,6 +1640,28 @@ REPOSITORY_POLICY_FILES = (
     "docs/spec.md",
     "docs/spec.en.md",
 )
+
+# The install instructions download release assets by name, and the release
+# workflow decides what those names are. Nothing connected the two, which is
+# how a README comes to advertise an artifact no release carries (it already
+# happened once here, in 2026-08). So the set of assets README fetches is
+# compared against the set release.yml requires itself to have published, in
+# both directions: an asset renamed in the workflow reds the README, and an
+# asset dropped from the README reds too.
+#
+# The comparison is on `$base/<name>`, the shell variable the install block
+# assigns the release URL to, rather than on bare names: `dawnc-linux-x86_64`
+# is a word README uses in prose as well, and a check that a word occurs
+# somewhere in a 300-line document is not a check.
+RELEASE_ASSET_BASE = "https://github.com/dawnop/dawn-lang/releases/latest/download"
+RELEASE_ASSET_FETCH = re.compile(r"\$base/([A-Za-z0-9._\-]+)")
+RELEASE_ASSET_DECL = re.compile(r"EXPECTED_ASSETS=\(\s*(.*?)\)", re.S)
+INSTALL_DOCS = ("README.md", "README.zh-CN.md")
+
+
+def release_assets(workflow: str) -> list[str]:
+    m = RELEASE_ASSET_DECL.search(workflow)
+    return sorted(m.group(1).split()) if m else []
 
 
 def repository_contract_problems(files: dict[str, str]) -> tuple[list[str], int]:
@@ -1655,6 +1684,24 @@ def repository_contract_problems(files: dict[str, str]) -> tuple[list[str], int]
             bad.append(f"CONTRIBUTING.md: missing active inline-code policy {name!r}")
         else:
             seen += 1
+
+    published = release_assets(files[".github/workflows/release.yml"])
+    if not published:
+        bad.append(".github/workflows/release.yml: no EXPECTED_ASSETS list to "
+                   "check the install instructions against")
+    else:
+        for rel in INSTALL_DOCS:
+            text = files[rel]
+            if RELEASE_ASSET_BASE not in text:
+                bad.append(f"{rel}: install instructions do not point at "
+                           f"{RELEASE_ASSET_BASE}")
+                continue
+            fetched = sorted(set(RELEASE_ASSET_FETCH.findall(text)))
+            if fetched != published:
+                bad.append(f"{rel}: install instructions fetch {fetched}, but "
+                           f"release.yml publishes {published}")
+            else:
+                seen += 1
 
     editor = files[".editorconfig"]
     for sample, expected in (
@@ -1807,6 +1854,27 @@ def check_repository_contracts_selftest() -> tuple[list[str], int]:
     if bad:
         return [f"repository policy self-test: restoring the real indent stayed red: {bad[0]}"], 0
 
+    renamed = dict(files)
+    renamed[".github/workflows/release.yml"] = \
+        renamed[".github/workflows/release.yml"].replace(
+            "dawnc-linux-x86_64", "dawnc-linux-amd64")
+    if renamed[".github/workflows/release.yml"] == files[".github/workflows/release.yml"]:
+        return ["repository policy self-test: release asset fixture was not mutated"], 0
+    bad, _ = repository_contract_problems(renamed)
+    if not any("install instructions fetch" in problem for problem in bad):
+        return ["repository policy self-test: renaming a release asset left the "
+                "install instructions green"], 0
+
+    dropped = dict(files)
+    dropped["README.md"] = dropped["README.md"].replace(
+        "curl -fsSLO $base/dawn-selfhost.jar.sha256\n", "", 1)
+    if dropped["README.md"] == files["README.md"]:
+        return ["repository policy self-test: install fixture was not mutated"], 0
+    bad, _ = repository_contract_problems(dropped)
+    if not any("install instructions fetch" in problem for problem in bad):
+        return ["repository policy self-test: dropping a checksum download from "
+                "the install instructions stayed green"], 0
+
     comment = dict(files)
     command = "./bin/dawn fmt compiler-plan std site selfhost packages examples --check"
     comment["CONTRIBUTING.md"] = comment["CONTRIBUTING.md"].replace(
@@ -1868,7 +1936,7 @@ def check_repository_contracts_selftest() -> tuple[list[str], int]:
     bad, _ = repository_contract_problems(historical)
     if bad:
         return [f"repository policy self-test: scoped historical prose was rejected: {bad[0]}"], 0
-    return [], 8
+    return [], 10
 
 
 def read_audit_details() -> dict[str, str]:
@@ -2720,7 +2788,7 @@ def main() -> None:
     version = toolchain_version()
     # What docs/README.md's opening sentence counts: the Markdown documents
     # under docs/, which is DOCS minus the top-level files it does not index
-    # (README, README.zh-CN, CLAUDE, CONTRIBUTING).
+    # (README, README.zh-CN, CLAUDE, CONTRIBUTING, CONTRIBUTING.zh-CN).
     doc_total = sum(1 for p in DOCS if p.is_relative_to(ROOT / "docs"))
 
     # Both cross-document checks need every document's headings before any

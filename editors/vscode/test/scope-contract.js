@@ -424,24 +424,46 @@ async function negativeControls(grammar) {
   return controls.map(([name]) => name);
 }
 
+// Two separate claims, kept separate on purpose.
+//
+// Every devDependency is pinned to an exact version and the lock agrees. This
+// runs over whatever is declared rather than over a fixed list: a caret range
+// on a package added next year is the same hazard as a caret range on the two
+// below, and a closed list says nothing about it while reddening merely because
+// something was added. That is what it did until @vscode/vsce arrived to make
+// the extension packageable, and the failure named exact versions while the
+// actual complaint was about the size of the set.
+//
+// And the two packages this file itself loads stay at the versions the recorded
+// scope results were measured against, because a tokenizer upgrade that moves
+// them is a result nobody re-measured.
 function verifyDependencyPins() {
   const packageJson = readJson(path.join(__dirname, "../package.json"));
   const packageLock = readJson(path.join(__dirname, "../package-lock.json"));
-  assert.deepEqual(
-    packageJson.devDependencies,
-    REQUIRED_DEV_DEPENDENCIES,
-    "TextMate test dependencies must use exact versions"
-  );
-  assert.deepEqual(
-    packageLock.packages[""].devDependencies,
-    REQUIRED_DEV_DEPENDENCIES,
-    "package lock must preserve the exact root dependency pins"
-  );
-  for (const [dependency, version] of Object.entries(REQUIRED_DEV_DEPENDENCIES)) {
+  const declared = packageJson.devDependencies;
+  const locked = packageLock.packages[""].devDependencies;
+  for (const [dependency, version] of Object.entries(declared)) {
+    assert.match(
+      version,
+      /^\d+\.\d+\.\d+$/,
+      `${dependency} devDependency must be an exact version, not ${version}`
+    );
+    assert.equal(
+      locked[dependency],
+      version,
+      `package lock must preserve the ${dependency} pin`
+    );
     assert.equal(
       packageLock.packages[`node_modules/${dependency}`].version,
       version,
       `${dependency} lock entry must match its exact package pin`
+    );
+  }
+  for (const [dependency, version] of Object.entries(REQUIRED_DEV_DEPENDENCIES)) {
+    assert.equal(
+      declared[dependency],
+      version,
+      `${dependency} is what this contract tokenizes with; it must stay at ${version}`
     );
   }
 }
