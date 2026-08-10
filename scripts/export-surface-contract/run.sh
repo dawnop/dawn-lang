@@ -81,6 +81,31 @@ expect_diags() {
   done
 }
 
+# The `impls` array of the one module `dawn doc` is pointed at, one entry per
+# line. Read out of the JSON rather than grepped for, so "the array is empty"
+# and "the key is gone" cannot look alike.
+doc_impls() {
+  local compiler=$1 source=$2 out
+  out="$work/doc.$$.$RANDOM"
+  run_dawn "$compiler" doc "$source" > "$out" 2>&1 || {
+    cat "$out" >&2
+    fail "doc $source did not run"
+  }
+  python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+mods = d["modules"]
+assert len(mods) == 1, mods
+print("\n".join(mods[0]["impls"]))' "$out"
+}
+
+expect_doc_impls() {
+  local name=$1 want=$2 got
+  got=$(doc_impls "${3:-$dawn}" "$cases/$name.dawn")
+  [ "$got" = "$want" ] || {
+    fail "$name: doc published [$got], wanted [$want]"
+  }
+}
+
 expect_project_ok() {
   run_dawn "$dawn" check "$here/$1" > "$work/p.$RANDOM" 2>&1 ||
     fail "$1: an accepted project was rejected"
@@ -207,6 +232,11 @@ case "$first" in
   *) echo "$first" >&2; fail "the surface diagnostic no longer comes first" ;;
 esac
 
+# design §7.2: `dawn doc` publishes the impls a reader of this API can name.
+# The fixture registers three and publishes one, so "no filter" (three) and
+# "filter everything" (none) are both failures, and the schema is untouched.
+expect_doc_impls doc_impls 'Rank[Card]'
+
 expect_project_ok consumer
 expect_project_fails consumer_leak 'public function `imported_leak` exposes private type `Secret`'
 expect_project_fails unused_export_project \
@@ -318,6 +348,36 @@ mutant_diverges() {
   echo "PASS  $mutation compiles, then turns $name red"
 }
 
+# design §7.2: the doc filter. The mutant is the consumer reading the whole
+# impl table again, which is what `dawn doc` did before this rule existed.
+mutant_doc_publishes() {
+  local mutation=$1 want=$2 mutant got
+  mutant=$(build_mutant "$mutation")
+  got=$(doc_impls "$mutant" "$cases/doc_impls.dawn")
+  [ "$got" = "$want" ] || {
+    fail "$mutation: doc published [$got], wanted the unfiltered [$want]"
+  }
+  echo "PASS  $mutation compiles, then turns the doc filter red"
+}
+
+# design §7.1: the other consumer. `lsp-use-completion.py` computes what a
+# `use` line should answer from the tree, including which std modules the
+# checker will let this document name; the mutant offers the two it will not.
+mutant_lsp_offers_internal_std() {
+  local mutation=$1 mutant out
+  mutant=$(build_mutant "$mutation")
+  out="$work/lsp-use.$RANDOM"
+  if python3 "$root/scripts/lsp-use-completion.py" java -jar "$mutant" lsp > "$out" 2>&1; then
+    cat "$out" >&2
+    fail "$mutation: the completion list still answers to the audience"
+  fi
+  grep -F 'an internal-std module is not offered outside std' "$out" | grep -q '^FAIL' || {
+    cat "$out" >&2
+    fail "$mutation: the use-completion oracle broke for another reason"
+  }
+  echo "PASS  $mutation compiles, then turns the completion audience red"
+}
+
 # design §八: the surface diagnostic must be *first*, so this mutant is caught
 # by the order and not by the presence of either diagnostic
 mutant_reorders() {
@@ -364,6 +424,8 @@ mutants=(
   "skip-impl-constraints"
   "skip-impl-assoc"
   "impl-always-observable"
+  "doc-keeps-private-impls"
+  "lsp-ignores-audience"
   "surface-after-bodies"
   "check-imports-not-exports"
   "skip-list-element"
@@ -414,7 +476,18 @@ run_mutant() {
     skip-impl-assoc)
       mutant_drops "$1" reject_assoc_binding 'observable impl' ;;
     impl-always-observable)
-      mutant_adds "$1" accept_private_impl 'exposes private type `Secret`' ;;
+      mutant_adds "$1" accept_private_impl 'exposes private type `Secret`'
+      # ...and the doc filter, which asks the same question of the same
+      # predicate, stays green. That is the retarget being checked rather than
+      # asserted: aimed at `impl_is_observable` itself this mutant would redden
+      # mutant 15 as well, and then neither assertion would own its rule.
+      expect_doc_impls doc_impls 'Rank[Card]' "$work/$1/compiler.jar" ;;
+    doc-keeps-private-impls)
+      mutant_doc_publishes "$1" 'Rank[Card]
+Rank[Draft]
+Sketch[Card]' ;;
+    lsp-ignores-audience)
+      mutant_lsp_offers_internal_std "$1" ;;
     surface-after-bodies)
       mutant_reorders "$1" ;;
     check-imports-not-exports)
@@ -461,11 +534,7 @@ for mutation in "${mutants[@]}"; do
   n=$((n + 1))
 done
 
-# Design §十二 lists a seventeenth mutant, `doc_json_omits_private_impl`, whose
-# rule is the doc filter. That filter is stage three of the design and does not
-# exist yet, so the mutant has nothing to remove; it lands with the filter.
-#
-# Two more of the design's mutants have no witness in today's language, and the
+# Two of the design's mutants have no witness in today's language, and the
 # walker keeps their branches anyway:
 #   * a projection's *subject* is always a rigid type variable (reduction is
 #     eager, assoc-types-design D3), so it can never be a private identity;

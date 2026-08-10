@@ -51,10 +51,29 @@ Two of the tree's own declarations are live witnesses and need no fixture:
 public opaque root does not publish its representation, and
 `examples/traits/traits.dawn` is a private trait implemented for a private type.
 
+## The two consumers
+
+`dawn doc` and the language server publish a surface, so they are held to the
+same audience the checker is (design §7.1), and they are held to it by reading
+what the checker decided rather than deciding again:
+
+* `doc_impls.dawn` registers three impls and publishes one. "No filter" gives
+  three and "filter everything" gives none, so the assertion is an equality and
+  not a `grep -v`.
+* `lsp-use-completion.py` computes what a `use` line should answer from the
+  tree, and that now includes which std modules the checker will let the
+  document name. `use std/pvec` is refused outside the bundled library, so
+  offering `pvec` — or its exported names — is offering a name the next
+  keystroke cannot use.
+
+`impl-always-observable` is aimed at the *validator's* use of
+`impl_is_observable`, not at the predicate, and the run asserts that the doc
+filter stays green under it. Aimed one line higher it would redden mutant #15
+as well (measured: the doc output becomes all three impls), and an assertion two
+mutants can redden is owned by neither. Same correction as `2d5f19a`.
+
 ## Not here
 
-* **Mutant #15, `doc_json_omits_private_impl`.** Its rule is the `dawn doc`
-  filter, which is stage three of the design. It lands with the filter.
 * **A projection's private subject, and a private effect nested in a written
   function type.** Both branches exist in the walker; neither is reachable in
   today's language (design §15.4 says why). They have no mutant because a

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 0c44645b1cdfa28f -->
+<!-- doc-check: translation-of docs/spec.md @ c2907c80c03e679c -->
 
 # Dawn Language Specification
 
@@ -451,11 +451,18 @@ decision in the implementation rather than special cases scattered everywhere.
 target type — the same representation, the same equality, hashing, ordering and rendering, on both
 backends, at zero cost. `opaque` is a soft keyword; only `opaque type` means anything.
 
+A generic opaque type's **instance identity** is its declaration identity together with its
+instantiated arguments; the target answers only questions about runtime representation. Even when a
+type parameter does not appear in the target at all, `Phantom[Int]` and `Phantom[String]` are two
+types; substitution, equality, unification, display and export-surface validation all carry those
+arguments along. "The representation is not public" does not imply "the type parameters are hidden".
+
 > **The criterion for implementers (the alias-substitution test)**: replace `opaque type N = T` in
-> place with `alias N = T`; if some function's answer changes, it is either one of the four things
-> below, or it is a bug. **Only four things** are allowed to see `TyOpaque`: the assignability
-> decision (who can convert), impl selection (`head_of`/`impl_at`), symbol naming
-> (`ty_key`/`dict_key`/impl method names), and the type name in diagnostics.
+> place with `alias N = T`; if some function's answer changes, it is either one of the five things
+> below, or it is a bug. **Only five things** are allowed to see `TyOpaque`: the assignability and
+> unification decision (who can convert), impl selection (`head_of`/`impl_at`), symbol naming
+> (`ty_key`/`dict_key`/impl method names), the type name in diagnostics, and export-surface
+> visibility (§3.3: it checks the identity and the explicit arguments, **not** the representation).
 > Every other function that eats a `Ty` — width, descriptor, slot, boxing, which instruction,
 > whether it can be a constant, whether some trait has an answer — takes the target's answer.
 > The order is fixed too: **ask about identity before representation**. `impl Eq[UserId]` must come
@@ -592,6 +599,33 @@ pure and reducible to a constant.
 
 All declarations are module-private by default; `pub` exports. `pub` can be used on `fn`, `type`,
 `alias`, `const`, `trait`, `effect`. `pub type` exports its constructors and fields as well.
+
+The **complete resolved export surface** of a `pub` declaration must be nameable outside its module.
+Marking only the outermost declaration `pub` does not export the private nominal identities it
+refers to:
+
+- A `pub fn` checks its type parameters' bounds, its parameters, its return type and its complete
+  effect row; a `pub const` checks its declared type, while the initializer stays an implementation
+  detail.
+- A `pub type` or record checks every constructor field; a `pub trait` checks every method
+  signature, constraint and effect row, while a default body stays a private implementation detail;
+  a `pub effect` checks every operation's parameters and return type.
+- A transparent alias is fully expanded at this boundary: a private alias whose ultimate target is
+  entirely public may appear in a public surface, but reaching a private nominal type after
+  expansion is still an error. A `pub opaque type` is the opposite — it stops at its own public
+  identity, so the representation may use private types, but every instantiated argument in the
+  public spelling must still be publicly nameable, and a private opaque identity may not appear in
+  a public surface at all.
+- A type projection checks both its trait identity and its subject; a named effect must be a
+  `pub effect`.
+- An impl has no `pub` spelling: only an impl of a public trait for a subject nameable outside the
+  module belongs to the export surface, and then its generic constraints and every associated type
+  binding must be publicly nameable too. An impl of a private trait, or for a private subject, is
+  not reachable from outside and so is not constrained here — which is also why `dawn doc` does not
+  list it.
+
+An ordinary `pub fn` **may** declare a public named effect (§6.5): callers can import it, propagate
+it, or install a handler. It is a *private* effect in a public surface that is an error.
 
 ### 3.4 Test blocks
 
@@ -1502,8 +1536,10 @@ fn logged(x: Int) -> Int !Ask !io = {
 - Performed but nobody answers (neither declared in the signature nor handled) → the error is
   reported on **the call that performs it**, with two ways out: add the annotation to the
   signature, or `with handle` on the spot.
-- On `pub fn main` and on export boundaries the labels must be empty — the "nobody answers" error
-  lands on the outermost signature that still owes a label.
+- Only `pub fn main` must have an empty label set — it has no caller to supply evidence, so the
+  "nobody answers" error lands on `main`'s own signature. An ordinary `pub fn` may carry the label
+  of a `pub effect`, for its caller to propagate or handle; it is a *private* effect in a public
+  surface that the export-surface validation refuses (§3.3).
 
 #### `with handle`
 
@@ -2333,7 +2369,10 @@ use java "java.lang.Math"      # Java interop (§9), form unchanged
 All declarations are module-private by default; `pub` exports `fn`/`type`/`alias`/`const`/`trait`/`effect`
 (`pub type` brings the constructors and fields with it, see §3.3). Accessing or importing a
 non-`pub` item → error (`` `parse` is private to module json/parser ``, with a hint: add
-`pub`).
+`pub`). An exported declaration must not leak a private type, trait or effect that cannot be named
+outside the module either; the full rules for transparent aliases, the opaque boundary, public
+traits/effects and reachable impls are in §3.3, and the error is reported at the declaration rather
+than at the use site.
 
 > **Load scope (2026-07-30, LANG-07)**: `dawn run/test/build <dir>` loads **every** module
 > under `src/` by default — modules that are never referenced are checked too (bit-rot

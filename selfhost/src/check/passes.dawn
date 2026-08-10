@@ -2765,6 +2765,9 @@ fn assoc_span(cx: Cx, assoc: List[AssocBind], name: String, fb: TySpan) -> TySpa
 ## then its bounds and associated bindings are private business. Refusing them
 ## would reject the ordinary shape of a module that implements its own trait
 ## for its own type.
+##
+## Two callers, one answer: the validator below, which decides whether to look
+## inside, and `observable_impls`, which decides what `dawn doc` may print.
 fn impl_is_observable(cx: Cx, root: Audience, tr: TraitI, imp: ImplI, head: TySpan) -> Bool =
   audience_covers(trait_audience(tr), root) &&
   len(surface_ty_leaks(cx, root, imp.subject, head, "impl subject")) == 0
@@ -2831,7 +2834,27 @@ pub fn pass_export_surface(cx: Cx, m: Module) -> Cx = {
       _ -> ()
     }
   }
-  cx1
+  Cx { ..cx1, observable_impls: observable_impls(cx1, root) }
+}
+
+## The impls this module publishes, decided once and written down (design
+## §7.1). `dawn doc` reads this; the `local_impls` it used to read is the
+## whole table, private heads and all, and asking a consumer to filter it is
+## asking it to keep a second copy of `impl_is_observable`.
+##
+## Every local impl is asked, not just the ones with a `DImpl` to visit: a
+## derived `Show` is as much of a published fact as a written one, and it has
+## no declaration of its own for the loop above to reach.
+fn observable_impls(cx: Cx, root: Audience) -> List[ImplI] = {
+  var out: List[ImplI] = []
+  for imp in cx.local_impls {
+    if ty_poisoned(imp.subject) { continue }
+    let tr = trait_of(cx.traits, imp.trait_id)
+    if impl_is_observable(cx, root, tr, imp, plain_span(imp.lo, imp.hi)) {
+      out = out ++ [imp]
+    }
+  }
+  out
 }
 
 # ---- expression checking (pass 5 groundwork) ----

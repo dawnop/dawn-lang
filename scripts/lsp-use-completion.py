@@ -76,6 +76,19 @@ def std_modules(path):
     return out
 
 
+def internal_std(path):
+    """The std modules nothing outside the bundled library may `use`, read off
+    the compiler's own list rather than restated here. They exist to hold the
+    representation of `Map`, `Set` and `List`; `pass_imports` refuses a `use`
+    of either from a project module, so completion must not offer one
+    (docs/public-surface-design.md §7.1)."""
+    text = open(path).read()
+    m = re.search(r"fn internal_std_modules\(\) -> List\[String\] = \[([^\]]*)\]", text)
+    if not m:
+        raise SystemExit("lsp-use-completion: cannot read internal_std_modules() from " + path)
+    return {s.strip().strip('"') for s in m.group(1).split(",") if s.strip()}
+
+
 def pub_names(path):
     """Every name a `use m.{...}` may import from a module, read off its source.
 
@@ -164,13 +177,16 @@ def main():
     first = dawn_dir(src) | {"std/"} | {a + "/" for a in dep_aliases(
         os.path.join(root, "selfhost/dawn.toml"))} | {"java"}
     check = dawn_dir(os.path.join(src, "check"))
+    hidden = internal_std(os.path.join(src, "check/types.dawn"))
     stds = std_modules(os.path.join(root, "std/modules.txt"))
+    stds -= {p.split("/", 1)[1] for p in hidden}
     lexer = pub_names(os.path.join(src, "front/lexer.dawn"))
 
     cases = [
         "use ",
         "use check/",
         "use std/",
+        "use std/pvec.{",
         "use front/lexer.{",
         "use front/lexer.{view_of, ",
         "use front/lexer ",
@@ -205,6 +221,17 @@ def main():
     got_std = labels(got["use std/"])
     expect("use std/", "exactly the modules in std/modules.txt",
            got_std == sorted(stds), "want %s\n        got  %s" % (sorted(stds), got_std))
+    # (c2) and not the ones the checker will refuse. `std/hamt` and `std/pvec`
+    #      are in modules.txt and in the server's StdCtx all the same -- they
+    #      are how `Map`, `Set` and `List` are represented, nameable from
+    #      inside the bundled library and nowhere else. A completion list is a
+    #      surface, so it answers to the same audience the checker does.
+    offered_hidden = sorted(set(got_std or []) & {p.split("/", 1)[1] for p in hidden})
+    expect("use std/", "an internal-std module is not offered outside std",
+           offered_hidden == [], "offered %s" % offered_hidden)
+    expect("use std/pvec.{", "and its names are not offered either",
+           labels(got["use std/pvec.{"]) == [],
+           "got %s" % labels(got["use std/pvec.{"]))
 
     # (d) the names inside `.{ }` for a module the buffer does not import --
     #     which is every module worth completing, since the `use` being typed

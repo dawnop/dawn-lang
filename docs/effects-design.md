@@ -171,8 +171,10 @@ sum_three uses the effect `ask`, but its signature does not declare `!ask`
   hint: add `!ask`, or answer it here with `with handle Ask { ... }`
 ```
 
-`pub fn main` 与导出边界上 labels 必须为空——「没人应答」的错误落在最外层还欠着 label 的
-签名上，与效果变量今天的落点一致。
+**只有 `pub fn main` 的 labels 必须为空**——它没有调用者提供证据，「没人应答」的错误落在它的
+签名上，与效果变量今天的落点一致。导出边界不在此列：普通 `pub fn` 携带公开具名效果正是
+`pub effect` 的用途，调用方可以继续传播或安装 handler；公开面上被拒的是**私有**效果，那条
+规则归 SEM-07 的导出面校验（`docs/public-surface-design.md` §六，spec §3.3 / §6.5）。
 
 ### 4.3 「行减 E」——`with handle` 的类型规则
 

@@ -400,11 +400,17 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
   w1 = close_arr(w1, any)
   w1 = w_key(w1, "impls")
   w1 = open_arr(w1)
-  for ii in cm.cx.local_impls {
+  # the impls the checker decided this module publishes, not the ones it has
+  # (docs/public-surface-design.md §7.1): an impl of a private trait, or for a
+  # private type, is not part of any API a reader of this page can use, and
+  # deciding that here would be a second copy of a rule the checker already
+  # applied.
+  let impls = cm.cx.observable_impls
+  for ii in impls {
     let t = trait_of(cm.cx.traits, ii.trait_id)
     w1 = w_str(w1, t.name ++ "[" ++ ty_show(cm.cx.adts, ii.subject) ++ "]")
   }
-  w1 = close_arr(w1, len(cm.cx.local_impls) > 0)
+  w1 = close_arr(w1, len(impls) > 0)
   close_obj(w1)
 }
 

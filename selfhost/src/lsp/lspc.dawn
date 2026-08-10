@@ -19,7 +19,7 @@ use std/set
 use std/list
 use check/types.{
   ty_show, sig_render, adt_of, trait_of, prelude_traits, prelude_trait_ids,
-  public_builtin_type_names
+  public_builtin_type_names, Audience, AModule, audience_covers, declared_audience
 }
 use check/cx.{ModExports}
 use lsp/lspq.{QCx, locals_at}
@@ -217,6 +217,18 @@ fn add(it: Items, name: String, kind: Int, detail: Option[String], rank: String)
 
 fn path_char(c: Char) -> Bool = is_word(c) || c == '/'
 
+## May the document being edited name the module `path` at all?
+##
+## A completion list is a surface being consumed, so it answers to the audience
+## the checker will (docs/public-surface-design.md §7.1): `std/hamt` and
+## `std/pvec` hold the representation of `Map`, `Set` and `List`, and
+## `pass_imports` refuses a `use` of either from outside the bundled library.
+## Offering them is offering a name the next keystroke is not allowed to write.
+## The question is asked of the document's own module, not of a root audience:
+## `std/map` is a world-facing module that may nonetheless name them.
+fn may_name_module(qc: QCx, path: String) -> Bool =
+  audience_covers(declared_audience(path), AModule(qc.entry.mod_path))
+
 ## Everything a `use` line admits at the cursor.
 fn use_completions(
   qc: QCx,
@@ -286,7 +298,11 @@ fn path_items(
   let prefix = list.take(parts, len(parts) - 1)
   var it = Items { out: [], seen: set.empty() }
   it = seg_items(it, prefix, sort(map.keys(candidates)), "0")
-  it = seg_items(it, prefix, sort(map.keys(qc.std.exports)), "1")
+  var std_paths: List[String] = []
+  for mp in sort(map.keys(qc.std.exports)) {
+    if may_name_module(qc, mp) { std_paths = std_paths ++ [mp] }
+  }
+  it = seg_items(it, prefix, std_paths, "1")
   if len(prefix) == 0 {
     let d: Option[String] = Some("`use java \"com.x.Y\"` — import a Java class")
     it = add(it, "java", 14, d, "2")
@@ -307,6 +323,8 @@ fn import_items(
   # `use a/b.` — a selective import is the only thing a `.` can open, and it
   # opens with `{`. A list already closed is not being added to.
   if n == 0 || after[0] != '{' { return none }
+  # a module this document may not name has no names to offer it
+  if not may_name_module(qc, path) { return none }
   var seen: Set[String] = set.empty()
   for nm in str.split(from_code_points(slice_cps(after, 1, n)), ",") {
     let t = str.trim(nm)

@@ -361,7 +361,7 @@ clean checkout、Core、N/N-1 与 Emit 四类证据缺一不可。单跑 `./bin/
 - 不让 doc 或 LSP 重新决定 visibility：它们只能消费 checker 的 validated result。
 - 不预写 `Emit-Change`：先跑门禁看到真实差异，再按唯一 label 声明。
 
-## 十五、实现现状（阶段二落地后记录）
+## 十五、实现现状（三阶段落地后记录）
 
 本节只记录实现事实，不改变以上任何裁决。
 
@@ -380,6 +380,21 @@ clean checkout、Core、N/N-1 与 Emit 四类证据缺一不可。单跑 `./bin/
 `scripts/export-surface-contract/run.sh` 里，前者靠捆绑 std 能加载证明，后者靠一份加了料的
 std 副本证明。二值公私模型两条都表达不了。
 
+阶段三（doc/LSP 消费面）也落了：`pass_export_surface` 把它判定为 observable 的 impl 写进
+`Cx.observable_impls`，`dawn doc` 发布这份结果而不再读 `cx.local_impls`。判据存下来而不是让
+消费者重算，是因为「重算」与「另一份规则」在代码里长得一样——同一个 `impl_is_observable`
+被两个调用点问，答案只有一个。**记名的行为差异只有一处**：`examples/traits/traits.dawn` 的
+`impls` 数组从四项（`Ord[Card]`、`Show[Card]` 两个 derive 加两个写出来的）变成空，因为
+`Describe` 与 `Card` 都是私有的；`doc site` 与 `site-dist-diff.sh` 逐字节不变。derive 出来的
+impl 与写出来的走同一条判定：它没有自己的声明可访问，所以判定是对 `local_impls` 逐条问的，
+不是对 `DImpl` 逐条问的。
+
+LSP 侧的对应改动是 `use` 行的补全：`lspc.dawn` 的 `may_name_module` 用同一套
+`audience_covers` 决定这份文档能不能命名一个模块，于是 `std/hamt`、`std/pvec` 不再出现在
+`use std/` 的候选里，`use std/pvec.{` 也不再列出它的导出名——`pass_imports` 本来就会拒绝这两个
+`use`，补全先前提供的是下一个按键写不出来的名字。`exported_items` 读的一直是 `ModExports`
+（已经只含 `pub`），所以那半本来就合规；改的是「哪个模块的导出面轮得到这份文档看」。
+
 ### 15.2 span：`resolve_type` 侧记的边表
 
 §八 要求诊断落在最内层违规 token，而校验器读的是已解析的 `Ty`，不带 span。实现的做法是
@@ -391,14 +406,17 @@ std 副本证明。二值公私模型两条都表达不了。
 底下没有任何 `TypeRef`，事后对齐必然失真。侧记则天然正确：别名节点的 `kids` 是空的，于是
 诊断落在别名名字上，展开路径由消息给出——正是 §八 要的那两件。
 
-### 15.3 两件临时的、点名在案的
+### 15.3 一件临时的、点名在案的
 
 - **`EffectRef` 尚未引入。** AST 仍把声明的 effect 存成裸字符串，所以一条 effect label 的
   泄漏诊断落在 **root 的名字 token** 上，而不是那条 label 上。§八 允许这个 fallback，
   §九 阶段二把 `EffectRef { name, lo, hi }` 列为要做的事——它没做，这里点名它是临时件，
   不是成品。`surface_sig_leaks` 里的注释同样点名。
-- **mutant #15（`doc_json_omits_private_impl`）属于阶段三。** 它拥有的规则是 doc 过滤器，
-  过滤器还不存在，所以这个 mutant 没有东西可以拿掉；它与过滤器同批落地。
+mutant #15（`doc_json_omits_private_impl`）已随过滤器落地，另加一个 LSP 侧的
+`lsp-ignores-audience`。#14 因此**改了瞄准点**：它现在改 `surface_impl` 里的那道门，而不是
+`impl_is_observable` 本身——后者被两个消费者问，改它会连 #15 的断言一起打红，而两个 mutant
+都能打红的断言谁都不拥有（`2d5f19a` 对 `drop-lsp-children` 做的是同一件事）。这条不是推测：
+实测把 `impl_is_observable` 改成 `true`，`doc_impls` 的输出确实从一项变成三项。
 
 ### 15.4 两条今天没有见证者的分支
 

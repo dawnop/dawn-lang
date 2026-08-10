@@ -16,6 +16,8 @@ import sys
 PASSES = "selfhost/src/check/passes.dawn"
 CHECKER = "selfhost/src/check/checker.dawn"
 TYPES = "selfhost/src/check/types.dawn"
+DOC = "selfhost/src/doc.dawn"
+LSPC = "selfhost/src/lsp/lspc.dawn"
 
 
 def replace_once(text: str, old: str, new: str, name: str) -> str:
@@ -132,15 +134,31 @@ MUTATIONS = {
         "  for b in imp.assoc_bindings {\n",
         "  for b in list.take(imp.assoc_bindings, 0) {\n",
     ),
-    # 14 -- an impl whose head is private is not observable at all
+    # 14 -- an impl whose head is private is not observable at all.
+    #
+    # Aimed at the *validator's* use of the predicate, not the predicate. The
+    # doc filter asks the same question (`observable_impls`), so replacing
+    # `impl_is_observable` with `true` would redden mutant 15's assertion too,
+    # and an assertion two mutants can redden is owned by neither -- the same
+    # correction 2d5f19a made to drop-lsp-children.
     "impl-always-observable": (
         PASSES,
-        "fn impl_is_observable(cx: Cx, root: Audience, tr: TraitI, imp: ImplI, head: TySpan)"
-        " -> Bool =\n"
-        "  audience_covers(trait_audience(tr), root) &&\n"
-        "  len(surface_ty_leaks(cx, root, imp.subject, head, \"impl subject\")) == 0\n",
-        "fn impl_is_observable(cx: Cx, root: Audience, tr: TraitI, imp: ImplI, head: TySpan)"
-        " -> Bool = true\n",
+        "  if not impl_is_observable(cx, root, tr, imp, head) { return cx }\n",
+        "  if false { return cx }\n",
+    ),
+    # 15 -- `dawn doc` publishes the impls the checker decided are observable,
+    # not every impl the module registered
+    "doc-keeps-private-impls": (
+        DOC,
+        "  let impls = cm.cx.observable_impls\n",
+        "  let impls = cm.cx.local_impls\n",
+    ),
+    # and the other consumer: the completion list answers to the same audience
+    "lsp-ignores-audience": (
+        LSPC,
+        "fn may_name_module(qc: QCx, path: String) -> Bool =\n"
+        "  audience_covers(declared_audience(path), AModule(qc.entry.mod_path))\n",
+        "fn may_name_module(qc: QCx, path: String) -> Bool = true\n",
     ),
     # 16 -- the surface is validated before any body
     "surface-after-bodies": (

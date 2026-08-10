@@ -374,10 +374,15 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 同样的相等、哈希、序与渲染，两个后端都如此，零开销。`opaque` 是软关键字，
 只有 `opaque type` 有意义。
 
+泛型不透明类型的**实例身份**由声明 identity 与实例化实参共同组成，target 只回答运行期表示。
+即使某个类型参数根本不出现在 target 里，`Phantom[Int]` 与 `Phantom[String]` 仍是两个类型；
+替换、相等、统一、显示与公开面校验都带着这些实参走。「表示不公开」不蕴含「类型参数也隐藏」。
+
 > **给实现者的判据（别名替换法）**：把 `opaque type N = T` 原地换成 `alias N = T`，
-> 若某个函数的答案变了，它要么是下面四件事之一，要么就是 bug。**只有四件事**允许看见
-> `TyOpaque`：可赋值性判定（谁能转换）、impl 选择（`head_of`/`impl_at`）、
-> 符号命名（`ty_key`/`dict_key`/impl 方法名）、以及诊断里的类型名。
+> 若某个函数的答案变了，它要么是下面五件事之一，要么就是 bug。**只有五件事**允许看见
+> `TyOpaque`：可赋值性与统一判定（谁能转换）、impl 选择（`head_of`/`impl_at`）、
+> 符号命名（`ty_key`/`dict_key`/impl 方法名）、诊断里的类型名，以及公开面可见性校验
+> （§3.3：查 identity 与显式实参，**不查** representation）。
 > 其余每一个吃 `Ty` 的函数——宽度、描述符、槽位、装箱、哪条指令、能不能当常量、
 > 某个 trait 有没有答案——都取目标的答案。
 > 次序也是定的：**先问身份再问表示**，`impl Eq[UserId]` 必须先于「按 Int 比较」，
@@ -489,6 +494,25 @@ const SIN_TABLE: List[Float] = comptime {
 
 所有声明默认模块私有；`pub` 导出。`pub` 可用于 `fn`、`type`、`alias`、`const`、`trait`、`effect`。
 `pub type` 同时导出其构造器与字段。
+
+一个 `pub` 声明的**完整已解析导出面**都必须能由模块外命名。只给最外层加 `pub`，不会把它
+引用到的私有名义身份一并公开：
+
+- `pub fn` 检查类型参数的 bound、参数、返回值与完整效果行；`pub const` 检查声明类型，
+  initializer 仍是实现细节。
+- `pub type` / record 检查全部构造器字段；`pub trait` 检查全部方法签名、约束与效果行，
+  default body 仍是私有实现细节；`pub effect` 检查每个操作的参数与返回值。
+- transparent alias 在这个边界完整展开：私有 alias 若最终只指向公开类型，可以出现在公开面；
+  展开后触及私有名义类型仍是错误。`pub opaque type` 相反，停在自己的公开 identity 上——
+  representation 可以用私有类型，但公开拼写里的每个实例化实参仍须公开可名，而私有 opaque
+  identity 本身不得出现在公开面。
+- 类型投影同时检查 trait identity 与 subject；具名效果必须是 `pub effect`。
+- impl 没有 `pub` 拼写：只有「公开 trait + 模块外可命名的 subject」的 impl 属于导出面，
+  它的泛型约束与全部 associated type binding 也必须公开可名。私有 trait 或私有 subject 的
+  impl 对外不可达，因而不受此约束——这也是 `dawn doc` 不列它的原因。
+
+普通 `pub fn` **可以**声明公开具名效果（见 §6.5）：调用方能导入、传播或安装 handler。
+私有效果出现在公开面才是错误。
 
 ### 3.4 测试块
 
@@ -1229,8 +1253,9 @@ fn logged(x: Int) -> Int !Ask !io = {
   因为效果变量按惯例是小写。
 - 发出了却没人应答（既没在签名里声明、也没有 handler）→ 在**发出的那次调用**上报错，
   并给出两条出路：签名加注记，或就地 `with handle`。
-- `pub fn main` 和导出边界上标签必须为空——「没人应答」的错误落在最外层还欠着标签的
-  签名上。
+- 只有 `pub fn main` 的标签必须为空——它没有调用者提供证据，「没人应答」的错误落在 `main`
+  的签名上。普通 `pub fn` 可以携带 `pub effect` 的标签，由调用方继续传播或安装 handler；
+  出现在公开面的是**私有**效果时，才由导出面校验拒绝（§3.3）。
 
 #### `with handle`
 
@@ -1891,6 +1916,8 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 所有声明默认模块私有；`pub` 导出 `fn`/`type`/`alias`/`const`/`trait`/`effect`
 （`pub type` 连带构造器与字段，见 §3.3）。
 访问或引入非 `pub` 项 → 错误（`` `parse` is private to module json/parser ``，附 hint：加 `pub`）。
+导出的声明内部也不得泄漏模块外无法命名的私有 type / trait / effect；transparent alias、opaque
+边界、公开 trait/effect 与可达 impl 的完整判定在 §3.3，错误报在声明处而不是使用处。
 
 > **加载范围（2026-07-30，LANG-07）**：`dawn run/test/build <dir>` 默认加载 `src/` 下
 > **全部**模块——未被引用的模块也检查（bit-rot 防护，这是对的默认）。`--closure`

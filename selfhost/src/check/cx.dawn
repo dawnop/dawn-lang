@@ -148,6 +148,14 @@ pub type Cx = {
   traits_by_name: Map[String, Int],
   local_traits: List[String],
   local_impls: List[ImplI],
+  # the subset of `local_impls` the public surface validator decided is
+  # observable to this module's own audience (docs/public-surface-design.md
+  # §7.1). `dawn doc` publishes this and not `local_impls`: an impl is a
+  # surface root only when the reader can name both halves of its head, and a
+  # consumer that decided that for itself would be a second copy of the rule,
+  # free to drift from the one the checker enforced. Empty until
+  # pass_export_surface runs.
+  observable_impls: List[ImplI],
   impl_table: Impls,
   module_aliases: Map[String, String],
   # (alias, fn name) → the imported module's signature (for qualified calls)
@@ -262,6 +270,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     traits_by_name: map.empty(),
     local_traits: [],
     local_impls: [],
+    observable_impls: [],
     impl_table: map.empty(),
     module_aliases: map.empty(),
     module_fn_sigs: map.empty(),
