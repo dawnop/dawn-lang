@@ -35,7 +35,7 @@ pub type Request = {
   # path captures, each held as the *segments* it matched: one for a `{name}`
   # capture, however many remain for a trailing `{name*}`. A tail capture used
   # to arrive pre-joined with "/", which put back exactly the ambiguity WEB-03
-  # removed — a decoded slash inside one segment became a separator again and
+  # removed: a decoded slash inside one segment became a separator again and
   # `/dav/a%2Fb/c` was indistinguishable from `/dav/a/b/c`. Read a `{name}`
   # capture with `param`, a `{name*}` one with `param_segs`.
   #
@@ -208,7 +208,7 @@ pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Resp
 #
 # These used to *delete* the offending characters, which closed the injection
 # and opened a quieter hole in its place. `/download?next=/a\r\nX: 1` came back
-# as a Location of `/aX: 1` — a redirect to a URL nobody asked for, emitted with
+# as a Location of `/aX: 1`, a redirect to a URL nobody asked for, emitted with
 # no error anywhere, and the caller had no way to find out that the value it
 # handed over is not the value that went on the wire. A header is not a
 # best-effort medium: either the value can travel as written or it cannot, and
@@ -252,7 +252,7 @@ fn header_problem(name: String, value: String) -> Option[String] =
     None
   }
 
-## Append one response header. Records are immutable — this returns a new
+## Append one response header. Records are immutable, so this returns a new
 ## Response.
 ##
 ## A name that is not a token, or a value carrying a character that cannot
@@ -403,8 +403,8 @@ pub fn error_response(e: HttpError) -> Response = error_response_with(default_er
 # ---- request accessors ----
 
 ## A path parameter captured by a `{name}` pattern segment. Missing means the
-## route table and the handler disagree — a programming error, hence 500. So
-## does a capture that matched anything other than exactly one segment: that is
+## route table and the handler disagree, which is a programming error, hence
+## 500. So does a capture that matched anything but exactly one segment: that is
 ## a trailing `{name*}`, whose value is a path and must be read with
 ## `param_segs`, since joining it here is what LIB-14 was about.
 pub fn param(req: Request, name: String) -> Result[String, HttpError] =
@@ -415,7 +415,7 @@ pub fn param(req: Request, name: String) -> Result[String, HttpError] =
     None -> Err(http_error(500, "missing path parameter: $name"))
   }
 
-## A trailing `{name*}` capture, as the path segments it matched — each decoded
+## A trailing `{name*}` capture, as the path segments it matched: each decoded
 ## on its own, none of them joined. `[]` when the capture matched nothing (the
 ## bare prefix) and also when the name is absent. Joining these with "/" is the
 ## old behavior and is the caller's decision now: a segment may legitimately
@@ -446,7 +446,7 @@ pub fn opt_param_int(req: Request, name: String) -> Option[Int] =
   }
 
 ## One query-string parameter, exactly as it was decoded; None when absent. Of
-## a repeated name this is the *first* value — same rule as `header`.
+## a repeated name this is the *first* value, the same rule as `header`.
 pub fn query(req: Request, name: String) -> Option[String] =
   match map.get(req.query, name) {
     Some(vs) -> get(vs, 0)
@@ -625,7 +625,7 @@ test "response header helpers" {
 
 test "a header that cannot travel is refused, not quietly edited" {
   # CRLF injection: the classic response-splitting payload. It used to come
-  # back as ("Location", "/nextSet-Cookie: admin=1") -- a redirect to a URL
+  # back as ("Location", "/nextSet-Cookie: admin=1"), a redirect to a URL
   # nobody asked for, emitted with no error anywhere.
   match catch_panic(() => with_header(raw(200, "text/plain", ""), "Location",
     "/next\r\nSet-Cookie: admin=1")) {
@@ -637,7 +637,7 @@ test "a header that cannot travel is refused, not quietly edited" {
     Ok(_) -> { assert false }
     Err(m) -> { assert str.contains(m.message, "illegal header name") }
   }
-  # a legal header is untouched -- in particular it is no longer copied
+  # a legal header is untouched. In particular it is no longer copied
   # character by character, so it is the very string the caller handed over
   assert with_header(raw(200, "text/plain", ""), "X-A", "a b\tc").headers == [("X-A", "a b\tc")]
 }

@@ -296,9 +296,9 @@ pub fn parse_query(q: String) -> List[(String, String)] !io =
 
 # Fold decoded key/value pairs into a multimap, keeping every value of a
 # repeated name in wire order. `map.from` collapses a repeat onto its last
-# value, which is what the query map and the form map both used to do — and a
-# form is the place it bites hardest, since a set of checkboxes with one name is
-# how HTML has always submitted a multi-select.
+# value, which is what the query map and the form map both used to do. A form is
+# the place it bites hardest, since a set of checkboxes with one name is how
+# HTML has always submitted a multi-select.
 fn multimap(ps: List[(String, String)]) -> Map[String, List[String]] =
   fold(ps, map.empty(), (acc, p) => {
     let (k, v) = p
@@ -309,9 +309,9 @@ fn multimap(ps: List[(String, String)]) -> Map[String, List[String]] =
   })
 
 # Parse an application/x-www-form-urlencoded body into a multimap. Same grammar
-# and the same decoding as a query string — this used to replace '+' with a
-# space and stop there, so every percent escape in a form field reached the
-# handler still encoded (`%40` for '@' in an email, and so on).
+# and the same decoding as a query string. This used to replace '+' with a space
+# and stop there, so every percent escape in a form field reached the handler
+# still encoded (`%40` for '@' in an email, and so on).
 ## An `application/x-www-form-urlencoded` body as a multimap: every value of a
 ## repeated name survives in wire order, the same shape `Request.query` and
 ## `Request.headers` have. Read one value with `form_value`, all of them with
@@ -541,7 +541,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
     # body comes off the request line and the headers, and `bodyless_request`
     # reads exactly that. So they go through the chain like every other answer,
     # and a cross-origin 400 or 413 now carries the Access-Control-* headers
-    # without which a browser refuses to let the page read the error body — the
+    # without which a browser refuses to let the page read the error body, the
     # one case where reading it matters most (LIB-10).
     #
     # What the middleware sees on these two paths is honest but partial: `raw`
@@ -623,7 +623,7 @@ pub type ServerConfig = { host: String, port: Int, max_body: Int, errors: ErrorF
 ##
 ## (The design sketched the handle as server + port only. Without the latch
 ## there is nothing for join to block on; without the executor there is nothing
-## to shut down, and a start/stop cycle left one behind every time — a test
+## to shut down, and a start/stop cycle left one behind every time, so a test
 ## suite or a reloading server accumulates them for the life of the process.)
 pub type ServerHandle = { server: HttpServer, port: Int, executor: ExecutorService, done: CountDownLatch }
 
@@ -1213,8 +1213,8 @@ test "stop shuts the request executor down, and does so even if the JDK's stop t
   assert h2.executor.isShutdown() == true
   # the latch opened too: join returns rather than blocking forever
   join(h2)
-  # nothing is listening on h2's port any more either -- shutting the executor
-  # down leaves the JDK server unstopped, so clean up before the test ends
+  # shutting the executor down leaves the JDK server unstopped, so close the
+  # listener before the test ends
   h2.server.stop(0)
 }
 
