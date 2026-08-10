@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ f5283ae0b3c79c82 -->
+<!-- doc-check: translation-of README.md @ 1fda1c55359613e7 -->
 
 # Dawn
 
@@ -126,7 +126,9 @@ pub fn main() -> Unit !io = {
   八份契约同行。太贵而不进每次 push 的是 `scripts/native-fixpoint.sh`——**整个编译器**：
   JVM 发的 C == native 自己发的 C == 再发一次的 C。
 
-规范把它写成了承诺（[docs/spec.md](docs/spec.md) §12.1）。
+规范把它写成了承诺（[docs/spec.md](docs/spec.md) §12.1）。它的**适用范围**是两个后端都能编的
+那些程序：C 后端拒绝 `use java`，所以带 Java 互操作的程序只有一个答案、不在对拍之内。这条边界
+划在哪儿，见[两样东西都叫「native」](#两样东西都叫native)。
 
 ### 三、native 侧既没有 GC，也没有 malloc/free
 
@@ -191,7 +193,8 @@ pub fn main() -> Unit !io = {
 ./bin/dawn run examples/projects/hello_mod        # 编译并运行（单文件或多模块项目）
 ./bin/dawn test <target>                    # 跑源码里内联的 test 块（构建时剥除）
 ./bin/dawn build <target> -o app.jar        # JVM 后端：可执行 jar
-./bin/dawn build <target> --native -o app   # 上一步 + GraalVM native-image
+./bin/dawn build <target> --native -o app   # 把上一步那个 jar 交给 GraalVM native-image 打包
+                                            #   （不是 C 后端；见下）
 ./bin/dawn fmt <target>                     # 就地格式化（--check 供 CI 校验）
 ./bin/dawn doc <target>                     # pub API 导出为 JSON；add 保格式编辑 dawn.toml
 ./bin/dawn lsp                              # LSP 服务器（stdio，编辑器用）
@@ -199,12 +202,39 @@ pub fn main() -> Unit !io = {
 
 依赖有两种：源码包（`url` + `hash` 内容寻址，MVS 选版本——单版本对 Dawn 不是便利而是承重墙，
 impl 一致性是全程序唯一映射）与 `[java-deps]`（coursier 解析 Maven 传递依赖，只在 JVM 后端
-有意义），见 [docs/package-design.md](docs/package-design.md)。注意 `--native` 走的是
-**GraalVM native-image**（拿上一步的 jar 去编），跟下面那个 C 后端是两条不同的路。
+有意义），见 [docs/package-design.md](docs/package-design.md)。
 
 内置 LSP 服务器两个后端各有一份、输出逐字节对齐：实时诊断、悬停、跳转定义、文档大纲；
 前端做了完整的错误恢复，文件残缺时一次报出全部错误。VS Code / Neovim / Helix 配置见
 [editors/](editors/)。
+
+### 两样东西都叫「native」
+
+`dawn build --native` 与 `dawnc` 都会给你一个不装 JVM 也能跑的可执行文件，但它们不是同一条路。
+光看这个词分不出你在哪条上：
+
+| | `dawn build --native` | `dawnc` |
+|---|---|---|
+| 它是什么 | 拿 JVM 后端刚写出来的 jar 过一遍 GraalVM `native-image` | C 后端：Core 出 C，交给 `cc` |
+| 你的代码由谁编 | JVM 字节码 | C |
+| `use java` | 可用，编进映像里 | **拒绝**，有意为之 |
+| `[java-deps]` | 解析并带上 | 无此概念 |
+| 机器上要有 | GraalVM `native-image` | 一个 `cc` |
+| 从哪儿来 | 自己在仓库检出里跑出来 | 每个 release 挂的 `dawnc-linux-x86_64` |
+| 目标平台 | GraalVM 能跑的地方 | 只有 linux-x86_64 |
+
+一个文件就能说清。`examples/interop/interop.dawn` 用了 `use java`：`dawn build --native`
+写出一个 15 MB、跑得起来的可执行文件；`dawnc check` 对同一个文件答的是
+`Java interop needs a JVM host with a class path to resolve java.lang.String against;
+this build has none`。
+
+撞名是历史造成的：`--native` 比 C 后端早，而 `scripts/` 下所有带 `native` 的东西
+（`spike-native`、`native-fixpoint.sh`、`native-cli-diff.sh`、`release-native.sh`）指的都是
+C 后端，不是那个 flag。把 flag 读成「把 JVM 那份产物提前打包」，把脚本读成「第二个后端」。
+
+**上面那条对等承诺的范围也在这里。**「两个后端一个答案」说的是两个后端都能编的那些程序，
+凡是带 `use java` 的都在范围之外——那些程序根本没有第二个答案可比。`scripts/spike-native/`
+下的 59 个程序按构造就在这个交集里。
 
 ### 不装 JVM 的那条路
 
@@ -212,8 +242,8 @@ impl 一致性是全程序唯一映射）与 `[java-deps]`（coursier 解析 Mav
 可执行程序（约 3.6 MB），std 与 C 运行时都嵌在里面，不需要这个仓库、也不需要 JVM。
 
 子命令是 `check|emitc|build|run|test|fmt|doc|add|lsp`；`build`/`run` 会调用机器上的 `cc`
-（`$CC` 可覆盖），其余的不碰 C 工具链。它**拒绝 `use java`**——那是这个后端的答案，不是缺陷；
-打包成 jar、`lock`、`cache` 需要 JVM，故不在它的子命令里。只有 linux-x86_64 一个目标，理由见
+（`$CC` 可覆盖），其余的不碰 C 工具链。打包成 jar、`lock`、`cache` 需要 JVM，故不在它的
+子命令里。只有 linux-x86_64 一个目标，理由见
 [docs/native-driver-plan.md](docs/native-driver-plan.md) §22.1。
 
 **说准一点**：「用 Dawn 可以完全不碰 JVM」成立——从编译器到产物有一条完整的路径；但

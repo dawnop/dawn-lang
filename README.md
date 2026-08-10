@@ -147,7 +147,11 @@ list here, because a divergence is a red build:
   every push is `scripts/native-fixpoint.sh` — **the whole compiler**: the C the JVM
   emits == the C the native binary emits == the C it emits again.
 
-The spec writes this down as a promise ([docs/spec.md](docs/spec.md) §12.1).
+The spec writes this down as a promise ([docs/spec.md](docs/spec.md) §12.1). Its
+scope is the programs both backends can compile: the C backend refuses `use java`,
+so a program with Java interop in it has one answer rather than two and is outside
+the comparison. Where that boundary runs is under
+[Two different things are called "native"](#two-different-things-are-called-native).
 
 ### 3. On the native side there is neither a GC nor malloc/free
 
@@ -235,7 +239,8 @@ as the entry point).
 ./bin/dawn run examples/projects/hello_mod        # compile and run (single file or multi-module project)
 ./bin/dawn test <target>                    # run the test blocks inlined in the source (stripped at build)
 ./bin/dawn build <target> -o app.jar        # JVM backend: an executable jar
-./bin/dawn build <target> --native -o app   # the above, plus GraalVM native-image
+./bin/dawn build <target> --native -o app   # that jar, packaged by GraalVM native-image
+                                            #   (not the C backend; see below)
 ./bin/dawn fmt <target>                     # format in place (--check for CI)
 ./bin/dawn doc <target>                     # export the pub API as JSON; `add` edits dawn.toml format-preservingly
 ./bin/dawn lsp                              # the LSP server (stdio, for editors)
@@ -245,14 +250,45 @@ Dependencies come in two kinds: source packages (`url` + `hash`, content-address
 version selection by MVS — a single version is not a convenience for Dawn but a
 load-bearing wall, since impl coherence is a whole-program unique mapping) and
 `[java-deps]` (coursier resolves the transitive Maven closure; meaningful on the JVM
-backend only). See [docs/package-design.md](docs/package-design.md). Note that
-`--native` goes through **GraalVM native-image** (compiling the jar from the previous
-step), which is a different road from the C backend below.
+backend only). See [docs/package-design.md](docs/package-design.md).
 
 The built-in LSP server exists once per backend with byte-aligned output: live
 diagnostics, hover, go-to-definition, document outline. The front end does full error
 recovery, so a broken file reports all of its errors at once. VS Code / Neovim / Helix
 configuration is in [editors/](editors/).
+
+### Two different things are called "native"
+
+`dawn build --native` and `dawnc` both hand you an executable that runs without a
+JVM installed, and they are not the same road. The word alone will not tell you
+which one you are on:
+
+| | `dawn build --native` | `dawnc` |
+|---|---|---|
+| What it is | GraalVM `native-image` over the jar the JVM backend just wrote | the C backend: Core to C, handed to `cc` |
+| Which backend compiled your code | JVM bytecode | C |
+| `use java` | works, compiled into the image | **refused**, on purpose |
+| `[java-deps]` | resolved and included | not applicable |
+| Needs on the machine | GraalVM `native-image` | a `cc` |
+| Where you get it | you run it, from a checkout | `dawnc-linux-x86_64`, in every release |
+| Targets | wherever GraalVM runs | linux-x86_64 only |
+
+One file settles it. `examples/interop/interop.dawn` uses `use java`:
+`dawn build --native` writes a 15 MB executable that runs, while `dawnc check` on
+the same file answers `Java interop needs a JVM host with a class path to
+resolve java.lang.String against; this build has none`.
+
+The collision is historical: `--native` predates the C backend, and everything
+under `scripts/` spelled `native` (`spike-native`, `native-fixpoint.sh`,
+`native-cli-diff.sh`, `release-native.sh`) means the C backend, not the flag.
+Read the flag as "package the JVM build ahead of time" and the scripts as "the
+second backend".
+
+**This is also the scope of the parity claim above.** "Two backends, one answer"
+is a claim about the programs both backends can compile, and every program
+containing `use java` is outside it, because on those there is no second answer
+to compare against. The 59 programs under `scripts/spike-native/` are inside that
+intersection by construction.
 
 ### The road without a JVM
 
@@ -262,9 +298,8 @@ runtime embedded. It needs neither this repository nor a JVM.
 
 Its subcommands are `check|emitc|build|run|test|fmt|doc|add|lsp`; `build`/`run` invoke
 the machine's `cc` (overridable with `$CC`) and the rest do not touch a C toolchain at
-all. It **refuses `use java`** — that is this backend's answer, not a defect. Packaging
-a jar, `lock` and `cache` need a JVM and are therefore not among its subcommands.
-There is one target, linux-x86_64; the reasoning is in
+all. Packaging a jar, `lock` and `cache` need a JVM and are therefore not among its
+subcommands. The one target is linux-x86_64; the reasoning is in
 [docs/native-driver-plan.md](docs/native-driver-plan.md) §22.1.
 
 **Precisely stated**: "you can use Dawn without ever touching a JVM" holds — there is a
