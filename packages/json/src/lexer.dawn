@@ -15,6 +15,7 @@ use std/char
 use std/cursor
 use std/str
 use std/cursor.{Cursor}
+use value.{JsonError, JsonErrorKind, Syntax, Truncated}
 
 ## The code point at `i`, or -1 at the end of the document.
 ##
@@ -43,8 +44,18 @@ pub fn offset(src: String, i: Cursor) -> Int =
 # Every error carries where it happened. Callers validating config, signatures
 # or API payloads need to point at the offending character; a bare message means
 # they have to re-scan the document themselves to say anything useful.
-pub fn err_at(src: String, i: Cursor, msg: String) -> String =
-  msg ++ " at offset " ++ to_string(offset(src, i))
+#
+# `Syntax` and `Truncated` are told apart mechanically rather than site by site:
+# an error noticed with the cursor at the end of the document *is* the document
+# running out, whichever scanner noticed it. The kinds a position cannot decide
+# (Trailing, Depth, NumberRange) are passed in by their one call site each,
+# through `err_kind`.
+pub fn err_at(src: String, i: Cursor, msg: String) -> JsonError =
+  err_kind(src, i, if cursor.done(src, i) { Truncated } else { Syntax }, msg)
+
+## An error of a stated kind at `i`.
+pub fn err_kind(src: String, i: Cursor, kind: JsonErrorKind, msg: String) -> JsonError =
+  JsonError { kind: kind, offset: offset(src, i), message: msg }
 
 pub fn is_digit(c: Int) -> Bool = c >= char.code('0') && c <= char.code('9')
 
@@ -107,11 +118,11 @@ fn simple_escape(e: Char) -> Option[Char] =
 # quote). The accumulator holds the *decoded* characters of one string, which
 # escapes make genuinely different from any span of the source, and its size is
 # that string's, not the document's.
-pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), String] = {
+pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), JsonError] = {
   var i = cursor.next(src, start)
   var acc: List[Char] = []
   var status = 0
-  var errmsg = ""
+  var errmsg = JsonError { kind: Syntax, offset: 0, message: "" }
   while status == 0 {
     let c = peek(src, i)
     if c == -1 {
@@ -199,7 +210,7 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
 fn skip_digits(src: String, i: Cursor) -> Cursor =
   if is_digit(peek(src, i)) { skip_digits(src, cursor.next(src, i)) } else { i }
 
-fn scan_int_part(src: String, i: Cursor) -> Result[Cursor, String] =
+fn scan_int_part(src: String, i: Cursor) -> Result[Cursor, JsonError] =
   if peek(src, i) == char.code('0') {
     Ok(cursor.next(src, i))
   } else if peek(src, i) >= char.code('1') && peek(src, i) <= char.code('9') {
@@ -208,7 +219,7 @@ fn scan_int_part(src: String, i: Cursor) -> Result[Cursor, String] =
     Err(err_at(src, i, "invalid number: expected a digit"))
   }
 
-fn scan_frac(src: String, i: Cursor) -> Result[Cursor, String] =
+fn scan_frac(src: String, i: Cursor) -> Result[Cursor, JsonError] =
   if peek(src, i) == char.code('.') {
     let i1 = cursor.next(src, i)
     let j = skip_digits(src, i1)
@@ -221,7 +232,7 @@ fn scan_frac(src: String, i: Cursor) -> Result[Cursor, String] =
     Ok(i)
   }
 
-fn scan_exp(src: String, i: Cursor) -> Result[Cursor, String] =
+fn scan_exp(src: String, i: Cursor) -> Result[Cursor, JsonError] =
   if peek(src, i) == char.code('e') || peek(src, i) == char.code('E') {
     let i1 = cursor.next(src, i)
     let i2 =
@@ -248,7 +259,7 @@ fn scan_exp(src: String, i: Cursor) -> Result[Cursor, String] =
 # integer through a double is what silently turned 9007199254740993 into
 # ...992. Only the caller knows whether this literal is an Int or a Float, so
 # only the caller can pick a lossless conversion — see `number_of` in parser.
-pub fn scan_number(src: String, start: Cursor) -> Result[(String, Cursor), String] = {
+pub fn scan_number(src: String, start: Cursor) -> Result[(String, Cursor), JsonError] = {
   let i0 = if peek(src, start) == char.code('-') { cursor.next(src, start) } else { start }
   let i1 = scan_int_part(src, i0)?
   let i2 = scan_frac(src, i1)?

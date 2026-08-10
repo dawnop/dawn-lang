@@ -11,8 +11,8 @@ use std/str
 use std/map
 use std/cursor
 use std/cursor.{Cursor}
-use lexer.{peek, skip_ws, is_digit, scan_string, scan_number, err_at}
-use value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
+use lexer.{peek, skip_ws, is_digit, scan_string, scan_number, err_at, err_kind}
+use value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj, JsonError, JsonErrorKind, Syntax, Truncated, Trailing, Depth, NumberRange, error_text}
 
 ## How deeply arrays and objects may nest before `parse` gives up. Deeper input
 ## is a plain error, not a blown stack.
@@ -42,11 +42,11 @@ fn is_finite(f: Float) -> Bool = f - f == 0.0
 # are accepted; only overflow to NaN or Infinity is rejected. RFC 8259 §6 lets
 # implementations set these range and precision limits. A caller that needs
 # exact decimal arithmetic needs a decimal model in `Json`.
-fn number_of(src: String, i: Cursor, lit: String) -> Result[Json, String] =
+fn number_of(src: String, i: Cursor, lit: String) -> Result[Json, JsonError] =
   if is_int_literal(lit) {
     match parse_int(lit) {
       Some(n) -> Ok(JInt(n))
-      None -> Err(err_at(src, i, "integer out of Int range: " ++ lit))
+      None -> Err(err_kind(src, i, NumberRange(lit), "integer out of Int range: " ++ lit))
     }
   } else {
     match parse_float(lit) {
@@ -56,9 +56,9 @@ fn number_of(src: String, i: Cursor, lit: String) -> Result[Json, String] =
         if is_finite(f) {
           Ok(JNum(f))
         } else {
-          Err(err_at(src, i, "number out of Float range: " ++ lit))
+          Err(err_kind(src, i, NumberRange(lit), "number out of Float range: " ++ lit))
         }
-      None -> Err(err_at(src, i, "invalid number: " ++ lit))
+      None -> Err(err_kind(src, i, NumberRange(lit), "invalid number: " ++ lit))
     }
   }
 
@@ -74,13 +74,13 @@ fn match_lit(src: String, i: Cursor, word: String, w: Cursor) -> Option[Cursor] 
     None
   }
 
-fn parse_lit(src: String, i: Cursor, word: String, val: Json) -> Result[(Json, Cursor), String] =
+fn parse_lit(src: String, i: Cursor, word: String, val: Json) -> Result[(Json, Cursor), JsonError] =
   match match_lit(src, i, word, cursor.start(word)) {
     Some(j) -> Ok((val, j))
     None -> Err(err_at(src, i, "invalid literal"))
   }
 
-fn parse_array_items(src: String, i: Cursor, depth: Int, acc: List[Json]) -> Result[(Json, Cursor), String] = {
+fn parse_array_items(src: String, i: Cursor, depth: Int, acc: List[Json]) -> Result[(Json, Cursor), JsonError] = {
   let (v, j) = parse_value(src, i, depth + 1)?
   let acc2 = acc ++ [v]
   let k = skip_ws(src, j)
@@ -94,7 +94,7 @@ fn parse_array_items(src: String, i: Cursor, depth: Int, acc: List[Json]) -> Res
   }
 }
 
-fn parse_array(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), String] = {
+fn parse_array(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), JsonError] = {
   let i1 = skip_ws(src, cursor.next(src, i0))
   if peek(src, i1) == char.code(']') {
     Ok((JArr([]), cursor.next(src, i1)))
@@ -103,7 +103,7 @@ fn parse_array(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), St
   }
 }
 
-fn parse_object_members(src: String, i: Cursor, depth: Int, acc: Map[String, Json]) -> Result[(Json, Cursor), String] = {
+fn parse_object_members(src: String, i: Cursor, depth: Int, acc: Map[String, Json]) -> Result[(Json, Cursor), JsonError] = {
   let ks = skip_ws(src, i)
   if peek(src, ks) != char.code('"') {
     Err(err_at(src, ks, "expected a string key in object"))
@@ -128,7 +128,7 @@ fn parse_object_members(src: String, i: Cursor, depth: Int, acc: Map[String, Jso
   }
 }
 
-fn parse_object(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), String] = {
+fn parse_object(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), JsonError] = {
   let i1 = skip_ws(src, cursor.next(src, i0))
   if peek(src, i1) == char.code('}') {
     Ok((JObj(map.empty()), cursor.next(src, i1)))
@@ -137,9 +137,9 @@ fn parse_object(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), S
   }
 }
 
-fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), String] = {
+fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), JsonError] = {
   if depth > MAX_DEPTH {
-    Err(err_at(src, i0, "maximum nesting depth exceeded"))
+    Err(err_kind(src, i0, Depth, "maximum nesting depth exceeded"))
   } else {
     let i = skip_ws(src, i0)
     let c = peek(src, i)
@@ -169,19 +169,21 @@ fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), St
   }
 }
 
-## Parse one complete JSON document (RFC 8259). `Err` carries a message ending
-## in the code-point offset it was noticed at; anything but whitespace after the
-## value is an error. Never panics. An integer literal becomes `JInt`, any other
-## number `JNum`. Integers must fit `Int`; fraction/exponent literals use
-## IEEE-754 binary64 ties-to-even rounding, accept finite underflow as signed
-## zero, and reject overflow when the result is non-finite.
-pub fn parse(input: String) -> Result[Json, String] = {
+## Parse one complete JSON document (RFC 8259). `Err` is a `value.JsonError`:
+## the kind of failure, the code-point offset it was noticed at, and a sentence;
+## `value.error_text` renders the last two as the one-line message this used to
+## return in place of the whole thing. Anything but whitespace after the value is
+## an error. Never panics. An integer literal becomes `JInt`, any other number
+## `JNum`. Integers must fit `Int`; fraction/exponent literals use IEEE-754
+## binary64 ties-to-even rounding, accept finite underflow as signed zero, and
+## reject overflow when the result is non-finite.
+pub fn parse(input: String) -> Result[Json, JsonError] = {
   let (v, j) = parse_value(input, cursor.start(input), 0)?
   let k = skip_ws(input, j)
   if cursor.done(input, k) {
     Ok(v)
   } else {
-    Err(err_at(input, k, "trailing content after the JSON value"))
+    Err(err_kind(input, k, Trailing, "trailing content after the JSON value"))
   }
 }
 
@@ -202,21 +204,79 @@ test "integers beyond 2^53 keep every digit" {
   assert parse("-9223372036854775808") == Ok(JInt(-9223372036854775807 - 1))
 }
 
+# The one-line rendering of whatever `parse` answered, so a test can state the
+# whole error in the shape the String error had.
+fn text_of(r: Result[Json, JsonError]) -> String =
+  match r {
+    Ok(_) -> "<ok>"
+    Err(e) -> error_text(e)
+  }
+
+fn kind_of(r: Result[Json, JsonError]) -> JsonErrorKind =
+  match r {
+    Ok(_) -> Syntax
+    Err(e) -> e.kind
+  }
+
 test "integer and non-finite overflow are refused, finite underflow is accepted" {
   # used to saturate to Long.MAX_VALUE
-  assert parse("99999999999999999999") ==
-    Err("integer out of Int range: 99999999999999999999 at offset 0")
+  assert text_of(parse("99999999999999999999")) ==
+    "integer out of Int range: 99999999999999999999 at offset 0"
   # used to become the JSON-illegal token Infinity
-  assert parse("1e400") == Err("number out of Float range: 1e400 at offset 0")
-  assert parse("-1e400") == Err("number out of Float range: -1e400 at offset 0")
+  assert text_of(parse("1e400")) == "number out of Float range: 1e400 at offset 0"
+  assert text_of(parse("-1e400")) == "number out of Float range: -1e400 at offset 0"
   # underflow is representable (as 0.0), so it stays accepted
   assert parse("1e-400") == Ok(JNum(0.0))
+  # a number the model cannot hold is its own kind, and carries the literal, so
+  # a caller that needs exact decimals keeps the digits instead of the sentence
+  assert kind_of(parse("1e400")) == NumberRange("1e400")
+  assert kind_of(parse("99999999999999999999")) == NumberRange("99999999999999999999")
 }
 
 test "errors carry a code-point offset" {
-  assert parse("{\"a\": }") == Err("unexpected character at offset 6")
-  assert parse("[1, 2") == Err("expected ',' or ']' in array at offset 5")
-  assert parse("1 2") == Err("trailing content after the JSON value at offset 2")
+  assert text_of(parse("{\"a\": }")) == "unexpected character at offset 6"
+  assert text_of(parse("[1, 2")) == "expected ',' or ']' in array at offset 5"
+  assert text_of(parse("1 2")) == "trailing content after the JSON value at offset 2"
   # the offset counts characters, not UTF-16 units or bytes: the emoji is one
-  assert parse("[\"😀\", ?]") == Err("unexpected character at offset 6")
+  assert text_of(parse("[\"😀\", ?]")) == "unexpected character at offset 6"
+}
+
+test "the error kind separates what a caller can act on" {
+  # the byte at `offset` cannot be there: a bad document, whole
+  match parse("{\"a\": }") {
+    Err(e) -> {
+      assert e.kind == Syntax
+      assert e.offset == 6
+    }
+    Ok(_) -> { assert false }
+  }
+  # the input ran out mid-value. An incremental reader asks for more bytes;
+  # under the String error the only way to tell this apart was to match prose
+  assert kind_of(parse("[1, 2")) == Truncated
+  assert kind_of(parse("{\"a\": 1")) == Truncated
+  assert kind_of(parse("\"unterminated")) == Truncated
+  assert kind_of(parse("")) == Truncated
+  # a complete value followed by more input: a reader of concatenated values
+  # resumes at `offset` rather than rejecting the frame
+  match parse("{} {}") {
+    Err(e) -> {
+      assert e.kind == Trailing
+      assert e.offset == 3
+    }
+    Ok(_) -> { assert false }
+  }
+  # deeper than this parser goes, which is not the document being wrong
+  assert kind_of(parse(nest(MAX_DEPTH + 2))) == Depth
+}
+
+# `n` nested arrays, unterminated: the depth cap is reached long before the end
+# of the text, so the error is Depth and not Truncated.
+fn nest(n: Int) -> String = {
+  var s = ""
+  var i = 0
+  while i < n {
+    s = s ++ "["
+    i = i + 1
+  }
+  s ++ "1"
 }

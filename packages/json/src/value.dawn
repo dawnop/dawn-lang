@@ -25,3 +25,52 @@ pub type Json =
   | JArr(items: List[Json])
   | JObj(entries: Map[String, Json])
 derive Show
+
+# Why a parse failed, as something a caller can branch on.
+#
+# `parse` used to answer `Result[Json, String]`, whose only reader is a human:
+# to point at the offending character a caller had to parse the offset back out
+# of the sentence, and to distinguish "the document is cut short" from "the
+# document is wrong" -- the difference between waiting for more bytes and
+# rejecting the request -- it had to match on prose this package never promised
+# to keep stable.
+#
+# The kinds are the distinctions a caller can *act* on, not one per message:
+#
+#   Truncated    the input ran out mid-value. An incremental reader asks for
+#                more; anything else reports a bad document.
+#   Trailing     a complete value, then something after it. A reader of
+#                concatenated values (JSON Lines, a stream) resumes at `offset`.
+#   Depth        past `parser.MAX_DEPTH`. Not a syntax error: the document may
+#                be perfectly good and simply deeper than this parser goes.
+#   NumberRange  the literal is legal JSON but outside Dawn's Int/Float model
+#                (RFC 8259 §6 leaves those limits to the implementation). It
+#                carries the literal, so a caller that needs exact decimals can
+#                keep the digits and re-read them itself.
+#   Syntax       everything else: the byte at `offset` cannot be there.
+##
+## Why a `parse` failed, in the terms a caller can act on: input that ran out,
+## a value followed by more input, nesting past `MAX_DEPTH`, a number outside
+## Dawn's model (carrying its literal), or a plain syntax error.
+pub type JsonErrorKind =
+  | Syntax
+  | Truncated
+  | Trailing
+  | Depth
+  | NumberRange(literal: String)
+derive Show
+
+## What `parse` returns on failure: the kind, the code-point offset it was
+## noticed at, and the sentence a human reads. `error_text` renders the last two
+## in the shape the old `String` error had.
+pub type JsonError = {
+  kind: JsonErrorKind,
+  offset: Int,
+  message: String,
+} derive Show
+
+## A `JsonError` as the one-line message the `String` error used to be:
+## `"unexpected character at offset 6"`. The migration from that error type is
+## this call.
+pub fn error_text(e: JsonError) -> String =
+  e.message ++ " at offset " ++ to_string(e.offset)
