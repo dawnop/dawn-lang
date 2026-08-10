@@ -1518,6 +1518,112 @@ pub fn main() -> Unit !io = infers_io()
     return [], 2
 
 
+# --- the named-effect tier's status ----------------------------------------
+# The README and the front page both say, in both languages, that the
+# named-effect layer has no internal consumer. That is true today, and it is
+# exactly the shape of sentence that stops being true without anybody noticing:
+# the day `std` or the compiler declares its first `effect`, four outward
+# documents would go on apologising for a feature that had just been adopted,
+# and the only thing that would have caught it is somebody remembering.
+#
+# So the claim is held from both sides. With no declaration under the roots
+# below, every registered document must carry its sentence; with a declaration,
+# none of them may. Whichever way it moves, the failing check names the
+# documents to edit.
+#
+# Deliberately not covered: whether the tier is *worth* a consumer, and whether
+# a consumer that exists is more than a token. This counts declarations.
+NAMED_EFFECT_ROOTS = ("std", "selfhost/src")
+NAMED_EFFECT_DECL = re.compile(r"(?m)^(?:pub\s+)?effect\s+[A-Za-z_]")
+NAMED_EFFECT_STATUS = (
+    ("README.md", "no internal consumer"),
+    ("README.zh-CN.md", "没有内部使用者"),
+    ("site/pages/home.md", "no internal consumer"),
+    ("site/pages/home.zh.md", "没有内部使用者"),
+)
+
+
+def named_effect_users(sources: dict[str, str]) -> list[str]:
+    return sorted(rel for rel, text in sources.items()
+                  if NAMED_EFFECT_DECL.search(text))
+
+
+def named_effect_status_problems(sources: dict[str, str],
+                                 docs: dict[str, str]) -> tuple[list[str], int]:
+    users = named_effect_users(sources)
+    roots = ", ".join(f"{root}/" for root in NAMED_EFFECT_ROOTS)
+    bad: list[str] = []
+    seen = 0
+    for rel, fragment in NAMED_EFFECT_STATUS:
+        text = docs.get(rel)
+        if text is None:
+            bad.append(f"{rel}: registered for the named-effect status claim, "
+                       f"but does not exist")
+            continue
+        if users and fragment in text:
+            bad.append(f"{rel}: still claims the named-effect tier has no internal "
+                       f"consumer ({fragment!r}), but {', '.join(users)} declares "
+                       f"one. The tier has been adopted; say so.")
+        elif not users and fragment not in text:
+            bad.append(f"{rel}: nothing under {roots} declares an effect, so this "
+                       f"document has to say so; expected the phrase {fragment!r}")
+        else:
+            seen += 1
+    return bad, seen
+
+
+def read_named_effect_sources() -> dict[str, str]:
+    sources: dict[str, str] = {}
+    for root in NAMED_EFFECT_ROOTS:
+        for path in sorted((ROOT / root).rglob("*.dawn")):
+            sources[path.relative_to(ROOT).as_posix()] = \
+                path.read_text(encoding="utf-8")
+    return sources
+
+
+def read_named_effect_docs() -> dict[str, str]:
+    return {rel: (ROOT / rel).read_text(encoding="utf-8")
+            for rel, _fragment in NAMED_EFFECT_STATUS if (ROOT / rel).exists()}
+
+
+def check_named_effect_status() -> tuple[list[str], int]:
+    return named_effect_status_problems(read_named_effect_sources(),
+                                        read_named_effect_docs())
+
+
+def check_named_effect_status_selftest() -> tuple[list[str], int]:
+    sources = read_named_effect_sources()
+    docs = read_named_effect_docs()
+    baseline, _ = named_effect_status_problems(sources, docs)
+    if baseline:
+        return [f"named-effect status self-test baseline is invalid: {baseline[0]}"], 0
+
+    # Prose about effects is not adoption; a file that only talks about them
+    # must stay green, or the check reddens on its own documentation.
+    mention = dict(sources)
+    mention["std/mention.dawn"] = "## an effect declaration would go here\nfn f() = 1\n"
+    bad, _ = named_effect_status_problems(mention, docs)
+    if bad:
+        return ["named-effect status self-test: prose about effects was read as "
+                f"adoption: {bad[0]}"], 0
+
+    adopted = dict(sources)
+    adopted["std/ask.dawn"] = "pub effect Ask {\n  fn ask() -> Int\n}\n"
+    bad, _ = named_effect_status_problems(adopted, docs)
+    if len(bad) != len(NAMED_EFFECT_STATUS):
+        return ["named-effect status self-test: one declaration in std reddened "
+                f"{len(bad)} of {len(NAMED_EFFECT_STATUS)} outward claims"], 0
+
+    silent = dict(docs)
+    silent["README.md"] = silent["README.md"].replace(
+        "no internal consumer", "in use throughout the compiler", 1)
+    bad, _ = named_effect_status_problems(sources, silent)
+    if not any("has to say so" in problem for problem in bad):
+        return ["named-effect status self-test: dropping the claim from README.md "
+                "stayed green"], 0
+    return [], 3
+
+
 REPOSITORY_POLICY_FILES = (
     ".editorconfig",
     "CONTRIBUTING.md",
@@ -2639,6 +2745,12 @@ def main() -> None:
     bad, policies_seen = check_repository_contracts()
     problems += bad
     bad, n = check_repository_contracts_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_named_effect_status()
+    problems += bad
+    policies_seen += n
+    bad, n = check_named_effect_status_selftest()
     problems += bad
     selftests_seen += n
     bad, n = check_markdown_section_selftest()

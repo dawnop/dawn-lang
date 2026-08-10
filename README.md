@@ -33,13 +33,20 @@ pub fn main() -> Unit !io =
 Each item names, in parentheses, **something you can go and check**: a gate, a
 measurement, a section of the spec.
 
-### 1. Effects are in the type, and there are more than two of them
+### 1. Effects are in the type
 
 Functions are pure by default; touching IO requires the `!io` label — the signature
 tells you whether it reaches outside, so testing a pure function needs no mocks. That
-is the base axis. The other axis is **named effects you declare yourself**: `effect`
-declares the operations, `with handle` answers them on the spot, the label propagates
-along signatures and is subtracted at exactly one syntactic node — the handler.
+axis carries weight everywhere: almost all of `std` is pure and says so, the compiler
+labels the parts of itself that are not, and a function reaching outside from a
+signature that stays silent about it is a compile error. (`scripts/doc-check.py`'s
+effect-inference probe pins both branches: an explicitly pure signature that calls
+`println` is rejected, an unannotated one infers `!io`.)
+
+There is a second axis, and nothing in this repository uses it yet: **named effects you
+declare yourself**. `effect` declares the operations, `with handle` answers them on the
+spot, the label propagates along signatures and is subtracted at exactly one syntactic
+node, the handler.
 
 ```dawn run
 effect Ask {
@@ -55,11 +62,14 @@ pub fn main() -> Unit !io = {
 }
 ```
 
-This tier is **tail resumption**: a handler arm is an ordinary closure, no continuation
+That tier is **tail resumption**: a handler arm is an ordinary closure, no continuation
 is captured, and so neither backend needs its own stack magic for it. The price is that
-multi-shot and non-tail resumption are not supported. Neither `std` nor the compiler
-itself uses named effects yet — the feature is purely additive.
-([docs/spec.md](docs/spec.md) §6.5; differential corpus
+multi-shot and non-tail resumption are not supported. It is specified, implemented on
+both backends and held by the differential corpus, and it has **no internal consumer**:
+`grep -rlE '^(pub )?effect ' std/ selfhost/src/` prints nothing, and `doc-check.py`
+reds this paragraph the day that stops being true. So read it as a working feature that
+has not yet had to carry a real program, rather than as the thing that makes Dawn
+different. ([docs/spec.md](docs/spec.md) §6.5; differential corpus
 `scripts/spike-native/effect_handler.dawn`.)
 
 ### 2. Two backends, one answer, machine-enforced

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/home.md @ 7d8defdb4b236bea -->
+<!-- doc-check: translation-of site/pages/home.md @ b11ca79412effde5 -->
 
 # 首页文案 —— 中文译本
 
@@ -30,11 +30,11 @@ type · match · effect · !io
 
 ## feature-effects-title
 
-效果进类型，而且不止两级
+效果进类型
 
 ## feature-effects-body
 
-函数默认是纯的，碰 IO 必须在签名标 `!io`——看签名即知它碰不碰外界，纯函数测试零 mock。另一条轴是你自己声明的**具名效果**：`effect` 声明操作、`with handle` 就地应答，标签随签名传播，只在 handle 这一个语法节点上被减掉。
+函数默认是纯的，碰 IO 必须在签名标 `!io`——看签名即知它碰不碰外界，纯函数测试零 mock。第二条轴是你自己声明的**具名效果**：`effect` 声明操作、`with handle` 就地应答，标签随签名传播，只在 handle 这一个语法节点上被减掉。这一档有规范、两个后端都实现了、也有测试，但它还**没有内部使用者**：标准库和编译器都没有声明过具名效果。
 
 ## feature-comptime-title
 

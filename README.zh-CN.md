@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ f5e70f5f105cbc90 -->
+<!-- doc-check: translation-of README.md @ 6e4269f6bf576a7c -->
 
 # Dawn
 
@@ -31,11 +31,15 @@ pub fn main() -> Unit !io =
 
 每条后面括号里是**能去核对的东西**：一条门禁、一份实测、一节规范。
 
-### 一、效果进类型，而且不止两级
+### 一、效果进类型
 
-函数默认纯，碰 IO 必须标 `!io`——看签名即知它碰不碰外界，纯函数测试零 mock。这是基轴。另一条
-轴是**用户自己声明的具名效果**：`effect` 声明操作、`with handle` 就地应答，标签随签名传播，
-只在 handle 这一个语法节点上被减掉。
+函数默认纯，碰 IO 必须标 `!io`——看签名即知它碰不碰外界，纯函数测试零 mock。这条轴处处承重：
+`std` 绝大部分是纯的、并且在签名上说了；编译器给自己不纯的那些部分打标；签名不说而函数伸手到
+外界，是编译错误。（`scripts/doc-check.py` 的 effect-inference 探针把两个分支都钉住了：显式声明为纯
+却调用 `println` 的签名被拒，不写效果的那个推断出 `!io`。）
+
+还有第二条轴，而这个仓库里还没有任何东西用它：**用户自己声明的具名效果**。`effect` 声明操作、
+`with handle` 就地应答，标签随签名传播，只在 handle 这一个语法节点上被减掉。
 
 ```dawn run
 effect Ask {
@@ -52,8 +56,11 @@ pub fn main() -> Unit !io = {
 ```
 
 这一档是**尾恢复**：handler 臂就是普通闭包，没有延续捕获，于是两个后端不必为它各造一套栈
-魔法；代价是不支持多次恢复与非尾恢复。std 与编译器自身**还没**改用具名效果，这个特性是纯
-加法。（[docs/spec.md](docs/spec.md) §6.5；对拍语料 `scripts/spike-native/effect_handler.dawn`。）
+魔法；代价是不支持多次恢复与非尾恢复。它有规范、两个后端都实现了、对拍语料也盯着，但它
+**没有内部使用者**：`grep -rlE '^(pub )?effect ' std/ selfhost/src/` 什么都不打印，而这句话哪天
+不成立了，`doc-check.py` 会把这一段判红。所以请把它读成一个还没扛过真实程序的可用特性，
+而不是「Dawn 与众不同」的那个理由。
+（[docs/spec.md](docs/spec.md) §6.5；对拍语料 `scripts/spike-native/effect_handler.dawn`。）
 
 ### 二、两个后端，一个答案，机器保证
 

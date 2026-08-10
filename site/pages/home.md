@@ -35,11 +35,11 @@ Core features
 
 ## feature-effects-title
 
-Effects in the type, and more than two of them
+Effects in the type
 
 ## feature-effects-body
 
-Functions are pure by default; touching IO requires `!io` on the signature — the signature tells you whether it reaches outside, so testing a pure function needs no mocks. The other axis is **named effects you declare yourself**: `effect` declares the operations, `with handle` answers them on the spot, and the label propagates along signatures until exactly one syntactic node subtracts it.
+Functions are pure by default; touching IO requires `!io` on the signature — the signature tells you whether it reaches outside, so testing a pure function needs no mocks. A second axis is **named effects you declare yourself**: `effect` declares the operations, `with handle` answers them on the spot, and the label propagates along signatures until exactly one syntactic node subtracts it. That tier is specified, implemented on both backends and tested, and it has **no internal consumer** yet: neither the standard library nor the compiler declares a named effect.
 
 ## feature-comptime-title
 
