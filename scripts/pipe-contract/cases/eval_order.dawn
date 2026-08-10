@@ -1,0 +1,26 @@
+# Evaluation order, which no type checker can see. The pipe invents no node, so
+# a piped call happens in the order the written-out call happens in: the target
+# first, then the arguments left to right, with the left side as the first
+# argument. Two compilers folding the same constants cannot show that; a
+# program that announces itself as it evaluates can.
+#
+# The callee is `(handler().run)` rather than `make()(...)` so that the
+# nested-call mutant leaves this file alone: the subject here is *when* the
+# left side is evaluated, and a fixture that stops compiling under another
+# mutant cannot own that.
+type Handler = { run: fn(Int, Int) -> Int }
+
+fn handler() -> Handler !io = {
+  println("eval callee")
+  Handler { run: (a, b) => a + b }
+}
+
+fn note(tag: String, v: Int) -> Int !io = {
+  println("eval ${tag}")
+  v
+}
+
+pub fn main() -> Unit !io = {
+  let total = note("lhs", 1) |> (handler().run)(note("arg", 2))
+  println("total=${total}")
+}

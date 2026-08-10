@@ -167,15 +167,6 @@ jobs:
       - name: grammar corpus
         run: ./scripts/grammar-corpus/run.sh
 
-      # SYN-05's two halves that no corpus can see: the editor's typed-child
-      # mapping under a dotted callee (hover inside `m.f(a)` and `m.C(a)` used
-      # to answer with the enclosing call's type -- a wrong answer, not a
-      # missing one), and formatter idempotence over the shapes the pipe newly
-      # admits. The formatter was expected not to move; this is the check that
-      # expectation was standing in for.
-      - name: pipe contract (editor mapping, formatter fixpoint)
-        run: ./scripts/pipe-contract/run.sh
-
       # SYN-08 crosses lexer state, parser folding, comptime and both emitters.
       # The grammar corpus pins rejection, while this contract checks the JVM
       # and native answers against a written oracle and inspects generated C
@@ -625,6 +616,47 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: public API surface contract (shard 3)
         run: ./scripts/export-surface-contract/run.sh --shard 3/3
+
+  # SYN-05: the general pipe. It left the `test` job when it grew its mutants,
+  # for the reason export-surface is split above: one build per rule does not
+  # fit in a job that is already 216s.
+  #
+  # What the mutants own is not the pipe's behaviour, which the checker,
+  # grammar and native corpora all pin. It is that each of those assertions is
+  # owned by exactly one sentence of the desugar, and that property rots
+  # silently: SYN-09's persisted mutants are how an anchor drift was caught
+  # when SYN-05 added an `XCtor` arm to the same match (2d5f19a), and the pipe
+  # had no equivalent until now. Every shard re-runs the fixture, editor and
+  # formatter contracts, which are seconds, so no shard is a partial verdict.
+  pipe-contract-1:
+    runs-on: ubuntu-latest
+    # 82s and 72s locally for the two shards (7 and 6 builds, plus the fixture
+    # contract), but the whole suite measured 125s and 156s on two runs of the
+    # same tree, so the budget takes 156s: a bound derived from the luckier of
+    # two observations is a bound that fails on a Tuesday, and a whole-suite
+    # figure is an upper bound on either shard. Re-derive from the first run to
+    # carry them, the way 30af350 did for export-surface.
+    # budget: 3x 156s worst observed
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: general pipe contract (shard 1)
+        run: ./scripts/pipe-contract/run.sh --shard 1/2
+
+  pipe-contract-2:
+    runs-on: ubuntu-latest
+    # budget: 3x 156s worst observed
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: general pipe contract (shard 2)
+        run: ./scripts/pipe-contract/run.sh --shard 2/2
 
   # SYN-09: which Java member `recv.name(args)` reaches. Its own job for the
   # same reason java-target-classpath is: the subject is a javac-built fixture
