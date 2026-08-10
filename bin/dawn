@@ -322,24 +322,31 @@ write_static_records() {
   printf 'R\tF\tbin/dawn\n'
 }
 
-path_has_symlink_component() (
+path_has_symlink_component() {
   symlink_path=$1
-  [ "$symlink_path" != "/" ] || exit 1
+  [ "$symlink_path" != "/" ] || return 1
   symlink_rest=${symlink_path#/}
   symlink_current=
-  symlink_old_ifs=$IFS
-  IFS=/
-  set -f
-  set -- $symlink_rest
-  IFS=$symlink_old_ifs
-  for symlink_part do
+  while [ -n "$symlink_rest" ]; do
+    case $symlink_rest in
+      */*)
+        symlink_part=${symlink_rest%%/*}
+        symlink_rest=${symlink_rest#*/}
+        ;;
+      *)
+        symlink_part=$symlink_rest
+        symlink_rest=
+        ;;
+    esac
+    # empty parts are what a doubled or trailing slash leaves behind
+    [ -n "$symlink_part" ] || continue
     symlink_current=$symlink_current/$symlink_part
     if [ -L "$symlink_current" ]; then
-      exit 0
+      return 0
     fi
   done
-  exit 1
-)
+  return 1
+}
 
 index_tree() {
   tree_root=$1
@@ -399,33 +406,85 @@ write_source_stream() (
   source_manifest=$1
   source_stream=$2
   source_work=$3
-  records=$(mktemp "$source_work/records.XXXXXX") || exit 1
-  merged=$(mktemp "$source_work/merged.XXXXXX") || {
-    rm -f "$records"
-    exit 1
-  }
-  sorted=$(mktemp "$source_work/sorted.XXXXXX") || {
-    rm -f "$records" "$merged"
-    exit 1
-  }
-  leaves=$(mktemp "$source_work/leaves.XXXXXX") || {
-    rm -f "$records" "$merged" "$sorted"
-    exit 1
-  }
-  sorted_leaves=$(mktemp "$source_work/sorted-leaves.XXXXXX") || {
-    rm -f "$records" "$merged" "$sorted" "$leaves"
-    exit 1
-  }
-  problem=$(mktemp "$source_work/problem.XXXXXX") || {
-    rm -f "$records" "$merged" "$sorted" "$leaves" "$sorted_leaves"
-    exit 1
-  }
-  snapshot=$(mktemp "$source_work/content.XXXXXX") || {
-    rm -f "$records" "$merged" "$sorted" "$leaves" "$sorted_leaves" "$problem"
-    exit 1
-  }
-  trap 'rm -f "$records" "$merged" "$sorted" "$leaves" "$sorted_leaves" "$problem" "$snapshot"' 0
+
+  # The stream is assembled, not dribbled out: one pass validates the records
+  # and collects every file whose bytes belong in it, a single `wc -c` measures
+  # all of them, and a second pass writes the frame headers into staging chunks
+  # that one `cat` interleaves with the sources. Byte for byte the same stream
+  # -- same frames, same order, same length prefixes -- for a handful of
+  # processes instead of ten per input file. This runs before every exec and
+  # not only before a build, and CI runs it thousands of times, so the constant
+  # is the whole cost of the check.
+  #
+  # C collation was already required for the sorts below; pinning the subshell
+  # to it also makes ${#value} count bytes, which is what a frame header must
+  # measure. A shell that does not follow the assignment keeps the old per-frame
+  # `wc -c`, so the probe buys speed and never a wrong length. LC_ALL stays in
+  # this subshell: the compiler runs in the caller's locale.
+  LC_ALL=C
+  export LC_ALL
+  frame_len_kind=external
+  frame_len_probe=$(printf '\303\251') || exit 1
+  if [ "${#frame_len_probe}" -eq 2 ]; then
+    frame_len_kind=shell
+  fi
+
+  parts=$(mktemp -d "$source_work/parts.XXXXXX") || exit 1
+  trap 'rm -rf "$parts"' 0
   trap 'exit 1' 1 2 15
+  records=$parts/records
+  merged=$parts/merged
+  sorted=$parts/sorted
+  problem=$parts/problem
+  sizes=$parts/sizes
+
+  frame_len() {
+    case $frame_len_kind in
+      shell) frame_len_value=${#1} ;;
+      *)
+        frame_len_value=$(printf '%s' "$1" | wc -c | tr -d '[:space:]') || return 1
+        case $frame_len_value in
+          ''|*[!0-9]*) return 1 ;;
+        esac
+        ;;
+    esac
+  }
+
+  # Frame headers accumulate in a variable and reach the stream through a
+  # staging chunk, one per spliced file plus a final tail.
+  frame_text=
+  chunk_serial=0
+  stream_size=0
+  emit_frame() {
+    frame_len "$1" || exit 1
+    frame_text=$frame_text$frame_len_value:$1
+  }
+  splice_file() {
+    splice_size=$1
+    chunk_serial=$((chunk_serial + 1))
+    chunk_file=$parts/chunk.$chunk_serial
+    frame_len "$frame_text$splice_size:" || exit 1
+    stream_size=$((stream_size + frame_len_value + splice_size))
+    printf '%s%s:' "$frame_text" "$splice_size" > "$chunk_file" || exit 1
+    frame_text=
+  }
+  # The measurements come back in the order the collection pass listed the
+  # files, and the emitting pass walks the same records in the same order.
+  size_count=0
+  next_size() {
+    # shellcheck disable=SC2034 # the second field is the path wc echoed back
+    if ! read -r frame_size size_path <&4; then
+      echo "error: cannot read the measured source input sizes" >&2
+      exit 1
+    fi
+    case $frame_size in
+      ''|*[!0-9]*)
+        echo "error: malformed source input size measurement" >&2
+        exit 1
+        ;;
+    esac
+    size_count=$((size_count + 1))
+  }
 
   if ! write_manifest_records "$source_manifest" "$records"; then
     exit 1
@@ -439,10 +498,11 @@ write_source_stream() (
     exit 1
   fi
 
-  : > "$source_stream" || exit 1
-  append_text_frame "$source_stream" "dawn-source-digest-v2" || exit 1
   tab=$(printf '\t')
+  set --
+  record_index=0
   while IFS= read -r record || [ -n "$record" ]; do
+    record_index=$((record_index + 1))
     scope=${record%%"$tab"*}
     rest=${record#*"$tab"}
     kind=${rest%%"$tab"*}
@@ -459,42 +519,25 @@ write_source_stream() (
       echo "error: source input has a symbolic-link path component: $absolute" >&2
       exit 1
     fi
-
-    append_text_frame "$source_stream" "record" || exit 1
-    append_text_frame "$source_stream" "$scope" || exit 1
-    append_text_frame "$source_stream" "$kind" || exit 1
-    append_text_frame "$source_stream" "$path" || exit 1
     case $kind in
       F)
         if [ -L "$absolute" ] || [ ! -f "$absolute" ]; then
           echo "error: required source input is not a regular non-symbolic-link file: $absolute" >&2
           exit 1
         fi
-        if ! cat "$absolute" > "$snapshot"; then
-          echo "error: cannot read source input: $absolute" >&2
-          exit 1
-        fi
-        append_text_frame "$source_stream" "present-file" || exit 1
-        append_file_frame "$source_stream" "$snapshot" || exit 1
+        set -- "$@" "$absolute"
         ;;
       O)
         if [ -L "$absolute" ]; then
           echo "error: optional source input is a symbolic link: $absolute" >&2
           exit 1
         fi
-        if [ ! -e "$absolute" ]; then
-          append_text_frame "$source_stream" "missing-file" || exit 1
-        else
+        if [ -e "$absolute" ]; then
           if [ ! -f "$absolute" ]; then
             echo "error: optional source input is not a regular file: $absolute" >&2
             exit 1
           fi
-          if ! cat "$absolute" > "$snapshot"; then
-            echo "error: cannot read optional source input: $absolute" >&2
-            exit 1
-          fi
-          append_text_frame "$source_stream" "present-file" || exit 1
-          append_file_frame "$source_stream" "$snapshot" || exit 1
+          set -- "$@" "$absolute"
         fi
         ;;
       T)
@@ -502,17 +545,12 @@ write_source_stream() (
           echo "error: required source input is not a non-symbolic-link directory tree: $absolute" >&2
           exit 1
         fi
-        append_text_frame "$source_stream" "tree-root" || exit 1
-        append_text_frame "$source_stream" "$path" || exit 1
-        if ! index_tree "$absolute" "$leaves" "$problem"; then
+        if ! index_tree "$absolute" "$parts/leaves.$record_index" "$problem"; then
           exit 1
         fi
-        if ! LC_ALL=C sort "$leaves" > "$sorted_leaves"; then
+        if ! LC_ALL=C sort "$parts/leaves.$record_index" > "$parts/tree.$record_index"; then
           echo "error: cannot sort source input tree: $absolute" >&2
           exit 1
-        fi
-        if [ ! -s "$sorted_leaves" ]; then
-          append_text_frame "$source_stream" "empty-tree" || exit 1
         fi
         while IFS= read -r leaf || [ -n "$leaf" ]; do
           case $absolute in
@@ -523,22 +561,115 @@ write_source_stream() (
             echo "error: source input tree entry changed type before it could be read: $leaf_file" >&2
             exit 1
           fi
-          if ! cat "$leaf_file" > "$snapshot"; then
-            echo "error: cannot read source input tree entry: $leaf_file" >&2
-            exit 1
-          fi
-          append_text_frame "$source_stream" "tree-leaf" || exit 1
-          append_text_frame "$source_stream" "$leaf" || exit 1
-          append_file_frame "$source_stream" "$snapshot" || exit 1
-        done < "$sorted_leaves"
+          set -- "$@" "$leaf_file"
+        done < "$parts/tree.$record_index"
         ;;
       *)
         echo "error: unknown source input kind while hashing: $kind" >&2
         exit 1
         ;;
     esac
-    append_text_frame "$source_stream" "record-end" || exit 1
   done < "$sorted"
+
+  # One measurement of every source, in stream order. The per-file loop used to
+  # snapshot each file and measure the snapshot; here the total is checked
+  # against the assembled stream instead, so a source that changes size while
+  # the launcher reads it still cannot produce a length prefix that disagrees
+  # with the bytes it counts -- it stops the run.
+  content_count=$#
+  : > "$sizes" || exit 1
+  if [ "$content_count" -gt 0 ] && ! wc -c "$@" > "$sizes"; then
+    echo "error: cannot measure the source inputs" >&2
+    exit 1
+  fi
+
+  # Scopes and kinds were checked above; this pass only lays out the bytes.
+  set --
+  record_index=0
+  exec 4< "$sizes" || exit 1
+  emit_frame "dawn-source-digest-v2"
+  while IFS= read -r record || [ -n "$record" ]; do
+    record_index=$((record_index + 1))
+    scope=${record%%"$tab"*}
+    rest=${record#*"$tab"}
+    kind=${rest%%"$tab"*}
+    path=${rest#*"$tab"}
+    case $scope in
+      R) absolute=$ROOT/$path ;;
+      *) absolute=$path ;;
+    esac
+
+    emit_frame "record"
+    emit_frame "$scope"
+    emit_frame "$kind"
+    emit_frame "$path"
+    case $kind in
+      F)
+        next_size
+        emit_frame "present-file"
+        splice_file "$frame_size"
+        set -- "$@" "$chunk_file" "$absolute"
+        ;;
+      O)
+        if [ ! -e "$absolute" ]; then
+          emit_frame "missing-file"
+        else
+          next_size
+          emit_frame "present-file"
+          splice_file "$frame_size"
+          set -- "$@" "$chunk_file" "$absolute"
+        fi
+        ;;
+      T)
+        emit_frame "tree-root"
+        emit_frame "$path"
+        if [ ! -s "$parts/tree.$record_index" ]; then
+          emit_frame "empty-tree"
+        fi
+        while IFS= read -r leaf || [ -n "$leaf" ]; do
+          case $absolute in
+            /) leaf_file=/$leaf ;;
+            *) leaf_file=$absolute/$leaf ;;
+          esac
+          next_size
+          emit_frame "tree-leaf"
+          emit_frame "$leaf"
+          splice_file "$frame_size"
+          set -- "$@" "$chunk_file" "$leaf_file"
+        done < "$parts/tree.$record_index"
+        ;;
+    esac
+    emit_frame "record-end"
+  done < "$sorted"
+  exec 4<&-
+
+  if [ "$size_count" -ne "$content_count" ]; then
+    echo "error: the source input set changed while it was being read" >&2
+    exit 1
+  fi
+
+  chunk_serial=$((chunk_serial + 1))
+  chunk_file=$parts/chunk.$chunk_serial
+  frame_len "$frame_text" || exit 1
+  stream_size=$((stream_size + frame_len_value))
+  printf '%s' "$frame_text" > "$chunk_file" || exit 1
+  set -- "$@" "$chunk_file"
+
+  if ! cat "$@" > "$source_stream"; then
+    echo "error: cannot assemble the source input stream" >&2
+    exit 1
+  fi
+  stream_written=$(LC_ALL=C wc -c < "$source_stream" | tr -d '[:space:]') || exit 1
+  case $stream_written in
+    ''|*[!0-9]*)
+      echo "error: cannot measure the source input stream" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$stream_written" -ne "$stream_size" ]; then
+    echo "error: source input bytes changed while they were being read" >&2
+    exit 1
+  fi
 )
 
 compute_manifest_digests() {
