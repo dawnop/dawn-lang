@@ -7,7 +7,7 @@ and the EBNF disagreed with the parser in several places -- all found by a
 human reading, none by a test. This script is the part of that gap a script
 can close.
 
-Thirteen checks, each unambiguous on purpose (a doc lint with false positives
+Fourteen checks, each unambiguous on purpose (a doc lint with false positives
 gets disabled, and then it protects nothing):
 
   links     every relative Markdown link resolves to a file in the repo
@@ -31,6 +31,9 @@ gets disabled, and then it protects nothing):
             `> Status: …`) line
   count     every claim about how many documents docs/ holds equals how many
             it holds, and every one of them is linked from docs/README.md
+  index     every lifecycle docs/README.md prints for a document is the one
+            that document's own status line claims, which is where the index
+            says the authority lives
   transl    every translated document registers the digest of the original it
             was translated from, that digest is still the original's, and its
             fenced blocks line up one-for-one with the original's
@@ -2568,6 +2571,161 @@ def check_audit_anchors_selftest() -> tuple[list[str], int]:
     return [], len(AUDIT_ANCHOR_MUTANTS)
 
 
+# docs/README.md opens by saying that a document's authoritative lifecycle is in
+# its own header and that the index only helps you find things. Then it prints a
+# lifecycle for every document in a column, and nothing compared the two. That is
+# the same defect as the audit registry one screen up: a claim about state, kept
+# by hand, in a second place.
+#
+# So the column is derived, in both directions. Where a document's status line
+# names one of the four lifecycles, the index cell must be that word: a document
+# retired to `historical` reds the index until the index follows, and an index
+# cell edited away from the header reds too.
+#
+# Six documents state progress instead of a lifecycle ("done", "七刀已结",
+# "设计已定"), which is a sentence a reader wants and not a lifecycle a machine
+# can read. Rather than rewrite six headers to fit a checker, they are recorded
+# below with the reason, and the record is itself checked both ways: a seventh
+# document that stops naming its lifecycle cannot arrive quietly, and a line
+# here cannot outlive the header that earned it. This is the ratchet in
+# scripts/gate-map/unseen.txt, at one tenth the size.
+INDEX_LIFECYCLE_ROW = re.compile(
+    r"^\|\s*\[[^\]]+\]\(([^)#]+)[^)]*\)\s*\|\s*"
+    r"\*{0,2}(normative|current|historical|proposed)\*{0,2}\s*\|", re.M)
+INDEX_LIFECYCLE_WORD = re.compile(
+    r"\b(normative|current|historical|proposed)\b", re.I)
+INDEX_LIFECYCLE_UNSTATED = {
+    "package-design.md": "状态 names the two projects that landed, not a lifecycle",
+    "trait.md": "状态 is 已实现, which answers a different question",
+    "native-driver-plan.md": "状态 counts the knives closed on the B line",
+    "jvm-base-plan.md": "状态 is done, and then a paragraph of what done means",
+    "atomic-write-design.md": "状态 is 已落地（两刀齐）, a landing note",
+    "std-audit.md": "状态 says S5 is mostly done and the document is now a ledger",
+}
+
+
+def document_lifecycle(text: str) -> str | None:
+    """The lifecycle a document claims for itself, or None if it claims none.
+
+    Only the status line is read. A document that discusses `historical` EBNF in
+    its prose is not thereby historical, and a check that searched the whole
+    file would say it was."""
+    head = text.split("\n")[:12]
+    line = next((one for one in head if STATUS_LINE.match(one)), None)
+    if line is None:
+        # grammar.ebnf carries its status in an EBNF comment; it is a document
+        # in the index like any other, and it is not Markdown.
+        line = next((one for one in head
+                     if "状态" in one or "Status" in one), None)
+    if line is None:
+        return None
+    match = INDEX_LIFECYCLE_WORD.search(line)
+    return None if match is None else match.group(1).lower()
+
+
+def index_lifecycle_problems(index_text: str,
+                             documents: dict[str, str]) -> tuple[list[str], int]:
+    bad: list[str] = []
+    checked = 0
+    unstated: set[str] = set()
+    for target, cell in INDEX_LIFECYCLE_ROW.findall(index_text):
+        text = documents.get(target)
+        if text is None:
+            bad.append(f"docs/README.md: lifecycle row for {target}, which is "
+                       f"not a document under docs/ [index_lifecycle_agrees]")
+            continue
+        claimed = document_lifecycle(text)
+        if claimed is None:
+            unstated.add(target)
+            if target not in INDEX_LIFECYCLE_UNSTATED:
+                bad.append(
+                    f"docs/{target}: the index calls it {cell}, but its own "
+                    f"status line names no lifecycle, and docs/README.md says "
+                    f"the header is the authority. Name one, or record why not "
+                    f"in INDEX_LIFECYCLE_UNSTATED "
+                    f"[index_lifecycle_unstated_recorded]")
+            continue
+        checked += 1
+        if claimed != cell:
+            bad.append(f"docs/README.md: calls docs/{target} {cell}, but that "
+                       f"document's own status line says {claimed}. The header "
+                       f"is the authority; the index follows it "
+                       f"[index_lifecycle_agrees]")
+    for target in sorted(set(INDEX_LIFECYCLE_UNSTATED) - unstated):
+        bad.append(f"docs/{target}: recorded as naming no lifecycle, but it now "
+                   f"names one. Drop the line "
+                   f"[index_lifecycle_unstated_stale]")
+    return bad, checked
+
+
+def read_index_lifecycle_documents() -> dict[str, str]:
+    index = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+    documents: dict[str, str] = {}
+    for target, _cell in INDEX_LIFECYCLE_ROW.findall(index):
+        path = ROOT / "docs" / target
+        if path.is_file():
+            documents[target] = path.read_text(encoding="utf-8")
+    return documents
+
+
+def check_index_lifecycle() -> tuple[list[str], int]:
+    index = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+    return index_lifecycle_problems(index, read_index_lifecycle_documents())
+
+
+INDEX_LIFECYCLE_MUTANTS = (
+    ("a-document-retired-without-telling-the-index", "index_lifecycle_agrees"),
+    ("a-header-that-stops-naming-a-lifecycle",
+     "index_lifecycle_unstated_recorded"),
+    ("a-recorded-header-that-starts-naming-one",
+     "index_lifecycle_unstated_stale"),
+    ("prose-about-a-historical-file", None),
+)
+
+
+def check_index_lifecycle_selftest() -> tuple[list[str], int]:
+    index = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+    documents = read_index_lifecycle_documents()
+    baseline, checked = index_lifecycle_problems(index, documents)
+    if baseline:
+        return [f"index lifecycle self-test baseline is invalid: {baseline[0]}"], 0
+    if not checked:
+        return ["index lifecycle self-test: no row was verifiable, so every "
+                "mutant below would pass for the wrong reason"], 0
+    # A row the mutation can actually move: retiring a document the index
+    # already calls historical changes nothing, and a mutant that changes
+    # nothing proves nothing.
+    cells = dict(INDEX_LIFECYCLE_ROW.findall(index))
+    stated = next(rel for rel, text in sorted(documents.items())
+                  if document_lifecycle(text) is not None
+                  and cells.get(rel) != "historical")
+    recorded = sorted(INDEX_LIFECYCLE_UNSTATED)[0]
+    for name, expected in INDEX_LIFECYCLE_MUTANTS:
+        mutated = dict(documents)
+        if name == "a-document-retired-without-telling-the-index":
+            mutated[stated] = "# T\n\n> 状态：**historical** —— retired.\n"
+        elif name == "a-header-that-stops-naming-a-lifecycle":
+            mutated[stated] = "# T\n\n> 状态：**已落地**，两刀齐。\n"
+        elif name == "a-recorded-header-that-starts-naming-one":
+            mutated[recorded] = "# T\n\n> 状态：**current** —— still applies.\n"
+        elif name == "prose-about-a-historical-file":
+            mutated[stated] = mutated[stated] + \
+                "\n本文讨论 historical 的 EBNF 与 proposed 的方案。\n"
+        bad, _ = index_lifecycle_problems(index, mutated)
+        seen = {label for problem in bad
+                for label in re.findall(r"\[(\w+)\]", problem)}
+        if expected is None:
+            if bad:
+                return [f"index lifecycle self-test: control mutant {name} "
+                        f"reddened {sorted(seen)}; it must redden nothing"], 0
+            continue
+        if seen != {expected}:
+            return [f"index lifecycle self-test: mutant {name} reddened "
+                    f"{sorted(seen) or 'nothing'}, expected exactly "
+                    f"[{expected}]"], 0
+    return [], len(INDEX_LIFECYCLE_MUTANTS)
+
+
 def audit_counts(states: dict[str, set[str]]) -> dict[str, int]:
     return {status: len(ids) for status, ids in states.items()}
 
@@ -3113,6 +3271,12 @@ def main() -> None:
     problems += bad
     audit_seen += n
     bad, n = check_audit_anchors_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_index_lifecycle()
+    problems += bad
+    indexed_seen += n
+    bad, n = check_index_lifecycle_selftest()
     problems += bad
     selftests_seen += n
     bad, n = check_historical_audit_status_selftest()
