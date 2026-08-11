@@ -550,6 +550,19 @@ fn visit_selective(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
 
 # ---- expressions ----
 
+## The function a synthesised eta wrapper stands for, as (owner, name). A
+## wrapper's body is the call and nothing else, so anything with a shape of its
+## own is somebody's real lambda and answers `None`.
+fn eta_target(body: TExpr) -> Option[(Option[String], String)] =
+  match body {
+    XCallFn(owner, name, _, _, _, _, _, _, _) -> Some((owner, name))
+    XCallBuiltin(name, _, _, _, _, _) -> {
+      let no_owner: Option[String] = None
+      Some((no_owner, name))
+    }
+    _ -> None
+  }
+
 fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   var q = q0
   # generic fallback: the expression's own type
@@ -574,6 +587,23 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
             Some(s) -> {
               let (dsp, dp) = def_of_sig(qc, s)
               q = offer(q, lo, hi, render_sig(qc, s), dsp, dp)
+            }
+            None -> ()
+          }
+        # A bounded name is an eta expansion by the time it is typed, and the
+        # reader still pointed at a function name. Only a synthesised wrapper
+        # can be here: a lambda somebody wrote is an `ELambda`, not an `EVar`.
+        Some(XLambda(_, _, body, _, _, _, _)) ->
+          match eta_target(body) {
+            Some(t) -> {
+              let (towner, fname) = t
+              match sig_by_owner(qc, towner, fname, None) {
+                Some(s) -> {
+                  let (dsp, dp) = def_of_sig(qc, s)
+                  q = offer(q, lo, hi, render_sig(qc, s), dsp, dp)
+                }
+                None -> ()
+              }
             }
             None -> ()
           }
