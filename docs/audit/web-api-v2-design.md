@@ -1,17 +1,24 @@
 # `packages/web` v2：把非法状态变成不可表示
 
-> 动码前的**调研与方案**，不是设计定稿。
+> 状态：**historical** —— 动码前的调研与方案，其六条覆盖项已全部落地；本文不是当前
+> 设计定稿，`packages/web` 的当前形状以代码为准。
 > 覆盖 codebase-audit.md 的 **WEB-03（P1）**、**WEB-04（P2）**、**WEB-06（P2）**、
 > **WEB-07（P2）**、**WEB-09（P2）**、**WEB-10（P2）**。
 > （WEB-01/02/05/08 的安全与协议 bug 已于 2026-07-25 落地。）
-> 状态：**已落地（2026-08-05，步 1–6 全部）**。步 0（WEB-09 不破坏半）先行于
+>
+> **落地（2026-08-05，步 1–6 全部）**：步 0（WEB-09 不破坏半）先行于
 > 2026-07-30（`6a2b8f9`）；步 1–6 分三批落在 web-v2 分支：ResponseBody + 按种类定长
 > + HEAD、raw path 路由 + dot segment 400 + 多值 header、ServerHandle 生命周期。
-> 实现与本文的偏离都记在代码注释里，两处值得点名：**包名随 major 换成 `web2`**
+> 实现与本文的偏离都记在代码注释里，两处值得点名：**包名随 major 换名**
 > （包管理器的 v2 换名规则强制，消费者靠别名保住 `use web/...` 拼写）；
 > `ServerHandle` 多带一个 `done: CountDownLatch`（jdk.httpserver 有 stop 没 join，
 > 没有 latch 就没有 join 可阻塞的东西）。
 > **这是一次破坏性 API 变更，按 CONTRIBUTING §六先发 tag。**
+>
+> **本文写作时的换名目标是 `web2 / 2.0.0`，那已经不是当前值**：`96a378a`
+> 又推了一个 major，包现在是 `web3 / 3.0.0`（`packages/web/dawn.toml`），
+> 该 major 同时带走了审查 v2 的 `LIB-08`、`LIB-12`、`LIB-14`、`LIB-15`、`LIB-17`。
+> **版本号写进文档就会烂**，所以这里只留一次指路：包名与版本读 `packages/web/dawn.toml`。
 > 与 [`../native-backend-plan.md`](../native-backend-plan.md) 不重合——那份的 §7
 > 明确把 `packages/web` 划到 native 范围外（web 需要 C 写的 HTTP 栈 + socket 层）。
 > 台账见 [native-plan-overlap.md](native-plan-overlap.md)。

@@ -141,7 +141,7 @@ export-surface pass）、`TOOL-13`（`3f5d64c` 的 `atomic_write_file` 调用点
 `LIB-17`（`3a21be8` 的 0/负数单一读法）与 `LIB-10`（`79448da` 让两条早退拒绝走 middleware
 链，partial → fixed）全部转 fixed；`LIB-16` 的 header sanitizer 半边由 `a2d9571` 改成
 拒绝而非删除，open → partial。这八条在订正前是**实现已发布、状态仍写 open** 的窗口，
-分区、计数与专题矩阵三项自检当时全绿——那正是 evidence 检查存在的理由。
+分区、计数与专题矩阵三项自检当时全绿，那正是 evidence 检查存在的理由。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 

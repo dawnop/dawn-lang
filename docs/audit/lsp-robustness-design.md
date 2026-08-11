@@ -1,50 +1,18 @@
 # LSP：URI、UTF-8 与响应性
 
-> 历史上的动码前**调研与方案**，不是当前设计定稿。
+> 状态：**historical** —— 动码前的调研与方案，不是当前设计定稿；当前行为以
+> `selfhost/src/lsp/` 与 `scripts/lsp-liveness.py` 为准。
 > 覆盖 codebase-audit.md 的 **LSP-01（P1）**、**LSP-02（P1）**、**LSP-04（P2）**。
-> （LSP-03「畸形 frame 让服务器静默退出」已于 2026-07-25 修复。）
-> 状态：**LSP-01 / LSP-02 / LSP-04 均已落地**。LSP-01/02 于 2026-07-30 完成；LSP-04
-> 的设计题于 2026-08-04 用两个探针答完（`io_stdin_ready(timeout_ms) -> Bool !io`，语义 B），
-> 2b / 2c / 2d 于 2026-08-05 全部落地。LSP-01 的落地形态与本文原方案相反：不换 JDK
-> （缝 1 之后 `lsp.dawn` 是零 `use java` 的共享前端），而是把手写 decoder 改成校验的。
-> `scripts/lsp-liveness.py` 的三条断言已进 CI 并被变异体逐条打红；C 后端
-> 两个 stdin 读取器都改走 `read(2)`（不再有 stdio 缓冲挡在就绪查询前面），`io_stdin_ready`
-> 进了原语表并在两个后端上答出同一张真值表，`lsp.dawn` 的读循环 debounce 了。
-> **LSP-04 至此关账**（§六的 3 与 4 是尾款：`$/cancelRequest` 与窗口取值的实测）。
+> （LSP-03「畸形 frame 让服务器静默退出」已于 2026-07-25 单独修复。）
 >
-> **2d 的落地被种子代际隔在 2b/2c 之后一代**：`selfhost/src` 只准用当前种子已支持的特性
-> （docs/bootstrap.md §种子推进协议 3），所以 `lsp.dawn` 调 `io.stdin_ready` 必须等 2b/2c
-> 发一个 release、bump `scripts/seed-release.txt` 之后才编得动。
-> 台账见 [native-plan-overlap.md](native-plan-overlap.md) §3.7——其「换 JDK」处方已作废。
+> **三条都已关账**：LSP-01 / LSP-02 于 2026-07-30，LSP-04 于 2026-08-05
+> （2b / 2c / 2d 全部）。LSP-04 的尾款只剩 §六 的 3 与 4（`$/cancelRequest` 与窗口取值的
+> 实测）。每一步当时的判断、被推翻的处方与实测数字按时间记在 §七。
+>
+> 头部只说当前结论。此前它把四段带日期的记录并排放在这里，于是同一段里既写着
+> LSP-04 已关账、又写着 LSP-04 撞墙待办，两份索引照抄了错的那半。这不是索引的错，
+> 是把日志写进头部的必然结果。
 
-
-> **2026-07-30 改判后落地（LSP-01 的 UTF-8 半）**：台账 §3.7 的「换 JDK」处方被当日
-> 架构再次作废——缝 1 之后 `lsp.dawn` 是共享前端（零 `use java`，两个 main 共用一份），
-> 换回 `java.net.URI` 等于把它踢出共享半区。按原则的正确形态落地：**手写 decoder 修成
-> 校验的**（continuation 区间 / overlong / surrogate / 超 U+10FFFF 全拒，坏序列出
-> U+FFFD 降级续读），一份纯 Dawn 实现两个工具链共用，单测钉住五类畸形输入。
-> **LSP-02 也已落地（同日）**：authority（空/localhost 才是本机，其他主机回 None
-> 而不是猜出一个相对路径）、query 与 fragment 在解码前切掉、Windows 盘符
-> （`file:///C:/x` → `C:/x`；`/c/x` 不是盘符）、`path_to_uri` 恒发三斜杠的空 authority
-> 形式（`C:/x` 若不补斜杠会把盘符解析成主机名），`:` 不再被百分号编码（RFC 3986 的
-> pchar，且 `%3A` 人读不出）。往返测试含重音字符与盘符。**LSP-04（debounce）撞墙已记档**：§2.2 的方案
-> 依赖「`read_message` 加一个超时形式（有输入就读，没输入就返回 `Idle`）」，
-> 而 std/io 只有阻塞的 `read_stdin(n)`——**没有任何「就绪/超时」原语**。
-> 造一个（`io_stdin_ready(timeout_ms) -> Bool` 之类）是**运行时契约变更**：
-> 两个后端各实现一份（JVM 的 available/带超时读 vs C 的 poll/select）、进 spec §11
-> 的原语表、进 intrinsic 语义表。那是一把独立的刀，且它的设计题（就绪 vs 超时读、
-> EOF 怎么表达、native 上的信号语义）比 debounce 本身大——**不该顺手塞进 LSP 改动里**，
-> 半设计好的原语进语言表面比不做更糟。debounce 的其余部分（generation 计数、
-> `$/cancelRequest` 直接回 RequestCancelled）都在那个原语之后才有意义。
->
-> **2026-08-04 实测收口**：设计题已经用探针答完，形状定了（语义 B 的 `Bool`），
-> 验收实验也已建出并用变异体打红过——见 §2.2.1 与 §2.2.2。落地还欠一件前置：
-> C 后端的 `io_read_stdin` 得先从 stdio 换成 `read(2)`。本轮不写任何代码。
->
-> **2026-08-05 落地（2b + 2c）**：前置与原语都进了树。实测两个后端在五种 stdin 状态
-> （管道有数据 / 管道静默 / 管道 EOF / 有数据且 EOF / 常规文件）上**每一格布尔值都相同**；
-> 时延照契约分岔且都在「至多」这一侧——EOF 那格 native 立刻回 `false`、JVM 耗满窗口。
-> 落地点的真实清单与逐点变异体记在 §2.2.1 末（原表 9 条错 1 条、漏 4 处）。
 ## 一、问题
 
 ### 1.1 手写 UTF-8 decoder 不校验（LSP-01）
@@ -497,3 +465,45 @@ LSP-04 的验收不在这条线上：`selfhost-lsp-diff.sh` 比的是**输出字
 无破坏性变更（LSP 是工具，不是语言表面）。2b/2c 动的是运行时契约与 intrinsic 表，
 但只加不改：`io_read_stdin` 的**可观察**语义（恰好 n 字节，短读即 EOF）不变，
 换掉的是它底下的缓冲层。
+
+## 七、落地日志（按时间顺序）
+
+> 本节是过程记录，按发生顺序读；结论在头部。
+
+**2026-07-30 改判后落地（LSP-01 的 UTF-8 半）**：台账 §3.7 的「换 JDK」处方被当日
+架构再次作废——缝 1 之后 `lsp.dawn` 是共享前端（零 `use java`，两个 main 共用一份），
+换回 `java.net.URI` 等于把它踢出共享半区。按原则的正确形态落地：**手写 decoder 修成
+校验的**（continuation 区间 / overlong / surrogate / 超 U+10FFFF 全拒，坏序列出
+U+FFFD 降级续读），一份纯 Dawn 实现两个工具链共用，单测钉住五类畸形输入。
+**LSP-02 也已落地（同日）**：authority（空/localhost 才是本机，其他主机回 None
+而不是猜出一个相对路径）、query 与 fragment 在解码前切掉、Windows 盘符
+（`file:///C:/x` → `C:/x`；`/c/x` 不是盘符）、`path_to_uri` 恒发三斜杠的空 authority
+形式（`C:/x` 若不补斜杠会把盘符解析成主机名），`:` 不再被百分号编码（RFC 3986 的
+pchar，且 `%3A` 人读不出）。往返测试含重音字符与盘符。
+
+**当日 LSP-04（debounce）撞墙已记档**：§2.2 的方案依赖「`read_message` 加一个超时形式
+（有输入就读，没输入就返回 `Idle`）」，而 std/io 只有阻塞的 `read_stdin(n)`——**没有任何
+「就绪/超时」原语**。造一个（`io_stdin_ready(timeout_ms) -> Bool` 之类）是**运行时契约
+变更**：两个后端各实现一份（JVM 的 available/带超时读 vs C 的 poll/select）、进 spec §11
+的原语表、进 intrinsic 语义表。那是一把独立的刀，且它的设计题（就绪 vs 超时读、
+EOF 怎么表达、native 上的信号语义）比 debounce 本身大——**不该顺手塞进 LSP 改动里**，
+半设计好的原语进语言表面比不做更糟。debounce 的其余部分（generation 计数、
+`$/cancelRequest` 直接回 RequestCancelled）都在那个原语之后才有意义。
+
+**2026-08-04 实测收口**：设计题已经用探针答完，形状定了（语义 B 的 `Bool`），
+验收实验也已建出并用变异体打红过——见 §2.2.1 与 §2.2.2。落地还欠一件前置：
+C 后端的 `io_read_stdin` 得先从 stdio 换成 `read(2)`。本轮不写任何代码。
+
+**2026-08-05 落地（2b + 2c）**：前置与原语都进了树。实测两个后端在五种 stdin 状态
+（管道有数据 / 管道静默 / 管道 EOF / 有数据且 EOF / 常规文件）上**每一格布尔值都相同**；
+时延照契约分岔且都在「至多」这一侧——EOF 那格 native 立刻回 `false`、JVM 耗满窗口。
+落地点的真实清单与逐点变异体记在 §2.2.1 末（原表 9 条错 1 条、漏 4 处）。
+
+**2026-08-05 落地（2d）与关账**：2d 被种子代际隔在 2b/2c 之后一代——`selfhost/src`
+只准用当前种子已支持的特性（docs/bootstrap.md §种子推进协议 3），所以 `lsp.dawn` 调
+`io.stdin_ready` 必须等 2b/2c 发一个 release、bump `scripts/seed-release.txt` 之后才编得动。
+之后：`scripts/lsp-liveness.py` 的三条断言进 CI 并被变异体逐条打红；C 后端两个 stdin
+读取器都改走 `read(2)`（不再有 stdio 缓冲挡在就绪查询前面）；`io_stdin_ready` 进了原语表
+并在两个后端上答出同一张真值表；`lsp.dawn` 的读循环 debounce 了。**LSP-04 至此关账。**
+LSP-01 的落地形态与本文原方案相反：不换 JDK，而是把手写 decoder 改成校验的。
+台账见 [native-plan-overlap.md](native-plan-overlap.md) §3.7——其「换 JDK」处方已作废。

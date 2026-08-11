@@ -9,8 +9,9 @@
 - JSON 旧有大整数、非有限输出与控制字符问题已经修复，不应重复；inflate 的三项 P1 与 Web
   tempfile ownership 也已关闭。当前剩余风险集中在 Web 公开 invariant、协议边界，以及
   `LIB-18` 尚未验证的 streaming clean-truncation 候选。
-- packages 的共同问题是 public record/Map/String 过早丢掉 invariant：Digest 可伪造、Response 可构造非法状态、query/form 丢重复值、JSON error 只有人类字符串。
+- packages 的共同问题是 public record/Map/String 过早丢掉 invariant：Digest 可伪造、Response 可构造非法状态、query/form 丢重复值、JSON error 只有人类字符串。其中 query/form 与 JSON error 已由后续两个 major 关闭，Digest 与 Response 仍在册。
 - early language/package 允许 breaking change，应优先把无效状态从公开类型中移除，而不是在 write boundary 继续 sanitizer/默认值补丁。
+- **本篇按目录写 `packages/web/src/…`、`packages/json/src/…`，但目录名不是包名**：包管理器的 v2 换名规则要求 major ≥ 2 的包名带上 major，所以这两个包的 `name` 分别是 `web3` 与 `json2`（各自的 `dawn.toml`），消费者靠别名保住 `use web/...` 的拼写。版本随 major 走，读 manifest 不读本文。
 
 ## LIB-01 — P1 — 解压上限在完整 materialize 之后才检查（已修）
 
@@ -271,7 +272,7 @@
 
 > **后续处置（2026-08-11 登记，实现更早）：partial。** header sanitizer 那半已由
 > `a2d9571` 关闭：`header_name`/`header_value` 的**逐字符删除**换成谓词
-> `valid_header_name`/`valid_header_value`，发射端拒绝而不是改写——`with_header` panic
+> `valid_header_name`/`valid_header_value`，发射端拒绝而不是改写：`with_header` panic
 > （程序用自己的字符串造头，送不出去是调用方的 bug，逐请求隔离把它渲染成 500），
 > `try_with_header`/`try_redirect` 是请求输入派生值的形式，答 400。删除法留下的静默改写
 > （`/a\r\nX: 1` 变成 `/aX: 1` 这类）因此消失。
