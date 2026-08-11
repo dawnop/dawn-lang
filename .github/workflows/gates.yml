@@ -234,12 +234,14 @@ jobs:
   # they were 180s of the old `test` job.
   contracts:
     runs-on: ubuntu-latest
-    # Run 31507403481 measured 583s for the complete SEM-14 contracts job.
-    # The source-loop label contract adds one private compiler build and
-    # measured 39s locally, so 622s is the conservative combined planning
-    # observation until a runner measures this exact job.
-    # budget: 3x 622s = 1866s
-    timeout-minutes: 32
+    # Run 31515869244 measured 575s for the complete ARC-13 contracts job;
+    # its source-loop label step was 42s. The prior conservative bound was
+    # 622s, which remains larger than that actual. The new range-bound step
+    # measured 18.40s locally after toolchain warm-up, so the planning value is
+    # max(575s, 622s) + 18.40s = 640.40s. The remote actual does not include
+    # this new step.
+    # budget: 3x 641s = 1923s, rounded up
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -403,6 +405,13 @@ jobs:
       # green as an independent control.
       - name: source loop label contract
         run: ./scripts/source-loop-label-contract/run.sh
+
+      # Range `for` bounds are evaluated once before the loop, in source order.
+      # The compiling mutant restores the old upper-first Core statement list
+      # and must turn only range_bound_order_is_lower_first red. A separate
+      # Core-only control keeps the once-before-loop half independent of stdout.
+      - name: range bound order contract
+        run: ./scripts/range-bound-order-contract/run.sh
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ eea427e047939848 -->
+<!-- doc-check: translation-of docs/spec.md @ 40f4978eeb083e9c -->
 
 # Dawn Language Specification
 
@@ -1189,7 +1189,9 @@ while queue.non_empty() { ... }
   `[C: Iter]` in a generic function is equally `for`-able (dictionary forwarding). The
   iteration order is the impl's cursor order (`String` by code point, `Map`/`Set` the same
   as `entries`/`to_list`).
-- `for x in a..b` supports half-open integer ranges (not via `Iter`).
+- `for x in a..b` supports half-open integer ranges (not via `Iter`). `a` is evaluated before
+  `b`; each bound is evaluated exactly once, and both are evaluated before the loop starts.
+  These guarantees also hold when the range is empty.
 
 Idiomatic style prefers `map`/`filter`/`fold`; loops are there for performance-sensitive
 spots and for taste.

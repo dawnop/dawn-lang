@@ -279,3 +279,23 @@
 - **当前行为：** `map_java_return` 仍有意拒绝把 Java `char` 直接映射为 Dawn `Char`：`selfhost/src/check/checker.dawn:6243`；这保住了 `Char` 的 Unicode scalar invariant，而不是声称 Dawn 缺少该类型。
 - **验证：** checker 单元测试钉住主诊断与 hint：`selfhost/src/check/checker.dawn:7482`；checker corpus 同步钉住对外文本：`scripts/checker-corpus/cases/java_bridge.expected:3`。
 - **剩余边界：** 若以后增加直接 interop，仍应使用 `U16` 或 checked conversion，不能把 surrogate 直接装进 `Char`。
+
+## SEM-18（P2）：range `for` 的运行时边界求值顺序反源码（已修）
+
+> **已修（2026-08-12）。** `for x in a..b` 现在先求值并绑定 `a`，再求值并绑定 `b`；
+> 两端各恰好一次，且都在进入循环前完成。中英文规范 §4.7 已明确该顺序，空区间也不例外。
+
+- **原证据：D。** `lower_expr` 原本先处理 `from`、再处理 `to`，但生成的 `CSLet` 列表先放
+  隐藏上界、再放循环变量。Core statement list 才是运行时顺序，因此 JVM/native 共享同一
+  个 upper-first 错误，普通后端互比无法发现。
+- **修复：** `selfhost/src/ir/lower.dawn` 只交换两个 `CSLet`，保持 bound 各 lower 一次、
+  归纳变量、测试、body 与 step 形状不变。修复位于共享 Core，不给任一后端加重排特例。
+- **绝对行为 oracle：** `scripts/spike-native/eval_order.dawn` 在既有首行不漂移的前提下，
+  增加有副作用的空区间和非空区间。手写 expectation 要求 lower 先于 upper；空区间仍求两端
+  且 body 不执行，非空区间在两端之后执行三轮并累计为 `234`。
+- **结构与负控：** `scripts/range-bound-order-contract/` 直接读取 Core 固定 lower-first
+  `CSLet` 顺序，并以不依赖动态输出的 control 固定四个 bound call 各一次且位于 loop 前。
+  唯一 compiling mutant 精确恢复 upper-first 列表，完整 build、回答合法版本后只能把
+  hand-owned owner 打红；matrix 的 role、owner、red、control 均由 fail-closed 自测读取。
+- **范围：** 不修改 iterable `for`、for-pattern、步长、右开边界或溢出语义；SYN-13 仍是
+  后续独立工作。

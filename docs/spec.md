@@ -956,7 +956,8 @@ while queue.non_empty() { ... }
   的 `Item`。std 的五个容器（`List`/`String`/`Bytes`/`Map`/`Set`）开箱可迭代；
   泛型函数里 `[C: Iter]` 的参数同样可 `for`（字典转发）。迭代序即 impl 的游标序
   （`String` 按码点、`Map`/`Set` 同 `entries`/`to_list`）。
-- `for x in a..b` 支持右开区间的整数范围（不经 `Iter`）。
+- `for x in a..b` 支持右开区间的整数范围（不经 `Iter`）。`a` 先于 `b` 求值；
+  两端各恰好求值一次，且都在进入循环前求值。即使区间为空，这些保证仍成立。
 
 惯用风格优先 `map`/`filter`/`fold`；循环是给性能敏感处和口味用的。
 

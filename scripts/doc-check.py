@@ -37,7 +37,7 @@ gets disabled, and then it protects nothing):
   transl    every translated document registers the digest of the original it
             was translated from, that digest is still the original's, and its
             fenced blocks line up one-for-one with the original's
-  audit     the current four-state audit registry exactly partitions all 98
+  audit     the current four-state audit registry exactly partitions all 99
             detail-heading IDs while the historical layer stays frozen at 97;
             counts, topic matrices and the frozen P1 mapping must agree
   evidence  every audit finding that carries an anchor agrees with the tree the
@@ -360,7 +360,7 @@ AUDIT_P1_SELF_CHECK = re.compile(
     r"逐行重算结果：\*\*(\d+) fixed / (\d+) partial / (\d+) open / "
     r"(\d+) retracted = (\d+)\*\*")
 AUDIT_FROZEN_TOTAL = 97
-AUDIT_CURRENT_TOTAL = 98
+AUDIT_CURRENT_TOTAL = 99
 AUDIT_FROZEN_TOPIC_TOTALS = (
     ("语法", 19),
     ("语义", 17),
@@ -371,7 +371,7 @@ AUDIT_FROZEN_TOPIC_TOTALS = (
 )
 AUDIT_CURRENT_TOPIC_TOTALS = (
     ("语法", 19),
-    ("语义", 17),
+    ("语义", 18),
     ("架构", 13),
     ("工具链", 17),
     ("库", 19),
@@ -387,7 +387,7 @@ AUDIT_FROZEN_PREFIX_TOTALS = {
 }
 AUDIT_CURRENT_PREFIX_TOTALS = {
     "SYN": 19,
-    "SEM": 17,
+    "SEM": 18,
     "ARC": 13,
     "TOOL": 17,
     "LIB": 19,
