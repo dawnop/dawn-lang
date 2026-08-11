@@ -56,15 +56,49 @@ current_args=(
   --vendor coursierapi
 )
 
+run_release_stage() {
+  local stage=$1
+  shift
+  if [ -z "${DAWN_INTERNAL_RELEASE_STAGE_TIMINGS:-}" ]; then
+    "$@"
+    return
+  fi
+  exec 3>&2
+  {
+    TIMEFORMAT="$stage"$'\t''%U'$'\t''%S'
+    time "$@" 2>&3
+  } 2>> "$DAWN_INTERNAL_RELEASE_STAGE_TIMINGS"
+  exec 3>&-
+}
+
+if [ -n "${DAWN_INTERNAL_RELEASE_STAGE_TIMINGS:-}" ]; then
+  case "$DAWN_INTERNAL_RELEASE_STAGE_TIMINGS" in
+    /*) ;;
+    *) echo "error: DAWN_INTERNAL_RELEASE_STAGE_TIMINGS must be absolute" >&2; exit 2 ;;
+  esac
+  if [ -e "$DAWN_INTERNAL_RELEASE_STAGE_TIMINGS" ]; then
+    echo "error: stage timing output already exists: $DAWN_INTERNAL_RELEASE_STAGE_TIMINGS" >&2
+    exit 2
+  fi
+  if [ ! -d "$(dirname "$DAWN_INTERNAL_RELEASE_STAGE_TIMINGS")" ]; then
+    echo "error: stage timing output directory does not exist" >&2
+    exit 2
+  fi
+  if ! (set -o noclobber; : > "$DAWN_INTERNAL_RELEASE_STAGE_TIMINGS") 2>/dev/null; then
+    echo "error: cannot create stage timing output" >&2
+    exit 2
+  fi
+fi
+
 # Source paths are embedded in panic messages. Keep the historical canonical
 # spelling `selfhost` while running from the absolute root; spelling the target
 # as an absolute path would change release bytes without changing semantics.
 cd "$root"
-"${java_cmd[@]}" -jar "$seed" build selfhost -o "$stage_a" \
+run_release_stage A "${java_cmd[@]}" -jar "$seed" build selfhost -o "$stage_a" \
   "${seed_args[@]}" > /dev/null
-"${java_cmd[@]}" -jar "$stage_a" build selfhost -o "$stage_b" \
+run_release_stage B "${java_cmd[@]}" -jar "$stage_a" build selfhost -o "$stage_b" \
   "${current_args[@]}" > /dev/null
-"${java_cmd[@]}" -jar "$stage_b" build selfhost -o "$stage_c" \
+run_release_stage C "${java_cmd[@]}" -jar "$stage_b" build selfhost -o "$stage_c" \
   "${current_args[@]}" > /dev/null
 cmp "$stage_b" "$stage_c"
 echo "OK: fixed point — HEAD rebuilt itself byte-identically (B == C)"
