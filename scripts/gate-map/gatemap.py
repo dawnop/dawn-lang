@@ -69,8 +69,12 @@ paths no gate watches) is a ratchet checked in both directions.
      names is exact for the Core IR golden step. This is what 98b9896 needed.
      From: scripts/core-golden/selfhost.sha.
   D  prev-diff compiles each corpus target's source with *both* toolchains, so
-     the target's own content cancels: it is blind there. std is the exception,
-     because the N-1 side is pointed at the std it was released with.
+     the target's own content cancels: it is blind there. That is the general
+     rule and the driver modules of 98b9896 are one case of it. A change inside
+     packages/web cannot move `emit packages/web`; the v0.64.0 branch declared
+     five labels whose oracles could not have seen the differences they named.
+     std is the exception, because the N-1 side is pointed at the std it was
+     released with.
      From: the `emit <target>` labels in scripts/emit-labels.txt, taken from
      that script's own section, and the `--std "$(seed_std_dir)"` in
      scripts/selfhost-prev-diff.sh, whose continued presence is checked.
@@ -182,6 +186,12 @@ DAWN_LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
 PRINTS_ONLY = re.compile(r"^\s*(echo|printf)\b")
 
 LEVELS = ("exact", "coupled", "coarse", "blind")
+
+# Reporting order, which is not strength order. `blind` is the answer somebody
+# is most likely to be wrong about, so it goes second rather than last: the
+# batch that declared five labels no oracle could see would have had to scroll
+# past every `coarse` line to reach it.
+REPORT_ORDER = ("exact", "blind", "coupled", "coarse")
 
 
 def run_git(args, cwd=ROOT, check=True):
@@ -872,6 +882,28 @@ class Map:
 
         # The premises. Each is a sentence rule D depends on; if one stops
         # being true in the tree the rule is wrong rather than merely old.
+        #
+        # The first is why a corpus target is blind: the loop emits the *same*
+        # `$t`, out of the same working tree, with both toolchains, so
+        # whatever the target's own source says is said identically on both
+        # sides and the diff cancels. Measured on 2026-08-11 rather than
+        # reasoned: a new `pub fn` added to packages/web/src/server.dawn
+        # reaches the emitted server.class and `emit packages/web` still
+        # reports the two sides identical.
+        emit_legs = [
+            ln for ln in body.splitlines() if "__emit" in ln and '"$t"' in ln
+        ]
+        prev_leg = [ln for ln in emit_legs if "PREV" in ln]
+        head_leg = [ln for ln in emit_legs if "HEAD" in ln]
+        if len(emit_legs) != 2 or not prev_leg or not head_leg:
+            self.problems.append(
+                f"{script} no longer emits the same `$t` with both toolchains "
+                "(one leg naming PREV, one naming HEAD), so 'a corpus "
+                "target's own content cancels' is no longer derivable; rule "
+                "D's blind conclusion is void"
+            )
+            return
+
         if "PREV_STD" not in body or "--std" not in body:
             self.problems.append(
                 f"{script} no longer points the N-1 toolchain at its own std "
@@ -909,7 +941,10 @@ class Map:
                     "blind",
                     gate.id,
                     f"`emit {target}` compiles this same source with both "
-                    "toolchains, so its content cancels",
+                    "toolchains, so its content cancels. A change inside "
+                    f"{target} cannot move `emit {target}`, and declaring "
+                    f"Emit-Change(emit {target}) for one names an oracle that "
+                    "could not have seen it",
                 ),
             )
         self.add_under(
@@ -1188,12 +1223,28 @@ def report(gm, paths, stream=sys.stdout):
         for o in obs:
             groups.setdefault((o.level, o.gate_id, o.tag_only), []).append(o.why)
         for (level, gate_id, tag_only), whys in sorted(
-            groups.items(), key=lambda kv: (LEVELS.index(kv[0][0]), kv[0][1])
+            groups.items(), key=lambda kv: (REPORT_ORDER.index(kv[0][0]), kv[0][1])
         ):
             tag = " [tag only]" if tag_only else ""
             more = f"  (+{len(whys) - 1} more)" if len(whys) > 1 else ""
             print(f"  {level:<7} {gate_id}{tag}{more}", file=stream)
             print(f"          {max(whys, key=len)}", file=stream)
+        # The same gate can be `coarse` on a path and blind to it, and that
+        # combination is exactly how somebody talks themselves into a
+        # declaration: prev-diff does read packages/web, and reads it on both
+        # sides. Printing the contradiction rather than leaving it to be
+        # spotted between two lines twelve apart.
+        contradicted = {
+            (o.gate_id, o.level) for o in obs if o.level in ("exact", "coarse")
+        }
+        for gate_id in sorted({o.gate_id for o in obs if o.level == "blind"}):
+            if any(gid == gate_id for gid, _ in contradicted):
+                print(
+                    f"  note    {gate_id} both reads this path and cancels it. "
+                    "The read above is the differential compiling it on both "
+                    "sides, not a gate watching it.",
+                    file=stream,
+                )
         print(file=stream)
 
 
@@ -1710,6 +1761,12 @@ ASSERTIONS = [
         lambda c, b: _clean(c.problems, "rule D is void"),
     ),
     (
+        "emit_cancels_the_corpus",
+        "the differential still emits the same target with both toolchains, "
+        "which is why a corpus target's own source is blind to its own label",
+        lambda c, b: _clean(c.problems, "blind conclusion is void"),
+    ),
+    (
         "std_not_corpus",
         "std is not itself an emit corpus target",
         lambda c, b: _clean(c.problems, "re-derive it"),
@@ -2007,6 +2064,19 @@ def mutants(base):
             "rule D's premise: with the N-1 side compiling today's std, "
             "'std source moves the emitted bytes' stops following",
             edits={PREV_DIFF: swap('--std "$(seed_std_dir)"', '"$(seed_std_dir)"')},
+        ),
+        Mutant(
+            "the-two-emit-legs-stop-agreeing",
+            "rule D's blind premise. If the two sides ever emit different "
+            "trees, a corpus target's own content stops cancelling and every "
+            "`blind` verdict here becomes an over-claim in the direction that "
+            "matters",
+            edits={
+                PREV_DIFF: swap(
+                    '"${HEAD_BIN[@]}" __emit "$t"',
+                    '"${HEAD_BIN[@]}" __emit selfhost',
+                )
+            },
         ),
         Mutant(
             "std-becomes-a-corpus-target",
