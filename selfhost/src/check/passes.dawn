@@ -30,7 +30,8 @@ use check/types.{
   trait_audience, builtin_type_audience, internal_std_modules,
   eff_subsumes, eff_suffix, eff_labels, EffectI, ev_record_name, AdtI, CtorI, FieldI,
   TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, ty_show, fn_return_show, sig_render, subst,
-  reduce_via_bindings, ty_named, builtin_type_at, builtin_type_visible, peel_opaque,
+  reduce_via_bindings, ty_named, builtin_type_at, builtin_type_name_reserved,
+  hard_reserved_builtin_type_name, peel_opaque,
   prelude_impls, prelude_trait_ids,
   prelude_trait_names, is_prelude_trait_name, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, eq_scalars, hash_scalars, Head, head_of, impl_at,
@@ -40,7 +41,7 @@ use check/types.{
 use check/cx.{
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
   cerr_h, cerr_o, fresh, alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
-  resolve_alias_target, resolve_type, is_const_serializable, no_sig,
+  resolve_alias_target, resolve_type, resolve_return_type, is_const_serializable, no_sig,
   TySpan, ty_span_kid, ty_span_of
 }
 
@@ -506,6 +507,27 @@ fn dup_names(names: List[String]) -> Bool = {
   false
 }
 
+fn refuse_hard_reserved_type_param(cx: Cx, name: String, lo: Int, hi: Int) -> Cx =
+  if hard_reserved_builtin_type_name(name) {
+    cerr(cx, "`" ++ name ++ "` is a compiler-owned type name and cannot be a type parameter",
+      lo, hi)
+  } else {
+    cx
+  }
+
+fn refuse_hard_reserved_decl_name(
+  cx: Cx,
+  name: String,
+  kind: String,
+  lo: Int,
+  hi: Int
+) -> Cx =
+  if hard_reserved_builtin_type_name(name) {
+    cerr(cx, "`" ++ name ++ "` is a compiler-owned type name and cannot name " ++ kind, lo, hi)
+  } else {
+    cx
+  }
+
 ## Pass 1: type headers (shells only), so recursive types resolve. Returns one
 ## Option[Shell] per module type declaration, aligned by index.
 pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
@@ -528,7 +550,7 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
       continue
     }
     let is_builtin_name = match builtin_type_at(d.name) {
-      Some(info) -> builtin_type_visible(info, cx1.is_std_module)
+      Some(info) -> builtin_type_name_reserved(info, cx1.is_std_module)
       None -> false
     }
     if is_builtin_name {
@@ -548,6 +570,9 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
     }
     if dup_names(d.tparams) {
       cx1 = cerr(cx1, "duplicate type parameter names", d.nlo, d.nhi)
+    }
+    for name in d.tparams {
+      cx1 = refuse_hard_reserved_type_param(cx1, name, d.nlo, d.nhi)
     }
     match d.alias_target {
       Some(target) -> {
@@ -618,6 +643,12 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
     var pi = 0
     var cbn = cx1.ctors_by_name
     for c in d.ctors {
+      if hard_reserved_builtin_type_name(c.name) {
+        cx1 = cerr(cx1, "constructor `" ++ c.name ++
+            "` uses a compiler-owned reserved type name", c.nlo, c.nhi)
+        pi = pi + 1
+        continue
+      }
       let builtin_ctor = match ty_named(c.name) {
         Some(_) -> true
         None -> false
@@ -977,7 +1008,7 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       continue
     }
     let is_builtin_name = match builtin_type_at(d.name) {
-      Some(info) -> builtin_type_visible(info, cx1.is_std_module)
+      Some(info) -> builtin_type_name_reserved(info, cx1.is_std_module)
       None -> false
     }
     if is_builtin_name {
@@ -1027,7 +1058,7 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
         cx1 = cxa
         ptys = ptys ++ [t]
       }
-      let (cxb, ret) = resolve_type(cx1, op.ret)
+      let (cxb, ret) = resolve_return_type(cx1, op.ret)
       cx1 = Cx { ..cxb, current_tparams: saved_tp, current_eff_vars: saved_ev }
       # the arm is a closure the caller reaches through evidence, so what the
       # arm's body does is recorded where the handler is installed, never here
@@ -1097,7 +1128,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       continue
     }
     let is_builtin_name = match builtin_type_at(d.name) {
-      Some(info) -> builtin_type_visible(info, cx1.is_std_module)
+      Some(info) -> builtin_type_name_reserved(info, cx1.is_std_module)
       None -> false
     }
     if is_builtin_name {
@@ -1120,6 +1151,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       cx1 = cerr(cx1, msg, d.nlo, d.nhi)
       continue
     }
+    cx1 = refuse_hard_reserved_type_param(cx1, d.tp, d.tplo, d.tphi)
     let (cx2, tvar) = fresh_tvar(cx1, d.tp)
     let (cx3, tid) = fresh(cx2)
     cx1 = cx3
@@ -1128,6 +1160,10 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     # its own trait (`C.Item` in resolve_assoc reads t.assoc by id)
     var assoc_names: List[String] = []
     for a in d.assoc {
+      if hard_reserved_builtin_type_name(a.name) {
+        cx1 = refuse_hard_reserved_decl_name(cx1, a.name, "an associated type", a.nlo, a.nhi)
+        continue
+      }
       if list.contains(assoc_names, a.name) {
         cx1 = cerr(cx1, "associated type `" ++ a.name ++ "` is declared twice in trait `" ++
             d.name ++ "`", a.nlo, a.nhi)
@@ -1205,7 +1241,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         cx1 = cx4
         ptys = ptys ++ [t]
       }
-      let (cx5, ret) = resolve_type(cx1, me.ret)
+      let (cx5, ret) = resolve_return_type(cx1, me.ret)
       cx1 = cx5
       let leaked = map.len(cx1.current_eff_vars) > 0
       cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
@@ -1484,6 +1520,9 @@ pub fn pass_register_impls(
     if dup_names(tpnames) {
       cx1 = cerr(cx1, "duplicate type parameter names", d.tlo, d.thi)
     }
+    for tp in d.tparams {
+      cx1 = refuse_hard_reserved_type_param(cx1, tp.name, tp.lo, tp.hi)
+    }
     var itvars: List[Ty] = []
     var tp_scope: Map[String, Ty] = map.empty()
     for tp in d.tparams {
@@ -1577,6 +1616,10 @@ pub fn pass_register_impls(
     var assoc_bindings: List[(String, Ty)] = []
     var bound_ns: List[String] = []
     for ab in d.assoc {
+      if hard_reserved_builtin_type_name(ab.name) {
+        cx1 = refuse_hard_reserved_decl_name(cx1, ab.name, "an associated type", ab.nlo, ab.nhi)
+        continue
+      }
       if not list.contains(tr.assoc, ab.name) {
         cx1 = cerr_h(cx1, "trait `" ++ tr.name ++ "` does not declare an associated type `" ++
             ab.name ++ "`", ab.nlo, ab.nhi,
@@ -1685,7 +1728,7 @@ pub fn pass_register_impls(
         ptys = ptys ++ [t]
       }
       let (cx4, ret) = match me.ret {
-        Some(r) -> resolve_type(cx1, r)
+        Some(r) -> resolve_return_type(cx1, r)
         None -> (cx1, TyError)
       }
       cx1 = cx4
@@ -1998,6 +2041,9 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
     if dup_names(tpnames) {
       cx1 = cerr(cx1, "duplicate type parameter names", d.nlo, d.nhi)
     }
+    for tp in d.tparams {
+      cx1 = refuse_hard_reserved_type_param(cx1, tp.name, tp.lo, tp.hi)
+    }
     var tvars: List[Ty] = []
     var tp_scope: Map[String, Ty] = map.empty()
     for tp in d.tparams {
@@ -2040,7 +2086,7 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
       ptys = ptys ++ [t]
     }
     let (cx5, ret) = match d.ret {
-      Some(r) -> resolve_type(cx1, r)
+      Some(r) -> resolve_return_type(cx1, r)
       None -> (cx1, TyError)
     }
     cx1 = cx5

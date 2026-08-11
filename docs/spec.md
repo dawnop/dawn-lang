@@ -222,8 +222,15 @@ C 后端给它一个字节。
   `ForeignError` 是 prelude 注入的普通名义 ADT；它们不是 compiler-owned builtin type。
 - `Array[T]` 是 bundled std 可命名的 compiler-owned 表示原语。用户模块不能借这个名字
   访问该原语；在 std 外声明的 `Array` 只是用户自己的名义类型。
-- `Never` 当前是 compiler-owned 内部类型，没有可由用户书写的类型名，也不进入公开补全
-  或 `dawn doc --builtins`。
+- `Never` 是 compiler-owned 的底类型与硬保留名，没有值或 constructor。它只能直接写在
+  顶层函数、局部函数、trait/impl 方法、effect operation，以及任意函数类型的返回位。
+  因此 `fn() -> Never` 与 `alias F = fn() -> Never` 合法；形参、字段、const/let 标注、
+  generic/collection/tuple 等存储位、associated binding，以及直接别名
+  `alias N = Never` 都非法。`type`、`alias`、`trait`、`effect`、constructor 名与
+  type parameter 都不能遮蔽 `Never`。声明返回
+  `Never` 的函数体本身必须发散。LSP 只在函数返回上下文补全该名；
+  `dawn doc --builtins` 以 `"use": "return"` 标明它不是全局可用的 public builtin。
+  `io.exit` 仍返回 `Unit`，本规则不改变其既有 API。
 
 类型位置的 `(T)` 只做**分组**，解析后仍是 `T`，不会产生额外类型节点。元组仍至少有
 两个元素：`(A, B)` 是元组，`(T,)` 不是单元素元组，空的 `()` 也不是类型（单位类型写
@@ -1578,7 +1585,8 @@ fn spawn_hello(msg: String) -> Unit !io = {
 
 - Java 形参是**函数式接口**（interface 且恰有一个抽象方法，`Object` 的公共方法不计）时，
   实参可传 Dawn 函数值——lambda、命名函数、构造器值均可。仅限接口；单抽象方法的
-  **抽象类**不支持（实现经 LambdaMetafactory，构建期展开，native-image 零配置）。
+  **抽象类**不支持。实现会生成一个持有 Dawn `FnN` 的普通 adapter class，并在构建期
+  写入 classfile；native-image 不需要运行时动态类生成配置。
 - **匹配**：SAM 方法签名按 §9.2 映射成 Dawn 函数类型后做常规匹配；lambda 的参数类型
   可从形参播种（与泛型实参推导同一机制）。重载打分时函数值只匹配函数式接口形参。
   Dawn 不追踪 Java 泛型实参，**泛型 SAM**（`Predicate`/`Function` 这类）的参数按擦除后
@@ -2257,12 +2265,12 @@ native-image，责任在库，见 §12.3）。
 | ADT | abstract class + final 子类；无载荷构造器为单例 |
 | record | final class + 字段（不依赖 Java record，兼容旧字节码目标） |
 | `match` | `instanceof` 链 + 字段读取（不用 indy、不用 pattern switch） |
-| lambda/闭包 | `LambdaMetafactory`（native-image 支持名单内） |
+| lambda/闭包 | 每个 closure 生成一个实现 `FnN` 的普通类，捕获值存入 final 字段；SAM 转换另生成持有该 `FnN` 的 adapter class |
 | 泛型 | 擦除 + 装箱 |
 | 结构相等类型 | ADT/record/元组仍生成配套 `equals` 与 `hashCode`，但那是**给 Java 调用方看的**——Dawn 的 `==`/`hash` 是 lowering 按结构展开的 Core 函数（§4.3），`Map`/`Set` 经字典走它。有 `impl Eq`/`impl Hash` 时这两个方法转发到该 impl |
 | `Int`/`Float`/`Bool` | 原生 `long`/`double`/`boolean`，仅泛型位置装箱 |
 | `Unit` | `Ldawn/rt/Unit;`——单例引用，占一个槽位，形参/字段/捕获位与别的引用无异 |
-| `Never` | `V`，且只出现在返回位（不返回的表达式没有形参或字段可占） |
+| `Never` | Dawn 静态调用使用返回描述符 `V`。擦除后的 `FnN.apply` 调用返回 `Object`，调用方先用 `POP` 丢弃它再终止。SAM adapter 调 bridge 时按 SAM 返回描述符处理结果：`void` 不产生栈值，单槽结果用 `POP` 丢弃，双槽结果用 `POP2` 丢弃；随后生成 `aconst_null; athrow`。`Never` 没有形参、字段或其他存储表示 |
 | `panic` | 抛 `dawn.rt.PanicError`（Error 子类，故 `catch_fault` 不拦；只有隔离点 `catch_panic` 拦，见 §9.8） |
 
 运行时支持类（`dawn/rt/Lists`、`Strings`、`Io`、`Show`、`Maps`、`Tuple*`、`Fn*` 等）

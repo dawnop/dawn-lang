@@ -30,6 +30,47 @@ fn double(x: Int) -> Int = x * 2
 
 fn negate(x: Int) -> Int = 0 - x
 
+trait BottomCall[T] {
+  fn required_bottom(x: T) -> Never
+  fn default_bottom(x: T) -> Never = panic("default bottom")
+}
+
+type BottomToken = BottomToken
+
+impl BottomCall[BottomToken] {
+  fn required_bottom(x: BottomToken) -> Never = panic("impl bottom")
+}
+
+effect BottomEffect {
+  fn effect_bottom() -> Never
+}
+
+fn direct_bottom() -> Never = panic("direct bottom")
+
+fn bottom_direct(take: Bool) -> Int = if take { direct_bottom() } else { 71 }
+
+fn bottom_dynamic(take: Bool) -> Int = {
+  let halt: fn() -> Never = direct_bottom
+  if take { halt() } else { 72 }
+}
+
+fn bottom_closure(take: Bool) -> Int = {
+  let halt: fn() -> Never = () => panic("closure bottom")
+  if take { halt() } else { 73 }
+}
+
+fn bottom_impl(take: Bool) -> Int =
+  if take { required_bottom(BottomToken) } else { 74 }
+
+fn bottom_default(take: Bool) -> Int =
+  if take { default_bottom(BottomToken) } else { 75 }
+
+fn bottom_trait[T: BottomCall](take: Bool, value: T) -> Int =
+  if take { required_bottom(value) } else { 76 }
+
+fn bottom_effect(take: Bool) -> Int !BottomEffect =
+  if take { effect_bottom() } else { 77 }
+
 ## A fold written by hand, driving a function value in a loop.
 fn fold_range(lo: Int, hi: Int, init: Int, f: fn(Int, Int) -> Int) -> Int = {
   var acc = init
@@ -84,4 +125,14 @@ pub fn main() -> Unit !io = {
   fn local_bump(x: Int) -> Int = x + base
   println("local_bump(23)    = ${local_bump(23)}")
   println("via apply1        = ${apply1(local_bump, 23)}")
+
+  println("-- Never calls --")
+  println("direct             = ${bottom_direct(false)}")
+  println("dynamic            = ${bottom_dynamic(false)}")
+  println("closure            = ${bottom_closure(false)}")
+  println("impl               = ${bottom_impl(false)}")
+  println("default            = ${bottom_default(false)}")
+  println("trait              = ${bottom_trait(false, BottomToken)}")
+  with handle BottomEffect { effect_bottom() => panic("effect bottom") }
+  println("effect             = ${bottom_effect(false)}")
 }

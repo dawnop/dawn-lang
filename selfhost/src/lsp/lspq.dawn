@@ -11,8 +11,9 @@ use std/str
 use std/map
 use std/list
 use front/ast.{
-  Module, Decl, Expr, Pattern, Stmt, FnDecl, CtorDecl, FieldDecl, MatchArm,
+  Module, Decl, Expr, Pattern, Stmt, TypeRef, FnDecl, CtorDecl, FieldDecl, MatchArm,
   Arg, arg_exprs, PatArg, LambdaParam, Param, TraitMethod, TypeDeclR, ImportName,
+  TNamed, TQual, TAssoc, TTuple, TFn,
   StrPart, SPText, SPInterp,
   EInt, EFloat, EBool, EUnit, EStr, EVar, EApply, EMethod, ELambda,
   ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
@@ -36,7 +37,8 @@ use check/tast.{
 }
 use check/types.{
   Ty, TyAdt, Sig, Sym, AdtI, CtorI, Adts, Traits, TraitI, MethodSig,
-  ty_show, sig_render, ctor_render, trait_of, adt_of, builtins
+  ty_show, sig_render, ctor_render, trait_of, adt_of, builtins,
+  builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
 use check/cx.{Cx, ModExports}
 use driver/analyze.{Program, CheckedMod}
@@ -328,6 +330,56 @@ fn render_sig(qc: QCx, s: Sig) -> String =
 
 fn render_ctor(qc: QCx, c: CtorI) -> String = ctor_render(qc.entry.cx.adts, c)
 
+type WrittenTypeUse = WtStorage | WtReturn
+
+fn visit_written_type(q0: Q, tref: TypeRef, type_use: WrittenTypeUse) -> Q = {
+  var q = q0
+  match tref {
+    TNamed(name, args, lo, hi) -> {
+      if type_use == WtReturn && len(args) == 0 {
+        match builtin_type_at(name) {
+          Some(info) ->
+            if builtin_type_hard_reserved(info) {
+              let (d, dp) = no_def()
+              q = offer(q, lo, hi, builtin_type_render(info), d, dp)
+            }
+          None -> ()
+        }
+      }
+      for arg in args { q = visit_written_type(q, arg, WtStorage) }
+    }
+    TQual(_, _, args, _, _) -> {
+      for arg in args { q = visit_written_type(q, arg, WtStorage) }
+    }
+    TAssoc(_, _, _, _) -> ()
+    TTuple(elems, _, _) -> {
+      for elem in elems { q = visit_written_type(q, elem, WtStorage) }
+    }
+    TFn(params, ret, _, _, _) -> {
+      for param in params { q = visit_written_type(q, param, WtStorage) }
+      q = visit_written_type(q, ret, WtReturn)
+    }
+  }
+  q
+}
+
+fn visit_param_types(q0: Q, params: List[Param]) -> Q = {
+  var q = q0
+  for param in params { q = visit_written_type(q, param.tref, WtStorage) }
+  q
+}
+
+fn visit_lambda_param_types(q0: Q, params: List[LambdaParam]) -> Q = {
+  var q = q0
+  for param in params {
+    match param.ann {
+      Some(tref) -> { q = visit_written_type(q, tref, WtStorage) }
+      None -> ()
+    }
+  }
+  q
+}
+
 # ---- declarations ----
 
 fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
@@ -340,7 +392,8 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
       let tf = tfun_by_body(qc, body)
       q = walk_e(qc, q, body, tf_body(tf))
     }
-    DConst(name, _, _, init, _, _, nlo, nhi) -> {
+    DConst(name, _, ann, init, _, _, nlo, nhi) -> {
+      q = visit_written_type(q, ann, WtStorage)
       match map.get(qc.entry.cx.consts, name) {
         Some(t) -> {
           q = offer(q, nlo, nhi, "const " ++ name ++ ": " ++ show_ty(qc, t),
@@ -383,6 +436,8 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
       q = offer(q, nlo, nhi, "trait " ++ name ++ "[" ++ tp ++ "]", Some((nlo, nhi)), None)
       let tid = map.get(qc.entry.cx.traits_by_name, name)
       for m in methods {
+        q = visit_param_types(q, m.params)
+        q = visit_written_type(q, m.ret, WtReturn)
         match tid {
           Some(t) -> {
             let tr = trait_of(qc.entry.cx.traits, t)
@@ -404,17 +459,28 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
     DEffect(e) -> {
       q = offer(q, e.nlo, e.nhi, "effect " ++ e.name, Some((e.nlo, e.nhi)), None)
       for op in e.ops {
+        q = visit_param_types(q, op.params)
+        q = visit_written_type(q, op.ret, WtReturn)
         match map.get(qc.entry.cx.fns, op.name) {
           Some(sg) -> { q = offer(q, op.nlo, op.nhi, render_sig(qc, sg), Some((op.nlo, op.nhi)), None) }
           None -> ()
         }
       }
     }
-    DImpl(_, trait_name, tlo, thi, _, methods, _, _, _) -> {
+    DImpl(_, trait_name, tlo, thi, subject, methods, assoc, _, _) -> {
       q = offer(q, tlo, thi, "impl " ++ trait_name ++ "[...]", Some((tlo, thi)), None)
+      q = visit_written_type(q, subject, WtStorage)
+      for binding in assoc { q = visit_written_type(q, binding.tref, WtStorage) }
       for m in methods { q = visit_fn_decl(qc, q, m) }
     }
     DType(t) -> {
+      match t.alias_target {
+        Some(target) -> { q = visit_written_type(q, target, WtStorage) }
+        None -> ()
+      }
+      for ctor in t.ctors {
+        for field in ctor.fields { q = visit_written_type(q, field.tref, WtStorage) }
+      }
       let info = map.get(qc.entry.cx.adts_by_name, t.name)
       let summary = match info {
         Some(aid) -> {
@@ -478,6 +544,11 @@ fn tconst_init(qc: QCx, name: String) -> Option[TExpr] = {
 
 fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl) -> Q = {
   var q = q0
+  q = visit_param_types(q, f.params)
+  match f.ret {
+    Some(ret) -> { q = visit_written_type(q, ret, WtReturn) }
+    None -> ()
+  }
   match sig_of(qc, f.name) {
     Some(s) -> { q = offer(q, f.nlo, f.nhi, render_sig(qc, s), Some((f.nlo, f.nhi)), None) }
     None -> ()
@@ -609,7 +680,8 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           }
         _ -> ()
       }
-    ELambda(params, body, _, _, _) ->
+    ELambda(params, body, _, _, _) -> {
+      q = visit_lambda_param_types(q, params)
       match te {
         Some(XLambda(psyms, _, tbody, _, _, _, _)) -> {
           var i = 0
@@ -631,6 +703,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         }
         _ -> { q = walk_e(qc, q, body, None) }
       }
+    }
     # one application node, so this arm answers for every shape of call: a name
     # (the sig at the name's span), a constructor, and a function value. The
     # callee of the first two is not walked as a value -- it is not one.
@@ -892,6 +965,9 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         q = walk_e(qc, q, arm.body, tb)
         i = i + 1
       }
+    }
+    EHandle(_, arms, _, _, _, _, _) -> {
+      for arm in arms { q = visit_lambda_param_types(q, arm.params) }
     }
     EBlock(stmts, tail, _, _) -> {
       let (tstmts, ttail) = match te {
@@ -1289,11 +1365,16 @@ fn field_index(c: CtorI, name: String) -> Option[Int] = {
 fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
   var q = q0
   match ps {
-    SLet(_, _, _, init, _, _) ->
+    SLet(_, _, ann, init, _, _) -> {
+      match ann {
+        Some(tref) -> { q = visit_written_type(q, tref, WtStorage) }
+        None -> ()
+      }
       match ts {
         Some(TSLet(_, _, tinit, _, _)) -> { q = walk_e(qc, q, init, Some(tinit)) }
         _ -> { q = walk_e(qc, q, init, None) }
       }
+    }
     SLetPat(pat, _, init, _, _) ->
       match ts {
         Some(TSLetPat(tpat, tinit, _, _)) -> {
@@ -1305,7 +1386,9 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
           q = walk_e(qc, q, init, None)
         }
       }
-    SLocalFn(name, params, _, _, body, nlo, nhi, lo, hi) ->
+    SLocalFn(name, params, ret, _, body, nlo, nhi, lo, hi) -> {
+      q = visit_lambda_param_types(q, params)
+      q = visit_written_type(q, ret, WtReturn)
       match ts {
         Some(TSLocalFn(sid, _, psyms, _, tbody, _, _, _)) -> {
           match sym_get(qc, sid) {
@@ -1336,6 +1419,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
         }
         _ -> { q = walk_e(qc, q, body, None) }
       }
+    }
     SAssign(name, value, nlo, nhi, _, _) ->
       match ts {
         Some(TSAssign(sid, _, tvalue, _, _)) -> {

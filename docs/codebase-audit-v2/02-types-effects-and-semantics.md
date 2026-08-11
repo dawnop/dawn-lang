@@ -220,12 +220,20 @@
 - **影响：** 函数 application 已一般化，但重要函数仍非一等；eta wrapper 增加噪声、捕获与可能的 allocation。
 - **建议：** 在 expected function type 已知后，实例化 type/effect vars、解析 witness/evidence，自动合成 closure。
 
-## SEM-14 — P2 — `Never` 是内部类型，却不能由用户命名
+## SEM-14：P2：`Never` 是内部类型，却不能由用户命名（已修）
 
-<!-- audit-anchor: present selfhost/src/check/types.dawn | name: "Never", params: [], access: BtCompilerOnly -->
+> **后续处置（2026-08-11）：已修。** `Never` 现为 compiler-owned hard-reserved 的
+> return-only bottom。顶层/局部函数、trait/impl 方法、effect operation 与嵌套函数类型的
+> 返回位可以直接书写；storage、直接 alias 与 associated binding 均拒绝；type、alias、trait、
+> effect、constructor 与 type parameter 不能复用该名。JVM 的 direct、dynamic/closure、
+> trait/impl/default 与 SAM bottom call 已统一走
+> call-result termination seam，擦除为 `Object` 的结果先丢弃，再以 verifier 可见的
+> `aconst_null; athrow` 终止。`scripts/checker-corpus`、`builtin-type-contract`、
+> `classfile-verify` 与 native differential 分别固定语义、LSP/doc、所有调用形态和双后端一致性。
+> `io.exit` 仍是 `Unit`。
 
-- **证据：S。** checker 有 `TyNever`，分层 builtin inventory 也把 `Never` 明确归为
-  compiler-only；当前 public resolver 仍有意不接受它。规范已经使用该概念，`io.exit`
+- **原证据：S。** checker 当时已有 `TyNever`，分层 builtin inventory 也把 `Never` 明确归为
+  compiler-only；public resolver 有意不接受它。规范已经使用该概念，`io.exit`
   因而只能声明 `Unit`。B200-1B 只消除了 inventory 漂移，没有提前执行本项的公开语义裁决。
 - **影响：** 用户不能声明发散函数；退出后的代码被视为可达，branch/callback type 不精确。
 - **建议：** 把 `Never` 暴露为硬保留的 compiler-owned bottom，但首版只允许在函数返回位

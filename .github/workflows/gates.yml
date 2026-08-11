@@ -234,17 +234,14 @@ jobs:
   # they were 180s of the old `test` job.
   contracts:
     runs-on: ubuntu-latest
-    # 249s predicted (211s of steps plus ~38s setup), 218s measured in run
-    # 31362339838; see the note in `test`. The atomic write contract added 31s
-    # of steps and the job came in *faster* than the previous 225s -- runner
-    # variance, which is exactly why the bound is the worse of the two figures
-    # and not the one that just happened. Its call-site section then added 28s
-    # locally (25s -> 53s) but 42s on the runner (25s -> 67s), where the two
-    # private compiler builds it makes are not competing with a laptop's other
-    # cores; 295s in run 31375903534 and 300s in 31376936404, so the figure
-    # below is 300 by the same rule the paragraph opens with.
-    # budget: 3x 300s worst observed
-    timeout-minutes: 15
+    # The previous whole-job worst was 300s. SEM-14 expanded classfile-verify
+    # to thirteen compiling mutants; the full step took 191.08s locally. Until
+    # the first remote run exists, the provisional ceiling deliberately adds
+    # the rounded 192s to the old whole-job figure without subtracting the old
+    # classfile step: 300 + 192 = 492s. ARC-13 will replace this estimate with
+    # the first remote observation.
+    # budget: 3x 492s provisional worst
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -254,6 +251,8 @@ jobs:
       # TEST-01: every emitted class force-linked through the JVM verifier.
       # The differentials prove the backends agree, never that the bytes are
       # legal; lazy linking means a class no test touches is never verified.
+      # Thirteen compiling mutants own the Never call and adapter termination
+      # assertions, including verifier-valid early-return counterexamples.
       - name: classfile verification
         run: ./scripts/classfile-verify/run.sh
 
@@ -752,9 +751,14 @@ jobs:
   # node.
   docs:
     runs-on: ubuntu-latest
-    # 305s predicted (254s + 47s moved in + setup-node), 307s measured.
-    # budget: 3x 307s worst observed
-    timeout-minutes: 16
+    # The previous whole-job worst was 323s in run 31484738610. SEM-14 grew the
+    # builtin contract to twenty-six compiling mutants; the full step took
+    # 630.70s locally. Until the first remote run exists, the provisional
+    # ceiling deliberately adds the rounded 631s to the old whole-job figure
+    # without subtracting the old builtin step: 323 + 631 = 954s. ARC-13 will
+    # replace this estimate with the first remote observation.
+    # budget: 3x 954s provisional worst
+    timeout-minutes: 48
     steps:
       - uses: actions/checkout@v4
 
@@ -774,8 +778,9 @@ jobs:
         run: ./scripts/doc-check.py
 
       # The checker, LSP and reference expose different views of one layered
-      # builtin-type inventory. Five compiling mutants prove each consumer and
-      # both sides of the reference's reverse function-membership check.
+      # builtin-type inventory. Twenty-six compiling mutants prove each
+      # consumer, every Never context, and both sides of the reference's
+      # reverse function-membership check.
       - name: builtin type inventory contract
         run: ./scripts/builtin-type-contract/run.sh
 

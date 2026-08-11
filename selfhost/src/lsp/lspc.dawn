@@ -19,7 +19,8 @@ use std/set
 use std/list
 use check/types.{
   ty_show, sig_render, adt_of, trait_of, prelude_traits, prelude_trait_ids,
-  public_builtin_type_names, Audience, AModule, audience_covers, declared_audience
+  public_builtin_type_names, return_only_builtin_type_names,
+  Audience, AModule, audience_covers, declared_audience
 }
 use check/cx.{ModExports}
 use lsp/lspq.{QCx, locals_at}
@@ -138,6 +139,44 @@ fn is_word(c: Char) -> Bool =
 
 fn is_space(c: Char) -> Bool =
   c == ' ' || c == '\t' || c == '\n' || c == '\u{000B}' || c == '\u{000C}' || c == '\r'
+
+## A conservative lexical test for the point immediately after a function
+## return arrow. It scans across newlines, but stops at a surrounding body or
+## match arm before accepting an older `fn`. Delimiters inside the parameter
+## list do not stop it, so multiline signatures and default expressions work.
+fn return_type_tail(before: List[Char]) -> Bool = {
+  var i = len(before)
+  while i > 0 && is_space(before[i - 1]) { i = i - 1 }
+  if i < 2 || before[i - 2] != '-' || before[i - 1] != '>' { return false }
+  i = i - 2
+  var parens = 0
+  var brackets = 0
+  while i > 0 {
+    let c = before[i - 1]
+    if c == ')' {
+      parens = parens + 1
+      i = i - 1
+    } else if c == '(' {
+      if parens > 0 { parens = parens - 1 }
+      i = i - 1
+    } else if c == ']' {
+      brackets = brackets + 1
+      i = i - 1
+    } else if c == '[' {
+      if brackets > 0 { brackets = brackets - 1 }
+      i = i - 1
+    } else if parens == 0 && brackets == 0 && (c == '{' || c == '}' || c == ';') {
+      return false
+    } else if is_word(c) {
+      let end = i
+      while i > 0 && is_word(before[i - 1]) { i = i - 1 }
+      if from_code_points(slice_cps(before, i, end)) == "fn" { return true }
+    } else {
+      i = i - 1
+    }
+  }
+  false
+}
 
 ## `(?:^|[^\w])(?:fn|let|var|const|type|for|derive|trait)\s+$`
 fn fresh_name_tail(before: List[Char]) -> Bool = {
@@ -438,6 +477,7 @@ pub fn completions_at(
   while ls > 0 && cps[ls - 1] != '\n' { ls = ls - 1 }
   let before = slice_cps(cps, ls, ws)
   let nb = len(before)
+  let in_return_type = return_type_tail(slice_cps(cps, 0, ws))
   # the effect row: `!` admits exactly one builtin effect
   if nb > 0 && before[nb - 1] == '!' {
     let d: Option[String] = Some("the IO effect — this function may perform input/output")
@@ -518,6 +558,11 @@ pub fn completions_at(
   for t in public_builtin_type_names() {
     it = add(it, t, 7, Some("builtin type"), "2")
   }
+  if in_return_type {
+    for t in return_only_builtin_type_names() {
+      it = add(it, t, 7, Some("builtin return type"), "2")
+    }
+  }
   for kw in keywords() {
     let nd: Option[String] = None
     it = add(it, kw, 14, nd, "3")
@@ -565,4 +610,13 @@ test "one `/` steps down one level, and a directory keeps its slash" {
   assert show(seg_items(fresh, ["front", "fmt"], paths, "0").out) == "rules:9"
   # a prefix that names nothing offers nothing, rather than everything
   assert show(seg_items(fresh, ["nope"], paths, "0").out) == ""
+}
+
+test "return-only type completion recognizes function arrows but not match arms" {
+  assert return_type_tail(code_points("fn f() -> "))
+  assert return_type_tail(code_points("fn f(\n  x: Int\n) -> "))
+  assert return_type_tail(code_points("alias F = fn() -> "))
+  assert return_type_tail(code_points("type Box = { f: fn(Int) -> "))
+  assert not return_type_tail(code_points("match x { _ -> "))
+  assert not return_type_tail(code_points("let x: "))
 }

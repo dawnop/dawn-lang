@@ -352,12 +352,12 @@ pub const CHAR_OPAQUE_ID: Int = -2
 ## The type of a character literal: `Char`, an opaque `Int`.
 pub fn ty_char() -> Ty = TyOpaque(CHAR_OPAQUE_ID, "Char", "std/char", [], TyInt)
 
-## Who may write a compiler-owned type name today. This is surface policy,
-## not a permanent property: SEM-14 may add return-position access for Never
-## here without inventing another inventory.
+## Who may write a compiler-owned type name. This is surface policy, including
+## the distinct return-only access used by Never.
 pub type BuiltinTypeAccess =
   | BtPublic
   | BtStdOnly
+  | BtReturnOnly
   | BtCompilerOnly
 
 pub type BuiltinTypeBuild =
@@ -391,7 +391,7 @@ pub fn builtin_type_inventory() -> List[BuiltinTypeI] = [
   BuiltinTypeI { name: "Map", params: ["K", "V"], access: BtPublic, build: BtMap },
   BuiltinTypeI { name: "Set", params: ["T"], access: BtPublic, build: BtSet },
   BuiltinTypeI { name: "Array", params: ["T"], access: BtStdOnly, build: BtArray },
-  BuiltinTypeI { name: "Never", params: [], access: BtCompilerOnly, build: BtLeaf(TyNever) }
+  BuiltinTypeI { name: "Never", params: [], access: BtReturnOnly, build: BtLeaf(TyNever) }
 ]
 
 pub fn builtin_type_at(name: String) -> Option[BuiltinTypeI] = {
@@ -405,7 +405,28 @@ pub fn builtin_type_visible(info: BuiltinTypeI, is_std: Bool) -> Bool =
   match info.access {
     BtPublic -> true
     BtStdOnly -> is_std
+    BtReturnOnly -> false
     BtCompilerOnly -> false
+  }
+
+## Return-position access is additive: ordinary public and std-only names keep
+## their existing visibility, while Never becomes nameable only at this use.
+pub fn builtin_type_visible_at_return(info: BuiltinTypeI, is_std: Bool) -> Bool =
+  builtin_type_visible(info, is_std) || info.access == BtReturnOnly
+
+## A return-only compiler name is reserved even where it is not nameable.
+## Public names retain their existing reservation policy, and Array remains a
+## std-only primitive that user modules may reuse as an ordinary nominal name.
+pub fn builtin_type_name_reserved(info: BuiltinTypeI, is_std: Bool) -> Bool =
+  builtin_type_visible(info, is_std) || info.access == BtReturnOnly
+
+pub fn builtin_type_hard_reserved(info: BuiltinTypeI) -> Bool =
+  info.access == BtReturnOnly
+
+pub fn hard_reserved_builtin_type_name(name: String) -> Bool =
+  match builtin_type_at(name) {
+    Some(info) -> builtin_type_hard_reserved(info)
+    None -> false
   }
 
 pub fn public_builtin_types() -> List[BuiltinTypeI] = {
@@ -418,6 +439,25 @@ pub fn public_builtin_types() -> List[BuiltinTypeI] = {
 
 pub fn public_builtin_type_names() -> List[String] =
   map(public_builtin_types(), info => info.name)
+
+pub fn return_only_builtin_types() -> List[BuiltinTypeI] = {
+  var out: List[BuiltinTypeI] = []
+  for info in builtin_type_inventory() {
+    if info.access == BtReturnOnly { out = out ++ [info] }
+  }
+  out
+}
+
+pub fn return_only_builtin_type_names() -> List[String] =
+  map(return_only_builtin_types(), info => info.name)
+
+## The reference includes every user-spellable compiler-owned type, but each
+## entry keeps its access policy instead of presenting Never as globally public.
+pub fn documented_builtin_types() -> List[BuiltinTypeI] =
+  public_builtin_types() ++ return_only_builtin_types()
+
+pub fn builtin_type_use(info: BuiltinTypeI) -> String =
+  if info.access == BtReturnOnly { "return" } else { "any" }
 
 pub fn builtin_type_render(info: BuiltinTypeI) -> String =
   if len(info.params) == 0 {
@@ -530,9 +570,9 @@ pub fn builtin_type_audience(name: String) -> Audience =
       match info.access {
         BtPublic -> AWorld
         BtStdOnly -> AStdOnly
-        # `Never` is the only one, and it is unwritable in every module, so no
-        # header reference reaches here -- the walker passes it as a scalar
-        # (design §5.1) without asking.
+        BtReturnOnly -> AWorld
+        # Compiler-only names cannot reach a written header. The walker passes
+        # compiler-created scalar identities without asking (design §5.1).
         BtCompilerOnly -> AWorld
       }
     None -> AWorld
@@ -2600,6 +2640,7 @@ test "builtin type inventory keeps its surface boundaries" {
   assert public_builtin_type_names() ==
     ["Int", "Char", "Float", "Bool", "String", "Bytes", "Unit", "List", "Map", "Set"]
   var std_only: List[String] = []
+  var return_only: List[String] = []
   var compiler_only: List[String] = []
   for info in builtin_type_inventory() {
     match info.access {
@@ -2609,6 +2650,11 @@ test "builtin type inventory keeps its surface boundaries" {
         assert not builtin_type_visible(info, false)
         assert builtin_type_visible(info, true)
       }
+      BtReturnOnly -> {
+        return_only = return_only ++ [info.name]
+        assert not builtin_type_visible(info, false)
+        assert not builtin_type_visible(info, true)
+      }
       BtCompilerOnly -> {
         compiler_only = compiler_only ++ [info.name]
         assert not builtin_type_visible(info, false)
@@ -2617,7 +2663,8 @@ test "builtin type inventory keeps its surface boundaries" {
     }
   }
   assert std_only == ["Array"]
-  assert compiler_only == ["Never"]
+  assert return_only == ["Never"]
+  assert compiler_only == []
   assert ty_named("Char") == Some(ty_char())
   assert ty_named("Bytes") == Some(TyBytes)
   assert ty_named("List") == None

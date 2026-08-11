@@ -69,7 +69,7 @@ use check/cx.{
   AliasE, Cx, Frame, LambdaCx, ModExports,
   cx_new, test_cx,
   cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
-  resolve_type, is_const_serializable, no_sig, TySpan
+  resolve_type, resolve_return_type, is_const_serializable, no_sig, TySpan
 }
 use check/passes.{
   seed_prelude, pass_java_uses, pass_imports, pass_type_shells, pass_ctor_fields,
@@ -4939,7 +4939,7 @@ fn check_local_fn(
     }
     ptys = ptys ++ [t]
   }
-  let (cxb, ret) = resolve_type(cx1, ret_ref)
+  let (cxb, ret) = resolve_return_type(cx1, ret_ref)
   cx1 = cxb
   var eff = EPure
   if len(effs) == 0 {
@@ -6073,8 +6073,8 @@ fn sam_param_ty(js: Jsig, p: String) -> Option[Ty] !io =
   }
 
 ## SAM signature → the Dawn function shape a converted argument must have
-## (spec §9.4). Callback parameters arrive unwrapped; None when the SAM is not
-## convertible (char).
+## (spec §9.4). Callback parameters arrive unwrapped. A char parameter remains
+## unconvertible; a char return seeds Never, so only a diverging callback fits.
 fn sam_fn_ty(js: Jsig, sm: JMethod) -> Option[(List[Ty], Ty)] !io = {
   var ps: List[Ty] = []
   for p in sm.param_cls {
@@ -6093,7 +6093,7 @@ fn sam_fn_ty(js: Jsig, sm: JMethod) -> Option[(List[Ty], Ty)] !io = {
   } else if r == "boolean" {
     Some(TyBool)
   } else if r == "char" {
-    None
+    Some(TyNever)
   } else if r == "java.lang.String" {
     Some(TyString)
   } else {
@@ -6110,13 +6110,13 @@ fn sam_ret_compatible(js: Jsig, r: Ty, j: String) -> Bool !io =
   if j == "void" {
     r == TyUnit || r == TyNever
   } else if j == "long" || j == "int" || j == "short" || j == "byte" {
-    r == TyInt
+    r == TyInt || r == TyNever
   } else if j == "double" || j == "float" {
-    r == TyFloat
+    r == TyFloat || r == TyNever
   } else if j == "boolean" {
-    r == TyBool
+    r == TyBool || r == TyNever
   } else if j == "char" {
-    false
+    r == TyNever
   } else {
     match r {
       TyString -> js.is_assignable(j, "java.lang.String")
@@ -7680,6 +7680,23 @@ fn test_jsig() -> Jsig = {
     methods_of: tj_methods_of,
     static_fields_of: tj_fields_of,
     is_assignable: tj_is_assignable
+  }
+}
+
+test "Never fits every SAM return representation" {
+  let js = test_jsig()
+  for ret in [
+    "void", "long", "int", "short", "byte", "float", "double", "boolean", "char",
+    "java.lang.String"
+  ] {
+    assert sam_ret_compatible(js, TyNever, ret)
+  }
+  match sam_fn_ty(js, tj_static("getAsChar", [], "char", "Chars")) {
+    Some((params, ret)) -> {
+      assert len(params) == 0
+      assert ret == TyNever
+    }
+    None -> { assert false }
   }
 }
 

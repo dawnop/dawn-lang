@@ -23,7 +23,7 @@ use ir/interp.{CtOut}
 use check/types.{
   Adts, Traits, AdtI, CtorI, ImplI, Sig, adt_of, trait_of, ty_show, sig_render,
   prelude_traits, prelude_trait_ids, builtins, internal_builtins,
-  public_builtin_types, internal_std_modules
+  documented_builtin_types, builtin_type_use, internal_std_modules
 }
 
 # ---- the JSON writer (JsonWriter, as a threaded record) ----
@@ -526,13 +526,14 @@ fn validate_builtin_groups(std: StdCtx) -> Unit = {
 
 fn builtin_types_json(w0: W) -> W = {
   var w = w0
-  for info in public_builtin_types() {
+  for info in documented_builtin_types() {
     w = open_obj(w)
     w = w_field(w, "name", info.name)
     w = w_key(w, "params")
     w = open_arr(w)
     for param in info.params { w = w_str(w, param) }
     w = close_arr(w, len(info.params) > 0)
+    w = w_field(w, "use", builtin_type_use(info))
     w = close_obj(w)
   }
   w

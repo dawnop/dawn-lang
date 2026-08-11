@@ -102,10 +102,10 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（75）
+#### 当前 fixed（76）
 
 - 语法（16）：`SYN-01`–`SYN-03`、`SYN-05`–`SYN-12`、`SYN-14`–`SYN-16`、`SYN-18`、`SYN-19`。
-- 语义（10）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-11`–`SEM-13`、`SEM-15`、`SEM-17`。
+- 语义（11）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-11`–`SEM-15`、`SEM-17`。
 - 架构（5）：`ARC-03`–`ARC-06`、`ARC-12`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
 - 库（14）：`LIB-01`–`LIB-05`、`LIB-07`–`LIB-12`、`LIB-14`、`LIB-15`、`LIB-17`。
@@ -116,10 +116,10 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 架构（3）：`ARC-01`、`ARC-02`、`ARC-11`。
 - 库（1）：`LIB-16`。
 
-#### 当前 open（16）
+#### 当前 open（15）
 
 - 语法（3）：`SYN-04`、`SYN-13`、`SYN-17`。
-- 语义（5）：`SEM-04`、`SEM-09`、`SEM-10`、`SEM-14`、`SEM-16`。
+- 语义（4）：`SEM-04`、`SEM-09`、`SEM-10`、`SEM-16`。
 - 架构（4）：`ARC-07`–`ARC-10`。
 - 库（4）：`LIB-06`、`LIB-13`、`LIB-18`、`LIB-19`。
 
@@ -127,8 +127,8 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**75 fixed + 4 partial + 16 open + 2 retracted = 97**。逐专题矩阵：
-语法 **16/0/3/0**、语义 **10/0/5/2**、架构 **5/3/4/0**、工具链 **17/0/0/0**、
+当前计数自检：**76 fixed + 4 partial + 15 open + 2 retracted = 97**。逐专题矩阵：
+语法 **16/0/3/0**、语义 **11/0/4/2**、架构 **5/3/4/0**、工具链 **17/0/0/0**、
 库 **14/1/4/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
@@ -145,6 +145,9 @@ export-surface pass）、`TOOL-13`（`3f5d64c` 的 `atomic_write_file` 调用点
 其后 `ARC-12` 由模块级 `LowerCache` 收口，open → fixed。同日 `SEM-13` open → fixed：
 受约束函数与 trait method 现在是一等函数值，`check_fn_value` 在期望函数类型定型主体之后
 写出 eta 展开，字典由 `resolve_witness` 在合成闭包内解析，外层约束的字典随之进入捕获列表。
+随后 `SEM-14` open → fixed：用户可在所有函数返回位书写硬保留的 `Never`，storage 位置继续
+拒绝；JVM 的 direct、dynamic、closure、trait/impl/default 与 SAM bottom call 统一走
+non-fallthrough seam，并由双后端、classfile、checker、LSP 与 doc 合同固定。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 

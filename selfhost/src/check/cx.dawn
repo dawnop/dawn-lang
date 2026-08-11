@@ -20,7 +20,8 @@ use check/types.{
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   EPure, EIo, EffVar, ELabeled, eff_union, eff_base, eff_labels,
   adt_of, trait_of, subst,
-  builtin_type_at, builtin_type_visible, builtin_type_apply, builtin_type_render,
+  builtin_type_at, builtin_type_visible, builtin_type_visible_at_return,
+  builtin_type_hard_reserved, builtin_type_apply, builtin_type_render,
   public_builtin_type_names,
   builtins, internal_builtins,
   prelude_adts, prelude_traits, first_minted_id
@@ -574,9 +575,21 @@ fn refuse_written_label(cx: Cx, eff: Eff, lo: Int, hi: Int) -> Cx = {
       "was created under (docs/spec.md §6.5)")
 }
 
-## Resolve a parsed type reference against the current scope (the Kotlin
-## resolveType with tparams/effVars defaulted to the current ones).
+## A written type is either a storage shape or the direct result of a function.
+## Never is nameable only in the latter. Structural function types choose the
+## context of each child themselves, so an outer return position cannot make
+## `List[Never]` or `(Never, Int)` legal by accident.
+type TypeUse =
+  | TypeStorage
+  | TypeReturn
+
 pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
+  resolve_type_for(cx, ref, TypeStorage)
+
+pub fn resolve_return_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
+  resolve_type_for(cx, ref, TypeReturn)
+
+fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
   match ref {
     TTuple(elems, lo, hi) -> {
       var cx1 = cx
@@ -602,12 +615,12 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
         cx2 = cx3
         ps = ps ++ [t]
       }
-      let (cx4, rt) = resolve_type(cx2, ret)
+      let (cx4, rt) = resolve_type_for(cx2, ret, TypeReturn)
       # a function type's written children are its parameters then its return
       # type, which is exactly TyFn's child order
       (record_span_at(cx4, lo, hi, params ++ [ret]), TyFn(ps, rt, eff2))
     }
-    TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi)
+    TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi, type_use)
     TQual(q, name, targs, lo, hi) -> resolve_qual(cx, q, name, targs, lo, hi)
     TAssoc(subj, name, lo, hi) -> {
       # `T.Item` has no written sub-reference: the subject is a bare name
@@ -748,7 +761,30 @@ fn resolve_qual(
   }
 }
 
-fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -> (Cx, Ty) !io = {
+fn resolve_named(
+  cx: Cx,
+  name: String,
+  targs: List[TypeRef],
+  lo: Int,
+  hi: Int,
+  type_use: TypeUse
+) -> (Cx, Ty) !io = {
+  # Return-only names are hard-reserved, so they win even if a rejected
+  # declaration left a same-spelled type parameter in the recovery scope.
+  match builtin_type_at(name) {
+    Some(info) -> if builtin_type_hard_reserved(info) {
+      if len(targs) > 0 {
+        return (cerr(cx, "`" ++ name ++ "` is not generic", lo, hi), TyError)
+      }
+      if type_use == TypeReturn && builtin_type_visible_at_return(info, cx.is_std_module) {
+        return (record_span_at(cx, lo, hi, no_trefs()), builtin_type_apply(info, []))
+      }
+      return (cerr_h(cx, "`" ++ name ++ "` can only be written as a function return type",
+        lo, hi, "write `fn(...) -> " ++ name ++
+          "`, or use a value-bearing type in this storage position"), TyError)
+    }
+    None -> ()
+  }
   # type parameters shadow everything
   match map.get(cx.current_tparams, name) {
     Some(v) -> {

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 65e7932e496a5541 -->
+<!-- doc-check: translation-of docs/spec.md @ eea427e047939848 -->
 
 # Dawn Language Specification
 
@@ -267,8 +267,17 @@ The remaining composite types do not belong to that builtin-name inventory:
 - `Array[T]` is a compiler-owned representation primitive nameable by the bundled std. A user
   module cannot reach that primitive through this name; an `Array` declared outside std is simply
   the user's own nominal type.
-- `Never` is currently a compiler-owned internal type. It has no user-spellable type name and is
-  absent from public completion and `dawn doc --builtins`.
+- `Never` is the compiler-owned bottom type and a hard-reserved name. It has no values or
+  constructors. It may be written directly only as the return type of a top-level function, local
+  function, trait or impl method, effect operation, or any function type. Therefore
+  `fn() -> Never` and `alias F = fn() -> Never` are valid. Parameters, fields, const or let
+  annotations, generic, collection, tuple, and other storage positions, associated bindings, and
+  the direct alias `alias N = Never` are invalid. `type`, `alias`, `trait`, `effect`, constructor
+  names, and type parameters cannot shadow `Never`. A function declared to return `Never` must
+  itself diverge. LSP completion offers the
+  name only in function-return contexts. `dawn doc --builtins` marks it with `"use": "return"`
+  rather than presenting it as a globally usable public builtin. `io.exit` still returns `Unit`;
+  this rule does not change its existing API.
 
 In type position, `(T)` is **grouping** only: after parsing it is still `T`, with no extra type
 node. A tuple still has at least two elements: `(A, B)` is a tuple, `(T,)` is not a one-element
@@ -1935,9 +1944,9 @@ fn spawn_hello(msg: String) -> Unit !io = {
 - When a Java parameter is a **functional interface** (an interface with exactly one
   abstract method; the public methods of `Object` do not count), the argument may be a
   Dawn function value — a lambda, a named function or a constructor value all work.
-  Interfaces only; an **abstract class** with a single abstract method is not supported
-  (the implementation goes through LambdaMetafactory, expanded at build time, zero
-  configuration for native-image).
+  Interfaces only; an **abstract class** with a single abstract method is not supported. The
+  implementation generates an ordinary adapter class that holds the Dawn `FnN` and writes it
+  into the classfile at build time; native-image needs no runtime dynamic-class configuration.
 - **Matching**: the SAM method signature is mapped to a Dawn function type by §9.2 and
   then matched as usual; a lambda's parameter types can be seeded from the parameter (the
   same mechanism as generic argument inference). In overload scoring a function value
@@ -2819,12 +2828,12 @@ inconsistency.
 | ADT | abstract class + final subclasses; a payload-free constructor is a singleton |
 | record | final class + fields (does not rely on Java records, so older bytecode targets still work) |
 | `match` | An `instanceof` chain + field reads (no indy, no pattern switch) |
-| lambda/closure | `LambdaMetafactory` (on native-image's supported list) |
+| lambda/closure | Each closure is an ordinary generated class implementing `FnN`, with captures in final fields; SAM conversion generates a separate adapter class holding that `FnN` |
 | generics | erasure + boxing |
 | structurally equal types | ADTs/records/tuples still get matching `equals` and `hashCode`, but those are **for Java callers** — Dawn's `==`/`hash` are Core functions that lowering expands structurally (§4.3), and `Map`/`Set` reach them through dictionaries. When an `impl Eq`/`impl Hash` exists, these two methods forward to that impl |
 | `Int`/`Float`/`Bool` | native `long`/`double`/`boolean`, boxed only in generic positions |
 | `Unit` | `Ldawn/rt/Unit;` — a singleton reference; it takes one slot and is no different from any other reference in parameter/field/capture positions |
-| `Never` | `V`, and it only appears in return position (an expression that does not return has no parameter or field to occupy) |
+| `Never` | Static Dawn calls use return descriptor `V`. Calls through erased `FnN.apply` return `Object`; the caller discards it with `POP` before terminating. When a SAM adapter calls its bridge, it follows the SAM return descriptor: `void` produces no stack value, a one-slot result is discarded with `POP`, and a two-slot result with `POP2`; the adapter then emits `aconst_null; athrow`. `Never` has no parameter, field, or other storage representation |
 | `panic` | Throws `dawn.rt.PanicError` (a subclass of Error, so `catch_fault` does not catch it; only the isolation point `catch_panic` does, see §9.8) |
 
 The runtime support classes (`dawn/rt/Lists`, `Strings`, `Io`, `Show`, `Maps`, `Tuple*`,

@@ -81,7 +81,7 @@ use jvm/ops.{
   OP_INSTANCEOF, OP_INVOKEINTERFACE, OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL,
   OP_IRETURN, OP_ISUB, OP_IXOR, OP_L2D, OP_L2I, OP_LADD, OP_LAND, OP_LASTORE, OP_LCMP,
   OP_LCONST_1, OP_LDIV, OP_LLOAD, OP_LMUL, OP_LNEG, OP_LOR, OP_LREM, OP_LRETURN, OP_LSHL, OP_LSHR,
-  OP_LSTORE, OP_LSUB, OP_LUSHR, OP_LXOR, OP_NEW, OP_POP, OP_PUTFIELD, OP_PUTSTATIC, OP_RETURN,
+  OP_LSTORE, OP_LSUB, OP_LUSHR, OP_LXOR, OP_NEW, OP_POP, OP_POP2, OP_PUTFIELD, OP_PUTSTATIC, OP_RETURN,
   OP_SASTORE, OP_SWAP, V52
 }
 
@@ -92,8 +92,17 @@ pub const ARGS_FIELD: String = "dawn\$args"
 
 # ---- GenCtx and Gen: the module's fixed facts, and the threaded state ----
 
-## A SAM bridge to emit: (arg idx, iface fqcn, sam name, sam params, sam ret).
-pub type SamB = { name: String, iface: String, sam_name: String, sam_params: List[String], sam_ret: String }
+## A SAM bridge to emit. `bottom` records the Dawn function result because the
+## Java descriptor alone cannot distinguish a callback that returns normally
+## from one that only inhabits that return type by diverging.
+pub type SamB = {
+  name: String,
+  iface: String,
+  sam_name: String,
+  sam_params: List[String],
+  sam_ret: String,
+  bottom: Bool
+}
 
 ## A closure class to emit, one per `CClosure` site.
 ##
@@ -129,7 +138,8 @@ pub type SamC = {
   arity: Int,
   bridge_owner: String,
   bridge: String,
-  bridge_desc: String
+  bridge_desc: String,
+  bottom: Bool
 }
 
 pub type ConstF = { fname: String, v: CValue, ty: Ty }
@@ -219,6 +229,51 @@ fn load_var(g: Gen, id: Int) -> Unit !io =
 
 fn store_var(g: Gen, id: Int) -> Unit !io =
   store_slot(g.mv, sym_of(g, id).ty, slot_of(g, id))
+
+## What an invocation leaves on the operand stack according to its JVM
+## descriptor. Bottom calls use this at one shared seam so every call form
+## discards the verifier-visible result before terminating when necessary.
+type CallResult =
+  | CallVoid
+  | CallOne
+  | CallTwo
+
+fn call_result_of_desc(desc: String) -> CallResult = {
+  let ret = match str.last_index_of(desc, ")") {
+    Some(i) -> str.drop(desc, i + 1)
+    None -> desc
+  }
+  if ret == "V" {
+    CallVoid
+  } else if ret == "J" || ret == "D" {
+    CallTwo
+  } else {
+    CallOne
+  }
+}
+
+## Make non-fallthrough visible to the verifier. `athrow` needs a reference,
+## and null is sufficient because execution can only reach this sequence if a
+## method that Dawn proved bottom violates its contract.
+fn terminate_bottom(m: MethodVisitor, result: CallResult) -> Unit !io = {
+  match result {
+    CallVoid -> ()
+    CallOne -> { m.visitInsn(OP_POP) }
+    CallTwo -> { m.visitInsn(OP_POP2) }
+  }
+  m.visitInsn(OP_ACONST_NULL)
+  m.visitInsn(OP_ATHROW)
+  ()
+}
+
+fn finish_call(g: Gen, ty: Ty, result: CallResult) -> (Gen, Bool) !io = {
+  if is_bottom(ty) {
+    terminate_bottom(g.mv, result)
+    (g, false)
+  } else {
+    (g, true)
+  }
+}
 
 ## Box a primitive about to sit in an erased Object position.
 fn box_ty(m: MethodVisitor, t: Ty) -> Unit !io = {
@@ -695,7 +750,7 @@ fn emit_sam_conversion(
   ft: Ty
 ) -> Gen !io = {
   let (_, iface, sam_name, sam_params, sam_ret) = conv
-  let (fps, _) = tyfn_parts(ft)
+  let (fps, fret) = tyfn_parts(ft)
   let n = len(fps)
   let bridge = "dawn\$sam\$" ++ to_string(g.sam_ctr)
   let g1 = Gen {
@@ -706,7 +761,8 @@ fn emit_sam_conversion(
       iface: iface,
       sam_name: sam_name,
       sam_params: sam_params,
-      sam_ret: sam_ret
+      sam_ret: sam_ret,
+      bottom: is_bottom(fret)
     }]
   }
   var pdescs = ""
@@ -724,7 +780,8 @@ fn emit_sam_conversion(
       arity: n,
       bridge_owner: gx.class_name,
       bridge: bridge,
-      bridge_desc: bridge_desc
+      bridge_desc: bridge_desc,
+      bottom: is_bottom(fret)
     }]
   }
   # the `FnN` this wraps is already on the stack, put there by the argument
@@ -774,7 +831,11 @@ fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
     slot = slot + w
   }
   m.visitMethodInsn(OP_INVOKESTATIC, s.bridge_owner, s.bridge, s.bridge_desc, false)
-  m.visitInsn(jreturn_of(rd))
+  if s.bottom {
+    terminate_bottom(m, call_result_of_desc(rd))
+  } else {
+    m.visitInsn(jreturn_of(rd))
+  }
   close_mv(m)
   cw.visitEnd()
   (s.cls, class_bytes(() => cw.toByteArray(), s.cls))
@@ -992,6 +1053,11 @@ fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
     i = i + 1
   }
   m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(n), "apply", erased_apply_desc(n), true)
+  if b.bottom {
+    terminate_bottom(m, CallOne)
+    close_mv(m)
+    return g
+  }
   let rc = b.sam_ret
   if rc == "void" {
     m.visitInsn(OP_POP)
@@ -1484,9 +1550,13 @@ fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, By
     # its siblings through it
     m.visitVarInsn(OP_ALOAD, 0)
     let (owner, target) = slot_target(tr, dd.slots[i])
-    m.visitMethodInsn(OP_INVOKESTATIC, owner, target,
-      sig_desc_with_dicts(gx.adts, ms.sig), false)
-    emit_return_of(m, ms.sig.ret)
+    let target_desc = sig_desc_with_dicts(gx.adts, ms.sig)
+    m.visitMethodInsn(OP_INVOKESTATIC, owner, target, target_desc, false)
+    if is_bottom(ms.sig.ret) {
+      terminate_bottom(m, call_result_of_desc(target_desc))
+    } else {
+      emit_return_of(m, ms.sig.ret)
+    }
     close_mv(m)
     i = i + 1
   }
@@ -1551,7 +1621,7 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
         None -> fn_desc_with_dicts(gx, sig_of_call(gx, owner, name))
       }
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)
-      (g1, true)
+      finish_call(g1, ty, call_result_of_desc(d))
     }
     CImpl(owner, tid, subject, method) -> {
       let g1 = gen_cargs(gx, g, args)
@@ -1565,18 +1635,18 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
       for _d in 0..(len(args) - len(psig.param_tys)) {
         ptys = ptys ++ [TyVar("D", 0)]
       }
+      let d = method_desc(gx.adts, ptys, psig.ret)
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        impl_method_name(gx, tr.name, subject, method),
-        method_desc(gx.adts, ptys, psig.ret), false)
-      (g1, true)
+        impl_method_name(gx, tr.name, subject, method), d, false)
+      finish_call(g1, ty, call_result_of_desc(d))
     }
     CDefault(owner, tid, method) -> {
       let g1 = gen_cargs(gx, g, args)
       let tr = trait_of(gx.traits, tid)
+      let d = fn_desc_with_dicts(gx, trait_method_sig(tr, method))
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        default_method_name(tr.name, method),
-        fn_desc_with_dicts(gx, trait_method_sig(tr, method)), false)
-      (g1, true)
+        default_method_name(tr.name, method), d, false)
+      finish_call(g1, ty, call_result_of_desc(d))
     }
     CMethod(dict, tid, method, _idx) -> {
       # the JVM's dictionaries are interfaces, so it dispatches by name and
@@ -1585,9 +1655,10 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
       let (g0, _) = gen_cexpr(gx, g, dict, false)
       g0.mv.visitTypeInsn(OP_CHECKCAST, tr_iface(tr.owner, tr.name))
       let g1 = gen_cargs(gx, g0, args)
+      let d = trait_method_desc(gx, trait_method_sig(tr, method))
       g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), method,
-        trait_method_desc(gx, trait_method_sig(tr, method)), true)
-      (g1, true)
+        d, true)
+      finish_call(g1, ty, call_result_of_desc(d))
     }
     CDynamic(target) -> {
       let (g1, falls) = gen_cexpr(gx, g, target, false)
@@ -1609,11 +1680,10 @@ fn gen_cdynamic(gx: GenCtx, g: Gen, args: List[CExpr], ft: Ty, ret_static: Ty) -
   }
   g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(len(fps)), "apply",
     erased_apply_desc(len(fps)), true)
-  if is_bottom(fret) {
-    g1.mv.visitInsn(OP_POP)
-  } else {
-    unerase(gx, g1, fret)
+  if is_bottom(ret_static) {
+    return finish_call(g1, ret_static, CallOne)
   }
+  unerase(gx, g1, fret)
   (g1, true)
 }
 
@@ -1721,10 +1791,12 @@ fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (Str
     p = p + 1
   }
   m.visitMethodInsn(OP_INVOKESTATIC, b.owner, b.target, b.impl_desc, false)
-  # a bottom return already left Object on the stack (impl_desc_of said so),
-  # and `box_ty` emits nothing for it -- both spellings end at areturn
-  box_ty(m, b.fret)
-  m.visitInsn(OP_ARETURN)
+  if is_bottom(b.fret) {
+    terminate_bottom(m, call_result_of_desc(b.impl_desc))
+  } else {
+    box_ty(m, b.fret)
+    m.visitInsn(OP_ARETURN)
+  }
   close_mv(m)
   cw.visitEnd()
   (b.cls, class_bytes(() => cw.toByteArray(), b.cls))
@@ -2541,3 +2613,12 @@ fn gen_cforeign(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io =
   } else {
     gen_java_call(gx, g, jc, ty)
   }
+
+test "call result width reads the return descriptor, not its last character" {
+  assert call_result_of_desc("()V") == CallVoid
+  assert call_result_of_desc("(I)J") == CallTwo
+  assert call_result_of_desc("D") == CallTwo
+  assert call_result_of_desc("()[J") == CallOne
+  assert call_result_of_desc("[D") == CallOne
+  assert call_result_of_desc("()Ljava/lang/Object;") == CallOne
+}

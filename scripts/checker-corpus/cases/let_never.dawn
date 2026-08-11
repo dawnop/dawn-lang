@@ -1,4 +1,6 @@
 # checker.dawn: a binding cannot hold Never, whether it binds a name or a pattern
+use std/io
+
 pub fn plain() -> Int = {
   let x = panic("no")
   1
@@ -13,3 +15,87 @@ pub fn destructured() -> Int = {
   let (a, b) = panic("no")
   1
 }
+
+# SEM-14 accepts Never only as the direct return of a function signature.
+alias NeverFn = fn() -> Never
+alias NeverMapper = fn(Int) -> fn() -> Never
+
+pub type NeverFnHolder = { run: fn() -> Never }
+pub type NeverFnCase = NeverFnCase(run: fn(Int) -> Never)
+
+pub effect NeverStop {
+  fn effect_stop() -> Never
+}
+
+pub trait NeverStopper[T] {
+  fn trait_stop(value: T) -> Never
+  fn trait_default(value: T) -> Never = panic("trait default")
+}
+
+pub type NeverToken = NeverToken
+
+impl NeverStopper[NeverToken] {
+  fn trait_stop(value: NeverToken) -> Never = panic("trait impl")
+}
+
+pub fn explicit_never() -> Never = panic("top")
+
+pub fn local_never() -> Never = {
+  fn local_stop() -> Never = panic("local")
+  local_stop()
+}
+
+pub fn recursive_never() -> Never = recursive_never()
+
+pub fn exit_stays_unit(code: Int) -> Unit !io = io.exit(code)
+
+# Storage positions reject a direct Never even when the initializer diverges.
+pub fn never_parameter(value: Never) -> Unit = ()
+
+pub type NeverRecord = { value: Never }
+pub type NeverConstructor = NeverConstructor(value: Never)
+
+const NEVER_CONST: Never = panic("const")
+
+pub fn never_let() -> Unit = {
+  let value: Never = panic("let")
+  ()
+}
+
+pub fn never_list() -> List[Never] = []
+pub fn never_tuple() -> (Never, Int) = panic("tuple")
+pub fn never_function_parameter(f: fn(Never) -> Unit) -> Unit = ()
+
+alias DirectNever = Never
+
+trait NeverItem[T] {
+  type Item
+  fn item_owner(value: T) -> T
+}
+
+type NeverSubject = NeverSubject
+
+impl NeverItem[NeverSubject] {
+  type Item = Never
+  fn item_owner(value: NeverSubject) -> NeverSubject = value
+}
+
+# The compiler-owned name cannot be introduced by type-like declarations.
+type Never = ReservedType
+alias Never = Int
+effect Never { fn reserved_effect() -> Unit }
+trait Never[T] { fn reserved_trait(value: T) -> Unit }
+type ReservedConstructor = Never
+
+trait ReservedAssociated[T] {
+  type Never
+  fn reserved_associated(value: T) -> Unit
+}
+
+pub fn reserved_type_parameter[Never](value: Int) -> Unit = ()
+type ReservedTypeParameter[Never] = { value: Int }
+trait ReservedTraitParameter[Never] { fn reserved_parameter(value: Int) -> Unit }
+
+# A written bottom result is a promise, not a coercion target for values.
+pub fn never_falls_through() -> Never = ()
+pub fn never_returns_value() -> Never = 1
