@@ -59,6 +59,15 @@ else
   bad "the selfhost cache generation contract is broken"
 fi
 
+# replay-bootstrap is too expensive for CI, but its seed/std selection is a
+# command-shape contract. Drive that shape through fake compiler roles and keep
+# the real fixed-point replay as a release-time check.
+if bash "$root/scripts/bootstrap-guards/replay-contract.sh"; then
+  ok "the replay bootstrap pairs stage 1 with the seed's own std"
+else
+  bad "the replay bootstrap can mix a seed with the checkout std"
+fi
+
 # ---------------------------------------------------------------------------
 # TOOL-16: the seed resolver is fail-closed.
 #

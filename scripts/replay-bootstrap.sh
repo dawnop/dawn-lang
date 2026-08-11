@@ -18,9 +18,9 @@
 # The seed must be at or above the seed floor recorded in docs/bootstrap.md
 # (selfhost/src only uses features the current seed already has).
 #
-# Why one generation is enough: stage2 is a function of selfhost/src alone —
-# any working seed compiling the same sources converges to the same bytes.
-# So an old seed plus today's sources must land byte-identical to HEAD.
+# Why one generation is enough: stage2 is a function of selfhost/src alone.
+# Any working seed compiling the same sources converges to the same bytes, so
+# an old seed plus today's sources must land byte-identical to HEAD.
 set -euo pipefail
 
 if [ "${1:-}" = "--allow-unverified" ]; then
@@ -75,13 +75,20 @@ case "$SEED_ARG" in
     echo "warning: using local seed $SEED (unverified)" >&2
     ;;
 esac
-# --std std explicitly: an old seed's *default* std is its embedded copy, but
-# the replay must compile today's sources against today's std
+# Stages after boot use today's std. Stage 1 is different: the seed must see the
+# std it was released with, which is the copy embedded in that seed.
 VENDOR=(--std std
   --vendor org/objectweb/asm --vendor coursierapi)
 
-# 1) the seed compiles today's selfhost sources
-java -Xss512m -jar "$SEED" build selfhost -o "$OUT/boot.jar" --std std > /dev/null
+# 1) the seed compiles today's selfhost sources against its own std. Run from an
+# empty directory so the default loader cannot pick up the checkout's std/. The
+# absolute target keeps local package paths anchored at the selfhost manifest.
+SEED_STAGE="$OUT/seed-stage"
+mkdir -p "$SEED_STAGE"
+(
+  cd "$SEED_STAGE"
+  java -Xss512m -jar "$SEED" build "$ROOT/selfhost" -o "$OUT/boot.jar" > /dev/null
+)
 echo "seed compiled selfhost"
 
 # 2) fixed point: boot emits selfhost, that compiler emits selfhost again —

@@ -90,7 +90,9 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
    种子重放：种子编 selfhost → 固定点（stage2==stage3）→ standalone 闭包 →
    （本地有 HEAD 编译器时）验证收敛到与 HEAD 逐字节一致。**一代洗净种子**：
    stage2 只由 selfhost/src 决定、与谁编译 boot 无关，所以「老种子 + 新源码」
-   也必须对出与 HEAD 相同的字节。发版前手动过一遍，不进 CI。
+   也必须对出与 HEAD 相同的字节。第一阶段在没有工作树 `std/` 的隔离目录运行，
+   让种子使用自己内嵌的发布 std；后续阶段才显式使用当前 std。发版前手动过一遍，
+   不进 CI。CI 用离线假编译器固定这条配对规则，完整固定点仍由发版前手动重放验证。
 
 ### 链条表
 
