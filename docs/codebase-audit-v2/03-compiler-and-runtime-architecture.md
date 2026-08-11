@@ -8,8 +8,9 @@
 
 - Core IR、checker split 与两个独立后端都是真实进展；“没有 lowered IR”“大文件就继续拆”应撤回。
 - 当前主要风险已经从物理文件大小转为**阶段契约没有类型化**：裸名字构依赖图、平行 List 靠下标对齐、稳定 identity 与临时 ID 共用全局计数器、内部 panic 被用户错误通道吞掉。
-- native failure runtime 的三项 P1 已由 #193 收口；当前结构债转为 `ARC-01/02/11` 的
-  partial 边界，以及 `ARC-07/08/12` 的 typed-product / stable-origin 前置。
+- native failure runtime 的三项 P1 已由 #193 收口；`ARC-12` 也已由模块级 `LowerCache`
+  收口。当前结构债转为 `ARC-01/02/11` 的 partial 边界，以及 `ARC-07/08` 的
+  typed-product / stable-origin 前置。
 
 ## ARC-01 — P1 — 返回类型推断把局部名字当顶层依赖
 
@@ -237,8 +238,11 @@
 >
 > **仍开放（ARC-11B）：** Core 仍无精确 source origin，最终主诊断位置仍是外围 const / comptime
 > block；当前 frame 只有函数 identity，没有 callsite span，也没有正式的跨文件 related-location
-> 协议。紧凑 `OriginId` / 边表与跨模块位置恢复须等 **ARC-07-JVM** 的 lowered-product 身份边界，
-> 并与 **ARC-12** 的跨 expression lowering cache 一起设计稳定 key；本切片没有预做这两项。
+> 协议。紧凑 `OriginId` / 边表与跨模块位置恢复须等 **ARC-07-JVM** 的 lowered-product 身份边界；
+> 本切片没有预做。**ARC-12** 已经把跨 expression 的 lowering cache 收口，稳定 key 那一半
+> 因此不再欠：同一 `(owner, fn)` 在一个模块里只有一份 lowered body，lifted lambda 也有
+> 全模块唯一的名字，边表可以挂在这个身份上。仍然欠的是 `RC-03` 的 `fold_children`/`visit`
+> 原语：Core 至今没有通用遍历器，`OriginId` 若现在动手，就是第七份手写全树遍历。
 
 - **历史证据（修复前基线，S）：** Core 不保留 source positions；内部 error 曾直接以 `(0,0)`
   `Diag` 建立，最终统一覆盖为 const/comptime block span。复杂 const 调 shared helper 时，用户只
@@ -248,10 +252,32 @@
 - **后续建议：** 在 ARC-07-JVM / ARC-12 的稳定身份基础上增加紧凑 `OriginId` 边表；不要把 full
   Span 塞进每个 Core node，也不要在本项顺手扩一套正式 related-location API。
 
-## ARC-12 — P3 — lowering cache 只活一个 comptime expression
+## ARC-12 — P3 — lowering cache 只活一个 comptime expression（已修）
 
 <!-- audit-anchor: absent selfhost/src/ir/interp.dawn | LowerCache -->
 
-- **证据：S。** `ESt` 持有 lowered function/dictionary cache：`selfhost/src/ir/interp.dawn:75`，但每个 `fold_expr` 都 `fresh_st` 清空：`selfhost/src/ir/interp.dawn:1552`、`:1560`；module const 各自调用：`selfhost/src/ir/interp.dawn:1790`。
+> **已修（2026-08-11）：** `ESt` 拆成两半。module 级的 `LowerCache`（lowered 函数体、
+> 字典表、lifted-lambda 计数器）由 `eval_module` 建一次，经 `CtRun` 串过全部 const
+> 初始化器、函数体与 test 体里的 comptime block；per-evaluation 的 fuel 与 depth 仍由
+> `st_from` 每次归零，所以一个 const 的预算不会被上一个花掉。缓存可以跨表达式复用的
+> 依据是 lowering 的输入面：它读的是模块的 trait、impl、adt、签名与符号表，这些在一次
+> `eval_comptime` 内固定，const/block 的值不参与 lowering（`CConstRef`/`CComptime` 是
+> 解释期才查表的节点），因此同一 `(owner, fn)` 在哪个表达式里被要到都是同一份 Core。
+> `next_lam` 一并进缓存并全程贯穿：lifted lambda 以生成名（`lambda$0`、`lambda$1`……）
+> 为键存在同一张表里，计数器若按表达式重置，第二个表达式的 `lambda$0` 会盖掉第一个的
+> 这正是明细点名的稳定 key 问题。缓存只在模块内活，`eval_comptime` 返回时即丢弃，
+> 不进 `CtOut`（driver、emitter 与 `doc` 都会把 `CtOut` 留到整个构建结束，lowered 函数体
+> 跟着走没有读者）。
+>
+> 门禁是 `ir/interp` 的 `one module's lowering cache outlives the expression that
+> filled it`：它经私有 `eval_module` 直接读运行结束时的缓存，断言两个 const 共用的
+> helper 仍在表里、两个各自 lift 一个 lambda 的 const 拿到了 `lambda$0` 与 `lambda$1`
+> 两个名字。两个活变异各红一次：把 `fold_expr` 的入参缓存换回空表，`m.helper` 断言红；
+> 把 `lower_expr_only` 的种子换回 `0`，`m.lambda$1` 断言红。
+>
+> **实测**（80 个函数的调用链 + 300 个 const 全调链首，`dawn check`，三次取范围）：
+> 1.49–1.61s → 0.87–0.91s。
+
+- **历史证据（修复前基线，S）：** `ESt` 持有 lowered function/dictionary cache，但每个 `fold_expr` 都 `fresh_st` 清空，module const 各自调用。
 - **影响：** 多个 const 调同一 helper 时重复 lowering 与 lambda lifting；comptime 使用增长后形成无必要编译时间。
 - **建议：** 拆 module-level `LowerCache` 与 per-evaluation fuel/env/depth；lifted-lambda identity 使用稳定 key。

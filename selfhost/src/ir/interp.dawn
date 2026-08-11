@@ -12,9 +12,11 @@
 #
 # Control flow: ER = Result[(ESt, Env, CValue), (ESt, Env, Ctl)] -- `?` is
 # throw, a call catches KReturn, a loop catches KBreak/KContinue naming it.
-# The state carries fuel (the real bound on runaway evaluation), the call
-# depth (turns a would-be stack overflow into a decent message), and the
-# function bodies lowered so far.
+# The state carries fuel (the real bound on runaway evaluation) and the call
+# depth (turns a would-be stack overflow into a decent message). Both start
+# over for every folded expression. What lowering produced does not: the
+# `LowerCache` is built once per module and handed from one const or comptime
+# block to the next, so a helper ten consts call is lowered once.
 #
 # Core still carries no precise source positions. Interpreter failures stay
 # structured until the fold boundary, though: the original actionable hint
@@ -91,18 +93,36 @@ type Ctl =
   | KBreak(loop_id: Int)
   | KContinue(loop_id: Int)
 
-type ESt = {
-  fuel: Int,
-  depth: Int,
+## What lowering has produced for this module so far. It is separate from
+## `ESt` because it outlives the expression being folded: lowering reads the
+## module's trait, impl, adt, signature and symbol tables, and those are fixed
+## for the whole run, so the body it produces for a function does not depend
+## on which const or comptime block asked for it. Ten consts calling one
+## helper therefore lower that helper once.
+##
+## `next_lam` belongs here for the same reason and must not restart per
+## expression. Lifted lambdas are keyed by their generated name (`lambda$0`,
+## `lambda$1`, ...) in the very table above them; a counter that restarted
+## would let the second expression's `lambda$0` land on the first's entry.
+type LowerCache = {
   # bodies lowered so far, keyed "owner.name" -- including the lambdas
   # lowering lifted out of them. Lowering happens on demand because one
   # comptime run touches a handful of functions out of the whole program.
-  lowered: Map[String, CFun],
+  fns: Map[String, CFun],
   # the dictionaries lowering registered while lowering those bodies, by key:
   # what `CMethod` looks a slot up in
   dicts: Map[String, CDictDef],
-  # seeds the lifted-lambda counter so names stay unique across the run
+  # seeds the lifted-lambda counter so names stay unique across the module
   next_lam: Int
+}
+
+## One expression's evaluation. Fuel and depth are the per-evaluation half and
+## start over for every fold; the cache is the module-level half and is handed
+## on to the next one.
+type ESt = {
+  fuel: Int,
+  depth: Int,
+  cache: LowerCache
 }
 
 alias Env = Map[Int, CValue]
@@ -473,12 +493,12 @@ fn lower_into(
 ) -> Result[(ESt, CFun), (ESt, Env, Ctl)] !io = {
   let (cf, lifted, dicts, next) =
     lower.lower_fn_only(owner, f, icx.traits, icx.impls, icx.adts, icx.prog_fns,
-      icx.syms, st.next_lam)
-  var tbl = map.insert(st.lowered, cache_key(owner, f), cf)
+      icx.syms, st.cache.next_lam)
+  var tbl = map.insert(st.cache.fns, cache_key(owner, f), cf)
   for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
-  var dts = st.dicts
+  var dts = st.cache.dicts
   for d in dicts { dts = map.insert(dts, d.key, d) }
-  Ok((ESt { ..st, lowered: tbl, dicts: dts, next_lam: next }, cf))
+  Ok((ESt { ..st, cache: LowerCache { fns: tbl, dicts: dts, next_lam: next } }, cf))
 }
 
 ## The subject half of that identity: its *head*, because an impl method's
@@ -555,7 +575,7 @@ fn get_trait_cfun(
   match map.get(icx.impl_fns, (tid, subject_key, method)) {
     Some(pair) -> {
       let (owner, f) = pair
-      match map.get(st.lowered, cache_key(owner, f)) {
+      match map.get(st.cache.fns, cache_key(owner, f)) {
         Some(cf) -> Ok((st, cf))
         None -> lower_into(icx, st, env, owner, f)
       }
@@ -600,14 +620,14 @@ fn get_cfun(
   owner: String,
   name: String
 ) -> Result[(ESt, CFun), (ESt, Env, Ctl)] !io = {
-  match map.get(st.lowered, owner ++ "." ++ name) {
+  match map.get(st.cache.fns, owner ++ "." ++ name) {
     Some(cf) -> return Ok((st, cf))
     None -> ()
   }
   match find_fn(icx, owner, name) {
     Some(pair) -> {
       let (o, f) = pair
-      match map.get(st.lowered, cache_key(o, f)) {
+      match map.get(st.cache.fns, cache_key(o, f)) {
         Some(cf) -> Ok((st, cf))
         None -> lower_into(icx, st, env, o, f)
       }
@@ -1223,7 +1243,7 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
           let (st2, env2, dv) = ceval(icx, st1, env1, dexpr)?
           match dv {
             VDict(key, _) ->
-              match map.get(st2.dicts, key) {
+              match map.get(st2.cache.dicts, key) {
                 Some(dd) ->
                   if idx >= len(dd.slots) {
                     cerr(st2, env2, "`" ++ m ++ "` has no slot " ++ to_string(idx))
@@ -1662,48 +1682,85 @@ pub type CtOut = {
   blocks: Map[(Int, Int), CValue]
 }
 
-fn fresh_st(fuel: Int) -> ESt = {
-  let no_fns: Map[String, CFun] = map.empty()
-  let no_dicts: Map[String, CDictDef] = map.empty()
-  ESt { fuel: fuel, depth: 0, lowered: no_fns, dicts: no_dicts, next_lam: 0 }
+## One module's evaluation in progress: what it has produced, and what
+## lowering has produced for it. The second half is not part of `CtOut`
+## because nothing downstream of comptime wants it. Driver, emitter and `doc`
+## all keep a `CtOut` per module for the length of the build, and the lowered
+## bodies would ride along there for no reader.
+type CtRun = {
+  out: CtOut,
+  cache: LowerCache
 }
 
+fn empty_cache() -> LowerCache = {
+  let no_fns: Map[String, CFun] = map.empty()
+  let no_dicts: Map[String, CDictDef] = map.empty()
+  LowerCache { fns: no_fns, dicts: no_dicts, next_lam: 0 }
+}
+
+## An evaluation seeded from what the module has lowered so far. Fuel and
+## depth start over here and nowhere else, which is what keeps one const's
+## budget from being spent by the one before it.
+fn st_from(fuel: Int, cache: LowerCache) -> ESt =
+  ESt { fuel: fuel, depth: 0, cache: cache }
+
+fn fresh_st(fuel: Int) -> ESt = st_from(fuel, empty_cache())
+
 ## Lower one expression and run it. Every comptime evaluation goes through
-## here, so lowering and interpretation are always the same pair.
-fn fold_expr(icx: ICx, fuel: Int, e: TExpr, lo: Int, hi: Int) -> Result[CValue, Diag] !io = {
-  let st = fresh_st(fuel)
+## here, so lowering and interpretation are always the same pair. The cache
+## goes in and comes back out. The expression's own body is lowered fresh,
+## since no two initializers are the same expression; every function it
+## reached stays lowered for the next one.
+fn fold_expr(
+  icx: ICx,
+  fuel: Int,
+  cache: LowerCache,
+  e: TExpr,
+  lo: Int,
+  hi: Int
+) -> (LowerCache, Result[CValue, Diag]) !io = {
   let env: Env = map.empty()
   let (ce, lifted, dicts, next) =
     lower.lower_expr_only(icx.owner, e, icx.traits, icx.impls, icx.adts,
-      icx.prog_fns, icx.syms, 0)
-  var tbl: Map[String, CFun] = map.empty()
+      icx.prog_fns, icx.syms, cache.next_lam)
+  var tbl = cache.fns
   for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
-  var dts: Map[String, CDictDef] = map.empty()
+  var dts = cache.dicts
   for d in dicts { dts = map.insert(dts, d.key, d) }
-  match ceval(icx, ESt { ..st, lowered: tbl, dicts: dts, next_lam: next }, env, ce) {
+  let st = st_from(fuel, LowerCache { fns: tbl, dicts: dts, next_lam: next })
+  match ceval(icx, st, env, ce) {
     Ok(r) -> {
-      let (_, _, v) = r
-      Ok(v)
+      let (st1, _, v) = r
+      (st1.cache, Ok(v))
     }
     Err(r) -> {
-      let (_, _, ctl) = r
+      let (st1, _, ctl) = r
+      # a failure here is the interpreter refusing, not lowering failing:
+      # invariant panics in lowering propagate (ARC-06). So what was lowered
+      # on the way is still valid, and is kept
       match ctl {
-        KErr(failure) -> Err(failure_diag(failure, lo, hi))
-        _ -> Err(failure_diag(
-          ct_failure("control flow escaped the folded expression (interpreter bug)", ""), lo, hi))
+        KErr(failure) -> (st1.cache, Err(failure_diag(failure, lo, hi)))
+        _ -> (st1.cache, Err(failure_diag(
+          ct_failure("control flow escaped the folded expression (interpreter bug)", ""), lo, hi)))
       }
     }
   }
 }
 
-fn eval_block(icx: ICx, fuel: Int, body: TExpr, out: CtOut, lo: Int, hi: Int) -> CtOut !io = {
+fn eval_block(icx: ICx, fuel: Int, body: TExpr, run: CtRun, lo: Int, hi: Int) -> CtRun !io = {
   # a block nested inside this one folds first, so lowering's reference to it
   # resolves
-  let out1 = walk_expr(icx, fuel, body, out)
-  let icx1 = ICx { ..icx, blocks: out1.blocks }
-  match fold_expr(icx1, fuel, body, lo, hi) {
-    Ok(v) -> CtOut { ..out1, blocks: map.insert(out1.blocks, (lo, hi), v) }
-    Err(d) -> CtOut { ..out1, diags: out1.diags ++ [d] }
+  let run1 = walk_expr(icx, fuel, body, run)
+  let icx1 = ICx { ..icx, blocks: run1.out.blocks }
+  let (cache, r) = fold_expr(icx1, fuel, run1.cache, body, lo, hi)
+  match r {
+    Ok(v) ->
+      CtRun {
+        out: CtOut { ..run1.out, blocks: map.insert(run1.out.blocks, (lo, hi), v) },
+        cache: cache
+      }
+    Err(d) ->
+      CtRun { out: CtOut { ..run1.out, diags: run1.out.diags ++ [d] }, cache: cache }
   }
 }
 
@@ -1711,126 +1768,126 @@ fn eval_block(icx: ICx, fuel: Int, body: TExpr, out: CtOut, lo: Int, hi: Int) ->
 ## budget. This walk stays on TAST: it is a search for a syntactic form, not
 ## an evaluation, and by the time Core exists lowering has already replaced
 ## the form with a reference to its value.
-fn walk_expr(icx: ICx, fuel: Int, e: TExpr, out: CtOut) -> CtOut !io =
+fn walk_expr(icx: ICx, fuel: Int, e: TExpr, acc: CtRun) -> CtRun !io =
   match e {
-    XComptime(body, lo, hi, ..) -> eval_block(icx, fuel, body, out, lo, hi)
+    XComptime(body, lo, hi, ..) -> eval_block(icx, fuel, body, acc, lo, hi)
     XStr(parts, _, _) -> {
-      var out1 = out
+      var acc1 = acc
       for p in parts {
         match p {
-          TSPInterp(x, _) -> { out1 = walk_expr(icx, fuel, x, out1) }
+          TSPInterp(x, _) -> { acc1 = walk_expr(icx, fuel, x, acc1) }
           TSPText(_) -> ()
         }
       }
-      out1
+      acc1
     }
-    XLambda(_, _, body, ..) -> walk_expr(icx, fuel, body, out)
+    XLambda(_, _, body, ..) -> walk_expr(icx, fuel, body, acc)
     XApply(target, args, ..) -> {
-      var out1 = walk_expr(icx, fuel, target, out)
-      for a in args { out1 = walk_expr(icx, fuel, a, out1) }
-      out1
+      var acc1 = walk_expr(icx, fuel, target, acc)
+      for a in args { acc1 = walk_expr(icx, fuel, a, acc1) }
+      acc1
     }
     XJava(jc, ..) -> {
-      var out1 = out
+      var acc1 = acc
       match jc.target {
-        Some(t) -> { out1 = walk_expr(icx, fuel, t, out1) }
+        Some(t) -> { acc1 = walk_expr(icx, fuel, t, acc1) }
         None -> ()
       }
-      for a in jc.args { out1 = walk_expr(icx, fuel, a, out1) }
-      out1
+      for a in jc.args { acc1 = walk_expr(icx, fuel, a, acc1) }
+      acc1
     }
-    XPropagate(operand, ..) -> walk_expr(icx, fuel, operand, out)
-    XUnwrap(operand, ..) -> walk_expr(icx, fuel, operand, out)
+    XPropagate(operand, ..) -> walk_expr(icx, fuel, operand, acc)
+    XUnwrap(operand, ..) -> walk_expr(icx, fuel, operand, acc)
     XReturn(v, _, _) ->
       match v {
-        Some(x) -> walk_expr(icx, fuel, x, out)
-        None -> out
+        Some(x) -> walk_expr(icx, fuel, x, acc)
+        None -> acc
       }
     XIndex(target, index, ..) ->
-      walk_expr(icx, fuel, index, walk_expr(icx, fuel, target, out))
+      walk_expr(icx, fuel, index, walk_expr(icx, fuel, target, acc))
     XCallDyn(_, _, args, ..) -> {
-      var out1 = out
-      for a in args { out1 = walk_expr(icx, fuel, a, out1) }
-      out1
+      var acc1 = acc
+      for a in args { acc1 = walk_expr(icx, fuel, a, acc1) }
+      acc1
     }
     XCallBuiltin(_, args, ..) -> {
-      var out1 = out
-      for a in args { out1 = walk_expr(icx, fuel, a, out1) }
-      out1
+      var acc1 = acc
+      for a in args { acc1 = walk_expr(icx, fuel, a, acc1) }
+      acc1
     }
     XCallFn(_, _, args, ..) -> {
-      var out1 = out
-      for a in args { out1 = walk_expr(icx, fuel, a, out1) }
-      out1
+      var acc1 = acc
+      for a in args { acc1 = walk_expr(icx, fuel, a, acc1) }
+      acc1
     }
     XCtor(_, _, written, _, spread, ..) -> {
-      var out1 = out
+      var acc1 = acc
       match spread {
-        Some(sp) -> { out1 = walk_expr(icx, fuel, sp, out1) }
+        Some(sp) -> { acc1 = walk_expr(icx, fuel, sp, acc1) }
         None -> ()
       }
-      for w in written { out1 = walk_expr(icx, fuel, w, out1) }
-      out1
+      for w in written { acc1 = walk_expr(icx, fuel, w, acc1) }
+      acc1
     }
-    XField(target, ..) -> walk_expr(icx, fuel, target, out)
+    XField(target, ..) -> walk_expr(icx, fuel, target, acc)
     XListLit(elems, ..) -> {
-      var out1 = out
-      for x in elems { out1 = walk_expr(icx, fuel, x, out1) }
-      out1
+      var acc1 = acc
+      for x in elems { acc1 = walk_expr(icx, fuel, x, acc1) }
+      acc1
     }
     XTupleLit(elems, ..) -> {
-      var out1 = out
-      for x in elems { out1 = walk_expr(icx, fuel, x, out1) }
-      out1
+      var acc1 = acc
+      for x in elems { acc1 = walk_expr(icx, fuel, x, acc1) }
+      acc1
     }
-    XBinary(_, l, r, ..) -> walk_expr(icx, fuel, r, walk_expr(icx, fuel, l, out))
-    XUnary(_, operand, ..) -> walk_expr(icx, fuel, operand, out)
+    XBinary(_, l, r, ..) -> walk_expr(icx, fuel, r, walk_expr(icx, fuel, l, acc))
+    XUnary(_, operand, ..) -> walk_expr(icx, fuel, operand, acc)
     XIf(cond, thn, els, ..) -> {
-      var out1 = walk_expr(icx, fuel, thn, walk_expr(icx, fuel, cond, out))
+      var acc1 = walk_expr(icx, fuel, thn, walk_expr(icx, fuel, cond, acc))
       match els {
-        Some(eb) -> walk_expr(icx, fuel, eb, out1)
-        None -> out1
+        Some(eb) -> walk_expr(icx, fuel, eb, acc1)
+        None -> acc1
       }
     }
     XMatch(scrut, arms, ..) -> {
-      var out1 = walk_expr(icx, fuel, scrut, out)
+      var acc1 = walk_expr(icx, fuel, scrut, acc)
       for arm in arms {
         match arm.guard {
-          Some(g) -> { out1 = walk_expr(icx, fuel, g, out1) }
+          Some(g) -> { acc1 = walk_expr(icx, fuel, g, acc1) }
           None -> ()
         }
-        out1 = walk_expr(icx, fuel, arm.body, out1)
+        acc1 = walk_expr(icx, fuel, arm.body, acc1)
       }
-      out1
+      acc1
     }
     XBlock(stmts, tail, ..) -> {
-      var out1 = out
-      for s in stmts { out1 = walk_stmt(icx, fuel, s, out1) }
+      var acc1 = acc
+      for s in stmts { acc1 = walk_stmt(icx, fuel, s, acc1) }
       match tail {
-        Some(x) -> walk_expr(icx, fuel, x, out1)
-        None -> out1
+        Some(x) -> walk_expr(icx, fuel, x, acc1)
+        None -> acc1
       }
     }
-    XUnsafePure(body, ..) -> walk_expr(icx, fuel, body, out)
-    _ -> out
+    XUnsafePure(body, ..) -> walk_expr(icx, fuel, body, acc)
+    _ -> acc
   }
 
-fn walk_stmt(icx: ICx, fuel: Int, s: TStmt, out: CtOut) -> CtOut !io =
+fn walk_stmt(icx: ICx, fuel: Int, s: TStmt, acc: CtRun) -> CtRun !io =
   match s {
-    TSLet(_, _, init, _, _) -> walk_expr(icx, fuel, init, out)
-    TSLetPat(_, init, _, _) -> walk_expr(icx, fuel, init, out)
-    TSLocalFn(_, _, _, _, body, _, _, _) -> walk_expr(icx, fuel, body, out)
-    TSAssign(_, _, value, _, _) -> walk_expr(icx, fuel, value, out)
-    TSExpr(e, _, _) -> walk_expr(icx, fuel, e, out)
-    TSAssert(cond, _, _, _) -> walk_expr(icx, fuel, cond, out)
-    TSWhile(cond, body, _, _, _) -> walk_expr(icx, fuel, body, walk_expr(icx, fuel, cond, out))
+    TSLet(_, _, init, _, _) -> walk_expr(icx, fuel, init, acc)
+    TSLetPat(_, init, _, _) -> walk_expr(icx, fuel, init, acc)
+    TSLocalFn(_, _, _, _, body, _, _, _) -> walk_expr(icx, fuel, body, acc)
+    TSAssign(_, _, value, _, _) -> walk_expr(icx, fuel, value, acc)
+    TSExpr(e, _, _) -> walk_expr(icx, fuel, e, acc)
+    TSAssert(cond, _, _, _) -> walk_expr(icx, fuel, cond, acc)
+    TSWhile(cond, body, _, _, _) -> walk_expr(icx, fuel, body, walk_expr(icx, fuel, cond, acc))
     TSFor(_, _, from, to_opt, _, body, _, _, _) -> {
-      var out1 = walk_expr(icx, fuel, from, out)
+      var acc1 = walk_expr(icx, fuel, from, acc)
       match to_opt {
-        Some(t) -> { out1 = walk_expr(icx, fuel, t, out1) }
+        Some(t) -> { acc1 = walk_expr(icx, fuel, t, acc1) }
         None -> ()
       }
-      walk_expr(icx, fuel, body, out1)
+      walk_expr(icx, fuel, body, acc1)
     }
   }
 
@@ -1862,6 +1919,9 @@ fn program_sigs(
 ## Evaluate all comptime constructs of a checked module: consts in declaration
 ## order (each gets a fresh fuel budget), then comptime blocks in function and
 ## test bodies. Failures become ordinary diagnostics.
+##
+## Callers get the results only. The lowering cache the run accumulated is
+## dropped here, which is the whole of its lifetime: module in, module out.
 pub fn eval_comptime(
   tm: TModule,
   std_fns: Map[String, TFun],
@@ -1873,7 +1933,25 @@ pub fn eval_comptime(
   impls: Impls,
   owner: String,
   opts: CtOpts
-) -> CtOut !io = {
+) -> CtOut !io =
+  eval_module(tm, std_fns, by_owner, std_impl_fns, std_names, adts, traits,
+    impls, owner, opts).out
+
+## The same run, with the cache still attached. Private because only this
+## module's own tests have a reason to look at it: from the outside, whether
+## two consts shared a lowered body is not observable, and that is the point.
+fn eval_module(
+  tm: TModule,
+  std_fns: Map[String, TFun],
+  by_owner: Map[String, Map[String, TFun]],
+  std_impl_fns: Map[(Int, String, String), (String, TFun)],
+  std_names: Set[String],
+  adts: Adts,
+  traits: Traits,
+  impls: Impls,
+  owner: String,
+  opts: CtOpts
+) -> CtRun !io = {
   let fuel = opts.fuel
   # std is implicitly visible, so a const may call it; a local definition
   # still shadows it, matching the checker's local → std → builtin order
@@ -1895,7 +1973,10 @@ pub fn eval_comptime(
   for f in tm.fns { impl_fns = note_trait_fn(impl_fns, owner, f) }
   let empty_c: Map[String, CValue] = map.empty()
   let empty_b: Map[(Int, Int), CValue] = map.empty()
-  var out = CtOut { diags: [], consts: empty_c, blocks: empty_b }
+  var run = CtRun {
+    out: CtOut { diags: [], consts: empty_c, blocks: empty_b },
+    cache: empty_cache()
+  }
   let base = ICx {
     fns: fns,
     by_owner: by_owner,
@@ -1915,20 +1996,31 @@ pub fn eval_comptime(
   }
   for c in tm.consts {
     # a comptime block inside the initializer folds first
-    out = walk_expr(ICx { ..base, consts: out.consts, blocks: out.blocks }, fuel, c.init, out)
-    let icx = ICx { ..base, consts: out.consts, blocks: out.blocks }
-    match fold_expr(icx, fuel, c.init, c.lo, c.hi) {
-      Ok(v) -> { out = CtOut { ..out, consts: map.insert(out.consts, c.name, v) } }
-      Err(d) -> { out = CtOut { ..out, diags: out.diags ++ [d] } }
+    run = walk_expr(ICx { ..base, consts: run.out.consts, blocks: run.out.blocks },
+      fuel, c.init, run)
+    let icx = ICx { ..base, consts: run.out.consts, blocks: run.out.blocks }
+    let (cache, r) = fold_expr(icx, fuel, run.cache, c.init, c.lo, c.hi)
+    match r {
+      Ok(v) -> {
+        run = CtRun {
+          out: CtOut { ..run.out, consts: map.insert(run.out.consts, c.name, v) },
+          cache: cache
+        }
+      }
+      Err(d) -> {
+        run = CtRun { out: CtOut { ..run.out, diags: run.out.diags ++ [d] }, cache: cache }
+      }
     }
   }
   for f in tm.fns {
-    out = walk_expr(ICx { ..base, consts: out.consts, blocks: out.blocks }, fuel, f.body, out)
+    run = walk_expr(ICx { ..base, consts: run.out.consts, blocks: run.out.blocks },
+      fuel, f.body, run)
   }
   for t in tm.tests {
-    out = walk_expr(ICx { ..base, consts: out.consts, blocks: out.blocks }, fuel, t.body, out)
+    run = walk_expr(ICx { ..base, consts: run.out.consts, blocks: run.out.blocks },
+      fuel, t.body, run)
   }
-  out
+  run
 }
 
 # ---- tests ----
@@ -2470,7 +2562,7 @@ test "Map and Set calls have signatures but remain ordinary comptime refusals" {
 
 test "lowering invariant panics cross both comptime lowering boundaries" {
   let icx0 = probe_icx()
-  match catch_panic(() => fold_expr(icx0, 1000, XError(3, 4), 3, 4)) {
+  match catch_panic(() => fold_expr(icx0, 1000, empty_cache(), XError(3, 4), 3, 4)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert e.message == "lower: XError reached lowering" }
   }
@@ -2504,6 +2596,50 @@ test "consts evaluate in declaration order and fold across references" {
   assert map.get(out.consts, "A") == Some(VInt(3))
   assert map.get(out.consts, "B") == Some(VList([VInt(3), VInt(4)]))
   assert map.get(out.consts, "C") == Some(VStr("x3"))
+}
+
+test "one module's lowering cache outlives the expression that filled it" {
+  # `helper` is called from two consts, and each of the last two consts lifts
+  # a lambda of its own. Both halves of the cache are read from the run that
+  # produced them, because from outside `eval_comptime` neither is visible.
+  let src = "fn helper(x: Int) -> Int = x + 1\n" ++
+    "const A: Int = helper(1)\n" ++
+    "const B: Int = helper(10)\n" ++
+    "const C: Int = {\n" ++
+    "  let f = (x: Int) => x * 2\n" ++
+    "  f(3)\n" ++
+    "}\n" ++
+    "const D: Int = {\n" ++
+    "  let g = (x: Int) => x * 3\n" ++
+    "  g(4)\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("m"), Some("m.dawn")), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let run = eval_module(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(run.out.diags) == 0
+  assert map.get(run.out.consts, "A") == Some(VInt(2))
+  assert map.get(run.out.consts, "B") == Some(VInt(11))
+  assert map.get(run.out.consts, "C") == Some(VInt(6))
+  assert map.get(run.out.consts, "D") == Some(VInt(12))
+
+  let cached = (k: String) =>
+    match map.get(run.cache.fns, k) {
+      Some(_) -> true
+      None -> false
+    }
+  # lowered while folding `A`, and still there four expressions later
+  assert cached("m.helper")
+  # each lifted lambda kept a name of its own. Restarting the counter per
+  # expression would file `g` on top of `f` under `m.lambda$0`
+  assert cached("m.lambda$0")
+  assert cached("m.lambda$1")
+  assert run.cache.next_lam == 2
 }
 
 test "const initializers run blocks, local fns, matches and loops" {
