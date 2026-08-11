@@ -654,6 +654,7 @@ class Observation:
 class Map:
     def __init__(self, tree):
         self.tree = tree
+        self.manifests = manifests(tree)
         self.gates = gates_of(tree)
         self.by_path = {}
         self.owned = {}
@@ -779,15 +780,37 @@ class Map:
         return None
 
     def core_modules(self):
-        """Module name -> source path, from the golden that records them."""
+        """Module name -> source path, from the golden that records them.
+
+        A module whose package no name declares is left out and reported
+        separately: "this package is not declared anywhere" and "this file is
+        missing" are two different pieces of news, and folding them together
+        would let one mutant redden both.
+        """
         record = self.tree.read(CORE_GOLDEN)
+        packages, _ = self.manifests
         out = {}
         for line in record.splitlines():
             parts = line.split()
             if len(parts) != 2 or not parts[1].endswith(".core"):
                 continue
             module = parts[1][2:-len(".core")] if parts[1].startswith("./") else parts[1][:-len(".core")]
-            out[module] = module_source(module, self.tree)
+            path, unknown = module_source(module, self.tree, packages)
+            if unknown is None:
+                out[module] = path
+        return out
+
+    def undeclared_packages(self):
+        """Golden modules whose package name no manifest declares."""
+        packages, _ = self.manifests
+        out = []
+        for line in self.tree.read(CORE_GOLDEN).splitlines():
+            parts = line.split()
+            if len(parts) != 2 or not parts[1].endswith(".core"):
+                continue
+            module = parts[1][2:-len(".core")] if parts[1].startswith("./") else parts[1][:-len(".core")]
+            if module_source(module, self.tree, packages)[1] is not None:
+                out.append(module)
         return out
 
     def _rule_c(self):
@@ -963,28 +986,91 @@ class Map:
         return out
 
 
-def module_source(module, tree):
+PKG_PREFIX = "dawn$pkg$"
+MANIFEST = "dawn.toml"
+MANIFEST_NAME = re.compile(r'^\s*name\s*=\s*"([^"]+)"\s*$')
+
+
+def manifests(tree):
+    """-> ({package name: its directory}, [problem]).
+
+    A package's directory is not its name, and reading it as one is how this
+    file's own rule C broke: `dawn$pkg$compiler_plan` was resolved by turning
+    the `_` back into a `-` and looking for a directory of that name, which
+    happened to work and was two guesses stacked. Neither holds.
+    `compiler-plan/dawn.toml` declares `name = "compiler_plan"` with the
+    underscore, so there is no mangling to undo; and `packages/web/dawn.toml`
+    already declares `name = "web2"` under the repository's v2-in-name rule,
+    in a directory still called `web`. The moment that package enters the Core
+    golden the guess reds on a correct tree.
+
+    So the name comes from the manifest that declares it, which is the only
+    thing that ever knew it. `analyze.dawn` builds the class name as
+    `dawn$pkg$` ++ the manifest's `name`, verbatim.
+
+    The scan stops at the first `[section]` header: `name` inside `[deps]` is
+    a dependency alias, not this package's name.
+    """
+    by_name, source, problems = {}, {}, []
+    for f in tree.files:
+        if f != MANIFEST and not f.endswith("/" + MANIFEST):
+            continue
+        directory = f[: -(len(MANIFEST) + 1)] if "/" in f else "."
+        name = None
+        for line in tree.read(f).splitlines():
+            if line.lstrip().startswith("["):
+                break
+            match = MANIFEST_NAME.match(line)
+            if match:
+                name = match.group(1)
+                break
+        if name is None:
+            problems.append(
+                f"{f} declares no `name` before its first section, so the "
+                "package in that directory cannot be named by anything that "
+                "reads the golden"
+            )
+            continue
+        if name in by_name:
+            problems.append(
+                f"the package name `{name}` is declared by two manifests, "
+                f"{source[name]} and {f}, so a module recorded as "
+                f"`{PKG_PREFIX}{name}.<module>` names two directories"
+            )
+            continue
+        by_name[name] = directory
+        source[name] = f
+    return by_name, problems
+
+
+def module_source(module, tree, packages):
     """`check.checker` -> selfhost/src/check/checker.dawn, and the two other
     shapes the golden uses: `std.str` for the bundled std, and
-    `dawn$pkg$<name>.<module>` for a source package."""
-    pkg = None
-    if module.startswith("dawn$pkg$"):
-        rest = module[len("dawn$pkg$"):]
-        pkg, _, module = rest.partition(".")
-        pkg = pkg.replace("_", "-")
-    if pkg:
-        for cand in (
-            f"packages/{pkg}/src/{module.replace('.', '/')}.dawn",
-            f"{pkg}/src/{module.replace('.', '/')}.dawn",
-        ):
-            if cand in tree.fileset:
-                return cand
-        return None
+    `dawn$pkg$<name>.<module>` for a source package.
+
+    -> (path, None) when it resolves, (None, None) when the file is missing,
+    and (None, module) when no declared package name begins it.
+    """
+    if module.startswith(PKG_PREFIX):
+        rest = module[len(PKG_PREFIX):]
+        # the longest declared name this module begins with. Longest because a
+        # package may be named as a prefix of another, and the manifest set is
+        # what decides where the name ends; splitting on the first `.` would
+        # be a guess about the name's shape.
+        owner = None
+        for name in packages:
+            if rest.startswith(name + ".") and (owner is None or len(name) > len(owner)):
+                owner = name
+        if owner is None:
+            return None, module
+        inner = rest[len(owner) + 1:].replace(".", "/")
+        cand = f"{packages[owner]}/src/{inner}.dawn"
+        return (cand if cand in tree.fileset else None), None
     if module.startswith("std."):
         cand = f"std/{module[len('std.'):].replace('.', '/')}.dawn"
-        return cand if cand in tree.fileset else None
+        return (cand if cand in tree.fileset else None), None
     cand = f"selfhost/src/{module.replace('.', '/')}.dawn"
-    return cand if cand in tree.fileset else None
+    return (cand if cand in tree.fileset else None), None
 
 
 LABEL_SECTION_RE = re.compile(r"^#\s*-{2,}\s*(\S+?)\s*-{2,}\s*$")
@@ -1141,6 +1227,17 @@ def declared_window(root):
 def check_structure(gm):
     problems = list(gm.problems)
     tree = gm.tree
+
+    # the manifest map rule C resolves package modules through. A name that is
+    # declared twice, or not at all, is reported here and nowhere else, so that
+    # "the package is not named" and "the file is missing" stay two answers.
+    problems += gm.manifests[1]
+    for module in gm.undeclared_packages():
+        problems.append(
+            f"{CORE_GOLDEN} records module `{module}`, and no manifest "
+            "declares a package whose name begins it. A package's directory "
+            "is not its name; read dawn.toml"
+        )
 
     # every compiler module has a golden entry (rule C, the other direction)
     recorded = set()
@@ -1519,8 +1616,35 @@ class Baseline:
     """What the clean tree answers, for the assertions stated as a difference."""
 
     def __init__(self, tree):
+        self.tree = tree
         self.unwatched = len(Map(tree).unseen())
         self.coupling = choose_coupling(tree)
+        self.package = choose_package(tree)
+
+
+def choose_package(tree):
+    """-> (name, its manifest) for a package the Core golden records.
+
+    Chosen from the tree for the reason `choose_coupling` is: a hard-coded
+    package is a fixture nobody re-measures, and this one was caught being
+    exactly that. The mutants below named `json`, which is right here and
+    wrong on the branch that renames it to `json2` while keeping the
+    directory, so `--check` could not run there at all.
+    """
+    packages, _ = manifests(tree)
+    golden = tree.read(CORE_GOLDEN)
+    for name in sorted(packages):
+        manifest = f"{packages[name]}/{MANIFEST}"
+        if f"{PKG_PREFIX}{name}." not in golden:
+            continue
+        if tree.read(manifest).count(f'name = "{name}"') != 1:
+            continue
+        return name, manifest
+    raise SystemExit(
+        "gate-map selftest: no package in the Core golden has a manifest "
+        "declaring its name exactly once, so rule C's package half has "
+        "nothing to mutate"
+    )
 
 
 def choose_coupling(tree):
@@ -1558,6 +1682,22 @@ ASSERTIONS = [
         "golden_covers_selfhost",
         "every compiler module has an entry in the Core golden",
         lambda c, b: _clean(c.problems, "with no entry in"),
+    ),
+    (
+        "package_name_declared",
+        "every package the Core golden names is declared by a manifest, "
+        "which is the only thing that knows a package's name",
+        lambda c, b: _clean(c.problems, "no manifest declares a package"),
+    ),
+    (
+        "package_name_unambiguous",
+        "no package name is declared by two manifests",
+        lambda c, b: _clean(c.problems, "is declared by two manifests"),
+    ),
+    (
+        "manifest_names_its_package",
+        "every manifest names the package in its directory",
+        lambda c, b: _clean(c.problems, "declares no `name` before"),
     ),
     (
         "commands_resolve",
@@ -1667,6 +1807,43 @@ def swap(old, new):
     return apply
 
 
+def swap_all(old, new):
+    """A replacement that is meant to hit every occurrence, and at least one.
+
+    The stricter `swap` is wrong where the mutation is a rename across a
+    record: a package's golden entries are one line per module, and pinning
+    the count would make the selftest brittle about how many modules a package
+    has. What must still fail loudly is the anchor going away entirely.
+    """
+
+    def apply(text, where):
+        if old not in text:
+            raise SystemExit(
+                f"gate-map selftest: mutation anchor drifted in {where}: "
+                f"{old!r} appears nowhere. Repoint the mutant; a mutation that "
+                "does not happen is a green nobody earned"
+            )
+        return text.replace(old, new)
+
+    return apply
+
+
+def provide(content):
+    """The content of a file the mutant adds. No anchor, so nothing can drift,
+    but it must really be new: a mutant that quietly overwrites something is
+    testing whatever that was."""
+
+    def apply(text, where):
+        if text:
+            raise SystemExit(
+                f"gate-map selftest: {where} already exists, so the mutant "
+                "that adds it is testing something else"
+            )
+        return content
+
+    return apply
+
+
 def append(tail):
     """Append, having checked there is something to append to."""
 
@@ -1724,6 +1901,12 @@ def regenerate_record(gm, note="regenerated by the selftest"):
     return "\n".join(lines) + "\n"
 
 
+# A suffix and a path the tree never has, so a mutant that plants one is
+# planting something and not colliding with something.
+RENAMED = "_renamed_by_the_selftest"
+PROBE_MANIFEST = "scripts/gate-map/selftest-probe/dawn.toml"
+
+
 class Mutant:
     """One otherwise-valid tree (or record) with one thing wrong with it."""
 
@@ -1747,6 +1930,59 @@ def mutants(base):
             "golden-forgets-a-module",
             "rule C, backwards: a compiler module the golden does not record",
             edits={CORE_GOLDEN: drop_line("./main.core")},
+        ),
+        Mutant(
+            "package-renamed-in-its-manifest",
+            "rule C's package half. The manifest is the only thing that knows "
+            "a package's name, and while rule C guessed the name from the "
+            "directory this mutant was silent: nothing read the file it edits",
+            edits={
+                base.package[1]: swap(
+                    f'name = "{base.package[0]}"',
+                    f'name = "{base.package[0]}{RENAMED}"',
+                )
+            },
+        ),
+        Mutant(
+            "two-manifests-one-package-name",
+            "a package name that names two directories, so a golden module "
+            "under it would resolve to either. It adds a manifest rather than "
+            "editing one, which keeps it away from `package_name_declared`: "
+            "the added file sorts after the real one, so the golden still "
+            "resolves and only the ambiguity is news",
+            files=lambda fs: fs + [PROBE_MANIFEST],
+            edits={
+                PROBE_MANIFEST: provide(
+                    f'schema = 1\nname = "{base.package[0]}"\n'
+                )
+            },
+        ),
+        Mutant(
+            "a-manifest-that-names-nothing",
+            "a package with no name at all, added the same way and for the "
+            "same reason",
+            files=lambda fs: fs + [PROBE_MANIFEST],
+            edits={PROBE_MANIFEST: provide("schema = 1\n")},
+        ),
+        Mutant(
+            "package-whose-name-is-not-its-directory",
+            "the shape the lib-web3-json2 branch has, where a major bump "
+            "renames the package and keeps the directory. Recorded with an "
+            "empty red set: a manifest-driven rule C is unmoved by it, and a "
+            "rule C that resolved names to directories reddened "
+            "golden_module_resolves on a perfectly good tree, which is how "
+            "this was found. `package-renamed-in-its-manifest` edits the same "
+            "manifest and is counted, so the pair cannot go vacuous",
+            edits={
+                base.package[1]: swap(
+                    f'name = "{base.package[0]}"',
+                    f'name = "{base.package[0]}{RENAMED}"',
+                ),
+                CORE_GOLDEN: swap_all(
+                    f"{PKG_PREFIX}{base.package[0]}.",
+                    f"{PKG_PREFIX}{base.package[0]}{RENAMED}.",
+                ),
+            },
         ),
         Mutant(
             "workflow-runs-a-missing-script",
