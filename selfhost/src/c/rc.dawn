@@ -487,7 +487,7 @@ fn unloop(lid: Int, body: CExpr) -> Option[CStmt] = {
       let n = len(stmts)
       if n < 2 { return None }
       let ok_last = match stmts[n - 1] {
-        CSDiscard(x) -> not yields(x)
+        CSDiscard(x) -> not yields(x) && not jumps(x, lid, true, true)
         _ -> false
       }
       if not ok_last { return None }
@@ -1890,6 +1890,37 @@ test "the match once-loop is unlooped and its arm takes the binding" {
         _ -> panic("expected the branch tree")
       },
     _ -> panic("expected a block")
+  }
+}
+
+test "a source loop ending in break keeps its jump target" {
+  # while and range loops start with their exit test and end with the source
+  # body. A terminal break makes that look like lower_match unless unloop also
+  # inspects the last statement for jumps to this loop.
+  let loop_body = CBlock([
+    CSIf(CBool(false), CBreak(7), None),
+    CSDiscard(CBreak(7))
+  ], None, TyUnit)
+  let body = CBlock([CSLoop(7, loop_body, None)], Some(CInt(0)), TyInt)
+  let m = rc_module(one_fn([], TyInt, body))
+  assert len(rc_check(m)) == 0
+  match m.fns[0].body {
+    CBlock([CSLoop(7, _, _)], _, _) -> ()
+    _ -> panic("expected the source loop to retain its break target")
+  }
+}
+
+test "a source loop ending in continue keeps its jump target" {
+  let loop_body = CBlock([
+    CSIf(CBool(false), CBreak(7), None),
+    CSDiscard(CContinue(7))
+  ], None, TyUnit)
+  let body = CBlock([CSLoop(7, loop_body, None)], Some(CInt(0)), TyInt)
+  let m = rc_module(one_fn([], TyInt, body))
+  assert len(rc_check(m)) == 0
+  match m.fns[0].body {
+    CBlock([CSLoop(7, _, _)], _, _) -> ()
+    _ -> panic("expected the source loop to retain its continue target")
   }
 }
 

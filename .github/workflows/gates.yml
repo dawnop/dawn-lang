@@ -234,14 +234,12 @@ jobs:
   # they were 180s of the old `test` job.
   contracts:
     runs-on: ubuntu-latest
-    # The previous whole-job worst was 300s. SEM-14 expanded classfile-verify
-    # to thirteen compiling mutants; the full step took 191.08s locally. Until
-    # the first remote run exists, the provisional ceiling deliberately adds
-    # the rounded 192s to the old whole-job figure without subtracting the old
-    # classfile step: 300 + 192 = 492s. ARC-13 will replace this estimate with
-    # the first remote observation.
-    # budget: 3x 492s provisional worst
-    timeout-minutes: 25
+    # Run 31507403481 measured 583s for the complete SEM-14 contracts job.
+    # The source-loop label contract adds one private compiler build and
+    # measured 39s locally, so 622s is the conservative combined planning
+    # observation until a runner measures this exact job.
+    # budget: 3x 622s = 1866s
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -397,6 +395,14 @@ jobs:
       # because drop walks a 200k-node chain and must not do it by recursing.
       - name: RC contract
         run: ./scripts/rc-contract/run.sh
+
+      # RC's match-only unloop rewrite must not erase a source loop that still
+      # owns a named break or continue target. The compiling mutant restores
+      # the broad recognizer, runs the complete assertion set, and must turn
+      # only source_loop_target_is_retained red; the match optimization stays
+      # green as an independent control.
+      - name: source loop label contract
+        run: ./scripts/source-loop-label-contract/run.sh
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test
@@ -751,14 +757,11 @@ jobs:
   # node.
   docs:
     runs-on: ubuntu-latest
-    # The previous whole-job worst was 323s in run 31484738610. SEM-14 grew the
-    # builtin contract to twenty-six compiling mutants; the full step took
-    # 630.70s locally. Until the first remote run exists, the provisional
-    # ceiling deliberately adds the rounded 631s to the old whole-job figure
-    # without subtracting the old builtin step: 323 + 631 = 954s. ARC-13 will
-    # replace this estimate with the first remote observation.
-    # budget: 3x 954s provisional worst
-    timeout-minutes: 48
+    # Run 31507403481 completed every docs step successfully in 1158s. The
+    # builtin inventory step was 932s of that observation. This replaces the
+    # provisional local estimate with the first complete SEM-14 runner data.
+    # budget: 3x 1158s = 3474s
+    timeout-minutes: 58
     steps:
       - uses: actions/checkout@v4
 

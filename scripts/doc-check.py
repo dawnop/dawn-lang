@@ -37,9 +37,9 @@ gets disabled, and then it protects nothing):
   transl    every translated document registers the digest of the original it
             was translated from, that digest is still the original's, and its
             fenced blocks line up one-for-one with the original's
-  audit     the current four-state audit registry exactly partitions all 97
-            detail-heading IDs and agrees with its counts, topic matrix and
-            frozen P1 mapping; audit indexes do not copy task progress
+  audit     the current four-state audit registry exactly partitions all 98
+            detail-heading IDs while the historical layer stays frozen at 97;
+            counts, topic matrices and the frozen P1 mapping must agree
   evidence  every audit finding that carries an anchor agrees with the tree the
             anchor names: what an open finding describes is still there, and
             what a fixed one claims has arrived. An exact partition of wrong
@@ -359,7 +359,9 @@ CURRENT_AUDIT_SELF_CHECK = re.compile(
 AUDIT_P1_SELF_CHECK = re.compile(
     r"逐行重算结果：\*\*(\d+) fixed / (\d+) partial / (\d+) open / "
     r"(\d+) retracted = (\d+)\*\*")
-AUDIT_TOPIC_TOTALS = (
+AUDIT_FROZEN_TOTAL = 97
+AUDIT_CURRENT_TOTAL = 98
+AUDIT_FROZEN_TOPIC_TOTALS = (
     ("语法", 19),
     ("语义", 17),
     ("架构", 12),
@@ -367,10 +369,26 @@ AUDIT_TOPIC_TOTALS = (
     ("库", 19),
     ("治理", 13),
 )
-AUDIT_PREFIX_TOTALS = {
+AUDIT_CURRENT_TOPIC_TOTALS = (
+    ("语法", 19),
+    ("语义", 17),
+    ("架构", 13),
+    ("工具链", 17),
+    ("库", 19),
+    ("治理", 13),
+)
+AUDIT_FROZEN_PREFIX_TOTALS = {
     "SYN": 19,
     "SEM": 17,
     "ARC": 12,
+    "TOOL": 17,
+    "LIB": 19,
+    "GOV": 13,
+}
+AUDIT_CURRENT_PREFIX_TOTALS = {
+    "SYN": 19,
+    "SEM": 17,
+    "ARC": 13,
     "TOOL": 17,
     "LIB": 19,
     "GOV": 13,
@@ -1951,6 +1969,13 @@ def read_audit_details() -> dict[str, str]:
             for _prefix, rel in AUDIT_DETAIL_FILES}
 
 
+def expected_audit_universe(prefix_totals: dict[str, int]) -> set[str]:
+    """Build the contiguous ID universe owned by one audit layer."""
+    return {f"{prefix}-{number:02d}"
+            for prefix, maximum in prefix_totals.items()
+            for number in range(1, maximum + 1)}
+
+
 def audit_detail_universe(detail_texts: dict[str, str]) -> tuple[set[str], list[str]]:
     """Derive the finding universe from the six detailed audit heading sets."""
     universe: set[str] = set()
@@ -1973,12 +1998,13 @@ def audit_detail_universe(detail_texts: dict[str, str]) -> tuple[set[str], list[
                 continue
             owners[audit_id] = rel
             universe.add(audit_id)
-        expected_total = AUDIT_PREFIX_TOTALS[expected_prefix]
+        expected_total = AUDIT_CURRENT_PREFIX_TOTALS[expected_prefix]
         if family_count != expected_total:
             bad.append(f"audit detail {rel} contains {family_count} {expected_prefix} headings, "
-                       f"expected frozen total {expected_total}")
-    if len(universe) != 97:
-        bad.append(f"audit details contain {len(universe)} unique finding IDs, expected 97")
+                       f"expected current total {expected_total}")
+    if len(universe) != AUDIT_CURRENT_TOTAL:
+        bad.append(f"audit details contain {len(universe)} unique finding IDs, "
+                   f"expected {AUDIT_CURRENT_TOTAL}")
     return universe, bad
 
 
@@ -2031,11 +2057,12 @@ def audit_status_blocks(text: str, status_pattern: re.Pattern,
     return blocks, bad
 
 
-def expand_audit_ids(body: str) -> tuple[set[str], list[str]]:
+def expand_audit_ids(body: str,
+                     prefix_totals: dict[str, int]) -> tuple[set[str], list[str]]:
     ids: set[str] = set()
     bad: list[str] = []
     for prefix, number in AUDIT_ANY_ID.findall(body):
-        if prefix not in AUDIT_PREFIX_TOTALS:
+        if prefix not in prefix_totals:
             bad.append(f"unknown audit ID family {prefix}-{number}")
     for match in AUDIT_ID_RANGE.finditer(body):
         prefix, start_text, end_prefix, end_text = match.groups()
@@ -2047,7 +2074,7 @@ def expand_audit_ids(body: str) -> tuple[set[str], list[str]]:
         if start > end:
             bad.append(f"descending audit range {match.group(0)}")
             continue
-        maximum = AUDIT_PREFIX_TOTALS[prefix]
+        maximum = prefix_totals[prefix]
         if start < 1 or end > maximum:
             bad.append(f"out-of-range audit ID {match.group(0)}")
             continue
@@ -2061,7 +2088,8 @@ def expand_audit_ids(body: str) -> tuple[set[str], list[str]]:
 
 def parse_audit_state(text: str, status_pattern: re.Pattern,
                       state_order: tuple[str, ...],
-                      layer: str) -> tuple[dict[str, set[str]], dict[str, int], list[str]]:
+                      layer: str,
+                      prefix_totals: dict[str, int]) -> tuple[dict[str, set[str]], dict[str, int], list[str]]:
     blocks, bad = audit_status_blocks(text, status_pattern, state_order, layer)
     states: dict[str, set[str]] = {}
     headings = {name: int(value) for name, value in status_pattern.findall(text)}
@@ -2069,7 +2097,7 @@ def parse_audit_state(text: str, status_pattern: re.Pattern,
         if name not in blocks:
             states[name] = set()
             continue
-        ids, problems = expand_audit_ids(blocks[name][2])
+        ids, problems = expand_audit_ids(blocks[name][2], prefix_totals)
         states[name] = ids
         bad += [f"{name}: {problem}" for problem in problems]
     return states, headings, bad
@@ -2079,10 +2107,12 @@ def audit_partition_problems(text: str, universe: set[str],
                              status_pattern: re.Pattern,
                              state_order: tuple[str, ...],
                              self_check_pattern: re.Pattern,
-                             layer: str) -> tuple[dict[str, set[str]], list[str]]:
+                             layer: str, expected_total: int,
+                             topic_totals: tuple[tuple[str, int], ...],
+                             prefix_totals: dict[str, int]) -> tuple[dict[str, set[str]], list[str]]:
     """Validate one historical or current layer as an exact finding partition."""
     states, headings, bad = parse_audit_state(
-        text, status_pattern, state_order, layer)
+        text, status_pattern, state_order, layer, prefix_totals)
     if set(headings) != set(state_order):
         bad.append(f"{layer} status layer must contain one "
                    f"{'/'.join(state_order)} heading")
@@ -2121,10 +2151,11 @@ def audit_partition_problems(text: str, universe: set[str],
         if stated != headings:
             bad.append(f"{layer} self-check {stated} disagrees with "
                        f"status headings {headings}")
-        if sum(values[:-1]) != total or total != 97:
-            bad.append(f"{layer} status counts must add up to the frozen 97 findings")
+        if sum(values[:-1]) != total or total != expected_total:
+            bad.append(f"{layer} status counts must add up to "
+                       f"{expected_total} findings")
 
-    for topic, expected_total in AUDIT_TOPIC_TOTALS:
+    for topic, expected_topic_total in topic_totals:
         prefix = AUDIT_TOPIC_PREFIX[topic]
         actual_counts = tuple(sum(1 for audit_id in states[status]
                                   if audit_id.startswith(prefix + "-"))
@@ -2140,9 +2171,9 @@ def audit_partition_problems(text: str, universe: set[str],
         if stated_counts != actual_counts:
             bad.append(f"{layer} audit topic {topic} says {stated_counts}, "
                        f"ID lists say {actual_counts}")
-        if sum(actual_counts) != expected_total:
+        if sum(actual_counts) != expected_topic_total:
             bad.append(f"{layer} audit topic {topic} must cover "
-                       f"{expected_total} frozen findings")
+                       f"{expected_topic_total} findings")
     return states, bad
 
 
@@ -2235,15 +2266,18 @@ def audit_status_problems(text: str,
                           detail_texts: dict[str, str] | None = None) -> list[str]:
     """Validate historical evidence and the machine-authoritative current registry."""
     details = read_audit_details() if detail_texts is None else detail_texts
-    universe, bad = audit_detail_universe(details)
+    current_universe, bad = audit_detail_universe(details)
+    frozen_universe = expected_audit_universe(AUDIT_FROZEN_PREFIX_TOTALS)
 
     historical = markdown_section(text, HISTORICAL_AUDIT_HEADING)
     if historical is None:
         bad.append("historical audit status section is missing")
     else:
         _historical_states, problems = audit_partition_problems(
-            historical, universe, HISTORICAL_AUDIT_STATUS,
-            HISTORICAL_AUDIT_STATES, HISTORICAL_AUDIT_SELF_CHECK, "historical")
+            historical, frozen_universe, HISTORICAL_AUDIT_STATUS,
+            HISTORICAL_AUDIT_STATES, HISTORICAL_AUDIT_SELF_CHECK, "historical",
+            AUDIT_FROZEN_TOTAL, AUDIT_FROZEN_TOPIC_TOTALS,
+            AUDIT_FROZEN_PREFIX_TOTALS)
         bad += problems
 
     current = markdown_section(text, CURRENT_AUDIT_HEADING)
@@ -2252,8 +2286,9 @@ def audit_status_problems(text: str,
         bad.append("machine-authoritative current audit status section is missing")
     else:
         current_states, problems = audit_partition_problems(
-            current, universe, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES,
-            CURRENT_AUDIT_SELF_CHECK, "current")
+            current, current_universe, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES,
+            CURRENT_AUDIT_SELF_CHECK, "current", AUDIT_CURRENT_TOTAL,
+            AUDIT_CURRENT_TOPIC_TOTALS, AUDIT_CURRENT_PREFIX_TOTALS)
         bad += problems
     bad += audit_p1_mapping_problems(text, current_states, details)
     return bad
@@ -2455,7 +2490,8 @@ def check_audit_anchors() -> tuple[list[str], int]:
         return [f"{path.relative_to(ROOT)}: machine-authoritative current audit "
                 f"status section is missing"], 0
     states, _headings, problems = parse_audit_state(
-        current, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current")
+        current, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current",
+        AUDIT_CURRENT_PREFIX_TOTALS)
     if problems:
         return [], 0
     bad, resolved = audit_anchor_problems(
@@ -2544,7 +2580,8 @@ def check_audit_anchors_selftest() -> tuple[list[str], int]:
     if current is None:
         return ["audit-anchor self-test: current status section is missing"], 0
     states, _headings, problems = parse_audit_state(
-        current, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current")
+        current, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current",
+        AUDIT_CURRENT_PREFIX_TOTALS)
     if problems:
         return ["audit-anchor self-test: current status layer does not parse"], 0
     sources = read_audit_anchor_sources(details)
@@ -2734,12 +2771,13 @@ def rewrite_audit_summaries(text: str, states: dict[str, set[str]],
                             status_pattern: re.Pattern,
                             state_order: tuple[str, ...],
                             self_check_pattern: re.Pattern,
-                            status_line, self_check_line) -> str:
+                            status_line, self_check_line,
+                            topic_totals: tuple[tuple[str, int], ...]) -> str:
     counts = audit_counts(states)
     text = status_pattern.sub(
         lambda match: status_line(match.group(1), counts[match.group(1)]), text)
     text = self_check_pattern.sub(self_check_line(counts), text, count=1)
-    for topic, _ in AUDIT_TOPIC_TOTALS:
+    for topic, _ in topic_totals:
         prefix = AUDIT_TOPIC_PREFIX[topic]
         topic_counts = tuple(sum(1 for audit_id in states[status]
                                  if audit_id.startswith(prefix + "-"))
@@ -2755,7 +2793,9 @@ def render_audit_statuses(text: str, states: dict[str, set[str]],
                           status_pattern: re.Pattern,
                           state_order: tuple[str, ...], layer: str,
                           status_line, self_check_pattern: re.Pattern,
-                          self_check_line) -> str:
+                          self_check_line,
+                          topic_totals: tuple[tuple[str, int], ...],
+                          prefix_totals: dict[str, int]) -> str:
     blocks, problems = audit_status_blocks(text, status_pattern, state_order, layer)
     if problems:
         return text
@@ -2763,7 +2803,7 @@ def render_audit_statuses(text: str, states: dict[str, set[str]],
     rendered: list[str] = []
     for status in state_order:
         rendered.append(status_line(status, len(states[status])) + "\n")
-        prefixes = list(AUDIT_PREFIX_TOTALS)
+        prefixes = list(prefix_totals)
         prefixes += sorted({audit_id.split("-", 1)[0] for audit_id in states[status]}
                            - set(prefixes))
         for prefix in prefixes:
@@ -2778,7 +2818,7 @@ def render_audit_statuses(text: str, states: dict[str, set[str]],
     updated = text[:start] + "\n".join(rendered).rstrip() + "\n\n" + text[end:].lstrip("\n")
     return rewrite_audit_summaries(
         updated, states, status_pattern, state_order, self_check_pattern,
-        status_line, self_check_line)
+        status_line, self_check_line, topic_totals)
 
 
 def historical_status_line(status: str, count: int) -> str:
@@ -2787,7 +2827,7 @@ def historical_status_line(status: str, count: int) -> str:
 
 def historical_self_check_line(counts: dict[str, int]) -> str:
     return (f"计数自检：**{counts['已修']} 已修 + {counts['部分']} 部分 + "
-            f"{counts['开放']} 开放 = 97**")
+            f"{counts['开放']} 开放 = {AUDIT_FROZEN_TOTAL}**")
 
 
 def current_status_line(status: str, count: int) -> str:
@@ -2796,7 +2836,8 @@ def current_status_line(status: str, count: int) -> str:
 
 def current_self_check_line(counts: dict[str, int]) -> str:
     return (f"当前计数自检：**{counts['fixed']} fixed + {counts['partial']} partial + "
-            f"{counts['open']} open + {counts['retracted']} retracted = 97**")
+            f"{counts['open']} open + {counts['retracted']} retracted = "
+            f"{AUDIT_CURRENT_TOTAL}**")
 
 
 def rewrite_historical_audit_summaries(text: str,
@@ -2804,7 +2845,7 @@ def rewrite_historical_audit_summaries(text: str,
     return rewrite_audit_summaries(
         text, states, HISTORICAL_AUDIT_STATUS, HISTORICAL_AUDIT_STATES,
         HISTORICAL_AUDIT_SELF_CHECK, historical_status_line,
-        historical_self_check_line)
+        historical_self_check_line, AUDIT_FROZEN_TOPIC_TOTALS)
 
 
 def render_historical_audit_statuses(text: str,
@@ -2812,14 +2853,16 @@ def render_historical_audit_statuses(text: str,
     return render_audit_statuses(
         text, states, HISTORICAL_AUDIT_STATUS, HISTORICAL_AUDIT_STATES,
         "historical", historical_status_line, HISTORICAL_AUDIT_SELF_CHECK,
-        historical_self_check_line)
+        historical_self_check_line, AUDIT_FROZEN_TOPIC_TOTALS,
+        AUDIT_FROZEN_PREFIX_TOTALS)
 
 
 def render_current_audit_statuses(text: str,
                                   states: dict[str, set[str]]) -> str:
     return render_audit_statuses(
         text, states, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current",
-        current_status_line, CURRENT_AUDIT_SELF_CHECK, current_self_check_line)
+        current_status_line, CURRENT_AUDIT_SELF_CHECK, current_self_check_line,
+        AUDIT_CURRENT_TOPIC_TOTALS, AUDIT_CURRENT_PREFIX_TOTALS)
 
 
 def check_historical_audit_status_selftest() -> tuple[list[str], int]:
@@ -2831,7 +2874,8 @@ def check_historical_audit_status_selftest() -> tuple[list[str], int]:
     if baseline:
         return [f"audit status self-test baseline is invalid: {baseline[0]}"], 0
     states, _, _ = parse_audit_state(
-        text, HISTORICAL_AUDIT_STATUS, HISTORICAL_AUDIT_STATES, "historical")
+        text, HISTORICAL_AUDIT_STATUS, HISTORICAL_AUDIT_STATES, "historical",
+        AUDIT_FROZEN_PREFIX_TOTALS)
     if not states["开放"]:
         return ["audit status self-test: no open finding available for migration"], 0
     moved = sorted(states["开放"])[0]
@@ -2880,7 +2924,24 @@ def check_historical_audit_status_selftest() -> tuple[list[str], int]:
     problems = audit_status_problems(text, missing_detail)
     if not any("contains 18 SYN headings" in problem for problem in problems):
         return ["audit status self-test: a finding omitted from a detail stayed green"], 0
-    return [], 7
+
+    current_universe, universe_problems = audit_detail_universe(details)
+    if universe_problems:
+        return [f"audit status self-test: current universe is invalid: "
+                f"{universe_problems[0]}"], 0
+    frozen_universe = expected_audit_universe(AUDIT_FROZEN_PREFIX_TOTALS)
+    post_frozen = sorted(current_universe - frozen_universe)
+    if not post_frozen:
+        return ["audit status self-test: no post-freeze finding exercises the split"], 0
+    leaked = {status: set(ids) for status, ids in states.items()}
+    leaked["已修"].add(post_frozen[0])
+    problems = audit_status_problems(
+        render_historical_audit_statuses(text, leaked), details)
+    if not any(f"out-of-range audit ID `{post_frozen[0]}`" in problem
+               for problem in problems):
+        return ["audit status self-test: a post-freeze finding entered the "
+                "historical universe without turning red"], 0
+    return [], 8
 
 
 def check_current_audit_status_selftest() -> tuple[list[str], int]:
@@ -2892,7 +2953,8 @@ def check_current_audit_status_selftest() -> tuple[list[str], int]:
     if baseline:
         return [f"current audit status self-test baseline is invalid: {baseline[0]}"], 0
     states, _, _ = parse_audit_state(
-        text, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current")
+        text, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current",
+        AUDIT_CURRENT_PREFIX_TOTALS)
     p1_ids, _ = audit_p1_universe(details)
     candidates = sorted(states["open"] - p1_ids)
     if not candidates:

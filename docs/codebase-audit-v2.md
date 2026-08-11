@@ -1,7 +1,7 @@
 # Dawn 代码库精细审查 v2
 
 > 状态：**current** —— 保留 v0.60.0 / `86f6a0f63960` 的冻结审查基线；本文件的
-> “机器权威的当前四状态层”是 97 项 finding 处置的唯一当前状态源，详细证据在
+> “机器权威的当前四状态层”是 98 项 finding 处置的唯一当前状态源，详细证据在
 > `docs/codebase-audit-v2/`。
 >
 > 审查方式：六专题并行只读审查 + 主审去重、静态复核和少量无副作用探针。
@@ -9,7 +9,7 @@
 
 ## 1. 一句话结论
 
-Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 Dawn 集合与相当完整的门禁，旧审查中的两个 P0 和多项协议缺陷已经不再成立；v0.60.0 冻结基线记录 **1 个未动态验证的 P0 候选、29 个 P1、55 个 P2、12 个 P3**，该严重度表不随后续处置重写。97 项 finding 的当前处置只读 §2 的机器权威四状态层；TOOL-05/06 已随共享 LSP workspace 与 target-scoped Java classpath 关闭，GOV-04 已由单一状态源与行为负控关闭，TOOL-14 已随完整 v2 launcher generation 合同关闭，当前 P1 优先级是两项 partial 的边界收口，以及仍需维护者裁决的 Cursor 契约。
+Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 Dawn 集合与相当完整的门禁，旧审查中的两个 P0 和多项协议缺陷已经不再成立；v0.60.0 冻结基线记录 **1 个未动态验证的 P0 候选、29 个 P1、55 个 P2、12 个 P3**，该严重度表不随后续处置重写。98 项 finding 的当前处置只读 §2 的机器权威四状态层；TOOL-05/06 已随共享 LSP workspace 与 target-scoped Java classpath 关闭，GOV-04 已由单一状态源与行为负控关闭，TOOL-14 已随完整 v2 launcher generation 合同关闭，当前 P1 优先级是两项 partial 的边界收口，以及仍需维护者裁决的 Cursor 契约。
 
 ## 2. 基线与口径
 
@@ -91,9 +91,10 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 > generation（fail-closed hasher、framed digests、pre/post re-plan、可恢复 commit-marker）
 > 关闭 `TOOL-14`，GOV-04 又把本节收成机器校验的
 > 唯一当前状态源。上一个三状态快照不删除、不改写其 ID 清单；这里增加 `retracted`，
-> 把“实现修好”与“复核后不再认定为缺陷”分开。六份明细中的 97 个 finding 标题定义
-> ID universe；本节必须对它无重复、无遗漏、无未知 ID 地精确分区，并与专题矩阵和冻结
-> P1 映射一致。
+> 把“实现修好”与“复核后不再认定为缺陷”分开。基线后的 `ARC-13` 作为新增 finding
+> 直接以 fixed 入账，因此六份明细中的 98 个标题定义当前 ID universe；冻结历史层仍只
+> 覆盖原 97 项，冻结 P1 映射仍只覆盖原 29 项。本节必须对当前 universe 无重复、无遗漏、
+> 无未知 ID 地精确分区，并与当前专题矩阵和冻结 P1 映射一致。
 
 | 状态 | 当前含义 |
 |---|---|
@@ -102,11 +103,11 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（76）
+#### 当前 fixed（77）
 
 - 语法（16）：`SYN-01`–`SYN-03`、`SYN-05`–`SYN-12`、`SYN-14`–`SYN-16`、`SYN-18`、`SYN-19`。
 - 语义（11）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-11`–`SEM-15`、`SEM-17`。
-- 架构（5）：`ARC-03`–`ARC-06`、`ARC-12`。
+- 架构（6）：`ARC-03`–`ARC-06`、`ARC-12`、`ARC-13`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
 - 库（14）：`LIB-01`–`LIB-05`、`LIB-07`–`LIB-12`、`LIB-14`、`LIB-15`、`LIB-17`。
 - 治理（13）：`GOV-01`–`GOV-13`。
@@ -127,8 +128,8 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**76 fixed + 4 partial + 15 open + 2 retracted = 97**。逐专题矩阵：
-语法 **16/0/3/0**、语义 **11/0/4/2**、架构 **5/3/4/0**、工具链 **17/0/0/0**、
+当前计数自检：**77 fixed + 4 partial + 15 open + 2 retracted = 98**。逐专题矩阵：
+语法 **16/0/3/0**、语义 **11/0/4/2**、架构 **6/3/4/0**、工具链 **17/0/0/0**、
 库 **14/1/4/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
@@ -148,6 +149,9 @@ export-surface pass）、`TOOL-13`（`3f5d64c` 的 `atomic_write_file` 调用点
 随后 `SEM-14` open → fixed：用户可在所有函数返回位书写硬保留的 `Never`，storage 位置继续
 拒绝；JVM 的 direct、dynamic、closure、trait/impl/default 与 SAM bottom call 统一走
 non-fallthrough seam，并由双后端、classfile、checker、LSP 与 doc 合同固定。
+其后新增 `ARC-13` 并直接记 fixed：native RC 的 `unloop` 现在拒绝删除终止语句仍跳向的
+`CSLoop`，源码 `break`/`continue` 不再留下无目标 C goto；独立 match control 与删除 mutant
+共同固定修复边界。它是冻结基线后的新增项，不改写原 97 项严重度与 29 项 P1 索引。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -176,7 +180,7 @@ non-fallthrough seam，并由双后端、classfile、checker、LSP 与 doc 合�
 | `LIB-18` | streaming body 的 `transferTo` 正常 EOF 与异常均没有长度/结果契约；上游 clean truncation 可能被当作成功结束 | 只记录静态协议候选，未构造网络探针；不另计严重度。 |
 
 这三项是当前“先记账、暂不验证”的最高风险候选；它们不改变 v0.60 冻结严重度表，也不在
-97 项之外新增 ID。
+98 项之外新增 ID。
 
 ### 4.2 冻结 v0.60 P0 候选（`SEM-01` 当前已修）
 

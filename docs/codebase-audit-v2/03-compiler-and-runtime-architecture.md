@@ -9,8 +9,8 @@
 - Core IR、checker split 与两个独立后端都是真实进展；“没有 lowered IR”“大文件就继续拆”应撤回。
 - 当前主要风险已经从物理文件大小转为**阶段契约没有类型化**：裸名字构依赖图、平行 List 靠下标对齐、稳定 identity 与临时 ID 共用全局计数器、内部 panic 被用户错误通道吞掉。
 - native failure runtime 的三项 P1 已由 #193 收口；`ARC-12` 也已由模块级 `LowerCache`
-  收口。当前结构债转为 `ARC-01/02/11` 的 partial 边界，以及 `ARC-07/08` 的
-  typed-product / stable-origin 前置。
+  收口，`ARC-13` 也已关闭 native RC 错删源码循环目标的问题。当前结构债转为
+  `ARC-01/02/11` 的 partial 边界，以及 `ARC-07/08` 的 typed-product / stable-origin 前置。
 
 ## ARC-01 — P1 — 返回类型推断把局部名字当顶层依赖
 
@@ -281,3 +281,25 @@
 - **历史证据（修复前基线，S）：** `ESt` 持有 lowered function/dictionary cache，但每个 `fold_expr` 都 `fresh_st` 清空，module const 各自调用。
 - **影响：** 多个 const 调同一 helper 时重复 lowering 与 lambda lifting；comptime 使用增长后形成无必要编译时间。
 - **建议：** 拆 module-level `LowerCache` 与 per-evaluation fuel/env/depth；lifted-lambda identity 使用稳定 key。
+
+## ARC-13（P1）：native RC 的 `unloop` 可删除仍被跳转指向的 loop label
+
+> **已修（2026-08-12）：** `unloop` 的最后终止条件现在同时要求表达式不产生值，且不含
+> 指向当前 loop id 的 `break` 或 `continue`。源码循环继续保留 `CSLoop`，match lowering
+> 的一次性循环仍按原规则还原成分支树。
+
+- **证据：V。** Core 用同一个 loop id 连接 `CSLoop` 与 `CBreak`/`CContinue`。range `for`
+  和 `while` 都可能形成“退出测试加发散尾语句”的形状；旧 `unloop` 只检查尾语句
+  `not yields(x)`，会把源码 body 的直接跳转误认成 match 的不可达 tail。
+- **影响：** native RC pass 删除声明目标的 `CSLoop`，C emitter 却继续发出
+  `goto Lx_end` 或 `goto Lx_step`。同一合法程序在 JVM 可运行，在 native 的 C 编译阶段
+  因标签不存在而失败。
+- **修复：** 复用已有递归 `jumps` walker，把终止判据收紧为
+  `not yields(x) && not jumps(x, lid, true, true)`。不增加 loop kind，不关闭 match 的
+  unloop 优化，也不让 C emitter 猜测缺失标签的位置。
+- **门禁：** `scripts/spike-native/source_loop_targets.dawn` 固定 range、iterable、while、
+  嵌套和条件跳转；`scripts/source-loop-label-contract/run.sh` 另有 compile-only continue
+  目标与独立 `match_unloop_is_retained` control。删除新 jump 条件的 compiling mutant 必须
+  构建，且 `--version` 输出单行 `dawn ...`；严格 matrix preflight 拒绝字段撒谎、重复、
+  缺失和未知记录，并要求它只能把 `source_loop_target_is_retained` 变红。
+- **设计记录：** [native-loop-control-design.md](../native-loop-control-design.md)。
