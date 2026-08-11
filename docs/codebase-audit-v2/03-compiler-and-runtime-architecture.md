@@ -146,6 +146,13 @@
 - **影响：** error recovery、filter、reorder 或独立阶段测试只要造成长度偏差，就先 OOB；API 类型不能表达“这是该 declaration 的产物”。
 - **建议：** 使用 `RegisteredImpl`、`CheckedImplMethod`、`LoweredFn { source_meta, core, lifts }` 等具名产品；短期至少先检查长度/name 并报 compiler invariant。
 
+- **订正（#196 分诊，2026-08-11 写回）。** 上面引了
+  [`arch-split-design.md`](../arch-split-design.md) 对 `emit_module` 位置对齐的**边界描述**，
+  漏引了紧接着的那条否决：该文同一节写着「`emit_module` 的 TModule/LMod 位置对齐不碰……
+  非目标」，并顺手记下同一个 OOB「本批不修」，理由是按 Core 遍历会改方法进 class 的顺序，
+  即 Emit-Change。所以本项**只有 checker 那半是活账**（`impl_sigs[ii]`/`msigs[mi]`，
+  对应 #88 的余账「`pass_register_impls` 可拆块」）；emit 那半判不做，重开要先推翻上述非目标。
+
 ## ARC-08 — P2 — 返回推断调度与回填至少二次复杂度
 
 <!-- audit-anchor: present selfhost/src/check/checker.dawn | list.take(sealed, idx) -->
@@ -153,6 +160,12 @@
 - **证据：S。** pending functions 每轮全表扫描：`selfhost/src/check/checker.dawn:7337`；逆拓扑依赖链可每轮只完成一个。每完成一项又用 `take ++ [x] ++ drop` 重建 `sealed` 与 `tfuns`：`selfhost/src/check/checker.dawn:7352`；`take/drop` 会遍历复制：`std/list.dawn:195`、`:201`。
 - **影响：** 顶层函数数 F 时，单回填已经 O(F²)；generated code、超大 module 与未来 incremental check 会首先暴露。
 - **建议：** indegree queue/SCC 一次调度，按 declaration index 写入 mutable builder/array，最后一次组装 immutable list。
+
+- **订正（#196 分诊，2026-08-11 写回）。** 上面**低估了**复杂度。`std/list.dawn` 的
+  `slice_go` 每步 `acc ++ [..]`，而 `take` 与 `drop` 都建在它上面，所以两者各自就是 O(n²)；
+  `take ++ [x] ++ drop` 的单次回填因而是 O(F²) 到 O(F³)，不是原文说的 O(F²)。
+  另一条落地约束：**必须按 declaration index 写回**，否则取号顺序改变会触发与 `ARC-09`
+  同款的全仓 ID 漂移。本项与 `ARC-01` 是同一段代码，同刀改最省。
 
 ## ARC-09 — P2 — 一个全局 `next_id` 混合稳定身份与临时身份
 
@@ -168,6 +181,16 @@
 - **影响：** 前一模块多一个 local/type variable，会让后续 nominal ID 与 C symbol 大面积漂移，扩大 cache invalidation 与无语义 golden diff。
 - **建议：** 拆成 `NominalId/TraitId/EffectId/SymId/TyVarId/TempId`；nominal 按 module declaration 稳定分配，temporary 限在 function/module。
 
+- **判不做（#196 分诊，2026-08-11 写回）。** **三处成文否决**，v2 立项时都没有对账：
+  `scripts/selfhost-core-diff.sh` 的 NORM 注释逐字写「Splitting the counter would rename
+  every generated symbol in the language, a far larger Emit-Change than the noise it
+  removes, so the answer is to name the noise rather than to stop making it」；
+  [`arch-split-design.md`](../arch-split-design.md) 的 D8/§6.2 判 #122「不进这批」，理由是
+  会毁掉 flat dump 那半边唯一完好的证明；[`operator-traits-design.md`](../operator-traits-design.md)
+  §3.5 已把它单独立案为 `fix/next-id-past-prelude` 并说明「不该由刀 3 的账单吸收」。
+  v2 新增的论据是「扩大 cache invalidation」，**但今天没有增量编译，这个收益是空的**。
+  **重开条件：** 增量 check 立项。
+
 ## ARC-10 — P2 — 512 MB 栈被当作通用递归策略
 
 <!-- audit-anchor: present bin/dawn | -Xss512m -->
@@ -181,6 +204,17 @@
 - 现有裁决正确指出“只 trampoline comptime”不能摘掉它：`docs/audit/ceval-trampoline-verdict.md:245`；因此本项不是复活旧方案。
 - **影响：** 地址空间受限环境难以启动；native executable 强制 pthread 与大 virtual stack，降低 embedding/容器适配；真正 stack exhaustion 仍可能是 silent crash，只是阈值被推远。
 - **建议：** 分阶段削减：parser/checker 对抗性 recursion 先改 iterative，运行期一般 tail call/关键 std recursion 再处理；把 stack size 变为有上限的可配置策略并记录实际 high-water，而非永久 ABI 常量。
+
+- **判不做（#196 分诊，2026-08-11 写回）。** 事实成立，三条建议里两条撞裁决、一条已是
+  事实：① 「分阶段削减，parser/checker 先改 iterative」撞
+  [`ceval-trampoline-verdict.md`](../audit/ceval-trampoline-verdict.md) §七「**要做就在同一批里做**，
+  单独摘掉其中一个，`-Xss` 一分不能少」，且实测 checker 每 MB 323 层比 ceval 的 159 更差，
+  分阶段买不到任何下降；② 「运行期一般尾调」撞
+  [`native-backend-plan.md`](../native-backend-plan.md) 的裁决，摘掉它是「语言退步，不是
+  清债」；③ 「变为可配置」**已经是事实**（`bin/dawn` 的 `${DAWN_JVM_OPTS:-…}`）。唯一
+  不冲突的「记录 high-water」也已在 `selfhost/src/ir/interp.dawn` 关账（写下 128m 实测
+  分界并明写「Do not make it dynamic」）。**重开条件：** `ceval-trampoline-verdict.md` §七
+  的三条，任一成立。
 
 ## ARC-11 — P3 — comptime 诊断只剩外层 initializer span（部分修复）
 

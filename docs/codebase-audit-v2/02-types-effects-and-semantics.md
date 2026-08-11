@@ -70,6 +70,15 @@
 - **影响：** scanner 和 parser 大量继续比较裸整数/`char.code`，早期语言新增 `Char` 的收益被最核心遍历接口抵消。
 - **建议：** 分成 `current(c) -> Char`（要求 not done，越界 panic）与 `peek(c) -> Option[Char]`；性能敏感的内部 intrinsic 可保留 sentinel，但不应成为 public std contract。
 
+- **判不做（#196 分诊，2026-08-11 写回）。** 发现属实，建议撞既有裁决。判据是
+  **「这个函数的答案是不是永远是一个字符」**：`cursor.char` 不是，它还要表达 end，
+  所以它不该拿 `Char` 这个类型。`Char` 面是 `str.at`/`str.chars`/`code_points`，
+  `cursor.char` 是那一层**下面**的原语。撞的裁决：
+  [`nominal-types-design.md`](../audit/nominal-types-design.md) §7.3（裁决原文与同一句判据）、
+  [`re-audit-b-decisions.md`](../audit/re-audit-b-decisions.md) 的 RD-07 **A**（越界策略三判据），
+  以及 `docs/spec.md` 把 `-1` 列为唯一具名例外；那条具名正是为了不被顺手改掉。
+  **重开条件：** 有人先推翻 RD-07 A 的三判据。
+
 ## SEM-06 — P1（已修）— Java `Object` 隐式窄化插入隐藏 `CHECKCAST`
 
 > **后续处置（2026-08-09）：已修。** Java overload scorer 现在只接受 exact match 与
@@ -117,6 +126,14 @@
 - **影响：** generic abstraction 对类型替换不闭合，同一数据形状因为“直接写”或“经 type parameter”得到不同能力。
 - **建议：** 允许 Unit 字段，并提供平凡 `Eq/Hash/Show/Ord`。反向禁止所有 `T = Unit` 会破坏 `Result[Unit,E]` 等常用 API，不建议。
 
+- **判不做（#196 分诊，2026-08-11 写回）。** 上面的 retracted 裁定与分诊一致，这里补
+  撞车出处：`Box[Unit]` 合法而 `Direct(value: Unit)` 非法是**有意的**。2026-07-27 的 #51
+  （[`native-backend-plan.md`](../native-backend-plan.md) §12）把五条 `Unit` 禁令删到只剩
+  构造子字段那一条，留下它的理由正是「它讲的是**建模**不是描述符」，`docs/spec.md` §2.1
+  也逐字写着「这是建模的说法」。「泛型能绕过」不是漏洞，是这条禁令从一开始就只约束直接
+  书写。**残余可议的只有标量集那半**（`selfhost/src/check/types.dawn` 的结构 eq/hash
+  scalar 集无 `TyUnit`），补它是 Emit-Change，收益不抵，故一并不做。
+
 ## SEM-09 — P2 — associated type 不能声明或接收 bound
 
 <!-- audit-anchor: present selfhost/src/check/checker.dawn | pub fn assoc_witness_err -->
@@ -130,6 +147,13 @@
 - **影响：** `Iter`/`Index` 的 generic consumer 不能声明 `C.Item: Show/Eq/Hash`，关联类型只能被搬运，难以用于真实算法。
 - **建议：** 支持 `type Item: Show` 与 `where C.Item: Show`/projection equality；dictionary 携带选中 impl 导出的关联证据。
 
+- **判不做（#196 分诊，2026-08-11 写回）。** 本体已由 #123 裁为搁置、等消费者，见
+  [`assoc-types-design.md`](../assoc-types-design.md) §7 开放问题 2。它留下的四处不一致
+  已在 #123 缺陷批修平：`C.Item` 上要 `Show`/`Ord`/`Eq`/`Hash` 一律在检查期拒绝、同一句
+  措辞、同一条 hint（`assoc_witness_err`）。修之前 `Eq`/`Hash` 是「检查期放行、lower 期
+  编译器 panic」，**那才是缺陷；今天的一致拒绝是答案不是症状**。
+  **重开条件：** 关联 witness 的表示、dictionary 传播与 `where C.Item: Trait` 语法一起定稿。
+
 ## SEM-10 — P2 — trait/impl 与具名 effect 不能组合
 
 <!-- audit-anchor: present selfhost/src/check/passes.dawn | trait methods cannot declare the effect -->
@@ -141,6 +165,12 @@
 - **证据：S。** v1 规则把 trait/impl method 限为 pure 或 `!io`：`docs/spec.md:1106`；pass 明确拒绝 named effect/effect var：`selfhost/src/check/passes.dawn:1158`。
 - **影响：** 无法定义泛型 state、parser、service、transaction trait；用户被迫在 trait API 退回 `Result`/`!io`，形成与语言效果系统并行的第二套抽象。
 - **建议：** 先允许 fixed named labels，再引入 trait/method-level effect parameters；dictionary 必须显式携带或捕获 evidence。
+
+- **判不做（#196 分诊，2026-08-11 写回）。** v1 的边界写在 spec §3.5，且**有明确前置**：
+  [`effects-design.md`](../effects-design.md) §4.5 写「trait/impl 方法 labels 必须为空……
+  解禁等 RX-10-B」，同文 §7 开放项 5 又把 RX-10-B 列为「trait 方法带效果行」的共同前置。
+  RX-10 已于 2026-07-31 裁 A，**效果参数 B 路线另立项**，那才是本条的入口。跳过前置直接
+  做，字典形状变更还要 Emit-Change 加一轮种子。**重开条件：** RX-10-B 立项。
 
 ## SEM-11 — P2 — panic/resource barriers 被硬编码为 `!io`（已分拆处置）
 
@@ -154,6 +184,10 @@
 - **边界：** 捕获确定性 pure panic，或对 pure resource 执行 pure release，仍强迫整个调用方变成 `!io`。
 - **影响：** effect system 系统性过度近似；pure library 无法用语言提供的唯一 cleanup/barrier primitive。
 - **建议：** 改成 effect-polymorphic：barrier 返回 thunk/release/use effect union。`catch_fault` 是否应保持 IO-only可单独由 fault source 决定，不应把 panic 与 cleanup 一并绑死。
+
+- **订正（#196 分诊，2026-08-11 写回）。** 上面冻结证据里的 `selfhost/src/check/types.dawn:1605`
+  记成了 `catch_panic`，那一行其实是 `catch_fault`（两者在同一张 builtin 表里相邻登记）。
+  冻结证据不改写，这里只标出误记；结论不受影响，本项的分拆处置也不依赖那一行。
 
 ## SEM-12 — P2 — “私有函数推断效果”实际只推断 base IO（已修）
 
@@ -212,6 +246,13 @@
 - **问题：** 名为 `Char` 的值在 interpolation、`to_string`、List/record 派生显示中出现 `97` 而非 `a`；用户必须记住 `str.from_char(c)` 才得到字符文本。
 - **影响：** 与用户对“字符”的基本预期、错误信息和 REPL/调试显示相悖；opaque representation 细节泄漏到语言 UI。
 - **建议：** 让 `Char` 自己实现 user-facing display；若需要 code-point debug，显式使用 `char.code`。如坚持 `Show` 表示结构，可用 `Display[Char]` 处理 interpolation。
+
+- **判不做（#196 分诊，2026-08-11 写回）。** **刻意如此。** opaque 沿用目标类型的 impl
+  （spec §2.7、§4.8），所以 `Char` 的 `Show` 就是 `Int` 的。给 `Char` 单独写一份 `Show`
+  会让它不再「就是它的目标」，**`opaque-twin` 那条判据也就不成立了**，而 opaque-twin 正是
+  [`nominal-types-design.md`](../audit/nominal-types-design.md) §7.4 驳回 LANG-04 步 1-3 的
+  地基，门禁 `scripts/opaque-twin` 已在 CI。要一个字符的字符串，`str.from_char(c)` 就是
+  那个函数。**重开条件：** 维护者重开 user-facing `Show`/`Display` 边界。
 
 ## SEM-17 — P3（已修）— Java `char` bridge 诊断明确两种字符模型
 

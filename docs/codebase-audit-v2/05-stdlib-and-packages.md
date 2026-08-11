@@ -144,6 +144,15 @@
 - **影响：** invalid UTF-8 JSON/签名输入会在应用看到前被改写；`Request.body` 无法表示 decode failure，raw bytes 也容易丢失。
 - **建议：** 现函数改名 `decode_utf8_lossy`，新增 `decode_utf8_checked -> Result`；Web 对 text media type strict decode，同时始终保留 raw Bytes。
 
+- **订正（#196 分诊，2026-08-11 写回）。** 上面「raw bytes 也容易丢失」不准确：
+  `read_body` 返回 `(String, Bytes)`，`Request.raw` 始终保留原始字节
+  （`packages/web/src/types.dawn`），建议里「始终保留 raw Bytes」那半**已经实现**。
+  仍成立的是另外两半：`decode_utf8` 无条件有损、没有 strict 对应项，且 `Request.body`
+  无法表示 decode failure。
+- **搭车去向：** 本项是 RD-06「函数名即定义域」的延续而非冲突，但同一函数在 20 个版本内
+  已改名两次（`decode` → `decode_utf8`），编译器还有核心路径调用点，
+  **不要为它单开一轮种子三期**；并进 RD-06 命名族统一的破坏窗口一起走。
+
 ## LIB-07 — P2 — `io.delete` 把不存在与操作失败都压成 false（已修）
 
 - **证据：S。** 修复前 API 返回 Bool，文档把不存在和 nonempty directory 等都写成 false：`std/io.dawn:90`；JVM/C runtime 丢掉具体 host error：`selfhost/src/jvm/rtclasses.dawn:1370`、`runtime/c/dawn_rt.c:1910`。
@@ -238,6 +247,13 @@
 - **影响：** unit test 与 production routing 分叉；pattern 中 repeated slash 也会被 silently normalize。
 - **建议：** 共享唯一 pure path parser；pattern/request 同时选择 reject repeated slash 或 preserve exact segments。
 
+- **订正（#196 分诊，2026-08-11 写回）。** **性质要降级。** `packages/web/src/router.dawn`
+  的 doc 已经逐字自称「the **legacy** empty-dropping rule……the server does not route
+  through this any more」，`dispatch`/`match_path` 只留给直接调用者与测试。所以这不是
+  路由分叉，是**没删干净的过期公开 API**：精确命中 RD-12 逐字点名的「web 的 `match_path`/
+  `dispatch`/`parse_query` 都是 `serve_app` 内脏」。去向是 RD-12 的包 pub 收窄，不是
+  「共享唯一 pure path parser」，那件事 `dispatch_segs` 已经做完了。
+
 ## LIB-14 — P2 — tail capture 抹掉 encoded slash 的 segment 边界（已修）
 
 <!-- audit-anchor: absent packages/web/src/types.dawn | pub fn param_segs -->
@@ -292,6 +308,13 @@
 
 <!-- audit-anchor: absent packages/web/src/middleware.dawn | limit > 0 -->
 
+> **后续处置（2026-08-11 登记，实现更早）：已修。** `3a21be8` 让 `with_body_limit` 与
+> `read_body` 用同一条读法：`limit <= 0` 是 unbounded，正数才是上限。原来的
+> `len > limit` 使 `0` 只放行空 body、`-1` 连空 body 都 413，与底层 reader 恰好相反；
+> 现在两处对 0 与负数给同一个答案，`middleware.dawn` 的单测钉住这一条。建议里的
+> `Option[Int]` 表示法没有采用：统一读法已经关闭本项指出的分歧边界，换类型是另一次
+> 包破坏，留给下一个 major。
+
 - **证据：S。** middleware 直接 `len > limit`：`packages/web/src/middleware.dawn:53`；底层 reader 把 `limit <= 0` 当 unlimited：`packages/web/src/server.dawn:76`。
 - **边界：** `-1` 在底层 unlimited、在 middleware 连 empty body 都拒；`0` 分别是 unlimited 与 empty-only。
 - **影响：** config 迁移或组合 middleware 时可从 fail-closed 变 fail-open，且无 type/validation 提示。
@@ -300,13 +323,6 @@
 ## LIB-18 — P2 — streaming response 吞掉所有 fault 与 panic
 
 <!-- audit-anchor: present packages/web/src/server.dawn | let _ = catch_panic -->
-
-> **后续处置（2026-08-11 登记，实现更早）：已修。** `3a21be8` 让 `with_body_limit` 与
-> `read_body` 用同一条读法：`limit <= 0` 是 unbounded，正数才是上限。原来的
-> `len > limit` 使 `0` 只放行空 body、`-1` 连空 body 都 413，与底层 reader 恰好相反；
-> 现在两处对 0 与负数给同一个答案，`middleware.dawn` 的单测钉住这一条。建议里的
-> `Option[Int]` 表示法没有采用：统一读法已经关闭本项指出的分歧边界，换类型是另一次
-> 包破坏，留给下一个 major。
 
 > **当前静态候选（未验证，不改严重度）：** streaming 分支把 `transferTo` 放进
 > `catch_panic` 后丢弃整个结果，且 `ResponseBody.Stream` 不携带 expected length：
@@ -318,6 +334,13 @@
 - **影响：** client disconnect、upstream IO failure 与 program invariant panic 都无 log/metric且不可区分；request 看似正常结束。
 - **建议：** 只降级 expected disconnect；structured log IO fault；program panic 必须进入统一 server error path。
 
+- **订正（#196 分诊，2026-08-11 写回）。** **证据等级 S → K。**
+  [`streaming-response-design.md`](../streaming-response-design.md) 逐字把「`catch_panic`
+  当 finally 兜住客户端中途断开」写成方案（§4.4 同款做法，落地清单也照抄），按方法说明 §3
+  的定义这属于「仓库已承认」。缺陷仍成立：三者不可区分、无 log/metric、clean truncation
+  可能被当成功。它因此是「细化一条已裁决的兜底」，零破坏、成本极低，可搭 tempfile 一类
+  的小刀一起做。
+
 ## LIB-19 — P2 — SHA-256 `Digest` public record 可伪造 invariant
 
 <!-- audit-anchor: absent packages/sha2/src/sha256.dawn | pub opaque type Digest -->
@@ -325,3 +348,9 @@
 - **证据：S。** digest state 是 public record：`packages/sha2/src/sha256.dawn:27`；`update/finish` 直接假定 `h` length、buffer length、total 相互一致：`:109`、`:127`。
 - **影响：** caller 可构造 type-correct 但会 OOB 或输出错误 digest 的 state；API 把实现 invariant 变成用户责任。
 - **建议：** `pub opaque type Digest`，只允许 `new/update/finish` 建立和推进状态。
+
+- **订正与去向（#196 分诊，2026-08-11 写回）。** 本条是 RD-12 的原句（「`Digest` 立刻
+  opaque」），不是新账，去向是 RD-12 的包 pub 收窄。**全表 ROI 最高**：改一个关键字，
+  编译器源码零改动（`selfhost/src/pkg/` 的两个消费点只经 `new`/`update`/`finish`/`hex`
+  使用它，从不写字面量、不读字段），哈希输出逐字节不变。
+

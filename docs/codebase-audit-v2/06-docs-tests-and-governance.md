@@ -19,6 +19,24 @@
 
 ## GOV-02 — P2 — normative syntax quick reference 含非法 Dawn
 
+> **后续处置（2026-08-11 登记，正文修复更早）：已修。** `d501357` 拆开了速查块里那两条
+> 同行 statement，`docs/spec.en.md` 同步。分诊当时把「fence 仍是裸 ```dawn、doc-check 没有
+> `parse` mode」记为残留，**该残留现裁为不做**，理由见下。
+>
+> **§13 速查块的排版裁决（GOV-02 后半，2026-08-11）：不做拆分，也不加 `parse` mode。**
+> 提议是把速查块拆成「声明 / 表达式 / 测试」三段，好让门禁能逐段解析。实测这买不到门禁：
+> 三段里只有「声明」与「测试」是合法模块，**「表达式」那段是语句**（`let n = 42`、
+> `if x > 0 { … }`、`xs[0]`），在顶层根本不解析，要让它过 `parse` 就得把它包进一个 `fn`，
+> 而那正好改掉速查表要展示的东西：它列的是**形式**，而形式是与上下文无关地列出来的。
+> 于是拆分只剩排版收益，`parse` mode 则会成为一条**在触发它的那个块上恰好用不上的规则**，
+> 而 `scripts/doc-check.py` 的模块注释逐字禁止这件事（「a check that matches nothing is
+> green for exactly the same reason a working check is green」）。
+>
+> **那么什么在守着这个块：** §1 到 §12 每一条形式都在上面被规范正文定义过，
+> `doc-check.py` 的 `sections` 与 `contracts` 两项检查盯着那些定义；速查块只是它们的目录。
+> **重开条件：** 该块里出现第一个能独立成为完整模块的例子，那时它该标 ```dawn compile
+> 并进 `blocks` 检查，一个块一条规则，不需要新 mode。
+
 - **证据：S。** `docs/spec.md:1996` 与 `:1997` 把两条 statement 写在同一行且无 separator。parser 要求 statement 后 newline：`selfhost/src/front/parser.dawn:120`，否则报 `expected a newline after this statement`：`:127`。
 - 该 fence 只是 `dawn`，doc-check 只执行标成 `run/compile` 的 block：`scripts/doc-check.py:881`、`:886`。
 - **影响：** 权威速查直接教给读者不可编译排版，且门禁因 opt-in 没发现。
@@ -72,12 +90,24 @@
 
 ## GOV-06 — P2 — grammar reject 允许额外错误而假绿
 
+> **后续处置（2026-08-11 登记，实现更早）：已修，且是全面而非局部。** `0d752c1` 把
+> `scripts/grammar-corpus/run.sh` 从「任一行含子串即过」重写为**整序列钉死**：读开头连续的
+> `# expect:` 行，先比条数（多一条少一条都 FAIL），再逐 index 比子串。reject fixture
+> **全部**带 expect 行（现 35 个），另加四个变异自测（漏声明 / 顺序调反 / accept 解析不了 /
+> 正例）写在同一脚本末尾。原提交标题的单数指的是**发现的那个已腐烂用例**，机制改动是全语料的。
+
 - **证据：S。** README 声称 reject 必须因正确理由失败：`scripts/grammar-corpus/README.md:10`；harness 收集所有 diagnostics 后，只要任一行包含 expected substring 就 pass：`scripts/grammar-corpus/run.sh:39`、`:43`。
 - **边界：** 在 fixture 前加一个独立 syntax error，只要 recovery 后仍产原 substring，用例继续绿。
 - **影响：** error priority、cascade 与 location regression 看不见；语言演进可能把一个精准诊断变成多条噪声仍过门禁。
 - **建议：** 固定 normalize 后的完整 diagnostic sequence；最低要求 first diagnostic match 且无额外 diagnostics，并给 harness 加自测。
 
 ## GOV-07 — P2 — package tests 仍是手抄清单
+
+> **后续处置（2026-08-11 登记，实现更早）：已修。** `e708115` 新增
+> `scripts/package-tests.sh`（遍历 `packages/*/dawn.toml`，并设下限防树塌），
+> `.github/workflows/gates.yml` 的五个硬编码包名换成调用它。无 test block 的 package 会
+> **变红而不是被跳过**（`dawn test` 对无断言目标报错），脚本注释逐字写着「forgetting to
+> extend a list looks exactly like not having written one」。
 
 - **证据：S。** `.github/workflows/gates.yml:77` 手工列五个 packages；新增 `packages/foo` 不自动进入 gate。同 workflow 在 `:81` 已承认 examples 曾因手抄漏测，并改成 discovery；`scripts/example-tests.sh:4` 也写了该原则。
 - **影响：** 当前五包都覆盖，但新增 package 是确定 blind spot。
