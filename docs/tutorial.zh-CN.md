@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ ac797f8440512c8e -->
+<!-- doc-check: translation-of docs/tutorial.md @ 035b8d1d4e51af94 -->
 
 # Dawn 教程
 
@@ -654,10 +654,30 @@ Some(Card { rank: 3, name: "queen" })
 `sort_by(xs, cmp)` 接自定义比较函数，`max_by`/`min_by(xs, key)` 按键取极值
 （键类型要有 `Ord`）。
 
+trait 方法，以及任何带约束的函数，都可以当裸函数值传递。它要的是一个期望的函数
+类型，因为那才说明约束在哪个类型上解析；剩下的包装连同字典由编译器写出：
+
+```dawn run
+fn shout[T: Show](xs: List[T]) -> List[String] = map(xs, to_string)
+
+pub fn main() -> Unit !io = {
+  println(join(shout([1, 2, 3]), " "))
+  # 这里的约束是 `shout` 自己的，所以包装闭包捕获 `shout` 收到的那个字典，
+  # 与手写 `x => to_string(x)` 同形
+  println(join(shout(["a", "b"]), " "))
+}
+```
+```output
+1 2 3
+"a" "b"
+```
+
+没有期望类型时（比如 `let f = to_string`），约束没有可解析的类型，编译器会直接
+这么说；写出类型，或者手写带标注参数的 lambda。
+
 v1 的边界：impl 的主体只能是**非泛型**具名类型或 `Int`/`Float`/`Bool`/`String`
-（没有条件 impl，`List[T]` 不能做主体）；trait 方法不能当函数值传递（包一层
-lambda 即可）；comptime 里不能用 trait 约束的调用。完整设计见
-[trait.md](trait.md)。
+（没有条件 impl，`List[T]` 不能做主体）；comptime 里不能用 trait 约束的调用。
+完整设计见 [trait.md](trait.md)。
 
 ## 17. 自己的效果：`effect` 与 `with handle`
 

@@ -1,0 +1,52 @@
+# A bounded function and a trait method used as bare function values. The
+# compiler writes the eta expansion, so each one becomes a closure whose body
+# is an ordinary dictionary-dispatched call (audit SEM-13).
+#
+# The reference counting is the reason this is here rather than only in the
+# checker corpus. Three witness shapes reach the wrapper and each puts a
+# different thing in the closure's capture mask: a settled subject captures
+# nothing, an enclosing function's bound captures that function's hidden
+# dictionary parameter, and a synthesised `Eq[Box[T]]` captures the parts it
+# was built from. A dictionary is an unheaded static, so counting one is the
+# failure `dict_capture.dawn` records for hand-written closures; this is the
+# same hazard for the ones the compiler writes.
+use std/list
+
+type Box[T] = { v: T }
+
+trait Greet[T] {
+  fn greet(x: T) -> String
+}
+
+impl Greet[Int] {
+  fn greet(x: Int) -> String = "i${x}"
+}
+
+impl Greet[String] {
+  fn greet(x: String) -> String = "s${x}"
+}
+
+## the witness is settled at `Int` here, so the wrapper captures nothing
+fn show_ints(xs: List[Int]) -> List[String] = list.map(xs, to_string)
+
+## the bound is this function's own, so the wrapper has to capture the
+## dictionary this function was handed
+fn show_all[T: Show](xs: List[T]) -> List[String] = list.map(xs, to_string)
+
+fn greet_all[T: Greet](xs: List[T]) -> List[String] = list.map(xs, greet)
+
+## `Eq[Box[T]]` is synthesised out of `Eq[T]`, so the witness is an apply
+fn dedupe[T: Eq](xs: List[Box[T]], y: Box[T]) -> Int =
+  len(list.filter(xs, x => x == y))
+
+pub fn main() -> Unit !io = {
+  println(join(show_ints([1, 2, 3]), ","))
+  println(join(show_all([4, 5]), ","))
+  println(join(show_all(["a", "b"]), ","))
+  println(join(greet_all([7, 8]), ","))
+  println(join(greet_all(["q"]), ","))
+  println("${dedupe([Box { v: 1 }, Box { v: 2 }, Box { v: 1 }], Box { v: 1 })}")
+  # the wrapper is a value like any other: bound, passed on, called twice
+  let f: fn(List[Int]) -> List[String] = show_all
+  println(join(f([9]) ++ f([10]), ","))
+}

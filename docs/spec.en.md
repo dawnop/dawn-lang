@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ c2907c80c03e679c -->
+<!-- doc-check: translation-of docs/spec.md @ 65e7932e496a5541 -->
 
 # Dawn Language Specification
 
@@ -806,9 +806,16 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
       part.
   - `List` is not in this list: std writes `impl[T: Eq] Eq[List[T]]` and the corresponding
     `Hash`/`Ord`. `Map`/`Set`/tuples still go through synthesis.
-- Limits: trait methods and functions with bounds cannot be used as function values (the hint
-  says wrap them in a lambda); calls with trait bounds and impl-based sorting are not allowed in
-  comptime.
+- **Trait methods and functions with bounds can be used as function values directly**: once the
+  expected function type settles the subject, the compiler writes the eta expansion and the
+  bound is discharged to a dictionary there. When the bound belongs to the **enclosing**
+  function's type parameter, the synthesised closure captures that function's dictionary
+  parameter, exactly as a handwritten lambda does. A subject nothing settles (`let f =
+  to_string`) still reports "cannot infer the type parameter(s)"; write the expected type, or an
+  annotated lambda. A function with an **effect label** is a different matter and still cannot be
+  a value (§6.5, boundary): evidence is captured where the lambda is written, and the capture
+  point the compiler would pick for you is not necessarily the one the caller wants.
+- Limits: calls with trait bounds and impl-based sorting are not allowed in comptime.
 
 ---
 

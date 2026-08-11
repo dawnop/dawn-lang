@@ -2816,8 +2816,11 @@ pub fn check_fn_value(
 ) -> (Cx, Ty, TExpr) = {
   # A declared effect is served by a hidden parameter, and a function value
   # has nowhere to put one: the wrapper is a lambda, and a lambda captures its
-  # evidence. So the language asks for the lambda rather than synthesising it
-  # -- the same answer trait bounds get, one line above.
+  # evidence at the point it is written. A synthesised wrapper would capture
+  # whatever handler is in scope *here*, which is not what the call site of a
+  # function value means, so the language asks for the lambda. Trait bounds
+  # used to be refused alongside this and are not: a dictionary is settled by
+  # the type, and the type is what an expected function type supplies.
   if len(eff_labels(f.eff)) > 0 {
     let ps2 = join(f.param_names, ", ")
     let what = match f.op_of {
@@ -2829,19 +2832,15 @@ pub fn check_fn_value(
       "wrap it in a lambda: (" ++ ps2 ++ ") => " ++ name ++ "(" ++ ps2 ++ ")"),
       TyError, XError(lo, hi))
   }
-  var has_bounds = false
-  for bs in f.constraints {
-    if len(bs) > 0 { has_bounds = true }
-  }
-  if has_bounds {
-    let ps = join(f.param_names, ", ")
-    let msg = match f.trait_id {
-      Some(_) -> "trait method `" ++ name ++ "` cannot be used as a value"
-      None -> "`" ++ name ++ "` has trait bounds and cannot be used as a value"
-    }
-    return (cerr_h(cx, msg, lo, hi,
-      "wrap it in a lambda: (" ++ ps ++ ") => " ++ name ++ "(" ++ ps ++ ")"),
-      TyError, XError(lo, hi))
+  # Counted off the type parameters rather than off `constraints` directly, so
+  # "there are bounds" and "these are the bounds" are one walk: the eta
+  # expansion below discharges exactly what this counts, and a second walk is
+  # how the two could come to disagree.
+  var nbounds = 0
+  var bi = 0
+  for _tp in f.tparams {
+    nbounds = nbounds + len(bounds_of(f, bi))
+    bi = bi + 1
   }
   let declared = TyFn(f.param_tys, f.ret, f.eff)
   let eff_is_var = match f.eff {
@@ -2900,7 +2899,99 @@ pub fn check_fn_value(
   }
   let cx1 = cx
   let inst = subst(declared, m, em)
+  if nbounds > 0 {
+    return eta_bounded_fn_value(cx1, name, f, m, em, inst, lo, hi)
+  }
   (cx1, inst, node(inst))
+}
+
+## A bounded function or a trait method used as a value: write the eta
+## expansion that used to be demanded of the programmer (audit SEM-13).
+##
+## The dictionaries are the whole of the difficulty, and the reason this
+## happens in the checker rather than in `lift_fn_value`: a bound is discharged
+## against the checker's scopes, and a bound on the *enclosing* function's type
+## parameter is discharged to that function's hidden dictionary parameter,
+## which the wrapper then has to capture. So the wrapper is opened as a lambda
+## first and the witnesses are resolved inside it. `resolve_witness` puts a
+## forwarded dictionary into every open lambda's capture list by itself, and
+## the synthesised wrapper is only one more of those.
+##
+## What comes out is an ordinary call node, so nothing downstream learns a new
+## shape: `lower_trait_call` devirtualises a concrete subject, collapses a
+## prelude witness to the primitive and dispatches a forwarded one through the
+## dictionary, none of which this has to know.
+fn eta_bounded_fn_value(
+  cx: Cx,
+  name: String,
+  f: Sig,
+  m: Map[Int, Ty],
+  em: Map[Int, Eff],
+  inst: Ty,
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) = {
+  let ctx = LambdaCx {
+    boundary: len(cx.frame.scopes),
+    expected_ret: None,
+    captures: [],
+    sugar: false,
+    arm: false,
+    settled: [],
+    unsettled: []
+  }
+  var cx1 = Cx {
+    ..cx,
+    frame: Frame { ..cx.frame, lambda_stack: cx.frame.lambda_stack ++ [ctx] }
+  }
+  var wits: List[WitRef] = []
+  var ok = true
+  var i = 0
+  for tp in f.tparams {
+    for tr_id in bounds_of(f, i) {
+      let (cxa, w) = resolve_witness(cx1, tr_id, subst(tp, m, em), lo, hi,
+        "`" ++ name ++ "`")
+      cx1 = cxa
+      match w {
+        Some(wr) -> { wits = wits ++ [wr] }
+        None -> { ok = false }
+      }
+    }
+    i = i + 1
+  }
+  let (ips, iret, _) = fn_ty_parts(inst)
+  # The parameters are the compiler's, not the source's: naming them after the
+  # callee's parameters would let a wrapper shadow a module alias, and nothing
+  # reads these names but a hover.
+  cx1 = push_scope(cx1)
+  var psyms: List[Int] = []
+  var pnames: List[String] = []
+  var args: List[TExpr] = []
+  var j = 0
+  for pt in ips {
+    let pn = "eta\$" ++ to_string(j)
+    let (cxd, sid) = declare(cx1, pn, pt, false, lo, hi)
+    cx1 = cxd
+    psyms = psyms ++ [sid]
+    pnames = pnames ++ [pn]
+    args = args ++ [XLocal(sid, pn, lo, hi, pt)]
+    j = j + 1
+  }
+  cx1 = pop_scope(cx1)
+  let popped = cx1.frame.lambda_stack[len(cx1.frame.lambda_stack) - 1]
+  let outer = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1)
+  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, lambda_stack: outer } }
+  if not ok { return (cx1, TyError, XError(lo, hi)) }
+  # No evidence: a label was refused at the top of `check_fn_value`, so the
+  # only effect that reaches here is the one the wrapper's own type carries.
+  let evid: List[TExpr] = []
+  let body =
+    if f.is_builtin {
+      XCallBuiltin(name, args, wits, lo, hi, iret)
+    } else {
+      XCallFn(f.owner, name, args, wits, evid, f.trait_id, lo, hi, iret)
+    }
+  (cx1, inst, XLambda(psyms, pnames, body, popped.captures, lo, hi, inst))
 }
 
 test "fn values instantiate from the expected type" {
@@ -2915,17 +3006,42 @@ test "fn values instantiate from the expected type" {
   # without context the generic cannot instantiate
   let (cx2, t2, _) = check_fn_value(cx, "len", len_sig, None, 0, 3)
   assert str.contains(cx2.diags[0].msg, "cannot infer the type parameter(s) of `len`")
-  # a bounded sig refuses to be a value (no table builtin carries bounds since
-  # the ordering family moved to std/list, so the exemplar is hand-built)
+  # a bounded sig eta-expands once the expected type settles its subject; the
+  # bound is Eq because that one answers structurally, so the exemplar needs no
+  # impl table (no table builtin carries bounds since the ordering family moved
+  # to std/list, so the sig is hand-built)
   let tv = TyVar("T", 0)
   let bounded = Sig {
     name: "sortish", param_tys: [TyList(tv)], param_names: ["xs"], param_defaults: [],
     ret: TyList(tv),
-    eff: EPure, is_builtin: true, tparams: [tv], constraints: [[ORD_ID]],
+    eff: EPure, is_builtin: true, tparams: [tv], constraints: [[EQ_ID]],
     owner: None, trait_id: None, op_of: None, inferring: false
   }
-  let (cx3, t3, _) = check_fn_value(cx, "sortish", bounded, None, 0, 4)
-  assert cx3.diags[0].msg == "`sortish` has trait bounds and cannot be used as a value"
+  let want = TyFn([TyList(TyInt)], TyList(TyInt), EPure)
+  let (cx3, t3, x3) = check_fn_value(cx, "sortish", bounded, Some(want), 0, 4)
+  assert len(cx3.diags) == 0
+  assert t3 == want
+  match x3 {
+    XLambda(psyms, _, body, caps, _, _, _) -> {
+      assert len(psyms) == 1
+      # nothing to capture: the witness is settled at `Int`, not forwarded
+      assert len(caps) == 0
+      match body {
+        XCallBuiltin(bn, bargs, bwits, _, _, _) -> {
+          assert bn == "sortish"
+          assert len(bargs) == 1
+          assert bwits == [WConcrete(EQ_ID, TyInt)]
+        }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  # without an expected type the subject is unknown, so the bound has nothing
+  # to be discharged at and the wrapper cannot be written
+  let (cx3b, _, _) = check_fn_value(cx, "sortish", bounded, None, 0, 4)
+  assert cx3b.diags[0].msg ==
+    "cannot infer the type parameter(s) of `sortish` used as a value here"
   # a non-generic sig passes through untouched
   let join_sig = map.get(bs, "join").expect("join")
   let (cx4, t4, _) = check_fn_value(cx, "join", join_sig, None, 0, 4)

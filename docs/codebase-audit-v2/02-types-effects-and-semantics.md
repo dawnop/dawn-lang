@@ -201,9 +201,19 @@
 - **影响：** `!io` 与用户 effect 的书写纪律不正交；文档让用户期待不写 annotation，实际 named effect 必须手写。
 - **建议：** 两阶段收集并封闭 labels；若短期不做，规范必须改成“只推断 return 与 base io”，并给出专门诊断。
 
-## SEM-13 — P2 — 受约束函数与 trait method 不是一等函数值
+## SEM-13 — P2 — 受约束函数与 trait method 不是一等函数值（已修）
 
 <!-- audit-anchor: present selfhost/src/check/checker.dawn | has trait bounds and cannot be used as a value -->
+
+> **后续处置（2026-08-11）：已修。** `check_fn_value` 不再在有 bound 时早退：期望的
+> 函数类型定型主体之后，它按建议合成 eta 展开，witness 由 `resolve_witness` 在合成
+> 闭包的 lambda 上下文里解析，于是外层函数的字典参数自动进入捕获列表，`WConcrete` /
+> `WApply` / `WForward` 三种形状都落到普通调用节点上，lowering 与两个后端不需要认识
+> 新形状。主体没有定型时仍然拒绝，但报的是「无法推断类型参数」，不再是「不能作值」。
+> 带 effect label 的函数仍不可作值，那是另一条理由（证据在写下 lambda 的位置捕获），
+> 规范 §3.5 与 §6.5 已分开陈述。门禁：checker corpus 的 `fn_value_bounds` 记住四条
+> 诊断，`scripts/spike-native/fn_value_bounds.dawn` 在两个后端连同 ASan/LSan 跑通三种
+> witness 形状，tutorial 的 `dawn run` 围栏跑通外层约束那一例。
 
 - **证据：S。** 规范承认带 bound/effect label/trait method 不能直接作值：`docs/spec.md:548`；checker 要求手工包 lambda：`selfhost/src/check/checker.dawn:2550`。
 - **边界：** `map(xs, to_string)` 之类自然写法失败，只能写 `x => to_string(x)`。

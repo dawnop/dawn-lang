@@ -1,0 +1,41 @@
+# checker.dawn: a bounded function or trait method used as a function value
+use std/list
+
+pub type Box = { v: Int }
+
+trait Greet[T] {
+  fn greet(x: T) -> String
+}
+
+impl Greet[Int] {
+  fn greet(x: Int) -> String = "i${x}"
+}
+
+# accepted: the expected function type settles the subject, so the bound has
+# somewhere to be discharged and the wrapper is written for you
+pub fn shown(xs: List[Int]) -> List[String] = list.map(xs, to_string)
+
+pub fn greeted(xs: List[Int]) -> List[String] = list.map(xs, greet)
+
+pub fn annotated() -> fn(Int) -> String = to_string
+
+# accepted: the bound is the enclosing function's, and the wrapper captures
+# that function's dictionary
+pub fn forwarded[T: Show](xs: List[T]) -> List[String] = list.map(xs, to_string)
+
+# rejected: nothing says what the subject is
+pub fn unsettled() -> Int = {
+  let f = to_string
+  1
+}
+
+# rejected: the subject is settled and cannot answer the bound
+pub fn no_impl(xs: List[Box]) -> List[String] = list.map(xs, to_string)
+
+# still rejected, and for the other reason: evidence is captured where a
+# lambda is written, so this one is not the compiler's to synthesise
+effect Ask {
+  fn get() -> Int
+}
+
+pub fn as_value() -> fn() -> Int = get

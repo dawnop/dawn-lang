@@ -697,10 +697,31 @@ The list functions that go with it are stable sorts that keep the first of a tie
 function of your own, and `max_by`/`min_by(xs, key)` take the extreme by a key (whose
 type needs `Ord`).
 
+A trait method, or any function with a bound, can be passed around as a bare function
+value. What it needs is an expected function type, because that is what says which type
+the bound is discharged at; the wrapper is then written for you, dictionary and all:
+
+```dawn run
+fn shout[T: Show](xs: List[T]) -> List[String] = map(xs, to_string)
+
+pub fn main() -> Unit !io = {
+  println(join(shout([1, 2, 3]), " "))
+  # the bound here is `shout`'s own, so the wrapper closes over the dictionary
+  # `shout` was handed, which is what `x => to_string(x)` would have done
+  println(join(shout(["a", "b"]), " "))
+}
+```
+```output
+1 2 3
+"a" "b"
+```
+
+Without one, as in `let f = to_string`, there is nothing to discharge the bound at and
+the compiler says so; write the type, or write the lambda with an annotated parameter.
+
 The v1 boundary: an impl's subject can only be a **non-generic** named type or
 `Int`/`Float`/`Bool`/`String` (there are no conditional impls, and `List[T]` cannot be a
-subject); a trait method cannot be passed around as a function value (wrap it in a
-lambda); and a call under a trait constraint is not available in comptime. The full
+subject); and a call under a trait constraint is not available in comptime. The full
 design is in [trait.md](trait.md), in Chinese.
 
 ## 17. Effects of your own: `effect` and `with handle`
