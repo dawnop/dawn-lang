@@ -238,10 +238,18 @@ TOOL-10 在这里仅关闭“双 parser/双 graph”。
 - **结论：已修。** executable jar 的 dependency path 不再因 URI tokenization 或 byte wrapping
   在 `java -jar` 阶段失效。
 
-## TOOL-13 — P2 — `dawn.toml` 与 `dawn.lock` 写入不原子
+## TOOL-13 — P2 — `dawn.toml` 与 `dawn.lock` 写入不原子（已修）
 
 <!-- audit-anchor: absent selfhost/src/pkg/add.dawn | atomic_write_file -->
 
+> **后续处置（2026-08-11 登记，实现更早）：已修。** `3f5d64c` 把 `dawn add` 的 manifest
+> 写入与 `dawn lock` 的目标写入都换成 `std/io.atomic_write_file`：同目录 stage、read-back
+> 校验、权限搬运、单次 rename，失败一律清理且原文件不动。算法与宿主能力两件新增
+> （`io_temp_file` 独占创建、`io_copy_permissions` 不跟随链接）的定稿在
+> `docs/atomic-write-design.md`，负控在 `scripts/atomic-write-contract/`（含
+> `callsites-expected.txt`，调用点漏迁会转红）。symlink fail-closed、hardlink detach 是
+> 该设计写明的边界，不属本项。**本条曾在实现发布后继续写 open**，由 `doc-check.py` 的
+> evidence 检查发现。
 
 - **证据：S。** `dawn add` 直接覆盖 manifest：`selfhost/src/pkg/add.dawn:163`、`:173`；`dawn lock` 直接写目标：`selfhost/src/main.dawn:837`。仓库已有 atomic replace primitive：`std/io.dawn:100`。
 - **影响：** disk full、process termination 或 write error 可把受版本控制文件留成 truncated state。

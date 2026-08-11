@@ -9,7 +9,7 @@
 
 ## 1. 一句话结论
 
-Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 Dawn 集合与相当完整的门禁，旧审查中的两个 P0 和多项协议缺陷已经不再成立；v0.60.0 冻结基线记录 **1 个未动态验证的 P0 候选、29 个 P1、55 个 P2、12 个 P3**，该严重度表不随后续处置重写。97 项 finding 的当前处置只读 §2 的机器权威四状态层；TOOL-05/06 已随共享 LSP workspace 与 target-scoped Java classpath 关闭，GOV-04 已由单一状态源与行为负控关闭，TOOL-14 已随完整 v2 launcher generation 合同关闭，当前 P1 优先级是三项 partial 的边界收口，以及仍需维护者裁决的 Cursor 契约。
+Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 Dawn 集合与相当完整的门禁，旧审查中的两个 P0 和多项协议缺陷已经不再成立；v0.60.0 冻结基线记录 **1 个未动态验证的 P0 候选、29 个 P1、55 个 P2、12 个 P3**，该严重度表不随后续处置重写。97 项 finding 的当前处置只读 §2 的机器权威四状态层；TOOL-05/06 已随共享 LSP workspace 与 target-scoped Java classpath 关闭，GOV-04 已由单一状态源与行为负控关闭，TOOL-14 已随完整 v2 launcher generation 合同关闭，当前 P1 优先级是两项 partial 的边界收口，以及仍需维护者裁决的 Cursor 契约。
 
 ## 2. 基线与口径
 
@@ -102,39 +102,46 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（65）
+#### 当前 fixed（73）
 
 - 语法（16）：`SYN-01`–`SYN-03`、`SYN-05`–`SYN-12`、`SYN-14`–`SYN-16`、`SYN-18`、`SYN-19`。
-- 语义（8）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-11`、`SEM-12`、`SEM-15`、`SEM-17`。
+- 语义（9）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-11`、`SEM-12`、`SEM-15`、`SEM-17`。
 - 架构（4）：`ARC-03`–`ARC-06`。
-- 工具链（16）：`TOOL-01`–`TOOL-12`、`TOOL-14`–`TOOL-17`。
-- 库（8）：`LIB-01`–`LIB-05`、`LIB-07`、`LIB-09`、`LIB-11`。
+- 工具链（17）：`TOOL-01`–`TOOL-17`。
+- 库（14）：`LIB-01`–`LIB-05`、`LIB-07`–`LIB-12`、`LIB-14`、`LIB-15`、`LIB-17`。
 - 治理（13）：`GOV-01`–`GOV-13`。
 
 #### 当前 partial（4）
 
 - 架构（3）：`ARC-01`、`ARC-02`、`ARC-11`。
-- 库（1）：`LIB-10`。
+- 库（1）：`LIB-16`。
 
-#### 当前 open（26）
+#### 当前 open（18）
 
 - 语法（3）：`SYN-04`、`SYN-13`、`SYN-17`。
-- 语义（7）：`SEM-04`、`SEM-07`、`SEM-09`、`SEM-10`、`SEM-13`、`SEM-14`、`SEM-16`。
+- 语义（6）：`SEM-04`、`SEM-09`、`SEM-10`、`SEM-13`、`SEM-14`、`SEM-16`。
 - 架构（5）：`ARC-07`–`ARC-10`、`ARC-12`。
-- 工具链（1）：`TOOL-13`。
-- 库（10）：`LIB-06`、`LIB-08`、`LIB-12`–`LIB-19`。
+- 库（4）：`LIB-06`、`LIB-13`、`LIB-18`、`LIB-19`。
 
 #### 当前 retracted（2）
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**65 fixed + 4 partial + 26 open + 2 retracted = 97**。逐专题矩阵：
-语法 **16/0/3/0**、语义 **8/0/7/2**、架构 **4/3/5/0**、工具链 **16/0/1/0**、
-库 **8/1/10/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
+当前计数自检：**73 fixed + 4 partial + 18 open + 2 retracted = 97**。逐专题矩阵：
+语法 **16/0/3/0**、语义 **9/0/6/2**、架构 **4/3/5/0**、工具链 **17/0/0/0**、
+库 **14/1/4/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
 fixed）、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed，
 `TOOL-05`/`TOOL-06`/`GOV-04`/`SYN-11`/`SYN-09` fixed。
+2026-08-11 由 `doc-check.py` 的 evidence 检查一次性订正八条：`SEM-07`（`6874f64` 的
+export-surface pass）、`TOOL-13`（`3f5d64c` 的 `atomic_write_file` 调用点迁移）、
+`LIB-08`（`ce9cd15` 的结构化 `JsonError`）、`LIB-12`（`05db7f2` 的 query/form multimap）、
+`LIB-14`（`4825c84` 的 tail capture 保段）、`LIB-15`（`aed3107` 的 handle 持有 executor）、
+`LIB-17`（`3a21be8` 的 0/负数单一读法）与 `LIB-10`（`79448da` 让两条早退拒绝走 middleware
+链，partial → fixed）全部转 fixed；`LIB-16` 的 header sanitizer 半边由 `a2d9571` 改成
+拒绝而非删除，open → partial。这八条在订正前是**实现已发布、状态仍写 open** 的窗口，
+分区、计数与专题矩阵三项自检当时全绿——那正是 evidence 检查存在的理由。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -250,12 +257,12 @@ fixed）、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed，
 | `LIB-01` | fixed | bounded inflate 在 materialize 前限制输出。 |
 | `LIB-02` | fixed | ZIP central directory 完整性已按声明边界校验。 |
 | `LIB-03` | fixed | DEFLATE EOF 不再补零接受截断流。 |
-| `LIB-10` | partial | middleware error 已带 CORS，middleware 前的 400/413 仍漏。 |
+| `LIB-10` | fixed | dot-segment 400 与 body-limit 413 现在都在 middleware 链下产生，CORS 与访问日志随之覆盖。 |
 | `LIB-11` | fixed | request-body tempfile 从创建起即有 owner。 |
 | `GOV-01` | fixed | dtoa 独立 oracle 已进入持续门禁。 |
 
-逐行重算结果：**25 fixed / 3 partial / 1 open / 0 retracted = 29**。唯一 open 为 `SEM-04`；三项
-partial 为 `ARC-01`、`ARC-02`、`LIB-10`。
+逐行重算结果：**26 fixed / 2 partial / 1 open / 0 retracted = 29**。唯一 open 为 `SEM-04`；两项
+partial 为 `ARC-01`、`ARC-02`。
 
 ## 6. 语言设计建议
 
@@ -329,16 +336,19 @@ partial 为 `ARC-01`、`ARC-02`、`LIB-10`。
 
 1. **TOOL-05/06 已关账：** `18fb3d6` 以 canonical `(project, source_root)` workspace、共享
    `Program`、诊断聚合与每 identity lease 完成收口，不再占用当前修复队列。
-2. **先收口 partial P1：** `ARC-01/02` 的 symbol edge/source origin；`LIB-10` 的
-   middleware 前 error response（`TOOL-14` 已由 `3e13645` 的 launcher v2 generation 收口）。
+2. **先收口 partial P1：** 只剩 `ARC-01/02` 的 symbol edge/source origin（`TOOL-14` 已由
+   `3e13645` 的 launcher v2 generation 收口，`LIB-10` 已由 `79448da` 把两条早退拒绝
+   接进 middleware 链收口）。
 3. **把 `SEM-04` 留给维护者裁决：** Cursor 是携带 owner 的值还是 generative identity，以及
    不同 owner 的 Eq/Ord 是否拒绝；裁决前只保留静态候选，不写 workaround。
-4. **低耦合自治批：** `SYN-11`、B200-1B 后续、`SYN-09` 与 `SYN-05` 均已关账；下一项 `SEM-07`，
-   再按依赖推进 `SYN-04 → SYN-13`；`SYN-17` 只留在 D/P3 关键字预算设计队列。
+4. **低耦合自治批：** `SYN-11`、B200-1B 后续、`SYN-09`、`SYN-05` 与 `SEM-07` 均已关账；
+   下一项按依赖推进 `SYN-04 → SYN-13`；`SYN-17` 只留在 D/P3 关键字预算设计队列。
 5. **类型化阶段产品：** `ARC-07` 后接 `ARC-08`，再以稳定 lowered identity 推进
    `ARC-11B/ARC-12`；不把 `ARC-09/10` 的 HOLD 项混入自治队列。
-6. **破坏性 package API：** `LIB-08`、`LIB-12`–`LIB-19` 按 package major 与迁移窗口分批；
-   `SEM-09/10` 是 intentional delayed capability/ABI，`SEM-16` 是 HOLD，均不作为自治修 bug。
+6. **破坏性 package API：** `json2` / `web3` 两个 major 已带走 `LIB-08`、`LIB-12`、`LIB-14`、
+   `LIB-15`、`LIB-17`；余下 `LIB-06`、`LIB-13`、`LIB-16`、`LIB-18`、`LIB-19` 按下一个 major
+   与迁移窗口分批。`SEM-09/10` 是 intentional delayed capability/ABI，`SEM-16` 是 HOLD，
+   均不作为自治修 bug。
 
 ## 9. 旧审查如何读
 

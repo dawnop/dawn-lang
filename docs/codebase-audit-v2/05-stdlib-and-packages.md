@@ -139,7 +139,6 @@
 
 <!-- audit-anchor: absent std/bytes.dawn | decode_utf8_checked -->
 
-
 - **证据：S。** `bytes.decode_utf8` 明确用 U+FFFD 替换 malformed input：`std/bytes.dawn:79`；Web 无条件用它构造 text body：`packages/web/src/server.dawn:77`。
 - **影响：** invalid UTF-8 JSON/签名输入会在应用看到前被改写；`Request.body` 无法表示 decode failure，raw bytes 也容易丢失。
 - **建议：** 现函数改名 `decode_utf8_lossy`，新增 `decode_utf8_checked -> Result`；Web 对 text media type strict decode，同时始终保留 raw Bytes。
@@ -157,10 +156,17 @@
   fault 或查询 NUL 前缀；双后端合同与七组可运行 mutant 固定删除结果、查询结果、路径解释及
   目标不变边界。
 
-## LIB-08 — P2 — JSON parse error 只有不稳定的 String
+## LIB-08 — P2 — JSON parse error 只有不稳定的 String（已修）
 
 <!-- audit-anchor: absent packages/json/src/value.dawn | pub type JsonError -->
 
+> **后续处置（2026-08-11 登记，实现更早）：已修。** `ce9cd15` 把 `parse` 的失败类型从
+> `String` 换成 `packages/json/src/value.dawn` 的 `JsonError { kind, offset, message }`，
+> `JsonErrorKind` 按调用方**能据以分支**的区别分档而不是一档一句话；`error_text` 保留旧的
+> 单行渲染供迁移。这是包破坏性变更，随 `96a378a` 的 major 一起发为 `json2 / 2.0.0`。
+> 立项时要显式推翻的 `re-audit-2026-07-30.md:547`「包错误类型统一 String 已由 ERR-02 覆盖」
+> 归因确实不成立：ERR-02 的范围是 `java_try`/`catch_panic` 的 `Result[T, String]`，从未碰过
+> JSON 自己的 parse error。
 
 - **证据：S。** public API 是 `Result[Json, String]`：`packages/json/src/parser.dawn:172`；offset 直接拼进 message：`packages/json/src/lexer.dawn:46`。
 - **影响：** Web/LSP/config tooling 要取 error kind/offset 只能解析人类文本，文案调整会破坏调用方。
@@ -183,6 +189,13 @@
 
 <!-- audit-anchor: absent packages/web/src/server.dawn | bodyless_request -->
 
+> **后续处置（2026-08-11 登记，实现更早）：已修。** `79448da` 让 dot-segment 400 与
+> body-limit 413 这两条早退拒绝也走 middleware 链：`bodyless_request` 从请求行与 header
+> 造出一个 body 为空的 Request（这两条路径的全部意义就是不读 body），核心函数直接返回该
+> 错误，于是它们与其他 error response 一样拿到 CORS 头与访问日志行。dot-segment 检查移到
+> dispatch 之后，因此拒绝还带上匹配路由的 tags。middleware 在这两条路径上看到的是
+> **诚实但不完整**的 Request（method/path/headers/query/tags 为真，body 与 raw 为空），
+> 这一点写在调用点。本项的 partial 边界至此关闭。
 
 > **后续处置（2026-08-09）：partial。** `with_cors` 已不再用 `?` 提前传播，handler 的
 > `Ok(Response)` 与 `Err(HttpError)` 都会写入 CORS headers：`packages/web/src/middleware.dawn:81`。
@@ -201,10 +214,14 @@
 - **影响：** 长期 server 可耗尽 temp directory/disk。
 - **建议：** temp path 是最外层 bracket resource；只有 Request 成功接管 ownership 才 disarm cleanup；delete failure 必须 log/return structured error。
 
-## LIB-12 — P2 — query/form 重复字段被静默折叠
+## LIB-12 — P2 — query/form 重复字段被静默折叠（已修）
 
 <!-- audit-anchor: absent packages/web/src/types.dawn | query: Map[String, List[String]] -->
 
+> **后续处置（2026-08-11 登记，实现更早）：已修。** `05db7f2` 把 `Request.query` 与
+> `parse_form` 的结果都改成 `Map[String, List[String]]`，按 wire order 保留同名的每个值，
+> 与 WEB-04 早已落地的 `headers` 同形；`query`/`form_value` 取第一个，`query_all`/`form_all`
+> 取全部。包破坏性变更，随 `96a378a` 的 major 发为 `web3 / 3.0.0`。
 
 - **证据：S。** `Request` 使用 `Map[String, String]`：`packages/web/src/types.dawn:36`；parser 先有 pair list，随后 `map.from`：`packages/web/src/server.dawn:283`、`:319`；form 同样：`:295`。
 - **边界：** `?tag=a&tag=b`、checkbox、多选表单只留下一个值。
@@ -215,45 +232,64 @@
 
 <!-- audit-anchor: present packages/web/src/router.dawn | pub fn dispatch( -->
 
-
 - **证据：S。** public dispatch path splitter 丢所有 empty segment：`packages/web/src/router.dawn:67`、`:275`；server raw-path splitter 保留内部 empty segment：`packages/web/src/server.dawn:244`、`:427`。
 - **边界：** direct `dispatch(..., "/a//b")` 可匹配 `/a/b`，真实 HTTP server 不匹配。
 - **影响：** unit test 与 production routing 分叉；pattern 中 repeated slash 也会被 silently normalize。
 - **建议：** 共享唯一 pure path parser；pattern/request 同时选择 reject repeated slash 或 preserve exact segments。
 
-## LIB-14 — P2 — tail capture 抹掉 encoded slash 的 segment 边界
+## LIB-14 — P2 — tail capture 抹掉 encoded slash 的 segment 边界（已修）
 
 <!-- audit-anchor: absent packages/web/src/types.dawn | pub fn param_segs -->
 
+> **后续处置（2026-08-11 登记，实现更早）：已修。** `4825c84` 让 `Request.params` 持有
+> 每个 capture **匹配到的段**（`Map[String, List[String]]`）而不是拼回的 String：`{name}`
+> 一段，`{name*}` 余下若干段。`param` 读单段 capture，`param_segs` 读 tail capture，
+> `/dav/a%2Fb` 与 `/dav/a/b` 因而在 handler 侧仍然可分。包破坏性变更，随 `web3 / 3.0.0` 发。
 
 - **证据：S。** server 先按 raw slash 分段再 decode：`packages/web/src/server.dawn:244`，但 tail capture 最后用 `/` 拼成 String：`packages/web/src/router.dawn:96`。
 - **边界：** `/dav/a%2Fb` 的单 segment `"a/b"` 与 `/dav/a/b` 的两个 segments 最终都得到 `rest = "a/b"`。
 - **影响：** file/WebDAV/auth handler 无法区分两个 URI resource identity。
 - **建议：** tail param 保留 `List[String]` 或带 raw encoding/segment boundaries 的专用类型。
 
-## LIB-15 — P2 — `ServerHandle` 不拥有自己创建的 executor
+## LIB-15 — P2 — `ServerHandle` 不拥有自己创建的 executor（已修）
 
 <!-- audit-anchor: absent packages/web/src/server.dawn | executor: ExecutorService -->
 
+> **后续处置（2026-08-11 登记，实现更早）：已修。** `aed3107` 把 `start` 创建的
+> virtual-thread executor 存进 `ServerHandle`，`stop` 经 `release_handle` 固定顺序释放：
+> executor 先 shutdown、再停 JDK server、最后**无条件** countDown，每步各自 `catch_fault`，
+> 所以任一步抛出都不会再让 `join` 永久阻塞。`server.dawn` 的单测直接钉住「JDK 的 stop 抛
+> 异常时 executor 仍被关掉」。包破坏性变更（handle 多一个字段），随 `web3 / 3.0.0` 发。
 
 - **证据：S。** handle 只保存 server/port/latch：`packages/web/src/server.dawn:489`；`start` 创建 virtual-thread executor 后不保存：`:511`；`stop` 不 shutdown：`:527`。
 - **影响：** start/stop lifecycle 没有确定释放全部 resources；stop exception 时 latch 也可能不 release。
 - **建议：** handle 持有 executor；`stop` 的 finally 顺序停止 server、shutdown executor、无条件 countDown。
 
-## LIB-16 — P2 — `Response` 可公开构造非法 HTTP 状态
+## LIB-16 — P2 — `Response` 可公开构造非法 HTTP 状态（部分修复）
 
 <!-- audit-anchor: present packages/web/src/types.dawn | pub type Response = { -->
 
+> **后续处置（2026-08-11 登记，实现更早）：partial。** header sanitizer 那半已由
+> `a2d9571` 关闭：`header_name`/`header_value` 的**逐字符删除**换成谓词
+> `valid_header_name`/`valid_header_value`，发射端拒绝而不是改写——`with_header` panic
+> （程序用自己的字符串造头，送不出去是调用方的 bug，逐请求隔离把它渲染成 500），
+> `try_with_header`/`try_redirect` 是请求输入派生值的形式，答 400。删除法留下的静默改写
+> （`/a\r\nX: 1` 变成 `/aX: 1` 这类）因此消失。
+>
+> **仍开放：** `Response` 仍是 public record，record literal 可绕过构造器；no-body 状态集
+> 仍只有 204/304，1xx 与 205 仍可带 entity；write boundary 也仍不重新校验。opaque
+> `Response` 那半在 `web-api-v2-design.md` §四已被裁「不做」（status 是三位数字的开放集合），
+> 重开必须显式回应该节；受检 `HeaderName`/`HeaderValue` 与统一的 1xx/204/205/304/HEAD
+> 语义没有被 §四覆盖，是本项余下的可做面。
 
 - **证据：S。** `Response` 是 public record literal：`packages/web/src/types.dawn:81`；header sanitizer 删除字符而非拒绝：`:214`；write boundary 不重新 validate：`packages/web/src/server.dawn:131`；no-body status 只覆盖 204/304：`:94`。
 - **边界：** header name `":"` 可变 empty，`"X:A"` 与 `"XA"` collision；1xx/205 仍可带 entity。
 - **影响：** safe constructor 的保证可被 record literal 绕过，最终是 host exception 或 protocol violation。
 - **建议：** opaque `Response` 与 validated `HeaderName/HeaderValue`；write boundary defense-in-depth；统一 1xx、204、205、304、HEAD body semantics。
 
-## LIB-17 — P2 — 两种 body limit 对 0/负数语义相反
+## LIB-17 — P2 — 两种 body limit 对 0/负数语义相反（已修）
 
 <!-- audit-anchor: absent packages/web/src/middleware.dawn | limit > 0 -->
-
 
 - **证据：S。** middleware 直接 `len > limit`：`packages/web/src/middleware.dawn:53`；底层 reader 把 `limit <= 0` 当 unlimited：`packages/web/src/server.dawn:76`。
 - **边界：** `-1` 在底层 unlimited、在 middleware 连 empty body 都拒；`0` 分别是 unlimited 与 empty-only。
@@ -264,6 +300,12 @@
 
 <!-- audit-anchor: present packages/web/src/server.dawn | let _ = catch_panic -->
 
+> **后续处置（2026-08-11 登记，实现更早）：已修。** `3a21be8` 让 `with_body_limit` 与
+> `read_body` 用同一条读法：`limit <= 0` 是 unbounded，正数才是上限。原来的
+> `len > limit` 使 `0` 只放行空 body、`-1` 连空 body 都 413，与底层 reader 恰好相反；
+> 现在两处对 0 与负数给同一个答案，`middleware.dawn` 的单测钉住这一条。建议里的
+> `Option[Int]` 表示法没有采用：统一读法已经关闭本项指出的分歧边界，换类型是另一次
+> 包破坏，留给下一个 major。
 
 > **当前静态候选（未验证，不改严重度）：** streaming 分支把 `transferTo` 放进
 > `catch_panic` 后丢弃整个结果，且 `ResponseBody.Stream` 不携带 expected length：
@@ -278,7 +320,6 @@
 ## LIB-19 — P2 — SHA-256 `Digest` public record 可伪造 invariant
 
 <!-- audit-anchor: absent packages/sha2/src/sha256.dawn | pub opaque type Digest -->
-
 
 - **证据：S。** digest state 是 public record：`packages/sha2/src/sha256.dawn:27`；`update/finish` 直接假定 `h` length、buffer length、total 相互一致：`:109`、`:127`。
 - **影响：** caller 可构造 type-correct 但会 OOB 或输出错误 digest 的 state；API 把实现 invariant 变成用户责任。

@@ -47,7 +47,6 @@
 
 <!-- audit-anchor: absent selfhost/src/front/ast.dawn | POr( -->
 
-
 > **当前静态候选（未验证，不改严重度）：** `lower_match` 在 `for p in arm.pats` 内分别
 > lowering 同一 arm 的 guard：`selfhost/src/ir/lower.dawn:2882`、`:2897`。若多个 alternative
 > 对同一 scrutinee 同时匹配，前一个 guard 返回 false 后还会尝试后一个 alternative，effectful
@@ -220,7 +219,6 @@
 
 <!-- audit-anchor: present selfhost/src/front/ast.dawn | SFor(name: String -->
 
-
 - **证据：S。** parser 在 `for` 后只接受 IDENT：`selfhost/src/front/parser.dawn:1215`；`let` 已支持不可反驳 pattern，规范也已有 refutability 规则：`docs/spec.md:921`。
 - **边界：** 遍历 pair/entry 不能写 `for (k, v) in entries`，必须先绑定临时值再解构。
 - **影响：** sequence iteration 与同语言的 binding grammar 不正交，尤其伤害 Map/zip API。
@@ -283,7 +281,6 @@
 ## SYN-17 — P3 — `java` 是全局硬关键字
 
 <!-- audit-anchor: present selfhost/src/front/token.dawn | "java" -> Some(JAVA) -->
-
 
 > **后续处置（2026-08-09）：维持 open，但归 D/P3 关键字预算设计项。** 当前 parser、规范与
 > TextMate grammar 对 hard keyword 身份一致，没有实现 bug；是否为 `java` 归还普通标识符空间
