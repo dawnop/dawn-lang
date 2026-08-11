@@ -21,6 +21,14 @@ fail() {
   exit 1
 }
 
+compare_compiler_inputs() {
+  local expected=$1 actual=$2 label=$3
+  if ! cmp -s "$expected" "$actual"; then
+    diff -u "$expected" "$actual" >&2 || true
+    fail "$label compiler input manifest drifted"
+  fi
+}
+
 run_jar_exact() {
   local jar_path=$1 label=$2
   if ! java -jar "$jar_path" > "$work/$label.run.out" 2> "$work/$label.run.err"; then
@@ -76,6 +84,70 @@ if ! "$dawn" --version > "$work/version.out" 2> "$work/version.err"; then
   cat "$work/version.err" >&2
   fail "$dawn could not initialize the current toolchain"
 fi
+
+if ! "$dawn" __source-inputs --base "$root" selfhost \
+    > "$work/source-plan.inputs" 2> "$work/source-plan.inputs.err"; then
+  cat "$work/source-plan.inputs.err" >&2
+  fail "SourcePlan could not list the selfhost compiler inputs"
+fi
+if [ -s "$work/source-plan.inputs.err" ]; then
+  cat "$work/source-plan.inputs.err" >&2
+  fail "SourcePlan wrote diagnostics while listing selfhost compiler inputs"
+fi
+if ! python3 "$root/scripts/gate-map/gatemap.py" --compiler-inputs \
+    > "$work/gate-map.inputs" 2> "$work/gate-map.inputs.err"; then
+  cat "$work/gate-map.inputs.err" >&2
+  fail "gate-map could not derive the selfhost compiler inputs"
+fi
+if [ -s "$work/gate-map.inputs.err" ]; then
+  cat "$work/gate-map.inputs.err" >&2
+  fail "gate-map wrote diagnostics while listing selfhost compiler inputs"
+fi
+compare_compiler_inputs \
+  "$work/source-plan.inputs" "$work/gate-map.inputs" "SourcePlan and gate-map"
+echo "PASS  SourcePlan and gate-map agree exactly on selfhost compiler inputs"
+
+python3 - "$work/gate-map.inputs" "$work" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+lines = source.read_text(encoding="utf-8").splitlines()
+files = [index for index, line in enumerate(lines) if line.startswith("R\tF\t")]
+if len(files) < 2:
+    raise SystemExit("compiler input negative controls need two required files")
+
+mutants = {}
+schema = list(lines)
+schema[0] = "dawn-source-inputs-v2"
+mutants["schema"] = schema
+
+paths = list(lines)
+del paths[files[0]]
+mutants["paths"] = paths
+
+kind = list(lines)
+kind[files[0]] = kind[files[0]].replace("R\tF\t", "R\tO\t", 1)
+mutants["kind"] = kind
+
+order = list(lines)
+order[files[0]], order[files[1]] = order[files[1]], order[files[0]]
+mutants["order"] = order
+
+for name, mutant in mutants.items():
+    (target / f"gate-map.{name}.mutant").write_text(
+        "\n".join(mutant) + "\n", encoding="utf-8"
+    )
+PY
+for mutant in schema paths kind order; do
+  if (compare_compiler_inputs \
+      "$work/source-plan.inputs" "$work/gate-map.$mutant.mutant" "$mutant mutant") \
+      > "$work/$mutant.control.out" 2> "$work/$mutant.control.err"; then
+    fail "$mutant compiler input mutant did not turn the byte-exact check red"
+  fi
+done
+echo "PASS  compiler input negative controls reject schema, path, kind and order drift"
 
 mkdir -p "$work/java-src/g" "$work/java-classes" "$work/maven/g/selected/1"
 

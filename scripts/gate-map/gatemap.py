@@ -3,6 +3,7 @@
 
     scripts/gate-map/gatemap.py selfhost/src/main.dawn
     scripts/gate-map/gatemap.py --changed origin/main
+    scripts/gate-map/gatemap.py --compiler-inputs
     scripts/gate-map/gatemap.py --labels         # which differential owns which label
     scripts/gate-map/gatemap.py --check          # what CI runs
 
@@ -68,15 +69,28 @@ paths no gate watches) is a ratchet checked in both directions.
   C  The Core golden records one hash per compiler module, so every module it
      names is exact for the Core IR golden step. This is what 98b9896 needed.
      From: scripts/core-golden/selfhost.sha.
-  D  prev-diff compiles each corpus target's source with *both* toolchains, so
-     the target's own content cancels: it is blind there. That is the general
-     rule and the driver modules of 98b9896 are one case of it. A change inside
-     packages/web cannot move `emit packages/web`; the v0.64.0 branch declared
-     five labels whose oracles could not have seen the differences they named.
-     std is the exception, because the N-1 side is pointed at the std it was
-     released with.
+  D  prev-diff compiles each corpus target's source in both output legs, so the
+     target's own corpus content cancels: it is blind there. That is the general
+     rule and the driver modules of 98b9896 are one case of it. std is the
+     exception, because the N-1 side is pointed at the std it was released with.
+
+     The selfhost project has a second role. It builds the HEAD compiler
+     selected by `HEAD_BIN=(./bin/dawn)` from a SourcePlan input closure rooted
+     at selfhost. The closure follows repo-local string `[deps]` recursively;
+     each project contributes dawn.toml and src, while only the root contributes
+     its optional dawn.lock. Paths are lexically normalized inside the
+     historical Tree; unknown dependency forms, parse errors, missing inputs,
+     escapes and cycles void the premise. A compiler semantic or build-input
+     change can move the HEAD leg for any emit target, including selfhost
+     itself, even though selfhost's own corpus content still cancels. Every path
+     in that derived closure receives a separate compiler-input coarse verdict.
+     `--compiler-inputs` serializes the same closure as a
+     `dawn-source-inputs-v1` manifest. The source-plan contract compares that
+     output byte for byte with `dawn __source-inputs`, so a schema, record,
+     kind or ordering change cannot leave these two derivations silently split.
      From: the `emit <target>` labels in scripts/emit-labels.txt, taken from
-     that script's own section, and the `--std "$(seed_std_dir)"` in
+     that script's own section, plus the exact output legs,
+     `HEAD_BIN=(./bin/dawn)` assignment and HEAD_BIN invocation in
      scripts/selfhost-prev-diff.sh, whose continued presence is checked.
   E  A gate that spells out a string a source module builds is coupled to that
      module, and the coupling is invisible from either side. This is what
@@ -124,10 +138,13 @@ and the residue is written down in unseen.txt where somebody can read it.
 """
 
 import argparse
+import posixpath
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -158,6 +175,39 @@ CLI_TARGET_ALIASES = {"--stdlib": "std"}
 CORE_GOLDEN = "scripts/core-golden/selfhost.sha"
 EMIT_LABELS = "scripts/emit-labels.txt"
 PREV_DIFF = "scripts/selfhost-prev-diff.sh"
+SELFHOST_PROJECT = "selfhost"
+SELFHOST_MANIFEST = "selfhost/dawn.toml"
+SELFHOST_LOCK = "selfhost/dawn.lock"
+SOURCE_INPUTS_HEADER = "dawn-source-inputs-v1"
+COMPILER_CLOSURE_PROBLEM = "selfhost compiler input closure is void"
+VALID_DAWN_NAME = re.compile(r"[a-z_][a-z0-9_]*")
+HEAD_BIN_ASSIGNMENT = "HEAD_BIN=(./bin/dawn)"
+PREV_EMIT_WORDS = (
+    "${PREV[@]}",
+    "__emit",
+    "${PREV_STD[@]}",
+    "$t",
+    "-o",
+    "$OUT/prev/$t",
+    ">",
+    "/dev/null",
+)
+HEAD_EMIT_TAIL = (
+    "__emit",
+    "$t",
+    "-o",
+    "$OUT/head/$t",
+    ">",
+    "/dev/null",
+)
+HEAD_EMIT_WORDS = ("${HEAD_BIN[@]}",) + HEAD_EMIT_TAIL
+HEAD_EMIT_COMMAND = (
+    '"${HEAD_BIN[@]}" __emit "$t" -o "$OUT/head/$t" > /dev/null'
+)
+HEAD_COMPILER_REASON = (
+    "`HEAD_BIN=(./bin/dawn)` makes the HEAD leg run the compiler built from "
+    "the SourcePlan input closure rooted at the selfhost project"
+)
 
 # This file, exempt from rules A and B. Every other gate script names a path in
 # order to read it; this one names paths in order to describe them, in a usage
@@ -365,6 +415,141 @@ def strip_comments(text):
     return "\n".join(
         ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
     )
+
+
+def shell_words(line):
+    """One shell line as tokens, with real comments removed by a shell lexer."""
+    try:
+        return tuple(shlex.split(line, comments=True, posix=True))
+    except ValueError:
+        return ()
+
+
+def compiler_project_closure(tree, root=SELFHOST_PROJECT):
+    """Repo-local SourcePlan projects reachable through string `[deps]` paths.
+
+    This is lexical and tree-backed so historical fixture Trees and in-memory
+    mutants receive the same answer as the checked-out tree. SourcePlan also
+    accepts fetched URL dependencies, but this bootstrap compiler closure is
+    required to stay repo-local: an unfamiliar dependency form voids the map
+    instead of being guessed into coverage.
+    """
+    projects = []
+    problems = []
+    visited = set()
+    visiting = []
+    names = {}
+
+    def problem(detail):
+        problems.append(f"{COMPILER_CLOSURE_PROBLEM}: {detail}")
+
+    def dependency_path(project, alias, raw):
+        if not raw or any(ord(char) < 32 for char in raw):
+            problem(f"{project}/dawn.toml dependency `{alias}` has an invalid path")
+            return None
+        if posixpath.isabs(raw):
+            problem(
+                f"{project}/dawn.toml dependency `{alias}` uses absolute path "
+                f"`{raw}` rather than a repo-local path"
+            )
+            return None
+        resolved = posixpath.normpath(posixpath.join(project, raw))
+        if resolved == ".." or resolved.startswith("../"):
+            problem(
+                f"{project}/dawn.toml dependency `{alias}` escapes the repo "
+                f"after lexical normalization: `{raw}` -> `{resolved}`"
+            )
+            return None
+        return resolved
+
+    def visit(project):
+        if project in visiting:
+            start = visiting.index(project)
+            cycle = visiting[start:] + [project]
+            problem("local dependency cycle: " + " -> ".join(cycle))
+            return
+        if project in visited:
+            return
+
+        manifest = f"{project}/dawn.toml"
+        source = f"{project}/src"
+        if manifest not in tree.fileset:
+            problem(f"local dependency project `{project}` has no dawn.toml")
+            return
+        if source not in tree.dirs:
+            problem(f"local dependency project `{project}` has no tracked src tree")
+            return
+        try:
+            document = tomllib.loads(tree.read(manifest))
+        except (tomllib.TOMLDecodeError, ValueError) as error:
+            problem(f"cannot parse {manifest}: {error}")
+            return
+        if document.get("schema") != 1:
+            problem(f"{manifest} does not declare supported schema 1")
+            return
+        name = document.get("name")
+        if not isinstance(name, str) or VALID_DAWN_NAME.fullmatch(name) is None:
+            problem(f"{manifest} does not declare a valid package name")
+            return
+        owner = names.get(name)
+        if owner is not None and owner != project:
+            problem(
+                f"package `{name}` is reached from both `{owner}` and `{project}`"
+            )
+            return
+        names[name] = project
+
+        deps = document.get("deps", {})
+        if not isinstance(deps, dict):
+            problem(f"{manifest} has an unknown `[deps]` shape")
+            return
+
+        visiting.append(project)
+        projects.append(project)
+        for alias, raw in deps.items():
+            if VALID_DAWN_NAME.fullmatch(alias) is None:
+                problem(f"{manifest} has invalid dependency alias `{alias}`")
+                continue
+            if not isinstance(raw, str):
+                problem(
+                    f"{manifest} dependency `{alias}` is not a local path string"
+                )
+                continue
+            child = dependency_path(project, alias, raw)
+            if child is not None:
+                visit(child)
+        visiting.pop()
+        visited.add(project)
+
+    visit(root)
+    return projects, problems
+
+
+def compiler_input_records(tree, root=SELFHOST_PROJECT):
+    """The tracked SourcePlan records that build the selfhost compiler.
+
+    SourcePlan sorts records by kind and path. Every project contributes its
+    required manifest and source tree, while the root lock remains an optional
+    file record even when the Tree does not currently contain it. Keeping the
+    record shape here lets rule D and `--compiler-inputs` consume one result.
+    """
+    projects, problems = compiler_project_closure(tree, root)
+    if problems:
+        return [], problems
+    records = [("R", "F", f"{project}/dawn.toml") for project in projects]
+    records.append(("R", "O", f"{root}/dawn.lock"))
+    records.extend(("R", "T", f"{project}/src") for project in projects)
+    return sorted(records), []
+
+
+def compiler_inputs_text(tree):
+    """A complete `dawn-source-inputs-v1` manifest, or closure problems."""
+    records, problems = compiler_input_records(tree)
+    if problems:
+        return "", problems
+    lines = [SOURCE_INPUTS_HEADER]
+    lines.extend("\t".join(record) for record in records)
+    return "\n".join(lines) + "\n", []
 
 
 def resolve(cand, tree):
@@ -883,26 +1068,47 @@ class Map:
         # The premises. Each is a sentence rule D depends on; if one stops
         # being true in the tree the rule is wrong rather than merely old.
         #
-        # The first is why a corpus target is blind: the loop emits the *same*
-        # `$t`, out of the same working tree, with both toolchains, so
-        # whatever the target's own source says is said identically on both
-        # sides and the diff cancels. Measured on 2026-08-11 rather than
-        # reasoned: a new `pub fn` added to packages/web/src/server.dawn
-        # reaches the emitted server.class and `emit packages/web` still
-        # reports the two sides identical.
-        emit_legs = [
-            ln for ln in body.splitlines() if "__emit" in ln and '"$t"' in ln
+        # The first is why a corpus target is blind: exactly one prev output
+        # leg and one head output leg emit the same `$t`, out of the same
+        # working tree, into their respective directories. The executable on
+        # the head output leg is deliberately not part of this premise. Even
+        # if that leg accidentally ran PREV, the corpus's own content would
+        # still occur on both sides and cancel.
+        commands = [shell_words(ln) for ln in body.splitlines()]
+        prev_output_legs = [words for words in commands if words == PREV_EMIT_WORDS]
+        head_output_legs = [
+            words
+            for words in commands
+            if len(words) == len(HEAD_EMIT_TAIL) + 1
+            and words[1:] == HEAD_EMIT_TAIL
         ]
-        prev_leg = [ln for ln in emit_legs if "PREV" in ln]
-        head_leg = [ln for ln in emit_legs if "HEAD" in ln]
-        if len(emit_legs) != 2 or not prev_leg or not head_leg:
+        if len(prev_output_legs) != 1 or len(head_output_legs) != 1:
             self.problems.append(
-                f"{script} no longer emits the same `$t` with both toolchains "
-                "(one leg naming PREV, one naming HEAD), so 'a corpus "
-                "target's own content cancels' is no longer derivable; rule "
-                "D's blind conclusion is void"
+                f"{script} no longer has exactly one prev output leg and one "
+                "head output leg that each emit the same `$t` into "
+                "`$OUT/prev/$t` and `$OUT/head/$t`; a corpus target's own "
+                "content no longer provably cancels, so rule D's blind "
+                "conclusion is void"
             )
             return
+
+        head_bins = [
+            ln.strip()
+            for ln in body.splitlines()
+            if ln.strip().startswith("HEAD_BIN=")
+        ]
+        head_compiler_legs = [words for words in commands if words == HEAD_EMIT_WORDS]
+        head_is_current = (
+            head_bins == [HEAD_BIN_ASSIGNMENT] and len(head_compiler_legs) == 1
+        )
+        if not head_is_current:
+            self.problems.append(
+                f"{script} must assign `{HEAD_BIN_ASSIGNMENT}` exactly once "
+                "and its head output leg must exactly call "
+                "`\"${HEAD_BIN[@]}\" __emit \"$t\"`; comments and variable "
+                "names are not evidence that the selfhost compiler runs, so "
+                "rule D's HEAD compiler premise is void"
+            )
 
         if "PREV_STD" not in body or "--std" not in body:
             self.problems.append(
@@ -928,6 +1134,9 @@ class Map:
             )
             return
 
+        compiler_inputs, closure_problems = compiler_input_records(tree)
+        self.problems.extend(closure_problems)
+
         for target in targets:
             if not tree.exists(target):
                 self.problems.append(
@@ -935,18 +1144,46 @@ class Map:
                     "not in the tree"
                 )
                 continue
+            if target == "selfhost":
+                blind_why = (
+                    "`emit selfhost` compiles this same source in both output "
+                    "legs, so selfhost's own corpus source content cancels "
+                    "between them"
+                )
+            else:
+                blind_why = (
+                    f"`emit {target}` compiles this same source in both output "
+                    f"legs, so {target}'s own corpus source content cancels "
+                    "between them"
+                )
             self.add_under(
                 target,
                 Observation(
                     "blind",
                     gate.id,
-                    f"`emit {target}` compiles this same source with both "
-                    "toolchains, so its content cancels. A change inside "
-                    f"{target} cannot move `emit {target}`, and declaring "
-                    f"Emit-Change(emit {target}) for one names an oracle that "
-                    "could not have seen it",
+                    blind_why,
                 ),
             )
+        if head_is_current and not closure_problems:
+            compiler_why = (
+                HEAD_COMPILER_REASON + ". Local string `[deps]` are followed "
+                "recursively; each project contributes dawn.toml and src, "
+                "and only the root contributes dawn.lock. Changes in this "
+                "derived closure can move any `emit ...` label, including "
+                "`emit selfhost`; decide declarations from the real "
+                "differential or an unmasked true-parent control"
+            )
+            for _, kind, path in compiler_inputs:
+                if kind == "T":
+                    self.add_under(
+                        path,
+                        Observation("coarse", gate.id, compiler_why),
+                    )
+                elif path in tree.fileset:
+                    self.add(
+                        path,
+                        Observation("coarse", gate.id, compiler_why),
+                    )
         self.add_under(
             "std",
             Observation(
@@ -1239,12 +1476,26 @@ def report(gm, paths, stream=sys.stdout):
         }
         for gate_id in sorted({o.gate_id for o in obs if o.level == "blind"}):
             if any(gid == gate_id for gid, _ in contradicted):
-                print(
-                    f"  note    {gate_id} both reads this path and cancels it. "
-                    "The read above is the differential compiling it on both "
-                    "sides, not a gate watching it.",
-                    file=stream,
+                compiler_role = any(
+                    o.gate_id == gate_id
+                    and o.level == "coarse"
+                    and "HEAD_BIN=(./bin/dawn)" in o.why
+                    for o in obs
                 )
+                if compiler_role:
+                    why = (
+                        "the selfhost project has two roles: its own corpus "
+                        "content cancels, while its HEAD compiler inputs are "
+                        "coarsely observed. Measure the declaration with the "
+                        "real differential or an unmasked true-parent control."
+                    )
+                else:
+                    why = (
+                        "the blind verdict covers only the same corpus's own "
+                        "content. Read the coarse reason separately; it does "
+                        "not turn own-content cancellation into exact coverage."
+                    )
+                print(f"  note    {gate_id} {why}", file=stream)
         print(file=stream)
 
 
@@ -1721,6 +1972,13 @@ def _cites(check, path, script):
     return any(script in obs.why for obs in check.map.verdict(path))
 
 
+def _has_head_compiler_coarse(gm, path="selfhost/dawn.toml"):
+    return any(
+        obs.level == "coarse" and obs.why.startswith(HEAD_COMPILER_REASON)
+        for obs in gm.verdict(path)
+    )
+
+
 # Each entry is (name, what it asserts, predicate). The predicate is true when
 # the assertion is green, so a mutant "reddens" one by making it false.
 ASSERTIONS = [
@@ -1761,9 +2019,22 @@ ASSERTIONS = [
         lambda c, b: _clean(c.problems, "rule D is void"),
     ),
     (
+        "prev_diff_head_compiler_premise",
+        "prev-diff still runs the compiler built from the selfhost project "
+        "on its HEAD leg",
+        lambda c, b: _clean(c.problems, "HEAD compiler premise is void"),
+    ),
+    (
+        "selfhost_compiler_closure_premise",
+        "the HEAD compiler input closure is a complete repo-local SourcePlan "
+        "graph rooted at selfhost",
+        lambda c, b: _clean(c.problems, COMPILER_CLOSURE_PROBLEM),
+    ),
+    (
         "emit_cancels_the_corpus",
-        "the differential still emits the same target with both toolchains, "
-        "which is why a corpus target's own source is blind to its own label",
+        "the differential still emits the same target through both output "
+        "legs, which is why a corpus target's own source is blind to its own "
+        "label",
         lambda c, b: _clean(c.problems, "blind conclusion is void"),
     ),
     (
@@ -1962,6 +2233,9 @@ def regenerate_record(gm, note="regenerated by the selftest"):
 # planting something and not colliding with something.
 RENAMED = "_renamed_by_the_selftest"
 PROBE_MANIFEST = "scripts/gate-map/selftest-probe/dawn.toml"
+COMPILER_PROBE_PROJECT = "gate-map-selftest/compiler-dep"
+COMPILER_PROBE_MANIFEST = f"{COMPILER_PROBE_PROJECT}/dawn.toml"
+COMPILER_PROBE_SOURCE = f"{COMPILER_PROBE_PROJECT}/src/value.dawn"
 
 
 class Mutant:
@@ -2064,6 +2338,32 @@ def mutants(base):
             "rule D's premise: with the N-1 side compiling today's std, "
             "'std source moves the emitted bytes' stops following",
             edits={PREV_DIFF: swap('--std "$(seed_std_dir)"', '"$(seed_std_dir)"')},
+        ),
+        Mutant(
+            "prev-diff-head-leg-uses-prev",
+            "rule D's compiler-behaviour premise. The script remains valid, "
+            "keeps the HEAD_BIN assignment and even names it in a comment, "
+            "but the real head output command runs PREV. The selfhost project "
+            "therefore no longer defines a compiler observed by that leg",
+            edits={
+                PREV_DIFF: swap(
+                    HEAD_EMIT_COMMAND,
+                    '"${PREV[@]}" __emit "$t" -o "$OUT/head/$t" '
+                    '> /dev/null # HEAD_BIN',
+                )
+            },
+        ),
+        Mutant(
+            "selfhost-dependency-escapes-repo",
+            "the compiler closure premise. The manifest remains valid TOML, "
+            "but one local dependency normalizes outside the repository and "
+            "must void every HEAD-compiler coarse claim",
+            edits={
+                SELFHOST_MANIFEST: swap(
+                    'compiler_plan = "../compiler-plan"',
+                    'compiler_plan = "../../gate-map-outside"',
+                )
+            },
         ),
         Mutant(
             "the-two-emit-legs-stop-agreeing",
@@ -2216,6 +2516,89 @@ def observe(base_tree, base_record):
     if problems:
         return {}, problems
 
+    def check_closure_rejection(label, overrides):
+        rejected = Map(base_tree.mutate(overrides=overrides))
+        if not any(
+            COMPILER_CLOSURE_PROBLEM in problem for problem in rejected.problems
+        ):
+            problems.append(
+                f"the {label} compiler closure probe produced no structure problem"
+            )
+        if _has_head_compiler_coarse(rejected):
+            problems.append(
+                f"the {label} compiler closure probe still received "
+                "HEAD-compiler coarse coverage"
+            )
+
+    root_manifest = base_tree.read(SELFHOST_MANIFEST)
+    check_closure_rejection(
+        "unknown dependency form",
+        {
+            SELFHOST_MANIFEST: swap(
+                'compiler_plan = "../compiler-plan"',
+                'compiler_plan = { path = "../compiler-plan" }',
+            )(root_manifest, SELFHOST_MANIFEST)
+        },
+    )
+    check_closure_rejection(
+        "missing manifest",
+        {
+            SELFHOST_MANIFEST: swap(
+                'compiler_plan = "../compiler-plan"',
+                'compiler_plan = "../gate-map-selftest/missing"',
+            )(root_manifest, SELFHOST_MANIFEST)
+        },
+    )
+    check_closure_rejection(
+        "dependency cycle",
+        {
+            "compiler-plan/dawn.toml": swap(
+                "[deps]\n", '[deps]\nback = "../selfhost"\n'
+            )(
+                base_tree.read("compiler-plan/dawn.toml"),
+                "compiler-plan/dawn.toml",
+            )
+        },
+    )
+    check_closure_rejection(
+        "manifest parse failure",
+        {SELFHOST_MANIFEST: root_manifest + "\n[\n"},
+    )
+
+    probe_manifest = swap(
+        "[deps]\n",
+        '[deps]\ngate_map_probe = "../gate-map-selftest/./compiler-dep"\n',
+    )(root_manifest, SELFHOST_MANIFEST)
+    probe_tree = base_tree.mutate(
+        files=base_tree.files + [COMPILER_PROBE_MANIFEST, COMPILER_PROBE_SOURCE],
+        overrides={
+            SELFHOST_MANIFEST: probe_manifest,
+            COMPILER_PROBE_MANIFEST: (
+                'schema = 1\nname = "gate_map_compiler_probe"\n'
+            ),
+            COMPILER_PROBE_SOURCE: "pub fn value() -> Int = 1\n",
+        },
+    )
+    probe_map = Map(probe_tree)
+    probe_closure_problems = [
+        problem
+        for problem in probe_map.problems
+        if COMPILER_CLOSURE_PROBLEM in problem
+    ]
+    if probe_closure_problems:
+        problems.append(
+            "the valid local dependency probe broke the compiler closure: "
+            + "; ".join(probe_closure_problems)
+        )
+    for path in (COMPILER_PROBE_MANIFEST, COMPILER_PROBE_SOURCE):
+        if not _has_head_compiler_coarse(probe_map, path):
+            problems.append(
+                f"the valid local dependency probe did not give `{path}` "
+                "HEAD-compiler coarse coverage"
+            )
+    if problems:
+        return {}, problems
+
     reds = {}
     for mutant in mutants(base):
         overrides = {
@@ -2223,6 +2606,48 @@ def observe(base_tree, base_record):
         }
         files = mutant.files(base_tree.files) if mutant.files else None
         gm = Map(base_tree.mutate(files=files, overrides=overrides))
+        if mutant.name == "prev-diff-head-leg-uses-prev":
+            head_problem = any(
+                "HEAD compiler premise is void" in problem
+                for problem in gm.problems
+            )
+            cancellation_problem = any(
+                "blind conclusion is void" in problem for problem in gm.problems
+            )
+            has_blind = any(
+                obs.level == "blind"
+                for obs in gm.verdict("selfhost/dawn.toml")
+            )
+            if not head_problem:
+                problems.append(
+                    "prev-diff-head-leg-uses-prev: the reviewer bypass did not "
+                    "produce a HEAD compiler structure problem"
+                )
+            if cancellation_problem or not has_blind:
+                problems.append(
+                    "prev-diff-head-leg-uses-prev: changing only the compiler "
+                    "on the head output leg must preserve own-content "
+                    "cancellation and its blind verdict"
+                )
+            if _has_head_compiler_coarse(gm):
+                problems.append(
+                    "prev-diff-head-leg-uses-prev: the reviewer bypass still "
+                    "receives selfhost HEAD-compiler coarse coverage"
+                )
+        if mutant.name == "selfhost-dependency-escapes-repo":
+            closure_problem = any(
+                COMPILER_CLOSURE_PROBLEM in problem for problem in gm.problems
+            )
+            if not closure_problem:
+                problems.append(
+                    "selfhost-dependency-escapes-repo: the normalized escape "
+                    "did not produce a compiler closure structure problem"
+                )
+            if _has_head_compiler_coarse(gm):
+                problems.append(
+                    "selfhost-dependency-escapes-repo: an invalid compiler "
+                    "closure still receives HEAD-compiler coarse coverage"
+                )
         record = mutant.record(base_record) if mutant.record else regenerate_record(gm)
         check = Check(gm, record)
         reds[mutant.name] = {
@@ -2597,6 +3022,8 @@ def main(argv=None):
     ap.add_argument("paths", nargs="*", help="repository-relative paths")
     ap.add_argument("--changed", metavar="REV",
                     help="ask about the files changed since REV")
+    ap.add_argument("--compiler-inputs", action="store_true",
+                    help="print the selfhost compiler's SourcePlan input manifest")
     ap.add_argument("--check", action="store_true",
                     help="the CI check: selftest, structure, ratchet, fixtures")
     ap.add_argument("--selftest", action="store_true",
@@ -2611,6 +3038,28 @@ def main(argv=None):
                     help="rewrite the red sets in mutants.txt; owners stay a "
                          "hand edit")
     args = ap.parse_args(argv)
+
+    if args.compiler_inputs:
+        incompatible = (
+            args.paths
+            or args.changed
+            or args.check
+            or args.selftest
+            or args.fixtures
+            or args.labels
+            or args.unseen
+            or args.record_unseen
+            or args.record_mutants
+        )
+        if incompatible:
+            ap.error("--compiler-inputs cannot be combined with another action")
+        output, problems = compiler_inputs_text(Tree(ROOT))
+        for problem in problems:
+            print(f"FAIL: {problem}", file=sys.stderr)
+        if problems:
+            return 1
+        sys.stdout.write(output)
+        return 0
 
     if args.selftest or args.record_mutants:
         return selftest(record_mode=args.record_mutants)

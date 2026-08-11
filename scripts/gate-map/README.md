@@ -6,6 +6,7 @@ remembering.
 ```
 scripts/gate-map/gatemap.py selfhost/src/main.dawn
 scripts/gate-map/gatemap.py --changed origin/main
+scripts/gate-map/gatemap.py --compiler-inputs # stable selfhost compiler input manifest
 scripts/gate-map/gatemap.py --labels        # which differential owns which label
 scripts/gate-map/gatemap.py --unseen        # paths no gate watches
 scripts/gate-map/gatemap.py --check         # what CI runs
@@ -61,6 +62,28 @@ written and marks a new line for you to fill in.
 `coarse` means "a gate reads this path", not "a gate would notice what you
 changed there". The distance between the verdicts is the distance between
 strengths of coverage, and the docstring defines each one.
+
+The `selfhost/` project has two roles in prev-diff. Both output legs compile the
+same selfhost corpus into their respective directories, so its own project
+content receives the ordinary own-content `blind` verdict. Separately, the HEAD
+leg must invoke the exact `HEAD_BIN` assigned to `./bin/dawn`. SourcePlan builds
+that compiler from a closure rooted at `selfhost`: repo-local string `[deps]`
+are followed recursively, every project contributes `dawn.toml` and `src`, and
+only the root contributes its optional `dawn.lock`. The closure is derived from
+the supplied Tree, including historical fixtures and mutants, without package
+names baked into the rule. Lexical escapes, cycles, missing manifests or source
+trees, parse failures and unfamiliar dependency forms void the premise instead
+of silently dropping an input. Compiler semantic or build-input changes in the
+derived closure receive a `coarse` verdict and can move any emit label. Use the
+real differential or an unmasked true-parent control to decide whether such a
+change needs a declaration.
+
+`--compiler-inputs` writes that derived closure in the exact
+`dawn-source-inputs-v1` record format used by `dawn __source-inputs`. The
+source-plan contract compares both producers byte for byte, including the
+schema header, required and optional kinds, path set and ordering. This keeps
+the map's Tree-backed historical derivation tied to the compiler's live
+SourcePlan semantics.
 
 The rules can be wrong. Over-claiming is the worse direction, because a map
 that says a file is watched when it is not repeats this directory's own subject

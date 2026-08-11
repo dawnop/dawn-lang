@@ -69,13 +69,15 @@ query: selfhost/src/nmain.dawn
 expect: exact core-golden/selfhost.sha records module `main`
 expect: exact core-golden/selfhost.sha records module `nmain`
 only: exact Core IR golden
-expect: blind `emit selfhost` compiles this same source with both toolchains
+expect: blind `emit selfhost` compiles this same source in both output legs
 
 # The boundary the batch above needed and could not read anywhere: a change to
 # std source is visible to the N vs N-1 differential and needs a declaration,
 # because the N-1 toolchain is pointed at the std it was released with, while a
-# change to selfhost source is not, because both sides compile the same one.
-# Two verdicts on one tree, from one rule, in opposite directions.
+# change confined to selfhost's own corpus content is not, because both sides
+# compile the same one. The selfhost project's separate role as the HEAD
+# compiler input is not the subject of this historical fixture. Two own-content
+# verdicts on one tree, from one rule, point in opposite directions.
 #
 # The ground for it is in the script: the flag that makes the two sides differ.
 name: 1c29bea, std and selfhost on opposite sides of the same rule
@@ -88,11 +90,11 @@ expect: exact the N-1 side compiles the std it was released with
 reject: blind `emit
 
 # 2026-08-11, measured rather than reasoned. The v0.64.0 branch declared twelve
-# Emit-Change labels; for five of them the oracle named could not have seen the
-# difference. `emit <target>` compiles the same working tree with both
-# toolchains, so a change to a corpus's own source is said identically on both
-# sides and cancels. The driver-module case already in this file is the special
-# case of that, not the whole of it.
+# Emit-Change labels; five changes confined to corpus content named oracles
+# that could not have seen the difference. Both `emit <target>` output legs
+# compile the same working tree, so a change to a corpus's own source is said
+# identically on both sides and cancels. The driver-module case already in this
+# file is the special case of that, not the whole of it.
 #
 # Confirmed here by mutation, with a positive control: a new `pub fn` appended
 # to packages/web/src/server.dawn reaches the emitted server.class (grep finds
@@ -109,5 +111,5 @@ ground: contains 9b4c9f8:scripts/emit-labels.txt emit packages/web
 ground: contains 9b4c9f8:scripts/selfhost-prev-diff.sh "${PREV[@]}" __emit "${PREV_STD[@]}" "$t"
 ground: contains 9b4c9f8:scripts/selfhost-prev-diff.sh "${HEAD_BIN[@]}" __emit "$t"
 query: packages/web/src/server.dawn
-expect: blind `emit packages/web` compiles this same source with both toolchains
+expect: blind `emit packages/web` compiles this same source in both output legs
 reject: exact N vs N-1 differential
