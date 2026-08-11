@@ -240,6 +240,9 @@ TOOL-10 在这里仅关闭“双 parser/双 graph”。
 
 ## TOOL-13 — P2 — `dawn.toml` 与 `dawn.lock` 写入不原子
 
+<!-- audit-anchor: absent selfhost/src/pkg/add.dawn | atomic_write_file -->
+
+
 - **证据：S。** `dawn add` 直接覆盖 manifest：`selfhost/src/pkg/add.dawn:163`、`:173`；`dawn lock` 直接写目标：`selfhost/src/main.dawn:837`。仓库已有 atomic replace primitive：`std/io.dawn:100`。
 - **影响：** disk full、process termination 或 write error 可把受版本控制文件留成 truncated state。
 - **建议：** 在目标目录写 temp，flush/close/validate 后 atomic rename，保留原 mode；失败不动旧文件。

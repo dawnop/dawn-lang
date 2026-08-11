@@ -45,6 +45,9 @@
 
 ## SEM-04 — P1 — Cursor 没有绑定所属 String，且表示跨后端不同
 
+<!-- audit-anchor: present std/cursor.dawn | pub opaque type Cursor = Int -->
+
+
 > **当前静态候选（未验证，不改严重度）：** comptime 把 Cursor 解释为 code-point index，
 > JVM/native 分别发射 UTF-16 offset 与 UTF-8 byte offset。如果 comptime 折叠出的 opaque
 > Cursor 值进入运行期操作，偏移可能跨执行模型失配。R-AUDIT 只完成静态追踪，未证明可达
@@ -87,6 +90,9 @@
 
 ## SEM-07 — P2 — public surface 可泄露 private type/trait/effect
 
+<!-- audit-anchor: absent selfhost/src/check/checker.dawn | pass_export_surface -->
+
+
 - **证据：S。** public signature 被定义为 API contract：`docs/spec.md:366`；默认 private：`docs/spec.md:1674`。模块检查流程没有 effective-visibility pass：`selfhost/src/check/checker.dawn:7295`；导出时直接复制签名与相关表：`selfhost/src/check/checker.dawn:8095`、`:8206`。
 - **边界：** `pub fn` 可返回 private nominal type、要求 private trait bound，或暴露调用方无法命名/处理的 private effect。
 - **影响：** 编译器可发布调用方无法实现或书写的 API，绕开 `pub opaque type` 作为抽象边界的设计。
@@ -106,6 +112,9 @@
 
 ## SEM-09 — P2 — associated type 不能声明或接收 bound
 
+<!-- audit-anchor: present selfhost/src/check/checker.dawn | pub fn assoc_witness_err -->
+
+
 > **后续处置（2026-08-09）：open，intentional delayed capability。** 现行 v1 明确延期
 > projection witness/bound evidence；它限制表达力，但不是当前实现漏做已承诺语义。只有关联
 > witness 的表示、dictionary 传播与 `where C.Item: Trait` 语法一起定稿后才重开，不进入自治
@@ -116,6 +125,9 @@
 - **建议：** 支持 `type Item: Show` 与 `where C.Item: Show`/projection equality；dictionary 携带选中 impl 导出的关联证据。
 
 ## SEM-10 — P2 — trait/impl 与具名 effect 不能组合
+
+<!-- audit-anchor: present selfhost/src/check/passes.dawn | trait methods cannot declare the effect -->
+
 
 > **后续处置（2026-08-09）：open，intentional delayed ABI。** v1 ABI 有意只允许 pure /
 > `!io` trait method；放开 named effect 会决定 dictionary 是否携带 evidence、evidence 的捕获
@@ -152,12 +164,18 @@
 
 ## SEM-13 — P2 — 受约束函数与 trait method 不是一等函数值
 
+<!-- audit-anchor: present selfhost/src/check/checker.dawn | has trait bounds and cannot be used as a value -->
+
+
 - **证据：S。** 规范承认带 bound/effect label/trait method 不能直接作值：`docs/spec.md:548`；checker 要求手工包 lambda：`selfhost/src/check/checker.dawn:2550`。
 - **边界：** `map(xs, to_string)` 之类自然写法失败，只能写 `x => to_string(x)`。
 - **影响：** 函数 application 已一般化，但重要函数仍非一等；eta wrapper 增加噪声、捕获与可能的 allocation。
 - **建议：** 在 expected function type 已知后，实例化 type/effect vars、解析 witness/evidence，自动合成 closure。
 
 ## SEM-14 — P2 — `Never` 是内部类型，却不能由用户命名
+
+<!-- audit-anchor: present selfhost/src/check/types.dawn | name: "Never", params: [], access: BtCompilerOnly -->
+
 
 - **证据：S。** checker 有 `TyNever`，分层 builtin inventory 也把 `Never` 明确归为
   compiler-only；当前 public resolver 仍有意不接受它。规范已经使用该概念，`io.exit`
@@ -180,6 +198,9 @@
 - **建议：** 明确选择并测试：要么文档承认 release-wins；更好的模型是保留 use failure，把 release failure 放入 `cause`/suppressed chain。
 
 ## SEM-16 — P2 — `Char` 的默认显示仍是整数码点
+
+<!-- audit-anchor: absent std/char.dawn | impl Show for Char -->
+
 
 > **后续处置（2026-08-09）：open/HOLD。** 当前规范明确选择码点显示，std 与派生显示一致；
 > R-AUDIT 没有发现新的实现分叉。既有“不做”条件继续生效：除非维护者重开 user-facing

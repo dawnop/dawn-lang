@@ -7,7 +7,7 @@ and the EBNF disagreed with the parser in several places -- all found by a
 human reading, none by a test. This script is the part of that gap a script
 can close.
 
-Twelve checks, each unambiguous on purpose (a doc lint with false positives
+Thirteen checks, each unambiguous on purpose (a doc lint with false positives
 gets disabled, and then it protects nothing):
 
   links     every relative Markdown link resolves to a file in the repo
@@ -37,6 +37,10 @@ gets disabled, and then it protects nothing):
   audit     the current four-state audit registry exactly partitions all 97
             detail-heading IDs and agrees with its counts, topic matrix and
             frozen P1 mapping; audit indexes do not copy task progress
+  evidence  every audit finding that carries an anchor agrees with the tree the
+            anchor names: what an open finding describes is still there, and
+            what a fixed one claims has arrived. An exact partition of wrong
+            statuses is still wrong, and the partition check cannot see that
   contracts  settled semantic and repository-governance clauses remain present;
              this is a targeted pin, not full prose comparison
 
@@ -2294,6 +2298,276 @@ def check_audit_indexes() -> tuple[list[str], int]:
     return bad, 0 if bad else len(AUDIT_INDEX_TABLES)
 
 
+# The registry above is an exact partition, and an exact partition of the wrong
+# statuses is still wrong. `SEM-07` and `TOOL-13` sat at `open` for days after
+# both were implemented and shipped, and every check in this file was green the
+# whole time: the partition was exact, the counts added up, the topic matrix
+# agreed. Nothing read the tree, so nothing could tell.
+#
+# The fix is the shape `check_named_effect_status` already uses here: state the
+# claim, derive the fact from the tree, and fail in both directions. A finding
+# carries one anchor, which names a file and a literal and says which way that
+# literal reads *while the finding is open*:
+#
+#   <!-- audit-anchor: present <path> | <literal> -->
+#       the code the finding describes; the fix deletes or rewrites it
+#   <!-- audit-anchor: absent <path> | <literal> -->
+#       the code the finding asks for; the fix creates it
+#
+# The status then decides which way it must read now:
+#
+#   open, partial  the condition holds. It stops holding when the fix lands,
+#                  and the finding is named as the thing to re-judge.
+#   fixed          the condition is inverted. It goes back when the fix is
+#                  reverted or refactored away, and the finding is named again.
+#   retracted      no anchor at all: nothing was implemented, so there is
+#                  nothing for one to point at.
+#
+# So the anchor is written once, when the finding is recorded, and never
+# maintained: what moves is the tree, and the pair (status, tree) is what is
+# checked. That is deliberate -- hand-maintained metadata is what rotted here,
+# and a scheme that needed somebody to remember to update it would be the same
+# defect one level up.
+#
+# The literal is drawn from the finding's own text: `present` anchors quote the
+# evidence, `absent` anchors quote the name the recommendation asks for. That
+# rule is what keeps an anchor from drifting into an unrelated file that
+# happens to be stable.
+#
+# What this does not promise: an anchor can be vacuous. `absent` fails silent
+# if the fix arrives under a different name, and the check cannot know that.
+# Under-claiming is the tolerable direction -- a false red gets a gate
+# disabled, and a gate nobody trusts protects nothing -- so the rules refuse to
+# guess, and the residue is that a fix can still land unnoticed if it renames
+# what the finding asked for. Only the anchored half of the registry is
+# covered: `fixed` findings recorded before this existed carry no anchor, and
+# for those the check has nothing to say.
+AUDIT_ANCHOR = re.compile(
+    r"<!--\s*audit-anchor:\s*(present|absent)\s+(\S+)\s*\|\s*(.+?)\s*-->")
+AUDIT_ANCHOR_STATES = ("open", "partial", "fixed", "retracted")
+AUDIT_ANCHOR_MIN_LITERAL = 4
+
+
+def audit_detail_entries(detail_texts: dict[str, str]) -> dict[str, str]:
+    """Each finding's section of its detail document, keyed by ID."""
+    entries: dict[str, str] = {}
+    for _prefix, rel in AUDIT_DETAIL_FILES:
+        text = detail_texts.get(rel)
+        if text is None:
+            continue
+        for match in re.finditer(r"^## ([A-Z]+-\d{2})\b.*?(?=^## |\Z)",
+                                 text, re.S | re.M):
+            entries[match.group(1)] = match.group(0)
+    return entries
+
+
+def audit_anchor_problems(detail_texts: dict[str, str],
+                          states: dict[str, set[str]],
+                          sources: dict[str, str]) -> tuple[list[str], int]:
+    """Cross-check every anchored finding's status against the tree.
+
+    `sources` is the tree the anchors are read against, as path -> text. It is
+    a parameter so the self-test below can hand this function a tree with one
+    thing changed; nothing else in the check knows where the tree came from."""
+    entries = audit_detail_entries(detail_texts)
+    owner = {audit_id: status for status, ids in states.items()
+             for audit_id in ids}
+    bad: list[str] = []
+    resolved = 0
+    for audit_id in sorted(entries):
+        status = owner.get(audit_id)
+        if status is None:
+            continue
+        anchors = AUDIT_ANCHOR.findall(entries[audit_id])
+        if len(anchors) > 1:
+            bad.append(f"{audit_id}: carries {len(anchors)} audit-anchors; one "
+                       f"finding has one, or its status answers to two trees "
+                       f"[anchor_one]")
+            continue
+        if not anchors:
+            if status in ("open", "partial"):
+                bad.append(f"{audit_id} is {status} and carries no audit-anchor. "
+                           f"Name the file and literal its status depends on, so "
+                           f"the tree can contradict it [anchor_required]")
+            continue
+        if status == "retracted":
+            bad.append(f"{audit_id} is retracted and carries an audit-anchor. A "
+                       f"retraction says the original finding was not a defect, "
+                       f"so nothing was implemented for an anchor to point at "
+                       f"[anchor_forbidden]")
+            continue
+        kind, rel, literal = anchors[0]
+        if len(literal) < AUDIT_ANCHOR_MIN_LITERAL:
+            bad.append(f"{audit_id}: audit-anchor literal {literal!r} is shorter "
+                       f"than {AUDIT_ANCHOR_MIN_LITERAL} characters, which is "
+                       f"short enough to match by accident "
+                       f"[anchor_literal_nonvacuous]")
+            continue
+        text = sources.get(rel)
+        if text is None:
+            bad.append(f"{audit_id}: audit-anchor names {rel}, which is not a "
+                       f"file in this repository. A status backed by a pointer "
+                       f"that does not resolve is a status nothing checks "
+                       f"[anchor_path_resolves]")
+            continue
+        resolved += 1
+        found = literal in text
+        holds = found if kind == "present" else not found
+        if status in ("open", "partial") and not holds:
+            was = "is gone from" if kind == "present" else "has arrived in"
+            bad.append(f"{audit_id} is {status}, but `{literal}` {was} {rel}. "
+                       f"The code the finding describes has moved; re-judge the "
+                       f"finding rather than the anchor [open_still_true]")
+        elif status == "fixed" and holds:
+            still = "is still in" if kind == "present" else "is still missing from"
+            bad.append(f"{audit_id} is fixed, but `{literal}` {still} {rel}. The "
+                       f"fix this status claims is not in the tree "
+                       f"[fixed_took_effect]")
+    return bad, resolved
+
+
+def read_audit_anchor_sources(detail_texts: dict[str, str]) -> dict[str, str]:
+    """Read exactly the files the anchors name, and nothing else.
+
+    Scope is the point: an anchor's literal is looked for in one named file, so
+    the same words written in prose -- in this very registry, or in a design
+    document that quotes the code -- cannot satisfy or break it."""
+    sources: dict[str, str] = {}
+    for entry in audit_detail_entries(detail_texts).values():
+        for _kind, rel, _literal in AUDIT_ANCHOR.findall(entry):
+            if rel in sources:
+                continue
+            path = ROOT / rel
+            if path.is_file():
+                sources[rel] = path.read_text(encoding="utf-8")
+    return sources
+
+
+def check_audit_anchors() -> tuple[list[str], int]:
+    path = ROOT / "docs/codebase-audit-v2.md"
+    text = path.read_text(encoding="utf-8")
+    details = read_audit_details()
+    current = markdown_section(text, CURRENT_AUDIT_HEADING)
+    if current is None:
+        return [f"{path.relative_to(ROOT)}: machine-authoritative current audit "
+                f"status section is missing"], 0
+    states, _headings, problems = parse_audit_state(
+        current, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current")
+    if problems:
+        return [], 0
+    bad, resolved = audit_anchor_problems(
+        details, states, read_audit_anchor_sources(details))
+    return [f"docs/codebase-audit-v2/: {problem}" for problem in bad], resolved
+
+
+# Which mutant reddens which assertion, and which one owns it. The `owner`
+# column is the whole point: a mutant that reddens two assertions proves
+# neither, so each one below names the single assertion that is allowed to see
+# it, and the self-test fails if a mutant reddens something else as well. This
+# copies the discipline in scripts/gate-map/mutants.txt.
+#
+# `an-open-finding-whose-code-was-fixed` is the event this whole section exists
+# for, replayed on a probe rather than remembered. It happened eight times at
+# once: with the anchors written and the registry as it stood, the check named
+# `SEM-07`, `TOOL-13`, `LIB-08`, `LIB-10`, `LIB-12`, `LIB-14`, `LIB-15` and
+# `LIB-17` as statuses the tree contradicted, and every other check in this
+# file was green on that same tree.
+#
+# `prose-that-quotes-a-literal` is the control. Nothing owns it and nothing may
+# redden it: it is the sentence the whole scheme depends on -- that an anchor
+# reads one named file rather than the repository, so writing the code out in
+# the audit document does not answer the question the anchor asks.
+AUDIT_ANCHOR_MUTANTS = (
+    ("an-open-finding-whose-code-was-fixed", "open_still_true"),
+    ("a-fixed-finding-whose-fix-is-gone", "fixed_took_effect"),
+    ("an-open-finding-with-no-anchor", "anchor_required"),
+    ("a-retracted-finding-with-an-anchor", "anchor_forbidden"),
+    ("an-anchor-naming-a-path-that-is-gone", "anchor_path_resolves"),
+    ("an-anchor-on-a-literal-too-short-to-mean-anything",
+     "anchor_literal_nonvacuous"),
+    ("a-second-anchor-on-one-finding", "anchor_one"),
+    ("prose-that-quotes-a-literal", None),
+)
+
+
+def audit_anchor_mutant(name: str, details: dict[str, str],
+                        states: dict[str, set[str]],
+                        sources: dict[str, str]) -> tuple:
+    """Apply one mutation to an otherwise valid registry/tree pair."""
+    details = dict(details)
+    states = {status: set(ids) for status, ids in states.items()}
+    sources = dict(sources)
+    rel = "docs/codebase-audit-v2/02-types-effects-and-semantics.md"
+    probe = "\n## SEM-99 — P2 — self-test probe\n\n" \
+            "<!-- audit-anchor: absent std/cursor.dawn | dawn_selftest_probe -->\n"
+    if name == "an-open-finding-whose-code-was-fixed":
+        details[rel] += probe
+        states["open"].add("SEM-99")
+        sources["std/cursor.dawn"] += "\nfn dawn_selftest_probe() = 1\n"
+    elif name == "a-fixed-finding-whose-fix-is-gone":
+        details[rel] += probe
+        states["fixed"].add("SEM-99")
+    elif name == "an-open-finding-with-no-anchor":
+        details[rel] += "\n## SEM-99 — P2 — self-test probe\n\nno anchor here.\n"
+        states["open"].add("SEM-99")
+    elif name == "a-retracted-finding-with-an-anchor":
+        details[rel] += probe
+        states["retracted"].add("SEM-99")
+    elif name == "an-anchor-naming-a-path-that-is-gone":
+        details[rel] += "\n## SEM-99 — P2 — self-test probe\n\n" \
+                        "<!-- audit-anchor: absent std/deleted.dawn | probe -->\n"
+        states["open"].add("SEM-99")
+    elif name == "an-anchor-on-a-literal-too-short-to-mean-anything":
+        details[rel] += "\n## SEM-99 — P2 — self-test probe\n\n" \
+                        "<!-- audit-anchor: present std/cursor.dawn | fn -->\n"
+        states["open"].add("SEM-99")
+    elif name == "a-second-anchor-on-one-finding":
+        details[rel] += probe.rstrip("\n") + \
+            "\n<!-- audit-anchor: present std/cursor.dawn | Cursor -->\n"
+        states["open"].add("SEM-99")
+    elif name == "prose-that-quotes-a-literal":
+        details[rel] += probe
+        states["open"].add("SEM-99")
+        details[rel] += "\nThe fix would add `dawn_selftest_probe` to the cursor.\n"
+    else:
+        raise AssertionError(f"unknown mutant {name}")
+    return details, states, sources
+
+
+def check_audit_anchors_selftest() -> tuple[list[str], int]:
+    text = (ROOT / "docs/codebase-audit-v2.md").read_text(encoding="utf-8")
+    details = read_audit_details()
+    current = markdown_section(text, CURRENT_AUDIT_HEADING)
+    if current is None:
+        return ["audit-anchor self-test: current status section is missing"], 0
+    states, _headings, problems = parse_audit_state(
+        current, CURRENT_AUDIT_STATUS, CURRENT_AUDIT_STATES, "current")
+    if problems:
+        return ["audit-anchor self-test: current status layer does not parse"], 0
+    sources = read_audit_anchor_sources(details)
+    baseline, resolved = audit_anchor_problems(details, states, sources)
+    if baseline:
+        return [f"audit-anchor self-test baseline is invalid: {baseline[0]}"], 0
+    if not resolved:
+        return ["audit-anchor self-test: no anchor resolved, so every mutant "
+                "below would pass for the wrong reason"], 0
+    for name, expected in AUDIT_ANCHOR_MUTANTS:
+        bad, _ = audit_anchor_problems(
+            *audit_anchor_mutant(name, details, states, sources))
+        seen = {label for problem in bad
+                for label in re.findall(r"\[(\w+)\]", problem)}
+        if expected is None:
+            if bad:
+                return [f"audit-anchor self-test: control mutant {name} reddened "
+                        f"{sorted(seen)}; it must redden nothing"], 0
+            continue
+        if seen != {expected}:
+            return [f"audit-anchor self-test: mutant {name} reddened "
+                    f"{sorted(seen) or 'nothing'}, expected exactly "
+                    f"[{expected}]"], 0
+    return [], len(AUDIT_ANCHOR_MUTANTS)
+
+
 def audit_counts(states: dict[str, set[str]]) -> dict[str, int]:
     return {status: len(ids) for status, ids in states.items()}
 
@@ -2835,6 +3109,12 @@ def main() -> None:
     bad, n = check_audit_indexes()
     problems += bad
     audit_seen += n
+    bad, n = check_audit_anchors()
+    problems += bad
+    audit_seen += n
+    bad, n = check_audit_anchors_selftest()
+    problems += bad
+    selftests_seen += n
     bad, n = check_historical_audit_status_selftest()
     problems += bad
     selftests_seen += n

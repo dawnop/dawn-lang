@@ -13,6 +13,9 @@
 
 ## ARC-01 — P1 — 返回类型推断把局部名字当顶层依赖
 
+<!-- audit-anchor: present selfhost/src/check/checker.dawn | pub fn name_refs -->
+
+
 > **后续处置（2026-08-09）：partial。** `RefScope` 现已排除参数、lambda、pattern/local
 > binding 与 module alias，原最小参数重名反例关闭；但非 module receiver 的
 > `EMethod(target, name, ...)` 仍无条件把裸 `name` 记为本模块函数边：
@@ -25,6 +28,9 @@
 - **建议：** 依赖遍历维护 lexical binding set；更稳妥的是先做轻量 name resolution，以 symbol ID 构图。不要继续用裸字符串模拟 call graph。
 
 ## ARC-02 — P1 — JVM classfile 硬边界变成无源码位置的内部异常
+
+<!-- audit-anchor: present selfhost/src/jvm/codegen.dawn | class_bytes(finish: fn() -> Option[Bytes] !io, cls: String) -->
+
 
 > **后续处置（2026-08-09）：partial。** `ldc_str` 已按 modified UTF-8 精确分块，class
 > finalize 也把 ASM failure 转成可读 compiler failure；但 `LMod`/Core finalize 仍没有对应
@@ -135,6 +141,9 @@
 
 ## ARC-07 — P2 — 阶段产物靠平行 List 的位置对齐
 
+<!-- audit-anchor: present selfhost/src/check/checker.dawn | impl_sigs[ii] -->
+
+
 - **证据：S。** impl registration 返回与 AST 二维 List 位置对齐的 signatures：`selfhost/src/check/passes.dawn:1382`；checker 直接索引 `impl_sigs[ii]`/`msigs[mi]` 并重新解析 trait/subject：`selfhost/src/check/checker.dawn:7402`、`:7405`、`:7414`。
 - JVM emitter 同时接收 `TModule` 与 `LMod`，先按 `fi` 取 `lm.fns[fi]`，之后才比较 name：`selfhost/src/jvm/emit.dawn:1324`、`:1390`、`:1394`。`docs/arch-split-design.md:748` 也记录了该边界。
 - **影响：** error recovery、filter、reorder 或独立阶段测试只要造成长度偏差，就先 OOB；API 类型不能表达“这是该 declaration 的产物”。
@@ -142,11 +151,17 @@
 
 ## ARC-08 — P2 — 返回推断调度与回填至少二次复杂度
 
+<!-- audit-anchor: present selfhost/src/check/checker.dawn | list.take(sealed, idx) -->
+
+
 - **证据：S。** pending functions 每轮全表扫描：`selfhost/src/check/checker.dawn:7337`；逆拓扑依赖链可每轮只完成一个。每完成一项又用 `take ++ [x] ++ drop` 重建 `sealed` 与 `tfuns`：`selfhost/src/check/checker.dawn:7352`；`take/drop` 会遍历复制：`std/list.dawn:195`、`:201`。
 - **影响：** 顶层函数数 F 时，单回填已经 O(F²)；generated code、超大 module 与未来 incremental check 会首先暴露。
 - **建议：** indegree queue/SCC 一次调度，按 declaration index 写入 mutable builder/array，最后一次组装 immutable list。
 
 ## ARC-09 — P2 — 一个全局 `next_id` 混合稳定身份与临时身份
+
+<!-- audit-anchor: present selfhost/src/check/cx.dawn | next_id: Int -->
+
 
 > **后续处置（2026-08-09）：open/HOLD。** 既有裁决不在尚无 incremental cache contract 时
 > 为“更稳定的 golden”重排全部 ID；这会制造大面积无语义产物变化，却没有消费者能验证收益。
@@ -160,6 +175,9 @@
 
 ## ARC-10 — P2 — 512 MB 栈被当作通用递归策略
 
+<!-- audit-anchor: present bin/dawn | -Xss512m -->
+
+
 > **后续处置（2026-08-09）：open/HOLD。** `ceval-trampoline-verdict` 已否决“只 trampoline
 > comptime 就摘掉大栈”的旧方案；用户程序深递归、parser/checker 对抗输入、JVM/native entry
 > 与失败方式必须一起裁。除非先有 measured high-water、默认栈/可配置上限与 recursion policy，
@@ -171,6 +189,9 @@
 - **建议：** 分阶段削减：parser/checker 对抗性 recursion 先改 iterative，运行期一般 tail call/关键 std recursion 再处理；把 stack size 变为有上限的可配置策略并记录实际 high-water，而非永久 ABI 常量。
 
 ## ARC-11 — P3 — comptime 诊断只剩外层 initializer span（部分修复）
+
+<!-- audit-anchor: absent selfhost/src/ir/core.dawn | OriginId -->
+
 
 > **部分修复（2026-08-09，ARC-11A）：** 解释器内部不再过早构造、传递 `Diag`；私有
 > `CtFailure` 分离保存 message、原始 actionable hint、调用帧、截断状态与可选粗 origin，
@@ -201,6 +222,9 @@
   Span 塞进每个 Core node，也不要在本项顺手扩一套正式 related-location API。
 
 ## ARC-12 — P3 — lowering cache 只活一个 comptime expression
+
+<!-- audit-anchor: absent selfhost/src/ir/interp.dawn | LowerCache -->
+
 
 - **证据：S。** `ESt` 持有 lowered function/dictionary cache：`selfhost/src/ir/interp.dawn:75`，但每个 `fold_expr` 都 `fresh_st` 清空：`selfhost/src/ir/interp.dawn:1552`、`:1560`；module const 各自调用：`selfhost/src/ir/interp.dawn:1790`。
 - **影响：** 多个 const 调同一 helper 时重复 lowering 与 lambda lifting；comptime 使用增长后形成无必要编译时间。
