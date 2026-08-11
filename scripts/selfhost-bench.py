@@ -1205,24 +1205,55 @@ def query_max_heap(
     return parse_max_heap(result.stdout)
 
 
+def process_group_has_live_members(process_group: int) -> bool:
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "stat").read_text(encoding="ascii")
+        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+            continue
+        close = raw.rfind(")")
+        if close < 0:
+            continue
+        fields = raw[close + 2 :].split()
+        if len(fields) < 3:
+            continue
+        try:
+            member_group = int(fields[2])
+        except ValueError:
+            continue
+        if member_group == process_group and fields[0] not in {"X", "Z"}:
+            return True
+    return False
+
+
+def wait_process_group_exit(
+    process: subprocess.Popen[bytes], timeout: float
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        process.poll()
+        if not process_group_has_live_members(process.pid):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+
+
 def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    try:
-        process.wait(timeout=5)
+    if wait_process_group_exit(process, 5):
         return
-    except subprocess.TimeoutExpired:
-        pass
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired as error:
-        raise BenchError("could not terminate profiled process group") from error
+    if not wait_process_group_exit(process, 5):
+        raise BenchError("could not terminate profiled process group")
 
 
 RoleClassifier = Callable[[ProcessView, ProcessIdentity], str | None]
@@ -1355,7 +1386,7 @@ def profile_command(
                     "max_heap_bytes": max_heap,
                 }
 
-            completed_normally = True
+            completed_normally = process.returncode == 0
             return ProfileResult(
                 returncode=process.returncode,
                 stdout=stdout,
@@ -1408,6 +1439,8 @@ def heap_tree_classifier(view: ProcessView, root: ProcessIdentity) -> str | None
             "single",
             "sum-parent",
             "sum-child",
+            "failure-parent",
+            "failure-child",
         }
         else None
     )

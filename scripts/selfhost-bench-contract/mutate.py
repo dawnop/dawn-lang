@@ -44,6 +44,30 @@ MUTATIONS = {
         "            if not completed_normally:\n"
         "                process.poll()",
     ),
+    "skip-post-cmdline-identity": (
+        "    argv = cmdline_reader(stat.identity.pid)\n"
+        "    if not identity_is_current(stat.identity, identity_reader):\n"
+        "        return None\n"
+        "    rss, hwm, peak = status",
+        "    argv = cmdline_reader(stat.identity.pid)\n"
+        "    rss, hwm, peak = status",
+    ),
+    "allow-inherited-java-home": (
+        '    "JAVA_HOME",\n'
+        '    "CLASSPATH",',
+        '    "CLASSPATH",',
+    ),
+    "snapshot-fail-open": (
+        "def verify_final_source_snapshot(expected_commit: str, root: Path = ROOT) -> None:\n"
+        "    actual_commit = source_snapshot(root)\n"
+        "    if actual_commit != expected_commit:\n"
+        "        raise BenchError(\n"
+        '            f"source HEAD changed during measurement: expected {expected_commit}, "\n'
+        '            f"found {actual_commit}"\n'
+        "        )",
+        "def verify_final_source_snapshot(expected_commit: str, root: Path = ROOT) -> None:\n"
+        "    del expected_commit, root",
+    ),
 }
 
 

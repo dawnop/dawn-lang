@@ -119,8 +119,8 @@ native compiler 必须由 `scripts/release-native.sh --jar <release-jar>` 在同
 
 RSS 总和只采用所有树内进程都成功读取 `VmRSS` 的时点。任何 sibling 都不属于根的后代，不能
 进入总和或角色集合。读取一次 stat 身份后，status 与 cmdline 的读取前后都要重新确认同一个
-`(pid,starttime)`；`jcmd` 返回后也要复核。任何采样异常或取消都会终止并等待整个被测进程组，
-正常完成的命令不发送终止信号。
+`(pid,starttime)`；`jcmd` 返回后也要复核。任何采样异常、取消或非零命令退出都会终止并等待整个
+被测进程组，正常成功的命令不发送终止信号。
 
 ## 8. 启动时间
 
@@ -167,7 +167,7 @@ RSS、VAS、产物大小、启动时间和绝对 wall time 在 Phase 1 都只是
 harness 另起无关 sibling。parent 和 grandchild 显式使用 64 MiB 堆，child 与 sibling 使用
 96 MiB。契约验证递归包含 grandchild、排除 sibling，并通过同 JDK `jcmd` 读取真实堆值。
 
-八个独立 source mutant 每次都运行完整 assertion 集：
+十一个独立 source mutant 每次都运行完整 assertion 集：
 
 | mutant | 唯一红项 | control |
 |---|---|---|
@@ -179,6 +179,9 @@ harness 另起无关 sibling。parent 和 grandchild 显式使用 64 MiB 堆，c
 | `starttime-constant` | `bench.starttime_identity_preserved` | `bench.vmhwm_reads_proc` |
 | `vmhwm-constant` | `bench.vmhwm_reads_proc` | `bench.sampling_targets_two_ms` |
 | `skip-exception-cleanup` | `bench.exception_cleanup` | `bench.descendants_recursive` |
+| `skip-post-cmdline-identity` | `bench.identity_rechecks` | `bench.same_jdk` |
+| `allow-inherited-java-home` | `bench.same_jdk` | `bench.final_source_snapshot` |
+| `snapshot-fail-open` | `bench.final_source_snapshot` | `bench.identity_rechecks` |
 
 mutator 的可执行 key 直接来自 `mutate.py --list`，运行时必须与 matrix membership 完全相等，
 不维护第二份 key 注册表。matrix 的 role、owner、red、control 全部由严格 parser 消费。未知、
@@ -186,9 +189,10 @@ mutator 的可执行 key 直接来自 `mutate.py --list`，运行时必须与 ma
 覆盖 duplicate key、未知字段、缺字段、非有限数、零负数、零分母、冲突模式、缺参数值、偶数
 样本和恰好 15% 噪声。
 
-独立 probe 还覆盖 status、cmdline 和 `jcmd` 前后的身份变化，伪造 `JAVA_HOME`，采样器异常后的
-子进程清理，以及测量后 tracked、untracked、HEAD 三类 source snapshot 漂移。snapshot probe
-只构造临时 Git 仓库，不执行正式构建。
+完整 assertion 集还覆盖 status、cmdline 和 `jcmd` 前后的身份变化，伪造 `JAVA_HOME`，采样异常
+与非零退出后的子进程清理，以及测量后 tracked、untracked、HEAD 三类 source snapshot 漂移。
+snapshot assertion 只构造临时 Git 仓库，不执行正式构建。这三条规则各自有修改生产路径的唯一
+source mutant 与 owner，不是只在正常实现上运行的正向 probe。
 
 CI 只运行 schema、synthetic `/proc` probe 与 mutant matrix，不运行 release 构建、硬件 record
 或硬件 check。

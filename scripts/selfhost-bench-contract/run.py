@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import copy
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
@@ -35,6 +35,9 @@ ASSERTIONS = (
     "bench.starttime_identity_preserved",
     "bench.vmhwm_reads_proc",
     "bench.exception_cleanup",
+    "bench.identity_rechecks",
+    "bench.same_jdk",
+    "bench.final_source_snapshot",
 )
 
 
@@ -228,7 +231,7 @@ def valid_baseline(module: ModuleType) -> dict[str, object]:
             "weight_samples": weight_samples,
             "startup_samples": startup_samples,
             "max_rounds": 3,
-            "proc_interval_ms": 2.0,
+            "proc_interval_ms": module.PROC_INTERVAL_NS / 1_000_000,
             "noise_threshold": 0.15,
             "bootstrap_ratio_tolerance": 0.15,
         },
@@ -468,13 +471,31 @@ def release_single(work: Path, failures: list[BaseException]) -> None:
         (work / "release.single").touch()
 
 
-def wait_identity_gone(module: ModuleType, identity: object, timeout: float = 3) -> bool:
+def identity_is_live(identity: object) -> bool:
+    try:
+        raw = Path(f"/proc/{identity.pid}/stat").read_text(encoding="ascii")
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+        return False
+    close = raw.rfind(")")
+    if close < 0:
+        return False
+    fields = raw[close + 2 :].split()
+    if len(fields) < 20:
+        return False
+    try:
+        starttime = int(fields[19])
+    except ValueError:
+        return False
+    return starttime == identity.starttime and fields[0] not in {"X", "Z"}
+
+
+def wait_identity_gone(identity: object, timeout: float = 3) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not module.identity_is_current(identity):
+        if not identity_is_live(identity):
             return True
         time.sleep(0.01)
-    return not module.identity_is_current(identity)
+    return not identity_is_live(identity)
 
 
 def force_cleanup(root: object | None) -> None:
@@ -521,11 +542,81 @@ def exception_cleanup_probe(
             raised = str(error) == "forced sampler failure"
         finally:
             child = captured.get("child")
-            child_gone = child is not None and wait_identity_gone(module, child)
+            child_gone = child is not None and wait_identity_gone(child)
             root = captured.get("root")
-            root_gone = root is not None and wait_identity_gone(module, root)
+            root_gone = root is not None and wait_identity_gone(root)
             force_cleanup(root)
         return raised and child_gone and root_gone
+
+
+def capture_failure_identities(
+    module: ModuleType,
+    work: Path,
+    identities: dict[str, object],
+    failures: list[BaseException],
+) -> None:
+    try:
+        pids = wait_for_ready(work, ("failure-parent", "failure-child"))
+        for name, pid in pids.items():
+            stat = module.read_process_stat(pid)
+            if stat is None:
+                raise AssertionError(f"could not capture {name} identity")
+            identities[name] = stat.identity
+    except BaseException as error:
+        failures.append(error)
+
+
+def nonzero_cleanup_probe(
+    module: ModuleType, classes: Path, java: Path, jcmd: Path, env: dict[str, str]
+) -> bool:
+    with tempfile.TemporaryDirectory(prefix="selfhost-bench-nonzero-") as raw:
+        work = Path(raw)
+        identities: dict[str, object] = {}
+        failures: list[BaseException] = []
+        observer = threading.Thread(
+            target=capture_failure_identities,
+            args=(module, work, identities, failures),
+            daemon=True,
+        )
+        observer.start()
+        result = None
+        try:
+            result = module.profile_command(
+                [
+                    java,
+                    "-Xmx64m",
+                    "-cp",
+                    classes,
+                    "HeapTree",
+                    "failure-parent",
+                    work,
+                ],
+                cwd=ROOT,
+                env=env,
+                classifier=module.heap_tree_classifier,
+                expected_roles=("failure-parent", "failure-child"),
+                java_roles=set(),
+                jcmd=jcmd,
+                timeout=20,
+            )
+            observer.join(timeout=5)
+            child = identities.get("failure-child")
+            root = identities.get("failure-parent")
+            child_gone = child is not None and wait_identity_gone(child)
+            root_gone = root is not None and wait_identity_gone(root)
+        finally:
+            (work / "release.failure").touch()
+            force_cleanup(identities.get("failure-parent"))
+            observer.join(timeout=5)
+        if failures:
+            raise failures[0]
+        return (
+            result is not None
+            and result.returncode == 7
+            and not observer.is_alive()
+            and child_gone
+            and root_gone
+        )
 
 
 def main_tree_probe(
@@ -673,6 +764,8 @@ def process_assertions(
         result.sampling_attempts >= 20
         and result.sampling_attempts * 50_000_000 >= result.wall_time_ns
     )
+    exception_cleanup = exception_cleanup_probe(module, classes, java, jcmd, env)
+    nonzero_cleanup = nonzero_cleanup_probe(module, classes, java, jcmd, env)
     return {
         "bench.descendants_recursive": recursive,
         "bench.heap_exact": heap_exact,
@@ -685,9 +778,10 @@ def process_assertions(
         "bench.sampling_targets_two_ms": scheduled,
         "bench.starttime_identity_preserved": starttime_exact,
         "bench.vmhwm_reads_proc": hwm_exact,
-        "bench.exception_cleanup": exception_cleanup_probe(
-            module, classes, java, jcmd, env
-        ),
+        "bench.exception_cleanup": exception_cleanup and nonzero_cleanup,
+        "bench.identity_rechecks": identity_rechecks_probe(module),
+        "bench.same_jdk": same_jdk_probe(module, java, jcmd),
+        "bench.final_source_snapshot": final_source_snapshot_probe(module),
     }
 
 
@@ -701,7 +795,7 @@ def sequence_reader(values: Sequence[object]):
     return read
 
 
-def identity_change_contract(module: ModuleType) -> None:
+def identity_rechecks_probe(module: ModuleType) -> bool:
     identity = module.ProcessIdentity(4242, 100)
     same = module.ProcessStat(identity, 1)
     changed = module.ProcessStat(module.ProcessIdentity(4242, 101), 1)
@@ -727,7 +821,7 @@ def identity_change_contract(module: ModuleType) -> None:
         cmdline_reader=cmdline_reader,
     )
     if before_status is not None or status_calls != 0 or cmdline_calls != 0:
-        raise AssertionError("identity change before status was not rejected")
+        return False
 
     after_status = module.read_stable_process_view(
         same,
@@ -736,7 +830,7 @@ def identity_change_contract(module: ModuleType) -> None:
         cmdline_reader=cmdline_reader,
     )
     if after_status is not None or status_calls != 1 or cmdline_calls != 0:
-        raise AssertionError("identity change after status was not rejected")
+        return False
 
     after_cmdline = module.read_stable_process_view(
         same,
@@ -745,7 +839,7 @@ def identity_change_contract(module: ModuleType) -> None:
         cmdline_reader=cmdline_reader,
     )
     if after_cmdline is not None or status_calls != 2 or cmdline_calls != 1:
-        raise AssertionError("identity change after cmdline was not rejected")
+        return False
 
     completed = subprocess.CompletedProcess(
         args=[], returncode=0, stdout="-XX:MaxHeapSize=67108864\n", stderr=""
@@ -763,25 +857,25 @@ def identity_change_contract(module: ModuleType) -> None:
             runner=runner,
         )
     except module.BenchError:
-        pass
-    else:
-        raise AssertionError("identity change after jcmd was not rejected")
-    print("PASS  process identity is rechecked around status, cmdline and jcmd")
+        return True
+    return False
 
 
-def jdk_environment_contract(module: ModuleType) -> None:
+def same_jdk_probe(module: ModuleType, java: Path, jcmd: Path) -> bool:
+    rejected = False
     try:
         module.reject_pollution({"JAVA_HOME": "/tmp/fake-java-home"})
     except module.BenchError:
-        pass
-    else:
-        raise AssertionError("fake JAVA_HOME was accepted")
-    toolchain = module.resolve_toolchain()
+        rejected = True
+    toolchain = module.Toolchain(
+        java=java.resolve(),
+        jcmd=jcmd.resolve(),
+        java_version="contract java",
+        java_runtime="contract runtime",
+    )
     env = module.measurement_environment(toolchain)
     launcher_java = (Path(env["JAVA_HOME"]) / "bin/java").resolve()
-    if launcher_java != toolchain.java:
-        raise AssertionError("measurement JAVA_HOME differs from direct JAR JDK")
-    print("PASS  fake JAVA_HOME is refused and launchers use the resolved JDK")
+    return rejected and launcher_java == toolchain.java
 
 
 def git(*args: str, cwd: Path) -> str:
@@ -806,10 +900,11 @@ def initialize_contract_repo(root: Path) -> str:
     return git("rev-parse", "HEAD", cwd=root)
 
 
-def snapshot_drift_contract(module: ModuleType) -> None:
+def final_source_snapshot_probe(module: ModuleType) -> bool:
     measured = valid_baseline(module)
     options = module.Options("record", 3, 5, 3)
     cases = ("tracked", "untracked", "head")
+    passed = True
     for case in cases:
         with tempfile.TemporaryDirectory(prefix=f"selfhost-bench-snapshot-{case}-") as raw:
             root = Path(raw)
@@ -825,8 +920,9 @@ def snapshot_drift_contract(module: ModuleType) -> None:
                 git("add", "tracked.txt", cwd=root)
                 git("commit", "-q", "-m", "Advance contract repository", cwd=root)
             output = io.StringIO()
+            errors = io.StringIO()
             try:
-                with redirect_stdout(output):
+                with redirect_stdout(output), redirect_stderr(errors):
                     module.publish_measurement(
                         options,
                         expected,
@@ -836,14 +932,16 @@ def snapshot_drift_contract(module: ModuleType) -> None:
                         baseline_path=baseline_path,
                     )
             except module.BenchError:
-                pass
+                refused = True
             else:
-                raise AssertionError(f"final snapshot accepted {case} drift")
-            if output.getvalue():
-                raise AssertionError(f"final snapshot printed before refusing {case} drift")
+                refused = False
+            if not refused:
+                passed = False
+            if output.getvalue() or errors.getvalue():
+                passed = False
             if baseline_path.read_text(encoding="ascii") != "sentinel\n":
-                raise AssertionError(f"final snapshot overwrote baseline after {case} drift")
-    print("PASS  final snapshot refuses tracked, untracked and HEAD drift before output")
+                passed = False
+    return passed
 
 
 def compile_fixture(toolchain: object, work: Path) -> Path:
@@ -941,9 +1039,6 @@ def main() -> int:
     matrix = parse_matrix(matrix_text, mutations)
     schema_contract(module)
     shell_contract()
-    identity_change_contract(module)
-    jdk_environment_contract(module)
-    snapshot_drift_contract(module)
     mutation_contract(module, matrix, mutations)
     if not synthetic_only:
         module.load_baseline(ROOT / "scripts/selfhost-bench.baseline")

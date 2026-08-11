@@ -50,6 +50,16 @@ public final class HeapTree {
         }
     }
 
+    private static void waitForReady(Path work, String mode) throws Exception {
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        while (!Files.exists(work.resolve("ready." + mode))) {
+            if (System.nanoTime() >= deadline) {
+                throw new IllegalStateException("timed out waiting for ready." + mode);
+            }
+            Thread.sleep(10);
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length != 2) {
             throw new IllegalArgumentException("usage: HeapTree MODE WORK");
@@ -74,13 +84,24 @@ public final class HeapTree {
                 child = spawn("64m", "sum-child", work);
             }
             case "sum-child" -> allocate(16);
+            case "failure-parent" -> {
+                allocate(8);
+                child = spawn("64m", "failure-child", work);
+            }
+            case "failure-child" -> allocate(8);
             default -> throw new IllegalArgumentException("unknown mode: " + mode);
         }
         ready(work, mode);
+        if (mode.equals("failure-parent")) {
+            waitForReady(work, "failure-child");
+            Thread.sleep(500);
+            System.exit(7);
+        }
         String release = switch (mode) {
             case "sibling" -> "release.sibling";
             case "single" -> "release.single";
             case "sum-parent", "sum-child" -> "release.sum";
+            case "failure-child" -> "release.failure";
             default -> "release.tree";
         };
         waitForRelease(work, release);
