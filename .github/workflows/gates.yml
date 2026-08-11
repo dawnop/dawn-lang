@@ -38,16 +38,20 @@ jobs:
   # the reusable gate set that both branch CI and release tags execute.
   tree-policy:
     runs-on: ubuntu-latest
-    # measured 6s, then 16s locally for the gate map added 2026-08-11. Seconds
-    # -scale jobs get a floor rather than 3x their own time, which would be a
-    # bound no slow runner could meet. Restate the runner figure from the first
-    # run that carries the new step if it stops being seconds-scale.
+    # 6s on the runner before the gate map step added 2026-08-11; the map
+    # measures 20.4s locally over three runs (20.35s, 20.38s, 20.38s) and has
+    # no runner figure yet. Still a seconds-scale job, so it keeps the floor
+    # rather than 3x its own time, which would be a bound no slow runner could
+    # meet, and the floor itself is unchanged. Restate this from the first run
+    # that carries the new step, and move it to a 3x bound if the job stops
+    # being seconds-scale there.
     # budget: floor (seconds-scale job)
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          # the gate map replays two commits' trees as fixtures
+          # the gate map replays four commits' trees as fixtures, and reads
+          # the Emit-Change declarations back to the last tag
           fetch-depth: 0
       - name: no server identity in the repo
         run: python3 scripts/check-no-server-identity.py
@@ -61,9 +65,10 @@ jobs:
       # Which gate sees which change was nobody's written-down knowledge until
       # two batches derived it wrong on the same day (see the header of
       # gatemap.py). This recomputes the answer from the workflows, the goldens
-      # and the scripts, ratchets the paths no gate watches, and replays both
-      # failures on the trees they happened on. It needs no toolchain and reads
-      # the same three workflow files the step above does.
+      # and the scripts, holds every rule to a mutant that uniquely reddens it,
+      # ratchets the paths no gate watches, and replays both failures on the
+      # trees they happened on. It needs no toolchain and reads the same three
+      # workflow files the step above does.
       - name: the gate map still describes this tree
         run: python3 scripts/gate-map/gatemap.py --check
 
