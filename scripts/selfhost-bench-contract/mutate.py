@@ -10,16 +10,48 @@ MUTATIONS = {
         "DESCENDANT_DEPTH_LIMIT: int | None = None",
         "DESCENDANT_DEPTH_LIMIT: int | None = 1",
     ),
-    "heap-mismatch-passes": (
-        "def heap_matches_expected(actual: int, expected: int) -> bool:\n"
-        "    return actual == expected",
-        "def heap_matches_expected(actual: int, expected: int) -> bool:\n"
-        "    return True",
+    "heap-parser-off-by-one": (
+        '    if value <= 0:\n'
+        '        raise BenchError("jcmd VM.flags returned a non-positive MaxHeapSize")\n'
+        "    return value",
+        '    if value <= 0:\n'
+        '        raise BenchError("jcmd VM.flags returned a non-positive MaxHeapSize")\n'
+        "    return value + 1",
+    ),
+    "tree-rss-last-only": (
+        "                    tree_rss += view.rss_bytes",
+        "                    tree_rss = view.rss_bytes",
+    ),
+    "overlap-any-role": (
+        "                    if set(expected_roles).issubset(roles_now):",
+        "                    if set(expected_roles).intersection(roles_now):",
+    ),
+    "sampling-200ms": (
+        "PROC_INTERVAL_NS = 2_000_000",
+        "PROC_INTERVAL_NS = 200_000_000",
+    ),
+    "starttime-constant": (
+        "        starttime = int(fields[19])",
+        "        starttime = 1",
+    ),
+    "vmhwm-constant": (
+        '    return values["VmRSS"], values["VmHWM"], values["VmPeak"]',
+        '    return values["VmRSS"], 1, values["VmPeak"]',
+    ),
+    "skip-exception-cleanup": (
+        "            if not completed_normally:\n"
+        "                terminate_process_group(process)",
+        "            if not completed_normally:\n"
+        "                process.poll()",
     ),
 }
 
 
 def main() -> None:
+    if sys.argv[1:] == ["--list"]:
+        for name in MUTATIONS:
+            print(name)
+        return
     if len(sys.argv) != 3 or sys.argv[1] not in MUTATIONS:
         names = " | ".join(MUTATIONS)
         raise SystemExit(f"usage: mutate.py <{names}> <selfhost-bench.py>")

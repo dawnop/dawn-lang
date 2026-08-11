@@ -50,7 +50,8 @@ scripts/selfhost-bench.sh [--measure | --record | --check]
 ```
 
 三种模式互斥，省略时是 `--measure`。重量样本默认 3，启动样本默认 11，重试轮数默认 3。
-每个参数必须带值，必须是达到最低值的正奇数；冲突模式和非法参数退出 2。
+每个参数必须带值。重量与启动样本数必须是达到最低值的正奇数，`--max-rounds` 可以是 1 到 3
+之间的任意整数；冲突模式和非法参数退出 2。
 
 - `--measure` 测量并打印结果，不读写 baseline。
 - `--record` 只在结论不是 inconclusive 时，用同目录临时文件和原子 rename 写 baseline。
@@ -63,7 +64,8 @@ scripts/selfhost-bench.sh [--measure | --record | --check]
 所有 preflight 都在任何构建和 warm-up 之前完成。正式硬件测量只支持 Linux x86_64。
 入口依次确认：
 
-1. 当前目录属于仓库根，HEAD 已提交，tracked 与 untracked 工作树均干净。
+1. 当前目录属于仓库根，HEAD 已提交，tracked 与 untracked 工作树均干净。测量结束后、打印任何
+   结果或写 baseline 前，再次验证 HEAD 未变且工作树仍干净。
 2. Python、Bash、Git、Java、同一 JDK 的 `jcmd`、C 编译器、`readelf`、`locale` 和 SHA-256
    工具存在；`C.UTF-8` 必须实际解析为 UTF-8，不能用会破坏 Unicode 路径的纯 `C` locale。
 3. 样本参数与模式合法，`--check` baseline 严格可读。
@@ -73,7 +75,7 @@ scripts/selfhost-bench.sh [--measure | --record | --check]
 
 拒绝集合包含 `DAWN_SEED`、`DAWN_SEED_CACHE`、`DAWN_SEED_ALLOW_UNVERIFIED`、
 `DAWN_JVM_OPTS`、`DAWN_SELFHOST_CP`、`DAWN_PKG_CACHE`、`DAWN_MAVEN_MIRROR`、
-`DAWNC_BIN`、`JAVA_TOOL_OPTIONS`、`JDK_JAVA_OPTIONS`、`_JAVA_OPTIONS`、`CLASSPATH`、
+`DAWNC_BIN`、`JAVA_TOOL_OPTIONS`、`JDK_JAVA_OPTIONS`、`_JAVA_OPTIONS`、`JAVA_HOME`、`CLASSPATH`、
 `COURSIER_CACHE`、`CC`、`CFLAGS` 和 `LDFLAGS`。空值也拒绝，因为存在本身已经使来源含糊。
 
 ## 5. 正式产物与 A/B/C
@@ -81,7 +83,8 @@ scripts/selfhost-bench.sh [--measure | --record | --check]
 release JAR 必须由 `scripts/build-release-jar.sh` 在测量临时目录生成。benchmark 不再复制三条
 build 命令。正式 builder 保持 seed、seed std、current std 和 vendor 的唯一配方，只增加一个
 不改变参数与输出的内部计时文件：A、B、C 每趟写 user CPU 与 system CPU。该文件由 benchmark
-创建、严格解析并在轮次结束后删除，普通 release 调用不产生它。
+创建、严格解析并在轮次结束后删除，普通 release 调用不产生它。system CPU 只用于确认每一行
+计时完整、有限且非负；Phase 1 baseline 和预算只保存并使用 user CPU。
 
 每轮先做一次不计数 warm-up，再执行 N 个完整 builder 样本。每个样本都必须通过 B 等于 C、
 standalone smoke 和最终原子提升。不同样本产出的 release JAR 还必须字节一致。
@@ -115,13 +118,17 @@ native compiler 必须由 `scripts/release-native.sh --jar <release-jar>` 在同
 - native 角色的最大堆字段为 JSON `null`。
 
 RSS 总和只采用所有树内进程都成功读取 `VmRSS` 的时点。任何 sibling 都不属于根的后代，不能
-进入总和或角色集合。
+进入总和或角色集合。读取一次 stat 身份后，status 与 cmdline 的读取前后都要重新确认同一个
+`(pid,starttime)`；`jcmd` 返回后也要复核。任何采样异常或取消都会终止并等待整个被测进程组，
+正常完成的命令不发送终止信号。
 
 ## 8. 启动时间
 
 启动时间分别测 direct release JAR、临时 deployment 形态的 `bin/dawn` 和 native compiler。
 三者先各跑一次 warm-up，再保存 11 个 `perf_counter_ns` 原始样本与中位数。
 native CLI 的版本子命令实际拼写是 `version`，JAR 与 shell launcher 使用 `--version`。
+direct JAR 与 `bin/dawn` 都使用 preflight 解析出的同一 JDK。入口拒绝外部 `JAVA_HOME`，随后只在
+测量子进程环境中设置经过路径一致性验证的 `JAVA_HOME`。
 
 临时 deployment launcher 由当前 `bin/dawn` 和正式 release JAR 组成，故不会信任仓库 ignored
 的 `build/dawn-selfhost.jar`，也不会触发源码重建。
@@ -160,16 +167,28 @@ RSS、VAS、产物大小、启动时间和绝对 wall time 在 Phase 1 都只是
 harness 另起无关 sibling。parent 和 grandchild 显式使用 64 MiB 堆，child 与 sibling 使用
 96 MiB。契约验证递归包含 grandchild、排除 sibling，并通过同 JDK `jcmd` 读取真实堆值。
 
-两个独立 source mutant 每次都运行完整 assertion 集：
+八个独立 source mutant 每次都运行完整 assertion 集：
 
 | mutant | 唯一红项 | control |
 |---|---|---|
 | `descendants-one-hop` | `bench.descendants_recursive` | `bench.heap_exact` |
-| `heap-mismatch-passes` | `bench.heap_exact` | `bench.descendants_recursive` |
+| `heap-parser-off-by-one` | `bench.heap_exact` | `bench.descendants_recursive` |
+| `tree-rss-last-only` | `bench.tree_rss_sums_simultaneous` | `bench.overlap_requires_all_roles` |
+| `overlap-any-role` | `bench.overlap_requires_all_roles` | `bench.tree_rss_sums_simultaneous` |
+| `sampling-200ms` | `bench.sampling_targets_two_ms` | `bench.starttime_identity_preserved` |
+| `starttime-constant` | `bench.starttime_identity_preserved` | `bench.vmhwm_reads_proc` |
+| `vmhwm-constant` | `bench.vmhwm_reads_proc` | `bench.sampling_targets_two_ms` |
+| `skip-exception-cleanup` | `bench.exception_cleanup` | `bench.descendants_recursive` |
 
-matrix 的 role、owner、red、control 全部由严格 parser 消费。未知、重复、缺失、改 owner 都必须
-fail closed。schema 的表驱动负例覆盖 duplicate key、未知字段、缺字段、非有限数、零负数、
-零分母、冲突模式、缺参数值、偶数样本和恰好 15% 噪声。
+mutator 的可执行 key 直接来自 `mutate.py --list`，运行时必须与 matrix membership 完全相等，
+不维护第二份 key 注册表。matrix 的 role、owner、red、control 全部由严格 parser 消费。未知、
+重复、缺失、改 owner，以及新增 mutator 但遗漏 matrix 都必须 fail closed。schema 的表驱动负例
+覆盖 duplicate key、未知字段、缺字段、非有限数、零负数、零分母、冲突模式、缺参数值、偶数
+样本和恰好 15% 噪声。
+
+独立 probe 还覆盖 status、cmdline 和 `jcmd` 前后的身份变化，伪造 `JAVA_HOME`，采样器异常后的
+子进程清理，以及测量后 tracked、untracked、HEAD 三类 source snapshot 漂移。snapshot probe
+只构造临时 Git 仓库，不执行正式构建。
 
 CI 只运行 schema、synthetic `/proc` probe 与 mutant matrix，不运行 release 构建、硬件 record
 或硬件 check。

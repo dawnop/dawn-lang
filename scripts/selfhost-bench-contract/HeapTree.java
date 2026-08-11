@@ -68,10 +68,22 @@ public final class HeapTree {
             }
             case "grandchild" -> allocate(16);
             case "sibling" -> allocate(24);
+            case "single" -> allocate(8);
+            case "sum-parent" -> {
+                allocate(12);
+                child = spawn("64m", "sum-child", work);
+            }
+            case "sum-child" -> allocate(16);
             default -> throw new IllegalArgumentException("unknown mode: " + mode);
         }
         ready(work, mode);
-        waitForRelease(work, mode.equals("sibling") ? "release.sibling" : "release.tree");
+        String release = switch (mode) {
+            case "sibling" -> "release.sibling";
+            case "single" -> "release.single";
+            case "sum-parent", "sum-child" -> "release.sum";
+            default -> "release.tree";
+        };
+        waitForRelease(work, release);
         if (child != null && child.waitFor() != 0) {
             throw new IllegalStateException("child exited nonzero");
         }

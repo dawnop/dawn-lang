@@ -65,6 +65,7 @@ POLLUTING_ENV = (
     "JAVA_TOOL_OPTIONS",
     "JDK_JAVA_OPTIONS",
     "_JAVA_OPTIONS",
+    "JAVA_HOME",
     "CLASSPATH",
     "COURSIER_CACHE",
     "CC",
@@ -161,6 +162,7 @@ class ProfileResult:
     wall_time_ns: int
     tree_peak_rss_bytes: int
     complete_overlap_samples: int
+    sampling_attempts: int
     roles: dict[str, dict[str, int | None]]
     observed_identities: frozenset[ProcessIdentity]
 
@@ -785,6 +787,18 @@ def clean_environment() -> dict[str, str]:
     return env
 
 
+def measurement_environment(toolchain: Toolchain) -> dict[str, str]:
+    env = clean_environment()
+    java_home = toolchain.java.parent.parent.resolve()
+    home_java = (java_home / "bin/java").resolve()
+    if home_java != toolchain.java:
+        raise BenchError(
+            f"resolved java {toolchain.java} does not match JAVA_HOME candidate {java_home}"
+        )
+    env["JAVA_HOME"] = os.fspath(java_home)
+    return env
+
+
 def reject_pollution(env: Mapping[str, str]) -> None:
     present = [name for name in POLLUTING_ENV if name in env]
     if present:
@@ -853,6 +867,30 @@ def resolve_seed() -> tuple[str, Path, str]:
     return tag, seed_path, digest
 
 
+def source_snapshot(root: Path = ROOT) -> str:
+    before = run_checked(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
+    if not COMMIT_RE.fullmatch(before):
+        raise BenchError("git rev-parse did not return a full commit hash")
+    status = run_checked(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=root
+    )
+    if status.stdout:
+        raise BenchError("record/check requires a clean committed worktree")
+    after = run_checked(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
+    if after != before:
+        raise BenchError("source HEAD changed while its snapshot was being verified")
+    return after
+
+
+def verify_final_source_snapshot(expected_commit: str, root: Path = ROOT) -> None:
+    actual_commit = source_snapshot(root)
+    if actual_commit != expected_commit:
+        raise BenchError(
+            f"source HEAD changed during measurement: expected {expected_commit}, "
+            f"found {actual_commit}"
+        )
+
+
 def preflight(options: Options) -> tuple[Preflight, dict[str, object] | None]:
     reject_pollution(os.environ)
     if platform.system() != "Linux" or platform.machine() != "x86_64":
@@ -860,14 +898,7 @@ def preflight(options: Options) -> tuple[Preflight, dict[str, object] | None]:
     for command in ("bash", "git", "cc", "readelf", "sha256sum", "locale"):
         if shutil.which(command) is None:
             raise BenchError(f"required command is missing: {command}")
-    status = run_checked(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=ROOT
-    )
-    if status.stdout:
-        raise BenchError("record/check requires a clean committed worktree")
-    commit = run_checked(["git", "rev-parse", "HEAD"], cwd=ROOT).stdout.strip()
-    if not COMMIT_RE.fullmatch(commit):
-        raise BenchError("git rev-parse did not return a full commit hash")
+    commit = source_snapshot()
     locale_result = run_checked(
         ["locale", "charmap"], cwd=ROOT, env=clean_environment()
     ).stdout.strip()
@@ -1064,6 +1095,44 @@ def read_cmdline(pid: int) -> tuple[str, ...]:
     )
 
 
+IdentityReader = Callable[[int], ProcessStat | None]
+StatusReader = Callable[[int], tuple[int, int, int] | None]
+CmdlineReader = Callable[[int], tuple[str, ...]]
+
+
+def identity_is_current(
+    identity: ProcessIdentity, identity_reader: IdentityReader = read_process_stat
+) -> bool:
+    current = identity_reader(identity.pid)
+    return current is not None and current.identity == identity
+
+
+def read_stable_process_view(
+    stat: ProcessStat,
+    *,
+    identity_reader: IdentityReader = read_process_stat,
+    status_reader: StatusReader = read_status_bytes,
+    cmdline_reader: CmdlineReader = read_cmdline,
+) -> ProcessView | None:
+    if not identity_is_current(stat.identity, identity_reader):
+        return None
+    status = status_reader(stat.identity.pid)
+    if status is None or not identity_is_current(stat.identity, identity_reader):
+        return None
+    argv = cmdline_reader(stat.identity.pid)
+    if not identity_is_current(stat.identity, identity_reader):
+        return None
+    rss, hwm, peak = status
+    return ProcessView(
+        identity=stat.identity,
+        parent_pid=stat.parent_pid,
+        argv=argv,
+        rss_bytes=rss,
+        hwm_bytes=hwm,
+        peak_bytes=peak,
+    )
+
+
 def process_table() -> dict[int, ProcessStat]:
     table: dict[int, ProcessStat] = {}
     for entry in Path("/proc").iterdir():
@@ -1110,17 +1179,24 @@ def parse_max_heap(output: str) -> int:
     return value
 
 
-def query_max_heap(jcmd: Path, identity: ProcessIdentity) -> int:
-    current = read_process_stat(identity.pid)
-    if current is None or current.identity != identity:
+def query_max_heap(
+    jcmd: Path,
+    identity: ProcessIdentity,
+    *,
+    identity_reader: IdentityReader = read_process_stat,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> int:
+    if not identity_is_current(identity, identity_reader):
         raise BenchError(f"Java process {identity.pid} exited before jcmd attach")
-    result = subprocess.run(
+    result = runner(
         [os.fspath(jcmd), str(identity.pid), "VM.flags"],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=8,
     )
+    if not identity_is_current(identity, identity_reader):
+        raise BenchError(f"Java process {identity.pid} changed identity during jcmd attach")
     if result.returncode != 0:
         raise BenchError(
             f"jcmd attach failed for {identity.pid}: "
@@ -1129,8 +1205,24 @@ def query_max_heap(jcmd: Path, identity: ProcessIdentity) -> int:
     return parse_max_heap(result.stdout)
 
 
-def heap_matches_expected(actual: int, expected: int) -> bool:
-    return actual == expected
+def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired as error:
+        raise BenchError("could not terminate profiled process group") from error
 
 
 RoleClassifier = Callable[[ProcessView, ProcessIdentity], str | None]
@@ -1157,50 +1249,46 @@ def profile_command(
             stderr=stderr_file,
             start_new_session=True,
         )
-        root: ProcessIdentity | None = None
-        root_deadline = time.monotonic() + 2
-        while root is None and time.monotonic() < root_deadline:
-            stat = read_process_stat(process.pid)
-            if stat is not None:
-                root = stat.identity
-                break
-            if process.poll() is not None:
-                break
-            time.sleep(0.001)
-        if root is None:
-            process.wait(timeout=2)
-            raise BenchError("profiled command exited before its root identity was observed")
-
-        role_observations: dict[str, dict[ProcessIdentity, RoleObservation]] = {}
-        observed_identities: set[ProcessIdentity] = set()
-        heap_futures: dict[ProcessIdentity, Future[int]] = {}
-        tree_peak = 0
-        overlap_samples = 0
-        deadline = time.monotonic() + timeout
-        next_tick = time.perf_counter_ns()
-        executor = ThreadPoolExecutor(max_workers=max(1, len(java_roles)))
+        completed_normally = False
+        executor: ThreadPoolExecutor | None = None
         try:
+            root: ProcessIdentity | None = None
+            root_deadline = time.monotonic() + 2
+            while root is None and time.monotonic() < root_deadline:
+                stat = read_process_stat(process.pid)
+                if stat is not None:
+                    root = stat.identity
+                    break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.001)
+            if root is None:
+                raise BenchError(
+                    "profiled command exited before its root identity was observed"
+                )
+
+            role_observations: dict[str, dict[ProcessIdentity, RoleObservation]] = {}
+            observed_identities: set[ProcessIdentity] = set()
+            heap_futures: dict[ProcessIdentity, Future[int]] = {}
+            tree_peak = 0
+            overlap_samples = 0
+            sampling_attempts = 0
+            deadline = time.monotonic() + timeout
+            next_tick = time.perf_counter_ns()
+            executor = ThreadPoolExecutor(max_workers=max(1, len(java_roles)))
             while True:
+                sampling_attempts += 1
                 table = process_table()
                 stats = descendant_stats(table, root)
                 complete = bool(stats)
                 tree_rss = 0
                 roles_now: set[str] = set()
                 for stat in stats:
-                    status = read_status_bytes(stat.identity.pid)
-                    if status is None:
+                    view = read_stable_process_view(stat)
+                    if view is None:
                         complete = False
                         continue
-                    rss, hwm, peak = status
-                    view = ProcessView(
-                        identity=stat.identity,
-                        parent_pid=stat.parent_pid,
-                        argv=read_cmdline(stat.identity.pid),
-                        rss_bytes=rss,
-                        hwm_bytes=hwm,
-                        peak_bytes=peak,
-                    )
-                    tree_rss += rss
+                    tree_rss += view.rss_bytes
                     observed_identities.add(stat.identity)
                     role = classifier(view, root)
                     if role is None:
@@ -1209,8 +1297,8 @@ def profile_command(
                     observation = role_observations.setdefault(role, {}).setdefault(
                         stat.identity, RoleObservation()
                     )
-                    observation.hwm_bytes = max(observation.hwm_bytes, hwm)
-                    observation.peak_bytes = max(observation.peak_bytes, peak)
+                    observation.hwm_bytes = max(observation.hwm_bytes, view.hwm_bytes)
+                    observation.peak_bytes = max(observation.peak_bytes, view.peak_bytes)
                     if (
                         role in java_roles
                         and is_java_argv(view.argv)
@@ -1226,12 +1314,6 @@ def profile_command(
                 if process.poll() is not None:
                     break
                 if time.monotonic() >= deadline:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.wait(timeout=5)
                     raise BenchError(f"profiled command exceeded {timeout:.0f}s")
                 next_tick += PROC_INTERVAL_NS
                 delay = (next_tick - time.perf_counter_ns()) / 1_000_000_000
@@ -1239,49 +1321,57 @@ def profile_command(
                     time.sleep(delay)
                 else:
                     next_tick = time.perf_counter_ns()
+
+            ended = time.perf_counter_ns()
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read().decode("utf-8", errors="replace")
+            stderr = stderr_file.read().decode("utf-8", errors="replace")
+
+            heap_values: dict[ProcessIdentity, int] = {}
+            for identity, future in heap_futures.items():
+                try:
+                    heap_values[identity] = future.result()
+                except Exception as error:
+                    if isinstance(error, BenchError):
+                        raise error
+                    raise BenchError(
+                        f"jcmd attach failed for {identity.pid}: {error}"
+                    ) from error
+
+            roles: dict[str, dict[str, int | None]] = {}
+            for role, identities in role_observations.items():
+                heaps = [heap_values.get(identity) for identity in identities]
+                if role in java_roles and any(heap is None for heap in heaps):
+                    raise BenchError(f"role {role} is missing an actual MaxHeapSize")
+                if role not in java_roles:
+                    max_heap: int | None = None
+                else:
+                    max_heap = max(int(heap) for heap in heaps if heap is not None)
+                roles[role] = {
+                    "process_count": len(identities),
+                    "rss_hwm_bytes": max(item.hwm_bytes for item in identities.values()),
+                    "vas_peak_bytes": max(item.peak_bytes for item in identities.values()),
+                    "max_heap_bytes": max_heap,
+                }
+
+            completed_normally = True
+            return ProfileResult(
+                returncode=process.returncode,
+                stdout=stdout,
+                stderr=stderr,
+                wall_time_ns=ended - started,
+                tree_peak_rss_bytes=tree_peak,
+                complete_overlap_samples=overlap_samples,
+                sampling_attempts=sampling_attempts,
+                roles=roles,
+                observed_identities=frozenset(observed_identities),
+            )
         finally:
-            executor.shutdown(wait=True, cancel_futures=False)
-        ended = time.perf_counter_ns()
-        stdout_file.seek(0)
-        stderr_file.seek(0)
-        stdout = stdout_file.read().decode("utf-8", errors="replace")
-        stderr = stderr_file.read().decode("utf-8", errors="replace")
-
-    heap_values: dict[ProcessIdentity, int] = {}
-    for identity, future in heap_futures.items():
-        try:
-            heap_values[identity] = future.result()
-        except Exception as error:
-            if isinstance(error, BenchError):
-                raise error
-            raise BenchError(f"jcmd attach failed for {identity.pid}: {error}") from error
-
-    roles: dict[str, dict[str, int | None]] = {}
-    for role, identities in role_observations.items():
-        heaps = [heap_values.get(identity) for identity in identities]
-        if role in java_roles and any(heap is None for heap in heaps):
-            raise BenchError(f"role {role} is missing an actual MaxHeapSize")
-        if role not in java_roles:
-            max_heap: int | None = None
-        else:
-            max_heap = max(int(heap) for heap in heaps if heap is not None)
-        roles[role] = {
-            "process_count": len(identities),
-            "rss_hwm_bytes": max(item.hwm_bytes for item in identities.values()),
-            "vas_peak_bytes": max(item.peak_bytes for item in identities.values()),
-            "max_heap_bytes": max_heap,
-        }
-
-    return ProfileResult(
-        returncode=process.returncode,
-        stdout=stdout,
-        stderr=stderr,
-        wall_time_ns=ended - started,
-        tree_peak_rss_bytes=tree_peak,
-        complete_overlap_samples=overlap_samples,
-        roles=roles,
-        observed_identities=frozenset(observed_identities),
-    )
+            if not completed_normally:
+                terminate_process_group(process)
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=False)
 
 
 def workload_classifier(root_role: str) -> RoleClassifier:
@@ -1307,7 +1397,20 @@ def heap_tree_classifier(view: ProcessView, root: ProcessIdentity) -> str | None
     if index + 1 >= len(view.argv):
         return None
     mode = view.argv[index + 1]
-    return mode if mode in {"parent", "child", "grandchild", "sibling"} else None
+    return (
+        mode
+        if mode
+        in {
+            "parent",
+            "child",
+            "grandchild",
+            "sibling",
+            "single",
+            "sum-parent",
+            "sum-child",
+        }
+        else None
+    )
 
 
 def require_profile(
@@ -1604,7 +1707,7 @@ def selected_ratio(value: Mapping[str, object]) -> float:
 
 
 def measure(options: Options, pre: Preflight) -> dict[str, object]:
-    env = clean_environment()
+    env = measurement_environment(pre.toolchain)
     with tempfile.TemporaryDirectory(prefix="dawn-selfhost-bench-") as raw:
         work = Path(raw)
         phase_started = time.perf_counter()
@@ -1632,6 +1735,43 @@ def measure(options: Options, pre: Preflight) -> dict[str, object]:
         )
 
 
+def publish_measurement(
+    options: Options,
+    expected_commit: str,
+    measured: Mapping[str, object],
+    baseline: Mapping[str, object] | None,
+    *,
+    root: Path = ROOT,
+    baseline_path: Path = BASELINE,
+) -> int:
+    verify_final_source_snapshot(expected_commit, root)
+    print_summary(measured)
+    if options.mode == "record":
+        verify_final_source_snapshot(expected_commit, root)
+        write_baseline_atomic(baseline_path, measured)
+        print(f"wrote {baseline_path}", file=sys.stderr)
+    elif options.mode == "check":
+        if baseline is None:
+            raise AssertionError("check mode reached comparison without baseline")
+        current = selected_ratio(measured)
+        previous = selected_ratio(baseline)
+        limit = previous * (1 + BOOTSTRAP_TOLERANCE)
+        delta = (current / previous - 1) * 100
+        if current > limit:
+            print(
+                f"FAIL: bootstrap ratio {current:.6f} is {delta:+.2f}% "
+                f"against baseline {previous:.6f} "
+                f"(budget +{BOOTSTRAP_TOLERANCE * 100:.0f}%)"
+            )
+            return 1
+        print(
+            f"PASS: bootstrap ratio {current:.6f} is {delta:+.2f}% "
+            f"against baseline {previous:.6f} "
+            f"(budget +{BOOTSTRAP_TOLERANCE * 100:.0f}%)"
+        )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--help"]:
@@ -1641,30 +1781,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         options = parse_cli(args)
         pre, baseline = preflight(options)
         measured = measure(options, pre)
-        print_summary(measured)
-        if options.mode == "record":
-            write_baseline_atomic(BASELINE, measured)
-            print(f"wrote {BASELINE}", file=sys.stderr)
-        elif options.mode == "check":
-            if baseline is None:
-                raise AssertionError("check mode reached comparison without baseline")
-            current = selected_ratio(measured)
-            previous = selected_ratio(baseline)
-            limit = previous * (1 + BOOTSTRAP_TOLERANCE)
-            delta = (current / previous - 1) * 100
-            if current > limit:
-                print(
-                    f"FAIL: bootstrap ratio {current:.6f} is {delta:+.2f}% "
-                    f"against baseline {previous:.6f} "
-                    f"(budget +{BOOTSTRAP_TOLERANCE * 100:.0f}%)"
-                )
-                return 1
-            print(
-                f"PASS: bootstrap ratio {current:.6f} is {delta:+.2f}% "
-                f"against baseline {previous:.6f} "
-                f"(budget +{BOOTSTRAP_TOLERANCE * 100:.0f}%)"
-            )
-        return 0
+        return publish_measurement(options, pre.commit, measured, baseline)
     except CliError as error:
         print(f"error: {error}", file=sys.stderr)
         print(USAGE, file=sys.stderr, end="")

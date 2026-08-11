@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stdout
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ import tempfile
 import threading
 import time
 from types import ModuleType
+from typing import Sequence
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,18 +26,16 @@ HERE = Path(__file__).resolve().parent
 BENCH = ROOT / "scripts/selfhost-bench.py"
 MATRIX = HERE / "matrix.txt"
 MUTATE = HERE / "mutate.py"
-MUTATIONS = ("descendants-one-hop", "heap-mismatch-passes")
-ASSERTIONS = ("bench.descendants_recursive", "bench.heap_exact")
-EXPECTED = {
-    ("role", "descendants-one-hop"): ("counted",),
-    ("owner", "descendants-one-hop"): ("bench.descendants_recursive",),
-    ("red", "descendants-one-hop"): ("bench.descendants_recursive",),
-    ("control", "descendants-one-hop"): ("bench.heap_exact",),
-    ("role", "heap-mismatch-passes"): ("counted",),
-    ("owner", "heap-mismatch-passes"): ("bench.heap_exact",),
-    ("red", "heap-mismatch-passes"): ("bench.heap_exact",),
-    ("control", "heap-mismatch-passes"): ("bench.descendants_recursive",),
-}
+ASSERTIONS = (
+    "bench.descendants_recursive",
+    "bench.heap_exact",
+    "bench.tree_rss_sums_simultaneous",
+    "bench.overlap_requires_all_roles",
+    "bench.sampling_targets_two_ms",
+    "bench.starttime_identity_preserved",
+    "bench.vmhwm_reads_proc",
+    "bench.exception_cleanup",
+)
 
 
 class MatrixError(ValueError):
@@ -51,7 +52,28 @@ def load_module(path: Path, name: str) -> ModuleType:
     return module
 
 
-def parse_matrix(text: str) -> dict[tuple[str, str], tuple[str, ...]]:
+def mutator_keys() -> tuple[str, ...]:
+    result = subprocess.run(
+        [sys.executable, os.fspath(MUTATE), "--list"],
+        check=True,
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    keys = tuple(result.stdout.splitlines())
+    if not keys or any(not key or "\t" in key for key in keys):
+        raise MatrixError("mutator registry returned an invalid key")
+    if len(keys) != len(set(keys)):
+        raise MatrixError("mutator registry returned duplicate keys")
+    return keys
+
+
+def parse_matrix(
+    text: str, mutations: Sequence[str]
+) -> dict[tuple[str, str], tuple[str, ...]]:
+    mutation_set = set(mutations)
+    if len(mutation_set) != len(mutations):
+        raise MatrixError("executable mutator keys are duplicated")
     records: dict[tuple[str, str], tuple[str, ...]] = {}
     for line_number, raw in enumerate(text.splitlines(), 1):
         if not raw or raw.startswith("#"):
@@ -62,46 +84,73 @@ def parse_matrix(text: str) -> dict[tuple[str, str], tuple[str, ...]]:
         record, mutation, *values = fields
         if record not in {"role", "owner", "red", "control"}:
             raise MatrixError(f"line {line_number}: unknown record {record!r}")
-        if mutation not in MUTATIONS:
+        if mutation not in mutation_set:
             raise MatrixError(f"line {line_number}: unknown mutation {mutation!r}")
         key = (record, mutation)
         if key in records:
             raise MatrixError(f"line {line_number}: duplicate {record} for {mutation}")
         records[key] = tuple(values)
-    missing = set(EXPECTED) - set(records)
-    unknown = set(records) - set(EXPECTED)
+    expected = {
+        (record, mutation)
+        for mutation in mutations
+        for record in ("role", "owner", "red", "control")
+    }
+    missing = expected - set(records)
+    unknown = set(records) - expected
     if missing:
         raise MatrixError(f"missing records: {sorted(missing)!r}")
     if unknown:
         raise MatrixError(f"unknown records: {sorted(unknown)!r}")
-    for key, expected in EXPECTED.items():
-        if records[key] != expected:
-            raise MatrixError(
-                f"{key[0]} for {key[1]} is {records[key]!r}, expected {expected!r}"
-            )
+    owners: list[str] = []
+    for mutation in mutations:
+        if records[("role", mutation)] != ("counted",):
+            raise MatrixError(f"role for {mutation} must be exactly counted")
+        owner = records[("owner", mutation)]
+        red = records[("red", mutation)]
+        control = records[("control", mutation)]
+        if len(owner) != 1 or owner[0] not in ASSERTIONS:
+            raise MatrixError(f"owner for {mutation} must name one known assertion")
+        if red != owner:
+            raise MatrixError(f"red for {mutation} must equal its owner")
+        if len(control) != 1 or control[0] not in ASSERTIONS:
+            raise MatrixError(f"control for {mutation} must name one known assertion")
+        if control == owner:
+            raise MatrixError(f"control for {mutation} must differ from its owner")
+        owners.append(owner[0])
+    if len(owners) != len(set(owners)):
+        raise MatrixError("counted mutants must have unique owners")
+    if set(owners) != set(ASSERTIONS):
+        raise MatrixError("matrix owners must cover the complete assertion set")
     return records
 
 
-def matrix_selftest(text: str) -> None:
-    parse_matrix(text)
+def matrix_selftest(text: str, mutations: tuple[str, ...]) -> None:
+    parse_matrix(text, mutations)
     lines = text.splitlines()
     first = next(line for line in lines if line and not line.startswith("#"))
+    first_mutation = mutations[0]
+    owner_line = next(line for line in lines if line.startswith(f"owner\t{first_mutation}\t"))
+    owner = owner_line.split("\t")[2]
+    changed_owner = next(assertion for assertion in ASSERTIONS if assertion != owner)
     mutants = {
         "unknown record": text.replace("role\t", "scope\t", 1),
         "duplicate record": text + first + "\n",
         "missing record": "\n".join(lines[:-1]) + "\n",
-        "changed owner": text.replace(
-            "owner\tdescendants-one-hop\tbench.descendants_recursive",
-            "owner\tdescendants-one-hop\tbench.heap_exact",
-        ),
+        "changed owner": text.replace(owner_line, f"owner\t{first_mutation}\t{changed_owner}"),
     }
     for name, mutant in mutants.items():
         try:
-            parse_matrix(mutant)
+            parse_matrix(mutant, mutations)
         except MatrixError:
             print(f"PASS  matrix refuses {name}")
         else:
             raise AssertionError(f"matrix accepted {name}")
+    try:
+        parse_matrix(text, mutations + ("unrecorded-mutator",))
+    except MatrixError:
+        print("PASS  matrix refuses an executable mutator without membership")
+    else:
+        raise AssertionError("matrix accepted an executable mutator without membership")
 
 
 def valid_baseline(module: ModuleType) -> dict[str, object]:
@@ -330,36 +379,162 @@ def schema_contract(module: ModuleType) -> None:
                 raise AssertionError(f"stage timings accepted {name}")
 
 
-def wait_and_release(work: Path, failure: list[BaseException]) -> None:
+def wait_for_ready(work: Path, names: Sequence[str]) -> dict[str, int]:
+    paths = {name: work / f"ready.{name}" for name in names}
+    deadline = time.monotonic() + 15
+    while True:
+        pids: dict[str, int] = {}
+        for name, path in paths.items():
+            try:
+                raw = path.read_text(encoding="ascii")
+                pid = int(raw)
+            except (FileNotFoundError, OSError, ValueError):
+                continue
+            if pid > 0:
+                pids[name] = pid
+        if len(pids) == len(paths):
+            return pids
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"HeapTree roles did not become ready: {list(names)!r}")
+        time.sleep(0.01)
+
+
+def direct_starttime(pid: int) -> int:
+    raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    close = raw.rfind(")")
+    if close < 0:
+        raise AssertionError(f"invalid independent stat for {pid}")
+    fields = raw[close + 2 :].split()
+    if len(fields) < 20:
+        raise AssertionError(f"short independent stat for {pid}")
+    return int(fields[19])
+
+
+def direct_status(pid: int) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for raw in Path(f"/proc/{pid}/status").read_text(encoding="ascii").splitlines():
+        if ":" not in raw:
+            continue
+        key, rest = raw.split(":", 1)
+        if key not in {"VmRSS", "VmHWM"}:
+            continue
+        fields = rest.split()
+        if len(fields) != 2 or fields[1] != "kB":
+            raise AssertionError(f"invalid independent {key} for {pid}")
+        values[key] = int(fields[0]) * 1024
+    if set(values) != {"VmRSS", "VmHWM"}:
+        raise AssertionError(f"missing independent status values for {pid}")
+    return values
+
+
+def capture_tree_and_release(
+    work: Path, oracle: dict[str, object], failures: list[BaseException]
+) -> None:
     try:
-        required = [work / f"ready.{name}" for name in ("parent", "child", "grandchild", "sibling")]
-        deadline = time.monotonic() + 15
-        while not all(path.is_file() for path in required):
-            if time.monotonic() >= deadline:
-                raise AssertionError("HeapTree roles did not all become ready")
-            time.sleep(0.01)
-        time.sleep(2)
-        (work / "release.tree").touch()
-        (work / "release.sibling").touch()
+        pids = wait_for_ready(work, ("parent", "child", "grandchild", "sibling"))
+        statuses = {name: direct_status(pid) for name, pid in pids.items()}
+        oracle["parent_identity"] = (pids["parent"], direct_starttime(pids["parent"]))
+        oracle["parent_hwm"] = statuses["parent"]["VmHWM"]
+        time.sleep(10)
     except BaseException as error:
-        failure.append(error)
+        failures.append(error)
+    finally:
         (work / "release.tree").touch()
         (work / "release.sibling").touch()
 
 
-def process_assertions(module: ModuleType, classes: Path, java: Path, jcmd: Path) -> dict[str, bool]:
-    with tempfile.TemporaryDirectory(prefix="selfhost-bench-proc-") as raw:
+def capture_sum_and_release(
+    work: Path, oracle: dict[str, int], failures: list[BaseException]
+) -> None:
+    try:
+        pids = wait_for_ready(work, ("sum-parent", "sum-child"))
+        statuses = [direct_status(pid) for pid in pids.values()]
+        oracle["rss_sum"] = sum(status["VmRSS"] for status in statuses)
+        oracle["max_rss"] = max(status["VmRSS"] for status in statuses)
+        time.sleep(0.8)
+    except BaseException as error:
+        failures.append(error)
+    finally:
+        (work / "release.sum").touch()
+
+
+def release_single(work: Path, failures: list[BaseException]) -> None:
+    try:
+        wait_for_ready(work, ("single",))
+        time.sleep(0.5)
+    except BaseException as error:
+        failures.append(error)
+    finally:
+        (work / "release.single").touch()
+
+
+def wait_identity_gone(module: ModuleType, identity: object, timeout: float = 3) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not module.identity_is_current(identity):
+            return True
+        time.sleep(0.01)
+    return not module.identity_is_current(identity)
+
+
+def force_cleanup(root: object | None) -> None:
+    if root is None:
+        return
+    try:
+        os.killpg(root.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        os.waitpid(root.pid, 0)
+    except ChildProcessError:
+        pass
+
+
+def exception_cleanup_probe(
+    module: ModuleType, classes: Path, java: Path, jcmd: Path, env: dict[str, str]
+) -> bool:
+    with tempfile.TemporaryDirectory(prefix="selfhost-bench-exception-") as raw:
+        work = Path(raw)
+        captured: dict[str, object] = {}
+
+        def explode_on_child(view: object, root: object) -> str | None:
+            captured["root"] = root
+            role = module.heap_tree_classifier(view, root)
+            if role == "child":
+                captured["child"] = view.identity
+                raise RuntimeError("forced sampler failure")
+            return role
+
+        raised = False
+        try:
+            module.profile_command(
+                [java, "-Xmx64m", "-cp", classes, "HeapTree", "parent", work],
+                cwd=ROOT,
+                env=env,
+                classifier=explode_on_child,
+                expected_roles=("parent", "child", "grandchild"),
+                java_roles=set(),
+                jcmd=jcmd,
+                timeout=20,
+            )
+        except RuntimeError as error:
+            raised = str(error) == "forced sampler failure"
+        finally:
+            child = captured.get("child")
+            child_gone = child is not None and wait_identity_gone(module, child)
+            root = captured.get("root")
+            root_gone = root is not None and wait_identity_gone(module, root)
+            force_cleanup(root)
+        return raised and child_gone and root_gone
+
+
+def main_tree_probe(
+    module: ModuleType, classes: Path, java: Path, jcmd: Path, env: dict[str, str]
+) -> tuple[object, object, dict[str, object]]:
+    with tempfile.TemporaryDirectory(prefix="selfhost-bench-tree-") as raw:
         work = Path(raw)
         sibling = subprocess.Popen(
-            [
-                os.fspath(java),
-                "-Xmx96m",
-                "-cp",
-                os.fspath(classes),
-                "HeapTree",
-                "sibling",
-                os.fspath(work),
-            ],
+            [java, "-Xmx96m", "-cp", classes, "HeapTree", "sibling", work],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -371,24 +546,19 @@ def process_assertions(module: ModuleType, classes: Path, java: Path, jcmd: Path
             time.sleep(0.001)
         if sibling_stat is None:
             raise AssertionError("could not observe sibling identity")
+        oracle: dict[str, object] = {}
         failures: list[BaseException] = []
         releaser = threading.Thread(
-            target=wait_and_release, args=(work, failures), daemon=True
+            target=capture_tree_and_release,
+            args=(work, oracle, failures),
+            daemon=True,
         )
         releaser.start()
         try:
             result = module.profile_command(
-                [
-                    java,
-                    "-Xmx64m",
-                    "-cp",
-                    classes,
-                    "HeapTree",
-                    "parent",
-                    work,
-                ],
+                [java, "-Xmx64m", "-cp", classes, "HeapTree", "parent", work],
                 cwd=ROOT,
-                env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+                env=env,
                 classifier=module.heap_tree_classifier,
                 expected_roles=("parent", "child", "grandchild"),
                 java_roles={"parent", "child", "grandchild"},
@@ -406,28 +576,274 @@ def process_assertions(module: ModuleType, classes: Path, java: Path, jcmd: Path
             releaser.join(timeout=5)
         if failures:
             raise failures[0]
+        if releaser.is_alive():
+            raise AssertionError("tree releaser did not finish")
         if result.returncode != 0:
             raise AssertionError(
                 f"HeapTree parent failed: {result.stdout!r} {result.stderr!r}"
             )
-        recursive = (
-            set(result.roles) == {"parent", "child", "grandchild"}
-            and result.complete_overlap_samples > 0
-            and sibling_stat.identity not in result.observed_identities
+        return result, sibling_stat, oracle
+
+
+def tree_sum_probe(
+    module: ModuleType, classes: Path, java: Path, jcmd: Path, env: dict[str, str]
+) -> bool:
+    with tempfile.TemporaryDirectory(prefix="selfhost-bench-sum-") as raw:
+        work = Path(raw)
+        oracle: dict[str, int] = {}
+        failures: list[BaseException] = []
+        releaser = threading.Thread(
+            target=capture_sum_and_release,
+            args=(work, oracle, failures),
+            daemon=True,
         )
-        parent_heap = result.roles.get("parent", {}).get("max_heap_bytes")
-        child_heap = result.roles.get("child", {}).get("max_heap_bytes")
-        heap_exact = (
-            isinstance(parent_heap, int)
-            and isinstance(child_heap, int)
-            and module.heap_matches_expected(parent_heap, 64 * 1024 * 1024)
-            and module.heap_matches_expected(child_heap, 96 * 1024 * 1024)
-            and not module.heap_matches_expected(child_heap, 64 * 1024 * 1024)
+        releaser.start()
+        try:
+            result = module.profile_command(
+                [java, "-Xmx64m", "-cp", classes, "HeapTree", "sum-parent", work],
+                cwd=ROOT,
+                env=env,
+                classifier=module.heap_tree_classifier,
+                expected_roles=("sum-parent", "sum-child"),
+                java_roles=set(),
+                jcmd=jcmd,
+                timeout=20,
+            )
+        finally:
+            (work / "release.sum").touch()
+            releaser.join(timeout=5)
+        if failures:
+            raise failures[0]
+        return (
+            result.returncode == 0
+            and oracle["rss_sum"] > oracle["max_rss"]
+            and result.tree_peak_rss_bytes >= oracle["rss_sum"]
         )
-        return {
-            "bench.descendants_recursive": recursive,
-            "bench.heap_exact": heap_exact,
-        }
+
+
+def overlap_probe(
+    module: ModuleType, classes: Path, java: Path, jcmd: Path, env: dict[str, str]
+) -> bool:
+    with tempfile.TemporaryDirectory(prefix="selfhost-bench-overlap-") as raw:
+        work = Path(raw)
+        failures: list[BaseException] = []
+        releaser = threading.Thread(
+            target=release_single, args=(work, failures), daemon=True
+        )
+        releaser.start()
+        try:
+            result = module.profile_command(
+                [java, "-Xmx64m", "-cp", classes, "HeapTree", "single", work],
+                cwd=ROOT,
+                env=env,
+                classifier=module.heap_tree_classifier,
+                expected_roles=("single", "missing"),
+                java_roles=set(),
+                jcmd=jcmd,
+                timeout=20,
+            )
+        finally:
+            (work / "release.single").touch()
+            releaser.join(timeout=5)
+        if failures:
+            raise failures[0]
+        return result.returncode == 0 and result.complete_overlap_samples == 0
+
+
+def process_assertions(
+    module: ModuleType, classes: Path, java: Path, jcmd: Path
+) -> dict[str, bool]:
+    env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+    env["JAVA_HOME"] = os.fspath(java.parent.parent)
+    result, sibling_stat, oracle = main_tree_probe(module, classes, java, jcmd, env)
+    recursive = (
+        set(result.roles) == {"parent", "child", "grandchild"}
+        and result.complete_overlap_samples > 0
+        and sibling_stat.identity not in result.observed_identities
+    )
+    parent_heap = result.roles.get("parent", {}).get("max_heap_bytes")
+    child_heap = result.roles.get("child", {}).get("max_heap_bytes")
+    heap_exact = parent_heap == 64 * 1024 * 1024 and child_heap == 96 * 1024 * 1024
+    parent_pid, parent_starttime = oracle["parent_identity"]
+    identity_exact = module.ProcessIdentity(parent_pid, parent_starttime)
+    starttime_exact = identity_exact in result.observed_identities
+    parent_hwm = result.roles.get("parent", {}).get("rss_hwm_bytes")
+    hwm_exact = isinstance(parent_hwm, int) and parent_hwm >= oracle["parent_hwm"]
+    scheduled = (
+        result.sampling_attempts >= 20
+        and result.sampling_attempts * 50_000_000 >= result.wall_time_ns
+    )
+    return {
+        "bench.descendants_recursive": recursive,
+        "bench.heap_exact": heap_exact,
+        "bench.tree_rss_sums_simultaneous": tree_sum_probe(
+            module, classes, java, jcmd, env
+        ),
+        "bench.overlap_requires_all_roles": overlap_probe(
+            module, classes, java, jcmd, env
+        ),
+        "bench.sampling_targets_two_ms": scheduled,
+        "bench.starttime_identity_preserved": starttime_exact,
+        "bench.vmhwm_reads_proc": hwm_exact,
+        "bench.exception_cleanup": exception_cleanup_probe(
+            module, classes, java, jcmd, env
+        ),
+    }
+
+
+def sequence_reader(values: Sequence[object]):
+    remaining = iter(values)
+
+    def read(pid: int) -> object:
+        del pid
+        return next(remaining)
+
+    return read
+
+
+def identity_change_contract(module: ModuleType) -> None:
+    identity = module.ProcessIdentity(4242, 100)
+    same = module.ProcessStat(identity, 1)
+    changed = module.ProcessStat(module.ProcessIdentity(4242, 101), 1)
+    status_calls = 0
+    cmdline_calls = 0
+
+    def status_reader(pid: int) -> tuple[int, int, int]:
+        nonlocal status_calls
+        del pid
+        status_calls += 1
+        return 10, 20, 30
+
+    def cmdline_reader(pid: int) -> tuple[str, ...]:
+        nonlocal cmdline_calls
+        del pid
+        cmdline_calls += 1
+        return ("java",)
+
+    before_status = module.read_stable_process_view(
+        same,
+        identity_reader=sequence_reader((changed,)),
+        status_reader=status_reader,
+        cmdline_reader=cmdline_reader,
+    )
+    if before_status is not None or status_calls != 0 or cmdline_calls != 0:
+        raise AssertionError("identity change before status was not rejected")
+
+    after_status = module.read_stable_process_view(
+        same,
+        identity_reader=sequence_reader((same, changed)),
+        status_reader=status_reader,
+        cmdline_reader=cmdline_reader,
+    )
+    if after_status is not None or status_calls != 1 or cmdline_calls != 0:
+        raise AssertionError("identity change after status was not rejected")
+
+    after_cmdline = module.read_stable_process_view(
+        same,
+        identity_reader=sequence_reader((same, same, changed)),
+        status_reader=status_reader,
+        cmdline_reader=cmdline_reader,
+    )
+    if after_cmdline is not None or status_calls != 2 or cmdline_calls != 1:
+        raise AssertionError("identity change after cmdline was not rejected")
+
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="-XX:MaxHeapSize=67108864\n", stderr=""
+    )
+
+    def runner(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return completed
+
+    try:
+        module.query_max_heap(
+            Path("/contract/jcmd"),
+            identity,
+            identity_reader=sequence_reader((same, changed)),
+            runner=runner,
+        )
+    except module.BenchError:
+        pass
+    else:
+        raise AssertionError("identity change after jcmd was not rejected")
+    print("PASS  process identity is rechecked around status, cmdline and jcmd")
+
+
+def jdk_environment_contract(module: ModuleType) -> None:
+    try:
+        module.reject_pollution({"JAVA_HOME": "/tmp/fake-java-home"})
+    except module.BenchError:
+        pass
+    else:
+        raise AssertionError("fake JAVA_HOME was accepted")
+    toolchain = module.resolve_toolchain()
+    env = module.measurement_environment(toolchain)
+    launcher_java = (Path(env["JAVA_HOME"]) / "bin/java").resolve()
+    if launcher_java != toolchain.java:
+        raise AssertionError("measurement JAVA_HOME differs from direct JAR JDK")
+    print("PASS  fake JAVA_HOME is refused and launchers use the resolved JDK")
+
+
+def git(*args: str, cwd: Path) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        check=True,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.strip()
+
+
+def initialize_contract_repo(root: Path) -> str:
+    git("init", "-q", cwd=root)
+    git("config", "user.name", "Contract", cwd=root)
+    git("config", "user.email", "contract@example.invalid", cwd=root)
+    (root / "tracked.txt").write_text("one\n", encoding="ascii")
+    git("add", "tracked.txt", cwd=root)
+    git("commit", "-q", "-m", "Initialize contract repository", cwd=root)
+    return git("rev-parse", "HEAD", cwd=root)
+
+
+def snapshot_drift_contract(module: ModuleType) -> None:
+    measured = valid_baseline(module)
+    options = module.Options("record", 3, 5, 3)
+    cases = ("tracked", "untracked", "head")
+    for case in cases:
+        with tempfile.TemporaryDirectory(prefix=f"selfhost-bench-snapshot-{case}-") as raw:
+            root = Path(raw)
+            expected = initialize_contract_repo(root)
+            baseline_path = root / "baseline.json"
+            baseline_path.write_text("sentinel\n", encoding="ascii")
+            if case == "tracked":
+                (root / "tracked.txt").write_text("changed\n", encoding="ascii")
+            elif case == "untracked":
+                (root / "untracked.txt").write_text("new\n", encoding="ascii")
+            else:
+                (root / "tracked.txt").write_text("two\n", encoding="ascii")
+                git("add", "tracked.txt", cwd=root)
+                git("commit", "-q", "-m", "Advance contract repository", cwd=root)
+            output = io.StringIO()
+            try:
+                with redirect_stdout(output):
+                    module.publish_measurement(
+                        options,
+                        expected,
+                        measured,
+                        None,
+                        root=root,
+                        baseline_path=baseline_path,
+                    )
+            except module.BenchError:
+                pass
+            else:
+                raise AssertionError(f"final snapshot accepted {case} drift")
+            if output.getvalue():
+                raise AssertionError(f"final snapshot printed before refusing {case} drift")
+            if baseline_path.read_text(encoding="ascii") != "sentinel\n":
+                raise AssertionError(f"final snapshot overwrote baseline after {case} drift")
+    print("PASS  final snapshot refuses tracked, untracked and HEAD drift before output")
 
 
 def compile_fixture(toolchain: object, work: Path) -> Path:
@@ -444,7 +860,11 @@ def compile_fixture(toolchain: object, work: Path) -> Path:
     return classes
 
 
-def mutation_contract(module: ModuleType, matrix: dict[tuple[str, str], tuple[str, ...]]) -> None:
+def mutation_contract(
+    module: ModuleType,
+    matrix: dict[tuple[str, str], tuple[str, ...]],
+    mutations: Sequence[str],
+) -> None:
     toolchain = module.resolve_toolchain()
     with tempfile.TemporaryDirectory(prefix="selfhost-bench-contract-") as raw:
         work = Path(raw)
@@ -455,7 +875,7 @@ def mutation_contract(module: ModuleType, matrix: dict[tuple[str, str], tuple[st
         for assertion in ASSERTIONS:
             print(f"PASS  {assertion}")
 
-        for mutation in MUTATIONS:
+        for mutation in mutations:
             source = work / f"{mutation}.py"
             shutil.copy2(BENCH, source)
             subprocess.run(
@@ -470,6 +890,10 @@ def mutation_contract(module: ModuleType, matrix: dict[tuple[str, str], tuple[st
             )
             mutant = load_module(source, "selfhost_bench_mutant_" + mutation.replace("-", "_"))
             observed = process_assertions(mutant, classes, toolchain.java, toolchain.jcmd)
+            if set(observed) != set(ASSERTIONS):
+                raise AssertionError(
+                    f"{mutation} ran {sorted(observed)}, expected {sorted(ASSERTIONS)}"
+                )
             reds = {name for name, passed in observed.items() if not passed}
             expected_reds = {matrix[("red", mutation)][0]}
             if reds != expected_reds:
@@ -511,12 +935,16 @@ def main() -> int:
         raise SystemExit("usage: run.py [--synthetic-only]")
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     module = load_module(BENCH, "selfhost_bench_contract_target")
+    mutations = mutator_keys()
     matrix_text = MATRIX.read_text(encoding="utf-8")
-    matrix_selftest(matrix_text)
-    matrix = parse_matrix(matrix_text)
+    matrix_selftest(matrix_text, mutations)
+    matrix = parse_matrix(matrix_text, mutations)
     schema_contract(module)
     shell_contract()
-    mutation_contract(module, matrix)
+    identity_change_contract(module)
+    jdk_environment_contract(module)
+    snapshot_drift_contract(module)
+    mutation_contract(module, matrix, mutations)
     if not synthetic_only:
         module.load_baseline(ROOT / "scripts/selfhost-bench.baseline")
         print("PASS  tracked compiler-weight baseline satisfies the strict schema")
