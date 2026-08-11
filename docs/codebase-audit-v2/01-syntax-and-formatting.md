@@ -45,18 +45,23 @@
 
 ## SYN-04 — P2 — or-pattern 不是 Pattern，规范承诺也未实现
 
-<!-- audit-anchor: absent selfhost/src/front/ast.dawn | POr( -->
-
-> **当前静态候选（未验证，不改严重度）：** `lower_match` 在 `for p in arm.pats` 内分别
-> lowering 同一 arm 的 guard：`selfhost/src/ir/lower.dawn:2882`、`:2897`。若多个 alternative
-> 对同一 scrutinee 同时匹配，前一个 guard 返回 false 后还会尝试后一个 alternative，effectful
-> guard 因而可能重复求值。这里只记录 R-AUDIT 的静态候选；没有运行探针，也不把本项从冻结
-> P2 提升为 P0/P1。修 `POr` 时必须把“一个 arm 的 guard 最多求值一次”写入 contract。
-
-- **证据：V。** 规范允许 alternatives 绑定同名同类型变量：`docs/spec.md:912`；checker 却拒绝任何带绑定的 alternative：`selfhost/src/check/checker.dawn:6339`。parser 只在 match arm 顶层收集 `|`：`selfhost/src/front/parser.dawn:2252`。
-- **边界：** `A(x) | B(x) -> x` 同时得到“不得绑定”和重复绑定诊断；`Some(0 | 1)` 不能作为嵌套模式。
-- **影响：** 规范与实现直接冲突，且 AST 让正确实现绑定集合合并更困难。
-- **建议：** 增加 `POr(List[Pattern])`；分支各自检查后比较 binding name/type 集合，最后只向 arm scope 引入一次。
+- **后续处置（2026-08-12）：已修。** AST/TAST 分别新增递归的 `POr(List[Pattern])` 与
+  `TPOr(List[TPat])`，`MatchArm`/`TArm` 各只保存一个 pattern。parser 把 `|` 定为 pattern
+  最低优先级并构造扁平 n-ary 节点，构造器、记录、tuple、list 与结构性 `let` 共用这套文法；
+  `(pat)` 只分组，tuple 仍由逗号决定。
+- **绑定契约：** 第一支产生共享环境中的 canonical Sym。后续支在隔离 scope 检查，必须绑定
+  完全相同的名字集合、类型与 mutability，再递归映射到第一支 Sym。绑定集、类型与 mutability
+  三条拒绝各有独立 compiling mutant，mutant 必须完整构建、回答版本，并只让 owner assertion
+  或 owner test 变红。
+- **穷尽性与 `let`：** typed pattern 到 usefulness 的表示新增惰性 `SOr`，只在当前列展开，
+  不预先形成嵌套 alternatives 的笛卡尔积。结构性 `let` 使用同一 usefulness 判定，因而
+  `let true | false = flag` 合法，`let true | true = flag` 仍以可反驳 pattern 拒绝。
+- **运行时：** lowering 为 canonical binders 建共享 slots，并以 selector 按源码顺序选择第一支；
+  guard 与 body 各只 lower 一次。绝对 JVM/native/ASan 语料固定 false guard 不重复副作用、body
+  单次执行、左偏选择、nested/list/constructor alternatives、引用绑定与结构性 `let`。
+- **编辑器：** LSP 递归配对每个 source/typed alternative，每个绑定出现都有 hover，后续定义
+  跳到第一支 canonical binding，completion 按共享 Sym 去重。端到端 LSP 探针使用候选编译器
+  同时固定三项行为。
 
 ## SYN-05 — P2 — pipe 仍绑定旧调用 AST 形状
 

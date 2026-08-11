@@ -19,7 +19,7 @@ use front/ast.{
   ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
   EBreak, EContinue, EComptime, EUnsafePure, EBinary, EUnary, EIf, EMatch,
   EBlock, EHandle,
-  PLit, PBind, PWild, PCtor, PTuple, PList,
+  PLit, PBind, PWild, POr, PCtor, PTuple, PList,
   SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect,
   e_lo, e_hi, module_uses, UseView, module_fns, module_impls, module_traits
@@ -31,7 +31,7 @@ use check/tast.{
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
-  TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
+  TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   x_lo, x_hi, tex_ty
 }
@@ -939,15 +939,11 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
       var i = 0
       for arm in arms {
         let ta = get(tarms, i)
-        var j = 0
-        for p in arm.pats {
-          let tp: Option[TPat] = match ta {
-            Some(a) -> get(a.pats, j)
-            None -> None
-          }
-          q = visit_pat(qc, q, p, tp)
-          j = j + 1
+        let tp: Option[TPat] = match ta {
+          Some(a) -> Some(a.pat)
+          None -> None
         }
+        q = visit_pat(qc, q, arm.pat, tp)
         match arm.guard {
           Some(g) -> {
             let tg: Option[TExpr] = match ta {
@@ -1235,12 +1231,27 @@ fn visit_pat(qc: QCx, q0: Q, pp: Pattern, tp: Option[TPat]) -> Q = {
         Some(TPBind(sid, _)) ->
           match sym_get(qc, sid) {
             Some(sym) -> {
-              q = offer(q, lo, hi, sym.name ++ ": " ++ show_ty(qc, sym.ty), Some((lo, hi)), None)
+              q = offer(q, lo, hi, sym.name ++ ": " ++ show_ty(qc, sym.ty),
+                Some((sym.dlo, sym.dhi)), None)
             }
             None -> ()
           }
         _ -> ()
       }
+    POr(alts) -> {
+      let talts = match tp {
+        Some(TPOr(xs)) -> xs
+        _ -> {
+          let none: List[TPat] = []
+          none
+        }
+      }
+      var i = 0
+      for alt in alts {
+        q = visit_pat(qc, q, alt, get(talts, i))
+        i = i + 1
+      }
+    }
     PCtor(name, args, _, _, nlo, nhi, _, _) -> {
       let resolved: Option[(Int, Int, List[Option[TPat]])] = match tp {
         Some(TPCtor(aid, ci, fps)) -> Some((aid, ci, fps))
@@ -1561,6 +1572,7 @@ fn collect_tpat(
   var acc = acc0
   match tp {
     TPBind(sym, _) -> { acc = collect_sym(qc, acc, sym) }
+    TPOr(alts) -> if len(alts) > 0 { acc = collect_tpat(qc, acc, alts[0]) }
     TPTuple(elems) -> {
       for e in elems { acc = collect_tpat(qc, acc, e) }
     }
@@ -1657,19 +1669,22 @@ fn collect_e(
       }
       var i = 0
       for arm in arms {
-        let (tb, tpats) = match get(tarms, i) {
-          Some(a) -> (Some(a.body), a.pats)
+        let (tb, tpat) = match get(tarms, i) {
+          Some(a) -> (Some(a.body), Some(a.pat))
           None -> {
             let n: Option[TExpr] = None
-            let none: List[TPat] = []
-            (n, none)
+            let np: Option[TPat] = None
+            (n, np)
           }
         }
         # an arm's binders belong to that arm, so unlike the binders in a block
         # they are offered only from inside it -- `before` is between the arm's
         # first token and its last
         if arm.lo < before && before <= arm.hi {
-          for tp in tpats { acc = collect_tpat(qc, acc, tp) }
+          match tpat {
+            Some(tp) -> { acc = collect_tpat(qc, acc, tp) }
+            None -> ()
+          }
         }
         acc = collect_e(qc, acc, arm.body, tb, before)
         i = i + 1

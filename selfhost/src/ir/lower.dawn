@@ -41,7 +41,7 @@ use check/tast.{
   TSPText, TSPInterp,
   BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr, UNeg, UNot, UBnot,
-  TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
+  TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   WitRef, WForward, WConcrete, WApply
 }
@@ -342,17 +342,112 @@ fn read_field(st: LSt, target: CExpr, scrut: Ty, adt: Int, ci: Int, idx: Int) ->
 
 # ---- patterns ----
 
-## A pattern compiles to (test, binds): a short-circuiting condition over
-## projections of `subj`, and the bindings to establish once it holds.
+## A pattern compiles to (setup, test, binds): shared slots that must outlive
+## the test, a short-circuiting condition over projections of `subj`, and the
+## ordinary bindings to establish once it holds.
 ##
 ## The test must short-circuit: a nested projection is only valid after the
 ## enclosing discriminant test passed, so `CAnd` carries a real obligation
 ## on both backends, not just an optimisation.
-fn pat_test(st: LSt, subj: CExpr, p: TPat, t: Ty) -> (LSt, CExpr, List[CStmt]) =
+fn sym_in(xs: List[Int], sid: Int) -> Bool = {
+  for x in xs {
+    if x == sid { return true }
+  }
+  false
+}
+
+fn pat_symbols(p: TPat) -> List[Int] = {
+  var out: List[Int] = []
+  match p {
+    TPBind(sid, _) -> { out = [sid] }
+    TPOr(alts) -> {
+      for alt in alts {
+        for sid in pat_symbols(alt) {
+          if not sym_in(out, sid) { out = out ++ [sid] }
+        }
+      }
+    }
+    TPTuple(elems) -> {
+      for sub in elems {
+        for sid in pat_symbols(sub) {
+          if not sym_in(out, sid) { out = out ++ [sid] }
+        }
+      }
+    }
+    TPList(pre, _, rest_sym, post) -> {
+      for sub in pre ++ post {
+        for sid in pat_symbols(sub) {
+          if not sym_in(out, sid) { out = out ++ [sid] }
+        }
+      }
+      match rest_sym {
+        Some(sid) -> if not sym_in(out, sid) { out = out ++ [sid] }
+        None -> ()
+      }
+    }
+    TPCtor(_, _, fields) -> {
+      for field in fields {
+        match field {
+          Some(sub) -> {
+            for sid in pat_symbols(sub) {
+              if not sym_in(out, sid) { out = out ++ [sid] }
+            }
+          }
+          None -> ()
+        }
+      }
+    }
+    _ -> ()
+  }
+  out
+}
+
+fn pat_test(st: LSt, subj: CExpr, p: TPat, t: Ty) -> (LSt, List[CStmt], CExpr, List[CStmt]) = {
+  if not pat_has_or(p) {
+    let (st1, cond, binds) = pat_test_slots(st, subj, p, t, [])
+    return (st1, [], cond, binds)
+  }
+  let slots = pat_symbols(p)
+  var setup: List[CStmt] = []
+  for sid in slots {
+    let sty = sym_ty(st, sid, TyError)
+    setup = setup ++ [CSLet(sid, sty, zero_of(sty))]
+  }
+  let (st1, cond, binds) = pat_test_slots(st, subj, p, t, slots)
+  (st1, setup, cond, binds)
+}
+
+fn pat_test_slots(
+  st: LSt,
+  subj: CExpr,
+  p: TPat,
+  t: Ty,
+  slots: List[Int]
+) -> (LSt, CExpr, List[CStmt]) =
   match p {
     TPWild -> (st, CBool(true), [])
-    TPBind(sym, _) -> (st, CBool(true), [CSLet(sym, sym_ty(st, sym, t), subj)])
+    TPBind(sym, _) -> {
+      let bind: CStmt = if sym_in(slots, sym) {
+        CSAssign(sym, subj)
+      } else {
+        CSLet(sym, sym_ty(st, sym, t), subj)
+      }
+      (st, CBool(true), [bind])
+    }
     TPLit(v) -> (st, lit_eq(subj, v, t), [])
+    TPOr(alts) -> {
+      let (st1, selector) = fresh_sym(st)
+      var st2 = st1
+      var setup: List[CStmt] = [CSLet(selector, TyBool, CBool(false))]
+      for alt in alts {
+        let (st3, cond, binds) = pat_test_slots(st2, subj, alt, t, slots)
+        st2 = st3
+        let available = CUnary(CNot, CLocal(selector, TyBool), TyBool)
+        let choose = CBlock(binds ++ [CSAssign(selector, CBool(true))], None, TyUnit)
+        setup = setup ++ [CSIf(and_of(available, cond), choose, None)]
+      }
+      (st2, CBlock(setup, Some(CLocal(selector, TyBool)), TyBool), [])
+    }
     TPTuple(elems) -> {
       var st1 = st
       var cond: CExpr = CBool(true)
@@ -365,7 +460,7 @@ fn pat_test(st: LSt, subj: CExpr, p: TPat, t: Ty) -> (LSt, CExpr, List[CStmt]) =
         }
       for sub in elems {
         let et = if i < len(ets) { ets[i] } else { pat_ty(st1, sub) }
-        let (st2, c, bs) = pat_test(st1, CTupleGet(subj, i, et), sub, et)
+        let (st2, c, bs) = pat_test_slots(st1, CTupleGet(subj, i, et), sub, et, slots)
         st1 = st2
         cond = and_of(cond, c)
         binds = binds ++ bs
@@ -383,7 +478,7 @@ fn pat_test(st: LSt, subj: CExpr, p: TPat, t: Ty) -> (LSt, CExpr, List[CStmt]) =
           Some(sub) -> {
             let ft = concrete_field_ty(st1, t, adt, ci, i)
             let proj = read_field(st1, subj, t, adt, ci, i)
-            let (st2, c, bs) = pat_test(st1, proj, sub, ft)
+            let (st2, c, bs) = pat_test_slots(st1, proj, sub, ft, slots)
             st1 = st2
             cond = and_of(cond, c)
             binds = binds ++ bs
@@ -395,7 +490,7 @@ fn pat_test(st: LSt, subj: CExpr, p: TPat, t: Ty) -> (LSt, CExpr, List[CStmt]) =
       (st1, cond, binds)
     }
     TPList(pre, has_rest, rest_sym, post) ->
-      lower_list_pattern(st, subj, t, pre, has_rest, rest_sym, post)
+      lower_list_pattern(st, subj, t, pre, has_rest, rest_sym, post, slots)
   }
 
 ## A list pattern: a length test plus element tests at fixed offsets from
@@ -408,7 +503,8 @@ fn lower_list_pattern(
   pre: List[TPat],
   has_rest: Bool,
   rest_sym: Option[Int],
-  post: List[TPat]
+  post: List[TPat],
+  slots: List[Int]
 ) -> (LSt, CExpr, List[CStmt]) = {
   let et =
     match t {
@@ -429,7 +525,7 @@ fn lower_list_pattern(
   for p in pre {
     let elem = adapt_out(
       CIntrinsic("list_index", [subj, CInt(i)], TyVar("E", 0)), TyVar("E", 0), et)
-    let (st2, c, bs) = pat_test(st1, elem, p, et)
+    let (st2, c, bs) = pat_test_slots(st1, elem, p, et, slots)
     st1 = st2
     cond = and_of(cond, c)
     binds = binds ++ bs
@@ -441,7 +537,7 @@ fn lower_list_pattern(
     let idx = CBinary(CSub, count, CInt(j), TyInt)
     let elem = adapt_out(
       CIntrinsic("list_index", [subj, idx], TyVar("E", 0)), TyVar("E", 0), et)
-    let (st2, c, bs) = pat_test(st1, elem, p, et)
+    let (st2, c, bs) = pat_test_slots(st1, elem, p, et, slots)
     st1 = st2
     cond = and_of(cond, c)
     binds = binds ++ bs
@@ -449,9 +545,13 @@ fn lower_list_pattern(
   }
   match rest_sym {
     Some(rs) -> {
-      binds = binds ++ [CSLet(rs, t,
-        CIntrinsic("list_slice",
-          [subj, CInt(len(pre)), CBinary(CSub, count, CInt(len(post)), TyInt)], t))]
+      let value = CIntrinsic("list_slice",
+        [subj, CInt(len(pre)), CBinary(CSub, count, CInt(len(post)), TyInt)], t)
+      if sym_in(slots, rs) {
+        binds = binds ++ [CSAssign(rs, value)]
+      } else {
+        binds = binds ++ [CSLet(rs, t, value)]
+      }
     }
     None -> ()
   }
@@ -476,9 +576,37 @@ fn pat_ty(st: LSt, p: TPat) -> Ty =
         LStr(_) -> TyString
       }
     TPCtor(adt, _, _) -> TyAdt(adt, [])
+    TPOr(alts) -> if len(alts) > 0 { pat_ty(st, alts[0]) } else { TyError }
     TPTuple(elems) -> TyTuple([])
     TPList(_, _, _, _) -> TyError
     TPWild -> TyError
+  }
+
+fn pat_has_or(p: TPat) -> Bool =
+  match p {
+    TPOr(_) -> true
+    TPTuple(elems) -> {
+      for sub in elems {
+        if pat_has_or(sub) { return true }
+      }
+      false
+    }
+    TPList(pre, _, _, post) -> {
+      for sub in pre ++ post {
+        if pat_has_or(sub) { return true }
+      }
+      false
+    }
+    TPCtor(_, _, fields) -> {
+      for field in fields {
+        match field {
+          Some(sub) -> if pat_has_or(sub) { return true }
+          None -> ()
+        }
+      }
+      false
+    }
+    _ -> false
   }
 
 fn sym_ty(st: LSt, sym: Int, fallback: Ty) -> Ty =
@@ -2880,30 +3008,26 @@ fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty, tl: Bool) -> (LS
   var st5 = st4
   var body: List[CStmt] = []
   for arm in arms {
-    # or-patterns duplicate the arm body, one branch per alternative; Dawn
-    # binds nothing in them beyond what each alternative establishes
-    for p in arm.pats {
-      let (st6, cond, binds) = pat_test(st5, subj, p, sty)
-      st5 = st6
-      let (st7, armb) = lower_expr(LSt { ..st5, tail: tl }, arm.body)
-      st5 = st7
-      let taken =
-        if produces {
-          CBlock([CSAssign(rsym, armb)], Some(CBreak(lid)), TyNever)
-        } else {
-          CBlock([CSDiscard(armb)], Some(CBreak(lid)), TyNever)
+    let (st6, setup, cond, binds) = pat_test(st5, subj, arm.pat, sty)
+    st5 = st6
+    let (st7, armb) = lower_expr(LSt { ..st5, tail: tl }, arm.body)
+    st5 = st7
+    let taken =
+      if produces {
+        CBlock([CSAssign(rsym, armb)], Some(CBreak(lid)), TyNever)
+      } else {
+        CBlock([CSDiscard(armb)], Some(CBreak(lid)), TyNever)
+      }
+    let inner =
+      match arm.guard {
+        Some(g) -> {
+          let (st8, gv) = lower_expr(st5, g)
+          st5 = st8
+          CBlock(binds ++ [CSIf(gv, taken, None)], None, TyUnit)
         }
-      let inner =
-        match arm.guard {
-          Some(g) -> {
-            let (st8, gv) = lower_expr(st5, g)
-            st5 = st8
-            CBlock(binds ++ [CSIf(gv, taken, None)], None, TyUnit)
-          }
-          None -> CBlock(binds, Some(taken), TyNever)
-        }
-      body = body ++ [CSIf(cond, inner, None)]
-    }
+        None -> CBlock(binds, Some(taken), TyNever)
+      }
+    body = body ++ setup ++ [CSIf(cond, inner, None)]
   }
   body = body ++ [CSDiscard(CIntrinsic("panic", [CStr("unreachable match")], TyNever))]
 
@@ -3095,10 +3219,9 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
       let (st1, v) = lower_expr(st, init)
       let it = tex_ty(init)
       let (st2, sym) = fresh_sym(st1)
-      # the checker has already proved the pattern irrefutable, so only the
-      # bindings survive; the test it produces is discarded
-      let (st3, _cond, binds) = pat_test(st2, CLocal(sym, it), pat, it)
-      (st3, [CSLet(sym, it, v)] ++ binds)
+      let (st3, setup, cond, binds) = pat_test(st2, CLocal(sym, it), pat, it)
+      let select: List[CStmt] = if pat_has_or(pat) { [CSDiscard(cond)] } else { [] }
+      (st3, [CSLet(sym, it, v)] ++ setup ++ select ++ binds)
     }
     TSLocalFn(sym, _, params, _, body, captures, _, _) -> {
       # a named local function is a lambda that also binds a name

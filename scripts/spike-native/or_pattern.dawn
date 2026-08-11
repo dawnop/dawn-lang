@@ -1,0 +1,87 @@
+# Or-pattern behavior is absolute, not only a backend differential.
+use std/io
+
+type Choice = Left(value: Int) | Right(value: Int)
+type TextChoice = First(value: String) | Second(value: String)
+
+fn false_guard() -> Bool !io = {
+  io.println("guard false")
+  false
+}
+
+fn true_guard() -> Bool !io = {
+  io.println("guard true")
+  true
+}
+
+fn arm_body() -> Int !io = {
+  io.println("body")
+  9
+}
+
+fn guarded_false(x: Int) -> Int !io =
+  match x {
+    _ | _ if false_guard() -> arm_body()
+    _ -> {
+      io.println("fallback")
+      0
+    }
+  }
+
+fn guarded_true(x: Int) -> Int !io =
+  match x {
+    _ | _ if true_guard() -> arm_body()
+    _ -> 0
+  }
+
+fn left_tuple(pair: (Int, Int)) -> Int =
+  match pair {
+    (x, _) | (_, x) -> x
+  }
+
+fn left_list(xs: List[Int]) -> Int =
+  match xs {
+    [0, x, ..rest] | [x, ..rest] -> x * 10 + len(rest)
+    [] -> -1
+  }
+
+fn from_choice(c: Choice) -> Int =
+  match c {
+    Left(x) | Right(x) -> x
+  }
+
+fn from_text(c: TextChoice) -> String =
+  match c {
+    First(x) | Second(x) -> x
+  }
+
+fn nested(value: Option[List[Int]]) -> Int =
+  match value {
+    Some([0 | 1, x]) -> x
+    Some(_) | None -> -1
+  }
+
+fn nary(value: Int) -> Int =
+  match value {
+    0 | 1 | 2 -> 1
+    _ -> 0
+  }
+
+fn structural(flag: Bool, pair: (Int, Int)) -> Int = {
+  let true | false = flag
+  let (x, _) | (_, x) = pair
+  x
+}
+
+pub fn main() -> Unit !io = {
+  io.println("guarded-false=" ++ to_string(guarded_false(1)))
+  io.println("guarded-true=" ++ to_string(guarded_true(1)))
+  io.println("left-tuple=" ++ to_string(left_tuple((3, 4))))
+  io.println("left-list-first=" ++ to_string(left_list([0, 5, 6])))
+  io.println("left-list-second=" ++ to_string(left_list([5, 6])))
+  io.println("constructor=" ++ to_string(from_choice(Right(7))))
+  io.println("reference=" ++ from_text(Second("ok")))
+  io.println("nested=" ++ to_string(nested(Some([1, 8]))))
+  io.println("nary=" ++ to_string(nary(2)))
+  io.println("structural=" ++ to_string(structural(false, (10, 11))))
+}

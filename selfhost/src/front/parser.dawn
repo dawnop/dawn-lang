@@ -39,7 +39,7 @@ use front/ast.{
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
   EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm,
-  PatArg, Pattern, PLit, PBind, PWild, PCtor, PQual, PTuple, PList,
+  PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
   DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module,
@@ -1198,17 +1198,19 @@ fn let_stmt(p: P, st: St, mutable: Bool) -> PR[Stmt] = {
   let (st1, kw) = adv(p, st)
   # destructuring: let (a, b) = pair / let Point { x, y } = p / let [..all] = xs
   let k = kind_of(p, st1)
-  if k == LPAREN || k == TYPEIDENT || k == LBRACKET {
-    let (st2, pat) = pattern_p(p, st1)?
-    if at_kind(p, st2, COLON) {
-      return Err((st2, perr_h(p, st2, "destructuring lets cannot take a type annotation",
-        "annotate inside the pattern's source instead")))
+  let or_after_name = (k == IDENT || k == UNDERSCORE) && kind_ahead(p, st1, 1) == PIPE
+  if k == LPAREN || k == TYPEIDENT || k == LBRACKET || k == INT || k == CHAR ||
+    k == FLOAT || k == MINUS || k == TRUE || k == FALSE || k == STRING || or_after_name {
+      let (st2, pat) = pattern_p(p, st1)?
+      if at_kind(p, st2, COLON) {
+        return Err((st2, perr_h(p, st2, "destructuring lets cannot take a type annotation",
+          "annotate inside the pattern's source instead")))
+      }
+      let (st3, _) = want(p, st2, EQ, "`=`")?
+      let st4 = skip_nl(p, st3)
+      let (st5, init) = expression(p, st4, false)?
+      return Ok((st5, SLetPat(pat, mutable, init, kw.lo, e_hi(init))))
     }
-    let (st3, _) = want(p, st2, EQ, "`=`")?
-    let st4 = skip_nl(p, st3)
-    let (st5, init) = expression(p, st4, false)?
-    return Ok((st5, SLetPat(pat, mutable, init, kw.lo, e_hi(init))))
-  }
   var st6 = st1
   var name = ""
   if at_kind(p, st6, IDENT) {
@@ -2393,15 +2395,8 @@ fn match_expr(p: P, st: St) -> PR[Expr] = {
 }
 
 fn match_arm(p: P, st: St) -> PR[MatchArm] = {
-  let (st1, first) = pattern_p(p, st)?
-  var pats = [first]
+  let (st1, pat) = pattern_p(p, st)?
   var st2 = st1
-  while at_kind(p, st2, PIPE) {
-    let st3 = skip_nl(p, adv1(p, st2))
-    let (st4, pt) = pattern_p(p, st3)?
-    pats = pats ++ [pt]
-    st2 = st4
-  }
   var guard: Option[Expr] = None
   if at_kind(p, st2, IF) {
     let st5 = adv1(p, st2)
@@ -2412,12 +2407,33 @@ fn match_arm(p: P, st: St) -> PR[MatchArm] = {
   let (st7, _) = want(p, st2, ARROW, "`->`")?
   let st8 = skip_nl(p, st7)
   let (st9, body) = expression(p, st8, false)?
-  Ok((st9, MatchArm { pats: pats, guard: guard, body: body, lo: pat_lo(first), hi: e_hi(body) }))
+  Ok((st9, MatchArm { pat: pat, guard: guard, body: body, lo: pat_lo(pat), hi: e_hi(body) }))
 }
 
 # ---- patterns ----
 
 fn pattern_p(p: P, st: St) -> PR[Pattern] = {
+  let (st1, first) = pattern_atom(p, st)?
+  var st2 = st1
+  var alts: List[Pattern] = match first {
+    POr(xs) -> xs
+    _ -> [first]
+  }
+  var saw_pipe = false
+  while at_kind(p, st2, PIPE) {
+    saw_pipe = true
+    let st3 = skip_nl(p, adv1(p, st2))
+    let (st4, next) = pattern_atom(p, st3)?
+    match next {
+      POr(xs) -> { alts = alts ++ xs }
+      _ -> { alts = alts ++ [next] }
+    }
+    st2 = st4
+  }
+  if saw_pipe || len(alts) > 1 { Ok((st2, POr(alts))) } else { Ok((st2, first)) }
+}
+
+fn pattern_atom(p: P, st: St) -> PR[Pattern] = {
   let t = cur(p, st)
   let k = t.kind
   if k == UNDERSCORE {
@@ -2532,25 +2548,37 @@ fn list_pat(p: P, st: St) -> PR[Pattern] = {
   Ok((st6, PList(pre, has_rest, rest_name, rest_span, post, open.lo, close.hi)))
 }
 
-## (a, b) — tuple pattern, 2 to 8 elements
+## (p) groups a pattern; (a, b) is a 2-to-8-element tuple pattern.
 fn tuple_pat(p: P, st: St) -> PR[Pattern] = {
   let (st1, open) = adv(p, st)
   var st2 = skip_nl(p, st1)
-  var elems: List[Pattern] = []
-  while not at_kind(p, st2, RPAREN) {
-    let (st3, pt) = pattern_p(p, st2)?
-    elems = elems ++ [pt]
-    st2 = skip_nl(p, st3)
-    if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
+  if at_kind(p, st2, RPAREN) {
+    let (st3, close) = adv(p, st2)
+    return Err((st3, pd("a tuple pattern needs at least 2 elements", open.lo, close.hi)))
   }
-  let (st4, close) = want(p, st2, RPAREN, "`)`")?
+  var elems: List[Pattern] = []
+  let (st3, first) = pattern_p(p, st2)?
+  st2 = skip_nl(p, st3)
+  if at_kind(p, st2, RPAREN) {
+    let (st4, _) = adv(p, st2)
+    return Ok((st4, first))
+  }
+  elems = [first]
+  while at_kind(p, st2, COMMA) {
+    st2 = skip_nl(p, adv1(p, st2))
+    if at_kind(p, st2, RPAREN) { break }
+    let (st5, pt) = pattern_p(p, st2)?
+    elems = elems ++ [pt]
+    st2 = skip_nl(p, st5)
+  }
+  let (st6, close) = want(p, st2, RPAREN, "`)`")?
   if len(elems) < 2 {
-    return Err((st4, pd("a tuple pattern needs at least 2 elements", open.lo, close.hi)))
+    return Err((st6, pd("a tuple pattern needs at least 2 elements", open.lo, close.hi)))
   }
   if len(elems) > 8 {
-    return Err((st4, pd("tuples have at most 8 elements", open.lo, close.hi)))
+    return Err((st6, pd("tuples have at most 8 elements", open.lo, close.hi)))
   }
-  Ok((st4, PTuple(elems, open.lo, close.hi)))
+  Ok((st6, PTuple(elems, open.lo, close.hi)))
 }
 
 ## Circle(r) / Rect(w: w, ..) / bare nullary Point / record Point { x, y: 0, .. }

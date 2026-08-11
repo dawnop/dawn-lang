@@ -20,7 +20,7 @@ use front/ast.{
   BinOp, UnOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt,
   OpLe, OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   OpNeg, OpNot, OpBnot,
-  Pattern, PLit, PBind, PWild, PCtor, PQual, PTuple, PList, PatArg, MatchArm,
+  Pattern, PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList, PatArg, MatchArm,
   Arg, pos_arg, arg_exprs, first_named,
   SPText, SPInterp, EFloat, EStr, pat_lo, pat_hi, e_lo, e_hi,
   EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
@@ -37,7 +37,7 @@ use check/tast.{
   TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr,
   TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
-  TPat, TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
+  TPat, TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   TFun, TConst, TModule, WitRef, WForward, WConcrete, WApply
 }
@@ -62,7 +62,7 @@ use check/types.{
 }
 use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, jsig_refused}
 use check/exhaustive.{
-  LitV, LInt, LFloat, LBool, LStr, SPat, SWild, SCtor, SLit, STuple, SList,
+  LitV, LInt, LFloat, LBool, LStr, SPat, SWild, SOr, SCtor, SLit, STuple, SList,
   useful, missing_list_patterns
 }
 use check/cx.{
@@ -1834,6 +1834,12 @@ test "field access follows record shape with substitution" {
 pub fn binds_anything(p: Pattern) -> Bool =
   match p {
     PBind(_, _, _) -> true
+    POr(alts) -> {
+      for alt in alts {
+        if binds_anything(alt) { return true }
+      }
+      false
+    }
     PCtor(_, pargs, _, _, _, _, _, _) -> {
       for a in pargs {
         if binds_anything(a.pat) { return true }
@@ -1865,15 +1871,15 @@ pub fn binds_anything(p: Pattern) -> Bool =
     _ -> false
   }
 
-## First refutable subpattern's span, or None if `p` always matches (spec §5.2).
-pub fn refutable_part(cx: Cx, p: Pattern) -> Option[(Int, Int)] =
+fn refutable_span(cx: Cx, p: Pattern) -> Option[(Int, Int)] =
   match p {
     PWild(_, _) -> None
     PBind(_, _, _) -> None
     PLit(_, lo, hi) -> Some((lo, hi))
+    POr(_) -> Some((pat_lo(p), pat_hi(p)))
     PTuple(elems, _, _) -> {
       for e in elems {
-        match refutable_part(cx, e) {
+        match refutable_span(cx, e) {
           Some(s) -> return Some(s)
           None -> ()
         }
@@ -1892,7 +1898,7 @@ pub fn refutable_part(cx: Cx, p: Pattern) -> Option[(Int, Int)] =
         None -> ()
       }
       for a in pargs {
-        match refutable_part(cx, a.pat) {
+        match refutable_span(cx, a.pat) {
           Some(s) -> return Some(s)
           None -> ()
         }
@@ -1908,7 +1914,7 @@ pub fn refutable_part(cx: Cx, p: Pattern) -> Option[(Int, Int)] =
         None -> ()
       }
       for a in pargs {
-        match refutable_part(cx, a.pat) {
+        match refutable_span(cx, a.pat) {
           Some(s) -> return Some(s)
           None -> ()
         }
@@ -1926,6 +1932,7 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
       let (cx1, sym) = declare(cx, name, scrut, mutable, lo, hi)
       (cx1, TPBind(sym, name))
     }
+    POr(alts) -> check_or_pattern(cx, alts, scrut, mutable)
     PLit(lit, lo, hi) -> check_lit_pattern(cx, lit, scrut, lo, hi)
     PTuple(elems, lo, hi) -> {
       let matches2 = match scrut {
@@ -2048,6 +2055,159 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
       }
     }
   }
+
+type PatBind = { name: String, sym: Int, ty: Ty, mutable: Bool, lo: Int, hi: Int }
+
+fn typed_binds(cx: Cx, p: TPat) -> List[PatBind] = {
+  var out: List[PatBind] = []
+  match p {
+    TPBind(sid, _) -> {
+      let s = sym_of(cx, sid)
+      out = [PatBind {
+        name: s.name,
+        sym: sid,
+        ty: s.ty,
+        mutable: s.mutable,
+        lo: s.dlo,
+        hi: s.dhi
+      }]
+    }
+    TPOr(alts) -> if len(alts) > 0 { out = typed_binds(cx, alts[0]) }
+    TPTuple(elems) -> {
+      for sub in elems { out = out ++ typed_binds(cx, sub) }
+    }
+    TPList(pre, _, rest_sym, post) -> {
+      for sub in pre { out = out ++ typed_binds(cx, sub) }
+      match rest_sym {
+        Some(sid) -> {
+          let s = sym_of(cx, sid)
+          out = out ++ [PatBind {
+            name: s.name,
+            sym: sid,
+            ty: s.ty,
+            mutable: s.mutable,
+            lo: s.dlo,
+            hi: s.dhi
+          }]
+        }
+        None -> ()
+      }
+      for sub in post { out = out ++ typed_binds(cx, sub) }
+    }
+    TPCtor(_, _, fields) -> {
+      for field in fields {
+        match field {
+          Some(sub) -> { out = out ++ typed_binds(cx, sub) }
+          None -> ()
+        }
+      }
+    }
+    _ -> ()
+  }
+  out
+}
+
+fn pat_bind_named(binds: List[PatBind], name: String) -> Option[PatBind] = {
+  for bind in binds {
+    if bind.name == name { return Some(bind) }
+  }
+  None
+}
+
+fn check_or_bindings(
+  cx: Cx,
+  canonical: List[PatBind],
+  actual: List[PatBind],
+  alt: Pattern
+) -> Cx = {
+  var cx1 = cx
+  for want in canonical {
+    match pat_bind_named(actual, want.name) {
+      None -> {
+        cx1 = cerr_h(cx1, "or-pattern alternative does not bind `" ++ want.name ++ "`",
+          pat_lo(alt), pat_hi(alt), "every alternative must bind the same names as the first")
+      }
+      Some(got) -> {
+        if got.ty != want.ty {
+          cx1 = cerr_h(cx1, "or-pattern binding `" ++ want.name ++ "` has type " ++
+              ty_show(cx1.adts, got.ty) ++ ", but the first alternative binds " ++
+              ty_show(cx1.adts, want.ty), got.lo, got.hi,
+            "bind `" ++ want.name ++ "` at the same type in every alternative")
+        }
+        if got.mutable != want.mutable {
+          cx1 = cerr_h(cx1, "or-pattern binding `" ++ want.name ++
+              "` does not have the first alternative's mutability", got.lo, got.hi,
+            "bind `" ++ want.name ++ "` with the same mutability in every alternative")
+        }
+      }
+    }
+  }
+  for got in actual {
+    if pat_bind_named(canonical, got.name) == None {
+      cx1 = cerr_h(cx1, "or-pattern alternative binds extra name `" ++ got.name ++ "`",
+        got.lo, got.hi, "every alternative must bind the same names as the first")
+    }
+  }
+  cx1
+}
+
+fn remap_or_binds(cx: Cx, p: TPat, canonical: List[PatBind]) -> TPat =
+  match p {
+    TPBind(sid, name) -> match pat_bind_named(canonical, name) {
+      Some(bind) -> TPBind(bind.sym, name)
+      None -> TPBind(sid, name)
+    }
+    TPOr(alts) -> TPOr(map(alts, alt => remap_or_binds(cx, alt, canonical)))
+    TPTuple(elems) -> TPTuple(map(elems, sub => remap_or_binds(cx, sub, canonical)))
+    TPList(pre, has_rest, rest_sym, post) -> {
+      let mapped_rest: Option[Int] = match rest_sym {
+        Some(sid) -> {
+          let name = sym_of(cx, sid).name
+          match pat_bind_named(canonical, name) {
+            Some(bind) -> Some(bind.sym)
+            None -> Some(sid)
+          }
+        }
+        None -> None
+      }
+      TPList(
+        map(pre, sub => remap_or_binds(cx, sub, canonical)),
+        has_rest,
+        mapped_rest,
+        map(post, sub => remap_or_binds(cx, sub, canonical))
+      )
+    }
+    TPCtor(aid, ci, fields) -> {
+      var mapped: List[Option[TPat]] = []
+      for field in fields {
+        mapped = mapped ++ [match field {
+          Some(sub) -> Some(remap_or_binds(cx, sub, canonical))
+          None -> None
+        }]
+      }
+      TPCtor(aid, ci, mapped)
+    }
+    _ -> p
+  }
+
+fn check_or_pattern(cx: Cx, alts: List[Pattern], scrut: Ty, mutable: Bool) -> (Cx, TPat) = {
+  if len(alts) == 0 { return (cx, TPOr([])) }
+  let (cx0, first) = check_pattern(cx, alts[0], scrut, mutable)
+  var cx1 = cx0
+  let canonical = typed_binds(cx1, first)
+  var typed = [first]
+  var i = 1
+  while i < len(alts) {
+    let isolated = push_scope(cx1)
+    let (cxa, raw) = check_pattern(isolated, alts[i], scrut, mutable)
+    cx1 = pop_scope(cxa)
+    let actual = typed_binds(cx1, raw)
+    cx1 = check_or_bindings(cx1, canonical, actual, alts[i])
+    typed = typed ++ [remap_or_binds(cx1, raw, canonical)]
+    i = i + 1
+  }
+  (cx1, TPOr(typed))
+}
 
 fn check_lit_pattern(cx: Cx, lit: Expr, scrut: Ty, lo: Int, hi: Int) -> (Cx, TPat) = {
   # the literal's own type; string patterns are interpolation-free (parser ensured)
@@ -2268,12 +2428,77 @@ test "patterns bind, refute, and lower" {
     _ -> { assert false }
   }
   # refutability: Some(x) is refutable, (a, b) is not, [x] is
-  assert refutable_part(cx, p) != None
+  assert refutable_span(cx, p) != None
   let tup = PTuple([PBind("a", 0, 1), PBind("b", 3, 4)], 0, 5)
-  assert refutable_part(cx, tup) == None
-  assert refutable_part(cx, PList([PWild(1, 2)], false, None, None, [], 0, 3)) != None
+  assert refutable_span(cx, tup) == None
+  assert refutable_span(cx, PList([PWild(1, 2)], false, None, None, [], 0, 3)) != None
   assert binds_anything(p)
   assert not binds_anything(PWild(0, 1))
+}
+
+test "or-patterns share the first symbol" {
+  let p = POr([
+    PTuple([PBind("x", 1, 2), PWild(3, 4)], 0, 5),
+    PTuple([PWild(7, 8), PBind("x", 9, 10)], 6, 11)
+  ])
+  let (cx1, tp) = check_pattern(push_scope(test_cx()), p, TyTuple([TyInt, TyInt]), false)
+  assert len(cx1.diags) == 0
+  match tp {
+    TPOr(alts) -> {
+      assert len(alts) == 2
+      match alts[0] {
+        TPTuple(first) -> match first[0] {
+          TPBind(first_sym, _) -> match alts[1] {
+            TPTuple(second) -> match second[1] {
+              TPBind(second_sym, _) -> { assert first_sym == second_sym }
+              _ -> { assert false }
+            }
+            _ -> { assert false }
+          }
+          _ -> { assert false }
+        }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+}
+
+test "or-patterns reject binding type mismatches" {
+  let canonical = [
+    PatBind { name: "x", sym: 1, ty: TyInt, mutable: false, lo: 1, hi: 2 }
+  ]
+  let actual = [
+    PatBind { name: "x", sym: 2, ty: TyString, mutable: false, lo: 3, hi: 4 }
+  ]
+  let cx = check_or_bindings(test_cx(), canonical, actual, PWild(5, 6))
+  assert len(cx.diags) == 1
+  assert str.contains(cx.diags[0].msg, "binding `x` has type String")
+}
+
+test "or-patterns reject binding mutability mismatches" {
+  let canonical = [
+    PatBind { name: "x", sym: 1, ty: TyInt, mutable: false, lo: 1, hi: 2 }
+  ]
+  let actual = [
+    PatBind { name: "x", sym: 2, ty: TyInt, mutable: true, lo: 3, hi: 4 }
+  ]
+  let cx = check_or_bindings(test_cx(), canonical, actual, PWild(5, 6))
+  assert len(cx.diags) == 1
+  assert str.contains(cx.diags[0].msg, "does not have the first alternative's mutability")
+}
+
+test "or-patterns reject binding-set mismatches" {
+  let canonical = [
+    PatBind { name: "missing", sym: 1, ty: TyBool, mutable: false, lo: 1, hi: 2 }
+  ]
+  let actual = [
+    PatBind { name: "extra", sym: 2, ty: TyBool, mutable: false, lo: 3, hi: 4 }
+  ]
+  let cx = check_or_bindings(test_cx(), canonical, actual, PWild(5, 6))
+  assert len(cx.diags) == 2
+  assert cx.diags[0].msg == "or-pattern alternative does not bind `missing`"
+  assert cx.diags[1].msg == "or-pattern alternative binds extra name `extra`"
 }
 
 test "ctor pattern field discipline" {
@@ -2324,6 +2549,11 @@ fn rs_params(sc: RefScope, ps: List[LambdaParam]) -> RefScope = {
 fn rs_pattern(sc: RefScope, p: Pattern) -> RefScope =
   match p {
     PBind(name, _, _) -> rs_bind(sc, name)
+    POr(alts) -> {
+      var o = sc
+      for alt in alts { o = rs_pattern(o, alt) }
+      o
+    }
     PCtor(_, args, _, _, _, _, _, _) -> rs_pargs(sc, args)
     PQual(_, _, args, _, _, _, _, _, _) -> rs_pargs(sc, args)
     PTuple(elems, _, _) -> {
@@ -2408,8 +2638,7 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
     EMatch(scrut, arms, _, _) -> {
       var o = name_refs(scrut, out, sc)
       for arm in arms {
-        var asc = sc
-        for p in arm.pats { asc = rs_pattern(asc, p) }
+        let asc = rs_pattern(sc, arm.pat)
         match arm.guard {
           Some(g) -> { o = name_refs(g, o, asc) }
           None -> ()
@@ -2520,8 +2749,8 @@ test "a bound name is not an edge to the top-level function it shadows" {
   # b => { let c = 1; match d { Some(e) -> b(c, e) } } — every lowercase
   # name here is bound, so nothing but the scrutinee `d` comes out (ARC-01).
   let arm = MatchArm {
-    pats: [PCtor("Some", [PatArg { name: None, nlo: 0, nhi: 0, pat: PBind("e", 0, 1) }],
-      false, true, 0, 1, 0, 1)],
+    pat: PCtor("Some", [PatArg { name: None, nlo: 0, nhi: 0, pat: PBind("e", 0, 1) }],
+      false, true, 0, 1, 0, 1),
     guard: None,
     body: EApply(EVar("b", 0, 1), [pos_arg(EVar("c", 0, 1)), pos_arg(EVar("e", 0, 1))], 0, 1),
     lo: 0,
@@ -4748,16 +4977,17 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
         cx1 = cerr(cx1, "cannot bind Never (this expression does not return)", e_lo(init), e_hi(init))
         it = TyError
       }
-      match refutable_part(cx1, pat) {
-        Some(sp) -> {
-          let (plo, phi) = sp
-          cx1 = cerr_h(cx1, "this pattern does not always match, so it cannot be used in a let",
-            plo, phi, "use match to handle the other cases")
-        }
-        None -> ()
-      }
       let (cxb, tp) = check_pattern(cx1, pat, it, mutable)
-      (cxb, TSLetPat(tp, ix, lo, hi))
+      cx1 = cxb
+      if not is_errorish(it) && useful(cx1.adts, [[to_spat(tp)]], [SWild], [it]) {
+        let (plo, phi) = match refutable_span(cx1, pat) {
+          Some(sp) -> sp
+          None -> (pat_lo(pat), pat_hi(pat))
+        }
+        cx1 = cerr_h(cx1, "this pattern does not always match, so it cannot be used in a let",
+          plo, phi, "use match to handle the other cases")
+      }
+      (cx1, TSLetPat(tp, ix, lo, hi))
     }
     SAssign(name, value, nlo, nhi, lo, hi) -> {
       var cx1 = cx
@@ -7039,6 +7269,7 @@ fn to_spat(p: TPat) -> SPat =
     TPWild -> SWild
     TPBind(_, _) -> SWild
     TPLit(v) -> SLit(v)
+    TPOr(alts) -> SOr(map(alts, alt => to_spat(alt)))
     TPTuple(elems) -> {
       var subs: List[SPat] = []
       for s in elems { subs = subs ++ [to_spat(s)] }
@@ -7112,20 +7343,8 @@ fn check_match(
   for idx in order {
     let arm = arms[idx]
     cx1 = push_scope(cx1)
-    if len(arm.pats) > 1 {
-      # or-patterns must not bind: each alternative would need identical bindings
-      for p in arm.pats {
-        if binds_anything(p) {
-          cx1 = cerr(cx1, "or-pattern alternatives cannot introduce bindings", pat_lo(p), pat_hi(p))
-        }
-      }
-    }
-    var tpats: List[TPat] = []
-    for p in arm.pats {
-      let (cxa, tp) = check_pattern(cx1, p, st, false)
-      cx1 = cxa
-      tpats = tpats ++ [tp]
-    }
+    let (cxa, tpat) = check_pattern(cx1, arm.pat, st, false)
+    cx1 = cxa
     var tguard: Option[TExpr] = None
     match arm.guard {
       Some(g) -> {
@@ -7151,7 +7370,7 @@ fn check_match(
     result = unified
     cx1 = pop_scope(cx1)
     slots = list.take(slots, idx) ++
-      [Some(TArm { pats: tpats, guard: tguard, body: bx })] ++ list.drop(slots, idx + 1)
+      [Some(TArm { pat: tpat, guard: tguard, body: bx })] ++ list.drop(slots, idx + 1)
   }
   var tarms: List[TArm] = []
   for s in slots {
@@ -7171,7 +7390,7 @@ fn check_match(
       }
       if unguarded {
         let ta = tarms[ai]
-        for tp in ta.pats { rows = rows ++ [[to_spat(tp)]] }
+        rows = rows ++ [[to_spat(ta.pat)]]
       }
       ai = ai + 1
     }
@@ -7536,8 +7755,8 @@ test "match checks arms, unifies results and demands exhaustiveness" {
   cx = push_scope(cx)
   let (cxo, _) = declare(cx, "o", opt_ty(TyInt), false, 0, 1)
   let arm = MatchArm {
-    pats: [PCtor("Some", [PatArg { name: None, nlo: 10, nhi: 11, pat: PBind("v", 10, 11) }],
-      false, true, 5, 9, 5, 12)],
+    pat: PCtor("Some", [PatArg { name: None, nlo: 10, nhi: 11, pat: PBind("v", 10, 11) }],
+      false, true, 5, 9, 5, 12),
     guard: None,
     body: EVar("v", 16, 17),
     lo: 5,
@@ -7548,14 +7767,14 @@ test "match checks arms, unifies results and demands exhaustiveness" {
   assert t == TyInt
   assert cx1.diags[0].msg == "non-exhaustive match, missing: None"
   # a wildcard arm completes it
-  let arm2 = MatchArm { pats: [PWild(20, 21)], guard: None, body: EInt(0, 25, 26), lo: 20, hi: 26 }
+  let arm2 = MatchArm { pat: PWild(20, 21), guard: None, body: EInt(0, 25, 26), lo: 20, hi: 26 }
   let m2 = EMatch(EVar("o", 0, 1), [arm, arm2], 0, 27)
   let (cx2, t2, _) = check_expr(cxo, m2, no_expected())
   assert t2 == TyInt
   assert len(cx2.diags) == 0
   # a guarded arm does not count toward exhaustiveness
   let arm3 = MatchArm {
-    pats: [PWild(20, 21)],
+    pat: PWild(20, 21),
     guard: Some(EBool(true, 22, 26)),
     body: EInt(0, 30, 31),
     lo: 20,

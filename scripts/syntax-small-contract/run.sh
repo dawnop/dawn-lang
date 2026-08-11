@@ -348,3 +348,5 @@ if ! assertion_failed_exactly "$boundary_mutant/assert.out" \
   fail "drop-builtin-alias-boundary mutant missed its owning assertion"
 fi
 echo "PASS  drop-builtin-alias-boundary compiles, then turns only nominal boundaries red"
+
+"$root/scripts/pattern-or-contract/run.sh"

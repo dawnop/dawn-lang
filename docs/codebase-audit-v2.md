@@ -103,9 +103,9 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（78）
+#### 当前 fixed（79）
 
-- 语法（16）：`SYN-01`–`SYN-03`、`SYN-05`–`SYN-12`、`SYN-14`–`SYN-16`、`SYN-18`、`SYN-19`。
+- 语法（17）：`SYN-01`–`SYN-12`、`SYN-14`–`SYN-16`、`SYN-18`、`SYN-19`。
 - 语义（12）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-11`–`SEM-15`、`SEM-17`、`SEM-18`。
 - 架构（6）：`ARC-03`–`ARC-06`、`ARC-12`、`ARC-13`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
@@ -117,9 +117,9 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 架构（3）：`ARC-01`、`ARC-02`、`ARC-11`。
 - 库（1）：`LIB-16`。
 
-#### 当前 open（15）
+#### 当前 open（14）
 
-- 语法（3）：`SYN-04`、`SYN-13`、`SYN-17`。
+- 语法（2）：`SYN-13`、`SYN-17`。
 - 语义（4）：`SEM-04`、`SEM-09`、`SEM-10`、`SEM-16`。
 - 架构（4）：`ARC-07`–`ARC-10`。
 - 库（4）：`LIB-06`、`LIB-13`、`LIB-18`、`LIB-19`。
@@ -128,8 +128,8 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**78 fixed + 4 partial + 15 open + 2 retracted = 99**。逐专题矩阵：
-语法 **16/0/3/0**、语义 **12/0/4/2**、架构 **6/3/4/0**、工具链 **17/0/0/0**、
+当前计数自检：**79 fixed + 4 partial + 14 open + 2 retracted = 99**。逐专题矩阵：
+语法 **17/0/2/0**、语义 **12/0/4/2**、架构 **6/3/4/0**、工具链 **17/0/0/0**、
 库 **14/1/4/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
@@ -155,6 +155,9 @@ non-fallthrough seam，并由双后端、classfile、checker、LSP 与 doc 合�
 随后新增 `SEM-18` 并直接记 fixed：range `for` 的共享 Core 绑定改为 lower-first，规范明确
 两端按源码顺序、各恰好一次且都在循环前求值；绝对双后端 expectation、Core 结构 control
 与恢复 upper-first 的 compiling mutant 共同固定修复边界。它同样不进入冻结历史或 P1 索引。
+随后 `SYN-04` open → fixed：or-pattern 成为递归、扁平的 n-ary `Pattern`，各 alternative
+共享第一支的 canonical binding；usefulness、结构性 `let`、单次 guard/body lowering 与 LSP
+查询均走同一 typed pattern。绝对双后端语料和三条 compiling mutant 固定运行时与拒绝边界。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -178,11 +181,10 @@ non-fallthrough seam，并由双后端、classfile、checker、LSP 与 doc 合�
 
 | ID | 静态候选 | 当前口径 |
 |---|---|---|
-| `SYN-04` | `lower_match` 在每个 or-pattern alternative 内 lowering 同一 guard；多个 alternative 同时匹配时，effectful guard 可能重复求值 | 只记录可能性，未做运行探针；不把它从冻结 P2 改判为 P0/P1。 |
 | `SEM-04` | comptime Cursor 使用 code-point index，JVM 使用 UTF-16 offset，native 使用 UTF-8 byte offset；折叠出的 Cursor 偏移可能跨执行模型失配 | 只记录静态跨后端候选，未验证可达程序；不另计严重度。 |
 | `LIB-18` | streaming body 的 `transferTo` 正常 EOF 与异常均没有长度/结果契约；上游 clean truncation 可能被当作成功结束 | 只记录静态协议候选，未构造网络探针；不另计严重度。 |
 
-这三项是当前“先记账、暂不验证”的最高风险候选；它们不改变 v0.60 冻结严重度表，也不在
+这两项是当前“先记账、暂不验证”的最高风险候选；它们不改变 v0.60 冻结严重度表，也不在
 99 项之外新增 ID。
 
 ### 4.2 冻结 v0.60 P0 候选（`SEM-01` 当前已修）
@@ -355,7 +357,7 @@ partial 为 `ARC-01`、`ARC-02`。
 3. **把 `SEM-04` 留给维护者裁决：** Cursor 是携带 owner 的值还是 generative identity，以及
    不同 owner 的 Eq/Ord 是否拒绝；裁决前只保留静态候选，不写 workaround。
 4. **低耦合自治批：** `SYN-11`、B200-1B 后续、`SYN-09`、`SYN-05` 与 `SEM-07` 均已关账；
-   下一项按依赖推进 `SYN-04 → SYN-13`；`SYN-17` 只留在 D/P3 关键字预算设计队列。
+   下一项按依赖推进 `SYN-13`；`SYN-17` 只留在 D/P3 关键字预算设计队列。
 5. **类型化阶段产品：** `ARC-07` 后接 `ARC-08`，再以稳定 lowered identity 推进
    `ARC-11B`；不把 `ARC-09/10` 的 HOLD 项混入自治队列。`ARC-12` 已单独收口
    （模块级 `LowerCache` + 贯穿的 lifted-lambda 计数器），它给 `ARC-11B` 提供的是

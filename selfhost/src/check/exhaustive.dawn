@@ -19,6 +19,7 @@ pub type LitV =
 
 pub type SPat =
   | SWild
+  | SOr(alts: List[SPat])
   | SCtor(adt: Int, ci: Int, subs: List[SPat])
   | SLit(v: LitV)
   | STuple(subs: List[SPat])
@@ -33,6 +34,25 @@ fn wilds(n: Int) -> List[SPat] = {
 }
 
 fn ctor_at(adts: Adts, adt: Int, ci: Int) -> CtorI = adt_of(adts, adt).ctors[ci]
+
+fn expand_head_row(row: List[SPat]) -> List[List[SPat]] = {
+  if len(row) == 0 { return [row] }
+  match row[0] {
+    SOr(alts) -> {
+      var out: List[List[SPat]] = []
+      let tail = list.drop(row, 1)
+      for alt in alts { out = out ++ expand_head_row([alt] ++ tail) }
+      out
+    }
+    _ -> [row]
+  }
+}
+
+fn expand_head_ors(matrix: List[List[SPat]]) -> List[List[SPat]] = {
+  var out: List[List[SPat]] = []
+  for row in matrix { out = out ++ expand_head_row(row) }
+  out
+}
 
 ## Constructor field types with the column's type arguments substituted in.
 fn inst_fields(adts: Adts, adt: Int, ci: Int, column: Ty) -> List[Ty] = {
@@ -67,21 +87,28 @@ fn inst_fields(adts: Adts, adt: Int, ci: Int, column: Ty) -> List[Ty] = {
 
 ## Would a value matching `q` slip through every row of `matrix`?
 pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[Ty]) -> Bool = {
-  if len(q) == 0 { return len(matrix) == 0 }
+  let expanded = expand_head_ors(matrix)
+  if len(q) == 0 { return len(expanded) == 0 }
   let t = types_[0]
   let rest_q = list.drop(q, 1)
   let rest_t = list.drop(types_, 1)
   match q[0] {
+    SOr(alts) -> {
+      for alt in alts {
+        if useful(adts, expanded, [alt] ++ rest_q, types_) { return true }
+      }
+      false
+    }
     SCtor(adt, ci, subs) ->
-      useful(adts, spec_ctor(adts, matrix, adt, ci), subs ++ rest_q,
+      useful(adts, spec_ctor(adts, expanded, adt, ci), subs ++ rest_q,
         inst_fields(adts, adt, ci, t) ++ rest_t)
-    SLit(v) -> useful(adts, spec_lit(matrix, v), rest_q, rest_t)
+    SLit(v) -> useful(adts, spec_lit(expanded, v), rest_q, rest_t)
     STuple(subs) -> {
       let elem_tys = match t {
         TyTuple(elems) -> if len(elems) == 0 { err_tys(len(subs)) } else { elems }
         _ -> err_tys(len(subs))
       }
-      useful(adts, spec_tuple(matrix, len(subs)), subs ++ rest_q, elem_tys ++ rest_t)
+      useful(adts, spec_tuple(expanded, len(subs)), subs ++ rest_q, elem_tys ++ rest_t)
     }
     SList(pre, has_rest, post) -> {
       let elem = match t {
@@ -90,16 +117,16 @@ pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[
       }
       if not has_rest {
         let n = len(pre)
-        useful(adts, spec_list(matrix, n), pre ++ rest_q, elem_tys_of(elem, n) ++ rest_t)
+        useful(adts, spec_list(expanded, n), pre ++ rest_q, elem_tys_of(elem, n) ++ rest_t)
       } else {
         # a rest pattern covers every length >= its arity; behaviour is uniform
         # beyond the longest pattern in play, so a finite probe suffices
         let arity = slist_arity(pre, post)
-        let bound = list_len_bound(matrix, Some(q[0]))
+        let bound = list_len_bound(expanded, Some(q[0]))
         var found = false
         var l = arity
         while l <= bound {
-          if useful(adts, spec_list(matrix, l),
+          if useful(adts, spec_list(expanded, l),
             pre ++ wilds(l - arity) ++ post ++ rest_q, elem_tys_of(elem, l) ++ rest_t) {
             found = true
             break
@@ -113,11 +140,11 @@ pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[
       # lists: probe every relevant length (same uniformity argument as above)
       match t {
         TyList(elem) -> {
-          let bound = list_len_bound(matrix, None)
+          let bound = list_len_bound(expanded, None)
           var found = false
           var l = 0
           while l <= bound {
-            if useful(adts, spec_list(matrix, l), wilds(l) ++ rest_q,
+            if useful(adts, spec_list(expanded, l), wilds(l) ++ rest_q,
               elem_tys_of(elem, l) ++ rest_t) {
               found = true
               break
@@ -128,17 +155,17 @@ pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[
         }
         # a tuple is its own single complete constructor
         TyTuple(elems) ->
-          return useful(adts, spec_tuple(matrix, len(elems)), wilds(len(elems)) ++ rest_q,
+          return useful(adts, spec_tuple(expanded, len(elems)), wilds(len(elems)) ++ rest_q,
             elems ++ rest_t)
         TyAdt(aid, _) -> {
           # if the matrix heads form a complete signature, a wildcard is useful
           # iff it is useful under some constructor; otherwise take the default matrix
           let a = adt_of(adts, aid)
-          if heads_complete(matrix, aid, len(a.ctors)) {
+          if heads_complete(expanded, aid, len(a.ctors)) {
             var i = 0
             var found = false
             for c in a.ctors {
-              if useful(adts, spec_ctor(adts, matrix, aid, i),
+              if useful(adts, spec_ctor(adts, expanded, aid, i),
                 wilds(len(c.fields)) ++ rest_q, inst_fields(adts, aid, i, t) ++ rest_t) {
                 found = true
                 break
@@ -150,15 +177,15 @@ pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[
         }
         _ ->
           if t == TyBool {
-            if lit_has(matrix, LBool(true)) && lit_has(matrix, LBool(false)) {
-              return useful(adts, spec_lit(matrix, LBool(true)), rest_q, rest_t) ||
-                useful(adts, spec_lit(matrix, LBool(false)), rest_q, rest_t)
+            if lit_has(expanded, LBool(true)) && lit_has(expanded, LBool(false)) {
+              return useful(adts, spec_lit(expanded, LBool(true)), rest_q, rest_t) ||
+                useful(adts, spec_lit(expanded, LBool(false)), rest_q, rest_t)
             }
           }
       }
       # Int/String literals can never be complete
       var defaulted: List[List[SPat]] = []
-      for row in matrix {
+      for row in expanded {
         match row[0] {
           SWild -> { defaulted = defaulted ++ [list.drop(row, 1)] }
           _ -> ()
@@ -325,6 +352,27 @@ test "bool literals complete a match" {
   let rows = [[SLit(LBool(true))], [SLit(LBool(false))]]
   assert not useful(adts, rows, [SWild], [TyBool])
   assert useful(adts, [[SLit(LBool(true))]], [SWild], [TyBool])
+}
+
+test "or-patterns stay structured through constructors, tuples, and lists" {
+  let adts = prelude_adts()
+  let bools = SOr([SLit(LBool(true)), SLit(LBool(false))])
+  assert not useful(adts, [[bools]], [SWild], [TyBool])
+
+  let option_row = [SOr([
+    SCtor(OPTION_ID, 0, [bools]),
+    SCtor(OPTION_ID, 1, [])
+  ])]
+  assert not useful(adts, [option_row], [SWild], [opt_ty(TyBool)])
+
+  let tuple_row = [STuple([bools, SWild])]
+  assert not useful(adts, [tuple_row], [SWild], [TyTuple([TyBool, TyString])])
+
+  let list_row = [SOr([
+    SList([], false, []),
+    SList([SWild], true, [])
+  ])]
+  assert not useful(adts, [list_row], [SWild], [TyList(TyInt)])
 }
 
 test "int literals are never complete" {

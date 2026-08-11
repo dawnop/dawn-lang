@@ -1111,13 +1111,24 @@ match shape {
 | 或 | `0 \| 1 \| 2` | 任一匹配（各分支绑定必须一致） |
 | 守卫 | `pat if cond` | 模式匹配且守卫为真 |
 
+`|` 是 pattern 的最低优先级，递归出现在构造器、记录、元组与列表 pattern 内，并按
+源码顺序收集为扁平的 n-ary or-pattern。`(pat)` 只用于分组，tuple pattern 仍需要逗号。
+运行时选择第一个匹配的 alternative，选中后不在同一 or-pattern 内回溯。match 臂的
+guard 作用于整个 or-pattern，最多执行一次；guard 为 false 时进入下一臂，body 也最多
+执行一次。
+
+每个 alternative 必须绑定完全相同的名字集合，且同名绑定的类型与 mutability 必须一致。
+第一支的绑定是共享环境中的 canonical binding，后续支只为它提供另一个取值路径。
+
 ### 5.2 穷尽性
 
 `match` **必须穷尽**。编译器对 ADT/Bool/Option/Result/元组做穷尽性检查，
 缺分支报错并列出缺失构造器。`Int`/`String`/`Float` 上的 match 必须有
 `_` 或绑定兜底分支。
 
-`let` 也接受不可反驳模式：`let (a, b) = pair`、`let Point { x, y } = p`。
+`let` 也接受不可反驳模式：`let (a, b) = pair`、`let Point { x, y } = p`。or-pattern
+使用同一份 usefulness 判定，所以 `let true | false = flag` 合法，而 `let true = flag`
+仍然可反驳并被拒绝。
 
 ---
 

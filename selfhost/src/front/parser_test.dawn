@@ -9,8 +9,8 @@ use front/astdump.{render_module}
 use front/ast.{
   Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EMatch, EPropagate,
   BinOp, OpAdd, OpMul,
-  PLit,
-  Stmt, SWhile,
+  PLit, PBind, PWild, POr, PCtor, PTuple, PList,
+  Stmt, SLetPat, SWhile,
   Decl, DFn, DType, DConst, DUseModule, DImpl, Module,
   TypeRef, TQual, TNamed, TFn
 }
@@ -434,7 +434,7 @@ test "negative minimum magnitude patterns fold to ordinary Int literals" {
   assert len(ds) == 0
   match m.decls[0] {
     DFn(f) -> match f.body {
-      EMatch(_, arms, _, _) -> match arms[0].pats[0] {
+      EMatch(_, arms, _, _) -> match arms[0].pat {
         PLit(EInt(v, _, _), _, _) -> { assert v == -9223372036854775807 - 1 }
         _ -> { assert false }
       }
@@ -506,6 +506,68 @@ test "match arms accept newline and comma separators" {
   ] {
     let (_, ds) = parse_module(src)
     assert len(ds) == 0
+  }
+}
+
+test "or-patterns are flat, recursive, and looser than pattern atoms" {
+  let src = "fn f(x: Int) -> Int = match x {\n" ++
+    "  Some((a | (b | c), [d | e])) | None if true -> 1\n" ++
+    "  _ -> 0\n" ++
+    "}"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) -> match f.body {
+      EMatch(_, arms, _, _) -> {
+        assert len(arms) == 2
+        assert arms[0].guard != None
+        match arms[0].pat {
+          POr(outer) -> {
+            assert len(outer) == 2
+            match outer[0] {
+              PCtor(_, args, _, _, _, _, _, _) -> match args[0].pat {
+                PTuple(elems, _, _) -> {
+                  match elems[0] {
+                    POr(inner) -> { assert len(inner) == 3 }
+                    _ -> { assert false }
+                  }
+                  match elems[1] {
+                    PList(pre, _, _, _, _, _, _) -> match pre[0] {
+                      POr(inner) -> { assert len(inner) == 2 }
+                      _ -> { assert false }
+                    }
+                    _ -> { assert false }
+                  }
+                }
+                _ -> { assert false }
+              }
+              _ -> { assert false }
+            }
+          }
+          _ -> { assert false }
+        }
+      }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
+  }
+}
+
+test "a structural let parses the same or-pattern grammar" {
+  let (m, ds) = parse_module("fn f(flag: Bool) -> Bool = {\n" ++
+      "  let true | false = flag\n" ++
+      "  flag\n" ++
+      "}")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) -> match f.body {
+      EBlock(stmts, _, _, _) -> match stmts[0] {
+        SLetPat(POr(alts), _, _, _, _) -> { assert len(alts) == 2 }
+        _ -> { assert false }
+      }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
   }
 }
 

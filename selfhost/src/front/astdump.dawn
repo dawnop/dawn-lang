@@ -16,10 +16,11 @@ use front/ast.{
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
   EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm,
-  PatArg, Pattern, PLit, PBind, PWild, PCtor, PQual, PTuple, PList,
+  PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
-  DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module
+  DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module,
+  pat_lo, pat_hi
 }
 
 fn sp(lo: Int, hi: Int) -> String = "@${lo}..${hi}"
@@ -455,9 +456,13 @@ fn dump_expr(out: List[String], d: Int, e: Expr) -> List[String] =
           Some(g) -> true
           None -> false
         }
-        o = o ++ [ind(d + 1) ++ "Arm npats=" ++ to_string(len(a.pats)) ++ " guard=" ++
+        let pats = match a.pat {
+          POr(alts) -> alts
+          _ -> [a.pat]
+        }
+        o = o ++ [ind(d + 1) ++ "Arm npats=" ++ to_string(len(pats)) ++ " guard=" ++
             bstr(has_guard) ++ " " ++ sp(a.lo, a.hi)]
-        for pt in a.pats { o = dump_pat(o, d + 2, pt) }
+        for pt in pats { o = dump_pat(o, d + 2, pt) }
         match a.guard {
           Some(g) -> { o = dump_expr(o, d + 2, g) }
           None -> ()
@@ -498,6 +503,12 @@ fn dump_pat(out: List[String], d: Int, pt: Pattern) -> List[String] =
     }
     PBind(name, lo, hi) -> out ++ [ind(d) ++ "PBind " ++ name ++ " " ++ sp(lo, hi)]
     PWild(lo, hi) -> out ++ [ind(d) ++ "PWild " ++ sp(lo, hi)]
+    POr(alts) -> {
+      var o = out ++ [ind(d) ++ "POr nalts=" ++ to_string(len(alts)) ++ " " ++
+          sp(pat_lo(alts[0]), pat_hi(alts[len(alts) - 1]))]
+      for alt in alts { o = dump_pat(o, d + 1, alt) }
+      o
+    }
     PCtor(name, pargs, has_rest, has_parens, nlo, nhi, lo, hi) -> {
       var o = out ++ [ind(d) ++ "PCtor " ++ name ++ " rest=" ++ bstr(has_rest) ++ " parens=" ++
           bstr(has_parens) ++ " name" ++ sp(nlo, nhi) ++ " " ++ sp(lo, hi)]

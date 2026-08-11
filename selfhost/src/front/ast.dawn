@@ -157,7 +157,7 @@ pub fn first_named(args: List[Arg]) -> Option[Arg] = {
   None
 }
 
-pub type MatchArm = { pats: List[Pattern], guard: Option[Expr], body: Expr, lo: Int, hi: Int }
+pub type MatchArm = { pat: Pattern, guard: Option[Expr], body: Expr, lo: Int, hi: Int }
 
 ## One arm of a `with handle E { ... }` clause: `op(a, b) => body`. The arm is
 ## a closure over the operation's parameters, so it carries what a lambda
@@ -244,6 +244,7 @@ pub type Pattern =
   | PLit(lit: Expr, lo: Int, hi: Int)
   | PBind(name: String, lo: Int, hi: Int)
   | PWild(lo: Int, hi: Int)
+  | POr(alts: List[Pattern])
   | PCtor(
     name: String,
     args: List[PatArg],
@@ -518,6 +519,7 @@ pub fn pat_lo(p: Pattern) -> Int =
     PLit(_, lo, _) -> lo
     PBind(_, lo, _) -> lo
     PWild(lo, _) -> lo
+    POr(alts) -> pat_lo(alts[0])
     PCtor(_, _, _, _, _, _, lo, _) -> lo
     PQual(_, _, _, _, _, _, _, lo, _) -> lo
     PTuple(_, lo, _) -> lo
@@ -529,6 +531,7 @@ pub fn pat_hi(p: Pattern) -> Int =
     PLit(_, _, hi) -> hi
     PBind(_, _, hi) -> hi
     PWild(_, hi) -> hi
+    POr(alts) -> pat_hi(alts[len(alts) - 1])
     PCtor(_, _, _, _, _, _, _, hi) -> hi
     PQual(_, _, _, _, _, _, _, _, hi) -> hi
     PTuple(_, _, hi) -> hi

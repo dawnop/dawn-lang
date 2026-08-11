@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 40f4978eeb083e9c -->
+<!-- doc-check: translation-of docs/spec.md @ 1c9811d7af095b57 -->
 
 # Dawn Language Specification
 
@@ -1370,6 +1370,17 @@ to the arm body expression.
 | Or | `0 \| 1 \| 2` | any alternative matches (the bindings of every alternative must agree) |
 | Guard | `pat if cond` | the pattern matches and the guard is true |
 
+`|` has the lowest precedence in a pattern. It may occur recursively inside constructor, record,
+tuple, and list patterns, and is collected in source order as a flat n-ary or-pattern. `(pat)` is
+grouping only; a tuple pattern still requires a comma. At run time the first matching alternative
+is selected, with no backtracking inside that or-pattern. A match-arm guard applies to the whole
+or-pattern and runs at most once. If it is false, matching continues at the next arm. The body also
+runs at most once.
+
+Every alternative must bind exactly the same name set, and each shared name must have the same type
+and mutability. The first alternative supplies the canonical binding in the shared environment;
+later alternatives only provide another path that assigns its value.
+
 ### 5.2 Exhaustiveness
 
 `match` **must be exhaustive**. The compiler checks exhaustiveness on ADT/Bool/Option/Result/tuple;
@@ -1377,6 +1388,8 @@ a missing arm is an error and the missing constructors are listed. A match on
 `Int`/`String`/`Float` must have a `_` or a binding arm as the catch-all.
 
 `let` also accepts irrefutable patterns: `let (a, b) = pair`, `let Point { x, y } = p`.
+Or-patterns use the same usefulness check, so `let true | false = flag` is valid while
+`let true = flag` remains refutable and is rejected.
 
 ---
 
