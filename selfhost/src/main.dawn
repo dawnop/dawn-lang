@@ -1084,7 +1084,8 @@ fn deps_from_env() -> List[String] !io = {
 ## Re-exec one invocation after its target and explicit classpath have already
 ## been identified. `rest` remains the caller's original list: in particular,
 ## a run separator, empty strings and option-looking program arguments are not
-## normalized away while the classpath is extended.
+## normalized away while the classpath is extended. The child receives this
+## JVM's actual maximum heap rather than reinterpreting launcher option text.
 fn maybe_with_known_deps(
   mode: String,
   rest: List[String],
@@ -1102,7 +1103,17 @@ fn maybe_with_known_deps(
   var cp = host_classpath()
   for j in jars { cp = cp ++ path_sep() ++ j }
   for j in cpjars { cp = cp ++ path_sep() ++ j }
-  var cmd: List[String] = [host_java(), "-Xss512m", "-cp", cp, "main", mode]
+  let rt = Runtime.getRuntime().expect("runtime")
+  let max_heap = rt.maxMemory()
+  var cmd: List[String] = [
+    host_java(),
+    "-Xss512m",
+    "-Xmx" ++ to_string(max_heap),
+    "-cp",
+    cp,
+    "main",
+    mode
+  ]
   cmd = cmd ++ rest
   let pb = ProcessBuilder.new(cmd)
   let env = pb.environment().expect("env")

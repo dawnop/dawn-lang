@@ -1,7 +1,7 @@
 # 编译器重量基线设计
 
-> 状态：**current**。本文是 #230 Phase 1 的定稿，定义可复现的测量口径与机器契约。
-> Phase 1 只建立 telemetry 和自举 CPU 比值门槛，不修改编译器堆策略。
+> 状态：**current**。本文是 #230 Phase 1 测量口径与 Phase 2 dependency re-exec
+> 堆继承策略的定稿。
 
 ## 1. 问题
 
@@ -37,7 +37,7 @@ Phase 1 交付以下内容：
 Phase 1 不修改 `bin/dawn`、`selfhost/src/main.dawn` 或 `TestMain`，也不修改栈、JAR 压缩、
 native static link 和 strip 策略。ARC-07、ARC-08 不因获得 telemetry 而关闭。
 
-Phase 2 才处理 dependency re-exec 的堆继承。届时应继承父编译器的实际堆上限，而不是把本次
+Phase 2 只处理 dependency re-exec 的堆继承。子编译器继承父编译器的实际堆上限，不把本次
 机器上的临时 768 MiB 探针写成产品常量。`TestMain` 的用户程序堆策略仍是另一项设计。
 
 ## 3. 命令与退出状态
@@ -205,3 +205,23 @@ CI 只运行 schema、synthetic `/proc` probe 与 mutant matrix，不运行 rele
 - 不把三台 JVM 的总 RSS 归因成编译器单进程泄漏。
 - 不改 512 MiB stack。既有勘测已排除它是当前 RSS 主因。
 - 不压缩 release JAR，不 strip native，不改 static link。这些是独立的发布与兼容性决策。
+
+## 13. Phase 2 dependency re-exec 堆继承
+
+Phase 2 只修改 `maybe_with_known_deps` 创建的子编译器 JVM。父编译器在生成子进程命令时读取
+`Runtime.maxMemory()`，把该进程已经生效的最大堆字节数写成子进程的 `-Xmx<N>` 参数。该值同时
+覆盖 `bin/dawn` 的默认上限和 `DAWN_JVM_OPTS` 的显式覆盖，也覆盖 JVM 对最终参数的规范化结果。
+
+实现不解析 `DAWN_JVM_OPTS`。文本解析无法可靠处理重复参数、其他 JVM 注入入口和 JVM 自身的
+最终取值，且 dependency re-exec 需要继承的是已生效上限，不是父进程最初收到的文本。父子进程
+使用 `host_java()` 选出的同一 JDK，因此十进制字节值由同一 JVM 解释。
+
+`scripts/dependency-heap-contract/` 构建真实 release JAR，通过 `bin/dawn` 的默认路径和
+`DAWN_JVM_OPTS="-Xss512m -Xmx384m"` 覆盖路径各启动一次会发生 dependency re-exec 的程序。
+契约使用同 JDK 的 `jcmd VM.flags` 读取父子 JVM 的实际 `MaxHeapSize`，要求两条路径都逐字节相等，
+并要求覆盖路径的父进程确实得到 384 MiB。source mutant 删除生产命令中的继承参数，只允许
+`heap.inherits_parent_max` 转红，`heap.dependency_reexec_observed` 必须保持绿色。
+
+本阶段不改变 `spawn_java`，因此 `run` 目标程序和 `TestMain` 的堆策略不随本次提交变化。
+`-Xss512m`、JAR 压缩、native strip 与 static link 也保持原状。#230 的 dependency re-exec
+堆继承范围至此完成，Phase 1 telemetry 继续负责观察，不为其他重量指标增加预算。

@@ -92,6 +92,22 @@ jobs:
       - name: compiler weight schema and synthetic process contract
         run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/selfhost-bench-contract/run.py
 
+  # Phase 2 measures process semantics, not runner hardware. The complete
+  # contract measured 60s locally, and the reused toolchain setup has a 29s
+  # observed upper bound. Keep it parallel to the 163s Phase 1 contract.
+  dependency-heap-contract:
+    runs-on: ubuntu-latest
+    # budget: 3x 90s combined worst observed
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          build: 'false'
+      - name: dependency re-exec inherits the effective parent heap
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/dependency-heap-contract/run.py
+
   # The extension grammar is editor behavior, not documentation. Exercise it
   # with VS Code's TextMate engine and Oniguruma WASM in a standalone job so a
   # broken scope rule cannot hide behind the compiler toolchain setup.
