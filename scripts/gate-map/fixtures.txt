@@ -1,0 +1,88 @@
+# The failures this map exists to have caught, replayed on the trees they
+# happened on.
+#
+# Not a restatement of them: each stanza names commits, gatemap.py materialises
+# those trees out of git and runs the whole map on them. A rule that stops
+# producing the verdict below fails here, and so does a fixture whose
+# expectation stops matching anything.
+#
+# Every stanza also carries `ground` lines, which are claims about the history
+# rather than about the map, measured with git. Without them a fixture could go
+# on describing an event that never had this shape, which is the failure mode
+# this whole directory is about.
+#
+# Keys: tree (a commit), overlay (<commit> <path>, for a batch whose tree never
+# landed as one commit), ground (see parse_fixtures), query (a path to ask
+# about), expect / reject / only (<level> <substring of "<gate> :: <reason>">).
+
+
+# 2026-08-11, the first of two. The pipe batch (ba93e76, 3c51ae1) pinned a
+# negative control to a whole sentence the std loader prints; the std batch
+# (9e64179) rewrote that sentence. Neither batch could see the other, and the
+# tree below is the one the pipe batch was green on: main before the loader
+# change, with the pipe batch's own directory on top.
+#
+# What the map has to say, from either side, is that the contract and the
+# compiler module share a string. Asked about the module, it names the contract
+# that spells the string out; asked about the contract, it names the module.
+name: 3c51ae1 and 9e64179, the sentence two batches shared
+tree: 9e64179^
+overlay: 3c51ae1 scripts/pipe-contract
+# the shared sentence, on both sides, and the commit that broke the pair
+ground: contains 3c51ae1:scripts/pipe-contract/run.sh bundled std module `
+ground: contains 9e64179^:selfhost/src/driver/stdlib.dawn bundled std module `
+ground: lacks 9e64179:selfhost/src/driver/stdlib.dawn bundled std module `
+ground: touched 9e64179 selfhost/src/driver/stdlib.dawn
+query: selfhost/src/driver/stdlib.dawn
+expect: coupled scripts/pipe-contract/run.sh spells out 'bundled std module `'
+
+# The other half of the same story: 819920e repointed the control at the part
+# it is actually about, and the coupling to the loader's wording goes away. A
+# fixture that only ever fired would not show that the rule follows the string
+# rather than the file name.
+name: 819920e, the control pinned to the substance rather than the wording
+tree: 819920e
+ground: touched 819920e scripts/pipe-contract/run.sh
+ground: lacks 819920e:scripts/pipe-contract/run.sh bundled std module `
+query: selfhost/src/driver/stdlib.dawn
+reject: coupled scripts/pipe-contract/run.sh
+
+# 2026-08-11, the second. 98b9896 rewrote `dawn --help` and `dawnc --help`, ran
+# doc-check, site-dist-diff, run-diff, prev-diff and native-cli-diff, and
+# concluded nothing was declared. The Core golden moved and had to be
+# re-recorded the next commit (1c29bea), which is the `golden-moved` line: the
+# only gate that saw the change is the one whose record had to move.
+#
+# `only exact` is the assertion that matters. Both drivers carry usage strings
+# the native CLI differential spells out, so they are `coupled` there, but a
+# coupling covers the sentences a gate quotes and help text was not one of
+# them. The single thing that records the whole module is the Core golden, and
+# that is what the batch needed to be told.
+name: 98b9896, the two drivers whose help text changed
+tree: 98b9896
+ground: touched 98b9896 selfhost/src/main.dawn
+ground: touched 98b9896 selfhost/src/nmain.dawn
+ground: golden-moved 1c29bea main
+ground: golden-moved 1c29bea nmain
+query: selfhost/src/main.dawn
+query: selfhost/src/nmain.dawn
+expect: exact core-golden/selfhost.sha records module `main`
+expect: exact core-golden/selfhost.sha records module `nmain`
+only: exact Core IR golden
+expect: blind `emit selfhost` compiles this same source with both toolchains
+
+# The boundary the batch above needed and could not read anywhere: a change to
+# std source is visible to the N vs N-1 differential and needs a declaration,
+# because the N-1 toolchain is pointed at the std it was released with, while a
+# change to selfhost source is not, because both sides compile the same one.
+# Two verdicts on one tree, from one rule, in opposite directions.
+#
+# The ground for it is in the script: the flag that makes the two sides differ.
+name: 1c29bea, std and selfhost on opposite sides of the same rule
+tree: 1c29bea
+ground: contains 1c29bea:scripts/selfhost-prev-diff.sh --std "$(seed_std_dir)"
+ground: contains 1c29bea:scripts/emit-labels.txt emit selfhost
+ground: lacks 1c29bea:scripts/emit-labels.txt emit std
+query: std/str.dawn
+expect: exact the N-1 side compiles the std it was released with
+reject: blind `emit

@@ -1,0 +1,48 @@
+# Paths in this repository that no gate watches, and why each one is not
+# watched.
+#
+# A ratchet, not a to-do list: `gatemap.py --check` compares it with what the
+# rules compute and fails in both directions, so a new unwatched file cannot
+# arrive quietly and a line here cannot outlive the gap it records.
+#
+# Each line is `<path>  <kind>: <why>`. The kind is checked against the map, so
+# a reason cannot go on claiming something the tree stopped supporting:
+#
+#   no-gate     nothing in any workflow reaches this path at any strength
+#   blind-only  gates reach it, and rule D says each of them cancels it out
+#   tag-only    watched, but only by a workflow that runs on a tag
+#
+# The prose after the kind is for a person, and it is the part that says
+# whether the gap is deliberate. Regenerate the path list with
+# `--record-unseen`, which keeps the reasons it already has and marks a new
+# line for you to write; read the diff, because a line appearing is the news.
+
+.editorconfig                              no-gate: editor configuration; nothing in CI reads it.
+.gitattributes                             no-gate: git configuration; nothing in CI reads it.
+.githooks/commit-msg                       no-gate: the developer-side copy of a CI guard. CI runs the guard script itself, never the hook, so the hook's own wiring is unmeasured.
+.githooks/pre-commit                       no-gate: same as commit-msg; the hook is a local convenience and the scripts it calls are gated on their own.
+.githooks/pre-push                         no-gate: same as commit-msg.
+.github/actions/dawn-toolchain/action.yml  no-gate: every job uses this composite action, and check-gate-budgets.py reads `.github/workflows/*.yml` only. Nothing reads the action itself.
+.gitignore                                 no-gate: git configuration; nothing in CI reads it.
+.vscode/extensions.json                    no-gate: editor configuration; nothing in CI reads it.
+LICENSE                                    no-gate: legal text. doc-check.py reads docs/ and the root *.md, and neither covers this.
+NOTICE                                     no-gate: legal text, as LICENSE.
+editors/README.md                          no-gate: doc-check.py reads `docs/**.md` and the root `*.md`; this one is under editors/ and falls outside both.
+scripts/bench.sh                           no-gate: a wall-clock benchmark run by hand. The numbers are machine-bound, so there is nothing for a gate to compare them with.
+scripts/bench_map.dawn                     no-gate: the subject of bench.sh's sibling benchmark, run by hand for the same reason. Its own header says so.
+scripts/dawn.slice                         no-gate: a systemd unit installed on a developer box to cap memory. CI does not run under it.
+scripts/dcap                               no-gate: the per-run half of the same memory cap. CI does not run under it.
+scripts/gen-rtsrc.py                       no-gate: a generator run by hand. Its output, selfhost/src/embed/rtsrc.dawn, is committed and watched; nothing re-runs the generator to check the two agree.
+scripts/gen-stdsrc.py                      no-gate: as gen-rtsrc.py, for selfhost/src/embed/stdsrc.dawn.
+scripts/native-fixpoint.sh                 no-gate: the native bootstrap fixed point. The `selfhost fixed point (B == C)` step runs scripts/selfhost-fixpoint.sh, which is the JVM one; no workflow names this file.
+scripts/play-live-check.py                 no-gate: it checks a deployed Playground over the network, so a gate would be asserting about the internet.
+scripts/render-brand.py                    no-gate: it regenerates the committed raster brand files. Run by hand; nothing checks the rasters still match the SVG.
+scripts/replay-bootstrap.sh                no-gate: replays the bootstrap chain from the trust root. Its header says "Manual, not in CI", and it takes far longer than a job.
+scripts/selfhost-bench.baseline            no-gate: the recorded number selfhost-bench.sh compares against; unwatched for the same reason it is.
+scripts/selfhost-bench.sh                  no-gate: bootstrap cost as a ratio, wall-clock and machine-bound. Run by hand.
+scripts/spike-hamt/README.md               no-gate: a spike kept for reference. Nothing builds it, and it is not on any module path.
+scripts/spike-hamt/hamt.dawn               no-gate: as the spike's README; the shipped HAMT is std's, and this is the sketch it came from.
+scripts/spike-hamt/vec.dawn                no-gate: as hamt.dawn.
+scripts/spike-sam/SamGen.java              no-gate: a Java spike from the SAM-conversion investigation. Nothing compiles it.
+scripts/spike-sam/SpikeMain.java           no-gate: as SamGen.java.
+scripts/spike-sam/run.sh                   no-gate: the spike's own runner. No workflow names it.

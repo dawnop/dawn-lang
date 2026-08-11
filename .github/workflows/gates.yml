@@ -38,12 +38,17 @@ jobs:
   # the reusable gate set that both branch CI and release tags execute.
   tree-policy:
     runs-on: ubuntu-latest
-    # measured 6s. Seconds-scale jobs get a floor rather than 3x their own
-    # time, which would be a bound no slow runner could meet.
+    # measured 6s, then 16s locally for the gate map added 2026-08-11. Seconds
+    # -scale jobs get a floor rather than 3x their own time, which would be a
+    # bound no slow runner could meet. Restate the runner figure from the first
+    # run that carries the new step if it stops being seconds-scale.
     # budget: floor (seconds-scale job)
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # the gate map replays two commits' trees as fixtures
+          fetch-depth: 0
       - name: no server identity in the repo
         run: python3 scripts/check-no-server-identity.py
 
@@ -52,6 +57,15 @@ jobs:
       # workflow files, so it belongs in the job that needs no toolchain.
       - name: every timeout is backed by an observation
         run: python3 scripts/check-gate-budgets.py
+
+      # Which gate sees which change was nobody's written-down knowledge until
+      # two batches derived it wrong on the same day (see the header of
+      # gatemap.py). This recomputes the answer from the workflows, the goldens
+      # and the scripts, ratchets the paths no gate watches, and replays both
+      # failures on the trees they happened on. It needs no toolchain and reads
+      # the same three workflow files the step above does.
+      - name: the gate map still describes this tree
+        run: python3 scripts/gate-map/gatemap.py --check
 
   # The extension grammar is editor behavior, not documentation. Exercise it
   # with VS Code's TextMate engine and Oniguruma WASM in a standalone job so a
