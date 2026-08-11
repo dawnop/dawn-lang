@@ -277,9 +277,37 @@ def schema_contract(module: ModuleType) -> None:
             print(f"PASS  CLI refuses {name}")
         else:
             raise AssertionError(f"CLI accepted {name}")
-    if module.noise_state(0.15) != "inconclusive":
-        raise AssertionError("exactly 15% spread was not inconclusive")
-    print("PASS  exactly 15% spread is inconclusive")
+    def ratio_sample(pass_a: int, pass_c: int) -> dict[str, object]:
+        return {
+            "pass_a_user_ms": pass_a,
+            "pass_b_user_ms": pass_a,
+            "pass_c_user_ms": pass_c,
+            "ratio": pass_c / pass_a,
+        }
+
+    boundary = module.ratio_summary(
+        [ratio_sample(100, 100), ratio_sample(100, 100), ratio_sample(100, 115)]
+    )
+    if module.noise_state(boundary["spread"]) != "inconclusive":
+        raise AssertionError(
+            f"raw ratios 1.0, 1.0, 1.15 produced {boundary['spread']!r} "
+            "without becoming inconclusive"
+        )
+    print("PASS  raw ratios 1.0, 1.0, 1.15 are inconclusive")
+
+    below = module.ratio_summary(
+        [
+            ratio_sample(10_000, 10_000),
+            ratio_sample(10_000, 10_000),
+            ratio_sample(10_000, 11_499),
+        ]
+    )
+    if module.noise_state(below["spread"]) != "conclusive":
+        raise AssertionError(
+            f"raw spread below 15% produced {below['spread']!r} "
+            "without staying conclusive"
+        )
+    print("PASS  raw spread 14.99% remains conclusive")
 
     with tempfile.TemporaryDirectory(prefix="bench-stage-schema-") as raw:
         path = Path(raw) / "times"

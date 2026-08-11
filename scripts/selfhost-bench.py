@@ -7,6 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -313,14 +314,21 @@ def median_int(values: Sequence[int]) -> int:
 
 
 def ratio_summary(samples: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    ordered = sorted(samples, key=lambda sample: float(sample["ratio"]))
-    median_sample = ordered[len(ordered) // 2]
-    ratios = [float(sample["ratio"]) for sample in ordered]
-    median_ratio = float(median_sample["ratio"])
-    spread = (max(ratios) - min(ratios)) / median_ratio
+    exact: list[tuple[Fraction, Mapping[str, object]]] = []
+    for sample in samples:
+        pass_a = sample["pass_a_user_ms"]
+        pass_c = sample["pass_c_user_ms"]
+        if type(pass_a) is not int or pass_a <= 0:
+            raise ValueError("pass A user CPU must be a positive integer")
+        if type(pass_c) is not int or pass_c <= 0:
+            raise ValueError("pass C user CPU must be a positive integer")
+        exact.append((Fraction(pass_c, pass_a), sample))
+    ordered = sorted(exact, key=lambda row: row[0])
+    median_ratio_exact, median_sample = ordered[len(ordered) // 2]
+    spread_exact = (ordered[-1][0] - ordered[0][0]) / median_ratio_exact
     return {
-        "median_ratio": median_ratio,
-        "spread": spread,
+        "median_ratio": float(median_ratio_exact),
+        "spread": float(spread_exact),
         "median_pass_a_user_ms": int(median_sample["pass_a_user_ms"]),
         "median_pass_c_user_ms": int(median_sample["pass_c_user_ms"]),
     }
