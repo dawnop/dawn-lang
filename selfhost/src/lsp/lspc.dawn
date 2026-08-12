@@ -20,13 +20,18 @@ use std/list
 use check/types.{
   ty_show, sig_render, adt_of, trait_of, prelude_traits, prelude_trait_ids,
   public_builtin_type_names, return_only_builtin_type_names,
+  ty_named, builtin_type_at, builtin_type_name_reserved, hard_reserved_builtin_type_name,
   Audience, AModule, audience_covers, declared_audience
 }
 use check/cx.{ModExports}
 use lsp/lspq.{QCx, locals_at, in_for_pattern}
-use front/lexer.{SourceView, view_of, slice_cp}
+use front/lexer.{SourceView, view_of, slice_cp, lex}
+use front/token.{
+  Token, TokKind, FOR, IN, PIPE, NEWLINE, EOF, IDENT,
+  LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET, COMMA, DOT, TYPEIDENT
+}
 use front/ast.{
-  module_traits, module_fns, module_types, module_consts, module_effects
+  module_traits, module_fns, module_types, module_consts, module_effects, module_uses
 }
 use front/parser
 use driver/analyze.{use_candidates}
@@ -228,6 +233,229 @@ fn slice_cps(cps: List[Char], lo: Int, hi: Int) -> List[Char] = {
     i = i + 1
   }
   out
+}
+
+fn next_non_newline(toks: List[Token], at: Int) -> Int = {
+  var i = at
+  while i < len(toks) && toks[i].kind == NEWLINE { i = i + 1 }
+  i
+}
+
+fn pattern_top(parens: Int, brackets: Int, braces: Int) -> Bool =
+  parens == 0 && brackets == 0 && braces == 0
+
+fn for_header_newline_continues(previous_pipe: Bool, next_kind: TokKind) -> Bool =
+  previous_pipe || next_kind == PIPE
+
+fn remember_latest_for(latest: Option[Int], found: Int) -> Option[Int] = Some(found)
+
+fn previous_is_pipe(toks: List[Token], previous: Int) -> Bool =
+  previous >= 0 && toks[previous].kind == PIPE
+
+fn pattern_depth_before(toks: List[Token], at: Int, before: Int) -> (Int, Int, Int) = {
+  var parens = 0
+  var brackets = 0
+  var braces = 0
+  var i = at
+  while i < before {
+    let kind = toks[i].kind
+    if kind == LPAREN {
+      parens = parens + 1
+    } else if kind == RPAREN {
+      parens = parens - 1
+    } else if kind == LBRACKET {
+      brackets = brackets + 1
+    } else if kind == RBRACKET {
+      brackets = brackets - 1
+    } else if kind == LBRACE {
+      braces = braces + 1
+    } else if kind == RBRACE {
+      braces = braces - 1
+    }
+    i = i + 1
+  }
+  (parens, brackets, braces)
+}
+
+## Find the balanced top-level `in` that closes one `for` header. A top-level
+## newline belongs to the header only around a continuation `|`; braces count
+## as pattern nesting only after a constructor name, never as a loop body.
+fn for_header_in(toks: List[Token], at: Int) -> Option[Int] = {
+  var parens = 0
+  var brackets = 0
+  var braces = 0
+  var previous_pipe = false
+  var previous_type = false
+  var i = at
+  while i < len(toks) {
+    let kind = toks[i].kind
+    if kind == EOF { return None }
+    if kind == NEWLINE {
+      if pattern_top(parens, brackets, braces) {
+        let next = next_non_newline(toks, i + 1)
+        if next >= len(toks) || not for_header_newline_continues(previous_pipe, toks[next].kind) {
+          return None
+        }
+      }
+      i = i + 1
+      continue
+    }
+    if kind == IN && pattern_top(parens, brackets, braces) {
+      return Some(i)
+    }
+    if kind == LPAREN {
+      parens = parens + 1
+    } else if kind == RPAREN {
+      if parens == 0 { return None }
+      parens = parens - 1
+    } else if kind == LBRACKET {
+      brackets = brackets + 1
+    } else if kind == RBRACKET {
+      if brackets == 0 { return None }
+      brackets = brackets - 1
+    } else if kind == LBRACE {
+      if not previous_type { return None }
+      braces = braces + 1
+    } else if kind == RBRACE {
+      if braces == 0 { return None }
+      braces = braces - 1
+    }
+    previous_pipe = kind == PIPE
+    previous_type = kind == TYPEIDENT
+    i = i + 1
+  }
+  None
+}
+
+fn recursive_pattern_boundary(
+  boundary: TokKind,
+  is_header_in: Bool,
+  parens: Int,
+  brackets: Int,
+  braces: Int
+) -> Bool =
+  if boundary == IN {
+    is_header_in && pattern_top(parens, brackets, braces)
+  } else if boundary == PIPE {
+    true
+  } else if boundary == COMMA {
+    parens > 0 || brackets > 0 || braces > 0
+  } else if boundary == RPAREN {
+    parens > 0
+  } else if boundary == RBRACKET {
+    brackets > 0
+  } else if boundary == RBRACE {
+    braces > 0
+  } else {
+    false
+  }
+
+## Is `pos` the empty atom after an or-pattern pipe? The token after the gap
+## must be a boundary at the same recursive-pattern depth, rather than a typed
+## atom whose span merely happens to start at the cursor.
+fn missing_for_alternative_at(
+  toks: List[Token],
+  at: Int,
+  header_in: Int,
+  scan_end: Int,
+  pos: Int
+) -> Bool = {
+  var previous = -1
+  var next = scan_end
+  var i = at
+  while i <= scan_end {
+    let tok = toks[i]
+    if tok.lo < pos && pos < tok.hi { return false }
+    if tok.hi <= pos {
+      if tok.kind != NEWLINE { previous = i }
+    } else if tok.lo >= pos && tok.kind != NEWLINE {
+      next = i
+      break
+    }
+    i = i + 1
+  }
+  if not previous_is_pipe(toks, previous) { return false }
+  let (parens, brackets, braces) = pattern_depth_before(toks, at, previous)
+
+  recursive_pattern_boundary(toks[next].kind, next == header_in, parens, brackets, braces)
+}
+
+fn qualified_incomplete_alternative_at(
+  toks: List[Token],
+  at: Int,
+  header_in: Int,
+  alias_lo: Int,
+  pos: Int
+) -> Bool = {
+  var alias_at = -1
+  var previous = -1
+  var next = header_in
+  var i = at
+  while i <= header_in {
+    let tok = toks[i]
+    if tok.lo == alias_lo { alias_at = i }
+    if tok.hi <= alias_lo && tok.kind != NEWLINE { previous = i }
+    if tok.lo >= pos && tok.kind != NEWLINE {
+      next = i
+      break
+    }
+    i = i + 1
+  }
+  if alias_at < 0 || toks[alias_at].kind != IDENT || alias_at + 1 >= len(toks) ||
+    toks[alias_at + 1].kind != DOT || not previous_is_pipe(toks, previous) {
+      return false
+    }
+  let (parens, brackets, braces) = pattern_depth_before(toks, at, previous)
+  recursive_pattern_boundary(toks[next].kind, next == header_in, parens, brackets, braces)
+}
+
+fn in_incomplete_qualified_for_pattern(text: String, alias_lo: Int, pos: Int) -> Bool = {
+  let (toks, _) = lex(text)
+  var latest_for: Option[Int] = None
+  var i = 0
+  while i < len(toks) && toks[i].lo <= alias_lo {
+    if toks[i].kind == FOR && toks[i].hi <= alias_lo {
+      latest_for = Some(i)
+    }
+    i = i + 1
+  }
+  match latest_for {
+    Some(for_at) -> match for_header_in(toks, for_at + 1) {
+      Some(header_in) ->
+        pos <= toks[header_in].lo &&
+        qualified_incomplete_alternative_at(toks, for_at + 1, header_in, alias_lo, pos)
+      None -> false
+    }
+    None -> false
+  }
+}
+
+## The parsed AST owns ordinary for-pattern completion. This recovery owns the
+## one state where no SFor can exist yet: an or-pattern alternative whose atom
+## has not been typed. It finds the enclosing header from lexer tokens, not
+## from line text, and accepts a gap only when the next token is a pattern
+## boundary and a balanced top-level `in` still closes the same header.
+## Consequently the source, range upper bound, body and following statements
+## are all beyond the delimiter and cannot be mistaken for pattern context.
+fn in_incomplete_for_pattern(text: String, pos: Int) -> Bool = {
+  let (toks, _) = lex(text)
+  var latest_for: Option[Int] = None
+  var i = 0
+  while i < len(toks) && toks[i].lo <= pos {
+    if toks[i].kind == FOR && toks[i].hi <= pos {
+      latest_for = remember_latest_for(latest_for, i)
+    }
+    i = i + 1
+  }
+  match latest_for {
+    Some(for_at) -> match for_header_in(toks, for_at + 1) {
+      Some(header_in) ->
+        pos <= toks[header_in].lo &&
+        missing_for_alternative_at(toks, for_at + 1, header_in, header_in, pos)
+      None -> false
+    }
+    None -> false
+  }
 }
 
 # ---- assembly ----
@@ -467,6 +695,117 @@ fn add_adt_completions(qc: QCx, it0: Items, include_types: Bool) -> Items = {
   it
 }
 
+## A malformed declaration may preserve its parsed type declarations while
+## checker recovery has no local ADT table. The incomplete-header path still
+## needs those constructors, and source declarations are enough to name them.
+fn checked_source_constructor(qc: QCx, type_name: String, ctor_name: String) -> Bool =
+  match map.get(qc.entry.cx.ctors_by_name, ctor_name) {
+    Some(pair) -> {
+      let (aid, slot) = pair
+      let a = adt_of(qc.entry.cx.adts, aid)
+      if a.name != type_name || a.owner != Some(qc.entry.class_name) { return false }
+      0 <= slot && slot < len(a.ctors) && a.ctors[slot].name == ctor_name
+    }
+    None -> false
+  }
+
+fn source_type_name_available(qc: QCx, name: String, seen: Set[String]) -> Bool = {
+  if set.has(seen, name) { return false }
+  if map.has(qc.entry.cx.java_classes, name) || map.has(qc.entry.cx.module_aliases, name) ||
+    map.has(qc.entry.cx.imported_names, name) || map.has(qc.entry.cx.aliases, name) {
+      return false
+    }
+  match builtin_type_at(name) {
+    Some(info) -> if builtin_type_name_reserved(info, qc.entry.cx.is_std_module) {
+      false
+    } else {
+      source_type_name_absent_or_local(qc, name)
+    }
+    None -> source_type_name_absent_or_local(qc, name)
+  }
+}
+
+fn source_type_name_absent_or_local(qc: QCx, name: String) -> Bool = {
+  for pair in map.entries(qc.entry.cx.adts) {
+    let (_, a) = pair
+    if a.name == name { return a.owner == Some(qc.entry.class_name) }
+  }
+  true
+}
+
+fn source_constructor_name_available(
+  qc: QCx,
+  type_name: String,
+  ctor_name: String,
+  seen: Set[String]
+) -> Bool = {
+  if set.has(seen, ctor_name) || hard_reserved_builtin_type_name(ctor_name) { return false }
+  match ty_named(ctor_name) {
+    Some(_) -> false
+    None -> match map.get(qc.entry.cx.ctors_by_name, ctor_name) {
+      Some(_) -> checked_source_constructor(qc, type_name, ctor_name)
+      None -> true
+    }
+  }
+}
+
+fn add_source_constructor_completions(qc: QCx, text: String, it0: Items) -> Items = {
+  let (m, _) = parser.parse_module(text)
+  var it = it0
+  var seen_types: Set[String] = set.empty()
+  var seen_ctors: Set[String] = set.empty()
+  for d in module_types(m) {
+    let type_ok = source_type_name_available(qc, d.name, seen_types)
+    seen_types = set.insert(seen_types, d.name)
+    for c in d.ctors {
+      if type_ok && source_constructor_name_available(qc, d.name, c.name, seen_ctors) {
+        it = add(it, c.name, 20, Some("constructor of " ++ d.name), "1")
+      }
+      seen_ctors = set.insert(seen_ctors, c.name)
+    }
+  }
+  it
+}
+
+fn qualified_alias_before_dot(cps: List[Char], word_start: Int) -> Option[(String, Int)] = {
+  if word_start < 1 || cps[word_start - 1] != '.' { return None }
+  var alias_lo = word_start - 1
+  while alias_lo > 0 && is_word(cps[alias_lo - 1]) { alias_lo = alias_lo - 1 }
+  if alias_lo == word_start - 1 { return None }
+  Some((from_code_points(slice_cps(cps, alias_lo, word_start - 1)), alias_lo))
+}
+
+fn qualified_pattern_constructors(qc: QCx, module_alias: String) -> List[CItem] = {
+  let none: List[CItem] = []
+  var imported_path = map.get(qc.entry.cx.module_aliases, module_alias)
+  if imported_path == None {
+    for imported in module_uses(qc.entry.m) {
+      match imported.selective {
+        None -> if imported.alias_name == module_alias && map.has(qc.exports_env, imported.path) {
+          match imported_path {
+            Some(previous) -> if previous != imported.path { return none }
+            None -> { imported_path = Some(imported.path) }
+          }
+        }
+        Some(_) -> ()
+      }
+    }
+  }
+  match imported_path {
+    Some(path) -> match map.get(qc.exports_env, path) {
+      Some(ex) -> {
+        var it = Items { out: [], seen: set.empty() }
+        for name in map.keys(ex.ctors) {
+          it = add(it, name, 20, Some("constructor from " ++ module_alias), "0")
+        }
+        it.out
+      }
+      None -> none
+    }
+    None -> none
+  }
+}
+
 pub fn completions_at(
   qc: QCx,
   project_modules: Option[Map[String, String]],
@@ -522,6 +861,15 @@ pub fn completions_at(
     None -> ()
   }
   if nb > 0 && before[nb - 1] == '.' && (nb < 2 || before[nb - 2] != '.') {
+    match qualified_alias_before_dot(cps, ws) {
+      Some(pair) -> {
+        let (module_alias, alias_lo) = pair
+        if in_for_pattern(qc, pos) || in_incomplete_qualified_for_pattern(text, alias_lo, pos) {
+          return qualified_pattern_constructors(qc, module_alias)
+        }
+      }
+      None -> ()
+    }
     let none: List[CItem] = []
     return none
   }
@@ -529,6 +877,10 @@ pub fn completions_at(
   var it = Items { out: [], seen: set.empty() }
   if in_for_pattern(qc, pos) {
     return add_adt_completions(qc, it, false).out
+  }
+  if in_incomplete_for_pattern(text, pos) {
+    it = add_adt_completions(qc, it, false)
+    return add_source_constructor_completions(qc, text, it).out
   }
   # locals of the enclosing function: parameters + binders before the cursor
   for pr in locals_at(qc, pos) {

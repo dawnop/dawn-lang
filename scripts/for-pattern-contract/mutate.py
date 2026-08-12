@@ -122,6 +122,76 @@ MUTATIONS = {
 ''',
         ),),
     ),
+    "move-source-into-loop": (
+        "src/ir/lower.dawn",
+        ((
+            '''  (LSt { ..st11, cur_loop: st.cur_loop }, [
+    CSLet(csym, ct, coll),
+    CSLet(isym, cur_t, start_v),
+    CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
+  ])
+''',
+            '''  let statements = match pat {
+    TPCtor(_, _, _) -> [
+      CSLet(isym, cur_t, start_v),
+      CSLoop(lid, CBlock([CSLet(csym, ct, coll)] ++ inner_stmts, None, TyUnit),
+        Some(CBlock([step], None, TyUnit)))
+    ]
+    _ -> [
+      CSLet(csym, ct, coll),
+      CSLet(isym, cur_t, start_v),
+      CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
+    ]
+  }
+  (LSt { ..st11, cur_loop: st.cur_loop }, statements)
+''',
+        ),),
+    ),
+    "move-iter-start-into-loop": (
+        "src/ir/lower.dawn",
+        ((
+            '''  (LSt { ..st11, cur_loop: st.cur_loop }, [
+    CSLet(csym, ct, coll),
+    CSLet(isym, cur_t, start_v),
+    CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
+  ])
+''',
+            '''  let statements = match pat {
+    TPCtor(_, _, _) -> [
+      CSLet(csym, ct, coll),
+      CSLoop(lid, CBlock([CSLet(isym, cur_t, start_v)] ++ inner_stmts, None, TyUnit),
+        Some(CBlock([step], None, TyUnit)))
+    ]
+    _ -> [
+      CSLet(csym, ct, coll),
+      CSLet(isym, cur_t, start_v),
+      CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
+    ]
+  }
+  (LSt { ..st11, cur_loop: st.cur_loop }, statements)
+''',
+        ),),
+    ),
+    "move-iter-get-after-pattern": (
+        "src/ir/lower.dawn",
+        ((
+            '''  let inner_stmts = [
+    CSIf(done_v, CBreak(lid), None),
+    CSLet(item_sym, item_ty, get_v)
+  ] ++ pattern_stmts ++ [CSDiscard(b)]
+''',
+            '''  let inner_stmts = match pat {
+    TPCtor(_, _, _) ->
+      [CSIf(done_v, CBreak(lid), None)] ++ pattern_stmts ++
+        [CSLet(item_sym, item_ty, get_v), CSDiscard(b)]
+    _ -> [
+      CSIf(done_v, CBreak(lid), None),
+      CSLet(item_sym, item_ty, get_v)
+    ] ++ pattern_stmts ++ [CSDiscard(b)]
+  }
+''',
+        ),),
+    ),
     "drop-complexity-diagnostic": (
         "src/check/checker.dawn",
         ((
@@ -170,6 +240,183 @@ MUTATIONS = {
         ((
             "  if in_for_pattern(qc, pos) {\n",
             "  if false {\n",
+        ),),
+    ),
+    "choose-earliest-incomplete-for": (
+        "src/lsp/lspc.dawn",
+        ((
+            "fn remember_latest_for(latest: Option[Int], found: Int) -> Option[Int] = Some(found)\n",
+            '''fn remember_latest_for(latest: Option[Int], found: Int) -> Option[Int] =
+  match latest {
+    Some(_) -> latest
+    None -> Some(found)
+  }
+''',
+        ),),
+    ),
+    "cross-ordinary-newline": (
+        "src/lsp/lspc.dawn",
+        ((
+            '''fn for_header_newline_continues(previous_pipe: Bool, next_kind: TokKind) -> Bool =
+  previous_pipe || next_kind == PIPE
+''',
+            '''fn for_header_newline_continues(previous_pipe: Bool, next_kind: TokKind) -> Bool =
+  true
+''',
+        ),),
+    ),
+    "drop-nested-recovery-depth": (
+        "src/lsp/lspc.dawn",
+        ((
+            '''  while i < before {
+    let kind = toks[i].kind
+    if kind == LPAREN {
+      parens = parens + 1
+    } else if kind == RPAREN {
+      parens = parens - 1
+    } else if kind == LBRACKET {
+      brackets = brackets + 1
+    } else if kind == RBRACKET {
+      brackets = brackets - 1
+''',
+            '''  while i < before {
+    let kind = toks[i].kind
+    if kind == LPAREN {
+      parens = parens
+    } else if kind == RPAREN {
+      parens = parens
+    } else if kind == LBRACKET {
+      brackets = brackets
+    } else if kind == RBRACKET {
+      brackets = brackets
+''',
+        ),),
+    ),
+    "drop-record-recovery-depth": (
+        "src/lsp/lspc.dawn",
+        ((
+            '''fn pattern_depth_before(toks: List[Token], at: Int, before: Int) -> (Int, Int, Int) = {
+  var parens = 0
+  var brackets = 0
+  var braces = 0
+  var i = at
+  while i < before {
+    let kind = toks[i].kind
+    if kind == LPAREN {
+      parens = parens + 1
+    } else if kind == RPAREN {
+      parens = parens - 1
+    } else if kind == LBRACKET {
+      brackets = brackets + 1
+    } else if kind == RBRACKET {
+      brackets = brackets - 1
+    } else if kind == LBRACE {
+      braces = braces + 1
+    } else if kind == RBRACE {
+      braces = braces - 1
+    }
+    i = i + 1
+  }
+  (parens, brackets, braces)
+}
+''',
+            '''fn pattern_depth_before(toks: List[Token], at: Int, before: Int) -> (Int, Int, Int) = {
+  var parens = 0
+  var brackets = 0
+  var braces = 0
+  var i = at
+  while i < before {
+    let kind = toks[i].kind
+    if kind == LPAREN {
+      parens = parens + 1
+    } else if kind == RPAREN {
+      parens = parens - 1
+    } else if kind == LBRACKET {
+      brackets = brackets + 1
+    } else if kind == RBRACKET {
+      brackets = brackets - 1
+    } else if kind == LBRACE {
+      braces = braces
+    } else if kind == RBRACE {
+      braces = braces
+    }
+    i = i + 1
+  }
+  (parens, brackets, braces)
+}
+''',
+        ),),
+    ),
+    "accept-nested-header-in": (
+        "src/lsp/lspc.dawn",
+        ((
+            '''fn pattern_top(parens: Int, brackets: Int, braces: Int) -> Bool =
+  parens == 0 && brackets == 0 && braces == 0
+''',
+            '''fn pattern_top(parens: Int, brackets: Int, braces: Int) -> Bool =
+  true
+''',
+        ),),
+    ),
+    "ignore-incomplete-pattern-pipe": (
+        "src/lsp/lspc.dawn",
+        ((
+            '''  if not previous_is_pipe(toks, previous) { return false }
+  let (parens, brackets, braces) = pattern_depth_before(toks, at, previous)
+''',
+            '''  if false { return false }
+  let (parens, brackets, braces) = pattern_depth_before(toks, at, previous + 1)
+''',
+        ),),
+    ),
+    "accept-nonboundary-alternative": (
+        "src/lsp/lspc.dawn",
+        ((
+            '''  } else if boundary == RBRACE {
+    braces > 0
+  } else {
+    false
+  }
+''',
+            '''  } else if boundary == RBRACE {
+    braces > 0
+  } else {
+    true
+  }
+''',
+        ),),
+    ),
+    "skip-qualified-pattern-constructors": (
+        "src/lsp/lspc.dawn",
+        ((
+            '''        if in_for_pattern(qc, pos) || in_incomplete_qualified_for_pattern(text, alias_lo, pos) {
+          return qualified_pattern_constructors(qc, module_alias)
+        }
+''',
+            '''        if false {
+          return qualified_pattern_constructors(qc, module_alias)
+        }
+''',
+        ),),
+    ),
+    "escape-incomplete-header-interval": (
+        "src/lsp/lspc.dawn",
+        ((
+            '''      Some(header_in) ->
+        pos <= toks[header_in].lo &&
+        missing_for_alternative_at(toks, for_at + 1, header_in, header_in, pos)
+''',
+            '''      Some(header_in) ->
+        true &&
+        missing_for_alternative_at(toks, for_at + 1, header_in, len(toks) - 1, pos)
+''',
+        ),),
+    ),
+    "admit-rejected-source-constructor": (
+        "src/lsp/lspc.dawn",
+        ((
+            "      if type_ok && source_constructor_name_available(qc, d.name, c.name, seen_ctors) {\n",
+            "      if true {\n",
         ),),
     ),
 }

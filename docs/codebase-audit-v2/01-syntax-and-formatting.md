@@ -245,8 +245,12 @@
   usefulness 超预算时 fail closed。iterable 每轮先把唯一一次 `iter_get` 存进隐藏 item
   local，range 使用独立隐藏 induction local，再走与结构性 `let` 共享的 selector/binding
   lowering；`Never` source 则只保留一次 bottom 求值。LSP 用完整递归 pattern span 把
-  header completion 限于 constructor，并按 source、body 与 after 的实际 span 分层 scope；十五条
-  production-source compiling mutant 分别固定 grammar、诊断、scope、LSP 与求值次数边界。
+  合法 header completion 限于 constructor；未完成 alternative 则用括号深度与同一 header
+  的平衡顶层 `in` 做 token recovery，并从 parser 保留的 type declarations 补齐本地
+  constructor，同时复用 checker registry 排除保留名、重复与无效声明；限定 module alias
+  completion 在完整和未完成 pattern 中都只给该模块可见 constructor，普通 member dot
+  仍为空。source、body 与 after 按实际边界分层 scope；28 条 production-source compiling
+  mutant 分别固定 grammar、诊断、scope、LSP、求值次数与 Core placement 边界。
 
 - **证据：S。** parser 在 `for` 后只接受 IDENT：`selfhost/src/front/parser.dawn:1215`；`let` 已支持不可反驳 pattern，规范也已有 refutability 规则：`docs/spec.md:921`。
 - **边界：** 遍历 pair/entry 不能写 `for (k, v) in entries`，必须先绑定临时值再解构。

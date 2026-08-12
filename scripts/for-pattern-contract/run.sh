@@ -34,9 +34,22 @@ ASSERT_IRREFUTABLE='refutable for patterns are rejected rather than filtered'
 ASSERT_BINDINGS='for pattern bindings reach the body with correct values'
 ASSERT_GET_ONCE='iter_get is evaluated once per iteration before pattern lowering'
 ASSERT_SOURCE_ONCE='iterable sources are evaluated once before the loop'
+ASSERT_SOURCE_PLACEMENT='iterable source is evaluated before loop entry'
+ASSERT_START_PLACEMENT='iter_start is evaluated before loop entry'
+ASSERT_GET_PLACEMENT='iter_get initializes the hidden item before pattern lowering'
 ASSERT_SCOPE='for pattern bindings stay inside the loop body'
 ASSERT_LSP_QUERY='for pattern headers expose binder and constructor queries'
 ASSERT_LSP_HEADER='for pattern completion suppresses values across the recursive header'
+ASSERT_LSP_LATEST_FOR='incomplete pattern recovery selects the latest enclosing for'
+ASSERT_LSP_NEWLINE='incomplete pattern recovery does not cross an ordinary newline'
+ASSERT_LSP_NESTED_DEPTH='incomplete pattern recovery preserves nested delimiter depth'
+ASSERT_LSP_RECORD_DEPTH='incomplete pattern recovery preserves record delimiter depth'
+ASSERT_LSP_TOP_LEVEL_IN='incomplete pattern recovery requires a top-level in delimiter'
+ASSERT_LSP_PREVIOUS_PIPE='incomplete pattern recovery requires a preceding pipe'
+ASSERT_LSP_BOUNDARY='incomplete pattern recovery requires a same-depth pattern boundary'
+ASSERT_LSP_HEADER_INTERVAL='incomplete pattern recovery stays before in, outside source body and after'
+ASSERT_LSP_SOURCE_CTOR='incomplete pattern recovery excludes rejected source constructors'
+ASSERT_LSP_QUALIFIED='for pattern qualified completion exposes only module constructors'
 ASSERT_LSP_RANGE='range upper-bound completion offers outer locals'
 ASSERT_LSP_SCOPE='for completion does not leak pattern or body locals'
 ASSERT_DERIVED='invalid for patterns suppress derived irrefutability diagnostics'
@@ -52,9 +65,22 @@ printf '%s\n' \
   "$ASSERT_BINDINGS" \
   "$ASSERT_GET_ONCE" \
   "$ASSERT_SOURCE_ONCE" \
+  "$ASSERT_SOURCE_PLACEMENT" \
+  "$ASSERT_START_PLACEMENT" \
+  "$ASSERT_GET_PLACEMENT" \
   "$ASSERT_SCOPE" \
   "$ASSERT_LSP_QUERY" \
   "$ASSERT_LSP_HEADER" \
+  "$ASSERT_LSP_LATEST_FOR" \
+  "$ASSERT_LSP_NEWLINE" \
+  "$ASSERT_LSP_NESTED_DEPTH" \
+  "$ASSERT_LSP_RECORD_DEPTH" \
+  "$ASSERT_LSP_TOP_LEVEL_IN" \
+  "$ASSERT_LSP_PREVIOUS_PIPE" \
+  "$ASSERT_LSP_BOUNDARY" \
+  "$ASSERT_LSP_HEADER_INTERVAL" \
+  "$ASSERT_LSP_SOURCE_CTOR" \
+  "$ASSERT_LSP_QUALIFIED" \
   "$ASSERT_LSP_RANGE" \
   "$ASSERT_LSP_SCOPE" \
   "$ASSERT_DERIVED" \
@@ -267,6 +293,21 @@ probe_compiler() {
         > "$output/get-core.out" 2> "$output/get-core.err"; then
     printf 'ASSERT: %s\n' "$ASSERT_GET_ONCE" >> "$output/assertions.raw"
   fi
+  if [ "$iter_lower" -ne 0 ] ||
+      ! python3 "$here/core_check.py" source-placement "$output/iter-dump/iter_core.core" \
+        > "$output/source-placement-core.out" 2> "$output/source-placement-core.err"; then
+    printf 'ASSERT: %s\n' "$ASSERT_SOURCE_PLACEMENT" >> "$output/assertions.raw"
+  fi
+  if [ "$iter_lower" -ne 0 ] ||
+      ! python3 "$here/core_check.py" start-placement "$output/iter-dump/iter_core.core" \
+        > "$output/start-placement-core.out" 2> "$output/start-placement-core.err"; then
+    printf 'ASSERT: %s\n' "$ASSERT_START_PLACEMENT" >> "$output/assertions.raw"
+  fi
+  if [ "$iter_lower" -ne 0 ] ||
+      ! python3 "$here/core_check.py" get-placement "$output/iter-dump/iter_core.core" \
+        > "$output/get-placement-core.out" 2> "$output/get-placement-core.err"; then
+    printf 'ASSERT: %s\n' "$ASSERT_GET_PLACEMENT" >> "$output/assertions.raw"
+  fi
   if [ "$range_lower" -ne 0 ] ||
       ! python3 "$here/core_check.py" range "$output/range-dump/range_core.core" \
         > "$output/range-core.out" 2> "$output/range-core.err"; then
@@ -280,6 +321,16 @@ probe_compiler() {
   if [ "$lsp_status" -ne 0 ] && ! grep -q '^ASSERT: ' "$output/lsp.out"; then
     printf 'ASSERT: %s\n' "$ASSERT_LSP_QUERY" >> "$output/assertions.raw"
     printf 'ASSERT: %s\n' "$ASSERT_LSP_HEADER" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_LATEST_FOR" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_NEWLINE" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_NESTED_DEPTH" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_RECORD_DEPTH" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_TOP_LEVEL_IN" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_PREVIOUS_PIPE" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_BOUNDARY" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_HEADER_INTERVAL" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_SOURCE_CTOR" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_QUALIFIED" >> "$output/assertions.raw"
     printf 'ASSERT: %s\n' "$ASSERT_LSP_RANGE" >> "$output/assertions.raw"
     printf 'ASSERT: %s\n' "$ASSERT_LSP_SCOPE" >> "$output/assertions.raw"
   fi
@@ -293,7 +344,8 @@ dump_probe() {
   for file in assertions.out parse.out fmt.out refutable.out.raw derived.out.raw \
     scope.out.raw complexity.out.raw bottom-check.out.raw bottom-lower.err bottom-core.err \
     runtime.out runtime.err iter-lower.err \
-    range-lower.err source-core.err start-core.err get-core.err range-core.err \
+    range-lower.err source-core.err start-core.err get-core.err \
+    source-placement-core.err start-placement-core.err get-placement-core.err range-core.err \
     lsp.out lsp.err; do
     if [ -f "$output/$file" ]; then cat "$output/$file" >&2; fi
   done

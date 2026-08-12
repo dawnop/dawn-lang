@@ -44,6 +44,19 @@ pattern header 中的 constructor 和 binding 参加 hover 与 definition。小�
 body 再加入 pattern bindings，循环后不保留 pattern 或 body locals。or-pattern body
 completion 只收第一支的 canonical symbols。
 
+限定 pattern completion 只在上述 header context 解析已经导入的 module alias，`q.` 与
+`q.On` 都只返回该模块可见 constructor，不混入该模块的 value/type；普通 member dot
+继续返回空列表。
+
+未完成的后续 alternative 尚不能形成 `SFor`。正常 AST span 路径失败后，completion 以
+lexer token 恢复同一 header，跟踪圆括号、方括号与 record brace 深度；只有位于 `for`
+与平衡顶层 `in` 之间、前一 token 是 `|` 且后一 token 是 pattern boundary 的空位才算
+pattern context。source、range upper bound、body 与循环后的语句都在该 `in` 之后，因此
+不会被恢复路径误判。若 checker recovery 未建立本地 ADT 表，constructor 列表从 parser
+仍保留的本文件 type declarations 补齐，并复用 checker 的 builtin 与 namespace registry
+排除保留名、无效声明和重复 constructor，不退回 value completion。普通 completion 只做
+线性 token/span 判断；只有 recovery 已命中才解析当前 source，因此热路径不增加无条件 parse。
+
 formatter 仍是 token-stream formatter，不增加生产分支；只增加行首 `|` 的 for-pattern
 格式化与幂等语料。AST dump 输出完整 pattern，而不是退化成一个名字。
 
@@ -53,9 +66,11 @@ formatter 仍是 token-stream formatter，不增加生产分支；只增加行�
 for-pattern。新语法只出现在字符串、外部 corpus 和由 HEAD compiler 编译的 JVM/native
 fixture 中。
 
-独立 contract 对 parser、checker、lowering 与 LSP 的十五条生产规则各放一个 compiling
-mutant，并对每个 mutant 运行完整 assertion set。既有 range bound order 与 source loop
-label contract 继续拥有边界顺序和 jump step，不复制同义规则。
+独立 contract 对 parser、checker、lowering 与 LSP 的 28 条生产规则各放一个 compiling
+mutant，并对每个 mutant 运行完整 assertion set。除原有求值次数负控外，三个独立 Core
+placement mutant 分别把 source、`iter_start` 移入 loop，或把 `iter_get` 移到 pattern
+selector/binding 之后，调用总数保持不变且各自只击穿自己的 owner。既有 range bound order
+与 source loop label contract 继续拥有边界顺序和 jump step，不复制同义规则。
 
 ## 六、不做的
 

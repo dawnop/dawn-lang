@@ -162,8 +162,10 @@ non-fallthrough seam，并由双后端、classfile、checker、LSP 与 doc 合�
 语法、诊断、LSP、运行时、复杂度归约和预算拒绝边界。
 随后 `SYN-13` open → fixed：`for` 头复用完整递归 pattern grammar，typed usefulness 拒绝
 可反驳 pattern；source/range 外层 scope、单次求值、隐藏 item/induction locals、共享 pattern
-lowering、`Never` source bottom 路径与精确 LSP span scope 由双后端语料和 15 条
-production-source compiling mutants 固定。
+lowering、`Never` source bottom 路径、精确 LSP span scope 与未完成 alternative 的
+token recovery、限定 constructor completion，以及 source/`iter_start`/`iter_get` 的 Core
+placement 由双后端语料和 28 条 production-source compiling mutants 固定；recovery fallback
+复用 checker 的 builtin/namespace 判定，不暴露被 checker 拒绝的 constructor。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
