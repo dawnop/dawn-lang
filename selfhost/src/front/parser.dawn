@@ -1198,9 +1198,13 @@ fn let_stmt(p: P, st: St, mutable: Bool) -> PR[Stmt] = {
   let (st1, kw) = adv(p, st)
   # destructuring: let (a, b) = pair / let Point { x, y } = p / let [..all] = xs
   let k = kind_of(p, st1)
-  let or_after_name = (k == IDENT || k == UNDERSCORE) && kind_ahead(p, st1, 1) == PIPE
+  let qualified_ctor = k == IDENT && kind_ahead(p, st1, 1) == DOT &&
+    kind_ahead(p, st1, 2) == TYPEIDENT
+  let or_after_name = (k == IDENT || k == UNDERSCORE) &&
+    at_kind(p, lead1(p, adv1(p, st1), PIPE), PIPE)
   if k == LPAREN || k == TYPEIDENT || k == LBRACKET || k == INT || k == CHAR ||
-    k == FLOAT || k == MINUS || k == TRUE || k == FALSE || k == STRING || or_after_name {
+    k == FLOAT || k == MINUS || k == TRUE || k == FALSE || k == STRING ||
+    qualified_ctor || or_after_name {
       let (st2, pat) = pattern_p(p, st1)?
       if at_kind(p, st2, COLON) {
         return Err((st2, perr_h(p, st2, "destructuring lets cannot take a type annotation",
@@ -2332,7 +2336,14 @@ fn sync_arm(p: P, start: St, failed: St) -> St = {
   while not at_kind(p, s, EOF) {
     let k = cur(p, s).kind
     let top = parens == 0 && brackets == 0 && braces == 0
-    if top && (k == NEWLINE || k == COMMA) { break }
+    if top && k == NEWLINE {
+      if at_kind(p, lead1(p, s, PIPE), PIPE) {
+        s = adv1(p, s)
+        continue
+      }
+      break
+    }
+    if top && k == COMMA { break }
     if k == RBRACE && braces == 0 { break }
     if k == LPAREN {
       parens = parens + 1
@@ -2420,9 +2431,11 @@ fn pattern_p(p: P, st: St) -> PR[Pattern] = {
     _ -> [first]
   }
   var saw_pipe = false
-  while at_kind(p, st2, PIPE) {
+  while true {
+    let sta = lead1(p, st2, PIPE)
+    if not at_kind(p, sta, PIPE) { break }
     saw_pipe = true
-    let st3 = skip_nl(p, adv1(p, st2))
+    let st3 = skip_nl(p, adv1(p, sta))
     let (st4, next) = pattern_atom(p, st3)?
     match next {
       POr(xs) -> { alts = alts ++ xs }

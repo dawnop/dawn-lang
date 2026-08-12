@@ -38,9 +38,9 @@ Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 D
 | **部分** | 已有实质修复，但明细所指出的至少一个边界在当前代码中仍成立，不能冒称关闭。 |
 | **开放** | 截至本层快照没有足够证据宣告关闭；未改、只做设计或只做前置重构都归此类。 |
 
-**已修（54）**
+**已修（55）**
 
-- 语法（11）：`SYN-01`–`SYN-03`、`SYN-06`–`SYN-08`、`SYN-10`、`SYN-14`、`SYN-15`、`SYN-18`、`SYN-19`。
+- 语法（12）：`SYN-01`–`SYN-04`、`SYN-06`–`SYN-08`、`SYN-10`、`SYN-14`、`SYN-15`、`SYN-18`、`SYN-19`。
 - 语义（7）：`SEM-01`、`SEM-02`、`SEM-03`、`SEM-11`、`SEM-12`、`SEM-15`、`SEM-17`。
 - 架构（4）：`ARC-03`–`ARC-06`。
 - 工具链（13）：`TOOL-01`–`TOOL-04`、`TOOL-07`、`TOOL-09`、`TOOL-10`、`TOOL-11`、`TOOL-12`、
@@ -54,9 +54,9 @@ Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 D
 - [`ARC-02`](codebase-audit-v2/03-compiler-and-runtime-architecture.md)：明细要求覆盖 String、method 与 classfile 硬边界；当前 `ldc_str` 已分块、`class_bytes` 已接住 ASM failure，但 Core finalize 仍没有 span，超限 method/class 只能报 class/ASM method 文本而没有源码位置，仍须用户手工拆分。
 - [`LIB-10`](codebase-audit-v2/05-stdlib-and-packages.md)：明细要求 CORS 包住最终 error response；当前 `with_cors` 已处理 handler 的 `Ok`/`Err`，但 `server.dawn` 的 dot-segment 400 与 body-limit 413 在 Request 和 middleware 之前产生，仍没有 CORS headers。
 
-**开放（40）**
+**开放（39）**
 
-- 语法（8）：`SYN-04`、`SYN-05`、`SYN-09`、`SYN-11`、`SYN-12`、`SYN-13`、
+- 语法（7）：`SYN-05`、`SYN-09`、`SYN-11`、`SYN-12`、`SYN-13`、
   `SYN-16`、`SYN-17`。
 - 语义（10）：`SEM-04`–`SEM-10`、`SEM-13`、`SEM-14`、`SEM-16`。
 - 架构（6）：`ARC-07`–`ARC-12`。
@@ -78,7 +78,7 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 `scripts/native-cli-diff.sh`；#206 与 release/bootstrap 收口见 `fde3203`、`2683638`、
 `c4761ce`、`3a3ad4b`、`77374c9`、`086ea95` 及 `scripts/bootstrap-guards/run.sh`。
 
-计数自检：**54 已修 + 3 部分 + 40 开放 = 97**。逐专题状态自检：语法 **11/0/8**、
+计数自检：**55 已修 + 3 部分 + 39 开放 = 97**。逐专题状态自检：语法 **12/0/7**、
 语义 **7/0/10**、架构 **4/2/6**、工具链 **13/0/4**、库 **7/1/11**、治理 **12/0/1**
 （顺序均为已修/部分/开放）；各专题仍分别覆盖 19 / 17 / 12 / 17 / 19 / 13 项，
 与冻结总数一致且无重复、遗漏。
@@ -157,7 +157,9 @@ non-fallthrough seam，并由双后端、classfile、checker、LSP 与 doc 合�
 与恢复 upper-first 的 compiling mutant 共同固定修复边界。它同样不进入冻结历史或 P1 索引。
 随后 `SYN-04` open → fixed：or-pattern 成为递归、扁平的 n-ary `Pattern`，各 alternative
 共享第一支的 canonical binding；usefulness、结构性 `let`、单次 guard/body lowering 与 LSP
-查询均走同一 typed pattern。绝对双后端语料和三条 compiling mutant 固定运行时与拒绝边界。
+查询均走同一 typed pattern。类型已知的完备 alternatives 在 usefulness 前归约，剩余搜索
+按确定性预算 fail-closed。绝对双后端语料与 14 条 production-source compiling mutants 固定
+语法、诊断、LSP、运行时、复杂度归约和预算拒绝边界。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 

@@ -615,15 +615,18 @@ jobs:
   # The checker's diagnostics, recorded in the order `cerr` appends them.
   # Nothing else here can see them -- grammar-corpus stops at the parser,
   # spike-native compares program output, and the Core golden compares the IR,
-  # so the wording, the span and above all the *order* of 277 diagnostics could
+  # so the wording, the span and above all the *order* of 474 diagnostics could
   # all move with every gate green. The ratchet in uncovered.txt is the other
   # half: it fails when a `cerr` no case reaches appears, so coverage cannot
   # quietly regress either.
   checker-corpus:
     runs-on: ubuntu-latest
-    # 348s before the move, 354s measured after it; see the note in `test`.
-    # budget: 3x 354s worst observed
-    timeout-minutes: 18
+    # 445.97s measured locally on 2026-08-12 after pattern-or joined the job:
+    # checker corpus 132.89s, syntax contracts 285.75s, Java narrowing 27.31s.
+    # This supersedes the prior 354s runner observation; round the worse value
+    # up before applying the repository-wide 3x rule.
+    # budget: 3x 446s worst observed
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -633,9 +636,10 @@ jobs:
         run: ./scripts/checker-corpus/run.sh
 
       # Parser ownership, checker-owned builtin alias hints, and the nominal
-      # singleton/nullary boundary are each exercised by a compiling mutant.
-      # The two earlier recovery mutants remain here too, so this step owns all
-      # five small syntax mutations without adding another cold-start job.
+      # singleton/nullary boundary keep their five compiling syntax mutants.
+      # This step also runs the pattern-or matrix: fourteen production mutants,
+      # each against the complete checker, parser, LSP, runtime and complexity
+      # assertion set, without adding another cold-start job.
       - name: syntax ownership and recovery contract
         run: ./scripts/syntax-small-contract/run.sh
 

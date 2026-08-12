@@ -2,25 +2,39 @@
 """Probe every or-pattern binder occurrence and its shared environment."""
 
 import json
+from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 
+LIB_TEXT = "pub type Qualified = Pick(value: Int)\n"
 TEXT = (
+    "use qlib as q\n"
+    "\n"
     "type Choice = Left(value: Int) | Right(value: Int)\n"
     "\n"
     "fn pick(choice: Choice) -> Int =\n"
     "  match choice {\n"
     "    Left(shared) | Right(shared) -> shared\n"
     "  }\n"
+    "\n"
+    "fn tail_len(xs: List[Int]) -> Int =\n"
+    "  match xs {\n"
+    "    [..rest] | [x, ..rest] -> len(rest)\n"
+    "  }\n"
+    "\n"
+    "fn qualified(value: q.Qualified) -> Int =\n"
+    "  match value {\n"
+    "    q.Pick(picked) -> picked\n"
+    "  }\n"
 )
-URI = "untitled:pattern-or-contract.dawn"
 
 
-def position(index):
+def position(index, text=TEXT):
     return {
-        "line": TEXT.count("\n", 0, index),
-        "character": index - (TEXT.rfind("\n", 0, index) + 1),
+        "line": text.count("\n", 0, index),
+        "character": index - (text.rfind("\n", 0, index) + 1),
     }
 
 
@@ -73,6 +87,14 @@ def range_start(result):
     return target.get("start")
 
 
+def definition_uri(result):
+    if isinstance(result, list) and result:
+        result = result[0]
+    if not isinstance(result, dict):
+        return None
+    return result.get("targetUri") or result.get("uri")
+
+
 def completion_labels(result):
     if isinstance(result, dict):
         result = result.get("items", [])
@@ -81,46 +103,97 @@ def completion_labels(result):
     return [item.get("label") for item in result if isinstance(item, dict)]
 
 
-def fail(message, replies_by_id=None):
+def fail(message):
     print("ASSERT: " + message)
-    if replies_by_id is not None:
-        print(json.dumps(replies_by_id, sort_keys=True), file=sys.stderr)
-    return 1
 
 
 def main():
     java, jar, cwd = sys.argv[1:]
-    occurrences = []
+    shared_occurrences = []
+    rest_occurrences = []
+    for needle, found_at in (("shared", shared_occurrences), ("rest", rest_occurrences)):
+        start = 0
+        while True:
+            found = TEXT.find(needle, start)
+            if found < 0:
+                break
+            found_at.append(found)
+            start = found + 1
+    if len(shared_occurrences) != 3 or len(rest_occurrences) != 3:
+        fail("the LSP fixture keeps three occurrences of each shared binding")
+        return 1
+
+    qualified_ctor = TEXT.index("q.Pick") + len("q.")
+    qualified_binds = []
     start = 0
     while True:
-        found = TEXT.find("shared", start)
+        found = TEXT.find("picked", start)
         if found < 0:
             break
-        occurrences.append(found)
+        qualified_binds.append(found)
         start = found + 1
-    if len(occurrences) != 3:
-        return fail("the LSP fixture must contain three `shared` occurrences")
+    if len(qualified_binds) != 2:
+        fail("the qualified-pattern fixture keeps its binding and use")
+        return 1
+
+    temp = tempfile.TemporaryDirectory(prefix="pattern-or-lsp-")
+    project = Path(temp.name)
+    source = project / "src"
+    source.mkdir()
+    (project / "dawn.toml").write_text(
+        'schema = 1\nname = "pattern_or_lsp"\n', encoding="utf-8")
+    lib_path = source / "qlib.dawn"
+    main_path = source / "main.dawn"
+    lib_path.write_text(LIB_TEXT, encoding="utf-8")
+    main_path.write_text(TEXT, encoding="utf-8")
+    lib_uri = lib_path.resolve().as_uri()
+    uri = main_path.resolve().as_uri()
 
     messages = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-         "params": {"processId": None, "rootUri": None, "capabilities": {}}},
+         "params": {"processId": None, "rootUri": project.resolve().as_uri(), "capabilities": {}}},
         {"jsonrpc": "2.0", "method": "initialized", "params": {}},
         {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
-            "textDocument": {"uri": URI, "languageId": "dawn", "version": 1, "text": TEXT}}},
+            "textDocument": {"uri": lib_uri, "languageId": "dawn", "version": 1,
+                             "text": LIB_TEXT}}},
+        {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "dawn", "version": 1, "text": TEXT}}},
     ]
-    for request_id, index in enumerate(occurrences, start=2):
+    for request_id, index in enumerate(shared_occurrences, start=2):
         messages.append({
             "jsonrpc": "2.0",
             "id": request_id,
             "method": "textDocument/hover",
-            "params": {"textDocument": {"uri": URI}, "position": position(index)},
+            "params": {"textDocument": {"uri": uri}, "position": position(index)},
+        })
+    for request_id, index in enumerate(rest_occurrences, start=5):
+        messages.append({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "textDocument/hover",
+            "params": {"textDocument": {"uri": uri}, "position": position(index)},
         })
     messages.extend([
-        {"jsonrpc": "2.0", "id": 5, "method": "textDocument/definition", "params": {
-            "textDocument": {"uri": URI}, "position": position(occurrences[1])}},
-        {"jsonrpc": "2.0", "id": 6, "method": "textDocument/completion", "params": {
-            "textDocument": {"uri": URI}, "position": position(occurrences[2] + len("shared"))}},
-        {"jsonrpc": "2.0", "id": 7, "method": "shutdown", "params": {}},
+        {"jsonrpc": "2.0", "id": 8, "method": "textDocument/definition", "params": {
+            "textDocument": {"uri": uri}, "position": position(shared_occurrences[1])}},
+        {"jsonrpc": "2.0", "id": 9, "method": "textDocument/definition", "params": {
+            "textDocument": {"uri": uri}, "position": position(rest_occurrences[1])}},
+        {"jsonrpc": "2.0", "id": 10, "method": "textDocument/completion", "params": {
+            "textDocument": {"uri": uri},
+            "position": position(shared_occurrences[2] + len("shared"))}},
+        {"jsonrpc": "2.0", "id": 11, "method": "textDocument/hover", "params": {
+            "textDocument": {"uri": uri}, "position": position(qualified_ctor)}},
+        {"jsonrpc": "2.0", "id": 12, "method": "textDocument/definition", "params": {
+            "textDocument": {"uri": uri}, "position": position(qualified_ctor)}},
+        {"jsonrpc": "2.0", "id": 13, "method": "textDocument/hover", "params": {
+            "textDocument": {"uri": uri}, "position": position(qualified_binds[0])}},
+        {"jsonrpc": "2.0", "id": 14, "method": "textDocument/definition", "params": {
+            "textDocument": {"uri": uri}, "position": position(qualified_binds[0])}},
+        {"jsonrpc": "2.0", "id": 15, "method": "textDocument/hover", "params": {
+            "textDocument": {"uri": uri}, "position": position(qualified_binds[1])}},
+        {"jsonrpc": "2.0", "id": 16, "method": "textDocument/definition", "params": {
+            "textDocument": {"uri": uri}, "position": position(qualified_binds[1])}},
+        {"jsonrpc": "2.0", "id": 17, "method": "shutdown", "params": {}},
         {"jsonrpc": "2.0", "method": "exit", "params": {}},
     ])
 
@@ -131,22 +204,60 @@ def main():
         cwd=cwd,
     )
     if done.returncode != 0:
+        temp.cleanup()
         sys.stderr.write(done.stdout.decode("utf-8", "replace"))
         sys.stderr.write(done.stderr.decode("utf-8", "replace"))
-        return fail("or-pattern LSP server exits successfully")
+        fail("or-pattern LSP server exits successfully")
+        return 1
 
     got = replies(done.stdout)
+    failures = []
+
+    def reject(message):
+        if message not in failures:
+            failures.append(message)
+
     for request_id in (2, 3, 4):
         if "shared: Int" not in hover_text(got.get(request_id)):
-            return fail("every or-pattern binding occurrence has hover", got)
+            reject("every or-pattern binding occurrence has hover")
+            break
+    for request_id in (5, 6, 7):
+        if "rest: List[Int]" not in hover_text(got.get(request_id)):
+            reject("every list-rest binding occurrence has hover")
+            break
 
-    if range_start(got.get(5)) != position(occurrences[0]):
-        return fail("later alternatives resolve to the first canonical binding", got)
+    if range_start(got.get(8)) != position(shared_occurrences[0]):
+        reject("later alternatives resolve to the first canonical binding")
 
-    if completion_labels(got.get(6)).count("shared") != 1:
-        return fail("or-pattern completion deduplicates the shared symbol", got)
+    if range_start(got.get(9)) != position(TEXT.find("..rest")):
+        reject("list-rest alternatives resolve to the first canonical binding")
 
-    print("PASS  every binder hovers, definitions canonicalize, and completion deduplicates")
+    if completion_labels(got.get(10)).count("shared") != 1:
+        reject("or-pattern completion deduplicates the shared symbol")
+
+    pqual_owner = "qualified constructor patterns expose constructor and binding queries"
+    if "Pick" not in hover_text(got.get(11)):
+        reject(pqual_owner)
+    if (definition_uri(got.get(12)) != lib_uri or
+            range_start(got.get(12)) != position(LIB_TEXT.index("Pick"), LIB_TEXT)):
+        reject(pqual_owner)
+    for request_id in (13, 15):
+        if "picked: Int" not in hover_text(got.get(request_id)):
+            reject(pqual_owner)
+    if range_start(got.get(14)) != position(qualified_binds[0]):
+        reject(pqual_owner)
+    if range_start(got.get(16)) != position(qualified_binds[0]):
+        reject(pqual_owner)
+
+    for message in failures:
+        fail(message)
+    if failures:
+        print(json.dumps(got, sort_keys=True), file=sys.stderr)
+        temp.cleanup()
+        return 1
+
+    temp.cleanup()
+    print("PASS  binders and qualified constructors hover and resolve canonically")
     return 0
 
 

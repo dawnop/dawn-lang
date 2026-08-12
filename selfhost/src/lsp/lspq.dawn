@@ -1252,43 +1252,11 @@ fn visit_pat(qc: QCx, q0: Q, pp: Pattern, tp: Option[TPat]) -> Q = {
         i = i + 1
       }
     }
-    PCtor(name, args, _, _, nlo, nhi, _, _) -> {
-      let resolved: Option[(Int, Int, List[Option[TPat]])] = match tp {
-        Some(TPCtor(aid, ci, fps)) -> Some((aid, ci, fps))
-        _ -> None
-      }
-      match resolved {
-        Some(k) -> {
-          let (aid, ci, fps) = k
-          let a = adt_of(qc.entry.cx.adts, aid)
-          match get(a.ctors, ci) {
-            Some(c) -> {
-              let (dsp, dp) = def_of_ctor(qc, aid, c.name)
-              q = offer(q, nlo, nhi, render_ctor(qc, c), dsp, dp)
-              # pair each written arg with its field's typed sub-pattern
-              var pos = 0
-              for pa in args {
-                let fi = match pa.name {
-                  Some(n) -> field_index(c, n)
-                  None -> Some(pos)
-                }
-                let sub: Option[TPat] = match fi {
-                  Some(ix) ->
-                    match get(fps, ix) {
-                      Some(o) -> o
-                      None -> None
-                    }
-                  None -> None
-                }
-                q = visit_pat(qc, q, pa.pat, sub)
-                pos = pos + 1
-              }
-            }
-            None -> { for pa in args { q = visit_pat(qc, q, pa.pat, None) } }
-          }
-        }
-        None -> { for pa in args { q = visit_pat(qc, q, pa.pat, None) } }
-      }
+    PCtor(_, args, _, _, nlo, nhi, _, _) -> {
+      q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
+    }
+    PQual(_, _, args, _, _, nlo, nhi, _, _) -> {
+      q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
     PTuple(elems, _, _) -> {
       let telems = match tp {
@@ -1344,7 +1312,7 @@ fn visit_pat(qc: QCx, q0: Q, pp: Pattern, tp: Option[TPat]) -> Q = {
                   match sym_get(qc, sid) {
                     Some(sym) -> {
                       q = offer(q, rlo, rhi, sym.name ++ ": " ++ show_ty(qc, sym.ty),
-                        Some((rlo, rhi)), None)
+                        Some((sym.dlo, sym.dhi)), None)
                     }
                     None -> ()
                   }
@@ -1358,6 +1326,53 @@ fn visit_pat(qc: QCx, q0: Q, pp: Pattern, tp: Option[TPat]) -> Q = {
       }
     }
     _ -> ()
+  }
+  q
+}
+
+fn visit_ctor_pat(
+  qc: QCx,
+  q0: Q,
+  args: List[PatArg],
+  nlo: Int,
+  nhi: Int,
+  tp: Option[TPat]
+) -> Q = {
+  var q = q0
+  let resolved: Option[(Int, Int, List[Option[TPat]])] = match tp {
+    Some(TPCtor(aid, ci, fps)) -> Some((aid, ci, fps))
+    _ -> None
+  }
+  match resolved {
+    Some(k) -> {
+      let (aid, ci, fps) = k
+      let a = adt_of(qc.entry.cx.adts, aid)
+      match get(a.ctors, ci) {
+        Some(c) -> {
+          let (dsp, dp) = def_of_ctor(qc, aid, c.name)
+          q = offer(q, nlo, nhi, render_ctor(qc, c), dsp, dp)
+          var pos = 0
+          for pa in args {
+            let fi = match pa.name {
+              Some(n) -> field_index(c, n)
+              None -> Some(pos)
+            }
+            let sub: Option[TPat] = match fi {
+              Some(ix) ->
+                match get(fps, ix) {
+                  Some(o) -> o
+                  None -> None
+                }
+              None -> None
+            }
+            q = visit_pat(qc, q, pa.pat, sub)
+            pos = pos + 1
+          }
+        }
+        None -> { for pa in args { q = visit_pat(qc, q, pa.pat, None) } }
+      }
+    }
+    None -> { for pa in args { q = visit_pat(qc, q, pa.pat, None) } }
   }
   q
 }

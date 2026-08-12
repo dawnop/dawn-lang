@@ -1113,12 +1113,13 @@ match shape {
 
 `|` 是 pattern 的最低优先级，递归出现在构造器、记录、元组与列表 pattern 内，并按
 源码顺序收集为扁平的 n-ary or-pattern。`(pat)` 只用于分组，tuple pattern 仍需要逗号。
-运行时选择第一个匹配的 alternative，选中后不在同一 or-pattern 内回溯。match 臂的
-guard 作用于整个 or-pattern，最多执行一次；guard 为 false 时进入下一臂，body 也最多
-执行一次。
+`|` 可以放在续行行首，例如 `A\n  | B`；换行后若没有 `|`，pattern 仍开始下一个 match 臂。
+运行时选择第一个匹配的 alternative，选中后不在同一 or-pattern 内回溯。match 臂的 guard
+作用于整个 or-pattern，最多执行一次；guard 为 false 时进入下一臂，body 也最多执行一次。
 
-每个 alternative 必须绑定完全相同的名字集合，且同名绑定的类型与 mutability 必须一致。
-第一支的绑定是共享环境中的 canonical binding，后续支只为它提供另一个取值路径。
+每个 alternative 必须绑定完全相同的名字集合，且同名绑定的类型必须一致。外围的 `let`
+或 `var` 为整个 pattern 一次性决定可变性，各 alternative 不可能在这点上不同。第一支的
+绑定是共享环境中的 canonical binding，后续支只为它提供另一个取值路径。
 
 ### 5.2 穷尽性
 
@@ -1126,9 +1127,14 @@ guard 作用于整个 or-pattern，最多执行一次；guard 为 false 时进�
 缺分支报错并列出缺失构造器。`Int`/`String`/`Float` 上的 match 必须有
 `_` 或绑定兜底分支。
 
-`let` 也接受不可反驳模式：`let (a, b) = pair`、`let Point { x, y } = p`。or-pattern
-使用同一份 usefulness 判定，所以 `let true | false = flag` 合法，而 `let true = flag`
-仍然可反驳并被拒绝。
+`let` 也接受不可反驳模式：`let (a, b) = pair`、`let Point { x, y } = p`，以及导入的单构造器
+类型上的 `let m.Only(x) = value`。or-pattern 使用同一份 usefulness 判定，所以
+`let true | false = flag` 合法，而 `let true = flag` 仍然可反驳并被拒绝。
+
+编译器在 usefulness 搜索前归约类型已知的完备 alternatives，包括 `true | false`。剩余搜索
+受确定性工作预算约束。如果预算耗尽，编译器会拒绝原本语法合法的 `match` 或结构性 `let`，
+报告 `pattern analysis exceeded its complexity budget`，而不会猜测是否穷尽。诊断会建议简化
+嵌套 alternatives，或把 pattern 拆成较小的 matches。
 
 ---
 

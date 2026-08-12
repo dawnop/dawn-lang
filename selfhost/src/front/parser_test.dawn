@@ -9,7 +9,7 @@ use front/astdump.{render_module}
 use front/ast.{
   Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EMatch, EPropagate,
   BinOp, OpAdd, OpMul,
-  PLit, PBind, PWild, POr, PCtor, PTuple, PList,
+  PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList,
   Stmt, SLetPat, SWhile,
   Decl, DFn, DType, DConst, DUseModule, DImpl, Module,
   TypeRef, TQual, TNamed, TFn
@@ -565,6 +565,120 @@ test "a structural let parses the same or-pattern grammar" {
         SLetPat(POr(alts), _, _, _, _) -> { assert len(alts) == 2 }
         _ -> { assert false }
       }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
+  }
+}
+
+test "or-pattern pipes may lead continuation lines without joining match arms" {
+  let src = "type Choice = Left(value: Int) | Right(value: Int) | Other\n" ++
+    "fn f(c: Choice) -> Int =\n" ++
+    "  match c {\n" ++
+    "    Left(x)\n" ++
+    "      | Right(x) -> x\n" ++
+    "    Other -> 0\n" ++
+    "  }\n" ++
+    "fn g(flag: Bool) -> Bool = {\n" ++
+    "  let true\n" ++
+    "    | false = flag\n" ++
+    "  flag\n" ++
+    "}"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 0
+  match m.decls[1] {
+    DFn(f) -> match f.body {
+      EMatch(_, arms, _, _) -> {
+        assert len(arms) == 2
+        match arms[0].pat {
+          POr(alts) -> { assert len(alts) == 2 }
+          _ -> { assert false }
+        }
+        match arms[1].pat {
+          PCtor(name, _, _, _, _, _, _, _) -> { assert name == "Other" }
+          _ -> { assert false }
+        }
+      }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
+  }
+  match m.decls[2] {
+    DFn(f) -> match f.body {
+      EBlock(stmts, _, _, _) -> match stmts[0] {
+        SLetPat(POr(alts), _, _, _, _) -> { assert len(alts) == 2 }
+        _ -> { assert false }
+      }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
+  }
+}
+
+test "a qualified constructor let enters structural pattern parsing" {
+  let src = "fn f(v: m.Box[Int]) -> Int = {\n" ++
+    "  let m.One(x) = v\n" ++
+    "  x\n" ++
+    "}"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) -> match f.body {
+      EBlock(stmts, _, _, _) -> match stmts[0] {
+        SLetPat(PQual(q, name, _, _, _, _, _, _, _), _, _, _, _) -> {
+          assert q == "m"
+          assert name == "One"
+        }
+        _ -> { assert false }
+      }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
+  }
+}
+
+test "a broken line-leading alternative recovers at the next arm" {
+  let src = "fn f(c: Choice) -> Int =\n" ++
+    "  match c {\n" ++
+    "    Left(x)\n" ++
+    "      | -> 0\n" ++
+    "    Right(y) -> y\n" ++
+    "  }\n\n" ++
+    "fn after() -> Int = 3"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 1
+  assert ds[0].msg == "expected a pattern"
+  match m.decls[0] {
+    DFn(f) -> match f.body {
+      EMatch(_, arms, _, _) -> {
+        assert len(arms) == 1
+        match arms[0].pat {
+          PCtor(name, _, _, _, _, _, _, _) -> { assert name == "Right" }
+          _ -> { assert false }
+        }
+      }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
+  }
+  match m.decls[1] {
+    DFn(f) -> { assert f.name == "after" }
+    _ -> { assert false }
+  }
+}
+
+test "a line-leading pipe cannot start a match arm" {
+  let src = "fn f(c: Choice) -> Int =\n" ++
+    "  match c {\n" ++
+    "    | Left(x) -> x\n" ++
+    "    Right(y) -> y\n" ++
+    "  }"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 1
+  assert ds[0].msg == "expected a pattern"
+  match m.decls[0] {
+    DFn(f) -> match f.body {
+      EMatch(_, arms, _, _) -> { assert len(arms) == 1 }
       _ -> { assert false }
     }
     _ -> { assert false }

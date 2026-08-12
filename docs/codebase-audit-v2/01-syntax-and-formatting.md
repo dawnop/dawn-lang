@@ -48,20 +48,37 @@
 - **后续处置（2026-08-12）：已修。** AST/TAST 分别新增递归的 `POr(List[Pattern])` 与
   `TPOr(List[TPat])`，`MatchArm`/`TArm` 各只保存一个 pattern。parser 把 `|` 定为 pattern
   最低优先级并构造扁平 n-ary 节点，构造器、记录、tuple、list 与结构性 `let` 共用这套文法；
-  `(pat)` 只分组，tuple 仍由逗号决定。
+  `(pat)` 只分组，tuple 仍由逗号决定。`A\n  | B` 可用行首 `|` 续写，而没有 `|` 的下一行
+  仍开始新 match 臂；`let_stmt` 识别 `IDENT DOT TYPEIDENT`，所以 `let m.C(x) = value` 也进入
+  统一的 `pattern_p` 与 checker 恢复路径。
 - **绑定契约：** 第一支产生共享环境中的 canonical Sym。后续支在隔离 scope 检查，必须绑定
-  完全相同的名字集合、类型与 mutability，再递归映射到第一支 Sym。绑定集、类型与 mutability
-  三条拒绝各有独立 compiling mutant，mutant 必须完整构建、回答版本，并只让 owner assertion
-  或 owner test 变红。
-- **穷尽性与 `let`：** typed pattern 到 usefulness 的表示新增惰性 `SOr`，只在当前列展开，
-  不预先形成嵌套 alternatives 的笛卡尔积。结构性 `let` 使用同一 usefulness 判定，因而
-  `let true | false = flag` 合法，`let true | true = flag` 仍以可反驳 pattern 拒绝。
+  完全相同的名字集合与类型，再递归映射到第一支 Sym。可变性由外围 `let`/`var` 对整个 pattern
+  统一决定，不存在 alternative 间差异。pattern 本身已经报错时不再比较 binding consistency，
+  但第一支的 canonical binding 继续供 arm body 恢复。
+- **穷尽性与 `let`：** `SOr` 虽然只展开当前列，旧递归仍会在后续列物化实际的指数乘积，24 个
+  `(true | false)` 已可超时并占用约 1.5 GB。现实现先按列类型递归归约完备子模式，`SWild`、
+  binder、`true | false`、完备的全 wildcard ADT constructors 与显然完备结构都折叠为 wildcard；
+  剩余 usefulness 搜索同时受行数与步骤预算约束。预算耗尽时 match 和结构性 `let` 都
+  fail-closed，报告唯一复杂度根因，并建议简化嵌套 alternatives 或拆分 match，不猜测穷尽性。
+  24 个 Bool alternatives 的生产 fixture 必须零诊断；合法 8 元、每列三 alternatives 的 fixture
+  必须恰好只报预算诊断。
 - **运行时：** lowering 为 canonical binders 建共享 slots，并以 selector 按源码顺序选择第一支；
   guard 与 body 各只 lower 一次。绝对 JVM/native/ASan 语料固定 false guard 不重复副作用、body
-  单次执行、左偏选择、nested/list/constructor alternatives、引用绑定与结构性 `let`。
+  单次执行、左偏选择、nested/list/constructor alternatives、引用绑定与结构性 `let`；另有路径
+  先经 nested alternative 向共享 slot 绑定引用，再因同一父 pattern 的兄弟条件失败而进入下一臂，
+  由 native ASan 固定 partial assignment 的释放边界。
 - **编辑器：** LSP 递归配对每个 source/typed alternative，每个绑定出现都有 hover，后续定义
-  跳到第一支 canonical binding，completion 按共享 Sym 去重。端到端 LSP 探针使用候选编译器
-  同时固定三项行为。
+  跳到第一支 canonical binding，list rest 也跳到首支 rest，completion 对共享 binding 只出现
+  一次。`visit_pat` 同样覆盖 `PQual`，限定构造器和其子 pattern bindings 都有 hover/definition。
+- **合同：** versioned matrix 与 executable mutator registry、owner registry 双向精确相等，并以
+  重复 mutant、重复 owner、未知 owner、缺 schema、缺 member，以及两类 registry 多/少自测
+  fail-closed。14 条 production-source mutants 每条都构建完整 compiler、运行同一 assertion set，
+  且 red set 恰等于唯一 owner：绑定集、绑定类型、派生诊断抑制、限定 let 分派、行首 `|`、list-rest
+  definition、completion 去重、`PQual` 查询、guard 单次、body 单次、左偏选择、nested 递归运行、
+  完备归约和预算拒绝。
+  其余 assertions 是该 mutant 的持久 green controls。
+- **非阻塞后续：** 本批没有增加新的 unreachable 诊断，`POr` 内不可达 alternative 仍待后续裁决；
+  当前文档不声称已经发现或报告它。
 
 ## SYN-05 — P2 — pipe 仍绑定旧调用 AST 形状
 

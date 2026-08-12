@@ -63,7 +63,7 @@ use check/types.{
 use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, jsig_refused}
 use check/exhaustive.{
   LitV, LInt, LFloat, LBool, LStr, SPat, SWild, SOr, SCtor, SLit, STuple, SList,
-  useful, missing_list_patterns
+  useful_result, missing_list_patterns_result
 }
 use check/cx.{
   AliasE, Cx, Frame, LambdaCx, ModExports,
@@ -2056,7 +2056,7 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
     }
   }
 
-type PatBind = { name: String, sym: Int, ty: Ty, mutable: Bool, lo: Int, hi: Int }
+type PatBind = { name: String, sym: Int, ty: Ty, lo: Int, hi: Int }
 
 fn typed_binds(cx: Cx, p: TPat) -> List[PatBind] = {
   var out: List[PatBind] = []
@@ -2067,7 +2067,6 @@ fn typed_binds(cx: Cx, p: TPat) -> List[PatBind] = {
         name: s.name,
         sym: sid,
         ty: s.ty,
-        mutable: s.mutable,
         lo: s.dlo,
         hi: s.dhi
       }]
@@ -2085,7 +2084,6 @@ fn typed_binds(cx: Cx, p: TPat) -> List[PatBind] = {
             name: s.name,
             sym: sid,
             ty: s.ty,
-            mutable: s.mutable,
             lo: s.dlo,
             hi: s.dhi
           }]
@@ -2133,11 +2131,6 @@ fn check_or_bindings(
               ty_show(cx1.adts, got.ty) ++ ", but the first alternative binds " ++
               ty_show(cx1.adts, want.ty), got.lo, got.hi,
             "bind `" ++ want.name ++ "` at the same type in every alternative")
-        }
-        if got.mutable != want.mutable {
-          cx1 = cerr_h(cx1, "or-pattern binding `" ++ want.name ++
-              "` does not have the first alternative's mutability", got.lo, got.hi,
-            "bind `" ++ want.name ++ "` with the same mutability in every alternative")
         }
       }
     }
@@ -2192,22 +2185,31 @@ fn remap_or_binds(cx: Cx, p: TPat, canonical: List[PatBind]) -> TPat =
 
 fn check_or_pattern(cx: Cx, alts: List[Pattern], scrut: Ty, mutable: Bool) -> (Cx, TPat) = {
   if len(alts) == 0 { return (cx, TPOr([])) }
+  let first_diag_count = len(cx.diags)
   let (cx0, first) = check_pattern(cx, alts[0], scrut, mutable)
   var cx1 = cx0
+  let first_ok = len(cx0.diags) == first_diag_count
   let canonical = typed_binds(cx1, first)
   var typed = [first]
   var i = 1
   while i < len(alts) {
+    let alt_diag_count = len(cx1.diags)
     let isolated = push_scope(cx1)
     let (cxa, raw) = check_pattern(isolated, alts[i], scrut, mutable)
     cx1 = pop_scope(cxa)
     let actual = typed_binds(cx1, raw)
-    cx1 = check_or_bindings(cx1, canonical, actual, alts[i])
+    if first_ok && len(cx1.diags) == alt_diag_count {
+      cx1 = check_or_bindings(cx1, canonical, actual, alts[i])
+    }
     typed = typed ++ [remap_or_binds(cx1, raw, canonical)]
     i = i + 1
   }
   (cx1, TPOr(typed))
 }
+
+fn usefulness_too_complex(cx: Cx, lo: Int, hi: Int) -> Cx =
+  cerr_h(cx, "pattern analysis exceeded its complexity budget", lo, hi,
+    "simplify nested alternatives or split the pattern into smaller matches")
 
 fn check_lit_pattern(cx: Cx, lit: Expr, scrut: Ty, lo: Int, hi: Int) -> (Cx, TPat) = {
   # the literal's own type; string patterns are interpolation-free (parser ensured)
@@ -2466,34 +2468,22 @@ test "or-patterns share the first symbol" {
 
 test "or-patterns reject binding type mismatches" {
   let canonical = [
-    PatBind { name: "x", sym: 1, ty: TyInt, mutable: false, lo: 1, hi: 2 }
+    PatBind { name: "x", sym: 1, ty: TyInt, lo: 1, hi: 2 }
   ]
   let actual = [
-    PatBind { name: "x", sym: 2, ty: TyString, mutable: false, lo: 3, hi: 4 }
+    PatBind { name: "x", sym: 2, ty: TyString, lo: 3, hi: 4 }
   ]
   let cx = check_or_bindings(test_cx(), canonical, actual, PWild(5, 6))
   assert len(cx.diags) == 1
   assert str.contains(cx.diags[0].msg, "binding `x` has type String")
 }
 
-test "or-patterns reject binding mutability mismatches" {
-  let canonical = [
-    PatBind { name: "x", sym: 1, ty: TyInt, mutable: false, lo: 1, hi: 2 }
-  ]
-  let actual = [
-    PatBind { name: "x", sym: 2, ty: TyInt, mutable: true, lo: 3, hi: 4 }
-  ]
-  let cx = check_or_bindings(test_cx(), canonical, actual, PWild(5, 6))
-  assert len(cx.diags) == 1
-  assert str.contains(cx.diags[0].msg, "does not have the first alternative's mutability")
-}
-
 test "or-patterns reject binding-set mismatches" {
   let canonical = [
-    PatBind { name: "missing", sym: 1, ty: TyBool, mutable: false, lo: 1, hi: 2 }
+    PatBind { name: "missing", sym: 1, ty: TyBool, lo: 1, hi: 2 }
   ]
   let actual = [
-    PatBind { name: "extra", sym: 2, ty: TyBool, mutable: false, lo: 3, hi: 4 }
+    PatBind { name: "extra", sym: 2, ty: TyBool, lo: 3, hi: 4 }
   ]
   let cx = check_or_bindings(test_cx(), canonical, actual, PWild(5, 6))
   assert len(cx.diags) == 2
@@ -4979,13 +4969,19 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       }
       let (cxb, tp) = check_pattern(cx1, pat, it, mutable)
       cx1 = cxb
-      if not is_errorish(it) && useful(cx1.adts, [[to_spat(tp)]], [SWild], [it]) {
-        let (plo, phi) = match refutable_span(cx1, pat) {
-          Some(sp) -> sp
-          None -> (pat_lo(pat), pat_hi(pat))
+      if not is_errorish(it) {
+        match useful_result(cx1.adts, [[to_spat(tp)]], [SWild], [it]) {
+          Some(true) -> {
+            let (plo, phi) = match refutable_span(cx1, pat) {
+              Some(sp) -> sp
+              None -> (pat_lo(pat), pat_hi(pat))
+            }
+            cx1 = cerr_h(cx1, "this pattern does not always match, so it cannot be used in a let",
+              plo, phi, "use match to handle the other cases")
+          }
+          Some(false) -> ()
+          None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
         }
-        cx1 = cerr_h(cx1, "this pattern does not always match, so it cannot be used in a let",
-          plo, phi, "use match to handle the other cases")
       }
       (cx1, TSLetPat(tp, ix, lo, hi))
     }
@@ -7395,35 +7391,62 @@ fn check_match(
       ai = ai + 1
     }
     let tys = [st]
-    if useful(cx1.adts, rows, [SWild], tys) {
-      let missing = match st {
-        TyAdt(aid, _) -> {
-          let ad = adt_of(cx1.adts, aid)
-          var names: List[String] = []
-          var ci2 = 0
-          for c in ad.ctors {
-            if useful(cx1.adts, rows, [SCtor(aid, ci2, wilds_of(len(c.fields)))], tys) {
-              names = names ++ [c.name]
+    match useful_result(cx1.adts, rows, [SWild], tys) {
+      Some(true) -> {
+        var too_complex = false
+        let missing = match st {
+          TyAdt(aid, _) -> {
+            let ad = adt_of(cx1.adts, aid)
+            var names: List[String] = []
+            var ci2 = 0
+            for c in ad.ctors {
+              match useful_result(
+                cx1.adts, rows, [SCtor(aid, ci2, wilds_of(len(c.fields)))], tys) {
+                Some(true) -> { names = names ++ [c.name] }
+                Some(false) -> ()
+                None -> { too_complex = true }
+              }
+              ci2 = ci2 + 1
             }
-            ci2 = ci2 + 1
+            join(names, ", ")
           }
-          join(names, ", ")
+          TyBool -> {
+            var names: List[String] = []
+            match useful_result(cx1.adts, rows, [SLit(LBool(true))], tys) {
+              Some(true) -> { names = names ++ ["true"] }
+              Some(false) -> ()
+              None -> { too_complex = true }
+            }
+            match useful_result(cx1.adts, rows, [SLit(LBool(false))], tys) {
+              Some(true) -> { names = names ++ ["false"] }
+              Some(false) -> ()
+              None -> { too_complex = true }
+            }
+            join(names, ", ")
+          }
+          TyList(_) ->
+            match missing_list_patterns_result(cx1.adts, rows, st) {
+              Some(patterns) -> join(patterns, ", ")
+              None -> {
+                too_complex = true
+                ""
+              }
+            }
+          _ -> "_ (" ++ ty_show(cx1.adts, st) ++ " has too many values to enumerate)"
         }
-        TyBool -> {
-          var names: List[String] = []
-          if useful(cx1.adts, rows, [SLit(LBool(true))], tys) { names = names ++ ["true"] }
-          if useful(cx1.adts, rows, [SLit(LBool(false))], tys) { names = names ++ ["false"] }
-          join(names, ", ")
+        if too_complex {
+          cx1 = usefulness_too_complex(cx1, lo, hi)
+        } else {
+          let hint = if is_adt(st) {
+            "add arms for the missing constructors, or a catch-all _"
+          } else {
+            "add an unguarded catch-all arm (a binding or _)"
+          }
+          cx1 = cerr_h(cx1, "non-exhaustive match, missing: " ++ missing, lo, hi, hint)
         }
-        TyList(_) -> join(missing_list_patterns(cx1.adts, rows, st), ", ")
-        _ -> "_ (" ++ ty_show(cx1.adts, st) ++ " has too many values to enumerate)"
       }
-      let hint = if is_adt(st) {
-        "add arms for the missing constructors, or a catch-all _"
-      } else {
-        "add an unguarded catch-all arm (a binding or _)"
-      }
-      cx1 = cerr_h(cx1, "non-exhaustive match, missing: " ++ missing, lo, hi, hint)
+      Some(false) -> ()
+      None -> { cx1 = usefulness_too_complex(cx1, lo, hi) }
     }
   }
   (cx1, result, XMatch(sx, tarms, lo, hi, result))
@@ -9814,6 +9837,25 @@ test "a module-qualified type resolves through the alias (LANG-06)" {
   assert len(pd6) == 0
   let (cx6, _) = check_module(cx_new(Some("use_site"), None), m6, env)
   assert len(cx6.diags) == 0
+  let src12 = "use geom as g\n" ++
+    "pub fn open_box(b: g.Box[Int]) -> Int = {\n" ++
+    "  let g.One(v) = b\n" ++
+    "  v\n" ++
+    "}\n"
+  let (m12, pd12) = parser.parse_module(src12)
+  assert len(pd12) == 0
+  let (cx12, _) = check_module(cx_new(Some("use_site"), None), m12, env)
+  assert len(cx12.diags) == 0
+  let src13 = "use geom as g\n" ++
+    "pub fn recover(b: g.Box[Int]) -> Int = {\n" ++
+    "  let missing.One(v) = b\n" ++
+    "  v\n" ++
+    "}\n"
+  let (m13, pd13) = parser.parse_module(src13)
+  assert len(pd13) == 0
+  let (cx13, _) = check_module(cx_new(Some("use_site"), None), m13, env)
+  assert len(cx13.diags) == 1
+  assert cx13.diags[0].msg == "unknown module alias `missing` in a pattern"
   # a qualified constant, beside a local one of the same simple name: the
   # flat Core identity could not tell them apart (LANG-06 step 3)
   let src8 = "use geom as g\n" ++

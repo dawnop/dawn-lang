@@ -25,6 +25,9 @@ pub type SPat =
   | STuple(subs: List[SPat])
   | SList(pre: List[SPat], has_rest: Bool, post: List[SPat])
 
+const USEFUL_STEP_LIMIT: Int = 8192
+const USEFUL_ROW_LIMIT: Int = 4096
+
 fn slist_arity(pre: List[SPat], post: List[SPat]) -> Int = len(pre) + len(post)
 
 fn wilds(n: Int) -> List[SPat] = {
@@ -35,23 +38,39 @@ fn wilds(n: Int) -> List[SPat] = {
 
 fn ctor_at(adts: Adts, adt: Int, ci: Int) -> CtorI = adt_of(adts, adt).ctors[ci]
 
-fn expand_head_row(row: List[SPat]) -> List[List[SPat]] = {
-  if len(row) == 0 { return [row] }
+fn expand_head_row(row: List[SPat], out0: List[List[SPat]]) -> Option[List[List[SPat]]] = {
+  var out = out0
+  if len(row) == 0 {
+    if len(out) >= USEFUL_ROW_LIMIT { return None }
+    return Some(out ++ [row])
+  }
   match row[0] {
     SOr(alts) -> {
-      var out: List[List[SPat]] = []
       let tail = list.drop(row, 1)
-      for alt in alts { out = out ++ expand_head_row([alt] ++ tail) }
-      out
+      for alt in alts {
+        match expand_head_row([alt] ++ tail, out) {
+          Some(next) -> { out = next }
+          None -> return None
+        }
+      }
+      Some(out)
     }
-    _ -> [row]
+    _ -> {
+      if len(out) >= USEFUL_ROW_LIMIT { return None }
+      Some(out ++ [row])
+    }
   }
 }
 
-fn expand_head_ors(matrix: List[List[SPat]]) -> List[List[SPat]] = {
+fn expand_head_ors(matrix: List[List[SPat]]) -> Option[List[List[SPat]]] = {
   var out: List[List[SPat]] = []
-  for row in matrix { out = out ++ expand_head_row(row) }
-  out
+  for row in matrix {
+    match expand_head_row(row, out) {
+      Some(next) -> { out = next }
+      None -> return None
+    }
+  }
+  Some(out)
 }
 
 ## Constructor field types with the column's type arguments substituted in.
@@ -85,105 +104,308 @@ fn inst_fields(adts: Adts, adt: Int, ci: Int, column: Ty) -> List[Ty] = {
   }
 }
 
-## Would a value matching `q` slip through every row of `matrix`?
-pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[Ty]) -> Bool = {
-  let expanded = expand_head_ors(matrix)
-  if len(q) == 0 { return len(expanded) == 0 }
-  let t = types_[0]
+fn err_tys(n: Int) -> List[Ty] = {
+  var out: List[Ty] = []
+  for _i in 0..n { out = out ++ [TyError] }
+  out
+}
+
+fn elem_tys_of(elem: Ty, n: Int) -> List[Ty] = {
+  var out: List[Ty] = []
+  for _i in 0..n { out = out ++ [elem] }
+  out
+}
+
+fn all_wild(patterns: List[SPat]) -> Bool = {
+  for pattern in patterns {
+    match pattern {
+      SWild -> ()
+      _ -> return false
+    }
+  }
+  true
+}
+
+fn complete_ctor_alts(adts: Adts, patterns: List[SPat], adt: Int) -> Bool = {
+  let info = adt_of(adts, adt)
+  var ci = 0
+  for _ctor in info.ctors {
+    var found = false
+    for pattern in patterns {
+      match pattern {
+        SCtor(found_adt, found_ci, subs) ->
+          if found_adt == adt && found_ci == ci && all_wild(subs) { found = true }
+        _ -> ()
+      }
+    }
+    if not found { return false }
+    ci = ci + 1
+  }
+  len(info.ctors) > 0
+}
+
+fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
+  match pattern {
+    SWild -> SWild
+    SLit(_) -> pattern
+    SOr(alts) -> {
+      var flat: List[SPat] = []
+      for alt in alts {
+        let simplified = simplify_pat(adts, alt, column)
+        match simplified {
+          SWild -> return SWild
+          SOr(inner) -> { flat = flat ++ inner }
+          _ -> { flat = flat ++ [simplified] }
+        }
+      }
+      if column == TyBool {
+        var has_true = false
+        var has_false = false
+        for alt in flat {
+          match alt {
+            SLit(LBool(true)) -> { has_true = true }
+            SLit(LBool(false)) -> { has_false = true }
+            _ -> ()
+          }
+        }
+        if has_true && has_false { return SWild }
+      }
+      match column {
+        TyAdt(adt, _) -> if complete_ctor_alts(adts, flat, adt) { return SWild }
+        _ -> ()
+      }
+      if len(flat) == 1 { flat[0] } else { SOr(flat) }
+    }
+    SCtor(adt, ci, subs) -> {
+      let field_tys = inst_fields(adts, adt, ci, column)
+      var simplified: List[SPat] = []
+      var index = 0
+      for sub in subs {
+        let field_ty = match get(field_tys, index) {
+          Some(found) -> found
+          None -> TyError
+        }
+        simplified = simplified ++ [simplify_pat(adts, sub, field_ty)]
+        index = index + 1
+      }
+      match column {
+        TyAdt(found_adt, _) ->
+          if found_adt == adt && len(adt_of(adts, adt).ctors) == 1 && all_wild(simplified) {
+            SWild
+          } else {
+            SCtor(adt, ci, simplified)
+          }
+        _ -> SCtor(adt, ci, simplified)
+      }
+    }
+    STuple(subs) -> {
+      let elem_tys = match column {
+        TyTuple(found) -> found
+        _ -> err_tys(len(subs))
+      }
+      var simplified: List[SPat] = []
+      var index = 0
+      for sub in subs {
+        let elem_ty = match get(elem_tys, index) {
+          Some(found) -> found
+          None -> TyError
+        }
+        simplified = simplified ++ [simplify_pat(adts, sub, elem_ty)]
+        index = index + 1
+      }
+      match column {
+        TyTuple(_) -> if all_wild(simplified) { SWild } else { STuple(simplified) }
+        _ -> STuple(simplified)
+      }
+    }
+    SList(pre, has_rest, post) -> {
+      let elem_ty = match column {
+        TyList(found) -> found
+        _ -> TyError
+      }
+      let simplified_pre = map(pre, sub => simplify_pat(adts, sub, elem_ty))
+      let simplified_post = map(post, sub => simplify_pat(adts, sub, elem_ty))
+      if has_rest && len(simplified_pre) == 0 && len(simplified_post) == 0 {
+        SWild
+      } else {
+        SList(simplified_pre, has_rest, simplified_post)
+      }
+    }
+  }
+
+fn simplify_row(adts: Adts, row: List[SPat], types_: List[Ty]) -> List[SPat] = {
+  var out: List[SPat] = []
+  var index = 0
+  for pattern in row {
+    let column = match get(types_, index) {
+      Some(found) -> found
+      None -> TyError
+    }
+    out = out ++ [simplify_pat(adts, pattern, column)]
+    index = index + 1
+  }
+  out
+}
+
+fn simplify_matrix(
+  adts: Adts,
+  matrix: List[List[SPat]],
+  types_: List[Ty]
+) -> List[List[SPat]] =
+  map(matrix, row => simplify_row(adts, row, types_))
+
+## Would a value matching `q` slip through every row of `matrix`? `None`
+## means the deterministic work budget was exhausted before the answer was
+## known; callers must diagnose that state rather than guess either answer.
+pub fn useful_result(
+  adts: Adts,
+  matrix: List[List[SPat]],
+  q: List[SPat],
+  types_: List[Ty]
+) -> Option[Bool] = {
+  let normalized_matrix = simplify_matrix(adts, matrix, types_)
+  let normalized_q = simplify_row(adts, q, types_)
+  let (_, result) = useful_go(
+    adts, normalized_matrix, normalized_q, types_, USEFUL_STEP_LIMIT)
+  result
+}
+
+pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[Ty]) -> Bool =
+  match useful_result(adts, matrix, q, types_) {
+    Some(result) -> result
+    None -> panic("usefulness exceeded its deterministic work budget")
+  }
+
+fn useful_go(
+  adts: Adts,
+  matrix: List[List[SPat]],
+  q: List[SPat],
+  types_: List[Ty],
+  fuel: Int
+) -> (Int, Option[Bool]) = {
+  if fuel <= 0 || len(matrix) > USEFUL_ROW_LIMIT { return (0, None) }
+  let expanded = match expand_head_ors(matrix) {
+    Some(rows) -> rows
+    None -> return (0, None)
+  }
+  let cost = len(expanded) + 1
+  if fuel < cost { return (0, None) }
+  let left0 = fuel - cost
+  if len(q) == 0 { return (left0, Some(len(expanded) == 0)) }
+  let column = types_[0]
   let rest_q = list.drop(q, 1)
   let rest_t = list.drop(types_, 1)
   match q[0] {
     SOr(alts) -> {
+      var left = left0
       for alt in alts {
-        if useful(adts, expanded, [alt] ++ rest_q, types_) { return true }
+        let (next, result) = useful_go(adts, expanded, [alt] ++ rest_q, types_, left)
+        left = next
+        match result {
+          Some(true) -> return (left, Some(true))
+          Some(false) -> ()
+          None -> return (left, None)
+        }
       }
-      false
+      (left, Some(false))
     }
     SCtor(adt, ci, subs) ->
-      useful(adts, spec_ctor(adts, expanded, adt, ci), subs ++ rest_q,
-        inst_fields(adts, adt, ci, t) ++ rest_t)
-    SLit(v) -> useful(adts, spec_lit(expanded, v), rest_q, rest_t)
+      useful_go(adts, spec_ctor(adts, expanded, adt, ci), subs ++ rest_q,
+        inst_fields(adts, adt, ci, column) ++ rest_t, left0)
+    SLit(value) -> useful_go(adts, spec_lit(expanded, value), rest_q, rest_t, left0)
     STuple(subs) -> {
-      let elem_tys = match t {
+      let elem_tys = match column {
         TyTuple(elems) -> if len(elems) == 0 { err_tys(len(subs)) } else { elems }
         _ -> err_tys(len(subs))
       }
-      useful(adts, spec_tuple(expanded, len(subs)), subs ++ rest_q, elem_tys ++ rest_t)
+      useful_go(adts, spec_tuple(expanded, len(subs)), subs ++ rest_q,
+        elem_tys ++ rest_t, left0)
     }
     SList(pre, has_rest, post) -> {
-      let elem = match t {
-        TyList(e) -> e
+      let elem = match column {
+        TyList(found) -> found
         _ -> TyError
       }
       if not has_rest {
-        let n = len(pre)
-        useful(adts, spec_list(expanded, n), pre ++ rest_q, elem_tys_of(elem, n) ++ rest_t)
+        let arity = len(pre)
+        useful_go(adts, spec_list(expanded, arity), pre ++ rest_q,
+          elem_tys_of(elem, arity) ++ rest_t, left0)
       } else {
-        # a rest pattern covers every length >= its arity; behaviour is uniform
-        # beyond the longest pattern in play, so a finite probe suffices
         let arity = slist_arity(pre, post)
         let bound = list_len_bound(expanded, Some(q[0]))
-        var found = false
-        var l = arity
-        while l <= bound {
-          if useful(adts, spec_list(expanded, l),
-            pre ++ wilds(l - arity) ++ post ++ rest_q, elem_tys_of(elem, l) ++ rest_t) {
-            found = true
-            break
+        var left = left0
+        var length = arity
+        while length <= bound {
+          let (next, result) = useful_go(adts, spec_list(expanded, length),
+            pre ++ wilds(length - arity) ++ post ++ rest_q,
+            elem_tys_of(elem, length) ++ rest_t, left)
+          left = next
+          match result {
+            Some(true) -> return (left, Some(true))
+            Some(false) -> ()
+            None -> return (left, None)
           }
-          l = l + 1
+          length = length + 1
         }
-        found
+        (left, Some(false))
       }
     }
     SWild -> {
-      # lists: probe every relevant length (same uniformity argument as above)
-      match t {
+      match column {
         TyList(elem) -> {
           let bound = list_len_bound(expanded, None)
-          var found = false
-          var l = 0
-          while l <= bound {
-            if useful(adts, spec_list(expanded, l), wilds(l) ++ rest_q,
-              elem_tys_of(elem, l) ++ rest_t) {
-              found = true
-              break
+          var left = left0
+          var length = 0
+          while length <= bound {
+            let (next, result) = useful_go(adts, spec_list(expanded, length),
+              wilds(length) ++ rest_q, elem_tys_of(elem, length) ++ rest_t, left)
+            left = next
+            match result {
+              Some(true) -> return (left, Some(true))
+              Some(false) -> ()
+              None -> return (left, None)
             }
-            l = l + 1
+            length = length + 1
           }
-          return found
+          return (left, Some(false))
         }
-        # a tuple is its own single complete constructor
         TyTuple(elems) ->
-          return useful(adts, spec_tuple(expanded, len(elems)), wilds(len(elems)) ++ rest_q,
-            elems ++ rest_t)
+          return useful_go(adts, spec_tuple(expanded, len(elems)),
+            wilds(len(elems)) ++ rest_q, elems ++ rest_t, left0)
         TyAdt(aid, _) -> {
-          # if the matrix heads form a complete signature, a wildcard is useful
-          # iff it is useful under some constructor; otherwise take the default matrix
-          let a = adt_of(adts, aid)
-          if heads_complete(expanded, aid, len(a.ctors)) {
-            var i = 0
-            var found = false
-            for c in a.ctors {
-              if useful(adts, spec_ctor(adts, expanded, aid, i),
-                wilds(len(c.fields)) ++ rest_q, inst_fields(adts, aid, i, t) ++ rest_t) {
-                found = true
-                break
+          let adt = adt_of(adts, aid)
+          if heads_complete(expanded, aid, len(adt.ctors)) {
+            var left = left0
+            var ci = 0
+            for ctor in adt.ctors {
+              let (next, result) = useful_go(adts, spec_ctor(adts, expanded, aid, ci),
+                wilds(len(ctor.fields)) ++ rest_q,
+                inst_fields(adts, aid, ci, column) ++ rest_t, left)
+              left = next
+              match result {
+                Some(true) -> return (left, Some(true))
+                Some(false) -> ()
+                None -> return (left, None)
               }
-              i = i + 1
+              ci = ci + 1
             }
-            return found
+            return (left, Some(false))
           }
         }
         _ ->
-          if t == TyBool {
-            if lit_has(expanded, LBool(true)) && lit_has(expanded, LBool(false)) {
-              return useful(adts, spec_lit(expanded, LBool(true)), rest_q, rest_t) ||
-                useful(adts, spec_lit(expanded, LBool(false)), rest_q, rest_t)
+          if column == TyBool && lit_has(expanded, LBool(true)) &&
+          lit_has(expanded, LBool(false)) {
+            let (after_true, true_result) = useful_go(
+              adts, spec_lit(expanded, LBool(true)), rest_q, rest_t, left0)
+            match true_result {
+              Some(true) -> return (after_true, Some(true))
+              None -> return (after_true, None)
+              Some(false) -> ()
             }
+            return useful_go(
+              adts, spec_lit(expanded, LBool(false)), rest_q, rest_t, after_true)
           }
       }
-      # Int/String literals can never be complete
       var defaulted: List[List[SPat]] = []
       for row in expanded {
         match row[0] {
@@ -191,21 +413,9 @@ pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[
           _ -> ()
         }
       }
-      useful(adts, defaulted, rest_q, rest_t)
+      useful_go(adts, defaulted, rest_q, rest_t, left0)
     }
   }
-}
-
-fn err_tys(n: Int) -> List[Ty] = {
-  var out: List[Ty] = []
-  for i in 0..n { out = out ++ [TyError] }
-  out
-}
-
-fn elem_tys_of(elem: Ty, n: Int) -> List[Ty] = {
-  var out: List[Ty] = []
-  for i in 0..n { out = out ++ [elem] }
-  out
 }
 
 fn heads_complete(matrix: List[List[SPat]], adt: Int, nctors: Int) -> Bool = {
@@ -318,22 +528,36 @@ fn list_len_bound(matrix: List[List[SPat]], q: Option[SPat]) -> Int = {
 }
 
 ## Witnesses for a non-exhaustive match over a list: [], [_], [_, _, ..] ...
-pub fn missing_list_patterns(adts: Adts, rows: List[List[SPat]], t: Ty) -> List[String] = {
+pub fn missing_list_patterns_result(
+  adts: Adts,
+  rows: List[List[SPat]],
+  t: Ty
+) -> Option[List[String]] = {
   let bound = list_len_bound(rows, None)
   var missing: List[String] = []
   var l = 0
   while l <= bound {
     let q = SList(wilds(l), false, [])
-    if useful(adts, rows, [q], [t]) {
-      var elems: List[String] = []
-      for i in 0..l { elems = elems ++ ["_"] }
-      if l == bound { elems = elems ++ [".."] }
-      missing = missing ++ ["[" ++ join(elems, ", ") ++ "]"]
+    match useful_result(adts, rows, [q], [t]) {
+      Some(true) -> {
+        var elems: List[String] = []
+        for _i in 0..l { elems = elems ++ ["_"] }
+        if l == bound { elems = elems ++ [".."] }
+        missing = missing ++ ["[" ++ join(elems, ", ") ++ "]"]
+      }
+      Some(false) -> ()
+      None -> return None
     }
     l = l + 1
   }
-  missing
+  Some(missing)
 }
+
+pub fn missing_list_patterns(adts: Adts, rows: List[List[SPat]], t: Ty) -> List[String] =
+  match missing_list_patterns_result(adts, rows, t) {
+    Some(patterns) -> patterns
+    None -> panic("missing-list analysis exceeded its deterministic work budget")
+  }
 
 # ---- tests ----
 
@@ -373,6 +597,31 @@ test "or-patterns stay structured through constructors, tuples, and lists" {
     SList([SWild], true, [])
   ])]
   assert not useful(adts, [list_row], [SWild], [TyList(TyInt)])
+}
+
+test "complete boolean alternatives normalize before recursive expansion" {
+  let adts = prelude_adts()
+  let bools = SOr([SLit(LBool(true)), SLit(LBool(false))])
+  var elems: List[SPat] = []
+  for _i in 0..24 { elems = elems ++ [bools] }
+  let rows = [[SList(elems, false, [])], [SWild]]
+  assert useful_result(adts, rows, [SWild], [TyList(TyBool)]) == Some(false)
+}
+
+test "pathological alternatives exhaust the deterministic work budget" {
+  let adts = prelude_adts()
+  let branch = SOr([
+    SCtor(OPTION_ID, 0, [SLit(LBool(true))]),
+    SCtor(OPTION_ID, 0, [SLit(LBool(false))]),
+    SCtor(OPTION_ID, 1, [])
+  ])
+  var elems: List[SPat] = []
+  var types_: List[Ty] = []
+  for _i in 0..8 {
+    elems = elems ++ [branch]
+    types_ = types_ ++ [opt_ty(TyBool)]
+  }
+  assert useful_result(adts, [[STuple(elems)]], [SWild], [TyTuple(types_)]) == None
 }
 
 test "int literals are never complete" {

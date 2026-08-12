@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 1c9811d7af095b57 -->
+<!-- doc-check: translation-of docs/spec.md @ 30cb2252b0c91215 -->
 
 # Dawn Language Specification
 
@@ -1372,14 +1372,16 @@ to the arm body expression.
 
 `|` has the lowest precedence in a pattern. It may occur recursively inside constructor, record,
 tuple, and list patterns, and is collected in source order as a flat n-ary or-pattern. `(pat)` is
-grouping only; a tuple pattern still requires a comma. At run time the first matching alternative
-is selected, with no backtracking inside that or-pattern. A match-arm guard applies to the whole
-or-pattern and runs at most once. If it is false, matching continues at the next arm. The body also
-runs at most once.
+grouping only; a tuple pattern still requires a comma. The `|` may start a continuation line, as in
+`A\n  | B`. A newline followed by a pattern without `|` still starts the next match arm. At run time
+the first matching alternative is selected, with no backtracking inside that or-pattern. A match-arm
+guard applies to the whole or-pattern and runs at most once. If it is false, matching continues at
+the next arm. The body also runs at most once.
 
-Every alternative must bind exactly the same name set, and each shared name must have the same type
-and mutability. The first alternative supplies the canonical binding in the shared environment;
-later alternatives only provide another path that assigns its value.
+Every alternative must bind exactly the same name set, and each shared name must have the same type.
+The enclosing `let` or `var` selects mutability once for the whole pattern, so alternatives cannot
+differ on it. The first alternative supplies the canonical binding in the shared environment; later
+alternatives only provide another path that assigns its value.
 
 ### 5.2 Exhaustiveness
 
@@ -1387,9 +1389,16 @@ later alternatives only provide another path that assigns its value.
 a missing arm is an error and the missing constructors are listed. A match on
 `Int`/`String`/`Float` must have a `_` or a binding arm as the catch-all.
 
-`let` also accepts irrefutable patterns: `let (a, b) = pair`, `let Point { x, y } = p`.
-Or-patterns use the same usefulness check, so `let true | false = flag` is valid while
-`let true = flag` remains refutable and is rejected.
+`let` also accepts irrefutable patterns: `let (a, b) = pair`, `let Point { x, y } = p`, and
+`let m.Only(x) = value` for an imported single-constructor type. Or-patterns use the same usefulness
+check, so `let true | false = flag` is valid while `let true = flag` remains refutable and is
+rejected.
+
+The compiler normalizes type-known complete alternatives, including `true | false`, before the
+usefulness search. The remaining search has a deterministic work budget. If that budget is exhausted,
+an otherwise legal `match` or structural `let` is rejected with `pattern analysis exceeded its
+complexity budget` instead of guessing about exhaustiveness. The diagnostic advises simplifying
+nested alternatives or splitting the pattern into smaller matches.
 
 ---
 
