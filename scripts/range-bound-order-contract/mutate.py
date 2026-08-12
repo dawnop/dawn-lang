@@ -14,12 +14,12 @@ def main() -> None:
     path = root / "selfhost/src/ir/lower.dawn"
     text = path.read_text(encoding="utf-8")
     old = (
-        "            CSLet(sym, TyInt, lo_v),\n"
+        "            CSLet(isym, item_ty, lo_v),\n"
         "            CSLet(bsym, TyInt, hi_v),\n"
     )
     new = (
         "            CSLet(bsym, TyInt, hi_v),\n"
-        "            CSLet(sym, TyInt, lo_v),\n"
+        "            CSLet(isym, item_ty, lo_v),\n"
     )
     count = text.count(old)
     if count != 1:

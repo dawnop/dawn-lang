@@ -417,6 +417,15 @@ fn pat_test(st: LSt, subj: CExpr, p: TPat, t: Ty) -> (LSt, List[CStmt], CExpr, L
   (st1, setup, cond, binds)
 }
 
+## Establish an already-proved-irrefutable pattern. Or-pattern tests still
+## execute because they choose which alternative fills the canonical slots;
+## every other test is statically known to succeed and need not branch.
+fn lower_irrefutable_pattern(st: LSt, subj: CExpr, p: TPat, t: Ty) -> (LSt, List[CStmt]) = {
+  let (st1, setup, cond, binds) = pat_test(st, subj, p, t)
+  let select: List[CStmt] = if pat_has_or(p) { [CSDiscard(cond)] } else { [] }
+  (st1, setup ++ select ++ binds)
+}
+
 fn pat_test_slots(
   st: LSt,
   subj: CExpr,
@@ -3180,7 +3189,7 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
         None, TyUnit)
       (LSt { ..st3, cur_loop: st.cur_loop }, [CSLoop(lid, inner, None)])
     }
-    TSFor(sym, _, from, to, wit, body, _, _, _) -> {
+    TSFor(pat, item_ty, from, to, wit, body, _, _, _) -> {
       match to {
         Some(hi) -> {
           let (st1, lid) = fresh_loop(st)
@@ -3188,27 +3197,29 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
           # in the OUTER loop context
           let (st2, lo_v) = lower_expr(st1, from)
           let (st3, hi_v) = lower_expr(st2, hi)
-          let (st4, bsym) = fresh_sym(st3)
-          let (st5, b) = lower_expr(LSt { ..st4, cur_loop: lid }, body)
-          let iv = CLocal(sym, TyInt)
+          let (st4, isym) = fresh_sym(st3)
+          let (st5, bsym) = fresh_sym(st4)
+          let iv = CLocal(isym, item_ty)
+          let (st6, pattern_stmts) = lower_irrefutable_pattern(st5, iv, pat, item_ty)
+          let (st7, b) = lower_expr(LSt { ..st6, cur_loop: lid }, body)
           # induction is explicit: init, test, body, step. The step lives on
           # the loop node rather than at the end of the body so that
           # `continue` runs it -- see core.CSLoop.
-          let inner = CBlock(
-            [CSIf(CUnary(CNot, CBinary(CLt, iv, CLocal(bsym, TyInt), TyBool), TyBool),
-              CBreak(lid), None),
-              CSDiscard(b)],
-            None, TyUnit)
-          let step = CSAssign(sym, CBinary(CAdd, iv, CInt(1), TyInt))
-          (LSt { ..st5, cur_loop: st.cur_loop }, [
-            CSLet(sym, TyInt, lo_v),
+          let inner_stmts = [
+            CSIf(CUnary(CNot, CBinary(CLt, iv, CLocal(bsym, TyInt), TyBool), TyBool),
+              CBreak(lid), None)
+          ] ++ pattern_stmts ++ [CSDiscard(b)]
+          let inner = CBlock(inner_stmts, None, TyUnit)
+          let step = CSAssign(isym, CBinary(CAdd, iv, CInt(1), TyInt))
+          (LSt { ..st7, cur_loop: st.cur_loop }, [
+            CSLet(isym, item_ty, lo_v),
             CSLet(bsym, TyInt, hi_v),
             CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
           ])
         }
         None ->
           match wit {
-            Some(w) -> lower_for_iter(st, sym, from, w, body)
+            Some(w) -> lower_for_iter(st, pat, item_ty, from, w, body)
             # unreachable on a checked program: the checker refuses a
             # witnessless for..in before lowering runs
             None -> panic("lower: for..in without an Iter witness")
@@ -3219,9 +3230,8 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
       let (st1, v) = lower_expr(st, init)
       let it = tex_ty(init)
       let (st2, sym) = fresh_sym(st1)
-      let (st3, setup, cond, binds) = pat_test(st2, CLocal(sym, it), pat, it)
-      let select: List[CStmt] = if pat_has_or(pat) { [CSDiscard(cond)] } else { [] }
-      (st3, [CSLet(sym, it, v)] ++ setup ++ select ++ binds)
+      let (st3, pattern_stmts) = lower_irrefutable_pattern(st2, CLocal(sym, it), pat, it)
+      (st3, [CSLet(sym, it, v)] ++ pattern_stmts)
     }
     TSLocalFn(sym, _, params, _, body, captures, _, _) -> {
       # a named local function is a lambda that also binds a name
@@ -3243,14 +3253,13 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
 ## dictionaries or devirtualisation: same door, same answer.
 fn lower_for_iter(
   st: LSt,
-  sym: Int,
+  pat: TPat,
+  item_ty: Ty,
   from: TExpr,
   w: WitRef,
   body: TExpr
 ) -> (LSt, List[CStmt]) = {
   let ct = tex_ty(from)
-  # the loop variable's type: the checker already reduced the impl's `Item`
-  let et = sym_ty(st, sym, TyError)
   let cur_t = iter_cur_ty(st, w, ct)
   let (st1, lid) = fresh_loop(st)
   let (st2, coll) = lower_expr(st1, from)
@@ -3260,18 +3269,21 @@ fn lower_for_iter(
   let iv: TExpr = XLocal(isym, "for$" ++ "cur", 0, 0, cur_t)
   let (st5, start_v) = lower_trait_call(st4, ITER_ID, "iter_start", [cv], [w], cur_t)
   let (st6, done_v) = lower_trait_call(st5, ITER_ID, "iter_done", [cv, iv], [w], TyBool)
-  let (st7, get_v) = lower_trait_call(st6, ITER_ID, "iter_get", [cv, iv], [w], et)
+  let (st7, get_v) = lower_trait_call(st6, ITER_ID, "iter_get", [cv, iv], [w], item_ty)
   let (st8, next_v) = lower_trait_call(st7, ITER_ID, "iter_next", [cv, iv], [w], cur_t)
-  let (st9, b) = lower_expr(LSt { ..st8, cur_loop: lid }, body)
-  let inner = CBlock(
-    [CSIf(done_v, CBreak(lid), None),
-      CSLet(sym, et, get_v),
-      CSDiscard(b)],
-    None, TyUnit)
+  let (st9, item_sym) = fresh_sym(st8)
+  let item = CLocal(item_sym, item_ty)
+  let (st10, pattern_stmts) = lower_irrefutable_pattern(st9, item, pat, item_ty)
+  let (st11, b) = lower_expr(LSt { ..st10, cur_loop: lid }, body)
+  let inner_stmts = [
+    CSIf(done_v, CBreak(lid), None),
+    CSLet(item_sym, item_ty, get_v)
+  ] ++ pattern_stmts ++ [CSDiscard(b)]
+  let inner = CBlock(inner_stmts, None, TyUnit)
   # the step lives on the loop node rather than at the end of the body so
   # that `continue` runs it -- see core.CSLoop
   let step = CSAssign(isym, next_v)
-  (LSt { ..st9, cur_loop: st.cur_loop }, [
+  (LSt { ..st11, cur_loop: st.cur_loop }, [
     CSLet(csym, ct, coll),
     CSLet(isym, cur_t, start_v),
     CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))

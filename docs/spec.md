@@ -941,22 +941,31 @@ let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
 
 ```dawn
 for x in [1, 2, 3] { println("$x") }
+for (key, value) in entries { println("$key=$value") }
 while queue.non_empty() { ... }
 ```
 
 - `for`/`while` 是 `Unit` 类型的语句，体内可用 `var` 累积。
+- `for pattern in source` 与 `for pattern in from..to` 复用完整递归 pattern 文法，包括
+  tuple、list、constructor、qualified constructor、or-pattern 与行首 `|` continuation。
+  pattern 必须对元素类型**不可反驳**；可反驳 pattern 是编译错误，不会被解释成 filter
+  或静默跳过不匹配元素。
+- pattern binding 只在循环体内可见。source 与 range 两端都在外层 scope 检查和求值，
+  看不到这些 binding；循环后的代码也看不到 pattern binding 或循环体局部变量。
 - `break` 退出**最内层**循环，`continue` 跳到其下一轮。二者是类型 `Never` 的表达式
   （同 `return`，可出现在 match 臂等表达式位置）；只在循环体内合法，且**不可穿越
   lambda/局部函数边界**去够外面的循环（lambda 是独立函数，想退出它用 `return`）。
   无标签形式——需要多层跳出请提取函数用 `return`。comptime 循环同样支持。
   `with` 之后的语句也是一个闭包的体（§4.10），所以那里的 `break` 同样够不到外面的
   循环——诊断会点名 `with`，而不是说一个作者没写的 lambda。
-- **`for x in e` 迭代任何实现了 `Iter` 的类型**（预置 trait，§3.5）：脱糖为对
+- **`for pattern in e` 迭代任何实现了 `Iter` 的类型**（预置 trait，§3.5）：`e` 在进入
+  循环前恰好求值一次；迭代脱糖为对
   `iter_start/iter_done/iter_next/iter_get` 的普通 trait 调用，元素类型是该 impl
   的 `Item`。std 的五个容器（`List`/`String`/`Bytes`/`Map`/`Set`）开箱可迭代；
   泛型函数里 `[C: Iter]` 的参数同样可 `for`（字典转发）。迭代序即 impl 的游标序
   （`String` 按码点、`Map`/`Set` 同 `entries`/`to_list`）。
-- `for x in a..b` 支持右开区间的整数范围（不经 `Iter`）。`a` 先于 `b` 求值；
+- `for pattern in a..b` 支持右开区间的整数范围（不经 `Iter`，元素类型是 `Int`）。
+  `a` 先于 `b` 求值；
   两端各恰好求值一次，且都在进入循环前求值。即使区间为空，这些保证仍成立。
 
 惯用风格优先 `map`/`filter`/`fold`；循环是给性能敏感处和口味用的。

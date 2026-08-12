@@ -350,3 +350,4 @@ fi
 echo "PASS  drop-builtin-alias-boundary compiles, then turns only nominal boundaries red"
 
 "$root/scripts/pattern-or-contract/run.sh"
+"$root/scripts/for-pattern-contract/run.sh"

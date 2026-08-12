@@ -1482,9 +1482,10 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
           q = walk_e(qc, q, body, None)
         }
       }
-    SFor(_, from, to, body, _, _) ->
+    SFor(pat, from, to, body, _, _) ->
       match ts {
-        Some(TSFor(_, _, tfrom, tto, _, tbody, _, _, _)) -> {
+        Some(TSFor(tpat, _, tfrom, tto, _, tbody, _, _, _)) -> {
+          q = visit_pat(qc, q, pat, Some(tpat))
           q = walk_e(qc, q, from, Some(tfrom))
           match to {
             Some(e) -> { q = walk_e(qc, q, e, tto) }
@@ -1493,6 +1494,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
           q = walk_e(qc, q, body, Some(tbody))
         }
         _ -> {
+          q = visit_pat(qc, q, pat, None)
           q = walk_e(qc, q, from, None)
           match to {
             Some(e) -> { q = walk_e(qc, q, e, None) }
@@ -1984,24 +1986,33 @@ fn collect_s(
       }
       acc = collect_e(qc, acc, init, tinit, before)
     }
-    SFor(name, from, to, body, lo, _) -> {
-      let (detail, tfrom, tto, tbody) = match ts {
-        Some(TSFor(sid, _, tf, tt, _, tb, _, _, _)) -> (sym_detail(qc, sid), Some(tf), tt, Some(tb))
+    SFor(_, from, to, body, _, _) -> {
+      let (tpat, tfrom, tto, tbody) = match ts {
+        Some(TSFor(tp, _, tf, tt, _, tb, _, _, _)) -> (Some(tp), Some(tf), tt, Some(tb))
         _ -> {
-          let n1: Option[String] = None
+          let n1: Option[TPat] = None
           let n2: Option[TExpr] = None
           let n3: Option[TExpr] = None
           let n4: Option[TExpr] = None
           (n1, n2, n3, n4)
         }
       }
-      if lo < before { acc = acc ++ [(name, detail)] }
-      acc = collect_e(qc, acc, from, tfrom, before)
+      if e_lo(from) <= before && before <= e_hi(from) {
+        acc = collect_e(qc, acc, from, tfrom, before)
+      }
       match to {
-        Some(e) -> { acc = collect_e(qc, acc, e, tto, before) }
+        Some(e) -> if e_lo(e) <= before && before <= e_hi(e) {
+          acc = collect_e(qc, acc, e, tto, before)
+        }
         None -> ()
       }
-      acc = collect_e(qc, acc, body, tbody, before)
+      if e_lo(body) <= before && before <= e_hi(body) {
+        match tpat {
+          Some(tp) -> { acc = collect_tpat(qc, acc, tp) }
+          None -> ()
+        }
+        acc = collect_e(qc, acc, body, tbody, before)
+      }
     }
     SWhile(cond, body, _, _) -> {
       let (tc, tb) = match ts {

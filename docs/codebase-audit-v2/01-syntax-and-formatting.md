@@ -240,7 +240,13 @@
 
 ## SYN-13 — P2 — `for` 不接受不可反驳 pattern
 
-<!-- audit-anchor: present selfhost/src/front/ast.dawn | SFor(name: String -->
+- **后续处置（2026-08-12）：已修。** `for` 头现复用完整递归 pattern grammar；checker 以
+  元素类型和 typed usefulness 证明不可反驳，并在既有 pattern 诊断后抑制派生错误、在
+  usefulness 超预算时 fail closed。iterable 每轮先把唯一一次 `iter_get` 存进隐藏 item
+  local，range 使用独立隐藏 induction local，再走与结构性 `let` 共享的 selector/binding
+  lowering。LSP 保留 pattern 声明位的 completion suppression，并按 source、body 与 after
+  的实际 span 分层 scope；十三条
+  production-source compiling mutant 分别固定 grammar、诊断、scope、LSP 与求值次数边界。
 
 - **证据：S。** parser 在 `for` 后只接受 IDENT：`selfhost/src/front/parser.dawn:1215`；`let` 已支持不可反驳 pattern，规范也已有 refutability 规则：`docs/spec.md:921`。
 - **边界：** 遍历 pair/entry 不能写 `for (k, v) in entries`，必须先绑定临时值再解构。

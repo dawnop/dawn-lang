@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 30cb2252b0c91215 -->
+<!-- doc-check: translation-of docs/spec.md @ 13a58f5b03651cb6 -->
 
 # Dawn Language Specification
 
@@ -1168,11 +1168,19 @@ let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
 
 ```dawn
 for x in [1, 2, 3] { println("$x") }
+for (key, value) in entries { println("$key=$value") }
 while queue.non_empty() { ... }
 ```
 
 - `for`/`while` are statements of type `Unit`, and `var` may be used inside the body to
   accumulate.
+- `for pattern in source` and `for pattern in from..to` reuse the complete recursive pattern
+  grammar, including tuples, lists, constructors, qualified constructors, or-patterns, and a
+  line-leading `|` continuation. The pattern must be **irrefutable** for the item type; a
+  refutable pattern is a compile error, not a filter that silently skips non-matching items.
+- Pattern bindings are visible only in the loop body. The source and both range bounds are
+  checked and evaluated in the outer scope, where those bindings are unavailable; code after
+  the loop likewise cannot see pattern bindings or body locals.
 - `break` leaves the **innermost** loop and `continue` jumps to its next round. Both are
   expressions of type `Never` (like `return`, they may appear in expression positions such
   as a match arm); they are legal only inside a loop body, and **cannot cross a
@@ -1182,15 +1190,17 @@ while queue.non_empty() { ... }
   The statements after a `with` are also the body of a closure (§4.10), so a `break` there
   likewise cannot reach the loop outside — the diagnostic names `with` instead of talking
   about a lambda the author never wrote.
-- **`for x in e` iterates any type that implements `Iter`** (a built-in trait, §3.5): it
-  desugars into ordinary trait calls to `iter_start/iter_done/iter_next/iter_get`, and the
+- **`for pattern in e` iterates any type that implements `Iter`** (a built-in trait, §3.5):
+  `e` is evaluated exactly once before the loop starts; iteration desugars into ordinary trait
+  calls to `iter_start/iter_done/iter_next/iter_get`, and the
   element type is that impl's `Item`. The five std containers
   (`List`/`String`/`Bytes`/`Map`/`Set`) iterate out of the box; a parameter bound by
   `[C: Iter]` in a generic function is equally `for`-able (dictionary forwarding). The
   iteration order is the impl's cursor order (`String` by code point, `Map`/`Set` the same
   as `entries`/`to_list`).
-- `for x in a..b` supports half-open integer ranges (not via `Iter`). `a` is evaluated before
-  `b`; each bound is evaluated exactly once, and both are evaluated before the loop starts.
+- `for pattern in a..b` supports half-open integer ranges (not via `Iter`, with `Int` items).
+  `a` is evaluated before `b`; each bound is evaluated exactly once, and both are evaluated
+  before the loop starts.
   These guarantees also hold when the range is empty.
 
 Idiomatic style prefers `map`/`filter`/`fold`; loops are there for performance-sensitive

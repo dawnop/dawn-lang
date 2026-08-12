@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` 下现有 89 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 90 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
@@ -61,6 +61,7 @@
 | [perceus-design.md](perceus-design.md) | current | native 的内存管理（精确 RC + 复用分析）。五刀已全部落地，关账在其 §8；仍是该子系统的权威说明。 |
 | [native-loop-control-design.md](native-loop-control-design.md) | current | native RC 的 `unloop` 只拆 match 一次性循环，保留仍被源码 `break`/`continue` 指向的循环与 C 标签。 |
 | [range-bound-order-design.md](range-bound-order-design.md) | current | SEM-18 的 range `for` 边界求值顺序、共享 Core 修复与 compiling mutant 契约。 |
+| [for-pattern-design.md](for-pattern-design.md) | current | SYN-13 的定稿：`for` 复用完整不可反驳 pattern、隐藏 loop locals、精确 LSP scope 与十三条独立负控。 |
 | [compiler-weight-baseline-design.md](compiler-weight-baseline-design.md) | current | #230 的严格重量基线与 dependency re-exec 堆继承：Phase 1 固定 release 产物、递归进程树 RSS、逐角色堆与 VAS、启动时间和 JSON schema，Phase 2 让子编译器继承父 JVM 的实际最大堆并由真实 `jcmd` 负控固定。 |
 | [effects-soundness-design.md](effects-soundness-design.md) | current | #188 的修法：具名效果的两个 soundness 缺陷（标签轴对函数值不设防、减标签的人不是应答的人）与「B 极简」三刀——注解位禁标签、闭包创建点结算、`verify_effects` 整行核对。落地后 spec.md §6.5 以它为准。 |
 | [never-return-design.md](never-return-design.md) | current | SEM-14 已裁决方案的实现记录：return-only `Never` 的语义边界、JVM bottom call 终止 seam 与验证矩阵。 |

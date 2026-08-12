@@ -2709,13 +2709,13 @@ fn stmt_name_refs(s: Stmt, out: Set[String], sc: RefScope) -> (Set[String], RefS
     SExpr(e, _, _) -> (name_refs(e, out, sc), sc)
     SAssert(cond, _, _, _) -> (name_refs(cond, out, sc), sc)
     SWhile(cond, body, _, _) -> (name_refs(body, name_refs(cond, out, sc), sc), sc)
-    SFor(name, from, to, body, _, _) -> {
+    SFor(pat, from, to, body, _, _) -> {
       var o = name_refs(from, out, sc)
       match to {
         Some(t) -> { o = name_refs(t, o, sc) }
         None -> ()
       }
-      (name_refs(body, o, rs_bind(sc, name)), sc)
+      (name_refs(body, o, rs_pattern(sc, pat)), sc)
     }
   }
 
@@ -2763,7 +2763,9 @@ test "a bound name is not an edge to the top-level function it shadows" {
     0,
     1
   )
-  let floop = EBlock([SFor("i", EInt(0, 0, 1), Some(EInt(2, 0, 1)), loop_body, 0, 1)], None, 0, 1)
+  let floop = EBlock([
+    SFor(PBind("i", 0, 1), EInt(0, 0, 1), Some(EInt(2, 0, 1)), loop_body, 0, 1)
+  ], None, 0, 1)
   assert set.to_list(name_refs(floop, set.empty(), ref_scope(set.empty()))) == []
 }
 
@@ -5065,7 +5067,7 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       }
       (cx1, TSWhile(cnx, bx, hj, lo, hi))
     }
-    SFor(name, from, to_opt, body, lo, hi) -> {
+    SFor(pat, from, to_opt, body, lo, hi) -> {
       var cx1 = cx
       let (cxa, ft, fx) = check_expr(cx1, from, no_expected())
       cx1 = cxa
@@ -5111,8 +5113,23 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
         }
       }
       cx1 = push_scope(cx1)
-      let (cxc, sid) = declare(cx1, name, loop_t, false, lo, hi)
+      let pat_diag_count = len(cx1.diags)
+      let (cxc, tp) = check_pattern(cx1, pat, loop_t, false)
       cx1 = cxc
+      if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {
+        match useful_result(cx1.adts, [[to_spat(tp)]], [SWild], [loop_t]) {
+          Some(true) -> {
+            let (plo, phi) = match refutable_span(cx1, pat) {
+              Some(sp) -> sp
+              None -> (pat_lo(pat), pat_hi(pat))
+            }
+            cx1 = cerr_h(cx1, "for pattern must match every item", plo, phi,
+              "use match or filter before the loop to handle items this pattern does not match")
+          }
+          Some(false) -> ()
+          None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
+        }
+      }
       let d = len(cx1.frame.loop_stack)
       let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
       cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
@@ -5132,7 +5149,7 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
           e_lo(body), e_hi(body))
       }
       cx1 = pop_scope(cx1)
-      (cx1, TSFor(sid, name, fx, tx_to, wit, bx, hj, lo, hi))
+      (cx1, TSFor(tp, loop_t, fx, tx_to, wit, bx, hj, lo, hi))
     }
   }
 
