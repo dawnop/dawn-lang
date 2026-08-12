@@ -73,6 +73,24 @@ def check_range(text: str) -> None:
         raise CoreError("range induction local is also a pattern binding slot")
 
 
+def check_bottom(text: str) -> None:
+    body = function_body(text, "bottom.consume")
+    panics = [
+        i for i, line in enumerate(body) if line.strip() == "intrinsic panic : Never"
+    ]
+    if len(panics) != 1:
+        raise CoreError(f"expected one Never source panic, found {len(panics)}")
+    panic = panics[0]
+    if panic == 0 or body[panic - 1].strip() != "discard":
+        raise CoreError("nonreturning source is not preserved as a discarded Never expression")
+    if count(body, r'^\s+str "source-stop"$') != 1:
+        raise CoreError("nonreturning iterable source is not lowered exactly once")
+    if any("unreachable-body" in line for line in body):
+        raise CoreError("unreachable for body was lowered after a Never source")
+    if any(line.strip().startswith("loop ") for line in body):
+        raise CoreError("a loop was lowered after a Never source")
+
+
 GOOD_ITER = """fn iter_core.main -> Unit
   block : Unit
     let v1 : List[Pair]
@@ -97,6 +115,13 @@ GOOD_RANGE = """fn range_core.main -> Unit
             int 1
 """
 
+GOOD_BOTTOM = """fn bottom.consume -> Unit
+  block : Unit
+    discard
+      intrinsic panic : Never
+        str "source-stop"
+"""
+
 
 def must_fail(label: str, text: str, check) -> None:
     try:
@@ -111,6 +136,7 @@ def self_test() -> None:
     check_start(GOOD_ITER)
     check_get(GOOD_ITER)
     check_range(GOOD_RANGE)
+    check_bottom(GOOD_BOTTOM)
     must_fail(
         "duplicate source",
         GOOD_ITER.replace(
@@ -143,20 +169,33 @@ def self_test() -> None:
         GOOD_RANGE.replace("          assign v1\n            int 1\n", "          assign v3\n            int 1\n"),
         check_range,
     )
-    print("core self-test: 4 mutant(s) refused")
+    must_fail(
+        "bottom type erased",
+        GOOD_BOTTOM.replace("intrinsic panic : Never", "intrinsic panic : Unit"),
+        check_bottom,
+    )
+    must_fail(
+        "bottom body lowered",
+        GOOD_BOTTOM + '    str "unreachable-body"\n',
+        check_bottom,
+    )
+    print("core self-test: 6 mutant(s) refused")
 
 
 def main() -> None:
     if sys.argv[1:] == ["--self-test"]:
         self_test()
         return
-    if len(sys.argv) != 3 or sys.argv[1] not in {"source", "start", "get", "range"}:
-        raise SystemExit("usage: core_check.py [--self-test | source|start|get|range dump.core]")
+    if len(sys.argv) != 3 or sys.argv[1] not in {"source", "start", "get", "range", "bottom"}:
+        raise SystemExit(
+            "usage: core_check.py [--self-test | source|start|get|range|bottom dump.core]"
+        )
     check = {
         "source": check_source,
         "start": check_start,
         "get": check_get,
         "range": check_range,
+        "bottom": check_bottom,
     }[sys.argv[1]]
     try:
         check(Path(sys.argv[2]).read_text(encoding="utf-8"))

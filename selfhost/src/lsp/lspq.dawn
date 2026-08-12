@@ -22,7 +22,7 @@ use front/ast.{
   PLit, PBind, PWild, POr, PCtor, PTuple, PList,
   SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect,
-  e_lo, e_hi, module_uses, UseView, module_fns, module_impls, module_traits
+  e_lo, e_hi, pat_lo, pat_hi, module_uses, UseView, module_fns, module_impls, module_traits
 }
 use check/tast.{
   TExpr, TPat, TStmt, TStrPart, TArm, TFun, TModule, TConst,
@@ -67,13 +67,17 @@ pub type Target = {
   def_path: Option[String]
 }
 
-type Q = { offset: Int, best: Option[Target] }
+type Q = { offset: Int, best: Option[Target], in_for_pattern: Bool }
 
-pub fn find_target(qc: QCx, offset: Int) -> Option[Target] = {
-  var q = Q { offset: offset, best: None }
+fn query(qc: QCx, offset: Int) -> Q = {
+  var q = Q { offset: offset, best: None, in_for_pattern: false }
   for d in qc.entry.m.decls { q = visit_decl(qc, q, d) }
-  q.best
+  q
 }
+
+pub fn find_target(qc: QCx, offset: Int) -> Option[Target] = query(qc, offset).best
+
+pub fn in_for_pattern(qc: QCx, offset: Int) -> Bool = query(qc, offset).in_for_pattern
 
 # ---- the offer rule: innermost span containing the offset, later ties win ----
 
@@ -1482,7 +1486,10 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
           q = walk_e(qc, q, body, None)
         }
       }
-    SFor(pat, from, to, body, _, _) ->
+    SFor(pat, from, to, body, _, _) -> {
+      if pat_lo(pat) <= q.offset && q.offset <= pat_hi(pat) {
+        q = Q { ..q, in_for_pattern: true }
+      }
       match ts {
         Some(TSFor(tpat, _, tfrom, tto, _, tbody, _, _, _)) -> {
           q = visit_pat(qc, q, pat, Some(tpat))
@@ -1503,6 +1510,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
           q = walk_e(qc, q, body, None)
         }
       }
+    }
     _ -> ()
   }
   q

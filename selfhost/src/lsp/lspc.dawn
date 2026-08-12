@@ -23,7 +23,7 @@ use check/types.{
   Audience, AModule, audience_covers, declared_audience
 }
 use check/cx.{ModExports}
-use lsp/lspq.{QCx, locals_at}
+use lsp/lspq.{QCx, locals_at, in_for_pattern}
 use front/lexer.{SourceView, view_of, slice_cp}
 use front/ast.{
   module_traits, module_fns, module_types, module_consts, module_effects
@@ -446,6 +446,27 @@ pub fn keywords() -> List[String] =
     "match", "if", "else", "for", "in", "while", "return", "break", "continue",
     "comptime", "unsafe_pure", "test", "assert", "with", "true", "false", "not"]
 
+fn add_adt_completions(qc: QCx, it0: Items, include_types: Bool) -> Items = {
+  var it = it0
+  for pr in map.entries(qc.entry.cx.adts_by_name) {
+    let (_, aid) = pr
+    let a = adt_of(qc.entry.cx.adts, aid)
+    if include_types { it = add(it, a.name, 7, Some("type " ++ a.name), "1") }
+    for c in a.ctors {
+      let detail =
+        if len(c.fields) == 0 {
+          c.name
+        } else {
+          c.name ++ "(" ++
+            join(map(c.fields, f => f.name ++ ": " ++ ty_show(qc.entry.cx.adts, f.ty)), ", ") ++
+            ")"
+        }
+      it = add(it, c.name, 20, Some(detail), "1")
+    }
+  }
+  it
+}
+
 pub fn completions_at(
   qc: QCx,
   project_modules: Option[Map[String, String]],
@@ -506,6 +527,9 @@ pub fn completions_at(
   }
 
   var it = Items { out: [], seen: set.empty() }
+  if in_for_pattern(qc, pos) {
+    return add_adt_completions(qc, it, false).out
+  }
   # locals of the enclosing function: parameters + binders before the cursor
   for pr in locals_at(qc, pos) {
     let (name, detail) = pr
@@ -518,22 +542,7 @@ pub fn completions_at(
       it = add(it, name, 3, Some(sig_render(qc.entry.cx.adts, qc.entry.cx.traits, sig)), "1")
     }
   }
-  for pr in map.entries(qc.entry.cx.adts_by_name) {
-    let (_, aid) = pr
-    let a = adt_of(qc.entry.cx.adts, aid)
-    it = add(it, a.name, 7, Some("type " ++ a.name), "1")
-    for c in a.ctors {
-      let detail =
-        if len(c.fields) == 0 {
-          c.name
-        } else {
-          c.name ++ "(" ++
-            join(map(c.fields, f => f.name ++ ": " ++ ty_show(qc.entry.cx.adts, f.ty)), ", ") ++
-            ")"
-        }
-      it = add(it, c.name, 20, Some(detail), "1")
-    }
-  }
+  it = add_adt_completions(qc, it, true)
   for tv in module_traits(qc.entry.m) {
     it = add(it, tv.name, 8, Some("trait " ++ tv.name ++ "[" ++ tv.tp ++ "]"), "1")
   }

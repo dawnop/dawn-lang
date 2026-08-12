@@ -952,6 +952,8 @@ while queue.non_empty() { ... }
   或静默跳过不匹配元素。
 - pattern binding 只在循环体内可见。source 与 range 两端都在外层 scope 检查和求值，
   看不到这些 binding；循环后的代码也看不到 pattern binding 或循环体局部变量。
+- 若 iterable source 不返回（类型为 `Never`），它仍恰好求值一次，并作为整个语句的
+  bottom 路径；不解析迭代 witness，也不进入 loop、pattern binding 或 body。
 - `break` 退出**最内层**循环，`continue` 跳到其下一轮。二者是类型 `Never` 的表达式
   （同 `return`，可出现在 match 臂等表达式位置）；只在循环体内合法，且**不可穿越
   lambda/局部函数边界**去够外面的循环（lambda 是独立函数，想退出它用 `return`）。

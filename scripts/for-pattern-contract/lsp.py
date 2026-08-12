@@ -9,6 +9,7 @@ import tempfile
 
 
 HEADER_OWNER = "for pattern headers expose binder and constructor queries"
+HEADER_COMPLETION_OWNER = "for pattern completion suppresses values across the recursive header"
 RANGE_COMPLETION_OWNER = "range upper-bound completion offers outer locals"
 SCOPE_OWNER = "for completion does not leak pattern or body locals"
 
@@ -103,6 +104,14 @@ def completion_labels(result: object) -> list[str]:
     return [item.get("label") for item in result if isinstance(item, dict)]
 
 
+def completion_items(result: object) -> list[dict]:
+    if isinstance(result, dict):
+        result = result.get("items", [])
+    if not isinstance(result, list):
+        return []
+    return [item for item in result if isinstance(item, dict)]
+
+
 def fail(owner: str) -> None:
     print("ASSERT: " + owner)
 
@@ -111,6 +120,7 @@ def main() -> int:
     java, jar, cwd = sys.argv[1:]
     ctor = TEXT.index("q.Only(header") + len("q.")
     header_bind = TEXT.index("header_value")
+    nested_header_completion = header_bind + len("header")
     header_use = TEXT.index("header_value", header_bind + 1)
     header_start = TEXT.index("q.Only(header")
     source_use = TEXT.index("in source") + len("in ")
@@ -175,7 +185,12 @@ def main() -> int:
             "textDocument": {"uri": uri}, "position": position(header_start)}},
         {"jsonrpc": "2.0", "id": 14, "method": "textDocument/completion", "params": {
             "textDocument": {"uri": uri}, "position": position(range_upper)}},
-        {"jsonrpc": "2.0", "id": 15, "method": "shutdown", "params": {}},
+        {"jsonrpc": "2.0", "id": 15, "method": "textDocument/completion", "params": {
+            "textDocument": {"uri": uri}, "position": position(nested_header_completion)}},
+        {"jsonrpc": "2.0", "id": 16, "method": "textDocument/completion", "params": {
+            "textDocument": {"uri": uri},
+            "position": position(shared_occurrences[1] + len("sha"))}},
+        {"jsonrpc": "2.0", "id": 17, "method": "shutdown", "params": {}},
         {"jsonrpc": "2.0", "method": "exit", "params": {}},
     ]
     done = subprocess.run(
@@ -188,6 +203,7 @@ def main() -> int:
         sys.stderr.write(done.stdout.decode("utf-8", "replace"))
         sys.stderr.write(done.stderr.decode("utf-8", "replace"))
         fail(HEADER_OWNER)
+        fail(HEADER_COMPLETION_OWNER)
         fail(RANGE_COMPLETION_OWNER)
         fail(SCOPE_OWNER)
         return 1
@@ -216,6 +232,23 @@ def main() -> int:
     shared_labels = completion_labels(got.get(11))
     header_labels = completion_labels(got.get(13))
     range_upper_labels = completion_labels(got.get(14))
+    nested_header_items = completion_items(got.get(15))
+    alternative_header_items = completion_items(got.get(16))
+    nested_header_labels = completion_labels(got.get(15))
+    alternative_header_labels = completion_labels(got.get(16))
+    header_completion_ok = (
+        header_labels == []
+        and nested_header_labels.count("Left") == 1
+        and nested_header_labels.count("Right") == 1
+        and alternative_header_labels.count("Left") == 1
+        and alternative_header_labels.count("Right") == 1
+        and all(item.get("kind") == 20 for item in nested_header_items)
+        and all(item.get("kind") == 20 for item in alternative_header_items)
+        and not any(label in nested_header_labels for label in (
+            "source", "choices", "outer", "header_value", "shared"))
+        and not any(label in alternative_header_labels for label in (
+            "source", "choices", "outer", "header_value", "shared"))
+    )
     range_completion_ok = range_upper_labels.count("outer") == 1
     scope_ok = (
         source_labels.count("source") == 1
@@ -225,7 +258,6 @@ def main() -> int:
         and body_labels.count("header_value") == 1
         and body_labels.count("outer") == 1
         and "body_local" not in body_labels
-        and header_labels == []
         and "range_value" not in range_upper_labels
         and "header_value" not in range_upper_labels
         and "body_local" not in range_upper_labels
@@ -241,11 +273,13 @@ def main() -> int:
 
     if not header_ok:
         fail(HEADER_OWNER)
+    if not header_completion_ok:
+        fail(HEADER_COMPLETION_OWNER)
     if not range_completion_ok:
         fail(RANGE_COMPLETION_OWNER)
     if not scope_ok:
         fail(SCOPE_OWNER)
-    if not header_ok or not range_completion_ok or not scope_ok:
+    if not header_ok or not header_completion_ok or not range_completion_ok or not scope_ok:
         print(json.dumps(got, sort_keys=True), file=sys.stderr)
         return 1
     print("PASS  for-pattern header queries and completion scopes are exact")

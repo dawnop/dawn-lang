@@ -3218,11 +3218,14 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
           ])
         }
         None ->
-          match wit {
-            Some(w) -> lower_for_iter(st, pat, item_ty, from, w, body)
-            # unreachable on a checked program: the checker refuses a
-            # witnessless for..in before lowering runs
-            None -> panic("lower: for..in without an Iter witness")
+          if item_ty == TyNever {
+            let (st1, source) = lower_expr(st, from)
+            (st1, [CSDiscard(source)])
+          } else {
+            match wit {
+              Some(w) -> lower_for_iter(st, pat, item_ty, from, w, body)
+              None -> panic("lower: for..in without an Iter witness")
+            }
           }
       }
     }

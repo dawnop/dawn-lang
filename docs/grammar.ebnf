@@ -169,16 +169,21 @@ if_expr         = "if" expr block { "else" "if" expr block } [ "else" block ] ;
 comptime_expr   = "comptime" block ;
 
 match_expr      = "match" expr "{" match_arm { NEWLINE match_arm } "}" ;
-match_arm       = pattern_or [ "if" expr ] "->" expr ;
-pattern_or      = pattern { "|" pattern } ;
+match_arm       = pattern [ "if" expr ] "->" expr ;
 
 (* ---- 模式 ---- *)
-pattern         = "_" | literal | IDENT
-                | TYPEIDENT [ "(" pat_args ")" ]             (* 构造器 *)
-                | TYPEIDENT "{" pat_fields "}"               (* 记录 *)
-                | "(" pattern "," pattern { "," pattern } ")"
+pattern         = pattern_atom { [ NEWLINE ] "|" [ NEWLINE ] pattern_atom } ;
+pattern_atom    = "_" | pattern_literal | IDENT | ctor_pattern
+                | "(" pattern ")"
+                | "(" pattern "," pattern { "," pattern } [ "," ] ")"
                 | "[" [ pat_list_items ] "]" ;
-pat_args        = pat_arg { "," pat_arg } [ "," [ ".." ] ] ;
+pattern_literal = [ "-" ] ( INT | FLOAT ) | STRING | CHAR | "true" | "false" ;
+ctor_pattern    = [ IDENT "." ] TYPEIDENT
+                  [ "(" [ pat_args ] ")" | "{" [ pat_fields ] "}" ] ;
+pat_args        = ".." | pat_arg { "," pat_arg } [ "," [ ".." ] ] ;
 pat_arg         = [ IDENT ":" ] pattern ;
-pat_fields      = IDENT [ ":" pattern ] { "," IDENT [ ":" pattern ] } [ "," ".." ] ;
-pat_list_items  = pattern { "," pattern } [ "," ".." IDENT ] ;
+pat_fields      = ".." | pat_field { "," pat_field } [ "," [ ".." ] ] ;
+pat_field       = IDENT [ ":" pattern ] ;
+pat_list_items  = pattern { "," pattern } [ "," ]
+                | [ pattern { "," pattern } "," ] ".." [ IDENT ]
+                  [ "," pattern { "," pattern } ] [ "," ] ;

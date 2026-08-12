@@ -11,6 +11,7 @@ refutable="$here/refutable.dawn"
 derived="$here/derived.dawn"
 scope="$here/scope.dawn"
 complexity="$here/complexity.dawn"
+bottom="$here/bottom.dawn"
 iter_core="$here/iter_core.dawn"
 range_core="$here/range_core.dawn"
 runtime="$root/scripts/spike-native/iter_for.dawn"
@@ -35,12 +36,14 @@ ASSERT_GET_ONCE='iter_get is evaluated once per iteration before pattern lowerin
 ASSERT_SOURCE_ONCE='iterable sources are evaluated once before the loop'
 ASSERT_SCOPE='for pattern bindings stay inside the loop body'
 ASSERT_LSP_QUERY='for pattern headers expose binder and constructor queries'
+ASSERT_LSP_HEADER='for pattern completion suppresses values across the recursive header'
 ASSERT_LSP_RANGE='range upper-bound completion offers outer locals'
 ASSERT_LSP_SCOPE='for completion does not leak pattern or body locals'
 ASSERT_DERIVED='invalid for patterns suppress derived irrefutability diagnostics'
 ASSERT_START_ONCE='iter_start is evaluated once before the loop'
 ASSERT_COMPLEXITY='for irrefutability analysis fails closed at its work budget'
 ASSERT_RANGE_SLOT='range loops keep induction state separate from pattern bindings'
+ASSERT_BOTTOM='nonreturning iterable sources lower once as bottom without a witness'
 
 owner_registry="$work/owners"
 printf '%s\n' \
@@ -51,12 +54,14 @@ printf '%s\n' \
   "$ASSERT_SOURCE_ONCE" \
   "$ASSERT_SCOPE" \
   "$ASSERT_LSP_QUERY" \
+  "$ASSERT_LSP_HEADER" \
   "$ASSERT_LSP_RANGE" \
   "$ASSERT_LSP_SCOPE" \
   "$ASSERT_DERIVED" \
   "$ASSERT_START_ONCE" \
   "$ASSERT_COMPLEXITY" \
   "$ASSERT_RANGE_SLOT" \
+  "$ASSERT_BOTTOM" \
   > "$owner_registry"
 
 validate_matrix() {
@@ -168,6 +173,9 @@ syntax_ok() {
   [ "$(grep -Fc 'PTuple ' "$output/parse.out")" -ge 1 ] || return 1
   [ "$(grep -Fc 'PList npre=1 rest=true restname=tail' "$output/parse.out")" -eq 1 ] || return 1
   [ "$(grep -Fc 'PCtor Pair ' "$output/parse.out")" -eq 1 ] || return 1
+  [ "$(grep -Fc 'PCtor Record ' "$output/parse.out")" -eq 1 ] || return 1
+  [ "$(grep -Fc 'PArg name=left' "$output/parse.out")" -eq 1 ] || return 1
+  [ "$(grep -Fc 'PArg name=right' "$output/parse.out")" -eq 1 ] || return 1
   [ "$(grep -Fc 'PQual q.Only ' "$output/parse.out")" -eq 1 ] || return 1
   [ "$(grep -Fc 'POr nalts=2' "$output/parse.out")" -eq 1 ] || return 1
   cp "$syntax" "$output/syntax_fmt.dawn"
@@ -187,8 +195,6 @@ probe_compiler() {
 
   if ! syntax_ok "$jar" "$output"; then
     printf 'ASSERT: %s\n' "$ASSERT_SYNTAX" >> "$output/assertions.raw"
-    awk '!seen[$0]++' "$output/assertions.raw" > "$output/assertions.out"
-    return
   fi
 
   capture_diagnostics "$jar" "$refutable" "$output/refutable.out" || true
@@ -216,6 +222,19 @@ probe_compiler() {
   if [ "$(diagnostic_count "$output/complexity.out")" -ne 1 ] ||
       [ "$(contains_count "$output/complexity.out" 'pattern analysis exceeded its complexity budget')" -ne 1 ]; then
     printf 'ASSERT: %s\n' "$ASSERT_COMPLEXITY" >> "$output/assertions.raw"
+  fi
+
+  capture_diagnostics "$jar" "$bottom" "$output/bottom-check.out" || true
+  mkdir -p "$output/bottom-dump"
+  local bottom_lower=0
+  timeout --kill-after=5s 45s java -Xss512m -Xmx2g -jar "$jar" __lower \
+    --std "$root/std" --dump "$output/bottom-dump" "$bottom" \
+    > "$output/bottom-lower.out" 2> "$output/bottom-lower.err" || bottom_lower=$?
+  if [ -s "$output/bottom-check.out" ] ||
+      [ "$bottom_lower" -ne 0 ] ||
+      ! python3 "$here/core_check.py" bottom "$output/bottom-dump/bottom.core" \
+        > "$output/bottom-core.out" 2> "$output/bottom-core.err"; then
+    printf 'ASSERT: %s\n' "$ASSERT_BOTTOM" >> "$output/assertions.raw"
   fi
 
   if ! timeout --kill-after=5s 45s java -Xss512m -Xmx2g -jar "$jar" run "$runtime" \
@@ -260,17 +279,20 @@ probe_compiler() {
   grep '^ASSERT: ' "$output/lsp.out" >> "$output/assertions.raw" || true
   if [ "$lsp_status" -ne 0 ] && ! grep -q '^ASSERT: ' "$output/lsp.out"; then
     printf 'ASSERT: %s\n' "$ASSERT_LSP_QUERY" >> "$output/assertions.raw"
+    printf 'ASSERT: %s\n' "$ASSERT_LSP_HEADER" >> "$output/assertions.raw"
     printf 'ASSERT: %s\n' "$ASSERT_LSP_RANGE" >> "$output/assertions.raw"
     printf 'ASSERT: %s\n' "$ASSERT_LSP_SCOPE" >> "$output/assertions.raw"
   fi
 
   awk '!seen[$0]++' "$output/assertions.raw" > "$output/assertions.out"
+  printf 'complete\n' > "$output/probe.complete"
 }
 
 dump_probe() {
   local output=$1
   for file in assertions.out parse.out fmt.out refutable.out.raw derived.out.raw \
-    scope.out.raw complexity.out.raw runtime.out runtime.err iter-lower.err \
+    scope.out.raw complexity.out.raw bottom-check.out.raw bottom-lower.err bottom-core.err \
+    runtime.out runtime.err iter-lower.err \
     range-lower.err source-core.err start-core.err get-core.err range-core.err \
     lsp.out lsp.err; do
     if [ -f "$output/$file" ]; then cat "$output/$file" >&2; fi
@@ -280,6 +302,8 @@ dump_probe() {
 observed="$work/observed.jar"
 build_compiler "$root/selfhost" "$observed" observed
 probe_compiler "$observed" "$work/observed"
+[ "$(cat "$work/observed/probe.complete" 2> /dev/null || true)" = complete ] ||
+  fail "observed compiler probe did not run the complete assertion set"
 if [ -s "$work/observed/assertions.out" ]; then
   dump_probe "$work/observed"
   fail "observed compiler contract failed"
@@ -302,6 +326,8 @@ expect_mutant_red() {
     fail "$name did not change production source"
   build_compiler "$mutant/selfhost" "$mutant/compiler.jar" "$name"
   probe_compiler "$mutant/compiler.jar" "$mutant/probe"
+  [ "$(cat "$mutant/probe/probe.complete" 2> /dev/null || true)" = complete ] ||
+    fail "$name probe did not run the complete assertion set"
   printf 'ASSERT: %s\n' "$owner" > "$mutant/assert.expected"
   if ! cmp -s "$mutant/assert.expected" "$mutant/probe/assertions.out"; then
     dump_probe "$mutant/probe"

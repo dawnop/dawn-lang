@@ -297,5 +297,5 @@
   `CSLet` 顺序，并以不依赖动态输出的 control 固定四个 bound call 各一次且位于 loop 前。
   唯一 compiling mutant 精确恢复 upper-first 列表，完整 build、回答合法版本后只能把
   hand-owned owner 打红；matrix 的 role、owner、red、control 均由 fail-closed 自测读取。
-- **范围：** 不修改 iterable `for`、for-pattern、步长、右开边界或溢出语义；SYN-13 仍是
-  后续独立工作。
+- **范围：** 本批当时不修改 iterable `for`、for-pattern、步长、右开边界或溢出语义；
+  SYN-13 后来已作为独立批次关账。

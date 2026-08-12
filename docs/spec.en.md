@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 13a58f5b03651cb6 -->
+<!-- doc-check: translation-of docs/spec.md @ 8f337b846f41fd4a -->
 
 # Dawn Language Specification
 
@@ -1181,6 +1181,9 @@ while queue.non_empty() { ... }
 - Pattern bindings are visible only in the loop body. The source and both range bounds are
   checked and evaluated in the outer scope, where those bindings are unavailable; code after
   the loop likewise cannot see pattern bindings or body locals.
+- If an iterable source does not return (its type is `Never`), it is still evaluated exactly
+  once and remains the statement's bottom path; no iteration witness, loop, pattern binding,
+  or body is reached.
 - `break` leaves the **innermost** loop and `continue` jumps to its next round. Both are
   expressions of type `Never` (like `return`, they may appear in expression positions such
   as a match arm); they are legal only inside a loop body, and **cannot cross a

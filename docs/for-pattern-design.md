@@ -21,6 +21,9 @@ source 与 range 两端在 pattern scope 外按源码顺序检查和求值，各
 本身已有类型、构造器或 alternative binding 诊断时，不再派生不可反驳诊断。usefulness
 达到确定性预算时沿用 fail-closed complexity diagnostic。
 
+若 iterable source 的类型是 `Never`，typed tree 保留该 bottom 类型而不伪装成 `TyError`。
+lowering 只发出 source 的一次求值；它之后的 witness、loop、pattern 与 body 都不可达。
+
 ## 三、表示与 lowering
 
 解析树使用 `SFor(pat, from, to, body, lo, hi)`；typed tree 使用
@@ -36,9 +39,10 @@ pattern lowering 建立 selector 与 binding。pattern setup 位于 done 检查�
 ## 四、LSP 与 formatter
 
 pattern header 中的 constructor 和 binding 参加 hover 与 definition。小写 pattern 位是
-新 binding 声明，不提供 outer-local completion；source 使用外层 scope，body 再加入 pattern
-bindings，循环后不保留 pattern 或 body locals。or-pattern completion 只收第一支的
-canonical symbols。
+新 binding 声明，整个递归 header span 的 completion 不混入 outer value/local；关键字后的
+初始位置保持 fresh-name suppression，嵌套位置只提供 constructor。source 使用外层 scope，
+body 再加入 pattern bindings，循环后不保留 pattern 或 body locals。or-pattern body
+completion 只收第一支的 canonical symbols。
 
 formatter 仍是 token-stream formatter，不增加生产分支；只增加行首 `|` 的 for-pattern
 格式化与幂等语料。AST dump 输出完整 pattern，而不是退化成一个名字。
@@ -49,7 +53,7 @@ formatter 仍是 token-stream formatter，不增加生产分支；只增加行�
 for-pattern。新语法只出现在字符串、外部 corpus 和由 HEAD compiler 编译的 JVM/native
 fixture 中。
 
-独立 contract 对 parser、checker、lowering 与 LSP 的十三条生产规则各放一个 compiling
+独立 contract 对 parser、checker、lowering 与 LSP 的十五条生产规则各放一个 compiling
 mutant，并对每个 mutant 运行完整 assertion set。既有 range bound order 与 source loop
 label contract 继续拥有边界顺序和 jump step，不复制同义规则。
 

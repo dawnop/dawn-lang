@@ -6,25 +6,21 @@ import sys
 
 
 MUTATIONS = {
-    "restore-name-only-for-head": (
+    "reject-record-for-head": (
         "src/front/parser.dawn",
-        (
-            (
-                '''fn for_stmt(p: P, st: St) -> PR[Stmt] = {
+        ((
+            '''fn for_stmt(p: P, st: St) -> PR[Stmt] = {
   let (st1, kw) = adv(p, st)
   let (st2, pat) = pattern_p(p, st1)?
 ''',
-                '''fn for_stmt(p: P, st: St) -> PR[Stmt] = {
+            '''fn for_stmt(p: P, st: St) -> PR[Stmt] = {
   let (st1, kw) = adv(p, st)
-  let (st2, name) = want(p, st1, IDENT, "a loop variable name")?
+  if at_kind(p, st1, TYPEIDENT) && kind_ahead(p, st1, 1) == LBRACE {
+    return Err((st1, perr(p, st1, "expected a non-record pattern")))
+  }
+  let (st2, pat) = pattern_p(p, st1)?
 ''',
-            ),
-            (
-                "  Ok((st8, SFor(pat, from, to, body, kw.lo, e_hi(body))))\n",
-                "  Ok((st8, SFor(PBind(name.text, name.lo, name.hi), from, to, body, "
-                "kw.lo, e_hi(body))))\n",
-            ),
-        ),
+        ),),
     ),
     "skip-irrefutability": (
         "src/check/checker.dawn",
@@ -160,6 +156,20 @@ MUTATIONS = {
           }
           let (st5, bsym) = fresh_sym(st4)
 ''',
+        ),),
+    ),
+    "drop-never-source-lowering": (
+        "src/ir/lower.dawn",
+        ((
+            "          if item_ty == TyNever {\n",
+            "          if item_ty == TyError {\n",
+        ),),
+    ),
+    "skip-pattern-context-completion": (
+        "src/lsp/lspc.dawn",
+        ((
+            "  if in_for_pattern(qc, pos) {\n",
+            "  if false {\n",
         ),),
     ),
 }
