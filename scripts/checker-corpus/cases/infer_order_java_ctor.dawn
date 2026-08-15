@@ -1,0 +1,24 @@
+# The other side of infer_order_java: a `use java` class name is subtracted
+# from the call graph only while it really names the Java class. A constructor
+# of this module claims the spelling first (check_method_call consults
+# `ctors_by_name` before the static arm), so `Integer.tag()` below is an
+# ordinary UFCS call to the local `tag` and its edge has to survive. `describe`
+# is declared before `tag` on purpose: a dropped edge checks it first, against
+# the placeholder signature every unchecked inferred function starts with
+# (return type `TyError`, effect `!io`), and the annotated pure `shown` is what
+# reports it. The golden is empty on purpose -- nothing here is recursive.
+#
+# This lives apart from infer_order_java because the two cannot share a module:
+# once `Integer` is a constructor here, it is no longer the Java class there.
+
+use java "java.lang.Integer"
+
+type Boxed = Integer
+
+fn describe() = Integer.tag() + 0
+
+fn tag(b: Boxed) = 7
+
+pub fn shown() -> Int = describe()
+
+pub fn main() -> Unit !io = println(to_string(shown()))

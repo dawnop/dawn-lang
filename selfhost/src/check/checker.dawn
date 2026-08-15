@@ -2513,17 +2513,18 @@ test "ctor pattern field discipline" {
 fn no_pargs() -> List[PatArg] = []
 
 ## What a name means at the point the call graph reaches it: the value binders
-## in scope (parameters, `let`s, patterns, loop variables, local functions) and
-## the whole-module aliases. Both answer the same question — is this spelling
-## an edge to a top-level function of *this* module, or does it name something
-## else entirely. Walking without them makes `fn a(b: Int) = b` depend on the
-## top-level `b`, and rejects both as mutually recursive (audit ARC-01).
-pub type RefScope = { bound: Set[String], mods: Set[String] }
+## in scope (parameters, `let`s, patterns, loop variables, local functions),
+## the whole-module aliases, and the `use java` class names. All three answer
+## the same question — is this spelling an edge to a top-level function of
+## *this* module, or does it name something else entirely. Walking without them
+## makes `fn a(b: Int) = b` depend on the top-level `b`, and rejects both as
+## mutually recursive (audit ARC-01).
+pub type RefScope = { bound: Set[String], mods: Set[String], javas: Set[String] }
 
 ## The scope a function body starts in: nothing bound yet, the module's aliases
-## fixed for the whole walk.
-pub fn ref_scope(mods: Set[String]) -> RefScope =
-  RefScope { bound: set.empty(), mods: mods }
+## and Java class names fixed for the whole walk.
+pub fn ref_scope(mods: Set[String], javas: Set[String]) -> RefScope =
+  RefScope { bound: set.empty(), mods: mods, javas: javas }
 
 pub fn rs_bind(sc: RefScope, name: String) -> RefScope =
   RefScope { ..sc, bound: set.insert(sc.bound, name) }
@@ -2578,6 +2579,21 @@ fn rs_qualified(sc: RefScope, target: Expr) -> Bool =
     _ -> false
   }
 
+## Is `target` a `use java` class name in receiver position — i.e. is
+## `target.m(..)` a Java static call rather than a UFCS rewrite of this
+## module's `m`? A bare capitalized receiver reaches the checker as a
+## zero-argument `ECtor`, and check_method_call's static arm claims it only
+## when no argument list was written; a receiver that *was* written with
+## parentheses is an ordinary construction, so its edge stays. The names a
+## constructor or a constant claims ahead of the Java class are already gone
+## from `javas` (check_module builds it), so membership is the whole test.
+fn rs_java_static(sc: RefScope, target: Expr) -> Bool =
+  match target {
+    ECtor(cn, cargs, spread, has_parens, _, _, _, _) ->
+      not has_parens && len(cargs) == 0 && spread == None && set.has(sc.javas, cn)
+    _ -> false
+  }
+
 ## Every lowercase name mentioned in call/value position and *not* bound where
 ## it is mentioned — the call-graph over-approximation for return-type
 ## inference ordering (Kotlin nameRefs). The over-approximation is deliberate
@@ -2590,9 +2606,20 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
       if set.has(sc.bound, name) || set.has(sc.mods, name) { out } else { set.insert(out, name) }
     EMethod(target, name, args, _, _, _, _) -> {
       # `x.f(a)` can mean `f(x, a)` (UFCS, spec §4.3), so the method name is an
-      # edge — unless the receiver is a module alias, where `f` lives in that
-      # other module and no local function of this name is reachable.
-      var o = if rs_qualified(sc, target) { out } else { set.insert(out, name) }
+      # edge — unless the receiver settles the call elsewhere first. Two
+      # receivers do, and both are decidable from the syntax alone here: a
+      # module alias, where `f` lives in that other module, and a `use java`
+      # class name, where `Class.f(..)` is a Java static and no local function
+      # is reachable at all.
+      #
+      # Nothing else may be subtracted. A Java *instance* call `value.f(..)` is
+      # also never a local function, but telling it apart from UFCS needs the
+      # receiver's type, and this walk runs before any body is checked. And a
+      # builtin or std method name keeps its edge on purpose: name resolution
+      # is local-then-std-then-builtin with whole shadowing (spec §10.6), so
+      # with a top-level `len` in this module `xs.len()` really does call it.
+      let elsewhere = rs_qualified(sc, target) || rs_java_static(sc, target)
+      var o = if elsewhere { out } else { set.insert(out, name) }
       o = name_refs(target, o, sc)
       for a in args { o = name_refs(a.e, o, sc) }
       o
@@ -2728,7 +2755,7 @@ test "name refs walk every call position" {
     0,
     14
   )
-  let refs = name_refs(e, set.empty(), ref_scope(set.empty()))
+  let refs = name_refs(e, set.empty(), ref_scope(set.empty(), set.empty()))
   for n in ["g", "y", "m", "h", "z"] {
     assert set.has(refs, n)
   }
@@ -2753,7 +2780,7 @@ test "a bound name is not an edge to the top-level function it shadows" {
     1
   )
   let lam = ELambda([LambdaParam { name: "b", ann: None, lo: 0, hi: 1 }], body, false, 0, 1)
-  let refs = name_refs(lam, set.empty(), ref_scope(set.empty()))
+  let refs = name_refs(lam, set.empty(), ref_scope(set.empty(), set.empty()))
   assert set.to_list(refs) == ["d"]
   # a for-loop variable and a local function's own name are binders too
   let loop_body = EBlock(
@@ -2766,7 +2793,7 @@ test "a bound name is not an edge to the top-level function it shadows" {
   let floop = EBlock([
     SFor(PBind("i", 0, 1), EInt(0, 0, 1), Some(EInt(2, 0, 1)), loop_body, 0, 1)
   ], None, 0, 1)
-  assert set.to_list(name_refs(floop, set.empty(), ref_scope(set.empty()))) == []
+  assert set.to_list(name_refs(floop, set.empty(), ref_scope(set.empty(), set.empty()))) == []
 }
 
 test "a module-qualified call is not an edge to a same-named local function" {
@@ -2774,13 +2801,32 @@ test "a module-qualified call is not an edge to a same-named local function" {
   let call = EMethod(EVar("list", 0, 4), "take",
     [pos_arg(EListLit([], 0, 1)), pos_arg(EVar("n", 0, 1))], 0, 1, 0, 1)
   let mods = set.insert(set.empty(), "list")
-  assert set.to_list(name_refs(call, set.empty(), ref_scope(mods))) == ["n"]
+  assert set.to_list(name_refs(call, set.empty(), ref_scope(mods, set.empty()))) == ["n"]
   # with no alias of that name in scope the receiver is a value, and UFCS puts
   # the edge back
-  let refs = name_refs(call, set.empty(), ref_scope(set.empty()))
+  let refs = name_refs(call, set.empty(), ref_scope(set.empty(), set.empty()))
   assert set.has(refs, "take")
   assert set.has(refs, "list")
 }
+
+test "a Java static call is not an edge to a same-named local function" {
+  # Integer.toHexString(n) mentions `toHexString`, but that call is answered by
+  # java.lang.Integer and never reaches a local function of that name (ARC-01)
+  let recv = ECtor("Integer", no_cargs(), None, false, 0, 7, 0, 7)
+  let call = EMethod(recv, "toHexString", [pos_arg(EVar("n", 0, 1))], 0, 1, 0, 1)
+  let javas = set.insert(set.empty(), "Integer")
+  assert set.to_list(name_refs(call, set.empty(), ref_scope(set.empty(), javas))) == ["n"]
+  # with no `use java` class of that name the receiver is a constructor, and
+  # UFCS puts the edge back
+  assert set.has(name_refs(call, set.empty(), ref_scope(set.empty(), set.empty())), "toHexString")
+  # a written argument list is an ordinary construction, not the static
+  # namespace: check_method_call declines it there too, so the edge stays
+  let built = EMethod(ECtor("Integer", no_cargs(), None, true, 0, 7, 0, 9), "toHexString",
+    [], 0, 1, 0, 1)
+  assert set.has(name_refs(built, set.empty(), ref_scope(set.empty(), javas)), "toHexString")
+}
+
+fn no_cargs() -> List[Arg] = []
 
 test "a handler's arms and its remainder are both call positions" {
   # with handle Ask { get(n) => p(n, q) }  r()
@@ -2795,7 +2841,7 @@ test "a handler's arms and its remainder are both call positions" {
   }
   let rest = ELambda(no_lparams(), EApply(EVar("r", 0, 1), [], 0, 1), true, 0, 1)
   let h = EHandle("Ask", [arm], rest, 0, 1, 0, 1)
-  let refs = name_refs(h, set.empty(), ref_scope(set.empty()))
+  let refs = name_refs(h, set.empty(), ref_scope(set.empty(), set.empty()))
   assert set.to_list(refs) == ["p", "q", "r"]
   # the arm's parameter is bound, and `get` names the operation the arm answers
   assert not set.has(refs, "n")
@@ -8632,9 +8678,20 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
     # the aliases are fixed for the module: pass_imports has already run, and a
     # local declaration may not shadow one (spec §10.3)
     let mod_alias_names: Set[String] = set.from(map.keys(cx1.module_aliases))
+    # `Class.m(..)` is a Java static call only when neither a constructor nor a
+    # constant claims the name first — that is check_method_call's static arm,
+    # and subtracting the two here keeps rs_java_static a membership test. All
+    # three tables are final: pass_java_uses, the type passes and
+    # pass_const_decls have all run.
+    var java_recv: Set[String] = set.empty()
+    for cn in map.keys(cx1.java_classes) {
+      if not map.has(cx1.ctors_by_name, cn) && not map.has(cx1.consts, cn) {
+        java_recv = set.insert(java_recv, cn)
+      }
+    }
     for idx in pending {
       let d = fnds[idx]
-      var sc = ref_scope(mod_alias_names)
+      var sc = ref_scope(mod_alias_names, java_recv)
       for p in fnds[idx].params { sc = rs_bind(sc, p.name) }
       let refs: Set[String] = name_refs(d.body, set.empty(), sc)
       var dlist: List[String] = []

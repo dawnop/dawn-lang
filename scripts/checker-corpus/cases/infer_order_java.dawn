@@ -1,0 +1,37 @@
+# Return-type inference orders the inferred functions by a call graph built
+# from the names their bodies mention (see infer_order_shadowing). A method
+# name is an edge because `x.f(a)` can mean `f(x, a)`, but `Class.f(a)` cannot:
+# it is a Java static call, and no function of this module takes part. Without
+# that subtraction the two functions below name themselves, and a self-edge is
+# a cycle inference refuses to break (audit ARC-01). The golden is empty on
+# purpose -- nothing here is recursive.
+#
+# The other half of the case is that the subtraction must not go further. A
+# builtin or std method name still has to be an edge: resolution is
+# local-then-std-then-builtin with whole shadowing (spec §10.6), so `xs.len()`
+# beside a top-level `len` calls the local one.
+
+use java "java.lang.Integer"
+use java "java.lang.Math"
+
+fn toHexString(n: Int) = Integer.toHexString(n)!
+
+fn abs(n: Int) = Math.abs(n)
+
+# `len` is a builtin, and this module redefines it. `narrow` is declared after
+# its caller on purpose: with the edge, it is checked first and its return type
+# is settled: without it, `count` is checked against the placeholder signature
+# every unchecked inferred function starts with (return type `TyError`, effect
+# `!io`), and the annotated pure `total` below is what reports the damage.
+fn count(xs: List[Int]) = xs.len() + 0
+
+fn len(xs: List[Int]) = 1
+
+pub fn total() -> Int = count([1, 2, 3])
+
+pub fn main() -> Unit !io = {
+  println(toHexString(255))
+  println(to_string(abs(0 - 1)))
+  println(to_string(total()))
+  ()
+}
