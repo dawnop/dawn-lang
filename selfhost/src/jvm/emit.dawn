@@ -33,8 +33,11 @@ use check/types.{
 }
 use check/tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
 use ir/interp.{CtOut}
+use front/ast.{
+  Decl, DFn, DImpl, DTrait, DTest, FnDecl, TraitMethod, TypeRef, TNamed, TQual, EUnit
+}
 use jvm/codegen.{
-  class_bytes,
+  class_bytes, class_bytes_from, MethodSite, no_sites,
   desc_of, method_desc, JvmRepr, jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of,
   is_bottom, load_slot, hash_of, dict_class, gen_adt, gen_ctor_class, parameterised_scaffold,
   dict_arg_field, dict_ctor_desc, EqOverride, no_override, singleton_scaffold, subject_name
@@ -404,10 +407,18 @@ fn trait_method_desc(gx: GenCtx, s: Sig) -> String = method_desc(gx.adts, s.para
 
 ## impl method static name: dawn$impl$<Trait>$<Subject>$<m>.
 fn impl_method_name(gx: GenCtx, trait_name: String, subject: Ty, m: String) -> String =
-  "dawn\$impl\$" ++ trait_name ++ "\$" ++ subject_name(gx.adts, subject) ++ "\$" ++ m
+  impl_static_name(trait_name, subject_name(gx.adts, subject), m)
+
+## The same, over names rather than types: the site table (`decl_sites`) reads
+## an impl's subject off the source text, where it is a name already, and has
+## to arrive at the same string this does.
+fn impl_static_name(trait_name: String, subject: String, m: String) -> String =
+  "dawn\$impl\$" ++ trait_name ++ "\$" ++ subject ++ "\$" ++ m
 
 fn default_method_name(trait_name: String, m: String) -> String =
   "dawn\$default\$" ++ trait_name ++ "\$" ++ m
+
+fn test_method_name(idx: Int) -> String = "dawn\$test\$" ++ to_string(idx)
 
 ## impl-method descriptor for lambdas/bridges: concrete types, but a bottom
 ## return (Never) becomes Object, because the erased `apply` has to return
@@ -1332,7 +1343,7 @@ fn gen_test(
   lifts: List[CFun],
   idx: Int
 ) -> Gen !io =
-  gen_fn(gx, g, cw, cf, lifts, "dawn\$test\$" ++ to_string(idx), "()" ++ desc_of(gx.adts, TyUnit))
+  gen_fn(gx, g, cw, cf, lifts, test_method_name(idx), "()" ++ desc_of(gx.adts, TyUnit))
 
 ## A throwaway MethodVisitor so Gen can be constructed before the first real
 ## method opens (the record field is non-optional by design).
@@ -1373,6 +1384,173 @@ fn owner_or_default(o: Option[String], fallback: String) -> String =
     None -> fallback
   }
 
+# ---- where an emitted method was declared ----
+
+## The head name of an impl subject as it was written: `List[T]` is written
+## under `List`, the same name `subject_name` answers for the type it checked
+## to. A subject with no head name (a tuple, a function type) is not written
+## under one either, so it has nothing to contribute.
+fn subject_head(t: TypeRef) -> Option[String] =
+  match t {
+    TNamed(n, _, _, _) -> Some(n)
+    TQual(_, n, _, _, _) -> Some(n)
+    _ -> None
+  }
+
+fn site_at(src: String, nlo: Int, nhi: Int) -> MethodSite =
+  MethodSite { path: src, nlo: nlo, nhi: nhi, lifted: false }
+
+## Where this module's methods were declared, keyed by the name each is
+## emitted under.
+##
+## Built from the AST because that is the only place a declaration's span
+## survives: TAST keeps no span for a function and Core keeps none at all
+## (deliberately -- docs/native-backend-plan.md). The keys are built by the
+## same functions that name the methods, so the two cannot drift apart. A
+## method no declaration is behind -- `<clinit>`, the JVM entry wrapper -- is
+## simply absent, and a lookup that misses falls back to what was printed
+## before this table existed.
+##
+## `src` empty and `decls` empty is the honest answer for a module whose
+## source the driver did not keep, which is every std module.
+fn decl_sites(src: String, decls: List[Decl]) -> Map[String, MethodSite] = {
+  var out: Map[String, MethodSite] = no_sites()
+  if src == "" { return out }
+  var ti = 0
+  for d in decls {
+    match d {
+      DFn(f) -> {
+        out = map.insert(out, f.name, site_at(src, f.nlo, f.nhi))
+        # one synthesised zero-argument function per defaulted parameter
+        # (#207), which is where that parameter's expression is compiled
+        var k = 0
+        for p in f.params {
+          match p.default {
+            Some(_) -> {
+              out = map.insert(out, f.name ++ "\$default\$" ++ to_string(k),
+                site_at(src, p.lo, p.hi))
+            }
+            None -> ()
+          }
+          k = k + 1
+        }
+      }
+      DImpl(_tps, trait_name, _tlo, _thi, subject, methods, _assoc, _lo, _hi) -> {
+        match subject_head(subject) {
+          Some(sn) -> {
+            for m in methods {
+              out = map.insert(out, impl_static_name(trait_name, sn, m.name),
+                site_at(src, m.nlo, m.nhi))
+            }
+          }
+          None -> ()
+        }
+      }
+      DTrait(trait_name, _tp, _tplo, _tphi, methods, _assoc, _pub, _lo, _hi, _nlo, _nhi) -> {
+        for m in methods {
+          match m.body {
+            Some(_) -> {
+              out = map.insert(out, default_method_name(trait_name, m.name),
+                site_at(src, m.nlo, m.nhi))
+            }
+            None -> ()
+          }
+        }
+      }
+      # test bodies are numbered in declaration order, which is the order
+      # `module_tests` hands them to the checker and the checker keeps
+      DTest(_name, _body, _lo, _hi, nlo, nhi) -> {
+        out = map.insert(out, test_method_name(ti), site_at(src, nlo, nhi))
+        ti = ti + 1
+      }
+      _ -> ()
+    }
+  }
+  out
+}
+
+## Give every body hoisted out of `owner` the declaration `owner` came from.
+##
+## A lifted lambda has no declaration of its own -- lowering named it
+## `lambda$N` -- so the function it was written inside is the finest
+## coordinate it has, and `lifted` says as much when the caret lands there.
+fn note_lift_sites(
+  sites: Map[String, MethodSite],
+  owner: String,
+  lifts: List[CFun]
+) -> Map[String, MethodSite] =
+  match map.get(sites, owner) {
+    Some(st) -> {
+      var out = sites
+      for lf in lifts { out = map.insert(out, lf.name, MethodSite { ..st, lifted: true }) }
+      out
+    }
+    None -> sites
+  }
+
+test "the site table is keyed by the name a method is emitted under" {
+  let body = EUnit(0, 0)
+  let f = FnDecl {
+    is_pub: true,
+    name: "big",
+    tparams: [],
+    params: [],
+    ret: None,
+    effs: [],
+    body: body,
+    lo: 0,
+    hi: 20,
+    nlo: 3,
+    nhi: 6
+  }
+  let sub = TNamed("Foo", [], 0, 3)
+  let impl_m = FnDecl { ..f, name: "fmt", nlo: 40, nhi: 43 }
+  let tm = TraitMethod {
+    name: "fmt",
+    params: [],
+    ret: TNamed("String", [], 0, 6),
+    effs: [],
+    body: Some(body),
+    lo: 60,
+    hi: 70,
+    nlo: 62,
+    nhi: 65
+  }
+  let decls: List[Decl] = [
+    DFn(f),
+    DImpl([], "Show", 0, 4, sub, [impl_m], [], 30, 50),
+    DTrait("Show", "T", 0, 1, [tm], [], true, 55, 75, 58, 62),
+    DTest("a test", body, 80, 90, 85, 91)
+  ]
+  let sites = decl_sites("/tmp/app.dawn", decls)
+  match map.get(sites, "big") {
+    Some(st) -> { assert st.nlo == 3 }
+    None -> panic("the plain function is missing")
+  }
+  # the impl and default keys are the mangled names, not the source names
+  match map.get(sites, "fmt") {
+    Some(_) -> panic("an impl method was keyed by its source name")
+    None -> ()
+  }
+  match map.get(sites, impl_static_name("Show", "Foo", "fmt")) {
+    Some(st) -> { assert st.nlo == 40 }
+    None -> panic("the impl method is missing")
+  }
+  match map.get(sites, default_method_name("Show", "fmt")) {
+    Some(st) -> { assert st.nlo == 62 }
+    None -> panic("the trait default is missing")
+  }
+  match map.get(sites, test_method_name(0)) {
+    Some(st) -> { assert st.nlo == 85 }
+    None -> panic("the test body is missing")
+  }
+  # a module the driver kept no source for contributes nothing
+  match map.get(decl_sites("", decls), "big") {
+    Some(_) -> panic("a module with no source produced a site")
+    None -> ()
+  }
+}
+
 ## dictionaries and the class of statics.
 ##
 ## `impl_table` is still a parameter, but it no longer says anything about
@@ -1398,7 +1576,12 @@ pub fn emit_module(
   ct: CtOut,
   # this module's const-name → comptime value view, imported consts included
   # (their values live in the declaring module's CtOut)
-  all_consts: Map[String, CValue]
+  all_consts: Map[String, CValue],
+  # the module's source file and its declarations, for a class file that
+  # cannot hold what was compiled to point at the declaration it came from.
+  # Empty for a module the driver kept no AST for, which is every std module
+  src: String,
+  decls: List[Decl]
 ) -> List[(String, Bytes)] !io = {
   var out: List[(String, Bytes)] = []
   for aid in own_adt_ids {
@@ -1452,6 +1635,7 @@ pub fn emit_module(
     let (_cf, lifts) = pr
     g = note_lifts(gx, g, lifts)
   }
+  var sites = decl_sites(src, decls)
   var has_main = false
   var fi = 0
   for f in tm.fns {
@@ -1466,18 +1650,21 @@ pub fn emit_module(
       Some(pair) -> {
         let (tid, subject) = pair
         let tr = trait_of(traits, tid)
-        g = gen_fn(gx, g, cw, cf, lifts, impl_method_name(gx, tr.name, subject, f.name),
-          fn_desc_with_dicts(gx, f.sig))
+        let mname = impl_method_name(gx, tr.name, subject, f.name)
+        sites = note_lift_sites(sites, mname, lifts)
+        g = gen_fn(gx, g, cw, cf, lifts, mname, fn_desc_with_dicts(gx, f.sig))
       }
       None ->
         match f.default_of {
           Some(tid) -> {
             let tr = trait_of(traits, tid)
-            g = gen_fn(gx, g, cw, cf, lifts, default_method_name(tr.name, f.name),
-              fn_desc_with_dicts(gx, f.sig))
+            let mname = default_method_name(tr.name, f.name)
+            sites = note_lift_sites(sites, mname, lifts)
+            g = gen_fn(gx, g, cw, cf, lifts, mname, fn_desc_with_dicts(gx, f.sig))
           }
           None -> {
             if f.name == "main" { has_main = true }
+            sites = note_lift_sites(sites, f.name, lifts)
             g = gen_fn(gx, g, cw, cf, lifts, f.name, fn_desc_with_dicts(gx, f.sig))
           }
         }
@@ -1487,6 +1674,7 @@ pub fn emit_module(
   var ti = 0
   for pr in lm.tests {
     let (cf, lifts) = pr
+    sites = note_lift_sites(sites, test_method_name(ti), lifts)
     g = gen_test(gx, g, cw, cf, lifts, ti)
     g = drain_lambdas(g, cw)
     ti = ti + 1
@@ -1510,7 +1698,7 @@ pub fn emit_module(
   for s in g.sam_classes {
     out = out ++ [gen_sam_class(supers, s)]
   }
-  out ++ [(class_name, class_bytes(() => cw.toByteArray(), class_name))]
+  out ++ [(class_name, class_bytes_from(() => cw.toByteArray(), class_name, src, sites))]
 }
 
 ## One Core dictionary as a JVM singleton.

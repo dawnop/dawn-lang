@@ -19,6 +19,8 @@ use check/types.{
   Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff
 }
 use ir/core.{subject_key}
+use front/diag.{render}
+use front/token.{Diag}
 use jvm/jreflect
 use java "dawn.rt.Asm"
 use java "dawn.rt.AsmWriter"
@@ -231,6 +233,15 @@ test "the ASM interop spike: a class assembles through the shared writer" {
 
 # ---- the class file's own limits ----
 
+## Where one emitted method was declared: the source file, and the span of the
+## name it was written under. `lifted` marks a body the compiler hoisted out of
+## that declaration -- a lambda, which has no name of its own and borrows the
+## coordinates of the function it was written inside.
+pub type MethodSite = { path: String, nlo: Int, nhi: Int, lifted: Bool }
+
+## No method of this class is traceable to a declaration.
+pub fn no_sites() -> Map[String, MethodSite] = map.empty()
+
 ## Take the bytes of a finished class writer, or report why the class file
 ## cannot hold them.
 ##
@@ -241,22 +252,129 @@ test "the ASM interop spike: a class assembles through the shared writer" {
 ## stack trace ending inside `MethodWriter`, with nothing in it naming what had
 ## been compiled (audit ARC-02).
 ##
-## ASM's own text names the offending method and its descriptor, and that is
-## the finest coordinate available at this point: Core carries no spans, so
-## there is no source position left to report. So the text is kept verbatim and
-## framed by the class it came out of, rather than replaced by a message that
-## knows less than it does.
+## This is the form for a class nothing is known about: ASM's own text names
+## the offending method and its descriptor, and with no site table that is the
+## finest coordinate there is. Emitters that can say where their methods came
+## from call `class_bytes_from`.
 pub fn class_bytes(finish: fn() -> Option[Bytes] !io, cls: String) -> Bytes !io =
+  class_bytes_from(finish, cls, "", no_sites())
+
+## The same, for a class whose methods can be traced back to source: `src` is
+## the file the class was compiled from and `sites` maps each emitted method
+## name to the declaration it came from.
+##
+## Core carries no spans, so by the time a body reaches ASM its source position
+## is long gone. The table closes that gap from the side that still has it: the
+## emitter holds the AST as well as the Core, and ASM's own text names the
+## method it refused, which is the key.
+pub fn class_bytes_from(
+  finish: fn() -> Option[Bytes] !io,
+  cls: String,
+  src: String,
+  sites: Map[String, MethodSite]
+) -> Bytes !io =
   match catch_fault(finish) {
     Ok(bs) -> bs.expect("bytes")
     Err(e) -> {
-      io.eprintln("error: `" ++ cls ++ "` does not fit in a JVM class file: " ++ e.message)
-      io.eprintln("  = hint: a method holds at most 64 KiB of bytecode and a class at most " ++
-          "65,535 constant pool entries; split the function, or split the module")
+      io.eprint(too_large_text(e.message, cls, src, sites))
       let _ = io.exit(1)
       panic("io.exit returned")
     }
   }
+
+## The method ASM refused, when its text names one of `cls`'s own: ASM writes
+## `Method too large: <class>.<method> <descriptor>`. A class that is too large
+## as a whole names no method at all, and this answers None for it.
+fn asm_method_name(msg: String, cls: String) -> Option[String] =
+  match str.strip_prefix(msg, "Method too large: " ++ cls ++ ".") {
+    Some(rest) ->
+      match str.index_of(rest, " ") {
+        Some(i) -> Some(str.take(rest, i))
+        None -> Some(rest)
+      }
+    None -> None
+  }
+
+fn size_hint(lifted: Bool, m: String) -> String = {
+  let limits = "a method holds at most 64 KiB of bytecode and a class at most " ++
+    "65,535 constant pool entries; split the function, or split the module"
+  if lifted {
+    "`" ++ m ++ "` is a lambda lifted out of the declaration marked here; " ++ limits
+  } else {
+    limits
+  }
+}
+
+## What the compiler prints when a class file cannot hold what was compiled:
+## ASM's own sentence, at the declaration the method came from when that is
+## known. Kept verbatim rather than reworded, because it names the method and
+## its descriptor and a replacement would know less than it does.
+fn too_large_text(
+  msg: String,
+  cls: String,
+  src: String,
+  sites: Map[String, MethodSite]
+) -> String !io = {
+  let head = "`" ++ cls ++ "` does not fit in a JVM class file: " ++ msg
+  match located(msg, cls, sites) {
+    Some(found) -> {
+      let (m, st) = found
+      match io.read_file(st.path) {
+        Ok(text) ->
+          render(st.path, text,
+            Diag { msg: head, lo: st.nlo, hi: st.nhi, hint: size_hint(st.lifted, m) })
+        # the file moved out from under the compiler between reading it and
+        # emitting: the span is unprintable, the message still stands
+        Err(_) -> flat_text(head, st.path, size_hint(st.lifted, m))
+      }
+    }
+    # no method to look up (a class over the pool limit), or one the table does
+    # not know: the module's own file is the whole of what is left to say
+    None -> flat_text(head, src, size_hint(false, ""))
+  }
+}
+
+fn located(msg: String, cls: String, sites: Map[String, MethodSite]) ->
+  Option[(String, MethodSite)] =
+  match asm_method_name(msg, cls) {
+    Some(m) ->
+      match map.get(sites, m) {
+        Some(st) -> Some((m, st))
+        None -> None
+      }
+    None -> None
+  }
+
+fn flat_text(head: String, path: String, hint: String) -> String = {
+  var out = "error: " ++ head ++ "\n"
+  if path != "" { out = out ++ "  --> " ++ path ++ "\n" }
+  out ++ "  = hint: " ++ hint ++ "\n"
+}
+
+test "a size failure is placed at the declaration it came from" {
+  # ASM names the class and the method; the class is this class, so what is
+  # left is the method name, and that is what the table is keyed by
+  assert asm_method_name("Method too large: app/util.big (J)J", "app/util") == Some("big")
+  # a method of some other class is not this table's to look up
+  assert asm_method_name("Method too large: app/other.big (J)J", "app/util") == None
+  # and a class over the constant pool limit names no method at all
+  assert asm_method_name("Class too large: app/util", "app/util") == None
+
+  let st = MethodSite { path: "/tmp/app.dawn", nlo: 3, nhi: 6, lifted: false }
+  let sites = map.insert(no_sites(), "big", st)
+  match located("Method too large: app/util.big (J)J", "app/util", sites) {
+    Some(found) -> {
+      let (m, got) = found
+      assert m == "big"
+      assert got.nlo == 3
+    }
+    None -> panic("the declaration was not found")
+  }
+  # a lifted body says so, because the caret is over the function it came out
+  # of and not over anything the user wrote as a method
+  assert str.contains(size_hint(true, "lambda\$2"), "lifted out of")
+  assert not str.contains(size_hint(false, "big"), "lifted out of")
+}
 
 # ---- ADT classes (spec §12.2) ----
 

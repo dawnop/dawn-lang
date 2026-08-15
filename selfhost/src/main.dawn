@@ -18,6 +18,7 @@ use std/io
 use std/str
 use std/bytes
 use std/map
+use front/ast.{Decl}
 use front/lexer
 use front/parser
 use front/lexdump
@@ -428,9 +429,12 @@ fn collect_program(
   var si = 0
   for sm in std_mods {
     let (cls, cx, tm, ct) = sm
+    # std carries no source path or AST here (StdCtx keeps neither), so a std
+    # class that outgrows the class file format reports what it always did
+    let no_decls: List[Decl] = []
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cls,
       own_trait_ids(cx.traits, cls), own_adts_of(cx.adts, cls, seen),
-      tm, std_lm[si], ct, cdriver.merged_consts(cx, ct, const_vals))
+      tm, std_lm[si], ct, cdriver.merged_consts(cx, ct, const_vals), "", no_decls)
     si = si + 1
     for aid in own_adts_of(cx.adts, cls, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cx.adts, aid)))
@@ -453,7 +457,7 @@ fn collect_program(
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns,
       cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name),
       own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, user_lm[ui], cm.ct,
-      cdriver.merged_consts(cm.cx, cm.ct, const_vals))
+      cdriver.merged_consts(cm.cx, cm.ct, const_vals), cm.path, cm.m.decls)
     ui = ui + 1
     for aid in own_adts_of(cm.cx.adts, cm.class_name, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cm.cx.adts, aid)))
