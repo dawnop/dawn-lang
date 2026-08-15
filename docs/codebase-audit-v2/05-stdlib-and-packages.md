@@ -7,9 +7,11 @@
 ## 本专题结论
 
 - JSON 旧有大整数、非有限输出与控制字符问题已经修复，不应重复；inflate 的三项 P1 与 Web
-  tempfile ownership 也已关闭。当前剩余风险集中在 Web 公开 invariant、协议边界，以及
-  `LIB-18` 尚未验证的 streaming clean-truncation 候选。
-- packages 的共同问题是 public record/Map/String 过早丢掉 invariant：Digest 可伪造、Response 可构造非法状态、query/form 丢重复值、JSON error 只有人类字符串。其中 query/form 与 JSON error 已由后续两个 major 关闭，Digest 与 Response 仍在册。
+  tempfile ownership 也已关闭。streaming body 吞掉全部失败那条（`LIB-18`）也已关闭：
+  fault 与 panic 现在由嵌套屏障分开并各自记录。当前剩余风险集中在 Web 公开 invariant，
+  以及 `LIB-18` 当初连带记下、至今仍未验证的 streaming clean-truncation 候选（要检测它
+  必须让 `Stream` 携带 expected length，那是被设计文档推迟到下一个 web major 的事）。
+- packages 的共同问题是 public record/Map/String 过早丢掉 invariant：Digest 可伪造、Response 可构造非法状态、query/form 丢重复值、JSON error 只有人类字符串。其中 query/form 与 JSON error 已由后续两个 major 关闭，Digest 已随 `sha2 / 2.0.0` 变成 opaque，只剩 Response 在册。
 - early language/package 允许 breaking change，应优先把无效状态从公开类型中移除，而不是在 write boundary 继续 sanitizer/默认值补丁。
 - **本篇按目录写 `packages/web/src/…`、`packages/json/src/…`，但目录名不是包名**：包管理器的 v2 换名规则要求 major ≥ 2 的包名带上 major，所以这两个包的 `name` 分别是 `web3` 与 `json2`（各自的 `dawn.toml`），消费者靠别名保住 `use web/...` 的拼写。版本随 major 走，读 manifest 不读本文。
 
@@ -254,6 +256,20 @@
   `dispatch`/`parse_query` 都是 `serve_app` 内脏」。去向是 RD-12 的包 pub 收窄，不是
   「共享唯一 pure path parser」，那件事 `dispatch_segs` 已经做完了。
 
+- **排期裁决（2026-08-16）：并入 RD-12，随下一个 web major 发，本轮不做。** 勘察把代价两端
+  都量清了。**迁移成本是零**：`match_path`/`match_segs`/`dispatch`/`dispatch_segs`/`parse_query`/
+  `validate_routes`/`route_meta`/`Dispatch` 八个符号的**包外调用点合计为 0**（仓内 `playground`
+  与仓外 dawnop-site 只用 `Route` 加六个构造/标注函数），router.dawn 自己的 test 与被测函数同
+  文件，去 `pub` 后仍可见，连测试都不用改；删掉 `match_path`/`dispatch` 后私有 `segs` 也失去
+  全部非 test 调用者可一并删除，重复斜杠语义在包里就只剩 `raw_segs` 一份定义，本条的原始症状
+  随之物理消灭。**但窗口成本不是零**：`packages/web` 现在是 `web3 / 3.0.0`、已随 `v0.64.0`
+  发出、被 dawnop-site 以 tag url + d1 hash 钉住消费；删一个 pub 名就是 semver major，按
+  `package-design.md` 的 v2 换名规则还要把包名改成 `web4`，再由 dawnop-site 提一个改 url/
+  version/hash 的提交。**为删几个零调用者的名字单开一个 major 并让下游改 manifest，性价比
+  不成立。** 与 `LIB-19` 的对比是这条裁决的全部依据：那边同样是收窄 pub 却已关账，因为
+  sha2 的消费者全是仓内路径依赖、不参与 MVS，major 是免费的。**是否该开 major，与开 major
+  贵不贵，是两件事。** 下一个 major 真开时要一次做完的符号清单就是上面那八个，不必重新勘察。
+
 ## LIB-14 — P2 — tail capture 抹掉 encoded slash 的 segment 边界（已修）
 
 <!-- audit-anchor: absent packages/web/src/types.dawn | pub fn param_segs -->
@@ -298,6 +314,27 @@
 > `Response` 那半在 `web-api-v2-design.md` §四已被裁「不做」（status 是三位数字的开放集合），
 > 重开必须显式回应该节；受检 `HeaderName`/`HeaderValue` 与统一的 1xx/204/205/304/HEAD
 > 语义没有被 §四覆盖，是本项余下的可做面。
+>
+> **二次处置（2026-08-16）：上面三条「仍开放」关掉两条，本项仍是 partial。**
+> `body_length` 的无 content 状态集补全为 1xx/204/205/304。jdk.httpserver 自己强制前三类
+> （每次都记一条 WARNING），**唯独不管 205**，所以修复前 `text(205, …)` 真会把 entity 送上线，
+> 违反 RFC 9110 §15.3.6；1xx 那三类改的是省掉一次白写的 body 与一条 WARNING，并让 `Stream`
+> body 走 `drop_body` 而不是被 `transferTo` 读空。write boundary 补了纯函数
+> `response_problem`：`content_type` 与每个 header 对都过 `with_header` 用的同一组谓词，
+> 不合格者换成中立 500 而非 panic（此处在 `handle` 的隔离点之外，panic 会打断连接而非渲染）。
+> `content_type` 是唯一一条**不需要 record 字面量就能到达**的未校验路径，因为 `raw`/`binary`/
+> `streaming` 把它当参数直通；JDK 的 `Headers.checkValue` 又放行 obs-fold 而 `valid_header_value`
+> 不放，那段差值区间就是从这里进去的。随 `web3 / 3.1.0` 发（签名与类型不动，故 minor）。
+>
+> **`Response` 仍是 public record，所以按 anchor 本项继续是 partial。** 但余项的收益已经缩水：
+> record 字面量造得出的非法头，现在会在 write boundary 被拦下并渲染成 500，与 `with_header`
+> 的 panic 落到同一个结局。opaque `Response` 与受检 `HeaderName`/`HeaderValue` 一并推到下一个
+> web major 做，一次迁移而不是两次，这正是 §四最后一条「一次只改一个」的反面教训所要求的。
+>
+> **另需订正一处转述：**「opaque `Response` 那半已被 §四裁掉」不准确。§四裁的是
+> **method/status 换成受限类型**，理由是封闭枚举必须配 `Other(String)` 逃生口等于绕回 String；
+> 它没有一个字提到 opaque `Response`，也没有否掉校验本身（它给的替代方案正是「String 常量
+> 加启动时校验」）。只有在「opaque 是为了给 status 一个封闭类型」这层意义上那句转述才成立。
 
 - **证据：S。** `Response` 是 public record literal：`packages/web/src/types.dawn:81`；header sanitizer 删除字符而非拒绝：`:214`；write boundary 不重新 validate：`packages/web/src/server.dawn:131`；no-body status 只覆盖 204/304：`:94`。
 - **边界：** header name `":"` 可变 empty，`"X:A"` 与 `"XA"` collision；1xx/205 仍可带 entity。
@@ -320,7 +357,7 @@
 - **影响：** config 迁移或组合 middleware 时可从 fail-closed 变 fail-open，且无 type/validation 提示。
 - **建议：** 禁止 negative；用 `Option[Int]` 表示 unlimited；所有入口复用同一 validator。
 
-## LIB-18 — P2 — streaming response 吞掉所有 fault 与 panic
+## LIB-18 — P2 — streaming response 吞掉所有 fault 与 panic（已修）
 
 <!-- audit-anchor: present packages/web/src/server.dawn | let _ = catch_panic -->
 
@@ -339,9 +376,33 @@
   当 finally 兜住客户端中途断开」写成方案（§4.4 同款做法，落地清单也照抄），按方法说明 §3
   的定义这属于「仓库已承认」。缺陷仍成立：三者不可区分、无 log/metric、clean truncation
   可能被当成功。它因此是「细化一条已裁决的兜底」，零破坏、成本极低，可搭 tempfile 一类
-  的小刀一起做。
+  的小刀一起做。（上面那个 §4.4 的引用错位：`catch_panic` 当 finally 的原文在本文 §4.3，
+  它引的 §4.4 是另一份 `streaming-design.md` 的。）
 
-## LIB-19 — P2 — SHA-256 `Digest` public record 可伪造 invariant
+> **后续处置（2026-08-16）：已修。** 单一并集屏障换成内 `catch_fault` 外 `catch_panic` 的
+> 嵌套，泵体抽成可注入的 `pump_with`（照 `spill_with` 的先例，让三种结局都能不起 socket 测），
+> 结果落在 `Pumped` / `TransferFailed` / `PumpPanicked` 三个构造器上并各自记一行日志。
+> **分类只看哪个屏障收下**：`catch_fault` 拦 `java.lang.Exception` 而放 panic 穿透，
+> `catch_panic` 两者都拦，差集恰是 program panic。这是 spec §9.8 认可的、后端无关的形式；
+> `ForeignError` 没有 `is_panic` 位，而按 `kind` 前缀匹配字符串那条建议 spec 已明确撤销。
+>
+> **日志措辞刻意不写「客户端断开」。** 客户端挂断与上游读失败是同一个 `transferTo` 抛出的
+> 同一个 `java.io.IOException`，这一层分不开；点名其中一个是把猜测印成事实。写的是
+> `transfer failed after commit`，只声称「已 commit 之后传输停了」这个能确知的部分。真要
+> 三分得把泵拆成 `readNBytes` + `write` 让读写各占一个屏障，那偏离设计文档点名的 API 且每块
+> 多一次 `Bytes` 分配，另立账。
+>
+> **不改 status、不告诉客户端**沿用设计文档 §4.3 的既有裁决（头已随 chunked 发出，status
+> 已花掉）。**clean truncation 仍未解决**：这一层没有 expected length，无从比对；缺口改记在
+> `streaming` 构造器的 doc comment 上，去向见总纲 §4.1。
+>
+> 顺带修掉一个自身缺陷：校验失败的消息会把**因为带 CRLF 而被拒的那个头**原样 `println`，
+> 等于把注入下移一层给读日志的人，故加 `log_safe` 并用逐字相等断言钉住。`types.header_problem`
+> 有同形状的问题但未动（会改到用户可见的 400 body 措辞），另立账。
+>
+> 11 个变异体逐个验证判词能转红，含「把两个屏障合回一个」与「`pump_with` 恒返回 `Pumped`」。
+
+## LIB-19 — P2 — SHA-256 `Digest` public record 可伪造 invariant（已修）
 
 <!-- audit-anchor: absent packages/sha2/src/sha256.dawn | pub opaque type Digest -->
 
@@ -353,3 +414,27 @@
   opaque」），不是新账，去向是 RD-12 的包 pub 收窄。**全表 ROI 最高**：改一个关键字，
   编译器源码零改动（`selfhost/src/pkg/` 的两个消费点只经 `new`/`update`/`finish`/`hex`
   使用它，从不写字面量、不读字段），哈希输出逐字节不变。
+
+> **后续处置（2026-08-16）：已修。** 私有 `DigestState` record 加 `pub opaque type Digest =
+> DigestState`，随 `sha2 / 2.0.0` 发。修复前 `Digest { h: [], buf: [], total: 0 }` 是合法
+> 字面量、喂给 `finish` 即 `panic: index 0 out of bounds for length 0`，也就是本条描述的
+> 伤害从 type-correct 的调用点真的可达；修复后包外构造报 `undefined constructor: Digest`、
+> 字段读取报 `` `.` field access needs a record value ``，私有 record 也不按名字泄漏
+> （`` `DigestState` is private to module ``）。200 个跨块边界输入加一次 130 步增量摘要，
+> 改前改后逐字节相同。
+>
+> **上面「改一个关键字、编译器源码零改动」这句话，前半是错的。** `pub opaque type X = { … }`
+> 不能解析：`opaque` 走 `alias_decl`，target 由 `type_ref` 解析，而 `type_ref` 没有 `LBRACE`
+> 分支（record 体是 `type_decl` 独有的），语言里也没有匿名 record 类型。必须写成私有 record
+> 加 opaque 两个声明。其次，模块**内**也不能直接 `d.h`：spec §2.7 规定 opaque 只在可赋值性
+> 位置转换、表达式内部不转换，`scripts/checker-corpus/cases/opaque_expr` 早已把这条钉成期望
+> 诊断。所以 `update`/`finish` 的函数体必须重写成先 `let state: DigestState = d` 再读字段。
+> 后半是对的：四个消费点（`pkg/vendor`、`pkg/maven`、`compiler-plan/pkgfetch`、
+> `site/gen/fingerprint`，比审计说的两个多两个）一行都没改。
+>
+> **版本纪律的判据在此细化：** 收窄 pub 是 semver major，但 sha2 的 major 是免费的
+> （三个消费者全是仓内路径依赖、零 url+hash 钉，路径依赖不参与 MVS），而 `LIB-13` 同形状的
+> 收窄要开 `web4` 并逼下游改 manifest。**是否该开 major 与开 major 贵不贵是两件事**，
+> 这一对正好是对照组。顺带撞出一条：`docs/package-design.md` 说 v2 换名规则「从第 0 天机器
+> 强制」，实测 selfhost 里无人执行（包 manifest 的 `name`/`version` 只被 `dawn add` 读来拼
+> `[deps.<name>]`），规则大概随 M8 归档 Kotlin CLI 一起失传，另立账处置。

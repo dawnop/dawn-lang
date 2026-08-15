@@ -103,13 +103,13 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（80）
+#### 当前 fixed（82）
 
 - 语法（18）：`SYN-01`–`SYN-16`、`SYN-18`、`SYN-19`。
 - 语义（12）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-11`–`SEM-15`、`SEM-17`、`SEM-18`。
 - 架构（6）：`ARC-03`–`ARC-06`、`ARC-12`、`ARC-13`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
-- 库（14）：`LIB-01`–`LIB-05`、`LIB-07`–`LIB-12`、`LIB-14`、`LIB-15`、`LIB-17`。
+- 库（16）：`LIB-01`–`LIB-05`、`LIB-07`–`LIB-12`、`LIB-14`、`LIB-15`、`LIB-17`–`LIB-19`。
 - 治理（13）：`GOV-01`–`GOV-13`。
 
 #### 当前 partial（4）
@@ -117,20 +117,20 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 架构（3）：`ARC-01`、`ARC-02`、`ARC-11`。
 - 库（1）：`LIB-16`。
 
-#### 当前 open（13）
+#### 当前 open（11）
 
 - 语法（1）：`SYN-17`。
 - 语义（4）：`SEM-04`、`SEM-09`、`SEM-10`、`SEM-16`。
 - 架构（4）：`ARC-07`–`ARC-10`。
-- 库（4）：`LIB-06`、`LIB-13`、`LIB-18`、`LIB-19`。
+- 库（2）：`LIB-06`、`LIB-13`。
 
 #### 当前 retracted（2）
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**80 fixed + 4 partial + 13 open + 2 retracted = 99**。逐专题矩阵：
+当前计数自检：**82 fixed + 4 partial + 11 open + 2 retracted = 99**。逐专题矩阵：
 语法 **18/0/1/0**、语义 **12/0/4/2**、架构 **6/3/4/0**、工具链 **17/0/0/0**、
-库 **14/1/4/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
+库 **16/1/2/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
 fixed）、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed，
@@ -166,6 +166,28 @@ lowering、`Never` source bottom 路径、精确 LSP span scope 与未完成 alt
 token recovery、限定 constructor completion，以及 source/`iter_start`/`iter_get` 的 Core
 placement 由双后端语料和 28 条 production-source compiling mutants 固定；recovery fallback
 复用 checker 的 builtin/namespace 判定，不暴露被 checker 拒绝的 constructor。
+随后 `LIB-19` open → fixed：`Digest` 成为私有 record 上的 `pub opaque type`，只有 `new`
+与 `update` 造得出的状态才存在。修复前 `Digest { h: [], buf: [], total: 0 }` 是合法字面量、
+喂给 `finish` 即 `index 0 out of bounds`，修复后包外构造与字段读取都被拒，私有 record 也不
+按名字泄漏；200 个跨块边界输入的摘要逐字节不变。审计原文说「改一个关键字」是错的：
+`pub opaque type X = { … }` 不能解析（`opaque` 的 target 走 `type_ref`，没有 `LBRACE` 分支），
+且模块内也不能直接 `.` 取字段（spec §2.7，`opaque_expr` 语料早已钉住），故 `update`/`finish`
+的函数体必须重写。包同批升 `sha2 / 2.0.0`：三个消费者全是仓内路径依赖、零 url+hash 钉，
+路径依赖不参与 MVS，所以这次 major 的迁移成本是零。
+随后 `LIB-18` open → fixed：流式 body 的单一并集屏障换成内 `catch_fault` 外 `catch_panic`
+的嵌套，于是上游 IO 故障、客户端中途挂断与程序 panic 是三个被记录的结局而不是同一个沉默。
+分类只看**哪个屏障收下**，不匹配任何 `kind` 字符串（spec §9.8 的二分即其可观察形式）。
+日志措辞刻意不写「客户端断开」：那与上游读失败是同一个 `transferTo` 抛出的同一个
+`IOException`，这一层分不开，点名其中一个就是把猜测印成事实。头已发出故无法改 status，
+这一条沿用 `streaming-response-design.md` §4.3 的既有裁决。clean truncation 仍未检测，
+因为这一层没有 expected length，缺口改记在 `streaming` 的 doc comment 上。
+同批 `LIB-16` 仍是 partial，但 partial 的内容变了：`body_length` 的无 content 状态集补全为
+1xx/204/205/304。jdk.httpserver 自己强制前三类（每次都记一条 WARNING），**唯独不管 205**，
+所以修复前 `text(205, …)` 真会把 entity 送上线，违反 RFC 9110 §15.3.6。write boundary 另加
+一层纯函数校验：`content_type` 与每个 header 对都过 `with_header` 用的同一组谓词，不合格者
+换成中立 500 而不是 panic（这里在 `handle` 的隔离点之外，panic 会打断连接而非渲染）。
+`content_type` 是唯一一条不需要 record 字面量就能到达的未校验路径。余下的 opaque `Response`
+与受检 `HeaderName`/`HeaderValue` 仍开放，见该条目。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -190,10 +212,12 @@ placement 由双后端语料和 28 条 production-source compiling mutants 固�
 | ID | 静态候选 | 当前口径 |
 |---|---|---|
 | `SEM-04` | comptime Cursor 使用 code-point index，JVM 使用 UTF-16 offset，native 使用 UTF-8 byte offset；折叠出的 Cursor 偏移可能跨执行模型失配 | 只记录静态跨后端候选，未验证可达程序；不另计严重度。 |
-| `LIB-18` | streaming body 的 `transferTo` 正常 EOF 与异常均没有长度/结果契约；上游 clean truncation 可能被当作成功结束 | 只记录静态协议候选，未构造网络探针；不另计严重度。 |
+| `LIB-18` | 上游 clean truncation 仍可能被当作成功结束：`ResponseBody.Stream` 不携带 expected length，本层没有可比对的东西 | 只记录静态协议候选，未构造网络探针；不另计严重度。**`LIB-18` 本身已 fixed**（fault 与 panic 已三分并各自记录），这里剩的是它当初连带记的另一半。 |
 
 这两项是当前“先记账、暂不验证”的最高风险候选；它们不改变 v0.60 冻结严重度表，也不在
-99 项之外新增 ID。
+99 项之外新增 ID。`LIB-18` 那半要真检测，必须给 `Stream` 带上 expected length，而
+`streaming-response-design.md` §六已把「透传上游 Content-Length」判为纯精修并推迟，且它同时
+是包 API 变更与线行为变更（chunked → 定长）。所以这半的去向是下一个 web major，不是本条目。
 
 ### 4.2 冻结 v0.60 P0 候选（`SEM-01` 当前已修）
 
@@ -372,9 +396,14 @@ partial 为 `ARC-01`、`ARC-02`。
    「同一函数体在整个模块里只有一份」这条身份前提，不是 `ARC-11B` 的全部前置：
    后者还欠 `RC-03` 的 `fold_children`/`visit` 原语，缺它就是第七份手写全树遍历。
 6. **破坏性 package API：** `json2` / `web3` 两个 major 已带走 `LIB-08`、`LIB-12`、`LIB-14`、
-   `LIB-15`、`LIB-17`；余下 `LIB-06`、`LIB-13`、`LIB-16`、`LIB-18`、`LIB-19` 按下一个 major
-   与迁移窗口分批。`SEM-09/10` 是 intentional delayed capability/ABI，`SEM-16` 是 HOLD，
-   均不作为自治修 bug。
+   `LIB-15`、`LIB-17`。此后判据细化了一层：**「要不要开 major」和「开 major 贵不贵」是两件事**。
+   `LIB-19` 同样是收窄 pub，却已随 `sha2 / 2.0.0` 关账，因为 sha2 的三个消费者全在仓内、
+   全是路径依赖、无一处 url+hash 钉，而路径依赖不参与 MVS，于是这次 major 的下游迁移成本
+   恰好是零。`LIB-13` 形状相同而代价不同：`packages/web` 是 `web3 / 3.0.0`、已随 `v0.64.0`
+   发出、被 dawnop-site 以 tag url + d1 hash 钉住消费，收窄要开 `web4 / 4.0.0`（连包名一起改）
+   并逼下游提一个改 manifest 的提交。**为删几个零调用者的名字付这笔钱不成立**，故它连同
+   `LIB-06`（另属 std 的 forwarder 纪律）与 `LIB-16` 余项按下一个 major 与迁移窗口分批。
+   `SEM-09/10` 是 intentional delayed capability/ABI，`SEM-16` 是 HOLD，均不作为自治修 bug。
 
 ## 9. 旧审查如何读
 
