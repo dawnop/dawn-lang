@@ -18,7 +18,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, with_header}
+use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response, error_response_with, streaming, text, binary, raw, header, headers_all, query, query_all, param, param_segs, with_header, valid_header_name, valid_header_value}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, tagged}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -34,6 +34,8 @@ use java "java.net.URL"
 use java "java.net.URLConnection"
 use java "java.net.HttpURLConnection"
 use java "java.io.ByteArrayInputStream"
+use java "java.io.ByteArrayOutputStream"
+use java "java.io.FileInputStream"
 use java "java.util.ArrayList"
 use java "java.nio.file.Files"
 
@@ -99,11 +101,20 @@ fn read_body(ex: HttpExchange, limit: Int) -> Result[(String, Bytes), HttpError]
 # (WEB-06/07): Text is its UTF-8 byte count, Binary its byte length, and only
 # Stream — whose length is unknown up front — stays chunked. An empty
 # Text/Binary maps to -1, because 0 would mean chunked; the JDK then emits
-# Content-Length: 0 itself. A 204/304 never carries a body no matter what the
-# handler built (RFC 9110 §6.4.1/§15.4.5; the JDK would force this anyway,
-# with a logged warning).
+# Content-Length: 0 itself.
+#
+# Four status classes never carry content no matter what the handler built:
+# 1xx informational (RFC 9110 §15.2), 204 No Content (§15.3.5), 205 Reset
+# Content (§15.3.6, "MUST NOT generate a response with content") and 304 Not
+# Modified (§15.4.5). This used to name only 204 and 304, which left the other
+# two to jdk.httpserver — and it covers three of the four: `sendResponseHeaders`
+# forces 1xx, 204 and 304 to no body, logging a WARNING each time it has to, but
+# it does **not** cover 205, which it treats as an ordinary status and will
+# happily give an entity. So 205 is the one class where this line is what keeps
+# the response compliant; for 1xx it saves a warning, a body written for
+# nothing, and a streaming body read to EOF instead of dropped.
 fn body_length(status: Int, body: ResponseBody) -> Int =
-  if status == 204 || status == 304 {
+  if (status >= 100 && status < 200) || status == 204 || status == 205 || status == 304 {
     -1
   } else {
     match body {
@@ -116,22 +127,147 @@ fn body_length(status: Int, body: ResponseBody) -> Int =
 
 fn exact_length(n: Int) -> Int = if n == 0 { -1 } else { n }
 
-## Close a streaming body that is never pumped (HEAD, 204/304): the upstream
-## connection must free even though no bytes move. The other kinds hold no
-## resource.
+## Close a streaming body that is never pumped (HEAD, 1xx/204/205/304): the
+## upstream connection must free even though no bytes move. The other kinds hold
+## no resource.
 fn drop_body(body: ResponseBody) -> Unit !io =
   match body {
     Stream(s) -> close_stream(s)
     _ -> ()
   }
 
+# How pumping a streaming body ended. Three outcomes, not two: the point of the
+# type is that a failed transfer and a panicking program are told apart, and
+# both are told apart from a clean EOF.
+type PumpOutcome =
+  | Pumped
+  | TransferFailed(message: String)
+  | PumpPanicked(message: String)
+
+# Pump an upstream stream and say how it ended, with the pumping step passed in
+# so a test can drive all three outcomes without a socket (the `spill_with`
+# arrangement above, for the same reason).
+#
+# The two barriers are nested rather than unioned. `catch_fault` catches
+# java.lang.Exception and lets a Dawn panic through (spec §9.8), `catch_panic`
+# catches both, so the inner one takes an IO failure and the outer one takes a
+# panic: which barrier accepted a failure is the backend-independent way to
+# classify it, and the only one. `ForeignError` carries no is_panic bit and its
+# `kind` is a backend's own name for the failure, so nothing here matches a
+# string.
+#
+# The single union barrier this replaced discarded its Result outright, so an
+# upstream IO failure, a client hanging up mid-download and a bug in this
+# program were all the same silent nothing.
+#
+# The bracket is inside the outer barrier so that the upstream stream closes on
+# every one of the three ways out, before the outcome is read.
+fn pump_with(s: InputStream, pump: fn(InputStream) -> Unit !io) -> PumpOutcome !io = {
+  let pumped = catch_panic(() => {
+    with up <- bracket(s, close_stream)
+    catch_fault(() => pump(up))
+  })
+  match pumped {
+    Ok(Ok(_)) -> Pumped
+    Ok(Err(e)) -> TransferFailed(e.message)
+    Err(m) -> PumpPanicked(m.message)
+  }
+}
+
+# Pump the upstream stream to the socket and log anything but a clean EOF.
+#
+# The wording is deliberately not "client disconnected". A client hanging up and
+# an upstream read failing are the same java.io.IOException out of the same
+# transferTo call, and this layer cannot tell them apart; naming one of them
+# would be a guess printed as a fact. What it can say honestly is that the
+# transfer stopped after the response was already committed.
+#
+# Nothing is sent to the client either way: the headers went out before the
+# first byte (chunked framing, docs/streaming-response-design.md §4.3), so the status
+# is spent and the only remaining signal is the connection ending short.
+#
+# Log ordering, so nobody reads it as interleaving: `with_logging`
+# (web/middleware.dawn) writes its access line when the handler returns, and
+# write_response runs after that, at the end of `handle`. A failed stream
+# therefore logs *after* its own `GET /x -> 200` line. That is the shape of the
+# pipeline, not a lost message.
+fn pump_stream(s: InputStream, out: OutputStream) -> Unit !io =
+  match pump_with(s, up => {
+    let _n = up.transferTo(out)
+    ()
+  }) {
+    Pumped -> ()
+    TransferFailed(m) -> println("stream body: transfer failed after commit: $m")
+    PumpPanicked(m) -> println("stream body panicked: $m")
+  }
+
+# Everything about to be handed to jdk.httpserver that is a header field,
+# checked against the same predicates `with_header` applies at construction
+# time; None when the response can travel as written.
+#
+# Defense in depth, and not redundant. `with_header`/`try_with_header` guard the
+# headers list, but two things reach the wire around them: a `Response` built as
+# a record literal (nothing stops that, and the framework's own error rendering
+# is one), and `content_type`, which `raw`/`binary`/`streaming` take as a
+# parameter and this function then `set`s as Content-Type without any check at
+# all — the one unvalidated path that needs no record literal to reach.
+#
+# The JDK's own Headers.checkValue is not the same predicate: it permits an
+# obs-fold ("\r\n" followed by SP or HTAB), which RFC 9110 §5.5 deprecated and
+# `valid_header_value` refuses. Values in that gap pass the JDK and would go out
+# folded.
+#
+# Pure, so it can be tested without a server.
+fn response_problem(r: Response) -> Option[String] = {
+  if not valid_header_value(r.content_type) {
+    return Some("illegal Content-Type: " ++ log_safe(r.content_type))
+  }
+  for h in r.headers {
+    let (k, v) = h
+    if not valid_header_name(k) {
+      return Some("illegal header name: " ++ log_safe(k))
+    }
+    if not valid_header_value(v) {
+      return Some("illegal value for header " ++ k ++ ": " ++ log_safe(v))
+    }
+  }
+  None
+}
+
+# Show a rejected header string on one line. A value refused for carrying a CR
+# or an LF must not then be written to a log verbatim — that is the same
+# injection one layer down, against whoever reads the log.
+fn log_safe(s: String) -> String = str.replace(str.replace(s, "\r", "\\r"), "\n", "\\n")
+
+# What goes out instead of a response that cannot travel. The neutral default
+# wording rather than the application's `ErrorFormat`: this is not the
+# application's error path (that one is rendered inside `serve_through`, under
+# the configured wording, and its headers pass the check above) but a refusal to
+# emit a response the program built wrong.
+fn withheld_response() -> Response =
+  error_response(http_error(500, default_errors().internal_message))
+
 # Write a response. The body kind decides the framing (see body_length). A
 # HEAD request gets the status and headers its GET produced — including the
 # exact Content-Length when the length is known — but no body bytes (RFC 9110
 # §9.3.2). jdk.httpserver's documented way to answer HEAD is to set
 # Content-Length manually and pass -1, which is what the HEAD branch does.
-fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
+#
+# A response carrying a header that cannot travel is replaced here, not
+# panicked over: this runs outside `handle`'s isolation barrier, so a panic
+# would reset the connection instead of rendering anything.
+fn write_response(ex: HttpExchange, response: Response) -> Unit !io = {
   with x <- bracket(ex, close_exchange)
+  let r = match response_problem(response) {
+    None -> response
+    Some(p) -> {
+      println("response withheld: $p")
+      # the rejected response may own an upstream stream, and nothing else
+      # will close it
+      drop_body(response.body)
+      withheld_response()
+    }
+  }
   let headers = x.getResponseHeaders()!
   headers.set("Content-Type", r.content_type)
   set_extra_headers(headers, r.headers)
@@ -162,19 +298,12 @@ fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
         out.flush()
       }
       # streaming body: pump the upstream InputStream straight to the socket, 8KB
-      # at a time — constant memory, first byte out immediately. transferTo can
-      # throw if the client disconnects mid-download; the bracket is the finally,
-      # so the upstream stream is closed and the HttpClient connection frees
-      # either way. The catch_panic outside it keeps a mid-download disconnect
-      # from being an error: the response is already committed, there is nothing
-      # left to say. Close failure is non-fatal too (close_stream swallows it).
-      Stream(s) -> {
-        let _ = catch_panic(() => {
-          with up <- bracket(s, close_stream)
-          up.transferTo(out)
-        })
-        ()
-      }
+      # at a time — constant memory, first byte out immediately. Whatever
+      # happens, the upstream stream closes and the HttpClient connection frees;
+      # a failure cannot escape into `handle`'s caller, because write_response
+      # runs outside that function's own isolation barrier. See pump_stream for
+      # what is logged and why the failure is not sent to the client.
+      Stream(s) -> pump_stream(s, out)
     }
   }
 }
@@ -813,6 +942,38 @@ fn test_stream_of(b: Bytes) -> InputStream !io = {
   }
 }
 
+# Test-only: a ByteArrayOutputStream seen as an OutputStream (same round-trip).
+# The caller keeps the ByteArrayOutputStream itself to read the bytes back —
+# both names refer to the one object.
+fn test_sink_of(b: ByteArrayOutputStream) -> OutputStream !io = {
+  let xs = ArrayList.new()
+  xs.add(b)
+  let got: Result[OutputStream, ForeignError] = cast(xs.get(0).expect("stream"))
+  match got {
+    Ok(s) -> s
+    Err(e) -> panic("test_sink_of: not an OutputStream: " ++ e.message)
+  }
+}
+
+# Test-only: an InputStream whose first read fails, standing in for an upstream
+# connection that broke mid-download. It is a closed FileInputStream because
+# Dawn can neither subclass a Java type nor implement one of its interfaces
+# under a name, so the only stream that throws is a JDK one made to.
+fn test_broken_stream() -> InputStream !io = {
+  let tmp = File.createTempFile("dawn-broken-", ".tmp")!
+  let xs = ArrayList.new()
+  xs.add(FileInputStream.new(tmp))
+  let got: Result[InputStream, ForeignError] = cast(xs.get(0).expect("stream"))
+  delete_quietly(String.valueOf(tmp.getPath()!)!)
+  match got {
+    Ok(s) -> {
+      s.close()
+      s
+    }
+    Err(e) -> panic("test_broken_stream: not an InputStream: " ++ e.message)
+  }
+}
+
 # Test-only: one raw HTTP exchange over a plain socket, returned as text.
 # The only client that will send `/a/../b` or a repeated header verbatim —
 # HttpClient and HttpURLConnection normalize dot segments away before the
@@ -874,6 +1035,8 @@ fn echo_tags(req: Request) -> Result[Response, HttpError] !io =
 test "body_length: -1 for no body, exact bytes for text/binary, 0 (chunked) for streams" {
   assert body_length(200, Empty) == -1
   assert body_length(200, Text("hello")) == 5
+  # one byte is a length, not a rounding of "empty"
+  assert body_length(200, Text("x")) == 1
   # UTF-8 bytes, not code points
   assert body_length(200, Text("中文")) == 6
   # an exact 0 cannot pass through sendResponseHeaders (0 = chunked there)
@@ -881,9 +1044,93 @@ test "body_length: -1 for no body, exact bytes for text/binary, 0 (chunked) for 
   assert body_length(200, Binary(bytes.utf8("abcd"))) == 4
   assert body_length(200, Binary(bytes.utf8(""))) == -1
   assert body_length(200, Stream(test_stream_of(bytes.utf8("x")))) == 0
-  # a 204/304 never carries a body, whatever the handler built
+}
+
+test "the four no-content status classes carry no body, whatever the handler built" {
+  # 1xx (RFC 9110 §15.2), 204 (§15.3.5), 205 (§15.3.6), 304 (§15.4.5). Only
+  # 204 and 304 used to be named here; 1xx and 205 were left to the JDK, which
+  # forces the first and not the second.
+  assert body_length(100, Text("hello")) == -1
+  assert body_length(101, Binary(bytes.utf8("x"))) == -1
+  assert body_length(199, Text("hello")) == -1
   assert body_length(204, Text("hello")) == -1
+  assert body_length(205, Text("hello")) == -1
   assert body_length(304, Binary(bytes.utf8("x"))) == -1
+  # a stream on one of these is dropped rather than pumped (see drop_body)
+  assert body_length(100, Stream(test_stream_of(bytes.utf8("x")))) == -1
+  assert body_length(205, Stream(test_stream_of(bytes.utf8("x")))) == -1
+  # the neighbours are ordinary statuses and keep their bodies
+  assert body_length(200, Text("hello")) == 5
+  assert body_length(203, Text("hello")) == 5
+  assert body_length(206, Text("hello")) == 5
+  assert body_length(303, Text("hello")) == 5
+  assert body_length(305, Text("hello")) == 5
+}
+
+test "response_problem passes what can travel and names what cannot" {
+  assert response_problem(text(200, "ok")) == None
+  assert response_problem(with_header(text(200, "ok"), "X-A", "a b\tc")) == None
+  # content_type is handed to headers.set unchecked: raw/binary/streaming take
+  # it as a parameter and no constructor validates it, so this is the one
+  # unvalidated path that needs no record literal to reach
+  match response_problem(raw(200, "text/plain\r\nX-Evil: 1", "")) {
+    Some(p) -> { assert str.contains(p, "illegal Content-Type") }
+    None -> { assert false }
+  }
+  # the gap between the two predicates: the JDK's checkValue permits an
+  # obs-fold ("\r\n" + SP), valid_header_value refuses it
+  match response_problem(raw(200, "text/plain\r\n x", "")) {
+    Some(p) -> { assert str.contains(p, "illegal Content-Type") }
+    None -> { assert false }
+  }
+  # a record literal is how a header gets in without with_header's guard
+  match response_problem(Response {
+    status: 200, content_type: "text/plain", headers: [("X Bad", "1")], body: Empty,
+  }) {
+    Some(p) -> { assert str.contains(p, "illegal header name") }
+    None -> { assert false }
+  }
+  match response_problem(Response {
+    status: 200, content_type: "text/plain", headers: [("X-Note", "a\r\n b")], body: Empty,
+  }) {
+    # the complaint itself stays on one line: a value refused for carrying a
+    # CRLF must not forge a log line on the way to being reported
+    Some(p) -> { assert p == "illegal value for header X-Note: a\\r\\n b" }
+    None -> { assert false }
+  }
+  # only the offending pair is named; the legal ones around it are not a problem
+  assert response_problem(Response {
+    status: 200, content_type: "text/plain",
+    headers: [("X-A", "1"), ("X-B", "2")], body: Empty,
+  }) == None
+}
+
+# Test-only: a response built as a record literal, which is how a header value
+# that never went through `with_header` reaches the writer.
+fn folded_header_response() -> Response =
+  Response {
+    status: 200, content_type: "text/plain; charset=utf-8",
+    headers: [("X-Note", "a\r\n b")], body: Text("ok"),
+  }
+
+test "a response carrying a header that cannot travel is withheld, not written" {
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/folded", ex => write_response(ex, folded_header_response()))
+  srv.createContext("/ctype", ex => write_response(ex, raw(200, "text/plain\r\n x", "ok")))
+  srv.createContext("/ok", ex => write_response(ex, text(200, "ok")))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  # a 500 instead, and not one byte of the header that could not travel
+  let folded = raw_http(port, get_line("/folded"))
+  assert str.starts_with(folded, "HTTP/1.1 500")
+  assert not str.contains(str.to_lower(folded), "x-note")
+  let ctype = raw_http(port, get_line("/ctype"))
+  assert str.starts_with(ctype, "HTTP/1.1 500")
+  # ...and an ordinary response is untouched
+  let ok = raw_http(port, get_line("/ok"))
+  assert str.starts_with(ok, "HTTP/1.1 200")
+  assert str.contains(ok, "ok")
+  srv.stop(0)
 }
 
 test "Content-Length is exact per body kind on the wire; only streams are chunked" {
@@ -929,6 +1176,21 @@ test "204 sends no body, no Content-Length, no chunked framing" {
   assert r.getHeaderField("Content-Length") == None
   assert r.getHeaderField("Transfer-encoding") == None
   assert bytes.len(r.getInputStream()!.readAllBytes()!) == 0
+  srv.stop(0)
+}
+
+test "205 sends no body either: the one no-content status the JDK does not force" {
+  # jdk.httpserver's sendResponseHeaders forces 1xx, 204 and 304 to no body on
+  # its own (WARNING: "forcing contentLen = -1"), but treats 205 as an ordinary
+  # status. Until body_length named it, a 205 with a body really put the entity
+  # on the wire, which RFC 9110 §15.3.6 says it MUST NOT.
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => write_response(ex, text(205, "must not travel")))
+  srv.start()
+  let resp = raw_http(srv.getAddress()!.getPort(), get_line("/"))
+  assert str.starts_with(resp, "HTTP/1.1 205")
+  assert not str.contains(resp, "must not travel")
+  assert not str.contains(str.to_lower(resp), "transfer-encoding")
   srv.stop(0)
 }
 
@@ -986,6 +1248,35 @@ test "write_response pumps an upstream stream to the client byte-exact (>8KB, mu
   assert got == payload
   up.stop(0)
   dn.stop(0)
+}
+
+test "pumping a streaming body tells EOF, a failed transfer and a panic apart" {
+  # LIB-18: all three used to be one discarded Result, so a broken download and
+  # a bug in this program both looked exactly like a request that ended well.
+  # No socket is needed for any of them.
+  let sink = ByteArrayOutputStream.new()
+  assert pump_with(test_stream_of(bytes.utf8("streamed")), up => {
+    let _n = up.transferTo(test_sink_of(sink))
+    ()
+  }) == Pumped
+  assert sink.toByteArray().expect("bytes") == bytes.utf8("streamed")
+
+  # an upstream that fails on read — the shape a client hanging up mid-download
+  # also takes, which is why the log wording does not claim to know which
+  let sink2 = ByteArrayOutputStream.new()
+  match pump_with(test_broken_stream(), up => {
+    let _n = up.transferTo(test_sink_of(sink2))
+    ()
+  }) {
+    TransferFailed(m) -> { assert m != "" }
+    _ -> { assert false }
+  }
+  assert bytes.len(sink2.toByteArray().expect("bytes")) == 0
+
+  # a bug in this program: not a java.lang.Exception, so it goes straight past
+  # the inner catch_fault to the outer catch_panic (spec §9.8) with its message
+  assert pump_with(test_stream_of(bytes.utf8("x")), _up => panic("pump bug")) ==
+    PumpPanicked("pump bug")
 }
 
 test "raw path split: interior empties stay, lead and one trailing drop" {

@@ -194,6 +194,13 @@ pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
 ## A streaming body: a live InputStream pumped to the socket in constant
 ## memory, chunked (the length is unknown up front). The server closes the
 ## stream after pumping, including when the client disconnects mid-download.
+##
+## The length being unknown is a limit, not just a framing choice: an upstream
+## that ends early with a clean EOF is indistinguishable here from one that
+## delivered everything, so a truncated object is served as a complete one. A
+## failed *read* is caught and logged (web/server.pump_stream); a short but
+## orderly one cannot be, since telling them apart needs a length to compare
+## against and nothing carries one.
 pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Response =
   Response { status: status, content_type: content_type, headers: [], body: Stream(stream) }
 
@@ -277,16 +284,22 @@ pub fn try_with_header(r: Response, name: String, value: String) -> Result[Respo
     None -> Ok(Response { ..r, headers: r.headers ++ [(name, value)] })
   }
 
+# A redirect carries no content, so its body is `Empty` rather than an empty
+# `Text`. The wire is the same either way (body_length maps both to -1), but
+# only one of them says so.
+fn bodyless(status: Int) -> Response =
+  Response { status: status, content_type: "text/plain; charset=utf-8", headers: [], body: Empty }
+
 ## A redirect: status (301/302/303/307) plus a Location header, empty body.
 ## A Location that cannot travel as a field value panics (see `with_header`);
 ## `try_redirect` is the form for a target built from request input.
 pub fn redirect(status: Int, location: String) -> Response =
-  with_header(raw(status, "text/plain; charset=utf-8", ""), "Location", location)
+  with_header(bodyless(status), "Location", location)
 
 ## `redirect` for a target built from request input: an illegal Location is a
 ## 400 rather than a panic.
 pub fn try_redirect(status: Int, location: String) -> Result[Response, HttpError] =
-  try_with_header(raw(status, "text/plain; charset=utf-8", ""), "Location", location)
+  try_with_header(bodyless(status), "Location", location)
 
 # Percent-encode as RFC 5987 attr-char: everything but ALPHA / DIGIT and the
 # fifteen listed punctuation marks, over the *UTF-8 bytes* rather than the code
@@ -617,6 +630,13 @@ test "response header helpers" {
   let rd = redirect(302, "/here")
   assert rd.status == 302
   assert rd.headers == [("Location", "/here")]
+  # a redirect carries no content, and says so: it used to be Text("") — the
+  # same bytes on the wire, but the kind is what states the intent
+  assert rd.body == Empty
+  match try_redirect(303, "/there") {
+    Ok(r) -> { assert r.body == Empty }
+    Err(_) -> { assert false }
+  }
   let at = attachment("text/markdown", "post.md", "# hi")
   assert at.headers ==
     [("Content-Disposition",
