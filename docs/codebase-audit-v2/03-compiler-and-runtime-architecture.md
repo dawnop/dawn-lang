@@ -27,6 +27,36 @@
 - **影响：** 合法、实际无递归的程序被拒；local fn、pattern binding 和同名 method 都能制造伪边。
 - **建议：** 依赖遍历维护 lexical binding set；更稳妥的是先做轻量 name resolution，以 symbol ID 构图。不要继续用裸字符串模拟 call graph。
 
+> **二次处置（2026-08-16）：仍是 partial，但残余边界已收窄到一句话可写清。**
+> `RefScope` 加第三张集合 `javas`，`EMethod` 臂对**零元 `ECtor` 且名字是 Java 类**的
+> receiver 不再记边。判据是照 `check_method_call` 的 Java 静态分派臂**逐条镜像**写的，
+> 包括那两个原勘察漏掉的条件：receiver 名字必须不在 `ctors_by_name`、不在 `consts`。
+> 这一条是承重的而非形式主义：`use java "java.lang.Integer"` 与本地一个叫 `Integer` 的
+> 构造器今天可以共存，而构造器赢分派，所以 `Integer.tag()` 是**真边**，摘掉它才是把这个
+> 单边过近似摘向有害的一侧。（`consts` 那半实际不可达，常量强制 SCREAMING_SNAKE_CASE 撞不上
+> Java 类名；保留只为镜像分派臂，没有测试声称它。）
+>
+> **修复前的最小复现确实被误拒**：`fn toHexString(n: Int) = Integer.toHexString(n)!` 报
+> `cannot infer the return type of \`toHexString\`: it is recursive`，而同一文件写出
+> `-> String !io` 就编过，证明程序合法。三个「别修过头」探针（被本模块顶层函数遮蔽的
+> builtin 方法名、模块别名限定调用、真正的相互递归）改前改后行为一致。五个变异体逐个转红，
+> 其中两个专钉上面那两个额外条件。
+>
+> **残余：只剩实例 Java receiver**（`TyJava`）。判它需要表达式的类型，而 `name_refs` 跑在
+> pass 5 开头、任何函数体被 check 之前，这一层拿不到类型。**非 Java 模块今天已经触发不了
+> 本项**：builtin/std/trait 方法名的边是真边（本模块同名顶层函数会全遮蔽 builtin，UFCS 一定
+> 打到它），record 的 fn 类型字段本来就先报 ambiguous。
+>
+> **原建议的「以 symbol ID 构图」远超小刀，不要当小刀推：** 顶层函数今天根本没有 symbol ID
+> （`cx.next_id` 铸的是 type var / ADT / effect / trait / **local** symbol，顶层函数一律以
+> `String` 为键），要它就要新增一整个 name-resolution 阶段并在 AST 上回填，直接压在
+> `ARC-07/08/09` 那条被 HOLD 的线上。本项余下部分应随那批走。
+>
+> 顺带留一条实测：本次改动让 `check.checker` 之外另三个模块的 Core 也动了，但**全部是
+> `structeq$AdtNNNNN` 的编号后缀统一偏移 14，零指令变化**。在干净基线上给 `checker.dawn`
+> 追加一个五行空函数得到逐字节相同的漂移，故这不归因于本设计，是 `ARC-09` 共享计数器本身
+> 的性质。`selfhost.norm.sha` 的噪声滤镜正是为分辨这两件事而存在的。
+
 ## ARC-02 — P1 — JVM classfile 硬边界变成无源码位置的内部异常
 
 <!-- audit-anchor: present selfhost/src/jvm/codegen.dawn | class_bytes(finish: fn() -> Option[Bytes] !io, cls: String) -->
@@ -40,6 +70,39 @@
 - **边界：** 超过 classfile `CONSTANT_Utf8` 65,535 bytes 的 literal、超 64 KiB Code 的 method、常量池过大或模块 class 过大，都可能让 ASM 抛异常。
 - **影响：** 语法/类型合法的源程序以 compiler/ASM stack trace 结束，而不是指向 literal/function/module 的诊断。仓库在 `docs/std-audit.md:91` 已知道 String 限制，但未把它变成通用发射边界。
 - **建议：** 长字符串分块重建；method/class finalize 捕获并分类 size exception；lowered function 保留 source origin。长期再考虑 outlining 或 module class 分片。
+
+> **二次处置（2026-08-16）：仍是 partial，但 method 超限那一支已经能定位到声明。**
+> 做法不是给 Core 加 span，而是**从 ASM 的报错文本反查 AST 的 name-span**：`emit_module` 建一张
+> 「实际写进 class 的 JVM method 名 → `(path, nlo, nhi, lifted)`」的表，失败时用
+> `front/diag.render` 出带 `--> path:line:col` 和 caret 的标准诊断。表的键由**命名 method 的
+> 那几个函数本身**生成（`impl_static_name` / `test_method_name` 等被抽出来共用），所以键与实际
+> 发射名不可能格式漂移。覆盖：普通顶层 fn、impl 方法、trait default 体、`f$default$k`
+> 合成默认值函数、test 体，以及 lifted lambda（借外层声明的 span 并在 hint 里说明借了）。
+>
+> **`class_bytes` 的签名刻意没动**，另开 `class_bytes_from` 由前者转发。理由不是迁就 anchor：
+> 那些**对自己的方法说不出话**的调用方（dict / closure / SAM / ADT / trait 接口，以及全部 std
+> 模块）本来就该继续用原来那个入口，转发让实现只有一份。
+>
+> **仍无位置的四类，逐条列明**：(a) std 模块整体，驱动层对它们既不留 path 也不留 AST；
+> (b) `<clinit>` 超限（模块所有 const 合并进类初始化器，ASM 不点名任何 const，已用 40,000 元素
+> 的 `const` 实测确认）；(c) JVM 入口包装 `main([Ljava/lang/String;)V`；(d) 上面那几类非模块 class。
+> **另外 class 整体超限（常量池溢出）只打 `--> <path>` 而没有行列**，因为 ASM 的
+> `Class too large` 不点名 method。**裸文件路径不算源码位置**：它把搜索范围缩到一个文件，
+> 再往下就没有了，指向其中任何一个声明都是猜。本项因此仍是 partial。
+>
+> **原建议里「lowered function 保留 source origin」（给 `CFun` 加 origin）已判为不做，且不是
+> 成本问题而是冲突问题：** `scripts/core-golden/selfhost.norm.sha` 存在的全部意义是「纯代码
+> 移动时它一个字节都不动」，那是重构声称「只搬代码没改语义」时唯一可信的证据。今天全仓
+> Core dump 里只有 3 处行号字面量（`e!` 展开的 panic 消息烘进去的字符串常量），脚本为这 3 处
+> 专门写了一条正则滤镜并附了长篇说明。给 Core 节点普遍加行号就是把 3 处扩散到每个节点，滤镜
+> 要么救不了、要么等于把 span 全滤掉。`native-backend-plan.md` 已有裁决：**保持 Core 无 span
+> 是有意的**，等真正做调试信息行号表时再一次性加。所以那件事属于「JVM LineNumberTable」的
+> 独立项，不该塞进本条。
+>
+> 顺带订正勘察一处：`codegen.dawn` 里那处「漏网的裸 `cw.toByteArray().expect("bytes")`」
+> 不在生产路径上，它在一个 ASM interop 的 `test` 块里，把 spike 测试的 writer 接进错误报告器
+> 什么也测不到。真正未接的生产调用在 `jvm/rtclasses.dawn` 与 `jvm/testrun.dawn`，都是尺寸不含
+> 用户输入的固定形状运行时类。
 
 ## ARC-03 — P1 — native 捕获失败会把消息截成 512 字节
 

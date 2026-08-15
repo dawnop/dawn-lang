@@ -383,9 +383,16 @@ partial 为 `ARC-01`、`ARC-02`。
 
 1. **TOOL-05/06 已关账：** `18fb3d6` 以 canonical `(project, source_root)` workspace、共享
    `Program`、诊断聚合与每 identity lease 完成收口，不再占用当前修复队列。
-2. **先收口 partial P1：** 只剩 `ARC-01/02` 的 symbol edge/source origin（`TOOL-14` 已由
-   `3e13645` 的 launcher v2 generation 收口，`LIB-10` 已由 `79448da` 把两条早退拒绝
-   接进 middleware 链收口）。
+2. **先收口 partial P1：** `ARC-01/02` 已各推一刀（2026-08-16），两项仍是 partial，但**残余
+   都已收窄成一句话，并且都判明了「余下那半不是小刀」**（`TOOL-14` 已由 `3e13645` 的
+   launcher v2 generation 收口，`LIB-10` 已由 `79448da` 把两条早退拒绝接进 middleware 链收口）。
+   `ARC-01` 的伪边现在只剩**实例 Java receiver**，判它要类型而 `name_refs` 跑在任何函数体被
+   check 之前；余下部分要「以 symbol ID 构图」，而顶层函数今天根本没有 symbol ID，那要新增
+   一整个 name-resolution 阶段，属 `ARC-07/08/09` 那条 HOLD 线。`ARC-02` 的 method 超限现在
+   带 `--> path:line:col`，余下的是 std 模块、`<clinit>`、JVM 入口包装与 class 整体超限
+   （后者 ASM 不点名 method，只能打文件路径，而**裸文件路径不算源码位置**）；余下部分要给
+   `CFun` 加 origin，那与 `selfhost.norm.sha` 的 identity proof 判据直接冲突，应随 JVM
+   调试信息行号表一起做。**所以这两项不该继续挂在「小刀」队列里等人再推一次。**
 3. **把 `SEM-04` 留给维护者裁决：** Cursor 是携带 owner 的值还是 generative identity，以及
    不同 owner 的 Eq/Ord 是否拒绝；裁决前只保留静态候选，不写 workaround。
 4. **低耦合自治批：** `SYN-11`、B200-1B 后续、`SYN-09`、`SYN-05`、`SEM-07` 与
