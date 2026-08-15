@@ -24,10 +24,19 @@ use std/str
 
 const MASK: Int = 0xFFFFFFFF
 
+# The three fields are one interlocking state: `h` is always eight words, `buf`
+# is always shorter than a block, and `total` counts every byte that has been
+# folded in or is still sitting in `buf`. `update` and `finish` index into `h`
+# and pad from `total` without rechecking any of that, so a caller who could
+# assemble the record could hand them a state that is type-correct and still
+# indexes out of bounds. Hence the record is private and `Digest` is opaque
+# over it: the only states that exist are the ones `new` and `update` build.
+type DigestState = { h: List[Int], buf: List[Int], total: Int }
+
 ## A digest in progress: the eight chaining words, the bytes of the block that
 ## is not full yet, and how many bytes have been fed in (the padding needs the
 ## total, and it is a bit count that must survive past 2^32).
-pub type Digest = { h: List[Int], buf: List[Int], total: Int }
+pub opaque type Digest = DigestState
 
 ## The round constants: the first 32 bits of the fractional parts of the cube
 ## roots of the first 64 primes.
@@ -50,7 +59,7 @@ fn rotr(x: Int, n: Int) -> Int = ((x >>> n) | (x << (32 - n))) & MASK
 ## A fresh digest, chained from the fractional parts of the square roots of the
 ## first eight primes.
 pub fn new() -> Digest =
-  Digest {
+  DigestState {
     h: [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
       0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19],
     buf: [],
@@ -107,8 +116,11 @@ fn compress(hs: List[Int], block: List[Int]) -> List[Int] = {
 
 ## Feed bytes in. Any number, any number of times.
 pub fn update(d: Digest, b: Bytes) -> Digest = {
-  var hs = d.h
-  var buf = d.buf
+  # opacity is seen through by assignment, not by `.` (spec 2.7), so the state
+  # is named once here and the fields are read off that
+  let state: DigestState = d
+  var hs = state.h
+  var buf = state.buf
   let n = bytes.len(b)
   var i = 0
   while i < n {
@@ -119,22 +131,24 @@ pub fn update(d: Digest, b: Bytes) -> Digest = {
     }
     i = i + 1
   }
-  Digest { h: hs, buf: buf, total: d.total + n }
+  DigestState { h: hs, buf: buf, total: state.total + n }
 }
 
 ## The digest as 64 lower-case hex digits. The state is not consumed -- it is a
 ## value, so `finish` can be called on a prefix and feeding can go on.
 pub fn finish(d: Digest) -> String = {
+  # see `update`: the fields come off an explicitly typed binding, not off `d`
+  let state: DigestState = d
   # the 0x80 byte, zeros up to 56 bytes into a block, then the bit count
-  var block = d.buf ++ [0x80]
+  var block = state.buf ++ [0x80]
   while len(block) % 64 != 56 { block = block ++ [0] }
-  let bits = d.total * 8
+  let bits = state.total * 8
   var s = 56
   while s >= 0 {
     block = block ++ [(bits >>> s) & 0xFF]
     s = s - 8
   }
-  var hs = d.h
+  var hs = state.h
   var off = 0
   while off < len(block) {
     hs = compress(hs, list.slice(block, off, off + 64))
