@@ -154,6 +154,10 @@
   编译器 panic」，**那才是缺陷；今天的一致拒绝是答案不是症状**。
   **重开条件：** 关联 witness 的表示、dictionary 传播与 `where C.Item: Trait` 语法一起定稿。
 
+- **排期裁决（2026-08-16，用户裁）：维持等，不设期限。** 与 `SEM-10` 不同，本条今天
+  **没有任何候选消费者**：`Iter`/`Index` 的泛型算法在全仓是 0 个。硬造一个来触发重开条件
+  是自欺。维持原重开条件不变。
+
 ## SEM-10 — P2 — trait/impl 与具名 effect 不能组合
 
 <!-- audit-anchor: present selfhost/src/check/passes.dawn | trait methods cannot declare the effect -->
@@ -171,6 +175,11 @@
   解禁等 RX-10-B」，同文 §7 开放项 5 又把 RX-10-B 列为「trait 方法带效果行」的共同前置。
   RX-10 已于 2026-07-31 裁 A，**效果参数 B 路线另立项**，那才是本条的入口。跳过前置直接
   做，字典形状变更还要 Emit-Change 加一轮种子。**重开条件：** RX-10-B 立项。
+
+- **排期裁决（2026-08-16，用户裁）：挂到 UI DSL 那一项上，不再单独排队。** 「等消费者」
+  这条纪律在自用研究项目的姿态下有个尴尬：消费者只能是我们自己。本条的天然消费者是
+  UI DSL（Elm 架构那批）——泛型 state 与效果组合正是它要的东西。所以本条的命运绑定在
+  那一项上：**它恢复即重开，它继续冻就一起冻**，不必再单独裁一次。前置 RX-10-B 不变。
 
 ## SEM-11 — P2 — panic/resource barriers 被硬编码为 `!io`（已分拆处置）
 
@@ -271,6 +280,14 @@
   [`nominal-types-design.md`](../audit/nominal-types-design.md) §7.4 驳回 LANG-04 步 1-3 的
   地基，门禁 `scripts/opaque-twin` 已在 CI。要一个字符的字符串，`str.from_char(c)` 就是
   那个函数。**重开条件：** 维护者重开 user-facing `Show`/`Display` 边界。
+
+- **排期裁决（2026-08-16，用户裁）：从破坏窗口批里拿出来，单独立项。** 本条此前挂在
+  「破坏窗口批」下，与 `LIB-06` 并列当占位者。那个归类是错的：`LIB-06` 只需要一班车
+  （改名要一轮破坏性发布），而本条要先**推翻一条设计地基**——opaque 沿用目标类型的 impl，
+  `opaque-twin` 判据与 `nominal-types-design.md` §7.4 驳回 LANG-04 都站在它上面。
+  把「要不要给 `Char` 单独一份 user-facing 显示」当成发布排期问题处理，会让一个语言设计
+  问题混进一批机械改名里。**正确的立项名是「`Show` 与 `Display` 分层」，判据是有没有
+  user-facing 显示这一层，而不是 `Char` 显示成什么。** 破坏窗口批因此只剩 `LIB-06`。
 
 ## SEM-17 — P3（已修）— Java `char` bridge 诊断明确两种字符模型
 
