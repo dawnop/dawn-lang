@@ -907,6 +907,57 @@ fn resolve_named(
 pub fn wrap_opaque(al: AliasE, args: List[Ty], target: Ty) -> Ty =
   if al.is_opaque { TyOpaque(al.id, al.name, al.owner, args, target) } else { target }
 
+## The std types whose representation means different things on the two
+## backends, and so cannot be written down in Core.
+##
+## A constant is folded once, at compile time, and its value is baked into Core
+## -- which both backends read. That is fine for every value whose Int is the
+## language's own: a `Char` is a code point on both. It is not fine for a
+## `Cursor`, which is an offset into the string's *representation*: a UTF-16
+## code-unit offset on the JVM, a UTF-8 byte offset on native, and a code-point
+## index in the comptime interpreter, which has no representation to offset
+## into. Three currencies, one Core, so a folded `Cursor` is wrong on at least
+## two of them -- `const C: Cursor = cursor.next("(astral)", cursor.start(..))`
+## used to compile to a lone surrogate on the JVM and to a number past
+## U+10FFFF on native. Neither is a character.
+##
+## A list rather than the general rule "opaque types are not serializable",
+## because that rule is false: `opaque type Meters = Int` is a constant like
+## any other, and `scripts/opaque-twin/consts.dawn` says so on purpose. It is
+## also not derivable -- nothing in a declaration marks its target as the
+## backend's -- so the answer is written here, next to the reason.
+##
+## One entry. It comes off when SEM-04 gives cursors a single currency, at
+## which point a folded one is portable and this function has nothing to say
+## (docs/codebase-audit-v2/02-types-effects-and-semantics.md).
+fn backend_dependent_repr(owner: String, name: String) -> Bool =
+  owner == "std/cursor" && name == "Cursor"
+
+## Why `is_const_serializable` said no, in the words the caller prints.
+##
+## Two refusals wear the same message otherwise, and they are opposite advice:
+## `Map` can never be a constant, while `Cursor` is refused for a reason that
+## has an expiry date and a workaround (hold the string, walk to the position
+## at the point of use). The refusal the caller can act on is the one worth
+## spelling out.
+pub fn const_refusal_hint(t: Ty) -> String =
+  match t {
+    TyOpaque(_, nm, own, _, _) ->
+      if backend_dependent_repr(own, nm) {
+        "a cursor is a position in the backend's own representation of a " ++
+          "string, and the two backends do not agree on it, so there is no " ++
+          "one value to fold; hold the string and walk to the position where " ++
+          "it is used (spec §7.2)"
+      } else {
+        const_hint_default()
+      }
+    _ -> const_hint_default()
+  }
+
+fn const_hint_default() -> String =
+  "constants hold Int/Float/Bool/String/Unit and List/tuple/record/ADT values " ++
+  "built from them (spec §7.2)"
+
 ## Can the compiler rebuild this value at class-init time? Int/Float/Bool/
 ## String/Unit and List/tuple/record/ADT built from them, plus an opaque type
 ## wherever its target qualifies (spec §7.2).
@@ -928,8 +979,14 @@ pub fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
     # representation objection, and #51 removed the representation.
     TyUnit -> true
     # Serializability is a question about the representation, so an opaque
-    # type is exactly as serializable as its target.
-    TyOpaque(_, _, _, _, tgt) -> is_const_serializable(cx, tgt, visited)
+    # type is exactly as serializable as its target -- unless the target's
+    # *meaning* is the backend's rather than the language's.
+    TyOpaque(_, nm, own, _, tgt) ->
+      if backend_dependent_repr(own, nm) {
+        false
+      } else {
+        is_const_serializable(cx, tgt, visited)
+      }
     TyList(e) -> is_const_serializable(cx, e, visited)
     TyTuple(elems) -> {
       for e in elems {

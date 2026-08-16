@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 1d6232106ddb1ec6 -->
+<!-- doc-check: translation-of docs/spec.md @ ee04332b71f27fb4 -->
 
 # Dawn Language Specification
 
@@ -1764,7 +1764,13 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
 2. The result type must be **constant-serialisable** — that is, the compiler can rebuild
    the value at class initialisation time: `Int`/`Float`/`Bool`/`String`/`Unit`, plus
    `List`/tuples/records/ADTs made only of those. Function values are not allowed.
-   **An opaque type is as serialisable as its target** (§2.7).
+   **An opaque type is as serialisable as its target** (§2.7), with one exception:
+   `std/cursor`'s `Cursor` is not. Its `Int` is an offset into **the backend's own
+   representation** of the string (UTF-16 code units on the JVM, UTF-8 bytes on native),
+   and a constant is folded once and written into the Core both backends read, so a folded
+   position holds for at most one of them. To compute a position at compile time, hold the
+   string and walk to it where it is used. The exception comes off once cursors have a
+   single currency.
    `Map`/`Set` are not allowed for now: they are HAMTs over `Array`, and the comptime
    interpreter has no `Array` primitive; `List` works because the interpreter carries its
    own list representation, not because it can run `std/pvec`.

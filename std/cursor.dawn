@@ -14,6 +14,19 @@
 # It used to be a type the compiler minted: a `Ty` variant, a `Head`, an entry
 # in the eq/hash scalar tables and an arm in seven files. Same guarantee, and
 # now no mechanism of its own — `opaque type` (spec §2.7) is the mechanism.
+#
+# What a position is measured in is the backend's business and nobody else's:
+# a UTF-16 code-unit offset on the JVM, a UTF-8 byte offset on native. Every
+# function below takes its string afresh, so within one string the unit never
+# escapes and the two backends answer alike.
+#
+# A cursor taken from one string and used on another is the one place that
+# breaks, and it breaks differently on each backend, because the two are
+# counting in different units. Nothing here rejects it: an out-of-range
+# position is clamped by `char`/`next`/`prev` and refused by `slice`, but an
+# in-range one is indistinguishable from a position of this string. Treat a
+# cursor as belonging to the string it came from. The type does not say so yet
+# -- SEM-04, docs/codebase-audit-v2/02-types-effects-and-semantics.md.
 
 ## A position in a String: an index the language will not let you compute.
 pub opaque type Cursor = Int
@@ -126,8 +139,10 @@ fn seek_go(s: String, c: Cursor, i: Int) -> Cursor =
 ## How many characters lie before `c`: the code-point index `seek` would take.
 ##
 ## One pass, counting forward from the start, rather than the two-scan version
-## `packages/json` wrote for itself. `c` must be a position in `s`; a cursor
-## from another string counts to whichever end it compares past.
+## `packages/json` wrote for itself.
+##
+## `c` must be a position in `s`. Handing it one from another string is not a
+## thing this function has an answer for -- see the module note above.
 pub fn offset(s: String, c: Cursor) -> Int = offset_go(s, start(s), c, 0)
 
 fn offset_go(s: String, p: Cursor, c: Cursor, n: Int) -> Int = {

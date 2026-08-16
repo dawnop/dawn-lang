@@ -58,6 +58,57 @@
 - **影响：** 同一合法 Dawn 程序跨后端不同，`Char` 的 Unicode scalar invariant 也可被错误来源的 cursor 破坏。规范“只有 arithmetic 能制造非法位置”的表述：`docs/spec.md:1819` 不成立。
 - **建议：** 破坏性改为 Cursor 自带 source identity/value，操作不再另收 String；或引入 generative `Cursor[S]`。至少在 runtime 验证 owner 与 code-point boundary，并禁止不同 owner 的 Eq/Ord。
 
+> **勘察与部分落地（2026-08-16）：拆成两条腿，第二条已关，第一条仍等裁决。**
+>
+> 上面的「静态候选（未验证）」现在验证过了，而且验出来的不是一件事，是两件互相独立的：
+>
+> 1. **跨串误用**：把 A 串的 cursor 用在 B 串上。两个后端答案不同，因为它们数的单位不同。
+>    **仍 open**，等货币裁决。
+> 2. **comptime 折叠**：`const C: Cursor = cursor.next("😀abc", cursor.start("😀abc"))`
+>    ——**全程只有一个字符串，没有任何误用**。JVM 得 56832（孤立低代理项），
+>    native 得 1933345（超出 U+10FFFF，根本不是码点）。根因是折出来的常量烘进 **Core，
+>    而 Core 是两个后端共读的**，所以解释器不可能跟着后端选货币，只能挑第三种。
+>    **已关**：`cx.dawn` 的 `backend_dependent_repr` 让 `Cursor` 不再是常量可序列化类型，
+>    诊断另给一条能照做的 hint（持有字符串、在用它的地方走过去）。规格
+>    `spec.md §7.2` 同步写下这条例外与它的撤销条件；负控在 `checker.dawn` 的
+>    「const-serializability」内联 test（同形状、只差 owner 的 `Cursor` 冒牌货必须仍可序列化）
+>    与 `scripts/checker-corpus/cases/const_serial_cursor.dawn`。
+>
+> **顺带推翻两条：**
+>
+> - 上面「源码甚至承认另一个 String 的 cursor 会数到某个 end」引的那行文档已经删掉。
+>   把错答案写成规格比 UB 更糟，因为它看着像设计过的。现在模块头注明说
+>   「货币是后端的事」「跨串是唯一漏的地方，且两个后端漏法不同」。
+> - **「给 `char`/`next` 补边界保险丝」这条不用做**：实测两个后端本来就一致——
+>   `char`/`next`/`prev` 越界钳位（`char` 回 −1），`slice` 越界 panic
+>   （`dawn_rt.c:1491`–`1521` 与 JVM 侧同策略）。保险丝只能抓越界，而真正的缺陷是
+>   **落在范围内**的外来 cursor，那种 cursor 和本串的位置在表示上无法区分。
+>
+> **调研结论（三路 websearch，2026-08-16）：**
+>
+> - **编译期 brand / generative `Cursor[S]` 出局。** 三十年零交付：没有任何语言把下标绑定
+>   容器放进标准库；唯一做过字符串位置的 Rust 库 `indexing-str` 2019 发布、2020-02 被
+>   yank（总下载 1456）；技巧唯一藏得住的形态是「整段算法进闭包」（`runST`），而 Dawn 的
+>   `Cursor` 要被持有、进结构体、从函数返回，正是那招覆盖不到的形状。依赖类型也不解决：
+>   `Fin n` 绑的是长度不是身份。
+> - **先例有七档**，其中 Haxe（逐目标编码表 + `target.utf16` define）与 Raku 与 Dawn 同构；
+>   Raku 官方文档用 "erroneously" 标注自己 JVM 后端的 `.chars`。**没有一个当事人选择
+>   「就这么放着」。**
+> - **决定性的外部证据是 `Data.Text`：UTF-16 → UTF-8，公开 API 零破坏，因为它从不暴露位置。**
+>   于是原则是：**货币只要不可观察就可以随时换**。反面样本同样清楚：`text-icu` 的文档在
+>   货币变更四年后仍是错的，无人发现。
+> - 若将来统一货币，**统一到 UTF-8 字节而不是码点**：码点货币会让 native 的快路径只剩 ASCII，
+>   而本项目的负载是 CJK。
+> - **绝不能用指针身份做 owner 判定**：JLS 会 intern 相同字面量，native 的字面量去重是后端
+>   自己的事，于是判定本身会跨后端分歧。JS 里唯一带所有者的位置 `RegExp.lastIndex` 恰恰是
+>   bug 工厂——**所有权做成可变状态是灾难，做成不可变值才安全**。
+> - Julia 的 Karpinski 在 #9297 里试过胖游标，结论是 "I can't manage it"，但同一句留下了
+>   "plausible to have a **StringIndex that is a wrapper around Int disallowing index
+>   arithmetic**"。**Dawn 今天就站在这个被点名认可的位置上。**
+>
+> **仍待维护者裁决的，只剩「要不要把货币焊成不可观察的」**，以及焊完之后货币选哪个
+> （那时它已是纯内部决定）。在此之前不实现，也不写 workaround。
+
 ## SEM-05 — P2 — `cursor.char` 用 `Int/-1` 绕开已经落地的 `Char`
 
 > **后续处置（2026-08-09）：retracted。** 规范把 `cursor.char -> Int`/`-1` 明列为底层

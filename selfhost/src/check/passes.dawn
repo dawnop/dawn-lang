@@ -41,7 +41,8 @@ use check/types.{
 use check/cx.{
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
   cerr_h, cerr_o, fresh, alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
-  resolve_alias_target, resolve_type, resolve_return_type, is_const_serializable, no_sig,
+  resolve_alias_target, resolve_type, resolve_return_type, is_const_serializable,
+  const_refusal_hint, no_sig,
   TySpan, ty_span_kid, ty_span_of
 }
 
@@ -2213,8 +2214,7 @@ pub fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = {
     if not is_const_serializable(cx1, declared, set.empty()) && declared != TyError {
       cx1 = cerr_h(cx1, "`" ++ ty_show(cx1.adts, declared) ++
           "` is not a constant-serializable type", t_lo2(d.ann), t_hi2(d.ann),
-        "constants hold Int/Float/Bool/String/Unit and List/tuple/record/ADT values built " ++
-          "from them (spec §7.2)")
+        const_refusal_hint(declared))
       declared = TyError
     }
     # the initializer still checks against the annotation as written (the

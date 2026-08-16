@@ -112,15 +112,16 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 库（16）：`LIB-01`–`LIB-05`、`LIB-07`–`LIB-12`、`LIB-14`、`LIB-15`、`LIB-17`–`LIB-19`。
 - 治理（13）：`GOV-01`–`GOV-13`。
 
-#### 当前 partial（4）
+#### 当前 partial（5）
 
+- 语义（1）：`SEM-04`。
 - 架构（3）：`ARC-01`、`ARC-02`、`ARC-11`。
 - 库（1）：`LIB-16`。
 
-#### 当前 open（11）
+#### 当前 open（10）
 
 - 语法（1）：`SYN-17`。
-- 语义（4）：`SEM-04`、`SEM-09`、`SEM-10`、`SEM-16`。
+- 语义（3）：`SEM-09`、`SEM-10`、`SEM-16`。
 - 架构（4）：`ARC-07`–`ARC-10`。
 - 库（2）：`LIB-06`、`LIB-13`。
 
@@ -128,8 +129,8 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**82 fixed + 4 partial + 11 open + 2 retracted = 99**。逐专题矩阵：
-语法 **18/0/1/0**、语义 **12/0/4/2**、架构 **6/3/4/0**、工具链 **17/0/0/0**、
+当前计数自检：**82 fixed + 5 partial + 10 open + 2 retracted = 99**。逐专题矩阵：
+语法 **18/0/1/0**、语义 **12/1/3/2**、架构 **6/3/4/0**、工具链 **17/0/0/0**、
 库 **16/1/2/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
@@ -188,6 +189,14 @@ placement 由双后端语料和 28 条 production-source compiling mutants 固�
 换成中立 500 而不是 panic（这里在 `handle` 的隔离点之外，panic 会打断连接而非渲染）。
 `content_type` 是唯一一条不需要 record 字面量就能到达的未校验路径。余下的 opaque `Response`
 与受检 `HeaderName`/`HeaderValue` 仍开放，见该条目。
+
+随后 `SEM-04` open → partial：原发现里的「comptime 折出来的 Cursor 偏移可能跨执行模型失配」
+被验证，而且验出来它**与 owner 无关**——只用一个字符串也会炸，因为常量折一次就烘进 Core，
+而 Core 是两个后端共读的。这条腿已关：`Cursor` 不再是常量可序列化类型，诊断给的是能照做的
+办法（持有字符串、在用它的地方走过去），`spec.md §7.2` 写下例外与撤销条件。原发现的另一条
+腿——跨串误用与三种货币——**仍成立**，等维护者裁决，所以是 partial 而不是 fixed。
+顺带推翻两条：`std/cursor.dawn` 那句把错答案写成规格的文档已删；「给 `char`/`next` 补边界
+保险丝」不用做，两个后端本来就一致地钳位/panic，而真正的缺陷落在范围内、保险丝抓不到。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -282,7 +291,7 @@ placement 由双后端语料和 28 条 production-source compiling mutants 固�
 | `SYN-02` | fixed | 插值扫描边界已统一并有 grammar contract。 |
 | `SEM-02` | fixed | effect union 调用点 substitution 已闭合。 |
 | `SEM-03` | fixed | opaque `Show` 不再被 String representation shortcut 绕过。 |
-| `SEM-04` | open | Cursor owner/value 与跨后端 offset 契约仍待裁决。 |
+| `SEM-04` | partial | comptime 折叠那条腿已关（`Cursor` 不再是常量可序列化类型）；跨串误用与货币统一仍待裁决。 |
 | `SEM-06` | fixed | Java reference narrowing 只允许显式 checked cast。 |
 | `ARC-01` | partial | lexical binding/module alias 已过滤，非模块 `EMethod` 裸名伪边仍在。 |
 | `ARC-02` | partial | 长 String 与 ASM failure 已接住，method/class 超限仍无 source span。 |
@@ -308,8 +317,9 @@ placement 由双后端语料和 28 条 production-source compiling mutants 固�
 | `LIB-11` | fixed | request-body tempfile 从创建起即有 owner。 |
 | `GOV-01` | fixed | dtoa 独立 oracle 已进入持续门禁。 |
 
-逐行重算结果：**26 fixed / 2 partial / 1 open / 0 retracted = 29**。唯一 open 为 `SEM-04`；两项
-partial 为 `ARC-01`、`ARC-02`。
+逐行重算结果：**26 fixed / 3 partial / 0 open / 0 retracted = 29**。三项 partial 为
+`ARC-01`、`ARC-02`、`SEM-04`；`SEM-04` 是 2026-08-16 从 open 改判的，它的两条腿里
+comptime 那条已关，剩下的一条仍等维护者裁决（明细见语义册）。
 
 ## 6. 语言设计建议
 
@@ -395,6 +405,11 @@ partial 为 `ARC-01`、`ARC-02`。
    调试信息行号表一起做。**所以这两项不该继续挂在「小刀」队列里等人再推一次。**
 3. **把 `SEM-04` 留给维护者裁决：** Cursor 是携带 owner 的值还是 generative identity，以及
    不同 owner 的 Eq/Ord 是否拒绝；裁决前只保留静态候选，不写 workaround。
+   **2026-08-16 更新：** 静态候选已验证，并且验出来是**两条互相独立的腿**。comptime 折叠
+   那条与 owner 无关（只用一个字符串也会炸），已按「Core 是两个后端共读的，所以不能烘一个
+   后端的偏移进去」关掉。剩下的一条仍照本条办。裁决的真正问题也换了形状：**不是「选哪种
+   货币」，而是「要不要先把货币焊成不可观察的」**——`Data.Text` 换过货币、公开 API 零破坏，
+   靠的就是从不暴露位置。明细与三路调研见语义册的 `SEM-04`。
 4. **低耦合自治批：** `SYN-11`、B200-1B 后续、`SYN-09`、`SYN-05`、`SEM-07` 与
    `SYN-13` 均已关账；`SYN-17` 只留在 D/P3 关键字预算设计队列。
 5. **类型化阶段产品：** `ARC-07` 后接 `ARC-08`，再以稳定 lowered identity 推进

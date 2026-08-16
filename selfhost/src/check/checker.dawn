@@ -69,7 +69,8 @@ use check/cx.{
   AliasE, Cx, Frame, LambdaCx, ModExports,
   cx_new, test_cx,
   cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
-  resolve_type, resolve_return_type, is_const_serializable, no_sig, TySpan
+  resolve_type, resolve_return_type, is_const_serializable, const_refusal_hint, no_sig,
+  TySpan
 }
 use check/passes.{
   seed_prelude, pass_java_uses, pass_imports, pass_type_shells, pass_ctor_fields,
@@ -949,6 +950,23 @@ test "const-serializability" {
   assert is_const_serializable(cx, opt_ty(TyTuple([TyInt, TyString])), set.empty())
   assert not is_const_serializable(cx, TyMap(TyInt, TyInt), set.empty())
   assert not is_const_serializable(cx, TyVar("T", 5), set.empty())
+  # an opaque type is its target's answer ...
+  let meters = TyOpaque(8, "Meters", "m", [], TyInt)
+  assert is_const_serializable(cx, meters, set.empty())
+  assert is_const_serializable(cx, TyList(meters), set.empty())
+  # ... except where the target is a position in the backend's own
+  # representation, which Core has no way to write down (SEM-04). Same shape,
+  # same target, only the declaring module and the name differ.
+  let cursor = TyOpaque(9, "Cursor", "std/cursor", [], TyInt)
+  let impostor = TyOpaque(9, "Cursor", "m", [], TyInt)
+  assert not is_const_serializable(cx, cursor, set.empty())
+  assert not is_const_serializable(cx, TyList(cursor), set.empty())
+  assert not is_const_serializable(cx, TyTuple([TyInt, cursor]), set.empty())
+  assert is_const_serializable(cx, impostor, set.empty())
+  # and it is the refusal the caller is told how to work around
+  assert str.contains(const_refusal_hint(cursor), "walk to the position")
+  assert str.contains(const_refusal_hint(meters), "constants hold")
+  assert str.contains(const_refusal_hint(TyMap(TyInt, TyInt)), "constants hold")
 }
 
 # ---- declaration passes ----
