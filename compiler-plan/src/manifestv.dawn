@@ -303,7 +303,15 @@ fn parse_url_dep(
 
 ## v2 = new name: a major bump is a new package, spelled into the name so
 ## version selection can never hand v2 to a v1 consumer.
-fn check_v2_name(name: String, v: SemV, lo: Int, hi: Int) -> List[Diag] =
+##
+## Two callers, and the difference between them is the whole point. Here the
+## name is the one the manifest declares about itself, so a package cannot
+## publish an incompatible major under its old name. In `source.select_url_deps`
+## it is the *selected* name, which is the package's own name and not the
+## consumer's alias: `web2` may lawfully be spelled `web` at the use site
+## (§4.3), and checking the alias would reject exactly the case the sugar
+## exists for.
+pub fn check_v2_name(name: String, v: SemV, lo: Int, hi: Int) -> List[Diag] =
   if v.major >= 2 && not str.ends_with(name, to_string(v.major)) {
     [diag("version " ++ semv_show(v) ++ " needs the major in the package name", lo, hi,
       "v2+ is a new package with a new name (`" ++ name ++ to_string(v.major) ++
@@ -311,6 +319,32 @@ fn check_v2_name(name: String, v: SemV, lo: Int, hi: Int) -> List[Diag] =
   } else {
     []
   }
+
+test "a major bump has to be spelled into the package name" {
+  # below 2 the rule does not apply: there is no older major to protect
+  assert check_v2_name("web", SemV { major: 0, minor: 9, patch: 0 }, 0, 0) == []
+  assert check_v2_name("web", SemV { major: 1, minor: 4, patch: 2 }, 0, 0) == []
+
+  let v2 = SemV { major: 2, minor: 0, patch: 0 }
+  assert check_v2_name("web2", v2, 0, 0) == []
+  let ds = check_v2_name("web", v2, 0, 0)
+  assert len(ds) == 1
+  assert ds[0].msg == "version 2.0.0 needs the major in the package name"
+  # the hint names the package the author should have written
+  assert str.contains(ds[0].hint, "`web2`")
+
+  # the digit is the whole major, not its last digit: a v10 package is `web10`,
+  # and `web1` does not satisfy it
+  let v10 = SemV { major: 10, minor: 0, patch: 0 }
+  assert check_v2_name("web10", v10, 0, 0) == []
+  assert len(check_v2_name("web1", v10, 0, 0)) == 1
+  assert len(check_v2_name("web0", v10, 0, 0)) == 1
+
+  # not asserted, and deliberately: `web12` also ends with `2`, so it passes at
+  # major 2. Tightening that means deciding what the trailing digits of a name
+  # mean, which is a naming rule rather than a check, and `sha2` at version
+  # 2.0.0 already passes here for a reason that has nothing to do with majors.
+}
 
 fn distinct(names: List[String]) -> List[String] = {
   var out: List[String] = []

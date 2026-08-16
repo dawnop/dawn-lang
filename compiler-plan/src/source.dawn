@@ -13,7 +13,8 @@ use std/map
 use std/set
 use diagnostic.{Diag}
 use manifestv.{
-  ManifestV, VPath, VUrl, SemV, MCoord, semv_show, semv_lt, mcoord_show, validate
+  ManifestV, VPath, VUrl, SemV, MCoord, semv_show, semv_lt, mcoord_show, validate,
+  check_v2_name
 }
 use pkgfetch
 use fspath/fspath
@@ -569,9 +570,10 @@ fn select_url_deps(
     match ro {
       None -> { resolved = map.insert(resolved, name, None) }
       Some(rt) -> {
-        # v2 = new name (§6.3), checked against the real name — the alias may
-        # lawfully differ (e.g. `web2` consumed under the spelling `web`)
-        let major = win.version.major
+        # v2 = new name (§6.3), against the selected name rather than the
+        # alias. One predicate, shared with the manifest's own check; see
+        # `manifestv.check_v2_name` for why the two callers differ.
+        let name_problems = check_v2_name(name, win.version, 0, 0)
         let (dmo, dmds, mfc3) = mf_get(mfc, rt)
         mfc = mfc3
         diags = diags ++ dmds
@@ -583,14 +585,10 @@ fn select_url_deps(
           Some(v) -> v != win.version
           None -> false
         }
-        if major >= 2 && not str.ends_with(name, to_string(major)) {
-          diags = diags ++ [LocDiag { path: win.mf_path, d: Diag {
-            msg: "version " ++ semv_show(win.version) ++ " needs the major in the package name",
-            lo: 0,
-            hi: 0,
-            hint: "v2+ is a new package with a new name (`" ++ name ++ to_string(major) ++
-              "`): otherwise version selection would hand incompatible majors to old consumers"
-          } }]
+        if len(name_problems) > 0 {
+          for d in name_problems {
+            diags = diags ++ [LocDiag { path: win.mf_path, d: d }]
+          }
           resolved = map.insert(resolved, name, None)
         } else if declared_differs {
           let declared_version = declared.expect("different declared version")
