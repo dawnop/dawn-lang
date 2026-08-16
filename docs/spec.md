@@ -588,7 +588,7 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 - **条件 impl**：`impl[T: Eq] Eq[List[T]]` 的方法是泛型函数，按约束接收字典；
   `Eq[List[Int]]` 这样的具体目标在编译期解成常量字典，`Eq[List[T]]`（`T` 刚性）
   则在运行期由 `Eq[T]` 构造。无 dyn（异构集合的写法见本节末「异构集合」；裁决理由与
-  重开条件见 [trait.md](trait.md)）、无 supertrait、无特化（不问「哪个更特化」）。
+  重开条件见 [trait.md](trait.md) §10）、无 supertrait、无特化（不问「哪个更特化」）。
   trait 方法效果只能是纯或 `!io`，impl 的效果 ⊑ trait 声明。
 - **关联类型**（设计与裁决见
   [assoc-types-design.md](assoc-types-design.md)）：trait 体可声明裸 `type Item`

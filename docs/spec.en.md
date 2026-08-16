@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 47be6047a9498517 -->
+<!-- doc-check: translation-of docs/spec.md @ 1d6232106ddb1ec6 -->
 
 # Dawn Language Specification
 
@@ -715,7 +715,7 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   constant dictionary at compile time, while `Eq[List[T]]` (with `T` rigid) is built at run time
   from `Eq[T]`. No dyn (for heterogeneous collections see "Heterogeneous collections" at the end
   of this section; the reasoning behind the verdict and the conditions for reopening it are in
-  [trait.md](trait.md)), no supertraits, no specialisation (no asking "which one is more
+  [trait.md](trait.md) §10), no supertraits, no specialisation (no asking "which one is more
   specific"). A trait method's effect can only be pure or `!io`, and an impl's effect ⊑ the trait
   declaration's.
 - **Associated types** (design and verdicts in
