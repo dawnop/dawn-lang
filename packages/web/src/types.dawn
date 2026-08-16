@@ -248,13 +248,50 @@ pub fn valid_header_name(n: String) -> Bool = {
   true
 }
 
+## Render a header string that was refused, for a report that is read
+## somewhere else. What is escaped is exactly what `valid_header_value`
+## refuses, so this only ever rewrites a character the caller has already been
+## told cannot travel; SP and HTAB are field-content and stay as they are.
+##
+## Naming a rejected string is not the same as passing it through. `CR` and
+## `LF` are why the string was refused in the first place, and the report goes
+## on to be a line in a log (`with_header` panics, and the server writes
+## `request panicked: <message>`) or a `400` body: writing them verbatim is the
+## same injection one layer down, against whoever reads the report rather than
+## against the client. The other C0 controls are no better, an `ESC` reaching
+## the terminal that is tailing the log being the same trick in the terminal's
+## language.
+pub fn escape_field(s: String) -> String = {
+  var out = ""
+  for c in code_points(s) {
+    if c == '\r' {
+      out = out ++ "\\r"
+    } else if c == '\n' {
+      out = out ++ "\\n"
+    } else if c == '\t' || (c >= ' ' && c != '\u{007F}') {
+      out = out ++ str.from_char(c)
+    } else {
+      out = out ++ "\\u{" ++ to_hex(char.code(c)) ++ "}"
+    }
+  }
+  out
+}
+
 # The refusal, worded once, used by both `with_header` (as a panic) and
 # `try_with_header` (as a 400).
+#
+# `to_string` used to stand where `escape_field` does. On a String it is the
+# identity, so it neither quoted nor escaped anything and only made the two
+# arms look like they disagreed about quoting.
 fn header_problem(name: String, value: String) -> Option[String] =
   if not valid_header_name(name) {
-    Some("illegal header name: " ++ to_string(name))
+    Some("illegal header name: " ++ escape_field(name))
   } else if not valid_header_value(value) {
-    Some("illegal value for header " ++ name ++ ": " ++ to_string(value))
+    # `name` is interpolated raw here and that is safe rather than an
+    # oversight: this arm is only reached after `valid_header_name` passed, so
+    # the name is a token and holds nothing that could end the line. A name
+    # that failed is reported by the arm above, escaped.
+    Some("illegal value for header " ++ name ++ ": " ++ escape_field(value))
   } else {
     None
   }
@@ -700,6 +737,50 @@ test "try_with_header answers 400 where with_header would panic" {
     Err(e) -> { assert e.status == 400 }
   }
   assert try_redirect(302, "/here") == Ok(redirect(302, "/here"))
+}
+
+test "escape_field rewrites what cannot travel and nothing else" {
+  # the complement of valid_header_value, so SP and HTAB survive
+  assert escape_field("a b\tc") == "a b\tc"
+  assert escape_field("") == ""
+  # nothing here is a control, so nothing here is this function's business:
+  # the report lands in a JSON body, which does its own quoting
+  assert escape_field("<b>\"&'\\") == "<b>\"&'\\"
+  assert escape_field("a\r\nb") == "a\\r\\nb"
+  assert escape_field("\u{0}\u{1b}\u{7f}") == "\\u{00}\\u{1b}\\u{7f}"
+}
+
+test "a refused header names what it refused without repeating it verbatim" {
+  # the message becomes a log line: with_header panics with it and the server
+  # writes "request panicked: <message>". A CR or an LF in a value refused for
+  # carrying one would forge a line there, against whoever reads the log
+  match try_with_header(raw(200, "text/plain", ""), "Location", "/next\r\nX: 1") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "illegal value for header Location: /next\\r\\nX: 1" }
+  }
+  # the name arm gets the string that failed the predicate, so it is the one
+  # that can hold anything at all
+  match try_with_header(raw(200, "text/plain", ""), "X\r\nSet-Cookie: a=1", "1") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "illegal header name: X\\r\\nSet-Cookie: a=1" }
+  }
+  # an ESC would be read as a command by the terminal tailing the log
+  match try_with_header(raw(200, "text/plain", ""), "X-A", "\u{1b}[2J") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "illegal value for header X-A: \\u{1b}[2J" }
+  }
+  # the value complaint interpolates the name raw. That is safe only because
+  # the name arm runs first: when both are illegal it is the name that is
+  # reported, so nothing but a token ever reaches the raw slot
+  match try_with_header(raw(200, "text/plain", ""), "X\r\nZ", "v\r\n") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "illegal header name: X\\r\\nZ" }
+  }
+  # with_header words the refusal the same way; only the delivery differs
+  match catch_panic(() => with_header(raw(200, "text/plain", ""), "Location", "/a\r\nb")) {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert m.message == "illegal value for header Location: /a\\r\\nb" }
+  }
 }
 
 test "attachment quotes and encodes the filename" {

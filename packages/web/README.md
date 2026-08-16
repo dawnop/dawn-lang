@@ -123,6 +123,11 @@ let r = try_redirect(302, next_from_query)?
 `filename*=` is percent-encoded per RFC 5987, so both parameters are legal by
 construction whatever the filename is.
 
+The refusal names what it refused, through `escape_field` (3.2): a value held
+back for carrying a `CR` must not carry it into the log line the panic becomes,
+or into the `400` body. What that escapes is exactly what `valid_header_value`
+refuses, so `SP` and `HTAB` come through untouched.
+
 ## Error wording (2.1)
 
 The framework renders three strings of its own: the JSON key of an error body,

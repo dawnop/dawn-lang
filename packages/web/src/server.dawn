@@ -18,7 +18,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response, error_response_with, streaming, text, binary, raw, header, headers_all, query, query_all, param, param_segs, with_header, valid_header_name, valid_header_value}
+use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response, error_response_with, streaming, text, binary, raw, header, headers_all, query, query_all, param, param_segs, with_header, valid_header_name, valid_header_value, escape_field}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, tagged}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -220,24 +220,19 @@ fn pump_stream(s: InputStream, out: OutputStream) -> Unit !io =
 # Pure, so it can be tested without a server.
 fn response_problem(r: Response) -> Option[String] = {
   if not valid_header_value(r.content_type) {
-    return Some("illegal Content-Type: " ++ log_safe(r.content_type))
+    return Some("illegal Content-Type: " ++ escape_field(r.content_type))
   }
   for h in r.headers {
     let (k, v) = h
     if not valid_header_name(k) {
-      return Some("illegal header name: " ++ log_safe(k))
+      return Some("illegal header name: " ++ escape_field(k))
     }
     if not valid_header_value(v) {
-      return Some("illegal value for header " ++ k ++ ": " ++ log_safe(v))
+      return Some("illegal value for header " ++ k ++ ": " ++ escape_field(v))
     }
   }
   None
 }
-
-# Show a rejected header string on one line. A value refused for carrying a CR
-# or an LF must not then be written to a log verbatim — that is the same
-# injection one layer down, against whoever reads the log.
-fn log_safe(s: String) -> String = str.replace(str.replace(s, "\r", "\\r"), "\n", "\\n")
 
 # What goes out instead of a response that cannot travel. The neutral default
 # wording rather than the application's `ErrorFormat`: this is not the

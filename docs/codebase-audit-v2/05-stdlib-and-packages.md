@@ -408,6 +408,22 @@
 >
 > 11 个变异体逐个验证判词能转红，含「把两个屏障合回一个」与「`pump_with` 恒返回 `Pumped`」。
 
+> **另立的那笔账（#286，2026-08-17）：已修，但暴露面与立账时的描述不同。** 先测后改的结果：
+> `to_string` 作用在 `String` 上是恒等（实测），所以 `header_problem` 两条臂**都**在逐字回显，
+> 立账时以为它至少加了引号是错的。而被点名的「第二条臂裸插 `name`」恰恰是唯一安全的槽位：
+> 走到那条臂说明 `valid_header_name` 已经通过，`name` 只可能是 token，连 `:`、空格、引号、
+> `<` 和任何控制字符都进不去。**400 body 那条路本来就是关着的**：消息经
+> `JStr` 进 `json/render`，CR/LF/NUL/ESC/引号全被转义（实测 body 为
+> `{"error":"illegal value for header Location: /n\r\nX: 1\"<b>"}`，
+> `application/json; charset=utf-8`），且消息永远不会变成响应头，故不存在响应拆分。
+>
+> 真正漏的是**另一个调用者**：`with_header` 拿同一条消息 `panic`，而 `serve_through` 与
+> `handle` 都把它 `println("request panicked: ${m.message}")` 写进日志，于是被拒的
+> 头名/头值里的 CRLF 原样伪造日志行。这与上面 `response_problem` 的缺陷是同一个，只是
+> `header_problem` 是被漏掉的那份拷贝。故把 `log_safe` 上提进 `types` 成 `pub escape_field`，
+> 两处共用一份规则；同时把它从「只转 CR/LF」放宽到「转 `valid_header_value` 拒绝的全部字符」
+> （C0 与 DEL），因为 ESC 落到 tail 日志的终端上是同一类把戏。随 `web3 / 3.2.0` 发。
+
 ## LIB-19 — P2 — SHA-256 `Digest` public record 可伪造 invariant（已修）
 
 <!-- audit-anchor: absent packages/sha2/src/sha256.dawn | pub opaque type Digest -->
