@@ -318,6 +318,48 @@ fn split_go(s: String, sep: String, at: Cursor, acc: List[String]) -> List[Strin
     Some(i) -> split_go(s, sep, cursor.skip(s, i, sep), acc ++ [cursor.slice(s, at, i)])
   }
 
+## `s` cut in two at the *first* occurrence of `sep`: what came before it and
+## what came after, or `None` when `sep` does not occur.
+##
+## Inquiry (spec §4.8, criterion 2), the same shape as `strip_prefix`: "no
+## separator" is a branch the caller takes. `split` answers a different
+## question -- it has no way to say "there was no separator", because one piece
+## is also what a string with no separator yields, and the two are different
+## answers to `key=value` parsing.
+##
+## Testing and cutting in one call is the point. The pair
+## `index_of` plus two `slice` calls is three passes and two chances to be one
+## out; this is one pass and no arithmetic. An empty `sep` occurs at the start,
+## so it answers `("", s)`.
+pub fn split_once(s: String, sep: String) -> Option[(String, String)] =
+  match cursor.find(s, sep, cursor.start(s)) {
+    None -> None
+    Some(c) -> Some(cut_at(s, c, sep))
+  }
+
+## `s` cut in two at the *last* occurrence of `sep`. The mirror of
+## `split_once`, and the one to reach for when the separator also occurs inside
+## the left part: `rsplit_once("a/b/c.d", "/")` is `("a/b", "c.d")`.
+pub fn rsplit_once(s: String, sep: String) -> Option[(String, String)] =
+  match last_at(s, sep, cursor.start(s), None) {
+    None -> None
+    Some(c) -> Some(cut_at(s, c, sep))
+  }
+
+## The two sides of an occurrence of `sep` known to start at `c`. `cursor.skip`
+## walks past it, so neither side is computed by subtracting a length.
+fn cut_at(s: String, c: Cursor, sep: String) -> (String, String) =
+  (cursor.slice(s, cursor.start(s), c),
+    cursor.slice(s, cursor.skip(s, c, sep), cursor.end(s)))
+
+## Where the last occurrence of `sep` begins. Walks forward remembering, the
+## way `last_idx` does, rather than walking back from the end -- a backward
+## search would have to compare two positions to know when to stop.
+fn last_at(s: String, sep: String, c: Cursor, best: Option[Cursor]) -> Option[Cursor] = {
+  let b2 = if cursor.starts_at(s, c, sep) { Some(c) } else { best }
+  if cursor.done(s, c) { b2 } else { last_at(s, sep, cursor.next(s, c), b2) }
+}
+
 ## `s` with every occurrence of `from` replaced by `to`, left to right and
 ## non-overlapping. An empty `from` splices `to` between the characters, the
 ## same way `split` with an empty separator yields them.
@@ -431,6 +473,31 @@ test "split yields one more piece than there were separators" {
   # the empty separator is `chars`
   assert join(split("a中😀", ""), "|") == "a|中|😀"
   assert join(split("", ""), "|") == ""
+}
+
+test "split_once and rsplit_once cut in two, or answer None" {
+  assert split_once("k=v", "=") == Some(("k", "v"))
+  assert split_once("k=v=w", "=") == Some(("k", "v=w"))
+  assert rsplit_once("k=v=w", "=") == Some(("k=v", "w"))
+  # "there was no separator" is an answer `split` cannot give: it and
+  # `split_once("a=", "=")` would both be one-piece results
+  assert split_once("abc", "=") == None
+  assert rsplit_once("abc", "=") == None
+  assert split_once("=v", "=") == Some(("", "v"))
+  assert split_once("k=", "=") == Some(("k", ""))
+  assert split_once("=", "=") == Some(("", ""))
+  # a multi-character separator is consumed whole, and the empty one is at the
+  # start (`cursor.find` finds it there), so it cuts before the first character
+  assert split_once("a--b--c", "--") == Some(("a", "b--c"))
+  assert rsplit_once("a--b--c", "--") == Some(("a--b", "c"))
+  assert split_once("abc", "") == Some(("", "abc"))
+  assert rsplit_once("abc", "") == Some(("abc", ""))
+  assert split_once("", "") == Some(("", ""))
+  assert split_once("", "a") == None
+  # the halves are cut by character: an astral separator is not split, and
+  # neither is an astral character next to one
+  assert split_once("a😀b", "😀") == Some(("a", "b"))
+  assert split_once("😀=😀", "=") == Some(("😀", "😀"))
 }
 
 test "replace is split then join, and an empty needle splices between characters" {
