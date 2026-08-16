@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 035b8d1d4e51af94 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 76d2d8626772e41a -->
 
 # Dawn 教程
 
@@ -674,6 +674,51 @@ pub fn main() -> Unit !io = {
 
 没有期望类型时（比如 `let f = to_string`），约束没有可解析的类型，编译器会直接
 这么说；写出类型，或者手写带标注参数的 lambda。
+
+### 一个 List 装多种类型：函数字段的 record
+
+`List[T]` 只装一个 `T`。想让一个列表装**不同类型**、而它们都支持同一个操作时，Dawn 没有
+`dyn Trait` 可用。做法是：把那个操作装进一个函数字段的 record，用 `opaque` 类型把 record
+藏起来，再给这个类型写它自己的 impl。约束在打包的地方解析，那是具体类型最后一次还看得见
+的位置：
+
+```dawn run
+type ShownRepr = { render: fn() -> String }
+
+pub opaque type Shown = ShownRepr
+
+pub fn shown[T: Show](x: T) -> Shown = {
+  let r: ShownRepr = ShownRepr { render: () => show(x) }
+  r
+}
+
+impl Show[Shown] {
+  fn show(s: Shown) -> String = {
+    let r: ShownRepr = s
+    r.render()
+  }
+}
+
+pub fn main() -> Unit !io = {
+  let xs: List[Shown] = [shown(1), shown("two"), shown(true)]
+  for x in xs {
+    println("${x}")
+  }
+}
+```
+```output
+1
+"two"
+true
+```
+
+第二行带引号。那是 `Show[String]` 一贯的渲染结果，不是例子写错了。
+
+这一招对「主体只出现在一个位置」的 trait 完整可用：`Show`、`Hash`，以及任何
+`fn(T) -> ...` 形状的方法。它够不着 `Eq` 和 `Ord`：`eq(a: T, b: T)` 与
+`cmp(a: T, b: T)` 要两个**同一类型**的值，而打包扔掉的恰好就是这个事实。所以异构的
+`List` 有，异构的 `Map` 键没有。这条线为什么落在这里、Dawn 为什么不做 trait 对象，
+见 [trait.md](trait.md) §10。
 
 v1 的边界：impl 的主体只能是**非泛型**具名类型或 `Int`/`Float`/`Bool`/`String`
 （没有条件 impl，`List[T]` 不能做主体）；comptime 里不能用 trait 约束的调用。

@@ -124,7 +124,9 @@ fn largest[T: Ord + Show](xs: List[T]) -> String = ...
 - **comptime**：v1 禁止在 comptime 中调用带约束的泛型函数（解释器无字典），
   trait 方法对具体类型的直接调用允许（解释器直查 impl 表）。
 - **不做 dyn/trait 对象**：异构集合的场景 Dawn 用 ADT 或 fn 字段 record 表达
-  （web 框架的 Handler 即先例）。文档里写明这个惯用法。
+  （web 框架的 Handler 即先例）。文档里写明这个惯用法（[tutorial.md](tutorial.md) §16
+  有可运行的 `Shown` 例子）。这句话在 v1 初稿里只是一条排期性的断言，从没被论证过；
+  论证、天花板与可证伪的重开条件是 2026-08-16 补的，见 §10。
 
 ## 4. 实现设计
 
@@ -187,7 +189,7 @@ fn largest[T: Ord + Show](xs: List[T]) -> String = ...
 | derive 用户自定义 trait | 未做；`derive Ord` 已对泛型类型解禁 |
 | 关联类型 | **已做**（2026-08-02）：trait 里写 `type Item`，方法签名里写投影 `T.Item`；设计与偏差记录见 [`assoc-types-design.md`](assoc-types-design.md) |
 | 迭代器协议 | **已做**：prelude 多了 `Iter` trait（关联类型的首个消费者），std 给 `List`/`Map`/`Set`/`String`/`Bytes` 各写一个 impl，`for..in` 因此不再对内建容器特判 |
-| 单态化 / dyn / 多参数 trait / supertrait | 未做，也没排期 |
+| 单态化 / dyn / 多参数 trait / supertrait | 单态化、多参数 trait、supertrait 仍是未做也没排期；**dyn（existential）已裁决不做**，理由、天花板与重开条件见 §10 |
 | `+`→Num | 未做 |
 
 §5 的表没预见到的那一项：**`[]` 也成了 trait**（2026-08-02）。prelude 的 `Index`
@@ -281,3 +283,130 @@ pub fn main() -> Unit !io = {
   （稳定），极值平局取第一个。
 - **测试规模**：六刀新增 ~120 项（parse 22 / check 35 / resolve 27+golden /
   run 11 / stdlib+derive 16 / 收尾若干），JVM 与 native-image 双跑验证。
+
+## 10. 不做 existential / dyn 的裁决（2026-08-16）
+
+### 10.1 先说这条规则原本没有论证
+
+§3.5 有一条 bullet 写着「不做 dyn/trait 对象」。它是 2026-07-12 的设计初稿
+（`984f3fa`）写下的，理由是排期性的：v1 只解决泛型约束和自定义排序。**那句话点名要付的
+成本是多参数 trait 与关联类型，关于 dyn 一个字没提。** `git log -S` 查这行字，
+`984f3fa` 之后再没有第二个提交动过它；v2 收口（`924ce49`，2026-07-26）重排 §5 状态表时
+把 dyn 归进「未做，也没排期」，同样没有重新论证。`docs/audit/` 与两轮 codebase-audit 里
+没有一条相关记录。
+
+所以本节先记下这件事：**这条规则此前从未被论证过，只是被沿用。** 下面是补的论证，
+结论和那句断言一致。但两者的后悔成本不一样：一条论证过的规则，重开时知道该去推翻哪一条
+前提；一条只被沿用的规则，重开时只能从头再走一遍，而且没人知道当初有没有走过。
+
+### 10.2 理由：消费者是零
+
+普查全部生产 Dawn，约 8.7 万行（selfhost 63k、backend-dawn 12.5k、std 5.9k、
+packages 5.5k）：
+
+- **impl 块共 3 个**，全在 std：`std/str.dawn:333`（`Iter[String]`）、
+  `std/bytes.dawn:365`（`Iter[Bytes]`）、`std/cursor.dawn:141`（`Ord[Cursor]`）。
+- **用户声明的 trait 0 个**。仓库里所有 `trait` 声明都落在 `examples/`、`scripts/` 的
+  门禁语料和 `site/play-ui/samples/` 里，没有一个在编译器、站点后端或 packages 的生产
+  路径上。
+- **手写 vtable（含两个及以上 fn 字段的 record）全语料 2 个**：
+  `selfhost/src/check/jsig.dawn:45` 的 `Jsig`（8 个方法）与
+  `selfhost/src/lsp/server.dawn:398` 的 `LspLeaseHost`（2 个）。两个都恰好有两个构造点，
+  而且分工是同一件事：一个真做，一个拒绝，因为 native 那一路不能链进 Java。逐条改写成
+  existential 之后都变差，见 §10.3 末尾。
+- **异构分发的现役写法是闭包，不是对象**：`packages/web/src/types.dawn:129` 的
+  `alias Middleware = fn(Handler) -> Handler`；生产站点 dawnop.com 用一张 `List[Route]`
+  闭包表挂了 9 个 api 模块加 WebDAV，几十条路由，零摩擦。
+
+按「必须运行期才知道成员的实现集合」这条判据筛，候选是 **0 个**。
+
+### 10.3 天花板：不加语法只覆盖两个预置 trait
+
+这一条比 §10.2 重要，因为理由会随消费者出现而翻转，天花板不会。
+
+存在量化把类型变量删掉：`exists T. (T, Show[T])` 打包完就没有 `T` 可说了。于是
+「这两个值的类型相同」在类型系统里无处安放。这是 **二元方法问题**（binary method
+problem，Bruce / Cardelli / Castagna 等，*Theory and Practice of Object Systems* 1(3)，
+1995），不是实现难度，是表达力的边界。
+
+另有一条独立的死因：关联类型必须在 dyn 类型里写死，而写不写得出来取决于这个关联类型
+是不是用户可见的。**「有关联类型」本身不是死因，「有不可命名的关联类型」才是。**
+
+六个预置 trait（定义在 `selfhost/src/check/types.dawn:1456` 的 `prelude_traits()`，
+规范化摘要在 spec.md §3.5）因此分三档，不是两档：
+
+| trait | 方法 | 结论 | 死因 |
+|---|---|---|---|
+| `Show` | `show(x: T) -> String` | **可** | 一元，无关联类型 |
+| `Hash` | `hash(x: T) -> Int` | **可** | 同上 |
+| `Eq` | `eq(a: T, b: T) -> Bool` | **不可** | 二元方法 |
+| `Ord` | `cmp(a: T, b: T) -> Int` | **不可** | 二元方法 |
+| `Iter` | 4 个方法，关联类型 `Cur`/`Item` | **不可** | `Cur` 不可命名 |
+| `Index` | `index(c: C, i: C.Idx) -> C.Item` | **可，但要新语法** | 两个关联类型都要写死 |
+
+`Iter` 的死法值得单说，因为它不是「难」，是「写不出来」。spec.md §3.5 把
+`Cur` 定成实现细节，原话是「游标形状由 impl 定」，`List`/`String`/`Bytes`/`Map`/`Set`
+各不相同。于是 `dyn Iter[Cur = ?, Item = Int]` 里那个 `?` 用户根本填不出来。这比 Rust
+更糟：Rust 的 `Iterator::next(&mut self) -> Option<Self::Item>` 只在返回位提关联类型，
+`dyn Iterator<Item = u8>` 绑一个 `Item` 就成立；Dawn 的 `Iter` 是游标式的，四个方法里
+有三个把 `C.Cur` 放在**参数位**。
+
+`Index` 反而是过得去的：`Idx` 与 `Item` 都是用户可见的类型（`List[T]` 上就是 `Int` 与
+`T`），`C` 也只出现在第 0 个参数位，二元方法那条不适用。它要的是
+`dyn Index[Idx = Int, Item = T]` 这种带关联类型绑定的语法，也就是一笔额外的语法预算。
+
+**推论一：不带关联类型绑定语法的 `dyn`，在 Dawn 上只覆盖 `Show` 和 `Hash` 两个预置
+trait。** 而 `List[Shown]` 就是 `Show` 那一个用例。也就是说，本节讨论的「最小可用子集」
+几乎就是 Dawn 上唯一不加语法就成立的那一格，这条线不是随手划的。
+
+**推论二：`Map[Shown, V]` 永远做不出来，`Set` 同理。** 这一条有 spec 层的直接理由，不必
+停在「二元方法」这个抽象说法上：spec.md §3.5 规定 **`impl Eq` 与 `impl Hash` 必须成对
+出现**，不成对是编译错误，理由是相等的值必须哈希相同、否则该类型作 `Map`/`Set` 键即失效。
+而 `Hash` 一元可 dyn、`Eq` 二元不可 dyn，于是任何 existential 类型都拿不到合法的一对。
+`std/map.dawn` 里每个要找条目的函数都带 `[K: Eq + Hash]`（`map.dawn:23/26/30/33` 等），
+这把锁是 spec 上的，不是实现上的。**异构容器在 Dawn 上的天花板是 `List`，不是 `Map`。**
+
+这不是 Dawn 特有的将就。Rust 的 `dyn Eq` 同样不存在，社区惯用法是 `dyn Any` 加
+downcast，也就是绕回「预先枚举具体类型」，跟 Dawn 今天用 ADT 表达异构是同一件事。
+
+最后，那两个手写 vtable 也不是「将就」。`Jsig` 有一个 `on: Bool` 门控字段
+（`jsig.dawn:47`），trait 对象只装方法、装不了数据字段，existential 表达不了它；而它的
+两个测试替身（`checker.dawn:7980` 的 `test_jsig()`、`interp.dawn:2836` 的 `fake_jsig()`）
+都写成 `Jsig { ..base, on: true, ... }`，`base` 是 `jsig_refused()`，用 record 更新语法只
+覆盖关心的那三个到五个方法，其余留 `jsig_refused()` 的 panic 桩。existential 同样做不到
+部分覆盖。record 版在这里不只是够用，是确实更好。
+
+### 10.4 成本：约 2000 行，外加一条 Perceus 不变式
+
+实现规模估在 **1500–2500 行、20 个以上文件**，横跨 parser、checker、Core、两个后端、
+运行时 C、comptime，外加至少两轮种子推进。
+
+真正贵的不是行数，是它踩到的一条静默不变式。C 后端的字典**没有对象头**，整族退出 RC
+账本：`selfhost/src/c/rc.dawn:528` 的 `dictish` 判据是 `set.has(st.dict_syms, s)`，
+按**符号 id** 走的一个旁路集合，凡认定为字典的表达式既不记绑定也不发 release。
+`docs/perceus-design.md:176` 明确否掉过「给字典加头」这个方案，理由写得很清楚：那要改
+`DAWN_DICT_MAX` 的结构和 emitc 写出的每一个静态初始化式，而**收益是零，因为字典在整个
+前端跑里分配了 0 次**。
+
+existential 会把那个 0 变成「O(打包次数)」，并且把字典存进堆对象。存进去之后它就没有
+符号 id 了，`dictish` 认不出来，`dawn_drop` 会拿它当普通对象去读引用计数，而那块内存的
+头部是 `.data` 段的字节。**前提当场作废，判据当场失效。**
+
+更糟的是这个回归不会转红：`runtime/c/dawn_rt.c:197` 的 `dawn_dict_new` 里已经装了
+`DAWN_LSAN_OWN(d)`（即 `__lsan_ignore_object`），本是为了兜住 perceus-design 写进契约的
+那条「`dawn_dict_new` 造出来的参数化字典会泄漏」。于是 existential 引入的字典泄漏会被
+同一条豁免一起盖住，全量 LSan 仍然出口 0 漏。要做 existential，得先把这条豁免和
+`dictish` 的符号 id 判据一起重做。
+
+### 10.5 可证伪的重开条件
+
+这条裁决不是永久的。出现下面任一情形就重开：
+
+1. **需要运行期才知道成员的实现集合**：某个 trait 的实现集合在编译期不封闭，或者封闭
+   但必须按运行期数据挑一个。今天 0 个实例。
+2. **「为一个到处流的 record 里的某一个字段加类型参数」的场景涨到 3 个以上独立实例。**
+   今天是 1 个，即 `selfhost/src/check/jsig.dawn` 的 `Jsig`，而 §10.3 末尾已经说明它换
+   过去更差。3 这个数是这么定的：1 个可以特事特办，2 个是巧合，3 个才是模式。
+
+重开时先查 §10.3：二元方法那条天花板不会因为消费者变多而移动，所以即使重开，不加关联
+类型绑定语法就仍然只有 `Show` 和 `Hash` 两个。判断「值不值」的分母永远是这两个。
