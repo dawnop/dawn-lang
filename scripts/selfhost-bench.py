@@ -1505,10 +1505,16 @@ def build_native_release(
 def workload_commands(
     work: Path, release_jar: Path, native: Path, java: Path, sample: int
 ) -> dict[str, tuple[list[Path | str], str]]:
+    # These must stay identical to bin/dawn's DAWN_JVM_OPTS default, and to
+    # child_java_cmd() in selfhost/src/main.dawn. The bench never invokes
+    # bin/dawn -- it forks the release jar itself -- so a flag added there and
+    # not here means selfhost-bench.baseline goes on measuring a configuration
+    # nobody runs, indefinitely and without any signal that it has.
     java_prefix: list[Path | str] = [
         java,
         "-Xss512m",
         "-Xmx2g",
+        "-XX:+UseSerialGC",
         "-jar",
         release_jar,
     ]

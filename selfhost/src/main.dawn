@@ -505,6 +505,41 @@ fn host_classpath() -> String !io =
     None -> ""
   }
 
+## The argv prefix shared by every JVM this driver spawns: the child is a
+## continuation of this process, so it should be configured like it rather than
+## be handed back to JVM ergonomics.
+##
+## Stated once because the two spawn sites had already drifted apart. One
+## propagated the heap ceiling and the other did not, which left `dawn run` and
+## `dawn build` executing on a child whose ceiling was MaxRAMPercentage of the
+## *host's* RAM -- measured at 4192206848 against a parent pinned to 2 GiB, so
+## how much memory a build may use was a property of the machine rather than of
+## the workload, which is exactly what pinning -Xmx in bin/dawn exists to deny.
+##
+## The heap comes from `maxMemory` rather than from re-parsing this JVM's
+## launcher options, so it reflects what the parent was actually given however
+## that was spelled.
+##
+## SerialGC because a compile's resident set is mostly space G1 touched and
+## never released: the live set of a hello-world compile stays under 15 MB
+## while G1's young generation expands to 810M. That is where the whole saving
+## is. Capping the heap here costs nothing and gains nothing on its own; the
+## collector took peak RSS from 532 to 390 MB on `run fib` and from 1365 to
+## 614 MB on `check selfhost`, at no wall-time cost. Keep this in step with
+## bin/dawn's DAWN_JVM_OPTS, which carries the full measurement.
+##
+## `-Xss512m` is load-bearing, not slack: ir/interp.dawn pins MAX_CALL_DEPTH at
+## 100000, which only binds below the real stack limit from -Xss 128m up.
+fn child_java_cmd() -> List[String] !io = {
+  let rt = Runtime.getRuntime().expect("runtime")
+  [
+    host_java(),
+    "-Xss512m",
+    "-Xmx" ++ to_string(rt.maxMemory()),
+    "-XX:+UseSerialGC"
+  ]
+}
+
 ## The toolchain's own help text. It began as the Kotlin cli/Main.kt USAGE
 ## copied verbatim, and inherited that file's habit of appending each new
 ## subcommand at the bottom of the list -- which left two entries stranded
@@ -1088,8 +1123,7 @@ fn deps_from_env() -> List[String] !io = {
 ## Re-exec one invocation after its target and explicit classpath have already
 ## been identified. `rest` remains the caller's original list: in particular,
 ## a run separator, empty strings and option-looking program arguments are not
-## normalized away while the classpath is extended. The child receives this
-## JVM's actual maximum heap rather than reinterpreting launcher option text.
+## normalized away while the classpath is extended.
 fn maybe_with_known_deps(
   mode: String,
   rest: List[String],
@@ -1107,17 +1141,7 @@ fn maybe_with_known_deps(
   var cp = host_classpath()
   for j in jars { cp = cp ++ path_sep() ++ j }
   for j in cpjars { cp = cp ++ path_sep() ++ j }
-  let rt = Runtime.getRuntime().expect("runtime")
-  let max_heap = rt.maxMemory()
-  var cmd: List[String] = [
-    host_java(),
-    "-Xss512m",
-    "-Xmx" ++ to_string(max_heap),
-    "-cp",
-    cp,
-    "main",
-    mode
-  ]
+  var cmd: List[String] = child_java_cmd() ++ ["-cp", cp, "main", mode]
   cmd = cmd ++ rest
   let pb = ProcessBuilder.new(cmd)
   let env = pb.environment().expect("env")
@@ -1201,11 +1225,11 @@ fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
   dir
 }
 
-## Spawn `java -Xss512m -cp <cp> <cls> <args...>` inheriting stdio; the exit
-## code. `scratch` is the directory the classes were written to, which the
-## reaping wait removes if this driver is terminated mid-run.
+## Spawn `java <child_java_cmd> -cp <cp> <cls> <args...>` inheriting stdio;
+## the exit code. `scratch` is the directory the classes were written to, which
+## the reaping wait removes if this driver is terminated mid-run.
 fn spawn_java(cp: String, cls: String, args: List[String], scratch: String) -> Int !io = {
-  var cmd: List[String] = [host_java(), "-Xss512m", "-cp", cp, cls]
+  var cmd: List[String] = child_java_cmd() ++ ["-cp", cp, cls]
   cmd = cmd ++ args
   let pb = ProcessBuilder.new(cmd)
   let _ = pb.inheritIO()

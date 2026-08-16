@@ -59,7 +59,33 @@ STD="$ROOT/std"
 # faster. Deliberately not pinned near that floor: a limit set where it barely
 # passes goes red on the next corpus growth, and reads as a compiler bug.
 # Override for the genuinely heavy scripts, e.g. DAWN_JVM_OPTS="-Xss512m -Xmx6g".
-DAWN_JVM_OPTS="${DAWN_JVM_OPTS:--Xss512m -Xmx2g}"
+#
+# Collector: SerialGC, because a compile's resident set is almost entirely
+# space G1 touched and never handed back. Measured on hello-world, where the
+# live set never exceeds 15 MB: G1 still expands the young generation
+# 10M -> 30M -> 90M -> 270M -> 810M, and ~99.9% of the resulting 466 MB RSS is
+# fixed cost that does not scale with the input.
+#
+# End to end, peak RSS across the process tree, GraalVM CE 21.0.2, three runs
+# each (2026-08-17): `run fib` 532 -> 390 MB, `check selfhost` 1365 -> 614 MB,
+# `test selfhost` 1239 -> 610 MB. Wall time is inside the spread on all three.
+# The win grows with input, so there is no size at which the old default would
+# have been the better one. None of it comes from the -Xmx propagation added to
+# the child spawns in the same change: with that alone `run fib` measures
+# 525 MB and `check selfhost` 1327 MB, i.e. unmoved. A ceiling bounds how much
+# a run may take, it does not reduce how much it does take.
+#
+# Two flags looked plausible here and are deliberately absent.
+# -XX:TieredStopAtLevel=1 costs ~10% wall at selfhost scale and its
+# interaction with the -Xss/MAX_CALL_DEPTH boundary below is unverified;
+# -XX:MaxNewSize=64m on top of SerialGC measured inside the spread.
+#
+# This list is duplicated twice and all three copies must move together:
+# child_java_cmd() in selfhost/src/main.dawn configures the JVMs the driver
+# re-execs into, and scripts/selfhost-bench.py forks the release jar directly
+# without going through this script, so a flag missing there means the recorded
+# baseline measures a configuration nobody runs.
+DAWN_JVM_OPTS="${DAWN_JVM_OPTS:--Xss512m -Xmx2g -XX:+UseSerialGC}"
 
 # deployed form: no sources, no seed resolver — run the shipped jar as-is
 if [ ! -f "$ROOT/scripts/seedjar.sh" ]; then
