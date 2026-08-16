@@ -1,0 +1,63 @@
+# A cursor is an offset into the string's representation, and the two backends
+# do not agree on what that representation is: UTF-16 code units on the JVM,
+# UTF-8 bytes on native. Every line below is a value a program can observe, and
+# none of them may name that measure. This file is what keeps it that way.
+#
+# It is a differential corpus *and* a written expectation, which matters here
+# more than usual: a defect the two backends share is invisible to `diff`
+# alone, and "both print 2" would be exactly such a defect if the JVM's measure
+# ever became the language's.
+#
+# The mutant: delete `impl Show[Cursor]` from std/cursor.dawn. The first three
+# lines become the raw offsets -- 2 and 4 for the same position -- so `jvm` and
+# `native` both go red against the expectation, and `diff` goes red between
+# them. Nothing else in the corpus notices.
+#
+# What is deliberately *not* here: a cursor used on a string it did not come
+# from. That is the one seam left open (SEM-04, decided 2026-08-16), it has no
+# defined answer, and pinning an undefined answer in a corpus is how an
+# accident becomes a promise.
+
+use std/cursor
+use std/list
+use std/map
+
+fn index_by_position(
+  s: String,
+  c: cursor.Cursor,
+  m: Map[cursor.Cursor, Int],
+) -> Map[cursor.Cursor, Int] =
+  if cursor.done(s, c) {
+    m
+  } else {
+    index_by_position(s, cursor.next(s, c), map.insert(m, c, cursor.offset(s, c)))
+  }
+
+pub fn main() -> Unit !io = {
+  # every character here is wider than one unit on at least one backend, which
+  # is what makes the two measures disagree in the first place
+  let s = "😀中a😀b"
+  let c = cursor.next(s, cursor.start(s))
+
+  # a position does not render its measure, at the top level, interpolated,
+  # or nested inside a container
+  println(to_string(c))
+  println("${c}")
+  println(to_string([cursor.start(s), c, cursor.end(s)]))
+
+  # the number that *is* shared is the position counted in characters, which
+  # is a walk rather than a representation
+  println(to_string(cursor.offset(s, c)))
+  println(to_string(cursor.offset(s, cursor.end(s))))
+
+  # ordering is by position, and the walk visits positions in the same order
+  # everywhere even though it steps by different amounts
+  println(to_string(cmp(cursor.start(s), c) < 0))
+  println(to_string(cmp(c, c) == 0))
+
+  # positions are ordinary values: a map may be keyed by them, and it iterates
+  # in position order rather than in the order of whatever integers the backend
+  # happened to hand out
+  let m = index_by_position(s, cursor.start(s), map.empty())
+  println(to_string(list.map(map.keys(m), k => map.get(m, k))))
+}

@@ -16,17 +16,32 @@
 # now no mechanism of its own — `opaque type` (spec §2.7) is the mechanism.
 #
 # What a position is measured in is the backend's business and nobody else's:
-# a UTF-16 code-unit offset on the JVM, a UTF-8 byte offset on native. Every
-# function below takes its string afresh, so within one string the unit never
-# escapes and the two backends answer alike.
+# a UTF-16 code-unit offset on the JVM, a UTF-8 byte offset on native, and a
+# code-point index in the comptime interpreter, which has no representation to
+# offset into. Every function below takes its string afresh, so within one
+# string the measure never escapes and all three answer alike.
 #
-# A cursor taken from one string and used on another is the one place that
-# breaks, and it breaks differently on each backend, because the two are
-# counting in different units. Nothing here rejects it: an out-of-range
-# position is clamped by `char`/`next`/`prev` and refused by `slice`, but an
-# in-range one is indistinguishable from a position of this string. Treat a
-# cursor as belonging to the string it came from. The type does not say so yet
-# -- SEM-04, docs/codebase-audit-v2/02-types-effects-and-semantics.md.
+# The number itself is not a value anyone else may hold. It cannot be read --
+# that is what `opaque` buys. It cannot be folded into a constant: the checker
+# refuses a `const` of this type, because a constant is folded once and written
+# into the Core both backends read (spec 7.2). And it does not print: the
+# `Show` below renders `<cursor>` rather than the measure, which is why the
+# same program's output does not depend on who compiled it. The number that is
+# shared is `offset(s, c)`, the position counted in characters.
+#
+# Which leaves one seam, and it is a decision rather than an omission: a cursor
+# taken from one string and used on another. An out-of-range position is
+# clamped by `char`/`next`/`prev` and refused by `slice`, but an in-range one
+# is indistinguishable from a position of this string, so nothing here rejects
+# it and the answer differs by backend. Binding a cursor to its string needs a
+# tag that is itself backend-independent (otherwise the check diverges where
+# the cursor did), which costs a walk to compute and a second word in the
+# hottest loop any parser has. That was weighed and declined on 2026-08-16:
+# the seam is named instead. A cursor belongs to the string it came from.
+# Everything else the measure could leak through is held shut by
+# scripts/spike-native/cursor_currency.dawn, which runs this module's public
+# answers on both backends and compares them against a written expectation.
+# SEM-04, docs/codebase-audit-v2/02-types-effects-and-semantics.md.
 
 ## A position in a String: an index the language will not let you compute.
 pub opaque type Cursor = Int
@@ -149,6 +164,20 @@ fn offset_go(s: String, p: Cursor, c: Cursor, n: Int) -> Int = {
   let x: Int = p
   let y: Int = c
   if x >= y || done(s, p) { n } else { offset_go(s, next(s, p), c, n + 1) }
+}
+
+## A cursor renders as `<cursor>`: a position, without saying which. The number
+## is the backend's own measure, so printing it would put "2 here, 4 there" in
+## a program's output, and a third answer again when the render is folded at
+## compile time. Nothing above this module can act on that number anyway.
+## `offset(s, c)` is the position in characters, and characters are what every
+## backend agrees on -- print that.
+##
+## An opaque type with no impl of its own renders as its target, which for this
+## one is the measure (scripts/spike-native/show_opaque.dawn pins the general
+## rule, and that this impl wins over it).
+impl Show[Cursor] {
+  fn show(_c: Cursor) -> String = "<cursor>"
 }
 
 ## Positions in one string are ordered, and that order is the Int's. One impl
@@ -281,6 +310,22 @@ test "skip advances past an occurrence it is told is there" {
   # a `sub` longer than what is left stops at the end rather than walking off
   assert done(s, skip(s, start(s), "prefix/rest and more"))
   assert slice("a😀z", skip("a😀z", start("a😀z"), "a😀"), end("a😀z")) == "z"
+}
+
+test "a cursor renders without its number" {
+  # the number under this one is 2 on the JVM, 4 on native and 1 in the
+  # comptime interpreter. Rendering it would be the one way left for that
+  # difference to reach a program's output.
+  let s = "😀ab"
+  let c = next(s, start(s))
+  assert to_string(c) == "<cursor>"
+  assert "${c}" == "<cursor>"
+  # nested rendering is checked from a program rather than from here: the
+  # conditional `Show[List[T]]` lives in std/list, which this module does not
+  # import. scripts/spike-native/cursor_currency.dawn has it.
+  #
+  # and the number that is shared is still reachable, by walking for it
+  assert offset(s, c) == 1
 }
 
 test "positions in one string are ordered, and the order is the walk's" {

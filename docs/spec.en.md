@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ ee04332b71f27fb4 -->
+<!-- doc-check: translation-of docs/spec.md @ 826051042ab5fda8 -->
 
 # Dawn Language Specification
 
@@ -1769,8 +1769,12 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    representation** of the string (UTF-16 code units on the JVM, UTF-8 bytes on native),
    and a constant is folded once and written into the Core both backends read, so a folded
    position holds for at most one of them. To compute a position at compile time, hold the
-   string and walk to it where it is used. The exception comes off once cursors have a
-   single currency.
+   string and walk to it where it is used. This exception is a corollary of §11's "the
+   measure never becomes an observable value", not the whole of it: rendering is shut off
+   too, or `const S: String = to_string(c)` would go around this clause and fold the
+   measure into the artefact as a string (and the interpreter counts code points, so that
+   would be a third answer again). The exception comes off once cursors have a single
+   currency.
    `Map`/`Set` are not allowed for now: they are HAMTs over `Array`, and the comptime
    interpreter has no `Array` primitive; `List` works because the interpreter carries its
    own list representation, not because it can run `std/pvec`.
@@ -2703,6 +2707,27 @@ outside, a position being reported to the outside); put them in a loop and you a
 the O(n²) they exist to remove. A single call on a single string with the index version is
 fine, but **inside a loop the cursor version is mandatory** — the measurements are in
 `docs/seq6-research.md` §5's addendum.
+
+**The measure is the backend's, and never becomes an observable value.** A position is an
+offset into **the string's representation**, and the execution models do not agree on that
+representation: UTF-16 code units on the JVM, UTF-8 bytes on native, and code points in the
+comptime interpreter, which has no representation to offset into. So the number does not
+leave `std/cursor`: it cannot be read (`opaque`), it cannot be folded into a constant
+(§7.2), and it does not render. `Show[Cursor]` renders `<cursor>` rather than the number,
+because otherwise a program's output would depend on who compiled it. To report a position,
+report `cursor.offset(s, c)`: the count **in characters**, which every backend agrees on.
+Which measure is used is therefore an internal decision, changeable at any time, and not a
+breaking change.
+
+**Using a cursor on another string is undefined.** A cursor belongs to the string it came
+from. An out-of-range position is clamped by `char`/`next`/`prev` and refused by `slice`,
+but an in-range one from another string is indistinguishable from a position of this one,
+so this specification promises no answer and the backends do in fact differ. Binding a
+cursor to its string needs a tag that is itself backend-independent (otherwise the check
+diverges exactly where the cursor did), which costs a walk to compute and a second word per
+position. That was weighed and declined on 2026-08-16 in favour of writing the boundary
+down; every other channel is held shut by `scripts/spike-native/cursor_currency.dawn`,
+which compares this module's public answers across both backends.
 
 **Container representations.** `Map`/`Set` are represented by the pure-Dawn `std/hamt` (a
 persistent HAMT) and `List` by `std/pvec` (a persistent vector); these are **internal
