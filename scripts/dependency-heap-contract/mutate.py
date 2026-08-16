@@ -6,9 +6,13 @@ import sys
 
 
 MUTATIONS = {
+    # Drop the ceiling from the argv every child JVM is spawned with, leaving
+    # the child to JVM ergonomics -- a heap sized from the host's RAM rather
+    # than from what this run was given. That is the defect
+    # heap.inherits_parent_max exists to catch.
     "drop-inherited-max-heap": (
-        '    "-Xmx" ++ to_string(max_heap),\n',
-        "",
+        '"-Xss512m", own_xmx(), ',
+        '"-Xss512m", ',
     ),
 }
 

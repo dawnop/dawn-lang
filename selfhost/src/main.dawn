@@ -42,6 +42,9 @@ use java "java.lang.ProcessBuilder"
 use java "java.lang.Process"
 use java "java.lang.Runtime"
 use java "java.lang.Thread"
+use java "java.lang.management.ManagementFactory"
+use java "java.lang.management.RuntimeMXBean"
+use java "java.util.List"
 use std/set
 use jvm/codegen.{
   no_override, gen_adt
@@ -516,9 +519,15 @@ fn host_classpath() -> String !io =
 ## how much memory a build may use was a property of the machine rather than of
 ## the workload, which is exactly what pinning -Xmx in bin/dawn exists to deny.
 ##
-## The heap comes from `maxMemory` rather than from re-parsing this JVM's
-## launcher options, so it reflects what the parent was actually given however
-## that was spelled.
+## The heap is this JVM's own `-Xmx`, forwarded verbatim, so a re-exec is a
+## fixed point: `-Xmx2g` stays `-Xmx2g` however many hops deep it goes. The
+## obvious `maxMemory()` is not, and the difference is not cosmetic. It reports
+## the heap a program may *fill*, which under a generational collector excludes
+## a survivor space, so `-Xmx2g` came back as 2075918336 and each hop shaved
+## another 3% off the ceiling. It happened to round-trip under G1 and stopped
+## doing so the moment the collector changed, which is how it went unnoticed:
+## the shrink is a property of the collector, not of the API. `-Xmx` is what
+## the ceiling was actually stated as, so it is what gets passed on.
 ##
 ## SerialGC because a compile's resident set is mostly space G1 touched and
 ## never released: the live set of a hello-world compile stays under 15 MB
@@ -530,14 +539,30 @@ fn host_classpath() -> String !io =
 ##
 ## `-Xss512m` is load-bearing, not slack: ir/interp.dawn pins MAX_CALL_DEPTH at
 ## 100000, which only binds below the real stack limit from -Xss 128m up.
-fn child_java_cmd() -> List[String] !io = {
+fn child_java_cmd() -> List[String] !io =
+  [host_java(), "-Xss512m", own_xmx(), "-XX:+UseSerialGC"]
+
+## This JVM's `-Xmx` as it was written on its own command line. A JVM started
+## without one has no ceiling to state, so the fallback is `maxMemory()`: it is
+## the wrong number by a survivor space, but a wrong ceiling still beats
+## MaxRAMPercentage of the host's RAM, which is the only other answer.
+fn own_xmx() -> String !io = {
+  let bean = ManagementFactory.getRuntimeMXBean().expect("runtime mx bean")
+  let given = bean.getInputArguments().expect("input arguments")
+  var found = ""
+  var i = 0
+  # last wins, matching the JVM's own reading of a repeated option
+  while i < given.size() {
+    let arg: Result[String, ForeignError] = cast(given.get(i).expect("argument"))
+    match arg {
+      Ok(a) -> if str.starts_with(a, "-Xmx") { found = a }
+      Err(_) -> ()
+    }
+    i = i + 1
+  }
+  if found != "" { return found }
   let rt = Runtime.getRuntime().expect("runtime")
-  [
-    host_java(),
-    "-Xss512m",
-    "-Xmx" ++ to_string(rt.maxMemory()),
-    "-XX:+UseSerialGC"
-  ]
+  "-Xmx" ++ to_string(rt.maxMemory())
 }
 
 ## The toolchain's own help text. It began as the Kotlin cli/Main.kt USAGE
