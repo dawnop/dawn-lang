@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 from types import ModuleType
-from typing import Sequence
+from typing import Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +39,11 @@ ASSERTIONS = (
     "bench.same_jdk",
     "bench.final_source_snapshot",
 )
+
+# The `-Xmx` the fixture tree is launched with, so `heap_exact` can say what it
+# wanted as well as what it got.
+PARENT_HEAP_BYTES = 64 * 1024 * 1024
+CHILD_HEAP_BYTES = 96 * 1024 * 1024
 
 
 class MatrixError(ValueError):
@@ -743,7 +748,7 @@ def overlap_probe(
 
 def process_assertions(
     module: ModuleType, classes: Path, java: Path, jcmd: Path
-) -> dict[str, bool]:
+) -> tuple[dict[str, bool], dict[str, object]]:
     env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
     env["JAVA_HOME"] = os.fspath(java.parent.parent)
     result, sibling_stat, oracle = main_tree_probe(module, classes, java, jcmd, env)
@@ -754,7 +759,7 @@ def process_assertions(
     )
     parent_heap = result.roles.get("parent", {}).get("max_heap_bytes")
     child_heap = result.roles.get("child", {}).get("max_heap_bytes")
-    heap_exact = parent_heap == 64 * 1024 * 1024 and child_heap == 96 * 1024 * 1024
+    heap_exact = parent_heap == PARENT_HEAP_BYTES and child_heap == CHILD_HEAP_BYTES
     parent_pid, parent_starttime = oracle["parent_identity"]
     identity_exact = module.ProcessIdentity(parent_pid, parent_starttime)
     starttime_exact = identity_exact in result.observed_identities
@@ -766,7 +771,7 @@ def process_assertions(
     )
     exception_cleanup = exception_cleanup_probe(module, classes, java, jcmd, env)
     nonzero_cleanup = nonzero_cleanup_probe(module, classes, java, jcmd, env)
-    return {
+    verdicts = {
         "bench.descendants_recursive": recursive,
         "bench.heap_exact": heap_exact,
         "bench.tree_rss_sums_simultaneous": tree_sum_probe(
@@ -783,6 +788,63 @@ def process_assertions(
         "bench.same_jdk": same_jdk_probe(module, java, jcmd),
         "bench.final_source_snapshot": final_source_snapshot_probe(module),
     }
+    # What the sampler actually saw, so a failure can be read rather than
+    # guessed at. Every number a verdict above compares is here, next to what
+    # it was compared against.
+    evidence = {
+        "roles": {role: dict(metrics) for role, metrics in result.roles.items()},
+        "roles_expected": sorted(("parent", "child", "grandchild")),
+        "heap_expected": {
+            "parent": PARENT_HEAP_BYTES,
+            "child": CHILD_HEAP_BYTES,
+        },
+        "parent_hwm_floor": oracle["parent_hwm"],
+        "sampling_attempts": result.sampling_attempts,
+        "wall_time_ns": result.wall_time_ns,
+        "complete_overlap_samples": result.complete_overlap_samples,
+        "parent_identity_expected": repr(identity_exact),
+        "identities_observed": sorted(repr(item) for item in result.observed_identities),
+        "sibling_identity": repr(sibling_stat.identity),
+    }
+    return verdicts, evidence
+
+
+def describe_failure(
+    verdicts: Mapping[str, bool], evidence: Mapping[str, object]
+) -> str:
+    """The report for a failed run: which verdicts, and what was behind them.
+
+    A bare `{name: False}` table is what this replaced, and it cost a whole
+    diagnosis: `bench.heap_exact` went false once on a CI runner, could not be
+    reproduced anywhere, and by then the two numbers it had compared were gone.
+    Five of the eleven verdicts are computed from the one tree observation
+    below; the other six each run their own probe, and for those the name is
+    the whole of what there is to say.
+    """
+    failed = sorted(name for name, ok in verdicts.items() if not ok)
+    if not failed:
+        return ""
+    return "real sampler failed: {}\nobserved: {}".format(
+        ", ".join(failed),
+        json.dumps(evidence, indent=2, sort_keys=True, default=repr),
+    )
+
+
+def failure_report_selftest() -> None:
+    if describe_failure(dict.fromkeys(ASSERTIONS, True), {"roles": {}}):
+        raise AssertionError("a run with nothing failed must report nothing")
+    verdicts = {**dict.fromkeys(ASSERTIONS, True), "bench.heap_exact": False}
+    evidence = {
+        "roles": {"parent": {"max_heap_bytes": 67108863}},
+        "heap_expected": {"parent": PARENT_HEAP_BYTES},
+    }
+    report = describe_failure(verdicts, evidence)
+    for needle in ("bench.heap_exact", "67108863", str(PARENT_HEAP_BYTES)):
+        if needle not in report:
+            raise AssertionError(f"the failure report does not name {needle}: {report}")
+    if "bench.same_jdk" in report:
+        raise AssertionError(f"the failure report named a passing verdict: {report}")
+    print("PASS  a failed verdict is reported with the numbers behind it")
 
 
 def sequence_reader(values: Sequence[object]):
@@ -967,9 +1029,12 @@ def mutation_contract(
     with tempfile.TemporaryDirectory(prefix="selfhost-bench-contract-") as raw:
         work = Path(raw)
         classes = compile_fixture(toolchain, work)
-        baseline = process_assertions(module, classes, toolchain.java, toolchain.jcmd)
-        if not all(baseline.values()):
-            raise AssertionError(f"real sampler failed its assertions: {baseline!r}")
+        baseline, evidence = process_assertions(
+            module, classes, toolchain.java, toolchain.jcmd
+        )
+        report = describe_failure(baseline, evidence)
+        if report:
+            raise AssertionError(report)
         for assertion in ASSERTIONS:
             print(f"PASS  {assertion}")
 
@@ -987,7 +1052,9 @@ def mutation_contract(
                 cwd=ROOT,
             )
             mutant = load_module(source, "selfhost_bench_mutant_" + mutation.replace("-", "_"))
-            observed = process_assertions(mutant, classes, toolchain.java, toolchain.jcmd)
+            observed, _ = process_assertions(
+                mutant, classes, toolchain.java, toolchain.jcmd
+            )
             if set(observed) != set(ASSERTIONS):
                 raise AssertionError(
                     f"{mutation} ran {sorted(observed)}, expected {sorted(ASSERTIONS)}"
@@ -1037,6 +1104,7 @@ def main() -> int:
     matrix_text = MATRIX.read_text(encoding="utf-8")
     matrix_selftest(matrix_text, mutations)
     matrix = parse_matrix(matrix_text, mutations)
+    failure_report_selftest()
     schema_contract(module)
     shell_contract()
     mutation_contract(module, matrix, mutations)
