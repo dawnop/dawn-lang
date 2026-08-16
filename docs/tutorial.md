@@ -719,6 +719,54 @@ pub fn main() -> Unit !io = {
 Without one, as in `let f = to_string`, there is nothing to discharge the bound at and
 the compiler says so; write the type, or write the lambda with an annotated parameter.
 
+### One list, many types: a record of functions
+
+A `List[T]` holds one `T`. When you want a list of *different* types that all support
+the same operation, Dawn has no `dyn Trait` to reach for. Capture the operation in a
+record of functions, hide the record behind an `opaque` type, and give that type an impl
+of its own. The bound is discharged where the value is packed, which is the last place
+the concrete type is still known:
+
+```dawn run
+type ShownRepr = { render: fn() -> String }
+
+pub opaque type Shown = ShownRepr
+
+pub fn shown[T: Show](x: T) -> Shown = {
+  let r: ShownRepr = ShownRepr { render: () => show(x) }
+  r
+}
+
+impl Show[Shown] {
+  fn show(s: Shown) -> String = {
+    let r: ShownRepr = s
+    r.render()
+  }
+}
+
+pub fn main() -> Unit !io = {
+  let xs: List[Shown] = [shown(1), shown("two"), shown(true)]
+  for x in xs {
+    println("${x}")
+  }
+}
+```
+```output
+1
+"two"
+true
+```
+
+The second line keeps its quotes. That is what `Show[String]` renders, here and
+everywhere else, and not a slip in the example.
+
+The trick is complete for a trait that takes its subject in one position: `Show`,
+`Hash`, anything shaped `fn(T) -> ...`. It does not reach `Eq` or `Ord`, whose
+`eq(a: T, b: T)` and `cmp(a: T, b: T)` need two values of the *same* type, and packing
+is exactly what throws that fact away. So a heterogeneous `List` is available and a
+heterogeneous `Map` key is not. Why the line falls there, and why Dawn does not add
+trait objects, is in [trait.md](trait.md) §10, in Chinese.
+
 The v1 boundary: an impl's subject can only be a **non-generic** named type or
 `Int`/`Float`/`Bool`/`String` (there are no conditional impls, and `List[T]` cannot be a
 subject); and a call under a trait constraint is not available in comptime. The full
