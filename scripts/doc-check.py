@@ -198,6 +198,13 @@ three patterns names its English spelling beside its Chinese one, and the
 Chinese side is left byte-identical -- measured, not asserted: every printed
 count is the same over this corpus before and after.
 
+The corpus is what git tracks, not what the directory holds. Enumerating it by
+walking the filesystem meant the gate read AGENTS.md and anything else a
+developer had left in the root -- files this project keeps deliberately
+untracked -- so "every document" named a different set on every machine, and a
+broken link in somebody's scratch notes failed the build. See
+markdown_documents.
+
 Each check prints how many references it *resolved*, not just how many it
 rejected: "0 rejected" reads the same whether the check is working or has
 gone blind, and this repository has been bitten by that difference.
@@ -218,12 +225,61 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DAWN = ROOT / "bin" / "dawn"
 
-# every tracked Markdown file, including the top-level ones. Globbed rather
-# than listed: README.zh-CN.md joined the top level in 2026-08-05 and a
-# hand-kept list is the thing that would not have noticed.
-DOCS = sorted(
-    [p for p in (ROOT / "docs").rglob("*.md")] + list(ROOT.glob("*.md"))
-)
+
+def tracked_markdown(root: pathlib.Path) -> set[pathlib.Path]:
+    """Every Markdown file git tracks under `root`, as absolute paths.
+
+    Raises rather than returning a guess. The caller turns that into an exit,
+    and the reason it must not fall back to a filesystem walk is the reason
+    this function exists at all: agent-collaboration notes (AGENTS.md and its
+    kind) are deliberately untracked and globally gitignored here, so a walk
+    reads documents that are not part of the repository. The gate's verdict
+    then depends on which scratch files the developer happens to be carrying,
+    and a stray broken link in one of them fails the build for everybody. A
+    silent fallback would restore that on exactly the machines least able to
+    notice it had happened.
+
+    The index, not the commit: `git add`-ing a new document puts it in scope
+    immediately, which is the point at which its author can be asked to fix it.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--", "*.md"],
+            capture_output=True, text=True)
+    except OSError as why:
+        raise RuntimeError(f"cannot run git to enumerate documents: {why}") from why
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"`git ls-files` failed in {root} (exit {proc.returncode}): "
+            f"{proc.stderr.strip() or 'no output'}")
+    names = [name for name in proc.stdout.split("\0") if name]
+    if not names:
+        # A git that answers and reports nothing would leave every check below
+        # with an empty corpus, which is green for the same reason a passing
+        # run is green. Whatever produced it, it is not this repository.
+        raise RuntimeError(f"`git ls-files` reports no Markdown at all under {root}")
+    return {root / name for name in names}
+
+
+def markdown_documents() -> list[pathlib.Path]:
+    """The documents this file checks: docs/ and the top level, tracked only.
+
+    The two globs state the subject -- docs/ at any depth plus the top level,
+    which is what scripts/gate-map records this gate as watching. Membership is
+    then settled by git, so "every document" means the same set here, in CI and
+    in a fresh checkout. Globbed rather than listed because README.zh-CN.md
+    joined the top level in 2026-08-05 and a hand-kept list is the thing that
+    would not have noticed.
+    """
+    try:
+        tracked = tracked_markdown(ROOT)
+    except RuntimeError as why:
+        sys.exit(f"doc-check: {why}")
+    walked = [p for p in (ROOT / "docs").rglob("*.md")] + list(ROOT.glob("*.md"))
+    return sorted(p for p in walked if p in tracked)
+
+
+DOCS = markdown_documents()
 
 # --- translations ----------------------------------------------------------
 # Which documents are translations, and of what. For the outward-facing layer
@@ -1117,6 +1173,46 @@ def check_status(path: pathlib.Path, text: str,
     return [f"{display}: no `> 状态：…` / `> Status: …` line in the "
             f"first 12 lines "
             f"(normative / current / historical / proposed -- see docs/README.md)"], 0
+
+
+def check_tracked_documents_selftest() -> tuple[list[str], int]:
+    """An ignored document is out of scope, and a git that cannot answer is fatal.
+
+    Both halves are assertions about the enumeration rather than about any
+    document, and both go red the moment somebody restores the filesystem walk:
+    the first because the ignored file comes back, the second because a
+    fallback is precisely a refusal to raise. Run against a repository built
+    here, so the control does not depend on what this worktree happens to
+    contain.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        outside = pathlib.Path(tmp)
+        (outside / "README.md").write_text("# not a repository\n", encoding="utf-8")
+        try:
+            tracked_markdown(outside)
+        except RuntimeError:
+            pass
+        else:
+            return ["tracked-document self-test: enumeration outside a git "
+                    "repository answered instead of failing"], 0
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = pathlib.Path(tmp)
+        (repo / ".gitignore").write_text("ignored.md\n", encoding="utf-8")
+        (repo / "tracked.md").write_text("# tracked\n", encoding="utf-8")
+        (repo / "ignored.md").write_text("# ignored\n", encoding="utf-8")
+        for argv in (["init", "-q"], ["add", "-A"]):
+            done = subprocess.run(["git", "-C", str(repo)] + argv,
+                                  capture_output=True, text=True)
+            if done.returncode != 0:
+                return [f"tracked-document self-test: `git {argv[0]}` failed in a "
+                        f"scratch repository: {done.stderr.strip()}"], 0
+        got = tracked_markdown(repo)
+        if got != {repo / "tracked.md"}:
+            return [f"tracked-document self-test: an ignored Markdown file is in "
+                    f"scope; enumeration returned "
+                    f"{sorted(p.name for p in got)}"], 0
+    return [], 2
 
 
 def check_status_selftest() -> tuple[list[str], int]:
@@ -3322,6 +3418,9 @@ def main() -> None:
     problems += bad
     selftests_seen += n
     bad, n = check_status_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_tracked_documents_selftest()
     problems += bad
     selftests_seen += n
     bad, audit_seen = check_audit_status()
