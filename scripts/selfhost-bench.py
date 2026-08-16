@@ -29,6 +29,17 @@ ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "scripts/selfhost-bench.baseline"
 SCHEMA = 1
 KIND = "dawn-compiler-weight-baseline"
+
+# The JVM options the toolchain actually ships with, repeated here because this
+# script forks the release jar directly and never goes through bin/dawn. Keep
+# identical to bin/dawn's DAWN_JVM_OPTS default and to child_java_cmd() in
+# selfhost/src/main.dawn; a flag added there and not here leaves the recorded
+# baseline measuring a configuration nobody runs, indefinitely and without any
+# signal that it has. That is not hypothetical: the baseline replaced on
+# 2026-08-17 had been describing a heap ceiling the tree stopped using five days
+# earlier.
+TOOLCHAIN_JVM_OPTS = ("-Xss512m", "-Xmx2g", "-XX:+UseSerialGC")
+
 PROC_INTERVAL_NS = 2_000_000
 MEASUREMENT_LOCALE = "C.UTF-8"
 NOISE_THRESHOLD = 0.15
@@ -1505,19 +1516,7 @@ def build_native_release(
 def workload_commands(
     work: Path, release_jar: Path, native: Path, java: Path, sample: int
 ) -> dict[str, tuple[list[Path | str], str]]:
-    # These must stay identical to bin/dawn's DAWN_JVM_OPTS default, and to
-    # child_java_cmd() in selfhost/src/main.dawn. The bench never invokes
-    # bin/dawn -- it forks the release jar itself -- so a flag added there and
-    # not here means selfhost-bench.baseline goes on measuring a configuration
-    # nobody runs, indefinitely and without any signal that it has.
-    java_prefix: list[Path | str] = [
-        java,
-        "-Xss512m",
-        "-Xmx2g",
-        "-XX:+UseSerialGC",
-        "-jar",
-        release_jar,
-    ]
+    java_prefix: list[Path | str] = [java, *TOOLCHAIN_JVM_OPTS, "-jar", release_jar]
     return {
         "jvm_build_fib": (
             java_prefix
@@ -1629,10 +1628,12 @@ def measure_startup(
 ) -> dict[str, object]:
     launcher = make_deployed_launcher(work, release_jar)
     commands: dict[str, Sequence[str | os.PathLike[str]]] = {
+        # direct_jar exists to price bin/dawn's shell work against the same JVM
+        # underneath it, so it has to be the same JVM: bin_dawn is a verbatim
+        # copy of the launcher and picks up whatever DAWN_JVM_OPTS says.
         "direct_jar": [
             pre.toolchain.java,
-            "-Xss512m",
-            "-Xmx2g",
+            *TOOLCHAIN_JVM_OPTS,
             "-jar",
             release_jar,
             "--version",
