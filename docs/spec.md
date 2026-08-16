@@ -587,7 +587,8 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   父目标的真子项）。
 - **条件 impl**：`impl[T: Eq] Eq[List[T]]` 的方法是泛型函数，按约束接收字典；
   `Eq[List[Int]]` 这样的具体目标在编译期解成常量字典，`Eq[List[T]]`（`T` 刚性）
-  则在运行期由 `Eq[T]` 构造。无 dyn、无 supertrait、无特化（不问「哪个更特化」）。
+  则在运行期由 `Eq[T]` 构造。无 dyn（异构集合的写法见本节末「异构集合」；裁决理由与
+  重开条件见 [trait.md](trait.md)）、无 supertrait、无特化（不问「哪个更特化」）。
   trait 方法效果只能是纯或 `!io`，impl 的效果 ⊑ trait 声明。
 - **关联类型**（设计与裁决见
   [assoc-types-design.md](assoc-types-design.md)）：trait 体可声明裸 `type Item`
@@ -672,6 +673,59 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
   函数是另一回事，仍不可当值（§6.5 边界）：证据在 lambda 写下的位置捕获，编译器替你
   选的捕获点未必是调用者要的那个。
 - 限制：comptime 中不允许 trait 约束的调用与 impl 排序。
+
+#### 异构集合
+
+没有 dyn，异构集合的惯用法是**一等函数 + 不透明类型**：在类型还具体的地方把方法调用
+包成闭包，装进一条记录，把记录声明成 opaque 类型，再给这个 opaque 类型写 impl。
+
+```dawn run
+type ShownRepr = { render: fn() -> String }
+
+pub opaque type Shown = ShownRepr
+
+pub fn shown[T: Show](x: T) -> Shown = {
+  let r: ShownRepr = ShownRepr { render: () => show(x) }
+  r
+}
+
+impl Show[Shown] {
+  fn show(s: Shown) -> String = {
+    let r: ShownRepr = s
+    r.render()
+  }
+}
+
+pub fn main() -> Unit !io = {
+  let xs: List[Shown] = [shown(1), shown("two"), shown(true)]
+  for x in xs { println("${x}") }
+}
+```
+
+```output
+1
+"two"
+true
+```
+
+四步各有依据，都在本文件内：
+
+- `shown` 里 `Show[T]` 消解出的字典是普通值，被 lambda 按值捕获（本节「trait 方法与
+  带约束的函数可以直接当函数值」一条：与手写 lambda 同形；§4.5：闭包按值捕获绑定）。
+  `T` 到此为止，`Shown` 里不再有它。
+- `Shown` 是不透明类型，运行期就是 `ShownRepr`，零开销（§2.7）。
+- `impl Show[Shown]` 合法且优先于目标类型的 impl：孤儿规则把不透明类型算作声明模块的
+  本地类型（§2.7）。
+- `let r: ShownRepr = s` 不能省：不透明类型的转换只发生在赋值、传参与返回位置，不在
+  表达式内部（§2.7），`s.render()` 是编译错误。
+
+适用范围：
+
+- **单方法 trait**：完整替代。
+- **多方法 trait**：每个方法写一个字段，即手写一张函数表；语言不代劳。
+- **`Eq`/`Ord` 写不出来**：二元方法（`fn eq(a: T, b: T)`）要求两个实参是同一类型，
+  而两个 `Shown` 的真实类型可以不同——「同类型」这件事在 `Shown` 的类型里无处安放。
+  推论：`Map[Shown, V]` 这样的东西做不出来。
 
 ---
 
