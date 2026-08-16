@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 8f337b846f41fd4a -->
+<!-- doc-check: translation-of docs/spec.md @ 47be6047a9498517 -->
 
 # Dawn Language Specification
 
@@ -713,7 +713,9 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
 - **Conditional impls**: the methods of `impl[T: Eq] Eq[List[T]]` are generic functions that take
   dictionaries according to their bounds; a concrete target like `Eq[List[Int]]` is solved to a
   constant dictionary at compile time, while `Eq[List[T]]` (with `T` rigid) is built at run time
-  from `Eq[T]`. No dyn, no supertraits, no specialisation (no asking "which one is more
+  from `Eq[T]`. No dyn (for heterogeneous collections see "Heterogeneous collections" at the end
+  of this section; the reasoning behind the verdict and the conditions for reopening it are in
+  [trait.md](trait.md)), no supertraits, no specialisation (no asking "which one is more
   specific"). A trait method's effect can only be pure or `!io`, and an impl's effect ⊑ the trait
   declaration's.
 - **Associated types** (design and verdicts in
@@ -825,6 +827,63 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
   a value (§6.5, boundary): evidence is captured where the lambda is written, and the capture
   point the compiler would pick for you is not necessarily the one the caller wants.
 - Limits: calls with trait bounds and impl-based sorting are not allowed in comptime.
+
+#### Heterogeneous collections
+
+There is no dyn; the idiom for a heterogeneous collection is **first-class functions plus an
+opaque type**: while the type is still concrete, wrap the method call in a closure, put the
+closure in a record, declare the record as an opaque type, and give that opaque type an impl.
+
+```dawn run
+type ShownRepr = { render: fn() -> String }
+
+pub opaque type Shown = ShownRepr
+
+pub fn shown[T: Show](x: T) -> Shown = {
+  let r: ShownRepr = ShownRepr { render: () => show(x) }
+  r
+}
+
+impl Show[Shown] {
+  fn show(s: Shown) -> String = {
+    let r: ShownRepr = s
+    r.render()
+  }
+}
+
+pub fn main() -> Unit !io = {
+  let xs: List[Shown] = [shown(1), shown("two"), shown(true)]
+  for x in xs { println("${x}") }
+}
+```
+
+```output
+1
+"two"
+true
+```
+
+Each of the four steps rests on a rule stated in this document:
+
+- The dictionary that discharges `Show[T]` inside `shown` is an ordinary value, captured by the
+  lambda by value (this section, "Trait methods and functions with bounds can be used as function
+  values directly": exactly as a handwritten lambda does; §4.5: a closure captures bindings by
+  value). `T` ends there; it no longer appears in `Shown`.
+- `Shown` is an opaque type, so at runtime it **is** `ShownRepr`, at zero cost (§2.7).
+- `impl Show[Shown]` is legal and takes precedence over the target type's impl: the orphan rule
+  counts an opaque type as a local type of the module that declares it (§2.7).
+- `let r: ShownRepr = s` cannot be dropped: an opaque type converts only at assignment, argument
+  and return positions, not inside an expression (§2.7), so `s.render()` is a compile error.
+
+Where it applies:
+
+- **A single-method trait**: a complete replacement.
+- **A multi-method trait**: one field per method, i.e. a hand-written function table; the
+  language does not write it for you.
+- **`Eq`/`Ord` cannot be written this way**: a binary method (`fn eq(a: T, b: T)`) requires both
+  arguments to have the same type, while two `Shown` values may have different underlying types —
+  "the same type" has nowhere to live in the type of `Shown`. Corollary: nothing like
+  `Map[Shown, V]` can be built.
 
 ---
 
