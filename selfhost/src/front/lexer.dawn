@@ -77,8 +77,6 @@ fn diag_h(msg: String, lo: Int, hi: Int, hint: String) -> Diag =
 
 fn no_diags() -> List[Diag] = []
 
-fn no_toks() -> List[Token] = []
-
 fn no_segs() -> List[Seg] = []
 
 fn no_cps() -> List[Char] = []
@@ -139,17 +137,40 @@ pub fn lex(text: String) -> (List[Token], List[Diag]) = lex_at(text, 0)
 ## Lex with a base offset added to every span — for re-lexing an interpolation
 ## segment in place (the Kotlin Lexer's baseOffset).
 pub fn lex_at(text: String, base: Int) -> (List[Token], List[Diag]) = {
-  let (toks, _, diags) = lex_go(text, base, false)
+  let (_, toks, _, diags) = lex_go(text, base, false)
   (toks, diags)
+}
+
+## `lex` plus the decoded code points it worked over. Spans are code-point
+## indices, so a caller that also has to look at the source between tokens needs
+## exactly this array — and the lexer built it anyway. Handing it back is what
+## keeps a file from being decoded twice (the parser's `assert` slices, the
+## formatter's line counting): `code_points` is a whole pass over the text.
+pub fn lex_cps(text: String) -> (List[Char], List[Token], List[Diag]) = {
+  let (cps, toks, _, diags) = lex_go(text, 0, false)
+  (cps, toks, diags)
 }
 
 ## Like `lex`, but also returns the comment tokens `lex` drops — the extra
 ## channel the formatter needs (the Kotlin Lexer's commentSink). A comment's
 ## text and span exclude trailing whitespace before the newline.
-pub fn lex_with_comments(text: String) -> (List[Token], List[Token], List[Diag]) =
+pub fn lex_with_comments(text: String) -> (List[Token], List[Token], List[Diag]) = {
+  let (_, toks, comments, diags) = lex_go(text, 0, true)
+  (toks, comments, diags)
+}
+
+## `lex_with_comments` plus the decoded code points, for the same reason as
+## `lex_cps`. The formatter decoded the same file three times without it.
+pub fn lex_with_comments_cps(
+  text: String
+) -> (List[Char], List[Token], List[Token], List[Diag]) =
   lex_go(text, 0, true)
 
-fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], List[Diag]) = {
+fn lex_go(
+  text: String,
+  base: Int,
+  collect: Bool
+) -> (List[Char], List[Token], List[Token], List[Diag]) = {
   let s = src_of(text, base)
   var i = 0
   var toks: List[Token] = []
@@ -211,9 +232,15 @@ fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], 
       toks = toks ++ [t]
       i = j
     } else {
-      let (j, ts, ds) = lex_symbol(s, i)
-      toks = toks ++ ts
-      diags = diags ++ ds
+      let (j, mt, md) = lex_symbol(s, i)
+      toks = match mt {
+        Some(t) -> toks ++ [t]
+        None -> toks
+      }
+      diags = match md {
+        Some(d) -> diags ++ [d]
+        None -> diags
+      }
       i = j
     }
   }
@@ -223,7 +250,7 @@ fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], 
     toks = toks ++ [tok(NEWLINE, "\\n", l, l + 1)]
   }
   toks = toks ++ [tok(EOF, "<eof>", l, l + 1)]
-  (toks, comments, diags)
+  (s.cps, toks, comments, diags)
 }
 
 ## A decoded source with the UTF-16 bridge the LSP boundary needs: the code
@@ -247,15 +274,18 @@ pub fn view_of(text: String) -> SourceView = {
 
 ## Slice `[a, b)` by code-point index — O(b - a). The one string-slicing API:
 ## every span in the front end is a pair of code-point indices.
-pub fn slice_cp(v: SourceView, a: Int, b: Int) -> String = {
+pub fn slice_cps(cps: List[Char], a: Int, b: Int) -> String = {
   var out: List[Char] = []
   var i = a
   while i < b {
-    out = out ++ [v.cps[i]]
+    out = out ++ [cps[i]]
     i = i + 1
   }
   from_code_points(out)
 }
+
+## `slice_cps` against a `SourceView`, for the LSP side, which carries one.
+pub fn slice_cp(v: SourceView, a: Int, b: Int) -> String = slice_cps(v.cps, a, b)
 
 # ---- words: keywords / identifiers / type identifiers ----
 
@@ -801,57 +831,70 @@ fn strip_triple_indent(segs_in: List[Seg]) -> List[Seg] = {
 
 # ---- symbols ----
 
-## The two-character operators. `<-` is one of them by the same maximal munch
-## every other pair here gets: `a<-b` reads as `a <- b`, not `a < (-b)`. Spaced
-## code (`a < -b`) is untouched, and `dawn fmt` puts spaces around every binary
-## operator, so no formatted source can reach the second reading (spec §1.4).
-fn two_kind(c: Char, c1: Char) -> Option[TokKind] =
-  if c == '<' && c1 == '<' { Some(SHL) }
-  else if c == '>' && c1 == '>' { Some(SHR) }
-  else if c == '-' && c1 == '>' { Some(ARROW) }
-  else if c == '<' && c1 == '-' { Some(LARROW) }
-  else if c == '=' && c1 == '>' { Some(FATARROW) }
-  else if c == '=' && c1 == '=' { Some(EQEQ) }
-  else if c == '!' && c1 == '=' { Some(NEQ) }
-  else if c == '<' && c1 == '=' { Some(LE) }
-  else if c == '>' && c1 == '=' { Some(GE) }
-  else if c == '+' && c1 == '+' { Some(PLUSPLUS) }
-  else if c == '|' && c1 == '>' { Some(PIPEGT) }
-  else if c == '&' && c1 == '&' { Some(AMPAMP) }
-  else if c == '|' && c1 == '|' { Some(PIPEPIPE) }
-  else if c == '.' && c1 == '.' { Some(DOTDOT) }
+## The two-character operators, each with its own spelling. `<-` is one of them
+## by the same maximal munch every other pair here gets: `a<-b` reads as
+## `a <- b`, not `a < (-b)`. Spaced code (`a < -b`) is untouched, and `dawn fmt`
+## puts spaces around every binary operator, so no formatted source can reach
+## the second reading (spec §1.4).
+##
+## The text comes from the table rather than from a slice of the source. This
+## dispatch already tested for the exact characters, so the answer is a constant,
+## and slicing it out instead cost a list allocation and a `from_code_points` per
+## operator token — half of every token stream (49.5% of the tree's tokens are
+## one- or two-character operators). `>>>` below was already written this way.
+## The equality with the source span is not incidental: `fmt` reprints tokens
+## from `.text` and the "token text is its source span" test in this file holds
+## the whole table to it.
+fn two_kind(c: Char, c1: Char) -> Option[(TokKind, String)] =
+  if c == '<' && c1 == '<' { Some((SHL, "<<")) }
+  else if c == '>' && c1 == '>' { Some((SHR, ">>")) }
+  else if c == '-' && c1 == '>' { Some((ARROW, "->")) }
+  else if c == '<' && c1 == '-' { Some((LARROW, "<-")) }
+  else if c == '=' && c1 == '>' { Some((FATARROW, "=>")) }
+  else if c == '=' && c1 == '=' { Some((EQEQ, "==")) }
+  else if c == '!' && c1 == '=' { Some((NEQ, "!=")) }
+  else if c == '<' && c1 == '=' { Some((LE, "<=")) }
+  else if c == '>' && c1 == '=' { Some((GE, ">=")) }
+  else if c == '+' && c1 == '+' { Some((PLUSPLUS, "++")) }
+  else if c == '|' && c1 == '>' { Some((PIPEGT, "|>")) }
+  else if c == '&' && c1 == '&' { Some((AMPAMP, "&&")) }
+  else if c == '|' && c1 == '|' { Some((PIPEPIPE, "||")) }
+  else if c == '.' && c1 == '.' { Some((DOTDOT, "..")) }
   else { None }
 
-fn one_kind(c: Char) -> Option[TokKind] =
+fn one_kind(c: Char) -> Option[(TokKind, String)] =
   match c {
-    '(' -> Some(LPAREN)
-    ')' -> Some(RPAREN)
-    '{' -> Some(LBRACE)
-    '}' -> Some(RBRACE)
-    '[' -> Some(LBRACKET)
-    ']' -> Some(RBRACKET)
-    ',' -> Some(COMMA)
-    ':' -> Some(COLON)
-    '.' -> Some(DOT)
-    '?' -> Some(QUESTION)
-    '=' -> Some(EQ)
-    '<' -> Some(LT)
-    '>' -> Some(GT)
-    '+' -> Some(PLUS)
-    '-' -> Some(MINUS)
-    '*' -> Some(STAR)
-    '/' -> Some(SLASH)
-    '%' -> Some(PERCENT)
-    '|' -> Some(PIPE)
-    '&' -> Some(AMP)
-    '^' -> Some(CARET)
-    '~' -> Some(TILDE)
-    '!' -> Some(BANG)
-    '@' -> Some(AT)
+    '(' -> Some((LPAREN, "("))
+    ')' -> Some((RPAREN, ")"))
+    '{' -> Some((LBRACE, "{"))
+    '}' -> Some((RBRACE, "}"))
+    '[' -> Some((LBRACKET, "["))
+    ']' -> Some((RBRACKET, "]"))
+    ',' -> Some((COMMA, ","))
+    ':' -> Some((COLON, ":"))
+    '.' -> Some((DOT, "."))
+    '?' -> Some((QUESTION, "?"))
+    '=' -> Some((EQ, "="))
+    '<' -> Some((LT, "<"))
+    '>' -> Some((GT, ">"))
+    '+' -> Some((PLUS, "+"))
+    '-' -> Some((MINUS, "-"))
+    '*' -> Some((STAR, "*"))
+    '/' -> Some((SLASH, "/"))
+    '%' -> Some((PERCENT, "%"))
+    '|' -> Some((PIPE, "|"))
+    '&' -> Some((AMP, "&"))
+    '^' -> Some((CARET, "^"))
+    '~' -> Some((TILDE, "~"))
+    '!' -> Some((BANG, "!"))
+    '@' -> Some((AT, "@"))
     _ -> None
   }
 
-fn lex_symbol(s: Src, at: Int) -> (Int, List[Token], List[Diag]) = {
+## At most one token and at most one diagnostic, which is what every branch here
+## produces; the list-of-each shape allocated two containers per operator to say
+## so.
+fn lex_symbol(s: Src, at: Int) -> (Int, Option[Token], Option[Diag]) = {
   let c = s.cps[at]
   # Dawn separates statements by newlines and has no `;` (spec §1.7). Recover a
   # stray one as a newline so it doesn't cascade into the rest of the file, but
@@ -859,29 +902,40 @@ fn lex_symbol(s: Src, at: Int) -> (Int, List[Token], List[Diag]) = {
   if c == ';' {
     return (
       at + 1,
-      [tok(NEWLINE, "\\n", off(s, at), off(s, at) + 1)],
-      [diag_h(
+      Some(tok(NEWLINE, "\\n", off(s, at), off(s, at) + 1)),
+      Some(diag_h(
         "Dawn has no `;` — statements are separated by newlines",
         off(s, at),
         off(s, at) + 1,
         "remove the `;`; write one statement per line"
-      )]
+      ))
     )
   }
   # `>>>` must be probed before the two-char pairs (the only three-char operator)
   if at + 2 < s.n && c == '>' && s.cps[at + 1] == '>' && s.cps[at + 2] == '>' {
-    return (at + 3, [tok(USHR, ">>>", off(s, at), off(s, at) + 3)], no_diags())
+    return (at + 3, Some(tok(USHR, ">>>", off(s, at), off(s, at) + 3)), None)
   }
-  let paired: Option[TokKind] = if at + 1 < s.n { two_kind(c, s.cps[at + 1]) } else { None }
+  let paired: Option[(TokKind, String)] =
+    if at + 1 < s.n { two_kind(c, s.cps[at + 1]) } else { None }
   match paired {
-    Some(k) -> (at + 2, [tok(k, text_of(s, at, at + 2), off(s, at), off(s, at + 2))], no_diags())
+    Some(kt) -> {
+      let (k, text) = kt
+      (at + 2, Some(tok(k, text, off(s, at), off(s, at + 2))), None)
+    }
     None ->
       match one_kind(c) {
-        Some(k) -> (at + 1, [tok(k, text_of(s, at, at + 1), off(s, at), off(s, at + 1))], no_diags())
+        Some(kt) -> {
+          let (k, text) = kt
+          (at + 1, Some(tok(k, text, off(s, at), off(s, at + 1))), None)
+        }
         None -> (
           at + 1,
-          no_toks(),
-          [mk_diag("unrecognized character: " ++ str.from_char(c), off(s, at), off(s, at) + 1)]
+          None,
+          Some(mk_diag(
+            "unrecognized character: " ++ str.from_char(c),
+            off(s, at),
+            off(s, at) + 1
+          ))
         )
       }
   }
@@ -1117,6 +1171,59 @@ test "spans are code-point indices, not utf-16 units" {
   let (toks, ds) = lex("🎈 x")
   assert toks[0].lo == 2
   assert toks[0].hi == 3
+}
+
+## The source that the span/text invariant below is checked over. Its job is
+## coverage, not meaning: one specimen of every token kind a formatter can meet,
+## including a non-BMP code point in a string (where a UTF-16 slice and a
+## code-point slice would disagree) and comments in both positions.
+fn invariant_corpus() -> String =
+  "# a full-line comment\n" ++
+  "pub fn f(_ x: Int, ys: List[Foo]) -> Bar = {  # trailing comment  \n" ++
+  "  let a = 255 0xff 0b1010 1_000_000 9223372036854775808 1.5 2.0e-3\n" ++
+  "  let s = \"plain\" `raw` 'c' \"日本語 🎈\" \"pre \${x} post\"\n" ++
+  "  a << b >> c -> d <- e => g == h != i <= j >= k ++ l |> m && n || o .. p >>> q\n" ++
+  "  ( ) { } [ ] , : . ? = < > + - * / % | & ^ ~ ! @ not\n" ++
+  "}\n"
+
+## Every token that can reach the formatter's stream carries exactly the source
+## its span names. `fmt` reprints tokens from `.text` and changes only the
+## whitespace between them, so a lexer that synthesized a token's text -- or
+## widened its span past it -- would make `fmt` rewrite the program instead of
+## reindenting it, and no formatting golden would say so: the wrong text is a
+## stable fixpoint, formatted output of formatted output.
+##
+## NEWLINE and EOF are the exceptions and are excluded on purpose: they are
+## separators the lexer invents (their text is a literal `\n` / `<eof>`), and
+## `fmt` filters both out before reflowing.
+test "token text is its source span" {
+  let src = invariant_corpus()
+  let (cps, toks, comments, ds) = lex_with_comments_cps(src)
+  assert len(ds) == 0
+  var seen: List[String] = []
+  var checked = 0
+  for t in toks ++ comments {
+    if t.kind != NEWLINE && t.kind != EOF {
+      assert t.text == slice_cps(cps, t.lo, t.hi)
+      seen = seen ++ [kind_name(t.kind)]
+      checked = checked + 1
+    }
+  }
+  # The invariant is only worth what the corpus reaches, so the corpus is held to
+  # naming every kind whose text this file decides.
+  for want in [
+    "COMMENT", "IDENT", "TYPEIDENT", "UNDERSCORE", "PUB", "FN", "LET", "NOT",
+    "INT", "FLOAT", "STRING", "CHAR",
+    "SHL", "SHR", "ARROW", "LARROW", "FATARROW", "EQEQ", "NEQ", "LE", "GE",
+    "PLUSPLUS", "PIPEGT", "AMPAMP", "PIPEPIPE", "DOTDOT", "USHR",
+    "LPAREN", "RPAREN", "LBRACE", "RBRACE", "LBRACKET", "RBRACKET",
+    "COMMA", "COLON", "DOT", "QUESTION", "EQ", "LT", "GT",
+    "PLUS", "MINUS", "STAR", "SLASH", "PERCENT", "PIPE", "AMP", "CARET",
+    "TILDE", "BANG", "AT"
+  ] {
+    assert list.contains(seen, want)
+  }
+  assert checked > 60
 }
 
 test "slice_cp addresses code points and the view carries the UTF-16 bridge" {

@@ -45,15 +45,20 @@ use front/ast.{
   DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module,
   e_lo, e_hi, t_lo, t_hi, pat_lo, pat_hi
 }
-use front/lexer.{lex, lex_at, view_of, slice_cp, SourceView}
+use front/lexer.{lex_cps, lex_at, slice_cps}
 
 # ---- parser state ----
 
-## `view` is the decoded module source, present only when the module has an
-## `assert` (which records its own source text — see `assert_stmt`). It is built
-## once per module rather than per assert: `view_of` walks the whole file, so
-## rebuilding it per assert makes parse allocation O(asserts x file size).
-type P = { toks: List[Token], view: Option[SourceView] }
+## `cps` is the module source as code points, which is what `assert` slices to
+## record its own text (see `assert_stmt`). Spans are code-point indices, so this
+## array is the only thing needed to resolve one, and the lexer already decoded
+## it — hence `lex_cps` rather than a second pass over the text.
+##
+## It is `None` for the sub-parser that re-lexes a string interpolation
+## (`str_lit`): that stream's spans are offsets into the enclosing file, so the
+## segment's own code points would be the wrong array to index. An interpolation
+## holds one expression and cannot contain an `assert`, so nothing asks.
+type P = { toks: List[Token], cps: Option[List[Char]] }
 
 ## Scan position plus the diagnostics accumulated so far (the Kotlin sink).
 type St = { pos: Int, diags: List[Diag] }
@@ -151,22 +156,13 @@ fn is_blank_str(v: String) -> Bool = {
   true
 }
 
-## Does this module need the source view at all? A module without `assert` never
-## slices its own text, and decoding it would be pure waste.
-fn has_assert(toks: List[Token]) -> Bool = {
-  for t in toks {
-    if t.kind == ASSERT { return true }
-  }
-  false
-}
-
 # ---- module ----
 
 ## Parse a whole file: lex, then descend. Never fails — broken declarations are
 ## reported and skipped, like the Kotlin recovery points.
 pub fn parse_module(text: String) -> (Module, List[Diag]) = {
-  let (toks, lexds) = lex(text)
-  let p = P { toks: toks, view: if has_assert(toks) { Some(view_of(text)) } else { None } }
+  let (cps, toks, lexds) = lex_cps(text)
+  let p = P { toks: toks, cps: Some(cps) }
   var st = St { pos: 0, diags: lexds }
   var decls: List[Decl] = []
   st = skip_nl(p, st)
@@ -1299,9 +1295,9 @@ fn expr_stmt(p: P, st: St) -> PR[Stmt] = {
 fn assert_stmt(p: P, st: St) -> PR[Stmt] = {
   let (st1, kw) = adv(p, st)
   let (st2, cond) = expression(p, st1, false)?
-  let src: Option[String] = match p.view {
+  let src: Option[String] = match p.cps {
     None -> None
-    Some(v) -> Some(slice_cp(v, e_lo(cond), e_hi(cond)))
+    Some(cps) -> Some(slice_cps(cps, e_lo(cond), e_hi(cond)))
   }
   Ok((st2, SAssert(cond, src, kw.lo, e_hi(cond))))
 }
@@ -1892,7 +1888,7 @@ fn str_lit(p: P, st: St, t: Token) -> PR[Expr] = {
       SCode(src, o) -> {
         let (subtoks, lexds) = lex_at(src, o)
         diags = diags ++ lexds
-        let subp = P { toks: subtoks, view: None }
+        let subp = P { toks: subtoks, cps: None }
         let sst = St { pos: 0, diags: diags }
         match expression(subp, sst, false) {
           Err(fe) -> {
