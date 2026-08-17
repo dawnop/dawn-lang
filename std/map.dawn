@@ -100,21 +100,25 @@ impl[K: Hash, V: Hash] Hash[Map[K, V]] {
   fn hash(m: Map[K, V]) -> Int = hash_go(entries(m), 0, len(m), 0)
 }
 
-fn show_go[K: Show, V: Show](es: List[(K, V)], i: Int, n: Int, acc: String) -> String =
+# The pieces, not the text: a `String` accumulator grown with `++` recopied
+# itself once per entry, making a rendering quadratic in its own length. `join`
+# is one builder pass, and it places the separator (std/list has the same shape).
+fn show_go[K: Show, V: Show](es: List[(K, V)], i: Int, n: Int, acc: List[String]) -> List[String] =
   if i == n {
     acc
   } else {
     let (k, v) = es[i]
-    show_go(es, i + 1, n, acc ++ (if i == 0 { "" } else { ", " }) ++
-        "(" ++ show(k) ++ ", " ++ show(v) ++ ")")
+    show_go(es, i + 1, n, acc ++ ["(" ++ show(k) ++ ", " ++ show(v) ++ ")"])
   }
 
 ## The call that rebuilds it: `map.from([(k, v), ...])`. A map has no literal
 ## syntax, so the rendering names a function the reader can paste back
 ## (spec §2.2), and it is the *public* spelling of that function.
 impl[K: Show, V: Show] Show[Map[K, V]] {
-  fn show(m: Map[K, V]) -> String =
-    "map.from([" ++ show_go(entries(m), 0, len(m), "") ++ "])"
+  fn show(m: Map[K, V]) -> String = {
+    let parts: List[String] = []
+    "map.from([" ++ join(show_go(entries(m), 0, len(m), parts), ", ") ++ "])"
+  }
 }
 
 # ---- iteration (prelude Iter, #44 knife 2) ----

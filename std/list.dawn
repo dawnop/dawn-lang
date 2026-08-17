@@ -31,6 +31,11 @@
 # A cursor is an index today because the representation is flat. When it stops
 # being flat, `Cur` and these four bodies change and nothing else does.
 
+# std/modules.txt puts `str` before `list`, and std/fmt already imports it, so
+# this edge is the allowed direction. It is here for the rendering witness below,
+# which needs a string length that allocates nothing.
+use std/str
+
 alias Cur = Int
 
 impl[T] Iter[List[T]] {
@@ -328,20 +333,25 @@ impl[T: Ord] Ord[List[T]] {
   fn cmp(a: List[T], b: List[T]) -> Int = cmp_go(a, b, iter_start(a), iter_start(b))
 }
 
-# "Am I at the first element?" was `i == 0`. A cursor cannot be asked that, so
-# the separator carries its own state -- the one thing dropping the index costs.
-fn show_go[T: Show](xs: List[T], c: Cur, first: Bool, acc: String) -> String =
+# The pieces, not the text: `acc ++ show(...)` per element recopied the whole
+# accumulator every step, so rendering n elements cost O(n^2) in the length of
+# the result. Collecting and handing the pieces to `join` is one pass over the
+# characters, because `join` is a single builder (dawn/rt/Strings.join). The
+# separator no longer needs the `first` flag either -- `join` places it.
+fn show_go[T: Show](xs: List[T], c: Cur, acc: List[String]) -> List[String] =
   if iter_done(xs, c) {
     acc
   } else {
-    show_go(xs, iter_next(xs, c), false,
-      acc ++ (if first { "" } else { ", " }) ++ show(iter_get(xs, c)))
+    show_go(xs, iter_next(xs, c), acc ++ [show(iter_get(xs, c))])
   }
 
 ## `[e0, e1]`, each element in its nested form -- so a String element is
 ## quoted where the list itself is not.
 impl[T: Show] Show[List[T]] {
-  fn show(xs: List[T]) -> String = "[" ++ show_go(xs, iter_start(xs), true, "") ++ "]"
+  fn show(xs: List[T]) -> String = {
+    let parts: List[String] = []
+    "[" ++ join(show_go(xs, iter_start(xs), parts), ", ") ++ "]"
+  }
 }
 
 # ---- tests ----
@@ -484,6 +494,40 @@ test "map, filter, fold and find walk in order" {
   assert find([1, 2, 3], x => x > 1).unwrap_or(0) == 2
   assert find([1, 2, 3], x => x > 9) == None
   assert find(e, x => true) == None
+}
+
+test "rendering a list is one pass over the characters, not one per element" {
+  # A cost, not a value. `show` built its answer in a `String` accumulator, and
+  # `acc ++ piece` copies the accumulator, so rendering n elements copied
+  # O(n^2) characters -- invisible on the four-element lists the block below
+  # asserts about, and the reason a diagnostic that names a large list, or a
+  # plain `"${xs}"`, could take longer than the compilation that produced it.
+  #
+  # The size had to be found by measurement, not by counting characters copied.
+  # 60000 elements cost the old implementation only 0.44s more than this one:
+  # the copying is quadratic but each copy is a bulk `arraycopy` running at
+  # gigabytes a second, so the constant is tiny and a plausible-looking size
+  # indicts nothing. 500000 elements is where it becomes unmissable -- measured
+  # on this machine, the whole std suite runs in 1.4s here and 56s with the
+  # accumulator back.
+  #
+  # First in the file's Show coverage on purpose, as `str.repeat`'s stack
+  # witness is first in its block: the small assertions below would otherwise
+  # run before the one that indicts a revert.
+  #
+  # Asserted through the length and two windows rather than by comparing the
+  # answer, so a failure names a number instead of putting four megabytes in the
+  # report. The length is `str.len`, a walk that allocates nothing;
+  # `code_points` would materialise every character as a boxed list element and
+  # cost more than the thing being measured.
+  let big = range(0, 500000)
+  let text = show(big)
+  # 2888890 digits (10*1 + 90*2 + 900*3 + 9000*4 + 90000*5 + 400000*6), 499999
+  # separators of two characters, and the two brackets. The separator count is
+  # the assertion that matters: one per gap, and `join` is what places it.
+  assert str.len(text) == 3888890
+  assert str.starts_with(text, "[0, 1, 2, ")
+  assert str.ends_with(text, ", 499998, 499999]")
 }
 
 test "Eq, Ord, Hash and Show on List say what the container means" {

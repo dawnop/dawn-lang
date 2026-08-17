@@ -64,17 +64,23 @@ impl[T: Hash] Hash[Set[T]] {
   fn hash(s: Set[T]) -> Int = hash_go(to_list(s), 0, len(s), 0)
 }
 
-fn show_go[T: Show](xs: List[T], i: Int, n: Int, acc: String) -> String =
+# The pieces, not the text: a `String` accumulator grown with `++` recopied
+# itself once per element, making a rendering quadratic in its own length. `join`
+# is one builder pass, and it places the separator (std/list has the same shape).
+fn show_go[T: Show](xs: List[T], i: Int, n: Int, acc: List[String]) -> List[String] =
   if i == n {
     acc
   } else {
-    show_go(xs, i + 1, n, acc ++ (if i == 0 { "" } else { ", " }) ++ show(xs[i]))
+    show_go(xs, i + 1, n, acc ++ [show(xs[i])])
   }
 
 ## `set.from([e0, e1])`, for the same reason a map renders as `map.from`: the
 ## rendering names a function the reader can call.
 impl[T: Show] Show[Set[T]] {
-  fn show(s: Set[T]) -> String = "set.from([" ++ show_go(to_list(s), 0, len(s), "") ++ "])"
+  fn show(s: Set[T]) -> String = {
+    let parts: List[String] = []
+    "set.from([" ++ join(show_go(to_list(s), 0, len(s), parts), ", ") ++ "])"
+  }
 }
 
 # ---- iteration (prelude Iter, #44 knife 2) ----
