@@ -23,12 +23,12 @@ use std/list
 use std/map
 use std/set
 use check/types.{
-  intr_at, Rt, RtStrings, RtBytes, RtArray, RtIo, peel_opaque, cast_target,
+  Intr, Rt, RtStrings, RtBytes, RtArray, RtIo, peel_opaque, cast_target,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
   Sym, Sig, Eff, eff_labels, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID,
-  builtins,
+  intrinsics,
   Impls, impl_at, reduce_via_bindings
 }
 use check/tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
@@ -163,6 +163,12 @@ pub type GenCtx = {
   impl_table: Impls,
   # program-wide (class name, fn name) → declared signature
   prog_fns: Map[(String, String), Sig],
+  # the intrinsic table, read once per class rather than per call site.
+  # `types.intr_at` rebuilds all 93 entries to answer one lookup, so asking it
+  # from `rt_intrinsic_class` cost O(table) per emitted intrinsic call, and
+  # `builtin_sig` rebuilt `types.builtins()` beside it -- for the signature the
+  # same entry already carries (audit RC-01).
+  intrs: Map[String, Intr],
   # the dictionaries lowering built for this class, deduplicated by key and
   # kept in the order they were asked for. This is Core's own table: naming a
   # dictionary from anything else is how the JVM backend spent a release not
@@ -721,8 +727,8 @@ fn rt_class(o: Rt) -> String =
 ## name. The name is not a lookup -- a runtime method is spelled exactly as the
 ## intrinsic is, which is why `gen_strings_class` and friends read like the
 ## table does.
-fn rt_intrinsic_class(name: String) -> Option[String] =
-  match intr_at(name) {
+fn rt_intrinsic_class(gx: GenCtx, name: String) -> Option[String] =
+  match map.get(gx.intrs, name) {
     Some(i) ->
       match i.rt {
         Some(o) -> Some(rt_class(o))
@@ -1603,6 +1609,7 @@ pub fn emit_module(
     traits: traits,
     impl_table: impl_table,
     prog_fns: prog_fns,
+    intrs: intrinsics(),
     # every dictionary the module asked for, tests included, in the order
     # lowering asked for them. Known up front so `is_slot_target` answers the
     # same for a hoisted body wherever in the class it is written.
@@ -2772,9 +2779,9 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "cast",
       "(Ljava/lang/Object;Ljava/lang/Class;)LResult;", false)
   } else {
-    match rt_intrinsic_class(name) {
+    match rt_intrinsic_class(gx, name) {
       Some(cls) -> {
-        let sig = builtin_sig(name)
+        let sig = builtin_sig(gx, name)
         g1.mv.visitMethodInsn(OP_INVOKESTATIC, cls, name,
           method_desc(gx.adts, sig.param_tys, sig.ret), false)
       }
@@ -2784,9 +2791,9 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
   (g1, true)
 }
 
-fn builtin_sig(name: String) -> Sig =
-  match map.get(builtins(), name) {
-    Some(s) -> s
+fn builtin_sig(gx: GenCtx, name: String) -> Sig =
+  match map.get(gx.intrs, name) {
+    Some(i) -> i.sig
     None -> panic("codegen: no signature for intrinsic " ++ name)
   }
 

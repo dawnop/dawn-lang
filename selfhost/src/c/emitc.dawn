@@ -28,7 +28,7 @@ use std/set
 use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyTuple, TyFn, TyBytes, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque,
-  intr_at, Adts, adt_of, prelude_adts, OPTION_ID, RESULT_ID, cast_target,
+  Intr, intrinsics, Adts, adt_of, prelude_adts, OPTION_ID, RESULT_ID, cast_target,
   is_ref_ty, Eff, EPure, hash_scalars, ord_scalars, intr_owned_args
 }
 use ir/reach.{TableUse}
@@ -94,6 +94,12 @@ pub type CSt = {
   # inserted and no `cex_ty` to read -- the JVM's `construct_value` reads
   # `gx.adts` for exactly the same reason.
   adts: Adts,
+  # the intrinsic table, read once per translation unit rather than per call
+  # site. `types.intr_at` rebuilds all 93 entries to answer one lookup, so
+  # asking it from `rt_symbol` cost O(table) per emitted intrinsic call
+  # (audit RC-01). Kept here for the reason `adts` is: this is the one state
+  # record every emitter function already carries.
+  intrs: Map[String, Intr],
   # The owner of the module being emitted. It qualifies the constant cache
   # key: `st.consts` is a per-module view keyed by simple name, so std/pvec's
   # MASK and std/hamt's MASK are two constants under one key -- and the cache
@@ -1407,8 +1413,8 @@ fn returns_borrow(n: String) -> Bool =
 ## calls it. So adding a native intrinsic is writing a C function with the
 ## conventional name -- the emitter needs no new case, and cannot be the thing
 ## that is out of date.
-fn rt_symbol(name: String) -> Option[String] =
-  match intr_at(name) {
+fn rt_symbol(intrs: Map[String, Intr], name: String) -> Option[String] =
+  match map.get(intrs, name) {
     Some(i) ->
       match i.rt {
         Some(_) -> Some("dawn_" ++ name)
@@ -1618,7 +1624,7 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     # the lowering did not know how to render
     panic("emitc: to_string survived lowering -- unsupported operand type")
   } else {
-    match rt_symbol(name) {
+    match rt_symbol(st1.intrs, name) {
       Some(sym) -> {
         let call = sym ++ "(" ++ join(cargs, ", ") ++ ")"
         (st1, if returns_borrow(name) { dup_expr(call, ty) } else { call })
@@ -1990,6 +1996,7 @@ fn emit_units(units: List[EmitMod], u: TableUse, adts: Adts) -> CSt = {
     blocks: map.empty(),
     dict_syms: set.empty(),
     adts: adts,
+    intrs: intrinsics(),
     cur_owner: "",
     cdefs: [],
     cmap: map.empty(),
@@ -2246,17 +2253,18 @@ test "the C runtime's constructor tags are the prelude's" {
 test "a primitive its module owns needs no arm in the emitter" {
   # The point of the table: these were seven hand-written cases, and the
   # families with none were what `emitc: intrinsic not implemented` meant.
-  assert rt_symbol("cursor_next") == Some("dawn_cursor_next")
-  assert rt_symbol("bytes_at") == Some("dawn_bytes_at")
-  assert rt_symbol("io_print") == Some("dawn_io_print")
-  assert rt_symbol("array_push") == Some("dawn_array_push")
+  let it = intrinsics()
+  assert rt_symbol(it, "cursor_next") == Some("dawn_cursor_next")
+  assert rt_symbol(it, "bytes_at") == Some("dawn_bytes_at")
+  assert rt_symbol(it, "io_print") == Some("dawn_io_print")
+  assert rt_symbol(it, "array_push") == Some("dawn_array_push")
   # a primitive added to the table since: the emitter got no new case for it,
   # which is the contract this test is about
-  assert rt_symbol("bytes_decode_utf8") == Some("dawn_bytes_decode_utf8")
+  assert rt_symbol(it, "bytes_decode_utf8") == Some("dawn_bytes_decode_utf8")
   # and the ones the emitter really does write itself stay out of it
-  assert rt_symbol("cursor_slice") == None
-  assert rt_symbol("expect") == None
-  assert rt_symbol("code_points") == None
+  assert rt_symbol(it, "cursor_slice") == None
+  assert rt_symbol(it, "expect") == None
+  assert rt_symbol(it, "code_points") == None
 }
 
 test "every scalar relation the emitter names is one the runtime defines" {

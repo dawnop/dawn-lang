@@ -17,7 +17,7 @@ use std/list
 use std/map
 use std/str
 use check/types.{
-  intr_at,
+  Intr,
   intrinsics,
   subst,
   reduce_via_bindings,
@@ -100,6 +100,15 @@ pub type LSt = {
   # specialised against `impls`, whose identities cannot collapse to a bare
   # (owner, name).
   prog_fns: Map[(String, String), Sig],
+  # the intrinsic table, read once per module rather than per call site.
+  # `types.intr_at` rebuilds all 93 entries to answer one lookup, and lowering
+  # asks about every intrinsic call in the module -- so asking it there was
+  # O(table) per site (audit RC-01, the half the checker's `Cx.bins` fixed).
+  #
+  # `lower_module_full` builds it once for the whole module, which is both
+  # backends' path. The comptime interpreter's two entries below build one per
+  # call because that is the granularity they lower at; they are cold.
+  intrs: Map[String, Intr],
   dicts: List[CDictDef],
   # The dictionaries in scope right here, by the type each one witnesses
   # `Eq` for (`ty_key_inst`, so `Option[Int]` and `Option[T]` are distinct
@@ -188,8 +197,8 @@ fn adapt_in(e: CExpr, actual: Ty, declared: Ty) -> CExpr =
 ## The signature of an intrinsic whose arguments and result cross erased -- a
 ## container primitive. Which those are is declared with the intrinsic
 ## (types.intrinsics) rather than guessed from the name here.
-fn erased_builtin_sig(name: String) -> Option[Sig] =
-  match intr_at(name) {
+fn erased_builtin_sig(st: LSt, name: String) -> Option[Sig] =
+  match map.get(st.intrs, name) {
     Some(i) -> if i.erased { Some(i.sig) } else { None }
     None -> None
   }
@@ -2738,7 +2747,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         Some(fname) -> return hamt_call(st, name, fname, args, wits, ty)
         None -> ()
       }
-      match erased_builtin_sig(name) {
+      match erased_builtin_sig(st, name) {
         Some(sg) -> {
           let (st1, vs) = lower_args_to(st, args, sg.param_tys)
           let (st2, ds) = witness_values(st1, wits)
@@ -3531,6 +3540,7 @@ pub fn lower_expr_only(
     impls: impls,
     adts: adts,
     prog_fns: prog_fns,
+    intrs: intrinsics(),
     dicts: [],
     dict_env: map.empty(),
     self_ctx: None,
@@ -3577,6 +3587,7 @@ pub fn lower_fn_only(
     impls: impls,
     adts: adts,
     prog_fns: prog_fns,
+    intrs: intrinsics(),
     dicts: [],
     dict_env: map.empty(),
     self_ctx: None,
@@ -3640,6 +3651,7 @@ pub fn lower_module_full(
     impls: impls,
     adts: adts,
     prog_fns: prog_fns,
+    intrs: intrinsics(),
     dicts: [],
     dict_env: map.empty(),
     self_ctx: None,
