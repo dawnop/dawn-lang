@@ -271,7 +271,11 @@ jobs:
     # measured 18.40s locally after toolchain warm-up, so the planning value is
     # max(575s, 622s) + 18.40s = 640.40s. The remote actual does not include
     # this new step.
-    # budget: 3x 641s = 1923s, rounded up
+    # The display layering step measured 12.72s then 12.95s locally after
+    # toolchain warm-up (two mutant compiler builds, JVM only), so the planning
+    # value is 640.40s + 12.95s = 653.35s. Neither of the two new steps is in
+    # the remote actual.
+    # budget: 3x 654s = 1962s, rounded up
     timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
@@ -443,6 +447,14 @@ jobs:
       # Core-only control keeps the once-before-loop half independent of stdout.
       - name: range bound order contract
         run: ./scripts/range-bound-order-contract/run.sh
+
+      # `Display` decides the top-level rendering in place of `Show`, and the
+      # question is asked at every peel layer of an opaque stack. Two compiling
+      # mutants, one per rule: dropping the question turns both assertions red,
+      # asking it once turns only the peel-layer one red. The nested rendering
+      # is a control neither may move.
+      - name: display layering contract
+        run: ./scripts/display-layering-contract/run.sh
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test

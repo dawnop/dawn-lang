@@ -332,13 +332,14 @@ problem，Bruce / Cardelli / Castagna 等，*Theory and Practice of Object Syste
 另有一条独立的死因：关联类型必须在 dyn 类型里写死，而写不写得出来取决于这个关联类型
 是不是用户可见的。**「有关联类型」本身不是死因，「有不可命名的关联类型」才是。**
 
-六个预置 trait（定义在 `selfhost/src/check/types.dawn:1456` 的 `prelude_traits()`，
+七个预置 trait（定义在 `selfhost/src/check/types.dawn` 的 `prelude_traits()`，
 规范化摘要在 spec.md §3.5）因此分三档，不是两档：
 
 | trait | 方法 | 结论 | 死因 |
 |---|---|---|---|
 | `Show` | `show(x: T) -> String` | **可** | 一元，无关联类型 |
 | `Hash` | `hash(x: T) -> Int` | **可** | 同上 |
+| `Display` | `display(x: T) -> String` | **可** | 同上；但没有消费者要它，见推论一 |
 | `Eq` | `eq(a: T, b: T) -> Bool` | **不可** | 二元方法 |
 | `Ord` | `cmp(a: T, b: T) -> Int` | **不可** | 二元方法 |
 | `Iter` | 4 个方法，关联类型 `Cur`/`Item` | **不可** | `Cur` 不可命名 |
@@ -355,9 +356,11 @@ problem，Bruce / Cardelli / Castagna 等，*Theory and Practice of Object Syste
 `T`），`C` 也只出现在第 0 个参数位，二元方法那条不适用。它要的是
 `dyn Index[Idx = Int, Item = T]` 这种带关联类型绑定的语法，也就是一笔额外的语法预算。
 
-**推论一：不带关联类型绑定语法的 `dyn`，在 Dawn 上只覆盖 `Show` 和 `Hash` 两个预置
-trait。** 而 `List[Shown]` 就是 `Show` 那一个用例。也就是说，本节讨论的「最小可用子集」
-几乎就是 Dawn 上唯一不加语法就成立的那一格，这条线不是随手划的。
+**推论一：不带关联类型绑定语法的 `dyn`，在 Dawn 上只覆盖 `Show`、`Hash` 与 `Display`
+三个预置 trait。** 而 `List[Shown]` 就是 `Show` 那一个用例；`Hash` 与 `Display` 都没有
+提出过 `dyn` 需求，`Display` 更是只被 `to_string`/`${...}` 消费、方法名不进函数命名空间，
+异构容器里没有它的位置。也就是说，本节讨论的「最小可用子集」几乎就是 Dawn 上唯一不加
+语法就成立、又真有人要的那一格，这条线不是随手划的。
 
 **推论二：`Map[Shown, V]` 永远做不出来，`Set` 同理。** 这一条有 spec 层的直接理由，不必
 停在「二元方法」这个抽象说法上：spec.md §3.5 规定 **`impl Eq` 与 `impl Hash` 必须成对

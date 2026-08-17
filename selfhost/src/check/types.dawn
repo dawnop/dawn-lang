@@ -1335,6 +1335,26 @@ pub const ITER_ID: Int = 4
 ## special-cased.
 pub const INDEX_ID: Int = 5
 
+## User-facing rendering: what `to_string` and `${...}` produce when the type
+## has an opinion about it. `Show` is the *nested* rendering, quoting a String
+## because inside a structure the quotes say "a value ends here"; `to_string`
+## is the top-level one and does not (spec 4.3). That split predates this
+## trait and is what it is named after: the layer already existed, spelled as
+## two arms in `to_str`, with no way for a type to join it.
+##
+## Only `to_string` and `${...}` consume `display`, so `injects: false` keeps
+## the name out of every module's function namespace, exactly as `Index` does
+## for `index`. A type with no impl renders as it always did, and an opaque
+## type is asked at every peel layer rather than once at the top -- one layer
+## at a time is what SEM-03 cost to learn.
+##
+## Deliberately not derivable: `derive Show` says "render my structure", and a
+## `Display` is a decision about presentation, which is one per type and hand
+## written. `Show[T]` stays the bound `to_string` requires, so this is a
+## refinement of an answer that already exists, never a new way to be
+## renderable.
+pub const DISPLAY_ID: Int = 6
+
 pub fn opt_ty(t: Ty) -> Ty = TyAdt(OPTION_ID, [t])
 
 pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
@@ -1559,8 +1579,28 @@ pub fn prelude_traits() -> Traits = {
     assoc: ["Idx", "Item"],
     injects: false
   }
+  # Display: one method, no associated types, and `injects: false` for the same
+  # reason Index has it -- `to_string` and `${...}` are the only consumers, so
+  # `display` is written in an impl body and read in `dawn doc`, nowhere else.
+  let dv = TyVar("T", -22)
+  let display = TraitI {
+    id: DISPLAY_ID,
+    name: "Display",
+    tvar: dv,
+    is_pub: true,
+    owner: None,
+    src_path: None,
+    methods: [
+      ("display", MethodSig {
+        sig: prelude_method(DISPLAY_ID, dv, "display", [dv], ["x"], TyString),
+        has_default: false
+      })
+    ],
+    assoc: [],
+    injects: false
+  }
   map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show), (ITER_ID, iter),
-    (INDEX_ID, index)])
+    (INDEX_ID, index), (DISPLAY_ID, display)])
 }
 
 ## The prelude trait ids, in id order. Everything that needs to know "which
@@ -1568,7 +1608,7 @@ pub fn prelude_traits() -> Traits = {
 ## redefinition guard, LSP completion -- so the set lives in one place instead
 ## of being transcribed per call site (docs/prelude-namespace-design.md §4.3).
 pub fn prelude_trait_ids() -> List[Int] =
-  [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID]
+  [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, DISPLAY_ID]
 
 ## The prelude trait names, derived from the table rather than transcribed.
 pub fn prelude_trait_names() -> List[String] = {
@@ -2641,8 +2681,13 @@ test "prelude shapes" {
   assert trait_of(traits, SHOW_ID).name == "Show"
   assert trait_of(traits, ITER_ID).name == "Iter"
   assert trait_of(traits, INDEX_ID).name == "Index"
-  # `[]` is the only operator whose trait does not inject its method name
+  assert trait_of(traits, DISPLAY_ID).name == "Display"
+  # the two traits whose method name the language consumes on the user's
+  # behalf, so neither injects it: `[]` calls `index`, `${...}` calls `display`
   assert not trait_of(traits, INDEX_ID).injects
+  assert not trait_of(traits, DISPLAY_ID).injects
+  # and Display carries no associated types, unlike the other non-injecting one
+  assert len(trait_of(traits, DISPLAY_ID).assoc) == 0
   # each trait over its own list -- one table per question, which is the point
   assert len(prelude_impls()) == len(ord_scalars()) + len(eq_scalars()) +
     len(hash_scalars()) + len(show_scalars()) + 5

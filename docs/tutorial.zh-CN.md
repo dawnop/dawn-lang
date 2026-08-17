@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 76d2d8626772e41a -->
+<!-- doc-check: translation-of docs/tutorial.md @ 65398d58e5cfa810 -->
 
 # Dawn 教程
 
@@ -555,8 +555,9 @@ hi
 
 `code_points`/`from_code_points` 在字符串与 `List[Char]` 间往返（含增补平面的
 emoji），`str.len` 数码点，`str.slice` 按码点下标切片，`str.at` 取一个 `Char`，
-`str.from_char` 把一个 `Char` 变成字符串。`"${c}"` 渲染成码点数字，因为 opaque
-type 的 `Show` 就是目标类型的那一份。
+`str.from_char` 把一个 `Char` 变成字符串。`"${c}"` 就是同一个单字符字符串：`std/char`
+写了 `impl Display[Char]`，而 `Display` 是顶层渲染那一层。嵌套那一层的 `Show` 仍是目标
+类型的那一份，所以列表里的 `Char` 仍打印成码点数字。
 
 按码点**下标**的函数每次都要从串首数起（单次 O(n)，循环里就是 O(n²)）。扫描字符串
 用 `std/cursor`：**游标**是不透明的位置，每步恒定开销；对它做算术是编译错误，

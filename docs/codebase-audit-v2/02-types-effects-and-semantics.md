@@ -366,13 +366,17 @@
 - **影响：** 最需要诊断的 cleanup 双失败路径没有稳定 contract；当前两后端碰巧都是 release-wins，不等于规范已经定义。
 - **建议：** 明确选择并测试：要么文档承认 release-wins；更好的模型是保留 use failure，把 release failure 放入 `cause`/suppressed chain。
 
-## SEM-16 — P2 — `Char` 的默认显示仍是整数码点
+## SEM-16 — P2 — `Char` 的默认显示仍是整数码点（已修）
 
 <!-- audit-anchor: absent std/char.dawn | impl Show for Char -->
 
-> **后续处置（2026-08-09）：open/HOLD。** 当前规范明确选择码点显示，std 与派生显示一致；
-> R-AUDIT 没有发现新的实现分叉。既有“不做”条件继续生效：除非维护者重开 user-facing
-> `Show`/`Display` 边界，否则不以 bug 名义迁移输出，也不进入自治 TODO。
+> **已修（2026-08-18，用户裁「做」）。** 加了第七个预置 trait `Display`：一个方法
+> `display(x: T) -> String`、无关联类型、`injects: false`（只有 `to_string` 与 `${...}`
+> 消费它，与 `Index` 同待遇），不可 derive，`Show[T]` 仍是 `to_string` 要的 bound。
+> `std/char` 写了 `impl Display[Char]`，于是 `to_string(c)`/`"${c}"` 出字符；**没写
+> `impl Show[Char]`**，所以嵌套渲染仍是 `Int` 的、`Char` 仍「就是它的目标」，
+> `scripts/opaque-twin` 的判据一字未改（这正是下面那条对 #196「不做」理由的更正所预言的）。
+> 落地清单见本条末尾的「落地」。
 
 - **性质：D。** 规范明确 `${c}` 沿用 Int rendering：`docs/spec.md:90`；`std/char.dawn:34` 也把它作为 opaque-target 继承规则。
 - **问题：** 名为 `Char` 的值在 interpolation、`to_string`、List/record 派生显示中出现 `97` 而非 `a`；用户必须记住 `str.from_char(c)` 才得到字符文本。
@@ -444,6 +448,38 @@
   trait + `to_str` 多问一次」，把收益量为「4 个调用点，0 个缺陷，全部已用显式函数写对」。
   在这两个数字之下要不要做，是排期判断而非技术判断。若判不做，建议把重开条件从
   「维护者重开边界」改成可检验的形式，例如「`Display` 出现第二个 `Char` 之外的消费者」。
+
+- **落地（2026-08-18）。用户裁「做」，形状按上条勘察，未再改设计。**
+
+  **语言侧。** `DISPLAY_ID = 6`，`prelude_traits()` 多一条 `Display`、`prelude_trait_ids()`
+  多一个 id（`selfhost/src/check/types.dawn`）。`to_str`（`selfhost/src/ir/lower.dawn`）在
+  **函数最顶上**先问 `has_own_display`，在 `TyString` 恒等之前。问在顶上不是随手放的：
+  `to_str` 会递归进 opaque 的目标，问在顶上等于**每剥一层都重问一次**，这正是 SEM-03
+  换来的形状；问进 opaque 臂里会让非 opaque 类型的 `Display` 失效。`dawn doc --stdlib`
+  的预置 trait 散文多一条（`selfhost/src/doc.dawn`）。
+
+  **std 侧。** `std/char.dawn` 一条 `impl Display[Char] { fn display(c) = str.from_char(c) }`。
+  `str.from_char` 原样保留：它是**按名字问**同一个字符串，不依赖 impl 在场，全仓 24 处
+  Char→String 的构造用法一处也不该改。
+
+  **判词与负控。**
+  - `std/char` 的单测钉「顶层是字符、元组里是码点」；`examples/text/chars.dawn` 同款，
+    并把那两行「本来就是为了讲这个意外」的示范改写成讲两层。
+  - `scripts/spike-native/display_layers.dawn` + `.expect`：双后端 + 手写期望，覆盖
+    「顶掉继承来的 `Show`」「顶掉自己写的 `Show`」「顶掉 `String` 恒等」「两层三层都问到」
+    以及反面的「嵌套不动」「`[T: Show]` 下仍走见证」。
+  - `scripts/display-layering-contract/`：两个 compiling mutant，一条规则一个。
+    `drop-display-question`（整段删掉问询）把 `display_wins_over_show` 与
+    `display_is_asked_at_every_peel_layer` 都弄红；`ask-display-once`（只在写下来的那个
+    类型上问一次，即被否掉的「问进 opaque 臂」形状）只弄红后者，且**不碰 `Show` 的逐层
+    剥法**，所以 SEM-03 不受它影响。control `show_stays_the_nested_rendering` 两个 mutant
+    都不许动。
+
+  **一条记下来、不修的后果。** 类型变量仍走它的 `Show` 见证，所以
+  `fn f[T: Show](x: T) = "${x}"` 里面拿到的是 `Show` 不是 `Display`。**这不是本批带来的**：
+  同样的道理让 `to_string("hi")` 出 `hi` 而 `f("hi")` 出 `"hi"`，spec §4.3 早已把规则写成
+  「只在**静态类型就是 `String`** 时去掉引号」。让字典携带 `Display` 不做，规范两侧
+  §4.3 各写了一段说明这条按静态类型定。
 
 ## SEM-17 — P3（已修）— Java `char` bridge 诊断明确两种字符模型
 

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 826051042ab5fda8 -->
+<!-- doc-check: translation-of docs/spec.md @ 872af4584748fb40 -->
 
 # Dawn Language Specification
 
@@ -111,8 +111,11 @@ a digit forbidden by its radix (such as `0b2`) is an invalid literal rather than
 **A character is its own type, `Char`**: one Unicode scalar value (`0..0x10FFFF`, excluding the
 surrogate range `D800..DFFF`). It is an **opaque type** (§2.7) over `Int` whose owner is
 `std/char` — the representation is the code point, so it is zero-cost, and `==`, `<`, hashing and
-literal patterns in `match` all reuse the `Int` ones; `"${c}"` also renders the way `Int` does (for
-a one-character string use `str.from_char(c)`). But it is **not** an `Int`: `'a' + 1` does not
+literal patterns in `match` all reuse the `Int` ones. The rendering comes in two layers (§4.3):
+`std/char` writes `impl Display[Char]`, so `to_string(c)` and `"${c}"` give the character, while
+`Show[Char]` is still the `Int`'s, so a `Char` nested inside a structure (`[c]`, a record field,
+a tuple) still renders as the code-point number. `str.from_char(c)` asks for the same
+one-character string by name, without depending on an impl. But it is **not** an `Int`: `'a' + 1` does not
 hold, and converting between the two goes through `std/char` — `char.code(c) -> Int` takes the code
 point, `char.of(n) -> Option[Char]` builds a character from a code point (`None` if it is not a
 scalar value). Inside single quotes is a single code point: the escapes are the same as in strings
@@ -480,8 +483,12 @@ arguments along. "The representation is not public" does not imply "the type par
 > written and once with `alias` substituted, and the outputs must agree (a compile error counts as
 > output). Doing this by hand once on 2026-07-27 caught 12 places.
 
-An opaque type can be given its own impls (`impl Show[UserId]`), which take precedence over the
-target type's; the orphan rule counts an opaque type as a local type of the module that declares it.
+An opaque type can be given its own impls (`impl Show[UserId]`, `impl Display[UserId]`), which take
+precedence over the target type's; the orphan rule counts an opaque type as a local type of the
+module that declares it. "The rendering is the target's too", above, is stated on the premise that
+the type wrote none of its own: `Char` is the one that did write an `impl Display[Char]`, so its
+top-level rendering is its own while its nested one is still `Int`'s (§4.3). Both layers are
+pinned, in both directions, by `scripts/opaque-twin/char.dawn`.
 
 > Why it is needed: before this, every time a representation had to be hidden a mechanism was
 > hand-rolled on the spot — `Cursor` was an opaque scalar minted by the compiler, and the HAMT
@@ -672,13 +679,17 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   (callable directly, by UFCS, or in a pipeline).
 - **Injection is a per-trait property**: whether a trait's method names occupy the function
   namespace is decided by that trait. Today a `trait` declaration always injects, and the five
-  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter` inject too; a trait consumed exclusively by an
-  operator (`Index`, §4.8) does not inject, and its method names appear only in impl bodies, in
-  documentation and in error messages.
-- **Six built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
-  `==`/`!=`), `Hash` (`hash`), `Show` (`show`, behind `to_string` and `${...}`), `Iter` (behind
-  `for..in`, §4.7), `Index` (behind `[]`, §4.8). The impls for the scalars ship with the language;
-  `derive Ord` / `derive Show` cast an ordinary impl, and on a generic type a conditional impl.
+  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter` inject too; **the two whose method name the
+  language consumes on the user's behalf do not**, and their method names appear only in impl
+  bodies, in documentation and in error messages: `Index` (consumed by `[]`, §4.8) and `Display`
+  (consumed by `to_string` and `${...}`, §4.3).
+- **Seven built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
+  `==`/`!=`), `Hash` (`hash`), `Show` (`show`, the **nested** rendering, and the bound
+  `to_string` asks for), `Iter` (behind `for..in`, §4.7), `Index` (behind `[]`, §4.8),
+  `Display` (`display`, the **top-level** rendering, behind `to_string` and `${...}`, §4.3).
+  The impls for the scalars ship with the language;
+  `derive Ord` / `derive Show` cast an ordinary impl, and on a generic type a conditional impl;
+  `Display` cannot be derived (the reason is under `Display` below).
   A tuple has no head, so no impl can be written for it; the first four are synthesised
   structurally for tuples by the compiler.
 - **`Iter`** declares two associated types and four methods (associated types are covered further
@@ -700,6 +711,18 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   in documentation and in error messages. A type has exactly one index type — `Index` is a
   single-parameter trait, so a second kind of subscript on the same container (slicing, say)
   cannot be written.
+- **`Display`** declares one method and no associated types:
+  `trait Display[T] { fn display(x: T) -> String }`. It is the **top-level rendering** layer:
+  `to_string(x)` and `"${x}"` use the impl when there is one, and otherwise render by the
+  existing rules of §4.3. The method name `display` does **not** enter the function namespace
+  (see the injection rule above). Three boundaries:
+  - **`Show[T]` remains the bound `to_string` asks for.** `Display` only refines an answer that
+    already exists; nothing becomes renderable that was not.
+  - **It cannot be derived.** `derive Show` says "render my structure", while a `Display` is a
+    decision about presentation: one per type, hand written.
+  - **An opaque type is asked at every peel layer** (§4.3): with no `Display` on
+    `opaque type A = B`, `B`'s is used; if `A` writes one, `A`'s wins.
+  The one impl that ships with the language is `impl Display[Char]` (in `std/char`, §1.5).
 - **Coherence**: at most one impl per "trait × type" across the whole program; the **orphan
   rule**: an impl can only be written in the module that declares the trait or the subject type.
   Impls take effect globally, no `use` needed.
@@ -1130,8 +1153,24 @@ implementations are cross-checked against this, "happens to agree" is not allowe
     The trait method `show` is the **nested** one, so rendering a string through a
     `[T: Show]` bound does carry quotes; `to_string`/`${}` drop them only when the **static
     type is `String`** itself.
-    One trait doing two jobs — this line is where the seam sits (Rust splits it into Display
-    and Debug).
+    **The rule is directed by the static type and not by the value**: `to_string("hi")` is `hi`,
+    while the same call written inside `fn f[T: Show](x: T) = "${x}"` gives `"hi"`, because the
+    static type there is `T` and the rendering goes through the `Show` witness. This has nothing
+    to do with `Display` below; it has held since the day the two layers were drawn apart.
+  - **A type can take over the top-level layer itself, by writing `impl Display` (§3.5).**
+    `to_string(x)`/`${x}` first ask whether the **static type** of `x` has a `Display` impl: if
+    it does, that is the rendering; only otherwise do the rest of this section's rules apply
+    (including the `String` identity above). Two boundaries:
+    - **An opaque type is peeled one layer at a time, and the question is asked again at each
+      layer.** With no `Display` on `opaque type A = B`, `B`'s is used, and if `B` has none the
+      peel continues. Peeling the whole stack before asking would make a rendering written on an
+      inner layer stop working at the top level, which is the defect audit SEM-03 recorded.
+    - **The `Show` layer does not move.** A type that writes a `Display` still renders through
+      `Show` when it is nested inside a structure, and a type variable under a `[T: Show]` bound
+      still renders through its witness (see above).
+    `Show` is the nested one and `Display` the top-level one, matching Rust's `Debug` and
+    `Display`; there used to be a single trait doing both jobs, and these two rules are where
+    the seam was cut.
 
 ### 4.4 Pipelines
 

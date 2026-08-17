@@ -1,4 +1,4 @@
-# Characters and code points: making a slug, and the two traps around Char.
+# Characters and code points: making a slug, and the two renderings of a Char.
 #
 # A `Char` is one Unicode scalar value and `'a'` is a literal of that type.
 # A string's characters come out of `code_points`; none of this is bytes and
@@ -54,9 +54,10 @@ pub fn main() -> Unit !io = {
 
   println(initials("ada lovelace"))
 
-  # `"${c}"` renders a Char the way its target type renders: as a number.
-  # `str.from_char` is the one that gives you the character.
-  println("'a' interpolates as ${'a'}, and prints as ${str.from_char('a')}")
+  # `"${c}"` is the character: std/char writes an `impl Display[Char]`, and
+  # Display is the top-level rendering. `Show` is the nested one and is still
+  # the Int's, so the same character inside a list is its code point.
+  println("'a' interpolates as ${'a'}, and inside a list as ${to_string(['a'])}")
 
   # One balloon: one character, four UTF-8 bytes, two UTF-16 units, and none
   # of those last two numbers is one this program can observe.
@@ -89,6 +90,16 @@ test "Char is opaque over Int: comparable, not arithmetic" {
   assert char.of(0xD800) == None
   # `'a' + 1` does not compile; going through the code point is the way.
   assert char.of(char.code('a') + 1) == Some('b')
+}
+
+test "a Char renders as itself on top and as a code point inside" {
+  # `Display` decides the top-level rendering, `Show` the nested one, and
+  # std/char writes only the first of the two (spec §3.5, §4.3)
+  assert to_string('a') == "a"
+  assert "${'🎈'}" == "🎈"
+  assert to_string(['a', '🎈']) == "[97, 127880]"
+  # `str.from_char` asks for the same string by name, without the impl
+  assert str.from_char('🎈') == to_string('🎈')
 }
 
 test "initials take the first character, not the first byte" {

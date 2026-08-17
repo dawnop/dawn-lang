@@ -97,8 +97,11 @@ true false not
 
 **字符是自己的类型 `Char`**：一个 Unicode 标量值（`0..0x10FFFF`，不含 `D800..DFFF`
 的代理半区）。它是 `Int` 上的 **opaque type**（§2.7），owner 是 `std/char`——表示就是
-码点，故零开销，且 `==`、`<`、哈希、`match` 里的字面量模式全部沿用 `Int` 的那一份，
-`"${c}"` 也照 `Int` 渲染（要一个字符的字符串用 `str.from_char(c)`）。但它**不是**
+码点，故零开销，且 `==`、`<`、哈希、`match` 里的字面量模式全部沿用 `Int` 的那一份。
+渲染分两层（§4.3）：`std/char` 写了 `impl Display[Char]`，所以 `to_string(c)` 与 `"${c}"`
+出的是那个字符；`Show[Char]` 仍是 `Int` 的那一份，所以嵌在结构里的 `Char`（`[c]`、
+记录字段、元组）仍渲染成码点数字。要一个字符的字符串也可以直接问 `str.from_char(c)`，
+那是同一个字符串，只是不依赖 impl。但它**不是**
 `Int`：`'a' + 1` 不成立，两者互转经 `std/char`——`char.code(c) -> Int` 拿码点、
 `char.of(n) -> Option[Char]` 从码点造字符（不是标量值就 `None`）。
 单引号内是单个码点：转义与字符串相同（`\n \t \r \\ \u{...}`）另加 `\'`；
@@ -397,8 +400,10 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 > 机器化在 `scripts/opaque-twin/`：每个语料跑两遍，一遍原样一遍换成 `alias`，
 > 输出必须一致（编译错误也算输出）。2026-07-27 用手工做这件事一次抓出 12 处。
 
-可以给不透明类型写自己的 impl（`impl Show[UserId]`），它优先于目标类型的；孤儿规则把
-不透明类型算作声明模块的本地类型。
+可以给不透明类型写自己的 impl（`impl Show[UserId]`、`impl Display[UserId]`），它优先于
+目标类型的；孤儿规则把不透明类型算作声明模块的本地类型。上一段「渲染也是目标的」正是
+以「自己没写」为前提：`Char` 就是写了 `impl Display[Char]` 的那个，于是顶层渲染是它自己的、
+嵌套渲染仍是 `Int` 的（§4.3）。两层都由 `scripts/opaque-twin/char.dawn` 双向钉住。
 
 > 为什么需要它：在此之前，每要隐藏一次表示就得现搓一套机制——`Cursor` 是编译器铸造的
 > 不透明标量，集合纯 Dawn 化的 HAMT 节点会是下一个。这是第三次之前把机制立出来。
@@ -555,13 +560,15 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 - trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
 - **注入是逐 trait 的属性**：一个 trait 的方法名是否占据函数命名空间由该 trait 决定。
   今天 `trait` 声明恒注入，`Ord`/`Eq`/`Hash`/`Show`/`Iter` 五个预置 trait 也注入；
-  由运算符独占消费的 trait（`Index`，§4.8）不注入，其方法名只在 impl 体、文档与
-  错误消息里出现。
-- **预置 trait 六个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
-  背后是 `==`/`!=`）、`Hash`（`hash`）、`Show`（`show`，背后是 `to_string` 与
-  `${...}`）、`Iter`（背后是 `for..in`，§4.7）、`Index`（背后是 `[]`，§4.8）。
+  **方法名由语言代用户消费掉的两个不注入**，它们的方法名只在 impl 体、文档与错误消息里
+  出现：`Index`（`[]` 消费它，§4.8）与 `Display`（`to_string` 与 `${...}` 消费它，§4.3）。
+- **预置 trait 七个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
+  背后是 `==`/`!=`）、`Hash`（`hash`）、`Show`（`show`，**嵌套**渲染，也是 `to_string`
+  要的 bound）、`Iter`（背后是 `for..in`，§4.7）、`Index`（背后是 `[]`，§4.8）、
+  `Display`（`display`，**顶层**渲染，背后是 `to_string` 与 `${...}`，§4.3）。
   标量的 impl 随语言提供；
-  `derive Ord` / `derive Show` 铸的是普通 impl，泛型类型上铸的是条件 impl。
+  `derive Ord` / `derive Show` 铸的是普通 impl，泛型类型上铸的是条件 impl；
+  `Display` 不可 derive（理由见下面 `Display` 那条）。
   元组没有 head，写不出 impl，前四者对元组由编译器按结构合成。
 - **`Iter`** 声明两个关联类型与四个方法（关联类型见本节下方）：
   `trait Iter[C] { type Cur  type Item  fn iter_start(c: C) -> C.Cur
@@ -577,6 +584,17 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   `Index` 即可用 `[]`（示例见 §4.8）。方法名 `index` **不**进入函数命名空间
   （见上条注入规则），只在 impl 体、文档与错误消息里出现。一个类型只有一个索引
   类型——`Index` 是单参数 trait，写不出同一容器的第二种下标（如切片）。
+- **`Display`** 声明一个方法、无关联类型：
+  `trait Display[T] { fn display(x: T) -> String }`。它是**顶层渲染**那一层：
+  `to_string(x)` 与 `"${x}"` 有 impl 就用它，没有就照 §4.3 的既有规则渲染。方法名
+  `display` **不**进入函数命名空间（见上条注入规则）。三条边界：
+  - **`Show[T]` 仍是 `to_string` 要的 bound。** `Display` 只改一个已经存在的答案，
+    不让任何原本渲染不出来的类型渲染得出来。
+  - **不可 derive。** `derive Show` 说的是「按我的结构渲染」，而一份 `Display` 是一个
+    呈现决定：一个类型一份，手写。
+  - **opaque type 逐层问**（§4.3）：`opaque type A = B` 上没写 `Display` 时，用 `B` 的
+    那一份；`A` 写了就是 `A` 的。
+  语言自带的唯一一份是 `impl Display[Char]`（在 `std/char`，§1.5）。
 - **一致性**：全程序每个「trait × 类型」至多一个 impl；**孤儿规则**：impl 只能
   写在 trait 或主体类型的声明模块。impl 全局生效，不需要 `use`。
 - **主体形状**：一个类型构造器，作用在**互不相同的类型变量**上，而那些变量恰好是
@@ -916,7 +934,19 @@ let area = {
     `["a"]` 是 `["a"]`——引号是「这里是一个值，不是周围的标点」的记号。
     trait 方法 `show` 是**嵌套**那一份，所以经 `[T: Show]` 约束渲染一个字符串
     会带引号；`to_string`/`${}` 只在**静态类型就是 `String`** 时去掉它。
-    一个 trait 兼二职，这条线就是它的位置（Rust 拆成 Display 与 Debug）。
+    **这条规则由静态类型定，不由值定**：`to_string("hi")` 是 `hi`，而同一个调用写在
+    `fn f[T: Show](x: T) = "${x}"` 里面出的是 `"hi"`，因为那里静态类型是 `T`，渲染走
+    `Show` 见证。这一点与下条的 `Display` 无关，两层分开的那天起就是这样。
+  - **顶层这一层类型可以自己接管，写法是 `impl Display`（§3.5）。**
+    `to_string(x)`/`${x}` 先问 `x` 的**静态类型**有没有 `Display` impl：有就用它，
+    没有才落到本节其余各条（含上一条的 `String` 恒等）。两条边界：
+    - **opaque type 是逐层剥的，每剥一层重问一次。** `opaque type A = B` 上没写
+      `Display` 时拿到 `B` 的那一份，`B` 也没写就再往下。一次剥到底再问会让写在里层的
+      渲染在顶层失效，那是审计 SEM-03 记下的缺陷。
+    - **`Show` 那一层不动。** 写了 `Display` 的类型嵌在结构里仍走 `Show`，
+      `[T: Show]` 约束下的类型变量仍走见证（同上条）。
+    `Show` 是嵌套那一份、`Display` 是顶层那一份，两个名字对上 Rust 的 `Debug` 与
+    `Display`；这里曾经只有一个 trait 兼二职，这两条就是它拆开的位置。
 
 ### 4.4 管道
 

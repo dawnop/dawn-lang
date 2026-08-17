@@ -28,6 +28,7 @@ use check/types.{
   Sym, Sig, EPure, Traits, TraitI, ImplI, MethodSig,
   Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
+  DISPLAY_ID,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, builtins, Impls, impl_at, has_impl_at,
   is_ground, expandable, type_args_of, sub_goals
 }
@@ -268,7 +269,18 @@ fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
   # how a redacting `Show` came to print the plaintext for `to_string(secret)`
   # while `Box { s: secret }` redacted it (audit SEM-03), so the peel is one
   # layer at a time with the impl question asked in between.
-  if t == TyString {
+  #
+  # A `Display` impl on `t` is the type's own answer to this question, so it is
+  # asked before any of the rules below -- including the String identity, which
+  # is the language's answer for a type that has none. The question is here
+  # rather than in the opaque arm on purpose: `to_str` recurses into an opaque
+  # target, so asking at the top asks again at every peel layer, which is the
+  # shape SEM-03 says this has to have. `Show[T]` remains the bound, so nothing
+  # becomes renderable that was not; a type variable still renders through its
+  # `Show` witness, the same static-type rule the String line above states.
+  if has_own_display(st, t) {
+    display_at(st, e, t)
+  } else if t == TyString {
     (st, e)
   } else if t == TyUnit {
     (st, CStr("()"))
@@ -296,6 +308,24 @@ fn has_own_show(st: LSt, t: Ty) -> Bool =
   } else {
     false
   }
+
+## The same question for `Display`, which only `to_str` asks: a user-facing
+## rendering is never inherited from a target, so there is no fall-through here.
+fn has_own_display(st: LSt, t: Ty) -> Bool =
+  if has_impl_at(st.impls, DISPLAY_ID, t) {
+    provides(impl_for(st, DISPLAY_ID, t), "display")
+  } else {
+    false
+  }
+
+## Call `t`'s own `Display`. Only reached with `has_own_display` true, so the
+## impl and its method are known to be there.
+fn display_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
+  let imp = impl_for(st, DISPLAY_ID, t)
+  let (st1, ds) = goal_dicts(st, sub_goals(st.impls, DISPLAY_ID, t))
+  (st1, CCall(
+    CImpl(owner_or(imp.owner, st1.owner), DISPLAY_ID, t, "display"), [x] ++ ds, TyString))
+}
 
 # ---- constructor fields ----
 

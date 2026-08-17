@@ -1,0 +1,93 @@
+# `Display` is the *top-level* rendering: what `to_string(x)` and `${x}` make of
+# a value. `Show` is the nested one, which quotes a String because inside a
+# structure the quotes say "a value ends here". That split is older than this
+# trait (spec §4.3); what `Display` adds is a way for a type to join it.
+#
+# Two rules are pinned here, and this is the only place a program states them:
+#   - a `Display` impl wins over whatever `Show` the value would otherwise
+#     render through, including a `Show` inherited from an opaque target and
+#     including the String identity;
+#   - it is asked at *every* peel layer of an opaque stack, not once on the type
+#     as written. Asking once is the SEM-03 shape, where a redacting `Show` was
+#     honoured one field deep and ignored at the top level.
+#
+# `Char` is the std type that carries one: `${c}` is the character, while
+# `Show[Char]` is still the `Int`'s, so a `Char` inside a list is still a code
+# point. That asymmetry is the whole content of the layer, so both halves are
+# below -- an expectation covering only the Display half would call the nested
+# rendering anything.
+#
+# The mutants that own these lines are in `scripts/display-layering-contract/`.
+# Both live in shared Core, so the two backends would agree on a broken answer;
+# `display_layers.expect` is the judgement that is not copied from either.
+
+use std/list
+use std/str
+
+opaque type Inner = String
+opaque type Outer = Inner
+opaque type Deep = Outer
+opaque type Tag = String
+
+# A type may carry both, and they answer different questions: `Show` is what a
+# structure containing one prints, `Display` is what a log line prints.
+impl Show[Tag] {
+  fn show(t: Tag) -> String = "***"
+}
+
+impl Display[Tag] {
+  fn display(t: Tag) -> String = "[redacted]"
+}
+
+impl Display[Inner] {
+  fn display(x: Inner) -> String = "<inner>"
+}
+
+type Row = { c: Char, t: Tag } derive Show
+
+fn inner_of(s: String) -> Inner = s
+
+fn outer_of(i: Inner) -> Outer = i
+
+fn deep_of(o: Outer) -> Deep = o
+
+fn tag_of(s: String) -> Tag = s
+
+## Rendering behind a `[T: Show]` bound, which is a different question from
+## rendering a value whose static type is known.
+fn render[T: Show](x: T) -> String = "${x}"
+
+pub fn main() -> Unit !io = {
+  # a Char renders as the character it names, spelled either way
+  println(to_string('a'))
+  println("${'中'}")
+  println(to_string('😀'))
+  # and that is the same string the explicit conversion answers with
+  println(str.from_char('中'))
+
+  # Display wins over an own Show ...
+  println(to_string(tag_of("x")))
+  # ... and over the String identity an opaque type over String inherits
+  println(to_string(inner_of("x")))
+  # every peel layer is asked: neither of these two carries a Display, and the
+  # one two and three layers down is still found
+  println(to_string(outer_of(inner_of("x"))))
+  println(to_string(deep_of(outer_of(inner_of("x")))))
+
+  # what Display does not touch: the nested rendering. A Char is still its code
+  # point in a list, a record and a tuple; Tag is still `***`; and an opaque
+  # type over String with no Show of its own is still the String's, quoted.
+  println(to_string(['a', 'b']))
+  println(to_string(Row { c: 'a', t: tag_of("x") }))
+  println(to_string(('a', tag_of("x"))))
+  println(to_string([inner_of("x")]))
+  println(to_string(list.map(['a', 'b'], c => str.from_char(c))))
+
+  # a type variable renders through its `Show` witness, because the rule is
+  # static-type-directed (spec §4.3). This is not new and not a consequence of
+  # Display: `to_string("hi")` is `hi` while `render("hi")` is `"hi"`, and has
+  # been since the two renderings were drawn apart.
+  println(render('a'))
+  println(render(inner_of("x")))
+  println(render("hi"))
+}

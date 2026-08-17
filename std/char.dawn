@@ -8,10 +8,13 @@
 # because character literals need a type before any module is in scope. This
 # module is its owner, which is what lets the two conversions below stay two
 # lines instead of two intrinsics. Everything else about it is ordinary
-# `opaque type` (spec §2.7): the representation is
-# `Int`, so it costs nothing, and `==`, `<`, hashing and `${...}` are the
-# Int's -- including the last one, so `"${c}"` renders a code point and
-# `str.from_char(c)` stays the way to get a one-character string.
+# `opaque type` (spec §2.7): the representation is `Int`, so it costs nothing,
+# and `==`, `<`, hashing and the nested `Show` rendering are all the Int's.
+#
+# The one place this module does have an opinion is the *top-level* rendering,
+# `impl Display[Char]` at the bottom: `"${c}"` is the character, not its code
+# point. `Show[Char]` is still the Int's, so a `Char` inside a structure still
+# renders as a number and `Char` still is its target (spec §4.3, §2.7).
 #
 # The predicates are `char_is_*` intrinsics underneath, table-driven from the
 # compiler's own Unicode class table (selfhost/src/embed/unicode_class.dawn), so the
@@ -54,6 +57,21 @@ pub fn is_lower(c: Char) -> Bool = char_is_lower(c)
 ## Whether `c` is whitespace.
 pub fn is_space(c: Char) -> Bool = char_is_space(c)
 
+## What `to_string` and `${...}` make of a character: the one-character string.
+##
+## `Display` is the top-level rendering and nothing else consumes it, so this
+## impl says "a character reads as itself" without saying anything about the
+## nested one. There is deliberately no `impl Show[Char]`: `Show` stays the
+## Int's, a `Char` in a list or a record still renders as its code point, and
+## `Char` still *is* its target, which is the claim `scripts/opaque-twin`
+## checks and which `nominal-types-design.md` §7.4 rests on.
+##
+## `str.from_char` is the same string asked for by name, and stays: this impl
+## is the rendering, not a replacement for the function.
+impl Display[Char] {
+  fn display(c: Char) -> String = str.from_char(c)
+}
+
 # ---- tests ----
 #
 # These tests exercise the explicit `Char`/`Int` boundary. Nothing below
@@ -94,6 +112,20 @@ test "a literal is a character, and code is the way back to Int" {
     _ -> "other"
   }
   assert name == "ex"
+}
+
+test "a character renders as itself on top and as a code point inside" {
+  # the Display impl above, which is the whole top-level rendering
+  assert to_string('a') == "a"
+  assert "${'中'}" == "中"
+  assert "${'😀'}" == "😀"
+  assert to_string('\n') == "\n"
+  # the same string `str.from_char` answers with, by construction
+  assert "${'中'}" == str.from_char('中')
+  # and `Show` is untouched: nested, a Char is still the Int it is. A tuple is
+  # the only structure available here -- List's `Show` impl is std/list, which
+  # is checked after this module.
+  assert to_string(('a', 'b')) == "(97, 98)"
 }
 
 test "the predicates read the compiler's Unicode table, not the host's" {

@@ -590,8 +590,9 @@ hi
 `code_points`/`from_code_points` go back and forth between a string and a `List[Char]`
 (supplementary-plane emoji included), `str.len` counts code points, `str.slice` slices
 by code-point index, `str.at` takes one `Char`, and `str.from_char` turns one `Char`
-into a string. `"${c}"` renders as the code point number, because an opaque type's
-`Show` is the target type's.
+into a string. `"${c}"` is that same one-character string: `std/char` writes an
+`impl Display[Char]`, and `Display` is the top-level rendering. `Show`, the nested one,
+is still the target type's, so a `Char` inside a list prints as its code-point number.
 
 A function that indexes **by code point** counts from the front of the string every time
 (O(n) once, O(n²) inside a loop). To scan a string, use `std/cursor`: a **cursor** is an

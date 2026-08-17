@@ -14,25 +14,49 @@
 #     reads as "does not compile and run" rather than as agreement. Printing
 #     the answers alone would not: a wrong answer on both sides is an empty
 #     diff, which is exactly the hole the header of run.sh describes.
+#
+# One claim below runs the other way, and it is not an exemption. `std/char`
+# writes `impl Display[Char]`, so the *top-level* rendering is the type's own,
+# and spec §2.7 has always let an opaque type's own impl beat its target's
+# (`impl Show[UserId]` is the example given there). So that answer is pinned
+# too, in both directions: equal to the string the impl is defined to produce,
+# and *not* equal to the Int's. The nested rendering, which is what
+# `Show[Char]` being the Int's actually means, is checked right above it and is
+# the one that would break if anybody wrote `impl Show[Char]`.
 use std/char
 use std/io
 use std/map
 use std/set
+use std/str
 
 opaque type Twin = Int
 
 fn same(what: String, a: String, b: String) -> Unit =
   if a != b { panic("Char disagrees with Int about " ++ what ++ ": " ++ a ++ " vs " ++ b) } else { () }
 
+fn differs(what: String, a: String, b: String) -> Unit =
+  if a == b {
+    panic("Char has stopped rendering itself at the top level for " ++ what ++ ": " ++ a)
+  } else {
+    ()
+  }
+
 pub fn main() -> Unit !io = {
   let a = 'a'
   let b = 'b'
   let t: Twin = 97
 
-  println("-- rendering is the target's, so a character shows as a number --")
-  same("to_string", to_string(a), to_string(char.code(a)))
-  same("interpolation", "${a}", "${char.code(a)}")
+  println("-- the nested rendering is the target's, so a character is a number --")
   same("show", show(a), show(char.code(a)))
+  same("in a list", to_string([a]), to_string([char.code(a)]))
+  same("in a tuple", to_string((a, a)), to_string((char.code(a), char.code(a))))
+  println(to_string([a, b]))
+
+  println("-- the top-level rendering is the type's own Display --")
+  same("to_string", to_string(a), str.from_char(a))
+  same("interpolation", "${a}", str.from_char(a))
+  differs("to_string", to_string(a), to_string(char.code(a)))
+  differs("interpolation", "${a}", "${char.code(a)}")
   println(to_string(a))
   println("${t}")
 
