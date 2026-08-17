@@ -64,6 +64,12 @@ paths no gate watches) is a ratchet checked in both directions.
   B  A gate's script names a path, so that path is coarse for it. Slash-bearing
      tokens, shell globs, and for Python gates the `ROOT / "a" / "b"` joins and
      `.glob()` patterns that a regular expression cannot tell from division.
+     For JavaScript gates the `path.join(ROOT, "a", "b")` and
+     `path.resolve(__dirname, "..")` calls, which are the same statement in the
+     only other language a gate here is written in. A gate started as `npm test`
+     is followed through the `scripts` table of the package.json in its working
+     directory, because the lifecycle name is not a path and the table that
+     binds it to one is in the tree.
      Bare directory names count only where a word cannot be prose: handed to
      the toolchain, or appended to a list of units.
   C  The Core golden records one hash per compiler module, so every module it
@@ -138,6 +144,7 @@ and the residue is written down in unseen.txt where somebody can read it.
 """
 
 import argparse
+import json
 import posixpath
 import re
 import shlex
@@ -411,9 +418,15 @@ def strip_comments(text):
     `docs/spec.md` while explaining something else is not an input. Trailing
     comments are left alone because stripping them needs a lexer per language
     and would cut through string literals.
+
+    `//` for the same reason in the one gate written in JavaScript. No tracked
+    shell or Python file has a line starting with it, so the two comment
+    markers do not have to be told apart by language.
     """
     return "\n".join(
-        ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        ln
+        for ln in text.splitlines()
+        if not ln.lstrip().startswith("#") and not ln.lstrip().startswith("//")
     )
 
 
@@ -744,18 +757,126 @@ def python_inputs(text, tree):
     return found
 
 
+# A gate is written in one of three languages, and the third one arrived as a
+# blind spot rather than as a decision: the VS Code grammar contract is
+# JavaScript, so `is_script` did not recognise it, rule B never read it, and the
+# one gate that scrapes the compiler's lexer and token tables was absent from
+# every answer this map gave about them. A lexer batch ran the 37 gates listed
+# for it, all green, and reddened a 38th nobody was told about.
+SCRIPT_SUFFIXES = (".sh", ".py", ".js")
+
+
 def is_script(path, tree):
-    return path in tree.fileset and Path(path).suffix in (".sh", ".py")
+    return path in tree.fileset and Path(path).suffix in SCRIPT_SUFFIXES
+
+
+JS_PATH_CALL = re.compile(
+    r"(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*)?"
+    r"path\.(?:join|resolve)\(([^()]*)\)"
+)
+JS_STRING = re.compile(r"^\"((?:[^\"\\]|\\.)*)\"$|^'((?:[^'\\]|\\.)*)'$")
+
+
+def js_inputs(text, tree, script_dir):
+    """Paths a JavaScript gate builds out of `path.join` / `path.resolve`.
+
+    The same statement `ROOT / "a" / "b"` is in a Python gate, and read for the
+    same reason: scope-contract.js names its whole subject that way, so without
+    this the editor grammar job looks as if it read only its own directory and
+    the compiler's lexer looks as if no editor gate watched it. Regular
+    expressions are enough here where the Python side needed a parse: `/` is
+    ambiguous with division and `path.join(` is not.
+
+    `__dirname` is the script's own directory, and a name bound to one of these
+    calls is usable as the base of the next, which is how `ROOT` is spelled:
+    `path.resolve(__dirname, "../../..")`. A base this cannot follow, or one
+    that normalizes outside the repository, contributes nothing rather than
+    contributing a guess.
+    """
+
+    def literal(arg):
+        match = JS_STRING.match(arg.strip())
+        if not match:
+            return None
+        return match.group(1) if match.group(1) is not None else match.group(2)
+
+    env = {"__dirname": script_dir}
+    found = set()
+    for match in JS_PATH_CALL.finditer(text):
+        name, raw = match.group(1), match.group(2)
+        args = [a for a in raw.split(",") if a.strip()]
+        if not args:
+            continue
+        base = env.get(args[0].strip())
+        if base is None:
+            continue
+        # A chain that ends in a variable yields the constant prefix, for the
+        # reason the Python reader gives: the directory is what the script
+        # declared and the file inside it is what it computed.
+        exact = True
+        parts = [base] if base else []
+        for arg in args[1:]:
+            segment = literal(arg)
+            if segment is None:
+                exact = False
+                break
+            parts.append(segment)
+        joined = posixpath.normpath("/".join(parts)) if parts else ""
+        if joined in (".", "/"):
+            joined = ""
+        if joined.startswith("..") or joined.startswith("/"):
+            continue
+        if name and exact:
+            env[name] = joined
+        if joined:
+            found |= resolve(joined, tree)
+    return found
 
 
 SEGMENT_SPLIT = re.compile(r"[\n;|&]+|\$\(|`|\(\s")
 COMMAND_PREFIX = re.compile(
     r"^\s*(?:(?:if|then|else|elif|while|until|do|!|time|exec|command|bash|sh|"
-    r"python3?|env|sudo|source|\.|\w+=\S*)\s+)*"
+    r"python3?|node|env|sudo|source|\.|\w+=\S*)\s+)*"
 )
 
+# The lifecycle names `npm <name>` accepts without `run`, which is the whole of
+# what the gates here use.
+NPM_LIFECYCLE = ("test", "start")
+NPM_RUN = ("run", "run-script")
 
-def executed_scripts(text, tree):
+
+def npm_script(words, tree, workdir):
+    """-> the command `npm test` in `workdir` is bound to, or None.
+
+    A step whose command is `npm test` names no file, and the editor grammar
+    contract is started exactly that way. The mapping from the lifecycle name
+    to a command is in package.json, which is in the tree, so it is read rather
+    than guessed. When it cannot be read the gate keeps only the coverage its
+    working directory gives it, which is the under-claim this file prefers; the
+    `npm-script-*` mutant is the negative control for that boundary.
+    """
+    if not workdir or not words or words[0] != "npm":
+        return None
+    if len(words) > 1 and words[1] in NPM_LIFECYCLE:
+        name = words[1]
+    elif len(words) > 2 and words[1] in NPM_RUN:
+        name = words[2]
+    else:
+        return None
+    manifest = posixpath.join(workdir, "package.json")
+    if manifest not in tree.fileset:
+        return None
+    try:
+        scripts = json.loads(tree.read(manifest)).get("scripts")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(scripts, dict):
+        return None
+    body = scripts.get(name)
+    return body if isinstance(body, str) else None
+
+
+def executed_scripts(text, tree, workdir=None, seen=None):
     """Scripts this text *runs*, as opposed to ones it mentions.
 
     doc-check.py's docstring names scripts/native-cli-diff.sh while explaining
@@ -763,17 +884,33 @@ def executed_scripts(text, tree):
     native CLI differential" put thirteen of the driver's usage strings under
     the wrong gate, so the token has to be in command position: first word of a
     segment, after the words that can precede a command.
+
+    `workdir` is the step's `working-directory`, which is where a relative
+    command resolves from and where the package.json an `npm` script goes
+    through is. `seen` stops a package.json whose scripts call each other from
+    recurring.
     """
     found = set()
+    seen = set() if seen is None else seen
     for segment in SEGMENT_SPLIT.split(text):
         segment = re.sub(r"\$\{?\w+\}?/", "", segment)
         rest = COMMAND_PREFIX.sub("", segment)
-        word = rest.strip().split()[:1]
-        if not word:
+        words = rest.strip().split()
+        if not words:
             continue
-        for cand in resolve(word[0], tree):
-            if is_script(cand, tree):
-                found.add(cand)
+        body = npm_script(words, tree, workdir)
+        if body is not None:
+            if body in seen:
+                continue
+            found |= executed_scripts(body, tree, workdir, seen | {body})
+            continue
+        cands = {words[0]}
+        if workdir:
+            cands.add(posixpath.join(workdir, words[0]))
+        for cand in cands:
+            for path in resolve(cand, tree):
+                if is_script(path, tree):
+                    found.add(path)
     return found
 
 
@@ -816,7 +953,7 @@ def gate_scripts(gate, tree, transitive=True):
     """
     direct = set()
     for command in gate.commands:
-        direct |= executed_scripts(command, tree)
+        direct |= executed_scripts(command, tree, gate.workdir)
     if not transitive:
         return direct
     scripts = set()
@@ -910,11 +1047,15 @@ class Map:
                 for sibling in tree.under(target):
                     if sibling == SELF:
                         continue
-                    if Path(sibling).suffix in (".sh", ".py"):
+                    if Path(sibling).suffix in SCRIPT_SUFFIXES:
                         body += strip_comments(tree.read(sibling)) + "\n"
                 names = path_tokens(body, tree) | shell_targets(body, tree)
                 if Path(script).suffix == ".py":
                     names |= python_inputs(tree.read(script), tree)
+                if Path(script).suffix == ".js":
+                    names |= js_inputs(
+                        tree.read(script), tree, posixpath.dirname(script)
+                    )
                 for token in sorted(names):
                     self.add_under(
                         token,
@@ -928,7 +1069,7 @@ class Map:
             for command in gate.commands:
                 named = path_tokens(command, tree) | shell_targets(command, tree)
                 for token in sorted(named):
-                    if token in tree.fileset and Path(token).suffix in (".sh", ".py"):
+                    if token in tree.fileset and Path(token).suffix in SCRIPT_SUFFIXES:
                         continue
                     self.add_under(
                         token,
