@@ -40,8 +40,9 @@ Haskell 的 `effectful` 生态整个跑在这一档上（abort 用真异常）�
   `catch_fault`/`catch_panic`/`bracket`。「异常式效果」映射到既有屏障族，不给 handler
   加逃逸档——`effectful` 同款取舍。
 - **参数化效果**（`effect Yield[T]`）：把 `Ty` 塞进 `Eff` 会让 subst 的类型/效果双 map
-  互递归、`Map[Eff, …]` 的键全动。留给 RX-10 期权 B（效果参数进类型参数表）那条
-  已立项的独立路线；v1 要泛型就在声明处具体化。
+  互递归、`Map[Eff, …]` 的键全动。**另立项**（原先记作「留给 RX-10 期权 B」，那是错的：
+  B 是把 `Eff` 塞进类型参数表，方向相反，见 §7 开放项 5 与
+  [effect-params-design.md](effect-params-design.md)）；v1 要泛型就在声明处具体化。
 - **重写 std**：io 不改写成用户效果（那是重写 checker 脊柱），panic 不改写成 aborting
   handler（上一条）。本特性是纯加法。
 
@@ -224,7 +225,9 @@ with handle E { 臂… } 之后，装 handler 的这个块记账：
 - **`return`/`break`/`continue`**：块剩余闭包内照拒（with 糖现规，checker.dawn:3355+），
   臂身体内同拒（同一条规则，臂也是 sugar 闭包）；两处诊断都点名 `with handle`。
 - **trait/impl 方法**：labels 必须为空——在既有三处拒绝（trait 方法禁效果变量等，
-  checker.dawn:1975-2001, 2391-2412）旁边加同款第四条。解禁等 RX-10-B。
+  现址 passes.dawn:1256-1259、:1742-1744，随 pass 拆分从 checker.dawn 搬来）旁边加同款
+  第四条（已落地，passes.dawn:1218-1227、:1706-1714）。解禁等 RX-10-B，设计见
+  [effect-params-design.md](effect-params-design.md)。
 - **comptime / const**：v1 一律拒绝具名效果（`leave_isolated` 通路加 labels 检查，
   checker.dawn:4580-4589）。「handler 是纯的就该放行」是真问题，但把「纯 handler」
   判据做对需要臂效果的组合推理，v1 不背——今天的「否」从偶然变成裁决，留档重开。
@@ -357,5 +360,7 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
 3. **aborting 档**：`effectful` 路线（abort=异常）映射到 Dawn 就是「操作返回
    `Result` + 调用处 `?`」或屏障族——够用性等 dogfood 检验，不够再谈。
 4. **comptime 纯 handler 放行**（§4.5）。
-5. **参数化效果**：RX-10-B 的独立路线（效果参数进类型参数表），是 `effect Yield[T]`
-   与 trait 方法带效果行（D9）的共同前置。
+5. **参数化效果**：两件事，方向相反，分开立项。**RX-10-B**（效果参数进类型参数表）是把
+   `Eff` 塞进类型参数表，它只是「trait 方法带效果行」的前置，范围与决策点见
+   [effect-params-design.md](effect-params-design.md)。**`effect Yield[T]`** 是把 `Ty` 塞进
+   `Eff`（代价见本文第 1 节的非目标行），另一根轴，另立项，与 RX-10-B 无前后置关系。

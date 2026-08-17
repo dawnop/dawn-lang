@@ -271,9 +271,13 @@
 > `!io` trait method；放开 named effect 会决定 dictionary 是否携带 evidence、evidence 的捕获
 > lifetime 与跨模块签名形状。它保留为语言能力账，但必须先作 ABI 裁决，不进入自治 TODO。
 
-- **证据：S。** v1 规则把 trait/impl method 限为 pure 或 `!io`：`docs/spec.md:1106`；pass 明确拒绝 named effect/effect var：`selfhost/src/check/passes.dawn:1158`。
+- **证据：S。** v1 规则把 trait/impl method 限为 pure 或 `!io`：`docs/spec.md:610`，§6.5「边界（v1）」复述在 `docs/spec.md:1429-1431`（bullet 本身是 `:1431`）；pass 明确拒绝 named effect/effect var：`selfhost/src/check/passes.dawn:1218-1227`（trait 方法自己的行）与 `selfhost/src/check/passes.dawn:1706-1714`（impl）。
 - **影响：** 无法定义泛型 state、parser、service、transaction trait；用户被迫在 trait API 退回 `Result`/`!io`，形成与语言效果系统并行的第二套抽象。
-- **建议：** 先允许 fixed named labels，再引入 trait/method-level effect parameters；dictionary 必须显式携带或捕获 evidence。
+- **建议：** 先允许 fixed named labels，再引入 trait/method-level effect parameters；evidence 只能显式携带，
+  「捕获进 dictionary」那一支已经封死：dictionary 是账本外的无头静态表，drop 它会把垃圾读作计数
+  （`dictish`，`selfhost/src/c/rc.dawn:528-538`），而 evidence 被刻意定为进 RC 账本的普通记录、不是
+  `CDict`（[`effects-design.md`](../effects-design.md) §5.1，`:280-283`）。由此证据只能由调用方在调用点供给，
+  见 [`effect-params-design.md`](../effect-params-design.md) 决策 5。
 
 - **判不做（#196 分诊，2026-08-11 写回）。** v1 的边界写在 spec §3.5，且**有明确前置**：
   [`effects-design.md`](../effects-design.md) §4.5 写「trait/impl 方法 labels 必须为空……

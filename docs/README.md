@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` 下现有 90 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 91 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
@@ -16,6 +16,7 @@
 | **normative** | 权威定义。实现与它冲突就是实现的 bug。只有一篇。 |
 | **current** | 描述当前的架构或流程，可以照着做。 |
 | **historical** | 当时的决策/调研/落地记录。**读作历史，不是现状**；结论可能已被后续推翻。 |
+| **proposed** | 已写成方案、尚未评审通过。范围与决策点可读，**不要照着实现**。 |
 
 ---
 
@@ -64,6 +65,7 @@
 | [for-pattern-design.md](for-pattern-design.md) | current | SYN-13 的定稿：`for` 复用完整不可反驳 pattern、隐藏 loop locals、空 alternative 的 token recovery、限定 constructor completion、Core placement 与 28 条独立负控。 |
 | [compiler-weight-baseline-design.md](compiler-weight-baseline-design.md) | current | #230 的严格重量基线与 dependency re-exec 堆继承：Phase 1 固定 release 产物、递归进程树 RSS、逐角色堆与 VAS、启动时间和 JSON schema，Phase 2 让子编译器继承父 JVM 的实际最大堆并由真实 `jcmd` 负控固定。 |
 | [effects-soundness-design.md](effects-soundness-design.md) | current | #188 的修法：具名效果的两个 soundness 缺陷（标签轴对函数值不设防、减标签的人不是应答的人）与「B 极简」三刀——注解位禁标签、闭包创建点结算、`verify_effects` 整行核对。落地后 spec.md §6.5 以它为准。 |
+| [effect-params-design.md](effect-params-design.md) | proposed | RX-10-B（效果参数进类型参数表）的范围与决策点。三件载荷里 `effect Yield[T]` 判为出局（另一根轴，另立任务）；结构事实是效果变量今天在 `Sig` 里没有表示、只走一条侧信道；枢纽是决策 5「效果参数被实例化时谁供证据」，因为字典没有 RC 头、捕获那一支已被 `rc.dawn` 封死。四刀，刀 1 零 Emit-Change 零种子、独立成立。 |
 | [never-return-design.md](never-return-design.md) | current | SEM-14 已裁决方案的实现记录：return-only `Never` 的语义边界、JVM bottom call 终止 seam 与验证矩阵。 |
 | [native-failure-design.md](native-failure-design.md) | current | #193 的修法：native 失败运行时的三个 P1（ARC-03 消息截断 / ARC-04 嵌套覆盖 / ARC-05 恢复泄漏）实测是**两件事**——载荷所有权与「longjmp 不跑清理」。刀 1 载荷对象化 + 路线 A3（`-fexceptions` + cleanup + ForcedUnwind）；路线 B（Result ABI）不做，重开条件写在 §4.3。载荷契约随刀 2 进 spec.md §9.8.1。 |
 | [named-args-design.md](named-args-design.md) | current | #207 的方案：具名实参推广到 `Sig` 支持的 callee + 默认参数（合成 `f$default$k` 零元纯函数）。四条用户终裁在其 §9：实参求值顺序改**写序**（本批唯一 Emit-Change）、单层名、默认值任意纯表达式、std 采用另批。 |
