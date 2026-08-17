@@ -2362,8 +2362,10 @@ fn check_ctor_pattern_at(
     }
     return (cx1, TPWild)
   }
-  var slots: List[Option[TPat]] = []
-  for _i in 0..n { slots = slots ++ [no_tpat()] }
+  # (field, sub-pattern) pairs, collected in pattern order and turned into the
+  # field-indexed list after the loop; an indexed write into a prefilled list
+  # rebuilds the whole list per sub-pattern
+  var matched: List[(Int, TPat)] = []
   # which field each sub-pattern is for: the same decision the call side makes
   # (types.ctor_slots). What is left here is the pattern half of it -- the
   # wording, the caret, and binding the sub-pattern against the field's type.
@@ -2404,9 +2406,23 @@ fn check_ctor_pattern_at(
     } else {
       let (cx3, tp) = check_pattern(cx1, a.pat, field_tys[idx], mutable)
       cx1 = cx3
-      slots = list.take(slots, idx) ++ [Some(tp)] ++ list.drop(slots, idx + 1)
+      matched = matched ++ [(idx, tp)]
     }
     i = i + 1
+  }
+  # ctor_slots hands out each field at most once -- a second pattern for it
+  # comes back SlotTaken with no pick -- so one scan per field answers which
+  # sub-pattern matched it, and a later pair still wins as an indexed write did.
+  var slots: List[Option[TPat]] = []
+  var fk = 0
+  for _fk in 0..n {
+    var so: Option[TPat] = no_tpat()
+    for mt in matched {
+      let (mf, mp) = mt
+      if mf == fk { so = Some(mp) }
+    }
+    slots = slots ++ [so]
+    fk = fk + 1
   }
   if len(pargs) > n {
     cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has " ++ to_string(n) ++ " field(s), the pattern names " ++
@@ -3898,21 +3914,28 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
         None -> TyNever
       }
       # inference-needing elements (bare None, nested []) go last; the typed
-      # nodes must come back in source order
+      # nodes must come back in source order. The nodes are collected in check
+      # order and put back in one pass at the end: `order` is two ascending
+      # runs, so a walk over the elements takes from the run that claimed each
+      # position. Assigning into a slot list as the nodes arrive is what this
+      # replaces, and that rebuilt the whole list per element.
+      var defer_at: List[Bool] = []
       var order: List[Int] = []
       var i = 0
       for x in elems {
-        if not needs_expected(cx, x) { order = order ++ [i] }
+        let d = needs_expected(cx, x)
+        defer_at = defer_at ++ [d]
+        if not d { order = order ++ [i] }
         i = i + 1
       }
+      let ready_n = len(order)
       i = 0
-      for x in elems {
-        if needs_expected(cx, x) { order = order ++ [i] }
+      for d in defer_at {
+        if d { order = order ++ [i] }
         i = i + 1
       }
       var cx1 = cx
-      var slots: List[Option[TExpr]] = []
-      for _j in 0..len(elems) { slots = slots ++ [no_texpr()] }
+      var checked: List[TExpr] = []
       for idx in order {
         let x = elems[idx]
         let el_exp: Option[Ty] =
@@ -3922,13 +3945,18 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
         let (cx3, unified) = unify_branches(cx1, elem_t, t, e_lo(x), e_hi(x), "the list elements")
         cx1 = cx3
         elem_t = unified
-        slots = list.take(slots, idx) ++ [Some(tx)] ++ list.drop(slots, idx + 1)
+        checked = checked ++ [tx]
       }
       var txs: List[TExpr] = []
-      for s in slots {
-        match s {
-          Some(tx) -> { txs = txs ++ [tx] }
-          None -> { txs = txs ++ [XError(lo, hi)] }
+      var ri = 0
+      var di = ready_n
+      for d in defer_at {
+        if d {
+          txs = txs ++ [checked[di]]
+          di = di + 1
+        } else {
+          txs = txs ++ [checked[ri]]
+          ri = ri + 1
         }
       }
       (cx1, TyList(elem_t), XListLit(txs, lo, hi, TyList(elem_t)))
@@ -5537,13 +5565,14 @@ fn check_call(
     None -> ()
   }
   # two rounds: self-sufficient arguments first (they bind type variables),
-  # then inference-needing ones (bare None, []) with what was learned
+  # then inference-needing ones (bare None, []) with what was learned.
+  #
+  # Both lists are indexed by argument and the loops below walk the arguments
+  # in order, so each one is grown by appending its own entry rather than
+  # written into a prefilled list -- an indexed write costs a rebuild of the
+  # whole list (list.take ++ .. ++ list.drop).
   var at_slots: List[Option[Ty]] = []
   var tx_slots: List[Option[TExpr]] = []
-  for _k in 0..len(args) {
-    at_slots = at_slots ++ [no_expected()]
-    tx_slots = tx_slots ++ [no_texpr()]
-  }
   # Which parameter each argument fills: the shared rule (types.arg_slots),
   # the function-call spelling of the decision constructors make. An
   # all-positional call of the right arity resolves to the identity mapping
@@ -5551,8 +5580,9 @@ fn check_call(
   # parameter is checked now, with no expected type, so its own errors are
   # reported and the rounds below skip it.
   var pidx: List[Int] = []
-  var slot_of: List[Option[Int]] = []
-  for _k in 0..len(s.param_tys) { slot_of = slot_of ++ [no_int()] }
+  # (parameter, argument) for the arguments that landed on a parameter;
+  # `slot_of` is built from it after the loop, since it is indexed the other way
+  var filled: List[(Int, Int)] = []
   var args_broken = false
   var given: List[Option[String]] = []
   for a0 in args0 { given = given ++ [a0.name] }
@@ -5591,19 +5621,39 @@ fn check_call(
     }
     pidx = pidx ++ [idx]
     if idx >= 0 {
-      slot_of = list.take(slot_of, idx) ++ [Some(i0)] ++ list.drop(slot_of, idx + 1)
+      filled = filled ++ [(idx, i0)]
+      at_slots = at_slots ++ [no_expected()]
+      tx_slots = tx_slots ++ [no_texpr()]
     } else {
       let (cxa, at, ax) = check_arg_at(cx1, a0.e, i0, pre0, no_expected())
       cx1 = cxa
-      at_slots = list.take(at_slots, i0) ++ [Some(at)] ++ list.drop(at_slots, i0 + 1)
-      tx_slots = list.take(tx_slots, i0) ++ [Some(ax)] ++ list.drop(tx_slots, i0 + 1)
+      at_slots = at_slots ++ [Some(at)]
+      tx_slots = tx_slots ++ [Some(ax)]
     }
     i0 = i0 + 1
   }
+  # arg_slots hands out each parameter at most once -- a second argument for it
+  # comes back SlotTaken with no pick -- so one scan of `filled` per parameter
+  # answers who fills it, and a later pair still wins as an indexed write did.
+  var slot_of: List[Option[Int]] = []
+  var pk = 0
+  for _pt in s.param_tys {
+    var so: Option[Int] = no_int()
+    for f in filled {
+      let (fp, fa) = f
+      if fp == pk { so = Some(fa) }
+    }
+    slot_of = slot_of ++ [so]
+    pk = pk + 1
+  }
   for round in 0..2 {
+    var at_next: List[Option[Ty]] = []
+    var tx_next: List[Option[TExpr]] = []
     var i = 0
     for a in args {
-      let done = match at_slots[i] {
+      var at_i = at_slots[i]
+      var tx_i = tx_slots[i]
+      let done = match at_i {
         Some(_) -> true
         None -> false
       }
@@ -5617,8 +5667,8 @@ fn check_call(
           if is_concrete(cx1, substd) || is_lambda_or_var(a) { Some(substd) } else { None }
         let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
         cx1 = cxa
-        at_slots = list.take(at_slots, i) ++ [Some(at)] ++ list.drop(at_slots, i + 1)
-        tx_slots = list.take(tx_slots, i) ++ [Some(ax)] ++ list.drop(tx_slots, i + 1)
+        at_i = Some(at)
+        tx_i = Some(ax)
         let (m3, em3, ok) = unify_into(cx1, pt, at, m, em)
         m = m3
         em = em3
@@ -5629,8 +5679,12 @@ fn check_call(
             "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
         }
       }
+      at_next = at_next ++ [at_i]
+      tx_next = tx_next ++ [tx_i]
       i = i + 1
     }
+    at_slots = at_next
+    tx_slots = tx_next
   }
   # the named-call arity report, after the arguments so their own errors come
   # first (the all-positional path answered arity above and returned)
@@ -5786,7 +5840,6 @@ fn check_call(
       # two reordered calls in one function must not collide on the names
       cx1 = push_scope(cx1)
       var locs: List[Option[TExpr]] = []
-      for _k in 0..len(args0) { locs = locs ++ [no_texpr()] }
       var wi2 = 0
       for a0 in args0 {
         match tx_slots[wi2] {
@@ -5796,10 +5849,9 @@ fn check_call(
             let (cxd, sidw) = declare(cx1, nm, t, false, a0.lo, a0.hi)
             cx1 = cxd
             arg_lets = arg_lets ++ [TSLet(Some(sidw), nm, ax, a0.lo, a0.hi)]
-            locs = list.take(locs, wi2) ++ [Some(XLocal(sidw, nm, a0.lo, a0.hi, t))] ++
-              list.drop(locs, wi2 + 1)
+            locs = locs ++ [Some(XLocal(sidw, nm, a0.lo, a0.hi, t))]
           }
-          None -> ()
+          None -> { locs = locs ++ [no_texpr()] }
         }
         wi2 = wi2 + 1
       }
@@ -6180,12 +6232,13 @@ fn check_ctor_call(
   # reported and `atx` holds something for the emitter. An argument that *did*
   # land on a field is checked in the two rounds below instead, where the
   # field's type is known.
-  var slots: List[Option[Int]] = []
-  for _k in 0..n { slots = slots ++ [no_int()] }
+  # `idx_of` and `atx` are indexed by argument and the loops below walk the
+  # arguments in order, so both grow by appending. `slots` is indexed by field,
+  # so its pairs are collected here and assembled after the loop (see
+  # check_call: an indexed write rebuilds the whole list).
+  var claimed: List[(Int, Int)] = []
   var idx_of: List[Int] = []
-  for _k in 0..len(cargs) { idx_of = idx_of ++ [-1] }
   var atx: List[Option[TExpr]] = []
-  for _k in 0..len(cargs) { atx = atx ++ [no_texpr()] }
   var anames: List[Option[String]] = []
   for a in cargs { anames = anames ++ [a.name] }
   let trailing = len(cargs) > 0 && cargs[len(cargs) - 1].trailing
@@ -6225,19 +6278,37 @@ fn check_ctor_call(
     if idx < 0 {
       let (cxa, _, ax) = check_expr(cx1, a.e, no_expected())
       cx1 = cxa
-      atx = list.take(atx, i) ++ [Some(ax)] ++ list.drop(atx, i + 1)
+      atx = atx ++ [Some(ax)]
+      idx_of = idx_of ++ [-1]
     } else {
-      slots = list.take(slots, idx) ++ [Some(i)] ++ list.drop(slots, idx + 1)
-      idx_of = list.take(idx_of, i) ++ [idx] ++ list.drop(idx_of, i + 1)
+      claimed = claimed ++ [(idx, i)]
+      atx = atx ++ [no_texpr()]
+      idx_of = idx_of ++ [idx]
     }
     i = i + 1
   }
+  # ctor_slots hands out each field at most once -- a second argument for it
+  # comes back SlotTaken with no pick -- so one scan per field answers who
+  # claimed it, and a later pair still wins as an indexed write did.
+  var slots: List[Option[Int]] = []
+  var fk = 0
+  for _fk in 0..n {
+    var so: Option[Int] = no_int()
+    for c in claimed {
+      let (cf, ca) = c
+      if cf == fk { so = Some(ca) }
+    }
+    slots = slots ++ [so]
+    fk = fk + 1
+  }
   # two rounds of checking (see check_call)
   for round in 0..2 {
+    var atx_next: List[Option[TExpr]] = []
     var j = 0
     for a in cargs {
       let idx = idx_of[j]
-      let already = match atx[j] {
+      var atx_j = atx[j]
+      let already = match atx_j {
         Some(_) -> true
         None -> false
       }
@@ -6248,7 +6319,7 @@ fn check_ctor_call(
           let exp2: Option[Ty] = if is_concrete(cx1, sub) { Some(sub) } else { None }
           let (cxa, at, ax) = check_expr(cx1, a.e, exp2)
           cx1 = cxa
-          atx = list.take(atx, j) ++ [Some(ax)] ++ list.drop(atx, j + 1)
+          atx_j = Some(ax)
           let (m3, em3, ok) = unify_into(cx1, declared, at, m, em)
           m = m3
           em = em3
@@ -6260,8 +6331,10 @@ fn check_ctor_call(
           }
         }
       }
+      atx_next = atx_next ++ [atx_j]
       j = j + 1
     }
+    atx = atx_next
   }
   var missing_reported = false
   if not args_broken {
@@ -6682,12 +6755,15 @@ fn finalize_sams(
   atx: List[Option[TExpr]]
 ) -> (Cx, List[Option[TExpr]], List[(Int, String, String, List[String], String)], List[Int]) !io = {
   var cx1 = cx
-  var atx2 = atx
+  # `atx` is the caller's per-argument list, so this walk rebuilds it by
+  # appending each position's entry rather than writing into a copy
+  var atx2: List[Option[TExpr]] = []
   var convs: List[(Int, String, String, List[String], String)] = []
   var bridges: List[Int] = []
   var i = 0
   for a in args {
     let p = param_at(cx1.jsig, params, packs, i)
+    var out_i = atx[i]
     match ats[i] {
       None -> {
         let sm = sam_of_nonprim(cx1.jsig, p).expect("sam scored")
@@ -6695,7 +6771,7 @@ fn finalize_sams(
         let (sps, sret) = ft
         let (cxa, t, ax) = check_expr(cx1, a, Some(TyFn(sps, sret, EIo)))
         cx1 = cxa
-        atx2 = list.take(atx2, i) ++ [Some(ax)] ++ list.drop(atx2, i + 1)
+        out_i = Some(ax)
         var fits = false
         match t {
           TyFn(tps, tret, _) ->
@@ -6734,6 +6810,7 @@ fn finalize_sams(
           _ -> ()
         }
     }
+    atx2 = atx2 ++ [out_i]
     i = i + 1
   }
   (cx1, atx2, convs, bridges)
@@ -7403,22 +7480,24 @@ fn check_match(
   # can borrow the result type from its siblings as its expected — the empty-list
   # two-pass (§EListLit) applied to arm bodies. Typed arms are reassembled in
   # source order for exhaustiveness + codegen.
+  # `order` is two ascending runs, so the arms it produces are collected in
+  # check order and merged back by position below, in one pass.
+  var defer_at: List[Bool] = []
   var order: List[Int] = []
   var oi = 0
   for arm in arms {
-    if not needs_expected(cx1, arm.body) { order = order ++ [oi] }
+    let d = needs_expected(cx1, arm.body)
+    defer_at = defer_at ++ [d]
+    if not d { order = order ++ [oi] }
     oi = oi + 1
   }
+  let ready_n = len(order)
   oi = 0
-  for arm in arms {
-    if needs_expected(cx1, arm.body) { order = order ++ [oi] }
+  for d in defer_at {
+    if d { order = order ++ [oi] }
     oi = oi + 1
   }
-  var slots: List[Option[TArm]] = []
-  for _s in 0..len(arms) {
-    let empty: Option[TArm] = None
-    slots = slots ++ [empty]
-  }
+  var checked: List[TArm] = []
   for idx in order {
     let arm = arms[idx]
     cx1 = push_scope(cx1)
@@ -7448,14 +7527,18 @@ fn check_match(
     cx1 = cxc
     result = unified
     cx1 = pop_scope(cx1)
-    slots = list.take(slots, idx) ++
-      [Some(TArm { pat: tpat, guard: tguard, body: bx })] ++ list.drop(slots, idx + 1)
+    checked = checked ++ [TArm { pat: tpat, guard: tguard, body: bx }]
   }
   var tarms: List[TArm] = []
-  for s in slots {
-    match s {
-      Some(t) -> { tarms = tarms ++ [t] }
-      None -> ()
+  var ri = 0
+  var di = ready_n
+  for d in defer_at {
+    if d {
+      tarms = tarms ++ [checked[di]]
+      di = di + 1
+    } else {
+      tarms = tarms ++ [checked[ri]]
+      ri = ri + 1
     }
   }
   # exhaustiveness (guarded arms can fail their guard, so they don't count)

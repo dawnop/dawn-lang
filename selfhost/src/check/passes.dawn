@@ -739,7 +739,11 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
     }
     let saved_tp = cx1.current_tparams
     cx1 = Cx { ..cx1, current_tparams: tp }
-    var new_ctors = info.ctors
+    # pass_type_shells hands out slots 0, 1, 2, .. to the accepted constructors
+    # in declaration order, so this loop reaches them in that order and the
+    # rebuilt list is grown by appending. Writing at the slot instead rebuilt
+    # the whole list per constructor.
+    var new_ctors: List[CtorI] = []
     var pi = 0
     for c in d.ctors {
       let slot = match accepted_slot(sh, pi) {
@@ -778,9 +782,8 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
         }
         fields = fields ++ [FieldI { name: f.name, ty: ft }]
       }
-      let old = new_ctors[slot]
-      new_ctors = list.take(new_ctors, slot) ++ [CtorI { ..old, fields: fields }] ++
-        list.drop(new_ctors, slot + 1)
+      let old = info.ctors[slot]
+      new_ctors = new_ctors ++ [CtorI { ..old, fields: fields }]
       pi = pi + 1
     }
     cx1 = Cx {
