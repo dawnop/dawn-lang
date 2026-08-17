@@ -44,9 +44,39 @@ pub fn format(source: String) -> Result[String, List[Diag]] = {
   for t in raw {
     if t.kind != NEWLINE && t.kind != EOF { code = code ++ [t] }
   }
-  let stream = sort_by(code ++ comments, (a: Token, b: Token) => a.lo - b.lo)
+  let stream = merge_by_lo(code, comments)
   if len(stream) == 0 { return Ok("") }
   Ok(reflow(cps, stream, unary_minus(raw), postfix_bang(raw), block_arrow(cps, raw)))
+}
+
+## The two token channels interleaved by span start. Both arrive ascending by
+## `lo` -- the lexer emits in source order and the comment sink is filled from
+## the same loop -- and no two spans overlap, so a linear merge is enough and
+## there are no ties for a stable sort to have to break. This was `sort_by` over
+## the concatenation, which paid O(n log n) comparisons to rediscover an order
+## both inputs already had.
+fn merge_by_lo(code: List[Token], comments: List[Token]) -> List[Token] = {
+  var out: List[Token] = []
+  var i = 0
+  var j = 0
+  while i < len(code) && j < len(comments) {
+    if code[i].lo <= comments[j].lo {
+      out = out ++ [code[i]]
+      i = i + 1
+    } else {
+      out = out ++ [comments[j]]
+      j = j + 1
+    }
+  }
+  while i < len(code) {
+    out = out ++ [code[i]]
+    i = i + 1
+  }
+  while j < len(comments) {
+    out = out ++ [comments[j]]
+    j = j + 1
+  }
+  out
 }
 
 ## Span starts of FATARROW tokens that end a brace-block's head line -- the
