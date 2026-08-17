@@ -234,20 +234,31 @@ fn reflow(
   # A single left-to-right cursor over the source's code points. Token spans are
   # sorted and non-overlapping, so we never rewind: reflow stays O(n) instead of
   # re-slicing the whole source per token (which made it O(n²), spec §1.8).
+  #
+  # Nothing between two tokens survives into the output except the number of
+  # newlines in it, so the cursor counts instead of materializing: the gap and
+  # the token span were each built into a string, one list cell per code point,
+  # and the token's string was then discarded in favour of `t.text` -- see below.
   var cur_ci = 0
   var i = 0
   while i < len(toks) {
     let t = toks[i]
-    # Advance to this token's start (capturing the gap since the previous token),
-    # then across the token itself. Comments reprint from their own `.text`.
-    let (gci, gap) = take_to(cps, cur_ci, t.lo)
-    let (tci, raw_text) = take_to(cps, gci, t.hi)
+    # Advance to this token's start (counting the newlines in the gap since the
+    # previous token), then across the token itself.
+    let (gci, nl) = count_to(cps, cur_ci, t.lo)
+    let (tci, _) = count_to(cps, gci, t.hi)
     cur_ci = tci
-    let ttext = if t.kind == COMMENT { t.text } else { raw_text }
+    # Every token reprints from `.text`, which for everything that can reach this
+    # stream is the same string its span slices to -- comments included, since a
+    # comment's text and its span both stop before the trailing whitespace. That
+    # is an invariant of the lexer, not of this file, and it is not free: a lexer
+    # that ever synthesized a token's text would silently rewrite the source
+    # here. So it is stated and tested where it is established, by the "token
+    # text is its source span" test in front/lexer.dawn.
+    let ttext = t.text
     if i == 0 {
       out = out ++ [ttext]
     } else {
-      let nl = count_nl(gap)
       if nl == 0 {
         let on_use_line = line_first.kind == USE
         if t.kind == COMMENT || space(prev, t, unary, postfix, on_use_line) {
@@ -380,20 +391,24 @@ fn space(prev: Token, cur: Token, unary: Set[Int], postfix: Set[Int], on_use_lin
 # ---- helpers ----
 
 ## Advance a cursor over `cps` from index `ci` up to code-point index `target`,
-## returning the new index and the code points consumed as a string. Token spans
-## are code-point indices, so this is one step per code point. Total work across
+## returning the new index and how many newlines were crossed. Token spans are
+## code-point indices, so this is one step per code point, and total work across
 ## a reflow is O(source length).
-fn take_to(cps: List[Char], ci: Int, target: Int) -> (Int, String) = {
+##
+## The newline count is the whole of what `reflow` needs from the text between
+## two tokens, so nothing is built: this replaced a version that assembled the
+## stretch into a `String` (a list cell per code point) and then handed it to
+## `len(str.split(s, "\n")) - 1`, which allocated a list of substrings to count
+## the separators between them.
+fn count_to(cps: List[Char], ci: Int, target: Int) -> (Int, Int) = {
   var i = ci
-  var out: List[Char] = []
+  var nl = 0
   while i < target && i < len(cps) {
-    out = out ++ [cps[i]]
+    if cps[i] == '\n' { nl = nl + 1 }
     i = i + 1
   }
-  (i, from_code_points(out))
+  (i, nl)
 }
-
-fn count_nl(s: String) -> Int = len(str.split(s, "\n")) - 1
 
 fn is_closer(k: TokKind) -> Bool = k == RPAREN || k == RBRACKET || k == RBRACE
 
