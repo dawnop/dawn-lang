@@ -58,10 +58,27 @@ function compilerOperators() {
 
   const lexerSource = fs.readFileSync(LEXER_PATH, "utf8");
   const mappings = new Map();
-  function add(kind, lexeme) {
+  function add(kind, spelling) {
     if (!operatorKinds.includes(kind)) return;
     assert.ok(!mappings.has(kind), `compiler operator ${kind} has duplicate spellings`);
-    mappings.set(kind, lexeme);
+    mappings.set(kind, spelling);
+  }
+
+  // Each table entry says two things: which characters the dispatch tested for,
+  // and which text the token carries. The spelling is what the lexer emits, so
+  // that is what this reads; the characters are read as well, and the two have
+  // to agree. They are not the same claim, and only the first one was here
+  // while the tables answered a bare TokKind and the text was sliced out of the
+  // source: an entry whose text is not its own source span would make `fmt`,
+  // which reprints tokens from `.text`, print something the parser never read.
+  function addTableEntry(kind, characters, spelling) {
+    assert.equal(
+      spelling,
+      characters,
+      `compiler operator ${kind} matches ${JSON.stringify(characters)} and ` +
+      `emits ${JSON.stringify(spelling)}`
+    );
+    add(kind, spelling);
   }
 
   const twoStart = lexerSource.indexOf("fn two_kind(");
@@ -69,17 +86,32 @@ function compilerOperators() {
   assert.notEqual(twoStart, -1, "two-character operator table is missing");
   assert.notEqual(twoEnd, -1, "two-character operator table has no end anchor");
   const twoBody = lexerSource.slice(twoStart, twoEnd);
-  for (const match of twoBody.matchAll(/(?:if|else if) c == '(.)' && c1 == '(.)' \{ Some\(([A-Z]+)\) \}/g)) {
-    add(match[3], match[1] + match[2]);
+  let twoEntries = 0;
+  for (const match of twoBody.matchAll(
+    /(?:if|else if) c == '(.)' && c1 == '(.)' \{ Some\(\(([A-Z]+), "([^"]*)"\)\) \}/g
+  )) {
+    addTableEntry(match[3], match[1] + match[2], match[4]);
+    twoEntries += 1;
   }
 
   const oneStart = twoEnd;
   const oneEnd = lexerSource.indexOf("fn lex_symbol(", oneStart);
   assert.notEqual(oneEnd, -1, "one-character operator table has no end anchor");
   const oneBody = lexerSource.slice(oneStart, oneEnd);
-  for (const match of oneBody.matchAll(/^\s*'(.)' -> Some\(([A-Z]+)\)\s*$/gm)) {
-    add(match[2], match[1]);
+  let oneEntries = 0;
+  for (const match of oneBody.matchAll(
+    /^\s*'(.)' -> Some\(\(([A-Z]+), "([^"]*)"\)\)\s*$/gm
+  )) {
+    addTableEntry(match[2], match[1], match[3]);
+    oneEntries += 1;
   }
+
+  // Both tables are read out of source text, so the shape they are written in
+  // is this scraper's input. A table that matched nothing used to surface as
+  // "every operator lacks a spelling" several assertions later, which is how a
+  // batch that only rewrote the tables read as a broken grammar.
+  assert.ok(twoEntries > 0, "the two-character operator table matched no entries");
+  assert.ok(oneEntries > 0, "the one-character operator table matched no entries");
 
   const unsignedShift = lexerSource.match(/tok\(USHR,\s*"([^"]+)"/);
   assert.ok(unsignedShift, "USHR spelling is missing");
