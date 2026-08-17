@@ -1389,26 +1389,83 @@ fn abs_parent(path: String) -> String !io =
     None -> "."
   }
 
+## The last segment of `path`, by exactly the rule `maven.artifacts` names an
+## artifact after: the text after the final `/`, with no normalization. Not
+## `fspath.basename`, which normalizes first and so answers differently for a
+## trailing slash — the two must agree here, and agreeing only for the paths
+## Coursier happens to hand back is not agreeing.
+fn jar_basename(path: String) -> String =
+  match str.last_index_of(path, "/") {
+    Some(i) -> str.drop(path, i + 1)
+    None -> path
+  }
+
+fn any_repeat(xs: List[String]) -> Bool = {
+  var seen: Set[String] = set.empty()
+  for x in xs {
+    if set.has(seen, x) { return true }
+    seen = set.insert(seen, x)
+  }
+  false
+}
+
+## Each resolved jar with the file name it is vendored under. `maven.artifacts`
+## answers this, and answers it by content: two coordinates can produce one jar
+## file name, and copying both to `lib/<basename>` dropped one of them without a
+## word — a deployment jar missing a dependency that was on the class path when
+## it compiled. So a name that collides is qualified by its hash.
+##
+## Hashing the closure to find that out is the same work the parent invocation
+## already did to verify dawn.lock, one process earlier: `build` re-execs with
+## the resolved jars on its class path (`maybe_with_known_deps`), and the child
+## was then reading and hashing all 11.1 MB of them again, 1.4s of the compiler's
+## own build, to learn names that are just the file names whenever no two jars
+## share one. Which is every resolution in practice.
+##
+## So: ask the file names first. They collide or they do not, and only when they
+## do is content the deciding question -- which is what `maven.artifacts` is for,
+## and it still gets asked. Nothing here makes the hash cheaper, on purpose:
+## `java.security.MessageDigest` and a `sha256` intrinsic are both ruled out,
+## for the reason recorded in packages/sha2/src/sha256.dawn.
+##
+## The one thing the two paths do not share: `maven.artifacts` reads every jar
+## before the caller copies any, so an unreadable jar used to be reported before
+## `lib/` was touched. The fast path finds it mid-copy, with the same message.
+## `lib/` was never all-or-nothing anyway -- a failing write panics mid-loop too.
+fn vendored_names(jars: List[String]) -> List[(String, String)] !io = {
+  var names: List[String] = []
+  for j in jars { names = names ++ [jar_basename(j)] }
+  if any_repeat(names) {
+    var out: List[(String, String)] = []
+    match maven.artifacts(jars) {
+      Ok(found) -> {
+        for a in found { out = out ++ [(a.path, a.name)] }
+      }
+      Err(e) -> panic(e)
+    }
+    out
+  } else {
+    var out: List[(String, String)] = []
+    var i = 0
+    while i < len(jars) {
+      out = out ++ [(jars[i], names[i])]
+      i = i + 1
+    }
+    out
+  }
+}
+
 ## Copy resolved jars next to the output jar, under lib/ — coursier's cache is
 ## a content-addressed path in the user's home, fine to compile against and
 ## useless to a deployed jar. Returns the manifest Class-Path entries.
-##
-## The file name comes from `maven.artifacts`, not from the source path: two
-## coordinates can produce one jar file name, and copying both to
-## `lib/<basename>` dropped one of them without a word — a deployment jar
-## missing a dependency that was on the class path when it compiled.
 fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
   var entries: List[String] = []
   if len(jars) == 0 { return entries }
-  let found = match maven.artifacts(jars) {
-    Ok(a) -> a
-    Err(e) -> panic(e)
-  }
+  let found = vendored_names(jars)
   let lib_dir = abs_parent(jar_path) ++ "/lib"
   let _ = io.mkdirs(lib_dir)
   for a in found {
-    let src = a.path
-    let name = a.name
+    let (src, name) = a
     let dst = lib_dir ++ "/" ++ name
     let bs =
       match io.read_bytes(src) {
@@ -1462,6 +1519,67 @@ fn uri_path(p: String) -> String = {
     }
   }
   out
+}
+
+## The names `maven.artifacts` gives `jars`, which is what `vendored_names` must
+## answer whichever path it takes.
+fn hashed_names(jars: List[String]) -> List[(String, String)] !io = {
+  var out: List[(String, String)] = []
+  match maven.artifacts(jars) {
+    Ok(found) -> {
+      for a in found { out = out ++ [(a.path, a.name)] }
+    }
+    Err(e) -> panic(e)
+  }
+  out
+}
+
+# The differential between not hashing and hashing. The expected names are
+# written out rather than compared only against `hashed_names`, because for the
+# colliding case that comparison is the slow path against itself: skipping the
+# hash there would answer two identical names, agree with nothing, and this test
+# is the only thing that says so.
+test "vendored file names are the hashed ones, hash or no hash" {
+  let root = match io.temp_dir("", "dawn-vendored-names-") {
+    Ok(d) -> d
+    Err(e) -> panic("temp dir: " ++ e.message)
+  }
+  with r <- bracket(root, p => pkgfetch.delete_tree(p))
+  let a = r ++ "/a"
+  let b = r ++ "/b"
+  let _ = io.mkdirs(a)
+  let _ = io.mkdirs(b)
+  for pair in [(a ++ "/api-1.0.jar", "one"), (b ++ "/api-1.0.jar", "two"),
+    (a ++ "/util-2.0.jar", "three"), (a ++ "/dup-3.0.jar", "same"),
+    (b ++ "/dup-3.0.jar", "same")] {
+    let (path, text) = pair
+    match io.write_file(path, text) {
+      Ok(_) -> ()
+      Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
+    }
+  }
+  # distinct file names: no hash is read, and the answer is the file names
+  let plain = [a ++ "/api-1.0.jar", a ++ "/util-2.0.jar"]
+  assert vendored_names(plain) ==
+    [(a ++ "/api-1.0.jar", "api-1.0.jar"), (a ++ "/util-2.0.jar", "util-2.0.jar")]
+  assert vendored_names(plain) == hashed_names(plain)
+  # one file name over two contents: every member of the group is qualified by
+  # twelve hex digits of its content, so the answer does not depend on the order
+  # Coursier returned them in
+  let clash = [a ++ "/api-1.0.jar", b ++ "/api-1.0.jar"]
+  assert vendored_names(clash) ==
+    [(a ++ "/api-1.0.jar", "7692c3ad3540-api-1.0.jar"),
+      (b ++ "/api-1.0.jar", "3fc4ccfe7458-api-1.0.jar")]
+  assert vendored_names(clash) == hashed_names(clash)
+  # the same bytes twice under one name is one artifact, not a collision, and
+  # the second copy does not become a second lib/ entry
+  let dup = [a ++ "/dup-3.0.jar", b ++ "/dup-3.0.jar"]
+  assert vendored_names(dup) == [(a ++ "/dup-3.0.jar", "dup-3.0.jar")]
+  assert vendored_names(dup) == hashed_names(dup)
+  # no jars at all, and a path with no directory in it
+  let none: List[String] = []
+  assert vendored_names(none) == []
+  assert jar_basename("api-1.0.jar") == "api-1.0.jar"
 }
 
 test "a class-path entry is a URI reference, not a path" {
