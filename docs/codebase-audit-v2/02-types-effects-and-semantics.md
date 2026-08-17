@@ -394,6 +394,57 @@
   问题混进一批机械改名里。**正确的立项名是「`Show` 与 `Display` 分层」，判据是有没有
   user-facing 显示这一层，而不是 `Char` 显示成什么。** 破坏窗口批因此只剩 `LIB-06`。
 
+- **勘察（2026-08-18，实测）。裁决权仍在维护者，本节只交事实。** 上一条问的「有没有
+  user-facing 显示这一层」，答案是**有，而且早就有**，只是不叫这个名字。
+
+  **实测（`bin/dawn run` 探针）：**
+
+  | 表达式 | 结果 |
+  |---|---|
+  | `show("hi")` | `"hi"`（带引号） |
+  | `to_string("hi")` / `${"hi"}` | `hi`（不带） |
+  | `show(Box { v: "hi" })` | `Box { v: "hi" }`（字段带引号） |
+  | `show('a')` / `${'a'}` / `Box { v: 'a' }` | `97` |
+
+  这条区别不是偶然：spec §4.3 已写下「顶层的 `String` 不加引号，嵌套的加」，
+  `selfhost/src/ir/interp.dawn:2747` 有一条单测就叫 `` `show` is the nested rendering
+  and `to_string` is not ``，而它承重：`SEM-03` 就是这层的 opaque 剥法出的真缺陷。
+  **所以「加一层」这个说法是错的，正确说法是「已有的那层要不要对用户开放」。**
+
+  **那层的全部实现是 `selfhost/src/ir/lower.dawn:261` 的 `to_str`**，内容只有：
+  `TyString` 恒等、`TyUnit` 出 `()`、opaque **逐层**剥并在每层问 `has_own_show`
+  （一次剥到底就是 `SEM-03`）、其余交给 `Show` 字典。于是今天用户类型的 Display 恒等于
+  `Show`，无处可分。`Char` 落在错的一侧的原因很具体：它是 `opaque type Char = Int`
+  且没有自己的 `Show`，`to_str` 剥到 `Int` 就交给 `Int` 的 impl 了。
+
+  **一条对 #196「不做」理由的更正。** 那条理由说给 `Char` 写显示会让它不再「就是它的
+  目标」、`opaque-twin` 判据随之不成立。这对 `impl Show[Char]` 成立，但对一个**只被
+  `to_string`/`${}` 消费的 `Display` trait 不成立**：`Show[Char]` 保持继承 `Int` 的，
+  `opaque-twin` 的判据一字不改。而且这样的 trait 有现成先例，`Index` 就是**不注入**
+  函数命名空间的预置 trait（spec §3.5，运算符本身在 §4.8），`Display` 可以同样不注入。落地形状小到
+  出乎意料：`to_str` 把 `has_own_show` 改成先问 `has_own_display`，加一个 prelude
+  trait id（今天六个：`Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Index`）。**没有任何 `Display`
+  impl 时字节完全不变**，只有 std 真写了 `impl Display[Char]` 之后、且只在插值到
+  `Char` 的地方才有 Emit-Change。
+
+  **反方向的成本也量了一条：** 不走 trait 而在 `to_str` 里给 `Char` 加一条臂，等于把
+  2026-07-30 删掉 `Cursor` 的 `Ty` 变体那个决定走回去（`types.dawn:350` 的注释写着
+  `CHAR_OPAQUE_ID` 全仓只用于构造类型、不做分派键，共 2 处引用）。这条不推荐。
+
+  **需求侧实测：全仓 28 处 `str.from_char`（不含 `std/str` 自身与嵌入副本），
+  其中只有 4 处是「本想显示一个字符」：**
+  `examples/text/chars.dawn:59`、`:64`（这个例子存在的目的就是讲这个意外），
+  `selfhost/src/front/lexer.dawn:585`（`unknown escape: \x`）、`:935`
+  （`unrecognized character: x`）。另外 24 处是正常的 Char→String 构造
+  （拼一个 `\r`、百分号解码之类），有了 `Display` 也不会少一处。
+  **归因到本条的缺陷数：0。** `selfhost/src/driver/stdlib.dawn:89` 还把
+  `str.from_char(...)` 作为 `char_to_string` 的迁移提示写在了 hint 里。
+
+  **待裁决（维护者）：** 上面把成本从「推翻一条设计地基」修正为「一个不注入的预置
+  trait + `to_str` 多问一次」，把收益量为「4 个调用点，0 个缺陷，全部已用显式函数写对」。
+  在这两个数字之下要不要做，是排期判断而非技术判断。若判不做，建议把重开条件从
+  「维护者重开边界」改成可检验的形式，例如「`Display` 出现第二个 `Char` 之外的消费者」。
+
 ## SEM-17 — P3（已修）— Java `char` bridge 诊断明确两种字符模型
 
 > **已修（2026-08-09，`3fc1e9e`）。** 原诊断把 bridge 不兼容误报成 Dawn 没有字符类型；当前诊断明确 Java `char` 是一个 UTF-16 code unit，而 Dawn `Char` 是 Unicode scalar，并给出返回解码后 `int` 或 `String` 的 adapter 路径。
