@@ -20,7 +20,8 @@ use check/types.{
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   EPure, EIo, EffVar, ELabeled, eff_union, eff_base, eff_labels,
   adt_of, trait_of, subst,
-  builtin_type_at, builtin_type_visible, builtin_type_visible_at_return,
+  BuiltinTypeI, builtin_type_map,
+  builtin_type_visible, builtin_type_visible_at_return,
   builtin_type_hard_reserved, builtin_type_apply, builtin_type_render,
   public_builtin_type_names,
   builtins, internal_builtins,
@@ -141,6 +142,10 @@ pub type Cx = {
   # intrinsic table, which is itself derived from the builtin one.
   bins: Map[String, Sig],
   hidden_bins: Set[String],
+  # the compiler-owned type inventory, keyed by name, for the same reason: it
+  # is a list literal, so resolve_named rebuilt all twelve records for every
+  # named type a module mentions
+  btypes: Map[String, BuiltinTypeI],
   adts_by_name: Map[String, Int],
   aliases: Map[String, AliasE],
   alias_resolved: Map[String, Ty],
@@ -263,6 +268,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     std_fns: map.empty(),
     bins: builtins(),
     hidden_bins: internal_builtins(),
+    btypes: builtin_type_map(),
     adts_by_name: map.empty(),
     aliases: map.empty(),
     alias_resolved: map.empty(),
@@ -771,7 +777,7 @@ fn resolve_named(
 ) -> (Cx, Ty) !io = {
   # Return-only names are hard-reserved, so they win even if a rejected
   # declaration left a same-spelled type parameter in the recovery scope.
-  match builtin_type_at(name) {
+  match map.get(cx.btypes, name) {
     Some(info) -> if builtin_type_hard_reserved(info) {
       if len(targs) > 0 {
         return (cerr(cx, "`" ++ name ++ "` is not generic", lo, hi), TyError)
@@ -831,7 +837,7 @@ fn resolve_named(
     }
     None -> ()
   }
-  match builtin_type_at(name) {
+  match map.get(cx.btypes, name) {
     Some(info) -> if builtin_type_visible(info, cx.is_std_module) {
       let arity = len(info.params)
       if len(targs) != arity {

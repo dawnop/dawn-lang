@@ -401,6 +401,17 @@ pub fn builtin_type_at(name: String) -> Option[BuiltinTypeI] = {
   None
 }
 
+## The same inventory, keyed by name. `builtin_type_inventory` is a list
+## literal, so every `builtin_type_at` call allocated the twelve records afresh;
+## a resolver that asks about each name a module mentions pays for the table
+## twice per name. Cx.btypes holds one of these for the life of a Cx, the way
+## Cx.bins already holds the signature table.
+pub fn builtin_type_map() -> Map[String, BuiltinTypeI] = {
+  var m: Map[String, BuiltinTypeI] = map.empty()
+  for info in builtin_type_inventory() { m = map.insert(m, info.name, info) }
+  m
+}
+
 pub fn builtin_type_visible(info: BuiltinTypeI, is_std: Bool) -> Bool =
   match info.access {
     BtPublic -> true
