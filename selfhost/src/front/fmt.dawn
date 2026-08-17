@@ -38,7 +38,7 @@ use front/token.{
 ## Reformat `source`, or report the lexer diagnostics that make reformatting
 ## unsafe. `Err` means the caller must leave the file exactly as it found it.
 pub fn format(source: String) -> Result[String, List[Diag]] = {
-  let (raw, comments, diags) = lexer.lex_with_comments(source)
+  let (cps, raw, comments, diags) = lexer.lex_with_comments_cps(source)
   if len(diags) > 0 { return Err(diags) }
   var code: List[Token] = []
   for t in raw {
@@ -46,7 +46,7 @@ pub fn format(source: String) -> Result[String, List[Diag]] = {
   }
   let stream = sort_by(code ++ comments, (a: Token, b: Token) => a.lo - b.lo)
   if len(stream) == 0 { return Ok("") }
-  Ok(reflow(source, stream, unary_minus(raw), postfix_bang(raw), block_arrow(source, raw)))
+  Ok(reflow(cps, stream, unary_minus(raw), postfix_bang(raw), block_arrow(cps, raw)))
 }
 
 ## Span starts of FATARROW tokens that end a brace-block's head line -- the
@@ -67,9 +67,11 @@ pub fn format(source: String) -> Result[String, List[Diag]] = {
 ## swallows the NEWLINE after every line-continuing token (`{`, `,`, `=>`
 ## themselves -- lexer.continues_line), so the token stream cannot say which
 ## line a brace was opened on. Spans are code-point indices and the tokens are
-## in order, so one cursor pass answers it.
-fn block_arrow(src: String, raw: List[Token]) -> Set[Int] = {
-  let cps = code_points(src)
+## in order, so one cursor pass answers it. The code points come from the lexer
+## (`lex_with_comments_cps`) rather than from a `code_points(src)` of its own:
+## this pass, `reflow` and the lex itself all want the same array, and decoding
+## the file once per pass made `format` decode it three times.
+fn block_arrow(cps: List[Char], raw: List[Token]) -> Set[Int] = {
   var out: Set[Int] = set.empty()
   var opener_kinds: List[TokKind] = []
   var opener_lines: List[Int] = []
@@ -199,7 +201,7 @@ fn is_effect_union(raw: List[Token], start: Int) -> Bool = {
 type Opener = { at: Int, brace: Bool }
 
 fn reflow(
-  src: String,
+  cps: List[Char],
   toks: List[Token],
   unary: Set[Int],
   postfix: Set[Int],
@@ -232,7 +234,6 @@ fn reflow(
   # A single left-to-right cursor over the source's code points. Token spans are
   # sorted and non-overlapping, so we never rewind: reflow stays O(n) instead of
   # re-slicing the whole source per token (which made it O(n²), spec §1.8).
-  let cps = code_points(src)
   var cur_ci = 0
   var i = 0
   while i < len(toks) {
