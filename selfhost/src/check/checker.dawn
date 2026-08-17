@@ -8763,9 +8763,11 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   # 5. inferred functions first, in call-dependency order — every callee's
   # signature is final before any caller is checked; a cycle must annotate
   let fnds = module_fns(m)
-  var sealed = sigs
-  var tfuns: List[Option[TFun]] = []
-  for _k in 0..len(fnds) { tfuns = tfuns ++ [no_tfun()] }
+  # What the inferred pass produced, keyed by declaration index. It fills
+  # scattered positions in dependency order, and writing each result into a
+  # list made the pass O(F^2) in the module's function count: a 3200-function
+  # module spent 1.02s above the floor on the rebuilds alone.
+  var inferred: Map[Int, TFun] = map.empty()
   var pending: List[Int] = []
   var i = 0
   for d in fnds {
@@ -8814,10 +8816,11 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
           if not set.has(done, r) { ready = false }
         }
         if ready {
-          let (cxe, ssig, tf) = check_fn_inferred(cx1, d, sealed[idx], evs[idx])
+          # each pending index is completed at most once, so the signature this
+          # reads is still the unsealed one the list held
+          let (cxe, _, tf) = check_fn_inferred(cx1, d, sigs[idx], evs[idx])
           cx1 = cxe
-          sealed = list.take(sealed, idx) ++ [ssig] ++ list.drop(sealed, idx + 1)
-          tfuns = list.take(tfuns, idx) ++ [Some(tf)] ++ list.drop(tfuns, idx + 1)
+          inferred = map.insert(inferred, idx, tf)
           done = set.insert(done, d.name)
           progress = true
         } else {
@@ -8851,13 +8854,22 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
     visible = set.insert(visible, d.name)
     ci = ci + 1
   }
-  # annotated function bodies
+  # annotated function bodies. The typed functions are assembled here, in
+  # declaration order, taking the inferred pass's result where it has one --
+  # the sealed signature it also produced went into cx.fns at the time and is
+  # not read back, and an inferring index never reaches check_fn.
+  var tfuns: List[Option[TFun]] = []
   i = 0
   for d in fnds {
     if not sigs[i].inferring {
-      let (cxe, tf) = check_fn(cx1, d, sealed[i], evs[i])
+      let (cxe, tf) = check_fn(cx1, d, sigs[i], evs[i])
       cx1 = cxe
-      tfuns = list.take(tfuns, i) ++ [Some(tf)] ++ list.drop(tfuns, i + 1)
+      tfuns = tfuns ++ [Some(tf)]
+    } else {
+      match map.get(inferred, i) {
+        Some(tf) -> { tfuns = tfuns ++ [Some(tf)] }
+        None -> { tfuns = tfuns ++ [no_tfun()] }
+      }
     }
     i = i + 1
   }

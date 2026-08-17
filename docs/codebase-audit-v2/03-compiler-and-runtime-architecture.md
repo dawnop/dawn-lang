@@ -217,9 +217,9 @@
   即 Emit-Change。所以本项**只有 checker 那半是活账**（`impl_sigs[ii]`/`msigs[mi]`，
   对应 #88 的余账「`pass_register_impls` 可拆块」）；emit 那半判不做，重开要先推翻上述非目标。
 
-## ARC-08 — P2 — 返回推断调度与回填至少二次复杂度
+## ARC-08 — P2 — 返回推断调度与回填至少二次复杂度（部分修复）
 
-<!-- audit-anchor: present selfhost/src/check/checker.dawn | list.take(sealed, idx) -->
+<!-- audit-anchor: present selfhost/src/check/checker.dawn | var remaining: List[Int] = [] -->
 
 - **证据：S。** pending functions 每轮全表扫描：`selfhost/src/check/checker.dawn:7337`；逆拓扑依赖链可每轮只完成一个。每完成一项又用 `take ++ [x] ++ drop` 重建 `sealed` 与 `tfuns`：`selfhost/src/check/checker.dawn:7352`；`take/drop` 会遍历复制：`std/list.dawn:195`、`:201`。
 - **影响：** 顶层函数数 F 时，单回填已经 O(F²)；generated code、超大 module 与未来 incremental check 会首先暴露。
@@ -230,6 +230,22 @@
   `take ++ [x] ++ drop` 的单次回填因而是 O(F²) 到 O(F³)，不是原文说的 O(F²)。
   另一条落地约束：**必须按 declaration index 写回**，否则取号顺序改变会触发与 `ARC-09`
   同款的全仓 ID 漂移。本项与 `ARC-01` 是同一段代码，同刀改最省。
+
+> **后续处置（2026-08-17）：partial。回填那半已关，调度那半没动。**
+> `check_module` 不再重建列表：推断出的 `TFun` 进一张按 declaration index 的
+> `Map[Int, TFun]`，`tfuns` 由紧随其后的 annotated-body 循环**一次按声明序装配**；
+> `sealed` 整个列表随之消失（`check_fn_inferred` 早已把封好的签名写进 `cx.fns`，
+> 推断位从不进 `check_fn`，pending 里每个 index 最多完成一次，所以那张列表唯一被读回的
+> 项就是未封的 `sigs`）。合成语料实测（F 个带标注顶层函数，`check`，同机交错 5 轮，
+> 中位墙钟）：F=400 0.646→0.596s、800 0.744→0.668、1600 0.867→0.732、3200 1.386→0.878；
+> 超出地板的增量 0.050/0.076/0.135/0.508，倍率 1.5/1.8/3.8 收敛到 4，即原文的二次项确实
+> 存在且已消失。selfhost 自身量不到：最大 module 约 250 个函数，`check selfhost` 上单独
+> 测这一刀是 +0.27% 墙钟、−0.06% CPU，都在噪声内（sd 2.7%/4.0%）——它是给生成代码买的保险，
+> 不是今天的收益。
+>
+> **残余：调度仍是每轮全表扫描**（`while progress` 里 `for idx in pending`，逆拓扑链
+> 可每轮只完成一项，P 项 pending 最坏 O(P²) 次 ready 判定）。原文建议的 indegree
+> queue/SCC 一次调度没做，本项因此不是 fixed。
 
 ## ARC-09 — P2 — 一个全局 `next_id` 混合稳定身份与临时身份
 

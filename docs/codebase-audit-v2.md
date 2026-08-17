@@ -112,25 +112,25 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 库（16）：`LIB-01`–`LIB-05`、`LIB-07`–`LIB-12`、`LIB-14`、`LIB-15`、`LIB-17`–`LIB-19`。
 - 治理（13）：`GOV-01`–`GOV-13`。
 
-#### 当前 partial（5）
+#### 当前 partial（6）
 
 - 语义（1）：`SEM-04`。
-- 架构（3）：`ARC-01`、`ARC-02`、`ARC-11`。
+- 架构（4）：`ARC-01`、`ARC-02`、`ARC-08`、`ARC-11`。
 - 库（1）：`LIB-16`。
 
-#### 当前 open（10）
+#### 当前 open（9）
 
 - 语法（1）：`SYN-17`。
 - 语义（3）：`SEM-09`、`SEM-10`、`SEM-16`。
-- 架构（4）：`ARC-07`–`ARC-10`。
+- 架构（3）：`ARC-07`、`ARC-09`、`ARC-10`。
 - 库（2）：`LIB-06`、`LIB-13`。
 
 #### 当前 retracted（2）
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**82 fixed + 5 partial + 10 open + 2 retracted = 99**。逐专题矩阵：
-语法 **18/0/1/0**、语义 **12/1/3/2**、架构 **6/3/4/0**、工具链 **17/0/0/0**、
+当前计数自检：**82 fixed + 6 partial + 9 open + 2 retracted = 99**。逐专题矩阵：
+语法 **18/0/1/0**、语义 **12/1/3/2**、架构 **6/4/3/0**、工具链 **17/0/0/0**、
 库 **16/1/2/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
