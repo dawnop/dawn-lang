@@ -761,8 +761,8 @@ def python_inputs(text, tree):
 # blind spot rather than as a decision: the VS Code grammar contract is
 # JavaScript, so `is_script` did not recognise it, rule B never read it, and the
 # one gate that scrapes the compiler's lexer and token tables was absent from
-# every answer this map gave about them. A lexer batch ran the 37 gates listed
-# for it, all green, and reddened a 38th nobody was told about.
+# every answer this map gave about them. A lexer batch ran every gate listed for
+# it, all green, and reddened one this map had never mentioned.
 SCRIPT_SUFFIXES = (".sh", ".py", ".js")
 
 
@@ -852,8 +852,9 @@ def npm_script(words, tree, workdir):
     contract is started exactly that way. The mapping from the lifecycle name
     to a command is in package.json, which is in the tree, so it is read rather
     than guessed. When it cannot be read the gate keeps only the coverage its
-    working directory gives it, which is the under-claim this file prefers; the
-    `npm-script-*` mutant is the negative control for that boundary.
+    working directory gives it, which is the under-claim this file prefers.
+    `npm-run-stops-naming-the-contract` is the negative control for that
+    boundary.
     """
     if not workdir or not words or words[0] != "npm":
         return None
@@ -2240,6 +2241,17 @@ ASSERTIONS = [
         ),
     ),
     (
+        "js_join_probe",
+        "rule B reaches a JavaScript gate started as `npm test`, and reads the "
+        "`path.join` calls in it, which is the only reason anything says the "
+        "editor grammar contract watches the compiler's lexer",
+        lambda c, b: _cites(
+            c,
+            "selfhost/src/front/lexer.dawn",
+            "editors/vscode/test/scope-contract.js",
+        ),
+    ),
+    (
         "glob_literal_probe",
         "a glob with a literal head is expanded against the tree",
         lambda c, b: not _cites(
@@ -2610,6 +2622,36 @@ def mutants(base):
             edits={
                 "scripts/check-gate-budgets.py": swap(
                     'root / ".github" / "workflows" / name', "root"
+                )
+            },
+        ),
+        Mutant(
+            "npm-run-stops-naming-the-contract",
+            "rule B through the npm indirection. A gate whose command is `npm "
+            "test` names no file, so the package.json script is what connects "
+            "it to one; with the lifecycle name bound to something else the "
+            "editor grammar job has to stop watching the compiler's lexer, "
+            "which is the state this map was silently in",
+            edits={
+                "editors/vscode/package.json": swap(
+                    '"test": "node test/scope-contract.js"',
+                    '"test": "node --test"',
+                )
+            },
+        ),
+        Mutant(
+            "js-path-in-segments",
+            "the JavaScript reader, run against the other spelling of the same "
+            "join. Recorded with an empty red set: a segmented "
+            "`path.join(ROOT, \"a\", \"b\")` is the same declared input as the "
+            "one-literal form and coverage may not move, while a map that only "
+            "scraped slash-bearing tokens loses it. Rule 3 is what makes the "
+            "silence mean something, and `npm-run-stops-naming-the-contract` "
+            "is counted on the same coupling so the pair cannot go vacuous",
+            edits={
+                "editors/vscode/test/scope-contract.js": swap(
+                    'path.join(ROOT, "selfhost/src/front/lexer.dawn")',
+                    'path.join(ROOT, "selfhost", "src", "front", "lexer.dawn")',
                 )
             },
         ),
