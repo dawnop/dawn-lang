@@ -64,9 +64,13 @@ paths no gate watches) is a ratchet checked in both directions.
   B  A gate's script names a path, so that path is coarse for it. Slash-bearing
      tokens, shell globs, and for Python gates the `ROOT / "a" / "b"` joins and
      `.glob()` patterns that a regular expression cannot tell from division.
-     For JavaScript gates the `path.join(ROOT, "a", "b")` and
-     `path.resolve(__dirname, "..")` calls, which are the same statement in the
-     only other language a gate here is written in. A gate started as `npm test`
+     For JavaScript gates the `join(ROOT, "a", "b")` and
+     `resolve(__dirname, "..")` calls, which are the same statement in the
+     only other language a gate here is written in, under whichever name the
+     file bound them to: `path` is a name a script chooses, not a keyword, so
+     the binding is read from the `require`/`import` that made it and a
+     spelling this cannot follow is reported rather than read as naming
+     nothing. A gate started as `npm test`
      is followed through the `scripts` table of the package.json in its working
      directory, because the lifecycle name is not a path and the table that
      binds it to one is in the tree.
@@ -763,35 +767,89 @@ def python_inputs(text, tree):
 # one gate that scrapes the compiler's lexer and token tables was absent from
 # every answer this map gave about them. A lexer batch ran every gate listed for
 # it, all green, and reddened one this map had never mentioned.
-SCRIPT_SUFFIXES = (".sh", ".py", ".js")
+#
+# `.mjs` and `.cjs` are the same language under Node's two module systems, and
+# a gate is free to migrate between them: a rename that this tuple did not
+# recognise would take the gate out of every answer, which is the failure
+# above with a different spelling.
+JS_SUFFIXES = (".js", ".mjs", ".cjs")
+SCRIPT_SUFFIXES = (".sh", ".py") + JS_SUFFIXES
 
 
 def is_script(path, tree):
     return path in tree.fileset and Path(path).suffix in SCRIPT_SUFFIXES
 
 
-JS_PATH_CALL = re.compile(
-    r"(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*)?"
-    r"path\.(?:join|resolve)\(([^()]*)\)"
-)
 JS_STRING = re.compile(r"^\"((?:[^\"\\]|\\.)*)\"$|^'((?:[^'\\]|\\.)*)'$")
 
+# The path module, under either module system and either of Node's two
+# spellings of its name.
+_JS_PATH_MODULE = r"""["'](?:node:)?path["']"""
+JS_NAMESPACE_BIND = re.compile(
+    r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*"
+    + _JS_PATH_MODULE
+    + r"\s*\)"
+    r"|import\s+([A-Za-z_$][\w$]*)\s+from\s*" + _JS_PATH_MODULE
+)
+JS_MEMBER_BIND = re.compile(
+    r"(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*require\(\s*" + _JS_PATH_MODULE + r"\s*\)"
+    r"|import\s*\{([^{}]*)\}\s*from\s*" + _JS_PATH_MODULE
+)
+JS_PATH_MENTION = re.compile(r"(?:require\(\s*|from\s*)" + _JS_PATH_MODULE)
+JS_JOINERS = ("join", "resolve")
 
-def js_inputs(text, tree, script_dir):
-    """Paths a JavaScript gate builds out of `path.join` / `path.resolve`.
+# The needle `js_binding_readable` watches for. A gate that reaches for this
+# module in a spelling the reader below cannot follow has to say so: silence
+# there is indistinguishable from a gate that names no paths at all, which is
+# the state this map was in about the editor grammar contract for as long as it
+# existed.
+JS_UNREADABLE_BINDING = "reaches for the path module under a name this reader"
+
+
+def js_path_callees(text):
+    """-> the spellings of `join`/`resolve` this file bound, or an empty set.
+
+    Read from the declaration rather than matched at the call, because `join(`
+    on its own is a name any file may have its own function for, while
+    `require("node:path")` says what it is. Both module systems and both
+    binding forms are the same declared input:
+
+        const path = require("node:path")      -> path.join, path.resolve
+        const { join } = require("node:path")  -> join
+        import path from "node:path"           -> path.join, path.resolve
+        import { join } from "node:path"       -> join
+
+    A binding that renames what it takes (`{ join: pjoin }`) is deliberately
+    not followed. The caller turns an empty answer on a file that mentions the
+    module into a problem, so the unfollowed spelling is loud rather than
+    silently unread.
+    """
+    callees = set()
+    for match in JS_NAMESPACE_BIND.finditer(text):
+        name = match.group(1) or match.group(2)
+        callees |= {f"{name}.{fn}" for fn in JS_JOINERS}
+    for match in JS_MEMBER_BIND.finditer(text):
+        for part in (match.group(1) or match.group(2)).split(","):
+            if part.strip() in JS_JOINERS:
+                callees.add(part.strip())
+    return callees
+
+
+def js_inputs(text, tree, script):
+    """-> (paths a JavaScript gate builds out of path joins, problems).
 
     The same statement `ROOT / "a" / "b"` is in a Python gate, and read for the
     same reason: scope-contract.js names its whole subject that way, so without
     this the editor grammar job looks as if it read only its own directory and
     the compiler's lexer looks as if no editor gate watched it. Regular
     expressions are enough here where the Python side needed a parse: `/` is
-    ambiguous with division and `path.join(` is not.
+    ambiguous with division and a declared join call is not.
 
-    `__dirname` is the script's own directory, and a name bound to one of these
-    calls is usable as the base of the next, which is how `ROOT` is spelled:
-    `path.resolve(__dirname, "../../..")`. A base this cannot follow, or one
-    that normalizes outside the repository, contributes nothing rather than
-    contributing a guess.
+    `__dirname` (`import.meta.dirname` under ESM) is the script's own
+    directory, and a name bound to one of these calls is usable as the base of
+    the next, which is how `ROOT` is spelled: `resolve(__dirname, "../../..")`.
+    A base this cannot follow, or one that normalizes outside the repository,
+    contributes nothing rather than contributing a guess.
     """
 
     def literal(arg):
@@ -800,9 +858,27 @@ def js_inputs(text, tree, script_dir):
             return None
         return match.group(1) if match.group(1) is not None else match.group(2)
 
-    env = {"__dirname": script_dir}
+    callees = js_path_callees(text)
+    if not callees:
+        if JS_PATH_MENTION.search(text):
+            return set(), [
+                f"{script} {JS_UNREADABLE_BINDING} can follow, so every path it "
+                "builds out of that module is missing from this map. Bind it as "
+                "`const path = require(\"node:path\")` or "
+                "`const { join } = require(\"node:path\")`, or teach "
+                "js_path_callees the spelling"
+            ]
+        return set(), []
+    call = re.compile(
+        r"(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*)?"
+        r"(?:"
+        + "|".join(re.escape(c) for c in sorted(callees, key=lambda c: (-len(c), c)))
+        + r")\(([^()]*)\)"
+    )
+    script_dir = posixpath.dirname(script)
+    env = {"__dirname": script_dir, "import.meta.dirname": script_dir}
     found = set()
-    for match in JS_PATH_CALL.finditer(text):
+    for match in call.finditer(text):
         name, raw = match.group(1), match.group(2)
         args = [a for a in raw.split(",") if a.strip()]
         if not args:
@@ -830,7 +906,7 @@ def js_inputs(text, tree, script_dir):
             env[name] = joined
         if joined:
             found |= resolve(joined, tree)
-    return found
+    return found, []
 
 
 SEGMENT_SPLIT = re.compile(r"[\n;|&]+|\$\(|`|\(\s")
@@ -1053,10 +1129,10 @@ class Map:
                 names = path_tokens(body, tree) | shell_targets(body, tree)
                 if Path(script).suffix == ".py":
                     names |= python_inputs(tree.read(script), tree)
-                if Path(script).suffix == ".js":
-                    names |= js_inputs(
-                        tree.read(script), tree, posixpath.dirname(script)
-                    )
+                if Path(script).suffix in JS_SUFFIXES:
+                    named, unreadable = js_inputs(tree.read(script), tree, script)
+                    names |= named
+                    self.problems += unreadable
                 for token in sorted(names):
                     self.add_under(
                         token,
@@ -2061,9 +2137,57 @@ class Baseline:
 
     def __init__(self, tree):
         self.tree = tree
-        self.unwatched = len(Map(tree).unseen())
+        gm = Map(tree)
+        self.unwatched = len(gm.unseen())
         self.coupling = choose_coupling(tree)
         self.package = choose_package(tree)
+        self.js_gate = choose_js_gate(gm)
+
+
+def js_gate_script(gm):
+    """-> the JavaScript gate's entry script in this tree, or None."""
+    found = {
+        script
+        for gate in gm.gates
+        for script in gate_scripts(gate, gm.tree)
+        if Path(script).suffix in JS_SUFFIXES
+    }
+    return sorted(found)[0] if found else None
+
+
+def js_gate_manifest(tree, script):
+    """-> the package.json whose `scripts` table names this script, or None."""
+    parts = posixpath.dirname(script).split("/")
+    while parts:
+        where = "/".join(parts)
+        manifest = f"{where}/package.json"
+        if manifest in tree.fileset and posixpath.relpath(script, where) in tree.read(
+            manifest
+        ):
+            return manifest
+        parts.pop()
+    return None
+
+
+def choose_js_gate(gm):
+    """-> (the JavaScript gate's script, a compiler module it names,
+    the package.json that binds it to `npm test`), or None.
+
+    Derived from the tree rather than written down, for the reason
+    `choose_package` gives one paragraph further on. `js_join_probe` is about
+    whichever file the JavaScript gate is; with the name spelled out here, a
+    mutant that renames it to `.cjs` would redden that probe by renaming its
+    subject, and a rename is exactly what has to stay invisible.
+    """
+    script = js_gate_script(gm)
+    if script is None:
+        return None
+    manifest = js_gate_manifest(gm.tree, script)
+    named, _ = js_inputs(gm.tree.read(script), gm.tree, script)
+    modules = sorted(p for p in named if p.startswith("selfhost/src/"))
+    if not modules or manifest is None:
+        return None
+    return script, modules[0], manifest
 
 
 def choose_package(tree):
@@ -2112,6 +2236,20 @@ def _clean(problems, needle):
 
 def _cites(check, path, script):
     return any(script in obs.why for obs in check.map.verdict(path))
+
+
+def _js_join_probe(check, base):
+    """The JavaScript half of rule B, with its subject read from each tree.
+
+    The gate's script is looked up in the tree under test and the compiler
+    module in the clean one: the coupling that has to survive is "whatever the
+    JavaScript gate is called, it is still why that module is watched", so a
+    rename passes and a reader that lost the joins does not.
+    """
+    if base.js_gate is None:
+        return False
+    script = js_gate_script(check.map)
+    return script is not None and _cites(check, base.js_gate[1], script)
 
 
 def _has_head_compiler_coarse(gm, path="selfhost/dawn.toml"):
@@ -2243,13 +2381,15 @@ ASSERTIONS = [
     (
         "js_join_probe",
         "rule B reaches a JavaScript gate started as `npm test`, and reads the "
-        "`path.join` calls in it, which is the only reason anything says the "
-        "editor grammar contract watches the compiler's lexer",
-        lambda c, b: _cites(
-            c,
-            "selfhost/src/front/lexer.dawn",
-            "editors/vscode/test/scope-contract.js",
-        ),
+        "path joins in it, which is the only reason anything says the editor "
+        "grammar contract watches the compiler's lexer",
+        _js_join_probe,
+    ),
+    (
+        "js_binding_readable",
+        "a JavaScript gate that reaches for the path module in a spelling the "
+        "reader cannot follow is reported, not read as naming nothing",
+        lambda c, b: _clean(c.problems, JS_UNREADABLE_BINDING),
     ),
     (
         "glob_literal_probe",
@@ -2321,6 +2461,17 @@ def provide(content):
                 "that adds it is testing something else"
             )
         return content
+
+    return apply
+
+
+def then(*steps):
+    """Several edits to one file, applied in order."""
+
+    def apply(text, where):
+        for step in steps:
+            text = step(text, where)
+        return text
 
     return apply
 
@@ -2402,8 +2553,60 @@ class Mutant:
         self.record = record
 
 
+def js_renamed(base, suffix, body=None):
+    """The mutant pair for a JavaScript gate that changes file extension.
+
+    Node's module systems are chosen by extension, so this is a rename a real
+    gate makes; both halves have to move together, since the package.json entry
+    is the only thing that binds the lifecycle name to a file.
+    """
+    script, _, manifest = base.js_gate
+    target = script[: -len(Path(script).suffix)] + suffix
+    directory = posixpath.dirname(manifest)
+    return (
+        lambda files: [f for f in files if f != script] + [target],
+        {
+            target: provide(base.tree.read(script) if body is None else body),
+            manifest: swap(
+                posixpath.relpath(script, directory),
+                posixpath.relpath(target, directory),
+            ),
+        },
+    )
+
+
+JS_ESM = then(
+    swap(
+        'const assert = require("node:assert/strict");\n'
+        'const fs = require("node:fs");\n'
+        'const path = require("node:path");\n',
+        'import assert from "node:assert/strict";\n'
+        'import fs from "node:fs";\n'
+        'import path from "node:path";\n'
+        'import { createRequire } from "node:module";\n'
+        "\nconst require = createRequire(import.meta.url);\n",
+    ),
+    swap_all("__dirname", "import.meta.dirname"),
+)
+
+
 def mutants(base):
     """The mutant set, built against the clean tree's baseline."""
+    js_script = base.js_gate[0]
+    # The literal, spelled one segment per argument. Both JavaScript mutants
+    # that are about the reader start here: with the path in one string it is
+    # also a slash-bearing token, so `path_tokens` answers and the reader could
+    # be missing entirely without either of them noticing.
+    js_segment = swap(
+        f'path.join(ROOT, "{base.js_gate[1]}")',
+        "path.join(ROOT, "
+        + ", ".join(f'"{part}"' for part in base.js_gate[1].split("/"))
+        + ")",
+    )
+    cjs_files, cjs_edits = js_renamed(base, ".cjs")
+    mjs_files, mjs_edits = js_renamed(
+        base, ".mjs", then(js_segment, JS_ESM)(base.tree.read(js_script), js_script)
+    )
     return [
         Mutant(
             "golden-names-a-ghost-module",
@@ -2633,9 +2836,10 @@ def mutants(base):
             "editor grammar job has to stop watching the compiler's lexer, "
             "which is the state this map was silently in",
             edits={
-                "editors/vscode/package.json": swap(
-                    '"test": "node test/scope-contract.js"',
-                    '"test": "node --test"',
+                base.js_gate[2]: swap(
+                    "node "
+                    + posixpath.relpath(js_script, posixpath.dirname(base.js_gate[2])),
+                    "node --test",
                 )
             },
         ),
@@ -2648,10 +2852,64 @@ def mutants(base):
             "scraped slash-bearing tokens loses it. Rule 3 is what makes the "
             "silence mean something, and `npm-run-stops-naming-the-contract` "
             "is counted on the same coupling so the pair cannot go vacuous",
+            edits={js_script: js_segment},
+        ),
+        Mutant(
+            "js-path-destructured",
+            "the same join, taken off the module by name instead of through "
+            "it. `const { join } = require(\"node:path\")` is the same declared "
+            "input as `const path = ...`, so coverage may not move; recorded "
+            "with an empty red set. Segmented as well, because that is what "
+            "takes `path_tokens` out of the answer: a reader that matched "
+            "`path.` as a literal prefix finds nothing here",
             edits={
-                "editors/vscode/test/scope-contract.js": swap(
-                    'path.join(ROOT, "selfhost/src/front/lexer.dawn")',
-                    'path.join(ROOT, "selfhost", "src", "front", "lexer.dawn")',
+                js_script: then(
+                    js_segment,
+                    swap(
+                        'const path = require("node:path");',
+                        'const { join, resolve } = require("node:path");',
+                    ),
+                    swap_all("path.join(", "join("),
+                    swap_all("path.resolve(", "resolve("),
+                )
+            },
+        ),
+        Mutant(
+            "js-gate-renamed-cjs",
+            "the gate, renamed to the extension that spells out the module "
+            "system it already uses. Nothing about it changes but the name, so "
+            "its red set is empty; a suffix tuple that did not list `.cjs` "
+            "stops seeing the gate at all, which is #302 again",
+            files=cjs_files,
+            edits=cjs_edits,
+        ),
+        Mutant(
+            "js-gate-migrated-to-esm",
+            "and the migration that goes with the other extension: `import` "
+            "for the declarations, `import.meta.dirname` for the directory, "
+            "`createRequire` for what is left. A real change to make and none "
+            "of it moves a path, so the red set is empty. Segmented too, "
+            "because that is what the directory seed is measured by: with the "
+            "path in one string, dropping `import.meta.dirname` left this "
+            "silent and the seed was carrying nothing",
+            files=mjs_files,
+            edits=mjs_edits,
+        ),
+        Mutant(
+            "js-path-bound-under-another-name",
+            "the spelling the reader is not going to follow: a binding that "
+            "renames what it takes. This one is counted, because the answer is "
+            "not to read it but to say so. Silence here is the #302 failure "
+            "exactly, and the assertion it owns is what makes it a report",
+            edits={
+                js_script: then(
+                    swap(
+                        'const path = require("node:path");',
+                        "const { join: pjoin, resolve: presolve } = "
+                        'require("node:path");',
+                    ),
+                    swap_all("path.join(", "pjoin("),
+                    swap_all("path.resolve(", "presolve("),
                 )
             },
         ),
@@ -2688,6 +2946,12 @@ def observe(base_tree, base_record):
     problems = []
     if base.coupling is None:
         return {}, ["rule E finds no coupling in this tree, so it has no mutant"]
+    if base.js_gate is None:
+        return {}, [
+            "no JavaScript gate in this tree names a compiler module through a "
+            "path join and a package.json, so rule B's JavaScript half has "
+            "nothing to mutate"
+        ]
 
     clean = Check(Map(base_tree), base_record)
     for name, what, test in ASSERTIONS:
