@@ -137,17 +137,33 @@ pub fn lex(text: String) -> (List[Token], List[Diag]) = lex_at(text, 0)
 ## Lex with a base offset added to every span — for re-lexing an interpolation
 ## segment in place (the Kotlin Lexer's baseOffset).
 pub fn lex_at(text: String, base: Int) -> (List[Token], List[Diag]) = {
-  let (toks, _, diags) = lex_go(text, base, false)
+  let (_, toks, _, diags) = lex_go(text, base, false)
   (toks, diags)
+}
+
+## `lex` plus the decoded code points it worked over. Spans are code-point
+## indices, so a caller that also has to look at the source between tokens needs
+## exactly this array — and the lexer built it anyway. Handing it back is what
+## keeps a file from being decoded twice (the parser's `assert` slices, the
+## formatter's line counting): `code_points` is a whole pass over the text.
+pub fn lex_cps(text: String) -> (List[Char], List[Token], List[Diag]) = {
+  let (cps, toks, _, diags) = lex_go(text, 0, false)
+  (cps, toks, diags)
 }
 
 ## Like `lex`, but also returns the comment tokens `lex` drops — the extra
 ## channel the formatter needs (the Kotlin Lexer's commentSink). A comment's
 ## text and span exclude trailing whitespace before the newline.
-pub fn lex_with_comments(text: String) -> (List[Token], List[Token], List[Diag]) =
-  lex_go(text, 0, true)
+pub fn lex_with_comments(text: String) -> (List[Token], List[Token], List[Diag]) = {
+  let (_, toks, comments, diags) = lex_go(text, 0, true)
+  (toks, comments, diags)
+}
 
-fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], List[Diag]) = {
+fn lex_go(
+  text: String,
+  base: Int,
+  collect: Bool
+) -> (List[Char], List[Token], List[Token], List[Diag]) = {
   let s = src_of(text, base)
   var i = 0
   var toks: List[Token] = []
@@ -227,7 +243,7 @@ fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], 
     toks = toks ++ [tok(NEWLINE, "\\n", l, l + 1)]
   }
   toks = toks ++ [tok(EOF, "<eof>", l, l + 1)]
-  (toks, comments, diags)
+  (s.cps, toks, comments, diags)
 }
 
 ## A decoded source with the UTF-16 bridge the LSP boundary needs: the code
