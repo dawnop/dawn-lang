@@ -1750,8 +1750,9 @@ fn slurp(p: String) -> String !io = {
 #### 9.5.1 `Bytes`：一等不可变字节序列
 
 `Bytes` 是不可变的字节序列，运行期就是裸 `byte[]`。库函数（§11「bytes」组）：
-`utf8(s) -> Bytes`（字符串的 UTF-8 字节）、`decode_utf8(b) -> String` /
+`utf8(s) -> Bytes`（字符串的 UTF-8 字节）、`decode_utf8_lossy(b) -> String` /
 `decode_latin1(b) -> String`（解码，见 §11）、
+`decode_utf8_checked(b) -> Result[String, Utf8Error]`（严格解码，见 §11）、
 `bytes.len`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、`bytes.slice(b, start, end)`
 （`[start,end)`，下标 clamp 进范围）、`bytes.index_of(b, needle, from) -> Option[Int]`。
 `index_of` 把负的 `from` 钳到 0；非空 `needle` 从该字节下标起找首次完整命中。
@@ -2163,10 +2164,18 @@ UTF-16 码元。`char_is_letter`/`_digit`/`_alnum`/`_upper`/`_lower`/`_space` �
 `bytes.slice` 两端**钳位**、`from > to` 得空串（判据 3，范围参数选取一段，不断言端点存在）。
 `truncate` 就是 `take`，不另设一个名字。
 
-**字节与文本编码。** 语言承诺的字符集只有两个，且**函数名即定义域**：`bytes.decode_utf8`
+**字节与文本编码。** 语言承诺的字符集只有两个，且**函数名即定义域**：`bytes.decode_utf8_lossy`
 与 `bytes.decode_latin1`，没有字符集注册表。没有 charset 参数就没有「不认识的字符集」
 这个失败面，故它们返回裸 `String` 而非 `Option`（沿革见
 [`stdlib-impl-notes.md`](stdlib-impl-notes.md)）。
+
+UTF-8 解码有**有损与严格两个**，同样由函数名区分。`decode_utf8_lossy` 把每个非法序列换成
+U+FFFD（上一段的替换规则）；`decode_utf8_checked` 不改写任何字节，在第一个非法序列处回
+`Err(Utf8Error { offset })`，`offset` 是该序列开始的字节下标，也就是输入前多少字节是合法
+UTF-8。两者对「什么算非法」的判断是同一个：`decode_utf8_checked` 回 `Ok` 的输入，**恰好**
+是 `decode_utf8_lossy` 原样返回的输入，这条是规范性的。`decode_latin1` 没有严格版本，
+因为每个字节都是一个码点，它不会失败。`decode_utf8` 是 `decode_utf8_lossy` 的旧名，
+按 CONTRIBUTING §7 的一代 forwarder 纪律保留，下个版本删除。
 
 hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份定义），规则是规范性的：
 `to_hex` 每字节两位、**小写**为规范拼写，`from_hex` 大小写皆收、其余一概不收；`to_base64`
@@ -2263,7 +2272,7 @@ url/文件名安全字母表且
     文本，正是这条规则要挡的事；输入本来就不是文本时该用 `io.read_file` 的字节孪生
     `io.read_bytes`，它一个字节都不看
   - `io.read_line` / `io.cwd` / `io.getenv` / `io.list_dir` / `io.temp_dir` / `args`
-    **替换**：非法序列换成 U+FFFD，规则逐字沿用 `bytes.decode_utf8`（一个非法序列一个
+    **替换**：非法序列换成 U+FFFD，规则逐字沿用 `bytes.decode_utf8_lossy`（一个非法序列一个
     U+FFFD，不是一个字节一个）。文件名不是 UTF-8 仍然是个文件名，拒绝它等于让程序连目录
     都列不了
   - 由此得一条不变式：**`String` 里没有非良构的 UTF-8**。这不是修辞——它挡的是

@@ -104,12 +104,321 @@ fn std/bytes.utf8 -> Bytes
     local v1 : Bytes
 fn std/bytes.decode_utf8 -> String
   param v0 : Bytes owned
+  call direct std/bytes.decode_utf8_lossy : String
+    local v0 : Bytes
+fn std/bytes.decode_utf8_lossy -> String
+  param v0 : Bytes owned
   block : String
     let v1 : String
       intrinsic bytes_decode_utf8 : String
         local v0 : Bytes
     drop v0
     local v1 : String
+fn std/bytes.decode_utf8_checked -> Result[String, Utf8Error]
+  param v0 : Bytes owned
+  block : Result[String, Utf8Error]
+    let v1 : Option[Int]
+      call direct std/bytes.first_malformed : Option[Int]
+        dup
+          local v0 : Bytes
+    let v2 : Result[String, Utf8Error]
+      intrinsic null_ref : Result[String, Utf8Error]
+    sif
+      isctor Option/Some
+        local v1 : Option[Int]
+      block : Unit
+        let v3 : Int
+          unbox to=Int
+            field Option/Some.0 : T
+              local v1 : Option[Int]
+        drop v0
+        drop v1
+        let v4 : Result[String, Utf8Error]
+          ctor Result/Err : Result[String, Utf8Error]
+            box from=Utf8Error
+              ctor Utf8Error/Utf8Error : Utf8Error
+                local v3 : Int
+        drop v2
+        assign v2
+          local v4 : Result[String, Utf8Error]
+      block : Unit
+        sif
+          isctor Option/None
+            local v1 : Option[Int]
+          block : Unit
+            let v5 : Result[String, Utf8Error]
+              ctor Result/Ok : Result[String, Utf8Error]
+                box from=String
+                  intrinsic bytes_decode_utf8 : String
+                    local v0 : Bytes
+            drop v2
+            assign v2
+              local v5 : Result[String, Utf8Error]
+            drop v0
+            drop v1
+          block : Unit
+            discard
+              intrinsic panic : Never
+                str "unreachable match"
+            drop v0
+            drop v1
+    local v2 : Result[String, Utf8Error]
+fn std/bytes.first_malformed -> Option[Int]
+  param v0 : Bytes owned
+  block : Option[Int]
+    let v1 : Int
+      intrinsic bytes_len : Int
+        local v0 : Bytes
+    let v2 : Int
+      int 0
+    loop L0
+      block : Unit
+        sif
+          unary not : Bool
+            binary lt : Bool
+              local v2 : Int
+              local v1 : Int
+          break L0
+        discard
+          block : Unit
+            let v3 : Int
+              call direct std/bytes.utf8_width : Int
+                dup
+                  local v0 : Bytes
+                local v2 : Int
+                local v1 : Int
+            discard
+              if : Unit
+                binary eq : Bool
+                  local v3 : Int
+                  int 0
+                block : Never
+                  block : Never
+                    let v4 : Option[Int]
+                      ctor Option/Some : Option[Int]
+                        box from=Int
+                          local v2 : Int
+                    drop v0
+                    return
+                      local v4 : Option[Int]
+            assign v2
+              binary add : Int
+                local v2 : Int
+                local v3 : Int
+    drop v0
+    ctor Option/None : Option[Int]
+fn std/bytes.utf8_width -> Int
+  param v0 : Bytes owned
+  param v1 : Int owned
+  param v2 : Int owned
+  block : Int
+    let v3 : Int
+      intrinsic bytes_at : Int
+        local v0 : Bytes
+        local v1 : Int
+    if : Int
+      binary lt : Bool
+        local v3 : Int
+        int 128
+      block : Int
+        let v4 : Int
+          int 1
+        drop v0
+        local v4 : Int
+      if : Int
+        binary lt : Bool
+          local v3 : Int
+          int 194
+        block : Int
+          let v5 : Int
+            int 0
+          drop v0
+          local v5 : Int
+        if : Int
+          binary le : Bool
+            local v3 : Int
+            int 223
+          block : Int
+            call direct std/bytes.utf8_seq : Int
+              local v0 : Bytes
+              local v1 : Int
+              local v2 : Int
+              int 2
+              int 128
+              int 191
+          if : Int
+            binary eq : Bool
+              local v3 : Int
+              int 224
+            block : Int
+              call direct std/bytes.utf8_seq : Int
+                local v0 : Bytes
+                local v1 : Int
+                local v2 : Int
+                int 3
+                int 160
+                int 191
+            if : Int
+              binary le : Bool
+                local v3 : Int
+                int 236
+              block : Int
+                call direct std/bytes.utf8_seq : Int
+                  local v0 : Bytes
+                  local v1 : Int
+                  local v2 : Int
+                  int 3
+                  int 128
+                  int 191
+              if : Int
+                binary eq : Bool
+                  local v3 : Int
+                  int 237
+                block : Int
+                  call direct std/bytes.utf8_seq : Int
+                    local v0 : Bytes
+                    local v1 : Int
+                    local v2 : Int
+                    int 3
+                    int 128
+                    int 159
+                if : Int
+                  binary le : Bool
+                    local v3 : Int
+                    int 239
+                  block : Int
+                    call direct std/bytes.utf8_seq : Int
+                      local v0 : Bytes
+                      local v1 : Int
+                      local v2 : Int
+                      int 3
+                      int 128
+                      int 191
+                  if : Int
+                    binary eq : Bool
+                      local v3 : Int
+                      int 240
+                    block : Int
+                      call direct std/bytes.utf8_seq : Int
+                        local v0 : Bytes
+                        local v1 : Int
+                        local v2 : Int
+                        int 4
+                        int 144
+                        int 191
+                    if : Int
+                      binary le : Bool
+                        local v3 : Int
+                        int 243
+                      block : Int
+                        call direct std/bytes.utf8_seq : Int
+                          local v0 : Bytes
+                          local v1 : Int
+                          local v2 : Int
+                          int 4
+                          int 128
+                          int 191
+                      if : Int
+                        binary eq : Bool
+                          local v3 : Int
+                          int 244
+                        block : Int
+                          call direct std/bytes.utf8_seq : Int
+                            local v0 : Bytes
+                            local v1 : Int
+                            local v2 : Int
+                            int 4
+                            int 128
+                            int 143
+                        block : Int
+                          let v6 : Int
+                            int 0
+                          drop v0
+                          local v6 : Int
+fn std/bytes.utf8_seq -> Int
+  param v0 : Bytes owned
+  param v1 : Int owned
+  param v2 : Int owned
+  param v3 : Int owned
+  param v4 : Int owned
+  param v5 : Int owned
+  block : Int
+    discard
+      if : Unit
+        binary gt : Bool
+          binary add : Int
+            local v1 : Int
+            local v3 : Int
+          local v2 : Int
+        block : Never
+          block : Never
+            let v6 : Int
+              int 0
+            drop v0
+            return
+              local v6 : Int
+    let v7 : Int
+      intrinsic bytes_at : Int
+        local v0 : Bytes
+        binary add : Int
+          local v1 : Int
+          int 1
+    discard
+      if : Unit
+        binary or : Bool
+          binary lt : Bool
+            local v7 : Int
+            local v4 : Int
+          binary gt : Bool
+            local v7 : Int
+            local v5 : Int
+        block : Never
+          block : Never
+            let v8 : Int
+              int 0
+            drop v0
+            return
+              local v8 : Int
+    let v9 : Int
+      int 2
+    loop L0
+      block : Unit
+        sif
+          unary not : Bool
+            binary lt : Bool
+              local v9 : Int
+              local v3 : Int
+          break L0
+        discard
+          block : Unit
+            let v10 : Int
+              intrinsic bytes_at : Int
+                local v0 : Bytes
+                binary add : Int
+                  local v1 : Int
+                  local v9 : Int
+            discard
+              if : Unit
+                binary or : Bool
+                  binary lt : Bool
+                    local v10 : Int
+                    int 128
+                  binary gt : Bool
+                    local v10 : Int
+                    int 191
+                block : Never
+                  block : Never
+                    let v11 : Int
+                      int 0
+                    drop v0
+                    return
+                      local v11 : Int
+            assign v9
+              binary add : Int
+                local v9 : Int
+                int 1
+    drop v0
+    local v3 : Int
 fn std/bytes.decode_latin1 -> String
   param v0 : Bytes owned
   block : String

@@ -20,6 +20,16 @@
 # is not what it claims to be is the part of it that has to be pinned. Every
 # expectation below is what the JVM prints -- the C side is the one that had
 # to move.
+#
+# ## The checked decoder
+#
+# `bytes.decode_utf8_checked` (LIB-06) answers `Err` where the lossy one
+# substitutes, and it is pure Dawn rather than a primitive, so it carries a
+# third copy of the table both backends implement. Here it is asked for the
+# same families, and then swept against the backend's own lossy decoder over
+# every one- and two-byte input: the counts are printed so that the two
+# backends have to agree on how many inputs each of them refused, and not
+# merely on the word "none".
 use std/char
 use std/io
 use std/list
@@ -39,6 +49,51 @@ fn of(vals: List[Int]) -> Bytes = {
 ## UTF-8 of the result. Printing the string itself would put a lone U+FFFD
 ## through a terminal and a diff on the way to being compared.
 fn seen(s: String) -> String = to_string(str.len(s)) ++ " " ++ bytes.to_hex(bytes.utf8(s))
+
+## What `bytes.decode_utf8_checked` answered, in one line.
+fn checked(b: Bytes) -> String =
+  match bytes.decode_utf8_checked(b) {
+    Ok(s) -> "ok " ++ seen(s)
+    Err(e) -> "err at " ++ to_string(e.offset)
+  }
+
+## How many leading bytes of `b` survive a decode and re-encode, which is where
+## the lossy decoder starts rewriting (`len(b)` when it rewrites nothing).
+##
+## The checked decoder is pure Dawn over `bytes_at`, so it answers the same on
+## both backends by construction. What is not free is that its answer still
+## matches *this* backend's `bytes_decode_utf8`, which is C here and the JVM
+## there, and which is the pair #112 had to move. So the oracle is recomputed
+## per backend rather than written down.
+fn lossy_prefix(b: Bytes) -> Int = {
+  var valid = 0
+  var k = 0
+  while k <= bytes.len(b) {
+    let p = bytes.slice(b, 0, k)
+    if bytes.utf8(bytes.decode_utf8_lossy(p)) == p { valid = k }
+    k = k + 1
+  }
+  valid
+}
+
+## 1 when the two decoders disagree about `b`, 0 when they agree: accepted
+## exactly when nothing was rewritten, refused exactly where the rewriting
+## began.
+fn disagreement(b: Bytes) -> Int = {
+  let valid = lossy_prefix(b)
+  let ok = match bytes.decode_utf8_checked(b) {
+    Ok(s) -> valid == bytes.len(b) && s == bytes.decode_utf8_lossy(b)
+    Err(e) -> valid < bytes.len(b) && e.offset == valid
+  }
+  if ok { 0 } else { 1 }
+}
+
+## 1 when the checked decoder refused `b`, 0 when it accepted it.
+fn refusal(b: Bytes) -> Int =
+  match bytes.decode_utf8_checked(b) {
+    Ok(_s) -> 0
+    Err(_e) -> 1
+  }
 
 pub fn main() -> Unit !io = {
   io.println("-- valid UTF-8 round trips, astral included --")
@@ -86,4 +141,62 @@ pub fn main() -> Unit !io = {
   io.println("f5 80 80 80       " ++ seen(raw.decode_utf8(of([0xF5, 0x80, 0x80, 0x80]))))
   io.println("f4 90 80 80       " ++ seen(raw.decode_utf8(of([0xF4, 0x90, 0x80, 0x80]))))
   io.println("f4 8f bf bf (val) " ++ seen(raw.decode_utf8(of([0xF4, 0x8F, 0xBF, 0xBF]))))
+
+  io.println("-- and the checked decoder refuses them, naming the byte --")
+  io.println("valid             " ++ checked(bytes.utf8("a中😀")))
+  io.println("a real efbfbd     " ++ checked(of([0xEF, 0xBF, 0xBD])))
+  io.println("80                " ++ checked(of([0x80])))
+  io.println("61 ff 62          " ++ checked(of([0x61, 0xFF, 0x62])))
+  io.println("c0 af             " ++ checked(of([0xC0, 0xAF])))
+  io.println("e0 80 af          " ++ checked(of([0xE0, 0x80, 0xAF])))
+  io.println("ed a0 80          " ++ checked(of([0xED, 0xA0, 0x80])))
+  io.println("ed 9f bf (valid)  " ++ checked(of([0xED, 0x9F, 0xBF])))
+  io.println("f0 9f 92 at end   " ++ checked(of([0xF0, 0x9F, 0x92])))
+  io.println("f4 90 80 80       " ++ checked(of([0xF4, 0x90, 0x80, 0x80])))
+  io.println("f4 8f bf bf (val) " ++ checked(of([0xF4, 0x8F, 0xBF, 0xBF])))
+
+  # Every one- and two-byte input, then every three-byte input over the bytes
+  # that bound a row of the UTF-8 table. Counts rather than a verdict: a sweep
+  # that stopped early would print "0 disagreements" just as loudly, and the
+  # two backends have to agree on how many inputs each of them refused.
+  io.println("-- the whole one- and two-byte space, and the table's edges --")
+  let alpha = of([0x00, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC1,
+                  0xC2, 0xDF, 0xE0, 0xE1, 0xEC, 0xED, 0xEE, 0xEF, 0xF0, 0xF3,
+                  0xF4, 0xF5, 0xFF])
+  var swept = 0
+  var refused = 0
+  var split = 0
+  var i = 0
+  while i < 256 {
+    let one = of([i])
+    swept = swept + 1
+    refused = refused + refusal(one)
+    split = split + disagreement(one)
+    var j = 0
+    while j < 256 {
+      let two = of([i, j])
+      swept = swept + 1
+      refused = refused + refusal(two)
+      split = split + disagreement(two)
+      j = j + 1
+    }
+    i = i + 1
+  }
+  var p = 0
+  while p < bytes.len(alpha) {
+    var q = 0
+    while q < bytes.len(alpha) {
+      var r = 0
+      while r < bytes.len(alpha) {
+        let three = of([bytes.at(alpha, p), bytes.at(alpha, q), bytes.at(alpha, r)])
+        swept = swept + 1
+        refused = refused + refusal(three)
+        split = split + disagreement(three)
+        r = r + 1
+      }
+      q = q + 1
+    }
+    p = p + 1
+  }
+  io.println("swept ${swept} refused ${refused} disagreements ${split}")
 }

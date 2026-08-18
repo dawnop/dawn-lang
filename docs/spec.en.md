@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 872af4584748fb40 -->
+<!-- doc-check: translation-of docs/spec.md @ b3cc70ab05eb7c9c -->
 
 # Dawn Language Specification
 
@@ -2149,7 +2149,8 @@ fn slurp(p: String) -> String !io = {
 
 `Bytes` is an immutable sequence of bytes, at runtime a bare `byte[]`. The library
 functions (§11, the "bytes" group): `utf8(s) -> Bytes` (the UTF-8 bytes of a string),
-`decode_utf8(b) -> String` / `decode_latin1(b) -> String` (decoding, see §11),
+`decode_utf8_lossy(b) -> String` / `decode_latin1(b) -> String` (decoding, see §11),
+`decode_utf8_checked(b) -> Result[String, Utf8Error]` (strict decoding, see §11),
 `bytes.len`, `bytes.at(b, i) -> Int` (0..255, out of range panics),
 `bytes.slice(b, start, end)` (`[start,end)`, subscripts clamped into range),
 `bytes.index_of(b, needle, from) -> Option[Int]`. `index_of` clamps a negative `from`
@@ -2687,10 +2688,21 @@ gives the empty string (criterion 3, a range argument selects a stretch, it does
 that the endpoints exist). `truncate` is just `take`; there is no separate name for it.
 
 **Bytes and text encodings.** The language promises exactly two charsets, and **the
-function name is the domain**: `bytes.decode_utf8` and `bytes.decode_latin1`; there is no
+function name is the domain**: `bytes.decode_utf8_lossy` and `bytes.decode_latin1`; there is no
 charset registry. With no charset parameter there is no "unknown charset" failure mode, so
 they return a bare `String` rather than an `Option` (the history is in
 [`stdlib-impl-notes.md`](stdlib-impl-notes.md)).
+
+UTF-8 decoding comes in a **lossy and a strict** form, told apart by the function name in
+the same way. `decode_utf8_lossy` replaces every illegal sequence with U+FFFD (the
+replacement rule of the paragraph above); `decode_utf8_checked` rewrites nothing and
+answers `Err(Utf8Error { offset })` at the first illegal sequence, where `offset` is the
+byte index that sequence begins at, which is also how many leading bytes of the input were
+valid UTF-8. The two share one notion of what is illegal: the inputs `decode_utf8_checked`
+accepts are **exactly** the inputs `decode_utf8_lossy` returns unchanged, and that is
+normative. `decode_latin1` has no strict form, because every byte is a code point and it
+cannot fail. `decode_utf8` is the old name of `decode_utf8_lossy`, kept under the
+one-generation forwarder discipline of CONTRIBUTING §7 and removed in the next version.
 
 hex and base64 are pure Dawn byte arithmetic (no `use java`, so both backends share one
 definition), and the rules are normative: `to_hex` writes two digits per byte and **lower
@@ -2829,7 +2841,7 @@ behaviours are:
     to stop; when the input was never text in the first place, use `io.read_file`'s byte
     twin `io.read_bytes`, which does not look at a single byte
   - `io.read_line` / `io.cwd` / `io.getenv` / `io.list_dir` / `io.temp_dir` / `args`
-    **replace**: an illegal sequence becomes U+FFFD, following `bytes.decode_utf8` to the
+    **replace**: an illegal sequence becomes U+FFFD, following `bytes.decode_utf8_lossy` to the
     letter (one U+FFFD per illegal sequence, not one per byte). A file name that is not
     UTF-8 is still a file name, and rejecting it would leave the program unable even to
     list a directory

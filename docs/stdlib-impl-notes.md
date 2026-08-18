@@ -72,6 +72,12 @@ std 模块按 `std/modules.txt` 的顺序检查，`list` 在 `set` 前面，加�
 与它底下的原语一并删除；原语的收窄走了种子三期。契约面上的后果是它们回裸 `String`
 而非 `Option`——没有 charset 参数，就没有「不认识的字符集」这个失败面。
 
+后来（LIB-06）UTF-8 这一侧按同一条规则又分成两个名字：`decode_utf8_lossy` 是原来那个
+（非法序列换 U+FFFD），`decode_utf8_checked` 在第一个非法序列处回
+`Err(Utf8Error { offset })`。这不是把 charset 参数换个形状请回来：定义域仍由函数名给定，
+分开的是**遇到非法输入怎么办**，而那正是原来没有答案、调用方也问不出来的那一半。
+`decode_utf8` 暂留为 `decode_utf8_lossy` 的一代 forwarder。
+
 ## `String` 里没有非良构 UTF-8：这条不变式是量出来的
 
 spec §11 把它写成规范。它不是修辞：`c0 af`（overlong 编码的 `/`）曾经原样进过字符串，

@@ -77,7 +77,119 @@ pub fn freeze(b: Buf) -> Bytes = bytes_from_array(b)
 pub fn utf8(s: String) -> Bytes = bytes_utf8(s)
 
 ## `b` decoded as UTF-8; what it cannot read becomes U+FFFD.
-pub fn decode_utf8(b: Bytes) -> String = bytes_decode_utf8(b)
+##
+## Removed in the next version: this is `decode_utf8_lossy` under the name it
+## carried while there was only one decoder. The forwarder lasts one generation
+## because stage 1 of the bootstrap compiles today's `selfhost/src` against the
+## std the seed carries, so the call sites move a release later
+## (CONTRIBUTING §7).
+pub fn decode_utf8(b: Bytes) -> String = decode_utf8_lossy(b)
+
+## `b` decoded as UTF-8, with each malformed sequence replaced by U+FFFD.
+##
+## Total, and lossy in the literal sense: the caller cannot tell a replacement
+## from a U+FFFD that was really in the input, and the bytes it stood for are
+## gone. That is the right answer for text on its way to a human and the wrong
+## one for input something is about to trust, which is how the overlong `c0 af`
+## turns into `/` on any path that decodes before it checks.
+## `decode_utf8_checked` is the other half.
+pub fn decode_utf8_lossy(b: Bytes) -> String = bytes_decode_utf8(b)
+
+## Why `decode_utf8_checked` refused. `offset` is the byte position where the
+## first malformed sequence begins, which is also how many leading bytes of the
+## input were valid UTF-8.
+##
+## No kind field. The distinctions a UTF-8 decoder could report (a tail cut
+## short, an overlong form, a surrogate half, a lead byte that leads nothing)
+## are not ones a caller acts on differently, and the standing test for that is
+## `packages/json`'s `JsonErrorKind`: kinds are the branches a caller takes,
+## not one per message. A struct is the shape that can gain such a field later
+## without breaking a caller that only reads `offset`.
+pub type Utf8Error = { offset: Int } derive Show
+
+## `b` decoded as UTF-8, or `Err` at the first sequence that is not.
+##
+## The exact complement of `decode_utf8_lossy`: this answers `Ok` for precisely
+## the inputs that one returns unchanged, and the `Ok` string is the one it
+## would have produced. Nothing is rewritten on the way to the caller, so an
+## application that must not act on bytes it was not sent asks this one.
+pub fn decode_utf8_checked(b: Bytes) -> Result[String, Utf8Error] =
+  match first_malformed(b) {
+    Some(i) -> Err(Utf8Error { offset: i })
+    None -> Ok(bytes_decode_utf8(b))
+  }
+
+# Where the first sequence that is not well-formed UTF-8 starts, or `None`.
+#
+# Walks whole sequences, so the answer is a sequence boundary and everything
+# before it decodes to itself.
+fn first_malformed(b: Bytes) -> Option[Int] = {
+  let n = bytes_len(b)
+  var i = 0
+  while i < n {
+    let w = utf8_width(b, i, n)
+    if w == 0 { return Some(i) }
+    i = i + w
+  }
+  None
+}
+
+# How many bytes the well-formed sequence at `i` occupies, or 0 when there is
+# no well-formed sequence there.
+#
+# This is Unicode table 3-7, spelled as its rows. It has to accept exactly what
+# `bytes_decode_utf8` leaves alone, or the checked decoder would refuse input
+# the lossy one hands through untouched. The JVM's `new String(b, UTF_8)` and
+# the C walker of `runtime/c/dawn_rt.c` (#112) were made to agree on that set,
+# and this is a third copy of the rules. A comment cannot hold three copies
+# together, so the test below re-derives the answer from the lossy decoder
+# itself rather than restating the table.
+fn utf8_width(b: Bytes, i: Int, n: Int) -> Int = {
+  let b1 = bytes_at(b, i)
+  if b1 < 0x80 {
+    1
+  } else if b1 < 0xC2 {
+    # 80..BF continue a sequence that never started; C0 and C1 lead only
+    # overlong spellings of ASCII
+    0
+  } else if b1 <= 0xDF {
+    utf8_seq(b, i, n, 2, 0x80, 0xBF)
+  } else if b1 == 0xE0 {
+    utf8_seq(b, i, n, 3, 0xA0, 0xBF)
+  } else if b1 <= 0xEC {
+    utf8_seq(b, i, n, 3, 0x80, 0xBF)
+  } else if b1 == 0xED {
+    # a surrogate half is not a code point a string may hold
+    utf8_seq(b, i, n, 3, 0x80, 0x9F)
+  } else if b1 <= 0xEF {
+    utf8_seq(b, i, n, 3, 0x80, 0xBF)
+  } else if b1 == 0xF0 {
+    utf8_seq(b, i, n, 4, 0x90, 0xBF)
+  } else if b1 <= 0xF3 {
+    utf8_seq(b, i, n, 4, 0x80, 0xBF)
+  } else if b1 == 0xF4 {
+    # nothing above U+10FFFF
+    utf8_seq(b, i, n, 4, 0x80, 0x8F)
+  } else {
+    0
+  }
+}
+
+# `width` bytes at `i`, whose second byte is in `lo..hi` and whose remaining
+# bytes are continuations, or 0. The lead byte decides `lo` and `hi`, which is
+# where the overlong forms and the two range edges are refused.
+fn utf8_seq(b: Bytes, i: Int, n: Int, width: Int, lo: Int, hi: Int) -> Int = {
+  if i + width > n { return 0 }
+  let b2 = bytes_at(b, i + 1)
+  if b2 < lo || b2 > hi { return 0 }
+  var k = 2
+  while k < width {
+    let x = bytes_at(b, i + k)
+    if x < 0x80 || x > 0xBF { return 0 }
+    k = k + 1
+  }
+  width
+}
 
 ## `b` decoded as ISO-8859-1: one code point per byte, 0..255.
 pub fn decode_latin1(b: Bytes) -> String = bytes_decode_latin1(b)
@@ -619,6 +731,154 @@ test "decode_latin1 is one code point per byte; decode_utf8 substitutes" {
   # a byte the Latin-1 round trip does not lose
   assert utf8(decode_latin1(high)) == freeze(put_bytes(put_bytes(buf(),
     utf8("\u{0080}")), utf8("\u{00FF}")))
+  # decode_utf8 is the old name of the lossy one, and nothing else
+  assert decode_utf8(high) == decode_utf8_lossy(high)
+}
+
+test "decode_utf8_checked refuses at the byte the sequence went wrong" {
+  let of = (hex: String) => from_hex(hex).expect("hex")
+  assert decode_utf8_checked(utf8("")) == Ok("")
+  assert decode_utf8_checked(utf8("a中😀")) == Ok("a中😀")
+  # U+FFFD is a character an input may legitimately carry, and its own
+  # encoding is well formed, so it is accepted rather than mistaken for the
+  # mark the lossy decoder leaves
+  assert decode_utf8_checked(of("efbfbd")) == Ok("\u{FFFD}")
+  # a byte that continues nothing, and one that leads nothing
+  assert decode_utf8_checked(of("80")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("ff")) == Err(Utf8Error { offset: 0 })
+  # the offset is a position in the input, not in the decoded text
+  assert decode_utf8_checked(of("61ff62")) == Err(Utf8Error { offset: 1 })
+  assert decode_utf8_checked(of("e4b8ad61ff")) == Err(Utf8Error { offset: 4 })
+  # an overlong form is not the character it encodes: `c0 af` is not `/`
+  assert decode_utf8_checked(of("c0af")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("e080af")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("f08fbfbf")) == Err(Utf8Error { offset: 0 })
+  # a surrogate half is not a code point a string may hold, and the code point
+  # just below the block is
+  assert decode_utf8_checked(of("eda080")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("edbfbf")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("ed9fbf")) == Ok("\u{D7FF}")
+  # nothing above U+10FFFF, and the last code point below it
+  assert decode_utf8_checked(of("f4908080")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("f5808080")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("f48fbfbf")) == Ok("\u{10FFFF}")
+  # a sequence the input ends in the middle of is refused where it began
+  assert decode_utf8_checked(of("61c3")) == Err(Utf8Error { offset: 1 })
+  assert decode_utf8_checked(of("e282")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("f09f92")) == Err(Utf8Error { offset: 0 })
+}
+
+test "decode_utf8_checked refuses exactly what decode_utf8_lossy rewrites" {
+  # Three copies of the UTF-8 table are in play: the JVM's, the C walker's, and
+  # `utf8_width` above. Restating the table here would only add a fourth, so
+  # the oracle is the lossy decoder itself.
+  #
+  # A byte string is valid UTF-8 exactly when decoding and re-encoding it gives
+  # the same bytes back: every sequence the decoder leaves alone re-encodes to
+  # itself, and a replacement never re-encodes to the bytes it replaced, since
+  # U+FFFD's own encoding EF BF BD is well formed and so is never replaced.
+  # The offset comes out of the same oracle: prefixes past the first malformed
+  # sequence all fail the round trip, so the longest one that survives it ends
+  # where that sequence begins.
+  #
+  # "" when the two agree about `b`, otherwise a sentence naming the input.
+  let disagreement = (b: Bytes) => {
+    var valid = 0
+    var k = 0
+    while k <= len(b) {
+      let p = slice(b, 0, k)
+      if utf8(decode_utf8_lossy(p)) == p { valid = k }
+      k = k + 1
+    }
+    match decode_utf8_checked(b) {
+      Ok(s) -> {
+        if valid != len(b) {
+          to_hex(b) ++ " accepted, but the lossy decoder rewrote it at "
+            ++ to_string(valid)
+        } else if s != decode_utf8_lossy(b) {
+          to_hex(b) ++ " accepted as a different string than the lossy decoder built"
+        } else {
+          ""
+        }
+      }
+      Err(e) -> {
+        if valid == len(b) {
+          to_hex(b) ++ " refused at " ++ to_string(e.offset)
+            ++ ", but the lossy decoder left it alone"
+        } else if e.offset != valid {
+          to_hex(b) ++ " refused at " ++ to_string(e.offset)
+            ++ ", but the lossy decoder rewrote it at " ++ to_string(valid)
+        } else {
+          ""
+        }
+      }
+    }
+  }
+
+  var bad = ""
+  var seen = 0
+  # every one- and two-byte input there is
+  var i = 0
+  while i < 256 {
+    let one = freeze(put(buf(), i))
+    if bad == "" { bad = disagreement(one) }
+    seen = seen + 1
+    var j = 0
+    while j < 256 {
+      let two = freeze(put(put(buf(), i), j))
+      if bad == "" { bad = disagreement(two) }
+      seen = seen + 1
+      j = j + 1
+    }
+    i = i + 1
+  }
+  # three and four bytes over the boundaries of every row of the table: the
+  # ends of the continuation range, the second-byte limits that refuse the
+  # overlong forms and the surrogates, and the lead bytes on each side of every
+  # width change
+  let alpha = from_hex("00417f808f909fa0bfc1c2dfe0e1ecedeeeff0f3f4f5ff").expect("alphabet")
+  let short = from_hex("41808f90bfc2e0edeff0f3f4f5").expect("alphabet")
+  var a = 0
+  while a < len(alpha) {
+    var b = 0
+    while b < len(alpha) {
+      var c = 0
+      while c < len(alpha) {
+        let three = freeze(put(put(put(buf(), at(alpha, a)), at(alpha, b)), at(alpha, c)))
+        if bad == "" { bad = disagreement(three) }
+        seen = seen + 1
+        c = c + 1
+      }
+      b = b + 1
+    }
+    a = a + 1
+  }
+  var p = 0
+  while p < len(short) {
+    var q = 0
+    while q < len(short) {
+      var r = 0
+      while r < len(short) {
+        var s = 0
+        while s < len(short) {
+          let four = freeze(put(put(put(put(buf(), at(short, p)), at(short, q)),
+            at(short, r)), at(short, s)))
+          if bad == "" { bad = disagreement(four) }
+          seen = seen + 1
+          s = s + 1
+        }
+        r = r + 1
+      }
+      q = q + 1
+    }
+    p = p + 1
+  }
+  # `bad` carries the case, which an `assert` on it could not print
+  if bad != "" {
+    panic("decode_utf8_checked disagrees with decode_utf8_lossy: " ++ bad)
+  }
+  # and the count says the sweep ran, so a green above is not an empty one
+  assert seen == 256 + 65536 + 12167 + 28561
 }
 
 test "for over Bytes yields each byte once, as 0..255" {

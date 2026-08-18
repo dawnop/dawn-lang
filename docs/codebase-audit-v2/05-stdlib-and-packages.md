@@ -140,7 +140,7 @@
 
 ## LIB-06 — P2 — UTF-8 API 默认有损且没有 strict 对应项
 
-<!-- audit-anchor: absent std/bytes.dawn | decode_utf8_checked -->
+<!-- audit-anchor: absent packages/web/src/server.dawn | decode_utf8_checked -->
 
 - **证据：S。** `bytes.decode_utf8` 明确用 U+FFFD 替换 malformed input：`std/bytes.dawn:79`；Web 无条件用它构造 text body：`packages/web/src/server.dawn:77`。
 - **影响：** invalid UTF-8 JSON/签名输入会在应用看到前被改写；`Request.body` 无法表示 decode failure，raw bytes 也容易丢失。
@@ -160,6 +160,37 @@
   上面那句「搭车」写下时还没发生的事：**它原本要搭的那班车已经开走了**——RD-06 命名族
   随 `#109` 破坏批完成，本条没跟上。所以它今天不是「等同批的车」，是**等下一班车**，
   且需要有人把它放进那批的清单里，否则会一直等下去。
+
+- **期 1 已落地（2026-08-18）：std 侧三件。** `decode_utf8_lossy` 是原行为改名；
+  `decode_utf8_checked(b) -> Result[String, Utf8Error]` 在 malformed 处回 `Err`，
+  `Utf8Error.offset` 是第一个非法序列开始的字节位置，也就是输入前多少字节是合法 UTF-8；
+  `decode_utf8` 降为一行 forwarder（CONTRIBUTING §7 的一代 forwarder 纪律）。
+  错误类型没有用 `ForeignError`：那是 host 边界失败的类型，这里失败的是输入本身，
+  故按 `packages/json` 的 `JsonError` 同形在模块内立了 `Utf8Error`。不设 kind 轴，
+  理由（「kind 是调用方能分支的区别，不是一句话一档」）写在类型的 doc 注释里。
+  **strict 与 lossy 的一致性不靠注释**：std 测试拿 lossy 自己当 oracle（合法 iff
+  decode 再 encode 得回原字节；offset iff 最长能这样往返的前缀长度），扫全部一字节与
+  二字节输入，再加表格边界字节构成的三字节、四字节组合；
+  `scripts/spike-native/bytes_decode.dawn` 把同一 oracle 搬到双后端，打印 refused 计数
+  而非「没有分歧」四个字，于是两个后端必须在拒绝了多少个输入上也一致。
+
+- **期 2 / 期 3 未做，且不能与期 1 同批。** 期 2 ＝迁移调用点
+  （`selfhost/src/main.dawn`、`selfhost/src/lsp/server.dawn`、`packages/inflate/src/zip.dawn`、
+  `compiler-plan/src/pkgfetch.dawn`、`packages/web/src/server.dawn`），必须等一次发布之后：
+  `bin/dawn` 第一阶段用种子带的 std 编今天的 `selfhost/src`，同批改名加改调用点在自举第一步就红。
+  期 3 ＝删掉 `decode_utf8`。
+
+- **`packages/web` 那半仍然开着，本条的 anchor 现在钉在它上面，清单如下。**
+  1. `read_body`（`packages/web/src/server.dawn`）对 text media type 走 strict decode；
+     binary handler 仍只取 raw `Bytes`，不为它们付一次校验。
+  2. `Request.body` 要能表示 decode failure。形状未定，至少三种：body 改成
+     `Result[String, Utf8Error]`、加一个返回 `Result` 的 `body_text` 访问器、
+     或在边界上直接以 400 拒绝而 `body` 只在合法时存在。**这是设计决定，不是实现细节**，
+     裁完再动手。
+  3. 这是包的破坏性变更，走 `web3` 自己的 major 与升级窗口（`packages/web/dawn.toml`
+     现为 `3.2.0`），不和 std 的三期同批。
+  4. 迁移期间 `Request.raw` 保持不变：原始字节已经在（见上面的订正），strict decode
+     只影响 text 那一路怎么报错。
 
 ## LIB-07 — P2 — `io.delete` 把不存在与操作失败都压成 false（已修）
 
