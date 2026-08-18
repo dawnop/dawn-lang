@@ -61,6 +61,20 @@ runs:
     # came to be diagnosed from step names rather than from evidence. The
     # annotation puts it in the run summary, where occurrences can be counted.
     #
+    # What a successful retry looks like, from the probe that exercised this
+    # branch for real: a green job carrying a red `failure` annotation from
+    # attempt 1, sitting beside the warning. `continue-on-error` suppresses the
+    # step's outcome, not its annotation, and that pair is the mechanism working
+    # rather than a broken build. Count flakes by this warning's title, then:
+    # the failure annotation is emitted in the success case too, so anything
+    # keying on annotation level miscounts.
+    #
+    # The annotation is also the only route for an observer without a token. A
+    # composite collapses into one step in the jobs API, so the step names here
+    # are not visible there, and GET /actions/jobs/{id}/logs answers 403 "Must
+    # have admin rights to Repository." This repo works without a PAT, which
+    # makes the `::warning::` load-bearing rather than a convenience.
+    #
     # 15s is a guess at how long a transient upstream stays bad, not a documented
     # backoff window: long enough that the retry is unlikely to be served by the
     # same failing edge, short enough to be noise against the 24-29s this setup
