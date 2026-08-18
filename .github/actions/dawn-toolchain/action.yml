@@ -1,15 +1,26 @@
 name: dawn toolchain
 description: >
   GraalVM, the cached bootstrap seed, and the selfhost toolchain built from it.
-  gates.yml is eleven jobs now rather than two, nine of which need a toolchain,
-  and this is the setup they share -- written once, because nine hand-kept
-  copies of it drift the way the gate list itself once drifted between ci.yml
-  and release.yml.
+  gates.yml is twenty jobs now rather than two, seventeen of which need a
+  toolchain, and this is the setup they share -- written once, because
+  seventeen hand-kept copies of it drift the way the gate list itself once
+  drifted between ci.yml and release.yml, and the way these counts did.
 
 inputs:
   github-token:
     description: passed to setup-graalvm so its downloads are not rate-limited
     required: true
+  java-version:
+    description: >
+      the JDK setup-graalvm installs. An input rather than a literal because
+      the step below is written twice, and this action exists on the premise
+      that hand-kept copies drift.
+    required: false
+    default: '21'
+  distribution:
+    description: as java-version, and for the same reason.
+    required: false
+    default: 'graalvm-community'
   build:
     description: >
       build the selfhost toolchain up front. The N-vs-N-1 jobs answer 'false':
@@ -21,10 +32,56 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: graalvm/setup-graalvm@v1
+    # setup-graalvm downloads a JDK from an upstream release host, and when that
+    # download fails it fails every job holding this action at once: 2 to 4 of
+    # the seventeen, a different set each time, on two occasions. Retrying is the
+    # whole fix, and a retry action cannot deliver it -- nick-fields/retry and
+    # its kin re-run a shell command, and this is a `uses:` step. Writing the
+    # step twice and branching on the first attempt's outcome is the only
+    # mechanism GitHub offers for a `uses:` step.
+    #
+    # `continue-on-error` and `steps.<id>.outcome` both behave inside a
+    # composite action the way they do in a job: the runner gives the composite
+    # its own steps scope and records outcome/conclusion for every step that has
+    # an explicit id (actions/runner, CompositeActionHandler.RunStepAsync ->
+    # ExecutionContext.ApplyContinueOnError/UpdateGlobalStepsContext). The id is
+    # load-bearing, not decoration: UpdateGlobalStepsContext skips steps whose
+    # context name is generated, so an unnamed step has no readable outcome.
+    - name: set up GraalVM
+      id: graalvm
+      uses: graalvm/setup-graalvm@v1
+      continue-on-error: true
       with:
-        java-version: '21'
-        distribution: 'graalvm-community'
+        java-version: ${{ inputs.java-version }}
+        distribution: ${{ inputs.distribution }}
+        github-token: ${{ inputs.github-token }}
+
+    # A run that needed two attempts still ends green, so without this the flake
+    # is invisible and its rate stays anecdotal -- which is how the outage above
+    # came to be diagnosed from step names rather than from evidence. The
+    # annotation puts it in the run summary, where occurrences can be counted.
+    #
+    # 15s is a guess at how long a transient upstream stays bad, not a documented
+    # backoff window: long enough that the retry is unlikely to be served by the
+    # same failing edge, short enough to be noise against the 24-29s this setup
+    # already costs. If the warning ever becomes frequent, the number is worth
+    # revisiting with the data it will by then have produced.
+    - name: note the GraalVM retry
+      if: steps.graalvm.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning title=GraalVM setup retried::graalvm/setup-graalvm@v1 failed on its first attempt and is being retried. The job may still pass. This annotation exists so the flake can be counted -- see .github/actions/dawn-toolchain/action.yml."
+        sleep 15
+
+    # The second attempt carries no `continue-on-error`, so it is the gate: two
+    # failures fail the job, and no job can reach the steps below without a
+    # toolchain. `continue-on-error` appears exactly once in this file, above.
+    - name: set up GraalVM (second attempt)
+      if: steps.graalvm.outcome == 'failure'
+      uses: graalvm/setup-graalvm@v1
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: ${{ inputs.distribution }}
         github-token: ${{ inputs.github-token }}
 
     # Keep both bootstrap inputs across runs. The pointer selects their release,
