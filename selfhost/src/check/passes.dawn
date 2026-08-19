@@ -25,10 +25,11 @@ use front/ast.{
 use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, TyError, TyVar,
   TyAssoc, TyAdt, TyList, TyJava,
-  TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, ELabeled,
+  TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, EffVar, ELabeled,
   Audience, AWorld, AStdOnly, AModule, audience_covers, decl_audience, declared_audience,
   trait_audience, builtin_type_audience, internal_std_modules,
-  eff_subsumes, eff_suffix, eff_labels, EffectI, ev_record_name, AdtI, CtorI, FieldI,
+  eff_subsumes, eff_suffix, eff_labels, eff_params_of, EffectI, ev_record_name,
+  AdtI, CtorI, FieldI,
   TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, ty_show, fn_return_show, sig_render, subst,
   reduce_via_bindings, ty_named, builtin_type_at, builtin_type_name_reserved,
   hard_reserved_builtin_type_name, peel_opaque,
@@ -1079,6 +1080,7 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
         is_builtin: false,
         tparams: [],
         constraints: [],
+        eparams: [],
         owner: cx1.owner_class,
         trait_id: None,
         op_of: Some((eid, idx)),
@@ -1247,17 +1249,8 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       }
       let (cx5, ret) = resolve_return_type(cx1, me.ret)
       cx1 = cx5
-      let leaked = map.len(cx1.current_eff_vars) > 0
+      let eparams = eff_params_of(cx1.current_eff_vars)
       cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
-      # a declared effect in one of these types is refused by `resolve_type`
-      # above, naming the effect and the position (cx.dawn's
-      # refuse_written_label); an effect variable has no such refusal, because
-      # it is legal in the position and illegal only in a trait
-      if leaked {
-        cx1 = cerr_h(cx1, "trait method signatures cannot carry effect variables",
-          me.nlo, me.nhi, "write !io on the function type, or leave it pure")
-        continue
-      }
       let eff = if len(me.effs) == 0 { EPure } else { EIo }
       let sig = Sig {
         name: me.name,
@@ -1269,10 +1262,20 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         is_builtin: false,
         tparams: [tvar],
         constraints: [[tid]],
+        eparams: eparams,
         owner: cx1.owner_class,
         trait_id: Some(tid),
         op_of: None,
         inferring: false
+      }
+      # a declared effect in one of these types is refused by `resolve_type`
+      # above, naming the effect and the position (cx.dawn's
+      # refuse_written_label); an effect variable has no such refusal, because
+      # it is legal in the position and illegal only in a trait
+      if len(sig.eparams) > 0 {
+        cx1 = cerr_h(cx1, "trait method signatures cannot carry effect variables",
+          me.nlo, me.nhi, "write !io on the function type, or leave it pure")
+        continue
       }
       let has_default = match me.body {
         Some(_) -> true
@@ -1737,9 +1740,29 @@ pub fn pass_register_impls(
       }
       cx1 = cx4
       let eff = if len(me.effs) == 0 { EPure } else { EIo }
-      let leaked = map.len(cx1.current_eff_vars) > 0
+      let eparams = eff_params_of(cx1.current_eff_vars)
       cx1 = Cx { ..cx1, current_eff_vars: saved_ev }
-      if leaked {
+      let msig = Sig {
+        name: me.name,
+        param_tys: ptys,
+        param_names: map(me.params, p => p.name),
+        param_defaults: [],
+        ret: ret,
+        eff: eff,
+        is_builtin: false,
+        # A conditional impl's method is a generic function: it takes one
+        # dictionary per bound, exactly like a `[T: Eq]` function does, and
+        # everything downstream (descriptors, call sites, `bind_dicts` for
+        # the body) follows from saying so here.
+        tparams: itvars,
+        constraints: iconstraints,
+        eparams: eparams,
+        owner: cx1.owner_class,
+        trait_id: None,
+        op_of: None,
+        inferring: false
+      }
+      if len(msig.eparams) > 0 {
         cx1 = cerr(cx1, "impl method signatures cannot carry effect variables",
           me.nlo, me.nhi)
         msigs = msigs ++ [no_sig()]
@@ -1767,25 +1790,7 @@ pub fn pass_register_impls(
           "drop !" ++ eff_show2(eff) ++ " here, or declare the trait method !" ++ eff_show2(eff))
       }
       provided = provided ++ [me.name]
-      msigs = msigs ++ [Some(Sig {
-        name: me.name,
-        param_tys: ptys,
-        param_names: map(me.params, p => p.name),
-        param_defaults: [],
-        ret: ret,
-        eff: eff,
-        is_builtin: false,
-        # A conditional impl's method is a generic function: it takes one
-        # dictionary per bound, exactly like a `[T: Eq]` function does, and
-        # everything downstream (descriptors, call sites, `bind_dicts` for
-        # the body) follows from saying so here.
-        tparams: itvars,
-        constraints: iconstraints,
-        owner: cx1.owner_class,
-        trait_id: None,
-        op_of: None,
-        inferring: false
-      })]
+      msigs = msigs ++ [Some(msig)]
     }
     let no_tp: Map[String, Ty] = map.empty()
     cx1 = Cx { ..cx1, current_tparams: no_tp }
@@ -2033,12 +2038,12 @@ pub fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[In
   (cx1, out)
 }
 
-## Pass 3: function signatures. Returns the per-decl signature list (aligned
-## with module_fns order) plus per-decl effect-variable tables for body checks.
-pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String, Eff]]) !io = {
+## Pass 3: function signatures. Returns the per-decl signature list, aligned
+## with module_fns order. The effect variables each signature introduced ride
+## in `Sig.eparams`; body checking reads them back from there (`enter_fn`).
+pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig]) !io = {
   var cx1 = cx
   var sigs: List[Sig] = []
-  var evs: List[Map[String, Eff]] = []
   for d in module_fns(m) {
     var tpnames: List[String] = []
     for tp in d.tparams { tpnames = tpnames ++ [tp.name] }
@@ -2094,7 +2099,7 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
       None -> (cx1, TyError)
     }
     cx1 = cx5
-    let ev = cx1.current_eff_vars
+    let eparams = eff_params_of(cx1.current_eff_vars)
     cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
     # until the body is checked, an unannotated fn assumes the worst effect
     let final_eff = if inferring && len(d.effs) == 0 { EIo } else { eff }
@@ -2112,18 +2117,18 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
       is_builtin: false,
       tparams: tvars,
       constraints: constraints,
+      eparams: eparams,
       owner: cx1.owner_class,
       trait_id: None,
       op_of: None,
       inferring: inferring
     }
     sigs = sigs ++ [sig]
-    evs = evs ++ [ev]
     # a top-level fn may shadow a builtin, a std name, or a prelude trait
     # method (spec §10.6)
     cx1 = bind_fn(cx1, d.name, sig, OLocal("function"), d.nlo, d.nhi)
   }
-  (cx1, sigs, evs)
+  (cx1, sigs)
 }
 
 test "Eq and Hash resolve as bounds like any other trait" {
@@ -2179,12 +2184,51 @@ test "fn signatures resolve with bounds and worst-effect inference" {
     })
   ] }
   var cx = seed_prelude(test_cx())
-  let (cx1, sigs, evs) = pass_fn_signatures(cx, m)
+  let (cx1, sigs) = pass_fn_signatures(cx, m)
   assert len(cx1.diags) == 0
   assert sig_render(cx1.adts, cx1.traits, sigs[0]) == "fn f[T: Ord](x: T) -> T"
   assert sigs[1].inferring
   assert sigs[1].eff == EIo
   assert map.get(cx1.fns, "g") == Some(sigs[1])
+}
+
+test "a signature's effect variables land in eparams once each, in mint order" {
+  # fn h(f: fn() -> Int !a, g: fn() -> Int !b, k: fn() -> Int !a) -> Int !c
+  let arrow = (e: String) => TFn([], TNamed("Int", [], 0, 3), [e], 0, 3)
+  let m = Module { decls: [
+    DFn(FnDecl {
+      is_pub: false,
+      name: "h",
+      tparams: no_tparams(),
+      params: [
+        Param { name: "f", tref: arrow("a"), default: None, lo: 5, hi: 6 },
+        Param { name: "g", tref: arrow("b"), default: None, lo: 7, hi: 8 },
+        Param { name: "k", tref: arrow("a"), default: None, lo: 9, hi: 10 }
+      ],
+      ret: Some(TNamed("Int", [], 12, 15)),
+      effs: ["c"],
+      body: EInt(0, 18, 19),
+      lo: 0,
+      hi: 19,
+      nlo: 3,
+      nhi: 4
+    })
+  ] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, sigs) = pass_fn_signatures(cx, m)
+  assert len(cx1.diags) == 0
+  # one entry per distinct name -- `a` appears twice and is minted once -- and
+  # the order is the resolver's, which takes the declared row before the
+  # parameter types. Nothing but the ids decides this: the table they come out
+  # of is keyed by name.
+  var names: List[String] = []
+  for e in sigs[0].eparams {
+    match e {
+      EffVar(n, _) -> { names = names ++ [n] }
+      _ -> { assert false }
+    }
+  }
+  assert names == ["c", "a", "b"]
 }
 
 ## Pass 3.5: constant declarations — types only (initializers run later, after
@@ -2301,7 +2345,7 @@ test "main shape violations are reported" {
     nhi: 7
   })] }
   var cx = seed_prelude(test_cx())
-  let (cx1, sigs, evs) = pass_fn_signatures(cx, m)
+  let (cx1, sigs) = pass_fn_signatures(cx, m)
   let cx2 = pass_main_check(cx1, m, sigs)
   assert len(cx2.diags) == 2
   assert cx2.diags[0].msg == "main must have the signature fn main() -> Unit !io"

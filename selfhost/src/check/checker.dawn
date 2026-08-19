@@ -1654,6 +1654,7 @@ test "propagate demands matching option and result shapes" {
     is_builtin: false,
     tparams: [],
     constraints: [],
+    eparams: [],
     owner: None,
     trait_id: None,
     op_of: None,
@@ -2960,7 +2961,7 @@ test "an isolated context reports its own effects, then restores all nine fields
       eff_witness: outer_wit,
       current_sig: Some(Sig {
         name: "outer", param_tys: [], param_names: [], param_defaults: [], ret: TyInt,
-        eff: EPure, is_builtin: false, tparams: [], constraints: [],
+        eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
         owner: None, trait_id: None, op_of: None, inferring: false
       }),
       dict_syms: outer_dicts,
@@ -3314,7 +3315,7 @@ test "fn values instantiate from the expected type" {
   let bounded = Sig {
     name: "sortish", param_tys: [TyList(tv)], param_names: ["xs"], param_defaults: [],
     ret: TyList(tv),
-    eff: EPure, is_builtin: true, tparams: [tv], constraints: [[EQ_ID]],
+    eff: EPure, is_builtin: true, tparams: [tv], constraints: [[EQ_ID]], eparams: [],
     owner: None, trait_id: None, op_of: None, inferring: false
   }
   let want = TyFn([TyList(TyInt)], TyList(TyInt), EPure)
@@ -7783,6 +7784,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
     is_builtin: false,
     tparams: [],
     constraints: [],
+    eparams: [],
     owner: Some("m"),
     trait_id: None,
     op_of: None,
@@ -8306,7 +8308,19 @@ fn dict_sym_list(cx: Cx, s: Sig) -> List[Int] = {
 
 ## The shared prologue of checkFn and friends: bind the signature frame and
 ## dictionaries, fresh effect record, one root scope.
-fn enter_fn(cx: Cx, s: Sig, ev: Map[String, Eff], nlo: Int, nhi: Int) -> Cx = {
+##
+## The effect variables come out of the signature, the same way the type
+## parameters do. They used to arrive as a third parallel list registration
+## handed out beside `sigs`, which made a signature's own binders the one
+## thing about it that could not be read off it.
+fn enter_fn(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
+  var ev: Map[String, Eff] = map.empty()
+  for e in s.eparams {
+    match e {
+      EffVar(n, _) -> { ev = map.insert(ev, n, e) }
+      _ -> ()
+    }
+  }
   var tp: Map[String, Ty] = map.empty()
   var bd = cx.current_tparam_bounds
   var ti = 0
@@ -8421,6 +8435,7 @@ fn default_sig(fname: String, k: Int, pty: Ty, owner: Option[String]) -> Sig =
     is_builtin: false,
     tparams: [],
     constraints: [],
+    eparams: [],
     owner: owner,
     trait_id: None,
     op_of: None,
@@ -8473,8 +8488,7 @@ fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TExpr]]) 
             e_lo(de), e_hi(de), "take the argument explicitly at the call sites")
           out = out ++ [no_texpr()]
         } else {
-          let empty_ev: Map[String, Eff] = map.empty()
-          var cxd = enter_fn(cx1, default_sig(d.name, k, pty, s.owner), empty_ev, p.lo, p.hi)
+          var cxd = enter_fn(cx1, default_sig(d.name, k, pty, s.owner), p.lo, p.hi)
           let (cxe, dt, dx) = check_expr(cxd, de, Some(pty))
           cxd = cxe
           if not assignable(cxd, dt, pty) {
@@ -8506,9 +8520,9 @@ fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TExpr]]) 
 }
 
 ## Check one annotated function body against its signature (the Kotlin checkFn).
-pub fn check_fn(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, TFun) !io = {
+pub fn check_fn(cx: Cx, d: FnDecl, s: Sig) -> (Cx, TFun) !io = {
   let (cx0, dtxs) = check_param_defaults(cx, d, s)
-  var cx1 = enter_fn(cx0, s, ev, d.nlo, d.nhi)
+  var cx1 = enter_fn(cx0, s, d.nlo, d.nhi)
   var psyms: List[Int] = []
   var i = 0
   for p in d.params {
@@ -8545,9 +8559,9 @@ pub fn check_fn(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, TFun) !
 ## Check the body of a signature-inferred function and seal its signature:
 ## ret = the body's type, eff = the body's effects (or the declared one, which
 ## is then enforced as usual). The Kotlin checkFnInferred.
-pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, Sig, TFun) !io = {
+pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig) -> (Cx, Sig, TFun) !io = {
   let (cx0, dtxs) = check_param_defaults(cx, d, s)
-  var cx1 = enter_fn(cx0, s, ev, d.nlo, d.nhi)
+  var cx1 = enter_fn(cx0, s, d.nlo, d.nhi)
   var psyms: List[Int] = []
   var i = 0
   for p in d.params {
@@ -8600,8 +8614,7 @@ pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx
 ## Check a trait's default method body against its own signature (T stays
 ## rigid). The Kotlin checkTraitDefault.
 pub fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> (Cx, TFun) !io = {
-  let empty_ev: Map[String, Eff] = map.empty()
-  var cx1 = enter_fn(cx, s, empty_ev, m2.nlo, m2.nhi)
+  var cx1 = enter_fn(cx, s, m2.nlo, m2.nhi)
   var psyms: List[Int] = []
   var i = 0
   for p in m2.params {
@@ -8646,6 +8659,7 @@ fn test_sig(name: String) -> Sig =
     is_builtin: false,
     tparams: [],
     constraints: [],
+    eparams: [],
     owner: None,
     trait_id: None,
     op_of: None,
@@ -8747,7 +8761,7 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   cx1 = pass_register_traits(cx1, m)
   let (cxb, impl_sigs) = pass_register_impls(cx1, m, shells)
   cx1 = cxb
-  let (cxc, sigs, evs) = pass_fn_signatures(cx1, m)
+  let (cxc, sigs) = pass_fn_signatures(cx1, m)
   cx1 = cxc
   let (cxd, const_tys) = pass_const_decls(cx1, m)
   cx1 = cxd
@@ -8817,7 +8831,7 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
         if ready {
           # each pending index is completed at most once, so the signature this
           # reads is still the unsealed one the list held
-          let (cxe, _, tf) = check_fn_inferred(cx1, d, sigs[idx], evs[idx])
+          let (cxe, _, tf) = check_fn_inferred(cx1, d, sigs[idx])
           cx1 = cxe
           inferred = map.insert(inferred, idx, tf)
           done = set.insert(done, d.name)
@@ -8861,7 +8875,7 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   i = 0
   for d in fnds {
     if not sigs[i].inferring {
-      let (cxe, tf) = check_fn(cx1, d, sigs[i], evs[i])
+      let (cxe, tf) = check_fn(cx1, d, sigs[i])
       cx1 = cxe
       tfuns = tfuns ++ [Some(tf)]
     } else {
@@ -8891,10 +8905,9 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
     for me in imd.methods {
       match msigs[mi] {
         Some(ms) -> {
-          let empty_ev: Map[String, Eff] = map.empty()
           # registration refused any parameter defaults; strip them so the
           # refusal is not followed by the value's own diagnostics
-          let (cxe, tf) = check_fn(cx1, strip_param_defaults(me), ms, empty_ev)
+          let (cxe, tf) = check_fn(cx1, strip_param_defaults(me), ms)
           cx1 = cxe
           impl_tfuns = impl_tfuns ++ [TFun { ..tf, impl_of: imp_key }]
         }

@@ -68,6 +68,42 @@ pub fn eff_labels(e: Eff) -> List[(Int, String)] =
     _ -> []
   }
 
+## `Sig.eparams` out of the table a signature's resolution filled: the effect
+## variables it introduced, id-sorted.
+##
+## The order is the contract, because a renderer will read this list back. The
+## table is `Cx.current_eff_vars`, keyed by name, so it carries no order of its
+## own -- iterating a Map would hand back HAMT order, which is a hash of the
+## spelling. The ids do carry one. `resolve_eff_at` mints an id through `fresh`
+## at the moment it first meets a name and never again, and `fresh` hands ids
+## out in ascending order, so sorting by id replays the order the resolver met
+## the names, once each. That order is the declared row, then the parameter
+## types left to right, then the return type -- first encounter, which is not
+## quite first *appearance*, since the row is written last.
+##
+## Every caller hands in a table that started empty at the signature it is
+## resolving; a table carried in from an enclosing scope would put ids from
+## elsewhere in front, and there is no such caller.
+##
+## Sorting by id is also how the label axis is kept in order (`eff_labels`,
+## which `bind_evidence` and `ev_sym_list` walk to lay out evidence). This is
+## the same discipline on the variable axis.
+pub fn eff_params_of(evs: Map[String, Eff]) -> List[Eff] = {
+  var ids: List[(Int, String)] = []
+  for e in map.values(evs) {
+    match e {
+      EffVar(n, id) -> { ids = ids ++ [(id, n)] }
+      _ -> ()
+    }
+  }
+  var out: List[Eff] = []
+  for p in by_id(ids) {
+    let (id, n) = p
+    out = out ++ [EffVar(n, id)]
+  }
+  out
+}
+
 ## The effect variables of this row, id-sorted — `eff_labels`' opposite number
 ## on the base axis. A row mentions a variable in exactly two shapes, `EffVar`
 ## and `EUnion`, and anything that walks one and forgets the other is the
@@ -975,6 +1011,17 @@ pub type Sig = {
   tparams: List[Ty],
   # trait ids per type parameter, aligned with tparams; missing tail = unbounded
   constraints: List[List[Int]],
+  # The effect variables this signature binds, each an `EffVar`, in the order
+  # `eff_params_of` defines. A separate component and not a member of
+  # `tparams` on purpose: `constraints` is aligned with `tparams` by position,
+  # and `bind_dicts` skips a non-`TyVar` entry while still advancing that
+  # position, so a mixed list would bind dictionaries to the wrong variable
+  # and say nothing (docs/effect-params-design.md decision 1).
+  #
+  # Empty on a builtin signature, whose row may still name the shared `e`
+  # (`bsig`): a builtin has no body to check, so nothing enters it and
+  # nothing reads the list back.
+  eparams: List[Eff],
   owner: Option[String],
   trait_id: Option[Int],
   # (effect id, field index) when this signature is an effect *operation*
@@ -1463,6 +1510,7 @@ fn prelude_method(tid: Int, tv: Ty, name: String, ptys: List[Ty], pnames: List[S
     is_builtin: false,
     tparams: [tv],
     constraints: [[tid]],
+    eparams: [],
     owner: None,
     trait_id: Some(tid),
     op_of: None,
@@ -1496,6 +1544,7 @@ pub fn prelude_traits() -> Traits = {
     is_builtin: false,
     tparams: [tv],
     constraints: [[ORD_ID]],
+    eparams: [],
     owner: None,
     trait_id: Some(ORD_ID),
     op_of: None,
@@ -1822,6 +1871,7 @@ fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
     is_builtin: true,
     tparams: [],
     constraints: [],
+    eparams: [],
     owner: None,
     trait_id: None,
     op_of: None,
