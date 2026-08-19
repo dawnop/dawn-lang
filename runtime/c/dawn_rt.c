@@ -9,19 +9,103 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <pthread.h>
-#include <setjmp.h>
-#include <signal.h>
-#include <spawn.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
+#ifndef __wasi__
+#include <pthread.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <unwind.h>
+#endif
+
+#ifdef __wasi__
+/* ---- wasm32-wasi ------------------------------------------------------
+ *
+ * The same translation unit, minus what the target does not have: threads,
+ * processes, signals, setjmp and an unwinder (wasi-libc leaves all five
+ * out). RC, strings, collections and file io through WASI preopens are the
+ * untouched code above and below; what follows is the honest spelling of
+ * each absence, not an emulation.
+ *
+ * The one real loss is failure *recovery*. dawn_raise lands on a handler by
+ * forced unwind + longjmp (see "landing at a handler" below), and both legs
+ * are missing here, so a raise that finds a handler aborts with a message
+ * instead of landing. A raise with no handler already ends the program on
+ * every target, and that path (report to stderr, exit 1) works unchanged.
+ * The planned replacement is wasm's own exception handling -- throw to a
+ * catch, cleanups run by the EH unwinder -- not a port of this machinery.
+ */
+
+/* setjmp/longjmp: pushing and popping handler frames costs nothing without
+ * them (setjmp answers "no failure yet" and the landing branch is dead
+ * code); only an actual landing needs the missing unwinder. */
+static _Noreturn void dawn_wasi_no_unwinder(void) {
+  fflush(stdout);
+  fputs("dawn: catch/bracket cannot recover on wasm32-wasi yet: the target "
+        "has no unwinder\n",
+        stderr);
+  abort();
+}
+
+typedef int dawn_wasi_jmp_buf[1];
+#define jmp_buf dawn_wasi_jmp_buf
+#define setjmp(b) 0
+#define longjmp(b, v) dawn_wasi_no_unwinder()
+
+/* Enough of <unwind.h> for the failure machinery to compile; the one entry
+ * point aborts, matching the setjmp story above. */
+typedef int _Unwind_Reason_Code;
+typedef int _Unwind_Action;
+typedef unsigned long long _Unwind_Exception_Class;
+#define _URC_NO_REASON 0
+#define _UA_END_OF_STACK 16
+struct _Unwind_Exception {
+  unsigned long long exception_class;
+  void (*exception_cleanup)(_Unwind_Reason_Code, struct _Unwind_Exception *);
+};
+struct _Unwind_Context;
+static _Unwind_Reason_Code _Unwind_ForcedUnwind(
+    struct _Unwind_Exception *e,
+    _Unwind_Reason_Code (*stop)(int, _Unwind_Action, _Unwind_Exception_Class,
+                                struct _Unwind_Exception *,
+                                struct _Unwind_Context *, void *),
+    void *arg) {
+  (void)e;
+  (void)stop;
+  (void)arg;
+  dawn_wasi_no_unwinder();
+}
+
+/* wasi-libc cuts these out of its headers on purpose ("WASI has no temp
+ * directories", "WASI has no chmod"). The temp makers report failure and
+ * the callers' existing faults say the rest; chmod succeeds vacuously --
+ * a target without file modes has nothing to copy and nothing to fail. */
+static char *dawn_wasi_mkdtemp(char *tmpl) {
+  (void)tmpl;
+  errno = ENOTSUP;
+  return NULL;
+}
+static int dawn_wasi_mkstemp(char *tmpl) {
+  (void)tmpl;
+  errno = ENOTSUP;
+  return -1;
+}
+static int dawn_wasi_chmod(const char *path, mode_t mode) {
+  (void)path;
+  (void)mode;
+  return 0;
+}
+#define mkdtemp dawn_wasi_mkdtemp
+#define mkstemp dawn_wasi_mkstemp
+#define chmod dawn_wasi_chmod
+#endif
 
 static int dawn_argc;
 static char **dawn_argv;
@@ -50,6 +134,19 @@ void dawn_rt_init(int argc, char **argv) {
   }
 }
 
+#ifdef __wasi__
+int dawn_rt_main(int argc, char **argv, void (*entry)(void)) {
+  /* No pthread here, and no substitute either: the wasm call stack belongs
+   * to the engine, so a DAWN_STACK_BYTES thread has no equivalent. Deep
+   * recursion on this target is a recorded limit (the native fallback below
+   * would print its warning on every run, which is noise, not a message --
+   * the warning exists for a big stack that unexpectedly failed to appear,
+   * and here one was never on offer). */
+  dawn_rt_init(argc, argv);
+  entry();
+  return 0;
+}
+#else
 /* See dawn_rt.h: the entry point runs on a DAWN_STACK_BYTES stack, not on
  * whatever the OS gave the main thread. Held in a static because casting an
  * object pointer to a function pointer is not conforming C, only POSIX. */
@@ -82,6 +179,7 @@ int dawn_rt_main(int argc, char **argv, void (*entry)(void)) {
   entry();
   return 0;
 }
+#endif
 
 static void *dawn_alloc(size_t n) {
   void *p = malloc(n);
@@ -2241,6 +2339,19 @@ bool dawn_io_stdin_ready(int64_t timeout_ms) {
   return queued > 0;
 }
 
+#ifdef __wasi__
+/* No processes on wasi, so `io.run` is a fault, same shape as the other
+ * honest refusals above. The signal-forwarding machinery below it goes with
+ * the spawn: it exists to keep a spawned child reachable, and there is
+ * nothing to spawn. */
+int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
+  (void)out_path;
+  (void)err_path;
+  dawn_drop(argv);
+  dawn_fault(DAWN_LIT("io_run: no processes on wasi"));
+  return -1;
+}
+#else
 /* Spawn and wait. `posix_spawnp` rather than fork+exec: fork duplicates the
  * whole address space only to throw it away, and this runs inside a compiler.
  * Redirection is a file action for the same reason the signature takes paths
@@ -2377,6 +2488,7 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
   if (WIFSIGNALED(status)) return (int64_t)(128 + WTERMSIG(status));
   return -1;
 }
+#endif
 
 dawn_array *dawn_args(void) {
   /* argv[0] is the program, which `args` does not include -- the JVM backend

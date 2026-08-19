@@ -1,0 +1,33 @@
+# The RC-heavy leg: HAMT churn, pvec accumulation, the Unicode case tables
+# and 10k recursion frames, all of which lean on the runtime paths a pointer
+# width or allocator difference would bend first (the #309 survey's probe
+# program, verbatim).
+use std/map
+use std/list
+use std/str
+
+fn rec(n: Int) -> Int = if n == 0 { 0 } else { 1 + rec(n - 1) }
+
+pub fn main() -> Unit !io = {
+  var m: Map[String, Int] = map.empty()
+  var i = 0
+  while i < 20000 {
+    m = map.insert(m, "key-${i}", i * 3)
+    i = i + 1
+  }
+  var total = 0
+  for k in map.keys(m) {
+    total = total + match map.get(m, k) { Some(v) -> v, None -> 0 }
+  }
+  println("sum = ${total}")
+  let s = "ΣΙΣΥΦΟΣ hello Мир"
+  println(str.to_lower(s) ++ " / " ++ str.to_upper(s))
+  var xs: List[Int] = []
+  var j = 0
+  while j < 50000 {
+    xs = xs ++ [j]
+    j = j + 1
+  }
+  println("len = ${len(xs)}")
+  println("depth10k = ${rec(10000)}")
+}

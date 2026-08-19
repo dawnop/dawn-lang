@@ -58,6 +58,7 @@ fn usage() -> String =
     "usage:",
     "  dawnc check [--std <dir>] <target>...       type-check, report diagnostics",
     "  dawnc build [--std <dir>] <target> [-o out] compile to a native binary via cc",
+    "  dawnc build --target wasm <target> [-o out] compile to wasm32-wasi via clang",
     "  dawnc emitc [--std <dir>] <target> [-o out] emit the C translation unit",
     "  dawnc run   [--std <dir>] <target> [-- <args>...]",
     "                                              compile and run",
@@ -218,6 +219,42 @@ fn parse_compile_tail(
   (std_dir, out, target)
 }
 
+## `build`'s tail: `parse_compile_tail` plus `--target <t>`. A separate parser
+## rather than a flag on the shared one because `emitc` has no targets to
+## choose between -- the C text is the same whatever compiles it. The only
+## spelling is `wasm` (wasm32-wasi via clang, see `cc_build_for`); native is
+## the default and has no spelling, and the JVM driver has no such flag at
+## all, so this stays off the argvs `native-cli-diff.sh` holds the two
+## drivers to.
+fn parse_build_tail(usage_text: String, rest: List[String]) -> (String, String, String, Bool) !io = {
+  var std_dir = "std"
+  var out = ""
+  var target = ""
+  var wasm = false
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "-o" && i + 1 < len(rest) {
+      out = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--target" && i + 1 < len(rest) {
+      if rest[i + 1] != "wasm" {
+        cli_error("unknown --target `" ++ rest[i + 1] ++ "`; this backend knows: wasm")
+      }
+      wasm = true
+      i = i + 2
+    } else {
+      refuse_second_target("dawn build", target, rest[i])
+      target = rest[i]
+      i = i + 1
+    }
+  }
+  if target == "" { cli_error(usage_text) }
+  (std_dir, out, target, wasm)
+}
+
 ## `[--std <dir>] <target>...`, matching main.dawn's public check parser.
 fn check_args(rest: List[String]) -> (String, List[String]) = {
   var std_dir = "std"
@@ -280,7 +317,19 @@ fn default_out(target: String) -> String = {
 ## leave the binary at `out`. The cc diagnostics stream to this process's
 ## stderr -- an empty err_path means "inherit", and cc failing is the user's
 ## compile error to read.
-fn cc_build(ctext: String, out: String) -> Unit !io = {
+fn cc_build(ctext: String, out: String) -> Unit !io = cc_build_for(ctext, out, false)
+
+## What a missing wasm32-wasi toolchain needs, said next to the failure it
+## causes: the compile errors clang prints for it (a missing driver, a missing
+## sysroot header, a missing compiler-rt) all presume the reader already knows
+## the target is cross-compiled, and the first person to hit one will not.
+fn wasm_toolchain_hint() -> String =
+  "note: `--target wasm` cross-compiles with clang and needs lld, wasi-libc " ++
+  "and the wasm32 compiler-rt next to it. On Debian/Ubuntu: apt install " ++
+  "clang lld wasi-libc libclang-rt-18-dev-wasm32 (or point DAWN_WASM_CC " ++
+  "at a wasi-sdk clang)."
+
+fn cc_build_for(ctext: String, out: String, wasm: Bool) -> Unit !io = {
   let work = match io.temp_dir("", "dawnc") {
     Ok(d) -> d
     Err(e) -> {
@@ -302,15 +351,41 @@ fn cc_build(ctext: String, out: String) -> Unit !io = {
       return ()
     }
   }
-  let cc = match io.getenv("CC") {
-    Some(c) -> c
-    None -> "cc"
+  # The wasm spelling is clang's and only clang's (cc has no wasm32-wasi),
+  # so its override is a separate variable rather than CC: one environment
+  # can hold a native CC and a wasi-sdk clang at the same time. The flag
+  # differences against the native row are the target's, not choices:
+  # no -pthread (wasi-libc has none) and no -fexceptions (nothing unwinds
+  # there yet -- see the wasi block in dawn_rt.c).
+  let cc = if wasm {
+    match io.getenv("DAWN_WASM_CC") {
+      Some(c) -> c
+      None -> "clang"
+    }
+  } else {
+    match io.getenv("CC") {
+      Some(c) -> c
+      None -> "cc"
+    }
   }
-  let argv = [
-    cc, "-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread",
-    "-I", work,
-    "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c", "-lm"
-  ]
+  # -Wno-parentheses-equality: a clang-only warning the emitted C trips a
+  # few hundred times per program (`if ((x == 0))` is the emitter's honest
+  # parenthesization). The native row never sees it because gcc has no such
+  # warning; real errors still print.
+  let argv = if wasm {
+    [
+      cc, "--target=wasm32-wasi", "-std=c11", "-O2", "-fwrapv", "-fno-strict-aliasing",
+      "-Wno-parentheses-equality",
+      "-I", work,
+      "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c", "-lm"
+    ]
+  } else {
+    [
+      cc, "-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread",
+      "-I", work,
+      "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c", "-lm"
+    ]
+  }
   # cc is done with the staging directory the moment it succeeds, and nothing
   # else ever removed it: 125 of them, a megabyte each (the emitted C plus the
   # embedded runtime), had accumulated in /tmp here. A cc that *failed* keeps
@@ -318,8 +393,14 @@ fn cc_build(ctext: String, out: String) -> Unit !io = {
   # look at, and the error names an exit code, not a file.
   match io.run(argv, "", "") {
     Ok(0) -> pkgfetch.delete_tree(work)
-    Ok(code) -> cli_error(cc ++ " failed (exit code " ++ "${code}" ++ ")")
-    Err(e) -> cli_error("cannot run " ++ cc ++ ": " ++ e.message)
+    Ok(code) -> {
+      if wasm { io.eprintln(wasm_toolchain_hint()) }
+      cli_error(cc ++ " failed (exit code " ++ "${code}" ++ ")")
+    }
+    Err(e) -> {
+      if wasm { io.eprintln(wasm_toolchain_hint()) }
+      cli_error("cannot run " ++ cc ++ ": " ++ e.message)
+    }
   }
 }
 
@@ -365,13 +446,18 @@ fn cmd_emitc(rest: List[String]) -> Unit !io = {
 }
 
 fn cmd_build(rest: List[String]) -> Unit !io = {
-  let (std_dir, out0, target) = parse_compile_tail(
-    "dawn build",
+  let (std_dir, out0, target, wasm) = parse_build_tail(
     "usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]",
     rest
   )
-  let out = if out0 == "" { default_out(target) } else { out0 }
-  cc_build(emitted(std_dir, target), out)
+  # `.wasm` by default: the artifact is not executable here, and every host
+  # that runs one (node, wasmtime, a browser loader) keys on the suffix.
+  let out = if out0 == "" {
+    if wasm { default_out(target) ++ ".wasm" } else { default_out(target) }
+  } else {
+    out0
+  }
+  cc_build_for(emitted(std_dir, target), out, wasm)
 }
 
 ## Build `ctext` into a scratch directory and become it: the process ends with
