@@ -27,7 +27,8 @@ use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
-  Sym, Sig, Eff, eff_labels, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID,
+  Sym, Sig, Eff, eff_labels, eff_assocs, reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
+  Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID,
   intrinsics,
   Impls, impl_at, reduce_via_bindings
 }
@@ -404,12 +405,33 @@ fn sig_desc_with_dicts(adts: Adts, s: Sig) -> String = {
     let (eid, _) = l
     ps = ps ++ desc_of(adts, TyAdt(eid, []))
   }
+  # ... and one erased slot per written projection, behind them (rule 丙):
+  # which evidence record fills it depends on the impl, so Object is the
+  # only descriptor every caller and callee can agree on
+  for _a in eff_assocs(s.eff) { ps = ps ++ "Ljava/lang/Object;" }
   "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
 }
 
 fn fn_desc_with_dicts(gx: GenCtx, s: Sig) -> String = sig_desc_with_dicts(gx.adts, s)
 
-fn trait_method_desc(gx: GenCtx, s: Sig) -> String = method_desc(gx.adts, s.param_tys, s.ret)
+## The dictionary-interface descriptor of a trait method: the erased
+## parameters, then the row's evidence -- written labels exact, projections
+## erased -- with no dictionary (the receiver is the dictionary). One
+## function so the interface declaration, the INVOKEINTERFACE call site and
+## the dictionary class's implementing method cannot disagree; a mismatch
+## among the three is a VerifyError, not a diagnostic.
+fn trait_iface_desc(adts: Adts, s: Sig) -> String = {
+  var ps = ""
+  for p in s.param_tys { ps = ps ++ desc_of(adts, p) }
+  for l in eff_labels(s.eff) {
+    let (eid, _) = l
+    ps = ps ++ desc_of(adts, TyAdt(eid, []))
+  }
+  for _a in eff_assocs(s.eff) { ps = ps ++ "Ljava/lang/Object;" }
+  "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
+}
+
+fn trait_method_desc(gx: GenCtx, s: Sig) -> String = trait_iface_desc(gx.adts, s)
 
 ## impl method static name: dawn$impl$<Trait>$<Subject>$<m>.
 fn impl_method_name(gx: GenCtx, trait_name: String, subject: Ty, m: String) -> String =
@@ -491,19 +513,33 @@ fn trait_method_sig(tr: TraitI, name: String) -> Sig = {
 ## verbatim, mirroring lower.dawn's subst_subject: the impl method's declared
 ## signature is the descriptor, so `Cur = Int` is an I slot and `Item = T`
 ## stays an erased Object one.
-fn subst_subject(tr: TraitI, s: Sig, subject: Ty, bindings: List[(String, Ty)]) -> Sig = {
+fn subst_subject(
+  tr: TraitI,
+  s: Sig,
+  subject: Ty,
+  bindings: List[(String, Ty)],
+  ebindings: List[(String, Eff)]
+) -> Sig = {
   let vid = match tr.tvar {
     TyVar(_, v) -> v
     _ -> panic("trait tvar")
   }
   var ps: List[Ty] = []
   for p in s.param_tys {
-    ps = ps ++ [reduce_via_bindings(subst_tvar(p, vid, subject), tr.id, subject, bindings)]
+    ps = ps ++ [reduce_ty_effs_via_bindings(
+      reduce_via_bindings(subst_tvar(p, vid, subject), tr.id, subject, bindings),
+      vid, tr.id, ebindings)]
   }
   Sig {
     ..s,
     param_tys: ps,
-    ret: reduce_via_bindings(subst_tvar(s.ret, vid, subject), tr.id, subject, bindings)
+    ret: reduce_ty_effs_via_bindings(
+      reduce_via_bindings(subst_tvar(s.ret, vid, subject), tr.id, subject, bindings),
+      vid, tr.id, ebindings),
+    # the row too: the impl method's own labels are its evidence layout, and
+    # the descriptor below is rebuilt from this signature (mirror of
+    # lower.dawn's subst_subject; a drift between the two is a VerifyError)
+    eff: reduce_eff_via_bindings(s.eff, vid, tr.id, ebindings)
   }
 }
 
@@ -1314,7 +1350,7 @@ pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Byte
   for entry in tr.methods {
     let (mn, ms) = entry
     let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, mn,
-      method_desc(adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
+      trait_iface_desc(adts, ms.sig)).expect("mv")
     m.visitEnd()
   }
   cw.visitEnd()
@@ -1735,16 +1771,29 @@ fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, By
   for entry in tr.methods {
     let (mname, ms) = entry
     let m = Asm.methodOn(cw, ACC_PUBLIC, mname,
-      method_desc(gx.adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
+      trait_iface_desc(gx.adts, ms.sig)).expect("mv")
     m.visitCode()
     var slot = 1
     for declared in ms.sig.param_tys {
       load_slot(m, declared, slot)
       slot = slot + slots_of(declared)
     }
-    # the dictionary itself is the trailing argument: a default body reaches
-    # its siblings through it
+    # The dictionary itself sits between the method's own arguments and the
+    # evidence: the target static's shape is (params, dicts, evs), the
+    # interface method's is (params, evs) with the dictionary as receiver --
+    # so load `this` here and the incoming evidence slots after it. Evidence
+    # is one reference each (a record or an erased Object), so the walk is
+    # the same slot walk.
     m.visitVarInsn(OP_ALOAD, 0)
+    for l in eff_labels(ms.sig.eff) {
+      let (eid, _) = l
+      load_slot(m, TyAdt(eid, []), slot)
+      slot = slot + 1
+    }
+    for _a in eff_assocs(ms.sig.eff) {
+      m.visitVarInsn(OP_ALOAD, slot)
+      slot = slot + 1
+    }
     let (owner, target) = slot_target(tr, dd.slots[i])
     let target_desc = sig_desc_with_dicts(gx.adts, ms.sig)
     m.visitMethodInsn(OP_INVOKESTATIC, owner, target, target_desc, false)
@@ -1822,15 +1871,25 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
     CImpl(owner, tid, subject, method) -> {
       let g1 = gen_cargs(gx, g, args)
       let tr = trait_of(gx.traits, tid)
+      let imp = impl_of(gx, tid, subject)
       let psig = subst_subject(tr, trait_method_sig(tr, method), subject,
-        impl_of(gx, tid, subject).assoc_bindings)
-      # A conditional impl's method takes a dictionary per bound. How many is
-      # readable from Core alone -- the arguments beyond the trait method's
-      # own are those dictionaries -- so this does not consult the impl table.
+        imp.assoc_bindings, imp.eff_bindings)
+      # A conditional impl's method takes a dictionary per bound, and an
+      # effectful one its evidence behind them. The evidence count and each
+      # slot's exact descriptor read off psig's row (the impl method's own
+      # labels, by conformance); only the dictionaries in between are erased.
+      # Getting a slot's type wrong here is a VerifyError, because the impl
+      # method's definition side spells the same descriptors from its own
+      # signature (sig_desc_with_dicts).
+      let evtys = map(eff_labels(psig.eff), l => {
+        let (eid, _) = l
+        TyAdt(eid, [])
+      })
       var ptys = psig.param_tys
-      for _d in 0..(len(args) - len(psig.param_tys)) {
+      for _d in 0..(len(args) - len(psig.param_tys) - len(evtys)) {
         ptys = ptys ++ [TyVar("D", 0)]
       }
+      ptys = ptys ++ evtys
       let d = method_desc(gx.adts, ptys, psig.ret)
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
         impl_method_name(gx, tr.name, subject, method), d, false)
@@ -1844,7 +1903,7 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
         default_method_name(tr.name, method), d, false)
       finish_call(g1, ty, call_result_of_desc(d))
     }
-    CMethod(dict, tid, method, _idx) -> {
+    CMethod(dict, tid, method, _idx, _nev) -> {
       # the JVM's dictionaries are interfaces, so it dispatches by name and
       # ignores the slot index the table-based backend uses
       let tr = trait_of(gx.traits, tid)

@@ -25,7 +25,8 @@ use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyMap, TySet, TyArray, TyJava,
   DICT_ADT_ID,
-  Sym, Sig, EPure, Traits, TraitI, ImplI, MethodSig,
+  Sym, Sig, Eff, EPure, Traits, TraitI, ImplI, MethodSig,
+  eff_labels, eff_assocs, reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty,
   Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID,
@@ -936,7 +937,13 @@ fn dict_key(tid: Int, subject: Ty) -> String =
 ## a devirtualised call boxes nothing -- and, since assoc types, so it boxes
 ## *correctly*: `Cur = Int` makes the slot an unboxed Int, `Item = T` keeps
 ## it erased, and the trait-side spelling `C.Cur`/`C.Item` says neither.
-fn subst_subject(tr: TraitI, sg: Sig, subject: Ty, bindings: List[(String, Ty)]) -> Sig = {
+fn subst_subject(
+  tr: TraitI,
+  sg: Sig,
+  subject: Ty,
+  bindings: List[(String, Ty)],
+  ebindings: List[(String, Eff)]
+) -> Sig = {
   let vid =
     match tr.tvar {
       TyVar(_, v) -> v
@@ -946,12 +953,20 @@ fn subst_subject(tr: TraitI, sg: Sig, subject: Ty, bindings: List[(String, Ty)])
   m = map.insert(m, vid, subject)
   var ps: List[Ty] = []
   for p in sg.param_tys {
-    ps = ps ++ [reduce_via_bindings(subst(p, m, map.empty()), tr.id, subject, bindings)]
+    ps = ps ++ [reduce_ty_effs_via_bindings(
+      reduce_via_bindings(subst(p, m, map.empty()), tr.id, subject, bindings),
+      vid, tr.id, ebindings)]
   }
   Sig {
     ..sg,
     param_tys: ps,
-    ret: reduce_via_bindings(subst(sg.ret, m, map.empty()), tr.id, subject, bindings)
+    ret: reduce_ty_effs_via_bindings(
+      reduce_via_bindings(subst(sg.ret, m, map.empty()), tr.id, subject, bindings),
+      vid, tr.id, ebindings),
+    # the row too: the impl method's declared labels are its evidence layout,
+    # and this signature is what every devirtualised call spells (the checker
+    # held the impl to exactly these labels)
+    eff: reduce_eff_via_bindings(sg.eff, vid, tr.id, ebindings)
   }
 }
 
@@ -1114,6 +1129,76 @@ fn dict_slot(
   (st1, CSlotFn(st1.owner, name))
 }
 
+fn no_texprs() -> List[TExpr] = []
+
+## Where each label of a devirtualised callee's row gets its evidence from,
+## against the trait-shaped list: (index into that list, the slot's declared
+## type, the label's evidence type). A label the trait row wrote is its own
+## slot, already exact; one a binding produced is the projection's erased
+## slot, unerased on the way in (`adapt_out` is the CHECKCAST). The
+## conformance check pinned the impl's labels to the trait's row after
+## bindings, so a label with no source is a lowering invariant break, not a
+## user error -- panic loudly rather than emit a call one argument short.
+fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty)] = {
+  let lts = eff_labels(sg.eff)
+  let ats = eff_assocs(sg.eff)
+  var out: List[(Int, Ty, Ty)] = []
+  for l in eff_labels(psig.eff) {
+    let (lid, _) = l
+    var src = 0 - 1
+    var from: Ty = TyAdt(lid, [])
+    var i = 0
+    for wl in lts {
+      let (wid, _) = wl
+      if wid == lid && src < 0 { src = i }
+      i = i + 1
+    }
+    if src < 0 {
+      var j = 0
+      for a in ats {
+        let (_, _, _, an) = a
+        for pr in imp.eff_bindings {
+          let (bn, be) = pr
+          if bn == an && src < 0 {
+            for bl in eff_labels(be) {
+              let (bid, _) = bl
+              if bid == lid && src < 0 {
+                src = len(lts) + j
+                from = erased_ev_ty()
+              }
+            }
+          }
+        }
+        j = j + 1
+      }
+    }
+    if src < 0 { panic("lower: no evidence source for a devirtualised label") }
+    out = out ++ [(src, from, TyAdt(lid, []))]
+  }
+  out
+}
+
+## The TExpr half of the selection: lower only the slots the impl's row
+## reads. Evidence expressions are locals, placeholders or checker errors --
+## nothing with an evaluation order to disturb.
+fn impl_evidence(
+  st: LSt,
+  sg: Sig,
+  imp: ImplI,
+  psig: Sig,
+  evid: List[TExpr]
+) -> (LSt, List[CExpr]) = {
+  var st1 = st
+  var out: List[CExpr] = []
+  for pr in impl_ev_sources(sg, imp, psig) {
+    let (i, from, to) = pr
+    let (st2, v) = lower_expr(st1, evid[i])
+    st1 = st2
+    out = out ++ [adapt_out(v, from, to)]
+  }
+  (st1, out)
+}
+
 ## Synthesise the bridge that lets an impl method sit in a dictionary slot:
 ## it takes the trait's generic (erased) parameters plus the dictionary,
 ## unboxes them into the impl's concrete signature, and boxes the result
@@ -1133,7 +1218,8 @@ fn make_bridge(
   let sg = trait_method_sig(tr, method)
   # only reached when the impl provides this method (dict_slot checked), so
   # the lookup cannot miss
-  let psig = subst_subject(tr, sg, subject, impl_for(st, tid, subject).assoc_bindings)
+  let imp0 = impl_for(st, tid, subject)
+  let psig = subst_subject(tr, sg, subject, imp0.assoc_bindings, imp0.eff_bindings)
   # `ty_key_inst`, not `ty_key`: a conditional impl's bridge names the
   # dictionary class it reads its arguments out of, so `Box[Int]` and
   # `Box[Box[Int]]` need different bridges. For a non-generic subject the two
@@ -1173,14 +1259,39 @@ fn make_bridge(
       }
       gi = gi + 1
     }
-    let call = CCall(CImpl(iowner, tid, subject, method), args ++ ds, psig.ret)
+    # The trait-shaped evidence parameters: the written labels' slots carry
+    # their exact evidence records, a projection's slot is erased (that is
+    # the whole of what "erased on the dictionary-slot boundary" means). The
+    # forwarding below re-selects them into the impl's own layout, unerasing
+    # where a binding supplied the label -- `adapt_out` is the CHECKCAST.
+    var evps: List[CParam] = []
+    var evlocals: List[CExpr] = []
+    for l in eff_labels(sg.eff) {
+      let (eid, _) = l
+      let (stv, esym) = fresh_sym(st1)
+      st1 = stv
+      evps = evps ++ [CParam { sym: esym, ty: TyAdt(eid, []), mode: COwned }]
+      evlocals = evlocals ++ [CLocal(esym, TyAdt(eid, []))]
+    }
+    for _a in eff_assocs(sg.eff) {
+      let (stv, esym) = fresh_sym(st1)
+      st1 = stv
+      evps = evps ++ [CParam { sym: esym, ty: erased_ev_ty(), mode: COwned }]
+      evlocals = evlocals ++ [CLocal(esym, erased_ev_ty())]
+    }
+    var ies: List[CExpr] = []
+    for pr in impl_ev_sources(sg, imp0, psig) {
+      let (i, from, to) = pr
+      ies = ies ++ [adapt_out(evlocals[i], from, to)]
+    }
+    let call = CCall(CImpl(iowner, tid, subject, method), args ++ ds ++ ies, psig.ret)
     let f = CFun {
       name: name,
       owner: st1.owner,
       captures: [],
       params: ps,
       dicts: [CParam { sym: dsym, ty: TyAdt(-1, []), mode: COwned }],
-      evs: [],
+      evs: evps,
       ret: sg.ret,
       body: adapt_in(call, psig.ret, sg.ret),
       is_test: false,
@@ -1480,7 +1591,7 @@ fn eq_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr)
   let sg = trait_method_sig(tr, "eq")
   let idx = method_index(tr, "eq")
   (st, adapt_out(
-    CCall(CMethod(d, EQ_ID, "eq", idx),
+    CCall(CMethod(d, EQ_ID, "eq", idx, 0),
       [adapt_in(a, t, sg.param_tys[0]), adapt_in(b, t, sg.param_tys[1])], sg.ret),
     sg.ret, TyBool))
 }
@@ -1692,7 +1803,7 @@ fn cmp_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr
   let sg = trait_method_sig(tr, "cmp")
   let idx = method_index(tr, "cmp")
   (st, adapt_out(
-    CCall(CMethod(d, ORD_ID, "cmp", idx),
+    CCall(CMethod(d, ORD_ID, "cmp", idx, 0),
       [adapt_in(a, t, sg.param_tys[0]), adapt_in(b, t, sg.param_tys[1])], sg.ret),
     sg.ret, TyInt))
 }
@@ -1888,7 +1999,7 @@ fn hash_through_dict(st: LSt, d: CExpr, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   let sg = trait_method_sig(tr, "hash")
   let idx = method_index(tr, "hash")
   (st, adapt_out(
-    CCall(CMethod(d, HASH_ID, "hash", idx), [adapt_in(x, t, sg.param_tys[0])], sg.ret),
+    CCall(CMethod(d, HASH_ID, "hash", idx, 0), [adapt_in(x, t, sg.param_tys[0])], sg.ret),
     sg.ret, TyInt))
 }
 
@@ -2061,7 +2172,7 @@ fn show_through_dict(st: LSt, d: CExpr, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   let sg = trait_method_sig(tr, "show")
   let idx = method_index(tr, "show")
   (st, adapt_out(
-    CCall(CMethod(d, SHOW_ID, "show", idx), [adapt_in(x, t, sg.param_tys[0])], sg.ret),
+    CCall(CMethod(d, SHOW_ID, "show", idx, 0), [adapt_in(x, t, sg.param_tys[0])], sg.ret),
     sg.ret, TyString))
 }
 
@@ -2253,12 +2364,18 @@ fn enter_wit_env(st: LSt, w: WitRef) -> (LSt, Map[String, CExpr]) =
 ## A trait method call. A concrete witness devirtualises to a direct call --
 ## Dawn is dictionary-passing, so this is where the dictionary disappears
 ## when it is statically known. A forwarded one dispatches through the slot.
+## The trait-shaped evidence list `evid` (the checker's: written labels in id
+## order, then projections in `eff_assocs` order) rides to whichever callee
+## the witness picks: whole to a dictionary slot or a default body, which have
+## the trait's own signature; re-selected per label for a devirtualised impl
+## method, whose row is the trait's after this impl's bindings.
 fn lower_trait_call(
   st: LSt,
   tid: Int,
   name: String,
   args: List[TExpr],
   ws: List[WitRef],
+  evid: List[TExpr],
   ty: Ty
 ) -> (LSt, CExpr) = {
   let tr = trait_of(st.traits, tid)
@@ -2290,10 +2407,12 @@ fn lower_trait_call(
   match ws[0] {
     WForward(sym) -> {
       # the dictionary slot has the trait's generic signature, so the
-      # subject position is erased and the argument is boxed
+      # subject position is erased and the argument is boxed; the evidence
+      # rides whole, in the trait row's own order
       let (st1, vs) = lower_args_to(st, args, sg.param_tys)
-      (st1, adapt_out(
-        CCall(CMethod(CLocal(sym, dict_ty()), tid, name, idx), vs, sg.ret),
+      let (st2, es) = lower_all(st1, evid)
+      (st2, adapt_out(
+        CCall(CMethod(CLocal(sym, dict_ty()), tid, name, idx, len(es)), vs ++ es, sg.ret),
         sg.ret, ty))
     }
     # An impl with a body, reached at a subject that is not ground: there is
@@ -2307,18 +2426,20 @@ fn lower_trait_call(
     WApply(_, subject, wargs) -> {
       let imp = impl_for(st, tid, subject)
       if provides(imp, name) {
-        let psig = subst_subject(tr, sg, subject, imp.assoc_bindings)
+        let psig = subst_subject(tr, sg, subject, imp.assoc_bindings, imp.eff_bindings)
         let (st1, vs) = lower_args_to(st, args, psig.param_tys)
         let (st2, ds) = witness_values(st1, wargs)
-        return (st2, adapt_out(
-          CCall(CImpl(owner_or(imp.owner, st2.owner), tid, subject, name), vs ++ ds,
+        let (st3, ies) = impl_evidence(st2, sg, imp, psig, evid)
+        return (st3, adapt_out(
+          CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ ds ++ ies,
             psig.ret),
           psig.ret, ty))
       }
       let (st1, d) = witness_value(st, ws[0])
       let (st2, vs) = lower_args_to(st1, args, sg.param_tys)
-      (st2, adapt_out(
-        CCall(CMethod(d, tid, name, idx), vs, sg.ret), sg.ret, ty))
+      let (st3, es) = lower_all(st2, evid)
+      (st3, adapt_out(
+        CCall(CMethod(d, tid, name, idx, len(es)), vs ++ es, sg.ret), sg.ret, ty))
     }
     WConcrete(_, subject) -> {
       let imp = impl_for(st, tid, subject)
@@ -2326,20 +2447,23 @@ fn lower_trait_call(
         # devirtualised: the impl's own method takes the concrete type, so
         # nothing is boxed. A conditional impl still wants its dictionaries,
         # and at a ground subject they are all statically known.
-        let psig = subst_subject(tr, sg, subject, imp.assoc_bindings)
+        let psig = subst_subject(tr, sg, subject, imp.assoc_bindings, imp.eff_bindings)
         let (st1, vs) = lower_args_to(st, args, psig.param_tys)
         let (st2, ds) = goal_dicts(st1, sub_goals(st1.impls, tid, subject))
-        (st2, adapt_out(
-          CCall(CImpl(owner_or(imp.owner, st2.owner), tid, subject, name), vs ++ ds,
+        let (st3, ies) = impl_evidence(st2, sg, imp, psig, evid)
+        (st3, adapt_out(
+          CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ ds ++ ies,
             psig.ret),
           psig.ret, ty))
       } else {
         # the default body is generic and takes the dictionary like any
-        # other dictionary-passing function
+        # other dictionary-passing function -- and the trait-shaped evidence
+        # behind it, like any other effectful one
         let (st1, vs) = lower_args_to(st, args, sg.param_tys)
         let (st2, d) = dict_ref(st1, tid, subject)
-        (st2, adapt_out(
-          CCall(CDefault(owner_or(tr.owner, st2.owner), tid, name), vs ++ [d], sg.ret),
+        let (st3, es) = lower_all(st2, evid)
+        (st3, adapt_out(
+          CCall(CDefault(owner_or(tr.owner, st3.owner), tid, name), vs ++ [d] ++ es, sg.ret),
           sg.ret, ty))
       }
     }
@@ -2636,13 +2760,13 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         # `<` becomes `cmp(l, r) <op> 0`, `==` becomes `eq(l, r)`.
         Some(w) ->
           if is_eq_op(op) {
-            let (st1, c) = lower_trait_call(st, EQ_ID, "eq", [l, r], [w], TyBool)
+            let (st1, c) = lower_trait_call(st, EQ_ID, "eq", [l, r], [w], no_texprs(), TyBool)
             match op {
               BEq -> (st1, c)
               _ -> (st1, negated(c))
             }
           } else {
-            let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], TyInt)
+            let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], no_texprs(), TyInt)
             (st1, CBinary(bin_op(op), c, CInt(0), TyBool))
           }
         # No witness. For `==`/`!=` that is not "nothing to dispatch": the
@@ -2792,7 +2916,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     }
     XCallFn(owner, name, args, wits, evid, trait_id, _, _, ty) ->
       match trait_id {
-        Some(tid) -> lower_trait_call(st, tid, name, args, wits, ty)
+        Some(tid) -> lower_trait_call(st, tid, name, args, wits, evid, ty)
         None -> {
           let o = match owner { Some(x) -> x, None -> st.owner }
           if tl && is_self_fn(st, o, name) {
@@ -2826,7 +2950,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     # the prelude impls have no body), dispatched through the dictionary where
     # it is a rigid `[C: Index]`.
     XIndex(target, index, wit, _, _, ty) ->
-      lower_trait_call(st, INDEX_ID, "index", [target, index], [wit], ty)
+      lower_trait_call(st, INDEX_ID, "index", [target, index], [wit], no_texprs(), ty)
     XCtorValue(adt, ci, _, _, ty) -> lift_ctor_value(st, adt, ci, ty)
     XCallDyn(sym, _, args, _, _, ty) ->
       if is_self_sym(st, sym) {
@@ -3309,10 +3433,10 @@ fn lower_for_iter(
   let (st4, isym) = fresh_sym(st3)
   let cv: TExpr = XLocal(csym, "for$" ++ "xs", 0, 0, ct)
   let iv: TExpr = XLocal(isym, "for$" ++ "cur", 0, 0, cur_t)
-  let (st5, start_v) = lower_trait_call(st4, ITER_ID, "iter_start", [cv], [w], cur_t)
-  let (st6, done_v) = lower_trait_call(st5, ITER_ID, "iter_done", [cv, iv], [w], TyBool)
-  let (st7, get_v) = lower_trait_call(st6, ITER_ID, "iter_get", [cv, iv], [w], item_ty)
-  let (st8, next_v) = lower_trait_call(st7, ITER_ID, "iter_next", [cv, iv], [w], cur_t)
+  let (st5, start_v) = lower_trait_call(st4, ITER_ID, "iter_start", [cv], [w], no_texprs(), cur_t)
+  let (st6, done_v) = lower_trait_call(st5, ITER_ID, "iter_done", [cv, iv], [w], no_texprs(), TyBool)
+  let (st7, get_v) = lower_trait_call(st6, ITER_ID, "iter_get", [cv, iv], [w], no_texprs(), item_ty)
+  let (st8, next_v) = lower_trait_call(st7, ITER_ID, "iter_next", [cv, iv], [w], no_texprs(), cur_t)
   let (st9, item_sym) = fresh_sym(st8)
   let item = CLocal(item_sym, item_ty)
   let (st10, pattern_stmts) = lower_irrefutable_pattern(st9, item, pat, item_ty)

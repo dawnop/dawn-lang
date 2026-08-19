@@ -1235,7 +1235,7 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
   # the dictionary / call target evaluates before the arguments, like the
   # JVM's; it rides at the head of the ordered row
   let head: List[CExpr] = match callee {
-    CMethod(dict, _, _, _) -> [dict]
+    CMethod(dict, _, _, _, _) -> [dict]
     CDynamic(target) -> [target]
     _ -> []
   }
@@ -1251,25 +1251,32 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
       (st1, impl_symbol(owner, tid, subject, method) ++ "(" ++ join(cargs, ", ") ++ ")")
     CDefault(owner, tid, method) ->
       (st1, default_symbol(owner, tid, method) ++ "(" ++ join(cargs, ", ") ++ ")")
-    CMethod(dict, _tid, _m, idx) -> {
+    CMethod(dict, _tid, _m, idx, nev) -> {
       let dv0 = row[0]
       # A dictionary reaches here as whatever its position carries -- a
       # parameter at a type-variable position is `void*`, which C will not
       # dereference. The JVM's CHECKCAST is this cast.
       let st3 = st1
       let dv = "((dawn_dict*)(" ++ dv0 ++ "))"
-      # a dictionary is a flat table of function pointers; the slot index
-      # was resolved by lowering, so no trait metadata is needed here
-      # every slot has the trait's generic signature plus the dictionary as
-      # a trailing argument, so one cast shape serves every slot
+      # A dictionary is a flat table of function pointers; the slot index was
+      # resolved by lowering, so no trait metadata is needed here. Every slot
+      # has the trait's generic signature, then the dictionary, then the
+      # row's evidence (`nev` trailing arguments -- Core carries the count
+      # because this backend cannot recount it): one cast shape per slot,
+      # with the dictionary spliced in front of the evidence.
+      let nargs = len(args) - nev
       var sigp: List[String] = []
+      var i = 0
       for a in args {
+        if i == nargs { sigp = sigp ++ ["dawn_dict*"] }
         sigp = sigp ++ [c_type(cex_ty(a))]
+        i = i + 1
       }
-      sigp = sigp ++ ["dawn_dict*"]
+      if nev == 0 { sigp = sigp ++ ["dawn_dict*"] }
       let cast = "(" ++ c_type(ty) ++ "(*)(" ++ join(sigp, ", ") ++ "))"
+      let row2 = list.take(cargs, nargs) ++ [dv] ++ list.drop(cargs, nargs)
       (st3, "((" ++ cast ++ "(" ++ dv ++ ")->slots[" ++ to_string(idx) ++ "])(" ++
-          join(cargs ++ [dv], ", ") ++ "))")
+          join(row2, ", ") ++ "))")
     }
     CDynamic(target) -> {
       let st3 = st1

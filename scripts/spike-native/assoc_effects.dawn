@@ -1,0 +1,91 @@
+# 刀 5 (docs/effect-params-design.md): associated effects, differentially.
+# One trait, three impls binding its effect member to a label, the empty row
+# and io; a generic consumer forwarding erased evidence (rule 丙's one hidden
+# slot), a default body forwarding through the dictionary, a mixed row (a
+# written label beside a projection), a devirtualised call, a default called
+# at a concrete subject, and a lambda capturing the erased evidence. The two
+# backends must agree on every byte, and asan must see every evidence record
+# dropped exactly once.
+effect Ask { fn ask() -> Int }
+effect Log { fn log(s: String) -> Int }
+
+trait P[T] {
+  effect E
+  fn run(x: T, k: Int) -> Int !T.E
+  fn twice(x: T, k: Int) -> Int !T.E = run(x, k) + run(x, k)
+}
+
+type A = { v: Int }
+type B = { v: Int }
+type C = { v: Int }
+
+impl P[A] {
+  effect E = !Ask
+  fn run(x: A, k: Int) -> Int !Ask = x.v + k + ask()
+}
+
+impl P[B] {
+  effect E = !()
+  fn run(x: B, k: Int) -> Int = x.v * k
+}
+
+impl P[C] {
+  effect E = !io
+  fn run(x: C, k: Int) -> Int !io = {
+    println("c-run")
+    x.v - k
+  }
+}
+
+fn drive[T: P](x: T) -> Int !T.E = run(x, 1) + twice(x, 2)
+
+fn tally[T: P](x: T) -> Int !Log !T.E = run(x, 3) + log("t")
+
+fn via_lambda[T: P](x: T) -> Int !T.E = {
+  let f = () => run(x, 5)
+  f()
+}
+
+# The Flix `forEach` shape: a written label, a projection and a plain effect
+# variable in one row. The evidence slots are the labels' (id order) then the
+# projections'; the variable adds none (rule 乙). Ask's id sorts before Log's,
+# so the impl's own layout is (Ask, Log) while the trait-shaped list is
+# (Log, atom) -- the devirtualised call and the bridge both re-select.
+trait Q[T] {
+  effect E
+  fn q(x: T, f: fn() -> Int !e) -> Int !Log !T.E !e
+}
+
+impl Q[A] {
+  effect E = !Ask
+  fn q(x: A, f: fn() -> Int !e) -> Int !Log !Ask !e = x.v + log("q") + ask() + f()
+}
+
+fn useq[T: Q](x: T) -> Int !Log !T.E = q(x, () => 7)
+
+# A conditional impl: the witness is applied, not concrete, and the consumer's
+# row spells the label the binding pins (a projection's subject must be a bare
+# type parameter, so `Box[U].E` is not spellable -- the reduction at the choke
+# answers instead).
+type Box[T] = { inner: T }
+
+impl[T: Eq] P[Box[T]] {
+  effect E = !Ask
+  fn run(x: Box[T], k: Int) -> Int !Ask = k + ask()
+}
+
+fn cdrive[U: Eq](b: Box[U]) -> Int !Ask = run(b, 5)
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 40 }
+  with handle Log { log(s) => 1 }
+  println(to_string(drive(A { v: 100 })))
+  println(to_string(drive(B { v: 7 })))
+  println(to_string(drive(C { v: 50 })))
+  println(to_string(tally(A { v: 5 })))
+  println(to_string(run(A { v: 1 }, 2)))
+  println(to_string(twice(A { v: 1 }, 1)))
+  println(to_string(via_lambda(A { v: 1 })))
+  println(to_string(useq(A { v: 2 })))
+  println(to_string(cdrive(Box { inner: 3 })))
+}

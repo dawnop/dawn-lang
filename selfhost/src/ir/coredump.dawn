@@ -96,7 +96,7 @@ fn walk_opt(a: Acc, e: Option[CExpr]) -> Acc =
 fn walk_callee(a: Acc, c: CCallee) -> Acc =
   match c {
     CDynamic(t) -> walk_expr(a, t)
-    CMethod(d, _, _, _) -> walk_expr(a, d)
+    CMethod(d, _, _, _, _) -> walk_expr(a, d)
     CDirect(_, _) -> a
     CImpl(_, _, _, _) -> a
     CDefault(_, _, _) -> a
@@ -228,8 +228,10 @@ fn callee_line(adts: Adts, c: CCallee) -> String =
   match c {
     CDirect(owner, name) -> "direct " ++ owner ++ "." ++ name
     CDynamic(_) -> "dynamic"
-    CMethod(_, tid, method, idx) ->
-      "method trait=" ++ to_string(tid) ++ " " ++ method ++ " slot=" ++ to_string(idx)
+    # nev prints only when nonzero, so every evidence-free dump is unchanged
+    CMethod(_, tid, method, idx, nev) ->
+      "method trait=" ++ to_string(tid) ++ " " ++ method ++ " slot=" ++ to_string(idx) ++
+      (if nev == 0 { "" } else { " nev=" ++ to_string(nev) })
     CImpl(owner, tid, subject, method) ->
       "impl " ++ owner ++ " trait=" ++ to_string(tid) ++ " subject=" ++
       ty_str(adts, subject) ++ " " ++ method
@@ -283,7 +285,7 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
       var out = ind(d) ++ "call " ++ callee_line(adts, callee) ++ ty(adts, t) ++ "\n"
       match callee {
         CDynamic(target) -> { out = out ++ expr(adts, n, d + 1, target) }
-        CMethod(dict, _, _, _) -> { out = out ++ expr(adts, n, d + 1, dict) }
+        CMethod(dict, _, _, _, _) -> { out = out ++ expr(adts, n, d + 1, dict) }
         CDirect(_, _) -> ()
         CImpl(_, _, _, _) -> ()
         CDefault(_, _, _) -> ()

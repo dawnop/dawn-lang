@@ -28,7 +28,7 @@ use check/types.{
   TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, EffVar, ELabeled,
   Audience, AWorld, AStdOnly, AModule, audience_covers, decl_audience, declared_audience,
   trait_audience, builtin_type_audience, internal_std_modules,
-  eff_subsumes, eff_suffix, eff_show, eff_labels, eff_params_of, subst_eff,
+  eff_subsumes, eff_suffix, eff_show, eff_labels, eff_assocs, eff_params_of, subst_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
   EffectI, ev_record_name,
   AdtI, CtorI, FieldI,
@@ -2600,6 +2600,14 @@ pub fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
         cx1 = cerr_h(cx1, "main cannot declare the effect `" ++ nm ++ "`", d.nlo, d.nhi,
           "nothing calls main, so nothing can answer it: install the handler inside " ++
             "main with `with handle " ++ nm ++ " { ... }`")
+      }
+      # the projection half of the same wall: an unreduced `!T.E` on main is
+      # an evidence slot nothing will ever fill (the ground-row invariant's
+      # outermost door -- see eff_is_ground)
+      for a in eff_assocs(sig.eff) {
+        let (s2, _, _, n2) = a
+        cx1 = cerr_h(cx1, "main cannot declare the effect `" ++ s2 ++ "." ++ n2 ++ "`",
+          d.nlo, d.nhi, "nothing calls main, so nothing can supply its evidence")
       }
     }
     i = i + 1

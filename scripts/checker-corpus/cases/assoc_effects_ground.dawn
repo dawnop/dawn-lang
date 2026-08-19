@@ -1,0 +1,26 @@
+# The ground-row walls (docs/effect-params-design.md 刀 5, the eff_is_ground
+# invariant). A projection is pending evidence: a body that raises one must
+# carry it in its own row (the evidence can only arrive through the
+# signature), and main -- the outermost frame -- can never carry one, because
+# nothing calls main to supply the slot. Both are diagnostics, not silent
+# reads: before the walls, an unreduced atom fell through the effect axis's
+# wildcard accessors and read as a bare pure row.
+effect Ask { fn ask() -> Int }
+
+trait P[T] {
+  effect E
+  fn run(x: T, k: Int) -> Int !T.E
+}
+
+type A = { v: Int }
+
+impl P[A] {
+  effect E = !Ask
+  fn run(x: A, k: Int) -> Int !Ask = x.v + k + ask()
+}
+
+# raises T.E without admitting it
+fn leak[T: P](x: T) -> Int = run(x, 1)
+
+# the outermost frame cannot carry a projection
+pub fn main[T: P]() -> Unit !T.E = ()
