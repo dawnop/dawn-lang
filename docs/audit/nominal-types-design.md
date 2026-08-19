@@ -315,11 +315,62 @@ opaque 剥离上的一个真缺陷。那一层当时是硬编码的，成员恰�
 现在两层都钉，且是双向的：嵌套等于 `Int` 的答案，顶层不等于 `Int` 的答案。
 
 原文理由**仍然成立**的那一半：`impl Show[Char]` 确实会让判据不成立，所以那份 impl
-至今没有，嵌套渲染仍是码点数字。「要不要连嵌套也改」是一道独立的、仍然开着的题：
-收益只有 `"${[c]}"` 出 `[a]` 而不是 `[97]`（顺带不再与 `List[Int]` 撞脸），代价是
-判据、`opaque-twin` 语料，以及同一个渲染面在几个 release 内的第二次输出破坏。
-`098419d` 量过需求面：28 个 `str.from_char` 调用点，4 个在渲染字符，其中 2 个就在
-解释这个反直觉的例子里，2 个在 lexer 诊断里，没有归因到任何缺陷。
+至今没有，嵌套渲染仍是码点数字。「要不要连嵌套也改」是一道独立的、仍然开着的题，
+重开条件在下面。
+
+#### 重开条件：跨语言对照（2026-08-19 调研）
+
+三条轴：几层渲染、由什么选层、字符嵌在容器里长什么样。本机能跑的实测，其余查官方文档。
+
+| 语言 | 层数 | 选法 | 有 `Char` 类型 | 顶层 | 嵌套 |
+|---|---|---|---|---|---|
+| Rust | 2（`Display`/`Debug`） | 调用点 `{}`/`{:?}` | 有 | `a` | `'a'` |
+| Swift | 2（`description`/`debugDescription`） | 位置 | 有 `Character` | `a` | `"a"` |
+| Python | 2（`str`/`repr`） | 位置 | 无 | `hi` | `'hi'` |
+| Haskell | 1（`show` 出字面量形） | 无 | 有 | `'a'` | `'a'` |
+| Koka | 1（`show` 出字面量形） | 无 | 有 | `'a'` | `'a'` |
+| Kotlin / Java / Scala | 1（`toString`） | 无 | 有 | `a` | `a` |
+| Gleam | 1（`inspect` 出 Gleam 语法） | 无 | 无 | 不适用 | 不适用 |
+| Go | 1（`%v`） | verb | `rune` 是 `int32` 别名 | `97` | `97` |
+| **Dawn 今天** | 2（`Display`/`Show`） | 位置 | 有 | `a` | `97` |
+
+实测两条：Python `str('hi')` 出 `hi` 而 `str(['hi'])` 出 `['hi']`；
+JVM `List.of(1, "1", '1')` 出 `[1, 1, 1]`，三个类型输出相同。
+
+四条结论：
+
+1. **两层与位置选法都不孤立。** Rust/Swift/Python 都分两层，其中 Swift 与 Python 同样
+   由位置决定。Rust 改由调用点选，代价是**容器不实现 `Display`**，`println!("{}", vec)`
+   编不过。那是回避「嵌套该用哪层」的办法，不是没有这个问题。
+2. **一层派只有两种活法。** 「一层等于人读形」（JVM 那行）实测丢信息；「一层等于字面量形」
+   （Haskell/Koka）不丢，代价是顶层也带引号、人读形要另开函数（Koka 专门有 `show-char`）。
+   Gleam 走第三条：不设 `Char` 类型，人读形靠各模块的 `to_string`。
+3. **出数字的只有 Go，而它没有 `Char` 类型。** Dawn 的处境反而更别扭：有完整的名义 `Char`，
+   却在渲染点主动把它当 `Int`。Go 是没得选，Dawn 是选的。
+4. **有独立 `Char` 类型的五行里，四行把嵌套的字符渲染成带定界符的字面量**
+   （Rust/Haskell/Koka 出 `'a'`、Swift 出 `"a"`），只有 JVM 那行出裸 `a`，
+   而那正是第 2 条里实测丢信息的一行。
+
+**所以重开的目标不是 `[a]`，是 `['a']`。** 具体是 `std/char` 补一份 `impl Show[Char]`
+返回带单引号的字面量形，转义规则同已有的嵌套 `String`（`'\n'` 出 `'\n'`，不出真换行）。
+它在 spec §4.3 自己写下的判据上更强：那里说嵌套加引号是因为「引号是『这里是一个值，
+不是周围的标点』的记号」，`'a'` 正是这条理由的字符版。三种列表也因此彻底分开：
+`['a', 'b']`、`["a", "b"]`、`[97, 98]`，今天则是后两者撞脸。落地后 `Display`/`Show`
+的语义与 Rust 的 `Display`/`Debug` 对齐，选法保持 Swift/Python 的位置驱动。
+
+代价不变：`Char` 不再「就是它的目标」，`scripts/opaque-twin/char.dawn` 语料重写，
+一轮输出破坏（`to_string(('a', 'b'))` 由 `(97, 98)` 变 `('a', 'b')`）。需求面 `098419d`
+量过：28 个 `str.from_char` 调用点，4 个在渲染字符（2 个就在解释这个反直觉的例子里、
+2 个在 lexer 诊断里），没有归因到任何缺陷。**所以判据不是需求量，是一致性**：
+有 `Char` 类型的语言里，四比一站在字面量形那边。
+
+出处：[Rust `char`](https://doc.rust-lang.org/std/primitive.char.html)、
+[Haskell `Text.Show`](https://hackage.haskell.org/package/base/docs/Text-Show.html)（`showList`
+存在的唯一理由就是让 `[Char]` 出 `"abc"` 而不是 `['a','b','c']`）、
+[Koka `std/core/show`](https://koka-lang.github.io/koka/doc/std_core_show.html)、
+[Gleam `gleam/string`](https://gleam-stdlib.hexdocs.pm/gleam/string.html)、
+[Swift `debugDescription`](https://developer.apple.com/documentation/swift/customdebugstringconvertible/debugdescription)、
+[Go: Strings, bytes, runes and characters](https://go.dev/blog/strings)。
 
 要一个字符的字符串，`str.from_char(c)` 仍是那个按名字要的函数。
 
