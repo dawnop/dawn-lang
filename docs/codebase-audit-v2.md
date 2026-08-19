@@ -103,13 +103,13 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（83）
+#### 当前 fixed（85）
 
 - 语法（18）：`SYN-01`–`SYN-16`、`SYN-18`、`SYN-19`。
 - 语义（13）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-11`–`SEM-18`。
 - 架构（6）：`ARC-03`–`ARC-06`、`ARC-12`、`ARC-13`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
-- 库（16）：`LIB-01`–`LIB-05`、`LIB-07`–`LIB-12`、`LIB-14`、`LIB-15`、`LIB-17`–`LIB-19`。
+- 库（18）：`LIB-01`–`LIB-15`、`LIB-17`–`LIB-19`。
 - 治理（13）：`GOV-01`–`GOV-13`。
 
 #### 当前 partial（6）
@@ -118,20 +118,19 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 架构（4）：`ARC-01`、`ARC-02`、`ARC-08`、`ARC-11`。
 - 库（1）：`LIB-16`。
 
-#### 当前 open（8）
+#### 当前 open（6）
 
 - 语法（1）：`SYN-17`。
 - 语义（2）：`SEM-09`、`SEM-10`。
 - 架构（3）：`ARC-07`、`ARC-09`、`ARC-10`。
-- 库（2）：`LIB-06`、`LIB-13`。
 
 #### 当前 retracted（2）
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**83 fixed + 6 partial + 8 open + 2 retracted = 99**。逐专题矩阵：
+当前计数自检：**85 fixed + 6 partial + 6 open + 2 retracted = 99**。逐专题矩阵：
 语法 **18/0/1/0**、语义 **13/1/2/2**、架构 **6/4/3/0**、工具链 **17/0/0/0**、
-库 **16/1/2/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
+库 **18/1/0/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
 fixed）、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed，
@@ -189,6 +188,12 @@ placement 由双后端语料和 28 条 production-source compiling mutants 固�
 换成中立 500 而不是 panic（这里在 `handle` 的隔离点之外，panic 会打断连接而非渲染）。
 `content_type` 是唯一一条不需要 record 字面量就能到达的未校验路径。余下的 opaque `Response`
 与受检 `HeaderName`/`HeaderValue` 仍开放，见该条目。
+
+随后 `LIB-06`/`LIB-13` open → fixed，同搭 web4 major 窗口（`Request.body` 改为原始
+Bytes、UTF-8 视图收进可失败的 `body_text`，坏体是带 offset 的 400；包名按 v2 换名规则
+变 `web4 / 4.0.0`）。`LIB-13` 按 2026-08-16 的清单把 `match_path`/`match_segs`/`dispatch`/
+`parse_query` 去 pub——公开 dispatch 与真实 server 的重复斜杠语义分叉随 public 面消灭；
+清单里另外四个是 server 跨模块消费的 seam，Dawn 没有包内可见档，收不了，残差记在该条目。
 
 随后 `SEM-04` open → partial：原发现里的「comptime 折出来的 Cursor 偏移可能跨执行模型失配」
 被验证，而且验出来它**与 owner 无关**——只用一个字符串也会炸，因为常量折一次就烘进 Core，

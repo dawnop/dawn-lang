@@ -138,9 +138,9 @@
 - **修复前影响：** 一个应为 total query 的 API 对合法 Int input 可能不终止。
 - **处置：** 已以 remaining-length/last-start 算法替换，并由 std、Core 与双后端语料守护。
 
-## LIB-06 — P2 — UTF-8 API 默认有损且没有 strict 对应项
+## LIB-06 — P2 — UTF-8 API 默认有损且没有 strict 对应项（已修）
 
-<!-- audit-anchor: absent packages/web/src/server.dawn | decode_utf8_checked -->
+<!-- audit-anchor: absent packages/web/src/types.dawn | pub fn body_text -->
 
 - **证据：S。** `bytes.decode_utf8` 明确用 U+FFFD 替换 malformed input：`std/bytes.dawn:79`；Web 无条件用它构造 text body：`packages/web/src/server.dawn:77`。
 - **影响：** invalid UTF-8 JSON/签名输入会在应用看到前被改写；`Request.body` 无法表示 decode failure，raw bytes 也容易丢失。
@@ -198,11 +198,12 @@
   `types.body_text(req) -> Result[String, HttpError]`，malformed body 是带 offset 的
   400（对齐 axum/actix 的处置）。包名随 v2 换名规则变为 `web4 / 4.0.0`。负控钉在包内
   test（`server.dawn`「an invalid UTF-8 body on a text route is a 400 naming the
-  offset」）：同一请求在旧代码下 lossy 静默 200。**anchor 注意**：本条的 anchor 钉的是
-  `server.dawn` 里出现 `decode_utf8_checked`，而实现把它放进了 `types.dawn`
-  （`body_text` 属于 Request 访问器族），正是 doc-check 自述的 vacuous-absent 残差——
-  status 是否翻 fixed 连同 anchor 一起重裁，不在本批单方面动。dawnop-site 侧 20 个
-  `req.body` 消费点等下个 release 的升钉窗口迁移。
+  offset」）：同一请求在旧代码下 lossy 静默 200。**状态随之翻 fixed（2026-08-20 裁）**：
+  anchor 原钉 `server.dawn | decode_utf8_checked`，而实现把解码收在 `types.dawn` 的
+  `body_text`（Request 访问器族）、`server.dawn` 刻意不再出现任何解码——vacuous-absent
+  残差按裁决把 anchor 归位到真实落点 `types.dawn | pub fn body_text`。dawnop-site 侧
+  20 个 `req.body` 消费点等下个 release 的升钉窗口迁移，那是消费方迁移，不是本条的
+  缺陷边界。
 
 ## LIB-07 — P2 — `io.delete` 把不存在与操作失败都压成 false（已修）
 
@@ -289,7 +290,7 @@
 - **影响：** 常见 HTTP 数据无法忠实表示，丢失不带诊断。
 - **建议：** breaking change 为 multimap 或 ordered pair list；提供 `query_first/query_all` convenience API。
 
-## LIB-13 — P2 — public router 与真实 server 的重复斜杠语义不同
+## LIB-13 — P2 — public router 与真实 server 的重复斜杠语义不同（已修）
 
 <!-- audit-anchor: present packages/web/src/router.dawn | pub fn dispatch( -->
 
@@ -318,6 +319,18 @@
   不成立。** 与 `LIB-19` 的对比是这条裁决的全部依据：那边同样是收窄 pub 却已关账，因为
   sha2 的消费者全是仓内路径依赖、不参与 MVS，major 是免费的。**是否该开 major，与开 major
   贵不贵，是两件事。** 下一个 major 真开时要一次做完的符号清单就是上面那八个，不必重新勘察。
+
+- **处置（2026-08-20，搭 web4 major 落地）：fixed。** 窗口由 Request.body 断裂打开，本条
+  按 2026-08-16 的清单搭车。`match_path`/`match_segs`/`dispatch`（router.dawn）与
+  `parse_query`（server.dawn）去 `pub`——调用点全在各自模块内（router 的 test 与被测函数
+  同文件），实测连测试都没改；本条的原始症状（公开 dispatch 的重复斜杠语义与真实 server
+  分叉）随 public 面物理消灭。**清单里另外四个没有收**：`dispatch_segs`/`validate_routes`/
+  `route_meta`/`Dispatch` 是 server.dawn 跨模块消费的 seam，而 Dawn 的可见性只有
+  module-private 与 `pub` 两档（spec §模块：「All declarations are module-private by
+  default; `pub` exports」），不存在包内可见的拼写；2026-08-16 勘察的「八个都去 pub」
+  漏看了这一层。它们的斜杠语义与 server 无分叉（`dispatch_segs` 收已切好的段，切分归
+  调用方），故不属于本条的缺陷边界；作为 RD-12 的「内脏 pub」残差记账，收窄它们要么等
+  包内可见性的语言特性、要么把 dispatch 机器并进 server 模块，都不是本窗口的免费搭车。
 
 ## LIB-14 — P2 — tail capture 抹掉 encoded slash 的 segment 边界（已修）
 

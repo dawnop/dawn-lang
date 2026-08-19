@@ -82,10 +82,14 @@ fn is_tail(seg: String) -> Bool =
 
 fn tail_name(seg: String) -> String = str.slice(seg, 1, str.len(seg) - 2)
 
-## Match one pattern against one path string, split with the legacy
-## empty-dropping rule. The server does not route through this any more — it
-## splits the *raw* path itself and calls match via dispatch_segs (WEB-03).
-pub fn match_path(pattern: String, path: String) -> Option[List[(String, List[String])]] =
+# Match one pattern against one path string, split with the legacy
+# empty-dropping rule. The server does not route through this any more — it
+# splits the *raw* path itself and calls match via dispatch_segs (WEB-03).
+# Module-internal since web4 (LIB-13): a public matcher whose slash semantics
+# differ from the server's was an API to write unit tests against and then be
+# surprised in production. This file's own tests still drive matching through
+# it, which is what it survives for.
+fn match_path(pattern: String, path: String) -> Option[List[(String, List[String])]] =
   match_segs(pattern, segs(path))
 
 # A tail capture used to be handed over as `join(rest, "/")`.
@@ -102,14 +106,16 @@ pub fn match_path(pattern: String, path: String) -> Option[List[(String, List[St
 # So a capture's value is the segments, not a string: one segment for `{name}`,
 # the remainder for `{name*}`. A caller that genuinely wants a joined path joins
 # them itself and thereby says so.
-## Match one pattern against already-split path segments; Some(captures) on
-## success. The caller owns the split — the server hands in raw-split,
-## per-segment-decoded segments, so an encoded slash never minted a boundary
-## here. An interior empty segment is a real segment: a capture accepts it, a
-## literal does not. A `{name}` capture yields a one-segment list; a trailing
-## `{name*}` yields all remaining segments (possibly none), unjoined, so that a
-## slash *inside* a segment stays distinguishable from a segment boundary.
-pub fn match_segs(pattern: String, xs: List[String]) -> Option[List[(String, List[String])]] = {
+# Match one pattern against already-split path segments; Some(captures) on
+# success. The caller owns the split — the server hands in raw-split,
+# per-segment-decoded segments, so an encoded slash never minted a boundary
+# here. An interior empty segment is a real segment: a capture accepts it, a
+# literal does not. A `{name}` capture yields a one-segment list; a trailing
+# `{name*}` yields all remaining segments (possibly none), unjoined, so that a
+# slash *inside* a segment stays distinguishable from a segment boundary.
+# Module-internal since web4 (LIB-13, with match_path above): dispatch_segs is
+# the one spelling of matching the package exports.
+fn match_segs(pattern: String, xs: List[String]) -> Option[List[(String, List[String])]] = {
   let ps = segs(pattern)
   let n = len(ps)
   if n > 0 && is_tail(ps[n - 1]) {
@@ -291,10 +297,12 @@ pub fn validate_routes(routes: List[Route]) -> Result[Unit, String] = {
   Ok(())
 }
 
-## Pick the route for (method, path string), splitting with the legacy
-## empty-dropping rule — kept for direct callers and tests; the server routes
-## through dispatch_segs.
-pub fn dispatch(routes: List[Route], method: String, path: String) -> Dispatch =
+# Pick the route for (method, path string), splitting with the legacy
+# empty-dropping rule. Module-internal since web4 (LIB-13): direct callers got
+# routing that disagreed with the real server on duplicate slashes, which is
+# the divergence the finding was about. This file's tests keep it as their
+# shorthand; everything else routes through dispatch_segs.
+fn dispatch(routes: List[Route], method: String, path: String) -> Dispatch =
   dispatch_segs(routes, method, segs(path))
 
 ## Pick the route for (method, segments). First match in table order wins. A
