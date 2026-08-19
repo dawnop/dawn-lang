@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ f60cabde125d057e -->
+<!-- doc-check: translation-of docs/spec.md @ d75452f1cd007cf3 -->
 
 # Dawn Language Specification
 
@@ -742,9 +742,11 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   from `Eq[T]`. No dyn (for heterogeneous collections see "Heterogeneous collections" at the end
   of this section; the reasoning behind the verdict and the conditions for reopening it are in
   [trait.md](trait.md) §10), no supertraits, no specialisation (no asking "which one is more
-  specific"). A trait method's effect row can be pure, `!io` or an **effect variable**, but never a
-  named label (§6.5 Boundaries); an impl's effect ⊑ the trait declaration's, and the two sides'
-  effect variables are paired by position.
+  specific"). A trait method's effect row is a full row: pure, `!io`, effect variables, named
+  labels and associated-effect projections are all admitted (§6.5 Boundaries); an impl's effect ⊑
+  the trait declaration's (after reduction through that impl's bindings), the two sides' effect
+  variables are paired by position, and **the labels must match exactly on both sides** — each
+  label is one hidden evidence parameter, part of the method's shape.
 - **Associated types** (design and verdicts in
   [assoc-types-design.md](assoc-types-design.md)): a trait body may declare a bare `type Item`
   member (no bound, no default), and an impl **binds each declaration exactly once** with
@@ -783,6 +785,31 @@ impl[T] Head[List[T]] {
 fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at instantiation
   match first(c) { Some(x) -> x, None -> d }        # head_or([1], 9) is Int
 ```
+- **Associated effects** (design and verdicts in
+  [effect-params-design.md](effect-params-design.md), knife 5): a trait body may declare a bare
+  `effect E` member (no bound, no default, v1), in the same place and under the same discipline
+  as `type Item`; an impl **binds each declaration exactly once** with `effect E = !X`, whose
+  right side is a **concrete row** — one named effect, `!io`, or the empty row `!()`; effect
+  variables and projections cannot be bound. A missing binding, multiple bindings, and binding a
+  name the trait does not have are each a compile error. A method's row **projects** it as
+  `!T.E` — the subject must be a type parameter carrying that trait bound (exactly one bound
+  declares the name; zero and ambiguity are both errors), and the licensed positions are the
+  type projection's: inside a method signature, including function-type rows in parameter and
+  return positions.
+  - **Reduction is eager**, through the same door as the type projection: when instantiation at
+    the call site lands the subject on a concrete head, the projection is immediately replaced
+    by the bound row via that subject's impl (the same answer as dictionary selection) — an
+    unreduced projection **does not exist** in a concrete row.
+  - **Evidence settles per parameter, exactly one slot**: each projection written in a row adds
+    one **erased** hidden evidence parameter, after the evidence the written labels synthesise.
+    A call site whose reduction yields a label hands over that label's evidence; one that lands
+    on its own still-rigid projection forwards its own slot; one that reduces to pure or `!io`
+    hands over a placeholder. The dictionary itself carries no evidence; a slot's shape depends
+    on the trait declaration alone. **v1 boundary**: one associated effect member binds at most
+    one label — two effects want two members.
+  - **A bound is a check, not a definition**: a projection always reads the impl's actual
+    binding (unique per subject); a row written on a consumer's bound is only an upper bound
+    (the impl's side ⊑ it), and the two coexist.
 - The built-in `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` and the impls for `Int`/`String`
   (**`Float` has none**: under NaN there is no total order to give — the reasons for refusing are
   in §4.3, numeric edge semantics; the one previously given following `Double.compare` was
@@ -1773,23 +1800,29 @@ Consequences:
 
 #### Boundaries (v1)
 
-The following positions refuse named effects outright; except for trait / impl methods, an effect
-variable is the same offence with the same diagnostic:
+These are the v1 boundaries. Most positions still refuse named effects (an effect variable is
+the same offence with the same diagnostic); since knife 5 the trait / impl entry is an allowance
+with its discipline written into the entry:
 
-- **trait / impl methods**: a method's row may carry an **effect variable**, but not a named
-  label. The variable is introduced by this very signature (§6.3's implicit introduction counts as
-  *bound* here), synthesises no evidence, and leaves the dictionary slot untouched; a label would
-  ask the caller to hand evidence over at the call site, and the slot has no room for it.
-  `trait Container[C] { fn wrap(c: C, body: fn() -> Int !e) -> Int !e }` is therefore legal, and
-  the `!e` is the **caller's**: one call of `wrap` takes a pure closure, another takes an `!io`
+- **trait / impl methods**: a method's row is a full row — effect variables, named labels and
+  associated-effect projections are all admitted (opened by knife 5; labels used to be refused).
+  The variable is introduced by this very signature (§6.3's implicit introduction counts as
+  *bound* here), synthesises no evidence, and leaves the dictionary slot untouched; a label is
+  one exactly-typed evidence parameter on the slot; a projection is one **erased** slot — which
+  evidence record fills it is the impl's decision, and the boundary only knows the slot exists.
+  In `trait Container[C] { fn wrap(c: C, body: fn() -> Int !e) -> Int !e }` the `!e` is the
+  **caller's**: one call of `wrap` takes a pure closure, another takes an `!io`
   one. The impl's and the trait's effect variables are paired **by position** (the order each
   signature introduces them: the row, then the parameters left to right, then the return type);
-  the spellings need not agree, and unequal counts are an error. Once paired, the impl's row must
-  be covered by the trait's: pure always is (doing less than the row admits to is not a lie),
-  and so is exactly the variable it was paired with; an unrelated label or `!io` is not.
+  the spellings need not agree, and unequal counts are an error. Once paired and reduced through
+  this impl's associated-effect bindings, the impl's row must be covered by the trait's: pure
+  always is (doing less than the row admits to is not a lie); an unrelated label or `!io` is
+  not; **written labels are the exception and must match exactly on both sides** — each label is
+  one hidden evidence parameter, the method's shape and not just its promise, and dropping one
+  would change the method's arity.
   A trait method's **default body** is checked like any other body: it can forward along the
-  variable (call the closure), but cannot install a handler — a rigid effect has no name for
-  `with handle` to spell.
+  variable or the erased evidence slot (call the closure), but cannot install a handler — a
+  rigid effect has no name for `with handle` to spell.
 - **comptime / const initialisers**: compile-time evaluation performs no named effect and cannot
   install a handler either.
 - **Written function types**: `fn(…) -> T !E` is illegal in any `TypeRef` position — parameters,
@@ -1798,8 +1831,11 @@ variable is the same offence with the same diagnostic:
   only ever captured by a closure at its creation point, so the spelling has no runtime meaning
   behind it. The migration is an **effect variable** (`fn() -> Int !e`), which takes both labelled
   and pure closures. A function's **own signature row** (`fn one() -> Int !Ask`) is not a `TypeRef`
-  and stays legal; so does `!io`. A record field can now hold an escaping closure — its row was
-  settled at the creation point.
+  and stays legal; so does `!io`. **Associated-effect projections are not under this ban**:
+  `fn() -> Int !C.E` is legal in these positions — the projection is the impl's decision and
+  reduces at instantiation into a row inference could have produced; it is not the
+  "caller supplies the handler" spelling. A record field can now hold an escaping closure — its
+  row was settled at the creation point.
 - **Function values**: a labelled function (including an operation itself) cannot be passed
   directly as a value — evidence is a hidden parameter and a function value has nowhere to put it.
   Write it as a lambda (`() => ask()`) and the lambda captures the evidence.
@@ -1816,9 +1852,13 @@ Each `effect E` makes lowering synthesise an ordinary record type (whose name th
 spell), with one field per operation holding its closure; `with handle` constructs that record and
 binds it to a local, and an operation call = read the field + call the closure. Every label written
 out in a signature appends one hidden evidence parameter to the function, **placed after the
-dictionary parameters**, in ascending effect id order. Labels that flow in through an effect
-variable synthesise no parameter — in that case the evidence sits in the closure's capture, so
-higher-order library functions (`list.map` and its ilk) need zero changes.
+dictionary parameters**, in ascending effect id order. Each associated-effect projection written
+in the row then appends **exactly one** erased evidence parameter, after the labels' evidence,
+ordered by (subject, trait, member name); on the dictionary-slot boundary it is an erased slot,
+and the impl side's bridge restores it to the concrete evidence record. Labels that flow in
+through a **signature-introduced effect variable** synthesise no parameter — in that case the
+evidence sits in the closure's capture, so higher-order library functions (`list.map` and its
+ilk) need zero changes; a projection is not of that kind, it travels through the slot above.
 The other half of the evidence flow is its dual: a closure settles its own row at the creation
 point, against the evidence it captured. A signature synthesises the parameter, a closure captures
 the evidence; only the two together are the whole flow — one decides who supplies, the other who

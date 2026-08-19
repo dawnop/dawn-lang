@@ -263,9 +263,18 @@
   **没有任何候选消费者**：`Iter`/`Index` 的泛型算法在全仓是 0 个。硬造一个来触发重开条件
   是自欺。维持原重开条件不变。
 
-## SEM-10 — P2 — trait/impl 与具名 effect 不能组合
+## SEM-10 — P2 — trait/impl 与具名 effect 不能组合（已修）
 
-<!-- audit-anchor: present selfhost/src/check/passes.dawn | trait methods cannot declare the effect -->
+<!-- audit-anchor: absent selfhost/src/check/passes.dawn | trait methods cannot declare the effect -->
+
+> **后续处置（2026-08-20，RX-10-B 刀 5）：已修，关账。** 本条要的 ABI 裁决在
+> [`effect-params-design.md`](../effect-params-design.md) 决策 5（规则丙）作出并随刀 5 落地：
+> trait/impl 方法的行可以写具名标签与关联效果投影 `!T.E`；每个标签合成一格证据参数，
+> 投影合成恰好一格擦除证据（字典槽位边界上 `Object`/`void*`），字典本身仍不携带任何证据、
+> `dict_key` 一字未动。「impl 决定效果」那一族（泛型 state / parser / service）由 trait 体内
+> `effect E` 成员加 impl 体内 `effect E = !X` 绑定承载。两条「cannot declare the effect」
+> 拒绝随刀删除，checker 语料 `trait_method_effects` 第二次重写，`assoc_effects` 系列钉住
+> 新机器。下面保留 v0.60.0 审查基线的原始证据与 2026-08-19 的刀 4 更正，行号是当时的。
 
 > **后续处置（2026-08-09）：open，intentional delayed ABI。** v1 ABI 有意只允许 pure /
 > `!io` trait method；放开 named effect 会决定 dictionary 是否携带 evidence、evidence 的捕获

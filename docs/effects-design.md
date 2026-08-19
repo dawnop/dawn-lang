@@ -224,14 +224,11 @@ with handle E { 臂… } 之后，装 handler 的这个块记账：
   否则照常报「`?` 的载体类型不符」）。
 - **`return`/`break`/`continue`**：块剩余闭包内照拒（with 糖现规，checker.dawn:3355+），
   臂身体内同拒（同一条规则，臂也是 sugar 闭包）；两处诊断都点名 `with handle`。
-- **trait/impl 方法**：**labels 必须为空，效果变量放行**（RX-10-B 刀 4 已落地）。
-  拒绝只剩两处，都只看标签：trait 方法 passes.dawn:1315-1323、impl 方法 :1800-1806，
-  各自的注释写着同一条理由——写出来的标签意味着调用方经证据参数供 handler，而字典槽位
-  没地方放它；效果变量不带标签，也就不合成证据，且由这条签名自己绑定（spec §6.3）。
-  旧稿在这里记的另两处（`eparams` 级的「trait/impl method signatures cannot carry
-  effect variables」，曾在 passes.dawn:1276-1279、:1766-1768）**已随刀 4 删除**，
-  代之以两侧按位对齐的元数检查（:1905-1911）。
-  标签的解禁等刀 5，设计见 [effect-params-design.md](effect-params-design.md)。
+- **trait/impl 方法**：**行是完整的行**（RX-10-B 刀 5 已落地；刀 4 先放行了效果变量）。
+  标签与关联效果投影都可以写：标签在槽位上是一格类型精确的证据参数，投影是一格擦除的
+  （规则丙，[effect-params-design.md](effect-params-design.md) 决策 5）。两处标签拒绝
+  已随刀 5 删除；一致性检查把 trait 的行经 impl 的 `effect E = !X` 绑定归约后与 impl 的
+  行比较，基轴按包含、标签轴恰相等——每个标签是一格隐藏证据参数，是方法的元数。
 - **comptime / const**：v1 一律拒绝具名效果（`leave_isolated` 通路加 labels 检查，
   checker.dawn:4580-4589）。「handler 是纯的就该放行」是真问题，但把「纯 handler」
   判据做对需要臂效果的组合推理，v1 不背——今天的「否」从偶然变成裁决，留档重开。
@@ -313,7 +310,8 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
 4. **效果变量实例化携带 labels**：调用处给 `!e` 代入 `(base, L)` 时，被调方按其签名的
    label 集合要证据——高阶场景（map 收 `!ask` 闭包）中 map 自己不发 `ask`、只是转手
    调闭包，闭包自带证据（闭包捕获，§4.4），**map 不需要证据参数**。规则：证据参数
-   只按签名里**字面写出的** labels 合成；经变量流进来的 labels 由闭包捕获自理。
+   按签名里**字面写出的** labels 合成，外加行里写出的每个关联效果投影一格（擦除，
+   规则丙）；经变量流进来的 labels 由闭包捕获自理。
    这条让高阶库函数零改动，是词法语义的直接红利。
 
 ### 5.3 可见性与门禁
@@ -377,7 +375,9 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
 3. **aborting 档**：`effectful` 路线（abort=异常）映射到 Dawn 就是「操作返回
    `Result` + 调用处 `?`」或屏障族——够用性等 dogfood 检验，不够再谈。
 4. **comptime 纯 handler 放行**（§4.5）。
-5. **参数化效果**：两件事，方向相反，分开立项。**RX-10-B**（效果参数进类型参数表）是把
-   `Eff` 塞进类型参数表，它只是「trait 方法带效果行」的前置，范围与决策点见
+5. **参数化效果**：两件事，方向相反，分开立项。**RX-10-B 已全线落地**（2026-08-20，
+   五刀收官）：效果变量有了显式绑定者与 `Sig.eparams` 的家，trait/impl 方法的行放开，
+   关联效果（trait 体 `effect E`、impl 体 `effect E = !X`、行内投影 `!T.E`）与规则丙的
+   证据结算随刀 5 落地，范围与全部决策见
    [effect-params-design.md](effect-params-design.md)。**`effect Yield[T]`** 是把 `Ty` 塞进
    `Eff`（代价见本文第 1 节的非目标行），另一根轴，另立项，与 RX-10-B 无前后置关系。

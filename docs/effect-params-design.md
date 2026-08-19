@@ -1,16 +1,17 @@
 # 效果参数（RX-10-B）设计
 
-> 状态：proposed。基线 `cf725f4`（main）。本文定范围、结构落点与决策点。
-> **刀 1 已落地（`cf725f4`）**；**决策 5 已裁（2026-08-19，A0 + A″；当日上午先裁 A0 + A′）**，
-> 条文见下；
+> 状态：**current，五刀全部落地**（刀 5 于 2026-08-20 落地，A″ 关联效果 + 规则丙；
+> 刀 1 `cf725f4`，刀 2-4 见 git）。**决策 5 已裁（2026-08-19，A0 + A″）**，条文见下；
 > **刀 5 拼写已按跨语言调研修订为 A″ 关联效果（2026-08-19）**：规则丙的运行时机制一字未改，
 > 改的是「这个效果叫什么、写在哪」。调研、四问终审与重开条件都在决策 5 里。
+> 刀 5 的落地记录（含实测修正与三处偏离）在刀 5 节末尾。
 > RX-10 期权 A 的裁决见 [audit/re-audit-2026-07-30.md](audit/re-audit-2026-07-30.md)
 > 第 593 行，B 的原始定义见 [audit/re-audit-b-decisions.md](audit/re-audit-b-decisions.md)
 > 第 560 行起。
 >
 > 文内的 `file:line` 一律对 `cf725f4` 实测。刀 1 动过 `passes.dawn` 与 `checker.dawn`
-> 的行号，旧稿里的引用已逐条重定位。
+> 的行号并逐条重定位过；**刀 2-5 又动过 types / checker / passes / lower / emit / emitc**，
+> 此后行号以符号名为准查现树，不再逐条刷新——设计已落地，正文自此是历史记录。
 
 ## 1. 范围：三件载荷，一件出局
 
@@ -1039,6 +1040,49 @@ Core 无新节点：`CDictDef`（`core.dawn:285-295`）在调用点路线下不�
 构造子，不动本刀已经买下的 ABI。
 
 刀 4 与刀 5 各独占一个发布。
+
+#### 刀 5 落地记录（2026-08-20）
+
+按本节与开工前置探针（`eff-assoc-coupling-probe.md`）落地；探针的三处实测修正照单全收：
+
+- **六个必插落点全部接线**：调用效果实例化 choke（`check_call` 里 `reduce_eff` 包住
+  `instantiate_eff`，返回位与参数期望位包 `reduce_ty_effs`）、`unify_into` 声明侧 choke、
+  `unify_eff`（签名扩成带 `cx` 与类型绑定表，声明侧原子先归约再比较）、SEM-13 函数值
+  实例化、`passes` 一致性检查（`reduce_eff_via_bindings`）、两个后端的 `subst_subject`
+  （行与 `TyFn` 内的行一并经绑定归约）。
+- **`EUnion` 扩形**：`EUnion(vars, assocs, io)`——投影原子按 (tvar, trait, name) 排序，
+  外加一个 io 位，因为 io 吸收变量但**不吸收投影**（投影是待到的证据，同标签），而旧载荷
+  表示不了 io 与原子共存的行。
+- **穷尽墙照探针清单新写**：`base_parts` 是效果基轴的第一堵穷尽墙（ELabeled 到基轴
+  panic）；`base_subsumes` 改写在它上面，io 不覆盖原子、原子按恰相等包含；`eff_is_ground`
+  是 ground 判据；`pub fn main` 的墙扩到投影；调用点解析不到证据来源时是诊断
+  （"needs evidence here"）。每堵墙各有一个能转红的变异（见验收记录）。
+- **描述符五处落点如清单**：JVM 四处（`sig_desc_with_dicts` 追加擦除格、
+  `trait_iface_desc` 统一接口声明 / INVOKEINTERFACE / 字典类转发三处、`CImpl` 位置重建改从
+  归约后的行读证据描述符）；C 一处（槽位 cast 把字典拼进实参与证据之间）。
+  `dict_key` 一个字节未动。桥接（`make_bridge`）收 trait 形状的证据参数、按 impl 的绑定
+  重选并 unerase（`adapt_out` 即 CHECKCAST）。
+
+**三处对设计的偏离，均已实测**：
+
+1. **`CMethod` 加了一个 `nev` 字段**（Core 节点字段，非新节点）：C 后端的槽位调用把字典
+   拼在实参与证据之间，而 emitc 没有 trait 元数据可数出证据几格，故 Core 携带。coredump
+   只在非零时打印，证据零格的 dump 逐字节不变。
+2. **投影证据的槽序取 (tvar, trait_id, 成员名) 三元组序**，而非本文「同一主体内按 trait 的
+   `effect` 成员声明序」：三元组序与规范形的排序共用一个定义（`by_assoc`），checker、
+   lowering 与两个后端都不必查 trait 表就得到同一张表；序依旧是契约，由内联测试钉住。
+3. **一致性检查在标签轴上取恰相等**（基轴仍按包含，问题一不动）：impl 方法的证据布局由
+   它自己的行合成，而去虚化调用按「trait 行经绑定归约」重建描述符——impl 少写一个标签
+   就是元数漂移（实测是 NoSuchMethodError，不是诊断），所以「写出来的标签」两边必须
+   逐一相等，诊断点名少了哪个。
+
+另两笔记录：`EffAssoc` 除三元组身份外携带主体的显示名（与 `EffVar` 存名同理，渲染
+`C.E` 不必查表）；`grammar.ebnf` 自 2026-07-25 起是 historical，三处新拼写进的是
+grammar-corpus（accept 一件、reject 六件），不再改 EBNF。种子零已由 fixpoint 实测
+（B == C 逐字节）；九个 emit 语料目标对真父对照逐字节相同（唯一差异是两棵工作树的
+绝对路径烘进 panic 串的已知假阳性），`fmt`/`lsp`/`run`/`doc` 差分全绿、无声明。
+`trait_method_effects` 第二次重写落地：两条 cannot declare 拒绝消失，替位的是行比较
+自己的话；`assoc_effects` 一族语料钉住注册、绑定、归约、ground 墙与双后端证据往返。
 
 **它们与 `#208` 的关系（改正旧稿，2026-08-19）。** 旧稿在此写「刀 4 …… 并解开 `#208`
 （UI DSL）要的泛型 state trait」。这句没有勘察背书：#198 的原始勘察全文（358 行、九条卡壳
