@@ -70,16 +70,18 @@ fn dump_decl(out: List[String], d: Int, decl: Decl) -> List[String] =
       o = dump_tref(o, d + 1, ann)
       dump_expr(o, d + 1, init)
     }
-    DTrait(name, tp, tplo, tphi, methods, assoc, is_pub, lo, hi, nlo, nhi) -> {
+    DTrait(name, tp, tplo, tphi, methods, assoc, effa, is_pub, lo, hi, nlo, nhi) -> {
       var o = out ++ [ind(d) ++ "Trait " ++ name ++ " tp=" ++ tp ++ " tp" ++ sp(tplo, tphi) ++
           " pub=" ++ bstr(is_pub) ++ " name" ++ sp(nlo, nhi) ++ " " ++ sp(lo, hi)]
       # after the methods, so a trait with no associated types dumps exactly
       # as it did before #44 and the parse-dump differential stays silent
       for m in methods { o = dump_trait_method(o, d + 1, m) }
       for a in assoc { o = o ++ [ind(d + 1) ++ "Assoc " ++ a.name ++ " " ++ sp(a.lo, a.hi)] }
+      # same discipline: a trait with no effect members dumps as before 刀 5
+      for a in effa { o = o ++ [ind(d + 1) ++ "EffAssoc " ++ a.name ++ " " ++ sp(a.lo, a.hi)] }
       o
     }
-    DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc2, lo, hi) -> {
+    DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc2, ebs, lo, hi) -> {
       var o = out ++ [ind(d) ++ "Impl " ++ trait_name ++ " trait" ++ sp(tlo, thi) ++ " " ++
           sp(lo, hi)]
       # An unconditional impl dumps exactly as it did before trait v2, so the
@@ -93,6 +95,10 @@ fn dump_decl(out: List[String], d: Int, decl: Decl) -> List[String] =
       for a in assoc2 {
         o = o ++ [ind(d + 1) ++ "AssocBind " ++ a.name ++ " " ++ sp(a.lo, a.hi)]
         o = dump_tref(o, d + 2, a.tref)
+      }
+      for a in ebs {
+        o = o ++ [ind(d + 1) ++ "EffBind " ++ a.name ++ " !(" ++ join(a.atoms, "|") ++ ") " ++
+            sp(a.lo, a.hi)]
       }
       o
     }

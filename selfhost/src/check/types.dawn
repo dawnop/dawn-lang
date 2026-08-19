@@ -27,9 +27,27 @@ pub type Eff =
   | EPure
   | EIo
   | EffVar(name: String, id: Int)
-# a normalized union: >= 2 distinct variables, no io, sorted by id
-  | EUnion(vars: List[(Int, String)])
-# The second axis (docs/effects-design.md §4.1): a base row -- one of the four
+# A normalized union of base-axis atoms: effect variables (sorted by id) and
+# associated-effect projections (sorted by (tvar, trait_id, name)), plus an io
+# flag. io absorbs variables but never a projection -- a projection stands for
+# evidence the same way a label does, and an absorbed one would have no
+# parameter to arrive through. Invariants: `io` implies `vars` is empty; a
+# union that could be a smaller shape is that shape (one atom and no io is the
+# atom itself, io alone is EIo), so every row that existed before projections
+# still has the representation it had.
+  | EUnion(vars: List[(Int, String)], assocs: List[(String, Int, Int, String)], io: Bool)
+# An associated-effect projection `C.E` (docs/effect-params-design.md 刀 5):
+# the effect an impl binds for the trait member `name`, read off the impl
+# chosen for the subject. The subject is *only ever* a rigid type variable
+# with a bound on `trait_id` -- it is stored as (display name, tvar id) so Eff
+# never contains a Ty, which is what keeps type/effect substitution from
+# becoming mutually recursive. Canonical-form invariant (the TyAssoc twin): a
+# ground row never contains one -- reduction is eager (D3), so a projection
+# only survives while its subject is still rigid. `eff_is_ground` is the
+# question; the walls downstream of reduction are new with this constructor,
+# because the effect axis had none (every accessor ended in a wildcard).
+  | EffAssoc(subject: String, tvar: Int, trait_id: Int, name: String)
+# The second axis (docs/effects-design.md §4.1): a base row -- one of the five
 # constructors above, never this one -- plus a non-empty, id-sorted set of
 # declared effects. Labels are a component of the normal form, not a member of
 # the base lattice: io absorbs effect variables and never absorbs a label,
@@ -53,6 +71,35 @@ fn by_id(vs: List[(Int, String)]) -> List[(Int, String)] =
     let (ib, _) = b
     ia - ib
   })
+
+## The projection atoms' one ordering: subject tvar id, then trait id, then
+## member name. It is the normal form's sort *and* the evidence layout's order
+## (the label axis's id-sort, replayed on the projection axis), so the checker,
+## lowering and both backends read the same list without consulting a table.
+fn by_assoc(atoms: List[(String, Int, Int, String)]) -> List[(String, Int, Int, String)] =
+  sort_by(atoms, (a, b) => {
+    let (_, va, ta, na) = a
+    let (_, vb, tb, nb) = b
+    if va != vb {
+      va - vb
+    } else if ta != tb {
+      ta - tb
+    } else if na < nb {
+      0 - 1
+    } else if na == nb {
+      0
+    } else {
+      1
+    }
+  })
+
+fn assoc_has(atoms: List[(String, Int, Int, String)], v: Int, t: Int, n: String) -> Bool = {
+  for a in atoms {
+    let (_, av, at2, an) = a
+    if av == v && at2 == t && an == n { return true }
+  }
+  false
+}
 
 ## The base row: the effect with its labels taken off.
 pub fn eff_base(e: Eff) -> Eff =
@@ -119,7 +166,19 @@ pub fn eff_params_of(evs: Map[String, Eff]) -> List[Eff] = {
 pub fn eff_vars(e: Eff) -> List[(Int, String)] =
   match eff_base(e) {
     EffVar(n, id) -> [(id, n)]
-    EUnion(vs) -> vs
+    EUnion(vs, _, _) -> vs
+    _ -> []
+  }
+
+## The associated-effect projections of this row, in `by_assoc` order -- the
+## third accessor beside `eff_vars` and `eff_labels`, and like them the walk
+## that decides what a consumer sees. Evidence slots for projections follow
+## exactly this list (after the written labels' slots), so this order is a
+## contract the same way `eff_params_of`'s is.
+pub fn eff_assocs(e: Eff) -> List[(String, Int, Int, String)] =
+  match eff_base(e) {
+    EffAssoc(s, v, t, n) -> [(s, v, t, n)]
+    EUnion(_, atoms, _) -> atoms
     _ -> []
   }
 
@@ -136,30 +195,54 @@ fn merge_labels(a: List[(Int, String)], b: List[(Int, String)]) -> List[(Int, St
   out
 }
 
-## The base-axis union: io absorbs everything, variables accumulate.
-fn base_union(effs: List[Eff]) -> Eff = {
-  for e in effs {
-    if e == EIo { return EIo }
+## A base row taken apart into its atoms: (io?, variables, projections).
+## The one walk `base_union` and `base_subsumes` share, and the effect axis's
+## first exhaustive wall: a base is one of the five base shapes, and a label
+## carrier reaching here is a normalization bug, not a case to handle.
+fn base_parts(e: Eff) -> (Bool, List[(Int, String)], List[(String, Int, Int, String)]) =
+  match e {
+    EPure -> (false, [], [])
+    EIo -> (true, [], [])
+    EffVar(n, id) -> (false, [(id, n)], [])
+    EffAssoc(s, v, t, n) -> (false, [], [(s, v, t, n)])
+    EUnion(vs, atoms, io) -> (io, vs, atoms)
+    ELabeled(_, _) -> panic("base_parts: a base row cannot carry labels")
   }
+
+## The base-axis union: io absorbs the variables and only them -- a projection
+## is pending evidence and survives beside io the way a label survives beside
+## it on the label axis. The result is re-normalized to the smallest shape.
+fn base_union(effs: List[Eff]) -> Eff = {
+  var io = false
   var vars: List[(Int, String)] = []
+  var atoms: List[(String, Int, Int, String)] = []
   for e in effs {
-    match e {
-      EffVar(n, id) -> if not union_has(vars, id) { vars = vars ++ [(id, n)] }
-      EUnion(vs) -> {
-        for v in vs {
-          let (id, n) = v
-          if not union_has(vars, id) { vars = vars ++ [v] }
-        }
-      }
-      _ -> ()
+    let (i2, vs, as2) = base_parts(e)
+    if i2 { io = true }
+    for v in vs {
+      let (id, _) = v
+      if not union_has(vars, id) { vars = vars ++ [v] }
+    }
+    for a in as2 {
+      let (_, av, at2, an) = a
+      if not assoc_has(atoms, av, at2, an) { atoms = atoms ++ [a] }
     }
   }
-  if len(vars) == 0 { return EPure }
-  if len(vars) == 1 {
-    let (id, n) = vars[0]
-    return EffVar(n, id)
+  if io { vars = [] }
+  if len(atoms) == 0 {
+    if io { return EIo }
+    if len(vars) == 0 { return EPure }
+    if len(vars) == 1 {
+      let (id, n) = vars[0]
+      return EffVar(n, id)
+    }
+    return EUnion(by_id(vars), [], false)
   }
-  EUnion(by_id(vars))
+  if not io && len(vars) == 0 && len(atoms) == 1 {
+    let (s, v, t, n) = atoms[0]
+    return EffAssoc(s, v, t, n)
+  }
+  EUnion(by_id(vars), by_assoc(atoms), io)
 }
 
 ## Combine effects into their normalized least upper bound.
@@ -185,30 +268,27 @@ pub fn eff_union(effs: List[Eff]) -> Eff = {
 ## Least upper bound in the effect lattice.
 pub fn lub_eff(a: Eff, b: Eff) -> Eff = eff_union([a, b])
 
-fn base_subsumes(outer: Eff, inner: Eff) -> Bool =
-  if outer == EIo {
-    true
-  } else if inner == EPure {
-    true
-  } else if outer == inner {
-    true
-  } else {
-    match outer {
-      EUnion(ovs) ->
-        match inner {
-          EffVar(_, id) -> union_has(ovs, id)
-          EUnion(ivs) -> {
-            for v in ivs {
-              let (id, _) = v
-              if not union_has(ovs, id) { return false }
-            }
-            true
-          }
-          _ -> false
-        }
-      _ -> false
-    }
+## Base-axis subsumption over the parts: io covers io and every variable,
+## never a projection -- a projection's evidence has to arrive through a slot
+## the outer row wrote down, so containment on the projection axis is exact,
+## like the label axis's. Spelled over `base_parts` rather than a shape match
+## so an unreduced projection cannot fall through a wildcard and read as
+## "covered" (the silent read-through the effect axis used to be made of).
+fn base_subsumes(outer: Eff, inner: Eff) -> Bool = {
+  let (oio, ovs, oas) = base_parts(outer)
+  let (iio, ivs, ias) = base_parts(inner)
+  for a in ias {
+    let (_, av, at2, an) = a
+    if not assoc_has(oas, av, at2, an) { return false }
   }
+  if oio { return true }
+  if iio { return false }
+  for v in ivs {
+    let (id, _) = v
+    if not union_has(ovs, id) { return false }
+  }
+  true
+}
 
 ## Does `outer` permit every effect in `inner`? io covers all of the base axis;
 ## pure is its bottom. The label axis is plain set containment: `!io` does not
@@ -230,10 +310,16 @@ fn eff_atoms(e: Eff) -> List[String] = {
     EPure -> ()
     EIo -> { names = names ++ ["io"] }
     EffVar(n, _) -> { names = names ++ [n] }
-    EUnion(vs) -> {
+    EffAssoc(s, _, _, n) -> { names = names ++ [s ++ "." ++ n] }
+    EUnion(vs, atoms, io) -> {
+      if io { names = names ++ ["io"] }
       for v in vs {
         let (_, n) = v
         names = names ++ [n]
+      }
+      for a in atoms {
+        let (s, _, _, n) = a
+        names = names ++ [s ++ "." ++ n]
       }
     }
     ELabeled(_, _) -> ()
@@ -975,8 +1061,8 @@ pub fn subst_eff(e: Eff, em: Map[Int, Eff]) -> Eff =
         Some(r) -> r
         None -> e
       }
-    EUnion(vs) -> {
-      var effs: List[Eff] = []
+    EUnion(vs, atoms, io) -> {
+      var effs: List[Eff] = if io { [EIo] } else { [] }
       for v in vs {
         let (id, n) = v
         effs = effs ++ [match map.get(em, id) {
@@ -984,11 +1070,79 @@ pub fn subst_eff(e: Eff, em: Map[Int, Eff]) -> Eff =
           None -> EffVar(n, id)
         }]
       }
+      for a in atoms {
+        let (s, av, at2, an) = a
+        effs = effs ++ [EffAssoc(s, av, at2, an)]
+      }
       eff_union(effs)
     }
     ELabeled(b, ls) -> eff_union([subst_eff(b, em), ELabeled(EPure, ls)])
+    # A projection is keyed by a *type* variable, and this map holds effects;
+    # rewriting it is the checker's reduction (it needs the type bindings and
+    # the impl table), the same split `subst`'s header documents for TyAssoc.
+    EffAssoc(_, _, _, _) -> e
     _ -> e
   }
+
+## Rewrite the projections whose subject is the type variable `vid` (the trait
+## subject, at trait/impl boundaries) to the impl's own bound rows -- the
+## effect twin of `reduce_via_bindings`, used by the impl-conformance check
+## and by both backends' `subst_subject`. Bindings are ground rows by
+## construction (registration refuses anything else), so unlike the type twin
+## there is nothing to instantiate.
+pub fn reduce_eff_via_bindings(
+  e: Eff,
+  vid: Int,
+  tid: Int,
+  bindings: List[(String, Eff)]
+) -> Eff = {
+  let atoms = eff_assocs(e)
+  if len(atoms) == 0 { return e }
+  var parts: List[Eff] = []
+  let (io, vs, _) = base_parts(eff_base(e))
+  if io { parts = parts ++ [EIo] }
+  for v in vs {
+    let (id, n) = v
+    parts = parts ++ [EffVar(n, id)]
+  }
+  for a in atoms {
+    let (s, av, at2, an) = a
+    var kept: Eff = EffAssoc(s, av, at2, an)
+    if av == vid && at2 == tid {
+      for pr in bindings {
+        let (bn, be) = pr
+        if bn == an { kept = be }
+      }
+    }
+    parts = parts ++ [kept]
+  }
+  eff_union(parts ++ [ELabeled(EPure, eff_labels(e))])
+}
+
+## `reduce_eff_via_bindings` pushed through a type: every function type's row
+## in `t` is rewritten, because a projection is licensed in parameter and
+## return positions too (D6) and `ty_map_children` deliberately lets effects
+## ride through. The type-axis walk stays `reduce_via_bindings`'s; this one
+## only touches rows.
+pub fn reduce_ty_effs_via_bindings(
+  t: Ty,
+  vid: Int,
+  tid: Int,
+  bindings: List[(String, Eff)]
+) -> Ty =
+  match t {
+    TyFn(ps, r, e) -> TyFn(
+      map(ps, x => reduce_ty_effs_via_bindings(x, vid, tid, bindings)),
+      reduce_ty_effs_via_bindings(r, vid, tid, bindings),
+      reduce_eff_via_bindings(e, vid, tid, bindings))
+    _ -> ty_map_children(t, x => reduce_ty_effs_via_bindings(x, vid, tid, bindings))
+  }
+
+## Is this row ground -- free of effect variables and projections? The
+## `is_ground` twin on the effect axis: labels and io are ground (they are
+## answers), a variable or an unreduced projection is a question still open.
+pub fn eff_is_ground(e: Eff) -> Bool =
+  len(eff_vars(e)) == 0 && len(eff_assocs(e)) == 0
 
 # ---- symbols and signatures ----
 
@@ -1088,6 +1242,10 @@ pub type TraitI = {
   # defaults -- docs/assoc-types-design.md D1). The name has no module-level
   # identity; `T.Item` is the only way to reach it.
   assoc: List[String],
+  # associated *effect* members (`effect E`), same discipline as `assoc`:
+  # bare names, declaration order, reachable only as the row atom `!T.E`
+  # (docs/effect-params-design.md 刀 5 -- no bounds, no defaults in v1)
+  eff_assoc: List[String],
   # Do this trait's method names occupy the module function namespace? True for
   # every trait a user can declare; false is reserved for compiler-built traits
   # whose sole consumer is an operator (docs/prelude-namespace-design.md D1).
@@ -1278,7 +1436,12 @@ pub type ImplI = {
   # (checked for exactly-once coverage at registration). The RHS is resolved
   # in the scope of `tparams`; reduction instantiates it with the same
   # substitution the witness gets (docs/assoc-types-design.md D4/D5).
-  assoc_bindings: List[(String, Ty)]
+  assoc_bindings: List[(String, Ty)],
+  # `effect E = !X` bindings, one per associated effect the trait declares,
+  # same exactly-once check. The RHS is a ground row (pure, `!io`, or one
+  # declared label -- registration refuses variables and projections), so
+  # reduction substitutes it verbatim (docs/effect-params-design.md 刀 5).
+  eff_bindings: List[(String, Eff)]
 }
 
 pub alias Traits = Map[Int, TraitI]
@@ -1544,6 +1707,7 @@ fn prelude_trait(tid: Int, name: String, tv: Ty, m: String, sig: Sig) -> TraitI 
     src_path: None,
     methods: [(m, MethodSig { sig: sig, has_default: false })],
     assoc: [],
+    eff_assoc: [],
     injects: true
   }
 
@@ -1576,6 +1740,7 @@ pub fn prelude_traits() -> Traits = {
     src_path: None,
     methods: [("cmp", MethodSig { sig: cmp_sig, has_default: false })],
     assoc: [],
+    eff_assoc: [],
     injects: true
   }
   let ev = TyVar("T", -14)
@@ -1619,6 +1784,7 @@ pub fn prelude_traits() -> Traits = {
       })
     ],
     assoc: ["Cur", "Item"],
+    eff_assoc: [],
     injects: true
   }
   # Index: the subject in parameter 0 so it is a non-projection position and
@@ -1643,6 +1809,7 @@ pub fn prelude_traits() -> Traits = {
       })
     ],
     assoc: ["Idx", "Item"],
+    eff_assoc: [],
     injects: false
   }
   # Display: one method, no associated types, and `injects: false` for the same
@@ -1663,6 +1830,7 @@ pub fn prelude_traits() -> Traits = {
       })
     ],
     assoc: [],
+    eff_assoc: [],
     injects: false
   }
   map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show), (ITER_ID, iter),
@@ -1717,7 +1885,8 @@ fn prelude_impl(tid: Int, t: Ty) -> ImplI =
     owner: None,
     src_path: None,
     provided: [],
-    assoc_bindings: []
+    assoc_bindings: [],
+    eff_bindings: []
   }
 
 ## A conditional prelude impl: `impl[T: tid] tid[Head[T]]`, one bound per
@@ -1738,7 +1907,8 @@ fn prelude_cond_impl(tid: Int, subject: Ty, tps: List[Ty]) -> ImplI = {
     owner: None,
     src_path: None,
     provided: [],
-    assoc_bindings: []
+    assoc_bindings: [],
+    eff_bindings: []
   }
 }
 
@@ -1773,7 +1943,8 @@ fn prelude_assoc_impl(
     owner: None,
     src_path: None,
     provided: [],
-    assoc_bindings: bindings
+    assoc_bindings: bindings,
+    eff_bindings: []
   }
 
 ## The scalars the backends compare for equality natively.
@@ -2522,7 +2693,7 @@ test "effect union normalizes" {
   assert eff_union([EPure, EPure]) == EPure
   assert eff_union([e1, EPure]) == e1
   assert eff_union([e1, EIo]) == EIo
-  assert eff_union([e2, e1]) == EUnion([(1, "e1"), (2, "e2")])
+  assert eff_union([e2, e1]) == EUnion([(1, "e1"), (2, "e2")], [], false)
   assert eff_union([e1, e1]) == e1
   assert lub_eff(EPure, EIo) == EIo
 }
@@ -2543,7 +2714,73 @@ test "effect rendering" {
   assert eff_suffix(EPure) == ""
   assert eff_suffix(EIo) == " !io"
   assert eff_suffix(EffVar("e", 7)) == " !e"
-  assert eff_show(EUnion([(2, "b"), (1, "a")])) == "(a|b)"
+  assert eff_show(EUnion([(2, "b"), (1, "a")], [], false)) == "(a|b)"
+  assert eff_show(EffAssoc("C", 9, 4, "E")) == "C.E"
+  assert eff_suffix(EffAssoc("C", 9, 4, "E")) == " !C.E"
+}
+
+test "projection atoms normalize beside variables and io" {
+  let e1 = EffVar("e1", 1)
+  let a = EffAssoc("C", 9, 4, "E")
+  let b = EffAssoc("D", 12, 4, "E")
+  # a single atom is itself, not a one-entry union
+  assert eff_union([a, EPure]) == a
+  assert eff_union([a, a]) == a
+  # atoms sort by (tvar, trait, name); variables keep the id sort
+  assert eff_union([b, a, e1]) == EUnion([(1, "e1")], [("C", 9, 4, "E"), ("D", 12, 4, "E")], false)
+  # io absorbs the variable and only it: the projection is pending evidence,
+  # and a swallowed one would have no parameter to arrive through
+  assert eff_union([a, e1, EIo]) == EUnion([], [("C", 9, 4, "E")], true)
+  assert eff_union([a, EIo]) == EUnion([], [("C", 9, 4, "E")], true)
+  # labels ride on the second axis over an atom base, unchanged
+  assert eff_union([a, ELabeled(EPure, [(7, "Ask")])]) == ELabeled(a, [(7, "Ask")])
+}
+
+test "projection subsumption is exact containment" {
+  let e1 = EffVar("e1", 1)
+  let a = EffAssoc("C", 9, 4, "E")
+  let b = EffAssoc("D", 12, 4, "E")
+  assert eff_subsumes(a, a)
+  assert eff_subsumes(a, EPure)
+  assert not eff_subsumes(a, b)
+  assert not eff_subsumes(a, e1)
+  # io never covers an atom, in either position
+  assert not eff_subsumes(EIo, a)
+  assert not eff_subsumes(a, EIo)
+  assert eff_subsumes(eff_union([a, EIo]), a)
+  assert eff_subsumes(eff_union([a, EIo]), EIo)
+  assert eff_subsumes(eff_union([a, e1]), a)
+  assert not eff_subsumes(eff_union([a, e1]), b)
+  # accessors agree with the normal form
+  assert eff_assocs(eff_union([b, a])) == [("C", 9, 4, "E"), ("D", 12, 4, "E")]
+  assert eff_vars(eff_union([a, e1])) == [(1, "e1")]
+  assert eff_labels(eff_union([a, ELabeled(EPure, [(7, "Ask")])])) == [(7, "Ask")]
+}
+
+test "projections reduce through an impl's effect bindings" {
+  let a = EffAssoc("C", 9, 4, "E")
+  let other = EffAssoc("C", 9, 5, "E")
+  let ask = ELabeled(EPure, [(7, "Ask")])
+  # bound to a label: the atom becomes that label's row
+  assert reduce_eff_via_bindings(a, 9, 4, [("E", ask)]) == ask
+  # bound to io / pure
+  assert reduce_eff_via_bindings(a, 9, 4, [("E", EIo)]) == EIo
+  assert reduce_eff_via_bindings(a, 9, 4, [("E", EPure)]) == EPure
+  # a different trait's atom on the same subject stays put
+  assert reduce_eff_via_bindings(other, 9, 4, [("E", ask)]) == other
+  # the rest of the row rides along
+  let row = eff_union([a, EffVar("e1", 1), ELabeled(EPure, [(2, "Log")])])
+  assert reduce_eff_via_bindings(row, 9, 4, [("E", ask)]) ==
+    ELabeled(EffVar("e1", 1), [(2, "Log"), (7, "Ask")])
+}
+
+test "effect groundness excludes variables and projections" {
+  assert eff_is_ground(EPure)
+  assert eff_is_ground(EIo)
+  assert eff_is_ground(ELabeled(EIo, [(7, "Ask")]))
+  assert not eff_is_ground(EffVar("e", 1))
+  assert not eff_is_ground(EffAssoc("C", 9, 4, "E"))
+  assert not eff_is_ground(eff_union([EffAssoc("C", 9, 4, "E"), EIo]))
 }
 
 ## The rule the pattern side and the call side now share, stated once. Both

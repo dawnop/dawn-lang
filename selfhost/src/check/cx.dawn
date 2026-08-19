@@ -18,7 +18,7 @@ use check/types.{
   Audience, AWorld,
   TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
-  EPure, EIo, EffVar, ELabeled, eff_union, eff_base, eff_labels,
+  EPure, EIo, EffVar, ELabeled, EffAssoc, eff_union, eff_base, eff_labels,
   adt_of, trait_of, subst,
   BuiltinTypeI, builtin_type_map,
   builtin_type_visible, builtin_type_visible_at_return,
@@ -438,6 +438,14 @@ pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff
   for a in atoms {
     if a == "io" {
       effs = effs ++ [EIo]
+    } else if str.contains(a, ".") {
+      # `C.E`: an associated-effect projection (docs/effect-params-design.md
+      # 刀 5). The parser only builds a dotted atom out of two uppercase
+      # names, so the split is exact.
+      let parts = str.split(a, ".")
+      let (cx2, e) = resolve_eff_assoc(cx1, parts[0], parts[1], lo, hi)
+      cx1 = cx2
+      effs = effs ++ [e]
     } else {
       match map.get(cx1.effects, a) {
         Some(eid) -> { effs = effs ++ [label_eff(cx1, eid)] }
@@ -467,6 +475,47 @@ pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff
   }
   (cx1, eff_union(effs))
 }
+
+## `!C.E` -- the row-atom twin of `resolve_assoc` below, same discipline
+## (assoc-types-design.md D2 replayed on the effect axis): the subject must be
+## a type parameter in scope, and exactly one of its bounds must declare the
+## associated effect. Zero declarers and ambiguity are both errors here;
+## nothing is deferred. The atom keeps only the subject's display name and
+## tvar id, so `Eff` never contains a `Ty`.
+fn resolve_eff_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, Eff) =
+  match map.get(cx.current_tparams, subj) {
+    None ->
+      (cerr_h(cx, "a projection's subject must be a type parameter in scope, and `" ++
+          subj ++ "` is not one", lo, hi,
+        "write `!T." ++ name ++ "` where `T` is a `[T: SomeTrait]` parameter whose trait " ++
+          "declares `effect " ++ name ++ "`"), EPure)
+    Some(v) -> {
+      let vid = match v {
+        TyVar(_, id) -> id
+        _ -> -1
+      }
+      let bs = match map.get(cx.current_tparam_bounds, vid) {
+        Some(x) -> x
+        None -> []
+      }
+      var owners: List[Int] = []
+      for tid in bs {
+        for an in trait_of(cx.traits, tid).eff_assoc {
+          if an == name && not list.contains(owners, tid) { owners = owners ++ [tid] }
+        }
+      }
+      if len(owners) == 0 {
+        (cerr_h(cx, "no trait bound on `" ++ subj ++ "` declares an associated effect `" ++
+            name ++ "`", lo, hi,
+          "the trait in the bound needs an `effect " ++ name ++ "` member"), EPure)
+      } else if len(owners) > 1 {
+        (cerr_h(cx, "`!" ++ subj ++ "." ++ name ++ "` is ambiguous: more than one bound declares `" ++
+            name ++ "`", lo, hi, "rename the associated effect in one of the traits"), EPure)
+      } else {
+        (cx, EffAssoc(subj, vid, owners[0], name))
+      }
+    }
+  }
 
 fn is_upper_name(s: String) -> Bool = {
   for c in code_points(s) {

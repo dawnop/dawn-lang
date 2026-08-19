@@ -323,6 +323,11 @@ pub type AssocDecl = { name: String, lo: Int, hi: Int, nlo: Int, nhi: Int }
 ## associated type its trait declares.
 pub type AssocBind = { name: String, tref: TypeRef, lo: Int, hi: Int, nlo: Int, nhi: Int }
 
+## `effect E = !X` in an impl body: the row an impl binds for each associated
+## effect its trait declares. `atoms` holds the written row atoms (empty for
+## the empty row `!()`); registration resolves and polices them.
+pub type EffAssocBind = { name: String, atoms: List[String], lo: Int, hi: Int, nlo: Int, nhi: Int }
+
 pub type TraitMethod = {
   name: String,
   params: List[Param],
@@ -420,6 +425,7 @@ pub type Decl =
     tphi: Int,
     methods: List[TraitMethod],
     assoc: List[AssocDecl],
+    eff_assoc: List[AssocDecl],
     is_pub: Bool,
     lo: Int,
     hi: Int,
@@ -435,6 +441,7 @@ pub type Decl =
     subject: TypeRef,
     methods: List[FnDecl],
     assoc: List[AssocBind],
+    eff_binds: List[EffAssocBind],
     lo: Int,
     hi: Int
   )
@@ -635,6 +642,7 @@ pub type TraitView = {
   tphi: Int,
   methods: List[TraitMethod],
   assoc: List[AssocDecl],
+  eff_assoc: List[AssocDecl],
   is_pub: Bool,
   lo: Int,
   hi: Int,
@@ -646,7 +654,7 @@ pub fn module_traits(m: Module) -> List[TraitView] = {
   var out: List[TraitView] = []
   for d in m.decls {
     match d {
-      DTrait(name, tp, tplo, tphi, methods, assoc, is_pub, lo, hi, nlo, nhi) -> {
+      DTrait(name, tp, tplo, tphi, methods, assoc, effa, is_pub, lo, hi, nlo, nhi) -> {
         out = out ++ [TraitView {
           name: name,
           tp: tp,
@@ -654,6 +662,7 @@ pub fn module_traits(m: Module) -> List[TraitView] = {
           tphi: tphi,
           methods: methods,
           assoc: assoc,
+          eff_assoc: effa,
           is_pub: is_pub,
           lo: lo,
           hi: hi,
@@ -675,6 +684,7 @@ pub type ImplView = {
   subject: TypeRef,
   methods: List[FnDecl],
   assoc: List[AssocBind],
+  eff_binds: List[EffAssocBind],
   lo: Int,
   hi: Int
 }
@@ -683,7 +693,7 @@ pub fn module_impls(m: Module) -> List[ImplView] = {
   var out: List[ImplView] = []
   for d in m.decls {
     match d {
-      DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, lo, hi) -> {
+      DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, ebs, lo, hi) -> {
         out = out ++ [ImplView {
           tparams: tparams,
           trait_name: trait_name,
@@ -692,6 +702,7 @@ pub fn module_impls(m: Module) -> List[ImplView] = {
           subject: subject,
           methods: methods,
           assoc: assoc,
+          eff_binds: ebs,
           lo: lo,
           hi: hi
         }]

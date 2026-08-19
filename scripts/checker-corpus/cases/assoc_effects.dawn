@@ -1,0 +1,73 @@
+# passes.dawn / cx.dawn 刀 5: associated effects. The declaration and binding
+# discipline mirrors associated types member for member -- duplicate members,
+# unknown / duplicate / non-ground / missing bindings, exactly once each --
+# and the row atom `!T.E` resolves like the type projection `T.Item` does:
+# subject in scope, exactly one bound declaring the member. The last section
+# is the exact-label rule: an impl whose bindings put a label on the trait's
+# row must *write* that label, because each label is one hidden evidence
+# parameter and dropping it would change the method's arity.
+effect Ask { fn ask() -> Int }
+
+trait Dup[T] {
+  effect E
+  effect E
+  fn m(x: T) -> Int
+}
+
+type A = { v: Int }
+type B = { v: Int }
+type C = { v: Int }
+type D = { v: Int }
+
+trait P[T] {
+  effect E
+  fn run(x: T) -> Int !T.E
+}
+
+# a binding for a member the trait does not declare, beside the real one
+impl P[A] {
+  effect F = !Ask
+  effect E = !Ask
+  fn run(x: A) -> Int !Ask = x.v + ask()
+}
+
+# the same member bound twice
+impl P[B] {
+  effect E = !Ask
+  effect E = !Ask
+  fn run(x: B) -> Int !Ask = x.v + ask()
+}
+
+# a binding must be a ground row: a variable has nothing to bind it here (an
+# impl declares no effect parameters). The member counts as bound so the
+# missing-binding report does not cascade; the method's pure row is fine
+# against the unreduced projection (pure is the bottom of the base axis).
+impl P[C] {
+  effect E = !e
+  fn run(x: C) -> Int = x.v
+}
+
+# no binding at all: exactly-once means the omission is refused, like a
+# missing `type Item =` is
+impl P[D] {
+  fn run(x: D) -> Int = x.v
+}
+
+trait Q[T] {
+  effect E
+  fn go(x: T) -> Int !T.E
+}
+
+# the exact-label rule: this impl's binding makes the trait's row `!Ask`, so
+# `go` must write `!Ask` -- subsumption alone would accept the pure spelling
+# and silently change the method's evidence arity
+impl Q[A] {
+  effect E = !Ask
+  fn go(x: A) -> Int = x.v
+}
+
+# projection resolution: the subject must be a tparam in scope, the member
+# must be declared by exactly one bound
+fn no_subject(x: Int) -> Int !Z.E = x
+fn no_member[T: P](x: T) -> Int !T.F = 1
+fn ambiguous[T: P + Q](x: T) -> Int !T.E = 1

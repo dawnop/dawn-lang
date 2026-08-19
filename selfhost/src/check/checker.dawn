@@ -703,7 +703,11 @@ pub fn unify_eff(declared: Eff, actual: Eff, em: Map[Int, Eff]) -> (Map[Int, Eff
     }
     # a union in a declared parameter position is not inferred into; accept when
     # the actual is already subsumed
-    EUnion(_) -> (em, eff_subsumes(subst_eff(declared, em), actual))
+    EUnion(_, _, _) -> (em, eff_subsumes(subst_eff(declared, em), actual))
+    # a declared projection is not inferred into either; whether it reduces
+    # first is the caller's business (the instantiation choke reduces rows
+    # before unification ever sees a concrete-subject atom)
+    EffAssoc(_, _, _, _) -> (em, eff_subsumes(subst_eff(declared, em), actual))
     # a declared label is not inferred into either: its base unifies, and its
     # labels have to cover the actual's
     ELabeled(b, ls) -> {
@@ -4363,7 +4367,8 @@ fn check_unsafe_pure(cx: Cx, body: Expr, expected: Option[Ty], lo: Int, hi: Int)
   for u in inner {
     match u {
       EffVar(_, _) -> if poly == None { poly = Some(u) }
-      EUnion(_) -> if poly == None { poly = Some(u) }
+      EUnion(_, _, _) -> if poly == None { poly = Some(u) }
+      EffAssoc(_, _, _, _) -> if poly == None { poly = Some(u) }
       _ -> ()
     }
   }
@@ -9504,14 +9509,17 @@ test "an arm answers with the operation's own signature" {
   assert str.contains(cx2.diags[0].msg, "arm `ask` takes 1 parameter(s)")
 }
 
-test "the four refusals: trait, impl, comptime, type declaration" {
+test "the two standing refusals: comptime and type declaration; trait rows carry labels" {
   let env: Map[String, ModExports] = map.empty()
   let base = "effect Ask {\n  fn ask() -> Int\n}\n"
-  # a trait method's row is pure or io, and a label is neither
+  # a trait method's row may write a label now (effect-params-design.md 刀 5):
+  # the label is one hidden evidence parameter, on the slot as on a fn
   let (m1, _) = parser.parse_module(base ++ "trait W[T] {\n  fn w(x: T) -> Int !Ask\n}\n")
   let (cx1, _) = check_module(test_cx(), m1, env)
-  assert cx1.diags[0].msg == "trait methods cannot declare the effect `Ask`"
-  # the same for an impl method
+  assert len(cx1.diags) == 0
+  # an impl method's labels are held to the trait's row by the conformance
+  # check -- a label the trait does not carry is refused there, in the row
+  # comparison's own words, not by a blanket ban
   let (m2, _) = parser.parse_module(base ++
       "trait W[T] {\n  fn w(x: T) -> Int\n}\n" ++
       "type P = { v: Int }\n" ++
@@ -9519,7 +9527,7 @@ test "the four refusals: trait, impl, comptime, type declaration" {
   let (cx2, _) = check_module(test_cx(), m2, env)
   var saw_impl = false
   for d in cx2.diags {
-    if d.msg == "impl methods cannot declare the effect `Ask`" { saw_impl = true }
+    if d.msg == "`w` is declared !Ask but trait `W` declares it pure" { saw_impl = true }
   }
   assert saw_impl
   # comptime is pure in v1, handlers included
@@ -9602,10 +9610,18 @@ test "a trait or impl method's row may carry effect variables" {
   assert len(carity.diags) == 1
   assert carity.diags[0].msg == "`f` binds 0 effect variable(s) but trait `One` binds 1"
   assert str.contains(carity.diags[0].hint, "this impl declares fn f(P) -> Int")
-  # a named label is still refused on both sides (effect-params-design.md 刀 5)
-  let clabel = check("effect Ask {\n  fn ask() -> Int\n}\n" ++
-      "trait W[T] {\n  fn w(x: T) -> Int !Ask\n}\n")
-  assert clabel.diags[0].msg == "trait methods cannot declare the effect `Ask`"
+  # a named label is accepted on both sides now (effect-params-design.md 刀 5),
+  # and the impl must *write* it: each label is one hidden evidence parameter,
+  # so dropping one would change the method's arity, not just its promise
+  let base5 = "effect Ask {\n  fn ask() -> Int\n}\n" ++
+    "trait W[T] {\n  fn w(x: T) -> Int !Ask\n}\n" ++
+    "type P = { v: Int }\n"
+  assert len(check(base5 ++
+      "impl W[P] {\n  fn w(x: P) -> Int !Ask = x.v + ask()\n}\n").diags) == 0
+  let cdrop = check(base5 ++ "impl W[P] {\n  fn w(x: P) -> Int = x.v\n}\n")
+  assert len(cdrop.diags) == 1
+  assert cdrop.diags[0].msg ==
+    "`w` must write the effect(s) `Ask`: the trait's row (after this impl's bindings) carries them"
 }
 
 test "a trait default body forwards the method's effect variable" {

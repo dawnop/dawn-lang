@@ -29,6 +29,7 @@ use check/types.{
   Audience, AWorld, AStdOnly, AModule, audience_covers, decl_audience, declared_audience,
   trait_audience, builtin_type_audience, internal_std_modules,
   eff_subsumes, eff_suffix, eff_show, eff_labels, eff_params_of, subst_eff,
+  reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
   EffectI, ev_record_name,
   AdtI, CtorI, FieldI,
   TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, ty_show, fn_return_show, sig_render, subst,
@@ -43,6 +44,7 @@ use check/types.{
 use check/cx.{
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
   cerr_h, cerr_o, fresh, fresh_effvar, alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
+  label_eff,
   resolve_alias_target, resolve_type, resolve_return_type, is_const_serializable,
   const_refusal_hint, no_sig,
   TySpan, ty_span_kid, ty_span_of
@@ -1275,6 +1277,18 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         assoc_names = assoc_names ++ [a.name]
       }
     }
+    # associated effects register the same way, and before the methods for the
+    # same reason: a method row can already project its own trait (`!C.E` in
+    # resolve_eff_assoc reads t.eff_assoc by id)
+    var eff_assoc_names: List[String] = []
+    for a in d.eff_assoc {
+      if list.contains(eff_assoc_names, a.name) {
+        cx1 = cerr(cx1, "associated effect `" ++ a.name ++ "` is declared twice in trait `" ++
+            d.name ++ "`", a.nlo, a.nhi)
+      } else {
+        eff_assoc_names = eff_assoc_names ++ [a.name]
+      }
+    }
     cx1 = Cx {
       ..cx1,
       traits: map.insert(cx1.traits, tid, TraitI {
@@ -1286,6 +1300,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         src_path: cx1.src_path,
         methods: [],
         assoc: assoc_names,
+        eff_assoc: eff_assoc_names,
         # a declared trait always injects: there is no surface syntax for
         # opting out (docs/prelude-namespace-design.md §4.2)
         injects: true
@@ -1307,21 +1322,6 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     tp = map.insert(tp, d.tp, tvar)
     let saved_tp = cx1.current_tparams
     for me in d.methods {
-      var label = ""
-      for a in me.effs {
-        if a != "io" && map.has(cx1.effects, a) && label == "" { label = a }
-      }
-      if label != "" {
-        # A named effect is still refused here (effect-params-design.md 刀 5
-        # lifts it): a written label means the caller supplies the handler
-        # through an evidence parameter, and a dictionary slot has no place to
-        # put one. An effect *variable* is a different animal -- it brings no
-        # label of its own, so it synthesises no evidence, and it is bound by
-        # this very signature (spec §6.3), which is why the row may carry it.
-        cx1 = cerr_h(cx1, "trait methods cannot declare the effect `" ++ label ++ "`",
-          me.nlo, me.nhi, "a trait method is pure or !io")
-        continue
-      }
       let saved_ev = cx1.current_eff_vars
       let empty_ev: Map[String, Eff] = map.empty()
       cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: empty_ev }
@@ -1396,6 +1396,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       src_path: cx1.src_path,
       methods: methods,
       assoc: assoc_names,
+      eff_assoc: eff_assoc_names,
       injects: injects
     }
     cx1 = Cx {
@@ -1423,7 +1424,7 @@ test "trait registration puts methods in the fn namespace" {
     hi: 38,
     nlo: 17,
     nhi: 20
-  }], [], false, 0, 40, 6, 9)] }
+  }], [], [], false, 0, 40, 6, 9)] }
   var cx = seed_prelude(test_cx())
   cx = pass_register_traits(cx, m)
   assert len(cx.diags) == 0
@@ -1444,7 +1445,7 @@ test "trait registration puts methods in the fn namespace" {
     hi: 38,
     nlo: 17,
     nhi: 20
-  }], [], false, 0, 40, 6, 9)] }
+  }], [], [], false, 0, 40, 6, 9)] }
   let cx2 = pass_register_traits(cx, m2)
   assert len(cx2.diags) == 1
   assert str.contains(cx2.diags[0].msg, "already a method of trait `Eq2`")
@@ -1454,7 +1455,7 @@ test "every prelude trait name is refused as a redefinition" {
   # the guard used to name three of the five by hand, so `trait Show` and
   # `trait Iter` came out as "defined twice" on a file that declares them once
   for name in prelude_trait_names() {
-    let m = Module { decls: [DTrait(name, "T", 10, 11, [], [], false, 0, 40, 6, 9)] }
+    let m = Module { decls: [DTrait(name, "T", 10, 11, [], [], [], false, 0, 40, 6, 9)] }
     let cx = pass_register_traits(seed_prelude(test_cx()), m)
     assert len(cx.diags) == 1
     assert cx.diags[0].msg == "`" ++ name ++ "` is a prelude trait and cannot be redefined"
@@ -1588,7 +1589,8 @@ pub fn pass_register_impls(
         owner: cx1.owner_class,
         src_path: cx1.src_path,
         provided: [],
-        assoc_bindings: []
+        assoc_bindings: [],
+        eff_bindings: []
       }
       cx1 = Cx {
         ..cx1,
@@ -1756,9 +1758,65 @@ pub fn pass_register_impls(
           "bind it: `type " ++ an ++ " = <type>`")
       }
     }
+    # `effect E = !X` bindings: each associated effect the trait declares,
+    # exactly once, to a *ground* row -- pure (`!()`), `!io`, or one declared
+    # label. An effect variable has nothing to bind it here (an impl declares
+    # no effect parameters) and a projection would chain reduction through
+    # another impl; both are refused, which is what lets reduction substitute
+    # the RHS verbatim (the effect twin of assoc-types D4/D6).
+    var eff_bindings: List[(String, Eff)] = []
+    var eff_bound_ns: List[String] = []
+    for eb in d.eff_binds {
+      if not list.contains(tr.eff_assoc, eb.name) {
+        cx1 = cerr_h(cx1, "trait `" ++ tr.name ++ "` does not declare an associated effect `" ++
+            eb.name ++ "`", eb.nlo, eb.nhi,
+          if len(tr.eff_assoc) == 0 {
+            "the trait declares no associated effects"
+          } else {
+            "it declares: " ++ join(tr.eff_assoc, ", ")
+          })
+        continue
+      }
+      if list.contains(eff_bound_ns, eb.name) {
+        cx1 = cerr(cx1, "associated effect `" ++ eb.name ++ "` is bound twice in this impl",
+          eb.nlo, eb.nhi)
+        continue
+      }
+      eff_bound_ns = eff_bound_ns ++ [eb.name]
+      var row: Eff = EPure
+      var bad = false
+      for a in eb.atoms {
+        if a == "io" {
+          row = EIo
+        } else {
+          match map.get(cx1.effects, a) {
+            Some(eid) -> { row = label_eff(cx1, eid) }
+            None -> {
+              bad = true
+              cx1 = cerr_h(cx1, "an associated effect binds a ground row, and `!" ++ a ++
+                  "` is not one", eb.nlo, eb.nhi,
+                "bind a declared effect, `!io`, or the empty row `!()`; an effect variable " ++
+                  "or a projection cannot be bound")
+            }
+          }
+        }
+      }
+      if not bad { eff_bindings = eff_bindings ++ [(eb.name, row)] }
+    }
+    for an in tr.eff_assoc {
+      if not list.contains(eff_bound_ns, an) {
+        cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+            "]` is missing `effect " ++ an ++ "`", d.tlo, d.thi,
+          "bind it: `effect " ++ an ++ " = !<effect>` (or `!io`, or the empty row `!()`)")
+      }
+    }
     var inst: Map[Int, Ty] = map.empty()
+    var trait_tvid = -1
     match tr.tvar {
-      TyVar(_, vid) -> { inst = map.insert(inst, vid, subject) }
+      TyVar(_, vid) -> {
+        inst = map.insert(inst, vid, subject)
+        trait_tvid = vid
+      }
       _ -> ()
     }
     let em0: Map[Int, Eff] = map.empty()
@@ -1791,19 +1849,6 @@ pub fn pass_register_impls(
       if already {
         cx1 = cerr(cx1, "method `" ++ me.name ++ "` is implemented twice in this impl",
           me.nlo, me.nhi)
-        msigs = msigs ++ [no_sig()]
-        continue
-      }
-      var label2 = ""
-      for a in me.effs {
-        if a != "io" && map.has(cx1.effects, a) && label2 == "" { label2 = a }
-      }
-      if label2 != "" {
-        # the trait side's refusal, for the same reason: a label is evidence a
-        # dictionary slot cannot carry. A variable is bound by the signature
-        # and carries none.
-        cx1 = cerr_h(cx1, "impl methods cannot declare the effect `" ++ label2 ++ "`",
-          me.nlo, me.nhi, "an impl method is pure or !io")
         msigs = msigs ++ [no_sig()]
         continue
       }
@@ -1890,12 +1935,18 @@ pub fn pass_register_impls(
       # the impl is not in the table yet, so a `C.Item` in the trait's
       # signature reduces through this impl's own bindings, not impl_at
       let ab2 = assoc_bindings
+      let eb2 = eff_bindings
       let tid2 = tid
       let subject2 = subject
+      let tvid2 = trait_tvid
       let want = map(msv.sig.param_tys,
-        t => reduce_via_bindings(subst(t, inst2, em2), tid2, subject2, ab2))
-      let want_ret = reduce_via_bindings(subst(msv.sig.ret, inst2, em2), tid2, subject2, ab2)
-      let want_eff = subst_eff(msv.sig.eff, em2)
+        t => reduce_ty_effs_via_bindings(
+          reduce_via_bindings(subst(t, inst2, em2), tid2, subject2, ab2), tvid2, tid2, eb2))
+      let want_ret = reduce_ty_effs_via_bindings(
+        reduce_via_bindings(subst(msv.sig.ret, inst2, em2), tid2, subject2, ab2), tvid2, tid2, eb2)
+      # the trait's row in the impl's variables, its projections rewritten to
+      # this impl's own bound rows (the effect twin of the line above)
+      let want_eff = reduce_eff_via_bindings(subst_eff(msv.sig.eff, em2), tvid2, tid2, eb2)
       let want_render = "fn " ++ me.name ++ "(" ++
         join(map(want, t => ty_show(adts2, t)), ", ") ++ ") -> " ++
         fn_return_show(cx1.adts, want_ret, want_eff) ++ eff_suffix(want_eff)
@@ -1920,6 +1971,25 @@ pub fn pass_register_impls(
         cx1 = cerr_h(cx1, "`" ++ me.name ++ "` is declared !" ++ eff_show(eff) ++
             " but trait `" ++ tr.name ++ "` declares it " ++ trait_side, me.nlo, me.nhi,
           "drop !" ++ eff_show(eff) ++ " here, or declare the trait method !" ++ eff_show(eff))
+      } else if eff_labels(want_eff) != eff_labels(eff) {
+        # The base axis is subsumption; the label axis is ABI. Each label is
+        # one hidden evidence parameter, and the devirtualised call spells the
+        # impl method's descriptor from the trait's row after bindings -- so
+        # an impl that quietly drops a label would change its own arity out
+        # from under every call site. Exact match, both directions.
+        var missing2: List[String] = []
+        for l in eff_labels(want_eff) {
+          let (lid, ln) = l
+          if not list.contains(map(eff_labels(eff), x => {
+            let (xid, _) = x
+            xid
+          }), lid) { missing2 = missing2 ++ [ln] }
+        }
+        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` must write the effect(s) `" ++
+            join(missing2, "`, `") ++ "`: the trait's row (after this impl's bindings) " ++
+            "carries them", me.nlo, me.nhi,
+          "each written effect is a hidden evidence parameter, so the labels are part of " ++
+            "the method's shape; declare the method !" ++ eff_show(want_eff))
       }
       provided = provided ++ [me.name]
       msigs = msigs ++ [Some(msig)]
@@ -1969,7 +2039,8 @@ pub fn pass_register_impls(
       owner: cx1.owner_class,
       src_path: cx1.src_path,
       provided: provided,
-      assoc_bindings: assoc_bindings
+      assoc_bindings: assoc_bindings,
+      eff_bindings: eff_bindings
     }
     cx1 = Cx {
       ..cx1,
@@ -2097,9 +2168,9 @@ test "impl registration enforces coherence and signature matching" {
     hi: 13,
     nlo: 0,
     nhi: 3
-  }], [], lo, lo + 20)
+  }], [], [], lo, lo + 20)
   let m = Module { decls: [
-    DTrait("Eq4", "T", 10, 11, [tm], [], false, 0, 40, 6, 9),
+    DTrait("Eq4", "T", 10, 11, [tm], [], [], false, 0, 40, 6, 9),
     good_impl(50),
     good_impl(80)
   ] }
@@ -2113,8 +2184,8 @@ test "impl registration enforces coherence and signature matching" {
   assert len(cx.local_impls) == 1
   # a missing method reports with the expected render
   let m2 = Module { decls: [
-    DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name: "eq5" }], [], false, 0, 40, 6, 9),
-    DImpl([], "Eq5", 50, 53, TNamed("Int", [], 54, 57), no_fn_decls(), [], 50, 70)
+    DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name: "eq5" }], [], [], false, 0, 40, 6, 9),
+    DImpl([], "Eq5", 50, 53, TNamed("Int", [], 54, 57), no_fn_decls(), [], [], 50, 70)
   ] }
   var cx2 = seed_prelude(test_cx())
   cx2 = pass_register_traits(cx2, m2)
@@ -3140,13 +3211,13 @@ pub fn pass_export_surface(cx: Cx, m: Module) -> Cx = {
         if is_pub { cx1 = surface_const(cx1, root, name, ann, nlo, nhi) }
       }
       DEffect(e) -> { if e.is_pub { cx1 = surface_effect(cx1, root, e) } }
-      DTrait(name, _, _, _, methods, _, is_pub, _, _, nlo, nhi) -> {
+      DTrait(name, _, _, _, methods, _, _, is_pub, _, _, nlo, nhi) -> {
         if is_pub { cx1 = surface_trait(cx1, root, name, methods, nlo, nhi) }
       }
       # an impl has no `pub` to read: observability is decided from its head.
       # Derived impls have no written head to visit at all, and their surface
       # is the deriving type's, which is a root in its own right.
-      DImpl(tps, _, tlo, thi, _, _, assoc, ilo, ihi) -> {
+      DImpl(tps, _, tlo, thi, _, _, assoc, _, ilo, ihi) -> {
         cx1 = surface_impl(cx1, root, tps, assoc, tlo, thi, ilo, ihi)
       }
       _ -> ()

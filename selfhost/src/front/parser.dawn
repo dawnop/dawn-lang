@@ -31,7 +31,7 @@ use front/token.{
 use front/ast.{
   TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, EffParamDecl,
   Param, LambdaParam,
-  AssocDecl, AssocBind,
+  AssocDecl, AssocBind, EffAssocBind,
   FieldDecl, CtorDecl, ImportName, StrPart, SPText, SPInterp,
   BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt, OpLe,
   OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
@@ -817,10 +817,15 @@ fn trait_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   var st8 = skip_nl(p, st7)
   var methods: List[TraitMethod] = []
   var assoc: List[AssocDecl] = []
+  var eff_assoc: List[AssocDecl] = []
   while not at_kind(p, st8, RBRACE) && not at_kind(p, st8, EOF) {
     if at_kind(p, st8, TYPE) {
       let (st9, a) = trait_assoc(p, st8)?
       assoc = assoc ++ [a]
+      st8 = want_sep(p, st9)?
+    } else if at_kind(p, st8, EFFECT) {
+      let (st9, a) = trait_eff_assoc(p, st8)?
+      eff_assoc = eff_assoc ++ [a]
       st8 = want_sep(p, st9)?
     } else {
       let (st9, m) = trait_method(p, st8)?
@@ -832,7 +837,7 @@ fn trait_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   if len(methods) == 0 {
     return Err((st10, pd("a trait must declare at least one method", kw.lo, close.hi)))
   }
-  Ok((st10, DTrait(name.text, tp.text, tp.lo, tp.hi, methods, assoc, is_pub,
+  Ok((st10, DTrait(name.text, tp.text, tp.lo, tp.hi, methods, assoc, eff_assoc, is_pub,
     kw.lo, close.hi, name.lo, name.hi)))
 }
 
@@ -848,6 +853,34 @@ fn trait_assoc(p: P, st: St) -> PR[AssocDecl] = {
   if at_kind(p, st2, EQ) {
     return Err((st2, perr_h(p, st2, "an associated type has no default",
       "the `= Type` binding belongs in each impl, not in the trait")))
+  }
+  Ok((st2, AssocDecl {
+    name: name_tok.text,
+    lo: kw.lo,
+    hi: name_tok.hi,
+    nlo: name_tok.lo,
+    nhi: name_tok.hi
+  }))
+}
+
+## `effect E` -- an associated effect member, bare like `type Item` is: no
+## bounds, no default, no body (docs/effect-params-design.md 刀 5, v1).
+fn trait_eff_assoc(p: P, st: St) -> PR[AssocDecl] = {
+  let (st1, kw) = want(p, st, EFFECT, "`effect`")?
+  let (st2, name_tok) = want(p, st1, TYPEIDENT, "an associated effect name (uppercase)")?
+  if at_kind(p, st2, COLON) {
+    return Err((st2, perr_h(p, st2, "an associated effect cannot declare bounds",
+      "`effect " ++ name_tok.text ++ "` is the whole declaration; the impl chooses the row")))
+  }
+  if at_kind(p, st2, EQ) {
+    return Err((st2, perr_h(p, st2, "an associated effect has no default",
+      "the `= !Row` binding belongs in each impl, not in the trait")))
+  }
+  if at_kind(p, st2, LBRACE) {
+    return Err((st2, perr_h(p, st2, "an associated effect member has no body",
+      "`effect " ++ name_tok.text ++ " { ... }` declares operations; that is a top-level " ++
+        "effect declaration. The member only names one: declare the effect outside and " ++
+        "bind it in each impl (effect " ++ name_tok.text ++ " = !SomeEffect)")))
   }
   Ok((st2, AssocDecl {
     name: name_tok.text,
@@ -997,6 +1030,7 @@ fn impl_decl(p: P, st: St) -> PR[Decl] = {
   var st8 = skip_nl(p, st7)
   var methods: List[FnDecl] = []
   var assoc: List[AssocBind] = []
+  var eff_binds: List[EffAssocBind] = []
   while not at_kind(p, st8, RBRACE) && not at_kind(p, st8, EOF) {
     if at_kind(p, st8, PUB) {
       return Err((st8, perr(p, st8, "impl methods cannot be pub (their visibility follows the trait)")))
@@ -1004,6 +1038,10 @@ fn impl_decl(p: P, st: St) -> PR[Decl] = {
     if at_kind(p, st8, TYPE) {
       let (st9, a) = impl_assoc(p, st8)?
       assoc = assoc ++ [a]
+      st8 = want_sep(p, st9)?
+    } else if at_kind(p, st8, EFFECT) {
+      let (st9, a) = impl_eff_bind(p, st8)?
+      eff_binds = eff_binds ++ [a]
       st8 = want_sep(p, st9)?
     } else {
       let (st9, m) = fn_decl(p, st8, false, true)?
@@ -1013,7 +1051,7 @@ fn impl_decl(p: P, st: St) -> PR[Decl] = {
   }
   let (st10, close) = want(p, st8, RBRACE, "`}`")?
   Ok((st10, DImpl(tparams, trait_tok.text, trait_tok.lo, trait_tok.hi, subject, methods,
-    assoc, kw.lo, close.hi)))
+    assoc, eff_binds, kw.lo, close.hi)))
 }
 
 ## `type Item = X` -- the binding an impl owes for each associated type its
@@ -1029,6 +1067,48 @@ fn impl_assoc(p: P, st: St) -> PR[AssocBind] = {
     tref: tref,
     lo: kw.lo,
     hi: t_hi(tref),
+    nlo: name_tok.lo,
+    nhi: name_tok.hi
+  }))
+}
+
+## `effect E = !X` -- the row an impl binds for each associated effect its
+## trait declares. The RHS is one atom (`!io` or one declared effect) or the
+## empty row `!()`; at most one, because a member stands for exactly one
+## evidence slot (docs/effect-params-design.md 刀 5, 决策 5 问题三).
+fn impl_eff_bind(p: P, st: St) -> PR[EffAssocBind] = {
+  let (st1, kw) = want(p, st, EFFECT, "`effect`")?
+  let (st2, name_tok) = want(p, st1, TYPEIDENT, "an associated effect name (uppercase)")?
+  let (st3, _) = want(p, st2, EQ,
+    "`=` (an impl binds each associated effect: effect " ++ name_tok.text ++ " = !SomeEffect)")?
+  let (st4, bang) = want(p, st3, BANG,
+    "`!` (the binding is a row: !SomeEffect, !io, or the empty row !())")?
+  var atoms: List[String] = []
+  var st5 = st4
+  var hi = bang.hi
+  if at_kind(p, st5, LPAREN) {
+    let st6 = adv1(p, st5)
+    let (st7, close) = want(p, st6, RPAREN,
+      "`)` -- the parenthesized binding is only the empty row `!()`; one atom is written bare, " ++
+        "and a union is not bindable (one member stands for one evidence slot; " ++
+        "declare a second `effect` member instead)")?
+    st5 = st7
+    hi = close.hi
+  } else {
+    let (st6, n) = effect_atom(p, st5)?
+    atoms = [n.text]
+    st5 = st6
+    hi = n.hi
+  }
+  if at_kind(p, st5, BANG) {
+    return Err((st5, perr_h(p, st5, "an associated effect binds at most one atom",
+      "a second effect wants its own `effect` member in the trait")))
+  }
+  Ok((st5, EffAssocBind {
+    name: name_tok.text,
+    atoms: atoms,
+    lo: kw.lo,
+    hi: hi,
     nlo: name_tok.lo,
     nhi: name_tok.hi
   }))
@@ -1168,6 +1248,22 @@ fn effect_atom(p: P, st: St) -> PR[Token] = {
   want(p, st, IDENT, "an effect name (io, an effect variable, or a declared effect)")
 }
 
+## One row atom as text: `io`, an effect variable, a declared effect, or an
+## associated-effect projection `C.E` (docs/effect-params-design.md 刀 5). The
+## dotted spelling stays one atom string; resolution splits it on the dot, so
+## the row keeps its `List[String]` shape everywhere downstream.
+fn effect_atom_text(p: P, st: St) -> PR[String] = {
+  let upper = at_kind(p, st, TYPEIDENT)
+  let (st1, n) = effect_atom(p, st)?
+  if upper && at_kind(p, st1, DOT) {
+    let st2 = adv1(p, st1)
+    let (st3, m) = want(p, st2, TYPEIDENT,
+      "an associated effect name (uppercase): `!" ++ n.text ++ ".E`")?
+    return Ok((st3, n.text ++ "." ++ m.text))
+  }
+  Ok((st1, n.text))
+}
+
 ## Optional effect annotation after a return type: nothing (pure), `!io`, `!e`,
 ## `!Ask`, or a union `!(e1 | Ask | ...)`. Returns the atom names.
 fn parse_effect(p: P, st: St) -> PR[List[String]] = {
@@ -1190,17 +1286,17 @@ fn effect_group(p: P, st: St) -> PR[List[String]] = {
   }
   let st1 = adv1(p, st)
   if not at_kind(p, st1, LPAREN) {
-    let (st2, n) = effect_atom(p, st1)?
-    return Ok((st2, [n.text]))
+    let (st2, n) = effect_atom_text(p, st1)?
+    return Ok((st2, [n]))
   }
   let st2 = adv1(p, st1)
-  let (st3, first) = effect_atom(p, st2)?
-  var atoms = [first.text]
+  let (st3, first) = effect_atom_text(p, st2)?
+  var atoms = [first]
   var st4 = st3
   while at_kind(p, st4, PIPE) {
     let st5 = adv1(p, st4)
-    let (st6, n) = effect_atom(p, st5)?
-    atoms = atoms ++ [n.text]
+    let (st6, n) = effect_atom_text(p, st5)?
+    atoms = atoms ++ [n]
     st4 = st6
   }
   let (st7, _) = want(p, st4, RPAREN, "`)` to close the effect union")?

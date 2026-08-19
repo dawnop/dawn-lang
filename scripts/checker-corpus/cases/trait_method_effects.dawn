@@ -1,8 +1,9 @@
-# checker.dawn: a trait or impl method's row may carry effect variables, but
-# never a named effect (docs/spec.md §6.5 边界(v1)). The variable is bound by
-# the signature itself and synthesises no evidence; a label would mean the
-# caller supplies a handler through a dictionary slot, which has no parameter
-# to carry it.
+# checker.dawn: a trait or impl method's row may carry effect variables and,
+# since 刀 5 (docs/effect-params-design.md), written labels -- each label is
+# one hidden evidence parameter on the slot, exactly as on a fn. What still
+# holds: a function *type* cannot name a label (effects-soundness-design.md
+# §4.1 -- that ban is #188's, not this file's), and an impl method's labels
+# must match the trait's row exactly, because they are the method's arity.
 effect Ask { fn ask() -> Int }
 
 trait Eff[T] {
@@ -21,10 +22,11 @@ trait Plain[T] {
 
 type Sub = S
 
-# `m` writes a label and is dropped, so the trait reports it missing. `n` is a
-# different failure: an effect variable is a legal row, but the trait's `n`
-# binds none, and the two signatures' variables are paired by position -- so
-# the impl is refused for the variable it introduced, not for having one.
+# `m` writes a label the trait's row does not carry, so the row comparison
+# refuses it -- in its own words, no blanket ban. `n` is a different failure:
+# an effect variable is a legal row, but the trait's `n` binds none, and the
+# two signatures' variables are paired by position -- so the impl is refused
+# for the variable it introduced, not for having one.
 impl Plain[Sub] {
   fn m(x: Sub) -> Int !Ask = 1
   fn n(x: Sub) -> Int !e = 1
