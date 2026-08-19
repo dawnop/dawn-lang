@@ -1,0 +1,54 @@
+# The widget vocabulary of the Elm architecture: a pure value tree with the
+# application's message type in the leaves, and never a function. A callback
+# field would cost the tree its structural `==` (functions cannot be compared),
+# and `==` is what makes snapshot tests one assertion and future diffing
+# possible at all; a message field keeps the tree data all the way down, and
+# the driver loop is the only place that interprets a message into effects.
+#
+# The set is deliberately minimal for a v1: text, one styled wrapper, row and
+# column containers, and a button that names the message pressing it sends.
+# Everything else a terminal app wants (checkboxes, lists with a cursor, ...)
+# has so far been expressible as these five.
+
+## How the terminal renderer may dress a subtree. `Plain` is the identity and
+## exists so that "which style" can be computed: an `if` over styles needs a
+## spelling for "none".
+pub type Style =
+  | Plain
+  | Bold
+  | Dim
+  | Underline
+derive Show
+
+## A pure description of a screen. `M` is the application's message type: the
+## tree says what an interaction *means* (`Button(label, on_press)`), and holds
+## no code. `Row` lays children out on one line, `Column` stacks them.
+pub type Widget[M] =
+  | Text(s: String)
+  | Styled(style: Style, child: Widget[M])
+  | Row(kids: List[Widget[M]])
+  | Column(kids: List[Widget[M]])
+  | Button(label: String, on_press: M)
+derive Show
+
+# A message type for the test blocks below; real apps bring their own.
+type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+test "widget trees are plain values with structural equality" {
+  let a: Widget[ProbeMsg] =
+    Column(kids: [Text(s: "hi"), Button(label: "go", on_press: Ping)])
+  let b: Widget[ProbeMsg] =
+    Column(kids: [Text(s: "hi"), Button(label: "go", on_press: Ping)])
+  assert a == b
+}
+
+test "a differing message or label is a differing tree" {
+  let a: Widget[ProbeMsg] = Button(label: "go", on_press: Ping)
+  assert a != Button(label: "go", on_press: Pong)
+  assert a != Button(label: "stop", on_press: Ping)
+  let row: Widget[ProbeMsg] = Row(kids: [Text(s: "x")])
+  assert row != Column(kids: [Text(s: "x")])
+}

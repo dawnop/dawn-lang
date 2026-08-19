@@ -1,0 +1,76 @@
+# Widget tree -> String, as a pure function. Keeping the renderer pure is the
+# point of the architecture: a view snapshot test is `render(view(m)) == "..."`
+# with no terminal involved, and the driver loop owns the only `!io` in an app.
+#
+# Layout is line-oriented (v1 is line-mode interaction, no raw terminal):
+# `Row` joins children with one space, `Column` with one newline. A Row is
+# meant for single-line children; a newline inside one is passed through
+# unchanged rather than detected, which keeps the function total and the rule
+# explainable in one sentence.
+#
+# Styles become ANSI SGR sequences. `Plain` renders the child untouched, with
+# no reset either: emitting `ESC[0m` for a style that never opened one would
+# make equal-looking screens compare unequal as strings.
+
+use std/list
+use widget.{Style, Plain, Bold, Dim, Underline, Widget, Text, Styled, Row, Column, Button}
+
+fn sgr(style: Style) -> String =
+  match style {
+    Plain -> ""
+    Bold -> "\u{001B}[1m"
+    Dim -> "\u{001B}[2m"
+    Underline -> "\u{001B}[4m"
+  }
+
+## The whole screen a widget tree describes, ANSI styling included.
+pub fn render[M](w: Widget[M]) -> String =
+  match w {
+    Text(s) -> s
+    Styled(style, child) ->
+      match style {
+        Plain -> render(child)
+        _ -> sgr(style) ++ render(child) ++ "\u{001B}[0m"
+      }
+    Row(kids) -> join(list.map(kids, k => render(k)), " ")
+    Column(kids) -> join(list.map(kids, k => render(k)), "\n")
+    Button(label, _) -> "[" ++ label ++ "]"
+  }
+
+## The escape sequence that clears the terminal and homes the cursor; a
+## redraw-style driver prints this before each frame. Pure on purpose: the
+## caller decides where the bytes go.
+pub fn clear_screen() -> String = "\u{001B}[2J\u{001B}[H"
+
+type ProbeMsg =
+  | Press
+derive Show
+
+test "leaves render to their visible text" {
+  let b: Widget[ProbeMsg] = Button(label: "ok", on_press: Press)
+  assert render(b) == "[ok]"
+  let t: Widget[ProbeMsg] = Text(s: "plain")
+  assert render(t) == "plain"
+}
+
+test "row joins with spaces, column with newlines" {
+  let w: Widget[ProbeMsg] =
+    Column(kids: [
+      Row(kids: [Text(s: "a"), Text(s: "b")]),
+      Text(s: "c"),
+    ])
+  assert render(w) == "a b\nc"
+  let empty: Widget[ProbeMsg] = Row(kids: [])
+  assert render(empty) == ""
+}
+
+test "styles wrap in SGR codes and Plain is the identity" {
+  let bold: Widget[ProbeMsg] = Styled(style: Bold, child: Text(s: "x"))
+  assert render(bold) == "\u{001B}[1mx\u{001B}[0m"
+  let dim: Widget[ProbeMsg] = Styled(style: Dim, child: Text(s: "x"))
+  assert render(dim) == "\u{001B}[2mx\u{001B}[0m"
+  let under: Widget[ProbeMsg] = Styled(style: Underline, child: Text(s: "x"))
+  assert render(under) == "\u{001B}[4mx\u{001B}[0m"
+  let plain: Widget[ProbeMsg] = Styled(style: Plain, child: Text(s: "x"))
+  assert render(plain) == "x"
+}
