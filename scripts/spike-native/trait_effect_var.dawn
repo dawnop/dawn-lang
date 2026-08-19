@@ -1,0 +1,35 @@
+# A trait method row carrying an effect variable (effect-params-design.md 刀 4):
+# the same dictionary, on both backends, whether the caller's closure is pure
+# or effectful. An effect variable synthesises no evidence, so the descriptors
+# and the dispatch are the ones a pure trait method already had.
+trait Container[C] {
+  fn wrap(c: C, body: fn() -> Int !e) -> Int !e
+}
+
+type Plain = { tag: Int }
+type Quiet = { tag: Int }
+
+impl Container[Plain] {
+  fn wrap(c: Plain, body: fn() -> Int !e) -> Int !e = body() + c.tag
+}
+
+# an impl may be pure where the row admits a variable
+impl Container[Quiet] {
+  fn wrap(c: Quiet, body: fn() -> Int !e) -> Int = c.tag
+}
+
+fn twice[C: Container](c: C, body: fn() -> Int !e) -> Int !e =
+  wrap(c, body) + wrap(c, body)
+
+pub fn main() -> Unit !io = {
+  let p = Plain { tag: 1 }
+  let q = Quiet { tag: 7 }
+  println("pure    ${wrap(p, () => 41)}")
+  let loud = () => {
+    println("body")
+    2
+  }
+  println("io      ${wrap(p, loud)}")
+  println("dropped ${wrap(q, () => 41)}")
+  println("generic ${twice(p, () => 20)}")
+}

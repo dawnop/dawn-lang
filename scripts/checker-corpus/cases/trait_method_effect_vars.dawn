@@ -1,0 +1,70 @@
+# The accept side of the same boundary: every shape a trait method's effect
+# variable is supposed to allow (docs/effect-params-design.md 刀 4). The golden
+# for this case is empty, which is the whole claim -- these check clean.
+trait Container[C] {
+  fn wrap(c: C, body: fn() -> Int !e) -> Int !e
+}
+
+type Plain = { tag: Int }
+type Quiet = { tag: Int }
+type Loud = { tag: Int }
+
+# forwards the caller's effect: the row is exactly the variable
+impl Container[Plain] {
+  fn wrap(c: Plain, body: fn() -> Int !e) -> Int !e = body() + c.tag
+}
+
+# pure, and still a Container: an impl may do less than the row admits to.
+# The variable stays in the parameter type, so both sides still bind one.
+impl Container[Quiet] {
+  fn wrap(c: Quiet, body: fn() -> Int !e) -> Int = c.tag
+}
+
+# the variable's *name* is the impl's own business; the two sides are paired
+# by position
+impl Container[Loud] {
+  fn wrap(c: Loud, body: fn() -> Int !zz) -> Int !zz = body() * c.tag
+}
+
+# a generic consumer forwards the row it cannot name, which is the point of
+# the shape: `twice` neither picks the effect nor settles it
+fn twice[C: Container](c: C, body: fn() -> Int !e) -> Int !e =
+  wrap(c, body) + wrap(c, body)
+
+# a pure call site instantiates the variable to pure, so this is a pure
+# function calling through a trait
+fn quiet_sum(p: Plain) -> Int = twice(p, () => 1)
+
+# two variables, in an arrangement no permutation of the pairing survives: the
+# impl spells them differently, and only the positional pairing (row, then the
+# parameters left to right) lines `x` up with `a` and `y` with `b`. Swap or
+# rotate the zip and this case goes red -- which is the lower bound on the
+# claim that the pairing is by position.
+trait Pair[C] {
+  fn pick(c: C, g: fn() -> Int !a, h: fn() -> Int !b) -> Int !a
+}
+
+impl Pair[Plain] {
+  fn pick(c: Plain, g: fn() -> Int !x, h: fn() -> Int !y) -> Int !x = g() + c.tag
+}
+
+trait Defaulted[C] {
+  fn one(c: C, body: fn() -> Int !e) -> Int !e
+  fn both(c: C, body: fn() -> Int !e) -> Int !e = one(c, body) + one(c, body)
+}
+
+impl Defaulted[Plain] {
+  fn one(c: Plain, body: fn() -> Int !e) -> Int !e = body()
+}
+
+pub fn main() -> Unit !io = {
+  let p = Plain { tag: 1 }
+  println("pure: ${quiet_sum(p)}")
+  let loud = () => {
+    println("ran")
+    2
+  }
+  println("effectful: ${twice(p, loud)}")
+  println("default: ${both(p, () => 3)}")
+  println("paired: ${pick(p, () => 4, () => 5)}")
+}

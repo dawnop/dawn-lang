@@ -1,4 +1,8 @@
-# checker.dawn: a trait or impl method's row is pure or !io, never a user effect
+# checker.dawn: a trait or impl method's row may carry effect variables, but
+# never a named effect (docs/spec.md §6.5 边界(v1)). The variable is bound by
+# the signature itself and synthesises no evidence; a label would mean the
+# caller supplies a handler through a dictionary slot, which has no parameter
+# to carry it.
 effect Ask { fn ask() -> Int }
 
 trait Eff[T] {
@@ -17,6 +21,10 @@ trait Plain[T] {
 
 type Sub = S
 
+# `m` writes a label and is dropped, so the trait reports it missing. `n` is a
+# different failure: an effect variable is a legal row, but the trait's `n`
+# binds none, and the two signatures' variables are paired by position -- so
+# the impl is refused for the variable it introduced, not for having one.
 impl Plain[Sub] {
   fn m(x: Sub) -> Int !Ask = 1
   fn n(x: Sub) -> Int !e = 1
@@ -32,10 +40,22 @@ trait Sigs[T] {
 # `sq` is refused by the general ban on writing a label into a function type
 # (docs/effects-soundness-design.md §4.1), so its signature goes on to be
 # checked and its second parameter -- which the trait does not declare -- is
-# reported too. The old label-specific refusal here dropped the method and hid
-# that. `sr` still carries an effect variable, which is refused only in a trait
-# or impl, and that refusal still drops the method.
+# reported too. `sr` writes an effect variable instead, which is legal, so the
+# only thing wrong with it is the parameter the trait never declared.
 impl Sigs[Sub] {
   fn sq(x: Sub, f: fn() -> Int !Ask) -> Int = 1
   fn sr(x: Sub, f: fn() -> Int !e) -> Int = 1
+}
+
+trait Two[T] {
+  fn tw(x: T, g: fn() -> Int !a, h: fn() -> Int !b) -> Int !a
+}
+
+# The permutation. Both sides bind two variables and both spell them `a` and
+# `b`, but the impl's row takes the *second* one, so mint order pairs the
+# trait's first variable with the impl's `b` and the parameter types stop
+# lining up. Pairing by spelling would have accepted this; pairing by position
+# is what refuses it.
+impl Two[Sub] {
+  fn tw(x: Sub, g: fn() -> Int !a, h: fn() -> Int !b) -> Int !b = h()
 }
