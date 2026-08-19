@@ -103,10 +103,10 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（82）
+#### 当前 fixed（83）
 
 - 语法（18）：`SYN-01`–`SYN-16`、`SYN-18`、`SYN-19`。
-- 语义（12）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-11`–`SEM-15`、`SEM-17`、`SEM-18`。
+- 语义（13）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-11`–`SEM-18`。
 - 架构（6）：`ARC-03`–`ARC-06`、`ARC-12`、`ARC-13`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
 - 库（16）：`LIB-01`–`LIB-05`、`LIB-07`–`LIB-12`、`LIB-14`、`LIB-15`、`LIB-17`–`LIB-19`。
@@ -118,10 +118,10 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 架构（4）：`ARC-01`、`ARC-02`、`ARC-08`、`ARC-11`。
 - 库（1）：`LIB-16`。
 
-#### 当前 open（9）
+#### 当前 open（8）
 
 - 语法（1）：`SYN-17`。
-- 语义（3）：`SEM-09`、`SEM-10`、`SEM-16`。
+- 语义（2）：`SEM-09`、`SEM-10`。
 - 架构（3）：`ARC-07`、`ARC-09`、`ARC-10`。
 - 库（2）：`LIB-06`、`LIB-13`。
 
@@ -129,8 +129,8 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**82 fixed + 6 partial + 9 open + 2 retracted = 99**。逐专题矩阵：
-语法 **18/0/1/0**、语义 **12/1/3/2**、架构 **6/4/3/0**、工具链 **17/0/0/0**、
+当前计数自检：**83 fixed + 6 partial + 8 open + 2 retracted = 99**。逐专题矩阵：
+语法 **18/0/1/0**、语义 **13/1/2/2**、架构 **6/4/3/0**、工具链 **17/0/0/0**、
 库 **16/1/2/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
@@ -425,7 +425,8 @@ comptime 那条已关，剩下的一条仍等维护者裁决（明细见语义�
    发出、被 dawnop-site 以 tag url + d1 hash 钉住消费，收窄要开 `web4 / 4.0.0`（连包名一起改）
    并逼下游提一个改 manifest 的提交。**为删几个零调用者的名字付这笔钱不成立**，故它连同
    `LIB-06`（另属 std 的 forwarder 纪律）与 `LIB-16` 余项按下一个 major 与迁移窗口分批。
-   `SEM-09/10` 是 intentional delayed capability/ABI，`SEM-16` 是 HOLD，均不作为自治修 bug。
+   `SEM-09/10` 是 intentional delayed capability/ABI，不作为自治修 bug。（`SEM-16` 的 HOLD
+   已于 2026-08-19 由用户裁「做」并落地，两层渲染都是 `std/char` 自己的，故转 fixed。）
 
 ## 9. 旧审查如何读
 

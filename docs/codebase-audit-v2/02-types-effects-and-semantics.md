@@ -372,15 +372,30 @@
 
 ## SEM-16 — P2 — `Char` 的默认显示仍是整数码点（已修）
 
-<!-- audit-anchor: absent std/char.dawn | impl Show for Char -->
+<!-- audit-anchor: absent std/char.dawn | fn show(c: Char) -> String -->
 
-> **已修（2026-08-18，用户裁「做」）。** 加了第七个预置 trait `Display`：一个方法
+> **已修，分两步（用户各裁一次）。**
+>
+> **步 1（2026-08-18）：顶层。** 加了第七个预置 trait `Display`：一个方法
 > `display(x: T) -> String`、无关联类型、`injects: false`（只有 `to_string` 与 `${...}`
 > 消费它，与 `Index` 同待遇），不可 derive，`Show[T]` 仍是 `to_string` 要的 bound。
-> `std/char` 写了 `impl Display[Char]`，于是 `to_string(c)`/`"${c}"` 出字符；**没写
-> `impl Show[Char]`**，所以嵌套渲染仍是 `Int` 的、`Char` 仍「就是它的目标」，
-> `scripts/opaque-twin` 的判据一字未改（这正是下面那条对 #196「不做」理由的更正所预言的）。
-> 落地清单见本条末尾的「落地」。
+> `std/char` 写了 `impl Display[Char]`，于是 `to_string(c)`/`"${c}"` 出字符；当时**没写**
+> `impl Show[Char]`，所以嵌套渲染仍是 `Int` 的。落地清单见本条末尾的「落地」。
+>
+> **步 2（2026-08-19）：嵌套。** `std/char` 补了 `impl Show[Char]`，返回源码字面量
+> `'a'`（转义集合对齐 `lex_escape`），于是 `"${[c]}"` 出 `['a']` 而不是 `[97]`，
+> `List[Char]`/`List[String]`/`List[Int]` 三者输出互不相同。`==`、`<`、`cmp`、`sort`、
+> 哈希仍全是 `Int` 的。**代价是 `Char` 不再是「opaque 就是它的目标」的例子**，
+> `scripts/opaque-twin/char.dawn` 因此改成逐条钉：两个渲染各钉两向，身份仍钉等于 `Int`。
+> 这不违反语言规则——spec §2.7 一直允许 opaque 写自己的 impl，并把「渲染也是目标的」
+> 写成以「自己没写」为前提。裁决依据是跨语言对照（有 `Char` 类型的语言里四比一用字面量形）
+> 与「`[97, 98]` 和 `List[Int]` 输出撞脸」，不是需求量（那个是零）。
+> 论证与落地清单在 [`nominal-types-design.md`](../audit/nominal-types-design.md) §7.4。
+> 那条 audit-anchor 的**字面量**也在此修好，两次。它原本写的是 `impl Show for Char`
+> （Rust 语法），在 Dawn 的树里永远匹配不上，所以它对本条从来不可能变红。换成真实拼写
+> `impl Show[Char]` 后仍然是空的：这份 impl 的文档注释里也写着同一串字，删掉代码锚点照绿。
+> 现在钉的是 `fn show(c: Char) -> String`，只有 impl 体里有；实测把它改掉，doc-check 变红。
+> 本条转 fixed 后 `absent` 的条件被反转，所以它要求这份 impl **存在**。
 
 - **性质：D。** 规范明确 `${c}` 沿用 Int rendering：`docs/spec.md:90`；`std/char.dawn:34` 也把它作为 opaque-target 继承规则。
 - **问题：** 名为 `Char` 的值在 interpolation、`to_string`、List/record 派生显示中出现 `97` 而非 `a`；用户必须记住 `str.from_char(c)` 才得到字符文本。

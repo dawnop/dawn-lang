@@ -11,11 +11,11 @@
 #     as written. Asking once is the SEM-03 shape, where a redacting `Show` was
 #     honoured one field deep and ignored at the top level.
 #
-# `Char` is the std type that carries one: `${c}` is the character, while
-# `Show[Char]` is still the `Int`'s, so a `Char` inside a list is still a code
-# point. That asymmetry is the whole content of the layer, so both halves are
-# below -- an expectation covering only the Display half would call the nested
-# rendering anything.
+# `Char` is the std type that carries one at each layer, and they differ:
+# `${c}` is the character, while `show(c)` is the source literal `'a'`, the way
+# a nested String is `"a"`. That difference is the whole content of the layer,
+# so both halves are below -- an expectation covering only the Display half
+# would call the nested rendering anything.
 #
 # The mutants that own these lines are in `scripts/display-layering-contract/`.
 # Both live in shared Core, so the two backends would agree on a broken answer;
@@ -74,9 +74,10 @@ pub fn main() -> Unit !io = {
   println(to_string(outer_of(inner_of("x"))))
   println(to_string(deep_of(outer_of(inner_of("x")))))
 
-  # what Display does not touch: the nested rendering. A Char is still its code
-  # point in a list, a record and a tuple; Tag is still `***`; and an opaque
-  # type over String with no Show of its own is still the String's, quoted.
+  # what Display does not touch: the nested rendering. A Char is its own
+  # `Show` in a list, a record and a tuple, and that is a *literal*, not the
+  # top-level character; Tag is still `***`; and an opaque type over String
+  # with no Show of its own is still the String's, quoted.
   println(to_string(['a', 'b']))
   println(to_string(Row { c: 'a', t: tag_of("x") }))
   println(to_string(('a', tag_of("x"))))
@@ -86,7 +87,8 @@ pub fn main() -> Unit !io = {
   # a type variable renders through its `Show` witness, because the rule is
   # static-type-directed (spec §4.3). This is not new and not a consequence of
   # Display: `to_string("hi")` is `hi` while `render("hi")` is `"hi"`, and has
-  # been since the two renderings were drawn apart.
+  # been since the two renderings were drawn apart. A Char behaves the same
+  # way, which is why the line below is the literal and not the character.
   println(render('a'))
   println(render(inner_of("x")))
   println(render("hi"))

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ b3cc70ab05eb7c9c -->
+<!-- doc-check: translation-of docs/spec.md @ 9de4b657979e7e3f -->
 
 # Dawn Language Specification
 
@@ -111,10 +111,11 @@ a digit forbidden by its radix (such as `0b2`) is an invalid literal rather than
 **A character is its own type, `Char`**: one Unicode scalar value (`0..0x10FFFF`, excluding the
 surrogate range `D800..DFFF`). It is an **opaque type** (§2.7) over `Int` whose owner is
 `std/char` — the representation is the code point, so it is zero-cost, and `==`, `<`, hashing and
-literal patterns in `match` all reuse the `Int` ones. The rendering comes in two layers (§4.3):
-`std/char` writes `impl Display[Char]`, so `to_string(c)` and `"${c}"` give the character, while
-`Show[Char]` is still the `Int`'s, so a `Char` nested inside a structure (`[c]`, a record field,
-a tuple) still renders as the code-point number. `str.from_char(c)` asks for the same
+literal patterns in `match` all reuse the `Int` ones. The rendering comes in two layers (§4.3), and `std/char`
+writes one for each: `impl Display[Char]` is the top level, so `to_string(c)` and `"${c}"` give the
+character, while `impl Show[Char]` is the nested one, so a `Char` inside a structure (`[c]`, a
+record field, a tuple) renders as the **source literal** `'a'`, escaped with the set above, the way
+a nested `String` renders as `"a"`. `str.from_char(c)` asks for that top-level
 one-character string by name, without depending on an impl. But it is **not** an `Int`: `'a' + 1` does not
 hold, and converting between the two goes through `std/char` — `char.code(c) -> Int` takes the code
 point, `char.of(n) -> Option[Char]` builds a character from a code point (`None` if it is not a
@@ -486,9 +487,10 @@ arguments along. "The representation is not public" does not imply "the type par
 An opaque type can be given its own impls (`impl Show[UserId]`, `impl Display[UserId]`), which take
 precedence over the target type's; the orphan rule counts an opaque type as a local type of the
 module that declares it. "The rendering is the target's too", above, is stated on the premise that
-the type wrote none of its own: `Char` is the one that did write an `impl Display[Char]`, so its
-top-level rendering is its own while its nested one is still `Int`'s (§4.3). Both layers are
-pinned, in both directions, by `scripts/opaque-twin/char.dawn`.
+the type wrote none of its own: `Char` wrote both (`impl Display[Char]` and `impl Show[Char]`,
+§1.5), so neither of its renderings is the `Int`'s while `==`, `<` and hashing still are.
+`scripts/opaque-twin/char.dawn` pins all four, claim by claim, each rendering in both directions:
+equal to the string its impl is defined to produce, and not equal to the `Int`'s.
 
 > Why it is needed: before this, every time a representation had to be hidden a mechanism was
 > hand-rolled on the spot — `Cursor` was an opaque scalar minted by the compiler, and the HAMT
@@ -722,7 +724,8 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
     decision about presentation: one per type, hand written.
   - **An opaque type is asked at every peel layer** (§4.3): with no `Display` on
     `opaque type A = B`, `B`'s is used; if `A` writes one, `A`'s wins.
-  The one impl that ships with the language is `impl Display[Char]` (in `std/char`, §1.5).
+  The one impl that ships with the language is `impl Display[Char]` (in `std/char`, §1.5; the
+  same module writes the other layer's `impl Show[Char]`).
 - **Coherence**: at most one impl per "trait × type" across the whole program; the **orphan
   rule**: an impl can only be written in the module that declares the trait or the subject type.
   Impls take effect globally, no `use` needed.
@@ -1149,7 +1152,9 @@ implementations are cross-checked against this, "happens to agree" is not allowe
     `impl[T: Show] Show[Box[T]]`, and that is its bound.
   - **A top-level `String` gets no quotes, a nested one does.** `to_string("a")` is `a`,
     while `["a"]` is `["a"]` — the quotes are the mark for "here is a value, not punctuation
-    from what surrounds it".
+    from what surrounds it". A `Char` is the same with a different delimiter:
+    `to_string('a')` is `a` while `['a']` is `['a']` (§1.5), so `List[Char]`, `List[String]`
+    and `List[Int]` all render differently.
     The trait method `show` is the **nested** one, so rendering a string through a
     `[T: Show]` bound does carry quotes; `to_string`/`${}` drop them only when the **static
     type is `String`** itself.

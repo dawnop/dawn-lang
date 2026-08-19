@@ -54,9 +54,9 @@ pub fn main() -> Unit !io = {
 
   println(initials("ada lovelace"))
 
-  # `"${c}"` is the character: std/char writes an `impl Display[Char]`, and
-  # Display is the top-level rendering. `Show` is the nested one and is still
-  # the Int's, so the same character inside a list is its code point.
+  # `"${c}"` is the character and `show(c)` is the source literal: std/char
+  # writes an impl at both layers, Display for the top level and Show for the
+  # nested one, so the same character inside a list keeps its quotes.
   println("'a' interpolates as ${'a'}, and inside a list as ${to_string(['a'])}")
 
   # One balloon: one character, four UTF-8 bytes, two UTF-16 units, and none
@@ -92,13 +92,16 @@ test "Char is opaque over Int: comparable, not arithmetic" {
   assert char.of(char.code('a') + 1) == Some('b')
 }
 
-test "a Char renders as itself on top and as a code point inside" {
+test "a Char renders as itself on top and as a literal inside" {
   # `Display` decides the top-level rendering, `Show` the nested one, and
-  # std/char writes only the first of the two (spec §3.5, §4.3)
+  # std/char writes both (spec §3.5, §4.3)
   assert to_string('a') == "a"
   assert "${'🎈'}" == "🎈"
-  assert to_string(['a', '🎈']) == "[97, 127880]"
-  # `str.from_char` asks for the same string by name, without the impl
+  assert to_string(['a', '🎈']) == "['a', '🎈']"
+  # which is a different answer from the Int's, and from a List[String]
+  assert to_string(['a', '🎈']) != to_string([97, 127880])
+  assert to_string(['a']) != to_string(["a"])
+  # `str.from_char` asks for the top-level string by name, without the impl
   assert str.from_char('🎈') == to_string('🎈')
 }
 

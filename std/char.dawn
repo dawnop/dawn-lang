@@ -7,14 +7,17 @@
 # `Char` is an opaque type over `Int` minted by the compiler (`types.ty_char`)
 # because character literals need a type before any module is in scope. This
 # module is its owner, which is what lets the two conversions below stay two
-# lines instead of two intrinsics. Everything else about it is ordinary
-# `opaque type` (spec §2.7): the representation is `Int`, so it costs nothing,
-# and `==`, `<`, hashing and the nested `Show` rendering are all the Int's.
+# lines instead of two intrinsics. `==`, `<` and hashing are the Int's, which
+# is what an `opaque type` over Int means and what costs nothing (spec §2.7).
 #
-# The one place this module does have an opinion is the *top-level* rendering,
-# `impl Display[Char]` at the bottom: `"${c}"` is the character, not its code
-# point. `Show[Char]` is still the Int's, so a `Char` inside a structure still
-# renders as a number and `Char` still is its target (spec §4.3, §2.7).
+# Rendering is where this module has an opinion, and it has one at both layers
+# (spec §4.3). `impl Display[Char]` is the top level: `"${c}"` is the
+# character. `impl Show[Char]` is the nested one: a `Char` in a list or a
+# record renders as the source literal `'a'`, the way a nested String renders
+# as `"a"`. Writing an impl of its own is the ordinary thing an opaque type
+# may do (spec §2.7 names `impl Show[UserId]`); what it costs is that `Char`
+# is no longer an *example* of "an opaque type is its target", which is why
+# `scripts/opaque-twin/char.dawn` pins both layers against the Int explicitly.
 #
 # The predicates are `char_is_*` intrinsics underneath, table-driven from the
 # compiler's own Unicode class table (selfhost/src/embed/unicode_class.dawn), so the
@@ -61,16 +64,38 @@ pub fn is_space(c: Char) -> Bool = char_is_space(c)
 ##
 ## `Display` is the top-level rendering and nothing else consumes it, so this
 ## impl says "a character reads as itself" without saying anything about the
-## nested one. There is deliberately no `impl Show[Char]`: `Show` stays the
-## Int's, a `Char` in a list or a record still renders as its code point, and
-## `Char` still *is* its target, which is the claim `scripts/opaque-twin`
-## checks and which `nominal-types-design.md` §7.4 rests on.
+## nested one, which is the `Show` below.
 ##
 ## `str.from_char` is the same string asked for by name, and stays: this impl
 ## is the rendering, not a replacement for the function.
 impl Display[Char] {
   fn display(c: Char) -> String = str.from_char(c)
 }
+
+## What a character looks like inside a structure: the source literal `'a'`.
+##
+## The nested layer renders a value so that it reads back as source, which is
+## why a nested String carries its quotes (spec §4.3). A character is the same
+## question with a different delimiter, and answering it with the code point
+## instead made a `List[Char]` print exactly like a `List[Int]`.
+##
+## The escape set is the one `lex_escape` accepts, so the output is a literal
+## the lexer would take back. It is deliberately the same five the nested
+## String escapes, minus `"` (not a delimiter here) plus `'` (which is): a
+## backslash first, or the quote escape it introduces gets doubled.
+impl Show[Char] {
+  fn show(c: Char) -> String = "'" ++ escaped(c) ++ "'"
+}
+
+fn escaped(c: Char) -> String =
+  match c {
+    '\\' -> "\\\\"
+    '\'' -> "\\'"
+    '\n' -> "\\n"
+    '\t' -> "\\t"
+    '\r' -> "\\r"
+    _ -> str.from_char(c)
+  }
 
 # ---- tests ----
 #
@@ -114,7 +139,7 @@ test "a literal is a character, and code is the way back to Int" {
   assert name == "ex"
 }
 
-test "a character renders as itself on top and as a code point inside" {
+test "a character renders as itself on top and as a literal inside" {
   # the Display impl above, which is the whole top-level rendering
   assert to_string('a') == "a"
   assert "${'中'}" == "中"
@@ -122,10 +147,31 @@ test "a character renders as itself on top and as a code point inside" {
   assert to_string('\n') == "\n"
   # the same string `str.from_char` answers with, by construction
   assert "${'中'}" == str.from_char('中')
-  # and `Show` is untouched: nested, a Char is still the Int it is. A tuple is
-  # the only structure available here -- List's `Show` impl is std/list, which
-  # is checked after this module.
-  assert to_string(('a', 'b')) == "(97, 98)"
+  # and the Show impl, which is the nested one. A tuple is the only structure
+  # available here -- List's `Show` impl is std/list, which is checked after
+  # this module.
+  assert show('a') == "'a'"
+  assert to_string(('a', 'b')) == "('a', 'b')"
+  # the two layers disagree, which is the whole reason there are two
+  assert show('a') != to_string('a')
+  # neither layer is the Int's any more, and that is what stopped a nested
+  # Char from printing like a nested Int
+  assert show('a') != show(code('a'))
+  assert to_string(('a', 'b')) != to_string((97, 98))
+}
+
+test "the nested literal escapes exactly what the lexer would read back" {
+  assert show('\\') == "'\\\\'"
+  assert show('\'') == "'\\''"
+  assert show('\n') == "'\\n'"
+  assert show('\t') == "'\\t'"
+  assert show('\r') == "'\\r'"
+  # `"` is not a delimiter inside single quotes, so it stays as it is -- the
+  # one place this set differs from the nested String's
+  assert show('"') == "'\"'"
+  # nothing else is escaped, including outside the BMP
+  assert show('中') == "'中'"
+  assert show('😀') == "'😀'"
 }
 
 test "the predicates read the compiler's Unicode table, not the host's" {

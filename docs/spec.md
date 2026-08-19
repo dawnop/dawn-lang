@@ -98,10 +98,11 @@ true false not
 **字符是自己的类型 `Char`**：一个 Unicode 标量值（`0..0x10FFFF`，不含 `D800..DFFF`
 的代理半区）。它是 `Int` 上的 **opaque type**（§2.7），owner 是 `std/char`——表示就是
 码点，故零开销，且 `==`、`<`、哈希、`match` 里的字面量模式全部沿用 `Int` 的那一份。
-渲染分两层（§4.3）：`std/char` 写了 `impl Display[Char]`，所以 `to_string(c)` 与 `"${c}"`
-出的是那个字符；`Show[Char]` 仍是 `Int` 的那一份，所以嵌在结构里的 `Char`（`[c]`、
-记录字段、元组）仍渲染成码点数字。要一个字符的字符串也可以直接问 `str.from_char(c)`，
-那是同一个字符串，只是不依赖 impl。但它**不是**
+渲染分两层（§4.3），`std/char` 两层各写了一份：`impl Display[Char]` 是顶层，
+`to_string(c)` 与 `"${c}"` 出的是那个字符；`impl Show[Char]` 是嵌套那层，嵌在结构里的
+`Char`（`[c]`、记录字段、元组）渲染成**源码字面量** `'a'`，转义集合就是上面那一套，
+一如嵌套的 `String` 渲染成 `"a"`。要一个字符的字符串也可以直接问 `str.from_char(c)`，
+那是顶层那个字符串，只是不依赖 impl。但它**不是**
 `Int`：`'a' + 1` 不成立，两者互转经 `std/char`——`char.code(c) -> Int` 拿码点、
 `char.of(n) -> Option[Char]` 从码点造字符（不是标量值就 `None`）。
 单引号内是单个码点：转义与字符串相同（`\n \t \r \\ \u{...}`）另加 `\'`；
@@ -402,8 +403,9 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 
 可以给不透明类型写自己的 impl（`impl Show[UserId]`、`impl Display[UserId]`），它优先于
 目标类型的；孤儿规则把不透明类型算作声明模块的本地类型。上一段「渲染也是目标的」正是
-以「自己没写」为前提：`Char` 就是写了 `impl Display[Char]` 的那个，于是顶层渲染是它自己的、
-嵌套渲染仍是 `Int` 的（§4.3）。两层都由 `scripts/opaque-twin/char.dawn` 双向钉住。
+以「自己没写」为前提：`Char` 两层都写了（`impl Display[Char]` 与 `impl Show[Char]`，§1.5），
+所以它的渲染两层都不是 `Int` 的，而 `==`、`<`、哈希仍然是。`scripts/opaque-twin/char.dawn`
+把这四件事逐条钉住，两个渲染各钉两向：等于 impl 该出的那个串，且不等于 `Int` 的。
 
 > 为什么需要它：在此之前，每要隐藏一次表示就得现搓一套机制——`Cursor` 是编译器铸造的
 > 不透明标量，集合纯 Dawn 化的 HAMT 节点会是下一个。这是第三次之前把机制立出来。
@@ -594,7 +596,8 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
     呈现决定：一个类型一份，手写。
   - **opaque type 逐层问**（§4.3）：`opaque type A = B` 上没写 `Display` 时，用 `B` 的
     那一份；`A` 写了就是 `A` 的。
-  语言自带的唯一一份是 `impl Display[Char]`（在 `std/char`，§1.5）。
+  语言自带的唯一一份是 `impl Display[Char]`（在 `std/char`，§1.5；同一个模块也写了
+  那一层对应的 `impl Show[Char]`）。
 - **一致性**：全程序每个「trait × 类型」至多一个 impl；**孤儿规则**：impl 只能
   写在 trait 或主体类型的声明模块。impl 全局生效，不需要 `use`。
 - **主体形状**：一个类型构造器，作用在**互不相同的类型变量**上，而那些变量恰好是
@@ -932,6 +935,8 @@ let area = {
     `derive Show` 在泛型类型上铸的是 `impl[T: Show] Show[Box[T]]`，这条就是它的 bound。
   - **顶层的 `String` 不加引号，嵌套的加。** `to_string("a")` 是 `a`，而
     `["a"]` 是 `["a"]`——引号是「这里是一个值，不是周围的标点」的记号。
+    `Char` 同理，定界符换成单引号：`to_string('a')` 是 `a`，而 `['a']` 是 `['a']`
+    （§1.5）。于是 `List[Char]`、`List[String]`、`List[Int]` 三者的渲染互不相同。
     trait 方法 `show` 是**嵌套**那一份，所以经 `[T: Show]` 约束渲染一个字符串
     会带引号；`to_string`/`${}` 只在**静态类型就是 `String`** 时去掉它。
     **这条规则由静态类型定，不由值定**：`to_string("hi")` 是 `hi`，而同一个调用写在

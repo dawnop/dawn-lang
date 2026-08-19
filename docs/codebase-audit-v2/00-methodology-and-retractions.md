@@ -147,5 +147,6 @@ v0.60 冻结基线的最高风险项 `SEM-01` 只给出 **S / P0 候选**。遵�
   重复求值、`SEM-04` comptime/runtime Cursor 偏移可能跨模型失配、`LIB-18` streaming clean
   truncation 可能静默成功。三者不新增 ID、不提升冻结严重度，也不冒称动态确认。
 - **执行状态不等于 finding 状态。** 该快照中 `SEM-09/10` 是 intentional delayed capability/ABI，
-  仍 open 但不进自治修 bug；`ARC-09/10` 与 `SEM-16` 按既有不做/重开条件置于 HOLD；
+  仍 open 但不进自治修 bug；`ARC-09/10` 按既有不做/重开条件置于 HOLD（`SEM-16` 的 HOLD
+  已于 2026-08-19 由用户裁「做」并落地，转 fixed）；
   `SYN-17` 是 D/P3 的关键字预算设计项。只有条件满足或维护者重开时才进入实现队列。
