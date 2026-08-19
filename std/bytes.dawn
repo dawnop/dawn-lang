@@ -76,15 +76,6 @@ pub fn freeze(b: Buf) -> Bytes = bytes_from_array(b)
 ## The UTF-8 bytes of `s`.
 pub fn utf8(s: String) -> Bytes = bytes_utf8(s)
 
-## `b` decoded as UTF-8; what it cannot read becomes U+FFFD.
-##
-## Removed in the next version: this is `decode_utf8_lossy` under the name it
-## carried while there was only one decoder. The forwarder lasts one generation
-## because stage 1 of the bootstrap compiles today's `selfhost/src` against the
-## std the seed carries, so the call sites move a release later
-## (CONTRIBUTING §7).
-pub fn decode_utf8(b: Bytes) -> String = decode_utf8_lossy(b)
-
 ## `b` decoded as UTF-8, with each malformed sequence replaced by U+FFFD.
 ##
 ## Total, and lossy in the literal sense: the caller cannot tell a replacement
@@ -715,7 +706,7 @@ test "from_base64 refuses everything that is not one spelling of some bytes" {
   assert from_base64("Zm9v.") == None
 }
 
-test "decode_latin1 is one code point per byte; decode_utf8 substitutes" {
+test "decode_latin1 is one code point per byte; decode_utf8_lossy substitutes" {
   let high = freeze(put(put(buf(), 0x80), 0xFF))
   # Latin-1 cannot fail: every byte names a code point, including the 0x80..0xFF
   # half that is not valid UTF-8
@@ -724,15 +715,13 @@ test "decode_latin1 is one code point per byte; decode_utf8 substitutes" {
   assert decode_latin1(utf8("abc")) == "abc"
   # so the two decoders disagree on exactly those bytes, which is the point of
   # having both
-  assert decode_utf8(high) == "\u{FFFD}\u{FFFD}"
-  assert decode_utf8(utf8("")) == ""
-  assert decode_utf8(utf8("a中😀")) == "a中😀"
-  assert utf8(decode_utf8(utf8("a中😀"))) == utf8("a中😀")
+  assert decode_utf8_lossy(high) == "\u{FFFD}\u{FFFD}"
+  assert decode_utf8_lossy(utf8("")) == ""
+  assert decode_utf8_lossy(utf8("a中😀")) == "a中😀"
+  assert utf8(decode_utf8_lossy(utf8("a中😀"))) == utf8("a中😀")
   # a byte the Latin-1 round trip does not lose
   assert utf8(decode_latin1(high)) == freeze(put_bytes(put_bytes(buf(),
     utf8("\u{0080}")), utf8("\u{00FF}")))
-  # decode_utf8 is the old name of the lossy one, and nothing else
-  assert decode_utf8(high) == decode_utf8_lossy(high)
 }
 
 test "decode_utf8_checked refuses at the byte the sequence went wrong" {
