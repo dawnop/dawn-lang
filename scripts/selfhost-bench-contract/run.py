@@ -36,6 +36,7 @@ ASSERTIONS = (
     "bench.vmhwm_reads_proc",
     "bench.exception_cleanup",
     "bench.identity_rechecks",
+    "bench.clone_image_unclassified",
     "bench.same_jdk",
     "bench.final_source_snapshot",
 )
@@ -626,7 +627,7 @@ def nonzero_cleanup_probe(
 
 def main_tree_probe(
     module: ModuleType, classes: Path, java: Path, jcmd: Path, env: dict[str, str]
-) -> tuple[object, object, dict[str, object]]:
+) -> tuple[object, object, object, dict[str, object]]:
     with tempfile.TemporaryDirectory(prefix="selfhost-bench-tree-") as raw:
         work = Path(raw)
         sibling = subprocess.Popen(
@@ -635,13 +636,42 @@ def main_tree_probe(
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        # A disguised sibling: outside the profiled session but alive for its
+        # whole duration, with `HeapTree parent` sitting in its argv exactly
+        # where the classifier reads the role. Role anchoring is descendant
+        # enumeration plus (pid, starttime) identity; a lookalike cmdline on
+        # an unrelated process must contribute nothing.
+        decoy = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(60)",
+                "-Xmx64m",
+                "-cp",
+                os.fspath(classes),
+                "HeapTree",
+                "parent",
+                os.fspath(work),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
         sibling_stat = None
+        decoy_stat = None
         deadline = time.monotonic() + 2
-        while sibling_stat is None and time.monotonic() < deadline:
-            sibling_stat = module.read_process_stat(sibling.pid)
+        while (
+            sibling_stat is None or decoy_stat is None
+        ) and time.monotonic() < deadline:
+            if sibling_stat is None:
+                sibling_stat = module.read_process_stat(sibling.pid)
+            if decoy_stat is None:
+                decoy_stat = module.read_process_stat(decoy.pid)
             time.sleep(0.001)
         if sibling_stat is None:
             raise AssertionError("could not observe sibling identity")
+        if decoy_stat is None:
+            raise AssertionError("could not observe decoy identity")
         oracle: dict[str, object] = {}
         failures: list[BaseException] = []
         releaser = threading.Thread(
@@ -669,6 +699,11 @@ def main_tree_probe(
             except subprocess.TimeoutExpired:
                 os.killpg(sibling.pid, signal.SIGKILL)
                 sibling.wait(timeout=5)
+            try:
+                os.killpg(decoy.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            decoy.wait(timeout=5)
             releaser.join(timeout=5)
         if failures:
             raise failures[0]
@@ -678,7 +713,7 @@ def main_tree_probe(
             raise AssertionError(
                 f"HeapTree parent failed: {result.stdout!r} {result.stderr!r}"
             )
-        return result, sibling_stat, oracle
+        return result, sibling_stat, decoy_stat, oracle
 
 
 def tree_sum_probe(
@@ -751,11 +786,18 @@ def process_assertions(
 ) -> tuple[dict[str, bool], dict[str, object]]:
     env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
     env["JAVA_HOME"] = os.fspath(java.parent.parent)
-    result, sibling_stat, oracle = main_tree_probe(module, classes, java, jcmd, env)
+    result, sibling_stat, decoy_stat, oracle = main_tree_probe(
+        module, classes, java, jcmd, env
+    )
     recursive = (
         set(result.roles) == {"parent", "child", "grandchild"}
         and result.complete_overlap_samples > 0
         and sibling_stat.identity not in result.observed_identities
+    )
+    clone_unclassified = (
+        clone_image_probe(module)
+        and decoy_stat.identity not in result.observed_identities
+        and result.roles.get("parent", {}).get("process_count") == 1
     )
     parent_heap = result.roles.get("parent", {}).get("max_heap_bytes")
     child_heap = result.roles.get("child", {}).get("max_heap_bytes")
@@ -785,6 +827,7 @@ def process_assertions(
         "bench.vmhwm_reads_proc": hwm_exact,
         "bench.exception_cleanup": exception_cleanup and nonzero_cleanup,
         "bench.identity_rechecks": identity_rechecks_probe(module),
+        "bench.clone_image_unclassified": clone_unclassified,
         "bench.same_jdk": same_jdk_probe(module, java, jcmd),
         "bench.final_source_snapshot": final_source_snapshot_probe(module),
     }
@@ -805,6 +848,7 @@ def process_assertions(
         "parent_identity_expected": repr(identity_exact),
         "identities_observed": sorted(repr(item) for item in result.observed_identities),
         "sibling_identity": repr(sibling_stat.identity),
+        "decoy_identity": repr(decoy_stat.identity),
     }
     return verdicts, evidence
 
@@ -921,6 +965,55 @@ def identity_rechecks_probe(module: ModuleType) -> bool:
     except module.BenchError:
         return True
     return False
+
+
+def clone_image_probe(module: ModuleType) -> bool:
+    """The fork-image shape of release run 32274732375, replayed synthetically.
+
+    A freshly forked child that has not exec'd yet shows its parent's argv, so
+    a cmdline classifier counts the parent's role twice; (pid, starttime)
+    rechecks cannot object because exec changes neither. classify_stable_view
+    must refuse exactly that view: same argv as its live parent. It must also
+    keep classifying the parent itself, a child with its own argv, and a
+    process whose parent is not in the sample (the profiled root).
+    """
+
+    def view(pid: int, starttime: int, parent_pid: int, argv: tuple[str, ...]) -> object:
+        return module.ProcessView(
+            identity=module.ProcessIdentity(pid, starttime),
+            parent_pid=parent_pid,
+            argv=argv,
+            rss_bytes=1,
+            hwm_bytes=1,
+            peak_bytes=1,
+        )
+
+    root = module.ProcessIdentity(100, 5000)
+    parent = view(
+        100, 5000, 1, ("java", "-Xmx64m", "-cp", "classes", "HeapTree", "parent", "/w")
+    )
+    clone = view(
+        101, 5001, 100, ("java", "-Xmx64m", "-cp", "classes", "HeapTree", "parent", "/w")
+    )
+    child = view(
+        102, 5002, 100, ("java", "-Xmx96m", "-cp", "classes", "HeapTree", "child", "/w")
+    )
+    orphan = view(
+        103, 5003, 999, ("java", "-Xmx64m", "-cp", "classes", "HeapTree", "parent", "/w")
+    )
+    views = {item.identity.pid: item for item in (parent, clone, child)}
+
+    def classify(item: object) -> str | None:
+        return module.classify_stable_view(
+            item, views, module.heap_tree_classifier, root
+        )
+
+    return (
+        classify(parent) == "parent"
+        and classify(clone) is None
+        and classify(child) == "child"
+        and classify(orphan) == "parent"
+    )
 
 
 def same_jdk_probe(module: ModuleType, java: Path, jcmd: Path) -> bool:

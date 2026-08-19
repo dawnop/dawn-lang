@@ -57,6 +57,14 @@ MUTATIONS = {
         '    "CLASSPATH",',
         '    "CLASSPATH",',
     ),
+    "clone-image-classified": (
+        "    parent = views_by_pid.get(view.parent_pid)\n"
+        "    if parent is not None and view.argv and view.argv == parent.argv:\n"
+        "        return None\n"
+        "    return classifier(view, root)",
+        "    del views_by_pid\n"
+        "    return classifier(view, root)",
+    ),
     "snapshot-fail-open": (
         "def verify_final_source_snapshot(expected_commit: str, root: Path = ROOT) -> None:\n"
         "    actual_commit = source_snapshot(root)\n"

@@ -1270,6 +1270,33 @@ def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
 RoleClassifier = Callable[[ProcessView, ProcessIdentity], str | None]
 
 
+def classify_stable_view(
+    view: ProcessView,
+    views_by_pid: Mapping[int, ProcessView],
+    classifier: RoleClassifier,
+    root: ProcessIdentity,
+) -> str | None:
+    """Classify one stable view, refusing the pre-exec image of a fork.
+
+    Between fork and exec a child still shows its parent's argv, so a cmdline
+    classifier reads the parent's role marker off a process that is about to
+    become something else. The (pid, starttime) identity rechecks cannot catch
+    it: exec changes neither. Release run 32274732375 red on exactly this --
+    the fixture child was sampled inside that window on a loaded runner,
+    counted as a second "parent", and its 96m heap failed bench.heap_exact.
+
+    A view whose argv equals the argv of its live parent in the same sample is
+    that fork image, so it gets no role (and, downstream, no jcmd attach --
+    which would also fail on a process that has not exec'd into a JVM yet).
+    The next sample sees the exec'd argv and classifies it as itself. No
+    profiled tree runs a child whose real argv equals its parent's.
+    """
+    parent = views_by_pid.get(view.parent_pid)
+    if parent is not None and view.argv and view.argv == parent.argv:
+        return None
+    return classifier(view, root)
+
+
 def profile_command(
     command: Sequence[str | os.PathLike[str]],
     *,
@@ -1325,14 +1352,23 @@ def profile_command(
                 complete = bool(stats)
                 tree_rss = 0
                 roles_now: set[str] = set()
+                # Two passes: classification needs the whole sample's views so
+                # a fork's pre-exec image can be told from the parent whose
+                # argv it still carries (see classify_stable_view).
+                views: dict[int, ProcessView] = {}
+                stable: list[ProcessStat] = []
                 for stat in stats:
                     view = read_stable_process_view(stat)
                     if view is None:
                         complete = False
                         continue
+                    views[stat.identity.pid] = view
+                    stable.append(stat)
+                for stat in stable:
+                    view = views[stat.identity.pid]
                     tree_rss += view.rss_bytes
                     observed_identities.add(stat.identity)
-                    role = classifier(view, root)
+                    role = classify_stable_view(view, views, classifier, root)
                     if role is None:
                         continue
                     roles_now.add(role)
