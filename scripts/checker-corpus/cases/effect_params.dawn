@@ -1,0 +1,28 @@
+# An explicit effect binder is optional and equivalent to the implicit
+# introduction of spec 6.3 (docs/effect-params-design.md decision 2), so this
+# case has no golden diagnostics: every signature here type-checks, and the
+# ones written both ways mean the same thing.
+use std/io
+
+fn map_explicit[T, U, !e](xs: List[T], f: fn(T) -> U !e) -> List[U] !e = map(xs, f)
+
+fn map_implicit[T, U](xs: List[T], f: fn(T) -> U !e) -> List[U] !e = map(xs, f)
+
+# a binder beside a bound, and a binder beside a name the signature introduces
+# on its own
+fn shown[T: Show, !e](x: T, f: fn(T) -> String !e) -> String !e = f(x)
+
+fn mixed[!a](f: fn() -> Int !a, g: fn() -> Int !b) -> Int !(a | b) = f() + g()
+
+# both spellings instantiate at a pure call site and at an `!io` one
+pub fn main() -> Unit !io = {
+  let a = map_explicit([1, 2], x => x + 1)
+  let b = map_implicit([1, 2], x => x + 1)
+  io.println(to_string(len(a) + len(b)))
+  let c = map_explicit([1, 2], x => {
+    io.println(to_string(x))
+    x
+  })
+  io.println(show(shown(1, n => to_string(n))))
+  io.println(to_string(len(c)))
+}

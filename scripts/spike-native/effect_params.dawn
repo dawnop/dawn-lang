@@ -1,0 +1,57 @@
+# Effect parameters (docs/effect-params-design.md knives 2 and 3): the explicit
+# binder `[T, U, !e]` on a `fn`, and the same binder on `alias` and `type`.
+#
+# The claim is that this is a check-period feature with nothing behind it at
+# run time. A closure settles its own row where it is created and carries the
+# evidence it needs (SEM-01, effects-design.md §4.6), so a `!e` on a record
+# field costs no argument at the call and neither backend grows a case. Both
+# backends running this to the same bytes is what says so.
+use std/io
+
+fn map_explicit[T, U, !e](xs: List[T], f: fn(T) -> U !e) -> List[U] !e = map(xs, f)
+
+alias Mapper[T, U, !e] = fn(T) -> U !e
+
+type Box[!e] = { f: fn(Int) -> Int !e }
+
+type Carrier[T, !e] =
+  | Now(v: T)
+  | Later(mk: fn() -> T !e)
+
+# the omitted effect argument at the use site: two type arguments for a table
+# of three items, and a pure closure goes in
+fn pure_mapper() -> Mapper[Int, String] = n => to_string(n)
+
+fn run_box(b: Box) -> Int !io = b.f(1)
+
+fn force[T](c: Carrier[T]) -> T !io =
+  match c {
+    Now(v) -> v
+    Later(mk) -> mk()
+  }
+
+pub fn main() -> Unit !io = {
+  println("-- an explicit binder forwards the argument's row --")
+  println(to_string(map_explicit([1, 2, 3], x => x + 1)))
+  println(to_string(map_explicit([1, 2], x => {
+    println("mapping")
+    x * 10
+  })))
+
+  println("-- a named function type --")
+  println(pure_mapper()(41))
+
+  println("-- a row on a record field, settled where the closure was built --")
+  println(to_string(run_box(Box { f: n => n * 2 })))
+  println(to_string(run_box(Box { f: n => {
+    println("in the field")
+    n * 3
+  } })))
+
+  println("-- and on a variant field --")
+  println(to_string(force(Now(7))))
+  println(to_string(force(Later(() => {
+    println("forcing")
+    8
+  }))))
+}

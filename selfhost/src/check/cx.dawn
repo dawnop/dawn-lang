@@ -544,8 +544,14 @@ pub fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx
     }
   }
   var cx1 = Cx { ..cx, alias_resolving: set.insert(cx.alias_resolving, al.name) }
-  # the alias target resolves with its own type parameters and a throwaway
-  # effect-variable table (effect variables are rejected at declaration)
+  # The alias target resolves with its own type parameters and an effect-variable
+  # table of its own, empty to start with. An alias may now bind effect
+  # parameters (`alias Mapper[T, U, !e] = fn(T) -> U !e`), and this is where they
+  # are minted: `refuse_decl_effvar` has already refused every name the
+  # declaration did not bind, so whatever reaches here is bound, and minting on
+  # first sight gives one variable per name for the whole target. The table is
+  # emptied rather than inherited so two aliases never share a variable, and the
+  # result is memoized, so the ids are minted once per alias.
   let saved_tp = cx1.current_tparams
   let saved_ev = cx1.current_eff_vars
   let empty_ev: Map[String, Eff] = map.empty()

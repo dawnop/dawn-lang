@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 4b486959e43ecf0b -->
+<!-- doc-check: translation-of docs/spec.md @ f60cabde125d057e -->
 
 # Dawn Language Specification
 
@@ -1564,9 +1564,31 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
 ```
 
 - An effect variable `!e` needs no declaration; appearing in a signature introduces it, and its
-  scope is the whole signature. Also, **only a function signature** can introduce an effect
-  variable: a function type inside a type declaration (an `alias` target, a record/variant field)
-  introduces no binder, so writing `!e` there is a compile error — write `!io` or leave it pure.
+  scope is the whole signature. It may also be given an **explicit binder** in the parameter list:
+  `fn map[T, U, !e](xs: List[T], f: fn(T) -> U !e) -> List[U] !e`. The two spellings are
+  equivalent. When a signature carries an explicit binder, that name resolves only to it within
+  the signature; a name with no binder is still introduced where it appears, and the two may be
+  mixed in one signature. A binder carries no bound (`[!e: X]` is an error), its name must be
+  lowercase (`!E` is a named effect, not a variable), `!io` cannot be a binder name, and the same
+  binder cannot be written twice.
+  The binder list is also where the order comes from: it binds in the order written, and names
+  with no binder are still introduced in the order they first appear.
+- A type declaration can bind effect parameters too: `alias Mapper[T, U, !e] = fn(T) -> U !e`,
+  `type Box[!e] = { f: fn(Int) -> Int !e }`. **Only through a binder**: a type declaration is not
+  a signature, so "introduced by appearing" does not apply there, and writing a name the
+  declaration does not bind is a compile error — put it in the parameter list, write `!io`, or
+  leave it pure. Several `!e` in one declaration are one variable; the `!e` of another
+  declaration is unrelated.
+  **A named effect is refused in a type declaration whatever the parameter list says**: a written
+  label would mean the caller supplies the handler, and Dawn's evidence is carried by the closure
+  from the point it was created (§6.5, [`effects-soundness-design.md`](effects-soundness-design.md)
+  §4.1).
+- There is **no syntax for writing an effect argument** at the use site (not in the first batch):
+  `Mapper[Int, String]` gives the type arguments only, and that is **not an arity error**. The
+  omitted slot is still the declaration's own effect variable, solved from context: store a pure
+  closure and it solves to pure there, store an `!io` closure and it solves to `!io` there.
+  **A consumer's own row has to cover it**, and an `!e` bound by that signature alone does not
+  cover a variable bound elsewhere, so a consumer writes `!io` today (`!io` covers any row).
 - `!(e1 | e2)` is a union, stored **normalised**: `io` absorbs everything (a union containing `io`
   is `io`), `pure` is the identity (and can be dropped), and a union of a single variable degrades
   to that variable itself (`!(e|e)` is `!e`). The base axis has only two points, so solving is a

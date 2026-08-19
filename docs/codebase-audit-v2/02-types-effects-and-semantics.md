@@ -271,8 +271,19 @@
 > `!io` trait method；放开 named effect 会决定 dictionary 是否携带 evidence、evidence 的捕获
 > lifetime 与跨模块签名形状。它保留为语言能力账，但必须先作 ABI 裁决，不进入自治 TODO。
 
-- **证据：S。** v1 规则把 trait/impl method 限为 pure 或 `!io`：`docs/spec.md:610`，§6.5「边界（v1）」复述在 `docs/spec.md:1429-1431`（bullet 本身是 `:1431`）；pass 明确拒绝 named effect/effect var：`selfhost/src/check/passes.dawn:1218-1227`（trait 方法自己的行）与 `selfhost/src/check/passes.dawn:1706-1714`（impl）。
-- **影响：** 无法定义泛型 state、parser、service、transaction trait；用户被迫在 trait API 退回 `Result`/`!io`，形成与语言效果系统并行的第二套抽象。
+- **证据：S（v0.60.0 基线的读数，2026-08-19 按刀 4 更正）。** 审查时 v1 规则把 trait/impl
+  method 限为 pure 或 `!io`。**这一半已经不成立**：RX-10-B 刀 4（A0）落地后，方法的行
+  **可以带效果变量**，只是不能带具名标签——`docs/spec.md:610-611` 与 §6.5「边界（v1）」的
+  `docs/spec.md:1451-1459` 都已按此改写。pass 侧的两处拒绝现在只看标签：
+  `selfhost/src/check/passes.dawn:1315-1323`（trait 方法自己的行）与 `:1800-1806`（impl）；
+  旧稿引的 `:1218-1227`、`:1706-1714` 是那两处拒绝在审查基线上的地址，另有两处 `eparams`
+  级的拒绝已随刀 4 删除，代之以两侧效果变量按位对齐的元数检查（`:1905-1911`）。
+  **剩下的本条**因此收窄成「具名标签不能进 trait/impl 方法的行」，理由是 ABI：写出来的标签
+  要求调用方在调用点交出证据，而字典槽位没有这一格。
+- **影响（同批收窄）：** 收内容闭包的容器型 trait（`Container` / `column` 那一族）**已经写得进
+  trait 了**，那正是刀 4 买下的东西。仍然写不出来的是让 impl 决定效果的那一族——泛型 state、
+  parser、service、transaction——它们要的是关联效果，用户在这些 trait API 上仍被迫退回
+  `Result`/`!io`，形成与语言效果系统并行的第二套抽象。
 - **建议：** 先允许 fixed named labels，再引入 trait/method-level effect parameters；evidence 只能显式携带，
   「捕获进 dictionary」那一支已经封死：dictionary 是账本外的无头静态表，drop 它会把垃圾读作计数
   （`dictish`，`selfhost/src/c/rc.dawn:528-538`），而 evidence 被刻意定为进 RC 账本的普通记录、不是

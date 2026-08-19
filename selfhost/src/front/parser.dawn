@@ -29,7 +29,8 @@ use front/token.{
   keyword
 }
 use front/ast.{
-  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, Param, LambdaParam,
+  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, EffParamDecl,
+  Param, LambdaParam,
   AssocDecl, AssocBind,
   FieldDecl, CtorDecl, ImportName, StrPart, SPText, SPInterp,
   BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt, OpLe,
@@ -406,15 +407,66 @@ fn test_decl(p: P, st: St) -> PR[Decl] = {
 
 # ---- type declarations ----
 
-## [T, U] on fn/type declarations, with optional bounds on fns: [T: Ord + Show]
-fn type_params(p: P, st: St) -> PR[List[TypeParamDecl]] = {
+## [T, U] on fn/type declarations, with optional bounds on fns: [T: Ord + Show],
+## and explicit effect binders spelled the way the row spells them: [T, U, !e].
+##
+## One bracketed list in the source, two lists back. They cannot be one list
+## downstream: `Sig.constraints` is positionally aligned with `Sig.tparams`, and
+## `bind_dicts` silently skips a member that is not a `TyVar` while its index
+## keeps going, so a mixed list would bind dictionary symbols to the wrong type
+## variable with nothing to report (docs/effect-params-design.md decision 1).
+##
+## `!` cannot begin anything else between the brackets, so there is no ambiguity
+## to resolve and no lookahead to spend: the item's first token decides which
+## kind it is.
+fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl])] = {
   if not at_kind(p, st, LBRACKET) {
     let none: List[TypeParamDecl] = []
-    return Ok((st, none))
+    let none_e: List[EffParamDecl] = []
+    return Ok((st, (none, none_e)))
   }
   var st1 = adv1(p, st)
   var out: List[TypeParamDecl] = []
+  var effs: List[EffParamDecl] = []
   while not at_kind(p, st1, RBRACKET) {
+    if at_kind(p, st1, BANG) {
+      let (st2, bang) = want(p, st1, BANG, "`!`")?
+      # An uppercase name after `!` is a declared effect, not a variable. A
+      # declaration binds variables only: a label belongs to the signature that
+      # raises it (docs/effects-soundness-design.md §4.1), and the resolver
+      # already refuses one at the same casing boundary (cx.resolve_eff_at).
+      if at_kind(p, st2, TYPEIDENT) {
+        let (st9, up) = want(p, st2, TYPEIDENT, "an effect parameter name (lowercase)")?
+        return Err((st9, pd_h("`" ++ up.text ++ "` is a declared effect, not an effect parameter",
+          bang.lo, up.hi,
+          "effect parameters are lowercase, like the variables they bind: [!e]")))
+      }
+      let (st3, n) = want(p, st2, IDENT, "an effect parameter name (lowercase)")?
+      if n.text == "io" {
+        return Err((st3, pd_h("`io` is a built-in effect and cannot be a parameter name",
+          bang.lo, n.hi, "pick another name: [!e]")))
+      }
+      var dup = false
+      for e in effs {
+        if e.name == n.text { dup = true }
+      }
+      if dup {
+        return Err((st3, pd("duplicate effect parameter `" ++ n.text ++ "`", bang.lo, n.hi)))
+      }
+      # `[!e: X]` would be a bound, and a bound constrains a type. Refusing it
+      # here rather than at the checker keeps the effect axis free of a bound
+      # syntax that has nothing to mean.
+      if at_kind(p, st3, COLON) {
+        return Err((st3, pd_h("an effect parameter cannot be constrained",
+          bang.lo, n.hi, "trait bounds constrain type parameters, not effects")))
+      }
+      effs = effs ++ [EffParamDecl { name: n.text, lo: bang.lo, hi: n.hi }]
+      if at_kind(p, st3, COMMA) { st1 = adv1(p, st3) } else {
+        st1 = st3
+        break
+      }
+      continue
+    }
     let (st2, n) = want(p, st1, TYPEIDENT, "a type parameter name (uppercase)")?
     var bounds: List[Bound] = []
     var st3 = st2
@@ -438,10 +490,10 @@ fn type_params(p: P, st: St) -> PR[List[TypeParamDecl]] = {
     }
   }
   let (st8, _) = want(p, st1, RBRACKET, "`]`")?
-  if len(out) == 0 {
+  if len(out) == 0 && len(effs) == 0 {
     return Err((st8, perr(p, st8, "type parameter list cannot be empty")))
   }
-  Ok((st8, out))
+  Ok((st8, (out, effs)))
 }
 
 ## `alias Name[T] = TypeRef` — a transparent type alias (spec §2.6) — and
@@ -452,7 +504,8 @@ fn alias_decl(p: P, st: St, is_pub: Bool, is_opaque: Bool) -> PR[Decl] = {
   let (st1, kw) =
     if is_opaque { want(p, st, TYPE, "`type`")? } else { want(p, st, ALIAS, "`alias`")? }
   let (st2, name) = want(p, st1, TYPEIDENT, "a type name (uppercase)")?
-  let (st3, tparam_decls) = type_params(p, st2)?
+  let (st3, tps) = type_params(p, st2)?
+  let (tparam_decls, eparam_decls) = tps
   for tp in tparam_decls {
     if len(tp.bounds) > 0 {
       let what = if is_opaque { "opaque type" } else { "alias" }
@@ -468,6 +521,7 @@ fn alias_decl(p: P, st: St, is_pub: Bool, is_opaque: Bool) -> PR[Decl] = {
     is_opaque: is_opaque,
     name: name.text,
     tparams: names,
+    eparams: map(eparam_decls, e => e.name),
     ctors: [],
     is_record: false,
     derives: [],
@@ -482,7 +536,8 @@ fn alias_decl(p: P, st: St, is_pub: Bool, is_opaque: Bool) -> PR[Decl] = {
 fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   let (st1, kw) = want(p, st, TYPE, "`type`")?
   let (st2, name) = want(p, st1, TYPEIDENT, "a type name (uppercase)")?
-  let (st3, tparam_decls) = type_params(p, st2)?
+  let (st3, tps) = type_params(p, st2)?
+  let (tparam_decls, eparam_decls) = tps
   for tp in tparam_decls {
     if len(tp.bounds) > 0 {
       return Err((st3, pd_h("type declarations cannot constrain their type parameters",
@@ -490,9 +545,10 @@ fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
     }
   }
   let tparams = map(tparam_decls, t => t.name)
+  let eparams = map(eparam_decls, e => e.name)
   let (st4, _) = want(p, st3, EQ, "`=`")?
   if at_kind(p, st4, LBRACE) {
-    return record_decl(p, st4, is_pub, kw, name, tparams)
+    return record_decl(p, st4, is_pub, kw, name, tparams, eparams)
   }
   # `type` declares a nominal type only. The parser recognizes alias shapes,
   # not names: a bare TYPEIDENT is always a constructor, and the checker owns
@@ -533,6 +589,7 @@ fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
     is_opaque: false,
     name: name.text,
     tparams: tparams,
+    eparams: eparams,
     ctors: ctors,
     is_record: false,
     derives: derives,
@@ -574,7 +631,8 @@ fn record_decl(
   is_pub: Bool,
   kw: Token,
   name: Token,
-  tparams: List[String]
+  tparams: List[String],
+  eparams: List[String]
 ) -> PR[Decl] = {
   var st1 = skip_nl(p, adv1(p, st))
   var fields: List[FieldDecl] = []
@@ -605,6 +663,7 @@ fn record_decl(
     is_opaque: false,
     name: name.text,
     tparams: tparams,
+    eparams: eparams,
     ctors: [ctor],
     is_record: true,
     derives: derives,
@@ -659,10 +718,19 @@ fn ctor_decl(p: P, st: St) -> PR[CtorDecl] = {
 fn fn_decl(p: P, st: St, is_pub: Bool, in_impl: Bool) -> PR[FnDecl] = {
   let (st1, fn_tok) = want(p, st, FN, "`fn`")?
   let (st2, name_tok) = want(p, st1, IDENT, "a function name (lowercase)")?
-  let (st3, tparams) = type_params(p, st2)?
+  let (st3, tps) = type_params(p, st2)?
+  let (tparams, eparams) = tps
   if in_impl && len(tparams) > 0 {
     let tp = tparams[0]
     return Err((st3, pd("impl methods cannot declare their own type parameters", tp.lo, tp.hi)))
+  }
+  # An impl method's row is checked against the trait's, and the trait method it
+  # answers has no parameter table to bind anything in (grammar.ebnf trait_method).
+  # The implicit introduction of spec §6.3 is what a method row uses.
+  if in_impl && len(eparams) > 0 {
+    let e = eparams[0]
+    return Err((st3, pd_h("impl methods cannot declare their own effect parameters", e.lo, e.hi,
+      "write the variable in the row and it is introduced there: -> Int !e")))
   }
   let (st4, _) = want(p, st3, LPAREN, "`(`")?
   let (st5, params) = typed_params(p, st4, "top-level function")?
@@ -691,6 +759,7 @@ fn fn_decl(p: P, st: St, is_pub: Bool, in_impl: Bool) -> PR[FnDecl] = {
     is_pub: is_pub,
     name: name_tok.text,
     tparams: tparams,
+    eparams: eparams,
     params: params,
     ret: ret,
     effs: effs,
@@ -908,7 +977,16 @@ fn effect_op(p: P, st: St) -> PR[EffectOp] = {
 ## conditional one has `[`, so type_params' own "not at `[`" test decides.
 fn impl_decl(p: P, st: St) -> PR[Decl] = {
   let (st0, kw) = want(p, st, IMPL, "`impl`")?
-  let (st1, tparams) = type_params(p, st0)?
+  let (st1, tps) = type_params(p, st0)?
+  let (tparams, eparams) = tps
+  # An impl's own parameters instantiate the trait's subject, and the subject is
+  # a type. Nothing on an impl head reads an effect (docs/effect-params-design.md
+  # decision 4: fn / alias / type take the table, trait and impl do not).
+  if len(eparams) > 0 {
+    let e = eparams[0]
+    return Err((st1, pd_h("an impl cannot declare effect parameters", e.lo, e.hi,
+      "only a function signature binds an effect variable: fn f[T, !e](...)")))
+  }
   let (st2, trait_tok) = want(p, st1, TYPEIDENT, "a trait name (uppercase)")?
   let (st3, _) = want(p, st2, LBRACKET,
     "`[` (an impl names its subject type: impl " ++ trait_tok.text ++ "[Point])")?
