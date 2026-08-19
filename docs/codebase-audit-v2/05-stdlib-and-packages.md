@@ -192,6 +192,18 @@
   4. 迁移期间 `Request.raw` 保持不变：原始字节已经在（见上面的订正），strict decode
      只影响 text 那一路怎么报错。
 
+- **`packages/web` 那半已随 web4 major 落地（2026-08-20）。** 上面三选一的形状裁决为
+  「`body_text` 访问器」：`Request.body` 改为原始 `Bytes`（原 `raw` 字段改名顶替，
+  lossy `String` 字段删除，`read_body` 不再做无条件 lossy 解码），文本视图是
+  `types.body_text(req) -> Result[String, HttpError]`，malformed body 是带 offset 的
+  400（对齐 axum/actix 的处置）。包名随 v2 换名规则变为 `web4 / 4.0.0`。负控钉在包内
+  test（`server.dawn`「an invalid UTF-8 body on a text route is a 400 naming the
+  offset」）：同一请求在旧代码下 lossy 静默 200。**anchor 注意**：本条的 anchor 钉的是
+  `server.dawn` 里出现 `decode_utf8_checked`，而实现把它放进了 `types.dawn`
+  （`body_text` 属于 Request 访问器族），正是 doc-check 自述的 vacuous-absent 残差——
+  status 是否翻 fixed 连同 anchor 一起重裁，不在本批单方面动。dawnop-site 侧 20 个
+  `req.body` 消费点等下个 release 的升钉窗口迁移。
+
 ## LIB-07 — P2 — `io.delete` 把不存在与操作失败都压成 false（已修）
 
 - **证据：S。** 修复前 API 返回 Bool，文档把不存在和 nonempty directory 等都写成 false：`std/io.dawn:90`；JVM/C runtime 丢掉具体 host error：`selfhost/src/jvm/rtclasses.dawn:1370`、`runtime/c/dawn_rt.c:1910`。
