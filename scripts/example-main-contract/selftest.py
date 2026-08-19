@@ -64,11 +64,11 @@ def install_real_toolchain(root: Path) -> None:
     (root / "std").symlink_to(ROOT / "std", target_is_directory=True)
 
 
-def run_contract(root: Path) -> subprocess.CompletedProcess[str]:
+def run_contract(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return subprocess.run(
-        [sys.executable, "scripts/example-main-contract/run.py"],
+        [sys.executable, "scripts/example-main-contract/run.py", *argv],
         cwd=root,
         env=env,
         text=True,
@@ -118,6 +118,48 @@ def compiler_controls() -> None:
         )
 
 
+def targeted_mode_controls() -> None:
+    """`--target` is how run-diff settlement holds a declaration to the pin.
+
+    The shape that must red is the ab116b1 incident: the example's output
+    changed (and the transcript diff was declared), but registry.json still
+    pins the old output. The clean shape -- pin matches the head output --
+    must stay green, and a target the registry does not know must be named
+    rather than silently skipped.
+    """
+    with tempfile.TemporaryDirectory(prefix="dawn-example-main-target-") as raw:
+        root = Path(raw)
+        source = install_contract(root, "pub fn main(|inner 7\n")
+        install_real_toolchain(root)
+        shutil.copy2(FIXTURES / "literals.dawn", source)
+
+        require_green("targeted run of a current pin", run_contract(root, "--target", TARGET))
+
+        require_red(
+            "targeted run of an unregistered target",
+            run_contract(root, "--target", "examples/regression/other.dawn"),
+            "no registry entry pins",
+        )
+
+        require_red(
+            "targeted mode usage error",
+            run_contract(root, "--bogus"),
+            "usage:",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="dawn-example-main-stale-") as raw:
+        root = Path(raw)
+        source = install_contract(root, "the output this example printed last release\n")
+        install_real_toolchain(root)
+        shutil.copy2(FIXTURES / "literals.dawn", source)
+
+        require_red(
+            "targeted run against a stale pin (the ab116b1 shape)",
+            run_contract(root, "--target", TARGET),
+            "stdout expected",
+        )
+
+
 def process_alive(process_id: int) -> bool:
     try:
         os.kill(process_id, 0)
@@ -151,6 +193,7 @@ def background_cleanup_control() -> None:
 
 def main() -> int:
     compiler_controls()
+    targeted_mode_controls()
     background_cleanup_control()
     print("OK: example main contract self-test")
     return 0

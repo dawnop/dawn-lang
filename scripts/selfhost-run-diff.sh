@@ -33,7 +33,7 @@ SH=(./bin/dawn)
 emitchange_load
 
 fail=0
-check() { # name ref-exit head-exit
+check() { # name ref-exit head-exit [gallery-target]
   local differs=0
   if [ "$2" != "$3" ] || ! diff "$OUT/k.txt" "$OUT/d.txt" > "$OUT/check-diff.txt"; then
     differs=1
@@ -41,24 +41,39 @@ check() { # name ref-exit head-exit
   if ! emit_gate "$1" "$differs" "exits $2 vs $3"; then
     head -20 "$OUT/check-diff.txt"
     fail=1
+  elif [ "$differs" = 1 ] && [ -n "${4:-}" ]; then
+    # Settling a declared difference in a gallery example's transcript is not
+    # the whole story: scripts/example-main-contract/registry.json pins the
+    # same output byte for byte, and a declaration cannot cover that pin.
+    # ab116b1 declared `run text/chars example`, this gate noted it, and the
+    # stale pin still red CI a day later -- so the settlement itself now runs
+    # the registry cases for that example against the head toolchain.
+    if ! python3 scripts/example-main-contract/run.py --target "$4" \
+        > "$OUT/registry-pin.txt" 2>&1; then
+      echo "FAIL $1 is declared, but the example registry does not pin the head output of $4"
+      echo "     (update scripts/example-main-contract/registry.json in the same batch"
+      echo "      as the declaration; the pin is outside every declaration's reach)"
+      tail -20 "$OUT/registry-pin.txt"
+      fail=1
+    fi
   fi
 }
 
 # run: with and without args (the no-args calc usage path exits 1)
 "$DAWN" run examples/projects/calc.dawn -- "1 + 2 * 3" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
 "${SH[@]}" run examples/projects/calc.dawn -- "1 + 2 * 3" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
-check "run calc (args)" "$k" "$d"
+check "run calc (args)" "$k" "$d" examples/projects/calc.dawn
 
 "$DAWN" run examples/projects/calc.dawn > "$OUT/k.txt" 2>&1 && k=0 || k=$?
 "${SH[@]}" run examples/projects/calc.dawn > "$OUT/d.txt" 2>&1 && d=0 || d=$?
-check "run calc (usage)" "$k" "$d"
+check "run calc (usage)" "$k" "$d" examples/projects/calc.dawn
 
 # run + test: the interop example, whose calls go to static methods declared on
 # JDK interfaces. `__emit` says the bytes agree and classfile-verify says they
 # link; this is the leg that says they answer the same thing when executed.
 "$DAWN" run examples/interop/interop.dawn -- /p > "$OUT/k.txt" 2>&1 && k=0 || k=$?
 "${SH[@]}" run examples/interop/interop.dawn -- /p > "$OUT/d.txt" 2>&1 && d=0 || d=$?
-check "run interop example" "$k" "$d"
+check "run interop example" "$k" "$d" examples/interop/interop.dawn
 
 "$DAWN" test examples/interop/interop.dawn > "$OUT/k.txt" 2>&1 && k=0 || k=$?
 "${SH[@]}" test examples/interop/interop.dawn > "$OUT/d.txt" 2>&1 && d=0 || d=$?
@@ -71,7 +86,7 @@ check "test interop example" "$k" "$d"
 for x in effects/handlers text/chars errors/barriers; do
   "$DAWN" run "examples/$x.dawn" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
   "${SH[@]}" run "examples/$x.dawn" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
-  check "run $x example" "$k" "$d"
+  check "run $x example" "$k" "$d" "examples/$x.dawn"
 done
 
 # test: a green multi-module suite

@@ -264,10 +264,34 @@ def run_case(target: str, case: dict[str, Any]) -> list[str]:
 
 
 def main() -> int:
+    # `--target` runs one registered entry and nothing else. It exists for
+    # settlement: when selfhost-run-diff.sh accepts a declared `run ... example`
+    # difference, it holds that settlement to this registry with exactly this
+    # mode, because the registry pin is an in-repo expectation no Emit-Change
+    # declaration can cover (ab116b1 declared the chars change, run-diff noted
+    # it, and the stale pin in registry.json still red CI a day later).
+    argv = sys.argv[1:]
+    only: str | None = None
+    if argv:
+        if len(argv) == 2 and argv[0] == "--target":
+            only = argv[1]
+        else:
+            print("usage: run.py [--target examples/<group>/<unit>]", file=sys.stderr)
+            return 2
+
     try:
         registered = validate_targets(load_registry())
-        discovered = discover_gallery_units()
-        check_bijection(registered, discovered)
+        if only is None:
+            discovered = discover_gallery_units()
+            check_bijection(registered, discovered)
+        elif only in registered:
+            registered = {only: registered[only]}
+        else:
+            raise ContractError(
+                f"no registry entry pins {only}; a changed example output needs "
+                "its scripts/example-main-contract/registry.json entry updated "
+                "in the same batch"
+            )
     except ContractError as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
@@ -291,10 +315,16 @@ def main() -> int:
     if failures:
         print(f"FAIL: {failures}/{cases} example main contract(s) failed", file=sys.stderr)
         return 1
-    print(
-        f"OK: {cases} case(s) cover {len(discovered)} gallery unit(s); "
-        "stdout, stderr, and exit matched exactly"
-    )
+    if only is None:
+        print(
+            f"OK: {cases} case(s) cover {len(discovered)} gallery unit(s); "
+            "stdout, stderr, and exit matched exactly"
+        )
+    else:
+        print(
+            f"OK: {cases} case(s) pin {only}; "
+            "stdout, stderr, and exit matched exactly"
+        )
     return 0
 
 
