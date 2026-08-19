@@ -1,0 +1,188 @@
+# The pure half of the todo app: model, messages, `update`, `view`, and the
+# line parser. Everything here is a value-in, value-out function, which is what
+# the test blocks below lean on -- an interaction is asserted as data, no
+# terminal in sight. The io shell around it is main.dawn.
+
+use std/list
+use std/str
+use tea/app.{App, update, view}
+use tea/widget.{Widget, Text, Styled, Row, Column, Button, Bold, Dim}
+
+pub type Todo = { id: Int, title: String, done: Bool }
+
+## `note` is the feedback line of the next frame ("added #3", "no todo #9");
+## `quit` is a model flag rather than a driver special case, so that quitting
+## stays a message like everything else.
+pub type Model = { todos: List[Todo], next_id: Int, note: String, quit: Bool }
+
+pub type Msg =
+  | Add(title: String)
+  | Toggle(id: Int)
+  | Del(id: Int)
+  | Quit
+  | Bad(input: String)
+derive Show
+
+pub fn initial() -> Model = Model { todos: [], next_id: 1, note: "", quit: false }
+
+## One command line -> one message. Unknown or malformed input becomes `Bad`,
+## so the parser is total and `update` owns the wording of the complaint.
+pub fn parse_line(line: String) -> Msg = {
+  let t = str.trim(line)
+  if t == "quit" || t == "q" {
+    Quit
+  } else {
+    match str.split_once(t, " ") {
+      Some((cmd, rest)) -> {
+        let arg = str.trim(rest)
+        if cmd == "add" && arg != "" {
+          Add(title: arg)
+        } else if cmd == "tog" {
+          id_msg(arg, id => Toggle(id: id), t)
+        } else if cmd == "del" {
+          id_msg(arg, id => Del(id: id), t)
+        } else {
+          Bad(input: t)
+        }
+      }
+      None -> Bad(input: t)
+    }
+  }
+}
+
+fn id_msg(arg: String, make: fn(Int) -> Msg, whole: String) -> Msg =
+  match parse_int(arg) {
+    Some(id) -> make(id)
+    None -> Bad(input: whole)
+  }
+
+fn has_id(m: Model, id: Int) -> Bool = list.any(m.todos, t => t.id == id)
+
+fn note_only(m: Model, note: String) -> Model = Model { ..m, note: note }
+
+impl App[Model] {
+  type Msg = Msg
+  fn update(m: Model, msg: Msg) -> Model =
+    match msg {
+      Add(title) -> Model {
+        ..m,
+        todos: m.todos ++ [Todo { id: m.next_id, title: title, done: false }],
+        next_id: m.next_id + 1,
+        note: "added #" ++ to_string(m.next_id),
+      }
+      Toggle(id) ->
+        if has_id(m, id) {
+          Model {
+            ..m,
+            todos: list.map(m.todos, t =>
+                if t.id == id { Todo { ..t, done: not t.done } } else { t }),
+            note: "",
+          }
+        } else {
+          note_only(m, "no todo #" ++ to_string(id))
+        }
+      Del(id) ->
+        if has_id(m, id) {
+          Model {
+            ..m,
+            todos: list.filter(m.todos, t => t.id != id),
+            note: "deleted #" ++ to_string(id),
+          }
+        } else {
+          note_only(m, "no todo #" ++ to_string(id))
+        }
+      Quit -> Model { ..m, note: "bye", quit: true }
+      Bad(input) ->
+        note_only(m, if input == "" { "type a command" } else { "unknown command: " ++ input })
+    }
+
+  fn view(m: Model) -> Widget[Msg] = {
+    let done = list.filter(m.todos, t => t.done)
+    let header: Widget[Msg] = Styled(style: Bold, child: Text(s:
+      "todo (" ++ to_string(len(done)) ++ "/" ++ to_string(len(m.todos)) ++ " done)"))
+    let body: List[Widget[Msg]] =
+      if list.is_empty(m.todos) {
+        [Styled(style: Dim, child: Text(s: "nothing yet; try: add buy milk"))]
+      } else {
+        list.map(m.todos, t => item_row(t))
+      }
+    let note: List[Widget[Msg]] = if m.note == "" { [] } else { [Text(s: m.note)] }
+    let help: Widget[Msg] = Styled(style: Dim, child: Text(s:
+      "commands: add <title> | tog <id> | del <id> | quit"))
+    Column(kids: [header] ++ body ++ note ++ [help])
+  }
+}
+
+## One todo as one row. The checkbox is a Button carrying the Toggle message:
+## the tree records what clicking would mean even though the line-mode driver
+## reaches the same message through `tog <id>`.
+fn item_row(t: Todo) -> Widget[Msg] = {
+  let title: Widget[Msg] =
+    if t.done { Styled(style: Dim, child: Text(s: t.title)) } else { Text(s: t.title) }
+  Row(kids: [
+    Button(label: if t.done { "x" } else { " " }, on_press: Toggle(id: t.id)),
+    Text(s: "#" ++ to_string(t.id)),
+    title,
+  ])
+}
+
+test "add assigns increasing ids and never recycles them" {
+  let m = update(update(initial(), Add(title: "one")), Add(title: "two"))
+  assert list.map(m.todos, t => t.id) == [1, 2]
+  let m2 = update(update(m, Del(id: 2)), Add(title: "three"))
+  assert list.map(m2.todos, t => t.id) == [1, 3]
+}
+
+test "toggle flips exactly the named todo, twice is identity" {
+  let m = update(update(initial(), Add(title: "a")), Add(title: "b"))
+  let once = update(m, Toggle(id: 2))
+  assert list.map(once.todos, t => t.done) == [false, true]
+  let twice = update(once, Toggle(id: 2))
+  assert list.map(twice.todos, t => t.done) == [false, false]
+}
+
+test "missing ids and bad input become notes, not changes" {
+  let m = update(initial(), Add(title: "a"))
+  let miss = update(m, Toggle(id: 9))
+  assert miss.todos == m.todos
+  assert miss.note == "no todo #9"
+  let bad = update(m, Bad(input: "frobnicate"))
+  assert bad.todos == m.todos
+  assert bad.note == "unknown command: frobnicate"
+  assert not bad.quit
+}
+
+test "quit is a message and a model flag, not a driver special case" {
+  let m = update(initial(), Quit)
+  assert m.quit
+  assert m.note == "bye"
+}
+
+test "parse_line is total over junk" {
+  assert parse_line("add buy milk") == Add(title: "buy milk")
+  assert parse_line("  tog 2 ") == Toggle(id: 2)
+  assert parse_line("del 10") == Del(id: 10)
+  assert parse_line("q") == Quit
+  assert parse_line("tog two") == Bad(input: "tog two")
+  assert parse_line("add ") == Bad(input: "add")
+  assert parse_line("") == Bad(input: "")
+}
+
+test "view snapshot: the tree is data and compares with ==" {
+  let m = update(update(update(initial(), Add(title: "buy milk")), Add(title: "ship tea")), Toggle(id: 1))
+  let want: Widget[Msg] = Column(kids: [
+    Styled(style: Bold, child: Text(s: "todo (1/2 done)")),
+    Row(kids: [
+      Button(label: "x", on_press: Toggle(id: 1)),
+      Text(s: "#1"),
+      Styled(style: Dim, child: Text(s: "buy milk")),
+    ]),
+    Row(kids: [
+      Button(label: " ", on_press: Toggle(id: 2)),
+      Text(s: "#2"),
+      Text(s: "ship tea"),
+    ]),
+    Styled(style: Dim, child: Text(s: "commands: add <title> | tog <id> | del <id> | quit")),
+  ])
+  assert view(m) == want
+}

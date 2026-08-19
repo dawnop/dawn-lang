@@ -1,0 +1,38 @@
+# An interactive todo list built on packages/tea, the Elm architecture v1:
+# the model, messages, update and view live in todo.dawn as pure functions,
+# and this file is the whole io surface -- a loop that draws the frame, reads
+# one line, parses it into a message, and folds it into the model.
+#
+# Commands: `add <title>`, `tog <id>`, `del <id>`, `quit` (or `q`).
+#
+# The loop redraws the full screen each turn (clear + render of the whole
+# widget tree). That is the v1 answer to rendering: no diffing, no raw mode,
+# and at todo-list scale a full rebuild per keystroke is nowhere near a cost.
+
+use std/io
+use tea/app.{step, view}
+use tea/render.{render, clear_screen}
+use todo.{Model, initial, parse_line}
+
+fn frame(s: String) -> Unit !io = io.println(clear_screen() ++ s)
+
+fn loop_turn(m: Model) -> Unit !io = {
+  if m.quit {
+    ()
+  } else {
+    io.print("> ")
+    match io.read_line() {
+      None -> ()
+      Some(line) -> {
+        let (next, screen) = step(m, parse_line(line))
+        frame(screen)
+        loop_turn(next)
+      }
+    }
+  }
+}
+
+pub fn main() -> Unit !io = {
+  frame(render(view(initial())))
+  loop_turn(initial())
+}
