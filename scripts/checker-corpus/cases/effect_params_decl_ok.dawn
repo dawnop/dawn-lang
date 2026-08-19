@@ -1,0 +1,44 @@
+# passes.dawn: the accept half of the type-declaration effect binder. No golden
+# diagnostics -- everything here is legal, and the refusals it is the control
+# for are in effect_params_decl.dawn next door.
+use std/io
+
+# RX-10's two original asks, verbatim
+alias Mapper[T, U, !e] = fn(T) -> U !e
+
+type Box[!e] = { f: fn(Int) -> Int !e }
+
+# a variant, and two fields that write the same binder: one variable, not two
+type Carrier[T, !e] =
+  | Now(v: T)
+  | Later(mk: fn() -> T !e, undo: fn(T) -> Unit !e)
+
+# an opaque type takes the table too: it parses as an alias does
+opaque type Hidden[!e] = fn(Int) -> Int !e
+
+# decision 7: the use site omits the effect argument and that is not an arity
+# error. Two type arguments for a table of three items is the arity.
+fn store(m: Mapper[Int, String]) -> Mapper[Int, String] = m
+
+# and the omitted argument solves to pure: a pure closure goes in
+fn pure_in() -> Mapper[Int, String] = n => to_string(n)
+
+# the end-to-end shape SEM-01 settles at the creation point: a closure with a
+# row goes into the field, and calling it back out needs no evidence passed
+fn call_box(b: Box) -> Int !io = b.f(1)
+
+pub fn main() -> Unit !io = {
+  io.println(store(pure_in())(1))
+  let pure_box = Box { f: n => n * 2 }
+  io.println(to_string(call_box(pure_box)))
+  let io_box = Box { f: n => {
+    io.println("in the field")
+    n * 3
+  } }
+  io.println(to_string(call_box(io_box)))
+  let c: Carrier[Int] = Now(1)
+  match c {
+    Now(v) -> io.println(to_string(v))
+    Later(mk, _) -> io.println(to_string(mk()))
+  }
+}

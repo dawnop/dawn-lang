@@ -513,12 +513,6 @@ fn alias_decl(p: P, st: St, is_pub: Bool, is_opaque: Bool) -> PR[Decl] = {
         tp.lo, tp.hi, "trait bounds go on the functions that use the type: fn f[T: Ord](...)")))
     }
   }
-  if len(eparam_decls) > 0 {
-    let e = eparam_decls[0]
-    let what = if is_opaque { "opaque type" } else { "alias" }
-    return Err((st3, pd_h(what ++ " declarations cannot declare effect parameters", e.lo, e.hi,
-      "only a function signature binds an effect variable: fn f[T, !e](...)")))
-  }
   let (st4, _) = want(p, st3, EQ, "`=`")?
   let (st5, target) = type_ref(p, st4)?
   let names = map(tparam_decls, t => t.name)
@@ -527,6 +521,7 @@ fn alias_decl(p: P, st: St, is_pub: Bool, is_opaque: Bool) -> PR[Decl] = {
     is_opaque: is_opaque,
     name: name.text,
     tparams: names,
+    eparams: map(eparam_decls, e => e.name),
     ctors: [],
     is_record: false,
     derives: [],
@@ -549,15 +544,11 @@ fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
         tp.lo, tp.hi, "trait bounds go on the functions that use the type: fn f[T: Ord](...)")))
     }
   }
-  if len(eparam_decls) > 0 {
-    let e = eparam_decls[0]
-    return Err((st3, pd_h("type declarations cannot declare effect parameters", e.lo, e.hi,
-      "only a function signature binds an effect variable: fn f[T, !e](...)")))
-  }
   let tparams = map(tparam_decls, t => t.name)
+  let eparams = map(eparam_decls, e => e.name)
   let (st4, _) = want(p, st3, EQ, "`=`")?
   if at_kind(p, st4, LBRACE) {
-    return record_decl(p, st4, is_pub, kw, name, tparams)
+    return record_decl(p, st4, is_pub, kw, name, tparams, eparams)
   }
   # `type` declares a nominal type only. The parser recognizes alias shapes,
   # not names: a bare TYPEIDENT is always a constructor, and the checker owns
@@ -598,6 +589,7 @@ fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
     is_opaque: false,
     name: name.text,
     tparams: tparams,
+    eparams: eparams,
     ctors: ctors,
     is_record: false,
     derives: derives,
@@ -639,7 +631,8 @@ fn record_decl(
   is_pub: Bool,
   kw: Token,
   name: Token,
-  tparams: List[String]
+  tparams: List[String],
+  eparams: List[String]
 ) -> PR[Decl] = {
   var st1 = skip_nl(p, adv1(p, st))
   var fields: List[FieldDecl] = []
@@ -670,6 +663,7 @@ fn record_decl(
     is_opaque: false,
     name: name.text,
     tparams: tparams,
+    eparams: eparams,
     ctors: [ctor],
     is_record: true,
     derives: derives,

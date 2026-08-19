@@ -235,25 +235,38 @@ pub fn bind_fn(cx: Cx, name: String, sig: Sig, org: Origin, lo: Int, hi: Int) ->
 
 # ---- declaration-site type checks ----
 
-## The span of the first effect variable inside a type reference, if any.
-pub fn effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
+## The first effect atom inside a type reference that this declaration does not
+## account for, with the span of the function type that wrote it. `!io` is
+## always accounted for, and so is any name the declaration binds in its own
+## parameter table (`type Box[!e] = { f: fn(Int) -> Int !e }`).
+##
+## The name comes back with the span because the two things left over need
+## different sentences, and only the name tells them apart.
+pub fn stray_eff_atom(ref: TypeRef, bound: List[String]) -> Option[(String, Int, Int)] =
   match ref {
     TAssoc(_, _, _, _) -> None
     TFn(params, ret, effs, lo, hi) -> {
       for a in effs {
-        if a != "io" { return Some((lo, hi)) }
+        # An uppercase atom is stray whatever the binder list holds. The parser
+        # will not put one in that list, but the refusal that reads this must
+        # not depend on the parser for a soundness rule: a label in a field is
+        # refused because evidence travels with the closure, not because the
+        # spelling failed to get into a table.
+        if a != "io" && (upper_first(a) || not list_has_name(bound, a)) {
+          return Some((a, lo, hi))
+        }
       }
       for p in params {
-        match effvar_span(p) {
+        match stray_eff_atom(p, bound) {
           Some(s) -> return Some(s)
           None -> ()
         }
       }
-      effvar_span(ret)
+      stray_eff_atom(ret, bound)
     }
     TTuple(elems, _, _) -> {
       for e in elems {
-        match effvar_span(e) {
+        match stray_eff_atom(e, bound) {
           Some(s) -> return Some(s)
           None -> ()
         }
@@ -262,7 +275,7 @@ pub fn effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
     }
     TQual(_, _, targs, _, _) -> {
       for e in targs {
-        match effvar_span(e) {
+        match stray_eff_atom(e, bound) {
           Some(s) -> return Some(s)
           None -> ()
         }
@@ -271,7 +284,7 @@ pub fn effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
     }
     TNamed(_, targs, _, _) -> {
       for e in targs {
-        match effvar_span(e) {
+        match stray_eff_atom(e, bound) {
           Some(s) -> return Some(s)
           None -> ()
         }
@@ -280,28 +293,91 @@ pub fn effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
     }
   }
 
+fn list_has_name(names: List[String], n: String) -> Bool = {
+  for x in names {
+    if x == n { return true }
+  }
+  false
+}
+
+## Uppercase first code point. cx.dawn draws the same line inside a row, where
+## the casing is what says "declared effect" rather than "variable"; this is a
+## two-line copy rather than an export because the export surface is API.
+fn upper_first(s: String) -> Bool = {
+  for c in code_points(s) {
+    return char_is_upper(c)
+  }
+  false
+}
+
 ## A type declaration -- an alias target or a record/variant constructor field
-## -- carries no effect row but `!io`. Both halves of that have a reason and
-## they are different reasons, which is why the message names neither: an
-## effect variable is only introduced by a function signature (spec §6.3) and
-## would have no binder here, while a declared effect cannot be written into a
-## function type at all (docs/effects-soundness-design.md §4.1).
+## -- carries no effect row it did not bind. Two things can be left over and
+## they have different reasons, so they get different sentences (decision 8 of
+## docs/effect-params-design.md):
 ##
-## Saying which of the two it is would take knowing whether the atom names a
-## declared effect, and this pass runs before `pass_effects` registers them.
-## `refuse_written_label` in cx.dawn does name it, at every position that gets
-## as far as `resolve_type`; these two do not, because a refused declaration
-## stops here. True in the result means the reference was refused.
-pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef) -> (Cx, Bool) =
-  match effvar_span(ref) {
-    Some(sp) -> {
-      let (lo, hi) = sp
-      (cerr_h(cx, "a type declaration cannot carry an effect row", lo, hi,
-        "write !io, or leave the function type pure: an effect variable has no binder " ++
-          "here, and a declared effect belongs to the signature that raises it"), true)
+##   * a lowercase name with no binder. Since RX-10-B a declaration *can* bind
+##     one, in its own parameter table, so the refusal now says which table is
+##     missing it rather than that no such thing exists.
+##   * an uppercase name: a declared effect. That one is refused whatever the
+##     parameter table says, because evidence for a written label travels with
+##     the closure that was built under its handler and a field is not a
+##     closure (docs/effects-soundness-design.md §4.1).
+##
+## Telling them apart needs only the spelling, not the effect table, so this
+## still runs before `pass_effects` and the pass order is unchanged. The name
+## may not be a declared effect at all -- an uppercase atom that names nothing
+## is `resolve_eff_at`'s "unknown effect", and this refusal stops the
+## declaration before it gets there, which is why the sentence says "declared
+## effects" rather than naming this one as one.
+##
+## True in the result means the reference was refused.
+pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef, bound: List[String]) -> (Cx, Bool) =
+  match stray_eff_atom(ref, bound) {
+    Some(t) -> {
+      let (name, lo, hi) = t
+      if upper_first(name) {
+        (cerr_h(cx, "a type declaration cannot name the effect `" ++ name ++ "`", lo, hi,
+          "write !io, or leave the function type pure: a declared effect belongs to the " ++
+            "signature that raises it, and the handler travels with the closure"), true)
+      } else {
+        (cerr_h(cx, "effect variable `" ++ name ++ "` has no binder here", lo, hi,
+          "bind it in the declaration's parameter list -- `[!" ++ name ++
+            "]` -- or write !io, or leave the function type pure"), true)
+      }
     }
     None -> (cx, false)
   }
+
+test "a type declaration accounts for io and for the names it binds, nothing else" {
+  let ty = (e: String) => TFn([], TNamed("Int", [], 0, 3), [e], 10, 30)
+  let nothing: List[String] = []
+  assert stray_eff_atom(ty("io"), nothing) == None
+  assert stray_eff_atom(ty("e"), nothing) == Some(("e", 10, 30))
+  assert stray_eff_atom(ty("e"), ["e"]) == None
+  assert stray_eff_atom(ty("e"), ["a", "e"]) == None
+  assert stray_eff_atom(ty("b"), ["a", "e"]) == Some(("b", 10, 30))
+  # a label is stray whatever the binder list says
+  assert stray_eff_atom(ty("Ask"), ["Ask"]) == Some(("Ask", 10, 30))
+  # and it is found through the shapes a type can nest in
+  let nested = TNamed("List", [TTuple([TNamed("Int", [], 0, 3), ty("e")], 5, 40)], 4, 41)
+  assert stray_eff_atom(nested, nothing) == Some(("e", 10, 30))
+  assert stray_eff_atom(nested, ["e"]) == None
+}
+
+test "the two things a type declaration cannot carry get different sentences" {
+  let ty = (e: String) => TFn([], TNamed("Int", [], 0, 3), [e], 10, 30)
+  let nothing: List[String] = []
+  let (cx1, bad1) = refuse_decl_effvar(test_cx(), ty("e"), nothing)
+  assert bad1
+  assert cx1.diags[0].msg == "effect variable `e` has no binder here"
+  let (cx2, bad2) = refuse_decl_effvar(cx1, ty("Ask"), ["Ask"])
+  assert bad2
+  assert cx2.diags[1].msg == "a type declaration cannot name the effect `Ask`"
+  # and the binder is what makes the variable legal
+  let (cx3, bad3) = refuse_decl_effvar(cx2, ty("e"), ["e"])
+  assert not bad3
+  assert len(cx3.diags) == 2
+}
 
 fn t_lo2(t: TypeRef) -> Int =
   match t {
@@ -581,7 +657,7 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
     }
     match d.alias_target {
       Some(target) -> {
-        let (cxe, bad_eff) = refuse_decl_effvar(cx1, target)
+        let (cxe, bad_eff) = refuse_decl_effvar(cx1, target, d.eparams)
         cx1 = cxe
         var tvs: List[Ty] = []
         for tn in d.tparams {
@@ -742,7 +818,19 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
       }
     }
     let saved_tp = cx1.current_tparams
-    cx1 = Cx { ..cx1, current_tparams: tp }
+    let saved_ev = cx1.current_eff_vars
+    # The declaration's own effect binders, minted once and shared by every
+    # field: two fields that write `!e` mean one variable, and the next
+    # declaration's `!e` is a different one. Without a scope of its own this
+    # table would carry names out of the declaration that wrote them, because
+    # `resolve_eff_at` mints into whatever table is current.
+    var ev: Map[String, Eff] = map.empty()
+    for en in d.eparams {
+      let (cxe, v) = fresh_effvar(cx1, en)
+      cx1 = cxe
+      ev = map.insert(ev, en, v)
+    }
+    cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: ev }
     # pass_type_shells hands out slots 0, 1, 2, .. to the accepted constructors
     # in declaration order, so this loop reaches them in that order and the
     # rebuilt list is grown by appending. Writing at the slot instead rebuilt
@@ -767,7 +855,7 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
         }
         fnames = set.insert(fnames, f.name)
         # same refusal as an alias target: a field's `!e` would have no binder
-        let (cxe, bad_eff) = refuse_decl_effvar(cx1, f.tref)
+        let (cxe, bad_eff) = refuse_decl_effvar(cx1, f.tref, d.eparams)
         cx1 = cxe
         if bad_eff {
           fields = fields ++ [FieldI { name: f.name, ty: TyError }]
@@ -793,6 +881,7 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
     cx1 = Cx {
       ..cx1,
       current_tparams: saved_tp,
+      current_eff_vars: saved_ev,
       adts: map.insert(cx1.adts, sh.adt, AdtI { ..info, ctors: new_ctors })
     }
     di = di + 1
@@ -807,6 +896,7 @@ test "type shells and fields build recursive types" {
     is_opaque: false,
     name: "Tree",
     tparams: ["T"],
+    eparams: [],
     ctors: [
       CtorDecl { name: "Leaf", fields: no_fields(), lo: 0, hi: 4, nlo: 0, nhi: 4 },
       CtorDecl {
@@ -861,6 +951,7 @@ test "duplicate constructors and prelude clashes are caught" {
     is_opaque: false,
     name: name,
     tparams: [],
+    eparams: [],
     ctors: [CtorDecl { name: "C" ++ name, fields: [], lo: 0, hi: 1, nlo: 0, nhi: 1 }],
     is_record: false,
     derives: [],
@@ -889,6 +980,7 @@ test "redeclaring Array collides in std and nowhere else" {
     is_opaque: false,
     name: "Array",
     tparams: ["T"],
+    eparams: [],
     ctors: [CtorDecl { name: "Wrap", fields: [], lo: 0, hi: 1, nlo: 0, nhi: 1 }],
     is_record: false,
     derives: [],
@@ -927,6 +1019,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
       is_opaque: false,
       name: "A",
       tparams: [],
+      eparams: [],
       ctors: [],
       is_record: false,
       derives: [],
@@ -941,6 +1034,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
       is_opaque: false,
       name: "B",
       tparams: [],
+      eparams: [],
       ctors: [],
       is_record: false,
       derives: [],
@@ -955,6 +1049,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
       is_opaque: false,
       name: "P",
       tparams: [],
+      eparams: [],
       ctors: [CtorDecl {
         name: "P",
         fields: [FieldDecl {

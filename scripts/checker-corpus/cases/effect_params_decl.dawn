@@ -1,0 +1,24 @@
+# passes.dawn: a type declaration may bind effect parameters, and only names it
+# binds are let through (docs/effect-params-design.md knife 3, decision 8).
+# The accept half of the boundary lives in effect_params_decl_ok.dawn; here the
+# golden records the two refusals and the reason each gives.
+effect Ask { fn get() -> Int }
+
+# a lowercase name with no binder: the declaration has a parameter list and
+# this name is not in it
+alias Unbound = fn(Int) -> Int !e
+
+type UnboundField = { f: fn(Int) -> Int !e }
+
+# bound, but not the one that was written
+alias WrongName[!a] = fn(Int) -> Int !b
+
+# an uppercase name is a declared effect, and a parameter list does not help:
+# the handler travels with the closure, and a field is not a closure
+alias Labelled[!e] = fn(Int) -> Int !Ask
+
+type LabelledField[!e] = { f: fn(Int) -> Int !Ask }
+
+# an uppercase name that is not a declared effect at all stops here too, which
+# is why the sentence does not claim this one is declared
+alias Unknown = fn(Int) -> Int !Nope
