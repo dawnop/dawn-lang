@@ -44,6 +44,19 @@ name: gates
 #
 # The setup they each repeat is ~40s and comes out of
 # .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
+#
+# The run's wall clock is its longest job, and the 3x budget rule already
+# forces every job's worst observation into its own budget line -- so the line
+# below caps what any of those lines may claim, and the #299 speedup is held
+# by check-gate-budgets.py instead of by memory. A job that regresses past the
+# pole must restate its budget, the restatement collides with the pole, and
+# raising the pole is a visible, reviewable edit rather than a silent slide.
+# 660s = native-diff's historical worst (589s, in export-surface's note) with
+# headroom for its documented non-reproducibility; every other job's figure
+# sits at or under 557s. This pins the per-job claims, not the literal run
+# wall clock: queueing and the coverage guard's tail are outside it, and a
+# checker cannot read a future run.
+# run-pole: 660s (the worst figure any job's budget line may claim)
 on:
   workflow_call:
 
@@ -697,13 +710,14 @@ jobs:
   # of that list but the toolchain.
   native-diff:
     runs-on: ubuntu-latest
-    # This is the one gate whose cost is not reproducible: 281s, 365s and 533s
-    # on three observations of an unchanged script, because run.sh drives the
-    # corpus four at a time on a 4-vCPU runner and how that lands is not ours
-    # to decide. The bound is 3x the worst of them, not 3x the average -- an
-    # average would put a routinely-observed run inside the kill window.
-    # budget: 3x 533s worst observed
-    timeout-minutes: 27
+    # This is the one gate whose cost is not reproducible: 281s, 365s, 533s
+    # and 557s (run 32102660458, 2026-08-18) on observations of an unchanged
+    # script, because run.sh drives the corpus four at a time on a 4-vCPU
+    # runner and how that lands is not ours to decide. The bound is 3x the
+    # worst of them, not 3x the average -- an average would put a
+    # routinely-observed run inside the kill window.
+    # budget: 3x 557s worst observed
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
