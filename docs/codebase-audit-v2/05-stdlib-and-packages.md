@@ -491,3 +491,9 @@
 > 这一对正好是对照组。顺带撞出一条：`docs/package-design.md` 说 v2 换名规则「从第 0 天机器
 > 强制」，实测 selfhost 里无人执行（包 manifest 的 `name`/`version` 只被 `dawn add` 读来拼
 > `[deps.<name>]`），规则大概随 M8 归档 Kotlin CLI 一起失传，另立账处置。
+>
+> **撤回（2026-08-20）**：上段推论错了，grep 事实为真但执行点在 compiler_plan 包内，
+> selfhost 以路径依赖消费它。链路级勘察实测：build/check、路径依赖、`dawn add`、url 依赖
+> 四条链路对违规名（web@3.0.0）全部拒绝，两个调用点（manifestv 自查与 MVS 选择点查真名）
+> 各自被观测到；对照组（web3、sha2@2.0.0、别名拼 `web`）全过。规则从未失传，零实施，
+> 文档承诺属实。裁决回写见 package-design.md §3。
