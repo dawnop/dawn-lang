@@ -24,3 +24,14 @@ fn leak[T: P](x: T) -> Int = run(x, 1)
 
 # the outermost frame cannot carry a projection
 pub fn main[T: P]() -> Unit !T.E = ()
+
+# an io base beside a projection: io absorbs variables, never an atom -- the
+# row keeps the evidence slot, so this declares and forwards cleanly
+fn io_and[T: P](x: T) -> Int !io !T.E = run(x, 1)
+
+# ... and the other direction: `!io` does not cover a projection, so a
+# closure whose row carries one is refused at an `!io` parameter (the same
+# rule that keeps a labelled closure out of one)
+fn take(f: fn() -> Int !io) -> Int !io = f()
+
+fn misuse[T: P](x: T) -> Int !io !T.E = take(() => run(x, 1))
