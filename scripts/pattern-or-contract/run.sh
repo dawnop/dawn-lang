@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
 # Or-patterns have one arm, one environment and source-level negative controls.
+#
+#   ./scripts/pattern-or-contract/run.sh              # everything
+#   ./scripts/pattern-or-contract/run.sh --shard 2/3  # fixtures + a third
+#
+# Sharding exists because a mutant costs one whole compiler build plus the
+# complete probe. Every shard runs the fixture half and validates the whole
+# matrix, so no shard is a partial verdict about what the contract asserts;
+# the mutants are divided round-robin, and each shard records what it ran for
+# scripts/mutant-coverage/check.py to hold the union to the matrix.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/pattern-or-contract"
 dawn=${DAWN_BIN:-"$root/bin/dawn"}
+
+# shellcheck source=scripts/mutant-coverage/shard.sh
+source "$root/scripts/mutant-coverage/shard.sh"
+shard_parse "$@"
+if [ "${#shard_rest[@]}" -gt 0 ]; then
+  echo "pattern-or-contract: unknown argument(s): ${shard_rest[*]}" >&2
+  exit 2
+fi
 fixture="$root/scripts/checker-corpus/cases/or_pattern.dawn"
 complexity_fixture="$here/complexity.dawn"
 budget_fixture="$here/budget.dawn"
@@ -406,10 +423,17 @@ expect_source_mutant_red() {
   echo "PASS  $name changes production source and turns only '$expected' red"
 }
 
+shard_begin pattern-or-contract
+mutant_position=0
 while IFS=$'\t' read -r record name relative expected; do
   if [ "$record" == mutant ]; then
-    expect_source_mutant_red "$name" "$relative" "$expected"
+    if ! shard_skips "$mutant_position"; then
+      shard_record "$name"
+      expect_source_mutant_red "$name" "$relative" "$expected"
+    fi
+    mutant_position=$((mutant_position + 1))
   fi
 done < "$matrix"
+shard_report "$mutant_position"
 
 echo "pattern-or-contract: OK"

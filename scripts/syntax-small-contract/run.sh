@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Parser ownership, checker-owned builtin alias hints, and the nominal
+# singleton/nullary boundary, each held by a compiling production mutant.
+#
+#   ./scripts/syntax-small-contract/run.sh                      # everything
+#   ./scripts/syntax-small-contract/run.sh --shard 2/3          # fixtures + a third
+#   ./scripts/syntax-small-contract/run.sh --only <mutant>      # one mutant, no children
+#
+# This runner also drives the pattern-or and for-pattern matrices, forwarding
+# its own --shard so one CI job carries one slice of the whole syntax family.
+# Every shard runs every fixture assertion of all three harnesses (seconds
+# each), so no shard is a partial verdict about what the contracts assert;
+# only the compiling mutants -- one whole compiler build each -- are divided
+# round-robin. Each shard records what it ran, and
+# scripts/mutant-coverage/check.py holds the union to the matrices.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -9,12 +23,49 @@ builtin_hint_fixture="$root/scripts/checker-corpus/cases/builtin_alias_hint.dawn
 builtin_hint_expected="$root/scripts/checker-corpus/cases/builtin_alias_hint.expected"
 builtin_boundary_fixture="$root/scripts/checker-corpus/cases/builtin_alias_boundary.dawn"
 builtin_boundary_expected="$root/scripts/checker-corpus/cases/builtin_alias_boundary.expected"
+matrix="$root/scripts/syntax-small-contract/matrix.txt"
 work=$(mktemp -d "${TMPDIR:-/tmp}/syntax-small-contract.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+
+# shellcheck source=scripts/mutant-coverage/shard.sh
+source "$root/scripts/mutant-coverage/shard.sh"
+shard_parse "$@"
+only=
+if [ "${#shard_rest[@]}" -gt 0 ]; then
+  case "${shard_rest[0]}" in
+    --only)
+      [ "${#shard_rest[@]}" -eq 2 ] || { echo "--only needs a mutant name" >&2; exit 2; }
+      only=${shard_rest[1]}
+      ;;
+    *)
+      echo "syntax-small-contract: unknown argument(s): ${shard_rest[*]}" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 fail() {
   echo "FAIL: $*" >&2
   exit 1
+}
+
+# The executable mutant list, in run order. matrix.txt is the persistent
+# record the coverage checker reads; the two are held equal in both
+# directions below, so a mutant added to one place cannot go missing from
+# the other.
+mutants=(
+  drop-opaque-anchor
+  drop-rbracket-return-boundary
+  restore-parser-builtin-branch
+  narrow-checker-builtin-hint
+  drop-builtin-alias-boundary
+)
+
+printf '%s\n' "${mutants[@]}" > "$work/matrix.executable"
+grep -v '^#' "$matrix" | grep -v '^$' > "$work/matrix.recorded" || true
+cmp -s "$work/matrix.executable" "$work/matrix.recorded" || {
+  diff -u "$work/matrix.recorded" "$work/matrix.executable" >&2 || true
+  fail "matrix.txt and the runner's executable mutant list disagree"
 }
 
 capture_checker_cli() {
@@ -120,13 +171,38 @@ assert_checker_exact "$work/builtin-boundary.out" "$builtin_boundary_expected" \
   }
 echo "PASS  builtin alias ownership, uniform hints, and nominal boundaries"
 
-mutant="$work/drop-opaque-anchor"
-mkdir -p "$mutant"
-cp -R "$root/selfhost" "$mutant/selfhost"
-cp -R "$root/compiler-plan" "$mutant/compiler-plan"
-ln -s "$root/packages" "$mutant/packages"
+new_syntax_mutant() {
+  mdir="$work/$1"
+  mkdir -p "$mdir"
+  cp -R "$root/selfhost" "$mdir/selfhost"
+  cp -R "$root/compiler-plan" "$mdir/compiler-plan"
+  ln -s "$root/packages" "$mdir/packages"
+}
 
-python3 - "$mutant/selfhost/src/front/parser.dawn" <<'PY'
+build_syntax_mutant() {
+  if ! "$dawn" build "$mdir/selfhost" -o "$mdir/compiler.jar" \
+      > "$mdir/build.out" 2>&1; then
+    cat "$mdir/build.out" >&2
+    fail "$1 mutant did not compile"
+  fi
+}
+
+expect_owning_test_red() {
+  local name=$1 owning_test=$2
+  if "$dawn" test "$mdir/selfhost" > "$mdir/test.out" 2>&1; then
+    fail "$name mutant stayed green"
+  fi
+  if ! grep -Fxq "$owning_test" "$mdir/test.out"; then
+    cat "$mdir/test.out" >&2
+    fail "$name mutant missed its owning test"
+  fi
+}
+
+run_syntax_mutant() {
+  new_syntax_mutant "$1"
+  case "$1" in
+    drop-opaque-anchor)
+      python3 - "$mdir/selfhost/src/front/parser.dawn" <<'PY'
 from pathlib import Path
 import sys
 
@@ -147,30 +223,14 @@ if text.count(old) != 1:
     raise SystemExit("drop-opaque-anchor mutation anchor drifted")
 path.write_text(text.replace(old, new))
 PY
+      build_syntax_mutant "$1"
+      expect_owning_test_red "$1" \
+        'FAIL  front/parser_test :: declaration recovery anchors at contextual opaque type'
+      echo "PASS  drop-opaque-anchor compiles, then turns the owning recovery test red"
+      ;;
 
-if ! "$dawn" build "$mutant/selfhost" -o "$mutant/compiler.jar" \
-    > "$mutant/build.out" 2>&1; then
-  cat "$mutant/build.out" >&2
-  fail "drop-opaque-anchor mutant did not compile"
-fi
-
-if "$dawn" test "$mutant/selfhost" > "$mutant/test.out" 2>&1; then
-  fail "drop-opaque-anchor mutant stayed green"
-fi
-if ! grep -Fxq 'FAIL  front/parser_test :: declaration recovery anchors at contextual opaque type' \
-    "$mutant/test.out"; then
-  cat "$mutant/test.out" >&2
-  fail "drop-opaque-anchor mutant missed its owning recovery test"
-fi
-echo "PASS  drop-opaque-anchor compiles, then turns the owning recovery test red"
-
-return_mutant="$work/drop-rbracket-return-boundary"
-mkdir -p "$return_mutant"
-cp -R "$root/selfhost" "$return_mutant/selfhost"
-cp -R "$root/compiler-plan" "$return_mutant/compiler-plan"
-ln -s "$root/packages" "$return_mutant/packages"
-
-python3 - "$return_mutant/selfhost/src/front/parser.dawn" <<'PY'
+    drop-rbracket-return-boundary)
+      python3 - "$mdir/selfhost/src/front/parser.dawn" <<'PY'
 from pathlib import Path
 import sys
 
@@ -182,30 +242,14 @@ if text.count(old) != 1:
     raise SystemExit("drop-rbracket-return-boundary mutation anchor drifted")
 path.write_text(text.replace(old, new))
 PY
+      build_syntax_mutant "$1"
+      expect_owning_test_red "$1" \
+        'FAIL  front/parser_test :: bare return stops at every delimiter boundary'
+      echo "PASS  drop-rbracket-return-boundary compiles, then turns its owning parser test red"
+      ;;
 
-if ! "$dawn" build "$return_mutant/selfhost" -o "$return_mutant/compiler.jar" \
-    > "$return_mutant/build.out" 2>&1; then
-  cat "$return_mutant/build.out" >&2
-  fail "drop-rbracket-return-boundary mutant did not compile"
-fi
-
-if "$dawn" test "$return_mutant/selfhost" > "$return_mutant/test.out" 2>&1; then
-  fail "drop-rbracket-return-boundary mutant stayed green"
-fi
-if ! grep -Fxq 'FAIL  front/parser_test :: bare return stops at every delimiter boundary' \
-    "$return_mutant/test.out"; then
-  cat "$return_mutant/test.out" >&2
-  fail "drop-rbracket-return-boundary mutant missed its owning parser test"
-fi
-echo "PASS  drop-rbracket-return-boundary compiles, then turns its owning parser test red"
-
-parser_mutant="$work/restore-parser-builtin-branch"
-mkdir -p "$parser_mutant"
-cp -R "$root/selfhost" "$parser_mutant/selfhost"
-cp -R "$root/compiler-plan" "$parser_mutant/compiler-plan"
-ln -s "$root/packages" "$parser_mutant/packages"
-
-python3 - "$parser_mutant/selfhost/src/front/parser.dawn" <<'PY'
+    restore-parser-builtin-branch)
+      python3 - "$mdir/selfhost/src/front/parser.dawn" <<'PY'
 from pathlib import Path
 import sys
 
@@ -231,39 +275,29 @@ if text.count(type_decl) != 1 or text.count(old) != 1:
     raise SystemExit("restore-parser-builtin-branch mutation anchor drifted")
 path.write_text(text.replace(type_decl, builtin_table + type_decl).replace(old, new))
 PY
+      build_syntax_mutant "$1"
+      java -Xss512m -Xmx2g -jar "$mdir/compiler.jar" __parse "$builtin_hint_fixture" \
+        > "$mdir/parser.out"
+      if assert_parser_neutral "$mdir/parser.out" \
+          > "$mdir/assert.out" 2>&1; then
+        fail "restore-parser-builtin-branch mutant stayed green"
+      fi
+      if ! assertion_failed_exactly "$mdir/assert.out" \
+          "bare TYPEIDENT builtin aliases must stay parser-neutral" \
+          "$mdir/assert.expected"; then
+        cat "$mdir/assert.out" >&2
+        fail "restore-parser-builtin-branch mutant missed its owning assertion"
+      fi
+      capture_checker_jar "$mdir/compiler.jar" "$builtin_boundary_fixture" \
+        "$mdir/boundary.out"
+      assert_checker_exact "$mdir/boundary.out" "$builtin_boundary_expected" \
+        "only singleton nullary builtin constructors get the alias hint" ||
+        fail "restore-parser-builtin-branch mutant crossed the checker boundary assertion"
+      echo "PASS  restore-parser-builtin-branch compiles, then turns only parser ownership red"
+      ;;
 
-if ! "$dawn" build "$parser_mutant/selfhost" -o "$parser_mutant/compiler.jar" \
-    > "$parser_mutant/build.out" 2>&1; then
-  cat "$parser_mutant/build.out" >&2
-  fail "restore-parser-builtin-branch mutant did not compile"
-fi
-
-java -Xss512m -Xmx2g -jar "$parser_mutant/compiler.jar" __parse "$builtin_hint_fixture" \
-  > "$parser_mutant/parser.out"
-if assert_parser_neutral "$parser_mutant/parser.out" \
-    > "$parser_mutant/assert.out" 2>&1; then
-  fail "restore-parser-builtin-branch mutant stayed green"
-fi
-if ! assertion_failed_exactly "$parser_mutant/assert.out" \
-    "bare TYPEIDENT builtin aliases must stay parser-neutral" \
-    "$parser_mutant/assert.expected"; then
-  cat "$parser_mutant/assert.out" >&2
-  fail "restore-parser-builtin-branch mutant missed its owning assertion"
-fi
-capture_checker_jar "$parser_mutant/compiler.jar" "$builtin_boundary_fixture" \
-  "$parser_mutant/boundary.out"
-assert_checker_exact "$parser_mutant/boundary.out" "$builtin_boundary_expected" \
-  "only singleton nullary builtin constructors get the alias hint" ||
-  fail "restore-parser-builtin-branch mutant crossed the checker boundary assertion"
-echo "PASS  restore-parser-builtin-branch compiles, then turns only parser ownership red"
-
-narrow_mutant="$work/narrow-checker-builtin-hint"
-mkdir -p "$narrow_mutant"
-cp -R "$root/selfhost" "$narrow_mutant/selfhost"
-cp -R "$root/compiler-plan" "$narrow_mutant/compiler-plan"
-ln -s "$root/packages" "$narrow_mutant/packages"
-
-python3 - "$narrow_mutant/selfhost/src/check/passes.dawn" <<'PY'
+    narrow-checker-builtin-hint)
+      python3 - "$mdir/selfhost/src/check/passes.dawn" <<'PY'
 from pathlib import Path
 import sys
 
@@ -277,40 +311,30 @@ if text.count(old) != 1:
     raise SystemExit("narrow-checker-builtin-hint mutation anchor drifted")
 path.write_text(text.replace(old, new))
 PY
+      build_syntax_mutant "$1"
+      capture_checker_jar "$mdir/compiler.jar" "$builtin_boundary_fixture" \
+        "$mdir/boundary.out"
+      assert_checker_exact "$mdir/boundary.out" "$builtin_boundary_expected" \
+        "only singleton nullary builtin constructors get the alias hint" ||
+        fail "narrow-checker-builtin-hint mutant crossed the boundary assertion"
+      capture_checker_jar "$mdir/compiler.jar" "$builtin_hint_fixture" \
+        "$mdir/hint.out"
+      if assert_checker_exact "$mdir/hint.out" "$builtin_hint_expected" \
+          "all compiler-owned nongeneric aliases must share the checker hint" \
+          > "$mdir/assert.out" 2>&1; then
+        fail "narrow-checker-builtin-hint mutant stayed green"
+      fi
+      if ! assertion_failed_exactly "$mdir/assert.out" \
+          "all compiler-owned nongeneric aliases must share the checker hint" \
+          "$mdir/assert.expected"; then
+        cat "$mdir/assert.out" >&2
+        fail "narrow-checker-builtin-hint mutant missed its owning assertion"
+      fi
+      echo "PASS  narrow-checker-builtin-hint compiles, then turns only uniform hints red"
+      ;;
 
-if ! "$dawn" build "$narrow_mutant/selfhost" -o "$narrow_mutant/compiler.jar" \
-    > "$narrow_mutant/build.out" 2>&1; then
-  cat "$narrow_mutant/build.out" >&2
-  fail "narrow-checker-builtin-hint mutant did not compile"
-fi
-
-capture_checker_jar "$narrow_mutant/compiler.jar" "$builtin_boundary_fixture" \
-  "$narrow_mutant/boundary.out"
-assert_checker_exact "$narrow_mutant/boundary.out" "$builtin_boundary_expected" \
-  "only singleton nullary builtin constructors get the alias hint" ||
-  fail "narrow-checker-builtin-hint mutant crossed the boundary assertion"
-capture_checker_jar "$narrow_mutant/compiler.jar" "$builtin_hint_fixture" \
-  "$narrow_mutant/hint.out"
-if assert_checker_exact "$narrow_mutant/hint.out" "$builtin_hint_expected" \
-    "all compiler-owned nongeneric aliases must share the checker hint" \
-    > "$narrow_mutant/assert.out" 2>&1; then
-  fail "narrow-checker-builtin-hint mutant stayed green"
-fi
-if ! assertion_failed_exactly "$narrow_mutant/assert.out" \
-    "all compiler-owned nongeneric aliases must share the checker hint" \
-    "$narrow_mutant/assert.expected"; then
-  cat "$narrow_mutant/assert.out" >&2
-  fail "narrow-checker-builtin-hint mutant missed its owning assertion"
-fi
-echo "PASS  narrow-checker-builtin-hint compiles, then turns only uniform hints red"
-
-boundary_mutant="$work/drop-builtin-alias-boundary"
-mkdir -p "$boundary_mutant"
-cp -R "$root/selfhost" "$boundary_mutant/selfhost"
-cp -R "$root/compiler-plan" "$boundary_mutant/compiler-plan"
-ln -s "$root/packages" "$boundary_mutant/packages"
-
-python3 - "$boundary_mutant/selfhost/src/check/passes.dawn" <<'PY'
+    drop-builtin-alias-boundary)
+      python3 - "$mdir/selfhost/src/check/passes.dawn" <<'PY'
 from pathlib import Path
 import sys
 
@@ -322,32 +346,53 @@ if text.count(old) != 1:
     raise SystemExit("drop-builtin-alias-boundary mutation anchor drifted")
 path.write_text(text.replace(old, new))
 PY
+      build_syntax_mutant "$1"
+      capture_checker_jar "$mdir/compiler.jar" "$builtin_hint_fixture" \
+        "$mdir/hint.out"
+      assert_checker_exact "$mdir/hint.out" "$builtin_hint_expected" \
+        "all compiler-owned nongeneric aliases must share the checker hint" ||
+        fail "drop-builtin-alias-boundary mutant crossed the uniform-hint assertion"
+      capture_checker_jar "$mdir/compiler.jar" "$builtin_boundary_fixture" \
+        "$mdir/boundary.out"
+      if assert_checker_exact "$mdir/boundary.out" "$builtin_boundary_expected" \
+          "only singleton nullary builtin constructors get the alias hint" \
+          > "$mdir/assert.out" 2>&1; then
+        fail "drop-builtin-alias-boundary mutant stayed green"
+      fi
+      if ! assertion_failed_exactly "$mdir/assert.out" \
+          "only singleton nullary builtin constructors get the alias hint" \
+          "$mdir/assert.expected"; then
+        cat "$mdir/assert.out" >&2
+        fail "drop-builtin-alias-boundary mutant missed its owning assertion"
+      fi
+      echo "PASS  drop-builtin-alias-boundary compiles, then turns only nominal boundaries red"
+      ;;
 
-if ! "$dawn" build "$boundary_mutant/selfhost" -o "$boundary_mutant/compiler.jar" \
-    > "$boundary_mutant/build.out" 2>&1; then
-  cat "$boundary_mutant/build.out" >&2
-  fail "drop-builtin-alias-boundary mutant did not compile"
-fi
+    *) fail "no assertion for mutant $1" ;;
+  esac
+}
 
-capture_checker_jar "$boundary_mutant/compiler.jar" "$builtin_hint_fixture" \
-  "$boundary_mutant/hint.out"
-assert_checker_exact "$boundary_mutant/hint.out" "$builtin_hint_expected" \
-  "all compiler-owned nongeneric aliases must share the checker hint" ||
-  fail "drop-builtin-alias-boundary mutant crossed the uniform-hint assertion"
-capture_checker_jar "$boundary_mutant/compiler.jar" "$builtin_boundary_fixture" \
-  "$boundary_mutant/boundary.out"
-if assert_checker_exact "$boundary_mutant/boundary.out" "$builtin_boundary_expected" \
-    "only singleton nullary builtin constructors get the alias hint" \
-    > "$boundary_mutant/assert.out" 2>&1; then
-  fail "drop-builtin-alias-boundary mutant stayed green"
-fi
-if ! assertion_failed_exactly "$boundary_mutant/assert.out" \
-    "only singleton nullary builtin constructors get the alias hint" \
-    "$boundary_mutant/assert.expected"; then
-  cat "$boundary_mutant/assert.out" >&2
-  fail "drop-builtin-alias-boundary mutant missed its owning assertion"
-fi
-echo "PASS  drop-builtin-alias-boundary compiles, then turns only nominal boundaries red"
+if [ -n "$only" ]; then
+  found=0
+  for name in "${mutants[@]}"; do
+    if [ "$name" = "$only" ]; then
+      run_syntax_mutant "$name"
+      found=1
+    fi
+  done
+  [ "$found" -eq 1 ] || fail "no mutant named $only"
+else
+  shard_begin syntax-small-contract
+  position=0
+  for name in "${mutants[@]}"; do
+    if ! shard_skips "$position"; then
+      shard_record "$name"
+      run_syntax_mutant "$name"
+    fi
+    position=$((position + 1))
+  done
+  shard_report "${#mutants[@]}"
 
-"$root/scripts/pattern-or-contract/run.sh"
-"$root/scripts/for-pattern-contract/run.sh"
+  "$root/scripts/pattern-or-contract/run.sh" --shard "$shard_index/$shard_total"
+  "$root/scripts/for-pattern-contract/run.sh" --shard "$shard_index/$shard_total"
+fi
