@@ -58,11 +58,15 @@ pub type Request = {
   # inside Headers is deliberately not relied on — a Request built by hand in
   # a test must behave exactly like one built from the wire.
   headers: Map[String, List[String]],
-  body: String,
-  # the request body as raw Bytes: binary handlers (multipart upload) parse
-  # structure and recover exact file bytes from here, no latin-1 detour.
-  # Empty on a "stream-body" route — the body went to `body_file` instead.
-  raw: Bytes,
+  # the request body exactly as it came off the wire, raw Bytes: binary
+  # handlers (multipart upload) parse structure and recover exact file bytes
+  # from here. Text handlers take the UTF-8 view through `body_text`, which
+  # refuses a malformed body with a 400 instead of rewriting it — the old
+  # `body: String` field was an unconditional lossy decode every request paid
+  # for, upload routes included, and a U+FFFD in it was indistinguishable from
+  # one the client sent. Empty on a "stream-body" route — the body went to
+  # `body_file` instead.
+  body: Bytes,
   # Where the body landed for routes tagged "stream-body" (WebDAV PUT): the server
   # streamed the socket to this temp file instead of reading it into memory, so a
   # PUT costs a fixed buffer rather than a copy of the file. A path, not a stream:
@@ -559,12 +563,25 @@ pub fn headers_all(req: Request, name: String) -> List[String] =
     None -> []
   }
 
+# 400, not a panic and not a replacement character: the wire is the client's
+# to get wrong, and refusing is what axum and actix-web do on the same input.
+# The offset is `Utf8Error.offset` — how many leading bytes decoded cleanly —
+# so a client can name the byte its encoder broke at.
+## The body decoded as UTF-8, or a 400 naming the byte offset of the first
+## malformed sequence — never a silent U+FFFD rewrite. A caller that truly
+## wants the lossy view still has `bytes.decode_utf8_lossy(req.body)`.
+pub fn body_text(req: Request) -> Result[String, HttpError] =
+  match bytes.decode_utf8_checked(req.body) {
+    Ok(s) -> Ok(s)
+    Err(e) -> Err(http_error(400, "request body is not valid UTF-8 (offset ${e.offset})"))
+  }
+
 test "param reads captures and flags missing ones" {
   let h: Map[String, List[String]] = map.empty()
   let q: Map[String, List[String]] = map.empty()
   let req = Request {
     method: "GET", path: "/a/42", raw_path: "/a/42",
-    params: map.from([("id", ["42"])]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
+    params: map.from([("id", ["42"])]), query: q, headers: h, body: bytes.utf8(""), body_file: None,
     route: None,
   }
   assert param(req, "id") == Ok("42")
@@ -578,7 +595,7 @@ test "param reads captures and flags missing ones" {
 test "query_int_bounded: absent uses default, out-of-range and non-int are 422" {
   let h: Map[String, List[String]] = map.empty()
   let mk = (q: Map[String, List[String]]) => Request {
-    method: "GET", path: "/a", raw_path: "/a", params: map.empty(), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
+    method: "GET", path: "/a", raw_path: "/a", params: map.empty(), query: q, headers: h, body: bytes.utf8(""), body_file: None,
     route: None,
   }
   # absent -> default
@@ -609,7 +626,7 @@ test "param_int rejects non-numbers as a client error" {
   let q: Map[String, List[String]] = map.empty()
   let req = Request {
     method: "GET", path: "/a/x", raw_path: "/a/x",
-    params: map.from([("id", ["x"])]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
+    params: map.from([("id", ["x"])]), query: q, headers: h, body: bytes.utf8(""), body_file: None,
     route: None,
   }
   match param_int(req, "id") {
@@ -622,7 +639,7 @@ test "header lookup is case-insensitive" {
   let req = Request {
     method: "GET", path: "/", raw_path: "/", params: map.empty(), query: map.empty(),
     headers: map.from([("authorization", ["Bearer xyz"]), ("content-type", ["application/json"])]),
-    body: "", raw: bytes.utf8(""), body_file: None,
+    body: bytes.utf8(""), body_file: None,
     route: None,
   }
   assert header(req, "Authorization") == Some("Bearer xyz")
@@ -634,7 +651,7 @@ test "a repeated query parameter keeps every value, in wire order" {
   let req = Request {
     method: "GET", path: "/a", raw_path: "/a", params: map.empty(),
     query: map.from([("tag", ["a", "b", "c"]), ("page", ["2"])]),
-    headers: map.empty(), body: "", raw: bytes.utf8(""), body_file: None, route: None,
+    headers: map.empty(), body: bytes.utf8(""), body_file: None, route: None,
   }
   # query() is the single-value view: the first, matching header()
   assert query(req, "tag") == Some("a")
@@ -650,7 +667,7 @@ test "repeated request headers keep every value" {
   let req = Request {
     method: "GET", path: "/", raw_path: "/", params: map.empty(), query: map.empty(),
     headers: map.from([("cookie", ["a=1", "b=2"])]),
-    body: "", raw: bytes.utf8(""), body_file: None,
+    body: bytes.utf8(""), body_file: None,
     route: None,
   }
   # header() is the single-value view: the first, as it always was
@@ -659,6 +676,27 @@ test "repeated request headers keep every value" {
   # headers_all shares header()'s case-insensitivity
   assert headers_all(req, "COOKIE") == ["a=1", "b=2"]
   assert headers_all(req, "missing") == []
+}
+
+test "body_text decodes a valid body and refuses a malformed one at its offset" {
+  let mk = (b: Bytes) => Request {
+    method: "POST", path: "/a", raw_path: "/a", params: map.empty(), query: map.empty(),
+    headers: map.empty(), body: b, body_file: None, route: None,
+  }
+  assert body_text(mk(bytes.utf8(""))) == Ok("")
+  # a valid body round-trips exactly, multi-byte sequences included
+  assert body_text(mk(bytes.utf8("a中😀"))) == Ok("a中😀")
+  # a U+FFFD the client really sent is data, not an error
+  assert body_text(mk(bytes.utf8("a\u{FFFD}b"))) == Ok("a\u{FFFD}b")
+  # 61 FF 62: one clean byte before the invalid one, so the offset is 1
+  let bad = bytes.freeze(bytes.put(bytes.put(bytes.put(bytes.buf(), 0x61), 0xFF), 0x62))
+  match body_text(mk(bad)) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.status == 400
+      assert e.message == "request body is not valid UTF-8 (offset 1)"
+    }
+  }
 }
 
 test "response header helpers" {
@@ -875,7 +913,7 @@ test "the 422 wording separates name from complaint, by configuration" {
   let h: Map[String, List[String]] = map.empty()
   let mk = (q: Map[String, List[String]]) => Request {
     method: "GET", path: "/a", raw_path: "/a", params: map.empty(), query: q, headers: h,
-    body: "", raw: bytes.utf8(""), body_file: None, route: None,
+    body: bytes.utf8(""), body_file: None, route: None,
   }
   let over = mk(map.from([("size", ["999"])]))
   # default: an ASCII colon and a space

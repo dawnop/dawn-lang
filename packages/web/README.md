@@ -64,6 +64,27 @@ it holds the *segments* a capture matched, not repeated values. A duplicate
 capture name is a route-table error that `validate_routes` refuses at startup,
 so no path parameter ever has two values.
 
+## Request body (4.0)
+
+`Request.body` is the wire bytes (`Bytes`), exactly as they arrived. The UTF-8
+view is an accessor:
+
+```dawn
+let source = body_text(req)?   # 400 on a malformed body, naming the byte offset
+```
+
+Binary handlers (multipart upload) parse `req.body` directly; routes tagged
+`stream-body` still get a temp-file path in `body_file` and an empty `body`.
+
+Until 4.0 a `body: String` field sat next to the bytes (then named `raw`),
+filled by an unconditional `decode_utf8_lossy` every request paid for, upload
+routes included. Lossy is the wrong default at a trust boundary: a malformed
+body reached the handler silently rewritten, and a `U+FFFD` in it was
+indistinguishable from one the client sent. Refusing with `400` is what axum
+and actix-web do on the same input; a caller that truly wants the lossy view
+still has `bytes.decode_utf8_lossy(req.body)`, one line, stated at the call
+site.
+
 ## CORS and OPTIONS (2.1)
 
 `with_cors` answers a **preflight** itself and lets everything else through to
@@ -91,9 +112,9 @@ dot segment and the `413` for an oversized body. Both are decided before the
 body is read, and used to be rendered before the middleware chain on the grounds
 that there was no `Request` yet. There is: everything a `Request` holds apart
 from the body comes off the request line and the headers. What the middleware
-sees on those paths is honest but partial. `body` and `raw` are empty, because
+sees on those paths is honest but partial. `body` is empty, because
 not reading the body is the whole point of refusing this early;
-`with_body_limit`, which reads `raw`, passes. The dot-segment check runs after
+`with_body_limit`, which reads `body`, passes. The dot-segment check runs after
 dispatch so that its `400` carries the matched route's tags: a WebDAV path is
 `no-cors` whether or not it contains a dot segment.
 

@@ -18,7 +18,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response, error_response_with, streaming, text, binary, raw, header, headers_all, query, query_all, param, param_segs, with_header, valid_header_name, valid_header_value, escape_field}
+use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response, error_response_with, streaming, text, binary, raw, header, headers_all, query, query_all, param, param_segs, body_text, with_header, valid_header_name, valid_header_value, escape_field}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, tagged}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -64,10 +64,13 @@ fn declared_length(ex: HttpExchange) -> Int !io =
     None -> 0
   }
 
-# Read the whole request body once as Bytes (spec §9.5.1), plus its UTF-8 decode
-# for the common text/JSON/form handlers. Binary handlers (multipart upload,
-# WebDAV PUT) take the raw Bytes and recover exact file bytes with no latin-1
-# detour — a single decode, not two.
+# Read the whole request body once, as the raw Bytes it is on the wire (spec
+# §9.5.1). No decode happens here: text handlers take the UTF-8 view through
+# `types.body_text`, which refuses a malformed body with a 400, and binary
+# handlers (multipart upload, WebDAV PUT) parse the bytes directly. The
+# unconditional lossy decode every request used to pay for — upload routes
+# included, into a String nothing read — is gone with the old (String, Bytes)
+# pair.
 #
 # `limit` is a hard ceiling on bytes read, and it is enforced *here* rather than
 # by a middleware afterwards. The old arrangement called readAllBytes() and let
@@ -78,11 +81,10 @@ fn declared_length(ex: HttpExchange) -> Int !io =
 # that can ever be allocated for one.
 #
 # limit <= 0 means unbounded, for the routes that opt out (see `handle`).
-fn read_body(ex: HttpExchange, limit: Int) -> Result[(String, Bytes), HttpError] !io = {
+fn read_body(ex: HttpExchange, limit: Int) -> Result[Bytes, HttpError] !io = {
   let stream = ex.getRequestBody()!
   if limit <= 0 {
-    let raw = stream.readAllBytes()!
-    Ok((bytes.decode_utf8_lossy(raw), raw))
+    Ok(stream.readAllBytes()!)
   } else if declared_length(ex) > limit {
     Err(http_error(413, "request body exceeds $limit bytes"))
   } else {
@@ -90,7 +92,7 @@ fn read_body(ex: HttpExchange, limit: Int) -> Result[(String, Bytes), HttpError]
     if bytes.len(raw) > limit {
       Err(http_error(413, "request body exceeds $limit bytes"))
     } else {
-      Ok((bytes.decode_utf8_lossy(raw), raw))
+      Ok(raw)
     }
   }
 }
@@ -438,9 +440,11 @@ fn multimap(ps: List[(String, String)]) -> Map[String, List[String]] =
 # still encoded (`%40` for '@' in an email, and so on).
 ## An `application/x-www-form-urlencoded` body as a multimap: every value of a
 ## repeated name survives in wire order, the same shape `Request.query` and
-## `Request.headers` have. Read one value with `form_value`, all of them with
-## `form_all`. It used to be `Map[String, String]`, where a multi-select (the
-## reason HTML forms repeat a name at all) silently kept only its last option.
+## `Request.headers` have. The argument is the body's UTF-8 view — a handler
+## gets it with `body_text(req)?`. Read one value with `form_value`, all of
+## them with `form_all`. It used to be `Map[String, String]`, where a
+## multi-select (the reason HTML forms repeat a name at all) silently kept only
+## its last option.
 pub fn parse_form(body: String) -> Map[String, List[String]] !io =
   multimap(parse_query(body))
 
@@ -499,8 +503,7 @@ fn bodyless_request(ex: HttpExchange, meta: Option[RouteMeta]) -> Request !io = 
     params: no_params,
     query: q,
     headers: read_headers(ex),
-    body: "",
-    raw: bytes.utf8(""),
+    body: bytes.utf8(""),
     body_file: None,
     route: meta,
   }
@@ -520,9 +523,9 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, error
   # inside the record literal, after the spill — a malformed request line
   # faulting there left the temp file with no owner.)
   let base = bodyless_request(ex, meta)
-  let (body, raw) = if streaming { ("", bytes.utf8("")) } else { read_body(ex, limit)? }
+  let body = if streaming { bytes.utf8("") } else { read_body(ex, limit)? }
   let bf: Option[String] = if streaming { Some(spill_body(errors, ex)?) } else { None }
-  Ok(Request { ..base, body: body, raw: raw, body_file: bf })
+  Ok(Request { ..base, body: body, body_file: bf })
 }
 
 # The ownership rule for a spilled body, with its two moving parts passed in so
@@ -1347,7 +1350,7 @@ test "param refuses to read a tail capture as one string" {
   let req = Request {
     method: "GET", path: "/dav/a/b", raw_path: "/dav/a/b",
     params: map.from([("rest", ["a/b", "c"]), ("id", ["7"])]),
-    query: map.empty(), headers: map.empty(), body: "", raw: bytes.utf8(""),
+    query: map.empty(), headers: map.empty(), body: bytes.utf8(""),
     body_file: None, route: None,
   }
   # a single-segment capture reads exactly as before
@@ -1551,6 +1554,48 @@ fn a_temp_file() -> File !io = File.createTempFile("dawn-spill-test-", ".tmp")!
 
 fn file_exists(path: String) -> Bool !io = File.new(path).exists()
 
+# Test-only: a raw POST whose body bytes the caller controls exactly — the one
+# client here that will put invalid UTF-8 on the wire (HttpClient publishers
+# all start from Strings or files this test would have to write).
+fn post_bytes(port: Int, path: String, body: Bytes) -> String !io = {
+  let s = Socket.new("127.0.0.1", port)
+  let out = s.getOutputStream()!
+  out.write(bytes.utf8("POST " ++ path ++ " HTTP/1.1\r\nHost: t\r\nContent-Length: ${to_string(bytes.len(body))}\r\nConnection: close\r\n\r\n"))
+  out.write(body)
+  out.flush()
+  let resp = bytes.decode_utf8_lossy(s.getInputStream()!.readAllBytes()!)
+  s.close()
+  resp
+}
+
+# The shape every JSON/form route has now: take the UTF-8 view, let `?`
+# propagate the 400 for a body that has none.
+fn echo_body_text(req: Request) -> Result[Response, HttpError] !io = {
+  let s = body_text(req)?
+  Ok(text(200, s))
+}
+
+test "an invalid UTF-8 body on a text route is a 400 naming the offset" {
+  # Under the old lossy `body: String` this request was silently accepted: the
+  # handler saw "a\u{FFFD}b" and answered 200, and nothing anywhere could tell
+  # the substitution from a U+FFFD the client really sent.
+  let routes = [route_post("/t", echo_body_text)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  # 61 FF 62: 'a', an invalid byte, 'b' — one clean byte, so the offset is 1
+  let bad = bytes.freeze(bytes.put(bytes.put(bytes.put(bytes.buf(), 0x61), 0xFF), 0x62))
+  let refused = post_bytes(port, "/t", bad)
+  assert str.starts_with(refused, "HTTP/1.1 400")
+  assert str.contains(refused, "request body is not valid UTF-8 (offset 1)")
+  # the same route under a valid body is untouched, byte-exact CJK included
+  let ok = post_bytes(port, "/t", bytes.utf8("中文ok"))
+  assert str.starts_with(ok, "HTTP/1.1 200")
+  assert str.contains(ok, "中文ok")
+  srv.stop(0)
+}
+
 test "an interrupted spill deletes its temp file instead of leaking it" {
   let tmp = a_temp_file()
   let path = String.valueOf(tmp.getPath()!)!
@@ -1576,7 +1621,7 @@ test "a completed spill hands its path over, and the Request is what drops it" {
       # the bracket release `handle` installs around the handler call)
       drop_body_file(Request {
         method: "PUT", path: "/x", raw_path: "/x", params: map.empty(), query: map.empty(),
-        headers: map.empty(), body: "", raw: bytes.utf8(""), body_file: Some(p), route: None,
+        headers: map.empty(), body: bytes.utf8(""), body_file: Some(p), route: None,
       })
       assert file_exists(p) == false
     }

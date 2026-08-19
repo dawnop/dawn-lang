@@ -5,7 +5,7 @@
 use std/str
 use std/bytes
 use java "java.util.concurrent.Semaphore"
-use web/types.{Request, Response, HttpError, text, raw}
+use web/types.{Request, Response, HttpError, text, raw, body_text}
 use web/router.{Route, route_get, route_post}
 use web/server.{serve_app}
 use web/middleware.{with_logging}
@@ -31,19 +31,24 @@ fn health(req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "ok"))
 fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, HttpError] !io =
   # bytes, not code points: str.len counts characters, so a program written in
   # CJK got up to three times the stated budget
-  if bytes.len(req.raw) > MAX_BODY {
+  if bytes.len(req.body) > MAX_BODY {
     Ok(raw(413, JSON_CT, render_error("source exceeds ${MAX_BODY} bytes")))
   } else {
-    match parse_request(req.body) {
-      Err(msg) -> Ok(raw(400, JSON_CT, render_error(msg)))
-      Ok(code) -> {
-        let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
-        # Hold a permit across execution only; with_gate releases it even if the
-        # compiler panics, then we render outside the permit. None = saturated.
-        match with_gate(gate, wait, () => if check_only { check(code) } else { execute(code) }) {
-          Some(outcome) ->
-            Ok(raw(200, JSON_CT, if check_only { render_check(outcome) } else { render_outcome(outcome) }))
-          None -> Ok(raw(429, JSON_CT, render_error("server busy, try again shortly")))
+    # body_text refuses a malformed body; render the refusal in the contract's
+    # own error shape like every other refusal here, not the framework's
+    match body_text(req) {
+      Err(e) -> Ok(raw(400, JSON_CT, render_error(e.message)))
+      Ok(source) -> match parse_request(source) {
+        Err(msg) -> Ok(raw(400, JSON_CT, render_error(msg)))
+        Ok(code) -> {
+          let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
+          # Hold a permit across execution only; with_gate releases it even if the
+          # compiler panics, then we render outside the permit. None = saturated.
+          match with_gate(gate, wait, () => if check_only { check(code) } else { execute(code) }) {
+            Some(outcome) ->
+              Ok(raw(200, JSON_CT, if check_only { render_check(outcome) } else { render_outcome(outcome) }))
+            None -> Ok(raw(429, JSON_CT, render_error("server busy, try again shortly")))
+          }
         }
       }
     }
