@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 9de4b657979e7e3f -->
+<!-- doc-check: translation-of docs/spec.md @ 4b486959e43ecf0b -->
 
 # Dawn Language Specification
 
@@ -742,8 +742,9 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   from `Eq[T]`. No dyn (for heterogeneous collections see "Heterogeneous collections" at the end
   of this section; the reasoning behind the verdict and the conditions for reopening it are in
   [trait.md](trait.md) §10), no supertraits, no specialisation (no asking "which one is more
-  specific"). A trait method's effect can only be pure or `!io`, and an impl's effect ⊑ the trait
-  declaration's.
+  specific"). A trait method's effect row can be pure, `!io` or an **effect variable**, but never a
+  named label (§6.5 Boundaries); an impl's effect ⊑ the trait declaration's, and the two sides'
+  effect variables are paired by position.
 - **Associated types** (design and verdicts in
   [assoc-types-design.md](assoc-types-design.md)): a trait body may declare a bare `type Item`
   member (no bound, no default), and an impl **binds each declaration exactly once** with
@@ -1750,10 +1751,23 @@ Consequences:
 
 #### Boundaries (v1)
 
-The following positions refuse named effects outright, with the same offence and the same
-diagnostic as effect variables:
+The following positions refuse named effects outright; except for trait / impl methods, an effect
+variable is the same offence with the same diagnostic:
 
-- **trait / impl methods**: a method's row is pure or `!io`.
+- **trait / impl methods**: a method's row may carry an **effect variable**, but not a named
+  label. The variable is introduced by this very signature (§6.3's implicit introduction counts as
+  *bound* here), synthesises no evidence, and leaves the dictionary slot untouched; a label would
+  ask the caller to hand evidence over at the call site, and the slot has no room for it.
+  `trait Container[C] { fn wrap(c: C, body: fn() -> Int !e) -> Int !e }` is therefore legal, and
+  the `!e` is the **caller's**: one call of `wrap` takes a pure closure, another takes an `!io`
+  one. The impl's and the trait's effect variables are paired **by position** (the order each
+  signature introduces them: the row, then the parameters left to right, then the return type);
+  the spellings need not agree, and unequal counts are an error. Once paired, the impl's row must
+  be covered by the trait's: pure always is (doing less than the row admits to is not a lie),
+  and so is exactly the variable it was paired with; an unrelated label or `!io` is not.
+  A trait method's **default body** is checked like any other body: it can forward along the
+  variable (call the closure), but cannot install a handler — a rigid effect has no name for
+  `with handle` to spell.
 - **comptime / const initialisers**: compile-time evaluation performs no named effect and cannot
   install a handler either.
 - **Written function types**: `fn(…) -> T !E` is illegal in any `TypeRef` position — parameters,
@@ -1769,6 +1783,10 @@ diagnostic as effect variables:
   Write it as a lambda (`() => ask()`) and the lambda captures the evidence.
 - `unsafe_pure` masks io only, **not labels**: labels are the input to evidence synthesis, and
   masking one breaks the parameter.
+- **Effect-polymorphic code forwards, it does not settle**: `with handle E` names one concrete
+  effect syntactically, so the point where a handler is installed is always monomorphic. A `!e` in
+  a signature can only pass the row along; installing a handler means writing the effect's name.
+  The other face of the same wall is that `pub fn main`'s labels must be empty.
 
 #### Implementation (informative)
 

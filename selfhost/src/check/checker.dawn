@@ -9521,6 +9521,87 @@ test "the four refusals: trait, impl, comptime, type declaration" {
   assert len(cx6.diags) == 0
 }
 
+test "a trait or impl method's row may carry effect variables" {
+  let env: Map[String, ModExports] = map.empty()
+  # the shape #208 asks for: the closure's effect is the *caller's*, so the
+  # trait method forwards a variable it neither picks nor settles
+  let tr = "trait Container[C] {\n" ++
+    "  fn wrap(c: C, body: fn() -> Int !e) -> Int !e\n}\n" ++
+    "type P = { v: Int }\n"
+  let check = (src: String) => {
+    let (m, ps) = parser.parse_module(src)
+    assert len(ps) == 0
+    let (cx, _) = check_module(test_cx(), m, env)
+    cx
+  }
+  # an impl that forwards the variable satisfies the row exactly
+  assert len(check(tr ++
+      "impl Container[P] {\n" ++
+      "  fn wrap(c: P, body: fn() -> Int !e) -> Int !e = body()\n}\n").diags) == 0
+  # so does a pure one: pure is the bottom of the base axis, and an impl that
+  # does less than the row admits to is not a lie about the row
+  assert len(check(tr ++
+      "impl Container[P] {\n  fn wrap(c: P, body: fn() -> Int !e) -> Int = c.v\n}\n").diags) == 0
+  # names do not have to agree -- the two sides' variables are paired by
+  # position (mint order), not by spelling
+  assert len(check(tr ++
+      "impl Container[P] {\n" ++
+      "  fn wrap(c: P, body: fn() -> Int !zz) -> Int !zz = body()\n}\n").diags) == 0
+  # `!io` does not: the row promises "whatever the caller's closure does", and
+  # an unconditionally effectful impl does more than that
+  let cio = check(tr ++
+      "impl Container[P] {\n" ++
+      "  fn wrap(c: P, body: fn() -> Int !e) -> Int !io = body()\n}\n")
+  assert len(cio.diags) == 1
+  assert cio.diags[0].msg == "`wrap` is declared !io but trait `Container` declares it !e"
+  # a permutation of the positions is not a renaming: the impl's row takes the
+  # trait's *second* variable, so the pairing puts the first one on `body` and
+  # the parameter types stop matching
+  let cperm = check("trait Two[C] {\n" ++
+      "  fn f(c: C, g: fn() -> Int !a, h: fn() -> Int !b) -> Int !a\n}\n" ++
+      "type P = { v: Int }\n" ++
+      "impl Two[P] {\n" ++
+      "  fn f(c: P, g: fn() -> Int !a, h: fn() -> Int !b) -> Int !b = h()\n}\n")
+  assert len(cperm.diags) == 1
+  assert cperm.diags[0].msg == "`f` does not match the trait's signature"
+  assert cperm.diags[0].hint ==
+    "trait `Two` declares it as fn f(P, fn() -> Int !b, fn() -> Int !a) -> Int !b"
+  # a variable the impl does not bind at all is an arity mismatch, reported
+  # with both signatures
+  let carity = check("trait One[C] {\n  fn f(c: C) -> Int !e\n}\n" ++
+      "type P = { v: Int }\n" ++
+      "impl One[P] {\n  fn f(c: P) -> Int = c.v\n}\n")
+  assert len(carity.diags) == 1
+  assert carity.diags[0].msg == "`f` binds 0 effect variable(s) but trait `One` binds 1"
+  assert str.contains(carity.diags[0].hint, "this impl declares fn f(P) -> Int")
+  # a named label is still refused on both sides (effect-params-design.md 刀 5)
+  let clabel = check("effect Ask {\n  fn ask() -> Int\n}\n" ++
+      "trait W[T] {\n  fn w(x: T) -> Int !Ask\n}\n")
+  assert clabel.diags[0].msg == "trait methods cannot declare the effect `Ask`"
+}
+
+test "a trait default body forwards the method's effect variable" {
+  let env: Map[String, ModExports] = map.empty()
+  let src = (row: String) => "trait Container[C] {\n" ++
+    "  fn wrap(c: C, body: fn() -> Int !e) -> Int !e = body()\n" ++
+    "  fn twice(c: C, body: fn() -> Int !e) -> Int" ++ row ++
+    " = wrap(c, body) + wrap(c, body)\n}\n" ++
+    "type P = { v: Int }\nimpl Container[P] { }\n"
+  # the default body is checked like any other annotated function: it may call
+  # through the variable, which is all a rigid effect can do (nothing installs
+  # a handler for a row it cannot name)
+  let (m1, p1) = parser.parse_module(src(" !e"))
+  assert len(p1) == 0
+  let (cx1, _) = check_module(test_cx(), m1, env)
+  assert len(cx1.diags) == 0
+  # and it is held to its own row: a pure default cannot forward one
+  let (m2, p2) = parser.parse_module(src(""))
+  assert len(p2) == 0
+  let (cx2, _) = check_module(test_cx(), m2, env)
+  assert len(cx2.diags) == 1
+  assert str.contains(cx2.diags[0].msg, "`twice`")
+}
+
 test "an operation cannot be a value, and unsafe_pure cannot mask a label" {
   let cx = eff_check("fn f() -> Int !Ask = {\n  let g = ask\n  g()\n}\n")
   assert cx.diags[0].msg == "effect operation `ask` raises !Ask and cannot be used as a value"

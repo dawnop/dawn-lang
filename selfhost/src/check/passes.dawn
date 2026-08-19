@@ -28,7 +28,8 @@ use check/types.{
   TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, EffVar, ELabeled,
   Audience, AWorld, AStdOnly, AModule, audience_covers, decl_audience, declared_audience,
   trait_audience, builtin_type_audience, internal_std_modules,
-  eff_subsumes, eff_suffix, eff_labels, eff_params_of, EffectI, ev_record_name,
+  eff_subsumes, eff_suffix, eff_show, eff_labels, eff_params_of, subst_eff,
+  EffectI, ev_record_name,
   AdtI, CtorI, FieldI,
   TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, ty_show, fn_return_show, sig_render, subst,
   reduce_via_bindings, ty_named, builtin_type_at, builtin_type_name_reserved,
@@ -1209,28 +1210,31 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     tp = map.insert(tp, d.tp, tvar)
     let saved_tp = cx1.current_tparams
     for me in d.methods {
-      var non_io = false
       var label = ""
       for a in me.effs {
-        if a != "io" {
-          non_io = true
-          if map.has(cx1.effects, a) && label == "" { label = a }
-        }
+        if a != "io" && map.has(cx1.effects, a) && label == "" { label = a }
       }
-      if non_io {
-        # the fourth refusal of design §4.5: a trait method's row is pure or
-        # io, and a declared effect is neither
-        let msg = if label != "" {
-          "trait methods cannot declare the effect `" ++ label ++ "`"
-        } else {
-          "trait methods cannot declare effect variables"
-        }
-        cx1 = cerr_h(cx1, msg, me.nlo, me.nhi, "a trait method is pure or !io")
+      if label != "" {
+        # A named effect is still refused here (effect-params-design.md 刀 5
+        # lifts it): a written label means the caller supplies the handler
+        # through an evidence parameter, and a dictionary slot has no place to
+        # put one. An effect *variable* is a different animal -- it brings no
+        # label of its own, so it synthesises no evidence, and it is bound by
+        # this very signature (spec §6.3), which is why the row may carry it.
+        cx1 = cerr_h(cx1, "trait methods cannot declare the effect `" ++ label ++ "`",
+          me.nlo, me.nhi, "a trait method is pure or !io")
         continue
       }
       let saved_ev = cx1.current_eff_vars
       let empty_ev: Map[String, Eff] = map.empty()
       cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: empty_ev }
+      # the row resolves before the parameter types, so mint order here is the
+      # order `eff_params_of` documents and `pass_fn_signatures` produces: the
+      # row, then the parameters left to right, then the return type. The impl
+      # side resolves in the same order, which is what makes the positional
+      # pairing in `pass_register_impls` mean anything.
+      let (cxef, eff) = resolve_eff_at(cx1, me.effs, me.nlo, me.nhi)
+      cx1 = cxef
       var ptys: List[Ty] = []
       for p in me.params {
         # Dawn already has a trait-level "default" (the default method body),
@@ -1251,7 +1255,6 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       cx1 = cx5
       let eparams = eff_params_of(cx1.current_eff_vars)
       cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
-      let eff = if len(me.effs) == 0 { EPure } else { EIo }
       let sig = Sig {
         name: me.name,
         param_tys: ptys,
@@ -1270,13 +1273,9 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       }
       # a declared effect in one of these types is refused by `resolve_type`
       # above, naming the effect and the position (cx.dawn's
-      # refuse_written_label); an effect variable has no such refusal, because
-      # it is legal in the position and illegal only in a trait
-      if len(sig.eparams) > 0 {
-        cx1 = cerr_h(cx1, "trait method signatures cannot carry effect variables",
-          me.nlo, me.nhi, "write !io on the function type, or leave it pure")
-        continue
-      }
+      # refuse_written_label). An effect variable in one of them is accepted:
+      # it rides in `sig.eparams` and is aligned against the impl's own
+      # variables in `pass_register_impls`.
       let has_default = match me.body {
         Some(_) -> true
         None -> false
@@ -1698,27 +1697,26 @@ pub fn pass_register_impls(
         msigs = msigs ++ [no_sig()]
         continue
       }
-      var non_io = false
       var label2 = ""
       for a in me.effs {
-        if a != "io" {
-          non_io = true
-          if map.has(cx1.effects, a) && label2 == "" { label2 = a }
-        }
+        if a != "io" && map.has(cx1.effects, a) && label2 == "" { label2 = a }
       }
-      if non_io {
-        let msg2 = if label2 != "" {
-          "impl methods cannot declare the effect `" ++ label2 ++ "`"
-        } else {
-          "impl methods cannot declare effect variables"
-        }
-        cx1 = cerr_h(cx1, msg2, me.nlo, me.nhi, "an impl method is pure or !io")
+      if label2 != "" {
+        # the trait side's refusal, for the same reason: a label is evidence a
+        # dictionary slot cannot carry. A variable is bound by the signature
+        # and carries none.
+        cx1 = cerr_h(cx1, "impl methods cannot declare the effect `" ++ label2 ++ "`",
+          me.nlo, me.nhi, "an impl method is pure or !io")
         msigs = msigs ++ [no_sig()]
         continue
       }
       let saved_ev = cx1.current_eff_vars
       let empty_ev2: Map[String, Eff] = map.empty()
       cx1 = Cx { ..cx1, current_eff_vars: empty_ev2 }
+      # row first, then parameters, then the return type -- the trait side's
+      # mint order, which the pairing below reads back positionally
+      let (cxef2, eff) = resolve_eff_at(cx1, me.effs, me.nlo, me.nhi)
+      cx1 = cxef2
       var ptys: List[Ty] = []
       for p in me.params {
         # calls dispatch through the trait's signature, which has no
@@ -1739,7 +1737,6 @@ pub fn pass_register_impls(
         None -> (cx1, TyError)
       }
       cx1 = cx4
-      let eff = if len(me.effs) == 0 { EPure } else { EIo }
       let eparams = eff_params_of(cx1.current_eff_vars)
       cx1 = Cx { ..cx1, current_eff_vars: saved_ev }
       let msig = Sig {
@@ -1762,12 +1759,35 @@ pub fn pass_register_impls(
         op_of: None,
         inferring: false
       }
-      if len(msig.eparams) > 0 {
-        cx1 = cerr(cx1, "impl method signatures cannot carry effect variables",
-          me.nlo, me.nhi)
-        msigs = msigs ++ [no_sig()]
-        continue
+      # Align the two signatures' effect variables before comparing them. Both
+      # sides minted their own, so the trait's `!e` and the impl's `!e` are
+      # different ids and would never compare equal -- the check below was
+      # vacuous only because both rows used to be forced to `EPure`/`EIo`.
+      #
+      # The pairing is positional over `Sig.eparams`, which is mint order (the
+      # row, then the parameters left to right, then the return type), the same
+      # discipline the type axis already uses: an impl method has no type
+      # parameter list either, and the trait's are substituted by position
+      # through `inst`. Names do not have to agree, so a consistent renaming is
+      # accepted and a permutation of the *positions* is not.
+      #
+      # The substitution runs trait -> impl, so `want`, `want_ret` and the
+      # renders below all speak the impl's spelling. Unequal lengths leave it
+      # empty and are reported on their own, after the shape check: a dropped
+      # variable usually shows up in a parameter type first, and that is the
+      # more useful report.
+      var em: Map[Int, Eff] = em0
+      if len(msv.sig.eparams) == len(msig.eparams) {
+        var epi = 0
+        for tev in msv.sig.eparams {
+          match tev {
+            EffVar(_, tevid) -> { em = map.insert(em, tevid, msig.eparams[epi]) }
+            _ -> ()
+          }
+          epi = epi + 1
+        }
       }
+      let em2 = em
       let inst2 = inst
       let adts2 = cx1.adts
       # the impl is not in the table yet, so a `C.Item` in the trait's
@@ -1776,18 +1796,33 @@ pub fn pass_register_impls(
       let tid2 = tid
       let subject2 = subject
       let want = map(msv.sig.param_tys,
-        t => reduce_via_bindings(subst(t, inst2, em0), tid2, subject2, ab2))
-      let want_ret = reduce_via_bindings(subst(msv.sig.ret, inst2, em0), tid2, subject2, ab2)
+        t => reduce_via_bindings(subst(t, inst2, em2), tid2, subject2, ab2))
+      let want_ret = reduce_via_bindings(subst(msv.sig.ret, inst2, em2), tid2, subject2, ab2)
+      let want_eff = subst_eff(msv.sig.eff, em2)
       let want_render = "fn " ++ me.name ++ "(" ++
         join(map(want, t => ty_show(adts2, t)), ", ") ++ ") -> " ++
-        fn_return_show(cx1.adts, want_ret, msv.sig.eff) ++ eff_suffix(msv.sig.eff)
+        fn_return_show(cx1.adts, want_ret, want_eff) ++ eff_suffix(want_eff)
       if ptys != want || ret != want_ret {
         cx1 = cerr_h(cx1, "`" ++ me.name ++ "` does not match the trait's signature",
           me.nlo, me.nhi, "trait `" ++ tr.name ++ "` declares it as " ++ want_render)
-      } else if not eff_subsumes(msv.sig.eff, eff) {
-        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` is declared !" ++ eff_show2(eff) ++
-            " but trait `" ++ tr.name ++ "` declares it pure", me.nlo, me.nhi,
-          "drop !" ++ eff_show2(eff) ++ " here, or declare the trait method !" ++ eff_show2(eff))
+      } else if len(msv.sig.eparams) != len(msig.eparams) {
+        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` binds ${len(msig.eparams)} effect variable(s) " ++
+            "but trait `" ++ tr.name ++ "` binds ${len(msv.sig.eparams)}", me.nlo, me.nhi,
+          "they are paired in the order they are written; trait `" ++ tr.name ++
+            "` declares it as " ++ want_render ++ ", this impl declares " ++
+            "fn " ++ me.name ++ "(" ++ join(map(ptys, t => ty_show(adts2, t)), ", ") ++
+            ") -> " ++ fn_return_show(cx1.adts, ret, eff) ++ eff_suffix(eff))
+      } else if not eff_subsumes(want_eff, eff) {
+        # `want_eff` is the trait's row in the impl's variables. Subsumption in
+        # this direction is what a row means: pure satisfies anything (an impl
+        # that does less than the trait promised is fine), a variable satisfies
+        # itself, and nothing else satisfies a variable -- an impl that is
+        # unconditionally `!io` does more than "whatever the caller's closure
+        # does", which is all the trait's row admits to.
+        let trait_side = if want_eff == EPure { "pure" } else { "!" ++ eff_show(want_eff) }
+        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` is declared !" ++ eff_show(eff) ++
+            " but trait `" ++ tr.name ++ "` declares it " ++ trait_side, me.nlo, me.nhi,
+          "drop !" ++ eff_show(eff) ++ " here, or declare the trait method !" ++ eff_show(eff))
       }
       provided = provided ++ [me.name]
       msigs = msigs ++ [Some(msig)]
@@ -1932,9 +1967,6 @@ fn check_eq_hash_pairs(cx: Cx, eq_hash_impls: List[(Int, Ty, Int, Int)]) -> Cx =
   }
   cx1
 }
-
-## Render a concrete effect for the impl-method error text ("io").
-fn eff_show2(e: Eff) -> String = if e == EIo { "io" } else { "" }
 
 test "impl registration enforces coherence and signature matching" {
   # trait Eq4[T] { fn eq4(a: T, b: T) -> Bool }  impl Eq4[Int] twice + one bad sig
