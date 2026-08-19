@@ -254,8 +254,9 @@ backend only). See [docs/package-design.md](docs/package-design.md).
 
 The built-in LSP server exists once per backend with byte-aligned output: live
 diagnostics, hover, go-to-definition, document outline. The front end does full error
-recovery, so a broken file reports all of its errors at once. VS Code / Neovim / Helix
-configuration is in [editors/](editors/).
+recovery, so a broken file reports all of its errors at once. The VS Code extension is
+on the [marketplace](https://marketplace.visualstudio.com/items?itemName=dawnop.dawn-lang)
+(`dawnop.dawn-lang`); Neovim / Helix configuration is in [editors/](editors/).
 
 ### Two different things are called "native"
 

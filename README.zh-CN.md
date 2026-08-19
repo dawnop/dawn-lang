@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 1fda1c55359613e7 -->
+<!-- doc-check: translation-of README.md @ af06bd9b28516620 -->
 
 # Dawn
 
@@ -205,8 +205,9 @@ impl 一致性是全程序唯一映射）与 `[java-deps]`（coursier 解析 Mav
 有意义），见 [docs/package-design.md](docs/package-design.md)。
 
 内置 LSP 服务器两个后端各有一份、输出逐字节对齐：实时诊断、悬停、跳转定义、文档大纲；
-前端做了完整的错误恢复，文件残缺时一次报出全部错误。VS Code / Neovim / Helix 配置见
-[editors/](editors/)。
+前端做了完整的错误恢复，文件残缺时一次报出全部错误。VS Code 扩展已上
+[marketplace](https://marketplace.visualstudio.com/items?itemName=dawnop.dawn-lang)
+（`dawnop.dawn-lang`）；Neovim / Helix 配置见 [editors/](editors/)。
 
 ### 两样东西都叫「native」
 
