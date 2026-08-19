@@ -143,26 +143,29 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  syntax-mutants-2:
-    runs-on: ubuntu-latest
-    # budget: 3x 450s predicted from the unsplit step's worst observed 1111s
-    timeout-minutes: 23
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: syntax ownership and recovery contract (shard 2)
-        env:
-          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/syntax-small-contract/run.sh --shard 2/3
-      - name: record which mutants this shard ran
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutant-coverage-syntax-2
-          path: ${{ runner.temp }}/mutant-coverage
-          if-no-files-found: error
-          retention-days: 1
+  # NEGATIVE CONTROL (#299): this shard job is deliberately disabled so
+  # mutant-shards-complete can be watched turning red on a real run.
+  # Do not merge this commit.
+  #  syntax-mutants-2:
+  #    runs-on: ubuntu-latest
+  #    # budget: 3x 450s predicted from the unsplit step's worst observed 1111s
+  #    timeout-minutes: 23
+  #    steps:
+  #      - uses: actions/checkout@v4
+  #      - uses: ./.github/actions/dawn-toolchain
+  #        with:
+  #          github-token: ${{ secrets.GITHUB_TOKEN }}
+  #      - name: syntax ownership and recovery contract (shard 2)
+  #        env:
+  #          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+  #        run: ./scripts/syntax-small-contract/run.sh --shard 2/3
+  #      - name: record which mutants this shard ran
+  #        uses: actions/upload-artifact@v4
+  #        with:
+  #          name: mutant-coverage-syntax-2
+  #          path: ${{ runner.temp }}/mutant-coverage
+  #          if-no-files-found: error
+  #          retention-days: 1
 
   syntax-mutants-3:
     runs-on: ubuntu-latest
@@ -1141,7 +1144,6 @@ jobs:
   mutant-shards-complete:
     needs:
       - syntax-mutants-1
-      - syntax-mutants-2
       - syntax-mutants-3
       - builtin-type-1
       - builtin-type-2
