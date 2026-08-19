@@ -277,10 +277,23 @@ type ev$Ask = { ask: fn() -> Int }
 type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
 ```
 
-- **刻意不复用 CDict**：字典是账本外的无头静态表（rc.dawn:513-521、types.dawn:192-197），
+- **刻意不复用 CDict**：字典是账本外的无头静态表（`dictish` 在 rc.dawn:531-539，
+  它的注释在 :528-530；types.dawn:343-347 是同一条规则从类型侧看的样子），
   而 handler 臂是捕获局部的真闭包，必须进 RC 账本。备忘录 §1.5.2 的裁决在此落地：
   证据是普通值，走普通记录 + 普通闭包的全部既有通路——**两个后端、interp、Perceus
   一行都不用改**。「字典轨」被复用的是它的调用约定（隐藏尾参、固定序），不是它的表示。
+- **不复用 CDict 还有第二条独立理由：参数化字典永活。** `dawn_dict_new`
+  （runtime/c/dawn_rt.c:195）在运行期分配一个带实参的字典，同处注释（:176-180）写明它
+  lives forever，并用 `DAWN_LSAN_OWN`（:181-193）对它 `__lsan_ignore_object`；
+  [perceus-design.md](perceus-design.md) 的「字典不加头」一段（:176-183）把「`dawn_dict_new`
+  造出来的参数化字典会泄漏」写成契约而非待办。证据一旦进字典的 `args`，它捕获的那些局部
+  就跟着永久泄漏。第三条更硬：`args` 的元素类型是 `struct dawn_dict *`
+  （runtime/c/dawn_rt.h:271），结构上放不下一个 ADT。
+- **「两个后端、interp、Perceus 一行都不用改」在规则丙下仍然成立，加一条限定**：Perceus
+  与 interp 确实一行不动，两个后端要动的只有**描述符**（JVM 的接口与槽位签名加宽、C 的
+  槽位 cast 形状加宽），而擦除的那一格在 JVM 是 `Ljava/lang/Object;`、在 native 是
+  `void*`，两处都是既有形状。规则丙的条文与代价见
+  [effect-params-design.md](effect-params-design.md) 的决策 5（已裁，2026-08-19）。
 - 由此 D11 的判据（core-move2-design §「受保护区间恒为一次闭包调用→运行时原语零
   Core 节点」）以更强形式成立：连运行时原语都不需要，纯 lowering。
 
