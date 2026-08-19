@@ -224,10 +224,14 @@ with handle E { 臂… } 之后，装 handler 的这个块记账：
   否则照常报「`?` 的载体类型不符」）。
 - **`return`/`break`/`continue`**：块剩余闭包内照拒（with 糖现规，checker.dawn:3355+），
   臂身体内同拒（同一条规则，臂也是 sugar 闭包）；两处诊断都点名 `with handle`。
-- **trait/impl 方法**：labels 必须为空——在既有三处拒绝（trait 方法禁效果变量等，
-  现址 passes.dawn:1256-1259、:1742-1744，随 pass 拆分从 checker.dawn 搬来）旁边加同款
-  第四条（已落地，passes.dawn:1218-1227、:1706-1714）。解禁等 RX-10-B，设计见
-  [effect-params-design.md](effect-params-design.md)。
+- **trait/impl 方法**：**labels 必须为空，效果变量放行**（RX-10-B 刀 4 已落地）。
+  拒绝只剩两处，都只看标签：trait 方法 passes.dawn:1315-1323、impl 方法 :1800-1806，
+  各自的注释写着同一条理由——写出来的标签意味着调用方经证据参数供 handler，而字典槽位
+  没地方放它；效果变量不带标签，也就不合成证据，且由这条签名自己绑定（spec §6.3）。
+  旧稿在这里记的另两处（`eparams` 级的「trait/impl method signatures cannot carry
+  effect variables」，曾在 passes.dawn:1276-1279、:1766-1768）**已随刀 4 删除**，
+  代之以两侧按位对齐的元数检查（:1905-1911）。
+  标签的解禁等刀 5，设计见 [effect-params-design.md](effect-params-design.md)。
 - **comptime / const**：v1 一律拒绝具名效果（`leave_isolated` 通路加 labels 检查，
   checker.dawn:4580-4589）。「handler 是纯的就该放行」是真问题，但把「纯 handler」
   判据做对需要臂效果的组合推理，v1 不背——今天的「否」从偶然变成裁决，留档重开。
