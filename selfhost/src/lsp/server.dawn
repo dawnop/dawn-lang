@@ -954,81 +954,45 @@ test "header lines require a nonempty ASCII token name" {
   }
 }
 
-fn is_utf8_continuation(byte: Int) -> Bool = byte >= 0x80 && byte <= 0xBF
-
-## The public bytes decoder deliberately replaces malformed input. LSP JSON
-## must instead reject it, so validate the wire bytes before decoding without
-## changing the language-wide replacement contract.
-fn valid_utf8(raw: Bytes) -> Bool = {
-  let total = bytes.len(raw)
-  var index = 0
-  while index < total {
-    let first = bytes.at(raw, index)
-    if first <= 0x7F {
-      index = index + 1
-    } else if first >= 0xC2 && first <= 0xDF {
-      if index + 1 >= total || not is_utf8_continuation(bytes.at(raw, index + 1)) {
-        return false
-      }
-      index = index + 2
-    } else if first >= 0xE0 && first <= 0xEF {
-      if index + 2 >= total { return false }
-      let second = bytes.at(raw, index + 1)
-      let third = bytes.at(raw, index + 2)
-      let second_ok = if first == 0xE0 {
-        second >= 0xA0 && second <= 0xBF
-      } else if first == 0xED {
-        second >= 0x80 && second <= 0x9F
-      } else {
-        is_utf8_continuation(second)
-      }
-      if not second_ok || not is_utf8_continuation(third) { return false }
-      index = index + 3
-    } else if first >= 0xF0 && first <= 0xF4 {
-      if index + 3 >= total { return false }
-      let second = bytes.at(raw, index + 1)
-      let third = bytes.at(raw, index + 2)
-      let fourth = bytes.at(raw, index + 3)
-      let second_ok = if first == 0xF0 {
-        second >= 0x90 && second <= 0xBF
-      } else if first == 0xF4 {
-        second >= 0x80 && second <= 0x8F
-      } else {
-        is_utf8_continuation(second)
-      }
-      let rest_ok = is_utf8_continuation(third) && is_utf8_continuation(fourth)
-      if not second_ok || not rest_ok {
-        return false
-      }
-      index = index + 4
-    } else {
-      return false
-    }
-  }
-  true
-}
-
 fn bytes_of(values: List[Int]) -> Bytes = {
   var out = bytes.buf()
   for value in values { out = bytes.put(out, value) }
   bytes.freeze(out)
 }
 
-test "LSP bodies require strict UTF-8 before replacement decoding" {
-  assert valid_utf8(bytes.utf8("\"plain 中😀�\""))
-  # Replacement decoding turns these bytes into the valid JSON string "�";
-  # accepting the decoded text would therefore hide an invalid wire body.
-  assert not valid_utf8(bytes_of([0x22, 0x80, 0x22]))
-  assert not valid_utf8(bytes_of([0xC0, 0xAF]))
-  assert not valid_utf8(bytes_of([0xED, 0xA0, 0x80]))
-  assert not valid_utf8(bytes_of([0xF4, 0x90, 0x80, 0x80]))
-  assert not valid_utf8(bytes_of([0xE2, 0x82]))
-}
-
 ## The outcome of one read. `Malformed` is reserved for a complete, bounded
 ## frame whose JSON body is bad and therefore leaves the next boundary known;
 ## framing errors are fatal because their next byte cannot be trusted.
 type Frame = Eof | Message(value: Json) | Malformed(code: Int, why: String) | Fatal
+
+## A complete body, decoded and parsed. LSP JSON must reject malformed UTF-8
+## rather than accept its replacement decoding, so the strict decoder is the
+## boundary: `decode_utf8_checked` answers `Ok` for exactly the inputs the
+## lossy one returns unchanged (LIB-06).
+fn decode_body(body: Bytes) -> Frame =
+  match bytes.decode_utf8_checked(body) {
+    Ok(text) -> match parser.parse(text) {
+      Ok(j) -> Message(j)
+      Err(e) -> Malformed(-32700, "Parse error: " ++ error_text(e))
+    }
+    Err(_) -> Malformed(-32700, "Parse error: invalid UTF-8")
+  }
+
+test "LSP bodies require strict UTF-8 before decoding" {
+  assert decode_body(bytes.utf8("\"plain 中😀�\"")) == Message(JStr("plain 中😀�"))
+  # Replacement decoding turns each of these into the valid JSON string "�";
+  # accepting the decoded text would therefore hide an invalid wire body.
+  assert decode_body(bytes_of([0x22, 0x80, 0x22])) ==
+    Malformed(-32700, "Parse error: invalid UTF-8")
+  assert decode_body(bytes_of([0xC0, 0xAF])) ==
+    Malformed(-32700, "Parse error: invalid UTF-8")
+  assert decode_body(bytes_of([0xED, 0xA0, 0x80])) ==
+    Malformed(-32700, "Parse error: invalid UTF-8")
+  assert decode_body(bytes_of([0xF4, 0x90, 0x80, 0x80])) ==
+    Malformed(-32700, "Parse error: invalid UTF-8")
+  assert decode_body(bytes_of([0xE2, 0x82])) ==
+    Malformed(-32700, "Parse error: invalid UTF-8")
+}
 
 ## One framed message: headers to CRLFCRLF, then Content-Length bytes of JSON.
 fn read_message() -> Frame !io = {
@@ -1068,12 +1032,9 @@ fn read_message() -> Frame !io = {
   # L2I nor native's allocation can therefore observe an unbounded value.
   let body = io.read_stdin(clen)
   if bytes.len(body) < clen { return Fatal }
-  if not valid_utf8(body) { return Malformed(-32700, "Parse error: invalid UTF-8") }
-  match parser.parse(bytes.decode_utf8(body)) {
-    Ok(j) -> Message(j)
-    # Exactly clen bytes were consumed, so the next frame starts where it should.
-    Err(e) -> Malformed(-32700, "Parse error: " ++ error_text(e))
-  }
+  # Exactly clen bytes were consumed, so a Malformed body still leaves the
+  # next frame starting where it should.
+  decode_body(body)
 }
 
 fn send(j: Json) -> Unit !io = {

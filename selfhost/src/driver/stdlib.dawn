@@ -125,14 +125,18 @@ fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
   # the one io primitive std renamed: it answers entry names, and `list_dir`
   # is what the module calls that
   out = map.insert(out, "io_list_names", "use std/io, then io.list_dir(...)")
-  for op in ["utf8", "len", "at", "slice", "decode_utf8", "decode_latin1"] {
+  for op in ["utf8", "len", "at", "slice", "decode_latin1"] {
     out = map.insert(out, "bytes_" ++ op, "use std/bytes, then bytes." ++ op ++ "(...)")
   }
+  # the lossy decoder's std name says what it does to malformed input (LIB-06);
+  # the primitive keeps the plain name
+  out = map.insert(out, "bytes_decode_utf8",
+    "use std/bytes, then bytes.decode_utf8_lossy(...) / bytes.decode_utf8_checked(...)")
   # retired outright rather than moved: the charset argument has no std
   # spelling, because the two charsets the language promises are two functions
   # (audit RP-04, decision C)
   out = map.insert(out, "bytes_decode",
-    "use std/bytes, then bytes.decode_utf8(...) / bytes.decode_latin1(...)")
+    "use std/bytes, then bytes.decode_utf8_lossy(...) / bytes.decode_latin1(...)")
   out = map.insert(out, "bytes_from_array",
     "use std/bytes, then bytes.buf()/bytes.put(...)/bytes.freeze(...)")
   for op in ["lower", "upper"] {

@@ -41,9 +41,9 @@
 ## 3. 为什么 JSON 错可恢复、framing 错不可恢复
 
 完整、有界且按声明长度读完的 body 若 UTF-8 或 JSON 解析失败，下一 byte 仍是可信的 frame
-边界；它属于 `Malformed(-32700, detail)`，可以回复后继续。公开 `bytes.decode_utf8` 的契约
-是替换非法序列，不能直接充当 wire validator：例如 bytes `22 80 22` 会被修成合法 JSON
-字符串 `"�"`。LSP 因此在替换式 decoding 前做严格验证。
+边界；它属于 `Malformed(-32700, detail)`，可以回复后继续。公开 `bytes.decode_utf8_lossy`
+（本设计成文时名叫 `decode_utf8`）的契约是替换非法序列，不能直接充当 wire validator：
+例如 bytes `22 80 22` 会被修成合法 JSON 字符串 `"�"`。LSP 因此在 decoding 处严格验证。
 
 framing 错误没有这个性质。缺失、非法或冲突的长度意味着不知道 body 有多长；partial body
 也无法知道当前 EOF 前的 byte 是否完整消息。继续扫描只能猜边界，并可能把攻击者拼在坏帧后的
@@ -75,10 +75,11 @@ trim，不是 wire grammar；本处用负数累计，在任何 host conversion �
 header reader 在追加每个 byte 后更新终止符状态。检查顺序固定为“先认完成，再认超限”，
 所以恰好 8192 bytes 的完成态可收；未完成态在 8192 当场 fatal，根本不读第 8193 byte。
 
-仓库没有严格 UTF-8 的公开 API：`bytes.decode_utf8` 规范上就是 replacement decoder，native
-runtime 内部虽有私有 `dawn_utf8_valid`，JVM 侧没有可从 Dawn 调用的同形接口。为避免扩大
-runtime/std API，`valid_utf8` 在 LSP 边界按 bytes 检查 continuation、overlong、surrogate 与
-`U+10FFFF` 上界；通过后才调用现有 decoder。
+本设计成文时仓库没有严格 UTF-8 的公开 API：当时的 `bytes.decode_utf8` 规范上就是
+replacement decoder，为避免扩大 runtime/std API，本地 `valid_utf8` 在 LSP 边界按 bytes
+检查 continuation、overlong、surrogate 与 `U+10FFFF` 上界，通过后才调用现有 decoder。
+LIB-06 之后严格 API 有了公开形态 `bytes.decode_utf8_checked`，`valid_utf8` 这份本地副本
+已删除，LSP 边界改由 `decode_body` 调 checked decoder 完成同一职责。
 
 ## 5. 门禁分工
 
@@ -120,7 +121,8 @@ skip `/proc` RSS 读数。
 - 不做 workspace/project snapshot，也不加载 `[java-deps]`；它们分别属于 TOOL-05/06/10。
 - 不做 initialize/shutdown lifecycle 状态机；它属于 TOOL-08。
 - 不修改 lexer、formatter 或 JSON parser。
-- 不改变 `bytes.decode_utf8` 的全语言 replacement 契约，也不为本项新增 runtime intrinsic。
+- 不改变 `bytes.decode_utf8_lossy`（当时名 `decode_utf8`）的全语言 replacement 契约，
+  也不为本项新增 runtime intrinsic。
 - 不把 cap 下推进通用 `io.read_stdin`；这里是 LSP protocol policy，不是所有 stdin 调用的语义。
 - 不把 framing error 伪装成可恢复 `Malformed`，也不尝试启发式重同步。
 

@@ -82,7 +82,7 @@ fn read_body(ex: HttpExchange, limit: Int) -> Result[(String, Bytes), HttpError]
   let stream = ex.getRequestBody()!
   if limit <= 0 {
     let raw = stream.readAllBytes()!
-    Ok((bytes.decode_utf8(raw), raw))
+    Ok((bytes.decode_utf8_lossy(raw), raw))
   } else if declared_length(ex) > limit {
     Err(http_error(413, "request body exceeds $limit bytes"))
   } else {
@@ -90,7 +90,7 @@ fn read_body(ex: HttpExchange, limit: Int) -> Result[(String, Bytes), HttpError]
     if bytes.len(raw) > limit {
       Err(http_error(413, "request body exceeds $limit bytes"))
     } else {
-      Ok((bytes.decode_utf8(raw), raw))
+      Ok((bytes.decode_utf8_lossy(raw), raw))
     }
   }
 }
@@ -978,7 +978,7 @@ fn raw_http(port: Int, request: String) -> String !io = {
   let out = s.getOutputStream()!
   out.write(bytes.utf8(request))
   out.flush()
-  let resp = bytes.decode_utf8(s.getInputStream()!.readAllBytes()!)
+  let resp = bytes.decode_utf8_lossy(s.getInputStream()!.readAllBytes()!)
   s.close()
   resp
 }
