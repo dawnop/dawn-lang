@@ -23,6 +23,22 @@ this line deliberately carries no reasoning, only the number the arithmetic
 needs. Raising a timeout without restating the observation it came from is the
 drift this catches.
 
+gates.yml additionally carries one file-level line:
+
+    # run-pole: 660s (the worst figure any job's budget line may claim)
+
+The run's wall clock is its longest job, and the 3x rule already forces every
+job's worst observation into its budget line -- so capping the worst claim
+caps the run, and the speedup that bought the current pole is held by a
+machine instead of by memory. A job that regresses past the pole must restate
+its budget (the 3x rule), the restatement collides with the pole, and raising
+the pole is a visible, reviewable edit. What this pins is the per-job claims,
+not the literal run wall clock: queueing, dispatch delay and the coverage
+guard's tail are outside it, and a checker cannot read a future run. ci.yml
+and release.yml are not under the pole -- their jobs (the secrets scan, the
+release pipeline) are not part of the every-push gate run whose length the
+pole exists to hold.
+
 Run with --selftest to see each rule refuse a mutated input; a checker whose
 red has never been observed is a checker nobody can rely on.
 """
@@ -37,8 +53,10 @@ BUDGET_RE = re.compile(r"^\s*#\s*budget:\s*(.+?)\s*$")
 THREE_X_RE = re.compile(r"^3x\s+(\d+)s\b")
 FLOOR_RE = re.compile(r"^floor\b")
 JOB_RE = re.compile(r"^  ([A-Za-z][\w-]*):\s*$")
+RUN_POLE_RE = re.compile(r"^#\s*run-pole:\s*(\d+)s\b")
 
 MULTIPLE = 3
+RUN_POLE_FILE = "gates.yml"
 
 
 def check_text(text, name):
@@ -87,6 +105,57 @@ def check_text(text, name):
     return problems
 
 
+def check_run_pole(text, name):
+    """Return the complaints about the file-level run-pole cap.
+
+    Applied to gates.yml only (see the module docstring for why the other
+    workflows are exempt). Exactly one `# run-pole: <N>s` line must exist,
+    and no job's `3x <N>s` budget claim may exceed it; floor budgets are
+    outside it for the reason they are outside the 3x rule.
+    """
+    lines = text.splitlines()
+    poles = []
+    for i, line in enumerate(lines):
+        pole_match = RUN_POLE_RE.match(line)
+        if pole_match:
+            poles.append((i + 1, int(pole_match.group(1))))
+    if not poles:
+        return [
+            f"{name}: no `# run-pole:` line -- the cap on what any job's"
+            " budget may claim is gone"
+        ]
+    if len(poles) > 1:
+        where = ", ".join(str(line_number) for line_number, _pole in poles)
+        return [
+            f"{name}: {len(poles)} `# run-pole:` lines (lines {where});"
+            " exactly one may exist"
+        ]
+    pole = poles[0][1]
+
+    problems = []
+    job = "?"
+    for i, line in enumerate(lines):
+        job_match = JOB_RE.match(line)
+        if job_match:
+            job = job_match.group(1)
+            continue
+        budget_match = BUDGET_RE.match(line)
+        if not budget_match:
+            continue
+        three_x = THREE_X_RE.match(budget_match.group(1))
+        if not three_x:
+            continue
+        seconds = int(three_x.group(1))
+        if seconds > pole:
+            problems.append(
+                f"{name}:{i + 1} ({job}): budget claims 3x {seconds}s, over the"
+                f" {pole}s run-pole -- either this job now outlasts the run's"
+                " agreed longest or the pole must be raised, and both are"
+                " reviewable edits, not silent ones"
+            )
+    return problems
+
+
 def selftest(root):
     """Every rule must be seen refusing something before its silence means pass."""
     good = """
@@ -108,6 +177,26 @@ jobs:
         ("floor spelled as prose", good.replace("floor (seconds-scale job)", "it is fast")),
     ]
 
+    pole_good = """\
+# run-pole: 660s (the worst figure any job's budget line may claim)
+jobs:
+  long:
+    # budget: 3x 557s worst observed
+    timeout-minutes: 28
+  quick:
+    # budget: floor (seconds-scale job)
+    timeout-minutes: 10
+"""
+    pole_mutants = [
+        ("a budget claim over the run-pole", pole_good.replace("3x 557s", "3x 700s")),
+        ("the run-pole line removed",
+         pole_good.replace(
+             "# run-pole: 660s (the worst figure any job's budget line may claim)\n",
+             "")),
+        ("a second run-pole line",
+         pole_good.replace("# run-pole: 660s", "# run-pole: 900s\n# run-pole: 660s")),
+    ]
+
     failures = []
     if check_text(good, "good.yml"):
         failures.append("the unmutated input was refused: " + "; ".join(check_text(good, "good.yml")))
@@ -117,11 +206,25 @@ jobs:
         else:
             print(f"  refused: {label}")
 
+    if check_run_pole(pole_good, "good-pole.yml"):
+        failures.append(
+            "the unmutated run-pole input was refused: "
+            + "; ".join(check_run_pole(pole_good, "good-pole.yml"))
+        )
+    for label, text in pole_mutants:
+        if not check_run_pole(text, "mutant-pole.yml"):
+            failures.append(f"mutant not caught: {label}")
+        else:
+            print(f"  refused: {label}")
+
     if failures:
         for f in failures:
             print(f"SELFTEST FAIL: {f}", file=sys.stderr)
         return 1
-    print(f"selftest: {len(mutants)} mutant(s) refused, clean input accepted")
+    print(
+        f"selftest: {len(mutants) + len(pole_mutants)} mutant(s) refused, "
+        "clean inputs accepted"
+    )
     return 0
 
 
@@ -137,7 +240,10 @@ def main():
         if not path.exists():
             continue
         checked += 1
-        problems.extend(check_text(path.read_text(encoding="utf-8"), name))
+        text = path.read_text(encoding="utf-8")
+        problems.extend(check_text(text, name))
+        if name == RUN_POLE_FILE:
+            problems.extend(check_run_pole(text, name))
 
     if not checked:
         print("no workflow files found -- this check saw nothing", file=sys.stderr)
