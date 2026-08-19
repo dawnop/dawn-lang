@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 4b486959e43ecf0b -->
+<!-- doc-check: translation-of docs/spec.md @ e1a85992bc96fbb9 -->
 
 # Dawn Language Specification
 
@@ -1564,7 +1564,16 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
 ```
 
 - An effect variable `!e` needs no declaration; appearing in a signature introduces it, and its
-  scope is the whole signature. Also, **only a function signature** can introduce an effect
+  scope is the whole signature. It may also be given an **explicit binder** in the parameter list:
+  `fn map[T, U, !e](xs: List[T], f: fn(T) -> U !e) -> List[U] !e`. The two spellings are
+  equivalent. When a signature carries an explicit binder, that name resolves only to it within
+  the signature; a name with no binder is still introduced where it appears, and the two may be
+  mixed in one signature. A binder carries no bound (`[!e: X]` is an error), its name must be
+  lowercase (`!E` is a named effect, not a variable), `!io` cannot be a binder name, and the same
+  binder cannot be written twice.
+  The binder list is also where the order comes from: it binds in the order written, and names
+  with no binder are still introduced in the order they first appear.
+  Also, **only a function signature** can introduce an effect
   variable: a function type inside a type declaration (an `alias` target, a record/variant field)
   introduces no binder, so writing `!e` there is a compile error — write `!io` or leave it pure.
 - `!(e1 | e2)` is a union, stored **normalised**: `io` absorbs everything (a union containing `io`

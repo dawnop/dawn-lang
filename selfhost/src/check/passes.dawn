@@ -14,7 +14,7 @@ use std/map
 use std/set
 
 use front/ast.{
-  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, Module,
+  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, EffParamDecl, Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_uses, DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod,
   Param, Expr, Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects,
@@ -42,7 +42,7 @@ use check/types.{
 
 use check/cx.{
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
-  cerr_h, cerr_o, fresh, alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
+  cerr_h, cerr_o, fresh, fresh_effvar, alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
   resolve_alias_target, resolve_type, resolve_return_type, is_const_serializable,
   const_refusal_hint, no_sig,
   TySpan, ty_span_kid, ty_span_of
@@ -492,6 +492,8 @@ fn no_fields() -> List[FieldDecl] = []
 fn no_params() -> List[Param] = []
 
 fn no_tparams() -> List[TypeParamDecl] = []
+
+fn no_eparams() -> List[EffParamDecl] = []
 
 fn no_effs() -> List[String] = []
 
@@ -1988,6 +1990,7 @@ test "impl registration enforces coherence and signature matching" {
     is_pub: false,
     name: "eq4",
     tparams: no_tparams(),
+    eparams: no_eparams(),
     params: [
       Param { name: "a", tref: TNamed("Int", [], 0, 1), default: None, lo: 0, hi: 1 },
       Param { name: "b", tref: TNamed("Int", [], 2, 3), default: None, lo: 2, hi: 3 }
@@ -2095,8 +2098,25 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig]) !io = {
     }
     let saved_tp = cx1.current_tparams
     let saved_ev = cx1.current_eff_vars
-    let empty_ev: Map[String, Eff] = map.empty()
-    cx1 = Cx { ..cx1, current_tparams: tp_scope, current_eff_vars: empty_ev }
+    var ev_scope: Map[String, Eff] = map.empty()
+    # An explicit binder mints its variable here, before anything in the
+    # signature is resolved, which is what makes it a binder: `resolve_eff_at`
+    # finds the name in the table and its implicit-minting arm never runs
+    # (docs/effect-params-design.md decision 2). Minting in declaration order
+    # is also what makes the list the author wrote the list a renderer prints
+    # back -- `eff_params_of` sorts by id, and these ids come first.
+    #
+    # Leaving the binders off stays legal and is the same signature: the names
+    # are then minted where they are first met, which for a list written in
+    # that same order is the same order. Only a binder list written out of
+    # encounter order distinguishes the two spellings, and there the explicit
+    # list wins, because it is the one the author can see.
+    for ep in d.eparams {
+      let (cxe, v) = fresh_effvar(cx1, ep.name)
+      cx1 = cxe
+      ev_scope = map.insert(ev_scope, ep.name, v)
+    }
+    cx1 = Cx { ..cx1, current_tparams: tp_scope, current_eff_vars: ev_scope }
     # bounds resolve before the parameter types, so a `T.Item` in one can
     # find its trait (assoc-types-design.md D2)
     let (cxbd, constraints) = resolve_bounds(cx1, d.tparams)
@@ -2192,6 +2212,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
         lo: 6,
         hi: 12
       }],
+      eparams: no_eparams(),
       params: [Param { name: "x", tref: TNamed("T", [], 17, 18), default: None, lo: 14, hi: 15 }],
       ret: Some(TNamed("T", [], 23, 24)),
       effs: no_effs(),
@@ -2205,6 +2226,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
       is_pub: false,
       name: "g",
       tparams: no_tparams(),
+      eparams: no_eparams(),
       params: [Param { name: "x", tref: TNamed("Int", [], 36, 39), default: None, lo: 33, hi: 34 }],
       ret: None,
       effs: no_effs(),
@@ -2232,6 +2254,7 @@ test "a signature's effect variables land in eparams once each, in mint order" {
       is_pub: false,
       name: "h",
       tparams: no_tparams(),
+      eparams: no_eparams(),
       params: [
         Param { name: "f", tref: arrow("a"), default: None, lo: 5, hi: 6 },
         Param { name: "g", tref: arrow("b"), default: None, lo: 7, hi: 8 },
@@ -2261,6 +2284,75 @@ test "a signature's effect variables land in eparams once each, in mint order" {
     }
   }
   assert names == ["c", "a", "b"]
+}
+
+## The name a signature's eparams entries carry, in `Sig.eparams` order.
+## `eff_params_of` only ever puts `EffVar` in there, so anything else is a bug
+## in that function rather than in the signature under test; `??` names it.
+fn eparam_names(s: Sig) -> List[String] = {
+  var names: List[String] = []
+  for e in s.eparams {
+    match e {
+      EffVar(n, _) -> { names = names ++ [n] }
+      _ -> { names = names ++ ["??"] }
+    }
+  }
+  names
+}
+
+test "an explicit binder list produces the eparams the implicit spelling does" {
+  # fn h[!c, !a, !b](f: fn() -> Int !a, g: fn() -> Int !b, k: fn() -> Int !a) -> Int !c
+  #
+  # The same signature as the test above, with the binders written down. This
+  # is the equivalence decision 2 promises: the binders are optional, and
+  # writing them changes nothing a later pass can see. `[!c, !a, !b]` is the
+  # order the resolver would have met the names in -- the row first -- so the
+  # two spellings agree, which is the whole claim.
+  let arrow = (e: String) => TFn([], TNamed("Int", [], 0, 3), [e], 0, 3)
+  let binder = (n: String) => EffParamDecl { name: n, lo: 0, hi: 2 }
+  let params = [
+    Param { name: "f", tref: arrow("a"), default: None, lo: 5, hi: 6 },
+    Param { name: "g", tref: arrow("b"), default: None, lo: 7, hi: 8 },
+    Param { name: "k", tref: arrow("a"), default: None, lo: 9, hi: 10 }
+  ]
+  let decl = FnDecl {
+    is_pub: false,
+    name: "h",
+    tparams: no_tparams(),
+    eparams: [binder("c"), binder("a"), binder("b")],
+    params: params,
+    ret: Some(TNamed("Int", [], 12, 15)),
+    effs: ["c"],
+    body: EInt(0, 18, 19),
+    lo: 0,
+    hi: 19,
+    nlo: 3,
+    nhi: 4
+  }
+  let m = Module { decls: [DFn(decl)] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, sigs) = pass_fn_signatures(cx, m)
+  assert len(cx1.diags) == 0
+  assert eparam_names(sigs[0]) == ["c", "a", "b"]
+
+  # A binder mentioned nowhere else in the signature is still a parameter of
+  # it: the list the author wrote is the list, which is what an explicit binder
+  # buys over the implicit introduction it is otherwise equal to.
+  let m2 = Module { decls: [DFn(FnDecl { ..decl, eparams: [binder("c"), binder("a"), binder("b"),
+    binder("z")] })] }
+  var cx2 = seed_prelude(test_cx())
+  let (cx3, sigs2) = pass_fn_signatures(cx2, m2)
+  assert len(cx3.diags) == 0
+  assert eparam_names(sigs2[0]) == ["c", "a", "b", "z"]
+
+  # And the binder list is where the order comes from when the two disagree:
+  # minting happens at the binder, before the row.
+  let m3 = Module { decls: [DFn(FnDecl { ..decl, eparams: [binder("b"), binder("a"),
+    binder("c")] })] }
+  var cx4 = seed_prelude(test_cx())
+  let (cx5, sigs3) = pass_fn_signatures(cx4, m3)
+  assert len(cx5.diags) == 0
+  assert eparam_names(sigs3[0]) == ["b", "a", "c"]
 }
 
 ## Pass 3.5: constant declarations — types only (initializers run later, after
@@ -2367,6 +2459,7 @@ test "main shape violations are reported" {
     is_pub: false,
     name: "main",
     tparams: no_tparams(),
+    eparams: no_eparams(),
     params: no_params2(),
     ret: Some(TNamed("Int", [], 20, 23)),
     effs: ["io"],

@@ -32,6 +32,19 @@ pub type Bound = { name: String, lo: Int, hi: Int }
 
 pub type TypeParamDecl = { name: String, bounds: List[Bound], lo: Int, hi: Int }
 
+## `!e` in a declaration's parameter table: an explicit binder for an effect
+## variable, spelled with the `!` the row uses (docs/effect-params-design.md
+## decision 3). It travels beside `TypeParamDecl` rather than inside it because
+## an effect is not a `Ty` and never enters the type axis: `Sig.constraints` is
+## positionally aligned with `Sig.tparams`, and a member of another kind in
+## that list would silently slide the dictionary symbols one slot (decision 1).
+##
+## The binder carries no bounds. A trait bound constrains a type, and the
+## effect axis has nothing to constrain: `[!e: X]` is refused at the parser.
+## The span runs from the `!` to the end of the name, so a diagnostic underlines
+## what the author wrote.
+pub type EffParamDecl = { name: String, lo: Int, hi: Int }
+
 ## `default`: the parameter's default value (#207) -- checked once in the
 ## declaring module and synthesized as `f$default$k`, so a call may omit the
 ## argument. Only top-level functions consume it; trait methods, effect
@@ -326,6 +339,11 @@ pub type FnDecl = {
   is_pub: Bool,
   name: String,
   tparams: List[TypeParamDecl],
+  # The `!e` items of the same bracketed list, kept apart from `tparams` for the
+  # reason `EffParamDecl` gives. Empty for every signature that leaves its
+  # effect variables to the implicit introduction of spec §6.3, which stays
+  # legal and produces the same `Sig.eparams` (decision 2).
+  eparams: List[EffParamDecl],
   params: List[Param],
   ret: Option[TypeRef],
   effs: List[String],

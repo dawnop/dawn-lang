@@ -43,8 +43,12 @@ type_decl       = [ "pub" ] "type" TYPEIDENT [ type_params ]
 alias_decl      = [ "pub" ] "alias" TYPEIDENT [ type_params ] "=" type_expr ;
                   (* 透明别名 (spec §2.6); type 只声明名义类型 *)
 type_params     = "[" type_param { "," type_param } "]" ;
-type_param      = TYPEIDENT [ ":" TYPEIDENT { "+" TYPEIDENT } ] ;
+type_param      = TYPEIDENT [ ":" TYPEIDENT { "+" TYPEIDENT } ]
+                | "!" IDENT ;
                   (* 约束 [T: Trait + Trait] 仅 fn 允许; type 声明的参数不带约束 *)
+                  (* "!" IDENT = 效果参数, 效果变量的显式绑定者 [T, U, !e];
+                     仅 fn 允许 (刀 2), 不带约束, 与隐式引入等价 (spec §6.3);
+                     effect-params-design.md 决策 2/3 *)
 sum_type        = [ "|" ] variant { "|" variant } ;
 variant         = TYPEIDENT [ "(" field_list ")" ] ;
 record_type     = "{" field_list "}" ;
