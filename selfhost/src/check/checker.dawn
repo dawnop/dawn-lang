@@ -44,8 +44,9 @@ use check/tast.{
 use check/types.{
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
-  Eff, EPure, EIo, EffVar, EUnion, ELabeled, eff_union, lub_eff, eff_subsumes, eff_suffix,
-  eff_base, eff_labels, eff_vars, eff_with_labels,
+  Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes,
+  eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, eff_assocs, eff_map_assocs,
+  erased_ev_ty,
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -207,6 +208,14 @@ fn with_top_lambda(cx: Cx, f: fn(LambdaCx) -> LambdaCx) -> Cx = {
 ## user writes can bind or read it.
 pub fn ev_local_name(cx: Cx, id: Int) -> String =
   "ev\$" ++ to_string(id) ++ "\$" ++ effect_of(cx, id).name
+
+## The name of the local that carries a projection's erased evidence -- rule
+## 丙's one hidden parameter per written `!C.E`. Minted from the atom's whole
+## identity (subject tvar id, trait id, member name), so two members named E
+## on different traits or subjects cannot shadow each other; `$` keeps it
+## unspellable like every evidence local.
+pub fn ev_assoc_local_name(vid: Int, tid: Int, name: String) -> String =
+  "ev\$a\$" ++ to_string(vid) ++ "\$" ++ to_string(tid) ++ "\$" ++ name
 
 ## Resolve parsed effect atoms into a normalized Eff, interning variables per
 ## signature (the Kotlin resolveEff over currentEffVars).
@@ -500,6 +509,62 @@ fn assoc_impl_of(cx: Cx, tid: Int, s: Ty) -> Option[ImplI] =
       }
   }
 
+## `reduce_assoc`'s twin on the effect axis: rewrite a row's projections
+## through the call-site type bindings. An atom whose subject was just bound
+## to a concrete type reads the binding off the same impl a witness would use
+## (D5, one door one answer); one whose subject was bound to another rigid
+## variable is re-keyed onto it (the forwarding case -- the caller's own
+## hidden parameter answers for it); one whose subject the bindings do not
+## mention stays put. Binding rows are ground by construction, so unlike the
+## type twin there is nothing to instantiate behind the substitution.
+fn reduce_eff(cx: Cx, e: Eff, m: Map[Int, Ty]) -> Eff =
+  eff_map_assocs(e, a => {
+    let (s0, v0, t0, n0) = a
+    let keep = EffAssoc(s0, v0, t0, n0)
+    match map.get(m, v0) {
+      None -> keep
+      Some(t) ->
+        match t {
+          TyVar(n2, v2) -> EffAssoc(n2, v2, t0, n0)
+          _ ->
+            match head_of(t) {
+              None -> keep
+              Some(_) ->
+                match assoc_impl_of(cx, t0, t) {
+                  # a missing impl already errored at the witness; stay put
+                  None -> keep
+                  Some(ii) -> {
+                    var bound: Option[Eff] = None
+                    for pr in ii.eff_bindings {
+                      let (bn, be) = pr
+                      if bn == n0 { bound = Some(be) }
+                    }
+                    match bound {
+                      # a missing binding already errored at the impl
+                      None -> keep
+                      Some(be) -> be
+                    }
+                  }
+                }
+            }
+        }
+    }
+  })
+
+## `reduce_eff` pushed through a type: a function type's row is licensed to
+## carry a projection (D6 admits parameter and return positions), and
+## `ty_map_children` deliberately lets effects ride through -- so the choke
+## points that reduce a substituted type also walk it for rows. The type-axis
+## reduction stays `reduce_assoc`'s.
+fn reduce_ty_effs(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty =
+  match t {
+    TyFn(ps, r, e) -> TyFn(
+      map(ps, x => reduce_ty_effs(cx, x, m)),
+      reduce_ty_effs(cx, r, m),
+      reduce_eff(cx, e, m))
+    _ -> ty_map_children(t, x => reduce_ty_effs(cx, x, m))
+  }
+
 pub fn unify_into(
   cx: Cx,
   declared: Ty,
@@ -556,7 +621,7 @@ pub fn unify_into(
     # subject concrete; a still-rigid one unifies only with the same
     # projection (assoc-types-design.md D7)
     TyAssoc(_, _, _) -> {
-      let d2 = reduce_assoc(cx, subst(declared, m, em))
+      let d2 = reduce_ty_effs(cx, reduce_assoc(cx, subst(declared, m, em)), m)
       match d2 {
         TyAssoc(_, _, _) -> (m, em, d2 == actual)
         _ -> unify_into(cx, d2, actual, m, em)
@@ -669,7 +734,7 @@ pub fn unify_into(
             i = i + 1
           }
           let (m3, em3, ok3) = unify_into(cx, dr, ar, m1, em1)
-          let (em4, ok4) = unify_eff(de, ae, em3)
+          let (em4, ok4) = unify_eff(cx, de, ae, m1, em3)
           (m3, em4, ok && ok3 && ok4)
         }
         _ -> (m, em, false)
@@ -685,7 +750,13 @@ pub fn unify_into(
 ## site would supply the evidence (docs/effects-design.md §4.1). An effect
 ## variable does accept it -- that is what carries a labelled closure through
 ## `list.map`.
-pub fn unify_eff(declared: Eff, actual: Eff, em: Map[Int, Eff]) -> (Map[Int, Eff], Bool) =
+pub fn unify_eff(
+  cx: Cx,
+  declared: Eff,
+  actual: Eff,
+  m: Map[Int, Ty],
+  em: Map[Int, Eff]
+) -> (Map[Int, Eff], Bool) =
   match declared {
     # `eff_subsumes` is the whole answer for a declaration with nothing to
     # infer, and it is what `assignable` asks too -- see its header for what
@@ -703,15 +774,17 @@ pub fn unify_eff(declared: Eff, actual: Eff, em: Map[Int, Eff]) -> (Map[Int, Eff
     }
     # a union in a declared parameter position is not inferred into; accept when
     # the actual is already subsumed
-    EUnion(_, _, _) -> (em, eff_subsumes(subst_eff(declared, em), actual))
-    # a declared projection is not inferred into either; whether it reduces
-    # first is the caller's business (the instantiation choke reduces rows
-    # before unification ever sees a concrete-subject atom)
-    EffAssoc(_, _, _, _) -> (em, eff_subsumes(subst_eff(declared, em), actual))
+    EUnion(_, _, _) -> (em, eff_subsumes(reduce_eff(cx, subst_eff(declared, em), m), actual))
+    # A declared projection is not inferred into either, but it does reduce
+    # first: the bindings accumulated so far may have pinned its subject, and
+    # comparing the unreduced atom would be a false mismatch (the half-loud
+    # failure the coupling probe warned about).
+    EffAssoc(_, _, _, _) ->
+      (em, eff_subsumes(reduce_eff(cx, subst_eff(declared, em), m), actual))
     # a declared label is not inferred into either: its base unifies, and its
     # labels have to cover the actual's
     ELabeled(b, ls) -> {
-      let (em1, ok) = unify_eff(b, eff_base(actual), em)
+      let (em1, ok) = unify_eff(cx, b, eff_base(actual), m, em)
       (em1, ok && eff_subsumes(ELabeled(EPure, ls),
         eff_with_labels(EPure, eff_labels(actual))))
     }
@@ -3203,7 +3276,9 @@ pub fn check_fn_value(
     _ -> ()
   }
   let cx1 = cx
-  let inst = subst(declared, m, em)
+  # the function-value instantiation choke: rows inside the value's type
+  # reduce with the same bindings its types substituted under (SEM-13 path)
+  let inst = reduce_ty_effs(cx1, subst(declared, m, em), m)
   if nbounds > 0 {
     return eta_bounded_fn_value(cx1, name, f, m, em, inst, lo, hi)
   }
@@ -5665,7 +5740,7 @@ fn check_call(
       let skip = round == 0 && needs_expected(cx1, a)
       if not done && not skip {
         let pt = s.param_tys[pidx[i]]
-        let substd = reduce_assoc(cx1, subst(pt, m, em))
+        let substd = reduce_ty_effs(cx1, reduce_assoc(cx1, subst(pt, m, em)), m)
         # lambdas only need their parameter types, and function values unify
         # piecewise — a partially concrete expected type still helps
         let exp2: Option[Ty] =
@@ -5679,7 +5754,7 @@ fn check_call(
         em = em3
         if not ok {
           cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
-              ty_show(cx1.adts, reduce_assoc(cx1, subst(pt, m, em))) ++ ", got " ++
+              ty_show(cx1.adts, reduce_ty_effs(cx1, reduce_assoc(cx1, subst(pt, m, em)), m)) ++ ", got " ++
               ty_show(cx1.adts, at), e_lo(a), e_hi(a),
             "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
         }
@@ -5795,11 +5870,14 @@ fn check_call(
         "cast reclaims an erased Java Object via CHECKCAST; primitive targets aren't supported")
     }
   }
-  # instantiate the callee's effect: an unbound effect variable means pure
-  let callee_eff = instantiate_eff(s.eff, em)
+  # Instantiate the callee's effect: an unbound effect variable means pure.
+  # The effect half of the choke below: a projection whose subject was just
+  # bound reduces here too (D3/D5), so no ground row ever carries one and the
+  # evidence loop further down sees the same answers the witness solver gave.
+  let callee_eff = reduce_eff(cx1, instantiate_eff(s.eff, em), m)
   # the one instantiation choke point: a projection whose subject just became
   # concrete reduces here, so no ground type ever carries one (D3)
-  let ret = reduce_assoc(cx1, subst(s.ret, m, em))
+  let ret = reduce_ty_effs(cx1, reduce_assoc(cx1, subst(s.ret, m, em)), m)
   # The call node's arguments are in parameter order; an all-positional call
   # already is, so this is the identity it always was. An unfilled parameter
   # with a default becomes a call of its synthesized `f$default$k` -- pure and
@@ -5885,19 +5963,30 @@ fn check_call(
   # label that arrived by instantiating an effect variable is not here on
   # purpose: that effect belongs to a closure the caller handed over, and the
   # closure carries its own evidence in its captures (design §5.2 step 4).
-  let (cxv, evs, unanswered) = evidence_args(cx1, s.eff, clo, chi)
+  let (cxv, evs0, unanswered) = evidence_args(cx1, s.eff, clo, chi)
   cx1 = cxv
+  # ... and one per projection written in the row, behind them (rule 丙)
+  let (cxa2, aevs, aunanswered, adropped) = evidence_assoc_args(cx1, s.eff, m, clo, chi)
+  cx1 = cxa2
+  let evs = evs0 ++ aevs
   # Charge the row -- minus any label `evidence_args` just reported as having
   # no handler. That call is already an error, at the raise site and in the
   # raise site's words; leaving the label in the body's row would have
   # `verify_effects` say the same thing over again at the signature.
-  cx1 = record_effect(cx1, eff_drop(callee_eff, unanswered), clo, chi, callee)
+  cx1 = record_effect(cx1,
+    eff_drop_assocs(eff_drop(callee_eff, unanswered ++ aunanswered), adropped),
+    clo, chi, callee)
   # A label the callee *wrote* has just been settled or unsettled from what its
   # evidence resolved to. One that arrived by instantiating an effect variable
   # has no evidence to resolve here at all -- it belongs to a closure the caller
   # handed over (design §5.2 step 4), so nothing in this body can discharge it
   # from a closure's row.
-  cx1 = mark_unsettled_labels(cx1, eff_with_labels(EPure, instantiated_labels(s.eff, callee_eff)))
+  # The "written" side includes what the projections reduced to: a label a
+  # projection produced was just settled or unsettled by its own evidence
+  # lookup above, so only labels that arrived by instantiating an effect
+  # variable stay in the complement.
+  cx1 = mark_unsettled_labels(cx1, eff_with_labels(EPure,
+    instantiated_labels(reduce_eff(cx1, s.eff, m), callee_eff)))
   let node = if s.is_builtin {
     XCallBuiltin(callee, txs2, wits, lo, hi, ret)
   } else {
@@ -5962,39 +6051,129 @@ fn evidence_args(cx: Cx, declared: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr], L
   var unanswered: List[Int] = []
   for l in eff_labels(declared) {
     let (eid, _) = l
-    let nm = ev_local_name(cx1, eid)
-    let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
-    cx1 = cxa
-    match found {
-      Some(sid) -> {
-        # the one place the language resolves evidence, and therefore the one
-        # place that knows whose handler answered: a `with handle` in this very
-        # body can be settled out of an enclosing closure's row, a hidden
-        # parameter of the signature cannot (docs/effects-soundness-design.md
-        # §4.2). Asking the row after the fact instead would settle a label
-        # whose evidence came from the signature and happens to share a name
-        # with a local handler -- the p2 counterexample in §5.3.
-        cx1 = match map.get(cx1.frame.handle_evs, sid) {
-          Some(arm_eff) -> mark_settled(cx1, eid, arm_eff)
-          None -> mark_unsettled(cx1, eid)
-        }
-        out = out ++ [XLocal(sid, nm, lo, hi, TyAdt(eid, []))]
+    let (cx2, tx, answered) = resolve_label_evidence(cx1, eid, lo, hi)
+    cx1 = cx2
+    if not answered { unanswered = unanswered ++ [eid] }
+    out = out ++ [tx]
+  }
+  (cx1, out, unanswered)
+}
+
+## One label's evidence out of the lexical environment -- the shared half of
+## `evidence_args` (a written label) and `evidence_assoc_args` (a projection
+## that reduced to one). Answers the expression and whether anyone answered.
+fn resolve_label_evidence(cx: Cx, eid: Int, lo: Int, hi: Int) -> (Cx, TExpr, Bool) = {
+  var cx1 = cx
+  let nm = ev_local_name(cx1, eid)
+  let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
+  cx1 = cxa
+  match found {
+    Some(sid) -> {
+      # the one place the language resolves evidence, and therefore the one
+      # place that knows whose handler answered: a `with handle` in this very
+      # body can be settled out of an enclosing closure's row, a hidden
+      # parameter of the signature cannot (docs/effects-soundness-design.md
+      # §4.2). Asking the row after the fact instead would settle a label
+      # whose evidence came from the signature and happens to share a name
+      # with a local handler -- the p2 counterexample in §5.3.
+      cx1 = match map.get(cx1.frame.handle_evs, sid) {
+        Some(arm_eff) -> mark_settled(cx1, eid, arm_eff)
+        None -> mark_unsettled(cx1, eid)
       }
-      None -> {
-        # inside comptime the refusal belongs to `leave_isolated`, which says
-        # what the construct is; saying "declare it" there would be advice
-        # that cannot be taken -- and because nothing is said here, the label
-        # is not withdrawn from the row either: `leave_isolated` reads the row
-        # to find out what to refuse
-        if not cx1.frame.isolated {
-          cx1 = unhandled_effect(cx1, eid, lo, hi)
-          unanswered = unanswered ++ [eid]
-        }
-        out = out ++ [XError(lo, hi)]
+      (cx1, XLocal(sid, nm, lo, hi, TyAdt(eid, [])), true)
+    }
+    None -> {
+      # inside comptime the refusal belongs to `leave_isolated`, which says
+      # what the construct is; saying "declare it" there would be advice
+      # that cannot be taken -- and because nothing is said here, the label
+      # is not withdrawn from the row either: `leave_isolated` reads the row
+      # to find out what to refuse
+      if not cx1.frame.isolated {
+        cx1 = unhandled_effect(cx1, eid, lo, hi)
+        (cx1, XError(lo, hi), false)
+      } else {
+        (cx1, XError(lo, hi), true)
       }
     }
   }
-  (cx1, out, unanswered)
+}
+
+## Rule 丙's call-site half: one evidence value per projection written in the
+## callee's declared row, in `eff_assocs` order, behind the written labels'
+## evidence. What each slot receives is decided by the same reduction the row
+## went through at the choke: a projection that reduced to a label resolves
+## that label's evidence exactly as a written one would; one that reduced to
+## pure or io takes a unit placeholder (the slot is erased and never read);
+## one still standing over a rigid subject forwards the caller's own hidden
+## parameter for the same atom. Returns (cx, args, unanswered label ids,
+## unanswered atoms) -- the last two are withdrawn from the charged row so a
+## single failure is a single diagnostic, like `evidence_args`' unanswered.
+fn evidence_assoc_args(
+  cx: Cx,
+  declared: Eff,
+  m: Map[Int, Ty],
+  lo: Int,
+  hi: Int
+) -> (Cx, List[TExpr], List[Int], List[(String, Int, Int, String)]) = {
+  var cx1 = cx
+  var out: List[TExpr] = []
+  var unanswered: List[Int] = []
+  var dropped: List[(String, Int, Int, String)] = []
+  for a in eff_assocs(declared) {
+    let (s0, v0, t0, n0) = a
+    let red = reduce_eff(cx1, EffAssoc(s0, v0, t0, n0), m)
+    let ls = eff_labels(red)
+    let ras = eff_assocs(red)
+    if len(ls) > 0 {
+      let (eid, _) = ls[0]
+      let (cx2, tx, answered) = resolve_label_evidence(cx1, eid, lo, hi)
+      cx1 = cx2
+      if not answered { unanswered = unanswered ++ [eid] }
+      out = out ++ [tx]
+    } else if len(ras) > 0 {
+      let (s2, v2, t2, n2) = ras[0]
+      let nm = ev_assoc_local_name(v2, t2, n2)
+      let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
+      cx1 = cxa
+      match found {
+        Some(sid) -> { out = out ++ [XLocal(sid, nm, lo, hi, erased_ev_ty())] }
+        None -> {
+          if not cx1.frame.isolated {
+            cx1 = cerr_h(cx1, "the effect `" ++ s2 ++ "." ++ n2 ++
+                "` needs evidence here, and nothing in scope supplies it", lo, hi,
+              "a projection's evidence arrives through the signature: add `!" ++ s2 ++ "." ++
+                n2 ++ "` to the enclosing function's row")
+            dropped = dropped ++ [ras[0]]
+          }
+          out = out ++ [XError(lo, hi)]
+        }
+      }
+    } else {
+      # pure or io: nothing will ever read the slot
+      out = out ++ [XUnit(lo, hi)]
+    }
+  }
+  (cx1, out, unanswered, dropped)
+}
+
+## A row without the named projection atoms -- `eff_drop`'s twin, for the one
+## caller that withdraws what nobody answered.
+fn eff_drop_assocs(e: Eff, atoms: List[(String, Int, Int, String)]) -> Eff = {
+  if len(atoms) == 0 { return e }
+  eff_map_assocs(e, a => {
+    let (_, av, at2, an) = a
+    var keep = true
+    for d in atoms {
+      let (_, dv, dt, dn) = d
+      if dv == av && dt == at2 && dn == an { keep = false }
+    }
+    if keep {
+      let (s2, v2, t2, n2) = a
+      EffAssoc(s2, v2, t2, n2)
+    } else {
+      EPure
+    }
+  })
 }
 
 ## A row without the named labels. The one caller drops the labels nobody
@@ -8374,6 +8553,16 @@ fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
     let (cx2, _) = declare(cx1, ev_local_name(cx1, eid), TyAdt(eid, []), false, nlo, nhi)
     cx1 = cx2
   }
+  # one erased slot per projection written in the row, behind the labels'
+  # slots, in `eff_assocs` order (rule 丙). The body can only forward it --
+  # nothing here knows which effect it will turn out to be -- which is
+  # exactly what an erased local is good for.
+  for a in eff_assocs(s.eff) {
+    let (_, vid, tid, n) = a
+    let (cx2, _) = declare(cx1, ev_assoc_local_name(vid, tid, n), erased_ev_ty(), false,
+      nlo, nhi)
+    cx1 = cx2
+  }
   cx1
 }
 
@@ -8384,6 +8573,13 @@ fn ev_sym_list(cx: Cx, s: Sig) -> List[Int] = {
   for l in eff_labels(s.eff) {
     let (eid, _) = l
     match lookup(cx, ev_local_name(cx, eid)) {
+      Some(sid) -> { out = out ++ [sid] }
+      None -> ()
+    }
+  }
+  for a in eff_assocs(s.eff) {
+    let (_, vid, tid, n) = a
+    match lookup(cx, ev_assoc_local_name(vid, tid, n)) {
       Some(sid) -> { out = out ++ [sid] }
       None -> ()
     }

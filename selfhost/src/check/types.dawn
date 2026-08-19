@@ -1095,7 +1095,24 @@ pub fn reduce_eff_via_bindings(
   vid: Int,
   tid: Int,
   bindings: List[(String, Eff)]
-) -> Eff = {
+) -> Eff =
+  eff_map_assocs(e, a => {
+    let (s, av, at2, an) = a
+    var kept: Eff = EffAssoc(s, av, at2, an)
+    if av == vid && at2 == tid {
+      for pr in bindings {
+        let (bn, be) = pr
+        if bn == an { kept = be }
+      }
+    }
+    kept
+  })
+
+## Rewrite each projection atom of `e` through `f`, leaving the rest of the
+## row in place -- the shared chassis of every effect-side reduction (the
+## binding-side one above, and the checker's call-site one, which closes over
+## the impl table). A row with no atoms comes back as itself.
+pub fn eff_map_assocs(e: Eff, f: fn((String, Int, Int, String)) -> Eff) -> Eff = {
   let atoms = eff_assocs(e)
   if len(atoms) == 0 { return e }
   var parts: List[Eff] = []
@@ -1105,19 +1122,18 @@ pub fn reduce_eff_via_bindings(
     let (id, n) = v
     parts = parts ++ [EffVar(n, id)]
   }
-  for a in atoms {
-    let (s, av, at2, an) = a
-    var kept: Eff = EffAssoc(s, av, at2, an)
-    if av == vid && at2 == tid {
-      for pr in bindings {
-        let (bn, be) = pr
-        if bn == an { kept = be }
-      }
-    }
-    parts = parts ++ [kept]
-  }
+  for a in atoms { parts = parts ++ [f(a)] }
   eff_union(parts ++ [ELabeled(EPure, eff_labels(e))])
 }
+
+## The type of an erased evidence slot -- a projection's hidden parameter, in
+## a generic consumer and on the dictionary-slot boundary. A `TyVar` on
+## purpose: both backends already treat one as the erased pointer shape
+## (JVM `Object`, C `void*` with ordinary ownership), which is exactly what a
+## slot that is only ever forwarded needs. Id 0 is never minted for a real
+## type parameter (prelude ids are negative, the counter opens past the
+## prelude), the same convention `TyVar("D", 0)` uses for dictionary slots.
+pub fn erased_ev_ty() -> Ty = TyVar("ev", 0)
 
 ## `reduce_eff_via_bindings` pushed through a type: every function type's row
 ## in `t` is rewritten, because a projection is licensed in parameter and
