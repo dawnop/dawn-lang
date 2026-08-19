@@ -86,7 +86,7 @@ selfhost/src/      分九个目录，依赖单向向下（拓扑序即下面的�
                    lsp/    语言服务（server lspc lspq）
                    根：main.dawn nmain.dawn doc.dawn version.dawn
 std/               标准库源（构建 selfhost 时编译进独立 jar 的 stdsrc 模块）
-packages/          可发布/复用源码包（json、web、fspath、sha2、inflate），[deps] 消费
+packages/          可发布/复用源码包（json、web、fspath、sha2、inflate、tea），[deps] 消费
 site/              用 Dawn 自己写的静态站生成器（自举）
 site/play-ui/      Playground 编辑器（TypeScript + Vite + CodeMirror 6）
 playground/        Dawn 写的 playground 后端
