@@ -50,9 +50,33 @@
 #     reach.dawn drops those on purpose. scripts/table-freight owns it;
 #   * wrong answers from legal bytes. The dedicated Java-tail fixture below is
 #     executed for its side effects; the general corpus is only verified.
+#
+# Modes, for CI scheduling and nothing else (the 2026-08-20 job split):
+#
+#   run.sh                          # everything, the local default
+#   run.sh --never-mutants-only     # the 13 compiling Never mutants + probe
+#   run.sh --without-never-mutants  # selftest, corpus verify, corpus mutant,
+#                                   # constant-pool scan
+#
+# The Never block is ~180s of compiling mutants and shares nothing with the
+# corpus loop but the javac'd Verify classes (both modes compile those, ~2s),
+# so it runs as its own gates.yml job. The two modes partition the full run:
+# nothing is conditional on anything but which job carries it, and the local
+# no-flag run still does the whole thing in one process.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$(pwd)
+
+mode=all
+case "${1:-}" in
+  '') ;;
+  --never-mutants-only) mode=never ;;
+  --without-never-mutants) mode=verify ;;
+  *)
+    echo "usage: $0 [--never-mutants-only | --without-never-mutants]" >&2
+    exit 2
+    ;;
+esac
 
 ./bin/dawn --version > /dev/null
 
@@ -61,8 +85,10 @@ trap 'rm -rf "$work"' EXIT
 
 javac -d "$work" scripts/classfile-verify/Verify.java scripts/classfile-verify/AccessCheck.java
 
-# Prove the gate can fail before believing that it did not.
-scripts/classfile-verify/selftest.sh "$work"
+if [ "$mode" != never ]; then
+  # Prove the gate can fail before believing that it did not.
+  scripts/classfile-verify/selftest.sh "$work"
+fi
 
 never_probe=scripts/classfile-verify/never_probe.py
 
@@ -123,6 +149,8 @@ expect_never_marker() {
   fi
   echo "PASS  $name compiles, then turns only $marker red"
 }
+
+run_never_mutants() {
 
 python3 "$never_probe" "$root/build/dawn-selfhost.jar" "$work"
 
@@ -265,6 +293,10 @@ build_never_mutant return-from-wide-sam-adapter
 expect_never_marker return-from-wide-sam-adapter \
   NEVER_WIDE_SAM_ADAPTER_TERMINATION --verified-mutant
 
+}
+
+run_corpus_checks() {
+
 fail=0
 java_tail_fixture=scripts/classfile-verify/java_tail_unit.dawn
 # examples/interop/interop.dawn is here for check 1, and it is the only corpus entry
@@ -321,3 +353,12 @@ fi
 echo "OK: corpus mutant -- the gate reds on a private reference in the emitted selfhost corpus"
 
 scripts/constpool-scan.py "$work/emit"
+
+}
+
+if [ "$mode" != verify ]; then
+  run_never_mutants
+fi
+if [ "$mode" != never ]; then
+  run_corpus_checks
+fi

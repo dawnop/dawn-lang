@@ -1,11 +1,27 @@
 #!/usr/bin/env bash
 # Hold SYN-13 across parser, checker, Core lowering, LSP, and the written
 # JVM/native Iter oracle. Every production mutant runs this complete set.
+#
+#   ./scripts/for-pattern-contract/run.sh              # everything
+#   ./scripts/for-pattern-contract/run.sh --shard 2/3  # fixtures + a third
+#
+# Sharding: every shard runs the fixture half and validates the whole matrix,
+# so no shard is a partial verdict; the mutants are divided round-robin, and
+# each shard records what it ran for scripts/mutant-coverage/check.py to hold
+# the union to the matrix.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/for-pattern-contract"
 dawn=${DAWN_BIN:-"$root/bin/dawn"}
+
+# shellcheck source=scripts/mutant-coverage/shard.sh
+source "$root/scripts/mutant-coverage/shard.sh"
+shard_parse "$@"
+if [ "${#shard_rest[@]}" -gt 0 ]; then
+  echo "for-pattern-contract: unknown argument(s): ${shard_rest[*]}" >&2
+  exit 2
+fi
 syntax="$here/syntax.dawn"
 refutable="$here/refutable.dawn"
 derived="$here/derived.dawn"
@@ -388,10 +404,17 @@ expect_mutant_red() {
   echo "PASS  $name changes production source and turns only '$owner' red"
 }
 
+shard_begin for-pattern-contract
+mutant_position=0
 while IFS=$'\t' read -r record name relative owner; do
   if [ "$record" = mutant ]; then
-    expect_mutant_red "$name" "$relative" "$owner"
+    if ! shard_skips "$mutant_position"; then
+      shard_record "$name"
+      expect_mutant_red "$name" "$relative" "$owner"
+    fi
+    mutant_position=$((mutant_position + 1))
   fi
 done < "$matrix"
+shard_report "$mutant_position"
 
 echo "for-pattern-contract: OK"

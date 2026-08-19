@@ -23,8 +23,24 @@ name: gates
 # still the whole critical path — 731s of a 731s run (31353623211) while five
 # jobs sat under six minutes — so its steps were dealt out to the jobs already
 # paying for the same toolchain, plus one new job (`contracts`) for the
-# emit/std contract block. No job may `needs:` another: they all start at once,
-# and the run is as long as the longest one.
+# emit/std contract block. The third (2026-08-20, #299) sharded the two mutant
+# matrices that had become the wall clock — the syntax family out of
+# checker-corpus, builtin-type out of docs — and moved the classfile Never
+# block out of contracts.
+#
+# No job that gates the tree may `needs:` another: they all start at once, and
+# the run is as long as the longest one. The one `needs:` in this file is
+# mutant-shards-complete, which is not a gate about the tree but about this
+# run's own completeness — it reassembles what the mutant shards recorded and
+# holds the union to the matrices, so it cannot start before them and sits off
+# the critical path (the shards it waits on are shorter than native-diff).
+#
+# Job definition order is descending expected duration, because runs here
+# regularly hold more jobs than the account's concurrent-runner ceiling (20;
+# the arithmetic lives in dawnop-site's ci.yml, measured 2026-08-15) and
+# creation order roughly tracks definition order: the jobs that queue should
+# be the short tail, which fits in slots the first finishers free. That is a
+# soft nudge, not a contract — GitHub does not promise dispatch order.
 #
 # The setup they each repeat is ~40s and comes out of
 # .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
@@ -77,68 +93,160 @@ jobs:
       - name: the gate map still describes this tree
         run: python3 scripts/gate-map/gatemap.py --check
 
-  # The hardware baseline itself stays local. CI exercises only the strict
-  # JSON reader, the synthetic Linux process tree and the two source mutants.
-  compiler-weight-contract:
+  # The syntax family's compiling mutants: syntax-small's five, pattern-or's
+  # fourteen and for-pattern's twenty-eight, one whole compiler build each.
+  # As one step of checker-corpus they measured 926~1111s on five consecutive
+  # main runs — the whole run's wall clock — so they run as three round-robin
+  # shards (#299). Every shard re-runs all three harnesses' fixture contracts
+  # and matrix validations, which are seconds, so no shard is a partial
+  # verdict about what the contracts assert; only the mutants are divided.
+  # Each shard writes down the mutants it actually executed, and
+  # mutant-shards-complete holds the union of the shards to the matrices,
+  # because a shard that skips a slice prints the same PASS lines as one that
+  # ran it.
+  syntax-mutants-1:
     runs-on: ubuntu-latest
-    # budget: floor (seconds-scale synthetic job)
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - name: compiler weight schema and synthetic process contract
-        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/selfhost-bench-contract/run.py
-
-  # Phase 2 measures process semantics, not runner hardware. The complete
-  # contract measured 60s locally, and the reused toolchain setup has a 29s
-  # observed upper bound. Keep it parallel to the 163s Phase 1 contract.
-  dependency-heap-contract:
-    runs-on: ubuntu-latest
-    # budget: 3x 90s combined worst observed
-    timeout-minutes: 5
+    # 47 mutants over three shards at the unsplit step's worst observation
+    # (1111s) is ~370s of mutants per shard, plus the fixture contracts
+    # (~40s) and the toolchain (~38s): ~450s predicted for the worst shard.
+    # Restate from the first run to carry them, the way 30af350 did for
+    # export-surface.
+    # budget: 3x 450s predicted from the unsplit step's worst observed 1111s
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          build: 'false'
-      - name: dependency re-exec inherits the effective parent heap
-        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/dependency-heap-contract/run.py
+      - name: syntax ownership and recovery contract (shard 1)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/syntax-small-contract/run.sh --shard 1/3
+      - name: record which mutants this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-syntax-1
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
 
-  # The extension grammar is editor behavior, not documentation. Exercise it
-  # with VS Code's TextMate engine and Oniguruma WASM in a standalone job so a
-  # broken scope rule cannot hide behind the compiler toolchain setup.
-  editor-grammar:
+  syntax-mutants-2:
     runs-on: ubuntu-latest
-    # measured 6s; a floor, for the reason tree-policy gives.
-    # budget: floor (seconds-scale job)
-    timeout-minutes: 5
+    # budget: 3x 450s predicted from the unsplit step's worst observed 1111s
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/dawn-toolchain
         with:
-          node-version: 'lts/*'
-          cache: npm
-          cache-dependency-path: editors/vscode/package-lock.json
-      - name: VS Code TextMate scope contract
-        working-directory: editors/vscode
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm test --silent
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: syntax ownership and recovery contract (shard 2)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/syntax-small-contract/run.sh --shard 2/3
+      - name: record which mutants this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-syntax-2
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
 
-      # The extension was publishable in principle and had never been packaged,
-      # which is how its manifest came to claim MIT in an Apache-2.0 repository
-      # and to point at an icon that did not exist. Packaging is the step that
-      # reads the manifest as the marketplace reads it, so it runs here rather
-      # than being remembered at publish time. The .vsix is not uploaded: only
-      # the maintainer's marketplace token can publish, and a build artifact
-      # nobody installs is not evidence of anything.
-      - name: the extension packages
-        working-directory: editors/vscode
-        run: npm run package
+  syntax-mutants-3:
+    runs-on: ubuntu-latest
+    # budget: 3x 450s predicted from the unsplit step's worst observed 1111s
+    timeout-minutes: 23
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: syntax ownership and recovery contract (shard 3)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/syntax-small-contract/run.sh --shard 3/3
+      - name: record which mutants this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-syntax-3
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  # SEM-14's builtin type inventory: twenty-six compiling mutants, measured
+  # 721~848s as one step of the docs job on five consecutive main runs, which
+  # made docs the second-longest job of every run. Two round-robin shards
+  # (#299); each first runs probe.py against the real compiler, so no shard
+  # is a partial verdict, and each reports to mutant-shards-complete like the
+  # syntax shards above. Two shards rather than three because the third would
+  # buy ~140s that is not on the critical path and cost another queued job.
+  builtin-type-1:
+    runs-on: ubuntu-latest
+    # 26 mutants over two shards at the unsplit step's worst observation
+    # (848s) is ~420s of mutants per shard, plus the probe and the toolchain:
+    # ~470s predicted for the worst shard. Restate from the first run to
+    # carry them.
+    # budget: 3x 470s predicted from the unsplit step's worst observed 848s
+    timeout-minutes: 24
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: builtin type inventory contract (shard 1)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/builtin-type-contract/run.sh --shard 1/2
+      - name: record which mutants this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-builtin-type-1
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  builtin-type-2:
+    runs-on: ubuntu-latest
+    # budget: 3x 470s predicted from the unsplit step's worst observed 848s
+    timeout-minutes: 24
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: builtin type inventory contract (shard 2)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/builtin-type-contract/run.sh --shard 2/2
+      - name: record which mutants this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-builtin-type-2
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  # The classfile gate's thirteen compiling Never mutants (TEST-01's call and
+  # adapter termination assertions), moved whole out of `contracts` (#299):
+  # at ~14s a mutant the block was ~180s of that job's classfile step and
+  # shares nothing with the corpus loop but the javac'd Verify classes, which
+  # both sides recompile for ~2s. Not sharded and not under the coverage
+  # guard: the block runs whole in this one job, so a missing slice is this
+  # job red, not a silence. If the matrix outgrows ~25, give it the
+  # syntax-mutants treatment and put it under mutant-shards-complete.
+  classfile-never-mutants:
+    runs-on: ubuntu-latest
+    # ~180s for the mutant block inside the contracts job's 246~258s
+    # classfile step, plus the real-compiler probe, javac and the toolchain:
+    # ~260s predicted. Restate from the first run to carry it.
+    # budget: 3x 260s predicted from the block's share of the unsplit step
+    timeout-minutes: 13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: classfile Never mutants
+        run: ./scripts/classfile-verify/run.sh --never-mutants-only
 
   # The core suite: the compiler's own tests, the self-hosting proof and the
   # gates that read the compiler's source or grammar rather than its products.
@@ -265,18 +373,13 @@ jobs:
   # they were 180s of the old `test` job.
   contracts:
     runs-on: ubuntu-latest
-    # Run 31515869244 measured 575s for the complete ARC-13 contracts job;
-    # its source-loop label step was 42s. The prior conservative bound was
-    # 622s, which remains larger than that actual. The new range-bound step
-    # measured 18.40s locally after toolchain warm-up, so the planning value is
-    # max(575s, 622s) + 18.40s = 640.40s. The remote actual does not include
-    # this new step.
-    # The display layering step measured 12.72s then 12.95s locally after
-    # toolchain warm-up (two mutant compiler builds, JVM only), so the planning
-    # value is 640.40s + 12.95s = 653.35s. Neither of the two new steps is in
-    # the remote actual.
-    # budget: 3x 654s = 1962s, rounded up
-    timeout-minutes: 33
+    # 545~576s complete on five consecutive main runs (2026-08-18/19, with
+    # both of the steps the older 654s planning value had to add on paper).
+    # The classfile step's thirteen Never mutants (~180s of its 246~258s)
+    # moved to the classfile-never-mutants job on 2026-08-20 (#299), so the
+    # planning value is ~400s. Restate from the first run without the block.
+    # budget: 3x 400s predicted after the Never mutants moved out
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -286,10 +389,11 @@ jobs:
       # TEST-01: every emitted class force-linked through the JVM verifier.
       # The differentials prove the backends agree, never that the bytes are
       # legal; lazy linking means a class no test touches is never verified.
-      # Thirteen compiling mutants own the Never call and adapter termination
-      # assertions, including verifier-valid early-return counterexamples.
+      # The thirteen compiling Never mutants that ride along in a full local
+      # run are the classfile-never-mutants job's step; the two halves
+      # partition the script's no-flag run.
       - name: classfile verification
-        run: ./scripts/classfile-verify/run.sh
+        run: ./scripts/classfile-verify/run.sh --without-never-mutants
 
       # K-A7: the compiler emits `dawn/rt/Asm`, the five null adapters that
       # used to be the last handwritten Java in the trusted base. Every other
@@ -633,12 +737,14 @@ jobs:
   # quietly regress either.
   checker-corpus:
     runs-on: ubuntu-latest
-    # 882.65s measured locally on 2026-08-12 after the for-pattern recovery matrix:
-    # checker corpus 119.13s, syntax contracts 741.84s, Java narrowing 21.68s.
-    # This supersedes the prior 872.35s local observation; round the worse
-    # value up before applying the repository-wide 3x rule.
-    # budget: 3x 883s worst observed
-    timeout-minutes: 45
+    # The syntax mutant family (926~1111s of this job on five consecutive
+    # main runs, the whole run's wall clock) moved to the syntax-mutants
+    # shard jobs on 2026-08-20 (#299). What remains — the corpus itself
+    # (175~202s remote), the Java narrowing contract (30~34s) and the
+    # toolchain (~38s) — is ~280s predicted from those same runs. Restate
+    # from the first run without the syntax step.
+    # budget: 3x 280s predicted after the syntax mutant family moved out
+    timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -647,72 +753,12 @@ jobs:
       - name: checker diagnostic corpus
         run: ./scripts/checker-corpus/run.sh
 
-      # Parser ownership, checker-owned builtin alias hints, and the nominal
-      # singleton/nullary boundary keep their five compiling syntax mutants.
-      # This step also runs the pattern-or and for-pattern matrices: another
-      # forty-two production mutants, each against its complete checker,
-      # parser, LSP, runtime and complexity assertion set, without adding
-      # another cold-start job.
-      - name: syntax ownership and recovery contract
-        run: ./scripts/syntax-small-contract/run.sh
-
       # SEM-06: an erased Java Object must not acquire a hidden CHECKCAST just
       # because an overload wants a concrete reference. The contract also
       # compiles the safe widening/Bytes/SAM/List paths and runs both source
       # mutants, including the structurally forbidden backend fallback.
       - name: Java narrowing contract
         run: ./scripts/java-narrowing-contract/run.sh
-
-  # SEM-07: a public declaration may only name identities its audience can
-  # name. Three jobs rather than one because the evidence is 24 mutant
-  # compilers -- one per rule -- and a mutant costs a whole build. Splitting
-  # keeps this off the critical path; every shard re-runs the fixture contract,
-  # which is seconds, so no shard is a partial verdict about what the validator
-  # accepts and rejects.
-  #
-  # The rules this owns are all silent when broken: a walker that peels an
-  # opaque representation still accepts every legal program, one that stops at
-  # a root's first leak still rejects the fixture, and one that runs after the
-  # bodies still emits the same text. None of that is visible to a golden.
-  export-surface-1:
-    runs-on: ubuntu-latest
-    # 122s locally for one shard (8 builds + the fixture contract); 201s, 192s
-    # and 206s measured across the three shards in the first run to carry them
-    # (31389692620), so the runner costs less here than checker-corpus's ratio
-    # predicted. All three sit well under native-diff's 589s critical path.
-    # budget: 3x 206s worst observed
-    timeout-minutes: 11
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: public API surface contract (shard 1)
-        run: ./scripts/export-surface-contract/run.sh --shard 1/3
-
-  export-surface-2:
-    runs-on: ubuntu-latest
-    # budget: 3x 206s worst observed
-    timeout-minutes: 11
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: public API surface contract (shard 2)
-        run: ./scripts/export-surface-contract/run.sh --shard 2/3
-
-  export-surface-3:
-    runs-on: ubuntu-latest
-    # budget: 3x 206s worst observed
-    timeout-minutes: 11
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: public API surface contract (shard 3)
-        run: ./scripts/export-surface-contract/run.sh --shard 3/3
 
   # SYN-05: the general pipe. It left the `test` job when it grew its mutants,
   # for the reason export-surface is split above: one build per rule does not
@@ -783,26 +829,6 @@ jobs:
       - name: Java member dispatch contract
         run: ./scripts/java-member-dispatch-contract/run.sh
 
-  # What a toolchain says when the std it loaded is not the std it shipped
-  # with (#226). Every failure used to be one sentence, and on the native
-  # driver that sentence blamed the installation for a std the user's working
-  # directory had shadowed in.
-  std-version:
-    runs-on: ubuntu-latest
-    # Seven private compiler builds: one per mutant, plus the probe that
-    # corrupts the compiled-in std. 63s locally. java-member-dispatch's ten
-    # builds cost 158s locally and 292s on the runner, which puts this one at
-    # about 205s here; restate the number from the first run that carries it.
-    # budget: 3x 205s predicted from java-member-dispatch's local/runner ratio
-    timeout-minutes: 11
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Std version contract
-        run: ./scripts/std-version-contract/run.sh
-
   # TEST-04: the documentation's own examples, links and anchors. The audit
   # found a wrong README example, an install command that did not run and an
   # EBNF out of step with the parser -- all by human reading. Marking the
@@ -814,11 +840,15 @@ jobs:
   # node.
   docs:
     runs-on: ubuntu-latest
-    # Run 31507403481 completed every docs step successfully in 1158s. The
-    # builtin inventory step was 932s of that observation. This replaces the
-    # provisional local estimate with the first complete SEM-14 runner data.
-    # budget: 3x 1158s = 3474s
-    timeout-minutes: 58
+    # The builtin type inventory contract (721~848s of this job on five
+    # consecutive main runs) moved to the builtin-type shard jobs on
+    # 2026-08-20 (#299). What remains — doc-check (112~132s), site tests,
+    # the playground contract, the site build and the dist differential
+    # (~50s together), and node + toolchain setup (~36s) — is ~250s
+    # predicted from those same runs. Restate from the first run without
+    # the inventory step.
+    # budget: 3x 250s predicted after the builtin-type mutants moved out
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
 
@@ -836,13 +866,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: documentation checks
         run: ./scripts/doc-check.py
-
-      # The checker, LSP and reference expose different views of one layered
-      # builtin-type inventory. Twenty-six compiling mutants prove each
-      # consumer, every Never context, and both sides of the reference's
-      # reverse function-membership check.
-      - name: builtin type inventory contract
-        run: ./scripts/builtin-type-contract/run.sh
 
       - name: site tests
         run: ./bin/dawn test site
@@ -869,43 +892,6 @@ jobs:
       # page. Read the script's header before touching it.
       - name: site dist, JVM vs native
         run: ./scripts/site-dist-diff.sh
-
-  # N vs N-1 (scripts/selfhost-prev-diff.sh): the previous release and HEAD
-  # compile the same corpus and any byte difference must be declared in a
-  # commit message. This is the oracle now that the Kotlin reference is
-  # archived (kotlin-final), and doubles as the machine enforcement of the
-  # seed feature discipline — the N-1 jar must still compile HEAD
-  # selfhost/src. The same job replays the run/fmt/lsp transcripts against
-  # the N-1 toolchain, the successors of the old Kotlin golden diffs.
-  prev-diff:
-    runs-on: ubuntu-latest
-    # 210s before the move and 210s after it; see the note in `test`.
-    # budget: 3x 210s worst observed
-    timeout-minutes: 11
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # the declared-change scan walks commits since the N-1 tag
-          fetch-depth: 0
-
-      # build: false — every script below drives the seed and builds what it
-      # needs itself, so a toolchain built up front would only be built again.
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          build: 'false'
-
-      - name: N vs N-1 differential
-        run: ./scripts/selfhost-prev-diff.sh
-
-      - name: run/test transcript vs N-1
-        run: ./scripts/selfhost-run-diff.sh
-
-      - name: formatter vs N-1
-        run: ./scripts/selfhost-fmt-diff.sh
-
-      - name: lsp transcript vs N-1
-        run: ./scripts/selfhost-lsp-diff.sh
 
   # The native half of the same comparison, split off because it is the longer
   # one (172s of prev-diff's 314s on 2026-08-07) and because the two steps in
@@ -949,3 +935,214 @@ jobs:
       # a tag would publish, not one built beside it with the same recipe.
       - name: driver subcommands on the native backend
         run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/native-cli-diff.sh
+
+  # The hardware baseline itself stays local. CI exercises only the strict
+  # JSON reader, the synthetic Linux process tree and the two source mutants.
+  compiler-weight-contract:
+    runs-on: ubuntu-latest
+    # budget: floor (seconds-scale synthetic job)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: compiler weight schema and synthetic process contract
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/selfhost-bench-contract/run.py
+
+  # Phase 2 measures process semantics, not runner hardware. The complete
+  # contract measured 60s locally, and the reused toolchain setup has a 29s
+  # observed upper bound. Keep it parallel to the 163s Phase 1 contract.
+  dependency-heap-contract:
+    runs-on: ubuntu-latest
+    # budget: 3x 90s combined worst observed
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          build: 'false'
+      - name: dependency re-exec inherits the effective parent heap
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/dependency-heap-contract/run.py
+
+  # The extension grammar is editor behavior, not documentation. Exercise it
+  # with VS Code's TextMate engine and Oniguruma WASM in a standalone job so a
+  # broken scope rule cannot hide behind the compiler toolchain setup.
+  editor-grammar:
+    runs-on: ubuntu-latest
+    # measured 6s; a floor, for the reason tree-policy gives.
+    # budget: floor (seconds-scale job)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: VS Code TextMate scope contract
+        working-directory: editors/vscode
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test --silent
+
+      # The extension was publishable in principle and had never been packaged,
+      # which is how its manifest came to claim MIT in an Apache-2.0 repository
+      # and to point at an icon that did not exist. Packaging is the step that
+      # reads the manifest as the marketplace reads it, so it runs here rather
+      # than being remembered at publish time. The .vsix is not uploaded: only
+      # the maintainer's marketplace token can publish, and a build artifact
+      # nobody installs is not evidence of anything.
+      - name: the extension packages
+        working-directory: editors/vscode
+        run: npm run package
+
+  # What a toolchain says when the std it loaded is not the std it shipped
+  # with (#226). Every failure used to be one sentence, and on the native
+  # driver that sentence blamed the installation for a std the user's working
+  # directory had shadowed in.
+  std-version:
+    runs-on: ubuntu-latest
+    # Seven private compiler builds: one per mutant, plus the probe that
+    # corrupts the compiled-in std. 63s locally. java-member-dispatch's ten
+    # builds cost 158s locally and 292s on the runner, which puts this one at
+    # about 205s here; restate the number from the first run that carries it.
+    # budget: 3x 205s predicted from java-member-dispatch's local/runner ratio
+    timeout-minutes: 11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Std version contract
+        run: ./scripts/std-version-contract/run.sh
+
+  # N vs N-1 (scripts/selfhost-prev-diff.sh): the previous release and HEAD
+  # compile the same corpus and any byte difference must be declared in a
+  # commit message. This is the oracle now that the Kotlin reference is
+  # archived (kotlin-final), and doubles as the machine enforcement of the
+  # seed feature discipline — the N-1 jar must still compile HEAD
+  # selfhost/src. The same job replays the run/fmt/lsp transcripts against
+  # the N-1 toolchain, the successors of the old Kotlin golden diffs.
+  prev-diff:
+    runs-on: ubuntu-latest
+    # 210s before the move and 210s after it; see the note in `test`.
+    # budget: 3x 210s worst observed
+    timeout-minutes: 11
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the declared-change scan walks commits since the N-1 tag
+          fetch-depth: 0
+
+      # build: false — every script below drives the seed and builds what it
+      # needs itself, so a toolchain built up front would only be built again.
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          build: 'false'
+
+      - name: N vs N-1 differential
+        run: ./scripts/selfhost-prev-diff.sh
+
+      - name: run/test transcript vs N-1
+        run: ./scripts/selfhost-run-diff.sh
+
+      - name: formatter vs N-1
+        run: ./scripts/selfhost-fmt-diff.sh
+
+      - name: lsp transcript vs N-1
+        run: ./scripts/selfhost-lsp-diff.sh
+
+  # SEM-07: a public declaration may only name identities its audience can
+  # name. Three jobs rather than one because the evidence is 24 mutant
+  # compilers -- one per rule -- and a mutant costs a whole build. Splitting
+  # keeps this off the critical path; every shard re-runs the fixture contract,
+  # which is seconds, so no shard is a partial verdict about what the validator
+  # accepts and rejects.
+  #
+  # The rules this owns are all silent when broken: a walker that peels an
+  # opaque representation still accepts every legal program, one that stops at
+  # a root's first leak still rejects the fixture, and one that runs after the
+  # bodies still emits the same text. None of that is visible to a golden.
+  export-surface-1:
+    runs-on: ubuntu-latest
+    # 122s locally for one shard (8 builds + the fixture contract); 201s, 192s
+    # and 206s measured across the three shards in the first run to carry them
+    # (31389692620), so the runner costs less here than checker-corpus's ratio
+    # predicted. All three sit well under native-diff's 589s critical path.
+    # budget: 3x 206s worst observed
+    timeout-minutes: 11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: public API surface contract (shard 1)
+        run: ./scripts/export-surface-contract/run.sh --shard 1/3
+
+  export-surface-2:
+    runs-on: ubuntu-latest
+    # budget: 3x 206s worst observed
+    timeout-minutes: 11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: public API surface contract (shard 2)
+        run: ./scripts/export-surface-contract/run.sh --shard 2/3
+
+  export-surface-3:
+    runs-on: ubuntu-latest
+    # budget: 3x 206s worst observed
+    timeout-minutes: 11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: public API surface contract (shard 3)
+        run: ./scripts/export-surface-contract/run.sh --shard 3/3
+
+  # The union guard for the sharded mutant matrices. Sharding introduced
+  # exactly one new way to be wrong — a mutant no shard runs — and nothing
+  # else can see it: each shard prints its own PASS lines and exits 0 whether
+  # it covered its slice or not. So each shard records what it executed, and
+  # this job reassembles the records and holds their union to the harnesses'
+  # own matrix files. Which harnesses must report is asked of the tree
+  # (scripts/mutant-coverage/check.py's header says how), not of this file:
+  # a shard job deleted from this file surfaces here as a named absence,
+  # which is the point.
+  #
+  # `if: always()` so a red shard cannot swallow the completeness verdict —
+  # the two failures stay separately attributable. The self-test runs first
+  # because a guard whose red has never been observed is not a guard; it
+  # feeds every refusal shape (missing shard, dropped mutant, double-run,
+  # shard-count disagreement, absent harness) through the checker and
+  # requires each to be refused. Artifacts are run-scoped, so release.yml
+  # reusing this workflow at a tag cannot cross-read a branch run's records.
+  mutant-shards-complete:
+    needs:
+      - syntax-mutants-1
+      - syntax-mutants-2
+      - syntax-mutants-3
+      - builtin-type-1
+      - builtin-type-2
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: the coverage checker can refuse
+        run: python3 scripts/mutant-coverage/check.py --self-test
+      - name: collect every shard's coverage record
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutant-coverage-*
+          path: coverage
+      - name: the union of the shards is the whole matrix
+        run: python3 scripts/mutant-coverage/check.py --coverage-dir coverage
