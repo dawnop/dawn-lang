@@ -362,6 +362,20 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
         w1 = close_obj(w1)
       }
       w1 = close_arr(w1, len(td.assoc) > 0)
+      # associated effects, beside the associated types (决策 9). The key is
+      # written only when the trait declares one, so every effect-free
+      # trait's doc output is byte-identical to what it was.
+      if len(td.eff_assoc) > 0 {
+        w1 = w_key(w1, "effectAssoc")
+        w1 = open_arr(w1)
+        for ad in td.eff_assoc {
+          w1 = open_obj(w1)
+          w1 = w_field(w1, "name", ad.name)
+          w1 = w_field_opt(w1, "doc", doc_of(ds, ad.lo))
+          w1 = close_obj(w1)
+        }
+        w1 = close_arr(w1, true)
+      }
       w1 = trait_methods_json(w1, cm.cx, cm.class_name, td.name)
       w1 = w_field_opt(w1, "doc", doc_of(ds, td.lo))
       w1 = close_obj(w1)

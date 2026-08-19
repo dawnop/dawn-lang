@@ -26,7 +26,7 @@ use front/lexer
 use front/token.{
   Token, TokKind, Diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
-  USE, ELSE, FN, TRUE, FALSE, NOT, IMPL,
+  USE, ELSE, FN, TRUE, FALSE, NOT, IMPL, EFFECT,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
@@ -171,10 +171,18 @@ fn postfix_bang(raw: List[Token]) -> Set[Int] = {
   var i = 0
   while i < len(raw) {
     if raw[i].kind == BANG {
+      # `effect E = !()` (刀 5): the empty row is only spellable in an impl's
+      # effect binding, so the classification is keyed to that exact prefix --
+      # anywhere else `!()` stays the postfix unwrap plus a call, as it was.
+      let empty_row_bind =
+        i >= 3 && raw[i - 1].kind == EQ && raw[i - 2].kind == TYPEIDENT &&
+        raw[i - 3].kind == EFFECT &&
+        i + 2 < len(raw) && raw[i + 1].kind == LPAREN && raw[i + 2].kind == RPAREN
       let names_effect =
         i + 1 < len(raw) &&
         (is_effect_name(raw[i + 1].kind) ||
-            (raw[i + 1].kind == LPAREN && is_effect_union(raw, i + 2)))
+            (raw[i + 1].kind == LPAREN && is_effect_union(raw, i + 2)) ||
+            empty_row_bind)
       if not names_effect { out = set.insert(out, raw[i].lo) }
     }
     i = i + 1
@@ -215,6 +223,10 @@ fn is_effect_union(raw: List[Token], start: Int) -> Bool = {
       if not is_effect_name(k) { return false }
       want_name = false
       i = i + 1
+      # a projection atom `S.E` (刀 5) is one name for this walk's purposes
+      if i + 1 < len(raw) && raw[i].kind == DOT && raw[i + 1].kind == TYPEIDENT {
+        i = i + 2
+      }
     } else if k == PIPE {
       want_name = true
       i = i + 1
@@ -530,6 +542,21 @@ test "a comment between the arrow and the body is transparent" {
 test "a leading else aligns with its if" {
   let src = "fn f(b: Bool) -> Int =\n  if b { 1 }\n  else { 2 }\n"
   assert fmt_of(src) == src
+}
+
+test "the associated-effect spellings keep their bang an effect marker" {
+  # `!()` after an effect binding's `=` is the empty row, not a postfix unwrap
+  # plus a call -- and only there: `o!()` in an expression stays tight.
+  let bind = "impl P[A] {\n  effect E = !()\n  fn run(x: A) -> Int = x.v\n}\n"
+  assert fmt_of(bind) == bind
+  let post = "fn h(o: Option[fn() -> Int]) -> Int = o!()\n"
+  assert fmt_of(post) == post
+  # a projection atom inside a union is one effect name for the walk, so the
+  # `!(` keeps the space that says "effect" rather than "call"
+  let row = "fn g[T: P](x: T, f: fn() -> Int !e) -> Int !(e | T.E) = f()\n"
+  assert fmt_of(row) == row
+  let bare = "fn k[T: P](x: T) -> Int !T.E = run(x)\n"
+  assert fmt_of(bare) == bare
 }
 
 test "use paths print tight and unary minus hugs" {

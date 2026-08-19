@@ -1,0 +1,42 @@
+# 刀 5 (docs/effect-params-design.md): the three new spellings. `effect E` as
+# a bare trait member beside `type Item`; `effect E = !X` bindings in impl
+# bodies (one declared effect, `!io`, or the empty row `!()`); and the row
+# atom `!T.E`, bare, stacked beside a label, and inside a union group.
+effect Ask { fn ask() -> Int }
+effect Log { fn log(s: String) -> Int }
+
+trait Parser[S] {
+  type Item
+  effect E
+  effect F
+  fn next(s: S) -> Int !S.E
+  fn note(s: S) -> Int !Log !S.F
+  fn both(s: S, f: fn() -> Int !e) -> Int !(e | S.E) !S.F
+}
+
+type Sub = { pos: Int }
+
+impl Parser[Sub] {
+  type Item = Int
+  effect E = !Ask
+  effect F = !()
+  fn next(s: Sub) -> Int !Ask = s.pos + ask()
+  fn note(s: Sub) -> Int !Log = log("n")
+  fn both(s: Sub, f: fn() -> Int !e) -> Int !(e | Ask) = s.pos + ask() + f()
+}
+
+type Other = { pos: Int }
+
+impl Parser[Other] {
+  type Item = Int
+  effect E = !io
+  effect F = !()
+  fn next(s: Other) -> Int !io = {
+    println("next")
+    s.pos
+  }
+  fn note(s: Other) -> Int !Log = log("o")
+  fn both(s: Other, f: fn() -> Int !e) -> Int !(e | io) = s.pos + f()
+}
+
+fn drive[S: Parser](s: S) -> Int !Log !S.E !S.F = next(s) + note(s)
