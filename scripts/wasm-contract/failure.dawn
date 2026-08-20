@@ -1,0 +1,147 @@
+# The failure runtime, wasm against native, one stdout byte for byte.
+#
+# Everything observable about catch_fault / catch_panic / bracket on the C
+# backend, asked on both targets: a landed catch (message verbatim past any
+# fixed buffer, 650 bytes here), kind routing across a skipped io barrier, a
+# fault taken by catch_fault, nested catches, a raise from a landing,
+# references live across the raise (25 rounds -- the rc-balance leg of
+# run.sh is what says their drops ran), a bracket whose release runs on the
+# unwind path and swallows a failure of its own without touching the
+# crossing one (spec 9.8.2 guarantee 2), and a release that escapes and
+# replaces it. Kinds print because both runs are the C runtime -- this is
+# the one differential where "panic"/"fault" is the same spelling on both
+# sides.
+use std/io
+use std/str
+
+fn n(i: Int) -> Int !io = i
+
+## A landed catch: the message arrives whole and verbatim.
+fn leg_message() -> Unit !io = {
+  let long = str.repeat("long-", 130)
+  match catch_panic(() => {
+    panic(long)
+    n(0)
+  }) {
+    Ok(_) -> println("message: not caught?")
+    Err(e) -> println("message: len=" ++ to_string(str.len(e.message)) ++
+        " kind=" ++ e.kind ++
+        " verbatim=" ++ (if e.message == long { "yes" } else { "no" }))
+  }
+}
+
+## Routing: a panic passes an io barrier untaken and lands on catch_panic.
+fn leg_routing() -> Unit !io =
+  match catch_panic(() => match catch_fault(() => {
+    panic("ROUTED")
+    n(0)
+  }) {
+    Ok(v) -> v
+    Err(_) -> 999
+  }) {
+    Ok(v) -> println("routing: the io barrier took a panic: " ++ to_string(v))
+    Err(e) -> println("routing: through, " ++ e.message)
+  }
+
+## And the io barrier does take a fault (io.read_file is catch_fault around
+## the raw read -- the barrier that lands here is std/io's own).
+fn leg_fault() -> Unit !io =
+  match io.read_file("/no/such/dawn/path") {
+    Ok(_) -> println("fault: no fault?")
+    Err(e) -> println("fault: kind=" ++ e.kind)
+  }
+
+## Nested catches: the inner one takes it, the outer sees Ok.
+fn leg_nested() -> Unit !io =
+  match catch_panic(() => match catch_panic(() => {
+    panic("INNER")
+    n(0)
+  }) {
+    Ok(v) -> v
+    Err(e) -> str.len(e.message)
+  }) {
+    Ok(v) -> println("nested: ok " ++ to_string(v))
+    Err(_) -> println("nested: the outer caught?")
+  }
+
+## A raise from a landing: catch, then panic again, caught one level out.
+fn leg_repanic() -> Unit !io =
+  match catch_panic(() => match catch_panic(() => {
+    panic("FIRST")
+    n(0)
+  }) {
+    Ok(v) -> v
+    Err(e) -> panic("SECOND-AFTER-" ++ e.message)
+  }) {
+    Ok(_) -> println("repanic: ok?")
+    Err(e) -> println("repanic: " ++ e.message)
+  }
+
+## References live across the raise: `big` is read after the raising call,
+## so the frame holds it when the raise discards the frame (the shape
+## scripts/spike-native/recover_live.dawn pins natively with LSan).
+fn holder(w: Int) -> Int !io = {
+  let big = str.repeat("Z", w)
+  panic("deliberate")
+  str.len(big)
+}
+
+fn leg_live() -> Unit !io = {
+  var total = 0
+  var i = 0
+  while i < 25 {
+    total = total + (match catch_panic(() => holder(n(2048))) {
+      Ok(v) -> v
+      Err(_) -> 1
+    })
+    i = i + 1
+  }
+  println("live: " ++ to_string(total))
+}
+
+## A release that swallows a failure of its own must not touch the one
+## crossing the bracket.
+fn release_swallows(name: String) -> Unit !io = {
+  println("  release for " ++ name)
+  match catch_panic(() => {
+    panic("INNER-FROM-RELEASE")
+    n(0)
+  }) {
+    Ok(_) -> println("  the inner did not fail?")
+    Err(e) -> println("  release swallowed: " ++ e.message)
+  }
+}
+
+fn leg_bracket() -> Unit !io =
+  match catch_panic(() => bracket("R", release_swallows, (r: String) => {
+    panic("OUTER-" ++ r)
+    n(0)
+  })) {
+    Ok(_) -> println("bracket: ok?")
+    Err(e) -> println("bracket: " ++ e.message)
+  }
+
+## A release that escapes replaces the crossing failure (the recorded
+## verdict: no suppressed chain, the escaping one wins).
+fn release_escapes(name: String) -> Unit !io = panic("RELEASE-ESCAPED-" ++ name)
+
+fn leg_release_escape() -> Unit !io =
+  match catch_panic(() => bracket("S", release_escapes, (r: String) => {
+    panic("REPLACED-" ++ r)
+    n(0)
+  })) {
+    Ok(_) -> println("escape: ok?")
+    Err(e) -> println("escape: " ++ e.message)
+  }
+
+pub fn main() -> Unit !io = {
+  leg_message()
+  leg_routing()
+  leg_fault()
+  leg_nested()
+  leg_repanic()
+  leg_live()
+  leg_bracket()
+  leg_release_escape()
+  println("failure corpus done")
+}

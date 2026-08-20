@@ -2798,7 +2798,7 @@ def mutants(base):
             "a recorded gap with no reason beside it, which is the prose this "
             "file exists to replace",
             record=lambda text: swap(
-                "LICENSE                                    no-gate:", "LICENSE  #"
+                "LICENSE                                      no-gate:", "LICENSE  #"
             )(text, "unseen.txt"),
         ),
         Mutant(
@@ -2806,8 +2806,8 @@ def mutants(base):
             "a reason the map contradicts. The kind is checked, so it cannot "
             "go on claiming something the tree stopped supporting",
             record=lambda text: swap(
-                "LICENSE                                    no-gate:",
-                "LICENSE                                    tag-only:",
+                "LICENSE                                      no-gate:",
+                "LICENSE                                      tag-only:",
             )(text, "unseen.txt"),
         ),
         Mutant(
