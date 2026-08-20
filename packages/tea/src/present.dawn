@@ -1,0 +1,88 @@
+# Frame -> frame, as terminal bytes. The terminal keeps no widget tree; the
+# only thing it retains is the rows already on screen. So the incremental unit
+# here is the row, not the widget: `present` compares the rows a screen shows
+# with the rows the next frame wants and emits cursor-addressed rewrites for
+# the rows that differ, nothing for the rows that do not. This is the Bubble
+# Tea shape (its standard renderer diffs the previous frame's lines); Ink by
+# contrast erases and rewrites the whole frame each commit, which is exactly
+# the v1 behaviour this module replaces.
+#
+# Everything is pure: bytes in, bytes out, the caller owns the terminal. A
+# driver keeps the rows it last painted, calls `present`, prints the result,
+# and remembers the new rows. The first paint has no previous rows; painting
+# over a cleared screen with `present([], rows)` writes every row.
+#
+# Rows are addressed absolutely (`ESC[r;1H`), 1-based, and each rewrite erases
+# the row first (`ESC[2K`) so a shorter new row leaves no tail of the old one.
+# When the new frame has fewer rows, the leftover rows are erased in place.
+
+use std/str
+
+## A rendered frame cut into rows, the unit `present` diffs at.
+pub fn frame_lines(frame: String) -> List[String] = str.split(frame, "\n")
+
+## The bytes that turn a screen showing `prev` into one showing `next`.
+## Identical frames emit nothing at all.
+pub fn present(prev: List[String], next: List[String]) -> String =
+  present_go(prev, next, 0, "")
+
+## Park the cursor on the first row below an `nrows`-tall frame and clear
+## that row; a driver prints its prompt there, over the previous prompt.
+pub fn park(nrows: Int) -> String = goto(nrows + 1) ++ erase()
+
+fn goto(row: Int) -> String = "\u{001B}[" ++ to_string(row) ++ ";1H"
+
+fn erase() -> String = "\u{001B}[2K"
+
+fn rewrite(row: Int, content: String) -> String = goto(row) ++ erase() ++ content
+
+fn present_go(prev: List[String], next: List[String], i: Int, acc: String) -> String =
+  if i >= len(prev) && i >= len(next) {
+    acc
+  } else if i >= len(next) {
+    present_go(prev, next, i + 1, acc ++ goto(i + 1) ++ erase())
+  } else if i >= len(prev) {
+    present_go(prev, next, i + 1, acc ++ rewrite(i + 1, next[i]))
+  } else if prev[i] == next[i] {
+    present_go(prev, next, i + 1, acc)
+  } else {
+    present_go(prev, next, i + 1, acc ++ rewrite(i + 1, next[i]))
+  }
+
+test "identical frames emit nothing" {
+  let rows = ["a", "b", "c"]
+  assert present(rows, rows) == ""
+  let empty: List[String] = []
+  assert present(empty, empty) == ""
+}
+
+test "one changed row is one addressed rewrite" {
+  let a = ["head", "old", "tail"]
+  let b = ["head", "new", "tail"]
+  assert present(a, b) == "\u{001B}[2;1H\u{001B}[2K" ++ "new"
+}
+
+test "growth writes only the new rows" {
+  let a = ["same"]
+  let b = ["same", "added"]
+  assert present(a, b) == "\u{001B}[2;1H\u{001B}[2K" ++ "added"
+}
+
+test "shrink erases the leftover rows in place" {
+  let a = ["keep", "gone", "gone too"]
+  let b = ["keep"]
+  assert present(a, b) == "\u{001B}[2;1H\u{001B}[2K" ++ "\u{001B}[3;1H\u{001B}[2K"
+}
+
+test "first paint over a cleared screen writes every row" {
+  let empty: List[String] = []
+  let b = ["x", "y"]
+  assert present(empty, b)
+    == "\u{001B}[1;1H\u{001B}[2K" ++ "x" ++ "\u{001B}[2;1H\u{001B}[2K" ++ "y"
+}
+
+test "frame_lines cuts at newlines and park clears the prompt row" {
+  assert frame_lines("a\nb") == ["a", "b"]
+  assert frame_lines("solo") == ["solo"]
+  assert park(2) == "\u{001B}[3;1H\u{001B}[2K"
+}

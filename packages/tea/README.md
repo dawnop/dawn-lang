@@ -53,6 +53,18 @@ index with one tail append or truncate. A middle deletion therefore rewrites
 the tail pairwise; that cost is pinned by a test rather than hidden, and keyed
 diffing waits for a consumer that measures it as pain.
 
+## Presenting
+
+The terminal retains no widget tree; what it retains is the rows already on
+screen. `present(prev, next)` therefore diffs at the row, not the widget: it
+returns the cursor-addressed ANSI bytes that rewrite exactly the rows that
+changed (erase first, so shorter rows leave no tail), erases leftover rows
+when the frame shrinks, and returns the empty string for an identical frame.
+`frame_lines` cuts a rendered frame into rows; `park(nrows)` positions and
+clears the prompt row below the frame. All pure: the caller owns the
+terminal, keeps the rows it last painted, and only the first paint clears
+the screen.
+
 ## Worked example
 
 `examples/projects/tea_todo` is a complete interactive todo list over this
