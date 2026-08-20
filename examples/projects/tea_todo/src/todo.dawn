@@ -8,6 +8,7 @@ use std/str
 use tea/route
 use tea/app.{App, update, view}
 use tea/widget.{Widget, Text, Styled, Row, Column, Button, Bold, Dim}
+use tea/dsl.{text, bold, dim, button, row, column}
 
 pub type Todo = { id: Int, title: String, done: Bool }
 
@@ -122,35 +123,35 @@ impl App[Model] {
         note_only(m, if input == "" { "type a command" } else { "unknown command: " ++ input })
     }
 
+  # The view writes in the DSL spelling (tea/dsl) since #310; the snapshot
+  # test below keeps a bare-constructor twin of the same tree, so the two
+  # surfaces are held equal by `==`, not by trust.
   fn view(m: Model) -> Widget[Msg] = {
     let done = list.filter(m.todos, t => t.done)
-    let header: Widget[Msg] = Styled(style: Bold, child: Text(s:
+    let header: Widget[Msg] = bold(text(
       "todo (" ++ to_string(len(done)) ++ "/" ++ to_string(len(m.todos)) ++ " done)"))
     let body: List[Widget[Msg]] =
       if list.is_empty(m.todos) {
-        [Styled(style: Dim, child: Text(s: "nothing yet; try: add buy milk"))]
+        [dim(text("nothing yet; try: add buy milk"))]
       } else {
         list.map(m.todos, t => item_row(t))
       }
-    let note: List[Widget[Msg]] = if m.note == "" { [] } else { [Text(s: m.note)] }
-    let help: Widget[Msg] = Styled(style: Dim, child: Text(s:
+    let note: List[Widget[Msg]] = if m.note == "" { [] } else { [text(m.note)] }
+    let help: Widget[Msg] = dim(text(
       "commands: add <title> | tog <id> | del <id> | press <n> | quit"))
-    Column(kids: [header] ++ body ++ note ++ [help])
+    column([header] ++ body ++ note ++ [help])
   }
 }
 
 ## One todo as one row. The checkbox is a Button carrying the Toggle message:
 ## the tree records what clicking would mean even though the line-mode driver
-## reaches the same message through `tog <id>`.
-fn item_row(t: Todo) -> Widget[Msg] = {
-  let title: Widget[Msg] =
-    if t.done { Styled(style: Dim, child: Text(s: t.title)) } else { Text(s: t.title) }
-  Row(kids: [
-    Button(label: if t.done { "x" } else { " " }, on_press: Toggle(id: t.id)),
-    Text(s: "#" ++ to_string(t.id)),
-    title,
+## reaches the same message through `tog <id>` or `press <n>`.
+fn item_row(t: Todo) -> Widget[Msg] =
+  row([
+    button(if t.done { "x" } else { " " }, Toggle(id: t.id)),
+    text("#" ++ to_string(t.id)),
+    if t.done { dim(text(t.title)) } else { text(t.title) },
   ])
-}
 
 test "add assigns increasing ids and never recycles them" {
   let m = update(update(initial(), Add(title: "one")), Add(title: "two"))
@@ -226,4 +227,14 @@ test "view snapshot: the tree is data and compares with ==" {
     Styled(style: Dim, child: Text(s: "commands: add <title> | tog <id> | del <id> | press <n> | quit")),
   ])
   assert view(m) == want
+}
+
+test "view of the empty model equals its bare-constructor twin too" {
+  let want: Widget[Msg] = Column(kids: [
+    Styled(style: Bold, child: Text(s: "todo (0/0 done)")),
+    Styled(style: Dim, child: Text(s: "nothing yet; try: add buy milk")),
+    Styled(style: Dim, child: Text(s:
+      "commands: add <title> | tog <id> | del <id> | press <n> | quit")),
+  ])
+  assert view(initial()) == want
 }

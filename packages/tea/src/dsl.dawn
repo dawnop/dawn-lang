@@ -1,0 +1,104 @@
+# The writing surface over the widget vocabulary: lowercase wrappers that eat
+# the constructors' named-field ceremony (`Text(s: ...)` becomes `text(...)`),
+# nothing more. Children stay a real list literal -- explicit, like Elm's
+# `div [attrs] [children]` and Flutter's `children: [...]` -- because the
+# implicit-collection alternative was probed and judged dead three walls deep
+# (handler arms hold no state, evidence settles at the block's creation site,
+# effects take no type parameters; see the #310 surface probe). What this
+# layer buys was measured there too: the same three-child row goes from 173
+# to 128 non-whitespace characters, five short of the compose ideal.
+#
+# Two spellings per container. The paren spelling `row([...])` is primary:
+# one expression, no thunk. The `_do` spelling `row_do { ... }` takes a tail
+# block whose body may hold statements before the child list -- worth a thunk
+# exactly when a `let` belongs next to the children, and nothing else.
+
+use widget.{Bold, Dim, Underline, Widget, Text, Styled, Row, Column, Button}
+
+## `Text(s: ...)`, unceremoniously.
+pub fn text[M](s: String) -> Widget[M] = Text(s: s)
+
+## Bold wrapper: `bold(text("hi"))`.
+pub fn bold[M](child: Widget[M]) -> Widget[M] = Styled(style: Bold, child: child)
+
+## Dim wrapper.
+pub fn dim[M](child: Widget[M]) -> Widget[M] = Styled(style: Dim, child: child)
+
+## Underline wrapper.
+pub fn underline[M](child: Widget[M]) -> Widget[M] =
+  Styled(style: Underline, child: child)
+
+## `Button(label:, on_press:)`, positionally: what it shows, then what
+## pressing it means.
+pub fn button[M](label: String, on_press: M) -> Widget[M] =
+  Button(label: label, on_press: on_press)
+
+## A row of children, as a plain list argument.
+pub fn row[M](kids: List[Widget[M]]) -> Widget[M] = Row(kids: kids)
+
+## A column of children, as a plain list argument.
+pub fn column[M](kids: List[Widget[M]]) -> Widget[M] = Column(kids: kids)
+
+## `row`, tail-block spelling: the block may hold statements and ends with
+## the child list. Same tree, one thunk dearer; prefer `row(...)` for a
+## single expression.
+pub fn row_do[M](body: fn() -> List[Widget[M]]) -> Widget[M] = Row(kids: body())
+
+## `column`, tail-block spelling; see `row_do`.
+pub fn column_do[M](body: fn() -> List[Widget[M]]) -> Widget[M] =
+  Column(kids: body())
+
+# A message type for the test blocks below; real apps bring their own.
+type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+test "every wrapper builds exactly its constructor's tree" {
+  let t: Widget[ProbeMsg] = text("hi")
+  assert t == Text(s: "hi")
+  let b: Widget[ProbeMsg] = bold(text("x"))
+  assert b == Styled(style: Bold, child: Text(s: "x"))
+  let d: Widget[ProbeMsg] = dim(text("x"))
+  assert d == Styled(style: Dim, child: Text(s: "x"))
+  let u: Widget[ProbeMsg] = underline(text("x"))
+  assert u == Styled(style: Underline, child: Text(s: "x"))
+  let p: Widget[ProbeMsg] = button("go", Ping)
+  assert p == Button(label: "go", on_press: Ping)
+  let r: Widget[ProbeMsg] = row([text("a")])
+  assert r == Row(kids: [Text(s: "a")])
+  let c: Widget[ProbeMsg] = column([text("a")])
+  assert c == Column(kids: [Text(s: "a")])
+}
+
+test "a composite DSL tree equals its bare-constructor twin" {
+  let dsl: Widget[ProbeMsg] =
+    column([
+      bold(text("title")),
+      row([button("x", Ping), text("#1"), dim(text("done thing"))]),
+      button("more", Pong),
+    ])
+  let bare: Widget[ProbeMsg] =
+    Column(kids: [
+      Styled(style: Bold, child: Text(s: "title")),
+      Row(kids: [
+        Button(label: "x", on_press: Ping),
+        Text(s: "#1"),
+        Styled(style: Dim, child: Text(s: "done thing")),
+      ]),
+      Button(label: "more", on_press: Pong),
+    ])
+  assert dsl == bare
+}
+
+test "the tail-block spelling holds statements and builds the same tree" {
+  let blocky: Widget[ProbeMsg] =
+    column_do {
+      let head: Widget[ProbeMsg] = bold(text("h"))
+      let tail: List[Widget[ProbeMsg]] = [text("a"), text("b")]
+      [head] ++ tail
+    }
+  assert blocky == column([bold(text("h")), text("a"), text("b")])
+  let rowwy: Widget[ProbeMsg] = row_do { [text("l"), text("r")] }
+  assert rowwy == row([text("l"), text("r")])
+}

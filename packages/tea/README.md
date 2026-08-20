@@ -52,6 +52,29 @@ timeouts), not wall time; the caveats live in runtime.dawn's header.
 SGR codes (`Plain` is the identity and emits nothing). `clear_screen()` returns
 the redraw escape sequence; printing it is the caller's business.
 
+## Writing views: the DSL spelling
+
+`tea/dsl` is lowercase wrappers over the constructors and nothing deeper:
+`text("hi")` for `Text(s: "hi")`, `bold`/`dim`/`underline` for the styled
+wrappers, `button(label, msg)`, and `row([...])`/`column([...])` with
+children as a real list. Containers also have a tail-block spelling,
+`row_do { ... }`/`column_do { ... }`, whose block may hold statements
+(`let`s) before ending with the child list; for a single expression the
+paren spelling is strictly cheaper. Children stay explicit lists on
+purpose -- implicit collection was probed and is unreachable by design
+(handler evidence settles at the block's creation site).
+
+Two usage taxes, both inference direction, neither specific to the DSL but
+both met immediately when writing views:
+
+- Type arguments flow from expected types, and a `let` binding has none.
+  `text("a")` infers `M` in list elements, function returns, and annotated
+  positions; a bare segment in a `++` chain does not. Shape a view as
+  annotated `let`s per segment (`let header: Widget[Msg] = ...`) and
+  concatenate the named parts.
+- The tail block is a thunk. Reach for `row_do` only when a statement
+  belongs next to the children; it never saves characters over `row([...])`.
+
 ## Diffing
 
 `diff(old, new)` computes the difference between two widget trees as a list
