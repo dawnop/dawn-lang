@@ -21,7 +21,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 RT = ROOT / "runtime" / "c"
 OUT = ROOT / "selfhost" / "src" / "embed" / "rtsrc.dawn"
-FILES = ["dawn_rt.c", "dawn_rt.h"]
+FILES = ["dawn_rt.c", "dawn_rt.h", "dawn_rt_wasi_eh.cc"]
 LIMIT = 60000
 
 

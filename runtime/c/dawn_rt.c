@@ -29,59 +29,17 @@
 /* ---- wasm32-wasi ------------------------------------------------------
  *
  * The same translation unit, minus what the target does not have: threads,
- * processes, signals, setjmp and an unwinder (wasi-libc leaves all five
- * out). RC, strings, collections and file io through WASI preopens are the
- * untouched code above and below; what follows is the honest spelling of
- * each absence, not an emulation.
+ * processes, signals, setjmp and a platform unwinder (wasi-libc leaves all
+ * five out). RC, strings, collections and file io through WASI preopens are
+ * the untouched code above and below; what follows is the honest spelling
+ * of each absence, not an emulation.
  *
- * The one real loss is failure *recovery*. dawn_raise lands on a handler by
- * forced unwind + longjmp (see "landing at a handler" below), and both legs
- * are missing here, so a raise that finds a handler aborts with a message
- * instead of landing. A raise with no handler already ends the program on
- * every target, and that path (report to stderr, exit 1) works unchanged.
- * The planned replacement is wasm's own exception handling -- throw to a
- * catch, cleanups run by the EH unwinder -- not a port of this machinery.
- */
-
-/* setjmp/longjmp: pushing and popping handler frames costs nothing without
- * them (setjmp answers "no failure yet" and the landing branch is dead
- * code); only an actual landing needs the missing unwinder. */
-static _Noreturn void dawn_wasi_no_unwinder(void) {
-  fflush(stdout);
-  fputs("dawn: catch/bracket cannot recover on wasm32-wasi yet: the target "
-        "has no unwinder\n",
-        stderr);
-  abort();
-}
-
-typedef int dawn_wasi_jmp_buf[1];
-#define jmp_buf dawn_wasi_jmp_buf
-#define setjmp(b) 0
-#define longjmp(b, v) dawn_wasi_no_unwinder()
-
-/* Enough of <unwind.h> for the failure machinery to compile; the one entry
- * point aborts, matching the setjmp story above. */
-typedef int _Unwind_Reason_Code;
-typedef int _Unwind_Action;
-typedef unsigned long long _Unwind_Exception_Class;
-#define _URC_NO_REASON 0
-#define _UA_END_OF_STACK 16
-struct _Unwind_Exception {
-  unsigned long long exception_class;
-  void (*exception_cleanup)(_Unwind_Reason_Code, struct _Unwind_Exception *);
-};
-struct _Unwind_Context;
-static _Unwind_Reason_Code _Unwind_ForcedUnwind(
-    struct _Unwind_Exception *e,
-    _Unwind_Reason_Code (*stop)(int, _Unwind_Action, _Unwind_Exception_Class,
-                                struct _Unwind_Exception *,
-                                struct _Unwind_Context *, void *),
-    void *arg) {
-  (void)e;
-  (void)stop;
-  (void)arg;
-  dawn_wasi_no_unwinder();
-}
+ * Failure *recovery* is real here since the A1 shadow-stack landing (see
+ * "landing at a handler on wasm32-wasi" further down): raise runs the
+ * discarded frames' drops off a shadow stack the frames registered on, and
+ * the trip to the handler is a wasm exception a small C++ shim catches
+ * (runtime/c/dawn_rt_wasi_eh.cc -- clang will not lower C landing pads for
+ * this target, so the two catch sites live in the one C++ TU). */
 
 /* wasi-libc cuts these out of its headers on purpose ("WASI has no temp
  * directories", "WASI has no chmod"). The temp makers report failure and
@@ -110,6 +68,25 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
 static int dawn_argc;
 static char **dawn_argv;
 
+#ifdef __wasi__
+/* Births minus deaths minus immortal marks: the LeakSanitizer stand-in for a
+ * target LSan cannot reach. Zero at a clean exit means every counted object
+ * the program made was released -- the same claim lsan's "0 leaks" makes for
+ * the native corpus. Printed at exit under DAWN_RC_BALANCE (stderr, so a
+ * stdout-byte differential stays clean); meaningless under DAWN_RC_LEAK,
+ * which turns the deaths off. */
+static int64_t dawn_wasi_live_objs;
+
+static void dawn_wasi_balance_dump(void) {
+  fprintf(stderr, "rc-balance: %lld\n", (long long)dawn_wasi_live_objs);
+}
+#define DAWN_LEDGER_BIRTH() (dawn_wasi_live_objs++)
+#define DAWN_LEDGER_DEATH() (dawn_wasi_live_objs--)
+#else
+#define DAWN_LEDGER_BIRTH() ((void)0)
+#define DAWN_LEDGER_DEATH() ((void)0)
+#endif
+
 /* Stderr, so a differential run comparing stdout byte for byte stays clean
  * even with the stats on. */
 static void dawn_rc_stats_dump(void) {
@@ -132,6 +109,11 @@ void dawn_rt_init(int argc, char **argv) {
   if (getenv("DAWN_RC_STATS") != NULL) {
     atexit(dawn_rc_stats_dump);
   }
+#ifdef __wasi__
+  if (getenv("DAWN_RC_BALANCE") != NULL) {
+    atexit(dawn_wasi_balance_dump);
+  }
+#endif
 }
 
 #ifdef __wasi__
@@ -195,6 +177,7 @@ static void *dawn_alloc(size_t n) {
 static void dawn_hdr_init(dawn_hdr *h, int32_t kind) {
   h->rc = 1;
   h->kind = kind;
+  DAWN_LEDGER_BIRTH();
 }
 
 dawn_str dawn_str_empty_obj = {{DAWN_IMMORTAL, DAWN_K_STR}, 0, ""};
@@ -454,6 +437,7 @@ void dawn_immortal(void *p) {
       continue; /* already out of the ledger; string literals end here */
     }
     h->rc = DAWN_IMMORTAL;
+    DAWN_LEDGER_DEATH(); /* out of the ledger for good, not a leak */
     switch (h->kind) {
       case DAWN_K_ADT: {
         dawn_adt *a = (dawn_adt *)q;
@@ -560,6 +544,7 @@ void dawn_drop(void *p) {
         fprintf(stderr, "dawn: drop of an unheaded pointer (kind %d)\n", h->kind);
         exit(1);
     }
+    DAWN_LEDGER_DEATH();
     free(q);
   }
   dawn_ws_free(&s);
@@ -859,9 +844,16 @@ int64_t dawn_int_of_float(double v) {
  * that will take its kind -- skipping io barriers when a panic passes through
  * them -- or reports and exits when there is none. */
 typedef struct dawn_handler {
+#ifndef __wasi__
   jmp_buf jb;
+#endif
   struct dawn_handler *prev;
   bool catches_panic;
+#ifdef __wasi__
+  /* how deep the shadow own-frame stack was when this handler was pushed:
+   * the raise walk stops here (see "landing at a handler on wasm32-wasi") */
+  size_t own_depth;
+#endif
 } dawn_handler;
 
 static dawn_handler *dawn_handlers;
@@ -905,10 +897,13 @@ static dawn_failure dawn_inflight;
 /* A cleanup for a frame-held payload (DAWN_CLEANUP), same NULL discipline as
  * dawn_unwind_drop: a slot whose message was handed onward is cleared by the
  * hand-over, so the cleanup only fires when the payload is being abandoned
- * -- today that is one path, a bracket release escaping (see dawn_bracket). */
+ * -- today that is one path, a bracket release escaping (see dawn_bracket).
+ * Native-only: the wasi bracket rides the shadow own-frame stack instead. */
+#ifndef __wasi__
 static void dawn_failure_release(dawn_failure *f) {
   if (f->msg != NULL) dawn_drop(f->msg);
 }
+#endif
 
 /* The innermost handler that will take a failure of this kind, or NULL. */
 static dawn_handler *dawn_find_handler(bool is_panic) {
@@ -917,6 +912,7 @@ static dawn_handler *dawn_find_handler(bool is_panic) {
   return h;
 }
 
+#ifndef __wasi__
 /* ---- landing at a handler: a forced unwind, not a bare longjmp ----------
  *
  * A bare `longjmp` discards every C frame between the raise and the handler
@@ -1007,6 +1003,117 @@ static _Noreturn void dawn_unwind_to(dawn_handler *h) {
   fputs("dawn: the unwinder returned without reaching its handler\n", stderr);
   abort();
 }
+#else
+/* ---- landing at a handler on wasm32-wasi: the A1 shadow cleanup stack ---
+ *
+ * The native landing is forced unwind + longjmp, and this target has
+ * neither: wasi-libc ships no setjmp and no unwinder, wasm SjLj
+ * (`-mllvm -wasm-enable-sjlj`) comes out of apt's clang 18 and 20 as
+ * structurally invalid modules (the setjmp dispatch loop needs a block
+ * parameter the backend never emits), and `-fexceptions` on a C TU crashes
+ * the wasm instruction selector outright (landingpad IR meets a
+ * funclet-only isel; the #309 probe pinned both). So the two jobs the
+ * unwinder did are split, and neither half needs it:
+ *
+ *   cleanups   Every emitted frame's own array registers on a shadow stack
+ *              (DAWN_OWN_FRAME in dawn_rt.h): push at entry, pop by the
+ *              same cleanup attribute that already runs on ordinary scope
+ *              exits. A raise walks the stack top-down to the target
+ *              handler's recorded depth and runs the drops itself -- same
+ *              slots, same order (innermost first, slot 1 upward) as the
+ *              forced unwind runs them natively. This is route A1 of
+ *              docs/native-failure-design.md 4.1, whose reopening condition
+ *              ("a target with no usable unwinder") is this target.
+ *
+ *   the trip   The raise then throws a wasm exception
+ *              (`__builtin_wasm_throw`, out of line -- inlining it into a
+ *              frame with cleanups is the isel crash again) and every
+ *              barrier runs its closure under `dawn_wasi_try`, a C++
+ *              `try { } catch (...) { }` in runtime/c/dawn_rt_wasi_eh.cc:
+ *              C++ funclet lowering is the one shape today's clang compiles
+ *              for wasm. catch(...) needs exactly two libc++abi entry
+ *              points, stubbed below; no personality, no libunwind.
+ *
+ * A skipped handler -- a panic passing an io barrier -- catches first (its
+ * try is innermost), fails the same pointer-identity test the native
+ * landing uses, and throws again; the payload waits in `dawn_inflight`
+ * either way, and the target's landing restores the chain to its own
+ * `prev`, dropping the skipped frames' entries with it. The frames between
+ * raise and handler are discarded by the wasm unwind without running
+ * anything (no landing pads in C on this target) -- their drops already ran
+ * off the shadow stack, so the cleanup attribute firing would be the double
+ * release, not the fix.
+ *
+ * Engine traps (unreachable, call-stack exhaustion) are not wasm exceptions
+ * and no catch here sees them -- the same "resource exhaustion passes every
+ * barrier" answer the native runtime gives (spec 9.8). */
+int dawn_wasi_try(void *(*body)(void *), void *ctx, void **out);
+
+/* The two entry points a bare `catch (...)` references under -fno-rtti.
+ * Identity is enough: the payload travels in `dawn_inflight`, not in the
+ * exception object, so there is nothing to adjust or free here. */
+void *__cxa_begin_catch(void *exc) { return exc; }
+void __cxa_end_catch(void) {}
+
+/* The shadow own-frame stack. Entries are the `dawn_own` arrays of live
+ * emitted frames (slot 0 the count, slots 1..n the owned locals), plus the
+ * one hand-written frame in dawn_bracket. Growable and never shrunk: the
+ * high-water mark of the call stack, a few thousand entries at worst. */
+static void ***dawn_wasi_owns;
+static size_t dawn_wasi_own_len;
+static size_t dawn_wasi_own_cap;
+
+void dawn_wasi_own_push(void *frame) {
+  if (dawn_wasi_own_len == dawn_wasi_own_cap) {
+    size_t cap = dawn_wasi_own_cap == 0 ? 256 : dawn_wasi_own_cap * 2;
+    void ***grown = (void ***)realloc(dawn_wasi_owns, cap * sizeof *grown);
+    if (grown == NULL) {
+      fputs("dawn: out of memory\n", stderr);
+      exit(1);
+    }
+    dawn_wasi_owns = grown;
+    dawn_wasi_own_cap = cap;
+  }
+  dawn_wasi_owns[dawn_wasi_own_len++] = (void **)frame;
+}
+
+/* LIFO by construction -- a frame pops only after everything it called has
+ * returned. A mismatch means the shadow stack and the real stack disagree,
+ * the same runtime bug the native stop function aborts on. */
+void dawn_wasi_own_pop(void *frame) {
+  if (dawn_wasi_own_len == 0 ||
+      dawn_wasi_owns[dawn_wasi_own_len - 1] != (void **)frame) {
+    fflush(stdout);
+    fputs("dawn: own-frame shadow stack out of order\n", stderr);
+    abort();
+  }
+  dawn_wasi_own_len--;
+}
+
+static dawn_handler *dawn_unwind_target;
+
+/* Out of line and never inlined: __builtin_wasm_throw inside a frame that
+ * has cleanup attributes is the isel crash from the probe. Tag 0 is the C++
+ * exception tag, which is what makes catch(...) in the shim take it; the
+ * token is not the payload (dawn_inflight is). */
+static char dawn_wasi_exc_token;
+
+__attribute__((noinline)) static _Noreturn void dawn_wasi_throw(void) {
+  __builtin_wasm_throw(0, &dawn_wasi_exc_token);
+}
+
+static _Noreturn void dawn_unwind_to(dawn_handler *h) {
+  dawn_unwind_target = h;
+  while (dawn_wasi_own_len > h->own_depth) {
+    void **fr = dawn_wasi_owns[--dawn_wasi_own_len];
+    int64_t n = (int64_t)(intptr_t)fr[0];
+    for (int64_t i = 1; i <= n; i++) {
+      if (fr[i] != NULL) dawn_drop(fr[i]);
+    }
+  }
+  dawn_wasi_throw();
+}
+#endif
 
 static void dawn_raise(dawn_str *msg, bool is_panic) {
   dawn_handler *h = dawn_find_handler(is_panic);
@@ -1049,6 +1156,7 @@ static dawn_adt *dawn_foreign_error(dawn_failure f) {
 
 /* The closure returns an erased slot whatever `T` is, so one cast covers
  * every instantiation -- see the header. */
+#ifndef __wasi__
 static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   /* designated init so the rest (the jmp_buf) is zeroed: the landing cleanup
    * may run before setjmp has ever filled it, and reads it only behind the
@@ -1068,6 +1176,38 @@ static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   dawn_handlers = h.prev;
   return dawn_ok(v);
 }
+#else
+static void *dawn_wasi_caught_body(void *ctx) {
+  dawn_clo *f = (dawn_clo *)ctx;
+  return ((void *(*)(dawn_clo *))f->fn)(f);
+}
+
+static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
+  dawn_handler h = {
+    .prev = dawn_handlers,
+    .catches_panic = catches_panic,
+    .own_depth = dawn_wasi_own_len
+  };
+  dawn_handlers = &h;
+  void *v = NULL;
+  if (dawn_wasi_try(dawn_wasi_caught_body, f, &v) != 0) {
+    if (dawn_unwind_target != &h) {
+      /* caught only because this try is innermost -- a panic passing an io
+       * barrier. Hand the throw onward; the chain repair happens at the
+       * target, same as the native skipped frames. */
+      dawn_wasi_throw();
+    }
+    dawn_unwind_target = NULL;
+    /* first thing on landing: the in-flight failure becomes this frame's.
+     * Nothing has run between the raise and here, so it is still ours. */
+    dawn_failure mine = dawn_inflight;
+    dawn_handlers = h.prev;
+    return dawn_err(dawn_foreign_error(mine));
+  }
+  dawn_handlers = h.prev;
+  return dawn_ok(v);
+}
+#endif
 
 dawn_adt *dawn_catch_fault(dawn_clo *f) { return dawn_run_caught(f, false); }
 
@@ -1126,6 +1266,7 @@ static _Noreturn void dawn_reraise(dawn_failure f) {
  * and scripts/spike-native/recover_bracket.dawn is the corpus that holds it
  * shut. The Unit each release call hands back is a box the emitter made for
  * the erased return, so it is dropped here -- nobody else can see it. */
+#ifndef __wasi__
 void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
   dawn_handler h DAWN_CLEANUP(dawn_handler_landing) = {
     .prev = dawn_handlers, .catches_panic = true
@@ -1158,6 +1299,61 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
     ((void *(*)(dawn_clo *, void *))release->fn)(release, dawn_dup(resource)));
   return r;
 }
+#else
+struct dawn_wasi_use_box {
+  dawn_clo *use;
+  void *resource;
+};
+
+static void *dawn_wasi_use_body(void *ctx) {
+  struct dawn_wasi_use_box *b = (struct dawn_wasi_use_box *)ctx;
+  return ((void *(*)(dawn_clo *, void *))b->use->fn)(b->use,
+                                                     dawn_dup(b->resource));
+}
+
+void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
+  dawn_handler h = {
+    .prev = dawn_handlers, .catches_panic = true,
+    .own_depth = dawn_wasi_own_len
+  };
+  dawn_handlers = &h;
+  struct dawn_wasi_use_box box = { use, resource };
+  void *r = NULL;
+  if (dawn_wasi_try(dawn_wasi_use_body, &box, &r) != 0) {
+    if (dawn_unwind_target != &h) {
+      /* a bracket takes every kind, so a failure that lands here was
+       * targeted here; anything else is the chain and the stack
+       * disagreeing */
+      fflush(stdout);
+      fputs("dawn: a bracket caught a failure it was not the target of\n",
+            stderr);
+      abort();
+    }
+    dawn_unwind_target = NULL;
+    /* Same discipline as the native branch: the crossing failure becomes
+     * this frame's before the release runs (spec 9.8.2 guarantee 2). The
+     * native branch guards the message with a frame cleanup for the case
+     * where the release *escapes*; here the unwinder that would run it does
+     * not exist, so the message rides a hand-written shadow-stack frame --
+     * the raise walk of the escaping failure is what drops it. */
+    dawn_failure crossing = dawn_inflight;
+    dawn_handlers = h.prev;
+    void *cross_own[2] = { (void *)(intptr_t)1, NULL };
+    dawn_wasi_own_push(cross_own);
+    cross_own[1] = crossing.msg;
+    dawn_drop(((void *(*)(dawn_clo *, void *))release->fn)(release,
+                                                          dawn_dup(resource)));
+    dawn_failure owed = crossing;
+    owed.msg = (dawn_str *)dawn_take(&cross_own[1]);
+    dawn_wasi_own_pop(cross_own);
+    dawn_reraise(owed);
+  }
+  dawn_handlers = h.prev;
+  dawn_drop(
+    ((void *(*)(dawn_clo *, void *))release->fn)(release, dawn_dup(resource)));
+  return r;
+}
+#endif
 
 /* ---- code-point classification (char_is_*) ---------------------------- */
 

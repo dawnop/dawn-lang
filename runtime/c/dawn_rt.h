@@ -335,13 +335,31 @@ bool dawn_is_unique(const void *p);
  * from being cleaned while its value already belongs to a callee that is
  * unwinding. Slots are `void *` and every read casts to the slot's C type;
  * all object pointers share a representation here, and every consumer
- * compiles with -fno-strict-aliasing (the backend's standing flags). */
+ * compiles with -fno-strict-aliasing (the backend's standing flags).
+ *
+ * On wasm32-wasi there is no unwinder to run the cleanup attribute when a
+ * raise discards frames, so the frames announce themselves instead: every
+ * own array is also registered on a shadow stack the runtime keeps
+ * (dawn_rt.c, "landing at a handler on wasm32-wasi"), a raise walks that
+ * stack and runs the drops itself, and the cleanup attribute -- which still
+ * fires on every ordinary scope exit -- unregisters the frame on the way
+ * out. DAWN_OWN_FRAME is the one spelling the emitter writes for both
+ * arrangements; on native it expands to exactly the declaration it always
+ * emitted. */
+#ifdef __wasi__
+void dawn_wasi_own_push(void *frame);
+void dawn_wasi_own_pop(void *frame);
+#endif
+
 static inline void dawn_own_drop(void *frame) {
   void **s = (void **)frame;
   int64_t n = (int64_t)(intptr_t)s[0];
   for (int64_t i = 1; i <= n; i++) {
     if (s[i] != NULL) dawn_drop(s[i]);
   }
+#ifdef __wasi__
+  dawn_wasi_own_pop(frame);
+#endif
 }
 
 static inline void *dawn_take(void **slot) {
@@ -351,6 +369,15 @@ static inline void *dawn_take(void **slot) {
 }
 
 #define DAWN_CLEANUP(f) __attribute__((cleanup(f)))
+
+#ifdef __wasi__
+#define DAWN_OWN_FRAME(n) \
+  DAWN_CLEANUP(dawn_own_drop) void *dawn_own[(n) + 1] = { (void *)(intptr_t)(n) }; \
+  dawn_wasi_own_push(dawn_own)
+#else
+#define DAWN_OWN_FRAME(n) \
+  DAWN_CLEANUP(dawn_own_drop) void *dawn_own[(n) + 1] = { (void *)(intptr_t)(n) }
+#endif
 
 /* Take a freshly built object graph out of the ledger for good: every node
  * reachable from `p` gets an immortal header, so dup and drop return

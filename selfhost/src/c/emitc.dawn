@@ -1889,10 +1889,12 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     }
   var head: List[String] = [fn_signature_def(f, shadowed) ++ " {\n"]
   if st3.nslots > 0 {
-    # slot 0 is the count dawn_own_drop reads; the rest start NULL
-    head = head ++ [pad(1) ++ "DAWN_CLEANUP(dawn_own_drop) void* dawn_own[" ++
-        to_string(st3.nslots + 1) ++ "] = { (void*)(intptr_t)" ++
-        to_string(st3.nslots) ++ " };\n"]
+    # one macro, two expansions (dawn_rt.h): natively the cleanup-carrying
+    # array declaration this line used to spell out (slot 0 the count, the
+    # rest NULL), on wasm32-wasi the same plus registering the frame on the
+    # shadow cleanup stack a raise walks in place of the missing unwinder
+    head = head ++ [pad(1) ++ "DAWN_OWN_FRAME(" ++
+        to_string(st3.nslots) ++ ");\n"]
   }
   for p in shadows {
     head = head ++ [pad(1) ++

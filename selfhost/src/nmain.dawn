@@ -338,7 +338,7 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool) -> Unit !io = {
     }
   }
   var wrote = io.write_file(work ++ "/main.c", ctext)
-  for f in ["dawn_rt.c", "dawn_rt.h"] {
+  for f in ["dawn_rt.c", "dawn_rt.h", "dawn_rt_wasi_eh.cc"] {
     match cdriver.runtime_source(f) {
       Some(t) -> { wrote = io.write_file(work ++ "/" ++ f, t) }
       None -> panic("embedded runtime is missing " ++ f)
@@ -355,8 +355,10 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool) -> Unit !io = {
   # so its override is a separate variable rather than CC: one environment
   # can hold a native CC and a wasi-sdk clang at the same time. The flag
   # differences against the native row are the target's, not choices:
-  # no -pthread (wasi-libc has none) and no -fexceptions (nothing unwinds
-  # there yet -- see the wasi block in dawn_rt.c).
+  # no -pthread (wasi-libc has none), and -fwasm-exceptions in place of
+  # -fexceptions -- it defines the exception tag dawn_rt.c's raise throws
+  # and adds no landing pads to C, so the emitted C compiles unchanged
+  # (the failure landing is the A1 shadow stack; see dawn_rt.c).
   let cc = if wasm {
     match io.getenv("DAWN_WASM_CC") {
       Some(c) -> c
@@ -368,16 +370,41 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool) -> Unit !io = {
       None -> "cc"
     }
   }
+  # The wasm catch site is C++ (runtime/c/dawn_rt_wasi_eh.cc says why) and
+  # wants spellings the C row must not carry (-x c++, -fno-rtti), while
+  # clang applies one -std to every input of an invocation -- so the shim is
+  # its own compile, and the main invocation links its object.
+  if wasm {
+    let shim = [
+      cc, "--target=wasm32-wasi", "-x", "c++", "-std=c++14", "-O2",
+      "-fno-rtti", "-fwasm-exceptions",
+      "-c", work ++ "/dawn_rt_wasi_eh.cc", "-o", work ++ "/dawn_rt_wasi_eh.o"
+    ]
+    match io.run(shim, "", "") {
+      Ok(0) -> ()
+      Ok(code) -> {
+        io.eprintln(wasm_toolchain_hint())
+        cli_error(cc ++ " failed (exit code " ++ "${code}" ++ ")")
+        return ()
+      }
+      Err(e) -> {
+        io.eprintln(wasm_toolchain_hint())
+        cli_error("cannot run " ++ cc ++ ": " ++ e.message)
+        return ()
+      }
+    }
+  }
   # -Wno-parentheses-equality: a clang-only warning the emitted C trips a
   # few hundred times per program (`if ((x == 0))` is the emitter's honest
   # parenthesization). The native row never sees it because gcc has no such
   # warning; real errors still print.
   let argv = if wasm {
     [
-      cc, "--target=wasm32-wasi", "-std=c11", "-O2", "-fwrapv", "-fno-strict-aliasing",
-      "-Wno-parentheses-equality",
+      cc, "--target=wasm32-wasi", "-std=c11", "-O2", "-fwrapv", "-fwasm-exceptions",
+      "-fno-strict-aliasing", "-Wno-parentheses-equality",
       "-I", work,
-      "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c", "-lm"
+      "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c",
+      work ++ "/dawn_rt_wasi_eh.o", "-lm"
     ]
   } else {
     [
