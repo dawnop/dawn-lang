@@ -26,12 +26,24 @@ The driver loop is the only place a message turns into anything.
 
 ## Purity split
 
-`update`, `view`, `render`, and `step` are pure by signature; the package
-contains no `!io` at all. The event loop belongs to the application's `main`:
-read input, parse it into a message yourself, `step`, print the frame. v1 is
-line-mode interaction (no raw terminal, no subscriptions, no `Cmd`); when a
-real app needs commands, the associated-effect work is where they grow, with
-this trait as the consumer justifying it.
+`update`, `view`, `render`, `step`, `diff`, `present`, and the subscription
+bookkeeping are all pure by signature; the package's only `!io` is
+`runtime.run`, the driver loop. An app hands `run` its pure hooks (parse a
+line into a message, declare ticks, say when to stop) and owns nothing else.
+Still line-mode interaction and still no `Cmd`; when a real app needs
+commands, the associated-effect work is where they grow, with this trait as
+the consumer justifying it.
+
+## Subscriptions
+
+`Sub[M]` is data, the same discipline as the widget tree: `Tick(every_ms,
+msg)` names the message a timer firing means, never a callback. The model
+declares what it wants (`subs(m)`), the driver owns all timing state, and
+the declaration is re-read after every update; timers re-arm only when the
+declared intervals change, and a due timer's message is looked up in the
+declaration current at fire time, never from the armed state. There is no
+clock in std, so "every n ms" honestly counts waiting (`stdin_ready`
+timeouts), not wall time; the caveats live in runtime.dawn's header.
 
 ## Rendering
 

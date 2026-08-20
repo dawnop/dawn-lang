@@ -1,44 +1,17 @@
 # An interactive todo list built on packages/tea, the Elm architecture v1:
-# the model, messages, update and view live in todo.dawn as pure functions,
-# and this file is the whole io surface -- a loop that paints the frame, reads
-# one line, parses it into a message, and folds it into the model.
+# the model, messages, update and view live in todo.dawn as pure functions.
+# Since renderer knife 3 the io loop lives in the library too
+# (tea/runtime.run, incremental repaint included), so this file is down to
+# naming the app's pure hooks: how a line becomes a message, which ticks the
+# model wants (none), and when to stop.
 #
 # Commands: `add <title>`, `tog <id>`, `del <id>`, `quit` (or `q`).
-#
-# Painting is incremental since renderer knife 2: the loop keeps the rows it
-# last painted and prints only the cursor-addressed rewrites for rows that
-# changed (`present`), with the prompt parked on the row below the frame.
-# Only the first paint clears the screen.
 
-use std/io
-use tea/app.{step, view}
-use tea/render.{render, clear_screen}
-use tea/present.{frame_lines, present, park}
-use todo.{Model, initial, parse_line}
+use tea/runtime.{run}
+use tea/sub.{Sub}
+use todo.{Model, Msg, initial, parse_line}
 
-fn paint(shown: List[String], rows: List[String]) -> Unit !io =
-  io.print(present(shown, rows) ++ park(len(rows)))
+pub fn main() -> Unit !io =
+  run(initial(), (m, line) => parse_line(line), m => no_ticks(m), m => m.quit)
 
-fn loop_turn(m: Model, shown: List[String]) -> Unit !io = {
-  if m.quit {
-    ()
-  } else {
-    io.print("> ")
-    match io.read_line() {
-      None -> ()
-      Some(line) -> {
-        let (next, screen) = step(m, parse_line(line))
-        let rows = frame_lines(screen)
-        paint(shown, rows)
-        loop_turn(next, rows)
-      }
-    }
-  }
-}
-
-pub fn main() -> Unit !io = {
-  let first = frame_lines(render(view(initial())))
-  io.print(clear_screen())
-  paint([], first)
-  loop_turn(initial(), first)
-}
+fn no_ticks(m: Model) -> List[Sub[Msg]] = []

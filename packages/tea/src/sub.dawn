@@ -1,0 +1,170 @@
+# Subscriptions as data, the same discipline as the widget tree: a `Sub`
+# holds the message a timer firing *means*, never a callback. The driver owns
+# all timing state; a model only declares what it currently wants, every
+# turn, and the declaration is re-read after every update (Elm's shape).
+# Bubble Tea's Tick is the other shape -- a one-shot command re-issued from
+# Update -- and it is unreachable here on purpose: v1 has no Cmd channel, and
+# the declarative form needs none.
+#
+# There is no clock in std, only `io.stdin_ready(timeout_ms)`. So "every n
+# ms" honestly means: n ms of *waiting* (full poll timeouts with no input),
+# not n ms of wall time. Time spent blocked on input does not count, because
+# nothing can measure it. That approximation is the documented v1 semantics.
+#
+# The pending state is deliberately not generic: it keeps intervals and
+# waiting only, and due timers come back as *indices* into the declaration.
+# The driver looks the message up in the declaration current at fire time,
+# so a model that swaps its messages (same intervals) never fires a stale
+# one, and comparing declarations to decide a re-arm is `List[Int] ==`,
+# with no `Eq` demanded of the message type.
+
+use std/list
+
+## What a model can ask the driver for: a message every `every_ms` of
+## waiting. Intervals below 1ms behave as 1ms (see `intervals`).
+pub type Sub[M] =
+  | Tick(every_ms: Int, msg: M)
+derive Show
+
+## One armed timer: its interval and how much waiting it has accumulated.
+pub type Pending = { every_ms: Int, waited_ms: Int }
+
+## The interval of each subscription, clamped to at least 1ms so a zero or
+## negative interval cannot spin the poll loop.
+pub fn intervals[M](subs: List[Sub[M]]) -> List[Int] =
+  list.map(subs, s =>
+      match s {
+        Tick(every, _) -> if every < 1 { 1 } else { every }
+      })
+
+## Fresh timers for a declaration, nothing waited yet.
+pub fn arm(iv: List[Int]) -> List[Pending] =
+  list.map(iv, ms => Pending { every_ms: ms, waited_ms: 0 })
+
+## How long the driver may block before the nearest timer comes due, or
+## `None` when there are no timers and it may block on input forever.
+pub fn poll_ms(ps: List[Pending]) -> Option[Int] = {
+  let none: Option[Int] = None
+  list.fold(ps, none, (acc, p) => {
+    let r = remaining(p)
+    match acc {
+      None -> Some(r)
+      Some(best) -> if r < best { Some(r) } else { acc }
+    }
+  })
+}
+
+# Never zero: a timer exactly due is handled by `elapse`, and a floor of 1
+# keeps a full poll cycle from busy-looping.
+fn remaining(p: Pending) -> Int =
+  if p.every_ms - p.waited_ms < 1 { 1 } else { p.every_ms - p.waited_ms }
+
+## Account `ms` of waiting to every timer. Returns the advanced timers and
+## the indices (declaration order) of those that came due. A timer fires
+## once per call and carries its remainder, so a late poll drifts rather
+## than bursts.
+pub fn elapse(ps: List[Pending], ms: Int) -> (List[Pending], List[Int]) = {
+  let kept: List[Pending] = []
+  let due: List[Int] = []
+  elapse_go(ps, ms, 0, kept, due)
+}
+
+fn elapse_go(
+  ps: List[Pending],
+  ms: Int,
+  i: Int,
+  kept: List[Pending],
+  due: List[Int],
+) -> (List[Pending], List[Int]) =
+  if i >= len(ps) {
+    (kept, due)
+  } else {
+    let p = ps[i]
+    let w = p.waited_ms + ms
+    if w >= p.every_ms {
+      elapse_go(ps, ms, i + 1,
+        kept ++ [Pending { every_ms: p.every_ms, waited_ms: w - p.every_ms }],
+        due ++ [i])
+    } else {
+      elapse_go(ps, ms, i + 1,
+        kept ++ [Pending { every_ms: p.every_ms, waited_ms: w }],
+        due)
+    }
+  }
+
+## The messages the due indices mean, read from the declaration current at
+## fire time. An index the declaration no longer covers is dropped.
+pub fn due_msgs[M](subs: List[Sub[M]], due: List[Int]) -> List[M] = {
+  let acc: List[M] = []
+  due_go(subs, due, 0, acc)
+}
+
+fn due_go[M](subs: List[Sub[M]], due: List[Int], i: Int, acc: List[M]) -> List[M] =
+  if i >= len(due) {
+    acc
+  } else {
+    let ix = due[i]
+    if ix < 0 || ix >= len(subs) {
+      due_go(subs, due, i + 1, acc)
+    } else {
+      match subs[ix] {
+        Tick(_, msg) -> due_go(subs, due, i + 1, acc ++ [msg])
+      }
+    }
+  }
+
+# A message type for the test blocks below; real apps bring their own.
+type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+test "intervals clamp to 1ms and keep declaration order" {
+  let subs: List[Sub[ProbeMsg]] = [Tick(every_ms: 0, msg: Ping), Tick(every_ms: 10, msg: Pong)]
+  assert intervals(subs) == [1, 10]
+}
+
+test "poll_ms is the nearest timer, None without timers" {
+  let none: List[Pending] = []
+  let idle: Option[Int] = None
+  assert poll_ms(none) == idle
+  assert poll_ms(arm([10, 25])) == Some(10)
+  let (later, _) = elapse(arm([10, 25]), 10)
+  assert poll_ms(later) == Some(10)
+}
+
+test "a timer fires exactly at its boundary, not before" {
+  let (early, due0) = elapse(arm([10]), 9)
+  assert list.is_empty(due0)
+  let (fired, due1) = elapse(early, 1)
+  assert due1 == [0]
+  assert fired == [Pending { every_ms: 10, waited_ms: 0 }]
+}
+
+test "a late poll carries the remainder instead of losing it" {
+  let (late, due0) = elapse(arm([10]), 15)
+  assert due0 == [0]
+  assert late == [Pending { every_ms: 10, waited_ms: 5 }]
+  let (again, due1) = elapse(late, 5)
+  assert due1 == [0]
+}
+
+test "timers with different intervals fire independently" {
+  let ps0 = arm([10, 25])
+  let (ps1, due1) = elapse(ps0, 10)
+  assert due1 == [0]
+  let (ps2, due2) = elapse(ps1, 10)
+  assert due2 == [0]
+  assert poll_ms(ps2) == Some(5)
+  let (ps3, due3) = elapse(ps2, 5)
+  assert due3 == [1]
+  assert ps3 == [Pending { every_ms: 10, waited_ms: 5 }, Pending { every_ms: 25, waited_ms: 0 }]
+}
+
+test "due_msgs reads the declaration at fire time and drops stale indices" {
+  let subs: List[Sub[ProbeMsg]] = [Tick(every_ms: 10, msg: Ping), Tick(every_ms: 25, msg: Pong)]
+  assert due_msgs(subs, [1, 0]) == [Pong, Ping]
+  assert due_msgs(subs, [7]) == []
+  let fewer: List[Sub[ProbeMsg]] = [Tick(every_ms: 10, msg: Pong)]
+  assert due_msgs(fewer, [0, 1]) == [Pong]
+}

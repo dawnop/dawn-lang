@@ -1,0 +1,154 @@
+# The driver loop, in the library at last: paint, wait for one input line or
+# a due tick, fold the messages, paint again. The app supplies its pure hooks
+# (`parse` for input lines, `subs` for the ticks the model currently wants,
+# `done` for when to stop); the loop owns every timer and the whole terminal.
+# This is the only `!io` in the package, and its effect row is the single
+# builtin label.
+#
+# Input is read byte-wise (`io.read_stdin`), not with `io.read_line`: the
+# std/io contract says `stdin_ready` polls the raw stream and a buffered
+# reader over the same stream would make the poll lie about lines it already
+# holds -- pick one reader, so this loop picks the raw one and assembles
+# lines itself. Bytes accumulate until a newline and decode as one string,
+# so multi-byte characters survive the byte-wise reads.
+#
+# Honesty notes, in the module contract because they are load-bearing:
+# - "Every n ms" counts waiting, not wall time: there is no clock in std,
+#   only `stdin_ready(timeout_ms)`, so time spent reading ready bytes is
+#   invisible. Interactive pacing is approximate by design.
+# - End of input ends the session, timers or not: a line-mode app is a
+#   conversation, and `stdin_ready` may answer `false` immediately once the
+#   input is gone, which would otherwise burst every timer at CPU speed.
+#   The loop cannot tell that early `false` from a real timeout, so a
+#   subscribed app on piped input may see ticks arrive faster than declared
+#   until the pipe's end is read. Subscriptions are for interactive use.
+# - A tick repaint reprints the prompt but cannot re-echo what was typed;
+#   typed-but-unsubmitted bytes stay in the partial line and are not lost.
+
+use std/io
+use std/list
+use std/bytes
+use app.{App, update, view}
+use render.{render, clear_screen}
+use present.{frame_lines, present, park}
+use sub.{Sub, Pending, intervals, arm, poll_ms, elapse, due_msgs}
+
+## Drive `init` until `done`: clear once, paint, then loop. Timers re-arm
+## only when the declared intervals change, so an unrelated model edit does
+## not reset a running timer; messages are looked up in the declaration
+## current at fire time, never from the armed state.
+pub fn run[A: App](
+  init: A,
+  parse: fn(A, String) -> A.Msg,
+  subs: fn(A) -> List[Sub[A.Msg]],
+  done: fn(A) -> Bool,
+) -> Unit !io = {
+  io.print(clear_screen())
+  let rows = frame_lines(render(view(init)))
+  io.print(present([], rows) ++ park(len(rows)))
+  let iv = intervals(subs(init))
+  turn(init, iv, arm(iv), rows, parse, subs, done)
+}
+
+# One turn: the done check and the prompt, then wait for a line or a tick.
+fn turn[A: App](
+  m: A,
+  iv: List[Int],
+  pending: List[Pending],
+  shown: List[String],
+  parse: fn(A, String) -> A.Msg,
+  subs: fn(A) -> List[Sub[A.Msg]],
+  done: fn(A) -> Bool,
+) -> Unit !io =
+  if done(m) {
+    ()
+  } else {
+    io.print("> ")
+    let fresh: List[Int] = []
+    wait(m, iv, pending, fresh, shown, parse, subs, done)
+  }
+
+# Block until a byte is due or a timer is; `partial` is the line so far.
+fn wait[A: App](
+  m: A,
+  iv: List[Int],
+  pending: List[Pending],
+  partial: List[Int],
+  shown: List[String],
+  parse: fn(A, String) -> A.Msg,
+  subs: fn(A) -> List[Sub[A.Msg]],
+  done: fn(A) -> Bool,
+) -> Unit !io =
+  match poll_ms(pending) {
+    None -> take_byte(m, iv, pending, partial, shown, parse, subs, done)
+    Some(t) ->
+      if io.stdin_ready(t) {
+        take_byte(m, iv, pending, partial, shown, parse, subs, done)
+      } else {
+        # A full timeout of waiting is accounted; fire what came due. The
+        # partial line survives the repaint.
+        let (p2, due) = elapse(pending, t)
+        let next = fold_msgs(m, due_msgs(subs(m), due))
+        let rows = frame_lines(render(view(next)))
+        io.print(present(shown, rows) ++ park(len(rows)) ++ "> ")
+        if done(next) {
+          ()
+        } else {
+          let want = intervals(subs(next))
+          if want == iv {
+            wait(next, iv, p2, partial, rows, parse, subs, done)
+          } else {
+            wait(next, want, arm(want), partial, rows, parse, subs, done)
+          }
+        }
+      }
+  }
+
+# One raw byte: end of input ends the session, a newline completes the line
+# and steps the app, anything else extends the partial line.
+fn take_byte[A: App](
+  m: A,
+  iv: List[Int],
+  pending: List[Pending],
+  partial: List[Int],
+  shown: List[String],
+  parse: fn(A, String) -> A.Msg,
+  subs: fn(A) -> List[Sub[A.Msg]],
+  done: fn(A) -> Bool,
+) -> Unit !io = {
+  let b = io.read_stdin(1)
+  if bytes.is_empty(b) {
+    ()
+  } else if bytes.at(b, 0) == 10 {
+    let next = fold_msgs(m, [parse(m, to_line(partial))])
+    let rows = frame_lines(render(view(next)))
+    io.print(present(shown, rows) ++ park(len(rows)))
+    let want = intervals(subs(next))
+    if want == iv {
+      turn(next, iv, pending, rows, parse, subs, done)
+    } else {
+      turn(next, want, arm(want), rows, parse, subs, done)
+    }
+  } else {
+    wait(m, iv, pending, partial ++ [bytes.at(b, 0)], shown, parse, subs, done)
+  }
+}
+
+fn fold_msgs[A: App](m: A, msgs: List[A.Msg]) -> A =
+  list.fold(msgs, m, (acc, msg) => update(acc, msg))
+
+# The assembled bytes of one line, decoded once so multi-byte characters
+# read byte-wise stay whole. The newline is never in `bs`; a carriage
+# return before it is kept, and a line parser that trims handles it.
+fn to_line(bs: List[Int]) -> String = {
+  let b = list.fold(bs, bytes.buf(), (acc, x) => bytes.put(acc, x))
+  bytes.decode_utf8_lossy(bytes.freeze(b))
+}
+
+test "to_line decodes multi-byte characters assembled byte-wise" {
+  let coffee = [0xE5, 0x92, 0x96, 0xE5, 0x95, 0xA1]
+  assert to_line(coffee) == "咖啡"
+  let empty: List[Int] = []
+  assert to_line(empty) == ""
+  assert to_line([0x68, 0x69, 0x0D]) == "hi\r"
+}
