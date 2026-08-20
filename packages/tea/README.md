@@ -77,6 +77,14 @@ clears the prompt row below the frame. All pure: the caller owns the
 terminal, keeps the rows it last painted, and only the first paint clears
 the screen.
 
+## Routing
+
+A `Button` already carries its message; `route.buttons(w)` gives every
+button in pre-order (label and message), and `route.press(w, n)` answers
+what pressing the n-th one (1-based) means, or `None`. A line-mode app
+wires this into its parse hook (the demo's `press <n>`); a focus model
+would walk the same list.
+
 ## Worked example
 
 `examples/projects/tea_todo` is a complete interactive todo list over this

@@ -5,6 +5,7 @@
 
 use std/list
 use std/str
+use tea/route
 use tea/app.{App, update, view}
 use tea/widget.{Widget, Text, Styled, Row, Column, Button, Bold, Dim}
 
@@ -47,6 +48,31 @@ pub fn parse_line(line: String) -> Msg = {
       }
       None -> Bad(input: t)
     }
+  }
+}
+
+## Model-aware command parsing: `press <n>` pushes the n-th button of the
+## *current* view (pre-order, 1-based), everything else is `parse_line`.
+## Routing through the tree is the point: the checkbox of row n carries a
+## `Toggle` for that row's id, so `press` reaches the same message a click
+## would mean, without this parser knowing what buttons exist.
+pub fn parse_cmd(m: Model, line: String) -> Msg = {
+  let t = str.trim(line)
+  match str.split_once(t, " ") {
+    Some((cmd, rest)) ->
+      if cmd == "press" {
+        match parse_int(str.trim(rest)) {
+          Some(n) ->
+            match route.press(view(m), n) {
+              Some(msg) -> msg
+              None -> Bad(input: t)
+            }
+          None -> Bad(input: t)
+        }
+      } else {
+        parse_line(line)
+      }
+    None -> parse_line(line)
   }
 }
 
@@ -108,7 +134,7 @@ impl App[Model] {
       }
     let note: List[Widget[Msg]] = if m.note == "" { [] } else { [Text(s: m.note)] }
     let help: Widget[Msg] = Styled(style: Dim, child: Text(s:
-      "commands: add <title> | tog <id> | del <id> | quit"))
+      "commands: add <title> | tog <id> | del <id> | press <n> | quit"))
     Column(kids: [header] ++ body ++ note ++ [help])
   }
 }
@@ -168,6 +194,21 @@ test "parse_line is total over junk" {
   assert parse_line("") == Bad(input: "")
 }
 
+test "press routes through the current view's buttons" {
+  let m = update(update(initial(), Add(title: "a")), Add(title: "b"))
+  assert parse_cmd(m, "press 1") == Toggle(id: 1)
+  assert parse_cmd(m, "press 2") == Toggle(id: 2)
+  assert parse_cmd(m, "press 9") == Bad(input: "press 9")
+  assert parse_cmd(m, "press x") == Bad(input: "press x")
+  assert parse_cmd(m, "add c") == Add(title: "c")
+  assert parse_cmd(m, "q") == Quit
+}
+
+test "press numbers rows, not ids: after a deletion they diverge" {
+  let m = update(update(update(initial(), Add(title: "a")), Add(title: "b")), Del(id: 1))
+  assert parse_cmd(m, "press 1") == Toggle(id: 2)
+}
+
 test "view snapshot: the tree is data and compares with ==" {
   let m = update(update(update(initial(), Add(title: "buy milk")), Add(title: "ship tea")), Toggle(id: 1))
   let want: Widget[Msg] = Column(kids: [
@@ -182,7 +223,7 @@ test "view snapshot: the tree is data and compares with ==" {
       Text(s: "#2"),
       Text(s: "ship tea"),
     ]),
-    Styled(style: Dim, child: Text(s: "commands: add <title> | tog <id> | del <id> | quit")),
+    Styled(style: Dim, child: Text(s: "commands: add <title> | tog <id> | del <id> | press <n> | quit")),
   ])
   assert view(m) == want
 }

@@ -1,0 +1,76 @@
+# From "the user did something" to "which message does it mean", as a pure
+# question to the tree. A `Button` already carries its message; what a
+# line-mode driver lacks is a way to name one button among many. Pre-order
+# numbering is that name: `buttons` lists every button the way a reader
+# meets them (top-to-bottom, left-to-right), and `press` answers what
+# pressing the n-th one means for exactly that ordering. An app wires it up
+# in its parse hook (`press <n>` in the demo); a future focus model would
+# walk the same list.
+
+use std/list
+use widget.{Bold, Widget, Text, Styled, Row, Column, Button}
+
+## Every button in the tree, in pre-order: label and the message pressing
+## it sends. The n-th entry is what `press(w, n)` resolves (1-based).
+pub fn buttons[M](w: Widget[M]) -> List[(String, M)] =
+  match w {
+    Text(_) -> []
+    Styled(_, child) -> buttons(child)
+    Row(kids) -> kid_buttons(kids, 0, [])
+    Column(kids) -> kid_buttons(kids, 0, [])
+    Button(label, msg) -> [(label, msg)]
+  }
+
+fn kid_buttons[M](
+  kids: List[Widget[M]],
+  i: Int,
+  acc: List[(String, M)],
+) -> List[(String, M)] =
+  if i >= len(kids) {
+    acc
+  } else {
+    kid_buttons(kids, i + 1, acc ++ buttons(kids[i]))
+  }
+
+## The message the n-th button would send, counting from 1 in pre-order,
+## or `None` when there is no such button.
+pub fn press[M](w: Widget[M], n: Int) -> Option[M] = {
+  let bs = buttons(w)
+  if n < 1 || n > len(bs) {
+    None
+  } else {
+    let (_, msg) = bs[n - 1]
+    Some(msg)
+  }
+}
+
+# A message type for the test blocks below; real apps bring their own.
+type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+test "buttons collects in pre-order through every container" {
+  let w: Widget[ProbeMsg] =
+    Column(kids: [
+      Row(kids: [Button(label: "a", on_press: Ping), Text(s: "x")]),
+      Styled(style: Bold, child: Button(label: "b", on_press: Pong)),
+      Text(s: "y"),
+    ])
+  assert buttons(w) == [("a", Ping), ("b", Pong)]
+  let bare: Widget[ProbeMsg] = Text(s: "no buttons here")
+  assert list.is_empty(buttons(bare))
+}
+
+test "press is 1-based and total over bad indices" {
+  let w: Widget[ProbeMsg] =
+    Column(kids: [
+      Button(label: "first", on_press: Ping),
+      Button(label: "second", on_press: Pong),
+    ])
+  assert press(w, 1) == Some(Ping)
+  assert press(w, 2) == Some(Pong)
+  let miss: Option[ProbeMsg] = None
+  assert press(w, 0) == miss
+  assert press(w, 3) == miss
+}
