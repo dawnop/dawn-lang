@@ -1,0 +1,241 @@
+# The difference between two widget trees, as data. `diff` computes a list of
+# patches, `apply` replays them; both are pure, so the contract is a single
+# assertion: `apply(old, diff(old, new)) == new`. What this buys over "rebuild
+# and replace everything" is locality: a patch names the address of a change,
+# and an unchanged sibling is never mentioned, which is what lets a presenter
+# later touch only the screen regions that actually changed.
+#
+# The list strategy is unkeyed, Elm-style: children pair up by index, and a
+# length difference becomes one append or one truncate at the tail. Deleting
+# in the middle therefore rewrites the tail pairwise -- the known cost of
+# unkeyed diffing, accepted for v1: widgets carry no keys, and terminal-scale
+# lists have not measured it as pain (see the middle-deletion test below,
+# which pins the cost rather than hiding it).
+#
+# The four ops are closed under in-order application: recursion over a common
+# prefix never shifts indices, and the tail ops never touch the prefix, so a
+# patch list applies in emission order with no index fixups.
+
+use std/list
+use widget.{Style, Bold, Dim, Widget, Text, Styled, Row, Column, Button}
+
+## One edit operation. `Replace` swaps a whole subtree, `SetStyle` restyles a
+## `Styled` wrapper without touching its child, and the two tail ops grow or
+## shrink a container's child list.
+pub type Op[M] =
+  | Replace(w: Widget[M])
+  | SetStyle(style: Style)
+  | AppendKids(ws: List[Widget[M]])
+  | TruncateKids(keep: Int)
+derive Show
+
+## One edit at one address. `path` is the chain of child indices from the
+## root; the child of a `Styled` is index 0.
+pub type Patch[M] = { path: List[Int], op: Op[M] }
+
+## Every difference between `old` and `new`, addressed from the root. Equal
+## trees produce the empty list.
+pub fn diff[M: Eq](old: Widget[M], new: Widget[M]) -> List[Patch[M]] =
+  diff_at(old, new, [])
+
+## Replay patches in order. An address that does not exist in `w` leaves the
+## node unchanged: `apply` stays total, and the roundtrip tests are what keep
+## `diff` from ever emitting such an address.
+pub fn apply[M](w: Widget[M], ps: List[Patch[M]]) -> Widget[M] =
+  list.fold(ps, w, (acc, p) => apply_one(acc, p.path, p.op))
+
+fn replace_at[M](path: List[Int], new: Widget[M]) -> List[Patch[M]] = {
+  let p: Patch[M] = Patch { path: path, op: Replace(w: new) }
+  [p]
+}
+
+fn diff_at[M: Eq](old: Widget[M], new: Widget[M], path: List[Int]) -> List[Patch[M]] =
+  match old {
+    Text(a) ->
+      match new {
+        Text(b) -> if a == b { [] } else { replace_at(path, new) }
+        _ -> replace_at(path, new)
+      }
+    Styled(s1, c1) ->
+      match new {
+        Styled(s2, c2) -> {
+          let inner = diff_at(c1, c2, path ++ [0])
+          if s1 == s2 {
+            inner
+          } else {
+            let sp: Patch[M] = Patch { path: path, op: SetStyle(style: s2) }
+            [sp] ++ inner
+          }
+        }
+        _ -> replace_at(path, new)
+      }
+    Row(a) ->
+      match new {
+        Row(b) -> diff_kids(a, b, path, 0, [])
+        _ -> replace_at(path, new)
+      }
+    Column(a) ->
+      match new {
+        Column(b) -> diff_kids(a, b, path, 0, [])
+        _ -> replace_at(path, new)
+      }
+    Button(l1, m1) ->
+      match new {
+        Button(l2, m2) ->
+          if l1 == l2 && m1 == m2 { [] } else { replace_at(path, new) }
+        _ -> replace_at(path, new)
+      }
+  }
+
+# Pairwise over the common prefix, then at most one tail op. Self-tail-
+# recursive so the compiler turns it into a loop.
+fn diff_kids[M: Eq](
+  old: List[Widget[M]],
+  new: List[Widget[M]],
+  path: List[Int],
+  i: Int,
+  acc: List[Patch[M]],
+) -> List[Patch[M]] = {
+  let common = if len(old) < len(new) { len(old) } else { len(new) }
+  if i < common {
+    diff_kids(old, new, path, i + 1, acc ++ diff_at(old[i], new[i], path ++ [i]))
+  } else if len(new) > common {
+    let ap: Patch[M] = Patch { path: path, op: AppendKids(ws: list.drop(new, common)) }
+    acc ++ [ap]
+  } else if len(old) > common {
+    let tp: Patch[M] = Patch { path: path, op: TruncateKids(keep: common) }
+    acc ++ [tp]
+  } else {
+    acc
+  }
+}
+
+fn apply_one[M](w: Widget[M], path: List[Int], op: Op[M]) -> Widget[M] =
+  if list.is_empty(path) {
+    apply_op(w, op)
+  } else {
+    let i = path[0]
+    let rest = list.drop(path, 1)
+    match w {
+      Styled(style, child) ->
+        if i == 0 {
+          Styled(style: style, child: apply_one(child, rest, op))
+        } else {
+          w
+        }
+      Row(kids) -> Row(kids: patch_kid(kids, i, rest, op))
+      Column(kids) -> Column(kids: patch_kid(kids, i, rest, op))
+      _ -> w
+    }
+  }
+
+fn patch_kid[M](kids: List[Widget[M]], i: Int, rest: List[Int], op: Op[M]) -> List[Widget[M]] =
+  if i < 0 || i >= len(kids) {
+    kids
+  } else {
+    list.take(kids, i) ++ [apply_one(kids[i], rest, op)] ++ list.drop(kids, i + 1)
+  }
+
+fn apply_op[M](w: Widget[M], op: Op[M]) -> Widget[M] =
+  match op {
+    Replace(n) -> n
+    SetStyle(s) ->
+      match w {
+        Styled(_, child) -> Styled(style: s, child: child)
+        _ -> w
+      }
+    AppendKids(ws) ->
+      match w {
+        Row(kids) -> Row(kids: kids ++ ws)
+        Column(kids) -> Column(kids: kids ++ ws)
+        _ -> w
+      }
+    TruncateKids(keep) ->
+      match w {
+        Row(kids) -> Row(kids: list.take(kids, keep))
+        Column(kids) -> Column(kids: list.take(kids, keep))
+        _ -> w
+      }
+  }
+
+# A message type for the test blocks below; real apps bring their own.
+type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+fn rt(a: Widget[ProbeMsg], b: Widget[ProbeMsg]) -> Bool = apply(a, diff(a, b)) == b
+
+test "diff of a tree with itself is empty" {
+  let w: Widget[ProbeMsg] =
+    Column(kids: [
+      Styled(style: Bold, child: Text(s: "t")),
+      Row(kids: [Button(label: "go", on_press: Ping), Text(s: "x")]),
+    ])
+  assert list.is_empty(diff(w, w))
+  let leaf: Widget[ProbeMsg] = Text(s: "a")
+  assert list.is_empty(diff(leaf, leaf))
+}
+
+test "apply replays diff back to the new tree" {
+  assert rt(Text(s: "a"), Text(s: "b"))
+  assert rt(
+    Styled(style: Bold, child: Text(s: "x")),
+    Styled(style: Dim, child: Text(s: "x")),
+  )
+  assert rt(Row(kids: [Text(s: "a")]), Column(kids: [Text(s: "a")]))
+  assert rt(Button(label: "go", on_press: Ping), Button(label: "go", on_press: Pong))
+  assert rt(
+    Column(kids: [Text(s: "same"), Row(kids: [Text(s: "old"), Text(s: "keep")])]),
+    Column(kids: [Text(s: "same"), Row(kids: [Text(s: "new"), Text(s: "keep")])]),
+  )
+}
+
+test "list growth, shrink, and middle deletion all roundtrip" {
+  let one: Widget[ProbeMsg] = Column(kids: [Text(s: "a")])
+  let three: Widget[ProbeMsg] = Column(kids: [Text(s: "a"), Text(s: "b"), Text(s: "c")])
+  assert rt(one, three)
+  assert rt(three, one)
+  let mid: Widget[ProbeMsg] = Column(kids: [Text(s: "a"), Text(s: "c")])
+  assert rt(three, mid)
+}
+
+test "an unchanged sibling is never mentioned" {
+  let a: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "two"), Text(s: "three")])
+  let b: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "TWO"), Text(s: "three")])
+  let want: List[Patch[ProbeMsg]] = [Patch { path: [1], op: Replace(w: Text(s: "TWO")) }]
+  assert diff(a, b) == want
+}
+
+test "a style-only change is one SetStyle, the child is untouched" {
+  let child: Widget[ProbeMsg] = Row(kids: [Text(s: "deep"), Button(label: "b", on_press: Ping)])
+  let want: List[Patch[ProbeMsg]] = [Patch { path: [], op: SetStyle(style: Dim) }]
+  assert diff(Styled(style: Bold, child: child), Styled(style: Dim, child: child)) == want
+}
+
+test "tail growth is one append, tail shrink is one truncate" {
+  let a: Widget[ProbeMsg] = Column(kids: [Text(s: "a")])
+  let b: Widget[ProbeMsg] = Column(kids: [Text(s: "a"), Text(s: "b"), Text(s: "c")])
+  let grow: List[Patch[ProbeMsg]] =
+    [Patch { path: [], op: AppendKids(ws: [Text(s: "b"), Text(s: "c")]) }]
+  assert diff(a, b) == grow
+  let shrink: List[Patch[ProbeMsg]] = [Patch { path: [], op: TruncateKids(keep: 1) }]
+  assert diff(b, a) == shrink
+}
+
+test "paths descend through Styled at index 0" {
+  let a: Widget[ProbeMsg] =
+    Column(kids: [Text(s: "k"), Styled(style: Bold, child: Text(s: "old"))])
+  let b: Widget[ProbeMsg] =
+    Column(kids: [Text(s: "k"), Styled(style: Bold, child: Text(s: "new"))])
+  let want: List[Patch[ProbeMsg]] = [Patch { path: [1, 0], op: Replace(w: Text(s: "new")) }]
+  assert diff(a, b) == want
+  assert apply(a, diff(a, b)) == b
+}
+
+test "middle deletion rewrites the tail pairwise, cost pinned not hidden" {
+  let a: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "two"), Text(s: "three")])
+  let b: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "three")])
+  assert len(diff(a, b)) == 2
+  assert apply(a, diff(a, b)) == b
+}

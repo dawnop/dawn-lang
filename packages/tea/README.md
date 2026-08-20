@@ -40,6 +40,19 @@ this trait as the consumer justifying it.
 SGR codes (`Plain` is the identity and emits nothing). `clear_screen()` returns
 the redraw escape sequence; printing it is the caller's business.
 
+## Diffing
+
+`diff(old, new)` computes the difference between two widget trees as a list
+of patches, and `apply(old, patches)` replays it; the contract is
+`apply(old, diff(old, new)) == new`, and equal trees diff to the empty list.
+A patch is an address (`path`, the chain of child indices; a `Styled` child
+is index 0) plus one of four ops: `Replace`, `SetStyle`, `AppendKids`,
+`TruncateKids`. Locality is the point: an unchanged sibling is never
+mentioned by any patch. Child lists diff unkeyed, Elm-style: pairwise by
+index with one tail append or truncate. A middle deletion therefore rewrites
+the tail pairwise; that cost is pinned by a test rather than hidden, and keyed
+diffing waits for a consumer that measures it as pain.
+
 ## Worked example
 
 `examples/projects/tea_todo` is a complete interactive todo list over this
