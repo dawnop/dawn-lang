@@ -1,0 +1,44 @@
+# What the checker says about the two list-literal element forms (spec §4.11)
+# when they are wrong. The parser's own refusals (`[..]`, `f(..xs)`) belong to
+# grammar-corpus; everything here parses and is rejected on types.
+#
+# The order matters as much as the wording: `EListLit` checks the elements that
+# can be typed on their own first and the ones that need an expectation second,
+# so a diagnostic about a deferred element comes after one about a ready
+# element written later in the source.
+
+pub type Tagged[T] = Tagged(label: String)
+
+fn nameless[T](s: String) -> Tagged[T] = Tagged(label: s)
+
+# `..` over something that is not a list
+fn spread_int(n: Int) -> List[Int] = [1, ..n, 2]
+
+fn spread_string(s: String) -> List[Int] = [..s]
+
+# the item type of the spread has to agree with the other elements
+fn spread_wrong_item(xs: List[String]) -> List[Int] = [1, ..xs]
+
+# a conditional element's condition is a Bool like any other
+fn cond_not_bool(n: Int) -> List[Int] = [0, if n { 7 }]
+
+# ... in every arm of the chain, not just the first
+fn cond_chain_not_bool(n: Int) -> List[Int] = [0, if n == 1 { 7 } else if n { 8 }]
+
+# a conditional element's body joins the element type
+fn cond_wrong_body(c: Bool) -> List[Int] = [0, if c { "seven" }]
+
+# the arms of one chain have to agree with each other
+fn cond_arms_disagree(n: Int) -> List[Int] = [if n == 1 { 7 } else if n == 2 { "eight" }]
+
+# nothing settles the element type: an element that needs an expectation and no
+# sibling that can give it one
+fn cond_uninferable(c: Bool) -> List[Tagged[Int]] = {
+  let out = [if c { nameless("a") }]
+  out
+}
+
+fn spread_uninferable() -> List[Int] = {
+  let out = [..[]]
+  out
+}

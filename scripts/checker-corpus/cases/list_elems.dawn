@@ -1,0 +1,112 @@
+# The two list-literal element forms, spec §4.11, in every shape that is
+# supposed to be accepted. The golden is empty on purpose: everything here
+# types, and what this case holds shut is *that*, not any wording.
+#
+# The lever the whole feature rides on is `nameless(...)` below. Its type
+# parameter appears only in its return type, so the call cannot be typed on its
+# own -- `[nameless("x")]` is "cannot infer type parameter(s) T". It types here
+# because a sibling element of the same literal settled the element type first,
+# and `EListLit` hands that type down to every element it has not checked yet.
+# A conditional element's *bodies* must receive it the same way; hand them None
+# and `mixed` below stops compiling. That is the one assertion this file exists
+# for, and it is an assertion about a program that produces no diagnostic at
+# all, which is why it lives in a corpus with an empty golden rather than in a
+# test about a message.
+
+use std/list
+
+pub type Tagged[T] = Tagged(label: String)
+
+fn nameless[T](s: String) -> Tagged[T] = Tagged(label: s)
+
+# ---- spread ----
+
+fn spread_middle(xs: List[Int]) -> List[Int] = [0, ..xs, 9]
+
+fn spread_only(xs: List[Int]) -> List[Int] = [..xs]
+
+fn spread_twice(xs: List[Int], ys: List[Int]) -> List[Int] = [..xs, ..ys]
+
+fn spread_leads(xs: List[Int]) -> List[Int] = [..xs, 1]
+
+# the expectation crosses the `..`, so the empty literal inside it is typed
+fn spread_empty_literal(x: Int) -> List[Int] = [x, ..[]]
+
+# ...including through an `if` whose branches are lists
+fn spread_of_if(c: Bool, xs: List[Int]) -> List[Int] = [0, ..if c { xs } else { [] }]
+
+# a spread nested in a spread's operand
+fn spread_nested(xs: List[List[Int]]) -> List[List[Int]] = [[0], ..xs]
+
+# ---- conditional element ----
+
+fn cond_one(c: Bool) -> List[Int] = [0, if c { 7 }, 9]
+
+fn cond_only(c: Bool) -> List[Int] = [if c { 7 }]
+
+fn cond_chain(n: Int) -> List[Int] = [0, if n == 1 { 11 } else if n == 2 { 22 }, 9]
+
+# a chain that *does* end in an else is one ordinary element, as it always was
+fn cond_with_else(c: Bool) -> List[Int] = [0, if c { 11 } else { 22 }, 9]
+
+# ---- inference ----
+
+# the element type reaches an element that cannot be typed alone, whichever
+# form it wears
+fn from_sibling(anchor: Tagged[Int]) -> List[Tagged[Int]] =
+  [anchor, nameless("a")]
+
+fn into_cond_body(anchor: Tagged[Int], c: Bool) -> List[Tagged[Int]] =
+  [anchor, if c { nameless("a") }]
+
+fn into_cond_chain(anchor: Tagged[Int], n: Int) -> List[Tagged[Int]] =
+  [anchor, if n == 1 { nameless("a") } else if n == 2 { nameless("b") }]
+
+fn into_spread_operand(anchor: Tagged[Int], c: Bool) -> List[Tagged[Int]] =
+  [anchor, ..if c { [nameless("a")] } else { [] }]
+
+# an annotation is an expectation too, and it reaches the same places without
+# any sibling at all
+fn from_annotation(c: Bool) -> List[Tagged[Int]] = {
+  let out: List[Tagged[Int]] = [if c { nameless("a") }]
+  out
+}
+
+# the deferred round: a bare `None` needs the expectation, and gets it from a
+# sibling element regardless of which form the sibling wears
+fn deferred_from_spread(xs: List[Option[Int]]) -> List[Option[Int]] = [None, ..xs]
+
+fn deferred_from_cond(c: Bool) -> List[Option[Int]] = [None, if c { Some(1) }]
+
+fn deferred_in_cond(xs: List[Option[Int]], c: Bool) -> List[Option[Int]] =
+  [..xs, if c { None }]
+
+fn mixed(anchor: Tagged[Int], xs: List[Tagged[Int]], c: Bool) -> List[Tagged[Int]] =
+  [anchor, ..xs, if c { nameless("note") }, anchor]
+
+pub fn main() -> Unit !io = {
+  let anchor: Tagged[Int] = Tagged(label: "a")
+  let all = [
+    len(spread_middle([1])),
+    len(spread_only([1])),
+    len(spread_twice([1], [2])),
+    len(spread_leads([1])),
+    len(spread_empty_literal(1)),
+    len(spread_of_if(true, [1])),
+    len(spread_nested([[1]])),
+    len(cond_one(true)),
+    len(cond_only(true)),
+    len(cond_chain(1)),
+    len(cond_with_else(true)),
+    len(from_sibling(anchor)),
+    len(into_cond_body(anchor, true)),
+    len(into_cond_chain(anchor, 1)),
+    len(into_spread_operand(anchor, true)),
+    len(from_annotation(true)),
+    len(deferred_from_spread([])),
+    len(deferred_from_cond(true)),
+    len(deferred_in_cond([], true)),
+    len(mixed(anchor, [], true)),
+  ]
+  println(to_string(list.fold(all, 0, (a, x) => a + x)))
+}
