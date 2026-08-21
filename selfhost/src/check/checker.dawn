@@ -6308,16 +6308,27 @@ fn eff_drop(e: Eff, ids: List[Int]) -> Eff = {
 
 ## docs/effects-design.md §4.2: the effect is used, and nothing in scope
 ## answers it. Either the signature admits it, or a handler discharges it.
+##
+## Inside `main` only the second way out exists: `pass_main_check` refuses a
+## label on main's row outright (docs/effects-design.md §4.2, spec §6.5), so
+## offering "add !E to the signature" here sends the reader into a second
+## error. The narrowed hint says why the missing half is missing rather than
+## dropping it silently.
 fn unhandled_effect(cx: Cx, eid: Int, lo: Int, hi: Int) -> Cx = {
   let nm = effect_of(cx, eid).name
-  let who = match cx.frame.current_sig {
-    Some(sg) -> "`" ++ sg.name ++ "`"
-    None -> "this code"
+  let (who, is_main) = match cx.frame.current_sig {
+    Some(sg) -> ("`" ++ sg.name ++ "`", sg.name == "main")
+    None -> ("this code", false)
+  }
+  let hint = if is_main {
+    "nothing calls main, so nothing can answer a declared effect: handle it here with " ++
+      "`with handle " ++ nm ++ " { ... }`"
+  } else {
+    "add !" ++ nm ++ " to the signature, or answer it here with `with handle " ++ nm ++
+      " { ... }`"
   }
   cerr_h(cx, who ++ " uses the effect `" ++ nm ++ "`, but its signature does not declare !" ++ nm,
-    lo, hi,
-    "add !" ++ nm ++ " to the signature, or answer it here with `with handle " ++ nm ++
-      " { ... }`")
+    lo, hi, hint)
 }
 
 ## Is `vid`'s inference failure nothing but an echo of the fields the call left
@@ -9733,6 +9744,21 @@ test "an operation raised with nobody answering names the effect, not the row" {
   # and answering it is the other
   let cx3 = eff_check("fn f() -> Int = {\n  with handle Ask { ask() => 1 }\n  ask()\n}\n")
   assert len(cx3.diags) == 0
+}
+
+test "in main the same diagnostic offers the handler alone" {
+  # main may not carry a label at all (pass_main_check), so the "declare it"
+  # half of the hint above would send the reader straight into a second error.
+  let cx = eff_check("pub fn main() -> Unit !io = {\n  let _ = ask()\n  ()\n}\n")
+  assert len(cx.diags) == 1
+  assert cx.diags[0].msg == "`main` uses the effect `Ask`, but its signature does not declare !Ask"
+  assert cx.diags[0].hint ==
+    "nothing calls main, so nothing can answer a declared effect: handle it here with " ++
+    "`with handle Ask { ... }`"
+  # the one way out it names is a way out
+  let cx2 = eff_check(
+    "pub fn main() -> Unit !io = {\n  with handle Ask { ask() => 1 }\n  let _ = ask()\n  ()\n}\n")
+  assert len(cx2.diags) == 0
 }
 
 test "a declared effect is served by a hidden evidence parameter" {
