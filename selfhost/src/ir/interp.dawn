@@ -37,6 +37,7 @@ use check/tast.{
   TExpr, TStmt, TFun, TModule, TJavaCall,
   XStr, XLambda, XApply, XJava, XPropagate, XUnwrap, XReturn, XIndex,
   XCallDyn, XCallBuiltin, XCallFn, XCtor, XField, XListLit, XTupleLit,
+  TLEExpr, TLESpread, TLEIf,
   XBinary, XUnary, XIf, XMatch, XBlock, XComptime, XUnsafePure,
   XError,
   TSPText, TSPInterp,
@@ -1832,7 +1833,17 @@ fn walk_expr(icx: ICx, fuel: Int, e: TExpr, acc: CtRun) -> CtRun !io =
     XField(target, ..) -> walk_expr(icx, fuel, target, acc)
     XListLit(elems, ..) -> {
       var acc1 = acc
-      for x in elems { acc1 = walk_expr(icx, fuel, x, acc1) }
+      for x in elems {
+        match x {
+          TLEExpr(e) -> { acc1 = walk_expr(icx, fuel, e, acc1) }
+          TLESpread(e) -> { acc1 = walk_expr(icx, fuel, e, acc1) }
+          TLEIf(arms) -> {
+            for a in arms {
+              acc1 = walk_expr(icx, fuel, a.body, walk_expr(icx, fuel, a.cond, acc1))
+            }
+          }
+        }
+      }
       acc1
     }
     XTupleLit(elems, ..) -> {

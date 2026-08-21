@@ -186,6 +186,47 @@ pub type HandlerArm = {
   nhi: Int
 }
 
+## One arm of an else-less `if` chain standing at a list-literal element
+## position: `if a { x } else if b { y }` is two of these.
+pub type ListIfArm = { cond: Expr, body: Expr }
+
+## What sits between two commas in a list literal. Three forms -- an ordinary
+## element, a spread, a conditional element -- and only the first one existed
+## before: `[a, ..xs, if c { y }]` has one of each.
+##
+## The element forms are a *representation*, not a rewrite: the parser builds
+## them, the checker types them and lowering turns them into concatenations
+## (spec §4.11). Desugaring at the parser instead -- `[a] ++ xs ++ ...` -- was
+## tried and refused: it makes the element type of the `[]` runs a question
+## inference has to answer on its own, and `++` does not push an expected type
+## into either operand, so the two halves that a list literal already solves
+## together would each be solved alone.
+pub type ListElem =
+  | LeExpr(e: Expr)
+# `..xs`: splices every element of a `List[T]` in. `lo`/`hi` span the `..`
+# together with its operand, which is what the "operand is not a list"
+# diagnostic underlines.
+  | LeSpread(e: Expr, lo: Int, hi: Int)
+# `if c { x }`, possibly with `else if` arms, and no final `else`: contributes
+# zero or one element. A chain that *does* end in an `else` is an `LeExpr` and
+# keeps the meaning it had before this form existed -- one element, chosen
+# between the branches (spec §4.11).
+  | LeIf(arms: List[ListIfArm], lo: Int, hi: Int)
+
+pub fn le_lo(x: ListElem) -> Int =
+  match x {
+    LeExpr(e) -> e_lo(e)
+    LeSpread(_, lo, _) -> lo
+    LeIf(_, lo, _) -> lo
+  }
+
+pub fn le_hi(x: ListElem) -> Int =
+  match x {
+    LeExpr(e) -> e_hi(e)
+    LeSpread(_, _, hi) -> hi
+    LeIf(_, _, hi) -> hi
+  }
+
 pub type Expr =
   | EInt(v: Int, lo: Int, hi: Int)
 # a character literal `'a'`: `v` is its code point, its type is `Char`
@@ -217,7 +258,7 @@ pub type Expr =
     hi: Int
   )
   | EFieldAcc(target: Expr, field: String, flo: Int, fhi: Int, lo: Int, hi: Int)
-  | EListLit(elems: List[Expr], lo: Int, hi: Int)
+  | EListLit(elems: List[ListElem], lo: Int, hi: Int)
   | ETupleLit(elems: List[Expr], lo: Int, hi: Int)
   | EPropagate(operand: Expr, lo: Int, hi: Int)
   | EUnwrap(operand: Expr, lo: Int, hi: Int)

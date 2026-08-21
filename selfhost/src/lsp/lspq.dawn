@@ -17,6 +17,7 @@ use front/ast.{
   StrPart, SPText, SPInterp,
   EInt, EFloat, EBool, EUnit, EStr, EVar, EApply, EMethod, ELambda,
   ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
+  ListElem, LeExpr, LeSpread, LeIf,
   EBreak, EContinue, EComptime, EUnsafePure, EBinary, EUnary, EIf, EMatch,
   EBlock, EHandle,
   PLit, PBind, PWild, POr, PCtor, PTuple, PList,
@@ -30,6 +31,7 @@ use check/tast.{
   XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn, XCallBuiltin,
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
+  TListElem, TLEExpr, TLESpread, TLEIf,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
   TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
@@ -821,11 +823,14 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         }
       }
     }
-    EListLit(elems, _, _) ->
+    EListLit(elems, _, _) -> {
+      let es = elem_exprs(elems)
       match te {
-        Some(XListLit(telems, _, _, _)) -> { q = walk_list(qc, q, elems, opt_list(telems)) }
-        _ -> { q = walk_list(qc, q, elems, no_texprs(elems)) }
+        Some(XListLit(telems, _, _, _)) ->
+          { q = walk_list(qc, q, es, opt_list(telem_exprs(telems))) }
+        _ -> { q = walk_list(qc, q, es, no_texprs(es)) }
       }
+    }
     ETupleLit(elems, _, _) ->
       match te {
         Some(XTupleLit(telems, _, _, _)) -> { q = walk_list(qc, q, elems, opt_list(telems)) }
@@ -1195,6 +1200,36 @@ fn no_texprs(es: List[Expr]) -> List[Option[TExpr]] = {
   var out: List[Option[TExpr]] = []
   let n: Option[TExpr] = None
   for _e in es { out = out ++ [n] }
+  out
+}
+
+## A list literal's elements as a flat sequence of expressions, in source
+## order: an ordinary element and a spread contribute their operand, a
+## conditional element its arms' conditions and bodies. `elem_exprs` and
+## `telem_exprs` produce the same sequence for the same literal -- the checker
+## keeps every element's form and every chain's arm count -- which is what lets
+## the two be walked in lockstep by index, as every other node here is.
+fn elem_exprs(elems: List[ListElem]) -> List[Expr] = {
+  var out: List[Expr] = []
+  for x in elems {
+    match x {
+      LeExpr(e) -> { out = out ++ [e] }
+      LeSpread(e, _, _) -> { out = out ++ [e] }
+      LeIf(arms, _, _) -> { for a in arms { out = out ++ [a.cond, a.body] } }
+    }
+  }
+  out
+}
+
+fn telem_exprs(elems: List[TListElem]) -> List[TExpr] = {
+  var out: List[TExpr] = []
+  for x in elems {
+    match x {
+      TLEExpr(e) -> { out = out ++ [e] }
+      TLESpread(e) -> { out = out ++ [e] }
+      TLEIf(arms) -> { for a in arms { out = out ++ [a.cond, a.body] } }
+    }
+  }
   out
 }
 
@@ -1803,12 +1838,13 @@ fn collect_e(
       }
     }
     EListLit(elems, _, _) -> {
+      let es = elem_exprs(elems)
       let telems = match te {
-        Some(XListLit(ts, _, _, _)) -> opt_list(ts)
-        _ -> no_texprs(elems)
+        Some(XListLit(ts, _, _, _)) -> opt_list(telem_exprs(ts))
+        _ -> no_texprs(es)
       }
       var i = 0
-      for e in elems {
+      for e in es {
         acc = collect_e(qc, acc, e, opt_get2(telems, i), before)
         i = i + 1
       }

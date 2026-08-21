@@ -25,6 +25,7 @@ use front/ast.{
   SPText, SPInterp, EFloat, EStr, pat_lo, pat_hi, e_lo, e_hi,
   EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
   EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
+  ListElem, LeExpr, LeSpread, LeIf, le_lo, le_hi,
   EComptime, EUnsafePure, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
   SAssert, SWhile, SFor, LambdaParam, ConstView,
   EHandle, HandlerArm, DEffect, EffectDeclR, EffectOp, module_effects
@@ -37,6 +38,7 @@ use check/tast.{
   TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr,
   TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
+  TListElem, TLEExpr, TLESpread, TLEIf, TListIfArm,
   TPat, TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   TFun, TConst, TModule, WitRef, WForward, WConcrete, WApply
@@ -2787,7 +2789,17 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
     EFieldAcc(target, _, _, _, _, _) -> name_refs(target, out, sc)
     EListLit(elems, _, _) -> {
       var o = out
-      for x in elems { o = name_refs(x, o, sc) }
+      for x in elems {
+        match x {
+          LeExpr(e) -> { o = name_refs(e, o, sc) }
+          LeSpread(e, _, _) -> { o = name_refs(e, o, sc) }
+          LeIf(arms, _, _) -> {
+            for a in arms {
+              o = name_refs(a.body, name_refs(a.cond, o, sc), sc)
+            }
+          }
+        }
+      }
       o
     }
     ETupleLit(elems, _, _) -> {
@@ -3093,7 +3105,7 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
     EListLit(elems, _, _) -> {
       if len(elems) == 0 { return true }
       for x in elems {
-        if not needs_expected(cx, x) { return false }
+        if not needs_expected_elem(cx, x) { return false }
       }
       true
     }
@@ -3180,6 +3192,45 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
         _ -> false
       }
     _ -> false
+  }
+
+## The same question for one list-literal element. A spread asks it of its
+## operand -- `..[]` is exactly as undecidable alone as `[]` is -- and a
+## conditional element asks it of its bodies, under the rule the literal
+## itself uses: one body that types on its own settles the element, so the
+## whole form needs an expectation only when every body does.
+pub fn needs_expected_elem(cx: Cx, x: ListElem) -> Bool =
+  match x {
+    LeExpr(e) -> needs_expected(cx, e)
+    LeSpread(e, _, _) -> needs_expected(cx, e)
+    LeIf(arms, _, _) -> {
+      for a in arms {
+        if not needs_expected(cx, if_body_value(a.body)) { return false }
+      }
+      true
+    }
+  }
+
+## What an `if` body produces, with a one-expression block peeled off.
+##
+## The parser always makes an `if` body a block (`if_expr` calls `block_expr`),
+## and `needs_expected` has no `EBlock` arm -- it falls to the wildcard and
+## answers false. So without this peel the arm above could never return true,
+## and `[if c { None }, Some(1)]` would be refused while `[None, Some(1)]` and
+## `[..[], Some(1)]` are accepted: a rule written and never able to fire.
+##
+## Peeled here rather than by giving `needs_expected` an `EBlock` arm, which
+## would re-order the two rounds for every argument and every match arm in the
+## tree. `[{ None }, Some(1)]` is refused for the same missing arm and stays
+## refused; that is the pre-existing shape, not this one.
+fn if_body_value(e: Expr) -> Expr =
+  match e {
+    EBlock(stmts, tail, _, _) ->
+      match tail {
+        Some(t) -> if len(stmts) == 0 { t } else { e }
+        None -> e
+      }
+    _ -> e
   }
 
 ## A top-level function or builtin used as a value; generics need the expected
@@ -3910,6 +3961,74 @@ fn see_through_expected(cx: Cx, e: Expr, expected: Option[Ty]) -> Option[Ty] =
     }
   }
 
+## One element of a list literal, at the element type agreed so far. Returns
+## what this element contributes to that type: its own type for an ordinary
+## element, the *item* type for a spread, the common body type for a
+## conditional one. `EListLit` unifies the answer back in, so all three forms
+## reach the literal's element type through the same door.
+##
+## `elem_t` is `TyNever` until something has settled it, and is passed down as
+## the expectation once it is concrete. That push-down is the whole point of
+## the feature and not an optimisation: `text(m.note)` is a call whose type
+## parameter appears only in the return type, so a body that gets `None` here
+## cannot be typed at all -- while the same call *as a sibling* of a
+## `Widget[Msg]` types fine. Hand the bodies `None` and the tea_todo view
+## stops compiling.
+fn check_list_elem(cx: Cx, x: ListElem, elem_t: Ty) -> (Cx, Ty, TListElem) !io = {
+  let el_exp: Option[Ty] =
+    if elem_t != TyNever && is_concrete(cx, elem_t) { Some(elem_t) } else { None }
+  match x {
+    LeExpr(e) -> {
+      let (cx1, t, tx) = check_expr(cx, e, el_exp)
+      (cx1, t, TLEExpr(tx))
+    }
+    LeSpread(e, lo, hi) -> {
+      # the expectation crosses the `..`: the operand of a spread is a list of
+      # what the literal is a list of, so `[x, ..[]]` and `[x, ..if c { [] }
+      # else { ys }]` reach their empty literals with an element type.
+      let list_exp: Option[Ty] = match el_exp {
+        Some(t) -> Some(TyList(t))
+        None -> None
+      }
+      let (cx1, t, tx) = check_expr(cx, e, list_exp)
+      match t {
+        TyList(item) -> (cx1, item, TLESpread(tx))
+        _ ->
+          if is_errorish(t) {
+            (cx1, TyError, TLESpread(tx))
+          } else {
+            (cerr_h(cx1, "`..` spreads a list, but this is " ++ ty_show(cx1.adts, t), lo, hi,
+              "drop the `..` to make it one element"), TyError, TLESpread(tx))
+          }
+      }
+    }
+    LeIf(arms, _, _) -> {
+      var cx1 = cx
+      var t = TyNever
+      var out: List[TListIfArm] = []
+      for a in arms {
+        let (cx2, ct, cndx) = check_expr(cx1, a.cond, no_expected())
+        cx1 = cx2
+        if ct != TyBool && not is_errorish(ct) {
+          cx1 = cerr(cx1, "if condition must be Bool, got " ++ ty_show(cx1.adts, ct),
+            e_lo(a.cond), e_hi(a.cond))
+        }
+        # an earlier arm of the same chain settles the type for a later one,
+        # exactly as an earlier element settles it for a later element
+        let body_exp: Option[Ty] =
+          if t != TyNever && is_concrete(cx1, t) { Some(t) } else { el_exp }
+        let (cx3, bt, bx) = check_expr(cx1, a.body, body_exp)
+        cx1 = cx3
+        let (cx4, u) = unify_branches(cx1, t, bt, e_lo(a.body), e_hi(a.body), "the if branches")
+        cx1 = cx4
+        t = u
+        out = out ++ [TListIfArm { cond: cndx, body: bx }]
+      }
+      (cx1, t, TLEIf(out))
+    }
+  }
+}
+
 fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
   match e {
     EInt(v, lo, hi) -> (cx, TyInt, XInt(v, lo, hi))
@@ -4002,7 +4121,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       var order: List[Int] = []
       var i = 0
       for x in elems {
-        let d = needs_expected(cx, x)
+        let d = needs_expected_elem(cx, x)
         defer_at = defer_at ++ [d]
         if not d { order = order ++ [i] }
         i = i + 1
@@ -4014,19 +4133,18 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
         i = i + 1
       }
       var cx1 = cx
-      var checked: List[TExpr] = []
+      var checked: List[TListElem] = []
       for idx in order {
         let x = elems[idx]
-        let el_exp: Option[Ty] =
-          if elem_t != TyNever && is_concrete(cx1, elem_t) { Some(elem_t) } else { None }
-        let (cx2, t, tx) = check_expr(cx1, x, el_exp)
+        let (cx2, t, tx) = check_list_elem(cx1, x, elem_t)
         cx1 = cx2
-        let (cx3, unified) = unify_branches(cx1, elem_t, t, e_lo(x), e_hi(x), "the list elements")
+        let (cx3, unified) =
+          unify_branches(cx1, elem_t, t, le_lo(x), le_hi(x), "the list elements")
         cx1 = cx3
         elem_t = unified
         checked = checked ++ [tx]
       }
-      var txs: List[TExpr] = []
+      var txs: List[TListElem] = []
       var ri = 0
       var di = ready_n
       for d in defer_at {
@@ -7887,7 +8005,7 @@ test "calls: builtins, dynamic targets, arity and undefined" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
   # len([1]) : Int
-  let call = EApply(EVar("len", 0, 3), [pos_arg(EListLit([EInt(1, 5, 6)], 4, 7))], 0, 8)
+  let call = EApply(EVar("len", 0, 3), [pos_arg(EListLit([LeExpr(EInt(1, 5, 6))], 4, 7))], 0, 8)
   let (cx1, t, _) = check_expr(cx, call, no_expected())
   assert t == TyInt
   assert len(cx1.diags) == 0
@@ -8068,7 +8186,7 @@ test "the same call, four callees, four kinds of typed node" {
   cx = push_scope(cx)
   # a function name is a static call
   let (_, _, n1) = check_expr(cx,
-    EApply(EVar("len", 0, 3), [pos_arg(EListLit([EInt(1, 5, 6)], 4, 7))], 0, 8), no_expected())
+    EApply(EVar("len", 0, 3), [pos_arg(EListLit([LeExpr(EInt(1, 5, 6))], 4, 7))], 0, 8), no_expected())
   match n1 {
     XCallBuiltin(n, ..) -> { assert n == "len" }
     _ -> { assert false }
