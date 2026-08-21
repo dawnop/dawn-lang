@@ -2230,6 +2230,13 @@ fn bare_lambda1(p: P, st: St, nb: Bool) -> PR[Expr] = {
   Ok((st3, ELambda([param], body, false, name.lo, e_hi(body))))
 }
 
+## `[a, b]` and the multi-line `[a\n b]`: inside a list literal a newline
+## separates elements exactly as a comma does (spec §4.11). The element
+## expression is parsed first and by the ordinary rules, so a continuation line
+## (`|>`, `.`, a binary operator leading the line -- §1.7) is still part of the
+## element it continues; the separator is whatever NEWLINE is left standing
+## afterwards. That is why the newlines are skipped only *after* asking whether
+## one is there: `skip_nl` first would erase the separator.
 fn list_lit(p: P, st: St) -> PR[Expr] = {
   let (st1, open) = adv(p, st)
   var st2 = skip_nl(p, st1)
@@ -2237,8 +2244,10 @@ fn list_lit(p: P, st: St) -> PR[Expr] = {
   while not at_kind(p, st2, RBRACKET) {
     let (st3, e) = list_elem(p, st2)?
     elems = elems ++ [e]
+    let broke_line = at_kind(p, st3, NEWLINE)
     st2 = skip_nl(p, st3)
-    if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
+    if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) }
+    else if not broke_line { break }
   }
   let (st4, close) = want(p, st2, RBRACKET, "`]`")?
   Ok((st4, EListLit(elems, open.lo, close.hi)))

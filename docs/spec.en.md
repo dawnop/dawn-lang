@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 0030f2977fd6c984 -->
+<!-- doc-check: translation-of docs/spec.md @ abdd6b80b4579688 -->
 
 # Dawn Language Specification
 
@@ -95,7 +95,7 @@ spaced `a < -b` is unaffected, and `dawn fmt` puts a space on both sides of ever
 | `true` / `false` | `Bool` | |
 | `"hello"` | `String` | see §1.6 |
 | `()` | `Unit` | the only value |
-| `[1, 2, 3]` | `List[Int]` | trailing comma allowed; element forms in §4.11 |
+| `[1, 2, 3]` | `List[Int]` | trailing comma allowed; separators and element forms in §4.11 |
 | `(1, "a")` | `(Int, String)` | tuple, 2 to 8 elements |
 | `'a'`, `'\n'`, `'世'`, `'\u{1F600}'` | `Char` | character literal (see below) |
 
@@ -190,6 +190,10 @@ boolean or arithmetic, the idiomatic spelling — a Java builder chain
 negation (is `x\n  - y` the expression `x - y`, or a new statement `-y`? there is no way to tell),
 so that pair of arithmetic operators does not continue a line from the start of one. By convention,
 one statement per line; `dawn fmt` makes it uniform.
+
+A newline doubles as a **separator** in two places: between match arms (§5) and between the
+elements of a list literal (§4.11). Both parse the expression by the rules above first, and the
+newline left standing afterwards is the separator, so continuation wins and separation follows.
 
 ### 1.8 `dawn fmt`
 
@@ -1483,7 +1487,9 @@ bracket(FileOutputStream.new(path), s => s.close(), f => {
 ### 4.11 List literals and their element forms
 
 ```
-list_lit  = "[" [ list_elem { "," list_elem } [ "," ] ] "]"
+list_lit  = "[" [ list_elem { list_sep list_elem } [ list_sep ] ] "]"
+list_sep  = "," | NL                   (* a newline is the same separator as a comma;
+                                          adjacent, the two count as one *)
 list_elem = expr                       (* an ordinary element: contributes one *)
           | ".." expr                  (* a spread: contributes 0..n *)
           | if_no_else                 (* a conditional element: contributes 0 or 1 *)
@@ -1497,6 +1503,62 @@ column([
   if m.note != "" { text(m.note) },  # a line only when there is something to say
   help,
 ])
+```
+
+**Separators: a newline is a comma.** Inside a multi-line list literal the commas between
+elements may be dropped, and one newline is one separator:
+
+```dawn
+column([
+  header
+  ..list.map(m.todos, t => item_row(t))
+  if m.note != "" { text(m.note) }
+  dim(text("commands"))
+])
+```
+
+The two separators may be mixed within one literal, a trailing comma or newline is still allowed,
+and both `[]` and a `[\n]` spanning lines are still zero elements. This is a **pure syntactic
+addition**: `[1, 2, 3]`, a multi-line literal with commas, and a trailing comma all parse to
+exactly what they parsed to before. `dawn fmt` does not rewrite either spelling into the other
+either; the author's choice of separator is kept, since the formatter only adjusts spacing within
+a line and indentation, never the line breaks the author wrote.
+
+**What is dropped is only the comma at a line break.** Two elements on one line still need one:
+`[a b]` is a syntax error, and the diagnostic is the same "expected `]`, found `b`" at the same
+position.
+
+**Which newline is a separator is decided by §1.7, not by this rule.** An element is parsed by the
+ordinary expression rules first, an operator that may lead a continuation line (`|>`, `.`, a binary
+operator) is still swallowed by the element above it, and the newline left standing is the
+separator:
+
+```dawn
+[
+  xs
+    |> f        # one element: `|>` leads a continuation line, which has nothing to do with lists
+  a
+  -1            # two elements: `+`/`-` never lead a continuation (§1.7), so `-1` is a prefix
+                # minus opening a new element
+]
+```
+
+`+` has no prefix meaning, so a `+` at the start of a line lands at an element position and is
+refused there, with "expected an expression, found `+`". That is what the `+`/`-` exception does at
+an element position, not an extra rule of the list literal's own.
+
+**A line-leading `..` always reads as a spread**, never as a range continuing the line above. `..`
+is not an expression operator (all four of its meanings are positions, see below) and the range
+`a..b` appears only in a `for` header (§4.7), so the left-hand literal below is two elements rather
+than one range:
+
+```dawn
+[
+  a
+  ..xs        # a spread element
+]
+[0..3]        # still refused: `..` between two values, and not at the start of an element, is
+              # neither of its meanings
 ```
 
 The three element forms hold **only inside a list literal**. Tuples, records and constructor
@@ -3263,7 +3325,7 @@ if x > 0 { "pos" } else { "non-pos" }
 match opt { Some(v) -> v, None -> fallback }
 xs |> filter(x => x > 0) |> map(x => to_string(x)) |> join(", ")
 xs[0]                            # subscript: goes through the Index trait; out of range panics, enquire with get (§4.8)
-[a, ..xs, if c { b }]            # list element forms: spread / conditional element (§4.11)
+[a, ..xs, if c { b }]            # list elements: spread / conditional; newlines separate too (§4.11)
 read_file(path)?                 # Result propagation
 if n < 0 { return "negative" }   # early return (§4.9)
 xs.each { x => println("$x") }  # tail block: the last argument (§4.3)

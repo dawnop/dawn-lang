@@ -4,10 +4,12 @@
 # that carry the most parser logic — rewrites, recovery, precedence.
 
 use std/str
+use std/list
 use front/parser.{parse_module}
 use front/astdump.{render_module}
 use front/ast.{
   Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EMatch, EPropagate,
+  EListLit, ListElem, LeExpr, LeSpread, LeIf,
   BinOp, OpAdd, OpMul,
   PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList,
   Stmt, SLetPat, SWhile,
@@ -496,6 +498,86 @@ test "a bare assignment arm is reported and later arms/decls still parse" {
     DFn(f) -> { assert f.name == "g" }
     _ -> { assert false }
   }
+}
+
+## The element list of `fn f(...) = [ ... ]`, for the separator tests below.
+fn list_elems_of(src: String) -> List[ListElem] = {
+  let (m, ds) = parse_module(src)
+  if len(ds) > 0 { panic("expected `${src}` to parse, got: ${ds[0].msg}") }
+  match m.decls[0] {
+    DFn(f) ->
+      match f.body {
+        EListLit(elems, _, _) -> elems
+        _ -> panic("expected a list literal body")
+      }
+    _ -> panic("expected a function declaration")
+  }
+}
+
+fn elem_tag(e: ListElem) -> String =
+  match e {
+    LeExpr(_) -> "expr"
+    LeSpread(_, _, _) -> "spread"
+    LeIf(arms, _, _) -> "if" ++ to_string(len(arms))
+  }
+
+## One tag per element, so an assertion names the *forms* a literal parsed to
+## rather than a count that three different mistakes all satisfy.
+fn elem_tags(elems: List[ListElem]) -> List[String] = list.map(elems, elem_tag)
+
+## A newline separates list elements the way a comma does (spec §4.11). The
+## oracle is the comma spelling of the same literal: the newline form is an
+## alternative separator, not a second grammar, so the two must parse to the
+## same element forms in the same order.
+test "a newline separates list elements the way a comma does" {
+  let head = "fn f(xs: List[Int], c: Bool) -> List[Int] = "
+  let shape = ["expr", "spread", "if1", "if2", "expr"]
+  let nl = head ++ "[\n  0\n  ..xs\n  if c { 1 }\n  if c { 2 } else if not c { 3 }\n  4\n]"
+  let commas = head ++ "[0, ..xs, if c { 1 }, if c { 2 } else if not c { 3 }, 4]"
+  assert elem_tags(list_elems_of(nl)) == shape
+  assert elem_tags(list_elems_of(commas)) == shape
+  # a comma and a newline may separate elements of one literal, in either order
+  assert len(list_elems_of("fn f(xs: List[Int]) -> List[Int] = [\n  0, 1\n  ..xs\n  2, 3,\n]")) == 5
+  # blank lines are still one separator
+  assert len(list_elems_of("fn f() -> List[Int] = [\n  0\n\n  1\n]")) == 2
+  # a nested literal separates its own elements, and closes its own bracket
+  assert len(list_elems_of("fn f() -> List[List[Int]] = [\n  [\n    0\n    1\n  ]\n  [2]\n]")) == 2
+  # the comma spellings are untouched, trailing comma and empty literal included
+  assert len(list_elems_of("fn f() -> List[Int] = [1, 2, 3]")) == 3
+  assert len(list_elems_of("fn f() -> List[Int] = [1,\n  2,\n]")) == 2
+  assert len(list_elems_of("fn f() -> List[Int] = []")) == 0
+  assert len(list_elems_of("fn f() -> List[Int] = [\n]")) == 0
+  # juxtaposition is not a separator: only a newline was added
+  let (_, ds) = parse_module("fn f(a: Int, b: Int) -> List[Int] = [a b]")
+  assert len(ds) == 1
+  assert ds[0].msg == "expected `]`, found `b`"
+}
+
+## Which newline is a separator is decided by §1.7 and not here: the element is
+## parsed by the ordinary expression rules first, so a line an operator may lead
+## has already been swallowed by the element above it, and the separator is
+## whatever newline is left. `..` and `-` are the two line openers where the
+## answer could have gone the other way.
+test "a list element ends where its continuation lines do" {
+  let head = "fn f(a: Int, b: Bool, xs: List[Int]) -> Unit = "
+  # an operator that may lead a continuation line still does: one element
+  assert len(list_elems_of(head ++ "[\n  a\n    |> g\n]")) == 1
+  assert len(list_elems_of(head ++ "[\n  xs\n    .len()\n]")) == 1
+  assert len(list_elems_of(head ++ "[\n  b\n    && b\n]")) == 1
+  assert len(list_elems_of(head ++ "[\n  a\n    == a\n]")) == 1
+  # `..` is not an expression operator, so it continues nothing: a line-leading
+  # `..` opens a spread element rather than closing a range with the line above
+  assert elem_tags(list_elems_of(head ++ "[\n  a\n  ..xs\n]")) == ["expr", "spread"]
+  # on one line the same two tokens are still the refusal they always were:
+  # `..` between two values inside a literal is neither of its meanings
+  let (_, range_ds) = parse_module("fn f() -> List[Int] = [0..3]")
+  assert range_ds[0].msg == "expected `]`, found `..`"
+  # `+` and `-` may not lead a continuation line, so a line opening with one
+  # opens an element: `-` is prefix there, and `+` has no prefix meaning
+  assert elem_tags(list_elems_of(head ++ "[\n  a\n  -1\n]")) == ["expr", "expr"]
+  let (_, plus_ds) = parse_module(head ++ "[\n  a\n  + a\n]")
+  assert len(plus_ds) == 1
+  assert plus_ds[0].msg == "expected an expression, found `+`"
 }
 
 test "match arms accept newline and comma separators" {

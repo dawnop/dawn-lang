@@ -627,6 +627,42 @@ test "the list element forms need no spacing rule of their own" {
   assert fmt_of(o) == o
 }
 
+## A newline between two elements is a separator (spec §4.11), and the formatter
+## has no opinion about which separator the author picked: it never turns commas
+## into line breaks or line breaks into commas, and a literal mixing the two
+## comes back mixed. What it does owe the new spelling is the *indent*, and the
+## two line openers that could have got that wrong are the ones pinned below --
+## `..` is not in `is_cont_starter` and `-` is classified by `unary_minus`, so
+## an element line is a line opener rather than a continuation of the one above,
+## which would have printed it one level too deep.
+test "a newline-separated list keeps its own spelling" {
+  let n = "fn a(xs: List[Int], c: Bool) -> List[Int] = [\n  1\n  ..xs\n" ++
+    "  if c { 2 } else if not c { 4 }\n  3\n]\n"
+  assert fmt_of(n) == n
+  assert fmt_of(fmt_of(n)) == n
+  # stripped of its indentation it comes back at element level, not staggered
+  assert fmt_of("fn a(xs: List[Int], c: Bool) -> List[Int] = [\n1\n..xs\n" ++
+      "if c { 2 } else if not c { 4 }\n3\n]\n") == n
+  # the comma spelling is the author's too, and is not rewritten
+  let c = "fn b(xs: List[Int]) -> List[Int] = [\n  1,\n  ..xs,\n  3,\n]\n"
+  assert fmt_of(c) == c
+  # nor is a literal that uses both separators
+  let m = "fn c(xs: List[Int]) -> List[Int] = [\n  1, 2\n  ..xs\n  4,\n]\n"
+  assert fmt_of(m) == m
+  # a nested literal indents by its own bracket
+  let d = "fn d(xs: List[List[Int]]) -> List[List[Int]] = [\n  [\n    1\n    2\n  ]\n  ..xs\n]\n"
+  assert fmt_of(d) == d
+  assert fmt_of(fmt_of(d)) == d
+  # an element opening with `-` is a prefix minus opening a line, not the
+  # subtraction the same two tokens would be on one line
+  let e = "fn e(a: Int) -> List[Int] = [\n  a\n  -1\n]\n"
+  assert fmt_of(e) == e
+  # and an element that really is continued keeps the continuation's extra level
+  let f = "fn f(xs: List[Int]) -> List[Int] = [\n  xs\n    |> id\n  xs\n]\n"
+  assert fmt_of(f) == f
+  assert fmt_of(fmt_of(f)) == f
+}
+
 ## The two sugars are token-level to this file: `with`/`<-` and a tail block
 ## take the default spacing, and `<-` continues its line like `->` and `=` do.
 ## What is pinned here is that the defaults are the *right* answer, so nobody

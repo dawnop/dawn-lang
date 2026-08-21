@@ -1,0 +1,96 @@
+# The `list_lit` production's separator (spec §4.11): inside a list literal a
+# newline separates elements exactly as a comma does, so a multi-line literal
+# may drop its commas. The comma spellings are unchanged -- accept/list_elems.
+# dawn is the same grammar written with them, and every literal below has a
+# comma twin there.
+#
+# Two line-leading tokens decide whether this reads as a separator at all, and
+# both are pinned here: `..` opens a spread element rather than continuing the
+# line above into a range (a range is the for-header's operator and never an
+# expression, see reject/list_range_element.dawn), while an operator that *may*
+# lead a continuation line (spec §1.7) still does, so the element above swallows
+# it. `+` and `-` never lead a continuation, which makes a line-leading `-` a
+# prefix minus opening a new element (see reject/list_leading_plus_element.dawn
+# for its other half).
+
+fn newlines(xs: List[Int], c: Bool) -> List[Int] = [
+  0
+  ..xs
+  if c { 1 }
+  if c { 2 } else if not c { 3 }
+  4
+]
+
+# a comma and a newline may separate elements of one literal, in either order,
+# and a trailing comma still closes the last element
+fn mixed(xs: List[Int]) -> List[Int] = [
+  0, 1
+  ..xs
+  2, 3,
+]
+
+# blank lines between elements are still one separator
+fn blank_lines() -> List[Int] = [
+  0
+
+  1
+]
+
+fn nested(xs: List[List[Int]]) -> List[List[Int]] = [
+  [
+    0
+    1
+  ]
+  ..xs
+  [2, 3]
+]
+
+# a line-leading `..` is the spread element, not a range continuing the line
+# above: `..` is not an expression operator, so there was nothing for it to
+# continue
+fn spread_opens_a_line(xs: List[Int], ys: List[Int]) -> List[Int] = [
+  0
+  ..xs
+  ..ys ++ xs
+  1
+]
+
+# an operator that may lead a continuation line still does, so each of these
+# literals holds one element and not two
+fn continuations(a: Int, b: Bool, xs: List[Int]) -> Unit = {
+  let piped = [
+    a
+      |> id
+  ]
+  let chained = [
+    xs
+      .len()
+  ]
+  let anded = [
+    b
+      && b
+  ]
+  let compared = [
+    a
+      == a
+  ]
+  ()
+}
+
+# `+` and `-` cannot lead a continuation line (spec §1.7), so a line opening
+# with `-` opens an element and the minus is prefix: two elements, not one
+# subtraction
+fn leading_minus(a: Int) -> List[Int] = [
+  a
+  -1
+]
+
+# the empty literal and the single-element one are unaffected by any of this
+fn empty() -> List[Int] = []
+
+fn empty_across_lines() -> List[Int] = [
+]
+
+fn one(xs: List[Int]) -> List[Int] = [
+  ..xs
+]
