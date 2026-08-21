@@ -245,6 +245,20 @@ pub type LambdaCx =
   }
 
 ## A fresh checker state for one module.
+##
+## `is_std_module` -- what opens the std-only builtins, `unsafe_pure` and the
+## representation modules -- is *proposed* here from the module's name, and
+## every production caller overwrites it. The name is not evidence: a project
+## file at `src/std/foo.dawn` is spelled exactly like a bundled module and is
+## not one, and a bundled module opened in an editor is spelled `main` and is
+## one. `driver/analyze.dawn` settles it from where the file came from
+## (`std_module_of`) and assigns the answer in the record update below its
+## `cx_new` call; `driver/stdlib.dawn` does the same, unconditionally, for the
+## bundle it is itself loading.
+##
+## The proposal survives for the test fixtures that build a `Cx` by hand and
+## have no file behind them. Nothing that decides a real program's access
+## reaches it.
 pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
   let is_std = match owner_class {
     Some(o) -> o == "std" || str.starts_with(o, "std/")

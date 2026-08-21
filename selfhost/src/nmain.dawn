@@ -31,7 +31,7 @@ use front/diag
 use driver/stdlib.{StdCtx, StdLoadError, load_std, std_load_error_text, std_load_is_bug}
 use ir/interp.{ct_default}
 use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease}
-use driver/analyze.{Program, LocDiag, load_directory, load_file, analyze_program}
+use driver/analyze.{Program, LocDiag, load_file, load_target, analyze_program}
 use check/tast.{TModule}
 use c/cdriver
 use version.{VERSION}
@@ -285,7 +285,7 @@ fn analyzed(std: StdCtx, target: String) -> Program !io = {
   if not io.is_dir(target) && not str.ends_with(target, ".dawn") {
     cli_error("source files must end in .dawn: " ++ target)
   }
-  let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+  let loaded = load_target(std, target)
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
   prog
@@ -447,7 +447,7 @@ fn cmd_check(rest: List[String]) -> Unit !io = {
   let std = load_or_die(std_dir)
   var all: List[LocDiag] = []
   for target in targets {
-    let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+    let loaded = load_target(std, target)
     let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
     all = all ++ prog.diags
   }
@@ -666,7 +666,7 @@ fn cmd_doc(rest: List[String]) -> Unit !io = {
   if not io.exists(target) {
     return cli_error("no such file or directory: " ++ target)
   }
-  let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+  let loaded = load_target(std, target)
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
   if len(prog.diags) > 0 { fail_doc(prog.diags) }
   print(doc.project_json(prog))

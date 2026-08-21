@@ -19,12 +19,12 @@ use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj, error_text}
 use json/render.{render}
 use driver/analyze.{
   Program, ProjectPlan, LocDiag,
-  analyze_program, analyze_standalone, project_plan, project_module_path,
-  load_entries_over, canon
+  analyze_program, analyze_standalone, standalone_entry, project_plan,
+  project_module_path, load_entries_over, canon
 }
 use compiler_plan/source
 use ir/interp.{ct_default}
-use check/jsig.{JsigLease}
+use check/jsig.{JsigLease, jsig_refused_lease}
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use check/checker.{exports_of, visible_bins}
 use lsp/lspq.{QCx, Target, find_target}
@@ -1437,7 +1437,7 @@ fn standalone_doc(
     text: text,
     view: view_of(text),
     ls: line_starts_of(text),
-    analysis: Standalone(prog, "main", modules)
+    analysis: Standalone(prog, standalone_entry(prog), modules)
   }
 }
 
@@ -1507,7 +1507,7 @@ fn open_new_doc(st0: LspState, uri: String, text: String) -> LspState !io =
 
 fn update_existing_doc(st0: LspState, old: Doc, text: String) -> LspState !io =
   match old.analysis {
-    Standalone(_, entry, modules) -> {
+    Standalone(_, _, modules) -> {
       let source_path = match old.path {
         Some(found) -> found
         None -> "<lsp>"
@@ -1516,12 +1516,14 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String) -> LspState !io =
         Some(lease) -> analyze_standalone(source_path, text, st0.std, ct_default(), lease.jsig)
         None -> panic("standalone LSP lease used after shutdown")
       }
+      # re-read rather than carry the old one: the identity is settled by the
+      # analysis, and an edit re-runs the analysis
       let d = Doc {
         ..old,
         text: text,
         view: view_of(text),
         ls: line_starts_of(text),
-        analysis: Standalone(prog, entry, modules)
+        analysis: Standalone(prog, standalone_entry(prog), modules)
       }
       let st = LspState { ..st0, docs: map.insert(st0.docs, old.uri, d) }
       publish_uris(st, set.from([old.uri]))
@@ -1891,5 +1893,77 @@ fn handle_formatting(st: LspState, params: Json) -> Json !io = {
       ])])
     }
     None -> JArr([])
+  }
+}
+
+test "a bundled std buffer keeps its std identity through the document seam" {
+  # `standalone_doc` is where `textDocument/didOpen` records what a buffer is.
+  # It used to write the literal "main", which `analyze_standalone` proposes
+  # and is not always what comes back: a source file of the bundled std is
+  # checked under its real std module path, and every query keyed by mod_path
+  # -- hover, go to definition -- resolves through `analysis.entry`. Writing
+  # the literal here leaves the diagnostics right and every query on a std
+  # buffer answering nothing, which is the shape of failure no diagnostic
+  # count can see.
+  let std = match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
+  }
+  let no_docs: Map[String, Doc] = map.empty()
+  let no_ws: Map[String, WorkspaceSlot] = map.empty()
+  let st = LspState {
+    std: std,
+    bins: builtins(),
+    docs: no_docs,
+    workspaces: no_ws,
+    standalone: Some(jsig_refused_lease()),
+    host: LspLeaseHost {
+      standalone: () => jsig_refused_lease(),
+      project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
+    },
+    lifecycle: Running
+  }
+  let path = "std/cursor.dawn"
+  let text = match io.read_file(path) {
+    Ok(t) -> t
+    Err(e) -> panic("std/cursor.dawn: " ++ e.message)
+  }
+  let no_modules: Option[Map[String, String]] = None
+  let d = standalone_doc(st, "file://" ++ canon(path), Some(path), Some(canon(path)),
+    text, no_modules)
+  match d.analysis {
+    Standalone(prog, entry, _) -> {
+      assert len(prog.diags) == 0
+      assert entry == "std/cursor"
+      # the identity is not decoration: this is the lookup every query makes
+      match doc_qcx(st, Analysis {
+        prog: prog,
+        entry: entry,
+        modules: no_modules,
+        workspace_key: None,
+        definition_root: None
+      }) {
+        Some(qc) -> { assert qc.entry.cx.is_std_module }
+        None -> panic("the std buffer's entry module was not found by mod_path")
+      }
+    }
+    WorkspaceMember(_) -> panic("a std source is not a workspace member")
+  }
+
+  # a buffer that is not one of the bundle's files stays `main`
+  let elsewhere = "/tmp/dawn-selfhost-lsp-std/cursor.dawn"
+  let _ = io.mkdirs("/tmp/dawn-selfhost-lsp-std")
+  match io.write_file(elsewhere, text) {
+    Ok(_) -> ()
+    Err(e) -> panic("test setup: " ++ e.message)
+  }
+  let d2 = standalone_doc(st, "file://" ++ elsewhere, Some(elsewhere),
+    Some(canon(elsewhere)), text, no_modules)
+  match d2.analysis {
+    Standalone(prog2, entry2, _) -> {
+      assert entry2 == "main"
+      assert len(prog2.diags) > 0
+    }
+    WorkspaceMember(_) -> panic("a standalone buffer is not a workspace member")
   }
 }

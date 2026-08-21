@@ -28,7 +28,8 @@ use ir/coredump
 use driver/stdlib.{StdCtx, StdLoadError, load_std, std_load_error_text, std_load_is_bug}
 use driver/analyze.{
   CheckedMod, LocDiag, LoadResult, Program, ProjectPlan,
-  load_directory, load_file, load_planned, project_plan_for_load, analyze_program
+  load_file, load_target, load_planned, project_plan_for_load, std_dir_target,
+  analyze_program
 }
 use compiler_plan/source
 use pkg/vendor
@@ -254,10 +255,8 @@ fn collect_program(
             cli_error("--closure needs an entry module (expected " ++ entry_file ++ ")")
           }
           load_file(entry_file)
-        } else if io.is_dir(target) {
-          load_directory(target)
         } else {
-          load_file(target)
+          load_target(std, target)
         }
       let prog = analyze_program(loaded, std, opts, jsig_real())
       if len(prog.diags) > 0 { fail_compile(prog.diags) }
@@ -1972,7 +1971,7 @@ fn run_lower(rest: List[String]) -> Unit !io = {
     Err(e) -> fail_std(e)
   }
   let t = targets[0]
-  let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
+  let loaded = load_target(std, t)
   let prog = analyze_program(loaded, std, ct_default(), jsig_real())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
   let (adts, traits, impl_table, prog_fns) = cdriver.program_tables(std, prog.modules)
@@ -2077,7 +2076,7 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
     Err(e) -> fail_std(e)
   }
   let t = target
-  let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
+  let loaded = load_target(std, t)
   let prog = analyze_program(loaded, std, ct_default(), jsig_real())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
   let text = match cdriver.c_text(std, prog) {
@@ -2144,15 +2143,22 @@ fn run_check(rest: List[String]) -> Unit !io = {
   let std = check_std(std_dir)
   var all: List[LocDiag] = []
   for t in targets {
-    match project_plan_for_load(source_target(t)) {
-      Err(rejected) -> { all = all ++ rejected.diags }
-      Ok(plan) -> {
-        let loaded = load_planned(plan)
-        match analyze_target_scoped(plan, loaded, std) {
-          Ok(prog) -> { all = all ++ prog.diags }
-          Err(e) -> return fail_target_setup(e)
+    # this command plans its own load rather than going through `load_target`,
+    # so the std directory has to be answered here too -- and with the same
+    # words, because scripts/native-cli-diff.sh compares the two drivers
+    match std_dir_target(std, t) {
+      Some(refusal) -> { all = all ++ refusal.diags }
+      None ->
+        match project_plan_for_load(source_target(t)) {
+          Err(rejected) -> { all = all ++ rejected.diags }
+          Ok(plan) -> {
+            let loaded = load_planned(plan)
+            match analyze_target_scoped(plan, loaded, std) {
+              Ok(prog) -> { all = all ++ prog.diags }
+              Err(e) -> return fail_target_setup(e)
+            }
+          }
         }
-      }
     }
   }
   if len(all) > 0 { return fail_compile(all) }
@@ -2167,7 +2173,7 @@ fn run_checkdump(rest: List[String]) -> Unit !io = {
   let std = check_std(std_dir)
   for t in targets {
     println("== " ++ t ++ " ==")
-    let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
+    let loaded = load_target(std, t)
     let prog = analyze_program(loaded, std, ct_default(), jsig_real())
     print(checkdump.render(prog))
   }

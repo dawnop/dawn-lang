@@ -35,6 +35,12 @@ use front/lexer
 use embed/stdsrc
 use ir/lower.{parser_impl}
 use version.{VERSION}
+use fspath/fspath
+
+## A path in the one spelling module identities are compared by: absolute and
+## normalized. `driver/analyze.dawn` exports the same line under the same name;
+## this file is below it in the layering and cannot import it.
+fn canon(p: String) -> String !io = fspath.absolute(p, io.cwd())
 
 ## Everything user-module analysis needs from std.
 pub type StdCtx = {
@@ -70,7 +76,30 @@ pub type StdCtx = {
   mods: List[(String, Cx, TModule, CtOut)],
   # per-module (modPath, source text, AST), in load order — `selfhost doc
   # --builtins` reads std doc comments and pub decls from these
-  srcs: List[(String, String, Module)]
+  srcs: List[(String, String, Module)],
+  # The directory this std was read from, canonicalized — `None` when the
+  # embedded copy answered for modules.txt, because then there is no directory
+  # anyone could open a file in.
+  dir: Option[String],
+  # canonical file path → the std module path that file was loaded as, for
+  # every module whose text came off the directory rather than the embedded
+  # copy. This is std's identity as a *fact about a file*, which is the only
+  # form a later reader can check: an editor opening `std/list.dawn` and
+  # `dawn check std/list.dawn` both arrive holding a path and nothing else,
+  # and the answer has to be no for a project file named `src/std/list.dawn`,
+  # which is spelled identically and is not this.
+  dir_modules: Map[String, String],
+  # the impl table each std module was checked against: everything the modules
+  # before it in load order declared, and nothing of its own.
+  #
+  # Re-checking one std source on its own -- an editor buffer, `dawn check
+  # std/list.dawn` -- has to start from this rather than from the finished
+  # bundle. `impls` below is the whole library's, this module's own included,
+  # and a module re-registering the impls it declares against a table that
+  # already holds them is a duplicate-impl error per impl: 15 of the 17 that
+  # survived the identity fix, all of them saying a std module conflicts with
+  # itself.
+  impls_before: Map[String, Impls]
 }
 
 pub fn prelude_names() -> List[String] =
@@ -352,11 +381,18 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !io = {
   var nid = first_minted_id()
   var mods: List[(String, Cx, TModule, CtOut)] = []
   var srcs: List[(String, String, Module)] = []
+  var dir_modules: Map[String, String] = map.empty()
+  var impls_before: Map[String, Impls] = map.empty()
   for n in names {
     let mod_path = "std/" ++ n
+    let file = dir ++ "/" ++ n ++ ".dawn"
     let text = match std_read_from(dir, n ++ ".dawn") {
       Ok(pair) -> {
-        let (t, _) = pair
+        let (t, from_dir) = pair
+        # only the modules the directory itself answered for: a name the
+        # embedded copy filled in has no file on disk, and claiming one would
+        # hand std identity to whatever happens to sit at that path
+        if from_dir { dir_modules = map.insert(dir_modules, canon(file), mod_path) }
         t
       }
       Err(m) -> return Err(StdLoadError {
@@ -369,8 +405,18 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !io = {
         origin: origin, declared: declared, why: StdModuleParse(mod_path, pdiags[0].msg)
       })
     }
+    impls_before = map.insert(impls_before, mod_path, impls)
     var cx = cx_new(Some(mod_path), None)
-    cx = Cx { ..cx, line_starts: lexer.line_starts_of(text), next_id: nid, impl_table: impls }
+    # said outright rather than left to `cx_new`'s name-shaped proposal: this
+    # is the loader for the bundled library, so every module it builds a Cx
+    # for is std by construction, whatever any of them is called
+    cx = Cx {
+      ..cx,
+      is_std_module: true,
+      line_starts: lexer.line_starts_of(text),
+      next_id: nid,
+      impl_table: impls
+    }
     # no std_fns here: std cannot implicitly import itself
     let (cx1, tm) = check_module(cx, m, exports)
     if len(cx1.diags) > 0 {
@@ -438,9 +484,45 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !io = {
     impls: impls,
     next_id: nid,
     mods: mods,
-    srcs: srcs
+    srcs: srcs,
+    dir: match origin {
+      StdFromDir(d) -> Some(canon(d))
+      StdEmbedded -> None
+    },
+    dir_modules: dir_modules,
+    impls_before: impls_before
   })
 }
+
+## The std module path `path` was loaded as, or `None` when this file is not
+## one of the sources this compiler's std came from.
+##
+## Provenance, not spelling. Every caller that asks the question is holding a
+## file path -- a `dawn check` target, an editor buffer -- and the two answers
+## it has to keep apart look the same from the outside: `std/list.dawn` in the
+## checkout `--std` pointed at is std, and `src/std/list.dawn` in somebody's
+## project is not, however the module path reads.
+##
+## Comparison is lexical (`canon` normalizes, it does not resolve symlinks), so
+## a std reached through a symlinked directory is not recognised through the
+## other spelling. That fails closed: the file checks as user code and reports
+## the std-only names it uses, which is the pre-existing behaviour.
+pub fn std_module_of(std: StdCtx, path: String) -> Option[String] !io = {
+  # an embedded std has no files at all, and canon() costs a cwd read
+  if len(map.keys(std.dir_modules)) == 0 {
+    let none: Option[String] = None
+    return none
+  }
+  map.get(std.dir_modules, canon(path))
+}
+
+## Is `dir` the very directory this compiler read its std from? Used to answer
+## a directory target as what it is instead of as a malformed project.
+pub fn is_std_dir(std: StdCtx, dir: String) -> Bool !io =
+  match std.dir {
+    Some(d) -> d == canon(dir)
+    None -> false
+  }
 
 # ---- tests ----
 

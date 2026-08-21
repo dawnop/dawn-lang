@@ -22,7 +22,9 @@ use check/passes.{
 use check/checker.{check_module, exports_of, check_fn, check_fn_inferred}
 use ir/interp.{eval_comptime, CtOut, CtOpts, ct_default}
 use check/jsig.{Jsig, jsig_refused}
-use driver/stdlib.{StdCtx, load_std, std_load_error_text}
+use driver/stdlib.{
+  StdCtx, load_std, std_load_error_text, std_module_of, is_std_dir, read_index
+}
 use check/tast.{TFun, TModule}
 use check/types.{Sym}
 use front/parser
@@ -232,6 +234,41 @@ pub fn load_directory(dir: String) -> LoadResult !io =
   match project_plan_for_load(source.ProjectDirectory(dir)) {
     Ok(plan) -> load_planned(plan)
     Err(rejected) -> rejected
+  }
+
+## One command-line target, loaded as whatever it is: a file, a project
+## directory, or the bundled std's own source directory.
+##
+## The third case is why this exists. Pointed at the std it just loaded, the
+## directory loader answered "project directory has no `src/` folder", which
+## is true of the standard library and useless as advice: std is not a project
+## and cannot be made into one -- there is no entry module to run, nothing to
+## build a jar from, and `[deps]` reaches it through the compiler rather than
+## through the module graph. Nor is there anything for `check` to do, because
+## `load_std` has already parsed, checked and comptime-evaluated every module
+## in the bundle before this function is reached; a std that did not check
+## would have failed the command outright, several steps earlier.
+##
+## Provenance, not spelling: this is the directory `--std` actually answered
+## from, whatever it is named, and a project directory called `std` still gets
+## the project diagnostics.
+pub fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !io = {
+  let none: Option[LoadResult] = None
+  if not io.is_dir(target) { return none }
+  if not is_std_dir(std, target) { return none }
+  Some(LoadResult { modules: [], diags: [synthetic(target,
+    "`" ++ target ++ "` is the bundled standard library, not a Dawn project",
+    "every dawn command checks the whole bundle before it starts, so there is " ++
+      "nothing left to check here; name one module (`dawn check " ++ target ++
+      "/list.dawn`) to see it on its own, or `dawn test --stdlib` to run its tests")] })
+}
+
+## One command-line target, loaded as a file or a project directory, with the
+## std directory answered by `std_dir_target` instead.
+pub fn load_target(std: StdCtx, target: String) -> LoadResult !io =
+  match std_dir_target(std, target) {
+    Some(refusal) -> refusal
+    None -> if io.is_dir(target) { load_directory(target) } else { load_file(target) }
   }
 
 ## Canonicalize a package module's `use` paths to the name-qualified spelling
@@ -673,6 +710,28 @@ fn empty_ctout() -> CtOut = {
   CtOut { diags: [], consts: no_c, blocks: no_b }
 }
 
+## A loaded module under the identity it actually has, plus whether that
+## identity is the bundled standard library's.
+##
+## A loader derives a module path from the source root it was given, and for
+## std's own sources there is no source root that produces the right answer:
+## `dawn check std/list.dawn` roots at `std/` and calls the module `list`, and
+## the editor's standalone path calls every buffer `main`. Either way the
+## checker was handed a user module, so it refused the std-only builtins the
+## file exists to wrap -- on the very line that defines the replacement the
+## hint recommends.
+##
+## The full identity is restored, not just the std flag. `std/hamt`'s exports
+## reach `StdOnly` and no further, and that is read off the owner string stored
+## in its declarations (`declared_audience`), so a half-identity -- std powers
+## under the name `hamt` -- publishes an internal module to the world and
+## fails a different way.
+fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !io =
+  match std_module_of(std, mf.path) {
+    Some(mod_path) -> (LoadedModule { ..mf, mod_path: mod_path, class_name: mod_path }, true)
+    None -> (mf, false)
+  }
+
 ## Check a loaded program in dependency order: each module sees the exports of
 ## everything before it (std pre-seeded); comptime runs on clean modules only.
 pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !io = {
@@ -691,19 +750,41 @@ pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) 
   # the subject, so a module able to name both has already been preceded by
   # whichever of the two wrote it.
   var impls = std.impls
-  for mf in loaded.modules {
+  for mf0 in loaded.modules {
+    # The one place a module's identity is settled, and the reason it is here
+    # rather than in the loaders: only this function holds the std, and the
+    # std is the only thing that can say whether a file on disk *is* std.
+    # The loaders answer from the source root, which makes `std/list.dawn`
+    # the module `list` and an editor buffer the module `main` -- both wrong
+    # for the bundled library's own sources, and wrong in the direction that
+    # takes the std-only surface away from the code that defines it.
+    let (mf, is_std) = std_identity(std, mf0)
     for d in mf.pdiags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
     let parse_failed = len(mf.pdiags) > 0
+    # A std source checked here is the bundle's own copy being checked a
+    # second time, so its baseline is the one `load_std` gave it -- what the
+    # modules before it declared -- and not the finished library, which holds
+    # the very impls this module is about to register.
+    var base_impls = impls
+    if is_std {
+      match map.get(std.impls_before, mf.mod_path) {
+        Some(before) -> { base_impls = before }
+        None -> ()
+      }
+    }
     var cx = cx_new(Some(mf.class_name), Some(mf.path))
     cx = Cx {
       ..cx,
+      # the module's own name got a vote in `cx_new` and does not get one
+      # here: `src/std/foo.dawn` is spelled like std and is not std
+      is_std_module: is_std,
       std_fns: std.std_fns,
       moved: std.moved,
       line_starts: lexer.line_starts_of(mf.text),
       next_id: nid,
       # std's impls are part of the baseline, not something `use` turns on --
       # and neither are the ones the modules before this got to
-      impl_table: impls,
+      impl_table: base_impls,
       # the host's Java signature oracle: jreflect's on the JVM driver, the
       # refusing default anywhere else (a native compiler refuses `use java`)
       jsig: js
@@ -860,11 +941,15 @@ fn entry_name_of(path: String) -> Option[String] = {
 ##
 ## The entry's name is checked here for the same reason `resolve` checks its
 ## seeds: a module path IS a class name, and this is the other way a file name
-## reaches class-name derivation. `mod_path` stays "main" rather than becoming
-## the file's name -- a buffer analysed alone is not a module in any program,
-## and its identity is nobody's to see -- so the check is the only thing this
-## borrows from the loader. Without it the editor silently accepted a file
-## `dawn check` refuses to compile.
+## reaches class-name derivation. `mod_path` is proposed as "main" rather than
+## as the file's name -- a buffer analysed alone is not a module in any
+## program, and its identity is nobody's to see -- so the check is the only
+## thing this borrows from the loader. Without it the editor silently accepted
+## a file `dawn check` refuses to compile.
+##
+## "Proposed", because `analyze_program` overrides it for one buffer: a source
+## file of the bundled std this compiler loaded, which is a module in a program
+## whatever the editor thinks. Read the answer back with `standalone_entry`.
 ##
 ## Unlike `resolve`, which skips the seed, the buffer is still analysed: the
 ## name is wrong, the contents are still worth checking, and an editor can
@@ -902,6 +987,12 @@ pub fn analyze_standalone(
   analyze_program(LoadResult { modules: [mf], diags: diags }, std, opts, js)
 }
 
+## The identity `analyze_standalone` settled on for its one buffer. Callers
+## used to write the literal "main", which is what that function proposes and
+## no longer always what comes back.
+pub fn standalone_entry(prog: Program) -> String =
+  if len(prog.modules) == 0 { "main" } else { prog.modules[0].mod_path }
+
 ## Analyze the file behind an editor buffer (the Kotlin `analyzeDocument`):
 ## no module imports → standalone; otherwise load the project with the buffer
 ## text overriding the on-disk file, so unsaved edits see cross-module context.
@@ -916,33 +1007,31 @@ pub fn analyze_document_planned(
   js: Jsig
 ) -> DocumentAnalysis !io = {
   if not has_module_use(text) {
-    return DocumentAnalysis {
-      prog: analyze_standalone(path, text, std, opts, js),
-      entry: "main",
-      plan: None
-    }
+    let prog = analyze_standalone(path, text, std, opts, js)
+    return DocumentAnalysis { prog: prog, entry: standalone_entry(prog), plan: None }
   }
   let abs = canon(path)
   var over: Map[String, String] = map.empty()
   over = map.insert(over, abs, text)
   let plan = project_plan(source.SourceFile(path))
   let loaded = load_entries_over(plan, [path], over)
-  var entry = ""
+  var loaded_entry = false
   for mf in loaded.modules {
-    if entry == "" && canon(mf.path) == abs { entry = mf.mod_path }
+    if canon(mf.path) == abs { loaded_entry = true }
   }
-  if entry == "" {
-    return DocumentAnalysis {
-      prog: analyze_standalone(path, text, std, opts, js),
-      entry: "main",
-      plan: Some(plan)
-    }
+  if not loaded_entry {
+    let prog = analyze_standalone(path, text, std, opts, js)
+    return DocumentAnalysis { prog: prog, entry: standalone_entry(prog), plan: Some(plan) }
   }
-  DocumentAnalysis {
-    prog: analyze_program(loaded, std, opts, js),
-    entry: entry,
-    plan: Some(plan)
+  # the entry's mod_path is read off the *analysis*, not off the load: a
+  # bundled std source is checked under its std module path, and the loader
+  # that produced this LoadedModule had no way to know that
+  let prog = analyze_program(loaded, std, opts, js)
+  var entry = ""
+  for cm in prog.modules {
+    if entry == "" && canon(cm.path) == abs { entry = cm.mod_path }
   }
+  DocumentAnalysis { prog: prog, entry: entry, plan: Some(plan) }
 }
 
 ## Compatibility entry for callers that do not retain project planning.
@@ -1293,4 +1382,151 @@ test "an aliased path dep canonicalizes to the package's real name" {
     }
   }
   assert found
+}
+
+# ---- std identity (a file's provenance, never its module path) ----
+
+fn std_or_die() -> StdCtx !io =
+  match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
+  }
+
+fn slurp(p: String) -> String !io =
+  match io.read_file(p) {
+    Ok(t) -> t
+    Err(e) -> panic("test setup: " ++ e.message)
+  }
+
+fn has_msg(prog: Program, msg: String) -> Bool = {
+  for ld in prog.diags {
+    if ld.d.msg == msg { return true }
+  }
+  false
+}
+
+test "every bundled std source checks clean on its own" {
+  # The bug this closes: `dawn check std/cursor.dawn` reported 281 errors
+  # across the bundle -- the first of them on line 50, the line that defines
+  # the very `cursor.start` its hint told the reader to call instead. std was
+  # checked as user code because the loader named the file after its source
+  # root (`cursor`) and the checker read std-ness off that name.
+  #
+  # This walks modules.txt rather than listing names, so a std module added
+  # later is covered the day it is added.
+  let std = std_or_die()
+  let names = match read_index("std") {
+    Ok(ns) -> ns
+    Err(e) -> panic("std index: " ++ e)
+  }
+  assert len(names) > 0
+  for n in names {
+    let file = "std/" ++ n ++ ".dawn"
+    let prog = analyze_program(load_file(file), std, ct_default(), jsig_refused())
+    if len(prog.diags) > 0 { println(file ++ ": " ++ prog.diags[0].d.msg) }
+    assert len(prog.diags) == 0
+    assert len(prog.modules) == 1
+    # under its real identity, not the one its source root would give it
+    assert prog.modules[0].mod_path == "std/" ++ n
+    assert prog.modules[0].cx.is_std_module
+  }
+}
+
+test "std identity is where the file came from, not what the module is called" {
+  # A project file at src/std/cursor.dawn is spelled exactly like a bundled
+  # module and is not one. The loader's reserved-path diagnostic already
+  # refused it -- and that diagnostic used to be the *only* thing refusing it,
+  # because the checker read std-ness off the name and opened the std-only
+  # builtins to it. Both halves are asserted: a fix that keeps the diagnostic
+  # and leaves the surface open has not closed anything.
+  let std = std_or_die()
+  let root = "/tmp/dawn-selfhost-analyze/stdspell"
+  mkdirs(root ++ "/src/std")
+  let impostor = root ++ "/src/std/cursor.dawn"
+  put(impostor, slurp("std/cursor.dawn"))
+  let prog = analyze_program(load_file(impostor), std, ct_default(), jsig_refused())
+  assert len(prog.modules) == 1
+  assert prog.modules[0].mod_path == "std/cursor"
+  assert not prog.modules[0].cx.is_std_module
+  assert has_msg(prog, "the module path `std/cursor` is reserved for the bundled standard library")
+  assert has_msg(prog, "undefined function: cursor_start")
+
+  # the same question asked directly, on the same module path, twice
+  assert std_module_of(std, "std/cursor.dawn") == Some("std/cursor")
+  let absent: Option[String] = None
+  assert std_module_of(std, impostor) == absent
+}
+
+test "user code still cannot reach a std-only builtin" {
+  # The negative control for all of the above. Opening std to its own sources
+  # is worth nothing if it also opened the intrinsic table to everyone, and
+  # the same hint the bug report quoted is what user code is supposed to get.
+  let std = std_or_die()
+  let root = "/tmp/dawn-selfhost-analyze/useronly"
+  mkdirs(root ++ "/src")
+  put(root ++ "/src/main.dawn",
+    "pub fn main() -> Unit !io = println(cursor_done(\"a\", cursor_start(\"a\")))\n")
+  let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
+  assert not prog.modules[0].cx.is_std_module
+  assert has_msg(prog, "undefined function: cursor_start")
+  var hinted = false
+  for ld in prog.diags {
+    if ld.d.msg == "undefined function: cursor_start" {
+      assert ld.d.hint == "`cursor_start` is not a builtin; use std/cursor, then cursor.start(...)"
+      hinted = true
+    }
+  }
+  assert hinted
+}
+
+test "the editor's standalone path gives a bundled std buffer its std identity" {
+  # The journey the bug was reported from: an editor opens std/list.dawn and
+  # every line that touches a std-only builtin is underlined. Both language
+  # server entries (didOpen and didChange) land in `analyze_standalone`, which
+  # names every buffer `main` -- so the buffer's name can never be the
+  # evidence, and this is the case a name-shaped fix cannot reach.
+  let std = std_or_die()
+  let text = slurp("std/cursor.dawn")
+  let prog = analyze_standalone("std/cursor.dawn", text, std, ct_default(), jsig_refused())
+  assert len(prog.diags) == 0
+  assert standalone_entry(prog) == "std/cursor"
+
+  # the same bytes at a path that is not the bundle's are user code
+  let root = "/tmp/dawn-selfhost-analyze/stdbuffer"
+  mkdirs(root)
+  let copy = root ++ "/cursor.dawn"
+  put(copy, text)
+  let other = analyze_standalone(copy, text, std, ct_default(), jsig_refused())
+  assert standalone_entry(other) == "main"
+  assert has_msg(other, "undefined function: cursor_start")
+
+  # and the project-aware branch, for a std module with `use` edges of its own
+  let doc = analyze_document_planned(
+    "std/list.dawn", slurp("std/list.dawn"), std, ct_default(), jsig_refused())
+  assert len(doc.prog.diags) == 0
+  assert doc.entry == "std/list"
+}
+
+test "the bundled std directory is not a project target" {
+  # `dawn check std` used to answer "project directory has no `src/` folder",
+  # which is true and useless: std is not a project and cannot be made into
+  # one. Recognised by provenance, so a project that happens to be called
+  # `std` still gets the project diagnostics.
+  let std = std_or_die()
+  let refusal = match std_dir_target(std, "std") {
+    Some(lr) -> lr
+    None -> panic("the loaded std directory was not recognised")
+  }
+  assert len(refusal.modules) == 0
+  assert len(refusal.diags) == 1
+  assert refusal.diags[0].d.msg == "`std` is the bundled standard library, not a Dawn project"
+
+  let root = "/tmp/dawn-selfhost-analyze/notthebundle/std"
+  mkdirs(root ++ "/src")
+  put(root ++ "/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+  match std_dir_target(std, root) {
+    Some(_) -> panic("a project directory named std was mistaken for the bundle")
+    None -> ()
+  }
+  assert len(load_target(std, root).diags) == 0
 }
