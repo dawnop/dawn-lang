@@ -1,0 +1,18 @@
+# The same reading, for the pre-split reconciler. It is a separate module only
+# because `Replace`, `AppendKids` and `TruncateKids` are constructor names in
+# both `tea_core/diff.Op` and `oldiff.Op`, and a match arm names a constructor
+# without a module prefix.
+
+use std/list
+use canon.{Canon, CReplace, CSetStyle, CAppend, CTruncate, ProbeMsg}
+use oldiff.{Op, Patch, Replace, SetStyle, AppendKids, TruncateKids}
+use tea_term/widget.{Widget}
+
+pub fn of_old(ps: List[Patch[ProbeMsg]]) -> List[Canon] =
+  list.map(ps, p =>
+      match p.op {
+        Replace(w) -> CReplace(path: p.path, w: w)
+        SetStyle(s) -> CSetStyle(path: p.path, s: s)
+        AppendKids(ws) -> CAppend(path: p.path, ws: ws)
+        TruncateKids(k) -> CTruncate(path: p.path, keep: k)
+      })

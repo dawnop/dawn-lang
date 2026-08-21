@@ -1,0 +1,165 @@
+# Does the shipped reconciler answer what the pre-split one answered?
+#
+# `oldiff` is packages/tea/src/diff.dawn as it stood before the split, run
+# against the same widget trees as `tea_core/diff`, which has never heard of a
+# widget. Three assertions per ordered pair of the corpus:
+#
+#   1. the two reconcilers emit the same patches, at the same addresses, in the
+#      same order (modulo the one documented SetStyle/SetSelf translation)
+#   2. the generic `apply` replays its own patches back to the new tree
+#   3. the pre-split one still does too, so a green run is not two broken halves
+#
+# The corpus deliberately includes every tree named in the pre-split reconciler's
+# eight test blocks, so those cases are covered by construction rather than by
+# paraphrase, and the named blocks below say what the answers *are* rather than
+# only that two functions agree.
+#
+# A differential that is green over 484 pairs proves nothing on its own -- the
+# wholesale-donor mutant survived the first version of this corpus -- so
+# ../mutants.sh is half of this gate and not an optional extra.
+
+use std/list
+use tea_core/diff
+use oldiff
+use canon.{Canon, CReplace, CSetStyle, CAppend, CTruncate, ProbeMsg, Ping, Pong, of_core}
+use canon_old.{of_old}
+use tea_term/widget.{
+  Style, Plain, Bold, Dim, Underline,
+  Widget, Text, Styled, Row, Column, Button,
+}
+
+## Twenty-two trees: leaves, both containers, nesting, style variation, message
+## variation, and the empty container.
+##
+## The last two earn their place. Without them the mutant `SetSelf(d) -> d`
+## (take the donor wholesale instead of grafting its self-data onto the children
+## already in place) survived the whole differential, because every other
+## in-place update in this corpus is followed only by `Replace` patches, and
+## replacing an already-correct child with itself is idempotent. A `Styled`
+## whose style changes AND whose container child *grows* is the shape that tells
+## the two apart: the wholesale mutant appends to an already-appended list.
+pub fn corpus() -> List[Widget[ProbeMsg]] = {
+  let deep: Widget[ProbeMsg] = Row(kids: [Text(s: "deep"), Button(label: "b", on_press: Ping)])
+  [
+    Text(s: "a"),
+    Text(s: "b"),
+    Button(label: "go", on_press: Ping),
+    Button(label: "go", on_press: Pong),
+    Button(label: "stop", on_press: Ping),
+    Styled(style: Bold, child: Text(s: "x")),
+    Styled(style: Dim, child: Text(s: "x")),
+    Styled(style: Underline, child: Text(s: "y")),
+    Styled(style: Plain, child: deep),
+    Styled(style: Bold, child: deep),
+    Styled(style: Dim, child: deep),
+    Row(kids: []),
+    Row(kids: [Text(s: "a")]),
+    Column(kids: [Text(s: "a")]),
+    Column(kids: [Text(s: "a"), Text(s: "b"), Text(s: "c")]),
+    Column(kids: [Text(s: "a"), Text(s: "c")]),
+    Column(kids: [Text(s: "one"), Text(s: "two"), Text(s: "three")]),
+    Column(kids: [Text(s: "one"), Text(s: "TWO"), Text(s: "three")]),
+    Column(kids: [Text(s: "same"), Row(kids: [Text(s: "old"), Text(s: "keep")])]),
+    Column(kids: [
+      Text(s: "k"),
+      Styled(style: Bold, child: Text(s: "old")),
+      Row(kids: [Button(label: "go", on_press: Ping), Text(s: "x")]),
+    ]),
+    Styled(style: Bold, child: Row(kids: [Text(s: "g")])),
+    Styled(style: Dim, child: Row(kids: [Text(s: "g"), Text(s: "h")])),
+  ]
+}
+
+## The three questions, asked of one pair.
+pub fn agree(a: Widget[ProbeMsg], b: Widget[ProbeMsg]) -> Bool = {
+  let old_ps = oldiff.diff(a, b)
+  let new_ps = diff.diff(a, b)
+  of_old(old_ps) == of_core(new_ps)
+    && diff.apply(a, new_ps) == b
+    && oldiff.apply(a, old_ps) == b
+}
+
+fn pairs_from(xs: List[Widget[ProbeMsg]], i: Int, j: Int, bad: Int) -> Int =
+  if i >= len(xs) {
+    bad
+  } else if j >= len(xs) {
+    pairs_from(xs, i + 1, 0, bad)
+  } else if agree(xs[i], xs[j]) {
+    pairs_from(xs, i, j + 1, bad)
+  } else {
+    pairs_from(xs, i, j + 1, bad + 1)
+  }
+
+test "the generic reconciler agrees with the pre-split one on 484 pairs" {
+  let xs = corpus()
+  assert len(xs) == 22
+  assert pairs_from(xs, 0, 0, 0) == 0
+}
+
+## The pair that kills the wholesale-donor mutant, named so the corpus cannot
+## lose it to a future edit without something going red.
+test "an in-place update grafts onto the children already in place" {
+  let a: Widget[ProbeMsg] = Styled(style: Bold, child: Row(kids: [Text(s: "g")]))
+  let b: Widget[ProbeMsg] = Styled(style: Dim, child: Row(kids: [Text(s: "g"), Text(s: "h")]))
+  let want: List[Canon] =
+    [CSetStyle(path: [], s: Dim), CAppend(path: [0], ws: [Text(s: "h")])]
+  assert of_core(diff.diff(a, b)) == want
+  assert diff.apply(a, diff.diff(a, b)) == b
+}
+
+# The eight test blocks of the pre-split reconciler, restated against the
+# generic one. The corpus above covers these inputs, but a named assertion says
+# what the answer *is*, not merely that two functions match.
+
+test "diff of a tree with itself is empty" {
+  let w: Widget[ProbeMsg] =
+    Column(kids: [
+      Styled(style: Bold, child: Text(s: "t")),
+      Row(kids: [Button(label: "go", on_press: Ping), Text(s: "x")]),
+    ])
+  assert list.is_empty(diff.diff(w, w))
+  let leaf: Widget[ProbeMsg] = Text(s: "a")
+  assert list.is_empty(diff.diff(leaf, leaf))
+}
+
+test "an unchanged sibling is never mentioned" {
+  let a: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "two"), Text(s: "three")])
+  let b: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "TWO"), Text(s: "three")])
+  let want: List[Canon] = [CReplace(path: [1], w: Text(s: "TWO"))]
+  assert of_core(diff.diff(a, b)) == want
+}
+
+test "a style-only change is one in-place update, the child is untouched" {
+  let child: Widget[ProbeMsg] = Row(kids: [Text(s: "deep"), Button(label: "b", on_press: Ping)])
+  let a: Widget[ProbeMsg] = Styled(style: Bold, child: child)
+  let b: Widget[ProbeMsg] = Styled(style: Dim, child: child)
+  let want: List[Canon] = [CSetStyle(path: [], s: Dim)]
+  assert of_core(diff.diff(a, b)) == want
+}
+
+test "tail growth is one append, tail shrink is one truncate" {
+  let a: Widget[ProbeMsg] = Column(kids: [Text(s: "a")])
+  let b: Widget[ProbeMsg] = Column(kids: [Text(s: "a"), Text(s: "b"), Text(s: "c")])
+  let grow: List[Canon] = [CAppend(path: [], ws: [Text(s: "b"), Text(s: "c")])]
+  assert of_core(diff.diff(a, b)) == grow
+  let shrink: List[Canon] = [CTruncate(path: [], keep: 1)]
+  assert of_core(diff.diff(b, a)) == shrink
+}
+
+test "paths descend through Styled at index 0" {
+  let a: Widget[ProbeMsg] =
+    Column(kids: [Text(s: "k"), Styled(style: Bold, child: Text(s: "old"))])
+  let b: Widget[ProbeMsg] =
+    Column(kids: [Text(s: "k"), Styled(style: Bold, child: Text(s: "new"))])
+  let want: List[Canon] = [CReplace(path: [1, 0], w: Text(s: "new"))]
+  assert of_core(diff.diff(a, b)) == want
+  assert diff.apply(a, diff.diff(a, b)) == b
+}
+
+test "middle deletion still rewrites the tail pairwise, cost unchanged" {
+  let a: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "two"), Text(s: "three")])
+  let b: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "three")])
+  assert len(diff.diff(a, b)) == 2
+  assert len(oldiff.diff(a, b)) == 2
+  assert diff.apply(a, diff.diff(a, b)) == b
+}

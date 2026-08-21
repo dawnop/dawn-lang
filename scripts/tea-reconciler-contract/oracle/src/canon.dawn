@@ -1,0 +1,43 @@
+# A shape both reconcilers' output can be read into, so the differential
+# compares answers rather than constructor names.
+#
+# The one place they genuinely differ is the in-place update: the pre-split
+# `SetStyle(style)` carries a style, and `SetSelf(w)` carries a whole node whose
+# self-data is the payload. Reading the style back out of the node is the entire
+# translation, and it is written here in the open so the deviation is a line of
+# code and not a paragraph of trust.
+
+use std/list
+use tea_core/diff.{Op, Patch, Replace, SetSelf, AppendKids, TruncateKids}
+use tea_term/widget.{Style, Plain, Widget, Styled}
+
+pub type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+pub type Canon =
+  | CReplace(path: List[Int], w: Widget[ProbeMsg])
+  | CSetStyle(path: List[Int], s: Style)
+  | CAppend(path: List[Int], ws: List[Widget[ProbeMsg]])
+  | CTruncate(path: List[Int], keep: Int)
+derive Show
+
+## The style a `SetSelf` donor carries. The terminal vocabulary only ever
+## answers `SelfDiffers` for a `Styled` pair, so the `Plain` fallback is
+## unreachable; the differential would catch it as a disagreement if it were
+## not, since the old reconciler cannot emit a `SetStyle` for a non-`Styled`.
+pub fn style_of(w: Widget[ProbeMsg]) -> Style =
+  match w {
+    Styled(s, _) -> s
+    _ -> Plain
+  }
+
+pub fn of_core(ps: List[Patch[Widget[ProbeMsg]]]) -> List[Canon] =
+  list.map(ps, p =>
+      match p.op {
+        Replace(w) -> CReplace(path: p.path, w: w)
+        SetSelf(w) -> CSetStyle(path: p.path, s: style_of(w))
+        AppendKids(ws) -> CAppend(path: p.path, ws: ws)
+        TruncateKids(k) -> CTruncate(path: p.path, keep: k)
+      })
