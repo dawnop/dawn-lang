@@ -1,0 +1,294 @@
+# The difference between two trees, as data. `diff` computes a list of patches,
+# `apply` replays them; both are pure, so the contract is a single assertion:
+# `apply(old, diff(old, new)) == new`. What this buys over "rebuild and replace
+# everything" is locality: a patch names the address of a change, and an
+# unchanged sibling is never mentioned, which is what lets a host later touch
+# only the regions that actually changed.
+#
+# Nothing here knows what a node is. Every question about a node goes through
+# `tea_core/tree`: `kids` for the children, `relate` for a pair's fate, `rekid`
+# to put a node back together. The `Eq` bound is what makes the short-circuit
+# possible and is also what keeps callbacks out of trees -- see tree.dawn.
+#
+# The list strategy is unkeyed, Elm-style: children pair up by index, and a
+# length difference becomes one append or one truncate at the tail. Deleting in
+# the middle therefore rewrites the tail pairwise -- the known cost of unkeyed
+# diffing, accepted for v1 (see the middle-deletion test below, which pins the
+# cost rather than hiding it). Keyed pairing is deferred, not forgotten: it
+# needs `InsertKid`/`RemoveKid`/`MoveKid`, whose payloads are `Int` and `W` and
+# so fit this `Op` without touching the contract. Half of keying is already
+# here, in that a vocabulary whose `relate` compares keys gets whole-subtree
+# replacement for a changed key at a fixed position for free.
+#
+# The four ops are closed under in-order application: recursion over a common
+# prefix never shifts indices, and the tail ops never touch the prefix, so a
+# patch list applies in emission order with no index fixups.
+
+use std/list
+use tree.{Tree, Rel, Unrelated, Same, SelfDiffers, kids, rekid, relate}
+
+## One edit operation. `Replace` swaps a whole subtree, `SetSelf` takes a
+## node's own data and keeps the children already in place, and the two tail
+## ops grow or shrink a node's child list.
+##
+## `SetSelf` carries a whole node where an attribute-carrying op would carry
+## attributes, because core has no way to name a vocabulary's attribute type
+## (tree.dawn, wall one). The payload is not a copy -- it is the node `diff`
+## was handed -- and it cannot be normalised to "the node without its
+## children" either, since a one-child wrapper has no spelling for "no child".
+pub type Op[W] =
+  | Replace(w: W)
+  | SetSelf(w: W)
+  | AppendKids(ws: List[W])
+  | TruncateKids(keep: Int)
+derive Show
+
+## One edit at one address. `path` is the chain of child indices from the root,
+## where a child index is an index into `kids`.
+pub type Patch[W] = { path: List[Int], op: Op[W] }
+
+## Every difference between `old` and `new`, addressed from the root. Equal
+## trees produce the empty list.
+pub fn diff[W: Tree + Eq](old: W, new: W) -> List[Patch[W]] = diff_at(old, new, [])
+
+## Replay patches in order. An address that does not exist in `w` leaves the
+## node unchanged: `apply` stays total, and the roundtrip tests are what keep
+## `diff` from ever emitting such an address.
+pub fn apply[W: Tree](w: W, ps: List[Patch[W]]) -> W =
+  list.fold(ps, w, (acc, p) => apply_one(acc, p.path, p.op))
+
+fn diff_at[W: Tree + Eq](old: W, new: W, path: List[Int]) -> List[Patch[W]] =
+  if old == new {
+    []
+  } else {
+    # `relate` is asked only about a pair already known unequal, which is why
+    # a vocabulary's leaves need no field comparison of their own.
+    match relate(old, new) {
+      Unrelated -> {
+        let rp: Patch[W] = Patch { path: path, op: Replace(w: new) }
+        [rp]
+      }
+      Same -> diff_kids(kids(old), kids(new), path, 0, [])
+      SelfDiffers -> {
+        let sp: Patch[W] = Patch { path: path, op: SetSelf(w: new) }
+        [sp] ++ diff_kids(kids(old), kids(new), path, 0, [])
+      }
+    }
+  }
+
+# Pairwise over the common prefix, then at most one tail op. Self-tail-
+# recursive so the compiler turns it into a loop.
+fn diff_kids[W: Tree + Eq](
+  old: List[W],
+  new: List[W],
+  path: List[Int],
+  i: Int,
+  acc: List[Patch[W]],
+) -> List[Patch[W]] = {
+  let common = if len(old) < len(new) { len(old) } else { len(new) }
+  if i < common {
+    diff_kids(old, new, path, i + 1, acc ++ diff_at(old[i], new[i], path ++ [i]))
+  } else if len(new) > common {
+    let ap: Patch[W] = Patch { path: path, op: AppendKids(ws: list.drop(new, common)) }
+    acc ++ [ap]
+  } else if len(old) > common {
+    let tp: Patch[W] = Patch { path: path, op: TruncateKids(keep: common) }
+    acc ++ [tp]
+  } else {
+    acc
+  }
+}
+
+fn apply_one[W: Tree](w: W, path: List[Int], op: Op[W]) -> W =
+  if list.is_empty(path) {
+    apply_op(w, op)
+  } else {
+    let i = path[0]
+    let ks = kids(w)
+    if i < 0 || i >= len(ks) {
+      w
+    } else {
+      let patched = apply_one(ks[i], list.drop(path, 1), op)
+      rekid(w, list.take(ks, i) ++ [patched] ++ list.drop(ks, i + 1))
+    }
+  }
+
+fn apply_op[W: Tree](w: W, op: Op[W]) -> W =
+  match op {
+    Replace(n) -> n
+    # The donor's own data, this node's children. `rekid` is what makes the
+    # in-place update expressible without an attribute type, and taking the
+    # donor wholesale instead is the mutant that survived the longest: see the
+    # named test below and scripts/tea-reconciler-contract.
+    SetSelf(d) -> rekid(d, kids(w))
+    AppendKids(ws) -> rekid(w, kids(w) ++ ws)
+    TruncateKids(keep) -> rekid(w, list.take(kids(w), keep))
+  }
+
+# ---- test vocabulary ----
+#
+# Deliberately not the terminal's. `Cell` has integer tags where `Widget` has a
+# `Style`, one container where `Widget` has two, and no message type parameter
+# at all: if the reconciler were secretly shaped around widgets, these blocks
+# would not compile. The terminal vocabulary is diffed against this same
+# reconciler by scripts/tea-reconciler-contract, which additionally holds the
+# answers to the pre-split concrete reconciler.
+
+type Cell =
+  | Atom(v: String)
+  | Tagged(tag: Int, kid: Cell)
+  | Group(ks: List[Cell])
+derive Show
+
+impl Tree[Cell] {
+  fn kids(w: Cell) -> List[Cell] =
+    match w {
+      Atom(_) -> []
+      Tagged(_, k) -> [k]
+      Group(ks) -> ks
+    }
+
+  fn rekid(w: Cell, ks: List[Cell]) -> Cell =
+    match w {
+      Atom(_) -> w
+      Tagged(t, _) -> if list.is_empty(ks) { w } else { Tagged(tag: t, kid: ks[0]) }
+      Group(_) -> Group(ks: ks)
+    }
+
+  fn relate(old: Cell, new: Cell) -> Rel =
+    match old {
+      Tagged(a, _) ->
+        match new {
+          Tagged(b, _) -> if a == b { Same } else { SelfDiffers }
+          _ -> Unrelated
+        }
+      Group(_) ->
+        match new {
+          Group(_) -> Same
+          _ -> Unrelated
+        }
+      Atom(_) -> Unrelated
+    }
+}
+
+## Every shape the reconciler distinguishes: both leaves, both containers,
+## nesting, tag variation, the empty container, and -- earning its place -- a
+## tag change over a child list that is growing at the same time. Without that
+## last pair the wholesale-donor mutant (`SetSelf(d) -> d`) survives, because
+## every other in-place update here is followed only by `Replace` patches and
+## replacing an already-correct child with itself is idempotent.
+fn corpus() -> List[Cell] = {
+  let deep: Cell = Group(ks: [Atom(v: "deep"), Atom(v: "b")])
+  [
+    Atom(v: "a"),
+    Atom(v: "b"),
+    Tagged(tag: 1, kid: Atom(v: "x")),
+    Tagged(tag: 2, kid: Atom(v: "x")),
+    Tagged(tag: 3, kid: Atom(v: "y")),
+    Tagged(tag: 0, kid: deep),
+    Tagged(tag: 1, kid: deep),
+    Tagged(tag: 2, kid: deep),
+    Group(ks: []),
+    Group(ks: [Atom(v: "a")]),
+    Group(ks: [Atom(v: "a"), Atom(v: "b"), Atom(v: "c")]),
+    Group(ks: [Atom(v: "a"), Atom(v: "c")]),
+    Group(ks: [Atom(v: "one"), Atom(v: "two"), Atom(v: "three")]),
+    Group(ks: [Atom(v: "one"), Atom(v: "TWO"), Atom(v: "three")]),
+    Group(ks: [Atom(v: "same"), Group(ks: [Atom(v: "old"), Atom(v: "keep")])]),
+    Group(ks: [Atom(v: "k"), Tagged(tag: 1, kid: Atom(v: "old")), Group(ks: [Atom(v: "x")])]),
+    Tagged(tag: 1, kid: Group(ks: [Atom(v: "g")])),
+    Tagged(tag: 2, kid: Group(ks: [Atom(v: "g"), Atom(v: "h")])),
+  ]
+}
+
+fn roundtrips(a: Cell, b: Cell) -> Bool = apply(a, diff(a, b)) == b
+
+fn pairs_from(xs: List[Cell], i: Int, j: Int, bad: Int) -> Int =
+  if i >= len(xs) {
+    bad
+  } else if j >= len(xs) {
+    pairs_from(xs, i + 1, 0, bad)
+  } else if roundtrips(xs[i], xs[j]) {
+    pairs_from(xs, i, j + 1, bad)
+  } else {
+    pairs_from(xs, i, j + 1, bad + 1)
+  }
+
+test "apply replays diff back to the new tree, over every ordered pair" {
+  let xs = corpus()
+  assert len(xs) == 18
+  assert pairs_from(xs, 0, 0, 0) == 0
+}
+
+test "diff of a tree with itself is empty" {
+  let w: Cell =
+    Group(ks: [Tagged(tag: 1, kid: Atom(v: "t")), Group(ks: [Atom(v: "b"), Atom(v: "x")])])
+  assert list.is_empty(diff(w, w))
+  let leaf: Cell = Atom(v: "a")
+  assert list.is_empty(diff(leaf, leaf))
+}
+
+test "an unchanged sibling is never mentioned" {
+  let a: Cell = Group(ks: [Atom(v: "one"), Atom(v: "two"), Atom(v: "three")])
+  let b: Cell = Group(ks: [Atom(v: "one"), Atom(v: "TWO"), Atom(v: "three")])
+  let want: List[Patch[Cell]] = [Patch { path: [1], op: Replace(w: Atom(v: "TWO")) }]
+  assert diff(a, b) == want
+}
+
+test "a self-only change is one SetSelf, the child is untouched" {
+  let child: Cell = Group(ks: [Atom(v: "deep"), Atom(v: "b")])
+  let a: Cell = Tagged(tag: 1, kid: child)
+  let b: Cell = Tagged(tag: 2, kid: child)
+  let want: List[Patch[Cell]] = [Patch { path: [], op: SetSelf(w: b) }]
+  assert diff(a, b) == want
+  assert apply(a, diff(a, b)) == b
+}
+
+## The pair that kills the wholesale-donor mutant, named so the corpus cannot
+## lose it to a future edit without something going red. `SetSelf` comes first
+## and is applied to the *old* children; the append that follows then lands on
+## a list of length one, not on the donor's list of length two.
+test "an in-place update grafts onto the children already in place" {
+  let a: Cell = Tagged(tag: 1, kid: Group(ks: [Atom(v: "g")]))
+  let b: Cell = Tagged(tag: 2, kid: Group(ks: [Atom(v: "g"), Atom(v: "h")]))
+  let want: List[Patch[Cell]] = [
+    Patch { path: [], op: SetSelf(w: b) },
+    Patch { path: [0], op: AppendKids(ws: [Atom(v: "h")]) },
+  ]
+  assert diff(a, b) == want
+  assert apply(a, diff(a, b)) == b
+}
+
+test "tail growth is one append, tail shrink is one truncate" {
+  let a: Cell = Group(ks: [Atom(v: "a")])
+  let b: Cell = Group(ks: [Atom(v: "a"), Atom(v: "b"), Atom(v: "c")])
+  let grow: List[Patch[Cell]] =
+    [Patch { path: [], op: AppendKids(ws: [Atom(v: "b"), Atom(v: "c")]) }]
+  assert diff(a, b) == grow
+  let shrink: List[Patch[Cell]] = [Patch { path: [], op: TruncateKids(keep: 1) }]
+  assert diff(b, a) == shrink
+}
+
+test "paths descend through a one-child wrapper at index 0" {
+  let a: Cell = Group(ks: [Atom(v: "k"), Tagged(tag: 1, kid: Atom(v: "old"))])
+  let b: Cell = Group(ks: [Atom(v: "k"), Tagged(tag: 1, kid: Atom(v: "new"))])
+  let want: List[Patch[Cell]] = [Patch { path: [1, 0], op: Replace(w: Atom(v: "new")) }]
+  assert diff(a, b) == want
+  assert apply(a, diff(a, b)) == b
+}
+
+test "middle deletion rewrites the tail pairwise, cost pinned not hidden" {
+  let a: Cell = Group(ks: [Atom(v: "one"), Atom(v: "two"), Atom(v: "three")])
+  let b: Cell = Group(ks: [Atom(v: "one"), Atom(v: "three")])
+  assert len(diff(a, b)) == 2
+  assert apply(a, diff(a, b)) == b
+}
+
+test "apply is total against an address that does not exist" {
+  let leaf: Cell = Atom(v: "a")
+  let nowhere: List[Patch[Cell]] = [Patch { path: [3, 1], op: Replace(w: Atom(v: "z")) }]
+  assert apply(leaf, nowhere) == leaf
+  let g: Cell = Group(ks: [Atom(v: "a")])
+  let negative: List[Patch[Cell]] = [Patch { path: [-1], op: Replace(w: Atom(v: "z")) }]
+  assert apply(g, negative) == g
+}

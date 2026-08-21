@@ -1,0 +1,70 @@
+# The Elm architecture's contract, and nothing else: a model type `M` names its
+# message type, names what its view is, and provides the two pure functions the
+# loop needs. The driver loop itself lives in a vocabulary's package, because a
+# driver has to paint, and painting is the one thing core cannot do. This v1 has
+# no `Cmd`: `update` is pure by signature, effects happen only in the driver,
+# and when a real app needs commands the associated-effect work (#307) is the
+# place to grow them, with this trait as the consumer that justifies it.
+#
+# `type View` is bare, and it has to be: an associated type cannot declare
+# bounds ("`type View` is the whole declaration; the impl chooses the type"), so
+# there is no way to write `type View: Tree`. The consequence is bigger than the
+# missing bound. A generic function over `A: App` can do nothing with an
+# `A.View` but return it -- a bound applies to a type parameter, and `A.View` is
+# not one -- and pinning the tree type as `Widget[A.Msg]` at the driver does not
+# rescue it either, because the reconciler wants `Eq` on the tree, structural
+# `Eq` on the tree wants `Eq` on the message, and `A.Msg` is an associated type
+# that cannot carry that bound either.
+#
+# So a driver that reconciles takes the view as an ordinary function parameter
+# over its own bounded tree type: `fn drive[A: App, W: Tree + Eq](m: A, vw:
+# fn(A) -> W, ...)`. What that costs, stated plainly rather than hidden: nothing
+# ties `W` back to `A.View` any more, so such a signature accepts a tree over
+# the wrong message type. `type View` stays here as the documented truth --
+# `dawn doc` renders it, and a reader can see that the `W` a driver takes is
+# meant to be it -- but the machine no longer checks the tie. This is the one
+# place the split loses type safety, and the language has no way to buy it back
+# short of bounds or equality constraints on associated types, neither of which
+# exists.
+
+## An application: `update` folds one message into the model, `view` describes
+## the whole screen for a model. Both pure, so both are testable with `==`.
+pub trait App[M] {
+  type Msg
+  type View
+  fn update(m: M, msg: M.Msg) -> M
+  fn view(m: M) -> M.View
+}
+
+# A minimal app for the test blocks below; real apps bring their own. Its view
+# is a `String` on purpose. Core must work for any view type at all, and a
+# widget tree here would be exactly the assumption this package exists to
+# avoid; tea_term/step is where the same trait meets a real tree.
+
+type Counter = { n: Int }
+
+type CounterMsg =
+  | Inc
+  | Dec
+derive Show
+
+impl App[Counter] {
+  type Msg = CounterMsg
+  type View = String
+  fn update(m: Counter, msg: CounterMsg) -> Counter =
+    match msg {
+      Inc -> Counter { n: m.n + 1 }
+      Dec -> Counter { n: m.n - 1 }
+    }
+  fn view(m: Counter) -> String = "n=" ++ to_string(m.n)
+}
+
+test "update folds messages, view snapshots as a value" {
+  let m = update(update(Counter { n: 0 }, Inc), Inc)
+  assert m == Counter { n: 2 }
+  assert view(update(m, Dec)) == "n=1"
+}
+
+test "the view type is whatever the impl says, core never assumes a tree" {
+  assert view(Counter { n: 7 }) == "n=7"
+}

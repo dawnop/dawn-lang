@@ -8,29 +8,33 @@
 # walk the same list.
 
 use std/list
+use tea_core/walk.{fold_preorder}
 use widget.{Bold, Widget, Text, Styled, Row, Column, Button}
 
 ## Every button in the tree, in pre-order: label and the message pressing
 ## it sends. The n-th entry is what `press(w, n)` resolves (1-based).
+##
+## The walk is `tea_core/walk.fold_preorder` and the reading of a node is
+## here, which is the whole reason routing did not become a second core
+## contract: core has no way to ask a node for its label, so a router written
+## against a core trait would have had to give the label up.
 pub fn buttons[M](w: Widget[M]) -> List[(String, M)] =
-  match w {
-    Text(_) -> []
-    Styled(_, child) -> buttons(child)
-    Row(kids) -> kid_buttons(kids, 0, [])
-    Column(kids) -> kid_buttons(kids, 0, [])
-    Button(label, msg) -> [(label, msg)]
-  }
+  fold_preorder(w, [], (acc, n, path) =>
+      match n {
+        Button(l, m) -> acc ++ [(l, m)]
+        _ -> acc
+      })
 
-fn kid_buttons[M](
-  kids: List[Widget[M]],
-  i: Int,
-  acc: List[(String, M)],
-) -> List[(String, M)] =
-  if i >= len(kids) {
-    acc
-  } else {
-    kid_buttons(kids, i + 1, acc ++ buttons(kids[i]))
-  }
+## The same walk, addressed rather than numbered: every button paired with the
+## path `tea_core/diff` would use for it. A line-mode driver has no use for
+## this -- it numbers -- but a host that hands back a node rather than an
+## ordinal dispatches on exactly these addresses, with no second scheme.
+pub fn addressed[M](w: Widget[M]) -> List[(List[Int], M)] =
+  fold_preorder(w, [], (acc, n, path) =>
+      match n {
+        Button(_, m) -> acc ++ [(path, m)]
+        _ -> acc
+      })
 
 ## The message the n-th button would send, counting from 1 in pre-order,
 ## or `None` when there is no such button.
@@ -73,4 +77,20 @@ test "press is 1-based and total over bad indices" {
   let miss: Option[ProbeMsg] = None
   assert press(w, 0) == miss
   assert press(w, 3) == miss
+}
+
+test "addressed is the same walk, keyed by patch address instead of ordinal" {
+  let w: Widget[ProbeMsg] =
+    Column(kids: [
+      Row(kids: [Button(label: "a", on_press: Ping), Text(s: "x")]),
+      Styled(style: Bold, child: Button(label: "b", on_press: Pong)),
+    ])
+  # [0, 0] and [1, 0] are the addresses `tea_core/diff` would emit for those
+  # nodes, so a host holding one is told which message it carries without a
+  # second numbering scheme. Same order and same messages as `buttons`.
+  assert addressed(w) == [([0, 0], Ping), ([1, 0], Pong)]
+  assert buttons(w) == [("a", Ping), ("b", Pong)]
+  assert len(addressed(w)) == len(buttons(w))
+  let bare: Widget[ProbeMsg] = Text(s: "no buttons here")
+  assert list.is_empty(addressed(bare))
 }

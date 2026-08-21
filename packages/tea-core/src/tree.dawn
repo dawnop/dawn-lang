@@ -1,0 +1,52 @@
+# What a reconcilable tree owes the reconciler, and the whole of what tea_core
+# knows about trees. The types named here are `W`, `List[W]`, `Int` and `Rel`;
+# there is no widget, no style, no tag and no message anywhere in this package.
+#
+# Two language facts shape the contract, and both are diagnostics this file was
+# written around rather than preferences:
+#
+#   - `type Op[W: Tree]` is rejected -- "type declarations cannot constrain
+#     their type parameters" -- and an unbounded projection `W.Attr` is
+#     rejected too. So an op may not carry a vocabulary-defined attribute
+#     payload, and every payload in `Op` is built from types core already
+#     knows. That is why the in-place update carries a whole node
+#     (`SetSelf(w)`) rather than a style.
+#   - The orphan rule is per module, so `impl Tree[Widget[M]]` cannot live
+#     here. It lives in the module declaring the vocabulary; for the terminal
+#     that is `tea_term/widget`.
+#
+# A vocabulary must also have structural `==`, which the reconciler demands as
+# an ordinary `Eq` bound rather than as a member of this trait. Structural
+# equality is free for any non-function type, so the bound is really the rule
+# "a node holds no callbacks" -- and leaving it a bound rather than an
+# obligation means a vocabulary that breaks it is rejected where it reaches the
+# reconciler instead of quietly implementing a member that lies.
+
+## How a vocabulary says two nodes at the same address are related. Closed, and
+## about semantics rather than hosts: the reconciler asks only "may I diff these
+## in place, and did the node's own data change".
+pub type Rel =
+  | Unrelated
+  | Same
+  | SelfDiffers
+derive Show
+
+## The contract. Three members, one per thing the reconciler does: walk
+## children, decide a pair's fate, and rebuild a node around new children.
+pub trait Tree[W] {
+  ## This node's children in order; a leaf has none. `diff` pairs these by
+  ## index and `apply` addresses through them, so an index in a `Patch.path`
+  ## is an index into exactly this list.
+  fn kids(w: W) -> List[W]
+
+  ## `w` with its children replaced. Must be total: a leaf handed children is
+  ## expected to ignore them and return itself, which is what keeps `apply`
+  ## total against an address that does not exist.
+  fn rekid(w: W, ks: List[W]) -> W
+
+  ## Whether the pair may be diffed in place, and whether the node's own data
+  ## (everything that is not a child) changed. Only ever called on a pair the
+  ## reconciler has already found unequal, so a vocabulary never has to
+  ## re-compare fields the `==` shortcut already settled.
+  fn relate(old: W, new: W) -> Rel
+}

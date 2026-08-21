@@ -1,0 +1,84 @@
+# How to visit a tree, for the vocabularies that need to collect something out
+# of one. Routing an event to a message is the first such need, and it is
+# deliberately *not* a second trait: a `fn activation(w) -> Option[W.Msg]`
+# member works (it was probed), but core cannot ask a node for anything it has
+# not been told to ask for, so a router written against it loses the label the
+# terminal numbers its buttons by. Exporting the walk instead keeps the reading
+# of a node in the vocabulary that wrote it, and costs the contract nothing:
+# `fold_preorder` touches only `kids`, which every `Tree` already owes.
+#
+# The path travels with the node because the second consumer needs it. A
+# terminal wants "the n-th button in reading order"; a host with real nodes
+# wants "the address of this node", and that address is the one `Patch.path`
+# already uses, so a host holding a node can be told which message it carries
+# without a second numbering scheme.
+
+use std/list
+use tree.{Tree, Rel, Unrelated, Same, kids}
+
+## Pre-order fold with the path in hand: `f` sees the accumulator, the node,
+## and the node's address from the root. The root's address is the empty path.
+pub fn fold_preorder[W: Tree, A](w: W, init: A, f: fn(A, W, List[Int]) -> A) -> A =
+  go(w, [], init, f)
+
+fn go[W: Tree, A](w: W, path: List[Int], acc: A, f: fn(A, W, List[Int]) -> A) -> A =
+  kids_go(kids(w), path, 0, f(acc, w, path), f)
+
+fn kids_go[W: Tree, A](
+  ks: List[W],
+  path: List[Int],
+  i: Int,
+  acc: A,
+  f: fn(A, W, List[Int]) -> A,
+) -> A =
+  if i >= len(ks) {
+    acc
+  } else {
+    kids_go(ks, path, i + 1, go(ks[i], path ++ [i], acc, f), f)
+  }
+
+# A test vocabulary of its own, and the smallest one this package has: the walk
+# reads nothing but `kids`, so a node whose only data is a name is enough to pin
+# both the order and the addresses.
+
+type Node = { name: String, ks: List[Node] }
+
+impl Tree[Node] {
+  fn kids(w: Node) -> List[Node] = w.ks
+  fn rekid(w: Node, ks: List[Node]) -> Node = Node { ..w, ks: ks }
+  fn relate(old: Node, new: Node) -> Rel =
+    if old.name == new.name { Same } else { Unrelated }
+}
+
+fn leaf(name: String) -> Node = Node { name: name, ks: [] }
+
+fn sample() -> Node =
+  Node { name: "root", ks: [
+    Node { name: "a", ks: [leaf("a1"), leaf("a2")] },
+    leaf("b"),
+    Node { name: "c", ks: [Node { name: "c1", ks: [leaf("c11")] }] },
+  ] }
+
+test "fold_preorder visits parents before children, left to right" {
+  let none: List[String] = []
+  let names = fold_preorder(sample(), none, (acc, n, path) => acc ++ [n.name])
+  assert names == ["root", "a", "a1", "a2", "b", "c", "c1", "c11"]
+  assert fold_preorder(leaf("only"), none, (acc, n, path) => acc ++ [n.name]) == ["only"]
+}
+
+test "the path a node arrives with is the address a patch would use" {
+  let none: List[List[Int]] = []
+  let paths = fold_preorder(sample(), none, (acc, node, p) => acc ++ [p])
+  let want: List[List[Int]] = [[], [0], [0, 0], [0, 1], [1], [2], [2, 0], [2, 0, 0]]
+  assert paths == want
+  assert fold_preorder(leaf("x"), none, (acc, node, p) => acc ++ [p]) == [[]]
+}
+
+test "the accumulator threads through in visit order" {
+  assert fold_preorder(sample(), 0, (acc, node, path) => acc + 1) == 8
+  let depth =
+    fold_preorder(sample(), 0, (acc, node, p) => if len(p) > acc { len(p) } else { acc })
+  assert depth == 3
+  let seen = fold_preorder(sample(), "", (acc, n, path) => acc ++ n.name ++ ".")
+  assert seen == "root.a.a1.a2.b.c.c1.c11."
+}

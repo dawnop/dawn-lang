@@ -1,0 +1,172 @@
+# The widget vocabulary of the Elm architecture: a pure value tree with the
+# application's message type in the leaves, and never a function. A callback
+# field would cost the tree its structural `==` (functions cannot be compared),
+# and `==` is what makes snapshot tests one assertion and future diffing
+# possible at all; a message field keeps the tree data all the way down, and
+# the driver loop is the only place that interprets a message into effects.
+#
+# The set is deliberately minimal for a v1: text, one styled wrapper, row and
+# column containers, and a button that names the message pressing it sends.
+# Everything else a terminal app wants (checkboxes, lists with a cursor, ...)
+# has so far been expressible as these five.
+#
+# The `impl Tree` at the bottom is here and not in a module of its own, and that
+# is not a style choice: Dawn's orphan rule is per module, so an impl belongs to
+# the module declaring the trait or the one declaring the type. tea_core must
+# not know that widgets exist, which leaves this file as the impl's only legal
+# home. It is one impl for every message type -- `impl[M] Tree[Widget[M]]` --
+# because a ground head like `Tree[Widget[Int]]` is not a thing the language
+# accepts.
+
+use std/list
+use tea_core/tree.{Tree, Rel, Unrelated, Same, SelfDiffers, kids, rekid, relate}
+
+## How the terminal renderer may dress a subtree. `Plain` is the identity and
+## exists so that "which style" can be computed: an `if` over styles needs a
+## spelling for "none".
+pub type Style =
+  | Plain
+  | Bold
+  | Dim
+  | Underline
+derive Show
+
+## A pure description of a screen. `M` is the application's message type: the
+## tree says what an interaction *means* (`Button(label, on_press)`), and holds
+## no code. `Row` lays children out on one line, `Column` stacks them.
+pub type Widget[M] =
+  | Text(s: String)
+  | Styled(style: Style, child: Widget[M])
+  | Row(kids: List[Widget[M]])
+  | Column(kids: List[Widget[M]])
+  | Button(label: String, on_press: M)
+derive Show
+
+## The whole of what this vocabulary owes the reconciler: three functions.
+##
+## `relate` is where a per-constructor `match old { ... match new { ... } }`
+## ladder would go, and it is shorter than one, because core short-circuits on
+## `old == new` before ever calling it. Every pair that arrives here is already
+## known unequal, so `Text`/`Text` and `Button`/`Button` need no field
+## comparison at all -- there is nothing under them to recurse into, so an
+## inequality core found is an inequality in their own data and the answer is
+## `Unrelated` whether or not the constructors match.
+impl[M] Tree[Widget[M]] {
+  fn kids(w: Widget[M]) -> List[Widget[M]] =
+    match w {
+      Text(_) -> []
+      Styled(_, c) -> [c]
+      Row(ks) -> ks
+      Column(ks) -> ks
+      Button(_, _) -> []
+    }
+
+  # Total by construction: a leaf handed children ignores them, and `Styled`
+  # takes the first child only, because it has exactly one and no spelling for
+  # none. Truncating a `Styled` to zero children is therefore a no-op rather
+  # than an error, which is the same totality `apply` needs.
+  fn rekid(w: Widget[M], ks: List[Widget[M]]) -> Widget[M] =
+    match w {
+      Text(_) -> w
+      Button(_, _) -> w
+      Styled(s, _) -> if list.is_empty(ks) { w } else { Styled(style: s, child: ks[0]) }
+      Row(_) -> Row(kids: ks)
+      Column(_) -> Column(kids: ks)
+    }
+
+  fn relate(old: Widget[M], new: Widget[M]) -> Rel =
+    match old {
+      Styled(s1, _) ->
+        match new {
+          Styled(s2, _) -> if s1 == s2 { Same } else { SelfDiffers }
+          _ -> Unrelated
+        }
+      Row(_) ->
+        match new {
+          Row(_) -> Same
+          _ -> Unrelated
+        }
+      Column(_) ->
+        match new {
+          Column(_) -> Same
+          _ -> Unrelated
+        }
+      Text(_) -> Unrelated
+      Button(_, _) -> Unrelated
+    }
+}
+
+# A message type for the test blocks below; real apps bring their own.
+type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+test "widget trees are plain values with structural equality" {
+  let a: Widget[ProbeMsg] =
+    Column(kids: [Text(s: "hi"), Button(label: "go", on_press: Ping)])
+  let b: Widget[ProbeMsg] =
+    Column(kids: [Text(s: "hi"), Button(label: "go", on_press: Ping)])
+  assert a == b
+}
+
+test "a differing message or label is a differing tree" {
+  let a: Widget[ProbeMsg] = Button(label: "go", on_press: Ping)
+  assert a != Button(label: "go", on_press: Pong)
+  assert a != Button(label: "stop", on_press: Ping)
+  let row: Widget[ProbeMsg] = Row(kids: [Text(s: "x")])
+  assert row != Column(kids: [Text(s: "x")])
+}
+
+test "kids is the addressing scheme: index 0 of a Styled is its child" {
+  let child: Widget[ProbeMsg] = Text(s: "x")
+  let wrapped: Widget[ProbeMsg] = Styled(style: Bold, child: child)
+  assert kids(wrapped) == [child]
+  let leaf: Widget[ProbeMsg] = Text(s: "a")
+  assert list.is_empty(kids(leaf))
+  let b: Widget[ProbeMsg] = Button(label: "go", on_press: Ping)
+  assert list.is_empty(kids(b))
+  let ks: List[Widget[ProbeMsg]] = [Text(s: "a"), Text(s: "b")]
+  let r: Widget[ProbeMsg] = Row(kids: ks)
+  assert kids(r) == ks
+  let c: Widget[ProbeMsg] = Column(kids: ks)
+  assert kids(c) == ks
+}
+
+test "rekid is total: a leaf handed children returns itself" {
+  let ks: List[Widget[ProbeMsg]] = [Text(s: "a")]
+  let none: List[Widget[ProbeMsg]] = []
+  let leaf: Widget[ProbeMsg] = Text(s: "keep me")
+  assert rekid(leaf, ks) == leaf
+  let b: Widget[ProbeMsg] = Button(label: "go", on_press: Ping)
+  assert rekid(b, ks) == b
+  # A Styled has exactly one child and no spelling for none, so emptying it is
+  # a no-op rather than an error. That is what keeps `apply` total.
+  let s: Widget[ProbeMsg] = Styled(style: Bold, child: Text(s: "orig"))
+  assert rekid(s, none) == s
+  assert rekid(s, ks) == Styled(style: Bold, child: Text(s: "a"))
+  let r: Widget[ProbeMsg] = Row(kids: none)
+  assert rekid(r, ks) == Row(kids: ks)
+}
+
+test "relate answers only about a pair core already found unequal" {
+  let a: Widget[ProbeMsg] = Row(kids: [Text(s: "a")])
+  let a2: Widget[ProbeMsg] = Row(kids: [Text(s: "b")])
+  assert relate(a, a2) == Same
+  let col: Widget[ProbeMsg] = Column(kids: [Text(s: "a")])
+  assert relate(a, col) == Unrelated
+  let s1: Widget[ProbeMsg] = Styled(style: Bold, child: Text(s: "x"))
+  let s2: Widget[ProbeMsg] = Styled(style: Bold, child: Text(s: "y"))
+  let s3: Widget[ProbeMsg] = Styled(style: Dim, child: Text(s: "x"))
+  assert relate(s1, s2) == Same
+  assert relate(s1, s3) == SelfDiffers
+  assert relate(s1, a) == Unrelated
+  # Leaves hold no children, so an inequality is theirs and there is nothing
+  # to descend into, matching constructors or not.
+  let t1: Widget[ProbeMsg] = Text(s: "a")
+  let t2: Widget[ProbeMsg] = Text(s: "b")
+  assert relate(t1, t2) == Unrelated
+  let b1: Widget[ProbeMsg] = Button(label: "go", on_press: Ping)
+  let b2: Widget[ProbeMsg] = Button(label: "go", on_press: Pong)
+  assert relate(b1, b2) == Unrelated
+}

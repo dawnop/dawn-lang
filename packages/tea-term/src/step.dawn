@@ -1,0 +1,82 @@
+# One turn of the Elm loop, minus the io. This used to sit next to `trait App`
+# in a file that looked general, but it calls `render`, so it was always the
+# terminal's: a driver has to paint, and painting is the one thing tea_core
+# cannot do.
+#
+# The view arrives as an argument rather than through the trait, and the
+# signature says why in its own shape. `A.View` is an associated type with no
+# bound and no bound is possible, so a generic function can do nothing with it
+# but return it; pinning it as `Widget[A.Msg]` is what a *rendering* driver can
+# do, because rendering asks nothing of the message type. A driver that
+# reconciles cannot even do that -- structural `Eq` on the tree needs `Eq` on
+# the message, and an associated type cannot carry it -- and must take its tree
+# type as its own bounded parameter instead. `render_step` below is the second
+# shape, kept because it is the one a future presenter would grow from and
+# because it is the only place in this package where the reconciler meets a
+# real app.
+
+use tea_core/tree.{Tree}
+use tea_core/diff.{Patch, Replace, diff, apply}
+use tea_core/app.{App, update, view}
+use widget.{Widget, Text}
+use render.{render}
+
+## Apply the message, render the new view. A driver prints the frame and reads
+## the next message; a test asserts on it.
+pub fn step[A: App](m: A, msg: A.Msg, vw: fn(A) -> Widget[A.Msg]) -> (A, String) = {
+  let next = update(m, msg)
+  (next, render(vw(next)))
+}
+
+## The same turn for a host that wants the change rather than the frame: the
+## new model and the patches from the old view to the new one. `W` is the
+## driver's own type parameter, which is what lets `Tree + Eq` apply to it at
+## all; the caller's `m => view(m)` settles it to a concrete widget tree.
+pub fn diff_step[A: App, W: Tree + Eq](
+  m: A,
+  msg: A.Msg,
+  vw: fn(A) -> W,
+) -> (A, List[Patch[W]]) = {
+  let next = update(m, msg)
+  (next, diff(vw(m), vw(next)))
+}
+
+# A minimal app for the test blocks below; real apps bring their own.
+type Counter = { n: Int }
+
+type CounterMsg =
+  | Inc
+  | Dec
+derive Show
+
+impl App[Counter] {
+  type Msg = CounterMsg
+  type View = Widget[CounterMsg]
+  fn update(m: Counter, msg: CounterMsg) -> Counter =
+    match msg {
+      Inc -> Counter { n: m.n + 1 }
+      Dec -> Counter { n: m.n - 1 }
+    }
+  fn view(m: Counter) -> Widget[CounterMsg] = Text(s: "n=" ++ to_string(m.n))
+}
+
+test "step returns the new model and the rendered frame" {
+  let (m, frame) = step(Counter { n: 41 }, Inc, c => view(c))
+  assert m == Counter { n: 42 }
+  assert frame == "n=42"
+}
+
+test "the impl of App is one line more than before the split" {
+  let m = update(update(Counter { n: 0 }, Inc), Inc)
+  assert m == Counter { n: 2 }
+  assert view(update(m, Dec)) == Text(s: "n=1")
+}
+
+test "a driver reaches the reconciler by pinning the tree as its own parameter" {
+  let (next, ps) = diff_step(Counter { n: 0 }, Inc, c => view(c))
+  assert next == Counter { n: 1 }
+  let want: List[Patch[Widget[CounterMsg]]] =
+    [Patch { path: [], op: Replace(w: Text(s: "n=1")) }]
+  assert ps == want
+  assert apply(view(Counter { n: 0 }), ps) == view(next)
+}

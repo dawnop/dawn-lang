@@ -1,9 +1,18 @@
 # The driver loop, in the library at last: paint, wait for one input line or
 # a due tick, fold the messages, paint again. The app supplies its pure hooks
-# (`parse` for input lines, `subs` for the ticks the model currently wants,
-# `done` for when to stop); the loop owns every timer and the whole terminal.
-# This is the only `!io` in the package, and its effect row is the single
-# builtin label.
+# (`view_of` for the tree to paint, `parse` for input lines, `subs` for the
+# ticks the model currently wants, `done` for when to stop); the loop owns
+# every timer and the whole terminal. This is the only `!io` in either tea
+# package, and its effect row is the single builtin label.
+#
+# `view_of` is a hook rather than a call to `App.view` because `A.View` is an
+# associated type with no bound: a generic function over `A: App` can do
+# nothing with an `A.View` but return it. Rendering is the easier of the two
+# cases -- it asks nothing of the message type -- so this loop pins the tree as
+# `Widget[A.Msg]`, which is a projection in a signature and therefore allowed.
+# A driver that reconciled could not even do that (see tea_term/step). At the
+# call site the hook is `m => view(m)` and settles to the same thing the trait
+# says; what is lost is the machine checking that it did.
 #
 # Input is read byte-wise (`io.read_stdin`), not with `io.read_line`: the
 # std/io contract says `stdin_ready` polls the raw stream and a buffered
@@ -28,10 +37,11 @@
 use std/io
 use std/list
 use std/bytes
-use app.{App, update, view}
+use tea_core/app.{App, update}
+use widget.{Widget}
 use render.{render, clear_screen}
 use present.{frame_lines, present, park}
-use sub.{Sub, Pending, intervals, arm, poll_ms, elapse, due_msgs}
+use tea_core/sub.{Sub, Pending, intervals, arm, poll_ms, elapse, due_msgs}
 
 ## Drive `init` until `done`: clear once, paint, then loop. Timers re-arm
 ## only when the declared intervals change, so an unrelated model edit does
@@ -39,15 +49,16 @@ use sub.{Sub, Pending, intervals, arm, poll_ms, elapse, due_msgs}
 ## current at fire time, never from the armed state.
 pub fn run[A: App](
   init: A,
+  view_of: fn(A) -> Widget[A.Msg],
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
 ) -> Unit !io = {
   io.print(clear_screen())
-  let rows = frame_lines(render(view(init)))
+  let rows = frame_lines(render(view_of(init)))
   io.print(present([], rows) ++ park(len(rows)))
   let iv = intervals(subs(init))
-  turn(init, iv, arm(iv), rows, parse, subs, done)
+  turn(init, iv, arm(iv), rows, view_of, parse, subs, done)
 }
 
 # One turn: the done check and the prompt, then wait for a line or a tick.
@@ -56,6 +67,7 @@ fn turn[A: App](
   iv: List[Int],
   pending: List[Pending],
   shown: List[String],
+  view_of: fn(A) -> Widget[A.Msg],
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
@@ -65,7 +77,7 @@ fn turn[A: App](
   } else {
     io.print("> ")
     let fresh: List[Int] = []
-    wait(m, iv, pending, fresh, shown, parse, subs, done)
+    wait(m, iv, pending, fresh, shown, view_of, parse, subs, done)
   }
 
 # Block until a byte is due or a timer is; `partial` is the line so far.
@@ -75,30 +87,31 @@ fn wait[A: App](
   pending: List[Pending],
   partial: List[Int],
   shown: List[String],
+  view_of: fn(A) -> Widget[A.Msg],
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
 ) -> Unit !io =
   match poll_ms(pending) {
-    None -> take_byte(m, iv, pending, partial, shown, parse, subs, done)
+    None -> take_byte(m, iv, pending, partial, shown, view_of, parse, subs, done)
     Some(t) ->
       if io.stdin_ready(t) {
-        take_byte(m, iv, pending, partial, shown, parse, subs, done)
+        take_byte(m, iv, pending, partial, shown, view_of, parse, subs, done)
       } else {
         # A full timeout of waiting is accounted; fire what came due. The
         # partial line survives the repaint.
         let (p2, due) = elapse(pending, t)
         let next = fold_msgs(m, due_msgs(subs(m), due))
-        let rows = frame_lines(render(view(next)))
+        let rows = frame_lines(render(view_of(next)))
         io.print(present(shown, rows) ++ park(len(rows)) ++ "> ")
         if done(next) {
           ()
         } else {
           let want = intervals(subs(next))
           if want == iv {
-            wait(next, iv, p2, partial, rows, parse, subs, done)
+            wait(next, iv, p2, partial, rows, view_of, parse, subs, done)
           } else {
-            wait(next, want, arm(want), partial, rows, parse, subs, done)
+            wait(next, want, arm(want), partial, rows, view_of, parse, subs, done)
           }
         }
       }
@@ -112,6 +125,7 @@ fn take_byte[A: App](
   pending: List[Pending],
   partial: List[Int],
   shown: List[String],
+  view_of: fn(A) -> Widget[A.Msg],
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
@@ -121,16 +135,16 @@ fn take_byte[A: App](
     ()
   } else if bytes.at(b, 0) == 10 {
     let next = fold_msgs(m, [parse(m, to_line(partial))])
-    let rows = frame_lines(render(view(next)))
+    let rows = frame_lines(render(view_of(next)))
     io.print(present(shown, rows) ++ park(len(rows)))
     let want = intervals(subs(next))
     if want == iv {
-      turn(next, iv, pending, rows, parse, subs, done)
+      turn(next, iv, pending, rows, view_of, parse, subs, done)
     } else {
-      turn(next, want, arm(want), rows, parse, subs, done)
+      turn(next, want, arm(want), rows, view_of, parse, subs, done)
     }
   } else {
-    wait(m, iv, pending, partial ++ [bytes.at(b, 0)], shown, parse, subs, done)
+    wait(m, iv, pending, partial ++ [bytes.at(b, 0)], shown, view_of, parse, subs, done)
   }
 }
 
