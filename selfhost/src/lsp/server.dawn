@@ -1967,3 +1967,241 @@ test "a bundled std buffer keeps its std identity through the document seam" {
     WorkspaceMember(_) -> panic("a standalone buffer is not a workspace member")
   }
 }
+
+# ---- go to definition: which file the reply names ----
+
+fn def_probe_state(std: StdCtx) -> LspState = {
+  let no_docs: Map[String, Doc] = map.empty()
+  let no_ws: Map[String, WorkspaceSlot] = map.empty()
+  LspState {
+    std: std,
+    bins: builtins(),
+    docs: no_docs,
+    workspaces: no_ws,
+    standalone: Some(jsig_refused_lease()),
+    host: LspLeaseHost {
+      standalone: () => jsig_refused_lease(),
+      project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
+    },
+    lifecycle: Running
+  }
+}
+
+## A buffer that names a std function, deliberately written outside the
+## checkout: the file a definition reply names has to come from the std the
+## compiler loaded, never from where the buffer happens to sit.
+fn def_probe_text() -> String =
+  join([
+    "use std/list",
+    "",
+    "fn helper(n: Int) -> Int = n + 1",
+    "",
+    "pub fn main() -> Unit !io = {",
+    "  let xs = list.reverse([1, 2, 3])",
+    "  if helper(xs[0]) > 0 { println(\"ok\") }",
+    "}",
+    ""
+  ], "\n")
+
+fn def_probe_put(path: String, text: String) -> Unit !io =
+  match io.write_file(path, text) {
+    Ok(_) -> ()
+    Err(e) -> panic("test setup: " ++ e.message)
+  }
+
+fn def_probe_doc_named(st: LspState, name: String, text: String) -> Doc !io = {
+  let dir = "/tmp/dawn-selfhost-lsp-def"
+  let path = dir ++ "/" ++ name
+  let _ = io.mkdirs(dir)
+  def_probe_put(path, text)
+  let no_modules: Option[Map[String, String]] = None
+  standalone_doc(st, path_to_uri(canon(path)), Some(path), Some(canon(path)), text,
+    no_modules)
+}
+
+fn def_probe_doc(st: LspState, text: String) -> Doc !io =
+  def_probe_doc_named(st, "main.dawn", text)
+
+fn def_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -> Target = {
+  let off = match str.index_of(text, needle) {
+    Some(i) -> i + skip
+    None -> panic("probe text has no " ++ needle)
+  }
+  match analysis_of(st, d) {
+    Some(analysis) ->
+      match doc_qcx(st, analysis) {
+        Some(qc) ->
+          match find_target(qc, off) {
+            Some(t) -> t
+            None -> panic("nothing under the cursor at " ++ needle)
+          }
+        None -> panic("the probe buffer has no QCx")
+      }
+    None -> panic("the probe buffer has no analysis")
+  }
+}
+
+fn def_probe_span(t: Target, what: String) -> (Int, Int) =
+  match t.def {
+    Some(sp) -> sp
+    None -> panic("no definition offered for " ++ what)
+  }
+
+test "a definition in std names std's file and points at the declaration" {
+  # The bug this pins: `def_path` None means "the document being analyzed", and
+  # std used to answer with it. `location_of` then mapped std's offsets through
+  # the requesting buffer's line table and replied with that buffer's uri, so
+  # "go to definition" on `reverse` jumped to an unrelated place in the file the
+  # request came from. A confidently wrong location, not a missing one.
+  let std = match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
+  }
+  let st = def_probe_state(std)
+  let text = def_probe_text()
+  let d = def_probe_doc(st, text)
+
+  let t = def_probe_at(st, d, text, "list.reverse", 5)
+  let dp = match t.def_path {
+    Some(p) -> p
+    None -> panic("a definition in std must name std's file")
+  }
+  assert dp == canon("std/list.dawn")
+
+  # The span is std's, so it only means anything read against std's own text.
+  # Slicing the file is what tells a right answer from a plausible one: the
+  # pre-fix reply had a range too, and it addressed the wrong document.
+  let (lo, hi) = def_probe_span(t, "list.reverse")
+  let src = match io.read_file(dp) {
+    Ok(s) -> s
+    Err(e) -> panic("std/list.dawn: " ++ e.message)
+  }
+  assert str.slice(src, lo, hi) == "reverse"
+
+  # and the Location the client is handed names that file, not this buffer
+  let nokey: Option[String] = None
+  match location_of(st, d, nokey, nokey, t.def_path, lo, hi) {
+    Some(loc) -> {
+      assert ostr(loc, "uri") == path_to_uri(canon("std/list.dawn"))
+      assert ostr(loc, "uri") != d.uri
+    }
+    None -> panic("a std file that exists must resolve to a Location")
+  }
+
+  # `use std/list` reaches location_of through DUseModule, which reads
+  # ModExports.src_path -- and std modules are checked with no src_path on
+  # purpose, so the bundle's own record is the only thing that can answer.
+  let u = def_probe_at(st, d, text, "std/list", 0)
+  assert u.def_path == Some(canon("std/list.dawn"))
+}
+
+test "an embedded std offers no definition instead of one in the wrong file" {
+  # A released toolchain in a project with no std directory: the embedded copy
+  # answers, and there is no file on disk to jump into. The honest reply is no
+  # definition at all. Emitting a None path here would be the original bug --
+  # None is the entry document, and std is not it.
+  let emb = match load_std("/tmp/dawn-selfhost-lsp-def/no-std-here") {
+    Ok(sc) -> sc
+    Err(e) -> panic("embedded std: " ++ std_load_error_text(e))
+  }
+  let absent: Option[String] = None
+  assert emb.dir == absent
+  let st = def_probe_state(emb)
+  let text = def_probe_text()
+  let d = def_probe_doc(st, text)
+
+  let t = def_probe_at(st, d, text, "list.reverse", 5)
+  match t.def {
+    Some(_) -> panic("an embedded std module has no file to point into")
+    None -> ()
+  }
+  # `handle_definition` replies [] on a None def, so location_of is never
+  # reached and cannot invent a range.
+
+  # What must survive: hover travels independently of def/def_path, and losing
+  # the jump must not cost the text.
+  assert str.contains(t.hover, "reverse")
+  assert str.contains(t.hover, "List[T]")
+
+  # local definitions are unaffected by which half of std answered
+  let l = def_probe_at(st, d, text, "helper(xs", 0)
+  assert l.def_path == absent
+  let (llo, lhi) = def_probe_span(l, "helper")
+  assert str.slice(text, llo, lhi) == "helper"
+}
+
+test "a definition of a std constant names std's file too" {
+  # `def_of_const_in` reaches std through its own loop rather than through
+  # `module_ast_by_class`, and today's bundle declares no `pub const` at all,
+  # so the real std cannot exercise it: a mutant reverting that branch on its
+  # own survived the whole suite. The probe std is what makes the branch
+  # reachable, and it is a one-module std for the same reason the id-counter
+  # probe in driver/stdlib is -- the real bundle's contents are not the thing
+  # under test.
+  let root = "/tmp/dawn-selfhost-lsp-def/conststd"
+  let _ = io.mkdirs(root)
+  def_probe_put(root ++ "/modules.txt", "constprobe\n")
+  def_probe_put(root ++ "/constprobe.dawn", "pub const PROBE_LIMIT: Int = 7\n")
+  let cstd = match load_std(root) {
+    Ok(sc) -> sc
+    Err(e) -> panic("probe std: " ++ std_load_error_text(e))
+  }
+  let st = def_probe_state(cstd)
+  let text = join([
+    "use std/constprobe.{PROBE_LIMIT}",
+    "",
+    "fn limit() -> Int = PROBE_LIMIT + 1",
+    ""
+  ], "\n")
+  let d = def_probe_doc_named(st, "constuser.dawn", text)
+
+  let t = def_probe_at(st, d, text, "PROBE_LIMIT + 1", 0)
+  let dp = match t.def_path {
+    Some(p) -> p
+    None -> panic("a std constant must name std's file")
+  }
+  assert dp == canon(root ++ "/constprobe.dawn")
+  let (lo, hi) = def_probe_span(t, "PROBE_LIMIT")
+  let src = match io.read_file(dp) {
+    Ok(s) -> s
+    Err(e) -> panic("probe std module: " ++ e.message)
+  }
+  assert str.slice(src, lo, hi) == "PROBE_LIMIT"
+}
+
+test "a local definition still resolves against the requesting document" {
+  # The contract the std fix leans on, from the other side. `def_path` None has
+  # to keep meaning "this buffer" -- that is what makes a definition in the file
+  # being edited resolve against the live text rather than whatever is on disk.
+  let std = match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
+  }
+  let st = def_probe_state(std)
+  let text = def_probe_text()
+  let d = def_probe_doc(st, text)
+
+  let t = def_probe_at(st, d, text, "helper(xs", 0)
+  let absent: Option[String] = None
+  assert t.def_path == absent
+  let (lo, hi) = def_probe_span(t, "helper")
+  assert str.slice(text, lo, hi) == "helper"
+
+  let nokey: Option[String] = None
+  match location_of(st, d, nokey, nokey, t.def_path, lo, hi) {
+    Some(loc) -> {
+      assert ostr(loc, "uri") == d.uri
+      let r = match oget(loc, "range") {
+        Some(j) -> j
+        None -> panic("a Location has a range")
+      }
+      let start = match oget(r, "start") {
+        Some(j) -> j
+        None -> panic("a range has a start")
+      }
+      # line 2 of the probe text, where `fn helper` is written
+      assert oint(start, "line") == 2
+    }
+    None -> panic("a definition in the requesting document must resolve")
+  }
+}

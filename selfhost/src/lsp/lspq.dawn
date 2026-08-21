@@ -44,7 +44,7 @@ use check/types.{
 }
 use check/cx.{Cx, ModExports}
 use driver/analyze.{Program, CheckedMod}
-use driver/stdlib.{StdCtx}
+use driver/stdlib.{StdCtx, std_file_of}
 
 ## The document analysis a query runs against: the entry module's checked
 ## state plus everything needed to resolve names defined elsewhere.
@@ -60,7 +60,12 @@ pub type QCx = {
 }
 
 ## What sits under the cursor: hover text plus an optional definition site.
-## `def_path` None = the analyzed document itself.
+##
+## `def` None = there is no definition to jump to, and `def_path` is only read
+## when `def` is `Some`. `def_path` None then means the analyzed document
+## itself, so nothing defined in another file may leave it None: the two
+## readings are indistinguishable downstream, and `location_of` resolves the
+## second one against the requesting buffer.
 pub type Target = {
   lo: Int,
   hi: Int,
@@ -136,7 +141,19 @@ fn sig_by_owner(qc: QCx, owner: Option[String], name: String, trait_id: Option[I
 }
 
 ## The parse AST of the module whose JVM class is `owner`, with its file path
-## (None = the entry document or a std module).
+## (None = the entry document).
+##
+## A std module answers with the file its text was read from. `load_std` builds
+## every std `Cx` without a `src_path` -- that field renders into a user-visible
+## duplicate-impl diagnostic, so std must not carry one -- and the bundle's own
+## `dir_modules` record is where the file lives instead.
+##
+## When the embedded copy supplied the module there is no file, and this fails
+## the whole lookup rather than answering `None`. `None` here means "the
+## document being analyzed", which is what makes a local definition resolve
+## against the live buffer; a std module borrowing it hands `location_of` the
+## requesting document's uri and std's offsets, and the reply is a confident
+## range in an unrelated file rather than a missing one.
 fn module_ast_by_class(qc: QCx, owner: String) -> Option[(Module, Option[String])] = {
   if owner == qc.entry.class_name { return Some((qc.entry.m, None)) }
   for cm in qc.prog.modules {
@@ -144,7 +161,12 @@ fn module_ast_by_class(qc: QCx, owner: String) -> Option[(Module, Option[String]
   }
   for tr in qc.std.srcs {
     let (mp, _, m) = tr
-    if mp == owner { return Some((m, None)) }
+    if mp == owner {
+      match std_file_of(qc.std, mp) {
+        Some(f) -> return Some((m, Some(f)))
+        None -> return None
+      }
+    }
   }
   None
 }
@@ -287,11 +309,17 @@ fn def_of_const_in(qc: QCx, mod_path: String, name: String) -> (Option[(Int, Int
       }
     }
   }
+  # same rule as `module_ast_by_class`: a std const is in std's file, and there
+  # is no definition to offer at all when the embedded copy supplied the module
   for tr in qc.std.srcs {
     let (mp, _, m) = tr
     if mp == mod_path {
-      match const_decl_span(m, name) {
-        Some(sp) -> return (Some(sp), None)
+      match std_file_of(qc.std, mp) {
+        Some(f) ->
+          match const_decl_span(m, name) {
+            Some(sp) -> return (Some(sp), Some(f))
+            None -> return no_def()
+          }
         None -> return no_def()
       }
     }
@@ -422,7 +450,16 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
               let d0: Option[(Int, Int)] = Some((0, 0))
               (d0, Some(sp))
             }
-            None -> no_def()
+            # std exports carry no src_path, so the bundle's record answers for
+            # them; an embedded std has no file and offers no jump
+            None ->
+              match std_file_of(qc.std, path) {
+                Some(f) -> {
+                  let d0: Option[(Int, Int)] = Some((0, 0))
+                  (d0, Some(f))
+                }
+                None -> no_def()
+              }
           }
         None -> no_def()
       }

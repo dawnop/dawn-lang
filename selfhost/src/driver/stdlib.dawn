@@ -516,6 +516,26 @@ pub fn std_module_of(std: StdCtx, path: String) -> Option[String] !io = {
   map.get(std.dir_modules, canon(path))
 }
 
+## The file this compiler read the std module `mod_path` from, or `None` when
+## no file holds it because the embedded copy answered for that module.
+##
+## The inverse of `std_module_of`, over the same one table. Deliberately a scan
+## rather than a second map built alongside `dir_modules`: the fact being asked
+## for is "which file did this text come off", and `dir ++ "/" ++ name` would
+## answer it for a module the embedded copy supplied, naming a file that either
+## does not exist or is somebody else's.
+##
+## The answer is per module, not per std: `std_read_from` falls back file by
+## file, so a directory missing one module loads it from the embedded copy and
+## every other module still has a file.
+pub fn std_file_of(std: StdCtx, mod_path: String) -> Option[String] = {
+  for pr in map.entries(std.dir_modules) {
+    let (file, mp) = pr
+    if mp == mod_path { return Some(file) }
+  }
+  None
+}
+
 ## Is `dir` the very directory this compiler read its std from? Used to answer
 ## a directory target as what it is instead of as a malformed project.
 pub fn is_std_dir(std: StdCtx, dir: String) -> Bool !io =
@@ -832,5 +852,41 @@ test "a std directory with no modules.txt falls back to the embedded copy" {
       println("embedded fallback failed: " ++ std_load_error_text(e))
       assert false
     }
+  }
+}
+
+test "a std module's file is only known when a directory supplied it" {
+  # `std_file_of` is what lets a reader jump into std, and the answer it must
+  # not invent is the one for a module the embedded copy filled in: there is no
+  # file, and naming `<dir>/<name>.dawn` anyway would point at whatever happens
+  # to sit there.
+  let std = match load_std("std") {
+    Ok(s) -> s
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
+  }
+  let f = match std_file_of(std, "std/list") {
+    Some(p) -> p
+    None -> panic("std/list came off the directory and has a file")
+  }
+  # the same one fact read in both directions, not two records that could drift
+  assert std_module_of(std, f) == Some("std/list")
+  # absolute, because that is the spelling `dir_modules` is keyed by and the
+  # spelling a definition reply has to survive being resolved from any cwd
+  assert str.starts_with(f, "/")
+  assert str.ends_with(f, "/std/list.dawn")
+  # a module path no std ever had
+  let absent: Option[String] = None
+  assert std_file_of(std, "std/not-a-module") == absent
+
+  # and the embedded half: every module loaded, none of them has a file
+  let root = "/tmp/dawn-selfhost-stdlib/absent"
+  let _ = io.mkdirs(root)
+  match load_std(root ++ "/nothing-here") {
+    Ok(emb) -> {
+      assert map.has(emb.exports, "std/list")
+      assert std_file_of(emb, "std/list") == absent
+      assert emb.dir == absent
+    }
+    Err(e) -> panic("embedded fallback failed: " ++ std_load_error_text(e))
   }
 }
