@@ -38,6 +38,7 @@ use front/ast.{
   UnOp, OpNeg, OpNot, OpBnot,
   Arg, pos_arg, trail_arg, MatchArm, Expr, EInt, EChar, EFloat, EBool, EUnit, EStr, EVar,
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
+  ListElem, LeExpr, LeSpread, LeIf, ListIfArm,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
   EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm,
   PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList,
@@ -1961,6 +1962,15 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
     # into a closure, and only a block has one (spec §4.10).
     Err((st, perr_h(p, st, "`with` is a statement and needs an enclosing block",
       "wrap the body in braces: fn f() = { with x <- g(...) ... }")))
+  } else if k == DOTDOT {
+    # `..` never starts an expression: each of its roles is a position, and
+    # naming them is the whole diagnostic. The list-element spread is the one
+    # that reaches here most often, because it is the one that looks like a
+    # prefix operator and is not: `[a, ..xs]` is an element, `f(..xs)` and
+    # `..xs ++ ys` are not element positions and have no meaning.
+    Err((st, perr_h(p, st, "`..` is not an expression",
+      "it spreads only in a list-literal element (`[a, ..xs]`), a record base " ++
+        "(`Point { ..p }`), a rest pattern (`[x, ..rest]`) or a range (`0..n`)")))
   } else {
     Err((st, perr(p, st, "expected an expression, found `" ++ t.text ++ "`")))
   }
@@ -2223,9 +2233,9 @@ fn bare_lambda1(p: P, st: St, nb: Bool) -> PR[Expr] = {
 fn list_lit(p: P, st: St) -> PR[Expr] = {
   let (st1, open) = adv(p, st)
   var st2 = skip_nl(p, st1)
-  var elems: List[Expr] = []
+  var elems: List[ListElem] = []
   while not at_kind(p, st2, RBRACKET) {
-    let (st3, e) = expression(p, st2, false)?
+    let (st3, e) = list_elem(p, st2)?
     elems = elems ++ [e]
     st2 = skip_nl(p, st3)
     if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
@@ -2233,6 +2243,58 @@ fn list_lit(p: P, st: St) -> PR[Expr] = {
   let (st4, close) = want(p, st2, RBRACKET, "`]`")?
   Ok((st4, EListLit(elems, open.lo, close.hi)))
 }
+
+## One element of a list literal (spec §4.11). Two of the three forms are
+## decided here rather than in `primary`, because both are positions rather
+## than operators: `..` spreads *because* it stands between two commas, and an
+## else-less `if` contributes zero or one element *because* it does.
+fn list_elem(p: P, st: St) -> PR[ListElem] = {
+  if at_kind(p, st, DOTDOT) {
+    let (st1, dots) = adv(p, st)
+    # `[..]` and `[a, .., b]` reach `expression` with nothing to spread; say so
+    # here rather than let the generic "expected an expression" name whatever
+    # closing token happens to follow.
+    if at_kind(p, st1, RBRACKET) || at_kind(p, st1, COMMA) {
+      return Err((st1, perr_h(p, st1, "`..` needs a list to spread",
+        "write the list after it: `[a, ..rest]`")))
+    }
+    let st2 = skip_nl(p, st1)
+    let (st3, e) = expression(p, st2, false)?
+    return Ok((st3, LeSpread(e, dots.lo, e_hi(e))))
+  }
+  let (st1, e) = expression(p, st, false)?
+  match if_chain_arms(e) {
+    Some(arms) -> Ok((st1, LeIf(arms, e_lo(e), e_hi(e))))
+    None -> Ok((st1, LeExpr(e)))
+  }
+}
+
+## The arms of an `if` chain that never reaches an `else`, or None for
+## everything else. This is the whole of the conditional element form's
+## grammar: at an element position `if c { x }` and `if a { x } else if b { y }`
+## contribute zero or one element, while a chain *ending* in an `else` is one
+## ordinary element and keeps the meaning it had before -- the asymmetry is
+## deliberate and written down in spec §4.11.
+##
+## `else if` nests in the else slot (see `if_expr`), so walking that slot is
+## what makes the whole chain one element rather than the last arm alone.
+## An `else { if ... }` written with braces is a block, not this shape, and
+## stays an ordinary element.
+fn if_chain_arms(e: Expr) -> Option[List[ListIfArm]] =
+  match e {
+    EIf(cond, thn, els, _, _) -> {
+      let here = ListIfArm { cond: cond, body: thn }
+      match els {
+        None -> Some([here])
+        Some(inner) ->
+          match if_chain_arms(inner) {
+            Some(rest) -> Some([here] ++ rest)
+            None -> None
+          }
+      }
+    }
+    _ -> None
+  }
 
 fn paren_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   # `(a, b) => e` / `(a: Int) => e` / `() => e`: decided before the group is

@@ -15,6 +15,7 @@ use front/ast.{
   BinOp, UnOp, bin_op_name, un_op_name,
   Arg, MatchArm, Expr, EInt, EChar, EFloat, EBool, EUnit, EStr, EVar,
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
+  ListElem, LeExpr, LeSpread, LeIf,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
   EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm,
   PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList,
@@ -266,6 +267,25 @@ fn dump_arg(out: List[String], d: Int, a: Arg) -> List[String] =
     None -> dump_expr(out, d, a.e)
   }
 
+## A list-literal element. `LeExpr` prints as the expression alone, so every
+## list literal written before the other two forms existed dumps unchanged.
+fn dump_list_elem(out: List[String], d: Int, x: ListElem) -> List[String] =
+  match x {
+    LeExpr(e) -> dump_expr(out, d, e)
+    LeSpread(e, lo, hi) -> {
+      let o = out ++ [ind(d) ++ "Spread " ++ sp(lo, hi)]
+      dump_expr(o, d + 1, e)
+    }
+    LeIf(arms, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "IfElem " ++ sp(lo, hi)]
+      for a in arms {
+        o = dump_expr(o, d + 1, a.cond)
+        o = dump_expr(o, d + 1, a.body)
+      }
+      o
+    }
+  }
+
 fn dump_stmt(out: List[String], d: Int, s: Stmt) -> List[String] =
   match s {
     SLet(name, mutable, ann, init, lo, hi) -> {
@@ -395,7 +415,7 @@ fn dump_expr(out: List[String], d: Int, e: Expr) -> List[String] =
     }
     EListLit(elems, lo, hi) -> {
       var o = out ++ [ind(d) ++ "ListLit " ++ sp(lo, hi)]
-      for x in elems { o = dump_expr(o, d + 1, x) }
+      for x in elems { o = dump_list_elem(o, d + 1, x) }
       o
     }
     ETupleLit(elems, lo, hi) -> {

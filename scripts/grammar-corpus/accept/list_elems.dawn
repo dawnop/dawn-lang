@@ -1,0 +1,62 @@
+# The `list_lit` production's two element forms (spec §4.11): the spread `..xs`
+# and the else-less conditional element. Both are *positions* rather than
+# operators, which is why they are the list literal's grammar and not the
+# expression grammar's -- `..` outside an element is refused (see
+# reject/list_spread_outside_element.dawn), and an `if` chain that ends in an
+# `else` is an ordinary element, so the same source is one production or the
+# other depending only on whether the chain terminates.
+#
+# This corpus only parses. What each form *means* is checker-corpus's
+# list_elems case; what it runs to is scripts/spike-native/list_elems.dawn.
+
+fn spreads(xs: List[Int], ys: List[Int]) -> List[Int] = [
+  0,
+  ..xs,
+  1,
+  ..ys,
+  ..[2, 3],
+  ..xs ++ ys,
+]
+
+fn conditionals(a: Bool, b: Bool, n: Int) -> List[Int] = [
+  0,
+  if a { 1 },
+  if a { 2 } else if b { 3 },
+  if a { 4 } else if b { 5 } else { 6 },
+  if n == 7 {
+    7
+  } else if n == 8 {
+    8
+  },
+  9,
+]
+
+fn together(xs: List[Int], c: Bool) -> List[Int] = [..xs, if c { 1 }, 2, ..xs]
+
+fn nested(xs: List[List[Int]], c: Bool) -> List[List[Int]] =
+  [[0, ..[1]], ..xs, if c { [..[2]] }]
+
+fn one_spread(xs: List[Int]) -> List[Int] = [..xs]
+
+fn trailing_comma(xs: List[Int], c: Bool) -> List[Int] = [..xs, if c { 1 },]
+
+# newlines may sit after `..` exactly as they may after a comma
+fn across_lines(xs: List[Int]) -> List[Int] = [
+  0,
+  ..
+    xs,
+]
+
+# a range is still a range: `..` between two values is the for-header operator
+fn ranges(n: Int) -> Int = {
+  var s = 0
+  for i in 0..n { s = s + i }
+  s
+}
+
+# and the rest pattern is still a pattern
+fn rest(xs: List[Int]) -> Int =
+  match xs {
+    [x, ..more] -> x + len(more)
+    _ -> 0
+  }

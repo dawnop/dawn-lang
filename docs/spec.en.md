@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ d75452f1cd007cf3 -->
+<!-- doc-check: translation-of docs/spec.md @ 0030f2977fd6c984 -->
 
 # Dawn Language Specification
 
@@ -95,7 +95,7 @@ spaced `a < -b` is unaffected, and `dawn fmt` puts a space on both sides of ever
 | `true` / `false` | `Bool` | |
 | `"hello"` | `String` | see §1.6 |
 | `()` | `Unit` | the only value |
-| `[1, 2, 3]` | `List[Int]` | trailing comma allowed |
+| `[1, 2, 3]` | `List[Int]` | trailing comma allowed; element forms in §4.11 |
 | `(1, "a")` | `(Int, String)` | tuple, 2 to 8 elements |
 | `'a'`, `'\n'`, `'世'`, `'\u{1F600}'` | `Char` | character literal (see below) |
 
@@ -1479,6 +1479,107 @@ bracket(FileOutputStream.new(path), s => s.close(), f => {
 > `return`/`break` cannot get out of it at the language level, and so the compiler owes no
 > escape-rewriting pass.
 > The criteria are in `docs/core-move2-design.md` §2.6 and §6.
+
+### 4.11 List literals and their element forms
+
+```
+list_lit  = "[" [ list_elem { "," list_elem } [ "," ] ] "]"
+list_elem = expr                       (* an ordinary element: contributes one *)
+          | ".." expr                  (* a spread: contributes 0..n *)
+          | if_no_else                 (* a conditional element: contributes 0 or 1 *)
+if_no_else = "if" expr block { "else" "if" expr block }   (* no final else *)
+```
+
+```dawn
+column([
+  header,
+  ..body,                            # body: List[Widget[Msg]], spliced in whole
+  if m.note != "" { text(m.note) },  # a line only when there is something to say
+  help,
+])
+```
+
+The three element forms hold **only inside a list literal**. Tuples, records and constructor
+arguments do not know them; the pattern `[x, ..rest]` (§5.1) is a different thing — the rest of
+a destructuring, spelled symmetrically with the spread here and meaning the opposite.
+
+**The spread `..xs`**: the operand must be a `List[T]`, and each of its elements is laid out in
+place. Anything else is "`..` spreads a list, but this is …". `..` is never legal in expression
+position; it appears in exactly these places: the range in a `for` header (§4.7), the record
+spread `P { ..p }` (§2.4), the rest pattern (§5.1), and the element spread here.
+
+**The conditional element `if c { x }`**: a true condition contributes one element `x`, a false
+one contributes none. `x`'s type joins the element type, and **it need not be `Unit`** — the
+rule that an `if` without an `else` must be `Unit` (§4.6) does not apply at this position,
+because nothing here needs it to produce a value.
+
+**An `else if` chain is one element form as a whole**: `if a { x } else if b { y }` contributes
+0 or 1, taking the arm whose condition is first true, and none if no condition is. However deep
+the chain, it is one element form.
+
+**A chain that does end in an `else` is not an element form**; it is an ordinary element, and it
+means exactly what it meant before this feature existed: `[a, if c { x } else { y }, b]` is
+always three elements. Hence a **deliberate asymmetry** — the else-less form may be omitted, the
+form with an `else` may not be expanded:
+
+```dawn
+[a, if c { x }]              # 0 or 1: a conditional element
+[a, if c { x } else { y }]   # always 1: an ordinary element, one of two
+[a, if c { ..xs } else { ..ys }]   # illegal: `..` is not at an element position
+```
+
+The reason is to **take the smallest cut**. Letting the form with an `else` expand too means
+making both branches of an `if` be *a run of elements* rather than a value — Dart's
+collection-if/collection-else, a second `if` grammar that holds only inside a collection
+literal, and with it a string of further questions about whether the `else` branch may nest a
+`for`, another `if`, and so on. The else-less form needs **none** of that: in ordinary
+expression position it could only ever be `Unit`, so moving it to an element position collides
+with no existing meaning. The same reasoning rules out a collection-for (`[for x in xs { f(x) }]`):
+`list.map` already writes it, and adding `for` immediately raises "why is there no `while`".
+
+**Evaluation order** is left to right, and the element forms do not change that. A conditional
+element's body **is evaluated only when its arm is taken**.
+
+**Typing**: every element form's contribution joins one element type `T`, and the literal is a
+`List[T]`. An ordinary element contributes its own type, a spread contributes the `T` of its
+`List[T]`, a conditional element contributes the common type of its arms' bodies.
+
+**The expected type is pushed down**, which is what the element forms are really for: once `T`
+is settled — from the literal's expected type, or from any element already checked — every later
+element is checked *at* `T`. A spread's operand receives `List[T]`, and **each body** of a
+conditional element receives `T`. So:
+
+```dawn
+# text: fn text[M](s: String) -> Widget[M], where M appears only in the return type
+[text(s)]                    # error: cannot infer type parameter(s) M
+[header, text(s)]            # fine: header settles M as Msg first
+[header, if c { text(s) }]   # equally fine: the expectation crosses into the body
+```
+
+The third line is why intermediate bindings like `let note: List[Widget[Msg]] = if …`
+**disappear**: a standalone `[text(s)]` binding has no sibling to ask and must be annotated,
+while the same things written as elements of one literal need no annotation. Elements that
+cannot be checked without an expectation (a bare `None`, a nested `[]`) are still checked in a
+second round, so they do not depend on source order.
+
+> **Breaking change in meaning (after v0.67.0)**: `[if c { <a Unit expression> }]` used to be
+> legal, of type `List[Unit]`, and **always of length 1** — the `if` inside was an ordinary
+> element, evaluated as a statement and producing `()`. The same source now has length 0 or 1,
+> and the body is not evaluated at all when the condition is false. **Nothing is reported; the
+> behaviour changes silently.**
+>
+> The affected programs are exactly the family "a conditional element whose body has type
+> `Unit`", no more and no less: before the element forms, an `if` without an `else` in
+> expression position could only be `Unit` (§4.6). Landing this, every `.dawn` file in
+> dawn-lang (566) and in the dawnop-site backend (84) was scanned file by file with the new
+> parser: **zero existing occurrences**.
+>
+> No transitional diagnostic was added, because it could only be an error: Dawn's diagnostics
+> have no severity — `Diag` carries `msg/lo/hi/hint` and everything is an error. And making "a
+> conditional element whose body is `Unit`" an error would carve a permanent hole in the new
+> form's typing rule to protect a class of programs measured not to exist; a `List[Unit]` of
+> length 0 or 1 is coherent under the new rule. A transition ends; a special case in a typing
+> rule does not.
 
 ---
 
@@ -3162,6 +3263,7 @@ if x > 0 { "pos" } else { "non-pos" }
 match opt { Some(v) -> v, None -> fallback }
 xs |> filter(x => x > 0) |> map(x => to_string(x)) |> join(", ")
 xs[0]                            # subscript: goes through the Index trait; out of range panics, enquire with get (§4.8)
+[a, ..xs, if c { b }]            # list element forms: spread / conditional element (§4.11)
 read_file(path)?                 # Result propagation
 if n < 0 { return "negative" }   # early return (§4.9)
 xs.each { x => println("$x") }  # tail block: the last argument (§4.3)

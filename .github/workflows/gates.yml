@@ -964,6 +964,32 @@ jobs:
       - name: compiler weight schema and synthetic process contract
         run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/selfhost-bench-contract/run.py
 
+  # The list literal's element forms (spec §4.11): ten compiling mutants, one
+  # per sentence of `..xs` and the else-less `if`, each run against the whole
+  # assertion set and diffed against a recorded matrix.
+  #
+  # Its own job rather than a step of `contracts`, which is where the other
+  # single-purpose mutant contracts sit. That job's worst observation is 356s
+  # against a 660s run pole, and 145s of local mutants at runner speed would
+  # put its next budget claim on the pole itself. A job costs a queue slot;
+  # the pole costs the whole run.
+  list-elems-contract:
+    runs-on: ubuntu-latest
+    # Ten `dawn build`s of the compiler at ~6s each plus twelve assertion runs
+    # per mutant: 145s locally, and no CI observation yet. 290s is that
+    # doubled for the runner, which is the planning value the two sharded
+    # mutant jobs used before their first runs corrected them (#299); replace
+    # it with the observation once there is one.
+    # budget: 3x 290s planning value (local 145s, doubled for the runner)
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: list element contract
+        run: ./scripts/list-elems-contract/run.sh
+
   # Phase 2 measures process semantics, not runner hardware. The complete
   # contract measured 60s locally, and the reused toolchain setup has a 29s
   # observed upper bound. Keep it parallel to the 163s Phase 1 contract.

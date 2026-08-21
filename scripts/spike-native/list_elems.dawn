@@ -1,0 +1,95 @@
+# The two list-literal element forms (spec §4.11) on both backends: `..xs`
+# splices a list in, and an else-less `if` contributes zero or one element.
+#
+# It is here rather than only in the inline tests because the lowering is new
+# *Core*, not new checking: a list literal with either form stops being a
+# single `CListLit` and becomes an accumulator -- a local, a `++` per segment,
+# and a conditional assignment. Nothing in the corpus reached that shape
+# before, so "the existing corpus is green" said nothing about it. The
+# reference-counting pass in particular had never seen a list-typed local that
+# is assigned to from inside an `if`, which is what `asan` and the leak check
+# on this file are for.
+use std/io
+use std/list
+use std/str
+
+fn even(n: Int) -> Bool = n % 2 == 0
+
+fn nums(n: Int) -> List[Int] = {
+  var out: List[Int] = []
+  var i = 0
+  while i < n {
+    out = out ++ [i]
+    i = i + 1
+  }
+  out
+}
+
+## An element that only types because a *sibling* settles the element type:
+## `wrap` has a type parameter that appears in the return type alone, so
+## `[wrap(s)]` on its own cannot be inferred. This is the lever the whole
+## feature rides on, so it is checked at runtime too, not only by compiling.
+pub type Tagged[T] = Tagged(label: String)
+
+fn wrap[T](s: String) -> Tagged[T] = Tagged(label: s)
+
+fn label_of[T](t: Tagged[T]) -> String =
+  match t {
+    Tagged(s) -> s
+  }
+
+## A body with an effect: it must not run when its arm is not taken. This is
+## the observable half of the breaking change recorded in spec §4.11 -- the same
+## source used to evaluate the body and keep a `Unit` element regardless.
+fn shout(s: String) -> Int !io = {
+  println("  (evaluated ${s})")
+  str.len(s)
+}
+
+pub fn main() -> Unit !io = {
+  println("-- spread --")
+  let xs = [1, 2, 3]
+  println(to_string([0, ..xs, 9]))
+  println(to_string([..xs]))
+  println(to_string([..xs, ..xs]))
+  println(to_string([..[], 7]))
+  let empty: List[Int] = []
+  println(to_string([0, ..empty, 1]))
+
+  println("-- conditional element --")
+  println(to_string([0, if true { 7 }, 9]))
+  println(to_string([0, if false { 7 }, 9]))
+  println(to_string([if false { 1 }]))
+  println(to_string([if true { 1 }]))
+
+  println("-- else-if chain, no final else --")
+  var k = 0
+  while k < 4 {
+    println("k=${k} -> ${to_string([0, if k == 1 { 11 } else if k == 2 { 22 }, 9])}")
+    k = k + 1
+  }
+
+  println("-- a final else is one ordinary element --")
+  println(to_string([0, if false { 11 } else { 22 }, 9]))
+
+  println("-- both forms, and a run between them --")
+  println(to_string([0, ..xs, 4, 5, if true { 6 }, ..xs, if false { 8 }, 9]))
+
+  println("-- nesting --")
+  println(to_string([[0], ..[[1, 2]], if true { [3] }]))
+
+  println("-- order is left to right, and a body only runs when taken --")
+  let taken = [shout("a"), if true { shout("bb") }, if false { shout("ccc") }, shout("dddd")]
+  println(to_string(taken))
+
+  println("-- the sibling lever --")
+  let anchor: Tagged[Int] = Tagged(label: "anchor")
+  let note = "hello"
+  let tagged = [anchor, if note != "" { wrap(note) }, anchor]
+  println(to_string(list.map(tagged, t => label_of(t))))
+
+  println("-- a long one, built by spreads --")
+  let big = [0 - 1, ..nums(200), ..nums(200), 999]
+  println("len=${len(big)} head=${big[0]} mid=${big[200]} last=${big[len(big) - 1]}")
+  println("evens=${len(list.filter(big, n => even(n)))}")
+}

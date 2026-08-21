@@ -126,20 +126,28 @@ impl App[Model] {
   # The view writes in the DSL spelling (tea/dsl) since #310; the snapshot
   # test below keeps a bare-constructor twin of the same tree, so the two
   # surfaces are held equal by `==`, not by trust.
+  #
+  # The children are one list literal, spreads and all (spec §4.11). It used to
+  # be `[header] ++ body ++ note ++ [help]` over two annotated `let`s, and the
+  # annotations were not decoration: `[dim(text("nothing yet..."))]` and
+  # `[text(m.note)]` are lists of a `Widget[M]` whose `M` appears nowhere in
+  # the arguments, so neither could be typed as a binding of its own. Inside
+  # the literal they are typed by their siblings -- `header` settles `M`, and
+  # the element type reaches through `..` and into the `if` body from there.
   fn view(m: Model) -> Widget[Msg] = {
     let done = list.filter(m.todos, t => t.done)
     let header: Widget[Msg] = bold(text(
       "todo (" ++ to_string(len(done)) ++ "/" ++ to_string(len(m.todos)) ++ " done)"))
-    let body: List[Widget[Msg]] =
-      if list.is_empty(m.todos) {
+    column([
+      header,
+      ..if list.is_empty(m.todos) {
         [dim(text("nothing yet; try: add buy milk"))]
       } else {
         list.map(m.todos, t => item_row(t))
-      }
-    let note: List[Widget[Msg]] = if m.note == "" { [] } else { [text(m.note)] }
-    let help: Widget[Msg] = dim(text(
-      "commands: add <title> | tog <id> | del <id> | press <n> | quit"))
-    column([header] ++ body ++ note ++ [help])
+      },
+      if m.note != "" { text(m.note) },
+      dim(text("commands: add <title> | tog <id> | del <id> | press <n> | quit")),
+    ])
   }
 }
 

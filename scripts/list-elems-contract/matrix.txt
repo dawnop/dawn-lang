@@ -1,0 +1,79 @@
+# Which assertion each list-element mutant reddens, and which one of them owns
+# it. Regenerate the red sets with `./scripts/list-elems-contract/run.sh
+# --record`; the `role` and `owner` lines are a hand edit, because which
+# assertion owns a mutant is a design decision and a recorder that could
+# reassign owners would launder the collision it exists to catch.
+#
+# Overlaps are recorded, not forbidden. `else-if-chain-truncated` cannot leave
+# a two-arm chain standing, so it reddens `cond_arm_settles_later_arms` along
+# with its own; `cond-always-contributes` lengthens every conditional element,
+# so it reddens both run assertions that have one. What may not overlap is an
+# *owner*.
+#
+# Three of the ten are `recorded` rather than `counted`, and all three for one
+# measured reason: their red sets are strict subsets of another mutant's.
+#
+#   needs-expected-blind-to-spread and needs-expected-blind-to-cond delete the
+#   second-round deferral for one element form each. Deferral can only matter
+#   for an element that cannot be typed without an expectation -- and an
+#   element that needs one is exactly the element the push-down reaches, so
+#   whatever the reordering saves, `spread-operand-loses-expectation` and
+#   `cond-body-loses-expectation` break first. They are two halves of one
+#   mechanism and no program separates them. Both were measured, both redden
+#   the deferral assertion, and neither reddens anything else.
+#
+#   cond-arm-does-not-settle-later-arms keeps the `el_exp` fallback and drops
+#   only the arm-to-arm half of the same line. That needs a chain of at least
+#   two arms to observe, and a two-arm chain is exactly what
+#   else-if-chain-truncated destroys, so the one assertion it reddens has two
+#   other claimants.
+#
+# They stay on the list anyway: `mutate.py` refuses an anchor that has drifted,
+# so deleting any of the three sentences is a loud failure rather than a green
+# run. What they do not get is an owner.
+#
+# See README.md for what each mutant removes and why three of them are aimed
+# narrower than the designed mutation was.
+
+role	cond-always-contributes	counted
+owner	cond-always-contributes	cond_false_contributes_nothing
+red	cond-always-contributes	cond_false_contributes_nothing
+red	cond-always-contributes	else_if_chain_picks_first_true
+
+role	cond-arm-does-not-settle-later-arms	recorded
+red	cond-arm-does-not-settle-later-arms	cond_arm_settles_later_arms
+
+role	cond-body-loses-expectation	counted
+owner	cond-body-loses-expectation	cond_body_gets_expectation
+red	cond-body-loses-expectation	cond_arm_settles_later_arms
+red	cond-body-loses-expectation	cond_body_gets_expectation
+red	cond-body-loses-expectation	cond_defers_to_second_round
+
+role	cond-condition-unchecked	counted
+owner	cond-condition-unchecked	cond_condition_is_bool
+red	cond-condition-unchecked	cond_condition_is_bool
+
+role	else-if-chain-truncated	counted
+owner	else-if-chain-truncated	else_if_chain_compiles
+red	else-if-chain-truncated	cond_arm_settles_later_arms
+red	else-if-chain-truncated	else_if_chain_compiles
+red	else-if-chain-truncated	else_if_chain_picks_first_true
+
+role	needs-expected-blind-to-cond	recorded
+red	needs-expected-blind-to-cond	cond_defers_to_second_round
+
+role	needs-expected-blind-to-spread	recorded
+red	needs-expected-blind-to-spread	spread_defers_to_second_round
+
+role	spread-item-type-not-joined	counted
+owner	spread-item-type-not-joined	spread_item_type_joins
+red	spread-item-type-not-joined	spread_item_type_joins
+
+role	spread-operand-list-check-dropped	counted
+owner	spread-operand-list-check-dropped	spread_operand_must_be_list
+red	spread-operand-list-check-dropped	spread_operand_must_be_list
+
+role	spread-operand-loses-expectation	counted
+owner	spread-operand-loses-expectation	spread_operand_gets_expectation
+red	spread-operand-loses-expectation	spread_defers_to_second_round
+red	spread-operand-loses-expectation	spread_operand_gets_expectation

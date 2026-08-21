@@ -40,6 +40,7 @@ use check/tast.{
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
+  TListElem, TLEExpr, TLESpread, TLEIf, TListIfArm,
   TSPText, TSPInterp,
   BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr, UNeg, UNot, UBnot,
@@ -2853,17 +2854,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       let (st1, vs) = lower_all(st, elems)
       (st1, CTuple(vs, ty))
     }
-    XListLit(elems, _, _, ty) -> {
-      # elements cross into an erased container
-      var st1 = st
-      var vs: List[CExpr] = []
-      for el in elems {
-        let (st2, v) = lower_expr(st1, el)
-        st1 = st2
-        vs = vs ++ [adapt_in(v, tex_ty(el), TyVar("E", 0))]
-      }
-      (st1, CListLit(vs, ty))
-    }
+    XListLit(elems, _, _, ty) -> lower_list_lit(st, elems, ty)
     XCallBuiltin(name, args, wits, _, _, ty) -> {
       # `char_unchecked` is the Int -> Char bridge, and `Char`'s representation
       # *is* `Int` -- so it disappears here rather than becoming a primitive
@@ -3019,6 +3010,150 @@ fn lower_all(st: LSt, es: List[TExpr]) -> (LSt, List[CExpr]) = {
   }
   (st1, vs)
 }
+
+# ---- list literals ----
+
+## What a list literal turns into once its elements are grouped: a run of
+## ordinary elements is one node, and each spread or conditional element is
+## its own step. Segmenting first is what lets the common case -- a literal
+## with neither -- keep the single `CListLit` it always had, symbol counter
+## untouched, so no existing Core moves.
+type Seg =
+  | SegRun(items: List[TExpr])
+  | SegSpread(e: TExpr)
+  | SegIf(arms: List[TListIfArm])
+
+fn seg_list(elems: List[TListElem]) -> List[Seg] = {
+  var out: List[Seg] = []
+  var run: List[TExpr] = []
+  for el in elems {
+    match el {
+      TLEExpr(e) -> { run = run ++ [e] }
+      TLESpread(e) -> {
+        if len(run) > 0 {
+          out = out ++ [SegRun(run)]
+          run = []
+        }
+        out = out ++ [SegSpread(e)]
+      }
+      TLEIf(arms) -> {
+        if len(run) > 0 {
+          out = out ++ [SegRun(run)]
+          run = []
+        }
+        out = out ++ [SegIf(arms)]
+      }
+    }
+  }
+  if len(run) > 0 { out = out ++ [SegRun(run)] }
+  out
+}
+
+## `[a, b]` -- the shape a list literal has always had. Elements cross into an
+## erased container, so each is boxed here.
+fn lower_run(st: LSt, items: List[TExpr], ty: Ty) -> (LSt, CExpr) = {
+  var st1 = st
+  var vs: List[CExpr] = []
+  for e in items {
+    let (st2, v) = lower_expr(st1, e)
+    st1 = st2
+    vs = vs ++ [adapt_in(v, tex_ty(e), TyVar("E", 0))]
+  }
+  (st1, CListLit(vs, ty))
+}
+
+fn cat_list(a: CExpr, b: CExpr, ty: Ty) -> CExpr = CBinary(CConcat, a, b, ty)
+
+## `acc = acc ++ <v>`: the one append every segment after the first uses.
+fn append_seg(sym: Int, ty: Ty, v: CExpr) -> CStmt =
+  CSAssign(sym, cat_list(CLocal(sym, ty), v, ty))
+
+## A list literal (spec §4.11). With no spread and no conditional element this
+## is `CListLit` and nothing else; otherwise it becomes an accumulator, seeded
+## by the first segment and appended to by each of the rest.
+##
+## **The accumulator is left-leaning on purpose.** `std/pvec.concat(a, b)`
+## pushes `b`'s elements onto `a`, so it costs the length of its *right*
+## operand -- and `++` in source is right-associative, so the source spelling
+## `[a] ++ xs ++ ys ++ [b]` re-walks the growing tail once per join. Appending
+## into an accumulator pays each element exactly once instead: `[header, ..body,
+## ..note, help]` is len(body) + 2 pushes where `[header] ++ body ++ note ++
+## [help]` is len(body) + len(note) + 2. Building this right-associated would
+## have been quadratic in the number of spreads.
+fn lower_list_lit(st: LSt, elems: List[TListElem], ty: Ty) -> (LSt, CExpr) = {
+  let segs = seg_list(elems)
+  if len(segs) == 0 { return (st, CListLit([], ty)) }
+  if len(segs) == 1 {
+    match segs[0] {
+      SegRun(items) -> return lower_run(st, items, ty)
+      SegSpread(_) -> ()
+      SegIf(_) -> ()
+    }
+  }
+  let (st0, sym) = fresh_sym(st)
+  var st1 = st0
+  var stmts: List[CStmt] = []
+  var seeded = false
+  for sg in segs {
+    match sg {
+      SegRun(items) -> {
+        let (st2, v) = lower_run(st1, items, ty)
+        st1 = st2
+        if seeded {
+          stmts = stmts ++ [append_seg(sym, ty, v)]
+        } else {
+          stmts = stmts ++ [CSLet(sym, ty, v)]
+          seeded = true
+        }
+      }
+      SegSpread(e) -> {
+        let (st2, v) = lower_expr(st1, e)
+        st1 = st2
+        if seeded {
+          stmts = stmts ++ [append_seg(sym, ty, v)]
+        } else {
+          # `[..xs, ...]` starts *as* xs; the list is persistent, so sharing
+          # it costs nothing and the first append copies only what it adds
+          stmts = stmts ++ [CSLet(sym, ty, v)]
+          seeded = true
+        }
+      }
+      SegIf(arms) -> {
+        if not seeded {
+          stmts = stmts ++ [CSLet(sym, ty, CListLit([], ty))]
+          seeded = true
+        }
+        let (st2, ss) = lower_if_seg(st1, sym, ty, arms, 0)
+        st1 = st2
+        stmts = stmts ++ ss
+      }
+    }
+  }
+  (st1, CBlock(stmts, Some(CLocal(sym, ty)), ty))
+}
+
+## `if c { acc = acc ++ [x] } else if d { acc = acc ++ [y] }`. The chain has no
+## final else, which is exactly why the element contributes zero elements when
+## nothing matches -- and why a body is not evaluated unless its arm is taken.
+fn lower_if_seg(
+  st: LSt,
+  sym: Int,
+  ty: Ty,
+  arms: List[TListIfArm],
+  k: Int
+) -> (LSt, List[CStmt]) =
+  if k >= len(arms) {
+    (st, [])
+  } else {
+    let a = arms[k]
+    let (st1, c) = lower_expr(st, a.cond)
+    let (st2, b) = lower_expr(st1, a.body)
+    let one = CListLit([adapt_in(b, tex_ty(a.body), TyVar("E", 0))], ty)
+    let thn = CBlock([append_seg(sym, ty, one)], None, TyUnit)
+    let (st3, rest) = lower_if_seg(st2, sym, ty, arms, k + 1)
+    let els: Option[CExpr] = if len(rest) == 0 { None } else { Some(CBlock(rest, None, TyUnit)) }
+    (st3, [CSIf(c, thn, els)])
+  }
 
 fn lower_str(st: LSt, parts: List[TStrPart]) -> (LSt, CExpr) = {
   var st1 = st

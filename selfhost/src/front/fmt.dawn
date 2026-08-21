@@ -409,9 +409,12 @@ fn space(prev: Token, cur: Token, unary: Set[Int], postfix: Set[Int], on_use_lin
   if p == DOT || c == DOT { return false }
   # `..` closes up on both sides when it is the range operator (`0..n`, spec
   # §777 and the tutorial), so only a token that ends a value pulls it left.
-  # Its other four roles are prefixes -- the record spread `{ ..base }` and the
-  # list/constructor/record rest `[x, ..rest]` -- where what precedes is an
-  # opener or a comma, and the space there belongs to that token's rule.
+  # Its other roles are prefixes -- the record spread `{ ..base }`, the
+  # list/constructor/record rest `[x, ..rest]`, and the list-literal element
+  # spread `[a, ..xs]` (spec §4.11) -- where what precedes is an opener or a
+  # comma, and the space there belongs to that token's rule. The element
+  # spread needed no rule of its own for exactly that reason: it stands in a
+  # position the two existing ones already covered.
   if p == DOTDOT { return false }
   if c == DOTDOT && is_value_end(p) { return false }
   if p == BANG && not set.has(postfix, prev.lo) { return false }
@@ -596,6 +599,32 @@ test "the range operator closes up and the spread and rest prefixes do not" {
   # tightening the left side is SYN-18, the right side is nobody's finding yet.
   let n = "fn m(p: Pair) -> Int =\n  match p {\n    Pair(a, ..) -> a\n    Rec { a, ..} -> a\n  }\n"
   assert fmt_of(n) == n
+}
+
+## The list-literal element forms (spec §4.11) cost the formatter nothing, and
+## this is the evidence rather than the claim: the spread lands where the rest
+## pattern already put `..` -- after `[` or after a comma -- and a conditional
+## element is an `if` expression, which needs no rule at an element position it
+## does not need anywhere else. Written as a test because "we changed nothing"
+## and "we did not look" produce the same diff.
+test "the list element forms need no spacing rule of their own" {
+  # one line: after `[` the spread hugs, after a comma it takes the comma's space
+  let a = "fn a(xs: List[Int], c: Bool) -> List[Int] = [1, ..xs, if c { 2 }, 3]\n"
+  assert fmt_of(a) == a
+  assert fmt_of("fn a(xs: List[Int], c: Bool) -> List[Int] = [ 1 , .. xs , if c { 2 } , 3 ]\n") == a
+  let b = "fn b(xs: List[Int]) -> List[Int] = [..xs]\n"
+  assert fmt_of(b) == b
+  # multi-line, trailing comma, an `else if` chain and a nested literal
+  let m = "fn d(xs: List[Int], c: Bool) -> List[Int] = [\n  1,\n  ..xs,\n" ++
+    "  if c { 2 } else if not c { 4 },\n  3,\n]\n"
+  assert fmt_of(m) == m
+  assert fmt_of(fmt_of(m)) == m
+  let n = "fn e(xs: List[List[Int]]) -> List[List[Int]] = [[1], ..xs, if true { [2] }]\n"
+  assert fmt_of(n) == n
+  # a spread whose operand is itself an expression: `..` is still a prefix, and
+  # the operator inside keeps its own spacing
+  let o = "fn g(xs: List[Int]) -> List[Int] = [1, ..xs ++ xs]\n"
+  assert fmt_of(o) == o
 }
 
 ## The two sugars are token-level to this file: `with`/`<-` and a tail block

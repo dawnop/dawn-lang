@@ -22,6 +22,22 @@ pub type TStrPart =
 
 pub type TArm = { pat: TPat, guard: Option[TExpr], body: TExpr }
 
+pub type TListIfArm = { cond: TExpr, body: TExpr }
+
+## The typed twin of `ast.ListElem`: what one comma-separated slot of a list
+## literal turned out to be. The forms survive checking rather than being
+## folded into concatenations here, because the concatenation is a *lowering*
+## and there is nothing the checker could say about it that it has not already
+## said about the parts (docs/spec.md §4.11). Every element's type has been
+## unified into the literal's element type by the time this exists.
+pub type TListElem =
+  | TLEExpr(e: TExpr)
+## `..xs`, with `e` already known to be a `List` of the element type.
+  | TLESpread(e: TExpr)
+## An else-less `if` chain: zero or one element. Each arm's condition is
+## `Bool` and each body has the element type.
+  | TLEIf(arms: List[TListIfArm])
+
 ## A trait witness at a use site: the caller's forwarded dictionary symbol,
 ## the unique impl (coherence) identified by (trait, subject), or -- where the
 ## subject still mentions a rigid type parameter -- that impl *applied to* the
@@ -133,7 +149,7 @@ pub type TExpr =
 # a bare constructor-with-fields used as a function value: map(xs, Some)
   | XCtorValue(adt: Int, ci: Int, lo: Int, hi: Int, ty: Ty)
   | XField(target: TExpr, field_idx: Int, lo: Int, hi: Int, ty: Ty)
-  | XListLit(elems: List[TExpr], lo: Int, hi: Int, ty: Ty)
+  | XListLit(elems: List[TListElem], lo: Int, hi: Int, ty: Ty)
   | XTupleLit(elems: List[TExpr], lo: Int, hi: Int, ty: Ty)
   | XPropagate(operand: TExpr, lo: Int, hi: Int, ty: Ty)
   | XUnwrap(operand: TExpr, msg: String, lo: Int, hi: Int, ty: Ty)
