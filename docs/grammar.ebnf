@@ -155,7 +155,12 @@ unsafe_pure_expr = "unsafe_pure" block ;
 
 literal         = INT | FLOAT | STRING | CHAR | "true" | "false" | "(" ")" ;
                   (* CHAR 是 Int 字面量的语法糖, 值 = 码点; 详见 spec §1.5 *)
-list_lit        = "[" [ expr { "," expr } [ "," ] ] "]" ;
+list_lit        = "[" [ list_elem { "," list_elem } [ "," ] ] "]" ;
+list_elem       = expr                                       (* 普通元素 *)
+                | ".." expr                                  (* 展开, spec §4.11 *)
+                | if_no_else ;                               (* 条件元素, 0 或 1 个 *)
+if_no_else      = "if" expr block { "else" "if" expr block } ;
+                  (* 末尾没有 else; 带 else 的链是一个普通元素 *)
 paren_or_tuple  = "(" expr { "," expr } ")" ;
 ctor_expr       = TYPEIDENT ;                                (* 带实参的构造 = ctor_expr + call_args *)
 record_expr     = TYPEIDENT "{" [ ".." expr "," ] rec_field { "," rec_field } [ "," ] "}" ;

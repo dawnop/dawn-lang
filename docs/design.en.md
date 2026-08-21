@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/design.md @ d5829b55b9a838ec -->
+<!-- doc-check: translation-of docs/design.md @ d8c51a531aef4bae -->
 
 # Dawn Design Notes
 
@@ -195,10 +195,34 @@ were** after the review, with the reasoning recorded so it does not get relitiga
   prefix / suffix), and merging any two of them manufactures a real ambiguity (`!` already
   serves double duty as the `!io` effect marker and as the prefix of `!=`). Kept; `x! != v`
   splits `!=` by longest match, as noted in spec §8.2.
-- **Three uses of `..`** (range in a `for` head, rest pattern `..rest`, record spread
+- ~~**Three uses of `..`** (range in a `for` head, rest pattern `..rest`, record spread
   `..base`): the three contexts are mutually exclusive, none can occur where another can,
   and the parser tells them apart with no lookahead; merging or respelling buys nothing.
-  Kept.
+  Kept.~~
+  **Overturned (the list element spread, spec §4.11)**: `..` now has four uses, the fourth
+  being the element spread of a list literal, `[a, ..xs]`. What this verdict actually asked
+  was whether to **merge or respell the three that existed**, and the answer to that is
+  still no — it did not ask whether to **use it once more** in a fourth position, which is
+  the opposite ledger: the first spends migration cost to buy taste, the second spends no
+  migration cost at all to buy symmetry in a position that was **already empty**. Three
+  things separate it from the original verdict: ① **the position is empty** — `..` has never
+  been legal in expression position (`[0, ..xs, 99]` reported `expected an expression, found
+  ..` before this landed), so the new use competes with no existing meaning; ② **the
+  contexts are still mutually exclusive and still need no lookahead** — that criterion of
+  the original verdict is a *premise* of this change rather than a counterexample to it:
+  `list_elem` branches on a single token; ③ **construction mirrors destructuring** —
+  `[x, ..rest]` as a pattern was already there, and `[x, ..rest]` as an expression reads as
+  the same thing in reverse, so the fourth use closes the pair. That is the same preference
+  for consistency the phrase "merging or respelling buys nothing" was expressing. The cost
+  side was measured too, and it produced **a new rule**: `push_digit` in
+  `examples/projects/calc.dawn` could have written its pattern and its return value in the
+  same shape (`[..init, Num(v)] -> [..init, Num(v * 10 + d)]`), but that file is in
+  `selfhost-prev-diff.sh`'s corpus, one leg of which is **the previous release's
+  compiler** — which cannot parse the new syntax. So the examples named in
+  `scripts/emit-labels.txt`, like `packages/{web,json}`, `site` and `playground`, have to
+  wait for a release before they may use the new forms. The seed discipline governs
+  `selfhost/src` and `std/`; this one governs the differential corpus, and neither covers
+  the other.
 
 Also: the review suspected "top-level declarations silently shadow the prelude" — the
 reality at P0.6 was that redefining a builtin/std name at the top level was an error.
