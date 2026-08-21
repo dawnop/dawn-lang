@@ -43,6 +43,25 @@ fi
 SJAR="$ROOT/build/dawn-selfhost.jar"
 STD="$ROOT/std"
 
+# Hand the toolchain its own std, for the subcommands that have no other way to
+# find it. `dawn lsp` is the one that needs it: an editor spawns the language
+# server with a cwd nobody chose, and a cwd-relative "std" then misses and the
+# embedded copy answers, so files of the very checkout being edited stop being
+# recognised as std. ROOT is resolved above by following this script's symlinks
+# to the real checkout, which is the toolchain's location and not the client's.
+#
+# Only when the directory is really there. An installed release ships bin/ and
+# build/ without std/, exports nothing, and the compiler falls through to the
+# copy embedded in the jar -- the std that release was built with, and so still
+# the right answer. Naming a path that does not exist would trade a wrong
+# directory for a missing one.
+#
+# An inherited DAWN_STD wins: it is the explicit request, this is the default.
+if [ -z "${DAWN_STD:-}" ] && [ -d "$STD" ]; then
+  DAWN_STD="$STD"
+  export DAWN_STD
+fi
+
 # Heap: pinned, not left to JVM ergonomics. With no -Xmx the ceiling is
 # MaxRAMPercentage=25% of the HOST's RAM, which makes "how much memory does a
 # build need" a property of the machine instead of a property of the workload.

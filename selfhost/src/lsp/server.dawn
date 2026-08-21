@@ -625,10 +625,57 @@ fn lifecycle_gate(lifecycle: Lifecycle, msg: Json) -> LifecycleGate = {
 
 # ---- the server loop ----
 
+## The `--std <dir>` a client passed on the server's command line, if any.
+##
+## Every other subcommand parses this; `lsp` did not, so there was not even an
+## escape hatch when the default landed somewhere wrong.
+pub fn lsp_std_flag(rest: List[String]) -> Option[String] = {
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      return Some(rest[i + 1])
+    }
+    i = i + 1
+  }
+  None
+}
+
+## Where a language server loads std from. Explicit flag first, then the std
+## belonging to this toolchain, and only then the cwd-relative literal.
+##
+## Not the process cwd, which is what this used to be. Every other subcommand
+## is run by someone who chose the directory they are standing in and can pass
+## `--std`; a language server is spawned by an editor, whose cwd nobody chose
+## and which is routinely not the checkout. The literal `"std"` then missed,
+## `load_std` fell back to the embedded copy, and a source file of the very
+## checkout being edited was no longer recognised as std: 281 phantom
+## "undefined function" diagnostics on files that `dawn check` calls clean.
+##
+## A toolchain only ever checked the std it was released with, so the answer
+## belongs to the toolchain. `bin/dawn` resolves its own location -- it already
+## follows symlinks hop by hop to find the real checkout -- and exports
+## DAWN_STD when a std directory is actually sitting there. An installed
+## release has none, exports nothing, and falls through to the copy embedded
+## in the jar, which is the std that release was built with and so is still the
+## right answer. The launcher never names a directory that does not exist.
+##
+## The last resort stays cwd-relative rather than becoming an error: running
+## the jar directly from a checkout is a real workflow, and it worked before.
+pub fn lsp_std_dir(flag: Option[String], from_env: Option[String]) -> String =
+  match flag {
+    Some(d) -> d
+    None ->
+      match from_env {
+        Some(d) -> d
+        None -> "std"
+      }
+  }
+
 ## The driver supplies resource factories rather than one process-global Java
 ## oracle. The JVM host creates a platform-only standalone lease and one lease
 ## per target; the native host creates lifecycle-compatible refusals.
-pub fn run_lsp(std_dir: String, host: LspLeaseHost) -> Unit !io = {
+pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !io = {
+  let std_dir = lsp_std_dir(std_flag, io.getenv("DAWN_STD"))
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> panic(std_load_error_text(e))
@@ -1966,6 +2013,36 @@ test "a bundled std buffer keeps its std identity through the document seam" {
     }
     WorkspaceMember(_) -> panic("a standalone buffer is not a workspace member")
   }
+}
+
+test "the language server's std is the toolchain's, not the client's cwd" {
+  # `run_lsp` used to be called with the bare literal "std", resolved against
+  # whatever directory the editor happened to spawn the server in. Same binary,
+  # same file, cwd one level above the checkout: 0 diagnostics became 7, all of
+  # them "undefined function" on a std source that `dawn check` calls clean.
+  # The rule this pins is the order, and the middle entry is the fix.
+  let none: Option[String] = None
+
+  # an explicit --std is the client speaking and wins over everything
+  assert lsp_std_dir(Some("/asked/for/std"), Some("/toolchain/std")) == "/asked/for/std"
+  assert lsp_std_dir(Some("/asked/for/std"), none) == "/asked/for/std"
+
+  # otherwise the std belonging to this toolchain, handed down by the launcher
+  assert lsp_std_dir(none, Some("/toolchain/std")) == "/toolchain/std"
+
+  # and only with nothing to go on does the cwd-relative literal answer. This
+  # is the last resort, not the default: running the jar straight out of a
+  # checkout still works, and an installed release has no directory either way,
+  # so `load_std` falls through to the embedded copy.
+  assert lsp_std_dir(none, none) == "std"
+
+  # the flag itself, which `lsp` did not parse at all before
+  assert lsp_std_flag(["--std", "/x"]) == Some("/x")
+  assert lsp_std_flag(["--std", "/x", "--std", "/y"]) == Some("/x")
+  assert lsp_std_flag([]) == none
+  # a trailing `--std` names no directory, so there is nothing to honour
+  assert lsp_std_flag(["--std"]) == none
+  assert lsp_std_flag(["--stdlib", "/x"]) == none
 }
 
 # ---- go to definition: which file the reply names ----
