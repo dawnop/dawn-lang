@@ -374,6 +374,7 @@ fn ev_test_body(
   ev_syms: List[Int],
   ptys: List[Ty],
   eparams: List[Eff],
+  eff: Eff,
   body: TExpr
 ) -> CExpr = {
   let sym = (nm: String, t: Ty) => Sym {
@@ -407,7 +408,7 @@ fn ev_test_body(
       param_names: pnames,
       param_defaults: [],
       ret: TyInt,
-      eff: EPure,
+      eff: eff,
       is_builtin: false,
       tparams: [],
       constraints: [],
@@ -451,7 +452,7 @@ test "a lone non-ground atom forwards this frame's slot for that atom" {
   let body = XApply(XLocal(1, "p", 0, 0, f0), [inner], 0, 0, TyInt)
   # `checker.ev_sym_list` hands the slots over in `atom_keys` order, so slot 8
   # is e0's (key 3 * 0 + 1) and slot 9 is e1's (key 3 * 1 + 1)
-  match ev_test_body([8, 9], [f0, f1], [e0, e1], body) {
+  match ev_test_body([8, 9], [f0, f1], [e0, e1], EPure, body) {
     CCall(CDynamic(CLocal(t0, _)), args, _) -> {
       assert t0 == 1
       # written argument, then the one evidence slot (types.fn_arity)
@@ -479,15 +480,21 @@ test "a lone non-ground atom forwards this frame's slot for that atom" {
 
 test "a ground label still builds the chain, and a pure row still builds none" {
   # The other half of `ev_forward`'s guard. A row with a written label asks for
-  # that effect's evidence, which is not what this frame's variable slot holds,
-  # so the cons stays. Over-forwarding here is invisible at runtime for the
-  # same reason the wrong slot is, so this too is pinned on the Core shape.
+  # that effect's evidence, which is not the same thing as a pack of it, so the
+  # cons stays. Over-forwarding here is invisible at runtime for the same
+  # reason the wrong slot is, so this too is pinned on the Core shape.
+  #
+  # The enclosing frame is given `!Ask` of its own, so it *has* a slot for the
+  # atom the callee names. Without that the guard could be deleted and nothing
+  # would move: the lookup would simply miss and fall through to the build.
+  let ask = ELabeled(EPure, [(7, "Ask")])
   let e0 = EffVar("e0", 0)
   let fv = TyFn([TyInt], TyInt, e0)
-  let fl = TyFn([TyInt], TyInt, ELabeled(EPure, [(7, "Ask")]))
+  let fl = TyFn([TyInt], TyInt, ask)
   let fp = TyFn([TyInt], TyInt, EPure)
   let lab = XApply(XLocal(2, "p", 0, 0, fl), [XInt(0, 0, 0)], 0, 0, TyInt)
-  match ev_test_body([8], [fv, fl, fp], [e0], lab) {
+  # slots in `atom_keys` order: the label's (key 21) first, then e0's (key 1)
+  match ev_test_body([8, 9], [fv, fl, fp], [e0], ask, lab) {
     CCall(CDynamic(_), args, _) -> {
       assert len(args) == 2
       match args[1] {
@@ -508,7 +515,7 @@ test "a ground label still builds the chain, and a pure row still builds none" {
   }
   # and a pure row is still the immortal empty pack, named nowhere
   let pure = XApply(XLocal(3, "p", 0, 0, fp), [XInt(0, 0, 0)], 0, 0, TyInt)
-  match ev_test_body([8], [fv, fl, fp], [e0], pure) {
+  match ev_test_body([8, 9], [fv, fl, fp], [e0], ask, pure) {
     CCall(CDynamic(_), args, _) -> {
       assert len(args) == 2
       match args[1] {
