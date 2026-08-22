@@ -25,7 +25,7 @@ use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyMap, TySet, TyArray, TyJava,
   DICT_ADT_ID,
-  Sym, Sig, Eff, EPure, Traits, TraitI, ImplI, MethodSig,
+  Sym, Sig, Eff, EPure, ELabeled, EffVar, Traits, TraitI, ImplI, MethodSig,
   eff_labels, eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty,
   EV_PACK_ID, ev_pack_ty,
@@ -131,7 +131,20 @@ pub type LSt = {
   tail: Bool,
   # set once a self tail call was actually rewritten, so only the functions
   # that need the wrapper loop pay for it
-  self_tail: Bool
+  self_tail: Bool,
+  # The evidence the frame being lowered holds, addressed by atom key
+  # (`types.atom_keys`) -- a named function's own per-atom slots. What a
+  # dynamic call site forwards instead of building; see `ev_forward`.
+  #
+  # Scoped to one Core function exactly like `dict_env`: a lifted body reaches
+  # its own parameters and not the enclosing function's, so entering one
+  # replaces this and leaving restores it.
+  ev_env: List[(Int, CExpr)],
+  # A lifted closure's own evidence slot: one erased pack, whatever its row
+  # (`fn_value_evs`). It answers for any single atom, because it is the whole
+  # chain rather than one node of it. None inside a named function, which has
+  # per-atom slots instead.
+  ev_own: Option[CExpr]
 }
 
 ## The function currently being lowered, as its own body sees it. Two things
@@ -289,8 +302,42 @@ fn lower_evidence(st: LSt, evid: List[TExpr]) -> (LSt, List[CExpr]) = {
   (st1, out)
 }
 
-## The evidence pack a call through a function **value** hands over: one cons
-## node per atom of the callee value's row, keyed by the atom
+## **Identity forwarding.** The evidence already in this frame that *is* the
+## pack the callee's row asks for, when there is one.
+##
+## The case is a row with no ground label and exactly one non-ground atom -- an
+## effect variable or a rigid projection. Then the callee's whole row is that
+## one atom, and which effect it turns out to be was decided by whoever
+## instantiated this frame. So the pack for it is not a new chain over a
+## placeholder: it is the evidence this frame is already holding for that same
+## atom, unchanged. Building a fresh cons there would be manufacturing a second
+## answer to a question that has one.
+##
+## This is a correctness rule before it is an optimisation. The knife that
+## starts *reading* packs needs the callee to receive the frame's real
+## evidence; a cons of placeholders is only indistinguishable from it while
+## nothing looks. What it buys today is that the allocation disappears --
+## every effect-polymorphic signature in std is a lone `!e`, so every `f(x)`
+## inside a higher-order function forwards rather than builds.
+##
+## A row with a ground label is left alone: the callee asks for a specific
+## effect's evidence, this frame's slot for it is a different thing from a
+## pack of it, and merging the two is the cons that `ev_build` still is.
+fn ev_forward(st: LSt, e: Eff) -> Option[CExpr] = {
+  if len(eff_labels(e)) != 0 { return None }
+  if len(eff_vars(e)) + len(eff_assocs(e)) != 1 { return None }
+  let ks = atom_keys(e)
+  for p in st.ev_env {
+    let (k, v) = p
+    if k == ks[0] { return Some(v) }
+  }
+  # a lifted closure has no per-atom slot to look up -- its one erased
+  # parameter is the pack, and a lone atom's pack is that pack
+  st.ev_own
+}
+
+## The cons chain a call site builds when nothing in the frame already is the
+## pack: one node per atom of the callee value's row, keyed by the atom
 ## (`types.atom_keys`), over the empty pack.
 ##
 ## Keyed rather than positional, which is what lets two rows meet without being
@@ -298,18 +345,179 @@ fn lower_evidence(st: LSt, evid: List[TExpr]) -> (LSt, List[CExpr]) = {
 ## vector was not (design 裁决背景 1). Built here rather than forwarded whole
 ## because the pack a caller holds and the pack a callee's row asks for are two
 ## different rows; merging them is a cons, and this is the cons.
-##
-## Under this knife every payload is a placeholder. A closure still carries the
-## evidence it was created under, so nothing on the receiving side reads a node
-## -- what the pack buys here is that both sides agree on the shape, and that
-## the allocation this convention costs is on the clock rather than deferred to
-## the knife that starts reading it.
-fn ev_pack(st: LSt, e: Eff) -> (LSt, CExpr) = {
+fn ev_build(e: Eff) -> CExpr = {
   var acc = ev_placeholder()
   for k in atom_keys(e) {
     acc = CCtor(EV_PACK_ID, 0, [CInt(k), ev_placeholder(), acc], ev_pack_ty())
   }
-  (st, acc)
+  acc
+}
+
+## The evidence pack a call through a function **value** hands over: the
+## frame's own evidence where that is what the row asks for (`ev_forward`), and
+## otherwise a chain built here (`ev_build`).
+##
+## Under this knife every payload a chain carries is a placeholder. A closure
+## still carries the evidence it was created under, so nothing on the receiving
+## side reads a node -- what the pack buys here is that both sides agree on the
+## shape, and that the allocation this convention costs is on the clock rather
+## than deferred to the knife that starts reading it.
+fn ev_pack(st: LSt, e: Eff) -> (LSt, CExpr) =
+  match ev_forward(st, e) {
+    Some(v) -> (st, v)
+    None -> (st, ev_build(e))
+  }
+
+## Lower one function on its own and hand back its Core body -- the two tests
+## below ask about a call site's evidence argument and nothing else.
+fn ev_test_body(
+  ev_syms: List[Int],
+  ptys: List[Ty],
+  eparams: List[Eff],
+  body: TExpr
+) -> CExpr = {
+  let sym = (nm: String, t: Ty) => Sym {
+    name: nm,
+    ty: t,
+    mutable: false,
+    dlo: 0,
+    dhi: 0,
+    dict_of: None
+  }
+  var syms: Map[Int, Sym] = map.empty()
+  var i = 0
+  for pt in ptys {
+    syms = map.insert(syms, i + 1, sym("p", pt))
+    i = i + 1
+  }
+  for e in ev_syms { syms = map.insert(syms, e, sym("ev", erased_ev_ty())) }
+  var psyms: List[Int] = []
+  var pnames: List[String] = []
+  var j = 0
+  for _pt in ptys {
+    psyms = psyms ++ [j + 1]
+    pnames = pnames ++ ["p"]
+    j = j + 1
+  }
+  let tf = TFun {
+    name: "h",
+    sig: Sig {
+      name: "h",
+      param_tys: ptys,
+      param_names: pnames,
+      param_defaults: [],
+      ret: TyInt,
+      eff: EPure,
+      is_builtin: false,
+      tparams: [],
+      constraints: [],
+      eparams: eparams,
+      owner: None,
+      trait_id: None,
+      op_of: None,
+      inferring: false
+    },
+    param_syms: psyms,
+    dict_syms: [],
+    ev_syms: ev_syms,
+    defaults: [],
+    body: body,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  let no_traits: Traits = map.empty()
+  let no_impls: Impls = map.empty()
+  let no_sigs: Map[(String, String), Sig] = map.empty()
+  let (cf, _lifted, _dicts, _next) =
+    lower_fn_only("m", tf, no_traits, no_impls, prelude_adts(), no_sigs, syms, 0)
+  cf.body
+}
+
+test "a lone non-ground atom forwards this frame's slot for that atom" {
+  # The oracle for identity forwarding, and it has to be a shape one.
+  #
+  # Nothing reads a pack at runtime under this knife, so forwarding slot 8
+  # where slot 9 was asked for computes the same answers as forwarding the
+  # right one: every behavioural gate -- run-diff, both fixpoints, the RC
+  # contract, the sanitiser legs -- stays green while the wrong evidence goes
+  # to the callee. Only the lowered Core still knows which slot was named.
+  let e0 = EffVar("e0", 0)
+  let e1 = EffVar("e1", 1)
+  let f0 = TyFn([TyInt], TyInt, e0)
+  let f1 = TyFn([TyInt], TyInt, e1)
+  # `p1(p2(0))`: two calls through function values, one per effect variable
+  let inner = XApply(XLocal(2, "p", 0, 0, f1), [XInt(0, 0, 0)], 0, 0, TyInt)
+  let body = XApply(XLocal(1, "p", 0, 0, f0), [inner], 0, 0, TyInt)
+  # `checker.ev_sym_list` hands the slots over in `atom_keys` order, so slot 8
+  # is e0's (key 3 * 0 + 1) and slot 9 is e1's (key 3 * 1 + 1)
+  match ev_test_body([8, 9], [f0, f1], [e0, e1], body) {
+    CCall(CDynamic(CLocal(t0, _)), args, _) -> {
+      assert t0 == 1
+      # written argument, then the one evidence slot (types.fn_arity)
+      assert len(args) == 2
+      match args[1] {
+        # forwarded, not built: e0's own slot arrives unchanged
+        CLocal(s, _) -> { assert s == 8 }
+        _ -> { assert false }
+      }
+      match args[0] {
+        CCall(CDynamic(CLocal(t1, _)), inner_args, _) -> {
+          assert t1 == 2
+          assert len(inner_args) == 2
+          match inner_args[1] {
+            CLocal(s2, _) -> { assert s2 == 9 }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+}
+
+test "a ground label still builds the chain, and a pure row still builds none" {
+  # The other half of `ev_forward`'s guard. A row with a written label asks for
+  # that effect's evidence, which is not what this frame's variable slot holds,
+  # so the cons stays. Over-forwarding here is invisible at runtime for the
+  # same reason the wrong slot is, so this too is pinned on the Core shape.
+  let e0 = EffVar("e0", 0)
+  let fv = TyFn([TyInt], TyInt, e0)
+  let fl = TyFn([TyInt], TyInt, ELabeled(EPure, [(7, "Ask")]))
+  let fp = TyFn([TyInt], TyInt, EPure)
+  let lab = XApply(XLocal(2, "p", 0, 0, fl), [XInt(0, 0, 0)], 0, 0, TyInt)
+  match ev_test_body([8], [fv, fl, fp], [e0], lab) {
+    CCall(CDynamic(_), args, _) -> {
+      assert len(args) == 2
+      match args[1] {
+        CCtor(aid, ci, fs, _) -> {
+          assert aid == EV_PACK_ID
+          assert ci == 0
+          # one node over the empty pack: `!Ask` is effect id 7, banded 3 * 7
+          assert len(fs) == 3
+          match fs[0] {
+            CInt(k) -> { assert k == 21 }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  # and a pure row is still the immortal empty pack, named nowhere
+  let pure = XApply(XLocal(3, "p", 0, 0, fp), [XInt(0, 0, 0)], 0, 0, TyInt)
+  match ev_test_body([8], [fv, fl, fp], [e0], pure) {
+    CCall(CDynamic(_), args, _) -> {
+      assert len(args) == 2
+      match args[1] {
+        CBox(CUnit, _) -> { assert true }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
 }
 
 ## Rule F2's call-site half for a function *value*: exactly one argument, the
@@ -2794,19 +3002,29 @@ fn lift_lambda(
       })
       None -> None
     }
+  # the pack parameter is minted before the body, not after it: a dynamic call
+  # inside the body forwards this slot (`ev_forward`), so it has to be in scope
+  # while the body is being lowered
+  let (st1c, evps) = fn_value_evs(st1b)
+  let own: Option[CExpr] =
+    match evps {
+      [p] -> Some(CLocal(p.sym, p.ty))
+      _ -> None
+    }
   let (st2, cbody0) = lower_expr(LSt {
-    ..st1b,
+    ..st1c,
     ret_ty: ret_of_fn_ty(ty),
     self_ctx: sc,
     tail: true,
-    self_tail: false
+    self_tail: false,
+    ev_env: [],
+    ev_own: own
   }, body)
   let cbody1 = adapt_in(cbody0, tex_ty(body), ret_of_fn_ty(ty))
   let cbody = wrap_self_loop(st2.self_tail, lid, cbody1, ret_of_fn_ty(ty))
-  let (st2c, evps) = fn_value_evs(st2)
   let f = CFun {
     name: name,
-    owner: st2c.owner,
+    owner: st2.owner,
     captures: caps,
     params: ps,
     dicts: [],
@@ -2818,12 +3036,14 @@ fn lift_lambda(
     default_of: None
   }
   (LSt {
-    ..st2c,
-    lifted: st2c.lifted ++ [f],
+    ..st2,
+    lifted: st2.lifted ++ [f],
     self_ctx: st.self_ctx,
     tail: st.tail,
-    self_tail: st.self_tail
-  }, CClosure(name, st2c.owner, cap_args, ty))
+    self_tail: st.self_tail,
+    ev_env: st.ev_env,
+    ev_own: st.ev_own
+  }, CClosure(name, st2.owner, cap_args, ty))
 }
 
 ## A constructor used as a function value (`map(xs, Some)`) becomes a
@@ -3956,6 +4176,19 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   for e in f.ev_syms {
     evs = evs ++ [CParam { sym: e, ty: sym_ty(st, e, TyError), mode: COwned }]
   }
+  # the same list addressed by atom, so a dynamic call site inside this body
+  # can find the slot its callee's row is asking for (`ev_forward`).
+  # `checker.ev_sym_list` builds the symbols in `atom_keys` order -- labels,
+  # then variables, then projections -- which is what lets these be zipped.
+  let f_keys = atom_keys(sig_abi_eff(f.sig))
+  var ev_env: List[(Int, CExpr)] = []
+  var ki = 0
+  for e in f.ev_syms {
+    if ki < len(f_keys) {
+      ev_env = ev_env ++ [(f_keys[ki], CLocal(e, sym_ty(st, e, erased_ev_ty())))]
+    }
+    ki = ki + 1
+  }
   let (stl, lid) = fresh_loop(st)
   # spec §12.4 covers plain top-level functions and local named ones. An impl
   # method, a trait default and a test keep the shape they had, so that the
@@ -3976,12 +4209,28 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     } else {
       None
     }
-  let st_in = LSt { ..stl, ret_ty: f.sig.ret, self_ctx: sc, tail: true, self_tail: false }
+  let st_in = LSt {
+    ..stl,
+    ret_ty: f.sig.ret,
+    self_ctx: sc,
+    tail: true,
+    self_tail: false,
+    ev_env: ev_env,
+    ev_own: None
+  }
   let (st1, body0) = lower_expr(st_in, f.body)
   # the tail value is a return too
   let body1 = adapt_in(body0, tex_ty(f.body), f.sig.ret)
   let body = wrap_self_loop(st1.self_tail, lid, body1, f.sig.ret)
-  (LSt { ..st1, ret_ty: st.ret_ty, self_ctx: st.self_ctx, tail: st.tail, self_tail: st.self_tail }, CFun {
+  (LSt {
+    ..st1,
+    ret_ty: st.ret_ty,
+    self_ctx: st.self_ctx,
+    tail: st.tail,
+    self_tail: st.self_tail,
+    ev_env: st.ev_env,
+    ev_own: st.ev_own
+  }, CFun {
     name: f.name,
     owner: owner,
     captures: [],
@@ -4033,7 +4282,9 @@ pub fn lower_expr_only(
     dict_env: map.empty(),
     self_ctx: None,
     tail: false,
-    self_tail: false
+    self_tail: false,
+    ev_env: [],
+    ev_own: None
   }
   let (st1, ce) = lower_expr(st, e)
   (ce, st1.lifted, st1.dicts, st1.next_lam)
@@ -4080,7 +4331,9 @@ pub fn lower_fn_only(
     dict_env: map.empty(),
     self_ctx: None,
     tail: false,
-    self_tail: false
+    self_tail: false,
+    ev_env: [],
+    ev_own: None
   }
   let (st1, cf) = lower_fn(st, owner, f)
   (cf, st1.lifted, st1.dicts, st1.next_lam)
@@ -4144,7 +4397,9 @@ pub fn lower_module_full(
     dict_env: map.empty(),
     self_ctx: None,
     tail: false,
-    self_tail: false
+    self_tail: false,
+    ev_env: [],
+    ev_own: None
   }
   var fns: List[(CFun, List[CFun])] = []
   var flat: List[CFun] = []
