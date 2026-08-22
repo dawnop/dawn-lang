@@ -311,10 +311,16 @@ dawn_box *dawn_box_bool(bool v) {
   return s;
 }
 
+/* See the header: one immortal object for every boxed Unit. */
+dawn_box dawn_unit_box_obj = {{DAWN_IMMORTAL, DAWN_K_BOX}, {.u = DAWN_UNIT}};
+
 dawn_box *dawn_box_unit(dawn_unit v) {
-  dawn_box *s = dawn_box_new();
-  s->val.u = v;
-  return s;
+  /* Unit has one value, so `v` carries nothing the shared object does not
+   * already say. Taken by parameter anyway because a call site may have
+   * computed it (an adapter boxes the result of the body it just called), and
+   * C evaluates that argument whether this reads it or not. */
+  (void)v;
+  return dawn_unit_box;
 }
 
 

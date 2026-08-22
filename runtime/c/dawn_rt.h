@@ -292,6 +292,24 @@ dawn_box *dawn_box_unit(dawn_unit v);
 /* No box for strings: a string IS a reference now, and an erased slot holds
  * the `dawn_str*` the way it holds any other pointer. */
 
+/* The one boxed Unit. Unit has a single value, so a box around it carries no
+ * information and every one of them may be the same object -- the JVM has
+ * spelled it that way all along (`push_unit` loads a singleton and `box_ty`
+ * adds nothing to it), and this is the native twin.
+ *
+ * Immortal, so dup and drop are no-ops on it and nothing ever frees it; boxes
+ * are written once at construction and read-only afterwards, so sharing one
+ * is unobservable. `dawn_box_unit` returns it too, for the boundaries that
+ * reach a box through a call (an adapter boxing a Unit-returning body).
+ *
+ * It exists for the erased evidence slot. Every call through a function value
+ * passes one, an unanswered slot is filled with a boxed unit, and a fresh box
+ * there is a malloc and a free on the hot path -- measurably so, since a call
+ * through a function value is what every higher-order std function does per
+ * element. */
+extern dawn_box dawn_unit_box_obj;
+#define dawn_unit_box (&dawn_unit_box_obj)
+
 /* Owning reads: the value comes out and the box is released. For the erased
  * call boundary only (dynamic call results and adapter parameters), where the
  * box is a wire format the RC pass never sees. A slot read the pass CAN see

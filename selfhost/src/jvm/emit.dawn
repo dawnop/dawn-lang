@@ -2943,6 +2943,52 @@ fn gen_cforeign(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io =
     gen_java_call(gx, g, jc, ty)
   }
 
+test "a signature's descriptor carries one evidence slot per row atom" {
+  # The third and fourth readers of `types.nev`: the descriptor a direct call
+  # spells and the one a trait interface declares. A label's slot is exact (its
+  # id *is* its evidence record's ADT id, so the field reads inside need no
+  # cast); a variable's and a projection's are erased, because which record
+  # fills either is the caller's instantiation to decide and the callee cannot
+  # know. Getting the *count* wrong is the failure this pins: the JVM answers
+  # NoSuchMethodError, having verified both sides happily.
+  #
+  # The third case below is the one the rest of the suite does not reach.
+  # `sig_abi_eff` folds `Sig.eparams` into the row, so a signature that binds a
+  # variable its row no longer mentions still owes its callers a slot -- an
+  # impl method purer than the trait row that admits it. Delete that fold and
+  # every other test here stays green.
+  let adts = prelude_adts()
+  let base = Sig {
+    name: "f",
+    param_tys: [TyInt],
+    param_names: ["x"],
+    param_defaults: [false],
+    ret: TyBool,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [],
+    constraints: [],
+    eparams: [],
+    owner: None,
+    trait_id: None,
+    op_of: None,
+    inferring: false
+  }
+  assert sig_desc_with_dicts(adts, base) == "(J)Z"
+  # a variable adds one erased slot, whether the row mentions it or only the
+  # binder list does (`types.sig_abi_eff`)
+  let ev = EffVar("e", 1)
+  assert sig_desc_with_dicts(adts, Sig { ..base, eff: ev, eparams: [ev] }) ==
+    "(JLjava/lang/Object;)Z"
+  assert sig_desc_with_dicts(adts, Sig { ..base, eff: EPure, eparams: [ev] }) ==
+    "(JLjava/lang/Object;)Z"
+  # io is an answer, not a question
+  assert sig_desc_with_dicts(adts, Sig { ..base, eff: EIo }) == "(J)Z"
+  # the trait-interface spelling is the same layout without the dictionary
+  assert trait_iface_desc(adts, Sig { ..base, eff: ev, eparams: [ev] }) ==
+    "(JLjava/lang/Object;)Z"
+}
+
 test "call result width reads the return descriptor, not its last character" {
   assert call_result_of_desc("()V") == CallVoid
   assert call_result_of_desc("(I)J") == CallTwo

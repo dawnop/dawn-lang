@@ -822,10 +822,21 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
       (st1, "((int64_t)" ++ adt_ref(tv) ++ "->tag)")
     }
     CBox(inner, from) -> {
-      # a boxed reference is the reference (a boxed scalar allocates fresh),
-      # so the flag passes through exactly when the wrapper is transparent
-      let (st1, v) = emit_expr(st, inner, k && is_ref_ty(from))
-      (st1, box_call(v, from))
+      # a boxed unit literal is the shared immortal object, not a call: the
+      # evidence placeholder is one of these and it is built at every call
+      # through a function value, so a malloc here is a malloc per element of
+      # every `map`. Only the literal takes the shortcut -- `box_call` still
+      # answers for a boxed unit that came out of a call, because dropping
+      # that expression would drop what it does (`dawn_box_unit` returns the
+      # same object for it).
+      if boxed_unit_literal(inner, from) {
+        (st, "((void*)dawn_unit_box)")
+      } else {
+        # a boxed reference is the reference (a boxed scalar allocates fresh),
+        # so the flag passes through exactly when the wrapper is transparent
+        let (st1, v) = emit_expr(st, inner, k && is_ref_ty(from))
+        (st1, box_call(v, from))
+      }
     }
     CDup(inner, ty) -> {
       let (st1, v) = emit_expr(st, inner, false)
@@ -909,6 +920,30 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
       # refusing it here is the design (llvm-backend-research.md 9).
       panic("emitc: `use java` cannot be compiled to native; use `use c`")
   }
+
+## Is this box a Unit *literal* going into an erased slot?
+##
+## Then it is the one shared object (`dawn_unit_box`) rather than a fresh one.
+## A literal because that is the whole test for "evaluating this costs
+## nothing": Unit's only value is already known, so there is no argument left
+## to evaluate for its side effects.
+fn boxed_unit_literal(inner: CExpr, from: Ty) -> Bool =
+  match inner {
+    CUnit ->
+      match c_repr(from) {
+        RUnitV -> true
+        _ -> false
+      }
+    _ -> false
+  }
+
+test "a boxed unit literal is the shared object, a boxed call is not" {
+  assert boxed_unit_literal(CUnit, TyUnit)
+  # a Unit that came out of a call still has the call to evaluate
+  assert not boxed_unit_literal(CCall(CDirect("m", "f"), [], TyUnit), TyUnit)
+  # and a box around anything else is an ordinary box
+  assert not boxed_unit_literal(CInt(1), TyInt)
+}
 
 fn box_call(v: String, from: Ty) -> String =
   match c_repr(from) {
