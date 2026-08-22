@@ -38,7 +38,8 @@
 use check/tast.{TJavaCall}
 use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyAdt,
-  TyVar, TyList, TyMap, TySet, TyArray, TyTuple, TyFn, TyBytes, TyJava, TyAssoc
+  TyVar, TyList, TyMap, TySet, TyArray, TyTuple, TyFn, TyBytes, TyJava, TyAssoc,
+  Eff, EPure, EIo, EffVar, ELabeled, fn_arity
 }
 
 ## Where a call goes. Dawn is dictionary-passing, not monomorphising, so
@@ -46,7 +47,12 @@ use check/types.{
 pub type CCallee =
   # a statically known top-level function; owner is its module class name
   | CDirect(owner: String, name: String)
-# a function value in a local (closure or fn-typed parameter)
+# A function value in a local (closure or fn-typed parameter). The evidence
+# pack is appended to `args`, behind the written arguments, so there is
+# deliberately no `nev` field here: unlike `CMethod`, a function value has no
+# dictionary to splice in front of the evidence, so a backend needs only the
+# total arity and that is `len(args)`. Adding the field to match CMethod would
+# be a second place to count the same thing (types.fn_arity is the first).
   | CDynamic(target: CExpr)
 # A trait method reached through a dictionary the caller forwarded. `idx` is
 # the method's slot in the trait's declaration order, `method` its name:
@@ -257,11 +263,22 @@ pub type CFun = {
   # trait dictionaries, passed as hidden trailing parameters
   dicts: List[CParam],
   # effect evidence, passed as hidden trailing parameters *after* the
-  # dictionaries, one per declared effect in the signature and in effect-id
-  # order (docs/effects-design.md §5.2). Unlike a dictionary this is an
-  # ordinary counted value -- a record of closures over locals -- so it stays
-  # out of `dicts`, whose whole meaning is "outside the reference-count
-  # ledger".
+  # dictionaries (docs/effects-design.md §5.2). Unlike a dictionary this is an
+  # ordinary counted value -- a record of closures over locals, or a pack of
+  # them -- so it stays out of `dicts`, whose whole meaning is "outside the
+  # reference-count ledger".
+  #
+  # Two conventions meet on this field, because the two kinds of callee are
+  # reached differently:
+  #
+  #   a **named** function takes one slot per atom of its ABI row
+  #     (`types.nev` of `types.sig_abi_eff`) -- a written label's slot is its
+  #     exact evidence record, a variable's and a projection's are erased;
+  #   a **function value** takes exactly one erased slot, whatever its row,
+  #     carrying an evidence pack (`types.fn_arity`).
+  #
+  # The one translation point between them is `lower.lift_fn_value`, whose
+  # wrapper is a function value on the outside and a named call on the inside.
   evs: List[CParam],
   ret: Ty,
   body: CExpr,
@@ -363,7 +380,10 @@ pub fn ty_key(t: Ty) -> String =
     TySet(e) -> "Set_" ++ ty_key(e)
     TyArray(e) -> "Array_" ++ ty_key(e)
     TyTuple(es) -> "Tup" ++ to_string(len(es))
-    TyFn(ps, _, _) -> "Fn" ++ to_string(len(ps))
+    # the *runtime* arity, not the written one: a function value's evidence
+    # pack is a parameter of the value, so the name a shape compiles to has to
+    # count it. `types.fn_arity` is the one place it is derived.
+    TyFn(_, _, _) -> "Fn" ++ to_string(fn_arity(t))
     TyJava(_, _) -> "Java"
   }
 
@@ -419,7 +439,7 @@ pub fn ty_key_inst(t: Ty) -> String =
     # cannot be left out: `Phantom[Int]` and `Phantom[String]` share a target.
     TyOpaque(id, _, _, args, tgt) ->
       "Op" ++ to_string(id) ++ "_" ++ ty_key_inst(tgt) ++ args_key(args)
-    TyFn(ps, r, _) -> "Fn" ++ to_string(len(ps)) ++ args_key(ps) ++ "_r" ++ ty_key_inst(r)
+    TyFn(ps, r, _) -> "Fn" ++ to_string(fn_arity(t)) ++ args_key(ps) ++ "_r" ++ ty_key_inst(r)
     _ -> ty_key(t)
   }
 
@@ -493,3 +513,26 @@ pub fn diverges(e: CExpr) -> Bool =
       }
     _ -> false
   }
+
+# ---- tests ----
+
+test "a function type's identity key counts its evidence slot" {
+  # `ty_key` decides whether two shapes may share a synthesised symbol, so it
+  # has to name the *runtime* arity. Under the one-pack convention that is the
+  # written parameters plus one, for every row alike -- which is exactly what
+  # makes an eta adapter unnecessary: a row widening on the way into a slot
+  # does not change the arity, so there is no crossing to make physical.
+  let pure_fn = TyFn([TyInt], TyBool, EPure)
+  let var_fn = TyFn([TyInt], TyBool, EffVar("e", 1))
+  assert ty_key(pure_fn) == "Fn2"
+  assert ty_key(var_fn) == "Fn2"
+  assert ty_key(TyFn([TyInt], TyBool, EIo)) == "Fn2"
+  assert ty_key(TyFn([], TyBool, ELabeled(EPure, [(7, "Ask")]))) == "Fn1"
+  assert ty_key(pure_fn) == ty_key(var_fn)
+  # the instantiated spelling counts the same way, and keeps the written
+  # parameters (the evidence slot is erased and has nothing to spell)
+  assert ty_key_inst(pure_fn) == "Fn2\$of\$Int_rBool"
+  assert ty_key_inst(var_fn) == "Fn2\$of\$Int_rBool"
+  # the count is `types.fn_arity`'s, not a second one kept here
+  assert ty_key(var_fn) == "Fn" ++ to_string(fn_arity(var_fn))
+}

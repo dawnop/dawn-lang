@@ -840,9 +840,12 @@ fn gen_bytes_from_array(cw: ClassWriter) -> Unit !io = {
 ## `Err(String)` and the structured version lived beside it under a
 ## transitional name; the migration that flipped the signature is over and
 ## there is one handler again.
+## The thunk arrives as a `dawn/rt/Fn1`, not an `Fn0`, and for the same reason
+## `gen_bracket` takes `Fn2`s: a function value's evidence slot is part of its
+## arity whatever its row says.
 fn gen_try_closure(cw: ClassWriter, name: String, caught: List[String]) -> Unit !io = {
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, name,
-    "(L" ++ fn_iface(0) ++ ";)LResult;")
+    "(L" ++ fn_iface(1) ++ ";)LResult;")
     .expect("mv")
   m.visitCode()
   let try_start = Label.new()
@@ -855,7 +858,8 @@ fn gen_try_closure(cw: ClassWriter, name: String, caught: List[String]) -> Unit 
   m.visitTypeInsn(OP_NEW, "Result\$Ok")
   m.visitInsn(OP_DUP)
   m.visitVarInsn(OP_ALOAD, 0)
-  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(0), "apply", erased_apply_desc(0), true)
+  m.visitInsn(OP_ACONST_NULL)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
   m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Ok", "<init>", "(Ljava/lang/Object;)V", false)
   m.visitLabel(try_end)
   m.visitInsn(OP_ARETURN)
@@ -904,9 +908,14 @@ fn gen_try_closure(cw: ClassWriter, name: String, caught: List[String]) -> Unit 
 ## `CBox`/`CUnbox` and is not repeated here -- `bracket` is declared `erased`
 ## in `types.intrinsics()`, which is what puts the box on the argument and the
 ## unbox at the call site.
+## The two closures arrive as `dawn/rt/Fn2`, not `Fn1`: every Dawn function
+## value carries one trailing evidence slot, whatever its row. A hand-written
+## shim has no evidence to hand over and nothing here reads one, so it pushes
+## null -- the empty pack (fb design 5.2; `dawn_bracket` gives the same answer
+## on the other backend).
 fn gen_bracket(cw: ClassWriter) -> Unit !io = {
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "bracket",
-    "(Ljava/lang/Object;L" ++ fn_iface(1) ++ ";L" ++ fn_iface(1) ++
+    "(Ljava/lang/Object;L" ++ fn_iface(2) ++ ";L" ++ fn_iface(2) ++
       ";)Ljava/lang/Object;").expect("mv")
   m.visitCode()
   let try_start = Label.new()
@@ -918,13 +927,15 @@ fn gen_bracket(cw: ClassWriter) -> Unit !io = {
   m.visitLabel(try_start)
   m.visitVarInsn(OP_ALOAD, 2)
   m.visitVarInsn(OP_ALOAD, 0)
-  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
+  m.visitInsn(OP_ACONST_NULL)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
   m.visitVarInsn(OP_ASTORE, 3)
   m.visitLabel(try_end)
   # normal path: release, then hand back what `use` answered
   m.visitVarInsn(OP_ALOAD, 1)
   m.visitVarInsn(OP_ALOAD, 0)
-  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
+  m.visitInsn(OP_ACONST_NULL)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
   m.visitInsn(OP_POP)
   m.visitVarInsn(OP_ALOAD, 3)
   m.visitInsn(OP_ARETURN)
@@ -935,7 +946,8 @@ fn gen_bracket(cw: ClassWriter) -> Unit !io = {
   m.visitVarInsn(OP_ASTORE, 4)
   m.visitVarInsn(OP_ALOAD, 1)
   m.visitVarInsn(OP_ALOAD, 0)
-  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
+  m.visitInsn(OP_ACONST_NULL)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
   m.visitInsn(OP_POP)
   m.visitVarInsn(OP_ALOAD, 4)
   m.visitInsn(OP_ATHROW)
@@ -3037,8 +3049,11 @@ fn gen_comparator_class(
 }
 
 pub fn gen_fn_comparator(supers: List[String]) -> Bytes !io =
-  gen_comparator_class(supers, FN_CMP_CLASS, "L" ++ fn_iface(2) ++ ";", (m: MethodVisitor) => {
-    m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
+  gen_comparator_class(supers, FN_CMP_CLASS, "L" ++ fn_iface(3) ++ ";", (m: MethodVisitor) => {
+    # the comparator is a Dawn function value, so it takes its evidence pack
+    # behind its two written parameters; this boundary has none to give
+    m.visitInsn(OP_ACONST_NULL)
+    m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(3), "apply", erased_apply_desc(3), true)
     m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
     m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
     ()

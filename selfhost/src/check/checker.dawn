@@ -48,7 +48,7 @@ use check/types.{
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes,
   eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, eff_assocs, eff_map_assocs,
-  erased_ev_ty,
+  erased_ev_ty, sig_abi_eff,
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -218,6 +218,13 @@ pub fn ev_local_name(cx: Cx, id: Int) -> String =
 ## unspellable like every evidence local.
 pub fn ev_assoc_local_name(vid: Int, tid: Int, name: String) -> String =
   "ev\$a\$" ++ to_string(vid) ++ "\$" ++ to_string(tid) ++ "\$" ++ name
+
+## The name of the local that carries an effect *variable*'s erased evidence --
+## rule 丁's one hidden parameter per `!e` written in the row. Minted from the
+## variable's id, which `resolve_eff_at` hands out once per signature, so two
+## signatures spelling their variable `e` do not share a name; `$` keeps it
+## unspellable like every evidence local.
+pub fn ev_var_local_name(vid: Int) -> String = "ev\$v\$" ++ to_string(vid)
 
 ## Resolve parsed effect atoms into a normalized Eff, interning variables per
 ## signature (the Kotlin resolveEff over currentEffVars).
@@ -6081,12 +6088,18 @@ fn check_call(
   # label that arrived by instantiating an effect variable is not here on
   # purpose: that effect belongs to a closure the caller handed over, and the
   # closure carries its own evidence in its captures (design §5.2 step 4).
-  let (cxv, evs0, unanswered) = evidence_args(cx1, s.eff, clo, chi)
+  # the callee's ABI row, which is its declared row plus the effect variables
+  # it binds -- the same list `bind_evidence` walked on the other side
+  let callee_abi = sig_abi_eff(s)
+  let (cxv, evs0, unanswered) = evidence_args(cx1, callee_abi, clo, chi)
   cx1 = cxv
-  # ... and one per projection written in the row, behind them (rule 丙)
-  let (cxa2, aevs, aunanswered, adropped) = evidence_assoc_args(cx1, s.eff, m, clo, chi)
+  # ... one per effect variable, behind them (rule 丁) ...
+  let (cxv2, vevs) = evidence_var_args(cx1, callee_abi, em, clo, chi)
+  cx1 = cxv2
+  # ... and one per projection written in the row, behind those (rule 丙)
+  let (cxa2, aevs, aunanswered, adropped) = evidence_assoc_args(cx1, callee_abi, m, clo, chi)
   cx1 = cxa2
-  let evs = evs0 ++ aevs
+  let evs = evs0 ++ vevs ++ aevs
   # Charge the row -- minus any label `evidence_args` just reported as having
   # no handler. That call is already an error, at the raise site and in the
   # raise site's words; leaving the label in the body's row would have
@@ -6175,6 +6188,55 @@ fn evidence_args(cx: Cx, declared: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr], L
     out = out ++ [tx]
   }
   (cx1, out, unanswered)
+}
+
+## Rule 丁's call-site half: one evidence value per effect *variable* written
+## in the callee's ABI row, in `eff_vars` order, between the written labels'
+## evidence and the projections'.
+##
+## The count comes from the declaration and the value from the call site, and
+## those are two different questions. The count cannot follow the instance: a
+## pure closure and a labelled one go into the same `!e` parameter, and the
+## callee's arity is fixed before either call site exists. The value can: a
+## variable instantiated with another variable forwards the caller's own hidden
+## parameter (the same forwarding a projection over a rigid subject does), and
+## anything else takes the unit placeholder -- pure, io, or a concrete label
+## whose evidence the closure still carries in its captures under this knife.
+##
+## Unlike its two neighbours this one never reports. A projection with nothing
+## to answer it is a signature that forgot to declare `!C.E`; an effect
+## variable with nothing to forward is the ordinary case of instantiating it
+## with a row that needs no evidence.
+fn evidence_var_args(
+  cx: Cx,
+  declared: Eff,
+  em: Map[Int, Eff],
+  lo: Int,
+  hi: Int
+) -> (Cx, List[TExpr]) = {
+  var cx1 = cx
+  var out: List[TExpr] = []
+  for v in eff_vars(declared) {
+    let (vid, _) = v
+    let inst = match map.get(em, vid) {
+      Some(e) -> e
+      None -> EPure
+    }
+    var slot: TExpr = XUnit(lo, hi)
+    let ivs = eff_vars(inst)
+    if len(ivs) == 1 {
+      let (svid, _) = ivs[0]
+      let nm = ev_var_local_name(svid)
+      let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
+      cx1 = cxa
+      match found {
+        Some(sid) -> { slot = XLocal(sid, nm, lo, hi, erased_ev_ty()) }
+        None -> ()
+      }
+    }
+    out = out ++ [slot]
+  }
+  (cx1, out)
 }
 
 ## One label's evidence out of the lexical environment -- the shared half of
@@ -8677,16 +8739,28 @@ fn enter_fn(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
 ## which is the whole of what makes an escaping closure keep its handler.
 fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
   var cx1 = cx
-  for l in eff_labels(s.eff) {
+  # the ABI row, not the declared one: a signature that binds `!e` in a
+  # parameter takes its slot whether or not its own row mentions it
+  let abi = sig_abi_eff(s)
+  for l in eff_labels(abi) {
     let (eid, _) = l
     let (cx2, _) = declare(cx1, ev_local_name(cx1, eid), TyAdt(eid, []), false, nlo, nhi)
+    cx1 = cx2
+  }
+  # one erased slot per effect variable written in the row, between the
+  # labels' slots and the projections', in `eff_vars` order (rule 丁). Same
+  # shape and same reason as a projection's: which evidence fills it is
+  # decided by the caller's instantiation, so the callee can only forward it.
+  for v in eff_vars(abi) {
+    let (vid, _) = v
+    let (cx2, _) = declare(cx1, ev_var_local_name(vid), erased_ev_ty(), false, nlo, nhi)
     cx1 = cx2
   }
   # one erased slot per projection written in the row, behind the labels'
   # slots, in `eff_assocs` order (rule 丙). The body can only forward it --
   # nothing here knows which effect it will turn out to be -- which is
   # exactly what an erased local is good for.
-  for a in eff_assocs(s.eff) {
+  for a in eff_assocs(abi) {
     let (_, vid, tid, n) = a
     let (cx2, _) = declare(cx1, ev_assoc_local_name(vid, tid, n), erased_ev_ty(), false,
       nlo, nhi)
@@ -8698,15 +8772,23 @@ fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
 ## The signature's evidence symbols in effect-id order (lowering appends them
 ## behind the dictionaries in exactly this order).
 fn ev_sym_list(cx: Cx, s: Sig) -> List[Int] = {
+  let abi = sig_abi_eff(s)
   var out: List[Int] = []
-  for l in eff_labels(s.eff) {
+  for l in eff_labels(abi) {
     let (eid, _) = l
     match lookup(cx, ev_local_name(cx, eid)) {
       Some(sid) -> { out = out ++ [sid] }
       None -> ()
     }
   }
-  for a in eff_assocs(s.eff) {
+  for v in eff_vars(abi) {
+    let (vid, _) = v
+    match lookup(cx, ev_var_local_name(vid)) {
+      Some(sid) -> { out = out ++ [sid] }
+      None -> ()
+    }
+  }
+  for a in eff_assocs(abi) {
     let (_, vid, tid, n) = a
     match lookup(cx, ev_assoc_local_name(vid, tid, n)) {
       Some(sid) -> { out = out ++ [sid] }

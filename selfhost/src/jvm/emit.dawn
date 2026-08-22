@@ -27,10 +27,12 @@ use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
-  Sym, Sig, Eff, eff_labels, eff_assocs, reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
+  Sym, Sig, Eff, EPure, EIo, EffVar, prelude_adts,
+  eff_labels, eff_vars, eff_assocs, nev, fn_arity, erased_ev_ty,
+  reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
   Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID,
   intrinsics,
-  Impls, impl_at, reduce_via_bindings
+  Impls, impl_at, reduce_via_bindings, sig_abi_eff
 }
 use check/tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
 use ir/interp.{CtOut}
@@ -119,13 +121,26 @@ pub type SamB = {
 pub type ClosB = {
   cls: String,
   iface: String,
+  # written parameters plus evidence: what `apply` takes
   arity: Int,
   cap_tys: List[Ty],
   fps: List[Ty],
+  # how many of `arity` are the row's evidence slots -- one, always, for every
+  # function value alike. They are erased, so `apply` hands them on without a
+  # cast, which is the whole of what distinguishing them buys.
+  nev: Int,
   fret: Ty,
   owner: String,
   target: String,
   impl_desc: String
+}
+
+## `n` erased evidence slots, as types. One spelling for the descriptor of a
+## hoisted body and for the parameters the closure class forwards.
+fn ev_tys(n: Int) -> List[Ty] = {
+  var out: List[Ty] = []
+  for _i in 0..n { out = out ++ [erased_ev_ty()] }
+  out
 }
 
 ## A SAM adapter class: the same substitution on the `use java` path.
@@ -332,7 +347,7 @@ fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
     TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
     TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
     TyJava(fqcn, _) -> { m.visitTypeInsn(OP_CHECKCAST, internal_of(fqcn)) }
-    TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
+    TyFn(_, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(fn_arity(t))) }
     TyUnit -> { m.visitTypeInsn(OP_CHECKCAST, UNIT_CLASS) }
     # TyVar (and a projection over one) is already erased, and the two
     # bottom types carry no value
@@ -367,7 +382,7 @@ fn unerase_class(adts: Adts, t: Ty) -> String =
     TyArray(_) -> ARRAY_CLASS
     TyTuple(elems) -> tuple_class(len(elems))
     TyJava(fqcn, _) -> internal_of(fqcn)
-    TyFn(params, _, _) -> fn_iface(len(params))
+    TyFn(_, _, _) -> fn_iface(fn_arity(t))
     TyUnit -> UNIT_CLASS
     TyVar(_, _) | TyAssoc(_, _, _) | TyNever | TyError -> obj()
   }
@@ -398,18 +413,33 @@ fn sig_desc_with_dicts(adts: Adts, s: Sig) -> String = {
   var dicts = 0
   for c in s.constraints { dicts = dicts + len(c) }
   for _i in 0..dicts { ps = ps ++ "Ljava/lang/Object;" }
+  # the ABI row, which is the declared one plus the variables the signature
+  # binds (`types.sig_abi_eff`) -- the list the callee's own parameters were
+  # bound from
+  let abi = sig_abi_eff(s)
   # one evidence parameter per declared effect, after the dictionaries. A
   # label's id is its evidence record's ADT id, so the descriptor is exact --
   # no erasure, and the field reads inside need no cast
-  for l in eff_labels(s.eff) {
+  for l in eff_labels(abi) {
     let (eid, _) = l
     ps = ps ++ desc_of(adts, TyAdt(eid, []))
   }
-  # ... and one erased slot per written projection, behind them (rule 丙):
-  # which evidence record fills it depends on the impl, so Object is the
-  # only descriptor every caller and callee can agree on
-  for _a in eff_assocs(s.eff) { ps = ps ++ "Ljava/lang/Object;" }
+  # ... one erased slot per effect variable, behind them (rule 丁), and one per
+  # written projection behind those (rule 丙): which evidence fills either is
+  # decided by the caller's instantiation, so Object is the only descriptor
+  # every caller and callee can agree on
+  ps = ps ++ erased_ev_slots(nev(abi) - len(eff_labels(abi)))
   "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
+}
+
+## The erased half of a row's evidence, as descriptor text. Spelled off `nev`
+## minus the exact slots rather than by walking the two axes again, so that the
+## descriptor and the parameter list a callee binds cannot come to disagree
+## about how many words there are.
+fn erased_ev_slots(n: Int) -> String = {
+  var ps = ""
+  for _i in 0..n { ps = ps ++ "Ljava/lang/Object;" }
+  ps
 }
 
 fn fn_desc_with_dicts(gx: GenCtx, s: Sig) -> String = sig_desc_with_dicts(gx.adts, s)
@@ -423,11 +453,12 @@ fn fn_desc_with_dicts(gx: GenCtx, s: Sig) -> String = sig_desc_with_dicts(gx.adt
 fn trait_iface_desc(adts: Adts, s: Sig) -> String = {
   var ps = ""
   for p in s.param_tys { ps = ps ++ desc_of(adts, p) }
-  for l in eff_labels(s.eff) {
+  let abi = sig_abi_eff(s)
+  for l in eff_labels(abi) {
     let (eid, _) = l
     ps = ps ++ desc_of(adts, TyAdt(eid, []))
   }
-  for _a in eff_assocs(s.eff) { ps = ps ++ "Ljava/lang/Object;" }
+  ps = ps ++ erased_ev_slots(nev(abi) - len(eff_labels(abi)))
   "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
 }
 
@@ -803,8 +834,12 @@ fn emit_sam_conversion(
   ft: Ty
 ) -> Gen !io = {
   let (_, iface, sam_name, sam_params, sam_ret) = conv
-  let (fps, fret) = tyfn_parts(ft)
-  let n = len(fps)
+  let (_fps, fret) = tyfn_parts(ft)
+  # the *function value's* arity: a Dawn fn value carries its evidence pack in
+  # a trailing slot, so what is on the stack here is a `Fn(n+1)`. The bridge
+  # and the adapter class below are spelled from this one number, and the
+  # bridge fills the slot with null (a shim has no evidence to hand over).
+  let n = fn_arity(ft)
   let bridge = "dawn\$sam\$" ++ to_string(g.sam_ctr)
   let g1 = Gen {
     ..g,
@@ -1051,7 +1086,9 @@ fn gen_java_call(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io = {
 ## static <samRet> dawn$sam$N(FnN f, <sam params>): null-check references,
 ## box to the erased Fn convention, invoke, adapt the result (§9.4).
 fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
-  let n = len(b.sam_params)
+  # `sam_params` are the Java side's; the Dawn function value on the other end
+  # of the bridge takes one more, its evidence pack
+  let n = len(b.sam_params) + 1
   var pdescs = ""
   for p in b.sam_params { pdescs = pdescs ++ jdesc(p) }
   let desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(b.sam_ret)
@@ -1105,6 +1142,11 @@ fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
     }
     i = i + 1
   }
+  # the evidence pack the function value expects. A `use java` callback is
+  # entered from Java, which has no evidence to give and nothing that reads
+  # one: null is the empty pack a hand-written boundary hands over, the same
+  # answer `dawn_bracket` and `gen_bracket` give.
+  m.visitInsn(OP_ACONST_NULL)
   m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(n), "apply", erased_apply_desc(n), true)
   if b.bottom {
     terminate_bottom(m, CallOne)
@@ -1785,12 +1827,15 @@ fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, By
     # is one reference each (a record or an erased Object), so the walk is
     # the same slot walk.
     m.visitVarInsn(OP_ALOAD, 0)
-    for l in eff_labels(ms.sig.eff) {
+    let mabi = sig_abi_eff(ms.sig)
+    for l in eff_labels(mabi) {
       let (eid, _) = l
       load_slot(m, TyAdt(eid, []), slot)
       slot = slot + 1
     }
-    for _a in eff_assocs(ms.sig.eff) {
+    # the erased slots -- rule 丁's variables and rule 丙's projections -- are
+    # one reference each and pass through without a cast
+    for _k in 0..(nev(mabi) - len(eff_labels(mabi))) {
       m.visitVarInsn(OP_ALOAD, slot)
       slot = slot + 1
     }
@@ -1881,10 +1926,16 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
       # Getting a slot's type wrong here is a VerifyError, because the impl
       # method's definition side spells the same descriptors from its own
       # signature (sig_desc_with_dicts).
-      let evtys = map(eff_labels(psig.eff), l => {
+      let pabi = sig_abi_eff(psig)
+      var evtys = map(eff_labels(pabi), l => {
         let (eid, _) = l
         TyAdt(eid, [])
       })
+      # rule 丁's variables and rule 丙's projections are erased slots behind
+      # the labels' exact ones, and they are part of the count the dictionary
+      # split below subtracts -- reading only the labels made a variable's slot
+      # look like a dictionary and put it in front of the evidence
+      for _k in 0..(nev(pabi) - len(eff_labels(pabi))) { evtys = evtys ++ [erased_ev_ty()] }
       var ptys = psig.param_tys
       for _d in 0..(len(args) - len(psig.param_tys) - len(evtys)) {
         ptys = ptys ++ [TyVar("D", 0)]
@@ -1933,8 +1984,10 @@ fn gen_cdynamic(gx: GenCtx, g: Gen, args: List[CExpr], ft: Ty, ret_static: Ty) -
     box_ty(g1.mv, if i < len(fps) { fps[i] } else { cex_ty(a) })
     i = i + 1
   }
-  g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(len(fps)), "apply",
-    erased_apply_desc(len(fps)), true)
+  # the evidence pack lowering appended is part of the arity, and `len(args)`
+  # is the total by construction -- which is why `CDynamic` carries no `nev`
+  g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(len(args)), "apply",
+    erased_apply_desc(len(args)), true)
   if is_bottom(ret_static) {
     return finish_call(g1, ret_static, CallOne)
   }
@@ -1949,7 +2002,10 @@ fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExp
   var cap_tys: List[Ty] = []
   for c in caps { cap_tys = cap_tys ++ [cex_ty(c)] }
   let (fps, fret) = tyfn_parts(ty)
-  let arity = len(fps)
+  # written parameters, then the one evidence slot: `types.fn_arity`, the same
+  # number the call site in `gen_cdynamic` arrives with
+  let nev_ty = fn_arity(ty) - len(fps)
+  let arity = fn_arity(ty)
   let iface = fn_iface(arity)
   let cls = closure_class(gx.class_name, g.clos_ctr)
   let g0 = Gen {
@@ -1964,9 +2020,10 @@ fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExp
       fret: fret,
       owner: owner,
       target: name,
+      nev: nev_ty,
       # lowering already hoisted the body to a top-level static, so this
       # names a method that exists rather than one to be emitted
-      impl_desc: impl_desc_of(gx, cap_tys ++ fps, fret)
+      impl_desc: impl_desc_of(gx, cap_tys ++ fps ++ ev_tys(nev_ty), fret)
     }]
   }
   if len(caps) == 0 {
@@ -2043,6 +2100,12 @@ fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (Str
   for pt in b.fps {
     m.visitVarInsn(OP_ALOAD, p + 1)
     unerase(gx, mg, pt)
+    p = p + 1
+  }
+  # the evidence slot sits behind the written parameters and is erased on both
+  # sides of the boundary, so it is loaded and passed as it is
+  for _i in 0..b.nev {
+    m.visitVarInsn(OP_ALOAD, p + 1)
     p = p + 1
   }
   m.visitMethodInsn(OP_INVOKESTATIC, b.owner, b.target, b.impl_desc, false)
@@ -2588,6 +2651,13 @@ fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Op
   let jl = "Ljava/util/List;"
   let obj = "Ljava/lang/Object;"
 
+  let cmp_desc = if len(args) > 1 { desc_of(gx.adts, cex_ty(args[1])) } else { "" }
+  let ev_descs = {
+    var acc = ""
+    for _i in 2..len(args) { acc = acc ++ obj }
+    acc
+  }
+
   ## The vector call for a primitive, as (function, descriptor). One table,
   ## so a primitive and its callee cannot drift apart silently.
   fn target(n: String) -> Option[(String, String)] =
@@ -2595,7 +2665,11 @@ fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Op
       "len" -> Some(("count", "(" ++ vec ++ ")J"))
       "get" -> Some(("get", "(" ++ vec ++ "J)LOption;"))
       "range" -> Some(("range", "(JJ)" ++ vec))
-      "sort_by" -> Some(("sort_by", "(" ++ vec ++ "L" ++ fn_iface(2) ++ ";)" ++ vec))
+      # `sort_by` is std/pvec's own function, compiled by the ordinary rules:
+      # its comparator is a `dawn/rt/Fn` of the function-value arity and it
+      # takes rule 丁's evidence slot behind it. Both are read off the call
+      # rather than written down, so this table cannot state a second count.
+      "sort_by" -> Some(("sort_by", "(" ++ vec ++ cmp_desc ++ ev_descs ++ ")" ++ vec))
       "list_index" -> Some(("index", "(" ++ vec ++ "J)" ++ obj))
       "list_slice" -> Some(("slice", "(" ++ vec ++ "JJ)" ++ vec))
       _ -> None

@@ -182,6 +182,103 @@ pub fn eff_assocs(e: Eff) -> List[(String, Int, Int, String)] =
     _ -> []
   }
 
+## How many hidden evidence arguments a **named** callee's row is worth: one
+## per written label (rule 甲), one per effect variable (rule 丁), one per
+## associated-effect projection (rule 丙), in that order. The base -- pure or
+## io -- is an answer rather than a question, so it takes no slot.
+##
+## This is the named half of the convention only. A function *value* is not
+## sized by its row at all (`fn_arity`): its evidence rides in one pack, and
+## the two halves meet at `lower.lift_fn_value`'s wrapper.
+##
+## **One definition, three readers** on the named side: the parameters
+## `checker.bind_evidence` declares, the arguments `checker.check_call`
+## appends, and the descriptors `jvm/emit` spells for a direct call and for a
+## trait interface. Every one of them decides how many words cross a boundary,
+## so two of them counting separately is an arity drift that no type error
+## catches: the JVM answers NoSuchMethodError and native reads the slot next
+## door. Hence a second derivation anywhere is a defect, not an optimisation.
+pub fn nev(e: Eff) -> Int =
+  len(eff_labels(e)) + len(eff_vars(e)) + len(eff_assocs(e))
+
+## The key an atom is addressed by inside an evidence pack.
+##
+## A pack is a chain keyed by atom, not a vector ordered by position, which is
+## the whole reason a row may hold two labels behind one variable without the
+## runtime having to merge and reorder anything (design 裁决背景 1). The three
+## axes mint their ids from different counters -- an effect id is program-wide,
+## an effect variable's id is its position in its own signature's binder list
+## (`eff_params_of`), a projection's identity is a triple -- so a key is banded
+## by axis rather than taken raw, or a variable in position 3 would answer to
+## the third effect ever declared.
+##
+## Nothing reads a key yet: under the representation knife a pack is built and
+## never queried. It is built with the real keys all the same, because a pack
+## whose nodes were interchangeable would not be the thing being measured.
+pub fn atom_keys(e: Eff) -> List[Int] = {
+  var out: List[Int] = []
+  for l in eff_labels(e) {
+    let (eid, _) = l
+    out = out ++ [3 * eid]
+  }
+  for v in eff_vars(e) {
+    let (vid, _) = v
+    out = out ++ [3 * vid + 1]
+  }
+  for a in eff_assocs(e) {
+    let (_, _, tid, _) = a
+    out = out ++ [3 * tid + 2]
+  }
+  out
+}
+
+## The runtime arity of a **function value**: the parameters it was written
+## with, plus exactly one evidence slot.
+##
+## One shape for every function value, whatever its row says -- the same
+## discipline `lift_ctor_value` and `lift_fn_value` already answer to, and the
+## reason this knife needs no eta adapter anywhere. A row widening on the way
+## into a slot (`checker.assignable` lets a pure closure stand where an
+## effectful one is declared) changes nothing a caller can observe about the
+## arity, so there is no crossing to make physical.
+##
+## The slot carries a pack, not an atom, so a pure function value carries an
+## empty one. That is the price this knife exists to measure.
+pub fn fn_arity(t: Ty) -> Int =
+  match peel_opaque(t) {
+    TyFn(ps, _, _) -> len(ps) + 1
+    _ -> 0
+  }
+
+test "the named side counts atoms and a function value counts one" {
+  let ask = ELabeled(EPure, [(7, "Ask")])
+  assert nev(EPure) == 0
+  assert nev(EIo) == 0
+  assert nev(ask) == 1
+  assert nev(ELabeled(EIo, [(7, "Ask"), (9, "Tell")])) == 2
+  # rule 丁: a variable is one slot, and so is a union of two of them
+  assert nev(EffVar("e", 1)) == 1
+  assert nev(EUnion([(1, "e1"), (2, "e2")], [], false)) == 2
+  # rule 丙: a projection is one slot, counted once however often it is used
+  assert nev(EffAssoc("T", 4, 3, "E")) == 1
+  # all three axes at once, and io still free
+  assert nev(ELabeled(EUnion([(1, "e")], [("T", 4, 3, "E")], true), [(7, "Ask")])) == 3
+  # a key per atom, banded so the three axes cannot answer for each other
+  assert atom_keys(EPure) == []
+  assert atom_keys(ask) == [21]
+  assert atom_keys(EffVar("e", 7)) == [22]
+  assert atom_keys(EffAssoc("T", 4, 7, "E")) == [23]
+  assert len(atom_keys(ELabeled(EUnion([(1, "e")], [("T", 4, 3, "E")], true), [(7, "Ask")]))) == 3
+  # the function-value arity is the written parameters plus the pack, and the
+  # row is not consulted: these four are one shape
+  assert fn_arity(TyFn([TyInt], TyInt, EPure)) == 2
+  assert fn_arity(TyFn([TyInt], TyInt, ask)) == 2
+  assert fn_arity(TyFn([TyInt], TyInt, EIo)) == 2
+  assert fn_arity(TyFn([TyInt], TyInt, EffVar("e", 1))) == 2
+  assert fn_arity(TyFn([], TyInt, EffVar("e", 1))) == 1
+  assert fn_arity(TyInt) == 0
+}
+
 ## The normal form of (base, labels): no labels means the base itself.
 pub fn eff_with_labels(base: Eff, labels: List[(Int, String)]) -> Eff =
   if len(labels) == 0 { base } else { ELabeled(base, by_id(labels)) }
@@ -1243,6 +1340,86 @@ pub alias Effects = Map[Int, EffectI]
 ## the ADT namespace with user types without ever colliding with one.
 pub fn ev_record_name(effect_name: String) -> String = "ev\$" ++ effect_name
 
+## A signature's **ABI row**: its declared row, with the effect variables it
+## binds folded in.
+##
+## The declared row is not the whole answer, because a signature can bind a
+## variable it does not itself raise. `impl Container[Quiet] { fn wrap(c: Quiet,
+## body: fn() -> Int !e) -> Int }` binds `e` in a parameter and is pure -- an
+## impl may be purer than the row the trait admits -- and it still has to take
+## the slot the trait method's callers pass, or the dictionary has two shapes.
+## `Sig.eparams` is exactly "the variables this signature introduced, in
+## introduction order" (`eff_params_of`), so folding it in is what makes the
+## count a property of the signature rather than of what its body happened to
+## do.
+##
+## The row's own variables are kept as well as `eparams`, not instead of it: a
+## variable can reach a row from a type declaration's effect parameter, which
+## this signature never bound (see `checker.verify_effects`' advice arm).
+##
+## Every Sig-side reader of `nev` goes through here, so there is still one
+## count. Nothing stores the result: it is a layout question, and the
+## non-normal `EUnion` it may build is only ever asked for its three axes.
+pub fn sig_abi_eff(s: Sig) -> Eff = {
+  let (io, vs0, atoms) = base_parts(eff_base(s.eff))
+  var vs = vs0
+  for p in s.eparams {
+    match p {
+      EffVar(n, id) -> if not union_has(vs, id) { vs = vs ++ [(id, n)] }
+      _ -> ()
+    }
+  }
+  eff_with_labels(EUnion(by_id(vs), atoms, io), eff_labels(s.eff))
+}
+
+## The evidence pack's ADT id. Reserved and negative, like `DICT_ADT_ID` and
+## `CHAR_OPAQUE_ID`, because this record has no declaration site to mint an id
+## for it and `first_minted_id` must not move when it is added.
+pub const EV_PACK_ID: Int = -3
+
+## The evidence pack: an immutable chain of `(key, evidence, outer)` nodes,
+## addressed by atom key rather than by position.
+##
+## This is what a function value's one evidence slot carries. Keying it means a
+## merge is a cons and a lookup is a walk, so two rows meeting at a call site
+## never have to be reordered against one another -- the failure mode that
+## judged a positional evidence *vector* unsafe on native (design 裁决背景 1).
+##
+## An ordinary record, so it costs no new Core node and no new backend shape:
+## it is built with `CCtor` and would be read with `CField`, exactly like the
+## `ev$E` record an effect declaration synthesises. Its name is unspellable for
+## the same reason that one's is.
+##
+## **The empty pack is the erased placeholder, not a nil constructor.** A slot
+## that carries no evidence carries what every other erased evidence slot
+## carries when nothing answers it, and a walk therefore ends when it meets
+## something that is not a node. A second constructor would have bought a
+## tag test instead of a shape test and one more emitted class per program.
+pub fn ev_pack_adt() -> AdtI =
+  AdtI {
+    id: EV_PACK_ID,
+    name: "ev\$Pack",
+    is_record: true,
+    tparams: [],
+    ctors: [
+      CtorI {
+        adt: EV_PACK_ID,
+        name: "ev\$Pack",
+        fields: [
+          FieldI { name: "key", ty: TyInt },
+          FieldI { name: "ev", ty: erased_ev_ty() },
+          FieldI { name: "outer", ty: erased_ev_ty() }
+        ]
+      }
+    ],
+    derives_show: false,
+    derives_ord: false,
+    owner: None,
+    audience: AWorld
+  }
+
+pub fn ev_pack_ty() -> Ty = TyAdt(EV_PACK_ID, [])
+
 # ---- traits ----
 
 pub type MethodSig = { sig: Sig, has_default: Bool }
@@ -1694,7 +1871,16 @@ pub fn prelude_adts() -> Adts = {
     owner: None,
     audience: AWorld
   }
-  map.from([(OPTION_ID, option), (RESULT_ID, result), (FOREIGN_ERROR_ID, ferr)])
+  # the evidence pack rides here rather than being minted per module: it is
+  # one shape for the whole program, and its id is negative so that adding it
+  # leaves `first_minted_id` -- and therefore every minted id in every program
+  # -- exactly where it was
+  map.from([
+    (OPTION_ID, option),
+    (RESULT_ID, result),
+    (FOREIGN_ERROR_ID, ferr),
+    (EV_PACK_ID, ev_pack_adt())
+  ])
 }
 
 fn prelude_method(tid: Int, tv: Ty, name: String, ptys: List[Ty], pnames: List[String],
@@ -3062,9 +3248,19 @@ test "builtin type inventory keeps its surface boundaries" {
   assert builtin_type_apply(ma, [TyString, TyInt]) == TyMap(TyString, TyInt)
 
   # Prelude ADTs are a separate nominal layer, not compiler-owned type names.
+  # `ev$Pack` is in the table but not of that layer: `$` is not an identifier
+  # character, so like the `ev$E` record an effect declaration synthesises it
+  # shares the ADT namespace without ever being spellable in a header. The
+  # surface list is therefore the three that are, and the split is asserted
+  # here rather than left to the reader.
   let prelude = prelude_adts()
   let prelude_names = sort(map(map.keys(prelude), id => adt_of(prelude, id).name))
-  assert prelude_names == ["ForeignError", "Option", "Result"]
+  assert prelude_names == ["ForeignError", "Option", "Result", "ev\$Pack"]
+  var spellable: List[String] = []
+  for n in prelude_names {
+    if not str.contains(n, "\$") { spellable = spellable ++ [n] }
+  }
+  assert spellable == ["ForeignError", "Option", "Result"]
 }
 
 test "builtin table renders signatures" {

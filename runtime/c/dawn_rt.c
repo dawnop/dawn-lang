@@ -1157,6 +1157,9 @@ static dawn_adt *dawn_foreign_error(dawn_failure f) {
 /* The closure returns an erased slot whatever `T` is, so one cast covers
  * every instantiation -- see the header. */
 #ifndef __wasi__
+/* `f` is a Dawn `fn() -> T`, which is a one-slot function value: the written
+ * parameters are none and the evidence pack is one. This boundary has no
+ * evidence, so it passes NULL -- the empty pack (see dawn_bracket). */
 static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   /* designated init so the rest (the jmp_buf) is zeroed: the landing cleanup
    * may run before setjmp has ever filled it, and reads it only behind the
@@ -1172,16 +1175,19 @@ static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
     dawn_handlers = h.prev;
     return dawn_err(dawn_foreign_error(mine));
   }
-  void *v = ((void *(*)(dawn_clo *))f->fn)(f);
+  void *v = ((void *(*)(dawn_clo *, void *))f->fn)(f, NULL);
   dawn_handlers = h.prev;
   return dawn_ok(v);
 }
 #else
 static void *dawn_wasi_caught_body(void *ctx) {
   dawn_clo *f = (dawn_clo *)ctx;
-  return ((void *(*)(dawn_clo *))f->fn)(f);
+  return ((void *(*)(dawn_clo *, void *))f->fn)(f, NULL);
 }
 
+/* `f` is a Dawn `fn() -> T`, which is a one-slot function value: the written
+ * parameters are none and the evidence pack is one. This boundary has no
+ * evidence, so it passes NULL -- the empty pack (see dawn_bracket). */
 static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   dawn_handler h = {
     .prev = dawn_handlers,
@@ -1260,7 +1266,13 @@ static _Noreturn void dawn_reraise(dawn_failure f) {
  * resource stays the caller's and each closure call needs a reference of its
  * own -- a closure's parameters arrive owned and it releases them (see
  * emitc.adapter_signature). Hence one `dawn_dup` per call and none for the
- * caller's. On the unwind path `use`'s reference is released by `use`'s own
+ * caller's.
+ *
+ * The trailing NULL each call passes is the evidence pack. Every Dawn function
+ * value carries one erased slot for it, whatever its row (types.fn_arity), and
+ * a hand-written shim has none to hand over: NULL is the empty pack, and
+ * `dawn_drop(NULL)` is already a no-op. `gen_bracket` pushes ACONST_NULL in
+ * the same three places on the JVM. On the unwind path `use`'s reference is released by `use`'s own
  * frame cleanups as the forced unwind walks it -- the leak that used to sit
  * here, "the documented cost of the mechanism", is what #193 ARC-05 closed,
  * and scripts/spike-native/recover_bracket.dawn is the corpus that holds it
@@ -1287,16 +1299,19 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
      * unwinder walks this frame on the way down. */
     dawn_failure crossing DAWN_CLEANUP(dawn_failure_release) = dawn_inflight;
     dawn_handlers = h.prev;
-    dawn_drop(((void *(*)(dawn_clo *, void *))release->fn)(release,
-                                                          dawn_dup(resource)));
+    dawn_drop(((void *(*)(dawn_clo *, void *, void *))release->fn)(
+      release, dawn_dup(resource), NULL));
     dawn_failure owed = crossing;
     crossing.msg = NULL;
     dawn_reraise(owed);
   }
-  void *r = ((void *(*)(dawn_clo *, void *))use->fn)(use, dawn_dup(resource));
+  void *r = ((void *(*)(dawn_clo *, void *, void *))use->fn)(use, dawn_dup(resource),
+                                                          NULL);
   dawn_handlers = h.prev;
   dawn_drop(
-    ((void *(*)(dawn_clo *, void *))release->fn)(release, dawn_dup(resource)));
+    ((void *(*)(dawn_clo *, void *, void *))release->fn)(release,
+                                                        dawn_dup(resource),
+                                                        NULL));
   return r;
 }
 #else
@@ -1307,8 +1322,8 @@ struct dawn_wasi_use_box {
 
 static void *dawn_wasi_use_body(void *ctx) {
   struct dawn_wasi_use_box *b = (struct dawn_wasi_use_box *)ctx;
-  return ((void *(*)(dawn_clo *, void *))b->use->fn)(b->use,
-                                                     dawn_dup(b->resource));
+  return ((void *(*)(dawn_clo *, void *, void *))b->use->fn)(
+      b->use, dawn_dup(b->resource), NULL);
 }
 
 void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
@@ -1341,8 +1356,8 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
     void *cross_own[2] = { (void *)(intptr_t)1, NULL };
     dawn_wasi_own_push(cross_own);
     cross_own[1] = crossing.msg;
-    dawn_drop(((void *(*)(dawn_clo *, void *))release->fn)(release,
-                                                          dawn_dup(resource)));
+    dawn_drop(((void *(*)(dawn_clo *, void *, void *))release->fn)(
+      release, dawn_dup(resource), NULL));
     dawn_failure owed = crossing;
     owed.msg = (dawn_str *)dawn_take(&cross_own[1]);
     dawn_wasi_own_pop(cross_own);
@@ -1350,7 +1365,9 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
   }
   dawn_handlers = h.prev;
   dawn_drop(
-    ((void *(*)(dawn_clo *, void *))release->fn)(release, dawn_dup(resource)));
+    ((void *(*)(dawn_clo *, void *, void *))release->fn)(release,
+                                                        dawn_dup(resource),
+                                                        NULL));
   return r;
 }
 #endif

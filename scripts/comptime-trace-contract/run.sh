@@ -22,8 +22,14 @@ require() {
   grep -Fq "$needle" "$file" || fail "missing diagnostic text: $needle"
 }
 
+# The budget is a knob, not a claim: it has to land the FUEL const's failure
+# with the lambda `map` calls on top of the chain, and how many steps that
+# takes depends on what the interpreter does per call. It was 200 until a
+# function value gained its hidden evidence slot -- the pack a dynamic call
+# builds is evaluated like any other argument, so the same walk now costs a few
+# more steps and stops one frame short of the lambda at 200.
 cp "$here/trace.dawn" "$work/trace.dawn"
-if "$dawn" run --comptime-fuel=200 "$work/trace.dawn" > "$work/trace.out" 2>&1; then
+if "$dawn" run --comptime-fuel=208 "$work/trace.dawn" > "$work/trace.out" 2>&1; then
   fail "the diagnostic fixture unexpectedly compiled"
 fi
 

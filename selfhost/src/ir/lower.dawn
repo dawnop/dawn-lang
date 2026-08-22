@@ -26,7 +26,9 @@ use check/types.{
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyMap, TySet, TyArray, TyJava,
   DICT_ADT_ID,
   Sym, Sig, Eff, EPure, Traits, TraitI, ImplI, MethodSig,
-  eff_labels, eff_assocs, reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty,
+  eff_labels, eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
+  reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty,
+  EV_PACK_ID, ev_pack_ty,
   Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID,
@@ -215,6 +217,156 @@ fn adapt_out(e: CExpr, declared: Ty, actual: Ty) -> CExpr =
       }
     _ -> e
   }
+
+# ---- evidence ----
+
+## What fills an evidence slot nothing answers -- and, in a function value's
+## one slot, the **empty pack**: a chain of no nodes is not a node.
+##
+## Boxed, because the slot is erased -- `Ljava/lang/Object;` on the JVM,
+## `void*` on native -- and a bare unit is neither: native spells Unit as a
+## byte, so passing one where a pointer is declared is an integer crossing into
+## a pointer. This is the same crossing `adapt_in` describes for every other
+## value entering an erased slot; it is spelled once because a placeholder is
+## made in four places.
+fn ev_placeholder() -> CExpr = adapt_in(CUnit, TyUnit, erased_ev_ty())
+
+## An evidence slot's value on its way into a call. A real record is already a
+## reference and crosses untouched; a placeholder the checker minted (a
+## projection, or a variable that instantiated to pure) is a unit and needs the
+## box.
+fn ev_value(v: CExpr) -> CExpr =
+  if peel_opaque(cex_ty(v)) == TyUnit { adapt_in(v, TyUnit, erased_ev_ty()) } else { v }
+
+## Is this primitive implemented by a runtime function rather than by Dawn?
+## `Intr.rt` is the intrinsic contract's own answer, and it is what decides
+## whether a row on this primitive buys hidden parameters: a hand-written shim
+## has no body for one to be bound in.
+fn is_rt_builtin(st: LSt, name: String) -> Bool =
+  match map.get(st.intrs, name) {
+    Some(i) ->
+      match i.rt {
+        Some(_) -> true
+        None -> false
+      }
+    None -> false
+  }
+
+## The evidence a primitive's own row is worth at the call site.
+##
+## A runtime shim takes none. One implemented in Dawn (`sort_by`, over
+## std/pvec) is an ordinary callee and owes `types.nev` slots -- the checker
+## does not attach them, because `XCallBuiltin` carries no evidence list, so
+## the count is read back off the intrinsic's signature here. Placeholders
+## under this knife, like every other slot.
+##
+## The *parameters* of a shim need no such rule: a function value has one
+## evidence slot whatever its row, so the arity a shim was written at and the
+## arity a Dawn caller computes are the same number plus one on both sides.
+fn builtin_evidence(st: LSt, name: String) -> List[CExpr] = {
+  if is_rt_builtin(st, name) { return [] }
+  match map.get(st.intrs, name) {
+    Some(i) -> {
+      var out: List[CExpr] = []
+      for _k in 0..nev(sig_abi_eff(i.sig)) { out = out ++ [ev_placeholder()] }
+      out
+    }
+    None -> []
+  }
+}
+
+## Lower the evidence arguments the checker attached to a **named** call: one
+## per atom of the callee's ABI row, in the order `checker.check_call` built
+## them.
+fn lower_evidence(st: LSt, evid: List[TExpr]) -> (LSt, List[CExpr]) = {
+  var st1 = st
+  var out: List[CExpr] = []
+  for e in evid {
+    let (st2, v) = lower_expr(st1, e)
+    st1 = st2
+    out = out ++ [ev_value(v)]
+  }
+  (st1, out)
+}
+
+## The evidence pack a call through a function **value** hands over: one cons
+## node per atom of the callee value's row, keyed by the atom
+## (`types.atom_keys`), over the empty pack.
+##
+## Keyed rather than positional, which is what lets two rows meet without being
+## reordered against one another -- the property that makes a pack safe where a
+## vector was not (design 裁决背景 1). Built here rather than forwarded whole
+## because the pack a caller holds and the pack a callee's row asks for are two
+## different rows; merging them is a cons, and this is the cons.
+##
+## Under this knife every payload is a placeholder. A closure still carries the
+## evidence it was created under, so nothing on the receiving side reads a node
+## -- what the pack buys here is that both sides agree on the shape, and that
+## the allocation this convention costs is on the clock rather than deferred to
+## the knife that starts reading it.
+fn ev_pack(st: LSt, e: Eff) -> (LSt, CExpr) = {
+  var acc = ev_placeholder()
+  for k in atom_keys(e) {
+    acc = CCtor(EV_PACK_ID, 0, [CInt(k), ev_placeholder(), acc], ev_pack_ty())
+  }
+  (st, acc)
+}
+
+## Rule F2's call-site half for a function *value*: exactly one argument, the
+## pack, whatever the row says. `types.fn_arity` is the other side of the same
+## number, and there is no third place either is derived.
+fn dyn_evidence(st: LSt, fty: Ty) -> (LSt, List[CExpr]) =
+  match peel_opaque(fty) {
+    TyFn(_, _, e) -> {
+      let (st1, p) = ev_pack(st, e)
+      (st1, [p])
+    }
+    # not a function type: the call site is already an error the checker
+    # reported, and an argument list one short would turn it into a crash
+    _ -> {
+      let (st1, p) = ev_pack(st, EPure)
+      (st1, [p])
+    }
+  }
+
+## The evidence parameters a function *value* of any type takes: one erased
+## slot, carrying the pack.
+##
+## Erased, unlike a named function's exact slot for a written label. A function
+## value is reached through an erased `apply` (JVM) or an erased adapter
+## (native), so there is no descriptor precision to be had on this side and one
+## shape covers every row (design §5.2).
+##
+## Under this knife nothing reads it: a closure still captures the evidence it
+## was created under, and the pack arrives alongside and is dropped. It exists
+## so that the arity a call site computes and the arity a closure was built
+## with are the same number.
+fn fn_value_evs(st: LSt) -> (LSt, List[CParam]) = {
+  let (st1, sym) = fresh_sym(st)
+  (st1, [CParam { sym: sym, ty: erased_ev_ty(), mode: COwned }])
+}
+
+## **The §2.5 guard, and why it is a comment here rather than an assertion.**
+##
+## Design §2.5: a value of evidence must never reach a closure's capture list.
+## An adapter or a wrapper that welded the handler in scope at its creation
+## point into its captures would put the D2 leak straight back, which is the
+## same reason rule 乙 cannot be rescued by one.
+##
+## The three closures this file builds obey it already, by construction and not
+## by luck: `lift_ctor_value` and `lift_fn_value` capture nothing at all, and
+## the pack a call site hands over is built at the call site out of
+## placeholders rather than read out of any environment. No adapter exists to
+## break it, because a function value's arity does not depend on its row and so
+## nothing has to be adapted (`types.fn_arity`).
+##
+## It cannot be *asserted* under this knife, and the reason is the point of the
+## knife: semantics are unchanged, so a user lambda still captures the evidence
+## it was created under -- rule 乙, `checker.bind_evidence`'s locals reaching a
+## `CClosure` through ordinary capture bookkeeping. The capture lists are full
+## of evidence on purpose. The assertion belongs to the knife that takes that
+## capture away; putting it here would only assert that this knife had already
+## been that one.
 
 # ---- operators ----
 
@@ -1141,10 +1293,13 @@ fn no_texprs() -> List[TExpr] = []
 ## bindings, so a label with no source is a lowering invariant break, not a
 ## user error -- panic loudly rather than emit a call one argument short.
 fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty)] = {
-  let lts = eff_labels(sg.eff)
-  let ats = eff_assocs(sg.eff)
+  let sabi = sig_abi_eff(sg)
+  let pabi = sig_abi_eff(psig)
+  let lts = eff_labels(sabi)
+  let vts = eff_vars(sabi)
+  let ats = eff_assocs(sabi)
   var out: List[(Int, Ty, Ty)] = []
-  for l in eff_labels(psig.eff) {
+  for l in eff_labels(pabi) {
     let (lid, _) = l
     var src = 0 - 1
     var from: Ty = TyAdt(lid, [])
@@ -1164,7 +1319,7 @@ fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty)] = {
             for bl in eff_labels(be) {
               let (bid, _) = bl
               if bid == lid && src < 0 {
-                src = len(lts) + j
+                src = len(lts) + len(vts) + j
                 from = erased_ev_ty()
               }
             }
@@ -1175,6 +1330,15 @@ fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty)] = {
     }
     if src < 0 { panic("lower: no evidence source for a devirtualised label") }
     out = out ++ [(src, from, TyAdt(lid, []))]
+  }
+  # An effect variable is not substituted by `subst_subject` -- it is the
+  # method's own binder, not the subject's -- so the impl's row carries the
+  # trait row's variables, in the same order, and each forwards the slot at its
+  # own index. Erased on both sides, so nothing is adapted across.
+  var vi = 0
+  for _v in eff_vars(pabi) {
+    out = out ++ [(len(lts) + vi, erased_ev_ty(), erased_ev_ty())]
+    vi = vi + 1
   }
   out
 }
@@ -1195,7 +1359,7 @@ fn impl_evidence(
     let (i, from, to) = pr
     let (st2, v) = lower_expr(st1, evid[i])
     st1 = st2
-    out = out ++ [adapt_out(v, from, to)]
+    out = out ++ [adapt_out(ev_value(v), from, to)]
   }
   (st1, out)
 }
@@ -1265,16 +1429,23 @@ fn make_bridge(
     # the whole of what "erased on the dictionary-slot boundary" means). The
     # forwarding below re-selects them into the impl's own layout, unerasing
     # where a binding supplied the label -- `adapt_out` is the CHECKCAST.
+    let sabi = sig_abi_eff(sg)
     var evps: List[CParam] = []
     var evlocals: List[CExpr] = []
-    for l in eff_labels(sg.eff) {
+    for l in eff_labels(sabi) {
       let (eid, _) = l
       let (stv, esym) = fresh_sym(st1)
       st1 = stv
       evps = evps ++ [CParam { sym: esym, ty: TyAdt(eid, []), mode: COwned }]
       evlocals = evlocals ++ [CLocal(esym, TyAdt(eid, []))]
     }
-    for _a in eff_assocs(sg.eff) {
+    for _v in eff_vars(sabi) {
+      let (stv, esym) = fresh_sym(st1)
+      st1 = stv
+      evps = evps ++ [CParam { sym: esym, ty: erased_ev_ty(), mode: COwned }]
+      evlocals = evlocals ++ [CLocal(esym, erased_ev_ty())]
+    }
+    for _a in eff_assocs(sabi) {
       let (stv, esym) = fresh_sym(st1)
       st1 = stv
       evps = evps ++ [CParam { sym: esym, ty: erased_ev_ty(), mode: COwned }]
@@ -2438,7 +2609,7 @@ fn lower_trait_call(
       }
       let (st1, d) = witness_value(st, ws[0])
       let (st2, vs) = lower_args_to(st1, args, sg.param_tys)
-      let (st3, es) = lower_all(st2, evid)
+      let (st3, es) = lower_evidence(st2, evid)
       (st3, adapt_out(
         CCall(CMethod(d, tid, name, idx, len(es)), vs ++ es, sg.ret), sg.ret, ty))
     }
@@ -2462,7 +2633,7 @@ fn lower_trait_call(
         # behind it, like any other effectful one
         let (st1, vs) = lower_args_to(st, args, sg.param_tys)
         let (st2, d) = dict_ref(st1, tid, subject)
-        let (st3, es) = lower_all(st2, evid)
+        let (st3, es) = lower_evidence(st2, evid)
         (st3, adapt_out(
           CCall(CDefault(owner_or(tr.owner, st3.owner), tid, name), vs ++ [d] ++ es, sg.ret),
           sg.ret, ty))
@@ -2632,13 +2803,14 @@ fn lift_lambda(
   }, body)
   let cbody1 = adapt_in(cbody0, tex_ty(body), ret_of_fn_ty(ty))
   let cbody = wrap_self_loop(st2.self_tail, lid, cbody1, ret_of_fn_ty(ty))
+  let (st2c, evps) = fn_value_evs(st2)
   let f = CFun {
     name: name,
-    owner: st2.owner,
+    owner: st2c.owner,
     captures: caps,
     params: ps,
     dicts: [],
-    evs: [],
+    evs: evps,
     ret: ret_of_fn_ty(ty),
     body: cbody,
     is_test: false,
@@ -2646,12 +2818,12 @@ fn lift_lambda(
     default_of: None
   }
   (LSt {
-    ..st2,
-    lifted: st2.lifted ++ [f],
+    ..st2c,
+    lifted: st2c.lifted ++ [f],
     self_ctx: st.self_ctx,
     tail: st.tail,
     self_tail: st.self_tail
-  }, CClosure(name, st2.owner, cap_args, ty))
+  }, CClosure(name, st2c.owner, cap_args, ty))
 }
 
 ## A constructor used as a function value (`map(xs, Some)`) becomes a
@@ -2673,20 +2845,21 @@ fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
     args = args ++ [adapt_in(CLocal(sym, pt), pt, declared)]
     i = i + 1
   }
+  let (st5, evps) = fn_value_evs(st2)
   let f = CFun {
     name: lam,
-    owner: st2.owner,
+    owner: st5.owner,
     captures: [],
     params: ps,
     dicts: [],
-    evs: [],
+    evs: evps,
     ret: ret,
     body: CCtor(adt, ci, args, ret),
     is_test: false,
     impl_of: None,
     default_of: None
   }
-  (LSt { ..st2, lifted: st2.lifted ++ [f] }, CClosure(lam, st2.owner, [], ty))
+  (LSt { ..st5, lifted: st5.lifted ++ [f] }, CClosure(lam, st5.owner, [], ty))
 }
 
 ## A top-level function used as a value becomes a closure over a wrapper
@@ -2705,25 +2878,46 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
     args = args ++ [CLocal(sym, pt)]
     i = i + 1
   }
+  # **The one translation point between the two evidence conventions.** Seen
+  # from outside, this wrapper is a function value: one erased slot carrying a
+  # pack, whatever its row. Seen from inside, the call it makes is a named one
+  # and owes the callee a slot per atom of *its* ABI row -- a different count,
+  # arrived at from the callee's signature rather than from this type.
+  #
+  # Under this knife the inside is a placeholder in every position: nothing
+  # reads a slot, so unpacking the pack the wrapper received would be work
+  # whose result is discarded. The knife that starts reading is where the two
+  # counts have to be reconciled for real, and this is the only place it has to
+  # happen.
+  let (st5, evps) = fn_value_evs(st2)
+  var inner_evs: List[CExpr] = []
+  if not is_builtin {
+    match sig_of(st5, owner, name) {
+      Some(sg) -> {
+        for _k in 0..nev(sig_abi_eff(sg)) { inner_evs = inner_evs ++ [ev_placeholder()] }
+      }
+      None -> ()
+    }
+  }
   let f = CFun {
     name: lam,
-    owner: st2.owner,
+    owner: st5.owner,
     captures: [],
     params: ps,
     dicts: [],
-    evs: [],
+    evs: evps,
     ret: ret_of_fn_ty(ty),
     body:
     if is_builtin {
       CIntrinsic(name, args, ret_of_fn_ty(ty))
     } else {
-      CCall(CDirect(owner, name), args, ret_of_fn_ty(ty))
+      CCall(CDirect(owner, name), args ++ inner_evs, ret_of_fn_ty(ty))
     },
     is_test: false,
     impl_of: None,
     default_of: None
   }
-  (LSt { ..st2, lifted: st2.lifted ++ [f] }, CClosure(lam, st2.owner, [], ty))
+  (LSt { ..st5, lifted: st5.lifted ++ [f] }, CClosure(lam, st5.owner, [], ty))
 }
 
 # ---- expressions ----
@@ -2896,12 +3090,13 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         Some(sg) -> {
           let (st1, vs) = lower_args_to(st, args, sg.param_tys)
           let (st2, ds) = witness_values(st1, wits)
-          (st2, adapt_out(CIntrinsic(name, vs ++ ds, sg.ret), sg.ret, ty))
+          (st2, adapt_out(CIntrinsic(name, vs ++ ds ++ builtin_evidence(st2, name), sg.ret),
+            sg.ret, ty))
         }
         None -> {
           let (st1, vs) = lower_all(st, args)
           let (st2, ds) = witness_values(st1, wits)
-          (st2, CIntrinsic(name, vs ++ ds, ty))
+          (st2, CIntrinsic(name, vs ++ ds ++ builtin_evidence(st2, name), ty))
         }
       }
     }
@@ -2923,13 +3118,13 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
               # arguments, in bound order -- the order the callee declares --
               # and an effectful one its evidence, right behind them
               let (st2, ds) = witness_values(st1, wits)
-              let (st3, es) = lower_all(st2, evid)
+              let (st3, es) = lower_evidence(st2, evid)
               (st3, adapt_out(CCall(CDirect(o, name), vs ++ ds ++ es, sg.ret), sg.ret, ty))
             }
             None -> {
               let (st1, vs) = lower_all(st, args)
               let (st2, ds) = witness_values(st1, wits)
-              let (st3, es) = lower_all(st2, evid)
+              let (st3, es) = lower_evidence(st2, evid)
               (st3, CCall(CDirect(o, name), vs ++ ds ++ es, ty))
             }
           }
@@ -2951,16 +3146,20 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
           # not a tail call, so the closure is rebuilt and called through
           let (st1, vs) = lower_all(st, args)
           let clo = self_value(st1, sym).expect("self closure")
-          (st1, CCall(CDynamic(clo), vs, ty))
+          let (st2, es) = dyn_evidence(st1, cex_ty(clo))
+          (st2, CCall(CDynamic(clo), vs ++ es, ty))
         }
       } else {
         let (st1, vs) = lower_all(st, args)
-        (st1, CCall(CDynamic(CLocal(sym, sym_ty(st1, sym, TyError))), vs, ty))
+        let fty = sym_ty(st1, sym, TyError)
+        let (st2, es) = dyn_evidence(st1, fty)
+        (st2, CCall(CDynamic(CLocal(sym, fty)), vs ++ es, ty))
       }
     XApply(target, args, _, _, ty) -> {
       let (st1, tv) = lower_expr(st, target)
       let (st2, vs) = lower_all(st1, args)
-      (st2, CCall(CDynamic(tv), vs, ty))
+      let (st3, es) = dyn_evidence(st2, cex_ty(tv))
+      (st3, CCall(CDynamic(tv), vs ++ es, ty))
     }
     XLambda(params, _, body, captures, _, _, ty) ->
       lift_lambda(st, params, body, captures, ty, None)

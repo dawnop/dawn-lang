@@ -13,10 +13,10 @@ use std/bytes
 use std/list
 use std/map
 use check/types.{
-  EPure, prelude_adts, opt_ty, peel_opaque,
+  EPure, EIo, EffVar, prelude_adts, opt_ty, peel_opaque,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
-  Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff
+  Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff, fn_arity
 }
 use ir/core.{subject_key}
 use front/diag.{render}
@@ -75,7 +75,9 @@ pub fn desc_of(adts: Adts, t: Ty) -> String =
       let internal = join(str.split(fqcn, "."), "/")
       if str.starts_with(internal, "[") { internal } else { "L" ++ internal ++ ";" }
     }
-    TyFn(params, _, _) -> "L" ++ fn_iface(len(params)) ++ ";"
+    # the runtime arity, from `types.fn_arity`: a function value's evidence
+    # pack is a hidden parameter of the value, so it picks the interface
+    TyFn(_, _, _) -> "L" ++ fn_iface(fn_arity(t)) ++ ";"
   }
 
 pub fn method_desc(adts: Adts, params: List[Ty], ret: Ty) -> String = {
@@ -167,7 +169,14 @@ test "descriptors and slot sizes mirror the Kotlin mapping" {
   assert desc_of(adts, TyBytes) == "[B"
   assert desc_of(adts, TyList(TyInt)) == "Lstd/pvec\$Vec;"
   assert desc_of(adts, TyTuple([TyInt, TyBool])) == "Ldawn/rt/Tuple2;"
-  assert desc_of(adts, TyFn([TyInt], TyBool, EPure)) == "Ldawn/rt/Fn1;"
+  # the interface is picked by `types.fn_arity`, not by the written parameter
+  # count: every function value carries one evidence slot, so `fn(Int) -> Bool`
+  # is a Fn2 and calling it as a Fn1 is a link error -- and the row does not
+  # enter into it, which is why no eta adapter exists anywhere
+  assert desc_of(adts, TyFn([TyInt], TyBool, EPure)) == "Ldawn/rt/Fn2;"
+  assert desc_of(adts, TyFn([TyInt], TyBool, EffVar("e", 1))) == "Ldawn/rt/Fn2;"
+  assert desc_of(adts, TyFn([TyInt], TyBool, EIo)) == "Ldawn/rt/Fn2;"
+  assert desc_of(adts, TyFn([], TyBool, EPure)) == "Ldawn/rt/Fn1;"
   assert desc_of(adts, opt_ty(TyInt)) == "LOption;"
   assert method_desc(adts, [TyInt, TyString], TyUnit) == "(JLjava/lang/String;)Ldawn/rt/Unit;"
   assert erased_apply_desc(2) == "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
@@ -840,7 +849,7 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
       let internal = join(str.split(fqcn, "."), "/")
       m.visitTypeInsn(OP_CHECKCAST, internal)
     }
-    TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
+    TyFn(_, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(fn_arity(t))) }
     TyUnit -> { m.visitTypeInsn(OP_CHECKCAST, UNIT_CLASS) }
     # TyVar (and a projection over one) is already erased, and the two
     # bottom types carry no value

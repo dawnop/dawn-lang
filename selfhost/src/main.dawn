@@ -60,7 +60,7 @@ use jvm/rtclasses.{
 }
 use check/types.{
   prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
-  FOREIGN_ERROR_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, ORD_ID,
+  FOREIGN_ERROR_ID, EV_PACK_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, ORD_ID,
   prelude_trait_ids, bounds_of,
   Ty, Sig, Traits, ImplI, Adts, Impls
 }
@@ -273,8 +273,11 @@ fn collect_program(
   # because it is a fact about the whole program: `adts` is complete at this
   # point and every class below is emitted against the same table.
   let sup = supers_of(adts, sort(map.keys(adts)))
+  # one past the widest written parameter list, because a function value's
+  # evidence pack is a parameter of the value (`types.fn_arity`): a written
+  # `fn(a, b, c, d, e, f, g, h)` is a Fn9
   var n = 0
-  while n <= 8 {
+  while n <= 9 {
     classes = classes ++ [(fn_iface(n), gen_fn_interface(n))]
     n = n + 1
   }
@@ -307,7 +310,9 @@ fn collect_program(
   }
   classes = classes ++ [(tr_iface(None, "Ord"), gen_ord_interface(sup))]
   classes = classes ++ [(FN_CMP_CLASS, gen_fn_comparator(sup))]
-  for aid in [OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID] {
+  # the evidence pack joins the three: it is program-wide, owned by no module,
+  # and every function value's hidden slot may carry one
+  for aid in [OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID, EV_PACK_ID] {
     classes = classes ++ gen_adt(sup, adts, adt_of(adts, aid), no_override())
   }
   # program-wide tables for module emission: traits/impls/fn sigs unioned

@@ -1,0 +1,80 @@
+# Effect-polymorphic evidence, held to the bytecode verifier.
+#
+# Rule 丁 gives every effect variable in a named signature's row one *erased*
+# hidden parameter, and an erased slot is the shape the verifier cannot check:
+# `Object` accepts anything, so a caller and a callee that disagree about how
+# many words cross link happily and read the slot next door.
+# `effect-params-design.md` recorded that cost for the one projection slot on a
+# trait boundary; rule 丁 widened it to every effect-polymorphic function, which
+# is why the case is registered here rather than left to the differential (a
+# wrong count is legal bytes with the wrong answer, and only the arity itself is
+# checkable).
+#
+# What each part is for:
+#
+#   * `apply_twice`  -- a variable's slot forwarded through two frames, so a
+#                       drift of one shows up as an argument count rather than
+#                       as a value;
+#   * `Wrap`         -- the same slot on the dictionary boundary, where the
+#                       interface method, the dictionary class's forwarder and
+#                       the impl's own static must all spell one descriptor;
+#   * `raise`/`Ask`  -- a written label beside a variable, so the exact slot
+#                       and the erased one are laid out in the same row;
+#   * the two crossings in `main` -- a pure closure into an `!e` parameter and
+#                       an `!e` value handed back to a call site that
+#                       instantiated the row to pure. Under the one-pack
+#                       convention neither is a crossing at all: a function
+#                       value's arity is its written parameters plus one for
+#                       every row alike, so a widened row does not change the
+#                       shape and there is no adapter to get wrong. They are
+#                       kept because that is a claim worth a fixture -- if an
+#                       arity ever did follow a row again, these two lines are
+#                       where the verifier would say so.
+#
+# Run: dawn run scripts/classfile-verify/effect_poly_evidence.dawn
+
+effect Ask {
+  fn ask() -> Int
+}
+
+fn apply_twice(f: fn(Int) -> Int !e, x: Int) -> Int !e = f(f(x))
+
+fn forward(f: fn(Int) -> Int !e, x: Int) -> Int !e = apply_twice(f, x)
+
+## A written label and a variable in one row: the label's slot is the evidence
+## record's own type, the variable's is erased, and they sit in that order.
+fn labelled(f: fn(Int) -> Int !e, x: Int) -> Int !Ask !e = f(x) + ask()
+
+trait Wrap[T] {
+  fn wrap(t: T, f: fn(Int) -> Int !e) -> Int !e
+}
+
+type Boxed = { seed: Int }
+
+impl Wrap[Boxed] {
+  fn wrap(t: Boxed, f: fn(Int) -> Int !e) -> Int !e = f(t.seed)
+}
+
+## Generic over the witness, so the call goes through the dictionary rather
+## than devirtualising: the erased slot crosses the interface here.
+fn through_dict[T: Wrap](t: T, f: fn(Int) -> Int !e) -> Int !e = wrap(t, f)
+
+## Hands back a function value whose row is the caller's to instantiate. A pure
+## call site holds it at the arity every function value has, which is the point
+## of the convention: the declaration and the use agree without an adapter.
+fn adder(f: fn(Int) -> Int !e) -> (fn(Int) -> Int !e) = n => f(n) + 1
+
+pub fn main() -> Unit !io = {
+  # a pure closure into an `!e` parameter: same arity, nothing widened
+  println(to_string(apply_twice(n => n + 1, 1)))
+  println(to_string(forward(n => n * 2, 3)))
+  println(to_string(through_dict(Boxed { seed: 5 }, n => n - 1)))
+  # a function value the row does not want: same arity the other way round
+  let plain: fn(Int) -> Int = n => n + 100
+  println(to_string(apply_twice(plain, 0)))
+  let narrowed: fn(Int) -> Int = adder(n => n * 3)
+  println(to_string(narrowed(4)))
+  with handle Ask { ask() => 7 }
+  println(to_string(labelled(n => n + ask(), 1)))
+  println(to_string(apply_twice(n => n + ask(), 0)))
+}

@@ -309,10 +309,20 @@ java_tail_fixture=scripts/classfile-verify/java_tail_unit.dawn
 # at class *load* rather than at type check, so a corpus entry that is only
 # compiled would not see it -- which is why it is registered here and not only
 # in the emit differential.
+# effect_poly_evidence.dawn is here for the same reason interop.dawn is, on the
+# other axis: rule 丁 gives every effect variable an *erased* hidden parameter,
+# and `Object` accepts anything, so a caller and a callee that disagree about
+# how many words cross link happily and read the slot next door. The arity is
+# the one part of that a verifier does check, and this fixture puts it on every
+# boundary at once -- a variable forwarded through two frames, the same slot on
+# a dictionary interface, an exact label slot beside an erased one, and a
+# function value crossing both directions of a widened row. The differential
+# cannot stand in for it: a miscount is legal bytes with a wrong answer.
 for t in selfhost site packages/json packages/web packages/sha2 packages/inflate \
     playground examples/projects/calc.dawn examples/interop/interop.dawn \
     examples/effects/handlers.dawn examples/text/chars.dawn \
-    examples/errors/barriers.dawn "$java_tail_fixture"; do
+    examples/errors/barriers.dawn scripts/classfile-verify/effect_poly_evidence.dawn \
+    "$java_tail_fixture"; do
   out="$work/emit/${t//\//_}"
   mkdir -p "$out"
   ./bin/dawn __emit "$t" -o "$out" > /dev/null

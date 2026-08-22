@@ -34,7 +34,7 @@ use std/str
 use std/list
 use std/map
 use std/set
-use check/types.{Adts, Ty, TyAdt, ty_show, adt_of}
+use check/types.{Adts, Ty, TyAdt, ty_show, adt_of, DICT_ADT_ID}
 use ir/core.{
   CModule, CFun, CParam, CMode, COwned, CBorrowed,
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
@@ -243,9 +243,15 @@ fn callee_line(adts: Adts, c: CCallee) -> String =
 ## because a dictionary's Dawn-level type is each backend's business. There is
 ## no such ADT, so `ty_show` cannot render it -- name it instead of crashing,
 ## and keep it visible: this is one of the things the dump exists to show.
+##
+## `DICT_ADT_ID` by name rather than "any negative id": the reserved band has
+## more than one tenant now (`EV_PACK_ID` is a real ADT with a real name), and
+## rendering every one of them as `<dict>` would hide exactly the node this
+## dump is being read for.
 fn ty_str(adts: Adts, t: Ty) -> String =
   match t {
-    TyAdt(aid, args) -> if aid < 0 && len(args) == 0 { "<dict>" } else { ty_show(adts, t) }
+    TyAdt(aid, args) ->
+      if aid == DICT_ADT_ID && len(args) == 0 { "<dict>" } else { ty_show(adts, t) }
     _ -> ty_show(adts, t)
   }
 
@@ -265,7 +271,7 @@ fn ty(adts: Adts, t: Ty) -> String = " : " ++ ty_str(adts, t)
 ## stable within one program -- it is only the compiler-compiling-itself dump,
 ## where every edit is to the program being measured, that churns.
 fn ctor_at(adts: Adts, adt: Int, ci: Int) -> String = {
-  if adt < 0 { return "<dict>/" ++ to_string(ci) }
+  if adt == DICT_ADT_ID { return "<dict>/" ++ to_string(ci) }
   let a = adt_of(adts, adt)
   let cn = if ci < len(a.ctors) { a.ctors[ci].name } else { "?" ++ to_string(ci) }
   a.name ++ "/" ++ cn

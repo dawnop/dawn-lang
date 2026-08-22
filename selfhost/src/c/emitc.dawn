@@ -1818,6 +1818,12 @@ fn adapter_signature(f: CFun) -> String = {
   for p in f.params {
     ps = ps ++ ["void* " ++ local_name(p.sym)]
   }
+  # the evidence pack rides in a trailing slot of the same erased shape: a call
+  # through a function value passes `types.fn_arity` arguments, and the adapter
+  # is the one place both counts have to agree
+  for e in f.evs {
+    ps = ps ++ ["void* " ++ local_name(e.sym)]
+  }
   "void* " ++ adapter_name(f.owner, f.name) ++ "(" ++ join(ps, ", ") ++ ")"
 }
 
@@ -1839,6 +1845,10 @@ fn emit_adapter(st: CSt, f: CFun) -> CSt = {
   # reading one owns it (references pass straight through to the callee)
   for p in f.params {
     args = args ++ [unbox_own_expr(local_name(p.sym), p.ty)]
+  }
+  # evidence is erased on both sides of the adapter, so it crosses unchanged
+  for e in f.evs {
+    args = args ++ [unbox_own_expr(local_name(e.sym), e.ty)]
   }
   let call = fn_symbol(f) ++ "(" ++ join(args, ", ") ++ ")"
   # a Unit-returning lambda still owes the caller a slot

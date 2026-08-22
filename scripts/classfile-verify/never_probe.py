@@ -151,6 +151,10 @@ def core_shapes(core):
     return all(item in core for item in required)
 
 
+# A Dawn `fn() -> T` value is a `dawn/rt/Fn1`, not an `Fn0`: every function
+# value carries one hidden erased evidence slot whatever its row
+# (types.fn_arity). The interface name and the erased `apply` descriptor below
+# are that fact spelled for javap.
 def structural_results(out_dir):
     main = javap(out_dir / "never_calls.class")
     direct = terminates(
@@ -161,7 +165,7 @@ def structural_results(out_dir):
     dynamic = all(
         terminates(
             method_body(main, f"long {name}(boolean)"),
-            "Fn0.apply:()Ljava/lang/Object;",
+            "Fn1.apply:(Ljava/lang/Object;)Ljava/lang/Object;",
             True,
         )
         for name in ("via_dynamic", "via_closure")
@@ -208,7 +212,7 @@ def structural_results(out_dir):
 
     sam_bridge = terminates(
         method_body(main, "dawn$sam$0("),
-        "Fn0.apply:()Ljava/lang/Object;",
+        "Fn1.apply:(Ljava/lang/Object;)Ljava/lang/Object;",
         True,
     )
     sam_files = list((out_dir / "dawn" / "sam").glob("never_calls$*.class"))
