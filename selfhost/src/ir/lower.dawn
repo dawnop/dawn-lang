@@ -527,6 +527,80 @@ test "a ground label still builds the chain, and a pure row still builds none" {
   }
 }
 
+test "inside a lifted closure the frame's evidence is its own pack slot" {
+  # `ev_forward`'s other source. A lambda has no per-atom slots -- one erased
+  # parameter carries the whole chain (`fn_value_evs`) -- so a lone atom's pack
+  # is that parameter, forwarded.
+  #
+  # Nothing in this tree reaches this branch: a dynamic call over a lone
+  # non-ground row inside a lambda body does not occur in the compiler, std or
+  # the corpus, so every other gate is blind to it by never running it. This
+  # test is the only thing holding it.
+  let e0 = EffVar("e0", 0)
+  let f0 = TyFn([TyInt], TyInt, e0)
+  let lam_ty = TyFn([f0], TyInt, e0)
+  var syms: Map[Int, Sym] = map.empty()
+  syms = map.insert(syms, 5, Sym {
+    name: "g",
+    ty: f0,
+    mutable: false,
+    dlo: 0,
+    dhi: 0,
+    dict_of: None
+  })
+  # `h() = g => g(0)`
+  let call = XApply(XLocal(5, "g", 0, 0, f0), [XInt(0, 0, 0)], 0, 0, TyInt)
+  let tf = TFun {
+    name: "h",
+    sig: Sig {
+      name: "h",
+      param_tys: [],
+      param_names: [],
+      param_defaults: [],
+      ret: lam_ty,
+      eff: EPure,
+      is_builtin: false,
+      tparams: [],
+      constraints: [],
+      eparams: [],
+      owner: None,
+      trait_id: None,
+      op_of: None,
+      inferring: false
+    },
+    param_syms: [],
+    dict_syms: [],
+    ev_syms: [],
+    defaults: [],
+    body: XLambda([5], ["g"], call, [], 0, 0, lam_ty),
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  let no_traits: Traits = map.empty()
+  let no_impls: Impls = map.empty()
+  let no_sigs: Map[(String, String), Sig] = map.empty()
+  let (_cf, lifted, _dicts, _next) =
+    lower_fn_only("m", tf, no_traits, no_impls, prelude_adts(), no_sigs, syms, 0)
+  assert len(lifted) == 1
+  let lam = lifted[0]
+  # one erased evidence parameter, whatever the row (types.fn_arity)
+  assert len(lam.evs) == 1
+  let own = lam.evs[0].sym
+  match lam.body {
+    CCall(CDynamic(CLocal(g, _)), args, _) -> {
+      assert g == 5
+      assert len(args) == 2
+      match args[1] {
+        # the closure's own slot, forwarded -- not a fresh chain
+        CLocal(s, _) -> { assert s == own }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+}
+
 ## Rule F2's call-site half for a function *value*: exactly one argument, the
 ## pack, whatever the row says. `types.fn_arity` is the other side of the same
 ## number, and there is no third place either is derived.
