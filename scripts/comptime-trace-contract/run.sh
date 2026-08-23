@@ -26,10 +26,20 @@ require() {
 # with the lambda `map` calls on top of the chain, and how many steps that
 # takes depends on what the interpreter does per call. It was 200 until a
 # function value gained its hidden evidence slot -- the pack a dynamic call
-# builds is evaluated like any other argument, so the same walk now costs a few
-# more steps and stops one frame short of the lambda at 200.
+# builds is evaluated like any other argument, so the walk cost a few more
+# steps and stopped one frame short of the lambda at 200 -- then 208.
+#
+# 206 since the evidence semantics flipped, and *down* rather than up, which is
+# worth the sentence because the guess was that reads would make it climb. They
+# do not here: `trace.dawn:6` is `map(range(0, 100), x => x + 1)`, a pure row
+# with no ground atom to look up and no environment to forward, so the pack is
+# the empty one and nothing walks it. What moved is that the pack is now built
+# by the checker and arrives as a lowered argument rather than being assembled
+# in `lower.ev_pack`, and the interpreter counts the two differently.
+# Measured, not reasoned: the window that satisfies every needle below is
+# 205-207, and this is its middle.
 cp "$here/trace.dawn" "$work/trace.dawn"
-if "$dawn" run --comptime-fuel=208 "$work/trace.dawn" > "$work/trace.out" 2>&1; then
+if "$dawn" run --comptime-fuel=206 "$work/trace.dawn" > "$work/trace.out" 2>&1; then
   fail "the diagnostic fixture unexpectedly compiled"
 fi
 

@@ -29,7 +29,14 @@
 #                       shape and there is no adapter to get wrong. They are
 #                       kept because that is a claim worth a fixture -- if an
 #                       arity ever did follow a row again, these two lines are
-#                       where the verifier would say so.
+#                       where the verifier would say so;
+#   * `union` / `mixed` / `labelled_value` -- the three shapes the slots now
+#                       carry *contents* for. A variable's slot holds a pack
+#                       and a label's holds a record, so a walk that read one
+#                       for the other would be a `CHECKCAST` against the wrong
+#                       class -- a link failure, which is exactly the kind this
+#                       gate is here to catch, and unreachable from any fixture
+#                       that never instantiated a variable with a real row.
 #
 # Run: dawn run scripts/classfile-verify/effect_poly_evidence.dawn
 
@@ -44,6 +51,25 @@ fn forward(f: fn(Int) -> Int !e, x: Int) -> Int !e = apply_twice(f, x)
 ## A written label and a variable in one row: the label's slot is the evidence
 ## record's own type, the variable's is erased, and they sit in that order.
 fn labelled(f: fn(Int) -> Int !e, x: Int) -> Int !Ask !e = f(x) + ask()
+
+## One variable instantiated with **two** labels. The slot is one erased word
+## and the pack in it is two nodes, so the count is unchanged and the contents
+## are not -- the shape that a positional evidence vector could not have held.
+effect Tell {
+  fn tell(v: Int) -> Int
+}
+
+fn twice_over(f: fn(Int) -> Int !e, x: Int) -> Int !e = f(f(x))
+
+## A written label and a variable packed into one slot: one node spliced over
+## the caller's own environment for the variable, not two nodes.
+fn mixed(g: fn() -> Int !e2) -> Int !Ask !e2 = twice_over(n => n + g() + ask(), 0)
+
+## A named function with a written label, used as a value. `lift_fn_value`'s
+## wrapper is the one place the two evidence conventions meet: one pack coming
+## in, one slot per atom going out, and the descriptors have to agree on both
+## sides of it.
+fn raises_ask(n: Int) -> Int !Ask = n + ask()
 
 trait Wrap[T] {
   fn wrap(t: T, f: fn(Int) -> Int !e) -> Int !e
@@ -77,4 +103,13 @@ pub fn main() -> Unit !io = {
   with handle Ask { ask() => 7 }
   println(to_string(labelled(n => n + ask(), 1)))
   println(to_string(apply_twice(n => n + ask(), 0)))
+  with handle Tell { tell(v) => v * 10 }
+  # `!e := !(Ask|Tell)`: two keys, one erased slot
+  println(to_string(twice_over(n => n + ask() + tell(n), 1)))
+  # `!e := !Ask !e2`, and `!e2 := !Tell` at this call
+  println(to_string(mixed(() => tell(2))))
+  # the named-to-value translation point, with a label to translate
+  let as_value: fn(Int) -> Int !Ask = raises_ask
+  println(to_string(as_value(1)))
+  println(to_string(apply_twice(as_value, 1)))
 }
