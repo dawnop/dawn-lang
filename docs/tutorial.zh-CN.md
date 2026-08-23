@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 65398d58e5cfa810 -->
+<!-- doc-check: translation-of docs/tutorial.md @ bb26ad1325f82134 -->
 
 # Dawn 教程
 
@@ -810,13 +810,13 @@ pub fn main() -> Unit !io = {
 臂里再发**本效果**，找的是**外层**的 handler（handler 不答自己）——所以
 `with handle Ask { ask() => ask() * 10 }` 是「把外面那个答案乘十」，不是死循环。
 
-闭包在**创建的地方**捕获 handler，带着它跑出块外也照样有效。它的类型此后说的是
-「跑它会做什么」，不是「它是在什么下面写的」：标签已经有人应答了，于是进到行里的
-是它捕获的那些臂的效果。纯臂的 handler 造出纯闭包，io 臂的造出 `!io` 闭包。
+闭包**不会**留住它写在谁下面的那个 handler。带它跑出块外，标签也跟着跑：它的行里仍写着
+`!Ask`，应答的是**最终调用它的地方**在场的那个 handler。类型说的是谁得供 handler，
+不是某个臂会做什么，所以纯臂的 handler 交给你的同样是一个 `!Ask` 闭包，io 臂的也是。
 
-这也是函数类型不能写具名效果的原因。`fn(f: fn() -> Int !Ask)` 读起来像「调用我的人
-得供 handler」，而 Dawn 里没有闭包是那样工作的——改写成 `fn(f: fn() -> Int !e)`：
-它收一个会发 `Ask` 的闭包，并把这个效果转发进你自己的行。
+于是函数类型可以写具名效果，而且字面读法就是它的意思。`fn(f: fn() -> Int !Ask)` 说的是
+「谁调用 `f`，谁供 `Ask` 的 handler」，调用真就是这么走的。`fn(f: fn() -> Int !e)`
+是另一种写法，不是迁移写法：效果变量收任何行的闭包，并把那条行转发进你自己的行。
 
 ### 高阶函数不用改一行
 
@@ -845,10 +845,11 @@ pub fn main() -> Unit !io = {
 - 「操作不返回调用点」的用法请走既有的失败机制：`Result` + `?`、
   `catch_fault`/`catch_panic`/`bracket`。
 - 效果不带类型参数（没有 `effect Yield[T]`）。
-- trait / impl 方法、comptime / const、类型声明位（`alias` 目标、record 字段）
-  都不接受具名效果。
-- 带标签的函数（含操作本身）不能直接当函数值传——包一层 lambda 即可
-  （`() => ask()`），lambda 会捕获证据。
+- comptime / const 初始化不发具名效果，也装不了 handler。trait / impl 方法可以带标签，
+  任何写出来的函数类型（`alias` 目标、record 字段、参数位）也可以；impl 仍欠的是一条
+  标签与 trait 恰相等的行，因为每个标签都是这个方法的一格隐藏参数。
+- 带标签的函数可以当函数值传：标签进到值的类型里，由调用点供 handler。只有**操作**本身
+  不行，它背后没有可取的函数符号；包一层 lambda（`() => ask()`）即可。
 - 臂是闭包，所以臂里不能写外层的 `var`，也不能 `return`/`break` 跳出去。
 
 完整规则见 [spec.md](spec.md) §6.5，设计取舍见

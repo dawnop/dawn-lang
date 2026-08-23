@@ -865,16 +865,17 @@ An arm that emits **its own effect** again finds the **outer** handler — a han
 not answer itself — so `with handle Ask { ask() => ask() * 10 }` means "take the answer
 from outside and multiply it by ten", not an infinite loop.
 
-A closure captures the handler **where it is created**, and carrying it out of the block
-keeps it working. Its type then says what running it will *do*, not what it was written
-under: the label has an answer already, so what goes into the row is the effects of the
-arms it captured. A handler with pure arms yields a pure closure; one with an io arm
-yields an `!io` one.
+A closure does **not** keep the handler it was written under. Carry it out of the block
+and it carries the label with it: its row still says `!Ask`, and the handler that answers
+is the one in scope **where the closure is finally called**. The type says who has to
+supply a handler, not what any particular arm would have done, so a handler with pure arms
+leaves you an `!Ask` closure just as an io one does.
 
-That is also why a function type may not name an effect. `fn(f: fn() -> Int !Ask)` reads
-as "the caller supplies the handler", and no closure in Dawn works that way — write
-`fn(f: fn() -> Int !e)` instead, which takes a closure raising `Ask` and forwards it into
-your own row.
+A function type may therefore name an effect, and it means exactly what it reads as.
+`fn(f: fn() -> Int !Ask)` says "whoever calls `f` supplies the `Ask` handler", which is
+how the call really works. `fn(f: fn() -> Int !e)` is the other spelling rather than a
+workaround: an effect variable takes a closure with any row at all and forwards that row
+into your own.
 
 ### Higher-order functions need no change
 
@@ -905,10 +906,13 @@ pub fn main() -> Unit !io = {
 - For "the operation does not come back to the call site", use the failure machinery
   that already exists: `Result` + `?`, `catch_fault`/`catch_panic`/`bracket`.
 - An effect takes no type parameters (there is no `effect Yield[T]`).
-- Trait and impl methods, comptime and const, and type positions (an `alias` target, a
-  record field) do not accept a named effect.
-- A labelled function — an operation itself included — cannot be passed around as a
-  function value; wrap it in a lambda (`() => ask()`), which captures the evidence.
+- comptime and const initialisers raise no named effect and cannot install a handler.
+  Trait and impl methods do take labels, and so does any written function type (an `alias`
+  target, a record field, a parameter); what an impl still owes is a row whose labels match
+  the trait's exactly, because each label is one of the method's hidden parameters.
+- A labelled function can be passed as a function value: the label goes into the value's
+  type, and the call site supplies the handler. Only an **operation** cannot, since there
+  is no function symbol behind it; wrap it in a lambda (`() => ask()`).
 - An arm is a closure, so it cannot write to an enclosing `var` and cannot `return` or
   `break` its way out.
 
