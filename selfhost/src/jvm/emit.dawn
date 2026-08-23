@@ -29,6 +29,7 @@ use check/types.{
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
   Sym, Sig, Eff, EPure, EIo, EffVar, prelude_adts,
   eff_labels, eff_vars, eff_assocs, nev, fn_arity, erased_ev_ty,
+  EV_PACK_ID, EV_MISS_MSG,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
   Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID,
   intrinsics,
@@ -2777,6 +2778,62 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
   if name == "null_ref" {
     g.mv.visitInsn(OP_ACONST_NULL)
     return (g, true)
+  }
+  if name == "ev_get" {
+    # One lookup in an evidence pack (types.ev_pack_adt). The contract's
+    # terminator test is "the runtime's own knowledge of shape", and here that
+    # is `INSTANCEOF`: it answers false for null and false for the boxed Unit
+    # that spells the empty pack, so all three ways a walk can end share the
+    # one branch and none of them dereferences anything.
+    #
+    # The field names and descriptors are read off the ADT rather than
+    # written out, so renaming a field of the pack moves this with it.
+    let c = adt_of(gx.adts, EV_PACK_ID).ctors[0]
+    let cls = ctor_jvm_name(gx.adts, c)
+    let key_desc = desc_of(gx.adts, c.fields[0].ty)
+    let ev_desc = desc_of(gx.adts, c.fields[1].ty)
+    var g1 = gen_cargs(gx, g, args)
+    let (ga, key_slot) = alloc(g1, 2)
+    g1 = ga
+    g1.mv.visitVarInsn(OP_LSTORE, key_slot)
+    let (gb, p_slot) = alloc(g1, 1)
+    g1 = gb
+    g1.mv.visitVarInsn(OP_ASTORE, p_slot)
+    let top = Label.new()
+    let step = Label.new()
+    let miss = Label.new()
+    let end = Label.new()
+    g1.mv.visitLabel(top)
+    g1.mv.visitVarInsn(OP_ALOAD, p_slot)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, cls)
+    g1.mv.visitJumpInsn(OP_IFEQ, miss)
+    g1.mv.visitVarInsn(OP_ALOAD, p_slot)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+    g1.mv.visitFieldInsn(OP_GETFIELD, cls, c.fields[0].name, key_desc)
+    g1.mv.visitVarInsn(OP_LLOAD, key_slot)
+    g1.mv.visitInsn(OP_LCMP)
+    g1.mv.visitJumpInsn(OP_IFNE, step)
+    g1.mv.visitVarInsn(OP_ALOAD, p_slot)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+    g1.mv.visitFieldInsn(OP_GETFIELD, cls, c.fields[1].name, ev_desc)
+    g1.mv.visitJumpInsn(OP_GOTO, end)
+    g1.mv.visitLabel(step)
+    g1.mv.visitVarInsn(OP_ALOAD, p_slot)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+    g1.mv.visitFieldInsn(OP_GETFIELD, cls, c.fields[2].name, ev_desc)
+    g1.mv.visitVarInsn(OP_ASTORE, p_slot)
+    g1.mv.visitJumpInsn(OP_GOTO, top)
+    # Falling off the end is not a terminator but a broken invariant, so this
+    # is the panic the contract asks for rather than the placeholder.
+    g1.mv.visitLabel(miss)
+    g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g1.mv.visitInsn(OP_DUP)
+    ldc_str(g1.mv, EV_MISS_MSG)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+      "(Ljava/lang/String;)V", false)
+    g1.mv.visitInsn(OP_ATHROW)
+    g1.mv.visitLabel(end)
+    return (g1, true)
   }
   if name == "java_eq" {
     # Equality of two values that came from the host (semantics-closure-design

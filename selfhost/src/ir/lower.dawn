@@ -1185,18 +1185,28 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ##   list_index list_slice
 ##                       `xs[i]` and a list pattern's `..rest`
 ##   null_ref            the zero of a reference type, for an uninitialised slot
+##   ev_get              one lookup in an evidence pack, by atom key. The walk
+##                       has to test the shape of what it is standing on, and
+##                       Core's only discriminant (`CIsCtor`) reads a tag off
+##                       whatever it is given -- undefined on native when that
+##                       is the boxed-unit placeholder or a raw NULL. So the
+##                       walk is a primitive and each backend writes it with
+##                       the shape test its own representation affords
+##                       (`types.ev_pack_adt`'s contract says the rest)
 ##
 ## Not an ADT, though the comment this replaces proposed one. Measured before
 ## deciding: `CIntrinsic` carries a `String` because it also carries the 89
-## user builtin names, so an ADT for these twelve either splits the node in
-## two or swallows all 101, and the `name == "..."` comparisons that would have
+## user builtin names, so an ADT for the names below either splits the node in
+## two or swallows the lot, and the `name == "..."` comparisons that would have
 ## to be rewritten numbered 44 in interp, 28 in emit and 24 in emitc when that
 ## was measured. A list the gate reads buys the property the ADT was wanted for
-## -- a backend cannot forget one silently -- for twelve lines instead of that.
+## -- a backend cannot forget one silently -- for a handful of lines instead.
+## (The two figures above are what the tree held when this was measured; the
+## sizes that have to stay true are asserted in the test below, not here.)
 pub fn internal_intrinsics() -> List[String] = [
   "cmp", "hash", "java_eq", "java_hash", "show", "quote",
   "str_of_int", "str_of_bool", "str_of_bytes",
-  "list_index", "list_slice", "null_ref"
+  "list_index", "list_slice", "null_ref", "ev_get"
 ]
 
 # ---- who implements a primitive ----
@@ -1246,6 +1256,10 @@ pub fn inline_intrinsics() -> List[String] = [
   "cmp", "hash", "show", "quote",
   "str_of_int", "str_of_bool", "str_of_bytes",
   "list_index", "list_slice", "null_ref",
+  # the evidence-pack lookup. A loop with a shape test in it, so it is a call
+  # on native and a stretch of bytecode on the JVM, and neither is a thing
+  # Core could have said for both
+  "ev_get",
   # neither of these returns, so both are instructions rather than a call
   "panic", "todo",
   # one instruction each: the JVM's L2D and D2L, and native's saturating
@@ -1353,12 +1367,12 @@ test "every intrinsic is owned by a runtime module, written inline, or removed b
   # 3. the sizes the comments above quote. A count written in prose is what
   #    went wrong in `internal_intrinsics`, whose comment gave two different
   #    answers for the same list in the same paragraph.
-  assert len(inline) == 29
+  assert len(inline) == 30
   assert len(host) == 2
   assert len(gone) == 20
-  # and the four groups account for all 105 names, with none left over
+  # and the four groups account for all 106 names, with none left over
   assert len(map.keys(it)) == 93
-  assert len(internal) == 12
+  assert len(internal) == 13
 }
 
 # ---- trait witnesses ----

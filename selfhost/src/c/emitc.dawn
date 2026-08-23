@@ -29,7 +29,8 @@ use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyTuple, TyFn, TyBytes, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque,
   Intr, intrinsics, Adts, adt_of, prelude_adts, OPTION_ID, RESULT_ID, cast_target,
-  is_ref_ty, Eff, EPure, hash_scalars, ord_scalars, intr_owned_args
+  is_ref_ty, Eff, EPure, hash_scalars, ord_scalars, intr_owned_args,
+  ev_pack_adt, EV_MISS_MSG
 }
 use ir/reach.{TableUse}
 use embed/unicode_case
@@ -1589,6 +1590,17 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     (st1, "dawn_int_of_float(" ++ a0 ++ ")")
   } else if name == "null_ref" {
     (st1, c_zero(ty))
+  } else if name == "ev_get" {
+    # One lookup in an evidence pack (types.ev_pack_adt). A call, not emitted
+    # C, because the walk's terminator test is the header's `kind` byte and
+    # that is the runtime's knowledge, not Core's -- `CIsCtor` a few hundred
+    # lines up reads `->tag` off whatever it is handed, which is exactly the
+    # undefined read the boxed-Unit placeholder and the shims' NULL would get.
+    #
+    # `dawn_ev_get` hands back a borrowed reference out of the pack, so the
+    # dup is here: rc.dawn wraps no intrinsic result, and every other arm that
+    # reads a value out of a structure it borrowed (`expect`) dups too.
+    (st1, dup_expr("dawn_ev_get(" ++ a0 ++ ", " ++ cargs[1] ++ ")", ty))
   } else if name == "hash" {
     (st1, scalar_rt("dawn_hash", cex_ty(args[0]), name) ++ "(" ++ a0 ++ ")")
   } else if name == "cmp" {
@@ -2350,6 +2362,31 @@ test "every scalar relation the emitter names is one the runtime defines" {
   assert gaps("dawn_cmp", TyFloat)
   assert gaps("dawn_cmp", TyBool)
   assert gaps("dawn_cmp", TyBytes)
+}
+
+test "the evidence-pack walk the emitter calls is the one the runtime has" {
+  # `ev_get` is emitted as a call by name, so a runtime that spells it
+  # differently is an undefined reference in the *user's* native build -- the
+  # same failure mode the test above exists for. Both files travel together in
+  # `rtsrc`, so both halves of the joint are readable from here.
+  let header = rtsrc.source("dawn_rt.h").expect("the embedded runtime header")
+  let body = rtsrc.source("dawn_rt.c").expect("the embedded runtime source")
+  assert str.contains(header, "void *dawn_ev_get(void *pack, int64_t key);")
+  assert str.contains(body, "void *dawn_ev_get(void *pack, int64_t key) {")
+
+  # The walk's shape test is the runtime's own, and these are the three
+  # numbers it tests against. Reorder or extend `ev_pack_adt` and the C stops
+  # recognising a node it is standing on -- silently, because a walk that
+  # stops early is a miss and a miss is a panic somewhere else entirely.
+  let pack = ev_pack_adt()
+  assert len(pack.ctors) == 1
+  assert len(pack.ctors[0].fields) == 3
+  assert str.contains(header, "#define DAWN_TAG_EV_PACK 0")
+  assert str.contains(header, "#define DAWN_EV_PACK_FIELDS 3")
+
+  # and the miss message is one text with three implementations. The C copy is
+  # written as a single literal so that this search can see it.
+  assert str.contains(body, EV_MISS_MSG)
 }
 
 ## `scalar_rt` refuses this pair -- the test above wants the refusal, and

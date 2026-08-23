@@ -719,6 +719,25 @@ int64_t dawn_idiv(int64_t a, int64_t b);
 int64_t dawn_imod(int64_t a, int64_t b);
 int64_t dawn_int_of_float(double v); /* Float -> Int, saturating like D2L */
 
+/* One lookup in an evidence pack: the `ev_get` intrinsic, whose contract is
+ * written at `types.ev_pack_adt` in the compiler.
+ *
+ * A call rather than emitted C because the walk has to ask what it is
+ * standing on, and that question is this file's to answer: the JVM gets it
+ * from `INSTANCEOF`, and here it is the `kind` byte every heap object carries
+ * in its header. Core cannot spell either -- `CIsCtor` reads a tag off
+ * whatever it is handed, which is undefined when that is a box or a null.
+ *
+ * Safe on all three things that end a walk: NULL, the immortal boxed Unit
+ * that spells the empty pack, and any other erased value that is not a pack
+ * node. The result is *borrowed* from inside the pack, like an ADT field
+ * read; the emitter dups it, because a Core expression hands back an owned
+ * value and `rc.dawn` does not wrap intrinsics. Falling off the end panics:
+ * a missing key is a broken compiler invariant, not an answer. */
+#define DAWN_TAG_EV_PACK 0 /* one constructor, so index 0 -- emitc pins it */
+#define DAWN_EV_PACK_FIELDS 3 /* key, ev, outer */
+void *dawn_ev_get(void *pack, int64_t key);
+
 /* Control. The two failure kinds, and the difference is which barrier stops
  * one: `catch_fault` takes a fault (the outside world said no) and lets a panic
  * past, `catch_panic` takes both. The JVM gets the same split from `Error` vs

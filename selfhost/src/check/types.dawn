@@ -1392,9 +1392,36 @@ pub const EV_PACK_ID: Int = -3
 ##
 ## **The empty pack is the erased placeholder, not a nil constructor.** A slot
 ## that carries no evidence carries what every other erased evidence slot
-## carries when nothing answers it, and a walk therefore ends when it meets
-## something that is not a node. A second constructor would have bought a
+## carries when nothing answers it. A second constructor would have bought a
 ## tag test instead of a shape test and one more emitted class per program.
+##
+## **The walk lives in the runtime intrinsic `ev_get(pack, key)`, and the
+## terminator test is the runtime's own knowledge of shape.** That sentence
+## used to read "a walk ends when it meets something that is not a node", which
+## named a test Core cannot spell: `CIsCtor` is the only discriminant node
+## there is, and on native it compiles to `((dawn_adt*)p)->tag == ci` -- a read
+## off a `dawn_box` when the value is the placeholder, which is undefined and
+## silently plausible. The JVM's `INSTANCEOF` answers the question exactly; the
+## native runtime answers it from the `kind` byte in every heap object's
+## header. Neither is expressible as Core, so neither is written as Core: the
+## walk is one intrinsic, each backend writes it, and the shape test never
+## leaves the layer that owns the representation.
+##
+## Three things terminate a walk, and `ev_get` tolerates all three: the boxed
+## unit that is the placeholder, a NULL pack, and any other erased value that
+## is not a pack node. NULL is not hypothetical -- seven hand-written shim
+## sites (`gen_try_closure`, `gen_bracket` ×3, the SAM bridge,
+## `dawn_run_caught`, `dawn_bracket`) hand a raw null across as the empty pack,
+## and their comments say that is safe because nothing reads one. That
+## justification expires when reads appear; `ev_get`'s null tolerance is what
+## replaces it, so the sites themselves stay as they are.
+##
+## A miss is not a terminator. Falling off the end means lowering built a pack
+## that does not answer a key its own reader asks for, which is a compiler
+## invariant break, so `ev_get` panics rather than handing back the
+## placeholder -- the same choice `lower.impl_ev_sources` makes, and for the
+## same reason: a placeholder used as an evidence record is a crash at a
+## distance from the bug.
 pub fn ev_pack_adt() -> AdtI =
   AdtI {
     id: EV_PACK_ID,
@@ -1419,6 +1446,15 @@ pub fn ev_pack_adt() -> AdtI =
   }
 
 pub fn ev_pack_ty() -> Ty = TyAdt(EV_PACK_ID, [])
+
+## What a failed `ev_get` says, in one place because three implementations say
+## it: the JVM emitter writes it into a `Panic`, the comptime interpreter
+## raises it, and `dawn_ev_get` in runtime/c/dawn_rt.c carries the same text as
+## a C literal (the joint is the test in c/emitc.dawn). A user should never see
+## it -- reaching it means the compiler handed a reader a pack without the key
+## the reader's own row named.
+pub const EV_MISS_MSG: String =
+  "effect evidence missing: no pack entry for the atom this call site asked for"
 
 # ---- traits ----
 

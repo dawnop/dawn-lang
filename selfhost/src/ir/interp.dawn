@@ -45,7 +45,8 @@ use check/tast.{
 }
 use check/types.{
   Ty, TyInt, TyUnit, TyError, TyAdt, Sym, Sig, Traits, ImplI, Impls, Adts, adt_of,
-  intrinsics, OPTION_ID, EPure, TyList, TyMap, TySet, TyArray, TyTuple
+  intrinsics, OPTION_ID, EPure, TyList, TyMap, TySet, TyArray, TyTuple,
+  EV_PACK_ID, EV_MISS_MSG
 }
 use ir/core.{
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
@@ -771,7 +772,7 @@ fn call_named(
 # the bottom of this file checks the partition is total and disjoint, and it
 # probes each name to check the lists say what the chain does.
 
-## Every name the chain below has an arm for -- 40 of them, 9 emitted by
+## Every name the chain below has an arm for -- 41 of them, 10 emitted by
 ## lowering and 31 writable by a user.
 ##
 ## Consulted *before* the chain rather than alongside it, so this is a gate and
@@ -784,7 +785,7 @@ fn interp_arms() -> List[String] = [
   # lowering's own intrinsics (lower.internal_intrinsics()); `cmp`, `hash` and
   # `java_hash` are the three it emits that are refused instead, below
   "java_eq", "show", "quote", "str_of_int", "str_of_bool",
-  "str_of_bytes", "list_index", "list_slice", "null_ref",
+  "str_of_bytes", "list_index", "list_slice", "null_ref", "ev_get",
   # user builtins
   "panic", "todo", "expect", "unwrap_or", "to_float", "to_int", "to_string",
   "len", "get", "range", "sort_by", "join",
@@ -875,6 +876,90 @@ fn no_arm_msg(name: String) -> String =
 
 const NO_ARM_LISTED: String = "listed in interp_arms but has no arm: "
 
+## The evidence-pack walk, on the interpreter's own values: the third
+## implementation of `ev_get`, alongside the JVM's `INSTANCEOF` loop and
+## `dawn_ev_get`. Its contract is written at `types.ev_pack_adt`.
+##
+## The shape test the other two get from the runtime is a `match` here, which
+## is why this one is a plain function and testable: a `VAdt` at `EV_PACK_ID`
+## is a node and everything else ends the walk. The three terminators the
+## contract names all arrive as "not a `VAdt` at that id" -- the placeholder
+## boxes to `VUnit`, a null pack cannot be constructed at all, and any other
+## erased value is some other `CValue`.
+##
+## A miss panics rather than answering the placeholder, and panics *this
+## compiler* rather than raising a comptime diagnostic: a pack without a key
+## its own reader named is lowering's bug, not the interpreted program's, and
+## `lower.impl_ev_sources` treats the same class of break the same way.
+fn ev_get_value(pack: CValue, key: Int) -> CValue =
+  match pack {
+    VAdt(aid, _, fields) ->
+      if aid != EV_PACK_ID {
+        panic(EV_MISS_MSG)
+      } else {
+        match fields[0] {
+          VInt(k) -> if k == key { fields[1] } else { ev_get_value(fields[2], key) }
+          _ -> panic("comptime interpreter bug: an evidence pack's key is not an Int")
+        }
+      }
+    _ -> panic(EV_MISS_MSG)
+  }
+
+## One pack node, in the shape `lower.ev_build` conses them.
+fn ev_node(key: Int, ev: CValue, outer: CValue) -> CValue =
+  VAdt(EV_PACK_ID, 0, [VInt(key), ev, outer])
+
+## Did the walk end in the contract's panic? `catch_panic` because that is
+## what a panic is here, and the message because "some panic" would pass for
+## an index-out-of-range just as well.
+fn ev_get_panics(pack: CValue, key: Int) -> Bool !io =
+  match catch_panic(() => ev_get_value(pack, key)) {
+    Ok(_) -> false
+    Err(e) -> str.contains(e.message, EV_MISS_MSG)
+  }
+
+# Nothing in a compiled program calls `ev_get` yet -- lowering emits no read
+# until the knife that flips the semantics -- so these two tests are the whole
+# oracle for the walk. They are written against the interpreter's copy because
+# it is the one of the three that is a function rather than instructions; the
+# other two are held to the same shape by scripts/intrinsic-parity.py and, for
+# the C one, by emitc's test that the runtime declares what the emitter calls.
+
+test "an evidence pack answers by key, not by position" {
+  let empty: CValue = VUnit
+  let one = ev_node(7, VInt(700), empty)
+  let two = ev_node(4, VInt(400), one)
+  let three = ev_node(1, VInt(100), two)
+  # the node the walk starts on
+  assert as_int(ev_get_value(three, 1)) == 100
+  # and the ones it only reaches by following `outer`. Compare the keys or the
+  # first node answers for every one of them; follow `outer` or the walk stops
+  # at the first node and these are misses
+  assert as_int(ev_get_value(three, 4)) == 400
+  assert as_int(ev_get_value(three, 7)) == 700
+  # a node answers the same whatever is consed in front of it: the pack is a
+  # scope, and a node nobody asked for costs a step and nothing else
+  assert as_int(ev_get_value(one, 7)) == 700
+}
+
+test "an evidence pack ends on the placeholder, and a miss is a panic" {
+  let empty: CValue = VUnit
+  let one = ev_node(7, VInt(700), empty)
+  # the placeholder ends the walk rather than being read as a node -- the
+  # whole reason the terminator test belongs to the runtime -- and the end of
+  # a walk is the panic, never the placeholder handed back as evidence
+  assert ev_get_panics(one, 8)
+  # a bare placeholder is the empty pack: nothing to walk, same answer
+  assert ev_get_panics(empty, 7)
+  # any other erased value terminates too. This is the case native cannot
+  # answer without the header's `kind` byte, and the one `CIsCtor` would have
+  # read a tag off
+  assert ev_get_panics(VStr("not a pack"), 7)
+  # NULL is the fourth thing that ends a walk, and it has no CValue at all --
+  # it comes from the hand-written shims, so `dawn_ev_get`'s own `p != NULL`
+  # is the only place it is answered and nothing here reaches it.
+}
+
 fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -> ER !io =
   if not has_name(interp_arms(), name) {
     cerr(st, env, no_arm_msg(name))
@@ -883,6 +968,13 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # reaches a real Java object -- `use java` is not foldable -- so this is
     # the interpreter's own value equality, kept so the arm is not a hole.
     Ok((st, env, VBool(value_eq(args[0], args[1]))))
+  } else if name == "ev_get" {
+    # An arm rather than a refusal, so that a `const` whose body reaches a
+    # function value keeps folding once lowering starts emitting reads.
+    # Comptime still refuses declared effects, so the packs that get here are
+    # the ones lowering builds for a pure row -- which is why the terminator
+    # matters more here than a hit does.
+    Ok((st, env, ev_get_value(args[0], as_int(args[1]))))
   } else if name == "panic" {
     cerr(st, env, "panicked: " ++ as_str(args[0]))
   } else if name == "todo" {
@@ -2141,7 +2233,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    went wrong in the list this gate replaces -- lowering's own said
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
-  assert len(arms) == 40
+  assert len(arms) == 41
   assert len(rejects) == 65
 }
 
