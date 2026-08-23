@@ -48,7 +48,7 @@ use check/types.{
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes,
   eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, eff_assocs, eff_map_assocs,
-  erased_ev_ty, sig_abi_eff,
+  erased_ev_ty, sig_abi_eff, label_key, EV_PACK_ID, ev_pack_ty,
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -6197,16 +6197,14 @@ fn evidence_args(cx: Cx, declared: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr], L
 ## The count comes from the declaration and the value from the call site, and
 ## those are two different questions. The count cannot follow the instance: a
 ## pure closure and a labelled one go into the same `!e` parameter, and the
-## callee's arity is fixed before either call site exists. The value can: a
-## variable instantiated with another variable forwards the caller's own hidden
-## parameter (the same forwarding a projection over a rigid subject does), and
-## anything else takes the unit placeholder -- pure, io, or a concrete label
-## whose evidence the closure still carries in its captures under this knife.
+## callee's arity is fixed before either call site exists. The value can, and
+## does: what fills the slot is `evidence_pack` of the row the variable was
+## instantiated with.
 ##
 ## Unlike its two neighbours this one never reports. A projection with nothing
 ## to answer it is a signature that forgot to declare `!C.E`; an effect
-## variable with nothing to forward is the ordinary case of instantiating it
-## with a row that needs no evidence.
+## variable instantiated with a label nobody handles is not diagnosed *here*
+## and must not be, because nothing reads a pack yet -- see `evidence_pack`.
 fn evidence_var_args(
   cx: Cx,
   declared: Eff,
@@ -6222,21 +6220,97 @@ fn evidence_var_args(
       Some(e) -> e
       None -> EPure
     }
-    var slot: TExpr = XUnit(lo, hi)
-    let ivs = eff_vars(inst)
-    if len(ivs) == 1 {
-      let (svid, _) = ivs[0]
-      let nm = ev_var_local_name(svid)
-      let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
-      cx1 = cxa
-      match found {
-        Some(sid) -> { slot = XLocal(sid, nm, lo, hi, erased_ev_ty()) }
-        None -> ()
-      }
-    }
+    let (cx2, slot) = evidence_pack(cx1, inst, lo, hi)
+    cx1 = cx2
     out = out ++ [slot]
   }
   (cx1, out)
+}
+
+## The evidence pack for a row an effect variable was instantiated with: a
+## **scope**, not a transcript.
+##
+## The rule (design §2), and it is the same one `lower.ev_pack` answers on the
+## function-value side -- one build rule, two layers, because a named callee's
+## variable slot and a function value's single slot carry the same thing:
+##
+##   * the **ground** atoms of the row -- its written labels -- become one
+##     `ev$Pack{key, evidence, outer}` node each, keyed by `types.label_key`;
+##   * they are consed **over the environment this frame already holds** for
+##     the row's non-ground atoms (an effect variable, a rigid projection),
+##     each of which has its own hidden parameter here;
+##   * no ground atom and exactly one non-ground atom means the pack **is**
+##     that slot: identity, no node. This is the case the deleted
+##     `len(eff_vars(inst)) == 1` branch used to be the whole of.
+##
+## The forwarded environment is the **tail**, spliced, not a node of its own.
+## `!Ask !e2` into an `!e` slot is one node over the caller's `e2` slot, not
+## two nodes with the caller's pack wrapped as a value: a wrapped chain answers
+## no key it used to answer, and a lookup miss is what that costs.
+##
+## A superset is safe. Lookup is by key, so a node nobody asks for is a step in
+## a walk and nothing else; only a *missing* key is a fault. That is what lets
+## the tail be an environment rather than a filtered copy of it.
+##
+## **Nothing reports here, and nothing may.** A ground label with no evidence
+## in scope takes the placeholder as that node's payload and is silent. Under
+## this knife a closure still carries the evidence it was created under (rule
+## 乙), so a packed value is never consulted and a diagnostic here would be a
+## verdict on a value nobody reads. The reporting surface arrives with the
+## semantic flip, when readers do -- and it arrives at
+## `resolve_label_evidence`, which already says "nobody is handling this" for
+## the two neighbours. For the same reason the resolution here goes through
+## bare `resolve_local` rather than through `resolve_label_evidence`: the
+## latter settles or unsettles the label it found, and settlement decides what
+## the caller is charged with.
+##
+## Two or more non-ground atoms keep the placeholder as the tail. A row like
+## `!(e1|e2)` has two environments to splice and one field to splice them
+## into, and merging two chains is not a cons -- that is the knife that starts
+## reading packs, not this one. It is narrower than the branch it replaces in
+## exactly one shape, `!e1 !C.E`, which the old test counted as one variable
+## and forwarded; a tail that is short by an atom and a tail that is short by
+## a chain are the same open question, and answering half of it here would be
+## the invented semantics. Today both are invisible: nothing reads, so a short
+## tail computes what a long one does.
+fn evidence_pack(cx: Cx, inst: Eff, lo: Int, hi: Int) -> (Cx, TExpr) = {
+  var cx1 = cx
+  let ground = eff_labels(inst)
+  let vs = eff_vars(inst)
+  let asx = eff_assocs(inst)
+  # the environment this frame holds for the row's non-ground atoms, when
+  # there is exactly one of them; otherwise the empty pack
+  var tail: TExpr = XUnit(lo, hi)
+  if len(vs) + len(asx) == 1 {
+    let nm = if len(vs) == 1 {
+      let (svid, _) = vs[0]
+      ev_var_local_name(svid)
+    } else {
+      let (_, av, at2, an) = asx[0]
+      ev_assoc_local_name(av, at2, an)
+    }
+    let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
+    cx1 = cxa
+    match found {
+      Some(sid) -> { tail = XLocal(sid, nm, lo, hi, erased_ev_ty()) }
+      None -> ()
+    }
+  }
+  var acc = tail
+  for l in ground {
+    let (eid, _) = l
+    let nm = ev_local_name(cx1, eid)
+    let (cxb, found) = resolve_local(cx1, nm, lo, hi, false)
+    cx1 = cxb
+    let ev = match found {
+      Some(sid) -> XLocal(sid, nm, lo, hi, TyAdt(eid, []))
+      None -> XUnit(lo, hi)
+    }
+    acc = XCtor(EV_PACK_ID, 0,
+      [XInt(label_key(eid), lo, hi), ev, acc],
+      [Some(0), Some(1), Some(2)], no_expr(), lo, hi, ev_pack_ty())
+  }
+  (cx1, acc)
 }
 
 ## One label's evidence out of the lexical environment -- the shared half of
@@ -9841,6 +9915,138 @@ test "in main the same diagnostic offers the handler alone" {
   let cx2 = eff_check(
     "pub fn main() -> Unit !io = {\n  with handle Ask { ask() => 1 }\n  let _ = ask()\n  ()\n}\n")
   assert len(cx2.diags) == 0
+}
+
+# ---- the pack-shape oracle for `evidence_pack` ----
+#
+# Nothing reads an evidence pack under this knife, so a pack with the wrong
+# contents computes the same answers as one with the right contents: every
+# behavioural gate -- the corpus, the transcripts, both fixpoints, the RC
+# contract, the sanitiser legs -- stays green while the wrong evidence is
+# handed over. The shape of what the checker built is the only witness, which
+# is the same argument `lower.dawn`'s two forwarding tests are written under.
+#
+# These pin the tree at the TAST rather than at the lowered Core because the
+# rule lives here: `lower_ctor` turns an `XCtor` into a `CCtor` field for
+# field, so a splice that is a splice here is a splice there.
+
+## The evidence arguments of the single named call a test function's body is.
+fn ev_args_of(f: TFun) -> List[TExpr] =
+  match f.body {
+    XCallFn(_, _, _, _, evs, _, _, _, _) -> evs
+    _ -> []
+  }
+
+fn fn_named(tm: TModule, name: String) -> TFun = {
+  for f in tm.fns {
+    if f.name == name { return f }
+  }
+  panic("no function named " ++ name)
+}
+
+## One pack node, unwrapped: (key, evidence payload, outer).
+fn pack_node(t: TExpr) -> (Int, TExpr, TExpr) =
+  match t {
+    XCtor(aid, ci, ws, _, _, _, _, _) -> {
+      if aid != EV_PACK_ID || ci != 0 || len(ws) != 3 {
+        panic("not an ev\$Pack constructor")
+      }
+      match ws[0] {
+        XInt(k, _, _) -> (k, ws[1], ws[2])
+        _ -> panic("pack key is not a literal")
+      }
+    }
+    _ -> panic("not a pack node")
+  }
+
+fn local_sym(t: TExpr) -> Int =
+  match t {
+    XLocal(sid, _, _, _, _) -> sid
+    _ -> panic("not a local")
+  }
+
+fn two_effects(body: String) -> String =
+  "effect Ask {\n  fn ask() -> Int\n}\n" ++
+  "effect Tell {\n  fn tell(v: Int) -> Int\n}\n" ++
+  "fn thru(f: fn() -> Int !e) -> Int !e = f()\n" ++ body
+
+fn pack_check(body: String) -> (Cx, TModule) !io = {
+  let (m, pdiags) = parser.parse_module(two_effects(body))
+  if len(pdiags) != 0 { panic("the fixture does not parse") }
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(test_cx(), m, env)
+  if len(cx1.diags) != 0 { panic("the fixture does not check: " ++ cx1.diags[0].msg) }
+  (cx1, tm)
+}
+
+test "a union instantiation conses one node per ground label over the empty pack" {
+  # `!e := !(Ask|Tell)`: two written labels, no non-ground atom. The pack is
+  # two nodes over the placeholder, keyed by `types.label_key` -- not one node
+  # for "the union", and not a slot forwarded from a frame that has none.
+  let (cx, tm) = pack_check("fn both() -> Int !Ask !Tell = thru(() => ask() + tell(1))\n")
+  let both = fn_named(tm, "both")
+  # the frame's own slots, in `atom_keys` order: Ask's, then Tell's
+  assert len(both.ev_syms) == 2
+  let ask_id = map.get(cx.effects, "Ask").expect("Ask")
+  let tell_id = map.get(cx.effects, "Tell").expect("Tell")
+  assert ask_id < tell_id
+  let evs = ev_args_of(fn_named(tm, "both"))
+  assert len(evs) == 1
+  # the fold wraps in `eff_labels` order, so the last label is outermost --
+  # the direction `lower.ev_build` folds `atom_keys` in
+  let (k_out, ev_out, rest) = pack_node(evs[0])
+  assert k_out == label_key(tell_id)
+  assert local_sym(ev_out) == both.ev_syms[1]
+  let (k_in, ev_in, tail) = pack_node(rest)
+  assert k_in == label_key(ask_id)
+  assert local_sym(ev_in) == both.ev_syms[0]
+  # and the chain ends at the empty pack, which is the placeholder
+  match tail {
+    XUnit(_, _) -> ()
+    _ -> { assert false }
+  }
+}
+
+test "a mixed instantiation splices the forwarded environment as the tail" {
+  # `!e := !Ask !e2`: exactly one node, and its `outer` **is** the caller's own
+  # `e2` slot. Wrapping that slot as a node's payload instead would build two
+  # nodes and answer no key `e2`'s own reader asks for -- a lookup miss, and
+  # the reason this is a shape test rather than a count.
+  let (cx, tm) = pack_check(
+    "fn outer(g: fn() -> Int !e2) -> Int !Ask !e2 = thru(() => g() + ask())\n")
+  let outer = fn_named(tm, "outer")
+  # `outer`'s ABI row is one label and one variable: an exact slot then an
+  # erased one
+  assert len(outer.ev_syms) == 2
+  let ask_id = map.get(cx.effects, "Ask").expect("Ask")
+  let evs = ev_args_of(outer)
+  assert len(evs) == 1
+  let (k, ev, tail) = pack_node(evs[0])
+  assert k == label_key(ask_id)
+  assert local_sym(ev) == outer.ev_syms[0]
+  # spliced, not wrapped: the tail is the slot itself, not a node over it
+  assert local_sym(tail) == outer.ev_syms[1]
+  assert tex_ty(tail) == erased_ev_ty()
+}
+
+test "a lone non-ground instantiation forwards the slot and builds no node" {
+  # `!e := !e3`: no ground atom, one non-ground atom. The pack **is** that
+  # slot. This is the whole of what the deleted `len(eff_vars(inst)) == 1`
+  # branch used to do, and it has to survive the generalisation.
+  let (_cx, tm) = pack_check("fn fwd(f: fn() -> Int !e3) -> Int !e3 = thru(f)\n")
+  let fwd = fn_named(tm, "fwd")
+  assert len(fwd.ev_syms) == 1
+  let evs = ev_args_of(fwd)
+  assert len(evs) == 1
+  assert local_sym(evs[0]) == fwd.ev_syms[0]
+  # a pure instantiation still has nothing to forward and nothing to cons
+  let (_cx2, tm2) = pack_check("fn pure_call() -> Int = thru(() => 1)\n")
+  let pc = fn_named(tm2, "pure_call")
+  assert len(pc.ev_syms) == 0
+  match ev_args_of(pc)[0] {
+    XUnit(_, _) -> ()
+    _ -> { assert false }
+  }
 }
 
 test "a declared effect is served by a hidden evidence parameter" {
