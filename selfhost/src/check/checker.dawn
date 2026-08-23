@@ -6313,7 +6313,9 @@ fn evidence_var_args(
 ##   * no ground atom and exactly one non-ground atom means the pack **is**
 ##     that environment: identity, no node, no allocation. Every effect-
 ##     polymorphic signature in std is this case, which is why the convention
-##     costs std nothing.
+##     costs std nothing;
+##   * **two or more** non-ground atoms are joined with `ev_append`, which is
+##     the one case that cannot be a splice: two chains, one `outer` field.
 ##
 ## The forwarded environment is the **tail**, spliced, not a node of its own.
 ## `!Ask !e2` into an `!e` slot is one node over the caller's `e2` slot, not
@@ -6325,34 +6327,38 @@ fn evidence_var_args(
 ## the tail be an environment rather than a filtered copy of it, and it is the
 ## one step of the argument that is not obviously true.
 ##
-## **Two or more non-ground atoms keep the empty pack as the tail, and that is
-## an open regression, not a deferred nicety.** A row like `!e1 !e2` has two
-## environments to splice and one field to splice them into; merging two chains
-## is not a cons, it is a walk-and-rebuild, and nothing in Core or in the
-## runtime can do it. So the pack is short.
+## **Two or more non-ground atoms are joined, and the join is a primitive.** A
+## row like `!e1 !e2` has two environments to put in one `outer` field, and
+## merging two chains is not a cons -- it is a walk-and-rebuild, which needs to
+## know where a chain ends, which is the shape test only a runtime can make
+## (`types.ev_pack_adt`). So `ev_append` is the second walker, and the fold
+## here is right-associative: `ev_append(e1, ev_append(e2, e3))` rebuilds each
+## environment once, where folding the other way would rebuild the first one
+## again for every atom after it.
 ##
-## Short means a reader that asks for a key from the dropped environment gets
-## `ev_get`'s compiler-invariant panic (`types.EV_MISS_MSG`). Loud, and never
-## another atom's evidence -- but loud at run time, on a program that checks
-## clean and that worked before the flip, because a closure used to carry the
-## evidence instead of asking for it. The smallest witness is eleven lines:
+## This is where the knife that landed the pack left a hole, and the hole was
+## not academic. The short tail dropped every environment but one, so a reader
+## asking for a key from a dropped one got `ev_get`'s compiler-invariant panic
+## (`types.EV_MISS_MSG`) -- loud, and never another atom's evidence, but loud
+## at run time, on a program that checks clean and that worked before the flip.
+## The witness is eleven lines and now runs on both backends
+## (scripts/spike-native/effect_two_vars.dawn):
 ##
 ##     fn thru(f: fn() -> Int !e) -> Int !e = f()
 ##     fn both(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !e1 !e2 =
 ##       thru(() => g() + h())
 ##
-## Nothing in this repository reaches it -- all 20 effect-polymorphic signatures
-## in std are a lone `!e`, and `packages/`, `selfhost/src` and the production
-## ecosystem corpus declare no effects at all -- which is why every gate is
-## green over it. That is a statement about the corpus, not about the language.
+## Nothing in this repository reached it -- all 20 effect-polymorphic
+## signatures in std are a lone `!e`, and `packages/`, `selfhost/src` and the
+## production ecosystem corpus declare no effects at all -- which is why every
+## gate was green over the hole, and why the witness had to be written rather
+## than found.
 ##
-## Closing it needs a decision one layer down, and the two candidates both cost
-## more than a line here: a reserved *join* key whose payload is another chain,
-## which makes `ev_get` a nested search rather than a walk (three
-## implementations, one of them an inlined bytecode loop with no recursion
-## available to it), or moving `ev_get` out of the emitter into a runtime static
-## where recursion is free. Neither belongs in a knife whose subject is the
-## semantics.
+## **The one-atom case stays the identity forward.** It is not routed through
+## `ev_append` for uniformity's sake: appending nothing to one chain would
+## rebuild that chain to answer exactly what it already answered, which is a
+## per-call allocation charged to every effect-polymorphic signature in std to
+## make this function two lines shorter.
 ##
 ## `report` is the difference between a demand and a snapshot. A call site
 ## demanding a row it cannot answer is the "nobody is handling this" error, at
@@ -6365,22 +6371,42 @@ fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExp
   let ground = eff_labels(inst)
   let vs = eff_vars(inst)
   let asx = eff_assocs(inst)
-  # the environment this frame holds for the row's non-ground atoms, when
-  # there is exactly one of them; otherwise the empty pack
-  var tail: TExpr = XUnit(lo, hi)
-  if len(vs) + len(asx) == 1 {
-    let (nm, key) = if len(vs) == 1 {
-      let (svid, _) = vs[0]
-      (ev_var_local_name(svid), var_key(svid))
-    } else {
-      let (_, av, at2, an) = asx[0]
-      (ev_assoc_local_name(av, at2, an), assoc_key(at2))
-    }
-    let (cxa, found) = ev_expr(cx1, nm, key, erased_ev_ty(), lo, hi)
+  # the environments this frame holds for the row's non-ground atoms, in row
+  # order: the effect variables it names, then its projections. An atom the
+  # frame has nothing for contributes nothing -- it is an error path, and the
+  # slot it would have filled is answered by whatever is left.
+  var envs: List[TExpr] = []
+  for v in vs {
+    let (svid, _) = v
+    let (cxa, found) =
+      ev_expr(cx1, ev_var_local_name(svid), var_key(svid), erased_ev_ty(), lo, hi)
     cx1 = cxa
     match found {
-      Some(tx) -> { tail = tx }
+      Some(tx) -> { envs = envs ++ [tx] }
       None -> ()
+    }
+  }
+  for a in asx {
+    let (_, av, at2, an) = a
+    let (cxa, found) =
+      ev_expr(cx1, ev_assoc_local_name(av, at2, an), assoc_key(at2), erased_ev_ty(), lo, hi)
+    cx1 = cxa
+    match found {
+      Some(tx) -> { envs = envs ++ [tx] }
+      None -> ()
+    }
+  }
+  # nothing to forward is the empty pack; one is that environment itself, no
+  # node and no allocation; more than one is the join, folded from the right so
+  # that each environment is rebuilt once and the first one stays frontmost.
+  let no_wits: List[WitRef] = []
+  var tail: TExpr = XUnit(lo, hi)
+  if len(envs) > 0 {
+    tail = envs[len(envs) - 1]
+    var i = len(envs) - 1
+    while i > 0 {
+      i = i - 1
+      tail = XCallBuiltin("ev_append", [envs[i], tail], no_wits, lo, hi, erased_ev_ty())
     }
   }
   var acc = tail
@@ -10101,6 +10127,20 @@ fn local_sym(t: TExpr) -> Int =
     _ -> panic("not a local")
   }
 
+## One join, unwrapped: (front, back). Panics on anything else, which is what
+## makes "no join here" assertable -- `local_sym` of a join is not a local.
+fn append_args(t: TExpr) -> (TExpr, TExpr) =
+  match t {
+    XCallBuiltin(name, args, _, _, _, ty) -> {
+      if name != "ev_append" || len(args) != 2 {
+        panic("not an ev_append call")
+      }
+      if ty != erased_ev_ty() { panic("a join is not at the erased type") }
+      (args[0], args[1])
+    }
+    _ -> panic("not a join")
+  }
+
 fn two_effects(body: String) -> String =
   "effect Ask {\n  fn ask() -> Int\n}\n" ++
   "effect Tell {\n  fn tell(v: Int) -> Int\n}\n" ++
@@ -10180,6 +10220,77 @@ test "a lone non-ground instantiation forwards the slot and builds no node" {
   let pc = fn_named(tm2, "pure_call")
   assert len(pc.ev_syms) == 0
   match ev_args_of(pc)[0] {
+    XUnit(_, _) -> ()
+    _ -> { assert false }
+  }
+}
+
+test "two non-ground atoms join their environments rather than dropping one" {
+  # `!e := !e1 !e2`: two environments, one `outer` field. Neither is a written
+  # label to cons and neither can be spliced, so the tail is the join -- and
+  # the two arguments are this frame's own slots, in row order. Fall back to
+  # the placeholder here (what this fixture used to get) and the second
+  # environment is silently gone: the program checks, and panics at the read.
+  let (_cx, tm) = pack_check(
+    "fn merge(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !e1 !e2 =\n" ++
+      "  thru(() => g() + h())\n")
+  let merge = fn_named(tm, "merge")
+  assert len(merge.ev_syms) == 2
+  let evs = ev_args_of(merge)
+  assert len(evs) == 1
+  let (front, back) = append_args(evs[0])
+  assert local_sym(front) == merge.ev_syms[0]
+  assert local_sym(back) == merge.ev_syms[1]
+
+  # three of them fold from the right, so each environment is rebuilt once.
+  # Folded the other way this would be `ev_append(ev_append(a, b), c)` -- the
+  # same answers, and the first environment rebuilt twice to get them.
+  let (_cx2, tm2) = pack_check(
+    "fn tri(a: fn() -> Int !e1, b: fn() -> Int !e2, c: fn() -> Int !e3) " ++
+      "-> Int !e1 !e2 !e3 =\n  thru(() => a() + b() + c())\n")
+  let tri = fn_named(tm2, "tri")
+  assert len(tri.ev_syms) == 3
+  let (a_env, rest) = append_args(ev_args_of(tri)[0])
+  assert local_sym(a_env) == tri.ev_syms[0]
+  let (b_env, c_env) = append_args(rest)
+  assert local_sym(b_env) == tri.ev_syms[1]
+  assert local_sym(c_env) == tri.ev_syms[2]
+}
+
+test "a ground label is consed over a joined tail, not folded into it" {
+  # `!e := !Ask !e1 !e2`. The two rules compose in one direction only: the
+  # label is a node, the join is what the node's `outer` is. A label folded
+  # into the join instead would need the join to take a key, and a join that
+  # took a key would be a cons.
+  let (cx, tm) = pack_check(
+    "fn over(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !Ask !e1 !e2 =\n" ++
+      "  thru(() => g() + h() + ask())\n")
+  let over = fn_named(tm, "over")
+  # the frame's slots: Ask's exact one, then the two erased ones
+  assert len(over.ev_syms) == 3
+  let ask_id = map.get(cx.effects, "Ask").expect("Ask")
+  let (k, ev, tail) = pack_node(ev_args_of(over)[0])
+  assert k == label_key(ask_id)
+  assert local_sym(ev) == over.ev_syms[0]
+  let (front, back) = append_args(tail)
+  assert local_sym(front) == over.ev_syms[1]
+  assert local_sym(back) == over.ev_syms[2]
+}
+
+test "one non-ground atom is forwarded, and is not joined with nothing" {
+  # The identity case, asserted against the join rather than against the cons:
+  # routing it through `ev_append` for uniformity would rebuild the chain to
+  # answer exactly what it already answered, once per call, in every
+  # effect-polymorphic signature std has. `local_sym` is the assertion -- a
+  # join is not a local, so it panics rather than passing.
+  let (_cx, tm) = pack_check("fn lone(f: fn() -> Int !e3) -> Int !e3 = thru(f)\n")
+  let lone = fn_named(tm, "lone")
+  assert local_sym(ev_args_of(lone)[0]) == lone.ev_syms[0]
+  # and a lone label over nothing is still one node over the placeholder, with
+  # no join underneath it
+  let (_cx2, tm2) = pack_check("fn lbl() -> Int !Ask = thru(() => ask())\n")
+  let (_k, _ev, tail) = pack_node(ev_args_of(fn_named(tm2, "lbl"))[0])
+  match tail {
     XUnit(_, _) -> ()
     _ -> { assert false }
   }
