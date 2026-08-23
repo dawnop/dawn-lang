@@ -30,7 +30,7 @@ use check/types.{
   trait_audience, builtin_type_audience, internal_std_modules,
   eff_subsumes, eff_suffix, eff_show, eff_labels, eff_assocs, eff_params_of, subst_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
-  EffectI, ev_record_name,
+  EffectI, ev_record_name, erased_ev_ty,
   AdtI, CtorI, FieldI,
   TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, ty_show, fn_return_show, sig_render, subst,
   reduce_via_bindings, ty_named, builtin_type_at, builtin_type_name_reserved,
@@ -320,17 +320,18 @@ fn upper_first(s: String) -> Bool = {
 ##   * a lowercase name with no binder. Since RX-10-B a declaration *can* bind
 ##     one, in its own parameter table, so the refusal now says which table is
 ##     missing it rather than that no such thing exists.
-##   * an uppercase name: a declared effect. That one is refused whatever the
-##     parameter table says, because evidence for a written label travels with
-##     the closure that was built under its handler and a field is not a
-##     closure (docs/effects-soundness-design.md §4.1).
+##   * an uppercase name: a declared effect. That one **used** to be refused
+##     whatever the parameter table said, because evidence for a written label
+##     travelled with the closure built under its handler and a field is not a
+##     closure. Evidence travels with the call now, so `type Box = { f: fn() ->
+##     Int !Ask }` means what it says -- whoever calls `f` supplies the handler
+##     -- and the refusal is gone.
 ##
 ## Telling them apart needs only the spelling, not the effect table, so this
-## still runs before `pass_effects` and the pass order is unchanged. The name
-## may not be a declared effect at all -- an uppercase atom that names nothing
-## is `resolve_eff_at`'s "unknown effect", and this refusal stops the
-## declaration before it gets there, which is why the sentence says "declared
-## effects" rather than naming this one as one.
+## still runs before `pass_effects` and the pass order is unchanged. An
+## uppercase atom that names nothing is not silently accepted by dropping the
+## refusal: it reaches `resolve_eff_at`, which is where "unknown effect" is
+## reported and always was.
 ##
 ## True in the result means the reference was refused.
 pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef, bound: List[String]) -> (Cx, Bool) =
@@ -338,9 +339,7 @@ pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef, bound: List[String]) -> (Cx, Boo
     Some(t) -> {
       let (name, lo, hi) = t
       if upper_first(name) {
-        (cerr_h(cx, "a type declaration cannot name the effect `" ++ name ++ "`", lo, hi,
-          "write !io, or leave the function type pure: a declared effect belongs to the " ++
-            "signature that raises it, and the handler travels with the closure"), true)
+        (cx, false)
       } else {
         (cerr_h(cx, "effect variable `" ++ name ++ "` has no binder here", lo, hi,
           "bind it in the declaration's parameter list -- `[!" ++ name ++
@@ -366,19 +365,22 @@ test "a type declaration accounts for io and for the names it binds, nothing els
   assert stray_eff_atom(nested, ["e"]) == None
 }
 
-test "the two things a type declaration cannot carry get different sentences" {
+test "an unbound effect variable is refused and a label is not" {
   let ty = (e: String) => TFn([], TNamed("Int", [], 0, 3), [e], 10, 30)
   let nothing: List[String] = []
   let (cx1, bad1) = refuse_decl_effvar(test_cx(), ty("e"), nothing)
   assert bad1
   assert cx1.diags[0].msg == "effect variable `e` has no binder here"
+  # An uppercase atom is stray by `stray_eff_atom`'s reckoning and is still
+  # not refused here: a written label is legal now, and an uppercase name that
+  # is not a declared effect is `resolve_eff_at`'s report to make.
   let (cx2, bad2) = refuse_decl_effvar(cx1, ty("Ask"), ["Ask"])
-  assert bad2
-  assert cx2.diags[1].msg == "a type declaration cannot name the effect `Ask`"
+  assert not bad2
+  assert len(cx2.diags) == 1
   # and the binder is what makes the variable legal
   let (cx3, bad3) = refuse_decl_effvar(cx2, ty("e"), ["e"])
   assert not bad3
-  assert len(cx3.diags) == 2
+  assert len(cx3.diags) == 1
 }
 
 fn t_lo2(t: TypeRef) -> Int =
@@ -1188,6 +1190,20 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       }
       cx1 = bind_fn(cx1, op.name, sig, OLocal("operation"), op.nlo, op.nhi)
     }
+    # **The installation site's evidence, and it must be the LAST field.**
+    #
+    # An arm runs where the handler was installed, not where the operation was
+    # raised, so the evidence its own body needs cannot come from the raise
+    # site. It comes from here: `checker.check_handle` fills this with the pack
+    # in scope at the `with handle`, and the operation call hands it to the arm
+    # closure as that closure's one evidence slot rather than handing over its
+    # own.
+    #
+    # Last because operation indices are positional -- `rec.fields[k]` in
+    # `check_handle` and `XField(recv, idx, ..)` in `check_call` both index by
+    # declaration order -- so a field in front of the operations would shift
+    # every one of them by one, silently.
+    fields = fields ++ [FieldI { name: "env", ty: erased_ev_ty() }]
     let rec_name = ev_record_name(d.name)
     # the evidence record is unspellable (`ev$E`), so it can never appear in a
     # written header -- but it shares the effect's audience so that nothing

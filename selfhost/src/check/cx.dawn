@@ -84,7 +84,7 @@ pub fn ty_span_kid(sp: TySpan, i: Int) -> TySpan =
 ## `check_unsafe_pure` hand-saves `used_effects` and `eff_witness` and nothing
 ## else, and never goes through here.)
 ##
-## These nine are exactly the ones that twin listed, plus `handle_evs`: the
+## These nine are exactly the ones that twin listed: the
 ## type is the restore set, so a tenth field added here silently widens what an
 ## isolated body restores, and that change is invisible to every byte-level
 ## gate in the tree (docs/arch-split-design.md D9 and §5.4). What does see it is
@@ -108,15 +108,6 @@ pub type Frame = {
   dict_syms: Map[(Int, Int), Int],
   lambda_stack: List[LambdaCx],
   loop_stack: List[Int],
-  # evidence symbol id → the union of that handler's arm effects, for every
-  # `with handle` installed in this body. Membership is the whole question a
-  # closure asks at settlement time (docs/effects-soundness-design.md §4.2):
-  # evidence resolved *here* can be discharged from the closure's row, evidence
-  # that came in through the signature cannot. Keyed by symbol id rather than
-  # effect id so a nested handler shadowing an outer one needs no extra rule --
-  # `resolve_local` already picked the inner binding, and ids are never reused,
-  # so an out-of-scope entry can never be reached.
-  handle_evs: Map[Int, Eff],
   # inside a comptime block or a const initializer: no effect of any kind may
   # cross, and v1 refuses declared effects there outright (design §4.5)
   isolated: Bool
@@ -223,25 +214,23 @@ pub type Cx = {
 ## remainder of a `with` block. Both are code the author did not spell as a
 ## lambda, and each has to be named as what it is when a jump tries to leave it.
 ##
-## `settled` and `unsettled` are the closure's own answer to "where did the
-## evidence for this label come from" (docs/effects-soundness-design.md §4.2).
-## Every label reaching this closure's row is charged to one of them, and a
-## label in both stays in the row: the two lists are not a partition but a
-## conservative bias, because a label with a second source is still raised
-## against somebody else's handler when the closure runs.
+## `boundary` is the only thing evidence still asks this record: a name found
+## below it was found outside the closure, which for an evidence name means the
+## closure reads its own pack instead (`checker.ev_expr`) and does **not**
+## capture (`checker.resolve_local`).
 pub type LambdaCx =
   {
     boundary: Int,
     expected_ret: Option[Ty],
     captures: List[Int],
     sugar: Bool,
-    arm: Bool,
-    # (effect id, that handler's arm effects), for evidence answered by a
-    # `with handle` inside the function this closure is being built in
-    settled: List[(Int, Eff)],
-    # effect ids whose evidence came from anywhere else: the signature's hidden
-    # parameters, a function value, or an instantiated effect variable
-    unsettled: List[Int]
+    # `settled` / `unsettled` used to sit here: which of the labels this
+    # closure raised had been answered by a `with handle` in the body it was
+    # written in, so that its row could be rewritten at the point it was
+    # created. Nothing rewrites a closure's row now -- the evidence is not
+    # captured, so the creation point knows nothing the call site does not --
+    # and both fields went with the rule.
+    arm: Bool
   }
 
 ## A fresh checker state for one module.
@@ -312,7 +301,6 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
       dict_syms: map.empty(),
       lambda_stack: [],
       loop_stack: [],
-      handle_evs: map.empty(),
       isolated: false
     },
     syms: map.empty(),
@@ -629,32 +617,19 @@ pub fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx
   (cx3, t)
 }
 
-## A written function type cannot name a declared effect
-## (docs/effects-soundness-design.md §4.1).
+## `refuse_written_label` stood here: a written function type could not name a
+## declared effect, on the grounds that `!Ask` on a function type reads as
+## "whoever calls me supplies the handler" and Dawn's evidence never travelled
+## that way -- it was captured by the closure at the point the closure was
+## built. That is now exactly how evidence travels, so the spelling has the
+## meaning the refusal said it lacked, and the refusal is gone along with its
+## message (an `error-contract` string, hence worth naming here).
 ##
-## Written is the whole of it: this runs on `TypeRef`s the author spelled, and
-## nothing that `unify`, `subst_eff` or `instantiate_eff` builds comes through
-## here. `map(xs, x => x + ask())` still infers `fn(Int) -> Int !Ask` for its
-## argument, because that type is inferred rather than written, and effect
-## polymorphism would be gone if it could not exist.
-##
-## What the ban costs is a spelling with no meaning behind it. `!Ask` on a
-## function type reads as "whoever calls me supplies the handler", and Dawn's
-## evidence never travels that way: it is captured by the closure at the point
-## the closure is built. A signature's own row (`fn one() -> Int !Ask`) is a
-## different thing and stays legal -- it is not a `TypeRef` and never reaches
-## here -- and so does an effect variable, which is what a caller writes when it
-## wants to take such a closure.
-fn refuse_written_label(cx: Cx, eff: Eff, lo: Int, hi: Int) -> Cx = {
-  let ls = eff_labels(eff)
-  if len(ls) == 0 { return cx }
-  let (_, n0) = ls[0]
-  cerr_h(cx, "a function type cannot name the effect `" ++ n0 ++ "`", lo, hi,
-    "use an effect variable: `fn() -> Int !e` accepts a closure that raises `" ++ n0 ++
-      "` and carries it on into this signature's own row. A written label would mean " ++
-      "the caller supplies the handler, and in Dawn a closure carries the handler it " ++
-      "was created under (docs/spec.md §6.5)")
-}
+## What the ban was really protecting was the row rewrite below it: the labels
+## were dropped from the resolved type (`eff_base(eff)`), so a written label
+## could not have survived into a `TyFn` even where it was accepted. Both go
+## together; keeping the drop without the diagnostic would silently launder a
+## label out of every annotation.
 
 ## A written type is either a storage shape or the direct result of a function.
 ## Never is nameable only in the latter. Structural function types choose the
@@ -686,10 +661,7 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
     }
     TFn(params, ret, effs, lo, hi) -> {
       let (cx1, eff) = resolve_eff_at(cx, effs, lo, hi)
-      var cx2 = refuse_written_label(cx1, eff, lo, hi)
-      # ... and go on with the row the author should have written, so the rest
-      # of the declaration is checked once rather than reported twice
-      let eff2 = eff_base(eff)
+      var cx2 = cx1
       var ps: List[Ty] = []
       for p in params {
         let (cx3, t) = resolve_type(cx2, p)
@@ -699,7 +671,7 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
       let (cx4, rt) = resolve_type_for(cx2, ret, TypeReturn)
       # a function type's written children are its parameters then its return
       # type, which is exactly TyFn's child order
-      (record_span_at(cx4, lo, hi, params ++ [ret]), TyFn(ps, rt, eff2))
+      (record_span_at(cx4, lo, hi, params ++ [ret]), TyFn(ps, rt, eff))
     }
     TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi, type_use)
     TQual(q, name, targs, lo, hi) -> resolve_qual(cx, q, name, targs, lo, hi)

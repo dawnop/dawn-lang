@@ -32,10 +32,28 @@ pub fn unsettled() -> Int = {
 # rejected: the subject is settled and cannot answer the bound
 pub fn no_impl(xs: List[Box]) -> List[String] = list.map(xs, to_string)
 
-# still rejected, and for the other reason: evidence is captured where a
-# lambda is written, so this one is not the compiler's to synthesise
-effect Ask {
+# still rejected, and for a reason that has nothing to do with the row: `get`
+# names no function. An operation call is a field read off a handler's record
+# plus a closure call, so there is no callee for a wrapper to call. (It used to
+# be refused for its label, on the grounds that evidence was captured where a
+# lambda was written; that ground is gone.)
+# `pub`, so that the two accepted shapes below are about effects rather than
+# about SEM-07's audience rule
+pub effect Ask {
   fn get() -> Int
 }
 
 pub fn as_value() -> fn() -> Int = get
+
+# accepted: an ordinary function with a written label, used as a value. Its row
+# rides in the value's type and the call site supplies the evidence, so there
+# is nothing here for a wrapper to capture and nothing to refuse.
+fn raises() -> Int !Ask = get()
+
+pub fn labelled_value() -> fn() -> Int !Ask = raises
+
+# ... and through an expected type, which is the path that instantiates. `!e`
+# takes the label the same way a type parameter takes a type.
+fn thru(f: fn() -> Int !e) -> Int !e = f()
+
+pub fn labelled_through() -> Int !Ask = thru(raises)

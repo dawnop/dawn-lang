@@ -223,20 +223,36 @@ pub fn atom_keys(e: Eff) -> List[Int] = {
   }
   for v in eff_vars(e) {
     let (vid, _) = v
-    out = out ++ [3 * vid + 1]
+    out = out ++ [var_key(vid)]
   }
   for a in eff_assocs(e) {
     let (_, _, tid, _) = a
-    out = out ++ [3 * tid + 2]
+    out = out ++ [assoc_key(tid)]
   }
   out
 }
 
-## One label's key on its own. `atom_keys` walks a row; a builder that already
-## has a single label in hand (`checker.evidence_pack` conses one node per
-## ground label) asks here instead of re-deriving the band, for the same reason
-## `nev` is the only place the slot count is computed.
+## One atom's key on its own, per axis. `atom_keys` walks a row; a caller that
+## already has a single atom in hand -- `checker.evidence_pack` consing a node
+## per ground label, `checker.bind_evidence` stamping the key onto the slot it
+## declares -- asks here instead of re-deriving the band, for the same reason
+## `nev` is the only place the slot count is computed. The bands were spelled
+## inline in `atom_keys` and nowhere else while nothing but `atom_keys` needed
+## them; three readers is where a second spelling starts to drift.
 pub fn label_key(eid: Int) -> Int = 3 * eid
+
+pub fn var_key(vid: Int) -> Int = 3 * vid + 1
+
+pub fn assoc_key(tid: Int) -> Int = 3 * tid + 2
+
+## Reading a key back. A pack node's key is always a label's -- a ground atom
+## is the only thing a pack conses a node for -- but a *slot* is addressed by
+## any of the three, and `lower.ev_slot` has to tell "walk the chain for this
+## effect's record" from "the chain itself is the answer". The band is the
+## whole of that question, and this is the same band `label_key` mints.
+pub fn key_is_label(k: Int) -> Bool = k % 3 == 0
+
+pub fn key_effect_id(k: Int) -> Int = k / 3
 
 ## The runtime arity of a **function value**: the parameters it was written
 ## with, plus exactly one evidence slot.
@@ -1270,13 +1286,23 @@ pub fn eff_is_ground(e: Eff) -> Bool =
 
 ## Resolved local variable/parameter. `dict_of` is (trait id, tvar id) for a
 ## hidden trait-dictionary binding.
+##
+## `ev_of` is the atom key (`atom_keys`) of an evidence binding -- a signature's
+## hidden slot or a `with handle`'s record -- and `None` for every ordinary
+## name. Two readers, and they are the two halves of the same rule:
+## `checker.resolve_local` refuses to put such a symbol in a capture list, and
+## `checker.ev_expr` turns a resolution that crossed a lambda boundary into a
+## read off the crossing closure's own pack. Carried on the symbol rather than
+## sniffed off the name because there are three spellings (`ev_local_name`,
+## `ev_var_local_name`, `ev_assoc_local_name`) and a fourth would be silent.
 pub type Sym = {
   name: String,
   ty: Ty,
   mutable: Bool,
   dlo: Int,
   dhi: Int,
-  dict_of: Option[(Int, Int)]
+  dict_of: Option[(Int, Int)],
+  ev_of: Option[Int]
 }
 
 ## Function signature (user functions and builtins alike).

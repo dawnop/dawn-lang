@@ -1,18 +1,34 @@
-# checker.dawn: a written function type cannot name a declared effect
-# (docs/effects-soundness-design.md §4.1). One refusal in cx.dawn covers every
-# position a type can be written in, because they all go through resolve_type.
+# checker.dawn: a written function type **may** name a declared effect, in
+# every position a type can be written in -- they all go through resolve_type,
+# and the one refusal that used to sit there (cx.dawn's refuse_written_label)
+# is gone.
+#
+# It was refused because `!Ask` on a function type reads as "whoever calls me
+# supplies the handler" and evidence did not travel that way: it was captured
+# by the closure where the closure was built. It travels exactly that way now,
+# so the spelling has the meaning the refusal said it lacked.
+#
+# The effect is `pub` so that the public surface rule (SEM-07) has nothing to
+# say about these signatures; what a public function may expose is a separate
+# question with its own case, and leaving it in would have this file report
+# five diagnostics about audiences and none about effects.
 use std/list
 
-effect Ask { fn get() -> Int }
+pub effect Ask { fn get() -> Int }
 
-# a parameter type
-pub fn as_param(f: fn() -> Int !Ask) -> Int = f()
+# a parameter type. Calling `f` is what owes the evidence, so the row is the
+# caller's business and the signature has to say so
+pub fn as_param(f: fn() -> Int !Ask) -> Int !Ask = f()
+
+# ... and a signature that does not say so is refused at the call, by name.
+# This is the whole of what the ban was standing in for
+pub fn as_param_undeclared(f: fn() -> Int !Ask) -> Int = f()
 
 # a return type
 pub fn as_return() -> fn() -> Int !Ask = () => 1
 
 # a `let` annotation
-pub fn as_let() -> Int = {
+pub fn as_let() -> Int !Ask = {
   let g: fn() -> Int !Ask = () => 1
   g()
 }
@@ -23,9 +39,8 @@ pub fn as_nested(fs: List[fn() -> Int !Ask], p: (Int, fn() -> Int !Ask)) -> Int 
   len(fs) + n
 }
 
-# The migration the hint asks for, in the same four positions: an effect
-# variable is not a label, so none of these is refused. Without them the case
-# would prove the refusal fires and nothing about what it fires on.
+# An effect variable in the same four positions. It was the migration the old
+# hint asked for; it is now simply the other spelling, and both are legal.
 pub fn var_param(f: fn() -> Int !e) -> Int !e = f()
 
 pub fn var_return() -> fn() -> Int !e = () => 1
@@ -38,9 +53,11 @@ pub fn var_let() -> Int !e = {
 # `!io` is the base axis, which the ban leaves alone
 pub fn io_param(f: fn() -> Int !io) -> Int !io = f()
 
-# a declaration position refuses it earlier, and since a declaration can bind
-# an effect parameter it now says which of the two kinds of atom this is: a
-# label, refused whatever the parameter list holds
+# a declaration position takes it too. `refuse_decl_effvar` still refuses an
+# unbound lowercase *variable* there -- that one has no binder and no meaning
+# -- and no longer refuses a label, which has both. This needs `pass_effects`
+# to run before `pass_ctor_fields`, because telling a label from a variable is
+# a table lookup.
 alias A = fn() -> Int !Ask
 
 pub type Box = { f: fn() -> Int !Ask }

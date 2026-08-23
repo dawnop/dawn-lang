@@ -28,7 +28,7 @@ use check/types.{
   Sym, Sig, Eff, EPure, ELabeled, EffVar, Traits, TraitI, ImplI, MethodSig,
   eff_labels, eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty,
-  EV_PACK_ID, ev_pack_ty,
+  EV_PACK_ID, ev_pack_ty, key_is_label, key_effect_id,
   Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID,
@@ -38,7 +38,7 @@ use check/types.{
 use check/tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
   tex_ty,
-  XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn, XCallBuiltin,
+  XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn, XCallBuiltin,
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
@@ -133,8 +133,8 @@ pub type LSt = {
   # that need the wrapper loop pay for it
   self_tail: Bool,
   # The evidence the frame being lowered holds, addressed by atom key
-  # (`types.atom_keys`) -- a named function's own per-atom slots. What a
-  # dynamic call site forwards instead of building; see `ev_forward`.
+  # (`types.atom_keys`) -- a named function's own per-atom slots. What an
+  # `XEvRead` names; see `ev_slot`.
   #
   # Scoped to one Core function exactly like `dict_env`: a lifted body reaches
   # its own parameters and not the enclosing function's, so entering one
@@ -302,321 +302,90 @@ fn lower_evidence(st: LSt, evid: List[TExpr]) -> (LSt, List[CExpr]) = {
   (st1, out)
 }
 
-## **Identity forwarding.** The evidence already in this frame that *is* the
-## pack the callee's row asks for, when there is one.
+## **One atom's evidence, out of whatever the running frame holds.**
 ##
-## The case is a row with no ground label and exactly one non-ground atom -- an
-## effect variable or a rigid projection. Then the callee's whole row is that
-## one atom, and which effect it turns out to be was decided by whoever
-## instantiated this frame. So the pack for it is not a new chain over a
-## placeholder: it is the evidence this frame is already holding for that same
-## atom, unchanged. Building a fresh cons there would be manufacturing a second
-## answer to a question that has one.
+## `checker.XEvRead` says which atom; this decides where it comes from, and
+## which it is depends only on the kind of frame:
 ##
-## This is a correctness rule before it is an optimisation. The knife that
-## starts *reading* packs needs the callee to receive the frame's real
-## evidence; a cons of placeholders is only indistinguishable from it while
-## nothing looks. What it buys today is that the allocation disappears --
-## every effect-polymorphic signature in std is a lone `!e`, so every `f(x)`
-## inside a higher-order function forwards rather than builds.
+##   * a **named** function has one slot per atom of its ABI row, and
+##     `ev_env` is that list addressed by key. The slot is the answer,
+##     unchanged.
+##   * a **lifted closure** has one erased pack whatever its row
+##     (`fn_value_evs`). A ground label is one entry of that chain, so the
+##     answer is `ev_get(pack, key)`; a non-ground atom's "environment" is the
+##     whole chain, so the answer is the pack itself. That asymmetry is the
+##     pack convention: a label's slot carries a record, a variable's slot
+##     carries a pack, and the closure's pack is a pack.
 ##
-## A row with a ground label is left alone: the callee asks for a specific
-## effect's evidence, this frame's slot for it is a different thing from a
-## pack of it, and merging the two is the cons that `ev_build` still is.
-fn ev_forward(st: LSt, e: Eff) -> Option[CExpr] = {
-  if len(eff_labels(e)) != 0 { return None }
-  if len(eff_vars(e)) + len(eff_assocs(e)) != 1 { return None }
-  let ks = atom_keys(e)
+## Neither is reached with nothing to hand back, in a program that checked: the
+## checker only mints `XEvRead` where the label is in the frame's own row, and
+## `bind_evidence` gives every atom of that row a slot. The placeholder here is
+## for the error paths that still lower.
+fn ev_slot(st: LSt, key: Int) -> CExpr = {
   for p in st.ev_env {
     let (k, v) = p
-    if k == ks[0] { return Some(v) }
+    if k == key { return v }
   }
-  # a lifted closure has no per-atom slot to look up -- its one erased
-  # parameter is the pack, and a lone atom's pack is that pack
-  st.ev_own
+  match st.ev_own {
+    Some(pack) -> ev_from_pack(pack, key)
+    None -> ev_placeholder()
+  }
 }
 
-## The cons chain a call site builds when nothing in the frame already is the
-## pack: one node per atom of the callee value's row, keyed by the atom
-## (`types.atom_keys`), over the empty pack.
+## One atom out of a pack, at the type the atom's own slot is declared with.
 ##
-## Keyed rather than positional, which is what lets two rows meet without being
-## reordered against one another -- the property that makes a pack safe where a
-## vector was not (design 裁决背景 1). Built here rather than forwarded whole
-## because the pack a caller holds and the pack a callee's row asks for are two
-## different rows; merging them is a cons, and this is the cons.
-fn ev_build(e: Eff) -> CExpr = {
-  var acc = ev_placeholder()
-  for k in atom_keys(e) {
-    acc = CCtor(EV_PACK_ID, 0, [CInt(k), ev_placeholder(), acc], ev_pack_ty())
+## A label's key addresses a node, and what the node carries is that effect's
+## record -- so the walk is `ev_get` and the erased result is unboxed back to
+## the record type, which is the ordinary erasure rule (`adapt_out`) and not a
+## special case. Any other atom is answered by the chain as a whole: its slot
+## carries a pack, a superset of a pack is a pack, and there is nothing to
+## walk to.
+fn ev_from_pack(pack: CExpr, key: Int) -> CExpr =
+  if key_is_label(key) {
+    let raw = CIntrinsic("ev_get", [pack, CInt(key)], erased_ev_ty())
+    adapt_out(raw, erased_ev_ty(), TyAdt(key_effect_id(key), []))
+  } else {
+    pack
   }
-  acc
-}
 
-## The evidence pack a call through a function **value** hands over: the
-## frame's own evidence where that is what the row asks for (`ev_forward`), and
-## otherwise a chain built here (`ev_build`).
+## The evidence arguments a call through a function **value** hands over:
+## exactly one, the pack, whatever the row says (`types.fn_arity`).
 ##
-## Under this knife every payload a chain carries is a placeholder. A closure
-## still carries the evidence it was created under, so nothing on the receiving
-## side reads a node -- what the pack buys here is that both sides agree on the
-## shape, and that the allocation this convention costs is on the clock rather
-## than deferred to the knife that starts reading it.
-fn ev_pack(st: LSt, e: Eff) -> (LSt, CExpr) =
-  match ev_forward(st, e) {
-    Some(v) -> (st, v)
-    None -> (st, ev_build(e))
+## The pack itself is the checker's -- `checker.evidence_pack` built it out of
+## the row and the scope, which is where both halves of the question live. This
+## used to be lowering's own rule (`ev_pack` / `ev_forward` / `ev_build`, over
+## `st.ev_env`), and having two builders was tolerable only while neither
+## payload was ever read: the checker's had the evidence and lowering's had
+## placeholders, and the difference was invisible. It is not invisible now, so
+## there is one builder, and it is the one that can see a scope.
+##
+## The empty list is an error path -- `check_handle` on an unknown effect
+## builds a call it has nothing to say about -- and answering the empty pack
+## keeps the arity right where emitting nothing would turn a reported program
+## into a crashing one.
+fn dyn_evidence(st: LSt, evid: List[TExpr]) -> (LSt, List[CExpr]) =
+  match evid {
+    [e] -> {
+      let (st1, v) = lower_expr(st, e)
+      (st1, [ev_value(v)])
+    }
+    _ -> (st, [ev_placeholder()])
   }
 
-## Lower one function on its own and hand back its Core body -- the two tests
-## below ask about a call site's evidence argument and nothing else.
-fn ev_test_body(
-  ev_syms: List[Int],
-  ptys: List[Ty],
-  eparams: List[Eff],
-  eff: Eff,
-  body: TExpr
-) -> CExpr = {
-  let sym = (nm: String, t: Ty) => Sym {
-    name: nm,
-    ty: t,
-    mutable: false,
-    dlo: 0,
-    dhi: 0,
-    dict_of: None
-  }
-  var syms: Map[Int, Sym] = map.empty()
-  var i = 0
-  for pt in ptys {
-    syms = map.insert(syms, i + 1, sym("p", pt))
-    i = i + 1
-  }
-  for e in ev_syms { syms = map.insert(syms, e, sym("ev", erased_ev_ty())) }
-  var psyms: List[Int] = []
-  var pnames: List[String] = []
-  var j = 0
-  for _pt in ptys {
-    psyms = psyms ++ [j + 1]
-    pnames = pnames ++ ["p"]
-    j = j + 1
-  }
-  let tf = TFun {
-    name: "h",
-    sig: Sig {
-      name: "h",
-      param_tys: ptys,
-      param_names: pnames,
-      param_defaults: [],
-      ret: TyInt,
-      eff: eff,
-      is_builtin: false,
-      tparams: [],
-      constraints: [],
-      eparams: eparams,
-      owner: None,
-      trait_id: None,
-      op_of: None,
-      inferring: false
-    },
-    param_syms: psyms,
-    dict_syms: [],
-    ev_syms: ev_syms,
-    defaults: [],
-    body: body,
-    is_test: false,
-    impl_of: None,
-    default_of: None
-  }
-  let no_traits: Traits = map.empty()
-  let no_impls: Impls = map.empty()
-  let no_sigs: Map[(String, String), Sig] = map.empty()
-  let (cf, _lifted, _dicts, _next) =
-    lower_fn_only("m", tf, no_traits, no_impls, prelude_adts(), no_sigs, syms, 0)
-  cf.body
-}
-
-test "a lone non-ground atom forwards this frame's slot for that atom" {
-  # The oracle for identity forwarding, and it has to be a shape one.
-  #
-  # Nothing reads a pack at runtime under this knife, so forwarding slot 8
-  # where slot 9 was asked for computes the same answers as forwarding the
-  # right one: every behavioural gate -- run-diff, both fixpoints, the RC
-  # contract, the sanitiser legs -- stays green while the wrong evidence goes
-  # to the callee. Only the lowered Core still knows which slot was named.
-  let e0 = EffVar("e0", 0)
-  let e1 = EffVar("e1", 1)
-  let f0 = TyFn([TyInt], TyInt, e0)
-  let f1 = TyFn([TyInt], TyInt, e1)
-  # `p1(p2(0))`: two calls through function values, one per effect variable
-  let inner = XApply(XLocal(2, "p", 0, 0, f1), [XInt(0, 0, 0)], 0, 0, TyInt)
-  let body = XApply(XLocal(1, "p", 0, 0, f0), [inner], 0, 0, TyInt)
-  # `checker.ev_sym_list` hands the slots over in `atom_keys` order, so slot 8
-  # is e0's (key 3 * 0 + 1) and slot 9 is e1's (key 3 * 1 + 1)
-  match ev_test_body([8, 9], [f0, f1], [e0, e1], EPure, body) {
-    CCall(CDynamic(CLocal(t0, _)), args, _) -> {
-      assert t0 == 1
-      # written argument, then the one evidence slot (types.fn_arity)
-      assert len(args) == 2
-      match args[1] {
-        # forwarded, not built: e0's own slot arrives unchanged
-        CLocal(s, _) -> { assert s == 8 }
-        _ -> { assert false }
-      }
-      match args[0] {
-        CCall(CDynamic(CLocal(t1, _)), inner_args, _) -> {
-          assert t1 == 2
-          assert len(inner_args) == 2
-          match inner_args[1] {
-            CLocal(s2, _) -> { assert s2 == 9 }
-            _ -> { assert false }
-          }
-        }
-        _ -> { assert false }
-      }
-    }
-    _ -> { assert false }
-  }
-}
-
-test "a ground label still builds the chain, and a pure row still builds none" {
-  # The other half of `ev_forward`'s guard. A row with a written label asks for
-  # that effect's evidence, which is not the same thing as a pack of it, so the
-  # cons stays. Over-forwarding here is invisible at runtime for the same
-  # reason the wrong slot is, so this too is pinned on the Core shape.
-  #
-  # The enclosing frame is given `!Ask` of its own, so it *has* a slot for the
-  # atom the callee names. Without that the guard could be deleted and nothing
-  # would move: the lookup would simply miss and fall through to the build.
-  let ask = ELabeled(EPure, [(7, "Ask")])
-  let e0 = EffVar("e0", 0)
-  let fv = TyFn([TyInt], TyInt, e0)
-  let fl = TyFn([TyInt], TyInt, ask)
-  let fp = TyFn([TyInt], TyInt, EPure)
-  let lab = XApply(XLocal(2, "p", 0, 0, fl), [XInt(0, 0, 0)], 0, 0, TyInt)
-  # slots in `atom_keys` order: the label's (key 21) first, then e0's (key 1)
-  match ev_test_body([8, 9], [fv, fl, fp], [e0], ask, lab) {
-    CCall(CDynamic(_), args, _) -> {
-      assert len(args) == 2
-      match args[1] {
-        CCtor(aid, ci, fs, _) -> {
-          assert aid == EV_PACK_ID
-          assert ci == 0
-          # one node over the empty pack: `!Ask` is effect id 7, banded 3 * 7
-          assert len(fs) == 3
-          match fs[0] {
-            CInt(k) -> { assert k == 21 }
-            _ -> { assert false }
-          }
-        }
-        _ -> { assert false }
-      }
-    }
-    _ -> { assert false }
-  }
-  # and a pure row is still the immortal empty pack, named nowhere
-  let pure = XApply(XLocal(3, "p", 0, 0, fp), [XInt(0, 0, 0)], 0, 0, TyInt)
-  match ev_test_body([8, 9], [fv, fl, fp], [e0], ask, pure) {
-    CCall(CDynamic(_), args, _) -> {
-      assert len(args) == 2
-      match args[1] {
-        CBox(CUnit, _) -> { assert true }
-        _ -> { assert false }
-      }
-    }
-    _ -> { assert false }
-  }
-}
-
-test "inside a lifted closure the frame's evidence is its own pack slot" {
-  # `ev_forward`'s other source. A lambda has no per-atom slots -- one erased
-  # parameter carries the whole chain (`fn_value_evs`) -- so a lone atom's pack
-  # is that parameter, forwarded.
-  #
-  # Nothing in this tree reaches this branch: a dynamic call over a lone
-  # non-ground row inside a lambda body does not occur in the compiler, std or
-  # the corpus, so every other gate is blind to it by never running it. This
-  # test is the only thing holding it.
-  let e0 = EffVar("e0", 0)
-  let f0 = TyFn([TyInt], TyInt, e0)
-  let lam_ty = TyFn([f0], TyInt, e0)
-  var syms: Map[Int, Sym] = map.empty()
-  syms = map.insert(syms, 5, Sym {
-    name: "g",
-    ty: f0,
-    mutable: false,
-    dlo: 0,
-    dhi: 0,
-    dict_of: None
-  })
-  # `h() = g => g(0)`
-  let call = XApply(XLocal(5, "g", 0, 0, f0), [XInt(0, 0, 0)], 0, 0, TyInt)
-  let tf = TFun {
-    name: "h",
-    sig: Sig {
-      name: "h",
-      param_tys: [],
-      param_names: [],
-      param_defaults: [],
-      ret: lam_ty,
-      eff: EPure,
-      is_builtin: false,
-      tparams: [],
-      constraints: [],
-      eparams: [],
-      owner: None,
-      trait_id: None,
-      op_of: None,
-      inferring: false
-    },
-    param_syms: [],
-    dict_syms: [],
-    ev_syms: [],
-    defaults: [],
-    body: XLambda([5], ["g"], call, [], 0, 0, lam_ty),
-    is_test: false,
-    impl_of: None,
-    default_of: None
-  }
-  let no_traits: Traits = map.empty()
-  let no_impls: Impls = map.empty()
-  let no_sigs: Map[(String, String), Sig] = map.empty()
-  let (_cf, lifted, _dicts, _next) =
-    lower_fn_only("m", tf, no_traits, no_impls, prelude_adts(), no_sigs, syms, 0)
-  assert len(lifted) == 1
-  let lam = lifted[0]
-  # one erased evidence parameter, whatever the row (types.fn_arity)
-  assert len(lam.evs) == 1
-  let own = lam.evs[0].sym
-  match lam.body {
-    CCall(CDynamic(CLocal(g, _)), args, _) -> {
-      assert g == 5
-      assert len(args) == 2
-      match args[1] {
-        # the closure's own slot, forwarded -- not a fresh chain
-        CLocal(s, _) -> { assert s == own }
-        _ -> { assert false }
-      }
-    }
-    _ -> { assert false }
-  }
-}
-
-## Rule F2's call-site half for a function *value*: exactly one argument, the
-## pack, whatever the row says. `types.fn_arity` is the other side of the same
-## number, and there is no third place either is derived.
-fn dyn_evidence(st: LSt, fty: Ty) -> (LSt, List[CExpr]) =
-  match peel_opaque(fty) {
-    TyFn(_, _, e) -> {
-      let (st1, p) = ev_pack(st, e)
-      (st1, [p])
-    }
-    # not a function type: the call site is already an error the checker
-    # reported, and an argument list one short would turn it into a crash
-    _ -> {
-      let (st1, p) = ev_pack(st, EPure)
-      (st1, [p])
-    }
-  }
+## Three tests stood here, on hand-built TAST run through `lower_fn_only`:
+## that a lone non-ground atom forwarded the frame's own slot, that a ground
+## label still built a node, and that inside a lifted closure the forward was
+## the closure's own pack parameter. They were the only oracle for a rule that
+## lowering owned, and they had to be shape tests on the emitted Core because
+## nothing read a pack at runtime, so a wrong slot computed the right answer.
+##
+## The rule does not live here any more. `checker.evidence_pack` builds every
+## pack, from the row and the scope together, and the tests that hold it are
+## beside it -- on the TAST, where the identity forward is a slot symbol and
+## the splice is a tail, and where "the wrong slot" is now also a wrong
+## transcript (`scripts/spike-native/effect_lexical.expect`). What is left on
+## this side is `ev_slot`, whose two branches are the two kinds of frame, and
+## its oracle is the same corpus.
 
 ## The evidence parameters a function *value* of any type takes: one erased
 ## slot, carrying the pack.
@@ -626,36 +395,54 @@ fn dyn_evidence(st: LSt, fty: Ty) -> (LSt, List[CExpr]) =
 ## (native), so there is no descriptor precision to be had on this side and one
 ## shape covers every row (design §5.2).
 ##
-## Under this knife nothing reads it: a closure still captures the evidence it
-## was created under, and the pack arrives alongside and is dropped. It exists
-## so that the arity a call site computes and the arity a closure was built
-## with are the same number.
+## The closure's body reads it: an operation raised inside a lambda resolves to
+## a `with handle` or a hidden slot the lambda does not capture, so the checker
+## mints an `XEvRead` and `ev_slot` answers it out of this parameter.
 fn fn_value_evs(st: LSt) -> (LSt, List[CParam]) = {
   let (st1, sym) = fresh_sym(st)
   (st1, [CParam { sym: sym, ty: erased_ev_ty(), mode: COwned }])
 }
 
-## **The §2.5 guard, and why it is a comment here rather than an assertion.**
+## **The §2.5 guard, as an assertion.**
 ##
 ## Design §2.5: a value of evidence must never reach a closure's capture list.
-## An adapter or a wrapper that welded the handler in scope at its creation
-## point into its captures would put the D2 leak straight back, which is the
-## same reason rule 乙 cannot be rescued by one.
+## That is rule 乙 stated as an invariant, and until the flip it could only be
+## a comment -- the capture lists were full of evidence on purpose, so the
+## assertion would have fired on every handled program in the tree.
 ##
-## The three closures this file builds obey it already, by construction and not
-## by luck: `lift_ctor_value` and `lift_fn_value` capture nothing at all, and
-## the pack a call site hands over is built at the call site out of
-## placeholders rather than read out of any environment. No adapter exists to
-## break it, because a function value's arity does not depend on its row and so
-## nothing has to be adapted (`types.fn_arity`).
+## Now nothing may capture evidence (`checker.resolve_local` skips it), so this
+## can be checked instead of argued, at the four places a closure is built:
+## `lift_lambda`, `lift_ctor_value`, `lift_fn_value` and the arm closures that
+## go through `lift_lambda` like any other lambda. It costs one type test per
+## captured symbol.
 ##
-## It cannot be *asserted* under this knife, and the reason is the point of the
-## knife: semantics are unchanged, so a user lambda still captures the evidence
-## it was created under -- rule 乙, `checker.bind_evidence`'s locals reaching a
-## `CClosure` through ordinary capture bookkeeping. The capture lists are full
-## of evidence on purpose. The assertion belongs to the knife that takes that
-## capture away; putting it here would only assert that this knife had already
-## been that one.
+## **It is nominal-only, and that is the honest limit.** An evidence *record*
+## is `ev$E` and the pack is `ev$Pack`, and both are named ADTs a capture list
+## cannot hide. A signature's slot for an effect variable or a projection is
+## `erased_ev_ty()`, which is the generic erased type -- it is what a `T`
+## parameter has -- so a captured one is indistinguishable here from an
+## ordinary captured `T`. Those are kept out by the checker refusing to capture
+## them, not by this; what this catches is the checker having stopped doing so,
+## which is the regression it exists for and the shape the corpus mutant takes.
+fn is_evidence_ty(st: LSt, t: Ty) -> Bool =
+  match t {
+    TyAdt(aid, _) ->
+      if aid == EV_PACK_ID {
+        true
+      } else {
+        str.starts_with(adt_of(st.adts, aid).name, "ev\$")
+      }
+    _ -> false
+  }
+
+fn refuse_evidence_captures(st: LSt, where2: String, captures: List[Int]) -> Unit = {
+  for c in captures {
+    if is_evidence_ty(st, sym_ty(st, c, TyError)) {
+      panic("lower: " ++ where2 ++ " captures evidence (symbol " ++ to_string(c) ++
+          ") -- design §2.5: evidence never joins a capture list")
+    }
+  }
+}
 
 # ---- operators ----
 
@@ -3055,6 +2842,7 @@ fn lift_lambda(
   self_sym: Option[Int]
 ) -> (LSt, CExpr) = {
   let (st1, name) = fresh_lam(st)
+  refuse_evidence_captures(st1, "a lifted lambda", captures)
   var caps: List[CParam] = []
   # the closure-allocation site sits in the ENCLOSING frame, so a capture of
   # an enclosing local named function rebuilds that function's closure; the
@@ -3146,6 +2934,9 @@ fn lift_lambda(
 ## function, so function values have exactly one representation.
 fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
   let (st1, lam) = fresh_lam(st)
+  # captures nothing by construction; the assertion is here so that "nothing"
+  # stays an assertion rather than a claim about a literal further down
+  refuse_evidence_captures(st1, "a constructor value's wrapper", [])
   let pts = params_of_fn_ty(ty)
   let ret = ret_of_fn_ty(ty)
   var ps: List[CParam] = []
@@ -3181,6 +2972,7 @@ fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
 ## with no captures, so that every function value has one representation.
 fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty) -> (LSt, CExpr) = {
   let (st1, lam) = fresh_lam(st)
+  refuse_evidence_captures(st1, "a function value's wrapper", [])
   let pts = params_of_fn_ty(ty)
   var ps: List[CParam] = []
   var args: List[CExpr] = []
@@ -3199,17 +2991,27 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
   # and owes the callee a slot per atom of *its* ABI row -- a different count,
   # arrived at from the callee's signature rather than from this type.
   #
-  # Under this knife the inside is a placeholder in every position: nothing
-  # reads a slot, so unpacking the pack the wrapper received would be work
-  # whose result is discarded. The knife that starts reading is where the two
-  # counts have to be reconciled for real, and this is the only place it has to
-  # happen.
+  # So the wrapper unpacks: one atom of the callee's ABI row per slot, in
+  # `atom_keys` order, which is the order `checker.ev_sym_list` laid the slots
+  # out in and therefore the order the callee reads them back. A ground label
+  # is a walk to its node; anything else is the chain itself (`ev_from_pack`).
+  #
+  # The count comes from the callee's signature and not from this wrapper's
+  # type, because they are different numbers on purpose: outside, one pack
+  # whatever the row (`types.fn_arity`); inside, one slot per atom
+  # (`types.nev`).
   let (st5, evps) = fn_value_evs(st2)
   var inner_evs: List[CExpr] = []
   if not is_builtin {
     match sig_of(st5, owner, name) {
       Some(sg) -> {
-        for _k in 0..nev(sig_abi_eff(sg)) { inner_evs = inner_evs ++ [ev_placeholder()] }
+        let pack = match evps {
+          [pp] -> CLocal(pp.sym, pp.ty)
+          _ -> ev_placeholder()
+        }
+        for k in atom_keys(sig_abi_eff(sg)) {
+          inner_evs = inner_evs ++ [ev_from_pack(pack, k)]
+        }
       }
       None -> ()
     }
@@ -3255,6 +3057,13 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         Some(c) -> (st, c)
         None -> (st, CLocal(sym, ty))
       }
+    # the frame's own evidence for one atom -- which slot or which walk is
+    # `ev_slot`'s question, and the type it arrives at is the ordinary erasure
+    # rule rather than anything evidence-specific
+    XEvRead(key, _, _, ty) -> {
+      let raw = ev_slot(st, key)
+      (st, adapt_out(raw, cex_ty(raw), ty))
+    }
     XUnsafePure(body, _, _, _) -> lower_expr(LSt { ..st, tail: tl }, body)
     XComptime(_, lo, hi, ty) -> (st, CComptime(lo, hi, ty))
     XError(_, _) -> panic("lower: XError reached lowering")
@@ -3453,7 +3262,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     XIndex(target, index, wit, _, _, ty) ->
       lower_trait_call(st, INDEX_ID, "index", [target, index], [wit], no_texprs(), ty)
     XCtorValue(adt, ci, _, _, ty) -> lift_ctor_value(st, adt, ci, ty)
-    XCallDyn(sym, _, args, _, _, ty) ->
+    XCallDyn(sym, _, args, evid, _, _, ty) ->
       if is_self_sym(st, sym) {
         if tl {
           self_tail_jump(st, args)
@@ -3461,19 +3270,19 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
           # not a tail call, so the closure is rebuilt and called through
           let (st1, vs) = lower_all(st, args)
           let clo = self_value(st1, sym).expect("self closure")
-          let (st2, es) = dyn_evidence(st1, cex_ty(clo))
+          let (st2, es) = dyn_evidence(st1, evid)
           (st2, CCall(CDynamic(clo), vs ++ es, ty))
         }
       } else {
         let (st1, vs) = lower_all(st, args)
         let fty = sym_ty(st1, sym, TyError)
-        let (st2, es) = dyn_evidence(st1, fty)
+        let (st2, es) = dyn_evidence(st1, evid)
         (st2, CCall(CDynamic(CLocal(sym, fty)), vs ++ es, ty))
       }
-    XApply(target, args, _, _, ty) -> {
+    XApply(target, args, evid, _, _, ty) -> {
       let (st1, tv) = lower_expr(st, target)
       let (st2, vs) = lower_all(st1, args)
-      let (st3, es) = dyn_evidence(st2, cex_ty(tv))
+      let (st3, es) = dyn_evidence(st2, evid)
       (st3, CCall(CDynamic(tv), vs ++ es, ty))
     }
     XLambda(params, _, body, captures, _, _, ty) ->
@@ -4537,7 +4346,8 @@ test "the flat module and the grouped functions are one lowering" {
     mutable: false,
     dlo: 0,
     dhi: 0,
-    dict_of: None
+    dict_of: None,
+    ev_of: None
   }
   var syms: Map[Int, Sym] = map.empty()
   syms = map.insert(syms, 1, sym("a"))
@@ -4647,7 +4457,8 @@ test "emitted_core carries the test bodies and what they hoisted" {
     mutable: false,
     dlo: 0,
     dhi: 0,
-    dict_of: None
+    dict_of: None,
+    ev_of: None
   }
   var syms: Map[Int, Sym] = map.empty()
   syms = map.insert(syms, 1, sym("a", ti))

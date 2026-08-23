@@ -1,7 +1,16 @@
-# checker.dawn: a labelled closure at the three assignability doors, and the
-# two shapes that show what the door is really weighing -- not the label the
-# closure was written under, but what running it will actually do
-# (docs/effects-soundness-design.md §4.2).
+# checker.dawn: a labelled closure at the three assignability doors.
+#
+# **Third rewrite of this file, and the direction is back to `!Ask` for the
+# opposite reason.** #188 recorded `!Ask` because a labelled closure had not
+# yet been settled against anything; the settlement batch then recorded `!io`
+# for the two handled shapes, because a closure was charged with the arms of
+# the handler in scope where it was written. Now it is `!Ask` again, and not
+# because nothing has answered yet: because nothing ever answers at a closure's
+# creation point. The label is the closure's, and the handler is the caller's.
+#
+# What the door weighs is therefore the closure's own row and nothing else,
+# which is the same sentence the file always carried -- it is the second half,
+# "what running it will actually do", that stopped being knowable here.
 use std/io
 
 pub effect Ask { fn get() -> Int }
@@ -25,15 +34,25 @@ pub fn via_assign() -> Int !Ask = {
 }
 
 # The same escape, but the handler is written here rather than owed to a
-# caller. The arms are pure, so the closure is pure and the door is open: it
-# was never refused for having a label, it was refused for what the label stood
-# for, and here it stands for nothing.
+# caller. The arm being pure no longer makes the closure pure: this handler
+# answers the raises that happen inside its own region, and running the
+# returned closure happens outside it. So the door is shut, and the return type
+# as written is wrong -- the honest one is `fn() -> Int !Ask`.
 pub fn handled_pure_arm() -> fn() -> Int = {
   with handle Ask { get() => 7 }
   () => get()
 }
 
-# ... and with an io arm the same door is shut again, in the arm's own terms.
+# ... and declaring what it actually is opens it. This is the migration the
+# refusal above asks for, and it is only spellable because a written label in a
+# function type is legal now.
+pub fn handled_pure_arm_declared() -> fn() -> Int !Ask = {
+  with handle Ask { get() => 7 }
+  () => get()
+}
+
+# ... and with an io arm, `g` is `!Ask` too: the arm's io is charged to the
+# body that installed the handler, never to the closure.
 pub fn handled_io_arm() -> Int !io = {
   with handle Ask { get() => {
     io.println("arm")

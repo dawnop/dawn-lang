@@ -96,10 +96,38 @@ pub type TExpr =
   | XStr(parts: List[TStrPart], lo: Int, hi: Int)
 # a local variable / parameter read
   | XLocal(sym: Int, name: String, lo: Int, hi: Int, ty: Ty)
+# **One atom's evidence, out of the evidence the running frame itself holds.**
+#
+# The checker resolves evidence lexically, and a lexical hit can be outside the
+# closure that needs it: an operation raised inside a lambda names a `with
+# handle` or a hidden parameter that belongs to an enclosing frame. Under rule
+# 乙 that was an ordinary capture. It is not one any more -- evidence never
+# joins a capture list (`resolve_local`) -- so the closure reads its own
+# evidence slot instead, and this node is the checker saying which atom.
+#
+# It carries a key rather than a symbol because what answers it is decided one
+# layer down, by which kind of frame is running: a named function has a slot
+# per atom and `lower.ev_slot` hands back that slot, a lifted closure has one
+# pack and hands back `ev_get(pack, key)` for a label or the pack itself for a
+# non-ground atom (`types.ev_pack_adt`). The symbol that was resolved would
+# name neither.
+  | XEvRead(key: Int, lo: Int, hi: Int, ty: Ty)
 # a top-level fn / builtin used as a value (type already instantiated)
   | XFnValue(owner: Option[String], name: String, is_builtin: Bool, ty: Ty, lo: Int, hi: Int)
-# a call of a local function value (dynamic target)
-  | XCallDyn(sym: Int, name: String, args: List[TExpr], lo: Int, hi: Int, ty: Ty)
+# a call of a local function value (dynamic target). `evidence` is the one
+# pack every function value takes (`types.fn_arity`), built by
+# `checker.evidence_pack` from the callee value's row -- empty only on an
+# error path, where lowering falls back to the empty pack rather than
+# emitting a call one argument short.
+  | XCallDyn(
+    sym: Int,
+    name: String,
+    args: List[TExpr],
+    evidence: List[TExpr],
+    lo: Int,
+    hi: Int,
+    ty: Ty
+  )
 # a builtin call
   | XCallBuiltin(name: String, args: List[TExpr], witnesses: List[WitRef], lo: Int, hi: Int, ty: Ty)
 # a call of a user/std function, resolved to its defining module; a trait
@@ -118,8 +146,19 @@ pub type TExpr =
     hi: Int,
     ty: Ty
   )
-# applying a non-name callee (pipe into lambda, fn-typed field)
-  | XApply(target: TExpr, args: List[TExpr], lo: Int, hi: Int, ty: Ty)
+# applying a non-name callee (pipe into lambda, fn-typed field). `evidence`
+# is XCallDyn's, for the same reason and with the same shape; an operation
+# call is the one site that fills it with something other than a pack built
+# from a row -- the arm's slot is a field read off the evidence record
+# (`checker.check_call`, and the `env` field at `types.ev_pack_adt`).
+  | XApply(
+    target: TExpr,
+    args: List[TExpr],
+    evidence: List[TExpr],
+    lo: Int,
+    hi: Int,
+    ty: Ty
+  )
   | XJava(call: TJavaCall, lo: Int, hi: Int, ty: Ty)
   | XLambda(
     params: List[Int],
@@ -302,11 +341,12 @@ pub fn x_lo(e: TExpr) -> Int =
     XUnit(lo, _) -> lo
     XStr(_, lo, _) -> lo
     XLocal(_, _, lo, _, _) -> lo
+    XEvRead(_, lo, _, _) -> lo
     XFnValue(_, _, _, _, lo, _) -> lo
-    XCallDyn(_, _, _, lo, _, _) -> lo
+    XCallDyn(_, _, _, _, lo, _, _) -> lo
     XCallBuiltin(_, _, _, lo, _, _) -> lo
     XCallFn(_, _, _, _, _, _, lo, _, _) -> lo
-    XApply(_, _, lo, _, _) -> lo
+    XApply(_, _, _, lo, _, _) -> lo
     XJava(_, lo, _, _) -> lo
     XLambda(_, _, _, _, lo, _, _) -> lo
     XCtor(_, _, _, _, _, lo, _, _) -> lo
@@ -340,11 +380,12 @@ pub fn x_hi(e: TExpr) -> Int =
     XUnit(_, hi) -> hi
     XStr(_, _, hi) -> hi
     XLocal(_, _, _, hi, _) -> hi
+    XEvRead(_, _, hi, _) -> hi
     XFnValue(_, _, _, _, _, hi) -> hi
-    XCallDyn(_, _, _, _, hi, _) -> hi
+    XCallDyn(_, _, _, _, _, hi, _) -> hi
     XCallBuiltin(_, _, _, _, hi, _) -> hi
     XCallFn(_, _, _, _, _, _, _, hi, _) -> hi
-    XApply(_, _, _, hi, _) -> hi
+    XApply(_, _, _, _, hi, _) -> hi
     XJava(_, _, hi, _) -> hi
     XLambda(_, _, _, _, _, hi, _) -> hi
     XCtor(_, _, _, _, _, _, hi, _) -> hi
@@ -379,11 +420,12 @@ pub fn tex_ty(e: TExpr) -> Ty =
     XUnit(_, _) -> TyUnit
     XStr(_, _, _) -> TyString
     XLocal(_, _, _, _, ty) -> ty
+    XEvRead(_, _, _, ty) -> ty
     XFnValue(_, _, _, ty, _, _) -> ty
-    XCallDyn(_, _, _, _, _, ty) -> ty
+    XCallDyn(_, _, _, _, _, _, ty) -> ty
     XCallBuiltin(_, _, _, _, _, ty) -> ty
     XCallFn(_, _, _, _, _, _, _, _, ty) -> ty
-    XApply(_, _, _, _, ty) -> ty
+    XApply(_, _, _, _, _, ty) -> ty
     XJava(_, _, _, ty) -> ty
     XLambda(_, _, _, _, _, _, ty) -> ty
     XCtor(_, _, _, _, _, _, _, ty) -> ty

@@ -17,12 +17,19 @@ fn inner_ten() -> Int !Ask = {
   ask() + ask()
 }
 
-# a closure built inside the handled region keeps that handler after the
-# region ends -- there is no stack to unwind, so nothing to invalidate. Its
-# type says what running it will do rather than what it was written under: the
-# handler here has a pure arm, so the escaped closure is pure, and the caller
-# owes nothing (docs/effects-soundness-design.md §4.2)
-fn escaping() -> fn() -> Int = {
+# a closure built inside the handled region does NOT keep that handler after
+# the region ends. Which handler answers is still decided where the call is
+# written -- `ask()` here is the operation of `Ask` and nothing else -- but the
+# evidence arrives with the call rather than being welded in at the closure's
+# creation point, so the row says `!Ask` and the caller supplies it. The arm
+# written here answers the raises that happen inside the region, and this
+# closure's raise happens outside it: `ask() => 7` is unreachable from `f`.
+#
+# This is the flip. It used to read "keeps that handler after the region ends
+# -- there is no stack to unwind, so nothing to invalidate", and the escaped
+# closure was pure because the arm was; a caller could not tell that it was
+# holding somebody else's handler, which is the D2 leak.
+fn escaping() -> fn() -> Int !Ask = {
   with handle Ask { ask() => 7 }
   () => ask() + 1
 }
@@ -48,6 +55,8 @@ pub fn main() -> Unit !io = {
   io.println("${sum_three()}")
   io.println("${shifted([1, 2, 3])}")
   io.println("${total([1, 2, 3])}")
+  # `f` raises !Ask, and the handler in scope *here* is the one that answers:
+  # 2 + 1, not 7 + 1
   let f = escaping()
   io.println("${f()}")
   io.println("${f() + sum_three()}")

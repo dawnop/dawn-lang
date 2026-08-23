@@ -1,0 +1,76 @@
+# checker.dawn: a closure's row is *not* rewritten where the closure is
+# created. The label rides out with it and the call that runs it supplies the
+# evidence, so the four shapes below -- which used to differ by whose handler
+# had answered -- now all say the same thing, and say it about the closure
+# rather than about the handler.
+#
+# This file was `effect_settle`, and it tested the opposite rule: a handler
+# written in the same body was subtracted from the closure's row and its arms
+# charged instead. The three shapes it turned on (the arm's own effects, an
+# inner handler shadowing an outer, a label with a second source) are kept
+# verbatim, because the point of keeping them is that none of them is a
+# distinction any more.
+use std/io
+
+pub effect Ask { fn get() -> Int }
+
+pub type Box = { f: fn() -> Int }
+
+# The handler's arm does io. Under settlement `g` was charged with the arm --
+# `fn() -> Int !io` -- because running `g` really would print. Now `g` is
+# `fn() -> Int !Ask` and printing is not `g`'s business: which arm answers is
+# decided by whoever calls `g`, and here that is the line below, under this
+# handler, so it does still print. What changed is what the *type* claims.
+pub fn io_arm() -> Int !io = {
+  with handle Ask { get() => {
+    io.println("arm")
+    8
+  } }
+  let g: fn() -> Int = () => get()
+  g()
+}
+
+# Two handlers, and it no longer matters which one `get()` "resolved to": the
+# closure names the operation and carries the label, and the innermost handler
+# in scope at the *call* answers. Same row either way.
+pub fn nested() -> Int !io = {
+  with handle Ask { get() => 1 }
+  with handle Ask { get() => {
+    io.println("inner")
+    2
+  } }
+  let g: fn() -> Int = () => get()
+  g()
+}
+
+# Two sources for one label was the shape that made settlement conservative:
+# `k` answered to `mixed`'s hidden evidence and the bare `get()` to the handler,
+# so the label had to stay. There is nothing to be conservative about -- no
+# closure loses a label -- and the answer is the same for a reason that no
+# longer needs a second case.
+pub fn mixed() -> Int !Ask = {
+  let k = () => get()
+  with handle Ask { get() => 2 }
+  let m: fn() -> Int = () => k() + get()
+  m()
+}
+
+# The counterexample that decided where settlement's criterion hung: `m`
+# resolves no evidence of its own, it only calls `k`. A criterion that asked
+# the row at the closure's exit would have found the handler above in scope and
+# settled `m` to pure. There is no criterion and no exit question: `m` calls
+# something that raises `Ask`, so `m` raises `Ask`.
+pub fn p2() -> Box !Ask = {
+  let k = () => get()
+  with handle Ask { get() => 2 }
+  let m = () => k()
+  Box { f: m }
+}
+
+# ... and the supply side, which is the half that used not to exist. A `!Ask`
+# closure in a pure field is refused above; a `!Ask` closure *called* where
+# nothing answers is refused here, at the call, by name.
+pub fn unsupplied() -> Int = {
+  let k = () => get()
+  k()
+}

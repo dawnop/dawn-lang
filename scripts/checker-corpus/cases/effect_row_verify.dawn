@@ -1,18 +1,23 @@
 # checker.dawn: a signature is held to the whole row, not just its base
 # (docs/effects-soundness-design.md §4.3). The label axis used to be left out
-# on the grounds that it answers for itself at the raise site -- which it does,
-# but only for calls that name their callee. A call through a function value
-# never resolves evidence, so nothing checked it.
+# on the grounds that it answers for itself at the raise site -- which it did,
+# but only for calls that named their callee.
+#
+# A call through a function value resolves evidence now, so there are two
+# checks rather than one and they meet: the call site says "nobody is handling
+# this" about the row it is calling, and the signature check holds the body's
+# whole row to what was declared. The shapes below are the same shapes; what
+# moved is which of the two catches each one.
 use std/io
 
 pub effect Leak { fn leak() -> Int }
 
 fn raises() -> Int !Leak = leak()
 
-# The reason there is nothing left for the check to catch: a labelled function
-# cannot become a function value in the first place, so a labelled row cannot
-# reach a dynamic call in a body that never declared the label. Take this
-# refusal away and the row check is what stops the program instead.
+# The refusal is gone, so this is exactly the shape the check exists for: a
+# labelled function *is* a function value, its row reaches a dynamic call, and
+# the body never declared the label. The call is what reports, and it names the
+# effect.
 pub fn as_value() -> Int = {
   let g = raises
   g()
@@ -29,9 +34,11 @@ fn fwd(f: fn() -> Int !e) -> Int !e = {
 
 pub type Thunk = { run: fn() -> Int }
 
-# e9: the forwarder's own handler no longer takes anything off the closure's
-# row, because the closure was settled where it was built -- under the io arm
-# below. `Thunk.run` is pure, and the thunk is not.
+# e9: the forwarder's own handler takes nothing off the closure's row, and now
+# for the simplest possible reason -- no handler takes anything off any
+# closure's row. The closure raises `Leak` and says so; `Thunk.run` is pure,
+# and the thunk is not. (The row it is refused with used to be `!io`, borrowed
+# from the arm the closure had been settled against.)
 pub fn launder() -> Thunk !io = {
   with handle Leak { leak() => {
     io.println("io arm")
@@ -40,9 +47,9 @@ pub fn launder() -> Thunk !io = {
   Thunk { run: () => fwd(() => leak()) }
 }
 
-# e15, and the half that must keep working: the closure answers to `middle`'s
-# own evidence, `!e` instantiates to `!Leak`, and `middle` declares it. The row
-# is not laundered on the way through `fwd` -- it is reported as what it is.
+# e15, and the half that must keep working: `!e` instantiates to `!Leak`,
+# `middle` declares it, and the pack `fwd` is handed is built out of `middle`'s
+# own hidden slot. The row is not laundered on the way through `fwd`.
 pub fn middle() -> Int !Leak = fwd(() => leak())
 
 # ... and the same call from a body that declares nothing is refused, with the

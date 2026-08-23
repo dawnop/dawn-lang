@@ -31,7 +31,7 @@ use front/ast.{
   EHandle, HandlerArm, DEffect, EffectDeclR, EffectOp, module_effects
 }
 use check/tast.{
-  TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
+  TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn,
   XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError, tex_ty,
@@ -48,7 +48,7 @@ use check/types.{
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes,
   eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, eff_assocs, eff_map_assocs,
-  erased_ev_ty, sig_abi_eff, label_key, EV_PACK_ID, ev_pack_ty,
+  erased_ev_ty, sig_abi_eff, label_key, var_key, assoc_key, atom_keys, EV_PACK_ID, ev_pack_ty,
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -112,7 +112,15 @@ pub fn declare(cx: Cx, name: String, ty: Ty, mutable: Bool, lo: Int, hi: Int) ->
   }
   cx1 = alias_shadow(cx1, name, lo, hi)
   let (cx2, id) = fresh(cx1)
-  let sym = Sym { name: name, ty: ty, mutable: mutable, dlo: lo, dhi: hi, dict_of: None }
+  let sym = Sym {
+    name: name,
+    ty: ty,
+    mutable: mutable,
+    dlo: lo,
+    dhi: hi,
+    dict_of: None,
+    ev_of: None
+  }
   var cx3 = Cx { ..cx2, syms: map.insert(cx2.syms, id, sym) }
   if name != "_" {
     let inner2 = map.insert(cx3.frame.scopes[len(cx3.frame.scopes) - 1], name, id)
@@ -164,45 +172,20 @@ pub fn record_effect(cx: Cx, e: Eff, lo: Int, hi: Int, name: String) -> Cx = {
   }
 }
 
-## Where a label reaching the innermost closure got its evidence
-## (docs/effects-soundness-design.md §4.2). `settled` means a `with handle`
-## written inside the function this closure is being built in answered it, so
-## the closure can be charged with that handler's arms instead of the label.
-## `unsettled` means the evidence belongs to somebody else -- the signature's
-## hidden parameter, a function value, an instantiated effect variable -- and
-## the label has to ride out with the closure.
+## **Where a label's evidence comes from is no longer a question the closure
+## asks.** `mark_settled` / `mark_unsettled` / `mark_unsettled_labels` /
+## `with_top_lambda` and the `LambdaCx.settled` / `.unsettled` fields they wrote
+## lived here, and they answered one question: had a `with handle` written
+## inside this body answered the label, so that the closure being built could be
+## charged with that handler's arms instead of the label itself.
 ##
-## Outside any lambda both are no-ops: the row is the function's own, and
-## `verify_effects` holds it to the signature rather than settling it.
-fn mark_settled(cx: Cx, eid: Int, arm_eff: Eff) -> Cx =
-  with_top_lambda(cx, lc => LambdaCx { ..lc, settled: lc.settled ++ [(eid, arm_eff)] })
-
-fn mark_unsettled(cx: Cx, eid: Int) -> Cx =
-  with_top_lambda(cx, lc =>
-      if list.contains(lc.unsettled, eid) { lc } else {
-        LambdaCx { ..lc, unsettled: lc.unsettled ++ [eid] }
-      })
-
-## Every label in `e` arrived through evidence this closure did not resolve --
-## a function value's row, or an effect variable instantiated at a call. The
-## three call sites are the three ways a labelled row is charged to a body
-## without `evidence_args` ever running (design §4.2).
-fn mark_unsettled_labels(cx: Cx, e: Eff) -> Cx = {
-  var cx1 = cx
-  for l in eff_labels(e) {
-    let (eid, _) = l
-    cx1 = mark_unsettled(cx1, eid)
-  }
-  cx1
-}
-
-fn with_top_lambda(cx: Cx, f: fn(LambdaCx) -> LambdaCx) -> Cx = {
-  let stack = cx.frame.lambda_stack
-  let n = len(stack)
-  if n == 0 { return cx }
-  let outer = list.take(stack, n - 1)
-  Cx { ..cx, frame: Frame { ..cx.frame, lambda_stack: outer ++ [f(stack[n - 1])] } }
-}
+## Nothing settles a closure's row now. A closure does not capture the evidence
+## it was created under, so there is no creation-point fact to record: the label
+## stays in the row, rides out with the closure, and is answered at the call
+## that runs it. Subtraction moved to the one place that also supplies --
+## `check_handle`'s remainder call, whose pack is the handler and whose
+## `eff_minus` is the label coming off (docs/effects-soundness-design.md §4.2 is
+## the argument this replaces, not one it refines).
 
 ## The name of the local that carries an effect's evidence. It is minted from
 ## the id, not just the name, so two modules declaring the same effect name
@@ -236,6 +219,83 @@ pub fn ev_var_local_name(vid: Int) -> String = "ev\$v\$" ++ to_string(vid)
 ## variable named `Ask`, which is never what the author meant, so it reports.
 pub fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) =
   resolve_eff_at(cx, atoms, 0, 0)
+
+# ---- evidence in scope ----
+
+## Declare an evidence binding: an ordinary local, plus the atom key that makes
+## it evidence (`types.Sym.ev_of`). The two declarers are `bind_evidence` (a
+## signature's hidden slots) and `check_handle` (a `with handle`'s record), and
+## between them they are the only way an evidence name ever enters a scope.
+fn declare_evidence(cx: Cx, name: String, ty: Ty, key: Int, lo: Int, hi: Int) -> (Cx, Int) = {
+  let (cx1, sid) = declare(cx, name, ty, false, lo, hi)
+  let sym = sym_of(cx1, sid)
+  (Cx { ..cx1, syms: map.insert(cx1.syms, sid, Sym { ..sym, ev_of: Some(key) }) }, sid)
+}
+
+## Was `name` found outside the innermost closure being checked?
+##
+## `resolve_local` asks the same question and answers it by capturing; this asks
+## it about an evidence name, which does not capture, so the answer has to come
+## back as a value. One extra scope walk per evidence resolution, which is per
+## raise rather than per expression.
+fn ev_crossed(cx: Cx, name: String) -> Bool = {
+  var i = len(cx.frame.scopes) - 1
+  while i >= 0 {
+    if map.has(cx.frame.scopes[i], name) {
+      for lc in cx.frame.lambda_stack {
+        if i < lc.boundary { return true }
+      }
+      return false
+    }
+    i = i - 1
+  }
+  false
+}
+
+## One atom's evidence as an expression, from wherever the frame being checked
+## can reach it. `None` means nothing answers it and the caller decides what to
+## say about that.
+##
+## Three outcomes, and the middle one is the flip:
+##
+##   * found in this frame -- a hidden parameter of the signature being checked,
+##     or a `with handle` in the same closure -- and it is an ordinary local
+##     read;
+##   * found **outside** this closure. Rule 乙 captured it; now the label stays
+##     in this closure's row and the call that runs the closure supplies the
+##     evidence, so the read is off this frame's own pack (`XEvRead`);
+##   * not found at all. Inside a closure that is not an error either, and for
+##     the same reason: the row carries the label out and the call site owes it.
+##     `effect_row_verify`'s `as_value` is exactly this case, and it used to be
+##     a refusal.
+##
+## Outside every closure a miss really is a miss: a named function's evidence
+## can only come from its own signature, and there is no pack to read.
+fn ev_expr(
+  cx: Cx,
+  name: String,
+  key: Int,
+  ty: Ty,
+  lo: Int,
+  hi: Int
+) -> (Cx, Option[TExpr]) = {
+  let crossed = ev_crossed(cx, name)
+  let (cx1, found) = resolve_local(cx, name, lo, hi, false)
+  match found {
+    Some(sid) ->
+      if crossed {
+        (cx1, Some(XEvRead(key, lo, hi, ty)))
+      } else {
+        (cx1, Some(XLocal(sid, name, lo, hi, ty)))
+      }
+    None ->
+      if len(cx1.frame.lambda_stack) > 0 {
+        (cx1, Some(XEvRead(key, lo, hi, ty)))
+      } else {
+        (cx1, None)
+      }
+  }
+}
 
 # ---- type resolution ----
 
@@ -1773,9 +1833,7 @@ test "loop jumps respect lambda boundaries" {
         expected_ret: None,
         captures: [],
         sugar: false,
-        arm: false,
-        settled: [],
-        unsettled: []
+        arm: false
       }]
     }
   }
@@ -2989,7 +3047,6 @@ fn no_lparams() -> List[LambdaParam] = []
 pub fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let empty_d: Map[(Int, Int), Int] = map.empty()
-  let empty_h: Map[Int, Eff] = map.empty()
   let fresh_scope: Map[String, Int] = map.empty()
   (Cx {
     ..cx,
@@ -3003,7 +3060,6 @@ pub fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
       dict_syms: empty_d,
       lambda_stack: [],
       loop_stack: [],
-      handle_evs: empty_h,
       isolated: true
     }
   }, cx.frame)
@@ -3030,7 +3086,7 @@ pub fn leave_isolated(cx: Cx, frame: Frame, what: String, blo: Int, bhi: Int) ->
   Cx { ..cx1, frame: frame }
 }
 
-test "an isolated context reports its own effects, then restores all nine fields" {
+test "an isolated context reports its own effects, then restores all eight fields" {
   var cx = test_cx()
   # The outer frame this enters an isolated context from. Every field differs
   # from what `enter_isolated` installs, including the ones the body then
@@ -3044,7 +3100,6 @@ test "an isolated context reports its own effects, then restores all nine fields
   let outer_wit: Map[Eff, (Int, Int, String)] =
     map.insert(map.empty(), EIo, (1, 2, "outer_io"))
   let outer_dicts: Map[(Int, Int), Int] = map.insert(map.empty(), (900, EQ_ID), 77)
-  let outer_hevs: Map[Int, Eff] = map.insert(map.empty(), 55, EIo)
   cx = Cx {
     ..cx,
     frame: Frame {
@@ -3062,11 +3117,9 @@ test "an isolated context reports its own effects, then restores all nine fields
       }),
       dict_syms: outer_dicts,
       lambda_stack: [LambdaCx {
-        boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false,
-        settled: [], unsettled: []
+        boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false
       }],
       loop_stack: [7],
-      handle_evs: outer_hevs,
       isolated: false
     }
   }
@@ -3080,7 +3133,6 @@ test "an isolated context reports its own effects, then restores all nine fields
   assert map.get(cx1.frame.dict_syms, (900, EQ_ID)) == None
   assert len(cx1.frame.lambda_stack) == 0
   assert len(cx1.frame.loop_stack) == 0
-  assert map.get(cx1.frame.handle_evs, 55) == None
   assert cx1.frame.isolated
   # the body records io of its own, at its own span, and that is what is reported
   let cx2 = record_effect(cx1, EIo, 5, 8, "println")
@@ -3088,7 +3140,10 @@ test "an isolated context reports its own effects, then restores all nine fields
   assert len(cx3.diags) == 1
   assert cx3.diags[0].msg == "const initializers must be pure, but `println` is !io"
   assert cx3.diags[0].lo == 5
-  # ... and every one of the nine fields comes back as the outer context left it
+  # ... and every one of the eight fields comes back as the outer context left
+  # it. It was nine: `handle_evs` mapped a `with handle`'s evidence symbol to
+  # its arms' effects, which settlement read to decide whether a closure could
+  # drop the label. Nothing settles, so the map has no reader and no field.
   assert map.get(cx3.frame.scopes[0], "outer") == Some(61)
   assert cx3.frame.used_effects == [EffVar("outer_e", 42)]
   assert map.get(cx3.frame.eff_witness, EIo) == Some((1, 2, "outer_io"))
@@ -3101,7 +3156,6 @@ test "an isolated context reports its own effects, then restores all nine fields
   assert len(cx3.frame.lambda_stack) == 1
   assert cx3.frame.lambda_stack[0].boundary == 3
   assert cx3.frame.loop_stack == [7]
-  assert map.get(cx3.frame.handle_evs, 55) == Some(EIo)
   assert not cx3.frame.isolated
 }
 
@@ -3250,21 +3304,22 @@ pub fn check_fn_value(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
-  # A declared effect is served by a hidden parameter, and a function value
-  # has nowhere to put one: the wrapper is a lambda, and a lambda captures its
-  # evidence at the point it is written. A synthesised wrapper would capture
-  # whatever handler is in scope *here*, which is not what the call site of a
-  # function value means, so the language asks for the lambda. Trait bounds
-  # used to be refused alongside this and are not: a dictionary is settled by
-  # the type, and the type is what an expected function type supplies.
-  if len(eff_labels(f.eff)) > 0 {
+  # A declared effect used to be refused here: a function value's wrapper is a
+  # lambda, a lambda captured its evidence where it was written, and a
+  # synthesised wrapper would have captured whatever handler was in scope at
+  # the *mention* rather than at the call. It does not capture any more --
+  # `lower.lift_fn_value` unpacks the pack its caller hands over -- so `let g =
+  # raises` is an ordinary function value of type `fn() -> Int !Leak` and the
+  # call site owes the evidence.
+  #
+  # **An operation is still refused, and for a reason the label never was.**
+  # `ask` names no function: an operation call is a field read off a handler's
+  # record plus a closure call (`check_call`), so there is nothing for a
+  # wrapper to call. The refusal that remains is about the missing callee, not
+  # about the row, and it says so.
+  if f.op_of != None {
     let ps2 = join(f.param_names, ", ")
-    let what = match f.op_of {
-      Some(_) -> "effect operation `" ++ name ++ "`"
-      None -> "`" ++ name ++ "`"
-    }
-    return (cerr_h(cx, what ++ " raises !" ++ eff_show(eff_with_labels(EPure, eff_labels(f.eff))) ++
-        " and cannot be used as a value", lo, hi,
+    return (cerr_h(cx, "effect operation `" ++ name ++ "` cannot be used as a value", lo, hi,
       "wrap it in a lambda: (" ++ ps2 ++ ") => " ++ name ++ "(" ++ ps2 ++ ")"),
       TyError, XError(lo, hi))
   }
@@ -3374,9 +3429,7 @@ fn eta_bounded_fn_value(
     expected_ret: None,
     captures: [],
     sugar: false,
-    arm: false,
-    settled: [],
-    unsettled: []
+    arm: false
   }
   var cx1 = Cx {
     ..cx,
@@ -3420,8 +3473,11 @@ fn eta_bounded_fn_value(
   let outer = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1)
   cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, lambda_stack: outer } }
   if not ok { return (cx1, TyError, XError(lo, hi)) }
-  # No evidence: a label was refused at the top of `check_fn_value`, so the
-  # only effect that reaches here is the one the wrapper's own type carries.
+  # The eta wrapper's own body is a *named* call, so the evidence it owes is
+  # per atom of the callee's ABI row, not one pack. A bounded function value
+  # with a labelled row would need that list built here; none exists (a bound
+  # and a label have never met in one signature in this tree), and building it
+  # blind would be a second, untested copy of `check_call`'s evidence block.
   let evid: List[TExpr] = []
   let body =
     if f.is_builtin {
@@ -4443,6 +4499,22 @@ fn is_java_node(x: TExpr) -> Bool =
 ## Find a name in the scope stack with lambda-capture bookkeeping (the Kotlin
 ## resolveLocal): a hit below a lambda boundary is captured by value into every
 ## crossing lambda; `var` bindings refuse to cross, and assignment never does.
+##
+## **Evidence is the one kind of name that crosses without being captured**
+## (`Sym.ev_of`). Rule 乙 was exactly this line: a `with handle`'s record and a
+## signature's hidden slots are ordinary locals, so an operation raised inside a
+## lambda welded the handler in scope at the lambda's *creation* point into its
+## capture list, and the closure kept answering to that handler wherever it was
+## later run. Severing it here is the whole semantic flip: the label stays in
+## the closure's row, so the call that runs the closure owes the evidence, and
+## the closure reads it out of its own pack (`ev_expr`, `tast.XEvRead`).
+##
+## The test is the symbol's flag rather than its name because there are three
+## spellings (`ev_local_name`, `ev_var_local_name`, `ev_assoc_local_name`) and
+## a fourth would be caught by nothing. It is placed on the capture arm and not
+## at the top so that a `var` refusal and an assignment refusal still read the
+## same for an evidence name -- neither can happen, since nothing can name one,
+## but the arm that is skipped should be exactly the arm that is wrong.
 pub fn resolve_local(
   cx: Cx,
   name: String,
@@ -4466,6 +4538,9 @@ pub fn resolve_local(
             } else if sym.mutable {
               let (msg, hint) = capture_var_msg(lc)
               cx1 = cerr_h(cx1, msg, lo, hi, hint)
+              stack = stack ++ [lc]
+            } else if sym.ev_of != None {
+              # evidence does not join a capture list -- see the note above
               stack = stack ++ [lc]
             } else {
               var caps = lc.captures
@@ -4597,56 +4672,19 @@ fn check_unsafe_pure(cx: Cx, body: Expr, expected: Option[Ty], lo: Int, hi: Int)
 
 # ---- lambdas and application ----
 
-## The union of the arm effects of every handler in this closure that answered
-## `eid`. Two entries for one effect is an ordinary shape -- a body may install
-## a handler, raise, install a second one and raise again -- and the closure
-## runs whichever arm each raise reached, so it owes both.
-fn settled_arm_eff(settled: List[(Int, Eff)], eid: Int) -> Option[Eff] = {
-  var found = false
-  var acc: List[Eff] = []
-  for s in settled {
-    let (sid, ae) = s
-    if sid == eid {
-      found = true
-      acc = acc ++ [ae]
-    }
-  }
-  if found { Some(eff_union(acc)) } else { None }
-}
-
-## A closure's row, settled at its creation point
-## (docs/effects-soundness-design.md §4.2).
+## `settled_arm_eff` and `settle_lambda_eff` stood here: a closure's row,
+## rewritten at its creation point, with a label answered by a `with handle` in
+## the same body swapped for that handler's arm effects. Their argument was that
+## the subtraction and the capture happened at the same node, so the label could
+## not be charged to the wrong function.
 ##
-## A label answered by a `with handle` written in the same body comes off the
-## row and that handler's arms go on instead: the arms are fields of the
-## evidence record the closure captured, so they run when the closure runs, and
-## the closure's type should say so. A label with any other source stays --
-## including one that *also* has a local handler, because the other source is
-## still answered by somebody else's arms when the closure runs. Over-keeping a
-## label is always safe; dropping one that a signature never admitted is the
-## defect this exists to close.
-##
-## This is the only place in the language where an effect row loses a member,
-## and it is the point where the evidence was captured. That the subtraction
-## and the capture happen at the same node is the whole argument that it cannot
-## be charged to the wrong function.
-fn settle_lambda_eff(lam_eff: Eff, lc: LambdaCx) -> Eff = {
-  var keep: List[(Int, String)] = []
-  var extra: List[Eff] = []
-  for l in eff_labels(lam_eff) {
-    let (eid, _) = l
-    match settled_arm_eff(lc.settled, eid) {
-      Some(ae) ->
-        if list.contains(lc.unsettled, eid) {
-          keep = keep ++ [l]
-        } else {
-          extra = extra ++ [ae]
-        }
-      None -> { keep = keep ++ [l] }
-    }
-  }
-  eff_union([eff_with_labels(eff_base(lam_eff), keep)] ++ extra)
-}
+## There is no capture to happen at the same node any more. A closure's row is
+## whatever its body raised, full stop; the label leaves it at the call that
+## supplies the evidence, which is `check_handle`'s remainder call and nowhere
+## else. What used to be "this closure was built under a pure arm, so it is
+## pure" is now "this closure raises !Ask, and whoever runs it says which
+## handler answers" -- a different program with a different transcript
+## (scripts/spike-native/effect_lexical.expect), and the point of the knife.
 
 fn check_lambda(
   cx: Cx,
@@ -4733,9 +4771,7 @@ fn check_lambda(
       expected_ret: exp_ret,
       captures: [],
       sugar: sugar,
-      arm: arm,
-      settled: [],
-      unsettled: []
+      arm: arm
     }
   cx1 = Cx {
     ..cx1,
@@ -4762,7 +4798,10 @@ fn check_lambda(
   let popped = cx3.frame.lambda_stack[len(cx3.frame.lambda_stack) - 1]
   let outer_lams = list.take(cx3.frame.lambda_stack, len(cx3.frame.lambda_stack) - 1)
   cx3 = Cx { ..cx3, frame: Frame { ..cx3.frame, lambda_stack: outer_lams } }
-  let lam_eff = settle_lambda_eff(eff_union(cx3.frame.used_effects), popped)
+  # the closure's row is what its body raised, unrewritten: nothing this body
+  # resolved can take a label off, because nothing this body resolved is
+  # travelling with the closure
+  let lam_eff = eff_union(cx3.frame.used_effects)
   cx3 = Cx { ..cx3, frame: Frame { ..cx3.frame, used_effects: saved_used, eff_witness: saved_wit } }
   let t = TyFn(ptys, bt, lam_eff)
   (cx3, t, XLambda(psyms, pnames, bx, popped.captures, lo, hi, t))
@@ -4777,20 +4816,30 @@ fn fn_ty_parts(t: Ty) -> (List[Ty], Ty, Eff) =
 ## `with handle E { op(..) => ... }` and the rest of its block
 ## (docs/effects-design.md §3.3 and §4.3).
 ##
-## Two things happen here and nowhere else. The arms are checked *before* the
-## evidence is bound, so an arm raising the effect it answers reaches the outer
-## handler rather than itself (§4.4). And the evidence is an ordinary local
-## under an unspellable name, so the remainder closure captures it the way it
-## captures anything else -- which is the whole of what makes a closure that
-## escapes the block keep answering to this handler.
+## Three things happen here and nowhere else.
 ##
-## A third used to: the block was charged with the remainder's effects *minus*
-## E. It is not, and E does not need taking off -- the remainder closure was
-## settled when it was built, against this very handler, because the evidence is
-## bound before the remainder is checked. Subtracting here was subtracting in
-## the consuming half of a thing whose producing half is the capture, which is
-## how a closure over one handler's evidence could have its label taken off by a
-## different one (docs/effects-soundness-design.md §4.2).
+## The arms are checked *before* the evidence is bound, so an arm raising the
+## effect it answers reaches the outer handler rather than itself (§4.4).
+##
+## The remainder is a closure, and **this** is the call that runs it -- so this
+## is the call that supplies its evidence: a pack of `E`'s record consed over
+## whatever else is in scope. That is why the block is charged with the
+## remainder's effects *minus* E again. Subtraction and supply are the same
+## call now, and being the same call is the whole argument: a label can only be
+## taken off a row by the site that answered it, so it cannot be taken off by a
+## handler that did not.
+##
+## (The comment here used to argue the opposite, and it was right about the
+## code it described: while the remainder *captured* the evidence, subtracting
+## here would have been subtracting in the consuming half of a thing whose
+## producing half was the capture, and a closure over one handler's evidence
+## could have had its label taken off by a different one. There is no capture
+## to be the producing half of any more.)
+##
+## And the record gets one more field than the effect declared operations: the
+## environment the arms will run in (`passes.dawn`'s `env`). An arm is a
+## closure, so it has exactly one evidence slot, and what goes in it is decided
+## here rather than at the raise site.
 fn check_handle(
   cx: Cx,
   name: String,
@@ -4813,9 +4862,12 @@ fn check_handle(
     None -> {
       cx1 = cerr_o(cx1, "unknown effect `" ++ name ++ "`", nlo, nhi,
         suggest.hint(name, map.keys(cx1.effects)))
-      let (cxr, rt, rx) = check_expr(cx1, rest, rest_expected(expected))
-      let (_, rret, _) = fn_ty_parts(rt)
-      return (cxr, rret, XApply(rx, [], lo, hi, rret))
+      var cxr0 = cx1
+      let (cxr, rt, rx) = check_expr(cxr0, rest, rest_expected(expected))
+      cxr0 = cxr
+      let (_, rret, reff0) = fn_ty_parts(rt)
+      let (cxr1, revs0, _) = evidence_pack(cxr0, reff0, false, lo, hi)
+      return (cxr1, rret, XApply(rx, [], [revs0], lo, hi, rret))
     }
   }
   let info = effect_of(cx1, eid)
@@ -4894,25 +4946,41 @@ fn check_handle(
     slots = slots ++ [Some(k)]
     k = k + 1
   }
+  # **The environment the arms run in**, snapshotted here, before `E`'s own
+  # evidence is bound -- an arm does not answer itself, and this is the same
+  # `before` that the arms were checked in. What the arms need is what they
+  # raise, so the row to pack is `arms_eff`. It reports nothing: an arm raising
+  # something unanswerable already said so, inside the arm.
+  let (cx1b, arm_env, _) = evidence_pack(cx1, arms_eff, false, lo, hi)
+  cx1 = cx1b
   let ev_ty = TyAdt(eid, [])
-  let ev_node = XCtor(eid, 0, arm_nodes, slots, no_expr(), lo, hi, ev_ty)
+  let ev_node = XCtor(eid, 0, arm_nodes ++ [arm_env], slots ++ [Some(len(slots))],
+    no_expr(), lo, hi, ev_ty)
   # the evidence is in scope for the remainder only, which is exactly the
   # region `handle` claims
   cx1 = push_scope(cx1)
   let ev_name = ev_local_name(cx1, eid)
-  let (cx2, ev_sym) = declare(cx1, ev_name, ev_ty, false, nlo, nhi)
-  cx1 = Cx {
-    ..cx2,
-    frame: Frame { ..cx2.frame, handle_evs: map.insert(cx2.frame.handle_evs, ev_sym, arms_eff) }
-  }
+  let (cx2, ev_sym) = declare_evidence(cx1, ev_name, ev_ty, label_key(eid), nlo, nhi)
+  cx1 = cx2
   let (cx3, rt, rx) = check_expr(cx1, rest, rest_expected(expected))
-  cx1 = pop_scope(cx3)
+  cx1 = cx3
   let (_, rret, reff) = fn_ty_parts(rt)
-  cx1 = record_effect(cx1, reff, lo, hi, "the block after `with handle`")
-  let call = XApply(rx, [], lo, hi, rret)
+  # the pack the remainder is run with: built while `E`'s record is still in
+  # scope, because it is the thing being handed over
+  let (cx4, revs, _) = evidence_pack(cx1, reff, false, lo, hi)
+  cx1 = pop_scope(cx4)
+  # ... and the block is charged with what the remainder does *minus* E, which
+  # this very call just answered
+  cx1 = record_effect(cx1, eff_minus(reff, eid), lo, hi, "the block after `with handle`")
+  let call = XApply(rx, [], [revs], lo, hi, rret)
   (cx1, rret,
     XBlock([TSLet(Some(ev_sym), ev_name, ev_node, lo, hi)], Some(call), lo, hi, rret))
 }
+
+## A row without one label. `eff_drop` takes a list; this is its one-label
+## caller, and it exists so that the subtraction `with handle` performs is
+## spelled where the supply is rather than folded into a list literal.
+fn eff_minus(e: Eff, eid: Int) -> Eff = eff_drop(e, [eid])
 
 fn no_arm() -> Option[HandlerArm] = None
 
@@ -5177,9 +5245,16 @@ fn check_apply(
       txs = pre_txs
     }
   }
-  cx1 = record_effect(cx1, feff, e_lo(target), e_hi(target), "the applied function")
-  cx1 = mark_unsettled_labels(cx1, feff)
-  (cx1, fret, XApply(fx, txs, lo, hi, fret))
+  # **The call is the supply point.** A function value's row is answered here,
+  # not where the closure was written, so this is where the pack is built and
+  # where a label nothing can answer is reported. What went unanswered comes
+  # out of the row this body is charged with, exactly as `check_call` does for
+  # a named callee: one failure, one diagnostic.
+  let (cxe, evs, unanswered) = dyn_evidence_args(cx1, feff, e_lo(target), e_hi(target))
+  cx1 = cxe
+  cx1 = record_effect(cx1, eff_drop(feff, unanswered), e_lo(target), e_hi(target),
+    "the applied function")
+  (cx1, fret, XApply(fx, txs, evs, lo, hi, fret))
 }
 
 # ---- blocks and statements ----
@@ -5716,9 +5791,12 @@ fn check_call(
         txs = txs ++ [ax]
         i = i + 1
       }
-      cx1 = record_effect(cx1, leff, clo, chi, callee)
-      cx1 = mark_unsettled_labels(cx1, leff)
-      return (cx1, lret, XCallDyn(sid, callee, txs, lo, hi, lret))
+      # the supply point for a call through a local holding a function value;
+      # see `check_apply` for why the row is answered here
+      let (cxe, evs, unanswered) = dyn_evidence_args(cx1, leff, clo, chi)
+      cx1 = cxe
+      cx1 = record_effect(cx1, eff_drop(leff, unanswered), clo, chi, callee)
+      return (cx1, lret, XCallDyn(sid, callee, txs, evs, lo, hi, lret))
     }
     None -> ()
   }
@@ -6085,16 +6163,19 @@ fn check_call(
     }
   }
   # the evidence the callee's *written* labels need, in effect-id order. A
-  # label that arrived by instantiating an effect variable is not here on
-  # purpose: that effect belongs to a closure the caller handed over, and the
-  # closure carries its own evidence in its captures (design §5.2 step 4).
+  # label that arrived by instantiating an effect variable is not here: it
+  # belongs to the variable's own slot, which `evidence_var_args` fills with a
+  # pack of that instance. (It used to be left out on the different grounds
+  # that the closure the caller handed over carried its own evidence in its
+  # captures -- rule 乙, which is what this knife severed. Same list, and now
+  # for the reason the layout already said.)
   # the callee's ABI row, which is its declared row plus the effect variables
   # it binds -- the same list `bind_evidence` walked on the other side
   let callee_abi = sig_abi_eff(s)
   let (cxv, evs0, unanswered) = evidence_args(cx1, callee_abi, clo, chi)
   cx1 = cxv
   # ... one per effect variable, behind them (rule 丁) ...
-  let (cxv2, vevs) = evidence_var_args(cx1, callee_abi, em, clo, chi)
+  let (cxv2, vevs, vunanswered) = evidence_var_args(cx1, callee_abi, em, clo, chi)
   cx1 = cxv2
   # ... and one per projection written in the row, behind those (rule 丙)
   let (cxa2, aevs, aunanswered, adropped) = evidence_assoc_args(cx1, callee_abi, m, clo, chi)
@@ -6105,19 +6186,13 @@ fn check_call(
   # raise site's words; leaving the label in the body's row would have
   # `verify_effects` say the same thing over again at the signature.
   cx1 = record_effect(cx1,
-    eff_drop_assocs(eff_drop(callee_eff, unanswered ++ aunanswered), adropped),
+    eff_drop_assocs(eff_drop(callee_eff, unanswered ++ vunanswered ++ aunanswered), adropped),
     clo, chi, callee)
-  # A label the callee *wrote* has just been settled or unsettled from what its
-  # evidence resolved to. One that arrived by instantiating an effect variable
-  # has no evidence to resolve here at all -- it belongs to a closure the caller
-  # handed over (design §5.2 step 4), so nothing in this body can discharge it
-  # from a closure's row.
-  # The "written" side includes what the projections reduced to: a label a
-  # projection produced was just settled or unsettled by its own evidence
-  # lookup above, so only labels that arrived by instantiating an effect
-  # variable stay in the complement.
-  cx1 = mark_unsettled_labels(cx1, eff_with_labels(EPure,
-    instantiated_labels(reduce_eff(cx1, s.eff, m), callee_eff)))
+  # Nothing further to record about where the labels came from. That question
+  # -- written here, or brought in by instantiating an effect variable -- was
+  # asked so that a closure being built could drop the ones it had answered
+  # itself; no closure drops anything now, so `instantiated_labels` and the
+  # `mark_unsettled_labels` call that consumed it went with it.
   let node = if s.is_builtin {
     XCallBuiltin(callee, txs2, wits, lo, hi, ret)
   } else {
@@ -6127,7 +6202,17 @@ fn check_call(
       Some(pr) -> {
         let (eid, idx) = pr
         let recv = if len(evs) == 1 { evs[0] } else { XError(lo, hi) }
-        XApply(XField(recv, idx, clo, chi, TyFn(s.param_tys, s.ret, EPure)), txs2, lo, hi, ret)
+        # **The arm's evidence is the handler's, not this raise site's.** An arm
+        # runs where the handler was installed, so the pack it gets is the one
+        # `check_handle` stored in the record's trailing `env` field -- the last
+        # field, behind every operation (`passes.dawn`). Handing over this
+        # frame's environment instead would answer an arm's own raises out of
+        # the scope that raised, which is the outer-handler rule backwards
+        # (`scripts/spike-native/effect_lexical.dawn`'s `inner_ten`).
+        let env_idx = len(adt_of(cx1.adts, eid).ctors[0].fields) - 1
+        let env = XField(recv, env_idx, clo, chi, erased_ev_ty())
+        XApply(XField(recv, idx, clo, chi, TyFn(s.param_tys, s.ret, EPure)), txs2,
+          [env], lo, hi, ret)
       }
       None -> XCallFn(s.owner, callee, txs2, wits, evs, s.trait_id, lo, hi, ret)
     }
@@ -6145,24 +6230,6 @@ fn check_call(
 ## walk is what used to drop `EUnion` on the floor, so a callee declared
 ## `!(e1|e2)` handed its own variables to its caller and no pure call site was
 ## accepted (audit SEM-02).
-## The labels in an instantiated row that the callee did not write down: the
-## ones an effect variable brought in. `evidence_args` answers for the written
-## ones and only those, so this is exactly its complement.
-fn instantiated_labels(declared: Eff, instantiated: Eff) -> List[(Int, String)] = {
-  let written = eff_labels(declared)
-  var out: List[(Int, String)] = []
-  for l in eff_labels(instantiated) {
-    let (eid, _) = l
-    var seen = false
-    for w in written {
-      let (wid, _) = w
-      if wid == eid { seen = true }
-    }
-    if not seen { out = out ++ [l] }
-  }
-  out
-}
-
 fn instantiate_eff(e: Eff, em: Map[Int, Eff]) -> Eff = {
   var em1 = em
   for v in eff_vars(e) {
@@ -6201,47 +6268,52 @@ fn evidence_args(cx: Cx, declared: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr], L
 ## does: what fills the slot is `evidence_pack` of the row the variable was
 ## instantiated with.
 ##
-## Unlike its two neighbours this one never reports. A projection with nothing
-## to answer it is a signature that forgot to declare `!C.E`; an effect
-## variable instantiated with a label nobody handles is not diagnosed *here*
-## and must not be, because nothing reads a pack yet -- see `evidence_pack`.
+## This used to be the one of the three that never reported, on the grounds
+## that nothing read a pack. Something reads it now, so instantiating `!e :=
+## !Ask` where no `Ask` is in scope is the "nobody is handling this" error, at
+## this call -- and like its two neighbours it hands the unanswered labels back
+## so the caller can take them out of the row it charges. Reporting without
+## withdrawing would say the same thing twice, once here and once at the
+## signature.
 fn evidence_var_args(
   cx: Cx,
   declared: Eff,
   em: Map[Int, Eff],
   lo: Int,
   hi: Int
-) -> (Cx, List[TExpr]) = {
+) -> (Cx, List[TExpr], List[Int]) = {
   var cx1 = cx
   var out: List[TExpr] = []
+  var unanswered: List[Int] = []
   for v in eff_vars(declared) {
     let (vid, _) = v
     let inst = match map.get(em, vid) {
       Some(e) -> e
       None -> EPure
     }
-    let (cx2, slot) = evidence_pack(cx1, inst, lo, hi)
+    let (cx2, slot, un) = evidence_pack(cx1, inst, true, lo, hi)
     cx1 = cx2
     out = out ++ [slot]
+    unanswered = unanswered ++ un
   }
-  (cx1, out)
+  (cx1, out, unanswered)
 }
 
-## The evidence pack for a row an effect variable was instantiated with: a
-## **scope**, not a transcript.
+## The evidence pack for a row: a **scope**, not a transcript.
 ##
-## The rule (design §2), and it is the same one `lower.ev_pack` answers on the
-## function-value side -- one build rule, two layers, because a named callee's
-## variable slot and a function value's single slot carry the same thing:
+## One build rule, and every call site that hands a pack over uses it -- a
+## named callee's variable slot (`evidence_var_args`), a call through a
+## function value, the remainder of a `with handle`, the environment an arm
+## runs in. It is the whole of the design's §2:
 ##
 ##   * the **ground** atoms of the row -- its written labels -- become one
 ##     `ev$Pack{key, evidence, outer}` node each, keyed by `types.label_key`;
 ##   * they are consed **over the environment this frame already holds** for
-##     the row's non-ground atoms (an effect variable, a rigid projection),
-##     each of which has its own hidden parameter here;
+##     the row's non-ground atoms (an effect variable, a rigid projection);
 ##   * no ground atom and exactly one non-ground atom means the pack **is**
-##     that slot: identity, no node. This is the case the deleted
-##     `len(eff_vars(inst)) == 1` branch used to be the whole of.
+##     that environment: identity, no node, no allocation. Every effect-
+##     polymorphic signature in std is this case, which is why the convention
+##     costs std nothing.
 ##
 ## The forwarded environment is the **tail**, spliced, not a node of its own.
 ## `!Ask !e2` into an `!e` slot is one node over the caller's `e2` slot, not
@@ -6250,30 +6322,27 @@ fn evidence_var_args(
 ##
 ## A superset is safe. Lookup is by key, so a node nobody asks for is a step in
 ## a walk and nothing else; only a *missing* key is a fault. That is what lets
-## the tail be an environment rather than a filtered copy of it.
+## the tail be an environment rather than a filtered copy of it, and it is the
+## one step of the argument that is not obviously true.
 ##
-## **Nothing reports here, and nothing may.** A ground label with no evidence
-## in scope takes the placeholder as that node's payload and is silent. Under
-## this knife a closure still carries the evidence it was created under (rule
-## 乙), so a packed value is never consulted and a diagnostic here would be a
-## verdict on a value nobody reads. The reporting surface arrives with the
-## semantic flip, when readers do -- and it arrives at
-## `resolve_label_evidence`, which already says "nobody is handling this" for
-## the two neighbours. For the same reason the resolution here goes through
-## bare `resolve_local` rather than through `resolve_label_evidence`: the
-## latter settles or unsettles the label it found, and settlement decides what
-## the caller is charged with.
+## **Two or more non-ground atoms keep the empty pack as the tail**, and that
+## is now a real limitation rather than a deferred one. A row like `!(e1|e2)`
+## has two environments to splice and one field to splice them into; merging
+## two chains is not a cons, it is a walk-and-rebuild, and the only thing that
+## could do it is a second runtime primitive. The consequence is bounded and
+## loud rather than silent: the pack is short, so a reader asking for a key
+## that lived in the dropped environment gets `ev_get`'s compiler-invariant
+## panic (`types.EV_MISS_MSG`), never another atom's evidence. Nothing in the
+## tree reaches it -- all 20 effect-polymorphic signatures in std are lone `!e`
+## -- and closing it belongs to whoever needs it, with an `ev_append`.
 ##
-## Two or more non-ground atoms keep the placeholder as the tail. A row like
-## `!(e1|e2)` has two environments to splice and one field to splice them
-## into, and merging two chains is not a cons -- that is the knife that starts
-## reading packs, not this one. It is narrower than the branch it replaces in
-## exactly one shape, `!e1 !C.E`, which the old test counted as one variable
-## and forwarded; a tail that is short by an atom and a tail that is short by
-## a chain are the same open question, and answering half of it here would be
-## the invented semantics. Today both are invisible: nothing reads, so a short
-## tail computes what a long one does.
-fn evidence_pack(cx: Cx, inst: Eff, lo: Int, hi: Int) -> (Cx, TExpr) = {
+## `report` is the difference between a demand and a snapshot. A call site
+## demanding a row it cannot answer is the "nobody is handling this" error, at
+## the call -- the reporting surface the flip moves here from the raise site.
+## The environment stored in a handler's `env` field is a snapshot of what is
+## in scope, and reports nothing: whatever the arms raise was already resolved,
+## and reported on, inside the arms themselves.
+fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExpr, List[Int]) = {
   var cx1 = cx
   let ground = eff_labels(inst)
   let vs = eff_vars(inst)
@@ -6282,60 +6351,82 @@ fn evidence_pack(cx: Cx, inst: Eff, lo: Int, hi: Int) -> (Cx, TExpr) = {
   # there is exactly one of them; otherwise the empty pack
   var tail: TExpr = XUnit(lo, hi)
   if len(vs) + len(asx) == 1 {
-    let nm = if len(vs) == 1 {
+    let (nm, key) = if len(vs) == 1 {
       let (svid, _) = vs[0]
-      ev_var_local_name(svid)
+      (ev_var_local_name(svid), var_key(svid))
     } else {
       let (_, av, at2, an) = asx[0]
-      ev_assoc_local_name(av, at2, an)
+      (ev_assoc_local_name(av, at2, an), assoc_key(at2))
     }
-    let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
+    let (cxa, found) = ev_expr(cx1, nm, key, erased_ev_ty(), lo, hi)
     cx1 = cxa
     match found {
-      Some(sid) -> { tail = XLocal(sid, nm, lo, hi, erased_ev_ty()) }
+      Some(tx) -> { tail = tx }
       None -> ()
     }
   }
   var acc = tail
+  var unanswered: List[Int] = []
   for l in ground {
     let (eid, _) = l
-    let nm = ev_local_name(cx1, eid)
-    let (cxb, found) = resolve_local(cx1, nm, lo, hi, false)
+    let (cxb, ev) =
+      if report {
+        let (cxr, tx, answered) = resolve_label_evidence(cx1, eid, lo, hi)
+        if not answered { unanswered = unanswered ++ [eid] }
+        (cxr, tx)
+      } else {
+        let nm = ev_local_name(cx1, eid)
+        let (cxs, found) = ev_expr(cx1, nm, label_key(eid), TyAdt(eid, []), lo, hi)
+        (cxs, match found {
+          Some(tx) -> tx
+          None -> XUnit(lo, hi)
+        })
+      }
     cx1 = cxb
-    let ev = match found {
-      Some(sid) -> XLocal(sid, nm, lo, hi, TyAdt(eid, []))
-      None -> XUnit(lo, hi)
-    }
     acc = XCtor(EV_PACK_ID, 0,
       [XInt(label_key(eid), lo, hi), ev, acc],
       [Some(0), Some(1), Some(2)], no_expr(), lo, hi, ev_pack_ty())
   }
-  (cx1, acc)
+  (cx1, acc, unanswered)
+}
+
+## The pack a call through a function **value** hands over, plus whatever the
+## row's ground labels had to say about being unanswered.
+##
+## `types.fn_arity` says a function value takes exactly one evidence argument
+## whatever its row, so this answers a one-element list and there is no second
+## place that number is derived. The unanswered labels come back so the caller
+## can take them out of the row it charges, exactly as `check_call` does for a
+## named callee: one failure, one diagnostic.
+fn dyn_evidence_args(cx: Cx, feff: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr], List[Int]) = {
+  let (cx1, pack, unanswered) = evidence_pack(cx, feff, true, lo, hi)
+  (cx1, [pack], unanswered)
 }
 
 ## One label's evidence out of the lexical environment -- the shared half of
-## `evidence_args` (a written label) and `evidence_assoc_args` (a projection
-## that reduced to one). Answers the expression and whether anyone answered.
+## `evidence_args` (a written label), `evidence_assoc_args` (a projection that
+## reduced to one) and `evidence_pack` (a ground atom of a row being packed).
+## Answers the expression and whether anyone answered.
+##
+## It used to record, on the innermost closure, whether the hit was a `with
+## handle` in this very body or a hidden parameter of the signature -- the
+## distinction settlement was built on (docs/effects-soundness-design.md §4.2,
+## and the p2 counterexample its long comment argued from). Nothing settles, so
+## nothing asks: the label is charged either way and rides out with the row.
+##
+## What is new is the third outcome. Inside a closure, nothing in scope is not
+## a failure: the label stays in the closure's row, and the call that runs the
+## closure supplies the evidence (`ev_expr`). "Nobody is handling this" is
+## still reported here, but for a named callee's own row and only outside every
+## closure -- inside one it is reported at the call site instead, which is
+## where a reader could actually name the call that went unanswered.
 fn resolve_label_evidence(cx: Cx, eid: Int, lo: Int, hi: Int) -> (Cx, TExpr, Bool) = {
   var cx1 = cx
   let nm = ev_local_name(cx1, eid)
-  let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
+  let (cxa, found) = ev_expr(cx1, nm, label_key(eid), TyAdt(eid, []), lo, hi)
   cx1 = cxa
   match found {
-    Some(sid) -> {
-      # the one place the language resolves evidence, and therefore the one
-      # place that knows whose handler answered: a `with handle` in this very
-      # body can be settled out of an enclosing closure's row, a hidden
-      # parameter of the signature cannot (docs/effects-soundness-design.md
-      # §4.2). Asking the row after the fact instead would settle a label
-      # whose evidence came from the signature and happens to share a name
-      # with a local handler -- the p2 counterexample in §5.3.
-      cx1 = match map.get(cx1.frame.handle_evs, sid) {
-        Some(arm_eff) -> mark_settled(cx1, eid, arm_eff)
-        None -> mark_unsettled(cx1, eid)
-      }
-      (cx1, XLocal(sid, nm, lo, hi, TyAdt(eid, [])), true)
-    }
+    Some(tx) -> (cx1, tx, true)
     None -> {
       # inside comptime the refusal belongs to `leave_isolated`, which says
       # what the construct is; saying "declare it" there would be advice
@@ -6387,10 +6478,10 @@ fn evidence_assoc_args(
     } else if len(ras) > 0 {
       let (s2, v2, t2, n2) = ras[0]
       let nm = ev_assoc_local_name(v2, t2, n2)
-      let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
+      let (cxa, found) = ev_expr(cx1, nm, assoc_key(t2), erased_ev_ty(), lo, hi)
       cx1 = cxa
       match found {
-        Some(sid) -> { out = out ++ [XLocal(sid, nm, lo, hi, erased_ev_ty())] }
+        Some(tx) -> { out = out ++ [tx] }
         None -> {
           if not cx1.frame.isolated {
             cx1 = cerr_h(cx1, "the effect `" ++ s2 ++ "." ++ n2 ++
@@ -7841,9 +7932,11 @@ fn check_method_call(
                 txs = txs ++ [ax]
                 ai = ai + 1
               }
-              cx1 = record_effect(cx1, feff, nlo, nhi, name)
-              cx1 = mark_unsettled_labels(cx1, feff)
-              return (cx1, fret, XApply(fx, txs, lo, hi, fret))
+              # ... and for a call through an fn-typed field
+              let (cxe, evs, unanswered) = dyn_evidence_args(cx1, feff, nlo, nhi)
+              cx1 = cxe
+              cx1 = record_effect(cx1, eff_drop(feff, unanswered), nlo, nhi, name)
+              return (cx1, fret, XApply(fx, txs, evs, lo, hi, fret))
             }
             _ -> ()
           }
@@ -8715,7 +8808,8 @@ fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
             mutable: false,
             dlo: nlo,
             dhi: nhi,
-            dict_of: Some((tr_id, vid))
+            dict_of: Some((tr_id, vid)),
+            ev_of: None
           }
           cx1 = Cx {
             ..cx2,
@@ -8807,10 +8901,14 @@ fn enter_fn(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
 }
 
 ## Bind one hidden evidence parameter per declared effect in the signature, in
-## effect-id order (docs/effects-design.md §5.2 step 1). They are ordinary
-## locals under an unspellable name, so an operation call inside a lambda
-## reaches them through the same capture bookkeeping every other local uses --
-## which is the whole of what makes an escaping closure keep its handler.
+## effect-id order (docs/effects-design.md §5.2 step 1). They are locals under
+## an unspellable name, flagged as evidence (`Sym.ev_of`) so that they are the
+## one kind of local a lambda reaches **without** capturing.
+##
+## That clause used to end "-- which is the whole of what makes an escaping
+## closure keep its handler". It was, and that is the sentence the flip
+## falsifies: an escaping closure keeps its *label*, and the handler is whoever
+## the eventual caller has installed.
 fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
   var cx1 = cx
   # the ABI row, not the declared one: a signature that binds `!e` in a
@@ -8818,7 +8916,8 @@ fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
   let abi = sig_abi_eff(s)
   for l in eff_labels(abi) {
     let (eid, _) = l
-    let (cx2, _) = declare(cx1, ev_local_name(cx1, eid), TyAdt(eid, []), false, nlo, nhi)
+    let (cx2, _) =
+      declare_evidence(cx1, ev_local_name(cx1, eid), TyAdt(eid, []), label_key(eid), nlo, nhi)
     cx1 = cx2
   }
   # one erased slot per effect variable written in the row, between the
@@ -8827,7 +8926,8 @@ fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
   # decided by the caller's instantiation, so the callee can only forward it.
   for v in eff_vars(abi) {
     let (vid, _) = v
-    let (cx2, _) = declare(cx1, ev_var_local_name(vid), erased_ev_ty(), false, nlo, nhi)
+    let (cx2, _) =
+      declare_evidence(cx1, ev_var_local_name(vid), erased_ev_ty(), var_key(vid), nlo, nhi)
     cx1 = cx2
   }
   # one erased slot per projection written in the row, behind the labels'
@@ -8836,8 +8936,8 @@ fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
   # exactly what an erased local is good for.
   for a in eff_assocs(abi) {
     let (_, vid, tid, n) = a
-    let (cx2, _) = declare(cx1, ev_assoc_local_name(vid, tid, n), erased_ev_ty(), false,
-      nlo, nhi)
+    let (cx2, _) = declare_evidence(cx1, ev_assoc_local_name(vid, tid, n), erased_ev_ty(),
+      assoc_key(tid), nlo, nhi)
     cx1 = cx2
   }
   cx1
@@ -8887,13 +8987,20 @@ fn verify_effects(
   var cx1 = cx
   for used in cx.frame.used_effects {
     # Both axes, not just the base. A label used to be left out on the grounds
-    # that it answers for itself -- `evidence_args` reports a raise with nothing
-    # in scope to handle it, at the raise site. That covers the calls that go
-    # through `evidence_args`, which is to say calls to functions named at the
-    # call site; a call through a function *value* never touches it, and the
-    # label went unchecked (docs/effects-soundness-design.md §4.3). The two do
-    # not overlap now: the raise-site report takes its label out of the row it
-    # charges, so this can hold the whole row to the signature.
+    # that it answers for itself at the raise site, and that only ever covered
+    # calls that named their callee: a call through a function *value* resolved
+    # no evidence at all, so its label went unchecked
+    # (docs/effects-soundness-design.md §4.3).
+    #
+    # Every call resolves evidence now -- a dynamic one through
+    # `dyn_evidence_args`, a named one through `evidence_args` and
+    # `evidence_var_args` -- so the reporting surface is wider than it was and
+    # this check's job is narrower in what it is the *only* catcher of. It is
+    # not narrower in what it holds. The two still do not overlap, for the same
+    # reason as before and now at three sites rather than one: whatever reports
+    # "nobody is handling this" hands the label back to be withdrawn from the
+    # row it charges, so what reaches here is exactly the labels that found
+    # evidence, and those are the ones a signature must admit.
     if not eff_subsumes(declared, used) {
       let (wlo, whi, wname) = match map.get(cx.frame.eff_witness, used) {
         Some(w) -> w
@@ -9254,8 +9361,18 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   cx1 = pass_imports(cx1, m, env)
   let (cxa, shells) = pass_type_shells(cx1, m)
   cx1 = cxa
-  cx1 = pass_ctor_fields(cx1, m, shells)
+  # **Effects before ctor fields.** A record field or a variant field may name
+  # a declared effect now (`fn() -> Int !Ask` is a legal field type since the
+  # written-label refusal went), and `resolve_eff_at` can only tell a label
+  # from an effect variable by looking the name up. The two passes are
+  # independent in the other direction: `pass_effects` resolves its operations'
+  # parameter and return types, which need type *shells* and never a field.
+  #
+  # It costs an id shift in one shape and nothing anywhere else: both mint from
+  # `Cx.next_id`, so a module that declares an effect *and* a type declaration
+  # binding `[!e]` numbers the two the other way round than it used to.
   cx1 = pass_effects(cx1, m)
+  cx1 = pass_ctor_fields(cx1, m, shells)
   cx1 = pass_resolve_aliases(cx1)
   cx1 = pass_register_traits(cx1, m)
   let (cxb, impl_sigs) = pass_register_impls(cx1, m, shells)
@@ -9842,13 +9959,14 @@ test "check_module: a type declaration refuses the effect names it did not bind"
   assert len(p5) == 0
   let (cx5, _) = check_module(test_cx(), m5, env)
   assert len(cx5.diags) == 0
-  # a label is refused with or without the binder, and says which name it is
+  # a label is not refused at all: a written label means the caller supplies
+  # the handler, which is how evidence travels now. It needs no binder either
+  # -- a label is not a variable, so the parameter list has nothing to say
   let (m6, p6) = parser.parse_module(
     "effect Ask { fn get() -> Int }\nalias F3[!e] = fn(Int) -> Int !Ask\n")
   assert len(p6) == 0
   let (cx6, _) = check_module(test_cx(), m6, env)
-  assert len(cx6.diags) == 1
-  assert cx6.diags[0].msg == "a type declaration cannot name the effect `Ask`"
+  assert len(cx6.diags) == 0
   # a concrete !io in the same positions stays legal
   let (m4, p4) = parser.parse_module(
     "pub type Cb = { f: fn(Int) -> Int !io }\nalias G = fn(Int) -> Int !io\n")
@@ -10093,11 +10211,14 @@ test "the row loses E at the handle node, and only there" {
 }
 
 test "an arm raising its own effect reaches the outer handler" {
-  # no outer handler: the arm owes the label like any other body
+  # no outer handler: the arm owes the label like any other body. It is the
+  # signature that reports rather than the raise, because the raise is inside
+  # a closure -- the arm -- and a closure carries its label out to whoever
+  # runs it. `f` installs the handler, so `f` is who runs it.
   let cx = eff_check("fn f() -> Int = {\n" ++
       "  with handle Ask { ask() => ask() + 1 }\n  2\n}\n")
   assert len(cx.diags) == 1
-  assert str.contains(cx.diags[0].msg, "uses the effect `Ask`")
+  assert cx.diags[0].msg == "function `f` is not declared !Ask but calls `ask` (!Ask)"
   # with one, the arm binds to it
   let cx2 = eff_check("fn f() -> Int = {\n" ++
       "  with handle Ask { ask() => 1 }\n" ++
@@ -10166,17 +10287,21 @@ test "the two standing refusals: comptime and type declaration; trait rows carry
     if str.contains(d.msg, "must be pure, but `ask` is !Ask") { saw_ct = true }
   }
   assert saw_ct
-  # a type declaration refuses a label, and says which one -- the parameter list
-  # that lifts the refusal for an effect variable does nothing for a label
-  let (m4, _) = parser.parse_module(base ++ "pub type Box[!e] = { f: fn() -> Int !Ask }\n")
+  # A type declaration takes a label now: `fn() -> Int !Ask` in a field means
+  # whoever calls `f` supplies the handler, which is what evidence does. The
+  # parameter list is beside the point either way -- a label is not a variable
+  # and never needed a binder.
+  let (m4, _) = parser.parse_module(base ++ "type Box[!e] = { f: fn() -> Int !Ask }\n")
   let (cx4, _) = check_module(test_cx(), m4, env)
-  assert cx4.diags[0].msg == "a type declaration cannot name the effect `Ask`"
-  # ... and outside a declaration the label is refused by name, once
+  assert len(cx4.diags) == 0
+  # ... and in a signature the label is accepted too. What it costs is that the
+  # call through the value now owes the evidence, at the call, by name
   let (m5, _) = parser.parse_module(base ++ "fn sink(f: fn() -> Int !Ask) -> Int = f()\n")
   let (cx5, _) = check_module(test_cx(), m5, env)
   assert len(cx5.diags) == 1
-  assert cx5.diags[0].msg == "a function type cannot name the effect `Ask`"
-  assert str.contains(cx5.diags[0].hint, "use an effect variable")
+  assert cx5.diags[0].msg ==
+    "`sink` uses the effect `Ask`, but its signature does not declare !Ask"
+  assert str.contains(cx5.diags[0].hint, "with handle Ask")
   # an effect variable in the same position is what the hint asks for, and it
   # is accepted: the ban is on the spelling that has no meaning, not on taking
   # a closure that raises
@@ -10275,8 +10400,12 @@ test "a trait default body forwards the method's effect variable" {
 }
 
 test "an operation cannot be a value, and unsafe_pure cannot mask a label" {
+  # not for its row -- a labelled *function* is an ordinary function value now
+  # -- but because `ask` names no function at all: an operation call is a field
+  # read off a handler's record plus a closure call, so there is nothing for a
+  # wrapper to call
   let cx = eff_check("fn f() -> Int !Ask = {\n  let g = ask\n  g()\n}\n")
-  assert cx.diags[0].msg == "effect operation `ask` raises !Ask and cannot be used as a value"
+  assert cx.diags[0].msg == "effect operation `ask` cannot be used as a value"
   assert str.contains(cx.diags[0].hint, "wrap it in a lambda")
   # unsafe_pure vouches that io is absent; evidence is not something it can vouch for
   let (m2, p2) = parser.parse_module(eff_src("fn f() -> Int = unsafe_pure { ask() }\n"))
@@ -10314,9 +10443,7 @@ fn arm_cx() -> Cx =
           expected_ret: None,
           captures: [],
           sugar: true,
-          arm: true,
-          settled: [],
-          unsettled: []
+          arm: true
         }]
       }
     }
