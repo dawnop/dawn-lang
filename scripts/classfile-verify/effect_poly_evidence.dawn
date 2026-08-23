@@ -36,7 +36,15 @@
 #                       for the other would be a `CHECKCAST` against the wrong
 #                       class -- a link failure, which is exactly the kind this
 #                       gate is here to catch, and unreachable from any fixture
-#                       that never instantiated a variable with a real row.
+#                       that never instantiated a variable with a real row;
+#   * `merged`       -- two variables in one slot, which is the join
+#                       (`ev_append`) rather than a cons. It reaches this gate
+#                       for the descriptor: the join is an emitted static on
+#                       the pack class, so the call site, the method and the
+#                       constructor it invokes have to agree on three
+#                       descriptors that nothing else in the tree spells. The
+#                       *answers* are pinned elsewhere -- this gate never runs
+#                       the corpus -- by scripts/spike-native/effect_two_vars.
 #
 # Run: dawn run scripts/classfile-verify/effect_poly_evidence.dawn
 
@@ -81,6 +89,13 @@ fn raises_ask(n: Int) -> Int !Ask = n + ask()
 ## wrapper passes its written arguments at the instantiated type without boxing
 ## them against the callee's declared one.
 fn two_atoms[T](tag: T, f: fn() -> Int !e) -> Int !Ask !e = f() + ask()
+
+## Two variables meeting in one slot. The tail of this pack is neither the
+## empty placeholder nor a forwarded slot but a join of two of them, and the
+## join is the one evidence primitive that allocates -- an INVOKESTATIC on the
+## pack class, whose descriptor is built from `types.ev_pack_adt` at both ends.
+fn merged(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !e1 !e2 =
+  twice_over(n => n + g() + h(), 0)
 
 trait Wrap[T] {
   fn wrap(t: T, f: fn(Int) -> Int !e) -> Int !e
@@ -127,4 +142,6 @@ pub fn main() -> Unit !io = {
   # order `types.atom_keys` lays them out
   let both: fn(String, fn() -> Int !Tell) -> Int !Ask !Tell = two_atoms
   println(to_string(both("t", () => tell(3))))
+  # `!e := !e1 !e2`, with both halves read through the merged slot
+  println(to_string(merged(() => ask(), () => tell(1))))
 }

@@ -1,0 +1,71 @@
+# Two effect variables meeting in one evidence slot -- the shape the pack
+# convention could not express until `ev_append` existed.
+#
+# `thru` takes one `!e`, and `both` hands it a row made of two: `!e := !e1 !e2`.
+# One slot, two environments, and neither is a written label the caller could
+# cons -- so the pack's tail is a *join* rather than a splice, and the join is
+# the primitive `ev_append` (types.ev_pack_adt). Before it, the checker kept
+# one environment and dropped the rest, and this program panicked with
+# "effect evidence missing" on a body that checks clean.
+#
+# The pure driver is here because it is what made the hole invisible: with
+# `() => 300` in the slot nothing walks the pack, so both trees print the same
+# 307 and every gate stays green. Only a driver that *reads* through the merged
+# slot can tell them apart, which is the whole reason this file exists.
+#
+# `three` is the fold rather than the pair: the tail is
+# `ev_append(e1, ev_append(e2, e3))`, so a join that only ever handled two
+# atoms, or that lost the deepest one, answers wrong here and nowhere else.
+# `over_label` puts a written label back on top of a merged tail, since a cons
+# over a join is the one composition of the two rules.
+use std/io
+
+effect AskE {
+  fn ask() -> Int
+}
+
+effect TellE {
+  fn tell() -> Int
+}
+
+effect NoteE {
+  fn note() -> Int
+}
+
+fn thru(f: fn() -> Int !e) -> Int !e = f()
+
+fn both(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !e1 !e2 =
+  thru(() => g() + h())
+
+fn three(
+  a: fn() -> Int !e1,
+  b: fn() -> Int !e2,
+  c: fn() -> Int !e3
+) -> Int !e1 !e2 !e3 =
+  thru(() => a() + b() + c())
+
+## A ground label consed over a joined tail: the label is a node, the two
+## variables are the chain under it, and a walk has to get through both kinds.
+fn over_label(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !AskE !e1 !e2 =
+  thru(() => g() + h() + ask())
+
+## The lone variable is still the identity forward -- no join, no rebuild --
+## and it goes through the same `thru` so that a change to the fold that also
+## caught this case would show up as a wrong answer somewhere.
+fn one(g: fn() -> Int !e1) -> Int !e1 = thru(() => g() + 1)
+
+pub fn main() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  with handle TellE { tell() => 7 }
+  with handle NoteE { note() => 20 }
+  println("-- two environments in one slot, read through both --")
+  println(to_string(both(() => ask(), () => tell())))
+  println("-- the same call with nothing to read, which was always green --")
+  println(to_string(both(() => 300, () => 7)))
+  println("-- three of them, which is the fold and not the pair --")
+  println(to_string(three(() => ask(), () => tell(), () => note())))
+  println("-- a written label consed over the join --")
+  println(to_string(over_label(() => tell(), () => note())))
+  println("-- and one on its own, forwarded rather than rebuilt --")
+  println(to_string(one(() => ask())))
+}
