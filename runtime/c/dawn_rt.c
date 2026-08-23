@@ -829,23 +829,32 @@ int64_t dawn_int_of_float(double v) {
   return (int64_t)v;
 }
 
-/* The evidence-pack walk; see the header, and `types.ev_pack_adt` for the
- * contract it implements.
+/* Is this a pack node? The shape test both evidence primitives make, and the
+ * whole reason they are runtime calls rather than emitted C.
  *
- * The shape test is three questions and the first one is the whole reason
- * this is not emitted C. `kind` separates a pack node from the boxed Unit
- * placeholder (DAWN_K_BOX) and from a string or a closure that a widened slot
- * might be carrying; the tag and field count then separate it from another
- * record that happens to be an ADT. Only the first is strictly needed today
- * -- a walk meets nothing but pack nodes, the placeholder and NULL -- and the
- * other two are here because "the pack is a scope, not a transcript of a row"
- * means a superset can be handed over, and a cheap check that cannot go wrong
- * is worth more than an argument that it never has to. */
+ * Three questions, and the first one carries it. `kind` separates a pack node
+ * from the boxed Unit placeholder (DAWN_K_BOX) and from a string or a closure
+ * that a widened slot might be carrying; the tag and field count then
+ * separate it from another record that happens to be an ADT. Only the first
+ * is strictly needed today -- a walk meets nothing but pack nodes, the
+ * placeholder and NULL -- and the other two are here because "the pack is a
+ * scope, not a transcript of a row" means a superset can be handed over, and
+ * a cheap check that cannot go wrong is worth more than an argument that it
+ * never has to. */
+static bool dawn_ev_is_node(const void *p) {
+  if (p == NULL || ((const dawn_hdr *)p)->kind != DAWN_K_ADT) {
+    return false;
+  }
+  const dawn_adt *node = (const dawn_adt *)p;
+  return node->tag == DAWN_TAG_EV_PACK && node->nfields == DAWN_EV_PACK_FIELDS;
+}
+
+/* The evidence-pack walk; see the header, and `types.ev_pack_adt` for the
+ * contract it implements. */
 void *dawn_ev_get(void *pack, int64_t key) {
   void *p = pack;
-  while (p != NULL && ((dawn_hdr *)p)->kind == DAWN_K_ADT) {
+  while (dawn_ev_is_node(p)) {
     dawn_adt *node = (dawn_adt *)p;
-    if (node->tag != DAWN_TAG_EV_PACK || node->nfields != DAWN_EV_PACK_FIELDS) break;
     if (node->fields[0].i == key) return node->fields[1].p;
     p = node->fields[2].p;
   }
@@ -855,6 +864,47 @@ void *dawn_ev_get(void *pack, int64_t key) {
   dawn_panic(DAWN_LIT(
       "effect evidence missing: no pack entry for the atom this call site asked for"));
   return NULL; /* unreachable: dawn_panic does not return */
+}
+
+/* The evidence-pack join: `front`'s nodes rebuilt onto `back`, front's order
+ * kept, and `front`'s own terminator dropped rather than copied so that the
+ * result is one flat chain. No miss to have -- an empty `front` is an
+ * ordinary answer (`back` itself), which is why only the lookup panics.
+ *
+ * Written forward with a running `prev` rather than recursively: a node's
+ * `outer` is an ordinary field here, so the loop can patch it, and this is
+ * the one implementation of the three that can avoid the stack.
+ *
+ * OWNERSHIP. Both arguments are BORROWED, like `dawn_ev_get`'s pack; the
+ * result is OWNED, because it is freshly allocated and `rc.dawn` wraps no
+ * intrinsic result -- so the emitter must not dup it, and does not. Every
+ * reference the result reaches is counted for: each copied `ev` payload gets
+ * a dup, the tail gets a dup of `back`, and the fresh nodes are born at rc 1
+ * owned by the node in front of them. Dropping the head therefore releases
+ * exactly what this function retained and nothing that it borrowed. */
+void *dawn_ev_append(void *front, void *back) {
+  if (!dawn_ev_is_node(front)) {
+    return dawn_dup(back);
+  }
+  dawn_adt *head = NULL;
+  dawn_adt *prev = NULL;
+  void *p = front;
+  while (dawn_ev_is_node(p)) {
+    dawn_adt *src = (dawn_adt *)p;
+    dawn_adt *node = dawn_adt_new(DAWN_TAG_EV_PACK, DAWN_EV_PACK_FIELDS, DAWN_EV_PACK_MASK);
+    node->fields[0].i = src->fields[0].i;
+    node->fields[1].p = dawn_dup(src->fields[1].p);
+    node->fields[2].p = NULL;
+    if (prev == NULL) {
+      head = node;
+    } else {
+      prev->fields[2].p = node;
+    }
+    prev = node;
+    p = src->fields[2].p;
+  }
+  prev->fields[2].p = dawn_dup(back);
+  return head;
 }
 
 /* ---- failures, and the two barriers that stop them ----------------------

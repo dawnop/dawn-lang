@@ -2749,6 +2749,16 @@ fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Op
   None
 }
 
+## One field of the evidence-pack node a local slot is standing on. The two
+## pack primitives read nine fields between them and every read is these same
+## three instructions, so the cast that makes the `GETFIELD` legal is written
+## once rather than nine times.
+fn ev_field(g: Gen, cls: String, slot: Int, field: String, desc: String) -> Unit !io = {
+  g.mv.visitVarInsn(OP_ALOAD, slot)
+  g.mv.visitTypeInsn(OP_CHECKCAST, cls)
+  g.mv.visitFieldInsn(OP_GETFIELD, cls, field, desc)
+}
+
 ## Core intrinsics. The names are Core's own vocabulary, which is why some
 ## do not match any TAST builtin: lowering invented `str_of_int`,
 ## `list_index` and friends when it destroyed interpolation and indexing.
@@ -2807,20 +2817,14 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     g1.mv.visitVarInsn(OP_ALOAD, p_slot)
     g1.mv.visitTypeInsn(OP_INSTANCEOF, cls)
     g1.mv.visitJumpInsn(OP_IFEQ, miss)
-    g1.mv.visitVarInsn(OP_ALOAD, p_slot)
-    g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
-    g1.mv.visitFieldInsn(OP_GETFIELD, cls, c.fields[0].name, key_desc)
+    ev_field(g1, cls, p_slot, c.fields[0].name, key_desc)
     g1.mv.visitVarInsn(OP_LLOAD, key_slot)
     g1.mv.visitInsn(OP_LCMP)
     g1.mv.visitJumpInsn(OP_IFNE, step)
-    g1.mv.visitVarInsn(OP_ALOAD, p_slot)
-    g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
-    g1.mv.visitFieldInsn(OP_GETFIELD, cls, c.fields[1].name, ev_desc)
+    ev_field(g1, cls, p_slot, c.fields[1].name, ev_desc)
     g1.mv.visitJumpInsn(OP_GOTO, end)
     g1.mv.visitLabel(step)
-    g1.mv.visitVarInsn(OP_ALOAD, p_slot)
-    g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
-    g1.mv.visitFieldInsn(OP_GETFIELD, cls, c.fields[2].name, ev_desc)
+    ev_field(g1, cls, p_slot, c.fields[2].name, ev_desc)
     g1.mv.visitVarInsn(OP_ASTORE, p_slot)
     g1.mv.visitJumpInsn(OP_GOTO, top)
     # Falling off the end is not a terminator but a broken invariant, so this
@@ -2833,6 +2837,83 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
       "(Ljava/lang/String;)V", false)
     g1.mv.visitInsn(OP_ATHROW)
     g1.mv.visitLabel(end)
+    return (g1, true)
+  }
+  if name == "ev_append" {
+    # Two evidence packs joined, front's entries first (types.ev_pack_adt).
+    # The terminator test is `INSTANCEOF` again, for the reasons the lookup
+    # above gives; what is new is that this one allocates, and a pack node's
+    # fields are final. So the rebuild cannot walk forward patching an `outer`
+    # behind it, the way `dawn_ev_append` does -- it has to build a node's
+    # tail before the node.
+    #
+    # Hence two loops rather than the runtime's one: reverse `front` onto
+    # null, then cons the reversal onto `back`, which puts front's entries
+    # back in front order over back's. The reversal is 2n allocations for an
+    # n-node front, and the alternative -- a static method on the pack class
+    # that recurses -- would put a method into every emitted program's
+    # `ev$Pack`, including the overwhelming majority that never merge two
+    # rows. A chain here is one node per row atom.
+    let c = adt_of(gx.adts, EV_PACK_ID).ctors[0]
+    let cls = ctor_jvm_name(gx.adts, c)
+    let key_desc = desc_of(gx.adts, c.fields[0].ty)
+    let ev_desc = desc_of(gx.adts, c.fields[1].ty)
+    let ctor_desc = "(" ++ key_desc ++ ev_desc ++ ev_desc ++ ")V"
+    var g1 = gen_cargs(gx, g, args)
+    let (ga, back_slot) = alloc(g1, 1)
+    g1 = ga
+    g1.mv.visitVarInsn(OP_ASTORE, back_slot)
+    let (gb, p_slot) = alloc(g1, 1)
+    g1 = gb
+    g1.mv.visitVarInsn(OP_ASTORE, p_slot)
+    let (gc, rev_slot) = alloc(g1, 1)
+    g1 = gc
+    g1.mv.visitInsn(OP_ACONST_NULL)
+    g1.mv.visitVarInsn(OP_ASTORE, rev_slot)
+    let (gd, acc_slot) = alloc(g1, 1)
+    g1 = gd
+    # pass one: front, reversed onto null. Where front stops is where the walk
+    # stops -- and front's own terminator is dropped rather than carried, which
+    # is what keeps the answer one flat chain.
+    let down = Label.new()
+    let down_end = Label.new()
+    g1.mv.visitLabel(down)
+    g1.mv.visitVarInsn(OP_ALOAD, p_slot)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, cls)
+    g1.mv.visitJumpInsn(OP_IFEQ, down_end)
+    g1.mv.visitTypeInsn(OP_NEW, cls)
+    g1.mv.visitInsn(OP_DUP)
+    ev_field(g1, cls, p_slot, c.fields[0].name, key_desc)
+    ev_field(g1, cls, p_slot, c.fields[1].name, ev_desc)
+    g1.mv.visitVarInsn(OP_ALOAD, rev_slot)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", ctor_desc, false)
+    g1.mv.visitVarInsn(OP_ASTORE, rev_slot)
+    ev_field(g1, cls, p_slot, c.fields[2].name, ev_desc)
+    g1.mv.visitVarInsn(OP_ASTORE, p_slot)
+    g1.mv.visitJumpInsn(OP_GOTO, down)
+    g1.mv.visitLabel(down_end)
+    # pass two: the reversal, consed onto back. The result is back when front
+    # held nothing, which is the identity the contract asks for.
+    let up = Label.new()
+    let up_end = Label.new()
+    g1.mv.visitVarInsn(OP_ALOAD, back_slot)
+    g1.mv.visitVarInsn(OP_ASTORE, acc_slot)
+    g1.mv.visitLabel(up)
+    g1.mv.visitVarInsn(OP_ALOAD, rev_slot)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, cls)
+    g1.mv.visitJumpInsn(OP_IFEQ, up_end)
+    g1.mv.visitTypeInsn(OP_NEW, cls)
+    g1.mv.visitInsn(OP_DUP)
+    ev_field(g1, cls, rev_slot, c.fields[0].name, key_desc)
+    ev_field(g1, cls, rev_slot, c.fields[1].name, ev_desc)
+    g1.mv.visitVarInsn(OP_ALOAD, acc_slot)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", ctor_desc, false)
+    g1.mv.visitVarInsn(OP_ASTORE, acc_slot)
+    ev_field(g1, cls, rev_slot, c.fields[2].name, ev_desc)
+    g1.mv.visitVarInsn(OP_ASTORE, rev_slot)
+    g1.mv.visitJumpInsn(OP_GOTO, up)
+    g1.mv.visitLabel(up_end)
+    g1.mv.visitVarInsn(OP_ALOAD, acc_slot)
     return (g1, true)
   }
   if name == "java_eq" {

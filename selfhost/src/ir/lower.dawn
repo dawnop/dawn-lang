@@ -980,6 +980,12 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ##                       walk is a primitive and each backend writes it with
 ##                       the shape test its own representation affords
 ##                       (`types.ev_pack_adt`'s contract says the rest)
+##   ev_append           two evidence packs joined, front's entries first. A
+##                       primitive for the same reason `ev_get` is -- it has
+##                       to know where one chain ends before it can put the
+##                       other there -- and separate from `ev_get` so that the
+##                       cost of a merge lands where the merge is written and
+##                       never on a read
 ##
 ## Not an ADT, though the comment this replaces proposed one. Measured before
 ## deciding: `CIntrinsic` carries a `String` because it also carries the 89
@@ -993,7 +999,7 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 pub fn internal_intrinsics() -> List[String] = [
   "cmp", "hash", "java_eq", "java_hash", "show", "quote",
   "str_of_int", "str_of_bool", "str_of_bytes",
-  "list_index", "list_slice", "null_ref", "ev_get"
+  "list_index", "list_slice", "null_ref", "ev_get", "ev_append"
 ]
 
 # ---- who implements a primitive ----
@@ -1043,10 +1049,10 @@ pub fn inline_intrinsics() -> List[String] = [
   "cmp", "hash", "show", "quote",
   "str_of_int", "str_of_bool", "str_of_bytes",
   "list_index", "list_slice", "null_ref",
-  # the evidence-pack lookup. A loop with a shape test in it, so it is a call
-  # on native and a stretch of bytecode on the JVM, and neither is a thing
-  # Core could have said for both
-  "ev_get",
+  # the evidence-pack lookup, and the join two rows meeting in one slot need.
+  # A loop with a shape test in it, so each is a call on native and emitted
+  # for the JVM, and neither is a thing Core could have said for both
+  "ev_get", "ev_append",
   # neither of these returns, so both are instructions rather than a call
   "panic", "todo",
   # one instruction each: the JVM's L2D and D2L, and native's saturating
@@ -1154,12 +1160,12 @@ test "every intrinsic is owned by a runtime module, written inline, or removed b
   # 3. the sizes the comments above quote. A count written in prose is what
   #    went wrong in `internal_intrinsics`, whose comment gave two different
   #    answers for the same list in the same paragraph.
-  assert len(inline) == 30
+  assert len(inline) == 31
   assert len(host) == 2
   assert len(gone) == 20
-  # and the four groups account for all 106 names, with none left over
+  # and the four groups account for all 107 names, with none left over
   assert len(map.keys(it)) == 93
-  assert len(internal) == 13
+  assert len(internal) == 14
 }
 
 # ---- trait witnesses ----

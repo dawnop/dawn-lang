@@ -736,7 +736,20 @@ int64_t dawn_int_of_float(double v); /* Float -> Int, saturating like D2L */
  * a missing key is a broken compiler invariant, not an answer. */
 #define DAWN_TAG_EV_PACK 0 /* one constructor, so index 0 -- emitc pins it */
 #define DAWN_EV_PACK_FIELDS 3 /* key, ev, outer */
+#define DAWN_EV_PACK_MASK 6 /* fields 1 and 2 are pointers, the key is not */
 void *dawn_ev_get(void *pack, int64_t key);
+
+/* The other half of the pack contract: two packs joined, `front`'s entries
+ * first (`types.ev_pack_adt`). One slot can be handed two rows -- `!e := !e1
+ * !e2` -- and consing is only enough when there is one, so `front`'s chain is
+ * walked and rebuilt onto `back`. `front`'s terminator is dropped rather than
+ * copied, so the chain stays flat and `ev_get` is unchanged by any of it.
+ *
+ * A call for the same reason `ev_get` is: it has to recognise a node, and
+ * that is this file's knowledge. It allocates, which `ev_get` does not, so
+ * the counting rule is worth stating twice -- both arguments are borrowed and
+ * the RESULT IS OWNED. The emitter does not dup it. */
+void *dawn_ev_append(void *front, void *back);
 
 /* Control. The two failure kinds, and the difference is which barrier stops
  * one: `catch_fault` takes a fault (the outside world said no) and lets a panic

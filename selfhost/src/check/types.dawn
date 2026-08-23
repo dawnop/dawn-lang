@@ -1454,6 +1454,26 @@ pub const EV_PACK_ID: Int = -3
 ## placeholder -- the same choice `lower.impl_ev_sources` makes, and for the
 ## same reason: a placeholder used as an evidence record is a crash at a
 ## distance from the bug.
+##
+## **The second walker is `ev_append(front, back)`, and it exists because one
+## slot can be handed two rows.** `!e := !e1 !e2` has two environments to put
+## in one `outer` field, and consing is only enough when there is one: the
+## other would have to be wrapped as a node's payload, which answers no key its
+## own reader asks for. So `front`'s chain is walked and rebuilt -- fresh
+## nodes, the same `key` and `ev` in each, front's order kept -- onto `back`,
+## and `front`'s own terminator is dropped rather than copied. It recognises a
+## node exactly as `ev_get` does, so all four terminators end the rebuild the
+## same way; appending onto an empty `front` is `back` itself.
+##
+## Two properties are worth naming because a reader could reasonably assume
+## either could go the other way. **The chain stays flat**, so `ev_get` is
+## untouched by any of this: still one walk, still no nesting, and the cost of
+## a merge is paid once where the merge is written rather than on every read.
+## And **front wins**: a key in both halves is answered by front's node,
+## because the walk meets it first. Distinct atoms cannot collide -- the bands
+## in `atom_keys` see to that -- so nothing in a checked program depends on the
+## rule; it is defined anyway, since "whichever the rebuild happened to put
+## first" is not something a later reader should have to work out.
 pub fn ev_pack_adt() -> AdtI =
   AdtI {
     id: EV_PACK_ID,

@@ -1601,6 +1601,16 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     # dup is here: rc.dawn wraps no intrinsic result, and every other arm that
     # reads a value out of a structure it borrowed (`expect`) dups too.
     (st1, dup_expr("dawn_ev_get(" ++ a0 ++ ", " ++ cargs[1] ++ ")", ty))
+  } else if name == "ev_append" {
+    # Two packs joined (types.ev_pack_adt), a call for the same reason the
+    # lookup is: it has to recognise a node, and the header's `kind` byte is
+    # the runtime's knowledge.
+    #
+    # No dup, and that is the difference from the arm above. `dawn_ev_append`
+    # allocates its answer, so what it hands back is already owned -- duping
+    # it here would leak the chain, since `rc.dawn` places exactly one release
+    # for the one reference it believes a Core expression produces.
+    (st1, "dawn_ev_append(" ++ a0 ++ ", " ++ cargs[1] ++ ")")
   } else if name == "hash" {
     (st1, scalar_rt("dawn_hash", cex_ty(args[0]), name) ++ "(" ++ a0 ++ ")")
   } else if name == "cmp" {
@@ -2364,25 +2374,43 @@ test "every scalar relation the emitter names is one the runtime defines" {
   assert gaps("dawn_cmp", TyBytes)
 }
 
-test "the evidence-pack walk the emitter calls is the one the runtime has" {
-  # `ev_get` is emitted as a call by name, so a runtime that spells it
-  # differently is an undefined reference in the *user's* native build -- the
-  # same failure mode the test above exists for. Both files travel together in
-  # `rtsrc`, so both halves of the joint are readable from here.
+test "the evidence-pack primitives the emitter calls are the ones the runtime has" {
+  # `ev_get` and `ev_append` are emitted as calls by name, so a runtime that
+  # spells either differently is an undefined reference in the *user's* native
+  # build -- the same failure mode the test above exists for. Both files
+  # travel together in `rtsrc`, so both halves of each joint are readable
+  # from here.
   let header = rtsrc.source("dawn_rt.h").expect("the embedded runtime header")
   let body = rtsrc.source("dawn_rt.c").expect("the embedded runtime source")
   assert str.contains(header, "void *dawn_ev_get(void *pack, int64_t key);")
   assert str.contains(body, "void *dawn_ev_get(void *pack, int64_t key) {")
+  assert str.contains(header, "void *dawn_ev_append(void *front, void *back);")
+  assert str.contains(body, "void *dawn_ev_append(void *front, void *back) {")
 
-  # The walk's shape test is the runtime's own, and these are the three
-  # numbers it tests against. Reorder or extend `ev_pack_adt` and the C stops
-  # recognising a node it is standing on -- silently, because a walk that
-  # stops early is a miss and a miss is a panic somewhere else entirely.
+  # The shape test is the runtime's own, and these are the three numbers it
+  # tests against. Reorder or extend `ev_pack_adt` and the C stops recognising
+  # a node it is standing on -- silently, because a walk that stops early is a
+  # miss and a miss is a panic somewhere else entirely.
   let pack = ev_pack_adt()
+  let fields = pack.ctors[0].fields
   assert len(pack.ctors) == 1
-  assert len(pack.ctors[0].fields) == 3
+  assert len(fields) == 3
   assert str.contains(header, "#define DAWN_TAG_EV_PACK 0")
   assert str.contains(header, "#define DAWN_EV_PACK_FIELDS 3")
+
+  # `ev_append` allocates, which the lookup does not, so it needs one number
+  # the lookup never asked for: which slots `drop` must recurse into. Computed
+  # here the way `emit_mask_arg` computes every other allocation's, so a field
+  # that changes from a scalar to a reference moves the constant with it --
+  # get it wrong and the chain leaks, or worse, drops through an integer.
+  var mask = 0
+  var bit = 1
+  for f in fields {
+    if is_ref_ty(f.ty) { mask = mask + bit }
+    bit = bit * 2
+  }
+  assert mask == 6
+  assert str.contains(header, "#define DAWN_EV_PACK_MASK " ++ to_string(mask))
 
   # and the miss message is one text with three implementations. The C copy is
   # written as a single literal so that this search can see it.

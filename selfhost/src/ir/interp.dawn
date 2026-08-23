@@ -772,7 +772,7 @@ fn call_named(
 # the bottom of this file checks the partition is total and disjoint, and it
 # probes each name to check the lists say what the chain does.
 
-## Every name the chain below has an arm for -- 41 of them, 10 emitted by
+## Every name the chain below has an arm for -- 42 of them, 11 emitted by
 ## lowering and 31 writable by a user.
 ##
 ## Consulted *before* the chain rather than alongside it, so this is a gate and
@@ -785,7 +785,7 @@ fn interp_arms() -> List[String] = [
   # lowering's own intrinsics (lower.internal_intrinsics()); `cmp`, `hash` and
   # `java_hash` are the three it emits that are refused instead, below
   "java_eq", "show", "quote", "str_of_int", "str_of_bool",
-  "str_of_bytes", "list_index", "list_slice", "null_ref", "ev_get",
+  "str_of_bytes", "list_index", "list_slice", "null_ref", "ev_get", "ev_append",
   # user builtins
   "panic", "todo", "expect", "unwrap_or", "to_float", "to_int", "to_string",
   "len", "get", "range", "sort_by", "join",
@@ -909,6 +909,30 @@ fn ev_get_value(pack: CValue, key: Int) -> CValue =
 fn ev_node(key: Int, ev: CValue, outer: CValue) -> CValue =
   VAdt(EV_PACK_ID, 0, [VInt(key), ev, outer])
 
+## The evidence-pack join, on the interpreter's own values: the third
+## implementation of `ev_append`, alongside the JVM's emitted static and
+## `dawn_ev_append`. Its contract is written at `types.ev_pack_adt`.
+##
+## Recursion is the whole of it here, and the shape it recurses on is the same
+## one `ev_get_value` walks: a `VAdt` at `EV_PACK_ID` is a node, anything else
+## is where `front` stopped -- and where `front` stopped is where `back` goes.
+## `front`'s own terminator is *dropped*, not copied, which is what makes the
+## result one flat chain rather than a chain that ends in another chain.
+##
+## No panic. A miss is a broken invariant, but a `front` with nothing in it is
+## an ordinary answer: a row whose first non-ground atom instantiated to pure
+## carries the placeholder, and appending it must give `back` back.
+fn ev_append_value(front: CValue, back: CValue) -> CValue =
+  match front {
+    VAdt(aid, _, fields) ->
+      if aid != EV_PACK_ID {
+        back
+      } else {
+        VAdt(EV_PACK_ID, 0, [fields[0], fields[1], ev_append_value(fields[2], back)])
+      }
+    _ -> back
+  }
+
 ## Did the walk end in the contract's panic? `catch_panic` because that is
 ## what a panic is here, and the message because "some panic" would pass for
 ## an index-out-of-range just as well.
@@ -960,6 +984,52 @@ test "an evidence pack ends on the placeholder, and a miss is a panic" {
   # is the only place it is answered and nothing here reaches it.
 }
 
+test "an appended pack answers from both halves, and answers front's first" {
+  let empty: CValue = VUnit
+  # two chains that answer nothing of each other's: the shape a row with two
+  # non-ground atoms hands one slot
+  let front = ev_node(1, VInt(100), ev_node(4, VInt(400), empty))
+  let back = ev_node(7, VInt(700), empty)
+  let both = ev_append_value(front, back)
+  # every key of front, in front's own order, then every key of back. Copy
+  # only front and the last two are misses; return `back` alone and the first
+  # two are
+  assert as_int(ev_get_value(both, 1)) == 100
+  assert as_int(ev_get_value(both, 4)) == 400
+  assert as_int(ev_get_value(both, 7)) == 700
+  # the join is a rebuild, so neither argument learned anything: front still
+  # ends where it ended, and back is still just itself
+  assert ev_get_panics(front, 7)
+  assert ev_get_panics(back, 1)
+
+  # front before back, stated as a lookup. Distinct atoms cannot collide, so
+  # this same-key probe is the one place the order is observable -- and the
+  # order is defined (types.ev_pack_adt), so it is pinned rather than left to
+  # whichever half the rebuild happened to put first
+  let a = ev_node(9, VInt(1), empty)
+  let b = ev_node(9, VInt(2), empty)
+  assert as_int(ev_get_value(ev_append_value(a, b), 9)) == 1
+  assert as_int(ev_get_value(ev_append_value(b, a), 9)) == 2
+}
+
+test "appending an empty pack changes nothing on either side" {
+  let empty: CValue = VUnit
+  let back = ev_node(7, VInt(700), empty)
+  # an empty front is the identity: a row whose non-ground atom instantiated
+  # to pure brings the placeholder, and it must not cost `back` a key. Not a
+  # panic either -- `ev_append` has no miss to have, only `ev_get` does
+  assert value_eq(ev_append_value(empty, back), back)
+  # and an empty back leaves a chain that ends on the placeholder, which is to
+  # say a walk of it terminates rather than running off anything
+  let front = ev_node(1, VInt(100), empty)
+  let onto_empty = ev_append_value(front, empty)
+  assert as_int(ev_get_value(onto_empty, 1)) == 100
+  assert ev_get_panics(onto_empty, 7)
+  # front's own terminator is dropped rather than copied, so two placeholders
+  # never meet: the chain is flat, and `ev_get` stays one walk
+  assert value_eq(onto_empty, front)
+}
+
 fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -> ER !io =
   if not has_name(interp_arms(), name) {
     cerr(st, env, no_arm_msg(name))
@@ -975,6 +1045,11 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # the ones lowering builds for a pure row -- which is why the terminator
     # matters more here than a hit does.
     Ok((st, env, ev_get_value(args[0], as_int(args[1]))))
+  } else if name == "ev_append" {
+    # the join, for the same reason the lookup has an arm: a `const` whose
+    # body reaches a function value with two rows in one slot folds here, and
+    # a refusal would make that fold a diagnostic instead of an answer.
+    Ok((st, env, ev_append_value(args[0], args[1])))
   } else if name == "panic" {
     cerr(st, env, "panicked: " ++ as_str(args[0]))
   } else if name == "todo" {
@@ -2233,7 +2308,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    went wrong in the list this gate replaces -- lowering's own said
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
-  assert len(arms) == 41
+  assert len(arms) == 42
   assert len(rejects) == 65
 }
 
