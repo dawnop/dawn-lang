@@ -871,9 +871,11 @@ void *dawn_ev_get(void *pack, int64_t key) {
  * result is one flat chain. No miss to have -- an empty `front` is an
  * ordinary answer (`back` itself), which is why only the lookup panics.
  *
- * Written forward with a running `prev` rather than recursively: a node's
- * `outer` is an ordinary field here, so the loop can patch it, and this is
- * the one implementation of the three that can avoid the stack.
+ * Written forward with a running `prev`: a node's `outer` is an ordinary
+ * field here, so the loop can fill it in after the fact. Neither of the other
+ * two can, and each pays differently for it -- the JVM's fields are final, so
+ * it reverses `front` and rebuilds, and the interpreter's values are
+ * immutable, so it recurses.
  *
  * OWNERSHIP. Both arguments are BORROWED, like `dawn_ev_get`'s pack; the
  * result is OWNED, because it is freshly allocated and `rc.dawn` wraps no
