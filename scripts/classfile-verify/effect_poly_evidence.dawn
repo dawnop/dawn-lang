@@ -71,6 +71,17 @@ fn mixed(g: fn() -> Int !e2) -> Int !Ask !e2 = twice_over(n => n + g() + ask(), 
 ## sides of it.
 fn raises_ask(n: Int) -> Int !Ask = n + ask()
 
+## The same translation with **two** atoms, which is what makes the order a
+## claim rather than a tautology: the label's slot is the record's own type and
+## the variable's is erased, so unpacking them the other way round hands an
+## `Object` to a slot declared `ev$Ask` -- a VerifyError, and this gate is the
+## only thing in the tree that runs the shape. A type parameter is what takes
+## `check_fn_value` down the instantiating path, and it is a reference one
+## because a *primitive* there fails for an unrelated and older reason: the
+## wrapper passes its written arguments at the instantiated type without boxing
+## them against the callee's declared one.
+fn two_atoms[T](tag: T, f: fn() -> Int !e) -> Int !Ask !e = f() + ask()
+
 trait Wrap[T] {
   fn wrap(t: T, f: fn(Int) -> Int !e) -> Int !e
 }
@@ -112,4 +123,8 @@ pub fn main() -> Unit !io = {
   let as_value: fn(Int) -> Int !Ask = raises_ask
   println(to_string(as_value(1)))
   println(to_string(apply_twice(as_value, 1)))
+  # two atoms through the same wrapper: an exact slot and an erased one, in the
+  # order `types.atom_keys` lays them out
+  let both: fn(String, fn() -> Int !Tell) -> Int !Ask !Tell = two_atoms
+  println(to_string(both("t", () => tell(3))))
 }
