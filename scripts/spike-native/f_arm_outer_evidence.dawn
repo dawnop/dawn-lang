@@ -1,0 +1,68 @@
+# An arm runs where the handler was **installed**, so its own residual evidence
+# comes from the installation site and not from the raise site. That is the half
+# of the design (§6) the pack convention answers with one trailing `env` field
+# on the evidence record: the arm is a closure, a closure has exactly one
+# evidence slot whatever its row, and the operation call fills that slot from
+# `env` rather than from whatever the raiser happened to be standing in.
+#
+# `effect_lexical`'s `inner_ten` pins one consequence of that -- an arm raising
+# the effect it answers reaches the *outer* handler, because a handler does not
+# answer itself -- and it is kept here verbatim, because it is the one shape
+# where the installation site and the raise site are separated by nothing but
+# the handler's own region.
+#
+# The rest of the file is the shape `inner_ten` cannot reach: an arm whose
+# residual effect is a **different** label, with a competing handler for that
+# label in scope at the raise site. Both handlers exist, both are reachable from
+# the raise, and only one of them is the arm's. A rule that filled the arm's
+# slot from the raise site's environment would compile, run, and print
+# `inner log`, which is why this needs a transcript rather than a type.
+#
+# `layers` is the same question one frame further out: the raise happens inside
+# a called function, so the raise site is not even lexically inside `main`.
+use std/io
+
+effect Ask {
+  fn ask() -> Int
+}
+
+effect Log {
+  fn log(v: Int) -> Unit
+}
+
+## An arm raising the effect it answers: the outer handler answers it, so this
+## is 42 * 10 twice under `ask() => 42`.
+fn inner_ten() -> Int !Ask = {
+  with handle Ask { ask() => ask() * 10 }
+  ask() + ask()
+}
+
+## The raise site, one frame away from every handler in this file.
+fn raiser() -> Int !Ask = ask() + 1
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 42 }
+  println("-- an arm raising its own effect reaches the outer handler --")
+  println(to_string(inner_ten()))
+
+  with handle Log { log(v) => println("outer log ${v}") }
+  # installed under the `Log` handler above: that is where the arm's own `log`
+  # is answered from
+  with handle Ask { ask() => {
+    log(1)
+    6
+  } }
+  # ... and a *second* `Log` handler, in scope at every raise below. The arm was
+  # not installed under it and must not find it.
+  with handle Log { log(v) => println("inner log ${v}") }
+  println("-- the arm's residual label comes from where it was installed --")
+  println(to_string(raiser()))
+  println("-- and the raise site's own `log` still finds the inner one --")
+  log(2)
+  println("-- one more frame out, so the raise is not even in this body --")
+  println(to_string(layers()))
+}
+
+## The raise is two frames from `main` and the arm is still answered by the
+## handler that was in scope where it was written.
+fn layers() -> Int !Ask = raiser() + raiser()

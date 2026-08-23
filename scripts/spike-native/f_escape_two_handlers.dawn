@@ -1,0 +1,75 @@
+# A closure that escapes **two** handlers, and one that escapes two handlers for
+# two different effects.
+#
+# `effect_lexical` already pins the single crossing: a closure built under one
+# handler answers to whatever is in scope where it is called. One handler is not
+# enough to say which of two rules produced that answer, because with a single
+# region "the innermost handler at the creation point" and "the handler at the
+# call site" differ by one hop and a wrong answer looks like an off-by-one. Two
+# nested regions separate them: `deep` is written under `ask() => 8` inside
+# `ask() => 7`, and every rule that reads the *creation* point picks one of
+# those two. The call site's answer, 2, is neither.
+#
+# `pair` is the same question with two labels rather than two nestings, so that
+# the pack the call site builds has to carry both keys for a closure that was
+# written where a *different* record answered each of them. Four records exist
+# for two operations and the two the call site holds are the two that are read.
+#
+# `nested_escape` closes the last hole in the shape: the escaping closure calls
+# another escaping closure, so the evidence has to cross two closure boundaries
+# on its way in. A rule that supplied only the outermost call would answer the
+# first `ask()` and lose the second.
+use std/io
+
+effect Ask {
+  fn ask() -> Int
+}
+
+effect Tell {
+  fn tell() -> Int
+}
+
+alias Thunk = fn() -> Int !Ask
+alias Both = fn() -> Int !Ask !Tell
+
+## Written two regions deep. 7 and 8 are both unreachable from the value.
+fn deep() -> Thunk = {
+  with handle Ask { ask() => 7 }
+  with handle Ask { ask() => 8 }
+  () => ask() + 1
+}
+
+## Two labels, two regions, one escaping value that reads both.
+fn pair() -> Both = {
+  with handle Ask { ask() => 70 }
+  with handle Tell { tell() => 80 }
+  () => ask() + tell()
+}
+
+## An escaping closure over an escaping closure: two boundaries between the
+## call that supplies the evidence and the raise that spends it.
+fn nested_escape() -> Thunk = {
+  with handle Ask { ask() => 700 }
+  let g = deep()
+  () => g() + ask()
+}
+
+pub fn main() -> Unit !io = {
+  let f = deep()
+  let p = pair()
+  let n = nested_escape()
+  with handle Ask { ask() => 2 }
+  with handle Tell { tell() => 5 }
+  println("-- two nested regions escaped, and neither arm answers --")
+  println(to_string(f()))
+  println("-- two labels escaped together --")
+  println(to_string(p()))
+  println("-- a closure through a closure, two boundaries deep --")
+  println(to_string(n()))
+  println("-- and the same values again under a different pair of handlers --")
+  with handle Ask { ask() => 20 }
+  with handle Tell { tell() => 50 }
+  println(to_string(f()))
+  println(to_string(p()))
+  println(to_string(n()))
+}

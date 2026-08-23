@@ -1,0 +1,54 @@
+# The D2 replay, and the whole of its transcript is that there is none.
+#
+# D2 is the leak the flip closes: a closure built inside a handled region used
+# to keep that region's handler after the region ended, so a caller could hold
+# somebody else's arms and never be able to tell. `under_a` is that shape at its
+# smallest -- one closure, built under a handler whose arm is the only thing in
+# this program that can print.
+#
+# So the expectation is an **empty transcript**. `A's arm` on stdout is the
+# replay happening; nothing on stdout is it not happening. That is a weak oracle
+# on its own -- a program that never ran prints nothing either -- so the answer
+# is checked too, and checked by dying: `f()` must be 2, from the handler in
+# scope where `f` is *called*, and `panic` is what says so if it is 1. The two
+# failures are independent and both are loud: a replay prints a line and then
+# exits non-zero.
+#
+# `escape_pure` is the same claim about the type rather than the value. Under
+# the old rule `under_a`'s closure was *pure* -- its label had been settled away
+# at the creation point -- and a pure closure is one a caller may put anywhere
+# without answering for it. Here the row survives, so `Thunk` is the annotation
+# that has to be written and `fn() -> Int` is the one that no longer typechecks.
+#
+# `!io` on `under_a` is not incidental: the arm prints, the arm runs where the
+# handler was installed, and so the *installing* body is what owes `!io`. Under
+# settlement this was the shape that charged the closure instead.
+use std/io
+
+effect Ask {
+  fn ask() -> Int
+}
+
+alias Thunk = fn() -> Int !Ask
+
+## Built under a handler whose arm prints. Nothing here can reach that arm
+## afterwards: the region ends with the block, and the closure leaves with its
+## label rather than with an answer to it.
+fn under_a() -> Thunk !io = {
+  with handle Ask { ask() => {
+    println("A's arm")
+    1
+  } }
+  () => ask()
+}
+
+## The row rides out through a second frame unchanged.
+fn escape_pure() -> Thunk !io = under_a()
+
+pub fn main() -> Unit !io = {
+  let f = under_a()
+  let h = escape_pure()
+  with handle Ask { ask() => 2 }
+  if f() != 2 { panic("D2 replay: f() answered A's arm") }
+  if h() != 2 { panic("D2 replay: h() answered A's arm") }
+}
