@@ -1,0 +1,48 @@
+# One effect variable instantiated with a row of **two written labels**, which
+# is the union half of the pack convention (the knife plan's §2.1, verbatim).
+#
+# `twice` declares a lone `!e`, so rule 丁 gives it one erased evidence slot and
+# the arity is fixed before any call site exists. The call below instantiates
+# `!e := !(Ask|Tell)` and has to put *two* answers in that one word: the pack is
+# `ev$Pack{key(Ask), ev$Ask, ev$Pack{key(Tell), ev$Tell, <empty>}}`. Two keys,
+# one slot -- the shape a positional evidence vector could not have held, since
+# the position of a label in the instance has nothing to do with the position of
+# the variable in the declaration.
+#
+# What makes this a *runtime* case rather than a checker one is that the closure
+# reads both. `tell(x)` is one lookup and `ask()` is another, and they are the
+# first and second nodes of the same chain, so a build that kept one atom and
+# dropped the rest is a wrong answer here and green everywhere else in the tree.
+# The `tell` arm prints, so a lookup that reached the wrong node or no node at
+# all cannot be silent about it.
+#
+# `pure_slot` is the control inside the file: the same `twice`, the same slot,
+# instantiated with nothing. That path is the identity forward -- no node, no
+# allocation -- and it is what every effect-polymorphic signature in std takes,
+# so it has to keep working while the line above it does not.
+use std/io
+use std/list
+
+effect Ask {
+  fn ask() -> Int
+}
+
+effect Tell {
+  fn tell(v: Int) -> Unit
+}
+
+fn twice[T, U](xs: List[T], f: fn(T) -> U !e) -> List[U] !e = list.map(xs, f)
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 7 }
+  with handle Tell { tell(v) => println("tell ${v}") }
+  println("-- two labels in one variable's slot, both read --")
+  println(to_string(twice([1, 2], x => {
+    tell(x)
+    x + ask()
+  })))
+  println("-- the same slot instantiated with nothing, which is the forward --")
+  println(to_string(twice([1, 2], x => x + 100)))
+  println("-- and with one of the two, which is a single node over the empty --")
+  println(to_string(twice([1, 2], x => x + ask())))
+}

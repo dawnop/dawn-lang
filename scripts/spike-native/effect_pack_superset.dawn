@@ -1,0 +1,65 @@
+# The superset clause, which is the one step of the pack argument that is not
+# obviously true: a pack is a **scope**, not a transcript of a row. A node
+# nobody asks for is a step in a walk and nothing else; only a *missing* key is
+# a fault.
+#
+# That clause is what lets a pack's tail be the environment the frame already
+# holds, rather than a filtered copy of it -- so it is load-bearing for every
+# splice in the design, and it is the reason lookup has to be **by key**. Until
+# this file, nothing in the tree ran a reader whose chain was longer than its
+# own row and whose own key was not the frontmost node.
+#
+# `widen` writes two atoms on its parameter's row, so every call through `f`
+# hands over `ev$Pack{key(Ask), <the exact Ask record>, <the e slot>}` whatever
+# is actually in the slot. `caller` is what puts something in it: its own `!e2`
+# instantiates `widen`'s `!e`, so the tail is `caller`'s forwarded environment
+# and the `Ask` node in front of it belongs to `widen`, not to whatever closure
+# `caller` was handed.
+#
+# Three arguments reach that widened slot:
+#
+#   * one that raises **`Tell`** and not `Ask`: it has to walk *past* the `Ask`
+#     node to reach its own key. This is the line the clause is about, and it
+#     is the line a **positional** lookup answers wrongly rather than loudly --
+#     `ev$Ask` is a perfectly good record of the wrong effect, and its one
+#     operation has the same shape as `Tell`'s, so the failure is a number and
+#     not a crash;
+#   * a **pure** one: the whole chain is spurious and it never follows a
+#     pointer of it;
+#   * one that raises `Ask` itself: the same key twice in one chain, once from
+#     `widen`'s node and once from `caller`'s tail. The frontmost wins, and
+#     both answer the same handler here, so this line says the duplicate is not
+#     an error rather than saying which copy was read.
+#
+# `ask() => 3` and `tell() => 40` are far enough apart that no combination of
+# reading the wrong node coincides with reading the right one.
+use std/io
+
+effect Ask {
+  fn ask() -> Int
+}
+
+effect Tell {
+  fn tell() -> Int
+}
+
+## A slot wider than what will be put in it: the `Ask` node is written here and
+## every caller inherits it.
+fn widen(f: fn() -> Int !Ask !e) -> Int !Ask !e = f() + ask()
+
+## The frame that fills the widened slot. `!e2` is a lone variable, so what it
+## forwards is its own environment -- spliced under `widen`'s node, not wrapped.
+fn caller(g: fn() -> Int !e2) -> Int !Ask !e2 = widen(g)
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 3 }
+  with handle Tell { tell() => 40 }
+  println("-- the reader walks past a node that is not its own --")
+  println(to_string(caller(() => tell())))
+  println("-- a pure reader under the same chain, which follows nothing --")
+  println(to_string(caller(() => 1)))
+  println("-- the same key twice in one chain, frontmost first --")
+  println(to_string(caller(() => ask())))
+  println("-- and both keys, so the walk has to find two different nodes --")
+  println(to_string(caller(() => ask() + tell())))
+}

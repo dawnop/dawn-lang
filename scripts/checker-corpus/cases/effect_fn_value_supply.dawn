@@ -1,0 +1,86 @@
+# checker.dawn: a function value's effects are supplied at the **call**, so the
+# same `let g = ...` accepts or reports depending on which side of the handler
+# the call is written -- and not on which side the `let` is.
+#
+# This is fb §2.3(a). The pairs below differ by one line's position and nothing
+# else, which is the point: under the old rule the creation point decided, so
+# `after` and `before` would have had the same verdict as each other and the
+# opposite one to `created_under`.
+#
+#   * `after`          -- created where nothing answers, called where something
+#                         does. Accepted. This is the shape settlement could
+#                         not express at all: the closure had no handler to
+#                         weld in at its creation point.
+#   * `before`         -- the same `let`, called before the handler. Reported,
+#                         at the call, because that is the site a reader can
+#                         name; the label is then withdrawn from the row this
+#                         body is charged with, so the signature does not say
+#                         it again.
+#   * `created_under`  -- created *inside* the region and called outside it.
+#                         Reported, and this is the verdict that inverted: the
+#                         handler above the `let` used to settle the closure's
+#                         row to pure and the call below was then free.
+#   * `declared`       -- the same body with `!Ask` written on the signature.
+#                         Accepted: the call is answered by the hidden
+#                         parameter rather than by a handler, which is the
+#                         other half of "supplied at the call".
+#
+# The values these compute are pinned on both backends by
+# scripts/spike-native/effect_fn_value_supply.dawn.
+pub effect Ask {
+  fn get() -> Int
+}
+
+# accepted: the call is under the handler, the `let` is not
+pub fn after() -> Int = {
+  let g = () => get()
+  with handle Ask { get() => 4 }
+  g()
+}
+
+# reported at the call: same `let`, called above the handler
+pub fn before() -> Int = {
+  let g = () => get()
+  let n = g()
+  with handle Ask { get() => 4 }
+  n
+}
+
+# the closure's creation point, and the only place in this file where a handler
+# is in scope where a lambda is written
+fn made_inside() -> fn() -> Int !Ask = {
+  with handle Ask { get() => 4 }
+  () => get()
+}
+
+# reported: created inside the region, called outside it. The creation point no
+# longer settles anything away, so the row rides out and this call owes it.
+pub fn created_under() -> Int = {
+  let g = made_inside()
+  g()
+}
+
+# accepted: the signature answers, so both calls are supplied from the hidden
+# parameter rather than from a handler
+pub fn declared() -> Int !Ask = {
+  let g = () => get()
+  let n = g()
+  with handle Ask { get() => 4 }
+  n + g()
+}
+
+# accepted: the supply crosses a function boundary as an ordinary argument, and
+# `through`'s own row is the variable that carries it
+pub fn through(f: fn() -> Int !e) -> Int !e = f()
+
+pub fn supplied_through() -> Int = {
+  let g = () => get()
+  with handle Ask { get() => 4 }
+  through(g)
+}
+
+# reported at the call to `through`, which is where the row was instantiated
+pub fn unsupplied_through() -> Int = {
+  let g = () => get()
+  through(g)
+}

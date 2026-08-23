@@ -1,0 +1,51 @@
+# A written label and an effect variable meeting in one evidence slot (the
+# knife plan's §2.2, verbatim). This is the case that decides cons-vs-wrap, and
+# the two spellings differ only in a program that reads through the forwarded
+# half -- which is what the first line of `main` does and nothing else in the
+# tree did.
+#
+#     fn inner(f: fn() -> Int !e) -> Int !e = f()
+#     fn outer(g: fn() -> Int !e2) -> Int !Ask !e2 = inner(() => g() + ask())
+#
+# `outer`'s ABI row is one label and one variable, so it holds two slots: an
+# exact `ev$Ask` record and an erased pack for `e2`. The call `inner(lambda)`
+# instantiates `!e := !Ask !e2`, and the pack for that row is **one node over a
+# forwarded chain**:
+#
+#     ev$Pack{key(Ask), <outer's ev$Ask slot>, <outer's e2 slot>}
+#
+# The tail is spliced, not wrapped. Wrapping it -- consing the variable as a
+# node of its own, keyed by the variable, with the empty pack under it -- builds
+# a chain that answers `key(Ask)` and `key(e2)` and nothing that used to be
+# reachable through `e2`. Inside `inner`, `f()` forwards the whole chain to the
+# lambda; inside the lambda, `g()` forwards it again; and `g`'s own body asks for
+# `key(Tell)`, which is in the spliced chain and is not in the wrapped one. The
+# cost of getting it wrong is `ev_get`'s compiler-invariant panic on a program
+# that checks clean, so the transcript is the only thing that can tell the two
+# builds apart.
+#
+# The second line is the same call with `!e2 := !pure`: the tail is the empty
+# pack, the node is still built, and the lambda's `g()` reads nothing. It is
+# here because it is the shape that stayed green through the hole.
+use std/io
+
+effect Ask {
+  fn ask() -> Int
+}
+
+effect Tell {
+  fn tell() -> Int
+}
+
+fn inner(f: fn() -> Int !e) -> Int !e = f()
+
+fn outer(g: fn() -> Int !e2) -> Int !Ask !e2 = inner(() => g() + ask())
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 5 }
+  with handle Tell { tell() => 30 }
+  println("-- one node over a forwarded chain, read through both halves --")
+  println(to_string(outer(() => tell())))
+  println("-- the same node over the empty pack, which was always green --")
+  println(to_string(outer(() => 100)))
+}

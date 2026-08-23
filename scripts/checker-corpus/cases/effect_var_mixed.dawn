@@ -1,0 +1,47 @@
+# checker.dawn: a written label and an effect variable meeting in one evidence
+# slot -- `!e := !Ask !e2`, the design's §2.2.
+#
+# Two things are recorded here and they are different claims.
+#
+# The first is acceptance: a variable instantiated with a row that is neither a
+# lone label nor a lone variable is not a diagnostic, and never was one. That is
+# every `pub fn` above `unanswered`, and the shape of the pack they build -- one
+# node spliced over a forwarded chain, rather than two nodes -- is a runtime
+# question, pinned on both backends by
+# scripts/spike-native/effect_var_mixed.dawn.
+#
+# The second is the reporting surface the flip *added*. `evidence_var_args` used
+# to be the one of the three evidence builders that never reported, because
+# nothing read a pack. Something reads one now, so instantiating `!e := !Ask`
+# where no `Ask` is in scope is "nobody is handling this", said at the call that
+# demanded it and not at the raise inside the callee. `unanswered` is that line,
+# and it is reported once: the label is withdrawn from the row this body is
+# charged with, so the signature does not repeat the complaint.
+use std/list
+
+pub effect Ask {
+  fn ask() -> Int
+}
+
+pub fn inner(f: fn() -> Int !e) -> Int !e = f()
+
+# `!e := !Ask !e2`: one node over the caller's own `e2` environment
+pub fn outer(g: fn() -> Int !e2) -> Int !Ask !e2 = inner(() => g() + ask())
+
+# the same instance with the label on the other side of the variable
+pub fn outer_flipped(g: fn() -> Int !e2) -> Int !e2 !Ask = inner(() => ask() + g())
+
+# two variables and a label, so the tail is a join with a cons over it
+pub fn outer_two(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !Ask !e1 !e2 =
+  inner(() => g() + h() + ask())
+
+# a lone variable, which is the identity forward and builds nothing
+pub fn plain(g: fn() -> Int !e2) -> Int !e2 = inner(() => g() + 1)
+
+# through a higher-order library function, whose own row is a lone `!e`
+pub fn through_map(xs: List[Int], g: fn() -> Int !e2) -> List[Int] !Ask !e2 =
+  list.map(xs, x => x + g() + ask())
+
+# reported, at the call: this instantiates `!e := !Ask` with nothing in scope
+# to answer `Ask`, and the body's own signature declares nothing either
+pub fn unanswered() -> Int = inner(() => ask())

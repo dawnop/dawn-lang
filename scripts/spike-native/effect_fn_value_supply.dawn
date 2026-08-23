@@ -1,0 +1,40 @@
+# Where a function value's effects are answered: at the **call**, not where the
+# value was written. One closure, three calls, three different answers.
+#
+# `g` is created where nothing is handling `Ask` at all. That used to be the
+# shape the checker refused outright, on the grounds that a lambda captured the
+# evidence it was created under and there was none to capture; now the label
+# rides out in `g`'s type -- `fn() -> Int !Ask` -- and each call supplies its
+# own evidence out of its own scope. So the same value answers 5, then 11, and
+# `main` is a single body in which the handler in scope changed twice.
+#
+# The half this file cannot run is the other half of the claim: `g()` written
+# above the first handler is a diagnostic, reported at the call. That is
+# scripts/checker-corpus/cases/effect_fn_value_supply.dawn, and the two files
+# are the same four lines in a different order.
+#
+# `through` exists so the supply point is not always the lexically enclosing
+# body: `g` crosses a function boundary as an ordinary argument, and the call
+# that runs it is inside `through`, whose own row is `!e`. The evidence still
+# comes from `main`'s scope, forwarded through `through`'s slot rather than
+# resolved again.
+use std/io
+
+effect Ask {
+  fn ask() -> Int
+}
+
+fn through(f: fn() -> Int !e) -> Int !e = f()
+
+pub fn main() -> Unit !io = {
+  # written where nothing answers `Ask`; its row says so and nothing is refused
+  let g = () => ask() + 1
+  with handle Ask { ask() => 4 }
+  println("-- the first handler in scope at the call --")
+  println(to_string(g()))
+  println(to_string(through(g)))
+  with handle Ask { ask() => 10 }
+  println("-- the same value, a different handler, the same call site kind --")
+  println(to_string(g()))
+  println(to_string(through(g)))
+}

@@ -1,0 +1,51 @@
+# checker.dawn: one effect variable instantiated with a row of **two written
+# labels**, which is the shape V1' must not turn into a diagnostic.
+#
+# The nearest thing on main to a "one variable stands for at most one label"
+# judgment was `evidence_var_args`' `len(ivs) == 1`, and that was a silent
+# fallback to a placeholder rather than a rejection. The flip replaced it with
+# a per-atom cons; adding a rejection there would have been the expressivity
+# regression the design was written to refuse. This file is what says the
+# rejection is not there: every shape below is accepted, and the golden is the
+# empty file.
+#
+# The answers these calls compute are pinned separately, on both backends, by
+# scripts/spike-native/effect_var_union.dawn. Here the claim is only that the
+# checker has nothing to say.
+use std/list
+
+pub effect Ask {
+  fn ask() -> Int
+}
+
+pub effect Tell {
+  fn tell(v: Int) -> Unit
+}
+
+pub effect Note {
+  fn note() -> Int
+}
+
+pub fn twice[T, U](xs: List[T], f: fn(T) -> U !e) -> List[U] !e = list.map(xs, f)
+
+# two labels into one slot
+pub fn union_two(xs: List[Int]) -> List[Int] !Ask !Tell = twice(xs, x => {
+  tell(x)
+  x + ask()
+})
+
+# three, so that the cons is a fold and not a pair
+pub fn union_three(xs: List[Int]) -> List[Int] !Ask !Tell !Note = twice(xs, x => {
+  tell(x)
+  x + ask() + note()
+})
+
+# the same slot with one label, which is a node over the empty pack
+pub fn union_one(xs: List[Int]) -> List[Int] !Ask = twice(xs, x => x + ask())
+
+# ... and with none, which is the identity forward every std signature takes
+pub fn union_none(xs: List[Int]) -> List[Int] = twice(xs, x => x + 1)
+
+# a label and a variable in the same instance, from a body that has both
+pub fn union_mixed[T](xs: List[T], f: fn(T) -> Int !e2) -> List[Int] !Ask !e2 =
+  twice(xs, x => f(x) + ask())
