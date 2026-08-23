@@ -6325,16 +6325,34 @@ fn evidence_var_args(
 ## the tail be an environment rather than a filtered copy of it, and it is the
 ## one step of the argument that is not obviously true.
 ##
-## **Two or more non-ground atoms keep the empty pack as the tail**, and that
-## is now a real limitation rather than a deferred one. A row like `!(e1|e2)`
-## has two environments to splice and one field to splice them into; merging
-## two chains is not a cons, it is a walk-and-rebuild, and the only thing that
-## could do it is a second runtime primitive. The consequence is bounded and
-## loud rather than silent: the pack is short, so a reader asking for a key
-## that lived in the dropped environment gets `ev_get`'s compiler-invariant
-## panic (`types.EV_MISS_MSG`), never another atom's evidence. Nothing in the
-## tree reaches it -- all 20 effect-polymorphic signatures in std are lone `!e`
-## -- and closing it belongs to whoever needs it, with an `ev_append`.
+## **Two or more non-ground atoms keep the empty pack as the tail, and that is
+## an open regression, not a deferred nicety.** A row like `!e1 !e2` has two
+## environments to splice and one field to splice them into; merging two chains
+## is not a cons, it is a walk-and-rebuild, and nothing in Core or in the
+## runtime can do it. So the pack is short.
+##
+## Short means a reader that asks for a key from the dropped environment gets
+## `ev_get`'s compiler-invariant panic (`types.EV_MISS_MSG`). Loud, and never
+## another atom's evidence -- but loud at run time, on a program that checks
+## clean and that worked before the flip, because a closure used to carry the
+## evidence instead of asking for it. The smallest witness is eleven lines:
+##
+##     fn thru(f: fn() -> Int !e) -> Int !e = f()
+##     fn both(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !e1 !e2 =
+##       thru(() => g() + h())
+##
+## Nothing in this repository reaches it -- all 20 effect-polymorphic signatures
+## in std are a lone `!e`, and `packages/`, `selfhost/src` and the production
+## ecosystem corpus declare no effects at all -- which is why every gate is
+## green over it. That is a statement about the corpus, not about the language.
+##
+## Closing it needs a decision one layer down, and the two candidates both cost
+## more than a line here: a reserved *join* key whose payload is another chain,
+## which makes `ev_get` a nested search rather than a walk (three
+## implementations, one of them an inlined bytecode loop with no recursion
+## available to it), or moving `ev_get` out of the emitter into a runtime static
+## where recursion is free. Neither belongs in a knife whose subject is the
+## semantics.
 ##
 ## `report` is the difference between a demand and a snapshot. A call site
 ## demanding a row it cannot answer is the "nobody is handling this" error, at
