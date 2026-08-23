@@ -5,18 +5,20 @@
 # evidence slot whatever its row, and the operation call fills that slot from
 # `env` rather than from whatever the raiser happened to be standing in.
 #
-# `effect_lexical`'s `inner_ten` pins one consequence of that -- an arm raising
+# `effect_lexical`'s `inner_ten` already pins one consequence -- an arm raising
 # the effect it answers reaches the *outer* handler, because a handler does not
-# answer itself -- and it is kept here verbatim, because it is the one shape
-# where the installation site and the raise site are separated by nothing but
-# the handler's own region.
+# answer itself -- and it is deliberately not repeated here. That shape cannot
+# say where an arm's evidence comes *from*: it has one label in it, so the
+# installation site and the raise site are separated by nothing but the
+# handler's own region, and every rule that could be wrong is wrong about the
+# same handler.
 #
-# The rest of the file is the shape `inner_ten` cannot reach: an arm whose
-# residual effect is a **different** label, with a competing handler for that
-# label in scope at the raise site. Both handlers exist, both are reachable from
-# the raise, and only one of them is the arm's. A rule that filled the arm's
-# slot from the raise site's environment would compile, run, and print
-# `inner log`, which is why this needs a transcript rather than a type.
+# This file is the shape `inner_ten` cannot reach: an arm whose residual effect
+# is a **different** label, with a competing handler for that label in scope at
+# the raise site. Both handlers exist, both are reachable from the raise, and
+# only one of them is the arm's. A rule that filled the arm's slot from the
+# raise site's environment would compile, run, and print `inner log` -- a wrong
+# answer, not a crash, which is why this needs a transcript rather than a type.
 #
 # `layers` is the same question one frame further out: the raise happens inside
 # a called function, so the raise site is not even lexically inside `main`.
@@ -30,21 +32,10 @@ effect Log {
   fn log(v: Int) -> Unit
 }
 
-## An arm raising the effect it answers: the outer handler answers it, so this
-## is 42 * 10 twice under `ask() => 42`.
-fn inner_ten() -> Int !Ask = {
-  with handle Ask { ask() => ask() * 10 }
-  ask() + ask()
-}
-
 ## The raise site, one frame away from every handler in this file.
 fn raiser() -> Int !Ask = ask() + 1
 
 pub fn main() -> Unit !io = {
-  with handle Ask { ask() => 42 }
-  println("-- an arm raising its own effect reaches the outer handler --")
-  println(to_string(inner_ten()))
-
   with handle Log { log(v) => println("outer log ${v}") }
   # installed under the `Log` handler above: that is where the arm's own `log`
   # is answered from
