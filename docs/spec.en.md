@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ abdd6b80b4579688 -->
+<!-- doc-check: translation-of docs/spec.md @ e2ffae350e23b428 -->
 
 # Dawn Language Specification
 
@@ -433,8 +433,10 @@ interchangeable with the type it names.
 > is a compile error whose hint points at `alias`; `type Color = Red` keeps its ADT meaning
 > unchanged.
 
-Restrictions: an alias cannot be recursive (a cycle is an error); it cannot carry an effect
-variable (only `!io` or pure); with `pub` it can be imported across modules (`use m.{Handler}`).
+Restrictions: an alias cannot be recursive (a cycle is an error); an effect variable must be bound
+by the parameter list (`alias Mapper[T, U, !e] = fn(T) -> U !e`), and writing an unbound one is an
+error, while a named label and `!io` are simply written (§6.3); with `pub` it can be imported across
+modules (`use m.{Handler}`).
 
 ### 2.7 Opaque types
 
@@ -881,9 +883,9 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
   function's type parameter, the synthesised closure captures that function's dictionary
   parameter, exactly as a handwritten lambda does. A subject nothing settles (`let f =
   to_string`) still reports "cannot infer the type parameter(s)"; write the expected type, or an
-  annotated lambda. A function with an **effect label** is a different matter and still cannot be
-  a value (§6.5, boundary): evidence is captured where the lambda is written, and the capture
-  point the compiler would pick for you is not necessarily the one the caller wants.
+  annotated lambda. A function with an **effect label** can be a value all the same: the label
+  enters the value's type and the call site supplies the evidence (§6.5, boundary). An **effect
+  operation** cannot; there is no function symbol to take.
 - Limits: calls with trait bounds and impl-based sorting are not allowed in comptime.
 
 #### Heterogeneous collections
@@ -1738,11 +1740,15 @@ difference of finite sets.
    **not implemented** (left for later).
 4. A pure function is **guaranteed**: same arguments return the same value, no observable side
    effects. The compiler may fold it, deduplicate it, and call it at comptime on that basis.
-   This guarantee did **not** hold for named effects until #188: a closure built under a handler
-   with an io arm could be run from a function whose signature said it was pure. The fix is the
-   boundary clause in §6.5 and
-   [`docs/effects-soundness-design.md`](effects-soundness-design.md).
-5. `panic`/`todo`/`assert` do not count as io — they do not return (divergence is not an effect).
+   Named effects are inside that guarantee too: a function value's type carries its full effect
+   row, and the only thing that can subtract a label from a row is the `with handle` that really
+   answered it (§6.5), so a function whose signature says pure cannot run somebody else's handler
+   arm.
+5. A function value's effects are answered **at the call**, not where the value was written. A
+   closure's row is what its body performs, unrewritten at the creation point; if the row an
+   individual call instantiates carries a named effect nobody answers, the error is reported on
+   **that call** (§6.5).
+6. `panic`/`todo`/`assert` do not count as io — they do not return (divergence is not an effect).
 
 ### 6.3 Effect polymorphism
 
@@ -1765,14 +1771,14 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
   with no binder are still introduced in the order they first appear.
 - A type declaration can bind effect parameters too: `alias Mapper[T, U, !e] = fn(T) -> U !e`,
   `type Box[!e] = { f: fn(Int) -> Int !e }`. **Only through a binder**: a type declaration is not
-  a signature, so "introduced by appearing" does not apply there, and writing a name the
+  a signature, so "introduced by appearing" does not apply there, and writing a **variable** the
   declaration does not bind is a compile error — put it in the parameter list, write `!io`, or
   leave it pure. Several `!e` in one declaration are one variable; the `!e` of another
   declaration is unrelated.
-  **A named effect is refused in a type declaration whatever the parameter list says**: a written
-  label would mean the caller supplies the handler, and Dawn's evidence is carried by the closure
-  from the point it was created (§6.5, [`effects-soundness-design.md`](effects-soundness-design.md)
-  §4.1).
+  **A named effect is not under that restriction**: `alias A = fn() -> Int !Ask` and
+  `type Boxed = { f: fn() -> Int !Ask }` are both legal. A label is not a variable and has no
+  binder to speak of; it means "whoever calls this function value supplies the handler", which is
+  exactly where evidence travels today (§6.5).
 - There is **no syntax for writing an effect argument** at the use site (not in the first batch):
   `Mapper[Int, String]` gives the type arguments only, and that is **not an arity error**. The
   omitted slot is still the declaration's own effect variable, solved from context: store a pure
@@ -1787,6 +1793,9 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
 - An effect variable spans both axes: `!e` can be instantiated to a row carrying labels. In
   `map(xs, x => ask())` the `!e` of `list.map` instantiates to "pure + {Ask}", so performing a
   named effect inside a `for` body goes through just as well.
+- Instantiation puts **no limit on how many atoms** a variable stands for: one `!e` may solve to a
+  single label, to a union of labels (`!e := !(Ask | Tell)`), to another variable, or to a mixture
+  of labels and variables (`!e := !Ask !e2`). There is **no** "one variable, at most one label" rule.
 - Instantiation at the call site: for `compose(inc, tag)`, if `inc` is pure and `tag` is `!io`,
   the effect union of the result type normalises to `!io`; if both are pure it normalises to pure
   and the result can be called in a pure context.
@@ -1856,7 +1865,7 @@ are not Java types, so an instance call like `s.substring(…)` does not work to
 ### 6.5 Named effects and `with handle`
 
 `effect` declares a set of operation signatures; the call site calls an operation directly, and the
-**lexically nearest** `with handle` answers it. This tier is **tail-resumptive**: a handler arm is
+`with handle` **lexically nearest to the call** answers it. This tier is **tail-resumptive**: a handler arm is
 an ordinary closure that is "called in place, its return value is the operation's result", with no
 continuation capture. For the design and the verdicts see
 [`docs/effects-design.md`](effects-design.md).
@@ -1903,8 +1912,10 @@ fn logged(x: Int) -> Int !Ask !io = {
   named effect; otherwise it is an effect variable (the old behaviour). Capitalised but not found →
   "unknown effect" is reported, because effect variables are lowercase by convention.
 - Performed but nobody answers (neither declared in the signature nor handled) → the error is
-  reported on **the call that performs it**, with two ways out: add the annotation to the
-  signature, or `with handle` on the spot.
+  reported on **the call nobody answers**, with two ways out: add the annotation to the
+  signature, or `with handle` on the spot. Calling an operation directly, that call is the
+  operation call; where the label arrives through a function value or an effect-polymorphic call,
+  the report lands on **that call**, not on the callee's definition.
 - Only `pub fn main` must have an empty label set — it has no caller to supply evidence, so the
   "nobody answers" error lands on `main`'s own signature. An ordinary `pub fn` may carry the label
   of a `pub effect`, for its caller to propagate or handle; it is a *private* effect in a public
@@ -1930,45 +1941,70 @@ of its discipline — legal only inside a block, the rest is a real closure, `re
   the effect are all compile errors.
 - One `handle`, one effect; handling the same effect again is inner shadowing outer, which is legal.
 - Handling an effect the block never actually performs is allowed (harmless dead evidence).
-- **Typing rule**: let the rest closure's effect be `(base, L')` and each arm body's effect be
+- **Typing rule**: let the rest closure's effect be `(base, L)` and each arm body's effect be
   `(base_i, L_i)`; then the block that installs the handler is recorded as
-  `(base ∪ ⋃base_i, L' ∪ ⋃L_i)`.
-  That `L'` is already **settled**: the rest is a closure, and a closure's row is settled at its
-  **creation point** — the labels this handler answers came off there, replaced by the effects of
-  this handler's arms. So this node performs no subtraction of its own. The effects the arm bodies
-  perform themselves (including io, including other labels) are all unioned back onto the block —
-  an arm runs where the handler is installed, not where the operation is performed.
-  **"A row losing a member" happens at the closure creation point and nowhere else**, and it does
-  not enter unification. It moved there from `with handle` because the capture happens at the
-  lambda: subtraction and capture at one node is what keeps a label from being taken off the wrong
-  function ([`docs/effects-soundness-design.md`](effects-soundness-design.md) §4.2).
+  `(base ∪ ⋃base_i, (L ∖ {E}) ∪ ⋃L_i)`.
+  The subtraction is at this node: the rest is a closure, **this node is what runs it**, and this
+  node is what supplies its evidence, so this node is the only thing that can take `E` off the row.
+  Subtraction and supply are one and the same call, which is why a handler that never answered `E`
+  can take nothing away. The base axis is not subtracted: `!io` is not something `handle` answers.
+  The effects the arm bodies perform themselves (including io, including other labels) are all
+  unioned back onto the block — an arm runs where the handler is installed, not where the operation
+  is performed.
+  **"A row losing a member" happens at `with handle` and nowhere else**, and it does not enter
+  unification.
 
-#### Lexical scope
+#### Lexical scope and the supply point
 
 Evidence (the handler's arms) is resolved **lexically**: an operation call binds to the lexically
-nearest `with handle`, and a closure captures the handler in force at its **creation point**.
-Consequences:
+nearest `with handle`. Evidence enters the callee with the call; a closure captures no handler at
+its creation point. Consequences:
 
-- **The handler is the creation point's, not the call site's.** A closure built inside a handle
-  block that escapes outside the block carrying that handler and is then called is still answered
-  by the original handler — in the tail-resumptive tier a handler is just a piece of ordinary code,
-  there is no stack magic to invalidate. The escaping closure's **type** does not say `!E`; it says
-  what the arms it captured do. `E` has an answer already, and the arms are the code that really
-  runs when the closure is called. The type states "what happens when you run this", not "who has
-  to supply the handler" — in Dawn the caller never supplies it. So a handler with pure arms yields
-  a pure escaping closure, and one with an io arm yields an `!io` one.
+- **The handler is the call site's, not the creation point's.** A closure built inside a handle
+  block that escapes outside the block and is then called does **not** carry the original handler:
+  its row still holds `!E`, and the handler in scope at the call answers it, or the error is
+  reported there. The type states "who has to supply the handler", and has nothing to do with what
+  the arms do; a handler with pure arms yields an escaping closure that is `!E` too.
 - Performing **this same effect** inside an arm body binds to the **outer** handler for that effect
   (it does not answer itself); with no outer one the arm owes the label and the error is reported
   as usual.
+- Performing **another** effect inside an arm body is answered by the handler in scope at the
+  **installation point**, not by the one in scope where the operation was performed: the arm runs
+  at the installation point.
+
+```dawn run
+use std/io
+
+effect Ask {
+  fn ask() -> Int
+}
+
+fn escaping() -> fn() -> Int !Ask = {
+  with handle Ask { ask() => 7 }
+  () => ask() + 1
+}
+
+pub fn main() -> Unit !io = {
+  let f = escaping()
+  with handle Ask { ask() => 2 }
+  io.println("${f()}")
+}
+```
+
+```output
+3
+```
+
+`ask() => 7` answers the operations performed inside its own region, and `f()` happens outside it,
+so `f`'s row keeps `!Ask` and the handler here in `main` answers it.
 
 #### Boundaries (v1)
 
-These are the v1 boundaries. Most positions still refuse named effects (an effect variable is
-the same offence with the same diagnostic); since knife 5 the trait / impl entry is an allowance
-with its discipline written into the entry:
+These are the v1 boundaries. "A written named effect" is no longer the reason for any of them;
+each has its own criterion.
 
 - **trait / impl methods**: a method's row is a full row — effect variables, named labels and
-  associated-effect projections are all admitted (opened by knife 5; labels used to be refused).
+  associated-effect projections are all admitted.
   The variable is introduced by this very signature (§6.3's implicit introduction counts as
   *bound* here), synthesises no evidence, and leaves the dictionary slot untouched; a label is
   one exactly-typed evidence parameter on the slot; a projection is one **erased** slot — which
@@ -1988,23 +2024,21 @@ with its discipline written into the entry:
   rigid effect has no name for `with handle` to spell.
 - **comptime / const initialisers**: compile-time evaluation performs no named effect and cannot
   install a handler either.
-- **Written function types**: `fn(…) -> T !E` is illegal in any `TypeRef` position — parameters,
-  return types, `let` annotations, `alias` targets, record/variant fields, generic arguments, tuple
-  elements. A written label reads as "whoever calls me supplies the handler", and Dawn's evidence is
-  only ever captured by a closure at its creation point, so the spelling has no runtime meaning
-  behind it. The migration is an **effect variable** (`fn() -> Int !e`), which takes both labelled
-  and pure closures. A function's **own signature row** (`fn one() -> Int !Ask`) is not a `TypeRef`
-  and stays legal; so does `!io`. **Associated-effect projections are not under this ban**:
-  `fn() -> Int !C.E` is legal in these positions — the projection is the impl's decision and
-  reduces at instantiation into a row inference could have produced; it is not the
-  "caller supplies the handler" spelling. A record field can now hold an escaping closure — its
-  row was settled at the creation point.
-- **Function values**: a labelled function (including an operation itself) cannot be passed
-  directly as a value — evidence is a hidden parameter and a function value has nowhere to put it.
-  Write it as a lambda (`() => ask()`) and the lambda captures the evidence.
+- **Written function types**: `fn(…) -> T !E` is legal in every `TypeRef` position, including
+  parameters, return types, `let` annotations, `alias` targets, record/variant fields, generic
+  arguments, tuple elements, and trait / impl method parameter types. A written label reads as
+  "whoever calls me supplies the handler", which is exactly its runtime meaning. An effect variable
+  (`fn() -> Int !e`) is another spelling rather than a migration: it forwards the row to its own
+  caller and takes a closure of any row. `!io` and associated-effect projections
+  (`fn() -> Int !C.E`) are equally legal. A record field can hold a labelled closure, and the
+  field's row is the row to supply when it is taken out and called.
+- **Function values**: a labelled named function can be passed as a value; the row enters the
+  value's type and the call site supplies the evidence. An **effect operation itself** cannot: an
+  operation call is "read the evidence field + call the closure", so there is no function symbol to
+  take, and the diagnostic says so. Write it as a lambda (`() => ask()`).
 - `unsafe_pure` masks io only, **not labels**: labels are the input to evidence synthesis, and
   masking one breaks the parameter.
-- **Effect-polymorphic code forwards, it does not settle**: `with handle E` names one concrete
+- **Effect-polymorphic code forwards, it does not install handlers**: `with handle E` names one concrete
   effect syntactically, so the point where a handler is installed is always monomorphic. A `!e` in
   a signature can only pass the row along; installing a handler means writing the effect's name.
   The other face of the same wall is that `pub fn main`'s labels must be empty.
@@ -2012,20 +2046,36 @@ with its discipline written into the entry:
 #### Implementation (informative)
 
 Each `effect E` makes lowering synthesise an ordinary record type (whose name the user cannot
-spell), with one field per operation holding its closure; `with handle` constructs that record and
-binds it to a local, and an operation call = read the field + call the closure. Every label written
-out in a signature appends one hidden evidence parameter to the function, **placed after the
-dictionary parameters**, in ascending effect id order. Each associated-effect projection written
-in the row then appends **exactly one** erased evidence parameter, after the labels' evidence,
-ordered by (subject, trait, member name); on the dictionary-slot boundary it is an erased slot,
-and the impl side's bridge restores it to the concrete evidence record. Labels that flow in
-through a **signature-introduced effect variable** synthesise no parameter — in that case the
-evidence sits in the closure's capture, so higher-order library functions (`list.map` and its
-ilk) need zero changes; a projection is not of that kind, it travels through the slot above.
-The other half of the evidence flow is its dual: a closure settles its own row at the creation
-point, against the evidence it captured. A signature synthesises the parameter, a closure captures
-the evidence; only the two together are the whole flow — one decides who supplies, the other who
-owns up.
+spell), with one field per operation holding its closure, plus one trailing `env` field: the
+evidence environment the arms run in, filled at the **installation point**. `with handle`
+constructs that record and binds it to a local; an operation call = read the field + call the
+closure, and the arm's evidence slot is taken from `env` rather than from the performing site.
+
+There are two evidence conventions, and exactly one translation point.
+
+**A named call gives one slot per atom of the row.** Every label written out in a signature appends
+one exactly-typed hidden evidence parameter to the function, **placed after the dictionary
+parameters**, in ascending effect id order; every signature-introduced effect variable appends one
+**erased** parameter; every associated-effect projection then appends **exactly one** erased
+parameter, after the labels' evidence, ordered by (subject, trait, member name), which the impl
+side's bridge restores to the concrete evidence record.
+
+**A function value always has exactly one slot.** Whatever its row says, a function value's runtime
+arity is "the parameters written, plus one evidence slot", and a pure function value carries an
+empty pack there. A pack is an immutable chain of `(key, evidence, outer)` nodes **addressed by
+atom key**: labels, effect variables and associated projections take their keys from separate
+bands, so two rows meeting in one slot is a single cons and a query is a walk by key, with no
+reordering and no chance of a shifted slot. The rule for building a pack at a call site: every
+**ground** atom of the row (a written label, a projection already reduced to a label) conses one
+node on top of the non-ground environment the frame already holds; when the row has no ground atom
+and exactly one non-ground atom left, the pack **is** that slot, and nothing is allocated. A
+superset is harmless: lookup is by key, so a node nobody asks for costs one step. Only a missing
+key is an error.
+
+The two conventions change hands in the wrapper `lift_fn_value` synthesises: each slot the named
+side wants is read out of the function value's single pack by key. Higher-order library functions
+(`list.map` and its ilk) take the "one non-ground atom left" path, forwarding as-is and building
+nothing.
 
 ---
 
