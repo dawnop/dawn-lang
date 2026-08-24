@@ -73,6 +73,20 @@ fn protect_assoc[T: Held](x: T) -> Int !T.E = bracket(0, y => (), y => held(x))
 fn nested(f: fn() -> Int !e) -> Int !e =
   bracket(0, x => (), x => protect(f) + 1)
 
+## A declared label beside an effect variable, which #335 made bindable: the
+## actual row `!AskE !TellE` binds `e` to the residual `!TellE` rather than
+## being refused. Reaching a primitive from inside such a signature builds the
+## one pack shape none of the lines above do -- **one ground node consed over
+## the frame's own variable slot, at a primitive's call site**. `over_label` in
+## effect_two_vars.dawn builds the same shape at an ordinary Dawn callee; what
+## is new here is that a shim is the reader, and a shim is where the pack used
+## to be thrown away.
+fn mixed(f: fn() -> Int !AskE !e) -> Int !AskE !e =
+  bracket(0, x => (), x => f() + ask())
+
+fn mixed_sort(xs: List[Int], c: fn(Int, Int) -> Int !AskE !e) -> List[Int] !AskE !e =
+  sort_by(xs, (a, b) => c(a, b) * ask())
+
 ## The unwind path, which is the third of the shim's three closure calls and
 ## the only one a value-returning program cannot otherwise reach. `use` panics,
 ## the release runs while the failure is in flight, and the release is what
@@ -117,6 +131,21 @@ fn line_nested() -> Unit !io = {
 fn line_projection() -> Unit !io = {
   with handle AskE { ask() => 300 }
   println(to_string(protect_assoc(Box { v: 1 })))
+}
+
+## The two handlers answer different numbers on purpose: 307 is only reachable
+## if the node and the tail are both walked, and it is this line's own two
+## handlers that put them there.
+fn line_mixed() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  with handle TellE { tell() => 7 }
+  println(to_string(mixed(() => tell())))
+}
+
+fn line_mixed_sort() -> Unit !io = {
+  with handle AskE { ask() => 1 }
+  with handle TellE { tell() => 7 }
+  println(to_string(mixed_sort([3, 1, 2], (a, b) => (b - a) * tell())))
 }
 
 fn line_unwind() -> Unit !io =
@@ -171,6 +200,10 @@ pub fn main() -> Unit !io = {
   line_nested()
   println("-- a projection in the row, which is neither a label nor a variable --")
   line_projection()
+  println("-- a label beside a variable, the residual bound by #335 --")
+  line_mixed()
+  println("-- and the same shape at sort_by --")
+  line_mixed_sort()
   println("-- the release running while a failure is in flight --")
   line_unwind()
   println("-- sort_by's comparator, which is the other primitive with a row --")
