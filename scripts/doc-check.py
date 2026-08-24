@@ -33,7 +33,9 @@ gets disabled, and then it protects nothing):
             it holds, and every one of them is linked from docs/README.md
   index     every lifecycle docs/README.md prints for a document is the one
             that document's own status line claims, which is where the index
-            says the authority lives
+            says the authority lives; and the sections listed in
+            LIFECYCLE_TABULATED_SECTIONS print one per document they link,
+            so a section cannot go back to prose and out of scope
   transl    every translated document registers the digest of the original it
             was translated from, that digest is still the original's, and its
             fenced blocks line up one-for-one with the original's
@@ -152,7 +154,10 @@ check whose blind spot is undocumented gets mistaken for a check:
     the rest outside the specs are counted as skipped, not silently counted as passing.
   * status: the *presence* of the document-lifecycle line, never its truth. Nothing here can
     tell `> 状态：current` from `> 状态：动工计划`, on a plan that shipped a
-    week ago, and pretending otherwise would be worse than the gap.
+    week ago, and pretending otherwise would be worse than the gap. It does
+    not even ask whether the line names a lifecycle at all: index does, for
+    the documents the index prints a lifecycle for, and a document outside
+    every lifecycle row is outside that too.
     Audit finding disposition is different: its finite ID universe and current
     registry are checked by the audit contract below. Free-form design-task
     progress remains authoritative only in each design document.
@@ -2885,7 +2890,7 @@ def check_index_lifecycle_block_selftest() -> tuple[list[str], int]:
                 for target, _cell in INDEX_LIFECYCLE_ROW.findall(section))
             mutant = index.replace(section, f"\n{prose}\n\n状态一律 historical。\n")
         else:
-            mutant = index.replace(f"## {heading}\n", f"## 特性设计\n")
+            mutant = index.replace(f"## {heading}\n", "## 特性设计\n")
         bad, _ = index_block_tabulated_problems(mutant)
         seen = {label for problem in bad
                 for label in re.findall(r"\[(\w+)\]", problem)}
