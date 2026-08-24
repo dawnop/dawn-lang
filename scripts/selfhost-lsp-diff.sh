@@ -271,6 +271,16 @@ PYEOF
 run_session "$REF" lsp > "$OUT/kotlin.txt"
 run_session "$SELF" lsp > "$OUT/self.txt"
 
+# Definition answers can point into a server's own std tree, and the two
+# servers run from different roots (the reference from its seed_root, the
+# subject from the repo). The root prefix is transport detail the same way
+# key order is; the file under std/ and the range are not, so only the
+# prefix collapses.
+for f in "$OUT/kotlin.txt" "$OUT/self.txt"; do
+  sed -i -e "s|file://$OUT/seed-root/std/|file://<root>/std/|g" \
+         -e "s|file://$ROOT/std/|file://<root>/std/|g" "$f"
+done
+
 . scripts/emitchange.sh
 emitchange_load
 if diff "$OUT/kotlin.txt" "$OUT/self.txt" > "$OUT/diff.txt" 2>&1; then
