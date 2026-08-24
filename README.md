@@ -333,7 +333,7 @@ written.
 
 ## Status
 
-Current toolchain 0.67.0, M0–M8 implemented. <!-- doc-check: version --> The lines of
+Current toolchain 0.68.0, M0–M8 implemented. <!-- doc-check: version --> The lines of
 work since then — the C backend and native bootstrap, Perceus, trait v2, effect
 handlers, package management — are recorded in their own design documents under
 `docs/`.
