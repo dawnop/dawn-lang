@@ -48,7 +48,8 @@ use check/types.{
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes,
   eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, eff_assocs, eff_map_assocs,
-  erased_ev_ty, sig_abi_eff, label_key, var_key, assoc_key, atom_keys, EV_PACK_ID, ev_pack_ty,
+  erased_ev_ty, sig_abi_eff, ty_eff_vars_all, nev, label_key, var_key, assoc_key, atom_keys,
+  EV_PACK_ID, ev_pack_ty,
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -6073,6 +6074,10 @@ fn check_call(
         "cast reclaims an erased Java Object via CHECKCAST; primitive targets aren't supported")
     }
   }
+  # `em` is final here, so this is where the instantiations can be read back.
+  # A variable in a parameter type that this signature did not bind came from a
+  # type declaration's binder and has no evidence slot anywhere.
+  cx1 = refuse_decl_eff_inst(cx1, s.param_tys ++ [s.ret], s.eparams, em, lo, hi)
   # Instantiate the callee's effect: an unbound effect variable means pure.
   # The effect half of the choke below: a projection whose subject was just
   # bound reduces here too (D3/D5), so no ground row ever carries one and the
@@ -6175,18 +6180,29 @@ fn check_call(
   let (cxv, evs0, unanswered) = evidence_args(cx1, callee_abi, clo, chi)
   cx1 = cxv
   # ... one per effect variable, behind them (rule 丁) ...
-  let (cxv2, vevs, vunanswered) = evidence_var_args(cx1, callee_abi, em, clo, chi)
+  let (cxv2, vevs, vunanswered, vinsts) = evidence_var_args(cx1, callee_abi, em, clo, chi)
   cx1 = cxv2
   # ... and one per projection written in the row, behind those (rule 丙)
   let (cxa2, aevs, aunanswered, adropped) = evidence_assoc_args(cx1, callee_abi, m, clo, chi)
   cx1 = cxa2
   let evs = evs0 ++ vevs ++ aevs
+  # **Charged is what was supplied.** The declared row is not enough on its
+  # own, because a declared `!io` absorbs the effect variables beside it
+  # (`base_union`) and the absorbed one is exactly the slot the line above just
+  # filled: `fn run(t: fn() -> Int !e) -> Int !io` normalizes to `!io`, so
+  # instantiating `!e := !Ask` charged the caller nothing and the caller's own
+  # row lost the label -- and a row without the label builds a pack without the
+  # node, which is `ev_get`'s compiler-invariant panic on a program that checks
+  # clean. So every instantiation `evidence_var_args` packed is unioned in
+  # before the withdrawal below: supplying evidence for an atom and not being
+  # charged for it are the same bug seen from two sides.
+  let charged = eff_union([callee_eff] ++ vinsts)
   # Charge the row -- minus any label `evidence_args` just reported as having
   # no handler. That call is already an error, at the raise site and in the
   # raise site's words; leaving the label in the body's row would have
   # `verify_effects` say the same thing over again at the signature.
   cx1 = record_effect(cx1,
-    eff_drop_assocs(eff_drop(callee_eff, unanswered ++ vunanswered ++ aunanswered), adropped),
+    eff_drop_assocs(eff_drop(charged, unanswered ++ vunanswered ++ aunanswered), adropped),
     clo, chi, callee)
   # Nothing further to record about where the labels came from. That question
   # -- written here, or brought in by instantiating an effect variable -- was
@@ -6239,6 +6255,79 @@ fn instantiate_eff(e: Eff, em: Map[Int, Eff]) -> Eff = {
   subst_eff(e, em1)
 }
 
+## Refuse to instantiate a **type declaration's** effect parameter with a row
+## that would need evidence.
+##
+## Knife 3 gave `type Box[!e]` and `alias Mapper[T, U, !e]` a binder and called
+## the feature check-period only, on the argument that a closure settled its row
+## where it was created and carried the evidence in its captures, so a `!e` on a
+## record field cost nothing at run time (docs/effect-params-design.md 刀 3, and
+## `scripts/spike-native/effect_params.dawn`'s header states it in those words).
+## The evidence flip took that premise away. A closure carries no evidence now;
+## the pack is handed over by whoever calls it, and a slot has to exist to hand
+## it over in.
+##
+## For a variable a **signature** binds there is one: rule 丁 gives it a hidden
+## parameter, the call site fills it with `evidence_pack` of the instance, and
+## the body forwards it. For a variable a **declaration** binds there is none,
+## and there is nowhere to put one either: a record is not a frame, and a type
+## reference has no effect-argument position to instantiate per use site
+## (decision 7 -- `Box` is one type however its field's row turns out). So the
+## binder keeps admitting every row that needs no evidence, which is what pure
+## and `!io` are and what the feature's own corpus asks of it, and refuses the
+## rows whose evidence would have to travel a channel that does not exist.
+## Before this refusal such a program checked clean and then met `ev_get`'s
+## compiler-invariant panic (`types.EV_MISS_MSG`) at run time.
+##
+## `nev` is the whole predicate, because it is the one place that counts how
+## much evidence a row is worth: zero atoms, nothing to carry, nothing to
+## refuse.
+##
+## `bound` is the signature's own binders, which are exempt and are also the
+## fix the hint asks for; a constructor binds none and passes `[]`.
+fn refuse_decl_eff_inst(
+  cx: Cx,
+  declared: List[Ty],
+  bound: List[Eff],
+  em: Map[Int, Eff],
+  lo: Int,
+  hi: Int
+) -> Cx = {
+  var cx1 = cx
+  for tv in ty_eff_vars_all(declared) {
+    let (vid, vname) = tv
+    var is_bound = false
+    for b in bound {
+      match b {
+        EffVar(_, bid) -> if bid == vid { is_bound = true }
+        _ -> ()
+      }
+    }
+    if is_bound { continue }
+    let inst = match map.get(em, vid) {
+      Some(e) -> e
+      None -> EPure
+    }
+    # The variable standing for itself is the identity, not an instantiation:
+    # `fn store(m: Mapper[Int, String]) -> Mapper[Int, String] = m` unifies the
+    # declaration's binder against the very same binder, and forwarding a value
+    # whose row is unchanged asks nobody for evidence. So the atom being solved
+    # is discounted and what is left is what would have to travel.
+    var owed = len(eff_labels(inst)) + len(eff_assocs(inst))
+    for iv in eff_vars(inst) {
+      let (ivid, _) = iv
+      if ivid != vid { owed = owed + 1 }
+    }
+    if owed == 0 { continue }
+    cx1 = cerr_h(cx1, "`!" ++ vname ++ "` is bound by a type declaration and cannot carry !" ++
+        eff_show(inst), lo, hi,
+      "a declaration's effect parameter has no evidence slot, so only pure and !io travel " ++
+        "through it; bind the variable on the function that runs the closure instead -- " ++
+        "`fn f(g: fn() -> Int !" ++ vname ++ ") -> Int !" ++ vname ++ "`")
+  }
+  cx1
+}
+
 ## Resolve one evidence value per label written in `declared`, in effect-id
 ## order. A label with nothing to answer it is the "nobody is handling this"
 ## error, reported here -- at the call that raises it, which is the only place
@@ -6275,16 +6364,23 @@ fn evidence_args(cx: Cx, declared: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr], L
 ## so the caller can take them out of the row it charges. Reporting without
 ## withdrawing would say the same thing twice, once here and once at the
 ## signature.
+##
+## The fourth answer is the rows themselves, one per slot, because the caller
+## has to charge what it packed and the declared row cannot tell it: `!io`
+## absorbs the variables beside it, so a callee declared `!io !e` hands its
+## caller a row with no trace of what `!e` turned out to be. See `check_call`'s
+## `charged`.
 fn evidence_var_args(
   cx: Cx,
   declared: Eff,
   em: Map[Int, Eff],
   lo: Int,
   hi: Int
-) -> (Cx, List[TExpr], List[Int]) = {
+) -> (Cx, List[TExpr], List[Int], List[Eff]) = {
   var cx1 = cx
   var out: List[TExpr] = []
   var unanswered: List[Int] = []
+  var insts: List[Eff] = []
   for v in eff_vars(declared) {
     let (vid, _) = v
     let inst = match map.get(em, vid) {
@@ -6295,8 +6391,9 @@ fn evidence_var_args(
     cx1 = cx2
     out = out ++ [slot]
     unanswered = unanswered ++ un
+    insts = insts ++ [inst]
   }
-  (cx1, out, unanswered)
+  (cx1, out, unanswered, insts)
 }
 
 ## The evidence pack for a row: a **scope**, not a transcript.
@@ -6920,6 +7017,13 @@ fn check_ctor_call(
     }
     atx = atx_next
   }
+  # `em` is final here. A constructor binds no effect variables of its own, so
+  # every variable its field types write is the declaration's, and the row it
+  # was just instantiated with has to be one nothing has to carry.
+  var field_tys: List[Ty] = []
+  for f in ci.fields { field_tys = field_tys ++ [f.ty] }
+  let no_binders: List[Eff] = []
+  cx1 = refuse_decl_eff_inst(cx1, field_tys, no_binders, em, lo, hi)
   var missing_reported = false
   if not args_broken {
     var missing: List[String] = []

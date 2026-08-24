@@ -1372,6 +1372,68 @@ pub alias Effects = Map[Int, EffectI]
 ## the ADT namespace with user types without ever colliding with one.
 pub fn ev_record_name(effect_name: String) -> String = "ev\$" ++ effect_name
 
+## Every effect variable written in the rows inside a type, in occurrence
+## order and with its name kept.
+##
+## A substitution keeps ids and throws names away, so a reader that has only
+## `Map[Int, Eff]` cannot say which variable an entry is about. This walk is
+## where the name comes back, and it is also the only way to ask "which
+## variables does this *type* carry", which `sig_abi_eff` below cannot answer:
+## it folds in the ones the signature **binds**, and a variable that arrived
+## through a `type Box[!e]` or `alias Mapper[T, U, !e]` binder is bound
+## somewhere else entirely.
+##
+## `TyAdt` contributes only through its arguments, and that is not an omission:
+## a declaration's effect binder is not a member of `TyAdt.args` (there is no
+## effect-argument position on a type reference at all), so a reference to
+## `Box` carries the variable nowhere a walk could find it. The field types do
+## carry it, which is why `check_ctor_call` asks about those rather than about
+## the type being built.
+pub fn ty_eff_vars(t: Ty) -> List[(Int, String)] =
+  match t {
+    TyAdt(_, args) -> ty_eff_vars_all(args)
+    TyList(e) -> ty_eff_vars(e)
+    TyMap(k, v) -> ty_eff_vars(k) ++ ty_eff_vars(v)
+    TySet(e) -> ty_eff_vars(e)
+    TyArray(e) -> ty_eff_vars(e)
+    TyOpaque(_, _, _, args, tgt) -> ty_eff_vars_all(args) ++ ty_eff_vars(tgt)
+    TyAssoc(s, _, _) -> ty_eff_vars(s)
+    TyTuple(es) -> ty_eff_vars_all(es)
+    TyFn(ps, r, ef) -> ty_eff_vars_all(ps) ++ ty_eff_vars(r) ++ eff_vars(ef)
+    _ -> []
+  }
+
+pub fn ty_eff_vars_all(ts: List[Ty]) -> List[(Int, String)] = {
+  var out: List[(Int, String)] = []
+  for t in ts {
+    for v in ty_eff_vars(t) {
+      let (id, _) = v
+      if not union_has(out, id) { out = out ++ [v] }
+    }
+  }
+  out
+}
+
+test "ty_eff_vars finds the rows a type carries, and only those" {
+  let e1 = EffVar("e", 11)
+  let e2 = EffVar("f", 12)
+  assert ty_eff_vars(TyInt) == []
+  assert ty_eff_vars(TyFn([TyInt], TyInt, e1)) == [(11, "e")]
+  # nested: a list of functions, and a function returning a function
+  assert ty_eff_vars(TyList(TyFn([], TyUnit, e1))) == [(11, "e")]
+  # parameters, then the return, then the row -- the row is written last and
+  # walked last, the same order `eff_params_of` mints in
+  assert ty_eff_vars(TyFn([], TyFn([], TyInt, e2), e1)) == [(12, "f"), (11, "e")]
+  # io and a written label are answers, not variables: neither is a slot here
+  assert ty_eff_vars(TyFn([], TyInt, EIo)) == []
+  assert ty_eff_vars(TyFn([], TyInt, ELabeled(EPure, [(7, "Ask")]))) == []
+  # a type reference hides its declaration's binder -- see the header
+  assert ty_eff_vars(TyAdt(3, [])) == []
+  assert ty_eff_vars(TyAdt(3, [TyFn([], TyInt, e1)])) == [(11, "e")]
+  # the list form dedupes by id, so two fields writing one binder are one entry
+  assert ty_eff_vars_all([TyFn([], TyInt, e1), TyFn([], TyUnit, e1)]) == [(11, "e")]
+}
+
 ## A signature's **ABI row**: its declared row, with the effect variables it
 ## binds folded in.
 ##
