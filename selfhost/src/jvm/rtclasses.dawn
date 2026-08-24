@@ -3061,7 +3061,13 @@ fn gen_comparator_class(
 pub fn gen_fn_comparator(supers: List[String]) -> Bytes !io =
   gen_comparator_class(supers, FN_CMP_CLASS, "L" ++ fn_iface(3) ++ ";", (m: MethodVisitor) => {
     # the comparator is a Dawn function value, so it takes its evidence pack
-    # behind its two written parameters; this boundary has none to give
+    # behind its two written parameters, and this boundary has none to give.
+    #
+    # Unobservable rather than merely tolerated: nothing constructs one of
+    # these. The class is emitted into every program (main.dawn) and
+    # instantiated by none -- it is what sorting used before `sort_by` became
+    # std/pvec's own function -- so no closure is ever applied through here.
+    # `types.ev_pack_adt` keeps the list of what every shim passes and why.
     m.visitInsn(OP_ACONST_NULL)
     m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(3), "apply", erased_apply_desc(3), true)
     m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")

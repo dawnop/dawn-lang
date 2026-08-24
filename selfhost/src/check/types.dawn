@@ -1570,12 +1570,52 @@ pub const EV_PACK_ID: Int = -3
 ##
 ## Three things terminate a walk, and `ev_get` tolerates all three: the boxed
 ## unit that is the placeholder, a NULL pack, and any other erased value that
-## is not a pack node. NULL is not hypothetical -- seven hand-written shim
-## sites (`gen_try_closure`, `gen_bracket` ×3, the SAM bridge,
-## `dawn_run_caught`, `dawn_bracket`) hand a raw null across as the empty pack,
-## and their comments say that is safe because nothing reads one. That
-## justification expires when reads appear; `ev_get`'s null tolerance is what
-## replaces it, so the sites themselves stay as they are.
+## is not a pack node. NULL is not hypothetical: hand-written shims apply Dawn
+## closures, and a shim passes whatever it has.
+##
+## This paragraph used to say that seven such sites passed a raw null "because
+## nothing reads one", that the justification would expire when reads appeared,
+## and that `ev_get`'s null tolerance replaced it -- so the sites could stay as
+## they were. The prediction was right and the conclusion was wrong, and the
+## way it was wrong is the part worth keeping. Null tolerance stops a *crash*.
+## A shim that passes null where the caller had a pack is not crashing; it is
+## answering the wrong question, and the reader that walks off the end gets the
+## compiler-invariant panic below on a program that checks clean. That is what
+## `bracket` did: `bracket(1, x => (), x => quota() + x)` under a
+## `with handle` printed `EV_MISS_MSG` instead of a number.
+##
+## So the sites are enumerated, and each one says which of the two it is.
+##
+##   `gen_bracket` ×3, `dawn_bracket` ×3 (and its wasi twin)
+##       **the pack**, out of the primitive's own evidence parameter.
+##       `bracket` is effect-polymorphic, so its row is worth one slot
+##       (`nev`) and the call site fills it like any other callee's.
+##
+##   `gen_try_closure`, `dawn_run_caught`
+##       **null, and it is the answer rather than a tolerated wrong one.**
+##       `catch_fault`/`catch_panic` declare `f: fn() -> T !io`, so a closure
+##       whose row still owes evidence -- a written label, an effect variable,
+##       a projection -- is refused at the argument by `eff_subsumes` before
+##       any of this. All three spellings were measured; the diagnostic names
+##       the row it could not accept.
+##
+##   the SAM bridge (`jvm/emit.gen_sam_bridge`)
+##       **null, and this one is a known hole rather than a discharged one.**
+##       A `use java` callback is entered from Java with no Dawn frame under
+##       it, and spec §9.4 puts no limit on the row a function value crossing
+##       that boundary may have -- so
+##       `Thread.new(() => println(to_string(quota())))` under a `with handle`
+##       still panics. The repair is not a wiring change: the pack would have
+##       to be captured into the adapter *object* at conversion time, which is
+##       evidence living in a value, and whether a callback Java runs after
+##       the handler frame returned should see that handler at all is a
+##       language question rather than a codegen one.
+##
+##   `gen_fn_comparator`
+##       **null, and nothing can observe it**: no emitted program constructs a
+##       `dawn/rt/FnComparator`. The class is written into every program and
+##       instantiated by none, left over from when sorting went through
+##       `java.util.Arrays`. Delete the class and the site goes with it.
 ##
 ## A miss is not a terminator. Falling off the end means lowering built a pack
 ## that does not answer a key its own reader asks for, which is a compiler

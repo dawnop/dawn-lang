@@ -1244,8 +1244,12 @@ static dawn_adt *dawn_foreign_error(dawn_failure f) {
  * every instantiation -- see the header. */
 #ifndef __wasi__
 /* `f` is a Dawn `fn() -> T`, which is a one-slot function value: the written
- * parameters are none and the evidence pack is one. This boundary has no
- * evidence, so it passes NULL -- the empty pack (see dawn_bracket). */
+ * parameters are none and the evidence pack is one. NULL is the empty pack,
+ * and here it is the answer rather than a tolerated wrong one: the barriers
+ * declare `f: fn() -> T !io`, so a closure whose row still owes evidence is
+ * refused at the argument long before this. `dawn_bracket` next door takes a
+ * pack, because its row is a variable and its callers can be charged for
+ * one. */
 static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   /* designated init so the rest (the jmp_buf) is zeroed: the landing cleanup
    * may run before setjmp has ever filled it, and reads it only behind the
@@ -1272,8 +1276,12 @@ static void *dawn_wasi_caught_body(void *ctx) {
 }
 
 /* `f` is a Dawn `fn() -> T`, which is a one-slot function value: the written
- * parameters are none and the evidence pack is one. This boundary has no
- * evidence, so it passes NULL -- the empty pack (see dawn_bracket). */
+ * parameters are none and the evidence pack is one. NULL is the empty pack,
+ * and here it is the answer rather than a tolerated wrong one: the barriers
+ * declare `f: fn() -> T !io`, so a closure whose row still owes evidence is
+ * refused at the argument long before this. `dawn_bracket` next door takes a
+ * pack, because its row is a variable and its callers can be charged for
+ * one. */
 static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   dawn_handler h = {
     .prev = dawn_handlers,

@@ -839,7 +839,8 @@ fn emit_sam_conversion(
   # the *function value's* arity: a Dawn fn value carries its evidence pack in
   # a trailing slot, so what is on the stack here is a `Fn(n+1)`. The bridge
   # and the adapter class below are spelled from this one number, and the
-  # bridge fills the slot with null (a shim has no evidence to hand over).
+  # bridge fills the slot with null -- a known hole rather than a discharged
+  # one, spelled out at the push in `gen_sam_bridge`.
   let n = fn_arity(ft)
   let bridge = "dawn\$sam\$" ++ to_string(g.sam_ctr)
   let g1 = Gen {
@@ -1143,10 +1144,20 @@ fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
     }
     i = i + 1
   }
-  # the evidence pack the function value expects. A `use java` callback is
-  # entered from Java, which has no evidence to give and nothing that reads
-  # one: null is the empty pack a hand-written boundary hands over, the same
-  # answer `dawn_bracket` and `gen_bracket` give.
+  # the evidence pack the function value expects, and a **known hole**: this
+  # boundary passes null, and the closure may need better. A `use java`
+  # callback is entered from Java with no Dawn frame under it, and spec §9.4
+  # puts no limit on the row a function value crossing here may have, so
+  # `Thread.new(() => println(to_string(quota())))` under a `with handle`
+  # checks clean and panics with `types.EV_MISS_MSG`.
+  #
+  # `gen_bracket` and `dawn_bracket` used to give the same answer for the same
+  # stated reason and no longer do -- a primitive's own row buys an evidence
+  # slot at the call site, so a shim can be handed the pack. There is no call
+  # site here to hand one over: the pack would have to be captured into the
+  # adapter object `emit_sam_conversion` builds, which is evidence living in a
+  # value, and what a callback Java runs after the handler frame returned
+  # should see is a language question. `types.ev_pack_adt` keeps the list.
   m.visitInsn(OP_ACONST_NULL)
   m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(n), "apply", erased_apply_desc(n), true)
   if b.bottom {
