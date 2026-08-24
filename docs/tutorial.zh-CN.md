@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ bb26ad1325f82134 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 5437be0909c296e5 -->
 
 # Dawn 教程
 

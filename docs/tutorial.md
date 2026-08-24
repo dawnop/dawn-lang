@@ -835,7 +835,7 @@ pub fn main() -> Unit !io = {
 
 An arm's body may do anything, io included. That counts against **the block that
 installed the handler** — which is why `main` above is `!io` — and not against `work`,
-which emitted the operation: `work` owes only `!Ask`.
+which emitted the operation: `work` owes only `!Log`.
 
 ### Who answers: the nearest one lexically
 
@@ -916,7 +916,7 @@ pub fn main() -> Unit !io = {
 - An arm is a closure, so it cannot write to an enclosing `var` and cannot `return` or
   `break` its way out.
 
-The full rules are in [spec.md](spec.md) §6.5 and the design trade-offs in
+The full rules are in [spec.en.md](spec.en.md) §6.5 and the design trade-offs in
 [effects-design.md](effects-design.md).
 
 ---
