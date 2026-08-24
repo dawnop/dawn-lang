@@ -1,0 +1,51 @@
+# checker.dawn: what a **type declaration's** effect parameter is allowed to be
+# instantiated with. The declaration-site half (which names may be written at
+# all) is effect_params_decl.dawn; this is the use-site half.
+#
+# A signature's `!e` has an evidence slot, so a row that needs evidence can
+# travel through it. A declaration's `!e` has none, and a type reference has no
+# effect-argument position that could give it one per use site, so only rows
+# that need no evidence -- pure and !io -- go through. Every refusal below
+# checked clean before the rule existed and then panicked at run time with
+# "effect evidence missing".
+effect Ask { fn get() -> Int }
+
+alias Thunk[!e] = fn() -> Int !e
+
+type Box[!e] = { f: fn(Int) -> Int !e }
+
+type Carrier[T, !e] =
+  | Now(v: T)
+  | Later(mk: fn() -> T !e)
+
+# the accepted rows, first, so the golden shows the refusals are about the row
+# and not about the shape: a pure closure and an `!io` closure into the same
+# field
+fn pure_box() -> Box = Box { f: n => n * 2 }
+
+fn io_box() -> Box !io = Box { f: n => n * 3 }
+
+# a written label in the field is a different spelling with a different answer:
+# it is ground, so whoever calls `f` resolves it by name and no variable is
+# involved
+type Named = { f: fn() -> Int !Ask }
+
+fn named_box() -> Named = Named { f: () => get() }
+
+# ---- the refusals ----
+
+# a labelled closure into a record field's effect parameter
+fn labelled_box() -> Box !Ask = Box { f: n => get() + n }
+
+# ... and into a variant field's
+fn labelled_carrier() -> Carrier[Int] !Ask = Later(() => get())
+
+# a labelled closure into an alias's effect parameter, at the call that fills a
+# parameter typed by the alias
+fn take(t: Thunk) -> Int !io = t()
+
+fn labelled_alias() -> Int !io !Ask = take(() => get())
+
+# a *signature's* effect variable is no more storable than a label: its pack
+# lives in this frame and the record outlives the frame
+fn forward(g: fn(Int) -> Int !r) -> Box = Box { f: g }

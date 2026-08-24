@@ -1,11 +1,22 @@
 # Effect parameters (docs/effect-params-design.md knives 2 and 3): the explicit
 # binder `[T, U, !e]` on a `fn`, and the same binder on `alias` and `type`.
 #
-# The claim is that this is a check-period feature with nothing behind it at
-# run time. A closure settles its own row where it is created and carries the
-# evidence it needs (SEM-01, effects-design.md §4.6), so a `!e` on a record
-# field costs no argument at the call and neither backend grows a case. Both
-# backends running this to the same bytes is what says so.
+# A `fn`'s binder and a declaration's binder are not the same feature, and what
+# is below is the half that stayed check-period. A `fn`'s `!e` has an evidence
+# slot (rule 丁), so a row that needs evidence travels through it; a
+# declaration's `!e` has none, and a type reference has no effect-argument
+# position that could give it one per use site, so only rows that need no
+# evidence -- pure and !io -- go into a field. Every field row written here is
+# one of those two, which is why neither backend grows a case and both run this
+# to the same bytes.
+#
+# The header used to claim more: that a closure settled its own row where it
+# was created and carried the evidence it needed (SEM-01, effects-design.md
+# §4.6), so any `!e` on a record field cost nothing at run time. The evidence
+# flip removed that premise and left the claim standing over a hole -- a
+# labelled closure in a field checked clean and then panicked. The refusal that
+# closed it is pinned next door, in
+# scripts/checker-corpus/cases/effect_params_carry.dawn.
 use std/io
 
 fn map_explicit[T, U, !e](xs: List[T], f: fn(T) -> U !e) -> List[U] !e = map(xs, f)
@@ -41,7 +52,7 @@ pub fn main() -> Unit !io = {
   println("-- a named function type --")
   println(pure_mapper()(41))
 
-  println("-- a row on a record field, settled where the closure was built --")
+  println("-- a row on a record field: pure and io, the two that owe nothing --")
   println(to_string(run_box(Box { f: n => n * 2 })))
   println(to_string(run_box(Box { f: n => {
     println("in the field")

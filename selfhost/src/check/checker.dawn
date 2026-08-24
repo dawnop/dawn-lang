@@ -6075,9 +6075,9 @@ fn check_call(
     }
   }
   # `em` is final here, so this is where the instantiations can be read back.
-  # A variable in a parameter type that this signature did not bind came from a
-  # type declaration's binder and has no evidence slot anywhere.
-  cx1 = refuse_decl_eff_inst(cx1, s.param_tys ++ [s.ret], s.eparams, em, lo, hi)
+  # A variable in a parameter type that this callee's ABI row does not carry
+  # came from a type declaration's binder and has no evidence slot anywhere.
+  cx1 = refuse_decl_eff_inst(cx1, s.param_tys ++ [s.ret], eff_vars(sig_abi_eff(s)), em, lo, hi)
   # Instantiate the callee's effect: an unbound effect variable means pure.
   # The effect half of the choke below: a projection whose subject was just
   # bound reduces here too (D3/D5), so no ground row ever carries one and the
@@ -6283,12 +6283,17 @@ fn instantiate_eff(e: Eff, em: Map[Int, Eff]) -> Eff = {
 ## much evidence a row is worth: zero atoms, nothing to carry, nothing to
 ## refuse.
 ##
-## `bound` is the signature's own binders, which are exempt and are also the
-## fix the hint asks for; a constructor binds none and passes `[]`.
+## `bound` is the variables the callee's **ABI row** carries -- `eff_vars` of
+## `sig_abi_eff`, which is the one definition of which atoms get a slot. Not
+## `Sig.eparams`: a builtin is hand-built with an empty `eparams` and writes its
+## variable in the row instead (`bracket`), and its callers do pass a pack for
+## it. Asking the ABI rather than the binder list asks the question that
+## matters, which is whether a slot exists, and it is also the fix the hint
+## points at. A constructor has no ABI row at all and passes `[]`.
 fn refuse_decl_eff_inst(
   cx: Cx,
   declared: List[Ty],
-  bound: List[Eff],
+  bound: List[(Int, String)],
   em: Map[Int, Eff],
   lo: Int,
   hi: Int
@@ -6298,10 +6303,8 @@ fn refuse_decl_eff_inst(
     let (vid, vname) = tv
     var is_bound = false
     for b in bound {
-      match b {
-        EffVar(_, bid) -> if bid == vid { is_bound = true }
-        _ -> ()
-      }
+      let (bid, _) = b
+      if bid == vid { is_bound = true }
     }
     if is_bound { continue }
     let inst = match map.get(em, vid) {
@@ -7022,7 +7025,7 @@ fn check_ctor_call(
   # was just instantiated with has to be one nothing has to carry.
   var field_tys: List[Ty] = []
   for f in ci.fields { field_tys = field_tys ++ [f.ty] }
-  let no_binders: List[Eff] = []
+  let no_binders: List[(Int, String)] = []
   cx1 = refuse_decl_eff_inst(cx1, field_tys, no_binders, em, lo, hi)
   var missing_reported = false
   if not args_broken {

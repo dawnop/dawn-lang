@@ -1,0 +1,68 @@
+# A callee whose declared row is `!io` still owes its caller the labels its
+# effect variables were instantiated with.
+#
+# `base_union` lets io absorb the variables written beside it, so `-> Int !io
+# !e` normalizes to `!io` and the declared row keeps no trace of `!e`. The
+# caller used to charge that declared row and nothing else, so instantiating
+# `!e := !AskE` charged it nothing: the label never entered the caller's own
+# row, the `with handle` remainder was therefore built with a pack that had no
+# node for it, and the call read `ev_get` off an empty pack and panicked with
+# "effect evidence missing" on a program that checks clean. The caller now
+# charges what it packed.
+#
+# Every function here is one the compiler's own diagnostic recommends: the
+# advice on an unbindable variable is "declare !io, which covers any row", and
+# following it is what walked into this.
+#
+# `plain` is the control that was always green -- its row has no io, so the
+# variable survived normalization and the charge came out right by accident of
+# the shape rather than by rule. Keeping it here means a fix that widened
+# something instead of charging would still have to answer for it.
+use std/io
+
+effect AskE {
+  fn ask() -> Int
+}
+
+effect TellE {
+  fn tell() -> Int
+}
+
+## The variable is written in the row and absorbed by the io beside it.
+fn under_io(f: fn() -> Int !e) -> Int !io !e = {
+  println("under_io ran")
+  f()
+}
+
+## The variable is not written in the row at all: `!io` alone, which is the
+## spelling the diagnostic asks for.
+fn only_io(f: fn() -> Int !e) -> Int !io = f()
+
+## The control: no io in the row, so nothing is absorbed.
+fn plain(f: fn() -> Int !e) -> Int !e = f()
+
+## Two absorbed variables in one signature, so the charge is a union and not a
+## single row that happened to be the last one seen.
+fn two_under_io(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !io = g() + h()
+
+## An absorbed variable forwarded through a second absorbing signature: the
+## instantiation here is a variable rather than a label, and the label is
+## charged one level up.
+fn nested(f: fn() -> Int !e) -> Int !io = only_io(f)
+
+pub fn main() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  with handle TellE { tell() => 7 }
+  println("-- a variable absorbed by the io written beside it --")
+  println(to_string(under_io(() => ask())))
+  println("-- the row that says only !io --")
+  println(to_string(only_io(() => ask())))
+  println("-- the control: a row with no io to absorb anything --")
+  println(to_string(plain(() => ask())))
+  println("-- two absorbed variables, two labels, one charge --")
+  println(to_string(two_under_io(() => ask(), () => tell())))
+  println("-- forwarded through a second absorbing signature --")
+  println(to_string(nested(() => tell())))
+  println("-- and a pure closure through the same signatures --")
+  println(to_string(only_io(() => 1)))
+}
