@@ -579,8 +579,15 @@ dawn_adt *dawn_catch_panic(dawn_clo *f);
  *
  * A taken unwind path leaks what the discarded C frames held, exactly as a
  * taken barrier does; see the note above and scripts/spike-native's
- * `.leaks-on-catch` markers. */
-void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use);
+ * `.leaks-on-catch` markers.
+ *
+ * `ev` is the fourth parameter because `bracket` is effect-polymorphic:
+ * `release` and `use` share one row, so the primitive's own row is worth one
+ * evidence slot at the call site (types.nev) and this is that slot. The two
+ * barriers above take none -- their thunks are declared `fn() -> T !io`, and
+ * `!io` is an answer rather than a question. `ev` is borrowed like every other
+ * intrinsic argument; each closure call takes a reference of its own. */
+void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use, void *ev);
 
 /* Simple (1:1) Unicode case mapping: a code point in `lo..hi` maps to itself
  * plus `delta`, and one in no range maps to itself.

@@ -3054,8 +3054,19 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     match rt_intrinsic_class(gx, name) {
       Some(cls) -> {
         let sig = builtin_sig(gx, name)
+        # the written parameters, then one erased slot per atom of the
+        # primitive's own row -- rule 丁 at a shim, the same count
+        # `lower.builtin_evidence` appends and the same one `sig_desc_with_dicts`
+        # spells for a Dawn callee. `bracket` is the only entry of the table
+        # this is worth anything at (every other row is pure or `!io`, and
+        # `types.nev` gives neither a slot), and a shim reached through a
+        # descriptor one word short is a `NoSuchMethodError` rather than a
+        # verifier complaint.
+        var ps = ""
+        for p in sig.param_tys { ps = ps ++ desc_of(gx.adts, p) }
+        ps = ps ++ erased_ev_slots(nev(sig_abi_eff(sig)))
         g1.mv.visitMethodInsn(OP_INVOKESTATIC, cls, name,
-          method_desc(gx.adts, sig.param_tys, sig.ret), false)
+          "(" ++ ps ++ ")" ++ desc_of(gx.adts, sig.ret), false)
       }
       None -> panic("codegen: Core intrinsic without a JVM mapping: " ++ name)
     }

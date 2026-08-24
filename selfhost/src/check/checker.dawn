@@ -3514,10 +3514,16 @@ fn eta_bounded_fn_value(
   # with a labelled row would need that list built here; none exists (a bound
   # and a label have never met in one signature in this tree), and building it
   # blind would be a second, untested copy of `check_call`'s evidence block.
+  # The builtin side is uninhabited rather than merely empty, and the two
+  # halves of the reason are in different files: only `sort_by` and `bracket`
+  # have a row worth a slot (`types.nev`), and neither carries a bound, so
+  # neither reaches this wrapper -- `check_fn_value` only opens one when
+  # `nbounds > 0`, and an unbounded primitive taken as a value is an
+  # `XFnValue` that `lower.lift_fn_value` unpacks a pack for.
   let evid: List[TExpr] = []
   let body =
     if f.is_builtin {
-      XCallBuiltin(name, args, wits, lo, hi, iret)
+      XCallBuiltin(name, args, wits, evid, lo, hi, iret)
     } else {
       XCallFn(f.owner, name, args, wits, evid, f.trait_id, lo, hi, iret)
     }
@@ -3557,7 +3563,7 @@ test "fn values instantiate from the expected type" {
       # nothing to capture: the witness is settled at `Int`, not forwarded
       assert len(caps) == 0
       match body {
-        XCallBuiltin(bn, bargs, bwits, _, _, _) -> {
+        XCallBuiltin(bn, bargs, bwits, _, _, _, _) -> {
           assert bn == "sortish"
           assert len(bargs) == 1
           assert bwits == [WConcrete(EQ_ID, TyInt)]
@@ -6244,8 +6250,15 @@ fn check_call(
   # asked so that a closure being built could drop the ones it had answered
   # itself; no closure drops anything now, so `instantiated_labels` and the
   # `mark_unsettled_labels` call that consumed it went with it.
+  # A primitive is charged for its own row like anything else, and until
+  # 2026-08-25 it was the one callee that did not *receive* what it charged:
+  # this node dropped `evs`, and lowering filled the slots with placeholders
+  # sized off the signature. Two primitives have a row to fill -- `sort_by`
+  # (`!e`, body in std/pvec) and `bracket` (`!e`, body a hand-written shim) --
+  # and both handed a closure a pack with nothing in it, so a labelled closure
+  # through either was `ev_get`'s panic on a program that checks clean.
   let node = if s.is_builtin {
-    XCallBuiltin(callee, txs2, wits, lo, hi, ret)
+    XCallBuiltin(callee, txs2, wits, evs, lo, hi, ret)
   } else {
     match s.op_of {
       # an operation call is a field read off the evidence plus a closure
@@ -6535,13 +6548,16 @@ fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExp
   # node and no allocation; more than one is the join, folded from the right so
   # that each environment is rebuilt once and the first one stays frontmost.
   let no_wits: List[WitRef] = []
+  # `ev_append`'s own row is pure, so it owes no evidence -- the packs it joins
+  # are its ordinary arguments
+  let no_ev: List[TExpr] = []
   var tail: TExpr = XUnit(lo, hi)
   if len(envs) > 0 {
     tail = envs[len(envs) - 1]
     var i = len(envs) - 1
     while i > 0 {
       i = i - 1
-      tail = XCallBuiltin("ev_append", [envs[i], tail], no_wits, lo, hi, erased_ev_ty())
+      tail = XCallBuiltin("ev_append", [envs[i], tail], no_wits, no_ev, lo, hi, erased_ev_ty())
     }
   }
   var acc = tail
@@ -10273,7 +10289,7 @@ fn local_sym(t: TExpr) -> Int =
 ## makes "no join here" assertable -- `local_sym` of a join is not a local.
 fn append_args(t: TExpr) -> (TExpr, TExpr) =
   match t {
-    XCallBuiltin(name, args, _, _, _, ty) -> {
+    XCallBuiltin(name, args, _, _, _, _, ty) -> {
       if name != "ev_append" || len(args) != 2 {
         panic("not an ev_append call")
       }

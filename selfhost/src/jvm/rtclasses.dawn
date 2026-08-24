@@ -909,47 +909,57 @@ fn gen_try_closure(cw: ClassWriter, name: String, caught: List[String]) -> Unit 
 ## in `types.intrinsics()`, which is what puts the box on the argument and the
 ## unbox at the call site.
 ## The two closures arrive as `dawn/rt/Fn2`, not `Fn1`: every Dawn function
-## value carries one trailing evidence slot, whatever its row. A hand-written
-## shim has no evidence to hand over and nothing here reads one, so it pushes
-## null -- the empty pack (fb design 5.2; `dawn_bracket` gives the same answer
-## on the other backend).
+## value carries one trailing evidence slot, whatever its row.
+##
+## **And this shim is handed one to put in it.** `bracket` is effect-
+## polymorphic -- `release` and `use` share the row `e` -- so its own row is
+## worth one evidence slot at every call site (`types.nev`), and the fourth
+## parameter is that slot: the pack the caller built for whatever `e`
+## instantiated to. It is the only primitive of the table that takes one.
+##
+## It used to push `ACONST_NULL` in all three places, on the ground that a
+## hand-written shim has no evidence and nothing reads a pack. Both halves were
+## true when they were written and the second one expired when `ev_get` landed:
+## `bracket(1, x => (), x => quota() + x)` under a `with handle` passed
+## `dawn check` and panicked at run time, because the closure walks the pack it
+## is applied with and a null pack answers no key.
 fn gen_bracket(cw: ClassWriter) -> Unit !io = {
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "bracket",
     "(Ljava/lang/Object;L" ++ fn_iface(2) ++ ";L" ++ fn_iface(2) ++
-      ";)Ljava/lang/Object;").expect("mv")
+      ";Ljava/lang/Object;)Ljava/lang/Object;").expect("mv")
   m.visitCode()
   let try_start = Label.new()
   let try_end = Label.new()
   let handler = Label.new()
   m.visitTryCatchBlock(try_start, try_end, handler, "java/lang/Throwable")
-  # the three parameters occupy 0..2; the answer is slot 3 and the caught
-  # Throwable slot 4
+  # the four parameters occupy 0..3 (the pack is 3); the answer is slot 4 and
+  # the caught Throwable slot 5
   m.visitLabel(try_start)
   m.visitVarInsn(OP_ALOAD, 2)
   m.visitVarInsn(OP_ALOAD, 0)
-  m.visitInsn(OP_ACONST_NULL)
+  m.visitVarInsn(OP_ALOAD, 3)
   m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
-  m.visitVarInsn(OP_ASTORE, 3)
+  m.visitVarInsn(OP_ASTORE, 4)
   m.visitLabel(try_end)
   # normal path: release, then hand back what `use` answered
   m.visitVarInsn(OP_ALOAD, 1)
   m.visitVarInsn(OP_ALOAD, 0)
-  m.visitInsn(OP_ACONST_NULL)
+  m.visitVarInsn(OP_ALOAD, 3)
   m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
   m.visitInsn(OP_POP)
-  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitVarInsn(OP_ALOAD, 4)
   m.visitInsn(OP_ARETURN)
   # unwind path: release, then the same failure again -- same object, so its
   # class, message and stack trace are the ones the caller would have seen had
   # nothing been protected
   m.visitLabel(handler)
-  m.visitVarInsn(OP_ASTORE, 4)
+  m.visitVarInsn(OP_ASTORE, 5)
   m.visitVarInsn(OP_ALOAD, 1)
   m.visitVarInsn(OP_ALOAD, 0)
-  m.visitInsn(OP_ACONST_NULL)
+  m.visitVarInsn(OP_ALOAD, 3)
   m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
   m.visitInsn(OP_POP)
-  m.visitVarInsn(OP_ALOAD, 4)
+  m.visitVarInsn(OP_ALOAD, 5)
   m.visitInsn(OP_ATHROW)
   close_mv(m)
   ()

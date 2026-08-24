@@ -1354,18 +1354,30 @@ static _Noreturn void dawn_reraise(dawn_failure f) {
  * emitc.adapter_signature). Hence one `dawn_dup` per call and none for the
  * caller's.
  *
- * The trailing NULL each call passes is the evidence pack. Every Dawn function
- * value carries one erased slot for it, whatever its row (types.fn_arity), and
- * a hand-written shim has none to hand over: NULL is the empty pack, and
- * `dawn_drop(NULL)` is already a no-op. `gen_bracket` pushes ACONST_NULL in
- * the same three places on the JVM. On the unwind path `use`'s reference is released by `use`'s own
+ * The trailing `ev` each call passes is the evidence pack, and it is this
+ * function's fourth parameter rather than a NULL. Every Dawn function value
+ * carries one erased slot for it whatever its row (types.fn_arity), and
+ * `bracket` is the one primitive that can fill it honestly: its two closures
+ * share the row `e`, so its own row buys one evidence slot at the call site
+ * (types.nev) and the caller packs it there. `gen_bracket` loads the same slot
+ * in the same three places on the JVM.
+ *
+ * It was NULL until 2026-08-25, on the ground that a hand-written shim has no
+ * evidence and nothing reads a pack. The second half stopped being true when
+ * `ev_get` landed, and a labelled closure through `bracket` then panicked with
+ * "effect evidence missing" on a program that checks clean.
+ *
+ * The pack is borrowed like every other intrinsic argument, and a closure's
+ * parameters arrive owned, so each call takes a reference of its own -- the
+ * same `dawn_dup` the resource gets, and for the same reason.
+ * On the unwind path `use`'s reference is released by `use`'s own
  * frame cleanups as the forced unwind walks it -- the leak that used to sit
  * here, "the documented cost of the mechanism", is what #193 ARC-05 closed,
  * and scripts/spike-native/recover_bracket.dawn is the corpus that holds it
  * shut. The Unit each release call hands back is a box the emitter made for
  * the erased return, so it is dropped here -- nobody else can see it. */
 #ifndef __wasi__
-void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
+void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use, void *ev) {
   dawn_handler h DAWN_CLEANUP(dawn_handler_landing) = {
     .prev = dawn_handlers, .catches_panic = true
   };
@@ -1386,39 +1398,40 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
     dawn_failure crossing DAWN_CLEANUP(dawn_failure_release) = dawn_inflight;
     dawn_handlers = h.prev;
     dawn_drop(((void *(*)(dawn_clo *, void *, void *))release->fn)(
-      release, dawn_dup(resource), NULL));
+      release, dawn_dup(resource), dawn_dup(ev)));
     dawn_failure owed = crossing;
     crossing.msg = NULL;
     dawn_reraise(owed);
   }
   void *r = ((void *(*)(dawn_clo *, void *, void *))use->fn)(use, dawn_dup(resource),
-                                                          NULL);
+                                                          dawn_dup(ev));
   dawn_handlers = h.prev;
   dawn_drop(
     ((void *(*)(dawn_clo *, void *, void *))release->fn)(release,
                                                         dawn_dup(resource),
-                                                        NULL));
+                                                        dawn_dup(ev)));
   return r;
 }
 #else
 struct dawn_wasi_use_box {
   dawn_clo *use;
   void *resource;
+  void *ev;
 };
 
 static void *dawn_wasi_use_body(void *ctx) {
   struct dawn_wasi_use_box *b = (struct dawn_wasi_use_box *)ctx;
   return ((void *(*)(dawn_clo *, void *, void *))b->use->fn)(
-      b->use, dawn_dup(b->resource), NULL);
+      b->use, dawn_dup(b->resource), dawn_dup(b->ev));
 }
 
-void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
+void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use, void *ev) {
   dawn_handler h = {
     .prev = dawn_handlers, .catches_panic = true,
     .own_depth = dawn_wasi_own_len
   };
   dawn_handlers = &h;
-  struct dawn_wasi_use_box box = { use, resource };
+  struct dawn_wasi_use_box box = { use, resource, ev };
   void *r = NULL;
   if (dawn_wasi_try(dawn_wasi_use_body, &box, &r) != 0) {
     if (dawn_unwind_target != &h) {
@@ -1443,7 +1456,7 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
     dawn_wasi_own_push(cross_own);
     cross_own[1] = crossing.msg;
     dawn_drop(((void *(*)(dawn_clo *, void *, void *))release->fn)(
-      release, dawn_dup(resource), NULL));
+      release, dawn_dup(resource), dawn_dup(ev)));
     dawn_failure owed = crossing;
     owed.msg = (dawn_str *)dawn_take(&cross_own[1]);
     dawn_wasi_own_pop(cross_own);
@@ -1453,7 +1466,7 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
   dawn_drop(
     ((void *(*)(dawn_clo *, void *, void *))release->fn)(release,
                                                         dawn_dup(resource),
-                                                        NULL));
+                                                        dawn_dup(ev)));
   return r;
 }
 #endif

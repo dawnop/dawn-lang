@@ -252,40 +252,42 @@ fn ev_value(v: CExpr) -> CExpr =
   if peel_opaque(cex_ty(v)) == TyUnit { adapt_in(v, TyUnit, erased_ev_ty()) } else { v }
 
 ## Is this primitive implemented by a runtime function rather than by Dawn?
-## `Intr.rt` is the intrinsic contract's own answer, and it is what decides
-## whether a row on this primitive buys hidden parameters: a hand-written shim
-## has no body for one to be bound in.
-fn is_rt_builtin(st: LSt, name: String) -> Bool =
-  match map.get(st.intrs, name) {
-    Some(i) ->
-      match i.rt {
-        Some(_) -> true
-        None -> false
-      }
-    None -> false
-  }
-
-## The evidence a primitive's own row is worth at the call site.
+## How many evidence slots a primitive's own row is worth at the call site:
+## `types.nev` of its ABI row, the same count and the same order as for any
+## named callee. A shim is not exempt -- `bracket`'s two closures are called
+## from hand-written code, and the pack they need can only come from the
+## caller.
 ##
-## A runtime shim takes none. One implemented in Dawn (`sort_by`, over
-## std/pvec) is an ordinary callee and owes `types.nev` slots -- the checker
-## does not attach them, because `XCallBuiltin` carries no evidence list, so
-## the count is read back off the intrinsic's signature here. Placeholders
-## under this knife, like every other slot.
+## Two entries of the table answer anything but zero, and they answer one
+## each: `sort_by` (`!e`, body in std/pvec) and `bracket` (`!e`, body a shim
+## in `jvm/rtclasses.gen_bracket` and `runtime/c`'s `dawn_bracket`).
 ##
 ## The *parameters* of a shim need no such rule: a function value has one
 ## evidence slot whatever its row, so the arity a shim was written at and the
 ## arity a Dawn caller computes are the same number plus one on both sides.
-fn builtin_evidence(st: LSt, name: String) -> List[CExpr] = {
-  if is_rt_builtin(st, name) { return [] }
+fn builtin_nev(st: LSt, name: String) -> Int =
   match map.get(st.intrs, name) {
-    Some(i) -> {
-      var out: List[CExpr] = []
-      for _k in 0..nev(sig_abi_eff(i.sig)) { out = out ++ [ev_placeholder()] }
-      out
-    }
-    None -> []
+    Some(i) -> nev(sig_abi_eff(i.sig))
+    None -> 0
   }
+
+## The evidence arguments of a primitive call: what the checker resolved, if it
+## resolved the right number of them, and placeholders otherwise.
+##
+## The fallback is the error path, not a second rule. `check_fn_value`'s eta
+## wrapper builds an `XCallBuiltin` with no evidence list (its comment says
+## why), and a call the checker gave up on part way through can leave a short
+## one; either way the arity a backend spells is read off the signature, so
+## emitting fewer arguments than that would turn a reported program into a
+## `NoSuchMethodError`. A placeholder is wrong evidence and a wrong count is a
+## wrong call.
+fn builtin_evidence(st: LSt, name: String, evid: List[TExpr]) -> (LSt, List[CExpr]) = {
+  let want = builtin_nev(st, name)
+  if want == 0 { return (st, []) }
+  if len(evid) == want { return lower_evidence(st, evid) }
+  var out: List[CExpr] = []
+  for _k in 0..want { out = out ++ [ev_placeholder()] }
+  (st, out)
 }
 
 ## Lower the evidence arguments the checker attached to a **named** call: one
@@ -3025,21 +3027,37 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
   # type, because they are different numbers on purpose: outside, one pack
   # whatever the row (`types.fn_arity`); inside, one slot per atom
   # (`types.nev`).
+  #
+  # A *builtin* is unpacked the same way, and used not to be: this branch
+  # emitted `CIntrinsic(name, args)` with no evidence at all, which is a wrong
+  # count and not merely wrong evidence. `let f = sort_by` was a
+  # `NoSuchMethodError` on the JVM before this line existed, on a program that
+  # checks clean; `bracket` reached through a value was `ev_get`'s panic. The
+  # row is read off the intrinsic table rather than off `callee`, because
+  # `callee` is `None` for every primitive that is not declared `erased` and
+  # erasure has nothing to do with how many evidence slots a row is worth.
   let (st5, evps) = fn_value_evs(st2)
-  var inner_evs: List[CExpr] = []
-  if not is_builtin {
-    match callee {
-      Some(sg) -> {
-        let pack = match evps {
-          [pp] -> CLocal(pp.sym, pp.ty)
-          _ -> ev_placeholder()
-        }
-        for k in atom_keys(sig_abi_eff(sg)) {
-          inner_evs = inner_evs ++ [ev_from_pack(pack, k)]
-        }
+  let ev_sig: Option[Sig] =
+    if is_builtin {
+      match map.get(st1.intrs, name) {
+        Some(i) -> Some(i.sig)
+        None -> None
       }
-      None -> ()
+    } else {
+      callee
     }
+  var inner_evs: List[CExpr] = []
+  match ev_sig {
+    Some(sg) -> {
+      let pack = match evps {
+        [pp] -> CLocal(pp.sym, pp.ty)
+        _ -> ev_placeholder()
+      }
+      for k in atom_keys(sig_abi_eff(sg)) {
+        inner_evs = inner_evs ++ [ev_from_pack(pack, k)]
+      }
+    }
+    None -> ()
   }
   let ret = ret_of_fn_ty(ty)
   # the result crosses back the same way: the callee returns its declared
@@ -3058,7 +3076,7 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
     ret: ret,
     body: adapt_out(
       if is_builtin {
-        CIntrinsic(name, args, decl_ret)
+        CIntrinsic(name, args ++ inner_evs, decl_ret)
       } else {
         CCall(CDirect(owner, name), args ++ inner_evs, decl_ret)
       },
@@ -3206,7 +3224,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       (st1, CTuple(vs, ty))
     }
     XListLit(elems, _, _, ty) -> lower_list_lit(st, elems, ty)
-    XCallBuiltin(name, args, wits, _, _, ty) -> {
+    XCallBuiltin(name, args, wits, evid, _, _, ty) -> {
       # `char_unchecked` is the Int -> Char bridge, and `Char`'s representation
       # *is* `Int` -- so it disappears here rather than becoming a primitive
       # each backend would have to implement as a no-op. The check it skips was
@@ -3247,13 +3265,14 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         Some(sg) -> {
           let (st1, vs) = lower_args_to(st, args, sg.param_tys)
           let (st2, ds) = witness_values(st1, wits)
-          (st2, adapt_out(CIntrinsic(name, vs ++ ds ++ builtin_evidence(st2, name), sg.ret),
-            sg.ret, ty))
+          let (st3, es) = builtin_evidence(st2, name, evid)
+          (st3, adapt_out(CIntrinsic(name, vs ++ ds ++ es, sg.ret), sg.ret, ty))
         }
         None -> {
           let (st1, vs) = lower_all(st, args)
           let (st2, ds) = witness_values(st1, wits)
-          (st2, CIntrinsic(name, vs ++ ds ++ builtin_evidence(st2, name), ty))
+          let (st3, es) = builtin_evidence(st2, name, evid)
+          (st3, CIntrinsic(name, vs ++ ds ++ es, ty))
         }
       }
     }

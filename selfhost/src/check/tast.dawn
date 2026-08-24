@@ -128,8 +128,27 @@ pub type TExpr =
     hi: Int,
     ty: Ty
   )
-# a builtin call
-  | XCallBuiltin(name: String, args: List[TExpr], witnesses: List[WitRef], lo: Int, hi: Int, ty: Ty)
+# a builtin call. `evidence` is the primitive's *own* row, sized by
+# `types.nev` exactly as a named callee's is (`XCallFn.evidence`): a builtin is
+# not exempt from the convention just because its body is elsewhere. Only two
+# entries of `types.builtins` have a row with anything in it to size --
+# `sort_by`, whose body is `std/pvec`'s, and `bracket`, whose body is a
+# hand-written shim -- so this list is empty at every other call.
+#
+# It used to not exist, and lowering filled the slots with placeholders off the
+# signature's arity instead. That was invisible while nothing read a pack and a
+# soundness hole once `ev_get` did: `bracket(r, rel, x => quota() + x)` under a
+# `with handle` checked clean and panicked at run time, because the placeholder
+# is not the pack the closure's own reader asks for.
+  | XCallBuiltin(
+    name: String,
+    args: List[TExpr],
+    witnesses: List[WitRef],
+    evidence: List[TExpr],
+    lo: Int,
+    hi: Int,
+    ty: Ty
+  )
 # a call of a user/std function, resolved to its defining module; a trait
 # method call when trait_id is set (codegen dispatches through the dictionary)
   | XCallFn(
@@ -344,7 +363,7 @@ pub fn x_lo(e: TExpr) -> Int =
     XEvRead(_, lo, _, _) -> lo
     XFnValue(_, _, _, _, lo, _) -> lo
     XCallDyn(_, _, _, _, lo, _, _) -> lo
-    XCallBuiltin(_, _, _, lo, _, _) -> lo
+    XCallBuiltin(_, _, _, _, lo, _, _) -> lo
     XCallFn(_, _, _, _, _, _, lo, _, _) -> lo
     XApply(_, _, _, lo, _, _) -> lo
     XJava(_, lo, _, _) -> lo
@@ -383,7 +402,7 @@ pub fn x_hi(e: TExpr) -> Int =
     XEvRead(_, _, hi, _) -> hi
     XFnValue(_, _, _, _, _, hi) -> hi
     XCallDyn(_, _, _, _, _, hi, _) -> hi
-    XCallBuiltin(_, _, _, _, hi, _) -> hi
+    XCallBuiltin(_, _, _, _, _, hi, _) -> hi
     XCallFn(_, _, _, _, _, _, _, hi, _) -> hi
     XApply(_, _, _, _, hi, _) -> hi
     XJava(_, _, hi, _) -> hi
@@ -423,7 +442,7 @@ pub fn tex_ty(e: TExpr) -> Ty =
     XEvRead(_, _, _, ty) -> ty
     XFnValue(_, _, _, ty, _, _) -> ty
     XCallDyn(_, _, _, _, _, _, ty) -> ty
-    XCallBuiltin(_, _, _, _, _, ty) -> ty
+    XCallBuiltin(_, _, _, _, _, _, ty) -> ty
     XCallFn(_, _, _, _, _, _, _, _, ty) -> ty
     XApply(_, _, _, _, _, ty) -> ty
     XJava(_, _, _, ty) -> ty
