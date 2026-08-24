@@ -1,6 +1,6 @@
 # 运算符 trait 设计 — `[]` 背后的 `Index`
 
-> 状态：**已落地**（刀 3 运算符 trait，2026-08-02，`1b8ee7f` + 语料 `4ae6b61`；§3.5
+> 状态：**historical** —— 已落地（刀 3 运算符 trait，2026-08-02，`1b8ee7f` + 语料 `4ae6b61`；§3.5
 > 记的那个前置「id 计数器开到 prelude 之后」也已单独收口，`59ad323` + `ec5aa25`）。
 > `Index` 是第六个 prelude trait，`index_wanted`/`index_wits` 双双删除，`[]` 现在问 impl 表。
 > 权威条文在 [spec.md](spec.md) §4.8；本文保留设计推演，文中动词的时态没有逐句改写，

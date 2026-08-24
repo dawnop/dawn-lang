@@ -2806,6 +2806,103 @@ def check_index_lifecycle() -> tuple[list[str], int]:
     return index_lifecycle_problems(index, read_index_lifecycle_documents())
 
 
+# The three predicates above read *rows*, so a section that lists its documents
+# as prose is invisible to all three. `特性设计与实现理由` was such a section for
+# months: eighteen documents behind one sentence saying they were all
+# historical, which no machine read and which two of them had already stopped
+# being. Deleting the lifecycle word from any of their headers left the gate
+# green. That is not a bug in the row predicates -- they were never shown the
+# documents -- so the fix is to require that this section hand every document
+# it links to a row of its own, and to say so where a future edit will trip
+# over it. A section listed here cannot go back to prose quietly.
+LIFECYCLE_TABULATED_SECTIONS = ("特性设计与实现理由",)
+# Relative links to a docs/ Markdown file, which is what a lifecycle row can
+# name. Anchors and external URLs are not documents to be tabulated.
+INDEX_SECTION_DOC_LINK = re.compile(r"\[[^\]]+\]\((?!\w+:)([^)#\s]+\.md)[^)]*\)")
+
+
+def index_block_tabulated_problems(index_text: str) -> tuple[list[str], int]:
+    bad: list[str] = []
+    checked = 0
+    for heading in LIFECYCLE_TABULATED_SECTIONS:
+        section = markdown_section(index_text, heading)
+        if section is None:
+            bad.append(f"docs/README.md: section 「{heading}」 is gone, and its "
+                       f"per-document lifecycle rows with it. Rename the entry "
+                       f"in LIFECYCLE_TABULATED_SECTIONS along with the heading "
+                       f"[index_lifecycle_block_tabulated]")
+            continue
+        rows = {target for target, _cell in INDEX_LIFECYCLE_ROW.findall(section)}
+        for target in dict.fromkeys(INDEX_SECTION_DOC_LINK.findall(section)):
+            checked += 1
+            if target not in rows:
+                bad.append(
+                    f"docs/README.md: 「{heading}」 links docs/{target} but gives "
+                    f"it no lifecycle row, so nothing compares it with that "
+                    f"document's own status line. Every document this section "
+                    f"lists needs a `| [{target}]({target}) | <lifecycle> | … |` "
+                    f"row [index_lifecycle_block_tabulated]")
+    return bad, checked
+
+
+def check_index_lifecycle_block() -> tuple[list[str], int]:
+    index = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+    return index_block_tabulated_problems(index)
+
+
+INDEX_LIFECYCLE_BLOCK_MUTANTS = (
+    "a-row-demoted-to-a-prose-link",
+    "the-whole-block-back-to-prose",
+    "the-section-heading-renamed",
+)
+
+
+def check_index_lifecycle_block_selftest() -> tuple[list[str], int]:
+    """Each mutant is a way the section stops being read per document.
+
+    The control matters as much as the three: a link in a *different* section
+    must redden nothing, or this check would be demanding rows from the whole
+    index and would be turned off the first time somebody added a `参见`."""
+    index = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+    baseline, checked = index_block_tabulated_problems(index)
+    if baseline:
+        return [f"index block self-test baseline is invalid: {baseline[0]}"], 0
+    if checked < 2:
+        return [f"index block self-test: only {checked} link(s) in scope, so a "
+                f"section reverting to prose would prove nothing"], 0
+
+    heading = LIFECYCLE_TABULATED_SECTIONS[0]
+    section = markdown_section(index, heading)
+    row = re.search(INDEX_LIFECYCLE_ROW.pattern + r"[^\n]*\n", section, re.M)
+    for name in INDEX_LIFECYCLE_BLOCK_MUTANTS:
+        if name == "a-row-demoted-to-a-prose-link":
+            target = row.group(1)
+            mutant = index.replace(
+                row.group(0), f"[{target}]({target})（本篇改回散文）\n")
+        elif name == "the-whole-block-back-to-prose":
+            prose = "\n".join(
+                f"[{target}]({target}) ·"
+                for target, _cell in INDEX_LIFECYCLE_ROW.findall(section))
+            mutant = index.replace(section, f"\n{prose}\n\n状态一律 historical。\n")
+        else:
+            mutant = index.replace(f"## {heading}\n", f"## 特性设计\n")
+        bad, _ = index_block_tabulated_problems(mutant)
+        seen = {label for problem in bad
+                for label in re.findall(r"\[(\w+)\]", problem)}
+        if seen != {"index_lifecycle_block_tabulated"}:
+            return [f"index block self-test: mutant {name} reddened "
+                    f"{sorted(seen) or 'nothing'}, expected exactly "
+                    f"[index_lifecycle_block_tabulated]"], 0
+
+    control = index.replace(
+        "## 调研\n", "## 调研\n\n参见 [spec.md](spec.md)。\n")
+    bad, _ = index_block_tabulated_problems(control)
+    if bad:
+        return [f"index block self-test: a prose link outside the tabulated "
+                f"sections reddened {bad[0]}"], 0
+    return [], len(INDEX_LIFECYCLE_BLOCK_MUTANTS) + 1
+
+
 INDEX_LIFECYCLE_MUTANTS = (
     ("a-document-retired-without-telling-the-index", "index_lifecycle_agrees"),
     ("a-header-that-stops-naming-a-lifecycle",
@@ -3438,6 +3535,12 @@ def main() -> None:
     problems += bad
     indexed_seen += n
     bad, n = check_index_lifecycle_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_index_lifecycle_block()
+    problems += bad
+    indexed_seen += n
+    bad, n = check_index_lifecycle_block_selftest()
     problems += bad
     selftests_seen += n
     bad, n = check_historical_audit_status_selftest()

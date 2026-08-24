@@ -107,30 +107,33 @@
 
 ## 特性设计与实现理由
 
-[bytes-design.md](bytes-design.md) ·
-[cast-interop.md](cast-interop.md) ·
-[pure-ffi-design.md](pure-ffi-design.md) ·
-[sourceview-design.md](sourceview-design.md) ·
-[streaming-design.md](streaming-design.md) ·
-[streaming-response-design.md](streaming-response-design.md) ·
-[unwrap-design.md](unwrap-design.md) ·
-[varargs-design.md](varargs-design.md) ·
-[builtins-to-stdlib.md](builtins-to-stdlib.md) ·
-[stdlib-naming.md](stdlib-naming.md) ·
-[trait-v2-design.md](trait-v2-design.md)（八刀，`==` 走 `Eq` bound）·
-[semantics-closure-design.md](semantics-closure-design.md)（S1：把一件事的 N 份定义收成一份）·
-[assoc-types-design.md](assoc-types-design.md)（`type Item` 与投影 `T.Item`，两刀）·
-[operator-traits-design.md](operator-traits-design.md)（`[]` 背后的 `Index`）·
-[prelude-namespace-design.md](prelude-namespace-design.md)（函数命名空间的「一道门」）·
-[effects-design.md](effects-design.md)（用户具名效果 + `with handle`，尾恢复档）·
-[core-move2-design.md](core-move2-design.md)（Move 2 的结账与 `CSProtect` 关档）
+| 文档 | 生命周期 | 说明 |
+|---|---|---|
+| [bytes-design.md](bytes-design.md) | historical | 一等 `Bytes`（M7 序 4）的动码前设计；权威条文在 spec §9.5.1。 |
+| [cast-interop.md](cast-interop.md) | historical | 把 `as_XXX` 家族收敛成一个泛型 `cast` 的设计。失败行为已被 LANG-02 改成 `Result[T, ForeignError]`，文中相关各处已就地订正。 |
+| [pure-ffi-design.md](pure-ffi-design.md) | historical | `unsafe_pure` 与 builtin→stdlib 迁移的地基，四个阶段于 2026-07-22 关账。 |
+| [sourceview-design.md](sourceview-design.md) | historical | 切片器收敛：内部位置货币整体换成码点索引，UTF-16 只在 LSP 出线边界由 `SourceView` 重建。 |
+| [streaming-design.md](streaming-design.md) | historical | 流式请求体（WebDAV PUT 恒定内存）的草案。 |
+| [streaming-response-design.md](streaming-response-design.md) | historical | 流式响应（GET 代理下载恒定内存）的草案，上一篇 §六留的尾巴。 |
+| [unwrap-design.md](unwrap-design.md) | historical | 互操作 Option 解包，后缀 `!`；权威条文在 spec §8.2。 |
+| [varargs-design.md](varargs-design.md) | historical | 传可变实参；权威条文在 spec §9.3。 |
+| [builtins-to-stdlib.md](builtins-to-stdlib.md) | historical | 「为什么有这么多 builtin」的回答与迁移路线。**文中的 builtin 计数别当现状**，这条曲线此后被 intrinsic 契约掉了头。 |
+| [stdlib-naming.md](stdlib-naming.md) | historical | 平铺名破坏性重组为模块限定式（v0.4.0 双拼写、v0.5.0 删平铺名）；§五另记第二批改名的沿革。 |
+| [trait-v2-design.md](trait-v2-design.md) | historical | 八刀，`==` 走 `Eq` bound；权威描述在 spec §3.5 与 trait.md。 |
+| [semantics-closure-design.md](semantics-closure-design.md) | **current** | S1：把一件事的 N 份定义收成一份。§9 那张表的步 1–5 已落地，**步 6 只做了一半**；§10–§12 是这条线的尾款。 |
+| [assoc-types-design.md](assoc-types-design.md) | **current** | `type Item` 与投影 `T.Item`，两刀均于 2026-08-02 落地；运算符 trait 的前置。 |
+| [operator-traits-design.md](operator-traits-design.md) | historical | `[]` 背后的 `Index`，第六个 prelude trait；权威条文在 spec §4.8。 |
+| [prelude-namespace-design.md](prelude-namespace-design.md) | historical | 函数命名空间的「一道门」与追加兼容性，三刀于 2026-08-02 完成。 |
+| [effects-design.md](effects-design.md) | historical | 用户具名效果 + `with handle`，尾恢复档；权威条文在 spec §6.5，教程见 tutorial §17。 |
+| [core-move2-design.md](core-move2-design.md) | historical | Move 2 的结账与 `CSProtect` 关档。 |
+| [arch-split-design.md](arch-split-design.md) | historical | ARCH-01 拆 `Cx` + ARCH-02 拆 `Gen`，**取代 lowered-ir-design.md §3.2 的六组件方案**。这一块里唯一仍值得整篇读的，理由见下。 |
 
-状态一律 historical：写作当时的取舍成立，文中的行数、性能数字和「现在是什么样」
-的描述**不保证仍然准确**。特性本身的权威描述在 spec.md。
+生命周期以每篇自己的文件头为准，上表由 `doc-check.py` 逐篇与它对账。表里 historical
+的那些：写作当时的取舍成立，文中的行数、性能数字和「现在是什么样」的描述**不保证仍然
+准确**。特性本身的权威描述在 spec.md。
 
-**例外，仍值得读**：[arch-split-design.md](arch-split-design.md)
-（ARCH-01 拆 `Cx` + ARCH-02 拆 `Gen`，**取代 lowered-ir-design.md §3.2 的六组件方案**；
-2026-08-03 十二刀落地）。它不只是「为什么这么拆」，还是一份**怎么在没有行为门禁的
+**上表最后一行的「仍值得读」是什么意思**：[arch-split-design.md](arch-split-design.md)
+（2026-08-03 十二刀落地）不只是「为什么这么拆」，还是一份**怎么在没有行为门禁的
 地方证明重构是恒等变换**的作业记录：归一化全量 Core 不变量、五语料逐字节对拍、
 以及 §5.4 那条「我们以为有门禁看着、实测两个都看不见」的自我更正。
 下一次动编译器大结构之前读它的 §5 与 §10。

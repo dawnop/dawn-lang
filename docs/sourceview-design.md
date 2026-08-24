@@ -1,6 +1,6 @@
 # SourceView：切片器收敛
 
-> 状态：**Scope A + Scope B 均已落地**。Scope A 统一了切片器(`SourceView` +
+> 状态：**historical** —— Scope A + Scope B 均已落地。Scope A 统一了切片器(`SourceView` +
 > `slice_cp`,删掉 `utf16_slice`/`utf16_slice_of`);Scope B 进一步把**内部位置货币整体换成
 > 码点索引**——token span、行起点、诊断列全是码点,UTF-16 只在 **LSP 出线边界**由 `SourceView`
 > 重建。逐字节对拍 prev-diff/run-diff/fmt-diff/lsp-diff/fixpoint(B==C) 全绿,158 selfhost + 33 site
