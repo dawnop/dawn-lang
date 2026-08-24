@@ -61,3 +61,64 @@ pub fn io_param(f: fn() -> Int !io) -> Int !io = f()
 alias A = fn() -> Int !Ask
 
 pub type Box = { f: fn() -> Int !Ask }
+
+# A label and a variable written side by side on the same row. These are the
+# shape the four cases above never put together, and the shape the label axis
+# was dropped on: the row is one thing, and the labels name the part of it the
+# declaration has already accounted for. What is left over -- base, plus any
+# label nobody wrote down -- is the variable's instance.
+pub effect Tell { fn put(v: Int) -> Unit }
+
+pub fn label_and_var(f: fn() -> Int !Ask !e) -> Int !Ask !e = f()
+
+pub fn asks_and_tells() -> Int !Ask !Tell = { put(1)
+  get() }
+
+# `!Tell` is the residual and binds `e`. This used to be refused with
+# `expected fn() -> Int !Ask`: the base was unified against the actual's base
+# alone, so the variable never met `!Tell` and stayed pure -- while the hint
+# printed beside it still said `!(Ask|e)`, unsubstituted. The two halves of
+# one diagnostic disagreeing was the bug's own fingerprint.
+pub fn residual_binds_the_var() -> Int !Ask !Tell = label_and_var(asks_and_tells)
+
+# The same row on a trait method and on its impl. Nothing about the rule is
+# specific to a free function, and the declaration door here is a different
+# one (`pass_register_traits` resolves these types).
+pub trait Widen[T] {
+  fn widen(self: T, f: fn() -> Int !Ask !e) -> Int !Ask !e
+}
+
+pub type Once = { n: Int }
+
+impl Widen[Once] {
+  fn widen(self: Once, f: fn() -> Int !Ask !e) -> Int !Ask !e = f() + self.n
+}
+
+pub fn through_a_method(o: Once) -> Int !Ask !Tell = o.widen(asks_and_tells)
+
+# `e` is pinned by the first argument, so by the time the second is judged the
+# declaration reads `!(Ask|Tell)` -- which is exactly the row the argument has.
+# Closing the arm on the labels *written* rather than on the substituted row
+# ignored that binding and refused the row against itself:
+# `expected fn() -> Int !(Ask|Tell), got fn() -> Int !(Ask|Tell)`. No amount of
+# reordering the solve fixes that one; the check has to read the bindings.
+pub fn tells() -> Int !Tell = { put(1)
+  2 }
+
+pub fn var_then_label(h: fn() -> Int !e, f: fn() -> Int !Ask !e) -> Int !Ask !e =
+  h() + f()
+
+pub fn bound_before_the_label_row() -> Int !Ask !Tell =
+  var_then_label(tells, asks_and_tells)
+
+# Why the residual has to be the actual *minus the written labels*, and not
+# the whole actual: `handles_ask` answers `!Ask` itself, so the label is spoken
+# for and must not be handed back to `e` as well. Bind `e` to the whole row
+# instead and this signature leaks `!Ask` into its own return type, and the
+# caller below is told it uses an effect it does not declare.
+pub fn handles_ask(f: fn() -> Int !Ask !e) -> Int !e = {
+  with handle Ask { get() => 1 }
+  f()
+}
+
+pub fn only_the_residual_is_left() -> Int !Tell = handles_ask(asks_and_tells)

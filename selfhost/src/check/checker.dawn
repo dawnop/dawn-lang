@@ -822,7 +822,7 @@ pub fn unify_into(
 ## variable does accept it -- that is what carries a labelled closure through
 ## `list.map`.
 ##
-## The arms that do not infer answer with `eff_carries` rather than
+## Every arm that closes on a comparison answers with `eff_carries` rather than
 ## `eff_subsumes`, for the same reason `assignable` does: this is a *value*
 ## crossing into a slot, and the slot's row is what its eventual call site
 ## reads to build the pack. `!io` covering an effect variable is a statement a
@@ -859,12 +859,30 @@ pub fn unify_eff(
     # failure the coupling probe warned about).
     EffAssoc(_, _, _, _) ->
       (em, eff_carries(reduce_eff(cx, subst_eff(declared, em), m), actual))
-    # a declared label is not inferred into either: its base unifies, and its
-    # labels have to cover the actual's
+    # A declared label *is* inferred into, through its base: the labels written
+    # here name what the row already accounts for, so what the base has to
+    # answer for is the actual minus exactly those -- the residual. That is the
+    # whole rule for `!Ask !e`: the labels are spoken for and the variable is
+    # the rest, including any label the declaration did not write down.
+    #
+    # Two ways to get this wrong, and this arm had both. Handing the base
+    # `eff_base(actual)` drops the label axis on the floor, so the variable
+    # never sees the actual's extra labels and defaults to pure -- which is
+    # where the `expected !Ask` in the diagnostic came from, while the hint
+    # beside it still printed the unsubstituted `!(Ask|e)`. And closing on the
+    # labels *written* rather than on the substituted row asks a question that
+    # ignores the binding the line above just made, so a row could be refused
+    # against itself. The closing sentence is the one the two arms above use;
+    # having three spellings of "does the declaration, once its variables are
+    # known, cover the actual" was the bug's hiding place.
     ELabeled(b, ls) -> {
-      let (em1, ok) = unify_eff(cx, b, eff_base(actual), m, em)
-      (em1, ok && eff_subsumes(ELabeled(EPure, ls),
-        eff_with_labels(EPure, eff_labels(actual))))
+      var written: List[Int] = []
+      for l in ls {
+        let (id, _) = l
+        written = written ++ [id]
+      }
+      let (em1, ok) = unify_eff(cx, b, eff_drop(actual, written), m, em)
+      (em1, ok && eff_carries(reduce_eff(cx, subst_eff(declared, em1), m), actual))
     }
   }
 
