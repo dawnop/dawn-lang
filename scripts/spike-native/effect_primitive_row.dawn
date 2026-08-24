@@ -1,0 +1,186 @@
+# A primitive's own row is worth evidence at the call site, and a shim is not
+# exempt from paying it.
+#
+# `types.builtins` has exactly two entries whose row is worth a slot
+# (`types.nev`): `sort_by`, whose body is `std/pvec`'s and is compiled like any
+# other Dawn function, and `bracket`, whose body is hand-written twice
+# (`jvm/rtclasses.gen_bracket`, `runtime/c`'s `dawn_bracket`). Both take
+# closures and call them, and a closure is applied with a pack.
+#
+# Neither used to receive one. `XCallBuiltin` carried no evidence list at all,
+# so lowering filled the slots with placeholders sized off the signature, and
+# the two shims pushed a bare null in the three places they apply a closure --
+# "nothing reads a pack" was the written reason, and it was true until `ev_get`
+# landed. After that a labelled closure through either primitive was
+# `types.EV_MISS_MSG` at run time on a program `dawn check` accepts:
+#
+#     with handle Cfg { quota() => 7 }
+#     println(to_string(bracket(1, x => (), x => quota() + x)))
+#
+# **Every line below installs its own handler**, and that is load-bearing
+# rather than tidy. With one `with handle` per effect at the top of `main`, a
+# single line that charges the label correctly puts the node into the shared
+# remainder's pack and every other line reads it out for free -- so a repair
+# that fixed one call site out of six printed the right answer six times. The
+# same arrangement was measured green over a real hole in
+# `effect_io_absorb.dawn`, which is where the rule comes from.
+#
+# The pure lines are the control that was always right: with nothing in the
+# closure that reads a pack, a null pack and the real one are the same answer,
+# which is exactly why every gate stayed green over this for as long as it did.
+use std/io
+
+effect AskE {
+  fn ask() -> Int
+}
+
+effect TellE {
+  fn tell() -> Int
+}
+
+trait Held[T] {
+  effect E
+  fn held(x: T) -> Int !T.E
+}
+
+type Box = { v: Int }
+
+impl Held[Box] {
+  effect E = !AskE
+  fn held(x: Box) -> Int !AskE = x.v + ask()
+}
+
+## `bracket` reached through a signature that spells the row as a variable, so
+## what the call site packs is a variable's instantiation rather than a written
+## label. This is the shape std is full of.
+fn protect(f: fn() -> Int !e) -> Int !e = bracket(0, x => (), x => f())
+
+## The same for `sort_by`, whose evidence slot the JVM emitter reads off the
+## call and the C emitter off the argument list.
+fn ordered(xs: List[Int], c: fn(Int, Int) -> Int !e) -> List[Int] !e = sort_by(xs, c)
+
+## A projection in the row rather than a label or a variable -- rule 丙's slot,
+## which `ev_from_pack` answers with the chain itself rather than with a node.
+## A null pack here was not even the contract's panic: the callee read a field
+## off it and the JVM answered `NullPointerException: Cannot read field "ask"
+## because "<parameter2>" is null`, which is the same bug one layer further
+## from where it was made.
+fn protect_assoc[T: Held](x: T) -> Int !T.E = bracket(0, y => (), y => held(x))
+
+## A bracket inside a bracket: the inner call's pack is built inside the outer
+## `use` closure, which is itself reading its own pack rather than a frame's
+## slot.
+fn nested(f: fn() -> Int !e) -> Int !e =
+  bracket(0, x => (), x => protect(f) + 1)
+
+## The unwind path, which is the third of the shim's three closure calls and
+## the only one a value-returning program cannot otherwise reach. `use` panics,
+## the release runs while the failure is in flight, and the release is what
+## raises the operation. The handler is installed *inside* the thunk so that
+## the row `catch_panic` demands is still `!io`.
+fn crossing() -> Int !io = {
+  with handle TellE { tell() => 5 }
+  bracket(0, x => println("release read " ++ to_string(tell())), x => panic("boom"))
+}
+
+fn line_use() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  println(to_string(bracket(1, x => (), x => ask() + x)))
+}
+
+fn line_release() -> Unit !io = {
+  with handle TellE { tell() => 7 }
+  println(to_string(bracket(1, x => println("release read " ++ to_string(tell())), x => x)))
+}
+
+## Two labels in one row: `release` raises one and `use` the other, and they
+## share the single variable `e`, so the pack has two nodes and each closure
+## has to find its own.
+fn line_two_labels() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  with handle TellE { tell() => 7 }
+  println(to_string(bracket(1,
+    x => println("release read " ++ to_string(tell())),
+    x => ask() + x)))
+}
+
+fn line_through_var() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  println(to_string(protect(() => ask())))
+}
+
+fn line_nested() -> Unit !io = {
+  with handle TellE { tell() => 7 }
+  println(to_string(nested(() => tell())))
+}
+
+fn line_projection() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  println(to_string(protect_assoc(Box { v: 1 })))
+}
+
+fn line_unwind() -> Unit !io =
+  match catch_panic(crossing) {
+    Ok(v) -> println(to_string(v))
+    Err(_) -> println("the panic carried on")
+  }
+
+fn line_sort() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  println(to_string(sort_by([3, 1, 2], (a, b) => (a - b) * ask())))
+}
+
+fn line_sort_through_var() -> Unit !io = {
+  with handle TellE { tell() => 7 }
+  println(to_string(ordered([3, 1, 2], (a, b) => (b - a) * tell())))
+}
+
+## A primitive taken as a *value* rather than called: the wrapper
+## `lower.lift_fn_value` writes is a function value on the outside and a named
+## call on the inside, so it has to unpack the pack it is handed into the
+## callee's slots. It used to pass no evidence arguments at all, which is a
+## wrong *count* and not merely wrong evidence -- `let f = sort_by` was a
+## `NoSuchMethodError` on the JVM before the pack convention existed.
+fn line_bracket_as_value() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  let f: fn(Int, fn(Int) -> Unit !AskE, fn(Int) -> Int !AskE) -> Int !AskE = bracket
+  println(to_string(f(1, x => (), x => ask() + x)))
+}
+
+fn line_sort_as_value() -> Unit !io = {
+  with handle TellE { tell() => 7 }
+  let f: fn(List[Int], fn(Int, Int) -> Int !TellE) -> List[Int] !TellE = sort_by
+  println(to_string(f([3, 1, 2], (a, b) => (a - b) * tell())))
+}
+
+fn line_pure() -> Unit !io = {
+  println(to_string(bracket(1, x => (), x => x + 1)))
+  println(to_string(sort_by([3, 1, 2], (a, b) => a - b)))
+}
+
+pub fn main() -> Unit !io = {
+  println("-- a label read inside bracket's use closure --")
+  line_use()
+  println("-- and inside its release closure, on the way out --")
+  line_release()
+  println("-- two labels in one row, one node each --")
+  line_two_labels()
+  println("-- the row named as a variable and instantiated at the call --")
+  line_through_var()
+  println("-- a bracket inside a bracket's use closure --")
+  line_nested()
+  println("-- a projection in the row, which is neither a label nor a variable --")
+  line_projection()
+  println("-- the release running while a failure is in flight --")
+  line_unwind()
+  println("-- sort_by's comparator, which is the other primitive with a row --")
+  line_sort()
+  println("-- and the same forwarded through a variable --")
+  line_sort_through_var()
+  println("-- bracket taken as a value rather than called --")
+  line_bracket_as_value()
+  println("-- sort_by taken as a value --")
+  line_sort_as_value()
+  println("-- the control: closures with nothing to read --")
+  line_pure()
+}
