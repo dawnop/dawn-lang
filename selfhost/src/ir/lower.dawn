@@ -2979,6 +2979,24 @@ fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
 fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty) -> (LSt, CExpr) = {
   let (st1, lam) = fresh_lam(st)
   refuse_evidence_captures(st1, "a function value's wrapper", [])
+  # **The erasure crossing.** This wrapper's slots are sized by the
+  # *instantiation* the use site asked for (`ty`), and the callee's slots by
+  # its *declaration*: a type parameter is an erased slot, so `ident` taken at
+  # `fn(Int) -> Int` is a long here and an Object there. Without the crossing
+  # the wrapper handed a long to a slot spelled `Ljava/lang/Object;` and the
+  # class failed verification before `main` ever ran.
+  #
+  # It is the same crossing `lower_args_to` and `adapt_out` make at an
+  # ordinary call to the same function, and the one `lift_ctor_value` makes
+  # against a constructor's declared field types. A non-erased intrinsic keeps
+  # `None` here on purpose: its backend handler reads the Core node's own type
+  # rather than a declared one, which is the split `erased_builtin_sig` names.
+  let callee: Option[Sig] =
+    if is_builtin { erased_builtin_sig(st1, name) } else { sig_of(st1, owner, name) }
+  let decl_pts = match callee {
+    Some(sg) -> sg.param_tys
+    None -> []
+  }
   let pts = params_of_fn_ty(ty)
   var ps: List[CParam] = []
   var args: List[CExpr] = []
@@ -2988,7 +3006,8 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
     let (st3, sym) = fresh_sym(st2)
     st2 = st3
     ps = ps ++ [CParam { sym: sym, ty: pt, mode: COwned }]
-    args = args ++ [CLocal(sym, pt)]
+    let d = if i < len(decl_pts) { decl_pts[i] } else { pt }
+    args = args ++ [adapt_in(CLocal(sym, pt), pt, d)]
     i = i + 1
   }
   # **The one translation point between the two evidence conventions.** Seen
@@ -3009,7 +3028,7 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
   let (st5, evps) = fn_value_evs(st2)
   var inner_evs: List[CExpr] = []
   if not is_builtin {
-    match sig_of(st5, owner, name) {
+    match callee {
       Some(sg) -> {
         let pack = match evps {
           [pp] -> CLocal(pp.sym, pp.ty)
@@ -3022,6 +3041,13 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
       None -> ()
     }
   }
+  let ret = ret_of_fn_ty(ty)
+  # the result crosses back the same way: the callee returns its declared
+  # type, and this wrapper's descriptor promises the instantiated one
+  let decl_ret = match callee {
+    Some(sg) -> sg.ret
+    None -> ret
+  }
   let f = CFun {
     name: lam,
     owner: st5.owner,
@@ -3029,13 +3055,14 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
     params: ps,
     dicts: [],
     evs: evps,
-    ret: ret_of_fn_ty(ty),
-    body:
-    if is_builtin {
-      CIntrinsic(name, args, ret_of_fn_ty(ty))
-    } else {
-      CCall(CDirect(owner, name), args ++ inner_evs, ret_of_fn_ty(ty))
-    },
+    ret: ret,
+    body: adapt_out(
+      if is_builtin {
+        CIntrinsic(name, args, decl_ret)
+      } else {
+        CCall(CDirect(owner, name), args ++ inner_evs, decl_ret)
+      },
+      decl_ret, ret),
     is_test: false,
     impl_of: None,
     default_of: None

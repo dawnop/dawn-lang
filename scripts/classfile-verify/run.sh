@@ -299,6 +299,7 @@ run_corpus_checks() {
 
 fail=0
 java_tail_fixture=scripts/classfile-verify/java_tail_unit.dawn
+generic_fn_value_fixture=scripts/classfile-verify/generic_fn_value.dawn
 # examples/interop/interop.dawn is here for check 1, and it is the only corpus entry
 # that exercises it in this direction: `Path.of` and `List.of` are static
 # methods declared on JDK *interfaces*, so the call sites emit `invokestatic`
@@ -318,11 +319,17 @@ java_tail_fixture=scripts/classfile-verify/java_tail_unit.dawn
 # a dictionary interface, an exact label slot beside an erased one, and a
 # function value crossing both directions of a widened row. The differential
 # cannot stand in for it: a miscount is legal bytes with a wrong answer.
+# generic_fn_value.dawn is the third of that family, on the erasure axis: a
+# generic function used as a value gets a wrapper sized by the instantiation
+# and calls a callee sized by the declaration, and a type parameter is an
+# erased slot. Handing a long to a slot spelled `Ljava/lang/Object;` is a link
+# failure and nothing a type check or a differential can see, since both
+# backends emitted the same wrong shape.
 for t in selfhost site packages/json packages/web packages/sha2 packages/inflate \
     playground examples/projects/calc.dawn examples/interop/interop.dawn \
     examples/effects/handlers.dawn examples/text/chars.dawn \
     examples/errors/barriers.dawn scripts/classfile-verify/effect_poly_evidence.dawn \
-    "$java_tail_fixture"; do
+    "$generic_fn_value_fixture" "$java_tail_fixture"; do
   out="$work/emit/${t//\//_}"
   mkdir -p "$out"
   ./bin/dawn __emit "$t" -o "$out" > /dev/null
@@ -343,6 +350,12 @@ echo "OK: every emitted class links, and every reference it names resolves and i
 
 ./bin/dawn test "$java_tail_fixture"
 echo "OK: Java Unit-tail results are evaluated, discarded, and runnable"
+
+# Executed as well as verified: the return crossing has an answer. A wrapper
+# that verifies but unboxes the wrong slot is legal bytes, so the link check
+# above is not the whole of what this fixture claims.
+./bin/dawn test "$generic_fn_value_fixture"
+echo "OK: a generic function value crosses erasure with the right answers"
 
 # The second mutant, and the one selftest.sh cannot be. Its fixtures live in
 # pkgA/pkgB, names the toolchain jar does not carry, so they would have stayed

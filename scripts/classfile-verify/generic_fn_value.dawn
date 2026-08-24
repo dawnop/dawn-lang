@@ -1,0 +1,75 @@
+# A generic function taken as a *value*, held to the bytecode verifier.
+#
+# `lower.lift_fn_value` synthesises a wrapper whose slots are sized by the
+# instantiation the use site asked for, and inside it calls the named function,
+# whose slots are sized by its declaration. A type parameter is an erased slot,
+# so the two sizes differ exactly where the callee wrote one: `ident` taken at
+# `fn(Int) -> Int` is a `long` on the wrapper's side and an `Object` on the
+# callee's. Without the crossing the wrapper handed the long straight over and
+# the class failed verification at load, before any assertion could run.
+#
+# Registered here rather than left to the differential for the reason
+# `effect_poly_evidence.dawn` is: both backends agreed on the same illegal
+# shape, so only a verifier separates them from a legal one. The test blocks
+# run as well, because the return crossing has an answer and not just a shape:
+# the callee hands back a boxed `Long` and the wrapper's descriptor promises a
+# `long`.
+#
+# What each declaration is for:
+#
+#   * `ident`    the same parameter erased in and unerased out, at all three
+#                JVM shapes a slot comes in: category 2 (`Int`, `Float`),
+#                category 1 (`Bool`) and a reference (`String`, which must not
+#                be boxed twice);
+#   * `snd`      two parameters whose declared slots differ from each other, so
+#                a crossing applied to the wrong index shows up as a type
+#                rather than cancelling;
+#   * `head_of`  erased on the way out only;
+#   * `count`    erased on the way in only;
+#   * `same`     a declared `List[T]` return, which is a reference slot however
+#                `T` is instantiated and must not be unboxed;
+#   * `tagged`   a concrete parameter beside a generic one, so "erase every
+#                slot" fails here as loudly as "erase none".
+#
+# Run: dawn test scripts/classfile-verify/generic_fn_value.dawn
+
+fn ident[T](x: T) -> T = x
+
+fn snd[A, B](a: A, b: B) -> B = b
+
+fn head_of[T](xs: List[T]) -> T = xs[0]
+
+fn count[T](xs: List[T]) -> Int = len(xs)
+
+fn same[T](x: T) -> List[T] = [x]
+
+fn tagged[T](n: Int, x: T) -> T = if n > 0 { x } else { x }
+
+test "an erased slot crossed in both directions at every JVM shape" {
+  let i: fn(Int) -> Int = ident
+  assert i(3) == 3
+  let f: fn(Float) -> Float = ident
+  assert f(1.5) == 1.5
+  let b: fn(Bool) -> Bool = ident
+  assert b(true)
+  let s: fn(String) -> String = ident
+  assert s("x") == "x"
+}
+
+test "each parameter answers to its own declared slot" {
+  let p: fn(Int, Bool) -> Bool = snd
+  assert p(1, true)
+  let q: fn(Bool, Int) -> Int = snd
+  assert q(false, 9) == 9
+  let t: fn(Int, Float) -> Float = tagged
+  assert t(1, 2.5) == 2.5
+}
+
+test "a slot the declaration did not erase is left alone" {
+  let h: fn(List[Int]) -> Int = head_of
+  assert h([7, 8]) == 7
+  let c: fn(List[Int]) -> Int = count
+  assert c([1, 2, 3]) == 3
+  let w: fn(Int) -> List[Int] = same
+  assert w(4) == [4]
+}

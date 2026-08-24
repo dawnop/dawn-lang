@@ -89,10 +89,10 @@ fn raises_ask(n: Int) -> Int !Ask = n + ask()
 ## the variable's is erased, so unpacking them the other way round hands an
 ## `Object` to a slot declared `ev$Ask` -- a VerifyError, and this gate is the
 ## only thing in the tree that runs the shape. A type parameter is what takes
-## `check_fn_value` down the instantiating path, and it is a reference one
-## because a *primitive* there fails for an unrelated and older reason: the
-## wrapper passes its written arguments at the instantiated type without boxing
-## them against the callee's declared one.
+## `check_fn_value` down the instantiating path; it is instantiated with a
+## *primitive* below so that the evidence slots and the erased written slot are
+## crossed in the one wrapper. generic_fn_value.dawn owns the written slot on
+## its own.
 fn two_atoms[T](tag: T, f: fn() -> Int !e) -> Int !Ask !e = f() + ask()
 
 ## Two variables meeting in one slot. The tail of this pack is neither the
@@ -145,8 +145,8 @@ pub fn main() -> Unit !io = {
   println(to_string(apply_twice(as_value, 1)))
   # two atoms through the same wrapper: an exact slot and an erased one, in the
   # order `types.atom_keys` lays them out
-  let both: fn(String, fn() -> Int !Tell) -> Int !Ask !Tell = two_atoms
-  println(to_string(both("t", () => tell(3))))
+  let both: fn(Int, fn() -> Int !Tell) -> Int !Ask !Tell = two_atoms
+  println(to_string(both(42, () => tell(3))))
   # `!e := !e1 !e2`, with both halves read through the merged slot
   println(to_string(merged(() => ask(), () => tell(1))))
 }
