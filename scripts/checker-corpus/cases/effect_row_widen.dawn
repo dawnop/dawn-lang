@@ -1,0 +1,66 @@
+# checker.dawn: how far a function **value**'s row may be widened on the way
+# into a slot. `assignable` and `unify_eff` are the two doors and they answer
+# with one relation, `types.eff_carries`.
+#
+# Upward is free: a closure that raises nothing goes anywhere, because the slot
+# hands it a pack it never reads and a superset is safe. What is refused is a
+# row with an atom the slot does not have, because the value's row is the whole
+# of what its eventual call site reads to build that pack -- an atom dropped
+# here is a key nobody puts in, and the read on the other side falls off the
+# end of the chain. `!io` covering an effect variable is the case that used to
+# be allowed, and the programs below checked clean and then panicked with
+# "effect evidence missing".
+#
+# A signature is judged by the other relation and still may promise `!io` over
+# a variable: `holds_io` is here to show the two have not been collapsed.
+use std/io
+
+fn take_io(f: fn() -> Int !io) -> Int !io = f()
+
+fn take_var(f: fn() -> Int !e) -> Int !e = f()
+
+# ---- accepted ----
+
+# a pure closure into either slot: nothing to carry
+fn pure_into_io() -> Int !io = take_io(() => 1)
+
+fn pure_into_var() -> Int = take_var(() => 1)
+
+# an io closure into the io slot, exactly
+fn io_into_io() -> Int !io = take_io(() => {
+  io.println("hi")
+  2
+})
+
+# a signature may still promise !io over a variable it binds: the variable is
+# in its binder list, so rule 丁 gives it a slot whatever the row says
+fn holds_io(f: fn() -> Int !e) -> Int !io = f()
+
+# ---- refused ----
+
+# the variable goes into an `!io` parameter, and the pack the call builds for
+# that parameter would have no node for it
+fn param_widen(f: fn() -> Int !r) -> Int !io !r =
+  take_io(() => {
+    io.println("hi")
+    f()
+  })
+
+# the same drop written as an annotation rather than a parameter: `assignable`
+# is the door here, `unify_eff` was the door above
+fn annotation_widen(f: fn() -> Int !r) -> Int !io !r = {
+  let g: fn() -> Int !io = () => {
+    io.println("hi")
+    f()
+  }
+  g()
+}
+
+# and as a return type
+fn return_widen(f: fn() -> Int !r) -> fn() -> Int !io = () => f()
+
+pub fn main() -> Unit !io = {
+  io.println(to_string(pure_into_io()))
+  io.println(to_string(pure_into_var()))
+  io.println(to_string(io_into_io()))
+}

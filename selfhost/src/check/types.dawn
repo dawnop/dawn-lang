@@ -328,9 +328,25 @@ fn base_parts(e: Eff) -> (Bool, List[(Int, String)], List[(String, Int, Int, Str
     ELabeled(_, _) -> panic("base_parts: a base row cannot carry labels")
   }
 
-## The base-axis union: io absorbs the variables and only them -- a projection
-## is pending evidence and survives beside io the way a label survives beside
-## it on the label axis. The result is re-normalized to the smallest shape.
+## The base-axis union: **io absorbs nothing**. A variable and a projection are
+## both pending evidence, and they survive beside io the way a label survives
+## beside it on the label axis. The result is re-normalized to the smallest
+## shape.
+##
+## io used to absorb the variables, on the strength of `base_subsumes`, where
+## it does cover them -- but subsumption is a statement about what a signature
+## is allowed to promise and a union is a statement about what a row is made
+## of, and a row's atoms are its evidence slots. Absorbing one is losing a slot.
+## The union runs over inferred rows too, so this was not a spelling question:
+## a closure that did io and called an `!e` parameter had its own row collapse
+## to `!io`, and then the call that ran it built a pack from that row -- one
+## with no node for the variable, and a lookup on it is `ev_get`'s
+## compiler-invariant panic on a body that checks clean. Nothing is lost by
+## keeping the atom: `base_subsumes` still lets `!io` stand over it, so what a
+## signature may declare is exactly what it was.
+##
+## `eff_subsumes` (not this) is where "io covers any row" lives, and it is
+## still there.
 fn base_union(effs: List[Eff]) -> Eff = {
   var io = false
   var vars: List[(Int, String)] = []
@@ -347,10 +363,11 @@ fn base_union(effs: List[Eff]) -> Eff = {
       if not assoc_has(atoms, av, at2, an) { atoms = atoms ++ [a] }
     }
   }
-  if io { vars = [] }
-  if len(atoms) == 0 {
+  if len(atoms) == 0 && len(vars) == 0 {
     if io { return EIo }
-    if len(vars) == 0 { return EPure }
+    return EPure
+  }
+  if len(atoms) == 0 && not io {
     if len(vars) == 1 {
       let (id, n) = vars[0]
       return EffVar(n, id)
@@ -420,6 +437,56 @@ pub fn eff_subsumes(outer: Eff, inner: Eff) -> Bool = {
     if not union_has(ols, id) { return false }
   }
   base_subsumes(eff_base(outer), eff_base(inner))
+}
+
+## Row containment for a function **value**: `eff_subsumes`, plus exactness on
+## the atoms that stand for pending evidence.
+##
+## The two questions are not the same question, and only one of them is about
+## io covering things. A *signature* may promise `!io` over a row it does not
+## name -- `fn run(t: fn() -> Int !e) -> Int !io` is what the checker's own
+## advice tells an author to write -- and the evidence still arrives, because
+## the variable is in the signature's binder list and rule 丁 gives it a slot
+## there whatever the row says. A *value* has no binder list. Its row is the
+## whole of what a call site reads to size and fill the pack it hands over
+## (`evidence_pack`), so an atom dropped on the way into a slot is a key nobody
+## puts in, and the read on the other side falls off the end of the chain.
+##
+## Widening in the other direction stays legal and is what this is not about: a
+## pure closure into an `!e` slot gets a pack it never reads, and a superset is
+## always safe. What is refused is a row with an atom the slot does not have.
+##
+## The label axis and the projection axis were exact already (`eff_subsumes`
+## and `base_subsumes`); this is the variable axis catching up to them.
+pub fn eff_carries(declared: Eff, actual: Eff) -> Bool = {
+  if not eff_subsumes(declared, actual) { return false }
+  let dvs = eff_vars(declared)
+  for v in eff_vars(actual) {
+    let (id, _) = v
+    if not union_has(dvs, id) { return false }
+  }
+  true
+}
+
+test "a value's row may be widened, but not by dropping an atom" {
+  let e1 = EffVar("e1", 1)
+  let e2 = EffVar("e2", 2)
+  let ask = ELabeled(EPure, [(7, "Ask")])
+  # widening upward: nothing to carry, so any slot takes it
+  assert eff_carries(EIo, EPure)
+  assert eff_carries(e1, EPure)
+  assert eff_carries(ask, EPure)
+  # the variable axis is exact now, which is the whole point
+  assert not eff_carries(EIo, e1)
+  assert not eff_carries(e2, e1)
+  assert eff_carries(e1, e1)
+  assert eff_carries(eff_union([e1, EIo]), e1)
+  assert eff_carries(eff_union([e1, e2]), e1)
+  # the other two axes answered this way before and still do
+  assert not eff_carries(EIo, ask)
+  assert eff_carries(ELabeled(EIo, [(7, "Ask")]), ask)
+  # a signature is judged by the other relation, and it still lets io stand
+  assert eff_subsumes(EIo, e1)
 }
 
 ## The atoms of a row, unsorted: "io" / variable names / effect names.
@@ -3050,7 +3117,9 @@ test "effect union normalizes" {
   let e2 = EffVar("e2", 2)
   assert eff_union([EPure, EPure]) == EPure
   assert eff_union([e1, EPure]) == e1
-  assert eff_union([e1, EIo]) == EIo
+  # io does not swallow the variable: an atom is an evidence slot, and the
+  # union is where a row's slots are counted (see `base_union`)
+  assert eff_union([e1, EIo]) == EUnion([(1, "e1")], [], true)
   assert eff_union([e2, e1]) == EUnion([(1, "e1"), (2, "e2")], [], false)
   assert eff_union([e1, e1]) == e1
   assert lub_eff(EPure, EIo) == EIo
@@ -3086,9 +3155,9 @@ test "projection atoms normalize beside variables and io" {
   assert eff_union([a, a]) == a
   # atoms sort by (tvar, trait, name); variables keep the id sort
   assert eff_union([b, a, e1]) == EUnion([(1, "e1")], [("C", 9, 4, "E"), ("D", 12, 4, "E")], false)
-  # io absorbs the variable and only it: the projection is pending evidence,
-  # and a swallowed one would have no parameter to arrive through
-  assert eff_union([a, e1, EIo]) == EUnion([], [("C", 9, 4, "E")], true)
+  # io absorbs neither: both are pending evidence, and a swallowed one would
+  # have no parameter to arrive through
+  assert eff_union([a, e1, EIo]) == EUnion([(1, "e1")], [("C", 9, 4, "E")], true)
   assert eff_union([a, EIo]) == EUnion([], [("C", 9, 4, "E")], true)
   # labels ride on the second axis over an atom base, unchanged
   assert eff_union([a, ELabeled(EPure, [(7, "Ask")])]) == ELabeled(a, [(7, "Ask")])
@@ -3322,7 +3391,7 @@ test "effect substitution collapses unions" {
   let e2 = EffVar("e2", 2)
   let un = eff_union([e1, e2])
   let em1: Map[Int, Eff] = map.from([(1, EIo)])
-  assert subst_eff(un, em1) == EIo
+  assert subst_eff(un, em1) == EUnion([(2, "e2")], [], true)
   let em2: Map[Int, Eff] = map.from([(1, EPure)])
   assert subst_eff(un, em2) == e2
   let em3: Map[Int, Eff] = map.from([(1, e2)])

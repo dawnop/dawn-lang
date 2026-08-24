@@ -14,6 +14,12 @@
 # advice on an unbindable variable is "declare !io, which covers any row", and
 # following it is what walked into this.
 #
+# The same absorption bit an **inferred** row as well, which is the half no
+# rule about signatures can reach: a closure that did io and called an `!e`
+# parameter had its own row collapse to `!io`, and then the call that ran it
+# built a pack out of that row. `lambda_absorbs` is that one, and nothing in it
+# is declared.
+#
 # `plain` is the control that was always green -- its row has no io, so the
 # variable survived normalization and the charge came out right by accident of
 # the shape rather than by rule. Keeping it here means a fix that widened
@@ -50,6 +56,27 @@ fn two_under_io(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !io = g() + h()
 ## charged one level up.
 fn nested(f: fn() -> Int !e) -> Int !io = only_io(f)
 
+## The absorption inside an **inferred** row, which is the half a rule about
+## call sites cannot reach. This lambda does io and calls an `!e` parameter, so
+## its own row was the union of the two -- and the union used to hand back
+## `!io` alone. The pack the call built came from that row, so it had no node
+## for the variable, and the `f()` inside read a key nobody had put there.
+## Nothing here is declared: only `base_union` decides what this closure's type
+## says, which is why a signature-shaped fix leaves it standing.
+fn lambda_absorbs(f: fn() -> Int !r) -> Int !io !r =
+  plain(() => {
+    println("inside the lambda")
+    f()
+  })
+
+## The same shape with two variables, so the lambda's row is io over a union
+## rather than io over one atom.
+fn lambda_absorbs_two(g: fn() -> Int !e1, h: fn() -> Int !e2) -> Int !io !e1 !e2 =
+  plain(() => {
+    println("inside the second lambda")
+    g() + h()
+  })
+
 pub fn main() -> Unit !io = {
   with handle AskE { ask() => 300 }
   with handle TellE { tell() => 7 }
@@ -63,6 +90,10 @@ pub fn main() -> Unit !io = {
   println(to_string(two_under_io(() => ask(), () => tell())))
   println("-- forwarded through a second absorbing signature --")
   println(to_string(nested(() => tell())))
+  println("-- a lambda whose own inferred row mixed io with a variable --")
+  println(to_string(lambda_absorbs(() => ask())))
+  println("-- and the same with two variables under the io --")
+  println(to_string(lambda_absorbs_two(() => ask(), () => tell())))
   println("-- and a pure closure through the same signatures --")
   println(to_string(only_io(() => 1)))
 }

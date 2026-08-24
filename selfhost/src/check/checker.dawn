@@ -48,6 +48,7 @@ use check/types.{
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes,
   eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, eff_assocs, eff_map_assocs,
+  eff_carries,
   erased_ev_ty, sig_abi_eff, ty_eff_vars_all, nev, label_key, var_key, assoc_key, atom_keys,
   EV_PACK_ID, ev_pack_ty,
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
@@ -485,7 +486,7 @@ fn sees_through(cx: Cx, owner: String) -> Bool =
 ## Can `t` be used where `target` is expected? (Never/TyError as anything;
 ## a pure fn where an io fn is wanted.)
 ##
-## The effect side is `eff_subsumes`, which is also what `unify_eff` answers
+## The effect side is `eff_carries`, which is also what `unify_eff` answers
 ## with -- the two used to disagree. This gate said `te == EIo` was enough,
 ## `unify_eff`'s io arm additionally required the actual to carry no labels,
 ## and the disagreement was reachable: a labelled closure refused as a call
@@ -501,7 +502,7 @@ pub fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
   match t {
     TyFn(ps, r, e) ->
       match target {
-        TyFn(tps, tr, te) -> ps == tps && assignable(cx, r, tr) && eff_subsumes(te, e)
+        TyFn(tps, tr, te) -> ps == tps && assignable(cx, r, tr) && eff_carries(te, e)
         _ -> false
       }
     TyOpaque(_, _, ow, _, tgt) ->
@@ -820,6 +821,13 @@ pub fn unify_into(
 ## site would supply the evidence (docs/effects-design.md §4.1). An effect
 ## variable does accept it -- that is what carries a labelled closure through
 ## `list.map`.
+##
+## The arms that do not infer answer with `eff_carries` rather than
+## `eff_subsumes`, for the same reason `assignable` does: this is a *value*
+## crossing into a slot, and the slot's row is what its eventual call site
+## reads to build the pack. `!io` covering an effect variable is a statement a
+## signature may make about itself and a value may not make about where it is
+## going.
 pub fn unify_eff(
   cx: Cx,
   declared: Eff,
@@ -833,8 +841,8 @@ pub fn unify_eff(
     # the two disagreeing about io cost. Spelled out here rather than hoisted
     # above the match because the two arms below have something to add: a
     # variable binds, and a label's base may be one.
-    EPure -> (em, eff_subsumes(EPure, actual))
-    EIo -> (em, eff_subsumes(EIo, actual))
+    EPure -> (em, eff_carries(EPure, actual))
+    EIo -> (em, eff_carries(EIo, actual))
     EffVar(_, id) -> {
       let prev = match map.get(em, id) {
         Some(p) -> p
@@ -844,13 +852,13 @@ pub fn unify_eff(
     }
     # a union in a declared parameter position is not inferred into; accept when
     # the actual is already subsumed
-    EUnion(_, _, _) -> (em, eff_subsumes(reduce_eff(cx, subst_eff(declared, em), m), actual))
+    EUnion(_, _, _) -> (em, eff_carries(reduce_eff(cx, subst_eff(declared, em), m), actual))
     # A declared projection is not inferred into either, but it does reduce
     # first: the bindings accumulated so far may have pinned its subject, and
     # comparing the unreduced atom would be a false mismatch (the half-loud
     # failure the coupling probe warned about).
     EffAssoc(_, _, _, _) ->
-      (em, eff_subsumes(reduce_eff(cx, subst_eff(declared, em), m), actual))
+      (em, eff_carries(reduce_eff(cx, subst_eff(declared, em), m), actual))
     # a declared label is not inferred into either: its base unifies, and its
     # labels have to cover the actual's
     ELabeled(b, ls) -> {
@@ -10421,8 +10429,8 @@ test "a declared effect is served by a hidden evidence parameter" {
 test "io does not absorb a label, and a label does not absorb io" {
   let eid = 77
   let ask = ELabeled(EPure, [(eid, "Ask")])
-  # the base axis is untouched: io still swallows an effect variable
-  assert eff_union([EIo, EffVar("e", 1)]) == EIo
+  # the base axis keeps its atoms: io swallows no effect variable either
+  assert eff_union([EIo, EffVar("e", 1)]) == EUnion([(1, "e")], [], true)
   # labels never merge into io, in either direction
   assert eff_union([EIo, ask]) == ELabeled(EIo, [(eid, "Ask")])
   assert not eff_subsumes(EIo, ask)
