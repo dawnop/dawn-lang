@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 34743b61bdf2b93d -->
+<!-- doc-check: translation-of docs/spec.md @ 633b819bc4b57554 -->
 
 # Dawn Language Specification
 
@@ -2489,12 +2489,32 @@ fn spawn_hello(msg: String) -> Unit !io = {
   enter Dawn with their erased types (usually an opaque `Object`, which can only be
   passed along as is); only a SAM with concrete types (`Runnable`, `HttpHandler`) gives
   the full experience.
-- **No restriction on effects**: pure functions, `!io` functions and effect-variable
-  functions can all be handed out. The effect system does not track when the Java side
-  calls — Java may call that function value on any thread at any moment (including after
-  this call has returned). This does not break the purity contract: Java code can only
-  run underneath a Dawn `!io` call, or on a Java thread with no Dawn stack, and no pure
-  function's signature promise is violated.
+- **The row must owe no evidence**: only a pure function and an `!io` function can be
+  handed out. A row carrying a named effect label, an effect variable or an
+  associated-effect projection is refused at the conversion point, as a compile error
+  rather than a run-time failure. The reason is in §6: evidence is supplied at the call
+  site, and Java enters a callback from somewhere with no Dawn frame under it, so there
+  is no call site to supply it. An effect variable is refused too, because it may be
+  instantiated at a row carrying a label while the conversion is checked only once, here.
+- **The way out**: write `with handle E { ... }` inside the function value, so that the
+  row crossing the boundary comes down to pure or `!io`; the diagnostic names this
+  rewrite.
+
+  ```dawn
+  with handle Log { log(m) => println(m) }
+  Thread.new(() => log("tick"))            # refused: the row is !Log
+
+  Thread.new(() => {                       # accepted: the row is !io
+    with handle Log { log(m) => println(m) }
+    log("tick")
+  })
+  ```
+
+- **When the call happens is still untracked**: the effect system does not care when the
+  Java side calls; Java may call that function value on any thread at any moment
+  (including after this call has returned). This does not break the purity contract: Java
+  code can only run underneath a Dawn `!io` call, or on a Java thread with no Dawn stack,
+  and no signature promise of a pure or `!io` function is violated.
 - **The null boundary for parameters**: a callback's reference-typed parameters are
   **not wrapped in `Option`**, they arrive as `T`; the bridge layer checks each one, and
   a null passed in by Java panics immediately (the message names the callback boundary).
