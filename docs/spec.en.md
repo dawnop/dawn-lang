@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 6cfa956833ce8946 -->
+<!-- doc-check: translation-of docs/spec.md @ 7804bfe47deb9c85 -->
 
 # Dawn Language Specification
 
@@ -1793,23 +1793,33 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
   `type Boxed = { f: fn() -> Int !Ask }` are both legal. A label is not a variable and has no
   binder to speak of; it means "whoever calls this function value supplies the handler", which is
   exactly where evidence travels today (§6.5).
-- **An effect parameter a declaration binds carries empty evidence only.** What is restricted is
-  **instantiation**, not spelling: the `!e` of `type Box[!e]` or `alias Mapper[T, U, !e]` may only
-  solve to a row that owes no evidence, which means pure, `!io`, or the variable itself (forwarded
-  unchanged, `fn store(m: Mapper[Int, String]) -> Mapper[Int, String] = m`). A row carrying a named
-  label, an associated-effect projection, or a variable bound **elsewhere** may not travel into a
-  consumer through this channel; writing one is a compile error. The reason is that the channel
-  does not exist: a variable a signature binds has a hidden evidence parameter to travel in
-  (§6.5 "Implementation"), one a declaration binds has none, a record is not a frame, and a type
-  reference has no effect-argument position to instantiate per use site. To make a row that really
-  owes evidence travel, bind the variable on the function that runs the closure instead:
-  `fn f(g: fn() -> Int !e) -> Int !e`.
+- **An effect parameter a nominal type binds carries empty evidence only.** What is restricted is
+  **instantiation**, not spelling: the `!e` of `type Box[!e]`, `type Chain[!e]` or
+  `opaque type Hidden[!e]` may only solve to a row that owes no evidence, which means pure, `!io`,
+  or the variable itself (forwarded unchanged, `fn store(b: Box) -> Box = b`). A row carrying a
+  named label, an associated-effect projection, or a variable bound **elsewhere** may not travel
+  into a consumer through this channel. The reason is that the channel does not exist: a variable a
+  signature binds has a hidden evidence parameter to travel in (§6.5 "Implementation"), one a
+  nominal type binds has none, a record is not a frame, and a nominal type's identity keeps only
+  its name and its type arguments (two bullets down), with nowhere to remember a row per use site.
+  To make a row that really owes evidence travel, bind the variable on the function that runs the
+  closure (`fn f(g: fn() -> Int !e) -> Int !e`), or use a transparent `alias` and write the effect
+  argument at the use site (next bullet).
 - An effect argument may be written at the use site, and **only a transparent `alias` takes one**:
-  `Thunk[!io]`, `Mapper[Int, String, !io]`. It shares the brackets with the type arguments and is
-  positioned within its own list (the declaring side splits `[T, U, !e]` the same way), so writing
-  one between two type arguments does not move the type arguments. Which rows may be written is
-  settled by the bullet above: today only `!io` (pure has no spelling in row position), while a row
-  carrying a label, a projection or a variable bound elsewhere is a compile error.
+  `Thunk[!io]`, `Thunk[!Ask]`, `Thunk[!e]`, `Mapper[Int, String, !(Ask | e)]`. The position takes
+  **everything the inline row position takes**, and nothing less: a transparent alias is its
+  expansion, `Thunk[!Ask]` and `fn() -> Int !Ask` are two spellings of one type, and a row that can
+  be written inline does not become unwritable by passing through an alias.
+  The argument is resolved in the **use site's own scope**, read exactly as the same row written
+  inline: `!e` names the variable the consumer's signature binds (introduced by appearing), `!Ask`
+  is the named effect visible here, `!T.E` is the projection here. Substitution runs position by
+  position in declaration order, the alias's own variable is replaced, and the result joins
+  whatever row the expansion already had under set semantics (flattened, deduplicated, and `io`
+  absorbs nothing, two bullets down): on `alias IoThunk[!e] = fn() -> Int !io !e`, `IoThunk[!Ask]`
+  is `fn() -> Int !(io | Ask)`.
+  The argument shares the brackets with the type arguments and is positioned within its own list
+  (the declaring side splits `[T, U, !e]` the same way), so writing one between two type arguments
+  does not move the type arguments.
   **A record, a variant and an `opaque type` do not take one**: such a type is its name plus its
   type arguments, with nowhere to remember the row, so accepting one would leave two types either
   indistinguishable or distinguishable but printed under one name. A transparent alias has no
@@ -1818,8 +1828,9 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
   gives the type arguments only. The omitted slot is still the declaration's own effect variable,
   solved from context: store a pure closure and it solves to pure there, store an `!io` closure and
   it solves to `!io` there. **A consumer's own row has to cover it**, and an `!e` bound by that
-  signature alone does not cover a variable bound elsewhere, so a consumer writes `!io` today
-  (`!io` covers any row).
+  signature alone does not cover a variable bound elsewhere. An alias's way out is to write the
+  argument (`Mapper[Int, String, !e]`, with `!e` bound by this signature); a nominal type has no
+  such way out, and a consumer writes `!io` (`!io` covers any row).
 - `!(e1 | e2)` is a union, stored **normalised**: union is componentwise (a boolean or on the io
   bit, plain set union on the variables, the projections and the labels), `pure` is the identity
   (and can be dropped), and a row that can take a smaller shape takes it (`!(e|e)` is `!e`).
