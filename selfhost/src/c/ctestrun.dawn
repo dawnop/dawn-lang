@@ -40,10 +40,17 @@ fn preamble() -> List[String] =
     " * what `catch (Throwable)` is on the JVM side; the message it hands back",
     " * is printed a line at a time, each indented six spaces, the way",
     " * `String.split(\"\\n\", -1)` feeds the JVM runner's loop. The borrowed",
-    " * `dawn_str_lit` never outlives the print it is made for. */",
+    " * `dawn_str_lit` never outlives the print it is made for.",
+    " *",
+    " * The barrier's second argument is the evidence pack it applies the thunk",
+    " * with (the binder in `catch_panic[T, !e]`). Here it is the empty pack: a",
+    " * test block is entered from this runner and not from a Dawn call site, so",
+    " * there is no frame under it holding evidence, and a block that performs an",
+    " * operation has to install its own handler inside itself. Same answer, same",
+    " * reason, as the direct call in scripts/rc-contract/rc_test.c. */",
     "static void dawn_test_one(dawn_str* pass, dawn_str* fail, void* thunk) {",
     "  dawn_clo* c = dawn_clo_new(thunk, 0, 0);",
-    "  dawn_adt* r = dawn_catch_panic(c);",
+    "  dawn_adt* r = dawn_catch_panic(c, NULL);",
     "  if (r->tag == DAWN_TAG_OK) {",
     "    dawn_io_println(pass);",
     "  } else {",
@@ -72,6 +79,11 @@ fn preamble() -> List[String] =
 ## The thunk and the two report lines for one test. The thunk is a closure
 ## adapter with no captures: `dawn_catch_panic` calls through `dawn_clo`, and a
 ## Unit-returning body still owes the erased boundary a slot.
+##
+## Only the environment parameter is declared. The barrier enters a function
+## value through a `(dawn_clo*, void*)` cast and passes the evidence pack
+## second, and an adapter that reads neither argument ignores it; that was the
+## shape while the pack was a literal null here too.
 fn one_test(i: Int, sym: String, label: String) -> List[String] = {
   let n = to_string(i)
   [
