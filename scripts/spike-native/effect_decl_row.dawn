@@ -1,0 +1,238 @@
+# A declaration's effect parameter reaching a **consumer's** signature, and an
+# `!io` row standing over an effect variable that is still read.
+#
+# `alias`/`type` binders have no evidence slot of their own (rule 丙′: a type
+# reference has no effect-argument position, so only rows that owe no evidence
+# -- pure and `!io` -- go in a field), and that is exactly the premise `!io`
+# absorbing a variable used to be built on. effect_params.dawn runs the binders
+# where they are *declared* and returned; what is below runs them where they
+# are *consumed*: a declaration-typed value arriving as a parameter of a
+# function that has an effect variable of its own, so one signature holds a
+# field row with no slot beside a variable that has one.
+#
+# The `!io` half is the diagnostic's own advice. On an unbindable variable the
+# compiler says "declare !io, which covers any row", so every consumer here is
+# written the way the hint asks -- and that spelling is what made the four
+# holes reachable: the caller charged a row with no variable in it, the `with
+# handle` remainder was built from that row, and the pack the remainder handed
+# down had no node for the label.
+#
+# **Every line installs its own handlers and every handler answers a different
+# prime**, for the reason effect_io_absorb.dawn's header gives: one shared
+# `with handle` per effect lets a single correctly-charged line seed the pack
+# that every other line then reads for free, and a repair of one call site out
+# of six measures as six.
+#
+# The pure lines are the control. With nothing in the closure that reads a
+# pack, a dropped variable and a kept one are the same answer, which is how
+# this stayed green for as long as it did.
+use std/io
+
+effect AskE {
+  fn ask() -> Int
+}
+
+effect TellE {
+  fn tell() -> Int
+}
+
+alias Thunk[!e] = fn() -> Int !e
+
+type Cell[!e] = { f: fn() -> Int !e }
+
+type Chain[T, !e] =
+  | Ready(v: T)
+  | Later(mk: fn() -> T !e)
+
+## The hop that makes every declared `!io !e` row below load-bearing. `apply1`
+## is a **named** callee whose row is a lone variable, so the caller has to
+## hand it evidence out of its own frame's slot -- and a caller whose row lost
+## the variable has no slot to hand over. Calling `k` directly would not show
+## that: a function value carries its own pack, so it answers correctly out of
+## a frame that was charged nothing at all.
+fn apply1(k: fn(Int) -> Int !e, n: Int) -> Int !e = k(n)
+
+## An alias binder in **parameter** position. The row in the alias owes no
+## evidence, the consumer's declared `!io` covers it, and nothing here is a
+## variable -- the baseline the two below are read against.
+fn force_thunk(t: Thunk) -> Int !io = t()
+
+## The same alias beside the consumer's own effect variable. `k`'s row is a
+## variable with a slot; the field's row is not; and the union of the two is
+## what `!io` used to swallow whole.
+fn thunk_then(t: Thunk, k: fn(Int) -> Int !e) -> Int !io !e = apply1(k, t())
+
+## A record field's binder, consumed the same way.
+fn cell_then(c: Cell, k: fn(Int) -> Int !e) -> Int !io !e = apply1(k, c.f())
+
+## A variant field's binder. `Later` holds the closure, `Ready` does not, and
+## both arms feed the same continuation, so an arm that lost the charge answers
+## differently from its sibling rather than from nothing.
+fn chain_then(c: Chain[Int], k: fn(Int) -> Int !e) -> Int !io !e =
+  match c {
+    Ready(v) -> apply1(k, v)
+    Later(mk) -> apply1(k, mk())
+  }
+
+## Two consumer variables under one `!io`, each read, so the charge is a union
+## and not whichever row was seen last.
+fn cell_pair(
+  c: Cell,
+  g: fn(Int) -> Int !e1,
+  h: fn(Int) -> Int !e2
+) -> Int !io !e1 !e2 = apply1(g, c.f()) + apply1(h, c.f())
+
+## The hint's other spelling: `!io` **alone**, with the variable named only in
+## a parameter type. No amount of normalizing the declared row can recover it
+## -- the row never mentioned it -- so what the call site charged is the only
+## thing that can be right, and this is the shape the diagnostic actively
+## recommends when a variable will not bind.
+fn only_io(c: Cell, k: fn(Int) -> Int !e) -> Int !io = apply1(k, c.f())
+
+## The io happens **before** the call, which is the ordering the absorption bug
+## was written under: `println` is what put io in the row, and the row is what
+## the caller charged.
+fn io_then(t: Thunk, k: fn(Int) -> Int !e) -> Int !io !e = {
+  println("io_then ran")
+  apply1(k, t())
+}
+
+## #345 crossing #346: an inferred row that mixes io with a variable, inside a
+## closure a *primitive* applies. `bracket`'s use closure does io and calls
+## `k`, so the closure's own row is the union -- and the union is what the pack
+## at the primitive's call site is built from.
+fn io_bracketed(t: Thunk, k: fn(Int) -> Int !e) -> Int !io !e =
+  bracket(0, x => (), x => {
+    println("inside the use closure")
+    apply1(k, t()) + x
+  })
+
+fn line_force_thunk() -> Unit !io = {
+  println(to_string(force_thunk(() => 2)))
+  println(to_string(force_thunk(() => {
+    println("an io thunk")
+    3
+  })))
+}
+
+fn line_thunk_then() -> Unit !io = {
+  with handle TellE { tell() => 5 }
+  println(to_string(thunk_then(() => 100, n => n + tell())))
+}
+
+fn line_cell_then() -> Unit !io = {
+  with handle TellE { tell() => 7 }
+  println(to_string(cell_then(Cell { f: () => 200 }, n => n + tell())))
+}
+
+## The continuation arrives as a **named value** with a written row rather than
+## as a lambda, so what has to hold is assignability into a slot whose row
+## keeps its variable. A relation that dropped the variable on the way in loses
+## the same key at the same place a union would.
+fn line_cell_then_value() -> Unit !io = {
+  with handle TellE { tell() => 11 }
+  let k: fn(Int) -> Int !TellE = n => n + tell()
+  println(to_string(cell_then(Cell { f: () => 300 }, k)))
+}
+
+fn line_chain_then() -> Unit !io = {
+  with handle TellE { tell() => 13 }
+  println(to_string(chain_then(Ready(400), n => n + tell())))
+  println(to_string(chain_then(Later(() => 500), n => n + tell())))
+}
+
+fn line_cell_pair() -> Unit !io = {
+  with handle AskE { ask() => 17 }
+  with handle TellE { tell() => 19 }
+  println(to_string(cell_pair(Cell { f: () => 600 }, n => n + ask(), n => n + tell())))
+}
+
+fn line_only_io() -> Unit !io = {
+  with handle TellE { tell() => 31 }
+  println(to_string(only_io(Cell { f: () => 1100 }, n => n + tell())))
+}
+
+fn line_io_then() -> Unit !io = {
+  with handle TellE { tell() => 23 }
+  println(to_string(io_then(() => 700, n => n + tell())))
+}
+
+fn line_io_bracketed() -> Unit !io = {
+  with handle TellE { tell() => 29 }
+  println(to_string(io_bracketed(() => 800, n => n + tell())))
+}
+
+fn line_pure_continuations() -> Unit !io = {
+  println(to_string(cell_then(Cell { f: () => 900 }, n => n + 1)))
+  println(to_string(io_then(() => 1000, n => n + 1)))
+}
+
+pub fn main() -> Unit !io = {
+  println("-- an alias binder in parameter position, no variable beside it --")
+  line_force_thunk()
+  println("-- and the same alias beside a consumer variable that is read --")
+  line_thunk_then()
+  println("-- a record field's binder consumed the same way --")
+  line_cell_then()
+  println("-- with the continuation as a written value rather than a lambda --")
+  line_cell_then_value()
+  println("-- a variant field's binder, both arms --")
+  line_chain_then()
+  println("-- two consumer variables under one io --")
+  line_cell_pair()
+  println("-- the row that says only !io, with the variable in a parameter --")
+  line_only_io()
+  println("-- the io happening before the call, which is the bug's ordering --")
+  line_io_then()
+  println("-- and the same inferred row inside a primitive's use closure --")
+  line_io_bracketed()
+  println("-- the control: continuations with nothing to read --")
+  line_pure_continuations()
+}
+
+# The assertion lane; see effect_widen_row.dawn's note. `line_force_thunk` and
+# the pure control have no assertion of their own here on purpose: what they
+# witness is that a row with nothing to charge still runs, and the transcript
+# is where that is read.
+test "an alias binder beside a consumer variable keeps the charge" {
+  with handle TellE { tell() => 5 }
+  assert thunk_then(() => 100, n => n + tell()) == 105
+}
+
+test "a record field's binder does too" {
+  with handle TellE { tell() => 7 }
+  assert cell_then(Cell { f: () => 200 }, n => n + tell()) == 207
+}
+
+test "a written continuation crosses into the variable's slot" {
+  with handle TellE { tell() => 11 }
+  let k: fn(Int) -> Int !TellE = n => n + tell()
+  assert cell_then(Cell { f: () => 300 }, k) == 311
+}
+
+test "both arms of a variant field's binder charge the same" {
+  with handle TellE { tell() => 13 }
+  assert chain_then(Ready(400), n => n + tell()) == 413
+  assert chain_then(Later(() => 500), n => n + tell()) == 513
+}
+
+test "two consumer variables under one io are a union, not the last one" {
+  with handle AskE { ask() => 17 }
+  with handle TellE { tell() => 19 }
+  assert cell_pair(Cell { f: () => 600 }, n => n + ask(), n => n + tell()) == 1236
+}
+
+test "a row that says only !io still charges what it packed" {
+  with handle TellE { tell() => 31 }
+  assert only_io(Cell { f: () => 1100 }, n => n + tell()) == 1131
+}
+
+test "io before the call does not swallow the variable" {
+  with handle TellE { tell() => 23 }
+  assert io_then(() => 700, n => n + tell()) == 723
+}
+
+test "nor does an inferred io row inside a primitive's use closure" {
+  with handle TellE { tell() => 29 }
+  assert io_bracketed(() => 800, n => n + tell()) == 829
+}

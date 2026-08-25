@@ -1,0 +1,214 @@
+# A written label standing beside an effect variable **in a parameter's own
+# row**, which is the shape #335 made bindable and the one nothing ran end to
+# end at an ordinary Dawn callee.
+#
+#     fn widen(f: fn() -> Int !AskE !e) -> Int !AskE !e = f() + ask()
+#
+# The argument's row is `!AskE !TellE` (or `!TellE`, or pure); the parameter's
+# is a label beside a variable; and binding `e` to what is left over is the
+# whole of #335. What the call site then has to build is one ground node consed
+# over the frame's own variable slot -- and every call in this file reads
+# *through* both halves, so a pack that keeps the node and loses the tail, or
+# keeps the tail and loses the node, answers a different number here.
+#
+# effect_var_mixed.dawn builds a node over a forwarded chain from the *callee*
+# side (`outer`'s own row carries the label; its parameter does not), and
+# effect_primitive_row.dawn's `mixed` builds this one where a shim is the
+# reader. Between them the ordinary-callee case was the gap: a Dawn function
+# receiving the widened row and calling it.
+#
+# **Every line installs its own handlers and every handler answers a different
+# prime.** That is the rule effect_io_absorb.dawn was measured to need: with
+# one `with handle` per effect at the top of `main`, a single line that charges
+# its label correctly seeds the shared remainder's pack and every other line
+# reads the node out of it for free, so a repair that fixed one call site out
+# of seven prints the right answer seven times. Distinct primes also mean no
+# two lines can agree by arithmetic accident.
+#
+# The pure line is the control that was always right: with nothing in the
+# closure that reads a pack, a lost tail and a kept one are the same answer.
+use std/io
+
+effect AskE {
+  fn ask() -> Int
+}
+
+effect TellE {
+  fn tell() -> Int
+}
+
+effect NoteE {
+  fn note() -> Int
+}
+
+## The shape itself. `f`'s declared row is a label beside a variable, and the
+## body reads both halves: `f()` needs whatever `e` was bound to, `ask()` needs
+## the node.
+fn widen(f: fn() -> Int !AskE !e) -> Int !AskE !e = f() + ask()
+
+## The same row one hop further out. `relay`'s `e` is instantiated into
+## `widen`'s `e`, so what travels is a variable's slot rather than a written
+## label, and the label is charged at both levels.
+fn relay(f: fn() -> Int !AskE !e) -> Int !AskE !e = widen(f) + ask()
+
+## #335 crossing #346: the widened row reaching a primitive's closure argument
+## through an ordinary Dawn callee. effect_primitive_row.dawn pins the direct
+## call; this is the same pack built one frame deeper, where `bracket`'s use
+## closure is what carries it into `widen`.
+fn widen_bracketed(f: fn() -> Int !AskE !e) -> Int !AskE !e =
+  bracket(0, x => (), x => widen(f))
+
+## The widened row settled at two ground labels, so the function can be taken
+## as a *value*: `lower.lift_fn_value` writes a wrapper that is a function
+## value outside and a named call inside, and the named call it wraps is the
+## one that builds the node over the tail. (`widen` itself cannot be annotated
+## this way -- a `!e` on a `fn` is bound where it is written and there is no
+## use-site effect argument to instantiate it with, which is #344.)
+fn widen_tell(f: fn() -> Int !AskE !TellE) -> Int !AskE !TellE = widen(f)
+
+## The same row through `sort_by`, whose comparator is the other closure a
+## primitive applies, and whose body is Dawn rather than a hand-written shim.
+fn widen_sorted(xs: List[Int], c: fn(Int, Int) -> Int !AskE !e) -> List[Int] !AskE !e =
+  sort_by(xs, (a, b) => c(a, b) * ask())
+
+## An argument written as a lambda: the row is inferred at the call and unified
+## against the parameter's label-beside-variable.
+fn line_lambda() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  with handle TellE { tell() => 7 }
+  println(to_string(widen(() => tell())))
+}
+
+## An argument that is a **named function value** with a written row, so the
+## question the checker answers is assignability rather than inference. That is
+## the other half of the repair that landed with the union fix: a value may
+## cross into a slot whose row binds a variable, and it may not cross into one
+## that dropped it.
+fn line_fn_value() -> Unit !io = {
+  with handle AskE { ask() => 500 }
+  with handle TellE { tell() => 11 }
+  let g: fn() -> Int !AskE !TellE = () => ask() + tell()
+  println(to_string(widen(g)))
+}
+
+## Two labels left over, so `e` binds a union and the pack under the node is a
+## join rather than one atom.
+fn line_two_residual() -> Unit !io = {
+  with handle AskE { ask() => 13 }
+  with handle TellE { tell() => 17 }
+  with handle NoteE { note() => 19 }
+  println(to_string(widen(() => tell() + note())))
+}
+
+## Nothing left over: `e` binds pure and the tail is the empty pack. The
+## control -- this line was green through the whole of #335.
+fn line_pure_residual() -> Unit !io = {
+  with handle AskE { ask() => 23 }
+  println(to_string(widen(() => 1)))
+}
+
+## The variable forwarded through a second signature that writes the same
+## label. Both frames charge `AskE`, and the answer separates a pack that
+## rebuilt the node at each level from one that lost it at either.
+fn line_relayed() -> Unit !io = {
+  with handle AskE { ask() => 29 }
+  with handle TellE { tell() => 31 }
+  println(to_string(relay(() => tell())))
+}
+
+fn line_bracketed() -> Unit !io = {
+  with handle AskE { ask() => 37 }
+  with handle TellE { tell() => 41 }
+  println(to_string(widen_bracketed(() => tell())))
+}
+
+fn line_sorted() -> Unit !io = {
+  with handle AskE { ask() => 1 }
+  with handle TellE { tell() => 43 }
+  println(to_string(widen_sorted([3, 1, 2], (a, b) => (b - a) * tell())))
+}
+
+## The widened row reached through a function *value*. The wrapper has one
+## evidence pack on the outside and per-atom slots on the inside, and the call
+## it wraps is `widen(f)` -- so the node-over-tail is built out of what the
+## wrapper unpacked rather than out of a frame's own slots.
+fn line_as_value() -> Unit !io = {
+  with handle AskE { ask() => 53 }
+  with handle TellE { tell() => 59 }
+  let w: fn(fn() -> Int !AskE !TellE) -> Int !AskE !TellE = widen_tell
+  println(to_string(w(() => tell())))
+}
+
+pub fn main() -> Unit !io = {
+  println("-- a lambda whose row unifies against label-beside-variable --")
+  line_lambda()
+  println("-- a named value whose written row has to be assignable to it --")
+  line_fn_value()
+  println("-- two labels left over, so the tail is a join --")
+  line_two_residual()
+  println("-- nothing left over: the control that was always green --")
+  line_pure_residual()
+  println("-- the same row forwarded through a second signature --")
+  line_relayed()
+  println("-- and carried into bracket's use closure --")
+  line_bracketed()
+  println("-- and into sort_by's comparator --")
+  line_sorted()
+  println("-- widen taken as a value rather than called --")
+  line_as_value()
+}
+
+# The assertion lane. `scripts/effect-evidence-contract/run.sh` runs these on
+# the JVM in seconds and without a C compiler; the transcript above is what the
+# native differential compares byte for byte. Same shapes, two readers: an
+# `assert` says what the number means, and the `.expect` file is the only check
+# that can see the *order* two closures ran in.
+test "a label beside a variable answers both halves" {
+  with handle AskE { ask() => 300 }
+  with handle TellE { tell() => 7 }
+  assert widen(() => tell()) == 307
+}
+
+test "a written row crosses into the widened slot by assignability" {
+  with handle AskE { ask() => 500 }
+  with handle TellE { tell() => 11 }
+  let g: fn() -> Int !AskE !TellE = () => ask() + tell()
+  assert widen(g) == 1011
+}
+
+test "two labels left over bind the variable to a join" {
+  with handle AskE { ask() => 13 }
+  with handle TellE { tell() => 17 }
+  with handle NoteE { note() => 19 }
+  assert widen(() => tell() + note()) == 49
+}
+
+test "nothing left over is still a node over the empty pack" {
+  with handle AskE { ask() => 23 }
+  assert widen(() => 1) == 24
+}
+
+test "the widened row survives a second signature" {
+  with handle AskE { ask() => 29 }
+  with handle TellE { tell() => 31 }
+  assert relay(() => tell()) == 89
+}
+
+test "a primitive's use closure carries the widened row" {
+  with handle AskE { ask() => 37 }
+  with handle TellE { tell() => 41 }
+  assert widen_bracketed(() => tell()) == 78
+}
+
+test "so does a comparator the primitive applies" {
+  with handle AskE { ask() => 1 }
+  with handle TellE { tell() => 43 }
+  assert widen_sorted([3, 1, 2], (a, b) => (b - a) * tell()) == [3, 2, 1]
+}
+
+test "the value wrapper unpacks the widened row into slots" {
+  with handle AskE { ask() => 53 }
+  with handle TellE { tell() => 59 }
+  let w: fn(fn() -> Int !AskE !TellE) -> Int !AskE !TellE = widen_tell
+  assert w(() => tell()) == 112
+}

@@ -334,6 +334,23 @@ jobs:
       - name: selfhost tests
         run: ./bin/dawn test selfhost
 
+      # An effect's evidence is only wrong at run time: #335, #345 and #346
+      # were all `dawn check` accepting a program that then panicked with
+      # "effect evidence missing", and a checker corpus cannot see that class
+      # because the checker is what said yes. The programs that catch it are
+      # scripts/spike-native/effect_*.dawn, and until now the only job that
+      # ran them was native-diff -- behind a C compiler, a sanitizer and 281s
+      # to 557s of wall clock, for a gate whose subject is backend agreement
+      # rather than the answer. This is the same corpus on the JVM alone, and
+      # it also holds the corpus to a roster, which nothing did (deleting a
+      # case was green). 30s locally: 12s of self-test, 18s of corpus. The
+      # self-test runs first because it is the thing that says the checks
+      # after it can fail at all.
+      - name: effect evidence contract
+        run: |
+          ./scripts/effect-evidence-contract/run.sh --self-test
+          ./scripts/effect-evidence-contract/run.sh
+
       # This reusable gate covers the comptime call chain, actionable hint,
       # default/impl frames, and frame cap through four compiling mutants;
       # both main and release call this workflow.
