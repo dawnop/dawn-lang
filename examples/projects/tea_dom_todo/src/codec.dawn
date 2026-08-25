@@ -1,0 +1,176 @@
+# The model as opaque text, and back.
+#
+# The counter could be one integer, so it used `to_string`. A record with a
+# list in it wants a real encoder, and `packages/json` is one, so this file is
+# what a second application on this bridge actually looks like: every turn
+# renders the whole model and every turn parses it back, because the reactor
+# holds nothing between calls.
+#
+# `decode` is total. A host may hand back anything -- a truncated string, a
+# model from an older build, a field of the wrong type -- and the answer is a
+# model rather than a panic, so a corrupted page recovers by clicking. Every
+# reader here has a fallback and none of them can fail.
+#
+# The encoding is deliberately the plain one: field names in full, ids and
+# titles per item, no delta and no compression. That is what the report's
+# per-turn cost section measured, and a cleverer encoding would have measured
+# the cleverness instead of the boundary.
+
+use std/list
+use std/map
+use std/str
+use json/value.{Json, JStr, JInt, JArr, JObj, JBool}
+use json/render.{render}
+use json/parser.{parse}
+use todo.{Model, Todo, Filter, All, Active, Done, Focus, Nowhere, Composer, Row, init}
+
+## The model as one line of JSON.
+pub fn encode(m: Model) -> String =
+  render(
+    JObj(entries: map.from([
+      ("todos", JArr(items: list.map(m.todos, t => enc_todo(t)))),
+      ("next", JInt(value: m.next_id)),
+      ("filter", JStr(value: filter_name(m.filter))),
+      ("draft", JStr(value: m.draft)),
+      ("edit", JStr(value: m.edit)),
+      ("focus", JStr(value: focus_name(m.focus))),
+    ])),
+  )
+
+fn enc_todo(t: Todo) -> Json =
+  JObj(entries: map.from([
+    ("id", JInt(value: t.id)),
+    ("title", JStr(value: t.title)),
+    ("done", JBool(value: t.done)),
+  ]))
+
+fn filter_name(f: Filter) -> String =
+  match f {
+    All -> "all"
+    Active -> "active"
+    Done -> "done"
+  }
+
+fn focus_name(f: Focus) -> String =
+  match f {
+    Nowhere -> "nowhere"
+    Composer -> "composer"
+    Row(id) -> "row:" ++ to_string(id)
+  }
+
+## Text back to a model, and never a failure.
+pub fn decode(s: String) -> Model =
+  match parse(s) {
+    Err(_) -> init()
+    Ok(JObj(entries)) ->
+      Model {
+        todos: dec_todos(map.get(entries, "todos")),
+        next_id: dec_int(map.get(entries, "next"), 1),
+        filter: dec_filter(dec_str(map.get(entries, "filter"), "all")),
+        draft: dec_str(map.get(entries, "draft"), ""),
+        edit: dec_str(map.get(entries, "edit"), ""),
+        focus: dec_focus(dec_str(map.get(entries, "focus"), "composer")),
+      }
+    Ok(_) -> init()
+  }
+
+fn dec_str(j: Option[Json], fallback: String) -> String =
+  match j {
+    Some(JStr(v)) -> v
+    _ -> fallback
+  }
+
+fn dec_int(j: Option[Json], fallback: Int) -> Int =
+  match j {
+    Some(JInt(v)) -> v
+    _ -> fallback
+  }
+
+fn dec_bool(j: Option[Json], fallback: Bool) -> Bool =
+  match j {
+    Some(JBool(v)) -> v
+    _ -> fallback
+  }
+
+fn dec_todos(j: Option[Json]) -> List[Todo] =
+  match j {
+    Some(JArr(items)) -> list.map(items, i => dec_todo(i))
+    _ -> []
+  }
+
+fn dec_todo(j: Json) -> Todo =
+  match j {
+    JObj(entries) ->
+      Todo {
+        id: dec_int(map.get(entries, "id"), 0),
+        title: dec_str(map.get(entries, "title"), ""),
+        done: dec_bool(map.get(entries, "done"), false),
+      }
+    _ -> Todo { id: 0, title: "", done: false }
+  }
+
+fn dec_filter(s: String) -> Filter =
+  if s == "active" {
+    Active
+  } else if s == "done" {
+    Done
+  } else {
+    All
+  }
+
+fn dec_focus(s: String) -> Focus =
+  if s == "composer" {
+    Composer
+  } else {
+    match str.strip_prefix(s, "row:") {
+      Some(rest) ->
+        match parse_int(rest) {
+          Some(n) -> Row(id: n)
+          None -> Nowhere
+        }
+      None -> Nowhere
+    }
+  }
+
+# ---- tests ---------------------------------------------------------------
+
+fn sample() -> Model =
+  Model {
+    todos: [
+      Todo { id: 1, title: "buy milk", done: true },
+      Todo { id: 2, title: "ship tea", done: false },
+    ],
+    next_id: 3,
+    filter: Active,
+    draft: "hal",
+    edit: "",
+    focus: Row(id: 2),
+  }
+
+test "a model round-trips through its own text" {
+  assert decode(encode(sample())) == sample()
+  assert decode(encode(init())) == init()
+  let all_focus: List[Focus] = [Nowhere, Composer, Row(id: 7)]
+  let mut_check = list.all(all_focus, f => decode(encode(Model { ..sample(), focus: f })).focus == f)
+  assert mut_check
+  let all_filters: List[Filter] = [All, Active, Done]
+  assert list.all(all_filters, f =>
+      decode(encode(Model { ..sample(), filter: f })).filter == f)
+}
+
+test "the encoding is one line, and a quote in a title cannot end it" {
+  let tricky = Model { ..init(), todos: [Todo { id: 1, title: "a\"b\nc", done: false }] }
+  let line = encode(tricky)
+  assert not str.contains(line, "\n")
+  assert decode(line) == tricky
+}
+
+test "decode is total: anything at all reads as a model" {
+  assert decode("") == init()
+  assert decode("not json") == init()
+  assert decode("[1,2,3]") == init()
+  assert decode("{}") == Model { ..init(), next_id: 1 }
+  # A field of the wrong type falls back rather than failing.
+  assert decode("{\"todos\":7,\"next\":\"x\"}") == init()
+  assert decode("{\"todos\":[{\"id\":\"x\"}]}").todos == [Todo { id: 0, title: "", done: false }]
+}

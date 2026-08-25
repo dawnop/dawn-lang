@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dawn todo (wasm reactor + DOM bridge)</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font: 16px/1.5 ui-sans-serif, system-ui, sans-serif;
+        margin: 0;
+        padding: 3rem 1.5rem;
+        display: flex;
+        justify-content: center;
+      }
+      main { width: min(38rem, 100%); }
+      h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.02em; margin: 0 0 0.75rem; }
+      .todo { border: 1px solid rgb(128 128 128 / 0.35); border-radius: 8px; padding: 1.25rem; }
+      .todo.editing { border-color: rgb(70 120 200 / 0.8); }
+      .compose { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; }
+      .field {
+        flex: 1;
+        min-height: 1.6rem;
+        padding: 0.25rem 0.5rem;
+        border: 1px solid rgb(128 128 128 / 0.4);
+        border-radius: 6px;
+        font-family: ui-monospace, monospace;
+        cursor: text;
+        opacity: 0.6;
+      }
+      .field.focus { opacity: 1; border-color: rgb(70 120 200 / 0.9); }
+      .filters { display: flex; gap: 0.4rem; margin-bottom: 0.75rem; }
+      .filter.on { font-weight: 600; text-decoration: underline; }
+      .list { list-style: none; margin: 0 0 0.75rem; padding: 0; }
+      .row { display: flex; gap: 0.5rem; align-items: center; padding: 0.15rem 0; }
+      .row.done .title { opacity: 0.5; text-decoration: line-through; }
+      .row .title { flex: 1; cursor: pointer; }
+      .row.editing .draft {
+        flex: 1;
+        font-family: ui-monospace, monospace;
+        border-bottom: 1px solid rgb(70 120 200 / 0.9);
+      }
+      .pad { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 0.75rem; }
+      .key { min-width: 1.9rem; padding: 0.2rem 0.3rem; font-family: ui-monospace, monospace; }
+      .key.wide { min-width: 3.4rem; }
+      .status { margin: 0; font-size: 0.9rem; opacity: 0.7; }
+      button { font: inherit; border-radius: 6px; cursor: pointer; }
+      #error { margin-top: 1rem; min-height: 1.5rem; font-size: 0.9rem; color: rgb(200 60 60); }
+      #about { margin-top: 2rem; font-size: 0.85rem; opacity: 0.75; }
+      code { font-family: ui-monospace, monospace; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="app"></div>
+      <p id="error"></p>
+      <p id="about">
+        Every character is a message. The bridge carries an event name and an
+        address and nothing else, so no <code>&lt;input&gt;</code> can tell the
+        module what was typed and the keyboard is made of buttons. Click the
+        field or a row's title to choose which draft the keys feed. Press
+        <code>boom</code> to make the guest's <code>update</code> panic: the
+        failure lands inside wasm, the page keeps the document it has, and the
+        next press works.
+      </p>
+    </main>
+
+    <script type="module">
+      // Serve the *repository root* over http and open this page under it. The
+      // root and not this directory: the import below reaches back into
+      // packages/, and a document root at web/ would put that outside it.
+      // http and not file://, because a module script and `fetch` need an
+      // origin.
+      //
+      //   dawnc build --target wasm --reactor examples/projects/tea_dom_todo \
+      //     -o examples/projects/tea_dom_todo/web/todo.wasm
+      //   python3 -m http.server 8000
+      //   # http://localhost:8000/examples/projects/tea_dom_todo/web/
+      //
+      // The .wasm is a build artifact and is not in the repository.
+      import { mount } from '../../../../packages/tea-dom/js/app.mjs';
+
+      const banner = document.getElementById('error');
+      try {
+        await mount(await fetch('./todo.wasm'), document.getElementById('app'), {
+          onError: (reply) => {
+            banner.textContent = `${reply.kind}: ${reply.error}`;
+          },
+        });
+      } catch (e) {
+        banner.textContent = String(e);
+        throw e;
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,389 @@
+# The pure half of the demo: model, messages, `update` and `view`. No io, no
+# wire format, no host, so every assertion below is `==` on a value.
+#
+# Why a todo list and not a bigger counter. Three things the counter cannot
+# show up in a browser at all:
+#
+#   a child list whose *contents* vary   the counter's bar varies only in
+#                                        length, so index pairing is always
+#                                        right for it. Rows carry identity,
+#                                        and deleting one in the middle is
+#                                        where index pairing stops matching
+#                                        what the user sees.
+#   a draft the user is typing           text that belongs to one widget and
+#                                        to no persisted record. In this
+#                                        architecture it is a model field.
+#   a mode                               a row that is being edited is a
+#                                        different shape from a row that is
+#                                        not, decided by a field of the model
+#                                        rather than by the row.
+#
+# The on-screen key palette is not a stylistic choice. The bridge carries an
+# event *name* and an address and nothing else -- no `ev.target.value` and no
+# event payload of any kind -- so a real `<input>` cannot tell this program
+# what was typed. Buttons are the only input device the boundary has, so the
+# app ships a keyboard made of buttons and every keystroke is a message. The
+# cost is recorded rather than worked around, and it is the same restriction
+# that puts `draft` and `edit` in the model.
+
+use std/list
+use std/str
+use tea_core/app.{App, update, view}
+use tea_dom/node.{Node, Text, Elem}
+use tea_dom/dsl.{el, text}
+
+## One item. `id` is the identity the user means; the reconciler pairs by
+## index and never sees it, which is what section 3 of the report measured.
+pub type Todo = { id: Int, title: String, done: Bool }
+
+## Which items the list shows.
+pub type Filter =
+  | All
+  | Active
+  | Done
+derive Show
+
+## Where the key palette types. `Nowhere` is a real state: a page that has
+## just started has no cursor in it, and a key pressed then is a no-op rather
+## than a silent append to some default field.
+pub type Focus =
+  | Nowhere
+  | Composer
+  | Row(id: Int)
+derive Show
+
+## The whole model.
+##
+## `draft`, `edit` and `focus` are the three fields that exist because this
+## architecture has no local state: each is a piece of one widget's private
+## business lifted to the top of the application. `todos`, `next_id` and
+## `filter` are the parts a user would call the data.
+pub type Model = {
+  todos: List[Todo],
+  next_id: Int,
+  filter: Filter,
+  draft: String,
+  edit: String,
+  focus: Focus,
+}
+
+## What the buttons mean. `Key` and `Rub` are the keyboard; the rest is the
+## application.
+pub type Msg =
+  | Key(c: String)
+  | Rub
+  | Add
+  | Toggle(id: Int)
+  | Drop(id: Int)
+  | Only(f: Filter)
+  | Edit(id: Int)
+  | Save
+  | Cancel
+  | Compose
+  | Boom
+derive Show
+
+## The model a fresh page starts from.
+pub fn init() -> Model =
+  Model { todos: [], next_id: 1, filter: All, draft: "", edit: "", focus: Composer }
+
+impl App[Model] {
+  type Msg = Msg
+  type View = Node[Msg]
+
+  fn update(m: Model, msg: Msg) -> Model =
+    match msg {
+      Key(c) -> type_into(m, c)
+      Rub -> rub_out(m)
+      Add ->
+        if str.trim(m.draft) == "" {
+          m
+        } else {
+          Model {
+            ..m,
+            todos: m.todos ++ [Todo { id: m.next_id, title: str.trim(m.draft), done: false }],
+            next_id: m.next_id + 1,
+            draft: "",
+            focus: Composer,
+          }
+        }
+      Toggle(id) ->
+        Model {
+          ..m,
+          todos: list.map(m.todos, t => if t.id == id { Todo { ..t, done: not t.done } } else { t }),
+        }
+      Drop(id) ->
+        Model {
+          ..m,
+          todos: list.filter(m.todos, t => t.id != id),
+          focus: if m.focus == Row(id: id) { Composer } else { m.focus },
+          edit: if m.focus == Row(id: id) { "" } else { m.edit },
+        }
+      Only(f) -> Model { ..m, filter: f }
+      Edit(id) -> Model { ..m, focus: Row(id: id), edit: title_of(m.todos, id) }
+      Save ->
+        match m.focus {
+          Row(id) ->
+            if str.trim(m.edit) == "" {
+              Model { ..m, focus: Composer, edit: "" }
+            } else {
+              Model {
+                ..m,
+                todos: retitle(m.todos, id, str.trim(m.edit)),
+                focus: Composer,
+                edit: "",
+              }
+            }
+          _ -> m
+        }
+      Cancel -> Model { ..m, focus: Composer, edit: "" }
+      Compose -> Model { ..m, focus: Composer }
+      # Deliberate, and the only unhandled failure in this tree: `tea_dom`'s
+      # `serve` catches it at the boundary, the host keeps its model, and the
+      # next message is answered normally. The counter carries the same
+      # button for the same reason.
+      Boom -> panic("boom: update failed on purpose with " ++ to_string(len(m.todos)) ++ " todos")
+    }
+
+  fn view(m: Model) -> Node[Msg] = {
+    let heading: Node[Msg] = el("h1", [], [], [text("dawn todo")])
+    let composer: Node[Msg] = compose_row(m)
+    let filters: Node[Msg] = filter_row(m.filter)
+    let items: Node[Msg] =
+      el("ul", [("class", "list")], [], list.map(visible(m), t => row(m, t)))
+    let pad: Node[Msg] = key_pad()
+    let status: Node[Msg] = el("p", [("class", "status")], [], [text(summary(m))])
+    el("div", [("class", root_class(m))], [], [heading, composer, filters, items, pad, status])
+  }
+}
+
+# ---- update helpers ------------------------------------------------------
+
+# One keystroke, routed by `focus`. This function is the whole of what a
+# Compose-style `remember` at the two text widgets would have replaced.
+fn type_into(m: Model, c: String) -> Model =
+  match m.focus {
+    Nowhere -> m
+    Composer -> Model { ..m, draft: m.draft ++ c }
+    Row(_) -> Model { ..m, edit: m.edit ++ c }
+  }
+
+fn rub_out(m: Model) -> Model =
+  match m.focus {
+    Nowhere -> m
+    Composer -> Model { ..m, draft: chop(m.draft) }
+    Row(_) -> Model { ..m, edit: chop(m.edit) }
+  }
+
+fn chop(s: String) -> String = if str.len(s) == 0 { s } else { str.take(s, str.len(s) - 1) }
+
+fn title_of(ts: List[Todo], id: Int) -> String =
+  match list.find(ts, t => t.id == id) {
+    Some(t) -> t.title
+    None -> ""
+  }
+
+fn retitle(ts: List[Todo], id: Int, title: String) -> List[Todo] =
+  list.map(ts, t => if t.id == id { Todo { ..t, title: title } } else { t })
+
+## The items the current filter admits, in insertion order.
+pub fn visible(m: Model) -> List[Todo] =
+  match m.filter {
+    All -> m.todos
+    Active -> list.filter(m.todos, t => not t.done)
+    Done -> list.filter(m.todos, t => t.done)
+  }
+
+# ---- view parts ----------------------------------------------------------
+
+# The root's class is the only thing an edit changes outside the row being
+# edited, which makes "started editing" one `set-self` at [] in the patch
+# stream rather than something a reader has to infer.
+fn root_class(m: Model) -> String =
+  match m.focus {
+    Row(_) -> "todo editing"
+    _ -> "todo"
+  }
+
+fn compose_row(m: Model) -> Node[Msg] = {
+  let field: Node[Msg] =
+    el(
+      "span",
+      [("class", if m.focus == Composer { "field focus" } else { "field" })],
+      [("click", Compose)],
+      [text(if m.draft == "" { "(nothing typed)" } else { m.draft })],
+    )
+  let add: Node[Msg] = el("button", [("class", "add")], [("click", Add)], [text("add")])
+  let boom: Node[Msg] = el("button", [("class", "boom")], [("click", Boom)], [text("boom")])
+  el("div", [("class", "compose")], [], [field, add, boom])
+}
+
+fn filter_row(cur: Filter) -> Node[Msg] =
+  el("div", [("class", "filters")], [], [
+    filter_button("all", All, cur),
+    filter_button("active", Active, cur),
+    filter_button("done", Done, cur),
+  ])
+
+fn filter_button(label: String, which: Filter, cur: Filter) -> Node[Msg] =
+  el(
+    "button",
+    [("class", if which == cur { "filter on" } else { "filter" })],
+    [("click", Only(f: which))],
+    [text(label)],
+  )
+
+# Two shapes, decided by a field of the model rather than by the row: an
+# `<li>` being edited has a draft and two verbs, an `<li>` at rest has a
+# checkbox, a title and a delete. They agree on tag and on child count and on
+# nothing else, which is what makes an edited row in the tail of a deletion
+# an outright `replace` rather than a text patch.
+fn row(m: Model, t: Todo) -> Node[Msg] =
+  if m.focus == Row(id: t.id) {
+    el("li", [("class", "row editing")], [], [
+      el("span", [("class", "draft")], [], [text(if m.edit == "" { "(empty)" } else { m.edit })]),
+      el("button", [("class", "save")], [("click", Save)], [text("save")]),
+      el("button", [("class", "cancel")], [("click", Cancel)], [text("cancel")]),
+    ])
+  } else {
+    el("li", [("class", if t.done { "row done" } else { "row" })], [], [
+      el("button", [("class", "box")], [("click", Toggle(id: t.id))], [
+        text(if t.done { "[x]" } else { "[ ]" }),
+      ]),
+      el("span", [("class", "title")], [("click", Edit(id: t.id))], [text(t.title)]),
+      el("button", [("class", "kill")], [("click", Drop(id: t.id))], [text("x")]),
+    ])
+  }
+
+## The letters this program can type. A keyboard made of buttons is what a
+## boundary that carries no event payload leaves an application: see the file
+## header.
+pub const KEYS: String = "abcdefghijklmnopqrstuvwxyz"
+
+fn key_pad() -> Node[Msg] = {
+  let letters: List[Node[Msg]] = list.map(str.chars(KEYS), c => key(c))
+  let space: Node[Msg] =
+    el("button", [("class", "key wide")], [("click", Key(c: " "))], [text("space")])
+  let rub: Node[Msg] = el("button", [("class", "key wide")], [("click", Rub)], [text("rub")])
+  el("div", [("class", "pad")], [], letters ++ [space, rub])
+}
+
+fn key(c: String) -> Node[Msg] =
+  el("button", [("class", "key")], [("click", Key(c: c))], [text(c)])
+
+fn summary(m: Model) -> String = {
+  let total = len(m.todos)
+  let done = len(list.filter(m.todos, t => t.done))
+  "$done of $total done"
+}
+
+# ---- tests ---------------------------------------------------------------
+
+fn typed(m: Model, s: String) -> Model =
+  list.fold(str.chars(s), m, (acc, c) => update(acc, Key(c: c)))
+
+fn seeded(n: Int) -> Model = seed_go(init(), 1, n)
+
+fn seed_go(m: Model, i: Int, n: Int) -> Model =
+  if i > n {
+    m
+  } else {
+    seed_go(update(typed(m, "task" ++ to_string(i)), Add), i + 1, n)
+  }
+
+test "typing is a message per character and lands where the focus says" {
+  let m = typed(init(), "milk")
+  assert m.draft == "milk"
+  assert update(m, Rub).draft == "mil"
+  # Nothing focused, nothing typed: a key is a no-op rather than a guess.
+  let loose = Model { ..init(), focus: Nowhere }
+  assert typed(loose, "milk") == loose
+}
+
+test "add commits the draft and clears it" {
+  let m = update(typed(init(), "buy milk"), Add)
+  assert m.todos == [Todo { id: 1, title: "buy milk", done: false }]
+  assert m.draft == ""
+  assert m.next_id == 2
+  # An empty draft is not a todo.
+  assert update(m, Add) == m
+}
+
+test "toggle, drop and filter are the plain list operations" {
+  let m = seeded(3)
+  assert len(m.todos) == 3
+  let t = update(m, Toggle(id: 2))
+  assert t.todos[1].done
+  assert len(visible(Model { ..t, filter: Active })) == 2
+  assert len(visible(Model { ..t, filter: Done })) == 1
+  let d = update(t, Drop(id: 2))
+  assert len(d.todos) == 2
+  assert d.todos[1].id == 3
+}
+
+test "an edit is a second draft, and the focus decides which one a key feeds" {
+  let m = update(seeded(3), Edit(id: 2))
+  assert m.focus == Row(id: 2)
+  assert m.edit == "task2"
+  let typing = typed(m, "!")
+  assert typing.edit == "task2!"
+  # The composer's draft is untouched while a row has the focus.
+  assert typing.draft == ""
+  let saved = update(typing, Save)
+  assert saved.todos[1].title == "task2!"
+  assert saved.focus == Composer
+  assert saved.edit == ""
+  # Cancel keeps the old title.
+  assert update(typing, Cancel).todos[1].title == "task2"
+}
+
+test "dropping the row being edited puts the focus somewhere that exists" {
+  let m = update(seeded(3), Edit(id: 2))
+  let d = update(m, Drop(id: 2))
+  assert d.focus == Composer
+  assert d.edit == ""
+}
+
+test "the view is a value, so a frame is one assertion" {
+  let m = view(init())
+  match m {
+    Text(_) -> { assert false }
+    Elem(tag, props, on, kids) -> {
+      assert tag == "div"
+      assert props == [("class", "todo")]
+      assert list.is_empty(on)
+      # heading, composer, filters, list, pad, status
+      assert len(kids) == 6
+    }
+  }
+  match view(update(seeded(1), Edit(id: 1))) {
+    Text(_) -> { assert false }
+    Elem(_, props, _, _) -> { assert props == [("class", "todo editing")] }
+  }
+}
+
+test "the key palette is 28 buttons and never varies with the model" {
+  let a = view(init())
+  let b = view(seeded(4))
+  match (kids_at(a, 4), kids_at(b, 4)) {
+    (Some(x), Some(y)) -> {
+      assert len(x) == 28
+      assert x == y
+    }
+    _ -> { assert false }
+  }
+}
+
+fn kids_at(n: Node[Msg], i: Int) -> Option[List[Node[Msg]]] =
+  match n {
+    Text(_) -> None
+    Elem(_, _, _, ks) ->
+      if i >= len(ks) {
+        None
+      } else {
+        match ks[i] {
+          Text(_) -> None
+          Elem(_, _, _, inner) -> Some(inner)
+        }
+      }
+  }
