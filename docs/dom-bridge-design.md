@@ -1,6 +1,6 @@
 # DOM 桥：wasm reactor + 纯消息边界
 
-> 状态：**current** —— 定稿并已落地。`packages/tea-dom` 是 `tea_core` 调和器的第二个消费者，
+> 状态：**current**。定稿并已落地。`packages/tea-dom` 是 `tea_core` 调和器的第二个消费者，
 > `dawnc build --target wasm --reactor` 是它的宿主形态，`scripts/wasm-dom-contract` 是它的门禁。
 
 ## 1. 这份文档回答什么

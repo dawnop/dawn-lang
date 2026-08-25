@@ -60,10 +60,10 @@ class StubElement extends StubNode {
     doc.rec.log(`create <${tag}>`);
   }
 
+  // A browser answers a live NamedNodeMap; the bridge only ever reads a
+  // length and an index, so an array of the same shape is enough.
   get attributes() {
-    const list = [...this._attrs.entries()].map(([name, value]) => ({ name, value }));
-    list.length = list.length; // a plain array is a good enough NamedNodeMap here
-    return list;
+    return [...this._attrs.entries()].map(([name, value]) => ({ name, value }));
   }
 
   getAttribute(name) {
