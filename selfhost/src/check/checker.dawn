@@ -1046,13 +1046,25 @@ fn earg_cooccurs(s: Sig, eid: Int, r: Eff) -> Option[(Eff, String)] = {
 ##     under a constructor is not a function *value* arriving at a slot.
 ##   * exactly one effect variable in the row. Two variables have no principal
 ##     split of the leftover, and inventing one is a language question.
-##   * `e` is bound by this signature and still free in `em`. A variable an
-##     earlier argument already pinned is answered, not open.
+##   * `e` is bound by this signature. A rigid variable from an enclosing
+##     declaration has no slot at this call to be answered in.
 ##   * `R` non-empty, and the row does not already fit. A row that fits is
 ##     accepted by the path that always accepted it, unchanged.
 ##   * `R ⊆ S`. Upward widening is what the other direction is for and it is
 ##     already free: a closure whose row is short of `R` is padded up by
 ##     `eff_carries` and never reaches here.
+##
+## A second argument through the same variable **joins**, it does not replace:
+## `lub_eff` is what `unify_eff`'s `EffVar` arm does for a bare `!e` parameter,
+## and two spellings of one parameter row cannot answer that question
+## differently. Replacing instead would make the verdict depend on the order
+## the arguments were written, and would hand the earlier closure a pack with
+## its own atom missing -- a program that checks clean and panics.
+##
+## The variable is read off the **unsubstituted** declared row for exactly that
+## reason: once `em` binds `e`, the substituted row has no variable left to
+## find, so a helper that looked only at the substituted row would see the
+## second argument as an ordinary mismatch.
 fn earg_row_subtract(
   cx: Cx,
   s: Sig,
@@ -1084,9 +1096,11 @@ fn earg_row_subtract(
     _ -> ()
   }
   if not is_dfn || not is_afn { return (em, false, None) }
-  let dsub = reduce_eff(cx, subst_eff(de, em), m)
-  if eff_carries(dsub, ae) { return (em, false, None) }
-  let vs = eff_vars(dsub)
+  # projections reduce (the subject may be pinned by `m` already); effect
+  # variables do not, because one of them is what this is looking for
+  let dred = reduce_eff(cx, de, m)
+  if eff_carries(reduce_eff(cx, subst_eff(dred, em), m), ae) { return (em, false, None) }
+  let vs = eff_vars(dred)
   if len(vs) != 1 { return (em, false, None) }
   let (eid, ename) = vs[0]
   var bound_here = false
@@ -1096,8 +1110,8 @@ fn earg_row_subtract(
       _ -> ()
     }
   }
-  if not bound_here || map.has(em, eid) { return (em, false, None) }
-  let r = eff_concrete_atoms(dsub)
+  if not bound_here { return (em, false, None) }
+  let r = eff_concrete_atoms(dred)
   if r == EPure { return (em, false, None) }
   let bare = ty_show(cx.adts, TyFn(dps, dr, EffVar(ename, eid)))
   let repair = "spell this parameter's row as `!" ++ ename ++ "` alone (`" ++ bare ++
@@ -1112,7 +1126,13 @@ fn earg_row_subtract(
           "`, without `!" ++ eff_show(r) ++ "`, so which row it binds to is observable there; " ++
           repair))
     }
-    None -> (map.insert(em, eid, eff_row_minus(ae, r)), true, None)
+    None -> {
+      let prev = match map.get(em, eid) {
+        Some(p) -> p
+        None -> EPure
+      }
+      (map.insert(em, eid, lub_eff(prev, eff_row_minus(ae, r))), true, None)
+    }
   }
 }
 

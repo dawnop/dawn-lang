@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 802c25d0a3fc5cc4 -->
+<!-- doc-check: translation-of docs/spec.md @ e0551f6976ca09bc -->
 
 # Dawn Language Specification
 
@@ -2203,6 +2203,12 @@ the rows that contain `R`, so which one was chosen can be observed only from a r
 and choosing it costs no principality. Where it has one, any choice would be a choice made on the
 caller's behalf that the caller never wrote, so the argument is still refused, and the diagnostic
 names the occurrence that makes the choice observable.
+
+Where **several** function-value arguments pass through the same `e`, the subtractions are
+joined, which is what a bare `!e` parameter has always done. Joined rather than last-one-wins:
+two spellings of one parameter row should not answer differently, and last-one-wins would make
+the verdict depend on the order the arguments were written and would hand the earlier closure an
+evidence pack with its own atom missing.
 
 The other shapes are unchanged. `R ⊄ S` is still refused: that direction is the widening above, and
 widening covers only the case where the slot's row already carries the argument's atom for atom,

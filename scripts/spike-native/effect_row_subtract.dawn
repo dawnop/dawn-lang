@@ -85,6 +85,14 @@ fn thread_bracketed(f: fn() -> Int !(e | io)) -> Int !(e | io) =
 ## one whose `e` was bound by subtraction.
 fn thread_tell(f: fn() -> Int !(TellR | io)) -> Int !(TellR | io) = thread(f)
 
+## Two function-value arguments through **one** variable. The binding joins
+## rather than replaces, which is what `unify_eff`'s `EffVar` arm does for a
+## bare `!e` parameter and therefore the only answer one parameter row can have
+## in two spellings. A binding that replaced would hand whichever argument was
+## written first a pack with its own atom missing, and the verdict would depend
+## on the order the arguments were written.
+fn both(t: fn() -> Int !(e | io), u: fn() -> Int !(e | io)) -> Int !(e | io) = t() + u()
+
 ## An argument written as a lambda: the row is inferred at the call and the
 ## leftover is one label.
 fn line_lambda() -> Unit !io = {
@@ -169,6 +177,20 @@ fn line_as_value() -> Unit !io = {
   })))
 }
 
+## The join, with a different label down each argument. Both closures run under
+## both handlers, and each reads only its own atom out of the shared pack.
+fn line_both() -> Unit !io = {
+  with handle TellR { tell(n) => n * 43 }
+  with handle NoteR { note(n) => n * 47 }
+  println(to_string(both(() => {
+    println("  closure: left")
+    tell(1)
+  }, () => {
+    println("  closure: right")
+    note(1)
+  })))
+}
+
 ## Which handler answered, not merely that one did. Both calls are the same
 ## text under the same signature; only the nearest handler differs, so a pack
 ## routed to the wrong one is a wrong number rather than a panic.
@@ -202,6 +224,8 @@ pub fn main() -> Unit !io = {
   line_bracketed()
   println("-- thread taken as a value rather than called --")
   line_as_value()
+  println("-- two arguments join on one variable --")
+  line_both()
   println("-- the nearest handler answers, twice over --")
   line_shadowed()
 }
@@ -286,6 +310,22 @@ test "the value wrapper unpacks the subtracted row into slots" {
     touch_io()
     tell(1)
   }) == 41
+}
+
+## The join. 43 comes out of the left closure and 47 out of the right, so a
+## binding that replaced rather than joined loses one of them: the first
+## argument's atom would not be in the pack the call builds, which is a panic
+## on a program that checked clean rather than a wrong number.
+test "two arguments through one variable join rather than replace" {
+  with handle TellR { tell(n) => n * 43 }
+  with handle NoteR { note(n) => n * 47 }
+  assert both(() => {
+    touch_io()
+    tell(1)
+  }, () => {
+    touch_io()
+    note(1)
+  }) == 90
 }
 
 ## The routing assertion: same call, same row, two handlers, and the number
