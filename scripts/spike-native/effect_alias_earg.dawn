@@ -75,12 +75,24 @@ fn drive_both(b: Both[!AskE, !TellE]) -> Int !AskE !TellE =
 fn same_twice(b: Both[!AskE, !AskE]) -> Int !AskE =
   b(() => 1000 + ask(), () => 1100 + ask())
 
-## io beside a variable, in the argument. io absorbing the variable here is
-## #345's hole reached through the substitution rather than through inference:
-## the row would lose its only slot while the callee still reads one.
+## io beside a variable, in the argument: the shape #345 was about, reached
+## through the substitution rather than through inference.
+##
+## What this line does **not** catch, measured rather than assumed: a
+## substitution that lets io swallow the variable, leaving the slot at `!io`.
+## The thunk the caller passes does io and nothing else, so it fits either row,
+## and `!e` still arrives through `k`. Making the thunk perform the label
+## beside the io would separate the two -- and does not type-check, because
+## solving `!e` out of `!(TellE | io)` against a slot of `!(e | io)` is row
+## subtraction, which the checker does not do. `merged` below is the line that
+## does separate them: there the two atoms are in one argument's own expansion.
 fn io_forward(t: Thunk[!(io | e)], k: fn(Int) -> Int !e) -> Int !io !e = apply1(k, t())
 
-## The argument merged into a target that already had io of its own.
+## The argument merged into a target that already had io of its own. This is
+## the line that holds io's non-absorption shut: both atoms are in one
+## argument's expansion, so a union in which io swallowed the label leaves the
+## slot at `!io` and the thunk below, which does io *and* asks, no longer fits
+## (measured against a re-introduced #345).
 fn merged(t: IoThunk[!AskE]) -> Int !io !AskE = t()
 
 ## Both axes at once: the type arguments stay aligned with `[T, U]` while the
@@ -208,7 +220,7 @@ test "the same row twice is that row once" {
   assert same_twice((f, g) => f() + g()) == 2186
 }
 
-test "io does not absorb a variable that arrived as an argument" {
+test "an argument that mixes io with a variable still charges both" {
   with handle TellE { tell() => 31 }
   assert io_forward(() => 700, n => n + tell()) == 731
 }
