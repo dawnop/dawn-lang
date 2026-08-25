@@ -19,6 +19,7 @@
 # scripts/wasm-dom-contract points at the wasm failure runtime.
 
 use tea_core/app.{App, update, view}
+use tea_core/diff.{Patch, Replace, AppendKids, TruncateKids, diff}
 use tea_dom/node.{Node, Text, Elem}
 use tea_dom/dsl.{button, div_of, el, text}
 
@@ -54,6 +55,7 @@ impl App[Counter] {
   fn view(m: Counter) -> Node[Msg] = {
     let heading: Node[Msg] = el("h1", [], [], [text("dawn counter")])
     let count: Node[Msg] = el("p", [("class", "count")], [], [text(to_string(m.n))])
+    let bar: Node[Msg] = el("div", [("class", "bar")], [], ticks(m.n))
     let controls: Node[Msg] =
       div_of("row", [
         button("-", Dec),
@@ -62,9 +64,21 @@ impl App[Counter] {
         button("boom", Boom),
       ])
     div_of(if m.n < 0 { "counter below-zero" } else { "counter" },
-      [heading, count, controls])
+      [heading, count, bar, controls])
   }
 }
+
+## One `span` per unit of a positive count, and none at all below zero.
+##
+## This is the part of the view whose *child list length* depends on the
+## model, and it is here for the reconciler rather than for the user: without
+## it the app only ever produces `replace` and `set-self`, and the two tail
+## ops (`append`, `truncate`) would never cross the boundary in a running
+## program. Counting up appends one span, counting down truncates one, and
+## the spans already on screen are never mentioned.
+fn ticks(n: Int) -> List[Node[Msg]] = if n <= 0 { [] } else { ticks(n - 1) ++ [tick()] }
+
+fn tick() -> Node[Msg] = el("span", [("class", "tick")], [], [])
 
 ## A model as text, and back. Opaque to everything but this module: the wire
 ## carries it as a JSON string and the host hands it back untouched.
@@ -94,6 +108,7 @@ test "the view is a value, so a frame is one assertion" {
     div_of("counter", [
       el("h1", [], [], [text("dawn counter")]),
       el("p", [("class", "count")], [], [text("0")]),
+      el("div", [("class", "bar")], [], []),
       div_of("row", [
         button("-", Dec),
         button("+", Inc),
@@ -102,6 +117,23 @@ test "the view is a value, so a frame is one assertion" {
       ]),
     ])
   assert view(init()) == want
+}
+
+test "the bar is the only child list whose length the model decides" {
+  # The two tail ops exist because of this: counting up is one `append` at
+  # the bar and one `replace` at the count, and the spans already there are
+  # not mentioned. Below zero the bar is empty rather than negative.
+  let none: List[Node[Msg]] = []
+  assert ticks(0) == none
+  assert ticks(-3) == none
+  assert len(ticks(3)) == 3
+  assert ticks(3) == [tick(), tick(), tick()]
+  let two: List[Patch[Node[Msg]]] = diff(view(Counter { n: 1 }), view(Counter { n: 2 }))
+  assert len(two) == 2
+  assert two[0] == Patch { path: [1, 0], op: Replace(w: text("2")) }
+  assert two[1] == Patch { path: [2], op: AppendKids(ws: [tick()]) }
+  let back: List[Patch[Node[Msg]]] = diff(view(Counter { n: 2 }), view(Counter { n: 1 }))
+  assert back[1] == Patch { path: [2], op: TruncateKids(keep: 1) }
 }
 
 test "the root's class is the only thing the sign of the count changes" {

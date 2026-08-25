@@ -59,6 +59,9 @@ fn usage() -> String =
     "  dawnc check [--std <dir>] <target>...       type-check, report diagnostics",
     "  dawnc build [--std <dir>] <target> [-o out] compile to a native binary via cc",
     "  dawnc build --target wasm <target> [-o out] compile to wasm32-wasi via clang",
+    "  dawnc build --target wasm --reactor <target> [-o out]",
+    "                                              ... as a reactor: no _start, one",
+    "                                              exported `dawn_turn` the host calls",
     "  dawnc emitc [--std <dir>] <target> [-o out] emit the C translation unit",
     "  dawnc run   [--std <dir>] <target> [-- <args>...]",
     "                                              compile and run",
@@ -219,18 +222,26 @@ fn parse_compile_tail(
   (std_dir, out, target)
 }
 
-## `build`'s tail: `parse_compile_tail` plus `--target <t>`. A separate parser
-## rather than a flag on the shared one because `emitc` has no targets to
-## choose between -- the C text is the same whatever compiles it. The only
-## spelling is `wasm` (wasm32-wasi via clang, see `cc_build_for`); native is
-## the default and has no spelling, and the JVM driver has no such flag at
-## all, so this stays off the argvs `native-cli-diff.sh` holds the two
+## `build`'s tail: `parse_compile_tail` plus `--target <t>` and `--reactor`. A
+## separate parser rather than a flag on the shared one because `emitc` has no
+## targets to choose between -- the C text is the same whatever compiles it.
+## The only spelling is `wasm` (wasm32-wasi via clang, see `cc_build_for`);
+## native is the default and has no spelling, and the JVM driver has no such
+## flag at all, so this stays off the argvs `native-cli-diff.sh` holds the two
 ## drivers to.
-fn parse_build_tail(usage_text: String, rest: List[String]) -> (String, String, String, Bool) !io = {
+##
+## `--reactor` is wasm-only and refused elsewhere, because it is a property of
+## the wasm execution model and has no meaning for a process that has a
+## `main`.
+fn parse_build_tail(
+  usage_text: String,
+  rest: List[String],
+) -> (String, String, String, Bool, Bool) !io = {
   var std_dir = "std"
   var out = ""
   var target = ""
   var wasm = false
+  var reactor = false
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
@@ -245,6 +256,9 @@ fn parse_build_tail(usage_text: String, rest: List[String]) -> (String, String, 
       }
       wasm = true
       i = i + 2
+    } else if rest[i] == "--reactor" {
+      reactor = true
+      i = i + 1
     } else {
       refuse_second_target("dawn build", target, rest[i])
       target = rest[i]
@@ -252,7 +266,10 @@ fn parse_build_tail(usage_text: String, rest: List[String]) -> (String, String, 
     }
   }
   if target == "" { cli_error(usage_text) }
-  (std_dir, out, target, wasm)
+  if reactor && not wasm {
+    cli_error("--reactor needs --target wasm; a native build always has a main")
+  }
+  (std_dir, out, target, wasm, reactor)
 }
 
 ## `[--std <dir>] <target>...`, matching main.dawn's public check parser.
@@ -317,7 +334,44 @@ fn default_out(target: String) -> String = {
 ## leave the binary at `out`. The cc diagnostics stream to this process's
 ## stderr -- an empty err_path means "inherit", and cc failing is the user's
 ## compile error to read.
-fn cc_build(ctext: String, out: String) -> Unit !io = cc_build_for(ctext, out, false)
+fn cc_build(ctext: String, out: String) -> Unit !io = cc_build_for(ctext, out, false, false)
+
+## The reactor's only export, appended to the emitted C.
+##
+## A wasm reactor is a module the host instantiates once and then calls into,
+## and this is the function it calls. Everything about the boundary above it
+## -- what a turn means, what crosses -- is in Dawn (packages/tea-dom); all
+## that is needed here is a name wasm-ld will export and a call into the
+## program's own `main`, which C permits and which is what runs
+## `dawn_rt_init` and the Dawn entry point.
+##
+## Two lines that are not decoration:
+##
+##   `export_name` rather than a `-Wl,--export` flag, so the exported spelling
+##   lives next to the function instead of in an argv the reader has to find.
+##
+##   `fflush(NULL)` because `dawn_rt_init` puts stdout in full buffering (the
+##   native differential compares piped stdout byte for byte and a
+##   line-buffered stream reorders against stderr). A process flushes that at
+##   exit; a reactor never exits, so a turn's reply would sit in the buffer
+##   until the buffer filled. Flushing per turn is the reactor's version of
+##   the exit that is not coming.
+fn reactor_shim() -> String =
+  join([
+    "",
+    "/* --- reactor entry, appended by `dawnc build --target wasm --reactor` --- */",
+    "#include <stdio.h>",
+    "__attribute__((export_name(\"dawn_turn\")))",
+    "int32_t dawn_turn(void) {",
+    "  int rc = main(0, (char **)0);",
+    "  fflush(NULL);",
+    "  return (int32_t)rc;",
+    "}"
+  ], "\n") ++ "\n"
+
+## The emitted C, plus the reactor export when one was asked for.
+fn reactor_wrapped(ctext: String, reactor: Bool) -> String =
+  if reactor { ctext ++ reactor_shim() } else { ctext }
 
 ## What a missing wasm32-wasi toolchain needs, said next to the failure it
 ## causes: the compile errors clang prints for it (a missing driver, a missing
@@ -329,7 +383,7 @@ fn wasm_toolchain_hint() -> String =
   "clang lld wasi-libc libclang-rt-18-dev-wasm32 (or point DAWN_WASM_CC " ++
   "at a wasi-sdk clang)."
 
-fn cc_build_for(ctext: String, out: String, wasm: Bool) -> Unit !io = {
+fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !io = {
   let work = match io.temp_dir("", "dawnc") {
     Ok(d) -> d
     Err(e) -> {
@@ -398,10 +452,16 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool) -> Unit !io = {
   # few hundred times per program (`if ((x == 0))` is the emitter's honest
   # parenthesization). The native row never sees it because gcc has no such
   # warning; real errors still print.
+  # A reactor has no `_start`: wasi-libc's reactor crt exports `_initialize`
+  # instead, the emitted `main` becomes an ordinary function nothing calls,
+  # and the only way in is the export `reactor_shim` declares. That is the
+  # whole difference in the link, and it is one flag.
+  let model: List[String] = if reactor { ["-mexec-model=reactor"] } else { [] }
   let argv = if wasm {
     [
       cc, "--target=wasm32-wasi", "-std=c11", "-O2", "-fwrapv", "-fwasm-exceptions",
-      "-fno-strict-aliasing", "-Wno-parentheses-equality",
+      "-fno-strict-aliasing", "-Wno-parentheses-equality"
+    ] ++ model ++ [
       "-I", work,
       "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c",
       work ++ "/dawn_rt_wasi_eh.o", "-lm"
@@ -473,7 +533,7 @@ fn cmd_emitc(rest: List[String]) -> Unit !io = {
 }
 
 fn cmd_build(rest: List[String]) -> Unit !io = {
-  let (std_dir, out0, target, wasm) = parse_build_tail(
+  let (std_dir, out0, target, wasm, reactor) = parse_build_tail(
     "usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]",
     rest
   )
@@ -484,7 +544,7 @@ fn cmd_build(rest: List[String]) -> Unit !io = {
   } else {
     out0
   }
-  cc_build_for(emitted(std_dir, target), out, wasm)
+  cc_build_for(reactor_wrapped(emitted(std_dir, target), reactor), out, wasm, reactor)
 }
 
 ## Build `ctext` into a scratch directory and become it: the process ends with
