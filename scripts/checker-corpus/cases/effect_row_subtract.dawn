@@ -1,0 +1,112 @@
+# checker.dawn: row subtraction at a function-value argument (#350). A closure
+# whose row is `S` arriving at a parameter declared `!(e|R)`, where `e` is one
+# effect variable the callee binds and `R` is concrete.
+#
+# Unification on its own never answers this. `unify_eff`'s union arm is a
+# containment test over the substituted row, and with `e` unbound the test has
+# nothing to compare, so `!(e|io)` refused every closure that raised a label
+# and the only parameter spelling that worked was the bare `!e`.
+# `earg_row_subtract` computes `e := S \ R` and offers it before the test runs.
+#
+# The binding is safe only where it is not observable, and that is the whole
+# precondition (spec §6.6): every solution of `!(e|R) ~ !S` agrees on the rows
+# that contain `R`, so which one was chosen can be read off only a row that
+# mentions `e` without `R`. The refused half below is that class, once per
+# position the scan looks at, plus the two shapes the rule declines to touch.
+#
+# Accepting is not the claim on its own. That a labelled closure reaching the
+# union slot still finds its handler is pinned at run level, on both backends,
+# by scripts/effect-evidence-contract and scripts/spike-native.
+use std/io
+
+pub effect Tell {
+  fn tell() -> Int
+}
+
+pub effect Ask {
+  fn ask() -> Int
+}
+
+# ---- accepted ----
+
+# #350 itself: R = {io}, S = {Tell, io}, so what is left for `e` is the label
+fn go(f: fn() -> Int !(e | io)) -> Int !(e | io) = f()
+
+pub fn shape_350() -> Int !io = {
+  with handle Tell { tell() => 5 }
+  go(() => {
+    io.println("in")
+    tell() + 1
+  })
+}
+
+# R with two atoms: a written label beside io. `Ask` is spoken for by the
+# declaration and so is `io`; `Tell` is the leftover.
+fn go2(f: fn() -> Int !(e | Ask | io)) -> Int !(e | Ask | io) = f()
+
+pub fn two_atoms() -> Int !io = {
+  with handle Tell { tell() => 5 }
+  with handle Ask { ask() => 7 }
+  go2(() => {
+    io.println("in")
+    tell() + ask()
+  })
+}
+
+# the leftover is two labels and no io at all: `e := !(Ask|Tell)`
+pub fn label_remainder() -> Int !io = {
+  with handle Tell { tell() => 5 }
+  with handle Ask { ask() => 7 }
+  go(() => {
+    io.println("in")
+    tell() + ask()
+  })
+}
+
+# ---- refused ----
+
+# The observable class, seen from a second parameter: `u`'s row is `!e` with no
+# io beside it, so `e := S \ {io}` and `e := S` are different demands on `u`
+# and the call would be choosing one of them silently.
+fn pick(t: fn() -> Int !(e | io), u: fn() -> Int !e) -> Int !(e | io) = t() + u()
+
+pub fn observable_param() -> Int !io = {
+  with handle Tell { tell() => 5 }
+  pick(() => {
+    io.println("t")
+    tell()
+  }, () => 1)
+}
+
+# the same class, seen from the declared row
+fn drop_it(t: fn() -> Int !(e | io)) -> Int !e = 0
+
+pub fn observable_return() -> Int !io = {
+  with handle Tell { tell() => 5 }
+  drop_it(() => {
+    io.println("d")
+    tell() + 1
+  })
+}
+
+# Two variables in the row. There is no principal split of the leftover between
+# them, so the rule declines the shape and the refusal is the one it always
+# was, hint included.
+fn go_two(f: fn() -> Int !(e1 | e2 | io)) -> Int !(e1 | e2 | io) = f()
+
+pub fn two_vars() -> Int !io = {
+  with handle Tell { tell() => 5 }
+  go_two(() => {
+    io.println("in")
+    tell() + 1
+  })
+}
+
+# `R ⊆ S` fails: the closure's row is short of the io the parameter names.
+# Widening in that direction is `eff_carries`' business and it is free only
+# where the declared row already covers the closure's, which `!(e|io)` does not
+# cover `!Tell`.
+pub fn short_of_r() -> Int !io = {
+  with handle Tell { tell() => 5 }
+  go(() => tell() + 1)
+}

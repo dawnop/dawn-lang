@@ -1,0 +1,308 @@
+# An effect variable standing beside **concrete atoms in a base-axis union**,
+# which is the shape #350 made bindable and the one nothing ran end to end.
+#
+#     fn thread(f: fn() -> Int !(e | io)) -> Int !(e | io) = f()
+#
+# The argument's row is `!(TellR|io)`; the parameter's is a variable beside io;
+# and binding `e` to what is left over after io is taken off is the whole of
+# #350. Until it landed, the only parameter spelling a labelled closure could
+# reach was the bare `!e`, so an author who wanted to say "this closure may do
+# io" had to say nothing at all.
+#
+# effect_widen_row.dawn is the same subtraction on the **label** axis, where it
+# has always worked: there the base is a bare variable and `unify_eff`'s
+# `ELabeled` arm hands it the residual directly. Here the concrete atom is in
+# the base itself, which is the arm that used to be a containment test with
+# nothing to compare, and the residual has to be computed before the test runs.
+#
+# What the call site then has to build is the same node-over-tail: io is an
+# answer rather than a slot, so the pack is exactly the tail `e` was bound to,
+# and every line below reads through it. A tail that lost an atom is not a
+# wrong number here, it is `ev_get`'s panic on a program that checked clean.
+#
+# **Every line installs its own handlers and every handler answers a different
+# prime**, for the reason effect_widen_row.dawn records: one `with handle` per
+# effect at the top of `main` lets a single correct call site seed a shared
+# remainder's pack, and every other line then reads the node out of it for
+# free. **Every operation takes an argument too**, so an answer is a function
+# of what the closure passed in rather than a constant a fold could stand in
+# for.
+use std/io
+
+effect AskR {
+  fn ask(n: Int) -> Int
+}
+
+effect TellR {
+  fn tell(n: Int) -> Int
+}
+
+effect NoteR {
+  fn note(n: Int) -> Int
+}
+
+## The io half of these parameter rows, with nothing on stdout.
+##
+## `R ⊆ S` is a precondition, not a courtesy: a closure whose row is *short*
+## of io is refused rather than padded up to it, which is what
+## `short_of_r` in scripts/checker-corpus/cases/effect_row_subtract.dawn pins.
+## So the assertion lane has to do io too, and it must do it silently or an
+## `assert` would be answering with a transcript.
+fn touch_io() -> Unit !io = print("")
+
+## The shape itself. `f`'s declared row is a variable beside io, and the body
+## does io of its own between the two halves of the transcript, so the `.expect`
+## can see that the closure ran where this says it ran.
+fn thread(f: fn() -> Int !(e | io)) -> Int !(e | io) = {
+  println("  thread: before")
+  let v = f()
+  println("  thread: after")
+  v
+}
+
+## R with two atoms: a written label beside io beside the variable. `AskR` is
+## spoken for by the declaration and answered out of the node, `io` is an
+## answer, and only `TellR` is left for `e`.
+fn thread2(f: fn() -> Int !(e | AskR | io)) -> Int !(e | AskR | io) = {
+  println("  thread2: before")
+  f() + ask(3)
+}
+
+## The same row one hop further out, and the case where the **leftover is
+## itself a variable**: `relay`'s `e` is what `thread`'s `e` binds to, so what
+## travels is a slot rather than a ground row.
+fn relay(f: fn() -> Int !(e | io)) -> Int !(e | io) = thread(f) + 1
+
+## #350 reaching a primitive's closure argument. `bracket` binds `!e` over the
+## closure it protects while its own row stays `!io`, so the pack `thread`
+## needs is built one frame deeper than the call that wrote it.
+fn thread_bracketed(f: fn() -> Int !(e | io)) -> Int !(e | io) =
+  bracket(0, x => (), x => thread(f))
+
+## The subtracted row settled at a ground label, so the function can be taken
+## as a *value*: `lower.lift_fn_value` writes a wrapper that is a function
+## value outside and a named call inside, and the named call it wraps is the
+## one whose `e` was bound by subtraction.
+fn thread_tell(f: fn() -> Int !(TellR | io)) -> Int !(TellR | io) = thread(f)
+
+## An argument written as a lambda: the row is inferred at the call and the
+## leftover is one label.
+fn line_lambda() -> Unit !io = {
+  with handle TellR { tell(n) => n * 7 }
+  println(to_string(thread(() => {
+    println("  closure: reached")
+    tell(5)
+  })))
+}
+
+## An argument that is a **named function value** with a written row, so the
+## question is assignability rather than inference.
+fn line_fn_value() -> Unit !io = {
+  with handle TellR { tell(n) => n * 11 }
+  let g: fn() -> Int !(TellR | io) = () => {
+    println("  closure: reached")
+    tell(5)
+  }
+  println(to_string(thread(g)))
+}
+
+## Two atoms in R. Both the node the declaration wrote and the tail the
+## subtraction computed are read, so a pack that keeps one and loses the other
+## answers a different number.
+fn line_two_atoms() -> Unit !io = {
+  with handle AskR { ask(n) => n * 13 }
+  with handle TellR { tell(n) => n * 17 }
+  println(to_string(thread2(() => {
+    println("  closure: reached")
+    tell(2) + ask(1)
+  })))
+}
+
+## Two labels left over, so `e` binds a union and the tail is a join rather
+## than one atom.
+fn line_union_residual() -> Unit !io = {
+  with handle NoteR { note(n) => n * 19 }
+  with handle TellR { tell(n) => n * 23 }
+  println(to_string(thread(() => {
+    println("  closure: reached")
+    tell(1) + note(1)
+  })))
+}
+
+## Nothing left over: the closure does io and nothing else, so `e` binds pure
+## and the tail is the empty pack. The control, green before #350 landed,
+## because a row that is already covered never needed the subtraction.
+fn line_pure_residual() -> Unit !io = {
+  println(to_string(thread(() => {
+    println("  closure: reached")
+    29
+  })))
+}
+
+## The subtraction forwarded through a second signature. `relay`'s own variable
+## is the leftover, so this line separates a binding that produced a ground row
+## from one that produced the caller's slot.
+fn line_relayed() -> Unit !io = {
+  with handle TellR { tell(n) => n * 31 }
+  println(to_string(relay(() => {
+    println("  closure: reached")
+    tell(1)
+  })))
+}
+
+fn line_bracketed() -> Unit !io = {
+  with handle TellR { tell(n) => n * 37 }
+  println(to_string(thread_bracketed(() => {
+    println("  closure: reached")
+    tell(1)
+  })))
+}
+
+## The subtracted row reached through a function *value*: the wrapper has one
+## evidence pack on the outside and per-atom slots on the inside.
+fn line_as_value() -> Unit !io = {
+  with handle TellR { tell(n) => n * 41 }
+  let w: fn(fn() -> Int !(TellR | io)) -> Int !(TellR | io) = thread_tell
+  println(to_string(w(() => {
+    println("  closure: reached")
+    tell(1)
+  })))
+}
+
+## Which handler answered, not merely that one did. Both calls are the same
+## text under the same signature; only the nearest handler differs, so a pack
+## routed to the wrong one is a wrong number rather than a panic.
+fn line_shadowed() -> Unit !io = {
+  with handle TellR { tell(n) => n * 2 }
+  println(to_string(thread(() => {
+    println("  closure: outer")
+    tell(50)
+  })))
+  with handle TellR { tell(n) => n * 3 }
+  println(to_string(thread(() => {
+    println("  closure: inner")
+    tell(50)
+  })))
+}
+
+pub fn main() -> Unit !io = {
+  println("-- a lambda whose row unifies against variable-beside-io --")
+  line_lambda()
+  println("-- a named value whose written row has to be assignable to it --")
+  line_fn_value()
+  println("-- a written label in R beside the io --")
+  line_two_atoms()
+  println("-- two labels left over, so the tail is a join --")
+  line_union_residual()
+  println("-- nothing left over: the control that was always green --")
+  line_pure_residual()
+  println("-- the leftover is the caller's own variable --")
+  line_relayed()
+  println("-- and carried into bracket's use closure --")
+  line_bracketed()
+  println("-- thread taken as a value rather than called --")
+  line_as_value()
+  println("-- the nearest handler answers, twice over --")
+  line_shadowed()
+}
+
+# The assertion lane. `scripts/effect-evidence-contract/run.sh` runs these on
+# the JVM in seconds and without a C compiler; the transcript above is what the
+# native differential compares byte for byte. Same shapes, two readers: an
+# `assert` says what the number means, and the `.expect` file is the only check
+# that can see that the closure ran between `thread`'s two lines.
+#
+# Nothing here prints, so `thread`'s own io is unobservable in this lane -- and
+# the io is half of what the parameter row says. That is the division of labour
+# the transcript exists for.
+
+## The subtraction and the argument both: 5 is what the closure passed and 7 is
+## what this test's handler multiplies by, so neither number alone is the answer.
+test "a variable beside io binds the leftover label" {
+  with handle TellR { tell(n) => n * 7 }
+  assert thread(() => {
+    touch_io()
+    tell(5)
+  }) == 35
+}
+
+test "a written row crosses into the subtracted slot by assignability" {
+  with handle TellR { tell(n) => n * 11 }
+  let g: fn() -> Int !(TellR | io) = () => {
+    touch_io()
+    tell(5)
+  }
+  assert thread(g) == 55
+}
+
+## 86 = the closure's own `tell(2) + ask(1)`, plus `thread2`'s own `ask(3)`.
+## The first two come out of the tail and the node the *closure* was handed;
+## the third out of the node `thread2`'s own frame holds.
+test "a label in R is answered from the node, the leftover from the tail" {
+  with handle AskR { ask(n) => n * 13 }
+  with handle TellR { tell(n) => n * 17 }
+  assert thread2(() => {
+    touch_io()
+    tell(2) + ask(1)
+  }) == 86
+}
+
+test "two labels left over bind the variable to a join" {
+  with handle NoteR { note(n) => n * 19 }
+  with handle TellR { tell(n) => n * 23 }
+  assert thread(() => {
+    touch_io()
+    tell(1) + note(1)
+  }) == 42
+}
+
+test "nothing left over is still an empty tail rather than no tail" {
+  assert thread(() => {
+    touch_io()
+    29
+  }) == 29
+}
+
+test "the leftover may be the caller's own variable" {
+  with handle TellR { tell(n) => n * 31 }
+  assert relay(() => {
+    touch_io()
+    tell(1)
+  }) == 32
+}
+
+test "a primitive's use closure carries the subtracted row" {
+  with handle TellR { tell(n) => n * 37 }
+  assert thread_bracketed(() => {
+    touch_io()
+    tell(1)
+  }) == 37
+}
+
+test "the value wrapper unpacks the subtracted row into slots" {
+  with handle TellR { tell(n) => n * 41 }
+  let w: fn(fn() -> Int !(TellR | io)) -> Int !(TellR | io) = thread_tell
+  assert w(() => {
+    touch_io()
+    tell(1)
+  }) == 41
+}
+
+## The routing assertion: same call, same row, two handlers, and the number
+## says which one the pack reached. A subtraction that bound `e` to a row the
+## handler search then resolved elsewhere is a wrong answer here rather than a
+## missing-evidence panic.
+test "the nearest handler answers through the union slot" {
+  with handle TellR { tell(n) => n * 2 }
+  let outer = thread(() => {
+    touch_io()
+    tell(50)
+  })
+  with handle TellR { tell(n) => n * 3 }
+  let inner = thread(() => {
+    touch_io()
+    tell(50)
+  })
+  assert outer == 100
+  assert inner == 150
+}

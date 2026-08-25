@@ -896,6 +896,226 @@ pub fn unify_eff(
     }
   }
 
+## Every effect row written in a type, each paired with where it was written.
+## The walk mirrors `ty_any_child`'s children exactly, plus the one thing that
+## walk cannot report: a function type's row is not a child of the type, so it
+## has to be picked up here by name.
+##
+## Missing a row makes `earg_cooccurs` say yes where it should say no, so the
+## arms are spelled out rather than left to a wildcard over "container-ish"
+## shapes.
+fn ty_rows_at(t: Ty, place: String) -> List[(Eff, String)] =
+  match t {
+    TyFn(ps, r, e) -> {
+      var out: List[(Eff, String)] = [(e, place)]
+      for p in ps { out = out ++ ty_rows_at(p, place) }
+      out ++ ty_rows_at(r, place)
+    }
+    TyAdt(_, targs) -> {
+      var out: List[(Eff, String)] = []
+      for a in targs { out = out ++ ty_rows_at(a, place) }
+      out
+    }
+    TyList(e2) -> ty_rows_at(e2, place)
+    TyMap(k, v) -> ty_rows_at(k, place) ++ ty_rows_at(v, place)
+    TySet(e2) -> ty_rows_at(e2, place)
+    TyArray(e2) -> ty_rows_at(e2, place)
+    TyTuple(es) -> {
+      var out: List[(Eff, String)] = []
+      for e2 in es { out = out ++ ty_rows_at(e2, place) }
+      out
+    }
+    TyOpaque(_, _, _, args, tgt) -> {
+      var out: List[(Eff, String)] = []
+      for a in args { out = out ++ ty_rows_at(a, place) }
+      out ++ ty_rows_at(tgt, place)
+    }
+    TyAssoc(sb, _, _) -> ty_rows_at(sb, place)
+    _ -> []
+  }
+
+## Every row a signature writes down, each with the position that wrote it.
+## The scan `earg_cooccurs` runs over, and the whole of it: the criterion is
+## about what the *declaration* says, so nothing outside these three places
+## counts.
+fn sig_rows(s: Sig) -> List[(Eff, String)] = {
+  var out: List[(Eff, String)] = []
+  var i = 0
+  for pt in s.param_tys {
+    let pn = match get(s.param_names, i) {
+      Some(n) -> "parameter `" ++ n ++ "`"
+      None -> "a parameter"
+    }
+    out = out ++ ty_rows_at(pt, pn)
+    i = i + 1
+  }
+  out = out ++ ty_rows_at(s.ret, "the return type")
+  out ++ [(s.eff, "the declared row")]
+}
+
+## The concrete atoms of a row: everything that is not an effect variable.
+## `R` in the co-occurrence criterion below.
+fn eff_concrete_atoms(e: Eff) -> Eff = {
+  var parts: List[Eff] = []
+  for a in eff_assocs(eff_base(e)) {
+    let (sb, v, t, n) = a
+    parts = parts ++ [EffAssoc(sb, v, t, n)]
+  }
+  if eff_subsumes(eff_base(e), EIo) { parts = parts ++ [EIo] }
+  eff_with_labels(eff_union(parts), eff_labels(e))
+}
+
+## Does `e` occur in `row`?
+fn eff_has_var(row: Eff, eid: Int) -> Bool = {
+  for v in eff_vars(row) {
+    let (id, _) = v
+    if id == eid { return true }
+  }
+  false
+}
+
+## `S \ R`: the actual row with every concrete atom of the parameter row taken
+## off. What is left is variables the closure's own row already carried plus
+## the atoms `R` did not name, which is the row `e` has to stand for.
+fn eff_row_minus(actual: Eff, r: Eff) -> Eff = {
+  var parts: List[Eff] = []
+  for v in eff_vars(actual) {
+    let (id, n) = v
+    parts = parts ++ [EffVar(n, id)]
+  }
+  let r_assocs = eff_assocs(eff_base(r))
+  for a in eff_assocs(eff_base(actual)) {
+    let (sb, v, t, n) = a
+    var keep = true
+    for d in r_assocs {
+      let (_, dv, dt, dn) = d
+      if dv == v && dt == t && dn == n { keep = false }
+    }
+    if keep { parts = parts ++ [EffAssoc(sb, v, t, n)] }
+  }
+  if eff_subsumes(eff_base(actual), EIo) && not eff_subsumes(eff_base(r), EIo) {
+    parts = parts ++ [EIo]
+  }
+  var r_labels: List[Int] = []
+  for l in eff_labels(r) {
+    let (id, _) = l
+    r_labels = r_labels ++ [id]
+  }
+  var ls: List[(Int, String)] = []
+  for l in eff_labels(actual) {
+    let (id, _) = l
+    if not list.contains(r_labels, id) { ls = ls ++ [l] }
+  }
+  eff_with_labels(eff_union(parts), ls)
+}
+
+## The co-occurrence criterion (spec §6.6): every row of the callee's declared
+## signature that mentions `e` also names every atom of `R`.
+##
+## Why this is the whole question: all solutions of `!(e|R) ~ !S` agree on the
+## rows that contain `R`, so the choice of `e` can only be read off a row that
+## mentions `e` without `R`. Where the signature has no such row, `e := S \ R`
+## is the only observable answer, and picking it preserves principality.
+##
+## Answers with the first row that breaks the criterion, so the diagnostic can
+## name the occurrence rather than restate the rule.
+fn earg_cooccurs(s: Sig, eid: Int, r: Eff) -> Option[(Eff, String)] = {
+  for pr in sig_rows(s) {
+    let (row, place) = pr
+    if eff_has_var(row, eid) && not eff_subsumes(eff_concrete_atoms(row), r) {
+      return Some(pr)
+    }
+  }
+  None
+}
+
+## Row subtraction at a function-value argument (spec §6.6, #350).
+##
+## A closure whose row is `S` reaching a parameter declared `!(e|R)`, where `e`
+## is one effect variable this signature binds and `R` is concrete. Unification
+## never binds `e` to the leftover on its own: `unify_eff`'s union arm is a
+## containment test, so `!(e|io)` refused every closure that raised anything.
+## Here the leftover is computed and handed to `em` before the test runs, and
+## the containment test then passes on the substituted row.
+##
+## Returns the map to unify with, whether a binding was added, and the hint to
+## print if the shape was right but a precondition said no.
+##
+## Deliberately narrow, and each guard is a decision:
+##   * only a `TyFn` parameter, at the top of the parameter type. A row nested
+##     under a constructor is not a function *value* arriving at a slot.
+##   * exactly one effect variable in the row. Two variables have no principal
+##     split of the leftover, and inventing one is a language question.
+##   * `e` is bound by this signature and still free in `em`. A variable an
+##     earlier argument already pinned is answered, not open.
+##   * `R` non-empty, and the row does not already fit. A row that fits is
+##     accepted by the path that always accepted it, unchanged.
+##   * `R ⊆ S`. Upward widening is what the other direction is for and it is
+##     already free: a closure whose row is short of `R` is padded up by
+##     `eff_carries` and never reaches here.
+fn earg_row_subtract(
+  cx: Cx,
+  s: Sig,
+  pt: Ty,
+  at: Ty,
+  m: Map[Int, Ty],
+  em: Map[Int, Eff]
+) -> (Map[Int, Eff], Bool, Option[String]) = {
+  var dps: List[Ty] = []
+  var dr = TyError
+  var de = EPure
+  var is_dfn = false
+  match pt {
+    TyFn(ps, r, e) -> {
+      dps = ps
+      dr = r
+      de = e
+      is_dfn = true
+    }
+    _ -> ()
+  }
+  var ae = EPure
+  var is_afn = false
+  match at {
+    TyFn(_, _, e) -> {
+      ae = e
+      is_afn = true
+    }
+    _ -> ()
+  }
+  if not is_dfn || not is_afn { return (em, false, None) }
+  let dsub = reduce_eff(cx, subst_eff(de, em), m)
+  if eff_carries(dsub, ae) { return (em, false, None) }
+  let vs = eff_vars(dsub)
+  if len(vs) != 1 { return (em, false, None) }
+  let (eid, ename) = vs[0]
+  var bound_here = false
+  for ep in s.eparams {
+    match ep {
+      EffVar(_, id) -> if id == eid { bound_here = true }
+      _ -> ()
+    }
+  }
+  if not bound_here || map.has(em, eid) { return (em, false, None) }
+  let r = eff_concrete_atoms(dsub)
+  if r == EPure { return (em, false, None) }
+  let bare = ty_show(cx.adts, TyFn(dps, dr, EffVar(ename, eid)))
+  let repair = "spell this parameter's row as `!" ++ ename ++ "` alone (`" ++ bare ++
+    "`); the variable then takes the closure's whole row"
+  if not eff_subsumes(ae, r) {
+    return (em, false, Some("`!" ++ eff_show(r) ++ "` is not part of the argument's row; " ++ repair))
+  }
+  match earg_cooccurs(s, eid, r) {
+    Some(pr) -> {
+      let (row, place) = pr
+      (em, false, Some("`" ++ ename ++ "` occurs in " ++ place ++ " as `!" ++ eff_show(row) ++
+          "`, without `!" ++ eff_show(r) ++ "`, so which row it binds to is observable there; " ++
+          repair))
+    }
+    None -> (map.insert(em, eid, eff_row_minus(ae, r)), true, None)
+  }
+}
+
 ## A rigid type parameter of the enclosing declaration is a known type; only a
 ## callee's still-unbound inference variables are not.
 pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
@@ -5996,14 +6216,38 @@ fn check_call(
         cx1 = cxa
         at_i = Some(at)
         tx_i = Some(ax)
-        let (m3, em3, ok) = unify_into(cx1, pt, at, m, em)
+        # A function value's row is answered here and nowhere else, so this is
+        # where the leftover `!(e|R)` leaves for `e` is computed (#350). The
+        # binding is offered to `unify_into` rather than made after it: the
+        # union arm is a containment test over the *substituted* row, so a
+        # binding that arrives late is a binding the test never sees.
+        let (em_sub, subtracted, why) = earg_row_subtract(cx1, s, pt, at, m, em)
+        var m3 = m
+        var em3 = em_sub
+        var ok = true
+        let (m4, em4, ok4) = unify_into(cx1, pt, at, m, em_sub)
+        m3 = m4
+        em3 = em4
+        ok = ok4
+        # A subtraction that did not rescue the argument must leave nothing
+        # behind: the argument is an error either way, and a stray binding for
+        # `e` would answer the next argument's row with a row nothing chose.
+        if not ok && subtracted {
+          let (m5, em5, ok5) = unify_into(cx1, pt, at, m, em)
+          m3 = m5
+          em3 = em5
+          ok = ok5
+        }
         m = m3
         em = em3
         if not ok {
+          let h = match why {
+            Some(w) -> w
+            None -> "signature: " ++ sig_render(cx1.adts, cx1.traits, s)
+          }
           cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
               ty_show(cx1.adts, reduce_ty_effs(cx1, reduce_assoc(cx1, subst(pt, m, em)), m)) ++ ", got " ++
-              ty_show(cx1.adts, at), e_lo(a), e_hi(a),
-            "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
+              ty_show(cx1.adts, at), e_lo(a), e_hi(a), h)
         }
       }
       at_next = at_next ++ [at_i]

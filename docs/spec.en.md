@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 7804bfe47deb9c85 -->
+<!-- doc-check: translation-of docs/spec.md @ 802c25d0a3fc5cc4 -->
 
 # Dawn Language Specification
 
@@ -2188,6 +2188,27 @@ labour is sharp:
   reads to build the pack, so on the way into a slot the slot's row must carry its row **atom for
   atom**. Widening upward stays free: a pure closure goes anywhere and the extra keys go unread.
   What is refused is a row with an atom the slot does not have.
+
+**Row subtraction** is the one exception to "atom for atom". When a function value goes into a
+parameter of the form `!(e | R)`, where `e` is the **only** effect variable the callee's signature
+binds and `R` is the set of concrete atoms in that row (named labels, `io`, associated-effect
+projections), and the argument's row `S` satisfies `R ⊆ S`, then `e` is bound to `S \ R` and the
+argument is accepted. A parameter written `!(e | io)` therefore takes a closure that both does io
+and raises a named effect; before this rule the only spelling that took one was the bare `!e`.
+
+The step carries a **co-occurrence precondition**: **every** row in the callee's signature that
+mentions `e` must also write down every atom of `R`. Every solution of `!(e | R) ~ !S` agrees on
+the rows that contain `R`, so which one was chosen can be observed only from a row that mentions
+`e` without `R`. Where the signature has no such row, `e := S \ R` is the only observable answer
+and choosing it costs no principality. Where it has one, any choice would be a choice made on the
+caller's behalf that the caller never wrote, so the argument is still refused, and the diagnostic
+names the occurrence that makes the choice observable.
+
+The other shapes are unchanged. `R ⊄ S` is still refused: that direction is the widening above, and
+widening covers only the case where the slot's row already carries the argument's atom for atom,
+which `!(e | io)` does not do for `!Tell`. A row with two or more effect variables is still refused
+as well: the remainder has no principal split between them, and this specification does not invent
+one.
 
 ---
 
