@@ -7253,6 +7253,64 @@ fn sam_ret_compatible(js: Jsig, r: Ty, j: String) -> Bool !io =
     }
   }
 
+## May a function value with this row cross to Java? Only if it owes no
+## evidence (spec §9.4).
+##
+## A converted function value is entered from Java with no Dawn frame under
+## it. `jvm/emit.gen_sam_bridge` has no call site to take an evidence pack
+## from, so it passes null, and a row with anything to answer for is then an
+## `ev_get` panic at run time on a body that checked clean. The check belongs
+## here because the conversion is written here and happens once, while the
+## calls into it are Java's and unbounded in number, time and thread.
+##
+## Pure and `!io` are the whole of the accepted set, and the normal form makes
+## that a two-arm match: every other constructor names a slot the Java caller
+## cannot fill. `ELabeled` always carries at least one label, `EUnion` at
+## least one variable or projection, and a label and a projection each stand
+## for evidence the way a variable does.
+##
+## An effect variable is refused even though the row it stands for might turn
+## out pure. The conversion is checked once and the variable may equally be
+## instantiated at a label, which would hand Java a function it cannot call;
+## the refusal is what makes the accepted set closed under instantiation.
+##
+## Nothing here reduces a projection first. Reduction is eager (D3), so one
+## that survives to a call site still has a rigid subject, which is exactly
+## the case that owes.
+##
+## The precedent is the same shape in two other languages: Kotlin refuses
+## `suspend` in a SAM conversion (KT-40978), and OCaml 5 will not resume an
+## effect through a C frame. A foreign caller is not a handler site.
+fn sam_row_ok(e: Eff) -> Bool =
+  match e {
+    EPure -> true
+    EIo -> true
+    _ -> false
+  }
+
+## The way out, named in terms of the row that was refused: a `with handle`
+## written inside the function value discharges the label there, and what
+## crosses is then pure or `!io`. A variable or a projection has no such
+## rewrite, so that arm says why it is refused rather than offering one.
+fn sam_row_hint(e: Eff) -> String = {
+  let ls = eff_labels(e)
+  if len(ls) == 0 {
+    return "an effect variable or an associated-effect projection may stand " ++
+      "for a label, so it does not cross either; give this function value a " ++
+      "pure or `!io` row"
+  }
+  let (_, n) = ls[0]
+  "write the handler inside the function value, so that the row crossing is " ++
+    "pure or `!io`:\n  () => { with handle " ++ n ++ " { ... } ... }"
+}
+
+fn sam_row_err(cx: Cx, a: Expr, p: String, e: Eff) -> Cx !io =
+  cerr_h(cx, "this function cannot cross to `" ++ cx.jsig.class_info(p).simple ++
+      "`: its row" ++ eff_suffix(e) ++ " owes evidence",
+    e_lo(a), e_hi(a),
+    "a Java caller has no call site to supply an evidence pack, so only a " ++
+      "pure or `!io` function value converts (spec §9.4)\n  " ++ sam_row_hint(e))
+
 ## Function-shaped arguments that need the target SAM to be typed are deferred:
 ## scored by arity now, checked once the winning overload is known.
 fn sam_deferred(cx: Cx, a: Expr) -> Bool =
@@ -7515,13 +7573,23 @@ fn finalize_sams(
         cx1 = cxa
         out_i = Some(ax)
         var fits = false
+        # a row that owes evidence is a separate refusal from a shape mismatch,
+        # and it gets its own diagnostic: the shape is right, the out is not
+        # "write a different lambda" but "handle the label inside this one"
+        var owes: Option[Eff] = None
         match t {
-          TyFn(tps, tret, _) ->
-            if tps == sps && sam_ret_compatible(cx1.jsig, tret, sm.ret_cls) { fits = true }
+          TyFn(tps, tret, te) ->
+            if tps == sps && sam_ret_compatible(cx1.jsig, tret, sm.ret_cls) {
+              if sam_row_ok(te) { fits = true } else { owes = Some(te) }
+            }
           _ -> ()
         }
         if fits { convs = convs ++ [(i, p, sm.name, sm.param_cls, sm.ret_cls)] }
-        if not fits && not is_errorish(t) {
+        match owes {
+          Some(te) -> { cx1 = sam_row_err(cx1, a, p, te) }
+          None -> ()
+        }
+        if not fits && owes == None && not is_errorish(t) {
           cx1 = cerr_h(cx1, "this function does not fit `" ++ cx1.jsig.class_info(p).simple ++ "`",
             e_lo(a), e_hi(a),
             "expected shape: " ++ ty_show(cx1.adts, TyFn(sps, sret, EIo)) ++
@@ -7530,9 +7598,14 @@ fn finalize_sams(
       }
       Some(t) ->
         match t {
-          TyFn(_, _, _) ->
+          TyFn(_, _, te) ->
             match sam_of_nonprim(cx1.jsig, p) {
-              Some(sm2) -> { convs = convs ++ [(i, p, sm2.name, sm2.param_cls, sm2.ret_cls)] }
+              Some(sm2) ->
+                if sam_row_ok(te) {
+                  convs = convs ++ [(i, p, sm2.name, sm2.param_cls, sm2.ret_cls)]
+                } else {
+                  cx1 = sam_row_err(cx1, a, p, te)
+                }
               None -> ()
             }
           TyList(el) -> {

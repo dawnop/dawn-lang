@@ -1600,16 +1600,23 @@ pub const EV_PACK_ID: Int = -3
 ##       the row it could not accept.
 ##
 ##   the SAM bridge (`jvm/emit.gen_sam_bridge`)
-##       **null, and this one is a known hole rather than a discharged one.**
-##       A `use java` callback is entered from Java with no Dawn frame under
-##       it, and spec §9.4 puts no limit on the row a function value crossing
-##       that boundary may have -- so
-##       `Thread.new(() => println(to_string(quota())))` under a `with handle`
-##       still panics. The repair is not a wiring change: the pack would have
-##       to be captured into the adapter *object* at conversion time, which is
-##       evidence living in a value, and whether a callback Java runs after
-##       the handler frame returned should see that handler at all is a
-##       language question rather than a codegen one.
+##       **null, and it is the answer, because nothing that owes evidence gets
+##       this far.** A `use java` callback is entered from Java with no Dawn
+##       frame under it, so there is no call site to take a pack from. Spec
+##       §9.4 answers that by narrowing what may cross rather than by widening
+##       what the bridge carries: `checker.sam_row_ok` accepts a pure or `!io`
+##       row at the conversion and refuses a label, an effect variable and a
+##       projection, naming the handler-inside-the-lambda rewrite as the out.
+##       So `Thread.new(() => println(to_string(quota())))` under a
+##       `with handle`, which used to check clean and panic, is now a checker
+##       error, and every row that reaches the bridge asks for nothing.
+##
+##       The alternative was to capture the pack into the adapter *object* at
+##       conversion time. That is evidence living in a value, and whether a
+##       callback Java runs after the handler frame returned should see that
+##       handler at all is a language question rather than a codegen one; V1'
+##       answers effects at call sites, so the narrowing is the one that fits.
+##       Kotlin refuses `suspend` at a SAM conversion for the same reason.
 ##
 ##   `gen_fn_comparator`
 ##       **null, and nothing can observe it**: no emitted program constructs a

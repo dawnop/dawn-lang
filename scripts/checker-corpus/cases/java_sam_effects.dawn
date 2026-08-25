@@ -1,0 +1,75 @@
+# checker.dawn: which effect rows may cross into a Java functional interface
+# (spec §9.4). Only pure and `!io` do; a label, an effect variable and a
+# projection each name an evidence slot a Java caller has no call site to fill.
+#
+# The accepting halves carry no golden line of their own, and that is what they
+# are for: a check that grew a false positive would put one here.
+#
+# Two conversion sites in `finalize_sams` need reaching, and they are told
+# apart by `sam_deferred`, not by where the argument is written: a lambda is
+# deferred only if it has at least one unannotated *parameter*, so a nullary
+# `() => ...` takes the already-typed path. Both are exercised below, which is
+# why `ArrayList.forEach` appears beside `Thread.new`.
+#
+# The classes are picked for stability: `Thread(Runnable)`, `Consumer` and
+# `Collection.removeIf` have not moved in a decade, and the diagnostic quotes
+# only the interface's simple name, never the host's overload set.
+use java "java.lang.Thread"
+use java "java.util.ArrayList"
+
+effect Log {
+  fn log(m: String) -> Unit
+}
+
+# --- refused: a written label ---
+
+pub fn labelled() -> Unit !io = {
+  with handle Log { log(m) => println(m) }
+  let t = Thread.new(() => log("tick"))
+  t.start()
+}
+
+# --- refused: a written label, reached through the deferred path instead ---
+
+pub fn labelled_deferred() -> Unit !io = {
+  with handle Log { log(m) => println(m) }
+  let a = ArrayList.new()
+  a.forEach(x => log("tick"))
+}
+
+# --- refused: an effect variable, which may be instantiated at a label ---
+
+pub fn variable(f: fn() -> Unit !e) -> Unit !io = {
+  let t = Thread.new(f)
+  t.start()
+}
+
+# --- accepted: pure ---
+
+pub fn pure_value() -> Unit !io = {
+  let t = Thread.new(() => ())
+  t.start()
+  let a = ArrayList.new()
+  a.removeIf(x => true)
+}
+
+# --- accepted: `!io` as a lambda, and as an already-typed named function ---
+
+fn tick() -> Unit !io = println("tick")
+
+pub fn io_value() -> Unit !io = {
+  let t = Thread.new(() => println("hi"))
+  t.start()
+  let u = Thread.new(tick)
+  u.start()
+}
+
+# --- accepted: the way out the refusal names, handler written inside ---
+
+pub fn handled_inside() -> Unit !io = {
+  let t = Thread.new(() => {
+    with handle Log { log(m) => println(m) }
+    log("tick")
+  })
+  t.start()
+}
