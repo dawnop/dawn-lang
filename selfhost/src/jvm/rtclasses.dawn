@@ -843,9 +843,17 @@ fn gen_bytes_from_array(cw: ClassWriter) -> Unit !io = {
 ## The thunk arrives as a `dawn/rt/Fn1`, not an `Fn0`, and for the same reason
 ## `gen_bracket` takes `Fn2`s: a function value's evidence slot is part of its
 ## arity whatever its row says.
+##
+## **And this shim is handed a pack to put in it**, in the second parameter,
+## for the reason `gen_bracket` next door is: since 2026-08-25 the barriers
+## bind `!e` over the protected closure (`types.builtins`), so their ABI row is
+## `!(e|io)` and is worth one evidence slot at the call site (`types.nev`).
+## They used to declare `f: fn() -> T !io` and push `ACONST_NULL`, which was a
+## correct answer to the question as it stood and the wrong question: it made a
+## labelled closure impossible to protect rather than safe to protect.
 fn gen_try_closure(cw: ClassWriter, name: String, caught: List[String]) -> Unit !io = {
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, name,
-    "(L" ++ fn_iface(1) ++ ";)LResult;")
+    "(L" ++ fn_iface(1) ++ ";Ljava/lang/Object;)LResult;")
     .expect("mv")
   m.visitCode()
   let try_start = Label.new()
@@ -858,13 +866,15 @@ fn gen_try_closure(cw: ClassWriter, name: String, caught: List[String]) -> Unit 
   m.visitTypeInsn(OP_NEW, "Result\$Ok")
   m.visitInsn(OP_DUP)
   m.visitVarInsn(OP_ALOAD, 0)
-  m.visitInsn(OP_ACONST_NULL)
+  m.visitVarInsn(OP_ALOAD, 1)
   m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
   m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Ok", "<init>", "(Ljava/lang/Object;)V", false)
   m.visitLabel(try_end)
   m.visitInsn(OP_ARETURN)
   m.visitLabel(handler)
-  gen_caught_err(m, 1)
+  # the two parameters occupy 0..1, so the caught Throwable and the five
+  # scratch locals `gen_caught_err` uses start at 2
+  gen_caught_err(m, 2)
   m.visitInsn(OP_ARETURN)
   close_mv(m)
   ()

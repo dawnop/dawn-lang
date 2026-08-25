@@ -174,7 +174,9 @@ static void test_panic_message(void) {
   static const char want[] = "Array index out of bounds";
   panic_subject = dawn_array_new();
   dawn_clo *c = dawn_clo_new((void *)panic_out_of_bounds, 0, 0);
-  dawn_adt *r = dawn_catch_panic(c);
+  /* the empty pack: this closure raises nothing that needs evidence, and a
+   * barrier's second parameter is the pack its `!e` binder buys */
+  dawn_adt *r = dawn_catch_panic(c, NULL);
   check(r->tag == DAWN_TAG_ERR, "an out-of-bounds read raises a panic");
   dawn_adt *err = (dawn_adt *)r->fields[0].p;
   dawn_str *msg = (dawn_str *)err->fields[1].p;

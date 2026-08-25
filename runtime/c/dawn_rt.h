@@ -559,9 +559,16 @@ dawn_array *dawn_args(void);
  *
  * `kind` is a backend's own name, so a program that *prints* one prints
  * different text on the two backends; everything that branches on Ok/Err, or
- * reads `message`, agrees. */
-dawn_adt *dawn_catch_fault(dawn_clo *f);
-dawn_adt *dawn_catch_panic(dawn_clo *f);
+ * reads `message`, agrees.
+ *
+ * `ev` is the evidence pack `f` is applied with, and it is the second
+ * parameter rather than a NULL for the reason `dawn_bracket` takes one: the
+ * barriers bind an effect parameter over the protected closure
+ * (`catch_fault[T, !e]`), so their ABI row is worth one evidence slot and the
+ * call site fills it. It is borrowed like every other intrinsic argument, so
+ * the closure call takes a reference of its own. */
+dawn_adt *dawn_catch_fault(dawn_clo *f, void *ev);
+dawn_adt *dawn_catch_panic(dawn_clo *f, void *ev);
 
 /* The third of the family, and the one that stops nothing. `use` runs on the
  * already-acquired `resource` under a handler that takes both kinds; whichever

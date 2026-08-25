@@ -1244,13 +1244,18 @@ static dawn_adt *dawn_foreign_error(dawn_failure f) {
  * every instantiation -- see the header. */
 #ifndef __wasi__
 /* `f` is a Dawn `fn() -> T`, which is a one-slot function value: the written
- * parameters are none and the evidence pack is one. NULL is the empty pack,
- * and here it is the answer rather than a tolerated wrong one: the barriers
- * declare `f: fn() -> T !io`, so a closure whose row still owes evidence is
- * refused at the argument long before this. `dawn_bracket` next door takes a
- * pack, because its row is a variable and its callers can be charged for
- * one. */
-static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
+ * parameters are none and the evidence pack is one, and `ev` is what goes in
+ * it. The barriers bind `!e` over the protected closure since 2026-08-25
+ * (`types.builtins`), so their ABI row is `!(e|io)`, worth one evidence slot
+ * at the call site -- the same arithmetic `dawn_bracket` next door has always
+ * had. It was NULL until then, which was correct while the barriers declared
+ * `f: fn() -> T !io` and refused anything owing evidence at the argument, and
+ * that refusal was the defect rather than the guarantee.
+ *
+ * The pack is borrowed like every other intrinsic argument and a closure's
+ * parameters arrive owned, so the call takes a reference of its own
+ * (perceus-design.md 5.1, and see dawn_bracket for the same `dawn_dup`). */
+static dawn_adt *dawn_run_caught(dawn_clo *f, void *ev, bool catches_panic) {
   /* designated init so the rest (the jmp_buf) is zeroed: the landing cleanup
    * may run before setjmp has ever filled it, and reads it only behind the
    * identity test -- but a zeroed struct keeps that path defined either way */
@@ -1265,32 +1270,37 @@ static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
     dawn_handlers = h.prev;
     return dawn_err(dawn_foreign_error(mine));
   }
-  void *v = ((void *(*)(dawn_clo *, void *))f->fn)(f, NULL);
+  void *v = ((void *(*)(dawn_clo *, void *))f->fn)(f, dawn_dup(ev));
   dawn_handlers = h.prev;
   return dawn_ok(v);
 }
 #else
+/* The body needs two things and `dawn_wasi_try` carries one, so they ride a
+ * struct on this frame -- the same shape `dawn_bracket`'s wasi branch uses for
+ * the same reason. */
+struct dawn_wasi_caught_box {
+  dawn_clo *f;
+  void *ev;
+};
+
 static void *dawn_wasi_caught_body(void *ctx) {
-  dawn_clo *f = (dawn_clo *)ctx;
-  return ((void *(*)(dawn_clo *, void *))f->fn)(f, NULL);
+  struct dawn_wasi_caught_box *b = (struct dawn_wasi_caught_box *)ctx;
+  return ((void *(*)(dawn_clo *, void *))b->f->fn)(b->f, dawn_dup(b->ev));
 }
 
 /* `f` is a Dawn `fn() -> T`, which is a one-slot function value: the written
- * parameters are none and the evidence pack is one. NULL is the empty pack,
- * and here it is the answer rather than a tolerated wrong one: the barriers
- * declare `f: fn() -> T !io`, so a closure whose row still owes evidence is
- * refused at the argument long before this. `dawn_bracket` next door takes a
- * pack, because its row is a variable and its callers can be charged for
- * one. */
-static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
+ * parameters are none and the evidence pack is one, and `ev` is what goes in
+ * it. See the native branch above for why it is a pack and not a NULL. */
+static dawn_adt *dawn_run_caught(dawn_clo *f, void *ev, bool catches_panic) {
   dawn_handler h = {
     .prev = dawn_handlers,
     .catches_panic = catches_panic,
     .own_depth = dawn_wasi_own_len
   };
   dawn_handlers = &h;
+  struct dawn_wasi_caught_box box = { f, ev };
   void *v = NULL;
-  if (dawn_wasi_try(dawn_wasi_caught_body, f, &v) != 0) {
+  if (dawn_wasi_try(dawn_wasi_caught_body, &box, &v) != 0) {
     if (dawn_unwind_target != &h) {
       /* caught only because this try is innermost -- a panic passing an io
        * barrier. Hand the throw onward; the chain repair happens at the
@@ -1309,9 +1319,13 @@ static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
 }
 #endif
 
-dawn_adt *dawn_catch_fault(dawn_clo *f) { return dawn_run_caught(f, false); }
+dawn_adt *dawn_catch_fault(dawn_clo *f, void *ev) {
+  return dawn_run_caught(f, ev, false);
+}
 
-dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }
+dawn_adt *dawn_catch_panic(dawn_clo *f, void *ev) {
+  return dawn_run_caught(f, ev, true);
+}
 
 /* Hand a failure this frame is holding to the next handler out.
  *
