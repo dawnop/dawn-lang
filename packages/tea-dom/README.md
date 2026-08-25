@@ -76,8 +76,10 @@ runtime, and a boundary that varies by backend cannot have one transcript.
 interpreter that turns the four ops into DOM mutations. Zero dependencies, one
 `<script type="module">`. `js/README.md` is its entry point.
 
-`examples/projects/tea_dom_counter` is a complete app over this package, and
-`scripts/wasm-dom-contract` drives it end to end without a browser.
+`examples/projects/tea_dom_counter` is a complete app over this package and
+`examples/projects/tea_dom_todo` is the one a tier above it (rows with
+identity, a draft, a mode). `scripts/wasm-dom-contract` drives both end to
+end without a browser.
 
 ## What the reconciler contract does not have for a DOM host
 
@@ -89,8 +91,18 @@ finds these:
   discards element state (focus, selection, a playing video) for every node
   after the deletion. `tea_core/diff`'s header already names the ops keying
   would need and says their payloads fit; this is the consumer that wants
-  them.
+  them. `tea_dom_todo` prices it: deleting the middle row of fifty is 98
+  patches over 24 rewritten rows where a keyed answer is one `RemoveKid`,
+  and deleting the *last* row is two patches at any length.
 - **`diff_step`.** `tea_term/step.diff_step` is "one turn as a patch list" and
   is written over `W: Tree + Eq` with nothing terminal in it, but it lives in
   the terminal's package. `reactor.turn` restates its three lines rather than
-  depending on `tea_term` for them.
+  depending on `tea_term` for them. The two still agree, but they are not the
+  same function: `diff_step(m, msg, vw)` computes `vw(m)` itself, and a
+  reactor already holds that tree because `route.at` needed it to resolve the
+  address. Moving `diff_step` to core would not make it usable here.
+- **No event payload.** A listener crosses as the *name* of an event, and an
+  event crosses back as an address and that name. Nothing carries
+  `ev.target.value`, so an `<input>` cannot tell a guest what was typed and
+  text entry has to be spelled as one message per character.
+  `tea_dom_todo`'s on-screen key palette is what that costs an application.

@@ -20,7 +20,8 @@ Elm 架构在这个仓库里已经有两半：`packages/tea-core` 是与词汇�
 | `packages/tea-dom/src` | DOM 词汇、路由、线格式、reactor 的一轮 |
 | `packages/tea-dom/js` | 宿主侧：WASI 垫片、reactor 驱动、patch 解释器 |
 | `examples/projects/tea_dom_counter` | 跑通整条环路的最小应用 |
-| `scripts/wasm-dom-contract` | 无浏览器的确定性转录门禁 |
+| `examples/projects/tea_dom_todo` | 第二个应用：带身份的列表、草稿、模式。§6 的两笔账在它身上是数字 |
+| `scripts/wasm-dom-contract` | 无浏览器的确定性转录门禁（两套转录，各带自己的变异体） |
 
 ## 2. reactor，不是命令模块
 
@@ -102,10 +103,22 @@ tag、props 和事件名都相同、只有某个事件的**含义**不同的两�
 视频）全部丢掉。`tea_core/diff` 的文件头已经写明 key 需要哪三个 op、以及它们的载荷
 （`Int` 和 `W`）不需要契约里没有的东西。这里只是记下：想要它的消费者出现了。
 
+`tea_dom_todo` 把这笔账变成了数字（`scripts/wasm-dom-contract/expected-todo.txt` 里那一轮
+是它的转录）：50 行的列表删中间一行，是 98 条 patch、24 行被重写，而带 key 的最小答案是
+1 条 `RemoveKid`；删**最后**一行则恒为 2 条，与行数无关。5 行、末行开着编辑器时是 17 条
+patch、25 次真实 DOM 变更，其中包括把那个正在编辑的 `<li>` 整个重建。被丢掉的元素状态在
+转录里看得见：一个 `<span>` 的文本从 `"c"` 换成 `"d"`，元素还是那个元素，代表的待办事项
+已经换了人。
+
 **`diff_step`。** `tea_term/step.diff_step` 就是「一轮，要变化而不要帧」，签名是
 `W: Tree + Eq`，里面没有一点终端的东西，但它住在终端的包里。`tea_dom/reactor.turn`
 选择把那三行重述一遍，而不是为它依赖 `tea_term`。把它搬到 `tea_core` 是一个包边界的
 裁决，不是这一刀该顺手做的事。
+
+第二个应用之后这条要补一句：两份实现今天仍然给同样的答案，但**不是同一个函数**。
+`diff_step(m, msg, vw)` 自己算 `vw(m)`，而 `turn` 手里已经有那棵树了（`route.at` 要它来
+把地址解成消息），于是重述的那两行复用 `old` 而不是重算。差价可测：1000 行时一次 `view`
+加一次前序遍历是 5.1 ms。所以搬家帮不到这个消费者，它的签名收不下「旧树已经在手上」。
 
 ## 7. 失败
 
@@ -124,12 +137,13 @@ panic 会中止模块，页面就死了。
 ## 8. 门禁
 
 `scripts/wasm-dom-contract/run.sh` 把整条环路（reactor、消息边界、patch 流、DOM 变更、
-事件路由）跑在一个记录型 document 桩上，逐字节比对 120 行转录。转录里有四种行，各回答一个问题：
+事件路由）跑在一个记录型 document 桩上，逐字节比对两份转录。计数器那份 120 行，
+里面有四种行，各回答一个问题：
 `request`/`reply` 是过界的字节，`patch` 是 op 和地址（这是局部性变成可断言的地方），
 `dom` 是桥对文档做了什么，`tree` 是文档随后是什么。
 
 请求行里的地址是桥从被点中的元素**走回来**算出来的（脚本是按标签找按钮再点它），所以
-路由错会表现为请求行不对。六个变异体逐个说明这些断言有牙：
+路由错会表现为请求行不对。计数器那份的六个变异体逐个说明这些断言有牙：
 
 | 变异体 | 改的是 | 转录怎么变红 |
 |---|---|---|
@@ -139,6 +153,14 @@ panic 会中止模块，页面就死了。
 | `event-address` | 地址回溯写成 push 而非 unshift | `request` 行的地址不对 |
 | `setself-payload` | `enc_self` 换成 `enc_node` | 只有 `reply` 行变长 |
 | `no-catch` | 去掉边界上的 `catch_panic` | 回复变成 `aborted` |
+
+第二份转录（`transcript-todo.mjs` / `expected-todo.txt`，482 行）驱动
+`examples/projects/tea_dom_todo`：五个待办、一次筛选、一次就地编辑、一次中间删除、一次
+panic、一次落空的事件。它多一种行 `state`，即根的 class、编辑框的文本、`<ul>` 子树与状态行；
+整份文档只在 init 后打一次，因为 28 个按键按钮每轮全打一遍会把行淹掉，而 init 之后的
+`dom` 行是不过滤的，所以「键盘区不该再被动过」仍然是可断言的。它自己的两个变异体
+（`todo-focus` 让按键无视焦点、`todo-filter` 让 done 筛选放行一切）都改在应用里而不是桥里：
+改桥的变异体两份转录一起红，说明不了第二份有没有牙。
 
 `scripts/wasm-contract`（失败运行时那套）和这一套共用一个 CI job，因为它们共用两件贵的
 东西：钉了版本与 sha256 的 wasi-sdk，以及从 `selfhost/src/nmain.dawn` 构建的 C 驱动。
