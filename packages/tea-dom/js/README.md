@@ -74,9 +74,13 @@ libc has torn itself down has no way back in.
 ```sh
 dawnc build --target wasm --reactor examples/projects/tea_dom_counter \
   -o examples/projects/tea_dom_counter/web/counter.wasm
-python3 -m http.server -d examples/projects/tea_dom_counter/web 8000
-# then open http://localhost:8000/
+python3 -m http.server 8000
+# then open
+#   http://localhost:8000/examples/projects/tea_dom_counter/web/
 ```
+
+Serve the repository root, not the `web/` directory: the page imports back
+into `packages/`, and a document root at `web/` would put that outside it.
 
 `scripts/wasm-dom-contract` is the same loop with a recording document stub
 in place of a browser, held to a transcript.
