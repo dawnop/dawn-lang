@@ -14,11 +14,22 @@
 // then reads again, sees zero bytes, and returns. That is what makes one
 // call into the reactor answer exactly one message.
 //
-// The four errno values used below are from the preview1 table:
-// 0 success, 8 badf, 28 inval, 70 spipe.
+// Which functions a module imports is decided by the wasi-libc it was linked
+// against, and that set grows: wasi-sdk 25 through 29 all ask for
+// `fd_prestat_get` and `fd_prestat_dir_name` where an older one did not, and
+// a missing import is a `LinkError` before a single line of the program runs.
+// So the import object is built *from the module's own import list*: the
+// functions below where there is one, and a stub that answers "not
+// implemented" and says so on stderr where there is not. A toolchain bump
+// then shows up as a diagnosable failure rather than as a page that will not
+// load.
+//
+// The errno values used below are from the preview1 table:
+// 0 success, 8 badf, 52 nosys, 70 spipe.
 
 const ERRNO_SUCCESS = 0;
 const ERRNO_BADF = 8;
+const ERRNO_NOSYS = 52;
 const ERRNO_SPIPE = 70;
 
 // preview1 filetype 2 is a character device, which is what a pipe-less
@@ -35,9 +46,26 @@ export class Wasi {
     this.exitCode = null;
   }
 
-  /** The import object to instantiate the module with. */
-  get imports() {
-    return { wasi_snapshot_preview1: this.#preview1() };
+  /**
+   * The import object for `module`: every `wasi_snapshot_preview1` function
+   * it asks for, implemented or stubbed. Passing the module is what keeps a
+   * newer wasi-libc from failing to link rather than failing to run.
+   */
+  importsFor(module) {
+    const implemented = this.#preview1();
+    const provided = {};
+    for (const imp of WebAssembly.Module.imports(module)) {
+      if (imp.module !== 'wasi_snapshot_preview1') continue;
+      provided[imp.name] = implemented[imp.name] || this.#unimplemented(imp.name);
+    }
+    return { wasi_snapshot_preview1: provided };
+  }
+
+  #unimplemented(name) {
+    return (...args) => {
+      this.stderr.push(`[wasi] ${name} is not implemented by this shim\n`);
+      return ERRNO_NOSYS;
+    };
   }
 
   /** Call once, after instantiation, before anything else. */
@@ -102,6 +130,11 @@ export class Wasi {
       environ_get: () => ERRNO_SUCCESS,
 
       fd_close: () => ERRNO_SUCCESS,
+
+      // No preopened directories, which is what "this guest does no file io"
+      // looks like to libc: the enumeration stops at the first bad fd.
+      fd_prestat_get: () => ERRNO_BADF,
+      fd_prestat_dir_name: () => ERRNO_BADF,
 
       fd_fdstat_get: (fd, statPtr) => {
         if (fd > 2) return ERRNO_BADF;

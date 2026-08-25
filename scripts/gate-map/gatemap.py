@@ -2407,6 +2407,24 @@ ASSERTIONS = [
 ]
 
 
+def unseen_prefix(text, path):
+    """The `<path><padding><kind>:` prefix, as unseen.txt currently pads it.
+
+    The padding is a column derived from the longest path in the file, so a
+    literal spelling of it here goes stale the day a gate closes and the
+    longest path leaves: the two mutants below then anchor on nothing, and
+    `swap` says so rather than passing. Closing a gap is the ordinary
+    outcome of adding a gate, so the anchor is computed instead.
+    """
+    for line in text.splitlines():
+        if line.startswith(path + " "):
+            return line[: line.index(":") + 1]
+    raise SystemExit(
+        f"gate-map selftest: {path} is not in unseen.txt any more. "
+        "Repoint the two ratchet mutants at a path that is still recorded"
+    )
+
+
 def swap(old, new):
     """A string replacement that refuses to happen twice, or not at all.
 
@@ -2797,17 +2815,17 @@ def mutants(base):
             "a-recorded-gap-with-no-reason",
             "a recorded gap with no reason beside it, which is the prose this "
             "file exists to replace",
-            record=lambda text: swap(
-                "LICENSE                                      no-gate:", "LICENSE  #"
-            )(text, "unseen.txt"),
+            record=lambda text: swap(unseen_prefix(text, "LICENSE"), "LICENSE  #")(
+                text, "unseen.txt"
+            ),
         ),
         Mutant(
             "a-recorded-gap-with-the-wrong-reason",
             "a reason the map contradicts. The kind is checked, so it cannot "
             "go on claiming something the tree stopped supporting",
             record=lambda text: swap(
-                "LICENSE                                      no-gate:",
-                "LICENSE                                      tag-only:",
+                unseen_prefix(text, "LICENSE"),
+                unseen_prefix(text, "LICENSE").replace("no-gate:", "tag-only:"),
             )(text, "unseen.txt"),
         ),
         Mutant(

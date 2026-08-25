@@ -777,6 +777,84 @@ jobs:
       - name: native differential (both backends, plus written expectations)
         run: ./scripts/spike-native/run.sh
 
+  # The wasm32-wasi target: the failure runtime, and the DOM bridge over it.
+  #
+  # Both harnesses ran by hand until now, and scripts/wasm-contract's own
+  # header said why: the toolchain was whatever apt shipped, and the
+  # .dawn-version discipline says a gate must pin what it downloads before it
+  # gates anyone. It downloads a pinned wasi-sdk now, so it can.
+  #
+  # They share a job because they share the two expensive things -- the
+  # wasi-sdk and the C driver built from selfhost/src/nmain.dawn -- and
+  # neither is worth paying for twice. Neither is on any other job's critical
+  # path: nothing `needs:` this, and its budget is well under the run pole
+  # (native-diff, above).
+  wasm-target:
+    runs-on: ubuntu-latest
+    # Not observed on a runner yet; this is the planning value, in the shape
+    # list-elems-contract's is. Locally (2026-08-26): 7s for the wasi-sdk,
+    # 35s for the driver, 30s for the failure contract, 12s for the DOM
+    # contract, ~45s for the checkout and the toolchain action = 129s.
+    # Doubled for a 4-vCPU runner, as that job's note does. Re-measure and
+    # restate after the first green run.
+    # budget: 3x 260s planning value (local 129s, doubled for the runner)
+    timeout-minutes: 13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # A version is a name; the checksum is the identity. The bytes GitHub
+      # serves under a tag can be re-uploaded, and this runner then executes
+      # them as a compiler. So the sha256 is written down here rather than
+      # fetched next to the tarball -- a checksum from the same place as the
+      # file it checks is not a check -- and the two move together or not at
+      # all, the same rule .dawn-version.sha256 states for the compiler jar.
+      #
+      # Why 29 and not the newest. wasi-sdk 33 (LLVM 22) fails to link
+      # anything built with `-fwasm-exceptions`: `undefined symbol:
+      # __cpp_exception`, the exception tag the backend used to define and
+      # now expects from libc++abi. 29 is the newest release the shipped
+      # `--target wasm` link works with unchanged, and 25, 27 and 29 all
+      # produce a byte-identical DOM transcript, so the pin is a choice about
+      # the toolchain and not about the answers. Raising it means either a
+      # wasi-sdk that restores the tag or a link line that names libc++abi,
+      # and that is a decision for whoever owns the failure runtime.
+      - name: the pinned wasi-sdk
+        run: |
+          v=29
+          sha=87d1d1a2879d139cdc624b968efad3d4a97b8078cdff95e63ac88ecafd1a0171
+          curl -fsSL -o wasi-sdk.tar.gz \
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${v}/wasi-sdk-${v}.0-x86_64-linux.tar.gz"
+          echo "${sha}  wasi-sdk.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/wasi-sdk"
+          tar xzf wasi-sdk.tar.gz -C "$RUNNER_TEMP/wasi-sdk" --strip-components=1
+          rm -f wasi-sdk.tar.gz
+          echo "DAWN_WASM_CC=$RUNNER_TEMP/wasi-sdk/bin/clang" >>"$GITHUB_ENV"
+
+      # Both harnesses build this from nmain.dawn when it is not handed one,
+      # and it is 35s of the job. Built once here, passed to both.
+      - name: the C driver, once
+        run: |
+          ./bin/dawn __emitc selfhost/src/nmain.dawn -o "$RUNNER_TEMP/nmain.c"
+          cc -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+            -I runtime/c -o "$RUNNER_TEMP/dawnc" "$RUNNER_TEMP/nmain.c" \
+            runtime/c/dawn_rt.c -lm
+          echo "DAWNC_BIN=$RUNNER_TEMP/dawnc" >>"$GITHUB_ENV"
+
+      # catch/bracket/raise on wasm, held to the native run byte for byte,
+      # plus the leak ledger this target has in place of LeakSanitizer and
+      # four negative controls.
+      - name: wasm failure contract
+        run: ./scripts/wasm-contract/run.sh
+
+      # The whole Elm loop across the boundary -- reactor, message passing,
+      # patch stream, DOM mutations, event routing -- against a recording
+      # document stub, held to a transcript, with six mutants.
+      - name: wasm DOM bridge contract
+        run: ./scripts/wasm-dom-contract/run.sh
+
   # The checker's diagnostics, recorded in the order `cerr` appends them.
   # Nothing else here can see them -- grammar-corpus stops at the parser,
   # spike-native compares program output, and the Core golden compares the IR,

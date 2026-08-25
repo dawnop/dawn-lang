@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dawn counter (wasm reactor + DOM bridge)</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font: 16px/1.5 ui-sans-serif, system-ui, sans-serif;
+        margin: 0;
+        padding: 3rem 1.5rem;
+        display: flex;
+        justify-content: center;
+      }
+      main { width: min(34rem, 100%); }
+      h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.02em; margin: 0 0 0.5rem; }
+      .counter { border: 1px solid rgb(128 128 128 / 0.35); border-radius: 8px; padding: 1.25rem; }
+      .counter.below-zero { border-color: rgb(200 60 60 / 0.7); }
+      .count { font-size: 2.5rem; margin: 0 0 0.5rem; font-variant-numeric: tabular-nums; }
+      .counter.below-zero .count { color: rgb(200 60 60); }
+      .bar { display: flex; gap: 3px; min-height: 12px; margin-bottom: 1rem; }
+      .tick { width: 10px; height: 12px; background: currentColor; opacity: 0.55; border-radius: 2px; }
+      .row { display: flex; gap: 0.5rem; }
+      button { font: inherit; padding: 0.35rem 0.9rem; border-radius: 6px; cursor: pointer; }
+      #error { margin-top: 1rem; min-height: 1.5rem; font-size: 0.9rem; color: rgb(200 60 60); }
+      #about { margin-top: 2rem; font-size: 0.85rem; opacity: 0.75; }
+      code { font-family: ui-monospace, monospace; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="app"></div>
+      <p id="error"></p>
+      <p id="about">
+        The document above is built and edited entirely from patches computed
+        inside a wasm module. Nothing but JSON crosses: the module never sees a
+        DOM node, and the page never sees a message. Press <code>boom</code> to
+        make the guest's <code>update</code> panic: the failure lands inside
+        wasm, the page keeps the document it has, and the next press works.
+      </p>
+    </main>
+
+    <script type="module">
+      // Serve this directory over http (a module script and `fetch` do not
+      // work from file://), then open the page:
+      //
+      //   dawnc build --target wasm --reactor examples/projects/tea_dom_counter \
+      //     -o examples/projects/tea_dom_counter/web/counter.wasm
+      //   python3 -m http.server -d examples/projects/tea_dom_counter/web 8000
+      //
+      // The .wasm is a build artifact and is not in the repository.
+      import { mount } from '../../../../packages/tea-dom/js/app.mjs';
+
+      const banner = document.getElementById('error');
+      try {
+        await mount(await fetch('./counter.wasm'), document.getElementById('app'), {
+          onError: (reply) => {
+            banner.textContent = `${reply.kind}: ${reply.error}`;
+          },
+        });
+      } catch (e) {
+        banner.textContent = String(e);
+        throw e;
+      }
+    </script>
+  </body>
+</html>

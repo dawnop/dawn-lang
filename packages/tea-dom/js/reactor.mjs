@@ -27,7 +27,7 @@ export class Reactor {
       : new Uint8Array(await source.arrayBuffer());
     const wasi = new Wasi();
     const module = await WebAssembly.compile(bytes);
-    const instance = await WebAssembly.instantiate(module, wasi.imports);
+    const instance = await WebAssembly.instantiate(module, wasi.importsFor(module));
     wasi.bind(instance);
     if (typeof instance.exports.dawn_turn !== 'function') {
       throw new Error(
