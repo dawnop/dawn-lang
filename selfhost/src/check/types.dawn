@@ -29,12 +29,13 @@ pub type Eff =
   | EffVar(name: String, id: Int)
 # A normalized union of base-axis atoms: effect variables (sorted by id) and
 # associated-effect projections (sorted by (tvar, trait_id, name)), plus an io
-# flag. io absorbs variables but never a projection -- a projection stands for
-# evidence the same way a label does, and an absorbed one would have no
-# parameter to arrive through. Invariants: `io` implies `vars` is empty; a
-# union that could be a smaller shape is that shape (one atom and no io is the
-# atom itself, io alone is EIo), so every row that existed before projections
-# still has the representation it had.
+# flag. io absorbs neither: a variable and a projection each stand for evidence
+# the way a label does, and an absorbed one would have no parameter to arrive
+# through, so `EUnion([(3, "e")], [], true)` is a normal form rather than a
+# shape to reduce (see `base_union`, which used to absorb the variables and
+# lost a pack entry doing it). Invariant: a union that could be a smaller shape
+# is that shape (one atom and no io is the atom itself, io alone is EIo), so
+# every row that existed before projections still has the representation it had.
   | EUnion(vars: List[(Int, String)], assocs: List[(String, Int, Int, String)], io: Bool)
 # An associated-effect projection `C.E` (docs/effect-params-design.md 刀 5):
 # the effect an impl binds for the trait member `name`, read off the impl
@@ -50,9 +51,9 @@ pub type Eff =
 # The second axis (docs/effects-design.md §4.1): a base row -- one of the five
 # constructors above, never this one -- plus a non-empty, id-sorted set of
 # declared effects. Labels are a component of the normal form, not a member of
-# the base lattice: io absorbs effect variables and never absorbs a label,
-# because evidence is synthesised per label and an absorbed one has no
-# parameter to arrive through. `labels` empty is not representable: the normal
+# the base lattice, and io absorbs one no more than it absorbs a variable:
+# evidence is synthesised per label and an absorbed one has no parameter to
+# arrive through. `labels` empty is not representable: the normal
 # form is then the base alone, which is what keeps every label-free program's
 # behaviour byte-identical to what it was before labels existed.
   | ELabeled(base: Eff, labels: List[(Int, String)])
