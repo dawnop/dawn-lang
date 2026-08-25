@@ -1,0 +1,289 @@
+# The boundary, as bytes. One JSON object in, one JSON object out, one line
+# each way, and nothing else crosses.
+#
+# What the shape is for. The host is a browser and the guest is a wasm module,
+# and the only thing a wasm module and JavaScript share for free is a byte
+# range. Everything else -- a JS object, a DOM node, an `externref` -- is a
+# reference the guest would have to hold, and a guest holding a host reference
+# is a lifetime the type system on neither side is tracking. So the guest
+# holds none: it is handed a message and it answers with a message.
+#
+# Three consequences worth stating, because they are the reason this is small:
+#
+#   - A *message* never crosses. What crosses outward is a patch list, whose
+#     only listener information is the *names* of the events an element wants;
+#     what crosses inward is an address and an event name. The host cannot
+#     name a message and never has to, because `tea_dom/route.at` resolves the
+#     pair against the tree the model produces right now. The application's
+#     message type therefore needs no encoding at all, and `Msg` stays a type
+#     the host has never heard of.
+#   - The *model* crosses, as opaque text the application encodes and decodes.
+#     It has to: Dawn has no module-level mutable state, so a reactor holds
+#     nothing between turns, and the alternative -- a handle into a guest-side
+#     table -- is the host reference this design does not want in either
+#     direction. Opaque means opaque: it is a JSON string and this module never
+#     looks inside it.
+#   - `SetSelf` ships a node *without its children*. That is not a shortcut
+#     around the contract, it is the contract read closely: `apply` performs
+#     `rekid(donor, kids(target))` and so reads nothing of the donor but its
+#     own data. Shipping the subtree would make an attribute change at the root
+#     cost the whole document, which is precisely the locality `diff` exists to
+#     buy. `enc_self` is the encoder that says so.
+#
+# Framing is one line per message because `json/render` escapes every code
+# point below U+0020, so a rendered value can never contain the newline that
+# separates two of them.
+
+use std/list
+use std/str
+use std/map
+use json/value.{Json, JStr, JInt, JArr, JObj, JBool, error_text}
+use json/render.{render}
+use json/parser.{parse}
+use tea_core/diff.{Patch, Op, Replace, SetSelf, AppendKids, TruncateKids}
+use node.{Node, Text, Elem}
+
+## What the host asked for this turn. `Bad` carries the reason rather than
+## panicking: a malformed line is the host's mistake and the guest answers it
+## with an error message, which is a thing a transcript can assert on.
+pub type Request =
+  | Init
+  | Event(model: String, path: List[Int], event: String)
+  | Bad(reason: String)
+derive Show
+
+# ---- outbound ----------------------------------------------------------
+
+fn jpath(p: List[Int]) -> Json = JArr(items: list.map(p, i => JInt(value: i)))
+
+fn jprop(kv: (String, String)) -> Json = {
+  let (k, v) = kv
+  JArr(items: [JStr(value: k), JStr(value: v)])
+}
+
+fn jevent[M](e: (String, M)) -> Json = {
+  let (name, _) = e
+  JStr(value: name)
+}
+
+## An element's own data: everything but its children. The payload of a
+## `SetSelf`, and the first half of a full node.
+pub fn enc_self[M](n: Node[M]) -> Json =
+  match n {
+    Text(s) -> JObj(entries: map.from([("t", JStr(value: "text")), ("s", JStr(value: s))]))
+    Elem(tag, props, on, _) ->
+      JObj(entries: map.from([
+        ("t", JStr(value: "elem")),
+        ("tag", JStr(value: tag)),
+        ("props", JArr(items: list.map(props, p => jprop(p)))),
+        ("on", JArr(items: list.map(on, e => jevent(e)))),
+      ]))
+  }
+
+## A whole subtree: an element's own data plus its children, recursively.
+pub fn enc_node[M](n: Node[M]) -> Json =
+  match n {
+    Text(_) -> enc_self(n)
+    Elem(tag, props, on, ks) ->
+      JObj(entries: map.from([
+        ("t", JStr(value: "elem")),
+        ("tag", JStr(value: tag)),
+        ("props", JArr(items: list.map(props, p => jprop(p)))),
+        ("on", JArr(items: list.map(on, e => jevent(e)))),
+        ("kids", JArr(items: list.map(ks, k => enc_node(k)))),
+      ]))
+  }
+
+## One patch. The four op names are the four `tea_core/diff.Op` constructors
+## and there is no fifth: a bridge that grows a case this list does not have
+## is a bridge that forked the contract.
+pub fn enc_patch[M](p: Patch[Node[M]]) -> Json =
+  match p.op {
+    Replace(w) ->
+      JObj(entries: map.from([
+        ("path", jpath(p.path)),
+        ("op", JStr(value: "replace")),
+        ("node", enc_node(w)),
+      ]))
+    SetSelf(w) ->
+      JObj(entries: map.from([
+        ("path", jpath(p.path)),
+        ("op", JStr(value: "set-self")),
+        ("node", enc_self(w)),
+      ]))
+    AppendKids(ws) ->
+      JObj(entries: map.from([
+        ("path", jpath(p.path)),
+        ("op", JStr(value: "append")),
+        ("nodes", JArr(items: list.map(ws, w => enc_node(w)))),
+      ]))
+    TruncateKids(keep) ->
+      JObj(entries: map.from([
+        ("path", jpath(p.path)),
+        ("op", JStr(value: "truncate")),
+        ("keep", JInt(value: keep)),
+      ]))
+  }
+
+## A successful turn: the model the host must hand back next time, and the
+## edits it must make to the document it is holding.
+pub fn reply_ok[M](model: String, ps: List[Patch[Node[M]]]) -> String =
+  render(JObj(entries: map.from([
+    ("ok", JBool(value: true)),
+    ("model", JStr(value: model)),
+    ("patches", JArr(items: list.map(ps, p => enc_patch(p)))),
+  ])))
+
+## A turn that could not happen. `kind` is the machine's word for it (the
+## failure's kind when a panic was caught, `bad-request` when the line did not
+## parse, `no-handler` when the address dispatched nowhere) and `error` is the
+## sentence. The host holds its document unchanged: an error carries no
+## patches at all, so there is no half-applied frame.
+pub fn reply_err(kind: String, message: String) -> String =
+  render(JObj(entries: map.from([
+    ("ok", JBool(value: false)),
+    ("kind", JStr(value: kind)),
+    ("error", JStr(value: message)),
+  ])))
+
+# ---- inbound -----------------------------------------------------------
+
+fn field(o: Map[String, Json], k: String) -> Option[Json] = map.get(o, k)
+
+fn as_string(j: Option[Json]) -> Option[String] =
+  match j {
+    Some(JStr(s)) -> Some(s)
+    _ -> None
+  }
+
+fn as_path(j: Option[Json]) -> Option[List[Int]] =
+  match j {
+    Some(JArr(items)) -> ints(items, [])
+    _ -> None
+  }
+
+fn ints(items: List[Json], acc: List[Int]) -> Option[List[Int]] =
+  if list.is_empty(items) {
+    Some(acc)
+  } else {
+    match items[0] {
+      JInt(v) -> ints(list.drop(items, 1), acc ++ [v])
+      _ -> None
+    }
+  }
+
+## Read one inbound line. Never panics and never partially succeeds: either
+## every field a request needs is there and well typed, or the answer is `Bad`
+## with the reason.
+pub fn decode_request(line: String) -> Request =
+  match parse(line) {
+    Err(e) -> Bad(reason: "not JSON: " ++ error_text(e))
+    Ok(JObj(entries)) ->
+      match as_string(field(entries, "op")) {
+        None -> Bad(reason: "no `op` field")
+        Some("init") -> Init
+        Some("event") ->
+          match (
+            as_string(field(entries, "model")),
+            as_path(field(entries, "path")),
+            as_string(field(entries, "event")),
+          ) {
+            (Some(m), Some(p), Some(ev)) -> Event(model: m, path: p, event: ev)
+            _ -> Bad(reason: "an `event` needs `model`, an integer `path` and `event`")
+          }
+        Some(other) -> Bad(reason: "unknown op `" ++ other ++ "`")
+      }
+    Ok(_) -> Bad(reason: "the request must be a JSON object")
+  }
+
+# ---- tests -------------------------------------------------------------
+
+type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+fn btn(label: String, m: ProbeMsg) -> Node[ProbeMsg] =
+  Elem(tag: "button", props: [], on: [("click", m)], kids: [Text(s: label)])
+
+test "a node encodes as its own data plus its children" {
+  let n: Node[ProbeMsg] = btn("go", Ping)
+  assert render(enc_node(n)) ==
+    "{\"t\":\"elem\",\"tag\":\"button\",\"props\":[],\"on\":[\"click\"]," ++
+    "\"kids\":[{\"t\":\"text\",\"s\":\"go\"}]}"
+  assert render(enc_self(n)) ==
+    "{\"t\":\"elem\",\"tag\":\"button\",\"props\":[],\"on\":[\"click\"]}"
+  let t: Node[ProbeMsg] = Text(s: "hi")
+  assert render(enc_node(t)) == "{\"t\":\"text\",\"s\":\"hi\"}"
+}
+
+test "the message an event means never reaches the wire" {
+  # The same tree with a different meaning for the same click renders to the
+  # same bytes: the host learns that a click is listened for and nothing else.
+  assert render(enc_node(btn("go", Ping))) == render(enc_node(btn("go", Pong)))
+}
+
+test "SetSelf ships the node without its children" {
+  let big: Node[ProbeMsg] =
+    Elem(tag: "div", props: [("class", "b")], on: [], kids: [btn("a", Ping), btn("b", Pong)])
+  let p: Patch[Node[ProbeMsg]] = Patch { path: [], op: SetSelf(w: big) }
+  assert render(enc_patch(p)) ==
+    "{\"path\":[],\"op\":\"set-self\"," ++
+    "\"node\":{\"t\":\"elem\",\"tag\":\"div\",\"props\":[[\"class\",\"b\"]],\"on\":[]}}"
+}
+
+test "every op has a wire name, and the address travels with it" {
+  let leaf: Node[ProbeMsg] = Text(s: "x")
+  let r: Patch[Node[ProbeMsg]] = Patch { path: [1, 0], op: Replace(w: leaf) }
+  assert render(enc_patch(r)) ==
+    "{\"path\":[1,0],\"op\":\"replace\",\"node\":{\"t\":\"text\",\"s\":\"x\"}}"
+  let a: Patch[Node[ProbeMsg]] = Patch { path: [2], op: AppendKids(ws: [leaf]) }
+  assert render(enc_patch(a)) ==
+    "{\"path\":[2],\"op\":\"append\",\"nodes\":[{\"t\":\"text\",\"s\":\"x\"}]}"
+  let t: Patch[Node[ProbeMsg]] = Patch { path: [], op: TruncateKids(keep: 3) }
+  assert render(enc_patch(t)) == "{\"path\":[],\"op\":\"truncate\",\"keep\":3}"
+}
+
+test "a reply is one line, ok or not" {
+  let none: List[Patch[Node[ProbeMsg]]] = []
+  assert reply_ok("7", none) == "{\"ok\":true,\"model\":\"7\",\"patches\":[]}"
+  assert reply_err("panic", "boom") ==
+    "{\"ok\":false,\"kind\":\"panic\",\"error\":\"boom\"}"
+}
+
+test "an opaque model stays opaque, quotes and newlines included" {
+  let none: List[Patch[Node[ProbeMsg]]] = []
+  # The model is a JSON string, so nothing an application puts in it can end
+  # the line or the field. This is the whole of the framing argument.
+  let out = reply_ok("a\"b\nc", none)
+  assert out == "{\"ok\":true,\"model\":\"a\\\"b\\nc\",\"patches\":[]}"
+  assert not str.contains(out, "\n")
+}
+
+test "requests decode, and a bad one is an answer rather than a panic" {
+  assert decode_request("{\"op\":\"init\"}") == Init
+  assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[0,1],\"event\":\"click\"}") ==
+    Event(model: "3", path: [0, 1], event: "click")
+  assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[],\"event\":\"x\"}") ==
+    Event(model: "3", path: [], event: "x")
+  match decode_request("not json at all") {
+    Bad(r) -> { assert r != "" }
+    _ -> { assert false }
+  }
+  match decode_request("{\"op\":\"nope\"}") {
+    Bad(r) -> { assert r == "unknown op `nope`" }
+    _ -> { assert false }
+  }
+  match decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[\"x\"],\"event\":\"c\"}") {
+    Bad(_) -> { assert true }
+    _ -> { assert false }
+  }
+  match decode_request("[1,2]") {
+    Bad(r) -> { assert r == "the request must be a JSON object" }
+    _ -> { assert false }
+  }
+  match decode_request("{\"model\":\"3\"}") {
+    Bad(r) -> { assert r == "no `op` field" }
+    _ -> { assert false }
+  }
+}

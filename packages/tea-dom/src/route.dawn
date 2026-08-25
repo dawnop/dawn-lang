@@ -1,0 +1,111 @@
+# From "the user clicked that element" to "which message does it mean", as a
+# pure question to the tree -- the DOM's half of what `tea_term/route` is for
+# the terminal, and written on the same walk.
+#
+# The terminal numbers its buttons because a line-mode app has no other way to
+# name one. A DOM host does not need a numbering: it already holds the node,
+# and `tea_core/walk.fold_preorder` hands every node the address
+# `tea_core/diff` would use for it. So the question this module answers is the
+# addressed one, and `tea_term/route.addressed` is the function that was
+# written in anticipation of exactly this consumer.
+#
+# Why routing lives in the vocabulary rather than behind a second core trait:
+# core has no way to ask a node for its listeners. That is tea_core/walk's own
+# argument, and this module is the second instance of it.
+
+use std/list
+use tea_core/walk.{fold_preorder}
+use node.{Node, Text, Elem}
+
+## Every node that listens for something, paired with the address
+## `tea_core/diff` addresses it by and the listeners it declares. Pre-order,
+## so the order is the order a reader meets the elements; nodes with no
+## listeners are not mentioned.
+##
+## This is what the bridge needs at the boundary: the host attaches a listener
+## exactly where this says one exists, and hands back the address it fired at.
+pub fn listeners[M: Eq](root: Node[M]) -> List[(List[Int], List[(String, M)])] =
+  fold_preorder(root, [], (acc, n, path) =>
+      match n {
+        Text(_) -> acc
+        Elem(_, _, on, _) -> if list.is_empty(on) { acc } else { acc ++ [(path, on)] }
+      })
+
+## What `event` at `path` means, or `None` when nothing there listens for it.
+##
+## `None` is a real answer and the bridge treats it as an error rather than as
+## a no-op: the host only ever attaches a listener where `listeners` said there
+## was one, so an event with no message means the host is dispatching against a
+## tree the model no longer produces. Swallowing that would turn a desync into
+## a click that silently does nothing.
+pub fn at[M: Eq](root: Node[M], path: List[Int], event: String) -> Option[M] =
+  fold_preorder(root, None, (acc, n, p) =>
+      match acc {
+        Some(_) -> acc
+        None ->
+          if p != path {
+            acc
+          } else {
+            match n {
+              Text(_) -> acc
+              Elem(_, _, on, _) -> lookup(on, event)
+            }
+          }
+      })
+
+fn lookup[M](on: List[(String, M)], event: String) -> Option[M] =
+  match list.find(on, e => {
+    let (name, _) = e
+    name == event
+  }) {
+    None -> None
+    Some(hit) -> {
+      let (_, msg) = hit
+      Some(msg)
+    }
+  }
+
+# A message type for the test blocks below; real apps bring their own.
+type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+fn sample() -> Node[ProbeMsg] =
+  Elem(tag: "div", props: [], on: [], kids: [
+    Elem(tag: "button", props: [], on: [("click", Ping)], kids: [Text(s: "up")]),
+    Text(s: "between"),
+    Elem(tag: "form", props: [], on: [("submit", Pong)], kids: [
+      Elem(tag: "input", props: [], on: [("input", Ping), ("blur", Pong)], kids: []),
+    ]),
+  ])
+
+test "listeners reports the addresses a patch would use, in pre-order" {
+  let want: List[(List[Int], List[(String, ProbeMsg)])] = [
+    ([0], [("click", Ping)]),
+    ([2], [("submit", Pong)]),
+    ([2, 0], [("input", Ping), ("blur", Pong)]),
+  ]
+  assert listeners(sample()) == want
+  let bare: Node[ProbeMsg] = Text(s: "nothing listens here")
+  assert list.is_empty(listeners(bare))
+}
+
+test "at resolves an address and an event name to a message" {
+  let none: Option[ProbeMsg] = None
+  assert at(sample(), [0], "click") == Some(Ping)
+  assert at(sample(), [2], "submit") == Some(Pong)
+  assert at(sample(), [2, 0], "blur") == Some(Pong)
+  # right address, wrong event; right event, wrong address; nothing there
+  assert at(sample(), [0], "submit") == none
+  assert at(sample(), [1], "click") == none
+  assert at(sample(), [9], "click") == none
+  assert at(sample(), [], "click") == none
+}
+
+test "the root can listen, and the empty path addresses it" {
+  let root: Node[ProbeMsg] =
+    Elem(tag: "body", props: [], on: [("keydown", Ping)], kids: [Text(s: "x")])
+  assert at(root, [], "keydown") == Some(Ping)
+  assert listeners(root) == [([], [("keydown", Ping)])]
+}

@@ -1,0 +1,59 @@
+# Lowercase wrappers over the constructors, and nothing deeper -- the same
+# spelling layer `tea_term/dsl` is, for the same reason: a view reads better as
+# `div([...])` than as `Elem(tag: "div", props: [], on: [], kids: [...])`, and
+# the four-field constructor is unreadable when three of the fields are empty.
+#
+# The same two inference taxes tea_term's README records apply here and are not
+# specific to either DSL: a type argument flows from an expected type, and a
+# `let` binding has none, so shape a view as annotated `let`s per segment
+# (`let header: Node[Msg] = ...`) and concatenate the named parts.
+
+use node.{Node, Text, Elem}
+
+## A text node.
+pub fn text[M](s: String) -> Node[M] = Text(s: s)
+
+## The general element: tag, properties, listeners, children.
+pub fn el[M](
+  tag: String,
+  props: List[(String, String)],
+  on: List[(String, M)],
+  kids: List[Node[M]],
+) -> Node[M] = Elem(tag: tag, props: props, on: on, kids: kids)
+
+## A container with children and nothing else. The two commonest shapes get a
+## name because they are what a view is mostly made of.
+pub fn div[M](kids: List[Node[M]]) -> Node[M] =
+  Elem(tag: "div", props: [], on: [], kids: kids)
+
+## A `div` with a class, which is how a view says "style this region".
+pub fn div_of[M](class: String, kids: List[Node[M]]) -> Node[M] =
+  Elem(tag: "div", props: [("class", class)], on: [], kids: kids)
+
+## A `span` holding one string.
+pub fn span[M](s: String) -> Node[M] =
+  Elem(tag: "span", props: [], on: [], kids: [Text(s: s)])
+
+## A button labelled `label` whose click means `msg`. The DOM analogue of
+## `tea_term/dsl.button`, and like it the message is data in the tree.
+pub fn button[M](label: String, msg: M) -> Node[M] =
+  Elem(tag: "button", props: [], on: [("click", msg)], kids: [Text(s: label)])
+
+# A message type for the test blocks below; real apps bring their own.
+type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+test "the wrappers build exactly the constructors they name" {
+  let b: Node[ProbeMsg] = button("go", Ping)
+  assert b == Elem(tag: "button", props: [], on: [("click", Ping)], kids: [Text(s: "go")])
+  let t: Node[ProbeMsg] = text("hi")
+  assert t == Text(s: "hi")
+  assert div([t]) == Elem(tag: "div", props: [], on: [], kids: [t])
+  assert div_of("row", [t]) == Elem(tag: "div", props: [("class", "row")], on: [], kids: [t])
+  let sp: Node[ProbeMsg] = span("hi")
+  assert sp == Elem(tag: "span", props: [], on: [], kids: [t])
+  let general: Node[ProbeMsg] = el("input", [("value", "7")], [("input", Pong)], [])
+  assert general == Elem(tag: "input", props: [("value", "7")], on: [("input", Pong)], kids: [])
+}

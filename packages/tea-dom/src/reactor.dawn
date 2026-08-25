@@ -1,0 +1,216 @@
+# One turn of the Elm loop for a host that is not in this process.
+#
+# `turn` is pure and is the whole of the boundary's behaviour: a request line
+# in, a reply line out, and in between exactly `view`, `route.at`, `update`,
+# `view` again and `diff`. `serve` is the only `!io` in this package, the same
+# split `tea_term` has, and it does two things `turn` cannot: it reads and
+# writes the lines, and it stands between a failing application and the host.
+#
+# Why the model travels. Dawn has no module-level mutable state, so nothing
+# survives between two calls into a reactor; the model therefore arrives with
+# the request and leaves with the reply, as text the application encodes. The
+# useful consequence is that a turn is a function of its inputs and of nothing
+# else, so the same transcript replays identically on a browser, on node and
+# on the JVM -- which is what makes this testable without a browser at all.
+#
+# Why `serve` is a loop over lines when the whole design says the guest has no
+# loop. It is a loop over *the input it was handed*, not over time: a reactor
+# turn writes one line to the guest and the guest drains it, answers, reaches
+# end of input and returns. The same binary run from a terminal drains a whole
+# session instead, which is why `dawn run` can drive this program and why the
+# example-main contract can hold it to a transcript.
+#
+# What `catch_panic` is doing here. An application's `update` or `view` may
+# panic, and on wasm that panic has to land somewhere: an unhandled one aborts
+# the module, and a host holding an aborted instance has lost the model. So
+# the guest catches at its own boundary and answers with an error reply, the
+# host keeps the model it already had, and the page stays alive. This is the
+# consumer for the wasm failure runtime -- the A1 shadow stack that makes a
+# raise on wasm32-wasi land at a handler instead of aborting -- and the
+# harness has a case that panics on purpose to hold it.
+#
+# The catch is here rather than inside `turn` because the failure barriers are
+# pinned to `!io` (spec 9.8): `catch_panic` has an `!io` row whatever it
+# guards, so a `turn` that caught its own failures could not be a pure
+# function, and a pure `turn` is what the test blocks below assert on with
+# `==`.
+
+use std/io
+use std/str
+use tea_core/diff.{Patch, Replace, diff}
+use node.{Node, Text, Elem}
+use route
+use wire.{Request, Init, Event, Bad, decode_request, enc_node, reply_ok, reply_err}
+
+## Answer one request line.
+##
+## `init` is the model a fresh page starts from, `encode`/`decode` are the
+## application's own opaque text for a model, and `update`/`view` are the two
+## pure functions `tea_core/app.App` names. They arrive as parameters rather
+## than through the trait for the reason `tea_core/app` records at length: a
+## generic function over `A: App` can do nothing with an `A.View`, and the
+## reconciler needs `Eq` on the tree, which needs `Eq` on the message, which
+## an associated type cannot carry.
+##
+## The two requests:
+##
+##   `init`   the host has an empty container. The reply is the initial model
+##            and one `replace` at the root, which is the only patch that can
+##            describe "there was nothing and now there is a document".
+##   `event`  the host names an address and an event. The message is looked up
+##            in `view(decode(model))` -- the tree the host is holding, since
+##            the host's document is that tree by construction -- folded in by
+##            `update`, and the reply is the new model plus `diff(old, new)`.
+pub fn turn[Mo, M: Eq](
+  line: String,
+  init: Mo,
+  encode: fn(Mo) -> String,
+  decode: fn(String) -> Mo,
+  update: fn(Mo, M) -> Mo,
+  view: fn(Mo) -> Node[M],
+) -> String =
+  match decode_request(line) {
+    Bad(reason) -> reply_err("bad-request", reason)
+    Init -> {
+      let root: Patch[Node[M]] = Patch { path: [], op: Replace(w: view(init)) }
+      reply_ok(encode(init), [root])
+    }
+    Event(model, path, event) -> {
+      let m0 = decode(model)
+      let old = view(m0)
+      match route.at(old, path, event) {
+        None ->
+          reply_err(
+            "no-handler",
+            "nothing at " ++ show_path(path) ++ " listens for `" ++ event ++ "`",
+          )
+        Some(msg) -> {
+          let m1 = update(m0, msg)
+          reply_ok(encode(m1), diff(old, view(m1)))
+        }
+      }
+    }
+  }
+
+fn show_path(p: List[Int]) -> String = "[" ++ join_ints(p, 0, "") ++ "]"
+
+fn join_ints(p: List[Int], i: Int, acc: String) -> String =
+  if i >= len(p) {
+    acc
+  } else {
+    join_ints(p, i + 1, if i == 0 { to_string(p[i]) } else { acc ++ "," ++ to_string(p[i]) })
+  }
+
+## Answer every request on stdin, one line each way, until end of input.
+##
+## A failing application is answered rather than propagated: `catch_panic` is
+## an isolation point (spec 9.8), so a panic in `update` or `view` becomes an
+## error reply and the loop goes on to the next line. A blank line is skipped,
+## because a host that writes "\n" between messages should not be told it sent
+## a malformed request.
+pub fn serve[Mo, M: Eq](
+  init: Mo,
+  encode: fn(Mo) -> String,
+  decode: fn(String) -> Mo,
+  update: fn(Mo, M) -> Mo,
+  view: fn(Mo) -> Node[M],
+) -> Unit !io =
+  match io.read_line() {
+    None -> ()
+    Some(line) -> {
+      if str.trim(line) != "" {
+        match catch_panic(() => turn(line, init, encode, decode, update, view)) {
+          Ok(reply) -> io.println(reply)
+          # `e.kind` is the runtime's own word for the failure and it is not
+          # the same word on every backend: the JVM answers
+          # `dawn.rt.PanicError` where the C runtime answers `panic`. The
+          # boundary must not vary by backend -- one transcript has to replay
+          # on the JVM, on native and on wasm -- and `catch_panic` catches
+          # panics and nothing else, so the kind carries no information the
+          # wire word does not. The message is passed through verbatim.
+          Err(e) -> io.println(reply_err("panic", e.message))
+        }
+      }
+      serve(init, encode, decode, update, view)
+    }
+  }
+
+# ---- tests -------------------------------------------------------------
+#
+# A counter, because the smallest app that has a model, two messages and a
+# tree with a stable region is enough to pin every branch of a turn.
+
+type Counter = { n: Int }
+
+type Msg =
+  | Inc
+  | Dec
+derive Show
+
+fn enc(m: Counter) -> String = to_string(m.n)
+
+fn dec(s: String) -> Counter =
+  match parse_int(s) {
+    Some(n) -> Counter { n: n }
+    None -> Counter { n: 0 }
+  }
+
+fn upd(m: Counter, msg: Msg) -> Counter =
+  match msg {
+    Inc -> Counter { n: m.n + 1 }
+    Dec -> Counter { n: m.n - 1 }
+  }
+
+fn vw(m: Counter) -> Node[Msg] =
+  Elem(tag: "div", props: [], on: [], kids: [
+    Elem(tag: "button", props: [], on: [("click", Dec)], kids: [Text(s: "-")]),
+    Elem(tag: "span", props: [], on: [], kids: [Text(s: to_string(m.n))]),
+    Elem(tag: "button", props: [], on: [("click", Inc)], kids: [Text(s: "+")]),
+  ])
+
+fn ask(line: String) -> String =
+  turn(line, Counter { n: 0 }, enc, dec, upd, vw)
+
+test "init answers the initial model and one replace at the root" {
+  let out = ask("{\"op\":\"init\"}")
+  assert str.starts_with(out, "{\"ok\":true,\"model\":\"0\",\"patches\":[{\"path\":[],\"op\":\"replace\"")
+  # The patch carries the whole document, which is what a host with an empty
+  # container needs and the only time the whole document crosses.
+  assert str.contains(out, "\"kids\":[{\"t\":\"text\",\"s\":\"0\"}]")
+}
+
+test "an event folds one message in and answers the minimal patch" {
+  # Clicking `+` changes one text node three levels down. The two buttons and
+  # the containers are unchanged and no patch may mention them.
+  let out = ask("{\"op\":\"event\",\"model\":\"41\",\"path\":[2],\"event\":\"click\"}")
+  assert out ==
+    "{\"ok\":true,\"model\":\"42\",\"patches\":" ++
+    "[{\"path\":[1,0],\"op\":\"replace\",\"node\":{\"t\":\"text\",\"s\":\"42\"}}]}"
+}
+
+test "the other button means the other message, at the same tree" {
+  let out = ask("{\"op\":\"event\",\"model\":\"41\",\"path\":[0],\"event\":\"click\"}")
+  assert str.contains(out, "\"model\":\"40\"")
+  assert str.contains(out, "\"s\":\"40\"")
+}
+
+test "an address that listens for nothing is an error, not a silent no-op" {
+  let out = ask("{\"op\":\"event\",\"model\":\"1\",\"path\":[1],\"event\":\"click\"}")
+  assert out ==
+    "{\"ok\":false,\"kind\":\"no-handler\"," ++
+    "\"error\":\"nothing at [1] listens for `click`\"}"
+  let root = ask("{\"op\":\"event\",\"model\":\"1\",\"path\":[],\"event\":\"click\"}")
+  assert str.contains(root, "nothing at [] listens for `click`")
+}
+
+test "a malformed line is answered, and the model is not mentioned" {
+  let out = ask("{\"op\":\"event\"}")
+  assert str.starts_with(out, "{\"ok\":false,\"kind\":\"bad-request\"")
+  assert not str.contains(out, "\"model\"")
+  assert not str.contains(out, "\"patches\"")
+}
+
+test "a turn is a function of its line, so a transcript replays" {
+  let line = "{\"op\":\"event\",\"model\":\"7\",\"path\":[2],\"event\":\"click\"}"
+  assert ask(line) == ask(line)
+}

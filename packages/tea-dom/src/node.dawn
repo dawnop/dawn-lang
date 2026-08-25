@@ -1,0 +1,208 @@
+# The DOM vocabulary of the Elm architecture: a pure value tree whose leaves
+# carry the application's message type and never a function, exactly as the
+# terminal's `Widget` does. This is a *second* vocabulary over `tea_core`'s
+# reconciler contract, not a second reconciler: `kids`, `rekid` and `relate`
+# are the whole of what this package owes core, and `diff`/`apply`/
+# `fold_preorder` arrive unchanged.
+#
+# Two nodes, not five. A browser's element is one shape with a tag, so the
+# vocabulary that mirrors it is `Text` and `Elem`; the terminal needed `Row`
+# and `Column` because a terminal has no tag to vary. Everything a DOM host
+# needs beyond that is a property (`props`) or a listener (`on`).
+#
+# `on` carries the *message* an event means, never a callback -- the same
+# load-bearing restriction `tea_term/widget` states, for the same reason:
+# a function field costs the tree its structural `==`, and `==` is what lets
+# the reconciler short-circuit and a view test be one assertion. A DOM event
+# arrives at this package as an address plus an event name, and the message
+# is looked up in the tree that is current at that moment (`tea_dom/route`),
+# so no message ever leaves the module that declared it.
+#
+# The impl is here and can be nowhere else: the orphan rule is per module, so
+# `impl Tree[Node[M]]` belongs to the module declaring `Node`.
+
+use std/list
+use tea_core/tree.{Tree, Rel, Unrelated, Same, SelfDiffers, kids, rekid, relate}
+use tea_core/diff.{Patch, Replace, diff, apply}
+
+## A pure description of a DOM subtree. `M` is the application's message type.
+##
+## `props` is what the host sets on the element (attributes, `value`, a class
+## list -- the interpretation is the bridge's, see `packages/tea-dom/js`), and
+## `on` names, per event type, the message that event means. Both are ordered
+## lists rather than maps because order is part of `==` and therefore part of
+## what the reconciler can see; a host that wants set semantics sorts before
+## it builds.
+pub type Node[M] =
+  | Text(s: String)
+  | Elem(
+    tag: String,
+    props: List[(String, String)],
+    on: List[(String, M)],
+    kids: List[Node[M]],
+  )
+derive Show
+
+## What this vocabulary owes the reconciler.
+##
+## The `M: Eq` bound is not decoration and not inherited from anywhere: `relate`
+## must be able to see *every* difference between a pair, or the contract
+## `apply(old, diff(old, new)) == new` fails. Two elements that agree on tag,
+## props and event names but disagree on what one of those events *means* are
+## unequal, and answering `Same` for them would emit no patch at all for a real
+## difference. So `relate` compares the `on` list whole, and comparing it needs
+## `Eq` on the message type. The terminal vocabulary never met this because its
+## message-carrying node (`Button`) is a leaf and answers `Unrelated`.
+impl[M: Eq] Tree[Node[M]] {
+  fn kids(w: Node[M]) -> List[Node[M]] =
+    match w {
+      Text(_) -> []
+      Elem(_, _, _, ks) -> ks
+    }
+
+  # Total by construction: a `Text` handed children ignores them, which is the
+  # totality `apply` needs against an address that no longer exists.
+  fn rekid(w: Node[M], ks: List[Node[M]]) -> Node[M] =
+    match w {
+      Text(_) -> w
+      Elem(t, p, o, _) -> Elem(tag: t, props: p, on: o, kids: ks)
+    }
+
+  # Called only on a pair core has already found unequal.
+  #
+  # A changed tag is `Unrelated`, because a host cannot turn a `div` into a
+  # `span`: it has to build a new element, which is what `Replace` means.
+  # A changed prop or listener at an unchanged tag is `SelfDiffers`, the
+  # in-place update every DOM host wants. Text is a leaf with nothing under
+  # it, so an inequality is its own and there is nothing to descend into.
+  fn relate(old: Node[M], new: Node[M]) -> Rel =
+    match old {
+      Elem(t1, p1, o1, _) ->
+        match new {
+          Elem(t2, p2, o2, _) ->
+            if t1 != t2 {
+              Unrelated
+            } else if p1 == p2 && o1 == o2 {
+              Same
+            } else {
+              SelfDiffers
+            }
+          _ -> Unrelated
+        }
+      Text(_) -> Unrelated
+    }
+}
+
+# A message type for the test blocks below; real apps bring their own.
+type ProbeMsg =
+  | Ping
+  | Pong
+derive Show
+
+fn div(ks: List[Node[ProbeMsg]]) -> Node[ProbeMsg] =
+  Elem(tag: "div", props: [], on: [], kids: ks)
+
+test "a DOM tree is a plain value with structural equality" {
+  let a: Node[ProbeMsg] = div([Text(s: "hi")])
+  assert a == div([Text(s: "hi")])
+  assert a != div([Text(s: "ho")])
+  assert a != Elem(tag: "span", props: [], on: [], kids: [Text(s: "hi")])
+}
+
+test "kids is the addressing scheme and rekid is total" {
+  let leaf: Node[ProbeMsg] = Text(s: "x")
+  assert list.is_empty(kids(leaf))
+  assert rekid(leaf, [Text(s: "y")]) == leaf
+  let ks: List[Node[ProbeMsg]] = [Text(s: "a"), Text(s: "b")]
+  assert kids(div(ks)) == ks
+  assert rekid(div([]), ks) == div(ks)
+}
+
+test "relate: tag decides related, self-data decides in place" {
+  let a: Node[ProbeMsg] = Elem(tag: "b", props: [("class", "x")], on: [], kids: [])
+  let b: Node[ProbeMsg] = Elem(tag: "b", props: [("class", "y")], on: [], kids: [])
+  let c: Node[ProbeMsg] = Elem(tag: "i", props: [("class", "x")], on: [], kids: [])
+  assert relate(a, b) == SelfDiffers
+  assert relate(a, c) == Unrelated
+  let kids_differ: Node[ProbeMsg] =
+    Elem(tag: "b", props: [("class", "x")], on: [], kids: [Text(s: "k")])
+  assert relate(a, kids_differ) == Same
+  let t1: Node[ProbeMsg] = Text(s: "a")
+  assert relate(t1, Text(s: "b")) == Unrelated
+  assert relate(t1, a) == Unrelated
+}
+
+## Every shape the reconciler distinguishes, in this vocabulary: both node
+## kinds, a tag change, a prop change, a listener-name change, a listener-
+## meaning change, nesting, the empty element, and child lists that grow,
+## shrink and change in the middle. `roundtrip` below is asked about every
+## ordered pair of these, which is the same standard tea_core holds its own
+## test vocabulary to.
+fn corpus() -> List[Node[ProbeMsg]] = {
+  let a: Node[ProbeMsg] = Text(s: "a")
+  let b: Node[ProbeMsg] = Text(s: "b")
+  [
+    a,
+    b,
+    div([]),
+    div([a]),
+    div([a, b]),
+    div([b, a]),
+    div([a, b, a]),
+    div([a, div([b])]),
+    div([div([a]), b]),
+    Elem(tag: "span", props: [], on: [], kids: []),
+    Elem(tag: "div", props: [("class", "x")], on: [], kids: []),
+    Elem(tag: "div", props: [("class", "y")], on: [], kids: []),
+    Elem(tag: "div", props: [("class", "x")], on: [], kids: [a]),
+    Elem(tag: "div", props: [], on: [("click", Ping)], kids: [a]),
+    Elem(tag: "div", props: [], on: [("click", Pong)], kids: [a]),
+    Elem(tag: "div", props: [], on: [("input", Ping)], kids: [a]),
+    Elem(tag: "div", props: [], on: [("click", Ping), ("blur", Pong)], kids: [a]),
+    Elem(tag: "div", props: [("class", "x")], on: [("click", Ping)], kids: [a, b]),
+  ]
+}
+
+test "apply replays diff back to the new tree, over every ordered pair" {
+  # The reconciler contract, asked of the second vocabulary. A `relate` that
+  # cannot see some difference fails here and nowhere else, which is why the
+  # corpus carries the two pairs that differ only in a listener.
+  let cs = corpus()
+  var i = 0
+  while i < len(cs) {
+    var j = 0
+    while j < len(cs) {
+      assert apply(cs[i], diff(cs[i], cs[j])) == cs[j]
+      j = j + 1
+    }
+    i = i + 1
+  }
+}
+
+test "equal trees diff to nothing, and an unchanged sibling is never mentioned" {
+  let cs = corpus()
+  var i = 0
+  while i < len(cs) {
+    assert list.is_empty(diff(cs[i], cs[i]))
+    i = i + 1
+  }
+  # One text node changes under the second of three children: one patch,
+  # addressed at it, and no mention of index 0 or 2.
+  let keep: Node[ProbeMsg] = Elem(tag: "b", props: [], on: [], kids: [Text(s: "keep")])
+  let old: Node[ProbeMsg] = div([keep, div([Text(s: "old")]), keep])
+  let new: Node[ProbeMsg] = div([keep, div([Text(s: "new")]), keep])
+  let want: List[Patch[Node[ProbeMsg]]] =
+    [Patch { path: [1, 0], op: Replace(w: Text(s: "new")) }]
+  assert diff(old, new) == want
+}
+
+test "a listener whose message changed is a self difference, not a silent one" {
+  # The case the `M: Eq` bound exists for. Same tag, same props, same event
+  # name, different meaning: without comparing `on` this pair answers `Same`,
+  # `diff` emits nothing for a real difference, and the roundtrip contract
+  # `apply(old, diff(old, new)) == new` is broken.
+  let a: Node[ProbeMsg] = Elem(tag: "button", props: [], on: [("click", Ping)], kids: [])
+  let b: Node[ProbeMsg] = Elem(tag: "button", props: [], on: [("click", Pong)], kids: [])
+  assert a != b
+  assert relate(a, b) == SelfDiffers
+}

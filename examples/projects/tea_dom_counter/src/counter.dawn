@@ -1,0 +1,117 @@
+# The pure half of the demo: a model, four messages, `update` and `view`, and
+# the two functions that turn a model into opaque text and back. No io, no
+# wire format, no host -- everything here is testable with `==`, which is the
+# point of the vocabulary carrying messages rather than callbacks.
+#
+# The view is shaped to make the reconciler visible rather than to look good.
+# Three things change independently:
+#
+#   the count text       every message: one `replace` deep in the tree
+#   the root's class     only when the sign of the count changes: one
+#                        `set-self` at the root, whose payload must not carry
+#                        the document underneath it
+#   nothing else         the heading and the four buttons are the same nodes
+#                        in every frame and no patch may ever mention them
+#
+# `Boom` is a message whose `update` panics on purpose. A demo does not need
+# one; the boundary does, because a guest that cannot survive a failing
+# application is a guest that loses the model on the first bug. It is what
+# scripts/wasm-dom-contract points at the wasm failure runtime.
+
+use tea_core/app.{App, update, view}
+use tea_dom/node.{Node, Text, Elem}
+use tea_dom/dsl.{button, div_of, el, text}
+
+## The whole model: how many times the user has pressed something, net.
+pub type Counter = { n: Int }
+
+## What the four buttons mean.
+pub type Msg =
+  | Inc
+  | Dec
+  | Reset
+  | Boom
+derive Show
+
+## The model a fresh page starts from.
+pub fn init() -> Counter = Counter { n: 0 }
+
+impl App[Counter] {
+  type Msg = Msg
+  type View = Node[Msg]
+
+  fn update(m: Counter, msg: Msg) -> Counter =
+    match msg {
+      Inc -> Counter { n: m.n + 1 }
+      Dec -> Counter { n: m.n - 1 }
+      Reset -> init()
+      # Deliberate, and the only unhandled failure in this tree. `tea_dom`'s
+      # `serve` catches it at the boundary and answers with an error reply;
+      # on wasm that landing is the A1 shadow stack.
+      Boom -> panic("boom: update failed on purpose at n=" ++ to_string(m.n))
+    }
+
+  fn view(m: Counter) -> Node[Msg] = {
+    let heading: Node[Msg] = el("h1", [], [], [text("dawn counter")])
+    let count: Node[Msg] = el("p", [("class", "count")], [], [text(to_string(m.n))])
+    let controls: Node[Msg] =
+      div_of("row", [
+        button("-", Dec),
+        button("+", Inc),
+        button("reset", Reset),
+        button("boom", Boom),
+      ])
+    div_of(if m.n < 0 { "counter below-zero" } else { "counter" },
+      [heading, count, controls])
+  }
+}
+
+## A model as text, and back. Opaque to everything but this module: the wire
+## carries it as a JSON string and the host hands it back untouched.
+pub fn encode(m: Counter) -> String = to_string(m.n)
+
+## Total, because a host may hand back anything: an unreadable model reads as
+## the initial one rather than as a panic, which keeps a corrupted page
+## recoverable by clicking.
+pub fn decode(s: String) -> Counter =
+  match parse_int(s) {
+    Some(n) -> Counter { n: n }
+    None -> init()
+  }
+
+test "update folds messages and the model round-trips through its text" {
+  let m = update(update(init(), Inc), Inc)
+  assert m == Counter { n: 2 }
+  assert update(m, Dec) == Counter { n: 1 }
+  assert update(m, Reset) == init()
+  assert decode(encode(m)) == m
+  assert decode(encode(Counter { n: -17 })) == Counter { n: -17 }
+  assert decode("not a number") == init()
+}
+
+test "the view is a value, so a frame is one assertion" {
+  let want: Node[Msg] =
+    div_of("counter", [
+      el("h1", [], [], [text("dawn counter")]),
+      el("p", [("class", "count")], [], [text("0")]),
+      div_of("row", [
+        button("-", Dec),
+        button("+", Inc),
+        button("reset", Reset),
+        button("boom", Boom),
+      ]),
+    ])
+  assert view(init()) == want
+}
+
+test "the root's class is the only thing the sign of the count changes" {
+  let below = view(Counter { n: -1 })
+  match below {
+    Text(_) -> { assert false }
+    Elem(_, props, _, _) -> { assert props == [("class", "counter below-zero")] }
+  }
+  match view(Counter { n: 0 }) {
+    Text(_) -> { assert false }
+    Elem(_, props, _, _) -> { assert props == [("class", "counter")] }
+  }
+}
