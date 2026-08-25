@@ -9,7 +9,15 @@
 # what crossed the boundary, which patches came back, what the bridge did to
 # the document, and what the document then was -- to expected.txt.
 #
-# What the transcript covers, and why each is there:
+# Then it does the same for examples/projects/tea_dom_todo against
+# transcript-todo.mjs and expected-todo.txt. Two applications and not one,
+# because the counter's child list varies only in length: pairing children by
+# index is always right for it, so the cost of unkeyed pairing and the cost
+# of lifting a widget's private draft into the model are both invisible
+# there. The todo transcript is where those two are numbers. Each case has
+# its own mutants, listed at its own section below.
+#
+# What the counter transcript covers, and why each is there:
 #
 #   init            the only turn where the whole document crosses
 #   two clicks up   one `replace` deep in the tree and one `append` at the
@@ -28,12 +36,12 @@
 # element the click landed on -- the script clicks a button it found by its
 # label -- so wrong routing shows up as a wrong request line.
 #
-# Then six mutants, each a real wrong build of a production file, each held
-# to the same transcript. A mutant that passes means the transcript has no
-# teeth about the thing it broke, and this script says so.
+# Then the mutants, each a real wrong build of a production file, each held
+# to the transcript of its case. A mutant that passes means the transcript
+# has no teeth about the thing it broke, and this script says so.
 #
 #   ./scripts/wasm-dom-contract/run.sh
-#   ./scripts/wasm-dom-contract/run.sh --record        # re-record expected.txt
+#   ./scripts/wasm-dom-contract/run.sh --record        # re-record both transcripts
 #   DAWNC_BIN=/path/to/dawnc ./scripts/wasm-dom-contract/run.sh
 #
 # Needs the same toolchain as scripts/wasm-contract (clang with wasm32-wasi,
@@ -52,6 +60,8 @@ record=0
 fail=0
 demo="$root/examples/projects/tea_dom_counter"
 expected="$here/expected.txt"
+todo_demo="$root/examples/projects/tea_dom_todo"
+todo_expected="$here/expected-todo.txt"
 
 # ---- toolchain preflight: missing pieces are named, never silent ----------
 wasm_cc="${DAWN_WASM_CC:-clang}"
@@ -77,9 +87,9 @@ if [ -z "$DAWNC" ]; then
 fi
 case "$DAWNC" in /*) ;; *) DAWNC="$root/$DAWNC" ;; esac
 
-build() { # <out.wasm>
-  "$DAWNC" build --target wasm --reactor "$demo" -o "$1" 2>"$work/build.err" || {
-    echo "FAIL: the reactor build broke:" >&2
+build() { # <project> <out.wasm>
+  "$DAWNC" build --target wasm --reactor "$1" -o "$2" 2>"$work/build.err" || {
+    echo "FAIL: the reactor build broke for $1:" >&2
     cat "$work/build.err" >&2
     exit 1
   }
@@ -89,7 +99,8 @@ build() { # <out.wasm>
 # A command module would export `_start` and abort after one turn. This is
 # what makes the whole session below possible, so it is checked rather than
 # assumed: nothing else in the transcript can tell the two apart.
-build "$work/counter.wasm"
+build "$demo" "$work/counter.wasm"
+build "$todo_demo" "$work/todo.wasm"
 exports="$(node --no-warnings -e '
   const fs = require("fs");
   WebAssembly.compile(fs.readFileSync(process.argv[1])).then((m) => {
@@ -103,22 +114,30 @@ else
   fail=1
 fi
 
-# ---- the transcript -------------------------------------------------------
+# ---- the transcripts ------------------------------------------------------
 node --no-warnings "$here/transcript.mjs" "$work/counter.wasm" >"$work/actual.txt"
+node --no-warnings "$here/transcript-todo.mjs" "$work/todo.wasm" >"$work/todo-actual.txt"
 
 if [ "$record" = 1 ]; then
   cp "$work/actual.txt" "$expected"
+  cp "$work/todo-actual.txt" "$todo_expected"
   echo "recorded $(wc -l <"$expected") lines into ${expected#"$root"/}"
+  echo "recorded $(wc -l <"$todo_expected") lines into ${todo_expected#"$root"/}"
   exit 0
 fi
 
-if diff -u "$expected" "$work/actual.txt" >"$work/transcript.diff"; then
-  echo "OK   transcript: $(wc -l <"$expected") lines, byte for byte"
-else
-  echo "FAIL: the transcript changed:" >&2
-  head -40 "$work/transcript.diff" >&2
-  fail=1
-fi
+check_transcript() { # <label> <expected> <actual>
+  if diff -u "$2" "$3" >"$work/transcript.diff"; then
+    echo "OK   $1 transcript: $(wc -l <"$2") lines, byte for byte"
+  else
+    echo "FAIL: the $1 transcript changed:" >&2
+    head -40 "$work/transcript.diff" >&2
+    fail=1
+  fi
+}
+
+check_transcript counter "$expected" "$work/actual.txt"
+check_transcript todo "$todo_expected" "$work/todo-actual.txt"
 
 # ---- mutants --------------------------------------------------------------
 # Each one edits a copy of the tree, rebuilds what needs rebuilding, and must
@@ -136,25 +155,54 @@ reset_tree() {
     "$root/selfhost" "$root/runtime" "$root/bin" "$mutant_tree/"
 }
 
+# Which case the mutants below are held to. `case_of` switches all four at
+# once, because a mutant driven with one case's wasm and another case's
+# transcript reds for the wrong reason and reports a covered assertion.
+case_project="examples/projects/tea_dom_counter"
+case_script="transcript.mjs"
+case_expected="$expected"
+case_wasm="$work/counter.wasm"
+
+case_of() { # <counter|todo>
+  case "$1" in
+    counter)
+      case_project="examples/projects/tea_dom_counter"
+      case_script="transcript.mjs"
+      case_expected="$expected"
+      case_wasm="$work/counter.wasm"
+      ;;
+    todo)
+      case_project="examples/projects/tea_dom_todo"
+      case_script="transcript-todo.mjs"
+      case_expected="$todo_expected"
+      case_wasm="$work/todo.wasm"
+      ;;
+    *)
+      echo "FAIL: no such transcript case: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
 run_mutant() { # <name> <needs-rebuild: yes|no> <what it breaks>
   local name="$1" rebuild="$2" what="$3" out rc
   if [ "$rebuild" = yes ]; then
-    "$DAWNC" build --target wasm --reactor "$mutant_tree/examples/projects/tea_dom_counter" \
+    "$DAWNC" build --target wasm --reactor "$mutant_tree/$case_project" \
       -o "$work/$name.wasm" 2>"$work/$name.build-err" || {
       echo "OK   mutant $name goes red (it does not even build): $what"
       return
     }
   else
-    cp "$work/counter.wasm" "$work/$name.wasm"
+    cp "$case_wasm" "$work/$name.wasm"
   fi
   set +e
-  out="$(node --no-warnings "$mutant_tree/scripts/wasm-dom-contract/transcript.mjs" \
+  out="$(node --no-warnings "$mutant_tree/scripts/wasm-dom-contract/$case_script" \
     "$work/$name.wasm" 2>"$work/$name.err")"
   rc=$?
   set -e
   if [ "$rc" != 0 ]; then
     echo "OK   mutant $name goes red (it fails to run): $what"
-  elif [ "$out" = "$(cat "$expected")" ]; then
+  elif [ "$out" = "$(cat "$case_expected")" ]; then
     echo "FAIL: mutant $name produced the expected transcript -- $what is not covered" >&2
     fail=1
   else
@@ -241,5 +289,33 @@ MUTANT_E
 edited "$mutant_tree/packages/tea-dom/src/reactor.dawn" &&
   run_mutant no-catch yes "the panic catch at the boundary is removed"
 
+# ---- mutants for the todo case -------------------------------------------
+# Both live in the application rather than in the bridge, because what the
+# second transcript adds is application shape the counter has none of: a
+# focus that decides where a keystroke lands, and a filter that decides which
+# rows exist. A bridge mutant is already covered above and would red both
+# transcripts; these red only this one, which is the evidence that the second
+# case is carrying assertions of its own.
+case_of todo
+
+# F: the lifted local state stops being routed. Every keystroke feeds the
+# composer's draft, so the row editor can never be typed into -- the exact
+# failure that having no local state at all is supposed to make impossible,
+# and the reason `focus` is a field.
+reset_tree
+sed -i 's/edit: m.edit ++ c/draft: m.draft ++ c/' \
+  "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn"
+edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
+  run_mutant todo-focus yes "a keystroke ignores the focus"
+
+# G: the filter stops filtering. `done` shows every row, so the list the
+# reconciler is handed is the wrong length and the turn that empties it never
+# empties it.
+reset_tree
+sed -i 's/    Done -> list.filter(m.todos, t => t.done)/    Done -> m.todos/' \
+  "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn"
+edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
+  run_mutant todo-filter yes "the done filter admits everything"
+
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm dom contract ok (transcript + 6 mutants)"
+echo "wasm dom contract ok (2 transcripts + 8 mutants)"
