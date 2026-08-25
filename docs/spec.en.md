@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 309732bef3bcdbad -->
+<!-- doc-check: translation-of docs/spec.md @ ffd06c6c31f57d7f -->
 
 # Dawn Language Specification
 
@@ -2811,8 +2811,12 @@ Three guarantees:
 - **The effect row is a variable `!e`**: `release`, `use` and the call as a whole share
   one row, and `bracket` adds no effect of its own. So a `bracket` over a pure resource is
   pure, an `!io` one is `!io`, and a labelled one passes its label straight through. The
-  pair of barriers in §9.8 is **not** like this (they are pinned to `!io`); the reason is
-  in [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.
+  pair of barriers in §9.8 binds an effect parameter too (`catch_fault[T, !e]`), so a free
+  row on the closure being run is common to both. The real difference left is whose
+  signature that row lands on: `bracket`'s own row **is** the variable, while the
+  barriers' own row is pinned to `!io`, because they hand the failure they caught back
+  as a value. The reason is in
+  [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.3, §7.4.
 
 > It gets no surface syntax like `defer`: the protected region is always **one closure
 > call**, so `return`/`?`/`break` cannot cross out of it at the language level, and the

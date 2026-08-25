@@ -2268,8 +2268,10 @@ with f <- bracket(open(path), close)
   要把失败拿成值就写 `catch_fault(() => bracket(...))`，两个原语各做一件事。
 - **效果行是变量 `!e`**：`release`、`use` 与整个调用共用同一行，`bracket` 自己不加任何
   效果。所以纯资源的 `bracket` 是纯的，`!io` 的是 `!io` 的，带标签的把标签原样传出去。
-  §9.8 那对屏障**不**是这样（它们钉死 `!io`），理由见
-  [`docs/audit/error-model-design.md`](audit/error-model-design.md) §七。
+  §9.8 那对屏障同样绑一个效果参数（`catch_fault[T, !e]`），所以「被跑的闭包行是自由的」
+  这一点两边一样。剩下的真差别是这一行落在谁的签名上：`bracket` 自己的行就是那个变量，
+  屏障自己的行钉死 `!io`，因为它们把接住的失败当成值交回去。理由见
+  [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.3、§7.4。
 
 > 它不给 `defer` 那样的面语法：受保护的区间恒为**一次闭包调用**，所以
 > `return`/`?`/`break` 在语言层面就跨不出去，编译器也就不欠一套逃逸改写。
