@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 633b819bc4b57554 -->
+<!-- doc-check: translation-of docs/spec.md @ 309732bef3bcdbad -->
 
 # Dawn Language Specification
 
@@ -2655,8 +2655,12 @@ fn parse(s: String) -> Result[Int, ForeignError] !io =
   # Err(ForeignError { kind: "java.lang.NumberFormatException", message: ..., cause: None })
 ```
 
-- Signature `catch_fault[T](f: fn() -> T !io) -> Result[T, ForeignError] !io`; the
-  closure may be pure.
+- Signature `catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io`. The
+  protected closure's row is an **effect parameter** `!e`: the closure may be pure, may be
+  `!io`, and may carry a label or an effect variable, as long as those effects have a
+  handler answering them outside the barrier. The barrier's **own** row is still `!io`,
+  because it hands the failure it caught back as a value, and whoever observes a failure is
+  impure ([`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.3, §7.4).
 - It only intercepts `java.lang.Exception` and its subclasses; `Error` is not intercepted
   — **a Dawn panic (`dawn.rt.PanicError` is a subclass of `Error`) passes through
   unchanged**, a panic is still a bug and is not recoverable.
@@ -2667,15 +2671,16 @@ fn parse(s: String) -> Result[Int, ForeignError] !io =
 - Failures inside the boundary propagate as usual: wrapping `catch_fault` around a whole
   compound call is enough, there is no need to wrap call by call.
 
-The companion `catch_panic[T](f: fn() -> T !io) -> Result[T, ForeignError] !io`
-intercepts **two kinds, a Dawn panic (`PanicError`) and `Exception`** — not any
-`Throwable`: `VirtualMachineError` (heap exhausted, stack overflow) passes through,
-resource exhaustion is not a value. It is for a **supervision boundary** — one request on
-a server, one execution of a task runner: a panic in one request should become a 500 and
-be logged, rather than take down the whole connection or process. Its division of labour
-with `catch_fault` is clear: `catch_fault` handles **expected foreign failure** and lets
-panics through; `catch_panic` is an **isolation point**. Ordinary business failures still
-go through `Result` — do not use `catch_panic` as routine error handling.
+The companion `catch_panic[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io` (the
+same shape, for the same reason) intercepts **two kinds, a Dawn panic (`PanicError`) and
+`Exception`** — not any `Throwable`: `VirtualMachineError` (heap exhausted, stack
+overflow) passes through, resource exhaustion is not a value. It is for a **supervision
+boundary** — one request on a server, one execution of a task runner: a panic in one
+request should become a 500 and be logged, rather than take down the whole connection or
+process. Its division of labour with `catch_fault` is clear: `catch_fault` handles
+**expected foreign failure** and lets panics through; `catch_panic` is an **isolation
+point**. Ordinary business failures still go through `Result` — do not use `catch_panic`
+as routine error handling.
 
 > **This division of labour is backend-independent.** The JVM gets it for free from the
 > class hierarchy (`Error` versus `Exception`); native has no exceptions, every failure

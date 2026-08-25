@@ -2149,7 +2149,10 @@ fn parse(s: String) -> Result[Int, ForeignError] !io =
   # Err(ForeignError { kind: "java.lang.NumberFormatException", message: ..., cause: None })
 ```
 
-- 签名 `catch_fault[T](f: fn() -> T !io) -> Result[T, ForeignError] !io`；闭包可为纯函数。
+- 签名 `catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io`。被护闭包的行
+  是一个**效果参数** `!e`：闭包可为纯函数，可为 `!io`，也可带标签或效果变量，只要那些
+  效果在屏障之外有 handler 答。屏障**自己**的行仍是 `!io`，因为它把接住的失败当成值交
+  回去，而观察失败的人不纯（[`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.3、§7.4）。
 - 只拦 `java.lang.Exception` 及其子类；`Error` 不拦——**Dawn 的 panic
   （`dawn.rt.PanicError` 是 `Error` 子类）原样穿透**，panic 仍然是 bug、不可恢复。
 - `Err` 载荷是 `ForeignError`——一个 prelude record，字段与取值见 §9.8.1。它到
@@ -2157,8 +2160,8 @@ fn parse(s: String) -> Result[Int, ForeignError] !io =
   「需要区分异常种类时按前缀匹配字符串」；那条建议已被撤销，`kind` 是它的替代物。
 - 边界之内失败照常传播：`catch_fault` 包住整段复合调用即可，无需逐调用包裹。
 
-配套的 `catch_panic[T](f: fn() -> T !io) -> Result[T, ForeignError] !io` 拦的是
-**Dawn panic（`PanicError`）与 `Exception` 两类**——不是任意 `Throwable`：
+配套的 `catch_panic[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io`（同一形状，
+同一理由）拦的是**Dawn panic（`PanicError`）与 `Exception` 两类**——不是任意 `Throwable`：
 `VirtualMachineError`（堆耗尽、栈溢出）穿透，资源耗尽不是一个值。它用于**监督边界**——
 服务器的单个请求、任务 runner 的单次执行：一个请求 panic 应变成 500 并记录，而非掀翻
 整条连接或进程。它与 `catch_fault` 分工明确：`catch_fault` 处理**预期外部失败**、放
