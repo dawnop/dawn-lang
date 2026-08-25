@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ e2ffae350e23b428 -->
+<!-- doc-check: translation-of docs/spec.md @ 34743b61bdf2b93d -->
 
 # Dawn Language Specification
 
@@ -1717,17 +1717,24 @@ nested alternatives or splitting the pattern into smaller matches.
 
 An effect row has two axes.
 
-The **base axis** has only two points: **pure** (the default, written nowhere) and **io**.
+The base axis's two **ground** points are **pure** (the default, written nowhere) and **io**.
 `!io` covers every observable side effect: files, network, clock, random numbers, printing,
-mutable global state, and all Java interop.
+mutable global state, and all Java interop. Two kinds of **non-ground** atom live on the base
+axis as well, beside io rather than as special cases of it: **effect variables** (§6.3) and
+**associated-effect projections** (§6.5).
 
 The **label axis** is the finite set of named effects the user declares with `effect` (§6.5).
-It is independent of the base axis: `!io` does **not** cover named effects, and io's absorption
-reasoning applies to the base axis only. So an `!io` function that performs `!Ask` still has to
-write `!Ask` in its signature.
+It is independent of the base axis: `!io` does **not** cover named effects. So an `!io` function
+that performs `!Ask` still has to write `!Ask` in its signature.
 
-Both axes are trivially decidable: the base axis is a boolean or, the label axis is union and
-difference of finite sets.
+**`io` wears two faces and they are read separately**, which is this section's main clause: under
+**containment** `io` is an upper bound, so a signature that promises `!io` stands over a purer
+implementation (including one that only performs effect variables); under **union** `io` is **not
+an absorbing element**, so `!io !e` may not cancel `!e` and both atoms stay in the normal form
+(printed `!(e|io)`). The full rules are in §6.6.
+
+Both axes are trivially decidable: union is componentwise union of finite sets plus one boolean or,
+containment is set containment per axis.
 
 ### 6.2 Rules
 
@@ -1749,6 +1756,13 @@ difference of finite sets.
    individual call instantiates carries a named effect nobody answers, the error is reported on
    **that call** (§6.5).
 6. `panic`/`todo`/`assert` do not count as io — they do not return (divergence is not an effect).
+7. **No absorption.** An effect row may not drop a label, an effect variable or an
+   associated-effect projection unless a handler answered it. Union drops nothing (§6.6); and when
+   a function value goes into a slot, the slot's row must carry its row atom for atom, because a
+   dropped atom is a dropped piece of evidence. The one subtraction point is `with handle` (§6.5),
+   and it subtracts only the label it answers. A signature promising `!io` over a variable it binds
+   is not a drop: that is containment (§6.6), and the variable still has an evidence slot from that
+   signature's binder list.
 
 ### 6.3 Effect polymorphism
 
@@ -1779,17 +1793,28 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
   `type Boxed = { f: fn() -> Int !Ask }` are both legal. A label is not a variable and has no
   binder to speak of; it means "whoever calls this function value supplies the handler", which is
   exactly where evidence travels today (§6.5).
+- **An effect parameter a declaration binds carries empty evidence only.** What is restricted is
+  **instantiation**, not spelling: the `!e` of `type Box[!e]` or `alias Mapper[T, U, !e]` may only
+  solve to a row that owes no evidence, which means pure, `!io`, or the variable itself (forwarded
+  unchanged, `fn store(m: Mapper[Int, String]) -> Mapper[Int, String] = m`). A row carrying a named
+  label, an associated-effect projection, or a variable bound **elsewhere** may not travel into a
+  consumer through this channel; writing one is a compile error. The reason is that the channel
+  does not exist: a variable a signature binds has a hidden evidence parameter to travel in
+  (§6.5 "Implementation"), one a declaration binds has none, a record is not a frame, and a type
+  reference has no effect-argument position to instantiate per use site. To make a row that really
+  owes evidence travel, bind the variable on the function that runs the closure instead:
+  `fn f(g: fn() -> Int !e) -> Int !e`.
 - There is **no syntax for writing an effect argument** at the use site (not in the first batch):
   `Mapper[Int, String]` gives the type arguments only, and that is **not an arity error**. The
   omitted slot is still the declaration's own effect variable, solved from context: store a pure
   closure and it solves to pure there, store an `!io` closure and it solves to `!io` there.
   **A consumer's own row has to cover it**, and an `!e` bound by that signature alone does not
   cover a variable bound elsewhere, so a consumer writes `!io` today (`!io` covers any row).
-- `!(e1 | e2)` is a union, stored **normalised**: `io` absorbs everything (a union containing `io`
-  is `io`), `pure` is the identity (and can be dropped), and a union of a single variable degrades
-  to that variable itself (`!(e|e)` is `!e`). The base axis has only two points, so solving is a
-  boolean or; the label axis is set union — both are decidable. **Named effects do not take part
-  in absorption**: `!(io | Ask)` is exactly `!(io | Ask)`, it does not collapse to `!io`.
+- `!(e1 | e2)` is a union, stored **normalised**: union is componentwise (a boolean or on the io
+  bit, plain set union on the variables, the projections and the labels), `pure` is the identity
+  (and can be dropped), and a row that can take a smaller shape takes it (`!(e|e)` is `!e`).
+  **`io` absorbs nothing**: `!(io | Ask)` is exactly `!(io | Ask)` and `!io !e` is exactly
+  `!(e|io)`; neither collapses to `!io`. The full rules, and their closure, are in §6.6.
 - An effect variable spans both axes: `!e` can be instantiated to a row carrying labels. In
   `map(xs, x => ask())` the `!e` of `list.map` instantiates to "pure + {Ask}", so performing a
   named effect inside a `for` body goes through just as well.
@@ -2076,6 +2101,72 @@ The two conventions change hands in the wrapper `lift_fn_value` synthesises: eac
 side wants is read out of the function value's single pack by key. Higher-order library functions
 (`list.map` and its ilk) take the "one non-ground atom left" path, forwarding as-is and building
 nothing.
+
+> **This is why union has no absorption (§6.6).** Both conventions above read their shape off the
+> effect row: the named side reads whether slots exist and how many, the function-value side reads
+> which keys the pack should hold. So any row equation that deletes a label, a variable or a
+> projection makes the static row and the runtime carrier disagree: a signature opens one slot
+> fewer, or a pack is built one key short, while the reading side still looks the key up and finds
+> nothing. That is the "effect evidence missing" compiler-invariant panic, on a program that checks
+> clean. §6.6's absorption ban is the static half of the same fact.
+>
+> **One alternative is refused here explicitly**: let the runtime fall back to a dynamic lookup by
+> label whenever a slot is missing, so that absorption would cost performance and not correctness.
+> Not adopted. It trades the invariant "an atom the row states has a place in the carrier" for a
+> fallback path, and a fallback path runs only on the programs that happen to be short a slot, so
+> the part nobody tests is exactly the part that is unsound; lookup would also become two semantics
+> instead of one walk by key. The invariant stands.
+
+### 6.6 Row equivalence and normal form
+
+An effect row is built from four kinds of **atom**: the base axis's `io`, effect variables (§6.3),
+associated-effect projections (§6.5), and the label axis's named effects. `pure` is the row with no
+atoms.
+
+Row equivalence is generated **by and only by** the five rules below.
+
+1. **Union is componentwise**: the union of two rows is a boolean or on the io bit and plain set
+   union on each of the three sets (effect variables, associated-effect projections, named labels).
+   Hence `|` is commutative, associative and idempotent, and `pure` is the identity. Stacked
+   annotations equal one union: `!Ask !io` is `!(io | Ask)`.
+2. **The normal form is the smallest shape**: on the base axis, all components empty is `pure`, io
+   alone is `!io`, no io and a single base atom left is that atom itself, and anything else is the
+   union of those components; an empty label set carries no label layer, and a non-empty one is
+   that base row plus those labels.
+3. **The normal form has a settled order**: effect variables in introduction order (first
+   appearance within the signature, with explicit binders taking the front in the order written),
+   associated-effect projections by (subject type parameter, trait, member name), named labels by
+   effect id. That order is also the evidence slots' layout order (§6.5 "Implementation").
+   Rendering is a separate matter: printed atoms are sorted by name, so `!io !e` prints as
+   `!(e|io)`.
+4. **Projections reduce through the impl**: once the subject is settled, an associated-effect
+   projection is replaced by the row that impl binds, and the result is normalised again by the
+   rules above. A ground row contains no projection.
+5. Two rows are **equivalent exactly when their normal forms are equal**.
+
+**An equation not written here does not hold.** In particular: **union has no absorption law**.
+`!(io | Ask)` and `!(e | io)` are normal forms that do not move, and any reading that equates them
+with `!io` is not a consequence of these five rules; it is a sixth rule being added.
+
+**Union does not distinguish effects that occupy an evidence slot from environment effects.** `io`
+is an environment effect and occupies no slot of its own (§6.5 "Implementation"). That is **not** a
+reason for it to absorb `!e`: `!e` can be instantiated to a named effect that does occupy a slot,
+whether a slot exists is known only after instantiation, and union is computed before it. This is
+the clause most easily argued away in reverse ("io takes no slot, so what does absorbing cost?"),
+so it is written as a clause rather than a comment: what would be absorbed is an atom, not a slot.
+
+**Containment is a separate relation and takes no part in equivalence.** `!io` covers `pure`, `io`
+and effect variables (including unions of them); named labels and associated-effect projections are
+judged by exact set containment, where `!io` covers neither `!Ask` nor `!C.E`. The division of
+labour is sharp:
+
+- **A signature** is judged by containment. A body purer than its signature is allowed (§6.2 rule
+  3), and a signature may promise `!io` while standing over a variable it binds, with the evidence
+  still arriving, because the slots come from the binder list and not from the row.
+- **A function value** is not. It has no binder list, and its row is the whole of what a call site
+  reads to build the pack, so on the way into a slot the slot's row must carry its row **atom for
+  atom**. Widening upward stays free: a pure closure goes anywhere and the extra keys go unread.
+  What is refused is a row with an atom the slot does not have.
 
 ---
 

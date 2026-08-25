@@ -1053,6 +1053,8 @@ Core 无新节点：`CDictDef`（`core.dawn:285-295`）在调用点路线下不�
 - **`EUnion` 扩形**：`EUnion(vars, assocs, io)`——投影原子按 (tvar, trait, name) 排序，
   外加一个 io 位，因为 io 吸收变量但**不吸收投影**（投影是待到的证据，同标签），而旧载荷
   表示不了 io 与原子共存的行。
+  > **「io 吸收变量」这半句已作废**（2026-08-25，#345）：并运算里 io 不吸收任何原子，
+  > 变量与投影同等待遇。权威条文见 [spec.md](spec.md) §6.6。
 - **穷尽墙照探针清单新写**：`base_parts` 是效果基轴的第一堵穷尽墙（ELabeled 到基轴
   panic）；`base_subsumes` 改写在它上面，io 不覆盖原子、原子按恰相等包含；`eff_is_ground`
   是 ground 判据；`pub fn main` 的墙扩到投影；调用点解析不到证据来源时是诊断
