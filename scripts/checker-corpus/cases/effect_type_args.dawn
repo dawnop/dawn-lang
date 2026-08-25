@@ -1,6 +1,11 @@
 # cx.dawn: the refusals around an explicit effect argument at a type
 # application (spec §6.3). The accept half lives in effect_type_args_ok.dawn;
 # here the golden records what each refusal says and why, in emission order.
+#
+# What is *not* here is a refusal of any particular row. A transparent alias
+# expands, so its argument position takes whatever the inline row position
+# takes; what refuses a row is what refuses it inline, and the last three cases
+# below are those refusals arriving through the argument.
 effect Ask { fn get() -> Int }
 
 alias Thunk[!e] = fn() -> Int !e
@@ -34,20 +39,6 @@ fn wrong_axis(c: Cell[Int]) -> Int !io = (c.f)()
 # too many, on the axis that does have parameters
 fn too_many(t: Thunk[!io, !io]) -> Int !io = t()
 
-# --- rule 丙 prime: only a row that owes no evidence ---
-
-# a declared effect: a handler is supplied at the call, and a type reference
-# has no frame for the evidence to arrive at
-fn labelled(t: Thunk[!Ask]) -> Int !Ask = t()
-
-# a variable bound on this signature: its evidence lives in this frame, and
-# the alias has no parameter to carry it over
-fn foreign_var(t: Thunk[!e], k: fn() -> Int !e) -> Int !e = t() + k()
-
-# the same refusal from a declaration rather than a signature: the variable
-# `Nested` binds is bound elsewhere as far as `Thunk` is concerned
-alias Nested[!e] = (Thunk[!e], Int)
-
 # --- a nominal type has no argument position at all ---
 
 # a record: named by its name and its type arguments, with nowhere to keep a row
@@ -64,13 +55,27 @@ fn variant_io(c: Chain[!io]) -> Int !io =
 # worse, not better: the two types print as one name
 fn opaque_io(h: Hidden[!io]) -> Int !io = 1
 
+# --- the argument is a row, and a row is resolved ---
+
+# a name that is not an effect is reported by the resolver that reports it
+# inside a function type, in the same words
+fn unknown_atom(t: Thunk[!Nope]) -> Int !io = t()
+
 # --- the substitution is real, and this is where it shows ---
 
 # with the argument written, the row in the expansion is io, so a pure
 # consumer is refused for owing io
 fn io_slot(t: Thunk[!io]) -> Int = t()
 
+# a label substitutes the same way, and then the consumer owes the label
+fn label_slot(t: Thunk[!Ask]) -> Int = t()
+
+# a variable the *argument* introduced is bound on this signature, so the
+# ordinary repair applies: write it on the row too
+fn var_slot(t: Thunk[!e]) -> Int = t()
+
 # with the argument elided, the row is the alias's own variable, and the
-# refusal is the other one -- the variable has no binder the consumer can
-# write. Two spellings, two sentences: that is the argument doing something.
+# refusal is the other one -- the variable is bound on `Mapper`, not here, so
+# the repair is to stop eliding. Two spellings, two sentences: that is the
+# argument doing something.
 fn own_var(m: Mapper[Int, String]) -> String = m(1)

@@ -9258,6 +9258,39 @@ fn ev_sym_list(cx: Cx, s: Sig) -> List[Int] = {
   out
 }
 
+## Is `vid` one of the effect variables this signature bound? A variable it
+## bound can be written on its own row -- the name resolves to the same
+## variable a second time -- and one it did not cannot.
+fn eff_var_is_bound(eparams: List[Eff], vid: Int) -> Bool = {
+  for p in eparams {
+    match p {
+      EffVar(_, id) -> if id == vid { return true }
+      _ -> ()
+    }
+  }
+  false
+}
+
+## The transparent alias whose declaration minted `vid`, if one did. Effect
+## variables carry ids from one counter, so at most one declaration answers,
+## and an alias is the only declaration whose parameter a use site can supply
+## an argument for. Imported aliases are searched too: an elided
+## `lib.Thunk` reaches a consumer the same way a local one does.
+##
+## Walked rather than indexed because this runs on the error path only, at the
+## point a diagnostic is already being written.
+fn alias_binding_evar(cx: Cx, vid: Int) -> Option[String] = {
+  for al in map.values(cx.aliases) {
+    if not al.is_opaque && eff_var_is_bound(al.eparams, vid) { return Some(al.name) }
+  }
+  for exp in map.values(cx.module_exports) {
+    for al in map.values(exp.aliases) {
+      if not al.is_opaque && eff_var_is_bound(al.eparams, vid) { return Some(al.name) }
+    }
+  }
+  None
+}
+
 ## The signature is the promise: every used effect must be subsumed by the
 ## declared one. `where2` finishes the hint ("the end of the signature" /
 ## "the trait method").
@@ -9266,6 +9299,7 @@ fn verify_effects(
   kind: String,
   name: String,
   declared: Eff,
+  eparams: List[Eff],
   where2: String,
   nlo: Int,
   nhi: Int
@@ -9292,18 +9326,38 @@ fn verify_effects(
         Some(w) -> w
         None -> (nlo, nhi, "?")
       }
-      # "add !e" is advice that cannot be taken when the effect is a variable:
-      # an effect variable is bound where it is written, so writing `!e` on
-      # this signature binds a *new* one and the row still will not subsume.
-      # This is the RX-10 hint the audit recorded as pointing down a dead end
-      # (docs/audit/re-audit-b-decisions.md), and it is reachable exactly when
-      # the variable came from somewhere this signature does not bind: a type
-      # declaration's effect parameter, since knife 3.
+      # "add !e" is advice that cannot be taken when the effect is a variable
+      # this signature does not bind: an effect variable is bound where it is
+      # written, so writing `!e` on this signature binds a *new* one and the
+      # row still will not subsume. This is the RX-10 hint the audit recorded
+      # as pointing down a dead end (docs/audit/re-audit-b-decisions.md), and
+      # it is reachable exactly when the variable came from a type
+      # declaration's effect parameter, through an application that elided the
+      # effect argument.
+      #
+      # Which is why the elided application is named when it can be found: the
+      # repair is to stop eliding. `Thunk[!e]` with `!e` bound on this
+      # signature substitutes this frame's variable into the expansion, and
+      # then the row does subsume. Only a transparent alias has that repair; a
+      # record or variant field's binder has no argument position, so the
+      # advice there stays what it was.
       let advice = match used {
-        EffVar(vn, _) ->
-          "`!" ++ vn ++ "` is bound where it was written, so writing `!" ++ vn ++ "` on " ++
-          where2 ++ " would bind a different variable: declare !io, which covers any row, " ++
-          "or remove the call"
+        EffVar(vn, vid) ->
+          if eff_var_is_bound(eparams, vid) {
+            "add !" ++ eff_show(used) ++ " to " ++ where2 ++ ", or remove the call"
+          } else {
+            match alias_binding_evar(cx, vid) {
+              Some(owner) ->
+                "`!" ++ vn ++ "` is `" ++ owner ++ "`'s own effect parameter, so writing `!" ++
+                vn ++ "` on " ++ where2 ++ " would bind a different variable: write `" ++
+                owner ++ "`'s effect argument at the type application, spelling a row " ++
+                "this signature does bind, or declare !io, which covers any row"
+              None ->
+                "`!" ++ vn ++ "` is bound where it was written, so writing `!" ++ vn ++ "` on " ++
+                where2 ++ " would bind a different variable: declare !io, which covers any " ++
+                "row, or remove the call"
+            }
+          }
         _ -> "add !" ++ eff_show(used) ++ " to " ++ where2 ++ ", or remove the call"
       }
       cx1 = cerr_h(cx1, kind ++ " `" ++ name ++ "` is not declared !" ++ eff_show(used) ++
@@ -9430,7 +9484,8 @@ pub fn check_fn(cx: Cx, d: FnDecl, s: Sig) -> (Cx, TFun) !io = {
         ty_show(cx1.adts, s.ret) ++ " but its body is " ++ ty_show(cx1.adts, bt),
       e_lo(d.body), e_hi(d.body))
   }
-  cx1 = verify_effects(cx1, "function", d.name, s.eff, "the end of the signature", d.nlo, d.nhi)
+  cx1 = verify_effects(cx1, "function", d.name, s.eff, s.eparams, "the end of the signature",
+    d.nlo, d.nhi)
   let dsyms = dict_sym_list(cx1, s)
   let esyms = ev_sym_list(cx1, s)
   cx1 = pop_scope(cx1)
@@ -9475,7 +9530,8 @@ pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig) -> (Cx, Sig, TFun) !io = {
     final_eff = eff_base(eff_union(cx1.frame.used_effects))
   } else {
     # the registration pass resolved the declared effect
-    cx1 = verify_effects(cx1, "function", d.name, s.eff, "the end of the signature", d.nlo, d.nhi)
+    cx1 = verify_effects(cx1, "function", d.name, s.eff, s.eparams,
+      "the end of the signature", d.nlo, d.nhi)
     final_eff = s.eff
   }
   let sealed = Sig { ..s, ret: bt, eff: final_eff, inferring: false }
@@ -9522,7 +9578,7 @@ pub fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> (Cx, 
         ty_show(cx1.adts, s.ret) ++ " but its default body is " ++ ty_show(cx1.adts, bt),
       e_lo(body), e_hi(body))
   }
-  cx1 = verify_effects(cx1, "method", m2.name, s.eff, "the trait method", m2.nlo, m2.nhi)
+  cx1 = verify_effects(cx1, "method", m2.name, s.eff, s.eparams, "the trait method", m2.nlo, m2.nhi)
   let dsyms = dict_sym_list(cx1, s)
   let esyms = ev_sym_list(cx1, s)
   cx1 = pop_scope(cx1)

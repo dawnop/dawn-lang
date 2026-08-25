@@ -1,11 +1,34 @@
 # cx.dawn: the accept half of an explicit effect argument at a type application
 # (spec §6.3). No golden diagnostics -- everything here is legal, and the
 # refusals it is the control for are in effect_type_args.dawn next door.
+#
+# The rule this file is the statement of: a transparent alias is its expansion,
+# so its effect-argument position takes every row the inline position takes.
+# Each function below has an inline twin one could write instead, and the two
+# mean the same type.
 use std/io
+
+effect Ask { fn ask() -> Int }
+
+effect Tell { fn tell() -> Int }
+
+trait Runner[T] {
+  effect E
+  fn run(x: T) -> Int !T.E
+}
+
+type Direct = { v: Int }
+
+impl Runner[Direct] {
+  effect E = !Ask
+  fn run(x: Direct) -> Int !Ask = x.v + ask()
+}
 
 alias Thunk[!e] = fn() -> Int !e
 
 alias Mapper[T, U, !e] = fn(T) -> U !e
+
+alias Both[!a, !b] = fn(fn() -> Int !a, fn() -> Int !b) -> Int !a !b
 
 # the argument answers the binder, and the alias expands with it in place
 fn force(t: Thunk[!io]) -> Int !io = t()
@@ -16,6 +39,47 @@ fn apply_io(m: Mapper[Int, String, !io]) -> String !io = m(1)
 
 # a union that is only io is the same row written the long way
 fn force_grouped(t: Thunk[!(io | io)]) -> Int !io = t()
+
+# a variable this signature binds. The alias's own variable goes away and this
+# frame's takes its place, which is why the consumer can declare it: the
+# evidence arrives in the slot the consumer wrote
+fn retry(n: Int, f: Thunk[!e]) -> Int !e = {
+  var total = 0
+  var i = 0
+  while i < n {
+    total = total + f()
+    i = i + 1
+  }
+  total
+}
+
+# a declared effect. `Thunk[!Ask]` is `fn() -> Int !Ask`, and a handler is
+# supplied where the closure is called, which is here
+fn ask_once(t: Thunk[!Ask]) -> Int !Ask = t()
+
+# a union of two labels
+fn ask_and_tell(t: Thunk[!(Ask | Tell)]) -> Int !Ask !Tell = t()
+
+# a union mixing a label with the variable this signature binds
+fn mixed(t: Thunk[!(Ask | e)], k: fn() -> Int !e) -> Int !Ask !e = t() + k()
+
+# an associated-effect projection: the row a bound's member names
+fn via[T: Runner](x: T, t: Thunk[!T.E]) -> Int !T.E = run(x) + t()
+
+# two binders, two arguments, matched in declaration order
+fn drive_both(b: Both[!Ask, !Tell]) -> Int !Ask !Tell = b(() => ask(), () => tell())
+
+# the alias has no identity to remember an argument in, so one signature may
+# apply it twice at different rows
+fn two_rows(a: Thunk[!Ask], b: Thunk[!io]) -> Int !Ask !io = a() + b()
+
+# and a declaration forwards its own binder into another alias's argument
+alias Nested[!e] = (Thunk[!e], Int)
+
+fn unpack(p: Nested[!Ask]) -> Int !Ask = {
+  let (t, n) = p
+  t() + n
+}
 
 # nested inside a function type in the same signature, and beside a variable
 # the signature binds for itself -- the variable is not the argument, it is
@@ -29,9 +93,19 @@ fn store(m: Mapper[Int, String]) -> Mapper[Int, String] = m
 fn pure_in() -> Mapper[Int, String] = n => to_string(n)
 
 pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 2 }
+  with handle Tell { tell() => 3 }
   io.println(to_string(force(() => 1)))
   io.println(apply_io(n => to_string(n)))
   io.println(to_string(force_grouped(() => 2)))
+  io.println(to_string(retry(3, () => ask())))
+  io.println(to_string(ask_once(() => ask())))
+  io.println(to_string(ask_and_tell(() => ask() + tell())))
+  io.println(to_string(mixed(() => ask(), () => tell())))
+  io.println(to_string(via(Direct { v: 4 }, () => ask())))
+  io.println(to_string(drive_both((f, g) => f() + g())))
+  io.println(to_string(two_rows(() => ask(), () => 5)))
+  io.println(to_string(unpack((() => ask(), 6))))
   io.println(to_string(drive(() => 3, n => n + 1)))
   io.println(store(pure_in())(4))
   io.println(to_string(force(() => {

@@ -1,0 +1,224 @@
+# An effect **argument** at a transparent alias's type application, run.
+#
+# `alias Thunk[!e] = fn() -> Int !e` binds a variable; a use site may hand it a
+# row, and the alias expands with that row in place. The checker corpus records
+# which spellings are accepted. What it cannot record is the only thing that
+# matters at runtime: the row the substitution produced is the row the caller
+# charges, and the pack the callee reads has a node for every atom in it.
+#
+# The rows below are the ones the argument position gained beyond `!io`: a
+# variable the *consumer* binds, a declared effect, a union of two, a union
+# mixing a label with a variable, io beside a variable, and two binders matched
+# in declaration order. Each is written a second way in the alias's expansion,
+# and if the substitution dropped an atom, merged two into one, or let io
+# absorb a variable, the pack loses the node and the call panics rather than
+# answering wrongly.
+#
+# **Every line installs its own handlers and every handler answers a different
+# prime**, for the reason effect_decl_row.dawn's header gives: one shared `with
+# handle` per effect lets a single correctly-charged line seed the pack that
+# every other line then reads for free, and a repair of one call site out of
+# nine measures as nine.
+use std/io
+
+effect AskE {
+  fn ask() -> Int
+}
+
+effect TellE {
+  fn tell() -> Int
+}
+
+alias Thunk[!e] = fn() -> Int !e
+
+alias Mapper[T, U, !e] = fn(T) -> U !e
+
+alias Both[!a, !b] = fn(fn() -> Int !a, fn() -> Int !b) -> Int !a !b
+
+## An alias whose target already has a row of its own, so the argument is
+## *merged* into it rather than dropped in. `IoThunk[!AskE]` is
+## `fn() -> Int !io !AskE`, one row with two atoms.
+alias IoThunk[!e] = fn() -> Int !io !e
+
+## The hop that makes a forwarded variable load-bearing, borrowed from
+## effect_decl_row.dawn: `apply1` is a **named** callee whose row is a lone
+## variable, so the caller hands it evidence out of its own frame's slot. A
+## caller whose row lost the variable has no slot to hand over. Calling `k`
+## directly would not show that -- a function value carries its own pack.
+fn apply1(k: fn(Int) -> Int !e, n: Int) -> Int !e = k(n)
+
+## The argument is a variable this signature binds. The alias's own variable
+## goes away and this frame's takes its place, which is why the consumer can
+## declare it: the evidence arrives in the slot the consumer wrote.
+fn forward(t: Thunk[!e], k: fn(Int) -> Int !e) -> Int !e = apply1(k, t())
+
+## A declared effect, substituted into the expansion. The handler is supplied
+## where the closure is called, which is inside the caller's frame.
+fn ask_through(t: Thunk[!AskE]) -> Int !AskE = t()
+
+## A union of two labels: both nodes have to be in the pack the call site
+## builds, and a union that kept only one loses whichever it dropped.
+fn both_labels(t: Thunk[!(AskE | TellE)]) -> Int !AskE !TellE = t()
+
+## A label beside the consumer's own variable, which is the mixed shape: one
+## atom with a handler and one with a slot, in a single argument.
+fn mixed(t: Thunk[!(AskE | e)], k: fn(Int) -> Int !e) -> Int !AskE !e = apply1(k, t())
+
+## Two binders, two arguments, matched in declaration order. Swap the two and
+## the closures below no longer fit their slots.
+fn drive_both(b: Both[!AskE, !TellE]) -> Int !AskE !TellE =
+  b(() => 500 + ask(), () => 600 + tell())
+
+## The same alias applied at one row twice. `!a` and `!b` both become `AskE`,
+## and the expansion's `!a !b` is `!AskE` once: a union that failed to dedupe
+## would ask for a second node under the same atom.
+fn same_twice(b: Both[!AskE, !AskE]) -> Int !AskE =
+  b(() => 1000 + ask(), () => 1100 + ask())
+
+## io beside a variable, in the argument. io absorbing the variable here is
+## #345's hole reached through the substitution rather than through inference:
+## the row would lose its only slot while the callee still reads one.
+fn io_forward(t: Thunk[!(io | e)], k: fn(Int) -> Int !e) -> Int !io !e = apply1(k, t())
+
+## The argument merged into a target that already had io of its own.
+fn merged(t: IoThunk[!AskE]) -> Int !io !AskE = t()
+
+## Both axes at once: the type arguments stay aligned with `[T, U]` while the
+## effect argument goes in the list of its own.
+fn map_through(m: Mapper[Int, Int, !e], k: fn(Int) -> Int !e) -> Int !e = apply1(k, m(1))
+
+fn line_forward() -> Unit !io = {
+  with handle TellE { tell() => 5 }
+  println(to_string(forward(() => 100, n => n + tell())))
+}
+
+fn line_ask_through() -> Unit !io = {
+  with handle AskE { ask() => 7 }
+  println(to_string(ask_through(() => 200 + ask())))
+}
+
+fn line_both_labels() -> Unit !io = {
+  with handle AskE { ask() => 11 }
+  with handle TellE { tell() => 13 }
+  println(to_string(both_labels(() => 300 + ask() + tell())))
+}
+
+fn line_mixed() -> Unit !io = {
+  with handle AskE { ask() => 17 }
+  with handle TellE { tell() => 19 }
+  println(to_string(mixed(() => 400 + ask(), n => n + tell())))
+}
+
+fn line_drive_both() -> Unit !io = {
+  with handle AskE { ask() => 23 }
+  with handle TellE { tell() => 29 }
+  println(to_string(drive_both((f, g) => f() + g())))
+}
+
+fn line_same_twice() -> Unit !io = {
+  with handle AskE { ask() => 43 }
+  println(to_string(same_twice((f, g) => f() + g())))
+}
+
+fn line_io_forward() -> Unit !io = {
+  with handle TellE { tell() => 31 }
+  println(to_string(io_forward(() => {
+    println("the io thunk ran")
+    700
+  }, n => n + tell())))
+}
+
+fn line_merged() -> Unit !io = {
+  with handle AskE { ask() => 41 }
+  println(to_string(merged(() => {
+    println("the merged thunk ran")
+    900 + ask()
+  })))
+}
+
+fn line_map_through() -> Unit !io = {
+  with handle TellE { tell() => 37 }
+  println(to_string(map_through(n => n + 800, n => n + tell())))
+}
+
+## The control. With nothing in the closures that reads a pack, a dropped
+## variable and a kept one are the same answer, which is how a hole in the
+## substitution would stay invisible if every line were written this way.
+fn line_pure() -> Unit !io = {
+  println(to_string(forward(() => 1200, n => n + 1)))
+  println(to_string(map_through(n => n + 1300, n => n + 2)))
+}
+
+pub fn main() -> Unit !io = {
+  println("-- a variable the consumer binds, forwarded through the alias --")
+  line_forward()
+  println("-- a declared effect substituted into the expansion --")
+  line_ask_through()
+  println("-- a union of two labels, both read --")
+  line_both_labels()
+  println("-- a label beside the consumer's own variable --")
+  line_mixed()
+  println("-- two binders matched in declaration order --")
+  line_drive_both()
+  println("-- and the same alias at one row twice --")
+  line_same_twice()
+  println("-- io beside a variable, which io does not absorb --")
+  line_io_forward()
+  println("-- merged into a target that already had io --")
+  line_merged()
+  println("-- both axes at once --")
+  line_map_through()
+  println("-- the control: closures with nothing to read --")
+  line_pure()
+}
+
+# The assertion lane; see effect_widen_row.dawn's note. The control has no
+# assertion of its own on purpose: what it witnesses is that a row with nothing
+# to charge still runs, and the transcript is where that is read.
+test "a variable the consumer binds survives the substitution" {
+  with handle TellE { tell() => 5 }
+  assert forward(() => 100, n => n + tell()) == 105
+}
+
+test "a declared effect substituted into the expansion is answered" {
+  with handle AskE { ask() => 7 }
+  assert ask_through(() => 200 + ask()) == 207
+}
+
+test "a union of two labels keeps both nodes" {
+  with handle AskE { ask() => 11 }
+  with handle TellE { tell() => 13 }
+  assert both_labels(() => 300 + ask() + tell()) == 324
+}
+
+test "a label beside a variable is one argument with two atoms" {
+  with handle AskE { ask() => 17 }
+  with handle TellE { tell() => 19 }
+  assert mixed(() => 400 + ask(), n => n + tell()) == 436
+}
+
+test "two binders are matched in declaration order" {
+  with handle AskE { ask() => 23 }
+  with handle TellE { tell() => 29 }
+  assert drive_both((f, g) => f() + g()) == 1152
+}
+
+test "the same row twice is that row once" {
+  with handle AskE { ask() => 43 }
+  assert same_twice((f, g) => f() + g()) == 2186
+}
+
+test "io does not absorb a variable that arrived as an argument" {
+  with handle TellE { tell() => 31 }
+  assert io_forward(() => 700, n => n + tell()) == 731
+}
+
+test "an argument merged into a target that already had io" {
+  with handle AskE { ask() => 41 }
+  assert merged(() => 900 + ask()) == 941
+}
+
+test "the type axis and the effect axis at one application" {
+  with handle TellE { tell() => 37 }
+  assert map_through(n => n + 800, n => n + tell()) == 838
+}

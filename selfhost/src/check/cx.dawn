@@ -774,13 +774,13 @@ fn resolve_qual(
         None -> TyError
       }
       if target == TyError { return (cxe, TyError) }
-      let em0 = earg_subst(al.eparams, eargs)
+      let (cxs, em0) = earg_subst(cxe, al.eparams, eargs)
       if len(al.tparams) == 0 {
         let m0: Map[Int, Ty] = map.empty()
-        return (record_span_at(cxe, lo, hi, no_trefs()),
+        return (record_span_at(cxs, lo, hi, no_trefs()),
           wrap_opaque(al, [], subst(target, m0, em0)))
       }
-      var cx2 = cxe
+      var cx2 = cxs
       var m2: Map[Int, Ty] = map.empty()
       var args: List[Ty] = []
       var i = 0
@@ -840,45 +840,20 @@ fn resolve_qual(
 
 ## ---- effect arguments at a type application (spec §6.3) ----
 
-## Rule 丙 prime at a use site: a declaration-bound effect parameter has no
-## evidence slot. A record is not a frame, and a type reference has no
-## parameter for evidence to arrive through, so the only rows that may be
-## written for one are the rows that owe none. `!io` is the whole of that set
-## in today's grammar -- pure has no spelling in row position -- and every
-## other atom stands for evidence somebody has to hand over: a declared effect,
-## an associated-effect projection, or a variable bound on some other
-## declaration or signature.
-##
-## The atoms are read, not resolved. Resolving `!e` here would mint the
-## variable into whatever effect table is current and hand the enclosing
-## signature an effect parameter it never wrote.
-##
-## True in the result means the argument was refused.
-fn refuse_owed_earg(cx: Cx, owner: String, ea: EffArg) -> (Cx, Bool) = {
-  for a in ea.atoms {
-    if a != "io" {
-      let hint = if is_upper_name(a) {
-        "a handler is supplied where the closure is called, so a written label " ++
-          "needs a frame to arrive at; bind the variable on the function that " ++
-          "runs the closure, or write `!io`"
-      } else {
-        "a variable bound elsewhere owes evidence that its binder's frame holds; " ++
-          "write `!io`, which covers any row, or omit the argument and let the " ++
-          "declaration's own variable stand"
-      }
-      return (cerr_h(cx, "`!" ++ a ++ "` cannot be an effect argument to `" ++ owner ++
-          "`: a type declaration's effect parameter carries no evidence (spec §6.3)",
-        ea.lo, ea.hi, hint), true)
-    }
-  }
-  (cx, false)
-}
-
 ## The effect-argument half of a type application's arity. A declaration that
 ## binds none takes none. One that binds some takes either all of them, or --
 ## decision 7 of docs/effect-params-design.md -- none at all: the elided
 ## spelling, whose slot stays the declaration's own variable and is solved by
 ## whatever the consumer's row has to cover.
+##
+## Arity is the whole of what is asked here. **Which** rows may be written is
+## not a question the argument position gets to answer differently from the
+## inline one: a transparent alias is its expansion, so `Thunk[!Ask]` is
+## `fn() -> Int !Ask` written a second way, and a row that is legal spelled out
+## in the function type cannot be illegal spelled through the alias. What
+## refuses a row is the same thing that refuses it inline -- `resolve_eff_at`
+## for a name that is not an effect, and the consumer's own signature for
+## evidence it does not hold.
 ##
 ## True in the result means the application was refused.
 fn check_eargs(
@@ -899,14 +874,7 @@ fn check_eargs(
     return (cerr(cx, "`" ++ owner ++ "` binds " ++ to_string(len(enames)) ++
         " effect parameter(s), got " ++ to_string(len(eargs)), lo, hi), true)
   }
-  var cx1 = cx
-  var bad = false
-  for ea in eargs {
-    let (cx2, refused) = refuse_owed_earg(cx1, owner, ea)
-    cx1 = cx2
-    if refused { bad = true }
-  }
-  (cx1, bad)
+  (cx, false)
 }
 
 ## `check_eargs` for a name the alias table answers, which is two declarations:
@@ -953,19 +921,30 @@ fn ty_arity_err(
 ## The substitution an application's effect arguments make. Empty when the
 ## application elided them, which is what keeps the elided spelling resolving
 ## to exactly the type it resolved to before the position existed.
-fn earg_subst(eparams: List[Eff], eargs: List[EffArg]) -> Map[Int, Eff] = {
+##
+## Each argument is a row, resolved by the same function that resolves the row
+## after a `->`: an argument is what the author would have written inline had
+## the alias not been there, so it is read in the use site's own scope, with
+## the use site's effect table. `!e` therefore names the *consumer's* variable
+## -- minting it if this is where it first appears, exactly as an inline `!e`
+## would -- and the alias's own variable is the one that goes away, replaced by
+## the row. Which is the whole of what a transparent alias means.
+fn earg_subst(cx: Cx, eparams: List[Eff], eargs: List[EffArg]) -> (Cx, Map[Int, Eff]) = {
+  var cx1 = cx
   var em: Map[Int, Eff] = map.empty()
-  if len(eargs) != len(eparams) { return em }
+  if len(eargs) != len(eparams) { return (cx1, em) }
+  var i = 0
   for v in eparams {
+    let ea = eargs[i]
+    let (cx2, row) = resolve_eff_at(cx1, ea.atoms, ea.lo, ea.hi)
+    cx1 = cx2
     match v {
-      # every atom is `io` by the time this runs: `refuse_owed_earg` has
-      # refused the rest, so the row an argument denotes is EIo and needs no
-      # resolver of its own
-      EffVar(_, id) -> { em = map.insert(em, id, EIo) }
+      EffVar(_, id) -> { em = map.insert(em, id, row) }
       _ -> ()
     }
+    i = i + 1
   }
-  em
+  (cx1, em)
 }
 
 ## A **nominal** type takes no effect argument: a record, a variant, or an
@@ -1070,13 +1049,13 @@ fn resolve_named(
       # `fn() -> Int !io` where `Thunk` is `fn() -> Int !e`. An opaque type
       # never reaches this with arguments -- `check_alias_eargs` refused them
       # -- so the map is empty and `wrap_opaque` sees the target it always saw.
-      let em = earg_subst(al.eparams, eargs)
+      let (cxs, em) = earg_subst(cx1, al.eparams, eargs)
       if len(al.tparams) == 0 {
         let m0: Map[Int, Ty] = map.empty()
-        return (record_span_at(cx1, lo, hi, no_trefs()),
+        return (record_span_at(cxs, lo, hi, no_trefs()),
           wrap_opaque(al, [], subst(target, m0, em)))
       }
-      var cx2 = cx1
+      var cx2 = cxs
       var m: Map[Int, Ty] = map.empty()
       var args: List[Ty] = []
       var i = 0
