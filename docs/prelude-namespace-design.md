@@ -459,7 +459,7 @@ trait Coll[C] {
 error: argument type mismatch: expected C.It, got Int
   = hint: signature: fn only[C: Coll](k: C.It) -> Int
 error: cannot infer type parameter(s) C for `only`
-  = hint: add a type annotation at the use site
+  = hint: Dawn has no call-site type arguments, so the type has to arrive as an expectation: annotate the binding an argument comes from, or the one that takes the result
 ```
 
 诊断已经准确，不需要额外机器。**推论**：一个 trait 方法若其类型参数只出现在投影里，

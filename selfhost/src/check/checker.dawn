@@ -6071,8 +6071,17 @@ fn check_call(
     }
   }
   if len(unbound) > 0 {
+    # Not "annotate the use site": Dawn has no call-site type arguments, so
+    # there is nothing at the call to annotate, and the old wording sent people
+    # looking for a turbofish. A type parameter is bound by what the arguments
+    # and the expectation carry, and an argument that carries nothing -- a
+    # `Never` from `panic`, an empty list with no expectation -- leaves it
+    # unbound. The repair is upstream of the call.
     return (cerr_h(cx1, "cannot infer type parameter(s) " ++ join(unbound, ", ") ++
-        " for `" ++ callee ++ "`", lo, hi, "add a type annotation at the use site"),
+        " for `" ++ callee ++ "`", lo, hi,
+      "Dawn has no call-site type arguments, so the type has to arrive as an " ++
+        "expectation: annotate the binding an argument comes from, or the one " ++
+        "that takes the result"),
       TyError, XError(lo, hi))
   }
   # trait bounds: each (type parameter, bound) pair needs a dictionary

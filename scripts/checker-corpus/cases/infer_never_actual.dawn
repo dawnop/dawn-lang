@@ -1,0 +1,19 @@
+# checker.dawn: a type parameter that nothing binds, and the hint that says
+# where the repair is. `unify_into` lets a `Never` actual through without
+# binding (it is a subtype of everything, so it picks nothing), which is
+# spec-conformant and is exactly how a parameter ends up unbound at a call
+# whose arguments all typechecked.
+fn takes_any[T](x: T) -> Int = 1
+
+fn takes_list[T](xs: List[T]) -> Int = 1
+
+# a Never actual: `panic` returns Never, so the argument carries no type for
+# `T` to be read off
+fn from_panic() -> Int = takes_any(panic("boom"))
+
+# the neighbour: an empty list with nothing to settle its element type reports
+# its own refusal first, and then leaves the parameter unbound the same way
+fn from_empty() -> Int = takes_list([])
+
+# the control: the same call with something that does carry a type
+fn bound() -> Int = takes_any(1)
