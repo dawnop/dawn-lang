@@ -1,0 +1,223 @@
+# The io barriers pay for their own row at the call site, and the closure they
+# protect gets the pack.
+#
+# `catch_fault`/`catch_panic` used to declare `f: fn() -> T !io`, so a closure
+# that still owed evidence was refused at the argument and the two shims
+# (`jvm/rtclasses.gen_try_closure`, `runtime/c`'s `dawn_run_caught`) pushed a
+# bare null where a pack goes. The refusal was the defect rather than the
+# guarantee: it made a labelled closure impossible to protect at all, which is
+# not a property the error model ever asked for. Since 2026-08-25 both
+# barriers bind an effect parameter over the protected closure
+#
+#     fn catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io
+#
+# so their ABI row is `!(e|io)`, worth one evidence slot (`types.nev`), and the
+# call site fills it exactly as it fills `bracket`'s.
+#
+# The barrier's *own* row is still `!io`, and that is the other half of what
+# this file holds shut. Whoever observes a failure is impure
+# (docs/audit/error-model-design.md §7.3), and these observe one: what they
+# hand back depends on the failure they caught. Opening the closure's row does
+# not touch that, so `line_pure_refused` has no line here -- the checker corpus
+# owns the refusal (scripts/checker-corpus/cases/catch_effects.dawn), because
+# a program that does not compile has no transcript.
+#
+# **Every line below installs its own handler and answers a number no other
+# line answers.** That is load-bearing and was measured: with one `with handle`
+# at the top of `main`, one correctly charged call site puts the node into the
+# shared remainder's pack and every other line reads it out for free, so a
+# repair (or a mutant) that touched one site out of ten looked right ten
+# times. `effect_primitive_row.dawn` next door carries the same rule for the
+# same reason.
+use std/io
+
+effect AskE {
+  fn ask() -> Int
+}
+
+effect TellE {
+  fn tell() -> Int
+}
+
+trait Held[T] {
+  effect E
+  fn held(x: T) -> Int !T.E
+}
+
+type Box = { v: Int }
+
+impl Held[Box] {
+  effect E = !AskE
+  fn held(x: Box) -> Int !AskE = x.v + ask()
+}
+
+## A barrier reached through a signature that spells the row as a variable, so
+## what the call site packs is a variable's instantiation and not a written
+## label. This is the shape std would use if std wrapped a barrier.
+fn guarded(f: fn() -> Int !e) -> Int !e !io =
+  match catch_fault(f) {
+    Ok(v) -> v
+    Err(_) -> 0 - 1
+  }
+
+## A projection in the row rather than a label or a variable: rule 丙's slot,
+## which `ev_from_pack` answers with the chain itself rather than with a node.
+## A null pack here is not even the contract's panic -- the callee reads a
+## field off it, and the JVM answers `NullPointerException` one layer away
+## from where the mistake was made.
+fn guarded_assoc[T: Held](x: T) -> Int !T.E !io =
+  match catch_fault(() => held(x)) {
+    Ok(v) -> v
+    Err(_) -> 0 - 1
+  }
+
+## A label beside an effect variable, the residual #335 made bindable. The pack
+## is one ground node consed over the frame's own variable slot, built at a
+## barrier's call site.
+fn guarded_mixed(f: fn() -> Int !AskE !e) -> Int !AskE !e !io =
+  match catch_fault(() => f() + ask()) {
+    Ok(v) -> v
+    Err(_) -> 0 - 1
+  }
+
+## body-raise, the floor: the protected closure performs an operation and
+## returns. If the barrier hands the closure a null pack this is `ev_get`'s
+## compiler-invariant panic, not a wrong number.
+fn line_body() -> Unit !io = {
+  with handle AskE { ask() => 300 }
+  match catch_fault(() => ask() + 1) {
+    Ok(v) -> println(to_string(v))
+    Err(_) -> println("faulted")
+  }
+}
+
+## body-raise on the way out: the closure performs an operation *and then*
+## fails, so the pack is read on a path whose value is thrown away. The
+## reported number comes from the Err arm, and the operation still has to have
+## been answered on the way there -- an unanswered one panics past the failure.
+##
+## The failure is a panic and the barrier is `catch_panic`, because a *fault*
+## needs an io primitive raising one unwrapped and the only such names live in
+## `spike-native/stdext/raw.dawn`, which the evidence-contract lane does not
+## have (it runs against the bundled std). `catch_kinds.dawn` already holds
+## `catch_fault`'s taken arm shut on both backends, and the two barriers are
+## the same generator and the same runtime function with one flag different.
+fn line_body_panic() -> Unit !io = {
+  with handle TellE { tell() => 40 }
+  match catch_panic(() => tell() + panic("deliberate")) {
+    Ok(v) -> println(to_string(v))
+    Err(_) -> println("panicked after " ++ to_string(tell() + 2))
+  }
+}
+
+## arm-raise: the operation the protected closure performs is answered by an
+## arm that performs an operation of its own. The arm runs under the barrier
+## frame and reads a chain it captured outside it, so this is the pack crossing
+## the barrier in the other direction.
+fn line_arm() -> Unit !io = {
+  with handle TellE { tell() => 7 }
+  with handle AskE { ask() => tell() + 500 }
+  match catch_fault(() => ask() + 3) {
+    Ok(v) -> println(to_string(v))
+    Err(_) -> println("faulted")
+  }
+}
+
+## arm-fail-inner-catch: a second barrier *inside* a handler arm, taking the
+## failure, and the arm reading a third operation on the Err path. Two barrier
+## frames are live at once and each owes its closure a different pack, and the
+## inner one is entered from an arm rather than from an ordinary frame.
+fn line_arm_panic_inner_catch() -> Unit !io = {
+  with handle TellE { tell() => 600 }
+  with handle AskE {
+    ask() =>
+      match catch_panic(() => panic("inner") + tell()) {
+        Ok(v) -> v
+        Err(_) -> tell() + 4
+      }
+  }
+  match catch_fault(() => ask() + 5) {
+    Ok(v) -> println(to_string(v))
+    Err(_) -> println("faulted")
+  }
+}
+
+## `catch_panic` is the other barrier and the same signature. Its shim is the
+## same generator with a different caught-class list, so a repair that reached
+## one and not the other shows up here.
+fn line_panic() -> Unit !io = {
+  with handle AskE { ask() => 700 }
+  match catch_panic(() => ask() + 6) {
+    Ok(v) -> println(to_string(v))
+    Err(_) -> println("panicked")
+  }
+}
+
+fn line_through_var() -> Unit !io = {
+  with handle AskE { ask() => 900 }
+  println(to_string(guarded(() => ask() + 8)))
+}
+
+fn line_projection() -> Unit !io = {
+  with handle AskE { ask() => 1000 }
+  println(to_string(guarded_assoc(Box { v: 9 })))
+}
+
+## The two handlers answer different numbers on purpose: 1107 is reachable only
+## if the node and the tail are both walked, and it is this line's own two
+## handlers that put them there.
+fn line_mixed() -> Unit !io = {
+  with handle AskE { ask() => 1100 }
+  with handle TellE { tell() => 7 }
+  println(to_string(guarded_mixed(() => tell())))
+}
+
+## A barrier taken as a *value* rather than called. The wrapper
+## `lower.lift_fn_value` writes is a function value outside and a named call
+## inside, so it has to unpack the pack it was handed into the callee's slots.
+## A wrong *count* here is a `NoSuchMethodError`, not a wrong answer.
+fn line_as_value() -> Unit !io = {
+  with handle AskE { ask() => 1200 }
+  let f: fn(fn() -> Int !AskE) -> Result[Int, ForeignError] !AskE !io = catch_fault
+  match f(() => ask() + 10) {
+    Ok(v) -> println(to_string(v))
+    Err(_) -> println("faulted")
+  }
+}
+
+## The control that was always right: with nothing in the closure that reads a
+## pack, a null pack and the real one are the same answer. This is exactly why
+## every gate stayed green over the old shape for as long as it did.
+fn line_pure() -> Unit !io = {
+  match catch_fault(() => 1300) {
+    Ok(v) -> println(to_string(v))
+    Err(_) -> println("faulted")
+  }
+  match catch_panic(() => 1400) {
+    Ok(v) -> println(to_string(v))
+    Err(_) -> println("panicked")
+  }
+}
+
+pub fn main() -> Unit !io = {
+  println("-- a label read inside the protected closure --")
+  line_body()
+  println("-- and read on a path whose value the failure discards --")
+  line_body_panic()
+  println("-- a handler arm performing an operation under the barrier --")
+  line_arm()
+  println("-- a second barrier inside that arm, taking the failure --")
+  line_arm_panic_inner_catch()
+  println("-- catch_panic, the other barrier and the same signature --")
+  line_panic()
+  println("-- the row named as a variable and instantiated at the call --")
+  line_through_var()
+  println("-- a projection in the row, which is neither label nor variable --")
+  line_projection()
+  println("-- a label beside a variable, the residual bound by #335 --")
+  line_mixed()
+  println("-- a barrier taken as a value rather than called --")
+  line_as_value()
+  println("-- the control: closures with nothing to read --")
+  line_pure()
+}
