@@ -14,7 +14,8 @@ use std/map
 use std/set
 
 use front/ast.{
-  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, EffParamDecl, Module,
+  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, EffParamDecl, EffArg,
+  Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_uses, DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod,
   Param, Expr, Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects,
@@ -32,7 +33,8 @@ use check/types.{
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
   EffectI, ev_record_name, erased_ev_ty,
   AdtI, CtorI, FieldI,
-  TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, ty_show, fn_return_show, sig_render, subst,
+  TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, no_eparam_names, ty_show, fn_return_show,
+  sig_render, subst,
   reduce_via_bindings, ty_named, builtin_type_at, builtin_type_name_reserved,
   hard_reserved_builtin_type_name, peel_opaque,
   prelude_impls, prelude_trait_ids,
@@ -275,25 +277,40 @@ pub fn stray_eff_atom(ref: TypeRef, bound: List[String]) -> Option[(String, Int,
       }
       None
     }
-    TQual(_, _, targs, _, _) -> {
+    TQual(_, _, targs, eargs, _, _) -> {
       for e in targs {
         match stray_eff_atom(e, bound) {
           Some(s) -> return Some(s)
           None -> ()
         }
       }
-      None
+      stray_earg_atom(eargs, bound)
     }
-    TNamed(_, targs, _, _) -> {
+    TNamed(_, targs, eargs, _, _) -> {
       for e in targs {
         match stray_eff_atom(e, bound) {
           Some(s) -> return Some(s)
           None -> ()
         }
       }
-      None
+      stray_earg_atom(eargs, bound)
     }
   }
+
+## The same question asked of the effect arguments a type application writes:
+## `alias A[!e] = Thunk[!e]` accounts for its atom, `alias A = Thunk[!x]` does
+## not. Written out rather than folded into the `TFn` arm because the span a
+## diagnostic underlines is the argument's, not an enclosing function type's.
+fn stray_earg_atom(eargs: List[EffArg], bound: List[String]) -> Option[(String, Int, Int)] = {
+  for ea in eargs {
+    for a in ea.atoms {
+      if a != "io" && (upper_first(a) || not list_has_name(bound, a)) {
+        return Some((a, ea.lo, ea.hi))
+      }
+    }
+  }
+  None
+}
 
 fn list_has_name(names: List[String], n: String) -> Bool = {
   for x in names {
@@ -350,7 +367,7 @@ pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef, bound: List[String]) -> (Cx, Boo
   }
 
 test "a type declaration accounts for io and for the names it binds, nothing else" {
-  let ty = (e: String) => TFn([], TNamed("Int", [], 0, 3), [e], 10, 30)
+  let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30)
   let nothing: List[String] = []
   assert stray_eff_atom(ty("io"), nothing) == None
   assert stray_eff_atom(ty("e"), nothing) == Some(("e", 10, 30))
@@ -360,13 +377,13 @@ test "a type declaration accounts for io and for the names it binds, nothing els
   # a label is stray whatever the binder list says
   assert stray_eff_atom(ty("Ask"), ["Ask"]) == Some(("Ask", 10, 30))
   # and it is found through the shapes a type can nest in
-  let nested = TNamed("List", [TTuple([TNamed("Int", [], 0, 3), ty("e")], 5, 40)], 4, 41)
+  let nested = TNamed("List", [TTuple([TNamed("Int", [], [], 0, 3), ty("e")], 5, 40)], [], 4, 41)
   assert stray_eff_atom(nested, nothing) == Some(("e", 10, 30))
   assert stray_eff_atom(nested, ["e"]) == None
 }
 
 test "an unbound effect variable is refused and a label is not" {
-  let ty = (e: String) => TFn([], TNamed("Int", [], 0, 3), [e], 10, 30)
+  let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30)
   let nothing: List[String] = []
   let (cx1, bad1) = refuse_decl_effvar(test_cx(), ty("e"), nothing)
   assert bad1
@@ -385,8 +402,8 @@ test "an unbound effect variable is refused and a label is not" {
 
 fn t_lo2(t: TypeRef) -> Int =
   match t {
-    TNamed(_, _, lo, _) -> lo
-    TQual(_, _, _, lo, _) -> lo
+    TNamed(_, _, _, lo, _) -> lo
+    TQual(_, _, _, _, lo, _) -> lo
     TAssoc(_, _, lo, _) -> lo
     TTuple(_, lo, _) -> lo
     TFn(_, _, _, lo, _) -> lo
@@ -394,8 +411,8 @@ fn t_lo2(t: TypeRef) -> Int =
 
 fn t_hi2(t: TypeRef) -> Int =
   match t {
-    TNamed(_, _, _, hi) -> hi
-    TQual(_, _, _, _, hi) -> hi
+    TNamed(_, _, _, _, hi) -> hi
+    TQual(_, _, _, _, _, hi) -> hi
     TAssoc(_, _, _, hi) -> hi
     TTuple(_, _, hi) -> hi
     TFn(_, _, _, _, hi) -> hi
@@ -669,6 +686,17 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
           cx1 = cx2
           tvs = tvs ++ [v]
         }
+        # The declaration's own effect variables, minted here for the reason
+        # `pass_ctor_fields` mints a record's here: one variable per name for
+        # the whole target, and the next declaration's `!e` is a different one.
+        # Minting at the declaration and not while the target resolves is what
+        # gives a use site an id to substitute an effect argument into.
+        var evs: List[Eff] = []
+        for en in d.eparams {
+          let (cxv, v) = fresh_effvar(cx1, en)
+          cx1 = cxv
+          evs = evs ++ [v]
+        }
         # an opaque type is a type, so it takes an id off the same counter;
         # a transparent alias is a spelling and needs none
         var aid = -1
@@ -681,6 +709,7 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
           aliases: map.insert(cx1.aliases, d.name, AliasE {
             name: d.name,
             tparams: tvs,
+            eparams: evs,
             # a refused target is dropped rather than kept: resolving it would
             # reach `resolve_type` and say the same thing a second time, in
             # different words, about the same span
@@ -773,6 +802,7 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
       name: d.name,
       is_record: d.is_record,
       tparams: tvs,
+      eparams: d.eparams,
       ctors: ctor_infos,
       derives_show: derives_show,
       derives_ord: derives_ord,
@@ -906,10 +936,10 @@ test "type shells and fields build recursive types" {
       CtorDecl {
         name: "Node",
         fields: [
-          FieldDecl { name: "v", tref: TNamed("T", [], 10, 11), lo: 8, hi: 11 },
+          FieldDecl { name: "v", tref: TNamed("T", [], [], 10, 11), lo: 8, hi: 11 },
           FieldDecl {
             name: "kids",
-            tref: TNamed("List", [TNamed("Tree", [TNamed("T", [], 24, 25),], 19, 26)], 13, 27),
+            tref: TNamed("List", [TNamed("Tree", [TNamed("T", [], [], 24, 25),], [], 19, 26)], [], 13, 27),
             lo: 13,
             hi: 27
           }
@@ -1027,7 +1057,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
       ctors: [],
       is_record: false,
       derives: [],
-      alias_target: Some(TNamed("B", [], 10, 11)),
+      alias_target: Some(TNamed("B", [], [], 10, 11)),
       lo: 0,
       hi: 11,
       nlo: 6,
@@ -1042,7 +1072,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
       ctors: [],
       is_record: false,
       derives: [],
-      alias_target: Some(TNamed("A", [], 22, 23)),
+      alias_target: Some(TNamed("A", [], [], 22, 23)),
       lo: 12,
       hi: 23,
       nlo: 18,
@@ -1058,7 +1088,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
         name: "P",
         fields: [FieldDecl {
           name: "f",
-          tref: TFn([], TNamed("Unit", [], 40, 44), [], 33, 44),
+          tref: TFn([], TNamed("Unit", [], [], 40, 44), [], 33, 44),
           lo: 30,
           hi: 44
         }],
@@ -1214,6 +1244,7 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       name: rec_name,
       is_record: true,
       tparams: [],
+      eparams: no_eparam_names(),
       ctors: [CtorI { adt: eid, name: rec_name, fields: fields }],
       derives_show: false,
       derives_ord: false,
@@ -1431,10 +1462,10 @@ test "trait registration puts methods in the fn namespace" {
   let m = Module { decls: [DTrait("Eq2", "T", 10, 11, [TraitMethod {
     name: "eq2",
     params: [
-      Param { name: "a", tref: TNamed("T", [], 22, 23), default: None, lo: 19, hi: 20 },
-      Param { name: "b", tref: TNamed("T", [], 28, 29), default: None, lo: 25, hi: 26 }
+      Param { name: "a", tref: TNamed("T", [], [], 22, 23), default: None, lo: 19, hi: 20 },
+      Param { name: "b", tref: TNamed("T", [], [], 28, 29), default: None, lo: 25, hi: 26 }
     ],
-    ret: TNamed("Bool", [], 34, 38),
+    ret: TNamed("Bool", [], [], 34, 38),
     effs: [],
     body: no_body(),
     lo: 14,
@@ -1455,7 +1486,7 @@ test "trait registration puts methods in the fn namespace" {
   let m2 = Module { decls: [DTrait("Eq3", "T", 10, 11, [TraitMethod {
     name: "eq2",
     params: no_params(),
-    ret: TNamed("Bool", [], 34, 38),
+    ret: TNamed("Bool", [], [], 34, 38),
     effs: [],
     body: no_body(),
     lo: 14,
@@ -2158,10 +2189,10 @@ test "impl registration enforces coherence and signature matching" {
   let tm = TraitMethod {
     name: "eq4",
     params: [
-      Param { name: "a", tref: TNamed("T", [], 22, 23), default: None, lo: 19, hi: 20 },
-      Param { name: "b", tref: TNamed("T", [], 28, 29), default: None, lo: 25, hi: 26 }
+      Param { name: "a", tref: TNamed("T", [], [], 22, 23), default: None, lo: 19, hi: 20 },
+      Param { name: "b", tref: TNamed("T", [], [], 28, 29), default: None, lo: 25, hi: 26 }
     ],
-    ret: TNamed("Bool", [], 34, 38),
+    ret: TNamed("Bool", [], [], 34, 38),
     effs: [],
     body: no_body(),
     lo: 14,
@@ -2169,16 +2200,16 @@ test "impl registration enforces coherence and signature matching" {
     nlo: 17,
     nhi: 20
   }
-  fn good_impl(lo: Int) -> Decl = DImpl([], "Eq4", lo, lo + 3, TNamed("Int", [], lo + 4, lo + 7), [FnDecl {
+  fn good_impl(lo: Int) -> Decl = DImpl([], "Eq4", lo, lo + 3, TNamed("Int", [], [], lo + 4, lo + 7), [FnDecl {
     is_pub: false,
     name: "eq4",
     tparams: no_tparams(),
     eparams: no_eparams(),
     params: [
-      Param { name: "a", tref: TNamed("Int", [], 0, 1), default: None, lo: 0, hi: 1 },
-      Param { name: "b", tref: TNamed("Int", [], 2, 3), default: None, lo: 2, hi: 3 }
+      Param { name: "a", tref: TNamed("Int", [], [], 0, 1), default: None, lo: 0, hi: 1 },
+      Param { name: "b", tref: TNamed("Int", [], [], 2, 3), default: None, lo: 2, hi: 3 }
     ],
-    ret: Some(TNamed("Bool", [], 4, 8)),
+    ret: Some(TNamed("Bool", [], [], 4, 8)),
     effs: no_effs(),
     body: EBool(true, 9, 13),
     lo: 0,
@@ -2202,7 +2233,7 @@ test "impl registration enforces coherence and signature matching" {
   # a missing method reports with the expected render
   let m2 = Module { decls: [
     DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name: "eq5" }], [], [], false, 0, 40, 6, 9),
-    DImpl([], "Eq5", 50, 53, TNamed("Int", [], 54, 57), no_fn_decls(), [], [], 50, 70)
+    DImpl([], "Eq5", 50, 53, TNamed("Int", [], [], 54, 57), no_fn_decls(), [], [], 50, 70)
   ] }
   var cx2 = seed_prelude(test_cx())
   cx2 = pass_register_traits(cx2, m2)
@@ -2396,8 +2427,8 @@ test "fn signatures resolve with bounds and worst-effect inference" {
         hi: 12
       }],
       eparams: no_eparams(),
-      params: [Param { name: "x", tref: TNamed("T", [], 17, 18), default: None, lo: 14, hi: 15 }],
-      ret: Some(TNamed("T", [], 23, 24)),
+      params: [Param { name: "x", tref: TNamed("T", [], [], 17, 18), default: None, lo: 14, hi: 15 }],
+      ret: Some(TNamed("T", [], [], 23, 24)),
       effs: no_effs(),
       body: EVar("x", 27, 28),
       lo: 0,
@@ -2410,7 +2441,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
       name: "g",
       tparams: no_tparams(),
       eparams: no_eparams(),
-      params: [Param { name: "x", tref: TNamed("Int", [], 36, 39), default: None, lo: 33, hi: 34 }],
+      params: [Param { name: "x", tref: TNamed("Int", [], [], 36, 39), default: None, lo: 33, hi: 34 }],
       ret: None,
       effs: no_effs(),
       body: EVar("x", 43, 44),
@@ -2431,7 +2462,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
 
 test "a signature's effect variables land in eparams once each, in mint order" {
   # fn h(f: fn() -> Int !a, g: fn() -> Int !b, k: fn() -> Int !a) -> Int !c
-  let arrow = (e: String) => TFn([], TNamed("Int", [], 0, 3), [e], 0, 3)
+  let arrow = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 0, 3)
   let m = Module { decls: [
     DFn(FnDecl {
       is_pub: false,
@@ -2443,7 +2474,7 @@ test "a signature's effect variables land in eparams once each, in mint order" {
         Param { name: "g", tref: arrow("b"), default: None, lo: 7, hi: 8 },
         Param { name: "k", tref: arrow("a"), default: None, lo: 9, hi: 10 }
       ],
-      ret: Some(TNamed("Int", [], 12, 15)),
+      ret: Some(TNamed("Int", [], [], 12, 15)),
       effs: ["c"],
       body: EInt(0, 18, 19),
       lo: 0,
@@ -2491,7 +2522,7 @@ test "an explicit binder list produces the eparams the implicit spelling does" {
   # writing them changes nothing a later pass can see. `[!c, !a, !b]` is the
   # order the resolver would have met the names in -- the row first -- so the
   # two spellings agree, which is the whole claim.
-  let arrow = (e: String) => TFn([], TNamed("Int", [], 0, 3), [e], 0, 3)
+  let arrow = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 0, 3)
   let binder = (n: String) => EffParamDecl { name: n, lo: 0, hi: 2 }
   let params = [
     Param { name: "f", tref: arrow("a"), default: None, lo: 5, hi: 6 },
@@ -2504,7 +2535,7 @@ test "an explicit binder list produces the eparams the implicit spelling does" {
     tparams: no_tparams(),
     eparams: [binder("c"), binder("a"), binder("b")],
     params: params,
-    ret: Some(TNamed("Int", [], 12, 15)),
+    ret: Some(TNamed("Int", [], [], 12, 15)),
     effs: ["c"],
     body: EInt(0, 18, 19),
     lo: 0,
@@ -2634,11 +2665,11 @@ pub fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
 
 test "const declarations register in order with serializability checks" {
   let m = Module { decls: [
-    DConst("A", false, TNamed("Int", [], 9, 12), EInt(1, 15, 16), 0, 16, 6, 7),
+    DConst("A", false, TNamed("Int", [], [], 9, 12), EInt(1, 15, 16), 0, 16, 6, 7),
     DConst("B", false,
-      TNamed("Map", [TNamed("Int", [], 30, 33), TNamed("Int", [], 35, 38)], 26, 39),
+      TNamed("Map", [TNamed("Int", [], [], 30, 33), TNamed("Int", [], [], 35, 38)], [], 26, 39),
       EInt(0, 42, 43), 20, 43, 26, 27),
-    DConst("A", false, TNamed("Int", [], 55, 58), EInt(2, 61, 62), 46, 62, 52, 53)
+    DConst("A", false, TNamed("Int", [], [], 55, 58), EInt(2, 61, 62), 46, 62, 52, 53)
   ] }
   var cx = seed_prelude(test_cx())
   let (cxcd, _) = pass_const_decls(cx, m)
@@ -2657,7 +2688,7 @@ test "main shape violations are reported" {
     tparams: no_tparams(),
     eparams: no_eparams(),
     params: no_params2(),
-    ret: Some(TNamed("Int", [], 20, 23)),
+    ret: Some(TNamed("Int", [], [], 20, 23)),
     effs: ["io"],
     body: EInt(0, 26, 27),
     lo: 0,

@@ -30,6 +30,7 @@ use front/token.{
 }
 use front/ast.{
   TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, EffParamDecl,
+  EffArg,
   Param, LambdaParam,
   AssocDecl, AssocBind, EffAssocBind,
   FieldDecl, CtorDecl, ImportName, StrPart, SPText, SPInterp,
@@ -1127,8 +1128,8 @@ fn type_ref(p: P, st: St) -> PR[TypeRef] = {
     let (stq1, _) = want(p, stq, DOT, "`.` (a lowercase name in type position is a module alias)")?
     let (stq2, t) = want(p, stq1, TYPEIDENT, "a type name (uppercase)")?
     let (stq3, pr) = type_args(p, stq2, t.hi)?
-    let (args, hi) = pr
-    return Ok((stq3, TQual(q.text, t.text, args, q.lo, hi)))
+    let (args, eargs, hi) = pr
+    return Ok((stq3, TQual(q.text, t.text, args, eargs, q.lo, hi)))
   }
   let (st1, t) = want(p, st, TYPEIDENT, "a type name (uppercase)")?
   # `T.Item` -- a projection (assoc-types-design.md D2). Only a bare uppercase
@@ -1141,29 +1142,48 @@ fn type_ref(p: P, st: St) -> PR[TypeRef] = {
     return Ok((st3, TAssoc(t.text, mem.text, t.lo, mem.hi)))
   }
   let (st2, pr) = type_args(p, st1, t.hi)?
-  let (args, hi) = pr
-  if at_kind(p, st2, DOT) && len(args) > 0 {
+  let (args, eargs, hi) = pr
+  if at_kind(p, st2, DOT) && (len(args) > 0 || len(eargs) > 0) {
     return Err((st2, perr_h(p, st2, "a projection's subject must be a bare type parameter",
       "write `T.Item` where `T` carries the trait bound; `" ++ t.text ++
         "[..].Item` is not supported")))
   }
-  if len(args) == 0 {
-    Ok((st2, TNamed(t.text, [], t.lo, t.hi)))
+  if len(args) == 0 && len(eargs) == 0 {
+    Ok((st2, TNamed(t.text, [], [], t.lo, t.hi)))
   } else {
-    Ok((st2, TNamed(t.text, args, t.lo, hi)))
+    Ok((st2, TNamed(t.text, args, eargs, t.lo, hi)))
   }
 }
 
 ## The optional `[T, ...]` argument list after a type name; hi is the closing
 ## bracket's, or the given fallback when there is no list.
-fn type_args(p: P, st: St, hi0: Int) -> PR[(List[TypeRef], Int)] = {
+##
+## An item that starts with `!` is an **effect** argument (spec §6.3, `Thunk[!io]`)
+## and joins a list of its own: the type arguments stay positionally aligned with
+## the declaration's type parameters whatever the author interleaved, exactly the
+## split `type_params` makes on the declaring side. `!` cannot begin a type, so
+## the item's first token decides which list it goes in and no lookahead is spent.
+fn type_args(p: P, st: St, hi0: Int) -> PR[(List[TypeRef], List[EffArg], Int)] = {
   if not at_kind(p, st, LBRACKET) {
     let none: List[TypeRef] = []
-    return Ok((st, (none, hi0)))
+    let none_e: List[EffArg] = []
+    return Ok((st, (none, none_e, hi0)))
   }
   var st2 = adv1(p, st)
   var args: List[TypeRef] = []
+  var eargs: List[EffArg] = []
   while not at_kind(p, st2, RBRACKET) {
+    if at_kind(p, st2, BANG) {
+      let bang = tok_at(p, st2.pos, 0)
+      let (st3, atoms) = effect_group(p, st2)?
+      let end = tok_at(p, st3.pos, -1).hi
+      eargs = eargs ++ [EffArg { atoms: atoms, lo: bang.lo, hi: end }]
+      if at_kind(p, st3, COMMA) { st2 = adv1(p, st3) } else {
+        st2 = st3
+        break
+      }
+      continue
+    }
     let (st3, a) = type_ref(p, st2)?
     args = args ++ [a]
     if at_kind(p, st3, COMMA) { st2 = adv1(p, st3) } else {
@@ -1172,10 +1192,10 @@ fn type_args(p: P, st: St, hi0: Int) -> PR[(List[TypeRef], Int)] = {
     }
   }
   let (st4, close) = want(p, st2, RBRACKET, "`]`")?
-  if len(args) == 0 {
+  if len(args) == 0 && len(eargs) == 0 {
     return Err((st4, perr(p, st4, "type argument list cannot be empty")))
   }
-  Ok((st4, (args, close.hi)))
+  Ok((st4, (args, eargs, close.hi)))
 }
 
 ## `(T)` — an AST-erased grouping, or `(A, B)` — a tuple type of 2 to 8 elements.

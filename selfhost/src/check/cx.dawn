@@ -12,9 +12,10 @@ use std/list
 use std/map
 use std/set
 use front/token.{Diag}
-use front/ast.{TypeRef, TNamed, TQual, TAssoc, TTuple, TFn}
+use front/ast.{TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
 use check/types.{
   Adts, AdtI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
+  no_eparam_names,
   Audience, AWorld,
   TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
@@ -36,6 +37,13 @@ use front/suggest
 pub type AliasE = {
   name: String,
   tparams: List[Ty],
+  # the effect variables the declaration bound (`alias Thunk[!e]`), minted here
+  # rather than while the target resolves so a use site has ids to substitute
+  # into. Declaration order, which is the order a use site's effect arguments
+  # are matched against (spec §6.3). `Ty`s and `Eff`s never share a list for
+  # the reason `Sig.eparams` gives: the type arguments stay positionally
+  # aligned with `tparams` whatever the author interleaved.
+  eparams: List[Eff],
   # the unresolved target in the declaring module; None on imported aliases
   target: Option[TypeRef],
   # `opaque type` rather than `alias`: resolving the name yields a TyOpaque
@@ -531,8 +539,8 @@ fn is_upper_name(s: String) -> Bool = {
 ## The `(lo, hi)` of a written type reference — its identity in `Cx.ty_spans`.
 pub fn tref_span(ref: TypeRef) -> (Int, Int) =
   match ref {
-    TNamed(_, _, lo, hi) -> (lo, hi)
-    TQual(_, _, _, lo, hi) -> (lo, hi)
+    TNamed(_, _, _, lo, hi) -> (lo, hi)
+    TQual(_, _, _, _, lo, hi) -> (lo, hi)
     TAssoc(_, _, lo, hi) -> (lo, hi)
     TTuple(_, lo, hi) -> (lo, hi)
     TFn(_, _, _, lo, hi) -> (lo, hi)
@@ -596,17 +604,24 @@ pub fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx
   }
   var cx1 = Cx { ..cx, alias_resolving: set.insert(cx.alias_resolving, al.name) }
   # The alias target resolves with its own type parameters and an effect-variable
-  # table of its own, empty to start with. An alias may now bind effect
-  # parameters (`alias Mapper[T, U, !e] = fn(T) -> U !e`), and this is where they
-  # are minted: `refuse_decl_effvar` has already refused every name the
-  # declaration did not bind, so whatever reaches here is bound, and minting on
-  # first sight gives one variable per name for the whole target. The table is
-  # emptied rather than inherited so two aliases never share a variable, and the
-  # result is memoized, so the ids are minted once per alias.
+  # table of its own, seeded with the variables the declaration bound
+  # (`alias Mapper[T, U, !e] = fn(T) -> U !e`). They are minted at the
+  # declaration, not on first sight here, so a use site that writes an effect
+  # argument has an id to substitute into; the table is seeded rather than
+  # inherited so two aliases never share a variable, and the result is
+  # memoized, so the ids are minted once per alias. `refuse_decl_effvar` has
+  # already refused every name the declaration did not bind, so nothing else
+  # reaches here to be minted on sight.
   let saved_tp = cx1.current_tparams
   let saved_ev = cx1.current_eff_vars
-  let empty_ev: Map[String, Eff] = map.empty()
-  cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: empty_ev }
+  var seed_ev: Map[String, Eff] = map.empty()
+  for v in al.eparams {
+    match v {
+      EffVar(n, _) -> { seed_ev = map.insert(seed_ev, n, v) }
+      _ -> ()
+    }
+  }
+  cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: seed_ev }
   let (cx2, t) = resolve_type(cx1, ref)
   var cx3 = Cx { ..cx2, current_tparams: saved_tp, current_eff_vars: saved_ev }
   cx3 = Cx {
@@ -673,8 +688,8 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
       # type, which is exactly TyFn's child order
       (record_span_at(cx4, lo, hi, params ++ [ret]), TyFn(ps, rt, eff))
     }
-    TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi, type_use)
-    TQual(q, name, targs, lo, hi) -> resolve_qual(cx, q, name, targs, lo, hi)
+    TNamed(name, targs, eargs, lo, hi) -> resolve_named(cx, name, targs, eargs, lo, hi, type_use)
+    TQual(q, name, targs, eargs, lo, hi) -> resolve_qual(cx, q, name, targs, eargs, lo, hi)
     TAssoc(subj, name, lo, hi) -> {
       # `T.Item` has no written sub-reference: the subject is a bare name
       let (cx1, t) = resolve_assoc(cx, subj, name, lo, hi)
@@ -733,6 +748,7 @@ fn resolve_qual(
   q: String,
   name: String,
   targs: List[TypeRef],
+  eargs: List[EffArg],
   lo: Int,
   hi: Int
 ) -> (Cx, Ty) !io = {
@@ -745,9 +761,11 @@ fn resolve_qual(
   }
   match map.get(exp.aliases, name) {
     Some(al) -> {
+      let enames = alias_enames(al)
+      let (cxe, bad_earg) = check_alias_eargs(cx, al, enames, eargs, lo, hi)
+      if bad_earg { return (cxe, TyError) }
       if len(targs) != len(al.tparams) {
-        return (cerr(cx, "`" ++ al.name ++ "` takes " ++ to_string(len(al.tparams)) ++
-            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
+        return (ty_arity_err(cxe, al.name, len(al.tparams), len(targs), enames, lo, hi), TyError)
       }
       # imported aliases carry their declaring module's resolution; nothing
       # here re-resolves the target against this module's scope
@@ -755,11 +773,14 @@ fn resolve_qual(
         Some(t) -> t
         None -> TyError
       }
-      if target == TyError { return (cx, TyError) }
+      if target == TyError { return (cxe, TyError) }
+      let em0 = earg_subst(al.eparams, eargs)
       if len(al.tparams) == 0 {
-        return (record_span_at(cx, lo, hi, no_trefs()), wrap_opaque(al, [], target))
+        let m0: Map[Int, Ty] = map.empty()
+        return (record_span_at(cxe, lo, hi, no_trefs()),
+          wrap_opaque(al, [], subst(target, m0, em0)))
       }
-      var cx2 = cx
+      var cx2 = cxe
       var m2: Map[Int, Ty] = map.empty()
       var args: List[Ty] = []
       var i = 0
@@ -775,20 +796,23 @@ fn resolve_qual(
         }
         i = i + 1
       }
-      let em: Map[Int, Eff] = map.empty()
       let kids = if al.is_opaque { targs } else { no_trefs() }
-      return (record_span_at(cx2, lo, hi, kids), wrap_opaque(al, args, subst(target, m2, em)))
+      return (record_span_at(cx2, lo, hi, kids), wrap_opaque(al, args, subst(target, m2, em0)))
     }
     None -> ()
   }
   match map.get(exp.types_by_name, name) {
     Some(aid) -> {
       let info = adt_of(cx.adts, aid)
+      let (cxe, bad_earg) = refuse_nominal_earg(cx, info.name,
+        if info.is_record { "a record type" } else { "a variant type" },
+        len(info.eparams) > 0, eargs, lo, hi)
+      if bad_earg { return (cxe, TyError) }
       if len(targs) != len(info.tparams) {
-        return (cerr(cx, "`" ++ info.name ++ "` takes " ++ to_string(len(info.tparams)) ++
-            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
+        return (ty_arity_err(cxe, info.name, len(info.tparams), len(targs), info.eparams,
+          lo, hi), TyError)
       }
-      var cx1 = cx
+      var cx1 = cxe
       var args: List[Ty] = []
       for a in targs {
         let (cx2, t) = resolve_type(cx1, a)
@@ -814,10 +838,188 @@ fn resolve_qual(
   }
 }
 
+## ---- effect arguments at a type application (spec §6.3) ----
+
+## Rule 丙 prime at a use site: a declaration-bound effect parameter has no
+## evidence slot. A record is not a frame, and a type reference has no
+## parameter for evidence to arrive through, so the only rows that may be
+## written for one are the rows that owe none. `!io` is the whole of that set
+## in today's grammar -- pure has no spelling in row position -- and every
+## other atom stands for evidence somebody has to hand over: a declared effect,
+## an associated-effect projection, or a variable bound on some other
+## declaration or signature.
+##
+## The atoms are read, not resolved. Resolving `!e` here would mint the
+## variable into whatever effect table is current and hand the enclosing
+## signature an effect parameter it never wrote.
+##
+## True in the result means the argument was refused.
+fn refuse_owed_earg(cx: Cx, owner: String, ea: EffArg) -> (Cx, Bool) = {
+  for a in ea.atoms {
+    if a != "io" {
+      let hint = if is_upper_name(a) {
+        "a handler is supplied where the closure is called, so a written label " ++
+          "needs a frame to arrive at; bind the variable on the function that " ++
+          "runs the closure, or write `!io`"
+      } else {
+        "a variable bound elsewhere owes evidence that its binder's frame holds; " ++
+          "write `!io`, which covers any row, or omit the argument and let the " ++
+          "declaration's own variable stand"
+      }
+      return (cerr_h(cx, "`!" ++ a ++ "` cannot be an effect argument to `" ++ owner ++
+          "`: a type declaration's effect parameter carries no evidence (spec §6.3)",
+        ea.lo, ea.hi, hint), true)
+    }
+  }
+  (cx, false)
+}
+
+## The effect-argument half of a type application's arity. A declaration that
+## binds none takes none. One that binds some takes either all of them, or --
+## decision 7 of docs/effect-params-design.md -- none at all: the elided
+## spelling, whose slot stays the declaration's own variable and is solved by
+## whatever the consumer's row has to cover.
+##
+## True in the result means the application was refused.
+fn check_eargs(
+  cx: Cx,
+  owner: String,
+  enames: List[String],
+  eargs: List[EffArg],
+  lo: Int,
+  hi: Int
+) -> (Cx, Bool) = {
+  if len(eargs) == 0 { return (cx, false) }
+  if len(enames) == 0 {
+    return (cerr_h(cx, "`" ++ owner ++ "` binds no effect parameters", lo, hi,
+      "an effect argument answers a `[!e]` in the declaration's parameter list, " ++
+        "and this one has none"), true)
+  }
+  if len(eargs) != len(enames) {
+    return (cerr(cx, "`" ++ owner ++ "` binds " ++ to_string(len(enames)) ++
+        " effect parameter(s), got " ++ to_string(len(eargs)), lo, hi), true)
+  }
+  var cx1 = cx
+  var bad = false
+  for ea in eargs {
+    let (cx2, refused) = refuse_owed_earg(cx1, owner, ea)
+    cx1 = cx2
+    if refused { bad = true }
+  }
+  (cx1, bad)
+}
+
+## `check_eargs` for a name the alias table answers, which is two declarations:
+## a transparent `alias`, which expands and takes the argument, and an `opaque
+## type`, which is nominal and does not.
+fn check_alias_eargs(
+  cx: Cx,
+  al: AliasE,
+  enames: List[String],
+  eargs: List[EffArg],
+  lo: Int,
+  hi: Int
+) -> (Cx, Bool) =
+  if al.is_opaque {
+    refuse_nominal_earg(cx, al.name, "an opaque type", len(enames) > 0, eargs, lo, hi)
+  } else {
+    check_eargs(cx, al.name, enames, eargs, lo, hi)
+  }
+
+## "`X` takes N type parameter(s), got M", with the sentence that says the
+## other list exists when the declaration binds effect parameters. Without it
+## `Cell[Int]` on a `type Cell[!e]` reads as "this type is not generic", which
+## is the wrong repair: the parameter is there, it is on the other axis.
+fn ty_arity_err(
+  cx: Cx,
+  owner: String,
+  declared: Int,
+  got: Int,
+  enames: List[String],
+  lo: Int,
+  hi: Int
+) -> Cx = {
+  let msg = "`" ++ owner ++ "` takes " ++ to_string(declared) ++
+    " type parameter(s), got " ++ to_string(got)
+  if len(enames) == 0 {
+    cerr(cx, msg, lo, hi)
+  } else {
+    cerr_h(cx, msg, lo, hi,
+      "`" ++ owner ++ "` also binds the effect parameter(s) `!" ++
+        join(enames, "`, `!") ++ "`, written with the `!`: `" ++ owner ++ "[!io]`")
+  }
+}
+
+## The substitution an application's effect arguments make. Empty when the
+## application elided them, which is what keeps the elided spelling resolving
+## to exactly the type it resolved to before the position existed.
+fn earg_subst(eparams: List[Eff], eargs: List[EffArg]) -> Map[Int, Eff] = {
+  var em: Map[Int, Eff] = map.empty()
+  if len(eargs) != len(eparams) { return em }
+  for v in eparams {
+    match v {
+      # every atom is `io` by the time this runs: `refuse_owed_earg` has
+      # refused the rest, so the row an argument denotes is EIo and needs no
+      # resolver of its own
+      EffVar(_, id) -> { em = map.insert(em, id, EIo) }
+      _ -> ()
+    }
+  }
+  em
+}
+
+## A **nominal** type takes no effect argument: a record, a variant, or an
+## opaque type.
+##
+## The reason is identity, not arity. A nominal type is named by its name and
+## its **type** arguments -- `TyAdt(id, args)`, `TyOpaque(id, .., args, ..)` --
+## and neither has a slot for an effect argument. Accepting one would leave
+## `Cell[!io]` and `Cell` indistinguishable, or, on an opaque type whose target
+## does carry the substitution, distinguishable but printed the same: two types
+## that a diagnostic renders as one name, which is how "expected Hidden, got
+## Hidden" gets written. A transparent alias has no identity to remember an
+## argument in -- it expands, and the substitution lands in the expansion --
+## which is why the two spellings part company here and not at the parser.
+##
+## True in the result means the application was refused.
+fn refuse_nominal_earg(
+  cx: Cx,
+  name: String,
+  kind: String,
+  binds_any: Bool,
+  eargs: List[EffArg],
+  lo: Int,
+  hi: Int
+) -> (Cx, Bool) = {
+  if len(eargs) == 0 { return (cx, false) }
+  if not binds_any {
+    return (cerr_h(cx, "`" ++ name ++ "` binds no effect parameters", lo, hi,
+      "an effect argument answers a `[!e]` in the declaration's parameter list, " ++
+        "and this one has none"), true)
+  }
+  (cerr_h(cx, "`" ++ name ++ "` is " ++ kind ++ " and takes no effect argument", lo, hi,
+    "a named type is its name and its type arguments, so there is nowhere for the row " ++
+      "to be remembered. Write `" ++ name ++ "` and let the consumer's row cover it, " ++
+      "or declare a transparent `alias`, which expands"), true)
+}
+
+## The names an alias's effect parameters were written with, for a diagnostic.
+fn alias_enames(al: AliasE) -> List[String] = {
+  var out: List[String] = []
+  for v in al.eparams {
+    match v {
+      EffVar(n, _) -> { out = out ++ [n] }
+      _ -> ()
+    }
+  }
+  out
+}
+
 fn resolve_named(
   cx: Cx,
   name: String,
   targs: List[TypeRef],
+  eargs: List[EffArg],
   lo: Int,
   hi: Int,
   type_use: TypeUse
@@ -826,7 +1028,7 @@ fn resolve_named(
   # declaration left a same-spelled type parameter in the recovery scope.
   match map.get(cx.btypes, name) {
     Some(info) -> if builtin_type_hard_reserved(info) {
-      if len(targs) > 0 {
+      if len(targs) > 0 || len(eargs) > 0 {
         return (cerr(cx, "`" ++ name ++ "` is not generic", lo, hi), TyError)
       }
       if type_use == TypeReturn && builtin_type_visible_at_return(info, cx.is_std_module) {
@@ -841,7 +1043,7 @@ fn resolve_named(
   # type parameters shadow everything
   match map.get(cx.current_tparams, name) {
     Some(v) -> {
-      if len(targs) > 0 {
+      if len(targs) > 0 || len(eargs) > 0 {
         return (cerr(cx, "type parameter `" ++ name ++ "` cannot take type arguments", lo, hi),
           TyError)
       }
@@ -851,14 +1053,28 @@ fn resolve_named(
   }
   match map.get(cx.aliases, name) {
     Some(al) -> {
+      let enames = alias_enames(al)
+      # the effect axis is asked first: an argument on an axis the declaration
+      # does not have is its own mistake, and reporting it as "got 0 type
+      # parameters" would name the wrong list
+      let (cxe, bad_earg) = check_alias_eargs(cx, al, enames, eargs, lo, hi)
+      if bad_earg { return (cxe, TyError) }
       if len(targs) != len(al.tparams) {
-        return (cerr(cx, "`" ++ al.name ++ "` takes " ++ to_string(len(al.tparams)) ++
-            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
+        return (ty_arity_err(cxe, al.name, len(al.tparams), len(targs), enames, lo, hi), TyError)
       }
-      let (cx1, target) = resolve_alias_target(cx, al, lo, hi)
+      let (cx1, target) = resolve_alias_target(cxe, al, lo, hi)
       if target == TyError { return (cx1, TyError) }
+      # The effect arguments, applied to the variables the declaration bound.
+      # A transparent alias expands into its target here, so the substitution
+      # lands in the type the use site actually gets: `Thunk[!io]` is
+      # `fn() -> Int !io` where `Thunk` is `fn() -> Int !e`. An opaque type
+      # never reaches this with arguments -- `check_alias_eargs` refused them
+      # -- so the map is empty and `wrap_opaque` sees the target it always saw.
+      let em = earg_subst(al.eparams, eargs)
       if len(al.tparams) == 0 {
-        return (record_span_at(cx1, lo, hi, no_trefs()), wrap_opaque(al, [], target))
+        let m0: Map[Int, Ty] = map.empty()
+        return (record_span_at(cx1, lo, hi, no_trefs()),
+          wrap_opaque(al, [], subst(target, m0, em)))
       }
       var cx2 = cx1
       var m: Map[Int, Ty] = map.empty()
@@ -876,7 +1092,6 @@ fn resolve_named(
         }
         i = i + 1
       }
-      let em: Map[Int, Eff] = map.empty()
       # an opaque type keeps the arguments as its children; a transparent one
       # expands into a target the author did not write here, so it has none
       let kids = if al.is_opaque { targs } else { no_trefs() }
@@ -886,6 +1101,8 @@ fn resolve_named(
   }
   match map.get(cx.btypes, name) {
     Some(info) -> if builtin_type_visible(info, cx.is_std_module) {
+      let (cxe, bad_earg) = check_eargs(cx, name, no_eparam_names(), eargs, lo, hi)
+      if bad_earg { return (cxe, TyError) }
       let arity = len(info.params)
       if len(targs) != arity {
         if arity == 0 {
@@ -909,7 +1126,7 @@ fn resolve_named(
   }
   match map.get(cx.java_classes, name) {
     Some(fqcn) -> {
-      if len(targs) > 0 {
+      if len(targs) > 0 || len(eargs) > 0 {
         return (cerr(cx, "Java types take no type arguments (generics are erased)", lo, hi),
           TyError)
       }
@@ -935,11 +1152,15 @@ fn resolve_named(
     }
     Some(aid) -> {
       let info = adt_of(cx.adts, aid)
+      let (cxe, bad_earg) = refuse_nominal_earg(cx, info.name,
+        if info.is_record { "a record type" } else { "a variant type" },
+        len(info.eparams) > 0, eargs, lo, hi)
+      if bad_earg { return (cxe, TyError) }
       if len(targs) != len(info.tparams) {
-        return (cerr(cx, "`" ++ info.name ++ "` takes " ++ to_string(len(info.tparams)) ++
-            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
+        return (ty_arity_err(cxe, info.name, len(info.tparams), len(targs), info.eparams,
+          lo, hi), TyError)
       }
-      var cx1 = cx
+      var cx1 = cxe
       var args: List[Ty] = []
       for a in targs {
         let (cx2, t) = resolve_type(cx1, a)

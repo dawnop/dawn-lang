@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ ffd06c6c31f57d7f -->
+<!-- doc-check: translation-of docs/spec.md @ 6cfa956833ce8946 -->
 
 # Dawn Language Specification
 
@@ -1804,12 +1804,22 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
   reference has no effect-argument position to instantiate per use site. To make a row that really
   owes evidence travel, bind the variable on the function that runs the closure instead:
   `fn f(g: fn() -> Int !e) -> Int !e`.
-- There is **no syntax for writing an effect argument** at the use site (not in the first batch):
-  `Mapper[Int, String]` gives the type arguments only, and that is **not an arity error**. The
-  omitted slot is still the declaration's own effect variable, solved from context: store a pure
-  closure and it solves to pure there, store an `!io` closure and it solves to `!io` there.
-  **A consumer's own row has to cover it**, and an `!e` bound by that signature alone does not
-  cover a variable bound elsewhere, so a consumer writes `!io` today (`!io` covers any row).
+- An effect argument may be written at the use site, and **only a transparent `alias` takes one**:
+  `Thunk[!io]`, `Mapper[Int, String, !io]`. It shares the brackets with the type arguments and is
+  positioned within its own list (the declaring side splits `[T, U, !e]` the same way), so writing
+  one between two type arguments does not move the type arguments. Which rows may be written is
+  settled by the bullet above: today only `!io` (pure has no spelling in row position), while a row
+  carrying a label, a projection or a variable bound elsewhere is a compile error.
+  **A record, a variant and an `opaque type` do not take one**: such a type is its name plus its
+  type arguments, with nowhere to remember the row, so accepting one would leave two types either
+  indistinguishable or distinguishable but printed under one name. A transparent alias has no
+  identity to remember it in; it expands in place, and the argument lands in the expansion.
+- Omitting the effect argument stays legal and is **not an arity error**: `Mapper[Int, String]`
+  gives the type arguments only. The omitted slot is still the declaration's own effect variable,
+  solved from context: store a pure closure and it solves to pure there, store an `!io` closure and
+  it solves to `!io` there. **A consumer's own row has to cover it**, and an `!e` bound by that
+  signature alone does not cover a variable bound elsewhere, so a consumer writes `!io` today
+  (`!io` covers any row).
 - `!(e1 | e2)` is a union, stored **normalised**: union is componentwise (a boolean or on the io
   bit, plain set union on the variables, the projections and the labels), `pure` is the identity
   (and can be dropped), and a row that can take a smaller shape takes it (`!(e|e)` is `!e`).

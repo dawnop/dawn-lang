@@ -22,6 +22,53 @@ fn rendered(src: String) -> String = {
   render_module(m, ds)
 }
 
+test "an effect argument joins its own list, and the type arguments keep theirs" {
+  let (m, ds) = parse_module("fn f(x: Mapper[Int, !io, String]) -> Int = 1")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) ->
+      match f.params[0].tref {
+        TNamed(name, args, eargs, _, _) -> {
+          assert name == "Mapper"
+          # the effect argument was written between the two type arguments and
+          # neither one moved: this is the split `type_params` makes on the
+          # declaring side, replayed at the use site
+          assert len(args) == 2
+          assert len(eargs) == 1
+          assert eargs[0].atoms == ["io"]
+          match args[0] {
+            TNamed(a0, _, _, _, _) -> { assert a0 == "Int" }
+            _ -> { assert false }
+          }
+          match args[1] {
+            TNamed(a1, _, _, _, _) -> { assert a1 == "String" }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "an effect argument takes the row spellings a return position takes" {
+  let (m, ds) = parse_module("fn f(a: T[!(x | Ask)], b: U[!C.E]) -> Int = 1")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) -> {
+      match f.params[0].tref {
+        TNamed(_, _, eargs, _, _) -> { assert eargs[0].atoms == ["x", "Ask"] }
+        _ -> { assert false }
+      }
+      match f.params[1].tref {
+        TNamed(_, _, eargs, _, _) -> { assert eargs[0].atoms == ["C.E"] }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+}
+
 test "a function declaration parses to one decl" {
   let (m, ds) = parse_module("fn f(x: Int) -> Int = x")
   assert len(ds) == 0
@@ -881,7 +928,7 @@ test "a module-qualified type parses in type position" {
   match m.decls[0] {
     DFn(f) -> {
       match f.params[0].tref {
-        TQual(q, name, targs, _, _) -> {
+        TQual(q, name, targs, _, _, _) -> {
           assert q == "v"
           assert name == "Json"
           assert len(targs) == 0
@@ -889,7 +936,7 @@ test "a module-qualified type parses in type position" {
         _ -> { assert false }
       }
       match f.ret {
-        Some(TQual(q2, name2, targs2, _, _)) -> {
+        Some(TQual(q2, name2, targs2, _, _, _)) -> {
           assert q2 == "v"
           assert name2 == "Box"
           assert len(targs2) == 1
@@ -919,7 +966,7 @@ test "type grouping disambiguates outer and inner function effects" {
         Some(TFn(_, inner, outer_effs, _, _)) -> {
           assert outer_effs == ["io"]
           match inner {
-            TFn(_, TNamed(name, _, _, _), inner_effs, _, _) -> {
+            TFn(_, TNamed(name, _, _, _, _), inner_effs, _, _) -> {
               assert name == "Int"
               assert len(inner_effs) == 0
             }
@@ -955,7 +1002,7 @@ test "type grouping disambiguates outer and inner function effects" {
   match m.decls[3] {
     DType(t) ->
       match t.alias_target {
-        Some(TNamed(name, args, _, _)) -> {
+        Some(TNamed(name, args, _, _, _)) -> {
           assert name == "Int"
           assert len(args) == 0
         }

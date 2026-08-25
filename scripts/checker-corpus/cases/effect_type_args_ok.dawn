@@ -1,0 +1,41 @@
+# cx.dawn: the accept half of an explicit effect argument at a type application
+# (spec §6.3). No golden diagnostics -- everything here is legal, and the
+# refusals it is the control for are in effect_type_args.dawn next door.
+use std/io
+
+alias Thunk[!e] = fn() -> Int !e
+
+alias Mapper[T, U, !e] = fn(T) -> U !e
+
+# the argument answers the binder, and the alias expands with it in place
+fn force(t: Thunk[!io]) -> Int !io = t()
+
+# beside type arguments: the two axes are separate lists, so the type
+# arguments still line up with `[T, U]` however the author interleaved them
+fn apply_io(m: Mapper[Int, String, !io]) -> String !io = m(1)
+
+# a union that is only io is the same row written the long way
+fn force_grouped(t: Thunk[!(io | io)]) -> Int !io = t()
+
+# nested inside a function type in the same signature, and beside a variable
+# the signature binds for itself -- the variable is not the argument, it is
+# the row of the closure the consumer runs
+fn drive(t: Thunk[!io], k: fn(Int) -> Int !e) -> Int !io !e = k(t())
+
+# decision 7 stands: the elided spelling is still not an arity error, and it
+# still means the declaration's own variable
+fn store(m: Mapper[Int, String]) -> Mapper[Int, String] = m
+
+fn pure_in() -> Mapper[Int, String] = n => to_string(n)
+
+pub fn main() -> Unit !io = {
+  io.println(to_string(force(() => 1)))
+  io.println(apply_io(n => to_string(n)))
+  io.println(to_string(force_grouped(() => 2)))
+  io.println(to_string(drive(() => 3, n => n + 1)))
+  io.println(store(pure_in())(4))
+  io.println(to_string(force(() => {
+    io.println("an io thunk goes in the io slot")
+    5
+  })))
+}

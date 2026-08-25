@@ -1,0 +1,76 @@
+# cx.dawn: the refusals around an explicit effect argument at a type
+# application (spec §6.3). The accept half lives in effect_type_args_ok.dawn;
+# here the golden records what each refusal says and why, in emission order.
+effect Ask { fn get() -> Int }
+
+alias Thunk[!e] = fn() -> Int !e
+
+alias Mapper[T, U, !e] = fn(T) -> U !e
+
+type Cell[!e] = { f: fn() -> Int !e }
+
+type Pair[T] = { a: T, b: T }
+
+type Chain[!e] =
+  | Ready
+  | Later(mk: fn() -> Int !e)
+
+opaque type Hidden[!e] = fn(Int) -> Int !e
+
+# --- the kind mismatch, both directions ---
+
+# an effect argument at a declaration that binds none: the wrong axis, and the
+# type-parameter arity would name the wrong list
+fn no_binder(p: Pair[!io]) -> Int = p.a
+
+# a builtin is the same answer from a different table
+fn builtin_binder(xs: List[!io]) -> Int = 1
+
+# and a type argument at a declaration whose only parameter is an effect one.
+# The arity message is the old one; the hint is what says the parameter exists
+# and is spelled with a `!`
+fn wrong_axis(c: Cell[Int]) -> Int !io = (c.f)()
+
+# too many, on the axis that does have parameters
+fn too_many(t: Thunk[!io, !io]) -> Int !io = t()
+
+# --- rule 丙 prime: only a row that owes no evidence ---
+
+# a declared effect: a handler is supplied at the call, and a type reference
+# has no frame for the evidence to arrive at
+fn labelled(t: Thunk[!Ask]) -> Int !Ask = t()
+
+# a variable bound on this signature: its evidence lives in this frame, and
+# the alias has no parameter to carry it over
+fn foreign_var(t: Thunk[!e], k: fn() -> Int !e) -> Int !e = t() + k()
+
+# the same refusal from a declaration rather than a signature: the variable
+# `Nested` binds is bound elsewhere as far as `Thunk` is concerned
+alias Nested[!e] = (Thunk[!e], Int)
+
+# --- a nominal type has no argument position at all ---
+
+# a record: named by its name and its type arguments, with nowhere to keep a row
+fn record_io(c: Cell[!io]) -> Int !io = (c.f)()
+
+# a variant says the same thing about itself
+fn variant_io(c: Chain[!io]) -> Int !io =
+  match c {
+    Ready -> 0
+    Later(mk) -> mk()
+  }
+
+# and an opaque type, whose target *would* carry the substitution -- which is
+# worse, not better: the two types print as one name
+fn opaque_io(h: Hidden[!io]) -> Int !io = 1
+
+# --- the substitution is real, and this is where it shows ---
+
+# with the argument written, the row in the expansion is io, so a pure
+# consumer is refused for owing io
+fn io_slot(t: Thunk[!io]) -> Int = t()
+
+# with the argument elided, the row is the alias's own variable, and the
+# refusal is the other one -- the variable has no binder the consumer can
+# write. Two spellings, two sentences: that is the argument doing something.
+fn own_var(m: Mapper[Int, String]) -> String = m(1)

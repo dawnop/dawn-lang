@@ -53,6 +53,7 @@ use check/types.{
   EV_PACK_ID, ev_pack_ty,
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
+  no_eparam_names,
   ty_mentions_var, ty_map_children, ty_any_child,
   SlotAt, SlotNoField, SlotAfterNamed, SlotOverflow, SlotTaken, ctor_slots, arg_slots,
   is_numeric, is_errorish, ty_char, peel_opaque,
@@ -396,22 +397,22 @@ fn module_alias_receiver(cx: Cx, recv: Expr) -> Bool = {
 
 test "scalar and container types resolve" {
   let cx = test_cx()
-  let (cx1, t) = resolve_type(cx, TNamed("Int", [], 0, 3))
+  let (cx1, t) = resolve_type(cx, TNamed("Int", [], [], 0, 3))
   assert t == TyInt
   let (cx2, t2) = resolve_type(cx1,
-    TNamed("Map", [TNamed("Int", [], 4, 7), TNamed("String", [], 9, 15)], 0, 16))
+    TNamed("Map", [TNamed("Int", [], [], 4, 7), TNamed("String", [], [], 9, 15)], [], 0, 16))
   assert t2 == TyMap(TyInt, TyString)
   assert len(cx2.diags) == 0
 }
 
 test "Array names the backend primitive in std and nothing in user code" {
   let std_cx = cx_new(Some("std/list"), None)
-  let (s1, t) = resolve_type(std_cx, TNamed("Array", [TNamed("Int", [], 6, 9)], 0, 10))
+  let (s1, t) = resolve_type(std_cx, TNamed("Array", [TNamed("Int", [], [], 6, 9)], [], 0, 10))
   assert t == TyArray(TyInt)
   assert len(s1.diags) == 0
   # outside std the name falls through to the ordinary lookups, so a user type
   # called Array still means their own -- here, nothing declares one
-  let (u1, t2) = resolve_type(test_cx(), TNamed("Array", [TNamed("Int", [], 6, 9)], 0, 10))
+  let (u1, t2) = resolve_type(test_cx(), TNamed("Array", [TNamed("Int", [], [], 6, 9)], [], 0, 10))
   assert t2 == TyError
   assert str.contains(u1.diags[0].msg, "unknown type: Array")
 }
@@ -423,7 +424,7 @@ test "which types may be a Map/Set key is what Hash answers" {
   # `[K: Eq + Hash]`. That bound is where it is caught, and it is caught by
   # the same rule that gives `hash(1.5)` outside a map the same answer.
   let (cx1, t) = resolve_type(cx,
-    TNamed("Map", [TNamed("Float", [], 4, 9), TNamed("Int", [], 11, 14)], 0, 15))
+    TNamed("Map", [TNamed("Float", [], [], 4, 9), TNamed("Int", [], [], 11, 14)], [], 0, 15))
   assert t == TyMap(TyFloat, TyInt)
   assert len(cx1.diags) == 0
   assert structural_gap(cx1, HASH_ID, TyFloat, set.empty()) == Some(TyFloat)
@@ -437,7 +438,7 @@ test "which types may be a Map/Set key is what Hash answers" {
 
 test "unknown types get suggestions" {
   let cx = test_cx()
-  let (cx1, t) = resolve_type(cx, TNamed("Strin", [], 0, 5))
+  let (cx1, t) = resolve_type(cx, TNamed("Strin", [], [], 0, 5))
   assert t == TyError
   assert cx1.diags[0].msg == "unknown type: Strin"
   assert cx1.diags[0].hint == "did you mean `String`?"
@@ -2004,6 +2005,7 @@ test "field access follows record shape with substitution" {
     name: "Box",
     is_record: true,
     tparams: [tv],
+    eparams: no_eparam_names(),
     ctors: [CtorI { adt: aid, name: "Box", fields: [FieldI { name: "v", ty: tv }] }],
     derives_show: false,
     derives_ord: false,
@@ -3008,7 +3010,7 @@ test "a bound name is not an edge to the top-level function it shadows" {
   assert set.to_list(refs) == ["d"]
   # a for-loop variable and a local function's own name are binders too
   let loop_body = EBlock(
-    [SLocalFn("k", no_lparams(), TNamed("Int", [], 0, 1), [], EApply(EVar("k", 0, 1), [], 0, 1),
+    [SLocalFn("k", no_lparams(), TNamed("Int", [], [], 0, 1), [], EApply(EVar("k", 0, 1), [], 0, 1),
       0, 1, 0, 1)],
     Some(EVar("i", 0, 1)),
     0,
@@ -8566,7 +8568,7 @@ test "argument names name a signature or a constructor; a value callee says so" 
   assert cx3.diags[0].hint == "pass the arguments by position"
   assert cx3.diags[0].lo == 2
   # (3) an applied expression is a function value too, with no name to quote
-  let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], 4, 7)), lo: 1, hi: 2 }],
+  let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], [], 4, 7)), lo: 1, hi: 2 }],
     EVar("x", 11, 12), false, 0, 12)
   let on_value = EApply(lam, [Arg { name: Some("a"), e: EInt(1, 16, 17), trailing: false, lo: 13, hi: 17 }], 0, 18)
   let (cx4, _, _) = check_expr(cx, on_value, no_expected())
@@ -8723,7 +8725,7 @@ test "the same call, four callees, four kinds of typed node" {
     _ -> { assert false }
   }
   # anything else applies a function value
-  let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], 4, 7)), lo: 1, hi: 2 }],
+  let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], [], 4, 7)), lo: 1, hi: 2 }],
     EVar("x", 11, 12), false, 0, 12)
   let (_, _, n4) = check_expr(cx, EApply(lam, [pos_arg(EInt(1, 13, 14))], 0, 15), no_expected())
   match n4 {

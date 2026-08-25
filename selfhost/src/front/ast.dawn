@@ -15,10 +15,11 @@ use std/str
 # ---- type references ----
 
 pub type TypeRef =
-  | TNamed(name: String, args: List[TypeRef], lo: Int, hi: Int)
+  | TNamed(name: String, args: List[TypeRef], eargs: List[EffArg], lo: Int, hi: Int)
 # a module-qualified type: `m.T[...]` where `m` is a `use ... as m` alias
 # (LANG-06; the alias namespace is separate from values, spec §10.3)
-  | TQual(qual: String, name: String, args: List[TypeRef], lo: Int, hi: Int)
+  | TQual(qual: String, name: String, args: List[TypeRef], eargs: List[EffArg],
+    lo: Int, hi: Int)
 # a projection `T.Item` (docs/assoc-types-design.md D2): both names uppercase,
 # which no other type form starts with, so the shape is unambiguous. The
 # subject is a bare name -- the checker requires it to resolve to a type
@@ -44,6 +45,17 @@ pub type TypeParamDecl = { name: String, bounds: List[Bound], lo: Int, hi: Int }
 ## The span runs from the `!` to the end of the name, so a diagnostic underlines
 ## what the author wrote.
 pub type EffParamDecl = { name: String, lo: Int, hi: Int }
+
+## `!io` written as an argument at a type-application site: `Thunk[!io]`,
+## `Mapper[Int, String, !io]` (spec §6.3, tier 1 of #344). It travels in its own
+## list beside `args` for the reason `EffParamDecl` travels beside
+## `TypeParamDecl`: a type application's arguments are matched positionally
+## against the declaration's type parameters, and a member of another kind in
+## that list would slide every argument after it one slot without saying so.
+##
+## `atoms` is the row's atom names, exactly what `TFn.effs` carries, so one
+## resolver reads both spellings. The span runs from the `!` to the last atom.
+pub type EffArg = { atoms: List[String], lo: Int, hi: Int }
 
 ## `default`: the parameter's default value (#207) -- checked once in the
 ## declaring module and synthesized as `f$default$k`, so a call may omit the
@@ -568,8 +580,8 @@ pub fn e_hi(e: Expr) -> Int =
 
 pub fn t_lo(t: TypeRef) -> Int =
   match t {
-    TNamed(_, _, lo, _) -> lo
-    TQual(_, _, _, lo, _) -> lo
+    TNamed(_, _, _, lo, _) -> lo
+    TQual(_, _, _, _, lo, _) -> lo
     TAssoc(_, _, lo, _) -> lo
     TTuple(_, lo, _) -> lo
     TFn(_, _, _, lo, _) -> lo
@@ -577,8 +589,8 @@ pub fn t_lo(t: TypeRef) -> Int =
 
 pub fn t_hi(t: TypeRef) -> Int =
   match t {
-    TNamed(_, _, _, hi) -> hi
-    TQual(_, _, _, _, hi) -> hi
+    TNamed(_, _, _, _, hi) -> hi
+    TQual(_, _, _, _, _, hi) -> hi
     TAssoc(_, _, _, hi) -> hi
     TTuple(_, _, hi) -> hi
     TFn(_, _, _, _, hi) -> hi

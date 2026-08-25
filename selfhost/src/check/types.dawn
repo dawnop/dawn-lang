@@ -919,6 +919,14 @@ pub type AdtI = {
   name: String,
   is_record: Bool,
   tparams: List[Ty],
+  # the effect parameters the declaration bound, in the order it wrote them
+  # (`type Cell[!e]` gives `["e"]`). Names and not `Eff`s: a record's identity
+  # is `TyAdt(id, args)`, which carries type arguments only, so nothing here
+  # is ever substituted. What the list is for is the diagnostic -- an arity
+  # that counts only type parameters cannot say why `Cell[Int]` is wrong, and
+  # a use site that writes an effect argument has to be told that a record has
+  # no position for one (spec §6.3).
+  eparams: List[String],
   ctors: List[CtorI],
   derives_show: Bool,
   derives_ord: Bool,
@@ -929,6 +937,9 @@ pub type AdtI = {
   # and the importer never has to guess what `pub` meant over there.
   audience: Audience
 }
+
+## `[]` at `List[String]`, for the declarations that bind no effect parameter.
+pub fn no_eparam_names() -> List[String] = []
 
 pub alias Adts = Map[Int, AdtI]
 
@@ -1658,6 +1669,7 @@ pub fn ev_pack_adt() -> AdtI =
     name: "ev\$Pack",
     is_record: true,
     tparams: [],
+    eparams: no_eparam_names(),
     ctors: [
       CtorI {
         adt: EV_PACK_ID,
@@ -2078,6 +2090,7 @@ pub fn prelude_adts() -> Adts = {
     name: "Option",
     is_record: false,
     tparams: [ot],
+    eparams: no_eparam_names(),
     ctors: [
       CtorI { adt: OPTION_ID, name: "Some", fields: [FieldI { name: "value", ty: ot }] },
       CtorI { adt: OPTION_ID, name: "None", fields: [] }
@@ -2094,6 +2107,7 @@ pub fn prelude_adts() -> Adts = {
     name: "Result",
     is_record: false,
     tparams: [rt, re],
+    eparams: no_eparam_names(),
     ctors: [
       CtorI { adt: RESULT_ID, name: "Ok", fields: [FieldI { name: "value", ty: rt }] },
       CtorI { adt: RESULT_ID, name: "Err", fields: [FieldI { name: "error", ty: re }] }
@@ -2124,6 +2138,7 @@ pub fn prelude_adts() -> Adts = {
     name: "ForeignError",
     is_record: true,
     tparams: [],
+    eparams: no_eparam_names(),
     ctors: [
       CtorI {
         adt: FOREIGN_ERROR_ID,

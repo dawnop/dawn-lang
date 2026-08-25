@@ -10,6 +10,7 @@ use front/token.{Diag}
 use front/lexdump.{esc}
 use front/ast.{
   TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, EffParamDecl,
+  EffArg,
   Param, LambdaParam,
   FieldDecl, CtorDecl, ImportName, StrPart, SPText, SPInterp,
   BinOp, UnOp, bin_op_name, un_op_name,
@@ -217,17 +218,17 @@ fn dump_trait_method(out: List[String], d: Int, m: TraitMethod) -> List[String] 
 
 fn dump_tref(out: List[String], d: Int, t: TypeRef) -> List[String] =
   match t {
-    TNamed(name, targs, lo, hi) -> {
+    TNamed(name, targs, eargs, lo, hi) -> {
       var o = out ++ [ind(d) ++ "TNamed " ++ name ++ " " ++ sp(lo, hi)]
       for a in targs { o = dump_tref(o, d + 1, a) }
-      o
+      dump_eargs(o, d + 1, eargs)
     }
     TAssoc(subj, name, lo, hi) ->
       out ++ [ind(d) ++ "TAssoc " ++ subj ++ "." ++ name ++ " " ++ sp(lo, hi)]
-    TQual(q, name, targs, lo, hi) -> {
+    TQual(q, name, targs, eargs, lo, hi) -> {
       var o = out ++ [ind(d) ++ "TQual " ++ q ++ "." ++ name ++ " " ++ sp(lo, hi)]
       for a in targs { o = dump_tref(o, d + 1, a) }
-      o
+      dump_eargs(o, d + 1, eargs)
     }
     TTuple(elems, lo, hi) -> {
       var o = out ++ [ind(d) ++ "TTuple " ++ sp(lo, hi)]
@@ -241,6 +242,17 @@ fn dump_tref(out: List[String], d: Int, t: TypeRef) -> List[String] =
       dump_tref(o, d + 1, ret)
     }
   }
+
+## The effect arguments of a type application, one child line each. A line
+## rather than a field on the parent so an application that writes none dumps
+## exactly the bytes it dumped before the position existed.
+fn dump_eargs(out: List[String], d: Int, eargs: List[EffArg]) -> List[String] = {
+  var o = out
+  for ea in eargs {
+    o = o ++ [ind(d) ++ "TEffArg " ++ atoms(ea.atoms) ++ " " ++ sp(ea.lo, ea.hi)]
+  }
+  o
+}
 
 fn dump_lparam(out: List[String], d: Int, pm: LambdaParam) -> List[String] = {
   let has_ann = match pm.ann {
