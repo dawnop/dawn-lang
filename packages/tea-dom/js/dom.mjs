@@ -48,6 +48,19 @@ const LISTENERS = new WeakMap();
 // view describes, and a bridge that guessed would be guessing per element.
 const PROPERTIES = new Set(['value', 'checked']);
 
+// The tags those two names are live on -- the form controls the WHATWG
+// dirty-flag argument is about, and no others. The scope matters for foreign
+// elements: a custom element may expose a `value` of its own, which is how it
+// answers a `Value` listener, and that property belongs to the library. On
+// anything outside this set the guest's `value` prop travels as an attribute
+// like every other prop, and an undeclared one is never reset -- resetting it
+// would write into library state, and throw outright on a getter-only one.
+const CONTROL_TAGS = new Set(['input', 'textarea', 'select']);
+
+function isControl(el) {
+  return typeof el.tagName === 'string' && CONTROL_TAGS.has(el.tagName.toLowerCase());
+}
+
 export class DomHost {
   /**
    * `mount` is the element the document is built inside; it is never itself
@@ -138,14 +151,15 @@ export class DomHost {
       if (!want.has(name)) el.removeAttribute(name);
     }
     for (const [name, value] of want) {
-      if (PROPERTIES.has(name)) writeProperty(el, name, value);
+      if (PROPERTIES.has(name) && isControl(el)) writeProperty(el, name, value);
       else if (el.getAttribute(name) !== value) el.setAttribute(name, value);
     }
     // "and no others" has to hold for the property half too. A property is
     // reset only where the element has one: `'value' in el` is false for a
     // `<div>`, and assigning to it there would invent an expando the document
-    // did not have.
+    // did not have. And only on a form control at all; see `CONTROL_TAGS`.
     for (const name of PROPERTIES) {
+      if (!isControl(el)) continue;
       if (want.has(name) || !(name in el)) continue;
       writeProperty(el, name, '');
     }
