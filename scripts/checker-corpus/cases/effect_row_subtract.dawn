@@ -12,7 +12,13 @@
 # precondition (spec §6.6): every solution of `!(e|R) ~ !S` agrees on the rows
 # that contain `R`, so which one was chosen can be read off only a row that
 # mentions `e` without `R`. The refused half below is that class, once per
-# position the scan looks at, plus the two shapes the rule declines to touch.
+# position the scan looks at, plus the one shape the rule declines to touch.
+#
+# `R ⊆ S` is not required. A closure short of `R` is padded rather than
+# refused: it binds `e` to what is left of its own row and is handed a pack
+# built from the slot's instantiated row, which is a superset it does not read
+# to the end. That refusal was deleted on 2026-08-26 and the accepted half
+# below is what it used to reject.
 #
 # Accepting is not the claim on its own. That a labelled closure reaching the
 # union slot still finds its handler is pinned at run level, on both backends,
@@ -80,6 +86,39 @@ pub fn two_arguments() -> Int !io = {
   })
 }
 
+# The closure does something, but not the io the parameter names. This is what
+# the deleted `R ⊆ S` guard refused, and it is the ordinary shape of a runner
+# whose own body is what does the io.
+pub fn pad_no_io() -> Int !io = {
+  with handle Tell { tell() => 5 }
+  go(() => tell() + 1)
+}
+
+# The same with a named atom in `R`: the declaration speaks for `Ask` and for
+# io, the closure only tells, and `e := !Tell`.
+pub fn pad_named_atom() -> Int !io = {
+  with handle Tell { tell() => 5 }
+  with handle Ask { ask() => 7 }
+  go2(() => tell() + 1)
+}
+
+# A pure closure into the two-atom slot. It reads nothing, so it is the control
+# that says the padded slot's unused keys cost nothing to hand over.
+pub fn pad_pure() -> Int !io = {
+  with handle Ask { ask() => 7 }
+  go2(() => 1)
+}
+
+# Forwarding a caller's own polymorphic callback. Both signatures promise io,
+# and `g`'s row is a variable of the *enclosing* declaration, so what is short
+# of `R` here is a row nobody has grounded yet.
+fn forward(g: fn() -> Int !e2) -> Int !(e2 | io) = go(g)
+
+pub fn pad_forward() -> Int !io = {
+  with handle Tell { tell() => 5 }
+  forward(() => tell() + 1)
+}
+
 # ---- refused ----
 
 # The observable class, seen from a second parameter: `u`'s row is `!e` with no
@@ -117,13 +156,4 @@ pub fn two_vars() -> Int !io = {
     io.println("in")
     tell() + 1
   })
-}
-
-# `R ⊆ S` fails: the closure's row is short of the io the parameter names.
-# Widening in that direction is `eff_carries`' business and it is free only
-# where the declared row already covers the closure's, which `!(e|io)` does not
-# cover `!Tell`.
-pub fn short_of_r() -> Int !io = {
-  with handle Tell { tell() => 5 }
-  go(() => tell() + 1)
 }

@@ -91,8 +91,9 @@ nothing by it.
 The self-test proves the script's own arithmetic. What proves the *corpus* is
 reverting a real repair in the compiler and watching this gate fail. These
 were measured on `ev-corpus-348` at `32341d9` (A through E) and on
-`assoc-effects` at `5675810` (F and G); each was applied, the toolchain
-rebuilt, the gate run, and the edit reverted. None of them is committed.
+`assoc-effects` at `5675810` (F and G) and on `pad-removal` at `fb41e44`
+(H and I); each was applied, the toolchain rebuilt, the gate run, and the edit
+reverted. None of them is committed.
 
 ### A. `base_union` absorbs effect variables into io again (#345)
 
@@ -280,12 +281,102 @@ choosing it rightly are the same choice. Only two members on one subject can
 tell those apart, and `types.assoc_key` bands by trait id alone -- which is
 what made the shape worth pinning even though it was already correct.
 
-Between them the seven mutants have different owners, which is the property
+### H. the row-subtraction refusal is put back (#363)
+
+`selfhost/src/check/checker.dawn`, the `R ⊆ S` precondition restored to
+`earg_row_subtract` immediately above its `earg_cooccurs` call, which is where
+it stood until 2026-08-26:
+
+```
+  if not eff_subsumes(ae, r) {
+    return (em, false, Some("`!" ++ eff_show(r) ++ "` is not part of the argument's row; " ++ repair))
+  }
+```
+
+Result: **red**, at check time, and on `effect_pad_row` alone.
+
+    ./scripts/effect-evidence-contract/run.sh
+
+    effect_pad_row:run                 FAIL
+    error: argument type mismatch: expected fn() -> Int !(e|io),
+    got fn() -> Int !e2
+      --> scripts/spike-native/effect_pad_row.dawn:75:56
+       | fn forward(g: fn() -> Int !e2) -> Int !(e2 | io) = run(g)
+      = hint: `!io` is not part of the argument's row; spell this
+        parameter's row as `!e` alone (`fn() -> Int !e`); the variable
+        then takes the closure's whole row
+    error: argument type mismatch: expected fn() -> Int !(AskP|e|io),
+    got fn() -> Int !TellP
+      --> scripts/spike-native/effect_pad_row.dawn:100:26
+    effect_pad_row:assertions          FAIL
+    11 errors
+    effect evidence contract FAILED
+
+Reverted: **green** (`effect evidence contract ok`).
+
+Every other entry is green under it, which is the statement that the deletion
+is the only thing this corpus is about. `scripts/checker-corpus/run.sh` also
+reds under the same edit, with three diagnostics reappearing in
+`effect_row_subtract`; the fourth padded shape there is a **pure** closure into
+`!(e | Ask | io)`, which the precondition never reached because `eff_carries`
+had already accepted it one line earlier.
+
+### I. the pack is read by position rather than by key (#363, the other half)
+
+The deletion in H rests on a superset being safe, and a superset is safe
+because a read walks the chain for its key. `selfhost/src/jvm/emit.dawn`, in
+the `ev_get` intrinsic, the wanted key replaced by the node's own so that the
+comparison is always equal and the walk always answers with the **front**
+entry:
+
+```
+    ev_field(g1, cls, p_slot, c.fields[0].name, key_desc)
+    ev_field(g1, cls, p_slot, c.fields[0].name, key_desc)
+    g1.mv.visitInsn(OP_LCMP)
+```
+
+Result: **red**, at run time, and inside `effect_pad_row` on exactly the two
+lines that are handed more than they read.
+
+    ./scripts/effect-evidence-contract/run.sh
+
+    effect_pad_row:run                 FAIL
+    Exception in thread "main" java.lang.ClassCastException:
+    class effect_pad_row$ev$TellP cannot be cast to
+    class effect_pad_row$ev$AskP
+      at effect_pad_row.line_pad_named_atom(Unknown Source)
+    effect_pad_row:assertions          FAIL
+      PASS  a closure that only tells reaches a slot whose concrete part is io
+      FAIL  short of a named atom too, and both halves of the pack still answer
+      PASS  a caller's own callback forwards into the runner's slot
+      PASS  a pure closure takes the padded slot and reads none of it
+      FAIL  a short argument and a long one join on one variable
+      PASS  the nearest handler answers a padded pack
+      2 of 6 test(s) failed
+
+Reverted: **green.**
+
+The four that stay green under it are the reading: a padded slot whose pack is
+one node still answers from the front, so `run(() => tell(1))`, the forwarded
+callback and the shadowed pair are unaffected, and the pure control reads
+nothing at all. Only `line_pad_named_atom` (a ground `Ask` node over the tail
+`e` was bound to) and `line_pad_join` (two labels joined into one tail) are
+handed a chain, and both of them come back with the neighbour's record. That
+is what "the pack is a scope, not a transcript" buys, stated as a failure.
+
+Thirteen other entries red under it too, which is not a defect of the mutant:
+the same superset property is what `effect_pack_superset`, `effect_assoc_row`
+and the rest have always leaned on. H is the targeted half of this pair, and I
+is the half that says why H's deletion was allowed.
+
+Between them the nine mutants have different owners, which is the property
 worth having: A is answered by `effect_decl_row` and `effect_io_absorb`, B by
 `effect_widen_row`, `effect_decl_row` and `effect_primitive_row`, C by
 `effect_widen_row` and `effect_primitive_row`, D and E by `effect_assoc_row`,
 `assoc_effects` and `effect_primitive_row`, F and G by `effect_assoc_row`
-alone. No single corpus file carries the gate.
+alone, H by `effect_pad_row` alone, and I by most of the corpus with
+`effect_pad_row` naming which two of its own lines it reached. No single corpus
+file carries the gate.
 
 ## What the corpus does not reach
 

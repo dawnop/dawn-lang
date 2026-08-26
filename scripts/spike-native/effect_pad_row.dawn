@@ -1,0 +1,215 @@
+# A closure that does **less** than the slot it goes into: the padding half of
+# row subtraction (#363), which the checker refused until 2026-08-26.
+#
+#     fn run(f: fn() -> Int !(e | io)) -> Int !(e | io)
+#     run(() => tell(1))          # `f` tells, and does no io at all
+#
+# `earg_row_subtract` used to require `R ⊆ S` before it would bind `e`, so a
+# closure whose row was short of the parameter's concrete atoms left with a
+# repair hint instead of a binding. The set that refused is exactly "does
+# something, but not `R`": a pure closure passed, an `!io` closure passed, and
+# the closure that raised a label of its own did not. That is the ordinary
+# shape of a `run` / `with_timing` / `retry` / `bracket` combinator whose own
+# body is what does the io, so the refusal was in the way of the shape the
+# feature exists for.
+#
+# effect_row_subtract.dawn is the other half, where the closure's row already
+# contains `R` and the leftover is what comes off it. Here there is nothing to
+# come off: `e` binds the closure's whole row, and the pack the call site
+# builds is a **superset** of what the closure will read.
+#
+# That superset is the whole of why deleting the precondition is safe, and it
+# is what every line below runs. The pack is built by `checker.evidence_pack`
+# out of the row this call site **instantiated**, never out of the closure's
+# own row, and `dawn_ev_get` answers by walking a key chain rather than by
+# indexing a layout. `runtime/c/dawn_rt.c` calls the pack "a scope, not a
+# transcript of a row" for exactly this reason. A closure handed keys it never
+# asks for cannot tell them from keys that are not there. A closure handed one
+# key too few panics, which is what these numbers are here to notice.
+#
+# **Every line installs its own handlers and every handler answers a different
+# prime**, for the reason effect_widen_row.dawn records: one `with handle` per
+# effect at the top of `main` lets a single correct call site seed a shared
+# remainder's pack, and every other line then reads the node out of it for
+# free. **Every operation takes an argument too**, so an answer is a function
+# of what the closure passed in rather than a constant a fold could stand in
+# for.
+use std/io
+
+effect AskP {
+  fn ask(n: Int) -> Int
+}
+
+effect TellP {
+  fn tell(n: Int) -> Int
+}
+
+effect NoteP {
+  fn note(n: Int) -> Int
+}
+
+## The runner the deleted precondition was about. Its own body does the io, so
+## the io in `f`'s row is the runner's promise about what `f` **may** do, not a
+## bill `f` has to pay. A closure that only tells is short of it.
+fn run(f: fn() -> Int !(e | io)) -> Int !(e | io) = {
+  println("  run: before")
+  let v = f()
+  println("  run: after")
+  v
+}
+
+## A named atom in `R` beside the io. `run2` asks by itself, so `Ask` is spoken
+## for by the declaration too, and a closure that only tells is short of two of
+## `R`'s atoms at once. `Ask` is read out of this frame's own node while `Tell`
+## comes out of the tail `e` was bound to, so a pack that lost either half
+## answers a different number rather than the same one.
+fn run2(f: fn() -> Int !(e | AskP | io)) -> Int !(e | AskP | io) = {
+  println("  run2: before")
+  f() + ask(1)
+}
+
+## Forwarding a caller's own polymorphic callback into the runner. Both
+## signatures promise io and neither `g` nor `e2` is ground here, so what is
+## short of `R` is a row nobody has instantiated yet: the subtraction binds
+## `run`'s `e` to this frame's slot rather than to a row it can inspect.
+fn forward(g: fn() -> Int !e2) -> Int !(e2 | io) = run(g)
+
+## Two function values through one variable, one of them short of `R` and one
+## of them not. The binding joins, so `t` is handed a pack carrying `u`'s atom
+## as well as its own, a superset built by a call site that had already seen
+## `t` when it grew. `t` reads only its own key out of it.
+fn both(t: fn() -> Int !(e | io), u: fn() -> Int !(e | io)) -> Int !(e | io) = {
+  println("  both: before")
+  t() + u()
+}
+
+## A closure that only tells, into a slot whose concrete part is io. 43 is this
+## line's handler and 1 is what the closure passed it, so neither number alone
+## is the answer.
+fn line_pad_no_io() -> Unit !io = {
+  with handle TellP { tell(n) => n * 43 }
+  println(to_string(run(() => tell(1))))
+}
+
+## The same closure into a slot that also names `Ask`. 106 is the closure's
+## `tell(2)` and 59 is `run2`'s own `ask(1)`; a pack missing the tail panics
+## and one missing the node answers 106.
+fn line_pad_named_atom() -> Unit !io = {
+  with handle TellP { tell(n) => n * 53 }
+  with handle AskP { ask(n) => n * 59 }
+  println(to_string(run2(() => tell(2))))
+}
+
+## The forwarded callback. The closure the caller writes never sees `run`'s
+## signature, and `forward`'s own row is what has to carry it there.
+fn line_pad_forward() -> Unit !io = {
+  with handle TellP { tell(n) => n * 61 }
+  println(to_string(forward(() => tell(1))))
+}
+
+## The control, and the one line whose subject is what is **not** read: a pure
+## closure into `!(e | Ask | io)`. `e` binds pure, the slot's row still names
+## `Ask` and io, and the closure asks the pack for nothing at all. 71 is the
+## closure and 73 is `run2`'s own ask. No `TellP` handler is installed on this
+## line, which is the point; a padded slot that made its keys a demand rather
+## than an offer would need one.
+fn line_pad_pure() -> Unit !io = {
+  with handle AskP { ask(n) => n * 73 }
+  println(to_string(run2(() => 71)))
+}
+
+## The join with one short argument. `t` tells and does no io; `u` does io and
+## notes; `e` binds `!(Tell|Note)` and both closures are handed the whole of
+## it. 79 comes out of `t` and 83 out of `u`.
+fn line_pad_join() -> Unit !io = {
+  with handle TellP { tell(n) => n * 79 }
+  with handle NoteP { note(n) => n * 83 }
+  println(to_string(both(() => tell(1), () => {
+    println("  u: doing io")
+    note(1)
+  })))
+}
+
+## Which handler answered, not merely that one did. Both calls are the same
+## text under the same signature and only the nearest handler differs, so a
+## padded pack routed to the wrong one is a wrong number rather than a panic.
+fn line_pad_shadowed() -> Unit !io = {
+  with handle TellP { tell(n) => n * 89 }
+  println(to_string(run(() => tell(1))))
+  with handle TellP { tell(n) => n * 97 }
+  println(to_string(run(() => tell(1))))
+}
+
+pub fn main() -> Unit !io = {
+  println("-- a closure that tells, into a slot whose concrete part is io --")
+  line_pad_no_io()
+  println("-- short of a named atom as well as of the io --")
+  line_pad_named_atom()
+  println("-- a caller's own polymorphic callback, forwarded --")
+  line_pad_forward()
+  println("-- the control: a pure closure, and the keys nobody reads --")
+  line_pad_pure()
+  println("-- one short argument and one not, joining on one variable --")
+  line_pad_join()
+  println("-- the nearest handler answers a padded pack, twice over --")
+  line_pad_shadowed()
+}
+
+# The assertion lane. `scripts/effect-evidence-contract/run.sh` runs these on
+# the JVM in seconds and without a C compiler; the transcript above is what the
+# native differential compares byte for byte. Same shapes, two readers: an
+# `assert` says what the number means, and the `.expect` file is the only check
+# that can see that the closure ran between `run`'s two lines.
+#
+# Unlike effect_row_subtract.dawn's lane there is no `touch_io` helper here,
+# and there is nothing for one to do: the whole subject is closures that do
+# **less** than their slot, so a closure that reached for io to satisfy the
+# parameter row would be the shape that always worked. The one closure below
+# that does io is the *long* half of the join, and it does it with `print("")`
+# so that an `assert` is not answering with a transcript.
+
+test "a closure that only tells reaches a slot whose concrete part is io" {
+  with handle TellP { tell(n) => n * 43 }
+  assert run(() => tell(1)) == 43
+}
+
+## 165 = the closure's `tell(2)` out of the tail, plus `run2`'s own `ask(1)`
+## out of the node its own frame holds. Two halves of one pack, and the sum is
+## the only number that says both arrived.
+test "short of a named atom too, and both halves of the pack still answer" {
+  with handle TellP { tell(n) => n * 53 }
+  with handle AskP { ask(n) => n * 59 }
+  assert run2(() => tell(2)) == 165
+}
+
+test "a caller's own callback forwards into the runner's slot" {
+  with handle TellP { tell(n) => n * 61 }
+  assert forward(() => tell(1)) == 61
+}
+
+## The control: nothing in the closure reads the pack, so the keys the padded
+## slot carries are demonstrably unread. `TellP` is unhandled here on purpose.
+test "a pure closure takes the padded slot and reads none of it" {
+  with handle AskP { ask(n) => n * 73 }
+  assert run2(() => 71) == 144
+}
+
+## 162 = 79 from the short argument and 83 from the one that is not. The
+## binding joins, so the short closure is handed the other's atom as well; a
+## binding that replaced would hand `t` a pack without `Tell` in it, which is
+## a panic on a program that checked clean rather than a wrong number.
+test "a short argument and a long one join on one variable" {
+  with handle TellP { tell(n) => n * 79 }
+  with handle NoteP { note(n) => n * 83 }
+  assert both(() => tell(1), () => {
+    print("")
+    note(1)
+  }) == 162
+}
+
+test "the nearest handler answers a padded pack" {
+  with handle TellP { tell(n) => n * 89 }
+  assert run(() => tell(1)) == 89
+  with handle TellP { tell(n) => n * 97 }
+  assert run(() => tell(1)) == 97
+}

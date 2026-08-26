@@ -1051,11 +1051,25 @@ fn earg_cooccurs(s: Sig, eid: Int, r: Eff) -> Option[(Eff, String)] = {
 ##     declaration has no slot at this call to be answered in.
 ##   * `R` non-empty, and the row does not already fit. A row that fits is
 ##     accepted by the path that always accepted it, unchanged.
-##   * `R ⊆ S`. The other direction belongs to widening, and widening is free
-##     only where the declared row already carries the closure's atom for atom:
-##     measured on a4f9668, a pure or `!io` closure into `!(e|io)` was accepted
-##     and a `!Tell` one was not. So a row short of `R` does reach here, and it
-##     leaves with the repair rather than with a binding.
+##
+## `R ⊆ S` is **not** among them. It was, until 2026-08-26: a closure short of
+## `R` left with the repair rather than with a binding, so `!(e|io)` took a
+## pure closure and an `!io` one and refused the closure that only raised
+## `!Tell`. The refused set was exactly "does something, but not `R`", which is
+## the ordinary shape of a `run` / `with_timing` / `retry` / `bracket`
+## combinator whose own body does the io. Padding is now accepted: `e` binds to
+## `eff_row_minus(S, R)`, which for a short row is `S` with atoms taken off it
+## that it never had.
+##
+## What makes the padding safe is that a pack is a **scope, not a transcript of
+## a row**. `runtime/c/dawn_rt.c` says it in those words above
+## `dawn_ev_is_node`. The pack is built by `evidence_pack` from the row this
+## call site **instantiated**, never from the closure's own row, and it is read
+## by a key-chained walk rather than by index, so a closure that does less than
+## its slot is handed a superset and leaves the extra keys unread. `eff_carries`
+## says the same from the other side: "a superset is always safe. What is
+## refused is a row with an atom the slot does not have." That direction is
+## unchanged, and it is the only one this rule ever had to be careful about.
 ##
 ## A second argument through the same variable **joins**, it does not replace:
 ## `lub_eff` is what `unify_eff`'s `EffVar` arm does for a bare `!e` parameter,
@@ -1119,9 +1133,6 @@ fn earg_row_subtract(
   let bare = ty_show(cx.adts, TyFn(dps, dr, EffVar(ename, eid)))
   let repair = "spell this parameter's row as `!" ++ ename ++ "` alone (`" ++ bare ++
     "`); the variable then takes the closure's whole row"
-  if not eff_subsumes(ae, r) {
-    return (em, false, Some("`!" ++ eff_show(r) ++ "` is not part of the argument's row; " ++ repair))
-  }
   match earg_cooccurs(s, eid, r) {
     Some(pr) -> {
       let (row, place) = pr
