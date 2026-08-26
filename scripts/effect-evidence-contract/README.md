@@ -170,11 +170,64 @@ the program instead of miscompiling it, which is what #335 was.
 
 Reverted: **green.**
 
-Between them the three mutants have different owners, which is the property
+### D. `ev_select` casts the projection's slot instead of walking it (#355)
+
+`selfhost/src/ir/lower.dawn`, the one-word edit that puts the reader back where
+it was before #355 -- a devirtualised label taken out of a projection's slot by
+CHECKCAST rather than by a walk to its node:
+
+```
+fn ev_select(v: CExpr, from: Ty, to: Ty, via: Int) -> CExpr =
+  if false { ev_from_pack(ev_value(v), via) } else { adapt_out(ev_value(v), from, to) }
+```
+
+Result: **red.**
+
+    effect_primitive_row:run           FAIL
+    assoc_effects:run                  FAIL
+      Exception in thread "main" java.lang.ClassCastException:
+      class ev$Pack cannot be cast to class ev$AskE
+    effect_assoc_row:run               FAIL
+    effect_assoc_row:assertions        FAIL
+      9 of 13 test(s) failed
+    effect evidence contract FAILED
+
+Reverted: **green.**
+
+### E. the call site puts no node in the projection's slot (#355, the other half)
+
+`selfhost/src/check/checker.dawn`, in `evidence_assoc_args`, the row handed to
+`evidence_pack` stripped of the labels the reduction just produced:
+
+```
+      let (cx2, pack, un) = evidence_pack(cx1, eff_with_labels(eff_base(red), []), true, lo, hi)
+```
+
+Result: **red**, and by the other report -- the pack is built, it is simply
+empty, so a reader walks it to the end.
+
+    effect_primitive_row:run           FAIL
+    effect_barrier_row:run             FAIL
+    assoc_effects:run                  FAIL
+    effect_assoc_row:run               FAIL
+      panic: effect evidence missing: no pack entry for the atom this call
+      site asked for
+    effect_assoc_row:assertions        FAIL
+      9 of 13 test(s) failed
+    effect evidence contract FAILED
+
+Reverted: **green.**
+
+D and E are the two halves of one convention -- what a call site puts in a
+projection's slot, and what the callee takes back out -- and each is red on its
+own, which is what says neither half is decoration.
+
+Between them the five mutants have different owners, which is the property
 worth having: A is answered by `effect_decl_row` and `effect_io_absorb`, B by
 `effect_widen_row`, `effect_decl_row` and `effect_primitive_row`, C by
-`effect_widen_row` and `effect_primitive_row`. No single corpus file carries
-the gate.
+`effect_widen_row` and `effect_primitive_row`, D and E by `effect_assoc_row`,
+`assoc_effects` and `effect_primitive_row`. No single corpus file carries the
+gate.
 
 ## What the corpus does not reach
 
