@@ -20,18 +20,24 @@
 #   uncaught     an unhandled panic reports to stderr and exits 1 on both
 #                targets, stdout up to that point identical.
 #
-# Not in CI yet: the toolchain below is whatever apt shipped, not a pinned
-# wasi-sdk with a recorded sha256, and the .dawn-version discipline says a
-# gate must pin what it downloads before it gates anyone. Until then this
-# runs by hand:
+# In CI on a pinned wasi-sdk (the wasm-target job in
+# .github/workflows/gates.yml); by hand it takes whatever it is pointed at:
 #
 #   ./scripts/wasm-contract/run.sh
+#   DAWN_WASM_CC=/path/to/wasi-sdk/bin/clang ./scripts/wasm-contract/run.sh
 #   DAWNC_BIN=/path/to/dawnc ./scripts/wasm-contract/run.sh   # reuse a driver
 #
-# Needs: clang with wasm32-wasi support + lld + wasi-libc + the wasm32
-# compiler-rt (Debian/Ubuntu: apt install clang lld wasi-libc
-# libclang-rt-18-dev-wasm32; the C++ shim uses no C++ runtime, so nothing
-# more), and node >= 20 for node:wasi.
+# Needs: clang 20 or newer with a wasm32 sysroot + lld + wasi-libc + the
+# wasm32 compiler-rt (Debian/Ubuntu: apt install clang-20 lld wasi-libc
+# libclang-rt-20-dev-wasm32; the C++ shim uses no C++ runtime, so nothing
+# more), and node >= 20 for node:wasi. clang 18 is too old: its assembler
+# crashes on the exception tag in runtime/c/dawn_rt_wasi_tag.c.
+#
+# The triple is not hardcoded. wasi-sdk 31 deprecated wasm32-wasi and 34
+# removed it; apt's wasi-libc has only wasm32-wasi and no wasm32-wasip1. The
+# preflight below asks the compiler which one it has a sysroot for, and the
+# driver asks the same question the same way, so both ends of that range stay
+# buildable from one script.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -45,14 +51,21 @@ fail=0
 wasm_cc="${DAWN_WASM_CC:-clang}"
 if ! command -v "$wasm_cc" >/dev/null; then
   echo "MISSING: $wasm_cc is not on PATH." >&2
-  echo "  Debian/Ubuntu: apt install clang lld wasi-libc libclang-rt-18-dev-wasm32" >&2
+  echo "  Debian/Ubuntu: apt install clang-20 lld wasi-libc libclang-rt-20-dev-wasm32" >&2
   exit 1
 fi
+# Which triple this compiler has a sysroot for, the same question and the
+# same answer `cc_build_for` asks in the driver: wasi-sdk 34 removed
+# wasm32-wasi, apt's wasi-libc has only wasm32-wasi, and the builds below
+# must use whichever the driver picked or they would test a different link.
+wasm_target=wasm32-wasi
+crt1="$("$wasm_cc" --target=wasm32-wasip1 -print-file-name=crt1.o 2>/dev/null || true)"
+[ -f "$crt1" ] && wasm_target=wasm32-wasip1
 echo 'int main(void){return 0;}' >"$work/probe.c"
-if ! "$wasm_cc" --target=wasm32-wasi -o "$work/probe.wasm" "$work/probe.c" 2>"$work/probe.err"; then
-  echo "MISSING: $wasm_cc cannot link a trivial wasm32-wasi program." >&2
+if ! "$wasm_cc" --target="$wasm_target" -o "$work/probe.wasm" "$work/probe.c" 2>"$work/probe.err"; then
+  echo "MISSING: $wasm_cc cannot link a trivial $wasm_target program." >&2
   sed 's/^/  | /' "$work/probe.err" >&2
-  echo "  Debian/Ubuntu: apt install lld wasi-libc libclang-rt-18-dev-wasm32" >&2
+  echo "  Debian/Ubuntu: apt install lld wasi-libc libclang-rt-20-dev-wasm32" >&2
   echo "  (or point DAWN_WASM_CC at a wasi-sdk clang)" >&2
   exit 1
 fi
@@ -76,15 +89,21 @@ case "$DAWNC" in /*) ;; *) DAWNC="$root/$DAWNC" ;; esac
 
 # The manual builds below (negative controls) must be the same compile
 # `dawnc build --target wasm` runs, or they would test a pipeline nobody
-# ships. One spelling, used everywhere.
+# ships. One spelling, used everywhere -- including the exception tag's own
+# translation unit (runtime/c/dawn_rt_wasi_tag.c), which is a link input on
+# both sides and whose absence here would red the mutants for the wrong
+# reason on any wasi-sdk from 31 up.
 wasm_shim_build() { # <src.cc> <out.o>
-  "$wasm_cc" --target=wasm32-wasi -x c++ -std=c++14 -O2 -fno-rtti \
+  "$wasm_cc" --target="$wasm_target" -x c++ -std=c++14 -O2 -fno-rtti \
     -fwasm-exceptions -c "$1" -o "$2"
 }
-wasm_c_build() { # <out.wasm> <main.c> <dawn_rt.c> <shim.o> <include-dir>
-  "$wasm_cc" --target=wasm32-wasi -std=c11 -O2 -fwrapv -fwasm-exceptions \
+wasm_tag_build() { # <src.c> <out.o>
+  "$wasm_cc" --target="$wasm_target" -std=c11 -O2 -c "$1" -o "$2"
+}
+wasm_c_build() { # <out.wasm> <main.c> <dawn_rt.c> <shim.o> <include-dir> <tag.o>
+  "$wasm_cc" --target="$wasm_target" -std=c11 -O2 -fwrapv -fwasm-exceptions \
     -fno-strict-aliasing -Wno-parentheses-equality -I "$5" \
-    -o "$1" "$2" "$3" "$4" -lm
+    -o "$1" "$2" "$3" "$4" "$6" -lm
 }
 
 # ---- both targets, one oracle: the native run's bytes ----------------------
@@ -146,13 +165,14 @@ fi
 # quietly stopped being compiled at all.
 "$root/bin/dawn" __emitc "$here/failure.dawn" -o "$work/failure.c"
 wasm_shim_build "$root/runtime/c/dawn_rt_wasi_eh.cc" "$work/eh.o"
+wasm_tag_build "$root/runtime/c/dawn_rt_wasi_tag.c" "$work/tag.o"
 sed '/^void dawn_wasi_own_push(void \*frame) {$/,/^}$/d' \
   "$root/runtime/c/dawn_rt.c" >"$work/dawn_rt_maimed.c"
 if ! grep -q dawn_wasi_own_push "$root/runtime/c/dawn_rt.c"; then
   echo "FAIL: negative control is stale -- dawn_wasi_own_push is gone from dawn_rt.c" >&2
   fail=1
 elif wasm_c_build "$work/maimed.wasm" "$work/failure.c" "$work/dawn_rt_maimed.c" \
-  "$work/eh.o" "$root/runtime/c" 2>/dev/null; then
+  "$work/eh.o" "$root/runtime/c" "$work/tag.o" 2>/dev/null; then
   echo "FAIL: a runtime missing the shadow-stack push still linked -- the contract is blind" >&2
   fail=1
 else
@@ -180,7 +200,7 @@ fi
 run_mutant() { # <name> <maimed dawn_rt.c>
   local name="$1" rt="$2" mrc
   wasm_c_build "$work/$name.wasm" "$work/failure.c" "$rt" \
-    "$work/eh.o" "$root/runtime/c" 2>"$work/$name.cc-err" ||
+    "$work/eh.o" "$root/runtime/c" "$work/tag.o" 2>"$work/$name.cc-err" ||
     { echo "FAIL: mutant $name did not even compile:" >&2
       head -5 "$work/$name.cc-err" >&2; fail=1; return; }
   set +e

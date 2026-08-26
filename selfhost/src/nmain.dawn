@@ -58,7 +58,7 @@ fn usage() -> String =
     "usage:",
     "  dawnc check [--std <dir>] <target>...       type-check, report diagnostics",
     "  dawnc build [--std <dir>] <target> [-o out] compile to a native binary via cc",
-    "  dawnc build --target wasm <target> [-o out] compile to wasm32-wasi via clang",
+    "  dawnc build --target wasm <target> [-o out] compile to wasm32-wasip1 via clang",
     "  dawnc build --target wasm --reactor <target> [-o out]",
     "                                              ... as a reactor: no _start, one",
     "                                              exported `dawn_turn` the host calls",
@@ -225,7 +225,8 @@ fn parse_compile_tail(
 ## `build`'s tail: `parse_compile_tail` plus `--target <t>` and `--reactor`. A
 ## separate parser rather than a flag on the shared one because `emitc` has no
 ## targets to choose between -- the C text is the same whatever compiles it.
-## The only spelling is `wasm` (wasm32-wasi via clang, see `cc_build_for`);
+## The only spelling is `wasm` (WASI preview 1 via clang, see `cc_build_for`,
+## which picks the triple the compiler in hand actually has a sysroot for);
 ## native is the default and has no spelling, and the JVM driver has no such
 ## flag at all, so this stays off the argvs `native-cli-diff.sh` holds the two
 ## drivers to.
@@ -373,15 +374,43 @@ fn reactor_shim() -> String =
 fn reactor_wrapped(ctext: String, reactor: Bool) -> String =
   if reactor { ctext ++ reactor_shim() } else { ctext }
 
-## What a missing wasm32-wasi toolchain needs, said next to the failure it
+## What a missing wasm toolchain needs, said next to the failure it
 ## causes: the compile errors clang prints for it (a missing driver, a missing
 ## sysroot header, a missing compiler-rt) all presume the reader already knows
 ## the target is cross-compiled, and the first person to hit one will not.
 fn wasm_toolchain_hint() -> String =
   "note: `--target wasm` cross-compiles with clang and needs lld, wasi-libc " ++
   "and the wasm32 compiler-rt next to it. On Debian/Ubuntu: apt install " ++
-  "clang lld wasi-libc libclang-rt-18-dev-wasm32 (or point DAWN_WASM_CC " ++
-  "at a wasi-sdk clang)."
+  "clang-20 lld wasi-libc libclang-rt-20-dev-wasm32 (or point DAWN_WASM_CC " ++
+  "at a wasi-sdk clang). clang 18 is too old: its assembler crashes on the " ++
+  "exception tag in dawn_rt_wasi_tag.c."
+
+## Which wasm triple this compiler has a sysroot for.
+##
+## `wasm32-wasi` was the only spelling until wasi-sdk 31 deprecated it, and 34
+## removed the target outright; apt's wasi-libc, in the other direction, still
+## lays out only `wasm32-wasi` and has no `wasm32-wasip1` at all. No single
+## hardcoded spelling reaches both ends of that range, so the driver asks
+## instead of assuming: `-print-file-name` answers with an absolute path when
+## the sysroot has the file and echoes the bare name back when it does not,
+## which costs one process and no compile. wasip1 is tried first so a modern
+## sdk never has to print the deprecation warning, and an unusable compiler
+## falls through to the old spelling and fails in the compile below, where the
+## install hint is.
+fn wasm_triple(cc: String, work: String) -> String !io = {
+  let probe = work ++ "/crt1.path"
+  let ask = [cc, "--target=wasm32-wasip1", "-print-file-name=crt1.o"]
+  let modern = match io.run(ask, probe, work ++ "/crt1.err") {
+    Ok(0) -> {
+      match io.read_file(probe) {
+        Ok(t) -> io.exists(str.trim(t))
+        Err(_) -> false
+      }
+    }
+    _ -> false
+  }
+  if modern { "wasm32-wasip1" } else { "wasm32-wasi" }
+}
 
 fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !io = {
   let work = match io.temp_dir("", "dawnc") {
@@ -392,7 +421,7 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !
     }
   }
   var wrote = io.write_file(work ++ "/main.c", ctext)
-  for f in ["dawn_rt.c", "dawn_rt.h", "dawn_rt_wasi_eh.cc"] {
+  for f in ["dawn_rt.c", "dawn_rt.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
     match cdriver.runtime_source(f) {
       Some(t) -> { wrote = io.write_file(work ++ "/" ++ f, t) }
       None -> panic("embedded runtime is missing " ++ f)
@@ -405,7 +434,7 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !
       return ()
     }
   }
-  # The wasm spelling is clang's and only clang's (cc has no wasm32-wasi),
+  # The wasm spelling is clang's and only clang's (cc cross-compiles no wasm),
   # so its override is a separate variable rather than CC: one environment
   # can hold a native CC and a wasi-sdk clang at the same time. The flag
   # differences against the native row are the target's, not choices:
@@ -424,17 +453,42 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !
       None -> "cc"
     }
   }
+  let triple = if wasm { wasm_triple(cc, work) } else { "" }
   # The wasm catch site is C++ (runtime/c/dawn_rt_wasi_eh.cc says why) and
   # wants spellings the C row must not carry (-x c++, -fno-rtti), while
   # clang applies one -std to every input of an invocation -- so the shim is
   # its own compile, and the main invocation links its object.
+  #
+  # The exception tag both sides throw through is a third compile, for the
+  # reason dawn_rt_wasi_tag.c gives: a unit that neither throws nor catches
+  # is the only place the definition can sit and still link on LLVM 21 and
+  # LLVM 22 alike. Its errors carry the same hint as the shim's; it runs
+  # second so that a toolchain missing altogether is still diagnosed by the
+  # compile that names C++, which is the harder one to have.
   if wasm {
     let shim = [
-      cc, "--target=wasm32-wasi", "-x", "c++", "-std=c++14", "-O2",
+      cc, "--target=" ++ triple, "-x", "c++", "-std=c++14", "-O2",
       "-fno-rtti", "-fwasm-exceptions",
       "-c", work ++ "/dawn_rt_wasi_eh.cc", "-o", work ++ "/dawn_rt_wasi_eh.o"
     ]
     match io.run(shim, "", "") {
+      Ok(0) -> ()
+      Ok(code) -> {
+        io.eprintln(wasm_toolchain_hint())
+        cli_error(cc ++ " failed (exit code " ++ "${code}" ++ ")")
+        return ()
+      }
+      Err(e) -> {
+        io.eprintln(wasm_toolchain_hint())
+        cli_error("cannot run " ++ cc ++ ": " ++ e.message)
+        return ()
+      }
+    }
+    let tag = [
+      cc, "--target=" ++ triple, "-std=c11", "-O2",
+      "-c", work ++ "/dawn_rt_wasi_tag.c", "-o", work ++ "/dawn_rt_wasi_tag.o"
+    ]
+    match io.run(tag, "", "") {
       Ok(0) -> ()
       Ok(code) -> {
         io.eprintln(wasm_toolchain_hint())
@@ -459,12 +513,12 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !
   let model: List[String] = if reactor { ["-mexec-model=reactor"] } else { [] }
   let argv = if wasm {
     [
-      cc, "--target=wasm32-wasi", "-std=c11", "-O2", "-fwrapv", "-fwasm-exceptions",
+      cc, "--target=" ++ triple, "-std=c11", "-O2", "-fwrapv", "-fwasm-exceptions",
       "-fno-strict-aliasing", "-Wno-parentheses-equality"
     ] ++ model ++ [
       "-I", work,
       "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c",
-      work ++ "/dawn_rt_wasi_eh.o", "-lm"
+      work ++ "/dawn_rt_wasi_eh.o", work ++ "/dawn_rt_wasi_tag.o", "-lm"
     ]
   } else {
     [

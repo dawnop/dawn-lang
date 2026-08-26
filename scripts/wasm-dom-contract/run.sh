@@ -51,9 +51,11 @@
 #   ./scripts/wasm-dom-contract/run.sh --record        # re-record both transcripts
 #   DAWNC_BIN=/path/to/dawnc ./scripts/wasm-dom-contract/run.sh
 #
-# Needs the same toolchain as scripts/wasm-contract (clang with wasm32-wasi,
-# lld, wasi-libc, wasm32 compiler-rt) plus node >= 20. In CI both come from
-# the pinned wasi-sdk; see .github/workflows/gates.yml.
+# Needs the same toolchain as scripts/wasm-contract (clang 20 or newer with a
+# wasm32 sysroot, lld, wasi-libc, wasm32 compiler-rt) plus node >= 20. It
+# compiles nothing itself, so the triple is the driver's business alone; see
+# `cc_build_for`. In CI both come from the pinned wasi-sdk; see
+# .github/workflows/gates.yml.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -87,7 +89,7 @@ todo_expected="$here/expected-todo.txt"
 wasm_cc="${DAWN_WASM_CC:-clang}"
 if ! command -v "$wasm_cc" >/dev/null; then
   echo "MISSING: $wasm_cc is not on PATH." >&2
-  echo "  Debian/Ubuntu: apt install clang lld wasi-libc libclang-rt-18-dev-wasm32" >&2
+  echo "  Debian/Ubuntu: apt install clang-20 lld wasi-libc libclang-rt-20-dev-wasm32" >&2
   exit 1
 fi
 if ! command -v node >/dev/null; then
