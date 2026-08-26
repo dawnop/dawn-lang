@@ -35,6 +35,28 @@
 #   * a trait **default body** reached through the projection, which is the
 #     dictionary-bridge reader rather than the devirtualised one.
 #
+# Three more because the atom's *neighbours* decide how the failure showed. One
+# projection alone took the allocation-free path -- the slot went over as the
+# pack -- and missed, so the report was `EV_MISS_MSG`. A projection beside a
+# second evidence atom is consed or joined instead, the record ends up in a
+# chain's `outer` field or under `ev_append`, and what came back was another
+# atom's record: a `ClassCastException` rather than a panic, on a program that
+# also checked clean. `!io` is not an atom and pays for nothing, so it is the
+# one neighbour that never triggered either. So:
+#
+#   * a label beside the projection **crossing an effect variable's slot**, at
+#     a callee that takes `fn() -> Int !e` -- the shape that reported a cast;
+#   * two projections in one row, on two traits;
+#   * two projections **on one trait**, read from inside a lambda. Both slots
+#     key on `types.assoc_key`, which bands by trait id, so this is where a
+#     collision would show. It answers because a non-label key is answered by
+#     the chain as a whole and a superset of a pack is a pack -- the same
+#     property the design leans on everywhere else. Before the repair it
+#     answered one projection with the *other's* record.
+#
+# And the control the whole file needs: a projection in a **return** row, which
+# is what `assoc_effects.dawn` is made of and what worked all along.
+#
 # **Every line installs its own handlers and every handler answers a different
 # prime**, for the reason effect_widen_row.dawn states: shared handlers at the
 # top of `main` let one correctly built pack seed every other line's read, and
@@ -59,6 +81,13 @@ trait Runner[T] {
   fn twice(x: T) -> Int !T.E = run(x) + run(x)
 }
 
+## A second trait with an effect member of its own, so that a row can hold two
+## projections whose keys come from two different trait ids.
+trait Other[U] {
+  effect F
+  fn other(y: U) -> Int !U.F
+}
+
 type One = { v: Int }
 
 type Two = { v: Int }
@@ -79,6 +108,11 @@ impl Runner[One] {
 impl Runner[Two] {
   effect E = !TellE
   fn run(x: Two) -> Int !TellE = x.v + tell()
+}
+
+impl Other[Two] {
+  effect F = !LogE
+  fn other(y: Two) -> Int !LogE = y.v + log()
 }
 
 impl Runner[Quiet] {
@@ -128,6 +162,41 @@ fn via_bracketed[T: Runner](x: T, t: fn() -> Int !T.E) -> Int !T.E =
 ## it and the impl's layout is re-selected inside the dictionary bridge rather
 ## than at a devirtualised call.
 fn dbl[T: Runner](x: T, t: fn() -> Int !T.E) -> Int !T.E = twice(x) + t()
+
+## A callee that binds nothing but its own effect variable. It is where the
+## next two signatures put a row containing a projection, so what fills its one
+## slot is a pack built out of the projection rather than the projection's slot
+## forwarded whole.
+fn thru(f: fn() -> Int !e) -> Int !e = f()
+
+## A written label **beside** the projection, crossing that variable's slot.
+## `!e` is instantiated to `!LogE !T.E`, so the pack is a ground node consed
+## over the projection's slot and the node's `outer` field is where the bare
+## record used to end up. A walk that stepped past the node found something
+## that was not a pack node and was not the placeholder either, and the answer
+## was a cast of one effect's record to another's rather than a miss.
+fn label_over[T: Runner](x: T) -> Int !LogE !T.E = thru(() => run(x) + log())
+
+## Two projections in one row, on two traits. Two non-ground atoms in one slot
+## is `ev_append`'s case, which is the other way a record reaches a reader:
+## joined into a chain rather than consed under a node.
+fn two_traits[T: Runner, U: Other](a: T, b: U) -> Int !T.E !U.F =
+  thru(() => run(a) + other(b))
+
+## Two projections **on one trait**, read from inside a lambda, where both are
+## addressed by the same `assoc_key` band. The lambda's own pack answers a
+## non-label key with the whole chain, so both reads get a superset and both
+## find their label's node in it.
+fn two_subjects[T: Runner, U: Runner](a: T, b: U) -> Int !T.E !U.E = {
+  let g = () => run(a) + run(b)
+  g()
+}
+
+## The control: a projection in a **return** row and nowhere else. This is the
+## shape `assoc_effects.dawn` is made of, and the one that was right all along.
+## It is here so that a repair which moves the parameter position by breaking
+## the return position cannot look like a repair.
+fn ret_only[T: Runner](x: T) -> Int !T.E = run(x)
 
 fn line_inline() -> Unit !io = {
   with handle AskE { ask() => 3 }
@@ -184,6 +253,29 @@ fn line_default() -> Unit !io = {
   println(to_string(dbl(One { v: 800 }, () => ask() + 43)))
 }
 
+fn line_label_over() -> Unit !io = {
+  with handle AskE { ask() => 61 }
+  with handle LogE { log() => 67 }
+  println(to_string(label_over(One { v: 1100 })))
+}
+
+fn line_two_traits() -> Unit !io = {
+  with handle AskE { ask() => 71 }
+  with handle LogE { log() => 73 }
+  println(to_string(two_traits(One { v: 1200 }, Two { v: 1300 })))
+}
+
+fn line_two_subjects() -> Unit !io = {
+  with handle AskE { ask() => 79 }
+  with handle TellE { tell() => 83 }
+  println(to_string(two_subjects(One { v: 1400 }, Two { v: 1500 })))
+}
+
+fn line_ret_only() -> Unit !io = {
+  with handle AskE { ask() => 89 }
+  println(to_string(ret_only(One { v: 1600 })))
+}
+
 pub fn main() -> Unit !io = {
   println("-- a projection in a parameter row, written inline --")
   line_inline()
@@ -205,6 +297,14 @@ pub fn main() -> Unit !io = {
   line_beside()
   println("-- and the trait default body, through the dictionary bridge --")
   line_default()
+  println("-- a label beside the projection, crossing a variable's slot --")
+  line_label_over()
+  println("-- two projections in one row, on two traits --")
+  line_two_traits()
+  println("-- two projections on one trait, read inside a lambda --")
+  line_two_subjects()
+  println("-- and the control: a projection in a return row and nowhere else --")
+  line_ret_only()
 }
 
 # The assertion lane. `scripts/effect-evidence-contract/run.sh` runs these on
@@ -259,4 +359,27 @@ test "a written label beside the projection is a node over its pack" {
 test "a trait default body reads the projection through the bridge" {
   with handle AskE { ask() => 41 }
   assert dbl(One { v: 800 }, () => ask() + 43) == 1766
+}
+
+test "a label consed over the projection keeps what is under the node" {
+  with handle AskE { ask() => 61 }
+  with handle LogE { log() => 67 }
+  assert label_over(One { v: 1100 }) == 1228
+}
+
+test "two projections in one slot are joined, not dropped" {
+  with handle AskE { ask() => 71 }
+  with handle LogE { log() => 73 }
+  assert two_traits(One { v: 1200 }, Two { v: 1300 }) == 2644
+}
+
+test "two projections on one trait answer with their own labels" {
+  with handle AskE { ask() => 79 }
+  with handle TellE { tell() => 83 }
+  assert two_subjects(One { v: 1400 }, Two { v: 1500 }) == 3062
+}
+
+test "a projection in a return row is what it always was" {
+  with handle AskE { ask() => 89 }
+  assert ret_only(One { v: 1600 }) == 1689
 }
