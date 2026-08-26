@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ db41235ddd2a4da2 -->
+<!-- doc-check: translation-of docs/spec.md @ 3cbdc116ce2a1910 -->
 
 # Dawn Language Specification
 
@@ -2192,8 +2192,8 @@ labour is sharp:
 **Row subtraction** is the one exception to "atom for atom". When a function value goes into a
 parameter of the form `!(e | R)`, where `e` is the **only** effect variable the callee's signature
 binds and `R` is the set of concrete atoms in that row (named labels, `io`, associated-effect
-projections), and the argument's row `S` satisfies `R ⊆ S`, then `e` is bound to `S \ R` and the
-argument is accepted. A parameter written `!(e | io)` therefore takes a closure that both does io
+projections), then `e` is bound to `S \ R`, where `S` is the argument's row, and the argument is
+accepted. A parameter written `!(e | io)` therefore takes a closure that both does io
 and raises a named effect; before this rule the only spelling that took one was the bare `!e`.
 
 The step carries a **co-occurrence precondition**: **every** row in the callee's signature that
@@ -2213,11 +2213,17 @@ The step carries a **companion condition**: `e` is looked for on each parameter'
 declared row. Once an earlier argument has bound `e`, the substituted row has no variable left to
 find.
 
-The other shapes are unchanged. `R ⊄ S` is still refused: that direction is the widening above, and
-widening covers only the case where the slot's row already carries the argument's atom for atom,
-which `!(e | io)` does not do for `!Tell`. A row with two or more effect variables is still refused
-as well: the remainder has no principal split between them, and this specification does not invent
-one.
+The argument's row **need not** contain `R`. Where `S` is short of `R`, `S \ R` is `S` with atoms
+taken off it that it never had, and `e` is bound to that and the argument accepted. This is safe
+for the same reason widening upward is free: the call site builds the pack from the
+**instantiated** row rather than from the argument's own row, and the pack is read by a key chain
+rather than by index. A closure short of its slot is therefore handed a superset, and the extra
+keys go unread.
+
+The other shapes are unchanged. The **other** direction is still refused: an atom in the
+argument's row that the slot does not have is the atom-for-atom clause above, which this section
+does not touch. A row with two or more effect variables is still refused as well: the remainder
+has no principal split between them, and this specification does not invent one.
 
 ---
 
