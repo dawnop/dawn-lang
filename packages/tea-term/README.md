@@ -14,7 +14,6 @@ use tea_term/widget.{Widget, Text, Row, Button}
 impl App[Counter] {
   type Msg = CounterMsg
   type View = Widget[CounterMsg]
-  effect E = !()
   fn update(m: Counter, msg: CounterMsg) -> Counter = ...
   fn view(m: Counter) -> Widget[CounterMsg] = ...
 }

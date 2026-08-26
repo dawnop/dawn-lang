@@ -3,15 +3,16 @@
 # needs. The driver loop itself lives in a vocabulary's package, because a
 # driver has to paint, and painting is the one thing core cannot do.
 #
-# `update`'s row is `!M.E`, an associated effect the impl binds. That is the
-# shape a per-app row has to take: a method's own effect variable belongs to
-# the *caller*, so an effect the implementation decides needs a member of the
-# trait to be named by (docs/effect-params-design.md 刀 5). Every v1 impl in
-# the tree binds it pure (`effect E = !()`), so the loop is exactly as pure as
-# it was, `==` still tests a turn, and nothing crosses a boundary that did not
-# cross it before -- a binding of `!()` is an empty evidence pack. What the
-# member buys is that an app which does need io no longer forces the trait's
-# row on every other app, which is what a `Cmd` for tea v2 is going to want.
+# `update`'s row is `!M.E`, an associated effect with a pure default. That is
+# the shape a per-app row has to take: a method's own effect variable belongs
+# to the *caller*, so an effect the implementation decides needs a member of
+# the trait to be named by (docs/effect-params-design.md 刀 5). The member
+# defaults to `!()` (#369), so an impl that says nothing gets a loop exactly
+# as pure as before, `==` still tests a turn, and nothing crosses a boundary
+# that did not cross it before -- a row of `!()` is an empty evidence pack.
+# What the member buys is that an app which does need io binds its own row
+# (`effect E = !io`) without forcing it on every other app, which is what a
+# `Cmd` for tea v2 is going to want.
 #
 # `packages/tea-dom`'s reactor is deliberately not part of this. It takes
 # `update` as an ordinary function parameter rather than through the trait, its
@@ -46,7 +47,7 @@
 pub trait App[M] {
   type Msg
   type View
-  effect E
+  effect E = !()
   fn update(m: M, msg: M.Msg) -> M !M.E
   fn view(m: M) -> M.View
 }
@@ -66,7 +67,6 @@ derive Show
 impl App[Counter] {
   type Msg = CounterMsg
   type View = String
-  effect E = !()
   fn update(m: Counter, msg: CounterMsg) -> Counter =
     match msg {
       Inc -> Counter { n: m.n + 1 }

@@ -102,9 +102,10 @@ truth.
 `effect E` is what lets one app's `update` do io while another's stays pure.
 The method's row is the projection `!M.E`, not an effect variable of its own,
 because a method's effect variable is the *caller's* to instantiate and this
-row is the impl's. Every impl in the tree binds `effect E = !()`, so a turn is
-still a pure function and `==` still tests one; the member is here so that an
-app which grows a `Cmd` does not make every other app pay for it.
+row is the impl's. The member defaults to `!()`, so an impl that says nothing
+gets a turn that is still a pure function and `==` still tests one; an app
+that needs more binds its own row (`effect E = !io`), and the member is here
+so that an app which grows a `Cmd` does not make every other app pay for it.
 
 ## Subscriptions
 
