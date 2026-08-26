@@ -73,6 +73,16 @@ fn std/map.entries -> List[(K, V)]
   param v0 : Map[K, V] owned
   call direct std/hamt.entries : List[(K, V)]
     local v0 : Map[K, V]
+fn std/map.fold -> A
+  param v0 : Map[K, V] owned
+  param v1 : A owned
+  param v2 : fn(A, K, V) -> A !e owned
+  ev v3 : ev owned
+  call direct std/hamt.fold : A
+    local v0 : Map[K, V]
+    local v1 : A
+    local v2 : fn(A, K, V) -> A !e
+    local v3 : ev
 fn std/map.eq_go -> Bool
   param v0 : Map[K, V] owned
   param v1 : List[(K, V)] owned
@@ -187,76 +197,6 @@ fn std/map.eq_go -> Bool
                       drop v10
                       drop v11
               local v12 : Bool
-fn std/map.hash_go -> Int
-  param v0 : List[(K, V)] owned
-  param v1 : Int owned
-  param v2 : Int owned
-  param v3 : Int owned
-  dict v4 : K owned
-  dict v5 : V owned
-  block : Int
-    loop L0
-      block : Never
-        let v6 : Int
-          if : Int
-            binary eq : Bool
-              local v1 : Int
-              local v2 : Int
-            block : Int
-              local v3 : Int
-            block : Int
-              let v7 : (K, V)
-                unbox to=(K, V)
-                  intrinsic list_index : E
-                    local v0 : List[(K, V)]
-                    local v1 : Int
-              let v8 : K
-                dup
-                  tupleget 0 : K
-                    local v7 : (K, V)
-              let v9 : V
-                dup
-                  tupleget 1 : V
-                    local v7 : (K, V)
-              drop v7
-              block : Never
-                let v10 : List[(K, V)]
-                  dup
-                    local v0 : List[(K, V)]
-                let v11 : Int
-                  binary add : Int
-                    local v1 : Int
-                    int 1
-                let v12 : Int
-                  local v2 : Int
-                let v13 : Int
-                  binary add : Int
-                    binary add : Int
-                      local v3 : Int
-                      binary mul : Int
-                        call method trait=2 hash slot=0 : Int
-                          local v4 : <dict>
-                          local v8 : K
-                        int 31
-                    call method trait=2 hash slot=0 : Int
-                      local v5 : <dict>
-                      local v9 : V
-                let v14 : List[(K, V)]
-                  local v10 : List[(K, V)]
-                drop v0
-                assign v0
-                  local v14 : List[(K, V)]
-                assign v1
-                  local v11 : Int
-                assign v2
-                  local v12 : Int
-                assign v3
-                  local v13 : Int
-                continue L0
-        drop v0
-        return
-          local v6 : Int
-    drop v0
 fn std/map.show_go -> List[String]
   param v0 : List[(K, V)] owned
   param v1 : Int owned
@@ -422,20 +362,21 @@ fn std/map.hash -> Int impl_of=2/Map[K, V]
   dict v1 : K owned
   dict v2 : V owned
   block : Int
-    let v3 : Int
-      call direct std/map.hash_go : Int
-        call direct std/map.entries : List[(K, V)]
-          dup
-            local v0 : Map[K, V]
-        int 0
-        call direct std/map.len : Int
-          dup
-            local v0 : Map[K, V]
-        int 0
-        local v1 : <dict>
-        local v2 : <dict>
-    drop v0
-    local v3 : Int
+    let v3 : A
+      call direct std/map.fold : A
+        local v0 : Map[K, V]
+        box from=Int
+          int 0
+        closure std/map.lambda$0 : fn(Int, K, V) -> Int
+          local v1 : K
+          local v2 : V
+        box from=Unit
+          unit
+    let v4 : Int
+      unbox to=Int
+        local v3 : A
+    drop v3
+    local v4 : Int
 fn std/map.show -> String impl_of=3/Map[K, V]
   param v0 : Map[K, V] owned
   dict v1 : K owned
@@ -565,3 +506,25 @@ fn std/map.iter_get -> (K, V) impl_of=4/Map[K, V]
           local v6 : Int
     drop v5
     local v7 : (K, V)
+fn std/map.lambda$0 -> Int
+  capture v0 : K owned
+  capture v1 : V owned
+  param v2 : Int owned
+  param v3 : K owned
+  param v4 : V owned
+  ev v5 : ev owned
+  block : Int
+    let v6 : Int
+      binary add : Int
+        binary add : Int
+          local v2 : Int
+          binary mul : Int
+            call method trait=2 hash slot=0 : Int
+              local v0 : <dict>
+              local v3 : K
+            int 31
+        call method trait=2 hash slot=0 : Int
+          local v1 : <dict>
+          local v4 : V
+    drop v5
+    local v6 : Int

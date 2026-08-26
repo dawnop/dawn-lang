@@ -2950,6 +2950,17 @@ pub fn builtins() -> Map[String, Sig] = {
       ..bsig("map_entries", [TyMap(k, v)], ["m"], TyList(TyTuple([k, v]))),
       tparams: [k, v]
     },
+    # a fold over the trie itself, so reading every entry does not build the
+    # entry list `map_entries` answers with. Unbounded like the other readers:
+    # visiting entries hashes and compares no keys. The row rides through the
+    # step the way `sort_by`'s rides through its comparator.
+    eff1(
+      Sig {
+      ..bsig("map_fold", [TyMap(k, v), a, TyFn([a, k, v], a, e)], ["m", "init", "f"], a),
+      tparams: [k, v, a]
+    },
+      e
+    ),
     tp1(bsig("set_to_list", [TySet(t)], ["s"], TyList(t)), t),
     # array_* intrinsics: the one collection primitive a backend implements, and
     # the whole of what std needs to build List/Map/Set on top (D1). Values, not
@@ -3098,7 +3109,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # trie in std/hamt, so a backend implements `Array` and nothing else
   # (docs/collections-dejava-research.md §5.1).
   for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
-    "entries"] {
+    "entries", "fold"] {
     let n = "map_" ++ op
     erased = set.insert(erased, n)
     internal = set.insert(internal, n)
@@ -3630,6 +3641,13 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
+  match map.get(bs, "map_fold") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn map_fold[K, V, A](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e"
+    }
+    None -> { assert false }
+  }
   match map.get(bs, "array_with") {
     Some(s) -> {
       assert sig_render(adts, traits, s) ==
@@ -3637,7 +3655,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 93
+  assert map_size2(bs) == 94
 }
 
 test "the reclaim's failure is a value, under the one name left" {

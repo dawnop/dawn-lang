@@ -387,6 +387,30 @@ pub fn values[K, V](m: Hamt[K, V]) -> List[V] = {
   out
 }
 
+fn node_fold[K, V, A](n: Node[K, V], acc: A, f: fn(A, K, V) -> A !e) -> A !e =
+  match n {
+    NEmpty -> acc
+    NLeaf(_, k, v, _) -> f(acc, k, v)
+    NColl(_, kids) -> kids_fold(kids, 0, acc, f)
+    NBranch(_, kids) -> kids_fold(kids, 0, acc, f)
+  }
+
+fn kids_fold[K, V, A](kids: Array[Node[K, V]], i: Int, acc: A, f: fn(A, K, V) -> A !e) -> A !e =
+  if i >= array_len(kids) {
+    acc
+  } else {
+    kids_fold(kids, i + 1, node_fold(array_get(kids, i), acc, f), f)
+  }
+
+## Every entry combined into one value, on the trie itself: no `(seq, k, v)`
+## list, no sort, no pair per entry -- the walk `entries` pays for is the cost
+## this exists to avoid. The price is the order: leaves come up in hash order,
+## so `f` sees the entries in no promised order and each exactly once. A fold
+## whose answer depends on the order it met the entries in belongs on
+## `entries(m)`.
+pub fn fold[K, V, A](m: Hamt[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e =
+  node_fold(m.root, init, f)
+
 ## A map from a list of pairs; a repeated key keeps the last value and the
 ## first position.
 pub fn from[K: Eq + Hash, V](es: List[(K, V)]) -> Hamt[K, V] = {
@@ -588,6 +612,30 @@ test "a rebound key keeps its position; one that left and came back does not" {
   assert count(s) == 3
   assert has(s, 3)
   assert not has(s, 9)
+}
+
+test "fold reaches every node shape and pays no entry list for it" {
+  # empty: the init comes straight back
+  let e: Hamt[Int, Int] = empty()
+  assert fold(e, 42, (acc, _k, v) => acc + v) == 42
+  # one leaf
+  assert fold(from([(5, 50)]), 0, (acc, k, v) => acc + k + v) == 55
+  # branches, more than one level deep: 100 keys spread over the low bits
+  var big: Hamt[Int, Int] = empty()
+  for i in 0..100 {
+    big = assoc(big, i, i * 2)
+  }
+  assert fold(big, 0, (acc, _k, v) => acc + v) == 9900
+  assert fold(big, 0, (acc, k, _v) => acc + k) == 4950
+  assert fold(big, 0, (acc, _k, _v) => acc + 1) == count(big)
+  # a collision node: 0 and -1 share a hash32, 4294967297 makes it three wide
+  let coll: Hamt[Int, Int] = from([(0, 100), (-1, 20), (4294967297, 3)])
+  match coll.root {
+    NColl(_h, kids) -> { assert array_len(kids) == 3 }
+    _ -> { assert false }
+  }
+  assert fold(coll, 0, (acc, _k, _v) => acc + 1) == 3
+  assert fold(coll, 0, (acc, _k, v) => acc + v) == 123
 }
 
 test "the trie separates by five bits, and dissoc collapses only a sibling" {

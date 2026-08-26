@@ -1114,7 +1114,7 @@ pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
 pub fn lowered_intrinsics() -> List[String] = {
   var out = ["parse_int", "parse_int_radix", "char_unchecked"]
   for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
-    "entries"] {
+    "entries", "fold"] {
     out = out ++ ["map_" ++ op]
   }
   for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
@@ -1166,9 +1166,9 @@ test "every intrinsic is owned by a runtime module, written inline, or removed b
   #    answers for the same list in the same paragraph.
   assert len(inline) == 32
   assert len(host) == 2
-  assert len(gone) == 20
-  # and the four groups account for all 108 names, with none left over
-  assert len(map.keys(it)) == 93
+  assert len(gone) == 21
+  # and the four groups account for all 109 names, with none left over
+  assert len(map.keys(it)) == 94
   assert len(internal) == 15
 }
 
@@ -3280,7 +3280,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         None -> ()
       }
       match hamt_fn(name) {
-        Some(fname) -> return hamt_call(st, name, fname, args, wits, ty)
+        Some(fname) -> return hamt_call(st, name, fname, args, wits, evid, ty)
         None -> ()
       }
       match erased_builtin_sig(st, name) {
@@ -4078,6 +4078,7 @@ fn hamt_fn(name: String) -> Option[String] =
     "set_to_list" -> Some("keys")
     "map_values" -> Some("values")
     "map_entries" -> Some("entries")
+    "map_fold" -> Some("fold")
     _ -> None
   }
 
@@ -4092,12 +4093,18 @@ fn hamt_sig(st: LSt, name: String) -> Sig =
 ## declares, so the adapts are the ordinary ones -- the two agree everywhere
 ## but on the container itself, which is a concrete type on both sides.
 fn hamt_call(
-  st: LSt, prim: String, fname: String, args: List[TExpr], wits: List[WitRef], ty: Ty
+  st: LSt, prim: String, fname: String, args: List[TExpr], wits: List[WitRef],
+  evid: List[TExpr], ty: Ty
 ) -> (LSt, CExpr) = {
   let sg = hamt_sig(st, fname)
   let (st1, vs) = lower_args_to(st, args, sg.param_tys)
   let (st2, ds) = witness_values(st1, wits)
-  (st2, adapt_out(CCall(CDirect("std/hamt", fname), vs ++ ds, sg.ret), sg.ret, ty))
+  # `map_fold`'s row rides through its step, so its callee takes an evidence
+  # slot behind the dictionaries, exactly as any named `!e` call does. The
+  # count is read off the primitive's own signature; for the rest of the
+  # family it is zero and this appends nothing.
+  let (st3, es) = builtin_evidence(st2, prim, evid)
+  (st3, adapt_out(CCall(CDirect("std/hamt", fname), vs ++ ds ++ es, sg.ret), sg.ret, ty))
 }
 
 # ---- indexing (docs/operator-traits-design.md §4.4) ----

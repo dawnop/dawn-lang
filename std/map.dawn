@@ -16,6 +16,8 @@
 # Key validity (no Float/Bytes anywhere inside the key type) is enforced by the
 # checker at every Map type instantiation, so these wrappers need no checks.
 
+use std/io
+
 ## A map with no entries. The key/value types come from the use site.
 pub fn empty[K, V]() -> Map[K, V] = map_empty()
 
@@ -52,6 +54,19 @@ pub fn values[K, V](m: Map[K, V]) -> List[V] = map_values(m)
 ## The (key, value) pairs, in insertion order.
 pub fn entries[K, V](m: Map[K, V]) -> List[(K, V)] = map_entries(m)
 
+## Every entry combined into one value: `f(acc, k, v)`, starting from `init`.
+## This walks the trie itself -- no entry list, no pair per entry -- which is
+## why it exists: folding `entries(m)` first builds and sorts the list this
+## avoids. The price is the order: `f` sees each entry exactly once but in
+## **no promised order** (the trie's own, which is not insertion order). A
+## fold whose answer depends on the order it met the entries in belongs on
+## `entries(m)`. The key and value arrive as two arguments rather than a
+## pair, so the walk allocates nothing per entry; the row rides through `f`
+## the way `list.fold`'s does. Unbounded like the other readers: visiting
+## entries hashes and compares no keys.
+pub fn fold[K, V, A](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e =
+  map_fold(m, init, f)
+
 # ---- Eq / Hash for Map ----
 #
 # Both are defined on the entries rather than on the structure holding them.
@@ -86,18 +101,12 @@ impl[K: Eq + Hash, V: Eq] Eq[Map[K, V]] {
     if len(a) != len(b) { false } else { eq_go(b, entries(a), 0, len(a)) }
 }
 
-fn hash_go[K: Hash, V: Hash](es: List[(K, V)], i: Int, n: Int, acc: Int) -> Int =
-  if i == n {
-    acc
-  } else {
-    let (k, v) = es[i]
-    hash_go(es, i + 1, n, acc + hash(k) * 31 + hash(v))
-  }
-
 ## A sum over the entries, so it does not depend on the order they come out
-## in — the same requirement `eq` above is written to.
+## in — the same requirement `eq` above is written to. Because it is
+## order-independent it may fold the trie directly: the entry list (and its
+## sort) that `entries` pays for would buy an order this sum cannot see.
 impl[K: Hash, V: Hash] Hash[Map[K, V]] {
-  fn hash(m: Map[K, V]) -> Int = hash_go(entries(m), 0, len(m), 0)
+  fn hash(m: Map[K, V]) -> Int = fold(m, 0, (acc, k, v) => acc + hash(k) * 31 + hash(v))
 }
 
 # The pieces, not the text: a `String` accumulator grown with `++` recopied
@@ -267,6 +276,49 @@ test "Show names the call that rebuilds it" {
   assert show(from([("a", 1)])) == "map.from([(\"a\", 1)])"
   # the rendering follows the same order everything else here does
   assert show(from([("b", 2), ("a", 1)])) == "map.from([(\"b\", 2), (\"a\", 1)])"
+}
+
+test "fold visits every entry exactly once, in no promised order" {
+  let m: Map[String, Int] = from([("b", 2), ("a", 1), ("c", 3)])
+  # order-insensitive answers: a sum, and a count against the stored size
+  assert fold(m, 0, (acc, _k, v) => acc + v) == 6
+  assert fold(m, 0, (acc, _k, _v) => acc + 1) == len(m)
+  let e: Map[String, Int] = empty()
+  assert fold(e, 7, (acc, _k, v) => acc + v) == 7
+  # keys and values pair up: the sum keyed through the map itself agrees
+  assert fold(m, 0, (acc, k, v) => acc + get(m, k).unwrap_or(-100) + v) == 12
+  # collect-then-sort: every key comes up exactly once, whatever the order
+  let no_keys: List[String] = []
+  let ks = fold(m, no_keys, (acc, k, _v) => acc ++ [k])
+  assert sort_by(ks, (x, y) => cmp(x, y)) == ["a", "b", "c"]
+  # a single entry has only one order, so it may be pinned
+  assert fold(from([("only", 9)]), 100, (acc, _k, v) => acc + v) == 109
+}
+
+# The effect is `!io` rather than a declared one on purpose: a test-only
+# `effect` in std would make this module the named-effect tier's first
+# internal consumer, which four outward documents state has not happened
+# (doc-check holds the sentence from both sides).
+test "fold's row is polymorphic: the step may perform an effect" {
+  let m: Map[String, Int] = from([("a", 1), ("b", 2), ("c", 3)])
+  let d = match io.temp_dir("", "dawn-map-fold-") {
+    Ok(p) -> p
+    Err(_) -> ""
+  }
+  assert d != ""
+  # one file per entry, written by the step itself, so the walk really
+  # performed the effect once per entry -- and the sum is unchanged by it
+  let total = fold(m, 0, (acc, k, v) => {
+    let _ = io.write_file(d ++ "/" ++ k, to_string(v))
+    acc + v
+  })
+  assert total == 6
+  for k in ["a", "b", "c"] {
+    match io.read_file(d ++ "/" ++ k) {
+      Ok(s) -> { assert s == to_string(get(m, k).unwrap_or(-1)) }
+      Err(_) -> { assert false }
+    }
+  }
 }
 
 test "for over a Map yields every entry once, in entries' order" {
