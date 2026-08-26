@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ e0551f6976ca09bc -->
+<!-- doc-check: translation-of docs/spec.md @ db41235ddd2a4da2 -->
 
 # Dawn Language Specification
 
@@ -2204,11 +2204,14 @@ and choosing it costs no principality. Where it has one, any choice would be a c
 caller's behalf that the caller never wrote, so the argument is still refused, and the diagnostic
 names the occurrence that makes the choice observable.
 
-Where **several** function-value arguments pass through the same `e`, the subtractions are
-joined, which is what a bare `!e` parameter has always done. Joined rather than last-one-wins:
-two spellings of one parameter row should not answer differently, and last-one-wins would make
-the verdict depend on the order the arguments were written and would hand the earlier closure an
-evidence pack with its own atom missing.
+Where one call passes **several** function-value arguments through the same `e`, each argument's
+residual `S_i \ R` is **joined** (the least upper bound on this lattice) into `e`'s binding:
+neither the first argument nor the last one wins. This is what a bare `!e` parameter has always
+done, and two spellings of one parameter row do not answer differently.
+
+The step carries a **companion condition**: `e` is looked for on each parameter's **unsubstituted**
+declared row. Once an earlier argument has bound `e`, the substituted row has no variable left to
+find.
 
 The other shapes are unchanged. `R ⊄ S` is still refused: that direction is the widening above, and
 widening covers only the case where the slot's row already carries the argument's atom for atom,
