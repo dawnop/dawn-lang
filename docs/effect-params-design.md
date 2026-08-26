@@ -1000,6 +1000,7 @@ signatures cannot carry effect variables`）随本刀消失，另需 accept 侧�
 
 1. **trait 体内 `effect E` 成员**：**无上界、无默认值**（v1；理由是调研在这一格拿不到一手
    依据，而两者都是纯加法）。存进 `TraitI` 里一张与 `assoc`（`types.dawn:1083`）同形的列表。
+   （默认值随 #369 于 2026-08-26 追加，见 §9；上界仍未做。）
 2. **impl 体内 `effect E = !X` 绑定**：**强制且恰好一次**，不从方法行推断（问题二），注册时
    做 exactly-once 覆盖检查，与 `ImplI.assoc_bindings`（`types.dawn:1270-1274`）同形同处。
 3. **行里的投影 `!S.E` / `!C.E`**：许可位置沿用 D6（方法签名内，含参数位与返回位），归约
@@ -1386,3 +1387,24 @@ check 全绿，运行期 panic `effect evidence missing`。别名拼写 `Thunk[!
 名册钉住运行期，两个后端都跑；`scripts/checker-corpus/cases/effect_type_args_ok.dawn` 里那
 条「刻意不进运行期门禁」的注释随之作废。两个生产变异体（读者半边与写者半边各一）记在
 `scripts/effect-evidence-contract/README.md`。
+
+## 9. 追记：关联效果默认值（#369，2026-08-26 裁决）
+
+刀 5 的「无默认值」是 v1 的取证保守（调研在这一格拿不到一手依据），当时就标为纯加法。
+树内随后自己长出了消费者：tea 的 `trait App` 加 `effect E` 时五个 impl 各付一行
+`effect E = !()` 纯样板，且那次迁移动了 8 个文件——「trait 加成员 → 全部 impl 破坏」正是
+默认值要买断的演化形状。用户裁决（2026-08-26）：**只做效果轴**；关联类型默认值不做，
+等真消费者出现再裁（类型轴今天可删除的绑定是零行，且没有规范默认元——效果轴有，`!()`
+是效果格的底，与「省略即纯」同构）。
+
+**机制一句话**：trait 成员可写 `effect E = !X`，右侧与 impl 绑定同一条 ground 纪律
+（`!()`、`!io` 或一个具名效果；变量、投影、并集照拒）。注册 trait 时解析进
+`TraitI.eff_defaults`；`pass_register_impls` 的缺绑定分支若查到默认，就把它物化成该 impl
+的绑定，查不到保持原报错。物化之后，归约、证据、两个后端对「默认来的」与「写出来的」
+绑定不可分辨——tea 五个 impl 删掉绑定前后 Core 逐字节相同，是这句话的可执行判词。
+降级、后端、证据链路零改动。
+
+门禁：grammar-corpus 的 reject `assoc_effect_member_default` 翻成 accept（显式契约翻转），
+另加坏默认 RHS 的 reject 族；checker-corpus `assoc_effect_defaults` 钉「省略即默认、覆盖
+生效、无默认照报缺、错默认两端拦」；`effect_assoc_row.dawn` 的 `ByDefault`/`Overr` 对按值
+钉两条路，生产变异体 J/K/L 记在 `scripts/effect-evidence-contract/README.md`。

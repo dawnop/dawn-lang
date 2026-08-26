@@ -83,13 +83,16 @@ test_decl       = "test" STRING block ;
 trait_decl      = [ "pub" ] "trait" TYPEIDENT "[" TYPEIDENT "]"
                   "{" trait_member { NEWLINE trait_member } "}" ;
                   (* 至少一个方法; 关联类型可零个 (assoc-types-design.md) *)
-trait_member    = trait_method | trait_assoc ;
+trait_member    = trait_method | trait_assoc | trait_eff_assoc ;
 trait_assoc     = "type" TYPEIDENT ;                              (* 裸声明: 无 bound 无默认 *)
+trait_eff_assoc = "effect" TYPEIDENT [ "=" eff_ground_row ] ;     (* 可选默认行 (#369): impl 省略绑定即取默认 *)
 trait_method    = "fn" IDENT "(" [ param_list ] ")" "->" type_expr [ effect ]
                   [ "=" expr ] ;                                  (* 带 = 即默认体 *)
 impl_decl       = "impl" TYPEIDENT "[" type_expr "]"
-                  "{" { fn_decl | impl_assoc } "}" ;              (* 方法不写 pub/类型参数 *)
+                  "{" { fn_decl | impl_assoc | impl_eff_bind } "}" ;  (* 方法不写 pub/类型参数 *)
 impl_assoc      = "type" TYPEIDENT "=" type_expr ;                (* 每个声明恰绑一次 *)
+impl_eff_bind   = "effect" TYPEIDENT "=" eff_ground_row ;         (* 无默认者恰绑一次, 有默认者可省 *)
+eff_ground_row  = "!" ( "(" ")" | "io" | TYPEIDENT ) ;            (* 具体行: !(), !io, 或一个已声明效果; 至多一个原子 *)
 
 (* ---- effect (docs/effects-design.md, spec §6.5) ---- *)
 effect_decl     = [ "pub" ] "effect" TYPEIDENT

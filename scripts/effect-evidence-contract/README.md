@@ -92,8 +92,9 @@ The self-test proves the script's own arithmetic. What proves the *corpus* is
 reverting a real repair in the compiler and watching this gate fail. These
 were measured on `ev-corpus-348` at `32341d9` (A through E) and on
 `assoc-effects` at `5675810` (F and G) and on `pad-removal` at `fb41e44`
-(H and I); each was applied, the toolchain rebuilt, the gate run, and the edit
-reverted. None of them is committed.
+(H and I) and on `assoc-effect-defaults` at `21e3db4` (J through L); each was
+applied, the toolchain rebuilt, the gate run, and the edit reverted. None of
+them is committed.
 
 ### A. `base_union` absorbs effect variables into io again (#345)
 
@@ -369,14 +370,86 @@ the same superset property is what `effect_pack_superset`, `effect_assoc_row`
 and the rest have always leaned on. H is the targeted half of this pair, and I
 is the half that says why H's deletion was allowed.
 
-Between them the nine mutants have different owners, which is the property
+### J. materialization ignores the declared default (#369)
+
+`selfhost/src/check/passes.dawn`, in `pass_register_impls`' missing-binding
+loop, the row a defaulted member materializes replaced with the empty row, so
+`effect E = !AskE` in the trait behaves as `= !()` for every impl that leant
+on it:
+
+```
+          Some(row) -> { eff_bindings = eff_bindings ++ [(an, EPure)] }
+```
+
+Result: **red**, at check time, at the impl that took the default:
+
+    effect_assoc_row:run               FAIL
+      error: `deft` is declared !AskE but trait `Dflt` declares it pure
+      --> scripts/spike-native/effect_assoc_row.dawn:208:6
+    effect_assoc_row:assertions        FAIL
+
+`scripts/checker-corpus/run.sh` reds under it too: the exact-label diagnostic
+its label-defaulted trait pins (``hop` must write the effect(s) `Ask``)
+disappears from `assoc_effect_defaults.expected`.
+
+Reverted: **green.**
+
+### K. the default is applied over a written binding (#369)
+
+Same loop, the materialization moved out of the not-bound guard, so a
+defaulted member's row is appended even when the impl bound its own and the
+last entry wins reduction -- the override is ignored:
+
+```
+      match dflt {
+        Some(row) -> { eff_bindings = eff_bindings ++ [(an, row)] }
+        None -> { if not list.contains(eff_bound_ns, an) { ...missing... } }
+      }
+```
+
+Result: **red**, at check time, at the impl that overrides:
+
+    effect_assoc_row:run               FAIL
+      error: `deft` is declared !TellE but trait `Dflt` declares it !AskE
+      --> scripts/spike-native/effect_assoc_row.dawn:213:6
+    effect_assoc_row:assertions        FAIL
+
+`scripts/checker-corpus/run.sh` reds too, on the override case: ``run` is
+declared !Ask but trait `P` declares it pure` appears for the impl whose
+written `effect E = !Ask` the default `!()` overrode.
+
+Reverted: **green.**
+
+### L. the missing-binding refusal fires despite the default (#369)
+
+Same loop, the `Some` arm made to diagnose exactly as the `None` arm does --
+the feature dead, every omission refused:
+
+    effect_assoc_row:run               FAIL
+      error: impl `Dflt[ByDefault]` is missing `effect E`
+    effect_assoc_row:assertions        FAIL
+
+`scripts/checker-corpus/run.sh` reds with the `impl P[A]/P[C]/P[D]/S[A] is
+missing `effect E`` family reappearing.
+
+Reverted: **green.**
+
+J, K and L are the three statements the defaulted shapes exist to hold: the
+declared row is the one materialized, a written binding beats it, and an
+omission under a default is not an error. Each is answered twice, by
+`effect_assoc_row`'s `ByDefault`/`Overr` pair here and by the checker corpus's
+diagnostics golden, and the two see different halves -- this gate the value
+lane, the corpus the refusal lane.
+
+Between them the twelve mutants have different owners, which is the property
 worth having: A is answered by `effect_decl_row` and `effect_io_absorb`, B by
 `effect_widen_row`, `effect_decl_row` and `effect_primitive_row`, C by
 `effect_widen_row` and `effect_primitive_row`, D and E by `effect_assoc_row`,
 `assoc_effects` and `effect_primitive_row`, F and G by `effect_assoc_row`
-alone, H by `effect_pad_row` alone, and I by most of the corpus with
-`effect_pad_row` naming which two of its own lines it reached. No single corpus
-file carries the gate.
+alone, H by `effect_pad_row` alone, I by most of the corpus with
+`effect_pad_row` naming which two of its own lines it reached, and J through L
+by `effect_assoc_row`'s defaulted pair beside the checker corpus. No single
+corpus file carries the gate.
 
 ## What the corpus does not reach
 

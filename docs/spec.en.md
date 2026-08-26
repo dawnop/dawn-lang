@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 813427002d697ddd -->
+<!-- doc-check: translation-of docs/spec.md @ 30d11c13ea91afd7 -->
 
 # Dawn Language Specification
 
@@ -792,12 +792,18 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
   match first(c) { Some(x) -> x, None -> d }        # head_or([1], 9) is Int
 ```
 - **Associated effects** (design and verdicts in
-  [effect-params-design.md](effect-params-design.md), knife 5): a trait body may declare a bare
-  `effect E` member (no bound, no default, v1), in the same place and under the same discipline
-  as `type Item`; an impl **binds each declaration exactly once** with `effect E = !X`, whose
-  right side is a **concrete row** — one named effect, `!io`, or the empty row `!()`; effect
-  variables and projections cannot be bound. A missing binding, multiple bindings, and binding a
-  name the trait does not have are each a compile error. A method's row **projects** it as
+  [effect-params-design.md](effect-params-design.md), knife 5; defaults ruled 2026-08-26): a
+  trait body may declare an `effect E` member (no bound) and may give it a **default row**
+  `effect E = !X`; an impl **binds each declaration at most once** with `effect E = !X`, whose
+  right side is a **concrete row**: one named effect, `!io`, or the empty row `!()`; effect
+  variables and projections cannot be bound, and a default's right side follows the same
+  discipline. An impl that omits a defaulted member takes the default; one that writes a
+  binding overrides it. Omitting a member **without** a default, multiple bindings, and binding
+  a name the trait does not have are each a compile error. Registration materializes the
+  default into that impl's binding, after which reduction, evidence and the backends cannot
+  tell a defaulted binding from a written one (the five pure tea impls compile to byte-identical
+  Core with their bindings deleted, which is that sentence's executable verdict). A method's
+  row **projects** it as
   `!T.E` — the subject must be a type parameter carrying that trait bound (exactly one bound
   declares the name; zero and ambiguity are both errors), and the licensed positions are the
   type projection's: inside a method signature, including function-type rows in parameter and
