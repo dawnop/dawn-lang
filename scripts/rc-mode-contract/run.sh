@@ -19,15 +19,17 @@
 # function `CBorrowed` on one or both sides. roster.txt names the sites; for
 # each, three flips:
 #
-#   callsite  the table row alone -- a mutant. Must be caught: today by the
-#             rc pass's own balance check (`rc: unbalanced`, at compile
-#             time), and once rc_check learns the table, by AddressSanitizer
-#             (measured: heap-use-after-free on every table-jurisdiction
-#             site). Any machine red counts; a flip that sails through
+#   callsite  the table row alone -- a mutant. Caught at compile time by the
+#             mode-contract assertion in `rc_module` (`rc: mode contract
+#             disagrees`): the two halves are compared before any rewrite,
+#             so a disagreement never reaches a binary. Behind it stand the
+#             runtime judges this harness measured before the assertion
+#             existed (heap-use-after-free on every table-jurisdiction
+#             site); any machine red counts, and a flip that sails through
 #             everything is the failure this harness exists to make loud.
-#   callee    `CParam.mode` alone -- the mirror mutant. Caught by
-#             LeakSanitizer (the callee stops releasing what callers still
-#             hand over).
+#   callee    `CParam.mode` alone -- the mirror mutant. Same assertion, other
+#             direction (measured behind it: an LSan direct leak, the callee
+#             no longer releasing what callers still hand over).
 #   both      the coherent flip, knife 2's semantics in miniature. This one
 #             must be GREEN all the way -- same bytes, clean sanitizers --
 #             and the sites where it is not are the harness's findings,
@@ -229,9 +231,9 @@ for spec in "${sites[@]}"; do
     id="$spec=$shape"
     tag="$(echo "$id" | tr '/:=' '___')"
     if ! emit "$work/$tag.c" "$id" "$here/$p.dawn"; then
-      # a compile-time red counts only when it is the balance oracle
-      # speaking, not some unrelated crash
-      if grep -q "rc: unbalanced" "$work/$tag.c.err"; then
+      # a compile-time red counts only when it is the contract assertion or
+      # the balance oracle speaking, not some unrelated crash
+      if grep -Eq "rc: (mode contract disagrees|unbalanced)" "$work/$tag.c.err"; then
         verdict "$id" ok
       else
         verdict "$id" bad "emit failed, but not on the rc balance check:" \

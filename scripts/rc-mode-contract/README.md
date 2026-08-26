@@ -23,11 +23,11 @@ semantic risk is a disagreement:
 * callee stops dropping, callers still hand over — a leak, which never
   prints a wrong byte at all.
 
-Neither is visible to a differential. Before the inference lands, this
-harness proves the net underneath it — the rc pass's own balance oracle,
-AddressSanitizer, LeakSanitizer — catches each half-flip *when it happens*,
-not by luck. "The green of a gate that has never seen a red is not
-evidence"; these are the reds.
+Neither is visible to a differential. This harness proves the net
+underneath the inference — the mode-contract assertion in `rc_module`, the
+rc pass's own balance oracle, AddressSanitizer, LeakSanitizer — catches
+each half-flip *when it happens*, not by luck. "The green of a gate that
+has never seen a red is not evidence"; these are the reds.
 
 ## The channel
 
@@ -57,77 +57,62 @@ unmutated compiler.
 ## The matrix
 
 Six sites (roster.txt), three shapes each, plus per-program clean controls.
-What the harness pins **today**:
+What the harness pins **today** (knife 2 step 0 in: `rc_check` reads the
+table, and `rc_module` asserts the two halves agree before rewriting):
 
-| site \ shape        | callsite            | callee   | both        |
-|---------------------|---------------------|----------|-------------|
-| std/cursor:done:2:0 | `rc: unbalanced` ✓  | LSan ✓   | known-red 1 |
-| std/cursor:next:2:0 | `rc: unbalanced` ✓  | LSan ✓   | known-red 1 |
-| std/str:len:1:0     | `rc: unbalanced` ✓  | LSan ✓   | known-red 1 |
-| std/pvec:index:2:0  | `rc: unbalanced` ✓  | LSan ✓   | known-red 2 |
-| std/list:reverse:1:0| `rc: unbalanced` ✓  | LSan ✓   | known-red 1 |
-| std/list:take:2:0   | `rc: unbalanced` ✓  | LSan ✓   | known-red 1 |
+| site \ shape        | callsite    | callee      | both      |
+|---------------------|-------------|-------------|-----------|
+| std/cursor:done:2:0 | assertion ✓ | assertion ✓ | green ✓   |
+| std/cursor:next:2:0 | assertion ✓ | assertion ✓ | green ✓   |
+| std/str:len:1:0     | assertion ✓ | assertion ✓ | green ✓   |
+| std/pvec:index:2:0  | assertion ✓ | assertion ✓ | known-red |
+| std/list:reverse:1:0| assertion ✓ | assertion ✓ | green ✓   |
+| std/list:take:2:0   | assertion ✓ | assertion ✓ | green ✓   |
 
-A mutant (callsite, callee) is judged by "any machine red counts": the rc
-balance panic, an ASan report, an LSan report, a wrong byte, a wrong exit. A
-mutant that sails through everything fails the run by name. The coherent
-flip (both) must be green end to end; the six failures are the two findings
-below, ratcheted in known-red.txt.
+"assertion" is the compile-time panic `rc: mode contract disagrees in ...`,
+which names the function, the position and both halves' answers. A mutant
+(callsite, callee) is judged by "any machine red counts": that assertion,
+the rc balance panic, an ASan report, an LSan report, a wrong byte, a wrong
+exit. A mutant that sails through everything fails the run by name. The
+coherent flip (both) must be green end to end — same bytes, clean
+sanitizers — and the one site where it is not is the finding below,
+ratcheted in known-red.txt.
 
-### callee, the leak mutant (verbatim)
+## What stands behind the assertion
 
-    ==2614392==ERROR: LeakSanitizer: detected memory leaks
-    Direct leak of 145 byte(s) in 1 object(s) allocated from:
-        ...
-        #3 dawn_str_concat runtime/c/dawn_rt.c:655
-        #4 dawn_std_2str__repeat ...
-        #5 dawn_cursor_1scan__main ...
+The runtime judges were measured before the assertion existed (against the
+step-0 parent, with `rc_module`'s self-check bypassed in a local
+experiment), so the matrix above is a *second* line in front of nets that
+were each seen red:
 
-Restore the flip, the run is clean. The corpus programs build their values
-at runtime on purpose: a string literal is an immortal static, and an
-immortal neither double-frees when over-released nor leaks when
-under-released — a mutant against a literal is invisible to both
-sanitizers.
+* callsite alone — the caller keeps no extra reference, the callee releases
+  the last one:
 
-## Finding 1: the balance oracle predates the table (5 known-red)
+      ==2609417==ERROR: AddressSanitizer: heap-use-after-free ...
+          #0 dawn_dup runtime/c/dawn_rt.c:368
+          #1 dawn_cursor_1scan__main ...
 
-Every callsite or both flip dies at *compile time*:
+* callee alone — the callee stops releasing what callers still hand over:
 
-    panic: rc: unbalanced in std/cursor: skip_go: released a binding that
-    was not held: 24; ...
+      ==2614392==ERROR: LeakSanitizer: detected memory leaks
+      Direct leak of 145 byte(s) in 1 object(s) allocated from:
+          ...
+          #3 dawn_str_concat runtime/c/dawn_rt.c:655
+          #4 dawn_std_2str__repeat ...
+          #5 dawn_cursor_1scan__main ...
 
-The **rewrite is right and the oracle is behind**. `rc_check`'s `CCall` arm
-marks every argument consuming (`chk_expr(c1, a, true)`; its signature has
-no mode table), while the pass classifies the same positions with
-`owned_positions` — and `rc_module` panics on the checker's verdict. Minimal
-shape, `fn h(s) = g(s, 1)` with `g`'s first parameter borrowed in the table;
-the pass produces exactly the right Core:
+The corpus programs build their values at runtime on purpose: a string
+literal is an immortal static, and an immortal neither double-frees when
+over-released nor leaks when under-released — a mutant against a literal is
+invisible to both sanitizers.
 
-    block : Int
-      let v1 : Int
-        call direct m.g : Int    -- s passes bare, no dup: borrowed position
-          local v0
-          int 7
-      drop v0                    -- h still owns s, releases it after the call
-      local v1
+(Historical: before step 0, `rc_check`'s `CCall` arm hard-coded the
+all-owned convention, so *any* table row with a borrowed position was
+uncompilable — right or wrong — and five known-red lines pinned that gap.
+Teaching the checker the table flipped them green and the ratchet took them
+out.)
 
-and the checker, reading the call as a transfer, counts `drop v0` as a
-double release. With the self-check bypassed (a local experiment, not
-committed), all five table-jurisdiction sites emit, print the expected
-bytes, and run ASan+LSan clean under the coherent flip — and the callsite
-mutants are then caught by ASan instead:
-
-    ==2609417==ERROR: AddressSanitizer: heap-use-after-free ...
-        #0 dawn_dup runtime/c/dawn_rt.c:368
-        #1 dawn_cursor_1scan__main ...
-
-So the projected end-state matrix is already measured: teaching `rc_check`
-the table (scheduled as part of knife 2, perceus-design.md 6 oracle (2))
-flips these five known-red entries green and hands the callsite mutants to
-ASan, with no other change. When that happens the ratchet fires
-(`FIXED -- delete it from known-red.txt`) and the entries come out.
-
-## Finding 2: `list_index` is outside the table's jurisdiction (1 known-red)
+## Finding: `list_index` is outside the table's jurisdiction (1 known-red)
 
 `xs[i]` lowers to the Core intrinsic `list_index`
 (`ir/lower.dawn`); only the C emitter maps it onto `std/pvec.index`. So the
@@ -135,16 +120,18 @@ function's *executed* call sites never consult the mode table — flipping
 `std/pvec:index` at the callsite changes exactly one call in the whole
 program (`nth`, which nothing runs), and the coherent flip still leaks: the
 intrinsic-lowered callers keep the all-owned convention while the callee
-stops dropping. Measured with the checker bypassed: `both` is an LSan
-direct leak, and the callsite mutant *survives* the sanitizers.
+stops dropping. `both` is an LSan direct leak, and without the contract
+assertion the callsite mutant *survives* the sanitizers (measured; the
+assertion is what catches it today, with no call site needed at all).
 
 The obligation this pins on the inference pass: **a function reachable
 through an intrinsic lowering (`list_index` / `list_slice` / `list_push`
-family) must not have its callee side stamped borrowed** unless the
-intrinsic lowering reads the same table. Today the site's callsite mutant is
-still caught (the compile-time panic covers `nth`), and the day the checker
-learns the table, this site's callsite flip becomes a survivor and fails the
-run — deliberately, so the jurisdiction question cannot be skipped.
+family, and every other `std/pvec` function the emitter names directly)
+must not have its callee side stamped borrowed** unless the intrinsic
+lowering reads the same table. This entry is the production mutant for that
+pin: delete the pin and the stamp it would produce is this both-flip, an
+LSan red. The entry comes out the day the intrinsic lowering reads the same
+table.
 
 ## The harness's own reds
 

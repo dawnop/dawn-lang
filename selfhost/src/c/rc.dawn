@@ -32,7 +32,7 @@
 # the corpus for it is the spike-native asan check.
 
 use ir/core.{
-  CModule, CFun, CParam, CExpr, CStmt, CCallee, CJava,
+  CModule, CFun, CParam, CExpr, CStmt, CCallee, CJava, CBorrowed,
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
@@ -694,6 +694,54 @@ fn borrow(st: RSt, e: CExpr, after: Set[Int]) -> (RSt, List[CStmt], CExpr, List[
 fn borrow_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], List[CExpr], List[Int]) =
   intr_args(st, es, [], after)
 
+## The owned argument positions of a call under `modes`, or None for the
+## common case, the all-owned convention, which must stay on `consume_all`'s
+## exact path.
+##
+## Only a `CDirect` callee can carry borrowed positions: the table is keyed
+## by the name a call site can see, and a dynamic target, a dictionary
+## method or an impl/default symbol stays all-owned (see core.CMode). A
+## table row covers the callee's declared parameters; argument positions
+## past it (forwarded dictionaries, evidence atoms) are owned -- a
+## dictionary is not counted anyway and evidence is an ordinary counted
+## record the callee releases.
+##
+## Takes the table rather than the pass state because it has two readers
+## with one question: the rewrite classifies call arguments with it, and
+## `rc_check` re-reads the same positions to know which arguments transfer.
+fn owned_positions(
+  modes: Map[(String, String), List[CMode]],
+  callee: CCallee,
+  n: Int
+) -> Option[List[Int]] =
+  match callee {
+    CDirect(owner, name) ->
+      match map.get(modes, (owner, name)) {
+        None -> None
+        Some(ms) -> {
+          var any_borrowed = false
+          for m in ms {
+            if not mode_owned(m) { any_borrowed = true }
+          }
+          # an all-owned row answers like a missing one: byte-for-byte the
+          # rewrite the table's absence produces
+          if not any_borrowed { return None }
+          var out: List[Int] = []
+          var i = 0
+          for m in ms {
+            if mode_owned(m) && i < n { out = out ++ [i] }
+            i = i + 1
+          }
+          while i < n {
+            out = out ++ [i]
+            i = i + 1
+          }
+          Some(out)
+        }
+      },
+    _ -> None
+  }
+
 ## The general operand-list rewrite: borrowed positions as `borrow_all` says,
 ## and the positions in `owned` handed over -- the reuse-analysis exceptions
 ## (docs/perceus-design.md 6), where the callee consumes the argument so that
@@ -740,46 +788,6 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
   }
   (st2, lets, outs, temps)
 }
-
-## The owned argument positions of a call, when the mode table marks any of
-## the callee's parameters borrowed -- or None for the common case, the
-## all-owned convention, which must stay on `consume_all`'s exact path.
-##
-## Only a `CDirect` callee can carry borrowed positions: the table is keyed
-## by the name a call site can see, and a dynamic target, a dictionary
-## method or an impl/default symbol stays all-owned (see core.CMode). A
-## table row covers the callee's declared parameters; argument positions
-## past it (forwarded dictionaries, evidence atoms) are owned -- a
-## dictionary is not counted anyway and evidence is an ordinary counted
-## record the callee releases.
-fn owned_positions(st: RSt, callee: CCallee, n: Int) -> Option[List[Int]] =
-  match callee {
-    CDirect(owner, name) ->
-      match map.get(st.modes, (owner, name)) {
-        None -> None
-        Some(ms) -> {
-          var any_borrowed = false
-          for m in ms {
-            if not mode_owned(m) { any_borrowed = true }
-          }
-          # an all-owned row answers like a missing one: byte-for-byte the
-          # rewrite the table's absence produces
-          if not any_borrowed { return None }
-          var out: List[Int] = []
-          var i = 0
-          for m in ms {
-            if mode_owned(m) && i < n { out = out ++ [i] }
-            i = i + 1
-          }
-          while i < n {
-            out = out ++ [i]
-            i = i + 1
-          }
-          Some(out)
-        }
-      },
-    _ -> None
-  }
 
 ## Rewrite each operand in a consuming position: the value is handed over and
 ## the receiver keeps it.
@@ -923,7 +931,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
         CDynamic(t) -> fv_expr(t, after)
         _ -> after
       }
-      match owned_positions(st1, callee, len(args)) {
+      match owned_positions(st1.modes, callee, len(args)) {
         None -> {
           let (st2, args1) = consume_all(st1, args, cbase)
           wrap(st2, lets, CCall(c1, args1, cty), cty, temps)
@@ -1385,6 +1393,14 @@ pub fn owned_modes() -> Map[(String, String), List[CMode]] = map.empty()
 ## not in its own `dicts` -- and a dictionary is outside the ledger wherever
 ## it appears (see `dictish`).
 pub fn rc_module(m: CModule, modes: Map[(String, String), List[CMode]]) -> CModule = {
+  # The contract's two halves are stored apart on purpose (the harness flips
+  # them apart); a disagreement between them is the one shape whose damage
+  # is silent at runtime -- a leak or a use-after-free, never a wrong byte
+  # up front -- so it must not get past compilation.
+  let mm = mode_mismatch(m, modes)
+  if len(mm) > 0 {
+    panic("rc: mode contract disagrees in " ++ m.owner ++ ": " ++ join(list.take(mm, 3), "; "))
+  }
   var base: Set[Int] = set.empty()
   for f in m.fns {
     for d in f.dicts { base = set.insert(base, d.sym) }
@@ -1397,11 +1413,53 @@ pub fn rc_module(m: CModule, modes: Map[(String, String), List[CMode]]) -> CModu
     fns = fns ++ [f1]
   }
   let out = CModule { ..m, fns: fns, next_sym: next }
-  let bad = rc_check(out)
+  let bad = rc_check(out, modes)
   if len(bad) > 0 {
     panic("rc: unbalanced in " ++ m.owner ++ ": " ++ join(list.take(bad, 3), "; "))
   }
   out
+}
+
+## Everywhere this module's callee-side modes (`CParam.mode`) disagree with
+## the call-site table, as sentences. A missing row and an all-owned row
+## both mean all-owned parameters.
+##
+## Impl and default-method bodies stay out: the table is keyed by the name a
+## `CDirect` call site spells, and an impl's `CFun.name` is its method name
+## -- two impls of `show` in one module share it, so a row for a plain
+## function of the same name would be compared against parameters it never
+## described. Their call sites (`CImpl`/`CDefault`/`CMethod`) never read the
+## table, and the inference pass must never stamp them for the same reason.
+fn mode_mismatch(m: CModule, modes: Map[(String, String), List[CMode]]) -> List[String] = {
+  var errs: List[String] = []
+  for f in m.fns {
+    let plain = match f.impl_of {
+      Some(_) -> false
+      None ->
+        match f.default_of {
+          Some(_) -> false
+          None -> true
+        }
+    }
+    if plain {
+      let row = match map.get(modes, (f.owner, f.name)) {
+        Some(r) -> r
+        None -> []
+      }
+      var i = 0
+      for p in f.params {
+        let table_owned = if i < len(row) { mode_owned(row[i]) } else { true }
+        if table_owned != mode_owned(p.mode) {
+          errs = errs ++ [f.name ++ ": parameter " ++ to_string(i) ++
+              " is " ++ (if mode_owned(p.mode) { "owned" } else { "borrowed" }) ++
+              " on the callee and " ++ (if table_owned { "owned" } else { "borrowed" }) ++
+              " in the table"]
+        }
+        i = i + 1
+      }
+    }
+  }
+  errs
 }
 
 # ---- the local oracle ----
@@ -1415,7 +1473,15 @@ pub fn rc_module(m: CModule, modes: Map[(String, String), List[CMode]]) -> CModu
 # the type of every receiver, and the corpus for it is spike-native's asan
 # check.
 
-type Chk = { live: Set[Int], gone: Bool, errs: List[String] }
+type Chk = {
+  live: Set[Int],
+  gone: Bool,
+  errs: List[String],
+  # the same call-site table the rewrite classified with: a borrowed
+  # argument position is a read, not a transfer, and the walk must not
+  # count it as a release
+  modes: Map[(String, String), List[CMode]]
+}
 
 fn chk_err(c: Chk, msg: String) -> Chk = Chk { ..c, errs: c.errs ++ [msg] }
 
@@ -1534,8 +1600,23 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
         CDynamic(t) -> chk_expr(c, t, false)
         _ -> c
       }
-      for a in args { c1 = chk_expr(c1, a, true) }
-      c1
+      # the same positions the rewrite classified: an owned argument is a
+      # consuming position (a bare binding there is a transfer), a borrowed
+      # one is a read the caller still owns
+      match owned_positions(c.modes, callee, len(args)) {
+        None -> {
+          for a in args { c1 = chk_expr(c1, a, true) }
+          c1
+        }
+        Some(owned) -> {
+          var i = 0
+          for a in args {
+            c1 = chk_expr(c1, a, list.contains(owned, i))
+            i = i + 1
+          }
+          c1
+        }
+      }
     }
     CIntrinsic(name, args, _) -> {
       let owned = intr_owned_args(name)
@@ -1645,8 +1726,10 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
   }
 
 ## Every way this module's Core is unbalanced, as sentences. Empty is the
-## answer the pass is supposed to produce.
-pub fn rc_check(m: CModule) -> List[String] = {
+## answer the pass is supposed to produce. `modes` must be the table the
+## rewrite ran with: the walk classifies call arguments by it, and a
+## different table would judge the right rewrite wrong.
+pub fn rc_check(m: CModule, modes: Map[(String, String), List[CMode]]) -> List[String] = {
   # the same module-wide dictionary union the pass makes: a lifted lambda's
   # dictionary capture is not a counted binding, so the oracle must not
   # expect a release for it (pass and oracle share one definition)
@@ -1665,7 +1748,7 @@ pub fn rc_check(m: CModule) -> List[String] = {
         live = set.insert(live, p.sym)
       }
     }
-    let c = chk_expr(Chk { live: live, gone: false, errs: [] }, f.body, true)
+    let c = chk_expr(Chk { live: live, gone: false, errs: [], modes: modes }, f.body, true)
     var here = c.errs
     if not c.gone && set.len(c.live) > 0 {
       here = here ++ ["a body left " ++ to_string(set.len(c.live)) ++ " binding(s) held"]
@@ -1688,23 +1771,23 @@ fn one_fn(params: List[CParam], ret: Ty, body: CExpr) -> CModule =
 
 test "a scalar body needs no counting at all" {
   let m = rc_module(one_fn([], TyInt, CInt(1)), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
 }
 
 test "a reference parameter the body never touches is still released" {
   let lst = TyList(TyInt)
   let p = CParam { sym: 1, ty: lst, mode: COwned }
   # the oracle sees the gap before the pass fills it...
-  assert len(rc_check(one_fn([p], TyInt, CInt(1)))) == 1
+  assert len(rc_check(one_fn([p], TyInt, CInt(1)), owned_modes())) == 1
   # ...and does not see one after
-  assert len(rc_check(rc_module(one_fn([p], TyInt, CInt(1)), owned_modes()))) == 0
+  assert len(rc_check(rc_module(one_fn([p], TyInt, CInt(1)), owned_modes()), owned_modes())) == 0
 }
 
 test "handing a parameter back is a move, not a copy" {
   let lst = TyList(TyInt)
   let p = CParam { sym: 1, ty: lst, mode: COwned }
   let m = rc_module(one_fn([p], lst, CLocal(1, lst)), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   # the last (only) use takes the value: no dup, no drop, nothing to balance
   match m.fns[0].body {
     CLocal(s, _) -> { assert s == 1 }
@@ -1722,7 +1805,7 @@ test "an earlier use copies, the last one takes" {
     TyInt
   )
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
     CBlock(ss, tail, _) -> {
       match ss[0] {
@@ -1754,7 +1837,7 @@ test "two uses in one operand list both copy" {
   let p = CParam { sym: 1, ty: lst, mode: COwned }
   let pair = TyTuple([lst, lst])
   let m = rc_module(one_fn([p], pair, CTuple([CLocal(1, lst), CLocal(1, lst)], pair)), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
     CBlock(ss, _, _) -> {
       match ss[0] {
@@ -1789,7 +1872,7 @@ test "a use inside a loop copies every trip round" {
     TyInt
   )
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   # the textual last use runs once per iteration; it must copy, and the
   # binding is released after the loop instead
   match m.fns[0].body {
@@ -1824,7 +1907,7 @@ test "the arm that keeps a binding drops what the other arm took" {
     TyInt
   )
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
     CIf(_, thn, els, _) -> {
       match thn {
@@ -1863,7 +1946,7 @@ test "the right side of a short circuit refuses to take" {
     TyBool
   )
   let m = rc_module(one_fn([p], TyBool, body), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   # the call only sometimes runs, so its use must copy, and the release
   # stays at the end of the function where it is unconditional
   match m.fns[0].body {
@@ -1896,7 +1979,7 @@ test "array_with takes its owned operands bare at their last use" {
   let p2 = CParam { sym: 2, ty: lst, mode: COwned }
   let body = CIntrinsic("array_with", [CLocal(1, arr), CInt(0), CLocal(2, lst)], arr)
   let m = rc_module(one_fn([p1, p2], arr, body), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   # both owned positions hand their reference over: no dup, no scope drop
   match m.fns[0].body {
     CIntrinsic(_, args, _) -> {
@@ -1927,7 +2010,7 @@ test "a binding is released at the statement that stops touching it" {
     TyInt
   )
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
     CBlock(ss, _, _) -> {
       match ss[1] {
@@ -1957,7 +2040,7 @@ test "the match once-loop is unlooped and its arm takes the binding" {
     TyInt
   )
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
     CBlock(ss, _, _) ->
       match ss[0] {
@@ -1991,7 +2074,7 @@ test "a source loop ending in break keeps its jump target" {
   ], None, TyUnit)
   let body = CBlock([CSLoop(7, loop_body, None)], Some(CInt(0)), TyInt)
   let m = rc_module(one_fn([], TyInt, body), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
     CBlock([CSLoop(7, _, _)], _, _) -> ()
     _ -> panic("expected the source loop to retain its break target")
@@ -2005,11 +2088,76 @@ test "a source loop ending in continue keeps its jump target" {
   ], None, TyUnit)
   let body = CBlock([CSLoop(7, loop_body, None)], Some(CInt(0)), TyInt)
   let m = rc_module(one_fn([], TyInt, body), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
     CBlock([CSLoop(7, _, _)], _, _) -> ()
     _ -> panic("expected the source loop to retain its continue target")
   }
+}
+
+test "a borrowed table row passes the argument bare and keeps the release" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let modes = map.insert(owned_modes(), ("m", "g"), [CBorrowed])
+  let body = CBlock(
+    [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt))],
+    Some(CInt(0)),
+    TyInt
+  )
+  # `g` is not a function of this module, so the row constrains only call
+  # sites and the contract assertion has nothing to compare it against
+  let m = rc_module(one_fn([p], TyInt, body), modes)
+  assert len(rc_check(m, modes)) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> {
+      match ss[0] {
+        CSDiscard(CCall(_, args2, _)) ->
+          match args2[0] {
+            CLocal(s, _) -> { assert s == 1 }
+            _ -> panic("expected the borrowed position to pass the binding bare")
+          }
+        _ -> panic("expected the discarded call")
+      }
+      # the caller still owns the value, so its release is the caller's,
+      # right after the call stops touching it
+      match ss[1] {
+        CSDrop(d) -> { assert d == 1 }
+        _ -> panic("expected the caller to keep the release")
+      }
+    }
+    _ -> panic("expected a block")
+  }
+}
+
+test "the checker under the same table judges the borrowed rewrite balanced" {
+  # the wrong table must also judge it wrong: the same module read with the
+  # all-owned table sees the bare argument as a transfer and the drop after
+  # it as a second release
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let modes = map.insert(owned_modes(), ("m", "g"), [CBorrowed])
+  let body = CBlock(
+    [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt))],
+    Some(CInt(0)),
+    TyInt
+  )
+  let m = rc_module(one_fn([p], TyInt, body), modes)
+  assert len(rc_check(m, modes)) == 0
+  assert len(rc_check(m, owned_modes())) > 0
+}
+
+test "the contract assertion names a one-sided mode" {
+  let lst = TyList(TyInt)
+  # table says borrowed, callee still owned: the callsite half-flip
+  let own = one_fn([CParam { sym: 1, ty: lst, mode: COwned }], TyInt, CInt(1))
+  let row = map.insert(owned_modes(), ("m", "f"), [CBorrowed])
+  assert len(mode_mismatch(own, row)) == 1
+  # callee says borrowed, no table row: the callee half-flip
+  let bor = one_fn([CParam { sym: 1, ty: lst, mode: CBorrowed }], TyInt, CInt(1))
+  assert len(mode_mismatch(bor, owned_modes())) == 1
+  # the coherent stamp is silent, and so is the all-owned base
+  assert len(mode_mismatch(bor, row)) == 0
+  assert len(mode_mismatch(own, owned_modes())) == 0
 }
 
 test "reassignment from the old value is a hand-over, not copy and drop" {
@@ -2023,7 +2171,7 @@ test "reassignment from the old value is a hand-over, not copy and drop" {
     TyInt
   )
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
-  assert len(rc_check(m)) == 0
+  assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
     CBlock(ss, _, _) -> {
       match ss[0] {

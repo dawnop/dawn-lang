@@ -2,29 +2,17 @@
 # ratchet rules: an unlisted failure is fatal, and so is a listed check that
 # starts passing -- fix means delete the line and upgrade the expectation.
 #
-# All six coherent flips are red today, and the harness's first run is what
-# found that. Two distinct findings:
+# One finding stays open. `xs[i]` lowers to the Core intrinsic `list_index`
+# (`ir/lower.dawn`); only the C emitter maps it onto `std/pvec.index`. So
+# the function's executed call sites never consult the mode table, and the
+# coherent flip leaks (measured: LSan direct leak -- the intrinsic-lowered
+# callers keep the all-owned convention while the callee stops dropping).
+# This is exactly why the inference pass must pin every intrinsic-backed
+# `std/pvec` function owned; the entry doubles as the production mutant for
+# that pin -- delete the pin and this both-flip is the red it produces. It
+# comes out the day the intrinsic lowering reads the same table.
 #
-# 1 (five sites): the call-site borrow REWRITE is correct -- with rc_module's
-#   self-check bypassed, all five emit, print the expected bytes and run
-#   asan+LSan clean -- but `rc_check`'s CCall arm still hard-codes the
-#   all-owned convention (`chk_expr(c1, a, true)` for every argument; its
-#   signature has no mode table), and `rc_module` panics on its verdict. So
-#   ANY table row with a borrowed position is uncompilable today, right or
-#   wrong. The checker extension was scheduled as part of knife 2
-#   (perceus-design.md 6, oracle (2)); until it lands, these entries pin the
-#   gap. When it lands they start passing, this ratchet fires, and the lines
-#   come out.
-#
-# 2 (std/pvec:index): even with the checker fixed, this one stays red -- its
-#   executed call sites are the `list_index` intrinsic, outside the table's
-#   jurisdiction, so the coherent flip still leaks (measured: LSan direct
-#   leak). The inference pass must refuse to stamp intrinsic-backed
-#   functions borrowed on the callee side, or teach the intrinsic lowering
-#   the same table. This entry holds that question open.
-std/cursor:done:2:0=both
-std/cursor:next:2:0=both
-std/str:len:1:0=both
+# (The other five both-flips went green when `rc_check` learned the table
+# and the mode-contract assertion landed -- knife 2 step 0; the five
+# known-red lines that pinned the checker gap came out then.)
 std/pvec:index:2:0=both
-std/list:reverse:1:0=both
-std/list:take:2:0=both
