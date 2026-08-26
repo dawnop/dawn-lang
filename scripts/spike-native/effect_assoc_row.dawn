@@ -54,6 +54,24 @@
 #     property the design leans on everywhere else. Before the repair it
 #     answered one projection with the *other's* record.
 #
+# And the half of that last one it does not reach. `two_subjects` puts two
+# projections of one trait in a row by taking **two subjects** -- `T.E` and
+# `U.E`, one member, two impls. A trait may declare more than one member, and
+# then `T.E` and `T.F` are two atoms of one row on **one** subject, filled from
+# **one** impl, addressed by one `assoc_key` band. That is the narrowest case
+# the band has: two members named apart in the source and not apart in the key.
+# Three shapes for it, all on a trait whose second subject binds the two
+# members the other way round, so a slot answered by the trait's id rather than
+# by the label its binding produced hands one line the other's handler and says
+# so in the arithmetic:
+#
+#   * both members read inside a lambda a callee applies;
+#   * both members through `list.fold`, whose `!e` is a std signature's
+#     parameter row rather than one this file wrote;
+#   * one member handed out as a **function value's** row while the frame reads
+#     the other itself, so the two slots of one band are split between a
+#     callee and this frame.
+#
 # And the control the whole file needs: a projection in a **return** row, which
 # is what `assoc_effects.dawn` is made of and what worked all along.
 #
@@ -62,6 +80,7 @@
 # top of `main` let one correctly built pack seed every other line's read, and
 # a repair that fixed one call site in eight would print eight right answers.
 use std/io
+use std/list
 
 effect AskE {
   fn ask() -> Int
@@ -88,6 +107,18 @@ trait Other[U] {
   fn other(y: U) -> Int !U.F
 }
 
+## A trait with **two** effect members. `Runner` has one, so every row above
+## that holds two projections gets the second from another trait or another
+## subject; this is the one that gets it from another *member*, which is the
+## pair `types.assoc_key` cannot tell apart -- the band is `3 * trait_id + 2`
+## and the member name is not in it.
+trait Pair[T] {
+  effect E
+  effect F
+  fn lo(x: T) -> Int !T.E
+  fn hi(x: T) -> Int !T.F
+}
+
 type One = { v: Int }
 
 type Two = { v: Int }
@@ -95,6 +126,10 @@ type Two = { v: Int }
 type Quiet = { v: Int }
 
 type Loud = { v: Int }
+
+type Ping = { v: Int }
+
+type Pong = { v: Int }
 
 impl Runner[One] {
   effect E = !AskE
@@ -126,6 +161,25 @@ impl Runner[Loud] {
     println("loud")
     x.v
   }
+}
+
+## The two impls of `Pair` bind its two members to the same two labels the
+## other way round. One generic consumer is instantiated at both, so a slot
+## that answered by trait id alone -- or a pack shared between the members --
+## does not merely lose a handler, it swaps two that are both installed, and
+## the arithmetic below is what says which happened.
+impl Pair[Ping] {
+  effect E = !AskE
+  effect F = !TellE
+  fn lo(x: Ping) -> Int !AskE = x.v + ask()
+  fn hi(x: Ping) -> Int !TellE = x.v + tell()
+}
+
+impl Pair[Pong] {
+  effect E = !TellE
+  effect F = !AskE
+  fn lo(x: Pong) -> Int !TellE = x.v + tell()
+  fn hi(x: Pong) -> Int !AskE = x.v + ask()
 }
 
 alias Thunk[!e] = fn() -> Int !e
@@ -191,6 +245,21 @@ fn two_subjects[T: Runner, U: Runner](a: T, b: U) -> Int !T.E !U.E = {
   let g = () => run(a) + run(b)
   g()
 }
+
+## Two members of one trait in one row, on one subject, read from inside a
+## lambda the callee applies. `thru`'s `!e` is instantiated to `!T.E !T.F`, so
+## one pack has to carry both members of one band.
+fn both_members[T: Pair](x: T) -> Int !T.E !T.F = thru(() => lo(x) * 1000 + hi(x))
+
+## The same row through `list.fold`, where the `!e` being instantiated belongs
+## to a std signature's parameter rather than to anything this file wrote.
+fn fold_members[T: Pair](x: T) -> Int !T.E !T.F =
+  list.fold([1, 2], 0, (acc, _k) => acc + lo(x) * 1000 + hi(x))
+
+## The two slots of one band split between a callee and this frame: `t` carries
+## the second member's row into a function value, and the first is read here.
+fn member_split[T: Pair](x: T, t: fn() -> Int !T.F) -> Int !T.E !T.F =
+  lo(x) * 1000 + t()
 
 ## The control: a projection in a **return** row and nowhere else. This is the
 ## shape `assoc_effects.dawn` is made of, and the one that was right all along.
@@ -271,6 +340,25 @@ fn line_two_subjects() -> Unit !io = {
   println(to_string(two_subjects(One { v: 1400 }, Two { v: 1500 })))
 }
 
+fn line_both_members() -> Unit !io = {
+  with handle AskE { ask() => 97 }
+  with handle TellE { tell() => 101 }
+  println(to_string(both_members(Ping { v: 2 })))
+  println(to_string(both_members(Pong { v: 2 })))
+}
+
+fn line_fold_members() -> Unit !io = {
+  with handle AskE { ask() => 113 }
+  with handle TellE { tell() => 127 }
+  println(to_string(fold_members(Ping { v: 3 })))
+}
+
+fn line_member_split() -> Unit !io = {
+  with handle AskE { ask() => 107 }
+  with handle TellE { tell() => 109 }
+  println(to_string(member_split(Ping { v: 5 }, () => tell() + 1)))
+}
+
 fn line_ret_only() -> Unit !io = {
   with handle AskE { ask() => 89 }
   println(to_string(ret_only(One { v: 1600 })))
@@ -303,6 +391,12 @@ pub fn main() -> Unit !io = {
   line_two_traits()
   println("-- two projections on one trait, read inside a lambda --")
   line_two_subjects()
+  println("-- two members of one trait, one subject, read inside a lambda --")
+  line_both_members()
+  println("-- the same two members through list.fold's parameter row --")
+  line_fold_members()
+  println("-- one member into a function value while the frame reads the other --")
+  line_member_split()
   println("-- and the control: a projection in a return row and nowhere else --")
   line_ret_only()
 }
@@ -377,6 +471,27 @@ test "two projections on one trait answer with their own labels" {
   with handle AskE { ask() => 79 }
   with handle TellE { tell() => 83 }
   assert two_subjects(One { v: 1400 }, Two { v: 1500 }) == 3062
+}
+
+test "two members of one trait answer with their own bindings" {
+  with handle AskE { ask() => 97 }
+  with handle TellE { tell() => 101 }
+  # Ping binds E to AskE and F to TellE; Pong binds them the other way, so the
+  # two answers are each other's digits and a swapped slot cannot pass both
+  assert both_members(Ping { v: 2 }) == 99103
+  assert both_members(Pong { v: 2 }) == 103099
+}
+
+test "two members of one trait survive a std parameter's row" {
+  with handle AskE { ask() => 113 }
+  with handle TellE { tell() => 127 }
+  assert fold_members(Ping { v: 3 }) == 232260
+}
+
+test "one band's two slots split between a callee and the frame" {
+  with handle AskE { ask() => 107 }
+  with handle TellE { tell() => 109 }
+  assert member_split(Ping { v: 5 }, () => tell() + 1) == 112110
 }
 
 test "a projection in a return row is what it always was" {

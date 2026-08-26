@@ -90,7 +90,8 @@ nothing by it.
 
 The self-test proves the script's own arithmetic. What proves the *corpus* is
 reverting a real repair in the compiler and watching this gate fail. These
-were measured on `ev-corpus-348` at `32341d9`; each was applied, the toolchain
+were measured on `ev-corpus-348` at `32341d9` (A through E) and on
+`assoc-effects` at `5675810` (F and G); each was applied, the toolchain
 rebuilt, the gate run, and the edit reverted. None of them is committed.
 
 ### A. `base_union` absorbs effect variables into io again (#345)
@@ -222,12 +223,69 @@ D and E are the two halves of one convention -- what a call site puts in a
 projection's slot, and what the callee takes back out -- and each is red on its
 own, which is what says neither half is decoration.
 
-Between them the five mutants have different owners, which is the property
+### F. the evidence local forgets which member it is (#360)
+
+`selfhost/src/check/checker.dawn`, `ev_assoc_local_name` with the member name
+dropped from the mint, so two `effect` members of one trait on one subject name
+one local between them:
+
+```
+pub fn ev_assoc_local_name(vid: Int, tid: Int, name: String) -> String =
+  "ev\$a\$" ++ to_string(vid) ++ "\$" ++ to_string(tid)
+```
+
+Result: **red**, at check time, and only at the three signatures that write two
+members of one trait in one row.
+
+    effect_assoc_row:run               FAIL
+      error: `ev$a$1617$1604` is already bound in this scope
+      --> both_members
+      error: `ev$a$1618$1604` is already bound in this scope
+      --> fold_members
+      error: `ev$a$1619$1604` is already bound in this scope
+      --> member_split
+    effect_assoc_row:assertions        FAIL
+    effect evidence contract FAILED
+
+Reverted: **green.**
+
+### G. a projection reduces through the wrong member's binding (#360)
+
+`selfhost/src/check/checker.dawn`, in `reduce_eff`'s impl arm, the binding
+chosen without consulting the member the projection names:
+
+```
+                      if bn == bn { bound = Some(be) }
+```
+
+Result: **red**, and this one runs, so the report is the miss rather than a
+refusal.
+
+    effect_assoc_row:run               FAIL
+      panic: effect evidence missing: no pack entry for the atom this call
+      site asked for
+    effect_assoc_row:assertions        FAIL
+      FAIL  two members of one trait answer with their own bindings
+      FAIL  two members of one trait survive a std parameter's row
+      FAIL  one band's two slots split between a callee and the frame
+      3 of 16 test(s) failed
+
+Reverted: **green.**
+
+F and G are the pair that says what the two-member shapes are for. Every other
+entry in the corpus is green under both, and inside `effect_assoc_row` so is
+every case that gets its second projection from a second trait or a second
+subject: a trait with one member has one binding, so choosing it wrongly and
+choosing it rightly are the same choice. Only two members on one subject can
+tell those apart, and `types.assoc_key` bands by trait id alone -- which is
+what made the shape worth pinning even though it was already correct.
+
+Between them the seven mutants have different owners, which is the property
 worth having: A is answered by `effect_decl_row` and `effect_io_absorb`, B by
 `effect_widen_row`, `effect_decl_row` and `effect_primitive_row`, C by
 `effect_widen_row` and `effect_primitive_row`, D and E by `effect_assoc_row`,
-`assoc_effects` and `effect_primitive_row`. No single corpus file carries the
-gate.
+`assoc_effects` and `effect_primitive_row`, F and G by `effect_assoc_row`
+alone. No single corpus file carries the gate.
 
 ## What the corpus does not reach
 
