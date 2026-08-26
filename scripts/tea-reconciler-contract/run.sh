@@ -4,6 +4,10 @@
 #
 #   ./scripts/tea-reconciler-contract/run.sh
 #
+# Nothing to re-record: this harness has no golden file. The expectation is
+# oracle/, a program, and the corpus is compared against what it computes, so
+# an intended change is a change to the oracle rather than to a transcript.
+#
 # Why a gate and not a consumer. `tea_core/diff` has no production caller and
 # cannot get one on a terminal: the presenter's increment is a screen row, not a
 # node (packages/tea-term/src/present.dawn says why in its own first lines), a

@@ -2,6 +2,12 @@
 # The atomic-manifest-write contract: what `io.atomic_write_file` promises, the
 # host failure at every step it has to survive, and a live mutant per promise.
 #
+#   ./scripts/atomic-write-contract/run.sh
+#
+# `expected.txt` and `callsites-expected.txt` are hand-written and there is no
+# `--record`: they say what the promises are, which is a thing a run cannot be
+# asked. Change the probes and edit both files to match.
+#
 # Three kinds of check live here, and they answer different questions:
 #
 #   contract    -- the probe's output on both backends against one golden file.

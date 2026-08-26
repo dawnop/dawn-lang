@@ -6,6 +6,12 @@
 #   ./scripts/spike-native/run.sh prog.dawn ...    # just these
 #   SPIKE_JOBS=1 ./scripts/spike-native/run.sh     # one at a time
 #
+# There is no `--record`, on purpose, and the reason is the paragraph below
+# about what `<name>.expect` is for: it is the one check in this harness not
+# derived from a backend, so it is written by hand from what the program is
+# supposed to print. A new corpus entry gets its `.expect` written the same
+# way; if the diff surprises you, the diff is the finding.
+#
 # Corpus entries are independent -- each one compiles and runs a program of its
 # own -- so they run in parallel, min(nproc, 4) at a time. That is scheduling
 # only: every entry still runs every check it ran serially, the transcript is

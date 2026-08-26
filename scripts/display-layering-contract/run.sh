@@ -2,6 +2,14 @@
 # Hold the two Display layering rules with a mutant apiece, and prove each one
 # reddens the rule it is about and nothing else.
 #
+#   ./scripts/display-layering-contract/run.sh
+#
+# Two tracked files and no `--record` for either. `probe.expect` is the labelled
+# answer the rules require; `matrix.txt` is the declaration of which mutant
+# reddens which label, which run.sh then checks against what actually happened.
+# Both are edited by hand: a recording of either would be the harness agreeing
+# with itself.
+#
 # The rules, both in `to_str` (selfhost/src/ir/lower.dawn):
 #   - a `Display` impl decides the top-level rendering, in place of the `Show`
 #     the value would otherwise render through;

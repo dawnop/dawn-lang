@@ -4,6 +4,11 @@
 #
 #   ./scripts/grammar-corpus/run.sh
 #
+# Nothing to re-record: a case carries its own expectation in its header, so
+# there is no golden file and no `--record`. checker-corpus, which does have
+# one, is the neighbour to reach for when the expectation is a diagnostic
+# stream rather than a verdict.
+#
 # accept/ must parse with no diagnostics. reject/ must be rejected, and for the
 # reason its header declares: the leading `# expect: <substring>` lines pin the
 # diagnostic sequence, one line per diagnostic, in order. `dawn __parse` prints

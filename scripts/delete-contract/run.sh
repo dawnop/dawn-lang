@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # The public delete contract, plus live mutants for the regressions that
 # created LIB-07. Each mutant must compile and run; only its behavior may fail.
+#
+#   ./scripts/delete-contract/run.sh
+#
+# `expected.txt` is hand-written and there is no `--record`. The mutants are
+# read against the same file (a mutant passes by *differing* from it), so a
+# golden recorded from a run would be recording whichever behaviour was in the
+# tree. Edit it by hand when the probe changes.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

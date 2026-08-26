@@ -5,6 +5,12 @@
 # source mutants then compile and execute private selfhost copies: restoring
 # the checker exception fails its unit test, while restoring an unreachable
 # backend CHECKCAST is caught by the structural half of this contract.
+#
+#   ./scripts/java-narrowing-contract/run.sh
+#
+# `rejected.expected` is one `D` line: the diagnostic the checker must produce,
+# span and candidate list included. No `--record`; when the wording moves on
+# purpose, copy the line the failure prints into the file.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

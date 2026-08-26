@@ -5,6 +5,12 @@
 #   ./scripts/effect-evidence-contract/run.sh
 #   ./scripts/effect-evidence-contract/run.sh --self-test
 #
+# The golden files are not here: this script runs the programs named in
+# roster.txt out of scripts/spike-native/ and holds each to that directory's
+# `<name>.expect`. So there is nothing to re-record here either, and the
+# hand-written expectation is the one in spike-native. Adding a program to the
+# gate is a line in roster.txt.
+#
 # ## What this owns that nothing else did
 #
 # Three defects landed on 2026-08-25 (#335, #345, #346) with the same shape:

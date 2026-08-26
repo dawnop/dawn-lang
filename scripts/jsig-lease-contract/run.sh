@@ -3,6 +3,12 @@
 # JsigLease seam and every behavioral mutant as a minimal dependency package.
 # After the ordinary compiler bootstrap, the subject has no external Java
 # dependency and never reaches for ASM, a host artifact cache, or the network.
+#
+#   ./scripts/jsig-lease-contract/run.sh
+#
+# `expected.txt` is the positive fixture's five PASS lines. No `--record`: the
+# mutant legs are read as substrings of their own runs, and only this file says
+# what the unmutated seam must report. Edit it by hand when a leg is added.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

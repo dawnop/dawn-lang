@@ -3,6 +3,11 @@
 #
 #   ./scripts/array-contract/run.sh
 #
+# There is no `--record`. `expected.txt` is the answer value semantics has to
+# give, written down before either backend was asked; recording it from a run
+# would make it a report of what the compiler does rather than a check on it.
+# Change what the probe prints and hand-edit the file to match.
+#
 # `Array` and `array_*` are std-internal, so this cannot be an examples/
 # program: the harness builds a copy of std/ with array.dawn dropped in and
 # compiles probe.dawn against it. It checks two things a second backend also

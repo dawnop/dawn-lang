@@ -3,6 +3,11 @@
 # cannot isolate: the lexer marker, comptime's VInt, and C's spelling of the
 # boundary constant. This probe checks both backends against a written answer
 # and then inspects the generated translation unit for both CInt and VInt.
+#
+#   ./scripts/int-min-contract/run.sh
+#
+# No `--record`: `expected.txt` is the written oracle this contract exists to
+# hold both backends to, so it is edited by hand and never taken from a run.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
