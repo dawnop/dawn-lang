@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 3cbdc116ce2a1910 -->
+<!-- doc-check: translation-of docs/spec.md @ 813427002d697ddd -->
 
 # Dawn Language Specification
 
@@ -1779,8 +1779,11 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
   equivalent. When a signature carries an explicit binder, that name resolves only to it within
   the signature; a name with no binder is still introduced where it appears, and the two may be
   mixed in one signature. A binder carries no bound (`[!e: X]` is an error), its name must be
-  lowercase (`!E` is a named effect, not a variable), `!io` cannot be a binder name, and the same
-  binder cannot be written twice.
+  lowercase (`!E` is a named effect, not a variable), neither `!io` nor `pure` can be a binder
+  name, and the same binder cannot be written twice.
+  `pure` is refused in **every** row position, not only as a binder: it reads as "pure only" and
+  would behave as "any row at all", which is the opposite. The empty row has its own spelling,
+  `!()` (§6.6).
   The binder list is also where the order comes from: it binds in the order written, and names
   with no binder are still introduced in the order they first appear.
 - A type declaration can bind effect parameters too: `alias Mapper[T, U, !e] = fn(T) -> U !e`,
@@ -2142,7 +2145,11 @@ nothing.
 
 An effect row is built from four kinds of **atom**: the base axis's `io`, effect variables (§6.3),
 associated-effect projections (§6.5), and the label axis's named effects. `pure` is the row with no
-atoms.
+atoms, written **`!()`**; it goes anywhere `!io` goes (a signature's row, a function type's row, an
+effect argument, an impl's associated-effect binding), and means what leaving the annotation off
+means. `pure` is not a spelling for that row: it is not a keyword, so written into a row it becomes
+an ordinary effect variable, and an effect variable is solved by any row at all. `!pure` is
+therefore an error (§6.3).
 
 Row equivalence is generated **by and only by** the five rules below.
 

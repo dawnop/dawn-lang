@@ -448,6 +448,13 @@ fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl])] = 
         return Err((st3, pd_h("`io` is a built-in effect and cannot be a parameter name",
           bang.lo, n.hi, "pick another name: [!e]")))
       }
+      # `pure` is refused here as well as at every use (`refuse_pure`). A
+      # binder is where the name is chosen, so it is the place to say so; a
+      # signature that got past this one would then be refused on its own row,
+      # which reads as a puzzle rather than as an answer.
+      if n.text == "pure" {
+        return Err((st3, refuse_pure(n.lo, n.hi)))
+      }
       var dup = false
       for e in effs {
         if e.name == n.text { dup = true }
@@ -1258,6 +1265,18 @@ fn fn_type_ref(p: P, st: St) -> PR[TypeRef] = {
   Ok((st8, TFn(params, ret, effs, kw.lo, end)))
 }
 
+## `pure` refused wherever a row could take it for a name. It is not reserved
+## (spec §1.4) and nothing stops it from being an ordinary lowercase effect
+## variable, which is the whole defect: `fn run(f: Thunk[!pure]) -> Int !pure`
+## reads as "only pure" and binds a variable that any row solves, so it takes a
+## closure that does io and runs it. The empty row has a spelling of its own,
+## `!()`, and one concept gets one spelling -- so this is a refusal with a
+## pointer, not an alias.
+fn refuse_pure(lo: Int, hi: Int) -> Diag =
+  pd_h("`pure` is not an effect name", lo, hi,
+    "as a row atom it would be an ordinary effect variable, which any row " ++
+      "solves; the empty row is written `!()`")
+
 ## One atom of an effect annotation. `io` and effect variables are lowercase
 ## idents; a declared effect is spelled with its own (uppercase) name, and
 ## which of the three an atom is stays a checker question -- the parser only
@@ -1266,7 +1285,12 @@ fn effect_atom(p: P, st: St) -> PR[Token] = {
   if at_kind(p, st, TYPEIDENT) {
     return Ok(adv(p, st))
   }
-  want(p, st, IDENT, "an effect name (io, an effect variable, or a declared effect)")
+  let (st1, n) = want(p, st,
+    IDENT, "an effect name (io, an effect variable, or a declared effect)")?
+  if n.text == "pure" {
+    return Err((st1, refuse_pure(n.lo, n.hi)))
+  }
+  Ok((st1, n))
 }
 
 ## One row atom as text: `io`, an effect variable, a declared effect, or an
@@ -1285,8 +1309,9 @@ fn effect_atom_text(p: P, st: St) -> PR[String] = {
   Ok((st1, n.text))
 }
 
-## Optional effect annotation after a return type: nothing (pure), `!io`, `!e`,
-## `!Ask`, or a union `!(e1 | Ask | ...)`. Returns the atom names.
+## Optional effect annotation after a return type: nothing (pure), the empty
+## row `!()`, `!io`, `!e`, `!Ask`, or a union `!(e1 | Ask | ...)`. Returns the
+## atom names.
 fn parse_effect(p: P, st: St) -> PR[List[String]] = {
   var atoms: List[String] = []
   var st0 = st
@@ -1311,6 +1336,16 @@ fn effect_group(p: P, st: St) -> PR[List[String]] = {
     return Ok((st2, [n]))
   }
   let st2 = adv1(p, st1)
+  # `!()` is the empty row, which is the pure row written out. It parses here
+  # rather than only in `impl_eff_bind` so that one row has one spelling in
+  # every position: a signature's row, an effect argument (`Thunk[!()]`), an
+  # impl's associated-effect binding. An empty atom list is what a signature
+  # with no annotation at all produces, so nothing downstream has to know the
+  # row was written.
+  if at_kind(p, st2, RPAREN) {
+    let empty: List[String] = []
+    return Ok((adv1(p, st2), empty))
+  }
   let (st3, first) = effect_atom_text(p, st2)?
   var atoms = [first]
   var st4 = st3

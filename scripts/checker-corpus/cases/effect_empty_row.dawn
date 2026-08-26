@@ -1,0 +1,67 @@
+# checker.dawn: the empty row `!()`, which is the pure row written out (#361).
+#
+# The parser produces an empty atom list for it, which is what a signature
+# carrying no annotation at all produces, so the claim here is that the two are
+# the same row and not merely similar: what `!()` accepts, `pure` accepts, and
+# what it refuses, `pure` refuses.
+#
+# The refusals are the load-bearing half. `!()` earned its spelling because
+# `!pure` did not mean this -- `pure` was an ordinary lowercase effect variable
+# that any row solved, so a parameter written `Thunk[!pure]` took a closure that
+# did io and ran it. A `Thunk[!()]` that took one would have reproduced the
+# defect under a new name.
+use std/io
+
+pub effect Ask {
+  fn ask() -> Int
+}
+
+alias Thunk[!e] = fn() -> Int !e
+
+# ---- accepted ----
+
+# a signature's own row, written out. The body is pure, as it must be.
+fn written_pure() -> Int !() = 1
+
+# a function type's row, and the pure closure that fits it
+fn takes_pure(f: fn() -> Int !()) -> Int !() = f()
+
+pub fn pure_through() -> Int = takes_pure(() => written_pure() + 1)
+
+# the effect-argument position at a transparent alias, which is the position
+# `!()` could not be written in at all before this
+fn takes_thunk(t: Thunk[!()]) -> Int = t()
+
+pub fn thunk_through() -> Int = takes_thunk(() => 2)
+
+# a caller that promises io still takes a `!()` callee: `!io` covers pure by
+# containment, the same way it covers a signature with no row (spec §6.6).
+pub fn under_io() -> Int !io = {
+  io.println("in")
+  written_pure() + takes_thunk(() => 3)
+}
+
+# ---- refused ----
+
+# an io closure at a `!()` function type. The expected row prints as no row at
+# all, which is the rendering of the same fact.
+pub fn io_closure_refused() -> Int = takes_pure(() => {
+  io.println("no")
+  4
+})
+
+# the same closure at the effect-argument spelling
+pub fn io_thunk_refused() -> Int = takes_thunk(() => {
+  io.println("no")
+  5
+})
+
+# a labelled closure is refused too: `!()` has no atom for `Ask` and nothing
+# here answers it
+pub fn label_closure_refused() -> Int !Ask = takes_thunk(() => ask())
+
+# and the body of a `!()` signature is held to it
+pub fn body_refused() -> Int !() = {
+  io.println("no")
+  6
+}
