@@ -51,8 +51,9 @@ use check/types.{
   eff_carries,
   erased_ev_ty, sig_abi_eff, ty_eff_vars_all, label_key, var_key, assoc_key, atom_keys,
   EV_PACK_ID, ev_pack_ty,
-  Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
+  Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
+  assoc_effect_advice,
   no_eparam_names,
   ty_mentions_var, ty_map_children, ty_any_child,
   SlotAt, SlotNoField, SlotAfterNamed, SlotOverflow, SlotTaken, ctor_slots, arg_slots,
@@ -9586,6 +9587,36 @@ fn alias_binding_evar(cx: Cx, vid: Int) -> Option[String] = {
   None
 }
 
+## The trait whose method this frame is implementing, if it is implementing
+## one. `None` for an ordinary function, which is most of what reaches here.
+##
+## An impl method body is checked by `check_fn`, exactly like a top-level
+## annotated function, so nothing on the frame says whose promise its row is
+## being held to. The name span answers it: an impl's span covers its methods,
+## so the impl that contains this name is the one being written, and the trait
+## it implements is whose row the refusal came from.
+##
+## Containment alone would be too wide -- a `fn` written inside a method body
+## is inside the impl's span as well -- so the trait has to declare a method of
+## this name too. A local `fn` does not reach here today (an unannotated one is
+## refused by its own inference, which says "the body of `f` performs io"), and
+## the name check is what keeps that an accident rather than the reason.
+##
+## Walked rather than indexed for `alias_binding_evar`'s reason: this runs on
+## the error path only, at the point a diagnostic is already being written.
+fn impl_method_trait(cx: Cx, name: String, nlo: Int, nhi: Int) -> Option[TraitI] = {
+  for im in cx.local_impls {
+    if im.lo <= nlo && nhi <= im.hi {
+      let tr = trait_of(cx.traits, im.trait_id)
+      for mm in tr.methods {
+        let (mn, _) = mm
+        if mn == name { return Some(tr) }
+      }
+    }
+  }
+  None
+}
+
 ## The signature is the promise: every used effect must be subsumed by the
 ## declared one. `where2` finishes the hint ("the end of the signature" /
 ## "the trait method").
@@ -9653,7 +9684,19 @@ fn verify_effects(
                 "row, or remove the call"
             }
           }
-        _ -> "add !" ++ eff_show(used) ++ " to " ++ where2 ++ ", or remove the call"
+        # An impl method gets a third road, and it is the one that keeps the
+        # other impls out of it. "Add !io here" is advice that can be taken,
+        # unlike the variable case above, but taken alone it is refused at the
+        # signature next (`passes.pass_register_impls`: the trait declares it
+        # pure), and the edit that clears *that* widens the trait's row for
+        # every impl there is. So the same sentence is offered from both ends.
+        _ ->
+          match impl_method_trait(cx, name, nlo, nhi) {
+            Some(tr) ->
+              "add !" ++ eff_show(used) ++ " to " ++ where2 ++ ", or remove the call; " ++
+              assoc_effect_advice(cx.adts, tr)
+            None -> "add !" ++ eff_show(used) ++ " to " ++ where2 ++ ", or remove the call"
+          }
       }
       cx1 = cerr_h(cx1, kind ++ " `" ++ name ++ "` is not declared !" ++ eff_show(used) ++
           " but calls `" ++ wname ++ "` (!" ++ eff_show(used) ++ ")", wlo, whi, advice)

@@ -1935,6 +1935,28 @@ pub fn trait_audience(t: TraitI) -> Audience = decl_audience(t.owner, t.is_pub)
 pub fn impl_display(adts: Adts, traits: Traits, i: ImplI) -> String =
   trait_of(traits, i.trait_id).name ++ "[" ++ ty_show(adts, i.subject) ++ "]"
 
+## The repair for a method row that has to differ from impl to impl.
+##
+## Two diagnostics refuse that shape, one at the impl's signature and one in
+## its body, and both used to offer only the edits that keep a single row for
+## everybody: widen the trait's declaration, or drop the effect. Widening is
+## the one a reader reaches for, and it makes every impl pay for the dirtiest
+## one -- a consumer that was pure, and testable with `==` because of it, is
+## neither once the trait's row carries `!io`. An impl-decided row has its own
+## spelling and it is not the method's own effect variable, which is the
+## caller's (docs/effect-params-design.md 刀 5): declare the effect as a member
+## of the trait, bind it once per impl, and write the method's row as the
+## projection.
+##
+## One sentence, two callers, for `nev`'s reason rather than for brevity: the
+## two diagnostics are reached from opposite ends of the same wrong turn, and
+## advice that disagreed with itself between them would be worse than advice
+## given once.
+pub fn assoc_effect_advice(adts: Adts, t: TraitI) -> String =
+  "if impls of `" ++ t.name ++ "` need different rows, declare `effect E` in the trait, " ++
+  "bind it in each impl (`effect E = !io`, or `effect E = !()` where the impl is pure), " ++
+  "and write the method's row as `!" ++ ty_show(adts, t.tvar) ++ ".E`"
+
 ## Render a signature like Kotlin FnSig.render (used in golden dumps and docs).
 pub fn sig_render(adts: Adts, traits: Traits, s: Sig) -> String = {
   var parts: List[String] = []

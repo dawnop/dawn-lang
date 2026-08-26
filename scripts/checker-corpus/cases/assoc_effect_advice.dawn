@@ -1,0 +1,64 @@
+# checker.dawn / passes.dawn: the two refusals an impl runs into when its row
+# has to differ from the trait's, and the third road out of both.
+#
+# `Chatty.run` does io under a trait row that is pure, which `verify_effects`
+# refuses; `Loud.run` writes the !io that refusal asks for, which the impl
+# conformance check refuses, because the trait declares the method pure. The
+# two are the same wrong turn from opposite ends, and the edit that clears the
+# second -- widening the trait's row -- makes every impl of `Job` carry !io,
+# including `Quiet`, which is pure and testable with `==` because of it. So
+# both hints also name the associated effect, which is the spelling for a row
+# the impl decides rather than the trait.
+#
+# `stray` is the control: an ordinary function is held to its own signature and
+# no trait's, so it keeps the two-clause hint it always had. `Task.step` is the
+# other half of the same question -- the effect arrives through a local `fn` it
+# calls rather than from an operation in its own body, and the advice still
+# names `Task`, because which trait is asked is decided by the method the row
+# belongs to and not by where the effect was raised.
+use std/io
+
+trait Job[M] {
+  fn run(m: M) -> Int
+}
+
+type Quiet = { v: Int }
+type Chatty = { v: Int }
+type Loud = { v: Int }
+
+impl Job[Quiet] {
+  fn run(m: Quiet) -> Int = m.v
+}
+
+impl Job[Chatty] {
+  fn run(m: Chatty) -> Int = {
+    io.println("tick")
+    m.v
+  }
+}
+
+impl Job[Loud] {
+  fn run(m: Loud) -> Int !io = {
+    io.println("boom")
+    m.v
+  }
+}
+
+fn stray(n: Int) -> Int = {
+  io.println("stray")
+  n
+}
+
+trait Task[M] {
+  fn step(m: M) -> Int
+}
+
+impl Task[Quiet] {
+  fn step(m: Quiet) -> Int = {
+    fn helper(n: Int) -> Int !io = {
+      io.println("helper")
+      n
+    }
+    helper(m.v)
+  }
+}
