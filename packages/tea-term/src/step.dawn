@@ -23,7 +23,7 @@ use render.{render}
 
 ## Apply the message, render the new view. A driver prints the frame and reads
 ## the next message; a test asserts on it.
-pub fn step[A: App](m: A, msg: A.Msg, vw: fn(A) -> Widget[A.Msg]) -> (A, String) = {
+pub fn step[A: App](m: A, msg: A.Msg, vw: fn(A) -> Widget[A.Msg]) -> (A, String) !A.E = {
   let next = update(m, msg)
   (next, render(vw(next)))
 }
@@ -36,7 +36,7 @@ pub fn diff_step[A: App, W: Tree + Eq](
   m: A,
   msg: A.Msg,
   vw: fn(A) -> W,
-) -> (A, List[Patch[W]]) = {
+) -> (A, List[Patch[W]]) !A.E = {
   let next = update(m, msg)
   (next, diff(vw(m), vw(next)))
 }
@@ -52,6 +52,7 @@ derive Show
 impl App[Counter] {
   type Msg = CounterMsg
   type View = Widget[CounterMsg]
+  effect E = !()
   fn update(m: Counter, msg: CounterMsg) -> Counter =
     match msg {
       Inc -> Counter { n: m.n + 1 }
@@ -66,7 +67,7 @@ test "step returns the new model and the rendered frame" {
   assert frame == "n=42"
 }
 
-test "the impl of App is one line more than before the split" {
+test "the impl of App is two lines more than before the split" {
   let m = update(update(Counter { n: 0 }, Inc), Inc)
   assert m == Counter { n: 2 }
   assert view(update(m, Dec)) == Text(s: "n=1")

@@ -53,7 +53,7 @@ pub fn run[A: App](
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
-) -> Unit !io = {
+) -> Unit !io !A.E = {
   io.print(clear_screen())
   let rows = frame_lines(render(view_of(init)))
   io.print(present([], rows) ++ park(len(rows)))
@@ -71,7 +71,7 @@ fn turn[A: App](
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
-) -> Unit !io =
+) -> Unit !io !A.E =
   if done(m) {
     ()
   } else {
@@ -91,7 +91,7 @@ fn wait[A: App](
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
-) -> Unit !io =
+) -> Unit !io !A.E =
   match poll_ms(pending) {
     None -> take_byte(m, iv, pending, partial, shown, view_of, parse, subs, done)
     Some(t) ->
@@ -129,7 +129,7 @@ fn take_byte[A: App](
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
-) -> Unit !io = {
+) -> Unit !io !A.E = {
   let b = io.read_stdin(1)
   if bytes.is_empty(b) {
     ()
@@ -148,7 +148,7 @@ fn take_byte[A: App](
   }
 }
 
-fn fold_msgs[A: App](m: A, msgs: List[A.Msg]) -> A =
+fn fold_msgs[A: App](m: A, msgs: List[A.Msg]) -> A !A.E =
   list.fold(msgs, m, (acc, msg) => update(acc, msg))
 
 # The assembled bytes of one line, decoded once so multi-byte characters

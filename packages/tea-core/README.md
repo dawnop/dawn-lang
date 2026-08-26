@@ -2,8 +2,10 @@
 
 The vocabulary-free half of the Elm architecture: what a tree owes a
 reconciler, the reconciler, the walk, `trait App`, and subscriptions. Nothing
-here names a widget, a style, a tag or a terminal, and nothing here has an
-effect row. The terminal's vocabulary is `packages/tea-term`.
+here names a widget, a style, a tag or a terminal, and nothing here performs an
+effect: the one row written in this package is `update`'s `!M.E`, which is the
+impl's to bind and is `!()` in every impl there is today. The terminal's
+vocabulary is `packages/tea-term`.
 
 ```dawn
 use tea_core/tree.{Tree, Rel, Unrelated, Same, SelfDiffers}
@@ -88,13 +90,21 @@ has no way to name -- the terminal's button labels, for instance.
 
 ## The App contract
 
-`trait App[M]` names `type Msg`, `type View`, and the two pure functions
-`update` and `view`. `type View` is bare because an associated type cannot
-declare bounds, and the consequence reaches further than the missing bound: a
-generic function over `A: App` can do nothing with an `A.View` but return it.
-So a driver takes the view as an ordinary function parameter over its own
-bounded tree type, and what is lost is the machine checking that the tree it
-gets is the one the trait names. `type View` stays as the documented truth.
+`trait App[M]` names `type Msg`, `type View`, `effect E`, and the two
+functions `update` and `view`. `type View` is bare because an associated type
+cannot declare bounds, and the consequence reaches further than the missing
+bound: a generic function over `A: App` can do nothing with an `A.View` but
+return it. So a driver takes the view as an ordinary function parameter over
+its own bounded tree type, and what is lost is the machine checking that the
+tree it gets is the one the trait names. `type View` stays as the documented
+truth.
+
+`effect E` is what lets one app's `update` do io while another's stays pure.
+The method's row is the projection `!M.E`, not an effect variable of its own,
+because a method's effect variable is the *caller's* to instantiate and this
+row is the impl's. Every impl in the tree binds `effect E = !()`, so a turn is
+still a pure function and `==` still tests one; the member is here so that an
+app which grows a `Cmd` does not make every other app pay for it.
 
 ## Subscriptions
 

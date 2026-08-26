@@ -1,10 +1,24 @@
 # The Elm architecture's contract, and nothing else: a model type `M` names its
-# message type, names what its view is, and provides the two pure functions the
-# loop needs. The driver loop itself lives in a vocabulary's package, because a
-# driver has to paint, and painting is the one thing core cannot do. This v1 has
-# no `Cmd`: `update` is pure by signature, effects happen only in the driver,
-# and when a real app needs commands the associated-effect work (#307) is the
-# place to grow them, with this trait as the consumer that justifies it.
+# message type, names what its view is, and provides the two functions the loop
+# needs. The driver loop itself lives in a vocabulary's package, because a
+# driver has to paint, and painting is the one thing core cannot do.
+#
+# `update`'s row is `!M.E`, an associated effect the impl binds. That is the
+# shape a per-app row has to take: a method's own effect variable belongs to
+# the *caller*, so an effect the implementation decides needs a member of the
+# trait to be named by (docs/effect-params-design.md 刀 5). Every v1 impl in
+# the tree binds it pure (`effect E = !()`), so the loop is exactly as pure as
+# it was, `==` still tests a turn, and nothing crosses a boundary that did not
+# cross it before -- a binding of `!()` is an empty evidence pack. What the
+# member buys is that an app which does need io no longer forces the trait's
+# row on every other app, which is what a `Cmd` for tea v2 is going to want.
+#
+# `packages/tea-dom`'s reactor is deliberately not part of this. It takes
+# `update` as an ordinary function parameter rather than through the trait, its
+# `turn` is pure so that tests can assert with `==`, and its failure barrier is
+# pinned `!io` by the language. Reconciling those three with a row the app
+# decides is a design judgement, not a signature edit, and it is deferred to
+# tea v2 along with `Cmd` itself.
 #
 # `type View` is bare, and it has to be: an associated type cannot declare
 # bounds ("`type View` is the whole declaration; the impl chooses the type"), so
@@ -32,7 +46,8 @@
 pub trait App[M] {
   type Msg
   type View
-  fn update(m: M, msg: M.Msg) -> M
+  effect E
+  fn update(m: M, msg: M.Msg) -> M !M.E
   fn view(m: M) -> M.View
 }
 
@@ -51,6 +66,7 @@ derive Show
 impl App[Counter] {
   type Msg = CounterMsg
   type View = String
+  effect E = !()
   fn update(m: Counter, msg: CounterMsg) -> Counter =
     match msg {
       Inc -> Counter { n: m.n + 1 }
