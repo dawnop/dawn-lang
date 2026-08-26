@@ -1095,6 +1095,9 @@ Core 无新节点：`CDictDef`（`core.dawn:285-295`）在调用点路线下不�
   归约后的行读证据描述符）；C 一处（槽位 cast 把字典拼进实参与证据之间）。
   `dict_key` 一个字节未动。桥接（`make_bridge`）收 trait 形状的证据参数、按 impl 的绑定
   重选并 unerase（`adapt_out` 即 CHECKCAST）。
+  > **「unerase 即 CHECKCAST」这半句已作废**（2026-08-26，#355）：投影那一格装的是
+  > **证据包**，重选是按标签键走一步链（`ev_from_pack`），不是把整格 cast 成证据记录。
+  > 见 §8。
 
 **三处对设计的偏离，均已实测**：
 
@@ -1272,3 +1275,59 @@ fn() -> Int !(Tell|io)`。根在 spec §6.6 的「函数值逐原子容得下」
 门禁：`scripts/checker-corpus/cases/effect_row_subtract.dawn` 钉住接受与拒绝两侧的判词，
 `scripts/spike-native/effect_row_subtract.dawn` 与 `scripts/effect-evidence-contract` 的名册
 钉住运行期，两个后端都跑。spec 的条文进 §6.6，中英同批。
+
+## 8. 追记：投影那一格装的是证据包（#355，2026-08-26）
+
+### 8.1 缺陷
+
+```dawn
+fn f[T: P](x: T, t: fn() -> Int !T.E) -> Int !T.E = run(x) + t()
+```
+
+check 全绿，运行期 panic `effect evidence missing`。别名拼写 `Thunk[!T.E]` 忠实转发同一个
+洞（#351）。行里投影旁边再站一个证据原子时，报的不是 panic 而是 `ClassCastException`
+（某个效果的记录被 cast 成另一个效果的），因为那时投影那一格不是整格交出去，而是被 cons
+到节点的 `outer` 位或被 `ev_append` 接进链里，走链的人于是拿到别人的记录。`!io` 不是原子，
+不占格，所以它是唯一不触发的邻居。
+
+### 8.2 根因
+
+规则丙的条文写着「效果参数被实例化成一个具体标签时，调用方交出该标签的证据」。V1′ 的证据
+包落地后这句就不对了：投影和效果变量是同一类原子——**行未知的原子**——而
+`lower.ev_from_pack` 的规则从落地起就是「非标签键由整条链回答」。于是调用点
+（`evidence_assoc_args`）交出记录、去虚化的读者（`impl_ev_sources`）把记录 cast 回来，两边
+自洽，跟布局的其余部分不自洽。**只要没有人走那一格，两套约定就分不出来**：投影写在返回
+行位时确实没人走（callee 转发进字典，impl 侧 cast 回来），而 `assoc_effects.dawn` 通篇是
+返回行位，所以门禁全绿。写在**参数行位**上就有人走了——调用函数值时那一格就是被交出去的
+包，闭包在里面按标签键问它。
+
+### 8.3 裁决与判据
+
+**投影那一格装包**，与效果变量同待遇。判据是 `ev_from_pack` 那条既有规则：一个键是标签就
+走到它的节点，不是标签就整条链回答。规则丙的**机制一字未改**——一个投影恒定一格、调用点
+供给、字典槽位边界上擦除——变的只是那一格里装什么。
+
+调用点因此改成用 `evidence_pack` 建那一格（把投影按调用点的绑定归约后的行喂进去），刚性
+转发、纯、io 三种情形从 `evidence_pack` 里原样落出来：刚性时行里只有一个非 ground 原子，
+`evidence_pack` 的免分配快路径就是「那一格本身」，正是原来刚性支路做的事。读者侧
+`impl_ev_sources` 相应改成走一步链。
+
+### 8.4 边界
+
+- **`types.assoc_key` 按 trait id 分带**，所以同一 trait 上的两个投影（`!T.E` 与 `!U.E`）
+  共用一个键。它答得对，理由是非标签键由整条链回答、而包的超集仍是包——同一条性质设计里
+  处处在用。修复前它答错：一个投影拿到另一个投影的记录。
+- **`sig_abi_eff` 不把参数行里的投影折进 ABI**（效果变量有 `eparams` 那一折，投影没有）。
+  实测这不是洞：一个投影要被读，它就必须写进本函数的行（否则 checker 直接拒绝，
+  "not declared !T.E but calls"），而写进行里就有格；闭包里读到的那一格来自闭包自己的包，
+  不是本帧的槽。两条都有探针实测。
+
+### 8.5 落点
+
+`selfhost/src/check/checker.dawn` 的 `evidence_assoc_args`，`selfhost/src/ir/lower.dawn` 的
+`impl_ev_sources` / `ev_select`（`impl_evidence` 与 `make_bridge` 共用后者）。
+
+门禁：`scripts/spike-native/effect_assoc_row.dawn` 与 `scripts/effect-evidence-contract` 的
+名册钉住运行期，两个后端都跑；`scripts/checker-corpus/cases/effect_type_args_ok.dawn` 里那
+条「刻意不进运行期门禁」的注释随之作废。两个生产变异体（读者半边与写者半边各一）记在
+`scripts/effect-evidence-contract/README.md`。
