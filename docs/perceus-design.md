@@ -596,8 +596,116 @@ rc 本地的 `yields` 换底成语句级的 `completes`，与检查器的判断�
 
 **`CBorrowed` 至此了结而未被构造。** §5.8 曾判它「作为刀 4 在表上开的个别口子
 出现」——方向说反了：唯一性要的是**更多的交出**而不是更少，刀 4 开的是 owned
-口子。borrowed 作为跨模块调用约定的那格仍然空着（`CMode` 的注释已改），
-等真有跨模块签名表的那天再说。
+口子。borrowed 作为跨模块调用约定的那格当时仍然空着；那张跨模块签名表后来
+真的有了，就是 §6.4。
+
+### 6.4 借用约定：模式契约与保守推断（借用线，2026-08-27 落地）
+
+§1 的画像在刀 4 之后仍然成立：扫描型代码的 RC 流量大头不是真实生死，是**约定税**
+——owned 约定下每个实参传递一对 dup/drop，外加被调方的 own-frame。lexer 语料
+（4M 字符，每字符三次 std cursor 包装调用）量出 76% 墙钟花在这上面。借用约定把
+这两半一起减掉：调用方不 dup（自己的引用活过调用，单线程严格求值下成立——被调方
+先返回，之后的语句才可能释放它），被调方不 drop（绑定不入账本，同 `dict_syms`
+的待遇，也不占 own-slot）。
+
+**契约（`core.CMode`）有两个读者，必须逐函数一致**：被调方读 `CParam.mode`
+（`rc.rc_fn` 决定什么入账本，`emitc.emit_fn` 决定什么占 own-slot），每个调用点读
+全程序模式表，键 `(owner, name)`（`rc.owned_positions` 与 `emitc.arg_flags`，
+一张表两个读者）。分开存是故意的：错位的两个方向（表说 borrowed 而被调方还 drop
+= use-after-free；被调方不 drop 而调用点还交出 = 泄漏）都不打印错字节，差分看不见，
+所以 mutant harness（scripts/rc-mode-contract）要能单边翻转它。防线分三层：
+`rc_module` 开头的**契约断言**（`mode_mismatch`，错位=编译期 panic，指名函数、
+位置、两边答案）、`rc_check` 按同一张表分类调用实参（借用位是读取不是转移）、
+再往下才是 asan / LSan（断言落地前逐面实测过：callsite 半翻 = heap-use-after-free，
+callee 半翻 = LSan direct leak）。
+
+**推断是全程序预 pass（`c/infer.dawn`），方向照 Lean（InferBorrow）**：引用参数
+默认 borrowed，不动点把「不止是读」的翻成 owned。`__emitc` 本来就是全程序编译，
+表在 `cdriver.build_units` 里天然可得——先 lower 全部模块，推断，盖章
+（`stamp_modes` 把同一个答案写上 `CParam.mode`），再逐模块 `rc_module`。
+规则分两类，牙齿不同：
+
+- **管辖 pin**：调用点不读表的函数，参数必须全 owned，体内怎么用都不看——
+  emitc 直呼其名的 `std/pvec` 面（`xs[i]` 是 Core intrinsic `list_index`，
+  只在 emitc 映到 `std/pvec.index`，字面量/`++`/host 边界同理；名单
+  `emitc.emitter_named_pvec_fns`）、字典槽指名的函数（`CSlotFn`，`CMethod`
+  按裸函数指针全 owned 调）、`CClosure` 指名的函数（函数值经 `CDynamic` 全
+  owned 调；具名函数作值有 `lift_fn_value` 包一层，pin 落在包装 lambda 上，
+  里面的直呼调用照常读表）、impl/default/带捕获的函数（`CFun.name` 与普通
+  函数可撞名，表键不上）、fn 类型的参数（高阶恒 owned，Lean/Koka/Swift 共识）。
+  **删一条 pin 是泄漏**，spike 语料的 asan 档与探针都能点名（见下表）。
+- **需求规则**：参数到达消费位就翻 owned——被返回（体尾/`CReturn`）、存进
+  构造器/元组/列表、被闭包捕获、`let` 别名、被重赋值（TCO 循环变量：自尾递归
+  在 Core 已是对参数的赋值，赋值展开要 drop 旧值，而 drop 是调用方从没授权过的
+  释放）、流入已知函数的 owned 位（不动点传播）、流入 intrinsic 的 owned 位
+  （`intr_owned_args`，保护刀 4 的就地率）、流入 CImpl/CDefault/CMethod/CDynamic
+  调用的实参位（那些调用点全 owned）。走查（`dm_expr`）逐臂镜像 `rc.rw` 的
+  消费分类。
+
+**镜像由另一侧强制，这是「零新增 dup 点」变成机器契约的地方**：`rc.rw` 的
+`CLocal` 消费臂里，borrowed 参数到达消费位是 panic，不是默默补一个 dup。于是
+走查漏一条规则=第一个被错盖的 std 函数拒绝编译（删规则的 production mutant
+全靠它红，见下表）；走查多看一条=多付一个 owned 位，只丢性能。唯一豁免是
+**hoisting**：混合行的操作数列表为了求值顺序给每个操作数具名，借用位上的
+borrowed 根在那里 dup 进临时、调用后 drop，本地配平，不算消费——豁免只罩
+`borrows` 形状（裸局部或其上的投影/box 链；`bracket` 的资源以 `CBox(CLocal)`
+到达，泛型槽把它装了箱，链正是把 consume 传到根的形状，链里嵌不进别的表达式，
+旗子漏不进无关上下文）。另一条 spike 抓的缝：**字典操作数不具名**——它是不跑
+代码的静态地址，具名会把 let 写在字典伪类型上，那不是值能住的 C 类型；全 owned
+路径（`consume_all`）从不具名，借用行第一次把带字典的调用送上 `intr_args`
+才撞见。
+
+**harness 语义随之升级成「拨动」**：单边翻转在推断结果上拨一半，断言点名；
+`both` 不再改成品表——第一次实测就翻了车：把 `str.len` 拨回 owned 后，靠旧行
+判为 borrowed 的**调用方**（`is_empty`）立刻撞 borrowed-consume panic——而是
+**带约束重跑不动点**（`infer.ForcedMode`：位置钉在反向，需求不许翻回，pin 对
+钉成 borrowed 的位置让路），一个自洽的另一世界，传播到所有调用方。四条
+known-red 各有名目：`std/pvec:index=both` 是 intrinsic 管辖泄漏（也是 pin-pvec
+的 production mutant 本体）；`str:len` / `list:reverse` / `list:take` 三条是
+拒绝——推断判了 owned（体内消费），拨成 borrowed 撞零新增 dup 契约，红在
+编译期。
+
+**实测**（基线 52c561b，9700X/WSL2，gcc -O2，hyperfine 15 次）：
+
+| | 前 | 后 |
+|---|---|---|
+| lex 动态 dup / drop（4M 字符） | 12,000,003 / 12,000,035 | **1 / 33** |
+| lex 墙钟 | 47.5 ± 0.3 ms | **18.1 ± 0.3 ms（2.64×）** |
+| psum_build `array_with` 就地率 | 6180 / 5061（55.0%） | 6180 / 5061（持平，借用没挡复用） |
+| psum_build 动态 dup | 1,262,669 | 1,262,671（+2，噪声） |
+| spike 语料 88 项静态 dup 点 | 60,179 | 48,110（−20.1%） |
+| 同上 own-frame | 26,649 | 22,380（−16.0%） |
+| `__emitc` 墙钟（lex/json_lib） | 0.90s / 0.81s | 0.90s / 0.82s（推断在噪声内） |
+
+18.1ms 与勘察时手工改产物 C 模拟的上界 17.9ms 相差 1%：这一版推断在扫描形状上
+基本拿满。分布照旧极不均匀：psum 型（分配/指针追逐主导）≈0，勘察备忘录预测的
+形状原样兑现。输出侧 oracle：lex/psum 输出逐字节同基线；spike-native 106 项全绿
+（含 asan+LSan 档）；JVM 零字节变化（模式只在 C 路上盖章，`selfhost-prev-diff`
+无新增声明）；JVM 与 native 双 fixpoint B==C。
+
+**每条规则一个 production mutant，观察到的红**（删掉该规则后）：
+
+| 规则 | 红 |
+|---|---|
+| pin：pvec 面 | LSan direct leak（psum 探针；known-red `std/pvec:index=both` 同体） |
+| pin：字典槽 | LSan direct leak（`list.sort` 探针；桥函数被盖 borrowed） |
+| pin：闭包指名 | LSan direct leak（`list.map` + 引用参数 lambda 探针） |
+| pin：fn 类型参数 | **无红**（见下） |
+| 需求：返回/逃逸 | rw 拒绝，selfhost 8 个模块 GAP（如 `emitc.dup_expr`） |
+| 需求：存入构造器 | rw 拒绝，33 GAP |
+| 需求：闭包捕获 | rw 拒绝，17 GAP |
+| 需求：let 别名 | rw 拒绝，58 GAP |
+| 需求：重赋值 | `rc_check` unbalanced（2 GAP + TCO 探针） |
+| 需求：owned 位传播 | rw 拒绝，50 GAP |
+| 需求：intrinsic owned 位 | rw 拒绝，2 GAP（lexer/astdump 的 `array_with` 流） |
+| 需求：非直呼调用实参 | rw 拒绝，6 GAP + `list.sort` 探针编译红 |
+| 契约断言本体 | rc-mode-contract 整跑 FAIL（callsite 翻转落到 rw 拒绝，不是 harness 认的 oracle） |
+
+fn 类型 pin 是唯一没有机器判词的规则：`CDynamic` 的目标在 rw 里本来就是借用位
+（调用函数值是读它，刀 1 就这么定的），只持有并调用函数值的参数即便 borrowed
+也两侧自洽，三家共识 pin 的是「部分应用看不见借用」这类 Dawn 今天没有的力学。
+留着它是零成本对齐共识（fn 参数维持现状即 owned），删它的 mutant 三个探针全绿。
+若后续想给它立判词，得先让某个调用点对函数值位置读表，今天没有这样的读者。
 
 ## 7. `--rc=leak`
 
@@ -622,6 +730,9 @@ rc 本地的 `yields` 换底成语句级的 `completes`，与检查器的判断�
 | — | 刀 2 落地后 Core golden 不只多了 dup/drop 行，还多了绑定（§5.0）。这是原计划没预见的，已重录 | |
 | 3 | emitc 消费两个节点 | **完成**：语料 23 个程序全绿，且新增 `asan` 一档（每个程序再用 AddressSanitizer 编译跑一遍）；整编译器前端 native 跑通、与 JVM 答案一致，`checker.dawn` 峰值内存 **4.4 GB → 1.42 GB** |
 | 4 | 复用分析（`rc == 1` 原地写）：owned 口子 + sweep + unloop + 开放循环/pin + 赋值交接（§6.1） | **完成**：整编译器就地 **73.8%**（337,170 / 456,977，leak 基线全复制），线性探针 92/92；probe 3.00s → 2.77s，峰值持平；全套门禁绿（含 asan、fixpoint、8 契约、4 个 N−1 对拍） |
+| B1 | 借用机制不推断：`CMode` 两个真相（`CParam.mode` / 模式表）、`rc_module`/`emitc` 两侧消费、表恒空 | **完成**：产物 C 逐字节等于基线（纯机制门），语料全绿 |
+| B3 | 模式契约 mutant harness（scripts/rc-mode-contract）：单边翻转必须被机器点名，DAWN_RC_MODE_FLIPS 注入 | **完成**：先于推断落地，「门禁的绿没有信息量」的顺序课；两个停-报发现（rc_check 落后于表、`list_index` 在表的管辖外）都成了 B2 的输入 |
+| B2 | 保守借用推断（§6.4）：`rc_check` 学表 + 契约断言，然后 `c/infer` 全程序不动点 + 双侧盖章 + rw 的零新增 dup 拒绝 | **完成**：lex 语料 dup 12M→1、墙钟 2.64×、就地率持平；spike 106 项全绿含 asan，双 fixpoint B==C，JVM 零字节；13 个 production mutant 12 红 1 记名豁免（§6.4 表） |
 
 刀 1 与刀 3 之间语料必须一直是绿的：刀 1 只改形状不改行为，刀 2 只改 Core 不改 C，
 **第一次真正开始 free 是刀 3**，所以刀 3 是唯一一个「跑起来会段错误」的位置。

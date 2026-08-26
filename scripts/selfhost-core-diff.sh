@@ -7,10 +7,10 @@
 # ## Why this exists when `__emit` already compares bytes
 #
 # Change Core and the class files change -- for the parts a shipping backend
-# reads. Two parts it does not:
+# reads. Two parts the JVM emitter does not read:
 #
-#   * `CParam.mode` -- still always COwned after Perceus, and ignored by both
-#     (knife 4 went the other way: `types.intr_owned_args`, not `CBorrowed`).
+#   * `CParam.mode` -- stamped by the borrowed inference (`c/infer`,
+#     docs/perceus-design.md 6.4) and consumed only on the C path.
 #   * `CDup` / `CSDrop` -- built by `rc.dawn` on the way into the C backend
 #     only, so `__emit`, which is the JVM emitter, walks past both.
 #
