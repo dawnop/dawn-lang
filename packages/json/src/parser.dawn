@@ -12,6 +12,7 @@
 # the document is what this is measured on.
 use std/char
 use std/map
+use std/str
 use std/cursor
 use std/cursor.{Cursor}
 use lexer.{skip_ws, is_digit, scan_string, scan_number, err_at, err_kind}
@@ -285,6 +286,38 @@ test "the error kind separates what a caller can act on" {
   }
   # deeper than this parser goes, which is not the document being wrong
   assert kind_of(parse(nest(MAX_DEPTH + 2))) == Depth
+}
+
+# The scanner batches decoded pieces before they reach its accumulator, and
+# nothing above exercises a string long enough to flush one. A flush that lost
+# the tail, or one that dropped or repeated a piece, would answer with a *valid*
+# string of the wrong length, which is the failure a round-trip test of one
+# short document cannot see.
+test "an escaped string decodes the same however many chunks it took" {
+  var n = 0
+  while n <= 70 {
+    # a span between every pair of escapes
+    assert parse("\"" ++ str.repeat("a\\\"", n) ++ "z\"") ==
+      Ok(JStr(str.repeat("a\"", n) ++ "z"))
+    # and no span at all between them
+    assert parse("\"" ++ str.repeat("\\n", n) ++ "\"") == Ok(JStr(str.repeat("\n", n)))
+    # the escapes that are four hex digits rather than one letter, including
+    # a surrogate pair, which advances by two escapes at once
+    assert parse("\"" ++ str.repeat("\\ud83d\\ude00", n) ++ "\"") ==
+      Ok(JStr(str.repeat("\u{1F600}", n)))
+    n = n + 1
+  }
+}
+
+test "a string that ends mid-chunk still reports where it ran out" {
+  # the error path leaves the accumulator behind entirely, so it is checked at
+  # a length that has flushed at least once
+  let cut = "\"" ++ str.repeat("\\n", 40)
+  assert kind_of(parse(cut)) == Truncated
+  match parse(cut) {
+    Err(e) -> { assert e.offset == 81 }
+    Ok(_) -> { assert false }
+  }
 }
 
 # `n` nested arrays, unterminated: the depth cap is reached long before the end

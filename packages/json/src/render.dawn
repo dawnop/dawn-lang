@@ -1,6 +1,7 @@
 # Serialize a Json value back to compact JSON text (used for round-trip tests).
 use std/char
 use std/cursor
+use std/str
 use std/map
 use value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 
@@ -24,15 +25,15 @@ fn escape_of(c: Int) -> String =
     "\\\""
   } else if c == char.code('\\') {
     "\\\\"
-  } else if c == 8 {
+  } else if c == char.code('\u{0008}') {
     "\\b"
-  } else if c == 12 {
+  } else if c == char.code('\u{000C}') {
     "\\f"
-  } else if c == 10 {
+  } else if c == char.code('\n') {
     "\\n"
-  } else if c == 9 {
+  } else if c == char.code('\t') {
     "\\t"
-  } else if c == 13 {
+  } else if c == char.code('\r') {
     "\\r"
   } else {
     from_code_points(['\\', 'u', '0', '0', hex_cp(c / 16), hex_cp(c % 16)])
@@ -168,6 +169,52 @@ test "every C0 control is escaped" {
   # U+0020 and up are literal
   assert render(JStr(" ~")) == "\" ~\""
   assert render(JStr("a\"b\\c")) == "\"a\\\"b\\\\c\""
+}
+
+# The batching is the one thing here that a small input cannot exercise: every
+# string in the tests above fits in a single chunk, so a flush that dropped a
+# piece, doubled one, or lost the tail after the last flush would go unnoticed.
+# These cross both boundaries in both directions, and the expected answers are
+# built by repetition rather than written out, so the test says what the rule is
+# rather than what one length happens to produce.
+test "an escaped string is the same however many chunks it took" {
+  var n = 0
+  while n <= 70 {
+    # `BATCH` escapes and a span between each pair of them
+    assert render(JStr(str.repeat("a\"", n) ++ "z")) ==
+      "\"" ++ str.repeat("a\\\"", n) ++ "z\""
+    # escapes with nothing between them, so every span is empty
+    assert render(JStr(str.repeat("\\", n))) == "\"" ++ str.repeat("\\\\", n) ++ "\""
+    n = n + 1
+  }
+}
+
+test "an array and an object are the same however many chunks they took" {
+  var n = 0
+  while n <= 20 {
+    var xs: List[Json] = []
+    var want = ""
+    var i = 0
+    while i < n {
+      xs = xs ++ [JInt(i)]
+      want = want ++ (if i == 0 { "" } else { "," }) ++ to_string(i)
+      i = i + 1
+    }
+    assert render(JArr(xs)) == "[" ++ want ++ "]"
+    n = n + 1
+  }
+  # the object side of the same rule: `SBATCH` is 8, so 20 entries flush twice
+  # and leave a tail
+  var es: List[(String, Json)] = []
+  var want2 = ""
+  var k = 0
+  while k < 20 {
+    es = es ++ [("k" ++ to_string(k), JInt(k))]
+    want2 = want2 ++ (if k == 0 { "" } else { "," }) ++
+      "\"k" ++ to_string(k) ++ "\":" ++ to_string(k)
+    k = k + 1
+  }
+  assert render(JObj(map.from(es))) == "{" ++ want2 ++ "}"
 }
 
 test "non-finite JNum cannot leak an illegal token" {
