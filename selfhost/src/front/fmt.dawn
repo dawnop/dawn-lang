@@ -171,8 +171,9 @@ fn postfix_bang(raw: List[Token]) -> Set[Int] = {
   var i = 0
   while i < len(raw) {
     if raw[i].kind == BANG {
-      # `effect E = !()` (刀 5): the empty row is only spellable in an impl's
-      # effect binding, so the classification is keyed to that exact prefix --
+      # `effect E = !()` (刀 5; a trait default spells it too since #369): the
+      # empty row is only spellable after an `effect NAME =` prefix -- an
+      # impl's binding or a trait member's default, one classification --
       # anywhere else `!()` stays the postfix unwrap plus a call, as it was.
       let empty_row_bind =
         i >= 3 && raw[i - 1].kind == EQ && raw[i - 2].kind == TYPEIDENT &&
@@ -552,6 +553,10 @@ test "the associated-effect spellings keep their bang an effect marker" {
   # plus a call -- and only there: `o!()` in an expression stays tight.
   let bind = "impl P[A] {\n  effect E = !()\n  fn run(x: A) -> Int = x.v\n}\n"
   assert fmt_of(bind) == bind
+  # the trait-side default (#369) is the same `effect NAME = !()` prefix, so
+  # the classification covers it without a second key
+  let deft = "trait P[T] {\n  effect E = !()\n  fn run(x: T) -> Int !T.E\n}\n"
+  assert fmt_of(deft) == deft
   let post = "fn h(o: Option[fn() -> Int]) -> Int = o!()\n"
   assert fmt_of(post) == post
   # a projection atom inside a union is one effect name for the walk, so the
