@@ -22,7 +22,7 @@ use std/set
 use front/token.{Diag}
 use front/ast.{Module}
 use check/types.{
-  Sig, Adts, Impls, first_minted_id, adt_of,
+  Sig, Adts, Impls, first_minted_id, adt_of, TyList,
   OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID
 }
 use check/tast.{TFun, TModule}
@@ -111,6 +111,16 @@ fn is_prelude(n: String) -> Bool = {
   }
   false
 }
+
+## The module a prelude name is harvested from. The harvest below used to go
+## by name alone, so whichever module was checked *last* supplied the prelude
+## function: invisible while exactly one module exported each name, and the
+## moment std/map grew a `fold` of its own, every bare `fold(xs, ...)` in
+## user code was checked against the map signature -- whose parameter types
+## name ADTs the user program's tables have never heard of, so the symptom
+## was an unknown-adt-id panic three tables downstream of the cause.
+fn prelude_owner(n: String) -> String =
+  if n == "println" || n == "print" { "std/io" } else { "std/list" }
 
 fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
   var out = out0
@@ -444,8 +454,13 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !io = {
     by_owner = map.insert(by_owner, mod_path, own)
     for fname in map.keys(exp.fns) {
       if is_prelude(fname) {
-        std_fns = map.insert(std_fns, fname,
-          map.get(exp.fns, fname).expect("prelude fn"))
+        # only from the owning module: a prelude-named export elsewhere
+        # (map.fold) keeps its qualified spelling and needs no hint either,
+        # since the bare name still resolves through the owner's
+        if mod_path == prelude_owner(fname) {
+          std_fns = map.insert(std_fns, fname,
+            map.get(exp.fns, fname).expect("prelude fn"))
+        }
       } else {
         moved = map.insert(moved, fname, "use " ++ mod_path ++ ", then " ++ n ++ "." ++
             fname ++ "(...)")
@@ -747,6 +762,20 @@ test "the bundled std loads, checks and evaluates" {
       assert map.has(std.std_fns, "println")
       assert map.has(std.std_fns, "map")
       assert not map.has(std.std_fns, "trim")
+      # ... harvested from their owning modules. `fold` is the name two
+      # modules export: bare `fold` must stay std/list's (three parameters,
+      # the subject a List), not map.fold, which the harvest would otherwise
+      # take because std/map is checked later
+      match map.get(std.std_fns, "fold") {
+        Some(s) -> {
+          assert s.owner == Some("std/list")
+          match s.param_tys[0] {
+            TyList(_) -> ()
+            _ -> { assert false }
+          }
+        }
+        None -> { assert false }
+      }
       # everything else moved behind its module
       assert map.get(std.moved, "map_insert") == Some("use std/map, then map.insert(...)")
       # the hint names the *public* spelling, which for length is not the
