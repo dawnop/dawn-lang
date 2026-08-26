@@ -26,6 +26,9 @@ class StubNode {
     this.doc = doc;
     this.parentNode = null;
     this.childNodes = [];
+    // Whether the node is in the tree under a mount point. Custom element
+    // reactions key off transitions of this flag, as they do in a browser.
+    this._connected = false;
   }
 }
 
@@ -48,7 +51,7 @@ class StubText extends StubNode {
   }
 }
 
-class StubElement extends StubNode {
+export class StubElement extends StubNode {
   constructor(doc, tag) {
     super(doc);
     this.nodeType = 1;
@@ -99,6 +102,7 @@ class StubElement extends StubNode {
     detach(child);
     child.parentNode = this;
     this.childNodes.push(child);
+    if (this._connected) connect(child);
     return child;
   }
 
@@ -112,6 +116,7 @@ class StubElement extends StubNode {
     if (i < 0) throw new Error('insertBefore: the reference is not a child');
     this.childNodes.splice(i, 0, child);
     child.parentNode = this;
+    if (this._connected) connect(child);
     return child;
   }
 
@@ -121,6 +126,7 @@ class StubElement extends StubNode {
     if (i < 0) throw new Error('removeChild: not a child');
     this.childNodes.splice(i, 1);
     child.parentNode = null;
+    disconnect(child);
     return child;
   }
 
@@ -132,6 +138,8 @@ class StubElement extends StubNode {
     this.childNodes[i] = fresh;
     fresh.parentNode = this;
     old.parentNode = null;
+    disconnect(old);
+    if (this._connected) connect(fresh);
     return old;
   }
 
@@ -233,7 +241,41 @@ function detach(node) {
     const i = kids.indexOf(node);
     if (i >= 0) kids.splice(i, 1);
     node.parentNode = null;
+    disconnect(node);
   }
+}
+
+// ---- custom element reactions ---------------------------------------------
+//
+// The two lifecycle transitions, fired in tree order (a parent before its
+// children), which is the order the DOM's insertion and removing steps run
+// custom element reactions in. The flag makes each transition fire once per
+// crossing: a callback that appends a child while running sees the child
+// connect immediately through `appendChild`, and the walk below then skips it.
+//
+// Moving a connected node (`insertBefore` on a node already in the document)
+// goes through `detach` first, so it fires disconnected and then connected,
+// exactly as a browser does -- a widget that cannot survive that is a widget
+// the foreign contract wants to catch.
+
+function connect(node) {
+  if (node._connected) return;
+  node._connected = true;
+  if (typeof node.connectedCallback === 'function') {
+    node.doc.rec.log(`connected <${node.tagName}>`);
+    node.connectedCallback();
+  }
+  for (const kid of [...node.childNodes]) connect(kid);
+}
+
+function disconnect(node) {
+  if (!node._connected) return;
+  node._connected = false;
+  if (typeof node.disconnectedCallback === 'function') {
+    node.doc.rec.log(`disconnected <${node.tagName}>`);
+    node.disconnectedCallback();
+  }
+  for (const kid of [...node.childNodes]) disconnect(kid);
 }
 
 function describe(node) {
@@ -243,9 +285,24 @@ function describe(node) {
 export class StubDocument {
   constructor(rec) {
     this.rec = rec;
+    // The custom element registry, shaped like the browser's: a class per
+    // tag, constructed when `createElement` meets the tag. A stub class
+    // extends `StubElement` and may define `connectedCallback` and
+    // `disconnectedCallback`; the reactions above dispatch and record them.
+    this._customElements = new Map();
+    this.customElements = {
+      define: (tag, cls) => {
+        if (this._customElements.has(tag)) {
+          throw new Error(`custom element <${tag}> is already defined`);
+        }
+        this._customElements.set(tag, cls);
+      },
+    };
   }
 
   createElement(tag) {
+    const cls = this._customElements.get(tag);
+    if (cls) return new cls(this, tag);
     return INPUTS.has(tag) ? new StubInput(this, tag) : new StubElement(this, tag);
   }
 
@@ -257,6 +314,9 @@ export class StubDocument {
   mountPoint() {
     const el = new StubElement(this, 'main');
     this.rec.lines.pop(); // the mount is scaffolding, not a recorded mutation
+    // The mount stands for the live document: what is under it is connected,
+    // which is what makes custom element reactions fire under it.
+    el._connected = true;
     return el;
   }
 }

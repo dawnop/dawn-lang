@@ -40,12 +40,13 @@
 # to the transcript of its case. A mutant that passes means the transcript
 # has no teeth about the thing it broke, and this script says so.
 #
-# Before any of that, three node-only checks driven straight at the bridge,
+# Before any of that, four node-only checks driven straight at the bridge,
 # each with its own mutants and its own head explaining why it is not a
 # transcript: keyed-ops.sh for the three ops neither application here reaches,
 # props.sh for the attribute/property split, whose failure a transcript cannot
-# see, and payload.sh for the parts of an event payload no application here
-# declares.
+# see, payload.sh for the parts of an event payload no application here
+# declares, and foreign.sh for the custom-element boundary no application
+# here mounts.
 #
 #   ./scripts/wasm-dom-contract/run.sh
 #   ./scripts/wasm-dom-contract/run.sh --record        # re-record both transcripts
@@ -74,10 +75,12 @@ record=0
 # value that has stopped following the model while every byte in the transcript
 # stays right. payload.sh does it for `key`, a checkbox, a listener whose kind
 # changed and the `preventDefault` decision, none of which either application
-# below asks for.
+# below asks for. foreign.sh does it for the custom-element lifecycle, which
+# neither application reaches because neither mounts a foreign element.
 "$(dirname "${BASH_SOURCE[0]}")/keyed-ops.sh"
 "$(dirname "${BASH_SOURCE[0]}")/props.sh"
 "$(dirname "${BASH_SOURCE[0]}")/payload.sh"
+"$(dirname "${BASH_SOURCE[0]}")/foreign.sh"
 
 fail=0
 demo="$root/examples/projects/tea_dom_counter"
@@ -354,4 +357,4 @@ edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
   run_mutant todo-filter yes "the done filter admits everything"
 
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm dom contract ok (2 transcripts + 9 mutants, plus the keyed ops, the props and the payloads)"
+echo "wasm dom contract ok (2 transcripts + 9 mutants, plus the keyed ops, the props, the payloads and the foreign elements)"
