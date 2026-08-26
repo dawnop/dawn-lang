@@ -1,0 +1,20 @@
+# Scan a dynamically built string with the std/cursor trio -- the hot shape
+# the borrowed knife exists for (docs/perceus-design.md 6). The string must
+# be built at runtime: a literal is an immortal static, and an immortal
+# neither double-frees when over-released nor leaks when under-released, so
+# a mutant against a literal would be invisible to both sanitizers.
+use std/str
+use std/cursor
+
+pub fn main() -> Unit !io = {
+  let s = str.repeat("ab" ++ to_string(7), 40)
+  var c = cursor.start(s)
+  var n = 0
+  var sum = 0
+  while not cursor.done(s, c) {
+    sum = sum + cursor.char(s, c)
+    n = n + 1
+    c = cursor.next(s, c)
+  }
+  println(to_string(n) ++ " " ++ to_string(sum))
+}

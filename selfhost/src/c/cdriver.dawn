@@ -9,7 +9,8 @@
 
 use std/io
 use std/map
-use ir/core.{CValue, CFun, CModule, CMode}
+use std/str
+use ir/core.{CValue, CFun, CModule, CParam, CMode, COwned, CBorrowed, mode_owned}
 use check/types.{Adts, Traits, Impls, Sig, prelude_adts}
 use check/cx.{Cx}
 use ir/interp.{CtOut}
@@ -147,6 +148,165 @@ fn named_tests(m: CModule) -> CModule = {
   CModule { ..m, fns: fns }
 }
 
+## One requested parameter-mode flip, from `DAWN_RC_MODE_FLIPS`. The mode
+## contract (core.CMode) has two readers -- the callee's `CParam.mode` and
+## the program-wide call-site table -- and a flip names which of them to turn
+## `CBorrowed` for one parameter of one function. Flipping only one is the
+## whole point: scripts/rc-mode-contract exists to prove a disagreement
+## between the two readers is caught by the sanitizers, and `both` is the
+## coherent flip the borrowed-inference pass (docs/perceus-design.md 6) will
+## one day produce, so it must stay green.
+type ModeFlip = {
+  owner: String,
+  name: String,
+  arity: Int,
+  idx: Int,
+  callee_side: Bool,
+  callsite_side: Bool
+}
+
+## Parse `owner:name:arity:index=callee|callsite|both`, comma-separated.
+## `:` separates the fields because `owner` itself carries `/` (module paths
+## are slash-spelled, core.CFun.owner). Any malformed entry is a panic, not a
+## skip: the only writer is the mutant harness, and a flip that silently did
+## not happen would turn a red mutant into a green lie.
+fn parse_mode_flips(spec: String) -> List[ModeFlip] = {
+  var out: List[ModeFlip] = []
+  for ent in str.split(spec, ",") {
+    let e = str.trim(ent)
+    if e != "" {
+      let (lhs, side) = str.split_once(e, "=")
+        .expect("DAWN_RC_MODE_FLIPS: missing `=` in `" ++ e ++ "`")
+      let parts = str.split(lhs, ":")
+      if len(parts) != 4 {
+        panic("DAWN_RC_MODE_FLIPS: want owner:name:arity:index=side, got `" ++ e ++ "`")
+      }
+      let arity = parse_int(parts[2])
+        .expect("DAWN_RC_MODE_FLIPS: arity is not a number in `" ++ e ++ "`")
+      let idx = parse_int(parts[3])
+        .expect("DAWN_RC_MODE_FLIPS: index is not a number in `" ++ e ++ "`")
+      if idx < 0 || idx >= arity {
+        panic("DAWN_RC_MODE_FLIPS: index " ++ to_string(idx) ++
+            " out of range for arity " ++ to_string(arity) ++ " in `" ++ e ++ "`")
+      }
+      let sides =
+        if side == "callee" {
+          (true, false)
+        } else if side == "callsite" {
+          (false, true)
+        } else if side == "both" {
+          (true, true)
+        } else {
+          panic("DAWN_RC_MODE_FLIPS: unknown side `" ++ side ++ "` in `" ++ e ++ "`")
+        }
+      let (ce, cs) = sides
+      out = out ++ [ModeFlip {
+        owner: parts[0], name: parts[1], arity: arity, idx: idx,
+        callee_side: ce, callsite_side: cs
+      }]
+    }
+  }
+  out
+}
+
+## The flips this compile was asked for -- an empty list on every real
+## compile. The variable is a test-only injection channel for the mutant
+## harness; with it unset this returns `[]`, `flip_table` and `flip_callee`
+## return their inputs unchanged, and the produced C is byte-for-byte what it
+## was before the channel existed (the harness pins that as its clean
+## control).
+fn mode_flips_from_env() -> List[ModeFlip] !io =
+  match io.getenv("DAWN_RC_MODE_FLIPS") {
+    None -> [],
+    Some(s) -> parse_mode_flips(s)
+  }
+
+## The call-site half of a flip: a table row with `CBorrowed` at the flipped
+## position. A row already inserted by an earlier flip is edited in place, so
+## two flips of one function compose.
+fn flip_table(
+  base: Map[(String, String), List[CMode]],
+  flips: List[ModeFlip]
+) -> Map[(String, String), List[CMode]] = {
+  var out = base
+  for fl in flips {
+    if fl.callsite_side {
+      var row0: List[CMode] = []
+      match map.get(out, (fl.owner, fl.name)) {
+        Some(r) -> { row0 = r }
+        None -> {
+          var i = 0
+          while i < fl.arity {
+            row0 = row0 ++ [COwned]
+            i = i + 1
+          }
+        }
+      }
+      var row: List[CMode] = []
+      var i = 0
+      for m in row0 {
+        if i == fl.idx { row = row ++ [CBorrowed] } else { row = row ++ [m] }
+        i = i + 1
+      }
+      out = map.insert(out, (fl.owner, fl.name), row)
+    }
+  }
+  out
+}
+
+## The callee half of a flip: the matching `CParam.mode` stamped `CBorrowed`
+## on the lowered Core, before `rc_module` reads it. With no flips the module
+## passes through untouched.
+fn flip_callee(m: CModule, flips: List[ModeFlip]) -> CModule = {
+  if len(flips) == 0 { return m }
+  var fns: List[CFun] = []
+  for f in m.fns {
+    var params = f.params
+    for fl in flips {
+      if fl.callee_side && fl.owner == f.owner && fl.name == f.name {
+        var out: List[CParam] = []
+        var i = 0
+        for p in params {
+          if i == fl.idx {
+            out = out ++ [CParam { ..p, mode: CBorrowed }]
+          } else {
+            out = out ++ [p]
+          }
+          i = i + 1
+        }
+        params = out
+      }
+    }
+    fns = fns ++ [CFun { ..f, params: params }]
+  }
+  CModule { ..m, fns: fns }
+}
+
+test "mode flips parse and stamp both halves" {
+  let fls = parse_mode_flips("std/cursor:done:2:0=both, std/str:len:1:0=callsite")
+  assert len(fls) == 2
+  assert fls[0].owner == "std/cursor" && fls[0].name == "done"
+  assert fls[0].callee_side && fls[0].callsite_side
+  assert not fls[1].callee_side && fls[1].callsite_side
+  let t = flip_table(map.empty(), fls)
+  match map.get(t, ("std/cursor", "done")) {
+    Some(row) -> {
+      assert len(row) == 2
+      assert not mode_owned(row[0]) && mode_owned(row[1])
+    }
+    None -> { assert false }
+  }
+  match map.get(t, ("std/str", "len")) {
+    Some(row2) -> { assert len(row2) == 1 && not mode_owned(row2[0]) }
+    None -> { assert false }
+  }
+}
+
+test "an empty flip list is the identity on the table" {
+  let t = flip_table(rc.owned_modes(), [])
+  assert len(map.entries(t)) == 0
+}
+
 ## Every module of the program, std first, lowered and reference-counted.
 ## `with_tests` is `dawn test`'s: the test bodies ride along, and so do the
 ## dictionaries only a test asks for (`lower.emitted_core`). std's tests ride
@@ -165,7 +325,10 @@ fn build_units(
   # module's Core, before any is rewritten. Until that pass exists the
   # table is empty and every parameter is owned. It rides back out because
   # the emitter reads call sites with the same table the rewrite used.
-  let modes = rc.owned_modes()
+  # `flips` is the mutant harness's injection channel (see ModeFlip above)
+  # and is empty on every compile that did not set DAWN_RC_MODE_FLIPS.
+  let flips = mode_flips_from_env()
+  let modes = flip_table(rc.owned_modes(), flips)
   # const values by declaring module, the same view the JVM path builds: a
   # const is named by its simple name and imported by it
   var const_vals: Map[String, Map[String, CValue]] = map.empty()
@@ -188,7 +351,7 @@ fn build_units(
       }
     units = units ++ [
       EmitMod {
-        m: rc.rc_module(core, modes),
+        m: rc.rc_module(flip_callee(core, flips), modes),
         consts: merged_consts(cx, ct, const_vals),
         blocks: ct.blocks
       }
@@ -204,7 +367,7 @@ fn build_units(
       }
     units = units ++ [
       EmitMod {
-        m: rc.rc_module(core, modes),
+        m: rc.rc_module(flip_callee(core, flips), modes),
         consts: merged_consts(cm.cx, cm.ct, const_vals),
         blocks: cm.ct.blocks
       }

@@ -407,8 +407,12 @@ jobs:
     # The classfile step's thirteen Never mutants (~180s of its 246~258s)
     # moved to the classfile-never-mutants job on 2026-08-20 (#299), so the
     # planning value was ~400s; the first run without the block came in at 356s.
-    # budget: 3x 356s worst observed (run 32286226622)
-    timeout-minutes: 18
+    # The rc-mode step added 2026-08-27 is 34s locally; doubled for the
+    # runner, the planning value is 356 + 70 = 426s -- still under the
+    # native-diff pole, so the run's wall clock does not move. Re-measure and
+    # restate after the first green run.
+    # budget: 3x 426s planning value (356s observed + rc-mode 34s local, doubled)
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -574,6 +578,17 @@ jobs:
       # because drop walks a 200k-node chain and must not do it by recursing.
       - name: RC contract
         run: ./scripts/rc-contract/run.sh
+
+      # The parameter-mode contract (core.CMode) under single-sided flips:
+      # a call-site table row without the callee's CParam.mode, and the
+      # mirror, each must be caught by rc_check / ASan / LSan, while the
+      # coherent flip -- the borrowed knife's semantics in miniature -- must
+      # run clean. It rides here for the atomic-write step's reason: it wants
+      # a JVM compile and a `cc` with sanitizers, and this job is not the
+      # critical path. The six known-red entries are the harness's findings;
+      # read that file before touching them.
+      - name: RC parameter-mode mutants
+        run: ./scripts/rc-mode-contract/run.sh
 
       # RC's match-only unloop rewrite must not erase a source loop that still
       # owns a named break or continue target. The compiling mutant restores
