@@ -21,9 +21,9 @@ same four files in a browser and in node.
 
 One JSON object per line each way. `packages/tea-dom/src/wire.dawn` is the
 authority on the shape; the two things a reader of this directory needs are
-that a *message* never crosses (only an address and an event name go in, only
-event *names* come out) and that the *model* does, as opaque text this code
-carries between turns without ever reading it.
+that a *message* never crosses (an address, an event name and at most one
+string go in; event names and payload kinds come out) and that the *model*
+does, as opaque text this code carries between turns without ever reading it.
 
 ```
 -> {"op":"init"}
@@ -34,14 +34,52 @@ carries between turns without ever reading it.
      {"path":[1,0],"op":"replace","node":{"t":"text","s":"1"}},
      {"path":[2],"op":"append","nodes":[{…}]}]}
 
+-> {"op":"event","model":"…","path":[1,0],"event":"input","payload":"buy mil"}
+
 <- {"ok":false,"kind":"panic","error":"…"}
 ```
 
 A node is `{"t":"text","s":…}` or
-`{"t":"elem","tag":…,"props":[[k,v],…],"on":[event,…],"kids":[…]}`, and a
+`{"t":"elem","tag":…,"props":[[k,v],…],"on":[…],"kids":[…]}`, and a
 `set-self` payload is the same object with no `kids` -- `apply` reads only a
 donor's own data, so the subtree is not shipped and a class change at the root
 costs one `setAttribute`.
+
+## Listeners and payloads
+
+An entry of `on` is either a bare event name, or `[name, kind]` where `kind`
+is `"value"` or `"key"`:
+
+```
+"on":["click"]
+"on":[["input","value"],"blur"]
+```
+
+A bare name is a listener that wants nothing back, which is what every listener
+was before payloads existed and is still the common case; the two encodings
+are what keeps a document full of buttons byte-identical to the one this bridge
+carried before.
+
+The kind decides three things, all of them in `dom.mjs`:
+
+- **what is read.** `"value"` is `ev.target.value`, with a checkbox or a radio
+  normalised to `"true"`/`"false"` so that one slot covers all three; `"key"`
+  is `ev.key`. Never anything the guest did not ask for.
+- **whether `preventDefault` is called.** It is, except for `"key"`:
+  cancelling a `keydown` is how a page stops the character reaching the
+  element, and a listener that asked which key was pressed did not ask for it
+  to be swallowed.
+- **when a listener is reattached.** A handler closes over the kind, so a
+  listener whose kind changed is removed and added rather than left in place.
+  The guest makes that reachable by comparing the kind in `relate`.
+
+The payload field is *omitted* from the request when there is none. Absent and
+empty are different answers: the guest refuses a turn whose payload does not
+match what its listener declared, with `{"ok":false,"kind":"bad-request"}`, so
+a host that sends `""` where nothing was asked for gets an error rather than a
+shrug. That refusal is the same policy an address that listens for nothing
+gets, and for the same reason: it means the two sides are looking at different
+trees.
 
 ## The seven ops
 

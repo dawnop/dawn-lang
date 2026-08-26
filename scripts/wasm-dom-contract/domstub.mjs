@@ -135,11 +135,21 @@ class StubElement extends StubNode {
     return old;
   }
 
-  /** Fire what a browser would fire: every listener registered for `name`. */
-  fire(name) {
+  /**
+   * Fire what a browser would fire: every listener registered for `name`.
+   *
+   * `extra` goes on the event object, which is how a case supplies the half of
+   * an event that is not the element -- `{ key: 'a' }` for a keystroke. The
+   * element half needs nothing: `target` is this element, so a listener that
+   * asked for a value reads the one this stub is holding, and a case that
+   * wants a different one types into the element first, as a user would.
+   */
+  fire(name, extra = {}) {
     const fns = this._listeners.get(name) || [];
     if (fns.length === 0) throw new Error(`<${this.tagName}> has no ${name} listener`);
-    for (const fn of fns.slice()) fn({ type: name, preventDefault() {} });
+    for (const fn of fns.slice()) {
+      fn({ type: name, target: this, preventDefault() {}, ...extra });
+    }
   }
 }
 
@@ -149,10 +159,10 @@ class StubElement extends StubNode {
 // WHATWG HTML: writing the `value` *content attribute* sets the live value
 // only while the control's dirty value flag is false, and that flag is set for
 // good the first time the user changes the value. So this stub does what a
-// browser does -- `setAttribute('value', ...)` writes through until `type()`
-// has been called and is inert afterwards -- and a bridge that renders a model
-// into a field with `setAttribute` is a bridge that stops being able to
-// correct the field after the first keystroke. Nothing raises when it happens,
+// browser does -- `setAttribute('value', ...)` writes through until
+// `typeInto()` has been called and is inert afterwards -- and a bridge that
+// renders a model into a field with `setAttribute` is one that stops being
+// able to correct it after the first keystroke. Nothing raises when it happens,
 // which is why it needs an element that models the rule rather than an
 // assertion that the right method was called.
 class StubInput extends StubElement {
@@ -161,6 +171,12 @@ class StubInput extends StubElement {
     this._value = '';
     this._checked = false;
     this._dirty = false;
+  }
+
+  // A browser reflects `type` as a property with `"text"` as the default, and
+  // the bridge reads it to decide whether a value is a tick or a string.
+  get type() {
+    return this._attrs.has('type') ? this._attrs.get('type') : 'text';
   }
 
   get value() {
@@ -188,8 +204,13 @@ class StubInput extends StubElement {
     if (name === 'checked') this._checked = value !== '' && value !== 'false';
   }
 
-  /** What the user does. The dirty value flag is one way. */
-  type(text) {
+  /**
+   * What the user does. The dirty value flag is one way.
+   *
+   * Not `type`: that name belongs to the content attribute a browser reflects
+   * as a property, and the bridge reads it to tell a tick from a string.
+   */
+  typeInto(text) {
     this._value = String(text);
     this._dirty = true;
   }

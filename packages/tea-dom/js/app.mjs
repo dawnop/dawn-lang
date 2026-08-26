@@ -1,7 +1,7 @@
 // The loop, in one function: init, render, wait, dispatch, patch, wait.
 //
-//   init  ->  reply.patches  ->  DOM
-//   click ->  address+event  ->  reply.patches  ->  DOM
+//   init  ->  reply.patches          ->  DOM
+//   event ->  address+event+payload  ->  reply.patches  ->  DOM
 //
 // Everything either side of the arrows is in `reactor.mjs` and `dom.mjs`;
 // what is here is the wiring and the one policy decision the wiring owns:
@@ -32,8 +32,8 @@ export async function mount(wasm, mountEl, { onError = defaultOnError, doc } = {
     return reply;
   }
 
-  function dispatch(path, event) {
-    settle(reactor.event(path, event));
+  function dispatch(path, event, payload) {
+    settle(reactor.event(path, event, payload));
   }
 
   settle(reactor.init());

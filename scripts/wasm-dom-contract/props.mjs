@@ -72,7 +72,7 @@ function mounted(node) {
 {
   const { host, rec, el } = mounted(elem('input', [['value', 'buy']]));
   // The user types. From here a browser ignores the content attribute.
-  el.type('buy milk and eggs');
+  el.typeInto('buy milk and eggs');
   check('the user typed', el.value, 'buy milk and eggs');
 
   // The model corrects the field: an add committed the draft and cleared it.

@@ -26,9 +26,46 @@ where a terminal has no tag to vary.
 One thing the DOM needed that the terminal did not. `relate` must see every
 difference between a pair, or `apply(old, diff(old, new)) == new` fails; two
 elements that agree on tag, props and event names but disagree on what a click
-*means* are unequal, and the vocabulary has to say so. That makes the impl
+*means*, or on what it should bring back, are unequal, and the vocabulary has
+to say so. That makes the impl
 `impl[M: Eq] Tree[Node[M]]` rather than `impl[M] ...`. The terminal never met
 this because its message-carrying node is a leaf that answers `Unrelated`.
+
+## Event payloads
+
+A listener is `On { event, payload, msg }`, and `payload` is a closed set:
+`NoData`, `Value` (the element's value, with a checkbox normalised by the host
+to `"true"`/`"false"`), `Key` (`ev.key`). The host brings back that one string
+and nothing else, and `dsl.on_click` / `on_value` / `on_key` are the three
+spellings a view wants.
+
+The merge cannot live in the tree. Elm's `on : String -> Decoder msg` is a
+function from the event to a message, and a tree holding a function has no
+structural `==` -- the compiler says so in as many words. So the tree holds a
+message with a hole in it and the fold happens outside it, in a trait with a
+default body:
+
+```dawn
+pub trait Fill[T] { fn fill(m: T, payload: String) -> T = m }
+```
+
+An application that declares no payloads writes `impl Fill[Msg] { }` and is
+done; `tea_dom_counter` is that case and `tea_dom_todo` is the other.
+
+Three consequences worth stating. The kind is data in the tree, so `relate`
+sees a listener whose *reading* changed exactly as it sees one whose meaning
+changed, and the host is told to reattach. A misspelling is a type error rather
+than a runtime `no-handler`. And a payload that does not match what the
+listener declared -- present where none was asked for, missing where one was,
+or not a string -- is refused with `bad-request` rather than defaulted, for the
+reason `route.at` answering `None` is refused: it means the host is holding a
+tree this model does not produce.
+
+The invariant survives all of it. The host still cannot name a message: it
+hands over text, and which constructor that text lands in was decided in the
+guest. What it gives up is that a message's *value* is enumerable from the
+tree, which was never the invariant, only a side effect of there being no way
+to type into the page at all.
 
 ## Keyed children
 
@@ -56,8 +93,10 @@ One JSON object per line each way, and nothing else crosses. `src/wire.dawn`
 has the full argument; the three properties worth repeating:
 
 - **A message never crosses.** Outward, the only listener information is the
-  *name* of the events an element wants; inward, an address and an event name.
-  `route.at` resolves the pair against the tree the model produces right now,
+  *name* of each event an element wants and, where the listener asked for one,
+  the *kind* of data to bring back; inward, an address, an event name and at
+  most one string. `route.at` resolves the address against the tree the model
+  produces right now and `Fill` folds the string into the message on this side,
   so the application's message type needs no encoding and the host has never
   heard of it.
 - **The model crosses, as opaque text.** Dawn has no module-level mutable
@@ -88,7 +127,7 @@ runtime, and a boundary that varies by backend cannot have one transcript.
 | `dsl` | lowercase wrappers over the constructors, `tea_term/dsl`'s counterpart |
 | `route` | an address plus an event name to a message, on `fold_preorder` |
 | `wire` | the JSON encoding of nodes, patches and replies; request decoding |
-| `reactor` | `turn` (pure) and `serve` (the package's only `!io`) |
+| `reactor` | `turn` (pure), `serve` (the package's only `!io`), `trait Fill` |
 
 ## The host half
 
@@ -113,8 +152,12 @@ finds these:
   same function: `diff_step(m, msg, vw)` computes `vw(m)` itself, and a
   reactor already holds that tree because `route.at` needed it to resolve the
   address. Moving `diff_step` to core would not make it usable here.
-- **No event payload.** A listener crosses as the *name* of an event, and an
-  event crosses back as an address and that name. Nothing carries
-  `ev.target.value`, so an `<input>` cannot tell a guest what was typed and
-  text entry has to be spelled as one message per character.
-  `tea_dom_todo`'s on-screen key palette is what that costs an application.
+- **Capability bits and predicates.** A listener declares what data it wants
+  and cannot yet declare anything else: whether the host should call
+  `preventDefault`, whether to register the listener as passive, whether to
+  debounce, whether a predicate the host evaluates locally should stop the
+  event crossing at all. Elm, Blazor, Vaadin and LiveView each have some of
+  these, and for a boundary that ships the whole model per turn a predicate
+  that keeps a turn from happening is worth more than anything a turn can
+  carry. `On` is a record so that adding one is a field rather than a second
+  break of the listener's shape; today it holds `payload` and nothing else.

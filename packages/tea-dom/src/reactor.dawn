@@ -38,9 +38,37 @@
 use std/io
 use std/str
 use tea_core/diff.{Patch, Replace, diff}
-use node.{Node, Text, Elem}
+use node.{Node, Text, Elem, On, NoData, Value, Key}
 use route
 use wire.{Request, Init, Event, Bad, decode_request, enc_node, reply_ok, reply_err}
+
+## How a message absorbs the string an event brought with it.
+##
+## The merge cannot live in the tree. A listener holding `fn(String) -> M`
+## would cost `Node[M]` its structural `==` (`node.dawn` says why, and the
+## compiler says it too: "functions cannot be compared"), and `==` on the tree
+## is what the reconciler and every view test are built on. So the tree holds
+## a message with a hole in it, the host brings back a string, and this folds
+## one into the other on the guest side. The host still cannot name a message:
+## it hands over text, and which constructor that text lands in was decided
+## here.
+##
+## The default body is `m`, so an application that declares no payloads writes
+## the empty impl and nothing else:
+##
+## ```dawn
+## impl Fill[Msg] { }
+## ```
+##
+## It is a trait rather than a parameter of `turn` because a defaulted
+## parameter may not mention the function's own type variables, so the
+## alternative was an argument at every call site of `turn` and `serve` for a
+## function almost every one of them would pass the identity to. The orphan
+## rule puts the impl in the module that declares `Msg`, which is the
+## application's own, which is where a reader looks for it.
+pub trait Fill[T] {
+  fn fill(m: T, payload: String) -> T = m
+}
 
 ## Answer one request line.
 ##
@@ -57,11 +85,13 @@ use wire.{Request, Init, Event, Bad, decode_request, enc_node, reply_ok, reply_e
 ##   `init`   the host has an empty container. The reply is the initial model
 ##            and one `replace` at the root, which is the only patch that can
 ##            describe "there was nothing and now there is a document".
-##   `event`  the host names an address and an event. The message is looked up
-##            in `view(decode(model))` -- the tree the host is holding, since
-##            the host's document is that tree by construction -- folded in by
-##            `update`, and the reply is the new model plus `diff(old, new)`.
-pub fn turn[Mo, M: Eq](
+##   `event`  the host names an address, an event and at most one string. The
+##            listener is looked up in `view(decode(model))` -- the tree the
+##            host is holding, since the host's document is that tree by
+##            construction -- the string is folded into its message by `fill`,
+##            `update` folds that in, and the reply is the new model plus
+##            `diff(old, new)`.
+pub fn turn[Mo, M: Eq + Fill](
   line: String,
   init: Mo,
   encode: fn(Mo) -> String,
@@ -75,7 +105,7 @@ pub fn turn[Mo, M: Eq](
       let root: Patch[Node[M]] = Patch { path: [], op: Replace(w: view(init)) }
       reply_ok(encode(init), [root])
     }
-    Event(model, path, event) -> {
+    Event(model, path, event, payload) -> {
       let m0 = decode(model)
       let old = view(m0)
       match route.at(old, path, event) {
@@ -84,12 +114,36 @@ pub fn turn[Mo, M: Eq](
             "no-handler",
             "nothing at " ++ show_path(path) ++ " listens for `" ++ event ++ "`",
           )
-        Some(msg) -> {
-          let m1 = update(m0, msg)
-          reply_ok(encode(m1), diff(old, view(m1)))
-        }
+        Some(listener) ->
+          match settle(listener, payload) {
+            Err(why) -> reply_err("bad-request", why)
+            Ok(msg) -> {
+              let m1 = update(m0, msg)
+              reply_ok(encode(m1), diff(old, view(m1)))
+            }
+          }
       }
     }
+  }
+
+# What arrived against what was asked for, and the message that results.
+#
+# A mismatch is refused rather than defaulted or dropped. The listener said
+# what it wanted and the host was told; a payload arriving where none was
+# declared, or missing where one was, means the two are looking at different
+# trees, which is the same desync `route.at` answering `None` reports and gets
+# the same treatment. Papering over it would turn a wrong reading -- a host
+# that sends `ev.key` where `ev.target.value` was asked for, say -- into a
+# message quietly built from the wrong text, and the transcripts would go on
+# being green.
+fn settle[M: Fill](listener: On[M], payload: Option[String]) -> Result[M, String] =
+  match (listener.payload, payload) {
+    (NoData, None) -> Ok(listener.msg)
+    (NoData, Some(_)) ->
+      Err("`" ++ listener.event ++ "` asks for no payload, but one arrived")
+    (Value, Some(text)) -> Ok(fill(listener.msg, text))
+    (Key, Some(text)) -> Ok(fill(listener.msg, text))
+    (_, None) -> Err("`" ++ listener.event ++ "` asks for a payload, but none arrived")
   }
 
 fn show_path(p: List[Int]) -> String = "[" ++ join_ints(p, 0, "") ++ "]"
@@ -108,7 +162,7 @@ fn join_ints(p: List[Int], i: Int, acc: String) -> String =
 ## error reply and the loop goes on to the next line. A blank line is skipped,
 ## because a host that writes "\n" between messages should not be told it sent
 ## a malformed request.
-pub fn serve[Mo, M: Eq](
+pub fn serve[Mo, M: Eq + Fill](
   init: Mo,
   encode: fn(Mo) -> String,
   decode: fn(String) -> Mo,
@@ -138,14 +192,25 @@ pub fn serve[Mo, M: Eq](
 # ---- tests -------------------------------------------------------------
 #
 # A counter, because the smallest app that has a model, two messages and a
-# tree with a stable region is enough to pin every branch of a turn.
+# tree with a stable region is enough to pin every branch of a turn. It also
+# has a field, which is what the payload branches need: `Set` is the message
+# with a hole in it, and `fill` is what puts the host's text in the hole.
 
 type Counter = { n: Int }
 
 type Msg =
   | Inc
   | Dec
+  | Set(text: String)
 derive Show
+
+impl Fill[Msg] {
+  fn fill(m: Msg, payload: String) -> Msg =
+    match m {
+      Set(_) -> Set(text: payload)
+      _ -> m
+    }
+}
 
 fn enc(m: Counter) -> String = to_string(m.n)
 
@@ -159,13 +224,40 @@ fn upd(m: Counter, msg: Msg) -> Counter =
   match msg {
     Inc -> Counter { n: m.n + 1 }
     Dec -> Counter { n: m.n - 1 }
+    Set(text) ->
+      match parse_int(text) {
+        Some(n) -> Counter { n: n }
+        None -> m
+      }
   }
 
 fn vw(m: Counter) -> Node[Msg] =
   Elem(tag: "div", props: [], on: [], kids: [
-    Elem(tag: "button", props: [], on: [("click", Dec)], kids: [Text(s: "-")], key: None),
+    Elem(
+      tag: "button",
+      props: [],
+      on: [On { event: "click", payload: NoData, msg: Dec }],
+      kids: [Text(s: "-")],
+      key: None,
+    ),
     Elem(tag: "span", props: [], on: [], kids: [Text(s: to_string(m.n))], key: None),
-    Elem(tag: "button", props: [], on: [("click", Inc)], kids: [Text(s: "+")], key: None),
+    Elem(
+      tag: "button",
+      props: [],
+      on: [On { event: "click", payload: NoData, msg: Inc }],
+      kids: [Text(s: "+")],
+      key: None,
+    ),
+    # Carries no `value` prop on purpose: the assertions below are about one
+    # region of the tree changing per turn, and a field that renders the model
+    # would put a second patch in every one of them.
+    Elem(
+      tag: "input",
+      props: [],
+      on: [On { event: "input", payload: Value, msg: Set(text: "") }],
+      kids: [],
+      key: None,
+    ),
   ], key: None)
 
 fn ask(line: String) -> String =
@@ -213,4 +305,42 @@ test "a malformed line is answered, and the model is not mentioned" {
 test "a turn is a function of its line, so a transcript replays" {
   let line = "{\"op\":\"event\",\"model\":\"7\",\"path\":[2],\"event\":\"click\"}"
   assert ask(line) == ask(line)
+  # With a payload too: the string is a field of the line like any other, so
+  # replaying the line replays the message it produced.
+  let typed = "{\"op\":\"event\",\"model\":\"7\",\"path\":[3],\"event\":\"input\",\"payload\":\"12\"}"
+  assert ask(typed) == ask(typed)
+}
+
+test "a payload reaches update through fill, and only through fill" {
+  # The whole path, end to end: the host's text lands in the hole `Set` left,
+  # `update` reads it, and the model changed to something no click could have
+  # produced. Nothing named a message on the way.
+  let out = ask("{\"op\":\"event\",\"model\":\"7\",\"path\":[3],\"event\":\"input\",\"payload\":\"12\"}")
+  assert str.contains(out, "\"model\":\"12\"")
+  assert str.contains(out, "\"s\":\"12\"")
+  # The text is carried verbatim, not parsed by the boundary: a payload that
+  # is not a number is a message `update` decides to ignore, not an error.
+  let junk =
+    ask("{\"op\":\"event\",\"model\":\"7\",\"path\":[3],\"event\":\"input\",\"payload\":\"twelve\"}")
+  assert str.contains(junk, "\"model\":\"7\"")
+  assert str.contains(junk, "\"patches\":[]")
+}
+
+test "a payload that does not match what the listener asked for is refused" {
+  # The listener at [3] asks for a value; a line with none is a host holding a
+  # tree this model does not produce, and the answer is the one `no-handler`
+  # gets rather than a message built from a default.
+  let missing = ask("{\"op\":\"event\",\"model\":\"7\",\"path\":[3],\"event\":\"input\"}")
+  assert missing ==
+    "{\"ok\":false,\"kind\":\"bad-request\"," ++
+    "\"error\":\"`input` asks for a payload, but none arrived\"}"
+  # And the other way round: the buttons ask for nothing, so a host that sends
+  # something is a host reading the wrong element.
+  let extra =
+    ask("{\"op\":\"event\",\"model\":\"7\",\"path\":[2],\"event\":\"click\",\"payload\":\"x\"}")
+  assert extra ==
+    "{\"ok\":false,\"kind\":\"bad-request\"," ++
+    "\"error\":\"`click` asks for no payload, but one arrived\"}"
+  # A refused turn carries no model and no patches, so the page is untouched.
+  assert not str.contains(extra, "\"patches\"")
 }

@@ -40,10 +40,12 @@
 # to the transcript of its case. A mutant that passes means the transcript
 # has no teeth about the thing it broke, and this script says so.
 #
-# Before any of that, two node-only checks driven straight at the bridge, each
-# with its own mutants and its own head explaining why it is not a transcript:
-# keyed-ops.sh for the three ops neither application here reaches, and props.sh
-# for the attribute/property split, whose failure a transcript cannot see.
+# Before any of that, three node-only checks driven straight at the bridge,
+# each with its own mutants and its own head explaining why it is not a
+# transcript: keyed-ops.sh for the three ops neither application here reaches,
+# props.sh for the attribute/property split, whose failure a transcript cannot
+# see, and payload.sh for the parts of an event payload no application here
+# declares.
 #
 #   ./scripts/wasm-dom-contract/run.sh
 #   ./scripts/wasm-dom-contract/run.sh --record        # re-record both transcripts
@@ -68,9 +70,12 @@ record=0
 # patch lists a keyed application would produce, and carries its own mutants.
 # props.sh does the same for `value`/`checked`, whose failure mode is a live
 # value that has stopped following the model while every byte in the transcript
-# stays right.
+# stays right. payload.sh does it for `key`, a checkbox, a listener whose kind
+# changed and the `preventDefault` decision, none of which either application
+# below asks for.
 "$(dirname "${BASH_SOURCE[0]}")/keyed-ops.sh"
 "$(dirname "${BASH_SOURCE[0]}")/props.sh"
+"$(dirname "${BASH_SOURCE[0]}")/payload.sh"
 
 fail=0
 demo="$root/examples/projects/tea_dom_counter"
@@ -280,13 +285,25 @@ sed -i 's|        ("node", enc_self(w)),|        ("node", enc_node(w)),|' \
 edited "$mutant_tree/packages/tea-dom/src/wire.dawn" &&
   run_mutant setself-payload yes "set-self ships its children"
 
-# E: the failure landing is taken away. `serve` calls `turn` directly, so the
+# E: the host stops honouring the kind the guest declared and reads a value
+# off every event. Every listener in both applications asks for nothing, so
+# what this produces is a `payload` field on requests that must not have one --
+# and the guest refuses the turn rather than ignoring the extra, which is what
+# makes the refusal visible here instead of at the first application that
+# declares a payload for one listener and gets it on all of them.
+reset_tree
+sed -i 's#if (kind === null || kind === undefined) return undefined;#if (false) return undefined;#' \
+  "$mutant_tree/packages/tea-dom/js/dom.mjs"
+edited "$mutant_tree/packages/tea-dom/js/dom.mjs" &&
+  run_mutant payload-ignores-kind no "the host sends a value whatever the listener asked for"
+
+# F: the failure landing is taken away. `serve` calls `turn` directly, so the
 # application's deliberate panic is nobody's to catch: on wasm it unwinds out
 # of `dawn_turn` and the host is left holding an aborted instance. This is the
 # run-level mutant, and the one that says knife 3's failure runtime is what
 # the `boom` line depends on.
 reset_tree
-python3 - "$mutant_tree/packages/tea-dom/src/reactor.dawn" <<'MUTANT_E'
+python3 - "$mutant_tree/packages/tea-dom/src/reactor.dawn" <<'MUTANT_F'
 import sys
 
 path = sys.argv[1]
@@ -300,7 +317,7 @@ lines[start : end + 1] = [
     indent + "io.println(turn(line, init, encode, decode, update, view))"
 ]
 open(path, "w").write("\n".join(lines))
-MUTANT_E
+MUTANT_F
 edited "$mutant_tree/packages/tea-dom/src/reactor.dawn" &&
   run_mutant no-catch yes "the panic catch at the boundary is removed"
 
@@ -313,7 +330,7 @@ edited "$mutant_tree/packages/tea-dom/src/reactor.dawn" &&
 # case is carrying assertions of its own.
 case_of todo
 
-# F: the lifted local state stops being routed. Every keystroke feeds the
+# G: the lifted local state stops being routed. Every keystroke feeds the
 # composer's draft, so the row editor can never be typed into -- the exact
 # failure that having no local state at all is supposed to make impossible,
 # and the reason `focus` is a field.
@@ -323,7 +340,7 @@ sed -i 's/edit: m.edit ++ c/draft: m.draft ++ c/' \
 edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
   run_mutant todo-focus yes "a keystroke ignores the focus"
 
-# G: the filter stops filtering. `done` shows every row, so the list the
+# H: the filter stops filtering. `done` shows every row, so the list the
 # reconciler is handed is the wrong length and the turn that empties it never
 # empties it.
 reset_tree
@@ -333,4 +350,4 @@ edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
   run_mutant todo-filter yes "the done filter admits everything"
 
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm dom contract ok (2 transcripts + 8 mutants, plus the keyed ops and the props)"
+echo "wasm dom contract ok (2 transcripts + 9 mutants, plus the keyed ops, the props and the payloads)"

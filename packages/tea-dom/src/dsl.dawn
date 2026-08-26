@@ -10,7 +10,7 @@
 # (`let header: Node[Msg] = ...`) and concatenate the named parts.
 
 use std/list
-use node.{Node, Text, Elem, with_key}
+use node.{Node, Text, Elem, On, NoData, Value, Key, with_key}
 use tea_core/tree.{key}
 
 ## A text node.
@@ -20,9 +20,33 @@ pub fn text[M](s: String) -> Node[M] = Text(s: s)
 pub fn el[M](
   tag: String,
   props: List[(String, String)],
-  on: List[(String, M)],
+  on: List[On[M]],
   kids: List[Node[M]],
 ) -> Node[M] = Elem(tag: tag, props: props, on: on, kids: kids, key: None)
+
+## `msg` when this element is clicked, and nothing else crosses.
+##
+## The three spellings below are the whole of what a view needs: a listener is
+## a record, and a record literal at every call site would put `payload:` in
+## front of a reader on the line where the interesting word is the message.
+## Anything they do not cover is `On { .. }` itself, which is public for that
+## reason.
+pub fn on_click[M](msg: M) -> On[M] =
+  On { event: "click", payload: NoData, msg: msg }
+
+## `msg`, with the element's value brought along.
+##
+## The event is a parameter because the choice between `input` (a message per
+## keystroke) and `change` (one when the field is left) is the application's
+## and is the difference between eight turns and one.
+pub fn on_value[M](event: String, msg: M) -> On[M] =
+  On { event: event, payload: Value, msg: msg }
+
+## `msg`, with `ev.key` brought along. `keydown` is the usual event; the host
+## does not call `preventDefault` for this kind, or the keystroke would be
+## swallowed on its way to the element.
+pub fn on_key[M](event: String, msg: M) -> On[M] =
+  On { event: event, payload: Key, msg: msg }
 
 ## An element whose children are paired by identity rather than by position.
 ## Each child arrives with the string that names it, which is the shape
@@ -35,7 +59,7 @@ pub fn el[M](
 pub fn keyed[M](
   tag: String,
   props: List[(String, String)],
-  on: List[(String, M)],
+  on: List[On[M]],
   kids: List[(String, Node[M])],
 ) -> Node[M] =
   Elem(
@@ -65,7 +89,7 @@ pub fn span[M](s: String) -> Node[M] =
 ## A button labelled `label` whose click means `msg`. The DOM analogue of
 ## `tea_term/dsl.button`, and like it the message is data in the tree.
 pub fn button[M](label: String, msg: M) -> Node[M] =
-  Elem(tag: "button", props: [], on: [("click", msg)], kids: [Text(s: label)], key: None)
+  Elem(tag: "button", props: [], on: [on_click(msg)], kids: [Text(s: label)], key: None)
 
 # A message type for the test blocks below; real apps bring their own.
 type ProbeMsg =
@@ -75,15 +99,30 @@ derive Show
 
 test "the wrappers build exactly the constructors they name" {
   let b: Node[ProbeMsg] = button("go", Ping)
-  assert b == Elem(tag: "button", props: [], on: [("click", Ping)], kids: [Text(s: "go")], key: None)
+  let click: On[ProbeMsg] = On { event: "click", payload: NoData, msg: Ping }
+  assert b == Elem(tag: "button", props: [], on: [click], kids: [Text(s: "go")], key: None)
   let t: Node[ProbeMsg] = text("hi")
   assert t == Text(s: "hi")
   assert div([t]) == Elem(tag: "div", props: [], on: [], kids: [t], key: None)
   assert div_of("row", [t]) == Elem(tag: "div", props: [("class", "row")], on: [], kids: [t], key: None)
   let sp: Node[ProbeMsg] = span("hi")
   assert sp == Elem(tag: "span", props: [], on: [], kids: [t], key: None)
-  let general: Node[ProbeMsg] = el("input", [("value", "7")], [("input", Pong)], [])
-  assert general == Elem(tag: "input", props: [("value", "7")], on: [("input", Pong)], kids: [], key: None)
+  let typed: On[ProbeMsg] = On { event: "input", payload: Value, msg: Pong }
+  let general: Node[ProbeMsg] = el("input", [("value", "7")], [typed], [])
+  assert general == Elem(tag: "input", props: [("value", "7")], on: [typed], kids: [], key: None)
+}
+
+test "the three listener spellings differ in the payload and nothing else" {
+  # What `on_click` buys is that a view says the message and not the reading.
+  # What the other two buy is that the reading is a value in the tree, so
+  # `relate` sees a change to it (`node.dawn`) and the wire encodes it
+  # (`wire.dawn`) without either of them being told about this file.
+  assert on_click(Ping) == On { event: "click", payload: NoData, msg: Ping }
+  assert on_value("input", Ping) == On { event: "input", payload: Value, msg: Ping }
+  assert on_key("keydown", Ping) == On { event: "keydown", payload: Key, msg: Ping }
+  # Same event, same message, three different listeners.
+  assert on_value("keydown", Ping) != on_key("keydown", Ping)
+  assert on_value("input", Ping) != On { event: "input", payload: NoData, msg: Ping }
 }
 
 test "keyed hands each child the string that names it" {

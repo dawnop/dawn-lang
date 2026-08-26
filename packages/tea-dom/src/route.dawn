@@ -15,7 +15,7 @@
 
 use std/list
 use tea_core/walk.{fold_preorder}
-use node.{Node, Text, Elem}
+use node.{Node, Text, Elem, On, NoData, Value}
 
 ## Every node that listens for something, paired with the address
 ## `tea_core/diff` addresses it by and the listeners it declares. Pre-order,
@@ -24,21 +24,28 @@ use node.{Node, Text, Elem}
 ##
 ## This is what the bridge needs at the boundary: the host attaches a listener
 ## exactly where this says one exists, and hands back the address it fired at.
-pub fn listeners[M: Eq](root: Node[M]) -> List[(List[Int], List[(String, M)])] =
+pub fn listeners[M: Eq](root: Node[M]) -> List[(List[Int], List[On[M]])] =
   fold_preorder(root, [], (acc, n, path) =>
       match n {
         Text(_) -> acc
         Elem(_, _, on, _, _) -> if list.is_empty(on) { acc } else { acc ++ [(path, on)] }
       })
 
-## What `event` at `path` means, or `None` when nothing there listens for it.
+## The listener for `event` at `path`, or `None` when nothing there listens for
+## it.
+##
+## The whole listener rather than just its message, because the caller needs
+## both halves of it: the message is what the event means, and the payload kind
+## is what the host was supposed to bring back, which is the only thing that
+## can say whether what did arrive is what was asked for. A record leaves room
+## for the next thing a listener declares without changing this signature.
 ##
 ## `None` is a real answer and the bridge treats it as an error rather than as
 ## a no-op: the host only ever attaches a listener where `listeners` said there
 ## was one, so an event with no message means the host is dispatching against a
 ## tree the model no longer produces. Swallowing that would turn a desync into
 ## a click that silently does nothing.
-pub fn at[M: Eq](root: Node[M], path: List[Int], event: String) -> Option[M] =
+pub fn at[M: Eq](root: Node[M], path: List[Int], event: String) -> Option[On[M]] =
   fold_preorder(root, None, (acc, n, p) =>
       match acc {
         Some(_) -> acc
@@ -53,17 +60,8 @@ pub fn at[M: Eq](root: Node[M], path: List[Int], event: String) -> Option[M] =
           }
       })
 
-fn lookup[M](on: List[(String, M)], event: String) -> Option[M] =
-  match list.find(on, e => {
-    let (name, _) = e
-    name == event
-  }) {
-    None -> None
-    Some(hit) -> {
-      let (_, msg) = hit
-      Some(msg)
-    }
-  }
+fn lookup[M](on: List[On[M]], event: String) -> Option[On[M]] =
+  list.find(on, e => e.event == event)
 
 # A message type for the test blocks below; real apps bring their own.
 type ProbeMsg =
@@ -71,31 +69,46 @@ type ProbeMsg =
   | Pong
 derive Show
 
+fn hear(event: String, msg: ProbeMsg) -> On[ProbeMsg] =
+  On { event: event, payload: NoData, msg: msg }
+
+fn hear_value(event: String, msg: ProbeMsg) -> On[ProbeMsg] =
+  On { event: event, payload: Value, msg: msg }
+
 fn sample() -> Node[ProbeMsg] =
   Elem(tag: "div", props: [], on: [], kids: [
-    Elem(tag: "button", props: [], on: [("click", Ping)], kids: [Text(s: "up")], key: None),
+    Elem(tag: "button", props: [], on: [hear("click", Ping)], kids: [Text(s: "up")], key: None),
     Text(s: "between"),
-    Elem(tag: "form", props: [], on: [("submit", Pong)], kids: [
-      Elem(tag: "input", props: [], on: [("input", Ping), ("blur", Pong)], kids: [], key: None),
+    Elem(tag: "form", props: [], on: [hear("submit", Pong)], kids: [
+      Elem(
+        tag: "input",
+        props: [],
+        on: [hear_value("input", Ping), hear("blur", Pong)],
+        kids: [],
+        key: None,
+      ),
     ], key: None),
   ], key: None)
 
 test "listeners reports the addresses a patch would use, in pre-order" {
-  let want: List[(List[Int], List[(String, ProbeMsg)])] = [
-    ([0], [("click", Ping)]),
-    ([2], [("submit", Pong)]),
-    ([2, 0], [("input", Ping), ("blur", Pong)]),
+  let want: List[(List[Int], List[On[ProbeMsg]])] = [
+    ([0], [hear("click", Ping)]),
+    ([2], [hear("submit", Pong)]),
+    ([2, 0], [hear_value("input", Ping), hear("blur", Pong)]),
   ]
   assert listeners(sample()) == want
   let bare: Node[ProbeMsg] = Text(s: "nothing listens here")
   assert list.is_empty(listeners(bare))
 }
 
-test "at resolves an address and an event name to a message" {
-  let none: Option[ProbeMsg] = None
-  assert at(sample(), [0], "click") == Some(Ping)
-  assert at(sample(), [2], "submit") == Some(Pong)
-  assert at(sample(), [2, 0], "blur") == Some(Pong)
+test "at resolves an address and an event name to the listener" {
+  let none: Option[On[ProbeMsg]] = None
+  assert at(sample(), [0], "click") == Some(hear("click", Ping))
+  assert at(sample(), [2], "submit") == Some(hear("submit", Pong))
+  assert at(sample(), [2, 0], "blur") == Some(hear("blur", Pong))
+  # The payload kind travels with the message, because deciding what to do
+  # with an inbound payload needs to know what was asked for.
+  assert at(sample(), [2, 0], "input") == Some(hear_value("input", Ping))
   # right address, wrong event; right event, wrong address; nothing there
   assert at(sample(), [0], "submit") == none
   assert at(sample(), [1], "click") == none
@@ -105,7 +118,7 @@ test "at resolves an address and an event name to a message" {
 
 test "the root can listen, and the empty path addresses it" {
   let root: Node[ProbeMsg] =
-    Elem(tag: "body", props: [], on: [("keydown", Ping)], kids: [Text(s: "x")], key: None)
-  assert at(root, [], "keydown") == Some(Ping)
-  assert listeners(root) == [([], [("keydown", Ping)])]
+    Elem(tag: "body", props: [], on: [hear("keydown", Ping)], kids: [Text(s: "x")], key: None)
+  assert at(root, [], "keydown") == Some(hear("keydown", Ping))
+  assert listeners(root) == [([], [hear("keydown", Ping)])]
 }

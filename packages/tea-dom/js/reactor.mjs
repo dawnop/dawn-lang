@@ -75,9 +75,19 @@ export class Reactor {
     return this.#keep(this.request({ op: 'init' }));
   }
 
-  /** A later turn: an address and an event name, against the model held here. */
-  event(path, event) {
-    return this.#keep(this.request({ op: 'event', model: this.model, path, event }));
+  /**
+   * A later turn: an address and an event name, against the model held here.
+   *
+   * `payload` is the one string the guest's listener asked to have brought
+   * back, and is left off the request entirely when there is none. Absent and
+   * empty are different answers on this wire -- the guest refuses a turn whose
+   * payload does not match what the listener declared -- so an omitted field
+   * has to stay omitted rather than become `""` or `null`.
+   */
+  event(path, event, payload) {
+    const request = { op: 'event', model: this.model, path, event };
+    if (payload !== undefined) request.payload = payload;
+    return this.#keep(this.request(request));
   }
 
   // An error reply carries no model and no patches, so the one already held

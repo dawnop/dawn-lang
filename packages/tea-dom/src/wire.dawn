@@ -11,12 +11,21 @@
 # Three consequences worth stating, because they are the reason this is small:
 #
 #   - A *message* never crosses. What crosses outward is a patch list, whose
-#     only listener information is the *names* of the events an element wants;
-#     what crosses inward is an address and an event name. The host cannot
-#     name a message and never has to, because `tea_dom/route.at` resolves the
-#     pair against the tree the model produces right now. The application's
-#     message type therefore needs no encoding at all, and `Msg` stays a type
-#     the host has never heard of.
+#     only listener information is the *name* of each event an element wants
+#     and, when the listener asked for one, the *kind* of data it wants back;
+#     what crosses inward is an address, an event name and at most one string.
+#     The host cannot name a message and never has to, because
+#     `tea_dom/route.at` resolves the pair against the tree the model produces
+#     right now, and `Fill` folds the string into the message on this side.
+#     The application's message type therefore needs no encoding at all, and
+#     `Msg` stays a type the host has never heard of.
+#
+#     The payload is a `String` and only ever a `String`. A checkbox is
+#     normalised to `"true"`/`"false"` by the host, an integer is parsed on
+#     this side, and nothing structured is admitted: opening it would put
+#     `json/value.Json` inside `Request` and make the boundary as wide as the
+#     browser's event object, which is the one thing every system with a real
+#     wire between guest and host has refused to do.
 #   - The *model* crosses, as opaque text the application encodes and decodes.
 #     It has to: Dawn has no module-level mutable state, so a reactor holds
 #     nothing between turns, and the alternative -- a handle into a guest-side
@@ -51,14 +60,20 @@ use tea_core/diff.{
   RemoveKid,
   MoveKid,
 }
-use node.{Node, Text, Elem, with_key}
+use node.{Node, Text, Elem, On, Payload, NoData, Value, Key, with_key}
 
 ## What the host asked for this turn. `Bad` carries the reason rather than
 ## panicking: a malformed line is the host's mistake and the guest answers it
 ## with an error message, which is a thing a transcript can assert on.
+##
+## `payload` is `None` when the line carried no `payload` field, which is what
+## a listener that asked for nothing produces. A field that is present but is
+## not a string is `Bad`: the set of things that can cross is closed, and a
+## number arriving where a string was declared is a host that has forked the
+## contract rather than a value to coerce.
 pub type Request =
   | Init
-  | Event(model: String, path: List[Int], event: String)
+  | Event(model: String, path: List[Int], event: String, payload: Option[String])
   | Bad(reason: String)
 derive Show
 
@@ -71,10 +86,25 @@ fn jprop(kv: (String, String)) -> Json = {
   JArr(items: [JStr(value: k), JStr(value: v)])
 }
 
-fn jevent[M](e: (String, M)) -> Json = {
-  let (name, _) = e
-  JStr(value: name)
-}
+## One listener, as the host needs to see it: the event name, plus the kind of
+## data to bring back when there is one.
+##
+## A listener that asks for nothing encodes as the bare name it always
+## encoded as, and one that asks for something encodes as a two-element array.
+## That is not politeness towards old hosts, it is what keeps the encoding
+## honest about what changed: the twelve reply lines in the recorded
+## transcripts that carry a non-empty `on` are all `NoData`, and they stay
+## byte-identical, so a moved byte in them is evidence of a bug in this
+## function rather than of the feature arriving.
+##
+## The kind's wire word is a lowercase name and not the constructor's spelling,
+## because the host reads it and the host is JavaScript.
+fn jevent[M](e: On[M]) -> Json =
+  match e.payload {
+    NoData -> JStr(value: e.event)
+    Value -> JArr(items: [JStr(value: e.event), JStr(value: "value")])
+    Key -> JArr(items: [JStr(value: e.event), JStr(value: "key")])
+  }
 
 ## An element's own data: everything but its children. The payload of a
 ## `SetSelf`, and the first half of a full node.
@@ -196,6 +226,17 @@ fn as_path(j: Option[Json]) -> Option[List[Int]] =
     _ -> None
   }
 
+# Absent, a string, or a refusal -- three answers in two layers of `Option`.
+# The outer one is "this field is acceptable", the inner one is "there is a
+# payload", and collapsing them would make a number arriving where a string
+# was declared indistinguishable from nothing arriving at all.
+fn as_payload(j: Option[Json]) -> Option[Option[String]] =
+  match j {
+    None -> Some(None)
+    Some(JStr(s)) -> Some(Some(s))
+    _ -> None
+  }
+
 fn ints(items: List[Json], acc: List[Int]) -> Option[List[Int]] =
   if list.is_empty(items) {
     Some(acc)
@@ -221,9 +262,16 @@ pub fn decode_request(line: String) -> Request =
             as_string(field(entries, "model")),
             as_path(field(entries, "path")),
             as_string(field(entries, "event")),
+            as_payload(field(entries, "payload")),
           ) {
-            (Some(m), Some(p), Some(ev)) -> Event(model: m, path: p, event: ev)
-            _ -> Bad(reason: "an `event` needs `model`, an integer `path` and `event`")
+            (Some(m), Some(p), Some(ev), Some(pl)) ->
+              Event(model: m, path: p, event: ev, payload: pl)
+            _ ->
+              Bad(
+                reason:
+                "an `event` needs `model`, an integer `path` and `event`, " ++
+                  "and a `payload` if present must be a string",
+              )
           }
         Some(other) -> Bad(reason: "unknown op `" ++ other ++ "`")
       }
@@ -237,8 +285,11 @@ type ProbeMsg =
   | Pong
 derive Show
 
+fn hear(event: String, msg: ProbeMsg) -> On[ProbeMsg] =
+  On { event: event, payload: NoData, msg: msg }
+
 fn btn(label: String, m: ProbeMsg) -> Node[ProbeMsg] =
-  Elem(tag: "button", props: [], on: [("click", m)], kids: [Text(s: label)], key: None)
+  Elem(tag: "button", props: [], on: [hear("click", m)], kids: [Text(s: label)], key: None)
 
 test "a node encodes as its own data plus its children" {
   let n: Node[ProbeMsg] = btn("go", Ping)
@@ -255,6 +306,47 @@ test "the message an event means never reaches the wire" {
   # The same tree with a different meaning for the same click renders to the
   # same bytes: the host learns that a click is listened for and nothing else.
   assert render(enc_node(btn("go", Ping))) == render(enc_node(btn("go", Pong)))
+}
+
+test "a listener that asks for nothing encodes as the bare name it always did" {
+  # The compatibility point, as an assertion rather than as a promise. Every
+  # listener in both recorded transcripts is this shape, which is why the
+  # payload feature moves none of their bytes.
+  let quiet: Node[ProbeMsg] =
+    Elem(tag: "span", props: [], on: [hear("click", Ping), hear("blur", Pong)], kids: [], key: None)
+  assert render(enc_self(quiet)) ==
+    "{\"t\":\"elem\",\"tag\":\"span\",\"props\":[],\"on\":[\"click\",\"blur\"]}"
+}
+
+test "a listener that asks for something says so, and says which" {
+  # A pair, so the host can see the difference: same event name, two readings.
+  let typed: Node[ProbeMsg] = Elem(
+    tag: "input",
+    props: [],
+    on: [
+      On { event: "input", payload: Value, msg: Ping },
+      On { event: "keydown", payload: Key, msg: Pong },
+      hear("blur", Pong),
+    ],
+    kids: [],
+    key: None,
+  )
+  assert render(enc_self(typed)) ==
+    "{\"t\":\"elem\",\"tag\":\"input\",\"props\":[]," ++
+    "\"on\":[[\"input\",\"value\"],[\"keydown\",\"key\"],\"blur\"]}"
+  # The kind is the only difference between these two and the wire shows it:
+  # a host told the wrong one reads the wrong thing off the event, and this
+  # is where that becomes visible rather than at the first keystroke.
+  let quiet: Node[ProbeMsg] =
+    Elem(tag: "input", props: [], on: [hear("input", Ping)], kids: [], key: None)
+  let loud: Node[ProbeMsg] = Elem(
+    tag: "input",
+    props: [],
+    on: [On { event: "input", payload: Value, msg: Ping }],
+    kids: [],
+    key: None,
+  )
+  assert render(enc_node(quiet)) != render(enc_node(loud))
 }
 
 test "SetSelf ships the node without its children" {
@@ -313,11 +405,12 @@ test "an opaque model stays opaque, quotes and newlines included" {
 }
 
 test "requests decode, and a bad one is an answer rather than a panic" {
+  let bare: Option[String] = None
   assert decode_request("{\"op\":\"init\"}") == Init
   assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[0,1],\"event\":\"click\"}") ==
-    Event(model: "3", path: [0, 1], event: "click")
+    Event(model: "3", path: [0, 1], event: "click", payload: bare)
   assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[],\"event\":\"x\"}") ==
-    Event(model: "3", path: [], event: "x")
+    Event(model: "3", path: [], event: "x", payload: bare)
   match decode_request("not json at all") {
     Bad(r) -> { assert r != "" }
     _ -> { assert false }
@@ -336,6 +429,36 @@ test "requests decode, and a bad one is an answer rather than a panic" {
   }
   match decode_request("{\"model\":\"3\"}") {
     Bad(r) -> { assert r == "no `op` field" }
+    _ -> { assert false }
+  }
+}
+
+test "a payload is optional, is a string, and is nothing else" {
+  # Absent is the shape every listener that asks for nothing produces, and it
+  # is not the same answer as an empty string: one says the host brought
+  # nothing, the other says the field was empty. `reactor.turn` acts on the
+  # difference.
+  assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[1],\"event\":\"input\"," ++
+      "\"payload\":\"buy milk\"}") ==
+    Event(model: "3", path: [1], event: "input", payload: Some("buy milk"))
+  assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[1],\"event\":\"input\"," ++
+      "\"payload\":\"\"}") ==
+    Event(model: "3", path: [1], event: "input", payload: Some(""))
+  # A quote and a newline inside a payload cannot end the field or the line,
+  # for the reason the model cannot: `json/parser` puts back what
+  # `JSON.stringify` escaped.
+  assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[1],\"event\":\"input\"," ++
+      "\"payload\":\"a\\\"b\\nc\"}") ==
+    Event(model: "3", path: [1], event: "input", payload: Some("a\"b\nc"))
+  # Present but not a string is a refusal, not a coercion and not a shrug.
+  match decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[1],\"event\":\"input\"," ++
+      "\"payload\":7}") {
+    Bad(r) -> { assert str.contains(r, "`payload`") }
+    _ -> { assert false }
+  }
+  match decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[1],\"event\":\"input\"," ++
+      "\"payload\":null}") {
+    Bad(_) -> { assert true }
     _ -> { assert false }
   }
 }

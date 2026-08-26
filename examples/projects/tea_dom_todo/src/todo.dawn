@@ -30,7 +30,8 @@ use std/list
 use std/str
 use tea_core/app.{App, update, view}
 use tea_dom/node.{Node, Text, Elem}
-use tea_dom/dsl.{el, text}
+use tea_dom/dsl.{el, on_click, text}
+use tea_dom/reactor.{Fill}
 
 ## One item. `id` is the identity the user means; the reconciler pairs by
 ## index and never sees it, which is what section 3 of the report measured.
@@ -86,6 +87,10 @@ derive Show
 ## The model a fresh page starts from.
 pub fn init() -> Model =
   Model { todos: [], next_id: 1, filter: All, draft: "", edit: "", focus: Composer }
+
+# Every listener in this view is a button click, so nothing asks the host to
+# bring anything back and the default `fill` -- the identity -- is right.
+impl Fill[Msg] { }
 
 impl App[Model] {
   type Msg = Msg
@@ -210,11 +215,11 @@ fn compose_row(m: Model) -> Node[Msg] = {
     el(
       "span",
       [("class", if m.focus == Composer { "field focus" } else { "field" })],
-      [("click", Compose)],
+      [on_click(Compose)],
       [text(if m.draft == "" { "(nothing typed)" } else { m.draft })],
     )
-  let add: Node[Msg] = el("button", [("class", "add")], [("click", Add)], [text("add")])
-  let boom: Node[Msg] = el("button", [("class", "boom")], [("click", Boom)], [text("boom")])
+  let add: Node[Msg] = el("button", [("class", "add")], [on_click(Add)], [text("add")])
+  let boom: Node[Msg] = el("button", [("class", "boom")], [on_click(Boom)], [text("boom")])
   el("div", [("class", "compose")], [], [field, add, boom])
 }
 
@@ -229,7 +234,7 @@ fn filter_button(label: String, which: Filter, cur: Filter) -> Node[Msg] =
   el(
     "button",
     [("class", if which == cur { "filter on" } else { "filter" })],
-    [("click", Only(f: which))],
+    [on_click(Only(f: which))],
     [text(label)],
   )
 
@@ -242,16 +247,16 @@ fn row(m: Model, t: Todo) -> Node[Msg] =
   if m.focus == Row(id: t.id) {
     el("li", [("class", "row editing")], [], [
       el("span", [("class", "draft")], [], [text(if m.edit == "" { "(empty)" } else { m.edit })]),
-      el("button", [("class", "save")], [("click", Save)], [text("save")]),
-      el("button", [("class", "cancel")], [("click", Cancel)], [text("cancel")]),
+      el("button", [("class", "save")], [on_click(Save)], [text("save")]),
+      el("button", [("class", "cancel")], [on_click(Cancel)], [text("cancel")]),
     ])
   } else {
     el("li", [("class", if t.done { "row done" } else { "row" })], [], [
-      el("button", [("class", "box")], [("click", Toggle(id: t.id))], [
+      el("button", [("class", "box")], [on_click(Toggle(id: t.id))], [
         text(if t.done { "[x]" } else { "[ ]" }),
       ]),
-      el("span", [("class", "title")], [("click", Edit(id: t.id))], [text(t.title)]),
-      el("button", [("class", "kill")], [("click", Drop(id: t.id))], [text("x")]),
+      el("span", [("class", "title")], [on_click(Edit(id: t.id))], [text(t.title)]),
+      el("button", [("class", "kill")], [on_click(Drop(id: t.id))], [text("x")]),
     ])
   }
 
@@ -263,13 +268,13 @@ pub const KEYS: String = "abcdefghijklmnopqrstuvwxyz"
 fn key_pad() -> Node[Msg] = {
   let letters: List[Node[Msg]] = list.map(str.chars(KEYS), c => key(c))
   let space: Node[Msg] =
-    el("button", [("class", "key wide")], [("click", Key(c: " "))], [text("space")])
-  let rub: Node[Msg] = el("button", [("class", "key wide")], [("click", Rub)], [text("rub")])
+    el("button", [("class", "key wide")], [on_click(Key(c: " "))], [text("space")])
+  let rub: Node[Msg] = el("button", [("class", "key wide")], [on_click(Rub)], [text("rub")])
   el("div", [("class", "pad")], [], letters ++ [space, rub])
 }
 
 fn key(c: String) -> Node[Msg] =
-  el("button", [("class", "key")], [("click", Key(c: c))], [text(c)])
+  el("button", [("class", "key")], [on_click(Key(c: c))], [text(c)])
 
 fn summary(m: Model) -> String = {
   let total = len(m.todos)

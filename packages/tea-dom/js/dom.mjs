@@ -24,6 +24,10 @@
 // Listeners. One DOM listener per (element, event name) the tree asked for.
 // They are tracked in a WeakMap rather than on the element, so a node this
 // bridge did not create carries nothing and nothing outlives the document.
+// A listener arrives as a name, or as a name and the *kind* of data the guest
+// asked to have brought back with it; the kind is stored beside the handler,
+// because a listener whose reading changed has to be replaced and not left in
+// place.
 //
 // Properties, not attributes, for two names. An `<input>` keeps a live value
 // beside its `value` content attribute, and the attribute stops writing
@@ -50,10 +54,11 @@ export class DomHost {
    * part of the tree, so the tree root is its single child and the empty path
    * addresses that child.
    *
-   * `dispatch(path, event)` is called with a recovered address whenever a
-   * listened-for event fires. `doc` is the document to create nodes with,
-   * and is a parameter so a test can pass a recording stub -- the bridge
-   * uses six methods of it and no global.
+   * `dispatch(path, event, payload)` is called with a recovered address
+   * whenever a listened-for event fires. `payload` is `undefined` unless the
+   * guest's listener asked for something, and a string when it did. `doc` is
+   * the document to create nodes with, and is a parameter so a test can pass
+   * a recording stub -- the bridge uses six methods of it and no global.
    */
   constructor(mount, dispatch, doc = globalThis.document) {
     this.mount = mount;
@@ -146,22 +151,29 @@ export class DomHost {
     }
 
     const attached = LISTENERS.get(el) || new Map();
-    const wanted = new Set(node.on);
-    for (const [name, fn] of attached) {
-      if (!wanted.has(name)) {
-        el.removeEventListener(name, fn);
-        attached.delete(name);
-      }
+    const wanted = listenerKinds(node.on);
+    // A listener whose *kind* changed is detached and reattached, not left
+    // alone: the guest changed what it wants read off the event, and a handler
+    // closed over the old kind would go on sending the old thing. The guest
+    // makes this reachable by comparing the kind (`node.dawn`'s `relate`), so
+    // the `set-self` that says so does arrive.
+    for (const [name, entry] of attached) {
+      if (wanted.get(name) === entry.kind) continue;
+      el.removeEventListener(name, entry.fn);
+      attached.delete(name);
     }
-    for (const name of wanted) {
+    for (const [name, kind] of wanted) {
       if (attached.has(name)) continue;
       const fn = (ev) => {
-        if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+        // Not for `key`: cancelling a `keydown` is how a page stops the
+        // character reaching the element, and a listener that asked to be told
+        // which key was pressed did not ask for it to be swallowed.
+        if (kind !== 'key' && ev && typeof ev.preventDefault === 'function') ev.preventDefault();
         const path = this.addressOf(el);
-        if (path !== null) this.dispatch(path, name);
+        if (path !== null) this.dispatch(path, name, readPayload(kind, el, ev));
       };
       el.addEventListener(name, fn);
-      attached.set(name, fn);
+      attached.set(name, { fn, kind });
     }
     LISTENERS.set(el, attached);
   }
@@ -219,6 +231,44 @@ const OPS = {
     el.insertBefore(node, ref);
   },
 };
+
+// An element's `on` list, as a map from event name to the kind of data the
+// guest wants back. A bare string is a listener that wants nothing, which is
+// what every listener was before payloads existed and is still the common
+// case; a pair is `[name, kind]`.
+function listenerKinds(on) {
+  const kinds = new Map();
+  for (const entry of on) {
+    if (typeof entry === 'string') kinds.set(entry, null);
+    else kinds.set(entry[0], entry[1]);
+  }
+  return kinds;
+}
+
+// The one string an event brings back, or `undefined` for a listener that
+// asked for nothing. The guest declared the kind, so this reads what it was
+// told to read and never what happens to be on the event: a bridge that sent
+// everything it could find would be a boundary as wide as the browser's event
+// object, and a bridge that guessed per element would be one the guest cannot
+// predict.
+//
+// `checked` folds into the same slot as `value` rather than getting a kind of
+// its own, normalised to the two strings a guest can compare. Blazor, Dioxus
+// and LiveView each arrived at that separately, and the reason is the same in
+// all three: one slot is one name to keep aligned across the boundary instead
+// of three.
+function readPayload(kind, el, ev) {
+  if (kind === null || kind === undefined) return undefined;
+  if (kind === 'key') return ev && ev.key !== undefined && ev.key !== null ? String(ev.key) : '';
+  // `kind === 'value'`. The target is where the value is; the element the
+  // listener sits on is the fallback for an event that arrived without one.
+  const target = (ev && ev.target) || el;
+  if (target.type === 'checkbox' || target.type === 'radio') {
+    return target.checked ? 'true' : 'false';
+  }
+  const value = target.value;
+  return value === undefined || value === null ? '' : String(value);
+}
 
 // A prop is a pair of strings, and `checked` is a boolean, so the two meet
 // here. Presence means checked, which is the attribute's own rule, and the two
