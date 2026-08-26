@@ -86,6 +86,44 @@ fn fail_usage() -> Unit !io = {
   ()
 }
 
+## `--help` in a subcommand's tail. Off the argv surface
+## `scripts/native-cli-diff.sh` holds the two drivers to, deliberately and for
+## the reason `--target` is: the JVM driver has no per-subcommand help, so this
+## is a flag one backend has and the other does not, and the differential
+## compares the commands both of them answer.
+fn wants_help(rest: List[String]) -> Bool = {
+  var found = false
+  for a in rest {
+    if a == "--help" { found = true }
+  }
+  found
+}
+
+## The usage block's lines for one subcommand, continuation lines included.
+##
+## Filtered out of `usage()` rather than written a second time. The parsers
+## below already spell each command's contract once in the `usage: dawn ...`
+## string they fail with, and a third copy is a third thing to forget. An entry
+## is a line beginning `  dawnc <cmd> `; the lines under it that belong to it
+## are the ones indented past the description column and not starting another
+## entry.
+fn subcommand_help(cmd: String) -> String = {
+  let head = "  dawnc " ++ cmd ++ " "
+  var out: List[String] = []
+  var keeping = false
+  for line in str.split(usage(), "\n") {
+    if str.starts_with(line, "  dawnc ") {
+      keeping = str.starts_with(line, head)
+      if keeping { out = out ++ [line] }
+    } else if keeping && str.starts_with(line, "    ") {
+      out = out ++ [line]
+    } else {
+      keeping = false
+    }
+  }
+  join(out, "\n") ++ "\n"
+}
+
 fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
@@ -546,6 +584,7 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !
 }
 
 fn cmd_check(rest: List[String]) -> Unit !io = {
+  if wants_help(rest) { return print(subcommand_help("check")) }
   let (std_dir, targets) = check_args(rest)
   if len(targets) == 0 {
     return cli_error("usage: dawn check [--std <dir>] <target>...")
@@ -587,6 +626,11 @@ fn cmd_emitc(rest: List[String]) -> Unit !io = {
 }
 
 fn cmd_build(rest: List[String]) -> Unit !io = {
+  # Ahead of the parser, not inside it: `--help` is a request for the contract,
+  # so it must not be able to fail on the argv it is asking about. The parser
+  # would take it for the target and report a missing file (which is what it
+  # did until 2026-08-26).
+  if wants_help(rest) { return print(subcommand_help("build")) }
   let (std_dir, out0, target, wasm, reactor) = parse_build_tail(
     "usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]",
     rest
@@ -927,4 +971,30 @@ pub fn main() -> Unit !io = {
         fail_usage()
       }
   }
+}
+
+test "a subcommand's help is that subcommand's lines out of the usage block" {
+  # The filter is what keeps one contract from being written twice, so what it
+  # would get wrong is picking up a neighbour's entry or dropping a
+  # continuation line. Both are asserted rather than assumed.
+  let b = subcommand_help("build")
+  assert str.contains(b, "compile to a native binary via cc")
+  assert str.contains(b, "compile to wasm32-wasip1 via clang")
+  assert str.contains(b, "exported `dawn_turn` the host calls")
+  assert not str.contains(b, "type-check, report diagnostics")
+  assert not str.contains(b, "speak LSP over stdin/stdout")
+
+  let c = subcommand_help("check")
+  assert str.contains(c, "type-check, report diagnostics")
+  assert not str.contains(c, "compile to a native binary via cc")
+
+  # a command with no entry gets nothing, rather than the whole block
+  assert subcommand_help("nosuch") == "\n"
+}
+
+test "--help is recognised anywhere in a subcommand's tail" {
+  assert wants_help(["--help"])
+  assert wants_help(["-o", "out", "--help"])
+  assert not wants_help([])
+  assert not wants_help(["--target", "wasm", "prog.dawn"])
 }
