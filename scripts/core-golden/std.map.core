@@ -10,7 +10,7 @@ fn std/map.from -> Map[K, V]
     local v1 : <dict>
     local v2 : <dict>
 fn std/map.insert -> Map[K, V]
-  param v0 : Map[K, V] owned
+  param v0 : Map[K, V] borrowed
   param v1 : K owned
   param v2 : V owned
   dict v3 : K owned
@@ -32,7 +32,7 @@ fn std/map.remove -> Map[K, V]
     local v2 : <dict>
     local v3 : <dict>
 fn std/map.get -> Option[V]
-  param v0 : Map[K, V] owned
+  param v0 : Map[K, V] borrowed
   param v1 : K owned
   dict v2 : K owned
   dict v3 : K owned
@@ -42,7 +42,7 @@ fn std/map.get -> Option[V]
     local v2 : <dict>
     local v3 : <dict>
 fn std/map.has -> Bool
-  param v0 : Map[K, V] owned
+  param v0 : Map[K, V] borrowed
   param v1 : K owned
   dict v2 : K owned
   dict v3 : K owned
@@ -52,29 +52,29 @@ fn std/map.has -> Bool
     local v2 : <dict>
     local v3 : <dict>
 fn std/map.len -> Int
-  param v0 : Map[K, V] owned
+  param v0 : Map[K, V] borrowed
   call direct std/hamt.count : Int
     local v0 : Map[K, V]
 fn std/map.is_empty -> Bool
-  param v0 : Map[K, V] owned
+  param v0 : Map[K, V] borrowed
   binary eq : Bool
     call direct std/hamt.count : Int
       local v0 : Map[K, V]
     int 0
 fn std/map.keys -> List[K]
-  param v0 : Map[K, V] owned
+  param v0 : Map[K, V] borrowed
   call direct std/hamt.keys : List[K]
     local v0 : Map[K, V]
 fn std/map.values -> List[V]
-  param v0 : Map[K, V] owned
+  param v0 : Map[K, V] borrowed
   call direct std/hamt.values : List[V]
     local v0 : Map[K, V]
 fn std/map.entries -> List[(K, V)]
-  param v0 : Map[K, V] owned
+  param v0 : Map[K, V] borrowed
   call direct std/hamt.entries : List[(K, V)]
     local v0 : Map[K, V]
 fn std/map.fold -> A
-  param v0 : Map[K, V] owned
+  param v0 : Map[K, V] borrowed
   param v1 : A owned
   param v2 : fn(A, K, V) -> A !e owned
   ev v3 : ev owned
@@ -122,8 +122,7 @@ fn std/map.eq_go -> Bool
             block : Bool
               let v11 : Option[V]
                 call direct std/map.get : Option[V]
-                  dup
-                    local v0 : Map[K, V]
+                  local v0 : Map[K, V]
                   local v9 : K
                   local v4 : <dict>
                   local v5 : <dict>
@@ -331,11 +330,9 @@ fn std/map.eq -> Bool impl_of=1/Map[K, V]
       if : Bool
         binary ne : Bool
           call direct std/map.len : Int
-            dup
-              local v0 : Map[K, V]
+            local v0 : Map[K, V]
           call direct std/map.len : Int
-            dup
-              local v1 : Map[K, V]
+            local v1 : Map[K, V]
         block : Bool
           let v6 : Bool
             bool false
@@ -345,12 +342,10 @@ fn std/map.eq -> Bool impl_of=1/Map[K, V]
           call direct std/map.eq_go : Bool
             local v1 : Map[K, V]
             call direct std/map.entries : List[(K, V)]
-              dup
-                local v0 : Map[K, V]
+              local v0 : Map[K, V]
             int 0
             call direct std/map.len : Int
-              dup
-                local v0 : Map[K, V]
+              local v0 : Map[K, V]
             local v2 : <dict>
             local v3 : <dict>
             local v4 : <dict>
@@ -375,6 +370,7 @@ fn std/map.hash -> Int impl_of=2/Map[K, V]
       unbox to=Int
         local v3 : A
     drop v3
+    drop v0
     local v4 : Int
 fn std/map.show -> String impl_of=3/Map[K, V]
   param v0 : Map[K, V] owned
@@ -394,12 +390,10 @@ fn std/map.show -> String impl_of=3/Map[K, V]
                 let v8 : List[String]
                   call direct std/map.show_go : List[String]
                     call direct std/map.entries : List[(K, V)]
-                      dup
-                        local v0 : Map[K, V]
+                      local v0 : Map[K, V]
                     int 0
                     call direct std/map.len : Int
-                      dup
-                        local v0 : Map[K, V]
+                      local v0 : Map[K, V]
                     local v3 : List[String]
                     local v1 : <dict>
                     local v2 : <dict>
@@ -434,10 +428,14 @@ fn std/map.iter_start -> (List[(K, V)], Int) impl_of=4/Map[K, V]
   param v0 : Map[K, V] owned
   dict v1 : K owned
   dict v2 : K owned
-  tuple : (List[(K, V)], Int)
-    call direct std/map.entries : List[(K, V)]
-      local v0 : Map[K, V]
-    int 0
+  block : (List[(K, V)], Int)
+    let v3 : (List[(K, V)], Int)
+      tuple : (List[(K, V)], Int)
+        call direct std/map.entries : List[(K, V)]
+          local v0 : Map[K, V]
+        int 0
+    drop v0
+    local v3 : (List[(K, V)], Int)
 fn std/map.iter_done -> Bool impl_of=4/Map[K, V]
   param v0 : Map[K, V] owned
   param v1 : (List[(K, V)], Int) owned
@@ -455,10 +453,13 @@ fn std/map.iter_done -> Bool impl_of=4/Map[K, V]
       tupleget 1 : Int
         local v4 : (List[(K, V)], Int)
     drop v4
-    binary ge : Bool
-      local v6 : Int
-      call direct std/hamt.count : Int
-        local v0 : Map[K, V]
+    let v7 : Bool
+      binary ge : Bool
+        local v6 : Int
+        call direct std/hamt.count : Int
+          local v0 : Map[K, V]
+    drop v0
+    local v7 : Bool
 fn std/map.iter_next -> (List[(K, V)], Int) impl_of=4/Map[K, V]
   param v0 : Map[K, V] owned
   param v1 : (List[(K, V)], Int) owned

@@ -16,7 +16,7 @@ fn std/hamt.idx_at -> Int
       local v1 : Int
     constref MASK : Int
 fn std/hamt.arr1 -> Array[T]
-  param v0 : T owned
+  param v0 : T borrowed
   block : Array[T]
     let v1 : Array[T]
       intrinsic array_new : Array[T]
@@ -25,17 +25,17 @@ fn std/hamt.arr1 -> Array[T]
         local v1 : Array[T]
         local v0 : T
     drop v1
-    drop v0
     local v2 : Array[T]
 fn std/hamt.arr2 -> Array[T]
-  param v0 : T owned
-  param v1 : T owned
+  param v0 : T borrowed
+  param v1 : T borrowed
   block : Array[T]
     let v2 : Array[T]
       call direct std/hamt.arr1 : Array[T]
         local v0 : T
     let v3 : T
-      local v1 : T
+      dup
+        local v1 : T
     let v4 : Array[T]
       intrinsic array_push : Array[T]
         local v2 : Array[T]
@@ -44,9 +44,9 @@ fn std/hamt.arr2 -> Array[T]
     drop v2
     local v4 : Array[T]
 fn std/hamt.arr_insert -> Array[T]
-  param v0 : Array[T] owned
+  param v0 : Array[T] borrowed
   param v1 : Int owned
-  param v2 : T owned
+  param v2 : T borrowed
   block : Array[T]
     let v3 : Array[T]
       intrinsic array_new : Array[T]
@@ -90,7 +90,6 @@ fn std/hamt.arr_insert -> Array[T]
     drop v3
     assign v3
       local v9 : Array[T]
-    drop v2
     loop L1
       block : Unit
         sif
@@ -123,10 +122,9 @@ fn std/hamt.arr_insert -> Array[T]
               binary add : Int
                 local v4 : Int
                 int 1
-    drop v0
     local v3 : Array[T]
 fn std/hamt.arr_remove -> Array[T]
-  param v0 : Array[T] owned
+  param v0 : Array[T] borrowed
   param v1 : Int owned
   block : Array[T]
     let v2 : Array[T]
@@ -171,7 +169,6 @@ fn std/hamt.arr_remove -> Array[T]
               binary add : Int
                 local v3 : Int
                 int 1
-    drop v0
     local v2 : Array[T]
 fn std/hamt.node_leaf -> Option[Node[K, V]]
   param v0 : Node[K, V] owned
@@ -488,7 +485,7 @@ fn std/hamt.coll_leaf -> Option[Node[K, V]]
                   drop v6
               local v7 : Option[Node[K, V]]
 fn std/hamt.branch_of -> Node[K, V]
-  param v0 : Node[K, V] owned
+  param v0 : Node[K, V] borrowed
   param v1 : Int owned
   param v2 : Int owned
   ctor Node/NBranch : Node[K, V]
@@ -569,57 +566,65 @@ fn std/hamt.node_put -> Node[K, V]
                           block : Node[K, V]
                             ctor Node/NColl : Node[K, V]
                               local v2 : Int
-                              call direct std/hamt.arr2 : Array[T]
-                                box from=Node[K, V]
-                                  local v0 : Node[K, V]
-                                box from=Node[K, V]
-                                  ctor Node/NLeaf : Node[K, V]
-                                    local v2 : Int
-                                    local v3 : K
-                                    local v4 : V
-                                    local v5 : Int
+                              block : Array[T]
+                                let v14 : ?
+                                  box from=Node[K, V]
+                                    local v0 : Node[K, V]
+                                let v15 : ?
+                                  box from=Node[K, V]
+                                    ctor Node/NLeaf : Node[K, V]
+                                      local v2 : Int
+                                      local v3 : K
+                                      local v4 : V
+                                      local v5 : Int
+                                let v16 : Array[T]
+                                  call direct std/hamt.arr2 : Array[T]
+                                    local v14 : ?
+                                    local v15 : ?
+                                drop v15
+                                drop v14
+                                local v16 : Array[T]
                       block : Node[K, V]
                         block : Never
-                          let v14 : Node[K, V]
+                          let v17 : Node[K, V]
                             call direct std/hamt.branch_of : Node[K, V]
-                              dup
-                                local v0 : Node[K, V]
+                              local v0 : Node[K, V]
                               local v10 : Int
                               local v1 : Int
                           drop v11
-                          let v15 : Int
+                          let v18 : Int
                             local v1 : Int
-                          let v16 : Int
+                          let v19 : Int
                             local v2 : Int
-                          let v17 : K
+                          let v20 : K
                             dup
                               local v3 : K
-                          let v18 : V
+                          let v21 : V
                             dup
                               local v4 : V
-                          let v19 : Int
+                          let v22 : Int
                             local v5 : Int
-                          let v20 : Node[K, V]
-                            local v14 : Node[K, V]
+                          let v23 : Node[K, V]
+                            local v17 : Node[K, V]
                           drop v0
                           assign v0
-                            local v20 : Node[K, V]
+                            local v23 : Node[K, V]
                           assign v1
-                            local v15 : Int
+                            local v18 : Int
                           assign v2
-                            local v16 : Int
-                          let v21 : K
-                            local v17 : K
+                            local v19 : Int
+                          let v24 : K
+                            local v20 : K
                           drop v3
                           assign v3
-                            local v21 : K
-                          let v22 : V
-                            local v18 : V
+                            local v24 : K
+                          let v25 : V
+                            local v21 : V
                           drop v4
                           assign v4
-                            local v22 : V
+                            local v25 : V
                           assign v5
-                            local v19 : Int
+                            local v22 : Int
                           block : Never
                             drop v8
                             continue L0
@@ -631,24 +636,24 @@ fn std/hamt.node_put -> Node[K, V]
                     isctor Node/NColl
                       local v7 : Node[K, V]
                     block : Unit
-                      let v23 : Int
+                      let v26 : Int
                         field Node/NColl.0 : Int
                           local v7 : Node[K, V]
-                      let v24 : Array[Node[K, V]]
+                      let v27 : Array[Node[K, V]]
                         dup
                           field Node/NColl.1 : Array[Node[K, V]]
                             local v7 : Node[K, V]
                       drop v7
-                      let v25 : Node[K, V]
+                      let v28 : Node[K, V]
                         if : Node[K, V]
                           binary eq : Bool
-                            local v23 : Int
+                            local v26 : Int
                             local v2 : Int
                           block : Node[K, V]
                             ctor Node/NColl : Node[K, V]
-                              local v23 : Int
+                              local v26 : Int
                               call direct std/hamt.coll_put : Array[Node[K, V]]
-                                local v24 : Array[Node[K, V]]
+                                local v27 : Array[Node[K, V]]
                                 int 0
                                 local v2 : Int
                                 local v3 : K
@@ -657,109 +662,119 @@ fn std/hamt.node_put -> Node[K, V]
                                 local v6 : <dict>
                           block : Node[K, V]
                             block : Never
-                              let v26 : Node[K, V]
+                              let v29 : Node[K, V]
                                 call direct std/hamt.branch_of : Node[K, V]
-                                  dup
-                                    local v0 : Node[K, V]
-                                  local v23 : Int
+                                  local v0 : Node[K, V]
+                                  local v26 : Int
                                   local v1 : Int
-                              drop v24
-                              let v27 : Int
+                              drop v27
+                              let v30 : Int
                                 local v1 : Int
-                              let v28 : Int
+                              let v31 : Int
                                 local v2 : Int
-                              let v29 : K
+                              let v32 : K
                                 dup
                                   local v3 : K
-                              let v30 : V
+                              let v33 : V
                                 dup
                                   local v4 : V
-                              let v31 : Int
+                              let v34 : Int
                                 local v5 : Int
-                              let v32 : Node[K, V]
-                                local v26 : Node[K, V]
+                              let v35 : Node[K, V]
+                                local v29 : Node[K, V]
                               drop v0
                               assign v0
-                                local v32 : Node[K, V]
+                                local v35 : Node[K, V]
                               assign v1
-                                local v27 : Int
+                                local v30 : Int
                               assign v2
-                                local v28 : Int
-                              let v33 : K
-                                local v29 : K
+                                local v31 : Int
+                              let v36 : K
+                                local v32 : K
                               drop v3
                               assign v3
-                                local v33 : K
-                              let v34 : V
-                                local v30 : V
+                                local v36 : K
+                              let v37 : V
+                                local v33 : V
                               drop v4
                               assign v4
-                                local v34 : V
+                                local v37 : V
                               assign v5
-                                local v31 : Int
+                                local v34 : Int
                               block : Never
                                 drop v8
                                 continue L0
                       drop v8
                       assign v8
-                        local v25 : Node[K, V]
+                        local v28 : Node[K, V]
                       drop v0
                     block : Unit
                       sif
                         isctor Node/NBranch
                           local v7 : Node[K, V]
                         block : Unit
-                          let v35 : Int
+                          let v38 : Int
                             field Node/NBranch.0 : Int
                               local v7 : Node[K, V]
                           drop v0
-                          let v36 : Array[Node[K, V]]
+                          let v39 : Array[Node[K, V]]
                             dup
                               field Node/NBranch.1 : Array[Node[K, V]]
                                 local v7 : Node[K, V]
                           drop v7
-                          let v37 : Node[K, V]
+                          let v40 : Node[K, V]
                             block : Node[K, V]
-                              let v38 : Int
+                              let v41 : Int
                                 binary shl : Int
                                   int 1
                                   call direct std/hamt.idx_at : Int
                                     local v2 : Int
                                     local v1 : Int
-                              let v39 : Int
+                              let v42 : Int
                                 intrinsic popcount : Int
                                   binary band : Int
-                                    local v35 : Int
+                                    local v38 : Int
                                     binary sub : Int
-                                      local v38 : Int
+                                      local v41 : Int
                                       int 1
                               if : Node[K, V]
                                 binary eq : Bool
                                   binary band : Int
-                                    local v35 : Int
                                     local v38 : Int
+                                    local v41 : Int
                                   int 0
                                 block : Node[K, V]
                                   ctor Node/NBranch : Node[K, V]
                                     binary bor : Int
-                                      local v35 : Int
                                       local v38 : Int
-                                    call direct std/hamt.arr_insert : Array[T]
-                                      local v36 : Array[Node[K, V]]
-                                      local v39 : Int
-                                      box from=Node[K, V]
-                                        ctor Node/NLeaf : Node[K, V]
-                                          local v2 : Int
-                                          local v3 : K
-                                          local v4 : V
-                                          local v5 : Int
+                                      local v41 : Int
+                                    block : Array[T]
+                                      let v43 : Array[Node[K, V]]
+                                        local v39 : Array[Node[K, V]]
+                                      let v44 : Int
+                                        local v42 : Int
+                                      let v45 : ?
+                                        box from=Node[K, V]
+                                          ctor Node/NLeaf : Node[K, V]
+                                            local v2 : Int
+                                            local v3 : K
+                                            local v4 : V
+                                            local v5 : Int
+                                      let v46 : Array[T]
+                                        call direct std/hamt.arr_insert : Array[T]
+                                          local v43 : Array[Node[K, V]]
+                                          local v44 : Int
+                                          local v45 : ?
+                                      drop v45
+                                      drop v43
+                                      local v46 : Array[T]
                                 block : Node[K, V]
-                                  let v40 : Node[K, V]
+                                  let v47 : Node[K, V]
                                     call direct std/hamt.node_put : Node[K, V]
                                       unbox to=Node[K, V]
                                         intrinsic array_get : T
-                                          local v36 : Array[Node[K, V]]
-                                          local v39 : Int
+                                          local v39 : Array[Node[K, V]]
+                                          local v42 : Int
                                       binary add : Int
                                         local v1 : Int
                                         constref BITS : Int
@@ -769,15 +784,15 @@ fn std/hamt.node_put -> Node[K, V]
                                       local v5 : Int
                                       local v6 : <dict>
                                   ctor Node/NBranch : Node[K, V]
-                                    local v35 : Int
+                                    local v38 : Int
                                     intrinsic array_with : Array[T]
-                                      local v36 : Array[Node[K, V]]
-                                      local v39 : Int
+                                      local v39 : Array[Node[K, V]]
+                                      local v42 : Int
                                       box from=Node[K, V]
-                                        local v40 : Node[K, V]
+                                        local v47 : Node[K, V]
                           drop v8
                           assign v8
-                            local v37 : Node[K, V]
+                            local v40 : Node[K, V]
                         block : Unit
                           discard
                             intrinsic panic : Never
@@ -1144,6 +1159,7 @@ fn std/hamt.node_del -> Node[K, V]
                                         call direct std/hamt.arr_remove : Array[T]
                                           local v18 : Array[Node[K, V]]
                                           local v21 : Int
+                                      drop v18
                                       drop v22
                                       drop v23
                                       if : Node[K, V]
@@ -1324,6 +1340,7 @@ fn std/hamt.coll_del -> Array[Node[K, V]]
                   drop v5
                   assign v5
                     local v7 : Array[Node[K, V]]
+                  drop v0
                   drop v2
                 block : Unit
                   sif
@@ -1376,15 +1393,11 @@ fn std/hamt.empty -> Hamt[K, V]
     int 0
     int 0
 fn std/hamt.count -> Int
-  param v0 : Hamt[K, V] owned
-  block : Int
-    let v1 : Int
-      field Hamt/Hamt.1 : Int
-        local v0 : Hamt[K, V]
-    drop v0
-    local v1 : Int
+  param v0 : Hamt[K, V] borrowed
+  field Hamt/Hamt.1 : Int
+    local v0 : Hamt[K, V]
 fn std/hamt.get -> Option[V]
-  param v0 : Hamt[K, V] owned
+  param v0 : Hamt[K, V] borrowed
   param v1 : K owned
   dict v2 : K owned
   dict v3 : K owned
@@ -1402,7 +1415,6 @@ fn std/hamt.get -> Option[V]
         dup
           local v1 : K
         local v2 : <dict>
-    drop v0
     drop v1
     let v5 : Option[V]
       intrinsic null_ref : Option[V]
@@ -1474,7 +1486,7 @@ fn std/hamt.get -> Option[V]
             drop v4
     local v5 : Option[V]
 fn std/hamt.index -> V
-  param v0 : Hamt[K, V] owned
+  param v0 : Hamt[K, V] borrowed
   param v1 : K owned
   dict v2 : K owned
   dict v3 : K owned
@@ -1539,7 +1551,7 @@ fn std/hamt.index -> V
         drop v5
     local v6 : V
 fn std/hamt.has -> Bool
-  param v0 : Hamt[K, V] owned
+  param v0 : Hamt[K, V] borrowed
   param v1 : K owned
   dict v2 : K owned
   dict v3 : K owned
@@ -1557,7 +1569,6 @@ fn std/hamt.has -> Bool
         dup
           local v1 : K
         local v2 : <dict>
-    drop v0
     drop v1
     let v5 : Bool
       bool false
@@ -1583,7 +1594,7 @@ fn std/hamt.has -> Bool
             drop v4
     local v5 : Bool
 fn std/hamt.assoc -> Hamt[K, V]
-  param v0 : Hamt[K, V] owned
+  param v0 : Hamt[K, V] borrowed
   param v1 : K owned
   param v2 : V owned
   dict v3 : K owned
@@ -1604,7 +1615,6 @@ fn std/hamt.assoc -> Hamt[K, V]
     let v8 : Int
       field Hamt/Hamt.2 : Int
         local v0 : Hamt[K, V]
-    drop v0
     block : Hamt[K, V]
       let v9 : Option[Node[K, V]]
         call direct std/hamt.node_leaf : Option[Node[K, V]]
@@ -1965,36 +1975,33 @@ fn std/hamt.by_seq -> Int
         block : Int
           int 0
 fn std/hamt.ordered -> List[(Int, K, V)]
-  param v0 : Hamt[K, V] owned
+  param v0 : Hamt[K, V] borrowed
   block : List[(Int, K, V)]
     let v1 : List[(Int, K, V)]
       listlit : List[(Int, K, V)]
-    let v2 : List[(Int, K, V)]
-      block : List[(Int, K, V)]
-        let v3 : List[(Int, K, V)]
-          call direct std/hamt.walk : List[(Int, K, V)]
-            dup
-              field Hamt/Hamt.0 : Node[K, V]
-                local v0 : Hamt[K, V]
-            local v1 : List[(Int, K, V)]
-        let v4 : fn((Int, K, V), (Int, K, V)) -> Int
-          closure std/hamt.lambda$0 : fn((Int, K, V), (Int, K, V)) -> Int
-        let v5 : ?
-          box from=Unit
-            unit
-        let v6 : List[(Int, K, V)]
-          intrinsic sort_by : List[(Int, K, V)]
-            local v3 : List[(Int, K, V)]
-            local v4 : fn((Int, K, V), (Int, K, V)) -> Int
-            local v5 : ?
-        drop v5
-        drop v4
-        drop v3
-        local v6 : List[(Int, K, V)]
-    drop v0
-    local v2 : List[(Int, K, V)]
+    block : List[(Int, K, V)]
+      let v2 : List[(Int, K, V)]
+        call direct std/hamt.walk : List[(Int, K, V)]
+          dup
+            field Hamt/Hamt.0 : Node[K, V]
+              local v0 : Hamt[K, V]
+          local v1 : List[(Int, K, V)]
+      let v3 : fn((Int, K, V), (Int, K, V)) -> Int
+        closure std/hamt.lambda$0 : fn((Int, K, V), (Int, K, V)) -> Int
+      let v4 : ?
+        box from=Unit
+          unit
+      let v5 : List[(Int, K, V)]
+        intrinsic sort_by : List[(Int, K, V)]
+          local v2 : List[(Int, K, V)]
+          local v3 : fn((Int, K, V), (Int, K, V)) -> Int
+          local v4 : ?
+      drop v4
+      drop v3
+      drop v2
+      local v5 : List[(Int, K, V)]
 fn std/hamt.entries -> List[(K, V)]
-  param v0 : Hamt[K, V] owned
+  param v0 : Hamt[K, V] borrowed
   block : List[(K, V)]
     let v1 : List[(K, V)]
       listlit : List[(K, V)]
@@ -2061,7 +2068,7 @@ fn std/hamt.entries -> List[(K, V)]
     drop v2
     local v1 : List[(K, V)]
 fn std/hamt.keys -> List[K]
-  param v0 : Hamt[K, V] owned
+  param v0 : Hamt[K, V] borrowed
   block : List[K]
     let v1 : List[K]
       listlit : List[K]
@@ -2114,7 +2121,7 @@ fn std/hamt.keys -> List[K]
     drop v2
     local v1 : List[K]
 fn std/hamt.values -> List[V]
-  param v0 : Hamt[K, V] owned
+  param v0 : Hamt[K, V] borrowed
   block : List[V]
     let v1 : List[V]
       listlit : List[V]
@@ -2330,21 +2337,17 @@ fn std/hamt.kids_fold -> A
     drop v3
     drop v4
 fn std/hamt.fold -> A
-  param v0 : Hamt[K, V] owned
+  param v0 : Hamt[K, V] borrowed
   param v1 : A owned
   param v2 : fn(A, K, V) -> A !e owned
   ev v3 : ev owned
-  block : A
-    let v4 : A
-      call direct std/hamt.node_fold : A
-        dup
-          field Hamt/Hamt.0 : Node[K, V]
-            local v0 : Hamt[K, V]
-        local v1 : A
-        local v2 : fn(A, K, V) -> A !e
-        local v3 : ev
-    drop v0
-    local v4 : A
+  call direct std/hamt.node_fold : A
+    dup
+      field Hamt/Hamt.0 : Node[K, V]
+        local v0 : Hamt[K, V]
+    local v1 : A
+    local v2 : fn(A, K, V) -> A !e
+    local v3 : ev
 fn std/hamt.from -> Hamt[K, V]
   param v0 : List[(K, V)] owned
   dict v1 : K owned
@@ -2394,6 +2397,7 @@ fn std/hamt.from -> Hamt[K, V]
                 local v10 : V
                 local v1 : <dict>
                 local v2 : <dict>
+            drop v3
             assign v3
               local v11 : Hamt[K, V]
       step
@@ -2406,7 +2410,7 @@ fn std/hamt.from -> Hamt[K, V]
     drop v4
     local v3 : Hamt[K, V]
 fn std/hamt.sadd -> Hamt[T, Bool]
-  param v0 : Hamt[T, Bool] owned
+  param v0 : Hamt[T, Bool] borrowed
   param v1 : T owned
   dict v2 : T owned
   dict v3 : T owned
@@ -2453,6 +2457,7 @@ fn std/hamt.sfrom -> Hamt[T, Bool]
                 local v7 : T
                 local v1 : <dict>
                 local v2 : <dict>
+            drop v3
             assign v3
               local v8 : Hamt[T, Bool]
       step
