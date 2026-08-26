@@ -71,6 +71,29 @@ a child goes and never why. `scripts/wasm-dom-contract/keyed-ops.mjs` drives
 these three straight at the bridge, since neither demo application keys its
 children.
 
+## Props: attributes, and two properties
+
+A prop is a pair of strings and reaches the element with `setAttribute`, with
+two exceptions: `value` and `checked` are written as *properties*.
+
+An `<input>` keeps a live value beside its `value` content attribute, and
+WHATWG HTML says the attribute writes through to the live one only while the
+control's dirty value flag is false, which the first keystroke sets for good.
+A bridge that only ever calls `setAttribute` therefore renders the model into a
+field exactly once: afterwards the field is the user's and the model can never
+correct it, and nothing raises. `checked` has the same split.
+
+`checked` is a boolean and a prop is a string, so presence means checked, which
+is the content attribute's own rule; `""` and `"false"` are the two spellings
+of unchecked. A prop that leaves the list is removed from the element either
+way, and the property half of that reset is skipped on elements that have no
+such property, so a `<div>` never acquires one.
+
+`scripts/wasm-dom-contract/props.mjs` drives this straight at the bridge
+against a stub that carries the dirty value flag, because a document whose
+attribute is right and whose live value is stale is one a transcript cannot
+tell from a correct one.
+
 ## Why a WASI shim rather than `node:wasi`
 
 There is no `node:wasi` in a browser, and a harness running on a different

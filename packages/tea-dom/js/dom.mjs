@@ -24,8 +24,25 @@
 // Listeners. One DOM listener per (element, event name) the tree asked for.
 // They are tracked in a WeakMap rather than on the element, so a node this
 // bridge did not create carries nothing and nothing outlives the document.
+//
+// Properties, not attributes, for two names. An `<input>` keeps a live value
+// beside its `value` content attribute, and the attribute stops writing
+// through to the live one as soon as the user touches the control -- WHATWG
+// HTML: "When the `value` content attribute is added, set, or removed, if the
+// control's dirty value flag is false, the user agent must set the value of
+// the element to the value of the `value` content attribute", and the dirty
+// value flag "must be set to true whenever the user interacts with the control
+// in a way that changes the value". A bridge that only ever calls
+// `setAttribute` therefore renders a model into a field exactly once: after
+// the first keystroke the model can never correct it again, and nothing
+// raises. `checked` has the same split for the same reason.
 
 const LISTENERS = new WeakMap();
+
+// The two names above. Small and closed on purpose: every other property a
+// browser exposes is either derived from an attribute or is not something a
+// view describes, and a bridge that guessed would be guessing per element.
+const PROPERTIES = new Set(['value', 'checked']);
 
 export class DomHost {
   /**
@@ -97,11 +114,14 @@ export class DomHost {
   }
 
   /**
-   * A node's own data onto an existing element: the properties it should
-   * have and no others, the listeners it asked for and no others. Children
-   * are not touched, which is what makes this the applier for `set-self`
-   * (`apply` is `rekid(donor, kids(target))`, and the donor's children are
-   * not part of what it donates).
+   * A node's own data onto an existing element: the props it should have and
+   * no others, the listeners it asked for and no others. Children are not
+   * touched, which is what makes this the applier for `set-self` (`apply` is
+   * `rekid(donor, kids(target))`, and the donor's children are not part of
+   * what it donates).
+   *
+   * A prop reaches the element as an attribute unless it is one of the two in
+   * `PROPERTIES`, which reach it as properties; see the note at the top.
    */
   setSelf(el, node) {
     if (node.t === 'text') {
@@ -113,7 +133,16 @@ export class DomHost {
       if (!want.has(name)) el.removeAttribute(name);
     }
     for (const [name, value] of want) {
-      if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+      if (PROPERTIES.has(name)) writeProperty(el, name, value);
+      else if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+    }
+    // "and no others" has to hold for the property half too. A property is
+    // reset only where the element has one: `'value' in el` is false for a
+    // `<div>`, and assigning to it there would invent an expando the document
+    // did not have.
+    for (const name of PROPERTIES) {
+      if (want.has(name) || !(name in el)) continue;
+      writeProperty(el, name, '');
     }
 
     const attached = LISTENERS.get(el) || new Map();
@@ -190,6 +219,15 @@ const OPS = {
     el.insertBefore(node, ref);
   },
 };
+
+// A prop is a pair of strings, and `checked` is a boolean, so the two meet
+// here. Presence means checked, which is the attribute's own rule, and the two
+// spellings a view would reach for to say otherwise are honoured rather than
+// read as truthy.
+function writeProperty(el, name, value) {
+  const next = name === 'checked' ? value !== '' && value !== 'false' : value;
+  if (el[name] !== next) el[name] = next;
+}
 
 // `el.attributes` is a live NamedNodeMap in a browser and whatever a stub
 // wants elsewhere; both answer to a length and an index, and copying the

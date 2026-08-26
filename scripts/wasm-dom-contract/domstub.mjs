@@ -143,6 +143,69 @@ class StubElement extends StubNode {
   }
 }
 
+// An `<input>`, which is the element where the attribute and the property are
+// two different things and only one of them is what the user sees.
+//
+// WHATWG HTML: writing the `value` *content attribute* sets the live value
+// only while the control's dirty value flag is false, and that flag is set for
+// good the first time the user changes the value. So this stub does what a
+// browser does -- `setAttribute('value', ...)` writes through until `type()`
+// has been called and is inert afterwards -- and a bridge that renders a model
+// into a field with `setAttribute` is a bridge that stops being able to
+// correct the field after the first keystroke. Nothing raises when it happens,
+// which is why it needs an element that models the rule rather than an
+// assertion that the right method was called.
+class StubInput extends StubElement {
+  constructor(doc, tag) {
+    super(doc, tag);
+    this._value = '';
+    this._checked = false;
+    this._dirty = false;
+  }
+
+  get value() {
+    return this._value;
+  }
+
+  set value(v) {
+    this.doc.rec.log(`prop <${this.tagName}> value=${JSON.stringify(String(v))}`);
+    this._value = String(v);
+  }
+
+  get checked() {
+    return this._checked;
+  }
+
+  set checked(v) {
+    this.doc.rec.log(`prop <${this.tagName}> checked=${v ? 'true' : 'false'}`);
+    this._checked = !!v;
+  }
+
+  setAttribute(name, value) {
+    super.setAttribute(name, value);
+    if (this._dirty) return;
+    if (name === 'value') this._value = value;
+    if (name === 'checked') this._checked = value !== '' && value !== 'false';
+  }
+
+  /** What the user does. The dirty value flag is one way. */
+  type(text) {
+    this._value = String(text);
+    this._dirty = true;
+  }
+
+  /** The other half of it: a checkbox the user clicked. */
+  check(on) {
+    this._checked = !!on;
+    this._dirty = true;
+  }
+}
+
+// The tags that hold a live value. `<select>` and `<textarea>` have the same
+// split; neither demo reaches one, so they are not modelled rather than
+// modelled wrongly.
+const INPUTS = new Set(['input']);
+
 function detach(node) {
   if (node.parentNode) {
     const kids = node.parentNode.childNodes;
@@ -162,7 +225,7 @@ export class StubDocument {
   }
 
   createElement(tag) {
-    return new StubElement(this, tag);
+    return INPUTS.has(tag) ? new StubInput(this, tag) : new StubElement(this, tag);
   }
 
   createTextNode(value) {
@@ -184,9 +247,12 @@ export function serialize(node) {
   const attrs = [...node._attrs.entries()]
     .map(([k, v]) => ` ${k}="${v}"`)
     .join('');
+  // An input's live value is a property, so it is nowhere in `_attrs`, and a
+  // tree line without it would not show what the user is looking at.
+  const live = node instanceof StubInput ? ` value="${node.value}"` : '';
   const on = [...node._listeners.keys()].sort().map((n) => ` @${n}`).join('');
   const kids = node.childNodes.map(serialize).join('');
-  return `<${node.tagName}${attrs}${on}>${kids}</${node.tagName}>`;
+  return `<${node.tagName}${attrs}${live}${on}>${kids}</${node.tagName}>`;
 }
 
 /** The first element in pre-order whose own text is `label`. */

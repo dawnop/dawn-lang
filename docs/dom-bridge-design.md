@@ -162,6 +162,13 @@ panic、一次落空的事件。它多一种行 `state`，即根的 class、编�
 （`todo-focus` 让按键无视焦点、`todo-filter` 让 done 筛选放行一切）都改在应用里而不是桥里：
 改桥的变异体两份转录一起红，说明不了第二份有没有牙。
 
+转录之前还有两套只要 node 的检查，各带自己的变异体，因为它们钉的东西转录看不见：
+`keyed-ops.sh` 驱动两个应用都不会走到的三个 op；`props.sh` 驱动 `value`/`checked` 的
+属性写。后者钉的是 WHATWG 的 dirty value flag——用户打过字之后，`value` 这个内容特性
+就不再写进用户看到的那个值，于是一个只会 `setAttribute` 的桥把模型渲染进输入框**只有一次**，
+之后模型再也改不动它，而且不抛异常：patch 流是对的，document 对象是对的，只有屏幕是错的。
+桩里那个带 dirty 标志的 `StubInput` 就是为了让这件事有地方红。
+
 `scripts/wasm-contract`（失败运行时那套）和这一套共用一个 CI job，因为它们共用两件贵的
 东西：钉了版本与 sha256 的 wasi-sdk，以及从 `selfhost/src/nmain.dawn` 构建的 C 驱动。
 
