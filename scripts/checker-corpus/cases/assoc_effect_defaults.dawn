@@ -1,0 +1,81 @@
+# passes.dawn #369: associated-effect defaults. A trait member may carry a
+# default row; an impl that writes no binding takes it, one that writes a
+# binding overrides it, and a member without a default keeps the
+# missing-binding refusal. A wrong default is caught at compile time from
+# both ends: a body that performs io under a pure row fails the
+# body-vs-declared check, and a signature that claims io over a pure row
+# fails the containment check. The default's RHS follows the binding's
+# ground-row discipline, so an effect variable is refused where a binding's
+# would be.
+effect Ask { fn ask() -> Int }
+
+trait P[T] {
+  effect E = !()
+  fn run(x: T) -> Int !T.E
+}
+
+type A = { v: Int }
+type B = { v: Int }
+type C = { v: Int }
+type D = { v: Int }
+
+# takes the default: no binding, no diagnostic
+impl P[A] {
+  fn run(x: A) -> Int = x.v
+}
+
+# overrides the default: the binding wins, so the method writes the label
+# the exact-label rule demands of it
+impl P[B] {
+  effect E = !Ask
+  fn run(x: B) -> Int !Ask = x.v + ask()
+}
+
+# a wrong default, caught from the body's end: the member defaulted pure,
+# so a body that calls io is refused by the body-vs-declared check
+impl P[C] {
+  fn run(x: C) -> Int = {
+    println("side effect")
+    x.v
+  }
+}
+
+# and from the signature's end: a method row claiming more than the
+# defaulted row fails containment
+impl P[D] {
+  fn run(x: D) -> Int !io = x.v
+}
+
+trait Q[T] {
+  effect E
+  fn go(x: T) -> Int !T.E
+}
+
+# a member without a default keeps today's refusal word for word
+impl Q[A] {
+  fn go(x: A) -> Int = x.v
+}
+
+# a default is a binding's RHS, so a non-ground row is refused where a
+# binding's would be; a refused default records none, so an impl that leant
+# on it is told the member is missing, same as under a defaultless trait
+trait R[T] {
+  effect E = !e
+  fn ping(x: T) -> Int !T.E
+}
+
+impl R[A] {
+  fn ping(x: A) -> Int = x.v
+}
+
+# a label default under the exact-label rule: the trait's row (after the
+# materialized default) carries `Ask`, so a method that stays silent about
+# it is refused, exactly as an explicit `effect E = !Ask` would be
+trait S[T] {
+  effect E = !Ask
+  fn hop(x: T) -> Int !T.E
+}
+
+impl S[A] {
+  fn hop(x: A) -> Int = x.v
+}

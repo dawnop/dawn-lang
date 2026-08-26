@@ -1,0 +1,32 @@
+# #369: a trait may give an associated effect member a default row, written
+# with the same ground-row tail an impl binding has -- one declared effect,
+# `!io`, or the empty row `!()`. An impl omits its binding to take the
+# default, or writes one to override it; a member without a default still
+# demands one (that half is the checker's, see checker-corpus
+# assoc_effect_defaults).
+effect Ask { fn ask() -> Int }
+
+trait P[T] {
+  effect E = !Ask
+  effect F = !io
+  effect G = !()
+  effect H
+  fn run(x: T) -> Int !T.E !T.F !T.G !T.H
+}
+
+type A = { v: Int }
+
+# takes E/F/G by default, overrides nothing but the member with no default
+impl P[A] {
+  effect H = !()
+  fn run(x: A) -> Int !Ask !io = x.v + ask()
+}
+
+type B = { v: Int }
+
+# overrides a defaulted member
+impl P[B] {
+  effect E = !()
+  effect H = !Ask
+  fn run(x: B) -> Int !io !Ask = x.v + ask()
+}

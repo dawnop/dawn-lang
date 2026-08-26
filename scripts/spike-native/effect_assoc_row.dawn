@@ -72,6 +72,11 @@
 #     the other itself, so the two slots of one band are split between a
 #     callee and this frame.
 #
+# And a trait whose member carries a **default** row (#369), taken by one
+# subject and overridden by the other, because materialization promises a
+# defaulted impl is the explicit one's byte-twin and a promise about evidence
+# is this file's to keep.
+#
 # And the control the whole file needs: a projection in a **return** row, which
 # is what `assoc_effects.dawn` is made of and what worked all along.
 #
@@ -117,6 +122,19 @@ trait Pair[T] {
   effect F
   fn lo(x: T) -> Int !T.E
   fn hi(x: T) -> Int !T.F
+}
+
+## A trait whose member carries a **default** row (#369). Registration
+## materializes the default into the impl that writes no binding, so a
+## defaulted impl must be indistinguishable from an explicitly bound one all
+## the way down: same reduction, same slot, same pack. `ByDefault` leans on
+## the default and `Overr` overrides it with the *other* label, so a
+## materialization that ignores the declared row, or a default applied over
+## a written binding, hands one of the two lines the other's handler and the
+## arithmetic says which.
+trait Dflt[T] {
+  effect E = !AskE
+  fn deft(x: T) -> Int !T.E
 }
 
 type One = { v: Int }
@@ -180,6 +198,19 @@ impl Pair[Pong] {
   effect F = !AskE
   fn lo(x: Pong) -> Int !TellE = x.v + tell()
   fn hi(x: Pong) -> Int !AskE = x.v + ask()
+}
+
+type ByDefault = { v: Int }
+
+type Overr = { v: Int }
+
+impl Dflt[ByDefault] {
+  fn deft(x: ByDefault) -> Int !AskE = x.v + ask()
+}
+
+impl Dflt[Overr] {
+  effect E = !TellE
+  fn deft(x: Overr) -> Int !TellE = x.v + tell()
 }
 
 alias Thunk[!e] = fn() -> Int !e
@@ -266,6 +297,11 @@ fn member_split[T: Pair](x: T, t: fn() -> Int !T.F) -> Int !T.E !T.F =
 ## It is here so that a repair which moves the parameter position by breaking
 ## the return position cannot look like a repair.
 fn ret_only[T: Runner](x: T) -> Int !T.E = run(x)
+
+## The defaulted member in the parameter position: the same read `via` does,
+## over a slot whose row came from the trait's default (`ByDefault`) or from
+## the impl's own overriding binding (`Overr`).
+fn via_deft[T: Dflt](x: T, t: fn() -> Int !T.E) -> Int !T.E = deft(x) + t()
 
 fn line_inline() -> Unit !io = {
   with handle AskE { ask() => 3 }
@@ -364,6 +400,13 @@ fn line_ret_only() -> Unit !io = {
   println(to_string(ret_only(One { v: 1600 })))
 }
 
+fn line_defaulted() -> Unit !io = {
+  with handle AskE { ask() => 131 }
+  with handle TellE { tell() => 137 }
+  println(to_string(via_deft(ByDefault { v: 1700 }, () => ask() + 1)))
+  println(to_string(via_deft(Overr { v: 1800 }, () => tell() + 2)))
+}
+
 pub fn main() -> Unit !io = {
   println("-- a projection in a parameter row, written inline --")
   line_inline()
@@ -399,6 +442,8 @@ pub fn main() -> Unit !io = {
   line_member_split()
   println("-- and the control: a projection in a return row and nowhere else --")
   line_ret_only()
+  println("-- a defaulted member taken, and a defaulted member overridden --")
+  line_defaulted()
 }
 
 # The assertion lane. `scripts/effect-evidence-contract/run.sh` runs these on
@@ -497,4 +542,20 @@ test "one band's two slots split between a callee and the frame" {
 test "a projection in a return row is what it always was" {
   with handle AskE { ask() => 89 }
   assert ret_only(One { v: 1600 }) == 1689
+}
+
+test "a defaulted member reads through the default's label" {
+  with handle AskE { ask() => 131 }
+  # ByDefault writes no binding: the trait's `= !AskE` is its row, so both
+  # the impl body's `ask()` and the thunk's answer through AskE's handler
+  assert via_deft(ByDefault { v: 1700 }, () => ask() + 1) == 1963
+}
+
+test "an impl's own binding overrides the default" {
+  with handle AskE { ask() => 131 }
+  with handle TellE { tell() => 137 }
+  # Overr binds `= !TellE`: a default applied over the written binding, or a
+  # materialization that ignores the declared row, would reach for AskE's
+  # handler here and the sum says so
+  assert via_deft(Overr { v: 1800 }, () => tell() + 2) == 2076
 }
