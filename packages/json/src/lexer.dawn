@@ -60,7 +60,10 @@ pub fn err_kind(src: String, i: Cursor, kind: JsonErrorKind, msg: String) -> Jso
 pub fn is_digit(c: Int) -> Bool = c >= char.code('0') && c <= char.code('9')
 
 pub fn skip_ws(src: String, i: Cursor) -> Cursor = {
-  let c = peek(src, i)
+  # `cursor.char` and not `peek`: the parser asks this at every value, every
+  # array element and every object member, so the wrapper's frame is a frame
+  # per token of the document.
+  let c = cursor.char(src, i)
   if c == char.code(' ') || c == char.code('\t') || c == char.code('\n') ||
     c == char.code('\r') {
       skip_ws(src, cursor.next(src, i))
@@ -101,123 +104,190 @@ fn read_hex4(src: String, i: Cursor) -> Option[(Int, Cursor)] = {
   }
 }
 
-fn simple_escape(e: Char) -> Option[Char] =
-  match e {
-    '"' -> Some('"')
-    '\\' -> Some('\\')
-    '/' -> Some('/')
-    'b' -> Some('\u{0008}')
-    'f' -> Some('\u{000C}')
-    'n' -> Some('\n')
-    'r' -> Some('\r')
-    't' -> Some('\t')
-    _ -> None
+# What one of JSON's short escapes decodes to, as text rather than as a `Char`.
+#
+# A `Char` would have to be turned into a one-character String to be appended
+# to anything, and `from_code_points` on a one-element list is an allocation
+# per escape of every escaped string. These are the eight answers there are, so
+# they are written as the strings they are and the conversion never runs.
+fn simple_escape(e: Int) -> Option[String] =
+  if e == char.code('"') {
+    Some("\"")
+  } else if e == char.code('\\') {
+    Some("\\")
+  } else if e == char.code('/') {
+    Some("/")
+  } else if e == char.code('b') {
+    Some("\u{0008}")
+  } else if e == char.code('f') {
+    Some("\u{000C}")
+  } else if e == char.code('n') {
+    Some("\n")
+  } else if e == char.code('r') {
+    Some("\r")
+  } else if e == char.code('t') {
+    Some("\t")
+  } else {
+    None
   }
 
 # `start` is the opening quote; returns (decoded string, cursor past the closing
-# quote). The accumulator holds the *decoded* characters of one string, which
-# escapes make genuinely different from any span of the source, and its size is
-# that string's, not the document's.
+# quote).
+#
+# The accumulator holds *spans*, not characters. A run of characters that no
+# escape touches is already a substring of the source, so it comes out with one
+# `cursor.slice` however long it is; only an escape, which decodes to something
+# no span of the source contains, ends a run. The overwhelmingly common string
+# -- one with no escape in it at all -- never touches the accumulator: the whole
+# scan is a walk to the closing quote and one slice.
+#
+# The list-per-character version this replaces was the parser's dominant cost.
+# Appending a one-element list is a bounded copy, but the bound is a pvec push
+# plus a concat plus the allocation of the singleton, and paying it per
+# character of every key and every string value dwarfed the scan itself.
 pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), JsonError] = {
   var i = cursor.next(src, start)
-  var acc: List[Char] = []
+  # where the run of unescaped characters in progress began
+  var run = i
+  var parts: List[String] = []
+  var chunk = ""
+  var pending = 0
+  var out = ""
   var status = 0
   var errmsg = JsonError { kind: Syntax, offset: 0, message: "" }
   while status == 0 {
-    let c = peek(src, i)
+    # `cursor.char` and not `peek`: they answer the same thing, and this is the
+    # one loop in the package that runs per character of the document, so the
+    # frame the wrapper costs is a frame per character.
+    let c = cursor.char(src, i)
     if c == -1 {
       status = 2
       errmsg = err_at(src, i, "unterminated string")
     } else if c == char.code('"') {
+      let last = chunk ++ cursor.slice(src, run, i)
+      out = if len(parts) == 0 { last } else { join(parts ++ [last], "") }
       i = cursor.next(src, i)
       status = 1
     } else if c == char.code('\\') {
       let ie = cursor.next(src, i)
       let e = peek(src, ie)
+      # what this escape decodes to, and where the character after it is. The
+      # branches below only compute those two; the one append is after them, so
+      # the accumulator is touched once per escape however the escape was spelt.
+      var dec = ""
+      var after = ie
+      var ok = true
       if e == char.code('u') {
         match read_hex4(src, cursor.next(src, ie)) {
           None -> {
+            ok = false
             status = 2
             errmsg = err_at(src, i, "invalid \\u escape")
           }
-          Some((code, after)) -> {
+          Some((code, a1)) -> {
+            after = a1
             if code >= 55296 && code <= 56319 {
-              let iu = cursor.next(src, after)
-              if peek(src, after) == char.code('\\') && peek(src, iu) == char.code('u') {
+              let iu = cursor.next(src, a1)
+              if peek(src, a1) == char.code('\\') && peek(src, iu) == char.code('u') {
                 match read_hex4(src, cursor.next(src, iu)) {
                   None -> {
+                    ok = false
                     status = 2
                     errmsg = err_at(src, i, "invalid \\u escape")
                   }
-                  Some((low, after2)) -> {
+                  Some((low, a2)) -> {
                     if low >= 56320 && low <= 57343 {
-                      acc = acc ++
-                        [char_of_code(65536 + (code - 55296) * 1024 + (low - 56320))]
-                      i = after2
+                      dec = str.from_char(
+                        char_of_code(65536 + (code - 55296) * 1024 + (low - 56320)))
+                      after = a2
                     } else {
-                      acc = acc ++ [char_of_code(65533)]
-                      i = after
+                      dec = replacement()
                     }
                   }
                 }
               } else {
-                acc = acc ++ [char_of_code(65533)]
-                i = after
+                dec = replacement()
               }
             } else if code >= 56320 && code <= 57343 {
-              acc = acc ++ [char_of_code(65533)]
-              i = after
+              dec = replacement()
             } else {
-              acc = acc ++ [char_of_code(code)]
-              i = after
+              dec = str.from_char(char_of_code(code))
             }
           }
         }
       } else {
-        # `char.of` also rejects the end of input, where `peek` answers -1
-        let esc = match char.of(e) {
-          Some(ec) -> simple_escape(ec)
-          None -> None
-        }
-        match esc {
+        # `simple_escape` answers None for the end of input too, where `peek`
+        # is -1 and no escape character can be
+        match simple_escape(e) {
           Some(cp) -> {
-            acc = acc ++ [cp]
-            i = cursor.next(src, ie)
+            dec = cp
+            after = cursor.next(src, ie)
           }
           None -> {
+            ok = false
             status = 2
             errmsg = err_at(src, i, "invalid escape")
           }
         }
       }
+      if ok {
+        chunk = chunk ++ cursor.slice(src, run, i) ++ dec
+        pending = pending + 1
+        if pending == BATCH {
+          parts = parts ++ [chunk]
+          chunk = ""
+          pending = 0
+        }
+        i = after
+        run = after
+      }
     } else if c < 32 {
       status = 2
       errmsg = err_at(src, i, "control character in string")
     } else {
-      acc = acc ++ [char_of_code(c)]
       i = cursor.next(src, i)
     }
   }
   if status == 1 {
-    Ok((from_code_points(acc), i))
+    Ok((out, i))
   } else {
     Err(errmsg)
   }
 }
 
+# U+FFFD, what an unpaired surrogate escape decodes to.
+fn replacement() -> String = str.from_char(char_of_code(65533))
+
+# How many decoded pieces gather in one string before that string joins the
+# list.
+#
+# An escape ends a run, so an escape-dense string would otherwise append to the
+# list once per escape -- and a list append is a whole singleton vector where a
+# string concat is one allocation. Batching trades a bounded amount of recopying
+# for that: a piece is copied at most `BATCH` times before its chunk is flushed,
+# so the extra copying stays linear in the output with this constant, while the
+# appends drop by the same factor. 32 is where the measurement stops improving
+# (a 58 KB escape-dense document: 3.5 ms to 1.5 ms, and 64 buys nothing more).
+const BATCH: Int = 32
+
 # ---- numbers ----
 
 fn skip_digits(src: String, i: Cursor) -> Cursor =
-  if is_digit(peek(src, i)) { skip_digits(src, cursor.next(src, i)) } else { i }
+  if is_digit(cursor.char(src, i)) { skip_digits(src, cursor.next(src, i)) } else { i }
 
-fn scan_int_part(src: String, i: Cursor) -> Result[Cursor, JsonError] =
-  if peek(src, i) == char.code('0') {
+# One `peek` and three tests, not three `peek`s: each one is a call that hands
+# the whole document across a frame boundary, and the scanner is asking the same
+# question of the same position every time.
+fn scan_int_part(src: String, i: Cursor) -> Result[Cursor, JsonError] = {
+  let c = peek(src, i)
+  if c == char.code('0') {
     Ok(cursor.next(src, i))
-  } else if peek(src, i) >= char.code('1') && peek(src, i) <= char.code('9') {
+  } else if c >= char.code('1') && c <= char.code('9') {
     Ok(skip_digits(src, cursor.next(src, i)))
   } else {
     Err(err_at(src, i, "invalid number: expected a digit"))
   }
+}
 
 fn scan_frac(src: String, i: Cursor) -> Result[Cursor, JsonError] =
   if peek(src, i) == char.code('.') {
@@ -232,11 +302,13 @@ fn scan_frac(src: String, i: Cursor) -> Result[Cursor, JsonError] =
     Ok(i)
   }
 
-fn scan_exp(src: String, i: Cursor) -> Result[Cursor, JsonError] =
-  if peek(src, i) == char.code('e') || peek(src, i) == char.code('E') {
+fn scan_exp(src: String, i: Cursor) -> Result[Cursor, JsonError] = {
+  let c = peek(src, i)
+  if c == char.code('e') || c == char.code('E') {
     let i1 = cursor.next(src, i)
+    let sign = peek(src, i1)
     let i2 =
-      if peek(src, i1) == char.code('+') || peek(src, i1) == char.code('-') {
+      if sign == char.code('+') || sign == char.code('-') {
         cursor.next(src, i1)
       } else {
         i1
@@ -250,6 +322,7 @@ fn scan_exp(src: String, i: Cursor) -> Result[Cursor, JsonError] =
   } else {
     Ok(i)
   }
+}
 
 # `start` begins a number; returns (the literal's *text*, cursor past it). The
 # text comes out with one `cursor_slice`, where the List[Int] version had to copy

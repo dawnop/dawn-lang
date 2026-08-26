@@ -6,21 +6,39 @@
 # parsing could start (docs/seq6-research.md). Cursors read the string in place,
 # so the shape below is unchanged apart from `i + 1` becoming `cursor.next`:
 # a character is not always one unit wide, so advancing is a call, not addition.
+#
+# The reads below are `cursor.char` rather than `lexer.peek`, which is the same
+# answer through one more frame. That frame is per token of the document, and
+# the document is what this is measured on.
 use std/char
-use std/str
 use std/map
 use std/cursor
 use std/cursor.{Cursor}
-use lexer.{peek, skip_ws, is_digit, scan_string, scan_number, err_at, err_kind}
+use lexer.{skip_ws, is_digit, scan_string, scan_number, err_at, err_kind}
 use value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj, JsonError, JsonErrorKind, Syntax, Truncated, Trailing, Depth, NumberRange, error_text}
 
 ## How deeply arrays and objects may nest before `parse` gives up. Deeper input
 ## is a plain error, not a blown stack.
 pub const MAX_DEPTH: Int = 512
 
-# true when the number literal is an integer (no fraction, no exponent)
-fn is_int_literal(lit: String) -> Bool =
-  not (str.contains(lit, ".") || str.contains(lit, "e") || str.contains(lit, "E"))
+# true when the number literal is an integer (no fraction, no exponent).
+#
+# One walk and not three. `str.contains` is a search, so the three-predicate
+# spelling this replaces re-read every digit of every number three times over,
+# on documents whose numbers are most of them.
+fn is_int_literal(lit: String) -> Bool = int_lit_go(lit, cursor.start(lit))
+
+fn int_lit_go(lit: String, i: Cursor) -> Bool =
+  if cursor.done(lit, i) {
+    true
+  } else {
+    let c = cursor.char(lit, i)
+    if c == char.code('.') || c == char.code('e') || c == char.code('E') {
+      false
+    } else {
+      int_lit_go(lit, cursor.next(lit, i))
+    }
+  }
 
 # Whether a Float is neither NaN nor ±Infinity. `f - f` is 0.0 exactly when f is
 # finite and NaN otherwise, and NaN compares false against everything (spec §4.3
@@ -84,7 +102,7 @@ fn parse_array_items(src: String, i: Cursor, depth: Int, acc: List[Json]) -> Res
   let (v, j) = parse_value(src, i, depth + 1)?
   let acc2 = acc ++ [v]
   let k = skip_ws(src, j)
-  let c = peek(src, k)
+  let c = cursor.char(src, k)
   if c == char.code(',') {
     parse_array_items(src, cursor.next(src, k), depth, acc2)
   } else if c == char.code(']') {
@@ -96,7 +114,7 @@ fn parse_array_items(src: String, i: Cursor, depth: Int, acc: List[Json]) -> Res
 
 fn parse_array(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), JsonError] = {
   let i1 = skip_ws(src, cursor.next(src, i0))
-  if peek(src, i1) == char.code(']') {
+  if cursor.char(src, i1) == char.code(']') {
     Ok((JArr([]), cursor.next(src, i1)))
   } else {
     parse_array_items(src, i1, depth, [])
@@ -105,18 +123,18 @@ fn parse_array(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), Js
 
 fn parse_object_members(src: String, i: Cursor, depth: Int, acc: Map[String, Json]) -> Result[(Json, Cursor), JsonError] = {
   let ks = skip_ws(src, i)
-  if peek(src, ks) != char.code('"') {
+  if cursor.char(src, ks) != char.code('"') {
     Err(err_at(src, ks, "expected a string key in object"))
   } else {
     let (key, j) = scan_string(src, ks)?
     let jc = skip_ws(src, j)
-    if peek(src, jc) != char.code(':') {
+    if cursor.char(src, jc) != char.code(':') {
       Err(err_at(src, jc, "expected ':' in object"))
     } else {
       let (v, k) = parse_value(src, cursor.next(src, jc), depth + 1)?
       let acc2 = map.insert(acc, key, v)
       let kc = skip_ws(src, k)
-      let c = peek(src, kc)
+      let c = cursor.char(src, kc)
       if c == char.code(',') {
         parse_object_members(src, cursor.next(src, kc), depth, acc2)
       } else if c == char.code('}') {
@@ -130,7 +148,7 @@ fn parse_object_members(src: String, i: Cursor, depth: Int, acc: Map[String, Jso
 
 fn parse_object(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), JsonError] = {
   let i1 = skip_ws(src, cursor.next(src, i0))
-  if peek(src, i1) == char.code('}') {
+  if cursor.char(src, i1) == char.code('}') {
     Ok((JObj(map.empty()), cursor.next(src, i1)))
   } else {
     parse_object_members(src, i1, depth, map.empty())
@@ -142,7 +160,7 @@ fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), Js
     Err(err_kind(src, i0, Depth, "maximum nesting depth exceeded"))
   } else {
     let i = skip_ws(src, i0)
-    let c = peek(src, i)
+    let c = cursor.char(src, i)
     if c == char.code('"') {
       let (s, j) = scan_string(src, i)?
       Ok((JStr(s), j))

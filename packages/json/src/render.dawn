@@ -1,5 +1,6 @@
 # Serialize a Json value back to compact JSON text (used for round-trip tests).
 use std/char
+use std/cursor
 use std/map
 use value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 
@@ -12,42 +13,122 @@ fn hex_cp(v: Int) -> Char = {
   char.of(n).expect("a hex digit")
 }
 
-# RFC 8259 §7 requires *every* code point below U+0020 to be escaped. Five have
-# short forms; the rest only have \u00XX. The earlier version handled quote,
-# backslash, LF, CR and TAB and passed the other 27 through verbatim, so a
-# document containing a literal \b — which this package's own lexer decodes from
-# `\b` — rendered back out as a raw 0x08 and was no longer parseable JSON.
-fn escape_cps(cs: List[Char]) -> List[Char] = {
-  var out: List[Char] = []
+# RFC 8259 §7 requires *every* code point below U+0020 to be escaped, and the
+# quote and the backslash besides. Five of the controls have short forms; the
+# rest only have \u00XX. An earlier version handled quote, backslash, LF, CR and
+# TAB and passed the other 27 through verbatim, so a document containing a
+# literal \b — which this package's own lexer decodes from `\b` — rendered back
+# out as a raw 0x08 and was no longer parseable JSON.
+fn escape_of(c: Int) -> String =
+  if c == char.code('"') {
+    "\\\""
+  } else if c == char.code('\\') {
+    "\\\\"
+  } else if c == 8 {
+    "\\b"
+  } else if c == 12 {
+    "\\f"
+  } else if c == 10 {
+    "\\n"
+  } else if c == 9 {
+    "\\t"
+  } else if c == 13 {
+    "\\r"
+  } else {
+    from_code_points(['\\', 'u', '0', '0', hex_cp(c / 16), hex_cp(c % 16)])
+  }
+
+# A quoted string, built out of spans rather than characters.
+#
+# The characters that need escaping are rare, and most strings have none at all,
+# so what this walks for is the *next* one and everything between two of them
+# comes out with a single `cursor.slice`. A string with no escapable character
+# is answered by quoting it whole, with nothing per character but the walk.
+#
+# The version this replaces materialized `code_points(s)`, built a second
+# `List[Char]` an element at a time, and rebuilt a string from that: three
+# passes and two list allocations per character, on every key and every string
+# value of every document rendered. `BATCH` is why the escaped pieces gather in
+# a string before they reach the list; lexer.dawn says what that trade is.
+fn quote(s: String) -> String = {
+  var i = cursor.start(s)
+  var run = i
+  var parts: List[String] = []
+  var chunk = ""
+  var pending = 0
+  while not cursor.done(s, i) {
+    let c = cursor.char(s, i)
+    let j = cursor.next(s, i)
+    # spelled out rather than behind a predicate: this runs per character of
+    # every string rendered, and a call is not free
+    if c == char.code('"') || c == char.code('\\') || c < 32 {
+      chunk = chunk ++ cursor.slice(s, run, i) ++ escape_of(c)
+      pending = pending + 1
+      if pending == BATCH {
+        parts = parts ++ [chunk]
+        chunk = ""
+        pending = 0
+      }
+      run = j
+    }
+    i = j
+  }
+  if len(parts) == 0 && pending == 0 {
+    "\"" ++ s ++ "\""
+  } else {
+    "\"" ++ join(parts ++ [chunk ++ cursor.slice(s, run, i)], "") ++ "\""
+  }
+}
+
+const BATCH: Int = 32
+
+# The elements of an array, comma-separated, and the entries of an object the
+# same way. Written out rather than `join(map(...), ",")` because `map` builds a
+# whole list of rendered pieces and a list append is a singleton vector: the
+# batching keeps the list to one entry per `SBATCH` pieces instead of one per
+# element.
+fn arr_body(xs: List[Json]) -> String = {
+  var parts: List[String] = []
+  var chunk = ""
+  var pending = 0
   var i = 0
-  while i < len(cs) {
-    let c = unwrap_or(get(cs, i), ' ')
-    if c == '"' {
-      out = out ++ ['\\', '"']
-    } else if c == '\\' {
-      out = out ++ ['\\', '\\']
-    } else if c == '\u{0008}' {
-      out = out ++ ['\\', 'b']
-    } else if c == '\u{000C}' {
-      out = out ++ ['\\', 'f']
-    } else if c == '\n' {
-      out = out ++ ['\\', 'n']
-    } else if c == '\t' {
-      out = out ++ ['\\', 't']
-    } else if c == '\r' {
-      out = out ++ ['\\', 'r']
-    } else if c < ' ' {
-      let n = char.code(c)
-      out = out ++ ['\\', 'u', '0', '0', hex_cp(n / 16), hex_cp(n % 16)]
-    } else {
-      out = out ++ [c]
+  let n = len(xs)
+  while i < n {
+    chunk = chunk ++ (if i == 0 { "" } else { "," }) ++ render(xs[i])
+    pending = pending + 1
+    if pending == SBATCH {
+      parts = parts ++ [chunk]
+      chunk = ""
+      pending = 0
     }
     i = i + 1
   }
-  out
+  if len(parts) == 0 { chunk } else { join(parts ++ [chunk], "") }
 }
 
-fn quote(s: String) -> String = "\"" ++ from_code_points(escape_cps(code_points(s))) ++ "\""
+fn obj_body(es: List[(String, Json)]) -> String = {
+  var parts: List[String] = []
+  var chunk = ""
+  var pending = 0
+  var i = 0
+  let n = len(es)
+  while i < n {
+    chunk = chunk ++ (if i == 0 { "" } else { "," }) ++ render_entry(es[i])
+    pending = pending + 1
+    if pending == SBATCH {
+      parts = parts ++ [chunk]
+      chunk = ""
+      pending = 0
+    }
+    i = i + 1
+  }
+  if len(parts) == 0 { chunk } else { join(parts ++ [chunk], "") }
+}
+
+# Smaller than `BATCH` because these pieces are whole rendered values rather
+# than a span and an escape: the bound on the extra copying is this constant
+# times the output, and eight is already an eightfold drop in appends.
+const SBATCH: Int = 8
 
 fn render_entry(e: (String, Json)) -> String = {
   let (k, v) = e
@@ -72,8 +153,8 @@ pub fn render(j: Json) -> String =
     JNum(n) -> render_num(n)
     JInt(n) -> to_string(n)
     JStr(s) -> quote(s)
-    JArr(xs) -> "[" ++ join(map(xs, render), ",") ++ "]"
-    JObj(m) -> "{" ++ join(map(map.entries(m), render_entry), ",") ++ "}"
+    JArr(xs) -> "[" ++ arr_body(xs) ++ "]"
+    JObj(m) -> "{" ++ obj_body(map.entries(m)) ++ "}"
   }
 
 test "every C0 control is escaped" {
