@@ -65,10 +65,11 @@ use check/types.{
   Ty, Sig, Traits, ImplI, Adts, Impls
 }
 use jvm/emit.{emit_module, gen_trait_interface}
-use ir/core.{CModule, CValue}
+use ir/core.{CModule, CValue, CMode}
 use ir/reach
 use ir/lower
 use c/rc
+use c/infer
 use c/emitc
 use c/cdriver
 use jvm/jfold.{fold_call}
@@ -1996,11 +1997,15 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   let dump_to = dump_dir
   let dumping = dump_to != ""
 
-  ## Lower one module; on success optionally write its golden. Returns the
-  ## node count so the coverage gate keeps working unchanged.
-  fn one(cls: String, tm: TModule) -> Int !io = {
-    let m = rc.rc_module(lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns),
-      rc.owned_modes())
+  ## Lower one module; the counting and the dump happen in the second phase,
+  ## once every module's Core exists and the mode inference has seen it all.
+  fn one(cls: String, tm: TModule) -> CModule =
+    lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)
+
+  ## Count and dump one lowered module. Returns the node count so the
+  ## coverage gate keeps working unchanged.
+  fn two(cls: String, core: CModule, modes: Map[(String, String), List[CMode]]) -> Int !io = {
+    let m = rc.rc_module(infer.stamp_modes(core, modes), modes)
     if dumping {
       let path = dump_to ++ "/" ++ join(str.split(cls, "/"), ".") ++ ".core"
       match io.write_file(path, coredump.render(adts, m)) {
@@ -2014,12 +2019,16 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   var ok = 0
   var bad = 0
   var seen: Set[String] = set.empty()
+  # Phase one: lower everything, so the golden carries the same parameter
+  # modes production carries -- the inference is whole-program, and running
+  # it per module would dump an all-owned world no shipping backend compiles.
   # std first: the compiler is compiled against it, so a gap there matters
-  # just as much
+  # just as much.
+  var cores: List[(String, CModule)] = []
   for sm in std.mods {
     let (cls, _cx, tm, _ct) = sm
     match catch_panic(() => one(cls, tm)) {
-      Ok(_n) -> { ok = ok + 1 }
+      Ok(m) -> { cores = cores ++ [(cls, m)] }
       Err(e) -> {
         bad = bad + 1
         if not set.has(seen, e.message) {
@@ -2031,12 +2040,32 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   }
   for cm in prog.modules {
     match catch_panic(() => one(cm.class_name, cm.tm)) {
-      Ok(_n) -> { ok = ok + 1 }
+      Ok(m) -> { cores = cores ++ [(cm.class_name, m)] }
       Err(e) -> {
         bad = bad + 1
         if not set.has(seen, e.message) {
           seen = set.insert(seen, e.message)
           println("GAP  " ++ cm.class_name ++ ": " ++ e.message)
+        }
+      }
+    }
+  }
+  # Phase two: infer modes over what lowered, then count and dump each.
+  var bare: List[CModule] = []
+  for pr in cores {
+    let (_cls, m) = pr
+    bare = bare ++ [m]
+  }
+  let modes = infer.infer_modes(bare)
+  for pr in cores {
+    let (cls, m) = pr
+    match catch_panic(() => two(cls, m, modes)) {
+      Ok(_n) -> { ok = ok + 1 }
+      Err(e) -> {
+        bad = bad + 1
+        if not set.has(seen, e.message) {
+          seen = set.insert(seen, e.message)
+          println("GAP  " ++ cls ++ ": " ++ e.message)
         }
       }
     }

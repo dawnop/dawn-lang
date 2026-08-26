@@ -57,26 +57,36 @@ unmutated compiler.
 ## The matrix
 
 Six sites (roster.txt), three shapes each, plus per-program clean controls.
-What the harness pins **today** (knife 2 step 0 in: `rc_check` reads the
-table, and `rc_module` asserts the two halves agree before rewriting):
+Since the inference landed (knife 2), a flip means TOGGLE: the single-sided
+shapes toggle one half of what the inference decided, and `both` re-runs
+the whole fixpoint with the position forced the other way — a coherent
+other-world, propagated to every caller (editing the finished table is not
+coherent: the first attempt broke a *caller* whose parameter stayed
+borrowed against the old row, and the borrowed-consume panic caught it).
+What the harness pins **today**:
 
-| site \ shape        | callsite    | callee      | both      |
-|---------------------|-------------|-------------|-----------|
-| std/cursor:done:2:0 | assertion ✓ | assertion ✓ | green ✓   |
-| std/cursor:next:2:0 | assertion ✓ | assertion ✓ | green ✓   |
-| std/str:len:1:0     | assertion ✓ | assertion ✓ | green ✓   |
-| std/pvec:index:2:0  | assertion ✓ | assertion ✓ | known-red |
-| std/list:reverse:1:0| assertion ✓ | assertion ✓ | green ✓   |
-| std/list:take:2:0   | assertion ✓ | assertion ✓ | green ✓   |
+| site \ shape        | callsite    | callee      | both              |
+|---------------------|-------------|-------------|-------------------|
+| std/cursor:done:2:0 | assertion ✓ | assertion ✓ | green ✓           |
+| std/cursor:next:2:0 | assertion ✓ | assertion ✓ | green ✓           |
+| std/str:len:1:0     | assertion ✓ | assertion ✓ | known-red: refusal|
+| std/pvec:index:2:0  | assertion ✓ | assertion ✓ | known-red: leak   |
+| std/list:reverse:1:0| assertion ✓ | assertion ✓ | known-red: refusal|
+| std/list:take:2:0   | assertion ✓ | assertion ✓ | known-red: refusal|
 
 "assertion" is the compile-time panic `rc: mode contract disagrees in ...`,
 which names the function, the position and both halves' answers. A mutant
 (callsite, callee) is judged by "any machine red counts": that assertion,
 the rc balance panic, an ASan report, an LSan report, a wrong byte, a wrong
-exit. A mutant that sails through everything fails the run by name. The
-coherent flip (both) must be green end to end — same bytes, clean
-sanitizers — and the one site where it is not is the finding below,
-ratcheted in known-red.txt.
+exit. A mutant that sails through everything fails the run by name.
+
+The coherent flip (both) must be green end to end — same bytes, clean
+sanitizers — except where a machine refuses it for a reason worth pinning,
+and those reasons are the ratchet entries in known-red.txt: the leak is
+the intrinsic-jurisdiction finding below, and the three refusals are
+`rc.rw`'s borrowed-consume panic holding the zero-new-dup contract against
+a forced borrow of a parameter whose body consumes it (the inference had
+said owned; the toggle demands the opposite; the refusal is the answer).
 
 ## What stands behind the assertion
 

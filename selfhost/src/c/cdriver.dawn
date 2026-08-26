@@ -18,6 +18,8 @@ use driver/stdlib.{StdCtx}
 use driver/analyze.{CheckedMod, Program}
 use ir/lower
 use c/rc
+use c/infer
+use c/infer.{ForcedMode}
 use ir/reach
 use ir/reach.{TableUse}
 use c/emitc
@@ -150,12 +152,13 @@ fn named_tests(m: CModule) -> CModule = {
 
 ## One requested parameter-mode flip, from `DAWN_RC_MODE_FLIPS`. The mode
 ## contract (core.CMode) has two readers -- the callee's `CParam.mode` and
-## the program-wide call-site table -- and a flip names which of them to turn
-## `CBorrowed` for one parameter of one function. Flipping only one is the
-## whole point: scripts/rc-mode-contract exists to prove a disagreement
-## between the two readers is caught by the sanitizers, and `both` is the
-## coherent flip the borrowed-inference pass (docs/perceus-design.md 6) will
-## one day produce, so it must stay green.
+## the program-wide call-site table -- and a flip names which of them to
+## TOGGLE for one parameter of one function (borrowed if the inference said
+## owned, owned if it said borrowed; before the inference existed the base
+## was all-owned and a flip always meant borrowed). Flipping only one side
+## is the whole point: scripts/rc-mode-contract exists to prove a
+## disagreement between the two readers is caught by a machine, and `both`
+## is the coherent flip that must stand or fall on its own semantics.
 type ModeFlip = {
   owner: String,
   name: String,
@@ -221,9 +224,16 @@ fn mode_flips_from_env() -> List[ModeFlip] !io =
     Some(s) -> parse_mode_flips(s)
   }
 
-## The call-site half of a flip: a table row with `CBorrowed` at the flipped
-## position. A row already inserted by an earlier flip is edited in place, so
-## two flips of one function compose.
+fn toggled(m: CMode) -> CMode =
+  match m {
+    COwned -> CBorrowed
+    CBorrowed -> COwned
+  }
+
+## The call-site half of a flip: the table row's mode toggled at the flipped
+## position (a missing row reads as all-owned first). A row already edited
+## by an earlier flip is edited in place, so two flips of one function
+## compose.
 fn flip_table(
   base: Map[(String, String), List[CMode]],
   flips: List[ModeFlip]
@@ -245,7 +255,7 @@ fn flip_table(
       var row: List[CMode] = []
       var i = 0
       for m in row0 {
-        if i == fl.idx { row = row ++ [CBorrowed] } else { row = row ++ [m] }
+        if i == fl.idx { row = row ++ [toggled(m)] } else { row = row ++ [m] }
         i = i + 1
       }
       out = map.insert(out, (fl.owner, fl.name), row)
@@ -254,8 +264,8 @@ fn flip_table(
   out
 }
 
-## The callee half of a flip: the matching `CParam.mode` stamped `CBorrowed`
-## on the lowered Core, before `rc_module` reads it. With no flips the module
+## The callee half of a flip: the matching `CParam.mode` toggled on the
+## stamped Core, before `rc_module` reads it. With no flips the module
 ## passes through untouched.
 fn flip_callee(m: CModule, flips: List[ModeFlip]) -> CModule = {
   if len(flips) == 0 { return m }
@@ -268,7 +278,7 @@ fn flip_callee(m: CModule, flips: List[ModeFlip]) -> CModule = {
         var i = 0
         for p in params {
           if i == fl.idx {
-            out = out ++ [CParam { ..p, mode: CBorrowed }]
+            out = out ++ [CParam { ..p, mode: toggled(p.mode) }]
           } else {
             out = out ++ [p]
           }
@@ -319,16 +329,9 @@ fn build_units(
   std_tests: Bool
 ) -> (List[EmitMod], String, Adts, Map[(String, String), List[CMode]]) !io = {
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
-  # The parameter-mode table, one for the whole unit: `__emitc` is
-  # whole-program compilation, so the borrowed-inference fixpoint
-  # (docs/perceus-design.md 6) has its natural home here, over every
-  # module's Core, before any is rewritten. Until that pass exists the
-  # table is empty and every parameter is owned. It rides back out because
-  # the emitter reads call sites with the same table the rewrite used.
   # `flips` is the mutant harness's injection channel (see ModeFlip above)
   # and is empty on every compile that did not set DAWN_RC_MODE_FLIPS.
   let flips = mode_flips_from_env()
-  let modes = flip_table(rc.owned_modes(), flips)
   # const values by declaring module, the same view the JVM path builds: a
   # const is named by its simple name and imported by it
   var const_vals: Map[String, Map[String, CValue]] = map.empty()
@@ -338,7 +341,11 @@ fn build_units(
   }
   for cm in prog.modules { const_vals = map.insert(const_vals, cm.mod_path, cm.ct.consts) }
 
-  var units: List[EmitMod] = []
+  # Every module lowered before any is reference-counted: the parameter-mode
+  # table is a whole-program fixpoint (`infer.infer_modes`), and `__emitc`
+  # is whole-program compilation, so this loop split is its natural home.
+  # `pre` carries the un-counted Core in EmitMod's own shape.
+  var pre: List[EmitMod] = []
   var entry = ""
   for sm in std.mods {
     let (cls, cx, tm, ct) = sm
@@ -349,12 +356,8 @@ fn build_units(
       } else {
         lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)
       }
-    units = units ++ [
-      EmitMod {
-        m: rc.rc_module(flip_callee(core, flips), modes),
-        consts: merged_consts(cx, ct, const_vals),
-        blocks: ct.blocks
-      }
+    pre = pre ++ [
+      EmitMod { m: core, consts: merged_consts(cx, ct, const_vals), blocks: ct.blocks }
     ]
   }
   for cm in prog.modules {
@@ -365,18 +368,59 @@ fn build_units(
       } else {
         lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns)
       }
-    units = units ++ [
-      EmitMod {
-        m: rc.rc_module(flip_callee(core, flips), modes),
-        consts: merged_consts(cm.cx, cm.ct, const_vals),
-        blocks: cm.ct.blocks
-      }
+    pre = pre ++ [
+      EmitMod { m: core, consts: merged_consts(cm.cx, cm.ct, const_vals), blocks: cm.ct.blocks }
     ]
     if entry == "" {
       for tf in cm.tm.fns {
         if tf.name == "main" { entry = cm.class_name }
       }
     }
+  }
+
+  # The inference stamps both halves of the contract from one fixpoint
+  # (table row and CParam.mode). A `both` flip re-runs the fixpoint with the
+  # named position held at the opposite of what the first run decided --
+  # a coherent other-world, propagated to every caller -- while the
+  # single-sided flips edit one half afterwards, which is exactly the
+  # disagreement `rc_module`'s contract assertion exists to catch. The
+  # table rides back out because the emitter reads call sites with the same
+  # table the rewrite used.
+  var cores: List[CModule] = []
+  for u2 in pre { cores = cores ++ [u2.m] }
+  let inferred0 = infer.infer_modes(cores)
+  var forced: List[ForcedMode] = []
+  for fl in flips {
+    if fl.callee_side && fl.callsite_side {
+      var cur = COwned
+      match map.get(inferred0, (fl.owner, fl.name)) {
+        None -> ()
+        Some(row) -> { if fl.idx < len(row) { cur = row[fl.idx] } }
+      }
+      forced = forced ++ [ForcedMode {
+        owner: fl.owner, name: fl.name, arity: fl.arity, idx: fl.idx,
+        mode: toggled(cur)
+      }]
+    }
+  }
+  let inferred = if len(forced) == 0 {
+    inferred0
+  } else {
+    infer.infer_modes_forced(cores, forced)
+  }
+  var singles: List[ModeFlip] = []
+  for fl in flips {
+    if not (fl.callee_side && fl.callsite_side) { singles = singles ++ [fl] }
+  }
+  let modes = flip_table(inferred, singles)
+  var units: List[EmitMod] = []
+  for u2 in pre {
+    units = units ++ [
+      EmitMod {
+        ..u2,
+        m: rc.rc_module(flip_callee(infer.stamp_modes(u2.m, inferred), singles), modes)
+      }
+    ]
   }
   # `adts` rides back out: the emitter needs it to rebuild a structured
   # comptime constant, and recomputing `program_tables` at the call site would

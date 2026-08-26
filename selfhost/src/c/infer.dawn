@@ -1,0 +1,688 @@
+# Borrowed-parameter inference: the whole-program pre-pass that fills the
+# Perceus mode table (core.CMode, docs/perceus-design.md 6).
+#
+# The direction is Lean's (InferBorrow): every reference parameter starts
+# borrowed, and a fixpoint flips to owned every parameter the body does not
+# merely read. Owned is the safe direction -- it is the convention the whole
+# backend spoke before this pass existed -- so every refusal here costs a
+# dup, never a free. What stays borrowed is exactly a parameter whose every
+# use is a borrow position of the rc rewrite: no dup on arrival, no ledger
+# entry, no own-slot, no release. The scan-shaped std wrappers (cursor/str)
+# are the target profile; docs/perceus-design.md 6 has the measurements.
+#
+# Two kinds of rule, with different teeth:
+#
+#   * Jurisdiction pins (`pinned`): functions whose call sites do not read
+#     the table -- reached through an intrinsic lowering, a dictionary slot
+#     or a closure -- must keep every parameter owned, because those call
+#     sites keep the all-owned convention no matter what the table says.
+#     Deleting a pin is a LEAK the sanitizers catch
+#     (scripts/rc-mode-contract's known-red measures the intrinsic one).
+#   * Demand rules (`dm_*`): a parameter that reaches a consuming position
+#     -- returned, stored, captured, reassigned, passed to an owned
+#     position -- is flipped owned. The walk mirrors `rc.rw`'s consume
+#     classification exactly, and the rewrite enforces the mirror: a
+#     borrowed parameter reaching a consuming position is a compile-time
+#     panic in `rc.rw` (never a silent dup), so a deleted demand rule is
+#     loud, and "borrowed" always means zero new dup points.
+#
+# The table this produces is one half of the contract; `stamp_modes` writes
+# the same answer onto `CParam.mode`, and `rc.rc_module` asserts the two
+# halves agree before rewriting anything.
+
+use std/list
+use std/map
+use std/set
+use ir/core.{
+  CModule, CFun, CParam, CExpr, CStmt, CCallee, CDictDef,
+  CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
+  CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
+  CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
+  CContinue, CForeign, CDup,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
+  CDynamic, CDirect, CMethod, CJava, CInt, CFloat, CBool, CStr, CUnit,
+  CSlotFn, CSlotDefault,
+  CMode, COwned, CBorrowed, mode_owned
+}
+use check/types.{Ty, TyFn, TyOpaque, TyInt, TyList, EPure, is_ref_ty, intr_owned_args}
+use c/emitc
+
+# ---- eligibility ----
+
+## A function value cannot see a borrow: a closure or fn-typed value is
+## called through `CDynamic`, whose sites keep the all-owned convention,
+## and Lean, Koka and Swift all pin higher-order to owned (core.CMode).
+## Keeping fn-typed *parameters* owned is the same consensus one step
+## earlier -- their values exist to be passed on into that convention.
+fn fn_typed(t: Ty) -> Bool =
+  match t {
+    TyFn(_, _, _) -> true
+    TyOpaque(_, _, _, _, tgt) -> fn_typed(tgt)
+    _ -> false
+  }
+
+## Whether this parameter may ever be stamped borrowed.
+fn eligible(p: CParam) -> Bool = is_ref_ty(p.ty) && not fn_typed(p.ty)
+
+## The functions whose call sites are outside the table's jurisdiction, so
+## their parameters must stay owned whatever their bodies do:
+##
+##   * the `std/pvec` functions the C emitter names directly -- the list
+##     primitives (`xs[i]` is the Core intrinsic `list_index`, mapped to
+##     `std/pvec.index` only in emitc) plus the literal/concat lowering
+##     targets. Their executed call sites never consult the table;
+##     scripts/rc-mode-contract's known-red entry is the measured leak.
+##   * every function a dictionary slot names: a `CMethod` call reads the
+##     slot as a bare function pointer and hands arguments over owned.
+##   * every function a `CClosure` names: a function value is called
+##     through `CDynamic`, all-owned. (A *named* function used as a value
+##     is wrapped by `lower.lift_fn_value`, so the pin lands on the lifted
+##     wrapper and the wrapped function's own row still applies to the
+##     direct call inside.)
+fn pinned(ms: List[CModule]) -> Set[(String, String)] = {
+  var out: Set[(String, String)] = set.empty()
+  for n in emitc.emitter_named_pvec_fns() {
+    out = set.insert(out, ("std/pvec", n))
+  }
+  for m in ms {
+    for d in m.dicts {
+      for s in d.slots {
+        match s {
+          CSlotFn(owner, name) -> { out = set.insert(out, (owner, name)) }
+          CSlotDefault(_, _) -> ()
+        }
+      }
+    }
+    for f in m.fns {
+      out = clo_expr(f.body, out)
+    }
+  }
+  out
+}
+
+## Every function a `CClosure` in `e` names. Enumerated rather than
+## wildcarded, for `rc.fv_expr`'s reason: a Core node added later with a
+## child this walk cannot see must come back as a compile error, because a
+## missed closure reference here is a function called all-owned while its
+## callee stops releasing -- a leak.
+fn clo_expr(e: CExpr, acc: Set[(String, String)]) -> Set[(String, String)] =
+  match e {
+    CClosure(fn_name, owner, caps, _) ->
+      clo_list(caps, set.insert(acc, (owner, fn_name))),
+    CCall(callee, args, _) -> {
+      let a1 = match callee {
+        CDynamic(t) -> clo_expr(t, acc)
+        CMethod(d, _, _, _, _) -> clo_expr(d, acc)
+        _ -> acc
+      }
+      clo_list(args, a1)
+    }
+    CIntrinsic(_, args, _) -> clo_list(args, acc)
+    CCtor(_, _, args, _) -> clo_list(args, acc)
+    CField(t, _, _, _, _) -> clo_expr(t, acc)
+    CIsCtor(t, _, _) -> clo_expr(t, acc)
+    CTagOf(t, _) -> clo_expr(t, acc)
+    CDictApply(_, args, _) -> clo_list(args, acc)
+    CDictArg(d, _, _, _, _) -> clo_expr(d, acc)
+    CTuple(elems, _) -> clo_list(elems, acc)
+    CTupleGet(t, _, _) -> clo_expr(t, acc)
+    CBox(inner, _) -> clo_expr(inner, acc)
+    CUnbox(inner, _) -> clo_expr(inner, acc)
+    CBinary(_, l, r, _) -> clo_expr(r, clo_expr(l, acc))
+    CUnary(_, x, _) -> clo_expr(x, acc)
+    CIf(cond, thn, els, _) -> {
+      let a1 = clo_expr(thn, clo_expr(cond, acc))
+      match els {
+        None -> a1
+        Some(x) -> clo_expr(x, a1)
+      }
+    }
+    CBlock(stmts, tail, _) -> {
+      let a1 = clo_stmts(stmts, acc)
+      match tail {
+        None -> a1
+        Some(t) -> clo_expr(t, a1)
+      }
+    }
+    CListLit(elems, _) -> clo_list(elems, acc)
+    CReturn(v) ->
+      match v {
+        None -> acc
+        Some(x) -> clo_expr(x, acc)
+      },
+    CDup(inner, _) -> clo_expr(inner, acc)
+    CForeign(j, _) -> {
+      let a1 = match j.target {
+        None -> acc
+        Some(t) -> clo_expr(t, acc)
+      }
+      clo_list(j.args, a1)
+    }
+    CInt(_) -> acc
+    CFloat(_) -> acc
+    CBool(_) -> acc
+    CStr(_) -> acc
+    CUnit -> acc
+    CLocal(_, _) -> acc
+    # a bare CFnRef does not survive lowering (emitc panics on one), so
+    # there is nothing to pin here; the wrapper's CClosure was the pin
+    CFnRef(_, _, _) -> acc
+    CDictRef(_, _, _, _) -> acc
+    CConstRef(_, _, _) -> acc
+    CComptime(_, _, _) -> acc
+    CBreak(_) -> acc
+    CContinue(_) -> acc
+  }
+
+fn clo_list(es: List[CExpr], acc: Set[(String, String)]) -> Set[(String, String)] = {
+  var a = acc
+  for e in es { a = clo_expr(e, a) }
+  a
+}
+
+fn clo_stmts(stmts: List[CStmt], acc: Set[(String, String)]) -> Set[(String, String)] = {
+  var a = acc
+  for s in stmts { a = clo_stmt(s, a) }
+  a
+}
+
+fn clo_stmt(s: CStmt, acc: Set[(String, String)]) -> Set[(String, String)] =
+  match s {
+    CSLet(_, _, init) -> clo_expr(init, acc)
+    CSAssign(_, v) -> clo_expr(v, acc)
+    CSDiscard(x) -> clo_expr(x, acc)
+    CSLoop(_, body, step) -> {
+      let a1 = clo_expr(body, acc)
+      match step {
+        None -> a1
+        Some(x) -> clo_expr(x, a1)
+      }
+    }
+    CSIf(cond, thn, els) -> {
+      let a1 = clo_expr(thn, clo_expr(cond, acc))
+      match els {
+        None -> a1
+        Some(x) -> clo_expr(x, a1)
+      }
+    }
+    CSDrop(_) -> acc
+  }
+
+# ---- demands ----
+#
+# The walk that finds every symbol reaching a consuming position, mirroring
+# `rc.rw`'s classification: `k` is true exactly where the rewrite would
+# consume the value. The mirror is enforced from the other side -- `rc.rw`
+# panics when a borrowed parameter reaches a consuming position -- so a
+# disagreement between the two walks is a loud compile error, never a
+# silent extra dup (walk says consume, rw says borrow: wasted owned bit,
+# performance only; walk says borrow, rw says consume: the panic).
+
+type Dm = {
+  # symbols seen in a consuming position, or reassigned
+  owned: Set[Int],
+  # the call-site table as inferred so far: a `CDirect` argument's k is the
+  # callee's current mode at that position
+  modes: Map[(String, String), List[CMode]]
+}
+
+fn dm_mark(d: Dm, sym: Int) -> Dm = Dm { ..d, owned: set.insert(d.owned, sym) }
+
+fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
+  match e {
+    CLocal(sym, _) -> if k { dm_mark(d, sym) } else { d },
+
+    # a projection reads its target; the projected value is fresh (dup'ed)
+    CField(t, _, _, _, _) -> dm_expr(d, t, false)
+    CTupleGet(t, _, _) -> dm_expr(d, t, false)
+    CIsCtor(t, _, _) -> dm_expr(d, t, false)
+    CTagOf(t, _) -> dm_expr(d, t, false)
+
+    # transparent to counting when the wrapped side is a reference
+    # (rc.rw's CBox/CUnbox rule)
+    CBox(inner, from) -> dm_expr(d, inner, k && is_ref_ty(from))
+    CUnbox(inner, to) -> dm_expr(d, inner, k && is_ref_ty(to))
+
+    CCall(callee, args, _) -> {
+      # calling a function value reads it (rc.rw_callee borrows the target)
+      var d1 = match callee {
+        CDynamic(t) -> dm_expr(d, t, false)
+        CMethod(dict, _, _, _, _) -> dm_expr(d, dict, false)
+        _ -> d
+      }
+      match callee {
+        CDirect(owner, name) -> {
+          let row = match map.get(d1.modes, (owner, name)) {
+            Some(r) -> r
+            None -> []
+          }
+          var i = 0
+          for a in args {
+            # positions past the row (dictionaries, evidence) are owned
+            let owned_pos = if i < len(row) { mode_owned(row[i]) } else { true }
+            d1 = dm_expr(d1, a, owned_pos)
+            i = i + 1
+          }
+          d1
+        }
+        # impl/default/method/dynamic targets keep the all-owned convention
+        _ -> {
+          for a in args { d1 = dm_expr(d1, a, true) }
+          d1
+        }
+      }
+    }
+
+    CIntrinsic(name, args, _) -> {
+      # runtime primitives borrow, except the reuse-analysis positions
+      let owned = intr_owned_args(name)
+      var d1 = d
+      var i = 0
+      for a in args {
+        d1 = dm_expr(d1, a, list.contains(owned, i))
+        i = i + 1
+      }
+      d1
+    }
+
+    # stored: the structure keeps the reference
+    CCtor(_, _, args, _) -> dm_list(d, args, true)
+    CTuple(elems, _) -> dm_list(d, elems, true)
+    CListLit(elems, _) -> dm_list(d, elems, true)
+    # captured: the closure keeps it (the Lean rule: pap captures are owned)
+    CClosure(_, _, caps, _) -> dm_list(d, caps, true)
+
+    # both sides of any binary are reads, short-circuit or not
+    CBinary(_, l, r, _) -> dm_expr(dm_expr(d, l, false), r, false)
+    CUnary(_, x, _) -> dm_expr(d, x, false)
+
+    CIf(cond, thn, els, _) -> {
+      let d1 = dm_expr(d, cond, false)
+      let d2 = dm_expr(d1, thn, k)
+      match els {
+        None -> d2
+        Some(x) -> dm_expr(d2, x, k)
+      }
+    }
+
+    CBlock(stmts, tail, _) -> {
+      let d1 = dm_stmts(d, stmts)
+      match tail {
+        None -> d1
+        Some(t) -> dm_expr(d1, t, k)
+      }
+    }
+
+    # returned: escapes to the caller (rc.rw rewrites the value consuming)
+    CReturn(v) ->
+      match v {
+        None -> d
+        Some(x) -> dm_expr(d, x, true)
+      },
+
+    # the JVM escape hatch; unreachable on the native path, walked
+    # conservatively so a symbol read only in here still demands owned
+    CForeign(j, _) -> {
+      let d1 = match j.target {
+        None -> d
+        Some(t) -> dm_expr(d, t, true)
+      }
+      dm_list(d1, j.args, true)
+    }
+
+    CDup(inner, _) -> dm_expr(d, inner, k)
+    CDictApply(_, args, _) -> dm_list(d, args, false)
+    CDictArg(dd, _, _, _, _) -> dm_expr(d, dd, false)
+
+    # Leaves, enumerated for rc.fv_expr's reason: a node added later must
+    # come back here as a compile error, because the wildcard's answer --
+    # "demands nothing" -- is the direction that stamps borrowed too often,
+    # and rc.rw's panic would then reject a correct program.
+    CInt(_) -> d
+    CFloat(_) -> d
+    CBool(_) -> d
+    CStr(_) -> d
+    CUnit -> d
+    CFnRef(_, _, _) -> d
+    CDictRef(_, _, _, _) -> d
+    CConstRef(_, _, _) -> d
+    CComptime(_, _, _) -> d
+    CBreak(_) -> d
+    CContinue(_) -> d
+  }
+
+fn dm_list(d: Dm, es: List[CExpr], k: Bool) -> Dm = {
+  var d1 = d
+  for e in es { d1 = dm_expr(d1, e, k) }
+  d1
+}
+
+fn dm_stmts(d: Dm, stmts: List[CStmt]) -> Dm = {
+  var d1 = d
+  for s in stmts { d1 = dm_stmt(d1, s) }
+  d1
+}
+
+fn dm_stmt(d: Dm, s: CStmt) -> Dm =
+  match s {
+    # a binding aliases the value: tracking where the alias flows would be
+    # a second liveness analysis, so the initialiser is a consuming
+    # position (which is also exactly how rc.rw rewrites it)
+    CSLet(_, _, init) -> dm_expr(d, init, true)
+    # reassignment: the expansion drops the old value, and a drop is a
+    # release the caller of a borrowed parameter never granted (the TCO
+    # loop-variable rule -- a binding that lives across iterations is
+    # handed over once per trip)
+    CSAssign(sym, v) -> dm_expr(dm_mark(d, sym), v, true)
+    CSDiscard(x) -> dm_expr(d, x, false)
+    CSLoop(_, body, step) -> {
+      let d1 = dm_expr(d, body, false)
+      match step {
+        None -> d1
+        Some(x) -> dm_expr(d1, x, false)
+      }
+    }
+    CSIf(cond, thn, els) -> {
+      let d1 = dm_expr(d, cond, false)
+      let d2 = dm_expr(d1, thn, false)
+      match els {
+        None -> d2
+        Some(x) -> dm_expr(d2, x, false)
+      }
+    }
+    CSDrop(_) -> d
+  }
+
+# ---- the fixpoint ----
+
+## One mode held fixed through the fixpoint, for the mutant harness's
+## coherent flips: `both` means "the world where the inference decided this
+## position the other way", and that world only exists by re-running the
+## fixpoint with the position pinned -- editing the finished table would
+## leave every caller's mode computed against the old row, and `rc.rw`'s
+## borrowed-consume panic rejects exactly that (watched happen: the first
+## toggle-to-owned broke `is_empty`, a caller whose parameter stayed
+## borrowed because the row used to say borrowed).
+pub type ForcedMode = { owner: String, name: String, arity: Int, idx: Int, mode: CMode }
+
+fn plain(f: CFun) -> Bool =
+  match f.impl_of {
+    Some(_) -> false
+    None ->
+      match f.default_of {
+        Some(_) -> false
+        None -> len(f.captures) == 0
+      }
+  }
+
+## The optimistic start: every eligible parameter of every candidate
+## borrowed. Rows are only created where at least one position could be
+## borrowed; everything else is the absent row, all owned.
+fn seed(ms: List[CModule], pin: Set[(String, String)]) -> Map[(String, String), List[CMode]] = {
+  var table: Map[(String, String), List[CMode]] = map.empty()
+  for m in ms {
+    for f in m.fns {
+      if plain(f) && not set.has(pin, (f.owner, f.name)) {
+        var row: List[CMode] = []
+        var any = false
+        for p in f.params {
+          if eligible(p) {
+            row = row ++ [CBorrowed]
+            any = true
+          } else {
+            row = row ++ [COwned]
+          }
+        }
+        if any { table = map.insert(table, (f.owner, f.name), row) }
+      }
+    }
+  }
+  table
+}
+
+## The program-wide mode table: whole-program because `__emitc` is one
+## translation unit, so every `CDirect` a body can spell has its callee in
+## `ms`. Monotone -- each round only flips borrowed to owned -- so the
+## fixpoint terminates in at most one round per eligible parameter.
+pub fn infer_modes(ms: List[CModule]) -> Map[(String, String), List[CMode]] =
+  infer_modes_forced(ms, [])
+
+## The same fixpoint with `forced` positions held at their given mode --
+## seeded there, exempt from demand flips, and (for a forced borrowed) from
+## the jurisdiction pins. Real compiles force nothing; the mutant harness's
+## `both` shape lives here.
+pub fn infer_modes_forced(
+  ms: List[CModule],
+  forced: List[ForcedMode]
+) -> Map[(String, String), List[CMode]] = {
+  var table = seed(ms, pinned(ms))
+  var fixed: Set[(String, String, Int)] = set.empty()
+  for fm in forced {
+    var row: List[CMode] = []
+    match map.get(table, (fm.owner, fm.name)) {
+      Some(r) -> { row = r }
+      None -> {
+        var i = 0
+        while i < fm.arity {
+          row = row ++ [COwned]
+          i = i + 1
+        }
+      }
+    }
+    var row2: List[CMode] = []
+    var i = 0
+    for mo in row {
+      if i == fm.idx { row2 = row2 ++ [fm.mode] } else { row2 = row2 ++ [mo] }
+      i = i + 1
+    }
+    table = map.insert(table, (fm.owner, fm.name), row2)
+    fixed = set.insert(fixed, (fm.owner, fm.name, fm.idx))
+  }
+  var changed = true
+  while changed {
+    changed = false
+    for m in ms {
+      for f in m.fns {
+        match map.get(table, (f.owner, f.name)) {
+          None -> ()
+          Some(row) -> {
+            let dm = dm_expr(
+              Dm { owned: set.empty(), modes: table },
+              f.body,
+              # the body's tail is the function's result: consuming
+              true
+            )
+            var row2: List[CMode] = []
+            var i = 0
+            var diff = false
+            for p in f.params {
+              let keep = row[i]
+              if not mode_owned(keep) && set.has(dm.owned, p.sym) &&
+                not set.has(fixed, (f.owner, f.name, i)) {
+                  row2 = row2 ++ [COwned]
+                  diff = true
+                } else {
+                  row2 = row2 ++ [keep]
+                }
+              i = i + 1
+            }
+            if diff {
+              table = map.insert(table, (f.owner, f.name), row2)
+              changed = true
+            }
+          }
+        }
+      }
+    }
+  }
+  # rows that ended all-owned answer like missing ones (rc.owned_positions);
+  # dropping them keeps the table a list of exceptions, not a census
+  var out: Map[(String, String), List[CMode]] = map.empty()
+  for key in map.keys(table) {
+    match map.get(table, key) {
+      None -> ()
+      Some(row) -> {
+        var any = false
+        for mo in row {
+          if not mode_owned(mo) { any = true }
+        }
+        if any { out = map.insert(out, key, row) }
+      }
+    }
+  }
+  out
+}
+
+## The callee half: `CParam.mode` stamped from the same table, so the two
+## readers of the contract cannot drift (rc_module asserts they have not).
+pub fn stamp_modes(m: CModule, modes: Map[(String, String), List[CMode]]) -> CModule = {
+  var fns: List[CFun] = []
+  for f in m.fns {
+    match map.get(modes, (f.owner, f.name)) {
+      None -> { fns = fns ++ [f] }
+      Some(row) -> {
+        if plain(f) {
+          var params: List[CParam] = []
+          var i = 0
+          for p in f.params {
+            let mo = if i < len(row) { row[i] } else { COwned }
+            params = params ++ [CParam { ..p, mode: mo }]
+            i = i + 1
+          }
+          fns = fns ++ [CFun { ..f, params: params }]
+        } else {
+          # an impl shares its method's name; the row that matched it
+          # belongs to a plain function and must not stamp this one
+          fns = fns ++ [f]
+        }
+      }
+    }
+  }
+  CModule { ..m, fns: fns }
+}
+
+# ---- tests ----
+
+fn t_fn(owner: String, name: String, params: List[CParam], ret: Ty, body: CExpr) -> CFun =
+  CFun {
+    name: name, owner: owner, captures: [], params: params, dicts: [], evs: [],
+    ret: ret, body: body, is_test: false, impl_of: None, default_of: None
+  }
+
+fn t_mod(owner: String, fns: List[CFun]) -> CModule =
+  CModule { owner: owner, fns: fns, dicts: [], next_sym: 100 }
+
+fn t_row(
+  table: Map[(String, String), List[CMode]],
+  owner: String,
+  name: String
+) -> List[CMode] =
+  match map.get(table, (owner, name)) {
+    Some(r) -> r
+    None -> []
+  }
+
+test "a parameter only read stays borrowed; a returned one flips owned" {
+  let lst = TyList(TyInt)
+  let read = t_fn("m", "r", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt,
+    CIntrinsic("len", [CLocal(1, lst)], TyInt))
+  let ret = t_fn("m", "g", [CParam { sym: 2, ty: lst, mode: COwned }], lst,
+    CLocal(2, lst))
+  let table = infer_modes([t_mod("m", [read, ret])])
+  let row = t_row(table, "m", "r")
+  assert len(row) == 1 && not mode_owned(row[0])
+  # the returned parameter's row pruned to nothing: absent means all owned
+  assert len(t_row(table, "m", "g")) == 0
+}
+
+test "an owned position propagates through the fixpoint" {
+  let lst = TyList(TyInt)
+  # g returns its parameter (owned); f forwards its own to g's position 0
+  let g = t_fn("m", "g", [CParam { sym: 2, ty: lst, mode: COwned }], lst,
+    CLocal(2, lst))
+  let f = t_fn("m", "f", [CParam { sym: 1, ty: lst, mode: COwned }], lst,
+    CCall(CDirect("m", "g"), [CLocal(1, lst)], lst))
+  let table = infer_modes([t_mod("m", [f, g])])
+  assert len(t_row(table, "m", "f")) == 0
+  # ...and a borrowed position does not: h only reads, k rides through it
+  let h = t_fn("m", "h", [CParam { sym: 3, ty: lst, mode: COwned }], TyInt,
+    CIntrinsic("len", [CLocal(3, lst)], TyInt))
+  let k2 = t_fn("m", "k", [CParam { sym: 4, ty: lst, mode: COwned }], TyInt,
+    CCall(CDirect("m", "h"), [CLocal(4, lst)], TyInt))
+  let t2 = infer_modes([t_mod("m", [h, k2])])
+  assert not mode_owned(t_row(t2, "m", "h")[0])
+  assert not mode_owned(t_row(t2, "m", "k")[0])
+}
+
+test "consuming shapes flip owned: stored, captured, aliased, reassigned" {
+  let lst = TyList(TyInt)
+  let stored = t_fn("m", "s", [CParam { sym: 1, ty: lst, mode: COwned }], lst,
+    CListLit([CLocal(1, lst)], TyList(lst)))
+  let captured = t_fn("m", "c", [CParam { sym: 2, ty: lst, mode: COwned }],
+    TyFn([], TyInt, EPure),
+    CClosure("lam", "m", [CLocal(2, lst)], TyFn([], TyInt, EPure)))
+  let aliased = t_fn("m", "a", [CParam { sym: 3, ty: lst, mode: COwned }], TyInt,
+    CBlock([CSLet(9, lst, CLocal(3, lst))], Some(CInt(0)), TyInt))
+  let reassigned = t_fn("m", "w", [CParam { sym: 4, ty: lst, mode: COwned }], TyInt,
+    CBlock([CSAssign(4, CListLit([], lst))], Some(CInt(0)), TyInt))
+  let table = infer_modes([t_mod("m", [stored, captured, aliased, reassigned])])
+  assert len(t_row(table, "m", "s")) == 0
+  assert len(t_row(table, "m", "c")) == 0
+  assert len(t_row(table, "m", "a")) == 0
+  assert len(t_row(table, "m", "w")) == 0
+}
+
+test "jurisdiction pins: closures, dictionary slots, pvec, fn-typed" {
+  let lst = TyList(TyInt)
+  let read_body = CIntrinsic("len", [CLocal(1, lst)], TyInt)
+  # named by a CClosure somewhere: called through CDynamic, all owned
+  let cl = t_fn("m", "cl", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt, read_body)
+  let user = t_fn("m", "u", [], TyFn([], TyInt, EPure),
+    CClosure("cl", "m", [], TyFn([], TyInt, EPure)))
+  assert len(t_row(infer_modes([t_mod("m", [cl, user])]), "m", "cl")) == 0
+  # named by a dictionary slot: read as a bare function pointer
+  let sl = t_fn("m", "sl", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt, read_body)
+  let dm = CModule {
+    owner: "m",
+    fns: [sl],
+    dicts: [CDictDef { key: "k", trait_id: 1, subject: TyInt, nargs: 0,
+      slots: [CSlotFn("m", "sl")] }],
+    next_sym: 100
+  }
+  assert len(t_row(infer_modes([dm]), "m", "sl")) == 0
+  # the emitter-named pvec surface: reached from intrinsics, not CDirect
+  let px = t_fn("std/pvec", "index", [CParam { sym: 1, ty: lst, mode: COwned },
+    CParam { sym: 2, ty: TyInt, mode: COwned }], TyInt, read_body)
+  assert len(t_row(infer_modes([t_mod("std/pvec", [px])]), "std/pvec", "index")) == 0
+  # a fn-typed parameter: higher-order is owned by consensus
+  let fty = TyFn([], TyInt, EPure)
+  let ho = t_fn("m", "ho", [CParam { sym: 1, ty: fty, mode: COwned }], TyInt,
+    CCall(CDynamic(CLocal(1, fty)), [], TyInt))
+  assert len(t_row(infer_modes([t_mod("m", [ho])]), "m", "ho")) == 0
+}
+
+test "stamping writes the fixpoint onto the callee half" {
+  let lst = TyList(TyInt)
+  let r = t_fn("m", "r", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt,
+    CIntrinsic("len", [CLocal(1, lst)], TyInt))
+  let m = t_mod("m", [r])
+  let table = infer_modes([m])
+  let m2 = stamp_modes(m, table)
+  assert not mode_owned(m2.fns[0].params[0].mode)
+}
+
+test "a forced position survives the fixpoint in both directions" {
+  let lst = TyList(TyInt)
+  # consuming body, forced borrowed anyway: the demand may not flip it back
+  let g = t_fn("m", "g", [CParam { sym: 1, ty: lst, mode: COwned }], lst,
+    CLocal(1, lst))
+  let t1 = infer_modes_forced([t_mod("m", [g])],
+    [ForcedMode { owner: "m", name: "g", arity: 1, idx: 0, mode: CBorrowed }])
+  assert not mode_owned(t_row(t1, "m", "g")[0])
+  # read-only body, forced owned: the row prunes to absent, which is owned
+  let r = t_fn("m", "r", [CParam { sym: 2, ty: lst, mode: COwned }], TyInt,
+    CIntrinsic("len", [CLocal(2, lst)], TyInt))
+  let t2 = infer_modes_forced([t_mod("m", [r])],
+    [ForcedMode { owner: "m", name: "r", arity: 1, idx: 0, mode: COwned }])
+  assert len(t_row(t2, "m", "r")) == 0
+}

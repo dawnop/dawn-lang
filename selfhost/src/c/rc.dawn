@@ -72,9 +72,23 @@ type RSt = {
   # dictionary parameters of the function being rewritten; see `immortal`
   dict_syms: Set[Int],
   # the call-site half of the parameter-mode contract (core.CMode): which of
-  # a named callee's parameters arrive borrowed. Empty today -- every lookup
-  # misses and every call keeps the all-owned rewrite.
+  # a named callee's parameters arrive borrowed, filled by `infer.infer_modes`
   modes: Map[(String, String), List[CMode]],
+  # This function's borrowed parameters. The inference stamps borrowed only
+  # where its walk saw no consuming use, and this pass holds it to that: a
+  # borrowed parameter reaching a consuming position is a panic, not a
+  # silent compensating dup. The panic is what makes the inference's demand
+  # rules individually load-bearing (delete one and the first std function
+  # it mis-stamps refuses to compile), and what keeps "borrowed" meaning
+  # zero new dup points rather than "usually cheaper". The one exemption is
+  # `hoisting`: an operand list with a mixed row names every operand for
+  # order's sake, and the dup/drop pair that puts on a borrowed root is
+  # balanced locally -- rc_check watches it -- so it is not a consuming use
+  # of the parameter, just its spelling under hoisting.
+  borrowed_syms: Set[Int],
+  hoisting: Bool,
+  # the name of the function being rewritten, for the panic above
+  fname: String,
   next_sym: Int,
   # inside the right side of && / ||, where evaluation is conditional and
   # transfers are refused -- see `rw_scircuit`
@@ -769,14 +783,29 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
       j = j + 1
     }
     let own = list.contains(owned, i)
-    if not any {
+    # A dictionary operand stays inline even when its neighbours are named:
+    # it is a static address that evaluates no code, so order cannot see it
+    # -- and naming it would write the let at the dictionary pseudo-type,
+    # which is not a C type a value lives at (found by spike-native the
+    # first time a borrowed row put a dictionary-taking call on this path;
+    # `consume_all`, the all-owned path, never names anything).
+    if not any || dictish(st2, e) {
       let (s2, e1) = rw(st2, e, own, a)
       st2 = s2
       outs = outs ++ [e1]
     } else {
       let ty = cex_ty(e)
-      let (s2, e1) = rw(st2, e, true, a)
-      let (s3, t) = fresh(s2)
+      # A borrowed-position operand named only for evaluation order is not a
+      # consuming use of its root -- the dup/drop pair is balanced right
+      # here -- so the borrowed-parameter panic stands down for it. The
+      # exemption covers exactly the `borrows` shapes: a bare local or a
+      # projection/box chain over one (`bracket`'s resource arrives as
+      # `CBox(CLocal)` -- the generic slot boxes it -- and the chain is the
+      # shape that carries `consume` down to the root). Such a chain embeds
+      # no other expression, so the flag cannot reach an unrelated context.
+      let hoist = not own && borrows(st2, e)
+      let (s2, e1) = rw(RSt { ..st2, hoisting: st2.hoisting || hoist }, e, true, a)
+      let (s3, t) = fresh(RSt { ..s2, hoisting: st2.hoisting })
       st2 = s3
       lets = lets ++ [CSLet(t, ty, e1)]
       outs = outs ++ [CLocal(t, ty)]
@@ -866,6 +895,13 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
   match e {
     CLocal(sym, _) ->
       if consume && counted(st, e) {
+        # the inference's contract, enforced: a borrowed parameter is only
+        # ever read (see RSt.borrowed_syms; `hoisting` is the one spelling
+        # exemption)
+        if set.has(st.borrowed_syms, sym) && not st.hoisting {
+          panic("rc: borrowed parameter " ++ to_string(sym) ++ " of " ++
+              st.fname ++ " reached a consuming position")
+        }
         # the last consuming use takes the value; every earlier one copies
         if not st.pinned && not set.has(after, sym) && transferable(st, sym, after) {
           (release(st, sym), e)
@@ -940,7 +976,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
         # list: the owned positions transfer or dup as ever, a borrowed
         # position rooted in a binding passes bare (the binding outlives the
         # call), and a borrowed owned-temporary gets a name and a drop of
-        # its own after the call. Unreachable while the table is empty.
+        # its own after the call.
         Some(owned) -> {
           let (st2, lets2, args1, temps2) = intr_args(st1, args, owned, cbase)
           wrap(st2, lets ++ lets2, CCall(c1, args1, cty), cty, temps ++ temps2)
@@ -1352,7 +1388,14 @@ fn rc_fn(
 ) -> (Int, CFun) = {
   var dicts = base_dicts
   for d in f.dicts { dicts = set.insert(dicts, d.sym) }
-  var st = RSt { scopes: [], dict_syms: dicts, modes: modes, next_sym: next_sym, pinned: false }
+  var bsyms: Set[Int] = set.empty()
+  for p in f.captures ++ f.params ++ f.evs {
+    if not mode_owned(p.mode) { bsyms = set.insert(bsyms, p.sym) }
+  }
+  var st = RSt {
+    scopes: [], dict_syms: dicts, modes: modes, borrowed_syms: bsyms,
+    hoisting: false, fname: f.owner ++ "." ++ f.name, next_sym: next_sym, pinned: false
+  }
   st = push(st, -1, true)
   # owned captures and parameters are the body's to release, so they enter
   # the ledger. A borrowed parameter does not (the callee-side half of the

@@ -16,3 +16,19 @@
 # and the mode-contract assertion landed -- knife 2 step 0; the five
 # known-red lines that pinned the checker gap came out then.)
 std/pvec:index:2:0=both
+
+# Three sites whose parameter the inference decided OWNED (the body
+# consumes it: str.len hands s to count, whose TCO loop reassigns its
+# binding; reverse and take hand xs to their _go helpers likewise). The
+# `both` toggle therefore forces borrowed onto a consuming parameter, and
+# the zero-new-dup contract refuses at compile time:
+#
+#   panic: rc: borrowed parameter ... reached a consuming position
+#
+# That refusal (rc.rw's borrowed-consume panic) is the machinery the demand
+# rules' production mutants rely on, and these entries are its live
+# exercise in CI. If a later knife relaxes the contract (Lean-style
+# escape-plus-dup), these start passing and this ratchet fires.
+std/str:len:1:0=both
+std/list:reverse:1:0=both
+std/list:take:2:0=both

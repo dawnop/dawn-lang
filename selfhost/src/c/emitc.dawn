@@ -129,7 +129,8 @@ pub type CSt = {
   # The call-site half of the parameter-mode contract (core.CMode), the same
   # table `rc.rc_module` rewrote with: which of a named callee's argument
   # positions are borrowed, and so read (k=false) rather than consumed. The
-  # callee side is read off `CParam.mode` in `emit_fn`. Empty today.
+  # callee side is read off `CParam.mode` in `emit_fn`. Filled by
+  # `infer.infer_modes` in the driver.
   modes: Map[(String, String), List[CMode]]
 }
 
@@ -1469,6 +1470,30 @@ fn pvec_target(n: String) -> String =
   } else {
     n
   }
+
+## Every `std/pvec` function this emitter names directly -- the
+## `pvec_target` range plus the literal (`from_array`), `++` (`concat`) and
+## host-boundary (`to_array`, `of_host`/`to_host`) spellings. These call
+## sites come from Core intrinsics and lowering shapes, not `CDirect`, so
+## they never read the parameter-mode table and always speak the all-owned
+## convention. The borrowed inference (`c/infer`) pins each of them owned
+## for exactly that reason; scripts/rc-mode-contract's known-red entry is
+## the measured leak behind the pin. A test below holds this list to the
+## emitter's actual spellings.
+pub fn emitter_named_pvec_fns() -> List[String] =
+  ["count", "get", "range", "sort_by", "index", "slice", "push",
+    "from_array", "to_array", "concat"]
+
+test "the emitter-named pvec list covers every list-primitive target" {
+  for n in ["len", "get", "range", "sort_by", "list_index", "list_slice", "list_push"] {
+    assert is_list_primitive(n)
+    assert list.contains(emitter_named_pvec_fns(), pvec_target(n))
+  }
+  # the non-intrinsic spellings: literals, `++`, and the host boundary
+  for n in ["from_array", "to_array", "concat"] {
+    assert list.contains(emitter_named_pvec_fns(), n)
+  }
+}
 
 ## The primitives that hand back something they do not own: an element still
 ## inside its container, or an argument passed straight through.
