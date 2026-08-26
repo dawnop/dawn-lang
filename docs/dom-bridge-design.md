@@ -202,13 +202,23 @@ document 对象是对的，只有屏幕是错的。
 `scripts/wasm-contract`（失败运行时那套）和这一套共用一个 CI job，因为它们共用两件贵的
 东西：钉了版本与 sha256 的 wasi-sdk，以及从 `selfhost/src/nmain.dawn` 构建的 C 驱动。
 
-wasi-sdk 钉在 30 而不是最新，是实测的结果：31 及以后（LLVM 22）链不动任何
-`-fwasm-exceptions` 的产物，报 `undefined symbol: __cpp_exception`。那个 exception tag 从前在
-每个用得着它的目标文件里都发一份 weak 定义，上游把它挪进了 libunwind，现有的
-`--target wasm` 链接命令行于是不再定义它。30 是这条命令行不加改动就能用的最新一版，
-而且它与 29 是同一个 LLVM commit（222fc11f2b8f，21.1.4）；25、27、29、30 产出的 DOM
-转录逐字节相同，所以这个钉子是关于工具链的选择，不是关于答案的。
+wasi-sdk 钉在 34。到 30 为止，现有的 `--target wasm` 链接命令行不加改动就能用；
+31 及以后（LLVM 22）链不动任何 `-fwasm-exceptions` 的产物，报
+`undefined symbol: __cpp_exception`。那个 exception tag 从前在每个用得着它的目标文件里
+都发一份 weak 定义，上游把它挪进了 libunwind，链接命令行于是不再定义它。上游给的修法是
+链 `-lunwind`（tag 在 libunwind.a 的 `Unwind-wasm.c.o` 里，CppExceptions.md 就是这么写的），
+但那个库只存在于 sysroot 33 及以后，一加就把 33 以前的每一套工具链连同 apt 那条路一起断掉。
+这里改成运行时自带这个 tag：`runtime/c/dawn_rt_wasi_tag.c`，内容是 libunwind 那段内联汇编的
+副本。它必须是一个自己的编译单元，理由写在该文件开头，LLVM 21 及更早的后端仍会给任何抛或接的
+编译单元发一份 weak 定义，同一个单元里再放一份强定义就是汇编器错误。
 
-再往上抬不是换个版本号的事：正确的修法是链 `-lunwind`（tag 在 libunwind.a 的
-`Unwind-wasm.c.o` 里，上游的 CppExceptions.md 就是这么写的），而它要求 sysroot 33 或更新。
-那是另一个批次：钉 34、给 tag 一个自己的编译单元、并改用 wasm32-wasip1 三元组。
+三元组是另一半，与异常无关：31 把 wasm32-wasi 标为废弃，34 直接删掉了这个 target；
+反方向上 apt 的 wasi-libc 只铺了 wasm32-wasi，没有 wasm32-wasip1。没有哪一个写死的拼法
+能同时够到两端，所以 `cc_build_for` 不写死，而是问编译器手上有哪一个的 sysroot
+（`-print-file-name=crt1.o` 给绝对路径就是有，原样回显文件名就是没有），apt 那条备用路因此还活着。
+代价是 clang 18 不再够用：它的汇编器在那段 tag 汇编上会崩，要 clang 20 或更新。
+
+有了这两件，25、27、29、30、31、33、34 全都能构建，产出的 DOM 转录逐字节相同，
+所以这个钉子仍然是关于工具链的选择，不是关于答案的。选 34 是因为它最新，而且它是 LLVM 23：
+逼着失败运行时走 A1 影子栈的那个 isel 崩溃（`dawn_rt.c` 的 "landing at a handler"）在它上面
+没有了，将来要撤影子栈得从这个钉子过。

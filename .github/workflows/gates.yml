@@ -777,7 +777,7 @@ jobs:
       - name: native differential (both backends, plus written expectations)
         run: ./scripts/spike-native/run.sh
 
-  # The wasm32-wasi target: the failure runtime, and the DOM bridge over it.
+  # The wasm target: the failure runtime, and the DOM bridge over it.
   #
   # Both harnesses ran by hand until now, and scripts/wasm-contract's own
   # header said why: the toolchain was whatever apt shipped, and the
@@ -792,17 +792,20 @@ jobs:
   wasm-target:
     runs-on: ubuntu-latest
     # Not observed on a runner yet; this is the planning value, in the shape
-    # list-elems-contract's is. Locally (2026-08-26): 7s for the wasi-sdk,
-    # 35s for the driver, 30s for the failure contract, 24s for the DOM
-    # contract, ~45s for the checkout and the toolchain action = 141s.
+    # list-elems-contract's is. Re-measured locally on the pin below
+    # (2026-08-26): 12s for the wasi-sdk step, 36s for the driver, 30s for the
+    # failure contract, 27s for the DOM contract, ~45s for the checkout and
+    # the toolchain action = 150s. The first four are timed; the last is still
+    # the carried estimate. The two halves of the old note disagreed (a prose
+    # sum of 141s against a budget line reading 129s); these agree.
     # The DOM contract was 12s while it had one transcript; the todo case
     # (a second reactor build, a second transcript and two more rebuilding
-    # mutants) added ~9s, and the keyed-ops section (node only, no wasm
-    # build) ~3s, measured on the same box the 12s came from.
+    # mutants) added ~9s, and the keyed-ops, props and payload sections (node
+    # only, no wasm build) ~6s between them.
     # Doubled for a 4-vCPU runner, as that job's note does. Re-measure and
     # restate after the first green run.
-    # budget: 3x 260s planning value (local 129s, doubled for the runner)
-    timeout-minutes: 13
+    # budget: 3x 300s planning value (local 150s, doubled for the runner)
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -816,26 +819,40 @@ jobs:
       # file it checks is not a check -- and the two move together or not at
       # all, the same rule .dawn-version.sha256 states for the compiler jar.
       #
-      # Why 30 and not the newest. 31 and up (LLVM 22) fail to link anything
-      # built with `-fwasm-exceptions`: `undefined symbol: __cpp_exception`.
-      # That exception tag used to be emitted as a weak definition in every
-      # object file that needed it; upstream moved it into libunwind instead,
-      # so the shipped `--target wasm` link line no longer defines it. 30 is
-      # the newest release that link line works with unchanged, and it is the
-      # same LLVM commit as 29 (222fc11f2b8f, 21.1.4): 25, 27, 29 and 30 all
-      # produce a byte-identical DOM transcript, so the pin is a choice about
-      # the toolchain and not about the answers. Wall clock: 30's tarball is
-      # 7,612 bytes larger than 29's, which is no measurable download time.
+      # Why 34, and what had to change to get here. 30 was the newest release
+      # the shipped `--target wasm` link line worked with unchanged: from 31
+      # (LLVM 22) on, linking anything built with `-fwasm-exceptions` fails
+      # with `undefined symbol: __cpp_exception`, because that exception tag
+      # stopped being emitted as a weak definition in every object file that
+      # needed it and moved into libunwind. Upstream's answer is `-lunwind`,
+      # which exists only in sysroot 33 and newer and would strand every
+      # older toolchain including apt's. This runtime defines the tag itself
+      # instead, in runtime/c/dawn_rt_wasi_tag.c, which is a translation unit
+      # of its own for the reason written at the top of that file.
       #
-      # Raising it past 30 is not a version bump. The fix is to link
-      # `-lunwind` (the tag lives in libunwind.a's Unwind-wasm.c.o, and
-      # upstream's CppExceptions.md says so), which needs sysroot 33 or
-      # newer; that is a separate batch that pins 34, gives the tag its own
-      # translation unit and moves to the wasm32-wasip1 triple.
+      # The triple is the other half and is unrelated to exceptions: 31
+      # deprecated wasm32-wasi and 34 removed it, while apt's wasi-libc has
+      # only wasm32-wasi and no wasm32-wasip1. Neither spelling reaches both
+      # ends, so `cc_build_for` asks the compiler which one it has a sysroot
+      # for rather than hardcoding either, and the apt path stays alive.
+      #
+      # With those two, 25 / 27 / 29 / 30 / 31 / 33 / 34 all build and all
+      # produce a byte-identical DOM transcript, so the pin stays a choice
+      # about the toolchain and not about the answers. 34 is the newest, and
+      # it is LLVM 23: the isel crash that forces the failure runtime onto its
+      # A1 shadow stack (dawn_rt.c, "landing at a handler") is gone there,
+      # so any future attempt to drop that shadow stack goes through this pin.
+      #
+      # Wall clock: 34's tarball is 192,383,077 bytes against 30's
+      # 119,449,290, up 61%. Measured here on one link, the whole step went
+      # 11.7s to 12.4s: the download itself is bandwidth-bound rather than
+      # size-bound at this scale (9.4s against 8.9s, inside the noise) and
+      # the +1.3s is the extra unpacking. Budget +5s to be safe; nothing
+      # `needs:` this job, so it is not on any critical path either way.
       - name: the pinned wasi-sdk
         run: |
-          v=30
-          sha=0507679dff16814b74516cd969a9b16d2ced1347388024bc7966264648c78bfb
+          v=34
+          sha=b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4
           curl -fsSL -o wasi-sdk.tar.gz \
             "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${v}/wasi-sdk-${v}.0-x86_64-linux.tar.gz"
           echo "${sha}  wasi-sdk.tar.gz" | sha256sum -c -
