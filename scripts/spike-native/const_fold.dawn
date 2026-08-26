@@ -102,6 +102,12 @@ const C_OPT_NONE: Option[Int] = None
 const C_RESULT: Result[Int, String] = Ok(3)
 const C_NEST: List[(Int, List[String])] = [(1, ["x"]), (2, [])]
 const C_LIST_LIST: List[List[Int]] = [[1], [2, 3]]
+## `xs ++ [x]` folds through the `list_push` intrinsic (lower.cat_list); an
+## append of a longer literal stays a concat. Pinned so the interpreter's
+## append agrees with both backends about value and order -- an interpreter
+## that pushed onto the wrong end would still fold without an error.
+const C_PUSHED: List[Int] = [1, 2] ++ [3]
+const C_PUSH_TWO: List[Int] = C_PUSHED ++ [4, 5]
 ## Opaque is serializable exactly as its target is (spec 7.2), so this must
 ## rebuild as the List it is.
 const C_OPAQUE: Tags = ["p", "q"]
@@ -188,6 +194,10 @@ pub fn main() -> Unit !io = {
   println("runtime nest  = ${to_string([(1, ["x"]), (2, [])])}")
   println("const   ll    = ${to_string(C_LIST_LIST)}")
   println("runtime ll    = ${to_string([[1], [2, 3]])}")
+  println("const   push  = ${to_string(C_PUSHED)}")
+  println("runtime push  = ${to_string([1, 2] ++ [3])}")
+  println("const   push2 = ${to_string(C_PUSH_TWO)}")
+  println("runtime push2 = ${to_string(C_PUSHED ++ [4, 5])}")
   println("const   opaq  = ${to_string(untag(C_OPAQUE))}")
   println("runtime opaq  = ${to_string(untag(tag(["p", "q"])))}")
   println("const   block = ${to_string(C_BLOCK)}")
