@@ -1718,8 +1718,15 @@ pub type TraitI = {
   assoc: List[String],
   # associated *effect* members (`effect E`), same discipline as `assoc`:
   # bare names, declaration order, reachable only as the row atom `!T.E`
-  # (docs/effect-params-design.md 刀 5 -- no bounds, no defaults in v1)
+  # (docs/effect-params-design.md 刀 5 -- no bounds)
   eff_assoc: List[String],
+  # associated-effect defaults (#369): (member name, ground row) for each
+  # `effect E = !Row` the trait body wrote. A member absent here has no
+  # default and keeps the missing-binding error; a member present here is
+  # materialized into an impl's `eff_bindings` when the impl writes no
+  # binding of its own, so everything downstream of registration sees a
+  # defaulted impl exactly as it sees an explicitly bound one.
+  eff_defaults: List[(String, Eff)],
   # Do this trait's method names occupy the module function namespace? True for
   # every trait a user can declare; false is reserved for compiler-built traits
   # whose sole consumer is an operator (docs/prelude-namespace-design.md D1).
@@ -2219,6 +2226,7 @@ fn prelude_trait(tid: Int, name: String, tv: Ty, m: String, sig: Sig) -> TraitI 
     methods: [(m, MethodSig { sig: sig, has_default: false })],
     assoc: [],
     eff_assoc: [],
+    eff_defaults: [],
     injects: true
   }
 
@@ -2252,6 +2260,7 @@ pub fn prelude_traits() -> Traits = {
     methods: [("cmp", MethodSig { sig: cmp_sig, has_default: false })],
     assoc: [],
     eff_assoc: [],
+    eff_defaults: [],
     injects: true
   }
   let ev = TyVar("T", -14)
@@ -2296,6 +2305,7 @@ pub fn prelude_traits() -> Traits = {
     ],
     assoc: ["Cur", "Item"],
     eff_assoc: [],
+    eff_defaults: [],
     injects: true
   }
   # Index: the subject in parameter 0 so it is a non-projection position and
@@ -2321,6 +2331,7 @@ pub fn prelude_traits() -> Traits = {
     ],
     assoc: ["Idx", "Item"],
     eff_assoc: [],
+    eff_defaults: [],
     injects: false
   }
   # Display: one method, no associated types, and `injects: false` for the same
@@ -2342,6 +2353,7 @@ pub fn prelude_traits() -> Traits = {
     ],
     assoc: [],
     eff_assoc: [],
+    eff_defaults: [],
     injects: false
   }
   map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show), (ITER_ID, iter),

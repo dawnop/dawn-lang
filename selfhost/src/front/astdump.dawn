@@ -79,8 +79,15 @@ fn dump_decl(out: List[String], d: Int, decl: Decl) -> List[String] =
       # as it did before #44 and the parse-dump differential stays silent
       for m in methods { o = dump_trait_method(o, d + 1, m) }
       for a in assoc { o = o ++ [ind(d + 1) ++ "Assoc " ++ a.name ++ " " ++ sp(a.lo, a.hi)] }
-      # same discipline: a trait with no effect members dumps as before 刀 5
-      for a in effa { o = o ++ [ind(d + 1) ++ "EffAssoc " ++ a.name ++ " " ++ sp(a.lo, a.hi)] }
+      # same discipline: a trait with no effect members dumps as before 刀 5,
+      # and a member with no default dumps as before #369
+      for a in effa {
+        let dsuf = match a.default {
+          Some(atoms) -> " default=!" ++ (if len(atoms) == 0 { "()" } else { atoms[0] })
+          None -> ""
+        }
+        o = o ++ [ind(d + 1) ++ "EffAssoc " ++ a.name ++ dsuf ++ " " ++ sp(a.lo, a.hi)]
+      }
       o
     }
     DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc2, ebs, lo, hi) -> {
