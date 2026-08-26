@@ -11,7 +11,9 @@
 
 use std/list
 use node.{Node, Text, Elem, On, NoData, Value, Key, with_key}
-use tea_core/tree.{key}
+use tea_core/tree.{key, kids}
+use json/render.{render}
+use wire.{enc_node}
 
 ## A text node.
 pub fn text[M](s: String) -> Node[M] = Text(s: s)
@@ -91,6 +93,29 @@ pub fn span[M](s: String) -> Node[M] =
 pub fn button[M](label: String, msg: M) -> Node[M] =
   Elem(tag: "button", props: [], on: [on_click(msg)], kids: [Text(s: label)], key: None)
 
+## An element whose inside belongs to someone else: a custom element the page
+## registered, with third-party JavaScript running behind it.
+##
+## The signature is the rule. There is no `kids` parameter, so "a foreign
+## element has no guest children" is a spelling rather than a convention:
+## with the guest-side list empty, `diff` never emits an address into the
+## element, and whatever the library builds inside it is invisible to the
+## reconciler and untouched by every patch. Lifecycle is the browser's --
+## `connectedCallback` when a patch mounts it, `disconnectedCallback` when
+## `replace`/`remove`/`truncate` take it out -- so no hook, no callback and
+## no handle enters the tree.
+##
+## Everything else about the node is ordinary: props reach the element as
+## attributes, listeners hear the events it dispatches on itself, and on the
+## wire it is a plain `elem` the bridge cannot tell from one. In a list, give
+## it an identity with `with_key`, as with any element whose rebuild is
+## expensive. The README's "Third-party mounts" section is the full contract.
+pub fn foreign[M](
+  tag: String,
+  props: List[(String, String)],
+  on: List[On[M]],
+) -> Node[M] = Elem(tag: tag, props: props, on: on, kids: [], key: None)
+
 # A message type for the test blocks below; real apps bring their own.
 type ProbeMsg =
   | Ping
@@ -123,6 +148,24 @@ test "the three listener spellings differ in the payload and nothing else" {
   # Same event, same message, three different listeners.
   assert on_value("keydown", Ping) != on_key("keydown", Ping)
   assert on_value("input", Ping) != On { event: "input", payload: NoData, msg: Ping }
+}
+
+test "foreign is el with the kids argument gone, not a new node kind" {
+  let w: Node[ProbeMsg] = foreign("code-editor", [("doc", "v1")], [on_value("change", Ping)])
+  assert w == el("code-editor", [("doc", "v1")], [on_value("change", Ping)], [])
+  # No guest children, whatever the library later puts inside the element.
+  assert list.is_empty(kids(w))
+  # And no wire footprint: the encoding is byte-for-byte the hand-written
+  # constructor's, so neither the wire nor the bridge can treat the tag
+  # specially. The seven ops stay seven.
+  let plain: Node[ProbeMsg] = Elem(
+    tag: "code-editor",
+    props: [("doc", "v1")],
+    on: [on_value("change", Ping)],
+    kids: [],
+    key: None,
+  )
+  assert render(enc_node(w)) == render(enc_node(plain))
 }
 
 test "keyed hands each child the string that names it" {

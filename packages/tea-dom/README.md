@@ -87,6 +87,59 @@ only where the list fell back to index pairing: there a shared position is the
 only evidence of identity, and a key that disagrees says the position is
 lying.
 
+## Third-party mounts
+
+A widget that owns its own DOM -- an editor, a chart, anything driven by
+third-party JavaScript -- goes behind a custom element. This is Elm's answer
+and the only one that keeps the tree a pure value: lifecycle hooks in the tree
+are functions in the tree, and a tree holding a function has no structural
+`==`. A custom element puts the lifecycle on the platform instead. The page
+registers the tag (`customElements.define`), the class does its mount work in
+`connectedCallback` and its cleanup in `disconnectedCallback`, and the browser
+fires those exactly when the reconciler's `replace`/`remove`/`truncate` land.
+Tearing a widget down is never this package's business.
+
+`dsl.foreign(tag, props, on)` builds the node. The signature has no `kids`
+parameter, because a foreign element has no guest children and that rule is
+worth a spelling rather than a warning: with the guest-side list empty, `diff`
+never emits an address into the element, so whatever the library builds inside
+is invisible to the reconciler and untouched by every patch. On the wire it is
+a plain `elem`; the bridge cannot tell it from one, and the seven ops stay
+seven.
+
+The division of labour across the boundary:
+
+- **The guest owns the attributes and nothing else.** Data goes in as
+  attributes; a changed prop arrives as `set-self`, and the element hears it
+  with `observedAttributes`/`attributeChangedCallback`. Events come out as DOM
+  events the element dispatches on itself, with a `value` property exposed for
+  a listener that declared `Value`. Both halves ride the existing machinery.
+- **The element must not write attributes onto its own host tag.** `set-self`
+  enforces "the props the guest declared and no others" and sweeps away
+  anything else it finds there. Library state lives inside the element, shadow
+  DOM preferred; a light-DOM inside is equally safe so long as the guest-side
+  kids stay empty.
+- **Never give a foreign tag children in the view.** A child in the view puts
+  guest patches and library DOM in the same index space, and the patches land
+  inside the widget -- appended after its private nodes, truncated across
+  them. `foreign` makes the safe spelling the easy one; `el` with a kid list
+  is the hole.
+- **In a list, key it** (`with_key`, or a `keyed` container). Index pairing
+  can pair a foreign element against an ordinary node when a sibling is
+  inserted or removed, and the failure is patches aimed at the wrong element.
+  Keyed, the worst case is a clean `replace`: disconnect, then connect, never
+  a patch inside it.
+
+One consequence to design for: `move` is `insertBefore`, and moving a
+connected custom element fires `disconnectedCallback` and `connectedCallback`
+again. A widget that builds itself in `connectedCallback` should guard against
+re-entry or be cheap to rebuild.
+
+`scripts/wasm-dom-contract/foreign.sh` holds all of this at the bridge:
+connect once on mount in tree order, disconnect on `remove`/`truncate`/
+`replace`, library DOM untouched by `set-self` and by sibling churn, and an
+event out carrying the value the element chose to expose.
+
 ## The boundary
 
 One JSON object per line each way, and nothing else crosses. `src/wire.dawn`
