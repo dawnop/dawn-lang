@@ -31,8 +31,11 @@ pub type Rel =
   | SelfDiffers
 derive Show
 
-## The contract. Three members, one per thing the reconciler does: walk
-## children, decide a pair's fate, and rebuild a node around new children.
+## The contract. Four members: walk children, decide a pair's fate, rebuild a
+## node around new children, and name a node among its siblings. Only the first
+## three are obligations -- `key` has a default, so a vocabulary that has no
+## notion of identity says nothing and gets the pairing it had before the
+## member existed.
 pub trait Tree[W] {
   ## This node's children in order; a leaf has none. `diff` pairs these by
   ## index and `apply` addresses through them, so an index in a `Patch.path`
@@ -49,4 +52,16 @@ pub trait Tree[W] {
   ## reconciler has already found unequal, so a vocabulary never has to
   ## re-compare fields the `==` shortcut already settled.
   fn relate(old: W, new: W) -> Rel
+
+  ## This node's identity among its siblings, or `None` when it has none.
+  ## `diff` pairs a child list by key when every child answers one and no two
+  ## answer the same, and by index otherwise, so this member is what turns a
+  ## deletion in the middle of a list into a deletion rather than a rewrite of
+  ## everything after it.
+  ##
+  ## `String` and not a vocabulary-chosen type: wall one above rules out an
+  ## unbounded projection, so the identity has to be built from a type core
+  ## already knows. The default body is what keeps the other three members the
+  ## whole of what an unkeyed vocabulary owes.
+  fn key(w: W) -> Option[String] = None
 }

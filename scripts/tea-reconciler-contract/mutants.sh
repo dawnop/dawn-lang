@@ -28,6 +28,7 @@ targets=(
   packages/tea-core/src/diff.dawn
   packages/tea-core/src/walk.dawn
   packages/tea-term/src/widget.dawn
+  packages/tea-dom/src/node.dawn
 )
 
 pristine="$(mktemp -d)"
@@ -45,13 +46,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The suites a mutant has to get past: the two packages' own blocks, and the
+# The suites a mutant has to get past: the packages' own blocks, and the
 # differential against the pre-split reconciler. Neither alone is enough --
 # the differential never reaches route/step, and the package blocks have no
 # oracle but themselves.
+#
+# The differential cannot reach the keyed path, and this is worth writing down
+# rather than leaving to be discovered: the pre-split reconciler has no keyed
+# ops to compare against, and the corpus is the terminal vocabulary, which
+# does not implement `key` and so answers the default `None` for every node.
+# What kills the keyed mutants below is the inline suites.
+#
+# One caution about reading a red command as an attribution: `dawn test` on
+# the oracle project also runs `tea_core/diff`'s own blocks, since it depends
+# on the package. So that command going red says the mutant was seen, not that
+# the 484 pairs saw it. Measured over all 30 mutants here, the oracle command
+# reds for 26 and the inline suites red for all 30.
+#
+# Ordered so that a mutant the terminal already sees still costs one run.
 check() {
   ./bin/dawn test packages/tea-term > /dev/null 2>&1 \
-    && ./bin/dawn test scripts/tea-reconciler-contract/oracle > /dev/null 2>&1
+    && ./bin/dawn test scripts/tea-reconciler-contract/oracle > /dev/null 2>&1 \
+    && ./bin/dawn test packages/tea-dom > /dev/null 2>&1
 }
 
 # name | file | sed program
@@ -82,6 +98,26 @@ mutants=(
   'relate-restyles-instead-of-recursing|packages/tea-term/src/widget.dawn|s|Styled(s2, _) -> if s1 == s2 { Same } else { SelfDiffers }|Styled(s2, _) -> if s1 == s2 { SelfDiffers } else { Same }|'
   'relate-diffs-rows-against-columns|packages/tea-term/src/widget.dawn|s|          Row(_) -> Same|          Row(_) -> Same\n          Column(_) -> Same|'
   'relate-descends-into-a-leaf|packages/tea-term/src/widget.dawn|s|      Text(_) -> Unrelated|      Text(_) -> Same|'
+
+  # Keyed pairing. Every one of these is a wrong answer that still type
+  # checks and still terminates, and most of them still round-trip on some
+  # inputs -- which is why the corpus has hand-picked shapes as well as a
+  # generated sweep.
+  'keyed-never-pairs|packages/tea-core/src/diff.dawn|s|  if list.is_empty(xs) { unkeyable } else { keys_go(xs, 0, \[\]) }|  unkeyable|'
+  'keyed-allows-duplicates|packages/tea-core/src/diff.dawn|s|    if len(list.unique(acc)) == len(acc) { Some(acc) } else { None }|    Some(acc)|'
+  'keyed-drops-ascending|packages/tea-core/src/diff.dawn|s|      drops(ok, nk, j - 1, acc ++ \[rm\])|      drops(ok, nk, j - 1, [rm] ++ acc)|'
+  'keyed-place-skips-moves|packages/tea-core/src/diff.dawn|s|        if p == t {|        if p >= t {|'
+  'keyed-move-ends-swapped|packages/tea-core/src/diff.dawn|s|          let mv: Op\[W\] = MoveKid(from: p, to: t)|          let mv: Op[W] = MoveKid(from: t, to: p)|'
+  'keyed-descends-at-the-old-index|packages/tea-core/src/diff.dawn|s|        descend(old, ok, new, nk, t + 1, acc ++ diff_at(old\[o\], new\[t\], path ++ \[t\]), path)|        descend(old, ok, new, nk, t + 1, acc ++ diff_at(old[o], new[t], path ++ [o]), path)|'
+  'keyed-phases-swapped|packages/tea-core/src/diff.dawn|s|  structural ++ descend(old, ok, new, nk, 0, \[\], path)|  descend(old, ok, new, nk, 0, [], path) ++ structural|'
+  'keyed-insert-ignores-its-position|packages/tea-core/src/diff.dawn|s|      let i = if at < 0 { 0 } else if at > len(ks) { len(ks) } else { at }|      let i = 0|'
+  # A different delimiter for the two whose subject contains `||`.
+  'keyed-move-is-not-total|packages/tea-core/src/diff.dawn|s@      if from < 0 || from >= len(ks) || to < 0 || to >= len(ks) {@      if false {@'
+
+  # The vocabulary's half of keying: the key is part of a pair's fate, or a
+  # list that fell back to indices pairs two different elements as one.
+  'relate-ignores-the-key|packages/tea-dom/src/node.dawn|s@            if t1 != t2 || k1 != k2 {@            if t1 != t2 {@'
+  'key-is-not-carried-through-rekid|packages/tea-dom/src/node.dawn|s|      Elem(t, p, o, _, k) -> Elem(tag: t, props: p, on: o, kids: ks, key: k)|      Elem(t, p, o, _, _) -> Elem(tag: t, props: p, on: o, kids: ks, key: None)|'
 )
 
 holes=0

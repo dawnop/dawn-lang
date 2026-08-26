@@ -1,10 +1,16 @@
 // The other consumer of the reconciler contract.
 //
 // `tea_term` interprets a patch into terminal cells. This interprets the same
-// four ops into DOM mutations, and that is the whole of the file: an op table
-// with four entries, a builder, and an address walk. There is no fifth op and
-// no special case -- if this file ever needs one, the contract in
+// seven ops into DOM mutations, and that is the whole of the file: an op table
+// with seven entries, a builder, and an address walk. There is no eighth op
+// and no special case -- if this file ever needs one, the contract in
 // `packages/tea-core/src/diff.dawn` is what should have grown, not this.
+//
+// Three of the seven exist so that an element can survive a change to the list
+// it sits in. `move` in particular must move the node the document already
+// has: everything the browser is holding inside it -- focus, a caret, a
+// selection, a scroll offset, a half-typed IME composition -- is state the
+// tree cannot see and a rebuilt element does not have.
 //
 // Addressing. A `path` is a chain of child indices, and `kids` in the DOM
 // vocabulary is exactly an element's children in order, so `path` walks
@@ -146,7 +152,7 @@ export class DomHost {
   }
 }
 
-// The interpretation table. Four entries, one per `tea_core/diff.Op`.
+// The interpretation table. Seven entries, one per `tea_core/diff.Op`.
 const OPS = {
   replace: (host, p) => host.replaceAt(p.path, p.node),
   'set-self': (host, p) => host.setSelf(host.at(p.path), p.node),
@@ -157,6 +163,31 @@ const OPS = {
   truncate: (host, p) => {
     const el = host.at(p.path);
     while (el.childNodes.length > p.keep) el.removeChild(el.childNodes[el.childNodes.length - 1]);
+  },
+  insert: (host, p) => {
+    const el = host.at(p.path);
+    // `at` is a position in the list after the insert, so `at === length` is
+    // the end and `insertBefore(node, null)` is what the DOM calls that.
+    el.insertBefore(host.build(p.node), el.childNodes[p.at] ?? null);
+  },
+  remove: (host, p) => {
+    const el = host.at(p.path);
+    el.removeChild(el.childNodes[p.at]);
+  },
+  // Never a removal and a rebuild. `insertBefore` on a node that is already in
+  // the document moves it, and moving is the whole reason this op exists.
+  //
+  // The reference child is read off the list as it is *now*, with the moving
+  // node still in it, while `to` counts positions in the list as it will be.
+  // So a node travelling right skips over itself and needs `to + 1`; a node
+  // travelling left does not. Getting this wrong puts the element one place
+  // off and raises nothing.
+  move: (host, p) => {
+    const el = host.at(p.path);
+    const node = el.childNodes[p.from];
+    const settled = el.childNodes.length - 1;
+    const ref = p.to >= settled ? null : el.childNodes[p.to < p.from ? p.to : p.to + 1];
+    el.insertBefore(node, ref);
   },
 };
 

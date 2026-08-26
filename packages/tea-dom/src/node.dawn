@@ -22,8 +22,8 @@
 # `impl Tree[Node[M]]` belongs to the module declaring `Node`.
 
 use std/list
-use tea_core/tree.{Tree, Rel, Unrelated, Same, SelfDiffers, kids, rekid, relate}
-use tea_core/diff.{Patch, Replace, diff, apply}
+use tea_core/tree.{Tree, Rel, Unrelated, Same, SelfDiffers, kids, rekid, relate, key}
+use tea_core/diff.{Patch, Replace, TruncateKids, RemoveKid, MoveKid, diff, apply}
 
 ## A pure description of a DOM subtree. `M` is the application's message type.
 ##
@@ -33,6 +33,13 @@ use tea_core/diff.{Patch, Replace, diff, apply}
 ## lists rather than maps because order is part of `==` and therefore part of
 ## what the reconciler can see; a host that wants set semantics sorts before
 ## it builds.
+##
+## `key` is this element's identity among its siblings, and it is a field
+## rather than a reserved property on purpose: the host never sees it. Pairing
+## is settled here, and what crosses to the bridge is the ops that pairing
+## produced, so the wire format does not know keys exist. `Text` has no key and
+## cannot get one, which is the same shape Elm's `Html.Keyed` has -- a keyed
+## list is a list of elements.
 pub type Node[M] =
   | Text(s: String)
   | Elem(
@@ -40,6 +47,7 @@ pub type Node[M] =
     props: List[(String, String)],
     on: List[(String, M)],
     kids: List[Node[M]],
+    key: Option[String],
   )
 derive Show
 
@@ -57,7 +65,7 @@ impl[M: Eq] Tree[Node[M]] {
   fn kids(w: Node[M]) -> List[Node[M]] =
     match w {
       Text(_) -> []
-      Elem(_, _, _, ks) -> ks
+      Elem(_, _, _, ks, _) -> ks
     }
 
   # Total by construction: a `Text` handed children ignores them, which is the
@@ -65,7 +73,13 @@ impl[M: Eq] Tree[Node[M]] {
   fn rekid(w: Node[M], ks: List[Node[M]]) -> Node[M] =
     match w {
       Text(_) -> w
-      Elem(t, p, o, _) -> Elem(tag: t, props: p, on: o, kids: ks)
+      Elem(t, p, o, _, k) -> Elem(tag: t, props: p, on: o, kids: ks, key: k)
+    }
+
+  fn key(w: Node[M]) -> Option[String] =
+    match w {
+      Text(_) -> None
+      Elem(_, _, _, _, k) -> k
     }
 
   # Called only on a pair core has already found unequal.
@@ -75,12 +89,19 @@ impl[M: Eq] Tree[Node[M]] {
   # A changed prop or listener at an unchanged tag is `SelfDiffers`, the
   # in-place update every DOM host wants. Text is a leaf with nothing under
   # it, so an inequality is its own and there is nothing to descend into.
+  #
+  # A changed key is `Unrelated` for the same reason a changed tag is: the two
+  # are not the same element, whatever else they agree on. This only ever
+  # fires where core fell back to index pairing, since the keyed path pairs
+  # equal keys by construction -- and index pairing is exactly where it is
+  # wanted, because there a shared position is the only evidence of identity
+  # and a key says the position is lying.
   fn relate(old: Node[M], new: Node[M]) -> Rel =
     match old {
-      Elem(t1, p1, o1, _) ->
+      Elem(t1, p1, o1, _, k1) ->
         match new {
-          Elem(t2, p2, o2, _) ->
-            if t1 != t2 {
+          Elem(t2, p2, o2, _, k2) ->
+            if t1 != t2 || k1 != k2 {
               Unrelated
             } else if p1 == p2 && o1 == o2 {
               Same
@@ -93,6 +114,15 @@ impl[M: Eq] Tree[Node[M]] {
     }
 }
 
+## `w` with `k` as its identity among its siblings. A `Text` is returned
+## unchanged: it has nowhere to keep one, so a child list holding text pairs by
+## index whatever this is asked. Total for the same reason `rekid` is.
+pub fn with_key[M](w: Node[M], k: String) -> Node[M] =
+  match w {
+    Text(_) -> w
+    Elem(t, p, o, ks, _) -> Elem(tag: t, props: p, on: o, kids: ks, key: Some(k))
+  }
+
 # A message type for the test blocks below; real apps bring their own.
 type ProbeMsg =
   | Ping
@@ -100,13 +130,13 @@ type ProbeMsg =
 derive Show
 
 fn div(ks: List[Node[ProbeMsg]]) -> Node[ProbeMsg] =
-  Elem(tag: "div", props: [], on: [], kids: ks)
+  Elem(tag: "div", props: [], on: [], kids: ks, key: None)
 
 test "a DOM tree is a plain value with structural equality" {
   let a: Node[ProbeMsg] = div([Text(s: "hi")])
   assert a == div([Text(s: "hi")])
   assert a != div([Text(s: "ho")])
-  assert a != Elem(tag: "span", props: [], on: [], kids: [Text(s: "hi")])
+  assert a != Elem(tag: "span", props: [], on: [], kids: [Text(s: "hi")], key: None)
 }
 
 test "kids is the addressing scheme and rekid is total" {
@@ -119,13 +149,13 @@ test "kids is the addressing scheme and rekid is total" {
 }
 
 test "relate: tag decides related, self-data decides in place" {
-  let a: Node[ProbeMsg] = Elem(tag: "b", props: [("class", "x")], on: [], kids: [])
-  let b: Node[ProbeMsg] = Elem(tag: "b", props: [("class", "y")], on: [], kids: [])
-  let c: Node[ProbeMsg] = Elem(tag: "i", props: [("class", "x")], on: [], kids: [])
+  let a: Node[ProbeMsg] = Elem(tag: "b", props: [("class", "x")], on: [], kids: [], key: None)
+  let b: Node[ProbeMsg] = Elem(tag: "b", props: [("class", "y")], on: [], kids: [], key: None)
+  let c: Node[ProbeMsg] = Elem(tag: "i", props: [("class", "x")], on: [], kids: [], key: None)
   assert relate(a, b) == SelfDiffers
   assert relate(a, c) == Unrelated
   let kids_differ: Node[ProbeMsg] =
-    Elem(tag: "b", props: [("class", "x")], on: [], kids: [Text(s: "k")])
+    Elem(tag: "b", props: [("class", "x")], on: [], kids: [Text(s: "k")], key: None)
   assert relate(a, kids_differ) == Same
   let t1: Node[ProbeMsg] = Text(s: "a")
   assert relate(t1, Text(s: "b")) == Unrelated
@@ -151,15 +181,15 @@ fn corpus() -> List[Node[ProbeMsg]] = {
     div([a, b, a]),
     div([a, div([b])]),
     div([div([a]), b]),
-    Elem(tag: "span", props: [], on: [], kids: []),
-    Elem(tag: "div", props: [("class", "x")], on: [], kids: []),
-    Elem(tag: "div", props: [("class", "y")], on: [], kids: []),
-    Elem(tag: "div", props: [("class", "x")], on: [], kids: [a]),
-    Elem(tag: "div", props: [], on: [("click", Ping)], kids: [a]),
-    Elem(tag: "div", props: [], on: [("click", Pong)], kids: [a]),
-    Elem(tag: "div", props: [], on: [("input", Ping)], kids: [a]),
-    Elem(tag: "div", props: [], on: [("click", Ping), ("blur", Pong)], kids: [a]),
-    Elem(tag: "div", props: [("class", "x")], on: [("click", Ping)], kids: [a, b]),
+    Elem(tag: "span", props: [], on: [], kids: [], key: None),
+    Elem(tag: "div", props: [("class", "x")], on: [], kids: [], key: None),
+    Elem(tag: "div", props: [("class", "y")], on: [], kids: [], key: None),
+    Elem(tag: "div", props: [("class", "x")], on: [], kids: [a], key: None),
+    Elem(tag: "div", props: [], on: [("click", Ping)], kids: [a], key: None),
+    Elem(tag: "div", props: [], on: [("click", Pong)], kids: [a], key: None),
+    Elem(tag: "div", props: [], on: [("input", Ping)], kids: [a], key: None),
+    Elem(tag: "div", props: [], on: [("click", Ping), ("blur", Pong)], kids: [a], key: None),
+    Elem(tag: "div", props: [("class", "x")], on: [("click", Ping)], kids: [a, b], key: None),
   ]
 }
 
@@ -188,7 +218,7 @@ test "equal trees diff to nothing, and an unchanged sibling is never mentioned" 
   }
   # One text node changes under the second of three children: one patch,
   # addressed at it, and no mention of index 0 or 2.
-  let keep: Node[ProbeMsg] = Elem(tag: "b", props: [], on: [], kids: [Text(s: "keep")])
+  let keep: Node[ProbeMsg] = Elem(tag: "b", props: [], on: [], kids: [Text(s: "keep")], key: None)
   let old: Node[ProbeMsg] = div([keep, div([Text(s: "old")]), keep])
   let new: Node[ProbeMsg] = div([keep, div([Text(s: "new")]), keep])
   let want: List[Patch[Node[ProbeMsg]]] =
@@ -201,8 +231,221 @@ test "a listener whose message changed is a self difference, not a silent one" {
   # name, different meaning: without comparing `on` this pair answers `Same`,
   # `diff` emits nothing for a real difference, and the roundtrip contract
   # `apply(old, diff(old, new)) == new` is broken.
-  let a: Node[ProbeMsg] = Elem(tag: "button", props: [], on: [("click", Ping)], kids: [])
-  let b: Node[ProbeMsg] = Elem(tag: "button", props: [], on: [("click", Pong)], kids: [])
+  let a: Node[ProbeMsg] = Elem(tag: "button", props: [], on: [("click", Ping)], kids: [], key: None)
+  let b: Node[ProbeMsg] = Elem(tag: "button", props: [], on: [("click", Pong)], kids: [], key: None)
   assert a != b
   assert relate(a, b) == SelfDiffers
+}
+
+# ---- what keying is worth, in patches ----
+#
+# The number the whole knife is about, held as an assertion rather than as a
+# sentence in a design note. `screen` is the shape a list application actually
+# has: rows whose listeners carry the row's identity, so a row that changes
+# position is a row whose own data changed, plus one sibling holding a count so
+# that a round is never zero patches.
+#
+# The two spellings differ in exactly one thing, `with_key` on the `<li>`, and
+# `wired` is what says so: the two trees encode to the same wire bytes, so the
+# difference in patch count is the pairing and nothing else.
+
+type RowMsg =
+  | Toggle(id: Int)
+  | Edit(id: Int)
+  | Drop(id: Int)
+derive Show
+
+fn row(i: Int, identified: Bool) -> Node[RowMsg] = {
+  let li: Node[RowMsg] = Elem(
+    tag: "li",
+    props: [("class", "row")],
+    on: [],
+    kids: [
+      Elem(
+        tag: "button",
+        props: [("class", "box")],
+        on: [("click", Toggle(id: i))],
+        kids: [Text(s: "[ ]")],
+        key: None,
+      ),
+      Elem(
+        tag: "span",
+        props: [("class", "title")],
+        on: [("click", Edit(id: i))],
+        kids: [Text(s: "item " ++ to_string(i))],
+        key: None,
+      ),
+      Elem(
+        tag: "button",
+        props: [("class", "kill")],
+        on: [("click", Drop(id: i))],
+        kids: [Text(s: "x")],
+        key: None,
+      ),
+    ],
+    key: None,
+  )
+  if identified { with_key(li, to_string(i)) } else { li }
+}
+
+fn ids(n: Int, gone: Int, i: Int, acc: List[Int]) -> List[Int] =
+  if i > n {
+    acc
+  } else if i == gone {
+    ids(n, gone, i + 1, acc)
+  } else {
+    ids(n, gone, i + 1, acc ++ [i])
+  }
+
+## `n` rows numbered from 1, without the one numbered `gone` (0 for all of
+## them), and a status line that counts what is left. The `<ul>` and the `<p>`
+## carry no key of their own, so the outer list pairs by index either way and
+## the only pairing this varies is the one over the rows.
+fn screen(n: Int, gone: Int, identified: Bool) -> Node[RowMsg] = {
+  let left = ids(n, gone, 1, [])
+  Elem(
+    tag: "div",
+    props: [],
+    on: [],
+    kids: [
+      Elem(
+        tag: "ul",
+        props: [],
+        on: [],
+        kids: list.map(left, i => row(i, identified)),
+        key: None,
+      ),
+      Elem(
+        tag: "p",
+        props: [("class", "status")],
+        on: [],
+        kids: [Text(s: to_string(len(left)) ++ " left")],
+        key: None,
+      ),
+    ],
+    key: None,
+  )
+}
+
+fn cost(n: Int, gone: Int, identified: Bool) -> Int =
+  len(diff(screen(n, 0, identified), screen(n, gone, identified)))
+
+test "keying a list of 50 rows: a deletion costs 2 patches instead of 98" {
+  # Deleting the row in the middle. Index pairing rewrites every row below it:
+  # four patches each (three listeners whose id changed, one label), plus the
+  # truncate, plus the status line. Key pairing removes one child and touches
+  # nothing else.
+  assert cost(50, 26, false) == 98
+  assert cost(50, 26, true) == 2
+
+  # The worst case for index pairing is the first row, where every row below
+  # is every row.
+  assert cost(50, 1, false) == 198
+  assert cost(50, 1, true) == 2
+
+  # The one case index pairing was already optimal for. Keying must not make
+  # it worse, and this is the assertion that would say so.
+  assert cost(50, 50, false) == 2
+  assert cost(50, 50, true) == 2
+}
+
+test "the two spellings of the row differ in the key and in nothing else" {
+  # What makes the counts above a measurement of the pairing rather than of
+  # two different documents. `with_key` is the only difference between them,
+  # and stripping it back off recovers the unkeyed tree exactly.
+  assert screen(4, 0, true) != screen(4, 0, false)
+  assert list.map(kids_of(screen(4, 0, true)), unkey) == kids_of(screen(4, 0, false))
+}
+
+# `w` with no identity. Only the test above wants this, which is why it is
+# here and not next to `with_key`.
+fn unkey(w: Node[RowMsg]) -> Node[RowMsg] =
+  match w {
+    Text(_) -> w
+    Elem(t, p, o, ks, _) ->
+      Elem(tag: t, props: p, on: o, kids: list.map(ks, unkey), key: None)
+  }
+
+fn kids_of(w: Node[RowMsg]) -> List[Node[RowMsg]] = kids(w)
+
+test "a keyed roundtrip over the row shape, deleting each row in turn" {
+  # Every position, not just the interesting ones: the two patches are always
+  # the removal of the row that went, addressed inside the `<ul>`, and the
+  # status line. The first row and the last row have no special case here,
+  # which is the difference from index pairing in one sentence.
+  var i = 1
+  while i <= 8 {
+    let before = screen(8, 0, true)
+    let after = screen(8, i, true)
+    let ps = diff(before, after)
+    assert apply(before, ps) == after
+    assert len(ps) == 2
+    assert ps[0] == Patch { path: [0], op: RemoveKid(at: i - 1) }
+    i = i + 1
+  }
+}
+
+test "a moved row is moved, not rebuilt" {
+  # The op a host must not implement as a removal and a build. There is one of
+  # them and no `Replace`, which is the guest-side half of the promise that the
+  # element the browser is holding is the element that ends up in the new slot.
+  let before: Node[RowMsg] = Elem(
+    tag: "ul",
+    props: [],
+    on: [],
+    kids: [row(1, true), row(2, true), row(3, true)],
+    key: None,
+  )
+  let after: Node[RowMsg] = Elem(
+    tag: "ul",
+    props: [],
+    on: [],
+    kids: [row(3, true), row(1, true), row(2, true)],
+    key: None,
+  )
+  let want: List[Patch[Node[RowMsg]]] = [Patch { path: [], op: MoveKid(from: 2, to: 0) }]
+  assert diff(before, after) == want
+  assert apply(before, diff(before, after)) == after
+}
+
+test "relate reads the key: two rows that agree on everything else are unrelated" {
+  # Where the key is load-bearing on the index path. Same tag, same props,
+  # same listeners, different identity: without the key comparison this pair
+  # answers `Same` and the reconciler descends into it as though it were the
+  # same element.
+  let one: Node[RowMsg] = with_key(Elem(tag: "li", props: [], on: [], kids: [], key: None), "1")
+  let two: Node[RowMsg] = with_key(Elem(tag: "li", props: [], on: [], kids: [], key: None), "2")
+  let bare: Node[RowMsg] = Elem(tag: "li", props: [], on: [], kids: [], key: None)
+  assert relate(one, two) == Unrelated
+  assert relate(one, bare) == Unrelated
+  assert key(one) == Some("1")
+  assert key(bare) == None
+  let t: Node[RowMsg] = Text(s: "x")
+  assert key(t) == None
+  # A key survives a rebuild around new children, or a keyed list would lose
+  # its pairing the moment anything under it changed.
+  assert key(rekid(one, [t])) == Some("1")
+  # `with_key` is total: text has nowhere to keep one.
+  assert with_key(t, "1") == t
+}
+
+test "a repeated key in the DOM vocabulary falls back to index pairing" {
+  # Two rows claiming the same identity. The answer is the one index pairing
+  # gives, which is the answer this package had before keys existed.
+  let both: Node[RowMsg] = Elem(
+    tag: "ul",
+    props: [],
+    on: [],
+    kids: [with_key(row(1, false), "same"), with_key(row(2, false), "same")],
+    key: None,
+  )
+  let one: Node[RowMsg] = Elem(
+    tag: "ul",
+    props: [],
+    on: [],
+    kids: [with_key(row(1, false), "same")],
+    key: None,
+  )
+  assert diff(both, one) == [Patch { path: [], op: TruncateKids(keep: 1) }]
+  assert apply(both, diff(both, one)) == one
 }

@@ -1,14 +1,17 @@
 # Lowercase wrappers over the constructors, and nothing deeper -- the same
 # spelling layer `tea_term/dsl` is, for the same reason: a view reads better as
-# `div([...])` than as `Elem(tag: "div", props: [], on: [], kids: [...])`, and
-# the four-field constructor is unreadable when three of the fields are empty.
+# `div([...])` than as `Elem(tag: "div", props: [], on: [], kids: [...],
+# key: None)`, and the constructor is unreadable when four of its five fields
+# are empty.
 #
 # The same two inference taxes tea_term's README records apply here and are not
 # specific to either DSL: a type argument flows from an expected type, and a
 # `let` binding has none, so shape a view as annotated `let`s per segment
 # (`let header: Node[Msg] = ...`) and concatenate the named parts.
 
-use node.{Node, Text, Elem}
+use std/list
+use node.{Node, Text, Elem, with_key}
+use tea_core/tree.{key}
 
 ## A text node.
 pub fn text[M](s: String) -> Node[M] = Text(s: s)
@@ -19,25 +22,50 @@ pub fn el[M](
   props: List[(String, String)],
   on: List[(String, M)],
   kids: List[Node[M]],
-) -> Node[M] = Elem(tag: tag, props: props, on: on, kids: kids)
+) -> Node[M] = Elem(tag: tag, props: props, on: on, kids: kids, key: None)
+
+## An element whose children are paired by identity rather than by position.
+## Each child arrives with the string that names it, which is the shape
+## `Html.Keyed.node` has in Elm and it is not decoration: a list of pairs is
+## the only spelling in which forgetting one key is a type error rather than a
+## silent return to index pairing.
+##
+## A `Text` child cannot hold a key, so a list containing one falls back to
+## index pairing however this is called. Wrap it in a `span` to key it.
+pub fn keyed[M](
+  tag: String,
+  props: List[(String, String)],
+  on: List[(String, M)],
+  kids: List[(String, Node[M])],
+) -> Node[M] =
+  Elem(
+    tag: tag,
+    props: props,
+    on: on,
+    kids: list.map(kids, entry => {
+      let (k, w) = entry
+      with_key(w, k)
+    }),
+    key: None,
+  )
 
 ## A container with children and nothing else. The two commonest shapes get a
 ## name because they are what a view is mostly made of.
 pub fn div[M](kids: List[Node[M]]) -> Node[M] =
-  Elem(tag: "div", props: [], on: [], kids: kids)
+  Elem(tag: "div", props: [], on: [], kids: kids, key: None)
 
 ## A `div` with a class, which is how a view says "style this region".
 pub fn div_of[M](class: String, kids: List[Node[M]]) -> Node[M] =
-  Elem(tag: "div", props: [("class", class)], on: [], kids: kids)
+  Elem(tag: "div", props: [("class", class)], on: [], kids: kids, key: None)
 
 ## A `span` holding one string.
 pub fn span[M](s: String) -> Node[M] =
-  Elem(tag: "span", props: [], on: [], kids: [Text(s: s)])
+  Elem(tag: "span", props: [], on: [], kids: [Text(s: s)], key: None)
 
 ## A button labelled `label` whose click means `msg`. The DOM analogue of
 ## `tea_term/dsl.button`, and like it the message is data in the tree.
 pub fn button[M](label: String, msg: M) -> Node[M] =
-  Elem(tag: "button", props: [], on: [("click", msg)], kids: [Text(s: label)])
+  Elem(tag: "button", props: [], on: [("click", msg)], kids: [Text(s: label)], key: None)
 
 # A message type for the test blocks below; real apps bring their own.
 type ProbeMsg =
@@ -47,13 +75,34 @@ derive Show
 
 test "the wrappers build exactly the constructors they name" {
   let b: Node[ProbeMsg] = button("go", Ping)
-  assert b == Elem(tag: "button", props: [], on: [("click", Ping)], kids: [Text(s: "go")])
+  assert b == Elem(tag: "button", props: [], on: [("click", Ping)], kids: [Text(s: "go")], key: None)
   let t: Node[ProbeMsg] = text("hi")
   assert t == Text(s: "hi")
-  assert div([t]) == Elem(tag: "div", props: [], on: [], kids: [t])
-  assert div_of("row", [t]) == Elem(tag: "div", props: [("class", "row")], on: [], kids: [t])
+  assert div([t]) == Elem(tag: "div", props: [], on: [], kids: [t], key: None)
+  assert div_of("row", [t]) == Elem(tag: "div", props: [("class", "row")], on: [], kids: [t], key: None)
   let sp: Node[ProbeMsg] = span("hi")
-  assert sp == Elem(tag: "span", props: [], on: [], kids: [t])
+  assert sp == Elem(tag: "span", props: [], on: [], kids: [t], key: None)
   let general: Node[ProbeMsg] = el("input", [("value", "7")], [("input", Pong)], [])
-  assert general == Elem(tag: "input", props: [("value", "7")], on: [("input", Pong)], kids: [])
+  assert general == Elem(tag: "input", props: [("value", "7")], on: [("input", Pong)], kids: [], key: None)
+}
+
+test "keyed hands each child the string that names it" {
+  let rows: Node[ProbeMsg] = keyed("ul", [], [], [("a", span("A")), ("b", span("B"))])
+  let want: Node[ProbeMsg] = Elem(
+    tag: "ul",
+    props: [],
+    on: [],
+    kids: [with_key(span("A"), "a"), with_key(span("B"), "b")],
+    key: None,
+  )
+  assert rows == want
+  # The element itself is unkeyed. A key names a node among its siblings, and
+  # a keyed container is keyed by whatever list it is a member of, not by the
+  # keys it hands out.
+  assert key(rows) == None
+  # Text cannot hold one, so a list containing text is back on indices however
+  # this is called. The pair is accepted and the key is dropped, which is the
+  # honest outcome: there is nowhere to put it.
+  let mixed: Node[ProbeMsg] = keyed("p", [], [], [("t", text("hi"))])
+  assert mixed == Elem(tag: "p", props: [], on: [], kids: [Text(s: "hi")], key: None)
 }

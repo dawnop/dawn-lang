@@ -14,7 +14,7 @@ same four files in a browser and in node.
 |---|---|
 | `wasi.mjs` | the eight WASI preview1 functions the guest imports, over a byte queue |
 | `reactor.mjs` | instantiate once, `dawn_turn` per message, one JSON line each way |
-| `dom.mjs` | the four patch ops as DOM mutations, and the address walk both ways |
+| `dom.mjs` | the seven patch ops as DOM mutations, and the address walk both ways |
 | `app.mjs` | the loop: init, render, wait, dispatch, patch, wait |
 
 ## The boundary
@@ -42,6 +42,34 @@ A node is `{"t":"text","s":…}` or
 `set-self` payload is the same object with no `kids` -- `apply` reads only a
 donor's own data, so the subtree is not shipped and a class change at the root
 costs one `setAttribute`.
+
+## The seven ops
+
+`replace`, `set-self`, `append` and `truncate` address a node or its tail.
+The other three edit a child list in the middle:
+
+```
+{"path":[3],"op":"insert","at":1,"node":{…}}
+{"path":[3],"op":"remove","at":1}
+{"path":[3],"op":"move","from":4,"to":1}
+```
+
+`move` must move the node the document already has, with `insertBefore`, and
+never remove and rebuild it. Everything a browser keeps inside an element --
+focus, a caret, a selection, a scroll offset, a half-typed IME composition --
+is state no tree describes and a fresh element does not have, and moving is
+the only way it survives a reordering.
+
+One trap in `move`. `to` counts positions in the list as it will be, while the
+reference child is read from the list as it is, with the moving node still in
+it. A node travelling right therefore skips over itself and takes `to + 1`; a
+node travelling left does not. The wrong choice puts the element one place off
+and raises nothing.
+
+The guest settles the pairing, so no key ever crosses: the host is told where
+a child goes and never why. `scripts/wasm-dom-contract/keyed-ops.mjs` drives
+these three straight at the bridge, since neither demo application keys its
+children.
 
 ## Why a WASI shim rather than `node:wasi`
 

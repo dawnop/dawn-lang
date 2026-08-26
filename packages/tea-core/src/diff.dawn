@@ -10,37 +10,56 @@
 # to put a node back together. The `Eq` bound is what makes the short-circuit
 # possible and is also what keeps callbacks out of trees -- see tree.dawn.
 #
-# The list strategy is unkeyed, Elm-style: children pair up by index, and a
-# length difference becomes one append or one truncate at the tail. Deleting in
-# the middle therefore rewrites the tail pairwise -- the known cost of unkeyed
-# diffing, accepted for v1 (see the middle-deletion test below, which pins the
-# cost rather than hiding it). Keyed pairing is deferred, not forgotten: it
-# needs `InsertKid`/`RemoveKid`/`MoveKid`, whose payloads are `Int` and `W` and
-# so fit this `Op` without touching the contract. Half of keying is already
-# here, in that a vocabulary whose `relate` compares keys gets whole-subtree
-# replacement for a changed key at a fixed position for free.
+# A child list is paired one of two ways, and the list decides which. When
+# every child answers a `key` and no two answer the same one, children pair by
+# key: a deletion in the middle is one `RemoveKid` whatever the length, and a
+# child that changed position is moved rather than rebuilt, which is the whole
+# point -- a host's node carries state the tree cannot see (focus, a caret, a
+# scroll offset), and state survives a move but not a rebuild. Otherwise
+# children pair by index, Elm-style, with a length difference becoming one
+# append or one truncate at the tail; deleting in the middle then rewrites the
+# tail pairwise, which is the known cost of unkeyed diffing and is pinned by a
+# test below rather than hidden.
 #
-# The four ops are closed under in-order application: recursion over a common
-# prefix never shifts indices, and the tail ops never touch the prefix, so a
-# patch list applies in emission order with no index fixups.
+# Index pairing is the fallback and not the failure case. `diff` is total and
+# has no channel for a complaint, so a child list with a repeated key or with
+# one unkeyed sibling gets the answer it would have had before keys existed,
+# which is an answer already proven correct rather than an undefined one.
+#
+# In-order application. The first four ops never shift an index: recursion over
+# a common prefix stays in place and the tail ops never touch the prefix. The
+# three keyed ops do shift indices, so the keyed path emits in two phases --
+# every structural op first, at the parent's address, and only then the
+# descents into the pairs that survived. Phase one leaves the child list in the
+# new order, so an index phase two emits is already final. That split is what
+# keeps the invariant the four ops had: a patch list applies in emission order
+# with no index fixups.
 
 use std/list
-use tree.{Tree, Rel, Unrelated, Same, SelfDiffers, kids, rekid, relate}
+use tree.{Tree, Rel, Unrelated, Same, SelfDiffers, kids, rekid, relate, key}
 
 ## One edit operation. `Replace` swaps a whole subtree, `SetSelf` takes a
-## node's own data and keeps the children already in place, and the two tail
-## ops grow or shrink a node's child list.
+## node's own data and keeps the children already in place, the two tail ops
+## grow or shrink a node's child list, and the three keyed ops edit it in the
+## middle.
 ##
 ## `SetSelf` carries a whole node where an attribute-carrying op would carry
 ## attributes, because core has no way to name a vocabulary's attribute type
 ## (tree.dawn, wall one). The payload is not a copy -- it is the node `diff`
 ## was handed -- and it cannot be normalised to "the node without its
 ## children" either, since a one-child wrapper has no spelling for "no child".
+##
+## `MoveKid` is the one op a host must not implement as a removal and a
+## rebuild. Its whole value is that the node the host already has is the node
+## that ends up at `to`.
 pub type Op[W] =
   | Replace(w: W)
   | SetSelf(w: W)
   | AppendKids(ws: List[W])
   | TruncateKids(keep: Int)
+  | InsertKid(at: Int, w: W)
+  | RemoveKid(at: Int)
+  | MoveKid(from: Int, to: Int)
 derive Show
 
 ## One edit at one address. `path` is the chain of child indices from the root,
@@ -76,9 +95,24 @@ fn diff_at[W: Tree + Eq](old: W, new: W, path: List[Int]) -> List[Patch[W]] =
     }
   }
 
+# Which pairing a child list gets. Both sides have to be keyable, because a
+# pairing is between two lists: keys on one side and indices on the other is
+# not a pairing at all.
+fn diff_kids[W: Tree + Eq](
+  old: List[W],
+  new: List[W],
+  path: List[Int],
+  i: Int,
+  acc: List[Patch[W]],
+) -> List[Patch[W]] =
+  match (pair_keys(old), pair_keys(new)) {
+    (Some(ok), Some(nk)) -> acc ++ diff_keyed(old, new, ok, nk, path)
+    _ -> diff_indexed(old, new, path, i, acc)
+  }
+
 # Pairwise over the common prefix, then at most one tail op. Self-tail-
 # recursive so the compiler turns it into a loop.
-fn diff_kids[W: Tree + Eq](
+fn diff_indexed[W: Tree + Eq](
   old: List[W],
   new: List[W],
   path: List[Int],
@@ -87,7 +121,7 @@ fn diff_kids[W: Tree + Eq](
 ) -> List[Patch[W]] = {
   let common = if len(old) < len(new) { len(old) } else { len(new) }
   if i < common {
-    diff_kids(old, new, path, i + 1, acc ++ diff_at(old[i], new[i], path ++ [i]))
+    diff_indexed(old, new, path, i + 1, acc ++ diff_at(old[i], new[i], path ++ [i]))
   } else if len(new) > common {
     let ap: Patch[W] = Patch { path: path, op: AppendKids(ws: list.drop(new, common)) }
     acc ++ [ap]
@@ -98,6 +132,111 @@ fn diff_kids[W: Tree + Eq](
     acc
   }
 }
+
+# `Some(ks)` exactly when this list can be paired by key: non-empty, every
+# child answers one, and no two answer the same. A repeated key is the one
+# thing keying cannot be total about -- it names two children, so it names
+# neither -- and the answer is the index pairing, not an error `diff` has
+# nowhere to put.
+fn pair_keys[W: Tree](xs: List[W]) -> Option[List[String]] = {
+  let unkeyable: Option[List[String]] = None
+  if list.is_empty(xs) { unkeyable } else { keys_go(xs, 0, []) }
+}
+
+fn keys_go[W: Tree](xs: List[W], i: Int, acc: List[String]) -> Option[List[String]] =
+  if i >= len(xs) {
+    if len(list.unique(acc)) == len(acc) { Some(acc) } else { None }
+  } else {
+    match key(xs[i]) {
+      None -> None
+      Some(k) -> keys_go(xs, i + 1, acc ++ [k])
+    }
+  }
+
+# Align, then descend. Phase one is every structural op, at the parent's
+# address, in an order that leaves the child list holding exactly the new
+# keys in the new order; phase two diffs the pairs that survived, at the
+# addresses phase one just gave them. See the header for why this is two
+# phases and not one.
+fn diff_keyed[W: Tree + Eq](
+  old: List[W],
+  new: List[W],
+  ok: List[String],
+  nk: List[String],
+  path: List[Int],
+) -> List[Patch[W]] = {
+  let gone: List[Op[W]] = drops(ok, nk, len(ok) - 1, [])
+  let survivors = list.filter(ok, k => list.contains(nk, k))
+  let placed: List[Op[W]] = place(new, nk, survivors, 0, [])
+  let structural = list.map(gone ++ placed, o => Patch { path: path, op: o })
+  structural ++ descend(old, ok, new, nk, 0, [], path)
+}
+
+# Highest index first, so that every removal's index is still the index of the
+# child it names when the host gets round to applying it.
+fn drops[W](ok: List[String], nk: List[String], j: Int, acc: List[Op[W]]) -> List[Op[W]] =
+  if j < 0 {
+    acc
+  } else if list.contains(nk, ok[j]) {
+    drops(ok, nk, j - 1, acc)
+  } else {
+    {
+      let rm: Op[W] = RemoveKid(at: j)
+      drops(ok, nk, j - 1, acc ++ [rm])
+    }
+  }
+
+# Left to right over the new order, carrying `cur`: the keys the child list
+# holds, in the order it holds them, as of this point in the emission. Every
+# position left of `t` is already final, so a key that is present is at or
+# after `t`, and one move is what puts it at `t`.
+fn place[W](
+  new: List[W],
+  nk: List[String],
+  cur: List[String],
+  t: Int,
+  acc: List[Op[W]],
+) -> List[Op[W]] =
+  if t >= len(nk) {
+    acc
+  } else {
+    let k = nk[t]
+    match list.index_of(cur, k) {
+      None -> {
+        let ins: Op[W] = InsertKid(at: t, w: new[t])
+        place(new, nk, list.take(cur, t) ++ [k] ++ list.drop(cur, t), t + 1, acc ++ [ins])
+      }
+      Some(p) ->
+        if p == t {
+          place(new, nk, cur, t + 1, acc)
+        } else {
+          let without = list.take(cur, p) ++ list.drop(cur, p + 1)
+          let mv: Op[W] = MoveKid(from: p, to: t)
+          place(new, nk, list.take(without, t) ++ [k] ++ list.drop(without, t), t + 1, acc ++ [mv])
+        }
+    }
+  }
+
+# The pairs both lists have, addressed at their new positions. A key only the
+# new list has was inserted whole in phase one and has nothing to diff against.
+fn descend[W: Tree + Eq](
+  old: List[W],
+  ok: List[String],
+  new: List[W],
+  nk: List[String],
+  t: Int,
+  acc: List[Patch[W]],
+  path: List[Int],
+) -> List[Patch[W]] =
+  if t >= len(nk) {
+    acc
+  } else {
+    match list.index_of(ok, nk[t]) {
+      None -> descend(old, ok, new, nk, t + 1, acc, path)
+      Some(o) ->
+        descend(old, ok, new, nk, t + 1, acc ++ diff_at(old[o], new[t], path ++ [t]), path)
+    }
+  }
 
 fn apply_one[W: Tree](w: W, path: List[Int], op: Op[W]) -> W =
   if list.is_empty(path) {
@@ -123,6 +262,28 @@ fn apply_op[W: Tree](w: W, op: Op[W]) -> W =
     SetSelf(d) -> rekid(d, kids(w))
     AppendKids(ws) -> rekid(w, kids(w) ++ ws)
     TruncateKids(keep) -> rekid(w, list.take(kids(w), keep))
+    # The three keyed ops keep `apply` total the same way the address walk
+    # does: an index that names no child leaves the node alone. An insert
+    # clamps instead, because "past the end" is a position a list has and
+    # "before the start" is the front.
+    InsertKid(at, n) -> {
+      let ks = kids(w)
+      let i = if at < 0 { 0 } else if at > len(ks) { len(ks) } else { at }
+      rekid(w, list.take(ks, i) ++ [n] ++ list.drop(ks, i))
+    }
+    RemoveKid(at) -> {
+      let ks = kids(w)
+      if at < 0 || at >= len(ks) { w } else { rekid(w, list.take(ks, at) ++ list.drop(ks, at + 1)) }
+    }
+    MoveKid(from, to) -> {
+      let ks = kids(w)
+      if from < 0 || from >= len(ks) || to < 0 || to >= len(ks) {
+        w
+      } else {
+        let without = list.take(ks, from) ++ list.drop(ks, from + 1)
+        rekid(w, list.take(without, to) ++ [ks[from]] ++ list.drop(without, to))
+      }
+    }
   }
 
 # ---- test vocabulary ----
@@ -291,4 +452,253 @@ test "apply is total against an address that does not exist" {
   let g: Cell = Group(ks: [Atom(v: "a")])
   let negative: List[Patch[Cell]] = [Patch { path: [-1], op: Replace(w: Atom(v: "z")) }]
   assert apply(g, negative) == g
+}
+
+# ---- keyed test vocabulary ----
+#
+# A second vocabulary, and it has to be a second one: `Cell` above answers the
+# default `key` for every node, which is exactly what makes it the proof that
+# an unkeyed vocabulary kept the behaviour it had. So the keyed path needs its
+# own, and `KCell` is it -- keyed leaves, a keyed container, and one node that
+# is deliberately unkeyable, since a list with an unkeyable sibling is a case
+# with an answer rather than a case that cannot arise.
+
+type KCell =
+  | KLeaf(k: String, v: String)
+  | KBox(k: String, ks: List[KCell])
+  | KBare(v: String)
+derive Show
+
+impl Tree[KCell] {
+  fn kids(w: KCell) -> List[KCell] =
+    match w {
+      KLeaf(_, _) -> []
+      KBare(_) -> []
+      KBox(_, ks) -> ks
+    }
+
+  fn rekid(w: KCell, ks: List[KCell]) -> KCell =
+    match w {
+      KLeaf(_, _) -> w
+      KBare(_) -> w
+      KBox(k, _) -> KBox(k: k, ks: ks)
+    }
+
+  # A key change is `Unrelated` here for the same reason it is in the DOM
+  # vocabulary: on the index path a shared position is the only evidence of
+  # identity, and a key that disagrees says the position is lying.
+  fn relate(old: KCell, new: KCell) -> Rel =
+    match old {
+      KBox(a, _) ->
+        match new {
+          KBox(b, _) -> if a == b { Same } else { Unrelated }
+          _ -> Unrelated
+        }
+      _ -> Unrelated
+    }
+
+  fn key(w: KCell) -> Option[String] =
+    match w {
+      KLeaf(k, _) -> Some(k)
+      KBox(k, _) -> Some(k)
+      KBare(_) -> None
+    }
+}
+
+fn kbox(ks: List[KCell]) -> KCell = KBox(k: "root", ks: ks)
+
+fn ka() -> KCell = KLeaf(k: "a", v: "A")
+fn kb() -> KCell = KLeaf(k: "b", v: "B")
+fn kc() -> KCell = KLeaf(k: "c", v: "C")
+fn kd() -> KCell = KLeaf(k: "d", v: "D")
+
+## Every shape the keyed path distinguishes: the empty list, lists that grow,
+## shrink, rotate and reverse, a child whose own data changed under an
+## unchanged key, a keyed container with a keyed list inside it, and -- the two
+## that pin the fallback -- a repeated key and an unkeyable sibling.
+fn kcorpus() -> List[KCell] = [
+  kbox([]),
+  kbox([ka()]),
+  kbox([ka(), kb()]),
+  kbox([kb(), ka()]),
+  kbox([ka(), kb(), kc()]),
+  kbox([kc(), kb(), ka()]),
+  kbox([ka(), kc()]),
+  kbox([kb(), kc()]),
+  kbox([ka(), kb(), kc(), kd()]),
+  kbox([kd(), ka(), kb(), kc()]),
+  kbox([ka(), kc(), kb(), kd()]),
+  kbox([KLeaf(k: "a", v: "CHANGED"), kb(), kc()]),
+  kbox([KBox(k: "a", ks: [kb()]), kc()]),
+  kbox([KBox(k: "a", ks: [kb(), kc()]), kc()]),
+  kbox([ka(), ka()]),
+  kbox([ka(), ka(), kb()]),
+  kbox([ka(), KBare(v: "x")]),
+  kbox([KBare(v: "x"), ka()]),
+  kbox([KBare(v: "y")]),
+]
+
+fn kroundtrips(x: KCell, y: KCell) -> Bool = apply(x, diff(x, y)) == y
+
+fn kpairs(xs: List[KCell], i: Int, j: Int, bad: Int) -> Int =
+  if i >= len(xs) {
+    bad
+  } else if j >= len(xs) {
+    kpairs(xs, i + 1, 0, bad)
+  } else if kroundtrips(xs[i], xs[j]) {
+    kpairs(xs, i, j + 1, bad)
+  } else {
+    kpairs(xs, i, j + 1, bad + 1)
+  }
+
+test "keyed: apply replays diff back to the new tree, over every ordered pair" {
+  let xs = kcorpus()
+  assert len(xs) == 19
+  assert kpairs(xs, 0, 0, 0) == 0
+}
+
+test "keyed: a removal in the middle is one op, whatever the length" {
+  let src = kbox([ka(), kb(), kc(), kd()])
+  let gone = kbox([ka(), kc(), kd()])
+  let want: List[Patch[KCell]] = [Patch { path: [], op: RemoveKid(at: 1) }]
+  assert diff(src, gone) == want
+  assert apply(src, diff(src, gone)) == gone
+}
+
+test "keyed: an insertion in the middle is one op and never mentions a neighbour" {
+  let src = kbox([ka(), kc()])
+  let ins = kbox([ka(), kb(), kc()])
+  let want: List[Patch[KCell]] = [Patch { path: [], op: InsertKid(at: 1, w: kb()) }]
+  assert diff(src, ins) == want
+  assert apply(src, diff(src, ins)) == ins
+}
+
+test "keyed: a rotation is one move, and a reversal is n-1 of them" {
+  let src = kbox([ka(), kb(), kc(), kd()])
+  let rot = kbox([kd(), ka(), kb(), kc()])
+  assert diff(src, rot) == [Patch { path: [], op: MoveKid(from: 3, to: 0) }]
+  # n-1 is the lower bound a minimum-move algorithm would also pay here, so
+  # this pins that the simple placement is not paying more than one for it.
+  assert len(diff(src, kbox([kd(), kc(), kb(), ka()]))) == 3
+}
+
+test "keyed: a moved child still gets its own subtree diffed, at its new address" {
+  # The two phases in one assertion: the move is addressed at the parent and
+  # the descent is addressed at index 1, which is where the move just put it.
+  let src = kbox([KBox(k: "x", ks: [ka()]), KLeaf(k: "y", v: "Y")])
+  let dst = kbox([KLeaf(k: "y", v: "Y"), KBox(k: "x", ks: [ka(), kb()])])
+  let want: List[Patch[KCell]] = [
+    Patch { path: [], op: MoveKid(from: 1, to: 0) },
+    Patch { path: [1], op: InsertKid(at: 1, w: kb()) },
+  ]
+  assert diff(src, dst) == want
+  assert apply(src, diff(src, dst)) == dst
+}
+
+test "keyed: removals are emitted highest index first" {
+  # Ascending order would be wrong and would still round-trip on a single
+  # removal, so the list has two and the assertion is on the order.
+  let src = kbox([ka(), kb(), kc(), kd()])
+  let dst = kbox([ka(), kc()])
+  let want: List[Patch[KCell]] = [
+    Patch { path: [], op: RemoveKid(at: 3) },
+    Patch { path: [], op: RemoveKid(at: 1) },
+  ]
+  assert diff(src, dst) == want
+  assert apply(src, diff(src, dst)) == dst
+}
+
+test "keyed: a tail append costs one op per child, where index pairing cost one" {
+  # The price the keyed path charges where the unkeyed one was already optimal.
+  # Named so that folding a run of tail inserts back into one `AppendKids` is a
+  # change to this number rather than a silent one.
+  let src = kbox([ka()])
+  let grown = kbox([ka(), kb(), kc()])
+  assert len(diff(src, grown)) == 2
+  assert apply(src, diff(src, grown)) == grown
+}
+
+test "keyed: a repeated key falls back to index pairing" {
+  # Not an error and not a best effort: the answer is the one index pairing
+  # gives, which the ordered pairs above have already proven correct.
+  let dup = kbox([ka(), ka()])
+  let one = kbox([ka()])
+  assert diff(dup, one) == [Patch { path: [], op: TruncateKids(keep: 1) }]
+  assert apply(dup, diff(dup, one)) == one
+}
+
+test "keyed: one unkeyable sibling puts the whole list back on indices" {
+  let mixed = kbox([ka(), KBare(v: "x"), kc()])
+  let shorter = kbox([ka(), kc()])
+  # Index pairing: KBare at 1 is replaced by kc, then the tail is truncated.
+  let want: List[Patch[KCell]] = [
+    Patch { path: [1], op: Replace(w: kc()) },
+    Patch { path: [], op: TruncateKids(keep: 2) },
+  ]
+  assert diff(mixed, shorter) == want
+  assert apply(mixed, diff(mixed, shorter)) == shorter
+}
+
+test "keyed: apply is total against keyed ops that address nothing" {
+  let g = kbox([ka(), kb()])
+  let far: List[Patch[KCell]] = [Patch { path: [], op: RemoveKid(at: 9) }]
+  assert apply(g, far) == g
+  let back: List[Patch[KCell]] = [Patch { path: [], op: MoveKid(from: 0, to: 5) }]
+  assert apply(g, back) == g
+  let neg: List[Patch[KCell]] = [Patch { path: [], op: MoveKid(from: -1, to: 0) }]
+  assert apply(g, neg) == g
+  # An insert clamps rather than declining, since a list has a position past
+  # its end and that is the position an out-of-range insert means.
+  let past: List[Patch[KCell]] = [Patch { path: [], op: InsertKid(at: 9, w: kc()) }]
+  assert apply(g, past) == kbox([ka(), kb(), kc()])
+  let before: List[Patch[KCell]] = [Patch { path: [], op: InsertKid(at: -3, w: kc()) }]
+  assert apply(g, before) == kbox([kc(), ka(), kb()])
+}
+
+# ---- a randomised sweep over keyed lists ----
+#
+# The corpus above is hand-picked, and a hand-picked corpus can be picked to
+# agree with the mistake the implementation makes. This asks the same contract
+# of lists nobody chose. A linear congruential generator rather than a source
+# of entropy, so the sweep is a constant and a failure is reproducible.
+
+fn lcg(seed: Int) -> Int = (seed * 1103515245 + 12345) % 2147483648
+
+fn pick(seed: Int, n: Int) -> KCell = {
+  let i = (seed / 7) % n
+  KLeaf(k: to_string(i), v: to_string(seed % 3))
+}
+
+# A list of distinct keys drawn from 0..n, in whatever order the generator
+# says and at whatever length the collisions leave.
+fn gen(seed: Int, take: Int, n: Int, acc: List[KCell], seen: List[String]) -> List[KCell] =
+  if take <= 0 {
+    acc
+  } else {
+    let c = pick(seed, n)
+    match key(c) {
+      None -> acc
+      Some(k) ->
+        if list.contains(seen, k) {
+          gen(lcg(seed), take - 1, n, acc, seen)
+        } else {
+          gen(lcg(seed), take - 1, n, acc ++ [c], seen ++ [k])
+        }
+    }
+  }
+
+fn sweep(seed: Int, left: Int, bad: Int) -> Int =
+  if left <= 0 {
+    bad
+  } else {
+    let s1 = lcg(seed)
+    let s2 = lcg(s1)
+    let x = kbox(gen(s1, 8, 9, [], []))
+    let y = kbox(gen(s2, 8, 9, [], []))
+    let ok = apply(x, diff(x, y)) == y && apply(y, diff(y, x)) == x
+    sweep(s2, left - 1, if ok { bad } else { bad + 1 })
+  }
+
+test "keyed: apply replays diff over 400 generated pairs of keyed lists" {
+  assert sweep(20260826, 400, 0) == 0
 }

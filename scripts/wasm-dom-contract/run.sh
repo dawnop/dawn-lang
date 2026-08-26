@@ -40,6 +40,9 @@
 # to the transcript of its case. A mutant that passes means the transcript
 # has no teeth about the thing it broke, and this script says so.
 #
+# Before any of that, keyed-ops.sh: the three ops neither application here
+# reaches, driven straight at the bridge. See its own head for why.
+#
 #   ./scripts/wasm-dom-contract/run.sh
 #   ./scripts/wasm-dom-contract/run.sh --record        # re-record both transcripts
 #   DAWNC_BIN=/path/to/dawnc ./scripts/wasm-dom-contract/run.sh
@@ -56,6 +59,12 @@ trap 'rm -rf "$work"' EXIT
 
 record=0
 [ "${1:-}" = "--record" ] && record=1
+
+# ---- the keyed ops, first, because they need nothing but node -------------
+# Neither application below keys its children, so `insert`/`remove`/`move`
+# never appear in either transcript. keyed-ops.sh drives the bridge with the
+# patch lists a keyed application would produce, and carries its own mutants.
+"$(dirname "${BASH_SOURCE[0]}")/keyed-ops.sh"
 
 fail=0
 demo="$root/examples/projects/tea_dom_counter"
@@ -318,4 +327,4 @@ edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
   run_mutant todo-filter yes "the done filter admits everything"
 
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm dom contract ok (2 transcripts + 8 mutants)"
+echo "wasm dom contract ok (2 transcripts + 8 mutants, plus the keyed ops)"

@@ -32,14 +32,14 @@ so a vocabulary never re-compares fields that `==` settled. That structural
 means "a node holds no callbacks" is enforced where a tree meets the
 reconciler.
 
-Two things the contract deliberately does not have. There is no `type Attr`,
-because a type declaration cannot constrain its parameters and an unbounded
-projection cannot be resolved, so an op cannot carry a vocabulary's attribute
-payload; the in-place op carries a whole replacement node instead. There is no
-`fn key`, because keyed child pairing has no consumer here yet -- the half of
-keying that works per node is already available, since a `relate` that compares
-keys gets whole-subtree replacement for a changed key at a fixed address for
-free.
+`fn key(w) -> Option[String]` is the fourth member and the only one with a
+default. It names a node among its siblings, and the default `None` is what
+lets a vocabulary with no notion of identity keep the pairing it had before the
+member existed. The type is `String` for the same reason there is no `type
+Attr`: a type declaration cannot constrain its parameters and an unbounded
+projection cannot be resolved, so an identity has to be built out of a type
+core already knows. That wall is also why the in-place op carries a whole
+replacement node rather than attributes.
 
 The impl belongs to the module declaring the vocabulary, not to this package:
 the orphan rule is per module and core must not know that widgets exist. One
@@ -62,11 +62,20 @@ already in place. The payload is not a copy, and it cannot be reduced to "the
 node without its children" either, because a one-child wrapper has no spelling
 for "no child".
 
-Child lists diff unkeyed, Elm-style: pairwise by index with one tail append or
-truncate. A middle deletion therefore rewrites the tail pairwise; that cost is
-pinned by a test rather than hidden. Adding keys later widens `Op` with
-`InsertKid`/`RemoveKid`/`MoveKid`, whose payloads are `Int` and `W` and so need
-nothing this contract does not already have.
+A child list pairs one of two ways, and the list decides. When every child
+answers a `key` and no two answer the same one, children pair by key:
+`InsertKid`, `RemoveKid` and `MoveKid` edit the list in the middle, so a
+deletion costs one op whatever the length and a child that changed position is
+moved rather than rebuilt. Otherwise children pair by index, Elm-style, with
+one tail append or truncate, and a middle deletion rewrites the tail pairwise;
+that cost is pinned by a test rather than hidden.
+
+Index pairing is the fallback, not the failure case. `diff` is total and has no
+channel for a complaint, so a repeated key or one unkeyable sibling gets the
+answer it would have had before keys existed. The keyed path emits in two
+phases -- every structural op at the parent's address, then the descents into
+the pairs that survived -- which is what keeps the invariant the four original
+ops had: patches apply in emission order with no index fixups.
 
 ## Walking
 

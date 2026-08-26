@@ -40,8 +40,18 @@ use std/map
 use json/value.{Json, JStr, JInt, JArr, JObj, JBool, error_text}
 use json/render.{render}
 use json/parser.{parse}
-use tea_core/diff.{Patch, Op, Replace, SetSelf, AppendKids, TruncateKids}
-use node.{Node, Text, Elem}
+use tea_core/diff.{
+  Patch,
+  Op,
+  Replace,
+  SetSelf,
+  AppendKids,
+  TruncateKids,
+  InsertKid,
+  RemoveKid,
+  MoveKid,
+}
+use node.{Node, Text, Elem, with_key}
 
 ## What the host asked for this turn. `Bad` carries the reason rather than
 ## panicking: a malformed line is the host's mistake and the guest answers it
@@ -71,7 +81,7 @@ fn jevent[M](e: (String, M)) -> Json = {
 pub fn enc_self[M](n: Node[M]) -> Json =
   match n {
     Text(s) -> JObj(entries: map.from([("t", JStr(value: "text")), ("s", JStr(value: s))]))
-    Elem(tag, props, on, _) ->
+    Elem(tag, props, on, _, _) ->
       JObj(entries: map.from([
         ("t", JStr(value: "elem")),
         ("tag", JStr(value: tag)),
@@ -84,7 +94,7 @@ pub fn enc_self[M](n: Node[M]) -> Json =
 pub fn enc_node[M](n: Node[M]) -> Json =
   match n {
     Text(_) -> enc_self(n)
-    Elem(tag, props, on, ks) ->
+    Elem(tag, props, on, ks, _) ->
       JObj(entries: map.from([
         ("t", JStr(value: "elem")),
         ("tag", JStr(value: tag)),
@@ -94,9 +104,13 @@ pub fn enc_node[M](n: Node[M]) -> Json =
       ]))
   }
 
-## One patch. The four op names are the four `tea_core/diff.Op` constructors
-## and there is no fifth: a bridge that grows a case this list does not have
+## One patch. The seven op names are the seven `tea_core/diff.Op` constructors
+## and there is no eighth: a bridge that grows a case this list does not have
 ## is a bridge that forked the contract.
+##
+## The keys that produced `insert`/`remove`/`move` do not appear here and have
+## no encoding. Pairing is settled in the guest, so what the host is told is
+## where a child goes, never why.
 pub fn enc_patch[M](p: Patch[Node[M]]) -> Json =
   match p.op {
     Replace(w) ->
@@ -122,6 +136,26 @@ pub fn enc_patch[M](p: Patch[Node[M]]) -> Json =
         ("path", jpath(p.path)),
         ("op", JStr(value: "truncate")),
         ("keep", JInt(value: keep)),
+      ]))
+    InsertKid(at, w) ->
+      JObj(entries: map.from([
+        ("path", jpath(p.path)),
+        ("op", JStr(value: "insert")),
+        ("at", JInt(value: at)),
+        ("node", enc_node(w)),
+      ]))
+    RemoveKid(at) ->
+      JObj(entries: map.from([
+        ("path", jpath(p.path)),
+        ("op", JStr(value: "remove")),
+        ("at", JInt(value: at)),
+      ]))
+    MoveKid(from, to) ->
+      JObj(entries: map.from([
+        ("path", jpath(p.path)),
+        ("op", JStr(value: "move")),
+        ("from", JInt(value: from)),
+        ("to", JInt(value: to)),
       ]))
   }
 
@@ -204,7 +238,7 @@ type ProbeMsg =
 derive Show
 
 fn btn(label: String, m: ProbeMsg) -> Node[ProbeMsg] =
-  Elem(tag: "button", props: [], on: [("click", m)], kids: [Text(s: label)])
+  Elem(tag: "button", props: [], on: [("click", m)], kids: [Text(s: label)], key: None)
 
 test "a node encodes as its own data plus its children" {
   let n: Node[ProbeMsg] = btn("go", Ping)
@@ -225,7 +259,7 @@ test "the message an event means never reaches the wire" {
 
 test "SetSelf ships the node without its children" {
   let big: Node[ProbeMsg] =
-    Elem(tag: "div", props: [("class", "b")], on: [], kids: [btn("a", Ping), btn("b", Pong)])
+    Elem(tag: "div", props: [("class", "b")], on: [], kids: [btn("a", Ping), btn("b", Pong)], key: None)
   let p: Patch[Node[ProbeMsg]] = Patch { path: [], op: SetSelf(w: big) }
   assert render(enc_patch(p)) ==
     "{\"path\":[],\"op\":\"set-self\"," ++
@@ -242,6 +276,24 @@ test "every op has a wire name, and the address travels with it" {
     "{\"path\":[2],\"op\":\"append\",\"nodes\":[{\"t\":\"text\",\"s\":\"x\"}]}"
   let t: Patch[Node[ProbeMsg]] = Patch { path: [], op: TruncateKids(keep: 3) }
   assert render(enc_patch(t)) == "{\"path\":[],\"op\":\"truncate\",\"keep\":3}"
+  let i: Patch[Node[ProbeMsg]] = Patch { path: [0], op: InsertKid(at: 2, w: leaf) }
+  assert render(enc_patch(i)) ==
+    "{\"path\":[0],\"op\":\"insert\",\"at\":2,\"node\":{\"t\":\"text\",\"s\":\"x\"}}"
+  let d: Patch[Node[ProbeMsg]] = Patch { path: [0], op: RemoveKid(at: 2) }
+  assert render(enc_patch(d)) == "{\"path\":[0],\"op\":\"remove\",\"at\":2}"
+  let m: Patch[Node[ProbeMsg]] = Patch { path: [0], op: MoveKid(from: 3, to: 1) }
+  assert render(enc_patch(m)) == "{\"path\":[0],\"op\":\"move\",\"from\":3,\"to\":1}"
+}
+
+test "a key is a guest-side fact and has no wire encoding" {
+  # The keyed and unkeyed spellings of the same element render to the same
+  # bytes. This is what makes the four op encodings that existed before keys
+  # byte-identical afterwards, which the wasm bridge transcripts also hold.
+  let plain: Node[ProbeMsg] = btn("go", Ping)
+  let identified: Node[ProbeMsg] = with_key(plain, "row-7")
+  assert plain != identified
+  assert render(enc_node(identified)) == render(enc_node(plain))
+  assert render(enc_self(identified)) == render(enc_self(plain))
 }
 
 test "a reply is one line, ok or not" {

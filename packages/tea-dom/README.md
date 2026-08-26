@@ -19,9 +19,9 @@ pub fn main() -> Unit !io = serve(init(), encode, decode, update, view)
 `relate`), and `diff`/`apply`/`fold_preorder` are written against those and
 nothing else. The terminal is one consumer of that contract; this package is
 the other, and the reconciler arrives unchanged. What differs is the
-vocabulary: `Text` and `Elem(tag, props, on, kids)` instead of the terminal's
-five constructors, because a browser element is one shape with a tag where a
-terminal has no tag to vary.
+vocabulary: `Text` and `Elem(tag, props, on, kids, key)` instead of the
+terminal's five constructors, because a browser element is one shape with a tag
+where a terminal has no tag to vary.
 
 One thing the DOM needed that the terminal did not. `relate` must see every
 difference between a pair, or `apply(old, diff(old, new)) == new` fails; two
@@ -29,6 +29,26 @@ elements that agree on tag, props and event names but disagree on what a click
 *means* are unequal, and the vocabulary has to say so. That makes the impl
 `impl[M: Eq] Tree[Node[M]]` rather than `impl[M] ...`. The terminal never met
 this because its message-carrying node is a leaf that answers `Unrelated`.
+
+## Keyed children
+
+`key` is a field of `Elem` and never leaves the guest. `dsl.keyed(tag, props,
+on, kids)` takes `List[(String, Node[M])]`, the shape Elm's `Html.Keyed.node`
+has, so a forgotten key is a type error rather than a silent return to index
+pairing; `node.with_key` is the one-node form underneath it.
+
+What it buys, priced on the shape `tea_dom_todo` has. Deleting the middle row
+of fifty costs 98 patches unkeyed, over 24 rewritten rows, and 2 keyed;
+deleting the *first* row costs 198 unkeyed and 2 keyed; deleting the last costs
+2 either way. Those numbers are assertions in `src/node.dawn`, not prose. What
+the rewrite discards in a browser and not in a terminal is element state --
+focus, a caret, a selection, a scroll offset, a playing video -- which is the
+reason this is a DOM concern before it is a performance one.
+
+`relate` answers `Unrelated` for two elements whose keys differ, which matters
+only where the list fell back to index pairing: there a shared position is the
+only evidence of identity, and a key that disagrees says the position is
+lying.
 
 ## The boundary
 
@@ -73,7 +93,7 @@ runtime, and a boundary that varies by backend cannot have one transcript.
 ## The host half
 
 `js/` is the JavaScript side: a WASI shim, the reactor driver, and the patch
-interpreter that turns the four ops into DOM mutations. Zero dependencies, one
+interpreter that turns the seven ops into DOM mutations. Zero dependencies, one
 `<script type="module">`. `js/README.md` is its entry point.
 
 `examples/projects/tea_dom_counter` is a complete app over this package and
@@ -86,14 +106,6 @@ end without a browser.
 Recorded rather than worked around, since a second consumer is exactly what
 finds these:
 
-- **Keyed children.** `diff` pairs children by index, so a deletion in the
-  middle rewrites the tail. In a terminal that is a redraw; in a DOM it
-  discards element state (focus, selection, a playing video) for every node
-  after the deletion. `tea_core/diff`'s header already names the ops keying
-  would need and says their payloads fit; this is the consumer that wants
-  them. `tea_dom_todo` prices it: deleting the middle row of fifty is 98
-  patches over 24 rewritten rows where a keyed answer is one `RemoveKid`,
-  and deleting the *last* row is two patches at any length.
 - **`diff_step`.** `tea_term/step.diff_step` is "one turn as a patch list" and
   is written over `W: Tree + Eq` with nothing terminal in it, but it lives in
   the terminal's package. `reactor.turn` restates its three lines rather than

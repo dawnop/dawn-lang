@@ -28,7 +28,7 @@ pub fn listeners[M: Eq](root: Node[M]) -> List[(List[Int], List[(String, M)])] =
   fold_preorder(root, [], (acc, n, path) =>
       match n {
         Text(_) -> acc
-        Elem(_, _, on, _) -> if list.is_empty(on) { acc } else { acc ++ [(path, on)] }
+        Elem(_, _, on, _, _) -> if list.is_empty(on) { acc } else { acc ++ [(path, on)] }
       })
 
 ## What `event` at `path` means, or `None` when nothing there listens for it.
@@ -48,7 +48,7 @@ pub fn at[M: Eq](root: Node[M], path: List[Int], event: String) -> Option[M] =
           } else {
             match n {
               Text(_) -> acc
-              Elem(_, _, on, _) -> lookup(on, event)
+              Elem(_, _, on, _, _) -> lookup(on, event)
             }
           }
       })
@@ -73,12 +73,12 @@ derive Show
 
 fn sample() -> Node[ProbeMsg] =
   Elem(tag: "div", props: [], on: [], kids: [
-    Elem(tag: "button", props: [], on: [("click", Ping)], kids: [Text(s: "up")]),
+    Elem(tag: "button", props: [], on: [("click", Ping)], kids: [Text(s: "up")], key: None),
     Text(s: "between"),
     Elem(tag: "form", props: [], on: [("submit", Pong)], kids: [
-      Elem(tag: "input", props: [], on: [("input", Ping), ("blur", Pong)], kids: []),
-    ]),
-  ])
+      Elem(tag: "input", props: [], on: [("input", Ping), ("blur", Pong)], kids: [], key: None),
+    ], key: None),
+  ], key: None)
 
 test "listeners reports the addresses a patch would use, in pre-order" {
   let want: List[(List[Int], List[(String, ProbeMsg)])] = [
@@ -105,7 +105,7 @@ test "at resolves an address and an event name to a message" {
 
 test "the root can listen, and the empty path addresses it" {
   let root: Node[ProbeMsg] =
-    Elem(tag: "body", props: [], on: [("keydown", Ping)], kids: [Text(s: "x")])
+    Elem(tag: "body", props: [], on: [("keydown", Ping)], kids: [Text(s: "x")], key: None)
   assert at(root, [], "keydown") == Some(Ping)
   assert listeners(root) == [([], [("keydown", Ping)])]
 }

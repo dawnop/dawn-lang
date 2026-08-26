@@ -8,7 +8,7 @@
 # code and not a paragraph of trust.
 
 use std/list
-use tea_core/diff.{Op, Patch, Replace, SetSelf, AppendKids, TruncateKids}
+use tea_core/diff.{Op, Patch, Replace, SetSelf, AppendKids, TruncateKids, InsertKid, RemoveKid, MoveKid}
 use tea_term/widget.{Style, Plain, Widget, Styled}
 
 pub type ProbeMsg =
@@ -21,6 +21,13 @@ pub type Canon =
   | CSetStyle(path: List[Int], s: Style)
   | CAppend(path: List[Int], ws: List[Widget[ProbeMsg]])
   | CTruncate(path: List[Int], keep: Int)
+## The three keyed ops, which the pre-split reconciler has no spelling for.
+## The terminal vocabulary takes the default `key` and so answers `None` for
+## every node, which means the keyed path is unreachable from this corpus and
+## this constructor is unreachable with it. It exists so that becoming
+## reachable is a disagreement the differential reports, rather than a
+## mapping onto some old op that quietly agrees.
+  | CKeyed(path: List[Int], op: String)
 derive Show
 
 ## The style a `SetSelf` donor carries. The terminal vocabulary only ever
@@ -40,4 +47,7 @@ pub fn of_core(ps: List[Patch[Widget[ProbeMsg]]]) -> List[Canon] =
         SetSelf(w) -> CSetStyle(path: p.path, s: style_of(w))
         AppendKids(ws) -> CAppend(path: p.path, ws: ws)
         TruncateKids(k) -> CTruncate(path: p.path, keep: k)
+        InsertKid(_, _) -> CKeyed(path: p.path, op: "insert")
+        RemoveKid(_) -> CKeyed(path: p.path, op: "remove")
+        MoveKid(_, _) -> CKeyed(path: p.path, op: "move")
       })

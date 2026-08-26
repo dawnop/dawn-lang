@@ -102,6 +102,19 @@ class StubElement extends StubNode {
     return child;
   }
 
+  // What `move` and `insert` are performed with. A reference of `null` means
+  // the end, which is what the DOM says and what the bridge relies on.
+  insertBefore(child, ref) {
+    const where = ref ? `before ${describe(ref)}` : 'at the end';
+    this.doc.rec.log(`insert ${describe(child)} into <${this.tagName}> ${where}`);
+    detach(child);
+    const i = ref === null || ref === undefined ? this.childNodes.length : this.childNodes.indexOf(ref);
+    if (i < 0) throw new Error('insertBefore: the reference is not a child');
+    this.childNodes.splice(i, 0, child);
+    child.parentNode = this;
+    return child;
+  }
+
   removeChild(child) {
     this.doc.rec.log(`remove ${describe(child)} from <${this.tagName}>`);
     const i = this.childNodes.indexOf(child);
