@@ -165,9 +165,13 @@ panic、一次落空的事件。它多一种行 `state`，即根的 class、编�
 `scripts/wasm-contract`（失败运行时那套）和这一套共用一个 CI job，因为它们共用两件贵的
 东西：钉了版本与 sha256 的 wasi-sdk，以及从 `selfhost/src/nmain.dawn` 构建的 C 驱动。
 
-wasi-sdk 钉在 29 而不是最新，是实测的结果：wasi-sdk 33（LLVM 22）链不动任何
-`-fwasm-exceptions` 的产物，报 `undefined symbol: __cpp_exception`，那个 exception tag 从前由
-后端定义、现在要从 libc++abi 来。29 是现有链接命令行不加改动就能用的最新一版。25、27、29
-产出的 DOM 转录逐字节相同，所以这个钉子是关于工具链的选择，不是关于答案的。
-往上抬需要一个把 tag 还回来的 wasi-sdk，或者一条点名 libc++abi 的链接命令行，
-那是失败运行时的主人该裁的事。
+wasi-sdk 钉在 30 而不是最新，是实测的结果：31 及以后（LLVM 22）链不动任何
+`-fwasm-exceptions` 的产物，报 `undefined symbol: __cpp_exception`。那个 exception tag 从前在
+每个用得着它的目标文件里都发一份 weak 定义，上游把它挪进了 libunwind，现有的
+`--target wasm` 链接命令行于是不再定义它。30 是这条命令行不加改动就能用的最新一版，
+而且它与 29 是同一个 LLVM commit（222fc11f2b8f，21.1.4）；25、27、29、30 产出的 DOM
+转录逐字节相同，所以这个钉子是关于工具链的选择，不是关于答案的。
+
+再往上抬不是换个版本号的事：正确的修法是链 `-lunwind`（tag 在 libunwind.a 的
+`Unwind-wasm.c.o` 里，上游的 CppExceptions.md 就是这么写的），而它要求 sysroot 33 或更新。
+那是另一个批次：钉 34、给 tag 一个自己的编译单元、并改用 wasm32-wasip1 三元组。
