@@ -3191,10 +3191,21 @@ pub fn internal_builtins() -> Set[String] = {
 ## hands its reference over -- a borrowed argument keeps the caller's count on
 ## it and `rc == 1` can never hold -- and takes the element owned because
 ## every call site passes a freshly built value that would otherwise cross
-## through a dup/drop pair. A function rather than an `Intr` field: the rc
-## pass asks at every intrinsic node, and this answer must not cost a table.
+## through a dup/drop pair. `list_push` takes its list owned for the same
+## uniqueness reason: it compiles to `std/pvec.push`, an ordinary Dawn
+## function that releases what it is handed, and a compensating dup at the
+## call site would pin the accumulator's count at >= 2 -- which forecloses
+## in-place reuse down the whole trie descent. A function rather than an
+## `Intr` field: the rc pass asks at every intrinsic node, and this answer
+## must not cost a table.
 pub fn intr_owned_args(name: String) -> List[Int] =
-  if name == "array_with" { [0, 2] } else { [] }
+  if name == "array_with" {
+    [0, 2]
+  } else if name == "list_push" {
+    [0]
+  } else {
+    []
+  }
 
 # ---- tests ----
 

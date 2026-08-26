@@ -1514,13 +1514,18 @@ fn of_host(v: String) -> String = mangle("std/pvec", "from_array") ++ "(" ++ v +
 ## function and releases what it was handed. So the reference is taken here.
 ## Miss it and the callee's drop is the second one on that value -- which is
 ## what `iter_done` did, taking the list out from under its own loop.
+##
+## Except the positions `intr_owned_args` flips to owned: there Core already
+## arranged the transfer (last use passes bare, otherwise rc dups), so the
+## reference arrives taken and a dup here would be the leak's other half.
 fn own0(args: List[CExpr], a0: String) -> String = dup_expr(a0, cex_ty(args[0]))
 
-fn own_args(args: List[CExpr], cargs: List[String]) -> List[String] = {
+fn own_args(args: List[CExpr], cargs: List[String], owned: List[Int]) -> List[String] = {
   var out: List[String] = []
   var i = 0
   for a in args {
-    out = out ++ [dup_expr(cargs[i], cex_ty(a))]
+    let v = if list.contains(owned, i) { cargs[i] } else { dup_expr(cargs[i], cex_ty(a)) }
+    out = out ++ [v]
     i = i + 1
   }
   out
@@ -1655,7 +1660,7 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     # own value representation (see gen_list_intrinsic's note on the JVM
     # side). So each backend translates them, and both translate to the same
     # `std/pvec` function -- one definition, compiled twice.
-    (st1, mangle("std/pvec", pvec_target(name)) ++ "(" ++ join(own_args(args, cargs), ", ") ++ ")")
+    (st1, mangle("std/pvec", pvec_target(name)) ++ "(" ++ join(own_args(args, cargs, owned), ", ") ++ ")")
   } else if name == "join" {
     (st1, "dawn_join(" ++ to_host(own0(args, a0)) ++ ", " ++ cargs[1] ++ ")")
   } else if name == "from_code_points" {

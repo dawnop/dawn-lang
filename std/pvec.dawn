@@ -113,8 +113,11 @@ fn push_tail[T](cnt: Int, level: Int, parent: VNode[T], tail: Array[T]) -> VNode
           VBranch(array_push(kids, VLeaf(tail)))
         }
       } else if sub < array_len(kids) {
-        VBranch(array_with(kids, sub,
-          push_tail(cnt, level - BITS, array_get(kids, sub), tail)))
+        # bind the child first so `kids` reaches `array_with` at its last
+        # use -- inline, the `array_get` read would pin an extra count on
+        # `kids` and the copy-on-write path would always copy
+        let child = array_get(kids, sub)
+        VBranch(array_with(kids, sub, push_tail(cnt, level - BITS, child, tail)))
       } else {
         VBranch(array_push(kids, new_path(level - BITS, VLeaf(tail))))
       }
@@ -122,26 +125,34 @@ fn push_tail[T](cnt: Int, level: Int, parent: VNode[T], tail: Array[T]) -> VNode
   }
 
 ## A copy with `x` appended.
-pub fn push[T](v: Vec[T], x: T) -> Vec[T] =
-  if array_len(v.tail) < WIDTH {
-    Vec { ..v, cnt: v.cnt + 1, tail: array_push(v.tail, x) }
-  } else if (v.cnt >>> BITS) > (1 << v.shift) {
+##
+## The destructuring `let` is load-bearing for the native backend: it releases
+## `v` before the descent, so each field rides its own last use into the
+## branch that consumes it. Reading the fields off `v` directly would keep the
+## whole old vector alive until the function returns, and `push_tail`'s
+## in-place `array_with` needs the root's count down to 1 by then.
+pub fn push[T](v: Vec[T], x: T) -> Vec[T] = {
+  let Vec { cnt, shift, root, tail } = v
+  if array_len(tail) < WIDTH {
+    Vec { cnt: cnt + 1, shift: shift, root: root, tail: array_push(tail, x) }
+  } else if (cnt >>> BITS) > (1 << shift) {
     # the trie is full at this depth: grow a level, with the old root beside a
     # fresh path down to the tail that just came off
     Vec {
-      cnt: v.cnt + 1,
-      shift: v.shift + BITS,
-      root: VBranch(arr2(v.root, new_path(v.shift, VLeaf(v.tail)))),
+      cnt: cnt + 1,
+      shift: shift + BITS,
+      root: VBranch(arr2(root, new_path(shift, VLeaf(tail)))),
       tail: arr1(x)
     }
   } else {
     Vec {
-      cnt: v.cnt + 1,
-      shift: v.shift,
-      root: push_tail(v.cnt, v.shift, v.root, v.tail),
+      cnt: cnt + 1,
+      shift: shift,
+      root: push_tail(cnt, shift, root, tail),
       tail: arr1(x)
     }
   }
+}
 
 # ---- reading ----
 #
