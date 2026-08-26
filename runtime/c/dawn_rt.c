@@ -489,6 +489,22 @@ void dawn_drop(void *p) {
   if (dawn_rc_leak || p == NULL) {
     return;
   }
+  /* Fast path: on scan-shaped code nearly every drop is decrement-only (the
+   * lexer corpus measured 12M drops to 28 frees), and the work-list setup is
+   * most of what those drops cost. rc > 1 means nothing dies and no child is
+   * visited, so decrement and return. Immortal headers return here too --
+   * DAWN_IMMORTAL reads as a large rc, so the guard keeps them unwritten.
+   * rc <= 0 and rc == 1 fall through to the walk below, which already owns
+   * the misuse diagnostic and the release. */
+  {
+    dawn_hdr *h0 = (dawn_hdr *)p;
+    if (h0->rc > 1) {
+      if (h0->rc != DAWN_IMMORTAL) {
+        h0->rc--;
+      }
+      return;
+    }
+  }
   dawn_ws s;
   dawn_ws_init(&s);
   dawn_ws_push(&s, p);
