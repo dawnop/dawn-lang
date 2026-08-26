@@ -36,10 +36,14 @@ require() {
 # the empty one and nothing walks it. What moved is that the pack is now built
 # by the checker and arrives as a lowered argument rather than being assembled
 # in `lower.ev_pack`, and the interpreter counts the two differently.
+#
+# 204 since `xs ++ [x]` lowers to one `list_push` intrinsic: the per-element
+# append inside `map_go` was two evaluated nodes (the one-element list, then
+# the concat) and is now one, so the same chain fits in slightly less fuel.
 # Measured, not reasoned: the window that satisfies every needle below is
-# 205-207, and this is its middle.
+# 203-205, and this is its middle.
 cp "$here/trace.dawn" "$work/trace.dawn"
-if "$dawn" run --comptime-fuel=206 "$work/trace.dawn" > "$work/trace.out" 2>&1; then
+if "$dawn" run --comptime-fuel=204 "$work/trace.dawn" > "$work/trace.out" 2>&1; then
   fail "the diagnostic fixture unexpectedly compiled"
 fi
 

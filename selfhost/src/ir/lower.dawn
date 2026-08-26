@@ -973,6 +973,8 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ##                       backend owes a float renderer any more
 ##   list_index list_slice
 ##                       `xs[i]` and a list pattern's `..rest`
+##   list_push           `xs ++ [x]`, which `cat_list` rewrites from a
+##                       one-element concat
 ##   null_ref            the zero of a reference type, for an uninitialised slot
 ##   ev_get              one lookup in an evidence pack, by atom key. The walk
 ##                       has to test the shape of what it is standing on, and
@@ -1001,7 +1003,7 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 pub fn internal_intrinsics() -> List[String] = [
   "cmp", "hash", "java_eq", "java_hash", "show", "quote",
   "str_of_int", "str_of_bool", "str_of_bytes",
-  "list_index", "list_slice", "null_ref", "ev_get", "ev_append"
+  "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append"
 ]
 
 # ---- who implements a primitive ----
@@ -1050,7 +1052,7 @@ pub fn inline_intrinsics() -> List[String] = [
   # lowering's own vocabulary, all of it but the two host ones below
   "cmp", "hash", "show", "quote",
   "str_of_int", "str_of_bool", "str_of_bytes",
-  "list_index", "list_slice", "null_ref",
+  "list_index", "list_slice", "list_push", "null_ref",
   # the evidence-pack lookup, and the join two rows meeting in one slot need.
   # A loop with a shape test in it, so each is a call on native and emitted
   # for the JVM, and neither is a thing Core could have said for both
@@ -1162,12 +1164,12 @@ test "every intrinsic is owned by a runtime module, written inline, or removed b
   # 3. the sizes the comments above quote. A count written in prose is what
   #    went wrong in `internal_intrinsics`, whose comment gave two different
   #    answers for the same list in the same paragraph.
-  assert len(inline) == 31
+  assert len(inline) == 32
   assert len(host) == 2
   assert len(gone) == 20
-  # and the four groups account for all 107 names, with none left over
+  # and the four groups account for all 108 names, with none left over
   assert len(map.keys(it)) == 93
-  assert len(internal) == 14
+  assert len(internal) == 15
 }
 
 # ---- trait witnesses ----
@@ -3175,7 +3177,13 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
           } else {
             let (st1, lv) = lower_expr(st, l)
             let (st2, rv) = lower_expr(st1, r)
-            (st2, CBinary(bin_op(op), lv, rv, ty))
+            # a list `++` goes through `cat_list` for its one-element-literal
+            # rewrite; strings and bytes keep their own CConcat arms
+            if op == BConcat && is_list_ty(ty) {
+              (st2, cat_list(lv, rv, ty))
+            } else {
+              (st2, CBinary(bin_op(op), lv, rv, ty))
+            }
           }
       }
     XIf(cond, thn, els, _, _, ty) -> {
@@ -3451,7 +3459,33 @@ fn lower_run(st: LSt, items: List[TExpr], ty: Ty) -> (LSt, CExpr) = {
   (st1, CListLit(vs, ty))
 }
 
-fn cat_list(a: CExpr, b: CExpr, ty: Ty) -> CExpr = CBinary(CConcat, a, b, ty)
+## Peeled, because the operand of a list `++` may be opaque over a list and
+## the backends peel before choosing their concat (emitc.emit_binary says why).
+fn is_list_ty(ty: Ty) -> Bool =
+  match peel_opaque(ty) {
+    TyList(_) -> true
+    _ -> false
+  }
+
+## A list append, and the one rewrite it carries: `xs ++ [x]` becomes
+## `list_push(xs, x)`. `std/pvec.concat` re-walks its right operand -- building
+## the one-element list and then pushing it back off is ~9 allocations where
+## `pvec.push` is at most a tail copy -- and appending a single element is the
+## commonest `++` in the tree (every `out = out ++ [x]` accumulator). The
+## element is dropped into the call as-is: `lower_run` already boxed it into
+## the erased slot, which is the type `push` declares, and evaluation order is
+## unchanged (left operand first, then the element, on both spellings).
+## A literal of any other length keeps the concat.
+fn cat_list(a: CExpr, b: CExpr, ty: Ty) -> CExpr =
+  match b {
+    CListLit(vs, _) ->
+      if len(vs) == 1 {
+        CIntrinsic("list_push", [a, vs[0]], ty)
+      } else {
+        CBinary(CConcat, a, b, ty)
+      }
+    _ -> CBinary(CConcat, a, b, ty)
+  }
 
 ## `acc = acc ++ <v>`: the one append every segment after the first uses.
 fn append_seg(sym: Int, ty: Ty, v: CExpr) -> CStmt =

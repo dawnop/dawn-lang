@@ -785,7 +785,7 @@ fn interp_arms() -> List[String] = [
   # lowering's own intrinsics (lower.internal_intrinsics()); `cmp`, `hash` and
   # `java_hash` are the three it emits that are refused instead, below
   "java_eq", "show", "quote", "str_of_int", "str_of_bool",
-  "str_of_bytes", "list_index", "list_slice", "null_ref", "ev_get", "ev_append",
+  "str_of_bytes", "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append",
   # user builtins
   "panic", "todo", "expect", "unwrap_or", "to_float", "to_int", "to_string",
   "len", "get", "range", "sort_by", "join",
@@ -1116,6 +1116,9 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     } else {
       Ok((st, env, xs[i]))
     }
+    # `xs ++ [x]`, rewritten from a one-element concat (lower.cat_list)
+  } else if name == "list_push" {
+    Ok((st, env, VList(as_list(args[0]) ++ [args[1]])))
     # the `..rest` of a list pattern
   } else if name == "list_slice" {
     let xs = as_list(args[0])
@@ -2308,7 +2311,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    went wrong in the list this gate replaces -- lowering's own said
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
-  assert len(arms) == 42
+  assert len(arms) == 43
   assert len(rejects) == 65
 }
 
