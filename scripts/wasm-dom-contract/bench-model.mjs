@@ -30,7 +30,7 @@
 // opaque-text model is affordable needs to know which side of the boundary
 // the milliseconds are on.
 //
-//   node scripts/wasm-dom-contract/bench-model.mjs <todo.wasm> [reps]
+//   node scripts/wasm-dom-contract/bench-model.mjs <todo.wasm> [reps] [n,n,...]
 //
 // Wall-clock numbers, so they are machine-bound and nothing compares them
 // with anything: this is a measuring instrument, not a gate.
@@ -40,8 +40,12 @@ import { Reactor } from '../../packages/tea-dom/js/reactor.mjs';
 
 const wasmPath = process.argv[2];
 const reps = Number(process.argv[3] || 25);
-if (!wasmPath) {
-  console.error('usage: node bench-model.mjs <todo.wasm> [reps]');
+// The sizes are an argument because the interesting one moves: where a turn
+// crosses a frame budget is a question about a particular build, and answering
+// it by hand means editing the instrument.
+const sizes = (process.argv[4] || '0,10,100,1000').split(',').map(Number);
+if (!wasmPath || sizes.some((n) => !Number.isInteger(n) || n < 0)) {
+  console.error('usage: node bench-model.mjs <todo.wasm> [reps] [n,n,...]');
   process.exit(2);
 }
 
@@ -107,7 +111,7 @@ const req = (m, path) =>
   JSON.stringify({ op: 'event', model: m, path, event: 'click' });
 
 console.log('n        parse     decode      full       rows | model B  request B  reply B');
-for (const n of [0, 10, 100, 1000]) {
+for (const n of sizes) {
   const small = model(n, 'done');
   const large = model(n, 'all');
 
@@ -136,7 +140,7 @@ for (const n of [0, 10, 100, 1000]) {
 // costs, the page pays this on top of it every turn.
 console.log('');
 console.log('host-side JSON on the same payloads (stringify + parse), median of the same reps:');
-for (const n of [10, 100, 1000]) {
+for (const n of sizes.filter((x) => x > 0)) {
   const line = req(model(n, 'done'), DONE_FILTER);
   const parsed = JSON.parse(line);
   const times = [];
