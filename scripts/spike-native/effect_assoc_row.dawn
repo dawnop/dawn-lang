@@ -1,0 +1,262 @@
+# An associated-effect projection **in a parameter's row**, which is where the
+# projection's evidence slot is actually read rather than merely forwarded.
+#
+#     fn via[T: Runner](x: T, t: fn() -> Int !T.E) -> Int !T.E = run(x) + t()
+#
+# `assoc_effects.dawn` writes its projections in *return* rows, and a return
+# row is the one position that never walks the slot: the callee forwards it to
+# a dictionary and a devirtualised impl casts it back out. Put the projection
+# on a parameter and the slot reaches a reader -- `t` is a function value, the
+# call hands it that slot as its pack, and the closure inside asks the pack for
+# a label's node. A pack answers; the bare evidence *record* the call site used
+# to put there answers nothing, so the program checked clean and panicked with
+# `types.EV_MISS_MSG` (#355). The alias spelling forwards the same row and so
+# forwarded the same hole (#351), which is why `via_alias` is here beside the
+# inline twin rather than in a corpus of its own.
+#
+# The repair is that a projection's slot carries a **pack**, the way an effect
+# variable's does and the way `lower.ev_from_pack` has always said it does. So
+# the shapes below are chosen for what walks the slot:
+#
+#   * the two spellings of the parameter position, inline and through an alias;
+#   * two subjects binding the member to two different labels, so one generic
+#     signature is instantiated at both in the same program;
+#   * a **named function value** crossing into the projection's slot, where the
+#     question is assignability rather than inference;
+#   * the projection's pack carried into a **primitive's** closure argument,
+#     which is #346's reader over #355's slot;
+#   * the empty pack, from a binding that is pure and from one that is io --
+#     the controls, since a closure that reads nothing cannot tell a lost pack
+#     from a kept one;
+#   * a frame that **forwards** the projection without grounding it, so what
+#     travels is one pack through two signatures;
+#   * a written label beside the projection in the same parameter row, which is
+#     a ground node consed over the projection's pack;
+#   * a trait **default body** reached through the projection, which is the
+#     dictionary-bridge reader rather than the devirtualised one.
+#
+# **Every line installs its own handlers and every handler answers a different
+# prime**, for the reason effect_widen_row.dawn states: shared handlers at the
+# top of `main` let one correctly built pack seed every other line's read, and
+# a repair that fixed one call site in eight would print eight right answers.
+use std/io
+
+effect AskE {
+  fn ask() -> Int
+}
+
+effect TellE {
+  fn tell() -> Int
+}
+
+effect LogE {
+  fn log() -> Int
+}
+
+trait Runner[T] {
+  effect E
+  fn run(x: T) -> Int !T.E
+  fn twice(x: T) -> Int !T.E = run(x) + run(x)
+}
+
+type One = { v: Int }
+
+type Two = { v: Int }
+
+type Quiet = { v: Int }
+
+type Loud = { v: Int }
+
+impl Runner[One] {
+  effect E = !AskE
+  fn run(x: One) -> Int !AskE = x.v + ask()
+}
+
+## A second subject binding the member to a **different** label, so one
+## generic `via` is instantiated at two labels in the same program. A slot that
+## answered by position rather than by key, or a pack shared between the two
+## instantiations, gives one of these two lines the other's handler.
+impl Runner[Two] {
+  effect E = !TellE
+  fn run(x: Two) -> Int !TellE = x.v + tell()
+}
+
+impl Runner[Quiet] {
+  effect E = !()
+  fn run(x: Quiet) -> Int = x.v
+}
+
+impl Runner[Loud] {
+  effect E = !io
+  fn run(x: Loud) -> Int !io = {
+    println("loud")
+    x.v
+  }
+}
+
+alias Thunk[!e] = fn() -> Int !e
+
+## The shape itself, with no alias anywhere. `run(x)` reads the projection as a
+## callee's row and `t()` reads it as a pack, in one frame.
+fn via[T: Runner](x: T, t: fn() -> Int !T.E) -> Int !T.E = run(x) + t()
+
+## The same signature with the parameter written through a transparent alias.
+## `Thunk[!T.E]` expands to `via`'s parameter type, so the two are one type and
+## must be one behaviour (#351).
+fn via_alias[T: Runner](x: T, t: Thunk[!T.E]) -> Int !T.E = run(x) + t()
+
+## The projection forwarded one frame further out without ever being grounded:
+## `relay`'s own slot fills `via`'s, and `t` is called on both sides of that
+## hop. A pack that survives the forward and a pack rebuilt at each level are
+## the same answer here; a pack replaced by a record on either hop is not.
+fn relay[T: Runner](x: T, t: fn() -> Int !T.E) -> Int !T.E = via(x, t) + t()
+
+## A written label beside the projection in the parameter's own row. The pack
+## the call builds is one ground node consed over the projection's slot, and
+## the closure reads through both halves.
+fn beside[T: Runner](x: T, t: fn() -> Int !LogE !T.E) -> Int !LogE !T.E =
+  run(x) + t() + log()
+
+## The projection's pack carried into a primitive's closure argument: the use
+## closure `bracket` applies has row `!e`, so `e` is instantiated to `!T.E` and
+## the pack that fills its slot is this frame's projection slot forwarded whole.
+fn via_bracketed[T: Runner](x: T, t: fn() -> Int !T.E) -> Int !T.E =
+  bracket(0, y => (), y => via(x, t))
+
+## The trait's **default** body reached through the projection. A default has
+## the trait's own signature, so the whole trait-shaped evidence list rides to
+## it and the impl's layout is re-selected inside the dictionary bridge rather
+## than at a devirtualised call.
+fn dbl[T: Runner](x: T, t: fn() -> Int !T.E) -> Int !T.E = twice(x) + t()
+
+fn line_inline() -> Unit !io = {
+  with handle AskE { ask() => 3 }
+  println(to_string(via(One { v: 100 }, () => ask() + 5)))
+}
+
+fn line_alias() -> Unit !io = {
+  with handle AskE { ask() => 7 }
+  println(to_string(via_alias(One { v: 200 }, () => ask() * 2)))
+}
+
+fn line_two_labels() -> Unit !io = {
+  with handle AskE { ask() => 11 }
+  with handle TellE { tell() => 13 }
+  println(to_string(via(One { v: 300 }, () => ask())))
+  println(to_string(via(Two { v: 300 }, () => tell())))
+}
+
+fn line_fn_value() -> Unit !io = {
+  with handle AskE { ask() => 47 }
+  let g: fn() -> Int !AskE = () => ask() * 3
+  println(to_string(via(One { v: 900 }, g)))
+}
+
+fn line_bracketed() -> Unit !io = {
+  with handle AskE { ask() => 53 }
+  println(to_string(via_bracketed(One { v: 1000 }, () => ask() + 59)))
+}
+
+fn line_pure() -> Unit !io = {
+  println(to_string(via(Quiet { v: 400 }, () => 17)))
+}
+
+fn line_io() -> Unit !io = {
+  println(to_string(via(Loud { v: 500 }, () => {
+    println("io thunk")
+    19
+  })))
+}
+
+fn line_relay() -> Unit !io = {
+  with handle AskE { ask() => 23 }
+  println(to_string(relay(One { v: 600 }, () => ask() + 29)))
+}
+
+fn line_beside() -> Unit !io = {
+  with handle AskE { ask() => 31 }
+  with handle LogE { log() => 37 }
+  println(to_string(beside(One { v: 700 }, () => ask() + log())))
+}
+
+fn line_default() -> Unit !io = {
+  with handle AskE { ask() => 41 }
+  println(to_string(dbl(One { v: 800 }, () => ask() + 43)))
+}
+
+pub fn main() -> Unit !io = {
+  println("-- a projection in a parameter row, written inline --")
+  line_inline()
+  println("-- the same row written through a transparent alias --")
+  line_alias()
+  println("-- one signature instantiated at two different labels --")
+  line_two_labels()
+  println("-- a named value crossing into the projection's slot --")
+  line_fn_value()
+  println("-- and the pack carried into a primitive's use closure --")
+  line_bracketed()
+  println("-- a binding that is pure: the empty pack, and the control --")
+  line_pure()
+  println("-- a binding that is io: the other empty pack --")
+  line_io()
+  println("-- forwarded through a second signature without grounding --")
+  line_relay()
+  println("-- a written label beside the projection in one row --")
+  line_beside()
+  println("-- and the trait default body, through the dictionary bridge --")
+  line_default()
+}
+
+# The assertion lane. `scripts/effect-evidence-contract/run.sh` runs these on
+# the JVM in seconds and without a C compiler; the transcript above is what the
+# native differential compares byte for byte. Same shapes, two readers: an
+# `assert` says what the number means, and the `.expect` file is the only check
+# that can see the *order* two closures ran in -- which is the whole of what
+# `line_io` records.
+test "a projection in a parameter row reaches the closure's pack" {
+  with handle AskE { ask() => 3 }
+  assert via(One { v: 100 }, () => ask() + 5) == 111
+}
+
+test "the alias spelling is the same type and the same answer" {
+  with handle AskE { ask() => 7 }
+  assert via_alias(One { v: 200 }, () => ask() * 2) == 221
+}
+
+test "two subjects put two different labels in the same slot" {
+  with handle AskE { ask() => 11 }
+  with handle TellE { tell() => 13 }
+  assert via(One { v: 300 }, () => ask()) == 322
+  assert via(Two { v: 300 }, () => tell()) == 326
+}
+
+test "a written row crosses into the projection's slot by assignability" {
+  with handle AskE { ask() => 47 }
+  let g: fn() -> Int !AskE = () => ask() * 3
+  assert via(One { v: 900 }, g) == 1088
+}
+
+test "a primitive's use closure carries the projection's pack" {
+  with handle AskE { ask() => 53 }
+  assert via_bracketed(One { v: 1000 }, () => ask() + 59) == 1165
+}
+
+test "a pure binding is the empty pack" {
+  assert via(Quiet { v: 400 }, () => 17) == 417
+}
+
+test "the projection survives a frame that only forwards it" {
+  with handle AskE { ask() => 23 }
+  assert relay(One { v: 600 }, () => ask() + 29) == 727
+}
+
+test "a written label beside the projection is a node over its pack" {
+  with handle AskE { ask() => 31 }
+  with handle LogE { log() => 37 }
+  assert beside(One { v: 700 }, () => ask() + log()) == 836
+}
+
+test "a trait default body reads the projection through the bridge" {
+  with handle AskE { ask() => 41 }
+  assert dbl(One { v: 800 }, () => ask() + 43) == 1766
+}

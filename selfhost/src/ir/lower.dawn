@@ -28,7 +28,7 @@ use check/types.{
   Sym, Sig, Eff, EPure, ELabeled, EffVar, Traits, TraitI, ImplI, MethodSig,
   eff_labels, eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty,
-  EV_PACK_ID, ev_pack_ty, key_is_label, key_effect_id,
+  EV_PACK_ID, ev_pack_ty, key_is_label, key_effect_id, label_key,
   Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID,
@@ -1384,23 +1384,29 @@ fn no_texprs() -> List[TExpr] = []
 
 ## Where each label of a devirtualised callee's row gets its evidence from,
 ## against the trait-shaped list: (index into that list, the slot's declared
-## type, the label's evidence type). A label the trait row wrote is its own
-## slot, already exact; one a binding produced is the projection's erased
-## slot, unerased on the way in (`adapt_out` is the CHECKCAST). The
-## conformance check pinned the impl's labels to the trait's row after
-## bindings, so a label with no source is a lowering invariant break, not a
-## user error -- panic loudly rather than emit a call one argument short.
-fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty)] = {
+## type, the label's evidence type, the pack key to walk to or -1). A label the
+## trait row wrote is its own slot, already exact and taken directly; one a
+## binding produced comes out of the projection's slot, which carries a **pack**
+## (`ev_from_pack`'s rule for every atom that is not a label), so it is a walk
+## to that label's node rather than a cast of the slot itself. It used to be
+## the cast, matching a call site that put the bare record there; #355 moved
+## the call site onto the pack convention the rest of the layout already used,
+## and this is the reader that has to move with it. The conformance check
+## pinned the impl's labels to the trait's row after bindings, so a label with
+## no source is a lowering invariant break, not a user error -- panic loudly
+## rather than emit a call one argument short.
+fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty, Int)] = {
   let sabi = sig_abi_eff(sg)
   let pabi = sig_abi_eff(psig)
   let lts = eff_labels(sabi)
   let vts = eff_vars(sabi)
   let ats = eff_assocs(sabi)
-  var out: List[(Int, Ty, Ty)] = []
+  var out: List[(Int, Ty, Ty, Int)] = []
   for l in eff_labels(pabi) {
     let (lid, _) = l
     var src = 0 - 1
     var from: Ty = TyAdt(lid, [])
+    var via = 0 - 1
     var i = 0
     for wl in lts {
       let (wid, _) = wl
@@ -1419,6 +1425,7 @@ fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty)] = {
               if bid == lid && src < 0 {
                 src = len(lts) + len(vts) + j
                 from = erased_ev_ty()
+                via = label_key(lid)
               }
             }
           }
@@ -1427,7 +1434,7 @@ fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty)] = {
       }
     }
     if src < 0 { panic("lower: no evidence source for a devirtualised label") }
-    out = out ++ [(src, from, TyAdt(lid, []))]
+    out = out ++ [(src, from, TyAdt(lid, []), via)]
   }
   # An effect variable is not substituted by `subst_subject` -- it is the
   # method's own binder, not the subject's -- so the impl's row carries the
@@ -1435,11 +1442,18 @@ fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty)] = {
   # own index. Erased on both sides, so nothing is adapted across.
   var vi = 0
   for _v in eff_vars(pabi) {
-    out = out ++ [(len(lts) + vi, erased_ev_ty(), erased_ev_ty())]
+    out = out ++ [(len(lts) + vi, erased_ev_ty(), erased_ev_ty(), 0 - 1)]
     vi = vi + 1
   }
   out
 }
+
+## One selected slot on its way into the impl method's own layout: a walk to a
+## key when the source is a pack (`via >= 0`), the erasure cast otherwise. The
+## two readers of `impl_ev_sources` -- the direct call and the dictionary
+## bridge -- say it the same way here so they cannot drift.
+fn ev_select(v: CExpr, from: Ty, to: Ty, via: Int) -> CExpr =
+  if via >= 0 { ev_from_pack(ev_value(v), via) } else { adapt_out(ev_value(v), from, to) }
 
 ## The TExpr half of the selection: lower only the slots the impl's row
 ## reads. Evidence expressions are locals, placeholders or checker errors --
@@ -1454,10 +1468,10 @@ fn impl_evidence(
   var st1 = st
   var out: List[CExpr] = []
   for pr in impl_ev_sources(sg, imp, psig) {
-    let (i, from, to) = pr
+    let (i, from, to, via) = pr
     let (st2, v) = lower_expr(st1, evid[i])
     st1 = st2
-    out = out ++ [adapt_out(ev_value(v), from, to)]
+    out = out ++ [ev_select(v, from, to, via)]
   }
   (st1, out)
 }
@@ -1551,8 +1565,8 @@ fn make_bridge(
     }
     var ies: List[CExpr] = []
     for pr in impl_ev_sources(sg, imp0, psig) {
-      let (i, from, to) = pr
-      ies = ies ++ [adapt_out(evlocals[i], from, to)]
+      let (i, from, to, via) = pr
+      ies = ies ++ [ev_select(evlocals[i], from, to, via)]
     }
     let call = CCall(CImpl(iowner, tid, subject, method), args ++ ds ++ ies, psig.ret)
     let f = CFun {

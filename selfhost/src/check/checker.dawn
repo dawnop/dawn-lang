@@ -6917,12 +6917,33 @@ fn resolve_label_evidence(cx: Cx, eid: Int, lo: Int, hi: Int) -> (Cx, TExpr, Boo
 
 ## Rule 丙's call-site half: one evidence value per projection written in the
 ## callee's declared row, in `eff_assocs` order, behind the written labels'
-## evidence. What each slot receives is decided by the same reduction the row
-## went through at the choke: a projection that reduced to a label resolves
-## that label's evidence exactly as a written one would; one that reduced to
-## pure or io takes a unit placeholder (the slot is erased and never read);
-## one still standing over a rigid subject forwards the caller's own hidden
-## parameter for the same atom. Returns (cx, args, unanswered label ids,
+## evidence.
+##
+## **A projection's slot carries a pack**, like an effect variable's and unlike
+## a written label's, because a projection is the same kind of thing an effect
+## variable is: an atom whose row the callee does not know. `lower.ev_from_pack`
+## has said so all along -- "any other atom is answered by the chain as a
+## whole" -- and this position used to hand over something else. A projection
+## that reduced to a label handed over that label's evidence *record*, which is
+## what a slot addressed by `label_key` holds, not what one addressed by
+## `assoc_key` does. The two conventions agreed with each other for as long as
+## nothing walked the slot: forwarding a projection through a rigid chain moves
+## whatever arrived, and a devirtualised callee took the record straight back
+## out with a cast. A row that reaches a *reader* is where they part, and the
+## reader is a parameter: `fn f[T: P](t: fn() -> Int !T.E) -> Int !T.E = t()`
+## calls a function value, the call hands the value the projection's slot as
+## its pack, and the closure inside asks that pack for `label_key(Ask)`. A bare
+## record answers no key at all, so a program that checks clean met `ev_get`'s
+## compiler-invariant panic (`types.EV_MISS_MSG`) at run time (#355). It stayed
+## hidden because `assoc_effects.dawn` writes its projections in *return* rows,
+## where nothing walks them.
+##
+## So the reduction decides the row and `evidence_pack` decides the shape, once,
+## the way it does for every other pack: a label becomes a node keyed by it, a
+## union of two becomes two nodes, pure and io become the empty pack (the slot
+## is erased and never read), and a projection still standing over a rigid
+## subject *is* the caller's own hidden parameter -- identity, no allocation,
+## which is what the rigid case always did. Returns (cx, args, unanswered label ids,
 ## unanswered atoms) -- the last two are withdrawn from the charged row so a
 ## single failure is a single diagnostic, like `evidence_args`' unanswered.
 fn evidence_assoc_args(
@@ -6939,35 +6960,38 @@ fn evidence_assoc_args(
   for a in eff_assocs(declared) {
     let (s0, v0, t0, n0) = a
     let red = reduce_eff(cx1, EffAssoc(s0, v0, t0, n0), m)
-    let ls = eff_labels(red)
-    let ras = eff_assocs(red)
-    if len(ls) > 0 {
-      let (eid, _) = ls[0]
-      let (cx2, tx, answered) = resolve_label_evidence(cx1, eid, lo, hi)
-      cx1 = cx2
-      if not answered { unanswered = unanswered ++ [eid] }
-      out = out ++ [tx]
-    } else if len(ras) > 0 {
-      let (s2, v2, t2, n2) = ras[0]
+    # A projection still standing over a rigid subject is answered by the
+    # caller's own slot for the same atom, and nothing in scope is this
+    # position's error to report. `evidence_pack` cannot report it -- an atom
+    # it finds no environment for contributes nothing, on the grounds that the
+    # miss was already diagnosed -- so the lookup is made here first, and the
+    # diagnostic is the one the rigid case has always given.
+    var missing = false
+    for r in eff_assocs(red) {
+      let (s2, v2, t2, n2) = r
       let nm = ev_assoc_local_name(v2, t2, n2)
       let (cxa, found) = ev_expr(cx1, nm, assoc_key(t2), erased_ev_ty(), lo, hi)
       cx1 = cxa
       match found {
-        Some(tx) -> { out = out ++ [tx] }
-        None -> {
+        Some(_) -> ()
+        None ->
           if not cx1.frame.isolated {
             cx1 = cerr_h(cx1, "the effect `" ++ s2 ++ "." ++ n2 ++
                 "` needs evidence here, and nothing in scope supplies it", lo, hi,
               "a projection's evidence arrives through the signature: add `!" ++ s2 ++ "." ++
                 n2 ++ "` to the enclosing function's row")
-            dropped = dropped ++ [ras[0]]
+            dropped = dropped ++ [r]
+            missing = true
           }
-          out = out ++ [XError(lo, hi)]
-        }
       }
+    }
+    if missing {
+      out = out ++ [XError(lo, hi)]
     } else {
-      # pure or io: nothing will ever read the slot
-      out = out ++ [XUnit(lo, hi)]
+      let (cx2, pack, un) = evidence_pack(cx1, red, true, lo, hi)
+      cx1 = cx2
+      unanswered = unanswered ++ un
+      out = out ++ [pack]
     }
   }
   (cx1, out, unanswered, dropped)
