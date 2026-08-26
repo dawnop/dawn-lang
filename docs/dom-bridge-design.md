@@ -181,20 +181,27 @@ panic 会中止模块，页面就死了。
 | `payload-ignores-kind` | 宿主无视声明的种类，一律读 `value` 送过来 | `request` 行多出 `payload`，guest 回 `bad-request` |
 | `no-catch` | 去掉边界上的 `catch_panic` | 回复变成 `aborted` |
 
-第二份转录（`transcript-todo.mjs` / `expected-todo.txt`，482 行）驱动
+第二份转录（`transcript-todo.mjs` / `expected-todo.txt`，461 行）驱动
 `examples/projects/tea_dom_todo`：五个待办、一次筛选、一次就地编辑、一次中间删除、一次
-panic、一次落空的事件。它多一种行 `state`，即根的 class、编辑框的文本、`<ul>` 子树与状态行；
-整份文档只在 init 后打一次，因为 28 个按键按钮每轮全打一遍会把行淹掉，而 init 之后的
-`dom` 行是不过滤的，所以「键盘区不该再被动过」仍然是可断言的。它自己的两个变异体
-（`todo-focus` 让按键无视焦点、`todo-filter` 让 done 筛选放行一切）都改在应用里而不是桥里：
+panic、一次落空的事件。它多一种行 `state`，即根的 class、编辑框的 `value`、`<ul>` 子树与
+状态行——那是每一轮真正在变的东西，整份文档每轮全打一遍只会把变了的行埋在重复的标题与
+筛选条里；整份文档在 init 后打一次，而 init 之后的 `dom` 行是不过滤的，所以「没动过的
+区域不该被动过」仍然是可断言的。它自己的两个变异体（`todo-fill` 让 `fill` 把行内编辑器的
+载荷填进 composer 的草稿、`todo-filter` 让 done 筛选放行一切）都改在应用里而不是桥里：
 改桥的变异体两份转录一起红，说明不了第二份有没有牙。
+
+那个应用原本用一块 28 键的按钮键盘打字，因为边界带不了 `ev.target.value`。载荷落地后它
+换成两个受控 `<input>`，账面是：init 回复 4125 B → 1247 B（−70%）、节点 77 → 19（−75%）、
+init 的 DOM 变更 228 → 55（−76%），而打一个标题从「每字符一轮」变成一轮。**没有**变的是
+中间删除那一轮：仍是 17 条 patch、25 次 DOM 变更，因为那笔账是配对方式的，不是输入法的。
 
 转录之前还有三套只要 node 的检查，各带自己的变异体，因为它们钉的东西转录看不见：
 `keyed-ops.sh` 驱动两个应用都不会走到的三个 op；`payload.sh` 驱动两个应用都不声明的那些
 载荷路径（`key`、checkbox 归一、种类变了要重挂监听器、以及那个有条件的 `preventDefault`）；
-`props.sh` 驱动 `value`/`checked` 的属性写。后者钉的是 WHATWG 的 dirty value flag——用户打过字之后，`value` 这个内容特性
-就不再写进用户看到的那个值，于是一个只会 `setAttribute` 的桥把模型渲染进输入框**只有一次**，
-之后模型再也改不动它，而且不抛异常：patch 流是对的，document 对象是对的，只有屏幕是错的。
+`props.sh` 驱动 `value`/`checked` 的属性写。最后这套钉的是 WHATWG 的 dirty value flag——
+用户打过字之后，`value` 这个内容特性就不再写进用户看到的那个值，于是一个只会 `setAttribute`
+的桥把模型渲染进输入框**只有一次**，之后模型再也改不动它，而且不抛异常：patch 流是对的、
+document 对象是对的，只有屏幕是错的。
 桩里那个带 dirty 标志的 `StubInput` 就是为了让这件事有地方红。
 
 `scripts/wasm-contract`（失败运行时那套）和这一套共用一个 CI job，因为它们共用两件贵的

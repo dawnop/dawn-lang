@@ -62,7 +62,7 @@ function model(n, filter) {
     filter,
     draft: '',
     edit: '',
-    focus: 'composer',
+    editing: null,
   });
 }
 

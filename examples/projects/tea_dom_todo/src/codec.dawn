@@ -19,10 +19,10 @@
 use std/list
 use std/map
 use std/str
-use json/value.{Json, JStr, JInt, JArr, JObj, JBool}
+use json/value.{Json, JStr, JInt, JArr, JObj, JBool, JNull}
 use json/render.{render}
 use json/parser.{parse}
-use todo.{Model, Todo, Filter, All, Active, Done, Focus, Nowhere, Composer, Row, init}
+use todo.{Model, Todo, Filter, All, Active, Done, init}
 
 ## The model as one line of JSON.
 pub fn encode(m: Model) -> String =
@@ -33,7 +33,7 @@ pub fn encode(m: Model) -> String =
       ("filter", JStr(value: filter_name(m.filter))),
       ("draft", JStr(value: m.draft)),
       ("edit", JStr(value: m.edit)),
-      ("focus", JStr(value: focus_name(m.focus))),
+      ("editing", enc_editing(m.editing)),
     ])),
   )
 
@@ -51,11 +51,13 @@ fn filter_name(f: Filter) -> String =
     Done -> "done"
   }
 
-fn focus_name(f: Focus) -> String =
-  match f {
-    Nowhere -> "nowhere"
-    Composer -> "composer"
-    Row(id) -> "row:" ++ to_string(id)
+# Which row is open, or `null`. A JSON null rather than a sentinel integer,
+# because "no row" is not a row number and encoding it as one would make -1 a
+# value `decode` has to know about.
+fn enc_editing(e: Option[Int]) -> Json =
+  match e {
+    Some(id) -> JInt(value: id)
+    None -> JNull
   }
 
 ## Text back to a model, and never a failure.
@@ -69,7 +71,7 @@ pub fn decode(s: String) -> Model =
         filter: dec_filter(dec_str(map.get(entries, "filter"), "all")),
         draft: dec_str(map.get(entries, "draft"), ""),
         edit: dec_str(map.get(entries, "edit"), ""),
-        focus: dec_focus(dec_str(map.get(entries, "focus"), "composer")),
+        editing: dec_editing(map.get(entries, "editing")),
       }
     Ok(_) -> init()
   }
@@ -118,18 +120,10 @@ fn dec_filter(s: String) -> Filter =
     All
   }
 
-fn dec_focus(s: String) -> Focus =
-  if s == "composer" {
-    Composer
-  } else {
-    match str.strip_prefix(s, "row:") {
-      Some(rest) ->
-        match parse_int(rest) {
-          Some(n) -> Row(id: n)
-          None -> Nowhere
-        }
-      None -> Nowhere
-    }
+fn dec_editing(j: Option[Json]) -> Option[Int] =
+  match j {
+    Some(JInt(v)) -> Some(v)
+    _ -> None
   }
 
 # ---- tests ---------------------------------------------------------------
@@ -144,15 +138,16 @@ fn sample() -> Model =
     filter: Active,
     draft: "hal",
     edit: "",
-    focus: Row(id: 2),
+    editing: Some(2),
   }
 
 test "a model round-trips through its own text" {
   assert decode(encode(sample())) == sample()
   assert decode(encode(init())) == init()
-  let all_focus: List[Focus] = [Nowhere, Composer, Row(id: 7)]
-  let mut_check = list.all(all_focus, f => decode(encode(Model { ..sample(), focus: f })).focus == f)
-  assert mut_check
+  let all_open: List[Option[Int]] = [None, Some(1), Some(7)]
+  let open_check =
+    list.all(all_open, e => decode(encode(Model { ..sample(), editing: e })).editing == e)
+  assert open_check
   let all_filters: List[Filter] = [All, Active, Done]
   assert list.all(all_filters, f =>
       decode(encode(Model { ..sample(), filter: f })).filter == f)

@@ -1,31 +1,40 @@
 // The same loop as transcript.mjs, driven against the app one tier up:
-// a list whose rows carry identity, a draft the user types, and a mode.
+// a list whose rows carry identity, two fields the user types into, and a
+// mode.
 //
 // Why a second transcript rather than more clicks in the first. The counter's
 // child list varies only in *length*, so pairing children by index is always
-// right for it and the two costs this file exists to pin cannot appear there:
+// right for it and the three things this file exists to pin cannot appear
+// there:
 //
 //   middle deletion   deleting a row in the middle of five rewrites every
 //                     row after it, because `diff` pairs by index and the
 //                     row that was at 3 is now at 2. The patch lines count
 //                     it; the `dom` lines show it happening to real nodes.
-//   lifted local      the composer draft and the row editor's draft are
-//   state             model fields, so one keystroke is a whole turn: a
+//   lifted local      the composer's draft and the row editor's draft are
+//   state             model fields, so an edit to either is a whole turn: a
 //                     request, a reply carrying the entire model, and a
-//                     patch. The transcript is what makes that per-character
-//                     cost a number rather than a worry.
+//                     patch. The transcript is what makes that a number
+//                     rather than a worry.
+//   event payloads    a listener that asked for the element's value, the
+//                     `payload` on the request line that carries it, and the
+//                     `prop <input> value=` mutation that writes the model
+//                     back into the controlled field. The counter has no
+//                     field and declares no payload.
 //
 // The line kinds are transcript.mjs's, plus one. `state` is a focused
-// serialization -- the root's class, the composer's text, the `<ul>` subtree
-// and the status line -- because the whole document is 28 key buttons wide
-// and printing it every turn would bury the rows. The one full `tree` line
-// after init is what says the rest of the document is there at all, and the
-// `dom` lines are unfiltered, so a mutation anywhere (including in the key
-// palette, where there must never be one after init) still shows up.
+// serialization -- the root's class, the composer's value, the `<ul>` subtree
+// and the status line -- because those are what a turn here is about, and a
+// full serialization every turn would repeat the heading and the filter bar
+// twelve times over the rows that changed. The one full `tree` line after
+// init is what says the rest of the document is there at all, and the `dom`
+// lines are unfiltered, so a mutation anywhere still shows up.
 //
 // Determinism is transcript.mjs's: no timers, no environment, a fresh
 // reactor per run, and every click aimed by walking the document rather than
-// by naming an address.
+// by naming an address. Typing is the same: a case types into the element it
+// found, exactly as a user would, and what reaches the boundary is whatever
+// the bridge then read off it.
 
 import { readFile } from 'node:fs/promises';
 import { mount } from '../../packages/tea-dom/js/app.mjs';
@@ -86,7 +95,7 @@ function byClassAndText(cls, label) {
   return hit;
 }
 
-/** Root class, composer text, the list subtree, and the status line. */
+/** Root class, composer value, the list subtree, and the status line. */
 function state() {
   const app = document_();
   const list = elementsBy(app, (n) => n.tagName === 'ul')[0];
@@ -94,18 +103,23 @@ function state() {
   const status = elementsBy(app, (n) => hasClass(n, 'status'))[0];
   return [
     `root=${JSON.stringify(app.getAttribute('class'))}`,
-    `field=${JSON.stringify(textOf(field))}`,
+    // The composer's text is its live `value`, not its children: it is an
+    // `<input>`, so what the user sees is a property and the model reaches it
+    // as one. Reading `textContent` here would report the empty string
+    // however the field was written, which is the failure this whole line
+    // exists to make visible.
+    `field=${JSON.stringify(field.value)}`,
     `status=${JSON.stringify(textOf(status))}`,
     serialize(list),
   ].join(' ');
 }
 
 // Every turn but the first prints its DOM mutations one per line. The first
-// builds the whole document -- 28 key buttons among other things -- and its
-// mutation list is a couple of hundred lines that say nothing the `tree`
-// line below it does not, so it is counted instead. Every later turn must
-// mutate nothing outside the region it changed, and that is only assertable
-// if the later lines are unfiltered.
+// builds the whole document and its mutation list says nothing the `tree`
+// line below it does not, so it is counted instead -- and the count is the
+// number the keyboard used to dominate, which is why it stays a number.
+// Every later turn must mutate nothing outside the region it changed, and
+// that is only assertable if the later lines are unfiltered.
 function flush(label, full = false) {
   out.push(`--- ${label}`);
   if (full) {
@@ -158,13 +172,29 @@ function press(element, what) {
   flush(`after ${what}`);
 }
 
-// ---- five todos, one character each --------------------------------------
+// The user types into a field: the whole value it now holds, once, which is
+// what a browser reports on an `input` event. The bridge decides what to read
+// off the element and what to put on the request line, so a case supplies no
+// payload of its own -- it changes the document and fires, and the request
+// line is the evidence of what the bridge made of that.
+function typeInto(element, value, what) {
+  out.push(`type     ${what} <- ${JSON.stringify(value)}`);
+  element.typeInto(value);
+  element.fire('input');
+  flush(`after ${what}`);
+}
+
+function field() {
+  return elementsBy(document_(), (n) => hasClass(n, 'field'))[0];
+}
+
+// ---- five todos, two turns each ------------------------------------------
 //
-// A title is one letter so that a whole todo costs two turns; the point of
-// this section is the *shape* of the list, and the per-keystroke cost is
-// measured once below rather than five times here.
+// A title is one letter here because the point of this section is the *shape*
+// of the list; the length of a title costs nothing now, which is what the
+// section after the filters says with a word instead.
 for (const letter of ['a', 'b', 'c', 'd', 'e']) {
-  press(byClassAndText('key', letter), `key ${letter}`);
+  typeInto(field(), letter, `title ${letter}`);
   press(byClassAndText('add', 'add'), `add (${letter})`);
 }
 
@@ -173,9 +203,14 @@ press(byClassAndText('filter', 'done'), 'filter done');
 press(byClassAndText('filter', 'all'), 'filter all');
 
 // ---- state that lives on a row, in the tail of the deletion below ---------
+//
+// The word typed into the row's editor is four characters and costs one turn,
+// which is the whole of what the payload bought: the palette this replaced
+// spent a turn, a request carrying the entire model and a patch on each of
+// them. The request line below is where the four characters cross.
 press(inRow(1, 'box'), 'toggle row 1');
 press(inRow(4, 'title'), 'edit row 4');
-press(byClassAndText('key', 'z'), 'key z into the row draft');
+typeInto(inRow(4, 'draft'), 'milk', 'retitle row 4');
 
 // ---- the measurement: delete a row in the middle -------------------------
 //

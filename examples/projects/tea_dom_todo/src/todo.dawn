@@ -18,20 +18,22 @@
 #                                        not, decided by a field of the model
 #                                        rather than by the row.
 #
-# The on-screen key palette is not a stylistic choice. The bridge carries an
-# event *name* and an address and nothing else -- no `ev.target.value` and no
-# event payload of any kind -- so a real `<input>` cannot tell this program
-# what was typed. Buttons are the only input device the boundary has, so the
-# app ships a keyboard made of buttons and every keystroke is a message. The
-# cost is recorded rather than worked around, and it is the same restriction
-# that puts `draft` and `edit` in the model.
+# Two real `<input>`s, and what they cost. A listener declares that it wants
+# the element's value (`dsl.on_value`), the host brings that one string back,
+# and `Fill` folds it into the message the listener named. So a title is one
+# message however long it is, and pasting, an IME and a real keyboard all
+# work. What it does not buy is *fewer* fields: `draft` and `edit` are still
+# model fields, because the two boxes are controlled -- the view renders them,
+# so a patch can correct them and the document stays a function of the model.
+# Making them uncontrolled is what would cut the turns rather than the
+# messages, and it is a separate question.
 
 use std/list
 use std/str
 use tea_core/app.{App, update, view}
 use tea_dom/node.{Node, Text, Elem}
-use tea_dom/dsl.{el, on_click, text}
-use tea_dom/reactor.{Fill}
+use tea_dom/dsl.{el, on_click, on_value, text}
+use tea_dom/reactor.{Fill, fill}
 
 ## One item. `id` is the identity the user means; the reconciler pairs by
 ## index and never sees it, which is what section 3 of the report measured.
@@ -44,35 +46,33 @@ pub type Filter =
   | Done
 derive Show
 
-## Where the key palette types. `Nowhere` is a real state: a page that has
-## just started has no cursor in it, and a key pressed then is a no-op rather
-## than a silent append to some default field.
-pub type Focus =
-  | Nowhere
-  | Composer
-  | Row(id: Int)
-derive Show
-
 ## The whole model.
 ##
-## `draft`, `edit` and `focus` are the three fields that exist because this
+## `draft`, `edit` and `editing` are the three fields that exist because this
 ## architecture has no local state: each is a piece of one widget's private
 ## business lifted to the top of the application. `todos`, `next_id` and
 ## `filter` are the parts a user would call the data.
+##
+## `editing` is which row is open, and `None` is a real state rather than a
+## missing one. It is not "where the keyboard is": that is the browser's to
+## know now, which is one thing an event payload took off the model.
 pub type Model = {
   todos: List[Todo],
   next_id: Int,
   filter: Filter,
   draft: String,
   edit: String,
-  focus: Focus,
+  editing: Option[Int],
 }
 
-## What the buttons mean. `Key` and `Rub` are the keyboard; the rest is the
-## application.
+## What the buttons and the two fields mean.
+##
+## `SetDraft` and `SetEdit` are the two messages with a hole in them: the view
+## puts one in the tree with an empty string, the host brings back what the
+## field holds, and `fill` below is what puts the second into the first.
 pub type Msg =
-  | Key(c: String)
-  | Rub
+  | SetDraft(text: String)
+  | SetEdit(text: String)
   | Add
   | Toggle(id: Int)
   | Drop(id: Int)
@@ -80,17 +80,28 @@ pub type Msg =
   | Edit(id: Int)
   | Save
   | Cancel
-  | Compose
   | Boom
 derive Show
 
 ## The model a fresh page starts from.
 pub fn init() -> Model =
-  Model { todos: [], next_id: 1, filter: All, draft: "", edit: "", focus: Composer }
+  Model { todos: [], next_id: 1, filter: All, draft: "", edit: "", editing: None }
 
-# Every listener in this view is a button click, so nothing asks the host to
-# bring anything back and the default `fill` -- the identity -- is right.
-impl Fill[Msg] { }
+## Where an event's payload lands.
+##
+## Two arms and a catch-all, and the catch-all is the point: every other
+## message comes from a button, arrives with no payload at all, and would be a
+## `bad-request` if the host tried to fill one in. A message's constructor is
+## what decides which field the text belongs to, and that decision is made
+## here, in the guest, which is why the host still cannot name a message.
+impl Fill[Msg] {
+  fn fill(m: Msg, payload: String) -> Msg =
+    match m {
+      SetDraft(_) -> SetDraft(text: payload)
+      SetEdit(_) -> SetEdit(text: payload)
+      _ -> m
+    }
+}
 
 impl App[Model] {
   type Msg = Msg
@@ -98,8 +109,8 @@ impl App[Model] {
 
   fn update(m: Model, msg: Msg) -> Model =
     match msg {
-      Key(c) -> type_into(m, c)
-      Rub -> rub_out(m)
+      SetDraft(t) -> Model { ..m, draft: t }
+      SetEdit(t) -> Model { ..m, edit: t }
       Add ->
         if str.trim(m.draft) == "" {
           m
@@ -109,7 +120,6 @@ impl App[Model] {
             todos: m.todos ++ [Todo { id: m.next_id, title: str.trim(m.draft), done: false }],
             next_id: m.next_id + 1,
             draft: "",
-            focus: Composer,
           }
         }
       Toggle(id) ->
@@ -121,28 +131,27 @@ impl App[Model] {
         Model {
           ..m,
           todos: list.filter(m.todos, t => t.id != id),
-          focus: if m.focus == Row(id: id) { Composer } else { m.focus },
-          edit: if m.focus == Row(id: id) { "" } else { m.edit },
+          editing: if m.editing == Some(id) { None } else { m.editing },
+          edit: if m.editing == Some(id) { "" } else { m.edit },
         }
       Only(f) -> Model { ..m, filter: f }
-      Edit(id) -> Model { ..m, focus: Row(id: id), edit: title_of(m.todos, id) }
+      Edit(id) -> Model { ..m, editing: Some(id), edit: title_of(m.todos, id) }
       Save ->
-        match m.focus {
-          Row(id) ->
+        match m.editing {
+          Some(id) ->
             if str.trim(m.edit) == "" {
-              Model { ..m, focus: Composer, edit: "" }
+              Model { ..m, editing: None, edit: "" }
             } else {
               Model {
                 ..m,
                 todos: retitle(m.todos, id, str.trim(m.edit)),
-                focus: Composer,
+                editing: None,
                 edit: "",
               }
             }
-          _ -> m
+          None -> m
         }
-      Cancel -> Model { ..m, focus: Composer, edit: "" }
-      Compose -> Model { ..m, focus: Composer }
+      Cancel -> Model { ..m, editing: None, edit: "" }
       # Deliberate, and the only unhandled failure in this tree: `tea_dom`'s
       # `serve` catches it at the boundary, the host keeps its model, and the
       # next message is answered normally. The counter carries the same
@@ -156,31 +165,12 @@ impl App[Model] {
     let filters: Node[Msg] = filter_row(m.filter)
     let items: Node[Msg] =
       el("ul", [("class", "list")], [], list.map(visible(m), t => row(m, t)))
-    let pad: Node[Msg] = key_pad()
     let status: Node[Msg] = el("p", [("class", "status")], [], [text(summary(m))])
-    el("div", [("class", root_class(m))], [], [heading, composer, filters, items, pad, status])
+    el("div", [("class", root_class(m))], [], [heading, composer, filters, items, status])
   }
 }
 
 # ---- update helpers ------------------------------------------------------
-
-# One keystroke, routed by `focus`. This function is the whole of what a
-# Compose-style `remember` at the two text widgets would have replaced.
-fn type_into(m: Model, c: String) -> Model =
-  match m.focus {
-    Nowhere -> m
-    Composer -> Model { ..m, draft: m.draft ++ c }
-    Row(_) -> Model { ..m, edit: m.edit ++ c }
-  }
-
-fn rub_out(m: Model) -> Model =
-  match m.focus {
-    Nowhere -> m
-    Composer -> Model { ..m, draft: chop(m.draft) }
-    Row(_) -> Model { ..m, edit: chop(m.edit) }
-  }
-
-fn chop(s: String) -> String = if str.len(s) == 0 { s } else { str.take(s, str.len(s) - 1) }
 
 fn title_of(ts: List[Todo], id: Int) -> String =
   match list.find(ts, t => t.id == id) {
@@ -205,18 +195,23 @@ pub fn visible(m: Model) -> List[Todo] =
 # edited, which makes "started editing" one `set-self` at [] in the patch
 # stream rather than something a reader has to infer.
 fn root_class(m: Model) -> String =
-  match m.focus {
-    Row(_) -> "todo editing"
-    _ -> "todo"
+  match m.editing {
+    Some(_) -> "todo editing"
+    None -> "todo"
   }
 
+# The composer is a controlled field: the `value` prop renders `m.draft`, and
+# the listener asks for the element's value back. A message per `input` event
+# is a message per *edit* rather than per character -- a paste of forty
+# characters is one -- and the two halves are what keep the model and the
+# document agreeing on what is in the box.
 fn compose_row(m: Model) -> Node[Msg] = {
   let field: Node[Msg] =
     el(
-      "span",
-      [("class", if m.focus == Composer { "field focus" } else { "field" })],
-      [on_click(Compose)],
-      [text(if m.draft == "" { "(nothing typed)" } else { m.draft })],
+      "input",
+      [("class", "field"), ("value", m.draft)],
+      [on_value("input", SetDraft(text: ""))],
+      [],
     )
   let add: Node[Msg] = el("button", [("class", "add")], [on_click(Add)], [text("add")])
   let boom: Node[Msg] = el("button", [("class", "boom")], [on_click(Boom)], [text("boom")])
@@ -239,14 +234,19 @@ fn filter_button(label: String, which: Filter, cur: Filter) -> Node[Msg] =
   )
 
 # Two shapes, decided by a field of the model rather than by the row: an
-# `<li>` being edited has a draft and two verbs, an `<li>` at rest has a
+# `<li>` being edited has a field and two verbs, an `<li>` at rest has a
 # checkbox, a title and a delete. They agree on tag and on child count and on
 # nothing else, which is what makes an edited row in the tail of a deletion
 # an outright `replace` rather than a text patch.
 fn row(m: Model, t: Todo) -> Node[Msg] =
-  if m.focus == Row(id: t.id) {
+  if m.editing == Some(t.id) {
     el("li", [("class", "row editing")], [], [
-      el("span", [("class", "draft")], [], [text(if m.edit == "" { "(empty)" } else { m.edit })]),
+      el(
+        "input",
+        [("class", "draft"), ("value", m.edit)],
+        [on_value("input", SetEdit(text: ""))],
+        [],
+      ),
       el("button", [("class", "save")], [on_click(Save)], [text("save")]),
       el("button", [("class", "cancel")], [on_click(Cancel)], [text("cancel")]),
     ])
@@ -260,22 +260,6 @@ fn row(m: Model, t: Todo) -> Node[Msg] =
     ])
   }
 
-## The letters this program can type. A keyboard made of buttons is what a
-## boundary that carries no event payload leaves an application: see the file
-## header.
-pub const KEYS: String = "abcdefghijklmnopqrstuvwxyz"
-
-fn key_pad() -> Node[Msg] = {
-  let letters: List[Node[Msg]] = list.map(str.chars(KEYS), c => key(c))
-  let space: Node[Msg] =
-    el("button", [("class", "key wide")], [on_click(Key(c: " "))], [text("space")])
-  let rub: Node[Msg] = el("button", [("class", "key wide")], [on_click(Rub)], [text("rub")])
-  el("div", [("class", "pad")], [], letters ++ [space, rub])
-}
-
-fn key(c: String) -> Node[Msg] =
-  el("button", [("class", "key")], [on_click(Key(c: c))], [text(c)])
-
 fn summary(m: Model) -> String = {
   let total = len(m.todos)
   let done = len(list.filter(m.todos, t => t.done))
@@ -284,29 +268,42 @@ fn summary(m: Model) -> String = {
 
 # ---- tests ---------------------------------------------------------------
 
-fn typed(m: Model, s: String) -> Model =
-  list.fold(str.chars(s), m, (acc, c) => update(acc, Key(c: c)))
-
 fn seeded(n: Int) -> Model = seed_go(init(), 1, n)
 
 fn seed_go(m: Model, i: Int, n: Int) -> Model =
   if i > n {
     m
   } else {
-    seed_go(update(typed(m, "task" ++ to_string(i)), Add), i + 1, n)
+    seed_go(update(update(m, SetDraft(text: "task" ++ to_string(i))), Add), i + 1, n)
   }
 
-test "typing is a message per character and lands where the focus says" {
-  let m = typed(init(), "milk")
-  assert m.draft == "milk"
-  assert update(m, Rub).draft == "mil"
-  # Nothing focused, nothing typed: a key is a no-op rather than a guess.
-  let loose = Model { ..init(), focus: Nowhere }
-  assert typed(loose, "milk") == loose
+test "a payload lands in the field its message names, and nowhere else" {
+  # `fill` is the whole of what an event payload can do to this application,
+  # so this is the whole of what has to be right about it: the text goes into
+  # the constructor the view put in the tree, and a message that carries no
+  # hole is returned unchanged rather than given one.
+  assert fill(SetDraft(text: ""), "buy milk") == SetDraft(text: "buy milk")
+  assert fill(SetEdit(text: "old"), "new") == SetEdit(text: "new")
+  assert fill(Add, "buy milk") == Add
+  assert fill(Toggle(id: 3), "buy milk") == Toggle(id: 3)
+  # And the field it lands in is the field `update` then writes.
+  let composing = update(init(), fill(SetDraft(text: ""), "buy milk"))
+  assert composing.draft == "buy milk"
+  assert composing.edit == ""
+}
+
+test "typing is one message whatever the length of what was typed" {
+  # The thing the key palette could not do. A title of any length, a paste, an
+  # IME commit: one `input` event, one message, one turn.
+  let m = update(init(), SetDraft(text: "buy milk and eggs"))
+  assert m.draft == "buy milk and eggs"
+  # A field the user emptied is an empty draft rather than an unchanged one:
+  # the payload is the field's value, not a keystroke to append.
+  assert update(m, SetDraft(text: "")).draft == ""
 }
 
 test "add commits the draft and clears it" {
-  let m = update(typed(init(), "buy milk"), Add)
+  let m = update(update(init(), SetDraft(text: "buy milk")), Add)
   assert m.todos == [Todo { id: 1, title: "buy milk", done: false }]
   assert m.draft == ""
   assert m.next_id == 2
@@ -326,26 +323,27 @@ test "toggle, drop and filter are the plain list operations" {
   assert d.todos[1].id == 3
 }
 
-test "an edit is a second draft, and the focus decides which one a key feeds" {
+test "an edit is a second field, and the two never feed each other" {
   let m = update(seeded(3), Edit(id: 2))
-  assert m.focus == Row(id: 2)
+  assert m.editing == Some(2)
   assert m.edit == "task2"
-  let typing = typed(m, "!")
+  let typing = update(m, SetEdit(text: "task2!"))
   assert typing.edit == "task2!"
-  # The composer's draft is untouched while a row has the focus.
+  # The composer's draft is untouched while a row is open, which is the
+  # assertion the routing mutant in scripts/wasm-dom-contract breaks.
   assert typing.draft == ""
   let saved = update(typing, Save)
   assert saved.todos[1].title == "task2!"
-  assert saved.focus == Composer
+  assert saved.editing == None
   assert saved.edit == ""
   # Cancel keeps the old title.
   assert update(typing, Cancel).todos[1].title == "task2"
 }
 
-test "dropping the row being edited puts the focus somewhere that exists" {
+test "dropping the row being edited closes the editor" {
   let m = update(seeded(3), Edit(id: 2))
   let d = update(m, Drop(id: 2))
-  assert d.focus == Composer
+  assert d.editing == None
   assert d.edit == ""
 }
 
@@ -357,8 +355,8 @@ test "the view is a value, so a frame is one assertion" {
       assert tag == "div"
       assert props == [("class", "todo")]
       assert list.is_empty(on)
-      # heading, composer, filters, list, pad, status
-      assert len(kids) == 6
+      # heading, composer, filters, list, status
+      assert len(kids) == 5
     }
   }
   match view(update(seeded(1), Edit(id: 1))) {
@@ -367,28 +365,26 @@ test "the view is a value, so a frame is one assertion" {
   }
 }
 
-test "the key palette is 28 buttons and never varies with the model" {
-  let a = view(init())
-  let b = view(seeded(4))
-  match (kids_at(a, 4), kids_at(b, 4)) {
-    (Some(x), Some(y)) -> {
-      assert len(x) == 28
-      assert x == y
-    }
-    _ -> { assert false }
-  }
+test "both fields are controlled, so the document renders the model" {
+  # A `value` prop carrying the model's text, on each of the two. Without it
+  # the field would be the browser's and nothing could clear it -- `Add`
+  # clears the draft, and this is what makes that reach the screen.
+  let field: Node[Msg] =
+    el(
+      "input",
+      [("class", "field"), ("value", "buy milk")],
+      [on_value("input", SetDraft(text: ""))],
+      [],
+    )
+  assert first_kid(compose_row(update(init(), SetDraft(text: "buy milk")))) == Some(field)
+  let editor: Node[Msg] =
+    el("input", [("class", "draft"), ("value", "task2")], [on_value("input", SetEdit(text: ""))], [])
+  let open = update(seeded(2), Edit(id: 2))
+  assert first_kid(row(open, Todo { id: 2, title: "task2", done: false })) == Some(editor)
 }
 
-fn kids_at(n: Node[Msg], i: Int) -> Option[List[Node[Msg]]] =
+fn first_kid(n: Node[Msg]) -> Option[Node[Msg]] =
   match n {
     Text(_) -> None
-    Elem(_, _, _, ks, ..) ->
-      if i >= len(ks) {
-        None
-      } else {
-        match ks[i] {
-          Text(_) -> None
-          Elem(_, _, _, inner, ..) -> Some(inner)
-        }
-      }
+    Elem(_, _, _, ks, ..) -> if list.is_empty(ks) { None } else { Some(ks[0]) }
   }

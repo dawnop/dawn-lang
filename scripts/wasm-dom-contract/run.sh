@@ -330,15 +330,17 @@ edited "$mutant_tree/packages/tea-dom/src/reactor.dawn" &&
 # case is carrying assertions of its own.
 case_of todo
 
-# G: the lifted local state stops being routed. Every keystroke feeds the
-# composer's draft, so the row editor can never be typed into -- the exact
-# failure that having no local state at all is supposed to make impossible,
-# and the reason `focus` is a field.
+# G: the payload stops being routed to the field it belongs to. `fill` puts
+# what was typed into a row's editor into the composer's draft instead, so the
+# row can never be retitled -- the same failure the palette's `focus` mutant
+# used to pin, moved to where the routing now lives. It is an application
+# mutant on purpose: `fill` is the guest-side half of the payload, and a
+# bridge mutant would red both transcripts and say nothing about this one.
 reset_tree
-sed -i 's/edit: m.edit ++ c/draft: m.draft ++ c/' \
+sed -i 's/      SetEdit(_) -> SetEdit(text: payload)/      SetEdit(_) -> SetDraft(text: payload)/' \
   "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn"
 edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
-  run_mutant todo-focus yes "a keystroke ignores the focus"
+  run_mutant todo-fill yes "a payload lands in the wrong field"
 
 # H: the filter stops filtering. `done` shows every row, so the list the
 # reconciler is handed is the wrong length and the turn that empties it never
