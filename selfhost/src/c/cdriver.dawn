@@ -9,7 +9,7 @@
 
 use std/io
 use std/map
-use ir/core.{CValue, CFun, CModule}
+use ir/core.{CValue, CFun, CModule, CMode}
 use check/types.{Adts, Traits, Impls, Sig, prelude_adts}
 use check/cx.{Cx}
 use ir/interp.{CtOut}
@@ -157,8 +157,15 @@ fn build_units(
   prog: Program,
   with_tests: Bool,
   std_tests: Bool
-) -> (List[EmitMod], String, Adts) !io = {
+) -> (List[EmitMod], String, Adts, Map[(String, String), List[CMode]]) !io = {
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
+  # The parameter-mode table, one for the whole unit: `__emitc` is
+  # whole-program compilation, so the borrowed-inference fixpoint
+  # (docs/perceus-design.md 6) has its natural home here, over every
+  # module's Core, before any is rewritten. Until that pass exists the
+  # table is empty and every parameter is owned. It rides back out because
+  # the emitter reads call sites with the same table the rewrite used.
+  let modes = rc.owned_modes()
   # const values by declaring module, the same view the JVM path builds: a
   # const is named by its simple name and imported by it
   var const_vals: Map[String, Map[String, CValue]] = map.empty()
@@ -181,7 +188,7 @@ fn build_units(
       }
     units = units ++ [
       EmitMod {
-        m: rc.rc_module(core),
+        m: rc.rc_module(core, modes),
         consts: merged_consts(cx, ct, const_vals),
         blocks: ct.blocks
       }
@@ -197,7 +204,7 @@ fn build_units(
       }
     units = units ++ [
       EmitMod {
-        m: rc.rc_module(core),
+        m: rc.rc_module(core, modes),
         consts: merged_consts(cm.cx, cm.ct, const_vals),
         blocks: cm.ct.blocks
       }
@@ -211,7 +218,7 @@ fn build_units(
   # `adts` rides back out: the emitter needs it to rebuild a structured
   # comptime constant, and recomputing `program_tables` at the call site would
   # be a second answer to a question already answered here
-  (units, entry, adts)
+  (units, entry, adts, modes)
 }
 
 ## Which Unicode tables ride: the same question, and the same answer, as the
@@ -235,9 +242,9 @@ fn tables(units: List[EmitMod], prog: Program, std_tests: Bool) -> TableUse = {
 ## everything it calls, and after S3 the collections *are* std -- `[1, 2]`
 ## calls `std/pvec.from_array`.
 pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !io = {
-  let (units, entry, adts) = build_units(std, prog, false, false)
+  let (units, entry, adts, modes) = build_units(std, prog, false, false)
   if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
-  Ok(emitc.emit_program(units, entry, tables(units, prog, false), adts))
+  Ok(emitc.emit_program(units, entry, tables(units, prog, false), adts, modes))
 }
 
 ## The same translation unit with the test blocks compiled in and a generated
@@ -256,8 +263,8 @@ pub fn c_test_text(
   tests: List[(String, Int, String)],
   std_tests: Bool
 ) -> Result[String, String] !io = {
-  let (units, _entry, adts) = build_units(std, prog, true, std_tests)
-  Ok(emitc.emit_headless(units, tables(units, prog, std_tests), adts) ++
+  let (units, _entry, adts, modes) = build_units(std, prog, true, std_tests)
+  Ok(emitc.emit_headless(units, tables(units, prog, std_tests), adts, modes) ++
       ctestrun.runner(tests))
 }
 

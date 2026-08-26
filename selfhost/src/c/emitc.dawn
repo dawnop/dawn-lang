@@ -39,7 +39,7 @@ use embed/unicode_class
 use ir/core.{
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict,
   diverges,
-  CExpr, CStmt, CCallee, CFun, CModule, CParam,
+  CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign, CDup,
@@ -125,7 +125,12 @@ pub type CSt = {
   # consuming position is a transfer and emits `dawn_take` -- see
   # emit_expr's `k`.
   slots: Map[Int, Int],
-  nslots: Int
+  nslots: Int,
+  # The call-site half of the parameter-mode contract (core.CMode), the same
+  # table `rc.rc_module` rewrote with: which of a named callee's argument
+  # positions are borrowed, and so read (k=false) rather than consumed. The
+  # callee side is read off `CParam.mode` in `emit_fn`. Empty today.
+  modes: Map[(String, String), List[CMode]]
 }
 
 fn pad(n: Int) -> String = {
@@ -1233,6 +1238,29 @@ fn all_flags(n: Int, v: Bool) -> List[Bool] = {
   out
 }
 
+## One consuming flag per argument of a call: true (owned) everywhere except
+## the positions a `CDirect` callee's mode-table row marks borrowed. A
+## missing row, a non-direct callee and any position past the row (forwarded
+## dictionaries, evidence atoms) are owned -- the same answers
+## `rc.owned_positions` gives, read from the same table. The borrowed arm is
+## unreachable while the table is empty.
+fn arg_flags(st: CSt, callee: CCallee, n: Int) -> List[Bool] =
+  match callee {
+    CDirect(owner, name) ->
+      match map.get(st.modes, (owner, name)) {
+        None -> all_flags(n, true)
+        Some(ms) -> {
+          var out: List[Bool] = []
+          for m in ms {
+            if len(out) < n { out = out ++ [mode_owned(m)] }
+          }
+          while len(out) < n { out = out ++ [true] }
+          out
+        }
+      },
+    _ -> all_flags(n, true)
+  }
+
 ## Emit a row of value operands preserving written order. C leaves the
 ## evaluation order of call arguments and of binary operands unspecified (gcc
 ## goes right to left); the JVM defines left to right, and spec §4.3 makes
@@ -1275,9 +1303,12 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
     CDynamic(target) -> [target]
     _ -> []
   }
-  # the head borrows (k=false); a callee's parameters arrive owned:
-  # consuming positions (chk k=true)
-  let ks = all_flags(len(head), false) ++ all_flags(len(args), true)
+  # the head borrows (k=false); a callee's parameters arrive owned --
+  # consuming positions (chk k=true) -- except the positions the mode table
+  # marks borrowed, which are reads: a bare tracked local there must NOT
+  # dawn_take its slot, because the caller still owns the value across the
+  # call. `rc.rc_module` classified the same positions with the same table.
+  let ks = all_flags(len(head), false) ++ arg_flags(st, callee, len(args))
   let (st1, row) = emit_ordered(st, head ++ args, ks)
   let cargs = list.drop(row, len(head))
   match callee {
@@ -1927,13 +1958,17 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   # the signature and moved into its slot before the body runs: a parameter
   # cannot live in the frame array, and a callee owns its parameters, so a
   # raise unwinding this frame has to release the ones not yet dropped or
-  # transferred.
+  # transferred. A borrowed parameter (CParam.mode, the callee-side half of
+  # the mode contract) is none of this: the caller keeps the reference, so
+  # it gets no slot, no shadow, and the unwinder never sees it -- it stays
+  # the plain C parameter the signature declares. Unreachable while
+  # lowering stamps every parameter COwned.
   var shadows: List[CParam] = []
   var slots: Map[Int, Int] = map.empty()
   var shadowed: Set[Int] = set.empty()
   var n = 0
   for p in f.captures ++ f.params ++ f.evs {
-    if is_ref_ty(p.ty) && not set.has(st.dict_syms, p.sym) {
+    if is_ref_ty(p.ty) && not set.has(st.dict_syms, p.sym) && mode_owned(p.mode) {
       shadows = shadows ++ [p]
       shadowed = set.insert(shadowed, p.sym)
       n = n + 1
@@ -2065,7 +2100,12 @@ pub fn test_symbol(owner: String, idx: Int) -> String = mangle(owner, test_name(
 ## the declarations, the dictionaries and every function body. Two callers
 ## finish it differently -- `emit_program` writes the program's own `main`,
 ## and `dawn test` on this backend appends a generated runner instead.
-fn emit_units(units: List[EmitMod], u: TableUse, adts: Adts) -> CSt = {
+fn emit_units(
+  units: List[EmitMod],
+  u: TableUse,
+  adts: Adts,
+  modes: Map[(String, String), List[CMode]]
+) -> CSt = {
   var st = CSt {
     out: [],
     tmp: 0,
@@ -2079,7 +2119,8 @@ fn emit_units(units: List[EmitMod], u: TableUse, adts: Adts) -> CSt = {
     cdefs: [],
     cmap: map.empty(),
     slots: map.empty(),
-    nslots: 0
+    nslots: 0,
+    modes: modes
   }
   st = line(st, "/* generated by dawn __emitc -- Core IR -> C */")
   st = line(st, "#include \"dawn_rt.h\"")
@@ -2190,8 +2231,14 @@ fn emit_units(units: List[EmitMod], u: TableUse, adts: Adts) -> CSt = {
   st
 }
 
-pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse, adts: Adts) -> String = {
-  var st = emit_units(units, u, adts)
+pub fn emit_program(
+  units: List[EmitMod],
+  entry: String,
+  u: TableUse,
+  adts: Adts,
+  modes: Map[(String, String), List[CMode]]
+) -> String = {
+  var st = emit_units(units, u, adts, modes)
   # The program body runs on the runtime's own stack, not the OS default one
   # (dawn_rt.h, "the program's stack"). The thunk exists because the entry's
   # C return type follows its Dawn one, and `dawn_rt_main` takes one shape;
@@ -2215,8 +2262,13 @@ pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse, adts: Adts
 ## one. `cdriver.c_test_text` is the only caller, and it appends the runner
 ## `ctestrun.dawn` generates -- the C mirror of the JVM path, where
 ## `testrun.dawn` synthesises a `dawn$TestMain` class beside the emitted ones.
-pub fn emit_headless(units: List[EmitMod], u: TableUse, adts: Adts) -> String =
-  join(emit_units(units, u, adts).out, "")
+pub fn emit_headless(
+  units: List[EmitMod],
+  u: TableUse,
+  adts: Adts,
+  modes: Map[(String, String), List[CMode]]
+) -> String =
+  join(emit_units(units, u, adts, modes).out, "")
 
 # ---- tests ----
 

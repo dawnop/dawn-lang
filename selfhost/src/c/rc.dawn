@@ -38,12 +38,14 @@ use ir/core.{
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
   CContinue, CForeign, CDup,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
-  CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CFloat, CBool, CStr, CUnit, COwned,
+  CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CFloat, CBool, CStr, CUnit,
+  CMode, COwned, mode_owned,
   cex_ty, diverges
 }
 use check/types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray,
   is_ref_ty, intr_owned_args }
 use std/list
+use std/map
 use std/set
 
 # ---- state ----
@@ -69,6 +71,10 @@ type RSt = {
   scopes: List[Sc],
   # dictionary parameters of the function being rewritten; see `immortal`
   dict_syms: Set[Int],
+  # the call-site half of the parameter-mode contract (core.CMode): which of
+  # a named callee's parameters arrive borrowed. Empty today -- every lookup
+  # misses and every call keeps the all-owned rewrite.
+  modes: Map[(String, String), List[CMode]],
   next_sym: Int,
   # inside the right side of && / ||, where evaluation is conditional and
   # transfers are refused -- see `rw_scircuit`
@@ -735,6 +741,46 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
   (st2, lets, outs, temps)
 }
 
+## The owned argument positions of a call, when the mode table marks any of
+## the callee's parameters borrowed -- or None for the common case, the
+## all-owned convention, which must stay on `consume_all`'s exact path.
+##
+## Only a `CDirect` callee can carry borrowed positions: the table is keyed
+## by the name a call site can see, and a dynamic target, a dictionary
+## method or an impl/default symbol stays all-owned (see core.CMode). A
+## table row covers the callee's declared parameters; argument positions
+## past it (forwarded dictionaries, evidence atoms) are owned -- a
+## dictionary is not counted anyway and evidence is an ordinary counted
+## record the callee releases.
+fn owned_positions(st: RSt, callee: CCallee, n: Int) -> Option[List[Int]] =
+  match callee {
+    CDirect(owner, name) ->
+      match map.get(st.modes, (owner, name)) {
+        None -> None
+        Some(ms) -> {
+          var any_borrowed = false
+          for m in ms {
+            if not mode_owned(m) { any_borrowed = true }
+          }
+          # an all-owned row answers like a missing one: byte-for-byte the
+          # rewrite the table's absence produces
+          if not any_borrowed { return None }
+          var out: List[Int] = []
+          var i = 0
+          for m in ms {
+            if mode_owned(m) && i < n { out = out ++ [i] }
+            i = i + 1
+          }
+          while i < n {
+            out = out ++ [i]
+            i = i + 1
+          }
+          Some(out)
+        }
+      },
+    _ -> None
+  }
+
 ## Rewrite each operand in a consuming position: the value is handed over and
 ## the receiver keeps it.
 ##
@@ -866,18 +912,32 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
         wrap(st1, lets, CUnbox(i1, to), to, temps)
       },
 
-    # Dawn functions take their arguments owned (docs/perceus-design.md 5.1);
-    # the dictionaries a call forwards are not counted and pass through. A
-    # callee that is a value is read at the moment of the call, after every
-    # argument has run: each side's after-set covers the other.
+    # Dawn functions take their arguments owned (docs/perceus-design.md 5.1)
+    # unless the mode table says a position is borrowed; the dictionaries a
+    # call forwards are not counted and pass through. A callee that is a
+    # value is read at the moment of the call, after every argument has run:
+    # each side's after-set covers the other.
     CCall(callee, args, cty) -> {
       let (st1, lets, c1, temps) = rw_callee(st, callee, fv_list(args, after))
       let cbase = match callee {
         CDynamic(t) -> fv_expr(t, after)
         _ -> after
       }
-      let (st2, args1) = consume_all(st1, args, cbase)
-      wrap(st2, lets, CCall(c1, args1, cty), cty, temps)
+      match owned_positions(st1, callee, len(args)) {
+        None -> {
+          let (st2, args1) = consume_all(st1, args, cbase)
+          wrap(st2, lets, CCall(c1, args1, cty), cty, temps)
+        }
+        # A callee with borrowed positions is an intrinsic-shaped operand
+        # list: the owned positions transfer or dup as ever, a borrowed
+        # position rooted in a binding passes bare (the binding outlives the
+        # call), and a borrowed owned-temporary gets a name and a drop of
+        # its own after the call. Unreachable while the table is empty.
+        Some(owned) -> {
+          let (st2, lets2, args1, temps2) = intr_args(st1, args, owned, cbase)
+          wrap(st2, lets ++ lets2, CCall(c1, args1, cty), cty, temps ++ temps2)
+        }
+      }
     }
 
     # Runtime primitives borrow, and dup whatever they decide to keep --
@@ -1276,17 +1336,29 @@ fn rw_effect(st: RSt, e: CExpr, after: Set[Int]) -> (RSt, CExpr) = {
 
 # ---- entry ----
 
-fn rc_fn(base_dicts: Set[Int], next_sym: Int, f: CFun) -> (Int, CFun) = {
+fn rc_fn(
+  base_dicts: Set[Int],
+  modes: Map[(String, String), List[CMode]],
+  next_sym: Int,
+  f: CFun
+) -> (Int, CFun) = {
   var dicts = base_dicts
   for d in f.dicts { dicts = set.insert(dicts, d.sym) }
-  var st = RSt { scopes: [], dict_syms: dicts, next_sym: next_sym, pinned: false }
+  var st = RSt { scopes: [], dict_syms: dicts, modes: modes, next_sym: next_sym, pinned: false }
   st = push(st, -1, true)
-  # captures and parameters arrive owned; the body is responsible for them.
-  # A dictionary capture is neither: it is a static, outside the ledger.
-  # Evidence is an ordinary counted record and rides with the parameters,
-  # which is the entire reason it is not carried in `dicts`.
+  # owned captures and parameters are the body's to release, so they enter
+  # the ledger. A borrowed parameter does not (the callee-side half of the
+  # mode contract, core.CMode): the caller keeps it alive, so no scope drop
+  # is owed and no transfer may take it -- outside the ledger it is dup'ed
+  # at every consuming use, the same account a dictionary-free borrowed
+  # root gets. A dictionary capture is neither: it is a static, outside the
+  # ledger whatever its mode says. Evidence is an ordinary counted record
+  # and rides with the parameters, which is the entire reason it is not
+  # carried in `dicts`.
   for p in f.captures ++ f.params ++ f.evs {
-    if is_ref_ty(p.ty) && not set.has(dicts, p.sym) { st = bind(st, p.sym) }
+    if is_ref_ty(p.ty) && not set.has(dicts, p.sym) && mode_owned(p.mode) {
+      st = bind(st, p.sym)
+    }
   }
   let (st1, body1) = rw(st, f.body, true, no_syms())
   let (st2, owned) = pop(st1)
@@ -1294,14 +1366,25 @@ fn rc_fn(base_dicts: Set[Int], next_sym: Int, f: CFun) -> (Int, CFun) = {
   (st3.next_sym, CFun { ..f, body: body2 })
 }
 
+## The mode table with no rows: every function takes every parameter owned.
+## What the drivers pass until the inference pass exists, and what a
+## missing row means everywhere a row is looked up.
+pub fn owned_modes() -> Map[(String, String), List[CMode]] = map.empty()
+
 ## Insert dup and drop across a module. Idempotent it is not: run it once.
+##
+## `modes` is the program-wide parameter-mode table (core.CMode): the same
+## table for every module of the unit, because a call site here may name a
+## function anywhere. The callee-side half of the contract is read off
+## `CParam.mode` instead -- the two must agree, and keeping them separately
+## readable is what lets the mutant harness disagree them on purpose.
 ##
 ## The dictionary symbols are unioned module-wide before any function is
 ## rewritten: a lifted lambda that captured an enclosing function's
 ## dictionary keeps the original symbol id, but carries it as a *capture*,
 ## not in its own `dicts` -- and a dictionary is outside the ledger wherever
 ## it appears (see `dictish`).
-pub fn rc_module(m: CModule) -> CModule = {
+pub fn rc_module(m: CModule, modes: Map[(String, String), List[CMode]]) -> CModule = {
   var base: Set[Int] = set.empty()
   for f in m.fns {
     for d in f.dicts { base = set.insert(base, d.sym) }
@@ -1309,7 +1392,7 @@ pub fn rc_module(m: CModule) -> CModule = {
   var next = m.next_sym
   var fns: List[CFun] = []
   for f in m.fns {
-    let (n, f1) = rc_fn(base, next, f)
+    let (n, f1) = rc_fn(base, modes, next, f)
     next = n
     fns = fns ++ [f1]
   }
@@ -1574,8 +1657,13 @@ pub fn rc_check(m: CModule) -> List[String] = {
   var errs: List[String] = []
   for f in m.fns {
     var live: Set[Int] = set.empty()
+    # only owned parameters owe a release; a borrowed one never enters the
+    # ledger, so the walk must not expect one (the same reading `rc_fn`
+    # binds by -- one definition, two sides)
     for p in f.captures ++ f.params ++ f.evs {
-      if is_ref_ty(p.ty) && not set.has(base, p.sym) { live = set.insert(live, p.sym) }
+      if is_ref_ty(p.ty) && not set.has(base, p.sym) && mode_owned(p.mode) {
+        live = set.insert(live, p.sym)
+      }
     }
     let c = chk_expr(Chk { live: live, gone: false, errs: [] }, f.body, true)
     var here = c.errs
@@ -1599,7 +1687,7 @@ fn one_fn(params: List[CParam], ret: Ty, body: CExpr) -> CModule =
   }
 
 test "a scalar body needs no counting at all" {
-  let m = rc_module(one_fn([], TyInt, CInt(1)))
+  let m = rc_module(one_fn([], TyInt, CInt(1)), owned_modes())
   assert len(rc_check(m)) == 0
 }
 
@@ -1609,13 +1697,13 @@ test "a reference parameter the body never touches is still released" {
   # the oracle sees the gap before the pass fills it...
   assert len(rc_check(one_fn([p], TyInt, CInt(1)))) == 1
   # ...and does not see one after
-  assert len(rc_check(rc_module(one_fn([p], TyInt, CInt(1))))) == 0
+  assert len(rc_check(rc_module(one_fn([p], TyInt, CInt(1)), owned_modes()))) == 0
 }
 
 test "handing a parameter back is a move, not a copy" {
   let lst = TyList(TyInt)
   let p = CParam { sym: 1, ty: lst, mode: COwned }
-  let m = rc_module(one_fn([p], lst, CLocal(1, lst)))
+  let m = rc_module(one_fn([p], lst, CLocal(1, lst)), owned_modes())
   assert len(rc_check(m)) == 0
   # the last (only) use takes the value: no dup, no drop, nothing to balance
   match m.fns[0].body {
@@ -1633,7 +1721,7 @@ test "an earlier use copies, the last one takes" {
     Some(CCall(g, [CLocal(1, lst)], TyInt)),
     TyInt
   )
-  let m = rc_module(one_fn([p], TyInt, body))
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m)) == 0
   match m.fns[0].body {
     CBlock(ss, tail, _) -> {
@@ -1665,7 +1753,7 @@ test "two uses in one operand list both copy" {
   let lst = TyList(TyInt)
   let p = CParam { sym: 1, ty: lst, mode: COwned }
   let pair = TyTuple([lst, lst])
-  let m = rc_module(one_fn([p], pair, CTuple([CLocal(1, lst), CLocal(1, lst)], pair)))
+  let m = rc_module(one_fn([p], pair, CTuple([CLocal(1, lst), CLocal(1, lst)], pair)), owned_modes())
   assert len(rc_check(m)) == 0
   match m.fns[0].body {
     CBlock(ss, _, _) -> {
@@ -1700,7 +1788,7 @@ test "a use inside a loop copies every trip round" {
     Some(CInt(0)),
     TyInt
   )
-  let m = rc_module(one_fn([p], TyInt, body))
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m)) == 0
   # the textual last use runs once per iteration; it must copy, and the
   # binding is released after the loop instead
@@ -1735,7 +1823,7 @@ test "the arm that keeps a binding drops what the other arm took" {
     Some(CInt(0)),
     TyInt
   )
-  let m = rc_module(one_fn([p], TyInt, body))
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m)) == 0
   match m.fns[0].body {
     CIf(_, thn, els, _) -> {
@@ -1774,7 +1862,7 @@ test "the right side of a short circuit refuses to take" {
     CCall(CDirect("m", "p"), [CLocal(1, lst)], TyBool),
     TyBool
   )
-  let m = rc_module(one_fn([p], TyBool, body))
+  let m = rc_module(one_fn([p], TyBool, body), owned_modes())
   assert len(rc_check(m)) == 0
   # the call only sometimes runs, so its use must copy, and the release
   # stays at the end of the function where it is unconditional
@@ -1807,7 +1895,7 @@ test "array_with takes its owned operands bare at their last use" {
   let p1 = CParam { sym: 1, ty: arr, mode: COwned }
   let p2 = CParam { sym: 2, ty: lst, mode: COwned }
   let body = CIntrinsic("array_with", [CLocal(1, arr), CInt(0), CLocal(2, lst)], arr)
-  let m = rc_module(one_fn([p1, p2], arr, body))
+  let m = rc_module(one_fn([p1, p2], arr, body), owned_modes())
   assert len(rc_check(m)) == 0
   # both owned positions hand their reference over: no dup, no scope drop
   match m.fns[0].body {
@@ -1838,7 +1926,7 @@ test "a binding is released at the statement that stops touching it" {
     Some(CInt(0)),
     TyInt
   )
-  let m = rc_module(one_fn([p], TyInt, body))
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m)) == 0
   match m.fns[0].body {
     CBlock(ss, _, _) -> {
@@ -1868,7 +1956,7 @@ test "the match once-loop is unlooped and its arm takes the binding" {
     Some(CInt(0)),
     TyInt
   )
-  let m = rc_module(one_fn([p], TyInt, body))
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m)) == 0
   match m.fns[0].body {
     CBlock(ss, _, _) ->
@@ -1902,7 +1990,7 @@ test "a source loop ending in break keeps its jump target" {
     CSDiscard(CBreak(7))
   ], None, TyUnit)
   let body = CBlock([CSLoop(7, loop_body, None)], Some(CInt(0)), TyInt)
-  let m = rc_module(one_fn([], TyInt, body))
+  let m = rc_module(one_fn([], TyInt, body), owned_modes())
   assert len(rc_check(m)) == 0
   match m.fns[0].body {
     CBlock([CSLoop(7, _, _)], _, _) -> ()
@@ -1916,7 +2004,7 @@ test "a source loop ending in continue keeps its jump target" {
     CSDiscard(CContinue(7))
   ], None, TyUnit)
   let body = CBlock([CSLoop(7, loop_body, None)], Some(CInt(0)), TyInt)
-  let m = rc_module(one_fn([], TyInt, body))
+  let m = rc_module(one_fn([], TyInt, body), owned_modes())
   assert len(rc_check(m)) == 0
   match m.fns[0].body {
     CBlock([CSLoop(7, _, _)], _, _) -> ()
@@ -1934,7 +2022,7 @@ test "reassignment from the old value is a hand-over, not copy and drop" {
     Some(CInt(0)),
     TyInt
   )
-  let m = rc_module(one_fn([p], TyInt, body))
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m)) == 0
   match m.fns[0].body {
     CBlock(ss, _, _) -> {

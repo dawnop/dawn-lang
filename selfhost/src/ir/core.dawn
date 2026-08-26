@@ -236,17 +236,50 @@ pub type CUnOp =
   | CNot
   | CBnot
 
-## How a parameter is passed, for Perceus. Everything is marked Owned (the
-## conservative choice: the callee is responsible for the reference), and the
-## reuse analysis settled the other direction than this comment once
-## predicted: uniqueness needs *more* handing-over, not less, so knife 4
-## opened owned exceptions on the intrinsic table (`types.intr_owned_args`)
-## and `CBorrowed` has still never been constructed. It stays declared as the
-## slot a future borrowed convention would fill (a cross-module signature
-## table's business, docs/perceus-design.md 6).
+## How a parameter is passed, for Perceus.
+##
+## `COwned` is the base convention: the caller hands the reference over (dup
+## or transfer at the call site) and the callee is responsible for it (it is
+## a ledger binding, released on every path out). `CBorrowed` is the other
+## convention, and its whole meaning is subtraction on both sides at once:
+## the caller does NOT dup -- it keeps its own reference alive across the
+## call, which single-threaded strict evaluation makes sound (the callee
+## returns before any later statement can release it) -- and the callee does
+## NOT drop: the binding stays outside the rc ledger entirely, the same
+## treatment `rc.dawn` gives `dict_syms`, and it takes no `dawn_own` slot in
+## the emitted frame. A borrowed value flowing onward into an owned position
+## (an argument to an owned parameter, a constructor field, a return) is
+## dup'ed there like any other borrowed root; only the parameter's own
+## arrival and departure are free.
+##
+## Two readers, one bit each, and they must agree per function:
+##
+##   * the callee side reads `CParam.mode` (`rc.rc_fn` decides which
+##     parameters enter the ledger, `emitc.emit_fn` which get own-slots);
+##   * every call site reads the program-wide mode table handed to
+##     `rc.rc_module` and to the C emitter, keyed `(owner, name)` as
+##     `CDirect` spells the callee.
+##
+## Splitting the truth this way is deliberate: the mutant harness flips one
+## side without the other to prove the sanitizer/oracle net catches a
+## disagreement. Today the table is empty and every parameter is stamped
+## `COwned` by lowering -- `CBorrowed` is never constructed; the inference
+## pass (docs/perceus-design.md 6, the borrowed knife) will stamp both sides
+## from one fixpoint. Dynamic callees, dictionary methods and closure
+## captures stay owned for good: partial application cannot see a borrow
+## (the consensus answer -- Lean, Koka and Swift all pin higher-order to
+## owned).
 pub type CMode =
   | COwned
   | CBorrowed
+
+## The one shared reading of the bit, so the pass and the emitter cannot
+## classify a mode two ways.
+pub fn mode_owned(m: CMode) -> Bool =
+  match m {
+    COwned -> true
+    CBorrowed -> false
+  }
 
 pub type CParam = { sym: Int, ty: Ty, mode: CMode }
 
