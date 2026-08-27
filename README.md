@@ -136,8 +136,8 @@ different. ([docs/spec.md](docs/spec.md) §6.5; differential corpus
 Multi-backend languages usually ship a list of known divergences. There is no such
 list here, because a divergence is a red build:
 
-- `scripts/spike-native/run.sh` — 59 corpus programs compiled and run on both sides,
-  comparing **stdout, stderr and exit code**, plus an AddressSanitizer leg.
+- `scripts/spike-native/run.sh` — the differential corpus is compiled and run on both
+  sides, comparing **stdout, stderr and exit code**, plus an AddressSanitizer leg.
 - `scripts/intrinsic-parity.py` — walks the primitive table; any primitive implemented
   on only one backend is red.
 - `scripts/native-cli-diff.sh` — pins the native binary's `fmt`/`doc`/`add`/`lsp`
@@ -275,7 +275,7 @@ which one you are on:
 | Targets | wherever GraalVM runs | linux-x86_64 only |
 
 One file settles it. `examples/interop/interop.dawn` uses `use java`:
-`dawn build --native` writes a 15 MB executable that runs, while `dawnc check` on
+`dawn build --native` writes an executable that runs, while `dawnc check` on
 the same file answers `Java interop needs a JVM host with a class path to
 resolve java.lang.String against; this build has none`.
 
@@ -288,14 +288,14 @@ second backend".
 **This is also the scope of the parity claim above.** "Two backends, one answer"
 is a claim about the programs both backends can compile, and every program
 containing `use java` is outside it, because on those there is no second answer
-to compare against. The 59 programs under `scripts/spike-native/` are inside that
+to compare against. Every entry under `scripts/spike-native/` is inside that
 intersection by construction.
 
 ### The road without a JVM
 
 **As of v0.50.0**, every release also carries **`dawnc-linux-x86_64`**: a single-file
-static executable produced by the C backend (about 3.6 MB), with `std` and the C
-runtime embedded. It needs neither this repository nor a JVM.
+static executable produced by the C backend, with `std` and the C runtime embedded.
+It needs neither this repository nor a JVM.
 
 Its subcommands are `check|emitc|build|run|test|fmt|doc|add|lsp`; `build`/`run` invoke
 the machine's `cc` (overridable with `$CC`) and the rest do not touch a C toolchain at

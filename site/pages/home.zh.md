@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/home.md @ b11ca79412effde5 -->
+<!-- doc-check: translation-of site/pages/home.md @ 498aa209aedf86bd -->
 
 # 首页文案 —— 中文译本
 
@@ -50,7 +50,7 @@ type · match · effect · !io
 
 ## feature-parity-body
 
-JVM 字节码与 C（再交给 `cc`）是**平级**的两条路。最容易分叉的地方语言自己拥有：`Float` 渲染是纯 Dawn 的 Schubfach、Unicode 大小写表是编译器的、`Map` 迭代顺序按插入定死。59 个语料程序每次 push 两边编两边跑，比 stdout、stderr、退出码——分歧会红灯。
+JVM 字节码与 C（再交给 `cc`）是**平级**的两条路。最容易分叉的地方语言自己拥有：`Float` 渲染是纯 Dawn 的 Schubfach、Unicode 大小写表是编译器的、`Map` 迭代顺序按插入定死。整套差分语料每次 push 两边编两边跑，比 stdout、stderr、退出码——分歧会红灯。
 
 ## closing
 

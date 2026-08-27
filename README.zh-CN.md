@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ af06bd9b28516620 -->
+<!-- doc-check: translation-of README.md @ 9385c8c73a9ee578 -->
 
 # Dawn
 
@@ -117,7 +117,7 @@ pub fn main() -> Unit !io = {
 
 多后端语言普遍带着一份「已知分歧」清单。这里没有，因为分歧会红灯：
 
-- `scripts/spike-native/run.sh`——59 个语料程序两边编、两边跑，比 **stdout、stderr、
+- `scripts/spike-native/run.sh`——整套差分语料两边编、两边跑，比 **stdout、stderr、
   退出码**，外加一档 AddressSanitizer。
 - `scripts/intrinsic-parity.py`——走原语表，任何 primitive 只在一个后端有实现就红。
 - `scripts/native-cli-diff.sh`——把 native 二进制的 `fmt`/`doc`/`add`/`lsp` 输出按**字节**
@@ -225,7 +225,7 @@ impl 一致性是全程序唯一映射）与 `[java-deps]`（coursier 解析 Mav
 | 目标平台 | GraalVM 能跑的地方 | 只有 linux-x86_64 |
 
 一个文件就能说清。`examples/interop/interop.dawn` 用了 `use java`：`dawn build --native`
-写出一个 15 MB、跑得起来的可执行文件；`dawnc check` 对同一个文件答的是
+写出一个跑得起来的可执行文件；`dawnc check` 对同一个文件答的是
 `Java interop needs a JVM host with a class path to resolve java.lang.String against;
 this build has none`。
 
@@ -235,12 +235,12 @@ C 后端，不是那个 flag。把 flag 读成「把 JVM 那份产物提前打�
 
 **上面那条对等承诺的范围也在这里。**「两个后端一个答案」说的是两个后端都能编的那些程序，
 凡是带 `use java` 的都在范围之外——那些程序根本没有第二个答案可比。`scripts/spike-native/`
-下的 59 个程序按构造就在这个交集里。
+下的每个语料入口按构造就在这个交集里。
 
 ### 不装 JVM 的那条路
 
 **从 v0.50.0 起**，每个 release 还挂着 **`dawnc-linux-x86_64`**：C 后端编出来的单文件静态
-可执行程序（约 3.6 MB），std 与 C 运行时都嵌在里面，不需要这个仓库、也不需要 JVM。
+可执行程序，std 与 C 运行时都嵌在里面，不需要这个仓库、也不需要 JVM。
 
 子命令是 `check|emitc|build|run|test|fmt|doc|add|lsp`；`build`/`run` 会调用机器上的 `cc`
 （`$CC` 可覆盖），其余的不碰 C 工具链。打包成 jar、`lock`、`cache` 需要 JVM，故不在它的

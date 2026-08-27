@@ -55,7 +55,7 @@ Two backends, one answer
 
 ## feature-parity-body
 
-JVM bytecode and C (handed on to `cc`) are **peer** roads. Wherever divergence would be easiest, the language owns the thing itself: `Float` rendering is Schubfach in pure Dawn, the Unicode case tables belong to the compiler, `Map` iteration order is pinned to insertion. 59 corpus programs are compiled and run on both sides on every push, comparing stdout, stderr and exit code — a divergence is a red build.
+JVM bytecode and C (handed on to `cc`) are **peer** roads. Wherever divergence would be easiest, the language owns the thing itself: `Float` rendering is Schubfach in pure Dawn, the Unicode case tables belong to the compiler, `Map` iteration order is pinned to insertion. The differential corpus is compiled and run on both sides on every push, comparing stdout, stderr and exit code — a divergence is a red build.
 
 ## closing
 
