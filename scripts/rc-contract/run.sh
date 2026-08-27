@@ -45,6 +45,21 @@ fail() {
 python3 "$here/matrix_check.py" --self-test
 python3 "$here/matrix_check.py" "$here/matrix.txt"
 
+# The runtime does not get its blocks from malloc, and the redirection that
+# says so is a macro inside dawn_rt.c: it reaches that translation unit and
+# nothing else. So a `free()` written anywhere else in the tree is handed an
+# address libc never issued, which under AddressSanitizer is a reported
+# bad-free and without it is undefined. `dawn_free` is exported for exactly
+# this, and this is what keeps the count of bare calls at zero.
+echo "== no bare free outside the runtime =="
+stray="$(grep -rn --include='*.c' --include='*.cc' --include='*.h' \
+  -E '(^|[^_[:alnum:]])free[[:space:]]*\(' "$root/runtime" "$root/scripts" |
+  grep -v "^$root/runtime/c/dawn_rt.c:" || true)"
+if [ -n "$stray" ]; then
+  echo "$stray" >&2
+  fail "a bare free() outside runtime/c/dawn_rt.c; call dawn_free instead"
+fi
+
 echo "== sanitized =="
 "$cc_bin" -std=c11 -O1 -g -fsanitize=address -fwrapv -fexceptions -fno-strict-aliasing -pthread \
   "${warn[@]}" -I "$root/runtime/c" \

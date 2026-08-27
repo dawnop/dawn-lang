@@ -10,11 +10,14 @@
 # reaches `none_is_shared` as well, because the runtime's own `None` goes
 # through the same shared object; what may not overlap is an owner.
 #
-# The controls are the two assertions that stand closest to the mutation and
-# must survive it anyway. `array_with` is the one reader of `dawn_is_unique`
-# whose answer the singleton moves, and `immortal` is the pre-existing
-# dup/drop guard the singleton reuses. A mutant that reddens either has
-# stopped being about field-less constructors.
+# The controls are the assertions that stand closest to the mutations and
+# must survive them anyway. `array_with` is the one reader of
+# `dawn_is_unique` whose answer the singleton moves, and `immortal` is the
+# pre-existing dup/drop guard the singleton reuses; a mutant that reddens
+# either has stopped being about field-less constructors. `counts` and
+# `sharing` are the same line for the allocator: every slab mutant below is
+# still a working allocator, so a mutant that cannot count or cannot share
+# has broken something other than the property it is named for.
 
 assert	counts
 assert	sharing
@@ -28,11 +31,41 @@ assert	adt0_singleton
 assert	none_is_shared
 assert	immortal
 assert	immortal_graph
+assert	slab_reuses_a_block
+assert	slab_never_shrinks_a_block
+assert	slab_returns_pages
+assert	slab_bound_is_honoured
+assert	oversize_leaves_the_slab
 
 control	array_with
 control	immortal
+control	counts
+control	sharing
 
 role	revert-adt0-to-fresh-allocation	counted
 owner	revert-adt0-to-fresh-allocation	adt0_singleton
 red	revert-adt0-to-fresh-allocation	adt0_singleton
 red	revert-adt0-to-fresh-allocation	none_is_shared
+
+role	slab-never-recycles	counted
+owner	slab-never-recycles	slab_reuses_a_block
+red	slab-never-recycles	slab_reuses_a_block
+
+role	slab-merges-size-classes	counted
+owner	slab-merges-size-classes	slab_never_shrinks_a_block
+red	slab-merges-size-classes	slab_never_shrinks_a_block
+
+# The bound and the retirement are one mechanism, so one mutant reddens both:
+# a run that never hands a slab back has no retirements to count and no bound
+# holding what it keeps. This is the mutant the knife rests on. Every answer
+# the program prints under it is correct and every other gate in the tree
+# stays green; the only thing that changes is that the memory never comes
+# back, which is the whole reason the allocator was written.
+role	slab-never-retires	counted
+owner	slab-never-retires	slab_returns_pages
+red	slab-never-retires	slab_returns_pages
+red	slab-never-retires	slab_bound_is_honoured
+
+role	slab-swallows-oversize	counted
+owner	slab-swallows-oversize	oversize_leaves_the_slab
+red	slab-swallows-oversize	oversize_leaves_the_slab

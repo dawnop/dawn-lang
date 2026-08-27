@@ -31,6 +31,75 @@ MUTATIONS = {
   return dawn_adt_new(tag, 0, 0);
 }""",
     ),
+    # ---- the slab allocator -------------------------------------------
+    #
+    # Four ways to lose one of the allocator's properties while staying a
+    # working allocator, which is why they need their own assertions: a
+    # program compiled against any of these still prints the right answers.
+    # The third is the one the whole knife rests on -- it is correct in every
+    # respect except the one the allocator was written for.
+    #
+    # None of them may hand a caller fewer bytes than it asked for. That
+    # rules out the most literal spelling of the second (one free list for
+    # every size, which would corrupt the heap of every case downstream of
+    # it and cost the harness its per-assertion answer) in favour of merging
+    # neighbouring classes, which reaches the same assertion by handing back
+    # a block from the wrong class while still being large enough to use.
+    #
+    # Free blocks are never put back, so a slab only ever hands out the
+    # blocks it was laid out with. Everything else holds: the counts are
+    # right, the objects are right, and each slab still empties and retires.
+    "slab-never-recycles": (
+        "dawn_rt.c",
+        """  if (s == dawn_sl_cur[cls]) {
+    *(void **)p = dawn_sl_head[cls];
+    dawn_sl_head[cls] = p;
+    s->used--; /* the current slab is kept even at zero; see the heading */
+    return;
+  }
+  *(void **)p = s->freelist;
+  s->freelist = p;
+  if (s->list == DAWN_SL_OFF) {
+    dawn_sl_link(&dawn_sl_partial[cls], s, DAWN_SL_PARTIAL);
+  }
+  if (--s->used == 0) {""",
+        """  if (s == dawn_sl_cur[cls]) {
+    s->used--; /* the current slab is kept even at zero; see the heading */
+    return;
+  }
+  if (--s->used == 0) {""",
+    ),
+    # Every class index is rounded up to the next odd one, so neighbouring
+    # classes share a free list. Blocks are still big enough for what they
+    # are handed to, so the damage is confined to the one property: a block
+    # freed by one size class is reused by another.
+    "slab-merges-size-classes": (
+        "dawn_rt.c",
+        """  size_t cls = (n + (DAWN_SL_GRAIN - 1)) / DAWN_SL_GRAIN;
+  if (cls == 0) {
+    cls = 1; /* a zero-byte request still answers a distinct address */
+  }""",
+        """  size_t cls = ((n + (DAWN_SL_GRAIN - 1)) / DAWN_SL_GRAIN) | 1u;""",
+    ),
+    # The load-bearing one. Empty slabs are kept without limit instead of
+    # being handed back past DAWN_SLAB_KEEP, which is what the allocator was
+    # written to do and the only property here that no answer a program
+    # prints depends on. Every other assertion in this file stays green under
+    # it, and so would every gate in the tree.
+    "slab-never-retires": (
+        "dawn_rt.c",
+        """  if (dawn_sl_empty_n[cls] < DAWN_SL_KEEP) {
+    dawn_sl_layout(s, cls);""",
+        """  if (1) {
+    dawn_sl_layout(s, cls);""",
+    ),
+    # The cap on what a size class covers is raised, so blocks the allocator
+    # documents as malloc's come out of the reserve instead.
+    "slab-swallows-oversize": (
+        "dawn_rt.h",
+        "#define DAWN_SLAB_MAX 2048u /* a bigger request goes to malloc */",
+        "#define DAWN_SLAB_MAX 8192u /* a bigger request goes to malloc */",
+    ),
 }
 
 

@@ -11,11 +11,15 @@
  * exactly the class of bug this file exists to catch, and neither is visible
  * from inside the program. */
 
+/* sysconf, for the page size the allocator assertions turn into bytes. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "dawn_rt.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* The Unicode tables are `extern` in the runtime and emitted by the compiler
  * alongside the program (emitc's `emit_case_table`). Nothing here touches
@@ -314,7 +318,10 @@ static void test_immortal(void) {
   check(a->h.rc == DAWN_IMMORTAL, "dup does not move an immortal count");
   dawn_drop(a);
   check(a->h.rc == DAWN_IMMORTAL, "drop does not move it either");
-  free(a); /* by hand: drop would never have */
+  /* By hand, because drop would never have. Through the runtime's own
+   * release: the block came from the runtime's allocator, which is not
+   * malloc, and libc's free would refuse an address it never handed out. */
+  dawn_free(a);
 }
 
 /* `dawn_immortal` takes a whole object graph out of the ledger, which is what
@@ -394,6 +401,135 @@ static void test_immortal_graph(void) {
   dawn_drop(ys);
 }
 
+/* ---- the allocator (dawn_rt.h, DAWN_SLAB_ACTIVE) ------------------------
+ *
+ * Blocks come from the runtime's own size-class slabs, not from malloc.
+ * Nothing in Dawn can see that, and neither can the sanitized runs, because
+ * they are exactly the builds that bypass it: the reason for the bypass is
+ * that objects outside malloc's book are objects LeakSanitizer cannot report.
+ * So these five assertions and the four mutants in matrix.txt are the whole
+ * oracle for the allocator, and the third of them -- that the pages go back
+ * to the kernel -- is the reason the allocator exists at all.
+ *
+ * On a build without the slab they are skipped, not passed. A vacuous pass
+ * reads exactly like a real one, which is the shape this file is here to
+ * refuse; the harness only checks that the roster ran, so `SKIP` keeps the
+ * bookkeeping honest and the claim absent. */
+
+/* Resident kilobytes, from the second field of /proc/self/statm. Negative
+ * where there is no procfs. */
+static long rss_kib(void) {
+  FILE *f = fopen("/proc/self/statm", "r");
+  if (f == NULL) {
+    return -1;
+  }
+  long total = 0;
+  long resident = 0;
+  int got = fscanf(f, "%ld %ld", &total, &resident);
+  fclose(f);
+  if (got != 2) {
+    return -1;
+  }
+  return resident * (sysconf(_SC_PAGESIZE) / 1024);
+}
+
+/* A string whose whole block is `bytes`, so a case can name a size class
+ * instead of guessing at one. */
+static dawn_str *block_of(size_t bytes) {
+  return dawn_str_new((int64_t)(bytes - sizeof(dawn_str) - 1));
+}
+
+/* Freeing and re-requesting one size gets the same block back. This is the
+ * allocator's reason for being on the time axis: without it every one of the
+ * self-hosted compiler's 2e8 allocations pays a full malloc. */
+static void test_slab_reuses_a_block(void) {
+  dawn_str *a = block_of(3 * DAWN_SLAB_GRAIN);
+  void *was = a;
+  dawn_drop(a);
+  dawn_str *b = block_of(3 * DAWN_SLAB_GRAIN);
+  check(dawn_slab_owns(b), "a small block comes from the reserve");
+  check((void *)b == was, "and a freed one is handed straight back");
+  dawn_drop(b);
+}
+
+/* Size classes do not leak into each other. A freed block is only ever
+ * handed to a request its own class covers, so no caller can be given fewer
+ * bytes than it asked for -- the failure a single pool of free blocks makes,
+ * and one nothing else in the tree would notice until it corrupted a heap. */
+static void test_slab_never_shrinks_a_block(void) {
+  dawn_str *small = block_of(2 * DAWN_SLAB_GRAIN);
+  void *was = small;
+  dawn_drop(small);
+  dawn_str *big = block_of(3 * DAWN_SLAB_GRAIN);
+  check((void *)big != was, "a bigger request does not get a smaller block");
+  dawn_drop(big);
+}
+
+/* The property glibc does not have, and the whole point of retiring at the
+ * slab rather than bounding a cache of free blocks: a program that allocates
+ * 64MiB and releases it is not still holding 64MiB. On a plain malloc build
+ * the second check below fails -- small chunks sit under the arena's top
+ * chunk and the resident set stays at its high-water mark -- which is why
+ * this case is skipped there rather than run and believed.
+ *
+ * Linux, deliberately: MADV_DONTNEED is what returns the pages, and a
+ * platform where it does not (macOS wants MADV_FREE) is one that should be
+ * building with -DDAWN_NO_SLAB. */
+static void test_slab_returns_pages(void) {
+  size_t node = sizeof(dawn_adt) + sizeof(dawn_slot);
+  long count = (long)((64 * 1024 * 1024) / node);
+  long base = rss_kib();
+  check(base >= 0, "the resident set can be read");
+  if (base < 0) {
+    return;
+  }
+
+  dawn_adt *head = NULL;
+  for (long i = 0; i < count; i++) {
+    dawn_adt *n = dawn_adt_new(0, 1, MASK1);
+    n->fields[0].p = head;
+    head = n;
+  }
+  long peak = rss_kib();
+  dawn_drop(head);
+  long after = rss_kib();
+
+  check(peak - base > 48 * 1024, "64MiB of live objects is resident");
+  check(after - base < 8 * 1024, "and releasing them gives the pages back");
+}
+
+/* The bound the header states, read off the counters rather than off the
+ * source: slabs really are retired (a run that never called madvise has a
+ * bound nothing is holding it to), and the empty ones being kept for reuse
+ * are within DAWN_SLAB_KEEP per class. Runs after the case above, which is
+ * what makes the retirement count non-trivial. */
+static void test_slab_bound_is_honoured(void) {
+  uint64_t live = 0;
+  uint64_t cached = 0;
+  uint64_t retired = 0;
+  dawn_slab_stats(&live, &cached, &retired);
+  check(retired > 0, "pages have gone back to the kernel");
+  check(cached <= (uint64_t)DAWN_SLAB_KEEP * DAWN_SLAB_CLASSES,
+        "and no more empty slabs are held than the bound allows");
+  check(live > 0, "while the slabs still in use are still there");
+}
+
+/* Past the documented cap a request is malloc's, which is what lets one
+ * range comparison answer "is this block mine" and why no size class has to
+ * cover a large block. The 4096 is written here rather than derived from
+ * DAWN_SLAB_MAX on purpose: a mutant that raises the cap must fail this, not
+ * move the question it is being asked. */
+static void test_oversize_leaves_the_slab(void) {
+  dawn_str *small = block_of(2 * DAWN_SLAB_GRAIN);
+  check(dawn_slab_owns(small), "a small block is inside the reserve");
+  dawn_str *big = dawn_str_new(4096);
+  check(!dawn_slab_owns(big), "a 4KiB one is not");
+  dawn_str_data(big)[0] = 'x';
+  check(dawn_str_data(big)[0] == 'x', "and is writable all the same");
+  dawn_drop(big);
+  dawn_drop(small);
+}
+
 /* --rc=leak. Nothing is freed, so this runs last and the harness turns the
  * leak check off for it -- the leaks are the point. */
 static void test_leak_mode(void) {
@@ -414,21 +550,27 @@ static void test_leak_mode(void) {
 typedef struct {
   const char *name;
   void (*fn)(void);
+  int slab; /* asks a question only a build with the slab allocator can answer */
 } rc_case;
 
 static const rc_case rc_cases[] = {
-    {"counts", test_counts},
-    {"sharing", test_sharing},
-    {"mask_skips_scalars", test_mask_skips_scalars},
-    {"array", test_array},
-    {"array_with", test_array_with},
-    {"array_steal", test_array_steal},
-    {"deep_chain", test_deep_chain},
-    {"panic_message", test_panic_message},
-    {"adt0_singleton", test_adt0_singleton},
-    {"none_is_shared", test_none_is_shared},
-    {"immortal", test_immortal},
-    {"immortal_graph", test_immortal_graph},
+    {"counts", test_counts, 0},
+    {"sharing", test_sharing, 0},
+    {"mask_skips_scalars", test_mask_skips_scalars, 0},
+    {"array", test_array, 0},
+    {"array_with", test_array_with, 0},
+    {"array_steal", test_array_steal, 0},
+    {"deep_chain", test_deep_chain, 0},
+    {"panic_message", test_panic_message, 0},
+    {"adt0_singleton", test_adt0_singleton, 0},
+    {"none_is_shared", test_none_is_shared, 0},
+    {"immortal", test_immortal, 0},
+    {"immortal_graph", test_immortal_graph, 0},
+    {"slab_reuses_a_block", test_slab_reuses_a_block, 1},
+    {"slab_never_shrinks_a_block", test_slab_never_shrinks_a_block, 1},
+    {"slab_returns_pages", test_slab_returns_pages, 1},
+    {"slab_bound_is_honoured", test_slab_bound_is_honoured, 1},
+    {"oversize_leaves_the_slab", test_oversize_leaves_the_slab, 1},
 };
 
 int main(int argc, char **argv) {
@@ -441,6 +583,10 @@ int main(int argc, char **argv) {
     printf("leak_mode %s\n", failures > 0 ? "FAIL" : "PASS");
   } else {
     for (size_t i = 0; i < sizeof(rc_cases) / sizeof(rc_cases[0]); i++) {
+      if (rc_cases[i].slab && !DAWN_SLAB_ACTIVE) {
+        printf("%s SKIP\n", rc_cases[i].name);
+        continue;
+      }
       int before = failures;
       rc_cases[i].fn();
       printf("%s %s\n", rc_cases[i].name, failures > before ? "FAIL" : "PASS");
