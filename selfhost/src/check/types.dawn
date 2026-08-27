@@ -2984,6 +2984,12 @@ pub fn builtins() -> Map[String, Sig] = {
     tp1(bsig("array_get", [TyArray(t), TyInt], ["a", "i"], t), t),
     tp1(bsig("array_push", [TyArray(t), t], ["a", "x"], TyArray(t)), t),
     tp1(bsig("array_with", [TyArray(t), TyInt, t], ["a", "i", "x"], TyArray(t)), t),
+    # `array_get` for a caller about to overwrite the slot: on native, a
+    # unique array hands the slot's own reference out instead of pinning an
+    # extra count on the child for the duration of the rebuild. Value
+    # semantics are `array_get`'s -- the difference is a count, and only the
+    # native runtime has counts (dawn_rt.h spells the caller's obligation).
+    tp1(bsig("array_steal", [TyArray(t), TyInt], ["a", "i"], t), t),
     # HAMT bitmaps; a pure-Dawn loop would do, so this is only here because
     # every target has the instruction (docs/runtime-intrinsics-design.md §5).
     bsig("popcount", [TyInt], ["n"], TyInt)
@@ -3132,7 +3138,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
     internal = set.insert(internal, n)
   }
   # Array is the one collection primitive a backend must implement (D1)
-  for op in ["new", "len", "get", "push", "with"] {
+  for op in ["new", "len", "get", "push", "with", "steal"] {
     let n = "array_" ++ op
     rt_of = map.insert(rt_of, n, RtArray)
     erased = set.insert(erased, n)
@@ -3678,7 +3684,14 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 94
+  match map.get(bs, "array_steal") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn array_steal[T](a: Array[T], i: Int) -> T"
+    }
+    None -> { assert false }
+  }
+  assert map_size2(bs) == 95
 }
 
 test "the reclaim's failure is a value, under the one name left" {

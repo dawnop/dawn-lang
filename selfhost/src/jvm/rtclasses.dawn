@@ -1917,6 +1917,7 @@ pub fn gen_array_class(supers: List[String]) -> Bytes !io = {
   close_mv(lv)
 
   gen_array_get(cw)
+  gen_array_steal(cw)
   gen_array_push(cw)
   gen_array_with(cw)
   gen_array_java(cw)
@@ -2039,6 +2040,22 @@ fn gen_array_get(cw: ClassWriter) -> Unit !io = {
   gv.visitLabel(bad)
   array_bounds_panic(gv, "array index ", 1)
   close_mv(gv)
+}
+
+## array_steal(v, i) delegates to array_get. The primitive exists for the
+## native runtime, where a unique array transfers the slot's own reference
+## out instead of pinning an extra count on the child; the JVM has no counts,
+## so under the caller's obligation (slot `i` is overwritten before it is
+## read again) the transfer and a plain read are the same observation. The
+## slot is never nulled here -- there is no reference to balance.
+fn gen_array_steal(cw: ClassWriter) -> Unit !io = {
+  let sv = open_static(cw, "array_steal", "(" ++ array_wrap_desc() ++ "J)Ljava/lang/Object;")
+  sv.visitVarInsn(OP_ALOAD, 0)
+  sv.visitVarInsn(OP_LLOAD, 1)
+  sv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_get",
+    "(" ++ array_wrap_desc() ++ "J)Ljava/lang/Object;", false)
+  sv.visitInsn(OP_ARETURN)
+  close_mv(sv)
 }
 
 ## array_push(v, x) -> v with x appended. Extends in place when this version

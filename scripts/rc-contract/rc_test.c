@@ -131,6 +131,53 @@ static void test_array_with(void) {
   dawn_drop(zs);
 }
 
+/* `array_steal` borrows the array and answers an owned slot reference. Alone
+ * it transfers the slot's own reference out -- slot NULL, the child's count
+ * untouched -- and shared it dups, leaving the slot's reference in place so
+ * every other version still reads it. Both halves are asserted, counters
+ * included, plus the caller's obligation shape: the emptied slot is written
+ * back through `array_with` before anything reads it. */
+static void test_array_steal(void) {
+  dawn_array *xs = dawn_array_new();
+  for (int i = 0; i < 8; i++) {
+    dawn_box *e = dawn_box_int(i);
+    dawn_array *n = dawn_array_push(xs, e);
+    dawn_drop(e);
+    dawn_drop(xs);
+    xs = n;
+  }
+  uint64_t taken0 = dawn_array_steal_taken;
+  uint64_t dup0 = dawn_array_steal_dup;
+
+  /* shared: a second holder pins the array, so the slot keeps its reference
+   * and the answer is a fresh one */
+  dawn_array *held = (dawn_array *)dawn_dup(xs);
+  dawn_box *shared = (dawn_box *)dawn_array_steal(xs, 3);
+  check(dawn_array_steal_dup == dup0 + 1, "a shared array answers a dup");
+  check(dawn_array_steal_taken == taken0, "and transfers nothing");
+  check(xs->buf->data[3] != NULL, "the slot keeps its reference");
+  check(shared->val.i == 3, "the dup reads the slot's value");
+  check(((dawn_box *)dawn_array_get(held, 3))->val.i == 3,
+        "and the other version still reads it");
+  dawn_drop(shared);
+  dawn_drop(held);
+
+  /* alone: the slot's own reference transfers out. The child's count does
+   * not move -- the reference changed hands, it was not re-taken. */
+  dawn_box *peek = (dawn_box *)dawn_array_get(xs, 3); /* borrowed */
+  int32_t child_rc = peek->h.rc;
+  dawn_box *taken = (dawn_box *)dawn_array_steal(xs, 3);
+  check(dawn_array_steal_taken == taken0 + 1, "a unique array transfers the slot");
+  check(xs->buf->data[3] == NULL, "and empties it");
+  check(taken == peek, "the same reference changed hands");
+  check(taken->h.rc == child_rc, "at the same count");
+
+  /* the caller's obligation: overwrite the emptied slot before any read */
+  dawn_array *ys = dawn_array_with(xs, 3, taken);
+  check(((dawn_box *)dawn_array_get(ys, 3))->val.i == 3, "the write-back restores the slot");
+  dawn_drop(ys);
+}
+
 /* The reason drop walks with an explicit stack. A persistent vector and a
  * HAMT are both deep; at this length C recursion overflows, and run.sh runs
  * this binary under a deliberately small stack so that a regression to
@@ -301,6 +348,7 @@ int main(int argc, char **argv) {
     test_mask_skips_scalars();
     test_array();
     test_array_with();
+    test_array_steal();
     test_deep_chain();
     test_panic_message();
     test_immortal();

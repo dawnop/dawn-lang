@@ -90,9 +90,13 @@ static void dawn_wasi_balance_dump(void) {
 /* Stderr, so a differential run comparing stdout byte for byte stays clean
  * even with the stats on. */
 static void dawn_rc_stats_dump(void) {
-  fprintf(stderr, "rc-stats: array_with in-place %llu, copied %llu\n",
+  fprintf(stderr,
+          "rc-stats: array_with in-place %llu, copied %llu, "
+          "array_steal taken %llu, dup %llu\n",
           (unsigned long long)dawn_array_with_inplace,
-          (unsigned long long)dawn_array_with_copied);
+          (unsigned long long)dawn_array_with_copied,
+          (unsigned long long)dawn_array_steal_taken,
+          (unsigned long long)dawn_array_steal_dup);
 }
 
 void dawn_rt_init(int argc, char **argv) {
@@ -1670,6 +1674,36 @@ dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x) {
   dawn_array *r = dawn_array_of(nb, a->len);
   dawn_drop(a);
   return r;
+}
+
+uint64_t dawn_array_steal_taken = 0;
+uint64_t dawn_array_steal_dup = 0;
+
+/* Borrows `a` and answers an owned reference to slot `i`. Alone -- the array
+ * and its buffer both unique, the same test `dawn_array_with` runs and for
+ * the same reason: an array at rc 1 may still share its buffer with another
+ * version whose slot this is too -- the slot's own reference is transferred
+ * out and the slot left NULL. Shared, this is get+dup: someone else may still
+ * read the slot, so its reference stays put.
+ *
+ * The caller's obligation on the unique path: overwrite slot `i` before
+ * anything reads it (std/pvec steals a child and hands the array straight to
+ * `dawn_array_with` on the same slot). Dropping the array instead is safe --
+ * the release walk skips NULL slots -- but a read of the emptied slot is not.
+ * Under --rc=leak counts only grow, so rc==1 cannot prove uniqueness and the
+ * transfer is skipped, exactly as in `dawn_array_with`. */
+void *dawn_array_steal(dawn_array *a, int64_t i) {
+  if (i < 0 || i >= (int64_t)a->len) {
+    dawn_panic(DAWN_LIT("Array index out of bounds"));
+  }
+  if (!dawn_rc_leak && dawn_is_unique(a) && dawn_is_unique(a->buf)) {
+    dawn_array_steal_taken++;
+    void *x = a->buf->data[i];
+    a->buf->data[i] = NULL;
+    return x;
+  }
+  dawn_array_steal_dup++;
+  return dawn_dup(a->buf->data[i]);
 }
 
 /* std/hamt counts set bits of a 32-way bitmap. Dawn's Int is signed 64-bit,

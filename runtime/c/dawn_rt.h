@@ -223,11 +223,21 @@ dawn_array *dawn_array_push(dawn_array *a, void *x);
 dawn_array *dawn_array_push_own(dawn_array *a, void *x);
 /* Consumes `a` and `x` -- see the calling convention note below. */
 dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x);
-/* In-place stores against copies, for the reuse analysis's gate. Counted
- * unconditionally (two increments against an allocation and a loop);
- * DAWN_RC_STATS=1 prints both on exit. */
+/* Borrows `a`, answers an owned reference to slot `i`. Alone (array and
+ * buffer both unique) the slot's own reference is transferred out and the
+ * slot left NULL, so the caller MUST overwrite slot `i` -- or drop the whole
+ * array -- before anything reads it again; shared, it is get+dup and the
+ * slot keeps its reference. For the rebuild shape `steal slot i, recurse,
+ * write slot i back`, where a plain get would pin an extra count on the
+ * child for the whole recursion and foreclose in-place reuse below it. */
+void *dawn_array_steal(dawn_array *a, int64_t i);
+/* In-place stores against copies (and transfers against dups), for the
+ * reuse analysis's gate. Counted unconditionally (two increments against an
+ * allocation and a loop); DAWN_RC_STATS=1 prints all four on exit. */
 extern uint64_t dawn_array_with_inplace;
 extern uint64_t dawn_array_with_copied;
+extern uint64_t dawn_array_steal_taken;
+extern uint64_t dawn_array_steal_dup;
 
 /* The one bit-twiddle std/hamt needs that C does not portably spell. */
 int64_t dawn_popcount(int64_t n);
