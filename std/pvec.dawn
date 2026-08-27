@@ -113,10 +113,14 @@ fn push_tail[T](cnt: Int, level: Int, parent: VNode[T], tail: Array[T]) -> VNode
           VBranch(array_push(kids, VLeaf(tail)))
         }
       } else if sub < array_len(kids) {
-        # bind the child first so `kids` reaches `array_with` at its last
-        # use -- inline, the `array_get` read would pin an extra count on
-        # `kids` and the copy-on-write path would always copy
-        let child = array_get(kids, sub)
+        # steal, not get: on native a unique `kids` transfers the slot's own
+        # reference out (the slot stays empty until `array_with` writes the
+        # rebuilt child back), so the recursion sees the child at its true
+        # count and the whole path can be reused in place -- a read would
+        # pin an extra count on the child for the length of the descent.
+        # Binding before the call still matters: it is what lets `kids`
+        # reach `array_with` at its last use
+        let child = array_steal(kids, sub)
         VBranch(array_with(kids, sub, push_tail(cnt, level - BITS, child, tail)))
       } else {
         VBranch(array_push(kids, new_path(level - BITS, VLeaf(tail))))

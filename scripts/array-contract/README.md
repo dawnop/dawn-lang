@@ -30,3 +30,12 @@
 
 实测说这个代价付得起：编译器的追加里 99.1% 命中 owned-tail 快路径
 （[collections-dejava-research](../../docs/collections-dejava-research.md) §9.5），12 倍差距整个落在 push 这条路上。
+
+## 三、`array_steal` 的转移率（native 腿）
+
+`array_steal` 共享时就是 `array_get`，值语义的每一格都刻意看不出差别，所以它的收益
+（`push_tail` 沿改动路径就地复用）只能拿计数器量。`run.sh` 用 native 后端编译
+`steal_native.dawn`（20 万次 `++` 累积），`DAWN_RC_STATS=1` 跑完读 stderr 的 rc-stats 行。
+预算 80% / 20% 卡在实测悬崖中间：带 steal 实测 11241/11241 就地写、11241/0 转移；
+退回 `array_get` 实测 6180/11241 就地（45% 复制），而 steal 根本不被调用。
+这是唯一能把「std/pvec 退回 `array_get`」变红的门——其余门禁全部照旧绿。

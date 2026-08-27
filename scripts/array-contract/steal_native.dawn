@@ -1,0 +1,17 @@
+# The slot-steal workload: one accumulator, 200k appends. Past 1057 elements
+# every tail fold descends through `push_tail`'s deep branch, so the
+# steal-recurse-write-back shape (std/pvec.push_tail) runs at every trie
+# level for the rest of the loop. An ordinary user program on purpose: the
+# rate being measured is what `++` compiles to, not a primitive named
+# directly, so it holds the whole chain -- list_push ownership, the steal,
+# the write-back -- not just the runtime function.
+pub fn main() -> Unit !io = {
+  var xs: List[Int] = []
+  var i = 0
+  while i < 200000 {
+    xs = xs ++ [i]
+    i = i + 1
+  }
+  if len(xs) != 200000 { panic("append lost elements") }
+  println("done ${len(xs)}")
+}
