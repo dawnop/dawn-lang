@@ -1,14 +1,21 @@
 # Which assertions each production mutant reddens, and which one owns it.
 #
-# `assert` names the roster, in the order rc_test.c runs it. The red sets are
-# observed by run.sh and compared with this file; the `owner` line is a hand
-# edit, because which assertion owns a mutant is a design decision and a
-# recorder that could reassign owners would launder the collision it exists to
-# catch.
+# `assert` names the roster, in the order rc_test.c runs it, and `probe` the
+# one poison_probe.c runs, in the order run.sh runs it. The two are separate
+# rosters because they come off different builds -- the assertions off a
+# plain one, the probes off a sanitized one with -DDAWN_SLAB_FORCE -- and a
+# mutant is read off one or the other, never both. The red sets are observed
+# by run.sh and compared with this file; the `owner` line is a hand edit,
+# because which assertion owns a mutant is a design decision and a recorder
+# that could reassign owners would launder the collision it exists to catch.
 #
 # Overlaps are recorded, not forbidden. `revert-adt0-to-fresh-allocation`
 # reaches `none_is_shared` as well, because the runtime's own `None` goes
-# through the same shared object; what may not overlap is an owner.
+# through the same shared object. What may not overlap is the claim: two
+# mutants may not name the same assertion as the one they own. An assertion
+# can still be red under a mutant that does not own it, and one is
+# (`slab_poisons_a_freed_block`, under both poisoning mutants), because a
+# narrowed poisoning loses a strict subset of what a removed one loses.
 #
 # The controls are the assertions that stand closest to the mutations and
 # must survive them anyway. `array_with` is the one reader of
@@ -37,10 +44,23 @@ assert	slab_returns_pages
 assert	slab_bound_is_honoured
 assert	oversize_leaves_the_slab
 
+probe	slab_block_stays_clean_while_live
+probe	slab_poisons_a_freed_block
+probe	slab_poisons_the_whole_block
+probe	slab_catches_a_double_free
+probe	slab_poisons_an_unissued_neighbour
+# Not a claim that anything works: the record of what this leg misses. An
+# overflow between two live blocks has nothing poisoned to run into, and
+# closing that needs red zones, which the allocator cannot have (dawn_rt.c,
+# "manual poisoning"). Kept as a probe so the gap is executed and named
+# rather than left as prose that nothing checks.
+probe	slab_misses_an_overflow_into_a_live_neighbour
+
 control	array_with
 control	immortal
 control	counts
 control	sharing
+control	slab_block_stays_clean_while_live
 
 role	revert-adt0-to-fresh-allocation	counted
 owner	revert-adt0-to-fresh-allocation	adt0_singleton
@@ -73,3 +93,39 @@ red	slab-swallows-oversize	oversize_leaves_the_slab
 # (32MiB, written in rc_test.c rather than derived) reddens with it: a slab
 # cache that swallows oversize blocks has also outgrown its documented bound.
 red	slab-swallows-oversize	slab_bound_is_honoured
+
+# The two below are the `poisoned` role: read off the probes, on a build with
+# both the sanitizer and the allocator. Neither changes what a program
+# computes, so run.sh also requires the whole assertion roster to stay green
+# under them -- that is the control this pair has beyond the named one.
+
+# Free blocks are no longer poisoned when they are handed back, so nothing
+# outside a slab that is still being laid out is unreadable. Use-after-free
+# and double-free on slab blocks stop being reported; the unissued neighbour
+# is still covered, because the poisoning that covers it is dawn_sl_layout's
+# and that one is untouched.
+role	slab-forgets-to-poison	poisoned
+owner	slab-forgets-to-poison	slab_poisons_the_whole_block
+red	slab-forgets-to-poison	slab_poisons_a_freed_block
+red	slab-forgets-to-poison	slab_poisons_the_whole_block
+red	slab-forgets-to-poison	slab_catches_a_double_free
+
+# The free block is poisoned from its ninth byte on, leaving the free list's
+# link addressable. This is the mutant behind dawn_rt.c's argument for
+# keeping the link inside the block at all: the claim is that ordering the
+# calls the way it does leaves a free block poisoned including offset zero,
+# and both probes below read offset zero -- the header of a freed object,
+# and the count a second drop of it reads.
+#
+# Its red set is a subset of the one above, and has to be: narrowing the
+# poisoned range can only lose reports that removing it also loses, so no
+# probe could redden here and stay green there. What makes it a mutant of
+# its own is the green it leaves behind. slab_poisons_the_whole_block still
+# passes, so this is measurably a *narrowing* rather than a removal, and the
+# two probes that go red are exactly the ones the argument names. That is
+# also why the owner lines are the way round they are: the assertion the
+# mutant above owns is the one only it reddens.
+role	slab-leaves-the-link-live	poisoned
+owner	slab-leaves-the-link-live	slab_poisons_a_freed_block
+red	slab-leaves-the-link-live	slab_poisons_a_freed_block
+red	slab-leaves-the-link-live	slab_catches_a_double_free

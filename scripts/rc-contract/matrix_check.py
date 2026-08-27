@@ -16,6 +16,9 @@ BASE = """assert\ta
 assert\tb
 assert\tc
 
+probe\tp
+probe\tq
+
 control\tc
 
 role\tm1\tcounted
@@ -26,7 +29,21 @@ red\tm1\tb
 role\tm2\trecorded
 red\tm2\ta
 red\tm2\tb
+
+role\tm3\tpoisoned
+owner\tm3\tp
+red\tm3\tp
+red\tm3\tq
 """
+
+# The roles, and which roster each one is read off. A mutant of the
+# allocator's behaviour is observed on a plain build through rc_test.c's
+# assertions; a mutant of its poisoning is observed on a sanitized build
+# through poison_probe.c's probes, because a plain build has no poisoning in
+# it to break. Mixing the two in one red set would record an observation the
+# harness never makes, so the roster a role may name is part of the role.
+ROSTER_OF = {"counted": "assert", "recorded": "assert", "poisoned": "probe"}
+OWNING = {"counted", "poisoned"}
 
 
 class MatrixError(ValueError):
@@ -34,13 +51,14 @@ class MatrixError(ValueError):
 
 
 def parse(text: str):
-    """(asserts, controls, roles, owners, reds) with every rule enforced."""
+    """(asserts, probes, controls, roles, owners, reds), every rule enforced."""
     asserts: list[str] = []
+    probes: list[str] = []
     controls: list[str] = []
     roles: dict[str, str] = {}
     owners: dict[str, str] = {}
     reds: dict[str, list[str]] = {}
-    arity = {"assert": 1, "control": 1, "role": 2, "owner": 2, "red": 2}
+    arity = {"assert": 1, "probe": 1, "control": 1, "role": 2, "owner": 2, "red": 2}
 
     for number, raw in enumerate(text.splitlines(), 1):
         if not raw.strip() or raw.startswith("#"):
@@ -57,6 +75,10 @@ def parse(text: str):
             if fields[0] in asserts:
                 raise MatrixError(f"line {number}: duplicate assertion {fields[0]!r}")
             asserts.append(fields[0])
+        elif record == "probe":
+            if fields[0] in probes:
+                raise MatrixError(f"line {number}: duplicate probe {fields[0]!r}")
+            probes.append(fields[0])
         elif record == "control":
             if fields[0] in controls:
                 raise MatrixError(f"line {number}: duplicate control {fields[0]!r}")
@@ -64,7 +86,7 @@ def parse(text: str):
         elif record == "role":
             if fields[0] in roles:
                 raise MatrixError(f"line {number}: duplicate role for {fields[0]!r}")
-            if fields[1] not in ("counted", "recorded"):
+            if fields[1] not in ROSTER_OF:
                 raise MatrixError(f"line {number}: unknown role {fields[1]!r}")
             roles[fields[0]] = fields[1]
         elif record == "owner":
@@ -74,28 +96,38 @@ def parse(text: str):
         else:
             reds.setdefault(fields[0], []).append(fields[1])
 
-    known = set(asserts)
+    rosters = {"assert": set(asserts), "probe": set(probes)}
+    both = rosters["assert"] & rosters["probe"]
+    if both:
+        raise MatrixError(f"{sorted(both)[0]!r} is both an assertion and a probe")
+    known = rosters["assert"] | rosters["probe"]
     for name in controls:
         if name not in known:
-            raise MatrixError(f"control {name!r} is not an assertion")
+            raise MatrixError(f"control {name!r} is not an assertion or a probe")
     for mutation, role in roles.items():
         if mutation not in reds:
             raise MatrixError(f"{mutation!r} has a role but reddens nothing")
-        if role == "counted" and mutation not in owners:
-            raise MatrixError(f"counted mutant {mutation!r} has no owner")
-        if role == "recorded" and mutation in owners:
-            raise MatrixError(f"recorded mutant {mutation!r} may not own an assertion")
+        if role in OWNING and mutation not in owners:
+            raise MatrixError(f"{role} mutant {mutation!r} has no owner")
+        if role not in OWNING and mutation in owners:
+            raise MatrixError(f"{role} mutant {mutation!r} may not own an assertion")
     for mutation, listed in reds.items():
         if mutation not in roles:
             raise MatrixError(f"{mutation!r} reddens something without a role")
+        roster = ROSTER_OF[roles[mutation]]
         for name in listed:
             if name not in known:
                 raise MatrixError(f"{mutation!r} reddens unknown assertion {name!r}")
+            if name not in rosters[roster]:
+                raise MatrixError(
+                    f"{roles[mutation]} mutant {mutation!r} reddens {name!r}, "
+                    f"which is not on its {roster} roster"
+                )
         if len(set(listed)) != len(listed):
             raise MatrixError(f"{mutation!r} lists an assertion twice")
         for name in controls:
-            if name in listed and roles[mutation] == "counted":
-                raise MatrixError(f"counted mutant {mutation!r} reddens control {name!r}")
+            if name in listed and roles[mutation] in OWNING:
+                raise MatrixError(f"{mutation!r} reddens control {name!r}")
     for mutation, name in owners.items():
         if mutation not in roles:
             raise MatrixError(f"{mutation!r} owns an assertion without a role")
@@ -103,12 +135,12 @@ def parse(text: str):
             raise MatrixError(f"{mutation!r} owns unknown assertion {name!r}")
         if name not in reds.get(mutation, []):
             raise MatrixError(f"{mutation!r} owns {name!r} without reddening it")
-    owned = [name for mutation, name in owners.items() if roles[mutation] == "counted"]
+    owned = [name for mutation, name in owners.items() if roles[mutation] in OWNING]
     if len(set(owned)) != len(owned):
-        raise MatrixError("two counted mutants own the same assertion")
+        raise MatrixError("two mutants own the same assertion")
     if not asserts:
         raise MatrixError("the assertion roster is empty")
-    return asserts, controls, roles, owners, reds
+    return asserts, probes, controls, roles, owners, reds
 
 
 def replaced(old: str, new: str) -> str:
@@ -123,22 +155,30 @@ def self_test() -> None:
         "unknown record": BASE + "note\tsomething\n",
         "wrong arity": replaced("role\tm1\tcounted", "role\tm1"),
         "duplicate assertion": BASE + "assert\ta\n",
+        "duplicate probe": BASE + "probe\tp\n",
+        "one name on both rosters": BASE + "probe\ta\n",
         "duplicate control": BASE + "control\tc\n",
         "duplicate role": BASE + "role\tm1\tcounted\n",
         "unknown role": replaced("role\tm1\tcounted", "role\tm1\tobserved"),
         "duplicate owner": BASE + "owner\tm1\tb\n",
-        "control is not an assertion": replaced("control\tc", "control\tz"),
-        "role reddens nothing": BASE + "role\tm3\tcounted\n",
+        "control is neither": replaced("control\tc", "control\tz"),
+        "role reddens nothing": BASE + "role\tm4\tcounted\n",
         "counted mutant has no owner": replaced("owner\tm1\ta\n", ""),
+        "poisoned mutant has no owner": replaced("owner\tm3\tp\n", ""),
         "recorded mutant owns something": BASE + "owner\tm2\ta\n",
-        "red without a role": BASE + "red\tm3\ta\n",
+        "red without a role": BASE + "red\tm4\ta\n",
         "red names an unknown assertion": replaced("red\tm1\tb", "red\tm1\tz"),
         "red lists an assertion twice": BASE + "red\tm1\ta\n",
         "counted mutant reddens a control": BASE + "red\tm1\tc\n",
+        "counted mutant reddens a probe": replaced("red\tm1\tb", "red\tm1\tp"),
+        "poisoned mutant reddens an assertion": replaced("red\tm3\tq", "red\tm3\tb"),
         "owner names an unknown assertion": replaced("owner\tm1\ta", "owner\tm1\tz"),
         "owner is not in the red set": replaced("owner\tm1\ta", "owner\tm1\tc"),
         "two counted mutants own one assertion": (
             replaced("role\tm2\trecorded", "role\tm2\tcounted") + "owner\tm2\ta\n"
+        ),
+        "two poisoned mutants own one probe": (
+            BASE + "role\tm5\tpoisoned\nowner\tm5\tp\nred\tm5\tp\n"
         ),
         "empty roster": "",
     }

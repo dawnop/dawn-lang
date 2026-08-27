@@ -21,23 +21,7 @@
 #include <string.h>
 #include <unistd.h>
 
-/* The Unicode tables are `extern` in the runtime and emitted by the compiler
- * alongside the program (emitc's `emit_case_table`). Nothing here touches
- * case or classification, so empty ones are enough to link. */
-const dawn_case_range dawn_upper_ranges[] = {{0, 0, 0}};
-const int64_t dawn_upper_ranges_n = 0;
-const dawn_case_range dawn_lower_ranges[] = {{0, 0, 0}};
-const int64_t dawn_lower_ranges_n = 0;
-const dawn_cp_range dawn_letter_ranges[] = {{0, 0}};
-const int64_t dawn_letter_ranges_n = 0;
-const dawn_cp_range dawn_digit_ranges[] = {{0, 0}};
-const int64_t dawn_digit_ranges_n = 0;
-const dawn_cp_range dawn_upper_class_ranges[] = {{0, 0}};
-const int64_t dawn_upper_class_ranges_n = 0;
-const dawn_cp_range dawn_lower_class_ranges[] = {{0, 0}};
-const int64_t dawn_lower_class_ranges_n = 0;
-const dawn_cp_range dawn_space_ranges[] = {{0, 0}};
-const int64_t dawn_space_ranges_n = 0;
+#include "unicode_stubs.h"
 
 static int failures;
 
@@ -404,14 +388,18 @@ static void test_immortal_graph(void) {
 /* ---- the allocator (dawn_rt.h, DAWN_SLAB_ACTIVE) ------------------------
  *
  * Blocks come from the runtime's own size-class slabs, not from malloc.
- * Nothing in Dawn can see that, and neither can the sanitized runs, because
- * they are exactly the builds that bypass it: the reason for the bypass is
- * that objects outside malloc's book are objects LeakSanitizer cannot report.
- * So these five assertions and the four mutants in matrix.txt are the whole
- * oracle for the allocator, and the third of them -- that the pages go back
- * to the kernel -- is the reason the allocator exists at all.
+ * Nothing in Dawn can see that, and neither do the sanitized runs that carry
+ * the leak assertions, because those are the builds that bypass it: objects
+ * outside malloc's book are objects LeakSanitizer cannot report. So these
+ * five assertions and the slab mutants in matrix.txt are the whole oracle
+ * for what the allocator does, and the third of them -- that the pages go
+ * back to the kernel -- is the reason the allocator exists at all.
  *
- * On a build without the slab they are skipped, not passed. A vacuous pass
+ * What the allocator does to *memory safety* is a separate leg, because it
+ * needs the sanitizer and the slab in the same binary: run.sh builds one
+ * with -DDAWN_SLAB_FORCE and asks poison_probe.c about it.
+ *
+ * On a build without the slab these are skipped, not passed. A vacuous pass
  * reads exactly like a real one, which is the shape this file is here to
  * refuse; the harness only checks that the roster ran, so `SKIP` keeps the
  * bookkeeping honest and the claim absent. */

@@ -54,19 +54,23 @@ MUTATIONS = {
         """  if (s == dawn_sl_cur[cls]) {
     *(void **)p = dawn_sl_head[cls];
     dawn_sl_head[cls] = p;
+    ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
     s->used--; /* the current slab is kept even at zero; see the heading */
     return;
   }
   *(void **)p = s->freelist;
   s->freelist = p;
+  ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
   if (s->list == DAWN_SL_OFF) {
     dawn_sl_link(&dawn_sl_partial[cls], s, DAWN_SL_PARTIAL);
   }
   if (--s->used == 0) {""",
         """  if (s == dawn_sl_cur[cls]) {
+    ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
     s->used--; /* the current slab is kept even at zero; see the heading */
     return;
   }
+  ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
   if (--s->used == 0) {""",
     ),
     # Every class index is rounded up to the next odd one, so neighbouring
@@ -99,6 +103,73 @@ MUTATIONS = {
         "dawn_rt.h",
         "#define DAWN_SLAB_MAX 2048u /* a bigger request goes to malloc */",
         "#define DAWN_SLAB_MAX 8192u /* a bigger request goes to malloc */",
+    ),
+    # ---- the manual poisoning -----------------------------------------
+    #
+    # These two are invisible to everything above: without the sanitizer
+    # there is no poisoning to break, so a plain build of either passes
+    # every assertion in the file. They are read off poison_probe.c
+    # instead, on a build that has both the sanitizer and the allocator.
+    #
+    # Free blocks stop being poisoned when they are handed back. The
+    # allocator still allocates, still recycles and still retires, so every
+    # answer stays right; what is lost is that a use-after-free on a slab
+    # block is reported. This is the one that says the poisoning is load
+    # bearing rather than decorative.
+    "slab-forgets-to-poison": (
+        "dawn_rt.c",
+        """  if (s == dawn_sl_cur[cls]) {
+    *(void **)p = dawn_sl_head[cls];
+    dawn_sl_head[cls] = p;
+    ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
+    s->used--; /* the current slab is kept even at zero; see the heading */
+    return;
+  }
+  *(void **)p = s->freelist;
+  s->freelist = p;
+  ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);""",
+        """  if (s == dawn_sl_cur[cls]) {
+    *(void **)p = dawn_sl_head[cls];
+    dawn_sl_head[cls] = p;
+    s->used--; /* the current slab is kept even at zero; see the heading */
+    return;
+  }
+  *(void **)p = s->freelist;
+  s->freelist = p;""",
+    ),
+    # A free block is poisoned from its ninth byte on, leaving the free
+    # list's link addressable. That is the shape someone reaches for when
+    # they read "the link lives in the block" and conclude the first word
+    # has to stay readable, and it is exactly what dawn_rt.c's argument for
+    # keeping the link in the block rules out: the argument is that the
+    # order of the calls leaves the whole block poisoned, offset zero
+    # included, everywhere outside the allocator. Without this mutant that
+    # argument is a paragraph; with it, it is the difference between a
+    # probe that reports and one that does not.
+    "slab-leaves-the-link-live": (
+        "dawn_rt.c",
+        """  if (s == dawn_sl_cur[cls]) {
+    *(void **)p = dawn_sl_head[cls];
+    dawn_sl_head[cls] = p;
+    ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
+    s->used--; /* the current slab is kept even at zero; see the heading */
+    return;
+  }
+  *(void **)p = s->freelist;
+  s->freelist = p;
+  ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);""",
+        """  if (s == dawn_sl_cur[cls]) {
+    *(void **)p = dawn_sl_head[cls];
+    dawn_sl_head[cls] = p;
+    ASAN_POISON_MEMORY_REGION((char *)p + sizeof(void *),
+                              cls * DAWN_SL_GRAIN - sizeof(void *));
+    s->used--; /* the current slab is kept even at zero; see the heading */
+    return;
+  }
+  *(void **)p = s->freelist;
+  s->freelist = p;
+  ASAN_POISON_MEMORY_REGION((char *)p + sizeof(void *),
+                            cls * DAWN_SL_GRAIN - sizeof(void *));""",
     ),
 }
 

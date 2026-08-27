@@ -127,6 +127,61 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
 
 #include <sys/mman.h>
 
+/* ---- manual poisoning ---------------------------------------------------
+ *
+ * A block that is not malloc's is a block AddressSanitizer knows nothing
+ * about, so on a -DDAWN_SLAB_FORCE build the allocator has to say what is
+ * live itself: a free block is poisoned, an issued one is not. That is the
+ * whole protocol, and it is what mimalloc's MI_TRACK_ASAN and LLVM's
+ * BumpPtrAllocator do too. The two macros come from the sanitizer's own
+ * header with their own feature guard, so on a build without -fsanitize
+ * they expand to `((void)(addr), (void)(size))` and cost nothing. The
+ * include sits inside DAWN_SLAB_ACTIVE rather than at the top of the file
+ * because wasi-sdk need not ship the header, and wasi is one of the builds
+ * that never reaches here.
+ *
+ * The order matters, and it is the reason the free list may stay inside the
+ * blocks. Freeing writes the link first and poisons the whole block after;
+ * allocating unpoisons the whole block first and reads the link after. So a
+ * free block is poisoned *including its first eight bytes* everywhere
+ * outside these functions, and a use-after-free that reads an object header
+ * at offset zero -- the commonest shape there is under reference counting --
+ * is reported rather than served. The window where the link is readable is
+ * straight-line code inside the allocator, which no program can observe
+ * because only the thread dawn_rt_main starts runs Dawn code (see the
+ * heading). Two changes would break that argument and force a block-number
+ * side table instead: making the runtime multi-threaded, or poisoning from
+ * p + 8 to leave the link addressable. scripts/rc-contract's
+ * `slab-leaves-the-link-live` mutant is what holds the second one shut.
+ *
+ * Poisoning is per slab, never over the reserve as a whole: poisoning all
+ * 1GiB up front costs 131MiB of shadow, while per-slab shadow is
+ * proportional to the slabs a program actually carves.
+ *
+ * Deliberately not done, so none of it reads as an oversight:
+ *
+ *   * No red zones, so an overflow into a *live* neighbour is not caught
+ *     (an overflow into a free one is). Two reasons, either alone enough.
+ *     A red zone changes the block layout, and the layout is the free
+ *     variable behind every number the allocator was written for. And LLVM
+ *     states the other one in code, at SpecificBumpPtrAllocator's
+ *     setRedZoneSize(0): an allocator that walks its own arena cannot have
+ *     red zones between allocations. dawn_sl_layout walks the whole slab.
+ *   * No quarantine. Reuse is already not "the same address back at once",
+ *     and a quarantine would have to be a side table anyway.
+ *   * No leak detection on this leg, and no __lsan_register_root_region.
+ *     LSan reports leaks by iterating its own allocator's chunks, so an
+ *     object it never allocated cannot be reported however it is annotated;
+ *     root regions only add places to scan *from*, which cures the false
+ *     positive of a malloc block reachable only through a slab block at the
+ *     price of hiding real leaks behind stale pointer-shaped bytes. False
+ *     red traded for false green is not a trade worth making. If a leak
+ *     oracle is ever wanted here, the shape that fits is the births-minus-
+ *     deaths ledger further down (DAWN_RC_BALANCE), which exists for the
+ *     other target LSan cannot reach.
+ */
+#include <sanitizer/asan_interface.h>
+
 /* The four the header states, under shorter names for the code that uses
  * them on every line. */
 #define DAWN_SL_GRAIN DAWN_SLAB_GRAIN
@@ -139,7 +194,12 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
 #define DAWN_SL_SLOTS 16384u /* so the reserve is 1GiB of address space */
 
 /* The largest block has to fit, or a class would have no slab to live in.
- * The smallest has to hold the free list's link. */
+ * The smallest has to hold the free list's link. The second one also buys
+ * the poisoning above its exactness: the sanitizer's shadow has an eight
+ * byte grain and rounds poison right-down and unpoison left-down, so a
+ * partial grain would silently under-poison. A block is a multiple of
+ * DAWN_SL_GRAIN from a 64KiB-aligned base, so with GRAIN >= 8 every start
+ * and every end is already on a grain and neither rounding can bite. */
 _Static_assert(DAWN_SL_MAX <= DAWN_SL_SIZE, "a block must fit inside a slab");
 _Static_assert(DAWN_SL_GRAIN >= sizeof(void *), "a free block holds one pointer");
 
@@ -221,6 +281,7 @@ static void dawn_sl_unlink(dawn_sl_slab **list, dawn_sl_slab *s) {
 static void dawn_sl_layout(dawn_sl_slab *s, size_t cls) {
   size_t bsize = cls * DAWN_SL_GRAIN;
   char *start = dawn_sl_addr(s);
+  ASAN_UNPOISON_MEMORY_REGION(start, DAWN_SL_SIZE);
   void *fl = NULL;
   /* Backwards, so the list comes out in address order. */
   for (size_t i = DAWN_SL_SIZE / bsize; i-- > 0;) {
@@ -228,6 +289,7 @@ static void dawn_sl_layout(dawn_sl_slab *s, size_t cls) {
     *(void **)b = fl;
     fl = b;
   }
+  ASAN_POISON_MEMORY_REGION(start, DAWN_SL_SIZE);
   s->freelist = fl;
   s->used = 0;
   s->cls = (uint16_t)cls;
@@ -294,6 +356,7 @@ static void *dawn_sl_slow(size_t cls, size_t n) {
    * onto the partial list. */
   dawn_sl_cur[cls] = s;
   void *b = s->freelist;
+  ASAN_UNPOISON_MEMORY_REGION(b, cls * DAWN_SL_GRAIN);
   dawn_sl_head[cls] = *(void **)b;
   s->freelist = NULL;
   s->used++;
@@ -312,6 +375,7 @@ static void *dawn_sl_get(size_t n) {
   if (b == NULL) {
     return dawn_sl_slow(cls, n);
   }
+  ASAN_UNPOISON_MEMORY_REGION(b, cls * DAWN_SL_GRAIN);
   dawn_sl_head[cls] = *(void **)b;
   dawn_sl_cur[cls]->used++;
   return b;
@@ -331,6 +395,9 @@ static void dawn_sl_retire(dawn_sl_slab *s, size_t cls) {
    * joins the spare list, so a program that churns slabs does not eat the
    * reserve. */
   madvise(dawn_sl_addr(s), DAWN_SL_SIZE, MADV_DONTNEED);
+  /* The pages are gone but the address range is not, and a retired slot is
+   * carved again later; poisoned is the right state for it in between. */
+  ASAN_POISON_MEMORY_REGION(dawn_sl_addr(s), DAWN_SL_SIZE);
   s->freelist = NULL;
   s->prev = NULL;
   s->cls = 0;
@@ -347,11 +414,13 @@ static void dawn_sl_put(void *p) {
   if (s == dawn_sl_cur[cls]) {
     *(void **)p = dawn_sl_head[cls];
     dawn_sl_head[cls] = p;
+    ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
     s->used--; /* the current slab is kept even at zero; see the heading */
     return;
   }
   *(void **)p = s->freelist;
   s->freelist = p;
+  ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
   if (s->list == DAWN_SL_OFF) {
     dawn_sl_link(&dawn_sl_partial[cls], s, DAWN_SL_PARTIAL);
   }
@@ -658,16 +727,9 @@ dawn_clo *dawn_clo_new_wide(void *fn, int32_t ncap, const uint64_t *mask) {
  * at run time and lives forever, so LeakSanitizer is told it is owned --
  * without this, leak detection on the corpus (the whole point of counting
  * strings) would drown in reports about a decided design. */
-#ifdef __SANITIZE_ADDRESS__
+#if DAWN_ASAN
 #include <sanitizer/lsan_interface.h>
 #define DAWN_LSAN_OWN(p) __lsan_ignore_object(p)
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#include <sanitizer/lsan_interface.h>
-#define DAWN_LSAN_OWN(p) __lsan_ignore_object(p)
-#else
-#define DAWN_LSAN_OWN(p) ((void)0)
-#endif
 #else
 #define DAWN_LSAN_OWN(p) ((void)0)
 #endif
