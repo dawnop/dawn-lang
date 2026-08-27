@@ -425,7 +425,8 @@ bool dawn_is_unique(const void *p);
  *     prints nothing and exits 0 on a slab build. Use-after-free detection
  *     goes the same way, a freed block staying addressable on a free list.
  *     Keeping malloc under the sanitizers keeps both, at the price that the
- *     sanitized builds no longer cover the allocator.
+ *     sanitized builds no longer cover the allocator; the allocator's own
+ *     assertions and mutants live in scripts/rc-contract instead.
  *   * wasm32-wasi, which has no sys/mman.h, no madvise and no MAP_NORESERVE.
  *   * -DDAWN_NO_SLAB, which is how the allocator is measured against its own
  *     absence, and the escape hatch for a platform where MADV_DONTNEED does
@@ -433,14 +434,14 @@ bool dawn_is_unique(const void *p);
  *
  * That price is paid back with -DDAWN_SLAB_FORCE, which takes the slab into
  * a sanitized build on purpose. It buys the other half: dawn_rt.c poisons
- * every free block by hand, so use-after-free, use-after-poison at offset
- * zero and double-free on slab blocks are reported the way malloc's are.
- * What it cannot buy is leak detection, which is structural rather than a
- * missing call -- LSan has no way to be told about an object it did not
- * allocate (dawn_rt.c, "manual poisoning"). So the forced build is a leg of
- * its own, run with detect_leaks=0 by scripts/rc-contract/run.sh, and the
- * three bypassed sanitizer runs that carry the leak assertions are left
- * exactly as they were.
+ * every free block by hand, so a use-after-free on a slab block is reported
+ * the way malloc's is, offset zero included, and so is a double free. What
+ * it cannot buy is leak detection, which is structural rather than a missing
+ * call -- LSan has no way to be told about an object it did not allocate
+ * (dawn_rt.c, "manual poisoning"). So the forced build is a leg of its own,
+ * run with detect_leaks=0 by scripts/rc-contract/run.sh, and the three
+ * bypassed sanitizer runs that carry the leak assertions are left exactly as
+ * they were.
  *
  * The nesting below is not a style choice: GCC rejects the flat spelling
  * `defined(__has_feature) && __has_feature(address_sanitizer)` with "missing

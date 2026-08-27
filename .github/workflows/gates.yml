@@ -413,8 +413,13 @@ jobs:
     # restate after the first green run. The builtin-decl step added
     # 2026-08-27 is 2.3s locally (one `dawn run` of a small project plus two
     # Python passes); doubled and rounded up, the planning value is 426 + 5 =
-    # 431s.
-    # budget: 3x 431s planning value (356s observed + 70s + 5s, doubled locals)
+    # 431s. The poisoned leg added to the RC contract step 2026-08-28 takes
+    # that step from 3.5s to 8.0s locally (three more sanitized builds of the
+    # runtime and eight more process runs); doubled, the planning value is
+    # 431 + 9 = 440s, still well under the native-diff pole, so the run's
+    # wall clock does not move.
+    # budget: 3x 440s planning value (356s observed + 70s + 5s + 9s, doubled
+    # locals)
     timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
@@ -598,6 +603,9 @@ jobs:
       # The oracle is AddressSanitizer -- a drop that fails to recurse is a leak,
       # one that recurses twice is a double free -- plus a small-stack run,
       # because drop walks a 200k-node chain and must not do it by recursing.
+      # A fourth leg, added 2026-08-28, builds the runtime with the sanitizer
+      # *and* the slab allocator (-DDAWN_SLAB_FORCE) and reads the hand
+      # poisoning off six probe processes and two mutants of its own.
       - name: RC contract
         run: ./scripts/rc-contract/run.sh
 
