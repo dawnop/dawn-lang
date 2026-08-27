@@ -111,6 +111,12 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
  * Requests over DAWN_SL_MAX go to malloc, which is why no size class has to
  * cover them and why one range comparison answers "is this block mine".
  *
+ * The reserve is address space, not memory: MAP_NORESERVE, and a page is
+ * only resident once something is written to it. It does count against
+ * RLIMIT_AS, though, so a program run under `ulimit -v` has 1GiB less of it
+ * than before. That is the one visible cost, and it is why running out of
+ * reserve falls back to malloc instead of failing.
+ *
  * Single-threaded on purpose: only the thread `dawn_rt_main` starts ever
  * runs Dawn code, so there is no lock here and none is needed.
  *
