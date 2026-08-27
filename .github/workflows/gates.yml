@@ -410,8 +410,11 @@ jobs:
     # The rc-mode step added 2026-08-27 is 34s locally; doubled for the
     # runner, the planning value is 356 + 70 = 426s -- still under the
     # native-diff pole, so the run's wall clock does not move. Re-measure and
-    # restate after the first green run.
-    # budget: 3x 426s planning value (356s observed + rc-mode 34s local, doubled)
+    # restate after the first green run. The builtin-decl step added
+    # 2026-08-27 is 2.3s locally (one `dawn run` of a small project plus two
+    # Python passes); doubled and rounded up, the planning value is 426 + 5 =
+    # 431s.
+    # budget: 3x 431s planning value (356s observed + 70s + 5s, doubled locals)
     timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
@@ -551,6 +554,17 @@ jobs:
       # reached that name. This walks the table instead.
       - name: intrinsic parity (both backends, the same primitives)
         run: ./scripts/intrinsic-parity.py
+
+      # The same table, read by a person instead of a backend.
+      # `selfhost/builtins.dawn` is all 95 builtins as declarations, one line
+      # each, and this holds it to the table in both directions -- name,
+      # signature, visibility and comptime availability. A mirror nothing
+      # compares is a document that goes stale the day after it is written,
+      # and a stale mirror of an API is worse than none, because a reader
+      # believes it. Seven mutants ride along; they are string edits held in
+      # memory, so the whole step is seconds and needs no shard.
+      - name: builtin declaration mirror
+        run: ./scripts/builtin-decl-contract/run.sh
 
       # `ForeignError.kind` is the backend's own name for a failure class, so
       # the native differential can only ask whether it is a name at all --

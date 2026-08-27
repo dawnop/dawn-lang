@@ -1,0 +1,55 @@
+# The builtin table, dumped from the compiler's own source.
+#
+# `selfhost/builtins.dawn` is a mirror of this table that a reader can open,
+# and a mirror is worth nothing unless something compares it. This is the side
+# of that comparison the compiler owns: it imports `check/types` as a library
+# and prints every entry of `intrinsics()` -- the name, whether user code may
+# spell it, and the rendered signature.
+#
+# No new compiler API and no new subcommand. The table is an ordinary Dawn
+# value in an ordinary Dawn module, and `selfhost` is an ordinary package, so a
+# path dependency is the whole mechanism.
+#
+# The signature is rendered with `sig_render_fqn`, not `sig_render`: the mirror
+# must be readable as Dawn source, and `cast`'s parameter is only a type any
+# file could name when it is spelled `java.lang.Object`. Every other entry
+# renders identically under both.
+#
+# Two record kinds, tab separated:
+#
+#     builtin\t<name>\t<pub|internal>\t<signature>
+#     lowering\t<name>
+#
+# The second is `lower.internal_intrinsics()`, the names lowering emits that no
+# source file may write. They carry no signature and are not mirrored; they are
+# here so the checker can hold its reading of `ir/interp.dawn` against the whole
+# intrinsic universe rather than against a slice of it. See check.py, M1.
+
+use std/io
+use std/list
+use std/map
+use std/str
+use selfhost/check/types.{intrinsics, prelude_adts, prelude_traits, sig_render_fqn}
+use selfhost/ir/lower.{internal_intrinsics}
+
+pub fn main() -> Unit !io = {
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let it = intrinsics()
+  for name in list.sort(map.keys(it)) {
+    let i = map.get(it, name).expect("intrinsic listed")
+    let vis = if i.internal { "internal" } else { "pub" }
+    let sig = sig_render_fqn(adts, traits, i.sig)
+    # A tab or a newline inside a rendering would make the line format lie
+    # about how many fields it has. Neither can occur -- a signature is built
+    # from identifiers, punctuation and single spaces -- so this is a guard
+    # against a future rendering, not a case that has one.
+    if str.contains(sig, "\t") || str.contains(sig, "\n") {
+      panic("a rendered signature carries a field separator: " ++ name)
+    }
+    io.println("builtin\t" ++ name ++ "\t" ++ vis ++ "\t" ++ sig)
+  }
+  for name in list.sort(internal_intrinsics()) {
+    io.println("lowering\t" ++ name)
+  }
+}

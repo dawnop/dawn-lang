@@ -1,0 +1,418 @@
+# The builtin table, as declarations.
+#
+# ## What this file is
+#
+# A mirror of `intrinsics()` in `src/check/types.dawn`, which is the truth.
+# There the table is built by helper calls around loops that mint families of
+# names, so reading one signature off it means running the constructors in
+# your head and reading the whole set means running the file. Here it is 95
+# lines, and the answer to "what can I call, and what does it take" is one
+# scroll.
+#
+# ## Machine-maintained
+#
+# `scripts/builtin-decl-contract` compares the two in both directions on every
+# push: a name here that is no builtin is red, a builtin missing from here is
+# red, and a signature that differs by one character is red. So this cannot go
+# stale, and equally it cannot be edited into something the compiler does not
+# do -- when the two disagree, the table is right and this file is what
+# changes.
+#
+# ## How to read a line
+#
+#   * `pub fn` is a builtin any Dawn file may call.
+#   * a bare `fn` is std-only: it is the backend contract behind a `std`
+#     module, the checker hides it from every other module, and the module
+#     that wraps it is named in the line above.
+#   * ` # comptime: rejected` marks a builtin a `const` may not fold through
+#     (`comptime_rejects` in `src/ir/interp.dawn`). 64 of the 95 carry it,
+#     which is the real answer to "what can a const do" -- spec 7.2.2 answers
+#     in prose and names about a quarter of them.
+#   * one declaration per line, never wrapped. A signature is what is being
+#     compared, and a comparison of something reflowed is a comparison of the
+#     reflowing.
+#
+# ## Why it does not compile, and what still reads it
+#
+# A declaration with no body is a parse error (`src/front/parser.dawn`), so
+# this file cannot be built even by accident, and it sits beside `src/` rather
+# than inside it, so no build looks for it. That is the intended arrangement:
+# it is a document whose accuracy happens to be gated, not a header the
+# compiler reads.
+#
+# `dawn fmt` is the exception, and it is a real one rather than a courtesy:
+# the formatter is lexical, so it reformats this file happily and the `fmt
+# --check` gate covers `selfhost/`. The whitespace here is therefore the
+# formatter's, not a generator's -- one blank line between sections, one space
+# before a trailing comment -- and an edit that spaces the comptime marker
+# differently is red twice over, once from the formatter and once from the
+# contract.
+#
+# ## The eight lines that are not legal Dawn even with a body
+#
+# Measured, by giving every signature a `= todo()` body and checking it: 87 of
+# the 95 are ordinary Dawn source. The exceptions are named rather than
+# quietly rendered into something that parses.
+#
+#   * the seven naming `Array` -- the six `array_*` and `bytes_from_array`.
+#     `Array` is a std-only type name (`BtStdOnly`), so those lines check
+#     inside `std/` and nowhere else. That is the same fact their bare `fn`
+#     already states, one level up in the type.
+#   * `cast`, whose parameter is rendered `java.lang.Object`. A dotted type
+#     path is not a spelling the parser takes anywhere; the source spelling is
+#     `use java "java.lang.Object"` and then the bare `Object`. The fully
+#     qualified name is used here because this file carries no `use` lines and
+#     a bare `Object` would name nothing -- identity, at the cost of the one
+#     line's paste-ability.
+#
+# The lowering-internal intrinsics (`internal_intrinsics()` in
+# `src/ir/lower.dawn`, 15 names) are deliberately absent. No source file may
+# write them under any visibility -- they exist between lowering and the
+# emitters -- so a declaration would be a promise this file cannot keep.
+
+# ---- control -- diverging, and the two barriers plus the release primitive ----
+#
+# The three that decide where a failure stops. `panic` starts one, the two
+# `catch_*` builtins are the only places one becomes a value, and `bracket`
+# releases across one without catching it (spec 9.8).
+
+## abort with a message; it diverges, so it types wherever a value is wanted
+pub fn panic(msg: String) -> Never
+
+## a placeholder that panics when reached
+pub fn todo() -> Never
+
+## use an acquired resource and release it on every way out -- the value, a panic or a fault; the failure carries on unchanged (this catches nothing)
+pub fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e) -> B !e # comptime: rejected
+
+## run a closure, turning an external failure into Err (panics pass through)
+pub fn catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io # comptime: rejected
+
+## run a closure at an isolation boundary, catching a panic or an exception into Err
+pub fn catch_panic[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io # comptime: rejected
+
+# ---- option -- the two the prelude type is worth having ----
+
+## unwrap a Some or panic with a message
+pub fn expect[T](o: Option[T], msg: String) -> T
+
+## the Some value, or a fallback for None
+pub fn unwrap_or[T](o: Option[T], fallback: T) -> T
+
+# ---- conversion -- between the scalars, and out to text ----
+
+## Int to Float
+pub fn to_float(n: Int) -> Float
+
+## Float to Int (truncates)
+pub fn to_int(x: Float) -> Int
+
+## render any printable value (numbers, strings, derive Show data)
+pub fn to_string[T: Show](x: T) -> String
+
+# ---- list -- what the language needs before std exists ----
+#
+# Four, not a list API: `std/list` is the list API. These are the ones the
+# language itself reaches for -- `for` and indexing lower onto them, and a
+# sort needs a comparison the checker can see.
+
+## number of elements
+pub fn len[T](xs: List[T]) -> Int
+
+## element at an index; None when out of bounds
+pub fn get[T](xs: List[T], i: Int) -> Option[T]
+
+## the integers from..to (exclusive)
+pub fn range(from: Int, to: Int) -> List[Int]
+
+## stable sort with a two-argument cmp function
+pub fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e
+
+# ---- string -- text in, numbers out ----
+#
+# `str_lower`/`str_upper` are the Unicode case table itself. std/str spells
+# `to_lower`/`to_upper` over them, and two names for one operation is one too
+# many, so the primitives are std-only (audit RD-02).
+
+## concatenate with a separator
+pub fn join(xs: List[String], sep: String) -> String
+
+## parse a decimal integer; None on malformed input
+pub fn parse_int(s: String) -> Option[Int]
+
+## parse a floating point number; None on malformed input
+pub fn parse_float(s: String) -> Option[Float]
+
+## parse an integer in base 2 through 36; None on malformed input
+pub fn parse_int_radix(s: String, radix: Int) -> Option[Int] # comptime: rejected
+
+## the Unicode case table applied downwards; `str.to_lower` is the spelling user code writes
+fn str_lower(s: String) -> String
+
+## the Unicode case table applied upwards; `str.to_upper` is the spelling user code writes
+fn str_upper(s: String) -> String
+
+# ---- char -- Unicode scalar values, and the six classes ----
+#
+# `Char` is an opaque `Int`. `char_unchecked` is the bridge back, std-only for
+# the reason an unchecked reader always is.
+
+## split a string into Unicode scalar-value characters
+pub fn code_points(s: String) -> List[Char]
+
+## assemble a string from characters
+pub fn from_code_points(cs: List[Char]) -> String
+
+## whether a character is a Unicode letter
+pub fn char_is_letter(c: Char) -> Bool
+
+## whether a character is a decimal digit
+pub fn char_is_digit(c: Char) -> Bool
+
+## whether a character is a letter or decimal digit
+pub fn char_is_alnum(c: Char) -> Bool
+
+## whether a character is upper-case
+pub fn char_is_upper(c: Char) -> Bool
+
+## whether a character is lower-case
+pub fn char_is_lower(c: Char) -> Bool
+
+## whether a character is whitespace
+pub fn char_is_space(c: Char) -> Bool
+
+## an Int taken as a Char with no range check; lowering rewrites the call to its argument
+fn char_unchecked(n: Int) -> Char # comptime: rejected
+
+# ---- cursor -- the string walk std/str is written over ----
+#
+# A cursor is a byte offset into a string, and this family is what makes
+# walking one a language primitive rather than a representation user code can
+# see. All std-only: `std/str` is the public surface.
+
+## a cursor at the first character of a string
+fn cursor_start(s: String) -> Int
+
+## a cursor one past the last character
+fn cursor_end(s: String) -> Int
+
+## whether a cursor has reached the end
+fn cursor_done(s: String, c: Int) -> Bool
+
+## the code point a cursor is on
+fn cursor_char(s: String, c: Int) -> Int
+
+## the cursor one character on
+fn cursor_next(s: String, c: Int) -> Int
+
+## the cursor one character back
+fn cursor_prev(s: String, c: Int) -> Int
+
+## the substring between two cursors; the emitter writes it inline so it can check the range
+fn cursor_slice(s: String, from: Int, to: Int) -> String
+
+# ---- bytes -- the byte surface behind std/bytes ----
+#
+# All std-only, and the shapes say why: `bytes_at` answers -1 out of range,
+# and turning that sentinel into a panic is the whole of what `bytes.at` does.
+
+## a string's UTF-8 encoding
+fn bytes_utf8(s: String) -> Bytes # comptime: rejected
+
+## bytes read back as UTF-8
+fn bytes_decode_utf8(b: Bytes) -> String # comptime: rejected
+
+## bytes read back as Latin-1, one byte to one character
+fn bytes_decode_latin1(b: Bytes) -> String # comptime: rejected
+
+## number of bytes
+fn bytes_len(b: Bytes) -> Int # comptime: rejected
+
+## the byte at an index, or -1 out of range; `bytes.at` is what turns that into a panic
+fn bytes_at(b: Bytes, i: Int) -> Int # comptime: rejected
+
+## the bytes in a half-open range
+fn bytes_slice(b: Bytes, start: Int, end: Int) -> Bytes # comptime: rejected
+
+## bytes built from an array of byte values
+fn bytes_from_array(a: Array[Int]) -> Bytes # comptime: rejected
+
+# ---- map -- the persistent trie behind std/map ----
+#
+# Std-only, and erased on both sides: lowering turns each of these into a call
+# on the Dawn HAMT in `std/hamt`, so a backend implements `Array` and nothing
+# else.
+
+## the empty map
+fn map_empty[K, V]() -> Map[K, V] # comptime: rejected
+
+## a map built from a list of key-value pairs
+fn map_from[K: Eq + Hash, V](entries: List[(K, V)]) -> Map[K, V] # comptime: rejected
+
+## the map with one key bound, replacing whatever it was bound to
+fn map_insert[K: Eq + Hash, V](m: Map[K, V], key: K, value: V) -> Map[K, V] # comptime: rejected
+
+## the map without one key
+fn map_remove[K: Eq + Hash, V](m: Map[K, V], key: K) -> Map[K, V] # comptime: rejected
+
+## what a key is bound to, if anything
+fn map_get[K: Eq + Hash, V](m: Map[K, V], key: K) -> Option[V] # comptime: rejected
+
+## whether a key is bound
+fn map_has[K: Eq + Hash, V](m: Map[K, V], key: K) -> Bool # comptime: rejected
+
+## number of bindings
+fn map_size[K, V](m: Map[K, V]) -> Int # comptime: rejected
+
+## the bound keys
+fn map_keys[K, V](m: Map[K, V]) -> List[K] # comptime: rejected
+
+## what the keys are bound to
+fn map_values[K, V](m: Map[K, V]) -> List[V] # comptime: rejected
+
+## the bindings, as key-value pairs
+fn map_entries[K, V](m: Map[K, V]) -> List[(K, V)] # comptime: rejected
+
+## reduce over the bindings with an accumulator
+fn map_fold[K, V, A](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e # comptime: rejected
+
+# ---- set -- the same trie, keyed on its elements ----
+
+## the empty set
+fn set_empty[T]() -> Set[T] # comptime: rejected
+
+## a set of a list's elements
+fn set_from[T: Eq + Hash](xs: List[T]) -> Set[T] # comptime: rejected
+
+## the set with one element added
+fn set_insert[T: Eq + Hash](s: Set[T], x: T) -> Set[T] # comptime: rejected
+
+## the set without one element
+fn set_remove[T: Eq + Hash](s: Set[T], x: T) -> Set[T] # comptime: rejected
+
+## whether an element is in the set
+fn set_has[T: Eq + Hash](s: Set[T], x: T) -> Bool # comptime: rejected
+
+## number of elements
+fn set_size[T](s: Set[T]) -> Int # comptime: rejected
+
+## the elements, as a list
+fn set_to_list[T](s: Set[T]) -> List[T] # comptime: rejected
+
+# ---- array -- the one collection primitive a backend implements ----
+#
+# Everything else in this file that holds several values is written in Dawn
+# over these six. `popcount` is here rather than with the arithmetic because
+# it is the HAMT's bitmap operation and nothing else uses it.
+
+## a new empty array
+fn array_new[T]() -> Array[T] # comptime: rejected
+
+## number of slots
+fn array_len[T](a: Array[T]) -> Int # comptime: rejected
+
+## the element in a slot
+fn array_get[T](a: Array[T], i: Int) -> T # comptime: rejected
+
+## the array with one element appended
+fn array_push[T](a: Array[T], x: T) -> Array[T] # comptime: rejected
+
+## the array with one slot overwritten; the array goes in owned, so a unique one is written in place
+fn array_with[T](a: Array[T], i: Int, x: T) -> Array[T] # comptime: rejected
+
+## array_get for a caller about to overwrite the slot: a unique array transfers the slot's own reference out
+fn array_steal[T](a: Array[T], i: Int) -> T # comptime: rejected
+
+## the number of set bits in an Int
+fn popcount(n: Int) -> Int # comptime: rejected
+
+# ---- io -- the console, the filesystem and the process ----
+#
+# `args` is the only public one. Every `io_*` primitive is std-only, and that
+# is the error model's boundary rather than a matter of taste: `io_read_file`
+# raises a *fault* on failure, and `std/io` is where that becomes a
+# `Result`. Called directly, the fault reaches the caller as a JVM stack trace
+# on one backend and a `longjmp` on the other.
+
+## command line arguments
+pub fn args() -> List[String] !io # comptime: rejected
+
+## write a string to stdout
+fn io_print(s: String) -> Unit !io # comptime: rejected
+
+## write a string to stdout, followed by a newline
+fn io_println(s: String) -> Unit !io # comptime: rejected
+
+## write a string to stderr
+fn io_eprint(s: String) -> Unit !io # comptime: rejected
+
+## write a string to stderr, followed by a newline
+fn io_eprintln(s: String) -> Unit !io # comptime: rejected
+
+## one line of stdin, or None at end of input
+fn io_read_line() -> Option[String] !io # comptime: rejected
+
+## exactly n bytes of stdin, shorter only at end of input
+fn io_read_stdin(n: Int) -> Bytes !io # comptime: rejected
+
+## whether stdin has a byte to read, waiting up to timeout_ms for one
+fn io_stdin_ready(timeout_ms: Int) -> Bool !io # comptime: rejected
+
+## whether anything is at a path
+fn io_exists(path: String) -> Bool !io # comptime: rejected
+
+## whether a path names a directory
+fn io_is_dir(path: String) -> Bool !io # comptime: rejected
+
+## whether a path names a symbolic link, without following it
+fn io_is_symlink(path: String) -> Bool !io # comptime: rejected
+
+## a whole file, as a UTF-8 string
+fn io_read_file(path: String) -> String !io # comptime: rejected
+
+## write a string to a file, creating missing parent directories
+fn io_write_file(path: String, content: String) -> Unit !io # comptime: rejected
+
+## a whole file, as bytes
+fn io_read_bytes(path: String) -> Bytes !io # comptime: rejected
+
+## write bytes to a file, creating missing parent directories
+fn io_write_bytes(path: String, content: Bytes) -> Unit !io # comptime: rejected
+
+## the entry names directly under a directory, in the host's order
+fn io_list_names(path: String) -> List[String] !io # comptime: rejected
+
+## create a directory and every missing directory above it
+fn io_mkdirs(path: String) -> Unit !io # comptime: rejected
+
+## remove a file or an empty directory; whether there was one to remove
+fn io_delete(path: String) -> Bool !io # comptime: rejected
+
+## move a path onto another, replacing it
+fn io_rename(src: String, dst: String) -> Unit !io # comptime: rejected
+
+## give one path the permissions another has
+fn io_copy_permissions(src: String, dst: String) -> Unit !io # comptime: rejected
+
+## the process's working directory
+fn io_cwd() -> String !io # comptime: rejected
+
+## an environment variable, if it is set
+fn io_getenv(name: String) -> Option[String] !io # comptime: rejected
+
+## a fresh directory under parent, named after prefix
+fn io_temp_dir(parent: String, prefix: String) -> String !io # comptime: rejected
+
+## a fresh empty file under parent, named after prefix, created by the host in one step
+fn io_temp_file(parent: String, prefix: String) -> String !io # comptime: rejected
+
+## end the process with a status code
+fn io_exit(code: Int) -> Unit !io # comptime: rejected
+
+## run argv[0] from PATH with argv as its arguments, redirecting the two output streams to two paths, and wait for its exit status
+fn io_run(argv: List[String], out_path: String, err_path: String) -> Int !io # comptime: rejected
+
+# ---- interop -- the one escape from the type system ----
+
+## reclaim an erased Java Object as a concrete reference type T, taken from the expected type at the call site (interop escape; a runtime CHECKCAST guards it, and a miss is an Err rather than a throw)
+pub fn cast[T](x: java.lang.Object) -> Result[T, ForeignError] # comptime: rejected
