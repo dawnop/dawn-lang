@@ -237,6 +237,76 @@ static void test_panic_message(void) {
   panic_subject = NULL;
 }
 
+/* A constructor with no fields is one shared immortal object per tag
+ * (dawn_rt.h's `dawn_adt0`). Nothing in Dawn can see the sharing -- `==` is
+ * structural -- so the property has to be checked here, at the C level, or it
+ * is checked nowhere; and the same goes for the other half, that the shared
+ * object is out of the ledger and therefore survives every release a program
+ * can spell.
+ *
+ * The mutation this owns is the obvious retreat: hand back a fresh
+ * `dawn_adt_new(tag, 0, 0)` instead. That is what the code did before, so
+ * every other assertion in this file stays green under it, and only the
+ * identity and immortality checks below go red. */
+static void test_adt0_singleton(void) {
+  dawn_adt *a = dawn_adt0(7);
+  dawn_adt *b = dawn_adt0(7);
+  check(a == b, "two constructions of one field-less tag are one object");
+  check(a->tag == 7, "which reads back its tag");
+  check(a->nfields == 0 && a->ptrmask.narrow == 0, "its arity and its empty mask");
+  check(a->h.kind == DAWN_K_ADT, "and answers the kind question drop asks");
+  check(a->h.rc == DAWN_IMMORTAL, "it is out of the ledger");
+  check(!dawn_is_unique(a), "so nothing ever sees it as unique");
+
+  /* dup and drop are the no-ops string literals have had since they joined
+   * the ledger -- the same guard, reached by the same comparison */
+  dawn_dup(a);
+  check(a->h.rc == DAWN_IMMORTAL, "dup does not move its count");
+  dawn_drop(a);
+  check(a->h.rc == DAWN_IMMORTAL, "drop does not move it either");
+
+  /* The property a fresh allocation loses: it outlives every release. Guarded
+   * on immortality because on a counted value this loop is a double free, and
+   * the check above has already recorded that it is not immortal -- a mutant
+   * should be red, not undefined. */
+  if (a->h.rc == DAWN_IMMORTAL) {
+    for (int i = 0; i < 100; i++) {
+      dawn_dup(a);
+      dawn_drop(a);
+      dawn_drop(a);
+    }
+    check(dawn_adt0(7) == a && a->tag == 7 && a->h.rc == DAWN_IMMORTAL,
+          "and it survives a hundred releases");
+  } else {
+    check(0, "and it survives a hundred releases");
+  }
+
+  /* sharing is per tag, not global: a tag is the whole content of the value,
+   * so two tags may not collapse into one object */
+  check(dawn_adt0(8) != a, "a different tag is a different object");
+  check(dawn_adt0(8)->tag == 8, "carrying its own tag");
+
+  /* Past the table's bound the answer is an ordinary counted value -- the
+   * fallback is exactly the pre-singleton behaviour, and it is the reason the
+   * bound needs no care beyond being large enough to be worth having. */
+  dawn_adt *far = dawn_adt0(DAWN_ADT0_TAGS);
+  check(far->tag == DAWN_ADT0_TAGS && far->nfields == 0,
+        "a tag past the table still builds");
+  check(dawn_is_unique(far), "as an ordinary counted value");
+  dawn_drop(far);
+}
+
+/* The runtime builds `None` for `parse_float`, `io_getenv` and every
+ * `ForeignError` cause, and it goes through the same shared object emitted
+ * code takes: field-less is field-less whoever builds it. */
+static void test_none_is_shared(void) {
+  dawn_adt *n = dawn_none();
+  check(n == dawn_none(), "the runtime's None is the singleton");
+  check(n->tag == DAWN_TAG_NONE && n->nfields == 0, "at the prelude's tag");
+  check(n->h.rc == DAWN_IMMORTAL, "and out of the ledger");
+  dawn_drop(n);
+}
+
 static void test_immortal(void) {
   dawn_adt *a = dawn_adt_new(0, 0, 0);
   a->h.rc = DAWN_IMMORTAL;
@@ -336,23 +406,45 @@ static void test_leak_mode(void) {
   dawn_rc_leak = false;
 }
 
+/* The named assertions, in the order they run. Names rather than a bare call
+ * list because scripts/rc-contract/matrix.txt records which of them a mutant
+ * reddens, and a red set is only a record if its members have names. The
+ * lines go to stdout as `<name> PASS|FAIL`, one per case; `run.sh` reads them
+ * and the exit status still says whether anything failed. */
+typedef struct {
+  const char *name;
+  void (*fn)(void);
+} rc_case;
+
+static const rc_case rc_cases[] = {
+    {"counts", test_counts},
+    {"sharing", test_sharing},
+    {"mask_skips_scalars", test_mask_skips_scalars},
+    {"array", test_array},
+    {"array_with", test_array_with},
+    {"array_steal", test_array_steal},
+    {"deep_chain", test_deep_chain},
+    {"panic_message", test_panic_message},
+    {"adt0_singleton", test_adt0_singleton},
+    {"none_is_shared", test_none_is_shared},
+    {"immortal", test_immortal},
+    {"immortal_graph", test_immortal_graph},
+};
+
 int main(int argc, char **argv) {
   dawn_rt_init(argc, argv);
   int leak_mode = argc > 1 && argv[1][0] == 'l';
 
   if (leak_mode) {
+    failures = 0;
     test_leak_mode();
+    printf("leak_mode %s\n", failures > 0 ? "FAIL" : "PASS");
   } else {
-    test_counts();
-    test_sharing();
-    test_mask_skips_scalars();
-    test_array();
-    test_array_with();
-    test_array_steal();
-    test_deep_chain();
-    test_panic_message();
-    test_immortal();
-    test_immortal_graph();
+    for (size_t i = 0; i < sizeof(rc_cases) / sizeof(rc_cases[0]); i++) {
+      int before = failures;
+      rc_cases[i].fn();
+      printf("%s %s\n", rc_cases[i].name, failures > before ? "FAIL" : "PASS");
+    }
   }
 
   if (failures > 0) {

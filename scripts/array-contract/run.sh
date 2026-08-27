@@ -103,7 +103,7 @@ fi
 stats="$(grep '^rc-stats:' "$work/steal.err" || true)"
 read -r with_in with_cp steal_tk steal_dp <<EOF2
 $(printf '%s\n' "$stats" | sed -n \
-  's/^rc-stats: array_with in-place \([0-9]*\), copied \([0-9]*\), array_steal taken \([0-9]*\), dup \([0-9]*\)$/\1 \2 \3 \4/p')
+  's/^rc-stats: array_with in-place \([0-9]*\), copied \([0-9]*\), array_steal taken \([0-9]*\), dup \([0-9]*\), adt0 singleton hits [0-9]*, missed [0-9]*$/\1 \2 \3 \4/p')
 EOF2
 if [ -z "${steal_tk:-}" ]; then
   echo "FAIL: no rc-stats line in the steal run's stderr" >&2

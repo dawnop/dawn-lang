@@ -1,0 +1,38 @@
+# Which assertions each production mutant reddens, and which one owns it.
+#
+# `assert` names the roster, in the order rc_test.c runs it. The red sets are
+# observed by run.sh and compared with this file; the `owner` line is a hand
+# edit, because which assertion owns a mutant is a design decision and a
+# recorder that could reassign owners would launder the collision it exists to
+# catch.
+#
+# Overlaps are recorded, not forbidden. `revert-adt0-to-fresh-allocation`
+# reaches `none_is_shared` as well, because the runtime's own `None` goes
+# through the same shared object; what may not overlap is an owner.
+#
+# The controls are the two assertions that stand closest to the mutation and
+# must survive it anyway. `array_with` is the one reader of `dawn_is_unique`
+# whose answer the singleton moves, and `immortal` is the pre-existing
+# dup/drop guard the singleton reuses. A mutant that reddens either has
+# stopped being about field-less constructors.
+
+assert	counts
+assert	sharing
+assert	mask_skips_scalars
+assert	array
+assert	array_with
+assert	array_steal
+assert	deep_chain
+assert	panic_message
+assert	adt0_singleton
+assert	none_is_shared
+assert	immortal
+assert	immortal_graph
+
+control	array_with
+control	immortal
+
+role	revert-adt0-to-fresh-allocation	counted
+owner	revert-adt0-to-fresh-allocation	adt0_singleton
+red	revert-adt0-to-fresh-allocation	adt0_singleton
+red	revert-adt0-to-fresh-allocation	none_is_shared

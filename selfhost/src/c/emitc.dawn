@@ -214,6 +214,18 @@ fn emit_mask_arg(st: CSt, tmp: String, bits: List[Bool]) -> (CSt, String, Bool) 
   }
 }
 
+## A constructor with no fields. There is nothing in such a value but its tag,
+## so the runtime keeps one immortal object per tag and this hands back its
+## address: no allocation, no counting, and no field stores to write after it.
+## An allocation census of nmain compiling itself put 27.0% of ADT allocations
+## here; see `dawn_adt0` in runtime/c/dawn_rt.h for why sharing them is not
+## observable.
+##
+## Constructing through the runtime rather than naming `dawn_adt0_table`
+## directly: the fallback for a tag past the table's bound belongs with the
+## table, not in every emitter that has one.
+fn adt0_call(tag: Int) -> String = "dawn_adt0(" ++ to_string(tag) ++ ")"
+
 # ---- names ----
 
 ## One code point as six hex digits. Fixed width, and that is the load-bearing
@@ -635,6 +647,9 @@ fn emit_const_adt(
   bits: List[Bool]
 ) -> (CSt, String) = {
   let (st1, tmp) = fresh(st)
+  if len(parts) == 0 {
+    return (line(st1, "dawn_adt* " ++ tmp ++ " = " ++ adt0_call(tag) ++ ";"), tmp)
+  }
   let (st2, mask, wide) = emit_mask_arg(st1, tmp, bits)
   var st3 = line(st2,
     "dawn_adt* " ++ tmp ++ " = " ++ (if wide { "dawn_adt_new_wide" } else { "dawn_adt_new" }) ++
@@ -1033,6 +1048,9 @@ fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool) -> (CSt, Strin
     bits = bits ++ [if erased { true } else { is_ref_ty(cex_ty(a)) }]
   }
   let (st3, tmp) = fresh(st1)
+  if len(parts) == 0 {
+    return (line(st3, "dawn_adt* " ++ tmp ++ " = " ++ adt0_call(tag) ++ ";"), tmp)
+  }
   let (st3m, mask, wide) = emit_mask_arg(st3, tmp, bits)
   var st4 = line(st3m,
     "dawn_adt* " ++ tmp ++ " = " ++ (if wide { "dawn_adt_new_wide" } else { "dawn_adt_new" }) ++

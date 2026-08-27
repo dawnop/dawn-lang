@@ -144,6 +144,66 @@ typedef struct {
 dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields, uint64_t mask);
 dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask);
 
+/* ---- the field-less constructors, shared ----
+ *
+ * A constructor with no fields has nothing in it: `tag`, an `nfields` of 0
+ * and an all-clear mask, and the C representation records no type, so two
+ * such values with the same tag are byte for byte the same object. They are
+ * not rare -- an allocation census of nmain compiling itself put 27.0% of all
+ * ADT allocations at nfields 0 (`None`, `Nil`, every enum constant), and a
+ * red-black tree benchmark at 52.4%. Each one was a 24-byte malloc plus a
+ * full count-and-free life.
+ *
+ * So there is one static object per tag instead, immortal like a string
+ * literal: constructing is taking an address, dup and drop return on the
+ * immortal guard they already had, and nothing is ever freed.
+ *
+ * Why this is not observable. `==` on an ADT is structural, never identity,
+ * so sharing cannot be seen from Dawn. Sharing *across types* -- `Nil` and a
+ * `None` that happen to land on the same tag -- cannot be seen either: the
+ * two are never comparable, and the bytes were already identical. The one
+ * property that does move is `dawn_is_unique`, which now answers false where
+ * it used to answer true -- and its only two callers are `array_with` and
+ * `array_steal` asking about a `dawn_array` and its buffer, neither of which
+ * a field-less ADT can be. So the answer that moved is one nobody asks.
+ *
+ * The table is bounded because the alternative is a per-tag symbol from the
+ * emitter, and the bound buys nothing to be careful about: a tag outside it
+ * falls back to a fresh allocation, which is exactly what every tag did
+ * before. 256 is comfortably past the widest constructor list in the tree
+ * (TokKind, 79). */
+#define DAWN_ADT0_TAGS 256
+
+/* The same layout as `dawn_adt` minus the flexible array member, which C
+ * forbids as an array element. `dawn_adt0` casts across, and the static
+ * assertions in dawn_rt.c hold the two shapes together. */
+typedef struct {
+  dawn_hdr h;
+  int32_t tag;
+  int32_t nfields;
+  dawn_mask ptrmask;
+} dawn_adt0_cell;
+
+extern dawn_adt0_cell dawn_adt0_table[DAWN_ADT0_TAGS];
+
+/* Counted for the same reason `array_with` counts its two paths: the win is
+ * an absence, and an absence needs a number. Printed on the DAWN_RC_STATS
+ * line. */
+extern uint64_t dawn_adt0_hits;
+extern uint64_t dawn_adt0_missed;
+
+/* Every field-less construction the emitter writes. Inline and with the tag
+ * a literal at every call site, so the bound test folds away and what is
+ * left is the address of a static. */
+static inline dawn_adt *dawn_adt0(int32_t tag) {
+  if (tag >= 0 && tag < DAWN_ADT0_TAGS) {
+    dawn_adt0_hits++;
+    return (dawn_adt *)&dawn_adt0_table[tag];
+  }
+  dawn_adt0_missed++;
+  return dawn_adt_new(tag, 0, 0);
+}
+
 /* The prelude ADTs the runtime itself has to build: `parse_float` and
  * `io_getenv` return an Option, `catch_fault` a Result. A constructor's tag is
  * its index in the declaration order, and these four numbers are the one place

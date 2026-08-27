@@ -92,11 +92,14 @@ static void dawn_wasi_balance_dump(void) {
 static void dawn_rc_stats_dump(void) {
   fprintf(stderr,
           "rc-stats: array_with in-place %llu, copied %llu, "
-          "array_steal taken %llu, dup %llu\n",
+          "array_steal taken %llu, dup %llu, "
+          "adt0 singleton hits %llu, missed %llu\n",
           (unsigned long long)dawn_array_with_inplace,
           (unsigned long long)dawn_array_with_copied,
           (unsigned long long)dawn_array_steal_taken,
-          (unsigned long long)dawn_array_steal_dup);
+          (unsigned long long)dawn_array_steal_dup,
+          (unsigned long long)dawn_adt0_hits,
+          (unsigned long long)dawn_adt0_missed);
 }
 
 void dawn_rt_init(int argc, char **argv) {
@@ -227,6 +230,34 @@ dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields, uint64_t mask) {
   a->ptrmask.narrow = mask;
   return a;
 }
+
+/* See dawn_rt.h: one immortal object per tag for the field-less
+ * constructors. The initialiser is written by doubling because 256 rows
+ * differing only in a constant are not worth 256 lines, and the `+ n` inside
+ * each row is what makes a row know its own tag. */
+_Static_assert(sizeof(dawn_adt0_cell) == sizeof(dawn_adt),
+               "dawn_adt0_cell must be a dawn_adt with the tail cut off");
+_Static_assert(offsetof(dawn_adt0_cell, tag) == offsetof(dawn_adt, tag),
+               "dawn_adt0_cell.tag must sit where dawn_adt.tag sits");
+_Static_assert(offsetof(dawn_adt0_cell, nfields) == offsetof(dawn_adt, nfields),
+               "dawn_adt0_cell.nfields must sit where dawn_adt.nfields sits");
+_Static_assert(offsetof(dawn_adt0_cell, ptrmask) == offsetof(dawn_adt, ptrmask),
+               "dawn_adt0_cell.ptrmask must sit where dawn_adt.ptrmask sits");
+
+#define DAWN_ADT0_ROW(t) {{DAWN_IMMORTAL, DAWN_K_ADT}, (t), 0, {0}}
+#define DAWN_ADT0_2(t) DAWN_ADT0_ROW(t), DAWN_ADT0_ROW((t) + 1)
+#define DAWN_ADT0_4(t) DAWN_ADT0_2(t), DAWN_ADT0_2((t) + 2)
+#define DAWN_ADT0_8(t) DAWN_ADT0_4(t), DAWN_ADT0_4((t) + 4)
+#define DAWN_ADT0_16(t) DAWN_ADT0_8(t), DAWN_ADT0_8((t) + 8)
+#define DAWN_ADT0_32(t) DAWN_ADT0_16(t), DAWN_ADT0_16((t) + 16)
+#define DAWN_ADT0_64(t) DAWN_ADT0_32(t), DAWN_ADT0_32((t) + 32)
+#define DAWN_ADT0_128(t) DAWN_ADT0_64(t), DAWN_ADT0_64((t) + 64)
+#define DAWN_ADT0_256(t) DAWN_ADT0_128(t), DAWN_ADT0_128((t) + 128)
+
+_Static_assert(DAWN_ADT0_TAGS == 256, "the doubling initialiser below writes 256 rows");
+dawn_adt0_cell dawn_adt0_table[DAWN_ADT0_TAGS] = {DAWN_ADT0_256(0)};
+uint64_t dawn_adt0_hits = 0;
+uint64_t dawn_adt0_missed = 0;
 
 dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask) {
   dawn_adt *a =
@@ -585,7 +616,9 @@ dawn_adt *dawn_some(void *boxed) {
   return a;
 }
 
-dawn_adt *dawn_none(void) { return dawn_adt_new(DAWN_TAG_NONE, 0, 0); }
+/* The runtime's own `None`, through the same shared object emitted code
+ * takes: field-less is field-less whoever builds it. */
+dawn_adt *dawn_none(void) { return dawn_adt0(DAWN_TAG_NONE); }
 
 static dawn_adt *dawn_ok(void *boxed) {
   dawn_adt *a = dawn_adt_new(DAWN_TAG_OK, 1, DAWN_MASK_ONE_BOXED);
