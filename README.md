@@ -160,9 +160,12 @@ analysis (rewrite in place when `rc == 1`). User code contains no memory-managem
 primitive at all. Measured on the whole compiler front end running `checker.dawn`,
 after strings were brought into the accounting too: **peak RSS 1.46 GB → 81 MB
 (−94%)**, wall clock 2.77s → 2.10s (−24%), **LSan unreachable-at-exit 246 million
-bytes → 0**. Reuse analysis rewrites in place 73.8% of the time across the whole
-compiler. ([docs/perceus-design.md](docs/perceus-design.md) §5.7; gates
-`scripts/rc-contract` and spike-native's always-on `detect_leaks=1`.)
+bytes → 0**. On that same run reuse analysis rewrites in place rather than copying
+for most of its opportunities (83% of `array_with` calls as this is written; it is a
+rate, and the gates below budget it rather than pin it).
+([docs/perceus-design.md](docs/perceus-design.md) §5.7, §6.4; gates
+`scripts/rc-contract`, `scripts/array-contract`, `scripts/map-reuse-contract` and
+spike-native's always-on `detect_leaks=1`.)
 
 ### 4. The semantics do not borrow from the host
 

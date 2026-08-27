@@ -25,6 +25,12 @@
 #     borrowed parameter reaching a consuming position is a compile-time
 #     panic in `rc.rw` (never a silent dup), so a deleted demand rule is
 #     loud, and "borrowed" always means zero new dup points.
+#   * One rule of neither kind (`proj_demands`): a parameter taken apart in
+#     order to put a changed structure back is flipped owned even though
+#     every use of it is a read. Nothing goes wrong when it is not -- the
+#     price is paid in reuse rather than in correctness -- so this one is a
+#     performance judgement, and the gate that measures it is
+#     scripts/map-reuse-contract.
 #
 # The table this produces is one half of the contract; `stamp_modes` writes
 # the same answer onto `CParam.mode`, and `rc.rc_module` asserts the two
@@ -223,17 +229,85 @@ type Dm = {
   owned: Set[Int],
   # the call-site table as inferred so far: a `CDirect` argument's k is the
   # callee's current mode at that position
-  modes: Map[(String, String), List[CMode]]
+  modes: Map[(String, String), List[CMode]],
+  # the ADTs this body constructs (`rebuilt_adts`), read by the projection
+  # rule below; empty while that pre-pass is the walk being run
+  built: Set[Int],
+  # filled by every `CCtor` the walk meets, so the pre-pass can hand the
+  # finished set to the real one
+  built_acc: Set[Int]
 }
 
 fn dm_mark(d: Dm, sym: Int) -> Dm = Dm { ..d, owned: set.insert(d.owned, sym) }
+
+## Whether reading `adt`'s field, in a position that consumes the result,
+## demands the container too.
+##
+## A projection is a read, and for the several hundred getters in the tree
+## that is the whole story: `n.count` copies a scalar, `m.root` dups a
+## reference, and neither needs the container to be the caller's gift. But
+## borrowing costs something the plain reading of "reads its target" hides.
+## A borrowed parameter is never released in the callee, so the container
+## stays alive across the whole body, so every child projected out of it is
+## held at rc >= 2 for the body's duration -- and Perceus reuse works by
+## letting the container die early and passing its uniqueness down to the
+## child. Borrow the container and the child can never be unique.
+##
+## That trade is worth taking where the body only reads, and is a straight
+## loss in the rebuild shape: take a persistent structure apart, put a
+## changed one back. `std/hamt.assoc` is the case that named the rule -- with
+## its map borrowed, `node_put`'s `array_with` copied the trie node instead
+## of writing into it, 2.1M times per self-compile (docs/perceus-design.md
+## 6.4). The shape is recognised by the crudest available proxy: the function
+## also *constructs* the ADT it is taking apart. That is a table lookup on
+## `CField`'s own adt id against `Dm.built`, not an analysis, and it separates
+## the rebuilders from the getters -- 15 parameters across the whole compiler,
+## `std/hamt.assoc`, `std/map.insert`, `std/set.insert` and their kin.
+##
+## Owned is the safe direction (see the header), so this rule can only cost a
+## dup, never a free: it is a performance judgement all the way down.
+fn proj_demands(d: Dm, k: Bool, adt: Int) -> Bool = k && set.has(d.built, adt)
+
+## Every function's `built` set, collected once for the whole program.
+##
+## This is `dm_expr` run for its `built_acc` alone. It has to be a separate
+## walk because a projection can textually precede the construction that
+## licenses it (`let root = m.root` before `Hamt { .. }`), so the set must be
+## complete before the rule above may read it. It is hoisted out of the
+## fixpoint because it does not depend on the mode table: recomputing it once
+## per round would be that walk run for nothing, several times over.
+##
+## Rows are keyed the way the mode table is, and a name shared by a plain
+## function and an impl method accumulates both bodies' tags rather than
+## letting one win. Merging can only widen the set, and a wider set only
+## demands more containers owned, which is the direction that costs a dup and
+## never a free.
+fn rebuilt_adts(ms: List[CModule]) -> Map[(String, String), Set[Int]] = {
+  var out: Map[(String, String), Set[Int]] = map.empty()
+  for m in ms {
+    for f in m.fns {
+      let acc = match map.get(out, (f.owner, f.name)) {
+        Some(s) -> s
+        None -> set.empty()
+      }
+      let d = Dm {
+        owned: set.empty(), modes: map.empty(), built: set.empty(),
+        built_acc: acc
+      }
+      out = map.insert(out, (f.owner, f.name), dm_expr(d, f.body, true).built_acc)
+    }
+  }
+  out
+}
 
 fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
   match e {
     CLocal(sym, _) -> if k { dm_mark(d, sym) } else { d },
 
-    # a projection reads its target; the projected value is fresh (dup'ed)
-    CField(t, _, _, _, _) -> dm_expr(d, t, false)
+    # a projection reads its target; the projected value is fresh (dup'ed).
+    # `proj_demands` is the one exception: taking a structure apart in order
+    # to put a changed one back needs the structure, not a view of it.
+    CField(t, adt, _, _, _) -> dm_expr(d, t, proj_demands(d, k, adt))
     CTupleGet(t, _, _) -> dm_expr(d, t, false)
     CIsCtor(t, _, _) -> dm_expr(d, t, false)
     CTagOf(t, _) -> dm_expr(d, t, false)
@@ -285,8 +359,10 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
       d1
     }
 
-    # stored: the structure keeps the reference
-    CCtor(_, _, args, _) -> dm_list(d, args, true)
+    # stored: the structure keeps the reference. The tag is also what
+    # `proj_demands` matches a projection against, so record it.
+    CCtor(adt, _, args, _) ->
+      dm_list(Dm { ..d, built_acc: set.insert(d.built_acc, adt) }, args, true),
     CTuple(elems, _) -> dm_list(d, elems, true)
     CListLit(elems, _) -> dm_list(d, elems, true)
     # captured: the closure keeps it (the Lean rule: pap captures are owned)
@@ -456,6 +532,7 @@ pub fn infer_modes_forced(
   forced: List[ForcedMode]
 ) -> Map[(String, String), List[CMode]] = {
   var table = seed(ms, pinned(ms))
+  let built = rebuilt_adts(ms)
   var fixed: Set[(String, String, Int)] = set.empty()
   for fm in forced {
     var row: List[CMode] = []
@@ -486,8 +563,15 @@ pub fn infer_modes_forced(
         match map.get(table, (f.owner, f.name)) {
           None -> ()
           Some(row) -> {
+            let mine = match map.get(built, (f.owner, f.name)) {
+              Some(s) -> s
+              None -> set.empty()
+            }
             let dm = dm_expr(
-              Dm { owned: set.empty(), modes: table },
+              Dm {
+                owned: set.empty(), modes: table,
+                built: mine, built_acc: set.empty()
+              },
               f.body,
               # the body's tail is the function's result: consuming
               true
@@ -630,6 +714,31 @@ test "consuming shapes flip owned: stored, captured, aliased, reassigned" {
   assert len(t_row(table, "m", "c")) == 0
   assert len(t_row(table, "m", "a")) == 0
   assert len(t_row(table, "m", "w")) == 0
+}
+
+test "the rebuild shape demands its container; a plain getter does not" {
+  let lst = TyList(TyInt)
+  # a getter: hand back the field of a structure this function never builds
+  let get = t_fn("m", "get", [CParam { sym: 1, ty: lst, mode: COwned }], lst,
+    CField(CLocal(1, lst), 7, 0, 0, lst))
+  # a rebuilder: the same projection, but its result goes into a fresh adt 7,
+  # so the projection demands the container it was taken out of
+  let put = t_fn("m", "put", [CParam { sym: 2, ty: lst, mode: COwned }], lst,
+    CCtor(7, 0, [CField(CLocal(2, lst), 7, 0, 0, lst)], lst))
+  # ...and a rebuilder of a *different* ADT is still a getter of this one
+  let other = t_fn("m", "other", [CParam { sym: 3, ty: lst, mode: COwned }], lst,
+    CCtor(8, 0, [CField(CLocal(3, lst), 7, 0, 0, lst)], lst))
+  let table = infer_modes([t_mod("m", [get, put, other])])
+  assert not mode_owned(t_row(table, "m", "get")[0])
+  assert len(t_row(table, "m", "put")) == 0
+  assert not mode_owned(t_row(table, "m", "other")[0])
+  # `std/hamt.assoc`'s own shape, and the reason the walk runs twice: the
+  # projection is bound out first and the construction that licenses it comes
+  # after, so a single pass would still be collecting adt 7 when it read it
+  let split = t_fn("m", "split", [CParam { sym: 4, ty: lst, mode: COwned }], lst,
+    CBlock([CSLet(9, lst, CField(CLocal(4, lst), 7, 0, 0, lst))],
+      Some(CCtor(7, 0, [CLocal(9, lst)], lst)), lst))
+  assert len(t_row(infer_modes([t_mod("m", [split])]), "m", "split")) == 0
 }
 
 test "jurisdiction pins: closures, dictionary slots, pvec, fn-typed" {

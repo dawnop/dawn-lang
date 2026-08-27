@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 9385c8c73a9ee578 -->
+<!-- doc-check: translation-of README.md @ e633f0ddf85a76b5 -->
 
 # Dawn
 
@@ -135,8 +135,10 @@ pub fn main() -> Unit !io = {
 所有权由编译器推导，走 Perceus 引用计数 + 复用分析（`rc == 1` 就地改写）。用户代码里没有任何
 内存管理原语。整个编译器前端跑 `checker.dawn` 的实测，在字符串也入账之后：**峰值 RSS
 1.46 GB → 81 MB（−94%）**、墙钟 2.77s → 2.10s（−24%）、**LSan 出口不可达 2.46 亿字节 → 0**。
-复用分析在整个编译器上就地率 73.8%。（[docs/perceus-design.md](docs/perceus-design.md) §5.7；
-门禁 `scripts/rc-contract` 与 spike-native 常开的 `detect_leaks=1`。）
+同一次运行里，复用分析把大多数机会写成了就地改写而不是复制（写下这句时是 `array_with`
+调用的 83%；它是个比率，下面的门禁给它立预算而不是钉死）。
+（[docs/perceus-design.md](docs/perceus-design.md) §5.7、§6.4；门禁 `scripts/rc-contract`、
+`scripts/array-contract`、`scripts/map-reuse-contract` 与 spike-native 常开的 `detect_leaks=1`。）
 
 ### 四、语义不借宿主
 

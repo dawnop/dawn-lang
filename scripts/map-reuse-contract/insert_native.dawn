@@ -1,0 +1,37 @@
+# The persistent hash map's write path, as an ordinary user program: 200k
+# `map.insert` calls threading one accumulator, then the same shape through
+# `set.insert`. Past a few hundred entries every insert descends several
+# levels of std/hamt's trie and rewrites a node array at each of them, so the
+# loop is `array_with` on the hamt axis for the whole of its run -- which is
+# the axis scripts/array-contract does not touch (that one accumulates with
+# `++`, so every one of its `array_with` calls comes from std/pvec).
+#
+# Nothing here names a primitive: the rate being measured is what
+# `map.insert` compiles to, so the whole chain holds -- the borrowed-parameter
+# inference's answer for `std/map.insert` and `std/hamt.assoc`, the
+# uniqueness that answer passes down to `node_put`, and the runtime's
+# in-place store.
+use std/map
+use std/set
+
+pub fn main() -> Unit !io = {
+  var m: Map[Int, Int] = map.empty()
+  var i = 0
+  while i < 200000 {
+    m = map.insert(m, i, i * 3)
+    i = i + 1
+  }
+  if map.len(m) != 200000 { panic("map lost entries") }
+  if map.get(m, 199999) != Some(599997) { panic("map lost a value") }
+
+  var s: Set[Int] = set.empty()
+  var j = 0
+  while j < 50000 {
+    s = set.insert(s, j * 7)
+    j = j + 1
+  }
+  if set.len(s) != 50000 { panic("set lost members") }
+  if not set.has(s, 349993) { panic("set lost a member") }
+
+  println("done ${map.len(m)} ${set.len(s)}")
+}
