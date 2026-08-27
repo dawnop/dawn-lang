@@ -43,9 +43,13 @@
 
 const LISTENERS = new WeakMap();
 
-// The two names above. Small and closed on purpose: every other property a
-// browser exposes is either derived from an attribute or is not something a
-// view describes, and a bridge that guessed would be guessing per element.
+// The two names above. Small and closed on purpose, and closed for a reason
+// rather than pending a wider audit: the pair is exactly what the dirty-flag
+// argument covers. Every other property a browser exposes is either derived
+// from an attribute or is not something a view describes, and a bridge that
+// guessed would be guessing per element. The usual reason a framework opens a
+// property channel does not apply here either: a prop is a pair of strings, so
+// there is no object that an attribute could fail to carry.
 const PROPERTIES = new Set(['value', 'checked']);
 
 // The tags those two names are live on -- the form controls the WHATWG
@@ -55,6 +59,12 @@ const PROPERTIES = new Set(['value', 'checked']);
 // anything outside this set the guest's `value` prop travels as an attribute
 // like every other prop, and an undeclared one is never reset -- resetting it
 // would write into library state, and throw outright on a getter-only one.
+//
+// Widening either set is a decision about the prop language, not a table edit.
+// A property channel, if one is ever wanted, arrives as an explicit spelling on
+// the prop the way Lit's `.prop=` does, never as an `in`-on-the-element
+// heuristic; and it has to answer first what a property resets to once the view
+// stops declaring it, which for an arbitrary element has no natural zero.
 const CONTROL_TAGS = new Set(['input', 'textarea', 'select']);
 
 function isControl(el) {
@@ -231,6 +241,8 @@ const OPS = {
   },
   // Never a removal and a rebuild. `insertBefore` on a node that is already in
   // the document moves it, and moving is the whole reason this op exists.
+  // `moveBefore` preserves more state still; it was evaluated and deferred, and
+  // the README lists what would reopen it.
   //
   // The reference child is read off the list as it is *now*, with the moving
   // node still in it, while `to` counts positions in the list as it will be.

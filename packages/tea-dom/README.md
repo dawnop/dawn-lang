@@ -135,6 +135,18 @@ connected custom element fires `disconnectedCallback` and `connectedCallback`
 again. A widget that builds itself in `connectedCallback` should guard against
 re-entry or be cheap to rebuild.
 
+That is a standing choice, not an oversight. `moveBefore` is the DOM's
+state-preserving move and would drop the callback pair; it stays unadopted
+because Safari has no implementation, it cannot be polyfilled, and what it buys
+is preserved state (animation progress, an `iframe`, a `popover` or `dialog`)
+rather than speed. Any one of these reopens the question:
+
+- WebKit bug 281223 moves to RESOLVED.
+- React's `enableMoveBefore` flag ships on.
+- A consumer keys a list whose items hold an `iframe`, a long-running
+  animation, or a `popover`/`dialog`.
+- A consumer ships a widget that implements `connectedMoveCallback`.
+
 `scripts/wasm-dom-contract/foreign.sh` holds all of this at the bridge:
 connect once on mount in tree order, disconnect on `remove`/`truncate`/
 `replace`, library DOM untouched by `set-self` and by sibling churn, and an
