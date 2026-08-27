@@ -55,8 +55,10 @@ const ZIP64_MARK16: Int = 0xFFFF
 
 const MAX_COMMENT: Int = 65535
 
-fn in_range(b: Bytes, off: Int, n: Int) -> Bool =
-  off >= 0 && n >= 0 && off + n <= bytes.len(b)
+fn in_range(b: Bytes, off: Int, n: Int) -> Bool = {
+  let total = bytes.len(b)
+  off >= 0 && off <= total && n >= 0 && n <= total - off
+}
 
 fn u16(b: Bytes, i: Int) -> Int = bytes.at(b, i) | (bytes.at(b, i + 1) << 8)
 
@@ -330,4 +332,48 @@ pub fn entries(src: Bytes) -> Result[List[Entry], String] = {
     out = out ++ [Entry { name: m.name, is_dir: m.is_dir, data: data }]
   }
   Ok(out)
+}
+
+test "overflowing zip64 metadata is refused instead of wrapping into range" {
+  # A minimal local header for a stored entry: signature, then zero-valued
+  # fixed fields (including zero-length name and extra fields).
+  var raw = bytes.buf()
+  for x in [0x50, 0x4B, 0x03, 0x04] { raw = bytes.put(raw, x) }
+  while bytes.size(raw) < 30 { raw = bytes.put(raw, 0) }
+  let src = bytes.freeze(raw)
+  let max = 9223372036854775807
+
+  # `start + csize` used to wrap negative and pass the range check. Slicing
+  # that reversed range then produced empty bytes, so this malformed entry was
+  # accepted as a valid empty file (size 0 and CRC-32 0).
+  let huge_data = Meta {
+    name: "huge-data",
+    is_dir: false,
+    flags: 0,
+    method: METHOD_STORED,
+    crc: 0,
+    csize: max,
+    size: 0,
+    local: 0,
+  }
+  assert read(src, huge_data) == Err("zip: entry data runs past the end: huge-data")
+
+  # The same overflow on the local-header offset let the signature read run
+  # at Int.MAX, where a malformed archive became a bounds panic instead of an
+  # ordinary parser error.
+  let huge_local = Meta {
+    name: "huge-local",
+    is_dir: false,
+    flags: 0,
+    method: METHOD_STORED,
+    crc: 0,
+    csize: 0,
+    size: 0,
+    local: max,
+  }
+  match catch_panic(() => read(src, huge_local)) {
+    Ok(Err(e)) -> { assert e == "zip: no local header for huge-local" }
+    Ok(Ok(_)) -> { assert false }
+    Err(_) -> { assert false }
+  }
 }
