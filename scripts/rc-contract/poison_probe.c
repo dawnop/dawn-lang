@@ -3,18 +3,21 @@
  *
  * The oracle here is a report, and a sanitizer report is an abort, so unlike
  * rc_test.c this cannot be a roster inside one process: each probe is its own
- * run, named by argv[1], and run.sh turns the pair (exit status, stderr) into
- * the `<name> PASS|FAIL` line the rest of the harness reads. The report to
- * look for is `use-after-poison` rather than `heap-use-after-free`: these
- * blocks are not malloc chunks, so what the sanitizer knows about them is
- * only what dawn_rt.c's poisoning told it.
+ * run, named by argv[1], and run.sh turns what came out on stderr into the
+ * `<name> PASS|FAIL` line the rest of the harness reads. The report to look
+ * for is `use-after-poison` rather than `heap-use-after-free`: these blocks
+ * are not malloc chunks, so what the sanitizer knows about them is only what
+ * dawn_rt.c's poisoning told it. It also carries no allocation or free
+ * stack, only the stack of the access, for the same reason.
  *
  * Nothing here calls libc's deallocator: a block the runtime made has to go
  * back through dawn_drop or dawn_free, and run.sh greps this directory to
  * keep it that way.
  *
- * The probes deliberately do the wrong thing to memory, so they are built
- * without optimisation assumptions in mind and each one ends the process. */
+ * A probe that reaches the end of main without a report prints "no report"
+ * and exits 0. Whether it gets there is the answer being read, so nothing
+ * below tries to keep the program in a sane state past the mistake it
+ * makes. */
 #include "unicode_stubs.h"
 
 #include <stdio.h>
@@ -58,7 +61,7 @@ int main(int argc, char **argv) {
     dawn_str *s = dawn_str_new(24);
     void *p = s;
     dawn_drop(s);
-    memset((char *)p + 16, 'x', 8);
+    memset((char *)p + sizeof(dawn_str), 'x', 8);
   } else if (strcmp(which, "double-free") == 0) {
     /* The second drop reads the header of a block that is already on a free
      * list, so it is caught before it can corrupt the list. */
