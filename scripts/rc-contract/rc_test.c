@@ -511,6 +511,13 @@ static void test_slab_bound_is_honoured(void) {
   check(retired > 0, "pages have gone back to the kernel");
   check(cached <= (uint64_t)DAWN_SLAB_KEEP * DAWN_SLAB_CLASSES,
         "and no more empty slabs are held than the bound allows");
+  /* The 32MiB idle budget is a spec-level claim, so the 33554432 is written
+   * here rather than derived: the check above follows DAWN_SLAB_KEEP wherever
+   * it drifts, and a KEEP of 5..7 keeps every mutant's red set intact too, so
+   * without this line nothing reds when the budget quietly grows. Class 0 is
+   * a dead index (a class is always >= 1), hence CLASSES - 1. */
+  check((uint64_t)DAWN_SLAB_KEEP * (DAWN_SLAB_CLASSES - 1) * 65536u <= 33554432u,
+        "and the whole idle budget stays within the documented 32MiB");
   check(live > 0, "while the slabs still in use are still there");
 }
 
