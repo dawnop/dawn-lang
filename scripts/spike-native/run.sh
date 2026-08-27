@@ -318,9 +318,9 @@ work="$(mktemp -d)"
 mkdir -p "$work/logs"
 
 # Whether this machine's cc can build with AddressSanitizer. Probed once,
-# because a corpus of 23 programs would otherwise ask 23 times, and reported
-# as `blocked` rather than as a failure: a missing sanitizer is no evidence
-# either way.
+# because a full run would otherwise ask once per corpus entry, and reported as
+# `blocked` rather than as a failure: a missing sanitizer is no evidence either
+# way.
 asan_ok=1
 printf 'int main(void){return 0;}\n' >"$work/asan_probe.c"
 if ! "$cc_bin" -fsanitize=address -o "$work/asan_probe" "$work/asan_probe.c" \

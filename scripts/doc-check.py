@@ -1765,6 +1765,37 @@ REPOSITORY_POLICY_FILES = (
     "docs/package-design.md",
     "docs/spec.md",
     "docs/spec.en.md",
+    "site/pages/home.md",
+    "site/pages/home.zh.md",
+)
+
+# Exact corpus and artifact sizes in outward copy decay without changing any
+# decision a reader makes. The README's native differential grew from 59 to
+# more than a hundred entries while still advertising 59 in four places, and
+# the released native binary outgrew both size figures in the toolchain
+# walkthrough. GOV-11 already removed this class of volatile scale metric from
+# the introduction; keep it out of the other outward surfaces too rather than
+# making every corpus addition or toolchain build a translation edit.
+OUTWARD_CORPUS_COUNTS = (
+    ("README.md", re.compile(
+        r"(?:\b\d+\s+(?:differential\s+)?corpus (?:programs|entries)\b|"
+        r"\bThe \d+ programs under `scripts/spike-native/`)", re.I)),
+    ("site/pages/home.md", re.compile(
+        r"\b\d+\s+(?:differential\s+)?corpus (?:programs|entries)\b", re.I)),
+    ("README.zh-CN.md", re.compile(
+        r"(?:\d+\s*个(?:差分|对拍)?语料(?:程序|入口)|"
+        r"下的\s*\d+\s*个程序)")),
+    ("site/pages/home.zh.md", re.compile(
+        r"\d+\s*个(?:差分|对拍)?语料(?:程序|入口)")),
+)
+
+BINARY_SIZE_LITERAL = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:KiB|MiB|GiB|KB|MB|GB)\b", re.I)
+TOOLCHAIN_ARTIFACT_SECTIONS = (
+    ("README.md", "Two different things are called \"native\""),
+    ("README.md", "The road without a JVM"),
+    ("README.zh-CN.md", "两样东西都叫「native」"),
+    ("README.zh-CN.md", "不装 JVM 的那条路"),
 )
 
 # The install instructions download release assets by name, and the release
@@ -1854,6 +1885,21 @@ def repository_contract_problems(files: dict[str, str]) -> tuple[list[str], int]
                 bad.append(f"{rel}: active introduction contains {name}")
             else:
                 seen += 1
+
+    for rel, pattern in OUTWARD_CORPUS_COUNTS:
+        if pattern.search(files[rel]):
+            bad.append(f"{rel}: outward copy contains a volatile differential-corpus count")
+        else:
+            seen += 1
+
+    for rel, heading in TOOLCHAIN_ARTIFACT_SECTIONS:
+        section = markdown_section(files[rel], heading)
+        if section is None:
+            bad.append(f"{rel}: missing toolchain section {heading!r}")
+        elif BINARY_SIZE_LITERAL.search(normalize_prose(section)):
+            bad.append(f"{rel}: {heading} contains a volatile binary size")
+        else:
+            seen += 1
 
     package = files["docs/package-design.md"]
     lock = markdown_section(package, "4.6 `dawn.lock` schema 1 冻结 Java 依赖闭包")
@@ -2026,6 +2072,24 @@ def check_repository_contracts_selftest() -> tuple[list[str], int]:
     if not any("active introduction contains volatile" in problem for problem in bad):
         return ["repository policy self-test: a volatile metric in the active intro stayed green"], 0
 
+    corpus_count = dict(files)
+    corpus_count["README.md"] += "\n59 corpus programs are compiled on both backends.\n"
+    bad, _ = repository_contract_problems(corpus_count)
+    if not any("volatile differential-corpus count" in problem for problem in bad):
+        return ["repository policy self-test: a volatile corpus count stayed green"], 0
+
+    binary_size = dict(files)
+    toolchain_heading = "The road without a JVM"
+    toolchain_section = markdown_section(binary_size["README.md"], toolchain_heading)
+    if toolchain_section is None:
+        return ["repository policy self-test: binary-size section fixture is absent"], 0
+    changed = toolchain_section + "\nThe native compiler is about 3.6 MB.\n"
+    binary_size["README.md"] = binary_size["README.md"].replace(
+        toolchain_section, changed, 1)
+    bad, _ = repository_contract_problems(binary_size)
+    if not any("volatile binary size" in problem for problem in bad):
+        return ["repository policy self-test: a volatile binary size stayed green"], 0
+
     active_lock = dict(files)
     lock_heading = "4.6 `dawn.lock` schema 1 冻结 Java 依赖闭包"
     lock_section = markdown_section(active_lock["docs/package-design.md"], lock_heading)
@@ -2062,7 +2126,7 @@ def check_repository_contracts_selftest() -> tuple[list[str], int]:
     bad, _ = repository_contract_problems(historical)
     if bad:
         return [f"repository policy self-test: scoped historical prose was rejected: {bad[0]}"], 0
-    return [], 10
+    return [], 12
 
 
 def read_audit_details() -> dict[str, str]:
