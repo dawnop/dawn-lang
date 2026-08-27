@@ -21,6 +21,10 @@ function loadBuiltins() {
   return JSON.parse(raw)
 }
 
+// `data.groups` and nothing else. `data.internal` is the std-only half of the
+// builtin table -- the backend contracts behind std/map, std/bytes, std/io and
+// the rest -- which the checker refuses outside std, so offering any of it in
+// the playground's completion would be offering a compile error.
 const data = loadBuiltins()
 const fns = []
 for (const group of data.groups ?? []) {

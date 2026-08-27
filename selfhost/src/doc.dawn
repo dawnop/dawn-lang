@@ -562,6 +562,43 @@ fn builtin_types_json(w0: W) -> W = {
   w
 }
 
+## The std-only builtins: `types.internal_builtins()`, which is every entry of
+## the table the checker hides from a module outside `std`.
+##
+## They are a key of their own rather than a group, and carry no prose. A group
+## is a section of a hand-written reference for people writing Dawn, and none of
+## these is something to write -- `std/map`, `std/bytes` and `std/io` are the
+## spellings, and `validate_builtin_groups` next door exists to keep the
+## reference free of names nobody may call. What a consumer of this JSON wants
+## them for is the opposite question: the playground's completion table and the
+## editor tooling read `groups`, while a reader auditing the language surface
+## wants to see the whole table, and until this key existed the only way to see
+## it was the compiler's source.
+##
+## Sorted by name, because `map.keys` answers in the trie's order and a
+## reference whose order moves when a name is added is a reference nothing can
+## diff.
+fn internal_builtins_json(w0: W, adts: Adts, traits: Traits) -> W = {
+  let bi = builtins()
+  let hidden = internal_builtins()
+  var names: List[String] = []
+  for name in list.sort(map.keys(bi)) {
+    if set.has(hidden, name) { names = names ++ [name] }
+  }
+  var w = w0
+  for name in names {
+    let sig = match map.get(bi, name) {
+      Some(s) -> s
+      None -> panic("internal builtin without a signature: " ++ name)
+    }
+    w = open_obj(w)
+    w = w_field(w, "name", name)
+    w = w_field(w, "sig", sig_render(adts, traits, sig))
+    w = close_obj(w)
+  }
+  w
+}
+
 ## The hand-written groups, resolved against the builtin table (falling back to
 ## the std prelude, where functions migrate). Shared by both output modes so
 ## the two references cannot drift into two answers.
@@ -670,6 +707,10 @@ pub fn builtins_json(std: StdCtx) -> String = {
     w = close_arr(w, any)
     w = close_obj(w)
   }
+  w = close_arr(w, true)
+  w = w_key(w, "internal")
+  w = open_arr(w)
+  w = internal_builtins_json(w, std.adts, traits)
   w = close_arr(w, true)
   w = close_obj(w)
   w_done(w)
