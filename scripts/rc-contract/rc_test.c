@@ -462,10 +462,65 @@ static void test_slab_never_shrinks_a_block(void) {
  *
  * Linux, deliberately: MADV_DONTNEED is what returns the pages, and a
  * platform where it does not (macOS wants MADV_FREE) is one that should be
- * building with -DDAWN_NO_SLAB. */
+ * building with -DDAWN_NO_SLAB.
+ *
+ * ## The allowance the poisoned leg gets, and why it is not a loosened bound
+ *
+ * AddressSanitizer keeps one shadow byte per eight bytes of address space,
+ * and the hand poisoning (dawn_rt.c, "manual poisoning") writes that shadow
+ * for every slab the allocator carves. madvise hands the slab's own pages
+ * back; the shadow pages stay, because the sanitizer owns that mapping and
+ * has no interface for returning part of it -- writing to it directly, or
+ * madvising it, would be reaching into the runtime's internal layout.
+ *
+ * The arithmetic is not close, it is exact. The case allocates 64MiB in
+ * 32-byte blocks: 2097152 objects, 1024 slabs of 64KiB, and 64MiB / 8 =
+ * *8192 KiB* of shadow. The old allowance was 8 * 1024 = 8192 KiB. So on a
+ * poisoned build the shadow alone accounted for the entire budget, and what
+ * was left for everything else was however much of that shadow happened to
+ * be resident already when `base` was read -- which is to say, however many
+ * slabs the fourteen cases ahead of this one had carved.
+ *
+ * Measured, not reasoned. Running the whole roster here: after - base =
+ * 7844 KiB against 8192, bit-identical over three runs, a margin of 348 KiB
+ * (87 pages, 4%) supplied entirely by the ~44 slabs the earlier cases had
+ * already touched. Running this case *alone*, so that nothing is pre-
+ * resident, on the same machine and the same binary: after - base = 8924
+ * KiB, which fails the old bound. That is the CI failure reproduced locally
+ * and it settles what it was: not a flake, and not the runner being slow or
+ * small, but a knife edge whose green side depended on how much of the
+ * measurement had been paid for before the measurement started.
+ *
+ * So the poisoned build is allowed, on top of the unchanged 8192 KiB, the
+ * shadow of exactly the address range it makes the allocator carve. That is
+ * a quantity the build provably cannot return, derived rather than tuned.
+ * The worst figure measured above, the 8924 KiB that fails the old bound,
+ * now sits 46% under the new one. The assertion keeps its teeth: a runtime
+ * that stops retiring leaves ~65MiB of slab pages *plus* that same shadow,
+ * four and a half times the widened limit. Verified by mutant rather than by
+ * argument -- slab-never-retires still reddens this case on a poisoned
+ * build, and slab-swallows-oversize still leaves it green there, which is
+ * the red set matrix.txt records for both off the plain leg.
+ *
+ * The plain build's limit does not move by one byte. Every mutant's red set
+ * is read off the plain leg, so that is where this bound is load bearing,
+ * and an allowance granted only under DAWN_ASAN cannot reach it. */
 static void test_slab_returns_pages(void) {
   size_t node = sizeof(dawn_adt) + sizeof(dawn_slot);
   long count = (long)((64 * 1024 * 1024) / node);
+
+  /* The address range the loop below makes the allocator carve, rounded up
+   * to whole slabs because a slab is poisoned whole, and the shadow of it at
+   * the sanitizer's fixed 1:8 scale. Zero without the sanitizer, and the
+   * only build that both defines DAWN_ASAN and reaches this line is the
+   * -DDAWN_SLAB_FORCE leg: the bypassed sanitized builds skip the case. */
+  long shadow_kib = 0;
+#if DAWN_ASAN
+  size_t block = ((node + DAWN_SLAB_GRAIN - 1) / DAWN_SLAB_GRAIN) * DAWN_SLAB_GRAIN;
+  size_t carved = ((size_t)count * block + 65535u) / 65536u * 65536u;
+  shadow_kib = (long)(carved / 8 / 1024);
+#endif
+
   long base = rss_kib();
   check(base >= 0, "the resident set can be read");
   if (base < 0) {
@@ -483,7 +538,8 @@ static void test_slab_returns_pages(void) {
   long after = rss_kib();
 
   check(peak - base > 48 * 1024, "64MiB of live objects is resident");
-  check(after - base < 8 * 1024, "and releasing them gives the pages back");
+  check(after - base < 8 * 1024 + shadow_kib,
+        "and releasing them gives the pages back");
 }
 
 /* The bound the header states, read off the counters rather than off the
