@@ -29,13 +29,35 @@ use std/io
 use std/list
 use std/map
 use std/str
+use selfhost/check/cx.{Cx, cx_new}
+use selfhost/check/passes.{pass_fn_signatures, seed_prelude}
 use selfhost/check/types.{intrinsics, prelude_adts, prelude_traits, sig_render_fqn}
+use selfhost/front/parser.{parse_module}
 use selfhost/ir/lower.{internal_intrinsics}
+
+## The one signature whose rendering is deliberately not Dawn source, and so
+## the one that cannot be read back. `cast`'s parameter renders
+## `java.lang.Object`, and a dotted type path is not a spelling the parser
+## takes anywhere: the source form is `use java "java.lang.Object"` and then
+## the bare `Object`. The mirror's own header already names this line as one
+## that would not compile even with a body, and the reason it renders that way
+## is that the short name is in no file's scope.
+##
+## Named here rather than skipped where the loop happens to fail, and the
+## checker holds the skip set equal to this one name, so a second signature
+## that stops parsing is red rather than absorbed.
+fn roundtrip_skips() -> List[String] = ["cast"]
 
 pub fn main() -> Unit !io = {
   let adts = prelude_adts()
   let traits = prelude_traits()
   let it = intrinsics()
+  # Resolution happens as if inside `std/`: seven of the signatures name
+  # `Array`, which is a std-only type (`BtStdOnly`), and outside std they
+  # resolve to an error rather than to the type the table holds. That is the
+  # same fact their bare `fn` states one level up, so reading them back where
+  # they are legal is reading them back where they are meant.
+  let base = seed_prelude(cx_new(Some("std/builtin_decl_dump"), None))
   for name in list.sort(map.keys(it)) {
     let i = map.get(it, name).expect("intrinsic listed")
     let vis = if i.internal { "internal" } else { "pub" }
@@ -48,8 +70,41 @@ pub fn main() -> Unit !io = {
       panic("a rendered signature carries a field separator: " ++ name)
     }
     io.println("builtin\t" ++ name ++ "\t" ++ vis ++ "\t" ++ sig)
+    if list.contains(roundtrip_skips(), name) {
+      io.println("roundtrip-skip\t" ++ name)
+    } else {
+      io.println("roundtrip\t" ++ name ++ "\t" ++ sig ++ "\t" ++ reread(base, sig))
+    }
   }
   for name in list.sort(internal_intrinsics()) {
     io.println("lowering\t" ++ name)
   }
+}
+
+## A rendering, read back as the declaration it claims to be, and rendered
+## again. Identity is the judgement (check.py, P6): a rendering that loses
+## something the signature carried comes back spelled differently.
+##
+## The body is `todo()` because a declaration with no body is a parse error --
+## the same fact that keeps `selfhost/builtins.dawn` out of every build -- and
+## `Never` types wherever a value is wanted, so one body serves all 94.
+## Nothing here checks a body: `pass_fn_signatures` resolves signatures and
+## that is the whole of what is compared.
+##
+## A failure to parse or resolve renders as a bracketed note rather than a
+## panic. It is a difference like any other, and P6 prints both sides, so the
+## note reaches the reader with the signature that produced it.
+fn reread(base: Cx, sig: String) -> String !io = {
+  let (m, ds) = parse_module(sig ++ " = todo()\n")
+  if len(ds) > 0 {
+    return "<parse: " ++ ds[0].msg ++ ">"
+  }
+  let (cx1, sigs) = pass_fn_signatures(base, m)
+  if len(cx1.diags) > 0 {
+    return "<resolve: " ++ cx1.diags[0].msg ++ ">"
+  }
+  if len(sigs) != 1 {
+    return "<parsed " ++ to_string(len(sigs)) ++ " declarations>"
+  }
+  sig_render_fqn(cx1.adts, cx1.traits, sigs[0])
 }

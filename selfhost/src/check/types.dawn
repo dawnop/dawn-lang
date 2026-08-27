@@ -2010,6 +2010,12 @@ fn sig_render_at(adts: Adts, traits: Traits, s: Sig, java_fqn: Bool) -> String =
   # for the reader alone: a row that mentions `!e` is unreadable without
   # seeing where `e` was bound. A signature that binds none renders exactly as
   # it did.
+  #
+  # A courtesy that is nonetheless checked, because a reader is not the only
+  # consumer of a rendering: `scripts/builtin-decl-contract`'s P6 reads every
+  # builtin's rendering back through the parser and renders it again, so a
+  # binder list that omits a variable the row mentions is red. Three entries
+  # of the table were, and the table is what moved.
   for ev in s.eparams {
     parts = parts ++ ["!" ++ eff_show(ev)]
   }
@@ -2623,9 +2629,29 @@ fn eff1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff: e }
 ## itself raise has to say so here, because `sig_abi_eff` reads the binder list
 ## and not the parameter types: the row of `f: fn() -> T !e` is the closure's,
 ## and the slot that carries its evidence is the signature's. The catch pair is
-## the only entry of the table in that shape (`bracket` raises the variable it
-## binds, so its own row already carries it).
+## the only entry of the table in that shape.
 fn ep1(s: Sig, e: Eff) -> Sig = Sig { ..s, eparams: [e] }
+
+## The row *and* the binder, for the entries that raise the variable they
+## introduce: `sort_by`, `map_fold` and `bracket`, each of which takes a
+## closure and answers with the closure's row.
+##
+## `eff1` alone was enough for the ABI -- `sig_abi_eff` unions the binder list
+## into the declared row, and for these three the row already carried the
+## variable, so the fold added nothing. It was not enough for the *rendering*.
+## A binder list is what `sig_render` prints between the brackets, so an entry
+## that raised `!e` without binding it rendered a signature mentioning a
+## variable no reader could see the introduction of, and one the parser could
+## not give back: read `fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e)`
+## as source and the variable is minted where it is first met, which lands it
+## in `eparams` and prints `[T, !e]`. The table said one thing and every file
+## that wrote the same signature by hand meant another.
+##
+## Nothing about a builtin's scope makes the shorter spelling meaningful: an
+## entry of this table has no enclosing signature for a variable to come from,
+## so a variable in its row is one it bound. That is why the fix is to say so
+## rather than to teach the renderer to guess.
+fn effp1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff: e, eparams: [e] }
 
 ## A Map/Set primitive that hashes: its key parameter carries `Eq` and `Hash`,
 ## so the dictionaries reach the trie in std/hamt. Which relation decides "same
@@ -2657,7 +2683,7 @@ pub fn builtins() -> Map[String, Sig] = {
     tp1(bsig("len", [TyList(t)], ["xs"], TyInt), t),
     tp1(bsig("get", [TyList(t), TyInt], ["xs", "i"], opt_ty(t)), t),
     bsig("range", [TyInt, TyInt], ["from", "to"], TyList(TyInt)),
-    eff1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e)], ["xs", "cmp"], TyList(t)), t), e),
+    effp1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e)], ["xs", "cmp"], TyList(t)), t), e),
     tp1(bsig("expect", [opt_ty(t), TyString], ["o", "msg"], t), t),
     tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t),
     tp1b(bsig("to_string", [t], ["x"], TyString), t, SHOW_ID),
@@ -2856,7 +2882,7 @@ pub fn builtins() -> Map[String, Sig] = {
     # and every place it surfaced -- hover, completion, `doc --builtins`, the
     # spec -- printed a signature that does not parse. Renaming it costs
     # nothing a caller can observe.
-    eff1(
+    effp1(
       Sig {
         ..bsig("bracket",
           [a, TyFn([a], TyUnit, e), TyFn([a], b, e)],
@@ -2995,7 +3021,7 @@ pub fn builtins() -> Map[String, Sig] = {
     # entry list `map_entries` answers with. Unbounded like the other readers:
     # visiting entries hashes and compares no keys. The row rides through the
     # step the way `sort_by`'s rides through its comparator.
-    eff1(
+    effp1(
       Sig {
       ..bsig("map_fold", [TyMap(k, v), a, TyFn([a, k, v], a, e)], ["m", "init", "f"], a),
       tparams: [k, v, a]
@@ -3675,18 +3701,24 @@ test "builtin table renders signatures" {
   let bs = builtins()
   match map.get(bs, "sort_by") {
     Some(s) -> {
+      # The binder renders, because the entry binds it. An entry of this table
+      # has no enclosing signature for a variable to come from, so a variable
+      # in its row is one it introduced, and a rendering that left the binder
+      # off spelled a signature the parser does not give back: read it as
+      # source and `!e` is minted where it is first met, which puts it in
+      # `eparams` and prints `[T, !e]` (scripts/builtin-decl-contract, P6).
       assert sig_render(adts, traits, s) ==
-        "fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
+        "fn sort_by[T, !e](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
     }
     None -> { assert false }
   }
   match map.get(bs, "catch_fault") {
     Some(s) -> {
-      # the binder renders and `sort_by`'s does not, which is the difference
-      # between a variable a signature *declares* and one it merely raises:
-      # `sort_by`'s `!e` reaches its row from the row itself, and the catch
-      # pair's reaches nothing but the closure parameter, so only an eparams
-      # entry can say where it was bound (types.sig_abi_eff).
+      # The catch pair binds a variable its own row does not carry -- `!e`
+      # reaches nothing but the closure parameter, and the row is `!io` --
+      # which is the case `eparams` exists for at all: only a binder entry can
+      # say where it came from, and `types.sig_abi_eff` reads that entry to
+      # decide the evidence slot.
       assert sig_render(adts, traits, s) ==
         "fn catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io"
     }
@@ -3702,7 +3734,7 @@ test "builtin table renders signatures" {
   match map.get(bs, "map_fold") {
     Some(s) -> {
       assert sig_render(adts, traits, s) ==
-        "fn map_fold[K, V, A](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e"
+        "fn map_fold[K, V, A, !e](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e"
     }
     None -> { assert false }
   }
@@ -3850,7 +3882,7 @@ test "bracket protects a resource and hands the body's own answer back" {
       # `body`, not `use`: the parameter is nameable in a call only if its
       # name is an identifier, and `use` is a keyword (see the table)
       assert sig_render(adts, traits, s) ==
-        "fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, " ++
+        "fn bracket[A, B, !e](resource: A, release: fn(A) -> Unit !e, " ++
         "body: fn(A) -> B !e) -> B !e"
     }
     None -> { assert false }

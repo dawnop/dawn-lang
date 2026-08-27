@@ -10,7 +10,7 @@
 #      table (`--self-test`). A judgement whose red has never been observed is
 #      a judgement nobody can rely on.
 #   2. the real comparison: dump the table out of the compiler and compare.
-#   3. seven mutants (matrix.txt), each a perturbation of the real inputs held
+#   3. nine mutants (matrix.txt), each a perturbation of the real inputs held
 #      in memory. The self-test proves the judgements *can* be red; these
 #      prove they are red about this repository, which a synthetic table
 #      cannot show -- a checker reading the wrong file passes every synthetic

@@ -26,12 +26,32 @@ stale mirror of an API is worse than no mirror, because a reader believes it.
     P4  `pub fn` in the mirror <=> the table says the name is not internal
     P5  the `# comptime: rejected` markers are exactly the table names the
         comptime interpreter refuses
+    P6  every signature, parsed back as the declaration it claims to be and
+        rendered again, comes out the same string
 
 P1 and P2 are separate judgements over the same two sets, and are deliberately
 not written as one equality. "The sets differ" names neither side; a mirror
 carrying a name the compiler dropped and a mirror missing one the compiler
 gained are different mistakes with different fixes, and a gate that cannot
 tell them apart makes the reader re-derive which happened.
+
+## Why P6 is a separate question from P3
+
+P1 to P5 hold the mirror against the table. All five stay green if the
+rendering itself loses something, because both sides are the same rendering:
+the mirror is copied from what `sig_render_fqn` printed, so it agrees with the
+table about a signature the compiler cannot read back. P6 is the only
+judgement that asks whether the printed line means what the entry means, and
+the reader is the compiler's own parser -- `parse_module` plus
+`pass_fn_signatures`, the two the dump project runs, so the answer is the one
+a source file would get.
+
+It found three when it was written. `sort_by`, `map_fold` and `bracket` each
+raised an effect variable without recording that they bound it, so they
+rendered `fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e`
+-- a signature mentioning `!e` with nowhere it was introduced, and one that
+comes back as `[T, !e]` when the parser mints the variable where it is first
+met. The table was fixed rather than the renderer.
 
 ## The meta-judgements
 
@@ -73,6 +93,12 @@ import sys
 
 MIRROR = "selfhost/builtins.dawn"
 INTERP = "selfhost/src/ir/interp.dawn"
+
+# The signatures P6 does not read back, held here so that adding one is an
+# edit to the checker rather than a line the dump can quietly stop producing.
+# `roundtrip_skips()` in the dump project names the same set and carries the
+# reason; this is the assertion that it still names only that.
+ROUNDTRIP_SKIPS = ["cast"]
 
 SIG_LINE = re.compile(r"^(pub )?fn [a-z_][A-Za-z0-9_]*[\[(]")
 MARKER = " # comptime: rejected"
@@ -125,9 +151,16 @@ def parse_mirror(text, where=MIRROR):
 
 
 def parse_dump(text, where="the dump"):
-    """(builtins, lowering): name -> (is_pub, signature), and the plain names."""
+    """The four record kinds.
+
+    Returns (builtins, lowering, roundtrips, skips): name -> (is_pub,
+    signature), the plain lowering names, name -> (rendered, re-rendered), and
+    the names the dump declined to read back.
+    """
     builtins = {}
     lowering = []
+    roundtrips = {}
+    skips = []
     for lineno, raw in enumerate(text.split("\n"), start=1):
         if not raw.strip():
             continue
@@ -144,13 +177,24 @@ def parse_dump(text, where="the dump"):
             if name in builtins:
                 raise SystemExit(f"{where}:{lineno}: `{name}` dumped twice")
             builtins[name] = (vis == "pub", sig)
+        elif kind == "roundtrip":
+            if len(fields) != 4:
+                raise SystemExit(f"{where}:{lineno}: expected 4 fields: {raw!r}")
+            _, name, rendered, reread = fields
+            if name in roundtrips:
+                raise SystemExit(f"{where}:{lineno}: `{name}` read back twice")
+            roundtrips[name] = (rendered, reread)
+        elif kind == "roundtrip-skip":
+            if len(fields) != 2:
+                raise SystemExit(f"{where}:{lineno}: expected 2 fields: {raw!r}")
+            skips.append(fields[1])
         elif kind == "lowering":
             if len(fields) != 2:
                 raise SystemExit(f"{where}:{lineno}: expected 2 fields: {raw!r}")
             lowering.append(fields[1])
         else:
             raise SystemExit(f"{where}:{lineno}: unknown record kind {kind!r}")
-    return builtins, lowering
+    return builtins, lowering, roundtrips, skips
 
 
 # --- ir/interp.dawn, read as source ---------------------------------------
@@ -292,11 +336,13 @@ def _loop_prefix(tail):
 # --- the judgements --------------------------------------------------------
 
 
-def judge(mirror_text, dump_text, interp_text):
+def judge(mirror_text, dump_text, interp_text, skips_expected=None):
     """Every failure, as a list of lines. Empty means green."""
+    if skips_expected is None:
+        skips_expected = ROUNDTRIP_SKIPS
     bad = []
     mirror, _ = parse_mirror(mirror_text)
-    builtins, lowering = parse_dump(dump_text)
+    builtins, lowering, roundtrips, skips = parse_dump(dump_text)
     arms = read_interp_arms(interp_text)
     rejects = read_comptime_rejects(interp_text)
 
@@ -350,6 +396,33 @@ def judge(mirror_text, dump_text, interp_text):
                 bad.append(f"P5 `{name}` is refused at comptime and carries no marker")
             else:
                 bad.append(f"P5 `{name}` is marked comptime-rejected and is not")
+
+    # P6 -- a rendering is a spelling of the signature, not a picture of it
+    #
+    # Three things, and the first two are what keep the third from being
+    # satisfied by an empty set: a dump that stopped reading signatures back
+    # covers nobody, and a dump that declared them all unreadable skips
+    # everybody. Coverage and the skip list are therefore checked before the
+    # comparison rather than assumed by it.
+    covered = set(roundtrips) | set(skips)
+    for name in sorted(set(builtins) - covered):
+        bad.append(f"P6 the builtin `{name}` was neither read back nor skipped")
+    for name in sorted(covered - set(builtins)):
+        bad.append(f"P6 `{name}` was read back and is no builtin")
+    if sorted(skips) != sorted(skips_expected):
+        bad.append(
+            "P6 the signatures the dump declines to read back are "
+            + (", ".join(f"`{n}`" for n in sorted(skips)) or "none")
+            + ", and the recorded set is "
+            + (", ".join(f"`{n}`" for n in sorted(skips_expected)) or "none")
+        )
+    for name in sorted(set(roundtrips) & set(builtins)):
+        rendered, reread = roundtrips[name]
+        if rendered != reread:
+            bad.append(
+                f"P6 `{name}` renders\n      {rendered}\n"
+                f"    and reading that back gives\n      {reread}"
+            )
     return bad
 
 
@@ -377,15 +450,29 @@ fn comptime_rejects() -> List[String] = {
 GOOD_DUMP = "\n".join(
     [
         "builtin\tkeep\tpub\tfn keep(x: Int) -> Int",
+        "roundtrip\tkeep\tfn keep(x: Int) -> Int\tfn keep(x: Int) -> Int",
         "builtin\trefuse\tpub\tfn refuse() -> Unit !io",
+        "roundtrip\trefuse\tfn refuse() -> Unit !io\tfn refuse() -> Unit !io",
         "builtin\tfam_a\tinternal\tfn fam_a() -> Unit",
+        "roundtrip\tfam_a\tfn fam_a() -> Unit\tfn fam_a() -> Unit",
         "builtin\tfam_b\tinternal\tfn fam_b() -> Unit",
+        "roundtrip\tfam_b\tfn fam_b() -> Unit\tfn fam_b() -> Unit",
         "builtin\twide_c\tinternal\tfn wide_c() -> Unit",
+        "roundtrip\twide_c\tfn wide_c() -> Unit\tfn wide_c() -> Unit",
         "builtin\twide_d\tinternal\tfn wide_d() -> Unit",
+        "roundtrip\twide_d\tfn wide_d() -> Unit\tfn wide_d() -> Unit",
         "builtin\tlate\tinternal\tfn late() -> Unit",
+        "roundtrip-skip\tlate",
         "lowering\tfold_me",
     ]
 )
+
+# The synthetic table's own skip set. P6 holds the dump's skips against a
+# recorded list, and the list the real dump answers to is `cast`, which this
+# table has no reason to carry: the judgement takes the expected set as an
+# argument so that the self-test can prove it fires without borrowing a name
+# from the repository.
+GOOD_SKIPS = ["late"]
 
 GOOD_MIRROR = """# a header
 pub fn keep(x: Int) -> Int
@@ -429,11 +516,37 @@ SELF_TESTS = [
         GOOD_INTERP,
     ),
     (
+        "P6",
+        GOOD_MIRROR,
+        GOOD_DUMP.replace(
+            "roundtrip\tkeep\tfn keep(x: Int) -> Int\tfn keep(x: Int) -> Int",
+            "roundtrip\tkeep\tfn keep(x: Int) -> Int\tfn keep[!e](x: Int) -> Int",
+        ),
+        GOOD_INTERP,
+    ),
+    (
+        "P6",
+        GOOD_MIRROR,
+        GOOD_DUMP.replace(
+            "roundtrip\tfam_a\tfn fam_a() -> Unit\tfn fam_a() -> Unit\n", ""
+        ),
+        GOOD_INTERP,
+    ),
+    (
+        "P6",
+        GOOD_MIRROR,
+        GOOD_DUMP.replace(
+            "roundtrip\tfam_b\tfn fam_b() -> Unit\tfn fam_b() -> Unit",
+            "roundtrip-skip\tfam_b",
+        ),
+        GOOD_INTERP,
+    ),
+    (
         "M1",
         GOOD_MIRROR.replace("fn late() -> Unit # comptime: rejected\n", ""),
-        GOOD_DUMP.replace("builtin\tlate\tinternal\tfn late() -> Unit\n", "").replace(
-            "\nbuiltin\tlate\tinternal\tfn late() -> Unit", ""
-        ),
+        GOOD_DUMP.replace(
+            "builtin\tlate\tinternal\tfn late() -> Unit\nroundtrip-skip\tlate\n", ""
+        ).replace("\nbuiltin\tlate\tinternal\tfn late() -> Unit\nroundtrip-skip\tlate", ""),
         GOOD_INTERP,
     ),
     ("M2", "# nothing but a header\n", GOOD_DUMP, GOOD_INTERP),
@@ -441,7 +554,7 @@ SELF_TESTS = [
 
 
 def self_test():
-    bad = judge(GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP)
+    bad = judge(GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_SKIPS)
     if bad:
         print("SELF-TEST FAIL: the clean synthetic table is not green:")
         for line in bad:
@@ -450,7 +563,7 @@ def self_test():
     print("OK   the clean synthetic table is green (the positive control)")
     rc = 0
     for label, mirror, dump, interp in SELF_TESTS:
-        found = judge(mirror, dump, interp)
+        found = judge(mirror, dump, interp, GOOD_SKIPS)
         owned = [line for line in found if line.startswith(label)]
         if not owned:
             print(f"SELF-TEST FAIL: the {label} perturbation stayed green")
@@ -511,6 +624,42 @@ def mutate_p5_move_marker(mirror, dump, interp):
     return "\n".join(lines), dump, interp
 
 
+SORT_BY_BOUND = "fn sort_by[T, !e](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
+SORT_BY_UNBOUND = "fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
+
+
+def mutate_p6_unbind_sort_by(mirror, dump, interp):
+    """The table before this judgement existed: `sort_by` raises `!e` and does
+    not record that it bound it (`eff1` rather than `effp1` in
+    `check/types.dawn`), so the binder is missing from what it renders.
+
+    The mirror is moved with it, which is the point. An author who reverts the
+    table and dutifully re-records the mirror leaves P1 to P5 green -- the two
+    sides agree, character for character, about a signature the compiler
+    cannot read back -- and P6 is the only one that says so.
+    """
+    mirror = _sub(mirror, "pub " + SORT_BY_BOUND, "pub " + SORT_BY_UNBOUND)
+    lines = dump.split("\n")
+    at = _index_of(lines, "builtin\tsort_by\tpub\t" + SORT_BY_BOUND)
+    lines[at] = "builtin\tsort_by\tpub\t" + SORT_BY_UNBOUND
+    rt = _index_of(lines, "roundtrip\tsort_by\t" + SORT_BY_BOUND + "\t" + SORT_BY_BOUND)
+    lines[rt] = "roundtrip\tsort_by\t" + SORT_BY_UNBOUND + "\t" + SORT_BY_BOUND
+    return mirror, "\n".join(lines), interp
+
+
+def mutate_p6_skip_popcount(mirror, dump, interp):
+    """Declare a signature unreadable that reads back fine. This is how P6
+    would erode: not by going red, but by the dump quietly excusing whatever
+    stopped agreeing with itself. The skip list is held to what is recorded,
+    so growing it is red until somebody writes down why."""
+    lines = dump.split("\n")
+    at = _index_of(
+        lines, "roundtrip\tpopcount\tfn popcount(n: Int) -> Int\tfn popcount(n: Int) -> Int"
+    )
+    lines[at] = "roundtrip-skip\tpopcount"
+    return mirror, "\n".join(lines), interp
+
+
 MUTANTS = [
     ("p1-declare-a-name-the-compiler-has-not", mutate_p1_add, "P1"),
     ("p2-drop-popcount", mutate_p2_drop_popcount, "P2"),
@@ -519,6 +668,8 @@ MUTANTS = [
     ("p4-publish-str_lower", mutate_p4_add_pub, "P4"),
     ("p4-hide-parse_int_radix", mutate_p4_drop_pub, "P4"),
     ("p5-move-a-comptime-marker", mutate_p5_move_marker, "P5"),
+    ("p6-drop-sort_by-s-effect-binder", mutate_p6_unbind_sort_by, "P6"),
+    ("p6-skip-a-signature-that-reads-back", mutate_p6_skip_popcount, "P6"),
 ]
 
 
@@ -591,14 +742,16 @@ def main():
         print(f"  the table in selfhost/src/check/types.dawn is the truth; edit {MIRROR}")
         return 1
     mirror_decls, _ = parse_mirror(mirror)
-    builtins, lowering = parse_dump(dump)
+    builtins, lowering, roundtrips, skips = parse_dump(dump)
     pub = sum(1 for is_pub, _, _ in mirror_decls.values() if is_pub)
     rejected = sum(1 for _, _, r in mirror_decls.values() if r)
     print(
         f"OK: {MIRROR} mirrors all {len(builtins)} builtins "
         f"({pub} public, {len(builtins) - pub} std-only, {rejected} refused at "
-        f"comptime), and the intrinsic universe of {len(builtins) + len(lowering)} "
-        f"names is partitioned by ir/interp.dawn"
+        f"comptime), the intrinsic universe of {len(builtins) + len(lowering)} "
+        f"names is partitioned by ir/interp.dawn, and {len(roundtrips)} of the "
+        f"signatures read back as themselves ({len(skips)} named as spellings "
+        f"the parser is not offered)"
     )
     return 0
 

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 4335a370ddc56a75 -->
+<!-- doc-check: translation-of docs/spec.md @ 3fcb03c624021059 -->
 
 # Dawn Language Specification
 
@@ -2832,7 +2832,7 @@ Dawn has no `try`/`finally`, and does not intend to (the pair of barriers in §9
 back" is carried by a third builtin:
 
 ```dawn
-fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e) -> B !e
+fn bracket[A, B, !e](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e) -> B !e
 ```
 
 The third parameter is named `body`: `use` is a keyword, so the call

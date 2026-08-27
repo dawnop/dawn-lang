@@ -2281,7 +2281,7 @@ Dawn 没有 `try`/`finally`，也不打算有（§9.8 那对屏障是**拦**，�
 「无论怎么退出都要把资源还回去」这件事由第三个内建承担：
 
 ```dawn
-fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e) -> B !e
+fn bracket[A, B, !e](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e) -> B !e
 ```
 
 第三个参数叫 `body`：`use` 是关键字，`bracket(r, close, use: f)` 这个调用写不出来，

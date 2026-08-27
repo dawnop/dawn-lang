@@ -18,6 +18,13 @@
 # do -- when the two disagree, the table is right and this file is what
 # changes.
 #
+# It also reads each line back with the compiler's own parser and renders the
+# result again (P6). Agreeing with the table is not enough on its own: both
+# sides are the same rendering, so a rendering that loses something leaves
+# every other judgement green. That one found three signatures spelling an
+# effect variable with nowhere it was introduced. `cast` is the single line
+# not read back, for the reason the section below gives.
+#
 # ## How to read a line
 #
 #   * `pub fn` is a builtin any Dawn file may call.
@@ -83,7 +90,7 @@ pub fn panic(msg: String) -> Never
 pub fn todo() -> Never
 
 ## use an acquired resource and release it on every way out -- the value, a panic or a fault; the failure carries on unchanged (this catches nothing)
-pub fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e) -> B !e # comptime: rejected
+pub fn bracket[A, B, !e](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e) -> B !e # comptime: rejected
 
 ## run a closure, turning an external failure into Err (panics pass through)
 pub fn catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io # comptime: rejected
@@ -126,7 +133,7 @@ pub fn get[T](xs: List[T], i: Int) -> Option[T]
 pub fn range(from: Int, to: Int) -> List[Int]
 
 ## stable sort with a two-argument cmp function
-pub fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e
+pub fn sort_by[T, !e](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e
 
 # ---- string -- text in, numbers out ----
 #
@@ -274,7 +281,7 @@ fn map_values[K, V](m: Map[K, V]) -> List[V] # comptime: rejected
 fn map_entries[K, V](m: Map[K, V]) -> List[(K, V)] # comptime: rejected
 
 ## reduce over the bindings with an accumulator
-fn map_fold[K, V, A](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e # comptime: rejected
+fn map_fold[K, V, A, !e](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e # comptime: rejected
 
 # ---- set -- the same trie, keyed on its elements ----
 
