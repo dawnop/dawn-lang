@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 3fcb03c624021059 -->
+<!-- doc-check: translation-of docs/spec.md @ b274509a27ab8d0a -->
 
 # Dawn Language Specification
 
@@ -1484,6 +1484,20 @@ bracket(FileOutputStream.new(path), s => s.close(), f => {
   and "getting out" only means what the reader thinks it means when that block happens to be
   in tail position. A loop **of its own** inside the sugared region is unaffected (a `for`
   after the `with`, with `break` belonging to it).
+- **The sugared region cannot touch a `var` declared before the `with`**, and the diagnostic
+  names the closure `with` introduced: the sugared region is that closure's body, and a closure
+  captures by value and refuses to capture `var` (§4.5). So every `var` declared **before** the
+  `with` can be neither assigned nor read in the rest of the block after it; a `var` declared
+  **after** the `with` belongs to the sugared region itself and is unaffected. To carry a value
+  from before the sugared region into it, bind a snapshot with `let` first, or pass it in as a
+  parameter.
+
+  ```dawn
+  var n = 1
+  let base = n          # snapshot it first; reading n after this is refused
+  with x <- g
+  var acc = base + x    # a var declared inside the sugared region is fine
+  ```
 - Write one name at the binding site, with the same rules as a lambda parameter; there is no
   `_` form (nor do lambda parameters have one).
 
@@ -1996,6 +2010,20 @@ of its discipline — legal only inside a block, the rest is a real closure, `re
   the effect are all compile errors.
 - One `handle`, one effect; handling the same effect again is inner shadowing outer, which is legal.
 - Handling an effect the block never actually performs is allowed (harmless dead evidence).
+- **A `var` declared before the installation point is out of reach after it** (this is §4.10's
+  capture-by-value discipline showing up here): every `var` declared **before** the installation
+  point can be neither assigned nor read in the rest of the block after the `with handle`; a `var`
+  declared **after** the installation point is entirely normal. The diagnostic names the closure
+  `with` introduced and offers two ways out: bind a snapshot with `let` first, or pass it in as a
+  parameter. An arm is a closure too, and likewise refuses to capture an outer `var` or to assign
+  inside the arm.
+
+  ```dawn
+  var n = 1
+  let base = n                    # snapshot it first; reading n after this is refused
+  with handle Ask { ask() => 42 }
+  var acc = base + ask()          # a var declared after the installation point is normal
+  ```
 - **Typing rule**: let the rest closure's effect be `(base, L)` and each arm body's effect be
   `(base_i, L_i)`; then the block that installs the handler is recorded as
   `(base ∪ ⋃base_i, (L ∖ {E}) ∪ ⋃L_i)`.

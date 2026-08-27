@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 5437be0909c296e5 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 4389020e54f40c70 -->
 
 # Dawn 教程
 
@@ -752,6 +752,9 @@ pub fn main() -> Unit !io = {
 - `sum_three` 直接调 `ask()`，签名里写下 `!Ask`。不写会报错，并告诉你两条出路。
 - `with handle Ask { ask() => 42 }` 装上 handler：**这一句之后的整个块**在它的作用域内。
   臂 `ask() => 42` 就是一个闭包，调用 `ask()` 就是调它，返回值就是 `ask()` 的值。
+- 这个「块的剩余部分」自己也是闭包，所以它按值捕获：`with handle` **之前**声明的 `var`，
+  在它之后既不能读也不能赋值；**之后**声明的 `var` 没问题。诊断会说明这一点，并给两条
+  出路：在 `with handle` 之前先 `let` 一个快照，或者把值作为参数传进来。
 
 ### 多个操作，和有参数的操作
 

@@ -363,6 +363,11 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
      错误拒绝（不能在 lambda 内赋值 / lambda 按值捕获拒 `var`）。没有变通：臂返回
      `Unit`、语言无 ref cell，逐项重装 handler 是 O(n) 反模式。**lexer 维持现状的
      元组捎带 + 驱动累积，不改写**——那本来就是对的形状。
+
+     另：受同一条按值捕获纪律限制的不止臂。`with handle` 吞掉块的剩余部分，那也是个
+     闭包，所以**安装点之前**声明的 `var` 在 `with handle` 之后既不能赋值也不能读
+     （安装点之后声明的不受影响），错误消息按被穿过的那一帧点名「`with` 引入的闭包」。
+     规范记在 `docs/spec.md` §4.10 与 §6.5。
    - **sink 与 reader 立即顺手**。站点生成器日志流（`say(s) => io.println(…)`，臂做
      io）与环境配置读取（`base() => 100`，嵌套安装在 let 块里）都一次写对，语法
      读感好。但**今天没有一处存量代码值得为此改写**：单 handler + 反正要 io 的

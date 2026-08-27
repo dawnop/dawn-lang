@@ -803,6 +803,10 @@ Three things are happening there:
 - `with handle Ask { ask() => 42 }` installs the handler: **the whole of the block after
   that line** is inside its scope. The arm `ask() => 42` is a closure, calling `ask()`
   calls it, and its return value is the value of `ask()`.
+- That rest of the block is itself a closure, so it captures by value: a `var` declared
+  **before** the `with handle` can be neither read nor assigned after it, while a `var`
+  declared **after** it is fine. The diagnostic says so and suggests the two ways out,
+  binding a `let` snapshot before the `with handle` or passing the value in as a parameter.
 
 ### More than one operation, and operations with parameters
 
