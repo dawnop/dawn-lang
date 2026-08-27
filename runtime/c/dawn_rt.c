@@ -2,6 +2,9 @@
 
 /* stat/opendir/readdir are POSIX, and -std=c11 hides them without this. */
 #define _POSIX_C_SOURCE 200809L
+/* madvise is not in that set. This is the wider one, so it has to be asked
+ * for by name; it is file-wide and only widens what is declared. */
+#define _DEFAULT_SOURCE 1
 
 #include "dawn_rt.h"
 
@@ -64,6 +67,361 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
 #define mkstemp dawn_wasi_mkstemp
 #define chmod dawn_wasi_chmod
 #endif
+
+/* ---- the small-object allocator -----------------------------------------
+ *
+ * Reference counting frees eagerly, so a Dawn program's allocator traffic is
+ * a torrent of short-lived blocks in a handful of sizes: the self-hosted
+ * compiler compiling itself makes 2.06e8 of them, over half of those 32
+ * bytes. Two things about glibc's malloc cost real money on that shape. The
+ * pair costs about 8.7ns, which is 1.8s of a 10.3s compile; and it never
+ * gives the pages back, because small chunks sit under an arena's top chunk
+ * and the resident set is therefore the historical high-water mark.
+ *
+ * So blocks are carved from 64KiB size-class slabs inside one reserved
+ * range. Three consequences, in the order they matter:
+ *
+ *   * A block carries no header of ours. Which slab a pointer belongs to is
+ *     a subtraction and a shift from the base of the reserve, and the slab's
+ *     bookkeeping lives in a side array indexed by that number. This is what
+ *     keeps the resident set from growing rather than shrinking: a per-block
+ *     size word pushes the dominant 32-byte object into the next chunk size,
+ *     and a cache of free blocks with headers measured +18% to +37% resident
+ *     against plain malloc on every load tried.
+ *   * Allocation is a pop from the current slab's free list, freeing a push
+ *     onto the owning slab's. There is no bump pointer beside the free list:
+ *     mimalloc measured that second branch "consistently about 2% worse"
+ *     (free-list sharding in action, 2.2), so a slab links all of its blocks
+ *     when it is carved.
+ *   * A slab whose last block is freed is retired: up to DAWN_SL_KEEP empty
+ *     slabs per class are held for reuse, and past that the pages go back to
+ *     the kernel with madvise(MADV_DONTNEED) while the address range returns
+ *     to the spare list. Retiring at the container is where every allocator
+ *     that gives memory back does it (mimalloc pages, jemalloc slabs,
+ *     tcmalloc spans). A bound on how many free *blocks* are cached, which
+ *     is the shape tried first, gives nothing back at all: what it bounds is
+ *     how much sits idle, and that was never the resident set.
+ *
+ * The one slab a class is currently allocating from is not retired when it
+ * empties. Without that, a class holding one object at a time would take the
+ * slow path on every single allocation; mimalloc says the same thing as a
+ * tick count ("important to not retire too quickly"), and one pinned slab
+ * per live class is the cheapest deterministic version of it.
+ *
+ * Requests over DAWN_SL_MAX go to malloc, which is why no size class has to
+ * cover them and why one range comparison answers "is this block mine".
+ *
+ * Single-threaded on purpose: only the thread `dawn_rt_main` starts ever
+ * runs Dawn code, so there is no lock here and none is needed.
+ *
+ * Which builds do not get any of this, and why, is in dawn_rt.h beside
+ * DAWN_SLAB_ACTIVE. */
+
+#if DAWN_SLAB_ACTIVE
+
+#include <sys/mman.h>
+
+/* The four the header states, under shorter names for the code that uses
+ * them on every line. */
+#define DAWN_SL_GRAIN DAWN_SLAB_GRAIN
+#define DAWN_SL_MAX DAWN_SLAB_MAX
+#define DAWN_SL_CLASSES DAWN_SLAB_CLASSES
+#define DAWN_SL_KEEP DAWN_SLAB_KEEP
+
+#define DAWN_SL_BITS 16 /* one slab is 64KiB */
+#define DAWN_SL_SIZE ((size_t)1 << DAWN_SL_BITS)
+#define DAWN_SL_SLOTS 16384u /* so the reserve is 1GiB of address space */
+
+/* The largest block has to fit, or a class would have no slab to live in.
+ * The smallest has to hold the free list's link. */
+_Static_assert(DAWN_SL_MAX <= DAWN_SL_SIZE, "a block must fit inside a slab");
+_Static_assert(DAWN_SL_GRAIN >= sizeof(void *), "a free block holds one pointer");
+
+/* Where a slab is, beyond current-or-not: on its class's list of slabs with
+ * free blocks, on its class's list of empty ones, or on neither (full, or
+ * the class's current slab). */
+#define DAWN_SL_OFF 0
+#define DAWN_SL_PARTIAL 1
+#define DAWN_SL_EMPTY 2
+
+/* One row per 64KiB of the reserve, indexed by the slab's number. Kept out
+ * of the slab itself so a block has nothing but the program's bytes in it. */
+typedef struct dawn_sl_slab {
+  void *freelist;
+  struct dawn_sl_slab *next;
+  struct dawn_sl_slab *prev;
+  uint32_t used;
+  uint16_t cls; /* 0 while the slot holds no slab */
+  uint8_t list;
+} dawn_sl_slab;
+
+static dawn_sl_slab dawn_sl_grid[DAWN_SL_SLOTS];
+static dawn_sl_slab *dawn_sl_spare; /* retired slots, address range reusable */
+static uint32_t dawn_sl_next;       /* slots carved out of the reserve so far */
+
+/* The reserve, as one subtraction and one unsigned compare. Zero span before
+ * the first allocation and after a failed reservation, so the test is false
+ * of every pointer and the allocator is simply absent. */
+static uintptr_t dawn_sl_lo;
+static size_t dawn_sl_span;
+static int dawn_sl_refused; /* mmap said no; do not ask again */
+
+#define DAWN_SL_MINE(p) (((uintptr_t)(p) - dawn_sl_lo) < dawn_sl_span)
+
+/* The current slab of each class, with its free list hoisted out so the fast
+ * path is one load and one branch. */
+static void *dawn_sl_head[DAWN_SL_CLASSES];
+static dawn_sl_slab *dawn_sl_cur[DAWN_SL_CLASSES];
+static dawn_sl_slab *dawn_sl_partial[DAWN_SL_CLASSES];
+static dawn_sl_slab *dawn_sl_empty[DAWN_SL_CLASSES];
+static uint32_t dawn_sl_empty_n[DAWN_SL_CLASSES];
+static uint64_t dawn_sl_live;    /* slabs holding pages */
+static uint64_t dawn_sl_retired; /* slabs whose pages went back to the kernel */
+
+static char *dawn_sl_addr(const dawn_sl_slab *s) {
+  return (char *)dawn_sl_lo + (size_t)(s - dawn_sl_grid) * DAWN_SL_SIZE;
+}
+
+static void dawn_sl_link(dawn_sl_slab **list, dawn_sl_slab *s, uint8_t which) {
+  s->prev = NULL;
+  s->next = *list;
+  if (*list != NULL) {
+    (*list)->prev = s;
+  }
+  *list = s;
+  s->list = which;
+}
+
+static void dawn_sl_unlink(dawn_sl_slab **list, dawn_sl_slab *s) {
+  if (s->prev != NULL) {
+    s->prev->next = s->next;
+  } else {
+    *list = s->next;
+  }
+  if (s->next != NULL) {
+    s->next->prev = s->prev;
+  }
+  s->prev = NULL;
+  s->next = NULL;
+  s->list = DAWN_SL_OFF;
+}
+
+/* Give a slab every block of one class, threaded through the blocks. Run
+ * once per slab that is carved and once per slab that empties, so that "a
+ * slab with nothing live in it holds all of its blocks" is written down
+ * rather than inferred from the free path having pushed each one back. The
+ * cost is amortised: a slab only stops being current after it has handed out
+ * every block it has, so a relayout is one store per allocation it served. */
+static void dawn_sl_layout(dawn_sl_slab *s, size_t cls) {
+  size_t bsize = cls * DAWN_SL_GRAIN;
+  char *start = dawn_sl_addr(s);
+  void *fl = NULL;
+  /* Backwards, so the list comes out in address order. */
+  for (size_t i = DAWN_SL_SIZE / bsize; i-- > 0;) {
+    void *b = start + i * bsize;
+    *(void **)b = fl;
+    fl = b;
+  }
+  s->freelist = fl;
+  s->used = 0;
+  s->cls = (uint16_t)cls;
+}
+
+/* Take a slot and lay a class's blocks out in it. NULL when the reserve is
+ * used up, which is a caller's cue to fall back to malloc rather than a
+ * fatal condition: a program whose shape the 1GiB reserve does not fit
+ * should get slower, not stop. */
+static dawn_sl_slab *dawn_sl_carve(size_t cls) {
+  dawn_sl_slab *s;
+  if (dawn_sl_spare != NULL) {
+    s = dawn_sl_spare;
+    dawn_sl_spare = s->next;
+  } else if (dawn_sl_next < DAWN_SL_SLOTS) {
+    s = &dawn_sl_grid[dawn_sl_next++];
+  } else {
+    return NULL;
+  }
+  dawn_sl_layout(s, cls);
+  s->next = NULL;
+  s->prev = NULL;
+  s->list = DAWN_SL_OFF;
+  dawn_sl_live++;
+  return s;
+}
+
+static void dawn_sl_reserve(void) {
+  void *p = mmap(NULL, (size_t)DAWN_SL_SLOTS * DAWN_SL_SIZE, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (p == MAP_FAILED) {
+    dawn_sl_refused = 1;
+    return;
+  }
+  dawn_sl_lo = (uintptr_t)p;
+  dawn_sl_span = (size_t)DAWN_SL_SLOTS * DAWN_SL_SIZE;
+}
+
+/* The class's free list is empty: find or make a slab, make it current, and
+ * hand out its first block. Reached on the first allocation of every class
+ * too, which is where the reserve gets made. */
+static void *dawn_sl_slow(size_t cls, size_t n) {
+  if (dawn_sl_span == 0) {
+    if (dawn_sl_refused) {
+      return malloc(n);
+    }
+    dawn_sl_reserve();
+    if (dawn_sl_span == 0) {
+      return malloc(n);
+    }
+  }
+  dawn_sl_slab *s = dawn_sl_partial[cls];
+  if (s != NULL) {
+    dawn_sl_unlink(&dawn_sl_partial[cls], s);
+  } else if ((s = dawn_sl_empty[cls]) != NULL) {
+    dawn_sl_unlink(&dawn_sl_empty[cls], s);
+    dawn_sl_empty_n[cls]--;
+  } else if ((s = dawn_sl_carve(cls)) == NULL) {
+    return malloc(n);
+  }
+  /* The class's previous current slab, if there was one, has an empty free
+   * list -- that is why this is being called -- so nothing has to be written
+   * back to it. It is now full and on no list; a free into it will link it
+   * onto the partial list. */
+  dawn_sl_cur[cls] = s;
+  void *b = s->freelist;
+  dawn_sl_head[cls] = *(void **)b;
+  s->freelist = NULL;
+  s->used++;
+  return b;
+}
+
+static void *dawn_sl_get(size_t n) {
+  size_t cls = (n + (DAWN_SL_GRAIN - 1)) / DAWN_SL_GRAIN;
+  if (cls == 0) {
+    cls = 1; /* a zero-byte request still answers a distinct address */
+  }
+  if (cls >= DAWN_SL_CLASSES) {
+    return malloc(n);
+  }
+  void *b = dawn_sl_head[cls];
+  if (b == NULL) {
+    return dawn_sl_slow(cls, n);
+  }
+  dawn_sl_head[cls] = *(void **)b;
+  dawn_sl_cur[cls]->used++;
+  return b;
+}
+
+static void dawn_sl_retire(dawn_sl_slab *s, size_t cls) {
+  if (s->list == DAWN_SL_PARTIAL) {
+    dawn_sl_unlink(&dawn_sl_partial[cls], s);
+  }
+  if (dawn_sl_empty_n[cls] < DAWN_SL_KEEP) {
+    dawn_sl_layout(s, cls);
+    dawn_sl_link(&dawn_sl_empty[cls], s, DAWN_SL_EMPTY);
+    dawn_sl_empty_n[cls]++;
+    return;
+  }
+  /* Past the bound the pages go back. The address range does not: the slot
+   * joins the spare list, so a program that churns slabs does not eat the
+   * reserve. */
+  madvise(dawn_sl_addr(s), DAWN_SL_SIZE, MADV_DONTNEED);
+  s->freelist = NULL;
+  s->prev = NULL;
+  s->cls = 0;
+  s->list = DAWN_SL_OFF;
+  s->next = dawn_sl_spare;
+  dawn_sl_spare = s;
+  dawn_sl_live--;
+  dawn_sl_retired++;
+}
+
+static void dawn_sl_put(void *p) {
+  dawn_sl_slab *s = &dawn_sl_grid[((uintptr_t)p - dawn_sl_lo) >> DAWN_SL_BITS];
+  size_t cls = s->cls;
+  if (s == dawn_sl_cur[cls]) {
+    *(void **)p = dawn_sl_head[cls];
+    dawn_sl_head[cls] = p;
+    s->used--; /* the current slab is kept even at zero; see the heading */
+    return;
+  }
+  *(void **)p = s->freelist;
+  s->freelist = p;
+  if (s->list == DAWN_SL_OFF) {
+    dawn_sl_link(&dawn_sl_partial[cls], s, DAWN_SL_PARTIAL);
+  }
+  if (--s->used == 0) {
+    dawn_sl_retire(s, cls);
+  }
+}
+
+static void *dawn_sl_realloc(void *p, size_t n) {
+  if (p == NULL) {
+    return dawn_sl_get(n);
+  }
+  if (!DAWN_SL_MINE(p)) {
+    /* A block malloc made stays with malloc, in both directions: its size is
+     * not written down anywhere this code can read. */
+    return realloc(p, n);
+  }
+  size_t old = (size_t)dawn_sl_grid[((uintptr_t)p - dawn_sl_lo) >> DAWN_SL_BITS].cls *
+               DAWN_SL_GRAIN;
+  size_t cls = (n + (DAWN_SL_GRAIN - 1)) / DAWN_SL_GRAIN;
+  if (cls != 0 && cls < DAWN_SL_CLASSES && cls * DAWN_SL_GRAIN == old) {
+    return p;
+  }
+  void *q = dawn_sl_get(n);
+  if (q == NULL) {
+    return NULL;
+  }
+  memcpy(q, p, n < old ? n : old);
+  dawn_sl_put(p);
+  return q;
+}
+
+void dawn_free(void *p) {
+  if (DAWN_SL_MINE(p)) {
+    dawn_sl_put(p);
+    return;
+  }
+  free(p);
+}
+
+bool dawn_slab_owns(const void *p) { return DAWN_SL_MINE(p); }
+
+void dawn_slab_stats(uint64_t *live, uint64_t *cached, uint64_t *retired) {
+  uint64_t held = 0;
+  for (size_t c = 0; c < DAWN_SL_CLASSES; c++) {
+    held += dawn_sl_empty_n[c];
+  }
+  *live = dawn_sl_live;
+  *cached = held;
+  *retired = dawn_sl_retired;
+}
+
+/* From here down the runtime's allocation is the allocator's, everywhere and
+ * without a call site having to remember. The macros reach this translation
+ * unit only, which is why `dawn_free` is exported for the one caller that is
+ * not in it. */
+#define malloc(n) dawn_sl_get(n)
+#define realloc(p, n) dawn_sl_realloc((p), (n))
+#define free(p) dawn_free(p)
+
+#else
+
+void dawn_free(void *p) { free(p); }
+
+bool dawn_slab_owns(const void *p) {
+  (void)p;
+  return false;
+}
+
+void dawn_slab_stats(uint64_t *live, uint64_t *cached, uint64_t *retired) {
+  *live = 0;
+  *cached = 0;
+  *retired = 0;
+}
+
+#endif /* DAWN_SLAB_ACTIVE */
 
 static int dawn_argc;
 static char **dawn_argv;

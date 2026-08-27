@@ -401,6 +401,70 @@ void *dawn_dup(void *p);
 void dawn_drop(void *p);
 bool dawn_is_unique(const void *p);
 
+/* ---- the small-object allocator -----------------------------------------
+ *
+ * Blocks come from size-class slabs the runtime carves out of one reserved
+ * address range, not from malloc; the shape and the reasons are in dawn_rt.c
+ * under the same heading. Two things about it leave the translation unit.
+ *
+ * The first is `dawn_free`. The runtime's own `free` calls are redirected by
+ * a macro inside dawn_rt.c, which reaches nothing else, so a block the
+ * runtime made and another translation unit releases has to be released
+ * through this. There is one such caller (scripts/rc-contract/rc_test.c),
+ * and a grep guard in scripts/rc-contract/run.sh keeps the count at one.
+ *
+ * The second is `DAWN_SLAB_ACTIVE`, because three builds do not get the slab
+ * and one of them has to be able to say so:
+ *
+ *   * AddressSanitizer and LeakSanitizer. LSan finds leaks by walking
+ *     malloc's own book of live blocks; objects carved out of our own
+ *     mapping are not in that book, so every leak assertion in spike-native
+ *     and rc-contract would pass without being able to fail. Measured, not
+ *     supposed: a binary run with DAWN_RC_LEAK=1, which leaks every object
+ *     on purpose, reports 5185 leaked bytes and exits 1 on a plain build and
+ *     prints nothing and exits 0 on a slab build. Use-after-free detection
+ *     goes the same way, a freed block staying addressable on a free list.
+ *     Keeping malloc under the sanitizers keeps both, at the price that the
+ *     sanitized builds no longer cover the allocator; the allocator's own
+ *     assertions and mutants live in scripts/rc-contract instead.
+ *   * wasm32-wasi, which has no sys/mman.h, no madvise and no MAP_NORESERVE.
+ *   * -DDAWN_NO_SLAB, which is how the allocator is measured against its own
+ *     absence, and the escape hatch for a platform where MADV_DONTNEED does
+ *     not actually return pages (macOS wants MADV_FREE).
+ */
+void dawn_free(void *p);
+
+#if defined(DAWN_NO_SLAB) || defined(__wasi__) || defined(__SANITIZE_ADDRESS__)
+#define DAWN_SLAB_ACTIVE 0
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define DAWN_SLAB_ACTIVE 0
+#else
+#define DAWN_SLAB_ACTIVE 1
+#endif
+#else
+#define DAWN_SLAB_ACTIVE 1
+#endif
+
+/* The shape, out here because the bound is a claim about the program rather
+ * than about the allocator's insides: at most DAWN_SLAB_KEEP empty slabs are
+ * held per size class, over DAWN_SLAB_CLASSES classes, at 64KiB each, so no
+ * more than 32MiB ever sits idle whatever the program does. Requests over
+ * DAWN_SLAB_MAX are malloc's. scripts/rc-contract reads these. */
+#define DAWN_SLAB_GRAIN 16u /* size-class step, and the block alignment */
+#define DAWN_SLAB_MAX 2048u /* a bigger request goes to malloc */
+#define DAWN_SLAB_CLASSES (DAWN_SLAB_MAX / DAWN_SLAB_GRAIN + 1u)
+#define DAWN_SLAB_KEEP 4u
+
+/* Read-only observation ports, for the contract test. Both answer as if the
+ * allocator were absent when it is: `dawn_slab_owns` is false of everything
+ * and the counters stay zero, so a caller that cannot tell the builds apart
+ * reads a bypassed build as one that never allocated rather than as one that
+ * passed. `live` counts slabs holding pages, `cached` the empty ones held
+ * for reuse, `retired` the slabs whose pages went back to the kernel. */
+bool dawn_slab_owns(const void *p);
+void dawn_slab_stats(uint64_t *live, uint64_t *cached, uint64_t *retired);
+
 /* ---- unwind cleanup (#193 ARC-05) ---------------------------------------
  *
  * A raise travels by forced unwind (dawn_rt.c, "landing at a handler"), and
