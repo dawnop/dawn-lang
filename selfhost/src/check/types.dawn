@@ -970,7 +970,14 @@ pub fn ctor_jvm_name(adts: Adts, c: CtorI) -> String = {
 ## ambiguous edge is a function return followed by the outer function's effect:
 ## without grouping, that suffix belongs to the inner function. Other type
 ## contexts have their own closing delimiter and need no defensive parentheses.
-fn ty_show_at(adts: Adts, t: Ty, group_fn: Bool) -> String =
+##
+## `java_fqn` picks which of a `TyJava`'s two names comes out. Every reader
+## surface takes the short one -- a diagnostic, a hover, the reference -- and
+## that is what `ty_show` passes. The long one has exactly one caller, the
+## builtin-declaration mirror, which needs a rendering that *parses*: `Object`
+## is a short name no `use java` line brought into scope, so `cast`'s
+## signature is only Dawn source when it is spelled `java.lang.Object`.
+fn ty_show_at(adts: Adts, t: Ty, group_fn: Bool, java_fqn: Bool) -> String =
   match t {
     TyInt -> "Int"
     TyFloat -> "Float"
@@ -986,39 +993,41 @@ fn ty_show_at(adts: Adts, t: Ty, group_fn: Bool) -> String =
       if len(targs) == 0 {
         name
       } else {
-        name ++ "[" ++ join(map(targs, x => ty_show_at(adts, x, false)), ", ") ++ "]"
+        name ++ "[" ++ join(map(targs, x => ty_show_at(adts, x, false, java_fqn)), ", ") ++ "]"
       }
     }
-    TyList(e) -> "List[" ++ ty_show_at(adts, e, false) ++ "]"
-    TyMap(k, v) -> "Map[" ++ ty_show_at(adts, k, false) ++ ", " ++
-      ty_show_at(adts, v, false) ++ "]"
-    TySet(e) -> "Set[" ++ ty_show_at(adts, e, false) ++ "]"
-    TyArray(e) -> "Array[" ++ ty_show_at(adts, e, false) ++ "]"
-    TyJava(_, display) -> display
+    TyList(e) -> "List[" ++ ty_show_at(adts, e, false, java_fqn) ++ "]"
+    TyMap(k, v) -> "Map[" ++ ty_show_at(adts, k, false, java_fqn) ++ ", " ++
+      ty_show_at(adts, v, false, java_fqn) ++ "]"
+    TySet(e) -> "Set[" ++ ty_show_at(adts, e, false, java_fqn) ++ "]"
+    TyArray(e) -> "Array[" ++ ty_show_at(adts, e, false, java_fqn) ++ "]"
+    TyJava(fqcn, display) -> if java_fqn { fqcn } else { display }
     # the name, never the target: a diagnostic outside the declaring module
     # must not leak what the module is hiding
     TyOpaque(_, name, _, args, _) ->
       if len(args) == 0 {
         name
       } else {
-        name ++ "[" ++ join(map(args, x => ty_show_at(adts, x, false)), ", ") ++ "]"
+        name ++ "[" ++ join(map(args, x => ty_show_at(adts, x, false, java_fqn)), ", ") ++ "]"
       }
-    TyTuple(elems) -> "(" ++ join(map(elems, x => ty_show_at(adts, x, false)), ", ") ++ ")"
+    TyTuple(elems) ->
+      "(" ++ join(map(elems, x => ty_show_at(adts, x, false, java_fqn)), ", ") ++ ")"
     TyFn(params, ret, eff) -> {
-      let shown = "fn(" ++ join(map(params, x => ty_show_at(adts, x, false)), ", ") ++
-        ") -> " ++ ty_show_at(adts, ret, eff != EPure) ++ eff_suffix(eff)
+      let shown = "fn(" ++
+        join(map(params, x => ty_show_at(adts, x, false, java_fqn)), ", ") ++
+        ") -> " ++ ty_show_at(adts, ret, eff != EPure, java_fqn) ++ eff_suffix(eff)
       if group_fn { "(" ++ shown ++ ")" } else { shown }
     }
-    TyAssoc(s, _, n) -> ty_show_at(adts, s, false) ++ "." ++ n
+    TyAssoc(s, _, n) -> ty_show_at(adts, s, false, java_fqn) ++ "." ++ n
   }
 
-pub fn ty_show(adts: Adts, t: Ty) -> String = ty_show_at(adts, t, false)
+pub fn ty_show(adts: Adts, t: Ty) -> String = ty_show_at(adts, t, false, false)
 
 ## Render the return type of a function before appending that function's
 ## effect suffix. A non-pure outer function must group a returned function type
 ## so parse(show(t)) assigns each effect to the same layer.
 pub fn fn_return_show(adts: Adts, ret: Ty, outer_eff: Eff) -> String =
-  ty_show_at(adts, ret, outer_eff != EPure)
+  ty_show_at(adts, ret, outer_eff != EPure, false)
 
 ## Render a constructor like Kotlin CtorInfo.render (used in diagnostics).
 pub fn ctor_render(adts: Adts, c: CtorI) -> String = {
@@ -1965,7 +1974,19 @@ pub fn assoc_effect_advice(adts: Adts, t: TraitI) -> String =
   "and write the method's row as `!" ++ ty_show(adts, t.tvar) ++ ".E`"
 
 ## Render a signature like Kotlin FnSig.render (used in golden dumps and docs).
-pub fn sig_render(adts: Adts, traits: Traits, s: Sig) -> String = {
+pub fn sig_render(adts: Adts, traits: Traits, s: Sig) -> String =
+  sig_render_at(adts, traits, s, false)
+
+## The same rendering with every `TyJava` spelled by its fully qualified name,
+## which is what a mirror of the builtin table needs: `cast`'s parameter is
+## `java.lang.Object`, and the short `Object` the reader surfaces print is not
+## a type any Dawn file has in scope. One caller (the builtin-declaration
+## mirror, scripts/builtin-decl-contract) and one difference; `sig_render`
+## above is what everything else keeps getting.
+pub fn sig_render_fqn(adts: Adts, traits: Traits, s: Sig) -> String =
+  sig_render_at(adts, traits, s, true)
+
+fn sig_render_at(adts: Adts, traits: Traits, s: Sig, java_fqn: Bool) -> String = {
   var parts: List[String] = []
   var i = 0
   for v in s.tparams {
@@ -2010,11 +2031,11 @@ pub fn sig_render(adts: Adts, traits: Traits, s: Sig) -> String = {
       Some(true) -> " = ..."
       _ -> ""
     }
-    ps = ps ++ [pn ++ ": " ++ ty_show(adts, pt) ++ dm]
+    ps = ps ++ [pn ++ ": " ++ ty_show_at(adts, pt, false, java_fqn) ++ dm]
     j = j + 1
   }
   "fn " ++ s.name ++ tp ++ "(" ++ join(ps, ", ") ++ ") -> " ++
-    fn_return_show(adts, s.ret, s.eff) ++ eff_suffix(s.eff)
+    ty_show_at(adts, s.ret, s.eff != EPure, java_fqn) ++ eff_suffix(s.eff)
 }
 
 # ---- prelude: Option / Result, Ord, builtins ----
@@ -2827,11 +2848,19 @@ pub fn builtins() -> Map[String, Sig] = {
     # criterion is about the row the primitive raises, not about the row its
     # argument may raise (§7.4), which is why the binder and the `!io` sit in
     # one signature without contradiction.
+    #
+    # The third parameter is `body` and not `use`, which is what it was called
+    # until the builtin table grew a mirror a reader can paste (selfhost/
+    # builtins.dawn). `use` is a keyword, so `bracket(r, close, use: f)` is
+    # not writable and never was: the name was a rendering with no caller,
+    # and every place it surfaced -- hover, completion, `doc --builtins`, the
+    # spec -- printed a signature that does not parse. Renaming it costs
+    # nothing a caller can observe.
     eff1(
       Sig {
         ..bsig("bracket",
           [a, TyFn([a], TyUnit, e), TyFn([a], b, e)],
-          ["resource", "release", "use"], b),
+          ["resource", "release", "body"], b),
         tparams: [a, b]
       },
       e
@@ -3691,6 +3720,28 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
+  # The one entry that renders two ways. `Object` is what a reader wants and
+  # what every consumer of `sig_render` gets; `java.lang.Object` is what a
+  # mirror of this table needs, because the short name is in no file's scope
+  # and a signature carrying it is not Dawn source. The two are asserted
+  # together so neither can be changed alone.
+  match map.get(bs, "cast") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn cast[T](x: Object) -> Result[T, ForeignError]"
+      assert sig_render_fqn(adts, traits, s) ==
+        "fn cast[T](x: java.lang.Object) -> Result[T, ForeignError]"
+    }
+    None -> { assert false }
+  }
+  # and an entry with no Java type in it renders the same under both, which is
+  # what "one difference" means
+  match map.get(bs, "map_entries") {
+    Some(s) -> {
+      assert sig_render_fqn(adts, traits, s) == sig_render(adts, traits, s)
+    }
+    None -> { assert false }
+  }
   assert map_size2(bs) == 95
 }
 
@@ -3796,9 +3847,11 @@ test "bracket protects a resource and hands the body's own answer back" {
   let bs = builtins()
   match map.get(bs, "bracket") {
     Some(s) -> {
+      # `body`, not `use`: the parameter is nameable in a call only if its
+      # name is an identifier, and `use` is a keyword (see the table)
       assert sig_render(adts, traits, s) ==
         "fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, " ++
-        "use: fn(A) -> B !e) -> B !e"
+        "body: fn(A) -> B !e) -> B !e"
     }
     None -> { assert false }
   }

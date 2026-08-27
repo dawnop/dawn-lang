@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 30d11c13ea91afd7 -->
+<!-- doc-check: translation-of docs/spec.md @ 4335a370ddc56a75 -->
 
 # Dawn Language Specification
 
@@ -2832,8 +2832,12 @@ Dawn has no `try`/`finally`, and does not intend to (the pair of barriers in §9
 back" is carried by a third builtin:
 
 ```dawn
-fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, use: fn(A) -> B !e) -> B !e
+fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e) -> B !e
 ```
+
+The third parameter is named `body`: `use` is a keyword, so the call
+`bracket(r, close, use: f)` cannot be written at all, and that spelling never had a
+caller -- it only ever appeared in the rendered signature.
 
 ```dawn
 let f = FileOutputStream.new(path)          # acquire the resource: ordinary code, before the call
@@ -2849,19 +2853,19 @@ no window at all (Koka's `finally` is the same, and likewise takes the resource
 directly). **Acquiring the resource is therefore ordinary code before the call** — a
 failure there needs no release, because nothing has been acquired yet.
 
-**`use` comes last** to leave the road open for `with` (§4.10, landed 2026-07-31): that
-sugar attaches "the rest of the block" as the **last** argument, so a primitive with
-`use` in the middle would have to be respelled. Once the resource is acquired up front,
+**It comes last** to leave the road open for `with` (§4.10, landed 2026-07-31): that
+sugar attaches "the rest of the block" as the **last** argument, so a primitive holding
+it in the middle would have to be respelled. Once the resource is acquired up front,
 such a site does not need a single lambda:
 
 ```dawn
 with f <- bracket(open(path), close)
-...the rest of the block is the use...
+...the rest of the block is the body...
 ```
 
 Three guarantees:
 
-- **`release` runs exactly once on every path** — `use` returning normally, panicking,
+- **`release` runs exactly once on every path** — `body` returning normally, panicking,
   faulting; all three run it, and run it only once.
 - **The original failure keeps propagating unchanged**: `kind`/`message` verbatim, **a
   panic is still a panic and a fault is still a fault**. So `catch_fault` still does not

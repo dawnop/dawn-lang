@@ -2281,8 +2281,11 @@ Dawn 没有 `try`/`finally`，也不打算有（§9.8 那对屏障是**拦**，�
 「无论怎么退出都要把资源还回去」这件事由第三个内建承担：
 
 ```dawn
-fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, use: fn(A) -> B !e) -> B !e
+fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e) -> B !e
 ```
+
+第三个参数叫 `body`：`use` 是关键字，`bracket(r, close, use: f)` 这个调用写不出来，
+所以那个拼写从来没有调用方，只在渲染出的签名里出现。
 
 ```dawn
 let f = FileOutputStream.new(path)          # 取资源：普通代码，在调用之前
@@ -2295,18 +2298,18 @@ Dawn 没有这种东西：失败只从程序自己调用的代码里发出，而
 不跑调用方的任何代码，所以 thunk 堵不到任何窗口（Koka 的 `finally` 同理，也是直接收资源）。
 **取资源因此是调用之前的普通代码**——那里失败无需释放，因为还没取到。
 
-**`use` 在最后**是给 `with` 留的路（§4.10，2026-07-31 落地）：那个糖把「剩下的块」当
-**最后一个**实参附加，`use` 在中间的原语就得改拼写。资源提前取之后，那种站点一个
+**它在最后**是给 `with` 留的路（§4.10，2026-07-31 落地）：那个糖把「剩下的块」当
+**最后一个**实参附加，把它放在中间的原语就得改拼写。资源提前取之后，那种站点一个
 lambda 都不用写：
 
 ```dawn
 with f <- bracket(open(path), close)
-...块剩下的部分就是 use...
+...块剩下的部分就是 body...
 ```
 
 三条保证：
 
-- **`release` 每条路径恰好跑一次**——`use` 正常返回、panic、fault，三条都跑，且只跑一次。
+- **`release` 每条路径恰好跑一次**——`body` 正常返回、panic、fault，三条都跑，且只跑一次。
 - **原失败原样继续传播**：`kind`/`message` 逐字不变，**panic 仍是 panic、fault 仍是 fault**。
   所以 `catch_fault` 依然不拦一个穿过 bracket 的 panic（native 侧靠 re-raise 复原那个
   种类位，不是重新推断；两个后端的实测比对在 `scripts/spike-native/bracket.dawn` 与
