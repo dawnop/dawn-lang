@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dawn todo, keyed (wasm reactor + DOM bridge)</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font: 16px/1.5 ui-sans-serif, system-ui, sans-serif;
+        margin: 0;
+        padding: 3rem 1.5rem;
+        display: flex;
+        justify-content: center;
+      }
+      main { width: min(38rem, 100%); }
+      h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.02em; margin: 0 0 0.75rem; }
+      .todo { border: 1px solid rgb(128 128 128 / 0.35); border-radius: 8px; padding: 1.25rem; }
+      .todo.editing { border-color: rgb(70 120 200 / 0.8); }
+      .compose { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; }
+      .field {
+        flex: 1;
+        padding: 0.25rem 0.5rem;
+        border: 1px solid rgb(128 128 128 / 0.4);
+        border-radius: 6px;
+        font: inherit;
+        font-family: ui-monospace, monospace;
+        background: transparent;
+        color: inherit;
+      }
+      .field:focus { outline: none; border-color: rgb(70 120 200 / 0.9); }
+      .filters { display: flex; gap: 0.4rem; margin-bottom: 0.75rem; }
+      .filter.on { font-weight: 600; text-decoration: underline; }
+      .list { list-style: none; margin: 0 0 0.75rem; padding: 0; }
+      .row { display: flex; gap: 0.5rem; align-items: center; padding: 0.15rem 0; }
+      .row.done .title { opacity: 0.5; text-decoration: line-through; }
+      .row .title { flex: 1; cursor: pointer; }
+      .row.editing .draft {
+        flex: 1;
+        font: inherit;
+        font-family: ui-monospace, monospace;
+        background: transparent;
+        color: inherit;
+        border: none;
+        border-bottom: 1px solid rgb(70 120 200 / 0.9);
+      }
+      .row.editing .draft:focus { outline: none; }
+      .status { margin: 0; font-size: 0.9rem; opacity: 0.7; }
+      button { font: inherit; border-radius: 6px; cursor: pointer; }
+      #keyed { margin-top: 1rem; font-size: 0.85rem; opacity: 0.75; }
+      #error { margin-top: 1rem; min-height: 1.5rem; font-size: 0.9rem; color: rgb(200 60 60); }
+      #about { margin-top: 2rem; font-size: 0.85rem; opacity: 0.75; }
+      code { font-family: ui-monospace, monospace; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="app"></div>
+      <p id="error"></p>
+      <p id="about">
+        Every edit is a message. A listener declares that it wants the
+        element's value, the bridge brings back that one string with the event,
+        and the guest folds it into the message the listener named, so a title
+        of any length costs one turn and pasting works. Click a row's title to
+        edit it. Press <code>boom</code> to make the guest's
+        <code>update</code> panic: the failure lands inside wasm, the page
+        keeps the document it has, and the next press works.
+      </p>
+      <p id="keyed">
+        The rows are keyed by id. Open one for editing, leave the caret in the
+        middle of the text, then delete a row above it: the editor keeps the
+        focus and the caret does not move, because the reconciler paired that
+        row by its key and the bridge moved the element the document already
+        had. <code>examples/projects/tea_dom_todo</code> is the same
+        application without the keys, and is deliberately left that way.
+      </p>
+    </main>
+
+    <script>
+      // Outside the module on purpose. A module script that fails to load runs
+      // none of its own code, so the banner the module writes cannot report the
+      // one failure that keeps the module from loading: opened with file://,
+      // the import below is refused by CORS and the page stays blank with
+      // nothing said. This timer is the only thing left that can speak. It
+      // stays quiet if anything mounted or if the module already reported, and
+      // the module clears it on success.
+      window.__mountWatchdog = setTimeout(() => {
+        const banner = document.getElementById('error');
+        if (document.getElementById('app').childNodes.length === 0 && banner.textContent === '') {
+          banner.textContent =
+            'nothing mounted: serve the repository root over http and open this ' +
+            'page under it. file:// cannot load the module. See ' +
+            'packages/tea-dom/js/README.md.';
+        }
+      }, 3000);
+    </script>
+
+    <script type="module">
+      // Serve the *repository root* over http and open this page under it. The
+      // root and not this directory: the import below reaches back into
+      // packages/, and a document root at web/ would put that outside it.
+      // http and not file://, because a module script and `fetch` need an
+      // origin.
+      //
+      //   dawnc build --target wasm --reactor examples/projects/tea_dom_todo_keyed \
+      //     -o examples/projects/tea_dom_todo_keyed/web/todo.wasm
+      //   python3 -m http.server 8000
+      //   # http://localhost:8000/examples/projects/tea_dom_todo_keyed/web/
+      //
+      // The .wasm is a build artifact and is not in the repository.
+      import { mount } from '../../../../packages/tea-dom/js/app.mjs';
+
+      const banner = document.getElementById('error');
+      try {
+        await mount(await fetch('./todo.wasm'), document.getElementById('app'), {
+          onError: (reply) => {
+            banner.textContent = `${reply.kind}: ${reply.error}`;
+          },
+        });
+        clearTimeout(window.__mountWatchdog);
+      } catch (e) {
+        banner.textContent = String(e);
+        throw e;
+      }
+    </script>
+  </body>
+</html>

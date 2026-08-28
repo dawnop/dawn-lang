@@ -1,0 +1,455 @@
+# The pure half of the demo: model, messages, `update` and `view`. No io, no
+# wire format, no host, so every assertion below is `==` on a value.
+#
+# The keyed twin of examples/projects/tea_dom_todo, and dawn.toml says why the
+# two are separate projects. One line differs: the `<ul>` is built with
+# `dsl.keyed` and each row is named by the id it already carries, so the
+# reconciler pairs rows by identity instead of by position.
+#
+# What that buys is not on the wire and not in a patch count. It is that the
+# element a browser is holding state inside -- a caret, a selection, an IME
+# composition, the focus itself -- is still the same element after a row above
+# it is deleted. `move` and `insert` carry a node the document already has;
+# index pairing would rewrite it in place, and rewritten is indistinguishable
+# from correct in every transcript and wrong under a user's hands.
+#
+# Why a todo list and not a bigger counter. Three things the counter cannot
+# show up in a browser at all:
+#
+#   a child list whose *contents* vary   the counter's bar varies only in
+#                                        length, so index pairing is always
+#                                        right for it. Rows carry identity,
+#                                        and deleting one in the middle is
+#                                        where pairing has to know it.
+#   a draft the user is typing           text that belongs to one widget and
+#                                        to no persisted record. In this
+#                                        architecture it is a model field.
+#   a mode                               a row that is being edited is a
+#                                        different shape from a row that is
+#                                        not, decided by a field of the model
+#                                        rather than by the row.
+#
+# Two real `<input>`s, and what they cost. A listener declares that it wants
+# the element's value (`dsl.on_value`), the host brings that one string back,
+# and `Fill` folds it into the message the listener named. So a title is one
+# message however long it is, and pasting, an IME and a real keyboard all
+# work. What it does not buy is *fewer* fields: `draft` and `edit` are still
+# model fields, because the two boxes are controlled -- the view renders them,
+# so a patch can correct them and the document stays a function of the model.
+# Making them uncontrolled is what would cut the turns rather than the
+# messages, and it is a separate question.
+
+use std/list
+use std/str
+use tea_core/app.{App, update, view}
+use tea_core/diff.{Patch, RemoveKid, diff}
+use tea_core/tree.{key}
+use tea_dom/node.{Node, Text, Elem}
+use tea_dom/dsl.{el, keyed, on_click, on_value, text}
+use tea_dom/reactor.{Fill, fill}
+
+## One item. `id` is the identity the user means, and here it is also the key
+## the reconciler pairs by -- `view` spells it into the keyed `<ul>` below.
+pub type Todo = { id: Int, title: String, done: Bool }
+
+## Which items the list shows.
+pub type Filter =
+  | All
+  | Active
+  | Done
+derive Show
+
+## The whole model.
+##
+## `draft`, `edit` and `editing` are the three fields that exist because this
+## architecture has no local state: each is a piece of one widget's private
+## business lifted to the top of the application. `todos`, `next_id` and
+## `filter` are the parts a user would call the data.
+##
+## `editing` is which row is open, and `None` is a real state rather than a
+## missing one. It is not "where the keyboard is": that is the browser's to
+## know now, which is one thing an event payload took off the model.
+pub type Model = {
+  todos: List[Todo],
+  next_id: Int,
+  filter: Filter,
+  draft: String,
+  edit: String,
+  editing: Option[Int],
+}
+
+## What the buttons and the two fields mean.
+##
+## `SetDraft` and `SetEdit` are the two messages with a hole in them: the view
+## puts one in the tree with an empty string, the host brings back what the
+## field holds, and `fill` below is what puts the second into the first.
+pub type Msg =
+  | SetDraft(text: String)
+  | SetEdit(text: String)
+  | Add
+  | Toggle(id: Int)
+  | Drop(id: Int)
+  | Only(f: Filter)
+  | Edit(id: Int)
+  | Save
+  | Cancel
+  | Boom
+derive Show
+
+## The model a fresh page starts from.
+pub fn init() -> Model =
+  Model { todos: [], next_id: 1, filter: All, draft: "", edit: "", editing: None }
+
+## Where an event's payload lands.
+##
+## Two arms and a catch-all, and the catch-all is the point: every other
+## message comes from a button, arrives with no payload at all, and would be a
+## `bad-request` if the host tried to fill one in. A message's constructor is
+## what decides which field the text belongs to, and that decision is made
+## here, in the guest, which is why the host still cannot name a message.
+impl Fill[Msg] {
+  fn fill(m: Msg, payload: String) -> Msg =
+    match m {
+      SetDraft(_) -> SetDraft(text: payload)
+      SetEdit(_) -> SetEdit(text: payload)
+      _ -> m
+    }
+}
+
+impl App[Model] {
+  type Msg = Msg
+  type View = Node[Msg]
+
+  fn update(m: Model, msg: Msg) -> Model =
+    match msg {
+      SetDraft(t) -> Model { ..m, draft: t }
+      SetEdit(t) -> Model { ..m, edit: t }
+      Add ->
+        if str.trim(m.draft) == "" {
+          m
+        } else {
+          Model {
+            ..m,
+            todos: m.todos ++ [Todo { id: m.next_id, title: str.trim(m.draft), done: false }],
+            next_id: m.next_id + 1,
+            draft: "",
+          }
+        }
+      Toggle(id) ->
+        Model {
+          ..m,
+          todos: list.map(m.todos, t => if t.id == id { Todo { ..t, done: not t.done } } else { t }),
+        }
+      Drop(id) ->
+        Model {
+          ..m,
+          todos: list.filter(m.todos, t => t.id != id),
+          editing: if m.editing == Some(id) { None } else { m.editing },
+          edit: if m.editing == Some(id) { "" } else { m.edit },
+        }
+      Only(f) -> Model { ..m, filter: f }
+      Edit(id) -> Model { ..m, editing: Some(id), edit: title_of(m.todos, id) }
+      Save ->
+        match m.editing {
+          Some(id) ->
+            if str.trim(m.edit) == "" {
+              Model { ..m, editing: None, edit: "" }
+            } else {
+              Model {
+                ..m,
+                todos: retitle(m.todos, id, str.trim(m.edit)),
+                editing: None,
+                edit: "",
+              }
+            }
+          None -> m
+        }
+      Cancel -> Model { ..m, editing: None, edit: "" }
+      # Deliberate, and the only unhandled failure in this tree: `tea_dom`'s
+      # `serve` catches it at the boundary, the host keeps its model, and the
+      # next message is answered normally. The counter carries the same
+      # button for the same reason.
+      Boom -> panic("boom: update failed on purpose with " ++ to_string(len(m.todos)) ++ " todos")
+    }
+
+  fn view(m: Model) -> Node[Msg] = {
+    let heading: Node[Msg] = el("h1", [], [], [text("dawn todo")])
+    let composer: Node[Msg] = compose_row(m)
+    let filters: Node[Msg] = filter_row(m.filter)
+    # Keyed, which is the one line this application does not share with
+    # tea_dom_todo. A row's key is the id the user means, so deleting row 1
+    # while row 3 is open moves the open row rather than rewriting it, and the
+    # `<input>` the caret is in is the same element afterwards.
+    let items: Node[Msg] =
+      keyed(
+        "ul",
+        [("class", "list")],
+        [],
+        list.map(visible(m), t => (to_string(t.id), row(m, t))),
+      )
+    let status: Node[Msg] = el("p", [("class", "status")], [], [text(summary(m))])
+    el("div", [("class", root_class(m))], [], [heading, composer, filters, items, status])
+  }
+}
+
+# ---- update helpers ------------------------------------------------------
+
+fn title_of(ts: List[Todo], id: Int) -> String =
+  match list.find(ts, t => t.id == id) {
+    Some(t) -> t.title
+    None -> ""
+  }
+
+fn retitle(ts: List[Todo], id: Int, title: String) -> List[Todo] =
+  list.map(ts, t => if t.id == id { Todo { ..t, title: title } } else { t })
+
+## The items the current filter admits, in insertion order.
+pub fn visible(m: Model) -> List[Todo] =
+  match m.filter {
+    All -> m.todos
+    Active -> list.filter(m.todos, t => not t.done)
+    Done -> list.filter(m.todos, t => t.done)
+  }
+
+# ---- view parts ----------------------------------------------------------
+
+# The root's class is the only thing an edit changes outside the row being
+# edited, which makes "started editing" one `set-self` at [] in the patch
+# stream rather than something a reader has to infer.
+fn root_class(m: Model) -> String =
+  match m.editing {
+    Some(_) -> "todo editing"
+    None -> "todo"
+  }
+
+# The composer is a controlled field: the `value` prop renders `m.draft`, and
+# the listener asks for the element's value back. A message per `input` event
+# is a message per *edit* rather than per character -- a paste of forty
+# characters is one -- and the two halves are what keep the model and the
+# document agreeing on what is in the box.
+fn compose_row(m: Model) -> Node[Msg] = {
+  let field: Node[Msg] =
+    el(
+      "input",
+      [("class", "field"), ("value", m.draft)],
+      [on_value("input", SetDraft(text: ""))],
+      [],
+    )
+  let add: Node[Msg] = el("button", [("class", "add")], [on_click(Add)], [text("add")])
+  let boom: Node[Msg] = el("button", [("class", "boom")], [on_click(Boom)], [text("boom")])
+  el("div", [("class", "compose")], [], [field, add, boom])
+}
+
+fn filter_row(cur: Filter) -> Node[Msg] =
+  el("div", [("class", "filters")], [], [
+    filter_button("all", All, cur),
+    filter_button("active", Active, cur),
+    filter_button("done", Done, cur),
+  ])
+
+fn filter_button(label: String, which: Filter, cur: Filter) -> Node[Msg] =
+  el(
+    "button",
+    [("class", if which == cur { "filter on" } else { "filter" })],
+    [on_click(Only(f: which))],
+    [text(label)],
+  )
+
+# Two shapes, decided by a field of the model rather than by the row: an
+# `<li>` being edited has a field and two verbs, an `<li>` at rest has a
+# checkbox, a title and a delete. They agree on tag and on child count and on
+# nothing else, which is what makes an edited row in the tail of a deletion
+# an outright `replace` rather than a text patch.
+fn row(m: Model, t: Todo) -> Node[Msg] =
+  if m.editing == Some(t.id) {
+    el("li", [("class", "row editing")], [], [
+      el(
+        "input",
+        [("class", "draft"), ("value", m.edit)],
+        [on_value("input", SetEdit(text: ""))],
+        [],
+      ),
+      el("button", [("class", "save")], [on_click(Save)], [text("save")]),
+      el("button", [("class", "cancel")], [on_click(Cancel)], [text("cancel")]),
+    ])
+  } else {
+    el("li", [("class", if t.done { "row done" } else { "row" })], [], [
+      el("button", [("class", "box")], [on_click(Toggle(id: t.id))], [
+        text(if t.done { "[x]" } else { "[ ]" }),
+      ]),
+      el("span", [("class", "title")], [on_click(Edit(id: t.id))], [text(t.title)]),
+      el("button", [("class", "kill")], [on_click(Drop(id: t.id))], [text("x")]),
+    ])
+  }
+
+fn summary(m: Model) -> String = {
+  let total = len(m.todos)
+  let done = len(list.filter(m.todos, t => t.done))
+  "$done of $total done"
+}
+
+# ---- tests ---------------------------------------------------------------
+
+fn seeded(n: Int) -> Model = seed_go(init(), 1, n)
+
+fn seed_go(m: Model, i: Int, n: Int) -> Model =
+  if i > n {
+    m
+  } else {
+    seed_go(update(update(m, SetDraft(text: "task" ++ to_string(i))), Add), i + 1, n)
+  }
+
+test "a payload lands in the field its message names, and nowhere else" {
+  # `fill` is the whole of what an event payload can do to this application,
+  # so this is the whole of what has to be right about it: the text goes into
+  # the constructor the view put in the tree, and a message that carries no
+  # hole is returned unchanged rather than given one.
+  assert fill(SetDraft(text: ""), "buy milk") == SetDraft(text: "buy milk")
+  assert fill(SetEdit(text: "old"), "new") == SetEdit(text: "new")
+  assert fill(Add, "buy milk") == Add
+  assert fill(Toggle(id: 3), "buy milk") == Toggle(id: 3)
+  # And the field it lands in is the field `update` then writes.
+  let composing = update(init(), fill(SetDraft(text: ""), "buy milk"))
+  assert composing.draft == "buy milk"
+  assert composing.edit == ""
+}
+
+test "typing is one message whatever the length of what was typed" {
+  # The thing the key palette could not do. A title of any length, a paste, an
+  # IME commit: one `input` event, one message, one turn.
+  let m = update(init(), SetDraft(text: "buy milk and eggs"))
+  assert m.draft == "buy milk and eggs"
+  # A field the user emptied is an empty draft rather than an unchanged one:
+  # the payload is the field's value, not a keystroke to append.
+  assert update(m, SetDraft(text: "")).draft == ""
+}
+
+test "add commits the draft and clears it" {
+  let m = update(update(init(), SetDraft(text: "buy milk")), Add)
+  assert m.todos == [Todo { id: 1, title: "buy milk", done: false }]
+  assert m.draft == ""
+  assert m.next_id == 2
+  # An empty draft is not a todo.
+  assert update(m, Add) == m
+}
+
+test "toggle, drop and filter are the plain list operations" {
+  let m = seeded(3)
+  assert len(m.todos) == 3
+  let t = update(m, Toggle(id: 2))
+  assert t.todos[1].done
+  assert len(visible(Model { ..t, filter: Active })) == 2
+  assert len(visible(Model { ..t, filter: Done })) == 1
+  let d = update(t, Drop(id: 2))
+  assert len(d.todos) == 2
+  assert d.todos[1].id == 3
+}
+
+test "an edit is a second field, and the two never feed each other" {
+  let m = update(seeded(3), Edit(id: 2))
+  assert m.editing == Some(2)
+  assert m.edit == "task2"
+  let typing = update(m, SetEdit(text: "task2!"))
+  assert typing.edit == "task2!"
+  # The composer's draft is untouched while a row is open, which is the
+  # assertion the routing mutant in scripts/wasm-dom-contract breaks.
+  assert typing.draft == ""
+  let saved = update(typing, Save)
+  assert saved.todos[1].title == "task2!"
+  assert saved.editing == None
+  assert saved.edit == ""
+  # Cancel keeps the old title.
+  assert update(typing, Cancel).todos[1].title == "task2"
+}
+
+test "dropping the row being edited closes the editor" {
+  let m = update(seeded(3), Edit(id: 2))
+  let d = update(m, Drop(id: 2))
+  assert d.editing == None
+  assert d.edit == ""
+}
+
+test "the view is a value, so a frame is one assertion" {
+  let m = view(init())
+  match m {
+    Text(_) -> { assert false }
+    Elem(tag, props, on, kids, ..) -> {
+      assert tag == "div"
+      assert props == [("class", "todo")]
+      assert list.is_empty(on)
+      # heading, composer, filters, list, status
+      assert len(kids) == 5
+    }
+  }
+  match view(update(seeded(1), Edit(id: 1))) {
+    Text(_) -> { assert false }
+    Elem(_, props, ..) -> { assert props == [("class", "todo editing")] }
+  }
+}
+
+test "both fields are controlled, so the document renders the model" {
+  # A `value` prop carrying the model's text, on each of the two. Without it
+  # the field would be the browser's and nothing could clear it -- `Add`
+  # clears the draft, and this is what makes that reach the screen.
+  let field: Node[Msg] =
+    el(
+      "input",
+      [("class", "field"), ("value", "buy milk")],
+      [on_value("input", SetDraft(text: ""))],
+      [],
+    )
+  assert first_kid(compose_row(update(init(), SetDraft(text: "buy milk")))) == Some(field)
+  let editor: Node[Msg] =
+    el("input", [("class", "draft"), ("value", "task2")], [on_value("input", SetEdit(text: ""))], [])
+  let open = update(seeded(2), Edit(id: 2))
+  assert first_kid(row(open, Todo { id: 2, title: "task2", done: false })) == Some(editor)
+}
+
+## The whole reason this project is a second copy. Every other assertion in
+## this file passes on the unkeyed original too.
+test "each row is named by the id the user means" {
+  match list_of(view(seeded(3))) {
+    None -> { assert false }
+    Some(ul) ->
+      match ul {
+        Text(_) -> { assert false }
+        Elem(tag, _, _, rows, ..) -> {
+          assert tag == "ul"
+          assert map(rows, key) == [Some("1"), Some("2"), Some("3")]
+        }
+      }
+  }
+}
+
+## And what the keys are for. Index pairing would compare the open editor --
+## last of three before, second of two after -- against a resting row, and
+## answer `Replace`: a fresh `<input>`, and the caret that was in the old one
+## is gone with it. Keyed, the removal is the only structural op and the row
+## being edited is not mentioned at all, so the element survives.
+##
+## `Replace` is what a browser cannot hide and a transcript cannot see: the
+## document after it is right either way.
+test "deleting a row above the open one leaves the open one alone" {
+  let open = update(seeded(3), Edit(id: 3))
+  let after = update(open, Drop(id: 1))
+  let ps = diff(view(open), view(after))
+  # the list's own edit, and nothing under it
+  assert filter(ps, p => p.path == [3]) == [Patch { path: [3], op: RemoveKid(at: 0) }]
+  assert filter(ps, p => len(p.path) > 1 && p.path[0] == 3) == []
+  # the editor is still open, so the root is untouched and the count line is
+  # the only other thing that moved
+  assert filter(ps, p => p.path == []) == []
+  assert len(ps) == 2
+}
+
+fn list_of(n: Node[Msg]) -> Option[Node[Msg]] =
+  match n {
+    Text(_) -> None
+    Elem(_, _, _, ks, ..) -> get(ks, 3)
+  }
+
+fn first_kid(n: Node[Msg]) -> Option[Node[Msg]] =
+  match n {
+    Text(_) -> None
+    Elem(_, _, _, ks, ..) -> if list.is_empty(ks) { None } else { Some(ks[0]) }
+  }

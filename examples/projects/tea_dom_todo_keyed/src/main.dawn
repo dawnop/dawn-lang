@@ -1,0 +1,25 @@
+# The whole io surface of the demo: one call, exactly as tea_dom_counter's.
+#
+# The same binary answers a browser and a terminal, because the boundary is
+# lines of JSON on stdin and stdout and nothing else. Built for wasm
+# (`dawnc build --target wasm --reactor`) it is a reactor the page calls once
+# per event; run from a shell (`dawn run`) it is a session you can type at,
+# which is how the example-main contract holds it to a transcript without a
+# browser or a wasm engine in sight.
+#
+#   $ echo '{"op":"init"}' | dawn run examples/projects/tea_dom_todo_keyed
+
+use tea_core/app.{update, view}
+use tea_dom/node.{Node}
+use tea_dom/reactor.{serve}
+use codec.{encode, decode}
+use todo.{Model, Msg, init}
+
+pub fn main() -> Unit !io = serve(init(), encode, decode, upd, vw)
+
+# The two hooks, named rather than passed as lambdas: `serve` needs a concrete
+# message type to settle `M: Eq` against, and a lambda at the call site has no
+# expectation to settle it from.
+fn upd(m: Model, msg: Msg) -> Model = update(m, msg)
+
+fn vw(m: Model) -> Node[Msg] = view(m)
