@@ -6,7 +6,7 @@ use std/bytes
 use md/ast.{Block}
 use md/parser.{parse}
 use html/render.{render_doc}
-use html/page.{Assets, Lang, En, Zh, page_with_toc, shell, shell_ext, lang_path}
+use html/page.{Assets, Lang, En, Zh, page_with_toc, shell, shell_ext, lang_path, plain_assets}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
@@ -356,8 +356,10 @@ type TeaCopy = {
   aside: String,
   counter: String,
   counter_note: String,
+  counter_src: String,
   todo: String,
   todo_note: String,
+  todo_src: String,
   sources: String,
   stuck: String,
 }
@@ -379,12 +381,14 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
       counter_note: "Press <code>boom</code> to make the guest's <code>update</code> "
         ++ "panic. The failure lands inside wasm, the reply carries no patches, the "
         ++ "page keeps the document it has, and the next press works.",
+      counter_src: "View the source · counter.dawn",
       todo: "Todo list",
       todo_note: "Click a title to edit it. Then open a row, leave the caret in the "
         ++ "middle of the text, and delete a row above it: the editor keeps the focus "
         ++ "and the caret does not move. The rows are keyed by id, so the reconciler "
         ++ "asks the bridge to move the element the document already has rather than "
         ++ "to rewrite it.",
+      todo_src: "View the source · todo.dawn",
       sources: "Source: "
         ++ """<a href="$root/$counter_page"><code>tea_dom_counter</code></a>"""
         ++ " and "
@@ -410,10 +414,12 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
       counter: "计数器",
       counter_note: "按 <code>boom</code> 让 guest 的 <code>update</code> 故意 panic。"
         ++ "失败落在 wasm 内部，回包不带补丁，页面保留手里的文档，下一次点击照常工作。",
+      counter_src: "查看源码 · counter.dawn",
       todo: "待办列表",
       todo_note: "点标题即可编辑。然后打开一行、把光标留在文字中间，再删掉它上面的一行："
         ++ "编辑框仍然有焦点，光标也不动。行是按 id 做键的，所以协调器让桥去移动文档里已有的"
         ++ "那个元素，而不是重写它。",
+      todo_src: "查看源码 · todo.dawn",
       sources: "源码：图库里的 "
         ++ """<a href="$root/$counter_page"><code>tea_dom_counter</code></a>"""
         ++ " 与 "
@@ -435,7 +441,7 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
 ## as an attribute rather than in the script so that gen/links checks it --
 ## an import specifier or a `fetch` argument is a string in a program, and
 ## nothing here reads programs.
-fn tea_frame(id: String, wasm: String, heading: String, note: String) -> String =
+fn tea_frame(id: String, wasm: String, heading: String, note: String, source: String) -> String =
   """
 <h2>$heading</h2>
 <div class="tea-frame">
@@ -443,7 +449,34 @@ fn tea_frame(id: String, wasm: String, heading: String, note: String) -> String 
 <p class="tea-error"></p>
 </div>
 <p class="tea-note">$note</p>
+$source
 """
+
+## The pure half of one demo, read out of the tree and folded away under the
+## application it drives.
+##
+## Read at build time rather than transcribed, so the code a reader sees is the
+## code the reactor above it was built from: there is one copy of it and it is
+## the file. `highlight_dawn` is the gallery's highlighter and the markup is
+## gen/examples.file_section's, down to the class names, because `pre.dawn` in
+## the stylesheet is the same styling either way.
+##
+## Only the pure half: `main.dawn` is host wiring -- stdin, stdout and the
+## reactor's exports -- and the point of the page above is that none of that is
+## where the application lives.
+fn tea_source(summary: String, path: String) -> String !io = {
+  let src = str.trim(must_read(path))
+  `<details class="tea-src"><summary>` ++ escape_html(summary) ++ "</summary>\n"
+    ++ `<pre class="dawn"><code>` ++ highlight_dawn(src) ++ "</code></pre>\n</details>"
+}
+
+## Where each demo's pure half is. Named, because the whole promise of reading
+## them is that these two paths are the ones the reactors were built from
+## (site/build.sh builds `examples/projects/tea_dom_counter` and
+## `examples/projects/tea_dom_todo_keyed`).
+fn counter_source_path() -> String = "examples/projects/tea_dom_counter/src/counter.dawn"
+
+fn todo_source_path() -> String = "examples/projects/tea_dom_todo_keyed/src/todo.dawn"
 
 ## The demo page, in one language.
 ##
@@ -456,6 +489,13 @@ pub fn gen_tea(out: String, a: Assets, lang: Lang) -> Unit !io = {
       En -> ("$out/tea.html", ".")
       Zh -> ("$out/zh/tea.html", "..")
     }
+  write_page(dst, tea_page(a, lang, root))
+}
+
+## The whole page as markup, without writing it -- which is what the tests
+## below read, so that what they check is the document a browser gets and not
+## a fragment assembled a second way.
+fn tea_page(a: Assets, lang: Lang, root: String) -> String !io = {
   let c = tea_copy(lang, root,
     lang_path(lang, "examples/tea_dom_counter.html"),
     lang_path(lang, "examples/tea_dom_todo_keyed.html"))
@@ -464,13 +504,60 @@ pub fn gen_tea(out: String, a: Assets, lang: Lang) -> Unit !io = {
   let body =
     `<main class="content tea-demo">` ++ "\n"
     ++ "<h1>${c.title}</h1>\n<p>${c.lede}</p>\n<p>${c.aside}</p>\n"
-    ++ tea_frame("tea-counter", "$root/assets/${a.tea_counter}", c.counter, c.counter_note)
-    ++ tea_frame("tea-todo", "$root/assets/${a.tea_todo}", c.todo, c.todo_note)
+    ++ tea_frame("tea-counter", "$root/assets/${a.tea_counter}", c.counter, c.counter_note,
+      tea_source(c.counter_src, counter_source_path()))
+    ++ tea_frame("tea-todo", "$root/assets/${a.tea_todo}", c.todo, c.todo_note,
+      tea_source(c.todo_src, todo_source_path()))
     ++ `<p class="tea-note">` ++ c.sources ++ "</p>\n</main>\n"
     ++ tea_watchdog(c.stuck) ++ "\n" ++ tea_mount_script(root, app)
-  write_page(dst,
-    shell_ext(a, lang, "tea.html", "${c.title} — Dawn", root, "tea", head, body))
+  shell_ext(a, lang, "tea.html", "${c.title} — Dawn", root, "tea", head, body)
 }
+
+## The counter's section is the counter's file. The mutation this is against
+## is a one-word one: `main.dawn` sits next to `counter.dawn` in the same
+## project, reads as a source file, highlights fine, and would put host wiring
+## under a demo whose whole claim is that the application is pure.
+test "the counter demo shows counter.dawn and not the host wiring next to it" {
+  let p = tea_page(plain_assets(), En, ".")
+  assert str.contains(p, `<details class="tea-src">`)
+  # `update`'s deliberate panic, spelled the way counter.dawn spells it and no
+  # other file in either project does.
+  assert str.contains(p, "boom: update failed on purpose at n=")
+  # main.dawn's opening line and its one call, neither of which belongs here.
+  assert not str.contains(p, "The whole io surface of the demo")
+  assert not str.contains(p, "decode, upd, vw")
+}
+
+## The keyed list is the reason there are two demos rather than one, so the
+## line that makes it keyed is the line worth pinning.
+test "the todo demo shows todo.dawn, keyed call included" {
+  let p = tea_page(plain_assets(), En, ".")
+  assert str.contains(p, "keyed(")
+  assert str.contains(p, "boom: update failed on purpose with ")
+  # codec.dawn's wire format is the other half of that project and not this.
+  assert not str.contains(p, "enc_editing")
+}
+
+## Both languages get both sections: the Chinese page is a twin, not a page
+## with the code left out of it.
+test "each language folds both sources away under its own summary" {
+  let en = tea_page(plain_assets(), En, ".")
+  let zh = tea_page(plain_assets(), Zh, "..")
+  assert count_sub(en, `<details class="tea-src">`) == 2
+  assert count_sub(zh, `<details class="tea-src">`) == 2
+  assert str.contains(en, "<summary>View the source · counter.dawn</summary>")
+  assert str.contains(en, "<summary>View the source · todo.dawn</summary>")
+  assert str.contains(zh, "<summary>查看源码 · counter.dawn</summary>")
+  assert str.contains(zh, "<summary>查看源码 · todo.dawn</summary>")
+  # Folded away: `<details>` with no `open` is closed, and the page says so by
+  # not saying anything.
+  assert not str.contains(en, `<details class="tea-src" open>`)
+  # The gallery links stay where they were.
+  assert str.contains(en, `<a href="./examples/tea_dom_counter.html">`)
+  assert str.contains(zh, `<a href="../zh/examples/tea_dom_todo_keyed.html">`)
+}
+
+fn count_sub(hay: String, needle: String) -> Int = len(str.split(hay, needle)) - 1
 
 ## The one failure a module script cannot report about itself: if the module
 ## does not load, none of its own code runs, and the page sits blank with
