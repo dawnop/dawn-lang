@@ -36,6 +36,11 @@
 # element the click landed on -- the script clicks a button it found by its
 # label -- so wrong routing shows up as a wrong request line.
 #
+# Then plateau.mjs, which asks the one question a transcript cannot: a
+# reactor never exits, so it is the only shape here where "allocated and
+# never freed" is unbounded rather than paid once. Its head says why the
+# three gates that already measure memory are each blind to it.
+#
 # Then the mutants, each a real wrong build of a production file, each held
 # to the transcript of its case. A mutant that passes means the transcript
 # has no teeth about the thing it broke, and this script says so.
@@ -136,6 +141,17 @@ if [ "$exports" = "_initialize,dawn_turn,memory" ]; then
   echo "OK   reactor: exports are $exports (no _start)"
 else
   echo "FAIL: expected a reactor exporting _initialize,dawn_turn,memory; got $exports" >&2
+  fail=1
+fi
+
+# ---- the reactor settles --------------------------------------------------
+# A reactor is the one shape in the tree that never exits, so it is the one
+# shape where "allocated and never freed" stops being a decided cost and
+# becomes an unbounded one. Everything else here reads what crossed the
+# boundary; this reads whether the module stops growing. plateau.mjs says
+# what the three gates that already measure memory each have a good reason
+# not to see.
+if ! node --no-warnings "$here/plateau.mjs" "$work/counter.wasm"; then
   fail=1
 fi
 
@@ -357,4 +373,4 @@ edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
   run_mutant todo-filter yes "the done filter admits everything"
 
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm dom contract ok (2 transcripts + 9 mutants, plus the keyed ops, the props, the payloads and the foreign elements)"
+echo "wasm dom contract ok (2 transcripts + 3 plateaus + 9 mutants, plus the keyed ops, the props, the payloads and the foreign elements)"
