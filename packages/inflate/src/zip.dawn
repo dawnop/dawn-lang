@@ -283,6 +283,29 @@ pub fn read_bounded(src: Bytes, m: Meta, cap: Option[Int]) -> Result[Bytes, Stri
   if not in_range(src, start, m.csize) {
     return Err("zip: entry data runs past the end: " ++ m.name)
   }
+  # A stored member's compressed bytes are its output. Check both metadata
+  # claims, and the caller's ceiling, before slicing those bytes out of the
+  # archive; doing either afterwards has already paid the allocation the
+  # ceiling exists to prevent.
+  if m.method == METHOD_STORED {
+    if m.csize != m.size {
+      return Err("zip: " ++ m.name ++ " unpacked to " ++ to_string(m.csize) ++
+          " bytes, the directory says " ++ to_string(m.size))
+    }
+    match cap {
+      None -> { }
+      Some(lim) -> {
+        if lim < 0 {
+          return Err("zip: " ++ m.name ++ ": a negative output limit (" ++
+              to_string(lim) ++ ")")
+        }
+        if m.size > lim {
+          return Err("zip: " ++ m.name ++ ": the output exceeds the " ++
+              to_string(lim) ++ " byte limit (stopped at 0 bytes)")
+        }
+      }
+    }
+  }
   let raw = bytes.slice(src, start, start + m.csize)
   var out = raw
   if m.method == METHOD_DEFLATE {
@@ -376,4 +399,46 @@ test "overflowing zip64 metadata is refused instead of wrapping into range" {
     Ok(Ok(_)) -> { assert false }
     Err(_) -> { assert false }
   }
+}
+
+test "stored entries honor the output ceiling before their bytes are copied" {
+  # A minimal local header followed by one stored byte.
+  var raw = bytes.buf()
+  for x in [0x50, 0x4B, 0x03, 0x04] { raw = bytes.put(raw, x) }
+  while bytes.size(raw) < 30 { raw = bytes.put(raw, 0) }
+  raw = bytes.put(raw, 120)
+  let src = bytes.freeze(raw)
+  let payload = bytes.utf8("x")
+  let stored = Meta {
+    name: "stored",
+    is_dir: false,
+    flags: 0,
+    method: METHOD_STORED,
+    crc: crc32.sum(payload),
+    csize: 1,
+    size: 1,
+    local: 0,
+  }
+
+  assert read_bounded(src, stored, Some(1)) == Ok(payload)
+  assert read_bounded(src, stored, Some(0)) ==
+    Err("zip: stored: the output exceeds the 0 byte limit (stopped at 0 bytes)")
+  assert read_bounded(src, stored, Some(-1)) ==
+    Err("zip: stored: a negative output limit (-1)")
+
+  # This claim used to be checked only after the compressed byte had
+  # already been sliced out. A stored member cannot legitimately have
+  # different compressed and uncompressed sizes.
+  let inconsistent = Meta {
+    name: "inconsistent",
+    is_dir: false,
+    flags: 0,
+    method: METHOD_STORED,
+    crc: 0,
+    csize: 1,
+    size: 0,
+    local: 0,
+  }
+  assert read_bounded(src, inconsistent, Some(0)) ==
+    Err("zip: inconsistent unpacked to 1 bytes, the directory says 0")
 }
