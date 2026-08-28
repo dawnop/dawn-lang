@@ -67,6 +67,25 @@
       </p>
     </main>
 
+    <script>
+      // Outside the module on purpose. A module script that fails to load runs
+      // none of its own code, so the banner the module writes cannot report the
+      // one failure that keeps the module from loading: opened with file://,
+      // the import below is refused by CORS and the page stays blank with
+      // nothing said. This timer is the only thing left that can speak. It
+      // stays quiet if anything mounted or if the module already reported, and
+      // the module clears it on success.
+      window.__mountWatchdog = setTimeout(() => {
+        const banner = document.getElementById('error');
+        if (document.getElementById('app').childNodes.length === 0 && banner.textContent === '') {
+          banner.textContent =
+            'nothing mounted: serve the repository root over http and open this ' +
+            'page under it. file:// cannot load the module. See ' +
+            'packages/tea-dom/js/README.md.';
+        }
+      }, 3000);
+    </script>
+
     <script type="module">
       // Serve the *repository root* over http and open this page under it. The
       // root and not this directory: the import below reaches back into
@@ -89,6 +108,7 @@
             banner.textContent = `${reply.kind}: ${reply.error}`;
           },
         });
+        clearTimeout(window.__mountWatchdog);
       } catch (e) {
         banner.textContent = String(e);
         throw e;
