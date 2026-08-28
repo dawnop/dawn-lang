@@ -14,8 +14,10 @@ what is in flight, and what was tried and closed.
 architecture is in the tree today ([`packages/tea-core`](packages/tea-core),
 [`packages/tea-dom`](packages/tea-dom)), the compiler emits wasm reactors for
 it (`dawn build --target wasm --reactor`), and the stack passed its first real
-browser run in 2026-08. Next: a public browser demo, then the pieces the demo
-proves a need for. A declarative UI DSL in the Compose style is the long-range
+browser run in 2026-08. The public demo is live at `/tea.html` on the project
+site (source under `site/`, applications under `examples/projects/`); next are
+the pieces the demo proves a need for. A declarative UI DSL in the Compose
+style is the long-range
 aim and is what several syntax decisions (trailing blocks, named arguments)
 were made for.
 
