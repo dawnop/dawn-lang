@@ -28,6 +28,12 @@
 # `slab_block_stays_clean_while_live` is the same line for the poisoning: a
 # mutant that reddens it has made the sanitizer refuse a block the program
 # is entitled to, which is a broken allocator rather than a lost report.
+#
+# A `control` and a `benign` role are two different things. A control is an
+# assertion that must survive every owning mutant; a benign mutant is an edit
+# to a production file whose whole claim is that the *whole* roster survives
+# it. The second is how a positive control gets written down: without a role
+# of its own it would be indistinguishable from a mutant nobody ran.
 
 assert	counts
 assert	sharing
@@ -41,6 +47,8 @@ assert	adt0_singleton
 assert	none_is_shared
 assert	immortal
 assert	immortal_graph
+assert	dict_is_shared
+assert	dict_family_is_keyed
 assert	slab_reuses_a_block
 assert	slab_never_shrinks_a_block
 assert	slab_returns_pages
@@ -96,6 +104,37 @@ red	slab-swallows-oversize	oversize_leaves_the_slab
 # (32MiB, written in rc_test.c rather than derived) reddens with it: a slab
 # cache that swallows oversize blocks has also outgrown its documented bound.
 red	slab-swallows-oversize	slab_bound_is_honoured
+
+# ---- argument-carrying dictionaries ---------------------------------------
+# Three mutants for one function, and what separates them is which of the
+# three is a wrong answer: none of them. All three print what the unmutated
+# runtime prints. The first holds more memory every call, the second hands
+# back the wrong relation for a shape nothing in the tree constructs, and the
+# third is only slower.
+
+# The retreat: the interning finds nothing, so every call allocates again.
+# This is the shape the runtime had until the leak was found, and outside
+# this file it is scripts/wasm-dom-contract's plateau leg that reddens on it.
+role	dict-intern-never-hits	counted
+owner	dict-intern-never-hits	dict_is_shared
+red	dict-intern-never-hits	dict_is_shared
+
+# The key drops the arguments, so a family collapses to its first member.
+# The memory still plateaus and every gate in the tree stays green, because
+# no program here instantiates one template with two different arguments.
+# `dict_family_is_keyed` is written out by hand for exactly this reason: it
+# is the only thing anywhere that can tell.
+role	dict-intern-ignores-args	counted
+owner	dict-intern-ignores-args	dict_family_is_keyed
+red	dict-intern-ignores-args	dict_family_is_keyed
+
+# The `benign` role, and the only mutant in this file that must stay green.
+# Every key hashes to zero, so the open-addressed table degrades to a linear
+# scan. That costs time and nothing else, and a run that reddened here would
+# be reading the probing rather than the identity -- which is what the two
+# above are about. Recorded rather than omitted, because an untested green
+# and an unexecuted one are the same empty red set.
+role	dict-intern-hash-collides	benign
 
 # The two below are the `poisoned` role: read off the probes, on a build with
 # both the sanitizer and the allocator. Neither changes what a program

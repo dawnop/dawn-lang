@@ -34,6 +34,8 @@ role\tm3\tpoisoned
 owner\tm3\tp
 red\tm3\tp
 red\tm3\tq
+
+role\tm6\tbenign
 """
 
 # The roles, and which roster each one is read off. A mutant of the
@@ -42,8 +44,18 @@ red\tm3\tq
 # through poison_probe.c's probes, because a plain build has no poisoning in
 # it to break. Mixing the two in one red set would record an observation the
 # harness never makes, so the roster a role may name is part of the role.
-ROSTER_OF = {"counted": "assert", "recorded": "assert", "poisoned": "probe"}
+ROSTER_OF = {
+    "counted": "assert",
+    "recorded": "assert",
+    "poisoned": "probe",
+    "benign": "assert",
+}
 OWNING = {"counted", "poisoned"}
+# The one role whose whole claim is a green. A positive control is a real
+# edit to a production file that changes no property anyone is entitled to,
+# so it reddens nothing -- and the file has to say so, because "reddens
+# nothing" and "was never run" produce the same empty red set otherwise.
+BENIGN = {"benign"}
 
 
 class MatrixError(ValueError):
@@ -105,7 +117,10 @@ def parse(text: str):
         if name not in known:
             raise MatrixError(f"control {name!r} is not an assertion or a probe")
     for mutation, role in roles.items():
-        if mutation not in reds:
+        if role in BENIGN:
+            if mutation in reds:
+                raise MatrixError(f"benign mutant {mutation!r} reddens something")
+        elif mutation not in reds:
             raise MatrixError(f"{mutation!r} has a role but reddens nothing")
         if role in OWNING and mutation not in owners:
             raise MatrixError(f"{role} mutant {mutation!r} has no owner")
@@ -180,6 +195,8 @@ def self_test() -> None:
         "two poisoned mutants own one probe": (
             BASE + "role\tm5\tpoisoned\nowner\tm5\tp\nred\tm5\tp\n"
         ),
+        "benign mutant reddens something": BASE + "red\tm6\ta\n",
+        "benign mutant owns an assertion": BASE + "owner\tm6\ta\n",
         "empty roster": "",
     }
     for name, mutant in mutants.items():

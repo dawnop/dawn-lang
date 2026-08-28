@@ -385,6 +385,46 @@ static void test_immortal_graph(void) {
   dawn_drop(ys);
 }
 
+/* ---- argument-carrying dictionaries (dawn_rt.c, dawn_dict_new) ----------
+ *
+ * Not reference counting, but here for the same reason the allocator is:
+ * nothing in Dawn can see it. A dictionary is never freed by design, so
+ * building one per call rather than one per (template, arguments) is a leak
+ * in every program that does not exit -- and one no answer a program prints
+ * depends on, which is how it survived in the tree. scripts/wasm-dom-contract
+ * measures the consequence on a reactor; these two ask the runtime directly.
+ *
+ * A template per case, because a shared one would let the first case seed the
+ * table for the second and the two would stop being independent questions. */
+
+static const dawn_dict dict_tmpl_a = {1, {NULL}, 0, {NULL}};
+static const dawn_dict dict_tmpl_b = {1, {NULL}, 0, {NULL}};
+static dawn_dict dict_arg_x = {1, {NULL}, 0, {NULL}};
+static dawn_dict dict_arg_y = {1, {NULL}, 0, {NULL}};
+
+/* One relation, asked for twice, is one dictionary. */
+static void test_dict_is_shared(void) {
+  dawn_dict *first = dawn_dict_new(&dict_tmpl_a, 1, &dict_arg_x);
+  dawn_dict *again = dawn_dict_new(&dict_tmpl_a, 1, &dict_arg_x);
+  check(first == again, "the same relation is the same dictionary");
+  check(first->nargs == 1, "and carries its argument count");
+  check(first->args[0] == &dict_arg_x, "and its argument");
+}
+
+/* A template whose body still mentions a type variable is a *family*, so the
+ * arguments are part of the identity and not decoration on it. No program in
+ * this tree instantiates one template twice with different arguments -- that
+ * was measured, and it is a fact about today's emitter rather than a contract
+ * -- so nothing else can go red when the key stops carrying them. This is the
+ * only place that shape exists. */
+static void test_dict_family_is_keyed(void) {
+  dawn_dict *x = dawn_dict_new(&dict_tmpl_b, 1, &dict_arg_x);
+  dawn_dict *y = dawn_dict_new(&dict_tmpl_b, 1, &dict_arg_y);
+  check(x != y, "one template with two arguments is two dictionaries");
+  check(x->args[0] == &dict_arg_x, "each holding the argument it was built for");
+  check(y->args[0] == &dict_arg_y, "the other one included");
+}
+
 /* ---- the allocator (dawn_rt.h, DAWN_SLAB_ACTIVE) ------------------------
  *
  * Blocks come from the runtime's own size-class slabs, not from malloc.
@@ -617,6 +657,8 @@ static const rc_case rc_cases[] = {
     {"none_is_shared", test_none_is_shared, 0},
     {"immortal", test_immortal, 0},
     {"immortal_graph", test_immortal_graph, 0},
+    {"dict_is_shared", test_dict_is_shared, 0},
+    {"dict_family_is_keyed", test_dict_family_is_keyed, 0},
     {"slab_reuses_a_block", test_slab_reuses_a_block, 1},
     {"slab_never_shrinks_a_block", test_slab_never_shrinks_a_block, 1},
     {"slab_returns_pages", test_slab_returns_pages, 1},

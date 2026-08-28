@@ -36,7 +36,11 @@
 # on purpose, and a leak report would drown the per-assertion answer this run
 # exists to read. A mutant of the *poisoning* is the other way round, because
 # without the sanitizer there is nothing there to break; those are the
-# `poisoned` role in matrix.txt and they are read off the probes.
+# `poisoned` role in matrix.txt and they are read off the probes. A third
+# role, `benign`, is a positive control: a real edit to the runtime that no
+# assertion here is entitled to notice, held to the baseline output rather
+# than to a red set. Without one, "this mutant reddens nothing" and "this
+# mutant was never built" look identical from the matrix.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -246,6 +250,17 @@ while IFS=$'\t' read -r mutation role; do
   status=$?
   set -e
   [ "$status" -lt 128 ] || fail "$mutation died on signal $((status - 128))"
+  if [ "$role" = benign ]; then
+    # The positive control, the other way round from everything else here: it
+    # has to compile, run, and leave the whole roster green. Its red set is
+    # empty by declaration, and matrix_check.py refuses a benign mutant that
+    # names one, so nothing is appended below.
+    [ "$status" -eq 0 ] || { cat "$dir/out.txt" >&2; fail "$mutation reddened something"; }
+    diff -u "$work/baseline.out" "$dir/out.txt" ||
+      fail "$mutation changed an answer"
+    echo "OK   $mutation (stays green, as recorded)"
+    continue
+  fi
   [ "$status" -ne 0 ] || fail "$mutation passed every assertion"
   awk -v m="$mutation" '$2 == "FAIL" { printf "red\t%s\t%s\n", m, $1 }' \
     "$dir/out.txt" >> "$observed"

@@ -104,6 +104,81 @@ MUTATIONS = {
         "#define DAWN_SLAB_MAX 2048u /* a bigger request goes to malloc */",
         "#define DAWN_SLAB_MAX 8192u /* a bigger request goes to malloc */",
     ),
+    # ---- argument-carrying dictionaries -------------------------------
+    #
+    # Three ways to get the interning wrong, and the reason all three are
+    # here is that only one of them is a wrong answer. A program compiled
+    # against any of them prints exactly what it printed before; what moves
+    # is how much memory it is still holding when it has printed it.
+    #
+    # The retreat: nothing is ever found in the table, so every call
+    # allocates, which is byte for byte the behaviour before the interning
+    # landed. The wasm DOM contract's plateau leg is what this reddens out
+    # in the tree; here it is the sharing assertion.
+    "dict-intern-never-hits": (
+        "dawn_rt.c",
+        """static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
+                           int32_t nargs, dawn_dict *const *args) {
+  if (e->tmpl != tmpl || e->d->nargs != nargs) return false;""",
+        """static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
+                           int32_t nargs, dawn_dict *const *args) {
+  return false;
+  if (e->tmpl != tmpl || e->d->nargs != nargs) return false;""",
+    ),
+    # The key loses the arguments, so a template is one dictionary rather
+    # than a family of them and the first instantiation is handed to every
+    # later one. Nothing in the tree can construct that shape -- measured,
+    # not assumed -- so the assertion it reddens is the only thing anywhere
+    # that would notice, which is the whole reason that assertion is written
+    # out by hand.
+    #
+    # Both halves of the key move, which is what makes this the mutant it is
+    # named for. Narrowing the comparison alone is nearly a no-op: the hash
+    # still spreads the family across buckets, so the wrong entry is one a
+    # linear probe walks past only when the two collide, and a mutant whose
+    # damage depends on a hash collision is a mutant that measures nothing.
+    "dict-intern-ignores-args": (
+        "dawn_rt.c",
+        """  size_t h = dawn_dict_mix((size_t)0, (size_t)(uintptr_t)tmpl);
+  h = dawn_dict_mix(h, (size_t)nargs);
+  for (int32_t i = 0; i < nargs; i++) {
+    h = dawn_dict_mix(h, (size_t)(uintptr_t)args[i]);
+  }
+  return h;
+}
+
+static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
+                           int32_t nargs, dawn_dict *const *args) {
+  if (e->tmpl != tmpl || e->d->nargs != nargs) return false;
+  for (int32_t i = 0; i < nargs; i++) {
+    if (e->d->args[i] != args[i]) return false;
+  }
+  return true;
+}""",
+        """  return dawn_dict_mix((size_t)0, (size_t)(uintptr_t)tmpl);
+}
+
+static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
+                           int32_t nargs, dawn_dict *const *args) {
+  return e->tmpl == tmpl;
+}""",
+    ),
+    # The positive control, and the only mutant in this file that must stay
+    # green: every key hashes to the same bucket. Open addressing with an
+    # exact comparison degrades to a linear scan under that, which is slower
+    # and nothing else -- so a harness that reddened here would be reading
+    # the probing rather than the identity.
+    "dict-intern-hash-collides": (
+        "dawn_rt.c",
+        """    h = dawn_dict_mix(h, (size_t)(uintptr_t)args[i]);
+  }
+  return h;
+}""",
+        """    h = dawn_dict_mix(h, (size_t)(uintptr_t)args[i]);
+  }
+  return 0;
+}""",
+    ),
     # ---- the manual poisoning -----------------------------------------
     #
     # These two are invisible to everything above: without the sanitizer
