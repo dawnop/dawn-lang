@@ -179,8 +179,26 @@ typedef struct { dawn_hdr h; dawn_slot val; } dawn_box;
 
 改成**结构性排除**：`CFun.dicts` 在 Core 里本来就是与 `params` 分开的一个字段
 （`core.dawn`），字典类型的表达式也认得出来，所以刀 2 的所有权分析可以直接跳过它们，
-不需要运行时帮忙。代价：`dawn_dict_new` 造出来的参数化字典会泄漏——0 次分配，
-写进契约而不是留成待办。
+不需要运行时帮忙。
+
+**「0 次分配」那个数字只对当年那个程序成立。** 它量的是编译器前端，那里的泛型主体
+不带类型变量，所以 `dawn_dict_new` 一次都没被调到。tea-core 的 reconciler 推翻了它：
+`Node[M]` 的结构相等要 `Eq[Node[M]]`、`Eq[List[Node[M]]]` 这种「字典的字典」，
+而那正是 `dawn_dict_new` 唯一负责的一类。counter 每 turn 造 28 个。
+
+所以契约改成一句更窄的：**每种一份，永不释放**，不是每次一份。`dawn_dict_new` 按
+(模板地址, 全部实参字典地址) intern，命中就共享同一个。共享是安全的：字典是它输入的
+纯函数，返回后无人回写，指针也从不被当身份比较。表只增不删，但规模有界于程序的
+实例化图，是类型结构的函数而不是运行时长度的函数。§3 其余裁决（不进 RC、不加头、
+结构性排除）原样成立。
+
+事故记录：2026-08-28 之前，任何不退出的 C 后端程序都在线性泄漏（tea-dom 的 counter
+reactor 每 turn 约 4KB，10 万 turn 的 native 二进制 RSS 750MB）。三处量内存的地方
+当时都是绿的且各有正当理由：LSan 被 `__lsan_ignore_object` 明确告知别看这一类、
+`DAWN_RC_BALANCE` 只数进过 RC 的对象、`scripts/rc-contract` 的题面里没有字典。
+补的两道门是 `scripts/wasm-dom-contract` 的平台期腿（问「跑久了停不停得下来」）
+与 `scripts/rc-contract` 的 `dict_is_shared` / `dict_family_is_keyed`（问键写对没有；
+后者是树内唯一能问的地方，因为没有程序会拿一个模板配两组不同实参）。
 
 ## 4. 原语表
 
