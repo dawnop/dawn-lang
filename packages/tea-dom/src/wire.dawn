@@ -16,9 +16,9 @@
 #     what crosses inward is an address, an event name and at most one string.
 #     The host cannot name a message and never has to, because
 #     `tea_dom/route.at` resolves the pair against the tree the model produces
-#     right now, and `Fill` folds the string into the message on this side.
-#     The application's message type therefore needs no encoding at all, and
-#     `Msg` stays a type the host has never heard of.
+#     right now, and that listener's own `to_msg` turns the string into a
+#     message on this side. The application's message type therefore needs no
+#     encoding at all, and `Msg` stays a type the host has never heard of.
 #
 #     The payload is a `String` and only ever a `String`. A checkbox is
 #     normalised to `"true"`/`"false"` by the host, an integer is parsed on
@@ -286,7 +286,7 @@ type ProbeMsg =
 derive Show
 
 fn hear(event: String, msg: ProbeMsg) -> On[ProbeMsg] =
-  On { event: event, payload: NoData, msg: msg }
+  On { event: event, payload: NoData, to_msg: _p => msg }
 
 fn btn(label: String, m: ProbeMsg) -> Node[ProbeMsg] =
   Elem(tag: "button", props: [], on: [hear("click", m)], kids: [Text(s: label)], key: None)
@@ -324,8 +324,8 @@ test "a listener that asks for something says so, and says which" {
     tag: "input",
     props: [],
     on: [
-      On { event: "input", payload: Value, msg: Ping },
-      On { event: "keydown", payload: Key, msg: Pong },
+      On { event: "input", payload: Value, to_msg: _p => Ping },
+      On { event: "keydown", payload: Key, to_msg: _p => Pong },
       hear("blur", Pong),
     ],
     kids: [],
@@ -342,7 +342,7 @@ test "a listener that asks for something says so, and says which" {
   let loud: Node[ProbeMsg] = Elem(
     tag: "input",
     props: [],
-    on: [On { event: "input", payload: Value, msg: Ping }],
+    on: [On { event: "input", payload: Value, to_msg: _p => Ping }],
     kids: [],
     key: None,
   )

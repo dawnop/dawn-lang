@@ -351,17 +351,22 @@ edited "$mutant_tree/packages/tea-dom/src/reactor.dawn" &&
 # case is carrying assertions of its own.
 case_of todo
 
-# G: the payload stops being routed to the field it belongs to. `fill` puts
-# what was typed into a row's editor into the composer's draft instead, so the
-# row can never be retitled -- the same failure the palette's `focus` mutant
-# used to pin, moved to where the routing now lives. It is an application
-# mutant on purpose: `fill` is the guest-side half of the payload, and a
-# bridge mutant would red both transcripts and say nothing about this one.
+# G: the payload stops being routed to the field it belongs to. The row
+# editor's listener names the composer's message, so what is typed into a row
+# lands in the draft and the row can never be retitled -- the same failure the
+# palette's `focus` mutant used to pin, moved to where the routing now lives.
+# It is an application mutant on purpose: the listener's function is the
+# guest-side half of the payload, and a bridge mutant would red both
+# transcripts and say nothing about this one.
+#
+# It is also the mutant that says the quotient `Eq[On[M]]` did not cost the
+# gate anything here: the two listeners are equal, so the patch stream is
+# unmoved, and what reds is the model and the document.
 reset_tree
-sed -i 's/      SetEdit(_) -> SetEdit(text: payload)/      SetEdit(_) -> SetDraft(text: payload)/' \
+sed -i 's/        \[on_value("input", SetEdit)\],/        [on_value("input", SetDraft)],/' \
   "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn"
 edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
-  run_mutant todo-fill yes "a payload lands in the wrong field"
+  run_mutant todo-msg yes "a payload lands in the wrong field"
 
 # H: the filter stops filtering. `done` shows every row, so the list the
 # reconciler is handed is the wrong length and the turn that empties it never

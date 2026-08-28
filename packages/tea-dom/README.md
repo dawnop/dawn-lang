@@ -25,47 +25,56 @@ where a terminal has no tag to vary.
 
 One thing the DOM needed that the terminal did not. `relate` must see every
 difference between a pair, or `apply(old, diff(old, new)) == new` fails; two
-elements that agree on tag, props and event names but disagree on what a click
-*means*, or on what it should bring back, are unequal, and the vocabulary has
-to say so. That makes the impl
-`impl[M: Eq] Tree[Node[M]]` rather than `impl[M] ...`. The terminal never met
-this because its message-carrying node is a leaf that answers `Unrelated`.
+elements that agree on tag and props but disagree on which events they listen
+for, or on what those events should bring back, are unequal, and the
+vocabulary has to say so. The terminal never met this because its
+message-carrying node is a leaf that answers `Unrelated`.
 
 ## Event payloads
 
-A listener is `On { event, payload, msg }`, and `payload` is a closed set:
+A listener is `On { event, payload, to_msg }`, and `payload` is a closed set:
 `NoData`, `Value` (the element's value, with a checkbox normalised by the host
 to `"true"`/`"false"`), `Key` (`ev.key`). The host brings back that one string
 and nothing else, and `dsl.on_click` / `on_value` / `on_key` are the three
 spellings a view wants.
 
-The merge cannot live in the tree. Elm's `on : String -> Decoder msg` is a
-function from the event to a message, and a tree holding a function has no
-structural `==` -- the compiler says so in as many words. So the tree holds a
-message with a hole in it and the fold happens outside it, in a trait with a
-default body:
+`to_msg` is `fn(String) -> M`: the payload in, the message out. Elm's
+`on : String -> Decoder msg` is the same shape. A bare constructor name is
+already a `fn(String) -> M`, so a value-carrying listener is
+`on_value("input", SetDraft)` and there is nothing else to write. A `NoData`
+listener is handed `""` and ignores it; `on_click(msg)` takes the message and
+builds the constant function itself.
+
+A tree holding a function ordinarily has no structural `==`, and the compiler
+says so in as many words. `On` keeps `==` by declaring its identity to be
+`(event, payload)`, in a hand-written `impl Eq` (with the paired `impl Hash`)
+rather than a derive. That pair is exactly what the host is told about a
+listener and exactly what a patch can carry, so two listeners equal under it
+are indistinguishable to the host, to the patch stream and to dispatch, which
+resolves the address against the tree the *current* model produces. This is not
+`Eq` for functions: `to_msg` is excluded from identity, not compared. What it
+gives up is that a message's *value* is visible to tree `==`, and
+`node.deliver(listener, payload)` is the replacement:
 
 ```dawn
-pub trait Fill[T] { fn fill(m: T, payload: String) -> T = m }
+assert deliver(on_value("input", SetDraft), "buy milk") == SetDraft(text: "buy milk")
 ```
 
-An application that declares no payloads writes `impl Fill[Msg] { }` and is
-done; `tea_dom_counter` is that case and `tea_dom_todo` is the other.
+`docs/dom-bridge-design.md` section 9 is the full argument and its boundary.
 
 Three consequences worth stating. The kind is data in the tree, so `relate`
-sees a listener whose *reading* changed exactly as it sees one whose meaning
-changed, and the host is told to reattach. A misspelling is a type error rather
-than a runtime `no-handler`. And a payload that does not match what the
-listener declared -- present where none was asked for, missing where one was,
-or not a string -- is refused with `bad-request` rather than defaulted, for the
-reason `route.at` answering `None` is refused: it means the host is holding a
-tree this model does not produce.
+sees a listener whose *reading* changed and the host is told to reattach; a
+listener whose *meaning* changed is not a difference, because there is nothing
+to tell the host. A misspelling is a type error rather than a runtime
+`no-handler`. And a payload that does not match what the listener declared,
+present where none was asked for, missing where one was, or not a string, is
+refused with `bad-request` rather than defaulted, for the reason `route.at`
+answering `None` is refused: it means the host is holding a tree this model
+does not produce.
 
 The invariant survives all of it. The host still cannot name a message: it
 hands over text, and which constructor that text lands in was decided in the
-guest. What it gives up is that a message's *value* is enumerable from the
-tree, which was never the invariant, only a side effect of there being no way
-to type into the page at all.
+guest.
 
 ## Keyed children
 
@@ -75,8 +84,8 @@ has, so a forgotten key is a type error rather than a silent return to index
 pairing; `node.with_key` is the one-node form underneath it.
 
 What it buys, priced on the shape `tea_dom_todo` has. Deleting the middle row
-of fifty costs 98 patches unkeyed, over 24 rewritten rows, and 2 keyed;
-deleting the *first* row costs 198 unkeyed and 2 keyed; deleting the last costs
+of fifty costs 26 patches unkeyed, over 24 relabelled rows, and 2 keyed;
+deleting the *first* row costs 51 unkeyed and 2 keyed; deleting the last costs
 2 either way. Those numbers are assertions in `src/node.dawn`, not prose. What
 the rewrite discards in a browser and not in a terminal is element state --
 focus, a caret, a selection, a scroll offset, a playing video -- which is the
@@ -161,9 +170,9 @@ has the full argument; the three properties worth repeating:
   *name* of each event an element wants and, where the listener asked for one,
   the *kind* of data to bring back; inward, an address, an event name and at
   most one string. `route.at` resolves the address against the tree the model
-  produces right now and `Fill` folds the string into the message on this side,
-  so the application's message type needs no encoding and the host has never
-  heard of it.
+  produces right now and that listener's own `to_msg` turns the string into a
+  message on this side, so the application's message type needs no encoding and
+  the host has never heard of it.
 - **The model crosses, as opaque text.** Dawn has no module-level mutable
   state, so a reactor holds nothing between turns. The consequence is worth
   more than the cost: a turn is a function of its inputs, so one transcript
@@ -188,11 +197,11 @@ runtime, and a boundary that varies by backend cannot have one transcript.
 
 | module | what it is |
 |---|---|
-| `node` | the vocabulary and `impl Tree` -- the orphan rule puts the impl here |
+| `node` | the vocabulary, `impl Tree`, `impl Eq`/`Hash`, and `deliver` -- the orphan rule puts the impls here |
 | `dsl` | lowercase wrappers over the constructors, `tea_term/dsl`'s counterpart |
 | `route` | an address plus an event name to a message, on `fold_preorder` |
 | `wire` | the JSON encoding of nodes, patches and replies; request decoding |
-| `reactor` | `turn` (pure), `serve` (the package's only `!io`), `trait Fill` |
+| `reactor` | `turn` (pure), `serve` (the package's only `!io`) |
 
 ## The host half
 

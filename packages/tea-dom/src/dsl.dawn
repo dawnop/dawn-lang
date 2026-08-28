@@ -10,7 +10,7 @@
 # (`let header: Node[Msg] = ...`) and concatenate the named parts.
 
 use std/list
-use node.{Node, Text, Elem, On, NoData, Value, Key, with_key}
+use node.{Node, Text, Elem, On, NoData, Value, Key, deliver, with_key}
 use tea_core/tree.{key, kids}
 use json/render.{render}
 use wire.{enc_node}
@@ -33,22 +33,29 @@ pub fn el[M](
 ## front of a reader on the line where the interesting word is the message.
 ## Anything they do not cover is `On { .. }` itself, which is public for that
 ## reason.
+##
+## A click carries nothing, so this takes the message itself and the constant
+## function is built here. The two below take the function, because there the
+## message is a function of what arrived.
 pub fn on_click[M](msg: M) -> On[M] =
-  On { event: "click", payload: NoData, msg: msg }
+  On { event: "click", payload: NoData, to_msg: _p => msg }
 
-## `msg`, with the element's value brought along.
+## The element's value, turned into a message by `f`.
+##
+## A bare constructor name is already a `fn(String) -> M`, so the usual call is
+## `on_value("input", SetDraft)` and the application writes no plumbing at all.
 ##
 ## The event is a parameter because the choice between `input` (a message per
 ## keystroke) and `change` (one when the field is left) is the application's
 ## and is the difference between eight turns and one.
-pub fn on_value[M](event: String, msg: M) -> On[M] =
-  On { event: event, payload: Value, msg: msg }
+pub fn on_value[M](event: String, f: fn(String) -> M) -> On[M] =
+  On { event: event, payload: Value, to_msg: f }
 
-## `msg`, with `ev.key` brought along. `keydown` is the usual event; the host
-## does not call `preventDefault` for this kind, or the keystroke would be
+## `ev.key`, turned into a message by `f`. `keydown` is the usual event; the
+## host does not call `preventDefault` for this kind, or the keystroke would be
 ## swallowed on its way to the element.
-pub fn on_key[M](event: String, msg: M) -> On[M] =
-  On { event: event, payload: Key, msg: msg }
+pub fn on_key[M](event: String, f: fn(String) -> M) -> On[M] =
+  On { event: event, payload: Key, to_msg: f }
 
 ## An element whose children are paired by identity rather than by position.
 ## Each child arrives with the string that names it, which is the shape
@@ -117,22 +124,26 @@ pub fn foreign[M](
 ) -> Node[M] = Elem(tag: tag, props: props, on: on, kids: [], key: None)
 
 # A message type for the test blocks below; real apps bring their own.
+# `Said` is the one carrying a payload: its bare name is the `fn(String) -> M`
+# the two value-carrying spellings take.
 type ProbeMsg =
   | Ping
   | Pong
+  | Said(what: String)
 derive Show
 
 test "the wrappers build exactly the constructors they name" {
   let b: Node[ProbeMsg] = button("go", Ping)
-  let click: On[ProbeMsg] = On { event: "click", payload: NoData, msg: Ping }
+  let click: On[ProbeMsg] = On { event: "click", payload: NoData, to_msg: _p => Ping }
   assert b == Elem(tag: "button", props: [], on: [click], kids: [Text(s: "go")], key: None)
+  assert deliver(click, "") == Ping
   let t: Node[ProbeMsg] = text("hi")
   assert t == Text(s: "hi")
   assert div([t]) == Elem(tag: "div", props: [], on: [], kids: [t], key: None)
   assert div_of("row", [t]) == Elem(tag: "div", props: [("class", "row")], on: [], kids: [t], key: None)
   let sp: Node[ProbeMsg] = span("hi")
   assert sp == Elem(tag: "span", props: [], on: [], kids: [t], key: None)
-  let typed: On[ProbeMsg] = On { event: "input", payload: Value, msg: Pong }
+  let typed: On[ProbeMsg] = On { event: "input", payload: Value, to_msg: _p => Pong }
   let general: Node[ProbeMsg] = el("input", [("value", "7")], [typed], [])
   assert general == Elem(tag: "input", props: [("value", "7")], on: [typed], kids: [], key: None)
 }
@@ -142,17 +153,23 @@ test "the three listener spellings differ in the payload and nothing else" {
   # What the other two buy is that the reading is a value in the tree, so
   # `relate` sees a change to it (`node.dawn`) and the wire encodes it
   # (`wire.dawn`) without either of them being told about this file.
-  assert on_click(Ping) == On { event: "click", payload: NoData, msg: Ping }
-  assert on_value("input", Ping) == On { event: "input", payload: Value, msg: Ping }
-  assert on_key("keydown", Ping) == On { event: "keydown", payload: Key, msg: Ping }
-  # Same event, same message, three different listeners.
-  assert on_value("keydown", Ping) != on_key("keydown", Ping)
-  assert on_value("input", Ping) != On { event: "input", payload: NoData, msg: Ping }
+  assert on_click(Ping) == On { event: "click", payload: NoData, to_msg: _p => Ping }
+  assert on_value("input", Said) == On { event: "input", payload: Value, to_msg: Said }
+  assert on_key("keydown", Said) == On { event: "keydown", payload: Key, to_msg: Said }
+  # Same event, same message function, three different listeners.
+  assert on_value("keydown", Said) != on_key("keydown", Said)
+  assert on_value("input", Said) != On { event: "input", payload: NoData, to_msg: Said }
+  # And the message is the function's answer, which is the half `==` on the
+  # tree deliberately cannot see.
+  assert deliver(on_value("input", Said), "typed") == Said(what: "typed")
+  assert deliver(on_key("keydown", Said), "Enter") == Said(what: "Enter")
+  # A `NoData` listener is handed the empty string and ignores it.
+  assert deliver(on_click(Ping), "") == Ping
 }
 
 test "foreign is el with the kids argument gone, not a new node kind" {
-  let w: Node[ProbeMsg] = foreign("code-editor", [("doc", "v1")], [on_value("change", Ping)])
-  assert w == el("code-editor", [("doc", "v1")], [on_value("change", Ping)], [])
+  let w: Node[ProbeMsg] = foreign("code-editor", [("doc", "v1")], [on_value("change", Said)])
+  assert w == el("code-editor", [("doc", "v1")], [on_value("change", Said)], [])
   # No guest children, whatever the library later puts inside the element.
   assert list.is_empty(kids(w))
   # And no wire footprint: the encoding is byte-for-byte the hand-written
@@ -161,7 +178,7 @@ test "foreign is el with the kids argument gone, not a new node kind" {
   let plain: Node[ProbeMsg] = Elem(
     tag: "code-editor",
     props: [("doc", "v1")],
-    on: [on_value("change", Ping)],
+    on: [on_value("change", Said)],
     kids: [],
     key: None,
   )
