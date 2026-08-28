@@ -83,6 +83,13 @@ JVM/native 逐字节对拍照旧成立。
 丢了哈希名 → 又回到不带版本的 URL），`gen/links.dawn` 的链接检查（页面链进 `assets/` 的
 每个引用都必须带哈希——只查存在与否是查不出来的，两个名字都在盘上）。
 
+demo 页的 wasm 和 DOM 桥走同一条路，但多两笔。一是桥的四个 `.mjs` **相互 import**，
+哈希改了名字，所以 `emit_bridge` 按依赖序（wasi ← reactor，dom ← app）把每个
+import 说明符改指到目标真正拿到的名字上；改不动就 panic，因为一个指向不存在文件的
+import 是这个站点任何检查都看不见的（`gen/links` 只读 `href=`/`src=`）。二是页面
+要 fetch 的 wasm 写成元素上的 `data-wasm=`（而不是脚本里的字符串），就为了让链接
+检查照常管它。
+
 ## 信息架构（URL 映射）
 
 | 路径 | 内容 | 来源 |
@@ -99,6 +106,8 @@ JVM/native 逐字节对拍照旧成立。
 | `/examples/{name}.html` | 每例一页：高亮源码（+ 多文件项目按模块列出） | 同上 |
 | `/stdlib.html` | 标准库 API 参考 + 侧栏 TOC：内建类型、prelude、预置 trait、每个 std 模块（函数 / 类型 / impl），文档注释按 Markdown 渲染 | `site/pages/stdlib.md` + `dawn doc --stdlib` |
 | `/playground.html` | 在线编辑器：CodeMirror 6 + Dawn 高亮、实时诊断、补全；运行/检查打后端 | `site/play-ui/`（npm 构建，产物由 `gen_assets` 搬进 `dist/assets`） |
+| `/tea.html` | **浏览器 demo**：两个 wasm reactor（计数器 + 键控待办）挂在页面上跑 | `examples/projects/tea_dom_{counter,todo_keyed}`（`site/build.sh` 编译成 wasm）+ `packages/tea-dom/js/*.mjs`（桥），二者都由 `gen_assets` 搬进 `dist/assets` |
+| `/zh/tea.html` | 同上（中文译本；两个应用本身画的是英文） | 同上 |
 
 ## 渲染约定
 
@@ -137,7 +146,12 @@ JVM/native 逐字节对拍照旧成立。
 ## 构建
 
 ```bash
-site/build.sh          # dawn doc --stdlib → 清空 dist → dawn run site
+site/build.sh          # dawn doc --stdlib → play-ui → tea reactors → 清空 dist → dawn run site
+# demo 的两个 wasm 要 clang 20+（带 wasm32 sysroot）。缺了就跳过并 warning，
+# 生成器写占位文件，demo 页面自己报错，其余页面不受影响：
+DAWN_WASM_CC=/usr/bin/clang-20 site/build.sh
+# `--target wasm` 只在原生驱动里（selfhost/src/nmain.dawn），编一次约 37s，
+# 按编译器自己的 source stamp + runtime/c 缓存在 site/build/tea/dawnc。
 # 或手动：
 ./bin/dawn doc --stdlib > site/build/stdlib.json
 ./bin/dawn run site    # 生成 site/dist/（从仓库根运行）
