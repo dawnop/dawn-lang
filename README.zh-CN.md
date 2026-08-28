@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ e633f0ddf85a76b5 -->
+<!-- doc-check: translation-of README.md @ bd61f1cc09ed44c0 -->
 
 # Dawn
 
@@ -272,6 +272,12 @@ C 后端，不是那个 flag。把 flag 读成「把 JVM 那份产物提前打�
 
 当前工具链 0.69.0，M0–M8 已实现。此后的主线（C 后端与 native 自举、Perceus、trait v2、
 效果处理器、包管理）落地记录在 `docs/` 各自的设计文档里。
+
+## 路线图与贡献
+
+[ROADMAP.md](ROADMAP.md)（英文）写明工作朝哪去、哪些线已关账；具体可上手的
+起点放在 GitHub issues 里。[CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)
+讲清一个改动在这里从想法走到代码的路：先写设计文档，用门禁代替审查清单。
 
 ## 许可证
 

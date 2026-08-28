@@ -341,6 +341,13 @@ work since then — the C backend and native bootstrap, Perceus, trait v2, effec
 handlers, package management — are recorded in their own design documents under
 `docs/`.
 
+## Roadmap and contributing
+
+[ROADMAP.md](ROADMAP.md) says where the work is going and which lines are
+closed; concrete starting points are kept as GitHub issues.
+[CONTRIBUTING.md](CONTRIBUTING.md) describes how a change travels from an idea
+to code here: a design document first, and gates instead of review checklists.
+
 ## License
 
 [Apache-2.0](LICENSE). Third-party code packaged into the `dawn` fat jar, and their
