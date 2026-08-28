@@ -15,7 +15,7 @@
 
 use std/list
 use tea_core/walk.{fold_preorder}
-use node.{Node, Text, Elem, On, NoData, Value}
+use node.{Node, Text, Elem, On, NoData, Value, deliver}
 
 ## Every node that listens for something, paired with the address
 ## `tea_core/diff` addresses it by and the listeners it declares. Pre-order,
@@ -24,7 +24,7 @@ use node.{Node, Text, Elem, On, NoData, Value}
 ##
 ## This is what the bridge needs at the boundary: the host attaches a listener
 ## exactly where this says one exists, and hands back the address it fired at.
-pub fn listeners[M: Eq](root: Node[M]) -> List[(List[Int], List[On[M]])] =
+pub fn listeners[M](root: Node[M]) -> List[(List[Int], List[On[M]])] =
   fold_preorder(root, [], (acc, n, path) =>
       match n {
         Text(_) -> acc
@@ -34,18 +34,18 @@ pub fn listeners[M: Eq](root: Node[M]) -> List[(List[Int], List[On[M]])] =
 ## The listener for `event` at `path`, or `None` when nothing there listens for
 ## it.
 ##
-## The whole listener rather than just its message, because the caller needs
-## both halves of it: the message is what the event means, and the payload kind
-## is what the host was supposed to bring back, which is the only thing that
-## can say whether what did arrive is what was asked for. A record leaves room
-## for the next thing a listener declares without changing this signature.
+## The whole listener rather than just its `to_msg`, because the caller needs
+## both halves of it: the function is what the event means, and the payload
+## kind is what the host was supposed to bring back, which is the only thing
+## that can say whether what did arrive is what was asked for. A record leaves
+## room for the next thing a listener declares without changing this signature.
 ##
 ## `None` is a real answer and the bridge treats it as an error rather than as
 ## a no-op: the host only ever attaches a listener where `listeners` said there
 ## was one, so an event with no message means the host is dispatching against a
 ## tree the model no longer produces. Swallowing that would turn a desync into
 ## a click that silently does nothing.
-pub fn at[M: Eq](root: Node[M], path: List[Int], event: String) -> Option[On[M]] =
+pub fn at[M](root: Node[M], path: List[Int], event: String) -> Option[On[M]] =
   fold_preorder(root, None, (acc, n, p) =>
       match acc {
         Some(_) -> acc
@@ -70,10 +70,10 @@ type ProbeMsg =
 derive Show
 
 fn hear(event: String, msg: ProbeMsg) -> On[ProbeMsg] =
-  On { event: event, payload: NoData, msg: msg }
+  On { event: event, payload: NoData, to_msg: _p => msg }
 
 fn hear_value(event: String, msg: ProbeMsg) -> On[ProbeMsg] =
-  On { event: event, payload: Value, msg: msg }
+  On { event: event, payload: Value, to_msg: _p => msg }
 
 fn sample() -> Node[ProbeMsg] =
   Elem(tag: "div", props: [], on: [], kids: [
@@ -115,6 +115,23 @@ test "at resolves an address and an event name to the listener" {
   assert at(sample(), [9], "click") == none
   assert at(sample(), [], "click") == none
 }
+
+test "and the listener it resolves to is the one that means what that node means" {
+  # `==` on `On` is `(event, payload)`, so the assertions above would pass with
+  # every listener in the tree wired to the same message. What the addresses
+  # resolve to is asked here instead, where the answer is the message itself.
+  # This is the assertion a routing bug has to get past.
+  assert delivered(at(sample(), [0], "click")) == Some(Ping)
+  assert delivered(at(sample(), [2], "submit")) == Some(Pong)
+  assert delivered(at(sample(), [2, 0], "blur")) == Some(Pong)
+  assert delivered(at(sample(), [2, 0], "input")) == Some(Ping)
+}
+
+fn delivered(o: Option[On[ProbeMsg]]) -> Option[ProbeMsg] =
+  match o {
+    None -> None
+    Some(l) -> Some(deliver(l, ""))
+  }
 
 test "the root can listen, and the empty path addresses it" {
   let root: Node[ProbeMsg] =

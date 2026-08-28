@@ -38,37 +38,9 @@
 use std/io
 use std/str
 use tea_core/diff.{Patch, Replace, diff}
-use node.{Node, Text, Elem, On, NoData, Value, Key}
+use node.{Node, Text, Elem, On, NoData, Value, Key, deliver}
 use route
 use wire.{Request, Init, Event, Bad, decode_request, enc_node, reply_ok, reply_err}
-
-## How a message absorbs the string an event brought with it.
-##
-## The merge cannot live in the tree. A listener holding `fn(String) -> M`
-## would cost `Node[M]` its structural `==` (`node.dawn` says why, and the
-## compiler says it too: "functions cannot be compared"), and `==` on the tree
-## is what the reconciler and every view test are built on. So the tree holds
-## a message with a hole in it, the host brings back a string, and this folds
-## one into the other on the guest side. The host still cannot name a message:
-## it hands over text, and which constructor that text lands in was decided
-## here.
-##
-## The default body is `m`, so an application that declares no payloads writes
-## the empty impl and nothing else:
-##
-## ```dawn
-## impl Fill[Msg] { }
-## ```
-##
-## It is a trait rather than a parameter of `turn` because a defaulted
-## parameter may not mention the function's own type variables, so the
-## alternative was an argument at every call site of `turn` and `serve` for a
-## function almost every one of them would pass the identity to. The orphan
-## rule puts the impl in the module that declares `Msg`, which is the
-## application's own, which is where a reader looks for it.
-pub trait Fill[T] {
-  fn fill(m: T, payload: String) -> T = m
-}
 
 ## Answer one request line.
 ##
@@ -77,8 +49,7 @@ pub trait Fill[T] {
 ## pure functions `tea_core/app.App` names. They arrive as parameters rather
 ## than through the trait for the reason `tea_core/app` records at length: a
 ## generic function over `A: App` can do nothing with an `A.View`, and the
-## reconciler needs `Eq` on the tree, which needs `Eq` on the message, which
-## an associated type cannot carry.
+## reconciler needs `Eq` on the tree, which an associated type cannot carry.
 ##
 ## The two requests:
 ##
@@ -88,10 +59,25 @@ pub trait Fill[T] {
 ##   `event`  the host names an address, an event and at most one string. The
 ##            listener is looked up in `view(decode(model))` -- the tree the
 ##            host is holding, since the host's document is that tree by
-##            construction -- the string is folded into its message by `fill`,
-##            `update` folds that in, and the reply is the new model plus
+##            construction -- the string is handed to that listener's `to_msg`,
+##            `update` folds the result in, and the reply is the new model plus
 ##            `diff(old, new)`.
-pub fn turn[Mo, M: Eq + Fill](
+##
+## `M: Eq` and nothing else. The `Fill` bound this used to carry is gone with
+## the trait: a listener holds the function, so there is nothing for an
+## application to declare.
+##
+## The `Eq` that stayed is no longer about listeners, and it is worth saying
+## why it stayed anyway. `diff` needs `Eq[Node[M]]`, and `Node[M]` has no
+## `impl Eq` of its own, so the compiler synthesises one from the structure;
+## the synthesis asks every type parameter of the ADT for a bound, whether or
+## not the parameter reaches a comparable position. Here it does not: `M`
+## occurs only under `On[M]`, whose `impl Eq` reads two fields and never
+## touches it. `impl[M] Tree[Node[M]]` and `route.at` therefore lost the bound
+## outright; this one survives the change for a reason that has nothing to do
+## with what a listener carries. An application pays nothing for it, since an
+## ordinary message ADT is structurally comparable without declaring anything.
+pub fn turn[Mo, M](
   line: String,
   init: Mo,
   encode: fn(Mo) -> String,
@@ -136,13 +122,17 @@ pub fn turn[Mo, M: Eq + Fill](
 # that sends `ev.key` where `ev.target.value` was asked for, say -- into a
 # message quietly built from the wrong text, and the transcripts would go on
 # being green.
-fn settle[M: Fill](listener: On[M], payload: Option[String]) -> Result[M, String] =
+#
+# A `NoData` listener is handed `""` rather than given a second shape. It
+# declared that it wants nothing, so what it is handed cannot matter, and
+# `on_click` builds a function that ignores its argument.
+fn settle[M](listener: On[M], payload: Option[String]) -> Result[M, String] =
   match (listener.payload, payload) {
-    (NoData, None) -> Ok(listener.msg)
+    (NoData, None) -> Ok(deliver(listener, ""))
     (NoData, Some(_)) ->
       Err("`" ++ listener.event ++ "` asks for no payload, but one arrived")
-    (Value, Some(text)) -> Ok(fill(listener.msg, text))
-    (Key, Some(text)) -> Ok(fill(listener.msg, text))
+    (Value, Some(text)) -> Ok(deliver(listener, text))
+    (Key, Some(text)) -> Ok(deliver(listener, text))
     (_, None) -> Err("`" ++ listener.event ++ "` asks for a payload, but none arrived")
   }
 
@@ -162,7 +152,7 @@ fn join_ints(p: List[Int], i: Int, acc: String) -> String =
 ## error reply and the loop goes on to the next line. A blank line is skipped,
 ## because a host that writes "\n" between messages should not be told it sent
 ## a malformed request.
-pub fn serve[Mo, M: Eq + Fill](
+pub fn serve[Mo, M](
   init: Mo,
   encode: fn(Mo) -> String,
   decode: fn(String) -> Mo,
@@ -193,8 +183,8 @@ pub fn serve[Mo, M: Eq + Fill](
 #
 # A counter, because the smallest app that has a model, two messages and a
 # tree with a stable region is enough to pin every branch of a turn. It also
-# has a field, which is what the payload branches need: `Set` is the message
-# with a hole in it, and `fill` is what puts the host's text in the hole.
+# has a field, which is what the payload branches need: `Set` carries what was
+# typed, and the input's listener is `Set` itself.
 
 type Counter = { n: Int }
 
@@ -203,14 +193,6 @@ type Msg =
   | Dec
   | Set(text: String)
 derive Show
-
-impl Fill[Msg] {
-  fn fill(m: Msg, payload: String) -> Msg =
-    match m {
-      Set(_) -> Set(text: payload)
-      _ -> m
-    }
-}
 
 fn enc(m: Counter) -> String = to_string(m.n)
 
@@ -236,7 +218,7 @@ fn vw(m: Counter) -> Node[Msg] =
     Elem(
       tag: "button",
       props: [],
-      on: [On { event: "click", payload: NoData, msg: Dec }],
+      on: [On { event: "click", payload: NoData, to_msg: _p => Dec }],
       kids: [Text(s: "-")],
       key: None,
     ),
@@ -244,7 +226,7 @@ fn vw(m: Counter) -> Node[Msg] =
     Elem(
       tag: "button",
       props: [],
-      on: [On { event: "click", payload: NoData, msg: Inc }],
+      on: [On { event: "click", payload: NoData, to_msg: _p => Inc }],
       kids: [Text(s: "+")],
       key: None,
     ),
@@ -254,7 +236,7 @@ fn vw(m: Counter) -> Node[Msg] =
     Elem(
       tag: "input",
       props: [],
-      on: [On { event: "input", payload: Value, msg: Set(text: "") }],
+      on: [On { event: "input", payload: Value, to_msg: Set }],
       kids: [],
       key: None,
     ),
@@ -311,10 +293,11 @@ test "a turn is a function of its line, so a transcript replays" {
   assert ask(typed) == ask(typed)
 }
 
-test "a payload reaches update through fill, and only through fill" {
-  # The whole path, end to end: the host's text lands in the hole `Set` left,
-  # `update` reads it, and the model changed to something no click could have
-  # produced. Nothing named a message on the way.
+test "a payload reaches update through the listener's own function" {
+  # The whole path, end to end: the host's text goes to the function the
+  # listener at [3] named, `update` reads what came back, and the model changed
+  # to something no click could have produced. Nothing named a message on the
+  # way, and nothing outside the view decided which constructor it lands in.
   let out = ask("{\"op\":\"event\",\"model\":\"7\",\"path\":[3],\"event\":\"input\",\"payload\":\"12\"}")
   assert str.contains(out, "\"model\":\"12\"")
   assert str.contains(out, "\"s\":\"12\"")
@@ -324,6 +307,32 @@ test "a payload reaches update through fill, and only through fill" {
     ask("{\"op\":\"event\",\"model\":\"7\",\"path\":[3],\"event\":\"input\",\"payload\":\"twelve\"}")
   assert str.contains(junk, "\"model\":\"7\"")
   assert str.contains(junk, "\"patches\":[]")
+}
+
+test "what an event means at an address is a question with an answer" {
+  # The dispatch-level assertion, which is what replaces "compare the trees and
+  # read the message out of the listener". `route.at` says which listener the
+  # host's pair resolves to, `node.deliver` says what it makes of a payload,
+  # and together they are what `settle` does minus the refusals.
+  let tree = vw(Counter { n: 7 })
+  match route.at(tree, [3], "input") {
+    None -> { assert false }
+    Some(l) -> {
+      assert deliver(l, "12") == Set(text: "12")
+      # Verbatim: the boundary hands over the string it was given and the
+      # application decides what it is worth.
+      assert deliver(l, "twelve") == Set(text: "twelve")
+    }
+  }
+  match route.at(tree, [2], "click") {
+    None -> { assert false }
+    Some(l) -> {
+      # A `NoData` listener ignores what it is handed, which is why `settle`
+      # can pass `""` rather than carry a second shape for the argument.
+      assert deliver(l, "") == Inc
+      assert deliver(l, "ignored") == Inc
+    }
+  }
 }
 
 test "a payload that does not match what the listener asked for is refused" {

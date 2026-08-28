@@ -1,31 +1,31 @@
-# The DOM vocabulary of the Elm architecture: a pure value tree whose leaves
-# carry the application's message type and never a function, exactly as the
-# terminal's `Widget` does. This is a *second* vocabulary over `tea_core`'s
-# reconciler contract, not a second reconciler: `kids`, `rekid` and `relate`
-# are the whole of what this package owes core, and `diff`/`apply`/
-# `fold_preorder` arrive unchanged.
+# The DOM vocabulary of the Elm architecture: a pure value tree over
+# `tea_core`'s reconciler contract. This is a *second* vocabulary, not a
+# second reconciler: `kids`, `rekid` and `relate` are the whole of what this
+# package owes core, and `diff`/`apply`/`fold_preorder` arrive unchanged.
 #
 # Two nodes, not five. A browser's element is one shape with a tag, so the
 # vocabulary that mirrors it is `Text` and `Elem`; the terminal needed `Row`
 # and `Column` because a terminal has no tag to vary. Everything a DOM host
 # needs beyond that is a property (`props`) or a listener (`on`).
 #
-# `on` carries the *message* an event means, never a callback -- the same
-# load-bearing restriction `tea_term/widget` states, for the same reason:
-# a function field costs the tree its structural `==`, and `==` is what lets
-# the reconciler short-circuit and a view test be one assertion. A DOM event
-# arrives at this package as an address plus an event name, and the message
-# is looked up in the tree that is current at that moment (`tea_dom/route`),
-# so no message ever leaves the module that declared it.
+# `on` carries what an event *means*, as `fn(String) -> M`: the payload string
+# the host brings back, in, and the application's message out. Elm spells the
+# same thing `on : String -> Decoder msg`. No callback into the host is in
+# there and none can be: a DOM event arrives at this package as an address
+# plus an event name, the listener is looked up in the tree that is current at
+# that moment (`tea_dom/route`), and the function runs on the guest side, so
+# no message and no function ever leaves the module that declared it.
 #
-# That restriction is what decides the shape of an event payload. Elm spells a
-# listener `on : String -> Decoder msg`, which is a function from the event to
-# a message, and a tree holding one cannot be compared. So a listener here
-# declares the *kind* of data it wants as a value (`Payload`), the host brings
-# that one string back with the event, and the merge happens outside the tree
-# (`tea_dom/reactor.Fill`). The kind is part of `==` for free, so "this
-# listener now wants something different" is a difference the reconciler
-# already sees and the host is already told about.
+# A function field would ordinarily cost the tree its structural `==`, and
+# `==` is what lets the reconciler short-circuit and a view test be one
+# assertion. `On` keeps `==` by declaring what its identity is: the pair
+# `(event, payload)`, which is exactly what the host is told about a listener
+# and exactly what a patch can carry. The hand-written `impl Eq[On[M]]` below
+# states the argument in full. The consequence a reader has to hold onto is
+# that a listener's *message* is behaviour, not identity, so two listeners
+# that differ only in what they mean are equal here and the reconciler emits
+# nothing for the pair. That is correct, because the host has nothing to be
+# told: it attaches by event name and asks again at dispatch time.
 #
 # The impl is here and can be nowhere else: the orphan rule is per module, so
 # `impl Tree[Node[M]]` belongs to the module declaring `Node`.
@@ -59,21 +59,72 @@ derive Show
 ## One listener: the event to hear, what to bring back with it, and what it
 ## means.
 ##
+## `to_msg` takes the payload string and answers the message. A listener that
+## declared `NoData` is handed `""` and ignores it, so the shape is one
+## function for all three kinds rather than a sum over them. A bare
+## constructor name is already a `fn(String) -> M` in Dawn, which is why
+## `on_value("input", SetDraft)` is the whole spelling of a value-carrying
+## listener.
+##
 ## A record rather than a tuple because this is the place a listener declares
 ## things to the host, and a payload kind is the first of them rather than the
 ## only one: a capability bit (`prevent`, `passive`) or a predicate the host
 ## evaluates per event is the same declaration site, and a record grows a field
 ## where a tuple would have to change shape again. `{ ..base, field: v }` is
 ## how one is spelled with the rest left alone.
-pub type On[M] = { event: String, payload: Payload, msg: M }
-derive Show
+pub type On[M] = { event: String, payload: Payload, to_msg: fn(String) -> M }
+
+## A listener's identity is its wire identity: `(event, payload)`, with
+## `to_msg` excluded.
+##
+## This is a quotient, written by hand and not derivable, so the argument for
+## it is here in full.
+##
+## What the host is ever told about a listener is the event name and, when one
+## was asked for, the kind of data to bring back: that is the whole of
+## `wire.jevent`, and therefore the whole of what any patch can carry about
+## one. What comes back inward is an address, an event name and at most one
+## string. Dispatch then resolves the pair against the tree the *current*
+## model produces (`route.at`) and applies that tree's `to_msg`. So two `On`
+## values agreeing on `(event, payload)` are indistinguishable to the host,
+## to the patch stream and to dispatch: nothing downstream of `==` can tell
+## them apart, and answering "equal" for them costs no information.
+##
+## The boundary of the claim, because it is easy to overread. This is not
+## `Eq` for functions, and no function is ever compared here or anywhere:
+## `to_msg` is excluded from identity, which is a different thing from being
+## compared badly. Equality stays reflexive, symmetric and transitive, since
+## it is `Eq` on a pair of ordinary values. What is given up is that a
+## message's *value* is visible to tree `==`: a test that used to assert
+## "this button now means `Drop(2)`" by comparing trees has to ask dispatch
+## instead, which is what `reactor.deliver` is for.
+##
+## The paired `Hash` reads the same two fields, because equal values must
+## hash equally or `On` stops working as a `Map` key. The compiler requires
+## the pair.
+impl[M] Eq[On[M]] {
+  fn eq(a: On[M], b: On[M]) -> Bool = a.event == b.event && a.payload == b.payload
+}
+
+impl[M] Hash[On[M]] {
+  fn hash(x: On[M]) -> Int = fold_hash(fold_hash(1, hash(x.event)), hash(x.payload))
+}
+
+## Hand-written for the same reason `Eq` is: a function field is not
+## printable, and what a reader wants to see is the two fields that decide
+## identity. The shape is the one `derive Show` would have produced for a
+## record of those two.
+impl[M] Show[On[M]] {
+  fn show(x: On[M]) -> String =
+    "On { event: " ++ show(x.event) ++ ", payload: " ++ show(x.payload) ++ " }"
+}
 
 ## A pure description of a DOM subtree. `M` is the application's message type.
 ##
 ## `props` is what the host sets on the element (attributes, `value`, a class
 ## list -- the interpretation is the bridge's, see `packages/tea-dom/js`), and
-## `on` names, per event type, the message that event means and what the host
-## should bring back with it (`On`, above). Both are ordered
+## `on` names, per event type, what the host should bring back with the event
+## and how to turn it into a message (`On`, above). Both are ordered
 ## lists rather than maps because order is part of `==` and therefore part of
 ## what the reconciler can see; a host that wants set semantics sorts before
 ## it builds.
@@ -95,21 +146,81 @@ pub type Node[M] =
   )
 derive Show
 
+## `==` on a node, written out rather than synthesised.
+##
+## The compiler synthesises `Eq` for an ADT that has no impl, and that is what
+## this was until listeners started carrying a function. It cannot be any
+## more, for one reason of language and one of implementation.
+##
+## The language reason is that the synthesis asks each type parameter of the
+## ADT for an `Eq` bound whether or not the parameter reaches a comparable
+## position, and `M` does not reach one: it occurs only under `On[M]`, whose
+## `Eq` reads two fields and never touches it. Writing the impl is what lets
+## `Node[M]` be comparable for *every* `M`, which is what takes the `M: Eq`
+## bound off `turn`, `serve` and the `Tree` impl.
+##
+## The implementation reason is a JVM backend bug and is recorded so that this
+## can be deleted when it is fixed: a synthesised `Eq` for an ADT whose
+## structure reaches a *conditional user impl* (`impl[M] Eq[On[M]]`) emits a
+## dictionary class with a private constructor, and the module that needs it
+## then dies with `tried to access private method ... <init>` at the first
+## comparison made at a rigid `M`. `turn` is exactly that call site. A
+## non-generic `impl Eq` on the nested type does not trigger it, nor does a
+## conditional impl on the outer ADT itself, which is why this shape works.
+##
+## Every field of `Elem` is here, and the test below is what keeps it that
+## way: an omission here is invisible to the roundtrip contract, since
+## `apply(old, diff(old, new)) == new` would be asked with the same blind
+## `==`.
+impl[M] Eq[Node[M]] {
+  fn eq(a: Node[M], b: Node[M]) -> Bool =
+    match a {
+      Text(s1) ->
+        match b {
+          Text(s2) -> s1 == s2
+          Elem(..) -> false
+        }
+      Elem(t1, p1, o1, k1, y1) ->
+        match b {
+          Text(_) -> false
+          Elem(t2, p2, o2, k2, y2) -> t1 == t2 && p1 == p2 && o1 == o2 && k1 == k2 && y1 == y2
+        }
+    }
+}
+
+## The same fields in the same order, folded the shape the compiler's own
+## synthesis folds them (seed 1, `h = 31*h + hash(part)`, constructor index
+## first). It is not the same *number*, because the synthesis wraps at 32 bits
+## and this does not; what a `Hash` owes is agreement with `==`, and nothing
+## in the tree pins the value.
+impl[M] Hash[Node[M]] {
+  fn hash(x: Node[M]) -> Int =
+    match x {
+      Text(s) -> fold_hash(fold_hash(1, 0), hash(s))
+      Elem(t, p, o, k, y) -> {
+        let h = fold_hash(fold_hash(1, 1), hash(t))
+        fold_hash(fold_hash(fold_hash(fold_hash(h, hash(p)), hash(o)), hash(k)), hash(y))
+      }
+    }
+}
+
+# One part folded into a running hash: the step the compiler's own synthesis
+# takes, named so that the impl above reads as the list of parts it is.
+fn fold_hash(acc: Int, part: Int) -> Int = 31 * acc + part
+
 ## What this vocabulary owes the reconciler.
 ##
-## The `M: Eq` bound is not decoration and not inherited from anywhere: `relate`
-## must be able to see *every* difference between a pair, or the contract
-## `apply(old, diff(old, new)) == new` fails. Two elements that agree on tag,
-## props and event names but disagree on what one of those events *means* --
-## or on what it should bring back -- are unequal, and answering `Same` for
-## them would emit no patch at all for a real difference. The payload kind
-## rides along in that same comparison, which is why declaring it as data
-## rather than encoding it in the event name costs the vocabulary nothing:
-## `relate` sees it without being told about it. So `relate` compares the `on`
-## list whole, and comparing it needs
-## `Eq` on the message type. The terminal vocabulary never met this because its
-## message-carrying node (`Button`) is a leaf and answers `Unrelated`.
-impl[M: Eq] Tree[Node[M]] {
+## No bound on `M`, and the absence is worth a sentence because there used to
+## be one. `relate` must see *every* difference between a pair, or the
+## contract `apply(old, diff(old, new)) == new` fails, and it sees differences
+## by comparing `props` and `on`. Comparing `on` needed `Eq` on the message
+## type back when a listener carried a message value; it does not now, because
+## `Eq[On[M]]` is written by hand over `(event, payload)` and never reaches
+## `M`. What `relate` still has to see is a changed event name and a changed
+## payload kind, which is a host that must attach a different listener, and it
+## does: the kind is data in the tree, so declaring it there rather than
+## encoding it in the event name costs the vocabulary nothing.
+impl[M] Tree[Node[M]] {
   fn kids(w: Node[M]) -> List[Node[M]] =
     match w {
       Text(_) -> []
@@ -162,6 +273,25 @@ impl[M: Eq] Tree[Node[M]] {
     }
 }
 
+## The message an event carrying `payload` means at this listener. The
+## eliminator for `On`, and the answer to the question tree `==` stopped being
+## able to answer.
+##
+## `reactor.settle` is this plus the check that what arrived is what the
+## listener declared; a view test wants the message and not the refusal, so
+## this is the spelling an application asserts with:
+##
+## ```dawn
+## assert deliver(on_value("input", SetDraft), "buy milk") == SetDraft(text: "buy milk")
+## ```
+##
+## Written here rather than in the calling module because a direct
+## `listener.to_msg(p)` at a site where `M` is a concrete type miscompiles on
+## the JVM backend today (the result of calling a function read out of a
+## generic record field is not cast back). Going through one generic function
+## is both the readable spelling and the working one.
+pub fn deliver[M](listener: On[M], payload: String) -> M = (listener.to_msg)(payload)
+
 ## `w` with `k` as its identity among its siblings. A `Text` is returned
 ## unchanged: it has nowhere to keep one, so a child list holding text pairs by
 ## index whatever this is asked. Total for the same reason `rekid` is.
@@ -183,16 +313,58 @@ fn div(ks: List[Node[ProbeMsg]]) -> Node[ProbeMsg] =
 # The listener spellings the tests below want. `tea_dom/dsl` has the public
 # ones; this module cannot use them, since `dsl` is written over it.
 fn hear[M](event: String, msg: M) -> On[M] =
-  On { event: event, payload: NoData, msg: msg }
+  On { event: event, payload: NoData, to_msg: _p => msg }
 
 fn hear_value[M](event: String, msg: M) -> On[M] =
-  On { event: event, payload: Value, msg: msg }
+  On { event: event, payload: Value, to_msg: _p => msg }
 
 test "a DOM tree is a plain value with structural equality" {
   let a: Node[ProbeMsg] = div([Text(s: "hi")])
   assert a == div([Text(s: "hi")])
   assert a != div([Text(s: "ho")])
   assert a != Elem(tag: "span", props: [], on: [], kids: [Text(s: "hi")], key: None)
+}
+
+test "every field of Elem is part of == and part of hash" {
+  # The guard on the hand-written `impl Eq[Node[M]]`. A field left out of it
+  # is invisible to every other test in this file, including the roundtrip
+  # contract: `apply(old, diff(old, new)) == new` would be asked with the same
+  # blind `==` and would answer yes. So each field gets a pair that differs in
+  # it and in nothing else, and both `==` and `hash` have to see the pair.
+  let base: Node[ProbeMsg] = Elem(
+    tag: "div",
+    props: [("class", "a")],
+    on: [hear("click", Ping)],
+    kids: [Text(s: "k")],
+    key: Some("1"),
+  )
+  let others: List[Node[ProbeMsg]] = [
+    Elem(tag: "span", props: [("class", "a")], on: [hear("click", Ping)], kids: [Text(s: "k")],
+      key: Some("1")),
+    Elem(tag: "div", props: [("class", "b")], on: [hear("click", Ping)], kids: [Text(s: "k")],
+      key: Some("1")),
+    Elem(tag: "div", props: [("class", "a")], on: [hear("blur", Ping)], kids: [Text(s: "k")],
+      key: Some("1")),
+    Elem(tag: "div", props: [("class", "a")], on: [hear("click", Ping)], kids: [Text(s: "j")],
+      key: Some("1")),
+    Elem(tag: "div", props: [("class", "a")], on: [hear("click", Ping)], kids: [Text(s: "k")],
+      key: Some("2")),
+  ]
+  var i = 0
+  while i < len(others) {
+    assert base != others[i]
+    assert hash(base) != hash(others[i])
+    i = i + 1
+  }
+  # Reflexive, and the two constructors are never each other.
+  assert base == base
+  assert hash(base) == hash(Elem(tag: "div", props: [("class", "a")], on: [hear("click", Ping)],
+    kids: [Text(s: "k")], key: Some("1")))
+  let t: Node[ProbeMsg] = Text(s: "div")
+  assert t != base
+  assert base != t
+  assert t == Text(s: "div")
+  assert hash(t) != hash(base)
 }
 
 test "kids is the addressing scheme and rekid is total" {
@@ -220,11 +392,15 @@ test "relate: tag decides related, self-data decides in place" {
 
 ## Every shape the reconciler distinguishes, in this vocabulary: both node
 ## kinds, a tag change, a prop change, a listener-name change, a listener-
-## meaning change, a listener-payload change, nesting, the empty element, and
+## payload change, a listener-order change, nesting, the empty element, and
 ## child lists that grow, shrink and change in the middle. `roundtrip` below is
 ## asked about every
 ## ordered pair of these, which is the same standard tea_core holds its own
 ## test vocabulary to.
+##
+## What is *not* here, and cannot be: a pair differing only in what a listener
+## means. Those two are one shape, because `Eq[On[M]]` is a quotient over
+## `(event, payload)`. The test below the corpus is where that is pinned.
 fn corpus() -> List[Node[ProbeMsg]] = {
   let a: Node[ProbeMsg] = Text(s: "a")
   let b: Node[ProbeMsg] = Text(s: "b")
@@ -243,7 +419,10 @@ fn corpus() -> List[Node[ProbeMsg]] = {
     Elem(tag: "div", props: [("class", "y")], on: [], kids: [], key: None),
     Elem(tag: "div", props: [("class", "x")], on: [], kids: [a], key: None),
     Elem(tag: "div", props: [], on: [hear("click", Ping)], kids: [a], key: None),
-    Elem(tag: "div", props: [], on: [hear("click", Pong)], kids: [a], key: None),
+    # The pair that differs only in the *order* of two listeners. Order is
+    # part of `==` on a list, so it is part of what the reconciler sees, and
+    # the host is handed the listeners in the order the view named them.
+    Elem(tag: "div", props: [], on: [hear("blur", Pong), hear("click", Ping)], kids: [a], key: None),
     Elem(tag: "div", props: [], on: [hear("input", Ping)], kids: [a], key: None),
     # The pair that differs only in what the listener asks the host to bring
     # back. Same event, same message, and the host has to attach a listener
@@ -287,23 +466,44 @@ test "equal trees diff to nothing, and an unchanged sibling is never mentioned" 
   assert diff(old, new) == want
 }
 
-test "a listener whose message changed is a self difference, not a silent one" {
-  # The case the `M: Eq` bound exists for. Same tag, same props, same event
-  # name, different meaning: without comparing `on` this pair answers `Same`,
-  # `diff` emits nothing for a real difference, and the roundtrip contract
-  # `apply(old, diff(old, new)) == new` is broken.
+test "a listener whose event name changed is a self difference, not a silent one" {
+  # The half of `Eq[On[M]]` the host cannot do without. Same tag, same props,
+  # same payload kind, different event: the host has `click` attached and needs
+  # `mousedown`, and it learns that from the `set-self` this answers. A `relate`
+  # that could not see the event name would emit nothing for a real difference
+  # and break `apply(old, diff(old, new)) == new`.
   let a: Node[ProbeMsg] = Elem(tag: "button", props: [], on: [hear("click", Ping)], kids: [], key: None)
-  let b: Node[ProbeMsg] = Elem(tag: "button", props: [], on: [hear("click", Pong)], kids: [], key: None)
+  let b: Node[ProbeMsg] =
+    Elem(tag: "button", props: [], on: [hear("mousedown", Ping)], kids: [], key: None)
   assert a != b
   assert relate(a, b) == SelfDiffers
+  assert diff(a, b) != []
+  # Two listeners under one element, differing only in the order they were
+  # named. The host attaches in that order, so the order is a difference.
+  let fwd: Node[ProbeMsg] = Elem(
+    tag: "button",
+    props: [],
+    on: [hear("click", Ping), hear("blur", Ping)],
+    kids: [],
+    key: None,
+  )
+  let rev: Node[ProbeMsg] = Elem(
+    tag: "button",
+    props: [],
+    on: [hear("blur", Ping), hear("click", Ping)],
+    kids: [],
+    key: None,
+  )
+  assert fwd != rev
+  assert relate(fwd, rev) == SelfDiffers
 }
 
 test "a listener whose payload changed is a self difference too" {
-  # The half a payload kind adds, and the reason declaring it as data rather
-  # than as a suffix on the event name costs nothing: the same comparison that
-  # already saw a changed meaning sees a changed *reading*. The host has a
-  # listener attached that takes no payload and needs one that does, and it
-  # learns that from the `set-self` this answers.
+  # The other half. The reason declaring the kind as data rather than as a
+  # suffix on the event name costs nothing: the same comparison that sees a
+  # changed event name sees a changed *reading*. The host has a listener
+  # attached that takes no payload and needs one that does, and it learns that
+  # from the `set-self` this answers.
   let quiet: Node[ProbeMsg] =
     Elem(tag: "input", props: [], on: [hear("input", Ping)], kids: [], key: None)
   let talking: Node[ProbeMsg] =
@@ -315,13 +515,43 @@ test "a listener whose payload changed is a self difference too" {
   assert relate(talking, talking) == Same
 }
 
+test "a listener's identity is its wire identity, and the message is not in it" {
+  # The quotient, stated as an assertion. `Eq[On[M]]` compares `(event,
+  # payload)` and stops; `to_msg` is behaviour, not identity.
+  #
+  # Why that is sound and not a shortcut: the host is told an event name and,
+  # when one was asked for, a kind (`wire.jevent`), and it hands back an
+  # address plus that pair. Dispatch resolves the pair against the tree the
+  # *current* model produces and runs that tree's `to_msg`. So a patch saying
+  # "this listener now means something else" would carry bytes the host
+  # already has, and re-attaching would change nothing it does.
+  assert hear("click", Ping) == hear("click", Pong)
+  let means_ping: Node[ProbeMsg] =
+    Elem(tag: "button", props: [], on: [hear("click", Ping)], kids: [], key: None)
+  let means_pong: Node[ProbeMsg] =
+    Elem(tag: "button", props: [], on: [hear("click", Pong)], kids: [], key: None)
+  assert means_ping == means_pong
+  assert relate(means_ping, means_pong) == Same
+  assert list.is_empty(diff(means_ping, means_pong))
+  # It is an equivalence, not a comparison of functions: reflexive on a
+  # listener whose message is a closure over something the other does not
+  # have, and still discriminating on the two fields that are identity.
+  assert hear("click", Ping) == hear("click", Ping)
+  assert hear("click", Ping) != hear("blur", Ping)
+  assert hear("click", Ping) != hear_value("click", Ping)
+  # `Hash` reads the same two fields, so equal listeners hash equally. The
+  # compiler requires the pair; this is what the pairing has to mean.
+  assert hash(hear("click", Ping)) == hash(hear("click", Pong))
+  assert hash(hear("click", Ping)) != hash(hear("blur", Ping))
+}
+
 # ---- what keying is worth, in patches ----
 #
 # The number the whole knife is about, held as an assertion rather than as a
 # sentence in a design note. `screen` is the shape a list application actually
-# has: rows whose listeners carry the row's identity, so a row that changes
-# position is a row whose own data changed, plus one sibling holding a count so
-# that a round is never zero patches.
+# has: rows whose listeners carry the row's identity and whose label carries
+# the row's number, plus one sibling holding a count so that a round is never
+# zero patches.
 #
 # The two spellings differ in exactly one thing, `with_key` on the `<li>`, and
 # `wired` is what says so: the two trees encode to the same wire bytes, so the
@@ -408,17 +638,23 @@ fn screen(n: Int, gone: Int, identified: Bool) -> Node[RowMsg] = {
 fn cost(n: Int, gone: Int, identified: Bool) -> Int =
   len(diff(screen(n, 0, identified), screen(n, gone, identified)))
 
-test "keying a list of 50 rows: a deletion costs 2 patches instead of 98" {
-  # Deleting the row in the middle. Index pairing rewrites every row below it:
-  # four patches each (three listeners whose id changed, one label), plus the
-  # truncate, plus the status line. Key pairing removes one child and touches
-  # nothing else.
-  assert cost(50, 26, false) == 98
+test "keying a list of 50 rows: a deletion costs 2 patches instead of 26" {
+  # Deleting the row in the middle. Index pairing rewrites the label of every
+  # row below it, one patch each, plus the truncate, plus the status line. Key
+  # pairing removes one child and touches nothing else.
+  #
+  # The unkeyed figure used to be 98, four patches per shifted row: the label
+  # and the three listeners, whose ids had all moved up by one. Three of those
+  # four went away when a listener's identity became `(event, payload)`, since
+  # a row's three listeners now compare equal to the row above's. The wire was
+  # already telling the host only the event name, so those three per row were
+  # patches carrying bytes the host already had.
+  assert cost(50, 26, false) == 26
   assert cost(50, 26, true) == 2
 
   # The worst case for index pairing is the first row, where every row below
   # is every row.
-  assert cost(50, 1, false) == 198
+  assert cost(50, 1, false) == 51
   assert cost(50, 1, true) == 2
 
   # The one case index pairing was already optimal for. Keying must not make
