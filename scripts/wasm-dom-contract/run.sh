@@ -363,7 +363,7 @@ case_of todo
 # gate anything here: the two listeners are equal, so the patch stream is
 # unmoved, and what reds is the model and the document.
 reset_tree
-sed -i 's/        \[on_value("input", SetEdit)\],/        [on_value("input", SetDraft)],/' \
+sed -i 's/value: m.edit, on: \[on_value("input", SetEdit)\]/value: m.edit, on: [on_value("input", SetDraft)]/' \
   "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn"
 edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
   run_mutant todo-msg yes "a payload lands in the wrong field"

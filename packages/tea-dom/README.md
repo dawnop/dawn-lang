@@ -7,7 +7,7 @@ depends on `packages/tea-term`, and nothing here knows what a browser is; the
 JavaScript that does is in `js/`.
 
 ```dawn
-use tea_dom/dsl.{button, div_of, text}
+use tea_dom/dsl.{button, div, text}
 use tea_dom/reactor.{serve}
 
 pub fn main() -> Unit !io = serve(init(), encode, decode, update, view)
@@ -29,6 +29,39 @@ elements that agree on tag and props but disagree on which events they listen
 for, or on what those events should bring back, are unequal, and the
 vocabulary has to say so. The terminal never met this because its
 message-carrying node is a leaf that answers `Unrelated`.
+
+## The view vocabulary
+
+`src/dsl.dawn` is lowercase wrappers over the two constructors and nothing
+deeper. Every parameter but the tag has a default, so a call names what it has:
+
+```dawn
+el("li", class: "row", kids: [
+  button(if t.done { "[x]" } else { "[ ]" }, Toggle(id: t.id), class: "box"),
+  el("span", class: "title", on: [on_click(Edit(id: t.id))], kids: [text(t.title)]),
+  button("x", Drop(id: t.id), class: "kill"),
+])
+```
+
+`el(tag, props, on, kids, class)` is the general spelling and the first four
+are in the constructor's order, so a positional call still reads. The helpers
+are `text`, `div(kids, class)`, `span(s, class)`, `button(label, msg, class)`,
+`input(class, value, on)`, `keyed`, `foreign`, and there are deliberately no
+others: a per-tag wrapper would buy nothing over `el("section", class: "x",
+kids: [...])` and would be one more thing to keep in step with `Elem`.
+
+`class:` is the one piece of sugar. It expands to exactly one prop, **prepended**:
+`el("li", [("id", "a")], class: "row")` has props `[("class", "row"), ("id", "a")]`.
+Prepending is what keeps the order a hand-written list already had, and props
+travel in order on the wire, so appending would move a byte in every
+transcript. An empty class adds no prop, which is what lets it be the default.
+Nothing is deduplicated: a call passing both a `class:` and a `("class", ..)`
+inside `props` produces both pairs, in that order, and what a browser does with
+a repeated attribute is the browser's rule.
+
+`input` has no `kids` parameter, for the reason `foreign` has none. Its `value`
+prop is rendered always, the empty string included: a field this builds is
+controlled, so a message that clears the model has to be able to clear the box.
 
 ## Event payloads
 
@@ -78,10 +111,11 @@ guest.
 
 ## Keyed children
 
-`key` is a field of `Elem` and never leaves the guest. `dsl.keyed(tag, props,
-on, kids)` takes `List[(String, Node[M])]`, the shape Elm's `Html.Keyed.node`
-has, so a forgotten key is a type error rather than a silent return to index
-pairing; `node.with_key` is the one-node form underneath it.
+`key` is a field of `Elem` and never leaves the guest. `dsl.keyed`'s `kids`
+takes `List[(String, Node[M])]`, the shape Elm's `Html.Keyed.node` has, so a
+forgotten key is a type error rather than a silent return to index pairing;
+`node.with_key` is the one-node form underneath it. It defaults like `el` does,
+so the usual call is `keyed("ul", class: "list", kids: rows)`.
 
 What it buys, priced on the shape `tea_dom_todo` has. Deleting the middle row
 of fifty costs 26 patches unkeyed, over 24 relabelled rows, and 2 keyed;
@@ -108,8 +142,8 @@ registers the tag (`customElements.define`), the class does its mount work in
 fires those exactly when the reconciler's `replace`/`remove`/`truncate` land.
 Tearing a widget down is never this package's business.
 
-`dsl.foreign(tag, props, on)` builds the node. The signature has no `kids`
-parameter, because a foreign element has no guest children and that rule is
+`dsl.foreign(tag, props, on, class)` builds the node. The signature has no
+`kids` parameter, because a foreign element has no guest children and that rule is
 worth a spelling rather than a warning: with the guest-side list empty, `diff`
 never emits an address into the element, so whatever the library builds inside
 is invisible to the reconciler and untouched by every patch. On the wire it is

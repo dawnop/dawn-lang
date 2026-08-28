@@ -21,7 +21,7 @@
 use tea_core/app.{App, update, view}
 use tea_core/diff.{Patch, Replace, AppendKids, TruncateKids, diff}
 use tea_dom/node.{Node, Text, Elem}
-use tea_dom/dsl.{button, div_of, el, text}
+use tea_dom/dsl.{button, div, el, text}
 
 ## The whole model: how many times the user has pressed something, net.
 pub type Counter = { n: Int }
@@ -53,18 +53,18 @@ impl App[Counter] {
     }
 
   fn view(m: Counter) -> Node[Msg] = {
-    let heading: Node[Msg] = el("h1", [], [], [text("dawn counter")])
-    let count: Node[Msg] = el("p", [("class", "count")], [], [text(to_string(m.n))])
-    let bar: Node[Msg] = el("div", [("class", "bar")], [], ticks(m.n))
+    let heading: Node[Msg] = el("h1", kids: [text("dawn counter")])
+    let count: Node[Msg] = el("p", class: "count", kids: [text(to_string(m.n))])
+    let bar: Node[Msg] = div(class: "bar", kids: ticks(m.n))
     let controls: Node[Msg] =
-      div_of("row", [
+      div(class: "row", kids: [
         button("-", Dec),
         button("+", Inc),
         button("reset", Reset),
         button("boom", Boom),
       ])
-    div_of(if m.n < 0 { "counter below-zero" } else { "counter" },
-      [heading, count, bar, controls])
+    div(class: if m.n < 0 { "counter below-zero" } else { "counter" },
+      kids: [heading, count, bar, controls])
   }
 }
 
@@ -78,7 +78,7 @@ impl App[Counter] {
 ## the spans already on screen are never mentioned.
 fn ticks(n: Int) -> List[Node[Msg]] = if n <= 0 { [] } else { ticks(n - 1) ++ [tick()] }
 
-fn tick() -> Node[Msg] = el("span", [("class", "tick")], [], [])
+fn tick() -> Node[Msg] = el("span", class: "tick")
 
 ## A model as text, and back. Opaque to everything but this module: the wire
 ## carries it as a JSON string and the host hands it back untouched.
@@ -105,11 +105,11 @@ test "update folds messages and the model round-trips through its text" {
 
 test "the view is a value, so a frame is one assertion" {
   let want: Node[Msg] =
-    div_of("counter", [
-      el("h1", [], [], [text("dawn counter")]),
-      el("p", [("class", "count")], [], [text("0")]),
-      el("div", [("class", "bar")], [], []),
-      div_of("row", [
+    div(class: "counter", kids: [
+      el("h1", kids: [text("dawn counter")]),
+      el("p", class: "count", kids: [text("0")]),
+      div(class: "bar"),
+      div(class: "row", kids: [
         button("-", Dec),
         button("+", Inc),
         button("reset", Reset),

@@ -1,8 +1,20 @@
 # Lowercase wrappers over the constructors, and nothing deeper -- the same
 # spelling layer `tea_term/dsl` is, for the same reason: a view reads better as
-# `div([...])` than as `Elem(tag: "div", props: [], on: [], kids: [...],
+# `div(kids: [...])` than as `Elem(tag: "div", props: [], on: [], kids: [...],
 # key: None)`, and the constructor is unreadable when four of its five fields
 # are empty.
+#
+# Every parameter but the tag has a default, so a call says what it has and is
+# silent about the rest. That is the whole of the surface: `el` with names is
+# the general spelling and the four helpers below are the shapes a view builds
+# often enough to have a word for. There is no per-tag vocabulary and there is
+# not going to be one -- `el("section", class: "x", kids: [...])` already reads,
+# and a hundred wrappers would be a hundred things to keep in step with `Elem`.
+#
+# `class:` is the one piece of sugar rather than a plain parameter, because a
+# class is the prop a view writes first and writing it as a pair in a list was
+# the tax that made `props` non-empty in almost every call. It expands to
+# exactly one prop, prepended; `props` is otherwise untouched.
 #
 # The same two inference taxes tea_term's README records apply here and are not
 # specific to either DSL: a type argument flows from an expected type, and a
@@ -18,13 +30,37 @@ use wire.{enc_node}
 ## A text node.
 pub fn text[M](s: String) -> Node[M] = Text(s: s)
 
-## The general element: tag, properties, listeners, children.
+## The general element: tag, properties, listeners, children, class.
+##
+## The first four are in the constructor's order, so every positional call
+## still reads; past the tag they are all optional, so `el("hr")`,
+## `el("ul", kids: rows)` and `el("h1", class: "title", kids: [text(t)])` are
+## each the whole call.
+##
+## `class:` is sugar for exactly one prop, and that prop goes *first*:
+## `el("li", class: "row")` is `el("li", [("class", "row")])`, and
+## `el("li", [("id", "a")], class: "row")` has props
+## `[("class", "row"), ("id", "a")]`. Prepending rather than appending is what
+## keeps the order a view already had, since a class list written by hand
+## spelled the class first; the wire carries props in order and a transcript
+## would see the difference.
+##
+## Nothing is deduplicated. A call passing both a `class:` and a
+## `("class", ..)` inside `props` produces both pairs, in that order, and what
+## a browser does with a repeated attribute is the browser's rule and not
+## this package's. The sugar is one leading prop, no more and no less.
 pub fn el[M](
   tag: String,
-  props: List[(String, String)],
-  on: List[On[M]],
-  kids: List[Node[M]],
-) -> Node[M] = Elem(tag: tag, props: props, on: on, kids: kids, key: None)
+  props: List[(String, String)] = [],
+  on: List[On[M]] = [],
+  kids: List[Node[M]] = [],
+  class: String = "",
+) -> Node[M] = Elem(tag: tag, props: classed(class, props), on: on, kids: kids, key: None)
+
+# The `class:` rule, in the one place every spelling below reads it from: an
+# empty class is no prop at all, a nonempty one is the first prop there is.
+fn classed(class: String, props: List[(String, String)]) -> List[(String, String)] =
+  if class == "" { props } else { [("class", class)] ++ props }
 
 ## `msg` when this element is clicked, and nothing else crosses.
 ##
@@ -63,17 +99,21 @@ pub fn on_key[M](event: String, f: fn(String) -> M) -> On[M] =
 ## the only spelling in which forgetting one key is a type error rather than a
 ## silent return to index pairing.
 ##
+## `props`, `on`, `kids` and `class` default exactly as `el`'s do, so the usual
+## call is `keyed("ul", class: "list", kids: rows)`.
+##
 ## A `Text` child cannot hold a key, so a list containing one falls back to
 ## index pairing however this is called. Wrap it in a `span` to key it.
 pub fn keyed[M](
   tag: String,
-  props: List[(String, String)],
-  on: List[On[M]],
-  kids: List[(String, Node[M])],
+  props: List[(String, String)] = [],
+  on: List[On[M]] = [],
+  kids: List[(String, Node[M])] = [],
+  class: String = "",
 ) -> Node[M] =
   Elem(
     tag: tag,
-    props: props,
+    props: classed(class, props),
     on: on,
     kids: list.map(kids, entry => {
       let (k, w) = entry
@@ -82,23 +122,40 @@ pub fn keyed[M](
     key: None,
   )
 
-## A container with children and nothing else. The two commonest shapes get a
-## name because they are what a view is mostly made of.
-pub fn div[M](kids: List[Node[M]]) -> Node[M] =
-  Elem(tag: "div", props: [], on: [], kids: kids, key: None)
-
-## A `div` with a class, which is how a view says "style this region".
-pub fn div_of[M](class: String, kids: List[Node[M]]) -> Node[M] =
-  Elem(tag: "div", props: [("class", class)], on: [], kids: kids, key: None)
+## A container and nothing else, which is what most of a view is made of.
+## `div(kids: rows)`, `div(class: "row", kids: rows)`, or `div()` for the empty
+## one; anything wanting a listener or a second prop is `el("div", ..)`.
+pub fn div[M](kids: List[Node[M]] = [], class: String = "") -> Node[M] =
+  Elem(tag: "div", props: classed(class, []), on: [], kids: kids, key: None)
 
 ## A `span` holding one string.
-pub fn span[M](s: String) -> Node[M] =
-  Elem(tag: "span", props: [], on: [], kids: [Text(s: s)], key: None)
+pub fn span[M](s: String, class: String = "") -> Node[M] =
+  Elem(tag: "span", props: classed(class, []), on: [], kids: [Text(s: s)], key: None)
 
 ## A button labelled `label` whose click means `msg`. The DOM analogue of
 ## `tea_term/dsl.button`, and like it the message is data in the tree.
-pub fn button[M](label: String, msg: M) -> Node[M] =
-  Elem(tag: "button", props: [], on: [on_click(msg)], kids: [Text(s: label)], key: None)
+pub fn button[M](label: String, msg: M, class: String = "") -> Node[M] =
+  Elem(
+    tag: "button",
+    props: classed(class, []),
+    on: [on_click(msg)],
+    kids: [Text(s: label)],
+    key: None,
+  )
+
+## A text field: the one input a view builds often enough to have a word for,
+## and the fifth and last of them.
+##
+## No `kids` parameter, for the reason `foreign` has none: an `<input>` has no
+## children, and a signature is a better place to say so than a comment.
+##
+## `value` is rendered always, the empty string included. A field this builds
+## is controlled -- the document shows what the model holds -- so a message
+## that clears the model has to be able to clear the box, and a `value` prop
+## that disappeared when the model went empty would leave the browser's own
+## text sitting there.
+pub fn input[M](class: String = "", value: String = "", on: List[On[M]] = []) -> Node[M] =
+  Elem(tag: "input", props: classed(class, [("value", value)]), on: on, kids: [], key: None)
 
 ## An element whose inside belongs to someone else: a custom element the page
 ## registered, with third-party JavaScript running behind it.
@@ -119,9 +176,10 @@ pub fn button[M](label: String, msg: M) -> Node[M] =
 ## expensive. The README's "Third-party mounts" section is the full contract.
 pub fn foreign[M](
   tag: String,
-  props: List[(String, String)],
-  on: List[On[M]],
-) -> Node[M] = Elem(tag: tag, props: props, on: on, kids: [], key: None)
+  props: List[(String, String)] = [],
+  on: List[On[M]] = [],
+  class: String = "",
+) -> Node[M] = Elem(tag: tag, props: classed(class, props), on: on, kids: [], key: None)
 
 # A message type for the test blocks below; real apps bring their own.
 # `Said` is the one carrying a payload: its bare name is the `fn(String) -> M`
@@ -140,12 +198,111 @@ test "the wrappers build exactly the constructors they name" {
   let t: Node[ProbeMsg] = text("hi")
   assert t == Text(s: "hi")
   assert div([t]) == Elem(tag: "div", props: [], on: [], kids: [t], key: None)
-  assert div_of("row", [t]) == Elem(tag: "div", props: [("class", "row")], on: [], kids: [t], key: None)
+  assert div([t], class: "row") == Elem(
+    tag: "div",
+    props: [("class", "row")],
+    on: [],
+    kids: [t],
+    key: None,
+  )
+  # The two orders are one node: naming both is what lets the class come first
+  # on the page and second in the call.
+  assert div(class: "row", kids: [t]) == div([t], class: "row")
   let sp: Node[ProbeMsg] = span("hi")
   assert sp == Elem(tag: "span", props: [], on: [], kids: [t], key: None)
+  let titled: Node[ProbeMsg] = span("hi", class: "title")
+  assert titled == Elem(
+    tag: "span",
+    props: [("class", "title")],
+    on: [],
+    kids: [t],
+    key: None,
+  )
+  assert button("go", Ping, class: "add") == Elem(
+    tag: "button",
+    props: [("class", "add")],
+    on: [click],
+    kids: [Text(s: "go")],
+    key: None,
+  )
   let typed: On[ProbeMsg] = On { event: "input", payload: Value, to_msg: _p => Pong }
   let general: Node[ProbeMsg] = el("input", [("value", "7")], [typed], [])
   assert general == Elem(tag: "input", props: [("value", "7")], on: [typed], kids: [], key: None)
+  # And the same node with every optional argument omitted instead of empty.
+  assert el("input", props: [("value", "7")], on: [typed]) == general
+}
+
+## `class:` is one leading prop. This is the assertion the whole re-cut rests
+## on, and it is here rather than only in a transcript because the wire is a
+## downstream reader: a `class:` that appended would still produce a valid
+## document, still pass every shape assertion above, and move a byte in
+## `scripts/wasm-dom-contract/expected.txt` that nothing in this package
+## explains.
+test "class is exactly one prop and it goes first" {
+  # Alone, it is the props list.
+  let want: Node[ProbeMsg] = Elem(
+    tag: "li",
+    props: [("class", "row")],
+    on: [],
+    kids: [],
+    key: None,
+  )
+  let sugared: Node[ProbeMsg] = el("li", class: "row")
+  let spelled: Node[ProbeMsg] = el("li", [("class", "row")])
+  assert sugared == want
+  assert spelled == want
+  # With props of its own, it is *prepended* -- first, not last. Appending
+  # here is what the mutant does and this line is what catches it.
+  assert props_of(el("li", [("id", "a"), ("data-n", "1")], class: "row")) == [
+    ("class", "row"),
+    ("id", "a"),
+    ("data-n", "1"),
+  ]
+  # An empty class is no prop at all, which is what lets it be the default.
+  assert props_of(el("li", [("id", "a")])) == [("id", "a")]
+  assert props_of(el("li", [("id", "a")], class: "")) == [("id", "a")]
+  assert props_of(el("li")) == []
+  assert props_of(div()) == []
+  assert props_of(span("hi")) == []
+  # Nothing deduplicates: two classes asked for are two props delivered, the
+  # sugar's first.
+  assert props_of(el("li", [("class", "b")], class: "a")) == [("class", "a"), ("class", "b")]
+  # The helpers read the same rule from the same place.
+  assert props_of(div(class: "row")) == [("class", "row")]
+  assert props_of(span("hi", class: "title")) == [("class", "title")]
+  assert props_of(button("go", Ping, class: "add")) == [("class", "add")]
+  assert props_of(keyed("ul", class: "list")) == [("class", "list")]
+  assert props_of(keyed("ul", [("id", "a")], class: "list")) == [("class", "list"), ("id", "a")]
+  assert props_of(foreign("x-editor", [("doc", "v1")], class: "pane")) == [
+    ("class", "pane"),
+    ("doc", "v1"),
+  ]
+}
+
+fn props_of(n: Node[ProbeMsg]) -> List[(String, String)] =
+  match n {
+    Text(_) -> []
+    Elem(_, props, ..) -> props
+  }
+
+## `input` is `el("input", ..)` with the two props a controlled field always
+## has and the children it cannot have.
+test "input is a controlled field with no children" {
+  let heard: On[ProbeMsg] = On { event: "input", payload: Value, to_msg: Said }
+  assert input(class: "field", value: "buy milk", on: [heard]) == Elem(
+    tag: "input",
+    props: [("class", "field"), ("value", "buy milk")],
+    on: [heard],
+    kids: [],
+    key: None,
+  )
+  # The `value` prop is there when the model's text is empty, which is the
+  # half that makes clearing the model clear the box.
+  assert props_of(input(class: "field")) == [("class", "field"), ("value", "")]
+  assert props_of(input()) == [("value", "")]
+  # And there is nowhere to put a child.
+  let filled: Node[ProbeMsg] = input(value: "x")
+  assert list.is_empty(kids(filled))
 }
 
 test "the three listener spellings differ in the payload and nothing else" {
@@ -195,6 +352,8 @@ test "keyed hands each child the string that names it" {
     key: None,
   )
   assert rows == want
+  let named: Node[ProbeMsg] = keyed("ul", kids: [("a", span("A")), ("b", span("B"))])
+  assert named == want
   # The element itself is unkeyed. A key names a node among its siblings, and
   # a keyed container is keyed by whatever list it is a member of, not by the
   # keys it hands out.
@@ -204,4 +363,8 @@ test "keyed hands each child the string that names it" {
   # honest outcome: there is nowhere to put it.
   let mixed: Node[ProbeMsg] = keyed("p", [], [], [("t", text("hi"))])
   assert mixed == Elem(tag: "p", props: [], on: [], kids: [Text(s: "hi")], key: None)
+  # A keyed container with no children is a container, not an error.
+  let empty: Node[ProbeMsg] = keyed("ul", class: "list")
+  let no_kids: List[Node[ProbeMsg]] = []
+  assert empty == Elem(tag: "ul", props: [("class", "list")], on: [], kids: no_kids, key: None)
 }

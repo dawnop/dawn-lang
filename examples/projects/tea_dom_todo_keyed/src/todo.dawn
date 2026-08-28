@@ -45,7 +45,7 @@ use tea_core/app.{App, update, view}
 use tea_core/diff.{Patch, RemoveKid, diff}
 use tea_core/tree.{key}
 use tea_dom/node.{Node, Text, Elem, On, deliver}
-use tea_dom/dsl.{el, keyed, on_click, on_value, text}
+use tea_dom/dsl.{button, div, el, input, keyed, on_click, on_value, text}
 
 ## One item. `id` is the identity the user means, and here it is also the key
 ## the reconciler pairs by -- `view` spells it into the keyed `<ul>` below.
@@ -158,7 +158,7 @@ impl App[Model] {
     }
 
   fn view(m: Model) -> Node[Msg] = {
-    let heading: Node[Msg] = el("h1", [], [], [text("dawn todo")])
+    let heading: Node[Msg] = el("h1", kids: [text("dawn todo")])
     let composer: Node[Msg] = compose_row(m)
     let filters: Node[Msg] = filter_row(m.filter)
     # Keyed, which is the one line this application does not share with
@@ -166,14 +166,9 @@ impl App[Model] {
     # while row 3 is open moves the open row rather than rewriting it, and the
     # `<input>` the caret is in is the same element afterwards.
     let items: Node[Msg] =
-      keyed(
-        "ul",
-        [("class", "list")],
-        [],
-        list.map(visible(m), t => (to_string(t.id), row(m, t))),
-      )
-    let status: Node[Msg] = el("p", [("class", "status")], [], [text(summary(m))])
-    el("div", [("class", root_class(m))], [], [heading, composer, filters, items, status])
+      keyed("ul", class: "list", kids: list.map(visible(m), t => (to_string(t.id), row(m, t))))
+    let status: Node[Msg] = el("p", class: "status", kids: [text(summary(m))])
+    div(class: root_class(m), kids: [heading, composer, filters, items, status])
   }
 }
 
@@ -213,32 +208,21 @@ fn root_class(m: Model) -> String =
 # characters is one -- and the two halves are what keep the model and the
 # document agreeing on what is in the box.
 fn compose_row(m: Model) -> Node[Msg] = {
-  let field: Node[Msg] =
-    el(
-      "input",
-      [("class", "field"), ("value", m.draft)],
-      [on_value("input", SetDraft)],
-      [],
-    )
-  let add: Node[Msg] = el("button", [("class", "add")], [on_click(Add)], [text("add")])
-  let boom: Node[Msg] = el("button", [("class", "boom")], [on_click(Boom)], [text("boom")])
-  el("div", [("class", "compose")], [], [field, add, boom])
+  let field: Node[Msg] = input(class: "field", value: m.draft, on: [on_value("input", SetDraft)])
+  let add: Node[Msg] = button("add", Add, class: "add")
+  let boom: Node[Msg] = button("boom", Boom, class: "boom")
+  div(class: "compose", kids: [field, add, boom])
 }
 
 fn filter_row(cur: Filter) -> Node[Msg] =
-  el("div", [("class", "filters")], [], [
+  div(class: "filters", kids: [
     filter_button("all", All, cur),
     filter_button("active", Active, cur),
     filter_button("done", Done, cur),
   ])
 
 fn filter_button(label: String, which: Filter, cur: Filter) -> Node[Msg] =
-  el(
-    "button",
-    [("class", if which == cur { "filter on" } else { "filter" })],
-    [on_click(Only(f: which))],
-    [text(label)],
-  )
+  button(label, Only(f: which), class: if which == cur { "filter on" } else { "filter" })
 
 # Two shapes, decided by a field of the model rather than by the row: an
 # `<li>` being edited has a field and two verbs, an `<li>` at rest has a
@@ -247,23 +231,16 @@ fn filter_button(label: String, which: Filter, cur: Filter) -> Node[Msg] =
 # an outright `replace` rather than a text patch.
 fn row(m: Model, t: Todo) -> Node[Msg] =
   if m.editing == Some(t.id) {
-    el("li", [("class", "row editing")], [], [
-      el(
-        "input",
-        [("class", "draft"), ("value", m.edit)],
-        [on_value("input", SetEdit)],
-        [],
-      ),
-      el("button", [("class", "save")], [on_click(Save)], [text("save")]),
-      el("button", [("class", "cancel")], [on_click(Cancel)], [text("cancel")]),
+    el("li", class: "row editing", kids: [
+      input(class: "draft", value: m.edit, on: [on_value("input", SetEdit)]),
+      button("save", Save, class: "save"),
+      button("cancel", Cancel, class: "cancel"),
     ])
   } else {
-    el("li", [("class", if t.done { "row done" } else { "row" })], [], [
-      el("button", [("class", "box")], [on_click(Toggle(id: t.id))], [
-        text(if t.done { "[x]" } else { "[ ]" }),
-      ]),
-      el("span", [("class", "title")], [on_click(Edit(id: t.id))], [text(t.title)]),
-      el("button", [("class", "kill")], [on_click(Drop(id: t.id))], [text("x")]),
+    el("li", class: if t.done { "row done" } else { "row" }, kids: [
+      button(if t.done { "[x]" } else { "[ ]" }, Toggle(id: t.id), class: "box"),
+      el("span", class: "title", on: [on_click(Edit(id: t.id))], kids: [text(t.title)]),
+      button("x", Drop(id: t.id), class: "kill"),
     ])
   }
 
@@ -408,16 +385,9 @@ test "both fields are controlled, so the document renders the model" {
   # A `value` prop carrying the model's text, on each of the two. Without it
   # the field would be the browser's and nothing could clear it -- `Add`
   # clears the draft, and this is what makes that reach the screen.
-  let field: Node[Msg] =
-    el(
-      "input",
-      [("class", "field"), ("value", "buy milk")],
-      [on_value("input", SetDraft)],
-      [],
-    )
+  let field: Node[Msg] = input(class: "field", value: "buy milk", on: [on_value("input", SetDraft)])
   assert first_kid(compose_row(update(init(), SetDraft(text: "buy milk")))) == Some(field)
-  let editor: Node[Msg] =
-    el("input", [("class", "draft"), ("value", "task2")], [on_value("input", SetEdit)], [])
+  let editor: Node[Msg] = input(class: "draft", value: "task2", on: [on_value("input", SetEdit)])
   let open = update(seeded(2), Edit(id: 2))
   assert first_kid(row(open, Todo { id: 2, title: "task2", done: false })) == Some(editor)
 }
