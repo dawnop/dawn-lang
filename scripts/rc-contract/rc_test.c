@@ -395,10 +395,12 @@ static void test_immortal_graph(void) {
  * measures the consequence on a reactor; these two ask the runtime directly.
  *
  * A template per case, because a shared one would let the first case seed the
- * table for the second and the two would stop being independent questions. */
+ * table for the second and the two would stop being independent questions.
+ * Different slot counts so that stays true: two identical read-only objects
+ * are two the compiler is allowed to fold into one address. */
 
 static const dawn_dict dict_tmpl_a = {1, {NULL}, 0, {NULL}};
-static const dawn_dict dict_tmpl_b = {1, {NULL}, 0, {NULL}};
+static const dawn_dict dict_tmpl_b = {2, {NULL}, 0, {NULL}};
 static dawn_dict dict_arg_x = {1, {NULL}, 0, {NULL}};
 static dawn_dict dict_arg_y = {1, {NULL}, 0, {NULL}};
 
