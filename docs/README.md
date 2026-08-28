@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` 下现有 92 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 93 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
@@ -69,6 +69,7 @@
 | [never-return-design.md](never-return-design.md) | current | SEM-14 已裁决方案的实现记录：return-only `Never` 的语义边界、JVM bottom call 终止 seam 与验证矩阵。 |
 | [native-failure-design.md](native-failure-design.md) | current | #193 的修法：native 失败运行时的三个 P1（ARC-03 消息截断 / ARC-04 嵌套覆盖 / ARC-05 恢复泄漏）实测是**两件事**——载荷所有权与「longjmp 不跑清理」。刀 1 载荷对象化 + 路线 A3（`-fexceptions` + cleanup + ForcedUnwind）；路线 B（Result ABI）不做，重开条件写在 §4.3。载荷契约随刀 2 进 spec.md §9.8.1。 |
 | [dom-bridge-design.md](dom-bridge-design.md) | current | UI DSL 第 4 层的边界：wasm reactor（`dawnc build --target wasm --reactor`）+ 纯消息传递 + 不用 `externref`，以及 `packages/tea-dom` 作为 `tea_core` 调和器的第二个消费者。记下契约对 DOM 缺的两件事（带 key 的子节点配对、住在终端包里的 `diff_step`）与 wasi-sdk 钉在 34 的实测理由。 |
+| [tea-block-children-design.md](tea-block-children-design.md) | **proposed** | 视图 DSL 的子节点该不该由尾块发出（类 Compose 形状）。三条路线各自的墙：效果发出法卡在收集型 handler 在尾恢复档不可表达、效果不带类型参数、效果变量上装不了 handler（十二个探针的实测答复逐条在册）；块产生列表法过不了语法歧义那道线；停在列表的得失。不给结论，裁决栏留空。 |
 | [named-args-design.md](named-args-design.md) | current | #207 的方案：具名实参推广到 `Sig` 支持的 callee + 默认参数（合成 `f$default$k` 零元纯函数）。四条用户终裁在其 §9：实参求值顺序改**写序**（本批唯一 Emit-Change）、单层名、默认值任意纯表达式、std 采用另批。 |
 | [tail-block-design.md](tail-block-design.md) | current | #206 的方案：裸 `{ ... }` 尾块（Kotlin 式，含 `{ x => }` 参数头）落到既有 `attach_trailing`，区分机制 = 头部禁记录字面量的开关扩义（`ns`→`nb`）。用户终裁在其 §13：方案乙、guard 位不禁；期 2 的最终口径是 `fn` 不再属于表达式，尾块是唯一 trailing form。 |
 | [match-arm-separators-design.md](match-arm-separators-design.md) | current | SYN-10 的定稿：match 臂只由物理换行或逗号分隔，尾逗号合法；删除 FIRST(pattern) 邻接，并以三类 delimiter-aware recovery 与绝对 grammar corpus 固定边界。 |
