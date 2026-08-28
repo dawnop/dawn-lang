@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ b274509a27ab8d0a -->
+<!-- doc-check: translation-of docs/spec.md @ 7397d73e680517a1 -->
 
 # Dawn Language Specification
 
@@ -567,11 +567,16 @@ column(kids, align: 1, gap: 12)
   function's effect row would depend on whether the call site passes the argument — one
   signature, two rows, which a type system cannot have.
 - **Evaluated in the declaring scope**: it may refer to this module's private functions and
-  `const`s, it **cannot see the function's other parameters** (the default is checked in a
-  scope with no parameters, so referring to one is an ordinary `undefined variable`), and it
-  is **not available on a parameter whose type mentions the function's type parameters**
-  (`fn join[T](xs: List[T] = [])` is refused; `fn join[T](xs: List[T], sep: String = ", ")`
-  is fine). Both restrictions can be lifted later without breaking anything.
+  `const`s, and it **cannot see the function's other parameters** (the default is checked in
+  a scope with no parameters, so referring to one is an ordinary `undefined variable`). That
+  restriction can be lifted later without breaking anything.
+- **A parameter's type may mention the function's type parameters**
+  (`fn join[T](xs: List[T] = []) -> T`): the synthesized `f$default$k` repeats the function's
+  type parameters and their bounds verbatim, and a call that omits the argument calls it at
+  **that call's own instantiation** — the same type substitution and the same witness
+  dictionaries the call site already resolved. A default expression may therefore use the
+  trait methods a bound provides (`fn pick[T: Zero](v: T = zero())`), and which
+  implementation it gets is decided by the call site's instantiation.
 - **A default need not sit at the tail**: `fn f(a: Int = 1, b: Int)` is legal — `a` can only
   be skipped by naming `b` (the positional prefix takes slots left to right and cannot jump).
   A skipped required parameter reports "missing argument(s) for `f`: …"; a count outside the

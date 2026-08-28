@@ -1,6 +1,8 @@
 # default parameter values (#207): what refuses them, in each place's own
-# words. Three value constraints -- purity, no type-parameter types, no other
-# parameters in scope -- and three positions that do not take defaults at all.
+# words. Two value constraints -- purity, no other parameters in scope -- and
+# three positions that do not take defaults at all. A parameter whose type
+# mentions the function's type parameters used to be a third value constraint;
+# it is accepted now (spec §3.1) and `ok_tparam` holds that open.
 use std/list
 
 fn eff() -> Int !io = 1
@@ -8,8 +10,10 @@ fn eff() -> Int !io = 1
 # an effectful default: the signature's row would depend on the call site
 pub fn bad_pure(a: Int = eff()) -> Int = a
 
-# a parameter whose type mentions the function's type parameter
-pub fn bad_tparam[T](xs: List[T] = [], n: Int) -> Int = n
+# a parameter whose type mentions the function's type parameter, on a bounded
+# type parameter at that: no diagnostic, and the case is here so that a
+# regression to the old refusal shows up as a new line rather than as nothing
+pub fn ok_tparam[T: Eq](xs: List[T] = [], n: Int) -> Int = n
 
 # a default cannot see the other parameters: they are not in its scope
 pub fn bad_param_ref(a: Int, b: Int = a * 2) -> Int = a + b

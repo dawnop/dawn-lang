@@ -41,7 +41,7 @@ use check/tast.{
   TListElem, TLEExpr, TLESpread, TLEIf, TListIfArm,
   TPat, TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
-  TFun, TConst, TModule, WitRef, WForward, WConcrete, WApply
+  TFun, TDefault, TConst, TModule, WitRef, WForward, WConcrete, WApply
 }
 use check/types.{
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
@@ -5997,13 +5997,27 @@ fn arity_msg(callee: String, min_n: Int, max_n: Int, got: Int) -> String = {
 }
 
 ## The call an omitted defaulted argument becomes: `f$default$k()`, resolved
-## to the declaring module. Its result type is the parameter's declared type,
-## which mentions no type parameter (check_param_defaults refused those), so
-## no instantiation applies.
-fn default_call(s: Sig, callee: String, idx: Int, lo: Int, hi: Int) -> TExpr = {
+## to the declaring module. The synthesized function repeats the callee's type
+## parameters and bounds, so this is an instantiated call like any other: the
+## result type is the parameter's type under this call's substitution, and the
+## witnesses are this call's own -- the same row, read in the same order, so
+## the parent's list is the callee's list. It is pure and zero-parameter, so
+## it needs no evidence.
+fn default_call(
+  cx: Cx,
+  s: Sig,
+  callee: String,
+  idx: Int,
+  m: Map[Int, Ty],
+  em: Map[Int, Eff],
+  wits: List[WitRef],
+  lo: Int,
+  hi: Int
+) -> TExpr = {
   let none_tid: Option[Int] = None
-  XCallFn(s.owner, callee ++ "\$default\$" ++ to_string(idx), [], [], [], none_tid,
-    lo, hi, s.param_tys[idx])
+  let pty = reduce_ty_effs(cx, reduce_assoc(cx, subst(s.param_tys[idx], m, em)), m)
+  XCallFn(s.owner, callee ++ "\$default\$" ++ to_string(idx), [], wits, [], none_tid,
+    lo, hi, pty)
 }
 
 ## A named call f(args) (the Kotlin checkCall): a local fn value, else a
@@ -6427,7 +6441,7 @@ fn check_call(
       Some(wi) -> tx_slots[wi]
       None ->
         if param_has_default(s, pi2) {
-          Some(default_call(s, callee, pi2, lo, hi))
+          Some(default_call(cx1, s, callee, pi2, m, em, wits, lo, hi))
         } else {
           no_texpr()
         }
@@ -6484,7 +6498,7 @@ fn check_call(
           Some(wi) -> locs[wi]
           None ->
             if param_has_default(s, pi3) {
-              Some(default_call(s, callee, pi3, lo, hi))
+              Some(default_call(cx1, s, callee, pi3, m, em, wits, lo, hi))
             } else {
               no_texpr()
             }
@@ -9012,6 +9026,38 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   let none8 = EApply(EVar("move2", 0, 5), [], 0, 7)
   let (cx9, _, _) = check_expr(cxd, none8, no_expected())
   assert cx9.diags[0].msg == "`move2` takes 1 to 2 argument(s), got 0"
+  # a generic callee: the synthesized default repeats the callee's type
+  # parameters and bounds, so the omitted slot is an *instantiated* call --
+  # the parameter type under this call's substitution, and this call's own
+  # witnesses in this call's order (#207 §4.3)
+  let tv = TyVar("T", 0)
+  let gsig = Sig {
+    name: "hold", param_tys: [TyList(tv), tv], param_names: ["xs", "probe"],
+    param_defaults: [true, false],
+    ret: TyInt,
+    eff: EPure, is_builtin: false, tparams: [tv], constraints: [[EQ_ID]], eparams: [],
+    owner: Some("m"), trait_id: None, op_of: None, inferring: false
+  }
+  let cxg = Cx { ..cx, fns: map.insert(cx.fns, "hold", gsig) }
+  let gcall = EApply(EVar("hold", 0, 4), [named_arg("probe", EInt(1, 5, 6))], 0, 7)
+  let (cx10, t10, n10) = check_expr(cxg, gcall, no_expected())
+  assert len(cx10.diags) == 0
+  assert t10 == TyInt
+  match n10 {
+    XCallFn(_, _, gargs, gwits, ..) -> {
+      assert gwits == [WConcrete(EQ_ID, TyInt)]
+      match gargs[0] {
+        XCallFn(_, dn2, dargs2, dwits2, _, _, _, _, dty2) -> {
+          assert dn2 == "hold\$default\$0"
+          assert len(dargs2) == 0
+          assert dwits2 == [WConcrete(EQ_ID, TyInt)]
+          assert dty2 == TyList(TyInt)
+        }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
 }
 
 test "the same call, four callees, four kinds of typed node" {
@@ -9719,7 +9765,15 @@ fn verify_effects(
 ## The signature of the function a defaulted parameter synthesizes: zero
 ## parameters, the parameter's type, pure -- `f$default$k` in f's module.
 ## `$` is not in the identifier lexicon, so the name cannot collide.
-fn default_sig(fname: String, k: Int, pty: Ty, owner: Option[String]) -> Sig =
+##
+## It repeats the parent's type parameters and bounds verbatim (#207 §4.3):
+## the parameter's type may mention them, and generics are erased before Core,
+## so what survives instantiation is the dictionary row. Copying the row
+## whole -- rather than the subset this one default happens to use -- is what
+## lets a call site hand its own witnesses straight over: both sides read the
+## row in `tparams x bounds_of` order, and a filtered row would renumber it.
+## `eparams` stays empty because a default is refused any effect.
+fn default_sig(parent: Sig, fname: String, k: Int, pty: Ty) -> Sig =
   Sig {
     name: fname ++ "\$default\$" ++ to_string(k),
     param_tys: [],
@@ -9728,10 +9782,10 @@ fn default_sig(fname: String, k: Int, pty: Ty, owner: Option[String]) -> Sig =
     ret: pty,
     eff: EPure,
     is_builtin: false,
-    tparams: [],
-    constraints: [],
+    tparams: parent.tparams,
+    constraints: parent.constraints,
     eparams: [],
-    owner: owner,
+    owner: parent.owner,
     trait_id: None,
     op_of: None,
     inferring: false
@@ -9753,60 +9807,53 @@ pub fn strip_param_defaults(d: FnDecl) -> FnDecl = {
   FnDecl { ..d, params: map(d.params, p => Param { ..p, default: none_e }) }
 }
 
+fn no_tdefault() -> Option[TDefault] = None
+
 ## Check each parameter default in the declaring module's scope (#207 §4.2):
-## no parameters, no type parameters, a pure frame of its own. The expression
-## becomes the body of the synthesized `f$default$k`, so what is in scope
-## here is exactly what is in scope there -- a reference to a sibling
-## parameter is an ordinary `undefined variable`, by construction rather than
-## by a rule.
-fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TExpr]]) !io = {
+## no parameters, a pure frame of its own. The expression becomes the body of
+## the synthesized `f$default$k`, so what is in scope here is exactly what is
+## in scope there -- a reference to a sibling parameter is an ordinary
+## `undefined variable`, by construction rather than by a rule.
+##
+## The frame does carry the function's type parameters and their bounds
+## (`default_sig` repeats them), so a parameter whose type mentions them takes
+## a default like any other; `enter_fn` mints the dictionary symbols and they
+## are carried out here, because the synthesized function has to bind the very
+## symbols its body was checked against.
+fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TDefault]]) !io = {
   var cx1 = cx
-  var out: List[Option[TExpr]] = []
+  var out: List[Option[TDefault]] = []
   var k = 0
   for p in d.params {
     match p.default {
-      None -> { out = out ++ [no_texpr()] }
+      None -> { out = out ++ [no_tdefault()] }
       Some(de) -> {
         let pty = s.param_tys[k]
-        # the default is checked once, outside any instantiation, so its type
-        # cannot mention the function's type parameters (#207 §4.3)
-        var mentions = false
-        for tv in s.tparams {
-          match tv {
-            TyVar(_, vid) -> if ty_mentions_var(pty, vid) { mentions = true }
-            _ -> ()
-          }
+        let dsig = default_sig(s, d.name, k, pty)
+        var cxd = enter_fn(cx1, dsig, p.lo, p.hi)
+        let (cxe, dt, dx) = check_expr(cxd, de, Some(pty))
+        cxd = cxe
+        if not assignable(cxd, dt, pty) {
+          cxd = cerr(cxd, "parameter `" ++ p.name ++ "` is " ++ ty_show(cxd.adts, pty) ++
+              " but its default value is " ++ ty_show(cxd.adts, dt), e_lo(de), e_hi(de))
         }
-        if mentions {
-          cx1 = cerr_h(cx1, "parameter `" ++ p.name ++ "` cannot take a default value: its type " ++
-              ty_show(cx1.adts, pty) ++ " mentions the function's type parameters",
-            e_lo(de), e_hi(de), "take the argument explicitly at the call sites")
-          out = out ++ [no_texpr()]
-        } else {
-          var cxd = enter_fn(cx1, default_sig(d.name, k, pty, s.owner), p.lo, p.hi)
-          let (cxe, dt, dx) = check_expr(cxd, de, Some(pty))
-          cxd = cxe
-          if not assignable(cxd, dt, pty) {
-            cxd = cerr(cxd, "parameter `" ++ p.name ++ "` is " ++ ty_show(cxd.adts, pty) ++
-                " but its default value is " ++ ty_show(cxd.adts, dt), e_lo(de), e_hi(de))
-          }
-          # the row would otherwise depend on whether the call site omits the
-          # argument -- one signature, two effect rows (#207 §4.3)
-          for used in cxd.frame.used_effects {
-            if not eff_subsumes(EPure, used) {
-              let (wlo, whi, wname) = match map.get(cxd.frame.eff_witness, used) {
-                Some(w) -> w
-                None -> (e_lo(de), e_hi(de), "?")
-              }
-              cxd = cerr_h(cxd, "a parameter default must be pure, but it calls `" ++ wname ++
-                  "` (!" ++ eff_show(used) ++ ")", wlo, whi,
-                "the default runs at every call that omits the argument; " ++
-                  "take the argument explicitly, or drop the effect")
+        # the row would otherwise depend on whether the call site omits the
+        # argument -- one signature, two effect rows (#207 §4.3)
+        for used in cxd.frame.used_effects {
+          if not eff_subsumes(EPure, used) {
+            let (wlo, whi, wname) = match map.get(cxd.frame.eff_witness, used) {
+              Some(w) -> w
+              None -> (e_lo(de), e_hi(de), "?")
             }
+            cxd = cerr_h(cxd, "a parameter default must be pure, but it calls `" ++ wname ++
+                "` (!" ++ eff_show(used) ++ ")", wlo, whi,
+              "the default runs at every call that omits the argument; " ++
+                "take the argument explicitly, or drop the effect")
           }
-          cx1 = pop_scope(cxd)
-          out = out ++ [Some(dx)]
         }
+        let dsyms = dict_sym_list(cxd, dsig)
+        cx1 = pop_scope(cxd)
+        out = out ++ [Some(TDefault { body: dx, dict_syms: dsyms })]
       }
     }
     k = k + 1
@@ -10278,16 +10325,21 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
     var k = 0
     for dv in tf.defaults {
       match dv {
-        Some(dx) -> {
-          let ds = default_sig(tf.name, k, tf.sig.param_tys[k], tf.sig.owner)
+        Some(dd) -> {
+          let ds = default_sig(tf.sig, tf.name, k, tf.sig.param_tys[k])
           synth = synth ++ [TFun {
             name: ds.name,
             sig: ds,
             param_syms: [],
-            dict_syms: [],
+            # the signature repeats the parent's bounds, so the body binds one
+            # dictionary per bound -- the same symbols `check_param_defaults`
+            # checked it against. Leaving these empty while the signature
+            # carries constraints is a descriptor/body disagreement, which is
+            # a verification error at run time rather than a diagnostic.
+            dict_syms: dd.dict_syms,
             ev_syms: [],
             defaults: [],
-            body: dx,
+            body: dd.body,
             is_test: false,
             impl_of: None,
             default_of: None

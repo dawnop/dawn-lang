@@ -6,6 +6,13 @@
 # not a value, so two omitting calls build two lists (Python's `def f(x=[])`
 # shares one; Dawn does not). `stamp` pins "declared module's scope": the
 # default calls a private function of this module.
+#
+# The second half is the generic relaxation (spec §3.1): a parameter whose
+# type mentions the function's own type parameters takes a default too. The
+# synthesized function repeats the parent's type parameters and bounds, so the
+# call site instantiates it with its own -- `pick` is where that is visible in
+# the answer rather than only in the descriptor, because its default value is
+# a trait method dispatched through the very dictionary the call site threaded.
 use std/io
 use std/list
 use std/str
@@ -32,6 +39,43 @@ fn ruler(w: Int = comptime { 2 + 2 }, c: Int = WIDTH) -> Int = w * 10 + c
 # defaults one.
 const RULED: Int = ruler(9)
 
+# ---- a defaulted parameter whose type mentions the type parameters ----
+
+# the type parameter under a list constructor, instantiated at two types
+fn count[T](xs: List[T] = [], extra: T) -> Int = len(xs ++ [extra])
+
+# and under Option: a bare `None` takes its type from the parameter
+fn first_or[T](x: Option[T] = None, fallback: T) -> T =
+  match x {
+    Some(v) -> v
+    None -> fallback
+  }
+
+# a bounded type parameter. The default does not use the bound, but the
+# synthesized function still takes the dictionary the signature promises --
+# a signature with constraints whose body binds nothing is a descriptor the
+# JVM verifier rejects, not a diagnostic.
+fn seen[T: Eq](xs: List[T] = [], probe: T) -> Bool = list.contains(xs, probe)
+
+# the default value *is* a dictionary dispatch, so the witness the call site
+# threaded decides what gets printed
+trait Zero[T] {
+  fn zero() -> T
+}
+
+impl Zero[Int] {
+  fn zero() -> Int = 7
+}
+
+impl Zero[String] {
+  fn zero() -> String = "z"
+}
+
+fn pick[T: Zero](v: T = zero(), n: Int) -> T = v
+
+# the comptime interpreter takes the generic default the same way
+const PICKED: Int = pick(n: 0)
+
 pub fn main() -> Unit !io = {
   io.println(greet("ada"))
   io.println(greet("ada", greeting: "hi"))
@@ -45,4 +89,15 @@ pub fn main() -> Unit !io = {
   io.println(to_string(ruler(9)))
   io.println(to_string(ruler(c: 1)))
   io.println(to_string(RULED))
+  io.println(to_string(count(extra: 1)) ++ " " ++ to_string(count(extra: "s")))
+  io.println(to_string(count([1, 2], 3)))
+  io.println(to_string(first_or(fallback: 5)) ++ " " ++ first_or(fallback: "none"))
+  io.println(first_or(Some("here"), "none"))
+  io.println(to_string(seen(probe: 1)) ++ " " ++ to_string(seen(probe: "s")))
+  io.println(to_string(seen([1, 2], 2)))
+  let pi: Int = pick(n: 0)
+  let ps: String = pick(n: 0)
+  io.println(to_string(pi) ++ " " ++ ps)
+  io.println(to_string(pick(3, 0)))
+  io.println(to_string(PICKED))
 }

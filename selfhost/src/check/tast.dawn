@@ -312,6 +312,14 @@ pub type TStmt =
     hi: Int
   )
 
+## One checked parameter default (#207): the expression, plus the dictionary
+## symbols the frame it was checked in minted. The synthesized `f$default$k`
+## repeats its parent's type parameters and bounds, so it takes the same
+## hidden dictionary parameters -- and the body may already refer to them, so
+## these have to be the symbols the body was checked against rather than a
+## fresh set minted at synthesis time.
+pub type TDefault = { body: TExpr, dict_syms: List[Int] }
+
 ## One checked function: its final signature, parameter symbol ids, the
 ## hidden dictionary symbols (bound-order), typed body. `impl_of` marks an
 ## impl method body (codegen mangles it dawn$impl$Trait$Subject$name);
@@ -325,7 +333,7 @@ pub type TFun = {
   # with the signature; check_module synthesizes `f$default$k` from each Some.
   # Empty everywhere defaults cannot appear (tests, impl methods, trait
   # default bodies).
-  defaults: List[Option[TExpr]],
+  defaults: List[Option[TDefault]],
   # hidden evidence parameters, one per declared effect in the signature, in
   # effect-id order -- the same convention the dictionaries follow, appended
   # after them (docs/effects-design.md §5.2). Empty for every function whose
