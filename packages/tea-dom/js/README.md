@@ -132,6 +132,14 @@ against a stub that carries the dirty value flag, because a document whose
 attribute is right and whose live value is stale is one a transcript cannot
 tell from a correct one.
 
+Which is also why the transcripts do not read like a browser. The stub prints
+`value` as an attribute, so `expected-todo.txt` has
+`<input class="field" value="" @input>` where a browser's `innerHTML` has
+`<input class="field">`: a real `<input>` has no `value` content attribute
+until someone sets one. Both are right, and a transcript is not a prediction
+of `innerHTML`. `props.mjs` is the authority on what actually reaches an
+element.
+
 ## Why a WASI shim rather than `node:wasi`
 
 There is no `node:wasi` in a browser, and a harness running on a different
