@@ -108,8 +108,68 @@ pub fn gen_assets(out: String) -> Assets !io = {
     og_image: og,
     play_css: play_css,
     play_js: play_js,
+    tea_js: emit_bridge(out),
+    # Built by site/build.sh, which is also where the toolchain that can build
+    # them is probed for. Never built here: scripts/site-dist-diff.sh runs this
+    # generator twice and compares the two site/dist byte for byte, so what the
+    # generator does has to be a function of files that were already on disk
+    # when it started.
+    tea_counter: emit_wasm(out, "tea-counter.wasm", "site/build/tea/counter.wasm"),
+    tea_todo: emit_wasm(out, "tea-todo.wasm", "site/build/tea/todo.wasm"),
   }
 }
+
+## The DOM bridge's four ES modules (packages/tea-dom/js), vendored under
+## content-hashed names; answers the name of the one a page imports.
+##
+## They import each other by relative specifier, and a fingerprinted copy is
+## not at the name its siblings ask for -- so each specifier is repointed at
+## the name its target actually got. That makes this four calls in dependency
+## order (wasi <- reactor, dom <- app) rather than a loop over a directory
+## listing, and the order is the reason: a name cannot be written into an
+## importer before the file it names has been hashed.
+fn emit_bridge(out: String) -> String !io = {
+  let wasi = emit_text(out, "tea-wasi.mjs", bridge_src("wasi.mjs"))
+  let reactor = emit_text(out, "tea-reactor.mjs",
+    repoint(bridge_src("reactor.mjs"), "./wasi.mjs", wasi))
+  let dom = emit_text(out, "tea-dom.mjs", bridge_src("dom.mjs"))
+  emit_text(out, "tea-app.mjs",
+    repoint(repoint(bridge_src("app.mjs"), "./reactor.mjs", reactor), "./dom.mjs", dom))
+}
+
+fn bridge_src(name: String) -> String !io = str.trim(must_read("packages/tea-dom/js/$name"))
+
+## Point one vendored module at the name another really got.
+##
+## The specifier has to be found. A rewrite that matched nothing would leave an
+## import of a file this generator never wrote, and nothing on this site could
+## notice: gen/links reads `href=` and `src=`, and an import specifier is
+## neither. So a change in how packages/tea-dom/js spells its imports stops the
+## build here rather than shipping a demo page that fails to load.
+fn repoint(text: String, spec: String, name: String) -> String !io = {
+  let quoted = "'$spec'"
+  if str.contains(text, quoted) {
+    str.replace(text, quoted, "'./$name'")
+  } else {
+    panic("no import of `$spec` to repoint — packages/tea-dom/js changed how it "
+        ++ "spells its imports, and the vendored copies would import files that "
+        ++ "are not there")
+  }
+}
+
+## One demo reactor, or a placeholder that says so. The wasm is a build product
+## (site/build.sh), not a tracked file, so a checkout that has never had a wasm
+## toolchain still builds the whole site; the demo page then fails to compile
+## its module and reports it, which is the same deal the Playground makes when
+## its editor bundle is missing.
+fn emit_wasm(out: String, name: String, src: String) -> String !io =
+  match io.read_bytes(src) {
+    Ok(b) -> emit_asset(out, name, b)
+    Err(_) -> {
+      println("  warning: $src missing — writing placeholder $name")
+      emit_text(out, name, "dawn tea: reactor not built; see site/build.sh")
+    }
+  }
 
 fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String !io =
   match io.read_file(src) {
@@ -283,3 +343,171 @@ pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !io = {
     shell_ext(a, lang, "playground.html", "Playground — Dawn", root, "playground", head,
       mount_body))
 }
+
+## Everything the demo page says, in one language. A record rather than two
+## page templates, for the reason gen/examples gives about its own: the two
+## languages sit next to each other, and a missing one is a compile error
+## instead of a page that renders half-translated.
+##
+## `sources` carries markup; every other field is escaped text.
+type TeaCopy = {
+  title: String,
+  lede: String,
+  aside: String,
+  counter: String,
+  counter_note: String,
+  todo: String,
+  todo_note: String,
+  sources: String,
+  stuck: String,
+}
+
+fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -> TeaCopy =
+  match lang {
+    En -> TeaCopy {
+      title: "The Elm architecture, in the browser",
+      lede: "Two applications written in Dawn and compiled to WebAssembly reactors. "
+        ++ "The model, the update function and the view all run inside wasm; the page "
+        ++ "holds a bridge of vanilla ES modules that applies the patches the guest "
+        ++ "computes. One JSON object per line crosses each way, and a DOM node never "
+        ++ "does: the module is never handed an element, and the page is never handed "
+        ++ "a message.",
+      aside: "Both are compiled by the same command a terminal program is "
+        ++ "(<code>dawn build --target wasm --reactor</code>), and both run from a "
+        ++ "shell too, as a session you can type JSON at.",
+      counter: "Counter",
+      counter_note: "Press <code>boom</code> to make the guest's <code>update</code> "
+        ++ "panic. The failure lands inside wasm, the reply carries no patches, the "
+        ++ "page keeps the document it has, and the next press works.",
+      todo: "Todo list",
+      todo_note: "Click a title to edit it. Then open a row, leave the caret in the "
+        ++ "middle of the text, and delete a row above it: the editor keeps the focus "
+        ++ "and the caret does not move. The rows are keyed by id, so the reconciler "
+        ++ "asks the bridge to move the element the document already has rather than "
+        ++ "to rewrite it.",
+      sources: "Source: "
+        ++ """<a href="$root/$counter_page"><code>tea_dom_counter</code></a>"""
+        ++ " and "
+        ++ """<a href="$root/$todo_page"><code>tea_dom_todo_keyed</code></a>"""
+        ++ " in the gallery. The architecture is "
+        ++ """<a href="https://github.com/dawnop/dawn-lang/tree/main/packages/tea-core">"""
+        ++ "<code>packages/tea-core</code></a>, the DOM vocabulary and the wire format "
+        ++ """are <a href="https://github.com/dawnop/dawn-lang/tree/main/packages/tea-dom">"""
+        ++ "<code>packages/tea-dom</code></a>, and the frontend direction they belong to "
+        ++ """is in the <a href="https://github.com/dawnop/dawn-lang/blob/main/ROADMAP.md">"""
+        ++ "roadmap</a>.",
+      stuck: "nothing mounted: this page needs to be served over http, and the "
+        ++ "reactor it fetches has to have been built (site/build.sh).",
+    }
+    Zh -> TeaCopy {
+      title: "浏览器里的 Elm 架构",
+      lede: "两个用 Dawn 写、编译成 WebAssembly reactor 的应用。模型、update 与 view 全部跑在 "
+        ++ "wasm 里；页面这边是一层零依赖的 ES 模块桥，负责把 guest 算出来的补丁应用到文档上。"
+        ++ "两个方向各自每行一个 JSON 对象，DOM 节点从不越界：模块拿不到元素，页面也拿不到消息。",
+      aside: "它们和一个终端程序用同一条命令编译"
+        ++ "（<code>dawn build --target wasm --reactor</code>），"
+        ++ "也都能从 shell 跑起来，成为一个可以手敲 JSON 的会话。",
+      counter: "计数器",
+      counter_note: "按 <code>boom</code> 让 guest 的 <code>update</code> 故意 panic。"
+        ++ "失败落在 wasm 内部，回包不带补丁，页面保留手里的文档，下一次点击照常工作。",
+      todo: "待办列表",
+      todo_note: "点标题即可编辑。然后打开一行、把光标留在文字中间，再删掉它上面的一行："
+        ++ "编辑框仍然有焦点，光标也不动。行是按 id 做键的，所以协调器让桥去移动文档里已有的"
+        ++ "那个元素，而不是重写它。",
+      sources: "源码：图库里的 "
+        ++ """<a href="$root/$counter_page"><code>tea_dom_counter</code></a>"""
+        ++ " 与 "
+        ++ """<a href="$root/$todo_page"><code>tea_dom_todo_keyed</code></a>"""
+        ++ "。架构在 "
+        ++ """<a href="https://github.com/dawnop/dawn-lang/tree/main/packages/tea-core">"""
+        ++ "<code>packages/tea-core</code></a>，DOM 词汇与线格式在 "
+        ++ """<a href="https://github.com/dawnop/dawn-lang/tree/main/packages/tea-dom">"""
+        ++ "<code>packages/tea-dom</code></a>，这条前端方向本身写在"
+        ++ """<a href="https://github.com/dawnop/dawn-lang/blob/main/ROADMAP.md">"""
+        ++ "路线图</a>里。",
+      stuck: "没有挂载成功：这个页面需要通过 http 访问，而且它取的 reactor 必须先构建出来"
+        ++ "（site/build.sh）。",
+    }
+  }
+
+## One demo, framed: the element the bridge mounts into, and the line an error
+## is reported on. `data-wasm` is the URL the page fetches, and it is spelled
+## as an attribute rather than in the script so that gen/links checks it --
+## an import specifier or a `fetch` argument is a string in a program, and
+## nothing here reads programs.
+fn tea_frame(id: String, wasm: String, heading: String, note: String) -> String =
+  """
+<h2>$heading</h2>
+<div class="tea-frame">
+<div class="tea-mount" id="$id" data-wasm="$wasm"></div>
+<p class="tea-error"></p>
+</div>
+<p class="tea-note">$note</p>
+"""
+
+## The demo page, in one language.
+##
+## The prose is translated and the two applications are not: they are Dawn
+## programs, English like the rest of the code here, and what they draw is
+## `dawn counter` and `dawn todo` on both sides.
+pub fn gen_tea(out: String, a: Assets, lang: Lang) -> Unit !io = {
+  let (dst, root) =
+    match lang {
+      En -> ("$out/tea.html", ".")
+      Zh -> ("$out/zh/tea.html", "..")
+    }
+  let c = tea_copy(lang, root,
+    lang_path(lang, "examples/tea_dom_counter.html"),
+    lang_path(lang, "examples/tea_dom_todo_keyed.html"))
+  let app = a.tea_js
+  let head = """<link rel="modulepreload" href="$root/assets/$app">"""
+  let body =
+    `<main class="content tea-demo">` ++ "\n"
+    ++ "<h1>${c.title}</h1>\n<p>${c.lede}</p>\n<p>${c.aside}</p>\n"
+    ++ tea_frame("tea-counter", "$root/assets/${a.tea_counter}", c.counter, c.counter_note)
+    ++ tea_frame("tea-todo", "$root/assets/${a.tea_todo}", c.todo, c.todo_note)
+    ++ `<p class="tea-note">` ++ c.sources ++ "</p>\n</main>\n"
+    ++ tea_watchdog(c.stuck) ++ "\n" ++ tea_mount_script(root, app)
+  write_page(dst,
+    shell_ext(a, lang, "tea.html", "${c.title} — Dawn", root, "tea", head, body))
+}
+
+## The one failure a module script cannot report about itself: if the module
+## does not load, none of its own code runs, and the page sits blank with
+## nothing said. A classic script can still speak. It stays quiet if the
+## demos mounted or if the module already wrote a banner, and the module
+## clears it on success. The same guard the demos' own pages carry
+## (examples/projects/tea_dom_counter/web/index.html), for the same reason.
+fn tea_watchdog(message: String) -> String =
+  """
+<script>
+window.__teaWatchdog = setTimeout(function () {
+  document.querySelectorAll('.tea-mount').forEach(function (host) {
+    var banner = host.parentElement.querySelector('.tea-error');
+    if (host.childNodes.length === 0 && banner && banner.textContent === '') {
+      banner.textContent = '$message';
+    }
+  });
+}, 4000);
+</script>
+"""
+
+## Mount every frame on the page: fetch the reactor named on the element,
+## hand it to the bridge, and report a failed turn on that frame's own line.
+fn tea_mount_script(root: String, app: String) -> String =
+  """
+<script type="module">
+import { mount } from '$root/assets/$app';
+for (const host of document.querySelectorAll('.tea-mount')) {
+  const banner = host.parentElement.querySelector('.tea-error');
+  try {
+    await mount(await fetch(host.dataset.wasm), host, {
+      onError: (reply) => { banner.textContent = reply.kind + ': ' + reply.error; },
+    });
+  } catch (e) {
+    banner.textContent = String(e);
+  }
+}
+clearTimeout(window.__teaWatchdog);
+</script>
+"""

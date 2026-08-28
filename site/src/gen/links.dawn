@@ -112,8 +112,16 @@ fn attr_values(html: String, opener: String) -> List[String] = {
 ## names are now derived from the content (gen/fingerprint), so a name that
 ## does not exist is a thing the generator can produce -- and the two
 ## references it can produce it for were exactly the two nobody was looking at.
+##
+## `data-wasm` is the demo page's (gen/pages.gen_tea): the URL of the reactor a
+## frame fetches. HTML has no element whose job is "a thing script will fetch",
+## so it is an attribute the page's own script reads -- but it is still a URL
+## this generator produced from a content hash, and it fails the same way the
+## other two would. Putting it here is what lets the page name the reactor in
+## markup instead of in a string inside a program, which nothing here reads.
 fn hrefs_of(html: String) -> List[String] =
   attr_values(html, "href=\"") ++ attr_values(html, "src=\"")
+  ++ attr_values(html, "data-wasm=\"")
 
 ## Every id this page offers as a link target. The opener carries its leading
 ## space so that `data-id="` and friends cannot be mistaken for an id.
@@ -350,6 +358,13 @@ test "src is fetched too, so it is checked too" {
   assert hrefs_of(`<img src="assets/logo.png"><script src="assets/p.js"></script>`)
     == ["assets/logo.png", "assets/p.js"]
   assert hrefs_of(`<a href="a.html"><img src="b.png"></a>`) == ["a.html", "b.png"]
+}
+
+## The third one: a URL the browser fetches on the page's own instruction. It
+## resolves and it is content-hashed or it is not, exactly like the other two.
+test "the demo page's reactor is a fetched URL too" {
+  assert hrefs_of(`<div class="tea-mount" data-wasm="./assets/tea-counter.ab12cd34.wasm"></div>`)
+    == ["./assets/tea-counter.ab12cd34.wasm"]
 }
 
 test "id extraction" {

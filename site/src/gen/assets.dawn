@@ -32,10 +32,12 @@
 # string say the same thing. That is doc-check.py's department for documents,
 # and there is no digest to hang on two words in a stylesheet.
 #
-# The `.js` scan is the same rule with no scoping mechanism to check: a bundle
-# shared by both trees has no language, so any Chinese in one is Chinese on the
-# English pages. If a bundle ever reads `documentElement.lang` and picks its
-# own strings, this is the check that has to learn about it.
+# The `.js`/`.mjs` scan is the same rule with no scoping mechanism to check: a
+# bundle shared by both trees has no language, so any Chinese in one is Chinese
+# on the English pages. If a bundle ever reads `documentElement.lang` and picks
+# its own strings, this is the check that has to learn about it. `.mjs` is
+# there because the DOM bridge the demo page mounts is four of them; a suffix
+# the rule did not name would have been a script nobody scanned.
 
 use std/str
 use std/list
@@ -310,8 +312,27 @@ pub fn check_assets(out: String) -> Unit !io = {
       ()
     } else if str.ends_with(name, ".css") {
       sheets = sheets + 1
+      let css = must_read("$out/assets/$name")
+      # A comment that ended earlier than its author thought. `*/` inside a
+      # comment body is not an escape and not an error -- it just closes the
+      # comment, and everything after it is read as CSS. What follows is
+      # usually a few words of prose, which a parser eats along with the rule
+      # after them, so one rule silently stops existing and everything else in
+      # the file is fine. That is not hypothetical: the demo page's frame had
+      # no border on 2026-08-28 because a comment mentioned a path with a `*`
+      # in it (`tea_dom_*/web`), and the sheet still parsed, still passed every
+      # check here, and still shipped.
+      #
+      # Stripping comments the way a browser does leaves the stray `*/` behind
+      # in the remainder, which is what makes this one comparison enough.
+      if str.contains(strip_comments(css), "*/") {
+        bad = bad
+          ++ ["assets/$name: a `*/` is left over after the comments are stripped, so a "
+              ++ "comment ended earlier than it looks and the rules after it are being "
+              ++ "read as garbage"]
+      }
       var seen: List[String] = []
-      for d in declarations(must_read("$out/assets/$name")) {
+      for d in declarations(css) {
         let (sel, decl) = d
         if not list.contains(seen, sel) {
           seen = seen ++ [sel]
@@ -337,7 +358,7 @@ pub fn check_assets(out: String) -> Unit !io = {
           }
         }
       }
-    } else if str.ends_with(name, ".js") {
+    } else if str.ends_with(name, ".js") || str.ends_with(name, ".mjs") {
       bundles = bundles + 1
       # A bundle both trees load has no language of its own to follow.
       if has_han(must_read("$out/assets/$name")) {
@@ -370,7 +391,7 @@ pub fn check_assets(out: String) -> Unit !io = {
     for b in bad {
       println("ASSET LANG: $b")
     }
-    panic("${len(bad)} shared-asset string(s) do not follow the page language")
+    panic("${len(bad)} shared-asset finding(s); see the ASSET LANG lines above")
   }
   println(
     "  asset lang check: $contents content declaration(s) in $sheets stylesheet(s) and "
@@ -383,6 +404,18 @@ test "comments go before anything else looks at the file" {
   assert strip_comments("a/*x*/b/*y*/c") == "abc"
   # unterminated: everything from the opener is comment
   assert strip_comments("a/*x") == "a"
+}
+
+## The shape of the bug the leftover-`*/` rule is for: a comment that mentions
+## `*/` ends at the mention, and the words after it are read as a selector for
+## the rule that follows. Stripping comments leaves the stray `*/` visible;
+## a sound comment leaves nothing.
+test "a comment that closed early leaves its terminator behind" {
+  assert str.contains(strip_comments("/* see a_*/b */ .x { color: red }"), "*/")
+  assert not str.contains(strip_comments("/* see a_* /b */ .x { color: red }"), "*/")
+  # and `.x` really is gone from what a parser then sees: the words left over
+  # by the early close are part of the selector, so the rule selects nothing
+  assert declarations("/* see a_*/b */ .x { color: red }") == [("b */ .x", "color: red")]
 }
 
 test "declarations carry the selector chain they sit under" {
