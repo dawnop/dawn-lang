@@ -726,7 +726,9 @@ dawn_clo *dawn_clo_new_wide(void *fn, int32_t ncap, const uint64_t *mask) {
  * 3): no header, never freed. An argument-carrying dictionary is built here
  * at run time and lives forever, so LeakSanitizer is told it is owned --
  * without this, leak detection on the corpus (the whole point of counting
- * strings) would drown in reports about a decided design. */
+ * strings) would drown in reports about a decided design. The interning
+ * table below is owned for the same reason and in the same sense: reachable
+ * for the life of the process, not lost. */
 #if DAWN_ASAN
 #include <sanitizer/lsan_interface.h>
 #define DAWN_LSAN_OWN(p) __lsan_ignore_object(p)
@@ -734,17 +736,110 @@ dawn_clo *dawn_clo_new_wide(void *fn, int32_t ncap, const uint64_t *mask) {
 #define DAWN_LSAN_OWN(p) ((void)0)
 #endif
 
+/* One dictionary per (template, arguments), not one per call.
+ *
+ * Never freed and one per call is a leak in any program that does not exit:
+ * a reactor turn over a `Node[Msg]` builds 28 of them, so a page clicked ten
+ * thousand times holds ten thousand copies of the same 28 relations
+ * (4KB/turn, measured on tea-dom's counter). Sharing them is sound because a
+ * dictionary is a pure function of its inputs: nothing writes `slots` or
+ * `args` after this function returns -- the assignment below is the only one
+ * in the runtime or in emitted code -- and no caller compares dictionary
+ * pointers for identity, so handing back the same address changes no answer.
+ *
+ * The key is the template's address plus the argument dictionaries'
+ * addresses. Addresses rather than contents: two distinct templates with
+ * identical slots stay distinct, which costs a duplicate and cannot make two
+ * different relations collide. All the arguments are in the key, not just
+ * the template, because a template with a type-variable body is a *family*;
+ * that no program in this tree instantiates one twice with different
+ * arguments is a fact about today's emitter rather than a contract, so
+ * scripts/rc-contract holds the key to the family shape directly.
+ *
+ * The table is open addressed, never deletes, and doubles. It is bounded by
+ * the instantiations a program has, which is a property of its types, so
+ * what it holds plateaus where the old behaviour rose forever. Single
+ * threaded for the reason the slab allocator is: only the thread
+ * dawn_rt_main starts runs Dawn code. */
+typedef struct {
+  const dawn_dict *tmpl;
+  dawn_dict *d;
+} dawn_dict_entry;
+
+static dawn_dict_entry *dawn_dict_tab;
+static size_t dawn_dict_cap; /* a power of two, or zero before the first use */
+static size_t dawn_dict_used;
+
+static size_t dawn_dict_mix(size_t h, size_t x) {
+  h ^= x + (size_t)0x9e3779b9u + (h << 6) + (h >> 2);
+  return h;
+}
+
+static size_t dawn_dict_hash(const dawn_dict *tmpl, int32_t nargs,
+                             dawn_dict *const *args) {
+  size_t h = dawn_dict_mix((size_t)0, (size_t)(uintptr_t)tmpl);
+  h = dawn_dict_mix(h, (size_t)nargs);
+  for (int32_t i = 0; i < nargs; i++) {
+    h = dawn_dict_mix(h, (size_t)(uintptr_t)args[i]);
+  }
+  return h;
+}
+
+static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
+                           int32_t nargs, dawn_dict *const *args) {
+  if (e->tmpl != tmpl || e->d->nargs != nargs) return false;
+  for (int32_t i = 0; i < nargs; i++) {
+    if (e->d->args[i] != args[i]) return false;
+  }
+  return true;
+}
+
+static void dawn_dict_grow(void) {
+  size_t cap = dawn_dict_cap == 0 ? 64 : dawn_dict_cap * 2;
+  dawn_dict_entry *tab = (dawn_dict_entry *)dawn_alloc(cap * sizeof *tab);
+  memset(tab, 0, cap * sizeof *tab);
+  DAWN_LSAN_OWN(tab);
+  for (size_t i = 0; i < dawn_dict_cap; i++) {
+    dawn_dict_entry e = dawn_dict_tab[i];
+    if (e.d == NULL) continue;
+    size_t j = dawn_dict_hash(e.tmpl, e.d->nargs, e.d->args) & (cap - 1);
+    while (tab[j].d != NULL) j = (j + 1) & (cap - 1);
+    tab[j] = e;
+  }
+  free(dawn_dict_tab);
+  dawn_dict_tab = tab;
+  dawn_dict_cap = cap;
+}
+
 dawn_dict *dawn_dict_new(const dawn_dict *tmpl, int32_t nargs, ...) {
+  dawn_dict *args[DAWN_DICT_MAX];
+  va_list ap;
+  va_start(ap, nargs);
+  for (int32_t i = 0; i < nargs; i++) {
+    args[i] = va_arg(ap, dawn_dict *);
+  }
+  va_end(ap);
+
+  if ((dawn_dict_used + 1) * 2 > dawn_dict_cap) dawn_dict_grow();
+  size_t mask = dawn_dict_cap - 1;
+  size_t j = dawn_dict_hash(tmpl, nargs, args) & mask;
+  while (dawn_dict_tab[j].d != NULL) {
+    if (dawn_dict_same(&dawn_dict_tab[j], tmpl, nargs, args)) {
+      return dawn_dict_tab[j].d;
+    }
+    j = (j + 1) & mask;
+  }
+
   dawn_dict *d = (dawn_dict *)dawn_alloc(sizeof(dawn_dict));
   DAWN_LSAN_OWN(d);
   *d = *tmpl;
   d->nargs = nargs;
-  va_list ap;
-  va_start(ap, nargs);
   for (int32_t i = 0; i < nargs; i++) {
-    d->args[i] = va_arg(ap, dawn_dict *);
+    d->args[i] = args[i];
   }
-  va_end(ap);
+  dawn_dict_tab[j].tmpl = tmpl;
+  dawn_dict_tab[j].d = d;
+  dawn_dict_used++;
   return d;
 }
 
