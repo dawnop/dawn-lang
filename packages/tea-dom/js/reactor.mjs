@@ -18,8 +18,14 @@ import { Wasi, WasiExit } from './wasi.mjs';
 export class Reactor {
   /**
    * `source` is anything `WebAssembly.compile` takes: bytes in node, or the
-   * `Response` from `fetch` in a browser (use `compileStreaming` there if
-   * the server sets the mime type; bytes work everywhere).
+   * `Response` from `fetch` in a browser, which is read to completion here
+   * and then compiled from that buffer.
+   *
+   * Not `compileStreaming`. Buffering costs one whole copy of the module at
+   * load, and buys indifference to the mime type: a `.wasm` served as
+   * `text/plain` mounts, because nothing here ever asks. Streaming reverses
+   * both, so a server sending `application/wasm` is a precondition of that
+   * change and not of this code.
    */
   static async load(source) {
     const bytes = source instanceof Uint8Array || source instanceof ArrayBuffer
