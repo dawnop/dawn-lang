@@ -21,9 +21,15 @@
 #                    of it: the state is dropped, the local state
 #                    interpretation (§8 problem three, §10.8). Both the Some
 #                    path and the None path are printed.
-#   long_tail (19)   an accumulator grown past std/pvec's 32-slot tail, where
-#                    the `cell_take` rewrite (§7.8) has to keep the vector
-#                    uniquely owned after it stops being a tail.
+#   long_tail (19)   an accumulator grown well past std/pvec's 32-slot tail
+#                    and into the second level of its trie, where the
+#                    `cell_take` rewrite (§7.8) has to keep the vector
+#                    uniquely owned after it stops being a tail. Length is
+#                    what makes this line the one that can be *measured*:
+#                    below about a thousand elements no trie node is ever
+#                    rewritten, so `DAWN_RC_STATS`'s in-place and copied
+#                    counters both sit at zero and a lost take looks like a
+#                    kept one.
 use std/io
 
 effect Emit {
@@ -138,7 +144,7 @@ fn long_tail() -> List[Int] = {
     var acc: List[Int] = []
     emit(n) => { acc = acc ++ [n] }
   }
-  for i in 0..40 { emit(i * 19) }
+  for i in 0..2000 { emit(i * 19) }
   acc
 }
 
@@ -150,5 +156,5 @@ pub fn main() -> Unit !io = {
   io.println("early_exit ${early_exit(0)}")
   let tail = long_tail()
   io.println("long_tail ${len(tail)} ${get(tail, 0)} ${get(tail, 31)} " ++
-      "${get(tail, 32)} ${get(tail, 39)} ${total(tail)}")
+      "${get(tail, 32)} ${get(tail, 1999)} ${total(tail)}")
 }
