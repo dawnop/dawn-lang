@@ -166,6 +166,84 @@ static void test_array_steal(void) {
   dawn_drop(ys);
 }
 
+/* ---- a handler's state cells (docs/handler-state-design.md) --------------
+ *
+ * The only overwritable slot in the runtime, so the only place a superseded
+ * reference can be forgotten. The three cases below are the three sentences
+ * of the ownership note at `dawn_cell_new` in dawn_rt.c, one each.
+ *
+ * Every probe holds a *heap* value. A string literal is DAWN_IMMORTAL and its
+ * count never moves, so a leak probe built on one reads the same before and
+ * after whatever it was meant to catch. */
+
+/* `cell_set` takes its value owned and releases the one it displaced. The
+ * release is read as a count rather than as a free, because a second holder
+ * is the only way to look at the old value *after* the set and still be
+ * entitled to. Under `cell-set-forgets-the-old-value` the count stays at two
+ * and this is the assertion that says so; the leak that mutant also causes is
+ * invisible here, since a `counted` mutant is built without the sanitizer. */
+static void test_cell_set_releases_the_old_value(void) {
+  dawn_box *first = dawn_box_int(11);
+  dawn_box *held = (dawn_box *)dawn_dup(first);
+  void *c = dawn_cell_new(first);
+  check(held->h.rc == 2, "cell_new keeps the reference it was handed");
+  check(dawn_cell_get(c) == first, "and the slot holds it");
+
+  dawn_cell_set(c, dawn_box_int(22));
+  check(held->h.rc == 1, "cell_set released the value it displaced");
+  check(dawn_is_unique(held), "so the second holder now has the last reference");
+  check(held->val.i == 11, "and the displaced value is still readable from it");
+  check(((dawn_box *)dawn_cell_get(c))->val.i == 22, "the slot holds the new value");
+
+  dawn_drop(held);
+  dawn_drop(c);
+}
+
+/* `cell_take` transfers the slot's own reference out and leaves the slot
+ * empty. The count must not move: the reference changed hands, it was not
+ * re-taken, and a take that dup'd instead would forfeit the in-place reuse
+ * the primitive exists for. */
+static void test_cell_take_empties_and_transfers(void) {
+  dawn_box *v = dawn_box_int(33);
+  void *c = dawn_cell_new(v);
+  dawn_adt *cell = (dawn_adt *)c;
+  int32_t rc0 = v->h.rc;
+
+  dawn_box *taken = (dawn_box *)dawn_cell_take(c);
+  check(taken == v, "the same reference changed hands");
+  check(taken->h.rc == rc0, "at the same count");
+  check(dawn_is_unique(taken), "so what came out is uniquely referenced");
+  check(cell->fields[0].p == NULL, "and the slot is empty");
+
+  /* the caller's obligation, and the shape the emitter always writes: store
+   * into the emptied slot before anything reads it again. The store's own
+   * release finds NULL, which `dawn_drop` returns on. */
+  dawn_cell_set(c, dawn_box_int(44));
+  check(((dawn_box *)dawn_cell_get(c))->val.i == 44, "the write-back restores the slot");
+
+  dawn_drop(taken);
+  dawn_drop(c);
+}
+
+/* `cell_get` hands back a borrowed reference out of the slot, exactly like an
+ * ADT field read: no count moves and the slot keeps what it had. Read twice,
+ * because a get that transferred would leave the second read looking at an
+ * emptied slot rather than at the value. */
+static void test_cell_get_does_not_transfer(void) {
+  dawn_box *v = dawn_box_int(55);
+  void *c = dawn_cell_new(v);
+  int32_t rc0 = v->h.rc;
+
+  dawn_box *seen = (dawn_box *)dawn_cell_get(c);
+  check(seen == v, "cell_get answers the slot's own reference");
+  check(seen->h.rc == rc0, "and moves no count: the result is borrowed");
+  check(((dawn_adt *)c)->fields[0].p == v, "the slot keeps it");
+  check(dawn_cell_get(c) == v, "a second read answers the same reference");
+  check(v->h.rc == rc0, "still at the same count");
+
+  dawn_drop(c);
+}
+
 /* The reason drop walks with an explicit stack. A persistent vector and a
  * HAMT are both deep; at this length C recursion overflows, and run.sh runs
  * this binary under a deliberately small stack so that a regression to
@@ -653,6 +731,9 @@ static const rc_case rc_cases[] = {
     {"array", test_array, 0},
     {"array_with", test_array_with, 0},
     {"array_steal", test_array_steal, 0},
+    {"cell_set_releases_the_old_value", test_cell_set_releases_the_old_value, 0},
+    {"cell_take_empties_and_transfers", test_cell_take_empties_and_transfers, 0},
+    {"cell_get_does_not_transfer", test_cell_get_does_not_transfer, 0},
     {"deep_chain", test_deep_chain, 0},
     {"panic_message", test_panic_message, 0},
     {"adt0_singleton", test_adt0_singleton, 0},

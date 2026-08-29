@@ -28,6 +28,11 @@
 # `slab_block_stays_clean_while_live` is the same line for the poisoning: a
 # mutant that reddens it has made the sanitizer refuse a block the program
 # is entitled to, which is a broken allocator rather than a lost report.
+# The two cell assertions beside `cell_set_releases_the_old_value` are the
+# same line for the state cells: `cell-set-forgets-the-old-value` is about a
+# release and nothing else, so a mutant that also stopped `take` transferring
+# or made `get` move a count would have changed the primitive rather than
+# dropped one line of it.
 #
 # A `control` and a `benign` role are two different things. A control is an
 # assertion that must survive every owning mutant; a benign mutant is an edit
@@ -41,6 +46,9 @@ assert	mask_skips_scalars
 assert	array
 assert	array_with
 assert	array_steal
+assert	cell_set_releases_the_old_value
+assert	cell_take_empties_and_transfers
+assert	cell_get_does_not_transfer
 assert	deep_chain
 assert	panic_message
 assert	adt0_singleton
@@ -72,6 +80,8 @@ control	immortal
 control	counts
 control	sharing
 control	slab_block_stays_clean_while_live
+control	cell_take_empties_and_transfers
+control	cell_get_does_not_transfer
 
 role	revert-adt0-to-fresh-allocation	counted
 owner	revert-adt0-to-fresh-allocation	adt0_singleton
@@ -104,6 +114,23 @@ red	slab-swallows-oversize	oversize_leaves_the_slab
 # (32MiB, written in rc_test.c rather than derived) reddens with it: a slab
 # cache that swallows oversize blocks has also outgrown its documented bound.
 red	slab-swallows-oversize	slab_bound_is_honoured
+
+# ---- a handler's state cells ----------------------------------------------
+# The runtime's only overwrite, and so the only release that can be forgotten
+# by omission rather than by a miscount. The mutant drops the `dawn_drop(old)`
+# from `dawn_cell_set`; the program still computes the right answers and every
+# other assertion here stays green, because nothing else in this file
+# supersedes a value. What goes red is the count read off a second holder of
+# the displaced value, which is the only vantage point from which a release
+# that did not happen is distinguishable from one that did.
+#
+# It is a `counted` mutant, so the build carries no sanitizer and the leak
+# itself is not what reddens: the assertion is. That is the point of having
+# it -- under the sanitizer this would be one more unattributed leak report,
+# and here it has a name.
+role	cell-set-forgets-the-old-value	counted
+owner	cell-set-forgets-the-old-value	cell_set_releases_the_old_value
+red	cell-set-forgets-the-old-value	cell_set_releases_the_old_value
 
 # ---- argument-carrying dictionaries ---------------------------------------
 # Three mutants for one function, and what separates them is which of the

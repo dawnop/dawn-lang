@@ -246,6 +246,29 @@ static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
   ASAN_POISON_MEMORY_REGION((char *)p + sizeof(void *),
                             cls * DAWN_SL_GRAIN - sizeof(void *));""",
     ),
+    # ---- a handler's state cells --------------------------------------
+    #
+    # `dawn_cell_set` is the runtime's only overwrite: everywhere else a value
+    # is built once and never superseded, so this is the one place a release
+    # can be forgotten. Forget it and the displaced value is held forever by a
+    # slot that no longer names it -- for the accumulating arm this primitive
+    # exists for, that is a leak per operation. Nothing a program prints
+    # changes, and the corpus that exercises cells end to end runs under the
+    # leak sanitizer but reports against the whole program rather than against
+    # the store that caused it. The assertion below is what names the store.
+    "cell-set-forgets-the-old-value": (
+        "dawn_rt.c",
+        """void dawn_cell_set(void *c, void *x) {
+  dawn_adt *cell = (dawn_adt *)c;
+  void *old = cell->fields[0].p;
+  cell->fields[0].p = x;
+  dawn_drop(old);
+}""",
+        """void dawn_cell_set(void *c, void *x) {
+  dawn_adt *cell = (dawn_adt *)c;
+  cell->fields[0].p = x;
+}""",
+    ),
 }
 
 
