@@ -417,9 +417,15 @@ jobs:
     # that step from 3.5s to 8.0s locally (three more sanitized builds of the
     # runtime and eight more process runs); doubled, the planning value is
     # 431 + 9 = 440s, still well under the native-diff pole, so the run's
-    # wall clock does not move.
-    # budget: 3x 440s planning value (356s observed + 70s + 5s + 9s)
-    timeout-minutes: 22
+    # wall clock does not move. The state-cell assertions and their mutant,
+    # added 2026-08-30, take the RC contract step from 8.7s to 9.1s locally
+    # (three assertions that allocate a handful of boxes, and one more mutant
+    # leg: a copy of the runtime, one compile, one run); doubled and rounded
+    # up, the planning value is 440 + 1 = 441s. That is one second over 22
+    # minutes' worth of 3x, so the timeout goes to 23 -- still far under the
+    # native-diff pole, and the run's wall clock still does not move.
+    # budget: 3x 441s planning value (356s observed + 70s + 5s + 9s + 1s)
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -818,6 +824,14 @@ jobs:
       # worker that is killed rather than failing is counted as a failure,
       # because a parallel harness that swallows an exit code is a green light
       # that means nothing.
+      #
+      # `effect_handler_state`, added 2026-08-30, is the only entry added since
+      # the 557s observation. It was measured rather than assumed: the whole
+      # corpus locally is 230.75s without it and 231.54s with it, four at a
+      # time both times. A corpus this parallel absorbs one 6s entry into a
+      # scheduling gap, so the budget line is not restated -- 557s is a runner
+      # observation and nothing here moved it. An entry that did move it would
+      # have to.
       - name: native differential (both backends, plus written expectations)
         run: ./scripts/spike-native/run.sh
 
