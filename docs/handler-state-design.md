@@ -140,6 +140,20 @@ cell_set(c: Cell[T], x: T) -> Unit
 `types.builtins()`，也不进 `selfhost/builtins.dawn` 的镜像**，builtin 声明镜像那道门禁
 够不着它们。落点是每个后端一份实现加 comptime 解释器一份，实测清单在 §7.1。
 
+> **落地更正（2026-08-29，原语已入 main，提交 `3c2c506`）。** 三处与上文不同，按实况为准：
+>
+> - **是四个不是三个。** 多的一个是 `cell_take(c: Cell[T]) -> T`：转移出槽内引用、槽置空，
+>   调用者义务随后覆写。理由是唯一性：`cell_get` 交出借用、emitter 补 dup，累积器经它读出来
+>   引用计数恒为 2，pvec 的就地复用从 100% 掉到 0%（实测 573/573 对 0/573）；收集器赋值
+>   必须走 take，先例是 `dawn_array_steal`。
+> - **comptime 解释器不是「一份实现」，是四行具名拒绝。** `with handle` 在 comptime 本就被拒，
+>   格子不可达；四个名字进 `comptime_rejects()`，分区测试逐个探针验证拒绝真的发生。
+> - **「镜像门禁够不着」只对一半。** 签名镜像确实不含它们，但 `builtin-decl-contract` 的 dump
+>   显式遍历 `internal_intrinsics()` 按名点名，`selfhost/builtins.dawn` 的名字计数注释也跟着改。
+>
+> 另一条给后续 mutant 语料的实测教训：负控探针的槽里不能放字符串字面量，字面量是不朽静态，
+> 漏放与双放都空转，探针必须在 set 与 take 两点都持堆值。
+
 **格子不必是 `ev$E` 的字段。** 它可以在造记录之前先造出来，臂按值捕获它。捕获的是一个
 不可变的引用，指向一个可变的对象；按值捕获这条纪律一个字都不用改。这一点用 Java 对象
 在今天的编译器上直接验过（探针 P5：`let` 绑一个 `AtomicLong`，三次 raise 各读各写，
