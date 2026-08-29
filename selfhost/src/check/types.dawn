@@ -1399,6 +1399,19 @@ pub fn eff_is_ground(e: Eff) -> Bool =
 ## read off the crossing closure's own pack. Carried on the symbol rather than
 ## sniffed off the name because there are three spellings (`ev_local_name`,
 ## `ev_var_local_name`, `ev_assoc_local_name`) and a fourth would be silent.
+##
+## `cell_of` marks a handler state cell (docs/handler-state-design.md): the
+## installation it belongs to, and the type its slot holds. `None` for every
+## ordinary name, and the licence the escape ban reads -- a cell may cross only
+## closures that belong to the same installation, which is the arms and the
+## remainder of that one `with handle`, and `checker.resolve_local` compares
+## this id against every lambda frame the name has to cross.
+##
+## The type rides here because the symbol's own `ty` cannot carry it: a cell's
+## `ty` is `erased_cell_ty()`, the slot, since that is what the binding holds at
+## run time and what lowering types the local and the capture entry with. What
+## the *reader* of the cell gets is the type below, and `checker.check_var`
+## takes it from here when it rewrites a read into `cell_get`.
 pub type Sym = {
   name: String,
   ty: Ty,
@@ -1406,7 +1419,8 @@ pub type Sym = {
   dlo: Int,
   dhi: Int,
   dict_of: Option[(Int, Int)],
-  ev_of: Option[Int]
+  ev_of: Option[Int],
+  cell_of: Option[(Int, Ty)]
 }
 
 ## Function signature (user functions and builtins alike).

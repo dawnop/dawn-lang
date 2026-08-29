@@ -212,7 +212,14 @@ pub type Cx = {
   # results the public surface validator reads, and false afterwards: a body's
   # type annotations have no public surface, so recording them would be a map
   # insert per annotation that nothing ever looks up.
-  record_ty_spans: Bool
+  record_ty_spans: Bool,
+  # the one handler state cell whose *next* read is to be a `cell_take` rather
+  # than a `cell_get` (docs/handler-state-design.md). Set by
+  # `checker.check_stmt`'s assignment arm for the length of one right-hand
+  # side, cleared by the read that consumes it, and never set for more than
+  # one read: the decision is made before the side is checked, from the
+  # syntax, and `checker.cell_take_ok` is where the conditions are.
+  take_cell: Option[Int]
 }
 
 ## One lambda's frame. `sugar` says the parser synthesized this lambda from a
@@ -238,7 +245,15 @@ pub type LambdaCx =
     # created. Nothing rewrites a closure's row now -- the evidence is not
     # captured, so the creation point knows nothing the call site does not --
     # and both fields went with the rule.
-    arm: Bool
+    arm: Bool,
+    # which `with handle` installation this closure belongs to, if any: the
+    # arms and the remainder of one installation carry its id, everything else
+    # carries `None`. It is the licence a state cell's escape ban reads
+    # (docs/handler-state-design.md, `checker.resolve_local`), and it is a
+    # separate field from `sugar` on purpose -- the remainder of a
+    # `with x <- f()` is sugar too, and it is handed to a *user* function that
+    # may store it, so sugar is not evidence of belonging to anything.
+    handler_of: Option[Int]
   }
 
 ## A fresh checker state for one module.
@@ -324,7 +339,8 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     module_exports: map.empty(),
     loop_jumps: set.empty(),
     ty_spans: map.empty(),
-    record_ty_spans: false
+    record_ty_spans: false,
+    take_cell: None
   }
 }
 

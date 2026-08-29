@@ -1,28 +1,85 @@
-# checker.dawn: a handler's state cells parse, and the checker refuses them
-# for now. The syntax landed ahead of the semantics (there is no mutable heap
-# cell, no escape ban and no rewrite of the reads and writes that cross an arm
-# boundary), so a cell is reported once per declaration and the rest of the
-# handler is checked as if it were not there -- which is why the names cascade.
-# This case goes away with the temporary refusal.
+# checker.dawn: a handler's state cells (docs/handler-state-design.md). Every
+# shape below is legal and this case's golden is empty on purpose -- the
+# refusals live in handler_cells_escape.dawn, and what this file is here to
+# pin is that none of them fires on the programs the feature exists for.
+effect Emit {
+  fn emit(n: Int) -> Unit
+}
+
 effect Ask {
   fn get() -> Int
 }
 
-fn asks() -> Int !Ask = get()
-
-pub fn one_cell() -> Int = {
-  with handle Ask {
-    var seen: Int = 0
-    get() => seen
-  }
-  asks()
+fn body() -> Unit !Emit = {
+  emit(1)
+  emit(2)
 }
 
-pub fn two_cells() -> Int = {
-  with handle Ask {
-    var seen: Int = 0
-    var log: List[String] = []
-    get() => seen
+# the collector: an arm writes the cell, the block remainder reads it, and
+# neither the `var` capture ban nor the assign-across ban may reach either
+pub fn collect() -> List[Int] = {
+  with handle Emit {
+    var acc: List[Int] = []
+    emit(n) => { acc = acc ++ [n] }
   }
-  asks()
+  body()
+  acc
+}
+
+fn twice(a: List[Int], b: List[Int]) -> List[Int] = a ++ b
+
+# two reads of the same cell in one right-hand side. Legal, and the second read
+# must not find a slot the first one emptied: `cell_take_ok` counts the
+# occurrences before deciding
+pub fn double_read() -> List[Int] = {
+  with handle Emit {
+    var acc: List[Int] = []
+    emit(n) => { acc = twice(acc, acc) ++ [n] }
+  }
+  body()
+  acc
+}
+
+# more than one cell on one handler, and an initializer that is not a literal
+pub fn two_cells() -> Int = {
+  with handle Emit {
+    var count: Int = 0
+    var total: Int = 1 - 1
+    emit(n) => {
+      count = count + 1
+      total = total + n
+    }
+  }
+  body()
+  count + total
+}
+
+# a read under a loop inside an arm: legal, and the take that would empty the
+# slot on the first turn is what `cell_take_ok` refuses here
+pub fn looped() -> List[Int] = {
+  with handle Emit {
+    var acc: List[Int] = []
+    emit(n) => {
+      var r: List[Int] = []
+      for _i in 0..2 {
+        r = r ++ acc
+      }
+      acc = r ++ [n]
+    }
+  }
+  body()
+  acc
+}
+
+# **the P-E4-A anchor.** An ordinary `let` bound inside a handler's region may
+# be captured by a closure that leaves the region -- that is legal today and
+# the state-cell escape ban must be narrow enough to leave it alone. Its
+# cell-shaped twin is refused in handler_cells_escape.dawn, and the pair is the
+# only thing that says the ban tightened cells and nothing else.
+pub fn escaping_let() -> fn() -> Int = {
+  with handle Ask {
+    get() => 41
+  }
+  let captured = get() * 10
+  () => captured
 }

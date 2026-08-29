@@ -22,7 +22,7 @@ use front/ast.{
   OpNeg, OpNot, OpBnot,
   Pattern, PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList, PatArg, MatchArm,
   Arg, pos_arg, arg_exprs, first_named,
-  SPText, SPInterp, EFloat, EStr, pat_lo, pat_hi, e_lo, e_hi,
+  SPText, SPInterp, EFloat, EStr, EUnit, EBreak, EContinue, pat_lo, pat_hi, e_lo, e_hi,
   EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
   EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
   ListElem, LeExpr, LeSpread, LeIf, le_lo, le_hi,
@@ -49,7 +49,8 @@ use check/types.{
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes,
   eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, eff_assocs, eff_map_assocs,
   eff_carries,
-  erased_ev_ty, sig_abi_eff, ty_eff_vars_all, label_key, var_key, assoc_key, atom_keys,
+  erased_ev_ty, erased_cell_ty,
+  sig_abi_eff, ty_eff_vars_all, label_key, var_key, assoc_key, atom_keys,
   EV_PACK_ID, ev_pack_ty,
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
@@ -107,7 +108,24 @@ pub fn sym_of(cx: Cx, id: Int) -> Sym =
 
 ## Declare a name in the innermost scope (the Kotlin `declare`): re-binding in
 ## the same scope is an error; `_` never binds.
-pub fn declare(cx: Cx, name: String, ty: Ty, mutable: Bool, lo: Int, hi: Int) -> (Cx, Int) = {
+pub fn declare(cx: Cx, name: String, ty: Ty, mutable: Bool, lo: Int, hi: Int) -> (Cx, Int) =
+  declare_sym(cx, name, ty, mutable, no_cell(), lo, hi)
+
+fn no_cell() -> Option[(Int, Ty)] = None
+
+## `declare` with the one field a cell needs set (`types.Sym.cell_of`). Split
+## out rather than added to `declare`'s parameter list: every one of the fifty
+## ordinary callers would have had to spell `None`, and the spelling would have
+## said nothing about what it was declining.
+fn declare_sym(
+  cx: Cx,
+  name: String,
+  ty: Ty,
+  mutable: Bool,
+  cell: Option[(Int, Ty)],
+  lo: Int,
+  hi: Int
+) -> (Cx, Int) = {
   var cx1 = cx
   let inner = cx1.frame.scopes[len(cx1.frame.scopes) - 1]
   if name != "_" && map.has(inner, name) {
@@ -123,7 +141,8 @@ pub fn declare(cx: Cx, name: String, ty: Ty, mutable: Bool, lo: Int, hi: Int) ->
     dlo: lo,
     dhi: hi,
     dict_of: None,
-    ev_of: None
+    ev_of: None,
+    cell_of: cell
   }
   var cx3 = Cx { ..cx2, syms: map.insert(cx2.syms, id, sym) }
   if name != "_" {
@@ -1923,6 +1942,35 @@ pub fn capture_var_msg(lc: LambdaCx) -> (String, String) =
       "bind it to a let before the lambda, or pass it as a parameter")
   }
 
+## A handler state cell leaving its installation, as (message, hint), in the
+## words of whichever closure it would have had to cross
+## (docs/handler-state-design.md). Same three-way split as the two above, and
+## for the same reason: two of the three closures are ones the author never
+## spelled.
+##
+## The three cases are not the same mistake. An *arm* here is an arm of some
+## other installation -- this one's arms are licensed and never reach this
+## message -- so the reader has to be told that a cell belongs to one `with
+## handle` and not to handlers in general. The `with` sugar case is the one a
+## reader is most likely to hit by accident: everything after `with x <- f()`
+## is a closure handed to `f`, so a cell read down there has left the region
+## even though nothing on the page looks like it did.
+pub fn capture_cell_msg(lc: LambdaCx, name: String) -> (String, String) =
+  if lc.arm {
+    ("`" ++ name ++ "` belongs to another handler's `with handle` and cannot be " ++
+        "used from this arm",
+      "a state cell is reachable only from the arms and the block remainder of " ++
+        "the `with handle` that declares it")
+  } else if lc.sugar {
+    ("`" ++ name ++ "` cannot cross the closure `with` introduced",
+      "everything after `with` is that closure's body, which is outside the " ++
+        "`with handle` that declares the cell; read the cell before the `with`")
+  } else {
+    ("`" ++ name ++ "` is a handler state cell and cannot be captured by a lambda",
+      "a state cell is reachable only from the arms and the block remainder of " ++
+        "its `with handle`; pass its value in, or hand a value back instead")
+  }
+
 ## return / return expr — early return from the enclosing fn (or lambda).
 ## The value is checked by the caller (recursion lives there); this decides the
 ## target type or errors. Returns Some(target) when a value should be checked
@@ -2124,7 +2172,8 @@ test "loop jumps respect lambda boundaries" {
         expected_ret: None,
         captures: [],
         sugar: false,
-        arm: false
+        arm: false,
+        handler_of: None
       }]
     }
   }
@@ -3413,7 +3462,8 @@ test "an isolated context reports its own effects, then restores all eight field
       }),
       dict_syms: outer_dicts,
       lambda_stack: [LambdaCx {
-        boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false
+        boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false,
+        handler_of: None
       }],
       loop_stack: [7],
       isolated: false
@@ -3725,7 +3775,8 @@ fn eta_bounded_fn_value(
     expected_ret: None,
     captures: [],
     sugar: false,
-    arm: false
+    arm: false,
+    handler_of: None
   }
   var cx1 = Cx {
     ..cx,
@@ -4667,7 +4718,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       check_ctor_call(cx, cname, cargs, spread, if has_braces { CBraces } else { CBare },
         expected, None, cclo, cchi, lo, hi)
     ELambda(params, body, sugar, lo, hi) ->
-      check_lambda(cx, params, body, sugar, false, expected, lo, hi)
+      check_lambda(cx, params, body, sugar, false, None, expected, lo, hi)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
@@ -4798,6 +4849,28 @@ fn is_java_node(x: TExpr) -> Bool =
     _ -> false
   }
 
+## One symbol added to one lambda's capture list, idempotently: the same name
+## resolved twice inside one closure is captured once.
+fn capture_into(lc: LambdaCx, id: Int) -> LambdaCx = {
+  var caps = lc.captures
+  var have = false
+  for c in caps {
+    if c == id { have = true }
+  }
+  if not have { caps = caps ++ [id] }
+  LambdaCx { ..lc, captures: caps }
+}
+
+## The installation a symbol's cell belongs to, dropping the slot type.
+fn cell_hid(sym: Sym) -> Option[Int] =
+  match sym.cell_of {
+    Some(c) -> {
+      let (hid, _) = c
+      Some(hid)
+    }
+    None -> None
+  }
+
 ## Find a name in the scope stack with lambda-capture bookkeeping (the Kotlin
 ## resolveLocal): a hit below a lambda boundary is captured by value into every
 ## crossing lambda; `var` bindings refuse to cross, and assignment never does.
@@ -4817,6 +4890,26 @@ fn is_java_node(x: TExpr) -> Bool =
 ## at the top so that a `var` refusal and an assignment refusal still read the
 ## same for an evidence name -- neither can happen, since nothing can name one,
 ## but the arm that is skipped should be exactly the arm that is wrong.
+##
+## **A handler state cell is the one kind of name that crosses a closure it is
+## licensed for and no other** (`Sym.cell_of`, docs/handler-state-design.md).
+## It is captured by value like any `let` -- what travels is the slot, and
+## writing through a slot is not writing a captured variable -- but only into
+## the arms and the remainder of the installation that declared it, which are
+## the frames carrying that installation's id. Every crossed frame is asked
+## separately, so a cell reaching its own arm from inside somebody else's
+## closure is refused at that closure.
+##
+## This arm is placed **first**, ahead of the two refusals, and the two are
+## therefore unreachable for a cell. That is deliberate and it is the whole of
+## the widening: an ordinary `var` still refuses to be captured and still
+## refuses to be assigned across a closure, word for word, and the only way to
+## keep that true was to make the cell case not consult either rule.
+##
+## `lc.sugar` is *not* the licence, though every licensed frame happens to be
+## sugar. The remainder of a `with x <- f()` is sugar too, and it is passed to
+## a user function that may keep it; a cell reachable from there would outlive
+## the handler that owns it.
 pub fn resolve_local(
   cx: Cx,
   name: String,
@@ -4833,7 +4926,20 @@ pub fn resolve_local(
         var stack: List[LambdaCx] = []
         for lc in cx1.frame.lambda_stack {
           if i < lc.boundary {
-            if for_assign {
+            if cell_hid(sym) != None {
+              # a state cell: captured like an ordinary `let` into the closures
+              # of its own installation, refused everywhere else. The licence is
+              # checked one frame at a time, so a cell that reaches its own arm
+              # through somebody else's closure is refused at that frame -- see
+              # the note above.
+              if lc.handler_of == cell_hid(sym) {
+                stack = stack ++ [capture_into(lc, id)]
+              } else {
+                let (msg, hint) = capture_cell_msg(lc, name)
+                cx1 = cerr_h(cx1, msg, lo, hi, hint)
+                stack = stack ++ [lc]
+              }
+            } else if for_assign {
               let (msg, hint) = assign_across_msg(lc, name)
               cx1 = cerr_h(cx1, msg, lo, hi, hint)
               stack = stack ++ [lc]
@@ -4845,13 +4951,7 @@ pub fn resolve_local(
               # evidence does not join a capture list -- see the note above
               stack = stack ++ [lc]
             } else {
-              var caps = lc.captures
-              var have = false
-              for c in caps {
-                if c == id { have = true }
-              }
-              if not have { caps = caps ++ [id] }
-              stack = stack ++ [LambdaCx { ..lc, captures: caps }]
+              stack = stack ++ [capture_into(lc, id)]
             }
           } else {
             stack = stack ++ [lc]
@@ -4884,7 +4984,20 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
   match found {
     Some(id) -> {
       let sym = sym_of(cx1, id)
-      (cx1, sym.ty, XLocal(id, name, lo, hi, sym.ty))
+      match sym.cell_of {
+        # A handler state cell reads through its slot, and the expression's
+        # type is what the slot holds, not the slot. `sym.ty` is the erased
+        # cell (see `types.Sym`), so the local node keeps that and the read
+        # node carries the value type -- which is also what makes the read the
+        # only place a cell's erased type is ever unwrapped.
+        Some(c) -> {
+          let (_, ct) = c
+          let take = cx1.take_cell == Some(id)
+          let cx2 = if take { Cx { ..cx1, take_cell: None } } else { cx1 }
+          (cx2, ct, cell_read(id, name, ct, take, lo, hi))
+        }
+        None -> (cx1, sym.ty, XLocal(id, name, lo, hi, sym.ty))
+      }
     }
     None -> {
       match lookup_fn_sig(cx1, name) {
@@ -4988,12 +5101,19 @@ fn check_unsafe_pure(cx: Cx, body: Expr, expected: Option[Ty], lo: Int, hi: Int)
 ## handler answers" -- a different program with a different transcript
 ## (scripts/spike-native/effect_lexical.expect), and the point of the knife.
 
+## `handler_of` is the installation this closure belongs to
+## (`cx.LambdaCx.handler_of`): `Some(id)` for the arms and the remainder of a
+## `with handle`, `None` for every lambda the author wrote. It is only ever
+## non-`None` on a call from `check_handle`, which is also why the remainder is
+## checked by calling this directly rather than through `check_expr`'s
+## `ELambda` arm -- that arm has no id to pass.
 fn check_lambda(
   cx: Cx,
   params: List[LambdaParam],
   body: Expr,
   sugar: Bool,
   arm: Bool,
+  handler_of: Option[Int],
   expected: Option[Ty],
   lo: Int,
   hi: Int
@@ -5073,7 +5193,8 @@ fn check_lambda(
       expected_ret: exp_ret,
       captures: [],
       sugar: sugar,
-      arm: arm
+      arm: arm,
+      handler_of: handler_of
     }
   cx1 = Cx {
     ..cx1,
@@ -5113,6 +5234,308 @@ fn fn_ty_parts(t: Ty) -> (List[Ty], Ty, Eff) =
   match t {
     TyFn(ps, r, ef) -> (ps, r, ef)
     _ -> ([], TyError, EPure)
+  }
+
+# ---- handler state cells ----
+#
+# A cell (docs/handler-state-design.md) is one heap slot made where a handler
+# is installed. The binding the author writes is not a variable: `acc` names
+# the slot, every read of it becomes `cell_get(acc)` and every assignment to it
+# becomes `cell_set(acc, v)`. That is the whole of why an arm may write it
+# while an arm may not write an enclosing `var` -- what the arm captured is the
+# slot, and writing through a slot is not writing a captured variable.
+#
+# The four primitives are internal (`ir/lower.internal_intrinsics`) and no
+# program can spell them; they reach Core as ordinary `XCallBuiltin` nodes,
+# which is the route `ev_append` already takes out of this file.
+
+## The slot itself, at the type the slot has. `types.Sym.ty` of a cell is
+## `erased_cell_ty()`, so this is just the local -- spelled out here so that
+## the three primitives cannot disagree about it.
+fn cell_local(id: Int, name: String, lo: Int, hi: Int) -> TExpr =
+  XLocal(id, name, lo, hi, erased_cell_ty())
+
+fn cell_wits() -> List[WitRef] = []
+
+## A cell primitive's row is pure, so it owes no evidence: the slot is an
+## ordinary argument.
+fn cell_evs() -> List[TExpr] = []
+
+## One read of a cell, at the type the slot holds.
+##
+## `take` picks `cell_take` -- which empties the slot and hands its reference
+## over -- rather than `cell_get`. It is an optimisation and never a
+## requirement: `cell_get` is correct everywhere, and the only thing riding on
+## the choice is whether the value the assignment goes on to rebuild is
+## uniquely referenced, which on native decides whether the accumulator is
+## rebuilt in place or copied. `cell_take_ok` is where the conditions are.
+fn cell_read(id: Int, name: String, ct: Ty, take: Bool, lo: Int, hi: Int) -> TExpr = {
+  let prim = if take { "cell_take" } else { "cell_get" }
+  XCallBuiltin(prim, [cell_local(id, name, lo, hi)], cell_wits(), cell_evs(), lo, hi, ct)
+}
+
+## One write of a cell. The superseded value is the primitive's problem, not
+## this file's: `cell_set` releases it on native and lets the collector have it
+## on the JVM.
+fn cell_write(id: Int, name: String, v: TExpr, lo: Int, hi: Int) -> TExpr =
+  XCallBuiltin("cell_set", [cell_local(id, name, lo, hi), v], cell_wits(), cell_evs(),
+    lo, hi, TyUnit)
+
+## Making the slot: evaluated once, where the handler is installed.
+fn cell_new(init: TExpr, lo: Int, hi: Int) -> TExpr =
+  XCallBuiltin("cell_new", [init], cell_wits(), cell_evs(), lo, hi, erased_cell_ty())
+
+## The cells of one installation, bound into the scope the caller has already
+## pushed, with the `TSLet` that makes each slot.
+##
+## **Every initialiser is checked before any cell is bound**, so an initialiser
+## cannot see a cell -- not even one written above it. Binding as the list is
+## walked would read the same on the page and mean something quite different:
+## the order the cells happen to be written in would become a semantics, and a
+## cell's initialiser would be able to read a slot that exists only because
+## this same statement is still running.
+##
+## The declaration is not `mutable`. A cell is not a `var` and must inherit
+## nothing from one: `mutable` is the flag the capture ban and the assignment
+## ban read, and every place a cell needs different behaviour says so about
+## `cell_of` in its own words (`resolve_local`, `check_stmt`'s assignment arm).
+##
+## The symbol's type is the erased slot, not the value: that is what the
+## binding holds at run time, what lowering gives the local, and what a capture
+## entry carries. The value's type rides on `cell_of` and `check_var` reads it
+## from there.
+fn declare_cells(cx: Cx, cells: List[HandlerCell], hid: Int) -> (Cx, List[TStmt]) !io = {
+  var cx1 = cx
+  var tys: List[Ty] = []
+  var inits: List[TExpr] = []
+  for c in cells {
+    let (cxa, t) = resolve_type(cx1, c.ann)
+    cx1 = cxa
+    let (cxb, it, ix) = check_expr(cx1, c.init, Some(t))
+    cx1 = cxb
+    # the same sentence a `let` with an annotation gets, deliberately: a cell's
+    # annotation is an annotation, and a second wording for it would be a
+    # second thing to keep in step
+    if not assignable(cx1, it, t) {
+      cx1 = cerr(cx1, "annotated type is " ++ ty_show(cx1.adts, t) ++
+          " but the initializer is " ++ ty_show(cx1.adts, it), e_lo(c.init), e_hi(c.init))
+    }
+    tys = tys ++ [t]
+    inits = inits ++ [ix]
+  }
+  var stmts: List[TStmt] = []
+  var i = 0
+  for c in cells {
+    let (cxc, sid) =
+      declare_sym(cx1, c.name, erased_cell_ty(), false, Some((hid, tys[i])), c.nlo, c.nhi)
+    cx1 = cxc
+    stmts = stmts ++ [TSLet(Some(sid), c.name, cell_new(inits[i], c.lo, c.hi), c.lo, c.hi)]
+    i = i + 1
+  }
+  (cx1, stmts)
+}
+
+## The remainder of a `with handle` block -- the parameterless sugar lambda the
+## parser packed the rest of the statements into (`ast.EHandle.rest`).
+##
+## Checked by calling `check_lambda` directly rather than through `check_expr`,
+## because the installation id has to reach the frame that call makes: it is
+## the licence a cell read from down here is checked against, and
+## `check_expr`'s `ELambda` arm has nothing to pass. The other arm is for a
+## tree the parser does not build; it keeps a malformed one from panicking, and
+## a cell read under it is refused rather than silently licensed.
+fn check_rest(cx: Cx, rest: Expr, hid: Int, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
+  match rest {
+    ELambda(params, body, sugar, rlo, rhi) ->
+      check_lambda(cx, params, body, sugar, false, Some(hid), rest_expected(expected),
+        rlo, rhi)
+    _ -> check_expr(cx, rest, rest_expected(expected))
+  }
+
+## May the read of `name` inside this assignment's right-hand side be a
+## `cell_take`?
+##
+## Between a take and the `cell_set` that ends the assignment the slot is
+## empty, so the question is only ever "can anything read this cell in that
+## window". Three conditions answer it, and each one names a program that would
+## otherwise read an emptied slot:
+##
+## **The assignment is in an arm of the cell's own installation.** In the
+## block remainder it is not safe: the right-hand side may raise `E`, and `E`
+## is answered by *this* installation, so an arm runs inside the window and
+## reads the cell it shares. Inside an arm the same raise reaches the enclosing
+## handler instead -- an arm does not answer itself (design §6.2, and
+## `check_handle` binds the evidence after the arms for exactly this reason) --
+## so no arm of this installation can run in the window. This is also where the
+## optimisation is worth having: the accumulating arm is the shape it exists
+## for.
+##
+## **Exactly one occurrence of the name in the right-hand side.** Two reads and
+## the second one finds the slot empty (`acc = f(acc, acc)`); a nested
+## assignment to the same cell is an occurrence too, and it would be writing
+## into a window it does not know about.
+##
+## **No occurrence under a lambda or a loop.** A loop runs its body more than
+## once, so one written read is not one read -- the second turn of
+## `for i in 0..2 { r = r ++ acc }` finds the slot empty. A lambda multiplies
+## in the same way, and capturing a cell into one is refused anyway
+## (`resolve_local`); `cell_occurrences` scores both as two, which is the same
+## as "more than one" for this test.
+##
+## The count is over the *written name*, before the right-hand side is checked,
+## so a shadowed `acc` inside it counts as an occurrence. That over-counts, and
+## over-counting only ever costs the optimisation.
+fn cell_take_ok(cx: Cx, hid: Int, name: String, value: Expr) -> Bool = {
+  if len(cx.frame.lambda_stack) == 0 { return false }
+  let lc = cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1]
+  if not lc.arm { return false }
+  if lc.handler_of != Some(hid) { return false }
+  cell_occurrences(value, name) == 1
+}
+
+## An occurrence in a context that runs more than once, scored so that it can
+## never be the single occurrence `cell_take_ok` accepts.
+fn cell_repeated(n: Int) -> Int = if n > 0 { 2 } else { 0 }
+
+## How many times `name` is written in this expression, counting a write to it
+## as an occurrence and scoring anything under a lambda, a local function or a
+## loop as two.
+##
+## The match is exhaustive on purpose -- no wildcard arm. An expression form
+## this walk did not descend into would be an *under*-count, and an under-count
+## is the one error that matters here: it turns two reads into one and hands
+## the second one an empty slot. A new `ast.Expr` constructor has to be
+## answered here before it compiles.
+fn cell_occurrences(e: Expr, name: String) -> Int =
+  match e {
+    EInt(_, _, _) | EChar(_, _, _) | EFloat(_, _, _) | EBool(_, _, _) | EUnit(_, _) |
+    EBreak(_, _) | EContinue(_, _) -> 0
+    EVar(n, _, _) -> if n == name { 1 } else { 0 }
+    EStr(parts, _, _) -> {
+      var o = 0
+      for pt in parts {
+        match pt {
+          SPText(_) -> ()
+          SPInterp(x) -> { o = o + cell_occurrences(x, name) }
+        }
+      }
+      o
+    }
+    EApply(target, args, _, _) -> {
+      var o = cell_occurrences(target, name)
+      for a in args { o = o + cell_occurrences(a.e, name) }
+      o
+    }
+    EMethod(target, _, args, _, _, _, _) -> {
+      var o = cell_occurrences(target, name)
+      for a in args { o = o + cell_occurrences(a.e, name) }
+      o
+    }
+    ELambda(_, body, _, _, _) -> cell_repeated(cell_occurrences(body, name))
+    ECtor(_, args, spread, _, _, _, _, _) -> {
+      var o = 0
+      match spread {
+        Some(sp) -> { o = o + cell_occurrences(sp, name) }
+        None -> ()
+      }
+      for a in args { o = o + cell_occurrences(a.e, name) }
+      o
+    }
+    EFieldAcc(target, _, _, _, _, _) -> cell_occurrences(target, name)
+    EListLit(elems, _, _) -> {
+      var o = 0
+      for x in elems {
+        match x {
+          LeExpr(x2) -> { o = o + cell_occurrences(x2, name) }
+          LeSpread(x2, _, _) -> { o = o + cell_occurrences(x2, name) }
+          LeIf(arms, _, _) -> {
+            for a in arms {
+              o = o + cell_occurrences(a.cond, name) + cell_occurrences(a.body, name)
+            }
+          }
+        }
+      }
+      o
+    }
+    ETupleLit(elems, _, _) -> {
+      var o = 0
+      for x in elems { o = o + cell_occurrences(x, name) }
+      o
+    }
+    EPropagate(operand, _, _) -> cell_occurrences(operand, name)
+    EUnwrap(operand, _, _) -> cell_occurrences(operand, name)
+    EIndex(target, index, _, _) ->
+      cell_occurrences(target, name) + cell_occurrences(index, name)
+    EReturn(v, _, _) ->
+      match v {
+        Some(x) -> cell_occurrences(x, name)
+        None -> 0
+      }
+    EComptime(body, _, _) -> cell_occurrences(body, name)
+    EUnsafePure(body, _, _) -> cell_occurrences(body, name)
+    EBinary(_, l, r, _, _, _, _) -> cell_occurrences(l, name) + cell_occurrences(r, name)
+    EUnary(_, operand, _, _) -> cell_occurrences(operand, name)
+    EIf(cond, thn, els, _, _) -> {
+      var o = cell_occurrences(cond, name) + cell_occurrences(thn, name)
+      match els {
+        Some(x) -> { o = o + cell_occurrences(x, name) }
+        None -> ()
+      }
+      o
+    }
+    EMatch(scrut, arms, _, _) -> {
+      var o = cell_occurrences(scrut, name)
+      for a in arms {
+        match a.guard {
+          Some(g) -> { o = o + cell_occurrences(g, name) }
+          None -> ()
+        }
+        o = o + cell_occurrences(a.body, name)
+      }
+      o
+    }
+    EBlock(stmts, tail, _, _) -> {
+      var o = 0
+      for st in stmts { o = o + cell_occurrences_stmt(st, name) }
+      match tail {
+        Some(t) -> { o = o + cell_occurrences(t, name) }
+        None -> ()
+      }
+      o
+    }
+    # a nested installation: its cells' initialisers run here, its arms and its
+    # remainder are closures of a *different* installation and so cannot reach
+    # this cell at all -- but a mention of the name in one still counts, because
+    # what is being counted is the name, not the resolution
+    EHandle(_, cells, arms, rest, _, _, _, _) -> {
+      var o = 0
+      for c in cells { o = o + cell_occurrences(c.init, name) }
+      for a in arms { o = o + cell_repeated(cell_occurrences(a.body, name)) }
+      o + cell_repeated(cell_occurrences(rest, name))
+    }
+  }
+
+fn cell_occurrences_stmt(s: Stmt, name: String) -> Int =
+  match s {
+    SLet(_, _, _, init, _, _) -> cell_occurrences(init, name)
+    SLetPat(_, _, init, _, _) -> cell_occurrences(init, name)
+    SLocalFn(_, _, _, _, body, _, _, _, _) -> cell_repeated(cell_occurrences(body, name))
+    # the target counts: an assignment to the same cell inside the right-hand
+    # side writes into the window the outer take opens
+    SAssign(n, value, _, _, _, _) ->
+      (if n == name { 1 } else { 0 }) + cell_occurrences(value, name)
+    SExpr(e, _, _) -> cell_occurrences(e, name)
+    SAssert(cond, _, _, _) -> cell_occurrences(cond, name)
+    SWhile(cond, body, _, _) ->
+      cell_repeated(cell_occurrences(cond, name) + cell_occurrences(body, name))
+    SFor(_, from, to, body, _, _) -> {
+      var o = cell_occurrences(from, name)
+      match to {
+        Some(t) -> { o = o + cell_occurrences(t, name) }
+        None -> ()
+      }
+      o + cell_repeated(cell_occurrences(body, name))
+    }
   }
 
 ## `with handle E { op(..) => ... }` and the rest of its block
@@ -5155,32 +5578,35 @@ fn check_handle(
   expected: Option[Ty]
 ) -> (Cx, Ty, TExpr) !io = {
   var cx1 = cx
-  # The syntax landed ahead of the semantics: a cell needs a mutable heap
-  # cell, an escape ban and a rewrite of every read and write that crosses the
-  # arm boundary, none of which exists yet (docs/handler-state-design.md §4).
-  # Refused here rather than half-checked, so no program can depend on a
-  # meaning this compiler does not have. Temporary.
-  for c in cells {
-    cx1 = cerr_h(cx1, "handler state cells are not yet supported", c.lo, c.hi,
-      "`var` inside a handler's braces parses, but the checker does not " ++
-        "implement it yet (docs/handler-state-design.md §4)")
-  }
   if cx1.frame.isolated {
     cx1 = cerr_h(cx1, "`with handle` is not available at compile time", lo, hi,
       "comptime blocks and const initializers are pure in v1 " ++
         "(docs/effects-design.md §4.5)")
   }
+  # this installation's identity, and the only thing a state cell's escape ban
+  # compares. Minted from the symbol counter because that counter is already
+  # the source of ids nothing else in the module can collide with; the id names
+  # no symbol.
+  let (cxh, hid) = fresh(cx1)
+  cx1 = cxh
   let eid = match map.get(cx1.effects, name) {
     Some(id) -> id
     None -> {
       cx1 = cerr_o(cx1, "unknown effect `" ++ name ++ "`", nlo, nhi,
         suggest.hint(name, map.keys(cx1.effects)))
-      var cxr0 = cx1
-      let (cxr, rt, rx) = check_expr(cxr0, rest, rest_expected(expected))
+      # the cells are still bound, and the remainder is still checked with the
+      # licence: the handler is refused, but the block below it is the author's
+      # code and a cascade of "undefined variable" on every cell read would
+      # bury the one diagnostic that matters
+      var cxr0 = push_scope(cx1)
+      let (cxc, cstmts) = declare_cells(cxr0, cells, hid)
+      cxr0 = cxc
+      let (cxr, rt, rx) = check_rest(cxr0, rest, hid, expected)
       cxr0 = cxr
       let (_, rret, reff0) = fn_ty_parts(rt)
       let (cxr1, revs0, _) = evidence_pack(cxr0, reff0, false, lo, hi)
-      return (cxr1, rret, XApply(rx, [], [revs0], lo, hi, rret))
+      let rcall = XApply(rx, [], [revs0], lo, hi, rret)
+      return (pop_scope(cxr1), rret, XBlock(cstmts, Some(rcall), lo, hi, rret))
     }
   }
   let info = effect_of(cx1, eid)
@@ -5220,11 +5646,25 @@ fn check_handle(
   # the arms, each against the operation's own signature. Their own effects
   # are charged to this block: an arm's body runs where the handler was
   # installed, not where the operation was raised
+  #
+  # The scope opened here is the whole region `handle` claims: the state cells
+  # first, then -- after the arms have been checked in it -- the evidence. Two
+  # things ride on that order. An arm sees the cells and not the evidence,
+  # which is the "an arm does not answer itself" rule already spelled out
+  # below; and the remainder sees both, which is what makes a cell readable
+  # after the handler and the evidence available to what it calls.
+  cx1 = push_scope(cx1)
+  let (cxcells, cell_stmts) = declare_cells(cx1, cells, hid)
+  cx1 = cxcells
   var arm_nodes: List[TExpr] = []
   var slots: List[Option[Int]] = []
-  # ... and charged to any closure this handler's evidence ends up inside, which
-  # is what makes an escaping closure's type say what it will actually run
-  # (docs/effects-soundness-design.md §4.2)
+  # ... which is `record_effect` below, into the frame this installation was
+  # written in -- the `⋃base_i` of docs/spec.md §6.5. The line here used to say
+  # the arms were charged to any closure the evidence ends up inside, citing
+  # docs/effects-soundness-design.md §4.2: a rule V1' flipped, in a document
+  # that has since declared itself historical. Nothing is charged to a closure
+  # any more, because the evidence is not captured and there is no closure to
+  # charge (docs/handler-state-design.md §7.6).
   var arms_eff = EPure
   var k = 0
   for o in info.ops {
@@ -5241,7 +5681,7 @@ fn check_handle(
             "the arm is the operation's body: " ++ ty_show(cxa.adts, field.ty))
         }
         let (cxb, at, ax) = check_lambda(cxa, a.params, a.body, true, true,
-          Some(field.ty), a.lo, a.hi)
+          Some(hid), Some(field.ty), a.lo, a.hi)
         cxa = cxb
         let (_, aret, aeff) = fn_ty_parts(at)
         if not assignable(cxa, aret, fret) {
@@ -5269,13 +5709,12 @@ fn check_handle(
   let ev_ty = TyAdt(eid, [])
   let ev_node = XCtor(eid, 0, arm_nodes ++ [arm_env], slots ++ [Some(len(slots))],
     no_expr(), lo, hi, ev_ty)
-  # the evidence is in scope for the remainder only, which is exactly the
-  # region `handle` claims
-  cx1 = push_scope(cx1)
+  # the evidence joins the region's scope here, after the arms and before the
+  # remainder
   let ev_name = ev_local_name(cx1, eid)
   let (cx2, ev_sym) = declare_evidence(cx1, ev_name, ev_ty, label_key(eid), nlo, nhi)
   cx1 = cx2
-  let (cx3, rt, rx) = check_expr(cx1, rest, rest_expected(expected))
+  let (cx3, rt, rx) = check_rest(cx1, rest, hid, expected)
   cx1 = cx3
   let (_, rret, reff) = fn_ty_parts(rt)
   # the pack the remainder is run with: built while `E`'s record is still in
@@ -5286,8 +5725,11 @@ fn check_handle(
   # this very call just answered
   cx1 = record_effect(cx1, eff_minus(reff, eid), lo, hi, "the block after `with handle`")
   let call = XApply(rx, [], [revs], lo, hi, rret)
+  # the slots are made before the record that holds the arms: an arm closes
+  # over the cells, so they have to exist before the closure does
   (cx1, rret,
-    XBlock([TSLet(Some(ev_sym), ev_name, ev_node, lo, hi)], Some(call), lo, hi, rret))
+    XBlock(cell_stmts ++ [TSLet(Some(ev_sym), ev_name, ev_node, lo, hi)],
+      Some(call), lo, hi, rret))
 }
 
 ## A row without one label. `eff_drop` takes a list; this is its one-label
@@ -5685,17 +6127,41 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
         }
         Some(sid) -> {
           let sym = sym_of(cx1, sid)
-          if not sym.mutable {
-            cx1 = cerr_h(cx1, "`" ++ name ++ "` is a let binding and cannot be assigned", nlo, nhi,
-              "declare it as var " ++ name ++ " = ... if it needs to change")
+          match sym.cell_of {
+            # A handler state cell is written through its slot, so this is a
+            # `cell_set` and not a `TSAssign`: the binding itself never
+            # changes, and it is the same write whether it is reached from an
+            # arm, from a nested block, or from the remainder.
+            Some(c) -> {
+              let (hid, ct) = c
+              if cell_take_ok(cx1, hid, name, value) {
+                cx1 = Cx { ..cx1, take_cell: Some(sid) }
+              }
+              let (cxb, vt, vx) = check_expr(cx1, value, Some(ct))
+              # cleared unconditionally: a right-hand side that never read the
+              # cell must not leave the mark standing for the next assignment
+              cx1 = Cx { ..cxb, take_cell: None }
+              if not assignable(cx1, vt, ct) {
+                cx1 = cerr(cx1, "`" ++ name ++ "` is " ++ ty_show(cx1.adts, ct) ++
+                    ", cannot assign " ++ ty_show(cx1.adts, vt), e_lo(value), e_hi(value))
+              }
+              (cx1, TSExpr(cell_write(sid, name, vx, lo, hi), lo, hi))
+            }
+            None -> {
+              if not sym.mutable {
+                cx1 = cerr_h(cx1, "`" ++ name ++ "` is a let binding and cannot be assigned",
+                  nlo, nhi,
+                  "declare it as var " ++ name ++ " = ... if it needs to change")
+              }
+              let (cxb, vt, vx) = check_expr(cx1, value, Some(sym.ty))
+              cx1 = cxb
+              if not assignable(cx1, vt, sym.ty) {
+                cx1 = cerr(cx1, "`" ++ name ++ "` is " ++ ty_show(cx1.adts, sym.ty) ++
+                    ", cannot assign " ++ ty_show(cx1.adts, vt), e_lo(value), e_hi(value))
+              }
+              (cx1, TSAssign(sid, name, vx, lo, hi))
+            }
           }
-          let (cxb, vt, vx) = check_expr(cx1, value, Some(sym.ty))
-          cx1 = cxb
-          if not assignable(cx1, vt, sym.ty) {
-            cx1 = cerr(cx1, "`" ++ name ++ "` is " ++ ty_show(cx1.adts, sym.ty) ++
-                ", cannot assign " ++ ty_show(cx1.adts, vt), e_lo(value), e_hi(value))
-          }
-          (cx1, TSAssign(sid, name, vx, lo, hi))
         }
       }
     }
@@ -5884,7 +6350,8 @@ fn check_local_fn(
   let ft = TyFn(ptys, ret, eff)
   let (cxc, sid) = declare(cx1, name, ft, false, nlo, nhi)
   cx1 = cxc
-  let (cxd, actual, lam) = check_lambda(cx1, params, body, false, false, Some(ft), lo, hi)
+  let (cxd, actual, lam) =
+    check_lambda(cx1, params, body, false, false, None, Some(ft), lo, hi)
   cx1 = cxd
   match actual {
     TyFn(_, ar, ae) -> {
@@ -9463,7 +9930,8 @@ fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
             dlo: nlo,
             dhi: nhi,
             dict_of: Some((tr_id, vid)),
-            ev_of: None
+            ev_of: None,
+            cell_of: None
           }
           cx1 = Cx {
             ..cx2,
@@ -11286,7 +11754,8 @@ fn arm_cx() -> Cx =
           expected_ret: None,
           captures: [],
           sugar: true,
-          arm: true
+          arm: true,
+          handler_of: None
         }]
       }
     }

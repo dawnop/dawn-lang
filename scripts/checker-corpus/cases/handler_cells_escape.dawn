@@ -1,0 +1,70 @@
+# checker.dawn: a handler state cell is reachable from the arms and the block
+# remainder of the `with handle` that declares it, and from nothing else
+# (docs/handler-state-design.md). Each function below crosses one closure that
+# does not belong to the installation, and each of the three phrasings is
+# somebody's real mistake.
+effect Ask {
+  fn get() -> Int
+}
+
+fn bracketish(a: Int, k: fn(Int) -> Int) -> Int = k(a)
+
+# a lambda written inside an arm is not the arm: it can be stored and called
+# later, and the arm frame being licensed says nothing about it
+pub fn lambda_in_arm() -> Int = {
+  with handle Ask {
+    var seen: Int = 0
+    get() => {
+      let f = () => seen
+      f()
+    }
+  }
+  get()
+}
+
+# `with x <- f()` also makes a closure the author did not spell, and that one
+# is handed to `bracketish`, which may keep it. Sugar is not a licence, and
+# this case is what says so
+pub fn through_with_sugar() -> Int = {
+  with handle Ask {
+    var seen: Int = 0
+    get() => seen
+  }
+  with x <- bracketish(1)
+  seen + x
+}
+
+# the cell twin of handler_cells.dawn's `escaping_let`: the same shape, the
+# same escape, and the opposite answer
+pub fn escaping_cell() -> fn() -> Int = {
+  with handle Ask {
+    var seen: Int = 0
+    get() => seen
+  }
+  () => seen
+}
+
+# a nested installation's arm belongs to *that* installation
+pub fn other_arm() -> Int = {
+  with handle Ask {
+    var outer: Int = 0
+    get() => outer
+  }
+  with handle Ask {
+    get() => outer
+  }
+  get()
+}
+
+# and outside the region the name is not in scope at all
+pub fn elsewhere() -> Int = seen
+
+# a cell's annotation is an annotation: the initializer answers to it, in the
+# same words a `let` would get
+pub fn bad_init() -> Int = {
+  with handle Ask {
+    var seen: Int = "no"
+    get() => seen
+  }
+  get()
+}

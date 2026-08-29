@@ -27,7 +27,7 @@ use check/types.{
   DICT_ADT_ID,
   Sym, Sig, Eff, EPure, ELabeled, EffVar, Traits, TraitI, ImplI, MethodSig,
   eff_labels, eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
-  reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty,
+  reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty, erased_cell_ty,
   EV_PACK_ID, ev_pack_ty, key_is_label, key_effect_id, label_key,
   Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
@@ -436,6 +436,37 @@ fn is_evidence_ty(st: LSt, t: Ty) -> Bool =
       }
     _ -> false
   }
+
+# ---- handler state cells ----
+
+## The four names that reach `lower_cell` below.
+fn is_cell_intrinsic(name: String) -> Bool =
+  name == "cell_new" || name == "cell_get" || name == "cell_set" || name == "cell_take"
+
+## The four cell primitives, lowered.
+##
+## Every value that goes into a slot is boxed to the erased cell type and every
+## value that comes out is unboxed from it, which is the whole of what this
+## adds: `cell_new(0)` on the JVM stores into an `Object[]`, so an `Int` has to
+## arrive as a reference, and `cell_get` on the same slot hands one back where
+## the program wants a long.
+##
+## `cell_set` is the one that returns `Unit` rather than the slot's type, so it
+## is the one arm here that does not adapt its result.
+fn lower_cell(st: LSt, name: String, args: List[TExpr], ty: Ty) -> (LSt, CExpr) = {
+  let er = erased_cell_ty()
+  if name == "cell_new" {
+    let (st1, v) = lower_expr(st, args[0])
+    return (st1, CIntrinsic(name, [adapt_in(v, tex_ty(args[0]), er)], er))
+  }
+  if name == "cell_set" {
+    let (st1, c) = lower_expr(st, args[0])
+    let (st2, v) = lower_expr(st1, args[1])
+    return (st2, CIntrinsic(name, [c, adapt_in(v, tex_ty(args[1]), er)], TyUnit))
+  }
+  let (st1, c) = lower_expr(st, args[0])
+  (st1, adapt_out(CIntrinsic(name, [c], er), er, ty))
+}
 
 fn refuse_evidence_captures(st: LSt, where2: String, captures: List[Int]) -> Unit = {
   for c in captures {
@@ -3267,6 +3298,16 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     }
     XListLit(elems, _, _, ty) -> lower_list_lit(st, elems, ty)
     XCallBuiltin(name, args, wits, evid, _, _, ty) -> {
+      # the handler-local slot (docs/handler-state-design.md). The checker
+      # types these four in the program's terms -- a read node carries what the
+      # slot holds, a write's second argument carries what is being stored --
+      # and the slot itself is erased, so the boxing on the way in and the
+      # unboxing on the way out are settled here. They cannot be settled by a
+      # signature the way an erased builtin's are: these names are internal
+      # (`internal_intrinsics`), so `erased_builtin_sig` has nothing for them.
+      if is_cell_intrinsic(name) {
+        return lower_cell(st, name, args, ty)
+      }
       # `char_unchecked` is the Int -> Char bridge, and `Char`'s representation
       # *is* `Int` -- so it disappears here rather than becoming a primitive
       # each backend would have to implement as a no-op. The check it skips was
@@ -4474,7 +4515,8 @@ test "the flat module and the grouped functions are one lowering" {
     dlo: 0,
     dhi: 0,
     dict_of: None,
-    ev_of: None
+    ev_of: None,
+    cell_of: None
   }
   var syms: Map[Int, Sym] = map.empty()
   syms = map.insert(syms, 1, sym("a"))
@@ -4585,7 +4627,8 @@ test "emitted_core carries the test bodies and what they hoisted" {
     dlo: 0,
     dhi: 0,
     dict_of: None,
-    ev_of: None
+    ev_of: None,
+    cell_of: None
   }
   var syms: Map[Int, Sym] = map.empty()
   syms = map.insert(syms, 1, sym("a", ti))
