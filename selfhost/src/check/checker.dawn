@@ -5658,13 +5658,20 @@ fn check_handle(
   cx1 = cxcells
   var arm_nodes: List[TExpr] = []
   var slots: List[Option[Int]] = []
-  # ... which is `record_effect` below, into the frame this installation was
-  # written in -- the `⋃base_i` of docs/spec.md §6.5. The line here used to say
-  # the arms were charged to any closure the evidence ends up inside, citing
-  # docs/effects-soundness-design.md §4.2: a rule V1' flipped, in a document
-  # that has since declared itself historical. Nothing is charged to a closure
-  # any more, because the evidence is not captured and there is no closure to
-  # charge (docs/handler-state-design.md §7.6).
+  # ... which is the per-arm `record_effect` inside the loop below, into the
+  # frame this installation was written in -- the `⋃base_i` of
+  # docs/spec.md §6.5. `arms_eff` is those same rows kept a second time for a
+  # second reader: it is what `evidence_pack` builds the arms' own environment
+  # from, after the loop and before `E`'s own record joins the scope. So each
+  # arm's row goes to two places and neither is a closure -- the block that
+  # installed the handler pays for it, and the arms are handed evidence for it.
+  #
+  # This line used to say the arms were charged to any closure the evidence
+  # ends up inside, citing docs/effects-soundness-design.md §4.2. That was a
+  # rule V1' flipped, in a document that has since declared itself historical:
+  # nothing is charged to a closure any more, because the evidence is not
+  # captured and there is no closure to charge
+  # (docs/handler-state-design.md §7.6).
   var arms_eff = EPure
   var k = 0
   for o in info.ops {
