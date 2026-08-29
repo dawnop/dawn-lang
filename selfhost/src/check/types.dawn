@@ -1345,6 +1345,22 @@ pub fn eff_map_assocs(e: Eff, f: fn((String, Int, Int, String)) -> Eff) -> Eff =
 ## prelude), the same convention `TyVar("D", 0)` uses for dictionary slots.
 pub fn erased_ev_ty() -> Ty = TyVar("ev", 0)
 
+## The type of a handler-local cell (docs/handler-state-design.md): the one
+## mutable slot, made where a handler is installed and reached only by the
+## four `cell_*` primitives lowering emits. Erased for the same reason the
+## evidence slot above is -- both backends already read a `TyVar` as the
+## erased pointer shape (`Ljava/lang/Object;` here, `void*` there, counted by
+## rc either way), and a cell is only ever forwarded.
+##
+## A name of its own rather than `erased_ev_ty()`, though the two are the same
+## representation. The guards that keep a cell inside its installation are
+## nominal, and an erased slot is what they are blind to; sharing a type with
+## evidence would make a captured cell and a captured evidence slot the same
+## entry in a capture table, which is the one place the difference has to be
+## legible. Id 0 for the reason `TyVar("ev", 0)` and `TyVar("D", 0)` use it: it
+## is never minted for a real type parameter.
+pub fn erased_cell_ty() -> Ty = TyVar("cell", 0)
+
 ## `reduce_eff_via_bindings` pushed through a type: every function type's row
 ## in `t` is rewritten, because a projection is licensed in parameter and
 ## return positions too (D6) and `ty_map_children` deliberately lets effects
@@ -3259,11 +3275,21 @@ pub fn internal_builtins() -> Set[String] = {
 ## in-place reuse down the whole trie descent. A function rather than an
 ## `Intr` field: the rc pass asks at every intrinsic node, and this answer
 ## must not cost a table.
+##
+## The two cell writers are here for a plainer reason than uniqueness: the
+## slot keeps what it is given, so the value has to arrive owned or the cell
+## would hold a reference nobody counted. `cell_get` and `cell_take` take
+## only the cell, and they borrow it -- the installation owns the cell for as
+## long as the handler is installed, which is longer than either call.
 pub fn intr_owned_args(name: String) -> List[Int] =
   if name == "array_with" {
     [0, 2]
   } else if name == "list_push" {
     [0]
+  } else if name == "cell_new" {
+    [0]
+  } else if name == "cell_set" {
+    [1]
   } else {
     []
   }

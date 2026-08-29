@@ -1483,6 +1483,68 @@ void *dawn_ev_append(void *front, void *back) {
   return head;
 }
 
+/* ---- handler-local cells ------------------------------------------------
+ *
+ * The one mutable slot in the language, and the header says why it is not a
+ * hole in the cycle argument. Four functions, each of them the shortest thing
+ * that can be written, because the whole content here is the counting: a
+ * missed drop leaks the superseded value and a missed transfer double-frees
+ * the current one, and neither shows up as a wrong answer.
+ *
+ * `dawn_adt` with one boxed field, so `dawn_dup` and `dawn_drop` already
+ * cover a cell -- see the note at the declarations. */
+
+/* OWNERSHIP. `x` is OWNED: the slot keeps the reference the caller hands
+ * over, so nothing is dup'd here. The RESULT IS OWNED, by whoever installed
+ * the handler -- it is a fresh allocation, and the emitter does not dup it. */
+void *dawn_cell_new(void *x) {
+  dawn_adt *c = dawn_adt_new(DAWN_TAG_CELL, DAWN_CELL_FIELDS, DAWN_CELL_MASK);
+  c->fields[0].p = x;
+  return c;
+}
+
+/* OWNERSHIP. `c` is BORROWED and the result is BORROWED out of the slot,
+ * exactly like an ADT field read: the slot keeps its reference. The emitter
+ * dups, because a Core expression hands back an owned value and `rc.dawn`
+ * wraps no intrinsic result -- the same split `dawn_ev_get` has against
+ * `dawn_ev_append` above. */
+void *dawn_cell_get(void *c) {
+  return ((dawn_adt *)c)->fields[0].p;
+}
+
+/* OWNERSHIP. `c` is BORROWED, `x` is OWNED. The reference the slot held is
+ * released here, and this is the only overwrite in the runtime: everywhere
+ * else a value is built once and never superseded, so there is nowhere else a
+ * release could be forgotten.
+ *
+ * The store happens before the release, which costs nothing and removes the
+ * question of what happens when `x` is the value already in the slot. Under
+ * the contract that case is safe either way -- the caller's owned reference is
+ * a second count -- but the order that needs no argument is the better one to
+ * write down. `dawn_drop(NULL)` returns immediately, so an emptied slot (see
+ * `dawn_cell_take`) is not a special case. */
+void dawn_cell_set(void *c, void *x) {
+  dawn_adt *cell = (dawn_adt *)c;
+  void *old = cell->fields[0].p;
+  cell->fields[0].p = x;
+  dawn_drop(old);
+}
+
+/* OWNERSHIP. `c` is BORROWED, the RESULT IS OWNED: the slot's own reference
+ * is transferred out and the slot left NULL, so the emitter does not dup and
+ * the caller owes the store the header describes.
+ *
+ * Not `dawn_cell_get` plus a dup, and the difference is the point. A dup pins
+ * a second count on the value for as long as the slot still names it, so an
+ * accumulator read out of a cell is never unique and every container
+ * operation on it copies instead of reusing in place. */
+void *dawn_cell_take(void *c) {
+  dawn_adt *cell = (dawn_adt *)c;
+  void *x = cell->fields[0].p;
+  cell->fields[0].p = NULL;
+  return x;
+}
+
 /* ---- failures, and the two barriers that stop them ----------------------
  *
  * A failure has a kind, and the kind decides which barrier stops it:

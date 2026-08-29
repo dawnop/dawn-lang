@@ -25,9 +25,16 @@ typedef unsigned char dawn_unit;
  * reference, so a slot's `void*` may be a box, an adt or a closure, and
  * nothing in the static type of an erased position says which.
  *
- * Counts are non-atomic. Dawn is strict, immutable and has no mutable
- * aliasing, so a cycle cannot be constructed and plain RC is complete --
- * that, and single-threaded programs, is what buys both simplifications. */
+ * Counts are non-atomic, and plain RC is complete because a cycle cannot be
+ * constructed. Immutability used to be the whole of that argument. The cells
+ * at the bottom of this file weaken it: a cell's slot can be overwritten, and
+ * a cell reachable from its own slot would be a cycle nothing here can free.
+ * The conclusion still holds, on a narrower footing -- a cell is a
+ * compiler-private primitive. It has no Dawn spelling, it appears in no
+ * user-visible type, and the checker keeps it inside the handler installation
+ * that made it (docs/handler-state-design.md). So no value a program can
+ * build ever holds a cell, and a slot only ever holds a value. Single-threaded
+ * programs are what buys the non-atomic half. */
 typedef struct {
   int32_t rc;
   int32_t kind;
@@ -920,6 +927,37 @@ void *dawn_ev_get(void *pack, int64_t key);
  * the counting rule is worth stating twice -- both arguments are borrowed and
  * the RESULT IS OWNED. The emitter does not dup it. */
 void *dawn_ev_append(void *front, void *back);
+
+/* ---- handler-local cells (docs/handler-state-design.md) -----------------
+ *
+ * One mutable slot, made where a handler is installed and read and written by
+ * the shells the compiler wraps around that handler's arms. The four
+ * `cell_*` intrinsics are the only things that reach it; no Dawn name spells
+ * them and no user-visible type mentions a cell, which is what the note on
+ * cycles at the top of this file leans on.
+ *
+ * The representation is a `dawn_adt` with one boxed field, not a kind of its
+ * own, and the whole reason is that `dawn_dup` and `dawn_drop` then need no
+ * new arm: their `DAWN_K_ADT` case walks `nfields` against `ptrmask`, and the
+ * two constants below are exactly what that case reads. A new kind would have
+ * been a second place to keep the release walk correct.
+ *
+ * Ownership is stated per function at the definitions in dawn_rt.c. In brief:
+ * `new` and `set` take the value OWNED, `get` hands back a BORROWED reference
+ * the emitter dups, `take` transfers the slot's own reference out and leaves
+ * the slot empty. */
+#define DAWN_TAG_CELL 0 /* one constructor, so index 0 -- emitc pins it */
+#define DAWN_CELL_FIELDS 1
+#define DAWN_CELL_MASK 1 /* the one field holds a reference */
+void *dawn_cell_new(void *x);
+void *dawn_cell_get(void *c);
+void dawn_cell_set(void *c, void *x);
+/* Empties the slot, so the caller MUST store into it -- or drop the cell --
+ * before anything reads it again. `dawn_array_steal` carries the same
+ * obligation for the same reason: a plain get would pin a second count on the
+ * value for as long as the slot holds it, and that forecloses the in-place
+ * reuse a collecting handler is written to get. */
+void *dawn_cell_take(void *c);
 
 /* Control. The two failure kinds, and the difference is which barrier stops
  * one: `catch_fault` takes a fault (the outside world said no) and lets a panic

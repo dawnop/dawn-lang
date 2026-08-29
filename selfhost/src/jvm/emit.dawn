@@ -79,7 +79,8 @@ use java "org.objectweb.asm.Label"
 use java "java.lang.System"
 use jvm/ops.{
   ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
-  COMPUTE_FRAMES, OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
+  COMPUTE_FRAMES, OP_AALOAD, OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY,
+  OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
   OP_ATHROW, OP_BASTORE, OP_CASTORE, OP_CHECKCAST, OP_D2F, OP_D2L, OP_DADD, OP_DASTORE, OP_DDIV,
   OP_DLOAD, OP_DMUL, OP_DNEG, OP_DREM, OP_DRETURN, OP_DSUB, OP_DUP, OP_DUP_X1, OP_F2D, OP_FASTORE, OP_FLOAD,
   OP_FRETURN, OP_GETFIELD, OP_GETSTATIC, OP_GOTO, OP_I2L, OP_IADD, OP_IASTORE,
@@ -2773,6 +2774,18 @@ fn ev_field(g: Gen, cls: String, slot: Int, field: String, desc: String) -> Unit
   g.mv.visitFieldInsn(OP_GETFIELD, cls, field, desc)
 }
 
+## A handler-local cell, on this machine: a one-slot `Object[]`
+## (docs/handler-state-design.md). No class of its own, because a cell needs
+## exactly what an array of one already is -- a reference to a mutable slot --
+## and a class would have to be emitted into every program that installs a
+## handler, `ACC_FINAL` fields and all.
+##
+## The descriptor rather than the internal name, because all four arms below
+## reach it through a `CHECKCAST`: Core's type for a cell is erased
+## (`types.erased_cell_ty`), so what the operand stack holds is an `Object`
+## and an array instruction on one is a `VerifyError` at class load.
+fn cell_desc() -> String = "[L" ++ obj() ++ ";"
+
 ## Core intrinsics. The names are Core's own vocabulary, which is why some
 ## do not match any TAST builtin: lowering invented `str_of_int`,
 ## `list_index` and friends when it destroyed interpolation and indexing.
@@ -2928,6 +2941,81 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     g1.mv.visitJumpInsn(OP_GOTO, up)
     g1.mv.visitLabel(up_end)
     g1.mv.visitVarInsn(OP_ALOAD, acc_slot)
+    return (g1, true)
+  }
+  if name == "cell_new" {
+    # The slot a handler installation makes. The initial value is already at
+    # the erased type when it gets here -- lowering boxes on the way into a
+    # type-variable slot -- so it is a reference and `AASTORE` takes it as it
+    # stands.
+    #
+    # Through a local rather than `DUP_X1`/`SWAP`: the value is on the stack
+    # before the array exists, and stashing it is one instruction more than
+    # the stack dance and reads as what it is.
+    var g1 = gen_cargs(gx, g, args)
+    let (ga, init_slot) = alloc(g1, 1)
+    g1 = ga
+    g1.mv.visitVarInsn(OP_ASTORE, init_slot)
+    g1.mv.visitInsn(OP_ICONST_1)
+    g1.mv.visitTypeInsn(OP_ANEWARRAY, obj())
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitInsn(OP_ICONST_0)
+    g1.mv.visitVarInsn(OP_ALOAD, init_slot)
+    g1.mv.visitInsn(OP_AASTORE)
+    return (g1, true)
+  }
+  if name == "cell_get" {
+    # One read. Nothing else: the JVM has a collector, so what native spends
+    # on counting here (`dawn_cell_get` hands back a borrow and emitc dups it)
+    # has no counterpart.
+    var g1 = gen_cargs(gx, g, args)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, cell_desc())
+    g1.mv.visitInsn(OP_ICONST_0)
+    g1.mv.visitInsn(OP_AALOAD)
+    return (g1, true)
+  }
+  if name == "cell_set" {
+    # One write, and the superseded value is the collector's problem -- the
+    # release `dawn_cell_set` has to write is the whole of the difference
+    # between the two backends here.
+    #
+    # `Unit` is a value in Core, so the arm leaves one: an intrinsic that
+    # falls through owes the stack what its type says.
+    var g1 = gen_cargs(gx, g, args)
+    let (ga, val_slot) = alloc(g1, 1)
+    g1 = ga
+    g1.mv.visitVarInsn(OP_ASTORE, val_slot)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, cell_desc())
+    g1.mv.visitInsn(OP_ICONST_0)
+    g1.mv.visitVarInsn(OP_ALOAD, val_slot)
+    g1.mv.visitInsn(OP_AASTORE)
+    push_unit(g1.mv)
+    return (g1, true)
+  }
+  if name == "cell_take" {
+    # A read that empties the slot. The clearing store is what native needs --
+    # `dawn_cell_take` transfers the slot's own reference out, and a slot left
+    # naming a value it no longer owns would be freed twice -- and a collector
+    # needs no such thing, so this could have been `cell_get` here.
+    #
+    # It is not, for two reasons. The caller's obligation (store into the slot
+    # before anything reads it again) is then enforced identically on both
+    # backends, so a violation is a difference the native differential can
+    # see rather than one backend's undefined behaviour; and a slot that keeps
+    # naming a value nobody will read again pins it for the collector, which
+    # is this machine's version of the count the native transfer gives up.
+    var g1 = gen_cargs(gx, g, args)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, cell_desc())
+    let (ga, cell_slot) = alloc(g1, 1)
+    g1 = ga
+    g1.mv.visitVarInsn(OP_ASTORE, cell_slot)
+    g1.mv.visitVarInsn(OP_ALOAD, cell_slot)
+    g1.mv.visitInsn(OP_ICONST_0)
+    g1.mv.visitInsn(OP_AALOAD)
+    g1.mv.visitVarInsn(OP_ALOAD, cell_slot)
+    g1.mv.visitInsn(OP_ICONST_0)
+    g1.mv.visitInsn(OP_ACONST_NULL)
+    g1.mv.visitInsn(OP_AASTORE)
     return (g1, true)
   }
   if name == "java_eq" {

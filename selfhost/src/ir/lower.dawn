@@ -990,6 +990,20 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ##                       other there -- and separate from `ev_get` so that the
 ##                       cost of a merge lands where the merge is written and
 ##                       never on a read
+##   cell_new cell_get cell_set cell_take
+##                       the handler-local slot and the three ways to touch it
+##                       (docs/handler-state-design.md). Primitives because a
+##                       slot that can be overwritten is the one thing Core
+##                       cannot say: every Core node builds a value and none
+##                       supersedes one, so an assignment has nothing to lower
+##                       into. `cell_take` is separate from `cell_get` for the
+##                       reason `ev_append` is separate from `ev_get` -- it
+##                       costs something a read must not pay. It empties the
+##                       slot and hands the reference over, where a read has to
+##                       leave the slot's reference in place and so pins a
+##                       second count on the value; an accumulator read that
+##                       way is never unique, and a container built in a
+##                       handler would copy on every step instead of reusing
 ##
 ## Not an ADT, though the comment this replaces proposed one. Measured before
 ## deciding: `CIntrinsic` carries a `String` because it also carries the 89
@@ -1003,7 +1017,8 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 pub fn internal_intrinsics() -> List[String] = [
   "cmp", "hash", "java_eq", "java_hash", "show", "quote",
   "str_of_int", "str_of_bool", "str_of_bytes",
-  "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append"
+  "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append",
+  "cell_new", "cell_get", "cell_set", "cell_take"
 ]
 
 # ---- who implements a primitive ----
@@ -1057,6 +1072,11 @@ pub fn inline_intrinsics() -> List[String] = [
   # A loop with a shape test in it, so each is a call on native and emitted
   # for the JVM, and neither is a thing Core could have said for both
   "ev_get", "ev_append",
+  # the handler-local slot. No runtime module owns it because the two
+  # representations have nothing in common: a one-slot `Object[]` on the JVM,
+  # where the collector handles the superseded value, and a counted one-field
+  # ADT on native, where `cell_set` has to release it
+  "cell_new", "cell_get", "cell_set", "cell_take",
   # neither of these returns, so both are instructions rather than a call
   "panic", "todo",
   # one instruction each: the JVM's L2D and D2L, and native's saturating
@@ -1164,12 +1184,12 @@ test "every intrinsic is owned by a runtime module, written inline, or removed b
   # 3. the sizes the comments above quote. A count written in prose is what
   #    went wrong in `internal_intrinsics`, whose comment gave two different
   #    answers for the same list in the same paragraph.
-  assert len(inline) == 32
+  assert len(inline) == 36
   assert len(host) == 2
   assert len(gone) == 21
-  # and the four groups account for all 110 names, with none left over
+  # and the four groups account for all 114 names, with none left over
   assert len(map.keys(it)) == 95
-  assert len(internal) == 15
+  assert len(internal) == 19
 }
 
 # ---- trait witnesses ----
