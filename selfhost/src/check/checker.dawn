@@ -4894,11 +4894,26 @@ fn cell_hid(sym: Sym) -> Option[Int] =
 ## **A handler state cell is the one kind of name that crosses a closure it is
 ## licensed for and no other** (`Sym.cell_of`, docs/handler-state-design.md).
 ## It is captured by value like any `let` -- what travels is the slot, and
-## writing through a slot is not writing a captured variable -- but only into
-## the arms and the remainder of the installation that declared it, which are
-## the frames carrying that installation's id. Every crossed frame is asked
-## separately, so a cell reaching its own arm from inside somebody else's
-## closure is refused at that closure.
+## writing through a slot is not writing a captured variable -- and two kinds
+## of frame let it through, both of them closures the author never spelled:
+##
+## - a frame of **its own** installation, arm or remainder alike: the frame
+##   carries that installation's id.
+## - the **remainder** of *any* installation. Such a closure is synthesized by
+##   the parser, called once and in place by the `with handle` node that owns
+##   it, and never handed to anybody; lexically it is nothing but the rest of
+##   the block it was cut out of. A second `with handle` in the same block
+##   would otherwise hide the first one's cells from the statements below it,
+##   which is a narrower rule than the one the design settled on
+##   (docs/handler-state-design.md §8 problem two).
+##
+## An **arm** of another installation stays refused, and that is not symmetry
+## for its own sake: between a `cell_take` and the `cell_set` that ends the
+## assignment the slot is empty (`cell_take_ok`), and somebody else's arm can
+## run inside that window and read the same cell out of it.
+##
+## Every crossed frame is asked separately, so a cell reaching its own arm from
+## inside somebody else's lambda is still refused at that lambda.
 ##
 ## This arm is placed **first**, ahead of the two refusals, and the two are
 ## therefore unreachable for a cell. That is deliberate and it is the whole of
@@ -4906,10 +4921,13 @@ fn cell_hid(sym: Sym) -> Option[Int] =
 ## refuses to be assigned across a closure, word for word, and the only way to
 ## keep that true was to make the cell case not consult either rule.
 ##
-## `lc.sugar` is *not* the licence, though every licensed frame happens to be
-## sugar. The remainder of a `with x <- f()` is sugar too, and it is passed to
-## a user function that may keep it; a cell reachable from there would outlive
-## the handler that owns it.
+## `lc.sugar` is *not* the licence, and it cannot stand in for one: the
+## remainder of a `with x <- f()` is spelled with the same flag as the
+## remainder of a `with handle`, and that one is passed to a *user* function
+## that may keep it, so a cell reachable from there would outlive the handler
+## that owns it. `handler_of` is what tells the two apart -- it is `None` on
+## the sugar remainder and `Some` on the handler's -- and `arm` is what splits
+## a handler's own two frames.
 pub fn resolve_local(
   cx: Cx,
   name: String,
@@ -4928,11 +4946,12 @@ pub fn resolve_local(
           if i < lc.boundary {
             if cell_hid(sym) != None {
               # a state cell: captured like an ordinary `let` into the closures
-              # of its own installation, refused everywhere else. The licence is
-              # checked one frame at a time, so a cell that reaches its own arm
-              # through somebody else's closure is refused at that frame -- see
-              # the note above.
-              if lc.handler_of == cell_hid(sym) {
+              # of its own installation and through any handler's block
+              # remainder, refused everywhere else. The licence is checked one
+              # frame at a time, so a cell that reaches its own arm through
+              # somebody else's lambda is refused at that frame -- see the note
+              # above.
+              if lc.handler_of == cell_hid(sym) || (lc.handler_of != None && not lc.arm) {
                 stack = stack ++ [capture_into(lc, id)]
               } else {
                 let (msg, hint) = capture_cell_msg(lc, name)

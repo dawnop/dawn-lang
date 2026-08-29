@@ -103,12 +103,14 @@ fn relay() -> List[Int] !Emit = {
   seen
 }
 
-# `relay` installs the second handler rather than this block, because a cell is
-# licensed frame by frame and the remainder of a nested `with handle` is a
-# frame of that handler's, not of this one's: `outer` is not readable after a
-# second installation in the same block. Calling out to a function that
-# installs its own handler is the phrasing that keeps both cells reachable
-# where each is read.
+# `relay` installs the second handler rather than this block. That was forced
+# when this line was written: a cell is licensed frame by frame, and a nested
+# `with handle`'s remainder used to be a frame only its own installation was
+# licensed for, so `outer` was unreadable after a second installation in the
+# same block. The licence now lets a cell through any handler's remainder
+# (docs/handler-state-design.md §7.4), so the inline phrasing would check too;
+# this line keeps the call-out because the two cells living in two *functions*
+# is the harder arrangement, and because the transcript is what it pins.
 fn arm_raises() -> List[Int] = {
   with handle Emit {
     var outer: List[Int] = []

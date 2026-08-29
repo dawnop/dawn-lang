@@ -83,3 +83,46 @@ pub fn escaping_let() -> fn() -> Int = {
   let captured = get() * 10
   () => captured
 }
+
+# **the nested-remainder anchor.** A second `with handle` in the same block
+# packs every statement after it into a remainder closure of its own, so the
+# read below crosses a frame carrying the *inner* installation's id. It is
+# still legal: that closure is synthesized, called once and in place by the
+# `with handle` node above it, and handed to nobody, so lexically it is the
+# outer block's remainder and the outer cell is reachable from it
+# (docs/handler-state-design.md §8 problem two). Its refused twin is
+# `other_arm` in handler_cells_escape.dawn -- an *arm* of the inner
+# installation, which can run inside the window a `cell_take` opens.
+pub fn nested_rest_read() -> Int = {
+  with handle Ask {
+    var outer: Int = 0
+    get() => outer
+  }
+  with handle Ask {
+    get() => 1
+  }
+  outer
+}
+
+# the same crossing for a **write**, and with a cell of the inner installation
+# alongside it. This is the P6 shape of docs/handler-state-design.md §7.3
+# written inline -- the outer accumulator reaches 1, swallows the inner's 78,
+# then takes a 2 -- instead of calling out to a function that installs the
+# second handler, which is the phrasing the shape needed before this widening.
+pub fn nested_rest_assign() -> Int = {
+  with handle Emit {
+    var outer: Int = 0
+    emit(n) => { outer = outer * 10 + n }
+  }
+  emit(1)
+  with handle Ask {
+    var inner: Int = 0
+    get() => inner
+  }
+  # a write to the inner installation's cell from its own remainder, then a
+  # write to the *outer* one from that same remainder, then a read of it
+  inner = 78
+  outer = outer * 10 + get()
+  emit(2)
+  outer
+}
