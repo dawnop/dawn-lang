@@ -1,0 +1,154 @@
+# A handler's state cells (docs/handler-state-design.md), end to end on both
+# backends: the `var` written inside `with handle`, the arms that write it, the
+# block remainder that reads it, and the three C primitives underneath
+# (`dawn_cell_new` / `_get` / `_set` / `_take` in runtime/c/dawn_rt.c).
+#
+# Five lines, each installing a handler of its own and each marked with a prime
+# of its own, so a value that leaked from one line into another is visible in
+# the transcript rather than merely possible. Every line **reads** its cell:
+# an installation that is only written to stays green with a cell that does not
+# work at all, which is why §7.4 asks for the read.
+#
+#   collect (3)      three writes then one read: the shape both clients of
+#                    this feature wanted, and the floor for the rest.
+#   nested (7, 11)   two installations at once. The inner one collects into a
+#                    cell of its own and hands back a number; the outer one
+#                    swallows that number and none of the inner's parts (§7.3).
+#   arm_raises (13)  an arm raising the effect it answers reaches the *outer*
+#                    handler, not itself (§6.2), so two live cells stay apart
+#                    while one arm runs inside the other's.
+#   early_exit (17)  `?` in the block remainder leaves without running the rest
+#                    of it: the state is dropped, the local state
+#                    interpretation (§8 problem three, §10.8). Both the Some
+#                    path and the None path are printed.
+#   long_tail (19)   an accumulator grown past std/pvec's 32-slot tail, where
+#                    the `cell_take` rewrite (§7.8) has to keep the vector
+#                    uniquely owned after it stops being a tail.
+use std/io
+
+effect Emit {
+  fn emit(n: Int) -> Unit
+}
+
+fn total(xs: List[Int]) -> Int = {
+  var s = 0
+  for x in xs { s = s + x }
+  s
+}
+
+# --- collect: three writes, one read ---------------------------------------
+
+fn triple() -> Unit !Emit = {
+  emit(3)
+  emit(6)
+  emit(9)
+}
+
+fn collect() -> List[Int] = {
+  with handle Emit {
+    var acc: List[Int] = []
+    emit(n) => { acc = acc ++ [n] }
+  }
+  triple()
+  acc
+}
+
+# --- nested: the outer swallows the inner's product, not its parts ----------
+
+fn inner_sum() -> Int = {
+  with handle Emit {
+    var kids: List[Int] = []
+    emit(n) => { kids = kids ++ [n] }
+  }
+  emit(11)
+  emit(22)
+  total(kids)
+}
+
+fn nested() -> List[Int] = {
+  with handle Emit {
+    var acc: List[Int] = []
+    emit(n) => { acc = acc ++ [n] }
+  }
+  emit(7)
+  # `inner_sum` installs and discharges its own Emit, so this argument is pure
+  # and 11 and 22 never reach `acc`
+  emit(inner_sum())
+  emit(14)
+  acc
+}
+
+# --- arm_raises: an arm does not answer itself ------------------------------
+
+# an arm records what it was handed and re-raises. The re-raise is answered
+# where *this* installation was installed, not by this installation, so it runs
+# a second arm holding a second cell -- and it runs it after the assignment on
+# the line above has already refilled this cell's slot.
+fn relay() -> List[Int] !Emit = {
+  with handle Emit {
+    var seen: List[Int] = []
+    emit(n) => {
+      seen = seen ++ [n]
+      emit(n * 13)
+    }
+  }
+  emit(13)
+  emit(26)
+  seen
+}
+
+# `relay` installs the second handler rather than this block, because a cell is
+# licensed frame by frame and the remainder of a nested `with handle` is a
+# frame of that handler's, not of this one's: `outer` is not readable after a
+# second installation in the same block. Calling out to a function that
+# installs its own handler is the phrasing that keeps both cells reachable
+# where each is read.
+fn arm_raises() -> List[Int] = {
+  with handle Emit {
+    var outer: List[Int] = []
+    emit(n) => { outer = outer ++ [n] }
+  }
+  let seen = relay()
+  seen ++ outer
+}
+
+# --- early_exit: `?` drops the state ----------------------------------------
+
+fn positive(n: Int) -> Option[Int] = if n > 0 { Some(n) } else { None }
+
+fn early_exit(limit: Int) -> Option[List[Int]] !io = {
+  with handle Emit {
+    var acc: List[Int] = []
+    emit(n) => { acc = acc ++ [n] }
+  }
+  emit(17)
+  emit(34)
+  # printed before the `?` so the transcript shows *what* was thrown away on
+  # the None path, not merely that something was
+  io.println("  before ?: ${acc}")
+  let n = positive(limit)?
+  emit(n)
+  Some(acc)
+}
+
+# --- long_tail: past the pvec tail ------------------------------------------
+
+fn long_tail() -> List[Int] = {
+  with handle Emit {
+    var acc: List[Int] = []
+    emit(n) => { acc = acc ++ [n] }
+  }
+  for i in 0..40 { emit(i * 19) }
+  acc
+}
+
+pub fn main() -> Unit !io = {
+  io.println("collect ${collect()}")
+  io.println("nested ${nested()}")
+  io.println("arm_raises ${arm_raises()}")
+  io.println("early_exit ${early_exit(51)}")
+  io.println("early_exit ${early_exit(0)}")
+  let tail = long_tail()
+  io.println("long_tail ${len(tail)} ${get(tail, 0)} ${get(tail, 31)} " ++
+      "${get(tail, 32)} ${get(tail, 39)} ${total(tail)}")
+}
