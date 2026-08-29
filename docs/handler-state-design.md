@@ -5,7 +5,8 @@
 > 同日五条待裁全部裁完，本文自此是这个项目的权威说明。
 > **裁的是候选二（handler 域 `var`）加一条强制逃逸禁令**，候选一关档；
 > 逐条裁决与理由在 §8，支撑它的三路跨语言勘察在 §10。
-> 尚未实现。两半实施勘察同日回来：拼写终裁落定（§8 问题二）、三处旧勘察被实测推翻
+> **语言侧 2026-08-29 落地，看护件 2026-08-30 落地**，落地记录挂在 §7.3、§7.4、§7.8
+> 三节的末尾。两半实施勘察同日回来：拼写终裁落定（§8 问题二）、三处旧勘察被实测推翻
 > （§2.1、§4.3、§4.5 各带一条补注）、动刀前那条 evidence 逃逸疑点已结案
 > （§7.6：没有第二出口，前置条件解除）。落刀前只剩 §7.7 一条三选一的取舍。
 > 勘察基线 `main = ae3cd59`，文中 file:line 均对该提交，编译器为 v0.69.0。
@@ -585,6 +586,12 @@ panic，程序打印 panic 串并以 1 退出，`catch_fault` 的 `Err` 分支�
 
 三条都不依赖 DOM，可以在纯 `tea_core` 的值上判，所以这条腿不必进 wasm 那条慢道。
 
+**落地记录（2026-08-30）：这条腿仍然欠着，但第一个判词已有语言侧的家。**
+`scripts/spike-native/effect_handler_state.dawn` 的 `nested` 一线就是「嵌套容器各收各的」
+在纯语言层的形状：内层安装自攒自的、只把一个数交回外层，外层吞下那个数而吞不到内层的零件。
+另外两个判词（emit 顺序即子节点顺序、条件臂为假不发射）是 DSL 那一侧的，本档没有替身，
+路线一施工时照原样加。
+
 ### 7.4 effect-evidence-contract 登记
 
 `scripts/effect-evidence-contract/roster.txt` 是双向棘轮：列了却不在的会红，
@@ -595,6 +602,19 @@ panic，程序打印 panic 串并以 1 退出，`catch_fault` 的 `Err` 分支�
 语料本身照该目录的纪律写：每条线自己装 handler、各用互不相同的质数当标记，
 每个 case 都要**读过格子**才算数（只安装不读，格子坏了也是绿的）。至少四条：
 攒三次读一次、嵌套两层、臂发同名效果落到外层、`?` 从剩余里逃逸后的状态口径（§3.5）。
+
+**落地记录（2026-08-30）：已登记，五条线而不是四条。**
+语料是 `scripts/spike-native/effect_handler_state.dawn`，roster 里走 `transcript` 车道，
+「What each entry owns」清单里有对应段落。第五条线（累加器长到越过 pvec 尾部并进入 trie
+第二层）是 §7.8 那条 take 改写唯一能被量出来的地方，理由写在 §7.8 的落地记录里。
+
+`arm_raises` 那条线的写法与原计划有一处出入，值得记下来，因为它是实测才知道的：
+**外层格子在同一个块里再装一次 handler 之后就读不到了**。格子的许可是逐帧判的
+（`resolve_local`），而嵌套 `with handle` 的块剩余是那一次安装的帧，不是外层那次的，
+于是块尾读外层格子会撞上「cannot cross the closure `with` introduced」。
+比 §8 问题二那句「只有这次安装的臂与块剩余能读写它」窄一档。语料改成让被调函数自己装第二个
+handler，两个格子各自在自己的剩余里被读，形状不变而两条许可都成立。
+这一档是紧是宽本档不裁，只把它记在这里。
 
 ### 7.5 门禁清单
 
@@ -738,6 +758,34 @@ so」。证据不可拼写，于是**没有任何 Dawn 程序能构造出那个�
 计数走 AST（`cell_occurrences`，对 `ast.Expr` **穷尽 match、无通配臂**）：漏数一种表达式
 形态就是把两次读当成一次，而多数一次只赔掉复用。被遮蔽的同名 `let` 也算一次出现，
 同样是往安全那边偏。
+
+**落地记录（2026-08-30）：复用是量出来的，不是论出来的。**
+`scripts/effect-evidence-contract/README.md` 的 mutant N 把 `cell_take_ok` 改成恒假
+（每次读都降成 `cell_get`），重建之后全树没有一处变红，因为丢掉一次 take 不是错答案。
+只有 `DAWN_RC_STATS=1` 说得出话：同一份语料，干净的一遍是 `array_with in-place 29,
+copied 0`，变异之后是 `in-place 0, copied 29`，两万元素那一档是 573/0 对 0/573。
+100% 就地复用塌到 0%，与本节开头那句预测逐字相符。
+
+代价是语料长度：一千元素以下 pvec 一个 trie 节点都不会被改写，两个计数器都是零，
+丢了 take 和留着 take 长得一模一样。`long_tail` 因此是两千元素而不是四十。
+
+同一份 README 的 mutant M 钉的是另一半：C 后端 `cell_get` 那一臂的 `dup_expr` 包裹删掉，
+借来的引用被当成拥有的交出去，spike-native 的 asan 腿立刻报 heap-use-after-free。
+两条都是手打、实测、恢复的文档化变异体，理由是它们都在编译器侧，自动化一条要重建一次
+`bin/dawn`。
+
+RC 那三句所有权话另有一条自动化看护：`scripts/rc-contract` 加了三条断言
+（`cell_set_releases_the_old_value` / `cell_take_empties_and_transfers` /
+`cell_get_does_not_transfer`），外加 production mutant `cell-set-forgets-the-old-value`，
+它把 `dawn_cell_set` 里的 `dawn_drop(old)` 删掉。红集只有一条，就是它 own 的那条；
+另外两条在 `matrix.txt` 里被登记成 `control`，即「这个 mutant 只是丢了一次释放，
+不是把原语改坏了」。
+
+**CI 墙钟账。** rc-contract 那一步本地从 8.7s 到 9.1s，加倍进位后 `contracts` job 的
+计划值 440s 变 441s，3 倍刚好越过 22 分钟，故 `timeout-minutes` 22 改 23，离 660s 的
+run-pole 还很远，整轮墙钟不动。spike-native 全量本地 230.75s 变 231.54s（四路并行，
+一条 6s 的语料被调度空隙吃掉了），557s 那条 runner 观测值没被推动，budget 不重述。
+effect-evidence 在 `test` job 里从 23.8s 到 25.3s，同一个 job 的预算里毫发无损。
 
 ## 8. 裁决
 
