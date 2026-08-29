@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 7397d73e680517a1 -->
+<!-- doc-check: translation-of docs/spec.md @ 2019f7502ad9590d -->
 
 # Dawn Language Specification
 
@@ -2015,13 +2015,35 @@ of its discipline — legal only inside a block, the rest is a real closure, `re
   the effect are all compile errors.
 - One `handle`, one effect; handling the same effect again is inner shadowing outer, which is legal.
 - Handling an effect the block never actually performs is allowed (harmless dead evidence).
+- **Handler-local state (cells)**: the head of the arm table may declare any number of `var`s, each
+  one slot of mutable state private to **this installation**. A cell is reachable from **the arms of
+  this installation** and from **the rest of the block after the `with handle`**: an arm reads and
+  writes it, the rest of the block reads it. That is the one and only surface by which a stateful
+  handler hands what it accumulated back to the installation point; there is no second route such as
+  a `return` arm. Three attendant rules: cells **must all come before the arms** (interleaving them
+  with arms is a compile error with a diagnostic of its own, so that no reader has to guess whether
+  declaration order means anything); **the type annotation is mandatory** (there is no context to
+  infer from inside the arm table's braces); and what is declared here is a **position**, not a new
+  spelling (`var` and assignment are the same two constructs as in §4.1, and a cell merely adds one
+  more legal place to declare one). A cell itself has no spellable type; a user cannot write one down.
+
+  ```dawn
+  with handle Emit {
+    var acc: List[Int] = []        # the cell: annotated, and ahead of every arm
+    emit(n) => { acc = acc ++ [n] }
+  }
+  body()
+  acc                              # the rest of the block reads it: this is the hand-back surface
+  ```
 - **A `var` declared before the installation point is out of reach after it** (this is §4.10's
   capture-by-value discipline showing up here): every `var` declared **before** the installation
   point can be neither assigned nor read in the rest of the block after the `with handle`; a `var`
   declared **after** the installation point is entirely normal. The diagnostic names the closure
   `with` introduced and offers two ways out: bind a snapshot with `let` first, or pass it in as a
-  parameter. An arm is a closure too, and likewise refuses to capture an outer `var` or to assign
-  inside the arm.
+  parameter. An arm is a closure too, and likewise refuses to capture an ordinary outer `var` or to
+  assign to one. **The one exception is this installation's own cells**: the `var`s declared by the
+  item above are readable and writable from the arms, because they are not outer bindings captured
+  into the arm but this installation's own state.
 
   ```dawn
   var n = 1
@@ -2041,6 +2063,43 @@ of its discipline — legal only inside a block, the rest is a real closure, `re
   is performed.
   **"A row losing a member" happens at `with handle` and nowhere else**, and it does not enter
   unification.
+- **`?` leaves early and the state is discarded**: `?` still passes through a `with handle`
+  transparently (§4.10), cells or no cells. On an early exit the state is discarded and the cells are
+  destroyed along with the handler frame; the line in the rest of the block that reads a cell is one
+  that was never going to run anyway, so there is no hand-back surface that looks certain to run and
+  quietly does not. This reading is not an invention of this language: it is the literature's
+  **local state interpretation** (Wu / Schrijvers / Hinze, *Effect Handlers in Scope*, Haskell 2014),
+  the standard answer for a state handler installed inside the error boundary.
+
+```dawn run
+use std/io
+
+effect Emit {
+  fn emit(n: Int) -> Unit
+}
+
+fn body() -> Unit !Emit = {
+  emit(1)
+  emit(2)
+}
+
+pub fn main() -> Unit !io = {
+  with handle Emit {
+    var acc: List[Int] = []
+    emit(n) => { acc = acc ++ [n] }
+  }
+  body()
+  io.println("${acc}")
+}
+```
+
+```output
+[1, 2]
+```
+
+That is the shape cells exist for: the `emit`s scattered through `body()` accumulate into `acc` in
+the order they were performed, while `body`'s signature says only that it performs `!Emit` and says
+nothing about where the values end up.
 
 #### Lexical scope and the supply point
 
@@ -2053,9 +2112,27 @@ its creation point. Consequences:
   its row still holds `!E`, and the handler in scope at the call answers it, or the error is
   reported there. The type states "who has to supply the handler", and has nothing to do with what
   the arms do; a handler with pure arms yields an escaping closure that is `!E` too.
+- **A cell does not escape its lexical region.** A state cell is reachable only from the arms and
+  the block remainder of this installation, and being captured by any closure that does **not**
+  belong to this installation is a compile error, with a diagnostic for each of the three
+  phrasings: a lambda hand-written inside an arm (what is licensed is the arm, not a closure the
+  arm builds), the block remainder after a `with x <- f(…)` (`with` introduces another closure, and
+  that closure is outside the `with handle` that declares the cell, so the way out is to read the
+  cell before the `with`), and the arm of another installation. Nor can a cell itself be passed out
+  of the region as a value: it has no spellable type. The contrast is an ordinary `let`: a value
+  bound with `let` inside a handler's region may still be captured by an escaping closure, and this
+  ban tightened cells and nothing else.
 - Performing **this same effect** inside an arm body binds to the **outer** handler for that effect
   (it does not answer itself); with no outer one the arm owes the label and the error is reported
   as usual.
+- **Reentrancy (at this tier)**: an arm gets the evidence environment of the layer **before** the
+  installation point, so a cell of one installation is touched only by the arms of that
+  installation, and the classic lost-update shape "read the cell, call out, write the cell" cannot
+  be built at this tier: whatever route the intervening call takes, it never gets back to the same
+  cell. Nested installations each have their own cells, and what the inner one accumulates does not
+  leak into the outer one. This is stated for the **tail-resumptive** tier and promises nothing
+  about how it reads once multiple `resume`s are allowed (there a cell would have to be copied
+  along with the continuation, which is a separate verdict).
 - Performing **another** effect inside an arm body is answered by the handler in scope at the
   **installation point**, not by the one in scope where the operation was performed: the arm runs
   at the installation point.
