@@ -92,9 +92,14 @@ The self-test proves the script's own arithmetic. What proves the *corpus* is
 reverting a real repair in the compiler and watching this gate fail. These
 were measured on `ev-corpus-348` at `32341d9` (A through E) and on
 `assoc-effects` at `5675810` (F and G) and on `pad-removal` at `fb41e44`
-(H and I) and on `assoc-effect-defaults` at `21e3db4` (J through L); each was
-applied, the toolchain rebuilt, the gate run, and the edit reverted. None of
-them is committed.
+(H and I) and on `assoc-effect-defaults` at `21e3db4` (J through L) and on
+`cell-guards` at `0939256` (M and N); each was applied, the toolchain rebuilt,
+the gate run, and the edit reverted. None of them is committed.
+
+Every one of them was checked to have *changed bytes* before it was run.
+A mutant that patched nothing runs green and reads exactly like a gate that
+holds, which is the one result this section may not produce; for M and N the
+check was `md5sum` on the file before and after the edit, quoted with each.
 
 ### A. `base_union` absorbs effect variables into io again (#345)
 
@@ -441,15 +446,98 @@ omission under a default is not an error. Each is answered twice, by
 diagnostics golden, and the two see different halves -- this gate the value
 lane, the corpus the refusal lane.
 
-Between them the twelve mutants have different owners, which is the property
+### M. `cell_get`'s result is not dup'd (handler state cells)
+
+`selfhost/src/c/emitc.dawn`, the `cell_get` arm, with the wrapper taken off so
+the borrowed reference is handed on as if it were owned:
+
+```
+    (st1, "dawn_cell_get(" ++ a0 ++ ")")
+```
+
+`md5sum selfhost/src/c/emitc.dawn`: `c53f16a3...` before, `26a9bbf7...` after.
+
+This one is read off `scripts/spike-native/run.sh`, not off this script: the
+JVM backend is untouched by it, so the gate here stays green and the corpus it
+would run is the same corpus. It is written down here anyway because the file
+it reddens is on this roster, and a reader looking for what holds
+`effect_handler_state` up should find both halves in one place.
+
+Result: **red**, on the four checks that read the native run plus the
+sanitizer:
+
+    effect_handler_state:asan    FAIL
+    ERROR: AddressSanitizer: heap-use-after-free on address 0x506000000260
+    READ of size 4 at 0x506000000260 thread T1
+        #0 dawn_dup runtime/c/dawn_rt.c:924
+        #1 dawn_std_2list__impl_33_3List_3show
+        #2 dawn_effect_1handler_1state__main
+    freed by thread T1 here:
+        #0 free
+        #1 dawn_drop runtime/c/dawn_rt.c:1126
+        #2 dawn_effect_1handler_1state__collect
+    effect_handler_state:native  FAIL   (no output at all)
+    effect_handler_state:diff    FAIL
+    effect_handler_state:stderr  FAIL
+      +dawn: drop of a value with rc=-333381630 (kind 32610)
+    effect_handler_state:exit    FAIL   jvm exit 0, native exit 1
+
+The shape is the one the ownership note at `dawn_cell_get` predicts. The slot
+keeps its reference, the reader is handed a second name for it and is charged
+for a reference it never took, and the first drop of the read value frees
+something the slot still points at. `collect` is the line that dies, which is
+the simplest of the five, so the dup is not a nicety for the interesting
+cases.
+
+Reverted: **green** (`differential ok`).
+
+### N. `cell_take_ok` never says yes (handler state cells, §7.8)
+
+`selfhost/src/check/checker.dawn`, the last line of `cell_take_ok`, changed to
+a count no occurrence can equal, so every read of a cell lowers to `cell_get`:
+
+```
+  cell_occurrences(value, name) == -1
+```
+
+`md5sum selfhost/src/check/checker.dawn`: `8709b95e...` before, `780c4bdb...`
+after.
+
+Result: **green everywhere, and that is the finding.** Every gate in the tree
+still passes, because a lost take is not a wrong answer:
+
+    $ diff -u effect_handler_state.expect <(./corpus_m3)
+    (no output)
+
+What moves is only visible with the counters on. `DAWN_RC_STATS=1` on the
+corpus binary, unmutated and mutated:
+
+    clean   rc-stats: array_with in-place 29, copied 0, array_steal taken 29, dup 0
+    mutant  rc-stats: array_with in-place 0, copied 29, array_steal taken 0, dup 29
+
+100% in place to 0%, which is §7.8's claim measured rather than argued: read
+through `cell_get`, the accumulator's count is 2 for as long as the slot still
+names it, so `array_with` can never take the unique path and every trie node
+it touches is copied. The same run at twenty thousand elements reads 573/0
+against 0/573, so the ratio is the length-independent part.
+
+This mutant is why `long_tail` is two thousand elements rather than forty.
+Below about a thousand no trie node is rewritten at all, both counters sit at
+zero either way, and a lost take is indistinguishable from a kept one. The
+corpus had to be long enough to be measurable before this entry could be
+written.
+
+Reverted: **green** (`differential ok`, counters back to 29/0).
+
+Between them the fourteen mutants have different owners, which is the property
 worth having: A is answered by `effect_decl_row` and `effect_io_absorb`, B by
 `effect_widen_row`, `effect_decl_row` and `effect_primitive_row`, C by
 `effect_widen_row` and `effect_primitive_row`, D and E by `effect_assoc_row`,
 `assoc_effects` and `effect_primitive_row`, F and G by `effect_assoc_row`
 alone, H by `effect_pad_row` alone, I by most of the corpus with
-`effect_pad_row` naming which two of its own lines it reached, and J through L
-by `effect_assoc_row`'s defaulted pair beside the checker corpus. No single
-corpus file carries the gate.
+`effect_pad_row` naming which two of its own lines it reached, J through L
+by `effect_assoc_row`'s defaulted pair beside the checker corpus, and M and N
+by `effect_handler_state` alone. No single corpus file carries the gate.
 
 ## What the corpus does not reach
 
@@ -466,7 +554,11 @@ nobody thought of, and the difference is invisible six months later.
   `effect_widen_row` reaches `lift_fn_value` through a monomorphic wrapper
   instead. That is #344: the binder exists and there is no use-site effect
   argument to instantiate it with.
-* Ordering inside a `test` block. A `with handle` arm captures by value and
-  may not assign to a `var`, so there is no accumulator an assertion could
-  read. Order is the transcript lane's, and that is not a workaround -- it is
+* Ordering inside a `test` block. This used to read "a `with handle` arm
+  captures by value and may not assign to a `var`, so there is no accumulator
+  an assertion could read", and state cells are exactly the accumulator that
+  sentence said did not exist. What is still true is narrower: a cell is
+  reachable only from its own installation, so an assertion outside the region
+  reads the value the region handed back rather than the order it was built
+  in. Order is the transcript lane's, and that is not a workaround -- it is
   why both lanes exist.
