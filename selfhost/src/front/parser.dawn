@@ -41,7 +41,7 @@ use front/ast.{
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
   ListElem, LeExpr, LeSpread, LeIf, ListIfArm,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
-  EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm,
+  EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm, HandlerCell,
   PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
@@ -2556,15 +2556,20 @@ fn with_stmt(p: P, st: St) -> PR[Expr] = {
   Ok((st7, attach_trailing(callee, lam)))
 }
 
-## `with handle E { op(a) => body ... }` plus the rest of the enclosing block,
-## which becomes a parameterless closure exactly as the binder form's does
-## (docs/effects-design.md §3.3):
+## `with handle E { var s: T = e ... op(a) => body ... }` plus the rest of the
+## enclosing block, which becomes a parameterless closure exactly as the binder
+## form's does (docs/effects-design.md §3.3):
 ##
-##     with handle Ask {      EHandle(Ask, [ask() => 42], () => {
+##     with handle Ask {      EHandle(Ask, [], [ask() => 42], () => {
 ##       ask() => 42            g()
 ##     }                        h()
 ##     g()               ==>  })
 ##     h()
+##
+## The braces hold two kinds of thing and `var` is what tells them apart: a
+## state cell (docs/handler-state-design.md §4.1) or an arm. The slot is clean
+## and needs no lookahead -- an arm starts at an operation *name*, so `var`,
+## being reserved, was never a legal first token here.
 ##
 ## `st` is just past `handle`; the returned state sits on the block's `}`.
 fn handle_stmt(p: P, st: St, kw: Token) -> PR[Expr] = {
@@ -2572,11 +2577,18 @@ fn handle_stmt(p: P, st: St, kw: Token) -> PR[Expr] = {
   let st2 = skip_nl(p, st1)
   let (st3, _) = want(p, st2, LBRACE, "`{` (the handler arms)")?
   var st4 = skip_nl(p, st3)
+  var cells: List[HandlerCell] = []
   var arms: List[HandlerArm] = []
   while not at_kind(p, st4, RBRACE) && not at_kind(p, st4, EOF) {
-    let (st5, a) = handler_arm(p, st4)?
-    arms = arms ++ [a]
-    st4 = want_sep(p, st5)?
+    if at_kind(p, st4, VAR) {
+      let (st5, c) = handler_cell(p, st4, len(arms) > 0)?
+      cells = cells ++ [c]
+      st4 = want_sep(p, st5)?
+    } else {
+      let (st5, a) = handler_arm(p, st4)?
+      arms = arms ++ [a]
+      st4 = want_arm_sep(p, st5)?
+    }
   }
   let (st6, close) = want(p, st4, RBRACE, "`}`")?
   if len(arms) == 0 {
@@ -2590,12 +2602,73 @@ fn handle_stmt(p: P, st: St, kw: Token) -> PR[Expr] = {
   let no_params: List[LambdaParam] = []
   let body = EBlock(stmts, tail, rest_lo, rest_hi)
   let rest = ELambda(no_params, body, true, kw.lo, rest_hi)
-  Ok((st8, EHandle(name.text, arms, rest, name.lo, name.hi, kw.lo, rest_hi)))
+  Ok((st8, EHandle(name.text, cells, arms, rest, name.lo, name.hi, kw.lo, rest_hi)))
+}
+
+## Separator after a handler arm. `want_sep`'s "expected a newline after this
+## statement" points at the consequence; an arm body written as a statement
+## (`op(n) => acc = n`) is the way this is reached, and the arrow that would
+## fix it is `=> { ... }`, so it gets the same shape of hint the match arm
+## separator gives.
+fn want_arm_sep(p: P, st: St) -> Result[St, (St, Diag)] =
+  if at_kind(p, st, NEWLINE) {
+    Ok(skip_nl(p, st))
+  } else if at_kind(p, st, RBRACE) || at_kind(p, st, EOF) {
+    Ok(st)
+  } else {
+    Err((st, perr_h(p, st, "expected a newline or `}` after this handler arm",
+      "one arm per line; wrap statement bodies in braces: `=> { ... }`")))
+  }
+
+## `var acc: List[Int] = []` — one handler state cell
+## (docs/handler-state-design.md §4.1). It is an ordinary `var` (spec §4.1) in
+## a new position, so only two things differ from `let_stmt`, and both are
+## decisions rather than limitations: the cells all stand ahead of the arms,
+## because a cell written between two arms would leave a reader wondering
+## whether the order means something, and the annotation is mandatory, because
+## nothing inside the braces gives inference an expected type to start from.
+##
+## `after_arm` says an arm has already been parsed in this handler.
+fn handler_cell(p: P, st: St, after_arm: Bool) -> PR[HandlerCell] = {
+  let (st1, kw) = adv(p, st)
+  if after_arm {
+    return Err((st1, pd_h("a handler's state cells must all come before its arms",
+      kw.lo, kw.hi,
+      "move this `var` above the first arm; a cell is set up once per installation")))
+  }
+  if at_kind(p, st1, UNDERSCORE) {
+    return Err((st1, perr(p, st1, "`var _` is meaningless")))
+  }
+  let (st2, name) = want(p, st1, IDENT, "a name for the state cell (`var acc: T = e`)")?
+  if not at_kind(p, st2, COLON) {
+    return Err((st2, perr_h(p, st2, "a handler's state cell must declare its type",
+      "nothing inside a handler's braces supplies an expected type: `var acc: List[Int] = []`")))
+  }
+  let (st3, ann) = type_ref(p, adv1(p, st2))?
+  let (st4, _) = want(p, st3, EQ, "`=` (a state cell's initial value)")?
+  let st5 = skip_nl(p, st4)
+  let (st6, init) = expression(p, st5, false)?
+  Ok((st6, HandlerCell {
+    name: name.text,
+    ann: ann,
+    init: init,
+    lo: kw.lo,
+    hi: e_hi(init),
+    nlo: name.lo,
+    nhi: name.hi
+  }))
 }
 
 ## `op(a, b) => expr` — one handler arm. The parameter list is a lambda's, and
 ## so is the body: an arm *is* the closure the operation call reaches.
 fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
+  # `let` is the other binder a reader might reach for when declaring a state
+  # cell, and the generic "expected an operation name" would send them looking
+  # for the wrong mistake.
+  if at_kind(p, st, LET) {
+    return Err((st, perr_h(p, st, "a handler's state cell is declared with `var`, not `let`",
+      "a cell is written `var acc: T = e`, ahead of the arms")))
+  }
   let (st1, name) = want(p, st, IDENT, "an operation name (`op(...) => ...`)")?
   let (st2, params) = lambda_params(p, st1, false)?
   let (st3, _) = want(p, st2, FATARROW, "`=>` (an arm is a closure)")?

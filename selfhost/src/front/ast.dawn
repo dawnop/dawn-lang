@@ -198,6 +198,26 @@ pub type HandlerArm = {
   nhi: Int
 }
 
+## One state cell of a `with handle E { ... }` clause: `var acc: List[Int] = []`,
+## written inside the braces ahead of every arm
+## (docs/handler-state-design.md §4.1). The `var` and the assignment are not new
+## (spec §4.1); the position is. Two consequences show up right here: the cells
+## come before the arms, so which handler a cell belongs to is decided by where
+## it is written, and the annotation is mandatory, because nothing inside the
+## braces supplies an expected type to infer one from.
+##
+## `nlo`/`nhi` span the name, which is what a diagnostic about the binding
+## underlines; `lo` is at the `var`.
+pub type HandlerCell = {
+  name: String,
+  ann: TypeRef,
+  init: Expr,
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
 ## One arm of an else-less `if` chain standing at a list-literal element
 ## position: `if a { x } else if b { y }` is two of these.
 pub type ListIfArm = { cond: Expr, body: Expr }
@@ -292,6 +312,7 @@ pub type Expr =
 # what discharges E from the remainder's effect row.
   | EHandle(
     name: String,
+    cells: List[HandlerCell],
     arms: List[HandlerArm],
     rest: Expr,
     nlo: Int,
@@ -559,7 +580,7 @@ pub fn e_lo(e: Expr) -> Int =
     EIf(_, _, _, lo, _) -> lo
     EMatch(_, _, lo, _) -> lo
     EBlock(_, _, lo, _) -> lo
-    EHandle(_, _, _, _, _, lo, _) -> lo
+    EHandle(_, _, _, _, _, _, lo, _) -> lo
   }
 
 pub fn e_hi(e: Expr) -> Int =
@@ -591,7 +612,7 @@ pub fn e_hi(e: Expr) -> Int =
     EIf(_, _, _, _, hi) -> hi
     EMatch(_, _, _, hi) -> hi
     EBlock(_, _, _, hi) -> hi
-    EHandle(_, _, _, _, _, _, hi) -> hi
+    EHandle(_, _, _, _, _, _, _, hi) -> hi
   }
 
 pub fn t_lo(t: TypeRef) -> Int =

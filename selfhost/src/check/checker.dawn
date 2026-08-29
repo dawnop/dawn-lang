@@ -28,7 +28,7 @@ use front/ast.{
   ListElem, LeExpr, LeSpread, LeIf, le_lo, le_hi,
   EComptime, EUnsafePure, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
   SAssert, SWhile, SFor, LambdaParam, ConstView,
-  EHandle, HandlerArm, DEffect, EffectDeclR, EffectOp, module_effects
+  EHandle, HandlerArm, HandlerCell, DEffect, EffectDeclR, EffectOp, module_effects
 }
 use check/tast.{
   TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn,
@@ -3186,14 +3186,17 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
     }
     EComptime(body, _, _) -> name_refs(body, out, sc)
     EUnsafePure(body, _, _) -> name_refs(body, out, sc)
-    # both halves of `with handle E { .. }` are ordinary code the function
-    # runs: the arm bodies (each a lambda over the operation's parameters) and
-    # the remainder of the block, which the parser packed into `rest` as a
-    # parameterless lambda. An arm's *name* is the operation it answers, not a
-    # call, so it is not an edge -- the operation itself is spelled bare at the
-    # site that raises it, and that spelling is an EVar handled above.
-    EHandle(_, arms, rest, _, _, _, _) -> {
+    # every part of `with handle E { .. }` is ordinary code the function runs:
+    # the state cells' initializers (evaluated at the installation, in the
+    # enclosing scope), the arm bodies (each a lambda over the operation's
+    # parameters) and the remainder of the block, which the parser packed into
+    # `rest` as a parameterless lambda. An arm's *name* is the operation it
+    # answers, not a call, so it is not an edge -- the operation itself is
+    # spelled bare at the site that raises it, and that spelling is an EVar
+    # handled above.
+    EHandle(_, cells, arms, rest, _, _, _, _) -> {
       var o = out
+      for c in cells { o = name_refs(c.init, o, sc) }
       for a in arms { o = name_refs(a.body, o, rs_params(sc, a.params)) }
       name_refs(rest, o, sc)
     }
@@ -3320,7 +3323,8 @@ test "a handler's arms and its remainder are both call positions" {
     nhi: 1
   }
   let rest = ELambda(no_lparams(), EApply(EVar("r", 0, 1), [], 0, 1), true, 0, 1)
-  let h = EHandle("Ask", [arm], rest, 0, 1, 0, 1)
+  let no_cells: List[HandlerCell] = []
+  let h = EHandle("Ask", no_cells, [arm], rest, 0, 1, 0, 1)
   let refs = name_refs(h, set.empty(), ref_scope(set.empty(), set.empty()))
   assert set.to_list(refs) == ["p", "q", "r"]
   # the arm's parameter is bound, and `get` names the operation the arm answers
@@ -4640,8 +4644,8 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       if ok { (cx1, TyNever, XContinue(lo, hi)) } else { (cx1, TyError, XError(lo, hi)) }
     }
     EBlock(stmts, tail, lo, hi) -> check_block(cx, stmts, tail, expected, lo, hi)
-    EHandle(name, arms, rest, nlo, nhi, lo, hi) ->
-      check_handle(cx, name, arms, rest, nlo, nhi, lo, hi, expected)
+    EHandle(name, cells, arms, rest, nlo, nhi, lo, hi) ->
+      check_handle(cx, name, cells, arms, rest, nlo, nhi, lo, hi, expected)
     EComptime(body, lo, hi) -> {
       let (cx1, frame) = enter_isolated(cx)
       let (cx2, t, bx) = check_expr(cx1, body, expected)
@@ -5141,6 +5145,7 @@ fn fn_ty_parts(t: Ty) -> (List[Ty], Ty, Eff) =
 fn check_handle(
   cx: Cx,
   name: String,
+  cells: List[HandlerCell],
   arms: List[HandlerArm],
   rest: Expr,
   nlo: Int,
@@ -5150,6 +5155,16 @@ fn check_handle(
   expected: Option[Ty]
 ) -> (Cx, Ty, TExpr) !io = {
   var cx1 = cx
+  # The syntax landed ahead of the semantics: a cell needs a mutable heap
+  # cell, an escape ban and a rewrite of every read and write that crosses the
+  # arm boundary, none of which exists yet (docs/handler-state-design.md §4).
+  # Refused here rather than half-checked, so no program can depend on a
+  # meaning this compiler does not have. Temporary.
+  for c in cells {
+    cx1 = cerr_h(cx1, "handler state cells are not yet supported", c.lo, c.hi,
+      "`var` inside a handler's braces parses, but the checker does not " ++
+        "implement it yet (docs/handler-state-design.md §4)")
+  }
   if cx1.frame.isolated {
     cx1 = cerr_h(cx1, "`with handle` is not available at compile time", lo, hi,
       "comptime blocks and const initializers are pure in v1 " ++

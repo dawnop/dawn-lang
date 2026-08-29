@@ -1472,6 +1472,52 @@ test "`with handle` claims the rest of its block, like the binder form" {
   assert str.contains(out, "Lambda(with)")
 }
 
+test "a handler's braces take state cells ahead of the arms" {
+  let out = rendered("fn f() -> Int = {\n  with handle Ask {\n    var seen: Int = 0\n" ++
+      "    var log: List[String] = []\n    ask() => seen\n  }\n  g()\n}")
+  assert str.contains(out, "Cell seen")
+  assert str.contains(out, "Cell log")
+  assert str.contains(out, "Arm ask")
+  # the annotation and the initializer are both under the cell, in that order
+  assert str.contains(out, "Cell seen name@46..50 @42..59\n          TNamed Int @52..55\n" ++
+      "          Int 0 @58..59")
+  # a handler with no cells still parses, and prints none
+  let plain = rendered("fn f() -> Int = {\n  with handle Ask { ask() => 1 }\n  g()\n}")
+  assert not str.contains(plain, "Cell ")
+}
+
+test "a state cell must be a `var`, annotated, named, and ahead of every arm" {
+  # the annotation is mandatory: nothing inside the braces gives inference an
+  # expected type
+  let (_, d1) = parse_module("fn f() -> Int = {\n  with handle Ask {\n" ++
+      "    var n = 0\n    ask() => 1\n  }\n  g()\n}")
+  assert len(d1) > 0
+  assert str.contains(d1[0].msg, "state cell must declare its type")
+  # cells come first, always
+  let (_, d2) = parse_module("fn f() -> Int = {\n  with handle Ask {\n" ++
+      "    ask() => 1\n    var n: Int = 0\n  }\n  g()\n}")
+  assert len(d2) > 0
+  assert str.contains(d2[0].msg, "must all come before its arms")
+  # `let` lands in the arm slot, and is told which binder a cell uses
+  let (_, d3) = parse_module("fn f() -> Int = {\n  with handle Ask {\n" ++
+      "    let n: Int = 0\n    ask() => 1\n  }\n  g()\n}")
+  assert len(d3) > 0
+  assert str.contains(d3[0].msg, "declared with `var`, not `let`")
+  # `_` names nothing to read back, here as in a block
+  let (_, d4) = parse_module("fn f() -> Int = {\n  with handle Ask {\n" ++
+      "    var _: Int = 0\n    ask() => 1\n  }\n  g()\n}")
+  assert len(d4) > 0
+  assert str.contains(d4[0].msg, "`var _` is meaningless")
+}
+
+test "an arm body written as a statement is told to brace it" {
+  let (_, ds) = parse_module("fn f() -> Int = {\n  with handle Ask {\n" ++
+      "    ask() => n = 1\n  }\n  g()\n}")
+  assert len(ds) > 0
+  assert str.contains(ds[0].msg, "expected a newline or `}` after this handler arm")
+  assert str.contains(ds[0].hint, "wrap statement bodies in braces")
+}
+
 test "`handle` is contextual: `with handle <-` is still a binder" {
   let out = rendered("fn f() -> Unit = {\n  with handle <- g()\n  use_it(handle)\n}")
   assert not str.contains(out, "Handle")

@@ -1,0 +1,28 @@
+# checker.dawn: a handler's state cells parse, and the checker refuses them
+# for now. The syntax landed ahead of the semantics (there is no mutable heap
+# cell, no escape ban and no rewrite of the reads and writes that cross an arm
+# boundary), so a cell is reported once per declaration and the rest of the
+# handler is checked as if it were not there -- which is why the names cascade.
+# This case goes away with the temporary refusal.
+effect Ask {
+  fn get() -> Int
+}
+
+fn asks() -> Int !Ask = get()
+
+pub fn one_cell() -> Int = {
+  with handle Ask {
+    var seen: Int = 0
+    get() => seen
+  }
+  asks()
+}
+
+pub fn two_cells() -> Int = {
+  with handle Ask {
+    var seen: Int = 0
+    var log: List[String] = []
+    get() => seen
+  }
+  asks()
+}

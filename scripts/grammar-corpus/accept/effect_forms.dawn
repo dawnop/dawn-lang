@@ -81,3 +81,36 @@ fn binder_named_handle(r: Handle) -> Unit !io = {
 }
 
 fn handle(x: Int) -> Int = x
+
+# a handler's braces may open with state cells: `var name: T = init`, all of
+# them ahead of every arm, each with a mandatory annotation
+# (docs/handler-state-design.md §4.1)
+fn one_cell() -> Int = {
+  with handle Ask {
+    var seen: Int = 0
+    ask() => { seen = seen + 1 }
+  }
+  one()
+}
+
+fn several_cells() -> Unit = {
+  with handle Store {
+    var reads: Int = 0
+    var log: List[String] = []
+    get() => {
+      reads = reads + 1
+      "x"
+    }
+    put(k, v) => { log = log ++ [k] }
+  }
+  ()
+}
+
+# a cell's initializer is an ordinary expression of the enclosing scope
+fn cell_init_is_an_expression(base: Int) -> Int = {
+  with handle Ask {
+    var seen: Int = base + 1
+    ask() => seen
+  }
+  one()
+}
