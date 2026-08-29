@@ -1137,6 +1137,22 @@ K1–K9）里 trait 一个字都没出现，Elm 架构的 `update` 按定义是�
 不能累积状态）与 K2（callee 装的 handler 罩不住 caller 传进来的闭包），这两条刀 4 与刀 5
 都不碰**。SEM-10 与 #208 的绑定是排期方便，不是技术依赖。
 
+> **K2 已被推翻（2026-08-29）**，上面那句留着是它当初的判断，不是现状。V1′ 的调用点翻转
+> 之后，一个函数值的效果由**调用点**供证据，所以 callee 装的 handler 罩得住 caller 传进来
+> 的闭包。v0.69.0 实测：
+>
+> ```dawn
+> fn run(body: fn() -> Int !Ask) -> Int = {
+>   with handle Ask { ask() => 5 }
+>   body()
+> }
+> ```
+>
+> `run(() => ask() * 2)` 打印 `10`，闭包写在 `run` 之外、被 `run` 里的臂答掉。
+> 同一条已由 `scripts/spike-native/effect_fn_value_supply.dawn` 钉住。
+> 于是 #208 只剩 K1 这一堵墙，它就是
+> [handler-state-design.md](handler-state-design.md) 这个项目。
+
 ## 5. 先例
 
 完整的十门语言横向对照在决策 5 的「跨语言调研」一节（含汇总表、四条铁律与逐字引文），
