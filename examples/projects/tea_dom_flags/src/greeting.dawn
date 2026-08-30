@@ -1,0 +1,127 @@
+# The pure half: a model that cannot be written down without asking the page
+# what it knew.
+#
+# `init` takes `Option[String]` rather than being a value, which is the whole
+# point of the project. The string is opaque to `tea_dom` and is JSON here
+# because that is what a page has to hand -- `JSON.stringify` on one side and
+# `json/parser` on the other -- but nothing about the boundary says so, and an
+# application that wants a bare locale name can read one.
+#
+# Everything here is total. Flags arrive from a page, so "no flags", "not
+# JSON", "JSON that is not an object" and "an object with no `name`" are four
+# things a running application meets and none of them is a reason to panic:
+# each falls back to the same default, and the default is visible in the view.
+
+use std/map
+use json/value.{Json, JStr, JInt, JObj}
+use json/render.{render}
+use json/parser.{parse}
+use tea_core/app.{App, update, view}
+use tea_dom/node.{Node}
+use tea_dom/dsl.{button, div, el, text}
+
+## Who the page said it was for, and how many times the button was pressed.
+##
+## The second field is here so the project has a turn that is not the first
+## one: flags are read once, and a session that only ever sends `init` could
+## not show that later turns carry the flagged model along in the model text
+## rather than asking for the flags again.
+pub type Model = { name: String, hellos: Int }
+
+## The one message.
+pub type Msg =
+  | Hello
+derive Show
+
+## The model a fresh page starts from, given what that page already knew.
+##
+## The default is a real answer rather than a placeholder: a page that sends
+## no flags gets `world`, and `world` is what the view then shows. That is
+## what makes "the flags were dropped" a visible fact instead of an empty
+## field somebody has to notice.
+pub fn init(flags: Option[String]) -> Model = Model { name: named(flags), hellos: 0 }
+
+fn named(flags: Option[String]) -> String =
+  match flags {
+    None -> "world"
+    Some(text) ->
+      match parse(text) {
+        Ok(JObj(entries)) -> name_in(entries, "world")
+        _ -> "world"
+      }
+  }
+
+fn name_in(entries: Map[String, Json], fallback: String) -> String =
+  match map.get(entries, "name") {
+    Some(JStr(s)) -> s
+    _ -> fallback
+  }
+
+fn hellos_in(entries: Map[String, Json]) -> Int =
+  match map.get(entries, "hellos") {
+    Some(JInt(v)) -> v
+    _ -> 0
+  }
+
+impl App[Model] {
+  type Msg = Msg
+  type View = Node[Msg]
+
+  fn update(m: Model, msg: Msg) -> Model =
+    match msg {
+      Hello -> Model { name: m.name, hellos: m.hellos + 1 }
+    }
+
+  fn view(m: Model) -> Node[Msg] = {
+    let greeting: Node[Msg] = el("p", class: "greeting", kids: [text("hello, " ++ m.name)])
+    let tally: Node[Msg] = el("p", class: "tally", kids: [text(to_string(m.hellos))])
+    div(class: "flags", kids: [greeting, tally, button("hello", Hello, class: "again")])
+  }
+}
+
+## The model as one line of JSON, and back. The name rides along in it, so
+## every turn after the first is answered without the flags being sent again.
+pub fn encode(m: Model) -> String =
+  render(
+    JObj(entries: map.from([
+      ("name", JStr(value: m.name)),
+      ("hellos", JInt(value: m.hellos)),
+    ])),
+  )
+
+## Total, because a host may hand back anything.
+pub fn decode(s: String) -> Model =
+  match parse(s) {
+    Ok(JObj(entries)) ->
+      Model { name: name_in(entries, "world"), hellos: hellos_in(entries) }
+    _ -> init(None)
+  }
+
+test "flags decide the model, and every way of not having them is the default" {
+  assert init(Some("{\"name\":\"dawn\"}")) == Model { name: "dawn", hellos: 0 }
+  let none: Option[String] = None
+  assert init(none) == Model { name: "world", hellos: 0 }
+  assert init(Some("")) == init(none)
+  assert init(Some("not json at all")) == init(none)
+  assert init(Some("[1,2]")) == init(none)
+  assert init(Some("{\"nom\":\"dawn\"}")) == init(none)
+  assert init(Some("{\"name\":7}")) == init(none)
+}
+
+test "the name is in the model text, so later turns need no second flags line" {
+  let m = update(init(Some("{\"name\":\"dawn\"}")), Hello)
+  assert m == Model { name: "dawn", hellos: 1 }
+  assert decode(encode(m)) == m
+  assert decode("not json at all") == init(None)
+}
+
+test "the view says the name, which is what makes a dropped flag visible" {
+  let want: Node[Msg] =
+    div(class: "flags", kids: [
+      el("p", class: "greeting", kids: [text("hello, dawn")]),
+      el("p", class: "tally", kids: [text("0")]),
+      button("hello", Hello, class: "again"),
+    ])
+  assert view(init(Some("{\"name\":\"dawn\"}"))) == want
+  assert view(init(None)) != want
+}

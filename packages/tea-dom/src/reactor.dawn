@@ -77,6 +77,12 @@ use wire.{Request, Init, Event, Bad, decode_request, enc_node, reply_ok, reply_e
 ## outright; this one survives the change for a reason that has nothing to do
 ## with what a listener carries. An application pays nothing for it, since an
 ## ordinary message ADT is structurally comparable without declaring anything.
+##
+## An application that wants what the page knew before it existed takes
+## `turn_with_flags` instead. This one ignores the `flags` an init may carry,
+## which is the whole difference between the two and is why an application
+## that never asked for flags cannot be given any: its `init` is a value, and
+## a value has nowhere to put a string.
 pub fn turn[Mo, M](
   line: String,
   init: Mo,
@@ -84,12 +90,45 @@ pub fn turn[Mo, M](
   decode: fn(String) -> Mo,
   update: fn(Mo, M) -> Mo,
   view: fn(Mo) -> Node[M],
+) -> String = turn_with_flags(line, _flags => init, encode, decode, update, view)
+
+## Answer one request line, with the initial model computed from the flags the
+## host sent.
+##
+## The one difference from `turn`: `init` is `fn(Option[String]) -> Mo` rather
+## than an `Mo`, and it is called once per `init` request with whatever the
+## line's `flags` field held. `None` is a line with no such field, which is
+## every line every host writes today, so `turn(line, m, ..)` is exactly
+## `turn_with_flags(line, _ => m, ..)` and is written as that below.
+##
+## Why a function of the flags rather than a model plus a patch step
+## (`fn(Mo, String) -> Mo`), which was the other shape that fits. A model built
+## from flags often has no meaningful value without them -- a palette with no
+## index has nothing to search, a session-scoped view has no user -- and the
+## patch shape forces one into existence and then hopes every field gets
+## overwritten. Elm's `init : flags -> model` is the same call for the same
+## reason, and it makes "there were no flags" a case the application writes
+## rather than a state it has to detect.
+##
+## Why `Option[String]` and not `String`. Absent and empty are different
+## answers everywhere else on this wire, and they are different here too: a
+## host that has nothing to say omits the field, and a host that has an empty
+## string to say sends one. An application that does not care collapses them
+## in one line; one that does cannot get the distinction back afterwards.
+pub fn turn_with_flags[Mo, M](
+  line: String,
+  init: fn(Option[String]) -> Mo,
+  encode: fn(Mo) -> String,
+  decode: fn(String) -> Mo,
+  update: fn(Mo, M) -> Mo,
+  view: fn(Mo) -> Node[M],
 ) -> String =
   match decode_request(line) {
     Bad(reason) -> reply_err("bad-request", reason)
-    Init -> {
-      let root: Patch[Node[M]] = Patch { path: [], op: Replace(w: view(init)) }
-      reply_ok(encode(init), [root])
+    Init(flags) -> {
+      let m0 = init(flags)
+      let root: Patch[Node[M]] = Patch { path: [], op: Replace(w: view(m0)) }
+      reply_ok(encode(m0), [root])
     }
     Event(model, path, event, payload) -> {
       let m0 = decode(model)
@@ -179,6 +218,36 @@ pub fn serve[Mo, M](
     }
   }
 
+## `serve`, for an application whose initial model is a function of the flags
+## the host sent. `turn_with_flags` is the difference and the only one.
+##
+## The loop is written out a second time rather than factored with `serve`
+## into a shared pump. That is deliberate and it is about evidence, not about
+## taste: `serve` is what four recorded transcripts replay through, and
+## leaving its bytes untouched makes those transcripts evidence about code
+## that did not change rather than about a refactor that happened to keep
+## them green. The two bodies differ in one identifier, and the day a third
+## joins them is the day to factor all three at once.
+pub fn serve_with_flags[Mo, M](
+  init: fn(Option[String]) -> Mo,
+  encode: fn(Mo) -> String,
+  decode: fn(String) -> Mo,
+  update: fn(Mo, M) -> Mo,
+  view: fn(Mo) -> Node[M],
+) -> Unit !io =
+  match io.read_line() {
+    None -> ()
+    Some(line) -> {
+      if str.trim(line) != "" {
+        match catch_panic(() => turn_with_flags(line, init, encode, decode, update, view)) {
+          Ok(reply) -> io.println(reply)
+          Err(e) -> io.println(reply_err("panic", e.message))
+        }
+      }
+      serve_with_flags(init, encode, decode, update, view)
+    }
+  }
+
 # ---- tests -------------------------------------------------------------
 #
 # A counter, because the smallest app that has a model, two messages and a
@@ -251,6 +320,61 @@ test "init answers the initial model and one replace at the root" {
   # The patch carries the whole document, which is what a host with an empty
   # container needs and the only time the whole document crosses.
   assert str.contains(out, "\"kids\":[{\"t\":\"text\",\"s\":\"0\"}]")
+}
+
+# The same counter, started from what the host knew. A model that reads its
+# whole self out of the flags is the smallest thing that can show the string
+# reaching `init` and reaching the view, which is what the assertions below
+# and the `tea_dom_flags` session both need.
+fn from_flags(flags: Option[String]) -> Counter =
+  match flags {
+    Some(text) -> dec(text)
+    None -> Counter { n: 0 }
+  }
+
+fn ask_flagged(line: String) -> String =
+  turn_with_flags(line, from_flags, enc, dec, upd, vw)
+
+test "flags reach init, and the model they build is the one that goes out" {
+  let out = ask_flagged("{\"op\":\"init\",\"flags\":\"7\"}")
+  assert str.starts_with(out, "{\"ok\":true,\"model\":\"7\",\"patches\":[{\"path\":[],\"op\":\"replace\"")
+  # And into the document, not just into the reply's model field: the root
+  # patch is `view(init(flags))`, so a flag the view never reads would leave
+  # this line alone.
+  assert str.contains(out, "\"kids\":[{\"t\":\"text\",\"s\":\"7\"}]")
+}
+
+test "an init with no flags is the init every host sends today" {
+  # The compatibility assertion at the turn rather than at the decoder: an
+  # application that takes flags must still answer the bare line, and what it
+  # gets is `None` rather than an empty string it would have to tell apart
+  # from a host that sent one.
+  assert ask_flagged("{\"op\":\"init\"}") == ask("{\"op\":\"init\"}")
+  assert str.contains(ask_flagged("{\"op\":\"init\"}"), "\"model\":\"0\"")
+}
+
+test "`turn` ignores flags, so an application that never asked for them is unmoved" {
+  # `turn` is `turn_with_flags` with a constant `init`, and this is the
+  # assertion that says the constant really is one: the same reply for a line
+  # carrying flags and a line carrying none, byte for byte.
+  assert ask("{\"op\":\"init\",\"flags\":\"7\"}") == ask("{\"op\":\"init\"}")
+}
+
+test "flags that are not a string are refused, and no model comes back" {
+  let out = ask_flagged("{\"op\":\"init\",\"flags\":7}")
+  assert str.starts_with(out, "{\"ok\":false,\"kind\":\"bad-request\"")
+  assert not str.contains(out, "\"model\"")
+  assert not str.contains(out, "\"patches\"")
+}
+
+test "an event turn is the same turn whether or not init takes flags" {
+  # Flags are an init-time thing and nothing else: every later turn decodes
+  # the model off the wire, so the two entry points cannot diverge after the
+  # first line and this says so.
+  let line = "{\"op\":\"event\",\"model\":\"41\",\"path\":[2],\"event\":\"click\"}"
+  assert ask_flagged(line) == ask(line)
+  let missing = "{\"op\":\"event\",\"model\":\"7\",\"path\":[3],\"event\":\"input\"}"
+  assert ask_flagged(missing) == ask(missing)
 }
 
 test "an event folds one message in and answers the minimal patch" {

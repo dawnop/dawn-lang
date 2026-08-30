@@ -1,0 +1,24 @@
+# The whole io surface of the demo: one call, exactly as tea_dom_counter's,
+# with `serve_with_flags` in place of `serve`.
+#
+# The difference is the first argument. `serve` takes the initial model;
+# `serve_with_flags` takes a function from the init line's `flags` field to
+# it, and calls it once. Everything after the first line is identical, since
+# the model travels on the wire from then on.
+#
+#   $ echo '{"op":"init","flags":"{\"name\":\"dawn\"}"}' | \
+#       dawn run examples/projects/tea_dom_flags
+
+use tea_core/app.{update, view}
+use tea_dom/node.{Node}
+use tea_dom/reactor.{serve_with_flags}
+use greeting.{Model, Msg, init, encode, decode}
+
+pub fn main() -> Unit !io = serve_with_flags(init, encode, decode, upd, vw)
+
+# The two hooks, named rather than passed as lambdas: `serve_with_flags` needs
+# a concrete message type to settle `M: Eq` against, and a lambda at the call
+# site has no expectation to settle it from.
+fn upd(m: Model, msg: Msg) -> Model = update(m, msg)
+
+fn vw(m: Model) -> Node[Msg] = view(m)

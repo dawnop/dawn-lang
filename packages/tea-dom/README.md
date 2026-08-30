@@ -216,6 +216,38 @@ has the full argument; the three properties worth repeating:
   data, so shipping the subtree would make an attribute change at the root
   cost the whole document. The locality `diff` buys is kept across the wire.
 
+## Flags
+
+An application whose initial model depends on what the page already knew
+takes `serve_with_flags` rather than `serve`:
+
+```dawn
+use tea_dom/reactor.{serve_with_flags}
+
+pub fn main() -> Unit !io = serve_with_flags(init, encode, decode, update, view)
+
+fn init(flags: Option[String]) -> Model = ...
+```
+
+`init` is `fn(Option[String]) -> Model` instead of a `Model`, and it is called
+once, with the `flags` field of the init line. That field is optional and is a
+string: the page sends `JSON.stringify(...)` and the guest parses it, so what
+may cross is the guest's decoder rather than the browser's idea of a value.
+Elm's `init : flags -> model` is the same call for the same reason -- a model
+built from flags often has no meaningful value without them, and a "build the
+default, then patch it" shape forces one into existence and hopes every field
+gets overwritten.
+
+`None` is a line with no `flags` field, which is every line every host writes
+today. So `serve` is unchanged, `turn(line, m, ..)` is `turn_with_flags(line,
+_ => m, ..)`, and an application that never asked for flags cannot be given
+any: its `init` is a value with nowhere to put a string. Absent and empty stay
+different answers, as they are for a payload.
+
+`examples/projects/tea_dom_flags` is the smallest application on this path,
+and `scripts/wasm-dom-contract/flags.sh` is what says the session it is pinned
+to would notice flags being dropped on the floor.
+
 ## Failure
 
 `serve` wraps each turn in `catch_panic`. An application that panics gets an
@@ -235,7 +267,7 @@ runtime, and a boundary that varies by backend cannot have one transcript.
 | `dsl` | lowercase wrappers over the constructors, `tea_term/dsl`'s counterpart |
 | `route` | an address plus an event name to a message, on `fold_preorder` |
 | `wire` | the JSON encoding of nodes, patches and replies; request decoding |
-| `reactor` | `turn` (pure), `serve` (the package's only `!io`) |
+| `reactor` | `turn` (pure), `serve` (the package's only `!io`), and the `_with_flags` pair of each |
 
 ## The host half
 

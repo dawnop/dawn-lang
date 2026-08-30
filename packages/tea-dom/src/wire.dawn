@@ -71,8 +71,18 @@ use node.{Node, Text, Elem, On, Payload, NoData, Value, Key, with_key}
 ## not a string is `Bad`: the set of things that can cross is closed, and a
 ## number arriving where a string was declared is a host that has forked the
 ## contract rather than a value to coerce.
+##
+## `Init` carries the same shape for the same reason. `flags` is what the page
+## knew before the guest existed -- a search index, a session, a locale --
+## handed to the application's `init` once and never again, which is Elm's
+## `Flags`. It is `None` when the line carried no `flags` field, so the
+## `{"op":"init"}` every host sends today means what it always meant: start
+## from nothing. One `Option[String]` and not a `Json`, because the boundary
+## admits one string per field and the application decodes it: putting
+## `json/value.Json` in here would make the inbound half as wide as whatever
+## the page felt like sending, which is the width `payload` refused.
 pub type Request =
-  | Init
+  | Init(flags: Option[String])
   | Event(model: String, path: List[Int], event: String, payload: Option[String])
   | Bad(reason: String)
 derive Show
@@ -227,10 +237,14 @@ fn as_path(j: Option[Json]) -> Option[List[Int]] =
   }
 
 # Absent, a string, or a refusal -- three answers in two layers of `Option`.
-# The outer one is "this field is acceptable", the inner one is "there is a
-# payload", and collapsing them would make a number arriving where a string
-# was declared indistinguishable from nothing arriving at all.
-fn as_payload(j: Option[Json]) -> Option[Option[String]] =
+# The outer one is "this field is acceptable", the inner one is "the field is
+# there", and collapsing them would make a number arriving where a string was
+# declared indistinguishable from nothing arriving at all.
+#
+# Both optional string fields on this wire read through here, `payload` on an
+# event and `flags` on an init, so the two cannot drift into different rules
+# about what a missing field or a number means.
+fn as_opt_string(j: Option[Json]) -> Option[Option[String]] =
   match j {
     None -> Some(None)
     Some(JStr(s)) -> Some(Some(s))
@@ -256,13 +270,17 @@ pub fn decode_request(line: String) -> Request =
     Ok(JObj(entries)) ->
       match as_string(field(entries, "op")) {
         None -> Bad(reason: "no `op` field")
-        Some("init") -> Init
+        Some("init") ->
+          match as_opt_string(field(entries, "flags")) {
+            Some(fl) -> Init(flags: fl)
+            None -> Bad(reason: "an `init`'s `flags` if present must be a string")
+          }
         Some("event") ->
           match (
             as_string(field(entries, "model")),
             as_path(field(entries, "path")),
             as_string(field(entries, "event")),
-            as_payload(field(entries, "payload")),
+            as_opt_string(field(entries, "payload")),
           ) {
             (Some(m), Some(p), Some(ev), Some(pl)) ->
               Event(model: m, path: p, event: ev, payload: pl)
@@ -406,7 +424,7 @@ test "an opaque model stays opaque, quotes and newlines included" {
 
 test "requests decode, and a bad one is an answer rather than a panic" {
   let bare: Option[String] = None
-  assert decode_request("{\"op\":\"init\"}") == Init
+  assert decode_request("{\"op\":\"init\"}") == Init(flags: bare)
   assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[0,1],\"event\":\"click\"}") ==
     Event(model: "3", path: [0, 1], event: "click", payload: bare)
   assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[],\"event\":\"x\"}") ==
@@ -429,6 +447,31 @@ test "requests decode, and a bad one is an answer rather than a panic" {
   }
   match decode_request("{\"model\":\"3\"}") {
     Bad(r) -> { assert r == "no `op` field" }
+    _ -> { assert false }
+  }
+}
+
+test "an init carries flags when the host sent some, and nothing when it did not" {
+  # The compatibility assertion. The line every host writes today has no
+  # `flags` field, and it decodes to the absent answer rather than to an empty
+  # one: an application reading `None` is an application told the page brought
+  # nothing, which is what `{"op":"init"}` has always meant.
+  let bare: Option[String] = None
+  assert decode_request("{\"op\":\"init\"}") == Init(flags: bare)
+  assert decode_request("{\"op\":\"init\",\"flags\":\"{}\"}") == Init(flags: Some("{}"))
+  # Opaque, and carried verbatim: what is inside is the application's to
+  # parse, and this module never looks. Quotes and newlines survive for the
+  # reason the model's do.
+  assert decode_request("{\"op\":\"init\",\"flags\":\"a\\\"b\\nc\"}") ==
+    Init(flags: Some("a\"b\nc"))
+  assert decode_request("{\"op\":\"init\",\"flags\":\"\"}") == Init(flags: Some(""))
+  # Present but not a string is a refusal, exactly as a payload's is.
+  match decode_request("{\"op\":\"init\",\"flags\":7}") {
+    Bad(r) -> { assert str.contains(r, "`flags`") }
+    _ -> { assert false }
+  }
+  match decode_request("{\"op\":\"init\",\"flags\":{\"name\":\"dawn\"}}") {
+    Bad(_) -> { assert true }
     _ -> { assert false }
   }
 }

@@ -76,9 +76,21 @@ export class Reactor {
     return JSON.parse(lines[0]);
   }
 
-  /** The first turn: no model yet, and the reply carries the whole document. */
-  init() {
-    return this.#keep(this.request({ op: 'init' }));
+  /**
+   * The first turn: no model yet, and the reply carries the whole document.
+   *
+   * `flags` is the one string the page knows and the guest does not -- a
+   * serialised search index, a session, a locale -- handed to the guest's
+   * `init` once and never again. It is left off the request entirely when
+   * there is none, for the reason a payload is: absent and empty are
+   * different answers on this wire, and only the host can tell them apart.
+   * A guest built on `serve` rather than `serve_with_flags` ignores whatever
+   * arrives here, so sending flags to one is not an error.
+   */
+  init(flags) {
+    const request = { op: 'init' };
+    if (flags !== undefined) request.flags = flags;
+    return this.#keep(this.request(request));
   }
 
   /**

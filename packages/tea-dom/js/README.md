@@ -27,6 +27,7 @@ does, as opaque text this code carries between turns without ever reading it.
 
 ```
 -> {"op":"init"}
+-> {"op":"init","flags":"{\"index\":[…]}"}
 <- {"ok":true,"model":"0","patches":[{"path":[],"op":"replace","node":{…}}]}
 
 -> {"op":"event","model":"0","path":[3,1],"event":"click"}
@@ -44,6 +45,37 @@ A node is `{"t":"text","s":…}` or
 `set-self` payload is the same object with no `kids` -- `apply` reads only a
 donor's own data, so the subtree is not shipped and a class change at the root
 costs one `setAttribute`.
+
+## Flags
+
+`Reactor.init(flags)` and `mount(wasm, el, { flags })` take one optional
+string, which becomes the request's `flags` field and reaches the guest's
+`init`. It is the one thing the page knows and the guest does not: a
+serialised search index, a session, a locale, whatever the document was
+rendered with.
+
+```js
+await mount(await fetch('./palette.wasm'), el, {
+  flags: JSON.stringify({ index, locale: 'zh' }),
+});
+```
+
+One string and not an object, because a field on this wire carries a string
+or nothing: the guest parses what it is given, so what may cross is decided
+by the guest's decoder rather than by whatever the page felt like sending.
+`JSON.stringify` on this side and `json/parser` on the other is the usual
+pair.
+
+The field is *omitted* when there is none, which is what `{"op":"init"}`
+already was and still means: a guest reading `None` was told the page brought
+nothing, and a guest reading `Some("")` was told an empty string. The
+distinction is the payload field's, for the payload field's reason.
+
+A guest built on `tea_dom/reactor.serve` ignores flags -- its `init` is a
+value with nowhere to put them -- so sending some is never an error. Only
+`serve_with_flags`, whose `init` is `fn(Option[String]) -> Model`, reads
+them. A `flags` field that is present and is not a string is refused with
+`{"ok":false,"kind":"bad-request"}`, as a non-string payload is.
 
 ## Listeners and payloads
 

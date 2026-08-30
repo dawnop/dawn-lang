@@ -17,12 +17,14 @@ import { DomHost } from './dom.mjs';
  *
  * `onError(reply)` is called for every reply that is not ok; the default
  * reports to the console. `doc` is the document to build nodes with, and
- * exists so a harness can hand in a recording stub.
+ * exists so a harness can hand in a recording stub. `flags` is the one string
+ * the page hands the guest's `init`, and is omitted from the request when it
+ * is left out here; a guest built on `serve` ignores it.
  *
  * Returns the pieces, so a page can drive a turn itself (a test, a keyboard
  * shortcut, a replayed transcript).
  */
-export async function mount(wasm, mountEl, { onError = defaultOnError, doc } = {}) {
+export async function mount(wasm, mountEl, { onError = defaultOnError, doc, flags } = {}) {
   const reactor = await Reactor.load(wasm);
   const host = new DomHost(mountEl, dispatch, doc);
 
@@ -36,7 +38,7 @@ export async function mount(wasm, mountEl, { onError = defaultOnError, doc } = {
     settle(reactor.event(path, event, payload));
   }
 
-  settle(reactor.init());
+  settle(reactor.init(flags));
   return { reactor, host, dispatch };
 }
 
