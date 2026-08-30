@@ -1,0 +1,17 @@
+# A function read from a generic record field and called where the record's
+# parameter is concrete. The field keeps its declared `fn(String) -> M` type
+# in Core, but erased `Fn.apply` has to recover the result as this call site's
+# `Msg`. Recovering it as the still-declared `M` emits no JVM CHECKCAST and
+# makes the verifier reject `main` before it can run (#14).
+use std/io
+
+type Msg =
+  | Set(text: String)
+derive Show
+
+type Box[M] = { f: fn(String) -> M }
+
+pub fn main() -> Unit !io = {
+  let c: Box[Msg] = Box { f: Set }
+  println("${c.f("hi")}")
+}
