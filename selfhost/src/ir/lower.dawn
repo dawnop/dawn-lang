@@ -1336,13 +1336,15 @@ fn owner_or(o: Option[String], fallback: String) -> String =
 ## types.dawn because `is_ref_ty` needs the same answer from the type alone.
 fn dict_ty() -> Ty = TyAdt(DICT_ADT_ID, [])
 
-## Build (once) the dictionary for a ground witness and return a reference to
-## it. Every slot is resolved here, so a backend only has to lay out pointers.
+## Build (once) an argument-free dictionary and return a reference to it.
+## This is every ground witness, plus a conditional impl whose subject still
+## contains type variables but whose bounds contribute no sub-goals. Every
+## slot is resolved here, so a backend only has to lay out pointers.
 fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
-  # Ground, so every sub-goal is ground too and its dictionary is a compile
-  # time constant: this dictionary takes no arguments even where the impl
-  # behind it is conditional. Its slots still have to *pass* those constants,
-  # which is what `false` here tells them.
+  # For a ground subject every sub-goal is ground too and a compile-time
+  # constant. A zero-goal non-ground subject has none to pass. In both cases
+  # the dictionary takes no arguments; `false` tells its slots to resolve any
+  # ground sub-goals as constants instead of selecting parameters from it.
   let (st1, key) = dict_def(st, tid, subject, sub_goals(st.impls, tid, subject), false)
   (st1, CDictRef(key, tid, subject, dict_ty()))
 }
@@ -1811,9 +1813,10 @@ fn goal_dicts(st: LSt, goals: List[(Int, Ty)]) -> (LSt, List[CExpr]) = {
 ## The dictionary for `t`, as an expression. Only called where
 ## `dict_available` already said yes.
 ##
-## A non-ground subject with structure is where trait v2 shows: its dictionary
-## is not a constant but a construction, built from its arguments' -- and its
-## arguments' may themselves be constructions.
+## A non-ground subject with structure whose parts contribute goals is where
+## trait v2 shows: its dictionary is a construction, built from its
+## arguments' -- and its arguments' may themselves be constructions. A
+## zero-goal conditional impl is the constant exception handled below.
 fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
   match map.get(st.dict_env, dict_key(tid, t)) {
     Some(d) -> (st, d)
@@ -1822,9 +1825,19 @@ fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
         dict_ref(st, tid, t)
       } else {
         let goals = sub_goals(st.impls, tid, t)
-        let (st1, ds) = goal_dicts(st, goals)
-        let (st2, key) = dict_def(st1, tid, t, goals, true)
-        (st2, CDictApply(key, ds, dict_ty()))
+        # A conditional impl may mention type parameters without bounding any
+        # of them. Its subject is non-ground, but its dictionary is still a
+        # constant: none of those parameters contributes an argument. Keep
+        # the use and definition on the singleton path together; asking for a
+        # CDictApply here while dict_def records nargs = 0 makes the JVM emit
+        # NEW against the singleton's private constructor.
+        if len(goals) == 0 {
+          dict_ref(st, tid, t)
+        } else {
+          let (st1, ds) = goal_dicts(st, goals)
+          let (st2, key) = dict_def(st1, tid, t, goals, true)
+          (st2, CDictApply(key, ds, dict_ty()))
+        }
       }
   }
 
