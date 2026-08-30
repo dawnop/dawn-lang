@@ -173,24 +173,38 @@ CPU、memory、tasks 与 parent slice 数值是第 7 节待实测复核的 hard 
 
 ## 7. 合并/上线前补齐的 measurement 与 admission 复核
 
-现有仓库没有 release-native LSP 的每会话 RSS、启动时间或 64 KiB buffer 延迟数据。当前
-实现先用每 session 256 MiB、全局两个 session、aggregate 512 MiB 的保守 hard ceiling，把
-协议、隔离、回收与 fallback 做成可测试切片；这些数仍是待实测复核的部署值，不是性能结论。
+仓库现在有同一 release-native 形态在受限 WSL2 worker 上的开发证据；它回答「实现是否离谱」和
+首版 admission 条件，但不冒充生产主机预算。当前仍用每 session 256 MiB、全局两个 session、
+aggregate 512 MiB 的保守 hard ceiling；生产上线前须在实际 Linux cgroup 复测后再收紧。
 
 用**将部署的同一个 release `dawnc`**，在 production-compatible Linux cgroup 中记录：
 
-| 场景 | 记录 | release `dawnc` 实测结果 |
+| 场景 | 记录 | v0.70.0 native / WSL2 cgroup，10 fresh process/例 |
 |---|---|---|
-| initialize 后空闲 | startup→initialize reply；idle RSS/PSS；60 秒 CPU time | 待填写 |
-| 打开五个 Playground sample（各自 fresh process） | didOpen→diagnostics 的 p50 / max；peak RSS/PSS | 待填写 |
-| 64 KiB 合法 source | didOpen→diagnostics；peak RSS/PSS | 待填写 |
-| burst Full sync | 连续更新后只收最后文本的 diagnostics；CPU time；peak RSS | 待填写 |
-| completion / hover / local definition | response latency；答案正确性 | 待填写 |
-| timeout / disconnect | unit 回收时间；permit 与进程数回到基线 | 待填写 |
+| initialize 后空闲 | startup→initialize reply；idle RSS/PSS；60 秒 CPU time | initialize p50/p95/max 324.392/337.816/348.770 ms；60 秒 idle CPU 0 ms，RSS p95 29.22 MiB |
+| 打开五个 Playground sample（各自 fresh process） | didOpen→diagnostics 的 p50 / max；peak RSS/PSS | 50 次全绿；diagnostics p50/p95/max 159.373/163.444/164.811 ms |
+| 64 KiB 合法 source | didOpen→diagnostics；peak RSS/PSS | 10/10 全绿；201.751/207.550/207.550 ms；peak RSS p50/p95 34.26/34.38 MiB，PSS max 32.17 MiB |
+| burst Full sync | one-in-flight 时 20 个本地 generation 只发 first/final；CPU time；peak RSS | 10/10 最终文本正确；总延迟 p50/p95 160.959/175.808 ms |
+| completion / hover / local definition | response latency；答案正确性 | 10/10 正确；p50/p95 分别 3.723/4.830、0.345/0.431、0.301/0.461 ms |
+| timeout / disconnect | unit 回收时间；permit 与进程数回到基线 | EOF 回收 10/10；p50/p95/max 33.031/33.518/33.518 ms；全部 100 次 cleanup max 66.793 ms |
 
-每个场景至少跑 10 个 fresh process；表里记 median、p95/max、binary version、host kernel、
-cgroup limits 和 harness commit。measurement 脚本进入仓库，原始 TSV/JSON 作为 PR artifact；
-本文写摘要和来源，不贴一次手跑的漂亮数字。
+原始 100 行在
+[`playground/test/lsp-measurements/2026-08-30-win-wsl2.tsv`](../playground/test/lsp-measurements/2026-08-30-win-wsl2.tsv)：
+binary 为 `dawnc 0.70.0 (native)`，harness commit `27945626`，cgroup v2 限制为 256 MiB、
+swap 0、CPU 100%、pids 16。`playground/deploy/lsp-measure.py` 默认每例 10 个 fresh process，
+逐行写且拒绝覆盖输出；`--self-test` 固定 65,536-byte source、framing/parser 与 TSV schema。
+
+这份 WSL2 数据中，64 KiB peak RSS p95 加 25% 后向上取整为 43 MiB，sample p95 < 3 秒且
+disconnect max < 2 秒，首版 stop 条件均未触发。但 WSL2 不是 production host，公开仓也不知道
+生产 parent slice 的可用预算 `B`；所以它不授权把 256/512 MiB cap 改成 43/86 MiB，更不授权
+上线。部署方仍须用同一脚本、同一 release binary 在实际 cgroup 重跑：
+
+```sh
+python3 -B playground/deploy/lsp-measure.py \
+  --dawnc /opt/dawn/bin/dawnc --iterations 10 \
+  --host-label production-cgroup --harness-commit <commit> \
+  --output /new/path/lsp-measure.tsv
+```
 
 部署方先给 LSP parent slice 一个**不会挤掉现有 broker、两个 run sandbox 和同机服务**的总 memory
 预算 `B`。取 64 KiB 场景的实测 peak RSS p95，加 25% headroom 向上取 MiB 为单 session
@@ -240,9 +254,9 @@ LSP 恢复后，completion 合并时以 server 结果为先、按 label 去重�
 | `playground/lsp_gateway.py` | stdlib gateway、child framing、allowlist、admission 与 lifecycle |
 | `playground/test/lsp_contract.py` | fake stdio LSP 驱动的黑盒 gateway contract |
 | `playground/sandbox/` | 固定 native executable、session id 校验、transient unit hardening 与 sudoers |
-| `playground/deploy/` | 新 service/slice、nginx WebSocket location、bounded real-native smoke 与上线/回滚说明 |
+| `playground/deploy/` | 新 service/slice、nginx WebSocket location、bounded real-native smoke、fresh-process measurement harness 与上线/回滚说明 |
 
-`playground/test/lsp-contract.sh` 当前用逐帧 oracle 独立于 Dawn build 运行，结果为 **20 passed,
+`playground/test/lsp-contract.sh` 当前用逐帧 oracle 独立于 Dawn build 运行，结果为 **21 passed,
 0 failed**，固定了：
 
 - initialize → didOpen → diagnostics → completion → hover → local definition → shutdown；
@@ -254,6 +268,8 @@ LSP 恢复后，completion 合并时以 server 结果为先、按 label 去重�
   monotonic deadline；日志断言确保 child stderr 内容不会落盘。
 - service/slice、nginx route、sudoers、sandbox wrapper 与 native artifact 路径由静态 contract 读取，
   固定 loopback、cgroup hard ceiling、提权命令、隔离属性和相对 artifact 规范化。
+- checked-in 100-row measurement 由 contract 固定场景/次数、v0.70 binary、cgroup、reap 与两条
+  admission threshold，并拒绝 source/body/URI 列或私有 worker 路径。
 
 contract 还会静态钉住 nginx、systemd、sudoers 与 wrapper 的关键联动；`nginx -t`、
 `systemd-analyze verify`、`visudo -cf`、Python compile 与 shell syntax 是上线前静态检查。
@@ -269,15 +285,15 @@ oracle 冒充 native 性能证据。
 #11 是 roadmap 上的一项功能，当前变更作为**一个 PR**评审，不再把可运行功能拆成四个相互等待
 的 PR。创建提交时按以下逻辑 commit 保持 review 与 revert 边界：
 
-1. **design/contract**：本文、固定 wire/lifecycle/security contract 与 fake stdio oracle；
-2. **gateway/sandbox**：一 socket / 一 native child、framing/allowlist、admission 与 transient unit；
+1. **design**：本文与目录索引；
+2. **gateway/sandbox/deploy/contract**：一 socket / 一 native child、framing/allowlist、admission、
+   transient unit、nginx 与 fake stdio oracle；
 3. **UI/fallback**：四项功能、generation/timeout、一次 jitter reconnect、`/api/check` 与 static
    completion fallback、Vite WebSocket proxy；
-4. **deploy**：service/slice、nginx snippet、bounded smoke、手工安装与回滚说明。
+4. **measurement**：fresh-process harness、自测与受限 WSL2 的原始开发证据。
 
-这些是一个 PR 内的 review slices，不表示已经创建或推送提交，也不授权生产发布。UI 在 endpoint
-缺失时自动回现状；生产回滚删除 `/api/lsp` location 并停止 gateway 即可，`/run` 与 `/check`
-全程不迁移 wire contract。
+这些是一个 PR 内的 review slices，不授权生产发布。UI 在 endpoint 缺失时自动回现状；生产回滚
+删除 `/api/lsp` location 并停止 gateway 即可，`/run` 与 `/check` 全程不迁移 wire contract。
 
 ## 11. 不做的（以及重开条件）
 
