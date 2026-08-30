@@ -649,6 +649,14 @@ class Contract:
             epoch = client.barrier(mark)
             require(latest_diagnostics(epoch, lib_uri, "DIDCLOSE_ROLLBACK_MISSING") == [],
                     "DIDCLOSE_ROLLBACK_MISSING", "closed URI was not cleared")
+            # A closed URI has no open document, so the clearing publish has no
+            # version to name. Sending one anyway makes the client hold the
+            # clear against a version it never had, and LSP has no spelling for
+            # "the version is unknown" other than leaving the field out.
+            closed_publish = diagnostic_publishes(epoch, lib_uri)[-1]
+            require("version" not in closed_publish,
+                    "UNOPENED_URI_VERSION_PUBLISHED",
+                    f"closed URI carried a document version: {closed_publish!r}")
             caller_diags = latest_diagnostics(epoch, main_uri, "DIDCLOSE_ROLLBACK_MISSING")
             require(caller_diags and any("live_value" in message for message in messages(caller_diags)),
                     "DIDCLOSE_ROLLBACK_MISSING",
@@ -1046,6 +1054,12 @@ class Contract:
             require(latest_diagnostics(broken, lock_uri, "EXTERNAL_DIAGNOSTIC_AGGREGATION_MISMATCH"),
                     "EXTERNAL_DIAGNOSTIC_AGGREGATION_MISMATCH",
                     "malformed lock was not published at dawn.lock")
+            # dawn.lock is a workspace input, never an open document, so its
+            # publish has no version to carry either.
+            lock_publish = diagnostic_publishes(broken, lock_uri)[-1]
+            require("version" not in lock_publish,
+                    "UNOPENED_URI_VERSION_PUBLISHED",
+                    f"external URI carried a document version: {lock_publish!r}")
             mark = client.mark()
             client.send(did_close(lock_doc_uri))
             cleared = client.barrier(mark)

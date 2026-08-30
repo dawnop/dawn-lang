@@ -118,6 +118,7 @@ expect_mutant_red single-overlay live-overlay SINGLE_OVERLAY_NOT_SHARED
 expect_mutant_red didclose-no-rebuild did-close DIDCLOSE_ROLLBACK_MISSING
 expect_mutant_red only-current-diagnostics diagnostics-current WORKSPACE_DIAGNOSTICS_CURRENT_ONLY
 expect_mutant_red drop-diagnostics-version diagnostics-current DIAGNOSTIC_VERSION_MISSING
+expect_mutant_red unopened-version-zero did-close UNOPENED_URI_VERSION_PUBLISHED
 expect_mutant_red skip-empty-diagnostics diagnostics-empty EMPTY_DIAGNOSTIC_CLEAR_MISSING
 expect_mutant_red wrong-source-view diagnostics-source-view DIAGNOSTIC_SOURCE_VIEW_MISMATCH
 expect_mutant_red duplicate-last-wins duplicate-canonical DUPLICATE_CANONICAL_LAST_WINS

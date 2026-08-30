@@ -1166,7 +1166,7 @@ def load_samples(sample_dir: Path) -> list[tuple[str, str]]:
             source = raw.decode("utf-8", errors="strict")
         except (OSError, UnicodeDecodeError) as error:
             raise MeasurementError(
-                f"cannot read sample {path.name} ({type(error).__name__})"
+                f"cannot read sample {path} ({type(error).__name__})"
             ) from error
         if len(raw) > SOURCE_LIMIT_BYTES:
             raise MeasurementError(
@@ -1374,6 +1374,16 @@ def self_test() -> None:
         )
         assert explicit_samples.samples == sample_dir
         assert cases_for(["samples"], explicit_samples.samples) == expected_samples
+        # The failure has to name the directory it searched. A mistyped
+        # --samples and the deployed default differ only in the directory, so
+        # a basename-only message reads the same for both.
+        missing = sample_dir / "absent"
+        try:
+            cases_for(["samples"], missing)
+        except MeasurementError as error:
+            assert os.fspath(missing) in str(error), str(error)
+        else:
+            raise AssertionError("a missing sample directory was accepted")
     print("lsp-measure self-test ok")
 
 

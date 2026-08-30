@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import socket
 import struct
@@ -523,8 +524,13 @@ def assert_remote_restart_behavior(script):
     ]
     assert len(curl_commands) == 3, commands
     for command in curl_commands:
-        assert "--connect-timeout 1" in command, command
-        assert "--max-time 1" in command, command
+        # Substring matching has no right-hand delimiter: `--max-time 10`
+        # contains `--max-time 1`, so a tenfold budget used to read as green.
+        # Compare the flag's own argument instead.
+        argv = command.split()
+        for flag in ("--connect-timeout", "--max-time"):
+            assert flag in argv, command
+            assert argv[argv.index(flag) + 1] == "1", command
         assert "http://127.0.0.1:8087/health" in command, command
 
     # A health endpoint which keeps accepting connections without replying must
@@ -537,6 +543,33 @@ def assert_remote_restart_behavior(script):
     assert "failed its health check after 10 attempts" in exhausted.stdout
     assert exhausted_count == 10, exhausted_commands
     assert exhausted_commands.count("sleep 2\n") == 9, exhausted_commands
+
+
+def search_one(pattern, text):
+    found = re.findall(pattern, text)
+    assert len(found) == 1, (pattern, found)
+    return found[0]
+
+
+def assert_health_budget(script):
+    """Multiply the restart's own numbers out and hold the stated ceiling.
+
+    Attempt count, curl's own deadline and the retry interval each read fine
+    on their own while the product they bound drifts: ten attempts at
+    `--max-time 10` is 118 seconds of deploy, not 28. The ceiling is a
+    function of all three, so compute it here and make the comment in
+    redeploy.sh state the same number.
+    """
+    attempts = int(search_one(r"HEALTH_ATTEMPTS=(\d+)\n", script))
+    budget = int(search_one(r"--max-time (\d+)\b", script))
+    connect = int(search_one(r"--connect-timeout (\d+)\b", script))
+    interval = int(search_one(r"\n\s*sleep (\d+)\n", script))
+    assert connect <= budget, (connect, budget)
+    # `attempts` requests of at most `budget` seconds each, with `attempts - 1`
+    # waits of `interval` between them.
+    total = attempts * budget + (attempts - 1) * interval
+    assert total == 28, (attempts, budget, interval, total)
+    assert f"check to {total} seconds" in script, script
 
 
 def remote_restart_contract():
@@ -554,6 +587,7 @@ def remote_restart_contract():
     script = redeploy[start:redeploy.index("'\n", start)]
     assert "systemctl cat dawn-play-lsp.service" in script, script
     assert_remote_restart_behavior(script)
+    assert_health_budget(script)
     ok("remote restart retries transient health failures and fails at its bound")
 
     no_retry = mutate_once(script, "  HEALTH_ATTEMPTS=10", "  HEALTH_ATTEMPTS=1")
@@ -561,6 +595,8 @@ def remote_restart_contract():
     no_curl_timeout = mutate_once(
         script, " --connect-timeout 1 --max-time 1", ""
     )
+    slow_curl = mutate_once(script, "--max-time 1 ", "--max-time 10 ")
+    slow_retry = mutate_once(script, "\n    sleep 2\n", "\n    sleep 20\n")
     expect_contract_red(
         "single health attempt", lambda: assert_remote_restart_behavior(no_retry)
     )
@@ -571,7 +607,24 @@ def remote_restart_contract():
         "curl without a total timeout",
         lambda: assert_remote_restart_behavior(no_curl_timeout),
     )
-    ok("single-attempt, unbounded-retry and no-timeout mutants turn red")
+    # A tenfold per-request budget is the mutant substring matching missed: it
+    # keeps every stubbed run green and only moves the ceiling.
+    expect_contract_red(
+        "tenfold per-request budget",
+        lambda: assert_remote_restart_behavior(slow_curl),
+    )
+    expect_contract_red(
+        "tenfold per-request budget against the stated ceiling",
+        lambda: assert_health_budget(slow_curl),
+    )
+    expect_contract_red(
+        "tenfold retry interval", lambda: assert_health_budget(slow_retry)
+    )
+    expect_contract_red(
+        "single attempt against the stated ceiling",
+        lambda: assert_health_budget(no_retry),
+    )
+    ok("attempt-count, retry-bound, timeout and health-ceiling mutants turn red")
 
 
 def measurement_evidence_contract():
@@ -924,7 +977,40 @@ def main():
             unlisted.send_json(rpc(13, "workspace/symbol", {}))
             unlisted.expect_close(1008)
             stream.close()
-            ok("file/second documents and unlisted methods are rejected")
+
+            # JSON `true` decodes to a Python bool, and bool is a subclass of
+            # int, so only the explicit bool exclusion refuses it. Each of these
+            # two documents is valid in every other respect, so no earlier rule
+            # can take the credit: a version bundled with a second bad field
+            # leaves the exclusion free to be deleted.
+            stream, response = upgrade_when_available(port)
+            assert response.startswith(b"HTTP/1.1 101 "), response
+            bool_open = WebSocket(stream)
+            initialize(bool_open, 14)
+            bool_open.send_json(note("textDocument/didOpen", {
+                "textDocument": {"uri": URI, "version": True, "text": "()"}
+            }))
+            bool_open.expect_close(1008)
+            stream.close()
+
+            # didChange compares against the open version, so `true` only
+            # reaches its own bool exclusion when 1 would otherwise be an
+            # increase. Open at 0 to get there.
+            stream, response = upgrade_when_available(port)
+            assert response.startswith(b"HTTP/1.1 101 "), response
+            bool_change = WebSocket(stream)
+            initialize(bool_change, 15)
+            bool_change.send_json(note("textDocument/didOpen", {
+                "textDocument": {"uri": URI, "version": 0, "text": "()"}
+            }))
+            assert bool_change.recv_json()["method"] == "textDocument/publishDiagnostics"
+            bool_change.send_json(note("textDocument/didChange", {
+                "textDocument": {"uri": URI, "version": True},
+                "contentChanges": [{"text": "()"}],
+            }))
+            bool_change.expect_close(1008)
+            stream.close()
+            ok("file/bool-version/second documents and unlisted methods are rejected")
 
             stream, response = upgrade_when_available(port)
             assert response.startswith(b"HTTP/1.1 101 "), response

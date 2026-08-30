@@ -146,6 +146,16 @@ def mutate(name, server, main, analyze):
       ("diagnostics", JArr(diagnostics_for_uri(st, uri)))
     ]))"""
         server_text = replace_once(server_text, old, new, name)
+    elif name == "unopened-version-zero":
+        old = """    match map.get(st.docs, uri) {
+      Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+      None -> ()
+    }"""
+        new = """    match map.get(st.docs, uri) {
+      Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+      None -> { fields = fields ++ [("version", JInt(0))] }
+    }"""
+        server_text = replace_once(server_text, old, new, name)
     elif name == "wrong-source-view":
         old = """        Some(d) -> {
           out = append_diagnostic(out, uri, diagnostic_json(d.view, d.ls, ld.d))
