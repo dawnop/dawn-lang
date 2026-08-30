@@ -1,10 +1,11 @@
 // What one turn costs when the model is the thing that grew.
 //
-// The boundary carries the whole model as opaque text in both directions
-// every turn, because a reactor holds nothing between calls. That is a
-// deliberate trade (packages/tea-dom/src/wire.dawn says why) and this is the
-// bill: it prices decode, encode, view and diff separately at 10, 100 and
-// 1000 todos, on the wasm build of examples/projects/tea_dom_todo.
+// The todo application uses the legacy `serve` boundary, which carries its
+// whole model as opaque text in both directions every turn. This instrument
+// prices that mode's decode, encode, view and diff separately at 10, 100 and
+// 1000 todos, on the wasm build of examples/projects/tea_dom_todo. A reactor
+// using `serve_with_state` may keep a separate read-only init value; its
+// mutable model still has this wire cost.
 //
 // The decomposition is arithmetic on three requests that differ in what the
 // reactor is made to do with the same model:

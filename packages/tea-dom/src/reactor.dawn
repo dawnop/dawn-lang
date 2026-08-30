@@ -6,9 +6,10 @@
 # split `tea_term` has, and it does two things `turn` cannot: it reads and
 # writes the lines, and it stands between a failing application and the host.
 #
-# Why the model travels. Dawn has no module-level mutable state, so nothing
-# survives between two calls into a reactor; the model therefore arrives with
-# the request and leaves with the reply, as text the application encodes. The
+# Why the model travels. The mutable model remains owned by the host: it
+# arrives with the request and leaves with the reply, as text the application
+# encodes. `serve_with_state` may separately retain read-only init data inside
+# the guest, but neither `turn` nor `turn_with_flags` has such an input. Their
 # useful consequence is that a turn is a function of its inputs and of nothing
 # else, so the same transcript replays identically on a browser, on node and
 # on the JVM -- which is what makes this testable without a browser at all.
@@ -36,6 +37,7 @@
 # `==`.
 
 use std/io
+use std/reactor as session
 use std/str
 use tea_core/diff.{Patch, Replace, diff}
 use node.{Node, Text, Elem, On, NoData, Value, Key, deliver}
@@ -151,6 +153,61 @@ pub fn turn_with_flags[Mo, M](
     }
   }
 
+## Answer one request while a read-only value lives in the guest rather than
+## in the model text crossing the wire.
+##
+## `init` splits the optional flags into `(retained, model)`. Only the model is
+## passed to `encode` and `decode`; `update` and `view` receive the retained
+## value separately, and `update` cannot return a replacement for it. The first
+## component of this function's answer is therefore an init-time replacement:
+## `Some` only after a successful `Init`, and `None` on every `Event` and every
+## refusal. `serve_with_state` is the sole place that commits that replacement.
+##
+## The current state is explicit so this remains a pure function. Besides
+## making each branch testable, that keeps retained state out of the request
+## and reply JSON by construction: the only wire codec here is the `Mo` codec.
+pub fn turn_with_state[S, Mo, M](
+  line: String,
+  state: Option[S],
+  init: fn(Option[String]) -> (S, Mo),
+  encode: fn(Mo) -> String,
+  decode: fn(String) -> Mo,
+  update: fn(S, Mo, M) -> Mo,
+  view: fn(S, Mo) -> Node[M],
+) -> (Option[S], String) =
+  match decode_request(line) {
+    Bad(reason) -> (None, reply_err("bad-request", reason))
+    Init(flags) -> {
+      let (kept, m0) = init(flags)
+      let root: Patch[Node[M]] = Patch { path: [], op: Replace(w: view(kept, m0)) }
+      (Some(kept), reply_ok(encode(m0), [root]))
+    }
+    Event(model, path, event, payload) ->
+      match state {
+        None ->
+          (None, reply_err("bad-request", "an `event` needs a successful `init` first"))
+        Some(kept) -> {
+          let m0 = decode(model)
+          let old = view(kept, m0)
+          match route.at(old, path, event) {
+            None ->
+              (None, reply_err(
+                "no-handler",
+                "nothing at " ++ show_path(path) ++ " listens for `" ++ event ++ "`",
+              ))
+            Some(listener) ->
+              match settle(listener, payload) {
+                Err(why) -> (None, reply_err("bad-request", why))
+                Ok(msg) -> {
+                  let m1 = update(kept, m0, msg)
+                  (None, reply_ok(encode(m1), diff(old, view(kept, m1))))
+                }
+              }
+          }
+        }
+      }
+  }
+
 # What arrived against what was asked for, and the message that results.
 #
 # A mismatch is refused rather than defaulted or dropped. The listener said
@@ -248,6 +305,33 @@ pub fn serve_with_flags[Mo, M](
     }
   }
 
+## `serve_with_flags`, with the init-only part retained by the guest across
+## calls to a wasm reactor's `dawn_turn` as well as across lines on the JVM.
+##
+## The runtime slot is reached only through `std/reactor`'s typed pump. A turn
+## is caught before its optional replacement is committed, so a panic during a
+## new init leaves the earlier state installed. Blank lines preserve the old
+## loop contract: they produce no reply and do not replace or mutate the slot
+## (the pump may still read its installed Root).
+pub fn serve_with_state[S, Mo, M](
+  init: fn(Option[String]) -> (S, Mo),
+  encode: fn(Mo) -> String,
+  decode: fn(String) -> Mo,
+  update: fn(S, Mo, M) -> Mo,
+  view: fn(S, Mo) -> Node[M],
+) -> Unit !io =
+  session.serve((state: Option[S], line: String) => {
+    if str.trim(line) == "" {
+      let no_replacement: Option[S] = None
+      let no_reply: Option[String] = None
+      (no_replacement, no_reply)
+    } else {
+      let (replacement, reply) =
+        turn_with_state(line, state, init, encode, decode, update, view)
+      (replacement, Some(reply))
+    }
+  }, e => reply_err("panic", e.message))
+
 # ---- tests -------------------------------------------------------------
 #
 # A counter, because the smallest app that has a model, two messages and a
@@ -335,6 +419,29 @@ fn from_flags(flags: Option[String]) -> Counter =
 fn ask_flagged(line: String) -> String =
   turn_with_flags(line, from_flags, enc, dec, upd, vw)
 
+type Kept = { label: String, by: Int }
+
+fn split_state(flags: Option[String]) -> (Kept, Counter) =
+  match flags {
+    Some("blue") -> (Kept { label: "blue", by: 3 }, Counter { n: 0 })
+    _ -> (Kept { label: "plain", by: 1 }, Counter { n: 0 })
+  }
+
+fn state_upd(state: Kept, m: Counter, msg: Msg) -> Counter =
+  match msg {
+    Inc -> Counter { n: m.n + state.by }
+    Dec -> Counter { n: m.n - state.by }
+    Set(text) -> upd(m, Set(text: text))
+  }
+
+fn state_vw(state: Kept, m: Counter) -> Node[Msg] =
+  Elem(tag: "button", props: [("data-state", state.label)], on: [
+    On { event: "click", payload: NoData, to_msg: _p => Inc },
+  ], kids: [Text(s: to_string(m.n))], key: None)
+
+fn ask_state(line: String, state: Option[Kept]) -> (Option[Kept], String) =
+  turn_with_state(line, state, split_state, enc, dec, state_upd, state_vw)
+
 test "flags reach init, and the model they build is the one that goes out" {
   let out = ask_flagged("{\"op\":\"init\",\"flags\":\"7\"}")
   assert str.starts_with(out, "{\"ok\":true,\"model\":\"7\",\"patches\":[{\"path\":[],\"op\":\"replace\"")
@@ -342,6 +449,42 @@ test "flags reach init, and the model they build is the one that goes out" {
   # patch is `view(init(flags))`, so a flag the view never reads would leave
   # this line alone.
   assert str.contains(out, "\"kids\":[{\"t\":\"text\",\"s\":\"7\"}]")
+}
+
+test "retained state is installed only by init and never enters the model text" {
+  let (replacement, out) = ask_state("{\"op\":\"init\",\"flags\":\"blue\"}", None)
+  assert replacement == Some(Kept { label: "blue", by: 3 })
+  # The retained label is visible to the view, while the model field is exactly
+  # the mutable counter codec's answer and contains no retained envelope.
+  assert str.starts_with(out, "{\"ok\":true,\"model\":\"0\",\"patches\":[")
+  assert str.contains(out, "[\"data-state\",\"blue\"]")
+
+  let installed = Kept { label: "blue", by: 3 }
+  let event = "{\"op\":\"event\",\"model\":\"1\",\"path\":[],\"event\":\"click\"}"
+  let (event_replacement, event_out) = ask_state(event, Some(installed))
+  # Event can read the state (the step is +3), but it has no API with which to
+  # replace it. None means the session pump leaves its existing root untouched.
+  assert event_replacement == None
+  assert str.contains(event_out, "\"model\":\"4\"")
+  assert str.contains(event_out, "\"s\":\"4\"")
+}
+
+test "a retained event needs init, and a later init replaces the state" {
+  let event = "{\"op\":\"event\",\"model\":\"1\",\"path\":[],\"event\":\"click\"}"
+  let (missing, refused) = ask_state(event, None)
+  assert missing == None
+  assert refused ==
+    "{\"ok\":false,\"kind\":\"bad-request\"," ++
+    "\"error\":\"an `event` needs a successful `init` first\"}"
+
+  let old = Kept { label: "old", by: 99 }
+  let (replacement, out) = ask_state("{\"op\":\"init\"}", Some(old))
+  assert replacement == Some(Kept { label: "plain", by: 1 })
+  assert str.contains(out, "[\"data-state\",\"plain\"]")
+
+  # A decoder refusal is not an init and therefore proposes no replacement.
+  let (bad, _error) = ask_state("{\"op\":\"init\",\"flags\":7}", Some(old))
+  assert bad == None
 }
 
 test "an init with no flags is the init every host sends today" {

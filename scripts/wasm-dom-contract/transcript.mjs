@@ -68,8 +68,8 @@ app = await mount(new Uint8Array(await readFile(wasmPath)), root, {
 });
 
 // `mount` already ran init; re-run it through the instrumented path so the
-// transcript carries the first turn too. A reactor is a pure function of its
-// request, so asking twice is not a second state.
+// transcript carries the first turn too. This counter uses the stateless
+// `serve` entry point, so asking twice does not create hidden guest state.
 rec.lines = [];
 root.childNodes.length = 0;
 app.host.root = null;

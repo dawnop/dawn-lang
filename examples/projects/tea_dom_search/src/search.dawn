@@ -26,18 +26,17 @@
 #
 #   a reader effect     Every link this view builds needs the page's distance
 #                       from the site root, and every label needs its
-#                       language. Both are model fields read at the leaves,
-#                       nine calls below the model. `Ctx` is installed once at
+#                       language. Both are retained fields read at the leaves,
+#                       nine calls below the state. `Ctx` is installed once at
 #                       the top of `view` and asked at the bottom, which is
 #                       two parameters that no function in between has to
 #                       carry or forward.
 #
 # The index arrives as flags -- one string the page has and the guest does not
-# -- and then rides in the model, because Dawn has no module-level mutable
-# state and a reactor turn is a function of its request line. That is a real
-# cost and it is stated here rather than hidden: the whole index is decoded on
-# every keystroke. It is affordable at this size (a few hundred entries) and
-# it is what would have to change first if the index grew.
+# -- and is split from the mutable model at init. `serve_with_state` roots that
+# read-only value inside the guest, so only query/selection/open/navigation
+# cross the wire on a keystroke. A wasm call enters main afresh, but the root's
+# lifetime is the module instance rather than that one call.
 #
 # The bilingual strings below are data, not prose: this application draws
 # itself on an English page and on a Chinese one, and the site's own generator
@@ -51,7 +50,6 @@ use json/value.{Json, JNull, JBool, JInt, JStr, JArr, JObj}
 use json/parser.{parse}
 use json/render.{render}
 use std/map
-use tea_core/app.{App, update, view}
 use tea_dom/node.{Node}
 use tea_dom/dsl.{el, div, span, text, input, on_value, on_key}
 
@@ -79,14 +77,19 @@ pub type Hit = { entry: Entry, at: Int }
 ## current selection resolves to.
 pub type Scan = { hits: List[Hit], chosen: String }
 
-## The whole model. `root` and `lang` come from the page and never change;
-## `query`, `sel` and `open` are the session; `goto` is the one field that is
-## an instruction rather than a state -- it holds the href Enter chose, the
-## page's script reads it out of the document, and the next message clears it.
-pub type Model = {
+## What init retains in the guest. There is deliberately no update that returns
+## this type: the index, root and language belong to one successful init and a
+## later successful init is the only operation that may replace them.
+pub type State = {
   root: String,
   lang: String,
   entries: List[Entry],
+}
+
+## The mutable model, and therefore the whole model text on the wire. `goto` is
+## an instruction rather than durable state: Enter sets it, the page reads it
+## out of the document, and the next message clears it.
+pub type Model = {
   query: String,
   sel: Int,
   open: Bool,
@@ -354,8 +357,8 @@ fn status(m: Model) -> List[Node[Msg]] !Ctx =
     [el("p", class: "search-status", kids: [text(empty_line(lang()))])]
   }
 
-fn panel(m: Model) -> Node[Msg] !Ctx = {
-  let s = scan(m.entries, m.query, m.sel)
+fn panel(state: State, m: Model) -> Node[Msg] !Ctx = {
+  let s = scan(state.entries, m.query, m.sel)
   let found: List[Node[Msg]] = sections(s.hits, m.sel)
   let box: Node[Msg] =
     input(class: "search-input", value: m.query,
@@ -371,72 +374,63 @@ fn panel(m: Model) -> Node[Msg] !Ctx = {
 
 # ---- the loop --------------------------------------------------------------
 
-## The model a fresh panel starts from, given what the page already knew.
+## The retained state and mutable model a fresh panel start from, given what
+## the page already knew.
 ##
 ## Total, because a page may hand back anything: no flags, flags that are not
 ## JSON, JSON that is not an object and an object with no index are four
 ## things a running application meets, and each falls back to the same visible
 ## default -- a panel with an empty index, which says "no matches" for
 ## everything and is therefore obvious rather than silent.
-pub fn init(flags: Option[String]) -> Model =
+pub fn init(flags: Option[String]) -> (State, Model) =
   match flags {
-    None -> blank()
+    None -> (blank_state(), blank())
     Some(text) ->
       match parse(text) {
         Ok(j) -> {
           let index = jget(j, "index")
-          Model {
+          (State {
             root: jstr_or(jget(j, "root"), "."),
             lang: jstr_or(jget(index, "lang"), "en"),
             entries: entries_of(jget(index, "items")),
-            query: "",
-            sel: 0,
-            open: true,
-            goto: "",
-          }
+          }, blank())
         }
-        Err(_) -> blank()
+        Err(_) -> (blank_state(), blank())
       }
   }
 
+fn blank_state() -> State = State { root: ".", lang: "en", entries: [] }
+
 fn blank() -> Model =
   Model {
-    root: ".",
-    lang: "en",
-    entries: [],
     query: "",
     sel: 0,
     open: true,
     goto: "",
   }
 
-impl App[Model] {
-  type Msg = Msg
-  type View = Node[Msg]
-
-  fn update(m: Model, msg: Msg) -> Model =
-    match msg {
-      Typed(text) -> Model { ..m, query: text, sel: 0, goto: "" }
-      Pressed(key) -> pressed(m, key)
-    }
-
-  ## Closed is an empty tree, not a hidden one: the panel is a whole document
-  ## while it is open and nothing at all while it is not, so the page keeps no
-  ## stale rows behind a `hidden` attribute.
-  fn view(m: Model) -> Node[Msg] = {
-    with handle Ctx {
-      root() => m.root
-      lang() => m.lang
-    }
-    if m.open { panel(m) } else { div(class: "search-panel is-closed") }
+pub fn update(state: State, m: Model, msg: Msg) -> Model =
+  match msg {
+    Typed(text) -> Model { ..m, query: text, sel: 0, goto: "" }
+    Pressed(key) -> pressed(state, m, key)
   }
+
+## Closed is an empty tree, not a hidden one: the panel is a whole document
+## while it is open and nothing at all while it is not, so the page keeps no
+## stale rows behind a `hidden` attribute.
+pub fn view(state: State, m: Model) -> Node[Msg] = {
+  with handle Ctx {
+    root() => state.root
+    lang() => state.lang
+  }
+  if m.open { panel(state, m) } else { div(class: "search-panel is-closed") }
 }
 
 ## What a key means. Everything not named here means nothing, which is the
 ## half that keeps typing cheap: an ordinary character is an `input` event and
 ## a `keydown` this ignores, and ignoring it answers with no patches at all.
-fn pressed(m: Model, key: String) -> Model = {
-  let s = scan(m.entries, m.query, m.sel)
+fn pressed(state: State, m: Model, key: String) -> Model = {
+  let s = scan(state.entries, m.query, m.sel)
   let last = len(s.hits) - 1
   if key == "ArrowDown" {
     Model { ..m, sel: if m.sel < last { m.sel + 1 } else { m.sel }, goto: "" }
@@ -507,25 +501,18 @@ pub fn entries_of(j: Json) -> List[Entry] = {
 
 fn quoted(s: String) -> String = render(JStr(value: s))
 
-fn items_json(entries: List[Entry]) -> String =
-  "[" ++ join(list.map(entries, e =>
-      "[" ++ join([quoted(e.group), quoted(e.title), quoted(e.detail), quoted(e.note),
-        quoted(e.href)], ",") ++ "]"), ",") ++ "]"
-
 ## The model as one line of JSON, and back.
 ##
 ## Written out rather than assembled through `JObj`, because a map's iteration
 ## order is a fact about a hash and this text is compared byte for byte in
 ## scripts/example-main-contract/registry.json. Field order here is the field
-## order there.
+## order there. The retained state is intentionally absent: encoding root,
+## language or index here would put the large static half back on the wire.
 pub fn encode(m: Model) -> String =
-  "{\"root\":" ++ quoted(m.root)
-  ++ ",\"lang\":" ++ quoted(m.lang)
-  ++ ",\"q\":" ++ quoted(m.query)
+  "{\"q\":" ++ quoted(m.query)
   ++ ",\"sel\":" ++ to_string(m.sel)
   ++ ",\"open\":" ++ (if m.open { "true" } else { "false" })
   ++ ",\"goto\":" ++ quoted(m.goto)
-  ++ ",\"items\":" ++ items_json(m.entries)
   ++ "}"
 
 ## Total, because a host may hand back anything: an unreadable model reads as
@@ -537,9 +524,6 @@ pub fn decode(s: String) -> Model =
       match j {
         JObj(_) ->
           Model {
-            root: jstr_or(jget(j, "root"), "."),
-            lang: jstr_or(jget(j, "lang"), "en"),
-            entries: entries_of(jget(j, "items")),
             query: jstr_or(jget(j, "q"), ""),
             sel: jint_or(jget(j, "sel"), 0),
             open: jbool_or(jget(j, "open"), true),
@@ -563,24 +547,27 @@ fn probe_index() -> List[Entry] = [
   probe_entry("tutorial", "Effects", "", "tutorial/09.html"),
 ]
 
-fn shown(m: Model) -> List[String] = {
-  let s = scan(m.entries, m.query, m.sel)
+fn probe_state() -> State = State { root: ".", lang: "en", entries: probe_index() }
+
+fn shown(state: State, m: Model) -> List[String] = {
+  let s = scan(state.entries, m.query, m.sel)
   list.map(s.hits, h => h.entry.title)
 }
 
 test "a query answers the entries that match it, best rank first" {
-  let m = Model { ..blank(), entries: probe_index() }
+  let state = probe_state()
+  let m = blank()
   # an exact title beats a prefix beats a word prefix beats a substring
-  assert shown(Model { ..m, query: "str.trim" }) == ["str.trim"]
-  assert shown(Model { ..m, query: "str." }) == ["str.trim", "str.split"]
+  assert shown(state, Model { ..m, query: "str.trim" }) == ["str.trim"]
+  assert shown(state, Model { ..m, query: "str." }) == ["str.trim", "str.split"]
   # `map` is a word of `list.map` and a substring of nothing else here
-  assert shown(Model { ..m, query: "map" }) == ["list.map"]
+  assert shown(state, Model { ..m, query: "map" }) == ["list.map"]
   # the note is the last resort, and only when nothing in a title matched
-  assert shown(Model { ..m, query: "whitespace" }) == ["str.trim"]
+  assert shown(state, Model { ..m, query: "whitespace" }) == ["str.trim"]
   # an empty query asks nothing, so nothing answers
   let none: List[String] = []
-  assert shown(Model { ..m, query: "" }) == none
-  assert shown(Model { ..m, query: "nothing here" }) == none
+  assert shown(state, Model { ..m, query: "" }) == none
+  assert shown(state, Model { ..m, query: "nothing here" }) == none
 }
 
 ## The group order is the panel's order, not the index's: a query that matches
@@ -590,8 +577,9 @@ test "hits are grouped in the panel's order and numbered across the groups" {
   # `eff` starts a word of the spec section and the whole of the tutorial
   # chapter, and appears nowhere in the three stdlib rows -- so the index's
   # own order (stdlib first) is not the order the panel shows.
-  let m = Model { ..blank(), entries: probe_index(), query: "eff" }
-  let s = scan(m.entries, m.query, m.sel)
+  let state = probe_state()
+  let m = Model { ..blank(), query: "eff" }
+  let s = scan(state.entries, m.query, m.sel)
   assert list.map(s.hits, h => h.entry.group) == ["spec", "tutorial"]
   assert list.map(s.hits, h => h.at) == [0, 1]
 }
@@ -600,12 +588,13 @@ test "hits are grouped in the panel's order and numbered across the groups" {
 ## href at the ordinal the model is pointing at, decided inside the arm while
 ## the ordinal still exists.
 test "the selection resolves to one href, and out of range resolves to none" {
-  let m = Model { ..blank(), entries: probe_index(), query: "str." }
-  assert scan(m.entries, m.query, 0).chosen == "stdlib.html#std-str-trim"
-  assert scan(m.entries, m.query, 1).chosen == "stdlib.html#std-str-split"
-  assert scan(m.entries, m.query, 7).chosen == ""
+  let state = probe_state()
+  let m = Model { ..blank(), query: "str." }
+  assert scan(state.entries, m.query, 0).chosen == "stdlib.html#std-str-trim"
+  assert scan(state.entries, m.query, 1).chosen == "stdlib.html#std-str-split"
+  assert scan(state.entries, m.query, 7).chosen == ""
   # and with nothing matched there is nothing to choose
-  assert scan(m.entries, "nothing here", 0).chosen == ""
+  assert scan(state.entries, "nothing here", 0).chosen == ""
 }
 
 ## Every group an index entry can name is a group the panel draws. An entry in
@@ -629,8 +618,9 @@ test "the registered groups are the ones an index may name" {
 ## group">` per group, never its rows. A collector that let them leak would
 ## produce the same rows in the same order under no section at all.
 test "each group's rows stay inside that group's section" {
-  let m = Model { ..blank(), entries: probe_index(), query: "eff" }
-  let v = view(m)
+  let state = probe_state()
+  let m = Model { ..blank(), query: "eff" }
+  let v = view(state, m)
   # two groups matched, so the results list has exactly two children
   assert count_class(v, "search-group") == 2
   assert count_class(v, "search-row") == 2
@@ -643,12 +633,13 @@ test "each group's rows stay inside that group's section" {
 ## The conditional half of the same rule: a group with no hits is absent, not
 ## empty. With one group matched there is one section and no second heading.
 test "a group with no hits emits no section at all" {
-  let m = Model { ..blank(), entries: probe_index(), query: "map" }
-  let v = view(m)
+  let state = probe_state()
+  let m = Model { ..blank(), query: "map" }
+  let v = view(state, m)
   assert count_class(v, "search-group") == 1
   assert count_class(v, "search-row") == 1
   # nothing matched at all: no sections, and a reason in their place
-  let no_hits = view(Model { ..m, query: "nothing here" })
+  let no_hits = view(state, Model { ..m, query: "nothing here" })
   assert count_class(no_hits, "search-group") == 0
   assert count_class(no_hits, "search-status") == 1
 }
@@ -658,34 +649,37 @@ test "a group with no hits emits no section at all" {
 ## in the page's language -- neither of which any function between [view] and
 ## the leaf mentions.
 test "the page's root and language reach the leaves through the handler" {
-  let en = Model { ..blank(), entries: probe_index(), query: "str.trim", root: ".." }
-  assert hrefs(view(en)) == ["../stdlib.html#std-str-trim"]
-  assert str.contains(show_tree(view(en)), "Standard library")
-  let zh = Model { ..en, lang: "zh-CN", root: "../.." }
-  assert hrefs(view(zh)) == ["../../stdlib.html#std-str-trim"]
-  assert str.contains(show_tree(view(zh)), "标准库")
+  let en_state = State { ..probe_state(), root: ".." }
+  let m = Model { ..blank(), query: "str.trim" }
+  assert hrefs(view(en_state, m)) == ["../stdlib.html#std-str-trim"]
+  assert str.contains(show_tree(view(en_state, m)), "Standard library")
+  let zh_state = State { ..en_state, lang: "zh-CN", root: "../.." }
+  assert hrefs(view(zh_state, m)) == ["../../stdlib.html#std-str-trim"]
+  assert str.contains(show_tree(view(zh_state, m)), "标准库")
   # the scope line follows it too, which is the expectation this panel manages
-  assert str.contains(show_tree(view(en)), "Searches titles and API names")
-  assert str.contains(show_tree(view(zh)), "只搜标题与 API 名")
+  assert str.contains(show_tree(view(en_state, m)), "Searches titles and API names")
+  assert str.contains(show_tree(view(zh_state, m)), "只搜标题与 API 名")
 }
 
 test "arrows move the selection and stop at both ends" {
-  let m = Model { ..blank(), entries: probe_index(), query: "str." }
-  assert update(m, Pressed(key: "ArrowUp")).sel == 0
-  let down = update(m, Pressed(key: "ArrowDown"))
+  let state = probe_state()
+  let m = Model { ..blank(), query: "str." }
+  assert update(state, m, Pressed(key: "ArrowUp")).sel == 0
+  let down = update(state, m, Pressed(key: "ArrowDown"))
   assert down.sel == 1
   # two hits, so the second is the last one
-  assert update(down, Pressed(key: "ArrowDown")).sel == 1
-  assert update(down, Pressed(key: "ArrowUp")).sel == 0
+  assert update(state, down, Pressed(key: "ArrowDown")).sel == 1
+  assert update(state, down, Pressed(key: "ArrowUp")).sel == 0
   # the selected row is the one that says so, and it is the only one
-  assert selected_titles(view(down)) == ["str.split"]
+  assert selected_titles(view(state, down)) == ["str.split"]
   # a key nothing is bound to leaves the model alone, so the turn has no patches
-  assert update(down, Pressed(key: "x")) == down
+  assert update(state, down, Pressed(key: "x")) == down
 }
 
 test "typing replaces the query and puts the selection back at the top" {
-  let m = Model { ..blank(), entries: probe_index(), query: "str.", sel: 1 }
-  let typed = update(m, Typed(text: "list"))
+  let state = probe_state()
+  let m = Model { ..blank(), query: "str.", sel: 1 }
+  let typed = update(state, m, Typed(text: "list"))
   assert typed.query == "list"
   assert typed.sel == 0
   assert typed.goto == ""
@@ -694,40 +688,43 @@ test "typing replaces the query and puts the selection back at the top" {
 ## Enter is the one message that leaves an instruction in the tree, and Escape
 ## is the one that empties it.
 test "enter marks a destination and escape renders nothing at all" {
-  let m = Model { ..blank(), entries: probe_index(), query: "str.", sel: 1 }
-  let go = update(m, Pressed(key: "Enter"))
+  let state = probe_state()
+  let m = Model { ..blank(), query: "str.", sel: 1 }
+  let go = update(state, m, Pressed(key: "Enter"))
   assert go.goto == "stdlib.html#std-str-split"
-  assert str.contains(show_tree(view(go)), "data-goto")
+  assert str.contains(show_tree(view(state, go)), "data-goto")
   # the next message clears it, so one Enter is one navigation
-  assert update(go, Typed(text: "str.")).goto == ""
-  let shut = update(go, Pressed(key: "Escape"))
+  assert update(state, go, Typed(text: "str.")).goto == ""
+  let shut = update(state, go, Pressed(key: "Escape"))
   assert not shut.open
   assert shut.query == ""
   let closed: List[Node[Msg]] = []
-  assert view(shut) == div(class: "search-panel is-closed", kids: closed)
+  assert view(state, shut) == div(class: "search-panel is-closed", kids: closed)
 }
 
 test "flags carry the index, and every way of not having them is an empty one" {
   let flags = "{\"root\":\"..\",\"index\":{\"v\":1,\"lang\":\"zh-CN\","
     ++ "\"items\":[[\"stdlib\",\"str.trim\",\"fn trim(s: String) -> String\","
     ++ "\"Remove surrounding whitespace.\",\"zh/stdlib.html#std-str-trim\"]]}}"
-  let m = init(Some(flags))
-  assert m.root == ".."
-  assert m.lang == "zh-CN"
-  assert len(m.entries) == 1
-  assert m.entries[0] == Entry {
+  let (state, m) = init(Some(flags))
+  assert state.root == ".."
+  assert state.lang == "zh-CN"
+  assert len(state.entries) == 1
+  assert state.entries[0] == Entry {
     group: "stdlib",
     title: "str.trim",
     detail: "fn trim(s: String) -> String",
     note: "Remove surrounding whitespace.",
     href: "zh/stdlib.html#std-str-trim",
   }
+  assert m == blank()
   let none: Option[String] = None
-  assert init(none) == blank()
-  assert init(Some("")) == blank()
-  assert init(Some("not json at all")) == blank()
-  assert init(Some("[1,2]")) == blank()
-  assert init(Some("{\"root\":\"..\"}")) == Model { ..blank(), root: ".." }
+  assert init(none) == (blank_state(), blank())
+  assert init(Some("")) == (blank_state(), blank())
+  assert init(Some("not json at all")) == (blank_state(), blank())
+  assert init(Some("[1,2]")) == (blank_state(), blank())
+  assert init(Some("{\"root\":\"..\"}"))
+    == (State { ..blank_state(), root: ".." }, blank())
 }
 
 ## The shape the site generator writes. This literal is the contract between
@@ -748,10 +745,14 @@ test "an index row is five strings, in this order" {
   }
 }
 
-test "the model round-trips through its text, index and all" {
-  let m = update(Model { ..blank(), entries: probe_index(), root: ".." }, Typed(text: "str."))
+test "only the mutable model round-trips through its text" {
+  let state = probe_state()
+  let m = update(state, blank(), Typed(text: "str."))
   assert decode(encode(m)) == m
-  assert decode(encode(update(m, Pressed(key: "Escape")))).open == false
+  assert encode(m) == "{\"q\":\"str.\",\"sel\":0,\"open\":true,\"goto\":\"\"}"
+  assert not str.contains(encode(m), "root")
+  assert not str.contains(encode(m), "items")
+  assert decode(encode(update(state, m, Pressed(key: "Escape")))).open == false
   assert decode("not json at all") == blank()
   assert decode("[1,2]") == blank()
   # an object missing every field is the blank model, field by field

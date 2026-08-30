@@ -1,0 +1,40 @@
+use tea_dom/node.{Node, Text, Elem, On, NoData}
+use tea_dom/reactor.{serve_with_state}
+
+type State = { label: String, by: Int }
+type Model = { n: Int }
+type Msg = Inc
+derive Show
+
+# A successful init replaces both fields. The deliberate panic is the
+# transaction boundary: the previously installed State must still answer the
+# next event in the same process/module instance.
+fn init(flags: Option[String]) -> (State, Model) =
+  match flags {
+    Some("panic") -> panic("retained init exploded")
+    Some("blue") -> (State { label: "blue", by: 3 }, Model { n: 0 })
+    Some("red") -> (State { label: "red", by: 5 }, Model { n: 0 })
+    _ -> (State { label: "plain", by: 1 }, Model { n: 0 })
+  }
+
+fn encode(m: Model) -> String = to_string(m.n)
+
+fn decode(text: String) -> Model =
+  match parse_int(text) {
+    Some(n) -> Model { n: n }
+    None -> Model { n: 0 }
+  }
+
+fn update(state: State, m: Model, _msg: Msg) -> Model =
+  Model { n: m.n + state.by }
+
+fn view(state: State, m: Model) -> Node[Msg] =
+  Elem(
+    tag: "button",
+    props: [("data-state", state.label)],
+    on: [On { event: "click", payload: NoData, to_msg: _payload => Inc }],
+    kids: [Text(s: to_string(m.n))],
+    key: None,
+  )
+
+pub fn main() -> Unit !io = serve_with_state(init, encode, decode, update, view)

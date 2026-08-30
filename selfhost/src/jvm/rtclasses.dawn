@@ -1126,6 +1126,10 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   # a single shared reader: a fresh BufferedReader per call would let one call's
   # buffer swallow input the next call should see. Lazily initialised in io_read_line.
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_STATIC, "stdin", "Ljava/io/BufferedReader;")
+  # The counterpart of runtime/c's one retained root. A generated program and
+  # all of its std modules share this class inside one JVM; a wasm instance has
+  # the same lifetime through the C static. Only std/reactor reaches the field.
+  Asm.fieldOn(cw, ACC_PRIVATE + ACC_STATIC, "reactor_state", "Ljava/lang/Object;")
 
   # io_print(s) = System.out.print(s)
   let pv = open_static(cw, "io_print", "(Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
@@ -1179,6 +1183,33 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   rlv.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
   rlv.visitInsn(OP_ARETURN)
   close_mv(rlv)
+
+  # reactor_state_has(): absence is kept separate from the erased value. Dawn
+  # values are never null, so the field's JVM default is the whole empty state.
+  let rsh = open_static(cw, "reactor_state_has", "()Z")
+  let rsh_none = Label.new()
+  rsh.visitFieldInsn(OP_GETSTATIC, IO_CLASS, "reactor_state", "Ljava/lang/Object;")
+  rsh.visitJumpInsn(OP_IFNULL, rsh_none)
+  rsh.visitInsn(OP_ICONST_1)
+  rsh.visitInsn(OP_IRETURN)
+  rsh.visitLabel(rsh_none)
+  rsh.visitInsn(OP_ICONST_0)
+  rsh.visitInsn(OP_IRETURN)
+  close_mv(rsh)
+
+  # get returns the same reference under GC; set atomically replaces the one
+  # static root. The generic descriptors are Object on both sides.
+  let rsg = open_static(cw, "reactor_state_get", "()Ljava/lang/Object;")
+  rsg.visitFieldInsn(OP_GETSTATIC, IO_CLASS, "reactor_state", "Ljava/lang/Object;")
+  rsg.visitInsn(OP_ARETURN)
+  close_mv(rsg)
+
+  let rss = open_static(cw, "reactor_state_set",
+    "(Ljava/lang/Object;)L" ++ UNIT_CLASS ++ ";")
+  rss.visitVarInsn(OP_ALOAD, 0)
+  rss.visitFieldInsn(OP_PUTSTATIC, IO_CLASS, "reactor_state", "Ljava/lang/Object;")
+  return_unit(rss)
+  close_mv(rss)
 
   # io_eprint/io_eprintln(s) = System.err.print/println(s). `System.err` is a
   # static field, which the `use java` interop does not reach (spec §9.1 --
