@@ -1,0 +1,205 @@
+# A fixed persistent red-black-tree workload. This replaces the lost historical
+# corpus behind #10's old "rbtree" number with an executable operation list and
+# an exact checksum rather than trying to preserve an undocumented timing.
+use std/io
+
+type Color = Red | Black
+
+type Tree =
+  | Empty
+  | Node(color: Color, left: Tree, key: Int, value: Int, right: Tree)
+
+const KEYS: Int = 32768
+const CHECKPOINT_EVERY: Int = 256
+const EXPECTED: Int = 100924915004
+
+# Okasaki's four red-red cases. Insertion below only makes a red leaf, so
+# balancing black parents here and blackening the root preserves every
+# red-black invariant without mutation.
+fn balance(color: Color, left: Tree, key: Int, value: Int, right: Tree) -> Tree =
+  match (color, left, key, value, right) {
+    (
+      Black,
+      Node(Red, Node(Red, a, xk, xv, b), yk, yv, c),
+      zk,
+      zv,
+      d
+    ) -> Node(Red, Node(Black, a, xk, xv, b), yk, yv, Node(Black, c, zk, zv, d))
+    (
+      Black,
+      Node(Red, a, xk, xv, Node(Red, b, yk, yv, c)),
+      zk,
+      zv,
+      d
+    ) -> Node(Red, Node(Black, a, xk, xv, b), yk, yv, Node(Black, c, zk, zv, d))
+    (
+      Black,
+      a,
+      xk,
+      xv,
+      Node(Red, Node(Red, b, yk, yv, c), zk, zv, d)
+    ) -> Node(Red, Node(Black, a, xk, xv, b), yk, yv, Node(Black, c, zk, zv, d))
+    (
+      Black,
+      a,
+      xk,
+      xv,
+      Node(Red, b, yk, yv, Node(Red, c, zk, zv, d))
+    ) -> Node(Red, Node(Black, a, xk, xv, b), yk, yv, Node(Black, c, zk, zv, d))
+    _ -> Node(color, left, key, value, right)
+  }
+
+fn insert_red(tree: Tree, key: Int, value: Int) -> Tree =
+  match tree {
+    Empty -> Node(Red, Empty, key, value, Empty)
+    Node(color, left, old_key, old_value, right) ->
+      if key < old_key {
+        balance(color, insert_red(left, key, value), old_key, old_value, right)
+      } else if key > old_key {
+        balance(color, left, old_key, old_value, insert_red(right, key, value))
+      } else {
+        Node(color, left, key, value, right)
+      }
+  }
+
+fn insert(tree: Tree, key: Int, value: Int) -> Tree =
+  match insert_red(tree, key, value) {
+    Empty -> Empty
+    Node(_color, left, root_key, root_value, right) ->
+      Node(Black, left, root_key, root_value, right)
+  }
+
+fn get(tree: Tree, key: Int) -> Option[Int] =
+  match tree {
+    Empty -> None
+    Node(_color, left, old_key, value, right) ->
+      if key < old_key {
+        get(left, key)
+      } else if key > old_key {
+        get(right, key)
+      } else {
+        Some(value)
+      }
+  }
+
+fn is_red(tree: Tree) -> Bool =
+  match tree {
+    Node(Red, _left, _key, _value, _right) -> true
+    _ -> false
+  }
+
+# A positive result is the common black height. -1 means unequal paths or a
+# red node with a red child. The public insert wrapper separately makes the
+# root black, checked by valid_rb.
+fn black_height(tree: Tree) -> Int =
+  match tree {
+    Empty -> 1
+    Node(color, left, _key, _value, right) -> {
+      let red = match color { Red -> true, Black -> false }
+      if red && (is_red(left) || is_red(right)) {
+        -1
+      } else {
+        let left_height = black_height(left)
+        let right_height = black_height(right)
+        if left_height < 1 || left_height != right_height {
+          -1
+        } else {
+          left_height + if red { 0 } else { 1 }
+        }
+      }
+    }
+  }
+
+fn valid_rb(tree: Tree) -> Bool =
+  match tree {
+    Empty -> true
+    Node(Black, _left, _key, _value, _right) -> black_height(tree) > 0
+    Node(Red, _left, _key, _value, _right) -> false
+  }
+
+# Because KEYS is 2^15 and 40503 is odd, this is a permutation of every key;
+# it produces the same non-sorted insertion order on every run.
+fn permuted(i: Int) -> Int = (i * 40503 + 7919) & (KEYS - 1)
+
+fn initial_value(key: Int) -> Int = key * 17 + 3
+
+fn updated_value(key: Int) -> Int = 0 - (key * 11 + 5)
+
+fn required(value: Option[Int]) -> Int =
+  match value {
+    Some(n) -> n
+    None -> panic("red-black tree lost a key")
+  }
+
+fn one_round() -> Int = {
+  var tree = Empty
+  var checkpoints: List[Tree] = []
+  var i = 0
+  while i < KEYS {
+    let key = permuted(i)
+    tree = insert(tree, key, initial_value(key))
+    if i % CHECKPOINT_EVERY == CHECKPOINT_EVERY - 1 {
+      # Holding old roots prevents the workload from collapsing into a unique
+      # mutable tree under RC reuse; their unchanged subtrees stay shared.
+      checkpoints = checkpoints ++ [tree]
+    }
+    i = i + 1
+  }
+
+  let before_updates = tree
+  var key = 0
+  while key < KEYS {
+    if key % 3 == 0 {
+      tree = insert(tree, key, updated_value(key))
+    }
+    key = key + 1
+  }
+
+  if not valid_rb(before_updates) || not valid_rb(tree) {
+    panic("red-black invariants changed")
+  }
+
+  var checksum = 0
+  var j = KEYS - 1
+  while j >= 0 {
+    let now = required(get(tree, j))
+    checksum = checksum + now * (j % 17 + 1)
+    let old = required(get(before_updates, j))
+    checksum = checksum + old * (j % 13 + 1)
+    j = j - 1
+  }
+  if get(tree, KEYS) != None { panic("red-black tree invented a key") }
+  checksum = checksum + len(checkpoints)
+  if checksum != EXPECTED { panic("red-black checksum changed: " ++ to_string(checksum)) }
+  checksum
+}
+
+fn positive_int(text: String) -> Int =
+  match parse_int(text) {
+    Some(n) -> if n > 0 { n } else { panic("repetitions must be positive") }
+    None -> panic("bad repetition count")
+  }
+
+fn ready(checksum: Int) -> Unit !io = {
+  io.println("checksum\t" ++ to_string(checksum))
+  io.println("ready")
+  while not io.stdin_ready(1000) { }
+  let _ = io.read_stdin(1)
+  ()
+}
+
+pub fn main() -> Unit !io = {
+  match args() {
+    [reps_text] -> {
+      let reps = positive_int(reps_text)
+      var checksum = 0
+      var i = 0
+      while i < reps {
+        checksum = checksum + one_round()
+        i = i + 1
+      }
+      ready(checksum)
+    }
+    _ -> panic("usage: slab-bench-rbtree <repetitions>")
+  }
+}

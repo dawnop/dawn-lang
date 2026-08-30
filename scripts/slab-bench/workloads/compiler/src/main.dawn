@@ -1,0 +1,56 @@
+# The in-process equivalent of `dawnc emitc`: it uses the native driver's own
+# load/analyse/C-emission pipeline, then drops the emitted text before the
+# ready barrier. Keeping the barrier in this process makes quiet RSS observable
+# without measuring an outer shell or an unrelated cc child.
+use std/io
+use std/str
+use selfhost/check/jsig.{jsig_refused}
+use selfhost/c/cdriver
+use selfhost/driver/analyze.{analyze_program, load_target}
+use selfhost/driver/stdlib.{load_std}
+use selfhost/ir/interp.{ct_default}
+
+fn positive_int(text: String) -> Int =
+  match parse_int(text) {
+    Some(n) -> if n > 0 { n } else { panic("repetitions must be positive") }
+    None -> panic("bad repetition count")
+  }
+
+fn emit_once(std_dir: String, target: String) -> Int !io = {
+  let std = match load_std(std_dir) {
+    Ok(s) -> s
+    Err(_) -> panic("compiler corpus std did not load")
+  }
+  let loaded = load_target(std, target)
+  let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+  if len(prog.diags) != 0 { panic("compiler corpus produced diagnostics") }
+  let text = match cdriver.c_text(std, prog) {
+    Ok(s) -> s
+    Err(e) -> panic(e)
+  }
+  str.len(text)
+}
+
+fn ready(checksum: Int) -> Unit !io = {
+  io.println("checksum\t" ++ to_string(checksum))
+  io.println("ready")
+  while not io.stdin_ready(1000) { }
+  let _ = io.read_stdin(1)
+  ()
+}
+
+pub fn main() -> Unit !io = {
+  match args() {
+    [std_dir, target, reps_text] -> {
+      let reps = positive_int(reps_text)
+      var checksum = 0
+      var i = 0
+      while i < reps {
+        checksum = checksum + emit_once(std_dir, target)
+        i = i + 1
+      }
+      ready(checksum)
+    }
+    _ -> panic("usage: slab-bench-compiler <std-dir> <target> <repetitions>")
+  }
+}

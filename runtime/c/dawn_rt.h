@@ -493,6 +493,11 @@ void dawn_free(void *p);
  * for reuse, `retired` the slabs whose pages went back to the kernel. */
 bool dawn_slab_owns(const void *p);
 void dawn_slab_stats(uint64_t *live, uint64_t *cached, uint64_t *retired);
+#ifdef DAWN_RC_CONTRACT
+/* Test-only logical observation. mincore cannot distinguish a 32KiB tranche
+ * from an eager 64KiB layout on a host whose page is itself 64KiB. */
+size_t dawn_slab_materialized_bytes(const void *p);
+#endif
 
 /* ---- unwind cleanup (#193 ARC-05) ---------------------------------------
  *
