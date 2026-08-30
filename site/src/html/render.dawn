@@ -5,6 +5,7 @@
 use std/str
 use md/ast.{Inline, Text, Code, Bold, Em, Link, Block, Heading, Para, CodeBlock, UList, OList, Table, Quote, Rule}
 use html/escape.{escape_html}
+use html/play.{Play, play_block}
 use hl/dawn.{highlight_dawn}
 
 ## One rendered document: body HTML, its TOC, and the first h1's plain text.
@@ -42,9 +43,17 @@ fn inlines_html(items: List[Inline], map_url: fn(String) -> String) -> String =
 pub fn inline_run(items: List[Inline], map_url: fn(String) -> String) -> String =
   inlines_html(items, map_url)
 
-fn code_html(lang: String, body: String) -> String =
+## `play` is the offer a `dawn` block makes: given one, the block comes out
+## wrapped with a link that carries its own source to the Playground. Only the
+## tutorial passes it -- the spec quotes three lines of a match, and a link
+## from there would open an editor on something that was never a program.
+fn code_html(lang: String, body: String, play: Option[Play]) -> String =
   if lang == "dawn" {
-    `<pre class="dawn"><code>` ++ highlight_dawn(body) ++ "</code></pre>"
+    let pre = `<pre class="dawn"><code>` ++ highlight_dawn(body) ++ "</code></pre>"
+    match play {
+      Some(p) -> play_block(p, pre, body)
+      None -> pre
+    }
   } else if lang == "output" {
     `<pre class="output"><code>` ++ escape_html(body) ++ "</code></pre>"
   } else {
@@ -52,14 +61,18 @@ fn code_html(lang: String, body: String) -> String =
   }
 
 ## A list item body: a lone paragraph renders tight (no <p>).
-fn item_body(bs: List[Block], map_url: fn(String) -> String) -> String =
+fn item_body(bs: List[Block], map_url: fn(String) -> String, play: Option[Play]) -> String =
   match bs {
     [Para(items)] -> inlines_html(items, map_url)
-    _ -> blocks_html(bs, map_url)
+    _ -> blocks_html(bs, map_url, play)
   }
 
-fn items_html(items: List[List[Block]], map_url: fn(String) -> String) -> String =
-  join(map(items, bs => "<li>" ++ item_body(bs, map_url) ++ "</li>"), "\n")
+fn items_html(
+  items: List[List[Block]],
+  map_url: fn(String) -> String,
+  play: Option[Play],
+) -> String =
+  join(map(items, bs => "<li>" ++ item_body(bs, map_url, play) ++ "</li>"), "\n")
 
 fn cell_html(tag: String, cells: List[List[Inline]], map_url: fn(String) -> String) -> String =
   join(map(cells, c => "<$tag>" ++ inlines_html(c, map_url) ++ "</$tag>"), "")
@@ -80,25 +93,36 @@ fn heading_html(lvl: Int, id: String, items: List[Inline], map_url: fn(String) -
 }
 
 ## One block outside the numbered top level (list items, quotes): no anchors.
-fn block_html(b: Block, map_url: fn(String) -> String) -> String =
+fn block_html(b: Block, map_url: fn(String) -> String, play: Option[Play]) -> String =
   match b {
     Heading(lvl, items) -> heading_html(lvl, "", items, map_url)
     Para(items) -> "<p>" ++ inlines_html(items, map_url) ++ "</p>"
-    CodeBlock(lang, body) -> code_html(lang, body)
-    UList(items) -> "<ul>\n" ++ items_html(items, map_url) ++ "\n</ul>"
-    OList(items) -> "<ol>\n" ++ items_html(items, map_url) ++ "\n</ol>"
+    CodeBlock(lang, body) -> code_html(lang, body, play)
+    UList(items) -> "<ul>\n" ++ items_html(items, map_url, play) ++ "\n</ul>"
+    OList(items) -> "<ol>\n" ++ items_html(items, map_url, play) ++ "\n</ol>"
     Table(header, rows) -> table_html(header, rows, map_url)
-    Quote(bs) -> "<blockquote>\n" ++ blocks_html(bs, map_url) ++ "\n</blockquote>"
+    Quote(bs) -> "<blockquote>\n" ++ blocks_html(bs, map_url, play) ++ "\n</blockquote>"
     Rule -> "<hr>"
   }
 
-fn blocks_html(bs: List[Block], map_url: fn(String) -> String) -> String =
-  join(map(bs, b => block_html(b, map_url)), "\n")
+fn blocks_html(bs: List[Block], map_url: fn(String) -> String, play: Option[Play]) -> String =
+  join(map(bs, b => block_html(b, map_url, play)), "\n")
 
 ## Render a whole document: h2/h3 get numbered ids and TOC entries; the first
 ## h1 becomes the title. h4 gets a numbered id too but stays OUT of the TOC —
 ## the sidebar is a two-level map, and spec §9.5.1-style leaves would bury it.
-pub fn render_doc(blocks: List[Block], map_url: fn(String) -> String) -> Doc = {
+pub fn render_doc(blocks: List[Block], map_url: fn(String) -> String) -> Doc =
+  render_doc_play(blocks, map_url, None)
+
+## `render_doc` with the Playground offer of the module comment on
+## `code_html`. Two entry points rather than one with a defaulted argument, so
+## that every page which does NOT hand out links says so by calling the short
+## name instead of by omitting something.
+pub fn render_doc_play(
+  blocks: List[Block],
+  map_url: fn(String) -> String,
+  play: Option[Play],
+) -> Doc = {
   var html = ""
   var toc: List[TocEntry] = []
   var title = ""
@@ -133,7 +157,7 @@ pub fn render_doc(blocks: List[Block], map_url: fn(String) -> String) -> Doc = {
         }
       }
       _ -> {
-        html = html ++ block_html(b, map_url) ++ "\n"
+        html = html ++ block_html(b, map_url, play) ++ "\n"
       }
     }
   }
@@ -178,6 +202,23 @@ test "dawn code blocks come out highlighted" {
   assert str.contains(doc.html, `<span class="k">let</span>`)
   let out = render_doc([CodeBlock("output", "1 < 2")], keep_url)
   assert str.contains(out.html, `<pre class="output"><code>1 &lt; 2</code></pre>`)
+}
+
+## The offer reaches a dawn block wherever one can appear, not only at the top
+## level: the tutorial puts code inside list items and inside quotes, and a
+## block that lost the link on the way down would be a link missing from a page
+## that has one everywhere else.
+test "the playground offer reaches nested dawn blocks and nothing else" {
+  let p = Some(Play { href: "../playground.html", label: "Open in playground" })
+  let nested = render_doc_play([
+    UList([[CodeBlock("dawn", "let x = 1")]]),
+    Quote([CodeBlock("dawn", "let y = 2")]),
+    CodeBlock("output", "1"),
+  ], keep_url, p)
+  assert str.contains(nested.html, `href="../playground.html#bGV0IHggPSAx"`)
+  assert str.contains(nested.html, `href="../playground.html#bGV0IHkgPSAy"`)
+  # the output fence is prose about a program, not a program
+  assert str.contains(nested.html, `<pre class="output"><code>1</code></pre>`)
 }
 
 test "tables render thead and tbody" {

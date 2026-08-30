@@ -1,0 +1,110 @@
+# The prefilled Playground link a code block carries: an href whose
+# `#fragment` IS the program, so that "try this" is a click instead of a
+# select-copy-switch-tab-paste.
+#
+# The protocol belongs to the editor, not to this generator.
+# site/play-ui/src/main.ts writes the fragment as
+# `btoa(unescape(encodeURIComponent(code)))` and reads it back as
+# `decodeURIComponent(escape(atob(hash)))`. That sandwich is not an encoding of
+# its own: `encodeURIComponent` percent-escapes the UTF-8 bytes and `unescape`
+# turns each `%XX` straight back into the character of that code, so what
+# `btoa` is handed is the UTF-8 byte string and nothing else. The sandwich
+# exists only because `atob`/`btoa` deal in latin-1. So
+# `bytes.to_base64(bytes.utf8(code))` is the same string byte for byte --
+# standard alphabet, `=` padding, both of which `atob` wants and neither of
+# which `to_base64_url` writes.
+#
+# That equality is the whole reason the Chinese tutorial can have links at all:
+# a generator that reached for `btoa`'s own habit and encoded code points as
+# bytes would lose every comment in it. The round trip is asserted below on a
+# Chinese program, and the wire format is pinned to a literal separately --
+# a round trip alone passes just as happily when both halves are wrong
+# together, and the half that has to match is the one this file cannot run.
+#
+# Not this module's business, said here so the next reader does not look for
+# it: whether the program in the block compiles on its own. The tutorial's two
+# `dawn skip-check` fragments (halves of a multi-file project) get a link like
+# every other dawn fence does. The Playground is an editor, and a fragment is
+# a reasonable thing to open in one.
+
+use std/bytes
+use html/escape.{escape_html}
+
+## Where a page's prefilled links go, and what they say there. Both halves are
+## the caller's because both depend on the page's language, which this module
+## deliberately does not know: `Lang` lives in html/page.dawn, html/page.dawn
+## imports html/render.dawn, and html/render.dawn is what calls this. A `Lang`
+## here would close that ring into a `use` cycle.
+pub type Play = { href: String, label: String } derive Show
+
+## `code` as the editor's URL fragment: Base64 (standard alphabet, padded)
+## over the UTF-8 bytes.
+pub fn play_hash(code: String) -> String = bytes.to_base64(bytes.utf8(code))
+
+## The program a fragment carries, or `None` when it is not one -- the inverse
+## of `play_hash`, and the editor's `decodeShare`. It exists as production code
+## rather than as a test helper because gen/links.dawn reads every fragment
+## this generator wrote back through it: a `#` on a link to the Playground is a
+## payload, not an element id, and this is the only sense in which it can be
+## checked.
+pub fn play_decode(hash: String) -> Option[String] =
+  match bytes.from_base64(hash) {
+    Some(b) ->
+      match bytes.decode_utf8_checked(b) {
+        Ok(s) -> Some(s)
+        Err(_) -> None
+      }
+    None -> None
+  }
+
+## The link itself, labelled in the page's language. No escaping is needed for
+## the fragment -- the standard Base64 alphabet holds nothing HTML reserves --
+## but it goes through `escape_html` anyway, because "this string happens to
+## contain no `&`" is not a property a reader of the markup can check.
+pub fn play_link(p: Play, code: String) -> String = {
+  let href = escape_html(p.href ++ "#" ++ play_hash(code))
+  """<a class="play-open" href="$href">${escape_html(p.label)}</a>"""
+}
+
+## A `<pre>` and its link as one unit, so the two can be styled as one panel
+## rather than as a code block with something floating under it.
+pub fn play_block(p: Play, pre: String, code: String) -> String =
+  `<div class="playable">` ++ "\n" ++ pre ++ "\n" ++ play_link(p, code) ++ "\n</div>"
+
+## The wire format, pinned to a literal rather than to itself. This is the
+## assertion a round trip cannot make: `play_hash` and `play_decode` agreeing
+## proves only that they agree, and the implementation they have to agree WITH
+## is a line of TypeScript that no test here can run. These two strings came
+## out of `btoa(unescape(encodeURIComponent(s)))`.
+test "the fragment is exactly what the editor's btoa sandwich writes" {
+  assert play_hash("fn main() -> Unit !io = println(\"hi\")\n")
+    == "Zm4gbWFpbigpIC0+IFVuaXQgIWlvID0gcHJpbnRsbigiaGkiKQo="
+  # Chinese, an emoji outside the BMP, and a length that forces `=` padding.
+  assert play_hash("# 中文 🌅\n") == "IyDkuK3mlocg8J+MhQo="
+}
+
+test "a program survives the round trip, multi-byte comments included" {
+  let en = "fn main() -> Unit !io = println(\"hello\")\n"
+  assert play_decode(play_hash(en)) == Some(en)
+  let zh = "# 打印一行\nfn main() -> Unit !io = println(\"你好, Dawn\")\n"
+  assert play_decode(play_hash(zh)) == Some(zh)
+}
+
+## What gen/links.dawn leans on: a fragment that is not a program says so.
+test "a fragment that is not a program does not decode" {
+  # Not the standard alphabet -- `atob` refuses `-` and `_`.
+  assert play_decode("Zm4-bWFpbg==") == None
+  # Valid Base64 either way; the second one holds two thirds of a character.
+  assert play_decode("5Lit") == Some("中")
+  assert play_decode("5Lg=") == None
+}
+
+test "the link carries the program in its fragment and its label in the markup" {
+  let p = Play { href: "../playground.html", label: "Open in playground" }
+  assert play_link(p, "let x = 1")
+    == `<a class="play-open" href="../playground.html#bGV0IHggPSAx">Open in playground</a>`
+  assert play_block(p, "<pre>P</pre>", "let x = 1")
+    == `<div class="playable">` ++ "\n<pre>P</pre>\n"
+    ++ `<a class="play-open" href="../playground.html#bGV0IHggPSAx">Open in playground</a>`
+    ++ "\n</div>"
+}

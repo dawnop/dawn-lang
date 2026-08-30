@@ -42,6 +42,7 @@ use std/map
 use md/text.{cp_at, seg}
 use gen/common.{must_read, must_list, take_n}
 use gen/fingerprint.{is_fingerprinted}
+use html/play.{play_decode}
 
 fn files_under(base: String, rel: String) -> List[String] !io = {
   let path = if rel == "" { base } else { "$base/$rel" }
@@ -198,6 +199,29 @@ fn leading_number(text: String) -> String = {
   if str.ends_with(raw, ".") { seg(cs, 0, i - 1) } else { raw }
 }
 
+## The one page on this site whose `#fragment` is not an element id. The
+## Playground reads `location.hash` as a program (play-ui's `decodeShare`,
+## html/play.dawn's `play_hash`), and the tutorial hands it 66 of them.
+##
+## So this is a redirection, not an exemption. Checked against the ids of
+## playground.html, every one of those links would be reported broken;
+## waved through, none of them would be looked at at all -- and the failure
+## worth catching is not "that id is missing", it is "the generator wrote a
+## fragment the editor cannot read". That is checkable here without the
+## source: the fragment has to be standard-alphabet Base64 (the url-safe one
+## is what `atob` refuses) decoding to well-formed UTF-8 (which a byte lost
+## from a Chinese comment is not). What this cannot see is whether the program
+## it decodes to is the program printed above the link; that is
+## gen/tutorial.dawn's test, which has both halves in hand.
+fn is_play_target(target: String) -> Bool =
+  target == "playground.html" || str.ends_with(target, "/playground.html")
+
+fn is_editor_payload(frag: String) -> Bool =
+  match play_decode(frag) {
+    Some(_) -> true
+    None -> false
+  }
+
 fn is_external(u: String) -> Bool =
   str.starts_with(u, "http://") || str.starts_with(u, "https://") || str.starts_with(u, "mailto:")
 
@@ -261,6 +285,7 @@ pub fn check_links(out: String) -> Unit !io = {
   var checked = 0
   var assets = 0
   var anchors = 0
+  var payloads = 0
   var numbered = 0
   for f in set.to_list(files) {
     if str.ends_with(f, ".html") {
@@ -320,10 +345,19 @@ pub fn check_links(out: String) -> Unit !io = {
           # Only .html has ids to check against, and a target we already
           # reported as missing is not reported twice.
           if frag != "" && target_exists && str.ends_with(target, ".html") {
-            anchors = anchors + 1
-            let page_ids = unwrap_or(map.get(ids, target), set.empty())
-            if not set.has(page_ids, frag) {
-              broken = broken ++ ["$f -> $href (no id \"$frag\" in $target)"]
+            if is_play_target(target) {
+              payloads = payloads + 1
+              if not is_editor_payload(frag) {
+                broken = broken
+                  ++ ["$f -> $target#...: the fragment is not standard Base64 over "
+                      ++ "well-formed UTF-8, so the editor cannot load it"]
+              }
+            } else {
+              anchors = anchors + 1
+              let page_ids = unwrap_or(map.get(ids, target), set.empty())
+              if not set.has(page_ids, frag) {
+                broken = broken ++ ["$f -> $href (no id \"$frag\" in $target)"]
+              }
             }
           }
         }
@@ -339,7 +373,7 @@ pub fn check_links(out: String) -> Unit !io = {
   println(
     "  link check: $checked internal href/src(s), $anchors #fragment(s) and $numbered numbered "
       ++ "heading id(s) across $pages pages, all resolve; $assets of them reach assets/ "
-      ++ "and every one is content-hashed")
+      ++ "and every one is content-hashed; $payloads prefilled Playground fragment(s) decode")
 }
 
 test "resolution normalizes relative segments" {
@@ -380,6 +414,20 @@ test "a same-page fragment is not an external link" {
   assert is_external("https://example.com/#s2-3")
   assert path_of("#s2-3") == ""
   assert frag_of("#s2-3") == "s2-3"
+}
+
+## The redirection, both ways: a fragment on the Playground is read as a
+## program, and a fragment anywhere else is still read as an id.
+test "the playground's fragment is a program, not an id" {
+  assert is_play_target("playground.html")
+  assert is_play_target("zh/playground.html")
+  assert not is_play_target("tutorial/03.html")
+  # `bGV0IHggPSAx` is `let x = 1`; the url-safe alphabet and a truncated
+  # multi-byte character are the two ways the generator could get it wrong.
+  assert is_editor_payload("bGV0IHggPSAx")
+  assert not is_editor_payload("Zm4-bWFpbg==")
+  assert not is_editor_payload("5Lg=")
+  assert not is_editor_payload("s3-1")
 }
 
 test "an href splits into path and fragment" {

@@ -1,9 +1,11 @@
 # docs/tutorial.md -> tutorial/index.html + one page per ## chapter.
 
-use md/ast.{Inline, Block, Heading}
+use std/str
+use md/ast.{Inline, Block, Heading, CodeBlock}
 use md/parser.{parse}
-use html/render.{render_doc, inline_text}
-use html/page.{Assets, Lang, En, Zh, page, contents_label}
+use html/render.{render_doc, render_doc_play, inline_text}
+use html/play.{Play, play_decode}
+use html/page.{Assets, Lang, En, Zh, page, contents_label, lang_path, playground_label}
 use gen/common.{must_read, write_page, map_doc_url, doc_files, pad2, drop_trailing_rule}
 
 type Chapter = { title: List[Inline], body: List[Block] }
@@ -87,6 +89,20 @@ fn tutorial_source(out: String, lang: Lang) -> (String, String, String) =
     Zh -> ("docs/tutorial.zh-CN.md", "$out/zh/tutorial", "../..")
   }
 
+## Where this language's tutorial sends its prefilled Playground links, from a
+## page `root` deep. `lang_path` is the site's one layout rule -- the Chinese
+## twin of any paired page is that same path under `/zh/` -- so the language
+## picks the page and nothing here writes a second href to keep level with the
+## first. An English chapter linking the Chinese Playground would still
+## resolve, still decode and still run the program: the only thing wrong with
+## it is the chrome around the editor, which is why the test below names the
+## href rather than merely checking that the link works.
+fn tutorial_play(root: String, lang: Lang) -> Play =
+  Play {
+    href: "$root/" ++ lang_path(lang, "playground.html"),
+    label: playground_label(lang),
+  }
+
 ## The tutorial: an index page plus one page per `##` chapter. Called once per
 ## language, and `lang` picks all three of the source document, the output
 ## directory and the depth every relative link is written from -- so the two
@@ -106,12 +122,15 @@ pub fn gen_tutorial(out: String, a: Assets, lang: Lang) -> Unit !io = {
   let (intro, chapters) = split_chapters(blocks)
   let n = len(chapters)
   let docs = doc_files()
+  # every dawn block on these pages carries its own source to the editor
+  let play = Some(tutorial_play(root, lang))
 
   # chapter pages
   for i in range(0, n) {
     match get(chapters, i) {
       Some(c) -> {
-        let doc = render_doc([Heading(1, c.title)] ++ c.body, u => map_doc_url(root, docs, u))
+        let doc =
+          render_doc_play([Heading(1, c.title)] ++ c.body, u => map_doc_url(root, docs, u), play)
         let html = doc.html ++ chapter_nav(chapters, i, lang)
         let title = inline_text(c.title)
         write_page("$dir/${pad2(i + 1)}.html",
@@ -125,7 +144,7 @@ pub fn gen_tutorial(out: String, a: Assets, lang: Lang) -> Unit !io = {
   }
 
   # index: the intro plus a chapter list
-  let intro_doc = render_doc(intro, u => map_doc_url(root, docs, u))
+  let intro_doc = render_doc_play(intro, u => map_doc_url(root, docs, u), play)
   var items = ""
   for i in range(0, n) {
     items = items ++ "\n" ++
@@ -140,4 +159,64 @@ pub fn gen_tutorial(out: String, a: Assets, lang: Lang) -> Unit !io = {
 test "each language's tutorial reads its own file and lands in its own place" {
   assert tutorial_source("d", En) == ("docs/tutorial.md", "d/tutorial", "..")
   assert tutorial_source("d", Zh) == ("docs/tutorial.zh-CN.md", "d/zh/tutorial", "../..")
+}
+
+## The href a chapter's `#`-carrying link is written from. `..` and `../..` are
+## the two depths tutorial_source hands out, so these are the two hrefs the
+## site really ships; both are the reader's own language.
+test "a chapter's playground links point at its own language's editor" {
+  assert tutorial_play("..", En).href == "../playground.html"
+  assert tutorial_play("..", En).label == "Open in playground"
+  assert tutorial_play("../..", Zh).href == "../../zh/playground.html"
+  assert tutorial_play("../..", Zh).label == "在 Playground 打开"
+}
+
+## The fragment of the first `playground.html#...` href in `html`, or "". The
+## opener is `.html#` rather than `#`, because a Dawn comment starts with `#`
+## and the highlighted program is sitting right there in the same string.
+fn first_play_hash(html: String) -> String =
+  match str.split(html, ".html#") {
+    [_, rest, ..] ->
+      match str.split(rest, "\"") {
+        [h, ..] -> h
+        _ -> ""
+      }
+    _ -> ""
+  }
+
+## The end-to-end claim, on the two shapes that ship: a dawn block on a
+## tutorial page comes out with a link, the link goes to this language's
+## Playground, and what the reader lands in is the program they were reading --
+## byte for byte, comments and all.
+##
+## The Chinese half is not a translation of the English half for its own sake.
+## It is the case a generator that encoded code points as bytes would fail and
+## the English one would pass, and it is two thirds of the tutorial's blocks.
+test "a tutorial dawn block links to the editor with itself prefilled" {
+  let en_code = "fn main() -> Unit !io = println(\"hello\")"
+  let en = render_doc_play([CodeBlock("dawn", en_code)], u => u,
+    Some(tutorial_play("..", En)))
+  assert str.contains(en.html, `<div class="playable">`)
+  assert str.contains(en.html, `href="../playground.html#`)
+  assert str.contains(en.html, ">Open in playground</a>")
+  assert play_decode(first_play_hash(en.html)) == Some(en_code)
+
+  let zh_code = "# 打印一行\nfn main() -> Unit !io = println(\"你好, Dawn\")"
+  let zh = render_doc_play([CodeBlock("dawn", zh_code)], u => u,
+    Some(tutorial_play("../..", Zh)))
+  assert str.contains(zh.html, `href="../../zh/playground.html#`)
+  assert str.contains(zh.html, ">在 Playground 打开</a>")
+  assert play_decode(first_play_hash(zh.html)) == Some(zh_code)
+}
+
+## The other half of the offer: pages that do not make it are unchanged. An
+## `output` fence is not a program, and the spec's fragments are not either --
+## `render_doc` is the call that says so.
+test "only a dawn block on a page that offers links gets one" {
+  let offered = render_doc_play([CodeBlock("output", "42")], u => u,
+    Some(tutorial_play("..", En)))
+  assert not str.contains(offered.html, "play-open")
+  let plain = render_doc([CodeBlock("dawn", "let x = 1")], u => u)
+  assert not str.contains(plain.html, "play-open")
+  assert not str.contains(plain.html, "playable")
 }
