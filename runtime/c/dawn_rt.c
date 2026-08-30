@@ -241,9 +241,18 @@ typedef struct dawn_sl_slab {
 /* `batches` occupies the byte that used to be tail padding. The side table is
  * 512KiB on a 64-bit target either way; growing every one of its 16384 rows to
  * carry the incremental state would spend more resident memory than the
- * policy is meant to recover on the small-live-set shape. */
-_Static_assert(sizeof(dawn_sl_slab) == 3 * sizeof(void *) + sizeof(uint32_t) +
-                                           sizeof(uint16_t) + 2 * sizeof(uint8_t),
+ * policy is meant to recover on the small-live-set shape.
+ *
+ * The 32 is a literal rather than a sum over the fields on purpose. A sum
+ * follows the struct wherever it goes: add a field and both sides move
+ * together, and the assertion that is supposed to hold the row size fixed
+ * agrees with the new one. What is being claimed here is the 512KiB in the
+ * sentence above -- 16384 rows of 32 bytes -- so the number that appears in
+ * the claim is the number written down. Every target this allocator is
+ * active on has 8-byte pointers (wasm32 and the bypassed sanitized builds
+ * are excluded in dawn_rt.h); one where the row is not 32 bytes has never
+ * run it, and should stop here rather than quietly carry a bigger table. */
+_Static_assert(sizeof(dawn_sl_slab) == 32,
                "incremental layout must not grow a slab metadata row");
 
 static dawn_sl_slab dawn_sl_grid[DAWN_SL_SLOTS];

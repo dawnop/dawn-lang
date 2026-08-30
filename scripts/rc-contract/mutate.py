@@ -112,6 +112,86 @@ MUTATIONS = {
         "#define DAWN_SL_BATCH ((size_t)32768)",
         "#define DAWN_SL_BATCH ((size_t)65536)",
     ),
+    # A batch tail that walks into the next 64KiB slot. Two guards stop that
+    # today and each one alone is enough, so no single-point edit reaches it:
+    # when a block is wider than a batch, `old_blocks == capacity` can be true
+    # while batches are still left, and the loop below it then runs to
+    # DAWN_SL_BATCHES without finding a new block, which is the second guard.
+    # This replaces both with the shape that has neither -- take the next
+    # block whatever the slot's capacity says -- because the property is only
+    # lost when both are gone. Everything else is left standing: the loop, the
+    # rounding, the batch accounting and the poisoning order are the file's.
+    #
+    # It is invisible to the production configuration, and that is the point.
+    # A 32KiB batch of a class at most 2032 bytes wide always finds a new
+    # complete block, so neither guard is ever reached and rc_test.c cannot
+    # tell this runtime from the real one -- run.sh requires exactly that,
+    # then reads the red set off the 1024-byte-batch binary, where the mutant
+    # hands out a fifty-seventh block starting 1024 bytes before the slot ends.
+    # That block runs 128 bytes into the next slot, which is inside the
+    # reserve and never carved during that run, so the damage is a wrong
+    # address rather than an unmapped write.
+    "slab-tail-crosses-the-slot": (
+        "dawn_rt.c",
+        """  size_t old_blocks = (size_t)s->batches * DAWN_SL_BATCH / bsize;
+  size_t capacity = DAWN_SL_SIZE / bsize;
+  if (old_blocks == capacity) {
+    /* A block wider than a batch can leave a tail of batches that contains no
+     * further complete block. Consume that tail logically instead of walking
+     * the next extension past this 64KiB slot. */
+    s->batches = (uint8_t)DAWN_SL_BATCHES;
+    return 0;
+  }
+  size_t new_batches = (size_t)s->batches;
+  size_t new_blocks = old_blocks;
+  /* Normally this advances once. Keeping the loop makes the allocator remain
+   * a working allocator if a configured block is wider than a batch: the
+   * slow path advances to the first boundary that contains a whole block
+   * instead of installing a NULL free list. */
+  while (new_blocks == old_blocks && new_batches < DAWN_SL_BATCHES) {
+    new_batches++;
+    new_blocks = new_batches * DAWN_SL_BATCH / bsize;
+  }
+  if (new_blocks == old_blocks) {
+    s->batches = (uint8_t)DAWN_SL_BATCHES;
+    return 0;
+  }""",
+        """  size_t old_blocks = (size_t)s->batches * DAWN_SL_BATCH / bsize;
+  size_t new_batches = (size_t)s->batches;
+  size_t new_blocks = old_blocks;
+  while (new_blocks == old_blocks && new_batches < DAWN_SL_BATCHES) {
+    new_batches++;
+    new_blocks = new_batches * DAWN_SL_BATCH / bsize;
+  }
+  if (new_blocks == old_blocks) {
+    new_batches = DAWN_SL_BATCHES;
+    new_blocks = old_blocks + 1;
+  }""",
+    ),
+    # The second `benign` role, and the reason the mutant above has to move
+    # both guards at once. This one drops the `old_blocks == capacity` fast
+    # path and nothing else. It looks like the guard that keeps a batch tail
+    # inside its slot, and it is not: whenever it would have fired, the loop
+    # below it runs out of batches without finding a block and the second
+    # guard clamps in its place. So the whole roster stays green and so does
+    # the 1024-byte-batch contract -- measured here rather than reasoned about
+    # in a comment, which is what separates a redundant guard from a missing
+    # test.
+    "slab-drops-the-redundant-tail-clamp": (
+        "dawn_rt.c",
+        """  size_t old_blocks = (size_t)s->batches * DAWN_SL_BATCH / bsize;
+  size_t capacity = DAWN_SL_SIZE / bsize;
+  if (old_blocks == capacity) {
+    /* A block wider than a batch can leave a tail of batches that contains no
+     * further complete block. Consume that tail logically instead of walking
+     * the next extension past this 64KiB slot. */
+    s->batches = (uint8_t)DAWN_SL_BATCHES;
+    return 0;
+  }
+  size_t new_batches = (size_t)s->batches;""",
+        """  size_t old_blocks = (size_t)s->batches * DAWN_SL_BATCH / bsize;
+  size_t new_batches = (size_t)s->batches;""",
+    ),
     # ---- argument-carrying dictionaries -------------------------------
     #
     # Three ways to get the interning wrong, and the reason all three are

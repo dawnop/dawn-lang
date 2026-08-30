@@ -1,13 +1,15 @@
 # Which assertions each production mutant reddens, and which one owns it.
 #
-# `assert` names the roster, in the order rc_test.c runs it, and `probe` the
-# one poison_probe.c runs, in the order run.sh runs it. The two are separate
-# rosters because they come off different builds -- the assertions off a
-# plain one, the probes off a sanitized one with -DDAWN_SLAB_FORCE -- and a
-# mutant is read off one or the other, never both. The red sets are observed
-# by run.sh and compared with this file; the `owner` line is a hand edit,
-# because which assertion owns a mutant is a design decision and a recorder
-# that could reassign owners would launder the collision it exists to catch.
+# `assert` names the roster, in the order rc_test.c runs it, `probe` the one
+# poison_probe.c runs, and `tail` the one slab_batch_tail.c runs, each in the
+# order run.sh runs it. Three separate rosters because they come off three
+# different builds -- the assertions off a plain one, the probes off a
+# sanitized one with -DDAWN_SLAB_FORCE, the tail check off a plain one with
+# -DDAWN_SL_BATCH=1024 -- and a mutant is read off one of them, never two.
+# The red sets are observed by run.sh and compared with this file; the
+# `owner` line is a hand edit, because which assertion owns a mutant is a
+# design decision and a recorder that could reassign owners would launder the
+# collision it exists to catch.
 #
 # Overlaps are recorded, not forbidden. `revert-adt0-to-fresh-allocation`
 # reaches `none_is_shared` as well, because the runtime's own `None` goes
@@ -76,6 +78,16 @@ probe	slab_poisons_an_unissued_neighbour
 # rather than left as prose that nothing checks.
 probe	slab_misses_an_overflow_into_a_live_neighbour
 
+# A roster of one, on a build the production configuration cannot reach. A
+# 32KiB batch of a class at most 2032 bytes wide always contains a further
+# complete block, so the two guards in dawn_sl_extend that keep a batch tail
+# inside its 64KiB slot are never executed by rc_test.c; at 1024 bytes a
+# 1152-byte class reaches them on its fifty-seventh block. Before this roster
+# existed the leg was run without a red set of its own, and it stayed green
+# against a runtime that had no batching in it at all -- which is to say it
+# was measuring the slot grid, not the policy.
+tail	slab_tail_stays_in_its_slot
+
 control	array_with
 control	immortal
 control	counts
@@ -124,6 +136,34 @@ role	slab-eagerly-materializes	counted
 owner	slab-eagerly-materializes	slab_materializes_on_demand
 red	slab-eagerly-materializes	slab_materializes_on_demand
 
+# The `tail` role: red on its own roster, and required to leave the whole
+# assertion roster byte for byte as the unmutated runtime left it. Both
+# halves are the claim. The mutant drops the two guards that stop a batch
+# tail from being extended past the end of its 64KiB slot, and hands out a
+# fifty-seventh 1152-byte block starting 1024 bytes before the slot ends. In
+# the production configuration that code is unreachable, so rc_test.c is
+# entitled to notice nothing and run.sh checks that it notices nothing --
+# without that half, a leg on its own binary would look like a mutant whose
+# owner someone forgot to put on the main roster.
+#
+# Both guards move together because either one alone is enough: whenever
+# `old_blocks == capacity` fires, the loop under it also runs out of batches
+# without finding a block and the clamp after it does the same job. That is
+# not a guess -- `slab-drops-the-redundant-tail-clamp` below is the first
+# guard removed on its own, and it is recorded as reddening nothing.
+role	slab-tail-crosses-the-slot	tail
+owner	slab-tail-crosses-the-slot	slab_tail_stays_in_its_slot
+red	slab-tail-crosses-the-slot	slab_tail_stays_in_its_slot
+
+# The second `benign` mutant, and the negative half of the pair above: the
+# `old_blocks == capacity` fast path removed and nothing else. It reads like
+# the guard that holds the slot boundary; it is a fast path, and the clamp
+# after the loop covers every case it covers. Recorded rather than argued,
+# because "this guard is redundant" is exactly the kind of claim that is true
+# until someone changes the loop under it. run.sh holds it to the assertion
+# roster and to the tail roster, both green.
+role	slab-drops-the-redundant-tail-clamp	benign
+
 # ---- a handler's state cells ----------------------------------------------
 # The runtime's only overwrite, and so the only release that can be forgotten
 # by omission rather than by a miscount. The mutant drops the `dawn_drop(old)`
@@ -164,12 +204,11 @@ role	dict-intern-ignores-args	counted
 owner	dict-intern-ignores-args	dict_family_is_keyed
 red	dict-intern-ignores-args	dict_family_is_keyed
 
-# The `benign` role, and the only mutant in this file that must stay green.
-# Every key hashes to zero, so the open-addressed table degrades to a linear
-# scan. That costs time and nothing else, and a run that reddened here would
-# be reading the probing rather than the identity -- which is what the two
-# above are about. Recorded rather than omitted, because an untested green
-# and an unexecuted one are the same empty red set.
+# The `benign` role. Every key hashes to zero, so the open-addressed table
+# degrades to a linear scan. That costs time and nothing else, and a run that
+# reddened here would be reading the probing rather than the identity --
+# which is what the two above are about. Recorded rather than omitted,
+# because an untested green and an unexecuted one are the same empty red set.
 role	dict-intern-hash-collides	benign
 
 # The two below are the `poisoned` role: read off the probes, on a build with

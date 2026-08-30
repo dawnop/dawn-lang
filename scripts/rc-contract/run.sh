@@ -36,11 +36,14 @@
 # on purpose, and a leak report would drown the per-assertion answer this run
 # exists to read. A mutant of the *poisoning* is the other way round, because
 # without the sanitizer there is nothing there to break; those are the
-# `poisoned` role in matrix.txt and they are read off the probes. A third
-# role, `benign`, is a positive control: a real edit to the runtime that no
-# assertion here is entitled to notice, held to the baseline output rather
-# than to a red set. Without one, "this mutant reddens nothing" and "this
-# mutant was never built" look identical from the matrix.
+# `poisoned` role in matrix.txt and they are read off the probes. A mutant of
+# the *batch tail* is a third: the production batch of 32KiB never reaches
+# the boundary it moves, so it is read off a build with a 1024-byte batch and
+# is held to leaving the whole assertion roster alone. A fourth role,
+# `benign`, is a positive control: a real edit to the runtime that nothing
+# here is entitled to notice, held to the baseline output rather than to a
+# red set. Without one, "this mutant reddens nothing" and "this mutant was
+# never built" look identical from the matrix.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -126,19 +129,25 @@ echo "== small stack =="
 # Residency questions get a fresh process too. The full roster is still run
 # above to catch interactions, but neither verdict may depend on pages or ASan
 # shadow made resident by an earlier case.
-echo "== isolated slab residency =="
-"$work/rc_plain" --case slab_materializes_on_demand
-"$work/rc_plain" --case slab_returns_pages
+#
+# Both cases are slab cases, so both print SKIP rather than an answer on a
+# build without the allocator -- and a SKIP exits zero, which is a leg that
+# passes without having asked anything. `isolated` is what refuses that.
+isolated() { # asan-options binary label case...
+  local opts="$1" bin="$2" label="$3" case
+  shift 3
+  for case in "$@"; do
+    ASAN_OPTIONS="$opts" "$bin" --case "$case" > "$work/isolated.out"
+    cat "$work/isolated.out"
+    if grep -q ' SKIP$' "$work/isolated.out"; then
+      fail "$case skipped on the $label build; the isolated leg asked nothing"
+    fi
+  done
+}
 
-# A batch smaller than a size class can end with no further complete block in
-# the logical slab. Keep that supported configuration as a narrow contract:
-# the slow path must consume the tail and move to the next 64KiB slot rather
-# than extending the last block through the slot boundary.
-echo "== slab batch tail =="
-"$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
-  -DDAWN_SL_BATCH=1024 "${warn[@]}" -I "$root/runtime/c" \
-  -o "$work/slab_batch_tail" "$here/slab_batch_tail.c" "$root/runtime/c/dawn_rt.c"
-"$work/slab_batch_tail"
+echo "== isolated slab residency =="
+isolated "" "$work/rc_plain" plain \
+  slab_materializes_on_demand slab_returns_pages
 
 # The roster the matrix names has to be the roster the binary runs, or the
 # comparison below is between two different questions.
@@ -161,6 +170,36 @@ build_poisoned() { # runtime-dir source output
     -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     "${warn[@]}" -I "$1" -o "$3" "$2" "$1/dawn_rt.c"
 }
+
+# The third configuration, and the only one in which a batch tail exists: a
+# 1024-byte batch under a 1152-byte class. The production 32KiB batch cannot
+# produce one, so this build is where the boundary is observable at all.
+build_tail() { # runtime-dir output
+  "$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+    -DDAWN_SL_BATCH=1024 "${warn[@]}" -I "$1" \
+    -o "$2" "$here/slab_batch_tail.c" "$1/dawn_rt.c"
+}
+
+# A batch smaller than a size class can end with no further complete block in
+# the logical slab. Keep that supported configuration as a narrow contract:
+# the slow path must consume the tail and move to the next 64KiB slot rather
+# than extending the last block through the slot boundary.
+#
+# It has a roster in matrix.txt and a mutant that owns it, which it did not
+# have when it was written: a leg that only ever runs against a correct
+# runtime is a leg whose green means nothing, and this one was green against
+# a runtime with no batching in it at all.
+echo "== slab batch tail =="
+build_tail "$root/runtime/c" "$work/tail"
+"$work/tail" > "$work/tail_baseline.out"
+cat "$work/tail_baseline.out"
+awk -F '\t' '$1 == "tail" { print $2 }' "$here/matrix.txt" > "$work/tail_roster.txt"
+awk '{ print $1 }' "$work/tail_baseline.out" > "$work/tail_ran.txt"
+diff -u "$work/tail_roster.txt" "$work/tail_ran.txt" ||
+  fail "matrix.txt names a different tail roster than slab_batch_tail.c runs"
+if grep -q ' FAIL$' "$work/tail_baseline.out"; then
+  fail "the unmutated runtime extends a batch tail past its logical slab"
+fi
 
 # One process per probe, because the sanitizer's verdict is an abort and not
 # a line of output. The verdict becomes the same `<name> PASS|FAIL` stream
@@ -216,8 +255,8 @@ if grep -q ' FAIL$' "$work/forced.out"; then
 fi
 
 echo "== isolated slab residency, sanitized =="
-ASAN_OPTIONS="$asan_opts" "$work/rc_asan_slab" --case slab_materializes_on_demand
-ASAN_OPTIONS="$asan_opts" "$work/rc_asan_slab" --case slab_returns_pages
+isolated "$asan_opts" "$work/rc_asan_slab" forced \
+  slab_materializes_on_demand slab_returns_pages
 
 awk -F '\t' '$1 == "probe" { print $2 }' "$here/matrix.txt" > "$work/probe_roster.txt"
 cut -f1 <<< "$probes" > "$work/probe_ran.txt"
@@ -266,6 +305,31 @@ while IFS=$'\t' read -r mutation role; do
   fi
   build_plain "$dir" "$dir/rc_test" > "$dir/cc.out" 2>&1 ||
     { cat "$dir/cc.out" >&2; fail "$mutation did not compile"; }
+  if [ "$role" = tail ]; then
+    # Two claims, and the harness reads both. The production configuration
+    # must not notice: the code this mutant edits is unreachable at a 32KiB
+    # batch, so the whole roster stays byte for byte what the unmutated
+    # runtime printed. Then the 1024-byte-batch build, where the boundary
+    # exists, has to go red. Dropping either half would leave a leg that
+    # cannot fail or a mutant whose owner is somewhere nobody looks.
+    "$dir/rc_test" > "$dir/out.txt" 2> "$dir/err.txt" ||
+      { cat "$dir/out.txt" "$dir/err.txt" >&2
+        fail "$mutation did not leave the production roster alone"; }
+    diff -u "$work/baseline.out" "$dir/out.txt" ||
+      fail "$mutation changed an answer the production batch is entitled to keep"
+    build_tail "$dir" "$dir/tail" >> "$dir/cc.out" 2>&1 ||
+      { cat "$dir/cc.out" >&2; fail "$mutation did not compile"; }
+    set +e
+    "$dir/tail" > "$dir/tail.txt" 2> "$dir/tail.err"
+    status=$?
+    set -e
+    [ "$status" -lt 128 ] || fail "$mutation died on signal $((status - 128))"
+    grep -q ' FAIL$' "$dir/tail.txt" || fail "$mutation reddened no tail check"
+    awk -v m="$mutation" '$2 == "FAIL" { printf "red\t%s\t%s\n", m, $1 }' \
+      "$dir/tail.txt" >> "$observed"
+    echo "OK   $mutation"
+    continue
+  fi
   # A mutant is expected to exit nonzero; what must not happen is a crash or a
   # signal, which would mean the red set was never fully observed.
   set +e
@@ -281,6 +345,16 @@ while IFS=$'\t' read -r mutation role; do
     [ "$status" -eq 0 ] || { cat "$dir/out.txt" >&2; fail "$mutation reddened something"; }
     diff -u "$work/baseline.out" "$dir/out.txt" ||
       fail "$mutation changed an answer"
+    # Both rosters, because one of the two benign mutants edits code that only
+    # the 1024-byte-batch build reaches: held to the assertion roster alone,
+    # its green would be the green of a build that never executed it.
+    build_tail "$dir" "$dir/tail" >> "$dir/cc.out" 2>&1 ||
+      { cat "$dir/cc.out" >&2; fail "$mutation did not compile"; }
+    "$dir/tail" > "$dir/tail.txt" 2> "$dir/tail.err" ||
+      { cat "$dir/tail.txt" "$dir/tail.err" >&2
+        fail "$mutation reddened the tail check"; }
+    diff -u "$work/tail_baseline.out" "$dir/tail.txt" ||
+      fail "$mutation changed a tail verdict"
     echo "OK   $mutation (stays green, as recorded)"
     continue
   fi
