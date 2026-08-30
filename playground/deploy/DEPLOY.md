@@ -30,6 +30,7 @@ by hand, with the server reachable.
    /opt/dawn/playground/sandbox/            # sandbox scripts (rsynced)
    /opt/dawn/playground/deploy/             # systemd/nginx source snippets (rsynced)
    /opt/dawn/packages/                       # path-deps the runner imports (rsynced)
+   /opt/dawn/site/play-ui/samples/           # starter samples, read by lsp-measure (rsynced)
    ```
    The runner's `main.dawn` imports the `web`/`json` packages by path
    (`playground/dawn.toml` → `../packages`), so `packages/` must sit beside
@@ -113,6 +114,11 @@ python3 -B playground/deploy/lsp-measure.py \
   --host-label production-cgroup --harness-commit <commit> \
   --output /new/path/lsp-measure.tsv
 ```
+
+The sample scenario reads the five starter programs from `site/play-ui/samples/`
+relative to the harness, which is why the layout above keeps that directory
+beside `playground/` on the server. Point `--samples` at another directory to
+measure a different set; the failure names the directory it searched.
 
 The checked-in WSL2 run is development evidence only. Apply the admission math
 and stop conditions in `docs/playground-lsp-design.md` to production results;

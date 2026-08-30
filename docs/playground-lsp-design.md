@@ -230,7 +230,7 @@ python3 -B playground/deploy/lsp-measure.py \
 | completion 超过 750 ms | 取消 UI 等待并立即给 static completion；不为此再启动一次编译 |
 | hover / definition 超过 1 s | 本次显示 unavailable；编辑不被阻塞 |
 | diagnostics 3 s 未到 | 关闭慢 session，下一次输入停顿回 `/api/check`；旧诊断在新结果前保留 |
-| child / gateway 中途断开 | 保留当前 buffer 和最后诊断，带 jitter 重连一次；失败后保持 fallback |
+| child / gateway 中途断开 | 保留当前 buffer 和最后诊断，带 jitter 重连一次；失败后保持 fallback。重连预算只在一条连接 ready 满 60 秒之后才回填，连上就断的 gateway 因此不会被反复重连 |
 
 client 每次送 Full sync 时记本地 generation 与文本 snapshot。`publishDiagnostics` 到达时，只有
 当前 editor 仍是那个 snapshot 才应用；否则丢掉旧结果，等待后续 sync。这不要求改现有 LSP

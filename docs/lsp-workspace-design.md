@@ -269,11 +269,12 @@ shutdown request、正常/异常 `exit`、EOF 与 fatal framing 都执行 `close
 `lease.close` 由 `catch_panic` 隔离并记录错误，不能阻止其他 workspace 或 standalone lease
 继续关闭；state 随后清空所有 lease ownership，shutdown 后再 exit 不会重复关闭。
 
-## 9. 18×18 行为合同
+## 9. 18 例 × 20 mutant 行为合同
 
 `scripts/lsp-workspace-contract/` 在私有 selfhost 副本上运行 18 个真实 JSON-RPC 正例，并为
-每个边界编译一个 mutant。每个 mutant 必须先编译成功，再只运行 owning case；只有出现该 case
-唯一的 failure label 才算负控见红，build failure、timeout、协议错误或无关 assertion 都不算。
+每个边界编译一个 mutant，共 20 个：`diagnostics-current` 与 `did-close` 各拥有两个，其余一
+例一个。每个 mutant 必须先编译成功，再只运行 owning case；只有出现该 case 唯一的 failure
+label 才算负控见红，build failure、timeout、协议错误或无关 assertion 都不算。
 
 18 个正例覆盖：
 

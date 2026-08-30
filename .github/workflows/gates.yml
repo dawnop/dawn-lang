@@ -730,7 +730,7 @@ jobs:
         run: ./scripts/jsig-lease-contract/run.sh
 
   # Slice D owns private source overlays, a fixture-only Maven repository and
-  # nineteen compiling selfhost mutants. It shares no mutable fixture state
+  # twenty compiling selfhost mutants. It shares no mutable fixture state
   # with the broad test job, so keeping it independent makes failures
   # attributable and keeps the same gate in branch and release workflows.
   #
@@ -744,8 +744,17 @@ jobs:
     # 403s predicted (196s + 168s moved in); 370s then 421s measured on two
     # consecutive runs of the same tree -- a 14% spread on identical work, the
     # same non-reproducibility `native-diff` documents. Budget the worse one.
-    # budget: 3x 421s worst observed
-    timeout-minutes: 22
+    #
+    # That pair was observed with eighteen mutants, and neither of the two
+    # added since restated it (drop-diagnostics-version, unopened-version-zero).
+    # A mutant costs one private selfhost build plus its owning case: 5.1s
+    # locally, three runs, 4.4s build + 0.7s case, 0.2s spread. This job runs
+    # about 3.1x slower on the runner than locally (421s over nineteen builds
+    # against 7.0s per build locally), which over-states the per-mutant figure
+    # because the gates moved in here are inside the 421s and outside that
+    # division. 16s each on the runner, so 421s + 2 x 16s.
+    # budget: 3x 453s planning value (421s observed at eighteen mutants, two added at 16s each)
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain

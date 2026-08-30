@@ -67,6 +67,8 @@ rsync -avz playground/sandbox/ "$HOST:$REMOTE/playground/sandbox/"
 rsync -avz playground/deploy/ "$HOST:$REMOTE/playground/deploy/"
 # Keep lsp-measure.py's deployed default repo-shaped: its location under
 # /opt/dawn/playground/deploy resolves these samples under /opt/dawn/site.
+# --delete: the tree is the only source of these files, so anything left in the
+# directory by hand is removed rather than kept beside a measurement run.
 rsync -avz --delete site/play-ui/samples/ \
   "$HOST:$REMOTE/site/play-ui/samples/"
 
