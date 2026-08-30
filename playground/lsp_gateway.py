@@ -800,11 +800,27 @@ class ClientProtocol:
                     for key, value in diagnostic.items()
                     if key not in {"relatedInformation", "data"}
                 })
+            safe_params: dict[str, Any] = {
+                "uri": DOCUMENT_URI,
+                "diagnostics": diagnostics,
+            }
+            if "version" in params:
+                version = params["version"]
+                if (
+                    not isinstance(version, int)
+                    or isinstance(version, bool)
+                    or version < -2_147_483_648
+                    or version > 2_147_483_647
+                ):
+                    raise ChildProtocolError(
+                        "child emitted an invalid diagnostics version"
+                    )
+                safe_params["version"] = version
             return compact_json(
                 {
                     "jsonrpc": "2.0",
                     "method": "textDocument/publishDiagnostics",
-                    "params": {"uri": DOCUMENT_URI, "diagnostics": diagnostics},
+                    "params": safe_params,
                 }
             )
 

@@ -310,15 +310,19 @@ class LspClient:
         self.stderr_file.close()
 
 
-def diagnostics(frames, uri):
+def diagnostic_publishes(frames, uri):
     found = []
     for item in frames:
         if item.get("method") != "textDocument/publishDiagnostics":
             continue
         params = item.get("params", {})
         if params.get("uri") == uri:
-            found.append(params.get("diagnostics"))
+            found.append(params)
     return found
+
+
+def diagnostics(frames, uri):
+    return [params.get("diagnostics") for params in diagnostic_publishes(frames, uri)]
 
 
 def latest_diagnostics(frames, uri, label):
@@ -668,15 +672,30 @@ class Contract:
             client.send(did_open(a_uri, a_text))
             client.send(did_open(b_uri, b_text))
             client.barrier(mark)
+            intermediate = "pub fn alpha() -> Int = absent_alpha_intermediate\n"
             changed = "pub fn alpha() -> Int = absent_alpha_again\n"
             mark = client.mark()
-            client.send(did_change(a_uri, changed, 2))
+            client.send(did_change(a_uri, intermediate, 2))
+            client.send(did_change(a_uri, changed, 7))
             epoch = client.barrier(mark)
-            require(latest_diagnostics(epoch, a_uri, "WORKSPACE_DIAGNOSTICS_CURRENT_ONLY"),
+            a_diagnostics = latest_diagnostics(
+                epoch, a_uri, "WORKSPACE_DIAGNOSTICS_CURRENT_ONLY")
+            require(a_diagnostics,
                     "WORKSPACE_DIAGNOSTICS_CURRENT_ONLY", "trigger URI lost its diagnostic")
             require(latest_diagnostics(epoch, b_uri, "WORKSPACE_DIAGNOSTICS_CURRENT_ONLY"),
                     "WORKSPACE_DIAGNOSTICS_CURRENT_ONLY",
                     "non-trigger workspace URI was not republished")
+            a_publish = diagnostic_publishes(epoch, a_uri)[-1]
+            b_publish = diagnostic_publishes(epoch, b_uri)[-1]
+            require(
+                a_publish.get("version") == 7
+                and b_publish.get("version") == 1
+                and any("absent_alpha_again" in message
+                        for message in messages(a_diagnostics)),
+                "DIAGNOSTIC_VERSION_MISSING",
+                "publishDiagnostics did not identify each analyzed document version: "
+                f"a={a_publish.get('version')!r} b={b_publish.get('version')!r} "
+                f"messages={messages(a_diagnostics)!r}")
         finally:
             self.close_client(client)
 

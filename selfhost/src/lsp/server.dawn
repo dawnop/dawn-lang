@@ -425,6 +425,7 @@ type DocAnalysis =
 
 type Doc = {
   uri: String,
+  version: Int,
   path: Option[String],
   canonical_path: Option[String],
   text: String,
@@ -697,7 +698,7 @@ pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !io = {
   # analyses still happen in the order the client asked for. Only repeats of
   # the same document coalesce — which is the whole point, since `didChange`
   # is Full sync and each one supersedes the last.
-  var pending: Option[(String, String)] = None
+  var pending: Option[(String, String, Int)] = None
   var serving = true
   var exit_status: Option[Int] = None
   while serving {
@@ -723,15 +724,15 @@ pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !io = {
             LgDispatch ->
               match update_of(msg) {
                 Some(u) -> {
-                  let (uri, text) = u
+                  let (uri, text, version) = u
                   match pending {
                     Some(p0) -> {
-                      let (uri0, _) = p0
+                      let (uri0, _, _) = p0
                       if uri0 != uri { st = flush(st, pending) }
                     }
                     None -> ()
                   }
-                  pending = Some((uri, text))
+                  pending = Some((uri, text, version))
                 }
                 # Anything else may read the analysed program or write about it,
                 # so the deferred work has to have happened first. That is also
@@ -811,23 +812,24 @@ pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !io = {
 const DEBOUNCE_MS: Int = 150
 
 ## Run the analysis a document sync deferred, if there is one.
-fn flush(st: LspState, pending: Option[(String, String)]) -> LspState !io =
+fn flush(st: LspState, pending: Option[(String, String, Int)]) -> LspState !io =
   match pending {
     Some(p) -> {
-      let (uri, text) = p
-      update_doc(st, uri, text)
+      let (uri, text, version) = p
+      update_doc(st, uri, text, version)
     }
     None -> st
   }
 
-## The (uri, text) a document-sync notification carries, or `None` when the
-## message is anything else.
+## The (uri, text, version) a document-sync notification carries, or `None`
+## when the message is anything else. Keeping the version beside the text is
+## what makes a debounced publish name the snapshot it actually analyzed.
 ##
 ## A sync notification with no text in it — `didChange` with an empty
 ## `contentChanges` — is `None` too, and lands in `handle` where it has always
 ## been ignored. There is nothing to defer about an update that carries no
 ## document.
-fn update_of(msg: Json) -> Option[(String, String)] = {
+fn update_of(msg: Json) -> Option[(String, String, Int)] = {
   let method = ostr(msg, "method")
   let params = match oget(msg, "params") {
     Some(j) -> j
@@ -835,12 +837,12 @@ fn update_of(msg: Json) -> Option[(String, String)] = {
   }
   let td = get_or_null(params, "textDocument")
   if method == "textDocument/didOpen" {
-    Some((ostr(td, "uri"), ostr(td, "text")))
+    Some((ostr(td, "uri"), ostr(td, "text"), oint(td, "version")))
   } else if method == "textDocument/didChange" {
     match oget(params, "contentChanges") {
       Some(JArr(changes)) ->
         match get(changes, 0) {
-          Some(c) -> Some((ostr(td, "uri"), ostr(c, "text")))
+          Some(c) -> Some((ostr(td, "uri"), ostr(c, "text"), oint(td, "version")))
           None -> None
         }
       _ -> None
@@ -1439,10 +1441,15 @@ fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !io = {
 
 fn publish_uris(st: LspState, uris: Set[String]) -> Unit !io = {
   for uri in sort(set.to_list(uris)) {
-    notify("textDocument/publishDiagnostics", jobj([
+    var fields: List[(String, Json)] = [
       ("uri", JStr(uri)),
       ("diagnostics", JArr(diagnostics_for_uri(st, uri)))
-    ]))
+    ]
+    match map.get(st.docs, uri) {
+      Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+      None -> ()
+    }
+    notify("textDocument/publishDiagnostics", jobj(fields))
   }
 }
 
@@ -1467,6 +1474,7 @@ fn standalone_doc(
   path: Option[String],
   canonical_path: Option[String],
   text: String,
+  version: Int,
   modules: Option[Map[String, String]]
 ) -> Doc !io = {
   let source_path = match path {
@@ -1479,6 +1487,7 @@ fn standalone_doc(
   }
   Doc {
     uri: uri,
+    version: version,
     path: path,
     canonical_path: canonical_path,
     text: text,
@@ -1488,12 +1497,12 @@ fn standalone_doc(
   }
 }
 
-fn open_new_doc(st0: LspState, uri: String, text: String) -> LspState !io =
+fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !io =
   match uri_to_path(uri) {
     None -> {
       let no_path: Option[String] = None
       let no_modules: Option[Map[String, String]] = None
-      let d = standalone_doc(st0, uri, no_path, no_path, text, no_modules)
+      let d = standalone_doc(st0, uri, no_path, no_path, text, version, no_modules)
       let st = LspState { ..st0, docs: map.insert(st0.docs, uri, d) }
       publish_uris(st, set.from([uri]))
       st
@@ -1504,7 +1513,8 @@ fn open_new_doc(st0: LspState, uri: String, text: String) -> LspState !io =
       match project_module_path(plan, path) {
         None -> {
           let modules: Option[Map[String, String]] = Some(plan.modules.by_use)
-          let d = standalone_doc(st0, uri, Some(path), Some(canonical_path), text, modules)
+          let d = standalone_doc(
+            st0, uri, Some(path), Some(canonical_path), text, version, modules)
           let st = LspState { ..st0, docs: map.insert(st0.docs, uri, d) }
           publish_uris(st, set.from([uri]))
           st
@@ -1513,6 +1523,7 @@ fn open_new_doc(st0: LspState, uri: String, text: String) -> LspState !io =
           let identity = workspace_identity(plan)
           let d = Doc {
             uri: uri,
+            version: version,
             path: Some(path),
             canonical_path: Some(canonical_path),
             text: text,
@@ -1552,7 +1563,7 @@ fn open_new_doc(st0: LspState, uri: String, text: String) -> LspState !io =
     }
   }
 
-fn update_existing_doc(st0: LspState, old: Doc, text: String) -> LspState !io =
+fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> LspState !io =
   match old.analysis {
     Standalone(_, _, modules) -> {
       let source_path = match old.path {
@@ -1567,6 +1578,7 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String) -> LspState !io =
       # analysis, and an edit re-runs the analysis
       let d = Doc {
         ..old,
+        version: version,
         text: text,
         view: view_of(text),
         ls: line_starts_of(text),
@@ -1579,6 +1591,7 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String) -> LspState !io =
     WorkspaceMember(identity) -> {
       let d = Doc {
         ..old,
+        version: version,
         text: text,
         view: view_of(text),
         ls: line_starts_of(text)
@@ -1595,10 +1608,10 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String) -> LspState !io =
     }
   }
 
-fn update_doc(st: LspState, uri: String, text: String) -> LspState !io =
+fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState !io =
   match map.get(st.docs, uri) {
-    Some(old) -> update_existing_doc(st, old, text)
-    None -> open_new_doc(st, uri, text)
+    Some(old) -> update_existing_doc(st, old, text, version)
+    None -> open_new_doc(st, uri, text, version)
   }
 
 ## An unavailable root retries only at an explicit low-frequency boundary.
@@ -1977,7 +1990,7 @@ test "a bundled std buffer keeps its std identity through the document seam" {
   }
   let no_modules: Option[Map[String, String]] = None
   let d = standalone_doc(st, "file://" ++ canon(path), Some(path), Some(canon(path)),
-    text, no_modules)
+    text, 0, no_modules)
   match d.analysis {
     Standalone(prog, entry, _) -> {
       assert len(prog.diags) == 0
@@ -2005,7 +2018,7 @@ test "a bundled std buffer keeps its std identity through the document seam" {
     Err(e) -> panic("test setup: " ++ e.message)
   }
   let d2 = standalone_doc(st, "file://" ++ elsewhere, Some(elsewhere),
-    Some(canon(elsewhere)), text, no_modules)
+    Some(canon(elsewhere)), text, 0, no_modules)
   match d2.analysis {
     Standalone(prog2, entry2, _) -> {
       assert entry2 == "main"
@@ -2093,7 +2106,7 @@ fn def_probe_doc_named(st: LspState, name: String, text: String) -> Doc !io = {
   def_probe_put(path, text)
   let no_modules: Option[Map[String, String]] = None
   standalone_doc(st, path_to_uri(canon(path)), Some(path), Some(canon(path)), text,
-    no_modules)
+    0, no_modules)
 }
 
 fn def_probe_doc(st: LspState, text: String) -> Doc !io =
