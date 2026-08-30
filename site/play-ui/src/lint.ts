@@ -1,8 +1,12 @@
-// Live diagnostics: after an idle pause, POST the buffer to the playground's
-// compile-only endpoint (/api/check) and turn the compiler's own report into
-// editor squiggles. Transient failures — busy server (429), rate limiting,
-// network — keep the previous diagnostics instead of flashing them away.
-import { linter, forEachDiagnostic, type Diagnostic } from '@codemirror/lint'
+// Diagnostic adapters for both live LSP ranges and the compile-only /api/check
+// fallback. Transient HTTP failures keep the previous squiggles rather than
+// flashing them away.
+import {
+  linter,
+  forEachDiagnostic,
+  setDiagnostics,
+  type Diagnostic,
+} from '@codemirror/lint'
 import type { Text } from '@codemirror/state'
 import {
   Decoration,
@@ -12,6 +16,7 @@ import {
   type DecorationSet,
   type ViewUpdate,
 } from '@codemirror/view'
+import { lspDiagnostics, type DawnLspClient } from './lsp'
 
 // Parse the compiler's report format:
 //   error: <message>
@@ -143,4 +148,110 @@ export function dawnLint(endpoint: string) {
     },
     { delay: 1000 },
   )
+}
+
+// LSP owns diagnostics while its session is healthy. When the session is not
+// available, this switches the same CodeMirror diagnostic state back to the
+// existing /api/check endpoint. Only the source that currently owns that state
+// may publish, so a late HTTP response cannot overwrite fresh LSP diagnostics.
+export function dawnDiagnostics(endpoint: string, lsp: DawnLspClient) {
+  return ViewPlugin.fromClass(class {
+    private timer: ReturnType<typeof setTimeout> | null = null
+    private abort: AbortController | null = null
+    private serial = 0
+    private destroyed = false
+    private readonly removeStatusListener: () => void
+    private readonly removeDiagnosticsListener: () => void
+
+    constructor(readonly view: EditorView) {
+      this.removeDiagnosticsListener = lsp.onDiagnostics((event) => {
+        if (event.text !== this.view.state.doc.toString()) return
+        this.cancelHttp()
+        this.publish(lspDiagnostics(event.diagnostics, event.text), event.text)
+      })
+      this.removeStatusListener = lsp.onStatus((status) => {
+        if (status === 'fallback') this.scheduleHttp(0)
+        else this.cancelHttp()
+      })
+    }
+
+    update(update: ViewUpdate) {
+      if (!update.docChanged) return
+      const text = update.state.doc.toString()
+      if (!text.trim()) {
+        this.cancelHttp()
+        this.publish([], text)
+      } else if (lsp.status === 'fallback') {
+        this.scheduleHttp(1000)
+      } else {
+        this.cancelHttp()
+      }
+    }
+
+    destroy() {
+      this.destroyed = true
+      this.cancelHttp()
+      this.removeStatusListener()
+      this.removeDiagnosticsListener()
+    }
+
+    private scheduleHttp(delay: number) {
+      this.cancelHttp()
+      if (!this.view.state.doc.toString().trim()) {
+        this.publish([], this.view.state.doc.toString())
+        return
+      }
+      this.timer = setTimeout(() => {
+        this.timer = null
+        void this.checkWithHttp()
+      }, delay)
+    }
+
+    private cancelHttp() {
+      this.serial++
+      if (this.timer != null) clearTimeout(this.timer)
+      this.timer = null
+      this.abort?.abort()
+      this.abort = null
+    }
+
+    private publish(diagnostics: Diagnostic[], text: string, serial?: number) {
+      queueMicrotask(() => {
+        if (this.destroyed || this.view.state.doc.toString() !== text) return
+        if (serial != null && serial !== this.serial) return
+        this.view.dispatch(setDiagnostics(this.view.state, diagnostics))
+      })
+    }
+
+    private async checkWithHttp() {
+      if (lsp.status !== 'fallback') return
+      const text = this.view.state.doc.toString()
+      if (!text.trim()) {
+        this.publish([], text)
+        return
+      }
+      const serial = ++this.serial
+      const abort = new AbortController()
+      this.abort = abort
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: text }),
+          signal: abort.signal,
+        })
+        if (!response.ok || serial !== this.serial || lsp.status !== 'fallback') return
+        const result = await response.json() as { ok?: boolean; phase?: string; output?: string }
+        if (serial !== this.serial || lsp.status !== 'fallback') return
+        const diagnostics = result.phase === 'compile'
+          ? parseDawnDiagnostics(result.output ?? '', this.view.state.doc)
+          : result.ok ? [] : null
+        if (diagnostics != null) this.publish(diagnostics, text, serial)
+      } catch {
+        // Busy, network and abort failures deliberately preserve the last set.
+      } finally {
+        if (this.abort === abort) this.abort = null
+      }
+    }
+  })
 }

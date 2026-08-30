@@ -14,6 +14,7 @@ import {
   autocompletion,
   type CompletionContext,
   type CompletionResult,
+  type CompletionSource,
 } from '@codemirror/autocomplete'
 import { BUILTINS } from './builtins.generated'
 
@@ -317,9 +318,9 @@ export function dawnCompletions(context: CompletionContext): CompletionResult | 
   return { from, options: filtered, validFor: /^[A-Za-z0-9_]*$/ }
 }
 
-export function dawn(): LanguageSupport {
+export function dawn(completionSource: CompletionSource = dawnCompletions): LanguageSupport {
   return new LanguageSupport(dawnMode, [
     syntaxHighlighting(dawnHighlight),
-    autocompletion({ override: [dawnCompletions] }),
+    autocompletion({ override: [completionSource] }),
   ])
 }

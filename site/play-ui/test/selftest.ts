@@ -3,6 +3,19 @@ import { parseDawnDiagnostics } from '../src/lint'
 import { EditorState, Text } from '@codemirror/state'
 import { ensureSyntaxTree } from '@codemirror/language'
 import { CompletionContext } from '@codemirror/autocomplete'
+import {
+  DAWN_LSP_PROTOCOL,
+  DAWN_LSP_URI,
+  DawnLspClient,
+  hoverText,
+  lspCompletionSource,
+  lspDiagnostics,
+  lspPositionToOffset,
+  lspWebSocketUrl,
+  mergeCompletionResults,
+  offsetToLspPosition,
+  type LspSocket,
+} from '../src/lsp'
 
 let fails = 0
 function expect(name: string, got: unknown, want: unknown) {
@@ -79,6 +92,190 @@ const un = completeAt('pub fn main() -> Uni‸')
 expect('builtin type Unit completes', un!.options.some((o) => o.label === 'Unit'), true)
 const self = completeAt('fn solo() -> Int = so‸')
 expect('recursive self-reference completes', self!.options.some((o) => o.label === 'solo'), true)
+
+// ---- browser/LSP adapter: UTF-16 ranges and safe result shaping ----
+const unicode = 'α😀z\nnext'
+expect('offset -> LSP UTF-16', offsetToLspPosition(unicode, 3), { line: 0, character: 3 })
+expect('offset -> LSP second line', offsetToLspPosition(unicode, 7), { line: 1, character: 2 })
+expect('LSP UTF-16 -> offset', lspPositionToOffset(unicode, { line: 0, character: 3 }), 3)
+const unicodeDiagnostic = lspDiagnostics([{
+  range: { start: { line: 0, character: 1 }, end: { line: 0, character: 3 } },
+  severity: 2,
+  message: 'emoji warning',
+}], unicode)[0]
+expect(
+  'LSP diagnostic UTF-16 span',
+  [unicodeDiagnostic.from, unicodeDiagnostic.to, unicodeDiagnostic.severity],
+  [1, 3, 'warning'],
+)
+expect('HTTPS endpoint becomes WSS', lspWebSocketUrl('/api/lsp', 'https://example.test/play'), 'wss://example.test/api/lsp')
+expect('markdown hover fence is plain text', hoverText('```dawn\nfn f() -> Int\n```'), 'fn f() -> Int')
+const merged = mergeCompletionResults(
+  [{ label: 'same', detail: 'server' }, { label: 'semantic' }],
+  { from: 4, options: [{ label: 'same', detail: 'static' }, { label: 'builtin' }] },
+)
+expect('completion is server-first and deduplicated', merged.options.map((o) => [o.label, o.detail]), [
+  ['same', 'server'], ['semantic', undefined], ['builtin', undefined],
+])
+let semanticCalls = 0
+const semanticSource = lspCompletionSource({
+  isReady: () => true,
+  completion: async () => {
+    semanticCalls++
+    return [{ label: 'playground', kind: 9, sortText: '0playground' }]
+  },
+} as unknown as DawnLspClient, dawnCompletions)
+const useState = EditorState.create({ doc: 'use pl' })
+const useResult = await semanticSource(new CompletionContext(useState, useState.doc.length, false))
+expect('LSP handles and orders use completion absent from static source', [
+  semanticCalls, useResult?.options[0].label, useResult?.options[0].sortText,
+], [1, 'playground', '0playground'])
+const rejectedSemanticSource = lspCompletionSource({
+  isReady: () => true,
+  completion: async () => { throw new Error('timed out') },
+} as unknown as DawnLspClient, dawnCompletions)
+const staticFallbackState = EditorState.create({ doc: 'fn solo() -> Int = so' })
+const staticFallback = await rejectedSemanticSource(new CompletionContext(
+  staticFallbackState,
+  staticFallbackState.doc.length,
+  false,
+))
+expect('semantic completion failure returns static completion',
+  staticFallback?.options.some((item) => item.label === 'solo'), true)
+
+// ---- fake gateway: handshake, serialized Full sync and stale suppression ----
+class FakeSocket implements LspSocket {
+  readyState = 0
+  protocol = ''
+  onopen: (() => void) | null = null
+  onmessage: ((event: { data: unknown }) => void) | null = null
+  onerror: (() => void) | null = null
+  onclose: (() => void) | null = null
+  readonly sent: Record<string, any>[] = []
+
+  constructor(readonly requestedProtocol: string) {}
+
+  open() {
+    this.readyState = 1
+    this.protocol = this.requestedProtocol
+    this.onopen?.()
+  }
+
+  receive(message: Record<string, unknown>) {
+    this.onmessage?.({ data: JSON.stringify({ jsonrpc: '2.0', ...message }) })
+  }
+
+  send(data: string) {
+    this.sent.push(JSON.parse(data))
+  }
+
+  close() {
+    this.readyState = 3
+  }
+}
+
+const tick = async () => { await Promise.resolve() }
+let socket!: FakeSocket
+const client = new DawnLspClient(
+  'ws://example.test/api/lsp',
+  (_url, protocol) => (socket = new FakeSocket(protocol)),
+  () => 0,
+)
+const published: string[] = []
+client.onDiagnostics((event) => published.push(event.text))
+client.start('first')
+socket.open()
+expect('requested fixed subprotocol', socket.requestedProtocol, DAWN_LSP_PROTOCOL)
+expect('initialize is first', socket.sent[0].method, 'initialize')
+socket.receive({ id: socket.sent[0].id, result: { capabilities: {} } })
+await tick()
+expect('fixed initialize/open sequence', socket.sent.slice(1).map((m) => m.method), [
+  'initialized', 'textDocument/didOpen',
+])
+expect('didOpen fixed URI', socket.sent[2].params.textDocument.uri, DAWN_LSP_URI)
+
+client.update('second')
+expect('change waits for prior diagnostics', socket.sent.filter((m) => m.method === 'textDocument/didChange').length, 0)
+socket.receive({
+  method: 'textDocument/publishDiagnostics',
+  params: { uri: DAWN_LSP_URI, diagnostics: [] },
+})
+expect('stale diagnostics discarded', published, [])
+expect('latest Full sync follows stale diagnostics', socket.sent.at(-1)?.params.contentChanges, [{ text: 'second' }])
+socket.receive({
+  method: 'textDocument/publishDiagnostics',
+  params: { uri: DAWN_LSP_URI, diagnostics: [] },
+})
+expect('current diagnostics published once', published, ['second'])
+
+const completion = client.completion(3)
+await tick()
+const completionRequest = socket.sent.at(-1)!
+expect('completion sees diagnosed snapshot', [completionRequest.method, completionRequest.params.position], [
+  'textDocument/completion', { line: 0, character: 3 },
+])
+socket.receive({ id: completionRequest.id, result: [{ label: 'semantic', kind: 3 }] })
+expect('completion response', (await completion).map((item) => item.label), ['semantic'])
+
+const oldDefinition = client.definition(0).then(() => 'resolved', () => 'rejected')
+await tick()
+const oldDefinitionRequest = socket.sent.at(-1)!
+const currentDefinition = client.definition(1)
+await tick()
+const currentDefinitionRequest = socket.sent.at(-1)!
+socket.receive({ id: currentDefinitionRequest.id, result: [] })
+expect('latest same-buffer definition resolves', await currentDefinition, [])
+socket.receive({ id: oldDefinitionRequest.id, result: [] })
+expect('out-of-order older definition is rejected', await oldDefinition, 'rejected')
+
+const staleHover = client.hover(0).then(() => 'resolved', () => 'rejected')
+await tick()
+const hoverRequest = socket.sent.at(-1)!
+client.update('third')
+socket.receive({ id: hoverRequest.id, result: { contents: 'old' } })
+expect('edited buffer rejects stale query response', await staleHover, 'rejected')
+client.stop()
+
+const retrySockets: FakeSocket[] = []
+const retryClient = new DawnLspClient(
+  'ws://example.test/api/lsp',
+  (_url, protocol) => {
+    const retrySocket = new FakeSocket(protocol)
+    retrySockets.push(retrySocket)
+    return retrySocket
+  },
+  () => 0,
+)
+retryClient.start('retry')
+retrySockets[0].onerror?.()
+await new Promise((resolve) => setTimeout(resolve, 0))
+expect('disconnect gets one reconnect', retrySockets.length, 2)
+retrySockets[1].onerror?.()
+await new Promise((resolve) => setTimeout(resolve, 0))
+expect('second disconnect stays fallback', [retrySockets.length, retryClient.status], [2, 'fallback'])
+retryClient.stop()
+
+const blackholeSockets: FakeSocket[] = []
+const blackholeClient = new DawnLspClient(
+  'ws://example.test/api/lsp',
+  (_url, protocol) => {
+    const blackholeSocket = new FakeSocket(protocol)
+    blackholeSockets.push(blackholeSocket)
+    return blackholeSocket
+  },
+  () => 0,
+  1,
+)
+blackholeClient.start('blackhole')
+const blackholeDeadline = Date.now() + 1000
+while ((blackholeSockets.length !== 2 || blackholeClient.status !== 'fallback')
+  && Date.now() < blackholeDeadline) {
+  await new Promise((resolve) => setTimeout(resolve, 1))
+}
+expect('CONNECTING blackhole retries once then falls back', [
+  blackholeSockets.length, blackholeClient.status,
+], [2, 'fallback'])
+blackholeClient.stop()
 
 console.log(fails === 0 ? 'ALL PASS' : `${fails} FAILURES`)
 process.exit(fails === 0 ? 0 : 1)
