@@ -255,6 +255,117 @@ await new Promise((resolve) => setTimeout(resolve, 0))
 expect('second disconnect stays fallback', [retrySockets.length, retryClient.status], [2, 'fallback'])
 retryClient.stop()
 
+// ---- versioned diagnostics: a stale publish is discarded, not adopted ----
+let versionSocket!: FakeSocket
+const versionClient = new DawnLspClient(
+  'ws://example.test/api/lsp',
+  (_url, protocol) => (versionSocket = new FakeSocket(protocol)),
+  () => 0,
+)
+const versionEvents: [string, string[]][] = []
+versionClient.onDiagnostics((event) => versionEvents.push([
+  event.text, event.diagnostics.map((item) => item.message),
+]))
+versionClient.start('AAA')
+versionSocket.open()
+versionSocket.receive({ id: versionSocket.sent[0].id, result: { capabilities: {} } })
+await tick()
+const openVersion = versionSocket.sent.at(-1)!.params.textDocument.version
+versionSocket.receive({
+  method: 'textDocument/publishDiagnostics',
+  params: { uri: DAWN_LSP_URI, version: openVersion, diagnostics: [] },
+})
+versionClient.update('BBB')
+const changeVersion = versionSocket.sent.at(-1)!.params.textDocument.version
+expect('each sync carries its own document version', changeVersion > openVersion, true)
+// The buffer is BBB and its sync is in flight, but the notification answers
+// AAA's version: pairing by arrival order alone would show AAA's error on BBB.
+versionSocket.receive({
+  method: 'textDocument/publishDiagnostics',
+  params: {
+    uri: DAWN_LSP_URI,
+    version: openVersion,
+    diagnostics: [{
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } },
+      message: 'belongs to AAA',
+    }],
+  },
+})
+versionSocket.receive({
+  method: 'textDocument/publishDiagnostics',
+  params: { uri: DAWN_LSP_URI, version: changeVersion, diagnostics: [] },
+})
+expect('a stale version is discarded and the matching one is published', versionEvents, [
+  ['AAA', []], ['BBB', []],
+])
+versionClient.stop()
+
+// ---- the reconnect budget is per healthy connection, not per round-trip ----
+const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }
+async function reachReady(target: FakeSocket) {
+  target.open()
+  target.receive({ id: target.sent[0].id, result: { capabilities: {} } })
+  await tick()
+}
+async function reachDiagnostics(target: FakeSocket) {
+  await reachReady(target)
+  target.receive({
+    method: 'textDocument/publishDiagnostics',
+    params: { uri: DAWN_LSP_URI, diagnostics: [] },
+  })
+}
+const budgetSockets: FakeSocket[] = []
+const budgetClient = new DawnLspClient(
+  'ws://example.test/api/lsp',
+  (_url, protocol) => {
+    const budgetSocket = new FakeSocket(protocol)
+    budgetSockets.push(budgetSocket)
+    return budgetSocket
+  },
+  () => 0,
+  3000,
+  60000,
+)
+budgetClient.start('budget')
+await reachDiagnostics(budgetSockets[0])
+budgetSockets[0].onerror?.()
+await settle()
+expect('the first drop spends the one reconnect', budgetSockets.length, 2)
+await reachDiagnostics(budgetSockets[1])
+budgetSockets[1].onerror?.()
+await settle()
+expect('a diagnostics round-trip does not refill the reconnect budget', [
+  budgetSockets.length, budgetClient.status,
+], [2, 'fallback'])
+budgetClient.stop()
+
+const refillSockets: FakeSocket[] = []
+const refillClient = new DawnLspClient(
+  'ws://example.test/api/lsp',
+  (_url, protocol) => {
+    const refillSocket = new FakeSocket(protocol)
+    refillSockets.push(refillSocket)
+    return refillSocket
+  },
+  () => 0,
+  3000,
+  0,
+)
+refillClient.start('refill')
+await reachReady(refillSockets[0])
+refillSockets[0].onerror?.()
+await settle()
+await reachReady(refillSockets[1])
+refillSockets[1].onerror?.()
+await settle()
+expect('a connection held past the threshold earns the budget back', refillSockets.length, 3)
+refillSockets[2].onerror?.()
+await settle()
+expect('a connection that never became ready earns nothing back', [
+  refillSockets.length, refillClient.status,
+], [3, 'fallback'])
+refillClient.stop()
+
 const blackholeSockets: FakeSocket[] = []
 const blackholeClient = new DawnLspClient(
   'ws://example.test/api/lsp',

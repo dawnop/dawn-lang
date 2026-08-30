@@ -77,6 +77,7 @@ interface SyncWaiter {
 interface SyncFlight {
   generation: number
   text: string
+  version: number
 }
 
 export interface LspSocket {
@@ -96,6 +97,14 @@ const SOCKET_OPEN = 1
 const CONNECT_TIMEOUT_MS = 3000
 const INITIALIZE_TIMEOUT_MS = 3000
 const DIAGNOSTICS_TIMEOUT_MS = 3000
+// How long a connection must stay ready before it earns the reconnect budget
+// back. The budget is one jittered reconnect (docs/playground-lsp-design.md);
+// what it may not be is one reconnect per round-trip, which is what refilling
+// it on every published diagnostic gave: a gateway that dropped every session
+// right after its first diagnostics turned into an unbounded connect loop.
+// The gateway retires sessions on its own lifetime ceiling, so the budget has
+// to come back eventually, and this is the earliest that is still bounded.
+const RECONNECT_BUDGET_MS = 60000
 
 function asRecord(value: unknown): Record<string, any> | null {
   return value != null && typeof value === 'object' && !Array.isArray(value)
@@ -232,6 +241,7 @@ export class DawnLspClient {
   private queryEpoch = new Map<string, number>()
   private syncWaiters: SyncWaiter[] = []
   private diagnosticTimer: ReturnType<typeof setTimeout> | null = null
+  private readyAt = 0
   private opened = false
   private version = 0
   private generation = 0
@@ -249,6 +259,7 @@ export class DawnLspClient {
     ),
     reconnectDelay: () => number = () => 250 + Math.floor(Math.random() * 500),
     private readonly connectTimeoutMs: number = CONNECT_TIMEOUT_MS,
+    private readonly reconnectBudgetMs: number = RECONNECT_BUDGET_MS,
   ) {
     this.socketFactory = socketFactory
     this.reconnectDelay = reconnectDelay
@@ -375,6 +386,7 @@ export class DawnLspClient {
         this.version = 0
         this.inFlight = null
         this.diagnosedGeneration = -1
+        this.readyAt = Date.now()
         this.setStatus('ready')
         this.sendLatestText()
       }).catch((reason) => {
@@ -418,8 +430,16 @@ export class DawnLspClient {
     this.syncWaiters = []
     this.inFlight = null
     this.opened = false
+    // -1, not 0: a connection that never reached ready earns nothing back
+    // even where the threshold itself is zero.
+    const readyFor = this.readyAt === 0 ? -1 : Date.now() - this.readyAt
+    this.readyAt = 0
     this.setStatus('fallback')
-    if (retry && !this.stopped && this.retryCount < 1) {
+    if (!retry || this.stopped) return
+    // A connection that carried a whole session before dropping earns the
+    // budget back; one that dropped sooner spends what is left of it.
+    if (readyFor >= this.reconnectBudgetMs) this.retryCount = 0
+    if (this.retryCount < 1) {
       this.retryCount++
       this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelay())
     }
@@ -490,9 +510,9 @@ export class DawnLspClient {
 
   private sendLatestText(): void {
     if (!this.isReady() || this.inFlight != null) return
-    const flight = { generation: this.generation, text: this.text }
-    this.inFlight = flight
     this.version++
+    const flight = { generation: this.generation, text: this.text, version: this.version }
+    this.inFlight = flight
     try {
       if (!this.opened) {
         this.opened = true
@@ -524,10 +544,18 @@ export class DawnLspClient {
     const params = asRecord(paramsValue)
     if (params?.uri !== DAWN_LSP_URI || this.inFlight == null) return
     const flight = this.inFlight
+    // Diagnostics are paired to the in-flight sync by arrival order, so a
+    // second publish for an already-answered version would be read as the
+    // answer to the next one and show the previous buffer's errors against
+    // the current text. When the notification carries a version, that is
+    // decidable: anything but the in-flight version is stale, and dropping it
+    // leaves the sync outstanding for its own timeout rather than closing it
+    // with the wrong answer. Servers that omit the version keep the old
+    // positional pairing; there is nothing better to do with it.
+    if (typeof params.version === 'number' && params.version !== flight.version) return
     this.inFlight = null
     this.clearDiagnosticTimer()
     this.diagnosedGeneration = flight.generation
-    this.retryCount = 0
     const diagnostics = Array.isArray(params.diagnostics)
       ? params.diagnostics.map(diagnosticOf)
         .filter((item: LspDiagnostic | null): item is LspDiagnostic => item != null)
