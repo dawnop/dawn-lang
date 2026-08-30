@@ -55,6 +55,7 @@ ssh "$HOST" "
   set -e
   chmod 755 '$REMOTE/bin/.dawnc.next'
   mv '$REMOTE/bin/.dawnc.next' '$REMOTE/bin/dawnc'
+  mkdir -p '$REMOTE/site/play-ui/samples'
 "
 # the runner sources + manifest (recompiled on service start) and the sandbox
 # scripts. main.dawn imports the `web`/`json` deps by path (playground/dawn.toml
@@ -64,6 +65,10 @@ rsync -avz --delete playground/dawn.toml playground/src playground/README.md \
 rsync -avz --delete packages/ "$HOST:$REMOTE/packages/"
 rsync -avz playground/sandbox/ "$HOST:$REMOTE/playground/sandbox/"
 rsync -avz playground/deploy/ "$HOST:$REMOTE/playground/deploy/"
+# Keep lsp-measure.py's deployed default repo-shaped: its location under
+# /opt/dawn/playground/deploy resolves these samples under /opt/dawn/site.
+rsync -avz --delete site/play-ui/samples/ \
+  "$HOST:$REMOTE/site/play-ui/samples/"
 
 # The remote half of the restart. It is a variable rather than an inline
 # argument so the contract test can run it here against stubbed systemctl and
@@ -82,8 +87,19 @@ REMOTE_RESTART='
   else
     sudo systemctl restart dawn-play dawn-play-lsp
   fi
-  sleep 2
-  curl -fsS --noproxy "*" -w "\n" http://127.0.0.1:8087/health
+  # Ten one-second request budgets plus nine two-second waits bound this whole
+  # check to 28 seconds, even if a process accepts TCP but never answers HTTP.
+  HEALTH_ATTEMPTS=10
+  HEALTH_ATTEMPT=1
+  until curl -fsS --noproxy "*" --connect-timeout 1 --max-time 1 -w "\n" \
+      http://127.0.0.1:8087/health; do
+    if [ "$HEALTH_ATTEMPT" -ge "$HEALTH_ATTEMPTS" ]; then
+      echo "error: dawn-play failed its health check after $HEALTH_ATTEMPTS attempts" >&2
+      exit 1
+    fi
+    HEALTH_ATTEMPT=$((HEALTH_ATTEMPT + 1))
+    sleep 2
+  done
   if [ "$LSP_INSTALLED" = 1 ]; then
     sudo systemctl is-active --quiet dawn-play-lsp
     /usr/bin/python3 -I -B /opt/dawn/playground/deploy/lsp-smoke.py
