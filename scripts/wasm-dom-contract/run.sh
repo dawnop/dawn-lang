@@ -45,23 +45,26 @@
 # to the transcript of its case. A mutant that passes means the transcript
 # has no teeth about the thing it broke, and this script says so.
 #
-# Before any of that, four node-only checks driven straight at the bridge,
-# each with its own mutants and its own head explaining why it is not a
-# transcript: keyed-ops.sh for the three ops neither application here reaches,
-# props.sh for the attribute/property split, whose failure a transcript cannot
-# see, payload.sh for the parts of an event payload no application here
-# declares, and foreign.sh for the custom-element boundary no application
-# here mounts.
+# Before any of that, five checks that need no wasm toolchain, each with its
+# own mutants and its own head explaining why it is not a transcript. Four are
+# driven straight at the bridge with node: keyed-ops.sh for the three ops
+# neither application here reaches, props.sh for the attribute/property split,
+# whose failure a transcript cannot see, payload.sh for the parts of an event
+# payload no application here declares, and foreign.sh for the custom-element
+# boundary no application here mounts. The fifth, collect.sh, needs bin/dawn
+# and not node: it is about how a node's children are *built* rather than
+# about what crossed the boundary, and the encoder cannot see that.
 #
 #   ./scripts/wasm-dom-contract/run.sh
 #   ./scripts/wasm-dom-contract/run.sh --record        # re-record both transcripts
 #   DAWNC_BIN=/path/to/dawnc ./scripts/wasm-dom-contract/run.sh
 #
 # Needs the same toolchain as scripts/wasm-contract (clang 20 or newer with a
-# wasm32 sysroot, lld, wasi-libc, wasm32 compiler-rt) plus node >= 20. It
-# compiles nothing itself, so the triple is the driver's business alone; see
-# `cc_build_for`. In CI both come from the pinned wasi-sdk; see
-# .github/workflows/gates.yml.
+# wasm32 sysroot, lld, wasi-libc, wasm32 compiler-rt) plus node >= 20. The
+# wasm triple is the driver's business alone and nothing here compiles for it;
+# see `cc_build_for`. In CI both come from the pinned wasi-sdk; see
+# .github/workflows/gates.yml. collect.sh does compile Dawn, with bin/dawn,
+# for the host and not for wasm.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -82,10 +85,16 @@ record=0
 # changed and the `preventDefault` decision, none of which either application
 # below asks for. foreign.sh does it for the custom-element lifecycle, which
 # neither application reaches because neither mounts a foreign element.
+#
+# collect.sh is the odd one out: it needs bin/dawn rather than node, and what
+# it is about is the construction of a child list rather than the bridge. A
+# transcript is handed a finished node, so how the node was built is invisible
+# to it; the collector the counter's view now uses is held there instead.
 "$(dirname "${BASH_SOURCE[0]}")/keyed-ops.sh"
 "$(dirname "${BASH_SOURCE[0]}")/props.sh"
 "$(dirname "${BASH_SOURCE[0]}")/payload.sh"
 "$(dirname "${BASH_SOURCE[0]}")/foreign.sh"
+"$(dirname "${BASH_SOURCE[0]}")/collect.sh"
 
 fail=0
 demo="$root/examples/projects/tea_dom_counter"
@@ -378,4 +387,4 @@ edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
   run_mutant todo-filter yes "the done filter admits everything"
 
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm dom contract ok (2 transcripts + 3 plateaus + 9 mutants, plus the keyed ops, the props, the payloads and the foreign elements)"
+echo "wasm dom contract ok (2 transcripts + 3 plateaus + 9 mutants, plus the keyed ops, the props, the payloads, the foreign elements and the collector)"

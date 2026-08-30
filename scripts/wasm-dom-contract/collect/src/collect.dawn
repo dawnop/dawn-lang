@@ -1,0 +1,113 @@
+# A direct-style collector for `Node`, written with handler state cells, and
+# the three things it is here to pin.
+#
+# The vocabulary lives in this fixture and not in `packages/tea-dom`: the
+# design doc's §1 boundary keeps a DSL vocabulary in the application or in a
+# fixture until the shape has been used for a release, so what this file is
+# is the shape under test rather than shipped surface.
+#
+# Why a gate at all, when scripts/wasm-dom-contract already holds two
+# transcripts byte for byte: a transcript records what crossed the boundary,
+# and the boundary is handed a finished `Node`. How that node's child list was
+# *built* is invisible to it (tea-block-children-design.md §7 says the same
+# thing about the encoder). A collector that reversed its children, or let an
+# inner container's children leak into its parent, would produce a different
+# tree and the transcript would notice; a collector that did so only for a
+# shape neither application builds would not be noticed by anything. So the
+# three verdicts below are asserted on pure `tea_core` values, which is also
+# why this leg needs no wasm toolchain.
+#
+# `Int` is the message type throughout. The effect carries a concrete node
+# type because an effect cannot take type parameters (spec §6.5), and nothing
+# here dispatches a message, so the choice is arbitrary and stated once.
+
+use tea_dom/node.{Node}
+use tea_dom/dsl.{el, text}
+
+## One child, here, now.
+##
+## The whole of the collector's interface to a body: a body says what its
+## children are by performing this, in the order it wants them.
+pub effect Emit {
+  fn emit(w: Node[Int]) -> Unit
+}
+
+## Run `body` and answer everything it emitted, in the order it emitted it.
+##
+## The cell is the collector: the arm appends, the block remainder reads, and
+## nothing else can reach it. Before cells this function had to be written as
+## a fold over an explicit accumulator threaded through every helper, which is
+## the tax the feature exists to remove.
+pub fn collect(body: fn() -> Unit !Emit) -> List[Node[Int]] = {
+  with handle Emit {
+    var acc: List[Node[Int]] = []
+    emit(w) => { acc = acc ++ [w] }
+  }
+  body()
+  acc
+}
+
+## Emit one finished node as a child.
+pub fn leaf(w: Node[Int]) -> Unit !Emit = emit(w)
+
+## Emit an element whose children are whatever `body` emits.
+##
+## The nested `collect` is the whole of the nesting rule: the inner
+## installation shadows the outer one for the length of `body`, so the inner
+## body's children land in the inner cell, and what reaches the outer cell is
+## the one finished element.
+pub fn elem(tag: String, body: fn() -> Unit !Emit) -> Unit !Emit = {
+  let kids: List[Node[Int]] = collect(body)
+  emit(el(tag, kids: kids))
+}
+
+# The subject of the third verdict, as a named function rather than a lambda
+# inside the test, so that a mutant can reach the condition with one sed.
+fn maybe_body(show: Bool) -> List[Node[Int]] =
+  collect(() => {
+    leaf(text("head"))
+    if show {
+      leaf(text("body"))
+    }
+  })
+
+test "emit order is child order" {
+  let got: List[Node[Int]] =
+    collect(() => {
+      leaf(text("a"))
+      leaf(text("b"))
+      leaf(text("c"))
+    })
+  let want: List[Node[Int]] = [text("a"), text("b"), text("c")]
+  assert got == want
+}
+
+test "a nested container collects its own children and no one else's" {
+  # The 882 shape from the design doc's probe P6: the outer cell accumulates
+  # one child, survives an inner installation that accumulates two of its own,
+  # and then accumulates one more. What crosses from inner to outer is one
+  # element, never two children.
+  let got: List[Node[Int]] =
+    collect(() => {
+      leaf(text("a"))
+      elem("ul", () => {
+        leaf(text("x"))
+        leaf(text("y"))
+      })
+      leaf(text("b"))
+    })
+  let inner: Node[Int] = el("ul", kids: [text("x"), text("y")])
+  let want: List[Node[Int]] = [text("a"), inner, text("b")]
+  assert got == want
+  assert len(got) == 3
+}
+
+test "a false condition emits nothing at all" {
+  # Not "emits an empty node": a branch that does not run performs no
+  # operation, so the child list is shorter rather than holed. This is the
+  # verdict that says a collector is not a list of slots.
+  let with_body: List[Node[Int]] = [text("head"), text("body")]
+  let without: List[Node[Int]] = [text("head")]
+  assert maybe_body(true) == with_body
+  assert maybe_body(false) == without
+}
