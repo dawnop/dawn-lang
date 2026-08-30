@@ -41,27 +41,18 @@ TasksMax=64
 LimitCORE=0
 UMask=0077
 
-PrivateDevices=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ProtectProc=invisible
-ProcSubset=pid
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-RestrictNamespaces=yes
-RestrictRealtime=yes
-LockPersonality=yes
-SystemCallArchitectures=native
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-
-# NoNewPrivileges/empty CapabilityBoundingSet are intentionally absent here:
-# this broker must use the two exact sudoers-whitelisted sandbox wrappers.
-# Untrusted native code runs in the transient service, where both are enabled.
+# Hardening lives on the per-session transient units, not on this broker.
+# The broker's whole job is to call the sudoers-whitelisted sandbox wrapper,
+# and on a unit with User= set, most sandbox options (PrivateDevices,
+# ProtectKernel*, ProtectClock, ProtectHostname, RestrictNamespaces,
+# RestrictRealtime, LockPersonality, SystemCallArchitectures, ...) implicitly
+# set NoNewPrivileges, which makes every setuid sudo call fail at ExecStartPre;
+# ProtectSystem=strict additionally read-onlys /run, where sudo keeps its
+# timestamp directory.  First production start failed exactly this way
+# (2026-08-30), so this unit now mirrors dawn-play.service, which spawns the
+# same sudo wrapper per request and has run in production since the start.
+# Untrusted native code never runs in this unit: each accepted socket gets a
+# transient service where the full sandbox set (and NoNewPrivileges) is on.
 
 [Install]
 WantedBy=multi-user.target
