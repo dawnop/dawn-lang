@@ -4420,23 +4420,28 @@ pub fn lower_fn_only(
 ##
 ## `m` is the same functions flat -- sources in source order, then the hoisted
 ## bodies in hoisting order -- which is what a whole-translation-unit backend
-## (`emitc`) reads. Test bodies stay out of it, and so do the dictionaries only
-## a test asks for: there is no test to compile natively. `dicts` is the
-## unabridged list, tests included, for the backend that emits them, and
-## `emitted_core` below puts the two halves back together for the consumer
-## that has to see everything a jar holds.
+## (`emitc`) reads for a build. Test bodies stay out of it, and so do the
+## dictionaries only a test asks for. `dicts` is the unabridged list, tests
+## included, and `emitted_core` below puts the two halves back together for a
+## JVM artifact or the native test runner.
 pub type LMod = {
   m: CModule,
   fns: List[(CFun, List[CFun])],
   tests: List[(CFun, List[CFun])],
-  dicts: List[CDictDef]
+  dicts: List[CDictDef],
+  # The unabridged counter, after tests and their hoisted bodies. `m` carries
+  # the production-only counter matching its production-only function list;
+  # `emitted_core` needs this one when it appends the test half.
+  next_sym: Int
 }
 
 ## Lower a whole module: one LSt for all of it, so a hoisted body is
 ## synthesised once however many functions need it, and symbol and lambda
 ## counters never restart.
 ##
-## `include_tests` is the JVM path's; a test block has no native meaning.
+## `include_tests` is the test-artifact path's. A test block is not callable as
+## an ordinary Dawn function, but both the JVM and native runners emit it under
+## a backend-owned entry point.
 pub fn lower_module_full(
   owner: String,
   tm: TModule,
@@ -4485,10 +4490,14 @@ pub fn lower_module_full(
     fns = fns ++ [(cf, list.drop(st.lifted, before))]
     flat = flat ++ [cf]
   }
-  # lifted bodies are appended after the source functions; they are ordinary
-  # top-level functions from here on and no backend can tell the difference
-  let m =
-    CModule { owner: owner, fns: flat ++ st.lifted, dicts: st.dicts, next_sym: st.next_sym }
+  # Lifted bodies are appended after the source functions; they are ordinary
+  # top-level functions from here on and no backend can tell the difference.
+  # Keep the production snapshots here. Tests share this lowering state and
+  # may mint parameters for bodies they hoist, so LMod separately carries the
+  # final counter for `emitted_core` below.
+  let prod_fns = flat ++ st.lifted
+  let prod_dicts = st.dicts
+  let prod_next_sym = st.next_sym
   var tests: List[(CFun, List[CFun])] = []
   if include_tests {
     for t in tm.tests {
@@ -4498,7 +4507,13 @@ pub fn lower_module_full(
       tests = tests ++ [(cf, list.drop(st.lifted, before))]
     }
   }
-  LMod { m: m, fns: fns, tests: tests, dicts: st.dicts }
+  let m = CModule {
+    owner: owner,
+    fns: prod_fns,
+    dicts: prod_dicts,
+    next_sym: prod_next_sym
+  }
+  LMod { m: m, fns: fns, tests: tests, dicts: st.dicts, next_sym: st.next_sym }
 }
 
 test "the flat module and the grouped functions are one lowering" {
@@ -4590,9 +4605,10 @@ test "the flat module and the grouped functions are one lowering" {
   assert len(g_lifts) == 0
 }
 
-## Everything of this module a JVM artifact holds, as one flat CModule: `m`,
-## then each test body followed by whatever lowering hoisted out of it, over
-## the unabridged dictionary list.
+## Everything the reachability scan or a native test artifact sees, as one
+## flat CModule: `m`, then each test body followed by whatever lowering
+## hoisted out of it, over the unabridged dictionary list. JVM reachability
+## consumes this; the native backend consumes it for `dawnc test`.
 ##
 ## `m` alone is not that. The JVM emitter writes test blocks into every
 ## artifact it produces -- `dawn build` and `dawn test` walk the same
@@ -4601,15 +4617,15 @@ test "the flat module and the grouped functions are one lowering" {
 ## when it was asked about `m`, a Unicode table only a test could reach was
 ## pruned out from under the test that needed it.
 ##
-## For a module lowered without tests this is `m` unchanged, which is what the
-## std modules and the native path get.
+## For a module lowered without tests this is `m` unchanged, which is what std
+## production modules and native builds get. The native test path includes tests.
 pub fn emitted_core(l: LMod) -> CModule = {
   var fns = l.m.fns
   for pr in l.tests {
     let (cf, lifts) = pr
     fns = fns ++ [cf] ++ lifts
   }
-  CModule { ..l.m, fns: fns, dicts: l.dicts }
+  CModule { ..l.m, fns: fns, dicts: l.dicts, next_sym: l.next_sym }
 }
 
 test "emitted_core carries the test bodies and what they hoisted" {
@@ -4687,8 +4703,9 @@ test "emitted_core carries the test bodies and what they hoisted" {
   assert len(flat) == 2
   assert flat[0] == "f"
 
+  let core = emitted_core(lm)
   var whole: List[String] = []
-  for cf in emitted_core(lm).fns { whole = whole ++ [cf.name] }
+  for cf in core.fns { whole = whole ++ [cf.name] }
   # the same two, then the test body, then the comparison the test hoisted
   assert len(whole) == 4
   assert whole[0] == flat[0]
@@ -4696,7 +4713,17 @@ test "emitted_core carries the test bodies and what they hoisted" {
   assert whole[2] == "strings compare"
   assert whole[3] != flat[1]
   # and the dictionaries are the unabridged list, not m's pre-test snapshot
-  assert len(emitted_core(lm).dicts) == len(lm.dicts)
+  assert len(core.dicts) == len(lm.dicts)
+  # The test-only structural equality above hoists a function whose parameter
+  # symbols are minted after the production snapshot. `rc_module` starts its
+  # own fresh bindings at `next_sym`; carrying the pre-test value made its
+  # first local shadow one of those parameters (a dictionary parameter in
+  # packages/tea-core's concrete failure), and emitc produced invalid C.
+  for cf in core.fns {
+    for p in cf.captures ++ cf.params ++ cf.dicts ++ cf.evs {
+      assert p.sym < core.next_sym
+    }
+  }
 }
 
 ## The flat shape on its own, for the consumers that want nothing else.

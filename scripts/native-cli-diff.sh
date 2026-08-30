@@ -647,6 +647,11 @@ PYEOF
 # a multi-module suite (labels get the `mod :: name` prefix) and a single one
 pair_report "test (multi-module package)" test packages/json
 pair_report "test (single-module package)" test packages/sha2
+# tea-core's tests hoist a derived Int equality wrapper after the production
+# functions. Its dictionary parameter is the exact boundary that used to share
+# a symbol with rc_module's first emitted local, so compiling this suite on the
+# native side is the regression oracle as well as another report comparison.
+pair_report "test (test-hoisted dictionary symbols)" test packages/tea-core
 # the bundled std's own suite. This is the only place the native backend runs
 # it: gates.yml calls `./bin/dawn test --stdlib`, which is the JVM and only
 # the JVM, and std is where "both backends answer the same" is least optional
