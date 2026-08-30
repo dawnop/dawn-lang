@@ -409,6 +409,16 @@ def main():
             stream, response = upgrade(port, origin="https://evil.invalid")
             assert response.startswith(b"HTTP/1.1 403 "), response
             stream.close()
+            # A disjoint origin is refused by exact matching and by substring
+            # matching alike, so it cannot tell the two apart. These two carry
+            # an allowed origin inside them and separate the rules: only exact
+            # matching refuses them. Registrable-suffix confusion
+            # (play.test.evil.invalid is owned by evil.invalid) and a path
+            # suffix, which is not part of an origin at all.
+            for confusing in (ORIGIN + ".evil.invalid", ORIGIN + "/evil"):
+                stream, response = upgrade(port, origin=confusing)
+                assert response.startswith(b"HTTP/1.1 403 "), (confusing, response)
+                stream.close()
             stream, response = upgrade(port, protocol=None)
             assert response.startswith(b"HTTP/1.1 403 "), response
             stream.close()
