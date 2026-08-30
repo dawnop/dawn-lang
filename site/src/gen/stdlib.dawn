@@ -290,6 +290,85 @@ fn modules_html(c: Chrome, docs: List[String], root: Json) -> (String, List[TocE
   (html, toc)
 }
 
+# ---- the same entries, as an index ----
+#
+# The search index (gen/search.dawn) needs the name, the declaration, the
+# first line of the documentation and the ANCHOR of every entry on this page.
+# The anchor is the part that cannot live anywhere else: an id here is built
+# out of a module slug, a kind word and a name, in five spellings that differ
+# from each other by one segment, and a second copy of those rules in another
+# file would be a copy that goes wrong silently -- the link would resolve to
+# nothing and only a reader would find out.
+#
+# So the enumeration is here, next to the functions that emit the ids, and the
+# test at the bottom of this file holds the two to each other: every anchor
+# this hands out has to be an id the page really carries, and the counts have
+# to agree so that an entry kind added to the page and not to this is a
+# failure rather than a silent omission.
+
+## One entry of the standard library page, as an index needs it.
+pub type ApiRow = { title: String, decl: String, doc: String, anchor: String }
+
+fn api_row(title: String, decl: String, doc: String, anchor: String) -> ApiRow =
+  ApiRow { title: title, decl: decl, doc: doc, anchor: anchor }
+
+## Every entry on the standard library page, in the order the page shows them.
+##
+## The module and group HEADINGS are here too, as rows whose declaration is
+## the heading's own kind: `std/str` is a thing a reader searches for, and the
+## page anchors it at `m-std-str`.
+pub fn api_rows(api: Json) -> List[ApiRow] = {
+  var rows: List[ApiRow] = []
+  for g in jarr(jget(api, "groups")) {
+    let name = field(g, "name")
+    rows = rows ++ [api_row(name, "prelude group", "", "g-$name")]
+    for f in jarr(jget(g, "fns")) {
+      rows = rows ++ [api_row(field(f, "name"), field(f, "sig"), field(f, "doc"),
+        "p-" ++ field(f, "name"))]
+    }
+  }
+  for t in jarr(jget(api, "traits")) {
+    rows = rows ++ [trait_row("prelude", t)]
+  }
+  for m in jarr(jget(api, "modules")) {
+    let path = field(m, "path")
+    let base = slug(path)
+    let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
+    rows = rows ++ [api_row(path, "module", field(m, "doc"), "m-$base")]
+    for t in jarr(jget(m, "types")) {
+      rows = rows
+        ++ [api_row(field(t, "name"), type_decl(t), field(t, "doc"),
+          "$base-type-" ++ field(t, "name"))]
+    }
+    for t in jarr(jget(m, "traits")) {
+      rows = rows ++ [trait_row(base, t)]
+    }
+    for c in jarr(jget(m, "consts")) {
+      let name = field(c, "name")
+      rows = rows
+        ++ [api_row(qualify(qual, name), "const $name: " ++ field(c, "type"), field(c, "doc"),
+          "$base-$name")]
+    }
+    for e in jarr(jget(m, "effects")) {
+      rows = rows
+        ++ [api_row(field(e, "name"), "effect " ++ field(e, "name"), field(e, "doc"),
+          "$base-effect-" ++ field(e, "name"))]
+    }
+    for f in jarr(jget(m, "fns")) {
+      let name = field(f, "name")
+      rows = rows
+        ++ [api_row(qualify(qual, name), field(f, "sig"), field(f, "doc"), "$base-$name")]
+    }
+  }
+  rows
+}
+
+fn trait_row(base: String, t: Json) -> ApiRow = {
+  let name = field(t, "name")
+  api_row(name, "trait $name[" ++ field(t, "typeParam") ++ "]", field(t, "doc"),
+    "$base-trait-$name")
+}
+
 # ---- the page ----
 
 ## Which file this language's intro is written in, where the page goes, and how
@@ -396,6 +475,79 @@ test "a doc comment is rendered as Markdown, not escaped whole" {
   # an empty doc contributes nothing at all
   assert prose([], "") == ""
 }
+
+## The anchors [api_rows] hands the search index have to be ids this page
+## really carries, and there have to be exactly as many of them as the page
+## has anchored things. Both halves matter and they fail differently: a
+## misspelled anchor is a search result that lands on the top of stdlib.html
+## instead of on the entry, and an entry kind the page grew and this did not
+## is a name the search can never find.
+##
+## Built from a synthetic `dawn doc --stdlib` document rather than from the
+## real one, because `dawn test site` runs before site/build.sh writes it.
+test "every index anchor is an id the page carries, and there are as many of each" {
+  let api = probe_api()
+  let rows = api_rows(api)
+  let (pre, _) = prelude_html([], api)
+  let (mods, _) = modules_html(chrome(En, "."), [], api)
+  let html = pre ++ traits_html([], api) ++ mods
+  for r in rows {
+    assert str.contains(html, "id=\"" ++ r.anchor ++ "\"")
+  }
+  # Every id on the page is one of these rows: same count, no leftovers on
+  # either side. `sub` and `entry` are the only two things here that emit an
+  # id, so counting them counts the anchored things.
+  assert len(str.split(html, ` id="`)) - 1 == len(rows)
+  # and the five spellings really are five, so a slug that stopped
+  # distinguishing them would move one of these lines
+  assert map(rows, r => r.anchor) == [
+    "g-io", "p-println", "prelude-trait-Show", "m-std-str", "std-str-type-Case",
+    "std-str-trait-Split", "std-str-WIDTH", "std-str-effect-Ask", "std-str-trim",
+  ]
+  assert map(rows, r => r.title) == [
+    "io", "println", "Show", "std/str", "Case", "Split", "str.WIDTH", "Ask", "str.trim",
+  ]
+}
+
+fn probe_api() -> Json =
+  jobj([
+    ("groups", JArr([
+      jobj([("name", JStr("io")),
+        ("fns", JArr([
+          jobj([("name", JStr("println")), ("sig", JStr("fn println(s: String) -> Unit !io")),
+            ("doc", JStr("Print a line."))]),
+        ]))]),
+    ])),
+    ("traits", JArr([
+      jobj([("name", JStr("Show")), ("typeParam", JStr("T")), ("assoc", JArr([])),
+        ("methods", JArr([])), ("doc", JStr("Text for a value."))]),
+    ])),
+    ("modules", JArr([
+      jobj([
+        ("path", JStr("std/str")),
+        ("doc", JStr("Strings.")),
+        ("impls", JArr([])),
+        ("types", JArr([
+          jobj([("name", JStr("Case")), ("record", JBool(false)), ("typeParams", JArr([])),
+            ("ctors", JArr([])), ("doc", JStr("A case."))]),
+        ])),
+        ("traits", JArr([
+          jobj([("name", JStr("Split")), ("typeParam", JStr("T")), ("assoc", JArr([])),
+            ("methods", JArr([])), ("doc", JStr("Splitting."))]),
+        ])),
+        ("consts", JArr([
+          jobj([("name", JStr("WIDTH")), ("type", JStr("Int")), ("doc", JStr("A width."))]),
+        ])),
+        ("effects", JArr([
+          jobj([("name", JStr("Ask")), ("ops", JArr([])), ("doc", JStr("Asking."))]),
+        ])),
+        ("fns", JArr([
+          jobj([("name", JStr("trim")), ("sig", JStr("fn trim(s: String) -> String")),
+            ("doc", JStr("Trim it."))]),
+        ])),
+      ]),
+    ])),
+  ])
 
 test "a marker comment never reaches the html, a stray < still escapes" {
   # end to end (parse then render): the two halves of the same rule

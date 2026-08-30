@@ -79,11 +79,27 @@ fn chapter_nav(chapters: List[Chapter], i: Int, lang: Lang) -> String = {
   `<nav class="chapter-nav">` ++ "\n" ++ prev ++ "\n" ++ next ++ "\n</nav>"
 }
 
+## The chapter titles, in the order the tutorial has them.
+##
+## What the search index needs, and all it needs: a chapter is a page of its
+## own (`tutorial/01.html` and up), so its title is a page title and the index
+## has nowhere to put a fragment. Numbering is the caller's -- the page names
+## are `pad2(i + 1)`, exactly as [gen_tutorial] writes them.
+pub fn chapter_titles(src: String) -> List[String] !io = {
+  let blocks =
+    match parse(must_read(src)) {
+      Ok(bs) -> bs
+      Err(e) -> panic("$src: $e")
+    }
+  let (_, chapters) = split_chapters(blocks)
+  map(chapters, c => inline_text(c.title))
+}
+
 ## Which file this language's tutorial is written in, where its pages go, and
 ## how far it is from the site root. English is the original and takes the
 ## default layout; the translation sits under `/zh/`, the same place the
 ## Chinese front page does.
-fn tutorial_source(out: String, lang: Lang) -> (String, String, String) =
+pub fn tutorial_source(out: String, lang: Lang) -> (String, String, String) =
   match lang {
     En -> ("docs/tutorial.md", "$out/tutorial", "..")
     Zh -> ("docs/tutorial.zh-CN.md", "$out/zh/tutorial", "../..")

@@ -16,7 +16,8 @@ else
   echo "warning: npm not found — Playground editor bundle NOT rebuilt" >&2
 fi
 
-# The two TEA demo applications, as wasm reactors. Built here for the same
+# The TEA applications, as wasm reactors: the two demos on tea.html, and the
+# search panel every page's header mounts. Built here for the same
 # reason play-ui is: scripts/site-dist-diff.sh runs the generator twice and
 # compares site/dist byte for byte, so everything the generator does has to be
 # a pure function of files that are already on disk when it starts. A
@@ -54,7 +55,7 @@ if command -v "$tea_cc" >/dev/null 2>&1; then
 fi
 
 if [ "$tea_ok" = 1 ]; then
-  echo "=== building the TEA demo reactors ==="
+  echo "=== building the TEA reactors ==="
   # `--target wasm --reactor` is the native driver's alone (selfhost/src/
   # nmain.dawn); the JVM CLI has no wasm backend. Emitting and linking it costs
   # ~35s, so it is cached beside the artifacts and keyed on what it was built
@@ -77,7 +78,10 @@ if [ "$tea_ok" = 1 ]; then
   # writes a placeholder, the demo page says it could not load, and every other
   # page is what it was. Same deal the Playground makes when its editor bundle
   # is missing, and the reason `set -e` is held off here.
-  for tea_demo in tea_dom_counter:counter tea_dom_todo_keyed:todo; do
+  # The search panel is not a demo and is built the same way anyway: it is a
+  # reactor, it is mounted by the same bridge, and a checkout with no wasm
+  # toolchain gets a placeholder and a header button that says so.
+  for tea_demo in tea_dom_counter:counter tea_dom_todo_keyed:todo tea_dom_search:search; do
     tea_project="${tea_demo%%:*}"
     tea_name="${tea_demo##*:}"
     if ! "$tea_dawnc" build --target wasm --reactor "examples/projects/$tea_project" \

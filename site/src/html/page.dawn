@@ -44,6 +44,14 @@ pub type Assets = {
   tea_js: String,
   tea_counter: String,
   tea_todo: String,
+  # The search panel: the page's own script, the reactor it mounts, and one
+  # index per language. Two indexes and not one because they carry different
+  # titles and different hrefs -- see gen/search.dawn -- and the shell picks
+  # the one that belongs to the page it is writing.
+  search_js: String,
+  search_wasm: String,
+  search_en: String,
+  search_zh: String,
 }
 
 ## The names the files have in site/assets, before any hashing. What the tests
@@ -60,6 +68,10 @@ pub fn plain_assets() -> Assets =
     tea_js: "tea-app.mjs",
     tea_counter: "tea-counter.wasm",
     tea_todo: "tea-todo.wasm",
+    search_js: "search.js",
+    search_wasm: "tea-search.wasm",
+    search_en: "search-en.json",
+    search_zh: "search-zh.json",
   }
 
 ## The `lang` attribute for <html>.
@@ -101,6 +113,23 @@ pub fn playground_label(lang: Lang) -> String =
     Zh -> "在 Playground 打开"
   }
 
+## What the header's search button says, in the language of the page it is on.
+pub fn search_label(lang: Lang) -> String =
+  match lang {
+    En -> "Search"
+    Zh -> "搜索"
+  }
+
+## Which index a page of this language fetches. One field per language on
+## [Assets] rather than a lookup, for the reason the record itself is a record:
+## a missing language is then a compile error, and a wrong one is a page of
+## results in the other language whose links all resolve.
+pub fn search_index_name(a: Assets, lang: Lang) -> String =
+  match lang {
+    En -> a.search_en
+    Zh -> a.search_zh
+  }
+
 ## Where a page lives in `lang`'s layout, given its path in the default one.
 ## The default layout is the English site; the Chinese twin of any paired page
 ## is that same path under `/zh/`. One rule, stated once, so that a caller
@@ -119,7 +148,7 @@ pub fn lang_path(lang: Lang, pair: String) -> String =
 ## both navs and labelled `Spec (中文)` on the English side; the spec and the
 ## design notes were translated on 2026-08-07 and the exception is gone with
 ## them.
-fn nav_items(lang: Lang) -> List[(String, String, String)] =
+pub fn nav_items(lang: Lang) -> List[(String, String, String)] =
   match lang {
     En -> [
       ("tutorial", "Tutorial", "tutorial/index.html"),
@@ -210,6 +239,29 @@ pub fn shell(
 ) -> String =
   shell_ext(a, lang, pair, title, root, active, "", body)
 
+## The header's search button, and the three URLs the panel needs.
+##
+## They are attributes rather than strings inside the script for the reason
+## the demo page's `data-wasm` is one: gen/links reads markup and nothing here
+## reads programs, so a URL spelled in a `fetch` argument would be the one URL
+## on this site that nothing checks. All three are content-hashed names, and
+## the asset rule in gen/links holds them to that.
+##
+## `data-search-root` is this page's own distance from the site root. The
+## index's hrefs are site-root relative, so the panel joins the two; without
+## it the same index would be wrong on every page but the front one.
+##
+## Nothing is fetched until the button is used (site/assets/search.js). The
+## reactor is 150KB gzipped and the index is tens of kilobytes, and neither
+## belongs in a first paint that a reader who never searches still pays for.
+fn search_button(a: Assets, lang: Lang, root: String) -> String = {
+  let app = a.tea_js
+  let wasm = a.search_wasm
+  let index = search_index_name(a, lang)
+  let label = escape_html(search_label(lang))
+  """<button class="search-open" type="button" aria-controls="dawn-search" aria-expanded="false" data-search-app="$root/assets/$app" data-search-wasm="$root/assets/$wasm" data-search-index="$root/assets/$index" data-search-root="$root">$label<kbd>&#8984;K</kbd></button>"""
+}
+
 ## Like [shell], but with extra markup injected into <head> (e.g. the Playground
 ## page's stylesheet + module script).
 pub fn shell_ext(
@@ -235,6 +287,7 @@ pub fn shell_ext(
   let ico = a.favicon
   let touch = a.touch_icon
   let og = a.og_image
+  let sjs = a.search_js
   """
 <!DOCTYPE html>
 <html lang="$code">
@@ -247,6 +300,7 @@ pub fn shell_ext(
 <meta property="og:title" content="$esc_title">
 <meta property="og:image" content="https://dawn-lang.dawnop.com/assets/$og">
 <link rel="stylesheet" href="$root/assets/$css">
+<script src="$root/assets/$sjs" defer></script>
 $alts
 $head_extra
 </head>
@@ -256,9 +310,11 @@ $head_extra
 <a class="brand" href="$root/$home"><img class="brand-logo" src="$root/assets/$logo" alt="">Dawn</a>
 $nav
 $switch
+${search_button(a, lang, root)}
 <a class="gh" href="https://github.com/dawnop/dawn-lang">GitHub</a>
 </nav>
 </header>
+<div id="dawn-search" class="search-host" hidden></div>
 $body
 <footer class="site-footer">
 <div class="inner">Dawn — a small, elegant functional language · <a href="https://github.com/dawnop/dawn-lang">GitHub</a> · Built by a generator written in Dawn</div>
@@ -379,6 +435,37 @@ test "the header brand is the vector mark" {
   let h = shell(plain_assets(), En, "", "t", ".", "", "")
   assert str.contains(h, `<img class="brand-logo" src="./assets/logo.svg" alt="">`)
   assert str.contains(h, `<link rel="apple-touch-icon" href="./assets/apple-touch-icon.png">`)
+}
+
+## Every page carries the button, the mount point and the script -- there is
+## no page-level opt-in, because a reader who wants to search wants to from
+## wherever they are. The three URLs are attributes so that gen/links checks
+## them; this is the assertion that says they are there to be checked.
+test "every page carries the search button, its mount point and its script" {
+  let p = shell(plain_assets(), En, "", "t", "..", "", "<p>x</p>")
+  assert str.contains(p, `<button class="search-open" type="button"`)
+  assert str.contains(p, `data-search-app="../assets/tea-app.mjs"`)
+  assert str.contains(p, `data-search-wasm="../assets/tea-search.wasm"`)
+  assert str.contains(p, `data-search-index="../assets/search-en.json"`)
+  assert str.contains(p, `data-search-root=".."`)
+  assert str.contains(p, `<div id="dawn-search" class="search-host" hidden></div>`)
+  assert str.contains(p, `<script src="../assets/search.js" defer></script>`)
+}
+
+## The panel is a piece of chrome, so it follows the page's language in both
+## of the ways chrome can: the label a reader clicks, and the index it loads.
+## An English page loading the Chinese index would show Chinese titles under
+## hrefs that all resolve, which is the failure a shared index would have made
+## unnoticeable.
+test "the search button is labelled and indexed in the page's own language" {
+  let en = shell(plain_assets(), En, "", "t", ".", "", "")
+  let zh = shell(plain_assets(), Zh, "", "t", "..", "", "")
+  assert str.contains(en, `data-search-index="./assets/search-en.json"`)
+  assert str.contains(en, ">Search<kbd>")
+  assert str.contains(zh, `data-search-index="../assets/search-zh.json"`)
+  assert str.contains(zh, ">搜索<kbd>")
+  assert search_index_name(plain_assets(), En) == "search-en.json"
+  assert search_index_name(plain_assets(), Zh) == "search-zh.json"
 }
 
 test "shell carries title, css root, body" {

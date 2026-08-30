@@ -12,6 +12,7 @@ use html/escape.{escape_html}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
 use gen/copy.{Copy, load_copy, line, body}
 use gen/fingerprint.{fingerprint}
+use gen/search.{read_api, search_index}
 
 fn parsed(path: String) -> List[Block] !io =
   match parse(must_read(path)) {
@@ -71,6 +72,11 @@ fn emit_text(out: String, name: String, text: String) -> String !io =
   emit_asset(out, name, bytes.utf8(text ++ "\n"))
 
 pub fn gen_assets(out: String) -> Assets !io = {
+  # Read once, used twice: the two search indexes are built from the same
+  # `dawn doc --stdlib` document gen/stdlib later renders into the page,
+  # and an index built from a second read would be an index of a document
+  # nobody had checked was the same one.
+  let api = read_api()
   let style = emit_text(out, "style.css", str.trim(must_read("site/assets/style.css")))
   # The bracket-cat mark, in the four shapes the places it appears will take.
   # The SVG is the mark; the three rasters are the same drawing rendered for
@@ -116,6 +122,16 @@ pub fn gen_assets(out: String) -> Assets !io = {
     # when it started.
     tea_counter: emit_wasm(out, "tea-counter.wasm", "site/build/tea/counter.wasm"),
     tea_todo: emit_wasm(out, "tea-todo.wasm", "site/build/tea/todo.wasm"),
+    # The search panel. Its script is checked in beside the stylesheet; its
+    # reactor is built by site/build.sh like the two above, and is a
+    # placeholder on a checkout with no wasm toolchain -- in which case the
+    # button reports that it could not load and every page is otherwise what
+    # it was. The two indexes are computed here from the site's own inputs;
+    # gen/search.dawn is the whole of that.
+    search_js: emit_text(out, "search.js", str.trim(must_read("site/assets/search.js"))),
+    search_wasm: emit_wasm(out, "tea-search.wasm", "site/build/tea/search.wasm"),
+    search_en: emit_text(out, "search-en.json", search_index(api, En)),
+    search_zh: emit_text(out, "search-zh.json", search_index(api, Zh)),
   }
 }
 

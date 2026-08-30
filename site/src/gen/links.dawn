@@ -39,6 +39,8 @@ use std/str
 use std/io
 use std/set
 use std/map
+use json/parser.{parse}
+use json/value.{Json, JArr, JStr, JObj, error_text}
 use md/text.{cp_at, seg}
 use gen/common.{must_read, must_list, take_n}
 use gen/fingerprint.{is_fingerprinted}
@@ -120,9 +122,18 @@ fn attr_values(html: String, opener: String) -> List[String] = {
 ## this generator produced from a content hash, and it fails the same way the
 ## other two would. Putting it here is what lets the page name the reactor in
 ## markup instead of in a string inside a program, which nothing here reads.
+##
+## The three `data-search-*` URLs are the header's (html/page.search_button):
+## the bridge module the panel imports, the reactor it mounts and the index it
+## fetches. Same reasoning as `data-wasm`, one page later -- they are on every
+## page of the site rather than on one, so a name that stopped existing would
+## be 92 dead fetches instead of two.
 fn hrefs_of(html: String) -> List[String] =
   attr_values(html, "href=\"") ++ attr_values(html, "src=\"")
   ++ attr_values(html, "data-wasm=\"")
+  ++ attr_values(html, "data-search-app=\"")
+  ++ attr_values(html, "data-search-wasm=\"")
+  ++ attr_values(html, "data-search-index=\"")
 
 ## Every id this page offers as a link target. The opener carries its leading
 ## space so that `data-id="` and friends cannot be mistaken for an id.
@@ -268,6 +279,57 @@ fn dir_of(rel: String) -> String = {
   join(take_n(parts, len(parts) - 1), "/")
 }
 
+## Which assets are search indexes: `search-<code>.json`, under the plain name
+## rather than the fingerprinted alias, so that each one is read once.
+fn is_search_index(name: String) -> Bool =
+  str.starts_with(name, "search-") && str.ends_with(name, ".json")
+  && not is_fingerprinted(name)
+
+## Every href a search index carries, in the order it carries them.
+##
+## This is the one place on the site where a generator writes a URL that no
+## document contains: the index is JSON, it is read by a program on the far
+## side of a wasm boundary, and the URL only becomes a link when a reader types
+## something that matches. `hrefs_of` cannot see it and nothing else looks --
+## so an anchor that stopped existing (a heading counter that moved, an id rule
+## that changed in gen/stdlib) would ship as a search result that lands on the
+## wrong section, or on nothing at all, with every gate green.
+##
+## The rows are `[group, title, detail, note, href]`; the href is the fifth.
+## A row of another shape is a generator that changed the format without
+## telling the panel, and is reported rather than skipped.
+fn index_hrefs(name: String, text: String) -> List[String] = {
+  var out: List[String] = []
+  match parse(text) {
+    Ok(doc) -> {
+      for item in items_of(doc) {
+        match item {
+          JArr(fields) ->
+            match get(fields, 4) {
+              Some(JStr(href)) -> {
+                out = out ++ [href]
+              }
+              _ -> panic("assets/$name: an index row is not five strings")
+            }
+          _ -> panic("assets/$name: an index row is not an array")
+        }
+      }
+    }
+    Err(e) -> panic("assets/$name is not JSON: " ++ error_text(e))
+  }
+  out
+}
+
+fn items_of(doc: Json) -> List[Json] =
+  match doc {
+    JObj(entries) ->
+      match map.get(entries, "items") {
+        Some(JArr(items)) -> items
+        _ -> []
+      }
+    _ -> []
+  }
+
 pub fn check_links(out: String) -> Unit !io = {
   let files = set.from(files_under(out, ""))
   # Every page's ids, indexed before any page is judged: a fragment is checked
@@ -364,6 +426,39 @@ pub fn check_links(out: String) -> Unit !io = {
       }
     }
   }
+  # The search indexes, whose hrefs are in an asset rather than in a page.
+  var indexes = 0
+  var index_links = 0
+  for name in must_list("$out/assets") {
+    if is_search_index(name) {
+      indexes = indexes + 1
+      let hrefs = index_hrefs(name, must_read("$out/assets/$name"))
+      if len(hrefs) == 0 {
+        broken = broken
+          ++ ["assets/$name: the search index is empty, so the panel can find nothing"]
+      }
+      for href in hrefs {
+        index_links = index_links + 1
+        let target = resolve("", href)
+        let frag = frag_of(href)
+        if not set.has(files, target) {
+          broken = broken
+            ++ ["assets/$name -> $href: the index names a page that was never written "
+                ++ "(resolved: $target)"]
+        } else if frag != "" {
+          let page_ids = unwrap_or(map.get(ids, target), set.empty())
+          if not set.has(page_ids, frag) {
+            broken = broken ++ ["assets/$name -> $href (no id \"$frag\" in $target)"]
+          }
+        }
+      }
+    }
+  }
+  if indexes == 0 {
+    broken = broken
+      ++ ["assets/: no search index was written, so every page's search button "
+          ++ "fetches a file that is not there"]
+  }
   if len(broken) > 0 {
     for b in broken {
       println("BROKEN LINK: $b")
@@ -373,7 +468,8 @@ pub fn check_links(out: String) -> Unit !io = {
   println(
     "  link check: $checked internal href/src(s), $anchors #fragment(s) and $numbered numbered "
       ++ "heading id(s) across $pages pages, all resolve; $assets of them reach assets/ "
-      ++ "and every one is content-hashed; $payloads prefilled Playground fragment(s) decode")
+      ++ "and every one is content-hashed; $payloads prefilled Playground fragment(s) decode; "
+      ++ "$index_links search-index href(s) in $indexes index(es) resolve, fragments included")
 }
 
 test "resolution normalizes relative segments" {

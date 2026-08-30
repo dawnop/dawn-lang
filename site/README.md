@@ -108,6 +108,32 @@ import 是这个站点任何检查都看不见的（`gen/links` 只读 `href=`/`
 | `/playground.html` | 在线编辑器：CodeMirror 6 + Dawn 高亮、实时诊断、补全；运行/检查打后端 | `site/play-ui/`（npm 构建，产物由 `gen_assets` 搬进 `dist/assets`） |
 | `/tea.html` | **浏览器 demo**：两个 wasm reactor（计数器 + 键控待办）挂在页面上跑 | `examples/projects/tea_dom_{counter,todo_keyed}`（`site/build.sh` 编译成 wasm）+ `packages/tea-dom/js/*.mjs`（桥），二者都由 `gen_assets` 搬进 `dist/assets` |
 | `/zh/tea.html` | 同上（中文译本；两个应用本身画的是英文） | 同上 |
+| `/assets/search-{en,zh}.json` | **搜索索引**（每语言一份，340 条：186 条 stdlib API + 模块/分组标题、规范与设计的 h2/h3、教程 17 章、示例与站内页面） | `dawn doc --stdlib` + `docs/spec*.md` / `design*.md` / `tutorial*.md` + `examples/**` + 导航表，全部由 `gen/search.dawn` 派生 |
+| `/assets/tea-search.wasm` | 搜索面板本体（wasm reactor），每页页头按钮首次触发才 fetch | `examples/projects/tea_dom_search`（`site/build.sh` 编成 wasm）|
+
+## 站内搜索
+
+页头一个按钮 + `⌘K`/`Ctrl-K`。面板是**第三个 wasm reactor**
+（`examples/projects/tea_dom_search`），和 demo 页那两个走同一座桥；页面这边只有
+`site/assets/search.js`（普通脚本，不是模块），负责三件事：绑按钮与快捷键、**首次触发时**
+才动态 `import()` 桥并 fetch reactor 与索引、以及在每次 keydown 后看一眼文档里有没有
+`a[data-goto]`（Enter 留下的那条指令），有就跳过去。
+
+**懒挂载不是优化，是硬约束**：reactor gzip 后约 150KB、索引四十几 KB，急切挂载就是一次
+首屏回归，而绝大多数读者从不搜索。没有 wasm 工具链的检出里 reactor 是占位文件，
+`mount` 抛错、面板里写一行为什么，其余页面一个字都不变——和 demo 页、Playground 编辑器
+是同一笔交易。
+
+索引是**构建产物，绝不手维护**。每一行都从它指向的那页所来自的文件里派生出来，锚点尤其：
+`gen/stdlib.dawn` 的 `api_rows` 和发 id 的那几个函数在同一个文件里，两者由那里的一个
+test 对着；`render_doc` 的 TOC 就是页面上的 TOC，所以 `#s6-5` 不可能和标题各走各的。
+索引写成一串**定长五元组**（`[group, title, detail, note, href]`）而不是对象，因为本仓
+JSON 渲染器的键序是哈希的事实，而 `site-dist-diff.sh` 对这份文件逐字节对拍。
+
+索引里的 href 是全站唯一一批「生成器写出来、程序在 wasm 那边读、读者敲字之前不出现在任何
+文档里」的 URL——`hrefs_of` 看不见它们，别的东西也不看。所以 `gen/links.dawn` 多了一段：
+把 `dist/assets/search-*.json` 也拆开，每个 href 连同 `#fragment` 一起对着写出来的页面查。
+2026-08-30 上线时是 680 条。
 
 ## 渲染约定
 
@@ -147,8 +173,8 @@ import 是这个站点任何检查都看不见的（`gen/links` 只读 `href=`/`
 
 ```bash
 site/build.sh          # dawn doc --stdlib → play-ui → tea reactors → 清空 dist → dawn run site
-# demo 的两个 wasm 要 clang 20+（带 wasm32 sysroot）。缺了就跳过并 warning，
-# 生成器写占位文件，demo 页面自己报错，其余页面不受影响：
+# 三个 wasm（demo 两个 + 搜索面板）要 clang 20+（带 wasm32 sysroot）。缺了就跳过并
+# warning，生成器写占位文件，页面自己报错，其余页面不受影响：
 DAWN_WASM_CC=/usr/bin/clang-20 site/build.sh
 # `--target wasm` 只在原生驱动里（selfhost/src/nmain.dawn），编一次约 37s，
 # 按编译器自己的 source stamp + runtime/c 缓存在 site/build/tea/dawnc。

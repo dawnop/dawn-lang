@@ -1,0 +1,357 @@
+# The search index: everything on this site a reader can be sent to, as one
+# JSON asset per language.
+#
+# The site had no search at all. stdlib.html carries 186 API entries under a
+# sidebar with 21 links in it, spec.html has 76 numbered sections, and the
+# only way to reach any of them was to open the page and press ctrl-F. The
+# panel that consumes this lives in examples/projects/tea_dom_search and runs
+# as a wasm reactor; what is here is the half that has to be a build product.
+#
+# Generated, never written by hand. Every row below is derived from the file
+# the page it points at was generated from -- the compiler's own
+# `dawn doc --stdlib` output, the Markdown of the spec and the design notes,
+# the tutorial's chapter split, the gallery walk, the nav table -- so an entry
+# cannot describe a page that does not exist and cannot go stale when one
+# moves. The anchors are the sharp end of that: `gen/stdlib.api_rows` hands
+# them over from the same function that emits the ids, and gen/links checks
+# every href in the written asset against the written pages, fragment
+# included.
+#
+# One asset per language rather than one with both. The two differ in more
+# than their labels: the section titles come from two different documents
+# (docs/spec.en.md and docs/spec.md), and every href in the Chinese one is
+# under `/zh/`. Merging them would make every page download the other
+# language's titles.
+#
+# The rows are five strings, positional:
+#
+#   [group, title, detail, note, href]
+#
+# Positional and not an object because the order of an object's keys in this
+# repository's JSON renderer is a fact about a hash table, and
+# scripts/site-dist-diff.sh compares two builds of this file byte for byte.
+# An array has one order and it is the one written here. `href` is relative to
+# the SITE ROOT; the page supplies its own distance from it when it mounts.
+#
+# The four groups are the panel's, and the panel is what rejects an unknown
+# one -- an entry whose group is not one of those four is simply never drawn.
+# The test below is what keeps this file honest about that.
+
+use std/str
+use std/list
+use std/io
+use json/parser.{parse}
+use json/value.{Json, JStr, error_text}
+use json/render.{render}
+use md/parser
+use html/render.{render_doc, TocEntry}
+use html/page.{Lang, En, Zh, lang_path, nav_items}
+use gen/common.{must_read, pad2}
+use gen/stdlib.{ApiRow, api_rows}
+use gen/tutorial.{chapter_titles}
+use gen/examples.{Example, collect_examples, must_describe}
+
+## One row of the index.
+pub type Row = { group: String, title: String, detail: String, note: String, href: String }
+
+## How much of a doc comment rides along. A note is a hint under a name, not
+## the documentation: long enough to tell two similar names apart, short
+## enough that the index stays a few tens of kilobytes.
+fn note_len() -> Int = 110
+
+## The first line of a doc comment, cut to [note_len].
+##
+## The first line and not the first paragraph: this is the one-line summary
+## that goes under a name in the panel, and a Markdown paragraph in this
+## repository is regularly five lines of prose.
+pub fn note_of(doc: String) -> String = {
+  var first = ""
+  for line in str.split(doc, "\n") {
+    if first == "" && str.trim(line) != "" {
+      first = str.trim(line)
+    }
+  }
+  if len(code_points(first)) <= note_len() {
+    first
+  } else {
+    from_code_points(list.take(code_points(first), note_len())) ++ "..."
+  }
+}
+
+# ---- the four sources ------------------------------------------------------
+
+## The standard library reference, one row per anchored entry.
+##
+## `api` is the parsed `dawn doc --stdlib` document. The anchors come from
+## gen/stdlib rather than from a second copy of its id rules; that module's
+## own test holds them to the ids the page really emits.
+fn api_index(api: Json, lang: Lang) -> List[Row] = {
+  let page = lang_path(lang, "stdlib.html")
+  list.map(api_rows(api), r =>
+      Row {
+        group: "stdlib",
+        title: r.title,
+        detail: r.decl,
+        note: note_of(r.doc),
+        href: "$page#${r.anchor}",
+      })
+}
+
+## One rendered document's headings, as rows.
+##
+## The ids are `render_doc`'s, which is the same call gen/pages makes to write
+## the page, so the fragments cannot drift from the anchors: a heading counter
+## that moved would move both at once. The URL mapper is the identity because
+## nothing here reads the rendered html -- only the table of contents.
+fn doc_index(src: String, page: String, detail: String) -> List[Row] !io = {
+  let blocks =
+    match parser.parse(must_read(src)) {
+      Ok(bs) -> bs
+      Err(e) -> panic("$src: $e")
+    }
+  list.map(render_doc(blocks, u => u).toc, e =>
+      Row { group: "spec", title: e.text, detail: detail, note: "", href: "$page#${e.id}" })
+}
+
+## The tutorial, one row per chapter page.
+fn tutorial_index(src: String, lang: Lang, detail: String) -> List[Row] !io = {
+  var rows: List[Row] = []
+  let titles = chapter_titles(src)
+  for i in range(0, len(titles)) {
+    let page = lang_path(lang, "tutorial/${pad2(i + 1)}.html")
+    rows = rows
+      ++ [Row { group: "tutorial", title: titles[i], detail: detail, note: "", href: page }]
+  }
+  rows
+}
+
+## The gallery, one row per example, plus the site's own pages.
+##
+## The nav table is read rather than restated: the seven entries a reader can
+## click in the header are seven pages the search has to be able to reach, and
+## a nav item added without a row here would be a page the panel cannot find.
+fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !io = {
+  var rows: List[Row] = []
+  rows = rows ++ [Row {
+    group: "examples",
+    title: home,
+    detail: detail,
+    note: "",
+    href: lang_path(lang, "index.html"),
+  }]
+  for item in nav_items(lang) {
+    let (_, label, path) = item
+    rows = rows ++ [Row { group: "examples", title: label, detail: detail, note: "", href: path }]
+  }
+  for ex in collect_examples() {
+    rows = rows
+      ++ [Row {
+        group: "examples",
+        title: ex.slug,
+        detail: detail,
+        note: note_of(must_describe(ex)),
+        href: lang_path(lang, "examples/${ex.slug}.html"),
+      }]
+  }
+  rows
+}
+
+# ---- the words the rows carry ----------------------------------------------
+#
+# The `detail` of a section row is the name of the document it is in, which is
+# the only thing that tells `6.5 Named effects` on the spec from a chapter of
+# the tutorial in a list. One table, both languages on adjacent lines, for the
+# reason gen/stdlib's chrome gives.
+
+type Words = {
+  spec: String,
+  design: String,
+  tutorial: String,
+  gallery: String,
+  home: String,
+}
+
+fn words(lang: Lang) -> Words =
+  match lang {
+    En -> Words {
+      spec: "Spec",
+      design: "Design",
+      tutorial: "Tutorial",
+      gallery: "Site",
+      home: "Home",
+    }
+    Zh -> Words {
+      spec: "规范",
+      design: "设计",
+      tutorial: "教程",
+      gallery: "站点",
+      home: "首页",
+    }
+  }
+
+## Which document each language reads its sections and chapters out of.
+##
+## The same pairing gen/pages.doc_source and gen/tutorial.tutorial_source
+## make, restated here because this reads the sources and writes no page: the
+## English site renders `docs/spec.en.md`, the Chinese one `docs/spec.md`, and
+## an index built from the wrong half would list one language's headings under
+## the other language's hrefs.
+pub fn sources(lang: Lang) -> (String, String, String) =
+  match lang {
+    En -> ("docs/spec.en.md", "docs/design.en.md", "docs/tutorial.md")
+    Zh -> ("docs/spec.md", "docs/design.md", "docs/tutorial.zh-CN.md")
+  }
+
+# ---- the asset -------------------------------------------------------------
+
+fn quoted(s: String) -> String = render(JStr(value: s))
+
+fn row_json(r: Row) -> String =
+  "[" ++ join([quoted(r.group), quoted(r.title), quoted(r.detail), quoted(r.note),
+    quoted(r.href)], ",") ++ "]"
+
+## Every row of one language's index, in the order the file will carry them.
+pub fn index_rows(api: Json, lang: Lang) -> List[Row] !io = {
+  let w = words(lang)
+  let (spec_src, design_src, tut_src) = sources(lang)
+  api_index(api, lang)
+    ++ doc_index(spec_src, lang_path(lang, "spec.html"), w.spec)
+    ++ doc_index(design_src, lang_path(lang, "design.html"), w.design)
+    ++ tutorial_index(tut_src, lang, w.tutorial)
+    ++ examples_index(lang, w.gallery, w.home)
+}
+
+## The index for one language, as the bytes that go into /assets/.
+##
+## `v` is a schema number the panel does not read yet and this file writes
+## anyway: the asset is fetched by a wasm module built from a different source
+## tree at a different time, and the day the two disagree the version is the
+## only place the disagreement can be seen.
+pub fn search_index(api: Json, lang: Lang) -> String !io = {
+  let rows = index_rows(api, lang)
+  "{\"v\":1,\"lang\":" ++ quoted(lang_code_of(lang))
+    ++ ",\"items\":[" ++ join(list.map(rows, r => row_json(r)), ",") ++ "]}"
+}
+
+# The `lang` field is the page's own `lang` attribute, so that the panel can
+# switch its labels on the same string the document does. html/page.lang_code
+# is where it comes from; it is spelled through this wrapper only because this
+# module has no `Assets` to reach for.
+fn lang_code_of(lang: Lang) -> String =
+  match lang {
+    En -> "en"
+    Zh -> "zh-CN"
+  }
+
+## The parsed `dawn doc --stdlib` document, or a stop. Read here rather than
+## passed down from gen/pages, so that the asset and the page it indexes read
+## the same file the same way.
+pub fn read_api() -> Json !io = {
+  let text =
+    match io.read_file("site/build/stdlib.json") {
+      Ok(t) -> t
+      Err(_) ->
+        panic("site/build/stdlib.json missing — run site/build.sh (it runs dawn doc --stdlib)")
+    }
+  match parse(text) {
+    Ok(v) -> v
+    Err(e) -> panic("stdlib.json: " ++ error_text(e))
+  }
+}
+
+# ---- tests -----------------------------------------------------------------
+
+## The shape the panel reads. This literal is the contract between two
+## programs that cannot share a line of code; the same one is pinned in
+## examples/projects/tea_dom_search/src/search.dawn's own test, and the two
+## tests name each other so that a change to either is a change to both.
+test "an index row is five strings, in this order" {
+  assert row_json(Row {
+    group: "spec",
+    title: "6.5 Named effects",
+    detail: "Spec",
+    note: "",
+    href: "spec.html#s6-5",
+  }) == "[\"spec\",\"6.5 Named effects\",\"Spec\",\"\",\"spec.html#s6-5\"]"
+  # a quote and a backslash in a title are the reason this goes through the
+  # JSON renderer rather than through string concatenation
+  assert row_json(Row { group: "g", title: "a\"b\\c", detail: "", note: "", href: "h" })
+    == "[\"g\",\"a\\\"b\\\\c\",\"\",\"\",\"h\"]"
+}
+
+## The `dawn doc --stdlib` document, in miniature. Synthetic rather than the
+## real one because `dawn test site` runs before site/build.sh writes it: the
+## tests below are about what this module does with an API document, and
+## gen/stdlib's own test is what says the anchors are the page's.
+fn probe_api() -> Json =
+  match parse("{\"groups\":[{\"name\":\"io\",\"fns\":[{\"name\":\"println\","
+      ++ "\"sig\":\"fn println(s: String) -> Unit !io\",\"doc\":\"Print a line.\"}]}],"
+      ++ "\"traits\":[],\"modules\":[{\"path\":\"std/str\",\"doc\":\"Strings.\","
+      ++ "\"impls\":[],\"types\":[],\"traits\":[],\"consts\":[],\"effects\":[],"
+      ++ "\"fns\":[{\"name\":\"trim\",\"sig\":\"fn trim(s: String) -> String\","
+      ++ "\"doc\":\"Trim it.\"}]}]}") {
+    Ok(v) -> v
+    Err(e) -> panic("the probe document must parse: " ++ error_text(e))
+  }
+
+## Only the four groups the panel draws. A fifth would be scored, matched and
+## then dropped without a word, so it is refused here instead.
+test "every row lands in one of the four groups the panel draws" {
+  let drawn = ["stdlib", "spec", "tutorial", "examples"]
+  for lang in [En, Zh] {
+    for r in index_rows(probe_api(), lang) {
+      assert list.contains(drawn, r.group)
+      assert r.title != ""
+      assert r.href != ""
+    }
+  }
+}
+
+## A note is one line and is bounded. The bound is what keeps the asset a few
+## tens of kilobytes instead of a few hundred: doc comments in this repository
+## regularly run to twenty lines.
+test "a note is the first line of a doc comment, cut to a bound" {
+  assert note_of("Remove surrounding whitespace.\n\nThe long reasoning follows.")
+    == "Remove surrounding whitespace."
+  assert note_of("\n\n  Leading blanks do not count.  ") == "Leading blanks do not count."
+  assert note_of("") == ""
+  let long = str.repeat("x", 200)
+  assert len(code_points(note_of(long))) == note_len() + 3
+  assert str.ends_with(note_of(long), "...")
+}
+
+## Each language reads its own half of every paired document. Building the
+## English index from the Chinese spec would produce rows whose titles are
+## Chinese and whose hrefs are English, and every one of them would resolve.
+test "each language indexes its own documents" {
+  assert sources(En) == ("docs/spec.en.md", "docs/design.en.md", "docs/tutorial.md")
+  assert sources(Zh) == ("docs/spec.md", "docs/design.md", "docs/tutorial.zh-CN.md")
+}
+
+## The whole asset, on the real inputs: the four sources are all in it, the
+## hrefs are relative to the site root rather than to a page, and the Chinese
+## one is the Chinese one.
+test "the index carries all four sources and addresses them from the site root" {
+  let api = probe_api()
+  let en = index_rows(api, En)
+  let zh = index_rows(api, Zh)
+  for group in ["stdlib", "spec", "tutorial", "examples"] {
+    assert len(list.filter(en, r => r.group == group)) > 0
+    assert len(list.filter(zh, r => r.group == group)) > 0
+  }
+  # site-root relative: no leading slash, no `./`, no `../`
+  for r in en ++ zh {
+    assert not str.starts_with(r.href, "/")
+    assert not str.starts_with(r.href, ".")
+  }
+  # and the Chinese tree is where the Chinese rows point
+  for r in zh {
+    assert str.starts_with(r.href, "zh/")
+  }
+  for r in en {
+    assert not str.starts_with(r.href, "zh/")
+  }
+  # the stdlib rows are anchored into the stdlib page, in each language's tree
+  assert list.filter(en, r => r.group == "stdlib")[0].href == "stdlib.html#g-io"
+  assert list.filter(zh, r => r.group == "stdlib")[0].href == "zh/stdlib.html#g-io"
+}
