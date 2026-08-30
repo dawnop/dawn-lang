@@ -1989,7 +1989,7 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
 
 ## Invoke a function value: erased apply, then unerase to the static type.
 fn gen_cdynamic(gx: GenCtx, g: Gen, args: List[CExpr], ft: Ty, ret_static: Ty) -> (Gen, Bool) !io = {
-  let (fps, fret) = tyfn_parts(ft)
+  let (fps, _) = tyfn_parts(ft)
   var g1 = g
   var i = 0
   for a in args {
@@ -2005,7 +2005,11 @@ fn gen_cdynamic(gx: GenCtx, g: Gen, args: List[CExpr], ft: Ty, ret_static: Ty) -
   if is_bottom(ret_static) {
     return finish_call(g1, ret_static, CallOne)
   }
-  unerase(gx, g1, fret)
+  # A generic record field keeps its declared function type in Core, so its
+  # result can still be a TyVar here even though the call site instantiated it.
+  # The CCall result is that instantiated type and therefore the type the
+  # erased `apply` result must be recovered as.
+  unerase(gx, g1, ret_static)
   (g1, true)
 }
 
