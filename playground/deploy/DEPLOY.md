@@ -133,9 +133,18 @@ of that — the old runner answered `/health` with `ok` the whole time.
 
 ## Rollback
 
-`systemctl stop dawn-play dawn-play-lsp` takes the dynamic endpoints down;
-the LSP service's `ExecStopPost` cleans up per-session transient services. To
-repeat that cleanup explicitly, run
-`sudo /opt/dawn/playground/sandbox/run-lsp-sandboxed.sh cleanup`.
+```sh
+systemctl disable --now dawn-play dawn-play-lsp
+```
+
+takes the dynamic endpoints down and keeps them down; the LSP service's
+`ExecStopPost` cleans up per-session transient services. To repeat that cleanup
+explicitly, run `sudo /opt/dawn/playground/sandbox/run-lsp-sandboxed.sh cleanup`.
+
+`disable`, not `stop` alone: step 6 installs both units with `enable --now`, so
+a `stop` lasts only until the next boot and the endpoint you rolled back comes
+up with the machine. Undo it with `systemctl enable --now dawn-play
+dawn-play-lsp`.
+
 nginx keeps serving the static site. Neither service has persistent state, so
 there is nothing to migrate back.

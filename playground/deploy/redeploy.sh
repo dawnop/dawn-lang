@@ -65,16 +65,34 @@ rsync -avz --delete packages/ "$HOST:$REMOTE/packages/"
 rsync -avz playground/sandbox/ "$HOST:$REMOTE/playground/sandbox/"
 rsync -avz playground/deploy/ "$HOST:$REMOTE/playground/deploy/"
 
-echo "=== restarting service ==="
-# shellcheck disable=SC2029
-ssh "$HOST" '
+# The remote half of the restart. It is a variable rather than an inline
+# argument so the contract test can run it here against stubbed systemctl and
+# curl: this is the least-executed code in the deploy, and it used to restart
+# dawn-play-lsp unconditionally under `set -e`, so a machine that had not
+# been through DEPLOY.md step 6 failed its next deploy, after the rsyncs.
+# shellcheck disable=SC2016  # $LSP_INSTALLED is the remote shell's, not ours
+REMOTE_RESTART='
   set -e
-  sudo systemctl restart dawn-play dawn-play-lsp
+  LSP_INSTALLED=1
+  systemctl cat dawn-play-lsp.service >/dev/null 2>&1 || LSP_INSTALLED=0
+  if [ "$LSP_INSTALLED" = 0 ]; then
+    echo "skip: dawn-play-lsp.service is not installed on this host."
+    echo "      Install the systemd units first: DEPLOY.md step 6."
+    sudo systemctl restart dawn-play
+  else
+    sudo systemctl restart dawn-play dawn-play-lsp
+  fi
   sleep 2
   curl -fsS --noproxy "*" -w "\n" http://127.0.0.1:8087/health
-  sudo systemctl is-active --quiet dawn-play-lsp
-  /usr/bin/python3 -I -B /opt/dawn/playground/deploy/lsp-smoke.py
+  if [ "$LSP_INSTALLED" = 1 ]; then
+    sudo systemctl is-active --quiet dawn-play-lsp
+    /usr/bin/python3 -I -B /opt/dawn/playground/deploy/lsp-smoke.py
+  fi
 '
+
+echo "=== restarting service ==="
+# shellcheck disable=SC2029
+ssh "$HOST" "$REMOTE_RESTART"
 
 echo "=== done ==="
 echo "verify: curl https://dawn-lang.dawnop.com/api/health"

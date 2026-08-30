@@ -286,7 +286,74 @@ def deployment_contract():
     ) == 1
     assert '*) NATIVE_BIN="$PWD/$NATIVE_BIN" ;;' in redeploy
     assert 'NATIVE_VERSION=$("$NATIVE_BIN" version)' in redeploy
-    ok("deployment route, cgroup, sudo and native-artifact boundaries are pinned")
+    # The unit is present on the production host, so only the other branch can
+    # be exercised here; pin the present one by text.
+    for line in (
+        "sudo systemctl restart dawn-play dawn-play-lsp",
+        "sudo systemctl is-active --quiet dawn-play-lsp",
+        "/usr/bin/python3 -I -B /opt/dawn/playground/deploy/lsp-smoke.py",
+    ):
+        assert line in redeploy, line
+
+    # Rollback has to survive a reboot: step 6 installs both units with
+    # `enable --now`, so stopping them alone leaves the endpoint coming back
+    # up with the machine.
+    deploy_doc = read_text(os.path.join(DEPLOY, "DEPLOY.md"))
+    rollback = deploy_doc[deploy_doc.index("## Rollback"):]
+    assert "systemctl disable --now dawn-play dawn-play-lsp" in rollback, rollback
+    assert "systemctl stop dawn-play dawn-play-lsp" not in rollback, rollback
+    ok("deployment route, cgroup, sudo, rollback and native-artifact boundaries are pinned")
+
+
+def remote_restart_contract():
+    """Run redeploy.sh's remote half where the LSP unit was never installed.
+
+    The restart is the one part of the deploy that has no dry run: it happens
+    over ssh, on the far side, after the rsyncs have already landed. Under
+    `set -e` an unconditional `restart dawn-play-lsp` turned "this host has not
+    done DEPLOY.md step 6 yet" into a failed deploy. Stubs stand in for
+    systemctl, sudo, curl and sleep, so the branch runs here instead of only
+    on a host nobody has.
+    """
+    redeploy = read_text(os.path.join(DEPLOY, "redeploy.sh"))
+    start = redeploy.index("REMOTE_RESTART='") + len("REMOTE_RESTART='")
+    script = redeploy[start:redeploy.index("'\n", start)]
+    assert "systemctl cat dawn-play-lsp.service" in script, script
+
+    with tempfile.TemporaryDirectory(prefix="dawn-lsp-restart-") as temp:
+        log = os.path.join(temp, "commands")
+        stubs = os.path.join(temp, "bin")
+        os.mkdir(stubs)
+        for name, body in (
+            # `systemctl cat` fails the way it does on a host without the unit.
+            ("systemctl", 'printf "%s\\n" "systemctl $*" >>"$LOG"\n'
+                          'case "$1" in cat) exit 1 ;; esac\nexit 0\n'),
+            ("sudo", 'printf "%s\\n" "sudo $*" >>"$LOG"\nexec "$@"\n'),
+            ("curl", 'printf "%s\\n" "curl $*" >>"$LOG"\necho ok\n'),
+            ("sleep", "exit 0\n"),
+        ):
+            path = os.path.join(stubs, name)
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("#!/bin/sh\n" + body)
+            os.chmod(path, 0o755)
+        result = subprocess.run(
+            ["/bin/sh", "-c", script],
+            env={"PATH": stubs + ":/usr/bin:/bin", "LOG": log},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+        commands = read_text(log) if os.path.exists(log) else ""
+
+    assert result.returncode == 0, (result.returncode, result.stdout)
+    assert "DEPLOY.md step 6" in result.stdout, result.stdout
+    assert "sudo systemctl restart dawn-play\n" in commands, commands
+    assert "restart dawn-play dawn-play-lsp" not in commands, commands
+    assert "is-active" not in commands, commands
+    # The runner still gets restarted and health-checked, absent unit or not.
+    assert "8087/health" in commands, commands
+    ok("a redeploy to a host without the LSP unit skips it and says so")
 
 
 def measurement_evidence_contract():
@@ -353,6 +420,7 @@ def measurement_evidence_contract():
 
 def main():
     deployment_contract()
+    remote_restart_contract()
     measurement_evidence_contract()
     port = free_port()
     with tempfile.TemporaryDirectory(prefix="dawn-lsp-contract-") as temp:
@@ -764,7 +832,7 @@ def main():
         assert "child-stderr bytes=" in gateway_log, gateway_log
         ok("child stderr contents are not logged")
     print("----")
-    print("21 passed, 0 failed")
+    print("22 passed, 0 failed")
 
 
 if __name__ == "__main__":
