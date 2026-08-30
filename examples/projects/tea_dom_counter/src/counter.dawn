@@ -68,6 +68,31 @@ impl App[Counter] {
   }
 }
 
+## One child, in the order the body wants it.
+##
+## The collector vocabulary lives in this module rather than in
+## `packages/tea-dom`, which is where a DSL word belongs until the shape has
+## been through a release: the package ships constructors, and a way of
+## *building* a child list is a second thing.
+effect Emit {
+  fn emit(w: Node[Msg]) -> Unit
+}
+
+## Run `body` and answer everything it emitted, in the order it emitted it.
+##
+## The cell is the collector. It is reachable from the arm that writes it and
+## from the line below that reads it, and from nowhere else, so `collect` is a
+## pure function whose row says nothing about `Emit`: the handler is what
+## takes the label off (spec §6.5).
+fn collect(body: fn() -> Unit !Emit) -> List[Node[Msg]] = {
+  with handle Emit {
+    var acc: List[Node[Msg]] = []
+    emit(w) => { acc = acc ++ [w] }
+  }
+  body()
+  acc
+}
+
 ## One `span` per unit of a positive count, and none at all below zero.
 ##
 ## This is the part of the view whose *child list length* depends on the
@@ -76,7 +101,16 @@ impl App[Counter] {
 ## ops (`append`, `truncate`) would never cross the boundary in a running
 ## program. Counting up appends one span, counting down truncates one, and
 ## the spans already on screen are never mentioned.
-fn ticks(n: Int) -> List[Node[Msg]] = if n <= 0 { [] } else { ticks(n - 1) ++ [tick()] }
+##
+## Written as a loop that emits, which is what the accumulator recursion this
+## used to be was standing in for. A negative count is an empty range rather
+## than a base case, so "none at all below zero" is the loop not running.
+fn ticks(n: Int) -> List[Node[Msg]] =
+  collect(() => {
+    for _i in 0..n {
+      emit(tick())
+    }
+  })
 
 fn tick() -> Node[Msg] = el("span", class: "tick")
 
