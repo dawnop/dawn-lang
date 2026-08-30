@@ -102,6 +102,22 @@ fn variable_union() -> Unit !io = {
   cross("union", () => ask() + tell())
 }
 
+## The conversion written inside a lambda: what the snapshot reads is then the
+## lifted closure's own evidence parameter, not a frame-level local. This is
+## the line that stays clear of `lower.refuse_evidence_captures` -- the pack is
+## an argument the closure was handed, and evidence still never joins a capture
+## list (design §2.5). A snapshot built by capturing instead would panic here.
+fn run_it(f: fn() -> Unit !e) -> Unit !e = f()
+
+fn nested() -> Unit !io = {
+  with handle Ask { ask() => 61 }
+  run_it(() => {
+    let t = Thread.new(() => println("nested " ++ to_string(ask())))
+    t.start()
+    t.join()
+  })
+}
+
 # --- which handler, when two are in scope -----------------------------------
 
 ## The snapshot is taken where the conversion is written, so the inner handler
@@ -162,6 +178,7 @@ pub fn main() -> Unit !io = {
   println("deferred " ++ to_string(deferred()))
   variable()
   variable_union()
+  nested()
   lexical()
   projection()
   control()
@@ -195,6 +212,16 @@ test "two labels through one variable are both answered" {
   let a = ArrayList.new()
   let _ = a.add("x")
   let _ = a.removeIf(x => ask() + tell() == 78)
+  assert a.size() == 0
+}
+
+test "a conversion written inside a lambda reads that lambda's own slot" {
+  with handle Ask { ask() => 67 }
+  let a = ArrayList.new()
+  let _ = a.add("x")
+  run_it(() => {
+    let _ = a.removeIf(x => ask() == 67)
+  })
   assert a.size() == 0
 }
 

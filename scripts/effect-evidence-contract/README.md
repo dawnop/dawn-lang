@@ -93,8 +93,9 @@ reverting a real repair in the compiler and watching this gate fail. These
 were measured on `ev-corpus-348` at `32341d9` (A through E) and on
 `assoc-effects` at `5675810` (F and G) and on `pad-removal` at `fb41e44`
 (H and I) and on `assoc-effect-defaults` at `21e3db4` (J through L) and on
-`cell-guards` at `0939256` (M and N); each was applied, the toolchain rebuilt,
-the gate run, and the edit reverted. None of them is committed.
+`cell-guards` at `0939256` (M and N) and on `sam-snapshot` at `87e2685` (O);
+each was applied, the toolchain rebuilt, the gate run, and the edit reverted.
+None of them is committed.
 
 Every one of them was checked to have *changed bytes* before it was run.
 A mutant that patched nothing runs green and reads exactly like a gate that
@@ -529,15 +530,47 @@ written.
 
 Reverted: **green** (`differential ok`, counters back to 29/0).
 
-Between them the fourteen mutants have different owners, which is the property
+### O. the SAM bridge passes null again (the boundary clause)
+
+`selfhost/src/jvm/emit.dawn`, the push in `gen_sam_bridge` put back to what it
+was before the creation-point snapshot, so the adapter's field is built and
+filled and never read:
+
+```
+  m.visitInsn(OP_ACONST_NULL)
+```
+
+in place of `m.visitVarInsn(OP_ALOAD, 1)`. `md5sum` before
+`edf525a8add4320803cdace5f75e63cb`, after `32dd273ddba0a47876c720c7a6063382`.
+
+Result: **red**, and only on the one entry -- the whole point of a boundary
+clause is that nothing else in the corpus crosses one:
+
+    effect_sam_snapshot:run            FAIL
+      Exception in thread "Thread-0" dawn.rt.PanicError: effect evidence
+      missing: no pack entry for the atom this call site asked for
+    effect_sam_snapshot:assertions     FAIL
+      7 of 8 test(s) failed
+    effect evidence contract FAILED
+
+The eighth assertion is the control, `a row with nothing in it still
+crosses`, and it passes under the mutant. That is what a control is for: it
+answers the same whether the pack is the snapshot, a wrong pack, or null, so
+its staying green while the other seven go red is the statement that the
+other seven are reading through the slot.
+
+Reverted: **green** (`effect evidence contract ok`).
+
+Between them the fifteen mutants have different owners, which is the property
 worth having: A is answered by `effect_decl_row` and `effect_io_absorb`, B by
 `effect_widen_row`, `effect_decl_row` and `effect_primitive_row`, C by
 `effect_widen_row` and `effect_primitive_row`, D and E by `effect_assoc_row`,
 `assoc_effects` and `effect_primitive_row`, F and G by `effect_assoc_row`
 alone, H by `effect_pad_row` alone, I by most of the corpus with
 `effect_pad_row` naming which two of its own lines it reached, J through L
-by `effect_assoc_row`'s defaulted pair beside the checker corpus, and M and N
-by `effect_handler_state` alone. No single corpus file carries the gate.
+by `effect_assoc_row`'s defaulted pair beside the checker corpus, M and N
+by `effect_handler_state` alone, and O by `effect_sam_snapshot` alone. No
+single corpus file carries the gate.
 
 ## What the corpus does not reach
 
