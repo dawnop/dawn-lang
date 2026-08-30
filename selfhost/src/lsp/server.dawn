@@ -2282,3 +2282,81 @@ test "a local definition still resolves against the requesting document" {
     None -> panic("a definition in the requesting document must resolve")
   }
 }
+
+# ---- handler state cells: what the reader points at, and what answers ----
+
+## A `with handle` with one state cell, written at every spelling a cell has:
+## the declaration, a write from inside an arm, a read inside that write's
+## right-hand side, and a read from the block below the handler.
+fn cell_probe_text() -> String =
+  join([
+    "effect Emit {",
+    "  fn emit(w: Int) -> Unit",
+    "}",
+    "",
+    "fn collect(body: fn() -> Unit !Emit) -> List[Int] = {",
+    "  with handle Emit {",
+    "    var acc: List[Int] = []",
+    "    emit(w) => { acc = acc ++ [w * 2] }",
+    "  }",
+    "  body()",
+    "  acc",
+    "}",
+    ""
+  ], "\n")
+
+test "a handler state cell answers at every spelling of it" {
+  # A cell is not an ordinary binding by the time it is typed: the checker
+  # rewrites every read into `cell_get`/`cell_take` and every write into
+  # `cell_set`, and the binding itself holds an erased slot
+  # (docs/handler-state-design.md). Left to the shapes an `XLocal` and a
+  # `TSAssign` make, the query answers nothing here -- and the type it would
+  # answer with is the erased cell, which names nothing the author wrote.
+  let std = match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ std_load_error_text(e))
+  }
+  let st = def_probe_state(std)
+  let text = cell_probe_text()
+  let d = def_probe_doc_named(st, "cells.dawn", text)
+  let absent: Option[String] = None
+
+  # the declaration: the slot's type, not the erased cell, and its own name as
+  # the place to jump to
+  let decl = def_probe_at(st, d, text, "acc: List[Int]", 0)
+  assert decl.hover == "var acc: List[Int]"
+  let (dlo, dhi) = def_probe_span(decl, "the cell declaration")
+  assert str.slice(text, dlo, dhi) == "acc"
+  assert decl.def_path == absent
+
+  # the write, whose left-hand side is a name the author wrote and the checker
+  # did not keep: same text, and the jump lands on the declaration
+  let w = def_probe_at(st, d, text, "acc = acc", 0)
+  assert w.hover == "var acc: List[Int]"
+  let (wlo, whi) = def_probe_span(w, "the cell write")
+  assert (wlo, whi) == (dlo, dhi)
+
+  # the read inside that write's right-hand side
+  let r = def_probe_at(st, d, text, "acc ++", 0)
+  assert r.hover == "var acc: List[Int]"
+  assert def_probe_span(r, "the cell read") == (dlo, dhi)
+
+  # the right-hand side itself has a type again -- `Int` and not the block's
+  # `List[Int]`, which is what the whole handler answered with when nothing
+  # inside it was walked
+  let rhs = def_probe_at(st, d, text, "w * 2", 2)
+  assert rhs.hover == "Int"
+
+  # the arm's parameter, which is only reachable once the arm is paired with
+  # the closure the checker made of it
+  let p = def_probe_at(st, d, text, "emit(w) =>", 5)
+  assert p.hover == "w: Int"
+  let (plo, phi) = def_probe_span(p, "the arm parameter")
+  assert str.slice(text, plo, phi) == "w"
+
+  # and a read from the block below the handler, which is the remainder
+  # closure rather than the arm
+  let tail = def_probe_at(st, d, text, "acc\n}", 0)
+  assert tail.hover == "var acc: List[Int]"
+  assert def_probe_span(tail, "the cell read below the handler") == (dlo, dhi)
+}

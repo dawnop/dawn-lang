@@ -13,6 +13,7 @@ use std/list
 use front/ast.{
   Module, Decl, Expr, Pattern, Stmt, TypeRef, FnDecl, CtorDecl, FieldDecl, MatchArm,
   Arg, arg_exprs, PatArg, LambdaParam, Param, TraitMethod, TypeDeclR, ImportName,
+  HandlerCell, HandlerArm,
   TNamed, TQual, TAssoc, TTuple, TFn,
   StrPart, SPText, SPInterp,
   EInt, EFloat, EBool, EUnit, EStr, EVar, EApply, EMethod, ELambda,
@@ -677,6 +678,161 @@ fn eta_target(body: TExpr) -> Option[(Option[String], String)] =
     _ -> None
   }
 
+## The parameters of a lambda-shaped thing, each at its own span. The written
+## params and the checker's symbols are paired positionally; a handler arm is
+## one of these too, since the checker makes a closure of it.
+fn offer_lambda_params(qc: QCx, q0: Q, params: List[LambdaParam], psyms: List[Int]) -> Q = {
+  var q = q0
+  var i = 0
+  for p in params {
+    match get(psyms, i) {
+      Some(sid) ->
+        match sym_get(qc, sid) {
+          Some(sym) -> {
+            q = offer(q, p.lo, p.hi, sym.name ++ ": " ++ show_ty(qc, sym.ty),
+              Some((p.lo, p.hi)), None)
+          }
+          None -> ()
+        }
+      None -> ()
+    }
+    i = i + 1
+  }
+  q
+}
+
+# ---- handler state cells ----
+#
+# `with handle` has no typed node of its own: the checker rewrites it
+# (`check.checker.check_handle`, docs/handler-state-design.md) into a block
+# holding one `TSLet` per state cell, then a `TSLet` for the effect's evidence
+# record whose fields are the arms, with the remainder applied as the tail. A
+# cell's every read is a `cell_get`/`cell_take` on the slot and its every write
+# is a `cell_set`, so neither reaches here as the `XLocal`/`TSAssign` an
+# ordinary binding would. Pairing the two trees is therefore this file's job
+# rather than a shape it can match on directly.
+
+## The pieces of the typed block: its statements, and the remainder closure the
+## tail call applies. Any other shape is not one `check_handle` builds, and the
+## walk continues parse-only.
+fn handle_parts(te: Option[TExpr]) -> (List[Option[TStmt]], Option[TExpr]) =
+  match te {
+    Some(XBlock(ts, tail, _, _, _)) -> {
+      let trest: Option[TExpr] = match tail {
+        Some(XApply(target, _, _, _, _, _)) -> Some(target)
+        _ -> None
+      }
+      (opt_stmts(ts), trest)
+    }
+    _ -> {
+      let none: List[Option[TStmt]] = []
+      let notail: Option[TExpr] = None
+      (none, notail)
+    }
+  }
+
+## The initializer inside one cell's `TSLet`: the slot is made by `cell_new`,
+## so what the author wrote is that primitive's only argument.
+fn cell_init_of(ts: Option[TStmt]) -> Option[TExpr] =
+  match ts {
+    Some(TSLet(_, _, XCallBuiltin(prim, args, _, _, _, _, _), _, _)) ->
+      if prim == "cell_new" { get(args, 0) } else { None }
+    _ -> None
+  }
+
+## The arms, out of the evidence record they are stored in. The record's last
+## field is the environment the arms run in rather than an arm, and an
+## unanswered operation stands in it as an `XError`; `arm_node_at` is what
+## tells the arms from both.
+fn handle_arm_nodes(ts: Option[TStmt]) -> List[TExpr] =
+  match ts {
+    Some(TSLet(_, _, XCtor(_, _, written, _, _, _, _, _), _, _)) -> written
+    _ -> []
+  }
+
+## The closure the checker made of one written arm, found by the arm's own
+## span: the record holds the arms in the effect's *declared* operation order,
+## which is not the order they were written in.
+fn arm_node_at(tarms: List[TExpr], lo: Int, hi: Int) -> Option[TExpr] = {
+  for a in tarms {
+    if x_lo(a) == lo && x_hi(a) == hi { return Some(a) }
+  }
+  None
+}
+
+fn is_cell_read(prim: String) -> Bool = prim == "cell_get" || prim == "cell_take"
+
+## The cell a cell primitive names. The slot is always its first argument and
+## always the local `check.checker.cell_local` made of the binding.
+fn cell_arg_sym(args: List[TExpr]) -> Option[Int] =
+  match get(args, 0) {
+    Some(XLocal(sid, _, _, _, _)) -> Some(sid)
+    _ -> None
+  }
+
+## The right-hand side of a cell write, which is `cell_set`'s second argument.
+fn cell_set_args(x: TExpr) -> Option[List[TExpr]] =
+  match x {
+    XCallBuiltin(prim, args, _, _, _, _, _) ->
+      if prim == "cell_set" { Some(args) } else { None }
+    _ -> None
+  }
+
+## A handler state cell at one of its spellings.
+##
+## The type is the slot's, read off `Sym.cell_of`, because `Sym.ty` is the
+## erased cell the binding holds at run time (`check.types.Sym`) and no reader
+## wants to see that. The keyword is `var` although the symbol is not
+## `mutable`: what an arm writes is the slot, not the binding, and `var` is
+## what the author wrote.
+fn offer_cell(qc: QCx, q0: Q, sid: Int, lo: Int, hi: Int) -> Q =
+  match sym_get(qc, sid) {
+    Some(sym) ->
+      match sym.cell_of {
+        Some(co) -> {
+          let (_, ct) = co
+          offer(q0, lo, hi, "var " ++ sym.name ++ ": " ++ show_ty(qc, ct),
+            Some((sym.dlo, sym.dhi)), None)
+        }
+        None -> q0
+      }
+    None -> q0
+  }
+
+## The declaration itself, at the name it declares -- the one span where a cell
+## is its own definition.
+fn offer_cell_decl(qc: QCx, q0: Q, ts: Option[TStmt], c: HandlerCell) -> Q =
+  match ts {
+    Some(TSLet(Some(sid), _, _, _, _)) -> offer_cell(qc, q0, sid, c.nlo, c.nhi)
+    _ -> q0
+  }
+
+## One arm against the closure the checker made of it: `op(a, b) => body` is a
+## lambda in everything but spelling, so the pairing is `ELambda`'s.
+fn walk_handler_arm(qc: QCx, q0: Q, arm: HandlerArm, ta: Option[TExpr]) -> Q =
+  match ta {
+    Some(XLambda(psyms, _, tbody, _, _, _, _)) -> {
+      let q = offer_lambda_params(qc, q0, arm.params, psyms)
+      walk_e(qc, q, arm.body, Some(tbody))
+    }
+    _ -> walk_e(qc, q0, arm.body, None)
+  }
+
+## The rest of the block. `ast.EHandle.rest` is the parameterless sugar lambda
+## the parser packed the remaining statements into, and the checker checked it
+## as one; neither half of that pair is anything the author wrote, so the walk
+## steps through both and pairs the bodies.
+fn walk_rest(qc: QCx, q0: Q, rest: Expr, trest: Option[TExpr]) -> Q = {
+  let tbody: Option[TExpr] = match trest {
+    Some(XLambda(_, _, b, _, _, _, _)) -> Some(b)
+    _ -> None
+  }
+  match rest {
+    ELambda(_, body, _, _, _) -> walk_e(qc, q0, body, tbody)
+    _ -> walk_e(qc, q0, rest, trest)
+  }
+}
+
 fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   var q = q0
   # generic fallback: the expression's own type
@@ -721,27 +877,25 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
             }
             None -> ()
           }
+        # A handler state cell is not read through its binding: the checker
+        # rewrites every read of the name into `cell_get`/`cell_take` on the
+        # slot (docs/handler-state-design.md). The reader still wrote a name,
+        # so the name still answers -- as the cell, at the type the slot holds.
+        Some(XCallBuiltin(prim, cargs, _, _, _, _, _)) -> {
+          if is_cell_read(prim) {
+            match cell_arg_sym(cargs) {
+              Some(sid) -> { q = offer_cell(qc, q, sid, lo, hi) }
+              None -> ()
+            }
+          }
+        }
         _ -> ()
       }
     ELambda(params, body, _, _, _) -> {
       q = visit_lambda_param_types(q, params)
       match te {
         Some(XLambda(psyms, _, tbody, _, _, _, _)) -> {
-          var i = 0
-          for p in params {
-            match get(psyms, i) {
-              Some(sid) ->
-                match sym_get(qc, sid) {
-                  Some(sym) -> {
-                    q = offer(q, p.lo, p.hi, sym.name ++ ": " ++ show_ty(qc, sym.ty),
-                      Some((p.lo, p.hi)), None)
-                  }
-                  None -> ()
-                }
-              None -> ()
-            }
-            i = i + 1
-          }
+          q = offer_lambda_params(qc, q, params, psyms)
           q = walk_e(qc, q, body, Some(tbody))
         }
         _ -> { q = walk_e(qc, q, body, None) }
@@ -1008,9 +1162,22 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         i = i + 1
       }
     }
-    EHandle(_, cells, arms, _, _, _, _, _) -> {
-      for c in cells { q = visit_written_type(q, c.ann, WtStorage) }
-      for arm in arms { q = visit_lambda_param_types(q, arm.params) }
+    EHandle(_, cells, arms, rest, _, _, _, _) -> {
+      let (tstmts, trest) = handle_parts(te)
+      var i = 0
+      for c in cells {
+        q = visit_written_type(q, c.ann, WtStorage)
+        let tc = opt_get3(tstmts, i)
+        q = offer_cell_decl(qc, q, tc, c)
+        q = walk_e(qc, q, c.init, cell_init_of(tc))
+        i = i + 1
+      }
+      let tarms = handle_arm_nodes(opt_get3(tstmts, len(cells)))
+      for arm in arms {
+        q = visit_lambda_param_types(q, arm.params)
+        q = walk_handler_arm(qc, q, arm, arm_node_at(tarms, arm.lo, arm.hi))
+      }
+      q = walk_rest(qc, q, rest, trest)
     }
     EBlock(stmts, tail, _, _) -> {
       let (tstmts, ttail) = match te {
@@ -1536,6 +1703,21 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
           }
           q = walk_e(qc, q, value, Some(tvalue))
         }
+        # Writing a handler state cell is not an assignment by the time it is
+        # typed: the binding never changes, the slot does, so the checker left
+        # a `cell_set` statement where the assignment was. The name is still
+        # the cell and the right-hand side still has a type.
+        Some(TSExpr(x, _, _)) ->
+          match cell_set_args(x) {
+            Some(cargs) -> {
+              match cell_arg_sym(cargs) {
+                Some(sid) -> { q = offer_cell(qc, q, sid, nlo, nhi) }
+                None -> ()
+              }
+              q = walk_e(qc, q, value, get(cargs, 1))
+            }
+            None -> { q = walk_e(qc, q, value, None) }
+          }
         _ -> { q = walk_e(qc, q, value, None) }
       }
     SExpr(e, _, _) ->
