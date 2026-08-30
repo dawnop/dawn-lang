@@ -45,7 +45,7 @@
 # to the transcript of its case. A mutant that passes means the transcript
 # has no teeth about the thing it broke, and this script says so.
 #
-# Before any of that, five checks that need no wasm toolchain, each with its
+# Before any of that, six checks that need no wasm toolchain, each with its
 # own mutants and its own head explaining why it is not a transcript. Four are
 # driven straight at the bridge with node: keyed-ops.sh for the three ops
 # neither application here reaches, props.sh for the attribute/property split,
@@ -53,7 +53,9 @@
 # payload no application here declares, and foreign.sh for the custom-element
 # boundary no application here mounts. The fifth, collect.sh, needs bin/dawn
 # and not node: it is about how a node's children are *built* rather than
-# about what crossed the boundary, and the encoder cannot see that.
+# about what crossed the boundary, and the encoder cannot see that. The sixth,
+# flags.sh, needs both: an init's flags are read once by an application whose
+# initial model is a function of them, and neither application here has one.
 #
 #   ./scripts/wasm-dom-contract/run.sh
 #   ./scripts/wasm-dom-contract/run.sh --record        # re-record both transcripts
@@ -90,11 +92,19 @@ record=0
 # it is about is the construction of a child list rather than the bridge. A
 # transcript is handed a finished node, so how the node was built is invisible
 # to it; the collector the counter's view now uses is held there instead.
+#
+# flags.sh has a leg on each side. Both applications below start from a
+# constant model, so their transcripts read the same whether the bridge sends
+# an init's `flags` field, drops it, or invents one -- there is nothing in
+# either tree a flag could move. It drives `Reactor.init` and `mount` with
+# node, and replays examples/projects/tea_dom_flags with bin/dawn against the
+# session scripts/example-main-contract/registry.json already pins.
 "$(dirname "${BASH_SOURCE[0]}")/keyed-ops.sh"
 "$(dirname "${BASH_SOURCE[0]}")/props.sh"
 "$(dirname "${BASH_SOURCE[0]}")/payload.sh"
 "$(dirname "${BASH_SOURCE[0]}")/foreign.sh"
 "$(dirname "${BASH_SOURCE[0]}")/collect.sh"
+"$(dirname "${BASH_SOURCE[0]}")/flags.sh"
 
 fail=0
 demo="$root/examples/projects/tea_dom_counter"
@@ -387,4 +397,4 @@ edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
   run_mutant todo-filter yes "the done filter admits everything"
 
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm dom contract ok (2 transcripts + 3 plateaus + 9 mutants, plus the keyed ops, the props, the payloads, the foreign elements and the collector)"
+echo "wasm dom contract ok (2 transcripts + 3 plateaus + 9 mutants, plus the keyed ops, the props, the payloads, the foreign elements, the collector and the flags)"
