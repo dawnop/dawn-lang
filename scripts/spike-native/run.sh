@@ -64,6 +64,13 @@
 # between the backends, so the marker says "non-zero is expected here", never
 # "any exit will do".
 #
+# The other marker says a program has no native half at all:
+# `<name>.jvm-only`. `use java` is refused by the native backend as a decision
+# (`emitc` says so in as many words), so a program whose subject *is* that
+# boundary cannot be differentiated and its C-side checks report `blocked`.
+# The alternative was six known-red.txt entries that nobody would ever be able
+# to delete, which would make that file mean two different things.
+#
 # `jvm` and `native` only run when <name>.expect exists. They are the answer
 # to codebase-audit.md TEST-01: a differential test alone certifies whatever
 # the JVM already does, and a defect the two backends share -- anything
@@ -169,6 +176,18 @@ run_corpus() {
     else
       verdict "$name:jvm" bad "$(diff -u "$expect" "$work/$name.jvm")"
     fi
+  fi
+
+  # A program whose subject is the `use java` boundary has no native half to
+  # differ from: `emitc` refuses `use java` by design ("cannot be compiled to
+  # native; use `use c`"), which is a decision rather than a defect. Such a
+  # program declares itself with a `<name>.jvm-only` marker and its C-side
+  # checks report `blocked`, the same word every other "no evidence either way"
+  # gets here. Without the marker the refusal would have to live in
+  # known-red.txt, which is the list of things that are *meant* to be fixed.
+  if [ -f "$here/$name.jvm-only" ]; then
+    for c in emitc cc native diff stderr exit asan; do blocked "$name:$c"; done
+    return 0
   fi
 
   if "$root/bin/dawn" __emitc --std "$stdcopy" "$prog" -o "$work/$name.c" \

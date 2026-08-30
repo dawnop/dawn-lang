@@ -3468,7 +3468,20 @@ fn lower_java(st: LSt, call: TJavaCall, ty: Ty) -> (LSt, CExpr) = {
     args = args ++ [v]
     tys = tys ++ [tex_ty(a)]
   }
-  (st1, CForeign(CJava { call: call, target: tgt, args: args, arg_tys: tys }, ty))
+  # the creation-point snapshots, lowered like any other expression. They are
+  # not captures: `refuse_evidence_captures` still holds everywhere, and this
+  # is the one boundary the design's §2.5 does not reach -- a value leaving the
+  # language has no call site left to be handed a pack at (spec §6.5).
+  var sevs: List[(Int, CExpr)] = []
+  for pe in call.sam_evs {
+    let (idx, tx) = pe
+    let (st2, v) = lower_expr(st1, tx)
+    st1 = st2
+    sevs = sevs ++ [(idx, v)]
+  }
+  (st1, CForeign(CJava {
+    call: call, target: tgt, args: args, arg_tys: tys, sam_evs: sevs
+  }, ty))
 }
 
 fn lower_all(st: LSt, es: List[TExpr]) -> (LSt, List[CExpr]) = {

@@ -502,6 +502,12 @@ fn closure_class(owner: String, idx: Int) -> String =
 fn sam_class(owner: String, idx: Int) -> String =
   "dawn/sam/" ++ join(str.split(owner, "/"), "\$") ++ "\$" ++ to_string(idx)
 
+## The descriptor of an erased evidence slot: what `desc_of` answers for
+## `types.erased_ev_ty()`, spelled out here because the SAM bridge and the
+## adapter class build their descriptors from Java class names and never hold a
+## `Ty` to ask about.
+fn ev_desc() -> String = "L" ++ obj() ++ ";"
+
 fn capture_field(idx: Int) -> String = "c" ++ to_string(idx)
 
 ## The load opcode and slot width for a JVM descriptor, for the one place
@@ -821,6 +827,17 @@ fn sam_conv_at(call: TJavaCall, i: Int) -> Option[(Int, String, String, List[Str
   None
 }
 
+## The creation-point evidence snapshot for the conversion at argument `i`,
+## looked up the way `sam_conv_at` looks up the conversion itself: the two
+## lists are built together and keyed the same way.
+fn sam_ev_at(jc: CJava, i: Int) -> Option[CExpr] = {
+  for pe in jc.sam_evs {
+    let (idx, e) = pe
+    if idx == i { return Some(e) }
+  }
+  None
+}
+
 fn is_list_bridge(call: TJavaCall, i: Int) -> Bool = {
   for b in call.list_bridges {
     if b == i { return true }
@@ -833,15 +850,16 @@ fn emit_sam_conversion(
   gx: GenCtx,
   g: Gen,
   conv: (Int, String, String, List[String], String),
-  ft: Ty
+  ft: Ty,
+  ev: Option[CExpr]
 ) -> Gen !io = {
   let (_, iface, sam_name, sam_params, sam_ret) = conv
   let (_fps, fret) = tyfn_parts(ft)
   # the *function value's* arity: a Dawn fn value carries its evidence pack in
   # a trailing slot, so what is on the stack here is a `Fn(n+1)`. The bridge
   # and the adapter class below are spelled from this one number, and the
-  # bridge fills the slot with null -- a known hole rather than a discharged
-  # one, spelled out at the push in `gen_sam_bridge`.
+  # bridge fills the slot out of the adapter's own field -- the creation-point
+  # snapshot pushed here, spelled out at the read in `gen_sam_bridge`.
   let n = fn_arity(ft)
   let bridge = "dawn\$sam\$" ++ to_string(g.sam_ctr)
   let g1 = Gen {
@@ -858,7 +876,7 @@ fn emit_sam_conversion(
   }
   var pdescs = ""
   for p in sam_params { pdescs = pdescs ++ jdesc(p) }
-  let bridge_desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(sam_ret)
+  let bridge_desc = "(L" ++ fn_iface(n) ++ ";" ++ ev_desc() ++ pdescs ++ ")" ++ jdesc(sam_ret)
   let cls = sam_class(gx.class_name, g.sam_ctr)
   let g2 = Gen {
     ..g1,
@@ -883,25 +901,55 @@ fn emit_sam_conversion(
   g2.mv.visitTypeInsn(OP_NEW, cls)
   g2.mv.visitInsn(OP_DUP_X1)
   g2.mv.visitInsn(OP_SWAP)
-  g2.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>",
-    "(L" ++ fn_iface(n) ++ ";)V", false)
-  g2
+  # then the snapshot, which is an ordinary Core expression evaluated here --
+  # the second `<init>` argument, so it goes on top of the function value.
+  # A conversion the checker built no pack for cannot happen (`finalize_sams`
+  # takes one wherever it records a conversion), and the null it would push
+  # instead is what `ev_get` already tolerates rather than a silent wrong
+  # answer, so this is a missing-case guard and not a supported shape.
+  let g3 =
+    match ev {
+      Some(e) -> {
+        let (ga, _falls) = gen_cexpr(gx, g2, e, false)
+        ga
+      }
+      None -> {
+        g2.mv.visitInsn(OP_ACONST_NULL)
+        g2
+      }
+    }
+  g3.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>",
+    "(L" ++ fn_iface(n) ++ ";" ++ ev_desc() ++ ")V", false)
+  g3
 }
 
-## One SAM adapter class: a field holding the `FnN`, and the interface method
-## forwarding to the bridge that was already being emitted next to it.
+## One SAM adapter class: two fields -- the `FnN`, and the creation-point
+## evidence snapshot -- and the interface method forwarding both to the bridge
+## that was already being emitted next to it.
+##
+## The second field is the whole of the boundary clause (spec §6.5). Evidence
+## never joins an ordinary capture list (design §2.5, and `lower`'s
+## `refuse_evidence_captures` panics if it tries), because inside the language
+## a call site can always be made to hand one over. A value crossing to Java
+## has no later call site, so it carries what it was made under, and this class
+## is the only shape in the compiler that holds a pack in a field.
 fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
   let fnd = "L" ++ fn_iface(s.arity) ++ ";"
+  let evd = ev_desc()
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
   Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, s.cls, obj(), s.iface)
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(0), fnd)
-  let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ fnd ++ ")V").expect("mv")
+  Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(1), evd)
+  let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ fnd ++ evd ++ ")V").expect("mv")
   init.visitCode()
   init.visitVarInsn(OP_ALOAD, 0)
   init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
   init.visitVarInsn(OP_ALOAD, 0)
   init.visitVarInsn(OP_ALOAD, 1)
   init.visitFieldInsn(OP_PUTFIELD, s.cls, capture_field(0), fnd)
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 2)
+  init.visitFieldInsn(OP_PUTFIELD, s.cls, capture_field(1), evd)
   init.visitInsn(OP_RETURN)
   close_mv(init)
   var pdescs = ""
@@ -912,6 +960,8 @@ fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitFieldInsn(OP_GETFIELD, s.cls, capture_field(0), fnd)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, s.cls, capture_field(1), evd)
   # LMF was handed the same method type as both sam and instantiated type
   # here, so there is nothing to adapt: the parameters go to the bridge in
   # the shape they arrived in, and the bridge does every conversion.
@@ -932,9 +982,10 @@ fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
   (s.cls, class_bytes(() => cw.toByteArray(), s.cls))
 }
 
-fn adapt_one_java_arg(gx: GenCtx, g: Gen, call: TJavaCall, i: Int, aty: Ty, param: String) -> Gen !io = {
+fn adapt_one_java_arg(gx: GenCtx, g: Gen, jc: CJava, i: Int, aty: Ty, param: String) -> Gen !io = {
+  let call = jc.call
   match sam_conv_at(call, i) {
-    Some(conv) -> emit_sam_conversion(gx, g, conv, aty)
+    Some(conv) -> emit_sam_conversion(gx, g, conv, aty, sam_ev_at(jc, i))
     None -> {
       if is_list_bridge(call, i) {
         emit_list_bridge(g.mv)
@@ -959,7 +1010,7 @@ fn gen_java_args(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, Bool) !io = {
     let (g2, falls) = gen_cexpr(gx, g1, jc.args[i], false)
     g1 = g2
     if not falls { return (g1, false) }
-    g1 = adapt_one_java_arg(gx, g1, call, i, jc.arg_tys[i], call.param_cls[i])
+    g1 = adapt_one_java_arg(gx, g1, jc, i, jc.arg_tys[i], call.param_cls[i])
     i = i + 1
   }
   match call.varargs_pack {
@@ -980,7 +1031,7 @@ fn gen_java_args(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, Bool) !io = {
         let (g2, falls) = gen_cexpr(gx, g1, jc.args[k], false)
         g1 = g2
         if not falls { return (g1, false) }
-        g1 = adapt_one_java_arg(gx, g1, call, k, jc.arg_tys[k], component)
+        g1 = adapt_one_java_arg(gx, g1, jc, k, jc.arg_tys[k], component)
         g1.mv.visitInsn(store)
         k = k + 1
       }
@@ -1086,22 +1137,25 @@ fn gen_java_call(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io = {
   (g1, true)
 }
 
-## static <samRet> dawn$sam$N(FnN f, <sam params>): null-check references,
-## box to the erased Fn convention, invoke, adapt the result (§9.4).
+## static <samRet> dawn$sam$N(FnN f, Object ev, <sam params>): null-check
+## references, box to the erased Fn convention, invoke, adapt the result
+## (§9.4). `ev` is the creation-point snapshot the adapter object holds.
 fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
   # `sam_params` are the Java side's; the Dawn function value on the other end
   # of the bridge takes one more, its evidence pack
   let n = len(b.sam_params) + 1
   var pdescs = ""
   for p in b.sam_params { pdescs = pdescs ++ jdesc(p) }
-  let desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(b.sam_ret)
+  let desc = "(L" ++ fn_iface(n) ++ ";" ++ ev_desc() ++ pdescs ++ ")" ++ jdesc(b.sam_ret)
   # public for the same reason a hoisted body is: the adapter class that
   # calls this bridge is a separate class file (gen_sam_class)
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC,
     b.name, desc).expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
-  var slot = 1
+  # slot 0 is the function value, slot 1 the snapshot; the Java side's own
+  # parameters start after it
+  var slot = 2
   var i = 0
   for p in b.sam_params {
     if p == "long" {
@@ -1145,21 +1199,21 @@ fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
     }
     i = i + 1
   }
-  # the evidence pack the function value expects, and a **known hole**: this
-  # boundary passes null, and the closure may need better. A `use java`
-  # callback is entered from Java with no Dawn frame under it, and spec §9.4
-  # puts no limit on the row a function value crossing here may have, so
-  # `Thread.new(() => println(to_string(quota())))` under a `with handle`
-  # checks clean and panics with `types.EV_MISS_MSG`.
+  # the evidence pack the function value expects: **the creation-point
+  # snapshot**, forwarded out of slot 1. There is no call site here to build
+  # one at -- Java enters the adapter with no Dawn frame under it -- so the
+  # pack was taken where the conversion was written, by the same
+  # `checker.evidence_pack` every other supply point uses, and carried in a
+  # field of the adapter object `emit_sam_conversion` builds. That is the one
+  # place evidence lives in a value, and spec §6.5's boundary clause says why:
+  # a value crossing out of the language has no later call site to be answered
+  # at. `Thread.new(() => println(to_string(quota())))` under a `with handle`
+  # reads the handler that was installed where the thread was made.
   #
-  # `gen_bracket` and `dawn_bracket` used to give the same answer for the same
-  # stated reason and no longer do -- a primitive's own row buys an evidence
-  # slot at the call site, so a shim can be handed the pack. There is no call
-  # site here to hand one over: the pack would have to be captured into the
-  # adapter object `emit_sam_conversion` builds, which is evidence living in a
-  # value, and what a callback Java runs after the handler frame returned
-  # should see is a language question. `types.ev_pack_adt` keeps the list.
-  m.visitInsn(OP_ACONST_NULL)
+  # This used to be `ACONST_NULL` and a documented hole, then a checker
+  # refusal (`sam_row_ok`), and is neither now. `types.ev_pack_adt` keeps the
+  # list of what every other null-passing site is doing.
+  m.visitVarInsn(OP_ALOAD, 1)
   m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(n), "apply", erased_apply_desc(n), true)
   if b.bottom {
     terminate_bottom(m, CallOne)

@@ -1,0 +1,225 @@
+# The creation-point snapshot (spec §6.5's boundary clause, §9.4): what a
+# function value carries with it when it stops being a Dawn value and becomes a
+# Java functional interface.
+#
+# Everywhere else in the language the supply point is the call -- a function
+# value's row is answered where it is applied. Java has no such place. The
+# adapter is entered from a Java frame, on a thread and at a time the language
+# did not choose, so the pack is taken where the conversion is *written* and
+# carried in a field of the adapter object.
+#
+# Which makes the sharp case the one below first: a `Thread` built inside a
+# function, under a handler installed in that function, started only after the
+# function has returned. There is no Dawn frame anywhere under `run()` when it
+# fires, and the answer is still the handler's.
+#
+# This file is JVM-only -- `use java` is refused on the native backend -- and
+# says so with a `.jvm-only` marker beside it, which is why the differential
+# reports its native half as blocked rather than red.
+#
+# Corpus discipline (scripts/effect-evidence-contract/README.md): every case
+# installs its own handlers, so no line can be reading a node another line
+# seeded; the answers are distinct primes, so no two can agree by arithmetic
+# accident; and every case *reads* through the slot, except the one at the
+# bottom that is labelled as the control.
+use std/io
+use java "java.lang.Thread"
+use java "java.util.ArrayList"
+
+effect Ask {
+  fn ask() -> Int
+}
+
+effect Tell {
+  fn tell() -> Int
+}
+
+# --- the handler frame is gone before Java calls -------------------------
+
+## Builds the thread and returns it. The handler is installed here and is out
+## of scope by the time the caller starts the thread, so nothing but the
+## snapshot can answer `ask()`.
+##
+## `a` is how the assertion lane sees the answer: a thread cannot return one,
+## so it puts `ask()` marks in a list the caller still holds. The transcript
+## lane reads the same number off the printed line.
+fn thread_under_handler(a: ArrayList) -> Thread !io = {
+  with handle Ask { ask() => 3 }
+  Thread.new(() => {
+    let n = ask()
+    println("after-frame " ++ to_string(n))
+    var i = 0
+    while i < n {
+      let _ = a.add("x")
+      i = i + 1
+    }
+  })
+}
+
+fn after_frame() -> Unit !io = {
+  let a = ArrayList.new()
+  let t = thread_under_handler(a)
+  t.start()
+  t.join()
+}
+
+# --- the deferred conversion path ----------------------------------------
+
+## A lambda with an unannotated parameter takes `sam_deferred`'s path: it is
+## typed against the SAM's shape after the overload is picked, which is a
+## second place the snapshot has to be taken. `removeIf` also *returns* through
+## the boundary, so the handler's answer decides the list's size.
+fn deferred() -> Int !io = {
+  with handle Ask { ask() => 5 }
+  let a = ArrayList.new()
+  let _ = a.add("x")
+  let _ = a.removeIf(x => ask() > 4)
+  a.size()
+}
+
+# --- an effect variable crosses --------------------------------------------
+
+## The crossing value's row is this frame's own binder, so the snapshot is the
+## frame's erased slot forwarded rather than a node built over it. `cross` has
+## to declare `!e`: the conversion charges the row here, which is what keeps a
+## label from being lost at the boundary rather than answered there.
+fn cross(tag: String, f: fn() -> Int !e) -> Unit !io !e = {
+  let t = Thread.new(() => println(tag ++ " " ++ to_string(f())))
+  t.start()
+  t.join()
+}
+
+fn variable() -> Unit !io = {
+  with handle Ask { ask() => 7 }
+  cross("var", () => ask())
+}
+
+## Two labels meeting in one variable's slot: the tail is `ev_append`'s join,
+## and a snapshot that kept only one of them answers 13 or 17 instead of 30.
+fn variable_union() -> Unit !io = {
+  with handle Ask { ask() => 13 }
+  with handle Tell { tell() => 17 }
+  cross("union", () => ask() + tell())
+}
+
+# --- which handler, when two are in scope -----------------------------------
+
+## The snapshot is taken where the conversion is written, so the inner handler
+## is the one in scope there. A snapshot built from the wrong frame is green on
+# every case above and answers 19 here.
+fn lexical() -> Unit !io = {
+  with handle Ask { ask() => 19 }
+  let outer = Thread.new(() => println("lexical-outer " ++ to_string(ask())))
+  with handle Ask { ask() => 23 }
+  let inner = Thread.new(() => println("lexical-inner " ++ to_string(ask())))
+  outer.start()
+  outer.join()
+  inner.start()
+  inner.join()
+}
+
+# --- an associated effect crosses -------------------------------------------
+
+trait P[T] {
+  effect E
+  fn run(x: T) -> Int !T.E
+}
+
+type A = { v: Int }
+
+impl P[A] {
+  effect E = !Ask
+  fn run(x: A) -> Int !Ask = x.v + ask()
+}
+
+## A projection in the crossing row: the snapshot has to reach the member's own
+## slot, not the subject's dictionary and not the frame's variable slot.
+fn cross_assoc[T: P](x: T) -> Unit !io !T.E = {
+  let t = Thread.new(() => println("assoc " ++ to_string(run(x))))
+  t.start()
+  t.join()
+}
+
+fn projection() -> Unit !io = {
+  with handle Ask { ask() => 29 }
+  cross_assoc(A { v: 1 })
+}
+
+# --- the control -------------------------------------------------------------
+
+## A crossing closure that reads no evidence at all. It answers the same
+# whether the snapshot was built right, built wrong, or passed as null, and it
+# is here to say so: the pure and `!io` rows that were the *only* rows allowed
+# across before the boundary clause must still cross.
+fn control() -> Unit !io = {
+  let t = Thread.new(() => println("control"))
+  t.start()
+  t.join()
+}
+
+pub fn main() -> Unit !io = {
+  after_frame()
+  println("deferred " ++ to_string(deferred()))
+  variable()
+  variable_union()
+  lexical()
+  projection()
+  control()
+}
+
+test "a thread started after the handler frame returned reads the snapshot" {
+  # nothing in this test's own scope handles Ask; three marks can only have
+  # come from the frame `thread_under_handler` installed and left
+  let a = ArrayList.new()
+  let t = thread_under_handler(a)
+  t.start()
+  t.join()
+  assert a.size() == 3
+}
+
+test "the deferred conversion path takes a snapshot too" {
+  assert deferred() == 0
+}
+
+test "an effect variable's slot is what crosses" {
+  with handle Ask { ask() => 31 }
+  let a = ArrayList.new()
+  let _ = a.add("x")
+  let _ = a.removeIf(x => ask() == 31)
+  assert a.size() == 0
+}
+
+test "two labels through one variable are both answered" {
+  with handle Ask { ask() => 37 }
+  with handle Tell { tell() => 41 }
+  let a = ArrayList.new()
+  let _ = a.add("x")
+  let _ = a.removeIf(x => ask() + tell() == 78)
+  assert a.size() == 0
+}
+
+test "the snapshot is the handler in scope where the value was written" {
+  with handle Ask { ask() => 43 }
+  let a = ArrayList.new()
+  let _ = a.add("x")
+  with handle Ask { ask() => 47 }
+  let _ = a.removeIf(x => ask() == 43)
+  # the conversion is written under the *inner* handler, so 43 is refused and
+  # nothing is removed
+  assert a.size() == 1
+}
+
+test "a projection's slot crosses" {
+  with handle Ask { ask() => 53 }
+  let a = ArrayList.new()
+  let _ = a.add("x")
+  let _ = a.removeIf(x => run(A { v: 2 }) == 55)
+  assert a.size() == 0
+}
+
+test "a row with nothing in it still crosses" {
+  let a = ArrayList.new()
+  let _ = a.add("x")
+  let _ = a.removeIf(x => true)
+  assert a.size() == 0
+}

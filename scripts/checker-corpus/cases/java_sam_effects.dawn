@@ -1,9 +1,20 @@
-# checker.dawn: which effect rows may cross into a Java functional interface
-# (spec §9.4). Only pure and `!io` do; a label, an effect variable and a
-# projection each name an evidence slot a Java caller has no call site to fill.
+# checker.dawn: what happens to an effect row that crosses into a Java
+# functional interface (spec §6.5's boundary clause, §9.4).
+#
+# Every row crosses. The conversion site takes a snapshot of the evidence pack
+# in scope there (`sam_snapshot`), the adapter object carries it, and Java's
+# call reads it -- so a label, an effect variable and an associated-effect
+# projection are all accepted where they used to be refused. This file used to
+# hold three golden refusal lines and holds one, which is the whole of what
+# changed: `sam_row_ok`, `sam_row_hint` and `sam_row_err` are gone.
 #
 # The accepting halves carry no golden line of their own, and that is what they
 # are for: a check that grew a false positive would put one here.
+#
+# The one line that remains is the honest half of the snapshot. A pack is taken
+# from a scope, so a row nothing in scope answers is reported at the conversion
+# the way it is reported at any other call -- the boundary moved where evidence
+# comes from, not whether it has to exist.
 #
 # Two conversion sites in `finalize_sams` need reaching, and they are told
 # apart by `sam_deferred`, not by where the argument is written: a lambda is
@@ -12,16 +23,16 @@
 # why `ArrayList.forEach` appears beside `Thread.new`.
 #
 # The classes are picked for stability: `Thread(Runnable)`, `Consumer` and
-# `Collection.removeIf` have not moved in a decade, and the diagnostic quotes
+# `Collection.removeIf` have not moved in a decade, and any diagnostic quotes
 # only the interface's simple name, never the host's overload set.
 use java "java.lang.Thread"
 use java "java.util.ArrayList"
 
-effect Log {
+pub effect Log {
   fn log(m: String) -> Unit
 }
 
-# --- refused: a written label ---
+# --- accepted: a written label, answered by a handler in scope ---
 
 pub fn labelled() -> Unit !io = {
   with handle Log { log(m) => println(m) }
@@ -29,7 +40,7 @@ pub fn labelled() -> Unit !io = {
   t.start()
 }
 
-# --- refused: a written label, reached through the deferred path instead ---
+# --- accepted: the same, reached through the deferred path instead ---
 
 pub fn labelled_deferred() -> Unit !io = {
   with handle Log { log(m) => println(m) }
@@ -37,10 +48,32 @@ pub fn labelled_deferred() -> Unit !io = {
   a.forEach(x => log("tick"))
 }
 
-# --- refused: an effect variable, which may be instantiated at a label ---
+# --- accepted: a written label riding out on the signature ---
+#
+# Nothing handles Log here, so the snapshot reads this frame's own hidden
+# parameter and the label is charged to the row -- which the signature declares.
 
-pub fn variable(f: fn() -> Unit !e) -> Unit !io = {
+pub fn labelled_declared() -> Unit !io !Log = {
+  let t = Thread.new(() => log("tick"))
+  t.start()
+}
+
+# --- accepted: an effect variable, forwarded out of the frame's own slot ---
+
+pub fn variable(f: fn() -> Unit !e) -> Unit !io !e = {
   let t = Thread.new(f)
+  t.start()
+}
+
+# --- accepted: an associated-effect projection ---
+
+pub trait P[T] {
+  effect E
+  fn run(x: T) -> Unit !T.E
+}
+
+pub fn projection[T: P](x: T) -> Unit !io !T.E = {
+  let t = Thread.new(() => run(x))
   t.start()
 }
 
@@ -64,12 +97,21 @@ pub fn io_value() -> Unit !io = {
   u.start()
 }
 
-# --- accepted: the way out the refusal names, handler written inside ---
+# --- accepted: the handler written inside, which is still a way to write it ---
 
 pub fn handled_inside() -> Unit !io = {
   let t = Thread.new(() => {
     with handle Log { log(m) => println(m) }
     log("tick")
   })
+  t.start()
+}
+
+# --- refused: a label nothing in scope answers and the signature does not
+#     declare. The snapshot is taken from a scope, so it reports what any other
+#     call site reports when the scope has nothing to give.
+
+pub fn unhandled() -> Unit !io = {
+  let t = Thread.new(() => log("tick"))
   t.start()
 }

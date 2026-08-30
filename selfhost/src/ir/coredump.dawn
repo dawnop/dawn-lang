@@ -43,7 +43,7 @@ use ir/core.{
   CCtor, CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg,
   CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
-  CReturn, CBreak, CContinue, CForeign, CDup,
+  CReturn, CBreak, CContinue, CForeign, CDup, sam_ev_exprs,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CBinOp, CUnOp,
@@ -129,7 +129,7 @@ fn walk_expr(a: Acc, e: CExpr) -> Acc =
     CReturn(v) -> walk_opt(a, v)
     CBreak(l) -> add_loop(a, l)
     CContinue(l) -> add_loop(a, l)
-    CForeign(j, _) -> walk_all(walk_opt(a, j.target), j.args)
+    CForeign(j, _) -> walk_all(walk_all(walk_opt(a, j.target), j.args), sam_ev_exprs(j))
     CInt(_) -> a
     CFloat(_) -> a
     CBool(_) -> a
@@ -371,7 +371,15 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
         (if j.call.is_field { " field" } else { "" }) ++
         ty(adts, t) ++ "\n"
       out = out ++ opt_expr(adts, n, d + 1, j.target)
-      out ++ exprs(adts, n, d + 1, j.args)
+      out = out ++ exprs(adts, n, d + 1, j.args)
+      # the creation-point evidence snapshots, one per SAM conversion, printed
+      # under the argument they belong to so a pack that moved shows up here
+      for pe in j.sam_evs {
+        let (idx, ev) = pe
+        out = out ++ ind(d + 1) ++ "sam-ev " ++ to_string(idx) ++ "\n"
+        out = out ++ expr(adts, n, d + 2, ev)
+      }
+      out
     }
   }
 

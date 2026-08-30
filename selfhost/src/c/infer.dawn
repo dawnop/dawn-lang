@@ -44,7 +44,7 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup,
+  CContinue, CForeign, CDup, sam_ev_exprs,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CMethod, CJava, CInt, CFloat, CBool, CStr, CUnit,
   CSlotFn, CSlotDefault,
@@ -162,7 +162,7 @@ fn clo_expr(e: CExpr, acc: Set[(String, String)]) -> Set[(String, String)] =
         None -> acc
         Some(t) -> clo_expr(t, acc)
       }
-      clo_list(j.args, a1)
+      clo_list(sam_ev_exprs(j), clo_list(j.args, a1))
     }
     CInt(_) -> acc
     CFloat(_) -> acc
@@ -403,7 +403,7 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
         None -> d
         Some(t) -> dm_expr(d, t, true)
       }
-      dm_list(d1, j.args, true)
+      dm_list(dm_list(d1, j.args, true), sam_ev_exprs(j), true)
     }
 
     CDup(inner, _) -> dm_expr(d, inner, k)

@@ -8093,63 +8093,48 @@ fn sam_ret_compatible(js: Jsig, r: Ty, j: String) -> Bool !io =
     }
   }
 
-## May a function value with this row cross to Java? Only if it owes no
-## evidence (spec §9.4).
+## The evidence a function value takes with it when it leaves the language
+## (spec §6.5's boundary clause, §9.4).
 ##
-## A converted function value is entered from Java with no Dawn frame under
-## it. `jvm/emit.gen_sam_bridge` has no call site to take an evidence pack
-## from, so it passes null, and a row with anything to answer for is then an
-## `ev_get` panic at run time on a body that checked clean. The check belongs
-## here because the conversion is written here and happens once, while the
-## calls into it are Java's and unbounded in number, time and thread.
+## **Inside Dawn the supply point is the call.** A function value's row is
+## answered where it is applied, because that is the only place a handler frame
+## is known to be live, and `check_apply` says so in as many words. Java has no
+## such place: an adapter is entered from a Java frame with no Dawn frame under
+## it, at a time and on a thread the language did not choose, so there is no
+## call site to build a pack at and none can be invented later.
 ##
-## Pure and `!io` are the whole of the accepted set, and the normal form makes
-## that a two-arm match: every other constructor names a slot the Java caller
-## cannot fill. `ELabeled` always carries at least one label, `EUnion` at
-## least one variable or projection, and a label and a projection each stand
-## for evidence the way a variable does.
+## **So the boundary clause takes the pack at the creation point.** The pack in
+## scope where the conversion is written is snapshotted into the adapter object
+## and handed to the closure on every entry Java makes. It is built by
+## `evidence_pack`, the same builder every other supply point uses, so what
+## crosses answers exactly the atoms its own row names, out of the frame that
+## can see them. Nothing about a call inside the language changes: this is the
+## one place a value carries evidence rather than receiving it, and it is the
+## place where "later, from a call site" is not available.
 ##
-## An effect variable is refused even though the row it stands for might turn
-## out pure. The conversion is checked once and the variable may equally be
-## instantiated at a label, which would hand Java a function it cannot call;
-## the refusal is what makes the accepted set closed under instantiation.
+## The row is charged to this body, and what went unanswered comes back out of
+## it, exactly as an ordinary call does -- one failure, one diagnostic. That is
+## what makes the snapshot honest rather than a way of losing a label: a
+## conversion with no handler in scope is either the "nobody is handling this"
+## error or a label riding out on the enclosing signature, whose hidden
+## parameter is then what the snapshot reads.
 ##
-## Nothing here reduces a projection first. Reduction is eager (D3), so one
-## that survives to a call site still has a rigid subject, which is exactly
-## the case that owes.
-##
-## The precedent is the same shape in two other languages: Kotlin refuses
-## `suspend` in a SAM conversion (KT-40978), and OCaml 5 will not resume an
-## effect through a C frame. A foreign caller is not a handler site.
-fn sam_row_ok(e: Eff) -> Bool =
-  match e {
-    EPure -> true
-    EIo -> true
-    _ -> false
-  }
-
-## The way out, named in terms of the row that was refused: a `with handle`
-## written inside the function value discharges the label there, and what
-## crosses is then pure or `!io`. A variable or a projection has no such
-## rewrite, so that arm says why it is refused rather than offering one.
-fn sam_row_hint(e: Eff) -> String = {
-  let ls = eff_labels(e)
-  if len(ls) == 0 {
-    return "an effect variable or an associated-effect projection may stand " ++
-      "for a label, so it does not cross either; give this function value a " ++
-      "pure or `!io` row"
-  }
-  let (_, n) = ls[0]
-  "write the handler inside the function value, so that the row crossing is " ++
-    "pure or `!io`:\n  () => { with handle " ++ n ++ " { ... } ... }"
+## This used to be a refusal. `sam_row_ok` accepted a pure or `!io` row and
+## rejected a label, an effect variable and a projection, because the bridge
+## had nothing to pass and passing null was an `ev_get` panic at run time on a
+## program that checked clean. Narrowing what may cross and snapshotting what
+## does are two answers to one hole; the snapshot is the answer that lets
+## `Thread.new(() => log("tick"))` under a `with handle` mean something, and it
+## is why the accepted set is now every row. Kotlin refuses `suspend` at a SAM
+## conversion (KT-40978) because a continuation cannot be resumed from a
+## foreign frame; an evidence pack is read, not resumed, and a read is a thing
+## a snapshot can serve.
+fn sam_snapshot(cx: Cx, i: Int, te: Eff, lo: Int, hi: Int) -> (Cx, (Int, TExpr)) = {
+  let (cx1, pack, unanswered) = evidence_pack(cx, te, true, lo, hi)
+  let cx2 = record_effect(cx1, eff_drop(te, unanswered), lo, hi,
+    "the function value crossing to Java")
+  (cx2, (i, pack))
 }
-
-fn sam_row_err(cx: Cx, a: Expr, p: String, e: Eff) -> Cx !io =
-  cerr_h(cx, "this function cannot cross to `" ++ cx.jsig.class_info(p).simple ++
-      "`: its row" ++ eff_suffix(e) ++ " owes evidence",
-    e_lo(a), e_hi(a),
-    "a Java caller has no call site to supply an evidence pack, so only a " ++
-      "pure or `!io` function value converts (spec §9.4)\n  " ++ sam_row_hint(e))
 
 ## Function-shaped arguments that need the target SAM to be typed are deferred:
 ## scored by arity now, checked once the winning overload is known.
@@ -8393,12 +8378,17 @@ fn finalize_sams(
   args: List[Expr],
   ats: List[Option[Ty]],
   atx: List[Option[TExpr]]
-) -> (Cx, List[Option[TExpr]], List[(Int, String, String, List[String], String)], List[Int]) !io = {
+) -> (Cx, List[Option[TExpr]], List[(Int, String, String, List[String], String)],
+  List[(Int, TExpr)], List[Int]) !io = {
   var cx1 = cx
   # `atx` is the caller's per-argument list, so this walk rebuilds it by
   # appending each position's entry rather than writing into a copy
   var atx2: List[Option[TExpr]] = []
   var convs: List[(Int, String, String, List[String], String)] = []
+  # one snapshot per conversion, in the same order: `sam_snapshot`, taken here
+  # because this is where the crossing value's row is in hand and the frame it
+  # crosses out of is still the current one
+  var evs: List[(Int, TExpr)] = []
   var bridges: List[Int] = []
   var i = 0
   for a in args {
@@ -8413,23 +8403,24 @@ fn finalize_sams(
         cx1 = cxa
         out_i = Some(ax)
         var fits = false
-        # a row that owes evidence is a separate refusal from a shape mismatch,
-        # and it gets its own diagnostic: the shape is right, the out is not
-        # "write a different lambda" but "handle the label inside this one"
-        var owes: Option[Eff] = None
+        # the row of the value that fits, kept out of the match so the snapshot
+        # is taken once the shape is settled: a mismatch has nothing to cross
+        var row: Eff = EPure
         match t {
           TyFn(tps, tret, te) ->
             if tps == sps && sam_ret_compatible(cx1.jsig, tret, sm.ret_cls) {
-              if sam_row_ok(te) { fits = true } else { owes = Some(te) }
+              fits = true
+              row = te
             }
           _ -> ()
         }
-        if fits { convs = convs ++ [(i, p, sm.name, sm.param_cls, sm.ret_cls)] }
-        match owes {
-          Some(te) -> { cx1 = sam_row_err(cx1, a, p, te) }
-          None -> ()
+        if fits {
+          convs = convs ++ [(i, p, sm.name, sm.param_cls, sm.ret_cls)]
+          let (cxs, ev) = sam_snapshot(cx1, i, row, e_lo(a), e_hi(a))
+          cx1 = cxs
+          evs = evs ++ [ev]
         }
-        if not fits && owes == None && not is_errorish(t) {
+        if not fits && not is_errorish(t) {
           cx1 = cerr_h(cx1, "this function does not fit `" ++ cx1.jsig.class_info(p).simple ++ "`",
             e_lo(a), e_hi(a),
             "expected shape: " ++ ty_show(cx1.adts, TyFn(sps, sret, EIo)) ++
@@ -8440,12 +8431,12 @@ fn finalize_sams(
         match t {
           TyFn(_, _, te) ->
             match sam_of_nonprim(cx1.jsig, p) {
-              Some(sm2) ->
-                if sam_row_ok(te) {
-                  convs = convs ++ [(i, p, sm2.name, sm2.param_cls, sm2.ret_cls)]
-                } else {
-                  cx1 = sam_row_err(cx1, a, p, te)
-                }
+              Some(sm2) -> {
+                convs = convs ++ [(i, p, sm2.name, sm2.param_cls, sm2.ret_cls)]
+                let (cxs, ev) = sam_snapshot(cx1, i, te, e_lo(a), e_hi(a))
+                cx1 = cxs
+                evs = evs ++ [ev]
+              }
               None -> ()
             }
           TyList(el) -> {
@@ -8468,7 +8459,7 @@ fn finalize_sams(
     atx2 = atx2 ++ [out_i]
     i = i + 1
   }
-  (cx1, atx2, convs, bridges)
+  (cx1, atx2, convs, evs, bridges)
 }
 
 ## Java return types → Dawn (spec §9.2): references land wrapped in Option.
@@ -8586,7 +8577,7 @@ fn check_java_call(
     }
     let c = best[0]
     let packs = bph == 0
-    let (cxa, atx2, convs, bridges) = finalize_sams(cx1, c.param_cls, packs, args, ats, atx)
+    let (cxa, atx2, convs, sevs, bridges) = finalize_sams(cx1, c.param_cls, packs, args, ats, atx)
     cx1 = cxa
     var fin: List[TExpr] = []
     for sl in atx2 {
@@ -8609,6 +8600,7 @@ fn check_java_call(
       args: fin,
       varargs_pack: vp,
       sam_convs: convs,
+      sam_evs: sevs,
       list_bridges: bridges,
       nlo: nlo,
       nhi: nhi
@@ -8682,7 +8674,7 @@ fn check_java_call(
   }
   let m3 = best[0]
   let packs = bph == 0
-  let (cxb, atx3, convs, bridges) = finalize_sams(cx1, m3.param_cls, packs, args, ats, atx)
+  let (cxb, atx3, convs, sevs, bridges) = finalize_sams(cx1, m3.param_cls, packs, args, ats, atx)
   cx1 = cxb
   var fin: List[TExpr] = []
   for sl in atx3 {
@@ -8707,6 +8699,7 @@ fn check_java_call(
     args: fin,
     varargs_pack: vp,
     sam_convs: convs,
+    sam_evs: sevs,
     list_bridges: bridges,
     nlo: nlo,
     nhi: nhi
@@ -8758,6 +8751,7 @@ fn check_java_static_field(
       let empty_params: List[String] = []
       let empty_args: List[TExpr] = []
       let no_convs: List[(Int, String, String, List[String], String)] = []
+      let no_sevs: List[(Int, TExpr)] = []
       let no_bridges: List[Int] = []
       let call = TJavaCall {
         fqcn: fq,
@@ -8772,6 +8766,7 @@ fn check_java_static_field(
         args: empty_args,
         varargs_pack: None,
         sam_convs: no_convs,
+        sam_evs: no_sevs,
         list_bridges: no_bridges,
         nlo: flo,
         nhi: fhi
