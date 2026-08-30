@@ -7,11 +7,13 @@
 // program's `main`, which drains the one line on stdin and returns.
 //
 // Nothing but bytes crosses. There is no `externref`, no JS value reachable
-// from the guest, and no handle the guest holds across a turn -- the model
-// is opaque text this class carries between calls, which it never reads.
-// The reason is lifetimes: a reference held across the boundary is owned by
-// neither side's type system, and the one thing a wasm guest and a page
-// share for free is a byte range.
+// from the guest, and no handle shared across a turn -- the model is opaque
+// text this class carries between calls, which it never reads. A guest using
+// `serve_with_state` may root its own read-only init state inside the wasm
+// instance, but JavaScript never receives or sends a reference to it. The
+// reason is lifetimes: a reference shared across the boundary is owned by
+// neither side's type system, and the one thing a wasm guest and a page share
+// for free is a byte range.
 
 import { Wasi, WasiExit } from './wasi.mjs';
 

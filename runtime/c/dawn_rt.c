@@ -647,6 +647,20 @@ size_t dawn_slab_materialized_bytes(const void *p) {
 
 static int dawn_argc;
 static char **dawn_argv;
+/* A process is one native/JVM session; a wasm module instance is one browser
+ * session. Unlike a Dawn local this root therefore survives the reactor shim
+ * calling main again for the next `dawn_turn`. */
+static void *dawn_reactor_state;
+static int dawn_reactor_cleanup_registered;
+static int dawn_rc_stats_registered;
+#ifdef __wasi__
+static int dawn_wasi_balance_registered;
+#endif
+
+static void dawn_reactor_state_clear(void) {
+  dawn_drop(dawn_reactor_state);
+  dawn_reactor_state = NULL;
+}
 
 #ifdef __wasi__
 /* Births minus deaths minus immortal marks: the LeakSanitizer stand-in for a
@@ -693,14 +707,26 @@ void dawn_rt_init(int argc, char **argv) {
    * ways. Rebuilding to switch would change the layout, which is the variable
    * the mode exists to hold still (plan 6 R3). */
   dawn_rc_leak = getenv("DAWN_RC_LEAK") != NULL;
-  if (getenv("DAWN_RC_STATS") != NULL) {
+  /* A reactor enters this function once per turn. Register each process-exit
+   * observer once, both to bound the atexit table and to keep the retained
+   * root's cleanup later (therefore earlier in LIFO order) than every report. */
+  if (getenv("DAWN_RC_STATS") != NULL && !dawn_rc_stats_registered) {
     atexit(dawn_rc_stats_dump);
+    dawn_rc_stats_registered = 1;
   }
 #ifdef __wasi__
-  if (getenv("DAWN_RC_BALANCE") != NULL) {
+  if (getenv("DAWN_RC_BALANCE") != NULL && !dawn_wasi_balance_registered) {
     atexit(dawn_wasi_balance_dump);
+    dawn_wasi_balance_registered = 1;
   }
 #endif
+  /* Register after the balance reporter so LIFO exit order releases the
+   * intentional process-lifetime root before the reporter counts live
+   * objects. `dawn_rt_init` runs once per wasm turn, hence the guard. */
+  if (!dawn_reactor_cleanup_registered) {
+    atexit(dawn_reactor_state_clear);
+    dawn_reactor_cleanup_registered = 1;
+  }
 }
 
 #ifdef __wasi__
@@ -3003,6 +3029,23 @@ dawn_str *dawn_bytes_decode_latin1(const dawn_bytes *b) {
 }
 
 /* ---- io ---- */
+
+bool dawn_reactor_state_has(void) { return dawn_reactor_state != NULL; }
+
+void *dawn_reactor_state_get(void) {
+  /* The runtime keeps its root. A Core expression owns its result, so hand a
+   * second reference to the caller rather than lending the global's one. */
+  return dawn_dup(dawn_reactor_state);
+}
+
+dawn_unit dawn_reactor_state_set(void *state) {
+  /* Take the new root before releasing the old one: replacing a state with
+   * the very same object is legal and must not free it in between. */
+  void *next = dawn_dup(state);
+  dawn_drop(dawn_reactor_state);
+  dawn_reactor_state = next;
+  return DAWN_UNIT;
+}
 
 /* Standard input is read through `read(2)` and never through stdio.
  *

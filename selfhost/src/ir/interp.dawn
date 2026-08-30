@@ -772,7 +772,7 @@ fn call_named(
 # the bottom of this file checks the partition is total and disjoint, and it
 # probes each name to check the lists say what the chain does.
 
-## Every name the chain below has an arm for -- 42 of them, 11 emitted by
+## Every name the chain below has an arm for -- 43 of them, 12 emitted by
 ## lowering and 31 writable by a user.
 ##
 ## Consulted *before* the chain rather than alongside it, so this is a gate and
@@ -802,7 +802,7 @@ fn interp_arms() -> List[String] = [
 ##
 ## Read it as the real answer to "what can a `const` do". Spec §7.2.2 answers
 ## in prose, and the prose is short by an order of magnitude: it names Map and
-## Set, which is 18 of the 71 names below (audit RP-11). The list is measured
+## Set, which is 18 of the 74 names below (audit RP-11). The list is measured
 ## here -- the gate test calls each one and checks it really is refused -- and
 ## rewriting the spec against it is a separate job.
 fn comptime_rejects() -> List[String] = {
@@ -830,6 +830,9 @@ fn comptime_rejects() -> List[String] = {
   # nothing here to protect and nothing for a release to give up -- folding it
   # would be inventing the answer rather than computing it.
   out = out ++ ["args", "catch_fault", "catch_panic", "bracket"]
+  # The retained reactor root is process/module state. A comptime evaluation
+  # has neither a reactor instance nor a turn boundary in which one could live.
+  out = out ++ ["reactor_state_has", "reactor_state_get", "reactor_state_set"]
   # `cast` unerases a host object, and comptime never has one. Its failure
   # being a value rather than a throw (the error model's step B) did not change
   # that: there is still no host object to reclaim, and an `Err` here would be
@@ -2320,7 +2323,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
   assert len(arms) == 43
-  assert len(rejects) == 71
+  assert len(rejects) == 74
 }
 
 fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =

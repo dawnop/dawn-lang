@@ -1,22 +1,21 @@
-# The whole io surface of the panel: one call, exactly as tea_dom_flags's.
+# The whole io surface of the panel: one call which splits the static search
+# index from the small model that crosses the wire on every event.
 #
-# `serve_with_flags` and not `serve`, because the index is the one thing the
-# page has and the guest cannot compute: it is a build product of the site
-# generator, fetched beside the reactor and handed over on the first line.
+# `serve_with_state` roots that index in the guest after init. On wasm each
+# request enters `main` afresh, but the root belongs to the module instance and
+# is therefore still present when the next independent `dawn_turn` arrives.
 #
 #   $ echo '{"op":"init","flags":"{\"root\":\".\",\"index\":{\"v\":1,\
 #       \"lang\":\"en\",\"items\":[]}}"}' | dawn run examples/projects/tea_dom_search
 
-use tea_core/app.{update, view}
 use tea_dom/node.{Node}
-use tea_dom/reactor.{serve_with_flags}
-use search.{Model, Msg, init, encode, decode}
+use tea_dom/reactor.{serve_with_state}
+use search.{State, Model, Msg, init, encode, decode, update, view}
 
-pub fn main() -> Unit !io = serve_with_flags(init, encode, decode, upd, vw)
+pub fn main() -> Unit !io = serve_with_state(init, encode, decode, upd, vw)
 
-# The two hooks, named rather than passed as lambdas: `serve_with_flags` needs
-# a concrete message type to settle `M: Eq` against, and a lambda at the call
-# site has no expectation to settle it from.
-fn upd(m: Model, msg: Msg) -> Model = update(m, msg)
+# The two hooks are named so the reactor can settle the concrete message and
+# retained-state types at the call site.
+fn upd(state: State, m: Model, msg: Msg) -> Model = update(state, m, msg)
 
-fn vw(m: Model) -> Node[Msg] = view(m)
+fn vw(state: State, m: Model) -> Node[Msg] = view(state, m)

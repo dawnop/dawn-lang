@@ -2929,6 +2929,16 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(bsig("io_print", [TyString], ["s"], TyUnit), EIo),
     eff1(bsig("io_println", [TyString], ["s"], TyUnit), EIo),
     eff1(bsig("io_read_line", [], [], opt_ty(TyString)), EIo),
+    # One erased root owned by a reactor instance. `std/reactor` is the only
+    # source-level client and always stores its one private concrete Root;
+    # application state stays captured behind that Root's fixed signature, so
+    # a package cannot read a value back at a different type.
+    # The slot is deliberately not an Option in the runtime ABI -- `has` keeps
+    # absence out of the erased value channel, where null would otherwise have
+    # to stand for both None and a value.
+    eff1(bsig("reactor_state_has", [], [], TyBool), EIo),
+    eff1(tp1(bsig("reactor_state_get", [], [], t), t), EIo),
+    eff1(tp1(bsig("reactor_state_set", [t], ["state"], TyUnit), t), EIo),
     eff1(bsig("io_is_dir", [TyString], ["path"], TyBool), EIo),
     eff1(bsig("io_read_file", [TyString], ["path"], TyString), EIo),
     eff1(bsig("io_write_file", [TyString, TyString], ["path", "content"], TyUnit), EIo),
@@ -3183,6 +3193,12 @@ pub fn intrinsics() -> Map[String, Intr] = {
   for op in io_in_rt {
     rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
   }
+  for op in ["has", "get", "set"] {
+    rt_of = map.insert(rt_of, "reactor_state_" ++ op, RtIo)
+    internal = set.insert(internal, "reactor_state_" ++ op)
+  }
+  erased = set.insert(erased, "reactor_state_get")
+  erased = set.insert(erased, "reactor_state_set")
   # Every io primitive is std-only, `list_names`/`run` included -- one list plus
   # the two, rather than a second copy of twenty names, so an io primitive
   # cannot be added to one of these loops and not the other.
@@ -3339,6 +3355,37 @@ test "every intrinsic property is declared against a real intrinsic" {
   assert intr_at("map_get").expect("map_get").erased
   assert intr_at("array_push").expect("array_push").erased
   assert not intr_at("str_upper").expect("str_upper").erased
+}
+
+test "the reactor root primitive is std-only, erased, and io" {
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  let has = intr_at("reactor_state_has").expect("reactor_state_has")
+  let get = intr_at("reactor_state_get").expect("reactor_state_get")
+  let setter = intr_at("reactor_state_set").expect("reactor_state_set")
+
+  # Only std/reactor may see the slot. Its concrete Root is erased at the ABI,
+  # while the separate presence bit remains an ordinary Bool.
+  assert has.internal
+  assert get.internal
+  assert setter.internal
+  assert not has.erased
+  assert get.erased
+  assert setter.erased
+  assert has.rt == Some(RtIo)
+  assert get.rt == Some(RtIo)
+  assert setter.rt == Some(RtIo)
+
+  assert sig_render(adts, traits,
+    map.get(bs, "reactor_state_has").expect("reactor_state_has")) ==
+    "fn reactor_state_has() -> Bool !io"
+  assert sig_render(adts, traits,
+    map.get(bs, "reactor_state_get").expect("reactor_state_get")) ==
+    "fn reactor_state_get[T]() -> T !io"
+  assert sig_render(adts, traits,
+    map.get(bs, "reactor_state_set").expect("reactor_state_set")) ==
+    "fn reactor_state_set[T](state: T) -> Unit !io"
 }
 
 test "the narrowed decoders drop the charset, and the Option with it" {
@@ -3814,7 +3861,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 95
+  assert map_size2(bs) == 98
 }
 
 test "the reclaim's failure is a value, under the one name left" {

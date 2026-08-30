@@ -1,0 +1,93 @@
+## A synchronous reactor session whose read-only state survives calls to main.
+#
+# A native or JVM command reads all of stdin in one invocation. A wasm reactor
+# is different: `dawn_turn` calls the program's main once per message, so an
+# ordinary recursive parameter is gone when that call returns. The three
+# internal primitives below address one runtime root whose lifetime is the
+# process on the JVM/native backend and the module instance on wasm.
+#
+# The erased root never holds `S` directly. It always holds the one private
+# type [Root], whose closure captures `S` behind a fixed signature. Even a
+# program that catches a failure from one `serve[S]` and enters `serve[T]`
+# afterwards can therefore only invoke the already-installed closure; no get
+# can cast an S-shaped root to T. The two callbacks below are pure as a second
+# boundary: application code cannot re-enter an io pump from inside a turn.
+#
+# A successful step may return `Some(new_state)` to replace the closure;
+# `None` means keep it exactly as it was. In particular an event does not write
+# a read-only retained state back.
+
+use std/io
+
+type Root = Root(
+  advance: fn(String) -> (Option[Root], Option[String])
+)
+
+fn rooted[S](
+  state: S,
+  step: fn(Option[S], String) -> (Option[S], Option[String]),
+) -> Root =
+  Root(advance: line => {
+    let (replacement, reply) = step(Some(state), line)
+    let next: Option[Root] =
+      match replacement {
+        Some(value) -> Some(rooted(value, step))
+        None -> None
+      }
+    (next, reply)
+  })
+
+fn first[S](
+  step: fn(Option[S], String) -> (Option[S], Option[String]),
+  line: String,
+) -> (Option[Root], Option[String]) = {
+  let (replacement, reply) = step(None, line)
+  let next: Option[Root] =
+    match replacement {
+      Some(value) -> Some(rooted(value, step))
+      None -> None
+    }
+  (next, reply)
+}
+
+fn advance(root: Root, line: String) -> (Option[Root], Option[String]) =
+  match root { Root(run) -> run(line) }
+
+## Read one line, run one typed step, print one line, and continue to EOF.
+##
+## `step` sees `None` before the first successful init. Its optional first
+## result is a replacement, not the current state: a failure or ordinary event
+## returns `None`, preserving the root already installed by an earlier init.
+## `on_panic` renders a caught application panic without receiving any state;
+## the root therefore remains installed on that path too.
+pub fn serve[S](
+  step: fn(Option[S], String) -> (Option[S], Option[String]),
+  on_panic: fn(ForeignError) -> String,
+) -> Unit !io =
+  match io.read_line() {
+    None -> ()
+    Some(line) -> {
+      let current: Option[Root] =
+        if reactor_state_has() { Some(reactor_state_get()) } else { None }
+      let attempted = catch_panic(() =>
+          match current {
+            Some(root) -> advance(root, line)
+            None -> first(step, line)
+          }
+      )
+      let (replacement, reply) =
+        match attempted {
+          Ok(answer) -> answer
+          Err(e) -> (None, Some(on_panic(e)))
+        }
+      match replacement {
+        Some(next) -> reactor_state_set(next)
+        None -> ()
+      }
+      match reply {
+        Some(text) -> io.println(text)
+        None -> ()
+      }
+      serve(step, on_panic)
+    }
+  }

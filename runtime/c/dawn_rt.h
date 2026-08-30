@@ -676,6 +676,14 @@ dawn_unit dawn_io_println(dawn_str *s);
 dawn_unit dawn_io_eprint(dawn_str *s);
 dawn_unit dawn_io_eprintln(dawn_str *s);
 dawn_adt *dawn_io_read_line(void); /* Option[String]; None at EOF */
+/* One type-erased root per process / wasm instance. std/reactor stores only
+ * its one private concrete Root type here; application state is captured by
+ * that Root's fixed-signature closure. `get` returns an owned reference;
+ * `set` borrows its argument and takes its own reference before releasing the
+ * old root. */
+bool dawn_reactor_state_has(void);
+void *dawn_reactor_state_get(void);
+dawn_unit dawn_reactor_state_set(void *state);
 bool dawn_io_is_dir(dawn_str *path); /* false for absent or invalid paths */
 bool dawn_io_exists(dawn_str *path); /* false for absent or invalid paths */
 dawn_unit dawn_io_mkdirs(dawn_str *path); /* panics on failure */
