@@ -1,0 +1,67 @@
+# Loopback WebSocket gateway.  nginx exposes /api/lsp; this process owns only
+# bounded protocol handling and one sandboxed native dawnc per connection.
+[Unit]
+Description=dawn-play-lsp - Dawn Playground LSP gateway
+After=network.target
+
+[Service]
+Type=simple
+User=dawn-play
+Group=dawn-play
+WorkingDirectory=/opt/dawn
+Environment=PLAY_LSP_HOST=127.0.0.1
+Environment=PLAY_LSP_PORT=8088
+Environment=PLAY_LSP_ORIGINS=https://dawn-lang.dawnop.com
+Environment=PLAY_LSP_MAX_SESSIONS=2
+Environment=PLAY_LSP_SOURCE_BYTES=65536
+Environment=PLAY_LSP_MESSAGE_BYTES=262144
+Environment=PLAY_LSP_IDLE_SECONDS=600
+Environment=PLAY_LSP_LIFETIME_SECONDS=1800
+Environment=PLAY_LSP_SETUP_SECONDS=15
+Environment=PLAY_LSP_SANDBOX_SCRIPT=/opt/dawn/playground/sandbox/run-lsp-sandboxed.sh
+
+# Remove sessions orphaned by a previous gateway crash before accepting new
+# ones, and again after a normal stop.  RuntimeMaxSec in the transient unit is
+# the final backstop if the host itself disappears during cleanup.
+ExecStartPre=/usr/bin/test -x /opt/dawn/bin/dawnc
+ExecStartPre=/usr/bin/python3 -I -B /opt/dawn/playground/lsp_gateway.py --check-config
+ExecStartPre=/usr/bin/sudo -n /opt/dawn/playground/sandbox/run-lsp-sandboxed.sh cleanup
+ExecStart=/usr/bin/python3 -I -B /opt/dawn/playground/lsp_gateway.py
+ExecStopPost=-/usr/bin/sudo -n /opt/dawn/playground/sandbox/run-lsp-sandboxed.sh cleanup
+
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=20
+# Let Python reap per-session helpers first; at TimeoutStopSec systemd sends
+# SIGKILL to the entire remaining cgroup. BindsTo/ExecStopPost backstop it.
+KillMode=mixed
+MemoryMax=128M
+MemorySwapMax=0
+TasksMax=64
+LimitCORE=0
+UMask=0077
+
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# NoNewPrivileges/empty CapabilityBoundingSet are intentionally absent here:
+# this broker must use the two exact sudoers-whitelisted sandbox wrappers.
+# Untrusted native code runs in the transient service, where both are enabled.
+
+[Install]
+WantedBy=multi-user.target
