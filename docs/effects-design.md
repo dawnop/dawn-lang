@@ -394,3 +394,140 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
    证据结算随刀 5 落地，范围与全部决策见
    [effect-params-design.md](effect-params-design.md)。**`effect Yield[T]`** 是把 `Ty` 塞进
    `Eff`（代价见本文第 1 节的非目标行），另一根轴，另立项，与 RX-10-B 无前后置关系。
+
+## 8. 已知风险（跨语言实证，2026-08-30）
+
+> 本节是 2026-08-30 追加的账目，不属于原设计，正文一字未改（与开头那条 08-24 补记同待遇）。
+> 当日做了三路只读跨语言调研：OCaml 5 生态、学院系（Koka / Effekt / Eff / Frank）、
+> 工业系（Unison / Flix / ZIO / Kyo / Haskell / Effect-TS），问的是走这条路线的人撞过什么。
+> 结果是三笔风险加一笔资产，记在这里，免得将来自己撞上才发现。
+> 与 [handler-state-design.md](handler-state-design.md) §10（2026-08-29）那一路不同：
+> 那一路问形制怎么选，这一路问路线本身有哪些已知的坑。权威条文仍在 [spec.md](spec.md) §6.5。
+> 每小节先列事实并带出处，末尾的「本仓」段是本仓的判断，不是来源的原话。
+
+### 8.1 风险一：效果多态的签名噪音
+
+事实，三方独立证词：
+
+- Brachthäuser 等，Effekt，OOPSLA 2020 扩展报告
+  （<https://pl.cs.uni-tuebingen.de/publications/brachthaeuser20effekt.pdf>）：现有 effect
+  handler 语言的语义复杂到无法规模化实用；Frank、Koka、Helium 用语法糖隐藏效果多态，
+  复杂用例里细节仍会泄漏给用户。Effekt 的对策是把参数化效果多态整个删掉。
+- 同组，OOPSLA 2022 扩展报告
+  （<https://pl.cs.uni-tuebingen.de/publications/brachthaeuser22effects.pdf>）§1.1：程序员
+  回避效果系统，一些语言（如 Scala）干脆不加效果系统；§2.2 用 Koka 的真实推断结果做反例，
+  一个 12 行的 rethrow 辅助函数推断出 `<exc,exc,info|e>` 这样的类型。
+- Lindley 等，《Modal Effect Types》，OOPSLA 2025（合著者含 Jane Street 的 Leo White 与
+  Stephen Dolan）点名自家的 Frank：依赖脆弱的语法机制，效果变量会出现在报错里
+  （举出的真实报错是 `cannot unify effects e and yield, £`），而这些变量不在源程序里，
+  大程序中用户不知如何修；且支持效果多态须重写既有库的类型签名，哪怕这些库根本不用效果。
+- Hillerström 博士论文（2021，<https://www.dhil.net/research/papers/thesis.pdf>）§8.1：
+  Rémy 式行多态「作为实用效果系统基础的适宜性存疑」，presence/absence 标注导致签名冗长。
+  同一节也说没有效果系统的 handler 编程易错。两难无已知解。
+- Dagstuhl 16112（2016）的 OCaml 效果系统工作组结论：约束写起来繁琐、读起来困难，会降低
+  社区采纳几率。五年后 OCaml 5 交付时完全放弃效果类型；至 2026 年 typed effects 仍无公开
+  原型，Jane Street 绕道 modes（`janestreet/handled_effect`）。
+
+**本仓。** 这条批评直击选型：Dawn 的效果变量就是行多态那一套，出现即引入、作用域是整条签名
+（[spec.md](spec.md) §6.3）。今天树里能核实的减压面只有三条，都不是对这条批评的答复：
+
+1. **具名效果从不推断。** 推断只在私有函数「同时省略返回类型与全部效果注记」的形态下确定
+   base effect（pure 或 `!io`），标签一律要显式写出（[spec.md](spec.md) §3.1）。所以 2022
+   报告 §2.2 那种「推断替用户算出一条没人想读的行」在 Dawn 里不由推断产生，只由人自己写出来。
+2. **效果变量的名字来自源码。** `resolve_eff_at` 只在遇到源码里写下的小写原子时铸变量
+   （`selfhost/src/check/cx.dawn:461`），名字连同 id 一起进 `Sig.eparams`
+   （`selfhost/src/check/types.dawn:118` 的注释写明这条次序契约），诊断按这个名字渲染
+   （`selfhost/src/check/checker.dawn:1152`）。Frank 那条「报错里的变量不在源程序里」
+   今天在 Dawn 没有对应物。这只挡住噪音的一种来源，不挡长度。
+3. **反向的一笔一起记。** 吸收禁令（[spec.md](spec.md) §6.2 规则 7）让一条行只增不减，
+   唯一的减法点是 `with handle`。这是健全性要求，但方向上是放大签名噪音而不是缩小。
+
+本仓手上没有真实样本可量：具名效果这一档零内部使用者，`std/` 与 `selfhost/src/` 下没有任何
+`effect` 声明，这条陈述由 `scripts/doc-check.py` 的 `check_named_effect_status` 从两侧钉住
+（有声明而文档还说没有，或没声明而文档不说，都红；见 [README.md](../README.md) 的效果一节）。
+
+**裁决：已知风险，暂无缓解，等真实的签名噪音样本再裁。** 样本的形状是多个效果同时在场、
+跨模块传播、以及库要不要为效果改签名；这三件今天一件都没发生。
+
+### 8.2 风险二：多 handler 组合的动态语义
+
+事实：
+
+- OCaml 生态实测：2026 年一个查未处理效果的静态检查器扫了 3881 个模块，零真 bug
+  （<https://discuss.ocaml.org/t/unhandled-a-static-checker-for-unhandled-effects-in-ocaml-5-and-a-negative-result/18474>）。
+  同期 Anil Madhavapeddy 把「多个库各自装 handler 时的顺序与作用域」列为 Ocsigen 暂不迁 Eio
+  的首要原因，并称之为 fundamental research
+  （<https://discuss.ocaml.org/t/why-ocsigen-is-staying-on-lwt-for-now/18318?page=2>）。
+- 机理案例：用户在 Eio 里嵌自己的 scoped state handler，Eio 一 resume continuation，用户的
+  handler 就出了作用域；octachron 在同一串讨论里证明，当两组效果的解释互相依赖时，不存在任何
+  嵌套顺序能让它们彼此独立
+  （<https://discuss.ocaml.org/t/how-to-compose-effect-handlers-with-eio/11279>）。
+- Lindley，《Encapsulating effects》，Dagstuhl 18172（2018）：handler 的朴素组合会静默吞掉
+  外层效果，问题不在类型，在动态语义。
+
+**本仓。** 两半要分开看：
+
+- **Eio 那个具体故障形态在 Dawn 不可能发生**，因为没有延续：臂是普通闭包，返回值即操作结果
+  （[spec.md](spec.md) §6.5），没有「resume 之后 handler 出作用域」这一步。
+- **octachron 那条更一般的结论与恢复语义无关，Dawn 不豁免。** 「两个 handler 装错顺序」是纯
+  动态的性质，静态效果类型看不见。Dawn 的静态面能报的是「没人应答」，报在没人应答的那次调用上
+  （spec §6.5）；吸收禁令（spec §6.2 规则 7）另外挡住了「静默吞掉外层效果」的静态形态，因为
+  `with handle` 只减自己应答的那个标签，别的原子必须留在行里。这两条都不是对顺序的检查。
+
+规模上这笔账今天不疼。`std/` 与 `selfhost/src/` 零 `effect` 声明（§8.1 末段）；仓外的
+backend-dawn 只有一个 `pub effect Clock`（`backend-dawn/src/util/clock.dawn`），生产与测试
+各就地装一次同名 handler，从不与第二个效果嵌套；本仓 `examples/projects/tea_dom_counter`
+的 `effect Emit` 同样是单效果单 handler。
+
+不过**安装点的选择已经不平凡了，单效果也一样**：clock.dawn 的头注释记了这条实测，
+handler 只把证据供给自己那个块的剩余部分，路由闭包在块内建起来却不捕获它，于是 handler 只能
+装在「拥有一整个工作单元」的最内层边界上，装在 `main` 里不行。这是本仓已经量到的一笔，
+与上面那条外部风险同源：难的都是位置，不是类型。
+
+**裁决：入案，不动手。** 第一次出现两个互不相识的库各自带效果、各自装 handler 时重开。
+
+### 8.3 风险三：multi-shot 与 native 后端 RC 的对撞
+
+事实：
+
+- Dagstuhl 21292（2021）：multi-shot 续延对概率编程、自动微分等应用至关重要，但如何安全高效
+  实现仍是公开研究问题。Stephen Dolan 的讲题把「续延可多次恢复时如何维持线性与唯一性」作为
+  挑战抛出，没有给答案。
+- OCaml 5 的先例：语言层只支持 one-shot，官方理由是 one-shot 对几乎所有并发需求足够；官方
+  effects-examples 仓库把回溯、非确定、记忆化三类例子全部隔离在 `multishot/` 子目录，
+  要跑得靠第三方 multicont 库克隆 fiber。
+
+**本仓。** Dawn 今天比 one-shot 还窄一格：**是尾恢复，语言里根本没有 `resume` 这个记号**。
+臂是普通闭包、返回值即操作结果、不捕获延续（[spec.md](spec.md) §6.5 首段）；编译器源码里
+没有 `resume` 的关键字或标识符字面量，parser 在 `with` 之后只认 `handle`
+（`selfhost/src/front/parser.dawn:2528`）；spec 提到 `resume` 只有一处，且是「不承诺放开之后
+仍然如此」的限定句。
+
+撞点在 native 后端：Perceus 的复用分析建立在 owned 参数加 `rc == 1` 的唯一性判据上
+（[perceus-design.md](perceus-design.md) 刀 4），而它的局部 oracle 是逐语句追 `gone` 的平衡
+检查器，假设控制流正常返回（同文 §5.5）。多次恢复意味着复制续延连同它携带的全部所有权，
+两边对不上。本文 §1 的非目标行早就写下了这条冲突；本节补的是外部证据，说明它不是本仓一家的
+局部困难，而是领域公开问题。
+
+handler 局部状态那一档压在同一个前提上：格子是 handler 帧上的一个槽位，放开多次恢复就得随
+续延一起复制（[handler-state-design.md](handler-state-design.md) 前言的期权记录，机制见同文 §10.2）。
+
+**裁决三条。** 尾恢复（比 one-shot 还窄）是有 OCaml 5 先例的保守选择，照此维持；回溯、
+概率编程、自动微分不作为本仓的宣传用途，也不进任何对外材料的能力清单；将来若做 multi-shot，
+必须与 RC 一起单独立项，不能当成效果系统内部的一次加法。
+
+### 8.4 一笔资产：本仓有实证场地
+
+事实：Dagstuhl 21292（2021）承认这个领域没有标准基准套件，也没有实用性的证明标准；
+Dagstuhl 18172（2018）那个效果系统 UX 工作组零产出；文献反复使用同样的七八个玩具基准。
+
+**本仓。** Dawn 手上有两块真场地：仓外的 backend-dawn（跑在生产上的博客后端）与本仓的 tea
+前端（`examples/projects/tea_dom_counter`）。相对整个领域，这是稀缺条件，多数效果系统的证据
+到玩具基准为止。
+
+判据已经有一个可以照抄的本地样本。backend-dawn 把时钟迁成效果之后，逐个点名了仍然直读机器
+时钟的站点，理由写的是「none of them has an assertion worth freezing」
+（`backend-dawn/src/util/clock.dawn` 头注释）。也就是说，加不加效果不问优雅，只问加了之后
+有没有一条今天写不出的断言变得写得出。这正是 21292 说领域里缺的那种实用性标准的一个具体形态。
+
+**裁决：把这条判据当作本仓评估效果系统收益的默认口径**，直到出现更好的。
