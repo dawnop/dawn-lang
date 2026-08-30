@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 2019f7502ad9590d -->
+<!-- doc-check: translation-of docs/spec.md @ 20c8c0b97dac5cda -->
 
 # Dawn Language Specification
 
@@ -2242,6 +2242,19 @@ side wants is read out of the function value's single pack by key. Higher-order 
 (`list.map` and its ilk) take the "one non-ground atom left" path, forwarding as-is and building
 nothing.
 
+**The boundary clause: a value leaving the language carries a creation-point snapshot.** Both
+conventions above put the supply point at the call, because the call is the only place a handler
+frame is known to be live. Once a function value has been converted to a Java functional interface
+(§9.4) there is no such place: the adapter is entered from a Java frame with no Dawn frame under
+it, and neither the moment nor the thread of the call is chosen by the language. So here, and only
+here, the value carries its own evidence: the conversion point builds **the pack that is in scope
+at that point** by the same rule as any other supply point, stores it in a field of the adapter
+object, and every entry Java makes hands it to the closure. The row is charged at the conversion
+like an ordinary call site, and an atom the scope cannot answer is still an error, so the snapshot
+is not a way of losing a label but a way of answering it at the last place an answer exists.
+Nothing about the rules inside the language changes: evidence is supplied at call sites, a
+snapshot is taken where a value crosses out, and the two meet only at that one step.
+
 > **This is why union has no absorption (§6.6).** Both conventions above read their shape off the
 > effect row: the named side reads whether slots exist and how many, the function-value side reads
 > which keys the pack should hold. So any row equation that deletes a label, a variable or a
@@ -2669,22 +2682,28 @@ fn spawn_hello(msg: String) -> Unit !io = {
   enter Dawn with their erased types (usually an opaque `Object`, which can only be
   passed along as is); only a SAM with concrete types (`Runnable`, `HttpHandler`) gives
   the full experience.
-- **The row must owe no evidence**: only a pure function and an `!io` function can be
-  handed out. A row carrying a named effect label, an effect variable or an
-  associated-effect projection is refused at the conversion point, as a compile error
-  rather than a run-time failure. The reason is in §6: evidence is supplied at the call
-  site, and Java enters a callback from somewhere with no Dawn frame under it, so there
-  is no call site to supply it. An effect variable is refused too, because it may be
-  instantiated at a row carrying a label while the conversion is checked only once, here.
-- **The way out**: write `with handle E { ... }` inside the function value, so that the
-  row crossing the boundary comes down to pure or `!io`; the diagnostic names this
-  rewrite.
+- **Every row crosses, and the evidence comes from the creation point**: a row carrying
+  a named effect label, an effect variable or an associated-effect projection can be
+  handed out. The conversion point snapshots the evidence pack that is in scope there
+  into the adapter object, and Java's call hands it to the closure; this is §6.5's
+  boundary clause. The reason is there too: Java enters a callback from somewhere with no
+  Dawn frame under it, so there is no call site to supply evidence at, and the creation
+  point is the last place any exists.
+- **The row is charged at the conversion point**: a crossing row counts towards this
+  function's row like any other call site. A label nothing in scope answers still reports
+  "nobody is handling this"; when this function's own signature carries it out instead,
+  what the snapshot reads is this frame's hidden evidence parameter. So the boundary
+  clause changes where evidence comes from, not whether it has to exist.
+- **The snapshot is the handler that was in scope when the value was written**: Java
+  calling after the frame that installed the handler has returned still reads that one.
+  Writing `with handle E { ... }` inside the function value is a different thing: it
+  installs a fresh handler on every run, over the top of the snapshot.
 
   ```dawn
   with handle Log { log(m) => println(m) }
-  Thread.new(() => log("tick"))            # refused: the row is !Log
+  Thread.new(() => log("tick"))            # the snapshot carries this handler
 
-  Thread.new(() => {                       # accepted: the row is !io
+  Thread.new(() => {                       # installs one of its own on every run
     with handle Log { log(m) => println(m) }
     log("tick")
   })
@@ -2694,7 +2713,9 @@ fn spawn_hello(msg: String) -> Unit !io = {
   Java side calls; Java may call that function value on any thread at any moment
   (including after this call has returned). This does not break the purity contract: Java
   code can only run underneath a Dawn `!io` call, or on a Java thread with no Dawn stack,
-  and no signature promise of a pure or `!io` function is violated.
+  and no signature promise of a pure or `!io` function is violated. The snapshot brings a
+  labelled row under the same sentence: whenever it is called, what answers it is the
+  handler chosen at the conversion.
 - **The null boundary for parameters**: a callback's reference-typed parameters are
   **not wrapped in `Option`**, they arrive as `T`; the bridge layer checks each one, and
   a null passed in by Java panics immediately (the message names the callback boundary).

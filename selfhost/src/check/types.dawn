@@ -1652,23 +1652,25 @@ pub const EV_PACK_ID: Int = -3
 ##       `!(e|io)`, worth one slot, and the call site fills it.
 ##
 ##   the SAM bridge (`jvm/emit.gen_sam_bridge`)
-##       **null, and it is the answer, because nothing that owes evidence gets
-##       this far.** A `use java` callback is entered from Java with no Dawn
-##       frame under it, so there is no call site to take a pack from. Spec
-##       §9.4 answers that by narrowing what may cross rather than by widening
-##       what the bridge carries: `checker.sam_row_ok` accepts a pure or `!io`
-##       row at the conversion and refuses a label, an effect variable and a
-##       projection, naming the handler-inside-the-lambda rewrite as the out.
-##       So `Thread.new(() => println(to_string(quota())))` under a
-##       `with handle`, which used to check clean and panic, is now a checker
-##       error, and every row that reaches the bridge asks for nothing.
+##       **the pack, and it is a snapshot rather than a call site's.** A
+##       `use java` callback is entered from Java with no Dawn frame under it,
+##       so there is no call site to take one from; spec §6.5's boundary clause
+##       takes it where the conversion is *written* instead, and the adapter
+##       object carries it in a field. So
+##       `Thread.new(() => println(to_string(quota())))` under a `with handle`
+##       reads that handler, on Java's thread, at Java's chosen moment.
 ##
-##       The alternative was to capture the pack into the adapter *object* at
-##       conversion time. That is evidence living in a value, and whether a
-##       callback Java runs after the handler frame returned should see that
-##       handler at all is a language question rather than a codegen one; V1'
-##       answers effects at call sites, so the narrowing is the one that fits.
-##       Kotlin refuses `suspend` at a SAM conversion for the same reason.
+##       This site has held three answers. It passed null while nothing could
+##       observe it; then `checker.sam_row_ok` narrowed the crossing set to
+##       pure and `!io`, which made the null correct by making the question
+##       unaskable; the snapshot answers the question instead, and the
+##       narrowing is gone with it. The narrowing's own argument was that
+##       evidence living in a value is a language question rather than a
+##       codegen one. It is, and it now has a language answer: a value that
+##       leaves the language has no later call site, so it carries what it was
+##       made under. Kotlin refuses `suspend` at a SAM conversion because a
+##       continuation cannot be resumed from a foreign frame; a pack is read,
+##       not resumed.
 ##
 ##   `gen_fn_comparator`
 ##       **null, and nothing can observe it**: no emitted program constructs a
