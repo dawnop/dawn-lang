@@ -2,6 +2,7 @@
 """Black-box contract for the bounded Playground WebSocket/LSP gateway."""
 
 import base64
+import csv
 import hashlib
 import json
 import os
@@ -20,6 +21,13 @@ FAKE = os.path.join(ROOT, "playground", "test", "fake_lsp.py")
 SMOKE = os.path.join(ROOT, "playground", "deploy", "lsp-smoke.py")
 DEPLOY = os.path.join(ROOT, "playground", "deploy")
 SANDBOX = os.path.join(ROOT, "playground", "sandbox")
+MEASUREMENT = os.path.join(
+    ROOT,
+    "playground",
+    "test",
+    "lsp-measurements",
+    "2026-08-30-win-wsl2.tsv",
+)
 ORIGIN = "http://play.test"
 PROTOCOL = "dawn-lsp-v1"
 URI = "untitled:dawn-playground/prog.dawn"
@@ -281,8 +289,71 @@ def deployment_contract():
     ok("deployment route, cgroup, sudo and native-artifact boundaries are pinned")
 
 
+def measurement_evidence_contract():
+    """Keep the checked-in 10x development evidence complete and public-safe."""
+    with open(MEASUREMENT, encoding="utf-8", newline="") as stream:
+        reader = csv.DictReader(stream, delimiter="\t")
+        rows = list(reader)
+    required = {
+        "scenario", "case", "iteration", "status", "error", "source_bytes",
+        "diagnostics_latency_ms", "cleanup_time_ms", "exit_code", "reaped",
+        "binary_name", "binary_version", "harness_commit", "host",
+        "cgroup_version", "cgroup_memory_max", "cgroup_memory_swap_max",
+        "cgroup_cpu_max", "cgroup_pids_max",
+    }
+    assert reader.fieldnames is not None and required <= set(reader.fieldnames)
+    assert not ({"source", "source_text", "body", "uri"} & set(reader.fieldnames))
+    expected = {
+        ("idle", "initialized-no-document"): 10,
+        ("sample", "comptime"): 10,
+        ("sample", "effects"): 10,
+        ("sample", "hello"): 10,
+        ("sample", "shapes"): 10,
+        ("sample", "traits"): 10,
+        ("source-64k", "exact-valid-65536-bytes"): 10,
+        ("burst", "burst"): 10,
+        ("features", "features"): 10,
+        ("disconnect", "disconnect"): 10,
+    }
+    observed = {}
+    for row in rows:
+        key = (row["scenario"], row["case"])
+        observed[key] = observed.get(key, 0) + 1
+        assert row["status"] == "ok" and row["error"] == ""
+        assert row["reaped"] == "true" and row["exit_code"] == "0"
+        assert row["binary_name"] == "dawnc-exact"
+        assert row["binary_version"] == "dawnc 0.70.0 (native)"
+        assert row["harness_commit"] == "27945626"
+        assert row["host"] == "win-wsl2"
+        assert (
+            row["cgroup_version"],
+            row["cgroup_memory_max"],
+            row["cgroup_memory_swap_max"],
+            row["cgroup_cpu_max"],
+            row["cgroup_pids_max"],
+        ) == ("v2", "268435456", "0", "100000 100000", "16")
+        public = "\t".join(row.values())
+        for private in ("/home/", "/Users/", "\\Users\\", "127.0.0.1"):
+            assert private not in public
+    assert observed == expected and len(rows) == 100
+    assert all(
+        row["source_bytes"] == "65536"
+        for row in rows if row["scenario"] == "source-64k"
+    )
+    assert max(
+        float(row["diagnostics_latency_ms"])
+        for row in rows if row["scenario"] == "sample"
+    ) < 3000
+    assert max(
+        float(row["cleanup_time_ms"])
+        for row in rows if row["scenario"] == "disconnect"
+    ) < 2000
+    ok("10x native measurement evidence is complete, bounded and public-safe")
+
+
 def main():
     deployment_contract()
+    measurement_evidence_contract()
     port = free_port()
     with tempfile.TemporaryDirectory(prefix="dawn-lsp-contract-") as temp:
         audit_path = os.path.join(temp, "audit.jsonl")
@@ -683,7 +754,7 @@ def main():
         assert "child-stderr bytes=" in gateway_log, gateway_log
         ok("child stderr contents are not logged")
     print("----")
-    print("20 passed, 0 failed")
+    print("21 passed, 0 failed")
 
 
 if __name__ == "__main__":

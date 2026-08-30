@@ -102,6 +102,22 @@ file changes, copy it to `/etc/systemd/system/`, `daemon-reload` and restart by
 hand. `DAWN_NATIVE_BIN=/path/to/dawnc-linux-x86_64` selects an already verified
 artifact outside the repository root.
 
+Before first exposure, run the fresh-process resource matrix inside the final
+parent cgroup with the same release binary. It records ten processes per case,
+including all five samples, exact 64 KiB source, one-in-flight burst, semantic
+queries, 60-second idle and disconnect cleanup:
+
+```sh
+python3 -B playground/deploy/lsp-measure.py \
+  --dawnc /opt/dawn/bin/dawnc --iterations 10 \
+  --host-label production-cgroup --harness-commit <commit> \
+  --output /new/path/lsp-measure.tsv
+```
+
+The checked-in WSL2 run is development evidence only. Apply the admission math
+and stop conditions in `docs/playground-lsp-design.md` to production results;
+do not infer the host budget from the WSL2 worker.
+
 **Order matters when the samples change.** The starter samples in
 `site/play-ui/samples/` are compiled by the deployed runner, so ship the runner
 *before* `site/redeploy.sh`. Backwards, the sidebar offers a program its own
