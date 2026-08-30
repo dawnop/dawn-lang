@@ -101,8 +101,9 @@ runner 先做一次不计入摘要的 warm-up，再交错运行 fresh process；
 红黑树 24 轮，compiler 1 轮。三个 checksum 分别恒为 `938400`、`2422197960096`、
 `15669348`。原始样本、build 输入摘要、corpus manifest 与环境记录随 harness 保存在
 `scripts/slab-bench/results/2026-08-30-wsl2/` 的 `primary/`、`exact-contended/` 与
-`paired-exact/`；第三个目录是最终源码的平衡复测，第二个保留一轮被宿主抖动污染、没有用于
-裁决的原始证据。
+`paired-exact/`；第三个目录是平衡复测，第二个保留一轮被宿主抖动污染、没有用于裁决的原始
+证据。corpus 与两份 runtime 是按目录传给 runner 的，不是 Git ref，所以归档里没有可核对的
+commit，而且三轮的 candidate 源与 corpus 并不完全相同（差异逐项列在该目录的 README）。
 
 ## 4. 归因矩阵
 
@@ -125,11 +126,23 @@ candidate 只动 first-touch extent；`mincore` 则直接观察 fresh slab 的�
 | R16 16 KiB tranche | 红黑树 eager / candidate | — | — | 2,034 / 2,076 | +2.1%，排除 |
 | R32 32 KiB tranche | 红黑树 eager / candidate | — | — | 2,002 / 2,005 | +0.1%，落在噪声内 |
 
+**这张表不可复现，与 §7 的三轮不是一种待遇。** 它来自归因 pilot，那一轮既没有保留逐样本
+TSV，也没有保留各变体的构建产物：S3、S4、S5 三行各要一个手改 `DAWN_SLAB_KEEP` 或改成
+current 一空即退役的 runtime，R4、R16、R32 三行各要一个改了 tranche 大小的 runtime，六个变体
+今天都不在仓库里，S0/S1/S2 三行也没有对应的存档样本。表内数字因此只是当时的读数记录，
+不能回放，也不要与 §7 逐项对齐：S0 的 ≈5,172 与 §7 lexer eager 的 5,228 本来就是两次不同的
+运行。§7 的三轮相反，原始样本、build 输入摘要、corpus manifest 与环境记录都在
+`scripts/slab-bench/results/2026-08-30-wsl2/`，可以逐样本重算。要重新验证本表，只能按
+“只改变什么”一列的描述重做那六个 runtime 变体，再用 `scripts/slab-bench/run.py` 的
+`--candidate-runtime` 各跑一轮。
+
 4 KiB 在 lexer 上的 quiet/HWM 各少约 1.3 MiB；fresh class 从完整 64 KiB 改为一页首触碰，
 差额与约 23 个冷 class 相符。production mutant 恢复 64 KiB 后，单独进程里的 `mincore`
 也从一页变成十六页，把这份差额钉到 eager layout，而不是 rounding 或 `madvise` 计数。
 但扩展红黑树样本推翻了“RSS 最低就是默认值”的初裁：4 KiB 和 16 KiB 都出现可重复 wall
-回退，32 KiB 则保住 wall，同时仍把冷 class 的首次驻留减半。最终因此采用 32 KiB；它保留
+回退，32 KiB 则保住 wall，同时仍把冷 class 的首次驻留减半。这三条 wall 判断只出自上表那一轮
+不可复现的 pilot，是当时选 32 KiB 的依据；最终源码三轮的 wall 结论另见 §7，按该节自己的
+规则是 inconclusive。最终因此采用 32 KiB；它保留
 current 和既有 empty cache，也不把 24 倍的立即退役代价带进热形状。`KEEP` pilot 说明方案
 B 将来仍可能独立研究 quiet cache budget，但它不改善本轮 peak，故不与本刀捆绑。
 
@@ -152,6 +165,16 @@ slab 的地址归属、64 KiB slot、size class 和 current/partial/empty/spare 
 5. 一个 slab 能退成非 current，前提仍是它曾经全部发完；因此进入 empty cache 的 slab 已完整
    materialize，现有复用和退役语义不变。
 
+第 2 步同时改了 slow path 的**选择顺序**，这是本刀除 layout 拆细之外唯一的策略改动，值得单写
+一句。`dawn_sl_slow` 现在先看当前 slab 还有没有未 materialize 的 batch，有就原地长一段并从中
+交出，长不动了才回到 partial → empty → carve。旧代码没有这一步：head 空就等于 current 已经
+发完，partial 是唯一去处。代价要说清楚：当 head 空、current 还留着未触碰 batch、同时某块非
+current slab 上又有被释放的空 block 时，新顺序会去碰一段新页，而不是复用那块已经驻留的空
+block。选它的理由是热 class 的形状。current 的连续 tranche 让它保持“一次 pop”，而优先借
+partial 会把同一个 class 的分配打散到多块 slab；这一步只发生在 tranche 边界（产品配置下每块
+slab 至多两次），被换下来的 current 也一定已经全部发完、随后照旧走 partial/empty/退役。§7
+三条曲线的 quiet RSS 没有因此变差，但它是一个“先长后借”的选择，不是恒等变换。
+
 extent 以完整 block 为单位，不能假设 block size 整除 32 KiB。一个跨 batch 边界的 block
 归到后一个 batch，从 block 的真实起点开始 unpoison/write，因此总容量仍精确等于
 `floor(64 KiB / block_size)`。若 block 比测试覆盖的 batch 更宽，slow path 会跳到第一个能
@@ -171,6 +194,14 @@ extent 以完整 block 为单位，不能假设 block size 整除 32 KiB。一�
 static assertion 限制在 255。metadata row 继续是 32 bytes（64-bit target），所以 side table
 不因本刀增长。reserve 建立后还请求 `MADV_NOHUGEPAGE`；否则 anonymous-THP=always 的机器
 可能把一次 32 KiB tranche fault 放大成 2 MiB，令策略与 `mincore` 契约依赖宿主 THP 模式。
+
+这一句是防御，不是一份已量到的收益：**它没有在 THP=always 的宿主上测过。** 本 PR 的评审复核在
+`/sys/kernel/mm/transparent_hugepage/enabled` 为 `madvise` 的机器上实测，加与不加这次调用
+对三条曲线的贡献为零，这正是该模式下应有的结果，因为没有 `MADV_HUGEPAGE` 的匿名映射本来
+就不会被合成大页。它挡住的放大只会在 THP=always 上出现，而那样一台机器还没有跑过本文的
+矩阵。§7 三轮的 `environment.tsv` 也没有记录宿主的 THP 模式，所以那三轮是在哪种模式下量的
+只能从机器推断；`scripts/slab-bench/run.py` 从本批起把该文件的内容写进 `environment.tsv`
+（`transparent_hugepage` 一项），让以后每一轮至少有记录。
 
 ### 5.3 ASan poisoning
 
@@ -207,24 +238,46 @@ poison：mmap 的新地址对 ASan 默认是 addressable，省掉整块 shadow p
 
 | 形状 | 固定语料与动作 | before | candidate | 裁决 |
 |---|---|---:|---:|---|
-| lexer | §3 harness，100 次 lex | 5,228 / 9,504 / 1,487 | 4,492 / 8,804 / 1,456 | quiet −14.1%，HWM −7.4%，wall −2.1% |
-| native compiler | native compiler emit 固定 selfhost snapshot | 22,496 / 317,460 / 8,677 | 18,892 / 313,744 / 8,584 | quiet −16.0%，HWM −1.2%，wall −1.1% |
-| 持久红黑树 | 32,768 keys × 24 轮，保留旧 root 并校验两棵树 | 2,828 / 20,092 / 2,019 | 2,572 / 19,816 / 2,001 | quiet −9.1%，HWM −1.4%，wall −0.9% |
+| lexer | §3 harness，100 次 lex | 5,228 / 9,504 / 1,487 | 4,492 / 8,804 / 1,456 | quiet −14.1%，HWM −7.4%；wall 见下 |
+| native compiler | native compiler emit 固定 selfhost snapshot | 22,496 / 317,460 / 8,677 | 18,892 / 313,744 / 8,584 | quiet −16.0%，HWM −1.2%；wall 见下 |
+| 持久红黑树 | 32,768 keys × 24 轮，保留旧 root 并校验两棵树 | 2,828 / 20,092 / 2,019 | 2,572 / 19,816 / 2,001 | quiet −9.1%，HWM −1.4%；wall 见下 |
 
 每个单元格依次是 quiet KiB / HWM KiB / wall ms，均为 5 个正式样本的中位数。四 allocator
 矩阵还得到 glibc/mimalloc：lexer 为 `8,940/8,940/1,772` 与 `8,752/8,752/1,471`；红黑树
 为 `24,296/24,296/2,578` 与 `20,176/20,176/2,054`；compiler 为
 `267,124/328,648/11,457` 与 `191,256/315,416/9,605`。candidate 在两个既有胜出形状上
-继续胜过 glibc/mimalloc，且三条 candidate/eager wall 都没有回退。
+继续胜过 glibc/mimalloc。
 
 最终源码的 8-sample 平衡复测给出 eager→candidate wall：lexer
 `1,467.716→1,469.859 ms`（+0.15%）、红黑树 `2,018.746→2,035.543 ms`（+0.83%）、
-compiler `8,658.511→8,553.561 ms`（−1.21%）；RSS 改善与主矩阵逐项一致。lexer/红黑树的
-亚 1% 方向与主矩阵相反，故按本文纪律判为噪声、不是可重复回退。中间那轮四 allocator
-复跑同时把 glibc compiler 从约 11.5 秒抖到 19.4 秒，并让同组样本在 9.1–23.7 秒间摆动；
-它完整保留在 `exact-contended/`，不进入摘要。主矩阵的 candidate source 只与最终源码差三处
-注释；三轮的 `runtime-candidate.o` MD5 都是 `2ea2ecdd5615af85b17874f3706eeedf`，所以
-主矩阵量到的是与最终源码相同的机器代码，而不是近似实现。
+compiler `8,658.511→8,553.561 ms`（−1.21%）；RSS 改善与主矩阵逐项一致。
+
+**按本节开头自己的规则，wall 的结论是 inconclusive。** 三轮的 candidate/eager wall 方向
+（lexer / 红黑树 / compiler）分别是：主矩阵 −2.09% / −0.88% / −1.06%，`exact-contended`
++1.24% / +0.37% / +6.64%，`paired-exact` +0.15% / +0.83% / −1.21%。三条形状各自都出现过
+方向相反的轮次，没有一条两轮同向，本节开头写的“方向在两轮不一致则 inconclusive，增加样本
+或查机器噪声，不挑有利的一轮”因此对三条全部适用。此前这里把亚 1% 的反向读数判成噪声、
+把主矩阵那一轮当结论，正是同一句话禁止的挑轮次，故改判。
+
+能说的到此为止：`exact-contended` 那一轮有独立于被测量的污染证据（同轮 glibc compiler
+中位数从约 11.5 秒涨到 19.4 秒、同组样本在 9.1–23.7 秒间摆动，而 glibc 不在本刀的改动路径
+上），所以它保留原始证据但不参与裁决；剩下两轮里最大的 candidate 回退是红黑树的 +0.83%，
+最大的收益是 compiler 的 −1.21%。要把 wall 从 inconclusive 变成结论，需要更多样本或一台更
+安静的机器，不是从现有三轮里挑一轮。
+
+RSS 侧不受影响：quiet 与 HWM 在三轮里逐项同向，且 quiet 数值几乎完全重合（lexer −14.1%、
+红黑树 −9.1%、compiler −16.0%，三轮相同到小数点后一位），这正是本节规则要求的两轮同向。
+本刀的裁决据此建立在 RSS 上，wall 只承担“没有量到可重复的大幅回退”这一条较弱的说法。
+被污染的那一轮完整保留在 `exact-contended/`。
+
+关于“量的是哪一份源”，本节此前写的是“主矩阵的 candidate source 只与最终源码差三处注释，
+三轮的 `runtime-candidate.o` MD5 都是 `2ea2ecdd5615af85b17874f3706eeedf`，所以主矩阵量到的
+是与最终源码相同的机器代码”。归档能支持的部分要小一些：`builds.tsv` 的 `runtime_c_md5`
+显示主矩阵的 candidate 源（`814029ab…`）与另两轮（`93d224d1…`）本身就不同，两者也都不是
+落地的 `runtime/c/dawn_rt.c`（`853cd7b1…`）；而 object 的 MD5 不是 `builds.tsv` 的列，只在
+当时的运行日志里，无法从归档重新导出。所以三轮量的都是最终源码的前身，落地版本本身没有
+在这三轮里跑过。逐项出处见
+`scripts/slab-bench/results/2026-08-30-wsl2/README.md` 的“三轮之间不共享什么”。
 
 仓库没有留下历史红黑树 benchmark 源或 runner；本批因此归档了一份固定的等价压力形状：
 每轮按确定排列插入 32,768 个 key、每 256 次保留一个旧 root、覆盖固定 key 集，然后同时
@@ -250,7 +303,19 @@ process 单跑 `slab_materializes_on_demand` 与既有 `slab_returns_pages`。�
 
 另一条独立 binary 以 `DAWN_SL_BATCH=1024`、block 1152 bytes 分满 56 个对象；第 57 个必须
 恰好落在下一 64 KiB slot。它钉住“最后一个完整 block 在第 63 batch 结束、第 64 batch 没有
-新 block”时不能越界。原 allocator mutants 的 red set 与所有 ASan probes保持不变。
+新 block”时不能越界。
+
+这条腿起初没有自己的 red set，只在 mutant 循环之外跑一次；而它对一个完全没有分批的 runtime
+同样是绿的（拿本刀之前的 `dawn_rt.c` 编出来实测过），也就是说它固定的是 slot 网格的边界，
+不是分批策略本身。现在它是 `matrix.txt` 的第三个 roster（`tail`），并有一个 owner：
+`slab-tail-crosses-the-slot` 同时去掉 `dawn_sl_extend` 里把 tail 挡在 slot 内的两处判断
+（`old_blocks == capacity` 与循环之后的钳制），于是第 57 个 block 从 slot 结束前 1024 bytes
+处交出，这条腿变红。两处必须一起去掉：任一处单独留下都足以挡住越界，这一点由第二个
+benign mutant `slab-drops-the-redundant-tail-clamp` 单独记下，它只去掉前一处，两个 roster 全绿。
+该 mutant 在产品配置下不可达（32 KiB batch 配上不超过 2032 bytes 的 class，永远还有下一个
+完整 block），所以 `run.sh` 对 `tail` 角色的要求有两半：assertion roster 与未变异运行逐字节
+相同，同时 1024-byte batch 那份 roster 变红。缺任何一半，它都会退回成一条不会红的腿。
+原 allocator mutants 的 red set 与所有 ASan probes 保持不变。
 
 ## 9. 落点与提交边界
 

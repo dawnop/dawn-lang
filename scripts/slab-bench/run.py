@@ -252,6 +252,27 @@ def cpu_model() -> str:
     return platform.processor() or "unknown"
 
 
+def transparent_hugepage() -> str:
+    """The host's anonymous-THP mode, verbatim.
+
+    The runtime asks for MADV_NOHUGEPAGE on its reserve precisely so that a
+    THP=always host cannot turn one tranche fault into a 2MiB resident extent.
+    That makes the host's mode part of what an RSS number means, and it was
+    not recorded in the rounds this harness has archived so far. The file's
+    own bracket notation (`always [madvise] never`) is kept as it is read:
+    parsing it would only add a way to record something the kernel did not
+    say.
+    """
+    try:
+        return (
+            Path("/sys/kernel/mm/transparent_hugepage/enabled")
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+    except OSError:
+        return "unknown"
+
+
 def libc_description() -> str:
     libc = " ".join(part for part in platform.libc_ver() if part).strip()
     ldd = shutil.which("ldd")
@@ -1114,7 +1135,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     write_environment(
         environment_path,
         [
-            ("schema", 2),
+            # 3 adds transparent_hugepage. The archived 2026-08-30 rounds are
+            # schema 2 and do not carry it, which is why their host THP mode
+            # can only be inferred.
+            ("schema", 3),
             ("started_utc", utc_now()),
             ("repo", ROOT),
             ("head", current_commit),
@@ -1174,6 +1198,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ("cpu_model", cpu_model()),
             ("cpu_count", os.cpu_count() or "unknown"),
             ("page_size", os.sysconf("SC_PAGE_SIZE")),
+            ("transparent_hugepage", transparent_hugepage()),
             ("loadavg_start", " ".join(f"{n:.2f}" for n in os.getloadavg())),
             ("workloads", ",".join(workloads)),
             ("variants", ",".join(variants)),

@@ -95,7 +95,9 @@ time。
 结果目录包括：
 
 - `samples.tsv`：warm-up 与每个新进程的原始 RSS/HWM/to-ready/checksum；
-- `environment.tsv`：ref/目录输入来源及 MD5、compiler/cc/kernel/libc、CPU、page size 与固定次数；
+- `environment.tsv`：ref/目录输入来源及 MD5、compiler/cc/kernel/libc、CPU、page size、
+  宿主 THP 模式（`transparent_hugepage`，因为 runtime 的 `MADV_NOHUGEPAGE` 只在
+  THP=always 上才有事可做，宿主模式因此是 RSS 数字的一部分）与固定次数；
 - `corpus-files.tsv`：复制后 corpus 每个文件的大小/MD5，以及 `environment.tsv` 中对应的稳定整树 MD5；
 - `builds.tsv`：每个 workload/variant 的 runtime 来源、编译参数、C 与 binary 的字节标识；
 - `logs/`：每个进程的 stderr；
