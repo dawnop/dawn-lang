@@ -207,10 +207,12 @@ has the full argument; the three properties worth repeating:
   produces right now and that listener's own `to_msg` turns the string into a
   message on this side, so the application's message type needs no encoding and
   the host has never heard of it.
-- **The model crosses, as opaque text.** Dawn has no module-level mutable
-  state, so a reactor holds nothing between turns. The consequence is worth
-  more than the cost: a turn is a function of its inputs, so one transcript
-  replays identically on the JVM, on native and on wasm.
+- **The model crosses, as opaque text.** The mutable model is the only thing
+  a reactor carries between turns; the one exception is the read-only root a
+  `_with_state` entry installs at init (`std/reactor`), which never rides the
+  wire again. The consequence is worth more than the cost: a turn is a
+  function of its inputs and that root, so one transcript replays identically
+  on the JVM, on native and on wasm.
 - **`SetSelf` ships a node without its children.** `apply` performs
   `rekid(donor, kids(target))` and reads nothing of the donor but its own
   data, so shipping the subtree would make an attribute change at the root
@@ -267,7 +269,7 @@ runtime, and a boundary that varies by backend cannot have one transcript.
 | `dsl` | lowercase wrappers over the constructors, `tea_term/dsl`'s counterpart |
 | `route` | an address plus an event name to a message, on `fold_preorder` |
 | `wire` | the JSON encoding of nodes, patches and replies; request decoding |
-| `reactor` | `turn` (pure), `serve` (the package's only `!io`), and the `_with_flags` pair of each |
+| `reactor` | `turn` (pure), `serve` (the package's only `!io`), and the `_with_flags` / `_with_state` pairs of each |
 
 ## The host half
 
