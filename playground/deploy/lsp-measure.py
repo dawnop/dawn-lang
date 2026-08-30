@@ -30,6 +30,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Iterable, TextIO
@@ -52,7 +53,7 @@ KILL_GRACE_SECONDS = 1.0
 MAX_MESSAGES_PER_WAIT = 256
 
 ROOT = Path(__file__).resolve().parents[2]
-SAMPLE_DIR = ROOT / "site" / "play-ui" / "samples"
+DEFAULT_SAMPLE_DIR = ROOT / "site" / "play-ui" / "samples"
 SAMPLE_NAMES = ("comptime", "effects", "hello", "shapes", "traits")
 
 FEATURE_SOURCE = (
@@ -1156,10 +1157,10 @@ def run_one(
     return row, failure
 
 
-def load_samples() -> list[tuple[str, str]]:
+def load_samples(sample_dir: Path) -> list[tuple[str, str]]:
     samples: list[tuple[str, str]] = []
     for name in SAMPLE_NAMES:
-        path = SAMPLE_DIR / f"{name}.dawn"
+        path = sample_dir / f"{name}.dawn"
         try:
             raw = path.read_bytes()
             source = raw.decode("utf-8", errors="strict")
@@ -1175,9 +1176,11 @@ def load_samples() -> list[tuple[str, str]]:
     return samples
 
 
-def cases_for(scenarios: list[str]) -> list[tuple[str, str, str]]:
+def cases_for(
+    scenarios: list[str], sample_dir: Path = DEFAULT_SAMPLE_DIR
+) -> list[tuple[str, str, str]]:
     cases: list[tuple[str, str, str]] = []
-    samples = load_samples() if "samples" in scenarios else []
+    samples = load_samples(sample_dir) if "samples" in scenarios else []
     source_64k = exact_64k_source() if "source-64k" in scenarios else ""
     for scenario in scenarios:
         if scenario == "samples":
@@ -1359,6 +1362,18 @@ def self_test() -> None:
     writer.writerow(row)
     parsed = list(csv.DictReader(io.StringIO(sink.getvalue()), delimiter="\t"))
     assert len(parsed) == 1 and tuple(parsed[0]) == COLUMNS
+    with tempfile.TemporaryDirectory(prefix="dawn-lsp-measure-") as temp:
+        sample_dir = Path(temp)
+        expected_samples = []
+        for name in SAMPLE_NAMES:
+            source = f"# {name}\n"
+            (sample_dir / f"{name}.dawn").write_text(source, encoding="utf-8")
+            expected_samples.append(("sample", name, source))
+        explicit_samples = parser().parse_args(
+            ["--self-test", "--samples", os.fspath(sample_dir)]
+        )
+        assert explicit_samples.samples == sample_dir
+        assert cases_for(["samples"], explicit_samples.samples) == expected_samples
     print("lsp-measure self-test ok")
 
 
@@ -1387,6 +1402,13 @@ def parser() -> argparse.ArgumentParser:
         "--scenario",
         action="append",
         help="repeat or comma-separate: all, idle, samples, source-64k, burst, features, disconnect",
+    )
+    out.add_argument(
+        "--samples",
+        type=Path,
+        default=DEFAULT_SAMPLE_DIR,
+        metavar="DIR",
+        help="editor sample directory (default: repository site/play-ui/samples)",
     )
     out.add_argument(
         "--timeout",
@@ -1460,7 +1482,7 @@ def main(argv: list[str] | None = None) -> int:
         executable, version, args.host_label, args.harness_commit
     )
     scenarios = resolve_scenarios(args.scenario)
-    cases = cases_for(scenarios)
+    cases = cases_for(scenarios, args.samples)
     stream, should_close = open_output(args.output)
     rows = 0
     try:

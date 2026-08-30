@@ -28,6 +28,7 @@ MEASUREMENT = os.path.join(
     "lsp-measurements",
     "2026-08-30-win-wsl2.tsv",
 )
+MEASURE_HARNESS = os.path.join(DEPLOY, "lsp-measure.py")
 ORIGIN = "http://play.test"
 PROTOCOL = "dawn-lsp-v1"
 URI = "untitled:dawn-playground/prog.dawn"
@@ -223,6 +224,76 @@ def read_text(path):
         return stream.read()
 
 
+def mutate_once(source, old, new):
+    count = source.count(old)
+    assert count == 1, (old, count)
+    return source.replace(old, new, 1)
+
+
+def expect_contract_red(label, contract):
+    try:
+        contract()
+    except AssertionError:
+        return
+    raise AssertionError(label + " mutant stayed green")
+
+
+def sample_deployment_coupling(redeploy, measure_harness):
+    sample_sync = (
+        'rsync -avz --delete site/play-ui/samples/ \\\n'
+        '  "$HOST:$REMOTE/site/play-ui/samples/"'
+    )
+    sample_default = (
+        'DEFAULT_SAMPLE_DIR = ROOT / "site" / "play-ui" / "samples"'
+    )
+    assert sample_sync in redeploy, sample_sync
+    assert "mkdir -p '$REMOTE/site/play-ui/samples'" in redeploy
+    assert sample_default in measure_harness, sample_default
+    assert '"--samples",' in measure_harness
+    assert "type=Path," in measure_harness
+    assert "cases_for(scenarios, args.samples)" in measure_harness
+
+
+def sample_deployment_negative_controls(redeploy, measure_harness):
+    sample_sync = (
+        'rsync -avz --delete site/play-ui/samples/ \\\n'
+        '  "$HOST:$REMOTE/site/play-ui/samples/"'
+    )
+    sample_default = (
+        'DEFAULT_SAMPLE_DIR = ROOT / "site" / "play-ui" / "samples"'
+    )
+    explicit_wiring = "cases_for(scenarios, args.samples)"
+    mutants = (
+        (
+            "samples-not-shipped",
+            mutate_once(redeploy, sample_sync, "# samples omitted"),
+            measure_harness,
+        ),
+        (
+            "deployed-default-drift",
+            redeploy,
+            mutate_once(
+                measure_harness,
+                sample_default,
+                'DEFAULT_SAMPLE_DIR = ROOT / "playground" / "samples"',
+            ),
+        ),
+        (
+            "explicit-samples-ignored",
+            redeploy,
+            mutate_once(measure_harness, explicit_wiring, "cases_for(scenarios)"),
+        ),
+    )
+    for label, mutant_redeploy, mutant_measure in mutants:
+        expect_contract_red(
+            label,
+            lambda r=mutant_redeploy, m=mutant_measure: sample_deployment_coupling(
+                r, m
+            ),
+        )
+    ok("sample deployment coupling owns three negative controls")
+
+
 def deployment_contract():
     """Pin the checked-in production boundary without needing root/systemd."""
     service = read_text(os.path.join(DEPLOY, "dawn-play-lsp.service"))
@@ -231,6 +302,7 @@ def deployment_contract():
     wrapper = read_text(os.path.join(SANDBOX, "run-lsp-sandboxed.sh"))
     sudoers = read_text(os.path.join(SANDBOX, "sudoers.dawn-play"))
     redeploy = read_text(os.path.join(DEPLOY, "redeploy.sh"))
+    measure_harness = read_text(MEASURE_HARNESS)
 
     for line in (
         "Environment=PLAY_LSP_HOST=127.0.0.1",
@@ -286,6 +358,8 @@ def deployment_contract():
     ) == 1
     assert '*) NATIVE_BIN="$PWD/$NATIVE_BIN" ;;' in redeploy
     assert 'NATIVE_VERSION=$("$NATIVE_BIN" version)' in redeploy
+    sample_deployment_coupling(redeploy, measure_harness)
+    sample_deployment_negative_controls(redeploy, measure_harness)
     # The unit is present on the production host, so only the other branch can
     # be exercised here; pin the present one by text.
     for line in (
@@ -305,6 +379,101 @@ def deployment_contract():
     ok("deployment route, cgroup, sudo, rollback and native-artifact boundaries are pinned")
 
 
+def run_remote_restart(script, curl_failures=0, curl_hangs=0):
+    """Run the remote half with a missing LSP unit and controlled health."""
+    with tempfile.TemporaryDirectory(prefix="dawn-lsp-restart-") as temp:
+        log = os.path.join(temp, "commands")
+        curl_count = os.path.join(temp, "curl-count")
+        stubs = os.path.join(temp, "bin")
+        os.mkdir(stubs)
+        for name, body in (
+            # `systemctl cat` fails the way it does on a host without the unit.
+            (
+                "systemctl",
+                'printf "%s\\n" "systemctl $*" >>"$LOG"\n'
+                'case "$1" in cat) exit 1 ;; esac\nexit 0\n',
+            ),
+            (
+                "sudo",
+                'printf "%s\\n" "sudo $*" >>"$LOG"\nexec "$@"\n',
+            ),
+            (
+                "curl",
+                'printf "%s\\n" "curl $*" >>"$LOG"\n'
+                'COUNT=0\n'
+                '[ ! -r "$CURL_COUNT" ] || read -r COUNT <"$CURL_COUNT"\n'
+                'COUNT=$((COUNT + 1))\n'
+                'printf "%s\\n" "$COUNT" >"$CURL_COUNT"\n'
+                # Exit 28 models curl enforcing --max-time on a server that
+                # accepts the connection but never returns HTTP. It is
+                # deliberately instant so the contract itself stays fast.
+                '[ "$COUNT" -gt "$CURL_HANGS" ] || exit 28\n'
+                'FAIL_LIMIT=$((CURL_HANGS + CURL_FAILURES))\n'
+                '[ "$COUNT" -gt "$FAIL_LIMIT" ] || exit 7\n'
+                'echo ok\n',
+            ),
+            (
+                "sleep",
+                'printf "%s\\n" "sleep $*" >>"$LOG"\nexit 0\n',
+            ),
+        ):
+            path = os.path.join(stubs, name)
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("#!/bin/sh\n" + body)
+            os.chmod(path, 0o755)
+        result = subprocess.run(
+            ["/bin/sh", "-c", script],
+            env={
+                "PATH": stubs + ":/usr/bin:/bin",
+                "LOG": log,
+                "CURL_COUNT": curl_count,
+                "CURL_FAILURES": str(curl_failures),
+                "CURL_HANGS": str(curl_hangs),
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=3,
+        )
+        commands = read_text(log) if os.path.exists(log) else ""
+        count = int(read_text(curl_count)) if os.path.exists(curl_count) else 0
+    return result, commands, count
+
+
+def assert_remote_restart_behavior(script):
+    # The first failure models an accepted-but-silent server reaching curl's
+    # own deadline; the second is an ordinary connection failure.
+    result, commands, curl_count = run_remote_restart(
+        script, curl_hangs=1, curl_failures=1
+    )
+    assert result.returncode == 0, (result.returncode, result.stdout)
+    assert "DEPLOY.md step 6" in result.stdout, result.stdout
+    assert "sudo systemctl restart dawn-play\n" in commands, commands
+    assert "restart dawn-play dawn-play-lsp" not in commands, commands
+    assert "is-active" not in commands, commands
+    assert curl_count == 3, commands
+    assert commands.count("sleep 2\n") == 2, commands
+    curl_commands = [
+        line for line in commands.splitlines() if line.startswith("curl ")
+    ]
+    assert len(curl_commands) == 3, commands
+    for command in curl_commands:
+        assert "--connect-timeout 1" in command, command
+        assert "--max-time 1" in command, command
+        assert "http://127.0.0.1:8087/health" in command, command
+
+    # A health endpoint which keeps accepting connections without replying must
+    # fail at the retry bound. The controlled stub recovers on attempt 12 so an
+    # unbounded mutant terminates and can be observed without a real delay.
+    exhausted, exhausted_commands, exhausted_count = run_remote_restart(
+        script, curl_hangs=11
+    )
+    assert exhausted.returncode != 0, exhausted.stdout
+    assert "failed its health check after 10 attempts" in exhausted.stdout
+    assert exhausted_count == 10, exhausted_commands
+    assert exhausted_commands.count("sleep 2\n") == 9, exhausted_commands
+
+
 def remote_restart_contract():
     """Run redeploy.sh's remote half where the LSP unit was never installed.
 
@@ -319,41 +488,25 @@ def remote_restart_contract():
     start = redeploy.index("REMOTE_RESTART='") + len("REMOTE_RESTART='")
     script = redeploy[start:redeploy.index("'\n", start)]
     assert "systemctl cat dawn-play-lsp.service" in script, script
+    assert_remote_restart_behavior(script)
+    ok("remote restart retries transient health failures and fails at its bound")
 
-    with tempfile.TemporaryDirectory(prefix="dawn-lsp-restart-") as temp:
-        log = os.path.join(temp, "commands")
-        stubs = os.path.join(temp, "bin")
-        os.mkdir(stubs)
-        for name, body in (
-            # `systemctl cat` fails the way it does on a host without the unit.
-            ("systemctl", 'printf "%s\\n" "systemctl $*" >>"$LOG"\n'
-                          'case "$1" in cat) exit 1 ;; esac\nexit 0\n'),
-            ("sudo", 'printf "%s\\n" "sudo $*" >>"$LOG"\nexec "$@"\n'),
-            ("curl", 'printf "%s\\n" "curl $*" >>"$LOG"\necho ok\n'),
-            ("sleep", "exit 0\n"),
-        ):
-            path = os.path.join(stubs, name)
-            with open(path, "w", encoding="utf-8") as stream:
-                stream.write("#!/bin/sh\n" + body)
-            os.chmod(path, 0o755)
-        result = subprocess.run(
-            ["/bin/sh", "-c", script],
-            env={"PATH": stubs + ":/usr/bin:/bin", "LOG": log},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=10,
-        )
-        commands = read_text(log) if os.path.exists(log) else ""
-
-    assert result.returncode == 0, (result.returncode, result.stdout)
-    assert "DEPLOY.md step 6" in result.stdout, result.stdout
-    assert "sudo systemctl restart dawn-play\n" in commands, commands
-    assert "restart dawn-play dawn-play-lsp" not in commands, commands
-    assert "is-active" not in commands, commands
-    # The runner still gets restarted and health-checked, absent unit or not.
-    assert "8087/health" in commands, commands
-    ok("a redeploy to a host without the LSP unit skips it and says so")
+    no_retry = mutate_once(script, "  HEALTH_ATTEMPTS=10", "  HEALTH_ATTEMPTS=1")
+    no_bound = mutate_once(script, "      exit 1", "      : # keep retrying")
+    no_curl_timeout = mutate_once(
+        script, " --connect-timeout 1 --max-time 1", ""
+    )
+    expect_contract_red(
+        "single health attempt", lambda: assert_remote_restart_behavior(no_retry)
+    )
+    expect_contract_red(
+        "unbounded health retry", lambda: assert_remote_restart_behavior(no_bound)
+    )
+    expect_contract_red(
+        "curl without a total timeout",
+        lambda: assert_remote_restart_behavior(no_curl_timeout),
+    )
+    ok("single-attempt, unbounded-retry and no-timeout mutants turn red")
 
 
 def measurement_evidence_contract():
@@ -832,7 +985,7 @@ def main():
         assert "child-stderr bytes=" in gateway_log, gateway_log
         ok("child stderr contents are not logged")
     print("----")
-    print("22 passed, 0 failed")
+    print("24 passed, 0 failed")
 
 
 if __name__ == "__main__":
