@@ -118,9 +118,83 @@ for m in "${mutants[@]}"; do
   fi
 done
 
+# ---- the same three verdicts, on a production collector --------------------
+#
+# The fixture above is the shape under test; examples/projects/tea_dom_search
+# is the first application that ships it. The two are not the same evidence.
+# The fixture's collector exists to be broken, so its assertions were written
+# knowing what the mutants would be; the panel's were written to describe a
+# search result list, and whether they *also* see a broken collector is a
+# question with an answer rather than an assumption.
+#
+# Three mutants, one per verdict, each an edit to a file that ships:
+#
+#   groups-leak-into-outer   the inner installation's rows are handed to the
+#                            outer one instead of the section that holds them.
+#                            The rows are all still there, in order, with the
+#                            right classes -- there are simply no sections.
+#   every-entry-emitted      the filter stops filtering: `probe` performs
+#                            `found` for an entry that scored zero, so a query
+#                            answers with the whole index in index order.
+#   selection-cell-crosstalk the two cells in one handler stop agreeing: the
+#                            ordinal `chosen` is decided by is one past the
+#                            one the rows are numbered with, so Enter goes to
+#                            the row below the highlighted one. Nothing about
+#                            the list moves, which is why this is its own
+#                            verdict and not a variant of the first two.
+#
+# The project's `[deps]` are relative, so the copy keeps the layout that makes
+# them resolve, exactly as scripts/wasm-dom-contract/flags.sh does for its own
+# guest leg.
+plant_search() { # <dir>
+  rm -rf "$1"
+  mkdir -p "$1/examples/projects"
+  cp -r "$root/packages" "$1/"
+  cp -r "$root/examples/projects/tea_dom_search" "$1/examples/projects/tea_dom_search"
+}
+
+search_base="$work/search-base"
+plant_search "$search_base"
+if "$dawn" test "$search_base/examples/projects/tea_dom_search" >"$work/search.txt" 2>&1; then
+  echo "OK   panel collector: $(grep -c '^PASS  search ::' "$work/search.txt") assertions"
+else
+  echo "FAIL: the search panel's assertions are red before any mutant was applied:" >&2
+  cat "$work/search.txt" >&2
+  exit 1
+fi
+
+prod=(
+  'groups-leak-into-outer|s|        emit(section(g, rows))|        for w in rows { emit(w) }|'
+  'every-entry-emitted|s|        if s == rank \&\& e.group == g.id \&\& shown < cap() {|        if true {|'
+  'selection-cell-crosstalk|s|      if len(hits) == sel {|      if len(hits) == sel + 1 {|'
+)
+
+for m in "${prod[@]}"; do
+  name="${m%%|*}"
+  prog="${m#*|}"
+  tree="$work/prod-$name"
+  plant_search "$tree"
+  target="$tree/examples/projects/tea_dom_search/src/search.dawn"
+  before="$(md5sum "$target")"
+  sed -i "$prog" "$target"
+  if [ "$before" = "$(md5sum "$target")" ]; then
+    echo "NOT APPLIED: $name (the sed matched nothing; the mutant is vacuous)"
+    holes=$((holes + 1))
+    continue
+  fi
+  if "$dawn" test "$tree/examples/projects/tea_dom_search" >"$work/$name.txt" 2>&1; then
+    echo "HOLE: $name survived, the panel's assertions do not see it"
+    holes=$((holes + 1))
+  else
+    echo "killed: $name"
+    killed=$((killed + 1))
+  fi
+done
+
+total=$((${#mutants[@]} + ${#prod[@]}))
 if [ "$holes" -ne 0 ]; then
-  echo "FAIL: $holes of ${#mutants[@]} collector mutant(s) unaccounted for" >&2
+  echo "FAIL: $holes of $total collector mutant(s) unaccounted for" >&2
   fail=1
 fi
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "collector ok ($killed/${#mutants[@]} mutants killed)"
+echo "collector ok ($killed/$total mutants killed)"

@@ -53,9 +53,12 @@
 # payload no application here declares, and foreign.sh for the custom-element
 # boundary no application here mounts. The fifth, collect.sh, needs bin/dawn
 # and not node: it is about how a node's children are *built* rather than
-# about what crossed the boundary, and the encoder cannot see that. The sixth,
-# flags.sh, needs both: an init's flags are read once by an application whose
-# initial model is a function of them, and neither application here has one.
+# about what crossed the boundary, and the encoder cannot see that -- it holds
+# both the fixture the shape was designed on and the first application that
+# ships it (examples/projects/tea_dom_search, the site's search panel). The
+# sixth, flags.sh, needs both: an init's flags are read once by an application
+# whose initial model is a function of them, and neither application here has
+# one.
 #
 #   ./scripts/wasm-dom-contract/run.sh
 #   ./scripts/wasm-dom-contract/run.sh --record        # re-record both transcripts
@@ -91,7 +94,9 @@ record=0
 # collect.sh is the odd one out: it needs bin/dawn rather than node, and what
 # it is about is the construction of a child list rather than the bridge. A
 # transcript is handed a finished node, so how the node was built is invisible
-# to it; the collector the counter's view now uses is held there instead.
+# to it; the collector the counter's view now uses is held there instead, and
+# so is the search panel's -- a fixture's assertions were written knowing what
+# would be broken, and an application's were not.
 #
 # flags.sh has a leg on each side. Both applications below start from a
 # constant model, so their transcripts read the same whether the bridge sends

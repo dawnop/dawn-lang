@@ -1,0 +1,855 @@
+# The pure half of the site's search panel: an index, a query, a selection,
+# and the tree those three make. No io, no wire format, no page.
+#
+# What makes it worth writing in Dawn rather than in the page's own script is
+# the three shapes it is built out of, each of which the language has and a
+# hand-rolled accumulator does not.
+#
+#   nested collectors   The result list is grouped, so the view is a collector
+#                       inside a collector: [sections] installs one for the
+#                       sections and [rows_of] installs another for the rows
+#                       of one group, and the inner installation shadows the
+#                       outer one for the length of its body. What crosses
+#                       from inner to outer is the finished `<li>`, never its
+#                       rows. Both are conditional -- a group with no hits
+#                       emits nothing at all rather than an empty section --
+#                       which is the thing a list of slots cannot express.
+#
+#   two state cells     [scan] carries `hits` and `chosen` in one
+#                       `with handle`. They are not the same quantity: the
+#                       first is every match in display order, the second is
+#                       the href the selection lands on, and it is decided by
+#                       comparing the running ordinal with the selection at
+#                       the moment the match is found. Nothing outside the
+#                       arm can see the ordinal, and nothing but a second pass
+#                       could recover `chosen` from `hits`.
+#
+#   a reader effect     Every link this view builds needs the page's distance
+#                       from the site root, and every label needs its
+#                       language. Both are model fields read at the leaves,
+#                       nine calls below the model. `Ctx` is installed once at
+#                       the top of `view` and asked at the bottom, which is
+#                       two parameters that no function in between has to
+#                       carry or forward.
+#
+# The index arrives as flags -- one string the page has and the guest does not
+# -- and then rides in the model, because Dawn has no module-level mutable
+# state and a reactor turn is a function of its request line. That is a real
+# cost and it is stated here rather than hidden: the whole index is decoded on
+# every keystroke. It is affordable at this size (a few hundred entries) and
+# it is what would have to change first if the index grew.
+#
+# The bilingual strings below are data, not prose: this application draws
+# itself on an English page and on a Chinese one, and the site's own generator
+# (site/src/gen/pages.dawn) keeps its two languages in one table for the same
+# reason -- a missing one is then a compile error rather than a page that
+# renders half-translated.
+
+use std/str
+use std/list
+use json/value.{Json, JNull, JBool, JInt, JStr, JArr, JObj}
+use json/parser.{parse}
+use json/render.{render}
+use std/map
+use tea_core/app.{App, update, view}
+use tea_dom/node.{Node}
+use tea_dom/dsl.{el, div, span, text, input, on_value, on_key}
+
+## One thing a reader can go to: which part of the site it belongs to, what it
+## is called, the one line under the name, and where it lives.
+##
+## `detail` is a signature for an API entry and the document's name for a
+## section; `note` is the first line of a doc comment, or empty. `href` is
+## relative to the SITE root, not to the page the panel is open on -- the page
+## supplies its own distance and [link] joins the two.
+pub type Entry = {
+  group: String,
+  title: String,
+  detail: String,
+  note: String,
+  href: String,
+}
+
+## A match, and its ordinal among all the matches in display order. The
+## ordinal is what the arrow keys move and what a row compares itself with to
+## know whether it is the selected one.
+pub type Hit = { entry: Entry, at: Int }
+
+## Everything a scan of the index answers: the matches, and the href the
+## current selection resolves to.
+pub type Scan = { hits: List[Hit], chosen: String }
+
+## The whole model. `root` and `lang` come from the page and never change;
+## `query`, `sel` and `open` are the session; `goto` is the one field that is
+## an instruction rather than a state -- it holds the href Enter chose, the
+## page's script reads it out of the document, and the next message clears it.
+pub type Model = {
+  root: String,
+  lang: String,
+  entries: List[Entry],
+  query: String,
+  sel: Int,
+  open: Bool,
+  goto: String,
+}
+
+## What the two listeners mean.
+pub type Msg =
+  | Typed(text: String)
+  | Pressed(key: String)
+derive Show
+
+## Where the page is and what language it is in, asked for at the leaves.
+##
+## Both are `String` because an effect operation cannot take a type parameter
+## (spec §6.5) and neither needs one: a root is a relative path and a language
+## is its `lang` attribute.
+pub effect Ctx {
+  fn root() -> String
+  fn lang() -> String
+}
+
+## One matched entry, in the order the body found it.
+pub effect Found {
+  fn found(e: Entry) -> Unit
+}
+
+## One child, in the order the body wants it. The same shape
+## scripts/wasm-dom-contract/collect pins, and the same one the counter's view
+## uses; it is spelled here rather than imported because a way of *building* a
+## child list is not part of `tea_dom`'s vocabulary yet.
+pub effect Emit {
+  fn emit(w: Node[Msg]) -> Unit
+}
+
+# ---- the four groups ------------------------------------------------------
+
+## A group of results, in the order the panel shows them. The id is what an
+## index entry's `group` field carries, so this table is also the registration:
+## an entry whose group is not one of these four is never shown at all, and
+## the test below is what says the index agrees.
+type Group = { id: String, en: String, zh: String }
+
+fn groups() -> List[Group] = [
+  Group { id: "stdlib", en: "Standard library", zh: "标准库" },
+  Group { id: "spec", en: "Spec and design", zh: "规范与设计" },
+  Group { id: "tutorial", en: "Tutorial", zh: "教程" },
+  Group { id: "examples", en: "Examples and pages", zh: "示例与页面" },
+]
+
+fn group_label(g: Group, code: String) -> String =
+  if code == "zh-CN" { g.zh } else { g.en }
+
+## What the panel says it searches. The expectation this manages is the one
+## the whole design rests on: this is a title and API-name index, not full
+## text, so a reader who types a word out of the middle of a paragraph gets
+## nothing and has to be told why rather than left to conclude the search is
+## broken.
+fn scope_line(code: String) -> String =
+  if code == "zh-CN" {
+    "只搜标题与 API 名，不搜正文。"
+  } else {
+    "Searches titles and API names, not body text."
+  }
+
+fn empty_line(code: String) -> String =
+  if code == "zh-CN" { "没有匹配。" } else { "No matches." }
+
+fn prompt_line(code: String) -> String =
+  if code == "zh-CN" { "输入以搜索。" } else { "Type to search." }
+
+# ---- scoring --------------------------------------------------------------
+
+## The ranks a match can have, best first. A list rather than a range because
+## it is read as an order and not as arithmetic, and because [probe] walks it.
+fn ranks() -> List[Int] = [5, 4, 3, 2, 1]
+
+## How many rows the panel will show. A cap rather than a scroll: the panel is
+## a keyboard target, and a list nobody can reach the bottom of by pressing
+## down is not a list.
+fn cap() -> Int = 40
+
+## Where a name can be split for the purpose of "starts a word": the module
+## separator, the path separator, the hyphen and the space.
+fn is_break(c: Char) -> Bool = c == '.' || c == '/' || c == '-' || c == ' '
+
+## Whether `hay` has `needle` at the start of one of its words.
+fn has_word_prefix(hay: String, needle: String) -> Bool = {
+  let cs = code_points(hay)
+  var found = false
+  var i = 0
+  while i < len(cs) {
+    if i > 0 && is_break(cs[i - 1]) && str.starts_with(str.drop(hay, i), needle) {
+      found = true
+    }
+    i = i + 1
+  }
+  found
+}
+
+## How well an entry answers a query, 0 for not at all.
+##
+## Deterministic and total: the same pair always scores the same, and the
+## order the panel shows is (group, rank, index order), so nothing here has to
+## sort and no two runs can disagree about ties.
+##
+## `q` arrives already lowercased, once per scan rather than once per entry.
+pub fn score(e: Entry, q: String) -> Int = {
+  let title = str.to_lower(e.title)
+  if q == "" {
+    0
+  } else if title == q {
+    5
+  } else if str.starts_with(title, q) {
+    4
+  } else if has_word_prefix(title, q) {
+    3
+  } else if str.contains(title, q) {
+    2
+  } else if str.contains(str.to_lower(e.detail), q) || str.contains(str.to_lower(e.note), q) {
+    1
+  } else {
+    0
+  }
+}
+
+# ---- the scan: two cells in one handler ------------------------------------
+
+## Every match, numbered, and the href the selection lands on.
+##
+## The two cells are the reason this is a handler and not a fold. `hits` is
+## the accumulation; `chosen` is decided by comparing the running ordinal --
+## which is `len(hits)` at the moment the arm runs, and which nothing outside
+## the arm can see -- against the selection the model carries. A fold could
+## carry both in a pair, at the cost of threading that pair through [probe]
+## and everything it calls; the point of the cells is that [probe]'s signature
+## says `!Found` and says nothing about what is being accumulated.
+pub fn scan(entries: List[Entry], query: String, sel: Int) -> Scan = {
+  with handle Found {
+    var hits: List[Hit] = []
+    var chosen: String = ""
+    found(e) => {
+      if len(hits) == sel {
+        chosen = e.href
+      }
+      hits = hits ++ [Hit { entry: e, at: len(hits) }]
+    }
+  }
+  probe(entries, str.to_lower(query))
+  Scan { hits: hits, chosen: chosen }
+}
+
+## Perform `found` once per matching entry, in display order.
+##
+## The conditional is the whole of the filter: an entry that does not match
+## is not emitted at all, rather than emitted with a zero score for somebody
+## further on to drop. Scores are computed once per entry and then bucketed,
+## because the walk below visits every entry twenty times and computing a
+## score is the expensive half.
+fn probe(entries: List[Entry], q: String) -> Unit !Found = {
+  let scored = list.map(entries, e => (e, score(e, q)))
+  var shown = 0
+  for g in groups() {
+    for rank in ranks() {
+      for pair in scored {
+        let (e, s) = pair
+        if s == rank && e.group == g.id && shown < cap() {
+          shown = shown + 1
+          found(e)
+        }
+      }
+    }
+  }
+}
+
+# ---- the view: a collector inside a collector ------------------------------
+
+## Run `body` and answer everything it emitted, in the order it emitted it.
+##
+## The row `!Emit !Ctx` is what lets this be nested inside itself while the
+## reader effect passes straight through: `Emit` is taken off by the handler
+## here, `Ctx` is not, so a body that asks the page where it is stays honest
+## all the way up to the one installation in [view].
+fn collect(body: fn() -> Unit !Emit !Ctx) -> List[Node[Msg]] !Ctx = {
+  with handle Emit {
+    var acc: List[Node[Msg]] = []
+    emit(w) => { acc = acc ++ [w] }
+  }
+  body()
+  acc
+}
+
+## An href on this page, given one relative to the site root.
+fn link(href: String) -> String !Ctx = "${root()}/$href"
+
+## One result row. `chosen` decides one class and nothing else, so moving the
+## selection is one `set-self` per row that changed and no rebuild.
+fn row(h: Hit, chosen: Bool) -> Node[Msg] !Ctx = {
+  let e = h.entry
+  let head: List[Node[Msg]] = [
+    span(e.title, class: "search-title"),
+    span(e.detail, class: "search-detail"),
+  ]
+  el("li", class: if chosen { "search-row is-selected" } else { "search-row" }, kids: [
+    el("a", [("href", link(e.href))], kids: head ++ note_kids(e)),
+  ])
+}
+
+## The one-line note, when there is one. A row with no note has no element for
+## it rather than an empty one, which is the same rule the sections follow.
+fn note_kids(e: Entry) -> List[Node[Msg]] =
+  if e.note == "" { [] } else { [span(e.note, class: "search-note")] }
+
+## The rows of one group. The inner collector: its installation shadows the
+## outer one for the length of the body, so these `emit`s land here and the
+## sections collector never sees them.
+fn rows_of(hits: List[Hit], g: Group, sel: Int) -> List[Node[Msg]] !Ctx =
+  collect(() => {
+    for h in hits {
+      if h.entry.group == g.id {
+        emit(row(h, h.at == sel))
+      }
+    }
+  })
+
+## Every group that has something to show, in the panel's order.
+##
+## The outer collector. A group with no rows emits nothing -- not an empty
+## section, not a placeholder -- which is why the answer's length is the
+## number of groups that matched rather than four.
+fn sections(hits: List[Hit], sel: Int) -> List[Node[Msg]] !Ctx =
+  collect(() => {
+    for g in groups() {
+      let rows: List[Node[Msg]] = rows_of(hits, g, sel)
+      if len(rows) > 0 {
+        emit(section(g, rows))
+      }
+    }
+  })
+
+fn section(g: Group, rows: List[Node[Msg]]) -> Node[Msg] !Ctx =
+  el("li", class: "search-group", kids: [
+    el("h2", class: "search-group-name", kids: [text(group_label(g, lang()))]),
+    el("ul", class: "search-group-rows", kids: rows),
+  ])
+
+## The link Enter chose, for the page's script to follow. It carries
+## `data-goto` because a page reads markup and not a model: the script looks
+## for that attribute after every keystroke and navigates when it appears.
+fn goto_kids(m: Model) -> List[Node[Msg]] !Ctx =
+  if m.goto == "" {
+    []
+  } else {
+    [el("a", [("href", link(m.goto)), ("data-goto", "1")], class: "search-goto",
+      kids: [text(m.goto)])]
+  }
+
+## What the list area holds when there is nothing to list: a reason, not a
+## blank. The two reasons are different -- an empty query has not been asked
+## anything yet, a query with no hits has.
+fn status(m: Model) -> List[Node[Msg]] !Ctx =
+  if str.trim(m.query) == "" {
+    [el("p", class: "search-status", kids: [text(prompt_line(lang()))])]
+  } else {
+    [el("p", class: "search-status", kids: [text(empty_line(lang()))])]
+  }
+
+fn panel(m: Model) -> Node[Msg] !Ctx = {
+  let s = scan(m.entries, m.query, m.sel)
+  let found: List[Node[Msg]] = sections(s.hits, m.sel)
+  let box: Node[Msg] =
+    input(class: "search-input", value: m.query,
+      on: [on_value("input", Typed), on_key("keydown", Pressed)])
+  let list_kids: List[Node[Msg]] =
+    if len(found) > 0 { found } else { [el("li", class: "search-none", kids: status(m))] }
+  div(class: "search-panel", kids: [
+    box,
+    el("ul", class: "search-results", kids: list_kids),
+    el("p", class: "search-scope", kids: [text(scope_line(lang()))]),
+  ] ++ goto_kids(m))
+}
+
+# ---- the loop --------------------------------------------------------------
+
+## The model a fresh panel starts from, given what the page already knew.
+##
+## Total, because a page may hand back anything: no flags, flags that are not
+## JSON, JSON that is not an object and an object with no index are four
+## things a running application meets, and each falls back to the same visible
+## default -- a panel with an empty index, which says "no matches" for
+## everything and is therefore obvious rather than silent.
+pub fn init(flags: Option[String]) -> Model =
+  match flags {
+    None -> blank()
+    Some(text) ->
+      match parse(text) {
+        Ok(j) -> {
+          let index = jget(j, "index")
+          Model {
+            root: jstr_or(jget(j, "root"), "."),
+            lang: jstr_or(jget(index, "lang"), "en"),
+            entries: entries_of(jget(index, "items")),
+            query: "",
+            sel: 0,
+            open: true,
+            goto: "",
+          }
+        }
+        Err(_) -> blank()
+      }
+  }
+
+fn blank() -> Model =
+  Model {
+    root: ".",
+    lang: "en",
+    entries: [],
+    query: "",
+    sel: 0,
+    open: true,
+    goto: "",
+  }
+
+impl App[Model] {
+  type Msg = Msg
+  type View = Node[Msg]
+
+  fn update(m: Model, msg: Msg) -> Model =
+    match msg {
+      Typed(text) -> Model { ..m, query: text, sel: 0, goto: "" }
+      Pressed(key) -> pressed(m, key)
+    }
+
+  ## Closed is an empty tree, not a hidden one: the panel is a whole document
+  ## while it is open and nothing at all while it is not, so the page keeps no
+  ## stale rows behind a `hidden` attribute.
+  fn view(m: Model) -> Node[Msg] = {
+    with handle Ctx {
+      root() => m.root
+      lang() => m.lang
+    }
+    if m.open { panel(m) } else { div(class: "search-panel is-closed") }
+  }
+}
+
+## What a key means. Everything not named here means nothing, which is the
+## half that keeps typing cheap: an ordinary character is an `input` event and
+## a `keydown` this ignores, and ignoring it answers with no patches at all.
+fn pressed(m: Model, key: String) -> Model = {
+  let s = scan(m.entries, m.query, m.sel)
+  let last = len(s.hits) - 1
+  if key == "ArrowDown" {
+    Model { ..m, sel: if m.sel < last { m.sel + 1 } else { m.sel }, goto: "" }
+  } else if key == "ArrowUp" {
+    Model { ..m, sel: if m.sel > 0 { m.sel - 1 } else { 0 }, goto: "" }
+  } else if key == "Enter" {
+    Model { ..m, goto: s.chosen }
+  } else if key == "Escape" {
+    Model { ..m, open: false, query: "", sel: 0, goto: "" }
+  } else {
+    m
+  }
+}
+
+# ---- the model as text -----------------------------------------------------
+
+fn jget(j: Json, key: String) -> Json =
+  match j {
+    JObj(entries) -> unwrap_or(map.get(entries, key), JNull)
+    _ -> JNull
+  }
+
+fn jstr_or(j: Json, fallback: String) -> String =
+  match j {
+    JStr(s) -> s
+    _ -> fallback
+  }
+
+fn jint_or(j: Json, fallback: Int) -> Int =
+  match j {
+    JInt(v) -> v
+    _ -> fallback
+  }
+
+fn jbool_or(j: Json, fallback: Bool) -> Bool =
+  match j {
+    JBool(b) -> b
+    _ -> fallback
+  }
+
+fn jarr(j: Json) -> List[Json] =
+  match j {
+    JArr(items) -> items
+    _ -> []
+  }
+
+## The index, read out of the five-string rows both halves of this feature
+## agree on. site/src/gen/search.dawn writes exactly this shape and pins the
+## same literal in a test of its own; the two are separate programs, so the
+## pair of tests is what keeps them level.
+pub fn entries_of(j: Json) -> List[Entry] = {
+  var out: List[Entry] = []
+  for item in jarr(j) {
+    let fs = jarr(item)
+    if len(fs) == 5 {
+      out = out
+        ++ [Entry {
+          group: jstr_or(fs[0], ""),
+          title: jstr_or(fs[1], ""),
+          detail: jstr_or(fs[2], ""),
+          note: jstr_or(fs[3], ""),
+          href: jstr_or(fs[4], ""),
+        }]
+    }
+  }
+  out
+}
+
+fn quoted(s: String) -> String = render(JStr(value: s))
+
+fn items_json(entries: List[Entry]) -> String =
+  "[" ++ join(list.map(entries, e =>
+      "[" ++ join([quoted(e.group), quoted(e.title), quoted(e.detail), quoted(e.note),
+        quoted(e.href)], ",") ++ "]"), ",") ++ "]"
+
+## The model as one line of JSON, and back.
+##
+## Written out rather than assembled through `JObj`, because a map's iteration
+## order is a fact about a hash and this text is compared byte for byte in
+## scripts/example-main-contract/registry.json. Field order here is the field
+## order there.
+pub fn encode(m: Model) -> String =
+  "{\"root\":" ++ quoted(m.root)
+  ++ ",\"lang\":" ++ quoted(m.lang)
+  ++ ",\"q\":" ++ quoted(m.query)
+  ++ ",\"sel\":" ++ to_string(m.sel)
+  ++ ",\"open\":" ++ (if m.open { "true" } else { "false" })
+  ++ ",\"goto\":" ++ quoted(m.goto)
+  ++ ",\"items\":" ++ items_json(m.entries)
+  ++ "}"
+
+## Total, because a host may hand back anything: an unreadable model reads as
+## a fresh one rather than as a panic, which keeps a corrupted page
+## recoverable by typing.
+pub fn decode(s: String) -> Model =
+  match parse(s) {
+    Ok(j) ->
+      match j {
+        JObj(_) ->
+          Model {
+            root: jstr_or(jget(j, "root"), "."),
+            lang: jstr_or(jget(j, "lang"), "en"),
+            entries: entries_of(jget(j, "items")),
+            query: jstr_or(jget(j, "q"), ""),
+            sel: jint_or(jget(j, "sel"), 0),
+            open: jbool_or(jget(j, "open"), true),
+            goto: jstr_or(jget(j, "goto"), ""),
+          }
+        _ -> blank()
+      }
+    Err(_) -> blank()
+  }
+
+# ---- tests -----------------------------------------------------------------
+
+fn probe_entry(group: String, title: String, note: String, href: String) -> Entry =
+  Entry { group: group, title: title, detail: "fn $title()", note: note, href: href }
+
+fn probe_index() -> List[Entry] = [
+  probe_entry("stdlib", "str.trim", "Remove surrounding whitespace.", "stdlib.html#std-str-trim"),
+  probe_entry("stdlib", "str.split", "", "stdlib.html#std-str-split"),
+  probe_entry("stdlib", "list.map", "", "stdlib.html#std-list-map"),
+  probe_entry("spec", "6.5 Named effects", "", "spec.html#s6-5"),
+  probe_entry("tutorial", "Effects", "", "tutorial/09.html"),
+]
+
+fn shown(m: Model) -> List[String] = {
+  let s = scan(m.entries, m.query, m.sel)
+  list.map(s.hits, h => h.entry.title)
+}
+
+test "a query answers the entries that match it, best rank first" {
+  let m = Model { ..blank(), entries: probe_index() }
+  # an exact title beats a prefix beats a word prefix beats a substring
+  assert shown(Model { ..m, query: "str.trim" }) == ["str.trim"]
+  assert shown(Model { ..m, query: "str." }) == ["str.trim", "str.split"]
+  # `map` is a word of `list.map` and a substring of nothing else here
+  assert shown(Model { ..m, query: "map" }) == ["list.map"]
+  # the note is the last resort, and only when nothing in a title matched
+  assert shown(Model { ..m, query: "whitespace" }) == ["str.trim"]
+  # an empty query asks nothing, so nothing answers
+  let none: List[String] = []
+  assert shown(Model { ..m, query: "" }) == none
+  assert shown(Model { ..m, query: "nothing here" }) == none
+}
+
+## The group order is the panel's order, not the index's: a query that matches
+## in three groups shows them in the order [groups] lists, whatever order the
+## index happened to be built in.
+test "hits are grouped in the panel's order and numbered across the groups" {
+  # `eff` starts a word of the spec section and the whole of the tutorial
+  # chapter, and appears nowhere in the three stdlib rows -- so the index's
+  # own order (stdlib first) is not the order the panel shows.
+  let m = Model { ..blank(), entries: probe_index(), query: "eff" }
+  let s = scan(m.entries, m.query, m.sel)
+  assert list.map(s.hits, h => h.entry.group) == ["spec", "tutorial"]
+  assert list.map(s.hits, h => h.at) == [0, 1]
+}
+
+## The second cell. `chosen` is not a function of `hits` alone -- it is the
+## href at the ordinal the model is pointing at, decided inside the arm while
+## the ordinal still exists.
+test "the selection resolves to one href, and out of range resolves to none" {
+  let m = Model { ..blank(), entries: probe_index(), query: "str." }
+  assert scan(m.entries, m.query, 0).chosen == "stdlib.html#std-str-trim"
+  assert scan(m.entries, m.query, 1).chosen == "stdlib.html#std-str-split"
+  assert scan(m.entries, m.query, 7).chosen == ""
+  # and with nothing matched there is nothing to choose
+  assert scan(m.entries, "nothing here", 0).chosen == ""
+}
+
+## Every group an index entry can name is a group the panel draws. An entry in
+## an unregistered group would be scored, matched, and then silently dropped
+## by [rows_of].
+test "the registered groups are the ones an index may name" {
+  let ids = list.map(groups(), g => g.id)
+  assert ids == ["stdlib", "spec", "tutorial", "examples"]
+  for e in probe_index() {
+    assert list.contains(ids, e.group)
+  }
+  for g in groups() {
+    assert group_label(g, "en") != ""
+    assert group_label(g, "zh-CN") != ""
+    assert group_label(g, "en") != group_label(g, "zh-CN")
+  }
+}
+
+## The nesting rule, on the tree rather than on the collector: what crosses
+## from the inner installation to the outer one is one `<li class="search-
+## group">` per group, never its rows. A collector that let them leak would
+## produce the same rows in the same order under no section at all.
+test "each group's rows stay inside that group's section" {
+  let m = Model { ..blank(), entries: probe_index(), query: "eff" }
+  let v = view(m)
+  # two groups matched, so the results list has exactly two children
+  assert count_class(v, "search-group") == 2
+  assert count_class(v, "search-row") == 2
+  # and the rows are underneath the sections rather than beside them: the
+  # results list holds two sections and no row, and each section holds one row
+  assert kid_classes(v, "search-results") == ["search-group", "search-group"]
+  assert list.map(all_with_class(v, "search-group-rows"), n => len(kids_of(n))) == [1, 1]
+}
+
+## The conditional half of the same rule: a group with no hits is absent, not
+## empty. With one group matched there is one section and no second heading.
+test "a group with no hits emits no section at all" {
+  let m = Model { ..blank(), entries: probe_index(), query: "map" }
+  let v = view(m)
+  assert count_class(v, "search-group") == 1
+  assert count_class(v, "search-row") == 1
+  # nothing matched at all: no sections, and a reason in their place
+  let no_hits = view(Model { ..m, query: "nothing here" })
+  assert count_class(no_hits, "search-group") == 0
+  assert count_class(no_hits, "search-status") == 1
+}
+
+## The reader effect, end to end: the root and the language reach the leaves.
+## A link is the page's own distance plus the site-root href, and a heading is
+## in the page's language -- neither of which any function between [view] and
+## the leaf mentions.
+test "the page's root and language reach the leaves through the handler" {
+  let en = Model { ..blank(), entries: probe_index(), query: "str.trim", root: ".." }
+  assert hrefs(view(en)) == ["../stdlib.html#std-str-trim"]
+  assert str.contains(show_tree(view(en)), "Standard library")
+  let zh = Model { ..en, lang: "zh-CN", root: "../.." }
+  assert hrefs(view(zh)) == ["../../stdlib.html#std-str-trim"]
+  assert str.contains(show_tree(view(zh)), "标准库")
+  # the scope line follows it too, which is the expectation this panel manages
+  assert str.contains(show_tree(view(en)), "Searches titles and API names")
+  assert str.contains(show_tree(view(zh)), "只搜标题与 API 名")
+}
+
+test "arrows move the selection and stop at both ends" {
+  let m = Model { ..blank(), entries: probe_index(), query: "str." }
+  assert update(m, Pressed(key: "ArrowUp")).sel == 0
+  let down = update(m, Pressed(key: "ArrowDown"))
+  assert down.sel == 1
+  # two hits, so the second is the last one
+  assert update(down, Pressed(key: "ArrowDown")).sel == 1
+  assert update(down, Pressed(key: "ArrowUp")).sel == 0
+  # the selected row is the one that says so, and it is the only one
+  assert selected_titles(view(down)) == ["str.split"]
+  # a key nothing is bound to leaves the model alone, so the turn has no patches
+  assert update(down, Pressed(key: "x")) == down
+}
+
+test "typing replaces the query and puts the selection back at the top" {
+  let m = Model { ..blank(), entries: probe_index(), query: "str.", sel: 1 }
+  let typed = update(m, Typed(text: "list"))
+  assert typed.query == "list"
+  assert typed.sel == 0
+  assert typed.goto == ""
+}
+
+## Enter is the one message that leaves an instruction in the tree, and Escape
+## is the one that empties it.
+test "enter marks a destination and escape renders nothing at all" {
+  let m = Model { ..blank(), entries: probe_index(), query: "str.", sel: 1 }
+  let go = update(m, Pressed(key: "Enter"))
+  assert go.goto == "stdlib.html#std-str-split"
+  assert str.contains(show_tree(view(go)), "data-goto")
+  # the next message clears it, so one Enter is one navigation
+  assert update(go, Typed(text: "str.")).goto == ""
+  let shut = update(go, Pressed(key: "Escape"))
+  assert not shut.open
+  assert shut.query == ""
+  let closed: List[Node[Msg]] = []
+  assert view(shut) == div(class: "search-panel is-closed", kids: closed)
+}
+
+test "flags carry the index, and every way of not having them is an empty one" {
+  let flags = "{\"root\":\"..\",\"index\":{\"v\":1,\"lang\":\"zh-CN\","
+    ++ "\"items\":[[\"stdlib\",\"str.trim\",\"fn trim(s: String) -> String\","
+    ++ "\"Remove surrounding whitespace.\",\"zh/stdlib.html#std-str-trim\"]]}}"
+  let m = init(Some(flags))
+  assert m.root == ".."
+  assert m.lang == "zh-CN"
+  assert len(m.entries) == 1
+  assert m.entries[0] == Entry {
+    group: "stdlib",
+    title: "str.trim",
+    detail: "fn trim(s: String) -> String",
+    note: "Remove surrounding whitespace.",
+    href: "zh/stdlib.html#std-str-trim",
+  }
+  let none: Option[String] = None
+  assert init(none) == blank()
+  assert init(Some("")) == blank()
+  assert init(Some("not json at all")) == blank()
+  assert init(Some("[1,2]")) == blank()
+  assert init(Some("{\"root\":\"..\"}")) == Model { ..blank(), root: ".." }
+}
+
+## The shape the site generator writes. This literal is the contract between
+## two programs that cannot share a line of code, and the same one is pinned
+## in site/src/gen/search.dawn's own test.
+test "an index row is five strings, in this order" {
+  match parse("[[\"spec\",\"6.5 Named effects\",\"Spec\",\"\",\"spec.html#s6-5\"]]") {
+    Ok(j) -> {
+      assert entries_of(j) == [Entry {
+        group: "spec",
+        title: "6.5 Named effects",
+        detail: "Spec",
+        note: "",
+        href: "spec.html#s6-5",
+      }]
+    }
+    Err(e) -> panic("the pinned index row must parse: $e")
+  }
+}
+
+test "the model round-trips through its text, index and all" {
+  let m = update(Model { ..blank(), entries: probe_index(), root: ".." }, Typed(text: "str."))
+  assert decode(encode(m)) == m
+  assert decode(encode(update(m, Pressed(key: "Escape")))).open == false
+  assert decode("not json at all") == blank()
+  assert decode("[1,2]") == blank()
+  # an object missing every field is the blank model, field by field
+  assert decode("{}") == blank()
+}
+
+# The helpers the assertions above read trees with. `Show` on a `Node` is the
+# whole tree as text, which is enough for "does this string appear anywhere in
+# the document" and useless for "where"; everything that needs structure walks
+# the tree instead. A class is matched as a WORD of the class attribute, not
+# as the whole of it -- a selected row's class is `search-row is-selected`,
+# and a check that compared the attribute would have stopped counting it.
+
+fn show_tree(w: Node[Msg]) -> String = to_string(w)
+
+fn count_class(w: Node[Msg], cls: String) -> Int = len(all_with_class(w, cls))
+
+## The class attribute of each child of the first element carrying `cls`.
+fn kid_classes(w: Node[Msg], cls: String) -> List[String] =
+  match get(all_with_class(w, cls), 0) {
+    None -> []
+    Some(found) -> list.map(kids_of(found), k => class_of(k))
+  }
+
+fn selected_titles(w: Node[Msg]) -> List[String] = {
+  var out: List[String] = []
+  for row in all_with_class(w, "is-selected") {
+    match get(kids_of(row), 0) {
+      Some(anchor) ->
+        match get(kids_of(anchor), 0) {
+          Some(title) -> {
+            out = out ++ [text_of(title)]
+          }
+          None -> ()
+        }
+      None -> ()
+    }
+  }
+  out
+}
+
+## Every `href` prop in the tree, in document order.
+fn hrefs(w: Node[Msg]) -> List[String] = {
+  var out: List[String] = []
+  match w {
+    Text(_) -> ()
+    Elem(_, props, ..) -> {
+      for p in props {
+        let (k, v) = p
+        if k == "href" {
+          out = out ++ [v]
+        }
+      }
+    }
+  }
+  for k in kids_of(w) {
+    out = out ++ hrefs(k)
+  }
+  out
+}
+
+fn class_of(w: Node[Msg]) -> String =
+  match w {
+    Text(_) -> ""
+    Elem(_, props, ..) -> {
+      var found = ""
+      for p in props {
+        let (k, v) = p
+        if k == "class" {
+          found = v
+        }
+      }
+      found
+    }
+  }
+
+fn kids_of(w: Node[Msg]) -> List[Node[Msg]] =
+  match w {
+    Text(_) -> []
+    Elem(_, _, _, kids, ..) -> kids
+  }
+
+fn text_of(w: Node[Msg]) -> String =
+  match w {
+    Text(s) -> s
+    Elem(_, _, _, kids, ..) -> join(list.map(kids, k => text_of(k)), "")
+  }
+
+fn has_class(w: Node[Msg], cls: String) -> Bool =
+  list.contains(str.split(class_of(w), " "), cls)
+
+fn all_with_class(w: Node[Msg], cls: String) -> List[Node[Msg]] = {
+  var out: List[Node[Msg]] = []
+  if has_class(w, cls) {
+    out = out ++ [w]
+  }
+  for k in kids_of(w) {
+    out = out ++ all_with_class(k, cls)
+  }
+  out
+}

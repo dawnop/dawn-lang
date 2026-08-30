@@ -1,0 +1,22 @@
+# The whole io surface of the panel: one call, exactly as tea_dom_flags's.
+#
+# `serve_with_flags` and not `serve`, because the index is the one thing the
+# page has and the guest cannot compute: it is a build product of the site
+# generator, fetched beside the reactor and handed over on the first line.
+#
+#   $ echo '{"op":"init","flags":"{\"root\":\".\",\"index\":{\"v\":1,\
+#       \"lang\":\"en\",\"items\":[]}}"}' | dawn run examples/projects/tea_dom_search
+
+use tea_core/app.{update, view}
+use tea_dom/node.{Node}
+use tea_dom/reactor.{serve_with_flags}
+use search.{Model, Msg, init, encode, decode}
+
+pub fn main() -> Unit !io = serve_with_flags(init, encode, decode, upd, vw)
+
+# The two hooks, named rather than passed as lambdas: `serve_with_flags` needs
+# a concrete message type to settle `M: Eq` against, and a lambda at the call
+# site has no expectation to settle it from.
+fn upd(m: Model, msg: Msg) -> Model = update(m, msg)
+
+fn vw(m: Model) -> Node[Msg] = view(m)
