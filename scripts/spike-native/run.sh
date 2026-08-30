@@ -69,7 +69,11 @@
 # (`emitc` says so in as many words), so a program whose subject *is* that
 # boundary cannot be differentiated and its C-side checks report `blocked`.
 # The alternative was six known-red.txt entries that nobody would ever be able
-# to delete, which would make that file mean two different things.
+# to delete, which would make that file mean two different things. The marker
+# is checked rather than believed: `emitc` still runs, and a marker on a
+# program it compiles is a failure by that name. Measured by putting the marker
+# on `effect_handler`, which compiles fine, and watching `effect_handler:
+# jvm-only` go red.
 #
 # `jvm` and `native` only run when <name>.expect exists. They are the answer
 # to codebase-audit.md TEST-01: a differential test alone certifies whatever
@@ -185,7 +189,18 @@ run_corpus() {
   # checks report `blocked`, the same word every other "no evidence either way"
   # gets here. Without the marker the refusal would have to live in
   # known-red.txt, which is the list of things that are *meant* to be fixed.
+  #
+  # The marker is a ratchet the way known-red.txt is, and for the same reason:
+  # an exemption nobody checks is a hiding place. So the refusal is *verified*
+  # rather than assumed. A marker on a program the native backend would happily
+  # compile silences six real checks, and this is what stops that from being
+  # green -- the emitter has to actually say no.
   if [ -f "$here/$name.jvm-only" ]; then
+    if "$root/bin/dawn" __emitc --std "$stdcopy" "$prog" -o "$work/$name.c" \
+      >"$work/$name.emitc" 2>&1; then
+      verdict "$name:jvm-only" bad \
+        "$name.jvm-only says the native backend refuses this program, and it did not"
+    fi
     for c in emitc cc native diff stderr exit asan; do blocked "$name:$c"; done
     return 0
   fi
