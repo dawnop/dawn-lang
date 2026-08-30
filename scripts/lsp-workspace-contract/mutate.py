@@ -106,20 +106,45 @@ def mutate(name, server, main, analyze):
         server_text = replace_once(server_text, old, new, name)
     elif name == "skip-empty-diagnostics":
         old = """  for uri in sort(set.to_list(uris)) {
-    notify("textDocument/publishDiagnostics", jobj([
+    var fields: List[(String, Json)] = [
       ("uri", JStr(uri)),
       ("diagnostics", JArr(diagnostics_for_uri(st, uri)))
-    ]))
+    ]
+    match map.get(st.docs, uri) {
+      Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+      None -> ()
+    }
+    notify("textDocument/publishDiagnostics", jobj(fields))
   }"""
         new = """  for uri in sort(set.to_list(uris)) {
     let values = diagnostics_for_uri(st, uri)
     if len(values) > 0 {
-      notify("textDocument/publishDiagnostics", jobj([
+      var fields: List[(String, Json)] = [
         ("uri", JStr(uri)),
         ("diagnostics", JArr(values))
-      ]))
+      ]
+      match map.get(st.docs, uri) {
+        Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+        None -> ()
+      }
+      notify("textDocument/publishDiagnostics", jobj(fields))
     }
   }"""
+        server_text = replace_once(server_text, old, new, name)
+    elif name == "drop-diagnostics-version":
+        old = """    var fields: List[(String, Json)] = [
+      ("uri", JStr(uri)),
+      ("diagnostics", JArr(diagnostics_for_uri(st, uri)))
+    ]
+    match map.get(st.docs, uri) {
+      Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+      None -> ()
+    }
+    notify("textDocument/publishDiagnostics", jobj(fields))"""
+        new = """    notify("textDocument/publishDiagnostics", jobj([
+      ("uri", JStr(uri)),
+      ("diagnostics", JArr(diagnostics_for_uri(st, uri)))
+    ]))"""
         server_text = replace_once(server_text, old, new, name)
     elif name == "wrong-source-view":
         old = """        Some(d) -> {

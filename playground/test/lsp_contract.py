@@ -4,6 +4,7 @@
 import base64
 import csv
 import hashlib
+import importlib.util
 import json
 import os
 import shlex
@@ -33,6 +34,7 @@ ORIGIN = "http://play.test"
 PROTOCOL = "dawn-lsp-v1"
 URI = "untitled:dawn-playground/prog.dawn"
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+FAKE_DIAGNOSTIC_VERSION = 1_000_003
 
 
 def free_port():
@@ -217,6 +219,69 @@ def read_audit(path):
 
 def ok(label):
     print("  ok  " + label)
+
+
+def assert_diagnostic_version(message):
+    actual = message.get("params", {}).get("version")
+    assert actual == FAKE_DIAGNOSTIC_VERSION, (
+        "GATEWAY_DIAGNOSTIC_VERSION_NOT_FORWARDED",
+        actual,
+        message,
+    )
+
+
+def diagnostics_params_contract():
+    module_name = "_dawn_playground_lsp_gateway_contract"
+    spec = importlib.util.spec_from_file_location(module_name, GATEWAY)
+    assert spec is not None and spec.loader is not None
+    gateway = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = gateway
+    try:
+        spec.loader.exec_module(gateway)
+    finally:
+        sys.modules.pop(module_name, None)
+
+    def narrow(params):
+        protocol = gateway.ClientProtocol(source_bytes=64)
+        protocol.state = "open"
+        body = json.dumps({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": params,
+        }, separators=(",", ":")).encode("utf-8")
+        return json.loads(protocol.from_child(body))
+
+    public = narrow({
+        "uri": URI,
+        "diagnostics": [],
+        "privateChildField": {"hostPath": "/tmp/must-not-cross"},
+    })
+    assert public["params"] == {"uri": URI, "diagnostics": []}, public
+
+    for boundary in (-2_147_483_648, 2_147_483_647):
+        public = narrow({
+            "uri": URI,
+            "diagnostics": [],
+            "version": boundary,
+            "privateChildField": "must-not-cross",
+        })
+        assert public["params"] == {
+            "uri": URI,
+            "diagnostics": [],
+            "version": boundary,
+        }, public
+
+    for invalid in (True, 1.5, -2_147_483_649, 2_147_483_648):
+        try:
+            narrow({"uri": URI, "diagnostics": [], "version": invalid})
+        except gateway.ChildProtocolError:
+            pass
+        else:
+            raise AssertionError(
+                "invalid child diagnostics version crossed the gateway: "
+                f"{invalid!r}"
+            )
+    ok("diagnostics version is optional, int32-bounded and params-whitelisted")
 
 
 def read_text(path):
@@ -575,6 +640,7 @@ def main():
     deployment_contract()
     remote_restart_contract()
     measurement_evidence_contract()
+    diagnostics_params_contract()
     port = free_port()
     with tempfile.TemporaryDirectory(prefix="dawn-lsp-contract-") as temp:
         audit_path = os.path.join(temp, "audit.jsonl")
@@ -599,6 +665,11 @@ def main():
                 shlex.quote(sys.executable), shlex.quote(FAKE)
             ),
             "FAKE_LSP_AUDIT": audit_path,
+            "FAKE_LSP_OMIT_DIAGNOSTIC_VERSION": (
+                "1" if os.environ.get(
+                    "PLAY_LSP_CONTRACT_OMIT_FAKE_VERSION"
+                ) == "1" else "0"
+            ),
         })
         with open(log_path, "wb") as log:
             gateway = subprocess.Popen(
@@ -686,6 +757,7 @@ def main():
             }))
             diagnostics = ws.recv_json()
             assert diagnostics["method"] == "textDocument/publishDiagnostics", diagnostics
+            assert_diagnostic_version(diagnostics)
             diagnostic = diagnostics["params"]["diagnostics"][0]
             assert "relatedInformation" not in diagnostic and "data" not in diagnostic
 
@@ -693,7 +765,9 @@ def main():
                 "textDocument": {"uri": URI, "version": 2},
                 "contentChanges": [{"text": "pub fn main() -> Unit = ()"}],
             }))
-            assert ws.recv_json()["method"] == "textDocument/publishDiagnostics"
+            changed_diagnostics = ws.recv_json()
+            assert changed_diagnostics["method"] == "textDocument/publishDiagnostics"
+            assert_diagnostic_version(changed_diagnostics)
 
             ws.send_json(rpc(2, "textDocument/completion", position_params()))
             assert ws.recv_json()["result"][0]["label"] == "println"
@@ -985,7 +1059,7 @@ def main():
         assert "child-stderr bytes=" in gateway_log, gateway_log
         ok("child stderr contents are not logged")
     print("----")
-    print("24 passed, 0 failed")
+    print("25 passed, 0 failed")
 
 
 if __name__ == "__main__":

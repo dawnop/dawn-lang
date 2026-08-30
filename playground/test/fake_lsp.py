@@ -8,6 +8,10 @@ import sys
 
 DOCUMENT_URI = "untitled:dawn-playground/prog.dawn"
 AUDIT = os.environ.get("FAKE_LSP_AUDIT")
+DIAGNOSTIC_VERSION = 1_000_003
+OMIT_DIAGNOSTIC_VERSION = os.environ.get(
+    "FAKE_LSP_OMIT_DIAGNOSTIC_VERSION"
+) == "1"
 
 
 def audit(message):
@@ -56,23 +60,30 @@ def location(uri):
 
 
 def publish():
+    params = {
+        # Deliberately unrelated to the browser's 1, 2, ... versions.  The
+        # gateway contract must observe this exact child value rather than
+        # reconstructing a plausible one from client state.
+        "version": DIAGNOSTIC_VERSION,
+        "uri": DOCUMENT_URI,
+        "diagnostics": [{
+            "range": location(DOCUMENT_URI)["range"],
+            "severity": 2,
+            "source": "fake-dawnc",
+            "message": "contract diagnostic",
+            "data": {"privatePath": "/tmp/should-not-cross"},
+            "relatedInformation": [{
+                "location": location("file:///etc/passwd"),
+                "message": "outside the scratch buffer",
+            }],
+        }],
+    }
+    if OMIT_DIAGNOSTIC_VERSION:
+        del params["version"]
     send({
         "jsonrpc": "2.0",
         "method": "textDocument/publishDiagnostics",
-        "params": {
-            "uri": DOCUMENT_URI,
-            "diagnostics": [{
-                "range": location(DOCUMENT_URI)["range"],
-                "severity": 2,
-                "source": "fake-dawnc",
-                "message": "contract diagnostic",
-                "data": {"privatePath": "/tmp/should-not-cross"},
-                "relatedInformation": [{
-                    "location": location("file:///etc/passwd"),
-                    "message": "outside the scratch buffer",
-                }],
-            }],
-        },
+        "params": params,
     })
 
 
