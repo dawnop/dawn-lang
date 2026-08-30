@@ -1,0 +1,17 @@
+# Keep the consumer in a second module: the JVM dictionary class lives under
+# dawn.dict, while this call site is where a CDictApply used to invoke its
+# private singleton constructor.
+use std/io
+use vocab.{On, Node, Elem}
+
+fn same[M: Eq](a: Node[M], b: Node[M]) -> Bool = a == b
+
+pub fn main() -> Unit !io = {
+  let a: Node[Int] = Elem(on: [On { event: "click", tag: 1 }])
+  # Different event, same tag: true only if the synthesized Node equality
+  # dispatches through On's explicit conditional impl.
+  let b: Node[Int] = Elem(on: [On { event: "submit", tag: 1 }])
+  let c: Node[Int] = Elem(on: [On { event: "click", tag: 2 }])
+  println("${same(a, b)}")
+  println("${same(a, c)}")
+}
