@@ -8,8 +8,16 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { closeBrackets, completionKeymap, acceptCompletion } from '@codemirror/autocomplete'
 import { bracketMatching, indentOnInput } from '@codemirror/language'
 import { lintGutter } from '@codemirror/lint'
-import { dawn } from './dawn-lang'
-import { dawnLint, errorLens } from './lint'
+import { dawn, dawnCompletions } from './dawn-lang'
+import { dawnDiagnostics, errorLens } from './lint'
+import {
+  DawnLspClient,
+  goToLspDefinition,
+  lspCompletionSource,
+  lspDefinition,
+  lspHover,
+  lspWebSocketUrl,
+} from './lsp'
 import { SAMPLES } from './samples'
 import './playground.css'
 
@@ -99,6 +107,10 @@ function mount(root: HTMLElement) {
   const fromHash = location.hash.length > 1 ? decodeShare(location.hash.slice(1)) : null
   let current = fromHash != null ? -1 : 0
   const baseline = () => (current >= 0 ? SAMPLES[current].code : fromHash ?? '')
+  const initialCode = fromHash ?? SAMPLES[0].code
+  const checkEndpoint = endpoint.replace(/\/run$/, '/check')
+  const lspEndpoint = endpoint.replace(/\/run$/, '/lsp')
+  const lsp = new DawnLspClient(lspWebSocketUrl(lspEndpoint, location.href))
 
   function refreshChrome() {
     const name = current >= 0 ? SAMPLES[current].file : 'shared.dawn'
@@ -118,14 +130,16 @@ function mount(root: HTMLElement) {
   // ---- editor ----
   const view = new EditorView({
     state: EditorState.create({
-      doc: fromHash ?? SAMPLES[0].code,
+      doc: initialCode,
       extensions: [
         history(),
         lineNumbers(),
         highlightActiveLineGutter(),
         highlightActiveLine(),
-        dawn(),
-        dawnLint(endpoint.replace(/\/run$/, '/check')),
+        dawn(lspCompletionSource(lsp, dawnCompletions)),
+        dawnDiagnostics(checkEndpoint, lsp),
+        lspHover(lsp),
+        lspDefinition(lsp),
         errorLens,
         lintGutter(),
         bracketMatching(),
@@ -133,6 +147,7 @@ function mount(root: HTMLElement) {
         indentOnInput(),
         keymap.of([
           { key: 'Mod-Enter', run: () => (run(), true) },
+          { key: 'F12', run: () => goToLspDefinition(lsp, view) },
           // Monaco-style: Tab accepts the open completion, else indents.
           { key: 'Tab', run: acceptCompletion },
           ...completionKeymap,
@@ -142,12 +157,16 @@ function mount(root: HTMLElement) {
         ]),
         EditorView.lineWrapping,
         EditorView.updateListener.of((u) => {
-          if (u.docChanged) refreshChrome()
+          if (u.docChanged) {
+            lsp.update(u.state.doc.toString())
+            refreshChrome()
+          }
         }),
       ],
     }),
     parent: editorHost,
   })
+  lsp.start(initialCode)
   refreshChrome()
 
   const currentCode = () => view.state.doc.toString()

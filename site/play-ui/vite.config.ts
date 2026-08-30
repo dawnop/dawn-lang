@@ -5,13 +5,18 @@ import { defineConfig } from 'vite'
 // <script type="module"> onto the Playground page. No hashing (the generator
 // controls cache headers), no code-splitting (one page, one bundle).
 export default defineConfig({
-  // Dev only: proxy /api/run to the local runner, mirroring the production nginx
-  // setup so the dev harness stays same-origin (no CORS on the runner needed).
+  // Dev only: mirror the production same-origin routes to the local runner and
+  // WebSocket gateway (neither service needs browser CORS access).
   server: {
     proxy: {
       '/api/run': { target: 'http://127.0.0.1:8087', rewrite: (p) => p.replace(/^\/api\/run/, '/run') },
       '/api/check': { target: 'http://127.0.0.1:8087', rewrite: (p) => p.replace(/^\/api\/check/, '/check') },
       '/api/health': { target: 'http://127.0.0.1:8087', rewrite: (p) => p.replace(/^\/api\/health/, '/health') },
+      '/api/lsp': {
+        target: 'ws://127.0.0.1:8088',
+        ws: true,
+        rewrite: (p) => p.replace(/^\/api\/lsp/, '/lsp'),
+      },
     },
   },
   build: {
