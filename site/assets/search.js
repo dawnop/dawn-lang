@@ -44,8 +44,14 @@
 
   async function boot() {
     var d = btn.dataset;
-    var bridge = await import(d.searchApp);
-    var responses = await Promise.all([fetch(d.searchWasm), fetch(d.searchIndex)]);
+    // The data attributes are page-relative ("./assets/..." or "../assets/...").
+    // fetch() resolves those against the document, but dynamic import() resolves
+    // against THIS module's URL, which already lives under /assets/ -- the raw
+    // attribute would load /assets/assets/... (the first production failure of
+    // this panel, 2026-08-31). Resolve all three against the document instead.
+    var abs = function (u) { return new URL(u, document.baseURI).href; };
+    var bridge = await import(abs(d.searchApp));
+    var responses = await Promise.all([fetch(abs(d.searchWasm)), fetch(abs(d.searchIndex))]);
     if (!responses[0].ok || !responses[1].ok) {
       throw new Error('search: the reactor or the index could not be fetched');
     }

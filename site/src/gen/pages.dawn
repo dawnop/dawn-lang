@@ -529,6 +529,24 @@ fn tea_page(a: Assets, lang: Lang, root: String) -> String !io = {
   shell_ext(a, lang, "tea.html", "${c.title} — Dawn", root, "tea", head, body)
 }
 
+## The search glue's data attributes are page-relative, and search.js itself
+## lives under /assets/. fetch() resolves a relative URL against the document,
+## but dynamic import() resolves it against the importing module, so a raw
+## `import(d.searchApp)` loads /assets/assets/... -- the panel's first
+## production failure (2026-08-31). Every resource must go through the
+## document-based resolver. Text-level, because nothing else in the repo
+## executes this file; the mutation it is against is deleting the abs() wrap.
+test "the search glue resolves every resource against the document, not itself" {
+  let js = must_read("site/assets/search.js")
+  assert str.contains(js, "new URL(u, document.baseURI)")
+  assert str.contains(js, "import(abs(d.searchApp))")
+  assert str.contains(js, "fetch(abs(d.searchWasm))")
+  assert str.contains(js, "fetch(abs(d.searchIndex))")
+  assert not str.contains(js, "import(d.searchApp)")
+  assert not str.contains(js, "fetch(d.searchWasm)")
+  assert not str.contains(js, "fetch(d.searchIndex)")
+}
+
 ## The counter's section is the counter's file. The mutation this is against
 ## is a one-word one: `main.dawn` sits next to `counter.dawn` in the same
 ## project, reads as a source file, highlights fine, and would put host wiring
