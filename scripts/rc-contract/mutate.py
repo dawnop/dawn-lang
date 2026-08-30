@@ -33,7 +33,7 @@ MUTATIONS = {
     ),
     # ---- the slab allocator -------------------------------------------
     #
-    # Four ways to lose one of the allocator's properties while staying a
+    # Five ways to lose one of the allocator's properties while staying a
     # working allocator, which is why they need their own assertions: a
     # program compiled against any of these still prints the right answers.
     # The third is the one the whole knife rests on -- it is correct in every
@@ -103,6 +103,14 @@ MUTATIONS = {
         "dawn_rt.h",
         "#define DAWN_SLAB_MAX 2048u /* a bigger request goes to malloc */",
         "#define DAWN_SLAB_MAX 8192u /* a bigger request goes to malloc */",
+    ),
+    # Revert the on-demand first touch while leaving the logical slab size,
+    # block count, lists and retirement policy alone. Programs still compute
+    # the same answers; only a one-object class writes through all 64KiB again.
+    "slab-eagerly-materializes": (
+        "dawn_rt.c",
+        "#define DAWN_SL_BATCH ((size_t)32768)",
+        "#define DAWN_SL_BATCH ((size_t)65536)",
     ),
     # ---- argument-carrying dictionaries -------------------------------
     #

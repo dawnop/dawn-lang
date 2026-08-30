@@ -1,0 +1,42 @@
+# The lexer-only residency shape. The source string survives every iteration;
+# each iteration's token and diagnostic graphs do not.
+use std/io
+use selfhost/front/lexer
+
+fn positive_int(text: String) -> Int =
+  match parse_int(text) {
+    Some(n) -> if n > 0 { n } else { panic("repetitions must be positive") }
+    None -> panic("bad repetition count")
+  }
+
+fn ready(checksum: Int) -> Unit !io = {
+  io.println("checksum\t" ++ to_string(checksum))
+  # A second, static line sequences after the checksum rendering was dropped.
+  # Waiting uses poll only; the read (and its Bytes allocation) happens after
+  # the parent sampled /proc and released us with one byte.
+  io.println("ready")
+  while not io.stdin_ready(1000) { }
+  let _ = io.read_stdin(1)
+  ()
+}
+
+pub fn main() -> Unit !io = {
+  match args() {
+    [path, reps_text] -> {
+      let reps = positive_int(reps_text)
+      let text = match io.read_file(path) {
+        Ok(s) -> s
+        Err(e) -> panic(e.message)
+      }
+      var seen = 0
+      var i = 0
+      while i < reps {
+        let (tokens, diags) = lexer.lex(text)
+        seen = seen + len(tokens) + len(diags)
+        i = i + 1
+      }
+      ready(seen)
+    }
+    _ -> panic("usage: slab-bench-lexer <source> <repetitions>")
+  }
+}

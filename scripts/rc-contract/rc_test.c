@@ -11,7 +11,8 @@
  * exactly the class of bug this file exists to catch, and neither is visible
  * from inside the program. */
 
-/* sysconf, for the page size the allocator assertions turn into bytes. */
+/* mincore and sysconf, for the allocator's first-touch assertion. */
+#define _DEFAULT_SOURCE 1
 #define _POSIX_C_SOURCE 200809L
 
 #include "dawn_rt.h"
@@ -19,6 +20,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if DAWN_SLAB_ACTIVE
+#include <sys/mman.h>
+#endif
 #include <unistd.h>
 
 #include "unicode_stubs.h"
@@ -511,9 +515,9 @@ static void test_dict_family_is_keyed(void) {
  * Nothing in Dawn can see that, and neither do the sanitized runs that carry
  * the leak assertions, because those are the builds that bypass it: objects
  * outside malloc's book are objects LeakSanitizer cannot report. So these
- * five assertions and the slab mutants in matrix.txt are the whole oracle
- * for what the allocator does, and the third of them -- that the pages go
- * back to the kernel -- is the reason the allocator exists at all.
+ * six assertions and the slab mutants in matrix.txt are the whole oracle
+ * for what the allocator does. The retirement assertion -- that the pages
+ * go back to the kernel -- is the reason the allocator exists at all.
  *
  * What the allocator does to *memory safety* is a separate leg, because it
  * needs the sanitizer and the slab in the same binary: run.sh builds one
@@ -545,6 +549,97 @@ static long rss_kib(void) {
  * instead of guessing at one. */
 static dawn_str *block_of(size_t bytes) {
   return dawn_str_new((int64_t)(bytes - sizeof(dawn_str) - 1));
+}
+
+/* A logical slab remains 64KiB, but making one current must not make all of
+ * those pages resident before the class needs them. This case runs first, so
+ * its 2032-byte class has no earlier current slab. mincore observes the
+ * mapping directly instead of using a process-wide RSS delta: allocator and
+ * libc noise elsewhere in the process cannot turn an eager layout green.
+ *
+ * The rest of the case is the correctness edge behind the policy. It drains
+ * every incremental tranche and checks the exact floor(64KiB / block) count,
+ * then empties that non-current slab and makes the allocator take it from the
+ * empty list again. That reuse must retain the old full-relayout behaviour:
+ * address ordered and complete, not treated as another fresh carve. */
+static void test_slab_materializes_on_demand(void) {
+  /* Class 127 is deliberately odd, so slab-merges-size-classes does not move
+   * this question to a different class. It also does not divide 32KiB: the
+   * seventeenth block crosses the first batch boundary and exercises the
+   * rounding in dawn_sl_extend. */
+  enum { slab_bytes = 65536, block_bytes = 2032 };
+  const size_t block = block_bytes;
+  const size_t blocks_per_slab = slab_bytes / block;
+  dawn_str *first_slab[slab_bytes / block_bytes];
+  dawn_str *second_slab[slab_bytes / block_bytes];
+
+  first_slab[0] = block_of(block);
+#if DAWN_SLAB_ACTIVE
+  /* This literal is deliberately independent of DAWN_SL_BATCH. It keeps the
+   * production mutant observable even when one host page is the whole 64KiB
+   * logical slab and mincore therefore cannot distinguish the two extents. */
+  check(dawn_slab_materialized_bytes(first_slab[0]) == 32768u,
+        "one small live set links only its first logical slab batch");
+  long page = sysconf(_SC_PAGESIZE);
+  int page_shape = page > 0 && slab_bytes % page == 0;
+  int aligned = page_shape && (uintptr_t)first_slab[0] % (size_t)page == 0;
+  check(page_shape,
+        "the logical slab is an exact number of host pages");
+  check(aligned, "the first block is host-page aligned");
+  if (aligned) {
+    size_t pages = slab_bytes / (size_t)page;
+    unsigned char resident[slab_bytes];
+    memset(resident, 0, pages);
+    int got = mincore(first_slab[0], slab_bytes, (void *)resident);
+    check(got == 0, "the logical slab's residency can be read");
+    if (got == 0) {
+      size_t present = 0;
+      for (size_t i = 0; i < pages; i++) {
+        present += (resident[i] & 1u) != 0;
+      }
+      /* The 32KiB is the candidate policy being asserted, not a value derived
+       * from the runtime. On page sizes below one logical slab this is the
+       * physical-RSS half of the observation port assertion above. */
+      size_t first_touch = (32768u + (size_t)page - 1) / (size_t)page;
+      check(present <= first_touch,
+            "one small live set materializes only its first slab batch");
+    }
+  }
+#endif
+
+  for (size_t i = 1; i < blocks_per_slab; i++) {
+    first_slab[i] = block_of(block);
+    check((uintptr_t)first_slab[i] == (uintptr_t)first_slab[0] + i * block,
+          "incremental batches preserve the logical slab's block count");
+  }
+  second_slab[0] = block_of(block);
+  check((uintptr_t)second_slab[0] == (uintptr_t)first_slab[0] + slab_bytes,
+        "only a full logical slab advances to the next slot");
+
+  for (size_t i = 0; i < blocks_per_slab; i++) {
+    dawn_drop(first_slab[i]);
+  }
+  for (size_t i = 1; i < blocks_per_slab; i++) {
+    second_slab[i] = block_of(block);
+    check((uintptr_t)second_slab[i] == (uintptr_t)second_slab[0] + i * block,
+          "the replacement current slab also grows in place");
+  }
+
+  dawn_str *reuse0 = block_of(block);
+  dawn_str *reuse1 = block_of(block);
+  dawn_str *reuse2 = block_of(block);
+  check(reuse0 == first_slab[0], "an empty logical slab is reused from its start");
+  check((uintptr_t)reuse1 == (uintptr_t)reuse0 + block,
+        "the empty slab's full relayout stays in address order");
+  check((uintptr_t)reuse2 == (uintptr_t)reuse0 + 2 * block,
+        "empty-slab reuse retains its complete free list");
+
+  for (size_t i = 0; i < blocks_per_slab; i++) {
+    dawn_drop(second_slab[i]);
+  }
+  dawn_drop(reuse0);
+  dawn_drop(reuse1);
+  dawn_drop(reuse2);
 }
 
 /* Freeing and re-requesting one size gets the same block back. This is the
@@ -725,6 +820,7 @@ typedef struct {
 } rc_case;
 
 static const rc_case rc_cases[] = {
+    {"slab_materializes_on_demand", test_slab_materializes_on_demand, 1},
     {"counts", test_counts, 0},
     {"sharing", test_sharing, 0},
     {"mask_skips_scalars", test_mask_skips_scalars, 0},
@@ -752,13 +848,20 @@ static const rc_case rc_cases[] = {
 int main(int argc, char **argv) {
   dawn_rt_init(argc, argv);
   int leak_mode = argc > 1 && argv[1][0] == 'l';
+  const char *only =
+      argc == 3 && strcmp(argv[1], "--case") == 0 ? argv[2] : NULL;
 
   if (leak_mode) {
     failures = 0;
     test_leak_mode();
     printf("leak_mode %s\n", failures > 0 ? "FAIL" : "PASS");
   } else {
+    int selected = only == NULL;
     for (size_t i = 0; i < sizeof(rc_cases) / sizeof(rc_cases[0]); i++) {
+      if (only != NULL && strcmp(only, rc_cases[i].name) != 0) {
+        continue;
+      }
+      selected = 1;
       if (rc_cases[i].slab && !DAWN_SLAB_ACTIVE) {
         printf("%s SKIP\n", rc_cases[i].name);
         continue;
@@ -766,6 +869,10 @@ int main(int argc, char **argv) {
       int before = failures;
       rc_cases[i].fn();
       printf("%s %s\n", rc_cases[i].name, failures > before ? "FAIL" : "PASS");
+    }
+    if (!selected) {
+      fprintf(stderr, "unknown rc contract case: %s\n", only);
+      return 2;
     }
   }
 

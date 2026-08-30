@@ -40,6 +40,7 @@
 # it. The second is how a positive control gets written down: without a role
 # of its own it would be indistinguishable from a mutant nobody ran.
 
+assert	slab_materializes_on_demand
 assert	counts
 assert	sharing
 assert	mask_skips_scalars
@@ -114,6 +115,14 @@ red	slab-swallows-oversize	oversize_leaves_the_slab
 # (32MiB, written in rc_test.c rather than derived) reddens with it: a slab
 # cache that swallows oversize blocks has also outgrown its documented bound.
 red	slab-swallows-oversize	slab_bound_is_honoured
+
+# The logical 64KiB slab and all of its transitions stay intact, but its first
+# free list is laid out eagerly again. The contract-only logical observation
+# reads 64KiB instead of 32KiB on every host; on a 4KiB-page host mincore also
+# sees sixteen resident pages instead of eight.
+role	slab-eagerly-materializes	counted
+owner	slab-eagerly-materializes	slab_materializes_on_demand
+red	slab-eagerly-materializes	slab_materializes_on_demand
 
 # ---- a handler's state cells ----------------------------------------------
 # The runtime's only overwrite, and so the only release that can be forgotten

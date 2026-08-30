@@ -49,7 +49,9 @@ cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-warn=(-Wall -Wextra -Werror -Wno-unused-parameter)
+# DAWN_RC_CONTRACT exposes logical allocator state only to these test builds;
+# production objects and their hot path do not contain that observation port.
+warn=(-DDAWN_RC_CONTRACT -Wall -Wextra -Werror -Wno-unused-parameter)
 
 # Pinned rather than inherited, because both halves of it decide whether the
 # poisoning leg means anything. allow_user_poisoning defaults on, and a
@@ -120,6 +122,23 @@ echo "== small stack =="
   "${warn[@]}" -I "$root/runtime/c" \
   -o "$work/rc_plain" "$here/rc_test.c" "$root/runtime/c/dawn_rt.c"
 ( ulimit -s 512 && "$work/rc_plain" )
+
+# Residency questions get a fresh process too. The full roster is still run
+# above to catch interactions, but neither verdict may depend on pages or ASan
+# shadow made resident by an earlier case.
+echo "== isolated slab residency =="
+"$work/rc_plain" --case slab_materializes_on_demand
+"$work/rc_plain" --case slab_returns_pages
+
+# A batch smaller than a size class can end with no further complete block in
+# the logical slab. Keep that supported configuration as a narrow contract:
+# the slow path must consume the tail and move to the next 64KiB slot rather
+# than extending the last block through the slot boundary.
+echo "== slab batch tail =="
+"$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  -DDAWN_SL_BATCH=1024 "${warn[@]}" -I "$root/runtime/c" \
+  -o "$work/slab_batch_tail" "$here/slab_batch_tail.c" "$root/runtime/c/dawn_rt.c"
+"$work/slab_batch_tail"
 
 # The roster the matrix names has to be the roster the binary runs, or the
 # comparison below is between two different questions.
@@ -195,6 +214,10 @@ fi
 if grep -q ' FAIL$' "$work/forced.out"; then
   fail "the allocator does not satisfy the contract under the sanitizer"
 fi
+
+echo "== isolated slab residency, sanitized =="
+ASAN_OPTIONS="$asan_opts" "$work/rc_asan_slab" --case slab_materializes_on_demand
+ASAN_OPTIONS="$asan_opts" "$work/rc_asan_slab" --case slab_returns_pages
 
 awk -F '\t' '$1 == "probe" { print $2 }' "$here/matrix.txt" > "$work/probe_roster.txt"
 cut -f1 <<< "$probes" > "$work/probe_ran.txt"

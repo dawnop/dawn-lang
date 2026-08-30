@@ -89,10 +89,12 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
  *     and a cache of free blocks with headers measured +18% to +37% resident
  *     against plain malloc on every load tried.
  *   * Allocation is a pop from the current slab's free list, freeing a push
- *     onto the owning slab's. There is no bump pointer beside the free list:
- *     mimalloc measured that second branch "consistently about 2% worse"
- *     (free-list sharding in action, 2.2), so a slab links all of its blocks
- *     when it is carved.
+ *     onto the owning slab's. There is no bump pointer on the hot path beside
+ *     the free list: mimalloc measured that second branch "consistently about
+ *     2% worse" (free-list sharding in action, 2.2). The slow path links one
+ *     DAWN_SL_BATCH tranche at a time instead. A class with a one-object live
+ *     set therefore keeps the one-load, one-branch pop without first writing
+ *     through all 64KiB of its logical slab.
  *   * A slab whose last block is freed is retired: up to DAWN_SL_KEEP empty
  *     slabs per class are held for reuse, and past that the pages go back to
  *     the kernel with madvise(MADV_DONTNEED) while the address range returns
@@ -105,8 +107,9 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
  * The one slab a class is currently allocating from is not retired when it
  * empties. Without that, a class holding one object at a time would take the
  * slow path on every single allocation; mimalloc says the same thing as a
- * tick count ("important to not retire too quickly"), and one pinned slab
- * per live class is the cheapest deterministic version of it.
+ * tick count ("important to not retire too quickly"), and one pinned logical
+ * slab per live class is the cheapest deterministic version of it. Only its
+ * materialized prefix is resident under the incremental policy above.
  *
  * Requests over DAWN_SL_MAX go to malloc, which is why no size class has to
  * cover them and why one range comparison answers "is this block mine".
@@ -166,7 +169,8 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
  *     variable behind every number the allocator was written for. And LLVM
  *     states the other one in code, at SpecificBumpPtrAllocator's
  *     setRedZoneSize(0): an allocator that walks its own arena cannot have
- *     red zones between allocations. dawn_sl_layout walks the whole slab.
+ *     red zones between allocations. dawn_sl_extend eventually walks every
+ *     block a logical slab issues.
  *   * No quarantine. Reuse is already not "the same address back at once",
  *     and a quarantine would have to be a side table anyway.
  *   * No leak detection on this leg, and no __lsan_register_root_region.
@@ -189,9 +193,17 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
 #define DAWN_SL_CLASSES DAWN_SLAB_CLASSES
 #define DAWN_SL_KEEP DAWN_SLAB_KEEP
 
+/* Materialize a fresh logical slab one measurement-selected tranche at a
+ * time. Kept overrideable for the batch-tail contract and for repeating the
+ * lexer/compiler/rbtree extent curve without editing the state machine. */
+#ifndef DAWN_SL_BATCH
+#define DAWN_SL_BATCH ((size_t)32768)
+#endif
+
 #define DAWN_SL_BITS 16 /* one slab is 64KiB */
 #define DAWN_SL_SIZE ((size_t)1 << DAWN_SL_BITS)
 #define DAWN_SL_SLOTS 16384u /* so the reserve is 1GiB of address space */
+#define DAWN_SL_BATCHES (DAWN_SL_SIZE / DAWN_SL_BATCH)
 
 /* The largest block has to fit, or a class would have no slab to live in.
  * The smallest has to hold the free list's link. The second one also buys
@@ -202,6 +214,10 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
  * and every end is already on a grain and neither rounding can bite. */
 _Static_assert(DAWN_SL_MAX <= DAWN_SL_SIZE, "a block must fit inside a slab");
 _Static_assert(DAWN_SL_GRAIN >= sizeof(void *), "a free block holds one pointer");
+_Static_assert(DAWN_SL_BATCH > 0, "a batch must contain bytes");
+_Static_assert(DAWN_SL_BATCH <= DAWN_SL_SIZE, "a batch fits inside a slab");
+_Static_assert(DAWN_SL_SIZE % DAWN_SL_BATCH == 0, "batches cover a slab exactly");
+_Static_assert(DAWN_SL_BATCHES <= UINT8_MAX, "the batch count fits in one byte");
 
 /* Where a slab is, beyond current-or-not: on its class's list of slabs with
  * free blocks, on its class's list of empty ones, or on neither (full, or
@@ -219,7 +235,16 @@ typedef struct dawn_sl_slab {
   uint32_t used;
   uint16_t cls; /* 0 while the slot holds no slab */
   uint8_t list;
+  uint8_t batches; /* prefix whose complete blocks have joined a free list */
 } dawn_sl_slab;
+
+/* `batches` occupies the byte that used to be tail padding. The side table is
+ * 512KiB on a 64-bit target either way; growing every one of its 16384 rows to
+ * carry the incremental state would spend more resident memory than the
+ * policy is meant to recover on the small-live-set shape. */
+_Static_assert(sizeof(dawn_sl_slab) == 3 * sizeof(void *) + sizeof(uint32_t) +
+                                           sizeof(uint16_t) + 2 * sizeof(uint8_t),
+               "incremental layout must not grow a slab metadata row");
 
 static dawn_sl_slab dawn_sl_grid[DAWN_SL_SLOTS];
 static dawn_sl_slab *dawn_sl_spare; /* retired slots, address range reusable */
@@ -272,18 +297,82 @@ static void dawn_sl_unlink(dawn_sl_slab **list, dawn_sl_slab *s) {
   s->list = DAWN_SL_OFF;
 }
 
-/* Give a slab every block of one class, threaded through the blocks. Run
- * once per slab that is carved and once per slab that empties, so that "a
- * slab with nothing live in it holds all of its blocks" is written down
- * rather than inferred from the free path having pushed each one back. The
- * cost is amortised: a slab only stops being current after it has handed out
- * every block it has, so a relayout is one store per allocation it served. */
+/* Add the next tranche's complete blocks to an empty free list. A block that
+ * crosses a tranche boundary joins the later tranche: after the last call the
+ * count is therefore still exactly floor(64KiB / bsize), including for sizes
+ * that do not divide the tranche. This is only called when `s->freelist` (and, for a
+ * current slab, dawn_sl_head[cls]) is empty, so no chain has to be spliced.
+ *
+ * The whole-block unpoison/write/poison order is the same one the old whole-
+ * slab layout used. In particular the first link may begin before this
+ * tranche's byte boundary when its block crosses that boundary; unpoisoning
+ * from the block's true start before writing the link is what keeps forced
+ * ASAN builds exact in that case. */
+static int dawn_sl_extend(dawn_sl_slab *s, size_t cls) {
+  size_t bsize = cls * DAWN_SL_GRAIN;
+  char *start = dawn_sl_addr(s);
+  size_t old_blocks = (size_t)s->batches * DAWN_SL_BATCH / bsize;
+  size_t capacity = DAWN_SL_SIZE / bsize;
+  if (old_blocks == capacity) {
+    /* A block wider than a batch can leave a tail of batches that contains no
+     * further complete block. Consume that tail logically instead of walking
+     * the next extension past this 64KiB slot. */
+    s->batches = (uint8_t)DAWN_SL_BATCHES;
+    return 0;
+  }
+  size_t new_batches = (size_t)s->batches;
+  size_t new_blocks = old_blocks;
+  /* Normally this advances once. Keeping the loop makes the allocator remain
+   * a working allocator if a configured block is wider than a batch: the
+   * slow path advances to the first boundary that contains a whole block
+   * instead of installing a NULL free list. */
+  while (new_blocks == old_blocks && new_batches < DAWN_SL_BATCHES) {
+    new_batches++;
+    new_blocks = new_batches * DAWN_SL_BATCH / bsize;
+  }
+  if (new_blocks == old_blocks) {
+    s->batches = (uint8_t)DAWN_SL_BATCHES;
+    return 0;
+  }
+  char *first = start + old_blocks * bsize;
+  size_t bytes = (new_blocks - old_blocks) * bsize;
+  ASAN_UNPOISON_MEMORY_REGION(first, bytes);
+  void *fl = NULL;
+  /* Backwards, so this tranche's list comes out in address order. */
+  for (size_t i = new_blocks; i-- > old_blocks;) {
+    void *b = start + i * bsize;
+    *(void **)b = fl;
+    fl = b;
+  }
+  ASAN_POISON_MEMORY_REGION(first, bytes);
+  s->freelist = fl;
+  s->batches = (uint8_t)new_batches;
+  return 1;
+}
+
+/* Initialise a newly carved (or previously madvised) slot without touching
+ * its data pages. Poisoning writes ASAN shadow, not the mapped data; the first
+ * dawn_sl_extend in the slow path is what materializes the first free list. */
+static void dawn_sl_init(dawn_sl_slab *s, size_t cls) {
+  char *start = dawn_sl_addr(s);
+  ASAN_POISON_MEMORY_REGION(start, DAWN_SL_SIZE);
+  s->freelist = NULL;
+  s->used = 0;
+  s->cls = (uint16_t)cls;
+  s->batches = 0;
+}
+
+/* Relayout a non-current slab after its last live block is freed. Such a slab
+ * could only stop being current after every batch had been issued, so all of
+ * its pages have already participated in the workload. Preserve the existing
+ * empty-cache contract: rebuild the complete address-ordered free list, keep
+ * it fully materialized for burst reuse, and leave madvise to the over-bound
+ * branch in dawn_sl_retire. Incremental first touch is only for a fresh slot. */
 static void dawn_sl_layout(dawn_sl_slab *s, size_t cls) {
   size_t bsize = cls * DAWN_SL_GRAIN;
   char *start = dawn_sl_addr(s);
   ASAN_UNPOISON_MEMORY_REGION(start, DAWN_SL_SIZE);
   void *fl = NULL;
-  /* Backwards, so the list comes out in address order. */
   for (size_t i = DAWN_SL_SIZE / bsize; i-- > 0;) {
     void *b = start + i * bsize;
     *(void **)b = fl;
@@ -293,9 +382,10 @@ static void dawn_sl_layout(dawn_sl_slab *s, size_t cls) {
   s->freelist = fl;
   s->used = 0;
   s->cls = (uint16_t)cls;
+  s->batches = (uint8_t)DAWN_SL_BATCHES;
 }
 
-/* Take a slot and lay a class's blocks out in it. NULL when the reserve is
+/* Take a slot and initialise it for one class. NULL when the reserve is
  * used up, which is a caller's cue to fall back to malloc rather than a
  * fatal condition: a program whose shape the 1GiB reserve does not fit
  * should get slower, not stop. */
@@ -309,7 +399,7 @@ static dawn_sl_slab *dawn_sl_carve(size_t cls) {
   } else {
     return NULL;
   }
-  dawn_sl_layout(s, cls);
+  dawn_sl_init(s, cls);
   s->next = NULL;
   s->prev = NULL;
   s->list = DAWN_SL_OFF;
@@ -318,14 +408,21 @@ static dawn_sl_slab *dawn_sl_carve(size_t cls) {
 }
 
 static void dawn_sl_reserve(void) {
-  void *p = mmap(NULL, (size_t)DAWN_SL_SLOTS * DAWN_SL_SIZE, PROT_READ | PROT_WRITE,
+  size_t span = (size_t)DAWN_SL_SLOTS * DAWN_SL_SIZE;
+  void *p = mmap(NULL, span, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (p == MAP_FAILED) {
     dawn_sl_refused = 1;
     return;
   }
+#ifdef MADV_NOHUGEPAGE
+  /* Incremental first touch is a page-retention policy. Do not let an
+   * anonymous-THP=always host turn a small set of faults into a resident 2MiB extent
+   * and make both the policy and its mincore contract host-mode dependent. */
+  (void)madvise(p, span, MADV_NOHUGEPAGE);
+#endif
   dawn_sl_lo = (uintptr_t)p;
-  dawn_sl_span = (size_t)DAWN_SL_SLOTS * DAWN_SL_SIZE;
+  dawn_sl_span = span;
 }
 
 /* The class's free list is empty: find or make a slab, make it current, and
@@ -341,7 +438,21 @@ static void *dawn_sl_slow(size_t cls, size_t n) {
       return malloc(n);
     }
   }
-  dawn_sl_slab *s = dawn_sl_partial[cls];
+  dawn_sl_slab *s = dawn_sl_cur[cls];
+  if (s != NULL && s->batches < DAWN_SL_BATCHES) {
+    /* The current tranche is fully issued -- a free would have made the hot
+     * head non-NULL -- but the logical slab is not full yet. Refill that same
+     * current slab before any list/state transition. */
+    if (dawn_sl_extend(s, cls)) {
+      void *b = s->freelist;
+      ASAN_UNPOISON_MEMORY_REGION(b, cls * DAWN_SL_GRAIN);
+      dawn_sl_head[cls] = *(void **)b;
+      s->freelist = NULL;
+      s->used++;
+      return b;
+    }
+  }
+  s = dawn_sl_partial[cls];
   if (s != NULL) {
     dawn_sl_unlink(&dawn_sl_partial[cls], s);
   } else if ((s = dawn_sl_empty[cls]) != NULL) {
@@ -350,11 +461,20 @@ static void *dawn_sl_slow(size_t cls, size_t n) {
   } else if ((s = dawn_sl_carve(cls)) == NULL) {
     return malloc(n);
   }
-  /* The class's previous current slab, if there was one, has an empty free
-   * list -- that is why this is being called -- so nothing has to be written
-   * back to it. It is now full and on no list; a free into it will link it
-   * onto the partial list. */
+  /* The class's previous current slab, if there was one, has materialized all
+   * its batches and has an empty free list -- that is why the growth case
+   * above did not return. It is now logically full and on no list; a free into
+   * it will link it onto the partial list. */
   dawn_sl_cur[cls] = s;
+  if (s->freelist == NULL) {
+    /* A fresh/spare slot is metadata-only until it becomes current. Partial
+     * and cached-empty slabs already carry their existing complete lists. */
+    if (!dawn_sl_extend(s, cls)) {
+      /* Every supported class fits at least once, so only a broken internal
+       * configuration can make a fresh logical slab have no complete block. */
+      return malloc(n);
+    }
+  }
   void *b = s->freelist;
   ASAN_UNPOISON_MEMORY_REGION(b, cls * DAWN_SL_GRAIN);
   dawn_sl_head[cls] = *(void **)b;
@@ -402,6 +522,7 @@ static void dawn_sl_retire(dawn_sl_slab *s, size_t cls) {
   s->prev = NULL;
   s->cls = 0;
   s->list = DAWN_SL_OFF;
+  s->batches = 0;
   s->next = dawn_sl_spare;
   dawn_sl_spare = s;
   dawn_sl_live--;
@@ -473,6 +594,16 @@ void dawn_slab_stats(uint64_t *live, uint64_t *cached, uint64_t *retired) {
   *retired = dawn_sl_retired;
 }
 
+#ifdef DAWN_RC_CONTRACT
+size_t dawn_slab_materialized_bytes(const void *p) {
+  if (!DAWN_SL_MINE(p)) return 0;
+  const dawn_sl_slab *s =
+      &dawn_sl_grid[((uintptr_t)p - dawn_sl_lo) >> DAWN_SL_BITS];
+  if (s->cls == 0) return 0;
+  return (size_t)s->batches * DAWN_SL_BATCH;
+}
+#endif
+
 /* From here down the runtime's allocation is the allocator's, everywhere and
  * without a call site having to remember. The macros reach this translation
  * unit only, which is why `dawn_free` is exported for the one caller that is
@@ -495,6 +626,13 @@ void dawn_slab_stats(uint64_t *live, uint64_t *cached, uint64_t *retired) {
   *cached = 0;
   *retired = 0;
 }
+
+#ifdef DAWN_RC_CONTRACT
+size_t dawn_slab_materialized_bytes(const void *p) {
+  (void)p;
+  return 0;
+}
+#endif
 
 #endif /* DAWN_SLAB_ACTIVE */
 
