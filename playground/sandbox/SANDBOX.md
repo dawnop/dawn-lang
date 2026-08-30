@@ -173,3 +173,18 @@ with:
 `scripts/play-live-check.py` re-runs the functional half of this against a
 deployed instance (samples byte-compared with their `.out`, plus a compiler
 version discriminant in both directions).
+
+## Native LSP sessions
+
+`run-lsp-sandboxed.sh` is deliberately separate from the arbitrary-program
+wrapper. It accepts only `run <32-lowercase-hex-id>`, `stop <id>`, or `cleanup`;
+the executable is always `/opt/dawn/bin/dawnc lsp`. One WebSocket therefore
+owns one named transient service and cannot choose an argv or filesystem path.
+
+Each session has `PrivateNetwork=yes`, a read-only host filesystem, 256 MB RAM,
+one CPU, 16 tasks and a 31-minute hard lifetime. The gateway's lifetime is 30
+minutes, leaving one minute for cleanup. All sessions additionally live under
+`dawn-play-lsp.slice` (512 MB, two CPUs, 48 tasks), so the host-level ceiling
+survives a gateway crash; service startup and shutdown clean up named orphan
+units. These are conservative initial caps and still require validation against
+the production native artifact before `/api/lsp` is exposed.

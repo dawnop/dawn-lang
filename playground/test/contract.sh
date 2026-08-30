@@ -6,6 +6,10 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$(cd .. && pwd)
 
+# The WebSocket/LSP bridge has an independent stdlib-only fake child, so its
+# framing, lifecycle and admission contract does not depend on a Dawn build.
+./test/lsp-contract.sh
+
 # Both layouts: macOS bundles the JDK under Contents/Home, Linux tarballs put
 # bin/ at the top level. Same probe as bin/dawn.
 if [ -z "$JAVA_HOME" ]; then

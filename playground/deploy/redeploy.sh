@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Push the playground runner to production. REPEATABLE step — assumes the
-# one-time server setup in DEPLOY.md is already done (dawn-play user, JDK at
-# /opt/dawn/jdk, sudoers, systemd unit installed).
+# one-time server setup in DEPLOY.md is already done (dawn-play user, JRE 21,
+# sudoers, and the gateway service/slice installed).
 #
 # Does NOT run itself as part of any build. Run it by hand when you mean to ship.
 # Prerequisites: SSH key loaded; JAVA_HOME set or a GraalVM under ~/tools.
@@ -11,6 +11,11 @@ cd "$(dirname "$0")/../.."   # repo root
 # Server login name is not committed (public repo); set DEPLOY_USER in your env.
 HOST="${DEPLOY_USER:?set DEPLOY_USER to the server login name}@dawnop.com"
 REMOTE=/opt/dawn
+NATIVE_BIN="${DAWN_NATIVE_BIN:-dawnc-linux-x86_64}"
+case "$NATIVE_BIN" in
+  /*) ;;
+  *) NATIVE_BIN="$PWD/$NATIVE_BIN" ;;
+esac
 
 if [ -z "${JAVA_HOME:-}" ]; then
   for d in "$HOME"/tools/graalvm-*/Contents/Home "$HOME"/tools/graalvm-*; do
@@ -22,21 +27,54 @@ export JAVA_HOME
 echo "=== building the selfhost toolchain ==="
 ./bin/dawn --version > /dev/null
 
+# Building the native release artifact is an independent, expensive gate and
+# is deliberately not hidden inside a production deploy.  Reuse the exact
+# artifact already verified by release-native.sh / CI.
+if [ ! -x "$NATIVE_BIN" ]; then
+  echo "error: $NATIVE_BIN is missing or not executable" >&2
+  echo "build it first with: ./scripts/release-native.sh -o dawnc-linux-x86_64" >&2
+  exit 1
+fi
+VERSION=$(sed -n 's/^pub const VERSION: String = "\(.*\)"$/\1/p' selfhost/src/version.dawn)
+NATIVE_VERSION=$("$NATIVE_BIN" version)
+if [ "$NATIVE_VERSION" != "dawnc $VERSION (native)" ]; then
+  echo "error: native artifact says '$NATIVE_VERSION', expected dawnc $VERSION (native)" >&2
+  exit 1
+fi
+
 echo "=== syncing to $HOST:$REMOTE ==="
 # the launcher + the standalone jar it runs (bin/dawn's deployed form needs
 # only build/dawn-selfhost.jar next to it — no seed fetch on the server)
 rsync -avz bin/ "$HOST:$REMOTE/bin/"
 rsync -avz --relative build/dawn-selfhost.jar "$HOST:$REMOTE/"
+# Use a same-directory rename so an interrupted transfer cannot replace the
+# native service binary with a partial file.
+rsync -avz "$NATIVE_BIN" "$HOST:$REMOTE/bin/.dawnc.next"
+# shellcheck disable=SC2029
+ssh "$HOST" "
+  set -e
+  chmod 755 '$REMOTE/bin/.dawnc.next'
+  mv '$REMOTE/bin/.dawnc.next' '$REMOTE/bin/dawnc'
+"
 # the runner sources + manifest (recompiled on service start) and the sandbox
 # scripts. main.dawn imports the `web`/`json` deps by path (playground/dawn.toml
 # -> ../packages), so those packages must ship too and resolve at $REMOTE/packages.
-rsync -avz --delete playground/dawn.toml playground/src playground/README.md "$HOST:$REMOTE/playground/"
+rsync -avz --delete playground/dawn.toml playground/src playground/README.md \
+  playground/lsp_gateway.py "$HOST:$REMOTE/playground/"
 rsync -avz --delete packages/ "$HOST:$REMOTE/packages/"
 rsync -avz playground/sandbox/ "$HOST:$REMOTE/playground/sandbox/"
+rsync -avz playground/deploy/ "$HOST:$REMOTE/playground/deploy/"
 
 echo "=== restarting service ==="
 # shellcheck disable=SC2029
-ssh "$HOST" 'sudo systemctl restart dawn-play && sleep 2 && curl -s --noproxy "*" http://127.0.0.1:8087/health && echo'
+ssh "$HOST" '
+  set -e
+  sudo systemctl restart dawn-play dawn-play-lsp
+  sleep 2
+  curl -fsS --noproxy "*" -w "\n" http://127.0.0.1:8087/health
+  sudo systemctl is-active --quiet dawn-play-lsp
+  /usr/bin/python3 -I -B /opt/dawn/playground/deploy/lsp-smoke.py
+'
 
 echo "=== done ==="
 echo "verify: curl https://dawn-lang.dawnop.com/api/health"

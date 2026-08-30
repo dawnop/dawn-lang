@@ -11,20 +11,24 @@ by hand, with the server reachable.
    useradd --system --no-create-home --shell /usr/sbin/nologin dawn-play
    ```
 
-2. **JRE 21** — a headless JRE is enough (the compiler is a fat jar; no javac
-   needed). On Ubuntu 22.04 it's in apt:
+2. **JRE 21 + Python 3** — a headless JRE is enough for `/run` and `/check`;
+   the bounded WebSocket gateway uses only Python's standard library. On
+   Ubuntu 22.04:
    ```sh
-   sudo apt-get install -y openjdk-21-jre-headless
+   sudo apt-get install -y openjdk-21-jre-headless python3
    # lands at /usr/lib/jvm/java-21-openjdk-amd64, java at /usr/bin/java
    ```
 
 3. **Layout** under `/opt/dawn` (owned by your deploy user, readable by dawn-play):
    ```
    /opt/dawn/bin/dawn                      # launcher (rsynced)
+   /opt/dawn/bin/dawnc                     # static native LSP server (rsynced)
    /opt/dawn/build/dawn-selfhost.jar       # compiler (rsynced)
    /opt/dawn/playground/dawn.toml           # runner manifest — deps web/json (rsynced)
    /opt/dawn/playground/src                 # runner sources (rsynced)
+   /opt/dawn/playground/lsp_gateway.py      # loopback WebSocket bridge (rsynced)
    /opt/dawn/playground/sandbox/            # sandbox scripts (rsynced)
+   /opt/dawn/playground/deploy/             # systemd/nginx source snippets (rsynced)
    /opt/dawn/packages/                       # path-deps the runner imports (rsynced)
    ```
    The runner's `main.dawn` imports the `web`/`json` packages by path
@@ -44,20 +48,28 @@ by hand, with the server reachable.
    whitelists only it, with any args — do NOT add a trailing `""`, that means
    "zero args only" and denies every real call):
    ```sh
-   chmod 755 /opt/dawn/playground/sandbox/run-sandboxed.sh
+   chmod 755 /opt/dawn/playground/sandbox/run-sandboxed.sh \
+     /opt/dawn/playground/sandbox/run-lsp-sandboxed.sh
    visudo -cf /opt/dawn/playground/sandbox/sudoers.dawn-play   # validate first
    install -m 440 -o root -g root /opt/dawn/playground/sandbox/sudoers.dawn-play \
      /etc/sudoers.d/dawn-play
    ```
 
-6. **systemd unit** — the shipped `dawn-play.service` points at the apt JRE
-   (`/usr/lib/jvm/java-21-openjdk-amd64`, `/usr/bin/java`) and sets
-   `PLAY_WORK_ROOT=/var/lib/dawn-play/work`:
+6. **systemd units** — `dawn-play.service` owns `/run` and `/check`;
+   `dawn-play-lsp.service` owns the loopback WebSocket gateway. Each accepted
+   WebSocket owns one transient native LSP service, all held under the
+   aggregate `dawn-play-lsp.slice` ceiling:
    ```sh
    install -m 644 /opt/dawn/playground/deploy/dawn-play.service \
      /etc/systemd/system/dawn-play.service
-   systemctl daemon-reload && systemctl enable --now dawn-play
+   install -m 644 /opt/dawn/playground/deploy/dawn-play-lsp.service \
+     /etc/systemd/system/dawn-play-lsp.service
+   install -m 644 /opt/dawn/playground/deploy/dawn-play-lsp.slice \
+     /etc/systemd/system/dawn-play-lsp.slice
+   systemctl daemon-reload
+   systemctl enable --now dawn-play dawn-play-lsp
    curl -s http://127.0.0.1:8087/health   # -> ok
+   systemctl is-active dawn-play-lsp       # -> active
    ```
 
 7. **Validate the sandbox** — run every item in `sandbox/SANDBOX.md`'s
@@ -65,19 +77,30 @@ by hand, with the server reachable.
    exposing `/api/run` publicly (results from the first deploy are recorded
    there).
 
-8. **nginx**: add `nginx-play.conf`'s two `location` blocks into the existing
-   `server { server_name dawn-lang.dawnop.com; … }`, and the `limit_req_zone`
-   line into `http { … }`. Then `nginx -t && systemctl reload nginx`.
+8. **nginx**: add `nginx-play.conf`'s locations into the existing
+   `server { server_name dawn-lang.dawnop.com; … }`, and all listed
+   `limit_req_zone` / `limit_conn_zone` declarations into `http { … }`. Then
+   `nginx -t && systemctl reload nginx`. `/api/lsp` must preserve the browser's
+   `Origin` and `Sec-WebSocket-Protocol: dawn-lsp-v1` headers and rewrite to the
+   gateway's loopback-only `/lsp` route, as the shipped snippet does.
 
 ## Repeatable deploys
 
 ```sh
-playground/deploy/redeploy.sh      # build jar, rsync, restart, health-check
+./scripts/release-native.sh -o dawnc-linux-x86_64  # or reuse CI's artifact
+playground/deploy/redeploy.sh      # sync jar/native/gateway, restart, health-check
 scripts/play-live-check.py         # then verify what is actually deployed
 ```
 
-`redeploy.sh` does **not** install `dawn-play.service`; when that file changes,
-copy it to `/etc/systemd/system/`, `daemon-reload` and restart by hand.
+The redeploy's LSP health check is an end-to-end smoke, not only a systemd
+status: `deploy/lsp-smoke.py` performs the WebSocket handshake, initializes the
+real sandboxed native server, opens the fixed scratch buffer, waits for a
+diagnostics notification and completes the close handshake.
+
+`redeploy.sh` does **not** install systemd units; when a `.service` or `.slice`
+file changes, copy it to `/etc/systemd/system/`, `daemon-reload` and restart by
+hand. `DAWN_NATIVE_BIN=/path/to/dawnc-linux-x86_64` selects an already verified
+artifact outside the repository root.
 
 **Order matters when the samples change.** The starter samples in
 `site/play-ui/samples/` are compiled by the deployed runner, so ship the runner
@@ -94,6 +117,9 @@ of that — the old runner answered `/health` with `ok` the whole time.
 
 ## Rollback
 
-`systemctl stop dawn-play` takes the endpoint down; nginx keeps serving the
-static site. The runner has no database and no persistent state, so there is
-nothing to migrate back.
+`systemctl stop dawn-play dawn-play-lsp` takes the dynamic endpoints down;
+the LSP service's `ExecStopPost` cleans up per-session transient services. To
+repeat that cleanup explicitly, run
+`sudo /opt/dawn/playground/sandbox/run-lsp-sandboxed.sh cleanup`.
+nginx keeps serving the static site. Neither service has persistent state, so
+there is nothing to migrate back.
