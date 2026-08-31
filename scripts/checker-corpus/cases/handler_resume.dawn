@@ -1,50 +1,119 @@
-# checker.dawn: the handler arm's binder clause, `op(a) resume k => ...`
-# (docs/oneshot-design.md §9 ③). The syntax parses -- that half is pinned by
-# scripts/grammar-corpus/accept/handle_resume_binder.dawn -- and the checker
-# refuses it, because a control arm has no meaning below the checker: Core has
-# no continuation node and both emitters would compile the arm as though it
-# returned to the raise site.
+# checker.dawn: the control arm, `op(a) resume k => ...`, and the judgments
+# docs/oneshot-design.md §11 states for it. The syntax half is pinned next door
+# in scripts/grammar-corpus (`handle_resume_binder.dawn`, `ctl_effect.dawn`);
+# what is here is what the *checker* says.
 #
-# What the golden is here to hold is that the refusal is **one** diagnostic per
-# arm, at the clause. The arm body is not checked against the operation's
-# signature: it is written for a language in which `resume` is in scope, so
-# checking it would bury the honest refusal under diagnostics about a program
-# nobody wrote.
-effect Ask {
+# Nothing below reaches lowering: `dawn __check` stops after checking, and a
+# control arm that reaches `dawn build` is refused by name there
+# (`lower.staged_intrinsics`). So a legal control arm produces no diagnostic in
+# this file, which is the point of the first two cases -- before this knife
+# every one of them was a refusal.
+
+ctl effect Ask {
   fn ask(n: Int) -> Int
 }
 
-effect Store {
+ctl effect Store {
   fn get(k: String) -> Int
   fn put(k: String, v: Int) -> Unit
 }
 
-# one arm, one diagnostic, underlining `resume k` and nothing else
-pub fn single() -> Int = {
-  with handle Ask { ask(n) resume k => k(n) }
+effect Plain {
+  fn plain(n: Int) -> Int
+}
+
+# --- accepted -------------------------------------------------------------
+
+# the shape the design writes: the arm resumes, and the block's value is what
+# the resumed remainder produced
+pub fn resumes() -> Int = {
+  with handle Ask { ask(n) resume k => k(n + 1) }
   ask(1)
 }
 
-# the clause is per arm: the tail-resumptive arm beside it is checked as
-# always, and contributes nothing
-pub fn mixed() -> Unit = {
+# not resuming is legal, and the arm's own value is then the block's answer.
+# The answer type here is String, which the operation's `Int` has nothing to do
+# with -- that is the whole of §11.1
+pub fn discards() -> String = {
+  with handle Ask { ask(n) resume k => "stopped" }
+  let _ = ask(1)
+  "done"
+}
+
+# two kinds of arm in one handler: `get` binds a continuation, `put` does not,
+# and the tail-resumptive one is checked against the operation exactly as it
+# always was
+pub fn mixed() -> Int = {
   with handle Store {
     get(key) resume k => k(0)
     put(key, v) => ()
   }
   put("a", 1)
+  get("a")
 }
 
-# a body that could not possibly typecheck -- `k` is not in scope, and the arm
-# answers with the wrong type -- still yields exactly the one diagnostic, which
-# is the claim about not checking the body
-pub fn body_is_not_checked() -> Int = {
-  with handle Ask { ask(n) resume k => k("not an Int") }
+# a state cell under a control arm: legal, and the read is a `cell_get` rather
+# than a `cell_take` (§11.5), which no diagnostic can show -- the inline test
+# `cell_take is not chosen inside a control arm` is what pins it
+pub fn with_cell() -> Int = {
+  with handle Ask {
+    var seen: List[Int] = []
+    ask(n) resume k => {
+      seen = seen ++ [n]
+      k(n)
+    }
+  }
   ask(1)
 }
 
-# the binder's name is the author's, and the hint quotes it back
-pub fn author_chosen_name() -> Int = {
-  with handle Ask { ask(n) resume continuation => continuation(n) }
+# --- refused --------------------------------------------------------------
+
+# the binder needs the effect's permission: decision 3 makes the clause the
+# arm's kind, S1 makes suspendability a property of the declaration, and where
+# they disagree it is the arm that is reported (§11.6)
+pub fn binder_without_ctl() -> Int = {
+  with handle Plain { plain(n) resume k => k(n) }
+  plain(1)
+}
+
+# the arm answers the block, so it is the block's type it is held to -- and the
+# message says "answers the block" rather than naming the operation
+pub fn wrong_answer() -> String = {
+  with handle Ask { ask(n) resume k => n }
+  let _ = ask(1)
+  "done"
+}
+
+# the binder is counted apart from the parameters, so the arity message says so.
+# It cascades -- with the arity wrong the binder lands on the operation's
+# parameter type and `k` is an Int -- which is what a wrong arity does for a
+# tail-resumptive arm too; the first line is the honest one
+pub fn arity() -> Int = {
+  with handle Ask { ask() resume k => k(0) }
   ask(1)
+}
+
+# `k` takes the operation's result, not its argument
+pub fn k_argument() -> Int = {
+  with handle Ask { ask(n) resume k => k("no") }
+  ask(1)
+}
+
+# `?` in a control arm is judged against the block's answer type, and the
+# sentence names the block (§11.4 (a))
+fn maybe() -> Option[Int] = None
+
+pub fn propagate() -> Int = {
+  with handle Ask { ask(n) resume k => k(maybe()?) }
+  ask(1)
+}
+
+# a jump out of a control arm names the arm, and the hint says it runs at the
+# installation and may suspend there
+pub fn jump() -> Int = {
+  for i in 0..2 {
+    with handle Ask { ask(n) resume k => break }
+    let _ = ask(1)
+  }
+  0
 }

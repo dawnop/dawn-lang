@@ -865,6 +865,13 @@ fn comptime_rejects() -> List[String] = {
   # immutable, so an implementation would have to invent a store the rest of
   # this interpreter has no notion of.
   out = out ++ ["cell_new", "cell_get", "cell_set", "cell_take"]
+  # one-shot resumption, refused for the same reason and one more. Unreachable:
+  # a control arm exists only under a `with handle`, which is refused one level
+  # up, so no `const` initialiser produces either name. And unimplemented
+  # everywhere else too -- `lower.staged_intrinsics` refuses both on the way to
+  # a backend -- so an arm here would be the only implementation of a feature
+  # that does not run yet, in the one evaluator that cannot reach it.
+  out = out ++ ["ctl_yield", "ctl_run"]
   # no arm, and no reason beyond that: `parse_int` folds and this one does not.
   # Left refused rather than quietly added, because a new arm is a new answer
   # the two backends then have to agree with.
@@ -2323,7 +2330,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
   assert len(arms) == 43
-  assert len(rejects) == 74
+  assert len(rejects) == 76
 }
 
 fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =

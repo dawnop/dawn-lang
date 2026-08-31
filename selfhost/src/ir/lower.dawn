@@ -1035,6 +1035,15 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ##                       second count on the value; an accumulator read that
 ##                       way is never unique, and a container built in a
 ##                       handler would copy on every step instead of reusing
+##   ctl_yield ctl_run   one-shot resumption, and the only two names in this
+##                       list no backend has ever been handed. The checker
+##                       builds them for a `with handle` with a control arm
+##                       (`checker.ctl_wrapper`, `checker.check_handle`):
+##                       `ctl_yield(prompt, arm, args...)` is the wrapper the
+##                       evidence record holds, and `ctl_run(prompt, rest, pack)`
+##                       is the block's tail, which owns the driving loop.
+##                       `staged_intrinsics` below is where they are classified
+##                       and says what happens to one today.
 ##
 ## Not an ADT, though the comment this replaces proposed one. Measured before
 ## deciding: `CIntrinsic` carries a `String` because it also carries the 89
@@ -1049,7 +1058,8 @@ pub fn internal_intrinsics() -> List[String] = [
   "cmp", "hash", "java_eq", "java_hash", "show", "quote",
   "str_of_int", "str_of_bool", "str_of_bytes",
   "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append",
-  "cell_new", "cell_get", "cell_set", "cell_take"
+  "cell_new", "cell_get", "cell_set", "cell_take",
+  "ctl_yield", "ctl_run"
 ]
 
 # ---- who implements a primitive ----
@@ -1174,16 +1184,38 @@ pub fn lowered_intrinsics() -> List[String] = {
   out
 }
 
-test "every intrinsic is owned by a runtime module, written inline, or removed by lowering" {
+## The primitives lowering refuses outright, because the phase that would
+## implement them has not landed.
+##
+## A group of its own rather than a silence. "No backend owes this" and "one
+## backend is short" already had to be told apart (`lowered_intrinsics` above
+## says why); "nobody has written this yet" is a third answer that looks like
+## both from inside an emitter, and leaving it out would have meant a control
+## arm reaching `emitc: intrinsic not implemented for native` -- a message about
+## the backend, for a program whose problem is the compiler's calendar.
+##
+## `ctl_yield` and `ctl_run` are the checker's half of one-shot resumption
+## (docs/oneshot-design.md §11.3). `dawn check` accepts a control arm in full,
+## with every judgment §11 states; `dawn build` stops here, by name, and points
+## at the knife that lands the driving loop and the two backends' arms. When it
+## does, these move to whichever of the four groups they belong in and this list
+## goes back to being empty.
+pub fn staged_intrinsics() -> List[String] = ["ctl_yield", "ctl_run"]
+
+## Is this the name of a primitive lowering refuses on purpose?
+pub fn is_staged_intrinsic(name: String) -> Bool = list.contains(staged_intrinsics(), name)
+
+test "every intrinsic is owned by a runtime module, written inline, removed by lowering, or staged" {
   let inline = inline_intrinsics()
   let host = jvm_only_intrinsics()
   let gone = lowered_intrinsics()
+  let staged = staged_intrinsics()
   let it = intrinsics()
   let internal = internal_intrinsics()
 
-  # 1. the four groups partition the universe. This is what makes a new
-  #    primitive impossible to forget: added to `types.builtins()` and to none
-  #    of the groups, it lands nowhere and this fails by name.
+  # 1. the groups partition the universe. This is what makes a new primitive
+  #    impossible to forget: added to `types.builtins()` and to none of the
+  #    groups, it lands nowhere and this fails by name.
   for n in map.keys(it) ++ internal {
     var groups = 0
     match map.get(it, n) {
@@ -1197,8 +1229,9 @@ test "every intrinsic is owned by a runtime module, written inline, or removed b
     if list.contains(inline, n) { groups = groups + 1 }
     if list.contains(host, n) { groups = groups + 1 }
     if list.contains(gone, n) { groups = groups + 1 }
+    if list.contains(staged, n) { groups = groups + 1 }
     if groups != 1 {
-      panic("`" ++ n ++ "` is in " ++ to_string(groups) ++ " of the four " ++
+      panic("`" ++ n ++ "` is in " ++ to_string(groups) ++ " of the five " ++
           "implementation groups; every intrinsic belongs to exactly one")
     }
   }
@@ -1206,7 +1239,7 @@ test "every intrinsic is owned by a runtime module, written inline, or removed b
   # 2. nothing on a list is outside the universe. This is the direction that
   #    rotted in the interpreter's copy -- arms outliving their producers --
   #    and a name misspelled here would otherwise read as a group of one.
-  for n in inline ++ host ++ gone {
+  for n in inline ++ host ++ gone ++ staged {
     if not (map.has(it, n) || list.contains(internal, n)) {
       panic("`" ++ n ++ "` is classified but is not an intrinsic")
     }
@@ -1218,9 +1251,10 @@ test "every intrinsic is owned by a runtime module, written inline, or removed b
   assert len(inline) == 36
   assert len(host) == 2
   assert len(gone) == 21
-  # and the four groups account for all 117 names, with none left over
+  assert len(staged) == 2
+  # and the five groups account for all 119 names, with none left over
   assert len(map.keys(it)) == 98
-  assert len(internal) == 19
+  assert len(internal) == 21
 }
 
 # ---- trait witnesses ----
@@ -3320,6 +3354,23 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       # (`internal_intrinsics`), so `erased_builtin_sig` has nothing for them.
       if is_cell_intrinsic(name) {
         return lower_cell(st, name, args, ty)
+      }
+      # one-shot resumption stops here, on purpose and by name
+      # (`staged_intrinsics`). The checker types a control arm completely, so
+      # `dawn check` on this program said everything it has to say; what is
+      # missing is the driving loop and the two backends' arms, and a program
+      # that reached this point would otherwise be compiled as though the arm
+      # returned to the raise site -- silently wrong output rather than a
+      # refusal. It is a `panic` rather than a diagnostic because lowering has
+      # no diagnostic channel: nothing here reports, everything here trusts the
+      # checker, and adding a channel for one staged name would be a phase's
+      # worth of plumbing for a message that is going away.
+      if is_staged_intrinsic(name) {
+        panic("lower: one-shot resumption is not implemented yet -- `" ++ name ++
+            "` reached lowering. A `with handle` arm written `op(a) resume k => ...` " ++
+            "type-checks (docs/oneshot-design.md §11) but cannot be compiled until " ++
+            "the driving loop and the two backends' arms land; drop the `resume` " ++
+            "clause to get a tail-resumptive arm, which compiles today.")
       }
       # `char_unchecked` is the Int -> Char bridge, and `Char`'s representation
       # *is* `Int` -- so it disappears here rather than becoming a primitive

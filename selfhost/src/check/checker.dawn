@@ -47,12 +47,13 @@ use check/types.{
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes,
-  eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, eff_assocs, eff_map_assocs,
+  eff_suffix, eff_base, eff_labels, eff_ctl_labels, eff_vars, eff_with_labels, eff_assocs,
+  eff_map_assocs,
   eff_carries,
   erased_ev_ty, erased_cell_ty,
   sig_abi_eff, ty_eff_vars_all, label_key, var_key, assoc_key, atom_keys,
   EV_PACK_ID, ev_pack_ty,
-  Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig,
+  Adts, AdtI, CtorI, FieldI, EffectI, Traits, TraitI, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   assoc_effect_advice,
   no_eparam_names,
@@ -1897,6 +1898,13 @@ pub fn in_with_sugar(cx: Cx) -> Bool =
 pub fn in_handler_arm(cx: Cx) -> Bool =
   len(cx.frame.lambda_stack) > 0 && cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1].arm
 
+## Is the innermost lambda a *control* arm -- one written with a `resume k`
+## clause? It answers the whole `with handle` block rather than the operation,
+## which is what every diagnostic below has to say instead of naming the
+## operation (docs/oneshot-design.md §11.4).
+pub fn in_control_arm(cx: Cx) -> Bool =
+  len(cx.frame.lambda_stack) > 0 && cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1].ctl
+
 ## The message for a jump that would have to leave a `with` region (spec §4.10),
 ## in the words of whichever of the two closures `with` makes it is standing in.
 pub fn with_cross_msg_cx(cx: Cx, kw: String) -> String =
@@ -2021,7 +2029,14 @@ pub fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) = {
   let depth = cx.frame.loop_stack[len(cx.frame.loop_stack) - 1]
   if depth != len(cx.frame.lambda_stack) {
     if in_with_sugar(cx) {
-      let hint = if in_handler_arm(cx) {
+      let hint = if in_control_arm(cx) {
+        # a control arm is further from the loop still: it does not run where
+        # the operation was raised at all -- it runs at the installation, and
+        # may stop in the middle and be entered again
+        # (docs/oneshot-design.md §11)
+        "the loop is outside the arm; a control arm runs where the handler was " ++
+          "installed, not where the operation is raised, and it may suspend there"
+      } else if in_handler_arm(cx) {
         "the loop is outside the arm; an arm is called from wherever the operation " ++
           "is raised, which need not be inside any loop"
       } else {
@@ -2036,6 +2051,26 @@ pub fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) = {
   }
   (Cx { ..cx, loop_jumps: set.insert(cx.loop_jumps, len(cx.frame.loop_stack) - 1) }, true)
 }
+
+## What `?` is judged against, in the reader's terms.
+##
+## Ordinarily it is the enclosing function's return type. In a **control arm**
+## it is the answer type of the `with handle` block, because that is what the
+## arm's body hands back (docs/oneshot-design.md §11.4 (a)) -- so `?` there
+## discards the continuation and makes the `None`/`Err` the block's value. That
+## is the only reading available, since the arm's value *is* the block's, and it
+## is a consistent one: an arm was always free not to resume. The code that
+## decides is unchanged -- `LambdaCx.expected_ret` already holds `A` -- and only
+## the sentence differs, because pointing at "the function" would name a frame
+## the author did not write.
+fn propagate_msg(cx: Cx, on: String, want: String, got: String) -> String =
+  if in_control_arm(cx) {
+    "`?` on " ++ on ++ " requires the block this arm answers to be " ++ want ++
+      ", but it is " ++ got
+  } else {
+    "`?` on " ++ on ++ " requires the function to return " ++ want ++
+      ", but it returns " ++ got
+  }
 
 ## expr? — unwrap Ok/Some or early-return the Err/None (spec §8.1).
 pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
@@ -2091,8 +2126,8 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
         }
         if not ret_is_opt {
           return (cerr(cx,
-            "`?` on an Option requires the function to return Option[...], but it returns " ++
-              ty_show(cx.adts, sig_ret), lo, hi), TyError, XError(lo, hi))
+            propagate_msg(cx, "an Option", "Option[...]", ty_show(cx.adts, sig_ret)),
+            lo, hi), TyError, XError(lo, hi))
         }
         return (cx, targs[0], node(targs[0]))
       }
@@ -2101,8 +2136,8 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
           TyAdt(rid, rargs) -> {
             if rid != RESULT_ID {
               return (cerr(cx,
-                "`?` on a Result requires the function to return Result[...], but it returns " ++
-                  ty_show(cx.adts, sig_ret), lo, hi), TyError, XError(lo, hi))
+                propagate_msg(cx, "a Result", "Result[...]", ty_show(cx.adts, sig_ret)),
+                lo, hi), TyError, XError(lo, hi))
             }
             if rargs[1] != targs[1] {
               return (cerr_h(cx, "`?` error types differ: " ++ ty_show(cx.adts, ot) ++ " vs " ++
@@ -2113,8 +2148,8 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
             return (cx, targs[0], node(targs[0]))
           }
           _ -> return (cerr(cx,
-            "`?` on a Result requires the function to return Result[...], but it returns " ++
-              ty_show(cx.adts, sig_ret), lo, hi), TyError, XError(lo, hi))
+            propagate_msg(cx, "a Result", "Result[...]", ty_show(cx.adts, sig_ret)),
+            lo, hi), TyError, XError(lo, hi))
         }
       }
       (cerr_h(cx, "`?` needs an Option or Result, got " ++ ty_show(cx.adts, ot), lo, hi,
@@ -2173,6 +2208,7 @@ test "loop jumps respect lambda boundaries" {
         captures: [],
         sugar: false,
         arm: false,
+        ctl: false,
         handler_of: None
       }]
     }
@@ -3467,7 +3503,7 @@ test "an isolated context reports its own effects, then restores all eight field
       dict_syms: outer_dicts,
       lambda_stack: [LambdaCx {
         boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false,
-        handler_of: None
+        ctl: false, handler_of: None
       }],
       loop_stack: [7],
       isolated: false
@@ -3780,6 +3816,7 @@ fn eta_bounded_fn_value(
     captures: [],
     sugar: false,
     arm: false,
+    ctl: false,
     handler_of: None
   }
   var cx1 = Cx {
@@ -4722,7 +4759,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       check_ctor_call(cx, cname, cargs, spread, if has_braces { CBraces } else { CBare },
         expected, None, cclo, cchi, lo, hi)
     ELambda(params, body, sugar, lo, hi) ->
-      check_lambda(cx, params, body, sugar, false, None, expected, lo, hi)
+      check_lambda(cx, params, body, sugar, false, false, None, expected, lo, hi)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
@@ -4904,12 +4941,24 @@ fn cell_hid(sym: Sym) -> Option[Int] =
 ## - a frame of **its own** installation, arm or remainder alike: the frame
 ##   carries that installation's id.
 ## - the **remainder** of *any* installation. Such a closure is synthesized by
-##   the parser, called once and in place by the `with handle` node that owns
-##   it, and never handed to anybody; lexically it is nothing but the rest of
+##   the parser and applied exactly once, in place, by the `with handle` node
+##   that owns it -- `XApply` at the block's tail, or `ctl_run` when the
+##   installation has a control arm; lexically it is nothing but the rest of
 ##   the block it was cut out of. A second `with handle` in the same block
 ##   would otherwise hide the first one's cells from the statements below it,
 ##   which is a narrower rule than the one the design settled on
 ##   (docs/handler-state-design.md §8 problem two).
+##
+##   One-shot resumption does not weaken this, and the reason is worth writing
+##   out because the obvious reading is that it does
+##   (docs/oneshot-design.md §11.5). What escapes a control arm is not the
+##   remainder closure -- that is still applied once and in place -- but a
+##   *continuation*, which is that closure already part-way through running.
+##   A continuation carries a **copy** of this installation's cells (decision 5,
+##   Effekt's option record), not the cell itself. So the claim this ban rests
+##   on is unchanged in the only terms it was ever written in: no second name
+##   reaches this slot. What is new is that the slot may be duplicated at run
+##   time, and a duplicate is a different slot with no name at all.
 ##
 ## An **arm** of another installation stays refused, and that is not symmetry
 ## for its own sake: between a `cell_take` and the `cell_set` that ends the
@@ -5130,12 +5179,20 @@ fn check_unsafe_pure(cx: Cx, body: Expr, expected: Option[Ty], lo: Int, hi: Int)
 ## non-`None` on a call from `check_handle`, which is also why the remainder is
 ## checked by calling this directly rather than through `check_expr`'s
 ## `ELambda` arm -- that arm has no id to pass.
+##
+## `ctl` narrows `arm`: the arm was written with a `resume k` clause, so
+## `params` already ends in the binder `check_handle` synthesized and
+## `expected`'s return type is the block's answer type rather than the
+## operation's (docs/oneshot-design.md §11.2, §11.3). Nothing in this function
+## reads it; it is written into the frame for the three consumers listed on
+## `cx.LambdaCx.ctl`.
 fn check_lambda(
   cx: Cx,
   params: List[LambdaParam],
   body: Expr,
   sugar: Bool,
   arm: Bool,
+  ctl: Bool,
   handler_of: Option[Int],
   expected: Option[Ty],
   lo: Int,
@@ -5217,6 +5274,7 @@ fn check_lambda(
       captures: [],
       sugar: sugar,
       arm: arm,
+      ctl: ctl,
       handler_of: handler_of
     }
   cx1 = Cx {
@@ -5370,7 +5428,7 @@ fn declare_cells(cx: Cx, cells: List[HandlerCell], hid: Int) -> (Cx, List[TStmt]
 fn check_rest(cx: Cx, rest: Expr, hid: Int, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
   match rest {
     ELambda(params, body, sugar, rlo, rhi) ->
-      check_lambda(cx, params, body, sugar, false, Some(hid), rest_expected(expected),
+      check_lambda(cx, params, body, sugar, false, false, Some(hid), rest_expected(expected),
         rlo, rhi)
     _ -> check_expr(cx, rest, rest_expected(expected))
   }
@@ -5408,10 +5466,19 @@ fn check_rest(cx: Cx, rest: Expr, hid: Int, expected: Option[Ty]) -> (Cx, Ty, TE
 ## The count is over the *written name*, before the right-hand side is checked,
 ## so a shadowed `acc` inside it counts as an occurrence. That over-counts, and
 ## over-counting only ever costs the optimisation.
+##
+## **Not in a control arm** (docs/oneshot-design.md §11.5). The first condition
+## above rests on "no arm of this installation can run inside the window", and
+## an arm that suspends and is resumed re-opens that window from the inside:
+## `acc = f(acc)` calls `k` in the middle, the remainder raises `E` again, and
+## the *same* arm is entered on the emptied slot. Refusing the take is free --
+## `cell_get` is correct everywhere and this is only ever an optimisation
+## (`cell_read`) -- so there is nothing to weigh.
 fn cell_take_ok(cx: Cx, hid: Int, name: String, value: Expr) -> Bool = {
   if len(cx.frame.lambda_stack) == 0 { return false }
   let lc = cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1]
   if not lc.arm { return false }
+  if lc.ctl { return false }
   if lc.handler_of != Some(hid) { return false }
   cell_occurrences(value, name) == 1
 }
@@ -5666,63 +5733,227 @@ fn check_handle(
         join(map(missing, o => "`" ++ o ++ "`"), ", "), nlo, nhi,
       "a handler answers every operation its effect declares")
   }
-  # the arms, each against the operation's own signature. Their own effects
-  # are charged to this block: an arm's body runs where the handler was
-  # installed, not where the operation was raised
+  # **Does this installation have a control arm?** One arm written
+  # `op(a) resume k => ...` is enough, and the answer decides the order the two
+  # halves below are checked in -- nothing else about this function branches on
+  # it (docs/oneshot-design.md §11.1).
   #
-  # The scope opened here is the whole region `handle` claims: the state cells
-  # first, then -- after the arms have been checked in it -- the evidence. Two
-  # things ride on that order. An arm sees the cells and not the evidence,
-  # which is the "an arm does not answer itself" rule already spelled out
-  # below; and the remainder sees both, which is what makes a cell readable
-  # after the handler and the evidence available to what it calls.
+  # Asked of `chosen` rather than of `arms`: an arm naming an operation this
+  # effect does not declare has already been reported and never reaches the
+  # record, so a binder on one of those says nothing about how this block is
+  # answered.
+  let has_ctl = any_control_arm(chosen)
+  # The scope opened here is the whole region `handle` claims, and the state
+  # cells are the first thing in it.
   cx1 = push_scope(cx1)
   let (cxcells, cell_stmts) = declare_cells(cx1, cells, hid)
   cx1 = cxcells
+  let ev_ty = TyAdt(eid, [])
+  let ev_name = ev_local_name(cx1, eid)
+
+  # **An arm does not answer itself**, and with a control arm present that rule
+  # changes hands: it used to be kept by *order* -- the arms were checked
+  # before `E`'s own evidence was bound -- and it is now kept by *scope*, so
+  # that it survives the two halves swapping places.
+  #
+  # The swap is forced. The answer type `A` is the remainder's return type
+  # (§11.1), and a control arm is checked against it, so with one present the
+  # remainder has to be checked first. Three facts make that legal, and each is
+  # checkable rather than a hope: `declare_evidence` needs only `eid` and
+  # `ev_ty`, never an arm node, so it can move ahead of the arms; a scope
+  # pushed around the remainder and popped again leaves the arms unable to see
+  # the evidence, which is what order used to buy; and `rret` does not depend
+  # on any arm, because an operation's return type comes from the effect
+  # declaration, so there is no cycle to break.
+  #
+  # With no control arm the order below is today's, statement for statement.
   var arm_nodes: List[TExpr] = []
   var slots: List[Option[Int]] = []
-  # ... which is the per-arm `record_effect` inside the loop below, into the
-  # frame this installation was written in -- the `⋃base_i` of
-  # docs/spec.md §6.5. `arms_eff` is those same rows kept a second time for a
-  # second reader: it is what `evidence_pack` builds the arms' own environment
-  # from, after the loop and before `E`'s own record joins the scope. So each
-  # arm's row goes to two places and neither is a closure -- the block that
-  # installed the handler pays for it, and the arms are handed evidence for it.
-  #
-  # This line used to say the arms were charged to any closure the evidence
-  # ends up inside, citing docs/effects-soundness-design.md §4.2. That was a
-  # rule V1' flipped, in a document that has since declared itself historical:
-  # nothing is charged to a closure any more, because the evidence is not
-  # captured and there is no closure to charge
-  # (docs/handler-state-design.md §7.6).
   var arms_eff = EPure
+  var arm_lets: List[TStmt] = []
+  var ev_sym = 0
+  var rret = TyError
+  var reff = EPure
+  var rx = XError(lo, hi)
+  var revs = XError(lo, hi)
+  if has_ctl {
+    cx1 = push_scope(cx1)
+    let (cxe, esym) = declare_evidence(cx1, ev_name, ev_ty, label_key(eid), nlo, nhi)
+    cx1 = cxe
+    ev_sym = esym
+    let (cxr, rt0, re0, rx0, rv0) = check_handle_remainder(cx1, rest, hid, expected, lo, hi)
+    cx1 = pop_scope(cxr)
+    rret = rt0
+    reff = re0
+    rx = rx0
+    revs = rv0
+    let (cxa, ns, sl, ae, als) =
+      check_handle_arms(cx1, info, rec, chosen, hid, name, Some(rret), nlo, nhi)
+    cx1 = cxa
+    arm_nodes = ns
+    slots = sl
+    arms_eff = ae
+    arm_lets = als
+  } else {
+    let no_answer: Option[Ty] = None
+    let (cxa, ns, sl, ae, als) =
+      check_handle_arms(cx1, info, rec, chosen, hid, name, no_answer, nlo, nhi)
+    cx1 = cxa
+    arm_nodes = ns
+    slots = sl
+    arms_eff = ae
+    arm_lets = als
+    let (cxe, esym) = declare_evidence(cx1, ev_name, ev_ty, label_key(eid), nlo, nhi)
+    cx1 = cxe
+    ev_sym = esym
+    let (cxr, rt0, re0, rx0, rv0) = check_handle_remainder(cx1, rest, hid, expected, lo, hi)
+    cx1 = cxr
+    rret = rt0
+    reff = re0
+    rx = rx0
+    revs = rv0
+  }
+  # **The environment the arms run in.** What the arms need is what they raise,
+  # so the row to pack is `arms_eff`, and it is packed out of a frame that
+  # cannot see `E`'s own record -- either because the record is not bound yet
+  # (no control arm) or because the scope holding it has been popped (control
+  # arm). It reports nothing: an arm raising something unanswerable already
+  # said so, inside the arm.
+  let (cx1b, arm_env, _) = evidence_pack(cx1, arms_eff, false, lo, hi)
+  cx1 = cx1b
+  let ev_node = XCtor(eid, 0, arm_nodes ++ [arm_env], slots ++ [Some(len(slots))],
+    no_expr(), lo, hi, ev_ty)
+  cx1 = pop_scope(cx1)
+  # ... and the block is charged with what the remainder does *minus* E, which
+  # this very call just answered
+  cx1 = record_effect(cx1, eff_minus(reff, eid), lo, hi, "the block after `with handle`")
+  # **The block's tail.** With no control arm it is today's node: the remainder
+  # closure, applied once and in place with the pack built for it. With one, it
+  # is `ctl_run`, which owns the driving loop -- so lowering and both backends
+  # read "this installation is a control installation" off a name instead of
+  # inferring it from the shape of the record (§11.3).
+  #
+  # `hid` is the prompt. It was minted from the symbol counter, so it is unique
+  # in the module, and a recursive re-activation of the same installation is
+  # answered innermost-first by the run-time stack discipline, which is the
+  # LIFO answer wanted -- no token object is needed to say it.
+  let call =
+    if has_ctl {
+      XCallBuiltin("ctl_run", [XInt(hid, lo, hi), rx, revs], ctl_wits(), ctl_evs(),
+        lo, hi, rret)
+    } else {
+      XApply(rx, [], [revs], lo, hi, rret)
+    }
+  # the slots are made before the record that holds the arms: an arm closes
+  # over the cells, so they have to exist before the closure does. A control
+  # arm's own local goes between the two, for the reason `ctl_wrapper` gives.
+  (cx1, rret,
+    XBlock(cell_stmts ++ arm_lets ++ [TSLet(Some(ev_sym), ev_name, ev_node, lo, hi)],
+      Some(call), lo, hi, rret))
+}
+
+## Was any answered operation given a `resume k` clause?
+fn any_control_arm(chosen: List[Option[HandlerArm]]) -> Bool = {
+  for c in chosen {
+    match c {
+      Some(a) -> if arm_is_control(a) { return true }
+      None -> ()
+    }
+  }
+  false
+}
+
+## The clause being there is the arm's kind (docs/oneshot-design.md §9 ③).
+fn arm_is_control(a: HandlerArm) -> Bool =
+  match a.binder {
+    Some(_) -> true
+    None -> false
+  }
+
+## The unspellable local a control arm's own closure is bound to. `$` is not an
+## identifier character, so nothing an author writes can name or shadow it; the
+## operation index keeps two arms of one handler apart even if an effect ever
+## declares the same operation name twice.
+fn ctl_arm_name(idx: Int, op: String) -> String = "arm\$" ++ to_string(idx) ++ "\$" ++ op
+
+## `ctl_yield` and `ctl_run` are internal primitives with pure rows and no type
+## parameters, so neither takes a witness or an evidence slot.
+fn ctl_wits() -> List[WitRef] = []
+
+fn ctl_evs() -> List[TExpr] = []
+
+## The remainder of the block: its type, its row, the closure, and the pack it
+## will be run with.
+##
+## Split out of `check_handle` so that the two orders §11.1 needs are two calls
+## rather than two copies. The pack has to be built here and not by the caller:
+## it is the pack being *handed over*, so it must be built while `E`'s own
+## record is still in scope, and in the control-arm order that scope closes as
+## soon as this returns.
+fn check_handle_remainder(
+  cx: Cx,
+  rest: Expr,
+  hid: Int,
+  expected: Option[Ty],
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, Eff, TExpr, TExpr) !io = {
+  let (cx1, rt, rx) = check_rest(cx, rest, hid, expected)
+  let (_, rret, reff) = fn_ty_parts(rt)
+  let (cx2, revs, _) = evidence_pack(cx1, reff, false, lo, hi)
+  (cx2, rret, reff, rx, revs)
+}
+
+## The arms, each against the operation it answers. Their own effects are
+## charged to this block: an arm's body runs where the handler was installed,
+## not where the operation was raised.
+##
+## `answer` is the block's answer type `A`, and it is `Some` exactly when this
+## installation has a control arm -- which is also exactly when the caller has
+## already checked the remainder and so has an `A` to give. A tail-resumptive
+## arm never reads it: it answers with the *operation's* return type, today and
+## under a `ctl` effect alike.
+##
+## The per-arm row goes to two places, and neither is a closure: `record_effect`
+## charges it to the frame this installation was written in (the `⋃base_i` of
+## docs/spec.md §6.5), and `arms_eff` keeps the same rows for the caller to
+## build the arms' own evidence environment from. The block that installed the
+## handler pays for it, and the arms are handed evidence for it.
+##
+## The fifth result is the `TSLet` a control arm needs: `ctl_wrapper` says why
+## the arm is bound to a local instead of being nested inside the wrapper.
+fn check_handle_arms(
+  cx: Cx,
+  info: EffectI,
+  rec: CtorI,
+  chosen: List[Option[HandlerArm]],
+  hid: Int,
+  name: String,
+  answer: Option[Ty],
+  nlo: Int,
+  nhi: Int
+) -> (Cx, List[TExpr], List[Option[Int]], Eff, List[TStmt]) !io = {
+  var cx1 = cx
+  var arm_nodes: List[TExpr] = []
+  var slots: List[Option[Int]] = []
+  var arms_eff = EPure
+  var arm_lets: List[TStmt] = []
   var k = 0
   for o in info.ops {
     let field = rec.fields[k]
     let (fptys, fret, _) = fn_ty_parts(field.ty)
     let node = match chosen[k] {
       None -> XError(nlo, nhi)
-      # A `resume k` clause makes this a control arm, and nothing below the
-      # checker knows what one is: Core has no continuation, and both emitters
-      # would compile it as though the arm returned to the raise site. So it is
-      # refused here, at the clause, and the arm becomes `XError` -- the same
-      # node an unanswered operation leaves, so the evidence record keeps its
-      # arity and no later phase meets a shape it has never seen.
-      #
-      # The body is deliberately not checked against the operation's signature.
-      # It is written for a language where `resume` is in scope and the arm may
-      # answer with the *block's* type rather than the operation's, so checking
-      # it here would bury one honest refusal under a pile of diagnostics about
-      # a program the author did not write.
-      Some(a) -> match a.binder {
-        Some(kname) -> {
-          cx1 = cerr_h(cx1, "`resume` arms are not available in this compiler", a.blo, a.bhi,
-            "binding the continuation makes this a control arm, and one-shot " ++
-              "resumption is not implemented yet (docs/oneshot-design.md); " ++
-              "without the `resume " ++ kname ++ "` clause the arm is tail-resumptive")
-          XError(a.blo, a.bhi)
-        }
-        None -> {
+      Some(a) ->
+        if arm_is_control(a) {
+          let (cxc, wrap, alet, aeff) =
+            check_control_arm(cx1, a, k, field.ty, fptys, fret, hid, name, info.ctl,
+              answer_ty(answer))
+          cx1 = cxc
+          arm_lets = arm_lets ++ [alet]
+          arms_eff = eff_union([arms_eff, aeff])
+          wrap
+        } else {
           var cxa = cx1
           if len(a.params) != len(fptys) {
             cxa = cerr_h(cxa, "arm `" ++ a.name ++ "` takes " ++ to_string(len(a.params)) ++
@@ -5730,7 +5961,7 @@ fn check_handle(
                 to_string(len(fptys)), a.nlo, a.nhi,
               "the arm is the operation's body: " ++ ty_show(cxa.adts, field.ty))
           }
-          let (cxb, at, ax) = check_lambda(cxa, a.params, a.body, true, true,
+          let (cxb, at, ax) = check_lambda(cxa, a.params, a.body, true, true, false,
             Some(hid), Some(field.ty), a.lo, a.hi)
           cxa = cxb
           let (_, aret, aeff) = fn_ty_parts(at)
@@ -5744,43 +5975,152 @@ fn check_handle(
           cx1 = cxa
           ax
         }
-      }
     }
     arm_nodes = arm_nodes ++ [node]
     slots = slots ++ [Some(k)]
     k = k + 1
   }
-  # **The environment the arms run in**, snapshotted here, before `E`'s own
-  # evidence is bound -- an arm does not answer itself, and this is the same
-  # `before` that the arms were checked in. What the arms need is what they
-  # raise, so the row to pack is `arms_eff`. It reports nothing: an arm raising
-  # something unanswerable already said so, inside the arm.
-  let (cx1b, arm_env, _) = evidence_pack(cx1, arms_eff, false, lo, hi)
-  cx1 = cx1b
-  let ev_ty = TyAdt(eid, [])
-  let ev_node = XCtor(eid, 0, arm_nodes ++ [arm_env], slots ++ [Some(len(slots))],
-    no_expr(), lo, hi, ev_ty)
-  # the evidence joins the region's scope here, after the arms and before the
-  # remainder
-  let ev_name = ev_local_name(cx1, eid)
-  let (cx2, ev_sym) = declare_evidence(cx1, ev_name, ev_ty, label_key(eid), nlo, nhi)
-  cx1 = cx2
-  let (cx3, rt, rx) = check_rest(cx1, rest, hid, expected)
-  cx1 = cx3
-  let (_, rret, reff) = fn_ty_parts(rt)
-  # the pack the remainder is run with: built while `E`'s record is still in
-  # scope, because it is the thing being handed over
-  let (cx4, revs, _) = evidence_pack(cx1, reff, false, lo, hi)
-  cx1 = pop_scope(cx4)
-  # ... and the block is charged with what the remainder does *minus* E, which
-  # this very call just answered
-  cx1 = record_effect(cx1, eff_minus(reff, eid), lo, hi, "the block after `with handle`")
-  let call = XApply(rx, [], [revs], lo, hi, rret)
-  # the slots are made before the record that holds the arms: an arm closes
-  # over the cells, so they have to exist before the closure does
-  (cx1, rret,
-    XBlock(cell_stmts ++ [TSLet(Some(ev_sym), ev_name, ev_node, lo, hi)],
-      Some(call), lo, hi, rret))
+  (cx1, arm_nodes, slots, arms_eff, arm_lets)
+}
+
+## `A` when the caller has one. `TyError` otherwise, which cannot be reached
+## from a control arm -- the caller passes `Some` exactly when one exists -- and
+## is absorbed by `assignable` if a later change ever makes it reachable.
+fn answer_ty(answer: Option[Ty]) -> Ty =
+  match answer {
+    Some(t) -> t
+    None -> TyError
+  }
+
+## One control arm: `op(a, b) resume k => body`.
+##
+## **What it is checked against** (docs/oneshot-design.md §11.2, §11.3):
+## `fn(P..., fn(R) -> A) -> A` with a pure row, where `P...` are the operation's
+## parameters, `R` is its return type and `A` is the block's answer type. The
+## binder is not in `a.params` -- the parser stored a name and two spans, not a
+## parameter node -- so it is synthesized here and appended, unannotated: the
+## expected function type supplies its type, and `is_concrete` answers true for
+## a `TyFn`, so no inference had to change to let that through.
+##
+## **Why `k`'s row is pure.** The pack the remainder needs was built at the
+## installation point and handed over there; a continuation is a remainder that
+## has already started, so that pack is inside it and calling `k` supplies
+## nothing. The converse is what settles it: a `k` carrying the remainder's row
+## would make the *call site* build a pack for a row that contains `E` itself,
+## and the arm cannot see `E`'s evidence -- it would resolve to an outer handler
+## of the same name, or to nothing. A row is recorded where its pack is
+## supplied, and this one was supplied already. The precedent is the SAM
+## snapshot, which charges the row at the conversion and hands over a value that
+## asks its caller for nothing.
+##
+## **Why the binder needs the effect's permission.** Decision 3 makes the clause
+## the arm's kind mark, and §11.6 S1 makes suspendability a property of the
+## effect; where the two disagree the arm is what is wrong, because the
+## declaration is a contract for the whole module and the arm is one use of it.
+## The arm is still checked as a control arm afterwards, so the author gets one
+## diagnostic about the clause rather than a cascade about a `k` that is not in
+## scope.
+fn check_control_arm(
+  cx: Cx,
+  a: HandlerArm,
+  idx: Int,
+  field_ty: Ty,
+  fptys: List[Ty],
+  fret: Ty,
+  hid: Int,
+  ename: String,
+  effect_is_ctl: Bool,
+  answer: Ty
+) -> (Cx, TExpr, TStmt, Eff) !io = {
+  var cx1 = cx
+  let kname = match a.binder {
+    Some(s) -> s
+    None -> ""
+  }
+  if not effect_is_ctl {
+    cx1 = cerr_h(cx1, "arm `" ++ a.name ++ "` binds a continuation, but effect `" ++
+        ename ++ "` is not declared `ctl`", a.blo, a.bhi,
+      "write `ctl effect " ++ ename ++ " { ... }`: suspendability is declared on the " ++
+        "effect, because a row names effects and that is all the Java boundary can read")
+  }
+  if len(a.params) != len(fptys) {
+    cx1 = cerr_h(cx1, "arm `" ++ a.name ++ "` takes " ++ to_string(len(a.params)) ++
+        " parameter(s) and a resume binder, but operation `" ++ a.name ++ "` declares " ++
+        to_string(len(fptys)), a.nlo, a.nhi,
+      "the binder is the continuation, not a parameter: " ++ ty_show(cx1.adts, field_ty))
+  }
+  let k_ty = TyFn([fret], answer, EPure)
+  let kp = LambdaParam { name: kname, ann: None, lo: a.blo, hi: a.bhi }
+  let (cxb, at, ax) = check_lambda(cx1, a.params ++ [kp], a.body, true, true, true,
+    Some(hid), Some(TyFn(fptys ++ [k_ty], answer, EPure)), a.lo, a.hi)
+  cx1 = cxb
+  let (_, aret, aeff) = fn_ty_parts(at)
+  if not assignable(cx1, aret, answer) {
+    cx1 = cerr_h(cx1, "arm `" ++ a.name ++ "` returns " ++ ty_show(cx1.adts, aret) ++
+        " but it answers the block, which is " ++ ty_show(cx1.adts, answer),
+      e_lo(a.body), e_hi(a.body),
+      "a control arm's value is the value of the whole `with handle`, not the " ++
+        "operation's result -- that is what the `resume` clause bought")
+  }
+  cx1 = record_effect(cx1, aeff, a.nlo, a.nhi, a.name)
+  let local = ctl_arm_name(idx, a.name)
+  let (cxd, asym) = declare(cx1, local, at, false, a.lo, a.hi)
+  cx1 = cxd
+  let (cxw, wrap) = ctl_wrapper(cx1, hid, asym, local, at, fptys, fret, a.lo, a.hi)
+  cx1 = cxw
+  (cx1, wrap, TSLet(Some(asym), local, ax, a.lo, a.hi), aeff)
+}
+
+## The closure the evidence record holds for a control arm.
+##
+## **The record's field type does not change** -- `passes.pass_effects` still
+## writes `TyFn(ptys, ret, EPure)` for every operation -- so the operation call
+## site reads one shape, and every `with handle` in the tree keeps the record
+## layout it had. A control arm is not a second kind of field; it is a different
+## closure in the same field (docs/oneshot-design.md §11.0 constraint 2). What
+## this wrapper does is hand the arm and the operation's arguments to
+## `ctl_yield`, which is where the bubbling begins.
+##
+## The node is typed at the operation's return type although the call never
+## returns normally. `Never` would be the honest type and would cost the wrapper
+## body a bottom-propagation case for nothing.
+##
+## **The arm is captured, not nested.** `check_lambda` computed the arm's
+## capture list against the frame the arm was written in; dropping that closure
+## inside another `XLambda` would put one more closure boundary between the arm
+## and the cells it captured, and the list would no longer describe where they
+## are. So the arm is bound to a local of its own (`ctl_arm_name`) above the
+## record, and this wrapper's capture list holds that one entry.
+fn ctl_wrapper(
+  cx: Cx,
+  hid: Int,
+  arm_sym: Int,
+  arm_name: String,
+  arm_ty: Ty,
+  fptys: List[Ty],
+  fret: Ty,
+  lo: Int,
+  hi: Int
+) -> (Cx, TExpr) = {
+  var cx1 = push_scope(cx)
+  var psyms: List[Int] = []
+  var pnames: List[String] = []
+  var pargs: List[TExpr] = []
+  var i = 0
+  for pt in fptys {
+    let pn = "ctl\$arg\$" ++ to_string(i)
+    let (cxa, sid) = declare(cx1, pn, pt, false, lo, hi)
+    cx1 = cxa
+    psyms = psyms ++ [sid]
+    pnames = pnames ++ [pn]
+    pargs = pargs ++ [XLocal(sid, pn, lo, hi, pt)]
+    i = i + 1
+  }
+  cx1 = pop_scope(cx1)
+  let body = XCallBuiltin("ctl_yield",
+    [XInt(hid, lo, hi), XLocal(arm_sym, arm_name, lo, hi, arm_ty)] ++ pargs,
+    ctl_wits(), ctl_evs(), lo, hi, fret)
+  (cx1, XLambda(psyms, pnames, body, [arm_sym], lo, hi, TyFn(fptys, fret, EPure)))
 }
 
 ## A row without one label. `eff_drop` takes a list; this is its one-label
@@ -6402,7 +6742,7 @@ fn check_local_fn(
   let (cxc, sid) = declare(cx1, name, ft, false, nlo, nhi)
   cx1 = cxc
   let (cxd, actual, lam) =
-    check_lambda(cx1, params, body, false, false, None, Some(ft), lo, hi)
+    check_lambda(cx1, params, body, false, false, false, None, Some(ft), lo, hi)
   cx1 = cxd
   match actual {
     TyFn(_, ar, ae) -> {
@@ -8154,8 +8494,38 @@ fn sam_ret_compatible(js: Jsig, r: Ty, j: String) -> Bool !io =
 ## conversion (KT-40978) because a continuation cannot be resumed from a
 ## foreign frame; an evidence pack is read, not resumed, and a read is a thing
 ## a snapshot can serve.
+##
+## **And that second half is now the other way round for one kind of row.**
+## Kotlin's reason applies word for word to a row naming a `ctl` effect: such a
+## value *can* be suspended, and suspending it means unwinding through the Java
+## frame that entered it, which no barrier below can undo
+## (docs/oneshot-design.md §11.6, decision 4). So Dawn refuses it, for Kotlin's
+## reason, and docs/design.md:105-107's claim that Dawn has no such obstacle is
+## retired with it. The snapshot clause is untouched for every other row --
+## pure, `!io`, and a named label that is not `ctl` -- so nothing that crosses
+## today stops crossing.
+##
+## **Only written labels are refused** (§11.6 H1). An effect variable and an
+## associated projection do not say what they will be instantiated to, and
+## refusing them would be refusing `!e` outright; those two axes stay dynamic --
+## a bubble that reaches a Java frame panics, naming the conversion rather than
+## the frame it died on. That is what keeps
+## `scripts/spike-native/effect_sam_snapshot.dawn`'s `cross`/`variable`/
+## `nested`/`cross_assoc`/`projection` cases alive.
 fn sam_snapshot(cx: Cx, i: Int, te: Eff, lo: Int, hi: Int) -> (Cx, (Int, TExpr)) = {
-  let (cx1, pack, unanswered) = evidence_pack(cx, te, true, lo, hi)
+  var cx0 = cx
+  let ctl = eff_ctl_labels(cx0.effect_infos, te)
+  if len(ctl) > 0 {
+    cx0 = cerr_h(cx0, "a function value whose row names the `ctl` effect `" ++ ctl[0] ++
+        "` cannot cross to Java", lo, hi,
+      "`ctl` says an arm may suspend this value's caller, and there is no Dawn frame " ++
+        "under a Java frame to suspend into; move the conversion out, or drop `ctl` " ++
+        "from the effect if no arm of it binds a continuation")
+  }
+  # the pack is built either way: a refused conversion still has a shape the
+  # rest of this call expects, and a second diagnostic about a missing argument
+  # would bury the one that matters
+  let (cx1, pack, unanswered) = evidence_pack(cx0, te, true, lo, hi)
   let cx2 = record_effect(cx1, eff_drop(te, unanswered), lo, hi,
     "the function value crossing to Java")
   (cx2, (i, pack))
@@ -11607,6 +11977,320 @@ test "a handler answers every operation its effect declares, and only those" {
   assert cx3.diags[0].msg == "operation `get` is answered twice"
 }
 
+# ---- control arms (docs/oneshot-design.md §11) ----
+
+fn ctl_src(body: String) -> String =
+  "ctl effect Ask {\n  fn ask(n: Int) -> Int\n}\n" ++ body
+
+fn ctl_check(body: String) -> Cx !io = {
+  let (m, _) = parser.parse_module(ctl_src(body))
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  cx1
+}
+
+## The primitive names a checked body reaches.
+##
+## Not a general walk: it descends the shapes `check_handle` builds and nothing
+## else, which is exactly what the tests below are about. A shape it does not
+## know answers the empty list, so this can only ever under-report -- and an
+## under-report fails the assertions rather than passing them.
+fn tast_prims(e: TExpr) -> List[String] =
+  match e {
+    XBlock(stmts, tail, _, _, _) -> {
+      var out: List[String] = []
+      for s in stmts { out = out ++ tstmt_prims(s) }
+      match tail {
+        Some(t) -> out ++ tast_prims(t)
+        None -> out
+      }
+    }
+    XLambda(_, _, body, _, _, _, _) -> tast_prims(body)
+    XCtor(_, _, written, _, _, _, _, _) -> {
+      var out: List[String] = []
+      for a in written { out = out ++ tast_prims(a) }
+      out
+    }
+    XCallBuiltin(n, args, _, _, _, _, _) -> {
+      var out = [n]
+      for a in args { out = out ++ tast_prims(a) }
+      out
+    }
+    XApply(t, args, _, _, _, _) -> {
+      var out = tast_prims(t)
+      for a in args { out = out ++ tast_prims(a) }
+      out
+    }
+    XCallFn(_, _, args, _, _, _, _, _, _) -> {
+      var out: List[String] = []
+      for a in args { out = out ++ tast_prims(a) }
+      out
+    }
+    XBinary(_, l, r, _, _, _, _, _, _) -> tast_prims(l) ++ tast_prims(r)
+    XUnary(_, o, _, _, _) -> tast_prims(o)
+    XIf(c, t, e, _, _, _) ->
+      match e {
+        Some(x) -> tast_prims(c) ++ tast_prims(t) ++ tast_prims(x)
+        None -> tast_prims(c) ++ tast_prims(t)
+      }
+    XField(t, _, _, _, _) -> tast_prims(t)
+    XPropagate(o, _, _, _) -> tast_prims(o)
+    XListLit(elems, _, _, _) -> {
+      var out: List[String] = []
+      for el in elems {
+        match el {
+          TLEExpr(x) -> { out = out ++ tast_prims(x) }
+          TLESpread(x) -> { out = out ++ tast_prims(x) }
+          TLEIf(_) -> ()
+        }
+      }
+      out
+    }
+    _ -> []
+  }
+
+## The statement half of `tast_prims`, split out so that the four statement
+## forms a handler arm's body is made of are all reached: a cell write is a
+## `TSExpr`, not a `TSLet`, and missing it made the first draft of the
+## `cell_take` test below pass by seeing nothing.
+fn tstmt_prims(s: TStmt) -> List[String] =
+  match s {
+    TSLet(_, _, init, _, _) -> tast_prims(init)
+    TSLetPat(_, init, _, _) -> tast_prims(init)
+    TSAssign(_, _, value, _, _) -> tast_prims(value)
+    TSExpr(e, _, _) -> tast_prims(e)
+    TSAssert(cond, _, _, _) -> tast_prims(cond)
+    _ -> []
+  }
+
+## The names bound by `let` statements in the blocks this walk reaches.
+fn tast_lets(e: TExpr) -> List[String] =
+  match e {
+    XBlock(stmts, tail, _, _, _) -> {
+      var out: List[String] = []
+      for s in stmts {
+        match s {
+          TSLet(_, n, init, _, _) -> { out = out ++ [n] ++ tast_lets(init) }
+          _ -> ()
+        }
+      }
+      match tail {
+        Some(t) -> out ++ tast_lets(t)
+        None -> out
+      }
+    }
+    XLambda(_, _, body, _, _, _, _) -> tast_lets(body)
+    XApply(t, args, _, _, _, _) -> {
+      var out = tast_lets(t)
+      for a in args { out = out ++ tast_lets(a) }
+      out
+    }
+    XCallBuiltin(_, args, _, _, _, _, _) -> {
+      var out: List[String] = []
+      for a in args { out = out ++ tast_lets(a) }
+      out
+    }
+    _ -> []
+  }
+
+## The capture lists of every wrapper closure this walk finds -- a lambda whose
+## whole body is the `ctl_yield` call.
+fn ctl_wrapper_captures(e: TExpr) -> List[Int] =
+  match e {
+    XBlock(stmts, tail, _, _, _) -> {
+      var out: List[Int] = []
+      for s in stmts {
+        match s {
+          TSLet(_, _, init, _, _) -> { out = out ++ ctl_wrapper_captures(init) }
+          _ -> ()
+        }
+      }
+      match tail {
+        Some(t) -> out ++ ctl_wrapper_captures(t)
+        None -> out
+      }
+    }
+    XCtor(_, _, written, _, _, _, _, _) -> {
+      var out: List[Int] = []
+      for a in written { out = out ++ ctl_wrapper_captures(a) }
+      out
+    }
+    XLambda(_, _, body, caps, _, _, _) ->
+      match body {
+        XCallBuiltin(n, _, _, _, _, _, _) -> if n == "ctl_yield" { caps } else { [] }
+        _ -> ctl_wrapper_captures(body)
+      }
+    XApply(t, args, _, _, _, _) -> {
+      var out = ctl_wrapper_captures(t)
+      for a in args { out = out ++ ctl_wrapper_captures(a) }
+      out
+    }
+    _ -> []
+  }
+
+test "a control arm is bound to a local, wrapped, and driven by `ctl_run`" {
+  let (m, p) = parser.parse_module(ctl_src(
+    "fn f() -> Int = {\n  with handle Ask { ask(n) resume k => k(n) }\n  ask(1)\n}\n"))
+  assert len(p) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 0
+  let body = tm.fns[0].body
+  let prims = tast_prims(body)
+  # the block's tail is the driving loop rather than the plain application, so
+  # nothing below the checker has to infer "this installation is a control one"
+  assert list.contains(prims, "ctl_run")
+  # and what the evidence record holds is the wrapper, whose body starts the
+  # bubble at the operation's own return type
+  assert list.contains(prims, "ctl_yield")
+  # the author's arm went into an unspellable local of its own, and the wrapper
+  # captures that one entry and nothing else -- which is what keeps the arm's
+  # own capture list describing the frame it was computed against
+  assert list.contains(tast_lets(body), "arm\$0\$ask")
+  assert len(ctl_wrapper_captures(body)) == 1
+
+  # a handler with no control arm is untouched: today's `XApply` tail, no
+  # wrapper, no extra local
+  let (m2, _) = parser.parse_module(ctl_src(
+    "fn g() -> Int = {\n  with handle Ask { ask(n) => n }\n  ask(1)\n}\n"))
+  let (cx2, tm2) = check_module(test_cx(), m2, env)
+  assert len(cx2.diags) == 0
+  let prims2 = tast_prims(tm2.fns[0].body)
+  assert not list.contains(prims2, "ctl_run")
+  assert not list.contains(prims2, "ctl_yield")
+  assert len(ctl_wrapper_captures(tm2.fns[0].body)) == 0
+}
+
+test "the answer type is the remainder's, and a control arm is held to it" {
+  # the remainder is `ask(1)`, so the block answers Int and so must the arm
+  let ok = ctl_check("fn f() -> Int = {\n" ++
+      "  with handle Ask { ask(n) resume k => k(n) }\n  ask(1)\n}\n")
+  assert len(ok.diags) == 0
+  # answering with the *operation's* type is no longer enough when the two
+  # differ: here the remainder is a String, so the block is, and so is the arm
+  let bad = ctl_check("fn f() -> String = {\n" ++
+      "  with handle Ask { ask(n) resume k => n }\n  \"done\"\n}\n")
+  assert len(bad.diags) == 1
+  assert bad.diags[0].msg ==
+    "arm `ask` returns Int but it answers the block, which is String"
+  # and discarding the continuation is legal: an arm need not resume, so a
+  # constant of the block's type is a complete answer
+  let drop = ctl_check("fn f() -> String = {\n" ++
+      "  with handle Ask { ask(n) resume k => \"stopped\" }\n  \"done\"\n}\n")
+  assert len(drop.diags) == 0
+}
+
+test "`k` takes the operation's result and answers the block, with a pure row" {
+  # `k`'s parameter is the operation's return type, not the operation's
+  # parameter type
+  let arg = ctl_check("fn f() -> Int = {\n" ++
+      "  with handle Ask { ask(n) resume k => k(\"no\") }\n  ask(1)\n}\n")
+  assert len(arg.diags) == 1
+  assert str.contains(arg.diags[0].msg, "String")
+  # `k`'s result is the block's answer type: here String, so handing it back
+  # from an arm that must answer String is exactly right, and using it as an
+  # Int is not
+  let ret = ctl_check("fn f() -> String = {\n" ++
+      "  with handle Ask { ask(n) resume k => k(n) + 1 }\n  \"done\"\n}\n")
+  assert len(ret.diags) > 0
+  # the row is pure: calling `k` owes no evidence and no label, so a pure
+  # function containing the whole installation stays pure
+  let pure = ctl_check("fn f() -> String = {\n" ++
+      "  with handle Ask { ask(n) resume k => k(n) }\n  \"done\"\n}\n")
+  assert len(pure.diags) == 0
+}
+
+test "a control arm's arity counts the binder separately" {
+  let cx = ctl_check("fn f() -> Int = {\n" ++
+      "  with handle Ask { ask() resume k => k(0) }\n  ask(1)\n}\n")
+  assert cx.diags[0].msg ==
+    "arm `ask` takes 0 parameter(s) and a resume binder, but operation `ask` declares 1"
+  assert str.contains(cx.diags[0].hint, "the binder is the continuation, not a parameter")
+  # the tail-resumptive wording is untouched, and says nothing about a binder
+  let plain = ctl_check("fn f() -> Int = {\n" ++
+      "  with handle Ask { ask() => 0 }\n  ask(1)\n}\n")
+  assert plain.diags[0].msg ==
+    "arm `ask` takes 0 parameter(s), but operation `ask` declares 1"
+}
+
+test "a binder under a non-`ctl` effect is refused at the clause" {
+  let (m, p) = parser.parse_module("effect Ask {\n  fn ask(n: Int) -> Int\n}\n" ++
+      "fn f() -> Int = {\n  with handle Ask { ask(n) resume k => k(n) }\n  ask(1)\n}\n")
+  assert len(p) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 1
+  assert cx1.diags[0].msg ==
+    "arm `ask` binds a continuation, but effect `Ask` is not declared `ctl`"
+  assert str.contains(cx1.diags[0].hint, "write `ctl effect Ask { ... }`")
+  # one diagnostic, not a cascade: the arm is still checked as a control arm,
+  # so `k` is in scope and the body is not reported for a language nobody wrote
+  # a program in
+  # ... and the tail-resumptive arm of a `ctl` effect stays legal, so the two
+  # kinds may sit in one handler
+  let mixed = ctl_check("fn f() -> Int = {\n" ++
+      "  with handle Ask { ask(n) => n }\n  ask(1)\n}\n")
+  assert len(mixed.diags) == 0
+}
+
+test "`cell_take` is not chosen inside a control arm" {
+  # the tail-resumptive arm takes: one occurrence, in an arm of the cell's own
+  # installation, and no arm of this installation can run in the emptied window
+  let (m, _) = parser.parse_module(ctl_src(
+    "fn f() -> Int = {\n  with handle Ask {\n    var acc: List[Int] = []\n" ++
+      "    ask(n) => { acc = acc ++ [n]\n      n }\n  }\n  ask(1)\n}\n"))
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm1) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 0
+  assert list.contains(tast_prims(tm1.fns[0].body), "cell_take")
+
+  # the same arm with a binder does not: a suspended arm can be resumed into
+  # the very window the take opened (docs/oneshot-design.md §11.5), so the read
+  # falls back to `cell_get`, which is correct everywhere
+  let (m2, _) = parser.parse_module(ctl_src(
+    "fn f() -> Int = {\n  with handle Ask {\n    var acc: List[Int] = []\n" ++
+      "    ask(n) resume k => { acc = acc ++ [n]\n      k(n) }\n  }\n  ask(1)\n}\n"))
+  let (cx2, tm2) = check_module(test_cx(), m2, env)
+  assert len(cx2.diags) == 0
+  let prims2 = tast_prims(tm2.fns[0].body)
+  assert not list.contains(prims2, "cell_take")
+  assert list.contains(prims2, "cell_get")
+}
+
+test "`?` in a control arm reports against the block, not the operation" {
+  # the arm answers the block, so what `?` needs to be an Option is the
+  # *block's* type (docs/oneshot-design.md §11.4 (a)) -- and when it is not, the
+  # sentence says so rather than naming a function the author did not write
+  let cx = ctl_check("fn opt() -> Option[Int] = None\n" ++
+      "fn f() -> Int = {\n" ++
+      "  with handle Ask { ask(n) resume k => k(opt()?) }\n  ask(1)\n}\n")
+  assert len(cx.diags) == 1
+  assert cx.diags[0].msg ==
+    "`?` on an Option requires the block this arm answers to be Option[...], but it is Int"
+  # with an Option answer type it composes, and what it means is "discard the
+  # continuation, the None is the block's value"
+  let ok = ctl_check("fn opt() -> Option[Int] = None\n" ++
+      "fn f() -> Option[Int] = {\n" ++
+      "  with handle Ask { ask(n) resume k => k(opt()?) }\n  None\n}\n")
+  assert len(ok.diags) == 0
+  # a tail-resumptive arm is unchanged, wording included: it answers the
+  # operation, so it is the function's return type that is named
+  let plain = ctl_check("fn opt() -> Option[Int] = None\n" ++
+      "fn f() -> Int = {\n" ++
+      "  with handle Ask { ask(n) => opt()? }\n  ask(1)\n}\n")
+  assert len(plain.diags) == 1
+  assert plain.diags[0].msg ==
+    "`?` on an Option requires the function to return Option[...], but it returns Int"
+}
+
+test "`break` inside a control arm says the arm may suspend" {
+  let cx = ctl_check("fn f() -> Int = {\n  for i in 0..2 {\n" ++
+      "    with handle Ask { ask(n) resume k => break }\n    ask(1)\n  }\n  0\n}\n")
+  assert len(cx.diags) > 0
+  assert str.contains(cx.diags[0].hint, "a control arm runs where the handler was installed")
+  assert str.contains(cx.diags[0].hint, "may suspend")
+}
+
 test "an arm answers with the operation's own signature" {
   let cx = eff_check("fn f() -> Int = {\n  with handle Ask { ask() => \"no\" }\n  1\n}\n")
   assert len(cx.diags) == 1
@@ -11801,6 +12485,7 @@ fn arm_cx() -> Cx =
           captures: [],
           sugar: true,
           arm: true,
+          ctl: false,
           handler_of: None
         }]
       }

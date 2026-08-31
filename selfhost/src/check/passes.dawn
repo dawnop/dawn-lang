@@ -1199,6 +1199,18 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       cx1 = Cx { ..cxb, current_tparams: saved_tp, current_eff_vars: saved_ev }
       # the arm is a closure the caller reaches through evidence, so what the
       # arm's body does is recorded where the handler is installed, never here
+      #
+      # **This field type does not change for a control arm**, and that is a
+      # decision rather than an omission (docs/oneshot-design.md §11.0
+      # constraint 2, §11.3). An arm written `op(a) resume k => ...` has a
+      # different type -- it takes the continuation and answers the block -- but
+      # what goes in this slot is a *wrapper* the checker synthesizes
+      # (`checker.ctl_wrapper`) with exactly the type written here, whose body
+      # starts the bubble. So the operation call site reads one shape, the
+      # evidence record has one layout, and every `with handle` in the tree and
+      # every core-golden dump keeps the shape it has. A second field type here
+      # would have been the alternative, and it would have put a control arm's
+      # cost on every handler ever written.
       let idx = len(fields)
       fields = fields ++ [FieldI { name: op.name, ty: TyFn(ptys, ret, EPure) }]
       op_names = op_names ++ [op.name]

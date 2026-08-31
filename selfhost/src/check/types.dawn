@@ -3476,6 +3476,34 @@ test "effect rendering" {
   assert eff_suffix(EffAssoc("C", 9, 4, "E")) == " !C.E"
 }
 
+test "a row is suspendable only where it names a `ctl` label" {
+  let plain = EffectI { id: 7, name: "Ask", owner: None, audience: AWorld, ops: ["ask"],
+    ctl: false }
+  let async = EffectI { id: 9, name: "Async", owner: None, audience: AWorld, ops: ["wait"],
+    ctl: true }
+  var effs: Effects = map.empty()
+  effs = map.insert(effs, 7, plain)
+  effs = map.insert(effs, 9, async)
+
+  assert not eff_suspendable(effs, EPure)
+  assert not eff_suspendable(effs, EIo)
+  assert not eff_suspendable(effs, ELabeled(EPure, [(7, "Ask")]))
+  assert eff_suspendable(effs, ELabeled(EPure, [(9, "Async")]))
+  # one `ctl` label in a row of several is enough, and the refusal has to name
+  # it, so the names come back rather than a flag
+  assert eff_ctl_labels(effs, ELabeled(EIo, [(7, "Ask"), (9, "Async")])) == ["Async"]
+
+  # H1: the two axes that do not say what they will become answer no here and
+  # are left to the run-time barrier
+  assert not eff_suspendable(effs, EffVar("e", 1))
+  assert not eff_suspendable(effs, EffAssoc("C", 1, 4, "E"))
+  assert not eff_suspendable(effs, EUnion([(1, "e")], [("C", 1, 4, "E")], true))
+  # and a label with no registered effect -- which is what a module that failed
+  # to declare one leaves behind -- is not suspendable either
+  let empty: Effects = map.empty()
+  assert not eff_suspendable(empty, ELabeled(EPure, [(9, "Async")]))
+}
+
 test "projection atoms normalize beside variables and io" {
   let e1 = EffVar("e1", 1)
   let a = EffAssoc("C", 9, 4, "E")

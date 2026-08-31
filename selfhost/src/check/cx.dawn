@@ -246,6 +246,15 @@ pub type LambdaCx =
     # captured, so the creation point knows nothing the call site does not --
     # and both fields went with the rule.
     arm: Bool,
+    # `ctl` narrows `arm` the way `arm` narrows `sugar`: this arm was written
+    # with a `resume k` clause, so it is a *control* arm
+    # (docs/oneshot-design.md §11). Three things ask, and each asks because a
+    # control arm is a frame that may stop in the middle and be entered again:
+    # `?` reports against the block's answer type rather than the operation's
+    # (§11.4); `break`/`continue` say so in their hint; and `cell_take` is
+    # refused, because the emptied-slot window a take opens can be re-entered
+    # by the very arm that opened it (§11.5).
+    ctl: Bool,
     # which `with handle` installation this closure belongs to, if any: the
     # arms and the remainder of one installation carry its id, everything else
     # carries `None`. It is the licence a state cell's escape ban reads

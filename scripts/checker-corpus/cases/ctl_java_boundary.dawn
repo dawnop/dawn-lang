@@ -1,0 +1,74 @@
+# checker.dawn: a function value whose row names a `ctl` effect does not cross
+# to Java (docs/oneshot-design.md §11.6, decision 4 + S1 + H1).
+#
+# This case exists because of the lesson `330ea5f` recorded: a rule kept only by
+# programs that continue to pass, and a rule that is not running at all, produce
+# identical output. So the refusal has a program that is *named as refused*
+# here, with its span and its words, and deleting the predicate in
+# `checker.sam_snapshot` has to turn this file red.
+#
+# The other half is the snapshot clause itself, which is untouched: a pure row,
+# an `!io` row and a plain named label all still cross, and the three cases at
+# the bottom are here to fail if the refusal ever widens into them.
+use java "java.lang.Thread"
+use java "java.util.ArrayList"
+
+# `pub` because `suspendable_from_signature` below carries the label on a
+# public surface; it is also the one place in the corpora where `pub ctl` is
+# spelled in the order the grammar admits
+pub ctl effect Async {
+  fn wait(ms: Int) -> Unit
+}
+
+effect Ask {
+  fn ask() -> Int
+}
+
+# --- refused: the row names a `ctl` label ---------------------------------
+
+# the sharp shape: the handler is installed here and gone by the time Java runs
+# the closure, which is exactly what the snapshot clause was built for -- and
+# exactly what cannot work once the arm may suspend, because there is no Dawn
+# frame under `run()` to suspend into
+pub fn suspendable_thread() -> Thread !io = {
+  with handle Async { wait(ms) => () }
+  Thread.new(() => wait(1))
+}
+
+# the deferred conversion path -- an unannotated parameter, typed against the
+# SAM after the overload is picked -- is a second place the pack is taken, and
+# it is refused in the same words
+pub fn suspendable_deferred() -> Int !io = {
+  with handle Async { wait(ms) => () }
+  let a = ArrayList.new()
+  let _ = a.add("x")
+  let _ = a.removeIf(x => {
+    wait(1)
+    true
+  })
+  a.size()
+}
+
+# the label may also arrive on the enclosing signature rather than from a
+# handler in scope: the row is the same, so the answer is the same
+pub fn suspendable_from_signature() -> Thread !io !Async = Thread.new(() => wait(1))
+
+# --- still accepted: the snapshot clause did not narrow --------------------
+
+pub fn pure_row() -> Thread !io = Thread.new(() => ())
+
+pub fn io_row() -> Thread !io = Thread.new(() => {
+  let a = ArrayList.new()
+  let _ = a.add("x")
+  ()
+})
+
+# a named label that is not `ctl` crosses with its pack, which is the clause
+# `ae20cb3` landed and `52ac506` refined
+pub fn plain_label() -> Thread !io = {
+  with handle Ask { ask() => 3 }
+  Thread.new(() => {
+    let _ = ask()
+    ()
+  })
+}
