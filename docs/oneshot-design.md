@@ -1097,3 +1097,140 @@ oracle 恰好在这个机制引入的那一类 bug 上变绿**，`dawn_ctl_live`
 把这四条做成常驻的一条腿（照 `scripts/rc-contract` 的 matrix 体例，但被测的是一个 Dawn
 程序而不是一个 C harness）大约给 `native-diff` 加三分钟，需要单独定价，故记在这里而不是
 顺手加进去。
+
+> **这条欠账已由刀 7a 结清**，落点是 `scripts/ctl-live-contract/`，见 §11.11。三分钟那个
+> 估价是按「加进 `native-diff`」算的，而实测 12.4s：那条腿不必跑整套语料，只要一个五十行的
+> Dawn 程序编一次 C、再对四份运行时各编一遍。它因此也不在 `native-diff` 上，在 `contracts`
+> 上，那不是关键路径。四条负控里进常驻的是 2 与 4，理由在 §11.11。
+
+### 11.11 刀 7a：与裁决无关的三条契约腿
+
+刀 6 的题（丢弃一条续延算不算释放它持有的资源）还没裁，但有三个问题不等它：它们问的是
+今天这套机制在**线程**上成立不成立，答案与 bracket 语义怎么定无关。三条腿都只加语料与
+门禁，运行时与发射器一个字节没改。
+
+#### 一、虚拟线程里的嵌套：不钉住载体
+
+生产（dawnop-site）的 web server 每个请求跑在 `newVirtualThreadPerTaskExecutor` 的一条
+虚拟线程上。一个装在请求处理里的 `ctl` handler，等于把我们的 `jdk.internal.vm.Continuation`
+嵌进 Loom 已经挂载的那条调度续延里面。Loom 声称支持嵌套，本仓一行都没验过，而这个答案
+决定效果系统能不能被服务端采用。
+
+**实测结论：不钉住（no pinning）**。JDK 21 上（CI 钉的是 GraalVM community 21，本机
+实测 21.0.2；`dawn run` 起的子 JVM 就是工具链自己那个 `java.home`），一条虚拟线程在我们的
+续延**已挂载**的情况下照常卸载与重挂，`-Djdk.tracePinnedThreads=full` 一行都不打；同一个
+标志对一个 `synchronized` 块里的 `Thread.sleep` 会打出完整栈回溯，所以这个探针本身是被验过
+会响的。语料是 `scripts/spike-native/ctl_vthread.dawn`（`.jvm-only`），四个案子：
+
+| 案子 | 问的是 |
+|---|---|
+| `installed_on_a_virtual_thread` | 基线：handler 装在虚拟线程上，挂起与恢复都在那条线程上 |
+| `suspended_across_a_sleep` | 臂里先 `Thread.sleep` 再恢复：卸载的是一条栈上带着**冻结**激活的虚拟线程 |
+| `yields_after_a_remount` | 顺序倒过来：块里先 `Thread.sleep`（Loom 越过我们**已挂载**的续延冻结再解冻），之后才 `ask` 冻结我们自己的帧 |
+| `the_carrier_is_not_pinned` | 钉住与否本身 |
+
+第四个是这条腿的真正断言，写法值得记：**钉住不抛异常也不打印，只是不卸载**，唯一症状是
+线程池不再前进，而池子够大时连这个症状都看不见。所以语料把调度器钉成**一个载体**
+（`jdk.virtualThreadScheduler.parallelism=1`，在任何东西碰 `VirtualThread` 之前设，因此
+在它的调度器被构造之前），然后把问题问成一个「解得开还是解不开」的死锁：`parked` 在一个
+**已恢复**的续延里 `latch.await(2, SECONDS)`，第二条虚拟线程只有在 `parked` 真的卸载了
+才拿得到那个唯一的载体去 `countDown`。钉住的运行时会等满两秒答 `awaited=false`，而且那一行会打在
+另一条线程之前而不是之后。两秒是不卸载路径所需时间的四个数量级以上，所以这个数字不与
+任何东西赛跑；超时那一半也是 oracle：没有它，钉住的运行时会把语料**挂住**而不是判红，而
+一个会挂的门禁是一个会被人重跑的门禁。
+
+#### 二、跨线程恢复：JVM 成立，native 没有拼写
+
+`scripts/spike-native/ctl_cross_thread.dawn`（`.jvm-only`）把 k 在一条线程上捕获、在另一条
+上恢复，每次恢复都在一条捕获时还不存在的线程上，线程名进 transcript，所以一次偷偷在原线程
+上的恢复过不了。刀 4 说这在 JVM 上「按构造成立」，而按构造成立所依赖的三行是三行有人能改的
+代码，所以这条腿把它问出来。跨的不只是续延本身：`bump` 是一个夹在 raise 与 `Ask` prompt
+之间的**控制** handler，它的激活被冒泡越过时冻在半空，恢复之后的那次 `bump` 必须由同一个
+激活回答，而那时它站在一条从未装过任何东西的线程上；`stateful` 对 handler 的状态格子问同一
+件事（臂第二次跑在另一条线程上，必须看见第一次写进去的东西）。三条都成立。
+
+**native 侧的裁决是「没有拼写」，而这是结论不是省略**：Dawn 今天起不了线程。`use c` 还不
+存在（`emitc` 的拒绝语里那句 "use `use c`" 指的是将来），std 没有并发，而 native 自己的
+carrier 线程属于运行时而不属于程序。native 确实跨**栈**恢复续延，那就是它的全部机制
+（§11.10），但一个 native 程序里只有一条 Dawn 栈，所以「另一条线程」没有可以去拒绝的写法。
+那边可写的是 `ctl_nested.drive`，它已经钉住了「装 handler 的帧已经返回之后再恢复」。
+
+这里没有为了让测试成立而发明语言表面。顺带记下两条**已确认写不出来**的东西，因为它们决定了
+上面那条腿只能长成现在这个样子：lambda 按值捕获，**不能对外层 `var` 赋值**（编译器点名
+拒绝）；Dawn 的 ADT 不是 Java 引用类型，`ArrayList.add(B(3))` 报「没有匹配的重载」。所以
+一个 Dawn 值到另一条线程的唯一通道就是**闭包捕获它**，跨线程语料的驱动器因此写成递归 +
+每层一个 `Thread`，而不是一个队列。
+
+#### 三、`dawn_ctl_live` 的常驻门禁
+
+`scripts/ctl-live-contract/`，跑在 `contracts` job 上。一个 50 行的 Dawn 程序
+（`live.dawn`：一条恢复的续延当对照，两条被丢弃的续延各在帧里压着一个跨挂起活着的堆值）
+编一次 C，再对四份运行时各编一遍并跑：树里那份，加 `matrix.txt` 里三个变异体各一份。
+判词四条，三条读自普通构建、一条读自消毒构建：`answers` / `exit_status` /
+`no_live_continuations_at_exit` / `no_leaks`。红集双向对账。
+
+**为什么四条负控只进了两条。** 1 与 3（把挂起当成帧已退出、一次性判断改 `if (false)`）
+红在 `ctl_resume` / `ctl_nested` 已有的差分上，`asan`、`diff`、`stderr` 都会响，常驻看护者
+已经有了。2 与 4 才是没人看的那一对，而且它们**必须成对**才是那句判词：
+
+| 变异体 | 红 | 绿（而且是故意的） |
+|---|---|---|
+| `ctl-never-reclaims` | `no_live_continuations_at_exit`（`dawn: 2 suspended continuation(s) still live at exit`）、`exit_status`（70） | `no_leaks`。停着的线程的栈是 root，LSan 一个字不说 |
+| `ctl-discard-skips-cleanups` | `no_leaks` | 其余三条。回收发生了，计数器回到零，只是帧的 cleanup 没跑；线程随后退出，栈没了，漏的东西才变得不可达 |
+| `ctl-signals-one-waiter` | 无（`benign` 阳性对照） | 全部。接力棒只有一个等待者，`signal` 与 `broadcast` 是同一次交接 |
+
+第三行是照 rc-contract 的教训加的：没有一个 `benign` 角色，「这个变异体什么都没红」与
+「这个变异体根本没被构建」是同一个空红集。
+
+**「删掉计数器」这件事怎么会红。** 判词 `no_live_continuations_at_exit` 只说报告保持了
+安静，一个已经不再计数的运行时同样满足它。所以有两道：`counted` 角色的变异体**必须红掉
+它 own 的那条判词**，于是计数器一旦停工，`ctl-never-reclaims` 就红不掉任何东西，harness
+按「reddened no assertion」判红；再加一个 rc-contract 没有的字段 `says`，把计数器有权说话
+的那一次里它说出的**整句连同数字**钉住，所以数字漂成 1 或 3 也是红而不是沉默。
+
+**定价**：本机 12.4s（三次中位数：12.47 / 12.30 / 12.42），= 一次 `dawn __emitc` + 八次
+`cc` + 八次进程运行。按 runner 双倍计 26s，加进 `contracts` 的 planning value（452 → 478s），
+3x 后越过 23 分钟，故 `timeout-minutes` 23 → 24。**整轮墙钟不动**：478s 仍在 `native-diff`
+的 557s 极点之下，而极点才是一轮的长度。放 `contracts` 而不是 `native-diff` 的理由与
+atomic-write 那步一样：它要一次 JVM 编译加一个 `cc`，而那个 job 不在关键路径上。
+
+**与图纸分歧的一处**：这条腿被要求「照 `scripts/rc-contract` 的 matrix 体例」，但没有配一个
+`matrix_check.py`。三个变异体、四条判词的矩阵，形状校验比矩阵本身长，而 rc-contract 那个
+校验器的价值在于它的 `--self-test`，那是为一个五个角色、三个 roster 的矩阵写的。这里换成
+把力气花在**双向对账**上（记了却没红、红了却没记，各自判红，两条都实测验过会红），那才是
+矩阵真正在防的东西。
+
+**语料的代价**：`ctl_vthread` 与 `ctl_cross_thread` 都是 `.jvm-only`，只跑 `dawn run` 与一次
+被要求失败的 `__emitc`，两条合计 4.4s 串行（`SPIKE_JOBS=1`）。整套语料四路并行、两组交错各跑
+两次：不带 247.43 / 245.68s，带 249.12 / 248.87s，**+2.4s**。`native-diff` 的 budget 行因此
+不重述，理由与 `effect_handler_state` 那条相同。
+
+> 这里踩了一次也记下来：第一次量到的是 +23.6s，因为那次「带」的运行与另一个 job
+> （doc-check）在同一台机器上并行，而「不带」的那次没有。四路并行的语料对同机竞争极其敏感，
+> 单次对比因此不是证据；上面四个数是交错跑的，别的什么都没在跑。
+
+#### 四个负控
+
+每条都改一份被跟踪的文件、跑该门禁的**常规调用**、再还原并逐次核回 md5。
+
+| 负控 | 改什么（md5 改前 = 改后） | 红在哪 |
+|---|---|---|
+| 1 | `runtime/c/dawn_rt.c`（`4ddf6bd0b52668f04a24de8dc2399bbe`）：把 `ctl-never-reclaims` 那处改进**工作树本身** | `ctl-live-contract` 的基线就红：`exit_status FAIL` + `no_live_continuations_at_exit FAIL`，`FAIL: the unmutated runtime does not satisfy the contract`。`answers` 与 `no_leaks` 全绿，正是那对判词 |
+| 2 | 同一文件：`dawn_ctl_report` 的守卫加 `\|\| 1`，即**计数照旧、只是永远不报告** | 基线四条**全绿**（这正是欠账那句话的样子：停工的看护者与工作正常的看护者，在一个正确的程序上输出一模一样），而 `FAIL: ctl-never-reclaims reddened no assertion`。**这条是本腿存在的理由** |
+| 3 | `scripts/spike-native/ctl_vthread.dawn`（`19d3456f384716ecebc08293d5df6d3e`）：第二条虚拟线程改成 `a.join()` **之后**才起，于是没人在 `parked` 等待期间 `countDown` | 只有 `ctl_vthread:jvm` 红，而且红成**钉住的那个样子**：`awaited=false n=2` 且打在另一条线程那行**之前**。`ctl_cross_thread` / `ctl_resume` / `ctl_nested` 全绿 |
+| 4 | `scripts/spike-native/ctl_cross_thread.dawn`（`d1ce99c13b81b5de72c7daefeefd5983`）：`relay` 不再起线程，就地恢复 | 只有 `ctl_cross_thread:jvm` 红，四行 `resumed on bump-1/bump-2/state-1/state-2` 全变 `main`。答案（`a=1 c=11 d=20`、`p=10 q=20`）一个字没变，这正说明**这条语料看的是线程不是答案** |
+
+**另有一条被判为不合格的负控，连同它牵出的事实一起记下来。** 本想用一个产品级改动直接
+制造「我们的帧钉住载体」：给 `Ctl.drive` 加 `ACC_SYNCHRONIZED`。它确实让 `ctl_vthread` 红了
+（`remounted 13` 与 `awaited=true n=2` 两行都没了），但它**同时**红掉 `ctl_nested` 与
+`ctl_cross_thread`，两者都 panic：
+
+```
+dawn: cannot suspend across this frame (MONITOR) -- a `ctl` operation was raised below a frame the JVM cannot capture
+```
+
+所以它不是「只红一条」的负控。而它证明的那件事值得单独记：**一次越过内层激活的冒泡，
+会把内层的 `drive` 帧一起冻住**（§11.9 第三条分歧说的就是这个），于是那个帧上的任何监视器
+都落在被冻结的区间里，`CtlCont.onPinned` 按 `MONITOR` 拒绝。换句话说，`Ctl.drive` 必须
+不持锁，这条约束今天没有任何一处写下来，靠的是没人往里加锁。`ctl_resume` 在这个改动下
+全绿（它只有单层 handler，冒泡从不越过一个 `drive` 帧），所以连这一条也不是随手能看见的。
