@@ -1,0 +1,99 @@
+# One-shot resumption, the single-handler half (docs/oneshot-design.md §11):
+# a control arm resumes and the value flows back into the block, a control arm
+# drops the continuation and answers the block itself, `?` in a control arm
+# abandons the continuation, a cell survives a suspension, and a second
+# resumption of one continuation panics by name.
+#
+# JVM-only, and the marker beside this file says so: `ctl_yield` / `ctl_run` are
+# `lower.jvm_only_intrinsics`, and emitc refuses both in the calendar's words
+# (`lower.native_staged_message`) because Perceus has no account yet of a frame
+# with a second exit path (risk R1). The refusal is verified by the runner, not
+# believed.
+use std/io
+use std/str
+
+ctl effect Ask {
+  ## Ask for a number, and get one back -- possibly much later.
+  fn ask(n: Int) -> Int
+}
+
+ctl effect Store {
+  fn get(k: String) -> Int
+  fn put(k: String, v: Int) -> Unit
+}
+
+# The round trip. `k(n + 1)` runs the rest of the block with that value as the
+# operation's result, and what the rest produces is what the arm returns, which
+# is what the block is. Two raises, so the continuation is captured twice --
+# each one a fresh one-shot continuation over one activation.
+fn resumes() -> Int = {
+  with handle Ask { ask(n) resume k => k(n + 1) }
+  ask(1) + ask(10)
+}
+
+# Not resuming is legal and is the block's answer (§11.1). The remainder after
+# `ask` never runs, and the `String` here has nothing to do with the `Int` the
+# operation declares -- the arm answers the block, not the raise site.
+fn discards() -> String = {
+  with handle Ask { ask(n) resume k => "stopped at ${to_string(n)}" }
+  let _ = ask(7)
+  "unreachable"
+}
+
+# Two kinds of arm in one handler. `put` is tail-resumptive and compiles as it
+# always did; `get` binds a continuation. The record they sit in has one shape
+# either way (§11.0 constraint 2).
+fn mixed() -> String = {
+  with handle Store {
+    var last: Int = 0
+    get(key) resume k => "get(${key})=${k(last + 1)}"
+    put(key, v) => { last = v }
+  }
+  put("a", 40)
+  "then ${to_string(get("a"))}"
+}
+
+# A cell read and written across a suspension (§11.5). The arm runs twice in
+# one activation, so it sees the accumulator both times.
+fn accumulating() -> String = {
+  with handle Ask {
+    var seen: List[Int] = []
+    ask(n) resume k => {
+      seen = seen ++ [n]
+      let rest = k(n * 2)
+      "${to_string(seen)} ${rest}"
+    }
+  }
+  "sum=${to_string(ask(1) + ask(2))}"
+}
+
+fn small(n: Int) -> Option[Int] = if n > 2 { None } else { Some(n) }
+
+# `?` in a control arm is judged against the block's answer type and means
+# "drop the continuation, and let `None` be the block's answer" (§11.4 (a)).
+# The first call resumes; the second abandons a captured continuation, which on
+# this backend is one more unreachable object.
+fn guarded(bound: Int) -> Option[Int] = {
+  with handle Ask { ask(n) resume k => k(small(n)?) }
+  Some(ask(bound) * 100)
+}
+
+# A continuation is one-shot, and the type system does not say so -- this does
+# (§11.2). The message is the one the design names.
+fn twice() -> Int = {
+  with handle Ask { ask(n) resume k => k(n) + k(n) }
+  ask(1)
+}
+
+pub fn main() -> Unit !io = {
+  io.println(to_string(resumes()))
+  io.println(discards())
+  io.println(mixed())
+  io.println(accumulating())
+  io.println(to_string(guarded(1)))
+  io.println(to_string(guarded(9)))
+  match catch_panic(() => twice()) {
+    Ok(v) -> io.println("resumed twice and lived: ${to_string(v)}")
+    Err(e) -> io.println(e.message)
+  }
+}

@@ -1,0 +1,94 @@
+# One-shot resumption, the part about *which* handler answers
+# (docs/oneshot-design.md §11): a yield bubbles past handlers it is not for,
+# resuming reinstalls this installation and everything between it and the
+# raise, and a continuation outlives the frame that installed the handler.
+#
+# JVM-only for the reason its sibling `ctl_resume.dawn` is; the marker beside
+# this file is verified rather than believed.
+use std/io
+use std/str
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+ctl effect Log {
+  fn note(s: String) -> Unit
+}
+
+effect Plain {
+  fn plain() -> Int
+}
+
+# The prompt is the installation, not the effect: the `Plain` handler stands
+# between the raise and the `Ask` prompt and is not consulted, and after the
+# resumption it is still installed -- `plain()` below runs on the resumed
+# stack and is answered by it.
+fn past_a_tail_handler() -> String = {
+  with handle Ask { ask(n) resume k => "outer saw ${to_string(n)}, then ${k(n * 2)}" }
+  with handle Plain { plain() => 5 }
+  let a = ask(3)
+  let b = plain()
+  "inner(${to_string(a)},${to_string(b)})"
+}
+
+# The same, with a *control* handler in between. The `Ask` yield freezes the
+# `Log` activation along with everything else between the raise and its own
+# prompt; resuming thaws it, and the `note("end")` after the resumption is
+# still answered by that same `Log` installation. That is what the prompt stack
+# being saved across the freeze buys (`rtclasses.gen_ctl_yield`).
+fn past_a_control_handler() -> String = {
+  with handle Ask { ask(n) resume k => "A[${k(n + 100)}]" }
+  with handle Log { note(s) resume k => "L[${s}|${k(())}]" }
+  note("start")
+  let v = ask(1)
+  note("end")
+  "v=${to_string(v)}"
+}
+
+# Two activations of one installation, recursively. The inner one is the one
+# that answers, which is the LIFO rule §11.3 gets from the run-time stack
+# instead of from a token object.
+fn recursive(depth: Int) -> Int = {
+  with handle Ask { ask(n) resume k => k(n + depth) }
+  if depth == 0 { ask(0) } else { ask(recursive(depth - 1)) }
+}
+
+# `k` is an ordinary function value with a pure row, so it goes in an ADT field
+# (§11.2). The block hands one out and returns; the driver below resumes it
+# from outside, after the frame that installed the handler is gone. Resuming
+# reinstalls the handler, so the second `ask` in the same block is answered by
+# the same installation -- `k` is deep (§11.0).
+type Step = Done(v: Int) | Susp(want: Int, k: fn(Int) -> Step)
+
+fn stepped() -> Step = {
+  with handle Ask { ask(n) resume k => Susp(n, k) }
+  Done(ask(1) + ask(2))
+}
+
+fn drive() -> String = {
+  var s = stepped()
+  var turns = 0
+  var out = ""
+  while true {
+    match s {
+      Done(v) -> {
+        out = out ++ "done ${to_string(v)} after ${to_string(turns)} turns"
+        break
+      }
+      Susp(want, k) -> {
+        turns = turns + 1
+        out = out ++ "want ${to_string(want)}; "
+        s = k(want * 10)
+      }
+    }
+  }
+  out
+}
+
+pub fn main() -> Unit !io = {
+  io.println(past_a_tail_handler())
+  io.println(past_a_control_handler())
+  io.println(to_string(recursive(2)))
+  io.println(drive())
+}

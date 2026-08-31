@@ -65,15 +65,28 @@
 # "any exit will do".
 #
 # The other marker says a program has no native half at all:
-# `<name>.jvm-only`. `use java` is refused by the native backend as a decision
-# (`emitc` says so in as many words), so a program whose subject *is* that
-# boundary cannot be differentiated and its C-side checks report `blocked`.
-# The alternative was six known-red.txt entries that nobody would ever be able
-# to delete, which would make that file mean two different things. The marker
-# is checked rather than believed: `emitc` still runs, and a marker on a
-# program it compiles is a failure by that name. Measured by putting the marker
-# on `effect_handler`, which compiles fine, and watching `effect_handler:
-# jvm-only` go red.
+# `<name>.jvm-only`. Two things earn it, and they are not the same thing.
+# `use java` is refused by the native backend as a decision (`emitc` says so in
+# as many words), so a program whose subject *is* that boundary cannot be
+# differentiated. One-shot resumption is refused because the native half has
+# not been written: `ctl_yield` / `ctl_run` are `lower.jvm_only_intrinsics`,
+# emitc refuses them in the compiler's own words
+# (`lower.native_staged_message`), and the reason is Perceus rather than the
+# emitter -- a captured continuation gives every frame a second exit path, and
+# `c/rc.dawn`'s oracle assumes control flow returns (docs/oneshot-design.md
+# risk R1). Either way the program's C-side checks report `blocked`.
+#
+# The alternative was known-red.txt entries that nobody would ever be able to
+# delete, which would make that file mean two different things. The marker is
+# checked rather than believed: `emitc` still runs, and a marker on a program it
+# compiles is a failure by that name. Measured by putting the marker on
+# `effect_handler`, which compiles fine, and watching `effect_handler: jvm-only`
+# go red.
+#
+# The `ctl_*` programs are the ones the marker is load-bearing for today: when
+# the native backend grows a driving loop, deleting their markers is what makes
+# the differential start running, and the JVM answers already in their .expect
+# files are what it will run against.
 #
 # `jvm` and `native` only run when <name>.expect exists. They are the answer
 # to codebase-audit.md TEST-01: a differential test alone certifies whatever
