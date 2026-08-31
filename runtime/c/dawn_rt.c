@@ -2502,6 +2502,17 @@ static bool dawn_ctl_report_registered;
  * because a reclaim answers `die` by unwinding instead. */
 static void dawn_ctl_switch_to(dawn_carrier *c) {
   dawn_carrier *saved = dawn_ctl_cur;
+  /* Nothing hands the baton to a carrier that has run out: the one-shot token
+   * on the continuation is what stops a second resumption, and every other
+   * caller here tests `finished` first. So this is the same kind of assertion
+   * `dawn_unwind_stop` makes about the handler chain, and it is worth having
+   * for the same reason: without it the failure is a wait nobody will ever
+   * answer, which reads as a hang rather than as a bug. */
+  if (c->finished) {
+    fflush(stdout);
+    fputs("dawn: a continuation was resumed after its stack ran out\n", stderr);
+    abort();
+  }
   pthread_mutex_lock(&c->m);
   c->turn = 1;
   pthread_cond_broadcast(&c->cv);
