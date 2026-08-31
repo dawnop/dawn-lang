@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 04b2ab846d3cf92d -->
+<!-- doc-check: translation-of docs/spec.md @ 1ac2a452e5b7fe19 -->
 
 # Dawn Language Specification
 
@@ -2314,14 +2314,12 @@ recognises only an **explicit** trigger.
   ticket a resumption spends: a discarded continuation cannot be resumed, and a resumed one cannot
   be discarded. Comptime refuses it.
 
-The four messages, verbatim:
-
-| Situation | Message |
-|---|---|
-| resuming a continuation already spent | `dawn: continuation resumed twice` |
-| discarding a continuation already spent | `dawn: continuation discarded after it was already used` |
-| `discard` on a function value that is not a continuation | ``dawn: `discard` expects a continuation`` |
-| suspending during a discard's unwind | ``dawn: a `ctl` operation was raised while a continuation was being discarded`` |
+Each of the four misuses has a verbatim message, and they are **written once, in the output of the
+program below**, in this order: resuming a continuation already spent; discarding one already spent
+(discard-then-resume, resume-then-discard and discard-twice are one ticket, so they are one
+message); `discard` on a function value that is not a continuation; suspending during a discard's
+unwind. (Writing them a second time would be an uncorroborated copy: this document's gate runs the
+program and compares the `output` fence, and it does not read a table of prose.)
 
 ```dawn run
 use std/io

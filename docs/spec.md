@@ -1887,14 +1887,11 @@ discarded at 1
   **是不是一条续延在运行期判**。`discard` 与恢复花的是同一张票：丢弃过的续延不能再恢复，恢复过的也不能再丢弃。
   comptime 拒绝它。
 
-四条消息，逐字如下。
-
-| 情形 | 消息 |
-|---|---|
-| 恢复一条已经用掉的续延 | `dawn: continuation resumed twice` |
-| 丢弃一条已经用掉的续延 | `dawn: continuation discarded after it was already used` |
-| 对一个不是续延的函数值 `discard` | ``dawn: `discard` expects a continuation`` |
-| 在丢弃的展开途中挂起 | ``dawn: a `ctl` operation was raised while a continuation was being discarded`` |
+四种误用各有一条逐字的消息，它们**只在下面这段程序的输出里写一次**，按这个顺序：恢复一条
+已经用掉的续延；丢弃一条已经用掉的续延（丢弃后恢复、恢复后丢弃、丢弃两次是同一张票，
+所以是同一条消息）；对一个不是续延的函数值 `discard`；在丢弃的展开途中挂起。
+（写第二遍就是一份没人核对的抄件：`output` 那一栏由这份文档的门禁跑出来比对，
+散文里的表格不会。）
 
 ```dawn run
 use std/io
