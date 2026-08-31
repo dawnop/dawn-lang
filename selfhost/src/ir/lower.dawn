@@ -1238,6 +1238,20 @@ pub fn jvm_only_intrinsics() -> List[String] =
 ## (`dawn check` says everything §11 has to say) and runs on the JVM today.
 pub fn native_staged_intrinsics() -> List[String] = ["ctl_yield", "ctl_run"]
 
+test "the staged-on-native refusal names the primitive and where to read why" {
+  # emitc has no arm for these, by design, so this sentence is the only thing a
+  # user gets. It has to name which primitive, say the program is correct, and
+  # point somewhere -- a refusal that only says "not implemented" sends the
+  # reader to the backend, which is not where the answer is.
+  for n in native_staged_intrinsics() {
+    let m = native_staged_message(n)
+    assert str.contains(m, "`" ++ n ++ "`")
+    assert str.contains(m, "docs/oneshot-design.md")
+    assert str.contains(m, "runs on the JVM")
+    assert str.contains(m, "drop the `resume` clause")
+  }
+}
+
 ## Is this primitive one native has not been handed yet?
 pub fn is_native_staged_intrinsic(name: String) -> Bool =
   list.contains(native_staged_intrinsics(), name)

@@ -36,6 +36,29 @@ fn dotted(cls: String) -> String = {
   out
 }
 
+## The manifest, as text. A function of its own so that a test can read it:
+## every attribute below is a promise to a class loader, and the only other way
+## to check one is to build a jar and start a JVM.
+##
+## `Add-Exports` is how a `java -jar` run reaches `jdk.internal.vm`, which is
+## where the driving loop for one-shot resumption lives
+## (docs/oneshot-design.md §3.5, `jvm/rtclasses.gen_ctl_class`). The launcher
+## reads it from the manifest of the jar it is given, so the user types no
+## `--add-exports` of their own; the same option is put on the command line of
+## every JVM `dawn run` spawns (`main.child_java_cmd`), which is the other half
+## of the same wiring -- neither reads the other, and a program is started both
+## ways.
+##
+## Written for every jar rather than only for one that can suspend. A manifest
+## attribute is inert without a class that uses the package, and the
+## alternative is a manifest whose shape depends on the program -- one more
+## thing for `write_jar` to be told and for a reader to explain.
+fn manifest_text(main_class: String, cp_entries: List[String]) -> String =
+  "Manifest-Version: 1.0" ++ crlf() ++
+  "Main-Class: " ++ dotted(main_class) ++ crlf() ++
+  "Add-Exports: java.base/jdk.internal.vm" ++ crlf() ++
+  class_path_lines(cp_entries) ++ crlf()
+
 fn stored_entry(name: String, bs: Bytes) -> ZipEntry !io = {
   let crc = CRC32.new()
   let _ = crc.update(bs)
@@ -131,28 +154,26 @@ pub fn write_jar_cp(
   }
   with file <- bracket(fos, close_file)
   with zos <- bracket(ZipOutputStream.new(file), close_zip)
-  # `Add-Exports` is how a `java -jar` run reaches `jdk.internal.vm`, which is
-  # where the driving loop for one-shot resumption lives
-  # (docs/oneshot-design.md §3.5, `jvm/rtclasses.gen_ctl_class`). The launcher
-  # reads it from the manifest of the jar it is given, so the user types no
-  # `--add-exports` of their own; the same option is put on the command line of
-  # every JVM `dawn run` spawns (`main.child_java_cmd`), which is the other
-  # half of the same wiring.
-  #
-  # Written for every jar rather than only for one that can suspend. A manifest
-  # attribute is inert without a class that uses the package, and the
-  # alternative is a manifest whose shape depends on the program -- which is
-  # one more thing for `write_jar` to be told and for a reader to explain.
-  let manifest =
-    "Manifest-Version: 1.0" ++ crlf() ++
-    "Main-Class: " ++ dotted(main_class) ++ crlf() ++
-    "Add-Exports: java.base/jdk.internal.vm" ++ crlf() ++
-    class_path_lines(cp_entries) ++ crlf()
-  put(zos, "META-INF/MANIFEST.MF", bytes.utf8(manifest))
+  put(zos, "META-INF/MANIFEST.MF", bytes.utf8(manifest_text(main_class, cp_entries)))
   for pair in classes {
     let (nm, bs) = pair
     put(zos, nm ++ ".class", bs)
   }
+}
+
+test "the manifest opens the internal package the driving loop needs" {
+  # The attribute the JVM launcher reads. Spelled out rather than compared
+  # against the producer: a test that rebuilds the string it is checking says
+  # only that concatenation works.
+  let lines = str.split(str.strip_suffix(manifest_text("main", []), crlf())
+      .unwrap_or(""), crlf())
+  assert lines[0] == "Manifest-Version: 1.0"
+  assert lines[1] == "Main-Class: main"
+  assert lines[2] == "Add-Exports: java.base/jdk.internal.vm"
+  # and it survives the wrapping a reader undoes, at every jar shape
+  assert unwrap_manifest(manifest_text("a/b/Main", ["x.jar"])) ==
+    "Manifest-Version: 1.0Main-Class: a.b.MainAdd-Exports: " ++
+    "java.base/jdk.internal.vmClass-Path: x.jar"
 }
 
 test "dotted turns an internal name into a binary name" {

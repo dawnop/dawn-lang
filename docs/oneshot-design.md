@@ -944,3 +944,53 @@ handler-state 那批在 `selfhost/src` 的 +1375 相比是三分之一多一点�
 「合法的接受、非 `ctl` 之下的拒绝」、`grammar-corpus` 的 reject 若干、
 `scripts/effect-evidence-contract` 的 roster 加一行、`core-golden` **不应因本刀移动**，
 这一条本身就是最有信息量的负控：如果它动了，说明约束 1 或 2 破了。
+
+### 11.9 刀 4：JVM 上跑起来
+
+刀 4（`b033d10`…）把 `ctl_yield` / `ctl_run` 从「lowering 按名拒绝」变成 **JVM 上真能跑**：
+`dawn run` 一个控制臂程序现在给出答案，C 后端仍然按名拒绝、且拒绝语是编译器的日程而不是
+后端的缺口。路线就是 §5 的 yield 冒泡，冻结/解冻由 `jdk.internal.vm.Continuation` 承担
+（§3.5 量过：每次 perform 70 至 460 ns）。
+
+**落点**（净增约 +560 行，其中约 400 行是 `jvm/rtclasses.dawn` 的三个类）：
+
+| file | 改什么 |
+|---|---|
+| `jvm/rtclasses.dawn` | `dawn/rt/Ctl`（一次激活 + 线程局部 prompt 栈 + 驱动循环 + `applyArm` 的 arity 链）、`dawn/rt/CtlCont`（`Continuation` 子类，`onPinned` 改成 Dawn panic）、`dawn/rt/CtlK`（`Fn2`，一次性由它强制） |
+| `main.dawn` | `program_has_ctl` 决定发不发这三个类；`child_java_cmd` 加 `--add-exports` |
+| `jvm/jarw.dawn` | manifest 加 `Add-Exports: java.base/jdk.internal.vm`；顺手把 manifest 文本提成 `manifest_text` 好让 test 读得到 |
+| `jvm/emit.dawn` | `ctl_run` → `Ctl.enter`，`ctl_yield` → 把操作实参装成 `Object[]` 再 `Ctl.yield` |
+| `ir/lower.dawn` | 两个名字从 `staged_intrinsics` 迁到 `jvm_only_intrinsics`；新增 `native_staged_intrinsics` 与它的拒绝语；`lower_ctl` 照 `lower_cell` 装箱 |
+| `check/types.dawn` | `erased_ctl_ty()` |
+| `c/emitc.dawn` | 兜底 panic 分两路：日程 vs 缺口 |
+| `scripts/spike-native/` | `ctl_resume` / `ctl_nested` 两个 `.jvm-only` 程序 |
+
+**施工时与 §11 分歧的五处**（树赢，理由逐条）：
+
+- **`ctl_yield` 多一个检查器没写的实参。** §11.3 的节点是 `ctl_yield(prompt, arm, args...)`；
+  lowering 发的是 `ctl_yield(prompt, arm, env, args...)`，`env` 是**包装闭包自己的证据槽**
+  （`st.ev_own`）。非加不可：臂是**运行时**在续延捕获之后施用的，而臂要用**安装点的** pack
+  而不是 raise 点的（`checker.check_call` 那段注释写了理由），那份 pack 在包装的证据参数里，
+  别处拿不到。这不改证据 ABI，只是把已经传进包装的东西转发出去。
+- **它们没有并进「四组」里的任何一组的原意。** 刀 3 的注记预期「移到该去的那一组」。
+  实际去了 `jvm_only_intrinsics`，但那组原本的理由是「这是后端的事实不是缺口」，对一半成员
+  不再成立。所以树里加的是一条**附注**（`native_staged_intrinsics`）而不是第五组：
+  `scripts/intrinsic-parity.py` 读的是那个划分，加一组要教它两遍；而 emitter 需要的差别
+  是**一句话**，不是一次分类。
+- **prompt 靠 `hid` 认得出来，但 prompt **栈**必须跨冻结保存。** §11.3 说「hid 直接当 prompt 用
+  …… 不需要运行期 token 对象」。认身份这半对；少的那半是：一次冒泡**越过**内层激活时，
+  内层的驱动帧是在 `Continuation.run` 中间被冻住的，没人 pop 也没人在解冻时 push 回来。
+  所以 `Ctl.yield` 把链头存在栈上跨过冻结、恢复时写回（`gen_ctl_yield`）。因为帧是共享对象、
+  `drive` 每次进入都重写 `prev`，写回的链尾正好是**恢复处**的那些 handler，于是「k 是深的」
+  与「k 可以在别处恢复」是同一行代码。`ctl_nested.past_a_control_handler` 是它的语料，
+  删掉那一行会红。
+- **一次性是 per 续延，不是 per 激活。** 每次挂起 `new CtlK`，各带各的 `used` 位。于是
+  「一个 handler 恢复十次」是十条各自一次性的续延跑在一次激活上，`k(n) + k(n)` 才是二次恢复。
+  §11.2 只说了「第二次调用 panic」，没说第二次是相对谁数的。
+- **§11.6 H1 的运行期屏障说不出「那次转换」。** 裁决要它「点名那次转换而不是 panic 的现场」。
+  JVM 能报的是 `onPinned` 的原因（`NATIVE` / `MONITOR`），而那时转换点早已不在栈上。
+  所以 `CtlCont.onPinned` 点名的是**帧的种类**，`Ctl.lookup` 的 miss 覆盖另一种形状
+  （安装点已返回之后从 Java 侧回调）。要点名转换，得让快照 pack 自带出处，那是另一把刀。
+
+**没有动的**：15 份 core-golden 程序 dump 逐字节不变（只有编译器模块的 `.sha` 重录），
+证据记录的形状、操作调用点、尾恢复档的发射一个字节没改。

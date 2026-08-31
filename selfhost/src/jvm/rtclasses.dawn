@@ -3896,6 +3896,24 @@ fn gen_ctl_apply_arm(cw: ClassWriter) -> Unit !io = {
   ()
 }
 
+test "an arm of the widest operation is still an Fn the program emits" {
+  # `applyArm` casts to `Fn(n + 2)`: the operation's parameters, the
+  # continuation, and the evidence slot. `main.dawn` emits `Fn0` through `Fn9`,
+  # one past the widest written parameter list the language allows, so the cap
+  # here is that bound read backwards -- and a chain that cast to an interface
+  # nobody emitted would be a NoClassDefFoundError in the *user's* program, at
+  # the moment an arm suspended.
+  assert fn_iface(ctl_max_op_params() + 2) == "dawn/rt/Fn9"
+  # the two descriptors the emitter spells at the call sites (jvm/emit.dawn)
+  assert ctl_enter_desc() ==
+    "(JLjava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
+  assert ctl_yield_desc() ==
+    "(JLjava/lang/Object;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;"
+  # the continuation is a function value of one written parameter, so `CtlK`
+  # implements the interface a `fn(R) -> A` is called through
+  assert fn_iface(2) == "dawn/rt/Fn2"
+}
+
 ## dawn/rt/CtlCont: `Continuation` with `onPinned` overridden.
 ##
 ## The inherited body throws `IllegalStateException`, which is a JDK-internal
