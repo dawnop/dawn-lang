@@ -73,8 +73,16 @@ fn discards() -> String !io = {
 # Two barriers stand between the raise and the installation. A discard walks
 # past both: on the JVM `CtlDiscard` is an `Error` and the barriers name
 # `PanicError` and `Exception`; on native the landing lands at brackets and
-# not at barrier frames. If either caught it, the block's answer would be one
-# of the "caught" strings instead of the arm's.
+# not at barrier frames.
+#
+# **The assertion is the two lines that are not printed**, and it has to be,
+# because the block's answer cannot see the difference: the arm's value is the
+# block's value whether or not the remainder went on running. A barrier that
+# took the poison would *return*, with an `Err`, and the abandoned computation
+# would carry on from there -- resurrected out of its own cleanup, printing
+# the line after the barrier and then finishing normally. Measured: handing
+# `catch_panic` the poison leaves the answer below untouched and adds one line
+# here, so an answer-only assertion would have been green under it.
 fn not_catchable() -> String !io = {
   with handle Ask {
     ask(n) resume k => {
@@ -82,14 +90,18 @@ fn not_catchable() -> String !io = {
       "arm answered ${to_string(n)}"
     }
   }
-  match catch_panic(() =>
-    match catch_fault(() => ask(1)) {
-      Ok(v) -> "catch_fault saw ${to_string(v)}"
-      Err(e) -> "catch_fault caught ${e.message}"
+  let outer = catch_panic(() => {
+    let inner = catch_fault(() => ask(1))
+    io.println("catch_fault answered a poisoned computation")
+    match inner {
+      Ok(v) -> to_string(v)
+      Err(e) -> e.message
     }
-  ) {
+  })
+  io.println("catch_panic answered a poisoned computation")
+  match outer {
     Ok(s) -> s
-    Err(e) -> "catch_panic caught ${e.message}"
+    Err(e) -> e.message
   }
 }
 
@@ -122,7 +134,7 @@ fn discard_then_resume() -> String !io =
     }
   }
 
-# The reverse order. The remainder runs to the end, so `release esc2` is the
+# The reverse order. The remainder runs to the end, so `release esc` is the
 # ordinary exit of a bracket rather than a discard's, and the discard that
 # follows finds the ticket spent.
 fn resume_then_discard() -> String !io =
