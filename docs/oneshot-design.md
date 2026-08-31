@@ -914,6 +914,22 @@ Dawn 现在按 Kotlin 的原因拒绝，这也正好把 [design.md](design.md):1
 **合计约 +520 行检查器改动**，落在 §4.5 那个「冒泡约 1800 至 2200 行」的估算里，与
 handler-state 那批在 `selfhost/src` 的 +1375 相比是三分之一多一点。
 
+**施工时与上表分歧的四处**（刀 3 落地，`94861e7`…`cebfa5f`；树赢，理由逐条）：
+
+- **内部原语的登记不在 `check/types.dawn`。** `ev_get` / `cell_*` 都不在
+  `types.builtins()`，名字表是 `ir/lower.dawn` 的 `internal_intrinsics()`，分类表是同文件的
+  四组。`ctl_yield` / `ctl_run` 因此进那两处，并新开第五组 `staged_intrinsics()`
+  ——「还没人写」与「某个后端少一条」从 emitter 里看是一回事，前三组存在的理由正是这个。
+- **§11.1 伪代码里 `evidence_pack(arms_eff)` 提到分支之后是错的。** 它必须在两条分支各建
+  一次：提出来之后，尾恢复档上它落在 `declare_evidence` 之后，臂的环境于是解析到正在建的
+  那条记录本身，`TSLet` 绑的值里含它自己。`dawn check` 与全部诊断 golden 都绿，
+  codegen 报 `symbol has no slot`，`scripts/effect-evidence-contract` 是唯一看见的门。
+- **带 binder 的 arity 诊断不在 `check_lambda`。** `:5161` 那条对 `arm` 早就整体跳过
+  （`&& not arm`），所以新文案落在 `check_control_arm`，与尾恢复档那条并排。
+- **SAM 拒绝没有内联 test。** 内联 harness 的 `cx.jsig` 是拒绝默认值，`use java` 在那里
+  根本过不去（`uncovered.txt` 已记着这条）。所以那条判词由 `scripts/checker-corpus` 的
+  `ctl_java_boundary` 加一次负控看住，内联那份改成对 `types.eff_suspendable` 的单元 test。
+
 **已经不在欠账里的**：`resume` 绑定的表面语法与 `HandlerArm` 的字段，刀 1（`6edbeec`）已落地，
 但它存的是 `binder: Option[String]` 加 `blo`/`bhi`，不是 `Option[LambdaParam]`，所以「把 binder
 变成一个参数」仍是刀 3 的活（§11.3）。
