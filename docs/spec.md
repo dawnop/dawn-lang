@@ -1573,9 +1573,13 @@ pub fn sqrt(x: Float) -> Float = unsafe_pure { Math.sqrt(x) }   # 仅 std 模块
 ### 6.5 具名效果与 `with handle`
 
 `effect` 声明一组操作签名，调用处直接调操作，由**调用处词法上最近的** `with handle` 应答。
-这一档是**尾恢复**（tail-resumptive）：handler 臂就是「就地调用、返回值即操作结果」的
-普通闭包，没有延续捕获。设计与裁决见
-[`docs/effects-design.md`](effects-design.md)。
+
+臂有两档。**尾恢复**（tail-resumptive）臂是「就地调用、返回值即操作结果」的普通闭包，
+没有延续捕获。**控制臂**多一个绑定子句（`op(参数…) resume k => 表达式`），`k` 绑定这次
+操作的续延，臂的值是整个 `with handle` 块的值；控制臂只写得在声明为 `ctl` 的效果之下，
+规则集中在下面的「控制臂」一节。绑定子句在不在，就是臂的种类记号。
+设计与裁决见 [`docs/effects-design.md`](effects-design.md) 与
+[`docs/oneshot-design.md`](oneshot-design.md)。
 
 #### 声明
 
@@ -1591,7 +1595,17 @@ effect State {
 }
 ```
 
+```dawn
+ctl effect Fetch {
+  fn fetch(url: String) -> String
+}
+```
+
 - 效果名是 UpperCamelCase，与类型、trait 共享一个命名空间。
+- 声明前可以写一个 `ctl` 前缀，意思是「这个效果的操作可以被控制臂挂起」。
+  `ctl` 是**上下文关键字**（与 `handle`、`resume` 同例），不保留，照旧可以当标识符、
+  参数名与函数名。带可见性时的顺序是 `pub ctl effect E`：`ctl` 站在 `opaque` 站的位置，
+  在可见性与它修饰的关键字之间。
 - 操作是普通函数签名：无体、**不得再带效果注记**（操作的效果就是它所属的效果本身），
   当前也不得带类型参数。
 - 操作名进入模块的函数命名空间：与本模块的任何顶层声明（普通函数 / trait 方法 /
@@ -1637,8 +1651,10 @@ handler 的作用域内，与 `with x <- f(…)` 完全同构，并继承它的�
 剩余部分是真闭包、`return`/`break`/`continue` 被拒（诊断点名 `with handle`）、
 `?` 透明穿过。
 
-- 臂形如 `op(参数…) => 表达式`，`=>` 与 lambda 同记号（臂本来就是闭包），臂之间换行分隔。
+- 臂形如 `op(参数…) => 表达式`（尾恢复臂）或 `op(参数…) resume k => 表达式`（控制臂，
+  见下面的「控制臂」一节），`=>` 与 lambda 同记号（臂本来就是闭包），臂之间换行分隔。
   每个声明的操作**恰好一臂**：少臂、多臂、臂名不属于该效果都是编译错误。
+  一个 handler 里两种臂可以并存。
 - 一个 `handle` 一个效果；同一效果重复 `handle` 是内层遮蔽外层，合法。
 - 允许 handle 一个块里实际没发出的效果（无害的死证据）。
 - **handler 局部状态（格子）**：臂表的开头可以声明若干 `var`，每个是**这次安装**私有的
@@ -1672,15 +1688,18 @@ handler 的作用域内，与 `with x <- f(…)` 完全同构，并继承它的�
   ```
 - **类型规则**：设剩余闭包的效果是 `(base, L)`、各臂身体的效果是 `(base_i, L_i)`，
   则装 handler 的这个块记 `(base ∪ ⋃base_i, (L ∖ {E}) ∪ ⋃L_i)`。
-  减法就在这个节点上：剩余部分是闭包，**运行它的就是这个节点**，它的证据也由这个节点供，
-  所以能把 `E` 从行里减掉的只有它。减法与供给是同一次调用，一个没应答过 `E` 的 handler
-  因此拿不掉任何东西。基轴不减：`!io` 不是 `handle` 应答得了的。
+  减法就在这个节点上：剩余部分是闭包，**供给它证据的就是这个节点**，所以能把 `E` 从行里
+  减掉的只有它。**减法跟着供给走，不跟着执行走**：控制臂之下，剩余可以由一条跑到别处去的
+  续延来运行（见「控制臂」），而它要的那份证据仍是这个节点在安装点建好交出去的那一份。
+  一个没供过 `E` 的 handler 因此拿不掉任何东西。基轴不减：`!io` 不是 `handle` 应答得了的。
   臂身体自己发的效果（含 io、含别的标签）全部并回块头上——
   臂在装 handler 的地方运行，不在发出操作的地方。
   **「行失去一个成员」只发生在 `with handle` 这一个语法节点上**，不进 unification。
 - **`?` 早退丢状态**：`?` 照旧透明地穿过 `with handle`（§4.10），带格子也不例外。
-  早退时状态丢弃，格子随 handler 帧一起销毁；块剩余里读格子的那行代码本来就不会执行，
-  所以没有「看起来一定会跑、实际被跳过」的交回表面在骗人。这不是本语言发明的口径，
+  早退丢的是**本次激活**的状态，那次激活的格子随之销毁；块剩余里读格子的那行代码本来
+  就不会执行，所以没有「看起来一定会跑、实际被跳过」的交回表面在骗人。
+  在早退之前被某个控制臂存下来的续延不受影响：它带着自己那次激活的格子，恢复它就是
+  恢复另一条状态谱系。这不是本语言发明的口径，
   它是文献里的 **local state interpretation**（Wu / Schrijvers / Hinze,
   *Effect Handlers in Scope*, Haskell 2014），也就是状态 handler 装在错误边界内侧时的标准答案。
 
@@ -1727,13 +1746,19 @@ pub fn main() -> Unit !io = {
   `with handle` 之外，出路是在 `with` 之前把格子读出来）、另一次安装的臂。格子本体也不能
   作为值传出词法域，它没有可拼写的类型。与它相对的是普通 `let`：handler 区域里 `let` 绑的值
   照旧可以被逃逸闭包捕获，这道禁令收紧的只有格子。
+  **续延是唯一能把这次激活的状态带出块外的东西**，而它带出去的不是一个新名字：块剩余闭包
+  本身仍然只被原地施用一次，逃出去的是它跑到一半的那条续延，续延带着的是**它自己那次激活**
+  的那一份格子。所以「没有第二个名字够得着这一格」在名字层面原样成立。
 - 臂身体里发**本效果**，绑定到**外层**的同效果 handler（自己不应答自己）；没有外层就是
   臂欠标签，照常报错。
-- **重入（本档如此）**：臂拿到的证据是安装点**之前**那一层的环境，所以一次安装的格子只被
-  这次安装的臂访问，「读格子、调用、写格子」那个经典的丢更新形状在这一档里构造不出来：
-  中间那次调用无论怎么绕都回不到同一个格子。嵌套安装各有各的格子，内层攒的东西不混进外层。
-  这条限定在**尾恢复**这一档，不承诺多次 `resume` 放开之后仍然如此（放开之后格子须随延续
-  复制，那是另一次裁决）。
+- **重入**：臂拿到的证据是安装点**之前**那一层的环境，所以一次安装的格子只被这次安装的臂
+  访问。嵌套安装各有各的格子，内层攒的东西不混进外层。
+  「读格子、调用、写格子」那个经典的丢更新形状在**尾恢复**这一档构造不出来：中间那次调用
+  无论怎么绕都回不到同一个格子。**控制臂之下它构造得出来**：臂读格子、调 `k`、剩余再发一次
+  同一个效果、同一个臂再进来。答案是格子的单位是**一次激活**，重进来的臂读到的是**本次激活**
+  的那一份；同一次安装被递归激活多次时各次激活各有一份，恢复一条续延回到的是它自己那次激活
+  的那一份。（此前这条只对尾恢复档承诺，并留了一句「放开之后格子须随延续复制」的逃生门；
+  本节就是行使它的地方。）
 - 臂身体里发**别的**效果，由**安装点**在场的 handler 应答，不是发出操作的那处在场的：
   臂在安装点运行。
 
@@ -1762,6 +1787,206 @@ pub fn main() -> Unit !io = {
 
 `ask() => 7` 应答的是它自己那段区域里发出的操作，而 `f()` 发生在区域之外，
 所以 `f` 的行留着 `!Ask`，由 `main` 这里的 handler 应答。
+
+#### 控制臂：`resume` 绑定与一次性续延
+
+控制臂形如 `op(参数…) resume k => 表达式`，`k` 由作者命名。它只写得在 `ctl` 效果之下，
+非 `ctl` 效果之下的臂写绑定子句是编译错误，诊断点名那个臂并要求去改声明：可挂起性是
+**声明**上的性质，因为一条行点名的是效果，而这是 Java 边界读得到的全部。`ctl` 是许可不是
+要求，`ctl` 效果之下写不带绑定子句的尾恢复臂合法。
+
+- **应答类型**：设 `with handle` 块剩余的类型是 `A`，则**块的类型是 `A`**，每个控制臂的体
+  必须也是 `A`，`k` 的类型是 `fn(R) -> A`，`R` 是该操作声明的返回类型。`A` 不是新的类型
+  变量，它就是块剩余的类型；一个控制臂都没有的 handler 里，这条规则什么都不说。
+- **臂的值就是块的值**，与操作声明的返回类型无关。一次都不恢复是合法的，臂的值直接成为
+  块的答案，块剩余里挂起点之后的部分不再运行。
+- **`k` 是一个普通函数值**，行是纯的，没有属于自己的类型：它进得了 ADT 字段、格子与列表，
+  也可以在安装 handler 的那个帧已经返回之后再被调用。行是纯的不是宽容，是供给点纪律的
+  直接推论（见下面的「实现」）：剩余要的那份证据包在安装点就建好并交给了续延，调用它的人
+  不必也不能再供一次。
+- **`k` 是深的**：调用它会重装本次安装，所以恢复之后的剩余再发同一个效果，仍由这次安装
+  应答，读到的仍是这次激活的格子。
+- **一次性是动态的**：一条续延至多用掉一次。类型不说这件事，也不试图说；第二次用掉它是
+  panic（消息见下表），不是可捕获的 fault。
+- **控制臂里的 `?`**：按 `A` 判，因而要求 `A` 是 `Option`/`Result`，意思是**放弃续延**、
+  用 `None`/`Err` 当整个块的答案。在调用 `k` 之前 `?`，放弃的是一条从未恢复的续延；
+  在调用 `k` 之后 `?`，丢掉的是剩余已经交回来的值，不是状态。
+- **不跨 Java 边界**：行里点名了某个 `ctl` 效果的函数值不能转成 Java 函数式接口，
+  在 SAM 转换点报编译错误（§9.4），因为 Java 帧下面没有 Dawn 帧可以承接一次挂起。
+  效果变量与关联效果投影两条轴**不静态判**，转换点不知道调用方会把 `!e` 实例化成什么；
+  它们由运行期接住，一次接不住的挂起是 panic 而不是错答案。
+
+```dawn run
+use std/io
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+fn release(tag: String) -> Unit !io = io.println("release ${tag}")
+
+fn resumed() -> Int = {
+  with handle Ask { ask(n) resume k => k(n + 1) }
+  ask(1) + ask(10)
+}
+
+fn bare() -> String !io = {
+  with handle Ask { ask(n) resume k => "dropped at ${to_string(n)}" }
+  with r <- bracket("bare", release)
+  "held ${r}, then ${to_string(ask(1))}"
+}
+
+fn explicit() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "discarded at ${to_string(n)}"
+    }
+  }
+  with a <- bracket("outer", release)
+  with b <- bracket("inner", release)
+  "held ${a} and ${b}, then ${to_string(ask(1))}"
+}
+
+pub fn main() -> Unit !io = {
+  io.println(to_string(resumed()))
+  io.println(bare())
+  io.println(explicit())
+}
+```
+
+```output
+13
+dropped at 1
+release inner
+release outer
+discarded at 1
+```
+
+`resumed` 是一次往返：`k(n + 1)` 拿这个值当那次 `ask` 的结果去跑块剩余，剩余产出什么就是
+臂的值，也就是块的值。`bare` 与 `explicit` 是下面那条裁决的两半。
+
+#### 放弃一条续延
+
+捕获了却不恢复的续延有两种结局，而语言只承认一个**显式**的触发器。
+
+- **裸丢弃什么都不跑。** 把最后一个引用丢掉，被冻住的那段计算里的 `bracket` 一个 `release`
+  都不跑（上面的 `bare`：没有 `release bare` 那一行，这就是全部断言）。这是裁决而不是疏漏：
+  按回收触发清理会让同一份源程序在两个后端上有两种可观察行为，因为 JVM 的 GC 时机不是
+  native 的引用计数时机；而析构器那条路也不通，`release` 是带词法环境的任意用户代码，
+  运行时独立调用不了它。被丢弃的续延占用的**内存**由实现回收，本规范不承诺回收的时机。
+- **`discard` 是被认可的那条路。**
+
+  ```dawn
+  fn discard[T, U](k: fn(T) -> U) -> Unit
+  ```
+
+  它用一剂毒药恢复被放弃的计算，让展开在挂起点与安装点之间的每一个 `bracket` 上落地、
+  **由内向外**跑一遍 `release`，然后答 `Unit`。参数类型就是续延自己的类型，不是更窄的
+  东西：上面已经裁过 `k` 是一个普通函数值，这里不把它收回去。所以任何函数值都过类型，
+  **是不是一条续延在运行期判**。`discard` 与恢复花的是同一张票：丢弃过的续延不能再恢复，恢复过的也不能再丢弃。
+  comptime 拒绝它。
+
+四条消息，逐字如下。
+
+| 情形 | 消息 |
+|---|---|
+| 恢复一条已经用掉的续延 | `dawn: continuation resumed twice` |
+| 丢弃一条已经用掉的续延 | `dawn: continuation discarded after it was already used` |
+| 对一个不是续延的函数值 `discard` | ``dawn: `discard` expects a continuation`` |
+| 在丢弃的展开途中挂起 | ``dawn: a `ctl` operation was raised while a continuation was being discarded`` |
+
+```dawn run
+use std/io
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+type Held =
+  | Ready(v: Int)
+  | Waiting(k: fn(Int) -> Held)
+
+fn plain(n: Int) -> Int = n
+
+fn twice() -> Int = {
+  with handle Ask { ask(n) resume k => k(n) + k(n) }
+  ask(1)
+}
+
+fn escaping() -> Held = {
+  with handle Ask { ask(n) resume k => Waiting(k) }
+  Ready(ask(1))
+}
+
+fn spent() -> String !io =
+  match escaping() {
+    Ready(v) -> "resumed ${to_string(v)}"
+    Waiting(k) -> {
+      discard(k)
+      match catch_panic(() => discard(k)) {
+        Ok(_) -> "discarded twice"
+        Err(e) -> e.message
+      }
+    }
+  }
+
+fn suspending() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "unreachable"
+    }
+  }
+  with r <- bracket("r", tag => {
+    let _ = ask(99)
+    ()
+  })
+  "unreachable ${r} ${to_string(ask(1))}"
+}
+
+pub fn main() -> Unit !io = {
+  match catch_panic(() => twice()) {
+    Ok(v) -> io.println(to_string(v))
+    Err(e) -> io.println(e.message)
+  }
+  io.println(spent())
+  match catch_panic(() => discard(plain)) {
+    Ok(_) -> io.println("discarded a plain function")
+    Err(e) -> io.println(e.message)
+  }
+  match catch_panic(() => suspending()) {
+    Ok(s) -> io.println(s)
+    Err(e) -> io.println(e.message)
+  }
+}
+```
+
+```output
+dawn: continuation resumed twice
+dawn: continuation discarded after it was already used
+dawn: `discard` expects a continuation
+dawn: a `ctl` operation was raised while a continuation was being discarded
+```
+
+另外四条规定：
+
+- **毒药不是失败**：`catch_panic` 与 `catch_fault` 都拦不住它。这条是必须的而不是方便：
+  拦得住就意味着被放弃的计算可以从自己的清理里复活，从屏障那里接着往下跑完。`bracket`
+  照旧释放，它护而不拦（§9.8.2）。
+- **冻结跨度里的内层激活一起丢**：一次冒泡越过的内层 handler 激活也在被丢弃的那一段里，
+  它底下的 `release` 同样跑，由内向外。
+- **展开途中不许挂起**：`release` 里做 io、失败、开自己的 `bracket` 都可以，唯独不能发
+  `ctl` 操作。展开下面的帧已经注定要走，没有任何东西能恢复进去，所以一次会挂起的展开
+  就是一次可能永远不完成的展开。
+- **展开途中 `release` 逃逸的失败不按 §9.8.2 的替换规则**：剩下的 `release` 照跑，第一条
+  失败是被交付的那一条，在展开跑完之后交给调用 `discard` 的人。理由记在 §9.8.2 的补注里。
+
+**两个后端只承诺可观察的一致。** 冻结与恢复的**机制不写进本规范**：JVM 上是把栈冻起来，
+native 上是停下那条栈、换另一条来跑，两者不同是刻意的。本规范承诺的是同一份源程序在两个
+后端上给出同一串可观察行为：答案、`release` 的次数与顺序、panic 的消息与它落在哪里。
+逐字节比对这三样的语料是 `scripts/spike-native/ctl_resume.dawn`、`ctl_nested.dawn` 与
+`ctl_discard.dawn`。
 
 #### 边界（v1）
 
@@ -2168,10 +2393,15 @@ fn spawn_hello(msg: String) -> Unit !io = {
   Dawn 不追踪 Java 泛型实参，**泛型 SAM**（`Predicate`/`Function` 这类）的参数按擦除后
   的类型进入 Dawn（通常是不透明 `Object`，只能原样传递）；具体类型的 SAM
   （`Runnable`、`HttpHandler`）才有完整体验。
-- **任何行都跨得过去，证据取自创建点**：带具名效果标签、含效果变量、含关联效果投影的行
-  都可以传出。转换点把当时在作用域里的证据包快照进 adapter 对象，Java 调用时把它交给闭包，
-  这是 §6.5 的边界条款。理由也在那里：Java 从没有 Dawn 栈帧的地方进入回调，没有调用点可交
-  证据，创建点是最后一个有证据的地方。
+- **除 `ctl` 之外任何行都跨得过去，证据取自创建点**：带具名效果标签、含效果变量、含关联
+  效果投影的行都可以传出。转换点把当时在作用域里的证据包快照进 adapter 对象，Java 调用时
+  把它交给闭包，这是 §6.5 的边界条款。理由也在那里：Java 从没有 Dawn 栈帧的地方进入回调，
+  没有调用点可交证据，创建点是最后一个有证据的地方。
+- **`ctl` 是那一个例外**：行里点名了某个 `ctl` 效果（§6.5）的函数值**不跨边界**，在转换点
+  报编译错误，因为 `ctl` 说的正是「这个值的调用者可能被一条臂挂起」，而 Java 帧下面没有
+  Dawn 帧可以承接。出路是把转换挪到别处，或者在没有任何臂绑定续延时把声明上的 `ctl` 去掉。
+  只有**写出来的**标签这样静态判：效果变量与关联效果投影两条轴，转换点不知道调用方会把
+  `!e` 实例化成什么，由运行期接住，一次接不住的挂起是 panic 而不是错答案。
 - **行在转换点记账**：跨界的行按普通调用点算进本函数的行。作用域里没人应答的标签照常报
   「没有 handler」；本函数的签名把它带出去时，快照读的就是本帧的隐藏证据参数。所以边界条款
   改的是证据从哪里来，不是它可不可以不存在。
@@ -2420,6 +2650,14 @@ with f <- bracket(open(path), close)
   （`scripts/spike-native/bracket_release_fails.dawn`）。`release` 自己**逃逸**一个
   失败（raise 而不接）则顶掉原失败、无 suppressed 链：这是两后端的现状，写在这里
   使它成为裁决而非巧合。
+
+  > **这条替换规则有且只有一个例外：丢弃一条续延时的那次展开**（§6.5 的 `discard`）。
+  > 那条路径上被穿过的不是一个失败而是一剂毒药，而毒药按定义拦不住；让 `release` 的失败
+  > 顶掉它，就等于把它换成一次普通失败，于是冻结跨度里的 `catch_panic` 会接住它，
+  > 被放弃的计算从自己的清理里复活、接着跑完。所以那里改用另一条规则（Lua `__close` 的那条）：
+  > **走查不停**，剩下的 `release` 照跑；**第一条失败是被交付的那一条**，在展开跑完之后
+  > 交给调用 `discard` 的人。语料是 `scripts/spike-native/ctl_discard.dawn` 的
+  > `release_failure`。
 - **`bracket` 不拦任何东西**，故返回 `B` 而非 `Result`——护与拦是两件正交的事
   （Haskell `bracket`、Kotlin `use`、Koka `finally`、Go `defer` 无一返回 Result）。
   要把失败拿成值就写 `catch_fault(() => bracket(...))`，两个原语各做一件事。

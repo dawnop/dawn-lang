@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 20c8c0b97dac5cda -->
+<!-- doc-check: translation-of docs/spec.md @ 04b2ab846d3cf92d -->
 
 # Dawn Language Specification
 
@@ -1939,10 +1939,16 @@ are not Java types, so an instance call like `s.substring(…)` does not work to
 ### 6.5 Named effects and `with handle`
 
 `effect` declares a set of operation signatures; the call site calls an operation directly, and the
-`with handle` **lexically nearest to the call** answers it. This tier is **tail-resumptive**: a handler arm is
-an ordinary closure that is "called in place, its return value is the operation's result", with no
-continuation capture. For the design and the verdicts see
-[`docs/effects-design.md`](effects-design.md).
+`with handle` **lexically nearest to the call** answers it.
+
+There are two tiers of arm. A **tail-resumptive** arm is an ordinary closure that is "called in
+place, its return value is the operation's result", with no continuation capture. A **control arm**
+carries one more clause (`op(args…) resume k => expression`): `k` binds the continuation of that
+operation, and the arm's value is the value of the whole `with handle` block. A control arm can be
+written only under an effect declared `ctl`, and the rules for it are collected in "Control arms"
+below. Whether the binding clause is there is the arm's kind marker. For the design and the verdicts
+see [`docs/effects-design.md`](effects-design.md) and
+[`docs/oneshot-design.md`](oneshot-design.md).
 
 #### Declaration
 
@@ -1958,7 +1964,18 @@ effect State {
 }
 ```
 
+```dawn
+ctl effect Fetch {
+  fn fetch(url: String) -> String
+}
+```
+
 - Effect names are UpperCamelCase and share one namespace with types and traits.
+- A declaration may carry a `ctl` prefix, which says "an operation of this effect may be suspended
+  by a control arm". `ctl` is a **contextual keyword** (as `handle` and `resume` are), never
+  reserved, and it is still usable as an identifier, a parameter name and a function name. With a
+  visibility the order is `pub ctl effect E`: `ctl` sits where `opaque` sits, between the visibility
+  and the keyword it modifies.
 - An operation is an ordinary function signature: no body, and it **must not carry an effect
   annotation of its own** (an operation's effect is the effect it belongs to); it currently must not
   carry type parameters either.
@@ -2009,10 +2026,12 @@ block** lives in that handler's scope, exactly isomorphic to `with x <- f(…)`,
 of its discipline — legal only inside a block, the rest is a real closure, `return`/`break`/
 `continue` are refused (the diagnostic names `with handle`), `?` passes through transparently.
 
-- An arm has the form `op(args…) => expression`, `=>` being the same notation as in a lambda (an
-  arm is a closure to begin with), and arms are separated by newlines. Every declared operation
-  gets **exactly one arm**: too few arms, too many arms, and an arm whose name does not belong to
-  the effect are all compile errors.
+- An arm has the form `op(args…) => expression` (a tail-resumptive arm) or
+  `op(args…) resume k => expression` (a control arm, see "Control arms" below), `=>` being the same
+  notation as in a lambda (an arm is a closure to begin with), and arms are separated by newlines.
+  Every declared operation gets **exactly one arm**: too few arms, too many arms, and an arm whose
+  name does not belong to the effect are all compile errors. Both kinds of arm may sit in one
+  handler.
 - One `handle`, one effect; handling the same effect again is inner shadowing outer, which is legal.
 - Handling an effect the block never actually performs is allowed (harmless dead evidence).
 - **Handler-local state (cells)**: the head of the arm table may declare any number of `var`s, each
@@ -2054,20 +2073,24 @@ of its discipline — legal only inside a block, the rest is a real closure, `re
 - **Typing rule**: let the rest closure's effect be `(base, L)` and each arm body's effect be
   `(base_i, L_i)`; then the block that installs the handler is recorded as
   `(base ∪ ⋃base_i, (L ∖ {E}) ∪ ⋃L_i)`.
-  The subtraction is at this node: the rest is a closure, **this node is what runs it**, and this
-  node is what supplies its evidence, so this node is the only thing that can take `E` off the row.
-  Subtraction and supply are one and the same call, which is why a handler that never answered `E`
-  can take nothing away. The base axis is not subtracted: `!io` is not something `handle` answers.
+  The subtraction is at this node: the rest is a closure and **this node is what supplies its
+  evidence**, so this node is the only thing that can take `E` off the row. **Subtraction follows
+  supply, not execution**: under a control arm the rest may be run by a continuation that has
+  travelled elsewhere (see "Control arms"), and the evidence it wants is still the pack this node
+  built at the installation point and handed over. A handler that never supplied `E` can therefore
+  take nothing away. The base axis is not subtracted: `!io` is not something `handle` answers.
   The effects the arm bodies perform themselves (including io, including other labels) are all
   unioned back onto the block — an arm runs where the handler is installed, not where the operation
   is performed.
   **"A row losing a member" happens at `with handle` and nowhere else**, and it does not enter
   unification.
 - **`?` leaves early and the state is discarded**: `?` still passes through a `with handle`
-  transparently (§4.10), cells or no cells. On an early exit the state is discarded and the cells are
-  destroyed along with the handler frame; the line in the rest of the block that reads a cell is one
-  that was never going to run anyway, so there is no hand-back surface that looks certain to run and
-  quietly does not. This reading is not an invention of this language: it is the literature's
+  transparently (§4.10), cells or no cells. What an early exit discards is the state of **this
+  activation**, whose cells are destroyed with it; the line in the rest of the block that reads a
+  cell is one that was never going to run anyway, so there is no hand-back surface that looks
+  certain to run and quietly does not. A continuation a control arm stored before the early exit is
+  unaffected: it carries the cells of its own activation, and resuming it resumes another lineage of
+  state. This reading is not an invention of this language: it is the literature's
   **local state interpretation** (Wu / Schrijvers / Hinze, *Effect Handlers in Scope*, Haskell 2014),
   the standard answer for a state handler installed inside the error boundary.
 
@@ -2122,17 +2145,28 @@ its creation point. Consequences:
   of the region as a value: it has no spellable type. The contrast is an ordinary `let`: a value
   bound with `let` inside a handler's region may still be captured by an escaping closure, and this
   ban tightened cells and nothing else.
+  **A continuation is the one thing that can carry this activation's state out of the block**, and
+  what it carries out is not a new name: the block's rest closure is still applied in place exactly
+  once, what escapes is that closure part-way through, and the continuation carries the cells of
+  **its own activation**. So "no second name reaches this cell" holds at the level of names,
+  unchanged.
 - Performing **this same effect** inside an arm body binds to the **outer** handler for that effect
   (it does not answer itself); with no outer one the arm owes the label and the error is reported
   as usual.
-- **Reentrancy (at this tier)**: an arm gets the evidence environment of the layer **before** the
-  installation point, so a cell of one installation is touched only by the arms of that
-  installation, and the classic lost-update shape "read the cell, call out, write the cell" cannot
-  be built at this tier: whatever route the intervening call takes, it never gets back to the same
-  cell. Nested installations each have their own cells, and what the inner one accumulates does not
-  leak into the outer one. This is stated for the **tail-resumptive** tier and promises nothing
-  about how it reads once multiple `resume`s are allowed (there a cell would have to be copied
-  along with the continuation, which is a separate verdict).
+- **Reentrancy**: an arm gets the evidence environment of the layer **before** the installation
+  point, so a cell of one installation is touched only by the arms of that installation. Nested
+  installations each have their own cells, and what the inner one accumulates does not leak into
+  the outer one.
+  The classic lost-update shape "read the cell, call out, write the cell" cannot be built at the
+  **tail-resumptive** tier: whatever route the intervening call takes, it never gets back to the
+  same cell. **Under a control arm it can be built**: the arm reads the cell, calls `k`, the rest
+  performs the same effect again, and the same arm is entered again. The answer is that a cell's
+  unit is **one activation**, and the re-entered arm reads the cell of **this** activation; when one
+  installation is activated recursively, each activation has its own, and resuming a continuation
+  goes back to the one belonging to its own activation. (This used to be promised for the
+  tail-resumptive tier only, with an escape hatch saying that once multiple `resume`s were allowed a
+  cell would have to be copied along with the continuation. This section is where that hatch is
+  used.)
 - Performing **another** effect inside an arm body is answered by the handler in scope at the
   **installation point**, not by the one in scope where the operation was performed: the arm runs
   at the installation point.
@@ -2162,6 +2196,229 @@ pub fn main() -> Unit !io = {
 
 `ask() => 7` answers the operations performed inside its own region, and `f()` happens outside it,
 so `f`'s row keeps `!Ask` and the handler here in `main` answers it.
+
+#### Control arms: the `resume` binding and one-shot continuations
+
+A control arm has the form `op(args…) resume k => expression`, with `k` named by the author. It can
+be written only under a `ctl` effect; an arm of a non-`ctl` effect that carries the binding clause is
+a compile error, and the diagnostic names that arm and asks for the declaration to be changed.
+Suspendability is a property of the **declaration**, because a row names effects and that is all the
+Java boundary can read. `ctl` is a licence rather than a requirement: a tail-resumptive arm with no
+binding clause is legal under a `ctl` effect.
+
+- **The answer type**: let the type of the rest of the `with handle` block be `A`; then **the
+  block's type is `A`**, every control arm's body must be `A` too, and `k`'s type is `fn(R) -> A`,
+  where `R` is the return type declared for that operation. `A` is not a new type variable, it is
+  the type of the rest of the block; in a handler with no control arm this rule says nothing.
+- **The arm's value is the block's value**, and has nothing to do with the operation's declared
+  return type. Not resuming at all is legal: the arm's value becomes the block's answer directly,
+  and the part of the block after the suspension does not run again.
+- **`k` is an ordinary function value**, with a pure row and no type of its own: it goes in an ADT
+  field, in a cell, in a list, and it may be called after the frame that installed the handler has
+  returned. The pure row is not leniency but a consequence of the supply-point discipline (see
+  "Implementation" below): the pack the rest of the block wants was built at the installation point
+  and handed to the continuation, so whoever calls it neither has to supply one nor can.
+- **`k` is deep**: calling it reinstalls this installation, so the rest of the block performing the
+  same effect again after the resumption is answered by this installation, reading the cells of this
+  activation.
+- **One-shot is dynamic**: a continuation is spent at most once. The type does not say so and does
+  not try to; spending it a second time is a panic (the message is in the table below), not a
+  catchable fault.
+- **`?` inside a control arm**: it is judged against `A`, and so requires `A` to be an
+  `Option`/`Result`. It means **abandon the continuation** and let `None`/`Err` be the answer of the
+  whole block. Before the call to `k` it abandons a continuation that was never resumed; after the
+  call to `k` it throws away the value the rest of the block already handed back, which is a value
+  and not state.
+- **It does not cross to Java**: a function value whose row names a `ctl` effect cannot be converted
+  to a Java functional interface, and the conversion point is a compile error (§9.4), because there
+  is no Dawn frame under a Java frame to suspend into. Only **written** labels are judged
+  statically. On the other two axes, an effect variable and an associated-effect projection, the
+  conversion point cannot know what the caller will instantiate `!e` with; those are caught at run
+  time, and a suspension nothing can catch is a panic rather than a wrong answer.
+
+```dawn run
+use std/io
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+fn release(tag: String) -> Unit !io = io.println("release ${tag}")
+
+fn resumed() -> Int = {
+  with handle Ask { ask(n) resume k => k(n + 1) }
+  ask(1) + ask(10)
+}
+
+fn bare() -> String !io = {
+  with handle Ask { ask(n) resume k => "dropped at ${to_string(n)}" }
+  with r <- bracket("bare", release)
+  "held ${r}, then ${to_string(ask(1))}"
+}
+
+fn explicit() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "discarded at ${to_string(n)}"
+    }
+  }
+  with a <- bracket("outer", release)
+  with b <- bracket("inner", release)
+  "held ${a} and ${b}, then ${to_string(ask(1))}"
+}
+
+pub fn main() -> Unit !io = {
+  io.println(to_string(resumed()))
+  io.println(bare())
+  io.println(explicit())
+}
+```
+
+```output
+13
+dropped at 1
+release inner
+release outer
+discarded at 1
+```
+
+`resumed` is one round trip: `k(n + 1)` runs the rest of the block with that value as the result of
+that `ask`, and what the rest produces is the arm's value, which is the block's. `bare` and
+`explicit` are the two halves of the ruling below.
+
+#### Abandoning a continuation
+
+A continuation that was captured and never resumed ends in one of two ways, and the language
+recognises only an **explicit** trigger.
+
+- **A bare drop runs nothing.** Drop the last reference and not one `release` of the brackets inside
+  the frozen computation runs (`bare` above: there is no `release bare` line, and that is the whole
+  assertion). This is a ruling rather than an oversight. Triggering cleanup off reclamation would
+  give one source program two observable behaviours on two backends, because the JVM's GC does not
+  fire when native's reference counting does; and the destructor route is closed too, since a
+  `release` is arbitrary user code with a lexical environment that no runtime can call on its own.
+  The **memory** a dropped continuation holds is reclaimed by the implementation, and this
+  specification does not promise when.
+- **`discard` is the sanctioned path.**
+
+  ```dawn
+  fn discard[T, U](k: fn(T) -> U) -> Unit
+  ```
+
+  It resumes the abandoned computation with a poison, so the unwind lands on every `bracket` between
+  the suspension and the installation and runs its `release`, **innermost first**, and then answers
+  `Unit`. The parameter's type is the continuation's own type and nothing narrower: `k` was ruled an
+  ordinary function value above, and this does not take that back. So any function value satisfies
+  the type and **whether it is a continuation is decided at run time**. `discard` spends the same
+  ticket a resumption spends: a discarded continuation cannot be resumed, and a resumed one cannot
+  be discarded. Comptime refuses it.
+
+The four messages, verbatim:
+
+| Situation | Message |
+|---|---|
+| resuming a continuation already spent | `dawn: continuation resumed twice` |
+| discarding a continuation already spent | `dawn: continuation discarded after it was already used` |
+| `discard` on a function value that is not a continuation | ``dawn: `discard` expects a continuation`` |
+| suspending during a discard's unwind | ``dawn: a `ctl` operation was raised while a continuation was being discarded`` |
+
+```dawn run
+use std/io
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+type Held =
+  | Ready(v: Int)
+  | Waiting(k: fn(Int) -> Held)
+
+fn plain(n: Int) -> Int = n
+
+fn twice() -> Int = {
+  with handle Ask { ask(n) resume k => k(n) + k(n) }
+  ask(1)
+}
+
+fn escaping() -> Held = {
+  with handle Ask { ask(n) resume k => Waiting(k) }
+  Ready(ask(1))
+}
+
+fn spent() -> String !io =
+  match escaping() {
+    Ready(v) -> "resumed ${to_string(v)}"
+    Waiting(k) -> {
+      discard(k)
+      match catch_panic(() => discard(k)) {
+        Ok(_) -> "discarded twice"
+        Err(e) -> e.message
+      }
+    }
+  }
+
+fn suspending() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "unreachable"
+    }
+  }
+  with r <- bracket("r", tag => {
+    let _ = ask(99)
+    ()
+  })
+  "unreachable ${r} ${to_string(ask(1))}"
+}
+
+pub fn main() -> Unit !io = {
+  match catch_panic(() => twice()) {
+    Ok(v) -> io.println(to_string(v))
+    Err(e) -> io.println(e.message)
+  }
+  io.println(spent())
+  match catch_panic(() => discard(plain)) {
+    Ok(_) -> io.println("discarded a plain function")
+    Err(e) -> io.println(e.message)
+  }
+  match catch_panic(() => suspending()) {
+    Ok(s) -> io.println(s)
+    Err(e) -> io.println(e.message)
+  }
+}
+```
+
+```output
+dawn: continuation resumed twice
+dawn: continuation discarded after it was already used
+dawn: `discard` expects a continuation
+dawn: a `ctl` operation was raised while a continuation was being discarded
+```
+
+Four more rules:
+
+- **The poison is not a failure**: neither `catch_panic` nor `catch_fault` sees it. This is
+  necessary rather than convenient: catching it would mean the abandoned computation can be
+  resurrected out of its own cleanup and carry on from the barrier to the end. `bracket` releases as
+  it always does, because it guards without catching (§9.8.2).
+- **An inner activation inside the frozen span is discarded with it**: an inner handler activation
+  that a bubble passed over is inside the abandoned span too, and the `release`s under it run as
+  well, innermost first.
+- **The unwind may not suspend**: a `release` may do io, may fail, and may open a `bracket` of its
+  own, but it may not perform a `ctl` operation. The frames below the walk are already committed to
+  going away and nothing can resume into them, so an unwind that suspends is an unwind that may
+  never finish.
+- **A failure escaping a `release` during the unwind does not follow §9.8.2's replacement rule**:
+  the remaining `release`s still run, and the first failure is the one delivered, handed to whoever
+  called `discard` after the walk is finished. The reasoning is recorded in §9.8.2.
+
+**The two backends promise observational agreement and nothing more.** The mechanism of freezing and
+resuming is **deliberately left out of this specification**: the JVM freezes the stack, native stops
+running that stack and switches to another, and that difference is intentional. What is promised is
+that one source program produces the same observable behaviour on both: the answers, the number and
+order of the `release`s, and the message and the position of a panic. The corpora that compare those
+byte for byte are `scripts/spike-native/ctl_resume.dawn`, `ctl_nested.dawn` and `ctl_discard.dawn`.
 
 #### Boundaries (v1)
 
@@ -2682,13 +2939,22 @@ fn spawn_hello(msg: String) -> Unit !io = {
   enter Dawn with their erased types (usually an opaque `Object`, which can only be
   passed along as is); only a SAM with concrete types (`Runnable`, `HttpHandler`) gives
   the full experience.
-- **Every row crosses, and the evidence comes from the creation point**: a row carrying
-  a named effect label, an effect variable or an associated-effect projection can be
-  handed out. The conversion point snapshots the evidence pack that is in scope there
+- **Every row but `ctl` crosses, and the evidence comes from the creation point**: a row
+  carrying a named effect label, an effect variable or an associated-effect projection can
+  be handed out. The conversion point snapshots the evidence pack that is in scope there
   into the adapter object, and Java's call hands it to the closure; this is §6.5's
   boundary clause. The reason is there too: Java enters a callback from somewhere with no
   Dawn frame under it, so there is no call site to supply evidence at, and the creation
   point is the last place any exists.
+- **`ctl` is the one exception**: a function value whose row names a `ctl` effect (§6.5)
+  **does not cross**, and the conversion point is a compile error, because `ctl` says
+  exactly that an arm may suspend this value's caller, and there is no Dawn frame under a
+  Java frame to suspend into. The ways out are to move the conversion elsewhere, or to drop
+  the `ctl` from the declaration when no arm of it binds a continuation. Only **written**
+  labels are judged this way: on the effect-variable and associated-effect-projection axes
+  the conversion point cannot know what the caller will instantiate `!e` with, so those are
+  caught at run time, where a suspension nothing can take is a panic rather than a wrong
+  answer.
 - **The row is charged at the conversion point**: a crossing row counts towards this
   function's row like any other call site. A label nothing in scope answers still reports
   "nobody is handling this"; when this function's own signature carries it out instead,
@@ -3009,6 +3275,16 @@ Three guarantees:
   **escapes** the release itself (raised and not caught) replaces the original, with no
   suppressed chain: that is what both backends do today, written here so it is a ruling
   rather than a coincidence.
+
+  > **This replacement rule has exactly one exception: the unwind that discards a
+  > continuation** (§6.5's `discard`). What is passing through on that path is not a
+  > failure but a poison, and a poison is by definition uncatchable; letting a `release`'s
+  > failure replace it would turn it into an ordinary failure, so a `catch_panic` inside the
+  > frozen span would take it and the abandoned computation would be resurrected out of its
+  > own cleanup and run to the end. So a different rule applies there, Lua's `__close` rule:
+  > **the walk is not stopped** and the remaining `release`s still run; **the first failure
+  > is the one delivered**, handed to whoever called `discard` once the unwind is finished.
+  > The corpus is `release_failure` in `scripts/spike-native/ctl_discard.dawn`.
 - **`bracket` intercepts nothing**, so it returns `B` and not `Result` — guarding and
   intercepting are two orthogonal things (neither Haskell's `bracket`, Kotlin's `use`,
   Koka's `finally` nor Go's `defer` returns a Result). To take the failure as a value,
