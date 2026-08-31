@@ -1,0 +1,92 @@
+# The handler arm's optional binder clause, `op(a) resume k => ...`
+# (docs/grammar.ebnf `handler_arm` / `resume_binder`, docs/oneshot-design.md
+# §9 ③). Parsing only: every arm below is a *control* arm, and the checker
+# refuses all of them today -- that refusal is pinned by
+# scripts/checker-corpus/cases/handler_resume.dawn, and it is a separate claim
+# from this one, which is that the syntax exists and has one reading.
+
+effect Ask {
+  fn ask() -> Int
+}
+
+effect Store {
+  fn get(k: String) -> Int
+  fn put(k: String, v: Int) -> Unit
+}
+
+# the shape the doc writes: a nullary operation, the binder on the same line
+fn nullary() -> Int = {
+  with handle Ask { ask() resume k => k(1) }
+  ask()
+}
+
+# the operation's own parameters come first and are unaffected; a multi-param
+# operation binds the continuation after its `)`
+fn multi_param() -> Unit = {
+  with handle Store {
+    get(key) resume k => k(0)
+    put(key, v) resume k => k(())
+  }
+  put("a", 1)
+}
+
+# the binder is an ordinary name chosen by the author, not a fixed one: nested
+# handlers can give their two continuations two spellings, which is the reason
+# the name is written rather than implied
+fn author_chosen_names() -> Int = {
+  with handle Ask { ask() resume outer => outer(1) }
+  with handle Store {
+    get(key) resume inner => inner(0)
+    put(key, v) resume inner => inner(())
+  }
+  ask()
+}
+
+# the clause is per arm, not per handler: a tail-resumptive arm and a control
+# arm sit side by side, and cells still come ahead of both
+fn mixed_with_cells() -> Unit = {
+  with handle Store {
+    var reads: Int = 0
+    get(key) resume k => {
+      reads = reads + 1
+      k(reads)
+    }
+    put(key, v) => ()
+  }
+  put("a", 1)
+}
+
+# an arm's body is still a block or an expression, and still may be written on
+# the following line
+fn body_forms() -> Int = {
+  with handle Ask {
+    ask() resume k =>
+      k(1)
+  }
+  ask()
+}
+
+# `resume` is contextual, never reserved, exactly like `handle`: it names a
+# function, a binding, and an operation, and none of those readings moved
+fn resume(x: Int) -> Int = x
+
+fn resume_is_a_binding() -> Int = {
+  let resume = 1
+  resume + resume(2)
+}
+
+effect Coroutine {
+  fn resume(n: Int) -> Int
+}
+
+# an operation *called* `resume` is answered by an arm whose name is `resume`;
+# the operation name is parsed before the `(`, so the two never compete
+fn operation_named_resume() -> Int = {
+  with handle Coroutine { resume(n) => n }
+  resume(1)
+}
+
+fn operation_named_resume_with_binder() -> Int = {
+  with handle Coroutine { resume(n) resume k => k(n) }
+  resume(1)
+}

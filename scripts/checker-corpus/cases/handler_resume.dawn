@@ -1,0 +1,50 @@
+# checker.dawn: the handler arm's binder clause, `op(a) resume k => ...`
+# (docs/oneshot-design.md §9 ③). The syntax parses -- that half is pinned by
+# scripts/grammar-corpus/accept/handle_resume_binder.dawn -- and the checker
+# refuses it, because a control arm has no meaning below the checker: Core has
+# no continuation node and both emitters would compile the arm as though it
+# returned to the raise site.
+#
+# What the golden is here to hold is that the refusal is **one** diagnostic per
+# arm, at the clause. The arm body is not checked against the operation's
+# signature: it is written for a language in which `resume` is in scope, so
+# checking it would bury the honest refusal under diagnostics about a program
+# nobody wrote.
+effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+effect Store {
+  fn get(k: String) -> Int
+  fn put(k: String, v: Int) -> Unit
+}
+
+# one arm, one diagnostic, underlining `resume k` and nothing else
+pub fn single() -> Int = {
+  with handle Ask { ask(n) resume k => k(n) }
+  ask(1)
+}
+
+# the clause is per arm: the tail-resumptive arm beside it is checked as
+# always, and contributes nothing
+pub fn mixed() -> Unit = {
+  with handle Store {
+    get(key) resume k => k(0)
+    put(key, v) => ()
+  }
+  put("a", 1)
+}
+
+# a body that could not possibly typecheck -- `k` is not in scope, and the arm
+# answers with the wrong type -- still yields exactly the one diagnostic, which
+# is the claim about not checking the body
+pub fn body_is_not_checked() -> Int = {
+  with handle Ask { ask(n) resume k => k("not an Int") }
+  ask(1)
+}
+
+# the binder's name is the author's, and the hint quotes it back
+pub fn author_chosen_name() -> Int = {
+  with handle Ask { ask(n) resume continuation => continuation(n) }
+  ask(1)
+}

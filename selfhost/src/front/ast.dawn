@@ -184,18 +184,31 @@ pub fn first_named(args: List[Arg]) -> Option[Arg] = {
 
 pub type MatchArm = { pat: Pattern, guard: Option[Expr], body: Expr, lo: Int, hi: Int }
 
-## One arm of a `with handle E { ... }` clause: `op(a, b) => body`. The arm is
-## a closure over the operation's parameters, so it carries what a lambda
-## carries; `nlo`/`nhi` span the operation name, which is what a diagnostic
-## about an unknown or duplicated operation underlines.
+## One arm of a `with handle E { ... }` clause: `op(a, b) => body`, or
+## `op(a, b) resume k => body`. The arm is a closure over the operation's
+## parameters, so it carries what a lambda carries; `nlo`/`nhi` span the
+## operation name, which is what a diagnostic about an unknown or duplicated
+## operation underlines.
+##
+## `binder` is the continuation's name when the arm was written with the
+## `resume k` clause, and its presence is the arm's kind
+## (docs/oneshot-design.md §9 ③): absent is the tail-resumptive arm, which is
+## every arm that compiles today; present is a control arm, which the checker
+## refuses until one-shot resumption lands. `blo`/`bhi` span `resume k`, the
+## two tokens that made the choice, and so are what that refusal underlines;
+## when the clause is absent they fall back to the operation name, the way
+## `PatArg` falls back to its pattern.
 pub type HandlerArm = {
   name: String,
   params: List[LambdaParam],
+  binder: Option[String],
   body: Expr,
   lo: Int,
   hi: Int,
   nlo: Int,
-  nhi: Int
+  nhi: Int,
+  blo: Int,
+  bhi: Int
 }
 
 ## One state cell of a `with handle E { ... }` clause: `var acc: List[Int] = []`,

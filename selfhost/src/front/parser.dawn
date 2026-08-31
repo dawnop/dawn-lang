@@ -2661,6 +2661,11 @@ fn handler_cell(p: P, st: St, after_arm: Bool) -> PR[HandlerCell] = {
 
 ## `op(a, b) => expr` — one handler arm. The parameter list is a lambda's, and
 ## so is the body: an arm *is* the closure the operation call reaches.
+##
+## `op(a, b) resume k => expr` is the same arm with the continuation bound, and
+## the clause being there is the whole kind mark (docs/oneshot-design.md §9 ③).
+## Without it nothing about the arm changed, down to the byte; with it the arm
+## is a control arm, which the checker refuses for now.
 fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
   # `let` is the other binder a reader might reach for when declaring a state
   # cell, and the generic "expected an operation name" would send them looking
@@ -2671,17 +2676,49 @@ fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
   }
   let (st1, name) = want(p, st, IDENT, "an operation name (`op(...) => ...`)")?
   let (st2, params) = lambda_params(p, st1, false)?
-  let (st3, _) = want(p, st2, FATARROW, "`=>` (an arm is a closure)")?
-  let st4 = skip_nl(p, st3)
-  let (st5, body) = expression(p, st4, false)?
-  Ok((st5, HandlerArm {
+  # `resume` is contextual and never reserved, like `handle`. Unlike `handle`
+  # it needs **one** token of lookahead, not two: `with handle <- e` is a
+  # competing legal production (a binder named `handle`), which is why
+  # `with_stmt` above has to look past it for `<-`, whereas the position right
+  # after an arm's `)` admits exactly one token today, `=>`. So an IDENT here
+  # cannot be anything but the binder clause, and the spelling of the operation
+  # name -- which is parsed before the `(` -- is untouched: `resume(x) => ...`
+  # still answers an operation called `resume`.
+  #
+  # Deliberately not "IDENT `resume` followed by IDENT followed by `=>`". The
+  # extra lookahead would buy no acceptance (nothing else can stand here) and
+  # would cost diagnostics: `resume` alone and `resume 1` would fall through to
+  # the `=>` check and be reported as a missing arrow, pointing past the
+  # mistake instead of at it.
+  var st3 = st2
+  var binder: Option[String] = None
+  # with no clause the span falls back to the operation name, so `blo`/`bhi`
+  # always point somewhere inside this arm
+  var blo = name.lo
+  var bhi = name.hi
+  if at_kind(p, st2, IDENT) && cur(p, st2).text == "resume" {
+    let kw = cur(p, st2)
+    let (st_k, k) = want(p, adv1(p, st2), IDENT,
+      "a name for the continuation (`op(a) resume k => ...`)")?
+    binder = Some(k.text)
+    blo = kw.lo
+    bhi = k.hi
+    st3 = st_k
+  }
+  let (st4, _) = want(p, st3, FATARROW, "`=>` (an arm is a closure)")?
+  let st5 = skip_nl(p, st4)
+  let (st6, body) = expression(p, st5, false)?
+  Ok((st6, HandlerArm {
     name: name.text,
     params: params,
+    binder: binder,
     body: body,
     lo: name.lo,
     hi: e_hi(body),
     nlo: name.lo,
-    nhi: name.hi
+    nhi: name.hi,
+    blo: blo,
+    bhi: bhi
   }))
 }
 

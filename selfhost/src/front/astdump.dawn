@@ -543,7 +543,13 @@ fn dump_expr(out: List[String], d: Int, e: Expr) -> List[String] =
         o = dump_expr(o, d + 2, c.init)
       }
       for a in arms {
-        o = o ++ [ind(d + 1) ++ "Arm " ++ a.name ++ " name" ++ sp(a.nlo, a.nhi) ++ " " ++
+        # the binder clause prints only when it was written: an arm without one
+        # dumps exactly the line it dumped before this clause existed
+        let bind = match a.binder {
+          Some(k) -> " resume " ++ k ++ sp(a.blo, a.bhi)
+          None -> ""
+        }
+        o = o ++ [ind(d + 1) ++ "Arm " ++ a.name ++ bind ++ " name" ++ sp(a.nlo, a.nhi) ++ " " ++
             sp(a.lo, a.hi)]
         for pm in a.params { o = dump_lparam(o, d + 2, pm) }
         o = dump_expr(o, d + 2, a.body)

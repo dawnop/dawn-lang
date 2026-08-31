@@ -3362,14 +3362,18 @@ fn no_cargs() -> List[Arg] = []
 
 test "a handler's arms and its remainder are both call positions" {
   # with handle Ask { get(n) => p(n, q) }  r()
+  let no_binder: Option[String] = None
   let arm = HandlerArm {
     name: "get",
     params: [LambdaParam { name: "n", ann: None, lo: 0, hi: 1 }],
+    binder: no_binder,
     body: EApply(EVar("p", 0, 1), [pos_arg(EVar("n", 0, 1)), pos_arg(EVar("q", 0, 1))], 0, 1),
     lo: 0,
     hi: 1,
     nlo: 0,
-    nhi: 1
+    nhi: 1,
+    blo: 0,
+    bhi: 1
   }
   let rest = ELambda(no_lparams(), EApply(EVar("r", 0, 1), [], 0, 1), true, 0, 1)
   let no_cells: List[HandlerCell] = []
@@ -5698,27 +5702,48 @@ fn check_handle(
     let (fptys, fret, _) = fn_ty_parts(field.ty)
     let node = match chosen[k] {
       None -> XError(nlo, nhi)
-      Some(a) -> {
-        var cxa = cx1
-        if len(a.params) != len(fptys) {
-          cxa = cerr_h(cxa, "arm `" ++ a.name ++ "` takes " ++ to_string(len(a.params)) ++
-              " parameter(s), but operation `" ++ a.name ++ "` declares " ++
-              to_string(len(fptys)), a.nlo, a.nhi,
-            "the arm is the operation's body: " ++ ty_show(cxa.adts, field.ty))
+      # A `resume k` clause makes this a control arm, and nothing below the
+      # checker knows what one is: Core has no continuation, and both emitters
+      # would compile it as though the arm returned to the raise site. So it is
+      # refused here, at the clause, and the arm becomes `XError` -- the same
+      # node an unanswered operation leaves, so the evidence record keeps its
+      # arity and no later phase meets a shape it has never seen.
+      #
+      # The body is deliberately not checked against the operation's signature.
+      # It is written for a language where `resume` is in scope and the arm may
+      # answer with the *block's* type rather than the operation's, so checking
+      # it here would bury one honest refusal under a pile of diagnostics about
+      # a program the author did not write.
+      Some(a) -> match a.binder {
+        Some(kname) -> {
+          cx1 = cerr_h(cx1, "`resume` arms are not available in this compiler", a.blo, a.bhi,
+            "binding the continuation makes this a control arm, and one-shot " ++
+              "resumption is not implemented yet (docs/oneshot-design.md); " ++
+              "without the `resume " ++ kname ++ "` clause the arm is tail-resumptive")
+          XError(a.blo, a.bhi)
         }
-        let (cxb, at, ax) = check_lambda(cxa, a.params, a.body, true, true,
-          Some(hid), Some(field.ty), a.lo, a.hi)
-        cxa = cxb
-        let (_, aret, aeff) = fn_ty_parts(at)
-        if not assignable(cxa, aret, fret) {
-          cxa = cerr(cxa, "arm `" ++ a.name ++ "` returns " ++ ty_show(cxa.adts, aret) ++
-              " but operation `" ++ a.name ++ "` declares " ++ ty_show(cxa.adts, fret),
-            e_lo(a.body), e_hi(a.body))
+        None -> {
+          var cxa = cx1
+          if len(a.params) != len(fptys) {
+            cxa = cerr_h(cxa, "arm `" ++ a.name ++ "` takes " ++ to_string(len(a.params)) ++
+                " parameter(s), but operation `" ++ a.name ++ "` declares " ++
+                to_string(len(fptys)), a.nlo, a.nhi,
+              "the arm is the operation's body: " ++ ty_show(cxa.adts, field.ty))
+          }
+          let (cxb, at, ax) = check_lambda(cxa, a.params, a.body, true, true,
+            Some(hid), Some(field.ty), a.lo, a.hi)
+          cxa = cxb
+          let (_, aret, aeff) = fn_ty_parts(at)
+          if not assignable(cxa, aret, fret) {
+            cxa = cerr(cxa, "arm `" ++ a.name ++ "` returns " ++ ty_show(cxa.adts, aret) ++
+                " but operation `" ++ a.name ++ "` declares " ++ ty_show(cxa.adts, fret),
+              e_lo(a.body), e_hi(a.body))
+          }
+          cxa = record_effect(cxa, aeff, a.nlo, a.nhi, a.name)
+          arms_eff = eff_union([arms_eff, aeff])
+          cx1 = cxa
+          ax
         }
-        cxa = record_effect(cxa, aeff, a.nlo, a.nhi, a.name)
-        arms_eff = eff_union([arms_eff, aeff])
-        cx1 = cxa
-        ax
       }
     }
     arm_nodes = arm_nodes ++ [node]

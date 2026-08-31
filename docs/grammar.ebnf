@@ -111,7 +111,12 @@ with_stmt       = "with" ( IDENT "<-" expr | handle_clause ) ;
 handle_clause   = "handle" TYPEIDENT "{" { handler_cell NEWLINE }
                   handler_arm { NEWLINE handler_arm } "}" ;
 handler_cell    = "var" IDENT ":" type_expr "=" expr ;  (* 全在臂之前, 标注强制 *)
-handler_arm     = IDENT "(" [ lambda_params ] ")" "=>" expr ;
+handler_arm     = IDENT "(" [ lambda_params ] ")" [ resume_binder ] "=>" expr ;
+(* 绑定子句在与不在, 就是臂的种类记号 (docs/oneshot-design.md §9 ③):
+   不在 = 尾恢复臂, 拼写与编译均与今天相同; 在 = 控制臂, 拿到续延 `k`。
+   `resume` 照 `handle` 先例做上下文关键字, 不保留: `fn resume` 照常声明。
+   控制臂今天由检查器拒绝, 只有语法先落地。 *)
+resume_binder   = "resume" IDENT ;
 let_stmt        = "let" pattern [ ":" type_expr ] "=" expr ;
 var_stmt        = "var" IDENT [ ":" type_expr ] "=" expr ;
 assign_stmt     = IDENT "=" expr ;

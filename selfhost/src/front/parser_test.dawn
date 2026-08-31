@@ -1518,6 +1518,57 @@ test "an arm body written as a statement is told to brace it" {
   assert str.contains(ds[0].hint, "wrap statement bodies in braces")
 }
 
+test "an arm may bind the continuation: `op(a) resume k => ...`" {
+  # the clause is the arm's kind mark (docs/oneshot-design.md §9 ③), so it
+  # prints on the arm's own line and the binder's span is `resume k`
+  let out = rendered("fn f() -> Int = {\n  with handle Ask { ask(n) resume k => n }\n  g()\n}")
+  assert str.contains(out, "Arm ask resume k@")
+  # an arm without the clause dumps exactly the line it dumped before the
+  # clause existed: absent is the byte-for-byte status quo
+  let plain = rendered("fn f() -> Int = {\n  with handle Ask { ask(n) => n }\n  g()\n}")
+  assert str.contains(plain, "Arm ask name@")
+  assert not str.contains(plain, "resume")
+  # the name is the author's, and the two arms of one handler choose separately
+  let two = rendered("fn f() -> Unit = {\n  with handle Store {\n" ++
+      "    get(k) resume outer => outer\n    put(k, v) => ()\n  }\n  g()\n}")
+  assert str.contains(two, "Arm get resume outer@")
+  assert str.contains(two, "Arm put name@")
+}
+
+test "`resume` is contextual: only an arm header reads it as the binder" {
+  # a function, and an operation, of that name still declare
+  let (m, ds) = parse_module("fn resume(x: Int) -> Int = x")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) -> { assert f.name == "resume" }
+    _ -> { assert false }
+  }
+  # the operation name is parsed before the `(`, so an arm answering an
+  # operation called `resume` never competes with the clause -- and may still
+  # carry one
+  let out = rendered("fn f() -> Int = {\n  with handle Co { resume(n) resume k => n }\n  g()\n}")
+  assert str.contains(out, "Arm resume resume k@")
+}
+
+test "the binder clause is `resume` and a name, at most once, before the arrow" {
+  # no name: one token of lookahead already committed, so the report is the
+  # missing name rather than a missing arrow further along
+  let (_, d1) = parse_module("fn f() -> Int = {\n  with handle Ask { ask(n) resume => n }\n" ++
+      "  g()\n}")
+  assert len(d1) > 0
+  assert str.contains(d1[0].msg, "a name for the continuation")
+  # `_` binds nothing to call, here as in `with x <- f()`
+  let (_, d2) = parse_module("fn f() -> Int = {\n  with handle Ask { ask(n) resume _ => n }\n" ++
+      "  g()\n}")
+  assert len(d2) > 0
+  assert str.contains(d2[0].msg, "a name for the continuation")
+  # one arm, one continuation: the second clause lands where the arrow belongs
+  let (_, d3) = parse_module("fn f() -> Int = {\n" ++
+      "  with handle Ask { ask(n) resume k resume j => n }\n  g()\n}")
+  assert len(d3) > 0
+  assert str.contains(d3[0].msg, "expected `=>` (an arm is a closure)")
+}
+
 test "`handle` is contextual: `with handle <-` is still a binder" {
   let out = rendered("fn f() -> Unit = {\n  with handle <- g()\n  use_it(handle)\n}")
   assert not str.contains(out, "Handle")
