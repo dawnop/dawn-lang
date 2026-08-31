@@ -1,0 +1,38 @@
+# The `ctl` prefix on an effect declaration (docs/grammar.ebnf `effect_decl`,
+# docs/oneshot-design.md §11.6 S1). Parsing only: what the flag *means* -- that
+# an arm of this effect may bind a continuation, and that a value whose row
+# names it does not cross to Java -- is the checker's claim and is pinned next
+# door in scripts/checker-corpus.
+
+ctl effect Async {
+  fn wait(ms: Int) -> Unit
+}
+
+# with `pub`, in the one order the grammar admits: `ctl` sits where `opaque`
+# sits, between the visibility and the keyword it modifies
+pub ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+# an ordinary effect beside them, spelled exactly as it always was
+effect Tell {
+  fn tell(s: String) -> Unit
+}
+
+# `ctl` is contextual and never reserved: it is still a name, a parameter and a
+# function, in the same file that just used it as a prefix
+fn ctl(x: Int) -> Int = x + 1
+
+fn use_it(ctl: Int) -> Int = ctl(ctl)
+
+# and a `ctl` effect's arms parse both ways -- the tail-resumptive one and the
+# control one -- since the prefix licenses the clause rather than requiring it
+fn both() -> Unit = {
+  with handle Async { wait(ms) resume k => k(()) }
+  wait(1)
+}
+
+fn tail_only() -> Unit = {
+  with handle Async { wait(ms) => () }
+  wait(1)
+}

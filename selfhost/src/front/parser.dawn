@@ -80,6 +80,8 @@ type TopDeclKind =
   | HTest
   | HOpaqueType
   | HBadOpaque
+  | HCtlEffect
+  | HBadCtl
   | HBadPub
 
 type TopDeclHead = { kind: TopDeclKind, st: St, is_pub: Bool }
@@ -207,6 +209,16 @@ fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
     else if k == IDENT && cur(p, st0).text == "opaque" {
       if kind_ahead(p, st0, 1) == TYPE { Some(HOpaqueType) } else { Some(HBadOpaque) }
     }
+    else if k == IDENT && cur(p, st0).text == "ctl" {
+      # `ctl` sits where `opaque` sits -- after `pub`, before the keyword it
+      # modifies -- because that is how `pub` composes with a contextual
+      # modifier today (`pub opaque type`), and effects gain nothing from a
+      # second order. One token of lookahead settles it, and `ctl` is never
+      # reserved: anything that is not `ctl effect` at module level is the
+      # author reaching for a declaration keyword, and is told which one this
+      # word introduces.
+      if kind_ahead(p, st0, 1) == EFFECT { Some(HCtlEffect) } else { Some(HBadCtl) }
+    }
     else if is_pub { Some(HBadPub) }
     else { None }
   match kind {
@@ -219,6 +231,7 @@ fn starts_top_decl(p: P, st: St) -> Bool =
   match classify_top_decl(p, st) {
     Some(head) -> match head.kind {
       HBadOpaque -> false
+      HBadCtl -> false
       _ -> true
     }
     None -> false
@@ -249,7 +262,7 @@ fn top_decl(p: P, st: St) -> PR[Decl] =
       HAlias -> alias_decl(p, head.st, head.is_pub, false)
       HConst -> const_decl(p, head.st, head.is_pub)
       HTrait -> trait_decl(p, head.st, head.is_pub)
-      HEffect -> effect_decl(p, head.st, head.is_pub)
+      HEffect -> effect_decl(p, head.st, head.is_pub, false)
       HImpl ->
         if head.is_pub {
           Err((head.st, perr(p, head.st,
@@ -272,6 +285,9 @@ fn top_decl(p: P, st: St) -> PR[Decl] =
       HOpaqueType -> alias_decl(p, adv1(p, head.st), head.is_pub, true)
       HBadOpaque -> Err((head.st,
         perr(p, head.st, "`opaque` introduces `opaque type Name = ...`")))
+      HCtlEffect -> effect_decl(p, adv1(p, head.st), head.is_pub, true)
+      HBadCtl -> Err((head.st,
+        perr(p, head.st, "`ctl` introduces `ctl effect Name { ... }`")))
       HBadPub -> top_decl_error(p, head.st)
     }
   }
@@ -948,14 +964,20 @@ fn trait_method(p: P, st: St) -> PR[TraitMethod] = {
   }))
 }
 
-## effect Ask { fn ask() -> Int }
+## effect Ask { fn ask() -> Int }, or ctl effect Async { fn wait() -> Unit }
 ##
 ## The shape is a trait body without a subject: operation signatures, no
 ## bodies, no type parameters (docs/effects-design.md §3.1, D2). An operation
 ## carries no effect annotation of its own -- the effect it belongs to *is*
 ## its effect -- so `!io` on one is refused where it is written rather than
 ## silently ignored.
-fn effect_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
+##
+## `is_ctl` arrives already decided: the `ctl` token is consumed by
+## `classify_top_decl`, next to `pub` and for the same reason -- both are
+## prefixes that say something about the declaration without being the word
+## that introduces it. The span still starts at `effect`, exactly as it starts
+## after a `pub`.
+fn effect_decl(p: P, st: St, is_pub: Bool, is_ctl: Bool) -> PR[Decl] = {
   let (st1, kw) = want(p, st, EFFECT, "`effect`")?
   let (st2, name) = want(p, st1, TYPEIDENT, "an effect name (uppercase)")?
   if at_kind(p, st2, LBRACKET) {
@@ -977,6 +999,7 @@ fn effect_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   }
   Ok((st7, DEffect(EffectDeclR {
     is_pub: is_pub,
+    is_ctl: is_ctl,
     name: name.text,
     ops: ops,
     lo: kw.lo,

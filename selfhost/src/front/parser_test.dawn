@@ -1464,6 +1464,37 @@ test "an effect declaration parses to operations with no bodies" {
   assert str.contains(ds[0].msg, "cannot declare effects of its own")
 }
 
+test "an effect may be prefixed `ctl`, after `pub` and nowhere else" {
+  # the prefix prints only when it was written, so every effect declared today
+  # dumps the line it dumped before the prefix existed
+  let plain = rendered("effect Ask {\n  fn ask() -> Int\n}")
+  assert str.contains(plain, "Effect Ask pub=false name@")
+  assert not str.contains(plain, "ctl")
+
+  let out = rendered("ctl effect Async {\n  fn wait(ms: Int) -> Unit\n}")
+  assert str.contains(out, "Effect Async pub=false ctl=true name@")
+
+  # one order, the one `pub opaque type` already uses
+  let both = rendered("pub ctl effect Async {\n  fn wait(ms: Int) -> Unit\n}")
+  assert str.contains(both, "Effect Async pub=true ctl=true name@")
+  let (_, d1) = parse_module("ctl pub effect Async {\n  fn wait(ms: Int) -> Unit\n}")
+  assert len(d1) > 0
+  assert str.contains(d1[0].msg, "`ctl` introduces")
+
+  # `ctl` modifies exactly one form, and says so
+  let (_, d2) = parse_module("ctl fn f() -> Int = 1")
+  assert len(d2) > 0
+  assert str.contains(d2[0].msg, "`ctl` introduces `ctl effect Name { ... }`")
+
+  # contextual, never reserved: still a function name and a parameter name
+  let (m, d3) = parse_module("fn ctl(ctl: Int) -> Int = ctl")
+  assert len(d3) == 0
+  match m.decls[0] {
+    DFn(f) -> { assert f.name == "ctl" }
+    _ -> { assert false }
+  }
+}
+
 test "`with handle` claims the rest of its block, like the binder form" {
   let out = rendered("fn f() -> Int = {\n  with handle Ask { ask() => 1 }\n  g()\n  h()\n}")
   assert str.contains(out, "Handle Ask")

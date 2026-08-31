@@ -1480,10 +1480,41 @@ pub type EffectI = {
   # for the same reason `AdtI.audience` is
   audience: Audience,
   # operation names in declaration order = the evidence record's field order
-  ops: List[String]
+  ops: List[String],
+  # the `ctl` prefix on the declaration: this effect's operations may be
+  # suspended by a control arm (docs/oneshot-design.md §11.6 S1). It is a
+  # property of the *effect* and not of an installation, because the consumer
+  # that cannot be written any other way -- the SAM conversion point -- has
+  # only the row, and a row names effects.
+  ctl: Bool
 }
 
 pub alias Effects = Map[Int, EffectI]
+
+## Does this row name an effect that was declared `ctl`?
+##
+## Only *written* labels answer yes. An effect variable and an associated
+## projection are rows this module cannot resolve -- the caller decides what
+## `!e` becomes, and a projection chains through an impl -- so they answer no
+## here and are caught by the run-time barrier instead
+## (docs/oneshot-design.md §11.6 H1). Answering "maybe" on those two axes is
+## what would have cost `scripts/spike-native/effect_sam_snapshot.dawn` a third
+## of its cases.
+pub fn eff_suspendable(effs: Effects, e: Eff) -> Bool = len(eff_ctl_labels(effs, e)) > 0
+
+## The `ctl` labels a row names, in the row's own order. The refusal that reads
+## this has to name the effect, so the names come back rather than a flag.
+pub fn eff_ctl_labels(effs: Effects, e: Eff) -> List[String] = {
+  var out: List[String] = []
+  for l in eff_labels(e) {
+    let (lid, lname) = l
+    match map.get(effs, lid) {
+      Some(i) -> if i.ctl { out = out ++ [lname] }
+      None -> ()
+    }
+  }
+  out
+}
 
 ## The name of the evidence record an effect declaration synthesises. It is
 ## unspellable on purpose -- `$` is not an identifier character -- so it shares
