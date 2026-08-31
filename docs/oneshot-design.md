@@ -952,7 +952,8 @@ handler-state 那批在 `selfhost/src` 的 +1375 相比是三分之一多一点�
 后端的缺口。路线就是 §5 的 yield 冒泡，冻结/解冻由 `jdk.internal.vm.Continuation` 承担
 （§3.5 量过：每次 perform 70 至 460 ns）。
 
-**落点**（净增约 +560 行，其中约 400 行是 `jvm/rtclasses.dawn` 的三个类）：
+**落点**（`selfhost/src` 净增 +885 / −45，其中 +557 是 `jvm/rtclasses.dawn` 的三个类
+与它们的 test；语料与文档另计）：
 
 | file | 改什么 |
 |---|---|
@@ -963,7 +964,7 @@ handler-state 那批在 `selfhost/src` 的 +1375 相比是三分之一多一点�
 | `ir/lower.dawn` | 两个名字从 `staged_intrinsics` 迁到 `jvm_only_intrinsics`；新增 `native_staged_intrinsics` 与它的拒绝语；`lower_ctl` 照 `lower_cell` 装箱 |
 | `check/types.dawn` | `erased_ctl_ty()` |
 | `c/emitc.dawn` | 兜底 panic 分两路：日程 vs 缺口 |
-| `scripts/spike-native/` | `ctl_resume` / `ctl_nested` 两个 `.jvm-only` 程序 |
+| `scripts/spike-native/` | `ctl_resume` / `ctl_nested` 两个 `.jvm-only` 程序；`run.sh` 的 marker 注释改成两条理由 |
 
 **施工时与 §11 分歧的五处**（树赢，理由逐条）：
 
