@@ -814,6 +814,29 @@ panic 或泄漏，它整个是个性能判断。
 **0.0%**，预算取 25%），并把那次拨回作为 production mutant 钉在 `matrix.txt` 里，
 连同一个必须保持绿的控制判词（`finished`：模式决策不许改答案）。
 
+### 6.6 那 17% 是什么：失败分布实测（2026-08-31）
+
+外部评审建议引入 Koka 的 `fip` 标注，按本仓纪律先测后裁。测量（前端负载 = native 编译器
+check `checker.dawn`，`DAWN_RC_STATS=1` + 逐调用点插桩 + rc 直方图 + addr2line 归因；
+方法与脚本见 agent 研究档案 review-recon-p13-fip）钉住四件事：
+
+- **`array_with` 只有三个活调用点**：`std/pvec.push_tail`（就地率 100.0%）、
+  `std/hamt.node_put`（45.4%，占全部拷贝的 99.57%）、`std/hamt.coll_put`（0%，150 次）。
+- **34,952 次失败里 rc > 2 的真多版本共享为零**：失败时头部 rc 恒等于 2，缓冲区恒唯一。
+  整个 17% 都是分析或源形状把所有权白白交了出去，不是程序在真共享。
+- 失败两族：**约 49% 是 record-spread 钉根**（`Cx { ..cx, syms: map.insert(cx.syms, …) }`
+  这一形状，四个零唯一调用点占 79.6%，47 字段的 `Cx` 每次更新还多付 45 个 dup；§6.1 末
+  「投影提升成 let」的缓办修法即此，公开 issue #30）；**39% 是下降钉父**（`node_put` 用
+  `array_get`+dup 而不是 `pvec` 的 `array_steal`，改生成 C 验证方向 +3,984 就地，issue #31）。
+- **ADT 复用的天花板**：本仓今天 ADT 复用为零；对 1,382 万次构造分配做时间邻接探针，
+  51.4% 紧跟同形释放（k1）、74.7% 在最近 8 次内（k8）。数量级在这里，不在标注。
+
+**`fip` 标注本身自我否决**：最严读法下全部函数 7.9%、std 公开面 14.0% 可标，且可标集合
+全是访问器与 IO；`map.insert`/`pvec.push`/`list.reverse` 这些 `fip` 存在理由一个都标不上
+（S3 之后集合是 Array 背身、arity 动态，Koka 的固定 arity 复用信用对不上）。且 Dawn 没有
+静态复用 pass（Core 只有 `CDup`/`CSDrop`），标注没有东西可查。裁决：不立 `fip` 设计文档；
+先做 #30/#31，静态构造子复用 pass 落地并重测 std 公开面之后再回头看 `fip(n)`/`fbip`。
+
 ## 7. `--rc=leak`
 
 `native-backend-plan.md` §6 R3 定的：**drop 全部 no-op 的调试模式**。
