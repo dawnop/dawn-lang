@@ -210,11 +210,13 @@ path = Path(sys.argv[1])
 text = path.read_text()
 old = """    Some(head) -> match head.kind {
       HBadOpaque -> false
+      HBadCtl -> false
       _ -> true
     }
 """
 new = """    Some(head) -> match head.kind {
       HBadOpaque -> false
+      HBadCtl -> false
       HOpaqueType -> false
       _ -> true
     }
