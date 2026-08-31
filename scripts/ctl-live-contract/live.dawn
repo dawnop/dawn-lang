@@ -1,0 +1,48 @@
+# The program the ctl-live contract compiles (docs/oneshot-design.md 11.10,
+# 11.11). It is small on purpose: every line is here to put a continuation on
+# a carrier and then throw it away with something owned still live in its
+# frames.
+#
+# `resumes` is the control -- a continuation that is used rather than dropped,
+# so a runtime that reclaimed nothing at all would still have to answer it.
+# `discards` and `guarded(9)` are the two abandonments, and each holds a heap
+# value across the suspension so that the frames the reclaim has to unwind own
+# something the leak checker can name.
+use std/io
+use std/str
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+fn resumes() -> String = {
+  with handle Ask { ask(n) resume k => k(n + 1) }
+  "sum=${to_string(ask(1) + ask(10))}"
+}
+
+## The arm answers the block, so the remainder never runs again. `held` is
+## read after the operation, so it is live across the suspension and the
+## abandoned frame is what owns it.
+fn discards(tag: String) -> String = {
+  with handle Ask { ask(n) resume k => "stopped at ${to_string(n)}" }
+  let held = "held " ++ tag
+  let n = ask(7)
+  "${held} ${to_string(n)}"
+}
+
+fn small(n: Int) -> Option[Int] = if n > 2 { None } else { Some(n) }
+
+## `?` in a control arm abandons the captured continuation and answers the
+## block with `None` (11.4). Same shape as above, reached by the other route.
+fn guarded(bound: Int) -> Option[String] = {
+  with handle Ask { ask(n) resume k => k(small(n)?) }
+  let held = "guard ${to_string(bound)}"
+  Some("${held}/${to_string(ask(bound))}")
+}
+
+pub fn main() -> Unit !io = {
+  io.println(resumes())
+  io.println(discards("a"))
+  io.println(to_string(guarded(1)))
+  io.println(to_string(guarded(9)))
+}

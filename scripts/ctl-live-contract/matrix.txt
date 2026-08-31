@@ -1,0 +1,56 @@
+# Which assertion each production mutant reddens, and which one owns it.
+#
+# `assert` names the roster in the order run.sh observes it; `red` records what
+# each mutation was seen to redden; `owner` is a hand edit, because which
+# assertion owns a mutant is a design decision and a recorder that could
+# reassign owners would launder the collision it exists to catch. Same shape as
+# scripts/rc-contract/matrix.txt, which this copies.
+#
+# `answers` is the control. Every mutant here is still a working runtime that
+# prints the right four lines; one that stopped printing them has broken
+# something other than the property it is named for, and the two questions must
+# not be allowed to answer for each other.
+#
+# `says` is one field rc-contract does not have, and the reason is what this leg
+# is for. The assertion `no_live_continuations_at_exit` only says the report
+# stayed quiet, so a runtime that had stopped counting would satisfy it exactly
+# as well as one that counts correctly. `says` pins the sentence *and the
+# number* the counter reaches on the one run where it is entitled to speak, so
+# a count that drifted to one or to three is a red rather than a silence.
+
+assert	answers
+assert	exit_status
+assert	no_live_continuations_at_exit
+assert	no_leaks
+
+control	answers
+
+# Knife 5's negative control 2, standing. The carrier is dropped rather than
+# unwound, so two threads stay parked forever holding the frames of two
+# abandoned continuations. Everything the program prints is right, and
+# `no_leaks` stays green on purpose: a parked thread's stack is a root, so
+# LeakSanitizer sees the whole of what was leaked as reachable. That green is
+# half the claim -- it is the measurement docs/oneshot-design.md 3.2 made and
+# 11.10 reproduced, and it is why `dawn_ctl_live` exists at all.
+role	ctl-never-reclaims	counted
+owner	ctl-never-reclaims	no_live_continuations_at_exit
+red	ctl-never-reclaims	exit_status
+red	ctl-never-reclaims	no_live_continuations_at_exit
+says	ctl-never-reclaims	dawn: 2 suspended continuation(s) still live at exit
+
+# Knife 5's negative control 4, and the other half. The carrier *is* reclaimed
+# -- the count returns to zero and the report stays quiet -- but the discard
+# jumps straight to the base handler instead of forcing an unwind through the
+# frames, so no frame's cleanup runs. The thread then exits and its stack goes
+# away, which turns the same lost memory into the kind of leak the sanitizer
+# can see. The two mutants together are the sentence: one path, two ways to
+# lose memory on it, and neither oracle covers both.
+role	ctl-discard-skips-cleanups	counted
+owner	ctl-discard-skips-cleanups	no_leaks
+red	ctl-discard-skips-cleanups	no_leaks
+
+# The positive control. A baton has exactly one waiter, so waking one rather
+# than all of them is the same handoff, and the whole roster has to stay green
+# under it. Without a mutant of this role, "reddened nothing" and "was never
+# built" are the same empty red set.
+role	ctl-signals-one-waiter	benign
