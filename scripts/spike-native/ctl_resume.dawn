@@ -77,6 +77,29 @@ fn accumulating() -> String = {
   "sum=${to_string(ask(1) + ask(2))}"
 }
 
+# The other half of the same rule: a cell belongs to an *activation*, not to
+# the installation. `accumulating` shows an arm re-entering the activation it
+# is already in and reading what it wrote there; here the same `with handle` is
+# activated again from inside its own remainder, and the inner activation gets
+# a cell of its own -- the outer `seen` is not touched by what the inner one
+# accumulates, and the resumption of an outer continuation goes back to the
+# outer cell. That is decision 5 ("a cell is copied along with the
+# continuation") as a program can see it.
+fn nested_cells(depth: Int) -> String = {
+  with handle Ask {
+    var seen: List[Int] = []
+    ask(n) resume k => {
+      seen = seen ++ [n]
+      "d${to_string(depth)}${to_string(seen)}(${k(n)})"
+    }
+  }
+  if depth == 0 {
+    "leaf"
+  } else {
+    "${to_string(ask(depth))}/${nested_cells(depth - 1)}/${to_string(ask(depth * 10))}"
+  }
+}
+
 fn small(n: Int) -> Option[Int] = if n > 2 { None } else { Some(n) }
 
 # `?` in a control arm is judged against the block's answer type and means
@@ -139,6 +162,7 @@ pub fn main() -> Unit !io = {
   io.println(discards())
   io.println(mixed())
   io.println(accumulating())
+  io.println(nested_cells(2))
   io.println(to_string(guarded(1)))
   io.println(to_string(guarded(9)))
   match catch_panic(() => twice()) {

@@ -108,6 +108,29 @@ fn inline_relay(step: Step, n: Int) -> Unit !io = {
   }
 }
 
+# The half the static refusal at the Java boundary does not cover. A row that
+# *names* a `ctl` effect cannot be converted to a Java functional interface at
+# all (docs/spec.md 9.4, pinned in scripts/checker-corpus); a row that is an
+# effect variable can, because the conversion point does not know what the
+# caller will instantiate it with. So the answer for that axis is the runtime's
+# instead, and this is what it says. The closure below is converted inside
+# `deferred`, where the row is `!e`; by the time Java enters it the activation
+# that would have answered the raise has returned, and the raise says so rather
+# than suspending into a stack that is not there.
+#
+# The message names the situation and not the conversion. Naming the conversion
+# would need a snapshot that carries its own provenance, which nothing here
+# has, and saying so is the honest form of decision 4's residual.
+fn deferred(f: fn() -> Unit !e) -> Thread !io !e = Thread.new(() => f())
+
+fn escaped_to_java() -> Thread !io = {
+  with handle Ask { ask(n) resume k => k(n + 1) }
+  deferred(() => {
+    let _ = ask(1)
+    ()
+  })
+}
+
 pub fn main() -> Unit !io = {
   io.println("captured on ${here()}")
   io.println("bumped, across threads:")
@@ -116,4 +139,9 @@ pub fn main() -> Unit !io = {
   relay(stateful(), "state", 1)
   io.println("bumped, where it stands:")
   inline_relay(bumped(), 1)
+  io.println("raised under a Java frame, after the installation returned:")
+  match catch_panic(() => escaped_to_java().run()) {
+    Ok(_) -> io.println("  it ran")
+    Err(e) -> io.println("  ${e.message}")
+  }
 }
