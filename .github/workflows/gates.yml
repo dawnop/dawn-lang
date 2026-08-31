@@ -857,6 +857,19 @@ jobs:
       # scheduling gap, so the budget line is not restated -- 557s is a runner
       # observation and nothing here moved it. An entry that did move it would
       # have to.
+      #
+      # `ctl_resume` and `ctl_nested` are not new entries, but their C halves
+      # are: they were `.jvm-only` until one-shot resumption got a native
+      # driving loop (docs/oneshot-design.md 11.10), and unblocking them adds
+      # an emitc, two cc builds and two runs each. Measured the same way, and
+      # it is a bigger number than the one above: the two C halves are 7.6s of
+      # serial work (11.81s vs 4.24s for the pair alone, medians of three,
+      # SPIKE_JOBS=1), and on the corpus at four at a time that lands as
+      # 210.84s against 205.69s, medians of two. So +5s of wall on a 206s
+      # local corpus, against runner observations that span 281s to 557s on an
+      # unchanged script. The budget line is not restated for the same reason
+      # as above; the serial figure is recorded because it is the one that
+      # would show if the pool ever stopped being four wide.
       - name: native differential (both backends, plus written expectations)
         run: ./scripts/spike-native/run.sh
 
