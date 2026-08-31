@@ -22,6 +22,14 @@ ctl effect Store {
   fn put(k: String, v: Int) -> Unit
 }
 
+ctl effect Tick {
+  ## No parameters, and two, on purpose: `Ctl.applyArm` dispatches on the
+  ## argument count and casts to `Fn(n + 2)`, so an arity nothing raises is an
+  ## arm of that chain nothing walks.
+  fn tick() -> Int
+  fn pair(a: Int, b: String) -> String
+}
+
 # The round trip. `k(n + 1)` runs the rest of the block with that value as the
 # operation's result, and what the rest produces is what the arm returns, which
 # is what the block is. Two raises, so the continuation is captured twice --
@@ -85,6 +93,17 @@ fn twice() -> Int = {
   ask(1)
 }
 
+# The ends of the arity chain. `tick` has no parameters, so the arm is an `Fn2`
+# and the array the runtime carries is empty; `pair` has two, so it is an `Fn4`.
+# One raise each is what keeps those two casts from being arms nothing walks.
+fn arities() -> String = {
+  with handle Tick {
+    tick() resume k => "tick(${to_string(k(1))})"
+    pair(a, b) resume k => "pair(${to_string(a)},${b},${k(b ++ "!")})"
+  }
+  "${to_string(tick())}/${pair(2, "x")}"
+}
+
 fn release(tag: String) -> Unit !io = io.println("release ${tag}")
 
 # Risk R2 in the ledger: the three barriers have to know about a suspension.
@@ -123,6 +142,7 @@ pub fn main() -> Unit !io = {
     Ok(v) -> io.println("resumed twice and lived: ${to_string(v)}")
     Err(e) -> io.println(e.message)
   }
+  io.println(arities())
   io.println(to_string(bracketed()))
   io.println(to_string(caught()))
 }
