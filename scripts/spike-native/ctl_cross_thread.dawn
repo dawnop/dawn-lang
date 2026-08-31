@@ -1,0 +1,119 @@
+# A continuation captured on one thread and resumed on another
+# (docs/oneshot-design.md 11.11).
+#
+# Knife 4 said this works on the JVM by construction: the prompt stack is a
+# `ThreadLocal`, `Ctl.drive` re-reads it on every entry, and `Ctl.yield` saves
+# the chain across the freeze and writes it back where the resumption happens.
+# "By construction" is an argument, and the three lines it rests on are three
+# lines somebody can change. So this asks the question instead, and every
+# resumption below happens on a thread that did not exist when the
+# continuation was captured -- the thread's own name is in the transcript, so
+# a run that quietly resumed on the capturing thread cannot pass.
+#
+# What crosses is not just the continuation. `bump` is a second *control*
+# handler standing between the raise and the `Ask` prompt: its activation is
+# frozen mid-flight by the `ask` that bubbles past it, and the `bump` after
+# the resumption has to be answered by that same activation, now reinstalled
+# on a thread that never installed anything. `stateful` asks the same of a
+# handler's state cell.
+#
+# JVM-only, and the reason is the finding rather than an omission: Dawn has no
+# way to start a thread on the native backend. There is no `use c` yet, `std`
+# has no concurrency, and the carrier threads native's own `ctl` mechanism
+# runs on belong to the runtime. Native does resume continuations across
+# *stacks* -- that is the whole mechanism (11.10) -- but there is exactly one
+# Dawn thread in a native program, so "another thread" has no spelling to
+# refuse. `ctl_nested.drive` is what is spellable there, and it already pins
+# resumption from outside the frame that installed the handler.
+use std/io
+use std/str
+use java "java.lang.Thread"
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+ctl effect Bump {
+  fn bump(n: Int) -> Int
+}
+
+# `k` is an ordinary function value with a pure row, so it travels in an ADT
+# field (11.2) and a lambda can close over it -- which is the only way a Dawn
+# value reaches another thread at all. Lambdas capture by value and a Dawn ADT
+# is not a Java reference type, so nothing here could be passed through a
+# `java.util.List`; the closure is the whole transport.
+type Step = Done(v: String) | Susp(mark: String, k: fn(Int) -> Step)
+
+fn here() -> String !io = Thread.currentThread()!.getName()!
+
+# Resume each suspension on a thread of its own, named so the transcript says
+# which one answered. `join` after `start` is what makes the order the
+# program's rather than the scheduler's: this is a question about *which*
+# thread, not about two of them running at once.
+fn relay(step: Step, tag: String, n: Int) -> Unit !io = {
+  match step {
+    Done(v) -> io.println("  done ${v}")
+    Susp(mark, k) -> {
+      let t = Thread.new(() => {
+        io.println("  resumed on ${here()}, ${mark}")
+        relay(k(n * 10), tag, n + 1)
+      }, "${tag}-${to_string(n)}")
+      t.start()
+      t.join()
+    }
+  }
+}
+
+# Two suspensions, and a control handler in between whose activation has to
+# survive both crossings. `a` is answered before anything suspends; `c` is
+# answered by the same `Bump` activation after the first resumption, on the
+# thread that resumption happened on.
+fn bumped() -> Step = {
+  with handle Ask { ask(n) resume k => Susp("want ${to_string(n)}", k) }
+  with handle Bump { bump(n) resume k => k(n + 1) }
+  let a = bump(0)
+  let b = ask(a)
+  let c = bump(b)
+  let d = ask(b + c)
+  Done("a=${to_string(a)} c=${to_string(c)} d=${to_string(d)}")
+}
+
+# A handler's state cell across the same two crossings. The arm runs wherever
+# the resumption did, so the second run of it is on another thread than the
+# first, and it has to see what the first one wrote.
+fn stateful() -> Step = {
+  with handle Ask {
+    var seen: List[Int] = []
+    ask(n) resume k => {
+      seen = seen ++ [n]
+      Susp("seen=${to_string(seen)}", k)
+    }
+  }
+  let p = ask(7)
+  let q = ask(p + 1)
+  Done("p=${to_string(p)} q=${to_string(q)}")
+}
+
+# The control. The same driver, resuming where it stands, so the two cases
+# above differ from it in the thread and in nothing else -- without it a
+# transcript full of thread names would still not say that the names were
+# read from the resuming thread rather than from the one that captured.
+fn inline_relay(step: Step, n: Int) -> Unit !io = {
+  match step {
+    Done(v) -> io.println("  done ${v}")
+    Susp(mark, k) -> {
+      io.println("  resumed on ${here()}, ${mark}")
+      inline_relay(k(n * 10), n + 1)
+    }
+  }
+}
+
+pub fn main() -> Unit !io = {
+  io.println("captured on ${here()}")
+  io.println("bumped, across threads:")
+  relay(bumped(), "bump", 1)
+  io.println("stateful, across threads:")
+  relay(stateful(), "state", 1)
+  io.println("bumped, where it stands:")
+  inline_relay(bumped(), 1)
+}
