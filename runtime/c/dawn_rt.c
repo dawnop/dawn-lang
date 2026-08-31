@@ -2624,6 +2624,18 @@ static dawn_carrier *dawn_ctl_carrier_new(dawn_ctl *f) {
  * abandoned one is told to `die` and handed the baton: it unwinds its whole
  * stack to the base handler, running every frame's cleanup, and finishes. */
 static void dawn_ctl_carrier_reclaim(dawn_carrier *c) {
+  /* A stack cannot discard itself: the discard is an unwind of the carrier's
+   * frames, and the frame that asked for it is one of them. Reachable, barely
+   * -- a remainder that ends up holding the last reference to a continuation
+   * over its own activation, which takes an operation whose result type
+   * contains the continuation. Refusing by name beats waiting for a baton
+   * nobody will pass, which is the same trade the test above makes. */
+  if (c == dawn_ctl_cur) {
+    fflush(stdout);
+    fputs("dawn: a suspended computation dropped the last reference to its "
+          "own continuation\n", stderr);
+    abort();
+  }
   if (!c->finished) {
     c->die = true;
     dawn_ctl_switch_to(c);
