@@ -1076,13 +1076,13 @@ owned 槽留在帧里，帧留在 carrier 上。所以 Perceus 的局部 oracle 
 （它们是刀 4 从 JVM 写下来的，本刀一个字节没改就直接当了 native 的 oracle）。
 
 **四个负控，都是对 `runtime/c/dawn_rt.c` 的产品级改动**（改前 md5
-`d301c363…`，四次跑完各自还原、md5 逐次核回原值）。四条各红各的：
-`effect_handler` 与 `recover_bracket` 两条非 ctl 语料在四次里全绿，`ctl_nested`
-只在前一条里红。
+`4ddf6bd0b52668f04a24de8dc2399bbe`，四次跑完各自还原、md5 逐次核回原值）。四条各红
+各的：`effect_handler` 与 `recover_bracket` 两条非 ctl 语料在四次里全绿，`ctl_nested`
+只在第一条里红。
 
 | 负控 | 改什么 | 红在哪 |
 |---|---|---|
-| 1 | `dawn_ctl_apply_arm` 不再 dup 操作实参，即**把挂起当成帧已经退出并把实参交了出去** | `ctl_nested:asan` = `heap-use-after-free`（`dawn_drop` 读一个 `dawn_ctl_apply_arm` 那条路上已经 free 掉的块）；`ctl_resume` 答案变成 `-41 / -6` 并以 `dawn: drop of a value with rc=0` 退 1 |
+| 1 | `dawn_ctl_apply_arm` 不再 dup 操作实参，即**把挂起当成帧已经退出并把实参交了出去** | 两个 ctl 语料的 `asan` 都是 `heap-use-after-free`（`dawn_drop` 读一个 `dawn_ctl_apply_arm` 那条路上已经 free 掉的块），两个的 `native` 与 `diff` 也红。它是四条里唯一一条症状随运行漂移的（一次是 `-41 / -6` 加 `dawn: drop of a value with rc=0`，一次是少了后半段输出），因为 use-after-free 读到的字节不由它决定 |
 | 2 | `dawn_ctl_carrier_reclaim` 对未跑完的 carrier 直接 `return`，即**故意漏掉一条被丢弃的续延** | `ctl_resume:stderr` = `dawn: 2 suspended continuation(s) still live at exit`，`ctl_resume:exit` = 70。**`ctl_resume:asan` 是绿的**：LSan 一个字都没说。这条同时是计数器的阳性对照，也是 §3.2 那条失明实测在本机制下的复现 |
 | 3 | `dawn_ctl_k_apply` 的一次性判断改成 `if (false)` | `ctl_resume:diff` 少了后七行，`ctl_resume:stderr` = `dawn: a continuation was resumed after its stack ran out`，退 134 |
 | 4 | `dawn_ctl_discard` 用裸 `longjmp` 代替强制展开，即**丢弃时不跑被丢的帧的 cleanup** | `ctl_resume:asan` = `LeakSanitizer: detected memory leaks`，两条 48 字节，栈回溯直指 `guarded` 与 `discards` |
