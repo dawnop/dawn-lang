@@ -6,7 +6,8 @@
 > 每次 perform 70 至 460 ns、native 影子栈税 15%（朴素）/ 5%（内联）/ 2 至 4%（地板）、
 > 效果传染面 48/3320 = 1.45%。三条路线被实测排除，剩两条活路。**路线是 yield 冒泡**
 > （§5），对拍与代价在 §4。**施工已经开始**：刀 1（`resume` 绑定的表面语法与检查器的摆位
-> 拒绝）已落地 `6edbeec`，刀 3 的施工图在 §11。
+> 拒绝）已落地 `6edbeec`，刀 3 的施工图在 §11，刀 4（JVM 上跑起来）在 §11.9，
+> 刀 5（native 上跑起来）在 §11.10。
 > 勘察基线 `main = 5441ed4`，编译器为 v0.70.0，§1 至 §10 的 file:line 均对该提交；
 > §11 写在刀 1 之后，它的 file:line 对 `6edbeec`，节首另有说明。
 > 相邻的既有裁决：[effects-design.md](effects-design.md) §8.3（multi-shot 必须与 RC 一起
@@ -452,8 +453,8 @@ Core 邻接文件上。**所以：选择性 CPS 约等于一到一点五次 hand
 
 | # | 风险 | 证据 | 状态 |
 |---|---|---|---|
-| R1 | **`c/rc.dawn` 的第二条出口路径** 与 Perceus 局部 oracle 的「假设控制流正常返回」相撞 | [effects-design.md](effects-design.md):508；`c/rc.dawn:28-31`；`perceus-design.md:377-381` | 冒泡路线的头号风险，缓解形状是 `dawn_take`（`dawn_rt.h:551-555`），每槽条件 drop 已被 16s→354s 判死 |
-| R2 | **三道屏障要认识 yield**：`bracket` 跨 yield 时**不许**跑 `release`（计算还没结束），`catch_fault`/`catch_panic` 跨 yield 时**不许**报成 `ForeignError` | `dawn_rt.h:746-765`；`builtins.dawn:96,99` | 每道 × 3 处手写（JVM 发射器 / C / wasi）；这类 bug 只在真客户下现形 |
+| R1 | **`c/rc.dawn` 的第二条出口路径** 与 Perceus 局部 oracle 的「假设控制流正常返回」相撞 | [effects-design.md](effects-design.md):508；`c/rc.dawn:28-31`；`perceus-design.md:377-381` | **已结账（刀 5，§11.10）**：native 的机制不给帧发第二出口（挂起不返回），`c/rc.dawn` 零行改动，定价的约 400 行没有花出去。第二出口换了住处：丢弃一条未恢复的续延由运行时回收，靠的是 #193 那套展开 |
+| R2 | **三道屏障要认识 yield**：`bracket` 跨 yield 时**不许**跑 `release`（计算还没结束），`catch_fault`/`catch_panic` 跨 yield 时**不许**报成 `ForeignError` | `dawn_rt.h:746-765`；`builtins.dawn:96,99` | **两个后端都免费，理由不同**：JVM 冻结而不展开（§11.9），native 只是不再跑那条栈（§11.10），三道屏障一行未改，`ctl_resume.dawn` 的 `bracketed`/`caught` 是它的语料。留一条未钉住的差异给刀 6：丢弃续延时，体内 `bracket` 的 release 不跑 |
 | R3 | **标志位穷尽性**：漏一个测试点 = 静默丢弃一次恢复 | §4.4 | 必须由变异体看护，不能靠 review |
 | R4 | **SAM 桥的承诺会被推翻**：[design.md](design.md):105-107 写着「Kotlin 禁 suspend lambda 转 SAM 是因为 suspend 改了调用约定，Dawn 无此障碍」。两种设计都为非纯行**造出**这个障碍 | `docs/design.md:105-107`，英译 `design.en.md:135` | **没有人给它定过价。** 一次性恢复之下，Java SAM 桥要么限定在纯/`io` 行，要么加一个适配器 |
 | R5 | **R4 与 sam-snapshot 分支的边界条款相交**：JVM 的 SAM 证据洞（`jvm/emit.dawn:1145-1162`，`m.visitInsn(OP_ACONST_NULL)`）正由「创建点快照」在另一分支上修 | `packages/web/src/server.dawn:770` 的 `createContext` 就是这条边界，今天在生产上跑 | 快照定了「跨边界的闭包看见什么」，一次性恢复定了「哪些行还能跨这条边界」。**两条要一起裁**，见 §9 问题 ④ |
@@ -995,3 +996,81 @@ handler-state 那批在 `selfhost/src` 的 +1375 相比是三分之一多一点�
 
 **没有动的**：15 份 core-golden 程序 dump 逐字节不变（只有编译器模块的 `.sha` 重录），
 证据记录的形状、操作调用点、尾恢复档的发射一个字节没改。
+
+### 11.10 刀 5：native 上跑起来
+
+刀 5（`4c7e72c`…）把 `ctl_yield` / `ctl_run` 从「emitc 按名拒绝」变成 **C 后端上真能跑**：
+`scripts/spike-native/ctl_resume.dawn` 与 `ctl_nested.dawn` 两个程序的 `.jvm-only` 标记
+删掉了，两条腿逐字节相同，`cc` / 运行 / ASan / LSan / 差分五项全绿。
+
+**机制：每次激活一条载体线程，一根接力棒。** 挂起时不复制栈、不返回、不展开，只是**不再跑
+那条栈**：每次 `ctl_run` 起一条 carrier 线程跑块剩余，一次挂起就是把接力棒交回驱动它的那条
+栈。选它的理由是三条路各自的墙。全栈复制在 §3.1 已被判死，理由是结构性的（handler 链、
+`jmp_buf`、`dawn_own` 槽全是栈地址）。哨兵冒泡要给每个帧发一条第二出口，那正是 R1
+本身。侧栈的三堵墙（§3.2）里有两堵是工具链的：`_Unwind_ForcedUnwind` 跨手工栈边界会
+`abort`，ASan 对 `makecontext`/`swapcontext` 每次运行都自己声明不支持，而消毒运行正是本仓
+native 正确性论证的载体。**线程一次绕过全部三堵**：每一次展开都只在一条线程自己的栈上从
+raise 走到同一条栈上的 handler，从不跨界；ASan 原生支持线程；切换由 OS 做，不必手写寄存器
+保存。代价是每次激活一次 `pthread_create`、每次挂起一次互斥量交接。**并发性没有被引入**：
+接力棒只有一根，任何时刻恰好一条栈在跑 Dawn 代码，两侧由同一把互斥量定序，所以非原子引用
+计数、slab 的无锁自由链、dict-intern 表的前提逐条仍然成立；真正是「每条栈一份」的那三样
+（`dawn_handlers`、`dawn_inflight`、`dawn_unwind_target` 加 `dawn_uexc`）改成了
+`_Thread_local`，`dawn_rt.h:639-641` 那句「只有一条线程跑 Dawn 代码」相应改写为「同一时刻
+只有一条」。
+
+**R1 结账：`c/rc.dawn` 零行。** §4.4 给它定价约 400 行，是「每个函数多一条出口路径要配平」。
+这条机制之下**发射的 C 里根本没有第二条出口**：一次挂起不从任何帧返回，它停止运行；帧的
+owned 槽留在帧里，帧留在 carrier 上。所以 Perceus 的局部 oracle 一个字不改，它那句「假设
+控制流正常返回」也仍然为真。第二出口没有消失，它换了住处：**丢弃一条未恢复的续延**由运行时
+承担，做法是把 #193 那套机制对准 carrier 自己的栈：`die` 位置起，carrier 强制展开到自己
+栈底的基座 handler，`dawn_own_drop` 逐帧跑。恰好一次，靠的正是 raise 已经在靠的那条不变量。
+实际代价是 `runtime/c/dawn_rt.c` 一节 342 行代码（另 210 行注释），`c/rc.dawn`、`c/infer.dawn`、
+`ir/reach.dawn` 全为零。
+
+**LSan 失明的对策是一个计数器。** §3.2 那条实测（200 条丢弃的续延、800 KB 真漏、零条报告）
+在本机制下原样成立：一条挂起的 carrier 线程的栈是 LSan 的 root，它持有的一切都「可达」。
+所以运行时自己数：`dawn_ctl_live` 在 carrier 起来时加一、回收时减一，进程正常结束时不为零就
+往 stderr 打一行并 `_exit(70)`。它不是装饰，负控 2（下）证明它抓得到而 LSan 抓不到。
+
+**R2 结账：native 上也是免费的，理由与 JVM 不同。** JVM 免费是因为 `Continuation.yield`
+冻结而不展开（§11.9）；native 免费是因为挂起只是不再跑那条栈，`bracket` 的帧、`catch_panic`
+的 `setjmp` 帧都原地不动。所以三道屏障一行未改，`ctl_resume.dawn` 的 `bracketed` 与 `caught`
+两条就是它的语料：release 在恢复之后跑恰好一次、顺序不变，跨挂起的 `catch_panic` 答 `Ok`。
+**唯一一条没有被语料钉住的差异**记在这里：丢弃一条续延时，它体内 `bracket` 的 release
+**不跑**（丢弃展开的 target 是基座，中间每个 `dawn_handler_landing` 的身份测试都不命中），
+这与 JVM 一致（丢弃一个 `Continuation` 不跑任何 finally），但两边都没有语料。要钉它得先裁
+「放弃一个计算算不算释放它持有的资源」，那是刀 6 的题。
+
+**落点**：
+
+| file | 改什么 |
+|---|---|
+| `runtime/c/dawn_rt.c` | 新一节：`dawn_ctl` 激活记录、carrier 与接力棒、`drive` 冒泡循环、`lookup`、arity 链、`dawn_ctl_k_apply`（一次性由 `gen` 强制）、丢弃回收、失败中继、`dawn_ctl_live`；三个失败态全局改 `_Thread_local` |
+| `runtime/c/dawn_rt.h` | `DAWN_K_CTL` 一个 kind；两个原语的原型 |
+| `selfhost/src/c/emitc.dawn` | `ctl_run` / `ctl_yield` 两条 arm；删掉「日程式拒绝」那一支 |
+| `selfhost/src/ir/lower.dawn` | 两个名字从 `jvm_only_intrinsics` 迁到 `inline_intrinsics`；`native_staged_intrinsics` 与它的消息整套删除 |
+| `selfhost/src/embed/rtsrc.dawn` | 重新生成 |
+| `scripts/spike-native/` | 删两个 `.jvm-only`；`run.sh` 的标记说明回到只剩 `use java` 一条理由 |
+| `scripts/intrinsic-parity.py` | 文档串：JVM 独占的从四个回到两个 |
+
+**施工时与图纸分歧的四处**（树赢，理由逐条）：
+
+- **`native_staged_intrinsics` 整套删掉，而不是留成空表。** `staged_intrinsics` 留了空表
+  是有道理的（「下一个没落地的相位需要有地方待」，那个机制在 lowering，是共享的）；
+  但 `native_staged_intrinsics` 从来不是一组，是一条**给这两个名字写的附注**，连它的消息
+  都写着「drop the `resume` clause」。空着留下来就是一句没有主语的话。
+- **`ctl_yield` / `ctl_run` 落进 `inline_intrinsics`，不是 `Intr.rt` 的运行时组。**
+  native 侧确实是一次运行时调用，但 JVM 侧是三个发射出来的类加内联字节码，而
+  `types.Intr.rt` 是「两个后端读同一个字段」的表：登记进去等于承诺 JVM 也有一个可调用的
+  运行时方法。所以按「每个后端自己写指令」归组，`scripts/intrinsic-parity.py` 于是要求
+  两边各有一条 arm，这正是想要的形状。
+- **prompt 链是全局，不是 `_Thread_local`。** 与隔壁的失败链恰好相反，而两者的理由是同一条：
+  失败链描述**一条栈**，prompt 链描述的是**逻辑上的那条 Dawn 栈**，而它现在跨 carrier。
+  JVM 能把它放进 ThreadLocal 只因为在那边所有冻结帧都在同一条线程上。
+- **wasm 是运行期拒绝，不是发射器拒绝。** 发射器是共享的，同一份 C 两个 target 都要编，
+  所以 `#ifdef __wasi__` 下两个原语是 panic 桩。理由不是缺 pthread：`dawn_turn` 每轮从头
+  调 `main`，没有任何 Dawn 栈跨得过一轮边界（§3.4），而轮边界正是 reactor 唯一想挂起的地方。
+
+**没有动的**：`c/rc.dawn`、`c/infer.dawn`、`ir/reach.dawn`、`ir/interp.dawn`、
+`jvm/` 下的任何一个文件；15 份 core-golden 程序 dump；两个语料程序的 `.expect`
+（它们是刀 4 从 JVM 写下来的，本刀一个字节没改就直接当了 native 的 oracle）。
