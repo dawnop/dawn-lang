@@ -446,9 +446,16 @@ jobs:
     # rounded up, the planning value is 452 + 26 = 478s. That is over 23
     # minutes' worth of 3x, so the timeout goes to 24. The run's wall clock
     # still does not move: 478s is under the native-diff pole of 557s, and the
-    # pole is what the run's length is.
-    # budget: 3x 478s planning value (356s observed + 70s + 5s + 9s + 1s + 5s + 6s + 26s)
-    timeout-minutes: 24
+    # pole is what the run's length is. Knife 6 puts two more mutants in that
+    # matrix (2026-08-31), which is four more `cc` builds and four more process
+    # runs: 12.4 -> 18.6s locally (median of three: 18.67/18.59/18.38, and
+    # 12.4 x 12/8 = 18.6 is the same figure predicted from the build count, so
+    # the two measurements are on comparable machines). Doubled and rounded up,
+    # +13, so the planning value is 478 + 13 = 491s -- over 24 minutes' worth
+    # of 3x, so the timeout goes to 25. Still under the native-diff pole, so
+    # the run's wall clock does not move.
+    # budget: 3x 491s planning value (356s observed + 70s + 5s + 9s + 1s + 5s + 6s + 26s + 13s)
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -899,6 +906,15 @@ jobs:
       # first attempt measured +23.6s because the "with" run shared the machine
       # with another job and the "without" run did not, and a corpus this
       # parallel makes a single unpaired comparison worthless.
+      #
+      # `ctl_discard`, added 2026-08-31 with the `discard` primitive
+      # (docs/oneshot-design.md 11.12), is a both-backends entry, so unlike the
+      # two above it does carry an emitc, two cc builds and two runs. Measured
+      # the same way, two interleaved pairs on an idle machine: 244.43/243.42s
+      # without it and 246.54/248.09s with, so +2.1s and +4.7s, +3.4s taken
+      # together. The budget line is not restated for the same reason: 557s is
+      # a runner observation on an unchanged script and a corpus this parallel
+      # absorbs three seconds into a scheduling gap.
       - name: native differential (both backends, plus written expectations)
         run: ./scripts/spike-native/run.sh
 

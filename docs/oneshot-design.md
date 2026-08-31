@@ -7,7 +7,8 @@
 > 效果传染面 48/3320 = 1.45%。三条路线被实测排除，剩两条活路。**路线是 yield 冒泡**
 > （§5），对拍与代价在 §4。**施工已经开始**：刀 1（`resume` 绑定的表面语法与检查器的摆位
 > 拒绝）已落地 `6edbeec`，刀 3 的施工图在 §11，刀 4（JVM 上跑起来）在 §11.9，
-> 刀 5（native 上跑起来）在 §11.10。
+> 刀 5（native 上跑起来）在 §11.10，刀 7a（三条与裁决无关的契约腿）在 §11.11，
+> 刀 6（丢弃一条续延算不算释放它持有的资源）在 §11.12。
 > 勘察基线 `main = 5441ed4`，编译器为 v0.70.0，§1 至 §10 的 file:line 均对该提交；
 > §11 写在刀 1 之后，它的 file:line 对 `6edbeec`，节首另有说明。
 > 相邻的既有裁决：[effects-design.md](effects-design.md) §8.3（multi-shot 必须与 RC 一起
@@ -1041,6 +1042,12 @@ owned 槽留在帧里，帧留在 carrier 上。所以 Perceus 的局部 oracle 
 这与 JVM 一致（丢弃一个 `Continuation` 不跑任何 finally），但两边都没有语料。要钉它得先裁
 「放弃一个计算算不算释放它持有的资源」，那是刀 6 的题。
 
+> **刀 6 已经裁并落地，见 §11.12。** 这一段描述的行为**仍然是裸丢弃的行为**，而且现在有
+> 语料（`ctl_discard.bare_drop`）；变的是它不再是唯一的出路：`discard(k)` 走同一条展开，
+> 但在每一个 `bracket` 上落地并跑 release。上面那句「中间每个 `dawn_handler_landing` 的
+> 身份测试都不命中」因此要读成「裸丢弃的走查如此」——`dawn_ctl_carrier_reclaim` 的
+> `run_releases` 参数是两者的全部区别。
+
 **落点**：
 
 | file | 改什么 |
@@ -1234,3 +1241,201 @@ dawn: cannot suspend across this frame (MONITOR) -- a `ctl` operation was raised
 都落在被冻结的区间里，`CtlCont.onPinned` 按 `MONITOR` 拒绝。换句话说，`Ctl.drive` 必须
 不持锁，这条约束今天没有任何一处写下来，靠的是没人往里加锁。`ctl_resume` 在这个改动下
 全绿（它只有单层 handler，冒泡从不越过一个 `drive` 帧），所以连这一条也不是随手能看见的。
+
+### 11.12 刀 6：丢弃一条续延算不算释放它持有的资源
+
+**用户 2026-08-31 裁「B-显式 继续」**，在三路跨语言勘察结账之后。三份原始报告与它们的
+综合在 `~/workspace/agent-handoff/research/`：`oneshot-drop-survey-academic.md`、
+`oneshot-drop-survey-effectlangs.md`、`oneshot-drop-survey-industrial.md`，
+综合是 `oneshot-drop-survey-synthesis.md`（15 个以上系统，全部一手来源）。裁决的两半：
+
+- **裸丢弃（bare drop）什么都不跑**，钉进语料，两个后端一致。
+- **另加一个显式的 `discard`**，它把丢弃变成一次「跑」：用一个毒药恢复被放弃的计算，让既有的
+  展开机制把每一个 `bracket` 的 release 由内向外跑一遍。
+
+勘察给的四条收敛，逐条决定了上面的形状。**没有人从 GC 或 RC 触发清理**（OCaml 实测朴素
+`Gc.finalise` 钩子 4.1×，Koka 的 free-on-zero 钩子做不了效果也跑不了 finally，Loom 回收内存
+不跑任何东西）。对一个双后端语言这条是决定性的：JVM 的 GC 时机不是 native 的 RC 时机，
+按回收触发就是**一份源程序两种可观察行为**。**每一个真的在放弃时跑清理的系统，都把丢弃变成
+一次跑**（OCaml `discontinue`、Wasm `resume_throw`、Python `GeneratorExit`、JS return-completion、
+Kotlin `CancellationException`、Koka `k(Finalize(v))`）；析构器遍历那一族（Rust drop、Lua `__close`）
+要求清理单元能被运行时独立调用，而 Dawn 的 release 是带词法环境的任意用户代码，那条路对我们
+不存在。**裸丢弃到处都什么都不跑**，但没有一个成品设计把它就那么裸着。**动态的「臂恢复了没有」
+标志一旦续延能逃逸就不健全**（Koka #641），而 k 逃逸在本仓是合法、有测试、承重的写法
+（reactor 形状、刀 4 的「k 存进 ADT，装它的帧返回之后再恢复」），所以唯一健全的触发器是显式的。
+
+#### 表面与类型
+
+`discard` 是一个**普通 builtin**（`types.builtins()`，镜像在 `selfhost/builtins.dawn`）：
+
+```
+fn discard[T, U](k: fn(T) -> U) -> Unit
+```
+
+参数类型就是续延自己的类型，不是更窄的东西：§11.2 裁过 k 是一个行为纯的普通函数值，
+那条裁决正是它能进 ADT、进格子、进列表的原因，在这里发明一个 `TyCont` 等于把它收回。
+于是任何函数值都过类型，**检查是动态的**，这与一次性本身的纪律同款：类型也没说「至多调
+一次」，第二次恢复是运行期 panic。
+
+**行是纯的，这是 §11.2 那段论证再读一遍。** 恢复一条续延会跑完块的剩余，那里面什么都可能
+做，而 k 的行仍然是纯的，因为剩余要的那份 pack 在安装点就建好了，账也记在那里。丢弃跑的是
+**同一批代码的一个子集**（剩余已经进入的那些 bracket 的 release），所以它欠不了恢复不欠的行。
+钉成 `!io` 只会让「放弃续延的臂」不纯而「恢复续延的臂」纯。
+
+`Intr.rt` 记的是 `RtIo`，于是两个后端各写一份实现、名字就是语言里的那个名字：JVM 上是
+`dawn/rt/Io.discard`，native 上是 `dawn_discard`。没有 emitter arm，`intrinsic-parity` 不欠。
+
+#### 四条消息，逐字
+
+| 情形 | 消息 |
+|---|---|
+| 恢复一条已经用掉的续延（不变） | `dawn: continuation resumed twice` |
+| 丢弃一条已经用掉的续延（丢弃后恢复、恢复后丢弃、丢弃两次） | `dawn: continuation discarded after it was already used` |
+| 对一个不是续延的函数值 `discard` | `` dawn: `discard` expects a continuation `` |
+| 在丢弃展开途中挂起 | `` dawn: a `ctl` operation was raised while a continuation was being discarded `` |
+
+前两条是同一张票：`discard` 花掉的就是恢复花掉的那一张（native 上是 `f->gen++`，JVM 上是
+`CtlK.used`），所以三种误用是一个判断。两个动词分开写，是因为「discarded twice」读成
+「resumed twice」会把现场说错。
+
+#### JVM 的构造
+
+刀 4 已经把「挂载一条冻结的续延」建好了，所以这里只多了一个字段和一次抛出。
+
+| file | 改什么 |
+|---|---|
+| `jvm/rtclasses.dawn` | `dawn/rt/CtlDiscard`（`Error` 子类，毒药）；`Ctl.poison` 字段与 `Ctl.DISCARDING` ThreadLocal；`Ctl.discard(f)` 驱动；`Ctl.yield` 的两个检查（入口的禁令、醒来时的毒药）；`CtlK.discardK()`；`Fn2.discardK()` 默认方法；`Io.discard`；`gen_bracket` 的毒药支路 |
+| `main.dawn` | `CtlDiscard` **无条件**发射 |
+| `check/types.dawn` | builtin 表一条 + `RtIo` |
+| `ir/interp.dawn` | comptime 按名拒绝 |
+| `doc.dawn`、`selfhost/builtins.dawn` | 参考手册与镜像各一条 |
+
+**不可捕获写在类层级里，不写成规则。** `CtlDiscard` 是 `Error` 而不是 `PanicError`，
+而 `catch_panic` 点名 `PanicError` 与 `Exception`、`catch_fault` 只点名 `Exception`，
+所以两道屏障都看不见它；`bracket` 抓 `Throwable`，所以 release 照跑。
+
+#### native 的构造
+
+`dawn_handler` 多一个 `discard_lands` 位（只有 `dawn_bracket` 置），
+`dawn_handler_landing` 多一条判断：丢弃展开途中，**在每一个 bracket 上落地**、跑 release、
+再从那一帧重启 forced unwind；屏障帧一个都不落。落地前把该位清掉，否则重启的那次走查会
+再一次落在同一帧上，永远。三个 per-stack 的状态（`walking` / `discarding` / `owed`）
+加一个 per-stack 的 `discard_target`，理由都写在声明处。
+
+`dawn_ctl_carrier_reclaim` 多一个 `run_releases` 参数，这是两种放弃的**全部**区别：裸丢弃
+只跑 `dawn_own_drop`（引用计数不是程序能观察的清理），显式丢弃另跑 release。
+
+#### 最尖的那个角：冻结跨度里的内层 handler
+
+一次 `ask` 冒泡越过内层的 `Log` 安装时，会把 `Log` 的激活连同它的驱动帧一起冻住（§11.9
+第三条分歧）。丢弃外层续延**必须连它一起丢**，否则内层那些帧持有的东西没有人放。
+
+**JVM 上这是白送的**：毒药是在内层驱动帧**下面**的 raise 点抛的，出去的路上就穿过它和它
+下面的每一个 bracket。**native 上要一个位**：内层跑在另一条 carrier 上，外层的走查只在
+`dawn_ctl_enter(Log)` 那一帧的 cleanup 处遇到它，而那一帧的 cleanup 与「某个帧刚好持有
+一条逃逸出来的续延的最后一份引用」在 `dawn_ctl_dispose` 里长得一模一样。后者是一次裸丢弃
+（JVM 上它就是一个不可达对象，什么都不跑），前者不是。所以 `dawn_ctl` 上有一个 `bubbling`
+位：它只在「这个激活的 `drive` 帧正停在冒泡循环里」时为真，而那正是「内层激活在冻结跨度
+之内」的唯一形状。`dawn_ctl_dispose` 用 `walking && f->bubbling` 决定传不传，两个后端于是
+逐字相同。语料是 `ctl_discard.nested`。
+
+**为什么用 `walking` 而不是 `discarding`**：在 release 里由普通代码丢掉的一条续延是一次
+普通的裸丢弃，不是走查自己放的手。
+
+#### release 纪律：丢弃途中不许挂起
+
+**裁决：禁，按 Python 的严格度。** 一次展开如果挂起，就是一次可能永远不完成的展开：它
+下面的帧已经注定要走，没有任何东西能恢复进去。Python 用同一句话回答同一个问题
+（"generator ignored GeneratorExit"）。release 里做 io、失败、开自己的 bracket 都可以，
+唯独不能挂起。
+
+判据是一个**全局**计数器 `dawn_ctl_discard_depth`（JVM 上是 `Ctl.DISCARDING`，存被丢弃的
+那个激活、进出时存旧值再还原），而不是隔壁那三个 per-stack 位：那三个描述**一次走查**，
+这一个是禁令，而 release 也可能恢复**另一条**续延、那就跑在第三条栈上。一根接力棒保证任何
+时刻只有一条 Dawn 栈在跑，所以一个计数器够。
+
+**顺手记一条实测**：把禁令拆掉，native 并不挂起，而是掉进 `dawn_ctl_lookup` 的 miss，
+panic 成 `` dawn: no `ctl` handler is installed for this operation …``（提示符早已被弹掉）。
+所以这条禁令买的是**点名**，不是防死锁：没有它，一次真正的误用会以一句说错现场的话结束。
+
+#### release 纪律：丢弃途中 release 失败了怎么办
+
+**裁决：Lua 的 `__close` 规则。** 剩下的 release 照跑，第一条失败是被交付的那一条，
+在展开跑完之后交给调用 `discard` 的人。
+
+本仓**有**一条既有的「展开途中失败」约定（spec 9.8.2：release 抛出的失败**替换**穿过 bracket
+的那一条），而它在这里是**错的约定**，理由不是口味：那条约定让 release 的失败变成一次普通的
+失败继续往外走，于是**冻结跨度里的一个 `catch_panic` 会把它接住**，被放弃的计算就从自己的
+清理里复活了，接着往下跑，最后正常返回。所以 release 在丢弃途中是在**保护之下**跑的：
+JVM 上 `gen_bracket` 的毒药支路把失败 `addSuppressed` 到毒药上再把毒药抛出去
+（`getSuppressed` 保持加入顺序，所以 `[0]` 就是第一条），native 上
+`dawn_ctl_discard_release` 自己插一个 handler 并把第一条记进 `dawn_ctl_discard_owed`。
+两边都在走查抵达基座之后才把它抬出来。语料是 `ctl_discard.release_failure`：`release lost`
+（失败的那条）、`release kept`（外面那条照跑）、`boom in lost`（交付的是第一条）。
+
+#### 与图纸分歧的六处（树赢，理由逐条）
+
+- **身份检查不是 `instanceof CtlK`，是 `Fn2.discardK` 的一个默认方法。** `CtlK` 只为
+  声明了 `ctl` 效果的程序发射，而 `instanceof` **会解析**它点名的类：一个一条续延都没有的
+  程序，回答「这不是续延」时会得到 `NoClassDefFoundError` 而不是 Dawn 的 panic。续延按构造
+  就是一个 `Fn2`（一个写出来的参数加每个函数值都带的证据槽），而 `discard` 的参数类型让
+  校验器替我们证明实参是一个，所以问题问在那里就不必点名那个类。默认方法不是抽象方法，
+  单抽象方法的形状没有变。
+- **`CtlDiscard` 无条件发射。** 它是这一族里唯一每个程序都带的类，因为 `gen_bracket` 要
+  点名它而每个程序都有 bracket。代价是零：它只点名 `java/lang/Error`，不像另外三个会把
+  `jdk.internal.vm` 的引用拖进一个从不挂起的 jar。
+- **`Ctl.discard` 是一个自己的入口，不是 `drive` 里的一支。** 图纸说「驱动循环的基座接住
+  `CtlDiscard`」。`drive` 要答一个值、要为一次恢复推弹提示符栈；一次丢弃什么值都不答，
+  两件事挤进一个方法只会让两边都多一个判断。`drive` 一个字节没改。
+- **`gen_bracket` 必须改。** 图纸说「bracket 发射出来的 finally 形状照跑」。跑是跑了，
+  但**原样重抛**不够，理由就是上一节那条：一条失败的 release 会把毒药换成一次普通失败。
+  这一处是本刀在 JVM 上唯一动到既有发射的地方。
+- **native 侧多一个 `bubbling` 位。** 图纸只说「内层也要被丢弃」；两个后端要逐字相同，
+  就得把「冻结跨度里的内层激活」与「某个帧持有的一条逃逸续延」分开，而它们在
+  `dawn_ctl_dispose` 里长得一样。
+- **名字撞了一处，判为无害。** `selfhost/src/c/emitc.dawn` 有一个模块私有的
+  `fn discard(st, v)`。它遮蔽的是那个模块里的 builtin，而那个模块从不调用 builtin；
+  全套门禁绿。记下来是因为下一个在那个文件里写 `discard(k)` 的人会得到别的东西。
+
+#### 一条方法论教训
+
+**「答案不变」不等于「什么都没发生」。** `not_catchable` 那条语料原本只断言块的答案，
+而块的答案是**臂**的值，不管剩余有没有继续跑。负控 1（让 `catch_panic` 接住毒药）在那个
+写法下**全绿**：屏障接住毒药、返回一个 `Err`、被放弃的计算从那里接着跑到底，答案一个字没变。
+改成断言**没有人打印的那两行**之后它才会红。「门禁的绿没有信息量」那条的又一个实例：
+一个只看返回值的判词，对「计算多跑了一截」是全盲的。
+
+#### 门禁与负控
+
+语料是 `scripts/spike-native/ctl_discard.dawn`（两后端，八组案子：裸丢弃、release 顺序、
+不可捕获、#641 三种误用、非续延、挂起禁令、失败的 release、嵌套内层）。
+`scripts/ctl-live-contract` 多两条判词与两个变异体：`releases_ran` 与
+`spent_ticket_refused` 读 **stderr**，所以 `answers` 仍然是它的控制项：一个跳过 release
+的运行时在 stdout 上打印的东西与正确的一模一样。
+
+四条负控，每条改一份被跟踪的产品文件、跑该门禁的常规调用、还原后 md5 逐次核回原值
+（`runtime/c/dawn_rt.c` = `3de1cadd30e1acec075fc4c3c2fdd962`，
+`selfhost/src/jvm/rtclasses.dawn` = `422b36862a2f08f160cbe037f97cc3cd`）。四条各红各的，
+每条只红 `ctl_discard` 一个语料：
+
+| 负控 | 改什么 | 红在哪 |
+|---|---|---|
+| 1 | JVM：`catch_panic` 的捕获表加上 `CtlDiscard` | `ctl_discard:jvm` / `:diff`，多一行 `catch_panic answered a poisoned computation` |
+| 2 | native：`dawn_handler_landing` 的丢弃判断整条删掉（回到只停基座） | `ctl_discard:native` / `:diff`，九行 release 加两条消息共十一行全部消失，多两行 `unreachable arm 1` |
+| 3 | native：`dawn_discard` 不再 `f->gen++` | `ctl_discard:native` / `:diff` / `:exit` / `:asan`。丢弃后的那次恢复走进一条已经交还的 carrier，程序当场死掉，后十六行没有了 |
+| 4 | native：挂起禁令删掉 | `ctl_discard:native` / `:diff`，那一行变成 `dawn_ctl_lookup` 的 miss 消息 |
+
+#### 定价
+
+`ctl_discard` 是一个**双后端**语料（不像 `ctl_vthread` 那两条只有 JVM 半边），所以它有
+一次 `__emitc`、两次 `cc`、两次进程运行。四路并行的整套语料，两组交错、机器上没有别的东西
+在跑：不带 244.43 / 243.42s，带 246.54 / 248.09s，两次配对的差是 +2.1 与 +4.7，**+3.4s**。
+`native-diff` 的 budget 行因此不重述，理由与 `effect_handler_state`、`ctl_vthread` 两条
+相同：那条 budget 是一次 runner 观测（281 至 557s，脚本没变），一个被并行调度吸收掉的
+三秒动不了它。交错不是装饰，`ctl_vthread` 那条的教训在这里同样成立。
+
+`ctl-live-contract` 多两个变异体，也就是多四次 `cc` 加四次进程运行：本机 12.4s → 18.6s
+（三次中位数 18.67 / 18.59 / 18.38，而 12.4 × 12/8 = 18.6 正是按构建次数推出来的同一个数，
+所以两次测量的机器可比）。加倍进位 +13，`contracts` 的 planning value 478 → 491s，
+3× 越过 24 分钟，故 `timeout-minutes` 24 → 25。整轮墙钟不动：491s 仍在 `native-diff`
+的 557s 极点之下。
