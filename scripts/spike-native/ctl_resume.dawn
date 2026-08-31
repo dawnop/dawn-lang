@@ -85,6 +85,33 @@ fn twice() -> Int = {
   ask(1)
 }
 
+fn release(tag: String) -> Unit !io = io.println("release ${tag}")
+
+# Risk R2 in the ledger: the three barriers have to know about a suspension.
+# On this backend they do not have to be told, and that is worth pinning rather
+# than assuming. `Continuation.yield` freezes frames where they stand instead of
+# unwinding them, so `bracket` does not see an exit at the suspension: it
+# releases once, after the resumption, in the order below. The sentinel design
+# §4.3 priced would have had to teach it that; capture buys it.
+fn bracketed() -> Int !io = {
+  with handle Ask { ask(n) resume k => k(n + 40) }
+  with r <- bracket("r1", release)
+  io.println("held ${r}")
+  let v = ask(1)
+  io.println("back with ${to_string(v)}")
+  v
+}
+
+# The other half of R2: a yield across a catching barrier is not a failure.
+# Nothing is thrown, so `catch_panic` catches nothing and answers `Ok`.
+fn caught() -> Int !io = {
+  with handle Ask { ask(n) resume k => k(n * 3) }
+  match catch_panic(() => ask(2)) {
+    Ok(v) -> v
+    Err(_) -> 0 - 1
+  }
+}
+
 pub fn main() -> Unit !io = {
   io.println(to_string(resumes()))
   io.println(discards())
@@ -96,4 +123,6 @@ pub fn main() -> Unit !io = {
     Ok(v) -> io.println("resumed twice and lived: ${to_string(v)}")
     Err(e) -> io.println(e.message)
   }
+  io.println(to_string(bracketed()))
+  io.println(to_string(caught()))
 }
