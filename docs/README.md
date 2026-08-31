@@ -130,7 +130,7 @@
 | [operator-traits-design.md](operator-traits-design.md) | historical | `[]` 背后的 `Index`，第六个 prelude trait；权威条文在 spec §4.8。 |
 | [prelude-namespace-design.md](prelude-namespace-design.md) | historical | 函数命名空间的「一道门」与追加兼容性，三刀于 2026-08-02 完成。 |
 | [effects-design.md](effects-design.md) | historical | 用户具名效果 + `with handle`，尾恢复档；权威条文在 spec §6.5，教程见 tutorial §17。 |
-| [oneshot-design.md](oneshot-design.md) | proposed | 一次性恢复（one-shot resumption）的**勘察结账**：四路勘察给出本仓第一批实测数字（JVM `Continuation` 70–460 ns、native 影子栈税 15%/5%/2–4%、传染面 1.45%），排除全栈复制/侧栈/wasm 非 CPS 三条路线，路线建议 yield 冒泡，六个待裁点等用户裁决。**不是已批准的项目，不要照着实现。** |
+| [oneshot-design.md](oneshot-design.md) | current | 一次性恢复（one-shot resumption）的**勘察结账**：四路勘察给出本仓第一批实测数字（JVM `Continuation` 70–460 ns、native 影子栈税 15%/5%/2–4%、传染面 1.45%），排除全栈复制/侧栈/wasm 非 CPS 三条路线，路线为 yield 冒泡；2026-08-31 用户立项，§9 六问全裁毕，施工中。 |
 | [core-move2-design.md](core-move2-design.md) | historical | Move 2 的结账与 `CSProtect` 关档。 |
 | [arch-split-design.md](arch-split-design.md) | historical | ARCH-01 拆 `Cx` + ARCH-02 拆 `Gen`，**取代 lowered-ir-design.md §3.2 的六组件方案**。这一块里唯一仍值得整篇读的，理由见下。 |
 
