@@ -4,11 +4,13 @@
 # abandons the continuation, a cell survives a suspension, and a second
 # resumption of one continuation panics by name.
 #
-# JVM-only, and the marker beside this file says so: `ctl_yield` / `ctl_run` are
-# `lower.jvm_only_intrinsics`, and emitc refuses both in the calendar's words
-# (`lower.native_staged_message`) because Perceus has no account yet of a frame
-# with a second exit path (risk R1). The refusal is verified by the runner, not
-# believed.
+# Both backends, and the two mechanisms behind the same answers are not alike:
+# the JVM freezes the stack (`jdk.internal.vm.Continuation`), native leaves the
+# frames where they are and switches to another stack (docs/oneshot-design.md
+# 11.10). Every line below is therefore a differential assertion as well as an
+# expectation -- `bracketed` and `caught` especially, since a mechanism that
+# unwound at the suspension instead of parking would reorder the first and turn
+# the second into an `Err`.
 use std/io
 use std/str
 
@@ -107,11 +109,12 @@ fn arities() -> String = {
 fn release(tag: String) -> Unit !io = io.println("release ${tag}")
 
 # Risk R2 in the ledger: the three barriers have to know about a suspension.
-# On this backend they do not have to be told, and that is worth pinning rather
-# than assuming. `Continuation.yield` freezes frames where they stand instead of
-# unwinding them, so `bracket` does not see an exit at the suspension: it
-# releases once, after the resumption, in the order below. The sentinel design
-# §4.3 priced would have had to teach it that; capture buys it.
+# Neither backend has to be told, and that is worth pinning rather than
+# assuming. A suspension is not an exit: the JVM's `Continuation.yield` freezes
+# the frames where they stand, and native stops running the stack they are on.
+# So `bracket` sees no exit at the suspension -- it releases once, after the
+# resumption, in the order below. The sentinel design §4.3 priced would have had
+# to teach it that; not unwinding buys it.
 fn bracketed() -> Int !io = {
   with handle Ask { ask(n) resume k => k(n + 40) }
   with r <- bracket("r1", release)
@@ -122,7 +125,7 @@ fn bracketed() -> Int !io = {
 }
 
 # The other half of R2: a yield across a catching barrier is not a failure.
-# Nothing is thrown, so `catch_panic` catches nothing and answers `Ok`.
+# Nothing is raised, so `catch_panic` catches nothing and answers `Ok`.
 fn caught() -> Int !io = {
   with handle Ask { ask(n) resume k => k(n * 3) }
   match catch_panic(() => ask(2)) {

@@ -47,7 +47,14 @@ enum {
   DAWN_K_ARRAY_BUF,
   DAWN_K_BOX,
   DAWN_K_BYTES,
-  DAWN_K_STR
+  DAWN_K_STR,
+  /* One activation of a control handler (see "one-shot resumption" in
+   * dawn_rt.c). It is in the ledger because the continuation a control arm
+   * receives is an ordinary Dawn function value that captures it, so the
+   * activation dies when the last continuation over it does -- and the frames
+   * it is holding suspended die with it. Native only: nothing on wasm32-wasi
+   * ever allocates one. */
+  DAWN_K_CTL
 };
 
 /* Never freed, and dup/drop return immediately on it. Static dictionaries are
@@ -771,6 +778,27 @@ dawn_adt *dawn_catch_panic(dawn_clo *f, void *ev);
  * `!io` is an answer rather than a question. `ev` is borrowed like every other
  * intrinsic argument; each closure call takes a reference of its own. */
 void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use, void *ev);
+
+/* ---- one-shot resumption (docs/oneshot-design.md 11.10) ----------------
+ *
+ * The two primitives the C emitter writes for a `with handle` with a control
+ * arm. Everything crossing here is erased (`types.erased_ctl_ty`), so these
+ * signatures do not vary with the operation: lowering boxes the payloads.
+ *
+ * `dawn_ctl_enter(hid, rest, evs)` is the block's tail. `hid` is the
+ * installation's identity, `rest` a `fn() -> A` function value (one evidence
+ * slot), `evs` the pack it is applied with. The answer is the block's, owned.
+ *
+ * `dawn_ctl_yield(hid, arm, env, nargs, args)` is what the wrapper closure in
+ * the evidence record calls when the operation is raised. `arm` is the
+ * author's arm, `env` the pack the *installation* built for it, and `args`
+ * the operation's arguments, borrowed. It answers the value the continuation
+ * was resumed with, owned; it does not return at all if the continuation is
+ * dropped.
+ *
+ * Both are borrowing like every other primitive here. */
+void *dawn_ctl_enter(int64_t hid, void *rest, void *evs);
+void *dawn_ctl_yield(int64_t hid, void *arm, void *env, int64_t nargs, void **args);
 
 /* Simple (1:1) Unicode case mapping: a code point in `lo..hi` maps to itself
  * plus `delta`, and one in no range maps to itself.

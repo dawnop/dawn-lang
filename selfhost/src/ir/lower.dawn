@@ -1096,10 +1096,10 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ##                       wrapper's own evidence slot as a third argument,
 ##                       because the runtime is what applies the arm and an arm
 ##                       is applied with the handler's pack rather than the
-##                       raise site's (`checker.check_call`). `jvm_only_intrinsics`
-##                       is where they are classified: the JVM writes both arms
-##                       over `jdk.internal.vm.Continuation`, and native is
-##                       staged (`native_staged_intrinsics`, risk R1).
+##                       raise site's (`checker.check_call`). Both backends
+##                       write their own arms (`inline_intrinsics`): the JVM
+##                       freezes a stack over `jdk.internal.vm.Continuation`,
+##                       native switches stacks instead (design 11.9, 11.10).
 ##
 ## Not an ADT, though the comment this replaces proposed one. Measured before
 ## deciding: `CIntrinsic` carries a `String` because it also carries the 89
@@ -1202,69 +1202,31 @@ pub fn inline_intrinsics() -> List[String] = [
   "cursor_slice",
   # argv arrives differently on each: a static field on the class here, a
   # runtime call there
-  "args"
+  "args",
+  # one-shot resumption. Two backends, two mechanisms, and neither is a
+  # runtime module's: the JVM freezes and thaws a stack over
+  # `jdk.internal.vm.Continuation` and needs three emitted classes to do it,
+  # while native leaves the frames where they are and switches stacks
+  # (docs/oneshot-design.md §11.9, §11.10). What they share is the
+  # descriptor, because lowering boxes every payload to `erased_ctl_ty`
+  "ctl_yield", "ctl_run"
 ]
 
 ## The primitives only the JVM owes an arm for.
-##
-## Two reasons, and the list keeps both because a backend cannot tell them
-## apart from the inside -- which is the whole argument the group below makes.
 ##
 ## `java_eq` / `java_hash` take a value that came from the host, and `use java`
 ## is the only thing that produces one -- a node emitc refuses outright. That is
 ## a fact about the backends rather than a gap in one of them, and emitc's
 ## generic refusal is the right answer if either ever reaches it.
 ##
-## `ctl_yield` / `ctl_run` are one-shot resumption
-## (docs/oneshot-design.md §11.3). The JVM writes both arms, over
-## `jdk.internal.vm.Continuation` and the `dawn/rt/Ctl` classes; native is not
-## short of an instruction sequence, it is short of a decision -- the second
-## exit path a captured continuation gives every frame collides with Perceus's
-## exactly-once release (risk R1, `c/rc.dawn:28-31`). So they are named again in
-## `native_staged_intrinsics` below, and emitc refuses them in the calendar's
-## words rather than the backend's.
-pub fn jvm_only_intrinsics() -> List[String] =
-  ["java_eq", "java_hash", "ctl_yield", "ctl_run"]
-
-## The subset of `jvm_only_intrinsics` that native does not owe *yet*.
-##
-## Not a sixth group: every name here is already classified above, and this
-## says only which sentence emitc's refusal should use. The distinction is the
-## same one `lowered_intrinsics` and `staged_intrinsics` were written for --
-## "no backend owes this", "one backend is short", and "nobody has written this
-## yet" are three answers that look alike from inside an emitter, and the last
-## one is a message about the compiler's calendar rather than about the
-## machine. A program that reaches it has already been type-checked in full
-## (`dawn check` says everything §11 has to say) and runs on the JVM today.
-pub fn native_staged_intrinsics() -> List[String] = ["ctl_yield", "ctl_run"]
-
-test "the staged-on-native refusal names the primitive and where to read why" {
-  # emitc has no arm for these, by design, so this sentence is the only thing a
-  # user gets. It has to name which primitive, say the program is correct, and
-  # point somewhere -- a refusal that only says "not implemented" sends the
-  # reader to the backend, which is not where the answer is.
-  for n in native_staged_intrinsics() {
-    let m = native_staged_message(n)
-    assert str.contains(m, "`" ++ n ++ "`")
-    assert str.contains(m, "docs/oneshot-design.md")
-    assert str.contains(m, "runs on the JVM")
-    assert str.contains(m, "drop the `resume` clause")
-  }
-}
-
-## Is this primitive one native has not been handed yet?
-pub fn is_native_staged_intrinsic(name: String) -> Bool =
-  list.contains(native_staged_intrinsics(), name)
-
-## What emitc says when it reaches one. Spelled here, beside the list, so the
-## refusal and the classification cannot drift.
-pub fn native_staged_message(name: String) -> String =
-  "emitc: one-shot resumption has no native backend yet -- `" ++ name ++
-  "` reached the C emitter. A `with handle` arm written `op(a) resume k => ...` " ++
-  "type-checks and runs on the JVM (docs/oneshot-design.md §11), but the C " ++
-  "backend's reference counting has no account of a frame with a second exit " ++
-  "path yet (risk R1); drop the `resume` clause to get a tail-resumptive arm, " ++
-  "which compiles on both backends today."
+## `ctl_yield` / `ctl_run` were here while native was short of a *decision*
+## rather than of an instruction sequence -- the second exit path a captured
+## continuation gives every frame against Perceus's exactly-once release (risk
+## R1). The native mechanism answers that by not giving a frame a second exit
+## at all (docs/oneshot-design.md §11.10), so they moved to `inline_intrinsics`
+## with the annotation that named them, and this list is back to the one reason
+## it was written for.
+pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
 
 ## The builtins no backend ever sees: lowering rewrites each into something
 ## else, so an arm for one of these is dead code rather than an implementation.
@@ -1304,10 +1266,9 @@ pub fn lowered_intrinsics() -> List[String] = {
 ## the backend, for a program whose problem is the compiler's calendar.
 ##
 ## Empty, and kept. `ctl_yield` / `ctl_run` were the entries: the knife that
-## landed the driving loop moved them to `jvm_only_intrinsics`, exactly as the
-## note here said it would, and the refusal below went with them -- native's
-## half is now a named refusal in emitc (`native_staged_message`) rather than a
-## refusal in lowering, because lowering is shared and the JVM compiles these.
+## landed the JVM's driving loop moved them out, exactly as the note here said
+## it would, and the knife after it gave native its own arms -- so they are in
+## `inline_intrinsics` now and no refusal is owed for them anywhere.
 ##
 ## The mechanism stays because the third answer stays: the next primitive whose
 ## phase has not landed needs somewhere to be, and an emitter is where it would
@@ -1361,22 +1322,10 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
   # 3. the sizes the comments above quote. A count written in prose is what
   #    went wrong in `internal_intrinsics`, whose comment gave two different
   #    answers for the same list in the same paragraph.
-  # 4. the staged-on-native annotation names only primitives the JVM owns.
-  #    It is not a group, so the partition above cannot catch a name that
-  #    drifts out of `jvm_only_intrinsics` and is left here -- which would make
-  #    emitc refuse in the calendar's words for a primitive whose calendar has
-  #    nothing to do with it.
-  for n in native_staged_intrinsics() {
-    if not list.contains(host, n) {
-      panic("`" ++ n ++ "` is staged on native but is not a JVM-only intrinsic")
-    }
-  }
-
-  assert len(inline) == 36
-  assert len(host) == 4
+  assert len(inline) == 38
+  assert len(host) == 2
   assert len(gone) == 21
   assert len(staged) == 0
-  assert len(native_staged_intrinsics()) == 2
   # and the five groups account for all 119 names, with none left over
   assert len(map.keys(it)) == 98
   assert len(internal) == 21

@@ -1214,6 +1214,13 @@ void dawn_immortal(void *p) {
   dawn_ws_free(&s);
 }
 
+/* An activation of a control handler releases the frames it is holding
+ * suspended before its own struct goes, and that runs on another stack; see
+ * "one-shot resumption" below. Declared here because the walk is above it. */
+#ifndef __wasi__
+static void dawn_ctl_dispose(void *p);
+#endif
+
 void dawn_drop(void *p) {
   if (dawn_rc_leak || p == NULL) {
     return;
@@ -1291,6 +1298,14 @@ void dawn_drop(void *p) {
         break;
       case DAWN_K_STR:
         break; /* one block: the bytes sit right after the header */
+#ifndef __wasi__
+      case DAWN_K_CTL:
+        /* Not pushed onto the work list like every other child: the frames
+         * this holds have to be unwound on their own stack, and their drops
+         * run there rather than here. */
+        dawn_ctl_dispose(q);
+        break;
+#endif
       default:
         fprintf(stderr, "dawn: drop of an unheaded pointer (kind %d)\n", h->kind);
         exit(1);
@@ -1751,7 +1766,32 @@ typedef struct dawn_handler {
 #endif
 } dawn_handler;
 
-static dawn_handler *dawn_handlers;
+/* The failure machinery is per *stack*, and since one-shot resumption a Dawn
+ * program has more than one: a suspended continuation is a carrier thread
+ * holding its frames (see "one-shot resumption" below), and the chain, the
+ * in-flight payload and the unwinder's target all describe a walk over one
+ * particular stack. Only one of those stacks runs at a time -- the handoff is
+ * a mutex, so this is a change of stack and not concurrency -- but they
+ * interleave: reclaiming a dropped continuation forces an unwind on its
+ * carrier while the driver is itself mid-unwind, and a shared
+ * `dawn_unwind_target` would have the inner walk clear the outer walk's
+ * target and the outer walk would then run off the end of its stack.
+ *
+ * Nothing hot reads these: a bracket, a barrier, and a raise. On wasm32-wasi
+ * there are no threads at all, so the qualifier is empty there. */
+#ifdef __wasi__
+#define DAWN_STACK_LOCAL
+#else
+#define DAWN_STACK_LOCAL _Thread_local
+#endif
+
+static DAWN_STACK_LOCAL dawn_handler *dawn_handlers;
+
+/* Set by the two places a failure ends the process. It suppresses the
+ * live-continuation report at exit (see "one-shot resumption"): a program
+ * dying of an uncaught failure has already said why, and a second line about
+ * what it was holding when it died is noise rather than a finding. */
+static bool dawn_ctl_dying;
 
 /* One failure, as a value: what a raise hands to the handler that takes it.
  *
@@ -1787,7 +1827,7 @@ typedef struct dawn_failure {
  * crossing the bracket: message, kind, and the routing bit, so `catch_fault`
  * could end up taking a panic. Now the crossing failure sits in the
  * bracket's frame, where a nested handler cannot reach it. */
-static dawn_failure dawn_inflight;
+static DAWN_STACK_LOCAL dawn_failure dawn_inflight;
 
 /* A cleanup for a frame-held payload (DAWN_CLEANUP), same NULL discipline as
  * dawn_unwind_drop: a slot whose message was handed onward is cleared by the
@@ -1849,9 +1889,9 @@ static dawn_handler *dawn_find_handler(bool is_panic) {
  * This is Itanium-ABI machinery (glibc and friends); macOS and musl are
  * recorded as unverified in the design and route A1 (a shadow cleanup
  * stack) is the fallback if one of them turns out not to carry it. */
-static struct _Unwind_Exception dawn_uexc;
+static DAWN_STACK_LOCAL struct _Unwind_Exception dawn_uexc;
 
-static dawn_handler *dawn_unwind_target;
+static DAWN_STACK_LOCAL dawn_handler *dawn_unwind_target;
 
 static void dawn_uexc_cleanup(_Unwind_Reason_Code r, struct _Unwind_Exception *e) {
   (void)r;
@@ -1985,7 +2025,7 @@ void dawn_wasi_own_pop(void *frame) {
   dawn_wasi_own_len--;
 }
 
-static dawn_handler *dawn_unwind_target;
+static DAWN_STACK_LOCAL dawn_handler *dawn_unwind_target;
 
 /* Out of line and never inlined: __builtin_wasm_throw inside a frame that
  * has cleanup attributes is the isel crash from the probe. Tag 0 is the C++
@@ -2022,6 +2062,7 @@ static void dawn_raise(dawn_str *msg, bool is_panic) {
   }
   /* Nothing stopped it, so the program is over either way -- which is why
    * both kinds report under the same word. */
+  dawn_ctl_dying = true;
   fflush(stdout);
   fputs("panic: ", stderr);
   if (msg->len > 0) fwrite(msg->p, 1, (size_t)msg->len, stderr);
@@ -2155,6 +2196,7 @@ static _Noreturn void dawn_reraise(dawn_failure f) {
     dawn_inflight = f;
     dawn_unwind_to(h);
   }
+  dawn_ctl_dying = true;
   fflush(stdout);
   fputs("panic: ", stderr);
   if (f.msg->len > 0) fwrite(f.msg->p, 1, (size_t)f.msg->len, stderr);
@@ -2300,6 +2342,559 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use, void *ev) {
                                                         dawn_dup(ev)));
   return r;
 }
+#endif
+
+/* ---- one-shot resumption (docs/oneshot-design.md 11.10) ----------------
+ *
+ * A control arm receives the block's remainder as a first-class function
+ * value. The route is yield bubbling (design 5): the raise site hands the
+ * operation to the nearest matching installation, that installation's driver
+ * runs the arm, and resuming hands a value back to the raise site.
+ *
+ * WHAT HOLDS THE SUSPENDED FRAMES. Not a copy of them. A copied stack is off
+ * the table on this backend and the reason is structural rather than a price
+ * (design 3.1): the handler chain is a list of stack addresses, a `jmp_buf`
+ * holds SP/FP, and every `dawn_own` slot is a `void **` into a frame. So the
+ * frames are left exactly where they are and the *stack* is what gets
+ * switched: each activation runs its remainder on a carrier thread of its
+ * own, and a suspension is a handoff back to the thread that drove it.
+ *
+ * The thread is the mechanism, not a concurrency model -- the same sentence
+ * dawn_rt.h already writes about the big-stack thread, and for the same
+ * reason. The handoff is a mutex and a condition variable with one baton:
+ * exactly one thread runs Dawn code at any instant, and the two sides of
+ * every switch are ordered by that mutex. So the non-atomic reference counts,
+ * the slab's lock-free free lists and the dict-intern table keep the property
+ * they were written against; what changes is that "the one stack" became "one
+ * stack at a time". The three things that really were per-stack moved to
+ * `DAWN_STACK_LOCAL` above.
+ *
+ * WHY A THREAD RATHER THAN A SIDE STACK. Three measured walls, all from the
+ * recon (design 3.2), and the thread walks around each rather than fixing it:
+ * `_Unwind_ForcedUnwind` aborts when it crosses a hand-made stack boundary,
+ * and here it never does -- every unwind runs on one thread, from a raise to
+ * a handler on that same thread's stack. AddressSanitizer prints
+ * "doesn't fully support makecontext/swapcontext" on every sanitized run, and
+ * the sanitized run is this project's native correctness argument; it supports
+ * threads outright. And a `ucontext` switch costs two `sigprocmask` syscalls,
+ * which is most of its 339 ns -- a price a handoff pays too, but neither
+ * number is the binding constraint on a corpus that suspends dozens of times.
+ *
+ * THE SECOND EXIT, AND PERCEUS. Risk R1 in the ledger is that a captured
+ * continuation gives every frame a second way out, while `c/rc.dawn`'s oracle
+ * insists every binding is released exactly once on every path *assuming
+ * control flow returns*. Under this arrangement there is no second exit in
+ * the emitted C at all: a suspension returns from nothing, it stops running.
+ * A frame's owned slots stay in the frame, which stays on the carrier. So
+ * `rc.dawn` is unchanged and its oracle keeps meaning what it meant.
+ *
+ * What the frames need instead is a way to be released when the continuation
+ * is *dropped* -- the path the recon measured LeakSanitizer to be blind to,
+ * 800 KB genuinely leaked and not one report. That path is the existing #193
+ * machinery pointed at its own stack: the reclaim wakes the carrier with
+ * `die` set, the carrier forces an unwind of its whole stack to a base
+ * handler planted at the bottom, and the unwinder runs every frame's
+ * `dawn_own_drop` cleanup on the way. Exactly-once, by exactly the mechanism
+ * that already holds for a raise. A bracket's `release` does *not* run on
+ * that path -- the identity test in `dawn_handler_landing` fails for every
+ * frame but the base -- which is what the JVM does too, where dropping a
+ * `Continuation` runs no finally block.
+ *
+ * And because LSan cannot see this class of leak (a parked thread's stack is
+ * a root, so everything it holds looks reachable), the counting is explicit:
+ * `dawn_ctl_live` is asserted zero at exit, loudly, on stderr.
+ *
+ * FAILURES CROSS BY RELAY. A fault or panic raised inside a remainder may be
+ * owed to a barrier that stands *outside* the block, on the driver's stack.
+ * It cannot be unwound to directly -- that is the wall above. So each carrier
+ * plants a base handler that takes every kind: the raise unwinds the carrier
+ * normally (running its brackets and its drops), lands at the base, and the
+ * payload is carried across the handoff and re-raised by the driver, where
+ * the rest of the chain is. Kind and message travel untouched, so
+ * `catch_fault` still refuses a panic that crossed a suspension. */
+#ifndef __wasi__
+
+/* The widest operation a control arm can answer, and the same number the JVM
+ * caps at (`rtclasses.ctl_max_op_params`): an arm takes the operation's
+ * parameters, the continuation and the evidence slot. */
+#define DAWN_CTL_MAX_ARGS 7
+
+typedef struct dawn_carrier dawn_carrier;
+
+typedef struct dawn_ctl {
+  dawn_hdr h;
+  int64_t hid;   /* the installation's identity; the prompt */
+  /* The one-shot token. A continuation is valid exactly while it equals this,
+   * and resuming bumps it -- so a second call of one continuation and a call
+   * of a continuation superseded by a later suspension are the same test. */
+  int64_t gen;
+  struct dawn_ctl *prev; /* the prompt chain, borrowed: frames outlive it */
+  dawn_carrier *carrier;
+  void *rest; /* owned: the block's remainder, a `fn() -> A` value */
+  void *evs;  /* owned: the pack the remainder is applied with */
+  /* Set by a yield and taken by the drive that answers it, both borrowed --
+   * the raise site's frame is suspended, not gone, so it still holds them. */
+  void *arm;
+  void *env;
+  void *args[DAWN_CTL_MAX_ARGS];
+  int64_t nargs;
+  void *result; /* owned: what the remainder produced */
+  void *resume; /* owned in, transferred out at the raise site */
+  bool failed;
+  dawn_failure fail;
+} dawn_ctl;
+
+struct dawn_carrier {
+  pthread_t th;
+  pthread_mutex_t m;
+  pthread_cond_t cv;
+  /* the baton: 1 = the carrier runs, 0 = whoever drove it runs */
+  int turn;
+  bool spawned;
+  bool finished;
+  bool joined;
+  bool die;
+  dawn_ctl *act;
+};
+
+/* The prompt chain. A plain global and not `DAWN_STACK_LOCAL`, and that is
+ * the difference from the handler chain next door: the failure chain
+ * describes one stack, while the prompt chain is the *logical* Dawn stack,
+ * which now spans carriers. A raise deep inside an inner remainder has to see
+ * the outer installation, and the frame that pushed it is parked on another
+ * thread. The JVM keeps this in a ThreadLocal for the same reason it can:
+ * there, one thread holds every frozen frame. */
+static dawn_ctl *dawn_ctl_top;
+
+/* The activation a suspension in flight is aimed at. Read by every drive the
+ * yield bubbles through, and one is in flight at a time by the same argument
+ * `dawn_inflight` makes: no user code runs while it is occupied. */
+static dawn_ctl *dawn_ctl_pending;
+
+/* The carrier whose stack is running Dawn code, or NULL for the big-stack
+ * thread. Saved and restored around every handoff. */
+static dawn_carrier *dawn_ctl_cur;
+
+/* Carriers alive: spawned and not yet reclaimed. THE MEMORY ORACLE FOR
+ * DROPPED CONTINUATIONS. LeakSanitizer answers nothing here and it was
+ * measured answering nothing (see the heading), because a parked thread's
+ * stack is a root and everything the suspended frames hold is reachable from
+ * it. A count that has to come back to zero is the check that can fail. */
+static int64_t dawn_ctl_live;
+
+/* This carrier is unwinding to be discarded rather than to deliver a failure.
+ * Per-stack for the reason everything else in the walk is: a reclaim nested
+ * inside a reclaim is two walks on two stacks. */
+static DAWN_STACK_LOCAL bool dawn_ctl_discarding;
+
+static void dawn_ctl_report(void) {
+  if (dawn_ctl_dying || dawn_ctl_live == 0) return;
+  fflush(stdout);
+  fprintf(stderr, "dawn: %lld suspended continuation(s) still live at exit\n",
+          (long long)dawn_ctl_live);
+  _exit(70);
+}
+
+static bool dawn_ctl_report_registered;
+
+/* One baton, two waits. `switch_to` is what a driver calls; `hand_back` is
+ * what the carrier calls, and it returns when someone resumes it -- or never,
+ * because a reclaim answers `die` by unwinding instead. */
+static void dawn_ctl_switch_to(dawn_carrier *c) {
+  dawn_carrier *saved = dawn_ctl_cur;
+  pthread_mutex_lock(&c->m);
+  c->turn = 1;
+  pthread_cond_broadcast(&c->cv);
+  while (c->turn == 1) pthread_cond_wait(&c->cv, &c->m);
+  pthread_mutex_unlock(&c->m);
+  dawn_ctl_cur = saved;
+}
+
+static _Noreturn void dawn_ctl_discard(void) {
+  dawn_handler *h = dawn_handlers;
+  while (h != NULL && h->prev != NULL) h = h->prev;
+  if (h == NULL) {
+    fflush(stdout);
+    fputs("dawn: a carrier has no base handler to discard to\n", stderr);
+    abort();
+  }
+  dawn_ctl_discarding = true;
+  dawn_unwind_to(h);
+}
+
+static void dawn_ctl_hand_back(dawn_carrier *c) {
+  pthread_mutex_lock(&c->m);
+  c->turn = 0;
+  pthread_cond_broadcast(&c->cv);
+  while (c->turn == 0) pthread_cond_wait(&c->cv, &c->m);
+  pthread_mutex_unlock(&c->m);
+  dawn_ctl_cur = c;
+  if (c->die) dawn_ctl_discard();
+}
+
+/* The last handoff: the carrier is done and nothing will resume it. */
+static void dawn_ctl_hand_back_final(dawn_carrier *c) {
+  pthread_mutex_lock(&c->m);
+  c->finished = true;
+  c->turn = 0;
+  pthread_cond_broadcast(&c->cv);
+  pthread_mutex_unlock(&c->m);
+}
+
+static void *dawn_ctl_carrier_main(void *arg) {
+  dawn_carrier *c = (dawn_carrier *)arg;
+  dawn_ctl *f = c->act;
+  pthread_mutex_lock(&c->m);
+  while (c->turn == 0) pthread_cond_wait(&c->cv, &c->m);
+  pthread_mutex_unlock(&c->m);
+  dawn_ctl_cur = c;
+  if (!c->die) {
+    /* The base of this stack. It takes every kind, and it is the only thing
+     * on the chain that this carrier's own frames can unwind to -- see
+     * "failures cross by relay" in the heading. Designated init so the
+     * jmp_buf is zeroed before the landing cleanup can ever read it, the same
+     * discipline `dawn_run_caught` writes for the same reason. */
+    dawn_handler base DAWN_CLEANUP(dawn_handler_landing) = {
+      .prev = NULL, .catches_panic = true
+    };
+    dawn_handlers = &base;
+    if (setjmp(base.jb) == 0) {
+      dawn_clo *r = (dawn_clo *)f->rest;
+      f->result = ((void *(*)(dawn_clo *, void *))r->fn)(r, dawn_dup(f->evs));
+    } else if (dawn_ctl_discarding) {
+      dawn_ctl_discarding = false;
+    } else {
+      /* first thing on landing, exactly as every other setjmp branch here */
+      f->fail = dawn_inflight;
+      f->failed = true;
+    }
+    dawn_handlers = NULL;
+  }
+  dawn_ctl_hand_back_final(c);
+  return NULL;
+}
+
+/* 64 MiB of address space, not memory: the pages are touched only as the
+ * stack grows, the same arrangement DAWN_STACK_BYTES describes. Smaller than
+ * the big stack because a remainder is a block's tail rather than a whole
+ * program, and because there is one of these per live activation. */
+#define DAWN_CTL_STACK_BYTES ((size_t)64 << 20)
+
+static dawn_carrier *dawn_ctl_carrier_new(dawn_ctl *f) {
+  pthread_attr_t at;
+  dawn_carrier *c = (dawn_carrier *)dawn_alloc(sizeof *c);
+  memset(c, 0, sizeof *c);
+  c->act = f;
+  if (pthread_mutex_init(&c->m, NULL) != 0 || pthread_cond_init(&c->cv, NULL) != 0) {
+    fputs("dawn: cannot make a continuation carrier\n", stderr);
+    exit(1);
+  }
+  if (!dawn_ctl_report_registered) {
+    atexit(dawn_ctl_report);
+    dawn_ctl_report_registered = true;
+  }
+  if (pthread_attr_init(&at) != 0) {
+    fputs("dawn: cannot make a continuation carrier\n", stderr);
+    exit(1);
+  }
+  (void)pthread_attr_setstacksize(&at, DAWN_CTL_STACK_BYTES);
+  if (pthread_create(&c->th, &at, dawn_ctl_carrier_main, c) != 0) {
+    pthread_attr_destroy(&at);
+    fputs("dawn: cannot make a continuation carrier\n", stderr);
+    exit(1);
+  }
+  pthread_attr_destroy(&at);
+  c->spawned = true;
+  dawn_ctl_live++;
+  return c;
+}
+
+/* Give the carrier back, whether it ran out or is being abandoned. An
+ * abandoned one is told to `die` and handed the baton: it unwinds its whole
+ * stack to the base handler, running every frame's cleanup, and finishes. */
+static void dawn_ctl_carrier_reclaim(dawn_carrier *c) {
+  if (!c->finished) {
+    c->die = true;
+    dawn_ctl_switch_to(c);
+  }
+  if (!c->joined) {
+    pthread_join(c->th, NULL);
+    c->joined = true;
+  }
+  pthread_mutex_destroy(&c->m);
+  pthread_cond_destroy(&c->cv);
+  dawn_ctl_live--;
+  free(c);
+}
+
+/* `dawn_drop` reaching a DAWN_K_CTL. The frames this activation is holding go
+ * first: they own references, and the walk that releases them has to run on
+ * the carrier's own stack. `dawn_drop` frees the struct itself afterwards. */
+static void dawn_ctl_dispose(void *p) {
+  dawn_ctl *f = (dawn_ctl *)p;
+  dawn_ctl *saved_top = dawn_ctl_top;
+  dawn_ctl *saved_pending = dawn_ctl_pending;
+  if (f->carrier != NULL) {
+    dawn_ctl_carrier_reclaim(f->carrier);
+    f->carrier = NULL;
+  }
+  /* A reclaim runs arbitrary Dawn cleanup on another stack, and a nested
+   * activation inside it drives and pops the chain as it goes. Neither is
+   * this walk's business, so both are put back. */
+  dawn_ctl_top = saved_top;
+  dawn_ctl_pending = saved_pending;
+  dawn_drop(f->rest);
+  dawn_drop(f->evs);
+  dawn_drop(f->result);
+  dawn_drop(f->resume);
+  if (f->failed && f->fail.msg != NULL) dawn_drop(f->fail.msg);
+}
+
+/* The innermost activation of this prompt, or a panic.
+ *
+ * The miss is a panic and not a fault for `ev_get`'s reason: an operation
+ * with no handler is a program the checker refuses, so arriving here means an
+ * invariant broke. The one way a *correct* program gets here is the residual
+ * design 11.6 H1 leaves open, and the message names it. Word for word the
+ * JVM's, because the differential compares stderr. */
+static dawn_ctl *dawn_ctl_lookup(int64_t hid) {
+  dawn_ctl *f = dawn_ctl_top;
+  while (f != NULL) {
+    if (f->hid == hid) return f;
+    f = f->prev;
+  }
+  dawn_panic(DAWN_LIT("dawn: no `ctl` handler is installed for this operation "
+                      "-- a suspendable function value was called from outside "
+                      "the `with handle` that answers it"));
+  return NULL;
+}
+
+static void *dawn_ctl_drive(dawn_ctl *f);
+
+/* The continuation, as an ordinary Dawn function value: `fn(R) -> A` with a
+ * pure row, so one written parameter plus the evidence slot every function
+ * value carries (design 11.2). Capture 0 is the activation and is counted;
+ * capture 1 is the one-shot token and is a scalar, so the mask is 1. */
+static void *dawn_ctl_k_apply(dawn_clo *self, void *v, void *ev) {
+  dawn_ctl *f = (dawn_ctl *)self->caps[0].p;
+  if (self->caps[1].i != f->gen) {
+    dawn_drop(v);
+    dawn_drop(ev);
+    dawn_panic(DAWN_LIT("dawn: continuation resumed twice"));
+  }
+  /* This pack answers nothing: the one the remainder needs was built at the
+   * installation and is inside the suspended frames already (design 11.2). */
+  dawn_drop(ev);
+  f->gen++;
+  f->resume = v; /* transferred; the raise site's `yield` takes it out */
+  return dawn_ctl_drive(f);
+}
+
+static dawn_clo *dawn_ctl_k_new(dawn_ctl *f) {
+  dawn_clo *k = dawn_clo_new((void *)dawn_ctl_k_apply, 2, UINT64_C(1));
+  k->caps[0].p = dawn_dup(f);
+  k->caps[1].i = f->gen;
+  return k;
+}
+
+/* Apply the arm: its parameters, then the continuation, then the pack the
+ * handler was installed with. A chain on the argument count for the JVM's
+ * reason -- which arm suspended is not known until it does -- and the
+ * arguments are borrowed here and owned by a closure's parameters, so each
+ * one is duplicated exactly like `dawn_bracket` duplicates its resource. */
+static void *dawn_ctl_apply_arm(dawn_clo *arm, int64_t n, void **args,
+                                dawn_clo *k, void *env) {
+  void *e = dawn_dup(env);
+  switch (n) {
+    case 0:
+      return ((void *(*)(dawn_clo *, void *, void *))arm->fn)(arm, k, e);
+    case 1:
+      return ((void *(*)(dawn_clo *, void *, void *, void *))arm->fn)(
+        arm, dawn_dup(args[0]), k, e);
+    case 2:
+      return ((void *(*)(dawn_clo *, void *, void *, void *, void *))arm->fn)(
+        arm, dawn_dup(args[0]), dawn_dup(args[1]), k, e);
+    case 3:
+      return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *))arm->fn)(
+        arm, dawn_dup(args[0]), dawn_dup(args[1]), dawn_dup(args[2]), k, e);
+    case 4:
+      return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *,
+                         void *))arm->fn)(
+        arm, dawn_dup(args[0]), dawn_dup(args[1]), dawn_dup(args[2]),
+        dawn_dup(args[3]), k, e);
+    case 5:
+      return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *,
+                         void *, void *))arm->fn)(
+        arm, dawn_dup(args[0]), dawn_dup(args[1]), dawn_dup(args[2]),
+        dawn_dup(args[3]), dawn_dup(args[4]), k, e);
+    case 6:
+      return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *,
+                         void *, void *, void *))arm->fn)(
+        arm, dawn_dup(args[0]), dawn_dup(args[1]), dawn_dup(args[2]),
+        dawn_dup(args[3]), dawn_dup(args[4]), dawn_dup(args[5]), k, e);
+    case 7:
+      return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *,
+                         void *, void *, void *, void *))arm->fn)(
+        arm, dawn_dup(args[0]), dawn_dup(args[1]), dawn_dup(args[2]),
+        dawn_dup(args[3]), dawn_dup(args[4]), dawn_dup(args[5]),
+        dawn_dup(args[6]), k, e);
+    default:
+      break;
+  }
+  dawn_panic(DAWN_LIT("dawn: a control arm answers an operation with more "
+                      "than 7 parameters"));
+  return NULL;
+}
+
+/* Run this activation until it either finishes or suspends into *this*
+ * prompt, and answer the block either way.
+ *
+ * Finished: the block's value is what the remainder produced. Suspended here:
+ * the arm gets the operation's arguments and a fresh continuation, and the
+ * arm's value is the block's value (design 11.1). Suspended past here: the
+ * loop parks the stack this drive is running on and the bubble carries on
+ * outward, which is the whole of "a yield bubbles past handlers it is not
+ * for". Nothing iterates for a resumption -- resuming is a call to `k` and
+ * `k` calls this again -- so a handler that resumes ten times is ten nested
+ * drives, which is what makes a dropped continuation cost nothing but its
+ * carrier. */
+static void *dawn_ctl_drive(dawn_ctl *f) {
+  dawn_clo *arm;
+  dawn_clo *k;
+  void *env;
+  void *args[DAWN_CTL_MAX_ARGS];
+  int64_t n;
+  int64_t i;
+  /* Read here rather than kept from the first entry: a continuation resumed
+   * somewhere else is answered by the handlers standing *there*, which is the
+   * whole of "k is deep up to this prompt and no further". */
+  f->prev = dawn_ctl_top;
+  dawn_ctl_top = f;
+  for (;;) {
+    dawn_ctl_switch_to(f->carrier);
+    if (f->carrier->finished) {
+      dawn_ctl_top = f->prev;
+      if (f->failed) {
+        dawn_failure owed = f->fail;
+        f->failed = false;
+        f->fail.msg = NULL;
+        dawn_reraise(owed);
+      }
+      {
+        void *r = f->result;
+        f->result = NULL;
+        return r;
+      }
+    }
+    if (dawn_ctl_pending == f) break;
+    /* Not this prompt. This drive's own frame is part of what the suspension
+     * captured, so it stops running too and the baton goes one further out;
+     * it is a carrier that is running when that happens, never the big-stack
+     * thread, because `lookup` already found the target on the chain. */
+    if (dawn_ctl_cur == NULL) {
+      fflush(stdout);
+      fputs("dawn: a suspension bubbled past every prompt\n", stderr);
+      abort();
+    }
+    dawn_ctl_hand_back(dawn_ctl_cur);
+  }
+  dawn_ctl_pending = NULL;
+  dawn_ctl_top = f->prev;
+  /* Take the pending operation out of the activation before the arm runs: the
+   * arm may resume, and a resumed remainder may raise again into this one. */
+  arm = (dawn_clo *)f->arm;
+  env = f->env;
+  n = f->nargs;
+  for (i = 0; i < n; i++) args[i] = f->args[i];
+  f->arm = NULL;
+  f->env = NULL;
+  f->nargs = 0;
+  k = dawn_ctl_k_new(f);
+  return dawn_ctl_apply_arm(arm, n, args, k, env);
+}
+
+static void dawn_ctl_slot_drop(dawn_ctl **slot) {
+  if (*slot != NULL) dawn_drop(*slot);
+}
+
+void *dawn_ctl_enter(int64_t hid, void *rest, void *evs) {
+  /* The activation is released by a cleanup rather than at the return, so
+   * that a failure or a discard unwinding through this frame releases it too
+   * -- and with it the carrier, if no continuation escaped holding one. */
+  dawn_ctl *f DAWN_CLEANUP(dawn_ctl_slot_drop) = dawn_alloc(sizeof(dawn_ctl));
+  memset(f, 0, sizeof *f);
+  dawn_hdr_init(&f->h, DAWN_K_CTL);
+  f->hid = hid;
+  f->rest = dawn_dup(rest);
+  f->evs = dawn_dup(evs);
+  f->carrier = dawn_ctl_carrier_new(f);
+  return dawn_ctl_drive(f);
+}
+
+void *dawn_ctl_yield(int64_t hid, void *arm, void *env, int64_t nargs,
+                     void **args) {
+  dawn_ctl *f = dawn_ctl_lookup(hid);
+  dawn_ctl *saved;
+  int64_t i;
+  void *v;
+  if (nargs > DAWN_CTL_MAX_ARGS) {
+    dawn_panic(DAWN_LIT("dawn: a control arm answers an operation with more "
+                        "than 7 parameters"));
+  }
+  f->arm = arm;
+  f->env = env;
+  f->nargs = nargs;
+  for (i = 0; i < nargs; i++) f->args[i] = args[i];
+  dawn_ctl_pending = f;
+  /* The prompts between this raise and the target are saved across the
+   * suspension and put back on the way in. Every drive between here and `f`
+   * stops in the loop above without popping its own frame off the chain, and
+   * nothing re-pushes them when the outer prompt resumes. Restoring the saved
+   * head restores the right chain rather than a stale one, because the
+   * activations are shared objects and `drive` rewrites `prev` on every
+   * entry: the saved head still ends at `f`, and `f`'s `prev` is whatever was
+   * installed where the resumption happened. That is the deep-handler rule
+   * and the "resumed somewhere else" rule in one line. */
+  saved = dawn_ctl_top;
+  if (dawn_ctl_cur == NULL) {
+    fflush(stdout);
+    fputs("dawn: a `ctl` operation was raised outside every carrier\n", stderr);
+    abort();
+  }
+  dawn_ctl_hand_back(dawn_ctl_cur);
+  dawn_ctl_top = saved;
+  v = f->resume;
+  f->resume = NULL;
+  return v;
+}
+
+#else
+
+/* wasm32-wasi has no threads, and the reason one-shot resumption stops here
+ * is not the missing primitive: every turn re-enters `main` from scratch
+ * (nmain's reactor driver), so no Dawn stack survives a turn boundary, which
+ * is the only place a reactor would want to suspend one (design 3.4). The
+ * refusal is at run time rather than in the emitter because the emitter is
+ * shared: the same C is compiled for both targets. */
+void *dawn_ctl_enter(int64_t hid, void *rest, void *evs) {
+  (void)hid;
+  (void)rest;
+  (void)evs;
+  dawn_panic(DAWN_LIT("dawn: one-shot resumption is not available on wasm"));
+  return NULL;
+}
+
+void *dawn_ctl_yield(int64_t hid, void *arm, void *env, int64_t nargs,
+                     void **args) {
+  (void)hid;
+  (void)arm;
+  (void)env;
+  (void)nargs;
+  (void)args;
+  dawn_panic(DAWN_LIT("dawn: one-shot resumption is not available on wasm"));
+  return NULL;
+}
+
 #endif
 
 /* ---- code-point classification (char_is_*) ---------------------------- */

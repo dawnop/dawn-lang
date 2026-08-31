@@ -65,16 +65,10 @@
 # "any exit will do".
 #
 # The other marker says a program has no native half at all:
-# `<name>.jvm-only`. Two things earn it, and they are not the same thing.
-# `use java` is refused by the native backend as a decision (`emitc` says so in
-# as many words), so a program whose subject *is* that boundary cannot be
-# differentiated. One-shot resumption is refused because the native half has
-# not been written: `ctl_yield` / `ctl_run` are `lower.jvm_only_intrinsics`,
-# emitc refuses them in the compiler's own words
-# (`lower.native_staged_message`), and the reason is Perceus rather than the
-# emitter -- a captured continuation gives every frame a second exit path, and
-# `c/rc.dawn`'s oracle assumes control flow returns (docs/oneshot-design.md
-# risk R1). Either way the program's C-side checks report `blocked`.
+# `<name>.jvm-only`. What earns it is `use java`, which the native backend
+# refuses as a decision (`emitc` says so in as many words), so a program whose
+# subject *is* that boundary cannot be differentiated. Its C-side checks report
+# `blocked`.
 #
 # The alternative was known-red.txt entries that nobody would ever be able to
 # delete, which would make that file mean two different things. The marker is
@@ -83,10 +77,12 @@
 # `effect_handler`, which compiles fine, and watching `effect_handler: jvm-only`
 # go red.
 #
-# The `ctl_*` programs are the ones the marker is load-bearing for today: when
-# the native backend grows a driving loop, deleting their markers is what makes
-# the differential start running, and the JVM answers already in their .expect
-# files are what it will run against.
+# The `ctl_*` programs used to wear it for a second reason -- one-shot
+# resumption had no native half -- and that is where the marker earned its
+# keep: when the native backend grew a driving loop of its own
+# (docs/oneshot-design.md 11.10), deleting the markers was the whole of making
+# the differential start running, against .expect files written from the JVM's
+# answers before there was anything to compare them to.
 #
 # `jvm` and `native` only run when <name>.expect exists. They are the answer
 # to codebase-audit.md TEST-01: a differential test alone certifies whatever

@@ -6,8 +6,8 @@
 `lower.inline_intrinsics()` names the primitives no runtime module owns and
 lowering does not remove -- the ones each backend writes instructions for
 itself -- and `lower.jvm_only_intrinsics()` names the ones only the JVM owes
-(the two host-value primitives, and one-shot resumption, whose native half is
-staged behind risk R1).
+(the two host-value primitives, which need a value `use java` is the only
+producer of).
 Nothing checked that either emitter agreed. `emit.gen_cintrinsic` and
 `emitc.emit_intrinsic` each end in a `panic` for a name they have no arm for,
 so a primitive present in one backend and absent from the other was a failure

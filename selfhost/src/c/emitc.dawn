@@ -32,7 +32,6 @@ use check/types.{
   is_ref_ty, Eff, EPure, hash_scalars, ord_scalars, intr_owned_args,
   ev_pack_adt, EV_MISS_MSG
 }
-use ir/lower.{is_native_staged_intrinsic, native_staged_message}
 use ir/reach.{TableUse}
 use embed/unicode_case
 use embed/rtsrc
@@ -1721,6 +1720,36 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     # count the slot no longer holds, which is the leak, and is also the whole
     # thing this primitive exists to avoid.
     (st1, "dawn_cell_take(" ++ a0 ++ ")")
+  } else if name == "ctl_run" {
+    # One-shot resumption's block tail (docs/oneshot-design.md §11.10). A call
+    # for the reason `cell_new` is one: the driving loop is written once, in
+    # the runtime, at one descriptor -- everything crossing into it was boxed
+    # to `erased_ctl_ty` by lowering.
+    #
+    # No dup. `dawn_ctl_enter` hands back what the remainder produced or what
+    # the arm answered, and either one is already owned; duping here would pin
+    # a count nothing releases.
+    (st1, "dawn_ctl_enter(" ++ a0 ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")")
+  } else if name == "ctl_yield" {
+    # The wrapper closure the evidence record holds, at the raise site. The
+    # first three are the prompt, the arm and the pack the arm is applied with
+    # (`lower.lower_ctl` says why the third one is there); the rest are the
+    # operation's arguments, and they go over in an array because the runtime
+    # dispatches on how many there are rather than on which operation it is.
+    #
+    # A compound literal, whose lifetime is this block -- so it outlives the
+    # call, which is all it has to do: the runtime copies the pointers into
+    # the activation before it suspends, and the frame holding them is
+    # suspended rather than gone. An empty one is not spellable in C, so a
+    # nullary operation passes NULL and a count of zero.
+    #
+    # No dup, for `ctl_run`'s reason: the value a resumption hands back is
+    # owned by the time it gets here.
+    let ops = list.slice(cargs, 3, len(cargs))
+    let n = len(ops)
+    let arr = if n == 0 { "(void **)0" } else { "(void *[]){" ++ join(ops, ", ") ++ "}" }
+    (st1, "dawn_ctl_yield(" ++ a0 ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ", " ++
+        to_string(n) ++ ", " ++ arr ++ ")")
   } else if name == "hash" {
     (st1, scalar_rt("dawn_hash", cex_ty(args[0]), name) ++ "(" ++ a0 ++ ")")
   } else if name == "cmp" {
@@ -1803,22 +1832,18 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
         let call = sym ++ "(" ++ join(cargs, ", ") ++ ")"
         (st1, if returns_borrow(name) { dup_expr(call, ty) } else { call })
       }
-      # Two refusals, and which one is the point. A primitive native has never
-      # been handed says so in the compiler's own words
-      # (`lower.native_staged_message`): the program is correct, it runs on the
-      # JVM, and what is missing is a decision this backend has not taken yet.
-      # Anything else here is the generic gap, which is a defect report.
+      # The generic gap, which is a defect report. There used to be a second
+      # refusal beside it, for a primitive native had not been *handed* yet --
+      # `ctl_yield` / `ctl_run` were its only members, and they have arms
+      # above now. Lowering keeps the mechanism for the next one
+      # (`lower.staged_intrinsics`, empty and kept); what is gone is the
+      # annotation that named these two.
       #
-      # No `name == "..."` in either branch, deliberately:
-      # scripts/intrinsic-parity.py reads this function's arms by that spelling
-      # and would count a named refusal as an implementation -- and then
-      # nothing would require the JVM to have one.
-      None ->
-        if is_native_staged_intrinsic(name) {
-          panic(native_staged_message(name))
-        } else {
-          panic("emitc: intrinsic not implemented for native: " ++ name)
-        }
+      # No `name == "..."` here, deliberately: scripts/intrinsic-parity.py
+      # reads this function's arms by that spelling and would count a named
+      # refusal as an implementation -- and then nothing would require the JVM
+      # to have one.
+      None -> panic("emitc: intrinsic not implemented for native: " ++ name)
     }
   }
 }
