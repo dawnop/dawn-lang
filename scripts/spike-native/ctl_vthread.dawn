@@ -1,0 +1,114 @@
+# One-shot resumption nested inside Loom's own continuations
+# (docs/oneshot-design.md 11.11): a control handler installed on a *virtual*
+# thread, suspending and resuming while the thread it runs on is being
+# unmounted and remounted underneath it.
+#
+# This is the shape production runs in. dawnop-site serves every request on
+# `newVirtualThreadPerTaskExecutor`, so a `ctl` handler installed in a request
+# handler puts a `jdk.internal.vm.Continuation` of ours *inside* the scheduler
+# continuation Loom already has mounted. Loom says nested continuations are
+# supported; nothing here exercised it, and the answer decides whether the
+# effect system can be adopted by a server at all.
+#
+# The last case is the one that would have been the finding. A carrier is
+# pinned when a frame that cannot be frozen is on the stack, and a pinned
+# virtual thread does not unmount: it blocks its carrier instead. Nothing
+# throws, nothing is printed, and the only symptom is that the pool stops
+# making progress -- which is invisible unless the pool is small enough for
+# one blocked carrier to be the whole of it. So the scheduler is pinned to a
+# single carrier and the question is asked as a deadlock that resolves or does
+# not: `parked` awaits a latch from inside a mounted control activation, and
+# `other` can only reach `countDown` if `parked` really unmounted. A pinning
+# runtime prints `awaited=false` after the two-second timeout, and prints it
+# *before* the other thread's line rather than after.
+#
+# JVM-only, and not because of `ctl`: virtual threads are a JVM runtime fact,
+# not a language feature, so the program is written with `use java` and the
+# native backend refuses it by design (see run.sh's marker note). There is no
+# native half of this question -- native's carriers are pthreads the runtime
+# owns and Dawn cannot spell (docs/oneshot-design.md 11.11).
+use std/io
+use java "java.lang.System"
+use java "java.lang.Thread"
+use java "java.util.concurrent.CountDownLatch"
+use java "java.util.concurrent.TimeUnit"
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+# The baseline: nothing about this handler knows what kind of thread it is on.
+# Two raises, so a continuation is captured and resumed twice, all of it inside
+# the scheduler continuation Loom mounted to run this body.
+fn installed_on_a_virtual_thread() -> String = {
+  with handle Ask { ask(n) resume k => k(n + 1) }
+  "installed ${to_string(ask(1) + ask(10))}"
+}
+
+# The arm sleeps before it resumes. Our continuation is frozen for the whole
+# sleep, so what unmounts is a virtual thread whose stack holds a *suspended*
+# activation of ours -- the easy half of the nesting, and the half a
+# `Thread.sleep` between suspension and resumption provokes for free.
+fn suspended_across_a_sleep() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      Thread.sleep(20)
+      k(n + 1)
+    }
+  }
+  "slept ${to_string(ask(1) + ask(10))}"
+}
+
+# The hard half, in the order that makes it hard: unmount first, then yield.
+# `Thread.sleep` inside the block freezes Loom's continuation *past* our
+# mounted one and thaws it again; the `ask` after it then freezes our own
+# frames, which have already been through one of Loom's freeze/thaw round
+# trips. A mechanism that cached anything about where its frames were would
+# answer wrong here and nowhere above.
+fn yields_after_a_remount() -> String !io = {
+  with handle Ask { ask(n) resume k => k(n + 1) }
+  Thread.sleep(20)
+  "remounted ${to_string(ask(1) + ask(10))}"
+}
+
+# Does a mounted control activation pin the carrier? The block suspends and
+# resumes first, so what awaits the latch is the *resumed* remainder running
+# inside `Continuation.run`, and the await is a park -- the operation a pinned
+# virtual thread has to serve on its carrier instead of unmounting for.
+#
+# The timeout is the oracle's other half. Without it a pinning runtime hangs
+# the corpus rather than failing it, and a gate that hangs is a gate somebody
+# reruns. Two seconds is four orders of magnitude more than the unpinned path
+# needs, so the number is not a race with anything.
+fn parked(latch: CountDownLatch) -> String !io = {
+  with handle Ask { ask(n) resume k => k(n + 1) }
+  let n = ask(1)
+  let ok = latch.await(2, TimeUnit.SECONDS!)
+  "awaited=${to_string(ok)} n=${to_string(n)}"
+}
+
+pub fn main() -> Unit !io = {
+  # One carrier for the whole program, set before anything touches
+  # `VirtualThread` and therefore before its scheduler is built. With the
+  # default parallelism a pinned carrier is simply one of four and `other`
+  # runs on another one, which is how a pinning runtime would pass this file
+  # without the two lines below.
+  let _ = System.setProperty("jdk.virtualThreadScheduler.parallelism", "1")
+  let _ = System.setProperty("jdk.virtualThreadScheduler.maxPoolSize", "1")
+
+  let one = Thread.startVirtualThread(() => {
+    io.println(installed_on_a_virtual_thread())
+    io.println(suspended_across_a_sleep())
+    io.println(yields_after_a_remount())
+  })!
+  one.join()
+
+  let latch = CountDownLatch.new(1)
+  let a = Thread.startVirtualThread(() => io.println(parked(latch)))!
+  let b = Thread.startVirtualThread(() => {
+    io.println("the other virtual thread got the carrier")
+    latch.countDown()
+  })!
+  a.join()
+  b.join()
+}
