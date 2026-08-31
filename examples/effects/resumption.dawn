@@ -1,0 +1,193 @@
+# One-shot resumption: an answer that arrives turns later, read as the value
+# of a `let`.
+#
+# `update` below asks for a greeting and uses it on the next line. Nothing in
+# it is written in halves, and `Msg` has exactly the two constructors a user
+# can produce -- `Typed` and `Cleared`. There is no `Fetched(body)` message,
+# which is the whole point: without a continuation, every round trip has to
+# become a message constructor, because a message is the only thing that can
+# re-enter `update`.
+#
+# The handler is what turns the direct-style line into three turns. Its `fetch`
+# arm binds the continuation and hands it out instead of resuming, so a turn
+# ends the moment `update` asks a question. The continuation goes into the
+# reactor's retained state, outliving the frame that installed the handler, and
+# the turn that brings the body back resumes it -- an ordinary call to an
+# ordinary function value.
+#
+# Abandoning one is spelled: a cancelled request calls `discard`, because
+# dropping a continuation on the floor runs nothing at all (docs/spec.md 6.5).
+# Here there is nothing under the suspension holding a resource, so `discard`
+# and a bare drop would be indistinguishable from the outside; the reason to
+# write it anyway is that the moment a `bracket` appears under a `fetch`, the
+# bare drop silently stops releasing and this call does not.
+#
+# Run: dawn run examples/effects/resumption.dawn
+# and type: type ada / body hello, ada / type bob / cancel / clear
+
+use std/reactor as session
+use std/str
+
+## A question for the outside world. `ctl` is what licenses an arm to bind a
+## continuation, and it is also what keeps a value carrying this label from
+## crossing to Java (docs/spec.md 6.5, 9.4).
+ctl effect Fetch {
+  ## The body at `url`. The answer may be many turns away.
+  fn fetch(url: String) -> String
+}
+
+## Two constructors, both of them things a person did.
+type Msg =
+  | Typed(name: String)
+  | Cleared
+
+type Model = { greeting: String, asked: Int }
+
+## Direct style, and the only place in the file that mentions a greeting: the
+## body of the request is the value of a `let`, on the line after the question.
+fn update(m: Model, msg: Msg) -> Model !Fetch =
+  match msg {
+    Typed(name) -> {
+      let body = fetch("/greet?name=" ++ name)
+      Model { greeting: body, asked: m.asked + 1 }
+    }
+    Cleared -> Model { greeting: "", asked: m.asked }
+  }
+
+## What one turn produced. `Waiting` carries the continuation, which is an
+## ordinary function value: it goes in an ADT field because §11.2 refused to
+## give it a type of its own.
+type Step =
+  | Done(m: Model)
+  | Waiting(url: String, k: fn(String) -> Step)
+
+## Run one message as far as it gets. The handler answers `fetch` by stopping:
+## the arm's value is the value of this whole block, so a suspension leaves as
+## `Waiting` and a message that never asks leaves as `Done`.
+##
+## Resuming `k` reinstalls this handler, so a second `fetch` inside the same
+## `update` would suspend again and arrive here as another `Waiting`.
+fn step_once(m: Model, msg: Msg) -> Step = {
+  with handle Fetch { fetch(url) resume k => Waiting(url, k) }
+  Done(update(m, msg))
+}
+
+## The session: the model, plus the continuation the last turn left behind.
+type Session = { model: Model, pending: Option[fn(String) -> Step] }
+
+fn start() -> Session = Session { model: Model { greeting: "", asked: 0 }, pending: None }
+
+fn render(m: Model) -> String = "greeting=${m.greeting} asked=${to_string(m.asked)}"
+
+## Fold whatever a turn produced back into the session, and say what happened.
+fn settle(s: Session, st: Step) -> (Session, String) =
+  match st {
+    Done(m) -> (Session { model: m, pending: None }, render(m))
+    Waiting(url, k) -> (Session { model: s.model, pending: Some(k) }, "GET ${url}")
+  }
+
+## One line of input. `body` and `cancel` are the two answers a pending
+## request takes; everything else is a message for `update`.
+fn turn(state: Option[Session], line: String) -> (Option[Session], Option[String]) = {
+  let s =
+    match state {
+      Some(prev) -> prev
+      None -> start()
+    }
+  let (next, reply) = respond(s, str.trim(line))
+  (Some(next), Some(reply))
+}
+
+fn respond(s: Session, line: String) -> (Session, String) =
+  if str.starts_with(line, "body ") {
+    match s.pending {
+      Some(k) -> settle(Session { model: s.model, pending: None }, k(str.drop(line, 5)))
+      None -> (s, "nothing is pending")
+    }
+  } else if line == "cancel" {
+    match s.pending {
+      Some(k) -> {
+        discard(k)
+        (Session { model: s.model, pending: None }, "cancelled")
+      }
+      None -> (s, "nothing is pending")
+    }
+  } else if str.starts_with(line, "type ") {
+    ask_for(s, Typed(str.drop(line, 5)))
+  } else if line == "clear" {
+    ask_for(s, Cleared)
+  } else {
+    (s, "say `type <name>`, `clear`, `body <text>` or `cancel`")
+  }
+
+## A new message is refused while a request is outstanding: the pending
+## continuation is the turn that has not finished, and starting another would
+## leave nobody to answer it.
+fn ask_for(s: Session, msg: Msg) -> (Session, String) =
+  if is_pending(s) {
+    (s, "a request is outstanding; answer it or cancel it")
+  } else {
+    settle(s, step_once(s.model, msg))
+  }
+
+fn is_pending(s: Session) -> Bool =
+  match s.pending {
+    Some(_) -> true
+    None -> false
+  }
+
+## The url a turn is waiting on, or `None` when it finished.
+fn waiting_on(st: Step) -> Option[String] =
+  match st {
+    Waiting(url, _) -> Some(url)
+    Done(_) -> None
+  }
+
+## The model a turn produced, once it has one.
+fn finished(st: Step) -> String =
+  match st {
+    Done(m) -> render(m)
+    Waiting(url, _) -> "still waiting on ${url}"
+  }
+
+pub fn main() -> Unit !io =
+  session.serve(turn, e => "failed: ${e.message}")
+
+test "the body arrives as a value inside update, not as a message" {
+  let asked = step_once(Model { greeting: "", asked: 0 }, Typed("ada"))
+  assert waiting_on(asked) == Some("/greet?name=ada")
+  match asked {
+    Waiting(_, k) -> {
+      assert finished(k("hello, ada")) == "greeting=hello, ada asked=1"
+    }
+    Done(m) -> {
+      assert render(m) == "the first turn should have suspended"
+    }
+  }
+}
+
+test "a message that asks nothing finishes in one turn" {
+  let st = step_once(Model { greeting: "hi", asked: 3 }, Cleared)
+  let nothing: Option[String] = None
+  assert waiting_on(st) == nothing
+  assert finished(st) == "greeting= asked=3"
+}
+
+test "the continuation outlives the frame that installed the handler" {
+  let (waiting, first) = respond(start(), "type bob")
+  assert first == "GET /greet?name=bob"
+  assert is_pending(waiting)
+  let (answered, second) = respond(waiting, "body hello, bob")
+  assert second == "greeting=hello, bob asked=1"
+  assert not is_pending(answered)
+}
+
+test "a cancelled request abandons its continuation and the session goes on" {
+  let (waiting, _) = respond(start(), "type ada")
+  let (cancelled, said) = respond(waiting, "cancel")
+  assert said == "cancelled"
+  assert not is_pending(cancelled)
+  let (cleared, after) = respond(cancelled, "clear")
+  assert after == "greeting= asked=0"
+  assert not is_pending(cleared)
+}
