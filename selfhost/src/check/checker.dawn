@@ -5767,10 +5767,19 @@ fn check_handle(
   # declaration, so there is no cycle to break.
   #
   # With no control arm the order below is today's, statement for statement.
+  #
+  # **The environment the arms run in** is packed in each branch rather than
+  # after them, and that placement is the rule rather than tidiness: the pack
+  # has to be built out of a frame that cannot see `E`'s own record. Building it
+  # once, below the branch, put it after `declare_evidence` on the tail-
+  # resumptive path -- so the arms' environment resolved `E` to the very record
+  # being built, and the `TSLet` binding that record contained a reference to
+  # itself. `dawn check` and every diagnostic golden were happy; codegen said
+  # "symbol has no slot" (scripts/effect-evidence-contract caught it).
   var arm_nodes: List[TExpr] = []
   var slots: List[Option[Int]] = []
-  var arms_eff = EPure
   var arm_lets: List[TStmt] = []
+  var arm_env = XError(lo, hi)
   var ev_sym = 0
   var rret = TyError
   var reff = EPure
@@ -5792,8 +5801,11 @@ fn check_handle(
     cx1 = cxa
     arm_nodes = ns
     slots = sl
-    arms_eff = ae
     arm_lets = als
+    # the evidence scope was popped above, so this pack cannot see `E`
+    let (cxp, env, _) = evidence_pack(cx1, ae, false, lo, hi)
+    cx1 = cxp
+    arm_env = env
   } else {
     let no_answer: Option[Ty] = None
     let (cxa, ns, sl, ae, als) =
@@ -5801,8 +5813,11 @@ fn check_handle(
     cx1 = cxa
     arm_nodes = ns
     slots = sl
-    arms_eff = ae
     arm_lets = als
+    # `E` is not bound yet, so this pack cannot see it either
+    let (cxp, env, _) = evidence_pack(cx1, ae, false, lo, hi)
+    cx1 = cxp
+    arm_env = env
     let (cxe, esym) = declare_evidence(cx1, ev_name, ev_ty, label_key(eid), nlo, nhi)
     cx1 = cxe
     ev_sym = esym
@@ -5813,14 +5828,6 @@ fn check_handle(
     rx = rx0
     revs = rv0
   }
-  # **The environment the arms run in.** What the arms need is what they raise,
-  # so the row to pack is `arms_eff`, and it is packed out of a frame that
-  # cannot see `E`'s own record -- either because the record is not bound yet
-  # (no control arm) or because the scope holding it has been popped (control
-  # arm). It reports nothing: an arm raising something unanswerable already
-  # said so, inside the arm.
-  let (cx1b, arm_env, _) = evidence_pack(cx1, arms_eff, false, lo, hi)
-  cx1 = cx1b
   let ev_node = XCtor(eid, 0, arm_nodes ++ [arm_env], slots ++ [Some(len(slots))],
     no_expr(), lo, hi, ev_ty)
   cx1 = pop_scope(cx1)
