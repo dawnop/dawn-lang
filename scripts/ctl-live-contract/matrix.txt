@@ -21,6 +21,8 @@
 assert	answers
 assert	exit_status
 assert	no_live_continuations_at_exit
+assert	releases_ran
+assert	spent_ticket_refused
 assert	no_leaks
 
 control	answers
@@ -36,7 +38,8 @@ role	ctl-never-reclaims	counted
 owner	ctl-never-reclaims	no_live_continuations_at_exit
 red	ctl-never-reclaims	exit_status
 red	ctl-never-reclaims	no_live_continuations_at_exit
-says	ctl-never-reclaims	dawn: 2 suspended continuation(s) still live at exit
+red	ctl-never-reclaims	releases_ran
+says	ctl-never-reclaims	dawn: 4 suspended continuation(s) still live at exit
 
 # Knife 5's negative control 4, and the other half. The carrier *is* reclaimed
 # -- the count returns to zero and the report stays quiet -- but the discard
@@ -48,6 +51,27 @@ says	ctl-never-reclaims	dawn: 2 suspended continuation(s) still live at exit
 role	ctl-discard-skips-cleanups	counted
 owner	ctl-discard-skips-cleanups	no_leaks
 red	ctl-discard-skips-cleanups	no_leaks
+red	ctl-discard-skips-cleanups	releases_ran
+
+# Knife 6's pair, and the reason `releases_ran` and `spent_ticket_refused`
+# exist. Running a bracket's release when a computation is abandoned is the
+# whole of what `discard` adds over a bare drop, and nothing else in the tree
+# watches it: the program prints the same five lines on stdout either way, the
+# count still returns to zero, and LeakSanitizer sees nothing because the
+# frames were reclaimed. So the two effects a discard is *for* are asserted
+# directly, off stderr, and each mutant owns one.
+#
+# The first is also the sharper reading of the pair above it. Three mutants now
+# redden `releases_ran`, which is the point rather than dilution: two of them
+# lose the releases as a side effect of losing the whole walk, and this one
+# loses only the releases, with everything else about the walk intact.
+role	ctl-discard-skips-releases	counted
+owner	ctl-discard-skips-releases	releases_ran
+red	ctl-discard-skips-releases	releases_ran
+
+role	ctl-discard-ignores-the-ticket	counted
+owner	ctl-discard-ignores-the-ticket	spent_ticket_refused
+red	ctl-discard-ignores-the-ticket	spent_ticket_refused
 
 # The positive control. A baton has exactly one waiter, so waking one rather
 # than all of them is the same handoff, and the whole roster has to stay green

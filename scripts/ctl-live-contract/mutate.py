@@ -7,9 +7,12 @@ exactly once or the mutation refuses to apply. A drifted anchor that patched
 nothing would leave the harness measuring the unmutated runtime, which is the
 one failure a mutant matrix exists to rule out.
 
-The three below are the standing form of knife 5's hand-run negative controls
+The first three are the standing form of knife 5's hand-run negative controls
 2, 4 and (new) a positive one; docs/oneshot-design.md 11.10 records what each
-was observed to do when it was run by hand.
+was observed to do when it was run by hand. The last two are knife 6's, and
+they are here rather than hand-run for the same reason: `discard` running the
+releases is a behaviour with no other watcher, and a runtime that stopped
+running them prints exactly what a correct one prints on stdout.
 """
 
 from pathlib import Path
@@ -29,6 +32,7 @@ MUTATIONS = {
     "ctl-never-reclaims": (
         """  if (!c->finished) {
     c->die = true;
+    c->run_releases = run_releases;
     dawn_ctl_switch_to(c);
   }""",
         """  if (!c->finished) {
@@ -43,9 +47,9 @@ MUTATIONS = {
     # what it held becomes unreachable: exactly the leak LeakSanitizer *can*
     # see, on the same code path where the mutant above leaves it blind.
     "ctl-discard-skips-cleanups": (
-        """  dawn_ctl_discarding = true;
+        """  dawn_ctl_discard_walking = run_releases;
   dawn_unwind_to(h);""",
-        """  dawn_ctl_discarding = true;
+        """  dawn_ctl_discard_walking = run_releases;
   longjmp(h->jb, 1);""",
     ),
     # The positive control. One waiter is all a baton ever has, so waking one
@@ -59,6 +63,32 @@ MUTATIONS = {
         """  pthread_mutex_lock(&c->m);
   c->turn = 1;
   pthread_cond_signal(&c->cv);""",
+    ),
+    # Knife 6. The landing predicate goes back to what it was before
+    # `discard` existed: the walk skips every intermediate frame and stops
+    # only at the base, so the frames are reclaimed and nothing a program
+    # wrote runs on the way. That is exactly the bare-drop behaviour, applied
+    # to the path that is supposed to differ from it -- and it is invisible on
+    # stdout, which is why `releases_ran` is an assertion of its own.
+    "ctl-discard-skips-releases": (
+        """  if (dawn_ctl_discard_walking && h->discard_lands) {
+    h->discard_lands = false;
+    longjmp(h->jb, 1);
+  }
+""",
+        "",
+    ),
+    # Knife 6. `discard` stops asking whether the ticket is still good. The
+    # second discard then finds the carrier already gone and answers Unit
+    # quietly instead of panicking, which is the #641 shape one step short of
+    # running a release twice.
+    "ctl-discard-ignores-the-ticket": (
+        """  if (k->caps[1].i != f->gen) {
+    dawn_panic(DAWN_LIT("dawn: continuation discarded after it was already "
+                        "used"));
+  }
+""",
+        "",
     ),
 }
 

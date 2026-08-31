@@ -5,9 +5,11 @@
 #
 # `resumes` is the control -- a continuation that is used rather than dropped,
 # so a runtime that reclaimed nothing at all would still have to answer it.
-# `discards` and `guarded(9)` are the two abandonments, and each holds a heap
-# value across the suspension so that the frames the reclaim has to unwind own
-# something the leak checker can name.
+# `discards` and `guarded(9)` are the two bare abandonments, and each holds a
+# heap value across the suspension so that the frames the reclaim has to unwind
+# own something the leak checker can name. `releasing` and `spent` are the
+# explicit one, `discard`, whose two observable effects go to stderr for the
+# reason written above each of them.
 use std/io
 use std/str
 
@@ -30,6 +32,43 @@ fn discards(tag: String) -> String = {
   "${held} ${to_string(n)}"
 }
 
+## The other abandonment, the explicit one (11.12). It runs what a bare drop
+## does not: the bracket's release. The release writes to *stderr* on purpose
+## -- the four lines on stdout are this leg's control, and a mutant that stops
+## releases running has to redden the assertion written for that and not the
+## one that says the program still works at all.
+fn releasing() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "discarded ${to_string(n)}"
+    }
+  }
+  with r <- bracket("held", tag => io.eprintln("released ${tag}"))
+  "unreachable ${to_string(ask(3))} ${r}"
+}
+
+type Held = Ready(v: String) | Waiting(k: fn(Int) -> Held)
+
+fn escaping() -> Held !io = {
+  with handle Ask { ask(n) resume k => Waiting(k) }
+  Ready("resumed ${to_string(ask(1))}")
+}
+
+## A discard spends the same one-shot ticket a resumption spends, so a second
+## one is refused by name. Also on stderr, and for the same reason.
+fn spent() -> String !io =
+  match escaping() {
+    Ready(_) -> "the arm resumed"
+    Waiting(k) -> {
+      discard(k)
+      match catch_panic(() => discard(k)) {
+        Ok(_) -> "discarded twice and lived"
+        Err(e) -> e.message
+      }
+    }
+  }
+
 fn small(n: Int) -> Option[Int] = if n > 2 { None } else { Some(n) }
 
 ## `?` in a control arm abandons the captured continuation and answers the
@@ -45,4 +84,6 @@ pub fn main() -> Unit !io = {
   io.println(discards("a"))
   io.println(to_string(guarded(1)))
   io.println(to_string(guarded(9)))
+  io.println(releasing())
+  io.eprintln(spent())
 }

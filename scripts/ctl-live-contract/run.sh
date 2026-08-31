@@ -99,6 +99,12 @@ observe() { # dir
   verdict "$dir" exit_status "$([ "$rc" -eq 0 ] && echo y)"
   verdict "$dir" no_live_continuations_at_exit \
     "$(grep -q 'still live at exit' "$dir/err.txt" || echo y)"
+  # The two `discard` writes on stderr, and they are on stderr so that these
+  # can be read without moving `answers`, which is the control.
+  verdict "$dir" releases_ran "$(grep -qx 'released held' "$dir/err.txt" && echo y)"
+  verdict "$dir" spent_ticket_refused \
+    "$(grep -qxF 'dawn: continuation discarded after it was already used' \
+      "$dir/err.txt" && echo y)"
 
   set +e
   ASAN_OPTIONS=detect_leaks=1 timeout "$run_timeout" "$dir/asan" \
