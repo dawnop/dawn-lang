@@ -3831,6 +3831,17 @@ fn gen_ctl_enter(cw: ClassWriter) -> Unit !io = {
 ## call to `k`, and `k` calls this again, so a handler that resumes ten times
 ## is ten nested `drive` frames rather than an iteration. That is what makes a
 ## dropped continuation free: the arm simply returns.
+##
+## **This method must not hold a lock, and neither may anything it calls while
+## an activation is live.** A yield that bubbles *past* an inner activation
+## freezes that activation's `drive` frame along with everything else in the
+## span, so a monitor entered on this frame would be inside the frozen region
+## and `Continuation.yield` refuses it: `CtlCont.onPinned` answers `MONITOR`.
+## The constraint is invisible in the code because there is no lock here to
+## see. Measured (docs/oneshot-design.md 11.11): adding `ACC_SYNCHRONIZED` to
+## this method panics `ctl_nested` and `ctl_cross_thread` with
+## "cannot suspend across this frame (MONITOR)", while `ctl_resume`, whose
+## handlers are single-layer and never bubble past a `drive` frame, stays green.
 fn gen_ctl_drive(cw: ClassWriter) -> Unit !io = {
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "drive",
     "(" ++ ctl_desc() ++ ")" ++ obj_desc()).expect("mv")
