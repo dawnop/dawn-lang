@@ -27,7 +27,7 @@ use check/types.{
   DICT_ADT_ID,
   Sym, Sig, Eff, EPure, ELabeled, EffVar, Traits, TraitI, ImplI, MethodSig,
   eff_labels, eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
-  reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty, erased_cell_ty,
+  reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty, erased_cell_ty, erased_ctl_ty,
   EV_PACK_ID, ev_pack_ty, key_is_label, key_effect_id, label_key,
   Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
@@ -466,6 +466,56 @@ fn lower_cell(st: LSt, name: String, args: List[TExpr], ty: Ty) -> (LSt, CExpr) 
   }
   let (st1, c) = lower_expr(st, args[0])
   (st1, adapt_out(CIntrinsic(name, [c], er), er, ty))
+}
+
+# ---- one-shot resumption ----
+
+## The two names that reach `lower_ctl` below.
+fn is_ctl_intrinsic(name: String) -> Bool = name == "ctl_yield" || name == "ctl_run"
+
+## The two one-shot primitives, lowered (docs/oneshot-design.md §11.3).
+##
+## Same job as `lower_cell` and for the same reason: the runtime that owns the
+## driving loop is written once, at one descriptor, so everything crossing into
+## it is boxed to `erased_ctl_ty` here and everything coming back out is
+## unboxed here. An operation declared `fn ask(n: Int) -> Int` and one declared
+## `fn get(k: String) -> Bytes` reach the same three runtime methods.
+##
+## **`ctl_yield` grows an argument that the checker did not write.** The
+## checker's node is `ctl_yield(prompt, arm, args...)`; what lowering emits is
+## `ctl_yield(prompt, arm, env, args...)`, where `env` is the wrapper closure's
+## own evidence slot (`st.ev_own`). It has to: the arm is applied by the
+## runtime, *after* the block's continuation has been captured, and an arm is
+## applied with the handler's pack rather than the raise site's
+## (`checker.check_call` says why -- an arm's own raises resolve in the scope
+## the handler was installed in). The wrapper is called with that pack in its
+## evidence slot, so forwarding the slot is the whole of it. `ev_own` is `None`
+## only inside a named function, and the wrapper is a lifted closure, so the
+## placeholder below is the shape of an error rather than a case.
+fn lower_ctl(st: LSt, name: String, args: List[TExpr], ty: Ty) -> (LSt, CExpr) = {
+  let er = erased_ctl_ty()
+  if name == "ctl_run" {
+    # (prompt, remainder closure, the pack the remainder is run with)
+    let (st1, p) = lower_expr(st, args[0])
+    let (st2, r) = lower_expr(st1, args[1])
+    let (st3, evs) = dyn_evidence(st2, [args[2]])
+    return (st3, adapt_out(CIntrinsic(name, [p, r] ++ evs, er), er, ty))
+  }
+  let (st1, p) = lower_expr(st, args[0])
+  let (st2, arm) = lower_expr(st1, args[1])
+  let env =
+    match st2.ev_own {
+      Some(e) -> ev_value(e)
+      None -> ev_placeholder()
+    }
+  var st3 = st2
+  var cargs: List[CExpr] = [p, arm, env]
+  for a in list.slice(args, 2, len(args)) {
+    let (stn, v) = lower_expr(st3, a)
+    st3 = stn
+    cargs = cargs ++ [adapt_in(v, tex_ty(a), er)]
+  }
+  (st3, adapt_out(CIntrinsic(name, cargs, er), er, ty))
 }
 
 fn refuse_evidence_captures(st: LSt, where2: String, captures: List[Int]) -> Unit = {
@@ -1035,15 +1085,21 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ##                       second count on the value; an accumulator read that
 ##                       way is never unique, and a container built in a
 ##                       handler would copy on every step instead of reusing
-##   ctl_yield ctl_run   one-shot resumption, and the only two names in this
-##                       list no backend has ever been handed. The checker
-##                       builds them for a `with handle` with a control arm
+##   ctl_yield ctl_run   one-shot resumption. The checker builds them for a
+##                       `with handle` with a control arm
 ##                       (`checker.ctl_wrapper`, `checker.check_handle`):
 ##                       `ctl_yield(prompt, arm, args...)` is the wrapper the
 ##                       evidence record holds, and `ctl_run(prompt, rest, pack)`
 ##                       is the block's tail, which owns the driving loop.
-##                       `staged_intrinsics` below is where they are classified
-##                       and says what happens to one today.
+##                       `lower_ctl` below normalises both -- every payload is
+##                       boxed to `erased_ctl_ty`, and `ctl_yield` grows the
+##                       wrapper's own evidence slot as a third argument,
+##                       because the runtime is what applies the arm and an arm
+##                       is applied with the handler's pack rather than the
+##                       raise site's (`checker.check_call`). `jvm_only_intrinsics`
+##                       is where they are classified: the JVM writes both arms
+##                       over `jdk.internal.vm.Continuation`, and native is
+##                       staged (`native_staged_intrinsics`, risk R1).
 ##
 ## Not an ADT, though the comment this replaces proposed one. Measured before
 ## deciding: `CIntrinsic` carries a `String` because it also carries the 89
@@ -1149,13 +1205,52 @@ pub fn inline_intrinsics() -> List[String] = [
   "args"
 ]
 
-## The two only the JVM owes an arm for.
+## The primitives only the JVM owes an arm for.
 ##
-## Both take a value that came from the host, and `use java` is the only thing
-## that produces one -- a node emitc refuses outright. So this is a fact about
-## the backends rather than a gap in one of them, and emitc's generic refusal
-## is the right answer if either ever reaches it.
-pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
+## Two reasons, and the list keeps both because a backend cannot tell them
+## apart from the inside -- which is the whole argument the group below makes.
+##
+## `java_eq` / `java_hash` take a value that came from the host, and `use java`
+## is the only thing that produces one -- a node emitc refuses outright. That is
+## a fact about the backends rather than a gap in one of them, and emitc's
+## generic refusal is the right answer if either ever reaches it.
+##
+## `ctl_yield` / `ctl_run` are one-shot resumption
+## (docs/oneshot-design.md §11.3). The JVM writes both arms, over
+## `jdk.internal.vm.Continuation` and the `dawn/rt/Ctl` classes; native is not
+## short of an instruction sequence, it is short of a decision -- the second
+## exit path a captured continuation gives every frame collides with Perceus's
+## exactly-once release (risk R1, `c/rc.dawn:28-31`). So they are named again in
+## `native_staged_intrinsics` below, and emitc refuses them in the calendar's
+## words rather than the backend's.
+pub fn jvm_only_intrinsics() -> List[String] =
+  ["java_eq", "java_hash", "ctl_yield", "ctl_run"]
+
+## The subset of `jvm_only_intrinsics` that native does not owe *yet*.
+##
+## Not a sixth group: every name here is already classified above, and this
+## says only which sentence emitc's refusal should use. The distinction is the
+## same one `lowered_intrinsics` and `staged_intrinsics` were written for --
+## "no backend owes this", "one backend is short", and "nobody has written this
+## yet" are three answers that look alike from inside an emitter, and the last
+## one is a message about the compiler's calendar rather than about the
+## machine. A program that reaches it has already been type-checked in full
+## (`dawn check` says everything §11 has to say) and runs on the JVM today.
+pub fn native_staged_intrinsics() -> List[String] = ["ctl_yield", "ctl_run"]
+
+## Is this primitive one native has not been handed yet?
+pub fn is_native_staged_intrinsic(name: String) -> Bool =
+  list.contains(native_staged_intrinsics(), name)
+
+## What emitc says when it reaches one. Spelled here, beside the list, so the
+## refusal and the classification cannot drift.
+pub fn native_staged_message(name: String) -> String =
+  "emitc: one-shot resumption has no native backend yet -- `" ++ name ++
+  "` reached the C emitter. A `with handle` arm written `op(a) resume k => ...` " ++
+  "type-checks and runs on the JVM (docs/oneshot-design.md §11), but the C " ++
+  "backend's reference counting has no account of a frame with a second exit " ++
+  "path yet (risk R1); drop the `resume` clause to get a tail-resumptive arm, " ++
+  "which compiles on both backends today."
 
 ## The builtins no backend ever sees: lowering rewrites each into something
 ## else, so an arm for one of these is dead code rather than an implementation.
@@ -1194,13 +1289,17 @@ pub fn lowered_intrinsics() -> List[String] = {
 ## arm reaching `emitc: intrinsic not implemented for native` -- a message about
 ## the backend, for a program whose problem is the compiler's calendar.
 ##
-## `ctl_yield` and `ctl_run` are the checker's half of one-shot resumption
-## (docs/oneshot-design.md §11.3). `dawn check` accepts a control arm in full,
-## with every judgment §11 states; `dawn build` stops here, by name, and points
-## at the knife that lands the driving loop and the two backends' arms. When it
-## does, these move to whichever of the four groups they belong in and this list
-## goes back to being empty.
-pub fn staged_intrinsics() -> List[String] = ["ctl_yield", "ctl_run"]
+## Empty, and kept. `ctl_yield` / `ctl_run` were the entries: the knife that
+## landed the driving loop moved them to `jvm_only_intrinsics`, exactly as the
+## note here said it would, and the refusal below went with them -- native's
+## half is now a named refusal in emitc (`native_staged_message`) rather than a
+## refusal in lowering, because lowering is shared and the JVM compiles these.
+##
+## The mechanism stays because the third answer stays: the next primitive whose
+## phase has not landed needs somewhere to be, and an emitter is where it would
+## otherwise be silence. The partition test below reads this list, so a name put
+## back here is classified the moment it is written.
+pub fn staged_intrinsics() -> List[String] = []
 
 ## Is this the name of a primitive lowering refuses on purpose?
 pub fn is_staged_intrinsic(name: String) -> Bool = list.contains(staged_intrinsics(), name)
@@ -1248,10 +1347,22 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
   # 3. the sizes the comments above quote. A count written in prose is what
   #    went wrong in `internal_intrinsics`, whose comment gave two different
   #    answers for the same list in the same paragraph.
+  # 4. the staged-on-native annotation names only primitives the JVM owns.
+  #    It is not a group, so the partition above cannot catch a name that
+  #    drifts out of `jvm_only_intrinsics` and is left here -- which would make
+  #    emitc refuse in the calendar's words for a primitive whose calendar has
+  #    nothing to do with it.
+  for n in native_staged_intrinsics() {
+    if not list.contains(host, n) {
+      panic("`" ++ n ++ "` is staged on native but is not a JVM-only intrinsic")
+    }
+  }
+
   assert len(inline) == 36
-  assert len(host) == 2
+  assert len(host) == 4
   assert len(gone) == 21
-  assert len(staged) == 2
+  assert len(staged) == 0
+  assert len(native_staged_intrinsics()) == 2
   # and the five groups account for all 119 names, with none left over
   assert len(map.keys(it)) == 98
   assert len(internal) == 21
@@ -3355,22 +3466,24 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       if is_cell_intrinsic(name) {
         return lower_cell(st, name, args, ty)
       }
-      # one-shot resumption stops here, on purpose and by name
-      # (`staged_intrinsics`). The checker types a control arm completely, so
-      # `dawn check` on this program said everything it has to say; what is
-      # missing is the driving loop and the two backends' arms, and a program
-      # that reached this point would otherwise be compiled as though the arm
-      # returned to the raise site -- silently wrong output rather than a
-      # refusal. It is a `panic` rather than a diagnostic because lowering has
-      # no diagnostic channel: nothing here reports, everything here trusts the
-      # checker, and adding a channel for one staged name would be a phase's
-      # worth of plumbing for a message that is going away.
+      # one-shot resumption (docs/oneshot-design.md §11.3). Boxed and given the
+      # wrapper's evidence slot here rather than in an emitter, for the reason
+      # the cells above are: the runtime's descriptors are fixed and the
+      # operation's types are not.
+      if is_ctl_intrinsic(name) {
+        return lower_ctl(st, name, args, ty)
+      }
+      # A primitive whose phase has not landed stops here, by name
+      # (`staged_intrinsics`, empty today). The checker types such a program
+      # completely, so `dawn check` said everything it has to say; what is
+      # missing is downstream, and a program that reached this point would
+      # otherwise be compiled as though the missing phase were a no-op --
+      # silently wrong output rather than a refusal. It is a `panic` rather
+      # than a diagnostic because lowering has no diagnostic channel: nothing
+      # here reports, everything here trusts the checker.
       if is_staged_intrinsic(name) {
-        panic("lower: one-shot resumption is not implemented yet -- `" ++ name ++
-            "` reached lowering. A `with handle` arm written `op(a) resume k => ...` " ++
-            "type-checks (docs/oneshot-design.md §11) but cannot be compiled until " ++
-            "the driving loop and the two backends' arms land; drop the `resume` " ++
-            "clause to get a tail-resumptive arm, which compiles today.")
+        panic("lower: `" ++ name ++ "` reached lowering, but the phase that " ++
+            "implements it has not landed (ir/lower.staged_intrinsics)")
       }
       # `char_unchecked` is the Int -> Char bridge, and `Char`'s representation
       # *is* `Int` -- so it disappears here rather than becoming a primitive

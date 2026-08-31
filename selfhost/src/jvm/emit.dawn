@@ -49,7 +49,8 @@ use jvm/codegen.{
 use jvm/rtclasses.{
   obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, append_const, close_mv,
   PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS, STRINGS_CLASS, HAMT_CLASS,
-  PVEC_CLASS, PVEC_MOD, FN_CMP_CLASS, ARRAYLIST, ARRAY_CLASS
+  PVEC_CLASS, PVEC_MOD, FN_CMP_CLASS, ARRAYLIST, ARRAY_CLASS,
+  CTL_CLASS, ctl_enter_desc, ctl_yield_desc
 }
 use jvm/help.{
   ldc_str, ldc_class, ldc_long, ldc_double, push_int, store_slot, pop_value, internal_of,
@@ -3075,6 +3076,38 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     g1.mv.visitInsn(OP_ICONST_0)
     g1.mv.visitInsn(OP_ACONST_NULL)
     g1.mv.visitInsn(OP_AASTORE)
+    return (g1, true)
+  }
+  if name == "ctl_run" {
+    # The tail of a `with handle` that has a control arm: the remainder closure
+    # and the pack it is run with, handed to the driving loop instead of being
+    # applied here (docs/oneshot-design.md §11.3). With no control arm the
+    # checker builds an ordinary `XApply` and this arm is never reached, which
+    # is what keeps the tail-resumptive form byte-identical.
+    let g1 = gen_cargs(gx, g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "enter", ctl_enter_desc(), false)
+    return (g1, true)
+  }
+  if name == "ctl_yield" {
+    # The wrapper the evidence record holds for a control arm. Its three fixed
+    # arguments are the prompt, the arm and the pack the arm is applied with;
+    # the operation's own arguments follow, already boxed by lowering, and are
+    # gathered into one array so that one runtime method answers for every
+    # operation arity.
+    var g1 = gen_cargs(gx, g, [args[0], args[1], args[2]])
+    let rest = list.slice(args, 3, len(args))
+    push_int(g1.mv, len(rest))
+    new_array(g1.mv, obj())
+    var i = 0
+    for a in rest {
+      g1.mv.visitInsn(OP_DUP)
+      push_int(g1.mv, i)
+      let (g2, _) = gen_cexpr(gx, g1, a, false)
+      g1 = g2
+      g1.mv.visitInsn(OP_AASTORE)
+      i = i + 1
+    }
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "yield", ctl_yield_desc(), false)
     return (g1, true)
   }
   if name == "java_eq" {

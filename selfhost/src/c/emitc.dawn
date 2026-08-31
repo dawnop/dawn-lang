@@ -32,6 +32,7 @@ use check/types.{
   is_ref_ty, Eff, EPure, hash_scalars, ord_scalars, intr_owned_args,
   ev_pack_adt, EV_MISS_MSG
 }
+use ir/lower.{is_native_staged_intrinsic, native_staged_message}
 use ir/reach.{TableUse}
 use embed/unicode_case
 use embed/rtsrc
@@ -1802,7 +1803,22 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
         let call = sym ++ "(" ++ join(cargs, ", ") ++ ")"
         (st1, if returns_borrow(name) { dup_expr(call, ty) } else { call })
       }
-      None -> panic("emitc: intrinsic not implemented for native: " ++ name)
+      # Two refusals, and which one is the point. A primitive native has never
+      # been handed says so in the compiler's own words
+      # (`lower.native_staged_message`): the program is correct, it runs on the
+      # JVM, and what is missing is a decision this backend has not taken yet.
+      # Anything else here is the generic gap, which is a defect report.
+      #
+      # No `name == "..."` in either branch, deliberately:
+      # scripts/intrinsic-parity.py reads this function's arms by that spelling
+      # and would count a named refusal as an implementation -- and then
+      # nothing would require the JVM to have one.
+      None ->
+        if is_native_staged_intrinsic(name) {
+          panic(native_staged_message(name))
+        } else {
+          panic("emitc: intrinsic not implemented for native: " ++ name)
+        }
     }
   }
 }

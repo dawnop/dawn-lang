@@ -5,7 +5,9 @@
 
 `lower.inline_intrinsics()` names the primitives no runtime module owns and
 lowering does not remove -- the ones each backend writes instructions for
-itself -- and `lower.jvm_only_intrinsics()` names the two only the JVM owes.
+itself -- and `lower.jvm_only_intrinsics()` names the ones only the JVM owes
+(the two host-value primitives, and one-shot resumption, whose native half is
+staged behind risk R1).
 Nothing checked that either emitter agreed. `emit.gen_cintrinsic` and
 `emitc.emit_intrinsic` each end in a `panic` for a name they have no arm for,
 so a primitive present in one backend and absent from the other was a failure
@@ -175,7 +177,7 @@ def main():
     report()
     print(
         f"PASS  both backends implement the {len(both)} inline primitives, "
-        f"and the JVM the {len(host)} host ones"
+        f"and the JVM the {len(host)} it owes alone"
     )
 
 
