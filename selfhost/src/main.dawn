@@ -56,7 +56,8 @@ use jvm/rtclasses.{
   gen_show_class, gen_strings_class, gen_array_class, gen_asm_class, gen_asm_writer_class,
   supers_of, PANIC_CLASS, UNIT_CLASS,
   BYTES_CLASS, IO_CLASS, FN_CMP_CLASS, SHOW_CLASS, STRINGS_CLASS, ARRAY_CLASS, ASM_CLASS,
-  ASM_WRITER_CLASS
+  ASM_WRITER_CLASS,
+  gen_ctl_class, gen_ctl_cont_class, gen_ctl_k_class, CTL_CLASS, CTL_CONT_CLASS, CTL_K_CLASS
 }
 use check/types.{
   prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
@@ -168,6 +169,40 @@ fn program_has_asm(std_mods: List[(String, Cx, TModule, CtOut)], mods: List[Chec
       imports_java(cm.cx, "dawn.rt.Asm") || imports_java(cm.cx, "dawn.rt.AsmWriter") {
         return true
       }
+  }
+  false
+}
+
+## Whether the program can suspend: does any module declare a `ctl` effect?
+##
+## Conditional for the reason ASM is (above), and the reason is sharper here.
+## `dawn/rt/Ctl` names `jdk/internal/vm/Continuation`, which is in `java.base`
+## but not exported: reaching it needs the `Add-Exports` this compiler writes
+## into the manifest and onto a spawned JVM's command line. A program that
+## never suspends should not carry that reference at all -- not because it
+## would fail to load (it would not; resolution is lazy), but because every jar
+## would then name an internal API it has no use for, and every tool that reads
+## a jar's references would have to be told why.
+##
+## The declaration is the signal rather than the arms, because that is what §11.6
+## S1 made suspendability a property of: a `ctl` effect whose handlers all
+## happen to be tail-resumptive emits three classes it never enters, which costs
+## a jar entry and nothing else.
+fn program_has_ctl(std_mods: List[(String, Cx, TModule, CtOut)], mods: List[CheckedMod]) -> Bool = {
+  for sm in std_mods {
+    let (_cls, cx0, _tm, _ct) = sm
+    if cx_declares_ctl(cx0) { return true }
+  }
+  for cm in mods {
+    if cx_declares_ctl(cm.cx) { return true }
+  }
+  false
+}
+
+fn cx_declares_ctl(cx0: Cx) -> Bool = {
+  for pr in map.entries(cx0.effect_infos) {
+    let (_id, i) = pr
+    if i.ctl { return true }
   }
   false
 }
@@ -308,6 +343,13 @@ fn collect_program(
     # reaches the callback -- see gen_asm_writer_class, and
     # scripts/asm-adapter-contract for the differential against the reference.
     classes = classes ++ [(ASM_WRITER_CLASS, gen_asm_writer_class())]
+  }
+  # The driving loop for one-shot resumption, for a program that declares a
+  # `ctl` effect (docs/oneshot-design.md §11.3, and program_has_ctl above).
+  if program_has_ctl(std_mods, mods) {
+    classes = classes ++ [(CTL_CLASS, gen_ctl_class(sup))]
+    classes = classes ++ [(CTL_CONT_CLASS, gen_ctl_cont_class(sup))]
+    classes = classes ++ [(CTL_K_CLASS, gen_ctl_k_class(sup))]
   }
   classes = classes ++ [(tr_iface(None, "Ord"), gen_ord_interface(sup))]
   classes = classes ++ [(FN_CMP_CLASS, gen_fn_comparator(sup))]
@@ -544,8 +586,23 @@ fn host_classpath() -> String !io =
 ##
 ## `-Xss512m` is load-bearing, not slack: ir/interp.dawn pins MAX_CALL_DEPTH at
 ## 100000, which only binds below the real stack limit from -Xss 128m up.
+## `--add-exports java.base/jdk.internal.vm=ALL-UNNAMED` is what lets a
+## `ctl` handler's driving loop reach `jdk.internal.vm.Continuation`
+## (docs/oneshot-design.md §3.5, `jvm/rtclasses.gen_ctl_class`). It is stated
+## here and in the jar manifest (`jvm/jarw.write_jar_cp`) because those are the
+## two ways a compiled program is started, and neither reads the other: `dawn
+## run` and `dawn test` spawn `java -cp`, where a manifest attribute means
+## nothing, and `java -jar` takes no options from here. **A user never types
+## it.**
+##
+## Unconditional, and cheap to be: it is one option on a class-path the JVM
+## checks once at startup, `jdk.internal.vm` exists on every JDK this compiler
+## supports, and a program that never suspends never loads a class that names
+## the package. Making it conditional would mean deciding here what the emitter
+## decided, from an argv rather than from the program.
 fn child_java_cmd() -> List[String] !io =
-  [host_java(), "-Xss512m", own_xmx(), "-XX:+UseSerialGC"]
+  [host_java(), "-Xss512m", own_xmx(), "-XX:+UseSerialGC",
+    "--add-exports", "java.base/jdk.internal.vm=ALL-UNNAMED"]
 
 ## This JVM's `-Xmx` as it was written on its own command line. A JVM started
 ## without one has no ceiling to state, so the fallback is `maxMemory()`: it is

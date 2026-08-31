@@ -131,9 +131,22 @@ pub fn write_jar_cp(
   }
   with file <- bracket(fos, close_file)
   with zos <- bracket(ZipOutputStream.new(file), close_zip)
+  # `Add-Exports` is how a `java -jar` run reaches `jdk.internal.vm`, which is
+  # where the driving loop for one-shot resumption lives
+  # (docs/oneshot-design.md §3.5, `jvm/rtclasses.gen_ctl_class`). The launcher
+  # reads it from the manifest of the jar it is given, so the user types no
+  # `--add-exports` of their own; the same option is put on the command line of
+  # every JVM `dawn run` spawns (`main.child_java_cmd`), which is the other
+  # half of the same wiring.
+  #
+  # Written for every jar rather than only for one that can suspend. A manifest
+  # attribute is inert without a class that uses the package, and the
+  # alternative is a manifest whose shape depends on the program -- which is
+  # one more thing for `write_jar` to be told and for a reader to explain.
   let manifest =
     "Manifest-Version: 1.0" ++ crlf() ++
     "Main-Class: " ++ dotted(main_class) ++ crlf() ++
+    "Add-Exports: java.base/jdk.internal.vm" ++ crlf() ++
     class_path_lines(cp_entries) ++ crlf()
   put(zos, "META-INF/MANIFEST.MF", bytes.utf8(manifest))
   for pair in classes {

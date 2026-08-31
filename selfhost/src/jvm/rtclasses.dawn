@@ -3463,3 +3463,538 @@ pub fn gen_asm_writer_class() -> Bytes !io = {
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }
+
+# ---- one-shot resumption (docs/oneshot-design.md §7, §11.3) ----
+
+## The three classes the driving loop is written in. Emitted only for a program
+## that declares a `ctl` effect (main.program_has_ctl), for the reason the ASM
+## adapters are emitted conditionally: they name types outside `java.base`'s
+## exported surface, and a jar that never suspends should not carry a reference
+## to `jdk.internal.vm` at all.
+pub const CTL_CLASS: String = "dawn/rt/Ctl"
+
+## The `Continuation` subclass. It exists for one method: `onPinned`, whose
+## inherited body throws `IllegalStateException`. A Dawn program that cannot
+## suspend where it stands should say so in Dawn's words and through Dawn's
+## panic, not through a JDK-internal exception type nothing here can name.
+pub const CTL_CONT_CLASS: String = "dawn/rt/CtlCont"
+
+## The continuation, as a Dawn function value. `k` is an ordinary `fn(R) -> A`
+## with a pure row (§11.2), so it is an `Fn2`: one written parameter plus the
+## evidence slot every function value carries.
+pub const CTL_K_CLASS: String = "dawn/rt/CtlK"
+
+const CONT_CLASS: String = "jdk/internal/vm/Continuation"
+
+const SCOPE_CLASS: String = "jdk/internal/vm/ContinuationScope"
+
+const PINNED_CLASS: String = "jdk/internal/vm/Continuation\$Pinned"
+
+const THREAD_LOCAL: String = "java/lang/ThreadLocal"
+
+## Descriptors, spelled once.
+fn ctl_desc() -> String = "L" ++ CTL_CLASS ++ ";"
+
+fn obj_desc() -> String = "L" ++ obj() ++ ";"
+
+fn obj_array_desc() -> String = "[L" ++ obj() ++ ";"
+
+fn cont_desc() -> String = "L" ++ CONT_CLASS ++ ";"
+
+fn scope_desc() -> String = "L" ++ SCOPE_CLASS ++ ";"
+
+fn tl_desc() -> String = "L" ++ THREAD_LOCAL ++ ";"
+
+## The frame descriptor `Ctl.enter` is called at, and `emit.gen_cintrinsic`
+## spells at the call site. Stated here so the two cannot drift.
+pub fn ctl_enter_desc() -> String =
+  "(J" ++ obj_desc() ++ obj_desc() ++ ")" ++ obj_desc()
+
+## `Ctl.yield`'s descriptor: the prompt, the arm, the arm's evidence pack, and
+## the operation's arguments boxed into one array (lowering boxes them).
+pub fn ctl_yield_desc() -> String =
+  "(J" ++ obj_desc() ++ obj_desc() ++ obj_array_desc() ++ ")" ++ obj_desc()
+
+## The widest operation a control arm can answer. An arm takes the operation's
+## parameters, the continuation and the evidence slot, so `n` parameters need
+## an `Fn(n + 2)` -- and `main.dawn` emits `Fn0` through `Fn9`, which is one
+## past the widest written parameter list the language allows anywhere.
+fn ctl_max_op_params() -> Int = 7
+
+## The class hierarchy the frame-computing writers need for these three. The
+## table is the program's, plus the edges only these classes create.
+fn ctl_supers(supers: List[String]) -> List[String] =
+  supers ++ [
+    CTL_CLASS ++ " " ++ obj(),
+    CTL_K_CLASS ++ " " ++ obj(),
+    CTL_CONT_CLASS ++ " " ++ CONT_CLASS,
+    CONT_CLASS ++ " " ++ obj(),
+  ]
+
+fn push_int(m: MethodVisitor, n: Int) -> Unit !io = {
+  m.visitIntInsn(OP_BIPUSH, n)
+  ()
+}
+
+## Throw a Dawn panic with a constant message.
+fn throw_panic(m: MethodVisitor, msg: String) -> Unit !io = {
+  m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitLdcInsn(Objects.requireNonNull(msg).expect("non-null"))
+  m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  m.visitInsn(OP_ATHROW)
+  ()
+}
+
+## dawn/rt/Ctl: an activation of a control handler, and the driving loop over
+## it (docs/oneshot-design.md §5, §11.3).
+##
+## One instance per `ctl_run`, which is one per *activation* rather than one per
+## installation: a recursive re-entry into the same `with handle` makes another
+## one, and the prompt stack answers innermost-first, which is the LIFO answer
+## §11.3 wants without a token object.
+##
+## **The prompt stack is a thread-local chain, and the one subtle line is in
+## `yield`.** `drive` pushes this frame before running the continuation and pops
+## it after; a yield that targets an *outer* prompt freezes this frame in the
+## middle of `Continuation.run`, so nothing pops it and nothing re-pushes it
+## when the outer resumes. So the yield saves the top of the chain across the
+## freeze and restores it on the way back. That restores the right chain rather
+## than a stale one, because the frames are shared objects and `drive` rewrites
+## `prev` on every entry: the saved head still ends at this frame, and this
+## frame's `prev` is whatever was installed where the resumption happened. That
+## is the deep-handler rule (§11.0) and the "resumed somewhere else" rule at
+## once.
+##
+## The value crossing every boundary here is erased (`types.erased_ctl_ty`), so
+## the descriptors are fixed and lowering does the boxing -- an operation's
+## parameter types are not this class's business.
+pub fn gen_ctl_class(supers: List[String]) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_FRAMES, ctl_supers(supers)).expect("writer")
+  Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, CTL_CLASS, obj(),
+    "java/lang/Runnable")
+
+  # The prompt stack: the innermost active activation on this thread. A field
+  # rather than a parameter because the raise site is an arbitrary descendant
+  # frame and has nothing to thread it through -- which is the same reason the
+  # evidence pack is a hidden parameter and not a global.
+  Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "TOP", tl_desc())
+  Asm.fieldOn(cw, ACC_PUBLIC, "hid", "J")
+  Asm.fieldOn(cw, ACC_PUBLIC, "scope", scope_desc())
+  Asm.fieldOn(cw, ACC_PUBLIC, "cont", cont_desc())
+  Asm.fieldOn(cw, ACC_PUBLIC, "prev", ctl_desc())
+  Asm.fieldOn(cw, ACC_PUBLIC, "rest", obj_desc())
+  Asm.fieldOn(cw, ACC_PUBLIC, "evs", obj_desc())
+  # what the *arm* is applied with: the handler's pack, forwarded from the
+  # wrapper closure's own evidence slot (lower.lower_ctl says why)
+  Asm.fieldOn(cw, ACC_PUBLIC, "env", obj_desc())
+  Asm.fieldOn(cw, ACC_PUBLIC, "result", obj_desc())
+  Asm.fieldOn(cw, ACC_PUBLIC, "resume", obj_desc())
+  Asm.fieldOn(cw, ACC_PUBLIC, "arm", obj_desc())
+  Asm.fieldOn(cw, ACC_PUBLIC, "args", obj_array_desc())
+
+  let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
+  cl.visitCode()
+  cl.visitTypeInsn(OP_NEW, THREAD_LOCAL)
+  cl.visitInsn(OP_DUP)
+  cl.visitMethodInsn(OP_INVOKESPECIAL, THREAD_LOCAL, "<init>", "()V", false)
+  cl.visitFieldInsn(OP_PUTSTATIC, CTL_CLASS, "TOP", tl_desc())
+  cl.visitInsn(OP_RETURN)
+  close_mv(cl)
+
+  let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>",
+    "(J" ++ obj_desc() ++ obj_desc() ++ ")V").expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_LLOAD, 1)
+  init.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "hid", "J")
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 3)
+  init.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "rest", obj_desc())
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 4)
+  init.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "evs", obj_desc())
+  # The scope is this activation's identity. Its name is for a debugger only:
+  # `Continuation.yield` compares scopes by reference, so two activations of
+  # one handler are two scopes however they are spelled.
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitTypeInsn(OP_NEW, SCOPE_CLASS)
+  init.visitInsn(OP_DUP)
+  init.visitLdcInsn(Objects.requireNonNull("dawn\$ctl").expect("non-null"))
+  init.visitMethodInsn(OP_INVOKESPECIAL, SCOPE_CLASS, "<init>",
+    "(Ljava/lang/String;)V", false)
+  init.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "scope", scope_desc())
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitTypeInsn(OP_NEW, CTL_CONT_CLASS)
+  init.visitInsn(OP_DUP)
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "scope", scope_desc())
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, CTL_CONT_CLASS, "<init>",
+    "(" ++ scope_desc() ++ "Ljava/lang/Runnable;)V", false)
+  init.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "cont", cont_desc())
+  init.visitInsn(OP_RETURN)
+  close_mv(init)
+
+  # Runnable: the body of the continuation is the block's remainder, applied
+  # once with the pack the installation built for it -- the same application
+  # `XApply(rx, [], [revs])` makes for a handler with no control arm. The
+  # difference is only that it runs on a stack that can be frozen.
+  let run = Asm.methodOn(cw, ACC_PUBLIC, "run", "()V").expect("mv")
+  run.visitCode()
+  run.visitVarInsn(OP_ALOAD, 0)
+  run.visitVarInsn(OP_ALOAD, 0)
+  run.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "rest", obj_desc())
+  run.visitTypeInsn(OP_CHECKCAST, fn_iface(1))
+  run.visitVarInsn(OP_ALOAD, 0)
+  run.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "evs", obj_desc())
+  run.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply",
+    erased_apply_desc(1), true)
+  run.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "result", obj_desc())
+  run.visitInsn(OP_RETURN)
+  close_mv(run)
+
+  gen_ctl_enter(cw)
+  gen_ctl_drive(cw)
+  gen_ctl_yield(cw)
+  gen_ctl_lookup(cw)
+  gen_ctl_apply_arm(cw)
+
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## `ctl_run(prompt, remainder, pack)`: make the activation and drive it.
+fn gen_ctl_enter(cw: ClassWriter) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "enter", ctl_enter_desc())
+    .expect("mv")
+  m.visitCode()
+  m.visitTypeInsn(OP_NEW, CTL_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_LLOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitMethodInsn(OP_INVOKESPECIAL, CTL_CLASS, "<init>",
+    "(J" ++ obj_desc() ++ obj_desc() ++ ")V", false)
+  m.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "drive",
+    "(" ++ ctl_desc() ++ ")" ++ obj_desc(), false)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+  ()
+}
+
+## Run this activation until it either finishes or suspends, and answer the
+## block either way.
+##
+## Finished: the block's value is what the remainder produced. Suspended: the
+## arm gets the operation's arguments and a fresh continuation, and *the arm's
+## value is the block's value* (§11.1). Nothing loops here -- resuming is a
+## call to `k`, and `k` calls this again, so a handler that resumes ten times
+## is ten nested `drive` frames rather than an iteration. That is what makes a
+## dropped continuation free: the arm simply returns.
+fn gen_ctl_drive(cw: ClassWriter) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "drive",
+    "(" ++ ctl_desc() ++ ")" ++ obj_desc()).expect("mv")
+  m.visitCode()
+  # f.prev = TOP.get()  -- read here rather than kept from the first entry:
+  # a continuation resumed somewhere else is answered by the handlers standing
+  # *there*, which is the whole of "k is deep up to this prompt and no further"
+  m.visitVarInsn(OP_ALOAD, 0)
+  ctl_top_get(m)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "prev", ctl_desc())
+  ctl_top_set_local(m, 0)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "cont", cont_desc())
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, CONT_CLASS, "run", "()V", false)
+  # pop, whether it finished or suspended into this prompt. A yield past this
+  # prompt never gets here at all: it freezes this frame too.
+  m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "TOP", tl_desc())
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "prev", ctl_desc())
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "set",
+    "(" ++ obj_desc() ++ ")V", false)
+  let suspended = Label.new()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "cont", cont_desc())
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, CONT_CLASS, "isDone", "()Z", false)
+  m.visitJumpInsn(OP_IFEQ, suspended)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "result", obj_desc())
+  m.visitInsn(OP_ARETURN)
+  m.visitLabel(suspended)
+  # take the pending operation out of the frame before the arm runs: the arm
+  # may resume, and a resumed remainder may raise again into this same frame
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "arm", obj_desc())
+  m.visitVarInsn(OP_ASTORE, 1)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "args", obj_array_desc())
+  m.visitVarInsn(OP_ASTORE, 2)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "env", obj_desc())
+  m.visitVarInsn(OP_ASTORE, 3)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitInsn(OP_ACONST_NULL)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "arm", obj_desc())
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitInsn(OP_ACONST_NULL)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "args", obj_array_desc())
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitTypeInsn(OP_NEW, CTL_K_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKESPECIAL, CTL_K_CLASS, "<init>",
+    "(" ++ ctl_desc() ++ ")V", false)
+  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "applyArm",
+    "(" ++ obj_desc() ++ obj_array_desc() ++ obj_desc() ++ obj_desc() ++ ")" ++
+      obj_desc(), false)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+  ()
+}
+
+## Push `TOP.get()` as a `Ctl`.
+fn ctl_top_get(m: MethodVisitor) -> Unit !io = {
+  m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "TOP", tl_desc())
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "get", "()" ++ obj_desc(), false)
+  m.visitTypeInsn(OP_CHECKCAST, CTL_CLASS)
+  ()
+}
+
+## `TOP.set(local)`.
+fn ctl_top_set_local(m: MethodVisitor, slot: Int) -> Unit !io = {
+  m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "TOP", tl_desc())
+  m.visitVarInsn(OP_ALOAD, slot)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "set",
+    "(" ++ obj_desc() ++ ")V", false)
+  ()
+}
+
+## `ctl_yield(prompt, arm, env, args)`: record what the arm will be handed,
+## freeze the stack back to the prompt, and -- when and if something resumes --
+## hand the resumption's value back to the raise site as the operation's result.
+fn gen_ctl_yield(cw: ClassWriter) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "yield", ctl_yield_desc())
+    .expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_LLOAD, 0)
+  m.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "lookup",
+    "(J)" ++ ctl_desc(), false)
+  m.visitVarInsn(OP_ASTORE, 5)
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "arm", obj_desc())
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "env", obj_desc())
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitVarInsn(OP_ALOAD, 4)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "args", obj_array_desc())
+  # the prompts between this raise and the target, saved across the freeze --
+  # see the class comment. `drive` pops down to the target on the way out and
+  # this puts the inner ones back on the way in.
+  ctl_top_get(m)
+  m.visitVarInsn(OP_ASTORE, 6)
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "scope", scope_desc())
+  m.visitMethodInsn(OP_INVOKESTATIC, CONT_CLASS, "yield",
+    "(" ++ scope_desc() ++ ")Z", false)
+  m.visitInsn(OP_POP)
+  ctl_top_set_local(m, 6)
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "resume", obj_desc())
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitInsn(OP_ACONST_NULL)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "resume", obj_desc())
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+  ()
+}
+
+## The innermost activation of this prompt on this thread.
+##
+## The miss is a panic and not a fault: an operation with no handler is a
+## program the checker refuses, so reaching it means an invariant broke -- the
+## same class of failure as `ev_get`'s miss, and not in `catch_fault`'s
+## catchable set. There is one way for a *correct* program to arrive here, and
+## it is the residual §11.6 H1 leaves open: a suspendable function value that
+## crossed the Java boundary through an effect variable or an associated
+## projection, and was called back after its installation returned.
+fn gen_ctl_lookup(cw: ClassWriter) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PRIVATE + ACC_STATIC, "lookup",
+    "(J)" ++ ctl_desc()).expect("mv")
+  m.visitCode()
+  ctl_top_get(m)
+  m.visitVarInsn(OP_ASTORE, 2)
+  let top = Label.new()
+  let step = Label.new()
+  let miss = Label.new()
+  m.visitLabel(top)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitJumpInsn(OP_IFNULL, miss)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "hid", "J")
+  m.visitVarInsn(OP_LLOAD, 0)
+  m.visitInsn(OP_LCMP)
+  m.visitJumpInsn(OP_IFNE, step)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitInsn(OP_ARETURN)
+  m.visitLabel(step)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "prev", ctl_desc())
+  m.visitVarInsn(OP_ASTORE, 2)
+  m.visitJumpInsn(OP_GOTO, top)
+  m.visitLabel(miss)
+  throw_panic(m, "dawn: no `ctl` handler is installed for this operation -- " ++
+      "a suspendable function value was called from outside the `with handle` " ++
+      "that answers it")
+  close_mv(m)
+  ()
+}
+
+## Apply the arm: its parameters, then the continuation, then the evidence pack
+## the handler was installed with.
+##
+## A chain on the argument count rather than one call site per operation,
+## because the arm that suspended is not known until it does. The arities are
+## the language's own: `Fn0` through `Fn9` are emitted for every program, and an
+## arm of an `n`-parameter operation is an `Fn(n + 2)`.
+fn gen_ctl_apply_arm(cw: ClassWriter) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PRIVATE + ACC_STATIC, "applyArm",
+    "(" ++ obj_desc() ++ obj_array_desc() ++ obj_desc() ++ obj_desc() ++ ")" ++
+      obj_desc()).expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitVarInsn(OP_ISTORE, 4)
+  for n in 0..(ctl_max_op_params() + 1) {
+    let next = Label.new()
+    m.visitVarInsn(OP_ILOAD, 4)
+    push_int(m, n)
+    m.visitJumpInsn(OP_IF_ICMPNE, next)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitTypeInsn(OP_CHECKCAST, fn_iface(n + 2))
+    for i in 0..n {
+      m.visitVarInsn(OP_ALOAD, 1)
+      push_int(m, i)
+      m.visitInsn(OP_AALOAD)
+    }
+    m.visitVarInsn(OP_ALOAD, 2)
+    m.visitVarInsn(OP_ALOAD, 3)
+    m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(n + 2), "apply",
+      erased_apply_desc(n + 2), true)
+    m.visitInsn(OP_ARETURN)
+    m.visitLabel(next)
+  }
+  throw_panic(m, "dawn: a control arm answers an operation with more than " ++
+      to_string(ctl_max_op_params()) ++ " parameters")
+  close_mv(m)
+  ()
+}
+
+## dawn/rt/CtlCont: `Continuation` with `onPinned` overridden.
+##
+## The inherited body throws `IllegalStateException`, which is a JDK-internal
+## report of a Dawn-level fact: the stack between the raise and the prompt holds
+## a frame the JVM cannot copy -- a native frame, or a monitor. A Dawn program
+## should hear that as a panic, in Dawn's words. This is also where the other
+## half of §11.6 H1 lands: the static refusal only covers written `ctl` labels,
+## and a suspendable closure that reached a Java frame through an effect
+## variable arrives here.
+pub fn gen_ctl_cont_class(supers: List[String]) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_FRAMES, ctl_supers(supers)).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, CTL_CONT_CLASS, CONT_CLASS)
+  let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>",
+    "(" ++ scope_desc() ++ "Ljava/lang/Runnable;)V").expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 1)
+  init.visitVarInsn(OP_ALOAD, 2)
+  init.visitMethodInsn(OP_INVOKESPECIAL, CONT_CLASS, "<init>",
+    "(" ++ scope_desc() ++ "Ljava/lang/Runnable;)V", false)
+  init.visitInsn(OP_RETURN)
+  close_mv(init)
+  let m = Asm.methodOn(cw, ACC_PROTECTED, "onPinned",
+    "(L" ++ PINNED_CLASS ++ ";)V").expect("mv")
+  m.visitCode()
+  m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitTypeInsn(OP_NEW, SB)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  append_const(m, "dawn: cannot suspend across this frame (")
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+    "(" ++ obj_desc() ++ ")Ljava/lang/String;", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append",
+    "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  append_const(m, ") -- a `ctl` operation was raised below a frame the JVM " ++
+      "cannot capture")
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+    "(Ljava/lang/String;)V", false)
+  m.visitInsn(OP_ATHROW)
+  close_mv(m)
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## dawn/rt/CtlK: the continuation as a Dawn function value.
+##
+## One-shot is enforced here and nowhere else: the type system does not say
+## "at most once" and does not try to (§11.2). A second call is a panic rather
+## than a fault, for the reason `ev_get`'s miss is -- it is a rule of the
+## language broken by the program, not a condition the program can handle. A
+## continuation that is never called is not an error at all: it is dropped, and
+## on this backend that is one more unreachable object.
+##
+## Each suspension makes a fresh one, so a handler that resumes many times is
+## many one-shot continuations over one activation, not one continuation resumed
+## many times.
+pub fn gen_ctl_k_class(supers: List[String]) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_FRAMES, ctl_supers(supers)).expect("writer")
+  Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, CTL_K_CLASS, obj(),
+    fn_iface(2))
+  Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "f", ctl_desc())
+  Asm.fieldOn(cw, ACC_PRIVATE, "used", "Z")
+  let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ ctl_desc() ++ ")V")
+    .expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 1)
+  init.visitFieldInsn(OP_PUTFIELD, CTL_K_CLASS, "f", ctl_desc())
+  init.visitInsn(OP_RETURN)
+  close_mv(init)
+  # the second parameter is the evidence slot every function value carries.
+  # This one has nothing to answer: the pack the remainder needs was built at
+  # the installation and is inside the frozen frames already (§11.2).
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "apply", erased_apply_desc(2)).expect("mv")
+  m.visitCode()
+  let ok = Label.new()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_K_CLASS, "used", "Z")
+  m.visitJumpInsn(OP_IFEQ, ok)
+  throw_panic(m, "dawn: continuation resumed twice")
+  m.visitLabel(ok)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitInsn(OP_ICONST_1)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_K_CLASS, "used", "Z")
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_K_CLASS, "f", ctl_desc())
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "resume", obj_desc())
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_K_CLASS, "f", ctl_desc())
+  m.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "drive",
+    "(" ++ ctl_desc() ++ ")" ++ obj_desc(), false)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
