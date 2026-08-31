@@ -440,8 +440,15 @@ jobs:
     # 23.4 -> 24.9s, so 2.9s local and ~6s doubled; 446 + 6 = 452s, which is
     # still inside 23 minutes' worth of 3x and still far under the
     # native-diff pole, so neither the timeout nor the run's wall clock moves.
-    # budget: 3x 452s planning value (356s observed + 70s + 5s + 9s + 1s + 5s + 6s)
-    timeout-minutes: 23
+    # The ctl-live step added 2026-08-31 is 12.4s locally (median of three:
+    # 12.47/12.30/12.42), which is one `dawn __emitc`, eight `cc` builds of
+    # the emitted C against a runtime copy, and eight process runs; doubled and
+    # rounded up, the planning value is 452 + 26 = 478s. That is over 23
+    # minutes' worth of 3x, so the timeout goes to 24. The run's wall clock
+    # still does not move: 478s is under the native-diff pole of 557s, and the
+    # pole is what the run's length is.
+    # budget: 3x 478s planning value (356s observed + 70s + 5s + 9s + 1s + 5s + 6s + 26s)
+    timeout-minutes: 24
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -629,6 +636,17 @@ jobs:
       # poisoning off six probe processes and two mutants of its own.
       - name: RC contract
         run: ./scripts/rc-contract/run.sh
+
+      # The other memory oracle, and the one AddressSanitizer cannot be.
+      # A continuation nobody resumes is a parked carrier thread, whose stack
+      # is a root, so LeakSanitizer reports nothing when the runtime forgets to
+      # reclaim it (measured: 800 KB, zero reports). `dawn_ctl_live` counts
+      # instead -- and until now nothing could turn *it* red, because a correct
+      # program says nothing about a counter. One Dawn program compiled once
+      # and run against the tree's runtime plus three mutations of it, with the
+      # red sets recorded in both directions.
+      - name: ctl-live contract
+        run: ./scripts/ctl-live-contract/run.sh
 
       # The parameter-mode contract (core.CMode) under single-sided flips:
       # a call-site table row without the callee's CParam.mode, and the
@@ -870,6 +888,17 @@ jobs:
       # unchanged script. The budget line is not restated for the same reason
       # as above; the serial figure is recorded because it is the one that
       # would show if the pool ever stopped being four wide.
+      #
+      # `ctl_vthread` and `ctl_cross_thread`, added 2026-08-31, are two more
+      # entries and both are `.jvm-only`: one `dawn run` and one `__emitc` that
+      # is required to fail, no C half at all. 4.4s for the pair serially
+      # (SPIKE_JOBS=1). On the whole corpus four at a time, two interleaved
+      # pairs on an otherwise idle machine: 247.43/245.68s without them and
+      # 249.12/248.87s with, so +2.4s. The budget line is not restated, for
+      # `effect_handler_state`'s reason. Interleaving is not decoration -- the
+      # first attempt measured +23.6s because the "with" run shared the machine
+      # with another job and the "without" run did not, and a corpus this
+      # parallel makes a single unpaired comparison worthless.
       - name: native differential (both backends, plus written expectations)
         run: ./scripts/spike-native/run.sh
 
