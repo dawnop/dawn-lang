@@ -3531,7 +3531,11 @@ fn ctl_supers(supers: List[String]) -> List[String] =
     CONT_CLASS ++ " " ++ obj(),
   ]
 
-fn push_int(m: MethodVisitor, n: Int) -> Unit !io = {
+## Push a small non-negative constant. Every caller here pushes an arity or an
+## array index below `ctl_max_op_params`, so `BIPUSH` covers the range and the
+## `ICONST_*` shortcuts `jvm/help.push_int` picks between would only make the
+## two spellings of the same instruction sequence look like a difference.
+fn push_small_int(m: MethodVisitor, n: Int) -> Unit !io = {
   m.visitIntInsn(OP_BIPUSH, n)
   ()
 }
@@ -3874,13 +3878,13 @@ fn gen_ctl_apply_arm(cw: ClassWriter) -> Unit !io = {
   for n in 0..(ctl_max_op_params() + 1) {
     let next = Label.new()
     m.visitVarInsn(OP_ILOAD, 4)
-    push_int(m, n)
+    push_small_int(m, n)
     m.visitJumpInsn(OP_IF_ICMPNE, next)
     m.visitVarInsn(OP_ALOAD, 0)
     m.visitTypeInsn(OP_CHECKCAST, fn_iface(n + 2))
     for i in 0..n {
       m.visitVarInsn(OP_ALOAD, 1)
-      push_int(m, i)
+      push_small_int(m, i)
       m.visitInsn(OP_AALOAD)
     }
     m.visitVarInsn(OP_ALOAD, 2)
