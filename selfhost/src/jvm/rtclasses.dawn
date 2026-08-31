@@ -98,8 +98,37 @@ pub fn gen_fn_interface(arity: Int) -> Bytes !io = {
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, "apply", erased_apply_desc(arity))
     .expect("mv")
   m.visitEnd()
+  if arity == 2 { gen_fn2_discard_default(cw) }
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
+}
+
+## `Fn2.discardK()`, a default method, and the reason it sits on a general
+## interface rather than on a class of its own.
+##
+## `discard(k)` has to ask a function value whether it is a continuation, and
+## the answer is dynamic: `k` is an ordinary `fn(R) -> A` and no type says
+## which function values are continuations (docs/oneshot-design.md 11.2). The
+## natural spelling of the question is `instanceof CtlK` -- and it is
+## unavailable, because `CtlK` is emitted only for a program that declares a
+## `ctl` effect, `instanceof` *resolves* the class it names, and a program with
+## no continuations at all would answer "not a continuation" with a
+## `NoClassDefFoundError` instead of with a Dawn panic.
+##
+## So the question is asked where it can be answered without naming that class.
+## A continuation is an `Fn2` by construction -- one written parameter plus the
+## evidence slot every function value carries -- and `discard`'s declared
+## parameter type makes the verifier prove its argument is one. `CtlK`
+## overrides this; every other function value in the program inherits the
+## refusal. Nothing else is affected: a default method is not abstract, so the
+## interface is still the single-abstract-method shape every emitted closure
+## implements.
+fn gen_fn2_discard_default(cw: ClassWriter) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "discardK", "()V").expect("mv")
+  m.visitCode()
+  throw_panic(m, "dawn: `discard` expects a continuation")
+  close_mv(m)
+  ()
 }
 
 ## dawn/rt/PanicError: an Error subclass carrying the panic message.
@@ -111,6 +140,21 @@ pub fn gen_panic_class() -> Bytes !io = {
   ctor.visitVarInsn(OP_ALOAD, 0)
   ctor.visitVarInsn(OP_ALOAD, 1)
   ctor.visitMethodInsn(OP_INVOKESPECIAL, "java/lang/Error", "<init>", "(Ljava/lang/String;)V", false)
+  ctor.visitInsn(OP_RETURN)
+  close_mv(ctor)
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## dawn/rt/CtlDiscard: the poison. See CTL_DISCARD_CLASS for why it is an
+## `Error`, and why every program carries it.
+pub fn gen_ctl_discard_class() -> Bytes !io = {
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, CTL_DISCARD_CLASS, "java/lang/Error")
+  let ctor = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "()V").expect("mv")
+  ctor.visitCode()
+  ctor.visitVarInsn(OP_ALOAD, 0)
+  ctor.visitMethodInsn(OP_INVOKESPECIAL, "java/lang/Error", "<init>", "()V", false)
   ctor.visitInsn(OP_RETURN)
   close_mv(ctor)
   cw.visitEnd()
@@ -569,6 +613,9 @@ pub fn supers_of(adts: Adts, all_ids: List[Int]) -> List[String] = {
 ## which is the one answer that can be wrong.
 pub fn jdk_supers() -> List[String] = [
   PANIC_CLASS ++ " java/lang/Error",
+  # `gen_bracket` tells the discard poison from a failure, so its handler
+  # merges this class with `java/lang/Throwable`
+  CTL_DISCARD_CLASS ++ " java/lang/Error",
   "java/lang/Error java/lang/Throwable",
   "java/lang/Exception java/lang/Throwable",
   "java/lang/RuntimeException java/lang/Exception",
@@ -964,6 +1011,10 @@ fn gen_bracket(cw: ClassWriter) -> Unit !io = {
   # nothing been protected
   m.visitLabel(handler)
   m.visitVarInsn(OP_ASTORE, 5)
+  let discarding = Label.new()
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitTypeInsn(OP_INSTANCEOF, CTL_DISCARD_CLASS)
+  m.visitJumpInsn(OP_IFNE, discarding)
   m.visitVarInsn(OP_ALOAD, 1)
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitVarInsn(OP_ALOAD, 3)
@@ -971,6 +1022,58 @@ fn gen_bracket(cw: ClassWriter) -> Unit !io = {
   m.visitInsn(OP_POP)
   m.visitVarInsn(OP_ALOAD, 5)
   m.visitInsn(OP_ATHROW)
+  # A discard unwind, which is not a failure and must not become one. Two
+  # things differ from the path above, and both are the same sentence read
+  # twice: a release that fails may not stop the walk (the frames below this
+  # one are already committed to going away, and abandoning the walk abandons
+  # what they hold), and it may not be *delivered* here either -- a
+  # `catch_panic` between this bracket and the handler would take it and the
+  # abandoned computation would carry on running, resurrected by its own
+  # cleanup. So the failure rides the poison as a suppressed exception and
+  # `Ctl.discard` raises it once the walk is over. Lua's `__close` rule, and
+  # the first failure is the one delivered because `getSuppressed` keeps the
+  # order they were added in.
+  m.visitLabel(discarding)
+  let inner_start = Label.new()
+  let inner_end = Label.new()
+  let inner_h = Label.new()
+  m.visitTryCatchBlock(inner_start, inner_end, inner_h, "java/lang/Throwable")
+  m.visitLabel(inner_start)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
+  m.visitInsn(OP_POP)
+  m.visitLabel(inner_end)
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitInsn(OP_ATHROW)
+  m.visitLabel(inner_h)
+  m.visitVarInsn(OP_ASTORE, 6)
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitVarInsn(OP_ALOAD, 6)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "addSuppressed",
+    "(Ljava/lang/Throwable;)V", false)
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitInsn(OP_ATHROW)
+  close_mv(m)
+  ()
+}
+
+## `discard(k)`: abandon the computation `k` would have resumed, running every
+## bracket release inside it (docs/oneshot-design.md 11.12).
+##
+## Two instructions, because the interesting half is the dispatch and the
+## dispatch is a virtual call: `Fn2.discardK` refuses by default and `CtlK`
+## overrides it (`gen_fn2_discard_default` says why the question is asked
+## there). `discard` lives in the io runtime module for the reason `bracket`
+## does -- it is a primitive with one implementation per backend and a name
+## the table already knows how to spell.
+fn gen_discard(cw: ClassWriter) -> Unit !io = {
+  let m = open_static(cw, "discard",
+    "(L" ++ fn_iface(2) ++ ";)L" ++ UNIT_CLASS ++ ";")
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "discardK", "()V", true)
+  return_unit(m)
   close_mv(m)
   ()
 }
@@ -1116,6 +1219,7 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   # The third of the family, and the one that catches nothing: it releases on
   # both ways out and rethrows.
   gen_bracket(cw)
+  gen_discard(cw)
 
   # Not an io primitive and not a barrier: `cast` is pure. It lives here
   # because this is the class that owns the one translation from a Throwable
@@ -3484,6 +3588,21 @@ pub const CTL_CONT_CLASS: String = "dawn/rt/CtlCont"
 ## evidence slot every function value carries.
 pub const CTL_K_CLASS: String = "dawn/rt/CtlK"
 
+## The poison a `discard` resumes an abandoned computation with, and the one
+## class of this family that *every* program carries.
+##
+## It is an `Error` and not a `PanicError`, which is what makes it uncatchable
+## by `catch_panic` and `catch_fault` -- they name `PanicError` and
+## `Exception`, and this is neither. `bracket` catches `Throwable`, so releases
+## run. That is the whole of "not catchable, but still releases", written in
+## the class hierarchy rather than in a rule.
+##
+## Unconditional because `gen_bracket` names it and every program has a
+## bracket. It costs nothing to carry: it names `java/lang/Error` and nothing
+## else, so unlike the three below it drags no `jdk.internal.vm` reference into
+## a jar that never suspends.
+pub const CTL_DISCARD_CLASS: String = "dawn/rt/CtlDiscard"
+
 const CONT_CLASS: String = "jdk/internal/vm/Continuation"
 
 const SCOPE_CLASS: String = "jdk/internal/vm/ContinuationScope"
@@ -3583,6 +3702,14 @@ pub fn gen_ctl_class(supers: List[String]) -> Bytes !io = {
   # frame and has nothing to thread it through -- which is the same reason the
   # evidence pack is a hidden parameter and not a global.
   Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "TOP", tl_desc())
+  # The activation a `discard` is unwinding, or null. Read by `yield`, which
+  # refuses to suspend while one is set: a release may do io, may fail, may
+  # open a bracket of its own, but it may not suspend, because the frames
+  # under it are already committed to going away and nothing can resume into
+  # them. Python answers the same question the same way ("generator ignored
+  # GeneratorExit"). Saved and restored rather than counted, so a `discard`
+  # inside a release nests without arithmetic.
+  Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "DISCARDING", tl_desc())
   Asm.fieldOn(cw, ACC_PUBLIC, "hid", "J")
   Asm.fieldOn(cw, ACC_PUBLIC, "scope", scope_desc())
   Asm.fieldOn(cw, ACC_PUBLIC, "cont", cont_desc())
@@ -3596,13 +3723,18 @@ pub fn gen_ctl_class(supers: List[String]) -> Bytes !io = {
   Asm.fieldOn(cw, ACC_PUBLIC, "resume", obj_desc())
   Asm.fieldOn(cw, ACC_PUBLIC, "arm", obj_desc())
   Asm.fieldOn(cw, ACC_PUBLIC, "args", obj_array_desc())
+  # set for the length of one `discard`: the frozen frames wake inside `yield`
+  # and that is where the poison becomes a throw
+  Asm.fieldOn(cw, ACC_PUBLIC, "poison", "Z")
 
   let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
   cl.visitCode()
-  cl.visitTypeInsn(OP_NEW, THREAD_LOCAL)
-  cl.visitInsn(OP_DUP)
-  cl.visitMethodInsn(OP_INVOKESPECIAL, THREAD_LOCAL, "<init>", "()V", false)
-  cl.visitFieldInsn(OP_PUTSTATIC, CTL_CLASS, "TOP", tl_desc())
+  for f in ["TOP", "DISCARDING"] {
+    cl.visitTypeInsn(OP_NEW, THREAD_LOCAL)
+    cl.visitInsn(OP_DUP)
+    cl.visitMethodInsn(OP_INVOKESPECIAL, THREAD_LOCAL, "<init>", "()V", false)
+    cl.visitFieldInsn(OP_PUTSTATIC, CTL_CLASS, f, tl_desc())
+  }
   cl.visitInsn(OP_RETURN)
   close_mv(cl)
 
@@ -3665,6 +3797,7 @@ pub fn gen_ctl_class(supers: List[String]) -> Bytes !io = {
   gen_ctl_yield(cw)
   gen_ctl_lookup(cw)
   gen_ctl_apply_arm(cw)
+  gen_ctl_discard(cw)
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
@@ -3785,6 +3918,15 @@ fn gen_ctl_yield(cw: ClassWriter) -> Unit !io = {
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "yield", ctl_yield_desc())
     .expect("mv")
   m.visitCode()
+  # the release-discipline ban (docs/oneshot-design.md 11.12). See the
+  # `DISCARDING` field for why an unwind may not suspend.
+  let not_discarding = Label.new()
+  m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "DISCARDING", tl_desc())
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "get", "()" ++ obj_desc(), false)
+  m.visitJumpInsn(OP_IFNULL, not_discarding)
+  throw_panic(m, "dawn: a `ctl` operation was raised while a continuation " ++
+      "was being discarded")
+  m.visitLabel(not_discarding)
   m.visitVarInsn(OP_LLOAD, 0)
   m.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "lookup",
     "(J)" ++ ctl_desc(), false)
@@ -3809,6 +3951,21 @@ fn gen_ctl_yield(cw: ClassWriter) -> Unit !io = {
     "(" ++ scope_desc() ++ ")Z", false)
   m.visitInsn(OP_POP)
   ctl_top_set_local(m, 6)
+  # Awake. A `discard` woke this stack to unwind it, not to answer the
+  # operation: the poison becomes a throw here, at the suspension point, and
+  # every bracket between here and the installation releases what it holds on
+  # the way out. That is what every system that runs cleanup on abandonment
+  # does -- the drop is turned into a run and the ordinary unwinder does the
+  # work (design 11.12).
+  let resumed = Label.new()
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "poison", "Z")
+  m.visitJumpInsn(OP_IFEQ, resumed)
+  m.visitTypeInsn(OP_NEW, CTL_DISCARD_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, CTL_DISCARD_CLASS, "<init>", "()V", false)
+  m.visitInsn(OP_ATHROW)
+  m.visitLabel(resumed)
   m.visitVarInsn(OP_ALOAD, 5)
   m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "resume", obj_desc())
   m.visitVarInsn(OP_ALOAD, 5)
@@ -3896,6 +4053,111 @@ fn gen_ctl_apply_arm(cw: ClassWriter) -> Unit !io = {
   }
   throw_panic(m, "dawn: a control arm answers an operation with more than " ++
       to_string(ctl_max_op_params()) ++ " parameters")
+  close_mv(m)
+  ()
+}
+
+## Put back what `discard` set before it mounted the continuation. Written
+## once and inlined three times because there is no `finally` to hang it on:
+## the two exits and the failure path each restore, in the reverse of the
+## order `discard` sets them.
+fn gen_ctl_discard_restore(m: MethodVisitor, saved_slot: Int) -> Unit !io = {
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitInsn(OP_ICONST_0)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "poison", "Z")
+  m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "DISCARDING", tl_desc())
+  m.visitVarInsn(OP_ALOAD, saved_slot)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "set",
+    "(" ++ obj_desc() ++ ")V", false)
+  m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "TOP", tl_desc())
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "prev", ctl_desc())
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "set",
+    "(" ++ obj_desc() ++ ")V", false)
+  ()
+}
+
+## `Ctl.discard(f)`: mount the abandoned computation and poison it.
+##
+## This is `drive` with the answer thrown away and the wake turned into a
+## throw. Mounting is what makes the difference between running the releases
+## and not running them: the frames are frozen inside `cont`, so nothing can
+## reach them from outside, and the only way to run a `finally` in a frozen
+## frame is to put the frame back on a stack and unwind it. That is the shape
+## every system in the survey converged on (OCaml `discontinue`, Wasm
+## `resume_throw`, Python `GeneratorExit`), and here it costs one field and
+## one throw because knife 4 already built the mounting.
+##
+## Nothing about the *value* of the block is answered: `discard` is Unit. The
+## activation is left done, and `CtlK.used` has already been set by the caller,
+## so a continuation resumed after this panics in the one-shot family rather
+## than running a release a second time.
+fn gen_ctl_discard(cw: ClassWriter) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "discard",
+    "(" ++ ctl_desc() ++ ")V").expect("mv")
+  m.visitCode()
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let h_poison = Label.new()
+  let h_any = Label.new()
+  let done = Label.new()
+  let quiet = Label.new()
+  m.visitTryCatchBlock(try_start, try_end, h_poison, CTL_DISCARD_CLASS)
+  m.visitTryCatchBlock(try_start, try_end, h_any, "java/lang/Throwable")
+  # f.prev = TOP.get(); TOP.set(f) -- the same bookkeeping `drive` does, and
+  # for the same reason: an operation raised by a release resolves against the
+  # handlers standing here
+  m.visitVarInsn(OP_ALOAD, 0)
+  ctl_top_get(m)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "prev", ctl_desc())
+  ctl_top_set_local(m, 0)
+  m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "DISCARDING", tl_desc())
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "get", "()" ++ obj_desc(), false)
+  m.visitVarInsn(OP_ASTORE, 1)
+  m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "DISCARDING", tl_desc())
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "set",
+    "(" ++ obj_desc() ++ ")V", false)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitInsn(OP_ICONST_1)
+  m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "poison", "Z")
+  m.visitLabel(try_start)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "cont", cont_desc())
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, CONT_CLASS, "run", "()V", false)
+  m.visitLabel(try_end)
+  m.visitJumpInsn(OP_GOTO, done)
+  # The poison came back out, which is the ordinary end of a discard: every
+  # frozen frame was unwound and every bracket on the way released. A release
+  # that failed rode along as a suppressed exception (`gen_bracket`), and this
+  # is where it is finally raised -- after the unwind, so the failure never
+  # stopped it and no other release was skipped.
+  m.visitLabel(h_poison)
+  m.visitVarInsn(OP_ASTORE, 2)
+  gen_ctl_discard_restore(m, 1)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "getSuppressed",
+    "()[Ljava/lang/Throwable;", false)
+  m.visitVarInsn(OP_ASTORE, 3)
+  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitJumpInsn(OP_IFEQ, quiet)
+  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitInsn(OP_ICONST_0)
+  m.visitInsn(OP_AALOAD)
+  m.visitInsn(OP_ATHROW)
+  m.visitLabel(quiet)
+  m.visitInsn(OP_RETURN)
+  # Anything else is somebody's failure passing through a stack that is going
+  # away, and the state has to be put back before it carries on.
+  m.visitLabel(h_any)
+  m.visitVarInsn(OP_ASTORE, 2)
+  gen_ctl_discard_restore(m, 1)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitInsn(OP_ATHROW)
+  m.visitLabel(done)
+  gen_ctl_discard_restore(m, 1)
+  m.visitInsn(OP_RETURN)
   close_mv(m)
   ()
 }
@@ -4017,6 +4279,29 @@ pub fn gen_ctl_k_class(supers: List[String]) -> Bytes !io = {
     "(" ++ ctl_desc() ++ ")" ++ obj_desc(), false)
   m.visitInsn(OP_ARETURN)
   close_mv(m)
+  # `Fn2.discardK`, overridden. The ticket is the same one a resumption spends
+  # and it is spent in the same field, so discard-then-resume,
+  # resume-then-discard and discard-twice are one test with one family of
+  # messages -- and none of them can run a release twice, which is the #641
+  # shape the survey found unsound in Koka and the reason the trigger here is
+  # explicit rather than inferred from whether an arm resumed.
+  let d = Asm.methodOn(cw, ACC_PUBLIC, "discardK", "()V").expect("mv")
+  d.visitCode()
+  let dok = Label.new()
+  d.visitVarInsn(OP_ALOAD, 0)
+  d.visitFieldInsn(OP_GETFIELD, CTL_K_CLASS, "used", "Z")
+  d.visitJumpInsn(OP_IFEQ, dok)
+  throw_panic(d, "dawn: continuation discarded after it was already used")
+  d.visitLabel(dok)
+  d.visitVarInsn(OP_ALOAD, 0)
+  d.visitInsn(OP_ICONST_1)
+  d.visitFieldInsn(OP_PUTFIELD, CTL_K_CLASS, "used", "Z")
+  d.visitVarInsn(OP_ALOAD, 0)
+  d.visitFieldInsn(OP_GETFIELD, CTL_K_CLASS, "f", ctl_desc())
+  d.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "discard",
+    "(" ++ ctl_desc() ++ ")V", false)
+  d.visitInsn(OP_RETURN)
+  close_mv(d)
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }

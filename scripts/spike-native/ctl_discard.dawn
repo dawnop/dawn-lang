@@ -1,0 +1,255 @@
+# Abandoning a continuation (docs/oneshot-design.md §11.12): the two ways it
+# ends, and what each one runs.
+#
+# A bare drop runs nothing a program wrote. `discard(k)` resumes the frozen
+# computation with a poison instead, so every bracket between the suspension
+# and the installation releases what it holds, innermost first -- and the
+# poison is not a failure, so neither barrier sees it. The ticket is spent
+# either way, which is what keeps the #641 shape (a stored continuation
+# resumed after the discard) from running a release twice.
+#
+# Both backends, and the mechanisms are as unlike as they are in the two
+# sibling files: the JVM mounts the continuation and throws `CtlDiscard`
+# through the frozen frames, native forces an unwind of the carrier's stack
+# and lands at every bracket on the way. Every line below is therefore a
+# differential assertion as well as an expectation.
+use std/io
+use std/str
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+ctl effect Log {
+  fn note(s: String) -> Unit
+}
+
+fn release(tag: String) -> Unit !io = io.println("release ${tag}")
+
+## A release that fails. `panic` diverges, so it is a Unit-returning release
+## the same way `todo()` would be.
+fn exploding(tag: String) -> Unit !io = {
+  io.println("release ${tag}")
+  panic("boom in ${tag}")
+}
+
+fn ident(n: Int) -> Int = n
+
+# ---- 1. the bare drop, pinned ----
+#
+# The arm answers the block without resuming, so the remainder never runs
+# again and the bracket it is suspended inside never exits. Nothing releases
+# `r`. That is the ruling and not an oversight: cleanup on abandonment is
+# triggered by an explicit call and by nothing else -- never by reclamation,
+# which would give one source program two behaviours on two backends. No
+# `release bare` line below is the whole assertion.
+fn bare_drop() -> String !io = {
+  with handle Ask { ask(n) resume k => "dropped at ${to_string(n)}" }
+  with r <- bracket("bare", release)
+  io.println("held ${r}")
+  "unreachable ${to_string(ask(1))}"
+}
+
+# ---- 2. discard runs the releases, innermost first ----
+#
+# The same shape with `discard(k)` in the arm. Two brackets, so the order is
+# an assertion too, and `discard` answers Unit only after both have run --
+# the arm's own line is printed by `main` afterwards.
+fn discards() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "discarded at ${to_string(n)}"
+    }
+  }
+  with a <- bracket("outer", release)
+  with b <- bracket("inner", release)
+  io.println("held ${a} and ${b}")
+  "unreachable ${to_string(ask(1))}"
+}
+
+# ---- 3. the poison is not a failure ----
+#
+# Two barriers stand between the raise and the installation. A discard walks
+# past both: on the JVM `CtlDiscard` is an `Error` and the barriers name
+# `PanicError` and `Exception`; on native the landing lands at brackets and
+# not at barrier frames. If either caught it, the block's answer would be one
+# of the "caught" strings instead of the arm's.
+fn not_catchable() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "arm answered ${to_string(n)}"
+    }
+  }
+  match catch_panic(() =>
+    match catch_fault(() => ask(1)) {
+      Ok(v) -> "catch_fault saw ${to_string(v)}"
+      Err(e) -> "catch_fault caught ${e.message}"
+    }
+  ) {
+    Ok(s) -> s
+    Err(e) -> "catch_panic caught ${e.message}"
+  }
+}
+
+# ---- 4. the #641 shape ----
+#
+# The arm stores the continuation and returns; the installing frame is gone
+# by the time anything looks at it. Koka's #641 is a finalizer fired because
+# an arm returned without resuming, and then fired again by the escaped
+# resumption -- which is why the trigger here is explicit and why `discard`
+# spends the same one-shot ticket a resumption spends. So `release esc` prints
+# once, and the resumption that follows the discard panics by name.
+type Held = Ready(v: String) | Waiting(k: fn(Int) -> Held)
+
+fn escaping() -> Held !io = {
+  with handle Ask { ask(n) resume k => Waiting(k) }
+  with r <- bracket("esc", release)
+  io.println("held ${r}")
+  Ready("resumed with ${to_string(ask(1))}")
+}
+
+fn discard_then_resume() -> String !io =
+  match escaping() {
+    Ready(v) -> "the arm resumed: ${v}"
+    Waiting(k) -> {
+      discard(k)
+      match catch_panic(() => k(5)) {
+        Ok(_) -> "resumed after a discard and lived"
+        Err(e) -> e.message
+      }
+    }
+  }
+
+# The reverse order. The remainder runs to the end, so `release esc2` is the
+# ordinary exit of a bracket rather than a discard's, and the discard that
+# follows finds the ticket spent.
+fn resume_then_discard() -> String !io =
+  match escaping() {
+    Ready(v) -> "the arm resumed: ${v}"
+    Waiting(k) -> {
+      let answered = k(5)
+      let tail =
+        match answered {
+          Ready(v) -> v
+          Waiting(_) -> "suspended again"
+        }
+      match catch_panic(() => discard(k)) {
+        Ok(_) -> "discarded after a resumption and lived"
+        Err(e) -> "${tail} then ${e.message}"
+      }
+    }
+  }
+
+fn discard_twice() -> String !io =
+  match escaping() {
+    Ready(v) -> "the arm resumed: ${v}"
+    Waiting(k) -> {
+      discard(k)
+      match catch_panic(() => discard(k)) {
+        Ok(_) -> "discarded twice and lived"
+        Err(e) -> e.message
+      }
+    }
+  }
+
+# ---- 5. a value that is not a continuation ----
+#
+# `k` is an ordinary `fn(R) -> A` (§11.2), so any function value satisfies
+# the type and the check is the same dynamic kind one-shot itself runs under.
+fn not_a_continuation() -> String !io =
+  match catch_panic(() => discard(ident)) {
+    Ok(_) -> "discarded an ordinary function and lived"
+    Err(e) -> e.message
+  }
+
+# ---- 6. a release may not suspend ----
+#
+# The frames under the walk are already committed to going away and nothing
+# can resume into them, so an unwind that suspends is an unwind that may never
+# finish. Python refuses the same thing in the same place ("generator ignored
+# GeneratorExit"). io in a release is fine -- the line before the refusal is
+# printed by the same release.
+fn yield_in_release() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "unreachable arm ${to_string(n)}"
+    }
+  }
+  with r <- bracket("susp", tag => {
+    io.println("release ${tag}")
+    let _ = ask(99)
+    ()
+  })
+  "unreachable ${to_string(ask(1))}"
+}
+
+fn suspending_release() -> String !io =
+  match catch_panic(() => yield_in_release()) {
+    Ok(s) -> s
+    Err(e) -> e.message
+  }
+
+# ---- 7. a release that fails ----
+#
+# Lua's `__close` rule: the walk is not stopped, so the outer release still
+# runs, and the first failure is the one delivered -- after the unwind, to
+# whoever called `discard`. Stopping instead would abandon everything the
+# frames below still hold, which is the leak the discard exists to close.
+fn failing_release() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "unreachable arm ${to_string(n)}"
+    }
+  }
+  with a <- bracket("kept", release)
+  with b <- bracket("lost", exploding)
+  "unreachable ${to_string(ask(1))}"
+}
+
+fn release_failure() -> String !io =
+  match catch_panic(() => failing_release()) {
+    Ok(s) -> s
+    Err(e) -> e.message
+  }
+
+# ---- 8. an inner handler activation inside the frozen span ----
+#
+# `ask` bubbles past the `Log` installation, which freezes the `Log`
+# activation along with everything else between the raise and the `Ask`
+# prompt. Discarding the outer continuation therefore has to discard that
+# inner activation too, and the bracket inside the `Log` block is how it says
+# so. On the JVM this is free -- the poison is thrown below the inner driver's
+# frame and unwinds through it. On native the inner carrier is a separate
+# stack, and the outer walk hands it the same instruction on its way past
+# (`dawn_ctl_dispose`, and the `bubbling` flag that tells this case from an
+# ordinary drop of a continuation a frame merely held).
+fn nested() -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "outer discarded ${to_string(n)}"
+    }
+  }
+  with a <- bracket("around", release)
+  with handle Log { note(s) resume k => "L[${s}|${k(())}]" }
+  with b <- bracket("within", release)
+  note("start")
+  "unreachable ${to_string(ask(1))}"
+}
+
+pub fn main() -> Unit !io = {
+  io.println(bare_drop())
+  io.println(discards())
+  io.println(not_catchable())
+  io.println(discard_then_resume())
+  io.println(resume_then_discard())
+  io.println(discard_twice())
+  io.println(not_a_continuation())
+  io.println(suspending_release())
+  io.println(release_failure())
+  io.println(nested())
+}

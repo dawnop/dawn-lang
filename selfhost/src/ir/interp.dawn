@@ -872,6 +872,11 @@ fn comptime_rejects() -> List[String] = {
   # a backend -- so an arm here would be the only implementation of a feature
   # that does not run yet, in the one evaluator that cannot reach it.
   out = out ++ ["ctl_yield", "ctl_run"]
+  # `discard` is the user-facing third of that family and is refused for the
+  # first of those reasons alone: its argument is a continuation, a `const`
+  # initialiser cannot produce one, and a value that is not a continuation is
+  # a run-time panic rather than a fold.
+  out = out ++ ["discard"]
   # no arm, and no reason beyond that: `parse_int` folds and this one does not.
   # Left refused rather than quietly added, because a new arm is a new answer
   # the two backends then have to agree with.
@@ -2330,7 +2335,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
   assert len(arms) == 43
-  assert len(rejects) == 76
+  assert len(rejects) == 77
 }
 
 fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =

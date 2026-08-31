@@ -1759,6 +1759,13 @@ typedef struct dawn_handler {
 #endif
   struct dawn_handler *prev;
   bool catches_panic;
+  /* A bracket, as opposed to a barrier. A discard unwind (see "one-shot
+   * resumption") lands at every one of these on its way to the base and runs
+   * its release; it lands at no barrier, because a discard is not a failure
+   * and `catch_panic`/`catch_fault` are defined not to see it. Only
+   * `dawn_bracket` sets it, and the landing clears it before jumping so that
+   * the walk it restarts does not meet the same frame again. */
+  bool discard_lands;
 #ifdef __wasi__
   /* how deep the shadow own-frame stack was when this handler was pushed:
    * the raise walk stops here (see "landing at a handler on wasm32-wasi") */
@@ -1893,16 +1900,53 @@ static DAWN_STACK_LOCAL struct _Unwind_Exception dawn_uexc;
 
 static DAWN_STACK_LOCAL dawn_handler *dawn_unwind_target;
 
+/* The three pieces of discard state, declared here because the landing above
+ * reads one of them. All are per-stack: a discard of an inner activation
+ * nested inside a discard of an outer one is two walks on two carriers.
+ *
+ *   `walking`  a discard unwind is between two landings on this stack. It is
+ *              cleared while a release runs, so an ordinary failure raised
+ *              inside a release finds its own handler by the ordinary rule.
+ *   `discarding` the whole span, from the first forced unwind to the base.
+ *              The carrier's base reads it to tell a discard from a failure.
+ *   `owed`     the first failure a release raised during the walk. Lua's
+ *              `__close` rule: the remaining releases still run, the first
+ *              error is the one delivered, and it surfaces at the caller of
+ *              `discard` once the unwind is over. */
+static DAWN_STACK_LOCAL bool dawn_ctl_discard_walking;
+
+static DAWN_STACK_LOCAL bool dawn_ctl_discarding;
+
+static DAWN_STACK_LOCAL dawn_failure dawn_ctl_discard_owed;
+
+/* Where the walk is going: the base handler at the bottom of this carrier.
+ * Kept apart from `dawn_unwind_target`, which a failure raised by a release
+ * overwrites and then clears at its own landing. */
+static DAWN_STACK_LOCAL dawn_handler *dawn_ctl_discard_target;
+
 static void dawn_uexc_cleanup(_Unwind_Reason_Code r, struct _Unwind_Exception *e) {
   (void)r;
   (void)e;
 }
 
 /* The cleanup on every handler struct. On a normal exit the target is NULL
- * and this is a comparison and nothing else. */
+ * and this is a comparison and nothing else.
+ *
+ * The second test is the discard unwind's, and it is why `discard_lands`
+ * exists (see "one-shot resumption"): a discard walks to the carrier's base
+ * but has to stop at every bracket on the way and run its release, which is
+ * the one thing a bare drop does not do. Barriers are skipped by the same
+ * predicate -- a discard is not a failure, so `catch_panic` and `catch_fault`
+ * must not see it. The flag is cleared before the jump because the bracket
+ * restarts the walk from its own frame, and a frame that still announced
+ * itself would answer the restarted walk with itself, forever. */
 static void dawn_handler_landing(dawn_handler *h) {
   if (dawn_unwind_target == h) {
     dawn_unwind_target = NULL;
+    longjmp(h->jb, 1);
+  }
+  if (dawn_ctl_discard_walking && h->discard_lands) {
+    h->discard_lands = false;
     longjmp(h->jb, 1);
   }
 }
@@ -2205,6 +2249,53 @@ static _Noreturn void dawn_reraise(dawn_failure f) {
   exit(1);
 }
 
+#ifndef __wasi__
+/* ---- the two halves of a bracket landing during a discard ---------------
+ *
+ * A discard resumes an abandoned computation with a poison and lets the
+ * ordinary unwinder do the work, which is what every system that runs cleanup
+ * on abandonment does (OCaml `discontinue`, Python `GeneratorExit`, Wasm
+ * `resume_throw`). Here the poison is the forced unwind itself, and these two
+ * are what a bracket does when it meets one: run the release, then put the
+ * walk back where it was.
+ *
+ * A failure raised by a release does not stop the walk. Lua's `__close` is
+ * the precedent and the rule is its rule: the remaining releases still run,
+ * the first failure is the one kept, and it is delivered to whoever called
+ * `discard` after the unwind has finished. Stopping the walk instead would
+ * leave the frames below this one holding everything they hold, which is the
+ * leak the discard exists to close. */
+static void dawn_ctl_discard_release(dawn_clo *release, void *resource,
+                                     void *ev) {
+  dawn_handler g DAWN_CLEANUP(dawn_handler_landing) = {
+    .prev = dawn_handlers, .catches_panic = true
+  };
+  /* Not walking while user code runs: a failure the release raises and
+   * catches inside itself must meet the ordinary landing rule, and a bracket
+   * the release opens of its own is an ordinary bracket. */
+  dawn_ctl_discard_walking = false;
+  dawn_handlers = &g;
+  if (setjmp(g.jb) == 0) {
+    dawn_drop(((void *(*)(dawn_clo *, void *, void *))release->fn)(
+      release, dawn_dup(resource), dawn_dup(ev)));
+    dawn_handlers = g.prev;
+  } else {
+    dawn_failure mine = dawn_inflight;
+    dawn_handlers = g.prev;
+    if (dawn_ctl_discard_owed.msg == NULL) {
+      dawn_ctl_discard_owed = mine;
+    } else {
+      dawn_drop(mine.msg);
+    }
+  }
+}
+
+static _Noreturn void dawn_ctl_discard_resume(void) {
+  dawn_ctl_discard_walking = true;
+  dawn_unwind_to(dawn_ctl_discard_target);
+}
+#endif
+
 /* `bracket(resource, release, use)` -- the parameter order is the intrinsic's:
  * the resource first, and the use-closure last.
  *
@@ -2252,10 +2343,20 @@ static _Noreturn void dawn_reraise(dawn_failure f) {
 #ifndef __wasi__
 void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use, void *ev) {
   dawn_handler h DAWN_CLEANUP(dawn_handler_landing) = {
-    .prev = dawn_handlers, .catches_panic = true
+    .prev = dawn_handlers, .catches_panic = true, .discard_lands = true
   };
   dawn_handlers = &h;
   if (setjmp(h.jb) != 0) {
+    /* A discard, not a failure: nothing is in flight and nothing is owed
+     * onward. Run the release and hand the walk back to where it was, which
+     * is the whole of "an abandoned computation still releases what it
+     * held". `dawn_handler_landing` cleared the flag on the way in, so the
+     * restarted walk passes this frame instead of landing on it again. */
+    if (dawn_ctl_discard_walking) {
+      dawn_handlers = h.prev;
+      dawn_ctl_discard_release(release, resource, ev);
+      dawn_ctl_discard_resume();
+    }
     /* The crossing failure becomes this frame's before the release runs:
      * `release` is arbitrary user code, and a failure it raises and swallows
      * must find `dawn_inflight` free rather than the one owed onward
@@ -2441,6 +2542,14 @@ typedef struct dawn_ctl {
   void *result; /* owned: what the remainder produced */
   void *resume; /* owned in, transferred out at the raise site */
   bool failed;
+  /* This activation's `drive` frame is parked in the bubble loop -- a
+   * suspension went past this prompt and froze the driver with it, so the
+   * frame sits on the stack of whichever activation the bubble reached. That
+   * is the one shape "an inner handler activation inside the frozen span" can
+   * take, and discarding the outer one discards this one too. The JVM needs
+   * no flag for it: the poison is thrown at a raise site *below* the inner
+   * driver's frame and unwinds through it on the way out. */
+  bool bubbling;
   dawn_failure fail;
 } dawn_ctl;
 
@@ -2454,6 +2563,9 @@ struct dawn_carrier {
   bool finished;
   bool joined;
   bool die;
+  /* `die` says the stack is going away; this says whether the brackets on it
+   * get to release what they hold. False for a bare drop, true for `discard`. */
+  bool run_releases;
   dawn_ctl *act;
 };
 
@@ -2482,10 +2594,15 @@ static dawn_carrier *dawn_ctl_cur;
  * it. A count that has to come back to zero is the check that can fail. */
 static int64_t dawn_ctl_live;
 
-/* This carrier is unwinding to be discarded rather than to deliver a failure.
- * Per-stack for the reason everything else in the walk is: a reclaim nested
- * inside a reclaim is two walks on two stacks. */
-static DAWN_STACK_LOCAL bool dawn_ctl_discarding;
+/* How many discards are in progress program-wide. A global and not per-stack,
+ * unlike the three flags next to `dawn_unwind_target`, because it answers a
+ * different question: those describe *a walk*, this one is the ban -- no `ctl`
+ * operation may suspend anywhere while a discard is running, the strictness
+ * Python spells "generator ignored GeneratorExit". A release runs on the
+ * carrier being discarded, but a release may also resume some other
+ * continuation, which runs on a third stack, and the ban covers that too. One
+ * baton means one Dawn stack at a time, so a plain counter is enough. */
+static int64_t dawn_ctl_discard_depth;
 
 static void dawn_ctl_report(void) {
   if (dawn_ctl_dying || dawn_ctl_live == 0) return;
@@ -2521,7 +2638,14 @@ static void dawn_ctl_switch_to(dawn_carrier *c) {
   dawn_ctl_cur = saved;
 }
 
-static _Noreturn void dawn_ctl_discard(void) {
+/* Abandon this carrier's stack: force an unwind of every frame down to the
+ * base handler this carrier planted. `run_releases` is the difference between
+ * the two ways a continuation ends without being resumed. A bare drop runs
+ * nothing a program wrote -- only `dawn_own_drop`, which the unwinder runs
+ * whatever anyone asked for, because reference counting is not a cleanup the
+ * program can observe. An explicit `discard` also lands at every bracket on
+ * the way and runs its release. */
+static _Noreturn void dawn_ctl_discard(bool run_releases) {
   dawn_handler *h = dawn_handlers;
   while (h != NULL && h->prev != NULL) h = h->prev;
   if (h == NULL) {
@@ -2530,6 +2654,8 @@ static _Noreturn void dawn_ctl_discard(void) {
     abort();
   }
   dawn_ctl_discarding = true;
+  dawn_ctl_discard_target = h;
+  dawn_ctl_discard_walking = run_releases;
   dawn_unwind_to(h);
 }
 
@@ -2540,7 +2666,7 @@ static void dawn_ctl_hand_back(dawn_carrier *c) {
   while (c->turn == 0) pthread_cond_wait(&c->cv, &c->m);
   pthread_mutex_unlock(&c->m);
   dawn_ctl_cur = c;
-  if (c->die) dawn_ctl_discard();
+  if (c->die) dawn_ctl_discard(c->run_releases);
 }
 
 /* The last handoff: the carrier is done and nothing will resume it. */
@@ -2574,6 +2700,17 @@ static void *dawn_ctl_carrier_main(void *arg) {
       f->result = ((void *(*)(dawn_clo *, void *))r->fn)(r, dawn_dup(f->evs));
     } else if (dawn_ctl_discarding) {
       dawn_ctl_discarding = false;
+      dawn_ctl_discard_walking = false;
+      dawn_ctl_discard_target = NULL;
+      /* A release that failed during the walk owes its failure to whoever
+       * asked for the discard. It travels the way every other failure out of
+       * a carrier travels -- by relay, in the activation -- and `discard`
+       * re-raises it once the stack it came from is gone. */
+      if (dawn_ctl_discard_owed.msg != NULL) {
+        f->fail = dawn_ctl_discard_owed;
+        f->failed = true;
+        dawn_ctl_discard_owed.msg = NULL;
+      }
     } else {
       /* first thing on landing, exactly as every other setjmp branch here */
       f->fail = dawn_inflight;
@@ -2622,8 +2759,10 @@ static dawn_carrier *dawn_ctl_carrier_new(dawn_ctl *f) {
 
 /* Give the carrier back, whether it ran out or is being abandoned. An
  * abandoned one is told to `die` and handed the baton: it unwinds its whole
- * stack to the base handler, running every frame's cleanup, and finishes. */
-static void dawn_ctl_carrier_reclaim(dawn_carrier *c) {
+ * stack to the base handler, running every frame's cleanup, and finishes.
+ * `run_releases` also lands the walk at every bracket on the way; see
+ * `dawn_ctl_discard`. */
+static void dawn_ctl_carrier_reclaim(dawn_carrier *c, bool run_releases) {
   /* A stack cannot discard itself: the discard is an unwind of the carrier's
    * frames, and the frame that asked for it is one of them. Reachable, barely
    * -- a remainder that ends up holding the last reference to a continuation
@@ -2638,6 +2777,7 @@ static void dawn_ctl_carrier_reclaim(dawn_carrier *c) {
   }
   if (!c->finished) {
     c->die = true;
+    c->run_releases = run_releases;
     dawn_ctl_switch_to(c);
   }
   if (!c->joined) {
@@ -2652,13 +2792,25 @@ static void dawn_ctl_carrier_reclaim(dawn_carrier *c) {
 
 /* `dawn_drop` reaching a DAWN_K_CTL. The frames this activation is holding go
  * first: they own references, and the walk that releases them has to run on
- * the carrier's own stack. `dawn_drop` frees the struct itself afterwards. */
+ * the carrier's own stack. `dawn_drop` frees the struct itself afterwards.
+ *
+ * THE ONE CASE THAT INHERITS A DISCARD. Two facts decide the third parameter.
+ * A drop here is a bare drop and a bare drop runs no release -- that is the
+ * ruling, and it is what a JVM program does too, where an unreachable
+ * `Continuation` runs no finally. But an inner activation whose driver is
+ * parked in the bubble loop is *inside* the outer computation's frozen span,
+ * not merely a value it holds, and on the JVM the poison thrown to discard the
+ * outer one physically unwinds through the inner driver's frame and every
+ * bracket below it. So the two backends agree only if that one case inherits,
+ * and `bubbling` is exactly it. `walking` rather than `discarding` is the test
+ * for the same reason: a continuation dropped by ordinary code inside a
+ * release is a bare drop like any other. */
 static void dawn_ctl_dispose(void *p) {
   dawn_ctl *f = (dawn_ctl *)p;
   dawn_ctl *saved_top = dawn_ctl_top;
   dawn_ctl *saved_pending = dawn_ctl_pending;
   if (f->carrier != NULL) {
-    dawn_ctl_carrier_reclaim(f->carrier);
+    dawn_ctl_carrier_reclaim(f->carrier, dawn_ctl_discard_walking && f->bubbling);
     f->carrier = NULL;
   }
   /* A reclaim runs arbitrary Dawn cleanup on another stack, and a nested
@@ -2819,7 +2971,9 @@ static void *dawn_ctl_drive(dawn_ctl *f) {
       fputs("dawn: a suspension bubbled past every prompt\n", stderr);
       abort();
     }
+    f->bubbling = true;
     dawn_ctl_hand_back(dawn_ctl_cur);
+    f->bubbling = false;
   }
   dawn_ctl_pending = NULL;
   dawn_ctl_top = f->prev;
@@ -2856,10 +3010,21 @@ void *dawn_ctl_enter(int64_t hid, void *rest, void *evs) {
 
 void *dawn_ctl_yield(int64_t hid, void *arm, void *env, int64_t nargs,
                      void **args) {
-  dawn_ctl *f = dawn_ctl_lookup(hid);
+  dawn_ctl *f;
   dawn_ctl *saved;
   int64_t i;
   void *v;
+  /* The release-discipline ban (docs/oneshot-design.md 11.12). A discard is
+   * an unwind, and an unwind that suspends is an unwind that may never
+   * finish: the frames below it are already committed to going away, and
+   * nothing can resume into them. Python answers the same question the same
+   * way, by name -- "generator ignored GeneratorExit". A release may do io,
+   * may fail, may open a bracket of its own; it may not suspend. */
+  if (dawn_ctl_discard_depth > 0) {
+    dawn_panic(DAWN_LIT("dawn: a `ctl` operation was raised while a "
+                        "continuation was being discarded"));
+  }
+  f = dawn_ctl_lookup(hid);
   if (nargs > DAWN_CTL_MAX_ARGS) {
     dawn_panic(DAWN_LIT("dawn: a control arm answers an operation with more "
                         "than 7 parameters"));
@@ -2891,6 +3056,61 @@ void *dawn_ctl_yield(int64_t hid, void *arm, void *env, int64_t nargs,
   return v;
 }
 
+/* `discard(k)` -- abandon a computation and let it release what it holds.
+ *
+ * WHAT IT IS. Every system in the survey that runs cleanup on abandonment
+ * turns the drop into a run: an abort is injected at the suspension point and
+ * the ordinary unwinder does the rest (OCaml `discontinue`, Wasm
+ * `resume_throw`, Python `GeneratorExit`, Koka `k(Finalize(v))`). Here the
+ * injected abort is the forced unwind of the carrier and the "ordinary
+ * unwinder" is #193's, so this function is mostly bookkeeping around
+ * `dawn_ctl_carrier_reclaim`.
+ *
+ * WHY THE CHECK IS DYNAMIC. `k` is an ordinary `fn(R) -> A` (design 11.2) and
+ * nothing in the type says which function values are continuations. So this
+ * asks the value: a closure whose code pointer is `dawn_ctl_k_apply` and
+ * nothing else. That is the same discipline one-shot itself runs under -- the
+ * type does not say "at most once" either, and the second call is a panic.
+ *
+ * THE TICKET. `gen` is bumped here exactly as a resumption bumps it, so
+ * discard-then-resume, resume-then-discard and discard-twice are one test and
+ * one family of messages.
+ *
+ * The argument is borrowed, like every intrinsic's (perceus-design.md 5.1). */
+dawn_unit dawn_discard(void *kv) {
+  dawn_clo *k;
+  dawn_ctl *f;
+  dawn_carrier *c;
+  if (kv == NULL || ((dawn_hdr *)kv)->kind != DAWN_K_CLO ||
+      ((dawn_clo *)kv)->fn != (void *)dawn_ctl_k_apply) {
+    dawn_panic(DAWN_LIT("dawn: `discard` expects a continuation"));
+  }
+  k = (dawn_clo *)kv;
+  f = (dawn_ctl *)k->caps[0].p;
+  if (k->caps[1].i != f->gen) {
+    dawn_panic(DAWN_LIT("dawn: continuation discarded after it was already "
+                        "used"));
+  }
+  f->gen++;
+  c = f->carrier;
+  if (c != NULL) {
+    dawn_ctl_discard_depth++;
+    dawn_ctl_carrier_reclaim(c, true);
+    f->carrier = NULL;
+    dawn_ctl_discard_depth--;
+    /* A release failed on the way down. The walk finished first -- every
+     * other release still ran -- and the failure is delivered here, where the
+     * caller of `discard` stands. */
+    if (f->failed) {
+      dawn_failure owed = f->fail;
+      f->failed = false;
+      f->fail.msg = NULL;
+      dawn_reraise(owed);
+    }
+  }
+  return DAWN_UNIT;
+}
+
 #else
 
 /* wasm32-wasi has no threads, and the reason one-shot resumption stops here
@@ -2916,6 +3136,12 @@ void *dawn_ctl_yield(int64_t hid, void *arm, void *env, int64_t nargs,
   (void)args;
   dawn_panic(DAWN_LIT("dawn: one-shot resumption is not available on wasm"));
   return NULL;
+}
+
+dawn_unit dawn_discard(void *kv) {
+  (void)kv;
+  dawn_panic(DAWN_LIT("dawn: one-shot resumption is not available on wasm"));
+  return DAWN_UNIT;
 }
 
 #endif

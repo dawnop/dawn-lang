@@ -2970,6 +2970,31 @@ pub fn builtins() -> Map[String, Sig] = {
       },
       e
     ),
+    # `discard(k)`: abandon the computation `k` would have resumed, running
+    # every bracket release inside it innermost-first
+    # (docs/oneshot-design.md 11.12).
+    #
+    # **The parameter type is the continuation's own type and nothing
+    # narrower.** 11.2 ruled that `k` is a plain `fn(R) -> A` with a pure row,
+    # and that ruling is what makes it storable in an ADT, a cell and a list;
+    # a `TyCont` invented here would take it back. So any function value type-
+    # checks and the check is dynamic, which is the discipline one-shot already
+    # runs under -- the type does not say "at most once" either, and the second
+    # resumption is a run-time panic. A value that is not a continuation
+    # panics by name.
+    #
+    # **The row is pure, and that is 11.2's argument read a second time.**
+    # Resuming a continuation runs the rest of a block that may do anything,
+    # and `k`'s row is pure all the same, because the pack the remainder needs
+    # was built at the installation and the accounting happened there.
+    # Discarding runs a *subset* of the same code -- the releases of brackets
+    # the remainder had already entered -- so it can owe no row that resuming
+    # does not. Pinning it to `!io` would mean an arm that abandons its
+    # continuation is impure while one that resumes it is not.
+    Sig {
+      ..bsig("discard", [TyFn([t], u, EPure)], ["k"], TyUnit),
+      tparams: [t, u]
+    },
     # io_* intrinsics: the console/file primitives std/io writes over. All !io.
     # The JVM backend emits them into dawn/rt/Io. read_file/write_file/list_names
     # throw on failure; std wraps them in a barrier. read_line returns Option
@@ -3271,6 +3296,11 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # call site would read a box as whatever `B` turned out to be.
   rt_of = map.insert(rt_of, "bracket", RtIo)
   erased = set.insert(erased, "bracket")
+  # `discard` joins the io runtime for the same reason: one implementation per
+  # backend, called by its own name in the module the table names. Not
+  # `erased` -- its one parameter is a function value, which crosses at the
+  # `Fn` interface its arity picks and not at `Object`, and it answers Unit.
+  rt_of = map.insert(rt_of, "discard", RtIo)
 
   # The persistent Map/Set: erased on both sides, and std-only. No runtime
   # module owns them any more -- lowering turns each into a call on the Dawn
@@ -3938,7 +3968,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 98
+  assert map_size2(bs) == 99
 }
 
 test "the reclaim's failure is a value, under the one name left" {
