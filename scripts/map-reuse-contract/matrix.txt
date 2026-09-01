@@ -6,16 +6,24 @@
 # recorder that could reassign owners would launder the collision it exists to
 # catch (scripts/pipe-contract/matrix.txt is the precedent this copies).
 #
-# `finished` is the control: the borrowed-parameter table is a decision about
-# where dup and drop go, never about what a program computes, so a mutant that
-# changes the answer has stopped being about reuse and is a bug somewhere else.
-# The mutant must leave it green while taking `hamt_in_place` to zero.
+# `finished` and `record_finished` are controls: ownership scheduling decides
+# where dup and drop go, never what either program computes. `hamt_in_place`
+# is also the negative control for the record-spread mutant -- a direct map
+# accumulator does not have a spread owner to release.
 
 assert	finished
 assert	hamt_in_place
+assert	record_finished
+assert	record_spread_in_place
 
 control	finished
+control	record_finished
 
 role	borrow-hamt-assoc-again	counted
 owner	borrow-hamt-assoc-again	hamt_in_place
 red	borrow-hamt-assoc-again	hamt_in_place
+red	borrow-hamt-assoc-again	record_spread_in_place
+
+role	keep-record-spread-source	counted
+owner	keep-record-spread-source	record_spread_in_place
+red	keep-record-spread-source	record_spread_in_place
