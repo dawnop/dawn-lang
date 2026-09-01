@@ -181,6 +181,15 @@ if ! run_jvm "$root" "$work/jvm.txt"; then
   cat "$work/jvm.err" >&2
   exit 1
 fi
+if [ "$record" -eq 0 ]; then
+  if ! cmp -s "$expected" "$work/jvm.txt"; then
+    echo "FAIL: retained JVM session changed:" >&2
+    diff -u "$expected" "$work/jvm.txt" | head -40 >&2
+    exit 1
+  fi
+  echo "OK   retained JVM: 9 lines in one process, byte for byte"
+fi
+
 if ! build_wasm "$root" "$work/base.wasm"; then
   echo "FAIL: retained wasm fixture did not build:" >&2
   cat "$work/wasm-build.err" >&2
@@ -203,12 +212,6 @@ if [ "$record" -eq 1 ]; then
   exit 0
 fi
 
-if ! cmp -s "$expected" "$work/jvm.txt"; then
-  echo "FAIL: retained JVM session changed:" >&2
-  diff -u "$expected" "$work/jvm.txt" | head -40 >&2
-  exit 1
-fi
-echo "OK   retained JVM: 9 lines in one process, byte for byte"
 if ! cmp -s "$expected" "$work/wasm.txt"; then
   echo "FAIL: retained wasm session changed:" >&2
   diff -u "$expected" "$work/wasm.txt" | head -40 >&2
