@@ -30,8 +30,8 @@ pub fn main() -> Unit !io =
 
 ## Install
 
-Every release publishes four assets: two artifacts and the SHA-256 of each.
-Check the digest. The seed the toolchain bootstraps from is verified on every
+Every release publishes four install assets: two artifacts and the SHA-256 of
+each. Check the digest. The seed the toolchain bootstraps from is verified on every
 single use, and an install step that skipped the same check would be the one
 place where that discipline stopped.
 
@@ -65,6 +65,14 @@ java -jar dawn-selfhost.jar run hello.dawn
 These two are different compilers, not two downloads of one. `dawnc` is the C
 backend and it refuses `use java`; the jar is the JVM toolchain. Which you want,
 and what each cannot do, is under [The toolchain](#the-toolchain) below.
+
+A release also carries two files that describe it rather than install it:
+`dawn-pub-api.json`, every public signature in `std` and in `packages/` with
+its effect row, and `dawn-pub-api-diff.md`, the classified difference from the
+previous release. The second is the one to read before upgrading. Effects are
+in the types, so a unit that started doing IO cannot do it quietly: the report
+names the expansion. It is a report and not a gate, and it compares signatures
+rather than behavior.
 
 **From a checkout**, which is what the rest of this file assumes: `./bin/dawn`
 downloads the seed on first use, verifies it against

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ bd61f1cc09ed44c0 -->
+<!-- doc-check: translation-of README.md @ 216dcf95f8627865 -->
 
 # Dawn
 
@@ -29,7 +29,7 @@ pub fn main() -> Unit !io =
 
 ## 安装
 
-每个 release 挂四件资产：两个产物，外加各自的 SHA-256。**请核对摘要**。工具链自举用的种子
+每个 release 挂四件安装资产：两个产物，外加各自的 SHA-256。**请核对摘要**。工具链自举用的种子
 每次使用前都要验一遍，安装这一步如果跳过同样的核对，那这套纪律就只在这里断了。
 
 **不装 JVM**（linux-x86_64）：一个静态可执行文件，`std` 与 C 运行时都在里面。
@@ -59,6 +59,11 @@ java -jar dawn-selfhost.jar run hello.dawn
 
 这两件是**两个不同的编译器**，不是同一个东西的两种下载方式。`dawnc` 是 C 后端，它拒绝
 `use java`；jar 是 JVM 工具链。该选哪个、各自做不到什么，见下面的[工具链](#工具链)一节。
+
+release 还挂两件**描述**它、而不是安装它的文件：`dawn-pub-api.json` 是 `std` 与 `packages/`
+里每一条公开签名连同它的效果行，`dawn-pub-api-diff.md` 是与上一个 release 的分类差异。
+升级前该读的是后者。效果就在类型里，所以某个单元开始做 IO 是藏不住的：报告会把这次扩张点名。
+它是报告不是门禁，而且它比的是签名，不是行为。
 
 **从仓库检出**（本文其余部分默认的就是这条路）：`./bin/dawn` 首次运行会下载种子、按
 `scripts/seed-checksums.txt` 验它，再用它编译 HEAD。

@@ -1810,14 +1810,36 @@ TOOLCHAIN_ARTIFACT_SECTIONS = (
 # assigns the release URL to, rather than on bare names: `dawnc-linux-x86_64`
 # is a word README uses in prose as well, and a check that a word occurs
 # somewhere in a 300-line document is not a check.
+#
+# A release carries two kinds of asset and they answer to different sentences.
+# `INSTALL_ASSETS` is what an install step fetches, and that set is what the
+# `$base/<name>` comparison above is about. `REPORT_ASSETS` (the pub-API
+# snapshot and its diff, issue #29) describe a release rather than being one:
+# telling a reader to `curl` a Markdown report before running `hello.dawn`
+# would be wrong, so they are held to a weaker rule -- each must be *named*, in
+# inline code, in every install document. An asset no document mentions is an
+# asset nobody knows to look for, which is the same failure the fetch check
+# exists for, one step milder.
+#
+# `EXPECTED_ASSETS`, the list the publish step actually uploads and then
+# requires exactly once, is pinned to the concatenation of the two. Without
+# that pin the workflow could keep both lists honest and upload only one of
+# them, and both checks here would stay green.
 RELEASE_ASSET_BASE = "https://github.com/dawnop/dawn-lang/releases/latest/download"
 RELEASE_ASSET_FETCH = re.compile(r"\$base/([A-Za-z0-9._\-]+)")
-RELEASE_ASSET_DECL = re.compile(r"EXPECTED_ASSETS=\(\s*(.*?)\)", re.S)
+RELEASE_ASSET_DECL = re.compile(r"INSTALL_ASSETS=\(\s*(.*?)\)", re.S)
+RELEASE_REPORT_DECL = re.compile(r"REPORT_ASSETS=\(\s*(.*?)\)", re.S)
+RELEASE_ASSET_UNION = 'EXPECTED_ASSETS=("${INSTALL_ASSETS[@]}" "${REPORT_ASSETS[@]}")'
 INSTALL_DOCS = ("README.md", "README.zh-CN.md")
 
 
 def release_assets(workflow: str) -> list[str]:
     m = RELEASE_ASSET_DECL.search(workflow)
+    return sorted(m.group(1).split()) if m else []
+
+
+def release_report_assets(workflow: str) -> list[str]:
+    m = RELEASE_REPORT_DECL.search(workflow)
     return sorted(m.group(1).split()) if m else []
 
 
@@ -1842,9 +1864,11 @@ def repository_contract_problems(files: dict[str, str]) -> tuple[list[str], int]
         else:
             seen += 1
 
-    published = release_assets(files[".github/workflows/release.yml"])
+    workflow = files[".github/workflows/release.yml"]
+    published = release_assets(workflow)
+    reports = release_report_assets(workflow)
     if not published:
-        bad.append(".github/workflows/release.yml: no EXPECTED_ASSETS list to "
+        bad.append(".github/workflows/release.yml: no INSTALL_ASSETS list to "
                    "check the install instructions against")
     else:
         for rel in INSTALL_DOCS:
@@ -1857,6 +1881,23 @@ def repository_contract_problems(files: dict[str, str]) -> tuple[list[str], int]
             if fetched != published:
                 bad.append(f"{rel}: install instructions fetch {fetched}, but "
                            f"release.yml publishes {published}")
+            else:
+                seen += 1
+
+    if not reports:
+        bad.append(".github/workflows/release.yml: no REPORT_ASSETS list; the "
+                   "pub-API snapshot and its diff would be published unnamed")
+    elif RELEASE_ASSET_UNION not in workflow:
+        bad.append(".github/workflows/release.yml: EXPECTED_ASSETS is not the "
+                   "two declared lists concatenated, so an asset both lists "
+                   "agree on need not be uploaded at all")
+    else:
+        for rel in INSTALL_DOCS:
+            spans = inline_code_spans(files[rel])
+            unnamed = [name for name in reports if name not in spans]
+            if unnamed:
+                bad.append(f"{rel}: release asset(s) {unnamed} are published but "
+                           f"named in no document")
             else:
                 seen += 1
 
@@ -2046,6 +2087,38 @@ def check_repository_contracts_selftest() -> tuple[list[str], int]:
     if not any("install instructions fetch" in problem for problem in bad):
         return ["repository policy self-test: dropping a checksum download from "
                 "the install instructions stayed green"], 0
+
+    report_renamed = dict(files)
+    report_renamed[".github/workflows/release.yml"] = \
+        report_renamed[".github/workflows/release.yml"].replace(
+            "dawn-pub-api-diff.md", "dawn-api-report.md")
+    if report_renamed[".github/workflows/release.yml"] == \
+            files[".github/workflows/release.yml"]:
+        return ["repository policy self-test: report asset fixture was not mutated"], 0
+    bad, _ = repository_contract_problems(report_renamed)
+    if not any("named in no document" in problem for problem in bad):
+        return ["repository policy self-test: renaming a report asset left the "
+                "documents that name it green"], 0
+
+    union_broken = dict(files)
+    union_broken[".github/workflows/release.yml"] = \
+        union_broken[".github/workflows/release.yml"].replace(
+            RELEASE_ASSET_UNION, 'EXPECTED_ASSETS=("${INSTALL_ASSETS[@]}")')
+    if union_broken[".github/workflows/release.yml"] == \
+            files[".github/workflows/release.yml"]:
+        return ["repository policy self-test: asset union fixture was not mutated"], 0
+    bad, _ = repository_contract_problems(union_broken)
+    if not any("two declared lists concatenated" in problem for problem in bad):
+        return ["repository policy self-test: publishing only the install list "
+                "while both lists stayed correct went unnoticed"], 0
+
+    reports_gone = dict(files)
+    reports_gone[".github/workflows/release.yml"] = \
+        RELEASE_REPORT_DECL.sub("REMOVED=()", reports_gone[".github/workflows/release.yml"])
+    bad, _ = repository_contract_problems(reports_gone)
+    if not any("no REPORT_ASSETS list" in problem for problem in bad):
+        return ["repository policy self-test: a release with no declared report "
+                "assets stayed green"], 0
 
     comment = dict(files)
     command = "./bin/dawn fmt compiler-plan std site selfhost packages examples --check"
