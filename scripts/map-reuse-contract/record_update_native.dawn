@@ -1,0 +1,23 @@
+# A map threaded through a record spread. The direct accumulator in
+# insert_native.dawn proves the hamt path can reuse; this one proves the RC
+# pass releases the spread record before evaluating the updated field. If the
+# record stays alive, its map reaches every insert shared and the rate falls
+# to zero while the computed answer remains unchanged.
+use std/map
+
+type State = { values: Map[Int, Int], marker: Int }
+
+fn put(st: State, i: Int) -> State =
+  State { ..st, values: map.insert(st.values, i, i * 3) }
+
+pub fn main() -> Unit !io = {
+  var st = State { values: map.empty(), marker: 7 }
+  var i = 0
+  while i < 200000 {
+    st = put(st, i)
+    i = i + 1
+  }
+  if map.len(st.values) != 200000 { panic("record update lost entries") }
+  if map.get(st.values, 199999) != Some(599997) { panic("record update lost a value") }
+  println("done ${map.len(st.values)} ${st.marker}")
+}

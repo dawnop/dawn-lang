@@ -886,6 +886,290 @@ fn rw_scircuit(st: RSt, op: CBinOp, l: CExpr, r: CExpr, bty: Ty, after: Set[Int]
   (RSt { ..st2, pinned: was }, CBinary(op, l1, r1, bty))
 }
 
+# A record update reaches Core as one synthetic binding for its spread base,
+# followed by a constructor whose unchanged fields project that binding. If
+# an updated field expression also projects the base, the ordinary tree walk
+# keeps the whole record alive until the constructor has evaluated every
+# argument. That extra owner pins a uniquely-held collection at rc == 2:
+#
+#   R { ..r, m: map.insert(r.m, k, v) }
+#
+# Lift those projections into statements immediately after the base binding.
+# The statement sweeper can then release the record before the update runs;
+# each projected reference is still an ordinary owned binding, so this is
+# ownership scheduling, not an unsafe field steal. This normalization lives
+# here rather than in lowering because it is useful only to the native RC
+# backend and must not perturb JVM Core or bytecode.
+type SpreadLift = {
+  base: Int,
+  # When `..r` lowered from a local, written fields still name the source
+  # symbol, while unchanged fields name the synthetic `base`. They are two
+  # aliases of the same immutable record and must share one lifted field.
+  # -1 means the spread expression was not a bare local.
+  source: Int,
+  adt: Int,
+  ci: Int,
+  next_sym: Int,
+  fields: Map[Int, Int],
+  lets: List[CStmt]
+}
+
+# Lowering puts any written-order temporaries in blocks around the rebuilt
+# constructor. Follow only those tails: finding an arbitrary nested ctor in
+# an updated field expression would misidentify an ordinary one-let block as
+# a spread update.
+fn spread_rebuild(e: CExpr, base: Int) -> Option[(Int, Int)] =
+  match e {
+    CBlock(_, Some(t), _) -> spread_rebuild(t, base)
+    CCtor(adt, ci, args, _) -> {
+      for a in args {
+        match a {
+          CField(CLocal(sym, _), fa, fc, _, _) ->
+            if sym == base && fa == adt && fc == ci { return Some((adt, ci)) },
+          _ -> ()
+        }
+      }
+      None
+    }
+    _ -> None
+  }
+
+fn lift_spread_list(st: SpreadLift, es: List[CExpr]) -> (SpreadLift, List[CExpr]) = {
+  var st1 = st
+  var out: List[CExpr] = []
+  for e in es {
+    let (s2, e1) = lift_spread_expr(st1, e)
+    st1 = s2
+    out = out ++ [e1]
+  }
+  (st1, out)
+}
+
+fn lift_spread_opt(st: SpreadLift, e: Option[CExpr]) -> (SpreadLift, Option[CExpr]) =
+  match e {
+    None -> (st, None)
+    Some(x) -> {
+      let (st1, x1) = lift_spread_expr(st, x)
+      (st1, Some(x1))
+    }
+  }
+
+fn lift_spread_callee(st: SpreadLift, c: CCallee) -> (SpreadLift, CCallee) =
+  match c {
+    CDynamic(target) -> {
+      let (st1, t1) = lift_spread_expr(st, target)
+      (st1, CDynamic(t1))
+    }
+    CMethod(dict, trait_id, method, idx, nev) -> {
+      let (st1, d1) = lift_spread_expr(st, dict)
+      (st1, CMethod(d1, trait_id, method, idx, nev))
+    }
+    CDirect(_, _) -> (st, c)
+    CImpl(_, _, _, _) -> (st, c)
+    CDefault(_, _, _) -> (st, c)
+  }
+
+fn lift_spread_stmts(st: SpreadLift, ss: List[CStmt]) -> (SpreadLift, List[CStmt]) = {
+  var st1 = st
+  var out: List[CStmt] = []
+  for s in ss {
+    let (s2, s1) =
+      match s {
+        CSLet(sym, ty, init) -> {
+          let (sx, x1) = lift_spread_expr(st1, init)
+          (sx, CSLet(sym, ty, x1))
+        }
+        CSAssign(sym, value) -> {
+          let (sx, x1) = lift_spread_expr(st1, value)
+          (sx, CSAssign(sym, x1))
+        }
+        CSDiscard(x) -> {
+          let (sx, x1) = lift_spread_expr(st1, x)
+          (sx, CSDiscard(x1))
+        }
+        CSLoop(loop_id, body, step) -> {
+          let (sx, b1) = lift_spread_expr(st1, body)
+          let (sy, p1) = lift_spread_opt(sx, step)
+          (sy, CSLoop(loop_id, b1, p1))
+        }
+        CSIf(cond, thn, els) -> {
+          let (sx, c1) = lift_spread_expr(st1, cond)
+          let (sy, t1) = lift_spread_expr(sx, thn)
+          let (sz, e1) = lift_spread_opt(sy, els)
+          (sz, CSIf(c1, t1, e1))
+        }
+        CSDrop(_) -> (st1, s)
+      }
+    st1 = s2
+    out = out ++ [s1]
+  }
+  (st1, out)
+}
+
+fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
+  match e {
+    CCall(callee, args, ty) -> {
+      let (st1, c1) = lift_spread_callee(st, callee)
+      let (st2, as1) = lift_spread_list(st1, args)
+      (st2, CCall(c1, as1, ty))
+    }
+    CIntrinsic(name, args, ty) -> {
+      let (st1, as1) = lift_spread_list(st, args)
+      (st1, CIntrinsic(name, as1, ty))
+    }
+    CCtor(adt, ci, args, ty) -> {
+      let (st1, as1) = lift_spread_list(st, args)
+      (st1, CCtor(adt, ci, as1, ty))
+    }
+    CField(target, adt, ci, idx, fty) -> {
+      match target {
+        CLocal(sym, rty) ->
+          if (sym == st.base || sym == st.source) && adt == st.adt && ci == st.ci {
+            match map.get(st.fields, idx) {
+              Some(tmp) -> return (st, CLocal(tmp, fty))
+              None -> {
+                let tmp = st.next_sym
+                # Canonicalise a written expression's `r.f` to the synthetic
+                # spread binding as well. With no later read of the source,
+                # its initial `let base = r` is a transfer rather than the
+                # record-level dup/drop pair this scheduling is removing.
+                let init = CField(CLocal(st.base, rty), adt, ci, idx, fty)
+                let st1 = SpreadLift {
+                  ..st,
+                  next_sym: tmp + 1,
+                  fields: map.insert(st.fields, idx, tmp),
+                  lets: st.lets ++ [CSLet(tmp, fty, init)]
+                }
+                return (st1, CLocal(tmp, fty))
+              }
+            }
+          },
+        _ -> ()
+      }
+      let (st1, t1) = lift_spread_expr(st, target)
+      (st1, CField(t1, adt, ci, idx, fty))
+    }
+    CIsCtor(target, adt, ci) -> {
+      let (st1, t1) = lift_spread_expr(st, target)
+      (st1, CIsCtor(t1, adt, ci))
+    }
+    CTagOf(target, adt) -> {
+      let (st1, t1) = lift_spread_expr(st, target)
+      (st1, CTagOf(t1, adt))
+    }
+    CClosure(name, owner, caps, ty) -> {
+      let (st1, cs1) = lift_spread_list(st, caps)
+      (st1, CClosure(name, owner, cs1, ty))
+    }
+    CDictApply(key, args, ty) -> {
+      let (st1, as1) = lift_spread_list(st, args)
+      (st1, CDictApply(key, as1, ty))
+    }
+    CDictArg(dict, owner, key, idx, ty) -> {
+      let (st1, d1) = lift_spread_expr(st, dict)
+      (st1, CDictArg(d1, owner, key, idx, ty))
+    }
+    CTuple(elems, ty) -> {
+      let (st1, es1) = lift_spread_list(st, elems)
+      (st1, CTuple(es1, ty))
+    }
+    CTupleGet(target, idx, ty) -> {
+      let (st1, t1) = lift_spread_expr(st, target)
+      (st1, CTupleGet(t1, idx, ty))
+    }
+    CBox(inner, from) -> {
+      let (st1, x1) = lift_spread_expr(st, inner)
+      (st1, CBox(x1, from))
+    }
+    CUnbox(inner, to) -> {
+      let (st1, x1) = lift_spread_expr(st, inner)
+      (st1, CUnbox(x1, to))
+    }
+    CBinary(op, left, right, ty) -> {
+      let (st1, l1) = lift_spread_expr(st, left)
+      let (st2, r1) = lift_spread_expr(st1, right)
+      (st2, CBinary(op, l1, r1, ty))
+    }
+    CUnary(op, operand, ty) -> {
+      let (st1, x1) = lift_spread_expr(st, operand)
+      (st1, CUnary(op, x1, ty))
+    }
+    CIf(cond, thn, els, ty) -> {
+      let (st1, c1) = lift_spread_expr(st, cond)
+      let (st2, t1) = lift_spread_expr(st1, thn)
+      let (st3, e1) = lift_spread_opt(st2, els)
+      (st3, CIf(c1, t1, e1, ty))
+    }
+    CBlock(stmts, tail, ty) -> {
+      let (st1, ss1) = lift_spread_stmts(st, stmts)
+      let (st2, t1) = lift_spread_opt(st1, tail)
+      (st2, CBlock(ss1, t1, ty))
+    }
+    CListLit(elems, ty) -> {
+      let (st1, es1) = lift_spread_list(st, elems)
+      (st1, CListLit(es1, ty))
+    }
+    CReturn(value) -> {
+      let (st1, v1) = lift_spread_opt(st, value)
+      (st1, CReturn(v1))
+    }
+    CDup(inner, ty) -> {
+      let (st1, x1) = lift_spread_expr(st, inner)
+      (st1, CDup(x1, ty))
+    }
+    # Foreign calls cannot reach the native emitter. Leaving one opaque is
+    # conservative: if it is the base's only remaining use, liveness keeps
+    # the record instead of moving a JVM-only access across the call.
+    CForeign(_, _) -> (st, e)
+    CInt(_) -> (st, e)
+    CFloat(_) -> (st, e)
+    CBool(_) -> (st, e)
+    CStr(_) -> (st, e)
+    CUnit -> (st, e)
+    CLocal(_, _) -> (st, e)
+    CFnRef(_, _, _) -> (st, e)
+    CDictRef(_, _, _, _) -> (st, e)
+    CConstRef(_, _, _) -> (st, e)
+    CComptime(_, _, _) -> (st, e)
+    CBreak(_) -> (st, e)
+    CContinue(_) -> (st, e)
+  }
+
+fn schedule_record_update(st: RSt, stmts: List[CStmt], tail: Option[CExpr]) ->
+  (RSt, List[CStmt], Option[CExpr]) = {
+    if len(stmts) != 1 { return (st, stmts, tail) }
+    match stmts[0] {
+      CSLet(base, _, init) ->
+        match tail {
+          Some(t) ->
+            match spread_rebuild(t, base) {
+              Some((adt, ci)) -> {
+                let source = match init {
+                  CLocal(sym, _) -> sym
+                  _ -> -1
+                }
+                let seed = SpreadLift {
+                  base: base, source: source, adt: adt, ci: ci, next_sym: st.next_sym,
+                  fields: map.empty(), lets: []
+                }
+                let (lifted, t1) = lift_spread_expr(seed, t)
+                if len(lifted.lets) > 0 {
+                  return (
+                    RSt { ..st, next_sym: lifted.next_sym },
+                    stmts ++ lifted.lets,
+                    Some(t1)
+                  )
+                }
+              }
+              None -> ()
+            },
+          None -> ()
+        },
+      _ -> ()
+    }
+    (st, stmts, tail)
+  }
+
 ## `consume` says whether the value is handed over; `after` is the bindings
 ## anything later still touches. Both only ever decide something at a
 ## borrow-producing node of counted type: everything else either produces its
@@ -1064,13 +1348,14 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     }
 
     CBlock(stmts, tail, bty) -> {
-      let st1 = push(st, -1, true)
-      let base = match tail {
+      let (st0, stmts0, tail0) = schedule_record_update(st, stmts, tail)
+      let st1 = push(st0, -1, true)
+      let base = match tail0 {
         None -> after
         Some(t) -> fv_expr(t, after)
       }
-      let (st2, stmts1) = rw_stmts(st1, stmts, base)
-      let (st3, tail1) = match tail {
+      let (st2, stmts1) = rw_stmts(st1, stmts0, base)
+      let (st3, tail1) = match tail0 {
         None -> (st2, None)
         Some(t) -> {
           let (s, t1) = rw(st2, t, consume, after)
@@ -2063,6 +2348,53 @@ test "a binding is released at the statement that stops touching it" {
       }
     }
     _ -> panic("expected a block")
+  }
+}
+
+test "a record update releases its spread owner before an updated field runs" {
+  let rec = TyAdt(7, [])
+  let ref = TyList(TyInt)
+  let p = CParam { sym: 1, ty: rec, mode: COwned }
+  # Lowering's exact shape for `R { ..r, a: g(r.a) }`: the unchanged field
+  # names the synthetic spread binding, while the written expression still
+  # names the source symbol. Both projections must be lifted and canonicalised
+  # before `g`, or either record owner keeps the updated reference shared.
+  let rebuilt = CCtor(7, 0, [
+    CField(CLocal(2, rec), 7, 0, 0, ref),
+    CCall(CDirect("m", "g"), [CField(CLocal(1, rec), 7, 0, 1, ref)], ref)
+  ], rec)
+  let body = CBlock([CSLet(2, rec, CLocal(1, rec))], Some(rebuilt), rec)
+  let m = rc_module(one_fn([p], rec, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  match m.fns[0].body {
+    CBlock(ss, tail, _) -> {
+      # `r` is handed to the synthetic binding rather than dup'ed: all later
+      # projections were canonicalised to that binding.
+      match ss[0] {
+        CSLet(2, _, CLocal(1, _)) -> ()
+        _ -> panic("expected the spread source handed over bare")
+      }
+      # The old record dies after the two fields are safe and before the tail
+      # call can run. Deleting the scheduling inserts this drop after `g`.
+      match ss[3] {
+        CSDrop(2) -> ()
+        _ -> panic("expected the spread owner released before the update")
+      }
+      match tail {
+        Some(CCtor(_, _, args, _)) -> {
+          match args[0] {
+            CLocal(_, _) -> ()
+            _ -> panic("expected the unchanged field transferred from its temporary")
+          }
+          match args[1] {
+            CCall(_, [CLocal(_, _)], _) -> ()
+            _ -> panic("expected the updated field to consume its lifted temporary")
+          }
+        }
+        _ -> panic("expected the rebuilt record")
+      }
+    }
+    _ -> panic("expected the scheduled update block")
   }
 }
 

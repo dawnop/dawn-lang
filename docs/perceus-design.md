@@ -831,6 +831,28 @@ check `checker.dawn`，`DAWN_RC_STATS=1` + 逐调用点插桩 + rc 直方图 + a
 - **ADT 复用的天花板**：本仓今天 ADT 复用为零；对 1,382 万次构造分配做时间邻接探针，
   51.4% 紧跟同形释放（k1）、74.7% 在最近 8 次内（k8）。数量级在这里，不在标注。
 
+**#30 已落地（2026-09-01）。** `c/rc.dawn` 现在只在 C 路径识别 lowering 写下的
+「一个 spread-base `let`，尾部为同构造子 rebuild」形状，把该 record 的字段投影提升到
+base 后面的语句里；written expression 里仍指向源码变量的 `r.f` 也统一改读合成 base。
+于是 `let base = r` 是 hand-over，投影完成后 sweep 在 updated expression 之前释放 base，
+`map.insert` 收到的字段重新是唯一 owner。JVM Core/字节码不经过这一步。
+
+这里要修正本节当时把两件事写成一件事的表述：现有 runtime 没有 ADT field-steal，
+所以这刀消掉的是 **record 自身**的 dup/drop 并解除集合的 pin；引用字段从不可变 record
+投影成独立 owner 时仍需一次 dup，随后才由临时量 transfer 给新 record。把 47 字段 `Cx`
+的全部 45 个字段 dup 都消掉，需要未来的 ADT reuse/field-steal，不属于这次纯调度修复。
+
+同一份 2026-09-01 `origin/main` 上重新冻结 native compiler 后，前端负载从
+`177,133 / 35,732`（83.21%）到 `180,583 / 32,282`（84.83%，多 3,450 次原地写）；
+对 `hamt.assoc` 入参的临时探针从 rc==1 `81,141` / other `41,149` 到
+`85,946 / 36,344`。这低于上面 2026-08-31 归因推算的约 17k 上限，说明 main 上的负载/调用
+分布已经演化，验收以新的冻结前后对拍为准。`map-reuse-contract` 因而没有虚抬原本看不见
+record spread 的 direct-map 预算，而是新增 focused record-wrapper leg：修复后
+`199,968 / 566,176`（35.3%），删除 scheduling 的 production mutant 为
+`0 / 566,176`，同时 direct-map negative control 仍为 36.6%。
+热缓存下以各自冻结的 native compiler 连跑自编译，旧版 5 次中位数 6.81s、新版 5 次中位数
+6.91s（约 +1.5%，在墙钟噪声量级内）；确定性的复用计数上升，但没有可声称的墙钟收益。
+
 **`fip` 标注本身自我否决**：最严读法下全部函数 7.9%、std 公开面 14.0% 可标，且可标集合
 全是访问器与 IO；`map.insert`/`pvec.push`/`list.reverse` 这些 `fip` 存在理由一个都标不上
 （S3 之后集合是 Array 背身、arity 动态，Koka 的固定 arity 复用信用对不上）。且 Dawn 没有
