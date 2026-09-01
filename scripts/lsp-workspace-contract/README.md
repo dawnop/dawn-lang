@@ -24,3 +24,10 @@ Every mutant is compiled before its one selected case runs. A mutant is
 accepted as red only when the output contains that case's owning failure label;
 a build failure, timeout, protocol failure, or unrelated assertion is not a
 negative control.
+
+`roster_check.py` keeps the two numbers in the design's section 9 heading tied
+to `workspace.py`'s `CASES` dictionary and the top-level `expect_mutant_red`
+calls in `run.sh`. The latter is the mutant source of truth because a mutation
+branch that is never compiled and run is not behavioral evidence. The contract
+preflight also changes each documented count in memory and requires both
+negative controls to turn the same check red.
