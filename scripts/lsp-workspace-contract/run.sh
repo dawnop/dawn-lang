@@ -20,6 +20,14 @@ for command in java javac jar python3; do
   command -v "$command" > /dev/null || fail "missing required command: $command"
 done
 
+# The design heading is a hard count claim. Its case roster is workspace.py's
+# CASES dictionary; its mutant roster is the top-level expect_mutant_red calls
+# below, because only a call that compiles a mutant and runs its owning case is
+# a behavioral negative control. The preflight also perturbs both documented
+# counts so a checker that can no longer go red fails before the expensive
+# private compiler builds begin.
+python3 "$here/roster_check.py" --self-test
+
 "$dawn" --version > "$work/version.out" 2> "$work/version.err" || {
   cat "$work/version.out" >&2
   cat "$work/version.err" >&2

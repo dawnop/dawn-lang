@@ -289,7 +289,7 @@ label 才算负控见红，build failure、timeout、协议错误或无关 asser
 - last close、shutdown、running exit、EOF、fatal framing 与 injected close failure 的 cleanup；
 - Unavailable 在 `didChange` 不重试、在 `didSave` 才重试。
 
-对应 18 个 compiling mutants 包括退化为 project-only identity。该 mutant 由
+对应的 compiling mutants 包括退化为 project-only identity。该 mutant 由
 `source-root-identity` case 的唯一 `SOURCE_ROOT_WORKSPACE_MERGED` assertion 定向打红；合同不只
 计数 lease，还验证两侧 diagnostics、definition 与 module resolution。
 
