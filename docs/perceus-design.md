@@ -853,6 +853,20 @@ record spread 的 direct-map 预算，而是新增 focused record-wrapper leg：
 热缓存下以各自冻结的 native compiler 连跑自编译，旧版 5 次中位数 6.81s、新版 5 次中位数
 6.91s（约 +1.5%，在墙钟噪声量级内）；确定性的复用计数上升，但没有可声称的墙钟收益。
 
+**#31 已接在 #30 后落地（2026-09-01）。** `std/hamt.node_put` 的 branch descent 现在与
+`std/pvec.push_tail` 用同一个合同：先以 `array_steal(kids, pos)` 暂时清空 slot，把 child 的
+slot owner 交给递归，再以 `array_with` 把 rebuilt child 写回同一位置。shared array 上 steal
+保守退化为 get+dup；unique array 上 parent 不再沿整个下降路径多钉一个 child owner。
+
+独立基线固定在 #30 提交：同一当前前端负载从 `180,605 / 32,285`（84.84%）到
+`184,825 / 28,065`（86.82%，多 4,220 次原地写）；新增的 hamt steal 中 36,826 次直接
+transfer、27,915 次因该层仍 shared 而保守 dup。focused gate 的 direct-map 从
+`249,936 / 682,352`（36.6%）升到 `682,352 / 682,352`（100%），record-wrapper 从
+`199,968 / 566,176`（35.3%）升到 `566,176 / 566,176`（100%）；两项预算都升到 95%，
+borrowed-assoc 与 keep-record-source mutant 仍把各自管辖的复用率打回 0%，新增的
+get-child-again N−1 mutant 则把 direct/record 分别精确打回 36.6%/35.3%，并让独立的
+`child_steal_taken` 从 100% 红到没有一次 steal。
+
 **`fip` 标注本身自我否决**：最严读法下全部函数 7.9%、std 公开面 14.0% 可标，且可标集合
 全是访问器与 IO；`map.insert`/`pvec.push`/`list.reverse` 这些 `fip` 存在理由一个都标不上
 （S3 之后集合是 Array 背身、arity 动态，Koka 的固定 arity 复用信用对不上）。且 Dawn 没有

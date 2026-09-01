@@ -158,7 +158,13 @@ fn node_put[K: Eq, V](
       if bm & bit == 0 {
         NBranch(bm | bit, arr_insert(kids, pos, NLeaf(h, k, v, seq)))
       } else {
-        let sub = node_put(array_get(kids, pos), shift + BITS, h, k, v, seq)
+        # Match pvec.push_tail's descent: remove the child before recursing,
+        # so the slot does not pin a second reference throughout the deeper
+        # update. The recursion receives the child at its true count, then
+        # array_with fills the temporarily empty slot and can reuse `kids` at
+        # its own last use.
+        let child = array_steal(kids, pos)
+        let sub = node_put(child, shift + BITS, h, k, v, seq)
         NBranch(bm, array_with(kids, pos, sub))
       }
     }

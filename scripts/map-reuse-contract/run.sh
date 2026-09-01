@@ -23,21 +23,20 @@
 # the `finished` control below has to stay green under the mutant, and why
 # this needs a counter for an oracle rather than an output.
 #
-# The direct leg's budget is against the measured cliff, array-contract's
-# style. With the rebuild-shape rule in `c/infer.proj_demands`, the workload
-# measures 249,936
-# in-place stores against 432,416 copies (36.6%), and with `std/hamt.assoc`'s
-# map borrowed again it measures 0 in-place against 682,352 copies (0.0%).
-# 25% sits between the two with room on both sides, and the direction of any
-# future improvement (reuse deeper in the descent) is up.
+# The direct leg's original budget sat between the rebuild-shape rule's
+# 249,936 in-place / 432,416 copied (36.6%) and a borrowed `std/hamt.assoc`'s
+# 0/682,352 (0.0%). After node_put began stealing its descent child (#31), the
+# clean workload is 682,352/682,352 (100%) and the borrowed mutant remains 0%;
+# 95% holds that independently measured gain with room for small workload
+# drift.
 #
 # A second workload puts the same accumulator in `State { ..st, values:
 # map.insert(st.values, ...) }`. After the #30 scheduling fix it measures
-# 199,968/566,176 (35.3%); a private compiler with the scheduling call removed
-# measures 0/566,176 while still printing the same answer. Its 30% budget and
-# source mutant make the record lifetime independently observable. The direct
-# leg stays green under that mutant, proving the failure is not manufactured
-# by breaking hamt itself.
+# 199,968/566,176 (35.3%) before #31 and 566,176/566,176 (100%) after it; a
+# private compiler with the scheduling call removed measures 0/566,176 while
+# still printing the same answer. Its 95% budget and source mutant make the
+# record lifetime independently observable. The direct leg stays green under
+# that mutant, proving the failure is not manufactured by breaking hamt itself.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -46,8 +45,8 @@ cc_bin="${CC:-cc}"
 
 # in-place/(in-place+copied), in percent. The original direct-hamt assertion
 # keeps its measured cliff; the record-spread leg has its own post-fix band.
-hamt_rate_budget=25
-record_rate_budget=30
+hamt_rate_budget=95
+record_rate_budget=95
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -64,11 +63,13 @@ fail() {
 # under test).
 observed="$work/observed.txt"
 : > "$observed"
-run_leg() { # label flips compiler
-  local label="$1" flips="$2" compiler="$3"
+run_leg() { # label flips compiler [std-dir]
+  local label="$1" flips="$2" compiler="$3" std_dir="${4:-}"
+  local std_args=()
+  [ -z "$std_dir" ] || std_args=(--std "$std_dir")
   local dir="$work/${label:-clean}/direct"
   mkdir -p "$dir"
-  DAWN_RC_MODE_FLIPS="$flips" "$compiler" __emitc "$here/insert_native.dawn" \
+  DAWN_RC_MODE_FLIPS="$flips" "$compiler" __emitc "${std_args[@]}" "$here/insert_native.dawn" \
     -o "$dir/insert.c"
   "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror \
@@ -90,11 +91,11 @@ run_leg() { # label flips compiler
     [ -z "$label" ] || printf 'red\t%s\t%s\n' "$label" finished >> "$observed"
   fi
 
-  local stats in_place copied total pct
+  local stats in_place copied stolen steal_dup total pct steal_total steal_pct
   stats="$(grep '^rc-stats:' "$dir/err.txt" || true)"
-  read -r in_place copied <<EOF
+  read -r in_place copied stolen steal_dup <<EOF
 $(printf '%s\n' "$stats" | sed -n \
-  's/^rc-stats: array_with in-place \([0-9]*\), copied \([0-9]*\),.*$/\1 \2/p')
+  's/^rc-stats: array_with in-place \([0-9]*\), copied \([0-9]*\), array_steal taken \([0-9]*\), dup \([0-9]*\),.*$/\1 \2 \3 \4/p')
 EOF
   [ -n "${copied:-}" ] || fail "no rc-stats line in ${label:-the clean run}'s stderr"
   total=$((in_place + copied))
@@ -111,6 +112,18 @@ EOF
       fail "the map/set write path lost in-place reuse. See c/infer.proj_demands
       and docs/perceus-design.md 6.4; scripts/array-contract cannot see this."
   fi
+
+  steal_total=$((stolen + steal_dup))
+  steal_pct=$((stolen * 100 / (steal_total == 0 ? 1 : steal_total)))
+  if [ "$steal_total" -gt 0 ] &&
+      [ "$((stolen * 100))" -ge "$((steal_total * hamt_rate_budget))" ]; then
+    echo "     child_steal_taken  ok    ${stolen}/${steal_total} taken (${steal_pct}%)"
+  else
+    echo "     child_steal_taken  FAIL  ${stolen}/${steal_total} taken (${steal_pct}%, budget ${hamt_rate_budget}%)"
+    [ -z "$label" ] || printf 'red\t%s\t%s\n' "$label" child_steal_taken >> "$observed"
+    [ -n "$label" ] ||
+      fail "hamt.node_put stopped stealing its descent child"
+  fi
 }
 
 # The focused #30 leg. Its only difference from the direct accumulator is one
@@ -118,11 +131,13 @@ EOF
 # answer stays correct but every hamt root arrives shared. Keeping the two
 # programs separate makes `hamt_in_place` a negative control for the record
 # mutant instead of letting one aggregate percentage hide which layer moved.
-run_record_leg() { # label flips compiler
-  local label="$1" flips="$2" compiler="$3"
+run_record_leg() { # label flips compiler [std-dir]
+  local label="$1" flips="$2" compiler="$3" std_dir="${4:-}"
+  local std_args=()
+  [ -z "$std_dir" ] || std_args=(--std "$std_dir")
   local dir="$work/${label:-clean}/record"
   mkdir -p "$dir"
-  DAWN_RC_MODE_FLIPS="$flips" "$compiler" __emitc "$here/record_update_native.dawn" \
+  DAWN_RC_MODE_FLIPS="$flips" "$compiler" __emitc "${std_args[@]}" "$here/record_update_native.dawn" \
     -o "$dir/record.c"
   "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror \
@@ -164,11 +179,11 @@ EOF
 # The roster the matrix names has to be the roster this script checks, or the
 # comparison below is between two different questions.
 awk -F '\t' '$1 == "assert" { print $2 }' "$here/matrix.txt" > "$work/roster.txt"
-printf 'finished\nhamt_in_place\nrecord_finished\nrecord_spread_in_place\n' > "$work/ran.txt"
+printf 'finished\nhamt_in_place\nchild_steal_taken\nrecord_finished\nrecord_spread_in_place\n' > "$work/ran.txt"
 diff -u "$work/roster.txt" "$work/ran.txt" ||
   fail "matrix.txt names a different assertion roster than run.sh checks"
 awk -F '\t' '$1 == "role" { print $2 }' "$here/matrix.txt" > "$work/mutants.txt"
-printf 'borrow-hamt-assoc-again\nkeep-record-spread-source\n' > "$work/mutants.ran.txt"
+printf 'borrow-hamt-assoc-again\nkeep-record-spread-source\nget-hamt-child-again\n' > "$work/mutants.ran.txt"
 diff -u "$work/mutants.txt" "$work/mutants.ran.txt" ||
   fail "matrix.txt names a different mutant roster than run.sh executes"
 
@@ -230,6 +245,33 @@ run_leg "$mutation" "" "$mdir/dawn"
 run_record_leg "$mutation" "" "$mdir/dawn"
 cmp -s "$work/clean/record/record.c" "$work/$mutation/record/record.c" &&
   fail "$mutation changed no record-update C"
+
+# The #31 N-1 mutant restores node_put's old get+recursive-call pair in a
+# private std tree. It needs no mutant compiler: --std is the normal input
+# boundary, and using the production compiler here keeps the mutation to the
+# one source line whose ownership contract the new assertion names.
+mutation=get-hamt-child-again
+echo "  $mutation"
+sdir="$work/$mutation/source"
+mkdir -p "$work/$mutation"
+cp -R "$root/std" "$sdir"
+python3 - "$sdir/hamt.dawn" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+old = """        let child = array_steal(kids, pos)
+        let sub = node_put(child, shift + BITS, h, k, v, seq)"""
+new = """        let sub = node_put(array_get(kids, pos), shift + BITS, h, k, v, seq)"""
+if text.count(old) != 1:
+    raise SystemExit("get-hamt-child-again: mutation anchor drifted")
+path.write_text(text.replace(old, new))
+PY
+run_leg "$mutation" "" "$root/bin/dawn" "$sdir"
+run_record_leg "$mutation" "" "$root/bin/dawn" "$sdir"
+cmp -s "$work/clean/direct/insert.c" "$work/$mutation/direct/insert.c" &&
+  fail "$mutation changed no hamt C"
 
 expected="$work/expected.txt"
 awk -F '\t' '$1 == "red" { print }' "$here/matrix.txt" | LC_ALL=C sort > "$expected"
