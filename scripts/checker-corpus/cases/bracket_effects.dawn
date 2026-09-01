@@ -1,12 +1,13 @@
-# `bracket` is effect-polymorphic in its own row; the two catch primitives
-# beside it raise `!io` whatever their argument raises (SEM-11,
-# docs/audit/error-model-design.md 六.11 and §7.3). The golden pins both
-# halves: a pure `bracket` produces nothing, and a pure `catch_panic` /
-# `catch_fault` still produces the `!io` complaint they always did.
+# `bracket` is effect-polymorphic in its own row. `catch_panic` beside it
+# raises `!io` whatever its argument raises, and `catch_fault` stopped doing so
+# on 2026-09-01 (SEM-11, docs/audit/error-model-design.md 六.11, §7.3 and
+# §7.5). The golden pins all three: a pure `bracket` and a pure `catch_fault`
+# produce nothing, a pure `catch_panic` still produces the `!io` complaint it
+# always did.
 #
-# The barriers do bind an effect parameter over the closure they protect
-# (#343), which is a different question and is `catch_effects.dawn` next door.
-# The two lines at the bottom of this file are the part that did not move.
+# All three bind an effect parameter over the closure they protect (#343),
+# which is a different question and is `catch_effects.dawn` next door. The two
+# lines at the bottom of this file are the part that tells the barriers apart.
 effect Ask {
   fn get() -> Int
 }
@@ -26,10 +27,13 @@ fn use_impure(n: Int) -> Unit = bracket(n, x => (), x => println(to_string(x)))
 
 fn release_impure(n: Int) -> Int = bracket(n, x => println("bye"), x => x)
 
-# The catch pair holds `!io`, so these two are refused in a pure signature
-# even though nothing they call is impure.
+# `catch_panic` holds `!io`, so this one is refused in a pure signature even
+# though nothing it calls is impure.
 fn caught_panic(n: Int) -> Result[Int, ForeignError] = catch_panic(() => n)
 
+# ...and its neighbour, the same line one word apart, is not. A repair that
+# reached both barriers instead of one shows up as this line going silent
+# together with the one above it rather than on its own.
 fn caught_fault(n: Int) -> Result[Int, ForeignError] = catch_fault(() => n)
 
 pub fn main() -> Unit !io = { println(to_string(pure_bracket(1))) }

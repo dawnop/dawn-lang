@@ -1,7 +1,9 @@
 # The two io barriers bind an effect parameter over the closure they protect
-# and still raise `!io` themselves (#343, SEM-11 §7.4). Those are two separate
-# claims and this case pins both, because the shape only makes sense if both
-# hold: the closure's row is free, the barrier's row is not.
+# (#343, SEM-11 §7.4), and since 2026-09-01 they no longer agree about their
+# own rows (§7.5): `catch_fault` carries the closure's row and adds nothing,
+# `catch_panic` still raises `!io`. Those are separate claims and this case
+# pins each of them, because the shape only makes sense together: the closure's
+# row is free for both barriers, and the barrier's own row is free for one.
 #
 # What the golden must show, and what it must go on *not* showing:
 #
@@ -10,8 +12,13 @@
 #     the ordinary "does not declare" complaint, at the label. A barrier that
 #     swallowed the label would make those two lines silent, which is the
 #     failure this case is aimed at.
-#   - the barrier is still `!io`. A pure signature that calls one is refused
+#   - `catch_panic` is still `!io`. A pure signature that calls it is refused
 #     even when nothing inside the closure is impure.
+#   - `catch_fault` is not, and "accepted" is too weak to pin that: a barrier
+#     that had widened its row to `!(e|io)` would also accept a pure caller's
+#     `!io` signature. So a pure caller of `catch_fault` is handed to a slot
+#     that takes a pure function value, which is a claim about the row and not
+#     about the diagnostic count.
 effect Ask {
   fn get() -> Int
 }
@@ -19,36 +26,53 @@ effect Ask {
 fn asks() -> Int !Ask = get()
 
 # accepted: the label crosses the barrier and is declared by the caller, which
-# is the whole point of the change. This line did not compile before #343.
-fn caught_labelled() -> Result[Int, ForeignError] !Ask !io = catch_fault(asks)
+# is the whole point of #343. This line did not compile before it.
+fn caught_labelled() -> Result[Int, ForeignError] !Ask = catch_fault(asks)
 
-# accepted: a handler answers it here instead, so nothing reaches the row
-fn caught_handled() -> Result[Int, ForeignError] !io = {
+# accepted: a handler answers it here instead, so nothing reaches the row --
+# and nothing is left for the barrier to add, so this one is pure outright
+fn caught_handled() -> Result[Int, ForeignError] = {
   with handle Ask { get() => 7 }
   catch_fault(() => asks())
 }
 
 # accepted: the row spelled as a variable and forwarded, the shape a std
-# wrapper would have
+# wrapper would have. `catch_panic` still adds its own `!io` on top of it.
 fn guarded(f: fn() -> Int !e) -> Result[Int, ForeignError] !e !io = catch_panic(f)
 
-# accepted: a pure closure still crosses, which is the old shape unchanged
-fn caught_pure(n: Int) -> Result[Int, ForeignError] !io = catch_fault(() => n)
+# accepted: the same wrapper over the other barrier, which is the shape that
+# #343 alone could not deliver -- the `!io` here is gone, not merely optional
+fn guarded_fault(f: fn() -> Int !e) -> Result[Int, ForeignError] !e = catch_fault(f)
+
+# accepted: a pure closure still crosses, and the caller stays pure
+fn caught_pure(n: Int) -> Result[Int, ForeignError] = catch_fault(() => n)
+
+# accepted, and this is the line that pins the row rather than the acceptance:
+# the slot takes a *pure* function value, so a `caught_pure` that had picked up
+# an `io` anywhere would be an argument type mismatch here
+fn apply_pure(f: fn(Int) -> Result[Int, ForeignError], n: Int) -> Result[Int, ForeignError] =
+  f(n)
+
+fn pure_slot() -> Result[Int, ForeignError] = apply_pure(caught_pure, 3)
+
+# accepted: over-declaring is legal, so a caller that has not got round to
+# dropping the `!io` still compiles. That is what makes the seed step of this
+# change one release rather than three.
+fn still_declares_io() -> Result[Int, ForeignError] !io = catch_fault(() => 1)
 
 # refused: the label crosses and the signature does not declare it. The
 # instantiated variable is charged to the caller exactly like `bracket`'s.
 fn label_undeclared() -> Result[Int, ForeignError] !io = catch_fault(asks)
 
-# refused: the barrier's own row is `!io` and purity still means purity, even
+# refused: `catch_panic`'s own row is `!io` and purity still means purity, even
 # though nothing this closure calls is impure
-fn pure_caller(n: Int) -> Result[Int, ForeignError] = catch_fault(() => n)
-
 fn pure_caller_panic(n: Int) -> Result[Int, ForeignError] = catch_panic(() => n)
 
 # refused: the label is declared and the `!io` is not, which separates the two
-# rows in one diagnostic -- a barrier that had merely widened its own row to
-# `!e` would leave this line accepted
-fn io_undeclared() -> Result[Int, ForeignError] !Ask = catch_fault(asks)
+# rows in one diagnostic. This line used to read `catch_fault` and was the
+# minimal sample of what §7.5 unlocked; the same line over `catch_fault` is
+# `caught_labelled` at the top of this file and is accepted now.
+fn panic_io_undeclared() -> Result[Int, ForeignError] !Ask = catch_panic(asks)
 
 pub fn main() -> Unit !io = {
   with handle Ask { get() => 1 }

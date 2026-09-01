@@ -817,18 +817,29 @@ fn comptime_rejects() -> List[String] = {
     out = out ++ ["bytes_" ++ op]
   }
   # io is the point: a compile must not read files or spawn processes because
-  # a source file said so. `args` is the same rule at the process boundary,
-  # and `catch_fault`/`catch_panic` take an `!io` thunk they would have to run.
+  # a source file said so. `args` is the same rule at the process boundary.
   for op in ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
     "delete", "rename", "temp_dir", "temp_file", "copy_permissions", "is_symlink", "read_stdin",
     "stdin_ready", "list_names", "run"] {
     out = out ++ ["io_" ++ op]
   }
-  # `bracket` takes two of those closures. It is refused for the reason the
-  # barriers are and one more: a `const` cannot hold a resource, so there is
-  # nothing here to protect and nothing for a release to give up -- folding it
-  # would be inventing the answer rather than computing it.
+  # The two barriers are refused for a reason of their own, and it is not the
+  # row they raise -- `catch_fault` raises none since 2026-09-01
+  # (docs/audit/error-model-design.md §7.5), so "they take an `!io` thunk they
+  # would have to run" stopped being the answer. What they would fold is a
+  # `ForeignError`, and its fields belong to the build rather than to the
+  # program: `kind` is declared backend-dependent
+  # (`java.lang.NumberFormatException` on the JVM, `"fault"` on native --
+  # runtime-intrinsics-design.md §12.4), and `catch_panic`'s `message` is too,
+  # on top of being a function of the source text an `assert` was written with.
+  # Folding either into a constant bakes the compiler that ran into the
+  # artifact it produced.
+  #
+  # `bracket` needs a ground of its own, being effect-polymorphic and catching
+  # nothing: a `const` cannot hold a resource, so there is nothing here to
+  # protect and nothing for a release to give up, and folding it would be
+  # inventing the answer rather than computing it.
   out = out ++ ["args", "catch_fault", "catch_panic", "bracket"]
   # The retained reactor root is process/module state. A comptime evaluation
   # has neither a reactor instance nor a turn boundary in which one could live.

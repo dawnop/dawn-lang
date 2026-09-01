@@ -1,0 +1,141 @@
+# A `bracket` release that escapes a *fault* while a discard is unwinding
+# (docs/oneshot-design.md §11.12, spec §9.8.2).
+#
+# `ctl_discard.dawn` §7 already holds the precedence rule shut -- the walk does
+# not stop, every remaining release still runs, and the first failure is the
+# one delivered after the unwind. It does so with a release that panics, and
+# observes it with `catch_panic`. So the other half of the split had no corpus
+# at all on either backend: a release that raises a **fault**, and the two
+# barriers' different answers to it. This file is that half.
+#
+# The payload cannot be pinned as text. `ForeignError.kind` is declared
+# backend-dependent (docs/runtime-intrinsics-design.md §12.4): the same missing
+# file is `java.nio.file.NoSuchFileException` on the JVM and `fault` on native,
+# and `message` is the backend's own too. So every crossed failure here is
+# compared against **the same fault raised with no discard in the way**, which
+# is the comparison `bracket_release_fails.dawn` uses for the same reason. A
+# corpus that spelled the kind out would pass on one backend by construction.
+#
+# The second subject is sharper and is why this file exists now rather than
+# with §7. The discard runs from a signature the checker types as **pure**:
+# §11.2 gives a continuation the type `fn(T) -> U` with a pure row, so a pure
+# function can hold one, and `discard` is pure for the same reason. Since
+# `catch_fault` stopped raising a row of its own
+# (docs/audit/error-model-design.md §7.5) the observation point is pure too.
+# `drop_caught` below therefore has a pure signature, is handed to a slot that
+# accepts only a pure function value, and returns `Err`. That is the named
+# exception to "a fault only comes from io" recorded in spec §9.8.1, and it is
+# a §11.2 hole rather than a barrier one: nothing about the barrier's row put
+# the io there, the continuation did.
+use std/io
+use std/str
+use std/raw
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+## The fault every case here raises, discarded or bare.
+fn read_missing() -> Int !io = str.len(raw.read_file("/no/such/dawn/path"))
+
+## The same failure with nothing in the way, to compare the crossed ones
+## against.
+fn bare_fault() -> ForeignError !io =
+  match catch_fault(read_missing) {
+    Ok(_) -> panic("the read was supposed to fail")
+    Err(e) -> e
+  }
+
+fn plain_release(tag: String) -> Unit !io = io.println("release ${tag}")
+
+## A release that raises a fault and does not catch it. The second line never
+## runs, which is part of what the transcript asserts.
+fn faulting_release(tag: String) -> Unit !io = {
+  io.println("release ${tag}")
+  io.println("unreachable ${to_string(read_missing())}")
+}
+
+## The observation point, and the whole point: no row. `discard` is pure
+## because a continuation is an ordinary value (§11.2), and `catch_fault` adds
+## nothing to the row it is given (§7.5), so this signature is pure -- and it
+## can still answer `Err`.
+fn drop_caught(k: fn(Int) -> Result[String, ForeignError]) -> Result[Unit, ForeignError] =
+  catch_fault(() => discard(k))
+
+## A slot that takes a pure function value. `drop_caught` reaching the arm
+## through here is a claim about its *row*, checked at compile time: an
+## observation point that had kept a row of its own would not fit, and this
+## file would stop compiling rather than print a different number.
+fn apply_pure(
+  f: fn(fn(Int) -> Result[String, ForeignError]) -> Result[Unit, ForeignError],
+  k: fn(Int) -> Result[String, ForeignError]
+) -> Result[Unit, ForeignError] = f(k)
+
+## Two brackets around a suspension, the inner one released by `rel`. The arm
+## abandons the continuation, so both releases run innermost first while the
+## discard walks out.
+fn discarding(rel: fn(String) -> Unit !io) -> Result[String, ForeignError] !io = {
+  with handle Ask {
+    ask(n) resume k =>
+      match apply_pure(drop_caught, k) {
+        Ok(_) -> Ok("discard finished at ${to_string(n)}")
+        Err(e) -> Err(e)
+      }
+  }
+  with a <- bracket("kept", plain_release)
+  with b <- bracket("lost", rel)
+  Ok("unreachable ${to_string(ask(1))}")
+}
+
+## The same shape with no barrier inside the arm: the escaping fault leaves the
+## discard, leaves the arm, leaves `discarding`, and is taken by whichever
+## barrier the caller wrapped around it.
+fn discarding_uncaught(rel: fn(String) -> Unit !io) -> String !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      "unreachable arm ${to_string(n)}"
+    }
+  }
+  with a <- bracket("kept", plain_release)
+  with b <- bracket("lost", rel)
+  "unreachable ${to_string(ask(1))}"
+}
+
+fn compare(label: String, bare: ForeignError, e: ForeignError) -> Unit !io = {
+  io.println("${label} same kind      ${to_string(bare.kind == e.kind)}")
+  io.println("${label} same message   ${to_string(bare.message == e.message)}")
+}
+
+pub fn main() -> Unit !io = {
+  let bare = bare_fault()
+
+  # the control first: the same discard with a release that does not fail, so
+  # an `Err` below is the release's and not the discard's
+  io.println("-- a discard whose releases all succeed --")
+  match discarding(plain_release) {
+    Ok(s) -> io.println(s)
+    Err(_) -> io.println("unexpectedly faulted")
+  }
+
+  io.println("-- a release faults during the unwind, taken inside the arm --")
+  match discarding(faulting_release) {
+    Ok(s) -> io.println("unexpectedly finished: ${s}")
+    Err(e) -> compare("inner", bare, e)
+  }
+
+  io.println("-- the same fault, escaping the arm into catch_fault --")
+  match catch_fault(() => discarding_uncaught(faulting_release)) {
+    Ok(s) -> io.println("unexpectedly finished: ${s}")
+    Err(e) -> compare("fault", bare, e)
+  }
+
+  # `catch_panic` takes both kinds, so it takes this one too, and §12.4 says it
+  # has to report it identically. A fault reported differently by the two
+  # barriers is the defect catch_kinds.dawn exists to keep out.
+  io.println("-- and the same fault into catch_panic, which reports it alike --")
+  match catch_panic(() => discarding_uncaught(faulting_release)) {
+    Ok(s) -> io.println("unexpectedly finished: ${s}")
+    Err(e) -> compare("panic", bare, e)
+  }
+}

@@ -1695,8 +1695,12 @@ pub const EV_PACK_ID: Int = -3
 ##       that a closure owing evidence was refused at the argument before any
 ##       of this. It was refused, and that was the defect rather than the
 ##       guarantee: a labelled closure could not be protected at all. The
-##       barriers now bind `!e` (`catch_fault[T, !e]`), so their ABI row is
-##       `!(e|io)`, worth one slot, and the call site fills it.
+##       barriers now bind `!e` (`catch_fault[T, !e]`), so their ABI row
+##       carries a variable, worth one slot, and the call site fills it. The
+##       slot count is why the two barriers can differ in their own rows and
+##       still share one shim: `catch_fault` raises `!e` and `catch_panic`
+##       raises `!(e|io)`, and `nev` is 1 either way because `io` occupies no
+##       slot.
 ##
 ##   the SAM bridge (`jvm/emit.gen_sam_bridge`)
 ##       **the pack, and it is a snapshot rather than a call site's.** A
@@ -2707,8 +2711,10 @@ fn eff1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff: e }
 ## One declared effect parameter. A signature that binds a variable it does not
 ## itself raise has to say so here, because `sig_abi_eff` reads the binder list
 ## and not the parameter types: the row of `f: fn() -> T !e` is the closure's,
-## and the slot that carries its evidence is the signature's. The catch pair is
-## the only entry of the table in that shape.
+## and the slot that carries its evidence is the signature's. `catch_panic` is
+## the only entry of the table in that shape; `catch_fault` was its twin until
+## it started raising the variable it binds (error-model-design.md §7.5), which
+## moved it to `effp1`.
 fn ep1(s: Sig, e: Eff) -> Sig = Sig { ..s, eparams: [e] }
 
 ## The row *and* the binder, for the entries that raise the variable they
@@ -2860,23 +2866,34 @@ pub fn builtins() -> Map[String, Sig] = {
     # these two entries were flipped at zero callers (v0.33.0), and the call
     # sites came back here. The transitional pair is gone.
     #
-    # The protected closure's row is a variable and the barrier's own row is
-    # not. Those are two different questions, and SEM-11 separates them
-    # (docs/audit/error-model-design.md §7.4): "whoever observes a failure is
-    # impure" constrains the row this primitive *raises*, which stays `!io`
-    # because it hands a caught failure back as a value. What `f` may raise is
-    # not observed by anyone here -- an effect is answered by its handler,
-    # which sits outside and is untouched by a barrier crossing it -- so
-    # pinning `f` to `!io` only meant that a labelled closure could not be
-    # protected at all. `!e` is declared rather than merely mentioned, because
-    # `sig_abi_eff` counts binders: without the binder the row would be `!io`
-    # alone, the call site would pass no pack, and the closure would walk a
-    # null one.
-    eff1(
-      ep1(tp1(bsig("catch_fault", [TyFn([], t, e)], ["f"],
-        result_ty(t, foreign_error_ty())), t), e),
-      EIo
-    ),
+    # The protected closure's row is a variable, and since 2026-09-01 so is
+    # this barrier's own (docs/audit/error-model-design.md §7.5). SEM-11's
+    # criterion did not change -- "whoever observes a failure is impure" -- it
+    # was read against *which* failure is observed. A fault is raised by the
+    # outside world, and every route out there is charged before it can raise
+    # one: an io primitive and a `use java` call are both unconditionally `EIo`
+    # (checker.dawn). So whoever can reach an `Err` here is already impure, and
+    # a second `!io` from the barrier is a charge nobody owes. That is what
+    # pinning it cost: a closure whose row is a label rather than `io` could
+    # cross the barrier (§7.4) but the caller was still charged `io` for the
+    # crossing, so a std wrapper over a named effect could never come out of
+    # one with a label-only row.
+    #
+    # `catch_panic` next door is deliberately not like this, and the two
+    # signatures differ from here on: nothing in the row records a panic, so
+    # the observer is the only place it can be recorded.
+    #
+    # The rule has one hole and it is `k`, not this primitive: §11.2 gives a
+    # continuation the type `fn(T) -> U` with a pure row, so a pure signature
+    # that resumes or discards one can deliver a fault after all. That is a
+    # §11.2 hole, it predates this entry, and it is written down in spec §9.8.1
+    # rather than papered over here.
+    #
+    # `!e` is declared rather than merely mentioned, because `sig_abi_eff`
+    # counts binders: without the binder the row would carry no variable, the
+    # call site would pass no pack, and the closure would walk a null one.
+    effp1(tp1(bsig("catch_fault", [TyFn([], t, e)], ["f"],
+      result_ty(t, foreign_error_ty())), t), e),
     # The reclaim's failure is a value, not an exception thrown through a
     # signature that says `pure` (docs/audit/error-model-design.md 二.B,
     # LANG-02). Still pure: a `ForeignError` handed back is not an effect, and
@@ -2896,9 +2913,16 @@ pub fn builtins() -> Map[String, Sig] = {
     # transitional spelling is gone; see 六.10.
     tp1(bsig("cast", [TyJava("java.lang.Object", "Object")], ["x"],
       result_ty(t, foreign_error_ty())), t),
-    # The other half of the split, and the same shape as `catch_fault` above
-    # for the same reason: `!e` is what `f` may raise, `!io` is what this
-    # primitive raises.
+    # The other half of the split, and no longer the same shape as
+    # `catch_fault` above. `!e` is still what `f` may raise. `!io` is still
+    # what *this* primitive raises, and that is the difference: a panic is a
+    # failure the language defines itself, so no row anywhere records that one
+    # can happen, and the only place it can be recorded is the barrier that
+    # turns it into a value. Its observables say why that matters -- an
+    # `assert` message is a function of the source text and a runtime failure's
+    # message differs between the backends -- so a pure caller of this one
+    # would be a pure expression whose value is a function of typography and of
+    # which backend built it (error-model-design.md §7.2, §7.5).
     eff1(
       ep1(tp1(bsig("catch_panic", [TyFn([], t, e)], ["f"],
         result_ty(t, foreign_error_ty())), t), e),
@@ -2940,19 +2964,19 @@ pub fn builtins() -> Map[String, Sig] = {
     # a call is a runtime primitive taking a closure, which is what
     # `catch_fault` already is. That is the intrinsic contract, not a second
     # implementation (docs/core-move2-design.md 2.6).
-    # Effect-polymorphic in its *own* row, which is where it differs from the
-    # two neighbours above: `release` and `use` share one row `e` and the call
-    # carries exactly that row. Nothing here observes a failure -- the release
-    # runs and the failure carries on -- so the primitive adds no effect of its
-    # own, and pinning it to `!io` would only mean that protecting a pure
-    # resource makes its user impure.
+    # Effect-polymorphic in its *own* row: `release` and `use` share one row
+    # `e` and the call carries exactly that row. Nothing here observes a
+    # failure -- the release runs and the failure carries on -- so the
+    # primitive adds no effect of its own, and pinning it to `!io` would only
+    # mean that protecting a pure resource makes its user impure.
     #
-    # The catch pair binds `!e` too, and still raises `!io`: what they hand
-    # back depends on the failure they caught, so they observe one and an
-    # observer is impure (docs/audit/error-model-design.md §7.3). That
-    # criterion is about the row the primitive raises, not about the row its
-    # argument may raise (§7.4), which is why the binder and the `!io` sit in
-    # one signature without contradiction.
+    # The three barriers now line up rather than splitting two against one
+    # (docs/audit/error-model-design.md §7.5): this one observes nothing, so
+    # `!e`; `catch_fault` observes a failure that something already paid `io`
+    # to make possible, so `!e` as well; `catch_panic` observes a failure
+    # nothing charged, so `!io`. What the criterion asks is not "does it
+    # observe" alone but "was the failure it observes already on someone's
+    # bill".
     #
     # The third parameter is `body` and not `use`, which is what it was called
     # until the builtin table grew a mirror a reader can paste (selfhost/
@@ -3908,13 +3932,25 @@ test "builtin table renders signatures" {
   }
   match map.get(bs, "catch_fault") {
     Some(s) -> {
-      # The catch pair binds a variable its own row does not carry -- `!e`
+      # This one carries the variable it binds, so it renders like `sort_by`
+      # above: the closure's row is the call's row and nothing is added
+      # (error-model-design.md §7.5).
+      assert sig_render(adts, traits, s) ==
+        "fn catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !e"
+    }
+    None -> { assert false }
+  }
+  match map.get(bs, "catch_panic") {
+    Some(s) -> {
+      # And this one binds a variable its own row does not carry -- `!e`
       # reaches nothing but the closure parameter, and the row is `!io` --
       # which is the case `eparams` exists for at all: only a binder entry can
       # say where it came from, and `types.sig_abi_eff` reads that entry to
-      # decide the evidence slot.
+      # decide the evidence slot. It is the last entry of the table in that
+      # shape, so deleting `eparams` would now be a one-signature repair and
+      # the assertion above would not notice.
       assert sig_render(adts, traits, s) ==
-        "fn catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io"
+        "fn catch_panic[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io"
     }
     None -> { assert false }
   }
@@ -3991,8 +4027,8 @@ test "the reclaim's failure is a value, under the one name left" {
     None -> { assert false }
   }
   # Pure, and deliberately: the failure became a value, so there is no effect
-  # to declare. The barriers are `!io` because the thunk they run is; this one
-  # runs nothing.
+  # to declare. This one also runs no thunk, which is why it is pure outright
+  # rather than effect-polymorphic the way `catch_fault` is.
   assert intr_at("cast").expect("cast").sig.eff == EPure
   # and the `rt` table does not carry it, although `dawn/rt/Io.cast` exists:
   # that route emits the descriptor the *signature* names, and this call needs
@@ -4019,22 +4055,33 @@ test "no barrier renders its failure into a String any more" {
   let adts = prelude_adts()
   let traits = prelude_traits()
   let bs = builtins()
+  # The rows differ and the payload does not, which is the point of asserting
+  # them together: the two barriers stopped being one shape on 2026-09-01
+  # (error-model-design.md §7.5) and the `ForeignError` they hand back did not
+  # move with them.
   for n in ["catch_fault", "catch_panic"] {
     match map.get(bs, n) {
       Some(s) -> {
+        let row = if n == "catch_fault" { "!e" } else { "!io" }
         assert sig_render(adts, traits, s) ==
-          "fn " ++ n ++ "[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io"
-        # and the barrier's own row is still `!io`, while the binder beside it
-        # buys exactly one evidence slot: SEM-11's criterion is about what the
-        # primitive raises, and opening the closure's row did not touch it
-        assert eff_base(s.eff) == EIo
+          "fn " ++ n ++ "[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] " ++ row
+        # and the binder buys exactly one evidence slot either way, because
+        # `io` occupies none: that is why one shim serves both rows
         assert nev(sig_abi_eff(s)) == 1
       }
       None -> { assert false }
     }
-    # and each reaches the io runtime, which is where a backend implements it
+    # and each reaches the io runtime, which is where a backend implements it.
+    # `RtIo` names the module a backend implements it in, not the row it
+    # raises: `catch_fault` raises no `io` and is still emitted there
+    # (docs/runtime-intrinsics-design.md §12.5).
     assert intr_at(n).expect(n).rt == Some(RtIo)
   }
+  # SEM-11's criterion, split by which failure is observed: a fault is the
+  # outside world's and something already paid `io` to reach it, a panic is the
+  # language's own and nothing charged it
+  assert intr_at("catch_fault").expect("catch_fault").sig.eff == EffVar("e", -1)
+  assert eff_base(intr_at("catch_panic").expect("catch_panic").sig.eff) == EIo
   for n in ["catch_fault_e", "catch_panic_e"] {
     match map.get(bs, n) {
       Some(_) -> { assert false }

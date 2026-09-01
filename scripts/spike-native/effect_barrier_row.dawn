@@ -9,18 +9,19 @@
 # not a property the error model ever asked for. Since 2026-08-25 both
 # barriers bind an effect parameter over the protected closure
 #
-#     fn catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io
+#     fn catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !e
 #
-# so their ABI row is `!(e|io)`, worth one evidence slot (`types.nev`), and the
-# call site fills it exactly as it fills `bracket`'s.
+# so their ABI row carries a variable, worth one evidence slot (`types.nev`),
+# and the call site fills it exactly as it fills `bracket`'s.
 #
-# The barrier's *own* row is still `!io`, and that is the other half of what
-# this file holds shut. Whoever observes a failure is impure
-# (docs/audit/error-model-design.md §7.3), and these observe one: what they
-# hand back depends on the failure they caught. Opening the closure's row does
-# not touch that, so `line_pure_refused` has no line here -- the checker corpus
-# owns the refusal (scripts/checker-corpus/cases/catch_effects.dawn), because
-# a program that does not compile has no transcript.
+# The two barriers' *own* rows differ since 2026-09-01
+# (docs/audit/error-model-design.md §7.5): `catch_fault` raises nothing of its
+# own, `catch_panic` still raises `!io`. That difference is invisible here on
+# purpose -- `nev` is 1 for both, because `io` occupies no slot, so one shim
+# serves both rows and this file measures the slot rather than the row. The
+# refusal that does depend on the row is the checker corpus's
+# (scripts/checker-corpus/cases/catch_effects.dawn), because a program that
+# does not compile has no transcript.
 #
 # **Every line below installs its own handler and answers a number no other
 # line answers.** That is load-bearing and was measured: with one `with handle`

@@ -377,11 +377,25 @@ SPEC_CONTRACTS = (
         ),
     ),
     (
-        "fixed catch effect row",
+        "the barriers' effect rows, which are no longer one row",
         (
-            ("docs/spec.md", "这一对的效果行**钉死 `!io`，不是变量**"),
-            ("docs/spec.en.md", "This pair's effect row is **pinned to `!io`, not a "
-             "variable**"),
+            ("docs/spec.md", "这一对的效果行**不再是同一个**"),
+            ("docs/spec.en.md", "This pair's effect row is **no longer one row**"),
+        ),
+    ),
+    (
+        "the three barriers in one line",
+        (
+            ("docs/spec.md", "于是**三个屏障排成一条线**"),
+            ("docs/spec.en.md", "So **the three barriers line up**"),
+        ),
+    ),
+    (
+        "the fault-only-from-io invariant, and its one exception",
+        (
+            ("docs/spec.md", "**fault 只从 io 来，除非它是被一条续延带过纯边界的。**"),
+            ("docs/spec.en.md", "**a fault only comes from io, unless a continuation "
+             "carried it across a pure boundary.**"),
         ),
     ),
     (

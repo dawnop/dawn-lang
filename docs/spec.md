@@ -2530,10 +2530,11 @@ fn parse(s: String) -> Result[Int, ForeignError] !io =
   # Err(ForeignError { kind: "java.lang.NumberFormatException", message: ..., cause: None })
 ```
 
-- 签名 `catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io`。被护闭包的行
+- 签名 `catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !e`。被护闭包的行
   是一个**效果参数** `!e`：闭包可为纯函数，可为 `!io`，也可带标签或效果变量，只要那些
-  效果在屏障之外有 handler 答。屏障**自己**的行仍是 `!io`，因为它把接住的失败当成值交
-  回去，而观察失败的人不纯（[`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.3、§7.4）。
+  效果在屏障之外有 handler 答。整个调用的行**就是**那一行——屏障自己不往里加任何东西。
+  它与配套的 `catch_panic` 从此不同形，理由见 §9.8.1 末与
+  [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.5。
 - 只拦 `java.lang.Exception` 及其子类；`Error` 不拦——**Dawn 的 panic
   （`dawn.rt.PanicError` 是 `Error` 子类）原样穿透**，panic 仍然是 bug、不可恢复。
 - `Err` 载荷是 `ForeignError`——一个 prelude record，字段与取值见 §9.8.1。它到
@@ -2541,8 +2542,10 @@ fn parse(s: String) -> Result[Int, ForeignError] !io =
   「需要区分异常种类时按前缀匹配字符串」；那条建议已被撤销，`kind` 是它的替代物。
 - 边界之内失败照常传播：`catch_fault` 包住整段复合调用即可，无需逐调用包裹。
 
-配套的 `catch_panic[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io`（同一形状，
-同一理由）拦的是**Dawn panic（`PanicError`）与 `Exception` 两类**——不是任意 `Throwable`：
+配套的 `catch_panic[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io` 只在参数位上
+同形：被护闭包的行同样是自由的，而这一个**自己的行钉死 `!io`**，因为它接住的失败没有
+任何行记录过（§9.8.1 末把两边排在一起）。它拦的是**Dawn panic（`PanicError`）与
+`Exception` 两类**——不是任意 `Throwable`：
 `VirtualMachineError`（堆耗尽、栈溢出）穿透，资源耗尽不是一个值。它用于**监督边界**——
 服务器的单个请求、任务 runner 的单次执行：一个请求 panic 应变成 500 并记录，而非掀翻
 整条连接或进程。它与 `catch_fault` 分工明确：`catch_fault` 处理**预期外部失败**、放
@@ -2589,10 +2592,29 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
 屏障只有这一对（**拦**失败的只有这一对；§9.8.2 的 `bracket` 什么都不拦），
 载荷只有 `ForeignError`，**不保留 String 版本**。
 
-这一对的效果行**钉死 `!io`，不是变量**——纯闭包也一样：捕获一个 panic 的结果取决于
-调用栈深度、取决于烘进消息里的 `file:line`，也取决于优化器折叠了多少次纯调用，
-三者都不是纯函数允许有的差别。§9.8.2 的 `bracket` 因此可以是效果多态的而它们不能：
-`bracket` 不观察失败。完整论证与重开条件见
+这一对的效果行**不再是同一个**：`catch_fault` 带的是被护闭包的行，`catch_panic` 钉死
+`!io`。判据没有变——观察失败的人不纯——变的是按**观察的是哪一种失败**来读它：
+
+- **fault 是外部世界造成的失败**，而通往外部世界的每一条路在能失败之前就已经记过账
+  （io 原语与 `use java` 调用无条件记 `!io`）。所以拿得到这个 `Err` 的人本来就不纯，
+  屏障再记一笔是记了一笔没人欠的账。
+- **panic 是语言自己定义的失败**，没有任何行记录它可能发生，于是只剩屏障这一处能记。
+  而它的可观察量恰是纯函数不许有的：`assert` 的消息是源码排版的函数，运行时自发的失败
+  消息两个后端不同（§9.8.1 只承诺 `panic(m)` 逐字节相同），优化器折叠与消重纯调用还会
+  改变捕获的次数。
+
+于是**三个屏障排成一条线**：§9.8.2 的 `bracket` 什么都不观察，`catch_fault` 观察的失败
+已经被 io 记过账，`catch_panic` 观察的失败没人记账。前两个的行是变量，第三个是 `!io`。
+
+> **这条线依赖一条带例外的不变式**：**fault 只从 io 来，除非它是被一条续延带过纯边界的。**
+> 续延的类型是 `fn(T) -> U`，行是纯的（[`docs/oneshot-design.md`](oneshot-design.md) §11.2
+> 的裁决：`k` 必须是能进 ADT 字段、进格子、进列表的普通值），所以一个**纯签名**的函数
+> 恢复或丢弃一条续延，就能把 remainder 里的 io 和它的 fault 带回自己的帧。两个后端都
+> 实测过这件事。这是 [`oneshot-design.md`](oneshot-design.md) §11.2 留下的洞，早于本条，
+> 本节不修它也不假装它不存在：受它影响的表达式可以被定型为纯却交出 `Err`，而 `Err` 的
+> `kind` 是后端相关的（本节上文）。要堵它得改续延的类型，不是改屏障的行。
+
+完整论证与重开条件见
 [`docs/audit/error-model-design.md`](audit/error-model-design.md) §七。
 
 > **历史**：把载荷从 String 换成 `ForeignError` 花了三个 release，因为一个内建的
@@ -2661,9 +2683,9 @@ with f <- bracket(open(path), close)
 - **效果行是变量 `!e`**：`release`、`use` 与整个调用共用同一行，`bracket` 自己不加任何
   效果。所以纯资源的 `bracket` 是纯的，`!io` 的是 `!io` 的，带标签的把标签原样传出去。
   §9.8 那对屏障同样绑一个效果参数（`catch_fault[T, !e]`），所以「被跑的闭包行是自由的」
-  这一点两边一样。剩下的真差别是这一行落在谁的签名上：`bracket` 自己的行就是那个变量，
-  屏障自己的行钉死 `!io`，因为它们把接住的失败当成值交回去。理由见
-  [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.3、§7.4。
+  这一点三个原语都一样。剩下的真差别只在 `catch_panic` 一个身上：它自己的行钉死 `!io`，
+  而 `bracket` 与 `catch_fault` 自己的行就是那个变量。理由见 §9.8.1 末与
+  [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.3、§7.4、§7.5。
 
 > 它不给 `defer` 那样的面语法：受保护的区间恒为**一次闭包调用**，所以
 > `return`/`?`/`break` 在语言层面就跨不出去，编译器也就不欠一套逃逸改写。

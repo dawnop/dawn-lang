@@ -402,6 +402,25 @@ C 侧没有,于是「往还不存在的目录里写文件」只在一个后端�
    所以 native 的 cast 恒出 `Ok`。这不是第二套错误模型,是**同一张表在一个后端
    上有一格是空的**——照第 2 条,以后填上也不算毁约。
 
+### 12.5 效果族的分界线不等于运行时模块的分界线
+
+`rt_of` 把 `catch_fault`、`catch_panic`、`bracket`、`discard` 都登记在 `RtIo` 名下,
+而这四个里有三个的签名不带 `EIo`。这不是漂移,是两张表回答的不是同一个问题:
+
+> **`RtIo` 回答的是「哪个后端模块实现它」,效果行回答的是「调用它的人要记什么账」。**
+
+树内注释早就把归属的理由写清了——「one implementation per backend, called by its own
+name in the module the table names」。`bracket` 与 `discard` 的签名从来不带 `EIo`,
+`catch_fault` 自 2026-09-01 起也不带([audit/error-model-design.md](audit/error-model-design.md) §7.5),
+四个原语全都仍由 `RtIo` 发射。
+
+两条线今天在 `io_*` 那 25 项上重合,在这四个原语上不重合,而且**将来会在更多地方不重合**:
+fs 族一旦从 `io` 里提升成具名效果 `!Fs`,`io_read_file` 的行是 `!Fs`,发射落点仍是 `RtIo`。
+所以别拿其中一张表去推另一张——「它在 `RtIo` 里,所以它是 `!io`」和「它不是 `!io`,
+所以它不该在 `RtIo` 里」两个方向都错。要改的是 `RtIo` 这个名字带的暗示,不是任何一边的
+内容;改名的代价(两个后端的模块名、`rt_class` 映射、契约脚本)超过它买到的清晰,所以
+现在只把这句话写下来。
+
 ## 13. 结论
 
 去 Java 和接 LLVM 是**同一套重构的两个视角**:立一层运行时 intrinsic 契约,把 `java.*` 全关进 JVM

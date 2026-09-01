@@ -335,6 +335,17 @@
   调不动这两个屏障。理由、机制与实测见
   [`error-model-design.md`](../audit/error-model-design.md) §7.4。
 
+- **追记（2026-09-01 裁决，写回本条）。** 上面那三条论证被逐条对着实现复核了一遍，结论是
+  它们是 **`catch_panic` 的论证**：论证一（调用栈）在 ERR-01 之后两个后端都不成立
+  （栈耗尽不在任一屏障的捕获名单里，到不了 `Result`），论证二、三只咬 panic。于是
+  `catch_fault` **自己的行**也放开成 `!e`，`catch_panic` 一个字不动：fault 是外部世界造成的
+  失败，通往外部世界的每条路已经记过 `io` 的账，屏障不必再记一笔；panic 没人记账，只剩
+  屏障能记。本条原始建议里那句「`catch_fault` 是否应保持 IO-only 可单独由 fault source
+  决定，不应把 panic 与 cleanup 一并绑死」到此兑现。三个屏障从此排成一条线，而不是二比一。
+  不变式「fault 只从 io 来」带一个具名例外（续延是纯 fn 值，见
+  [`oneshot-design.md`](../oneshot-design.md) §11.2），实测确认、本次不修。见
+  [`error-model-design.md`](../audit/error-model-design.md) §7.5。
+
 ## SEM-12 — P2 — “私有函数推断效果”实际只推断 base IO（已修）
 
 > **后续处置（2026-08-09）：已修。** 双语规范现按 checker 的真实分支写明：私有函数
