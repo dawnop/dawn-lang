@@ -246,12 +246,12 @@ tool17_require_line() {
 }
 
 tool17_asset_block() {
-  awk '
+  awk -v header="$2=(" '
     {
       line = $0
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
-      if (line == "EXPECTED_ASSETS=(") {
+      if (line == header) {
         inside = 1
         next
       }
@@ -272,7 +272,7 @@ tool17_validate() {
   local create_line
   local errors=0
   local exact_count
-  local expected_assets
+  local expected_assets expected_reports
   local native_line
   local publish_check_line
   local publish_upload_line
@@ -322,13 +322,24 @@ tool17_validate() {
     fi
   done
 
+  # Two declared lists since issue #29: the install set the READMEs fetch, and
+  # the pub-API report pair published beside it. Each block is pinned exactly;
+  # the union line EXPECTED_ASSETS=(...) that the publish step uploads is owned
+  # by doc-check.py's repository policy check, not here.
   expected_assets="$(printf '%s\n' \
     dawn-selfhost.jar \
     dawn-selfhost.jar.sha256 \
     dawnc-linux-x86_64 \
     dawnc-linux-x86_64.sha256)"
-  if [ "$(tool17_asset_block "$release_file")" != "$expected_assets" ]; then
-    echo "release.yml must publish exactly the four canonical asset names" >&2
+  if [ "$(tool17_asset_block "$release_file" INSTALL_ASSETS)" != "$expected_assets" ]; then
+    echo "release.yml must publish exactly the four canonical install asset names" >&2
+    errors=1
+  fi
+  expected_reports="$(printf '%s\n' \
+    dawn-pub-api.json \
+    dawn-pub-api-diff.md)"
+  if [ "$(tool17_asset_block "$release_file" REPORT_ASSETS)" != "$expected_reports" ]; then
+    echo "release.yml must publish exactly the two pub-API report asset names" >&2
     errors=1
   fi
   # shellcheck disable=SC2016 # literal workflow shell source
@@ -400,7 +411,7 @@ tool17_validate() {
 release_file="$root/.github/workflows/release.yml"
 wrapper_file="$root/scripts/selfhost-fixpoint.sh"
 if tool17_validate "$release_file" "$wrapper_file"; then
-  ok "release uses one cross-JDK recipe and an idempotent four-asset contract"
+  ok "release uses one cross-JDK recipe and an idempotent six-asset contract"
 else
   bad "release bypasses its canonical build, comparison, or publish contract"
 fi
@@ -459,6 +470,11 @@ sed 's/^[[:space:]]*dawnc-linux-x86_64\.sha256$/            dawnc-linux-amd64.sh
   "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-asset.yml"
 tool17_expect_reject "a wrong published asset name" \
   "$tool17_dir/release.wrong-asset.yml" "$tool17_dir/wrapper.base.sh"
+
+sed 's/^[[:space:]]*dawn-pub-api-diff\.md$/            dawn-api-diff.md/' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-report.yml"
+tool17_expect_reject "a wrong pub-API report asset name" \
+  "$tool17_dir/release.wrong-report.yml" "$tool17_dir/wrapper.base.sh"
 
 # shellcheck disable=SC2016 # mutate the guarded script's literal $work
 sed 's|\./scripts/build-release-jar\.sh -o "$work/dawn-selfhost\.jar"|java -Xss512m -jar seed.jar build selfhost -o "$work/dawn-selfhost.jar"|' \
