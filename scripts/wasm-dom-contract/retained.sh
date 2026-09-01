@@ -9,10 +9,12 @@
 #
 # A source-seam gate holds the retained-root intrinsics to std/reactor, the
 # compiler/runtime implementations and this contract's direct C ownership
-# probe. Its source mutant adds a call to an unrelated std module and must make
-# that gate fail. Two production mutants then independently drop the installed
-# root and commit a provisional root before a turn succeeds. They must compile,
-# run and go red on both backends; a compile failure is not credited.
+# probe. A copy-only count mutant adds one allowed-file occurrence; an
+# independent source mutant adds a call to an unrelated std module. Each must
+# make its own half of the seam gate fail. Two production mutants then
+# independently drop the installed root and commit a provisional root before a
+# turn succeeds. They must compile, run and go red on both backends; a compile
+# failure is not credited.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -82,6 +84,7 @@ EOF
 seam_files() { # <tree-root>
   (
     cd "$1"
+    # core-golden is emitted output: std.reactor.core legitimately contains these intrinsic names.
     grep -RIl --fixed-strings 'reactor_state_' . \
       --exclude=retained.sh \
       --exclude-dir=.dawn --exclude-dir=.git --exclude-dir=build \
@@ -108,7 +111,7 @@ check_seam() { # <tree-root>
   guard_count="$(grep -Fxc '        if reactor_state_has() { Some(reactor_state_get()) } else { None }' "$reactor" || true)"
   if [ "$has_count" -ne 1 ] || [ "$get_count" -ne 1 ] || \
      [ "$set_count" -ne 1 ] || [ "$guard_count" -ne 1 ]; then
-    echo "retained-root seam changed: std/reactor must have one guarded get and one set" >&2
+    echo "retained-root seam changed: std/reactor counts are has=$has_count get=$get_count set=$set_count guard=$guard_count; expected 1 each" >&2
     return 1
   fi
 }
@@ -120,14 +123,41 @@ if ! check_seam "$root" >"$work/seam-base.log" 2>&1; then
 fi
 echo "OK   retained source seam: one guarded std/reactor read, one write"
 
+copy_seam_files() { # <destination-tree>
+  local destination="$1"
+  while IFS= read -r rel; do
+    local file="${rel#./}"
+    mkdir -p "$destination/$(dirname "$file")"
+    cp "$root/$file" "$destination/$file"
+  done < <(seam_expected)
+}
+
+# This mutant leaves seam_files byte-for-byte equal to seam_expected: it adds
+# one real intrinsic call to the already-allowed std/reactor source, so only
+# the exact count assertion can kill it. The mutation lives entirely in the
+# private copy and is discarded with $work.
+count_mutant="$work/seam-count-mutant"
+copy_seam_files "$count_mutant"
+cat >>"$count_mutant/std/reactor.dawn" <<'EOF'
+
+fn retained_seam_count_mutant() -> Bool !io = reactor_state_has()
+EOF
+if check_seam "$count_mutant" >"$work/seam-count-mutant.log" 2>&1; then
+  echo "FAIL: retained-root seam-count mutant survived" >&2
+  exit 1
+fi
+count_mismatch="std/reactor counts are has=2 get=1 set=1 guard=1; expected 1 each"
+if ! grep -Fq "$count_mismatch" "$work/seam-count-mutant.log"; then
+  echo "FAIL: seam-count mutant failed for an unrelated reason:" >&2
+  cat "$work/seam-count-mutant.log" >&2
+  exit 1
+fi
+echo "OK   mutant seam-count goes red ($count_mismatch)"
+
 # This is a real source mutation, not a synthetic grep fixture: begin with the
 # exact allowed files, then add an intrinsic call to an unrelated std module.
 seam_mutant="$work/seam-mutant"
-while IFS= read -r rel; do
-  file="${rel#./}"
-  mkdir -p "$seam_mutant/$(dirname "$file")"
-  cp "$root/$file" "$seam_mutant/$file"
-done < <(seam_expected)
+copy_seam_files "$seam_mutant"
 cp "$root/std/str.dawn" "$seam_mutant/std/str.dawn"
 cat >>"$seam_mutant/std/str.dawn" <<'EOF'
 
@@ -315,4 +345,4 @@ apply_exact_mutant "$mutant_tree/std/reactor.dawn" \
   $'  Root(advance: line => {\n    let installed = rooted(state, step)\n    let pending = Root(advance: next_line => first(step, next_line))\n    unsafe_pure { reactor_state_set(pending) }\n    let (replacement, reply) = step(Some(state), line)\n    unsafe_pure { reactor_state_set(installed) }'
 run_mutant commit-before-success "$mutant_tree" line-five
 
-echo "retained state ok (JVM process + wasm instance, seam mutant + 2/2 production mutants killed)"
+echo "retained state ok (JVM process + wasm instance, 2 seam mutants + 2/2 production mutants killed)"
