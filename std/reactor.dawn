@@ -1,21 +1,25 @@
-## A synchronous reactor session whose read-only state survives calls to main.
-#
-# A native or JVM command reads all of stdin in one invocation. A wasm reactor
-# is different: `dawn_turn` calls the program's main once per message, so an
-# ordinary recursive parameter is gone when that call returns. The three
-# internal primitives below address one runtime root whose lifetime is the
-# process on the JVM/native backend and the module instance on wasm.
-#
-# The erased root never holds `S` directly. It always holds the one private
-# type [Root], whose closure captures `S` behind a fixed signature. Even a
-# program that catches a failure from one `serve[S]` and enters `serve[T]`
-# afterwards can therefore only invoke the already-installed closure; no get
-# can cast an S-shaped root to T. The two callbacks below are pure as a second
-# boundary: application code cannot re-enter an io pump from inside a turn.
-#
-# A successful step may return `Some(new_state)` to replace the closure;
-# `None` means keep it exactly as it was. In particular an event does not write
-# a read-only retained state back.
+## Run a synchronous newline protocol whose state survives calls to `main`.
+##
+## On native and JVM targets, a session lasts for the process. On wasm, it
+## lasts for one module instance, across separate calls to `dawn_turn`.
+## [serve] calls `step` with `None` until an invocation returns a replacement
+## state. Afterwards it supplies `Some(current_state)`. Returning `Some(next)`
+## replaces the retained state only after that invocation succeeds; returning
+## `None`, refusing an input, or panicking preserves the previous state.
+## Optional replies are printed one per line, and `on_panic` supplies the reply
+## for a caught panic.
+##
+## A session must use exactly one state type. Calling `serve[S]` and later
+## `serve[T]` in the same process or wasm module instance is a program error:
+## the installed root continues dispatching lines to the `S` step. Start a new
+## process or instantiate a new wasm module to change state type.
+
+# The three internal primitives below address one runtime root. The erased root
+# never holds `S` directly: it holds the private [Root], whose closure captures
+# `S` behind a fixed signature. This keeps the internal ABI type-safe even for
+# the cross-instantiation program error documented above. The callbacks are
+# pure as a second boundary, so application code cannot re-enter an io pump
+# from inside a turn.
 
 use std/io
 
@@ -53,7 +57,8 @@ fn first[S](
 fn advance(root: Root, line: String) -> (Option[Root], Option[String]) =
   match root { Root(run) -> run(line) }
 
-## Read one line, run one typed step, print one line, and continue to EOF.
+## Read one input line, run one typed step, optionally print one reply, and
+## continue to EOF.
 ##
 ## `step` sees `None` before the first successful init. Its optional first
 ## result is a replacement, not the current state: a failure or ordinary event

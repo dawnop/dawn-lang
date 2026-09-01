@@ -60,11 +60,12 @@
 # whose initial model is a function of them, and neither application here has
 # one. After the driver preflight, retained.sh adds the stateful boundary the
 # two demo transcripts do not have: the same session in one JVM process and in
-# one wasm instance entered through a separate dawn_turn for every line, plus
-# a production mutant that forgets the retained root.
+# one wasm instance entered through a separate dawn_turn for every line, a
+# source-seam mutant, and production mutants for forgetting or prematurely
+# replacing the retained root.
 #
 #   ./scripts/wasm-dom-contract/run.sh
-#   ./scripts/wasm-dom-contract/run.sh --record        # re-record both transcripts
+#   ./scripts/wasm-dom-contract/run.sh --record        # re-record all transcripts
 #   DAWNC_BIN=/path/to/dawnc ./scripts/wasm-dom-contract/run.sh
 #
 # Needs the same toolchain as scripts/wasm-contract (clang 20 or newer with a
@@ -154,8 +155,11 @@ build() { # <project> <out.wasm>
 
 # ---- guest-retained init state -------------------------------------------
 # This has to follow driver resolution: unlike the six preflight checks above,
-# its wasm half builds both a base reactor and the drop-retained-state mutant.
-DAWNC_BIN="$DAWNC" "$here/retained.sh"
+# its wasm half builds both a base reactor and the production mutants. Recording
+# is forwarded so its JVM/wasm transcript is refreshed along with the demos.
+retained_args=()
+[ "$record" -eq 1 ] && retained_args+=(--record)
+DAWNC_BIN="$DAWNC" "$here/retained.sh" "${retained_args[@]}"
 
 # ---- the reactor is a reactor --------------------------------------------
 # A command module would export `_start` and abort after one turn. This is
@@ -410,4 +414,4 @@ edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
   run_mutant todo-filter yes "the done filter admits everything"
 
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm dom contract ok (2 transcripts + 3 plateaus + 9 mutants, plus retained state and its mutant, the keyed ops, the props, the payloads, the foreign elements, the collector and the flags)"
+echo "wasm dom contract ok (2 transcripts + 3 plateaus + 9 mutants, plus retained state and its seam/production mutants, the keyed ops, the props, the payloads, the foreign elements, the collector and the flags)"
