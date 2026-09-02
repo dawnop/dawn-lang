@@ -11,8 +11,11 @@
 > `bytecode`（字节码写入器），`scripts/tile-golden` 加字节码 golden 与 `tileiras` 层 1，
 > CI 新 job `tile`），§5.3 与 §6 描述的就是它。**刀 5 已落地**（`packages/tileir` 的
 > 索引算术与 `d_for` / `d_for2`、记录 handler 的区域栈、`For` 的降低 / 渲染 / 编码，
-> 第二个 kernel `sum` 与 `std/gpu.sum_ref`），§5.2 描述的就是它；刀 0、刀 4、刀 6 未动工
-> （刀 4 与刀 5 并行开工，各自的合并以后到者 rebase 为准）。
+> 第二个 kernel `sum` 与 `std/gpu.sum_ref`），§5.2 描述的就是它。**刀 4 的管线已落地**（`RtGpu`
+> 八个 intrinsic、原生运行时的 `dlopen libcuda`、JVM 拒绝类、`with_gpu_real`、`scripts/tile-gpu-diff`
+> 的对拍脚本与台账、CI 台账门），§4.2、§4.4 与 §6.4 描述的就是它；**GPU 对拍本身待驱动**：本机
+> 560.94 上管线走到 `cuModuleLoadData` 被 `CUDA_ERROR_INVALID_IMAGE` 拦住，台账第一行记的就是这一步
+> （§6.4）。刀 0 与刀 6 未动工。
 > 前置勘察与计划稿是两份不入库的研究备忘录（agent-handoff 的
 > `cutile-backend-fit.md` 与 `tile-backend-plan.md`），探索过程留在那里，
 > 本文只保留结论与证据坐标。
@@ -213,18 +216,36 @@ handler 安装时一次性给；第二里程碑再把「字节码到模块句柄
 `List[Float]` 在大数据下应是 `Bytes`，v1 用 `List[Float]` 是为了和假设备的参考实现同一种值，
 第二里程碑换 `Bytes` 并让 `narrow` 提供 bf16 的打包。
 
-### 4.2 `with_gpu_real` 形态（刀 4，接口先定）
-
-照 `with_fs_real`（`std/io.dawn:451-469`）：
+### 4.2 `with_gpu_real` 形态（刀 4 已落地）
 
 ```dawn
-pub fn with_gpu_real[T](module: Bytes, body: fn() -> T !Gpu !io) -> T !io
+pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -> T !io
 ```
 
-臂里每个操作是一条 `catch_fault(() => gpu_*_host(...))`，`gpu_*_host` 是 `RtGpu` 名下的
-intrinsic（§4.4）。**接缝在错误面之下**（`std/io.dawn:398-406` 的措辞）：臂答的是宿主
-driver 返回的 `ForeignError`（`kind` 是 CUDA 错误名的字符串，与
-runtime-intrinsics-design.md §12.5 说的「后端相关契约位」同待遇），不是加工过的结果。
+与计划稿的两处出入，都有理由：
+
+- **参数是 `Map[String, Bytes]` 而不是一个 `module: Bytes`**。`packages/tileir` 的 `encode` 一次
+  编一个 kernel，一个程序要用两个 kernel 就有两个 cubin；按名字装表与 `with_gpu_fake` 的
+  `Map[String, fn]` 同形，`launch` 查表找不到名字时两个 handler 答同一个 `gpu.no_kernel`，
+  也正是 §4.5 说的「模块与 kernel 名的绑定在宿主层是一张表」。
+- **臂里不是 `catch_fault(() => gpu_*_host(...))`，intrinsic 自己答 `Result`**。原生 fault 只带
+  一条消息，`kind` 恒为 `"fault"`（runtime-intrinsics-design.md §12.4），经 `catch_fault` 出来的
+  `kind` 装不下 CUresult 的名字；所以八个 intrinsic 直接构造 `ForeignError`，`kind` 是
+  `cuda.<cuGetErrorName>`（如 `cuda.CUDA_ERROR_INVALID_IMAGE`），message 写驱动调用名与数字
+  （`cuModuleLoadData: CUresult 200 (...)`）。没有 libcuda 可装载答 `gpu.no_driver`，JVM 上一律
+  `gpu.unsupported_backend`。**接缝仍在错误面之下**：臂把这个 `ForeignError`原样交出，不加工。
+
+handler 的状态与假设备同款：句柄从 1 起编号、`Map[Int, (设备指针, 元素数)]` 一张表，未签发或已释放
+的句柄答 `gpu.no_such_buffer`；`gpu_alloc` 本版只收 `"f64"`（操作面搬的是 `List[Float]`），其它答
+`gpu.unsupported_dtype`。`gpu_launch` 先查名字、再查参数（`gpu.no_arguments`、`gpu.no_such_buffer`），
+**然后才碰设备**：cubin 在该 kernel 第一次 `launch` 时交给 `cuModuleLoadData`，模块句柄留到本次
+安装结束，所以不 launch 的程序不装模块，alloc/upload/download 在装不了模块的驱动上照样可用，
+这正是 560.94 上能验到的那一半。grid 计 tile block 数，intrinsic 以 block dims `(1,1,1)`、
+shared 0 调 `cuLaunchKernel`（cuda-tile 宿主示例的启动形态）。第一个需要设备的操作打开设备
+（`cuInit`、device 0、`cuCtxCreate_v2`）；`body` 返回后 `gpu_close_host` 销毁上下文
+（连带释放程序没 free 的缓冲与模块）并 `dlclose`。std 侧唯一能在 `dawn test --stdlib` 里断言的是
+「不碰设备的拒绝」（dtype、句柄表、kernel 表三处，两个后端与有无驱动的机器上答案相同），
+`std/gpu.dawn` 最后一个 test 块就是它；设备本身归 `scripts/tile-gpu-diff`（§6.4）。
 
 ### 4.3 假设备 `with_gpu_fake`（刀 1 已落地）
 
@@ -250,19 +271,32 @@ pub fn reference_kernels() -> Map[String, fn(List[List[Float]]) -> List[Float]]
 层 2 对拍的形状：同一个 `!Gpu` 程序跑两遍，一遍 `with_gpu_fake` 一遍 `with_gpu_real`，
 输出同一组行。这与 `scripts/spike-native/effect_fs_seam.dawn`（`c569ff18`）一模一样。
 
-### 4.4 intrinsic 与运行时落点（刀 4）
+### 4.4 intrinsic 与运行时落点（刀 4 已落地）
 
-- `types.dawn:3263` 的 `Rt` 加 `RtGpu`；`intrinsics()` 登记 `gpu_alloc_host` 等六项，
-  `internal: true`。运行时模块归属与效果行是两张表（runtime-intrinsics-design.md §12.5）：
-  `gpu_*_host` 的行是 `!io`，归属是 `RtGpu`。
-- C 侧：`runtime/c/dawn_rt.c` 加 `dawn_gpu_*` 六个函数，`dlopen("libcuda.so.1")` 而不是
-  链接期 `-lcuda`，否则每个 native 程序都要装 CUDA 才能链接。
-- JVM 侧：`emit.dawn:794 rt_class` 加一臂映射到 `dawn/rt/Gpu` 类，方法体统一抛
-  「not available on this backend」。发射 `dawn/rt/*` 类字节属于 Emit-Change 大户；按可达性
-  发射意味着不用 gpu 的程序零变化，但 `rtclasses` 生成器改动本身要实报。
-- 分组表：`lower.dawn:1163 inline_intrinsics` 与 `:1229 jvm_only_intrinsics` 只有「两边都有
-  臂」与「JVM 独有」两组，`RtGpu` 走 `rt` 表项不走 inline，所以不必进这两组；但
-  `scripts/intrinsic-parity.py` 的 `rt_class` 锚点要认识 `RtGpu`。门禁改动，墙钟秒级。
+- `types.dawn` 的 `Rt` 加 `RtGpu`；`intrinsics()` 登记**八项**而不是六项，全部 `internal: true`、
+  行是 `!io`、归属 `RtGpu`：六个操作的 `gpu_{alloc,upload,download,launch,free,sync}_host`，
+  加 `gpu_load_module_host(cubin: Bytes) -> Result[Int, ForeignError]`（答 CUmodule 句柄）与
+  `gpu_close_host() -> Unit`（释放上下文与库）。多出的两个是刻意的：装模块单独成操作才能懒到
+  第一次 launch（§4.2），close 单独成操作才有地方在 handler 退出时释放（LSan 下实测零漏）。
+  ABI 上缓冲区是裸设备指针（`Int`）、数据是 `Array[Float]`、launch 参数是 `Array[Int]`：
+  `Array` 是两个后端都能在运行时边界叫出名字的唯一容器，List 到 Array 的一趟走在 std 里
+  （`std/pvec` 的 `Vec` 是记录不是 `List`，std 源码里两者不能互换，所以用 `array_new/array_push`
+  循环）；返回值全是 `Result`，理由见 §4.2。
+- C 侧：`runtime/c/dawn_rt.c` 末尾一段，夹在 `DAWN_RT_GPU_BEGIN / END` 两个标记之间（台账门
+  按这一段比较，§6.4）。`dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL)`，`dlsym` 十三个入口
+  （版本化符号要自己拼：`cuCtxCreate_v2 / cuMemAlloc_v2 / cuMemcpyHtoD_v2 / cuMemcpyDtoH_v2 /
+  cuMemFree_v2 / cuCtxDestroy_v2`，cuda.h 里的宏在 dlsym 面前不存在），不链 `-lcuda`，也不加
+  `-ldl`（glibc 2.34 起 dlopen 在 libc 里；任何链接行都没改）。借用约定要守：Array 的槽是借来的，
+  读 `->val.f` 而不能 `dawn_unbox_float`（后者会释放 box，第一版就因此在 native 上 `drop of a
+  value with rc=...` 崩掉）。wasi 分支每个函数答 `gpu.unsupported_backend`。
+- JVM 侧：`rtclasses.dawn` 的 `gen_gpu_class` 出 `dawn/rt/Gpu`，八个静态方法直线体、无分支无
+  handler，每个 `new Result$Err(new ForeignError("gpu.unsupported_backend", "<name>: ...", None))`
+  （`gpu_close_host` 答 Unit）；`emit.dawn` 的 `rt_class` 多一臂；`main.dawn` 与 `dawn/rt/Io` 同样
+  无条件发射。「抛异常」改成「答 Err」是因为错误模型：按构造拒绝应当是值不是 `LinkageError`。
+- 分组表不用动：`RtGpu` 走 `rt` 表项，`lower.dawn` 的分配测试按 `rt: Some(_)` 自动归组；
+  `scripts/intrinsic-parity.py` 只读 inline 两组，也不用动（计划稿说的 `rt_class` 锚点并不存在）。
+  要动的是三处计数与一张表：`types.dawn` / `lower.dawn` 的 intrinsic 总数 99 → 107，
+  `ir/interp.dawn` 的 `comptime_rejects` 加八个名字（77 → 85，编译期不许开驱动，理由同 io）。
 
 ### 4.5 kernel 怎么被 `launch` 点名
 
@@ -509,31 +543,65 @@ bytecode`；截断 → `section length 4 exceeds remaining bytecode data`；未�
 `for-results-not-rolled-back` 是写入器变异体，文本不动、字节同长、`tileiras` 答
 `operand index 39 out of bounds (size=25) for operand 1`。层 1 还多查每个 cubin 的符号表里有
 `GLOBAL FUNC <kernel>`（python 直接读 ELF64，不依赖 binutils）。今天三层各有：层 0 三个
-golden 文件两后端；层 1 CI 每 push；层 2 无（刀 4）。
+golden 文件两后端；层 1 CI 每 push；层 2 有脚本、台账与 CI 门（§6.4），但本机驱动 560.94 装不进
+cubin，台账第一行记的是 `blocked`，「算的对不对」这一格要等驱动升级才有第一个答案。
 
 ### 6.3 版本钉法（刀 3 实况）
 
 三个数同批改：`tileiras` 的版本与三个 wheel 的 sha256、字节码版本（`packages/tileir/src/bytecode.dawn`
 的 `BYTECODE_MAJOR / BYTECODE_MINOR`，写入头）、本机台账里的驱动版本。全部记在
 `scripts/tile-golden/toolchain.txt`（`bytecode 13.2` / `tileiras 13.3.36` / `gpu-name sm_86` /
-三行 `wheel … sha256=…` / `driver none`），而且不是散文：`install-tileiras.sh` 只认它的 `wheel` 行，
+三行 `wheel … sha256=…` / `driver 560.94`），而且不是散文：`install-tileiras.sh` 只认它的 `wheel` 行，
 `run.sh` 拿 `kernels --bytecode-version` 对 `bytecode` 行、拿 `tileiras --version` 对 `tileiras` 行，
-任一不符直接红。与计划稿的一处出入：wheel 的 sha256 不写在 `gates.yml` 里而写在这个文件里，
+任一不符直接红；刀 4 起 `driver` 行也是机器读的：`tile-gpu-diff/run.sh` 在它与 `nvidia-smi` 不符时
+拒绝写台账，`--check` 要求它等于台账末行的驱动（§6.4）。与计划稿的一处出入：wheel 的 sha256 不写在 `gates.yml` 里而写在这个文件里，
 因为本机装与 CI 装要读同一份。`gatemap.py` 对它的判词是 `exact`（`tile` job 的两步都以它为输入），
 对 `packages/tileir/src/bytecode.dawn` 是 `coarse`（`run.sh` 点名 `packages/tileir`）；
 计划稿想要的「coupled」不必另加规则，run.sh 的交叉校验就是那条耦合的机器形态。
 
-### 6.4 本机对拍脚本与台账（D4 的机器强制点）
+### 6.4 本机对拍脚本与台账（D4 的机器强制点，刀 4 已落地）
 
-- `scripts/tile-gpu-diff/run.sh`：装 `with_gpu_real` 跑每个 `scripts/tile-gpu-diff/*.dawn`，
-  与 `with_gpu_fake` 的输出比（逐位档），再跑容差档；写 `ledger.txt` 一行：
-  `<commit> <date> <driver> <tileiras> <gpu> <pass/fail>`。
-- CI `tile` job 的最后一步：`git diff --name-only <ledger.commit>..HEAD -- packages/tileir
-  std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c scripts/tile-golden` 非空而 `ledger.txt`
-  未在本 push 更新就红。它不证明 GPU 结果进了 CI，它证明**有人在有 GPU 的机器上看过这个
-  commit**。台账 commit 必须是 HEAD 的祖先（照 `advance-seed.sh` 复核 tag 的做法）。
-- 前置：本机 Windows 驱动升到 r580 以上（现 560.94）；WSL2 内装 `nvidia-cuda-tileiras`；
-  `nvidia-smi` 已能看到 3080 / 8.6。驱动升级是用户的事，计划在此处停下等它。
+**脚本** `scripts/tile-gpu-diff/run.sh`（本机一次约 25 s，含一次 tileiras、一次 JVM 运行、三次
+原生构建）：用钉版本的 `tileiras` 把 `scripts/tile-golden/vadd.tilebc` 汇编成 cubin；先在 JVM 上跑
+`vadd_diff.dawn`，要求真 handler 在第一个操作就答 `gpu.unsupported_backend`；再原生跑它：四组输入
+（128 / 1024 / 128 / 4096 个元素，含负数、百万量级、`-0.0`、`1e300`、`1e-300`），每组在
+`with_gpu_real` 与 `with_gpu_fake` 下各走一遍 alloc → upload → 回读第一个输入 → launch → sync →
+download，逐段打印设备答的 kind，结果按 `to_string` 的整段渲染比（分得清 `-0.0` 与 NaN，即逐位）。
+末行判词三种：`pass`（每组逐位相同）、`blocked:<kind>@<stage>`（驱动在该段拒绝，各组一致）、
+`fail`（设备答了但数字不同，或内存回读就不同）。计划稿里的「容差档」本版没有客体（vadd 是逐位档），
+随 matmul 一起来。两个变异体内置在脚本里（§7 刀 4 行）。
+
+**台账** `scripts/tile-gpu-diff/ledger.txt`，脚本追加、不手写，一行
+`<commit> <date> <driver> <tileiras> <gpu-name> <result> [# note]`。commit 是 HEAD 的 12 位；tile
+路径有未提交改动时拒绝写（那一行会指着一棵没跑过的树），`toolchain.txt` 的 `driver` 行与
+`nvidia-smi` 不符时也拒绝（先改那一行、提交、再跑，于是台账提交只加一行）。第一行：
+
+```
+d4a98cd76809 2026-09-02 560.94 13.3.36 sm_86 blocked:cuda.CUDA_ERROR_INVALID_IMAGE@launch # cuModuleLoadData: CUresult 200 (CUDA_ERROR_INVALID_IMAGE)
+```
+
+**CI 门** `run.sh --check`，`tile` job 最后一步（几条 git 命令，亚秒；checkout 改为 `fetch-depth: 0`，
+祖先判定要历史）：台账末行要能解析；commit 存在且是 HEAD 的祖先；日期是过去的一天；结果是 `pass` 或
+`blocked:...`（`fail` 可以留在历史里，不能在末行）；自该 commit 起 tile 路径没变，tile 路径 =
+`packages/tileir`、`std/gpu.dawn`、`scripts/tile-golden`、`scripts/tile-gpu-diff`（台账本身除外）与
+`runtime/c/dawn_rt.c` 里 `DAWN_RT_GPU_BEGIN / END` 之间那一段（运行时其它部分不是 tile 路径，
+两个版本各取该段比较，标记丢了算改了）；`toolchain.txt` 的 `driver` 与 `tileiras` 行等于台账末行。
+与计划稿的出入：`std/narrow.dawn` 暂不在 tile 路径里（GPU 路径还没用到它，刀 6 接 bf16 时加进去）；
+「blocked 是允许状态」是新加的语义，因为一台装不进 cubin 的机器的诚实记录比没有记录有用，
+门拒绝的是沉默。负控：把末行 commit 改成一个非祖先（另一分支的 sha），`--check` 红，原文见刀 4 报告。
+
+**560.94 上的实测**（`cuDriverGetVersion` 答 12060）：`cuInit` / `cuDeviceGet` / `cuCtxCreate_v2` /
+`cuMemAlloc_v2` / `cuMemcpyHtoD_v2` / `cuMemcpyDtoH_v2` 全部 `CUDA_SUCCESS`，四组输入的内存回读逐位
+相同；`cuModuleLoadData` 对 `tileiras 13.3.36 --gpu-name sm_86` 出的 cubin 答
+**`CUDA_ERROR_INVALID_IMAGE`（200）**。cubin 的 ELF 头 `EI_ABIVERSION = 8`（CUDA 13 的 ELF ABI），
+12.x 驱动的装载器不认，所以拦在装载而不是启动，与 cuTile 文档「r580 起」一致。ASan + LSan 下同一条
+路径（`ASAN_OPTIONS=protect_shadow_gap=0`，否则 `cuMemAlloc` 在 ASan 的影子内存下答 OUT_OF_MEMORY；
+`leak:libcuda.so` 压掉驱动自己的两处内部分配）本仓运行时零漏，`dlclose` 四次安装各一次无事。
+
+**升驱动后要做的事**，就一步：Windows 侧把 NVIDIA 驱动升到 r580 以上（WSL2 的 `libcuda.so.1`
+随宿主驱动来，WSL 内不装驱动），`nvidia-smi` 确认版本后把 `toolchain.txt` 的 `driver` 行改成
+该版本、提交，跑 `./scripts/tile-gpu-diff/run.sh`，提交它追加的台账行。预期末行变 `pass`，
+`grid-zero` 变异体从 SKIP 变成 PASS。若变成 `fail`，那是这条线的第一个真问题。
 
 ### 6.5 墙钟
 
@@ -557,7 +625,7 @@ golden 文件两后端；层 1 CI 每 push；层 2 无（刀 4）。
 | **0 窄浮点**（与刀 1 并行，D3） | 「`round_bf16(a + b)` 在两个后端上与精确 oracle 逐位一致」 | `std/narrow.dawn`、`scripts/narrow-contract/`、`spike-native/narrow_round.dawn` 加 `.expect`、`opaque-twin/narrow.dawn` | 174 条以上 `differential ok`；twin 过 | ties-to-even 改成 ties-away，oracle 用例红；删量子钳位，`1e-40` 用例红 | 1 到 2 |
 | **2 记录 handler + 文本 golden**（已落地） | 「同一个 kernel 体记录两次产出逐字节相同的 Tile IR 文本，且与手写 golden 相同」 | `packages/tileir`（`Dev`、`Tile[D] / Param[D] / Idx`、`TileProg`、渲染器）、`scripts/tile-golden/{vadd,vadd_f32}.mlir` 与 `run.sh`（两后端）、opaque-twin 一条语料、包测试 | golden 逐字节，两后端；`cuda-tile-translate` 本机没有，round-trip 推迟到刀 3 | 渲染器少发 store 的 token 操作数，`vadd.mlir` 红；`load` 的 dtype 写死 `f64`，f32 kernel 在记录时被拒而 f64 的不动（两条都内置在 `run.sh`，两后端各验） | 2 到 3（实报 1；门禁 17s 本机，落在 `test` job，budget 323s → 357s） |
 | **3 字节码写入器 + CI 层 1**（已落地） | 「`tileiras --gpu-name sm_86` 接受我们写的字节码并产出 cubin」 | `packages/tileir/src/lower.dawn`（两个消费者共用的指令表，渲染器改吃它、文本 golden 逐字节未动）与 `bytecode.dawn`（约 330 行含测试，比估的 1500 少：只编码指令表装得下的十三种操作）、`scripts/tile-golden` 加 `*.tilebc` golden、`toolchain.txt`、`install-tileiras.sh`、三个写入器变异体，`gates.yml` 新 job `tile` | 本机 `tileiras` 13.3.36 接受，8320 字节 cubin（§6.1）；CI `tile` job | 三个写入器变异体各被 `tileiras` 以具名报文拒绝（§6.2） | 4 到 6（实报 1；`run.sh` 本机 40 s，`tile` job budget 220 s planning value） |
-| **4 `with_gpu_real` + 本机对拍** | 「GPU 算出的 vadd 与假设备逐位一致」 | `RtGpu` 加六个 intrinsic、`dawn_rt.c` 的 `dlopen libcuda`、JVM `dawn/rt/Gpu` 拒绝类、`with_gpu_real`、`scripts/tile-gpu-diff/`、`intrinsic-parity.py` 锚点、CI 台账检查 | 本机 `run.sh` 全绿并写台账；CI 台账门绿 | `launch` 的 grid 写成 0，对拍红；台账 commit 写成非祖先，CI 红 | 3 到 4 |
+| **4 `with_gpu_real` + 本机对拍**（管线落地，GPU 对拍待驱动） | 「GPU 算出的 vadd 与假设备逐位一致」 | `RtGpu` 加八个 intrinsic（六操作 + 装模块 + close）、`dawn_rt.c` 的 `dlopen libcuda`（约 300 行 C）、JVM `dawn/rt/Gpu` 拒绝类、`with_gpu_real`、`scripts/tile-gpu-diff/{run.sh,vadd_diff.dawn,ledger.txt}`、`gates.yml` 的 `--check` 步；parity 脚本不必动 | 本机 `run.sh` 走到 `cuModuleLoadData` 被 560.94 拦住，台账记 `blocked`；CI 台账门绿 | `download-short`（handler 少取一个元素）对拍在 560.94 上就红；`grid-zero`（launch 传 0 block）在 560.94 上 SKIP 并明说原因，升驱动后要红；台账 commit 写成非祖先，`--check` 红 | 3 到 4（实报 1；`run.sh` 本机 25 s，`--check` 亚秒，`tile` job budget 不变） |
 | **5 结构化控制流 + 第二个 kernel**（已落地） | 「带 `d_for` 的归约 kernel 与假设备逐位一致」 | `d_for / d_for2` 普通函数加 `t_loop_begin / t_loop_end` 与三个索引算术操作、区域栈、token 穿过循环携带值、`For` 的降低 / 渲染 / 字节码区域编码、`sum` kernel 与 `std/gpu.sum_ref`；`d_if` 未做（§5.2） | `scripts/tile-golden` 加 `sum.mlir / sum.tilebc`、层 1 含 `FUNC GLOBAL sum`；本机对拍归刀 4 的脚本 | 循环后 token 不换（`loop-token-not-carried`）与区域栈弹反（`region-stack-pop`）→ 降低时按名拒绝；写入器不回滚值索引（`for-results-not-rolled-back`）→ `tileiras` 红 | 3 到 4（实报 1；`run.sh` 本机 100 s，`tile` job budget 340 s planning value） |
 | **6 BF16 tile** | 「设备 bf16 `addf` 与 `narrow.round_bf16(f64 加)` 对全部 65536 个 bf16 值对加随机对逐位一致」 | `Tensor[BF16 标记]` 的 dtype 表项、宿主 `Bytes` 打包、对拍脚本的逐位档 | 本机对拍；台账 | 设备侧 rounding 属性改 `approx`，对拍红 | 2 |
 | 7（期权）混合路线 | 「同一个 kernel 体经编译期发射器与经记录 handler 产出相同的 Tile 程序」 | `selfhost/src/tile/emit_tile.dawn` | 两路 `TileProg` 相等 | 不在本计划内 | 6 到 10 |
@@ -577,7 +645,8 @@ kernel 记录出来的是一阶单态 SSA。换来的限制是 §5.2 的结构�
 混合路线（刀 7）重新面对这堵墙。
 
 **墙三（无 CI 执行 oracle）**：处置 = D4。CI 只到层 1，执行只在本机，台账把「有人跑过」
-变成机器可查的事实。剩余风险是一台机器、一种架构（sm_86）。前置：驱动升级。
+变成机器可查的事实。剩余风险是一台机器、一种架构（sm_86）。前置：驱动升级，刀 4 实测它就是
+今天唯一拦着层 2 的东西（§6.4）。
 
 其它：
 
@@ -602,8 +671,9 @@ kernel 记录出来的是一阶单态 SSA。换来的限制是 §5.2 的结构�
   与真父提交对照，十个 `emit` label 全动。两个原因，都与引用无关：std 模块的类整体发射进
   每个程序的输出（`std/gpu.class`、它的闭包与字典类都在 calc 的输出里），而且新模块让
   ADT id 重编号，生成的字典类名（`gen$common$dict$1$Adt1810` 之类）跟着改。`doc --builtins`
-  也动（参考页列出新模块）。刀 0 同理按十个 label 预估；刀 4 的 `dawn/rt/Gpu` 类与
-  `rtclasses` 改动另计，按 prev-diff 实报。
+  也动（参考页列出新模块）。刀 0 同理按十个 label 预估；刀 4 实报见其提交的 Emit-Change 声明：
+  std/gpu 多了 `with_gpu_real` 与三个 Array 辅助函数，`dawn/rt/Gpu` 类无条件进每个 jar，
+  ADT id 再次重编号（`Adt2042` → `Adt2103`），Core golden 里指令真变的只有编辑过的八个模块。
 - 假设备把旧 bug 固化：`with_gpu_fake` 的参考实现若错，GPU 对拍会「一致地错」。所以每个
   对拍语料的 `.expect` 必须手写（`spike-native/run.sh` 的规矩），参考实现只是第二份意见。
 
