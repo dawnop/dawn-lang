@@ -207,8 +207,10 @@ for backend in jvm native; do
     { cat "$out.err" >&2; fail "load-dtype-f64: vadd_f32 failed on $backend for something other than the dtype refusal"; }
   [ ! -s "$out" ] || fail "load-dtype-f64: vadd_f32 printed text before being refused on $backend"
   ctrl="$work/m-load-dtype-f64.vadd.$backend"
-  [ "$(cat "$ctrl.rc")" = 0 ] && cmp -s "$here/vadd.mlir" "$ctrl" ||
-    { cat "$ctrl.err" >&2; fail "load-dtype-f64: vadd (all f64) should be untouched on $backend"; }
+  if [ "$(cat "$ctrl.rc")" != 0 ] || ! cmp -s "$here/vadd.mlir" "$ctrl"; then
+    cat "$ctrl.err" >&2
+    fail "load-dtype-f64: vadd (all f64) should be untouched on $backend"
+  fi
 done
 echo "PASS  mutant: load-dtype-f64 (vadd_f32 refused at trace time on both backends; vadd untouched)"
 
