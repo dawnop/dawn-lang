@@ -631,9 +631,11 @@ bytecode`；截断 → `section length 4 exceeds remaining bytecode data`；未�
 `'cuda_tile.tanh' op invalid rounding mode specified, expect one of [approx, full]`。
 只读退出码的门会把它当绿。`run.sh` 的 `assemble` 因此改成「退出码为 0 **且** 输出里没有
 `^error:`」，`tile-gpu-diff` 那边的 `assemble_golden` 同改。这是「门的绿没有信息量」的又一个
-实例：这一格从刀 3 起一直是绿的，而它从来没看过 stderr。今天三层各有：层 0 三个
-golden 文件两后端；层 1 CI 每 push；层 2 有脚本、台账与 CI 门（§6.4），但本机驱动 560.94 装不进
-cubin，台账第一行记的是 `blocked`，「算的对不对」这一格要等驱动升级才有第一个答案。
+实例：这一格从刀 3 起一直是绿的，而它从来没看过 stderr。今天三层各有：层 0 二十三个
+kernel 的文本与字节码 golden，两后端逐字节；层 1 CI 每 push；层 2 有脚本、台账与 CI 门（§6.4），
+本机驱动升到 616.56 之后台账末行是 `pass`，「算的对不对」这一格从刀 7a 起有答案了。
+（刀 4 到刀 6 期间这里写的是「本机驱动 560.94 装不进 cubin，台账第一行记的是 `blocked`」；
+那两行 `blocked` 留在台账的历史里，是那个装载器答过的话。）
 
 ### 6.3 版本钉法（刀 3 实况）
 
