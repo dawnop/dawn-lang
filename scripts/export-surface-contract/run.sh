@@ -48,7 +48,21 @@ diags_of() {
   local compiler=$1 source=$2 out
   out="$work/diags.$$.$RANDOM"
   run_dawn "$compiler" __check "$source" > "$out" 2>&1 || true
-  grep '^D' "$out" || true
+  # A compiler that cannot load the bundled std prints one `error:` line and
+  # no diagnostics at all. Left silent, that reads as "accepted" to
+  # mutant_adds and as "red" to mutant_drops, both wrongly; so the error
+  # lines come through when there is nothing else, and the two assertions
+  # refuse them by name below.
+  grep '^D' "$out" || grep '^error:' "$out" || true
+}
+
+refuse_std_break() {
+  local mutation=$1 name=$2 got=$3
+  case "$got" in
+    *"does not load"*)
+      echo "$got" >&2
+      fail "$mutation: the bundled std does not load under this mutant, so $name never ran; that channel is mutant_breaks_std's" ;;
+  esac
 }
 
 # ---- assertions on the real compiler -------------------------------------
@@ -278,6 +292,7 @@ mutant_drops() {
   local mutation=$1 name=$2 message=$3 mutant got
   mutant=$(build_mutant "$mutation")
   got=$(diags_of "$mutant" "$cases/$name.dawn")
+  refuse_std_break "$mutation" "$name" "$got"
   if printf '%s' "$got" | grep -Fq "$message"; then
     echo "$got" >&2
     fail "$mutation: $name still reports its owning diagnostic"
@@ -289,6 +304,7 @@ mutant_adds() {
   local mutation=$1 name=$2 message=$3 mutant got
   mutant=$(build_mutant "$mutation")
   got=$(diags_of "$mutant" "$cases/$name.dawn")
+  refuse_std_break "$mutation" "$name" "$got"
   printf '%s' "$got" | grep -Fq "$message" || {
     echo "$got" >&2
     fail "$mutation: $name was still accepted"
@@ -334,7 +350,7 @@ mutant_breaks_std() {
     cat "$out" >&2
     fail "$mutation: std broke for another reason"
   }
-  echo "PASS  $mutation compiles, then turns the public-opaque contract red"
+  echo "PASS  $mutation compiles, then makes the bundled std unloadable"
 }
 
 mutant_diverges() {
@@ -468,7 +484,14 @@ run_mutant() {
     skip-assoc-trait)
       mutant_drops "$1" reject_assoc_trait 'projection `Item` trait' ;;
     reject-all-effects)
-      mutant_adds "$1" accepted 'exposes private effect `Ask`' ;;
+      # the witness is in the tree since std declared its first effect:
+      # the `pub effect Fs` in std/io.dawn sits on public operations and on
+      # `with_fs_real`'s public signature, so a pass that leaks every effect
+      # makes the bundled std itself unloadable, before `accepted.dawn` and
+      # its `pub effect Ask` are ever reached
+      grep -q '^pub effect Fs' "$root/std/io.dawn" \
+        || fail "$1: the witness moved; std/io.dawn no longer declares Fs, retarget this mutant"
+      mutant_breaks_std "$1" 'public effect `Fs` operation `fs_is_dir` exposes private effect `Fs`' ;;
     pass-all-effects)
       mutant_drops "$1" reject_private_effect 'exposes private effect `Hidden`' ;;
     skip-impl-constraints)
