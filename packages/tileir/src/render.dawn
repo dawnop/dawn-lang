@@ -7,14 +7,17 @@
 # The renderer spells; it does not decide. Which operations a program becomes,
 # in what order, with which operands and value numbers, is lower.dawn's
 # answer, shared with the bytecode writer, so this module is one line of
-# assembly per `Instr` and nothing else. Spelling follows the specification's
-# appendix example (vector add over `tile<ptr<f32>>` parameters) and the
-# dialect's own round-trip tests (`test/Bytecode/operationsTest.mlir`:
-# `make_token`, `token=%N` on the token-ordered memory operations).
+# assembly per `Instr` and nothing else, a `ForLoop` being its header line, its
+# body two columns further in, and a closing brace. Spelling follows the
+# specification's appendix example (vector add over `tile<ptr<f32>>`
+# parameters) and the dialect's own round-trip tests
+# (`test/Bytecode/operationsTest.mlir`: `make_token`, `token=%N` on the
+# token-ordered memory operations, `for %iv in (%lo to %hi, step %st) :
+# tile<i32> iter_values(%a = %init) -> (ty) { ... continue %v : ty }`).
 use std/list
 use std/str
-use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AddF}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstI32, MulInt, AddInt, Reshape, Broadcast, Iota, Offset, LoadPtr, StorePtr, AddFloat, Ret}
+use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AddF, IdxConst, IdxAdd, IdxMul, For, Continue}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstI32, MulInt, AddInt, Reshape, Broadcast, Iota, Offset, LoadPtr, StorePtr, AddFloat, ForLoop, Cont, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -38,6 +41,12 @@ fn name(r: Ref) -> String = match r {
 
 fn v(id: Int) -> String = "%${id}"
 
+fn commas(xs: List[String]) -> String =
+  list.fold(xs, "", (acc, x) => if acc == "" { x } else { acc ++ ", " ++ x })
+
+# `%a, %b = ` for the values an instruction defines, or nothing for none.
+fn results(ids: List[Int]) -> String = if len(ids) == 0 { "" } else { commas(list.map(ids, v)) ++ " = " }
+
 fn line(i: Instr) -> String = match i {
   MakeTok(dst) -> "${v(dst)} = make_token : token"
   BlockIds(x, y, z) -> "${v(x)}, ${v(y)}, ${v(z)} = get_tile_block_id : tile<i32>"
@@ -54,7 +63,31 @@ fn line(i: Instr) -> String = match i {
   StorePtr(tok_out, ptrs, value, tok_in, ptr_ty, val_ty) ->
     "${v(tok_out)} = store_ptr_tko weak ${name(ptrs)}, ${name(value)} token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)} -> token"
   AddFloat(dst, t, lhs, rhs) -> "${v(dst)} = addf ${name(lhs)}, ${name(rhs)} rounding<nearest_even> : ${ty(t)}"
+  ForLoop(res, tys, iv, lower, upper, step, inits, carried, _body) -> {
+    let iters = if len(inits) == 0 {
+      ""
+    } else {
+      let pairs = list.map(range(0, len(inits)), k => "${v(carried[k])} = ${name(inits[k])}")
+      " iter_values(${commas(pairs)}) -> (${commas(list.map(tys, ty))})"
+    }
+    "${results(res)}for ${v(iv)} in (${name(lower)} to ${name(upper)}, step ${name(step)}) : tile<i32>${iters} {"
+  }
+  Cont(values, tys) ->
+    if len(values) == 0 { "continue" } else { "continue ${commas(list.map(values, name))} : ${commas(list.map(tys, ty))}" }
   Ret -> "return"
+}
+
+# An instruction at `indent` columns: one line, or for a loop its header,
+# its body two columns further in, and the closing brace.
+fn lines(indent: String, i: Instr) -> List[String] = match i {
+  ForLoop(_res, _tys, _iv, _lower, _upper, _step, _inits, _carried, body) ->
+    [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
+  _ -> [indent ++ line(i)]
+}
+
+fn block(indent: String, body: List[Instr]) -> List[String] = {
+  let none: List[String] = []
+  list.fold(body, none, (acc, i) => acc ++ lines(indent, i))
 }
 
 fn join(lines: List[String]) -> String = list.fold(lines, "", (acc, l) => acc ++ l ++ "\n")
@@ -69,9 +102,8 @@ pub fn render_kernel(k: Kernel) -> String = {
     args = args ++ ["%arg${i}: ${ty(Tile([], PtrTo(dt)))}"]
     i = i + 1
   }
-  let head = list.fold(args, "", (acc, a) => if acc == "" { a } else { acc ++ ", " ++ a })
-  let body = list.map(k.body, l => "    " ++ line(l))
-  join(["cuda_tile.module @m {", "  entry @${k.name}(${head}) {"] ++ body ++ ["  }", "}"])
+  let head = commas(args)
+  join(["cuda_tile.module @m {", "  entry @${k.name}(${head}) {"] ++ block("    ", k.body) ++ ["  }", "}"])
 }
 
 ## `prog` lowered and rendered.
@@ -142,4 +174,42 @@ test "types are spelled as the assembly spells them" {
 
 test "rendering the same program twice gives the same text" {
   assert render(two_loads_one_param()) == render(two_loads_one_param())
+}
+
+fn sum_prog() -> TileProg = TileProg {
+  name: "sum",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    IdxConst(2, 4),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, 128, 0),
+    IdxConst(6, 1),
+    IdxAdd(7, 3, 6),
+    IdxAdd(8, 3, 2),
+    For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [
+      Load(12, 13, 0, "f64", 9, 128, 11),
+      AddF(14, "f64", 128, 10, 12),
+      Continue([14, 13])
+    ]),
+    Store(17, 1, "f64", 1, 128, 15, 16)
+  ]
+}
+
+test "a loop is its header with the carried values, a body two columns in, and a closing brace" {
+  let text = render(sum_prog())
+  assert str.contains(text, "\n    %20, %21 = for %22 in (%18 to %19, step %17) : tile<i32> iter_values(%23 = %15, %24 = %16) -> (tile<128xf64>, token) {\n")
+  assert str.contains(text, "\n      %34, %35 = load_ptr_tko weak %33 token=%24 : tile<128xptr<f64>> -> tile<128xf64>, token\n")
+  assert str.contains(text, "\n      %36 = addf %23, %34 rounding<nearest_even> : tile<128xf64>\n")
+  assert str.contains(text, "\n      continue %36, %35 : tile<128xf64>, token\n    }\n")
+  # after the loop, the store takes the loop's results
+  assert str.contains(text, "store_ptr_tko weak %45, %20 token=%21 :")
+  assert str.ends_with(text, "    return\n  }\n}\n")
+}
+
+test "index arithmetic spells as scalar i32 constant, addi and muli" {
+  let text = render(sum_prog())
+  assert str.contains(text, "\n    %4 = constant <i32: 4> : tile<i32>\n    %5 = muli %1, %4 : tile<i32>\n")
+  assert str.contains(text, "\n    %18 = addi %5, %17 : tile<i32>\n    %19 = addi %5, %4 : tile<i32>\n")
 }

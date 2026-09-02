@@ -15,26 +15,49 @@
 # `ops` is where the chain starts. Nothing else orders them; Tile IR gives
 # program order no meaning between memory operations.
 use std/list
+use std/str
 use std/gpu.{F64, F32}
-use dev.{Dev, Param, param, block_id, load, store, addf}
+use dev.{Dev, Tile, Param, param, block_id, load, store, addf, idx_const, idx_add, idx_mul, d_for, d_for2}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
 ## definition. `param` is a position in `TileProg.params`; `n` is a tile
-## width; `dtype` is a std/gpu dtype name.
+## width; `dtype` is a std/gpu dtype name. `IdxConst` / `IdxAdd` / `IdxMul`
+## are scalar i32 values: a host constant, a sum, a product.
 ##
-## `For` is reserved for knife 5 (tile-backend-design 5.2): a region with an
-## induction variable, carried values entering as `inits`, named `carried`
-## inside the body and `results` after it, and the body's own operations
-## nested. No handler records it in this release and the renderer refuses it.
+## `For` is a region (tile-backend-design 5.2): a loop over the index handles
+## `[lower, upper)` by `step`, with the induction variable `iv` and the
+## carried values entering as `inits` (handles defined before the loop),
+## named `carried` inside `body` and `results` after it, the three lists
+## the same length. `body` is the region's own operations in issue order,
+## `Continue(values)` last: the values the next iteration receives, one per
+## carried value. The recording handler carries the memory token through
+## every loop as the LAST carried value, so `inits`, `carried` and `results`
+## each end in a token handle and `Continue` ends in the body's last token.
+## `iv`, `carried` and everything `body` defines are visible inside the
+## region only; `results` are the loop's values after it.
 pub type TileOp =
   | MakeToken(dst: Int)
   | BlockId(dst: Int, axis: Int)
   | Load(dst: Int, tok_out: Int, param: Int, dtype: String, idx: Int, n: Int, tok_in: Int)
   | Store(tok_out: Int, param: Int, dtype: String, idx: Int, n: Int, value: Int, tok_in: Int)
   | AddF(dst: Int, dtype: String, n: Int, lhs: Int, rhs: Int)
+  | IdxConst(dst: Int, value: Int)
+  | IdxAdd(dst: Int, lhs: Int, rhs: Int)
+  | IdxMul(dst: Int, lhs: Int, rhs: Int)
   | For(iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
+  | Continue(values: List[Int])
 derive Show
+
+## How deep loops may nest. A kernel body that recurses through `d_for`
+## unrolls at recording time, one region per call, and this is where the
+## handler stops it (tile-backend-design 5.2).
+pub const MAX_LOOP_DEPTH: Int = 16
+
+## How many handles one recording may mint. A helper that recurses without a
+## loop unrolls into a flat record that never ends; this is where the handler
+## stops that.
+pub const MAX_HANDLES: Int = 65536
 
 ## A kernel as recorded: its entry name, the dtype name of each parameter in
 ## order (every parameter is a pointer to that format), and its operations in
@@ -67,63 +90,175 @@ fn check_param(name: String, params: List[String], pos: Int, dtype: String, verb
     ()
   }
 
+# An open region: the operations of the enclosing region as they stood when
+# it opened, and the loop header that closes over them at `t_loop_end`.
+type Frame = {
+  outer: List[TileOp],
+  iv: Int,
+  lower: Int,
+  upper: Int,
+  step: Int,
+  inits: List[Int],
+  carried: List[Int],
+}
+
+# The next free handle after minting `k` from `next`, or a refusal when the
+# recording has grown past MAX_HANDLES.
+fn mint(name: String, next: Int, k: Int) -> Int =
+  if next + k > MAX_HANDLES {
+    refuse(name, "the recording mints more than ${MAX_HANDLES} handles; a helper that recurses unrolls forever")
+  } else {
+    next + k
+  }
+
+fn last(xs: List[Int]) -> Int = xs[len(xs) - 1]
+
+fn but_last(xs: List[Int]) -> List[Int] = list.take(xs, len(xs) - 1)
+
 ## Run `body` once under a handler that records what it issues, and answer
 ## the record. `params` is the dtype name of each entry parameter in order;
 ## the body's `param(d, pos)` values must agree with it (position in range,
 ## same format) or the run panics. Two runs of the same body answer equal
 ## programs.
+##
+## Regions: `t_loop_begin` pushes the operations recorded so far and opens an
+## empty list for the loop body; `t_loop_end` pops, wraps the body in a `For`
+## and appends it to what was pushed. The token cell is carried through the
+## loop as the last loop-carried value: the body starts from the loop's
+## carried token and the code after the loop continues from the loop's token
+## result, so a store after a loop is ordered after every store inside it.
+## A `t_loop_begin` deeper than MAX_LOOP_DEPTH, a `t_loop_end` with no open
+## loop or with the wrong number of values, or a body that ends with a loop
+## still open, is refused.
 pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev) -> TileProg = {
-  with handle Dev {
-    var next: Int = 1
-    var tok: Int = 0
-    var ops: List[TileOp] = []
-    t_block_id(axis) => {
-      if axis < 0 || axis > 2 { refuse(name, "block_id axis is 0, 1 or 2, got ${axis}") } else { () }
-      let d = next
-      next = next + 1
-      ops = ops ++ [BlockId(d, axis)]
-      d
+  let ops = {
+    with handle Dev {
+      var next: Int = 1
+      var tok: Int = 0
+      var ops: List[TileOp] = []
+      var frames: List[Frame] = []
+      t_block_id(axis) => {
+        if axis < 0 || axis > 2 { refuse(name, "block_id axis is 0, 1 or 2, got ${axis}") } else { () }
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [BlockId(d, axis)]
+        d
+      }
+      t_load(param, dtype, idx, n) => {
+        check_param(name, params, param, dtype, "load")
+        check_shape(name, n)
+        let d = next
+        let t = next + 1
+        next = mint(name, next, 2)
+        ops = ops ++ [Load(d, t, param, dtype, idx, n, tok)]
+        tok = t
+        d
+      }
+      t_store(param, dtype, idx, n, v) => {
+        check_param(name, params, param, dtype, "store")
+        check_shape(name, n)
+        let t = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Store(t, param, dtype, idx, n, v, tok)]
+        tok = t
+        ()
+      }
+      t_addf(dtype, n, a, b) => {
+        check_shape(name, n)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [AddF(d, dtype, n, a, b)]
+        d
+      }
+      t_idx_const(value) => {
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [IdxConst(d, value)]
+        d
+      }
+      t_idx_add(a, b) => {
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [IdxAdd(d, a, b)]
+        d
+      }
+      t_idx_mul(a, b) => {
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [IdxMul(d, a, b)]
+        d
+      }
+      t_loop_begin(lower, upper, step, inits) => {
+        if len(frames) >= MAX_LOOP_DEPTH {
+          refuse(name, "loops nest deeper than ${MAX_LOOP_DEPTH}; a body that recurses through d_for unrolls forever")
+        } else {
+          ()
+        }
+        # the token rides along as the last carried value
+        let all = inits ++ [tok]
+        let iv = next
+        let base = next + 1
+        next = mint(name, next, 1 + len(all))
+        let carried = list.map(range(0, len(all)), k => base + k)
+        frames = frames ++ [Frame { outer: ops, iv: iv, lower: lower, upper: upper, step: step, inits: all, carried: carried }]
+        ops = []
+        tok = last(carried)
+        (iv, but_last(carried))
+      }
+      t_loop_end(outs) => {
+        if len(frames) == 0 { refuse(name, "loop_end with no loop open") } else { () }
+        let frame = frames[len(frames) - 1]
+        let want = len(frame.inits) - 1
+        if len(outs) != want {
+          refuse(name, "a loop body carrying ${want} value(s) answered ${len(outs)}")
+        } else {
+          ()
+        }
+        let (outer, inner) = (frame.outer, ops)
+        let base = next
+        next = mint(name, next, len(frame.inits))
+        let results = list.map(range(0, len(frame.inits)), k => base + k)
+        let body = inner ++ [Continue(outs ++ [tok])]
+        frames = list.take(frames, len(frames) - 1)
+        ops = outer ++ [For(frame.iv, frame.lower, frame.upper, frame.step, frame.inits, frame.carried, results, body)]
+        tok = last(results)
+        but_last(results)
+      }
     }
-    t_load(param, dtype, idx, n) => {
-      check_param(name, params, param, dtype, "load")
-      check_shape(name, n)
-      let d = next
-      let t = next + 1
-      next = next + 2
-      ops = ops ++ [Load(d, t, param, dtype, idx, n, tok)]
-      tok = t
-      d
-    }
-    t_store(param, dtype, idx, n, v) => {
-      check_param(name, params, param, dtype, "store")
-      check_shape(name, n)
-      let t = next
-      next = next + 1
-      ops = ops ++ [Store(t, param, dtype, idx, n, v, tok)]
-      tok = t
-      ()
-    }
-    t_addf(dtype, n, a, b) => {
-      check_shape(name, n)
-      let d = next
-      next = next + 1
-      ops = ops ++ [AddF(d, dtype, n, a, b)]
-      d
-    }
+    body()
+    if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} loop(s) still open") } else { () }
+    ops
   }
-  body()
   TileProg { name: name, params: params, ops: [MakeToken(0)] ++ ops }
 }
 
-## The handles a program defines, in definition order: what a consumer that
-## renumbers (the renderer) or checks well-formedness walks.
+## The handles an operation defines in the region it sits in, in definition
+## order: what a consumer that renumbers (the lowering) or checks
+## well-formedness walks. A `For` defines its `results` there; its `iv`,
+## `carried` and body belong to the region inside it (`defined_inside`).
 pub fn defined(op: TileOp) -> List[Int] = match op {
   MakeToken(dst) -> [dst]
   BlockId(dst, _axis) -> [dst]
   Load(dst, tok_out, _param, _dtype, _idx, _n, _tok_in) -> [dst, tok_out]
   Store(tok_out, _param, _dtype, _idx, _n, _value, _tok_in) -> [tok_out]
   AddF(dst, _dtype, _n, _lhs, _rhs) -> [dst]
+  IdxConst(dst, _value) -> [dst]
+  IdxAdd(dst, _lhs, _rhs) -> [dst]
+  IdxMul(dst, _lhs, _rhs) -> [dst]
   For(_iv, _lower, _upper, _step, _inits, _carried, results, _body) -> results
+  Continue(_values) -> []
+}
+
+## Every handle `ops` define, at any depth, in issue order: for a `For`, its
+## results, then its induction variable, its carried handles and what its
+## body defines.
+pub fn defined_inside(ops: List[TileOp]) -> List[Int] = {
+  let none: List[Int] = []
+  list.fold(ops, none, (acc, op) => match op {
+    For(iv, _lower, _upper, _step, _inits, carried, results, body) ->
+      acc ++ results ++ [iv] ++ carried ++ defined_inside(body)
+    _ -> acc ++ defined(op)
+  })
 }
 
 # ---- tests ----
@@ -178,4 +313,152 @@ test "every handle an operation defines is fresh and increasing" {
   let none: List[Int] = []
   let all = list.fold(p.ops, none, (acc, op) => acc ++ defined(op))
   assert all == [0, 1, 2, 3, 4, 5, 6, 7]
+}
+
+# Each block folds `chunks` consecutive 128-wide tiles of `x` into one tile
+# of `out`: the first tile enters the loop, the loop adds the rest in order.
+fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
+  let b = block_id(0)
+  let n = idx_const(chunks)
+  let base = idx_mul(b, n)
+  let first = load(x, base, 128)
+  let one = idx_const(1)
+  let lo = idx_add(base, one)
+  let up = idx_add(base, n)
+  let acc = d_for(lo, up, one, first, (k, t) => addf(F64, 128, t, load(x, k, 128)))
+  store(out, b, 128, acc)
+}
+
+fn trace_sum() -> TileProg =
+  trace_kernel("sum", ["f64", "f64"], () => sum(param(F64, 0), param(F64, 1), 4))
+
+test "a loop records as one For holding the body's operations, with the token carried in and out as the last value" {
+  let p = trace_sum()
+  assert p.ops == [
+    MakeToken(0),
+    BlockId(1, 0),
+    IdxConst(2, 4),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, 128, 0),
+    IdxConst(6, 1),
+    IdxAdd(7, 3, 6),
+    IdxAdd(8, 3, 2),
+    # iv 9; carried: the tile 10 and the token 11 (entering as 4 and 5);
+    # inside: load 12 with token 13, addf 14; results: tile 15, token 16
+    For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [
+      Load(12, 13, 0, "f64", 9, 128, 11),
+      AddF(14, "f64", 128, 10, 12),
+      Continue([14, 13])
+    ]),
+    Store(17, 1, "f64", 1, 128, 15, 16)
+  ]
+}
+
+test "the same loop traced twice records the same program, and every handle is fresh" {
+  assert trace_sum() == trace_sum()
+  assert defined_inside(trace_sum().ops) == [0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 9, 10, 11, 12, 13, 14, 17]
+}
+
+fn two_carried(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let zero = idx_const(0)
+  let two = idx_const(2)
+  let a0 = load(x, b, 8)
+  let b0 = load(y, b, 8)
+  let (ra, rb) = d_for2(zero, two, idx_const(1), a0, b0, (k, ta, tb) =>
+      (addf(F64, 8, ta, load(x, k, 8)), addf(F64, 8, tb, load(y, k, 8))))
+  store(out, b, 8, addf(F64, 8, ra, rb))
+}
+
+test "a loop carrying two tiles answers two results in order, the token behind them" {
+  let p = trace_kernel("two", ["f64", "f64", "f64"], () => two_carried(param(F64, 0), param(F64, 1), param(F64, 2)))
+  let loop = p.ops[len(p.ops) - 3]
+  match loop {
+    For(iv, lower, upper, step, inits, carried, results, body) -> {
+      assert (iv, lower, upper, step) == (9, 2, 3, 8)
+      assert inits == [4, 6, 7]
+      assert carried == [10, 11, 12]
+      assert results == [19, 20, 21]
+      assert body[len(body) - 1] == Continue([15, 18, 17])
+    }
+    _ -> { assert false }
+  }
+  # the store after the loop consumes the loop's token result
+  assert p.ops[len(p.ops) - 1] == Store(23, 2, "f64", 1, 8, 22, 21)
+}
+
+fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let zero = idx_const(0)
+  let two = idx_const(2)
+  let one = idx_const(1)
+  let first = load(x, b, 8)
+  let acc = d_for(zero, two, one, first, (i, t) =>
+      d_for(zero, two, one, t, (j, u) => addf(F64, 8, u, load(x, idx_add(i, j), 8))))
+  store(out, b, 8, acc)
+}
+
+test "loops nest: the inner For sits in the outer body and the outer continue passes the inner result" {
+  let p = trace_kernel("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
+  match p.ops[len(p.ops) - 2] {
+    For(_iv, _lo, _up, _st, _inits, _carried, results, body) -> {
+      assert len(body) == 2
+      match body[0] {
+        For(_iv2, _lo2, _up2, _st2, _inits2, _carried2, results2, _body2) -> {
+          assert body[1] == Continue(results2)
+        }
+        _ -> { assert false }
+      }
+      assert len(results) == 2
+    }
+    _ -> { assert false }
+  }
+  assert p == trace_kernel("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
+}
+
+fn deeper(x: Param[F64], depth: Int, t: Tile[F64]) -> Tile[F64] !Dev = {
+  let zero = idx_const(0)
+  let one = idx_const(1)
+  d_for(zero, one, one, t, (i, u) => deeper(x, depth + 1, addf(F64, 8, u, load(x, i, 8))))
+}
+
+test "a body that recurses through d_for is refused at the depth limit rather than unrolled forever" {
+  let outcome = catch_panic(() => trace_kernel("deep", ["f64"], () => {
+    let x = param(F64, 0)
+    let first = load(x, block_id(0), 8)
+    let _r = deeper(x, 0, first)
+    ()
+  }))
+  match outcome {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "loops nest deeper than ${MAX_LOOP_DEPTH}") }
+  }
+}
+
+# Below the typed surface: the operations themselves, misused.
+fn wrong_arity() -> Unit !Dev = {
+  let (_iv, _inside) = t_loop_begin(0, 0, 0, [1])
+  let _outs = t_loop_end([])
+  ()
+}
+
+fn never_closed() -> Unit !Dev = {
+  let (_iv, _inside) = t_loop_begin(0, 0, 0, [])
+  ()
+}
+
+fn never_opened() -> Unit !Dev = {
+  let _outs = t_loop_end([])
+  ()
+}
+
+fn refusal(body: fn() -> Unit !Dev) -> String !io = match catch_panic(() => trace_kernel("raw", ["f64"], body)) {
+  Ok(_) -> "accepted"
+  Err(e) -> e.message
+}
+
+test "a loop body answering the wrong number of carried values, a loop never closed, and a close with no loop open are refused" {
+  assert str.contains(refusal(wrong_arity), "a loop body carrying 1 value(s) answered 0")
+  assert str.contains(refusal(never_closed), "the body ended with 1 loop(s) still open")
+  assert str.contains(refusal(never_opened), "loop_end with no loop open")
 }

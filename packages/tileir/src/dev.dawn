@@ -18,6 +18,7 @@
 # them is a type error rather than a malformed program: a `Tile[F32]` in a
 # `Tile[F64]` slot, or a host `Int` where an index tile is wanted, are both
 # refused by the checker.
+use std/list
 use std/gpu.{Dtype, dtype_name, F64, F32}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it.
@@ -45,14 +46,30 @@ pub opaque type Param[D] = (Int, String)
 ## `t_load` answers the handle of an `n`-wide tile of `dtype` read from
 ## parameter `param` at element offset `idx * n`; `t_store` writes one there;
 ## `t_addf` answers the handle of the element-wise sum of two `n`-wide tiles.
-## The loop operations of tile-backend-design 5.2 (`t_loop_begin` /
-## `t_loop_end`) are not declared in this release; `prog.TileOp` already has
-## the `For` variant they will record into.
+## `t_idx_const` / `t_idx_add` / `t_idx_mul` answer scalar i32 handles: a
+## host constant, and the sum and product of two index handles.
+##
+## `t_loop_begin` / `t_loop_end` bracket a region (tile-backend-design 5.2).
+## `t_loop_begin(lower, upper, step, inits)` opens a `for` over the index
+## handles `[lower, upper)` by `step`, with `inits` as the loop-carried
+## values entering it, and answers the induction variable's handle and one
+## handle per carried value as the body sees them; the operations issued
+## until the matching `t_loop_end` fall inside the region. `t_loop_end(outs)`
+## closes it with `outs` as the values the body hands to the next iteration
+## (one per carried value, in order) and answers one handle per carried
+## value as they stand after the loop. The handler carries the memory
+## ordering token through the loop on its own; a body never sees it. Only
+## `d_for` and `d_for2` call the pair; a body calls those.
 pub effect Dev {
   fn t_block_id(axis: Int) -> Int
   fn t_load(param: Int, dtype: String, idx: Int, n: Int) -> Int
   fn t_store(param: Int, dtype: String, idx: Int, n: Int, v: Int) -> Unit
   fn t_addf(dtype: String, n: Int, a: Int, b: Int) -> Int
+  fn t_idx_const(value: Int) -> Int
+  fn t_idx_add(a: Int, b: Int) -> Int
+  fn t_idx_mul(a: Int, b: Int) -> Int
+  fn t_loop_begin(lower: Int, upper: Int, step: Int, inits: List[Int]) -> (Int, List[Int])
+  fn t_loop_end(outs: List[Int]) -> List[Int]
 }
 
 ## Parameter `pos` of the entry, of format `d`. Positions count from zero and
@@ -107,6 +124,88 @@ pub fn addf[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
   h
 }
 
+## The scalar index tile holding the host constant `value`: a loop bound, a
+## step, a stride. The constant is fixed when the kernel is recorded, which
+## is what a host `Int` in a kernel body means (tile-backend-design 5.2).
+pub fn idx_const(value: Int) -> Idx !Dev = {
+  let h: Idx = t_idx_const(value)
+  h
+}
+
+## The sum of two index tiles.
+pub fn idx_add(a: Idx, b: Idx) -> Idx !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Idx = t_idx_add(x, y)
+  h
+}
+
+## The product of two index tiles.
+pub fn idx_mul(a: Idx, b: Idx) -> Idx !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Idx = t_idx_mul(x, y)
+  h
+}
+
+# A `for` over the index range `[lower, upper)` by `step` with `carried` as
+# the loop-carried handles: `body` runs ONCE, on the host, with the induction
+# variable and the carried handles as the loop sees them, and answers the
+# handles the next iteration receives (as many as `carried`, in order); what
+# it issues in between falls inside the loop's region. The answer is the
+# carried handles after the loop. Private: handles are opaque outside this
+# module, so a body can only reach this through the typed `d_for` / `d_for2`.
+fn loop_handles(lower: Idx, upper: Idx, step: Idx, carried: List[Int],
+  body: fn(Idx, List[Int]) -> List[Int] !Dev) -> List[Int] !Dev = {
+  let lo: Int = lower
+  let up: Int = upper
+  let st: Int = step
+  let (iv, inside) = t_loop_begin(lo, up, st, carried)
+  let i: Idx = iv
+  t_loop_end(body(i, inside))
+}
+
+## A `for` over the index range `[lower, upper)` by `step` inside the kernel,
+## carrying one tile: `init` enters, `body` runs ONCE, on the host, with the
+## induction variable and the carried tile as the loop sees them, and
+## answers the tile the next iteration receives; what it issues in between
+## falls inside the loop's region. The answer is the tile after the loop.
+##
+## This is an ordinary function rather than an operation because the
+## operation's own declaration could not name a `!Dev` body
+## (tile-backend-design 5.2). A body may nest `d_for`; the handler bounds the
+## depth. The memory ordering token is carried through the loop by the
+## handler, so a store after the loop is ordered after every store inside it.
+pub fn d_for[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
+  body: fn(Idx, Tile[D]) -> Tile[D] !Dev) -> Tile[D] !Dev = {
+  let h: Int = init
+  let outs = loop_handles(lower, upper, step, [h], (i, inside) => {
+    let t: Tile[D] = inside[0]
+    let r: Int = body(i, t)
+    [r]
+  })
+  let out: Tile[D] = outs[0]
+  out
+}
+
+## `d_for` carrying two tiles, of formats `A` and `B`, in order.
+pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
+  body: fn(Idx, Tile[A], Tile[B]) -> (Tile[A], Tile[B]) !Dev) -> (Tile[A], Tile[B]) !Dev = {
+  let ha: Int = a
+  let hb: Int = b
+  let outs = loop_handles(lower, upper, step, [ha, hb], (i, inside) => {
+    let ta: Tile[A] = inside[0]
+    let tb: Tile[B] = inside[1]
+    let (ra, rb) = body(i, ta, tb)
+    let xa: Int = ra
+    let xb: Int = rb
+    [xa, xb]
+  })
+  let oa: Tile[A] = outs[0]
+  let ob: Tile[B] = outs[1]
+  (oa, ob)
+}
+
 # ---- tests ----
 #
 # The recording handler lives in prog.dawn and is tested there. These blocks
@@ -132,6 +231,32 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       let h = next
       next = next + 1
       h
+    }
+    t_idx_const(_value) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_idx_add(_a, _b) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_idx_mul(_a, _b) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_loop_begin(_lower, _upper, _step, inits) => {
+      let iv = next
+      let base = next + 1
+      next = next + 1 + len(inits)
+      (iv, list.map(range(0, len(inits)), k => base + k))
+    }
+    t_loop_end(outs) => {
+      let base = next
+      next = next + len(outs)
+      list.map(range(0, len(outs)), k => base + k)
     }
   }
   body()
@@ -185,9 +310,65 @@ test "load hands the handler the parameter's own format, not a fixed one" {
       }
       t_store(_param, _dtype, _idx, _n, _v) => ()
       t_addf(_dtype, _n, _a, _b) => 2
+      t_idx_const(_value) => 3
+      t_idx_add(_a, _b) => 4
+      t_idx_mul(_a, _b) => 5
+      t_loop_begin(_lower, _upper, _step, inits) => (6, inits)
+      t_loop_end(outs) => outs
     }
     let _r = dtype_passed_to_load()
     log
   }
   assert seen == ["block_id 2", "load 1 f32 0 64"]
+}
+
+fn loop_seen() -> (Int, Int, Int, Int, Int) !Dev = {
+  let a = param(F64, 0)
+  let b = block_id(0)
+  let lo = idx_const(0)
+  let up = idx_add(b, idx_mul(b, lo))
+  let first = load(a, b, 8)
+  let acc = d_for(lo, up, lo, first, (i, t) => addf(F64, 8, t, load(a, i, 8)))
+  let hb: Int = b
+  let hup: Int = up
+  let hfirst: Int = first
+  let hacc: Int = acc
+  let hlo: Int = lo
+  (hb, hlo, hup, hfirst, hacc)
+}
+
+test "a loop's induction variable, carried handle and result are the handles the operations answered" {
+  # block_id 100, const 101, mul 102, add 103, load 104, then loop_begin
+  # takes 105 (iv) and 106 (the carried tile), the body's load 107 and
+  # addf 108, and loop_end answers 109 for the tile after the loop.
+  assert under_counter(loop_seen) == (100, 101, 103, 104, 109)
+}
+
+test "d_for hands the body the carried handle and passes its answer back as the continue value" {
+  let seen = {
+    with handle Dev {
+      var log: List[String] = []
+      t_block_id(_axis) => 0
+      t_load(_param, _dtype, _idx, _n) => 1
+      t_store(_param, _dtype, _idx, _n, _v) => ()
+      t_addf(_dtype, _n, a, b) => {
+        log = log ++ ["addf ${a} ${b}"]
+        2
+      }
+      t_idx_const(value) => value + 10
+      t_idx_add(_a, _b) => 4
+      t_idx_mul(_a, _b) => 5
+      t_loop_begin(lower, upper, step, inits) => {
+        log = log ++ ["loop_begin ${lower} ${upper} ${step} ${show(inits)}"]
+        (30, [31])
+      }
+      t_loop_end(outs) => {
+        log = log ++ ["loop_end ${show(outs)}"]
+        [40]
+      }
+    }
+    let _r = loop_seen()
+    log
+  }
+  assert seen == ["loop_begin 10 4 10 [1]", "addf 31 1", "loop_end [2]"]
 }

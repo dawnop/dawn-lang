@@ -24,7 +24,9 @@
 #     double-rounding theorem holds for that mode and no other. The renderer
 #     spells it and the writer encodes it; the table has no field for it
 #     because there is no other value it could take.
-#   * `return` closes the body, so a consumer walks one list and nothing else.
+#   * `return` closes the body, so a consumer walks one list and nothing else
+#     at the top level. A `ForLoop` nests: its body is a list of its own, `Cont`
+#     last, and a consumer recurses into it.
 #
 # Values are renumbered on the way out (0, 1, ... in definition order, as
 # scripts/core-golden's coredump does): the program's handles are trace
@@ -33,10 +35,20 @@
 # parameters are not values in this numbering: an operand is `Arg(pos)` or
 # `Val(id)`, and each consumer maps the two onto its own name space (`%argN`
 # and `%N` in the text; one flat index space in the bytecode, where the
-# parameters come first).
+# parameters come first). Around a `For` the numbering reads top to bottom
+# as the text does: the loop's results, then its induction variable and
+# carried values, then the body. The bytecode's index space rolls a region
+# back before numbering the results (bytecode.dawn), which is a mapping the
+# writer keeps, not a second numbering of the table.
+#
+# Scope: what a loop body defines (the induction variable, the carried
+# values, the body's own values, the ladders built inside) is visible in
+# that body and nowhere after it. A handle that refers to one of them after
+# the loop is refused by name; a ladder memoised inside is not reused after.
 use std/list
 use std/map
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, AddF, For}
+use std/str
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, AddF, IdxConst, IdxAdd, IdxMul, For, Continue}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -65,6 +77,12 @@ derive Show
 ## and bytecode both state: a result type on every value-producing
 ## instruction, plus the operand types the assembly prints (`from` / `to` on
 ## the shape operations, `ptr_ty` / `off_ty` / `val_ty` on the memory ones).
+##
+## `ForLoop` is the loop: `results` are the values it defines after itself,
+## typed `tys` (one per carried value); `iv` (a scalar i32) and `carried`
+## (typed `tys` again) are the block arguments its `body` sees; `lower`,
+## `upper`, `step` and `inits` are operands from outside. `body` ends in
+## `Cont(values, tys)`, the values handed to the next iteration.
 pub type Instr =
   | MakeTok(dst: Int)
   | BlockIds(x: Int, y: Int, z: Int)
@@ -78,6 +96,8 @@ pub type Instr =
   | LoadPtr(dst: Int, tok_out: Int, ptrs: Ref, tok_in: Ref, ptr_ty: Ty, val_ty: Ty)
   | StorePtr(tok_out: Int, ptrs: Ref, value: Ref, tok_in: Ref, ptr_ty: Ty, val_ty: Ty)
   | AddFloat(dst: Int, ty: Ty, lhs: Ref, rhs: Ref)
+  | ForLoop(results: List[Int], tys: List[Ty], iv: Int, lower: Ref, upper: Ref, step: Ref, inits: List[Ref], carried: List[Int], body: List[Instr])
+  | Cont(values: List[Ref], tys: List[Ty])
   | Ret
 derive Show
 
@@ -101,10 +121,15 @@ pub fn param_ty(dtype: String) -> Ty = Tile([], PtrTo(dtype))
 
 # The lowering's state, threaded through pure helpers rather than held in
 # `var`s, because the helpers are called from inside a `for` and a closure may
-# not capture a `var` (spec 4.5).
+# not capture a `var` (spec 4.5). `names` and `tys` are the handles in scope
+# and their types; `closed` the handles a finished loop body defined, kept
+# so that a reference to one after the loop is refused by name; `memo` the
+# ladders in scope; `body` the instructions of the region being built.
 type L = {
   next: Int,
   names: Map[Int, Ref],
+  tys: Map[Int, Ty],
+  closed: Map[Int, Unit],
   memo: Map[String, Ref],
   body: List[Instr],
 }
@@ -113,11 +138,38 @@ fn fresh(l: L) -> (L, Int) = (L { ..l, next: l.next + 1 }, l.next)
 
 fn emit(l: L, i: Instr) -> L = L { ..l, body: l.body ++ [i] }
 
-fn bind(l: L, handle: Int, r: Ref) -> L = L { ..l, names: map.insert(l.names, handle, r) }
+fn bind(l: L, handle: Int, r: Ref, t: Ty) -> L =
+  L { ..l, names: map.insert(l.names, handle, r), tys: map.insert(l.tys, handle, t) }
 
 fn ref_of(l: L, handle: Int, what: String) -> Ref = match map.get(l.names, handle) {
   Some(r) -> r
-  None -> panic("tileir: `${what}` refers to handle ${handle}, which no earlier operation defined")
+  None ->
+    if map.has(l.closed, handle) {
+      panic("tileir: `${what}` refers to handle ${handle}, which a loop body defined and which is not visible after the loop")
+    } else {
+      panic("tileir: `${what}` refers to handle ${handle}, which no earlier operation defined")
+    }
+}
+
+fn ty_of(l: L, handle: Int) -> Ty = match map.get(l.tys, handle) {
+  Some(t) -> t
+  None -> panic("tileir: handle ${handle} has no type; it was bound without one")
+}
+
+# A fresh value bound to `handle` with type `t`.
+fn define(l0: L, handle: Int, t: Ty) -> (L, Int) = {
+  let (l1, v) = fresh(l0)
+  (bind(l1, handle, Val(v), t), v)
+}
+
+# Fresh values for `handles`, each typed by `tys` at the same position.
+fn define_all(l0: L, handles: List[Int], tys: List[Ty]) -> (L, List[Int]) = {
+  let none: List[Int] = []
+  list.fold(range(0, len(handles)), (l0, none), (acc, k) => {
+    let (l, vs) = acc
+    let (l1, v) = define(l, handles[k], tys[k])
+    (l1, vs ++ [v])
+  })
 }
 
 # `off = idx * n + iota`, an `n`-wide tile of i32 element offsets. Memoised
@@ -167,47 +219,106 @@ fn pointers(l0: L, param: Int, dtype: String, idx: Int, n: Int) -> (L, Ref) = {
 
 fn lower_op(l0: L, op: TileOp) -> L = match op {
   MakeToken(dst) -> {
-    let (l1, t) = fresh(l0)
-    bind(emit(l1, MakeTok(t)), dst, Val(t))
+    let (l1, t) = define(l0, dst, Token)
+    emit(l1, MakeTok(t))
   }
   BlockId(dst, axis) -> {
     let (l1, x) = fresh(l0)
     let (l2, y) = fresh(l1)
     let (l3, z) = fresh(l2)
     let l4 = emit(l3, BlockIds(x, y, z))
-    bind(l4, dst, Val(if axis == 0 { x } else if axis == 1 { y } else { z }))
+    bind(l4, dst, Val(if axis == 0 { x } else if axis == 1 { y } else { z }), i32_scalar())
   }
   Load(dst, tok_out, param, dtype, idx, n, tok_in) -> {
     let tin = ref_of(l0, tok_in, "load token")
     let (l1, pt) = pointers(l0, param, dtype, idx, n)
-    let (l2, v) = fresh(l1)
-    let (l3, t) = fresh(l2)
-    let l4 = emit(l3, LoadPtr(v, t, pt, tin, Tile([n], PtrTo(dtype)), Tile([n], Num(dtype))))
-    bind(bind(l4, dst, Val(v)), tok_out, Val(t))
+    let val_ty = Tile([n], Num(dtype))
+    let (l2, v) = define(l1, dst, val_ty)
+    let (l3, t) = define(l2, tok_out, Token)
+    emit(l3, LoadPtr(v, t, pt, tin, Tile([n], PtrTo(dtype)), val_ty))
   }
   Store(tok_out, param, dtype, idx, n, value, tok_in) -> {
     let tin = ref_of(l0, tok_in, "store token")
     let v = ref_of(l0, value, "store value")
     let (l1, pt) = pointers(l0, param, dtype, idx, n)
-    let (l2, t) = fresh(l1)
-    let l3 = emit(l2, StorePtr(t, pt, v, tin, Tile([n], PtrTo(dtype)), Tile([n], Num(dtype))))
-    bind(l3, tok_out, Val(t))
+    let (l2, t) = define(l1, tok_out, Token)
+    emit(l2, StorePtr(t, pt, v, tin, Tile([n], PtrTo(dtype)), Tile([n], Num(dtype))))
   }
   AddF(dst, dtype, n, lhs, rhs) -> {
     let a = ref_of(l0, lhs, "addf lhs")
     let b = ref_of(l0, rhs, "addf rhs")
-    let (l1, d) = fresh(l0)
-    bind(emit(l1, AddFloat(d, Tile([n], Num(dtype)), a, b)), dst, Val(d))
+    let ty = Tile([n], Num(dtype))
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, AddFloat(d, ty, a, b))
   }
-  For(_iv, _lower, _upper, _step, _inits, _carried, _results, _body) ->
-    panic("tileir: `For` is not lowered in this release (tile-backend-design 5.2, knife 5)")
+  IdxConst(dst, value) -> {
+    let (l1, d) = define(l0, dst, i32_scalar())
+    emit(l1, ConstI32(d, value))
+  }
+  IdxAdd(dst, lhs, rhs) -> {
+    let a = ref_of(l0, lhs, "index add lhs")
+    let b = ref_of(l0, rhs, "index add rhs")
+    let (l1, d) = define(l0, dst, i32_scalar())
+    emit(l1, AddInt(d, i32_scalar(), a, b))
+  }
+  IdxMul(dst, lhs, rhs) -> {
+    let a = ref_of(l0, lhs, "index mul lhs")
+    let b = ref_of(l0, rhs, "index mul rhs")
+    let (l1, d) = define(l0, dst, i32_scalar())
+    emit(l1, MulInt(d, i32_scalar(), a, b))
+  }
+  For(iv, lower, upper, step, inits, carried, results, body) -> lower_for(l0, iv, lower, upper, step, inits, carried, results, body)
+  Continue(values) -> {
+    let refs = list.map(values, h => ref_of(l0, h, "continue value"))
+    let tys = list.map(values, h => ty_of(l0, h))
+    emit(l0, Cont(refs, tys))
+  }
+}
+
+# Lower a loop. The operands are resolved in the enclosing scope; the
+# results are numbered next (the order the text reads in), then the
+# induction variable and the carried values as the body's block arguments,
+# then the body in its own instruction list with the enclosing names and
+# ladders visible. On the way out everything the body bound is closed: the
+# names and ladders revert to the enclosing scope's plus the results.
+fn lower_for(l0: L, iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp]) -> L = {
+  if len(carried) != len(inits) || len(results) != len(inits) {
+    panic("tileir: a loop carrying ${len(inits)} value(s) names ${len(carried)} inside and ${len(results)} after")
+  } else {
+    ()
+  }
+  let lo = ref_of(l0, lower, "for lower bound")
+  let up = ref_of(l0, upper, "for upper bound")
+  let st = ref_of(l0, step, "for step")
+  let init_refs = list.map(inits, h => ref_of(l0, h, "for initial value"))
+  let tys = list.map(inits, h => ty_of(l0, h))
+  let (l1, res) = define_all(l0, results, tys)
+  let (l2, ivn) = define(l1, iv, i32_scalar())
+  let (l3, args) = define_all(l2, carried, tys)
+  let inner0 = L { ..l3, body: [] }
+  let inner = list.fold(body, inner0, lower_op)
+  match inner.body[len(inner.body) - 1] {
+    Cont(values, _tys) ->
+      if len(values) != len(inits) {
+        panic("tileir: a loop carrying ${len(inits)} value(s) continues with ${len(values)}")
+      } else {
+        ()
+      }
+    _ -> panic("tileir: a loop body ends in something other than continue")
+  }
+  # close the body's scope: what it bound is gone, its numbers stay spent
+  let opened = list.filter(map.keys(inner.names), h => not map.has(l1.names, h))
+  let closed = list.fold(opened, l1.closed, (m, h) => map.insert(m, h, ()))
+  let l4 = L { ..l1, next: inner.next, closed: closed }
+  emit(l4, ForLoop(res, tys, ivn, lo, up, st, init_refs, args, inner.body))
 }
 
 ## `prog` as a `Kernel`: its operations in order, each memory operation
 ## preceded by the pointer ladder it needs, `Ret` last. A handle no earlier
-## operation defined is refused rather than numbered.
+## operation defined, or one a finished loop body defined, is refused rather
+## than numbered.
 pub fn lower(prog: TileProg) -> Kernel = {
-  var l = L { next: 0, names: map.empty(), memo: map.empty(), body: [] }
+  var l = L { next: 0, names: map.empty(), tys: map.empty(), closed: map.empty(), memo: map.empty(), body: [] }
   for op in prog.ops {
     l = lower_op(l, op)
   }
@@ -228,7 +339,21 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   LoadPtr(dst, tok_out, _ptrs, _tok_in, _ptr_ty, _val_ty) -> [dst, tok_out]
   StorePtr(tok_out, _ptrs, _value, _tok_in, _ptr_ty, _val_ty) -> [tok_out]
   AddFloat(dst, _ty, _lhs, _rhs) -> [dst]
+  ForLoop(results, _tys, _iv, _lower, _upper, _step, _inits, _carried, _body) -> results
+  Cont(_values, _tys) -> []
   Ret -> []
+}
+
+## Every value `body` defines, at any depth, in the order the text reads
+## them: for a `For`, its results, its induction variable, its carried
+## values, then its body's.
+pub fn defines_inside(body: List[Instr]) -> List[Int] = {
+  let none: List[Int] = []
+  list.fold(body, none, (acc, i) => match i {
+    ForLoop(results, _tys, iv, _lower, _upper, _step, _inits, carried, inner) ->
+      acc ++ results ++ [iv] ++ carried ++ defines_inside(inner)
+    _ -> acc ++ defines(i)
+  })
 }
 
 # ---- tests ----
@@ -304,4 +429,94 @@ test "block ids along the three axes bind the matching result of one get_tile_bl
 
 test "lowering the same program twice gives the same table" {
   assert lower(two_loads_one_param()) == lower(two_loads_one_param())
+}
+
+# The sum kernel as prog.dawn's test records it: four chunks of 128.
+fn sum_prog() -> TileProg = TileProg {
+  name: "sum",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    IdxConst(2, 4),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, 128, 0),
+    IdxConst(6, 1),
+    IdxAdd(7, 3, 6),
+    IdxAdd(8, 3, 2),
+    For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [
+      Load(12, 13, 0, "f64", 9, 128, 11),
+      AddF(14, "f64", 128, 10, 12),
+      Continue([14, 13])
+    ]),
+    Store(17, 1, "f64", 1, 128, 15, 16)
+  ]
+}
+
+fn is_for(i: Instr) -> Bool = match i {
+  ForLoop(_results, _tys, _iv, _lower, _upper, _step, _inits, _carried, _body) -> true
+  _ -> false
+}
+
+test "a loop lowers to one For whose results, block arguments and body are numbered in reading order" {
+  let k = lower(sum_prog())
+  let f64_128 = Tile([128], Num("f64"))
+  let loops = list.filter(k.body, is_for)
+  assert len(loops) == 1
+  match loops[0] {
+    ForLoop(results, tys, iv, lower, upper, step, inits, carried, body) -> {
+      # results 20 and 21, then iv 22, then carried 23 and 24; the body starts at 25
+      assert results == [20, 21]
+      assert tys == [f64_128, Token]
+      assert iv == 22
+      assert (lower, upper, step) == (Val(18), Val(19), Val(17))
+      assert inits == [Val(15), Val(16)]
+      assert carried == [23, 24]
+      assert defines_inside(body)[0] == 25
+      # the body's load reads its pointers at the induction variable and the carried token
+      assert body[len(body) - 3] == LoadPtr(34, 35, Val(33), Val(24), Tile([128], PtrTo("f64")), f64_128)
+      assert body[len(body) - 2] == AddFloat(36, f64_128, Val(23), Val(34))
+      assert body[len(body) - 1] == Cont([Val(36), Val(35)], [f64_128, Token])
+    }
+    _ -> { assert false }
+  }
+  # every value, at any depth, is numbered once, densely, in reading order
+  assert defines_inside(k.body) == range(0, len(defines_inside(k.body)))
+}
+
+test "after a loop the store consumes the loop's results, not values from inside it" {
+  let k = lower(sum_prog())
+  let f64_128 = Tile([128], Num("f64"))
+  let p64_128 = Tile([128], PtrTo("f64"))
+  let store = k.body[len(k.body) - 2]
+  match store {
+    StorePtr(_tok_out, _ptrs, value, tok_in, _ptr_ty, _val_ty) -> { assert (value, tok_in) == (Val(20), Val(21)) }
+    _ -> { assert false }
+  }
+  assert k.body[len(k.body) - 1] == Ret
+  # the ladder inside the loop is the body's; the one after it is built anew
+  assert len(list.filter(k.body, is_offset)) == 2
+  assert (f64_128, p64_128) == (Tile([128], Num("f64")), Tile([128], PtrTo("f64")))
+}
+
+test "a value a loop body defined is refused by name after the loop" {
+  # the store's token is the body's load token (13) instead of the loop's token result (16)
+  let bad = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 9) ++ [Store(17, 1, "f64", 1, 128, 15, 13)] }
+  match catch_panic(() => lower(bad)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "`store token` refers to handle 13, which a loop body defined and which is not visible after the loop") }
+  }
+}
+
+test "a loop whose carried lists disagree, or whose body does not end in continue, is refused" {
+  let short = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 8) ++ [For(9, 7, 8, 6, [4, 5], [10], [15, 16], [Continue([10, 11])])] }
+  match catch_panic(() => lower(short)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "a loop carrying 2 value(s) names 1 inside and 2 after") }
+  }
+  let open = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 8) ++ [For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [AddF(12, "f64", 128, 10, 10)])] }
+  match catch_panic(() => lower(open)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "a loop body ends in something other than continue") }
+  }
 }

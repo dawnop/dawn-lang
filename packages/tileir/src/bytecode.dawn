@@ -25,8 +25,22 @@
 #                kernel] locIndex[varint, 0 = unknown] bodyLength[varint] body
 #   body      =: instruction*, values numbered from 0: the entry parameters
 #                first, then each result in order
-#   instruction =: opcode[varint] resultTypeIndex[varint]* (flags[varint])?
-#                attributes operands[varint]*
+#   instruction =: opcode[varint] (numResults[varint])? resultTypeIndex[varint]*
+#                (flags[varint])? attributes (numOperands[varint])?
+#                operands[varint]* (numRegions[varint] region*)?
+#   region    =: numBlocks[varint] block*
+#   block     =: numArgs[varint] argTypeIndex[varint]* numOps[varint]
+#                instruction*
+#
+# The counts are present on an operation with a variadic operand or result
+# list (`return`, `continue`, `for`), and the flags on one with an optional
+# field the targeted version knows (`for`'s `unsigned`, 13.2 and later).
+# Value indices inside a block continue from the enclosing count: the block
+# arguments take the next indices, the block's results follow, and when the
+# block ends the count rolls back to where it stood before the arguments, so
+# the region-holding operation's own results take the indices the body just
+# used (BytecodeWriter.cpp writeBlock). The table's numbers are the text's,
+# so `index` maps each table value to its index here.
 #   Constant (4, aligned 8), Type (5, aligned 4), String (1, aligned 4) =:
 #                count[varint] padding[to the index width] offset[u64 or u32
 #                LE]* data*, where a constant is length[varint] + raw bytes,
@@ -43,8 +57,8 @@ use std/bytes
 use std/list
 use std/map
 use std/str
-use prog.{TileProg, MakeToken, BlockId, Load, Store, AddF}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstI32, MulInt, AddInt, Reshape, Broadcast, Iota, Offset, LoadPtr, StorePtr, AddFloat, Ret}
+use prog.{TileProg, MakeToken, BlockId, Load, Store, AddF, IdxConst, IdxAdd, IdxMul, For, Continue}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstI32, MulInt, AddInt, Reshape, Broadcast, Iota, Offset, LoadPtr, StorePtr, AddFloat, ForLoop, Cont, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
@@ -61,6 +75,8 @@ const OP_ADDF: Int = 0x02
 const OP_ADDI: Int = 0x03
 const OP_BROADCAST: Int = 0x0B
 const OP_CONSTANT: Int = 0x10
+const OP_CONTINUE: Int = 0x11
+const OP_FOR: Int = 0x29
 const OP_GET_TILE_BLOCK_ID: Int = 0x30
 const OP_IOTA: Int = 0x3A
 const OP_LOAD_PTR_TKO: Int = 0x3D
@@ -143,14 +159,16 @@ fn intern(t: Table, enc: Bytes) -> (Table, Int) = {
   }
 }
 
-# The writer's state: the three tables, the body under construction, and how
-# many entry parameters precede the values in the body's index space.
+# The writer's state: the three tables, the body under construction, the
+# index each table value has in the body's index space (the entry
+# parameters take 0 to nargs-1 before any of them), and the next free index.
 type W = {
   strs: Table,
   types: Table,
   consts: Table,
   body: bytes.Buf,
-  nargs: Int,
+  index: Map[Int, Int],
+  nvals: Int,
 }
 
 fn ty_of(w: W, enc: Bytes) -> (W, Int) = {
@@ -202,12 +220,20 @@ fn str_of(w: W, s: String) -> (W, Int) = {
 
 fn ref_index(w: W, r: Ref) -> Int = match r {
   Arg(pos) -> pos
-  Val(id) -> w.nargs + id
+  Val(id) -> match map.get(w.index, id) {
+    Some(i) -> i
+    None -> panic("tileir: value ${id} has no bytecode index here; it is not in scope")
+  }
 }
 
 fn emit(w: W, x: Int) -> W = W { ..w, body: put_varint(w.body, x) }
 
 fn emit_ref(w: W, r: Ref) -> W = emit(w, ref_index(w, r))
+
+# The next index, given to table value `id`.
+fn number(w: W, id: Int) -> W = W { ..w, index: map.insert(w.index, id, w.nvals), nvals: w.nvals + 1 }
+
+fn number_all(w: W, ids: List[Int]) -> W = list.fold(ids, w, number)
 
 # opcode, then one result type index.
 fn emit_op(w: W, opcode: Int, result: Ty) -> W = {
@@ -215,7 +241,7 @@ fn emit_op(w: W, opcode: Int, result: Ty) -> W = {
   emit(emit(w1, opcode), ti)
 }
 
-fn instr(w0: W, i: Instr) -> W = match i {
+fn encode_instr(w0: W, i: Instr) -> W = match i {
   MakeTok(_dst) -> emit_op(w0, OP_MAKE_TOKEN, Token)
   BlockIds(_x, _y, _z) -> {
     let (w1, ti) = ty(w0, Tile([], Num("i32")))
@@ -250,8 +276,42 @@ fn instr(w0: W, i: Instr) -> W = match i {
     # flags: no flush_to_zero; rounding_mode nearest_even.
     emit_ref(emit_ref(emit(emit(emit_op(w0, OP_ADDF, t), 0), 0), lhs), rhs)
   }
+  ForLoop(_results, tys, iv, lower, upper, step, inits, carried, body) -> {
+    # results: their count, then a type each; flags: `unsigned` absent
+    # (13.2 and later know the field); operands: their count, then the
+    # bounds, the step and the initial values; one region of one block
+    # whose arguments are the induction variable (i32) and the carried
+    # values, then the body's instructions.
+    let w1 = emit(emit(w0, OP_FOR), len(tys))
+    let w2 = list.fold(tys, w1, (w, t) => {
+      let (wt, ti) = ty(w, t)
+      emit(wt, ti)
+    })
+    let w3 = if for_has_flags() { emit(w2, 0) } else { w2 }
+    let w4 = list.fold([lower, upper, step] ++ inits, emit(w3, 3 + len(inits)), emit_ref)
+    let w5 = emit(emit(emit(w4, 1), 1), 1 + len(carried))
+    let (w6, i32i) = ty(w5, Tile([], Num("i32")))
+    let w7 = list.fold(tys, emit(w6, i32i), (w, t) => {
+      let (wt, ti) = ty(w, t)
+      emit(wt, ti)
+    })
+    let w8 = number_all(number(w7, iv), carried)
+    let w9 = list.fold(body, emit(w8, len(body)), instr)
+    # the block is over: its indices roll back, the loop's results take them
+    W { ..w9, index: w7.index, nvals: w7.nvals }
+  }
+  Cont(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_CONTINUE), 0), len(values)), emit_ref)
   Ret -> emit(emit(emit(w0, OP_RETURN), 0), 0)
 }
+
+# `for` gained its optional `unsigned` field in 13.2, so from that version on
+# the writer emits its flags varint and a 13.1 reader would not expect one.
+fn for_has_flags() -> Bool = BYTECODE_MAJOR > 13 || (BYTECODE_MAJOR == 13 && BYTECODE_MINOR >= 2)
+
+# Write one instruction, then give its results the next indices. A `ForLoop`
+# numbers its block arguments and body inside `encode_instr` and rolls them
+# back; its results are numbered here, after, as the reader will number them.
+fn instr(w: W, i: Instr) -> W = number_all(encode_instr(w, i), defines(i))
 
 # ---- the file
 
@@ -275,7 +335,7 @@ fn magic() -> bytes.Buf = bytes.put(bytes.put(bytes.put(bytes.put(bytes.put(byte
 
 ## `k` as a bytecode file holding one kernel entry.
 pub fn encode_kernel(k: Kernel) -> Bytes = {
-  var w = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), nargs: len(k.params) }
+  var w = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: len(k.params) }
   var params: List[Int] = []
   for dt in k.params {
     let (w1, pi) = ty(w, Tile([], PtrTo(dt)))
@@ -344,7 +404,7 @@ test "interning answers one index per distinct encoding, in first-use order" {
 }
 
 test "a tile type names its element type first, so the element's index is lower" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), nargs: 0 }
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
   let (w1, ti) = ty(w0, Tile([128], PtrTo("f64")))
   # f64 (tag 9), ptr<f64>, tile<128xptr<f64>>: three types, the tile last.
   assert ti == 2
@@ -383,4 +443,76 @@ test "the function entry is a kernel with an unknown location and the entry name
 
 test "encoding the same program twice gives the same bytes" {
   assert encode(vadd()) == encode(vadd())
+}
+
+fn sum_prog() -> TileProg = TileProg {
+  name: "sum",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    IdxConst(2, 4),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, 128, 0),
+    IdxConst(6, 1),
+    IdxAdd(7, 3, 6),
+    IdxAdd(8, 3, 2),
+    For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [
+      Load(12, 13, 0, "f64", 9, 128, 11),
+      AddF(14, "f64", 128, 10, 12),
+      Continue([14, 13])
+    ]),
+    Store(17, 1, "f64", 1, 128, 15, 16)
+  ]
+}
+
+# The bytecode of `k.body` alone, and the writer after it.
+fn body_of(k: Kernel) -> (W, String) = {
+  var w = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: len(k.params) }
+  for i in k.body {
+    w = instr(w, i)
+  }
+  (w, hex(bytes.freeze(w.body)))
+}
+
+test "a loop's block arguments take the indices after the values before it, and its results take those same indices once the block ends" {
+  let k = lower(sum_prog())
+  let (w, _b) = body_of(k)
+  # 2 parameters, then table values 0..19 at indices 2..21; the results
+  # %20 and %21 are numbered after the body rolled back: 22 and 23, the
+  # indices the induction variable %22 and the carried %23 took inside.
+  # The body's values are out of scope afterwards and have no index; the
+  # continue inside named %36 and %35 by the indices they had there, 36 and
+  # 35, which is what the bytes say.
+  assert map.get(w.index, 19) == Some(21)
+  assert map.get(w.index, 20) == Some(22)
+  assert map.get(w.index, 21) == Some(23)
+  assert map.get(w.index, 37) == Some(24)
+  assert not map.has(w.index, 22)
+  assert not map.has(w.index, 36)
+  let (w2, whole) = body_of(k)
+  assert w2.nvals == w.nvals
+  assert str.contains(whole, hex(bytes.freeze(put_varint(put_varint(put_varint(put_varint(put_varint(bytes.buf(), OP_CONTINUE), 0), 2), 36), 35))))
+}
+
+test "a for is its opcode, result count and types, the flags, the operand count and operands, then one region of one block" {
+  let k = lower(sum_prog())
+  let (_w, whole) = body_of(k)
+  # opcode 0x29, 2 results, types (t0 = tile<128xf64>, t1 = token: whatever
+  # indices they got), flags 0, 5 operands: %18 %19 %17 %15 %16 at indices
+  # 20 21 19 17 18, then 1 region, 1 block, 3 args.
+  let head = bytes.freeze(put_varint(bytes.buf(), OP_FOR))
+  assert str.contains(whole, hex(head))
+  let tail = bytes.freeze(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(bytes.buf(), 0), 5), 20), 21), 19), 17), 18), 1), 1))
+  assert str.contains(whole, hex(tail) ++ "03")
+  assert bytecode_version() == "13.2"
+  assert for_has_flags()
+}
+
+test "encoding a loop twice gives the same bytes, and the file still opens and closes as before" {
+  let b = encode(sum_prog())
+  assert b == encode(sum_prog())
+  assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d02" ++ "0000"
+  assert bytes.at(b, bytes.len(b) - 1) == 0
+  assert str.ends_with(hex(b), hex(bytes.utf8("sum")) ++ "00")
 }
