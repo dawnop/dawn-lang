@@ -1,12 +1,18 @@
 # The kernels scripts/tile-golden pins. Each is traced twice (the two records
-# must be equal, or this program panics) and rendered once; the text is the
-# golden. run.sh copies this file to src/main.dawn of a project whose [deps]
-# names packages/tileir, and runs it with the kernel's name as the argument.
+# must be equal, or this program panics) and then either rendered once, the
+# text being the layer-0 golden, or encoded once into the bytecode file the
+# layer-1 golden pins and `tileiras` assembles. run.sh copies this file to
+# src/main.dawn of a project whose [deps] names packages/tileir, and runs it
+# as `kernels <name>` (text to stdout), `kernels <name> --bytecode <path>`
+# (bytes to the file) or `kernels --bytecode-version` (the header's version,
+# which run.sh holds against toolchain.txt).
 use std/io
+use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32}
 use tileir/dev.{Dev, Param, param, block_id, load, store, addf}
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
+use tileir/bytecode.{encode, bytecode_version}
 
 # f64 vector add over 128-wide tiles: the first milestone's kernel
 # (tile-backend-design 1), and the shape std/gpu's vadd_ref answers for.
@@ -34,12 +40,23 @@ fn trace(name: String) -> TileProg = match name {
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
+# Trace `name` twice and answer the record, or panic if the two runs differ.
+fn trace_twice(name: String) -> TileProg = {
+  let first = trace(name)
+  let second = trace(name)
+  if first != second { panic("tile-golden: `${name}` traced twice gave two different programs") } else { () }
+  first
+}
+
 pub fn main() -> Unit !io = match args() {
-  [name] -> {
-    let first = trace(name)
-    let second = trace(name)
-    if first != second { panic("tile-golden: `${name}` traced twice gave two different programs") } else { () }
-    print(render(first))
+  ["--bytecode-version"] -> println(bytecode_version())
+  [name] -> print(render(trace_twice(name)))
+  [name, "--bytecode", path] -> {
+    let bytes = encode(trace_twice(name))
+    match with_fs_real(() => write_bytes(path, bytes)) {
+      Ok(_) -> ()
+      Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
+    }
   }
-  _ -> panic("usage: kernels <vadd|vadd_f32>")
+  _ -> panic("usage: kernels <vadd|vadd_f32> [--bytecode <path>] | kernels --bytecode-version")
 }

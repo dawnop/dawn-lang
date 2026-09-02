@@ -1,0 +1,33 @@
+# The numbers docs/tile-backend-design.md 6.3 says move together, in one
+# place that scripts read (install-tileiras.sh takes the wheels from here,
+# run.sh holds the bytecode and tileiras versions against the tools it runs).
+#
+#   bytecode   the version packages/tileir/src/bytecode.dawn writes into the
+#              header (BYTECODE_MAJOR.BYTECODE_MINOR); run.sh fails if the
+#              program disagrees with this line. 13.2 is the lowest version
+#              Tile IR runs on Ampere and Ada (sm_80 to sm_89); tileiras
+#              13.3.36 accepts 13.1, 13.2 and 13.3 and produces the same
+#              cubin from all three.
+#   tileiras   the assembler's own version, as `tileiras --version` prints it
+#              after `V`; run.sh fails if the binary it was given is another.
+#   gpu-name   the --gpu-name the goldens are assembled for (the one GPU of
+#              the ledger, 6.4).
+#   wheel      the PyPI wheels install-tileiras.sh downloads, each with the
+#              sha256 of the manylinux x86_64 file; the download is refused
+#              if the bytes differ. nvidia-cuda-tileiras carries the binary;
+#              at run time it needs libnvvm.so.4 (nvidia-nvvm) and ptxas
+#              (nvidia-cuda-nvcc) beside it, measured by removing each file
+#              in turn: without either it prints `failed to compile Tile IR
+#              program` on every input, including an empty module. The third
+#              wheel it declares, nvidia-nvjitlink, is not needed and not
+#              installed.
+#   driver     the driver version the ledger's last GPU run used; `none`
+#              until knife 4 records one (the machine's 560.94 is below the
+#              r580 Tile IR needs).
+bytecode 13.2
+tileiras 13.3.36
+gpu-name sm_86
+wheel nvidia-cuda-tileiras==13.3.36 sha256=9221618a3f6422efcb9ae38225d1db7bf0f4ca211f8fdc98a3cd6a81a8f00eca
+wheel nvidia-nvvm==13.3.73 sha256=0e28e0858a3475e11ac67d35301cd5bf82666a1c0dc4ec4e80ceaf3a5fd1dea8
+wheel nvidia-cuda-nvcc==13.3.73 sha256=f483af83166c4fa356a21606076d553b0b4ceaebbd9912e537545080db695bdd
+driver none
