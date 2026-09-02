@@ -8,6 +8,7 @@
 # .class files (docs/selfhost-codegen.md).
 
 use std/io
+use std/io.{Fs}
 use std/str
 use std/bytes
 use std/list
@@ -265,7 +266,7 @@ pub fn no_sites() -> Map[String, MethodSite] = map.empty()
 ## the offending method and its descriptor, and with no site table that is the
 ## finest coordinate there is. Emitters that can say where their methods came
 ## from call `class_bytes_from`.
-pub fn class_bytes(finish: fn() -> Option[Bytes] !io, cls: String) -> Bytes !io =
+pub fn class_bytes(finish: fn() -> Option[Bytes] !io, cls: String) -> Bytes !Fs !io =
   class_bytes_from(finish, cls, "", no_sites())
 
 ## The same, for a class whose methods can be traced back to source: `src` is
@@ -281,7 +282,7 @@ pub fn class_bytes_from(
   cls: String,
   src: String,
   sites: Map[String, MethodSite]
-) -> Bytes !io =
+) -> Bytes !Fs !io =
   match catch_fault(finish) {
     Ok(bs) -> bs.expect("bytes")
     Err(e) -> {
@@ -323,7 +324,7 @@ fn too_large_text(
   cls: String,
   src: String,
   sites: Map[String, MethodSite]
-) -> String !io = {
+) -> String !Fs !io = {
   let head = "`" ++ cls ++ "` does not fit in a JVM class file: " ++ msg
   match located(msg, cls, sites) {
     Some(found) -> {
@@ -642,7 +643,7 @@ pub fn gen_ctor_class(
   base: String,
   ci: CtorI,
   ov: EqOverride
-) -> Bytes !io = {
+) -> Bytes !Fs !io = {
   let sub = ctor_jvm_name(adts, ci)
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, sub, base)
@@ -710,7 +711,7 @@ pub fn gen_adt(
   adts: Adts,
   a: AdtI,
   ov: EqOverride
-) -> List[(String, Bytes)] !io = {
+) -> List[(String, Bytes)] !Fs !io = {
   let base = adt_jvm_name(a)
   if a.is_record {
     let ci = match a.ctors {

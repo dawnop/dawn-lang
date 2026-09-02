@@ -9,6 +9,7 @@ use std/str
 use std/set
 use std/map
 use std/io
+use std/io.{Fs}
 use compiler_plan/manifestv.{MCoord, mcoord_show}
 use compiler_plan/pkgfetch
 use sha2/sha256
@@ -147,7 +148,7 @@ fn count_of(m: Map[String, String], k: String) -> Option[String] = map.get(m, k)
 ## does not depend on the order coursier returned them in. Names that do not
 ## collide are untouched, which is every name in practice; the same bytes
 ## appearing twice is one artifact, not a collision.
-pub fn artifacts(jars: List[String]) -> Result[List[Artifact], String] !io = {
+pub fn artifacts(jars: List[String]) -> Result[List[Artifact], String] !Fs !io = {
   var names: List[String] = []
   var hashes: List[String] = []
   for j in jars {
@@ -246,7 +247,7 @@ pub fn parse_lock(text: String) -> Result[Lock, String] = {
 
 ## Hash the jars a resolution produced into a Lock, next to the coordinates
 ## they came from.
-pub fn lock_of(coords: List[MCoord], jars: List[String]) -> Result[Lock, String] !io = {
+pub fn lock_of(coords: List[MCoord], jars: List[String]) -> Result[Lock, String] !Fs !io = {
   var cs: List[String] = []
   for c in coords { cs = cs ++ [mcoord_show(c)] }
   let found = match artifacts(jars) {
@@ -314,7 +315,7 @@ pub type FetchCheckedError = { path: String, message: String }
 pub fn fetch_checked_report(
   project: String,
   coords: List[MCoord]
-) -> Result[List[String], FetchCheckedError] !io = {
+) -> Result[List[String], FetchCheckedError] !Fs !io = {
   let jars = match fetch(coords) {
     Ok(found) -> found
     Err(e) -> return Err(FetchCheckedError { path: project ++ "/dawn.toml", message: e })
@@ -346,7 +347,7 @@ pub fn fetch_checked_report(
 pub fn fetch_checked(
   project: String,
   coords: List[MCoord]
-) -> Result[List[String], String] !io =
+) -> Result[List[String], String] !Fs !io =
   match fetch_checked_report(project, coords) {
     Ok(jars) -> Ok(jars)
     Err(e) -> Err(e.message)
@@ -354,56 +355,58 @@ pub fn fetch_checked(
 
 ## `pkgfetch.delete_tree` is not usable as a value across a module boundary,
 ## so the test's cleanup names it here.
-fn rmtree(path: String) -> Unit !io = pkgfetch.delete_tree(path)
+fn rmtree(path: String) -> Unit !io = io.with_fs_real(() => pkgfetch.delete_tree(path))
 
 test "one jar file name, two artifacts: both survive, distinctly named" {
-  let root = match io.temp_dir("", "dawn-artifacts-") {
-    Ok(d) -> d
-    Err(e) -> panic("temp dir: " ++ e.message)
-  }
-  with r <- bracket(root, rmtree)
-  # `group.a:util:1.0` and `group.b:util:1.0` land in different cache
-  # directories under one file name -- which is the whole hazard, since what
-  # comes back from coursier is a list of paths and nothing else
-  let _ = io.mkdirs(r ++ "/a")
-  let _ = io.mkdirs(r ++ "/b")
-  let _ = io.mkdirs(r ++ "/c")
-  let _ = io.write_file(r ++ "/a/util-1.0.jar", "one")
-  let _ = io.write_file(r ++ "/b/util-1.0.jar", "two")
-  let _ = io.write_file(r ++ "/c/asm-9.jar", "asm")
-  let got = match artifacts([r ++ "/a/util-1.0.jar", r ++ "/b/util-1.0.jar", r ++ "/c/asm-9.jar"]) {
-    Ok(a) -> a
-    Err(e) -> panic(e)
-  }
-  assert len(got) == 3
-  # the name that does not collide is left exactly as it was
-  assert got[2].name == "asm-9.jar"
-  # the one that does is qualified on both sides, so the result does not
-  # depend on which order they arrived in
-  assert got[0].name != got[1].name
-  assert str.ends_with(got[0].name, "-util-1.0.jar")
-  assert str.ends_with(got[1].name, "-util-1.0.jar")
-  # ...and a lock built from that set can verify itself, which is the thing a
-  # name-keyed lock could not do
-  let l = match lock_of([MCoord { group: "g", artifact: "a", version: "1", aname: "a" }],
-    [r ++ "/a/util-1.0.jar", r ++ "/b/util-1.0.jar", r ++ "/c/asm-9.jar"]) {
-    Ok(x) -> x
-    Err(e) -> panic(e)
-  }
-  match check_lock(l, l) {
-    Ok(_) -> { assert true }
-    Err(e) -> {
-      println(e)
-      assert false
+  io.with_fs_real(() => {
+    let root = match io.temp_dir("", "dawn-artifacts-") {
+      Ok(d) -> d
+      Err(e) -> panic("temp dir: " ++ e.message)
     }
-  }
-  # the same bytes reached twice is one artifact, not a collision
-  let same = match artifacts([r ++ "/a/util-1.0.jar", r ++ "/a/util-1.0.jar"]) {
-    Ok(a) -> a
-    Err(e) -> panic(e)
-  }
-  assert len(same) == 1
-  assert same[0].name == "util-1.0.jar"
+    with r <- bracket(root, rmtree)
+    # `group.a:util:1.0` and `group.b:util:1.0` land in different cache
+    # directories under one file name -- which is the whole hazard, since what
+    # comes back from coursier is a list of paths and nothing else
+    let _ = io.mkdirs(r ++ "/a")
+    let _ = io.mkdirs(r ++ "/b")
+    let _ = io.mkdirs(r ++ "/c")
+    let _ = io.write_file(r ++ "/a/util-1.0.jar", "one")
+    let _ = io.write_file(r ++ "/b/util-1.0.jar", "two")
+    let _ = io.write_file(r ++ "/c/asm-9.jar", "asm")
+    let got = match artifacts([r ++ "/a/util-1.0.jar", r ++ "/b/util-1.0.jar", r ++ "/c/asm-9.jar"]) {
+      Ok(a) -> a
+      Err(e) -> panic(e)
+    }
+    assert len(got) == 3
+    # the name that does not collide is left exactly as it was
+    assert got[2].name == "asm-9.jar"
+    # the one that does is qualified on both sides, so the result does not
+    # depend on which order they arrived in
+    assert got[0].name != got[1].name
+    assert str.ends_with(got[0].name, "-util-1.0.jar")
+    assert str.ends_with(got[1].name, "-util-1.0.jar")
+    # ...and a lock built from that set can verify itself, which is the thing a
+    # name-keyed lock could not do
+    let l = match lock_of([MCoord { group: "g", artifact: "a", version: "1", aname: "a" }],
+      [r ++ "/a/util-1.0.jar", r ++ "/b/util-1.0.jar", r ++ "/c/asm-9.jar"]) {
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    }
+    match check_lock(l, l) {
+      Ok(_) -> { assert true }
+      Err(e) -> {
+        println(e)
+        assert false
+      }
+    }
+    # the same bytes reached twice is one artifact, not a collision
+    let same = match artifacts([r ++ "/a/util-1.0.jar", r ++ "/a/util-1.0.jar"]) {
+      Ok(a) -> a
+      Err(e) -> panic(e)
+    }
+    assert len(same) == 1
+    assert same[0].name == "util-1.0.jar"
+  })
 }
 
 test "a lock that lists a name twice is refused rather than half-read" {

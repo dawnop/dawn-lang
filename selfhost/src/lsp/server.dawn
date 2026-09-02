@@ -9,6 +9,7 @@
 
 use std/char
 use std/io
+use std/io.{Fs}
 use std/str
 use std/map
 use std/list
@@ -675,7 +676,7 @@ pub fn lsp_std_dir(flag: Option[String], from_env: Option[String]) -> String =
 ## The driver supplies resource factories rather than one process-global Java
 ## oracle. The JVM host creates a platform-only standalone lease and one lease
 ## per target; the native host creates lifecycle-compatible refusals.
-pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !io = {
+pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !io = {
   let std_dir = lsp_std_dir(std_flag, io.getenv("DAWN_STD"))
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
@@ -812,7 +813,7 @@ pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !io = {
 const DEBOUNCE_MS: Int = 150
 
 ## Run the analysis a document sync deferred, if there is one.
-fn flush(st: LspState, pending: Option[(String, String, Int)]) -> LspState !io =
+fn flush(st: LspState, pending: Option[(String, String, Int)]) -> LspState !Fs !io =
   match pending {
     Some(p) -> {
       let (uri, text, version) = p
@@ -1105,7 +1106,15 @@ fn respond_error(id: Json, code: Int, message: String) -> Unit !io =
 fn notify(method: String, params: Json) -> Unit !io =
   send(jobj([("jsonrpc", JStr("2.0")), ("method", JStr(method)), ("params", params)]))
 
-fn handle(st0: LspState, msg: Json) -> LspState !io = {
+## One message, under the real file system. The handler is installed per
+## message rather than once around the read loop because the loop's state
+## threads through `var`s the loop reads back, and `with` cannot see a `var`
+## declared before it (spec §4.10); the innermost boundary that owns a whole
+## unit of work is the message.
+fn handle(st0: LspState, msg: Json) -> LspState !io =
+  io.with_fs_real(() => handle_fs(st0, msg))
+
+fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !io = {
   var st = st0
   let method = ostr(msg, "method")
   let id = match oget(msg, "id") {
@@ -1210,7 +1219,7 @@ fn add_loc_diag(
   path_by_uri: Map[String, String],
   out0: Map[String, List[Json]],
   ld: LocDiag
-) -> Map[String, List[Json]] !io = {
+) -> Map[String, List[Json]] !Fs !io = {
   var out = out0
   let target = canon(ld.path)
   var matched = false
@@ -1240,7 +1249,7 @@ fn diagnostics_of_program(
   st: LspState,
   path_by_uri: Map[String, String],
   prog: Program
-) -> Map[String, List[Json]] !io = {
+) -> Map[String, List[Json]] !Fs !io = {
   var out: Map[String, List[Json]] = map.empty()
   for ld in prog.diags { out = add_loc_diag(st, path_by_uri, out, ld) }
   out
@@ -1250,7 +1259,7 @@ fn diagnostics_of_problem(
   st: LspState,
   path_by_uri: Map[String, String],
   problem: LocDiag
-) -> Map[String, List[Json]] !io = {
+) -> Map[String, List[Json]] !Fs !io = {
   let out: Map[String, List[Json]] = map.empty()
   add_loc_diag(st, path_by_uri, out, problem)
 }
@@ -1312,7 +1321,7 @@ fn conflict_diagnostics(
 
 ## Rebuild one coherent workspace snapshot. Conflict detection happens before the
 ## overlay map can overwrite either live text, and discards the old program.
-fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !io =
+fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !Fs !io =
   match workspace_inputs(st, ws0.plan, ws0.path_by_uri) {
     InputsConflict(paths) -> {
       let no_entries: Map[String, String] = map.empty()
@@ -1341,7 +1350,7 @@ fn unavailable_workspace(
   plan: ProjectPlan,
   path_by_uri: Map[String, String],
   problem: LocDiag
-) -> UnavailableWorkspace !io =
+) -> UnavailableWorkspace !Fs !io =
   UnavailableWorkspace {
     plan: plan,
     path_by_uri: path_by_uri,
@@ -1355,7 +1364,7 @@ fn activate_workspace(
   st: LspState,
   plan: ProjectPlan,
   path_by_uri: Map[String, String]
-) -> WorkspaceSlot !io =
+) -> WorkspaceSlot !Fs !io =
   match st.host.project(plan.source) {
     Ok(lease) -> {
       let no_prog: Option[Program] = None
@@ -1497,7 +1506,7 @@ fn standalone_doc(
   }
 }
 
-fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !io =
+fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !Fs !io =
   match uri_to_path(uri) {
     None -> {
       let no_path: Option[String] = None
@@ -1563,7 +1572,7 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
     }
   }
 
-fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> LspState !io =
+fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> LspState !Fs !io =
   match old.analysis {
     Standalone(_, _, modules) -> {
       let source_path = match old.path {
@@ -1608,7 +1617,7 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
     }
   }
 
-fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState !io =
+fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState !Fs !io =
   match map.get(st.docs, uri) {
     Some(old) -> update_existing_doc(st, old, text, version)
     None -> open_new_doc(st, uri, text, version)
@@ -1617,7 +1626,7 @@ fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState
 ## An unavailable root retries only at an explicit low-frequency boundary.
 ## didChange never reaches this function; new members use `activate_workspace`
 ## directly, and a fully closed root is newly planned when reopened.
-fn retry_unavailable(st: LspState, uri: String) -> LspState !io =
+fn retry_unavailable(st: LspState, uri: String) -> LspState !Fs !io =
   match map.get(st.docs, uri) {
     Some(d) ->
       match d.analysis {
@@ -1635,7 +1644,7 @@ fn retry_unavailable(st: LspState, uri: String) -> LspState !io =
     None -> st
   }
 
-fn close_doc(st0: LspState, uri: String) -> LspState !io =
+fn close_doc(st0: LspState, uri: String) -> LspState !Fs !io =
   match map.get(st0.docs, uri) {
     None -> {
       publish_uris(st0, set.from([uri]))
@@ -1690,7 +1699,7 @@ fn pos_offset(d: Doc, params: Json) -> Int = {
 
 # ---- language features ----
 
-fn handle_completion(st: LspState, params: Json) -> Json !io = {
+fn handle_completion(st: LspState, params: Json) -> Json !Fs !io = {
   match doc_of(st, params) {
     Some(d) ->
       match analysis_of(st, d) {
@@ -1746,7 +1755,7 @@ fn handle_hover(st: LspState, params: Json) -> Json !io = {
   }
 }
 
-fn handle_definition(st: LspState, params: Json) -> Json !io = {
+fn handle_definition(st: LspState, params: Json) -> Json !Fs !io = {
   match doc_of(st, params) {
     Some(d) ->
       match analysis_of(st, d) {
@@ -1805,7 +1814,7 @@ fn location_of(
   def_path: Option[String],
   lo: Int,
   hi: Int
-) -> Option[Json] !io = {
+) -> Option[Json] !Fs !io = {
   let same = match def_path {
     None -> true
     Some(dp) ->
@@ -1957,75 +1966,77 @@ fn handle_formatting(st: LspState, params: Json) -> Json !io = {
 }
 
 test "a bundled std buffer keeps its std identity through the document seam" {
-  # `standalone_doc` is where `textDocument/didOpen` records what a buffer is.
-  # It used to write the literal "main", which `analyze_standalone` proposes
-  # and is not always what comes back: a source file of the bundled std is
-  # checked under its real std module path, and every query keyed by mod_path
-  # -- hover, go to definition -- resolves through `analysis.entry`. Writing
-  # the literal here leaves the diagnostics right and every query on a std
-  # buffer answering nothing, which is the shape of failure no diagnostic
-  # count can see.
-  let std = match load_std("std") {
-    Ok(sc) -> sc
-    Err(e) -> panic("std: " ++ std_load_error_text(e))
-  }
-  let no_docs: Map[String, Doc] = map.empty()
-  let no_ws: Map[String, WorkspaceSlot] = map.empty()
-  let st = LspState {
-    std: std,
-    bins: builtins(),
-    docs: no_docs,
-    workspaces: no_ws,
-    standalone: Some(jsig_refused_lease()),
-    host: LspLeaseHost {
-      standalone: () => jsig_refused_lease(),
-      project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
-    },
-    lifecycle: Running
-  }
-  let path = "std/cursor.dawn"
-  let text = match io.read_file(path) {
-    Ok(t) -> t
-    Err(e) -> panic("std/cursor.dawn: " ++ e.message)
-  }
-  let no_modules: Option[Map[String, String]] = None
-  let d = standalone_doc(st, "file://" ++ canon(path), Some(path), Some(canon(path)),
-    text, 0, no_modules)
-  match d.analysis {
-    Standalone(prog, entry, _) -> {
-      assert len(prog.diags) == 0
-      assert entry == "std/cursor"
-      # the identity is not decoration: this is the lookup every query makes
-      match doc_qcx(st, Analysis {
-        prog: prog,
-        entry: entry,
-        modules: no_modules,
-        workspace_key: None,
-        definition_root: None
-      }) {
-        Some(qc) -> { assert qc.entry.cx.is_std_module }
-        None -> panic("the std buffer's entry module was not found by mod_path")
+  io.with_fs_real(() => {
+    # `standalone_doc` is where `textDocument/didOpen` records what a buffer is.
+    # It used to write the literal "main", which `analyze_standalone` proposes
+    # and is not always what comes back: a source file of the bundled std is
+    # checked under its real std module path, and every query keyed by mod_path
+    # -- hover, go to definition -- resolves through `analysis.entry`. Writing
+    # the literal here leaves the diagnostics right and every query on a std
+    # buffer answering nothing, which is the shape of failure no diagnostic
+    # count can see.
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
+    }
+    let no_docs: Map[String, Doc] = map.empty()
+    let no_ws: Map[String, WorkspaceSlot] = map.empty()
+    let st = LspState {
+      std: std,
+      bins: builtins(),
+      docs: no_docs,
+      workspaces: no_ws,
+      standalone: Some(jsig_refused_lease()),
+      host: LspLeaseHost {
+        standalone: () => jsig_refused_lease(),
+        project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
+      },
+      lifecycle: Running
+    }
+    let path = "std/cursor.dawn"
+    let text = match io.read_file(path) {
+      Ok(t) -> t
+      Err(e) -> panic("std/cursor.dawn: " ++ e.message)
+    }
+    let no_modules: Option[Map[String, String]] = None
+    let d = standalone_doc(st, "file://" ++ canon(path), Some(path), Some(canon(path)),
+      text, 0, no_modules)
+    match d.analysis {
+      Standalone(prog, entry, _) -> {
+        assert len(prog.diags) == 0
+        assert entry == "std/cursor"
+        # the identity is not decoration: this is the lookup every query makes
+        match doc_qcx(st, Analysis {
+          prog: prog,
+          entry: entry,
+          modules: no_modules,
+          workspace_key: None,
+          definition_root: None
+        }) {
+          Some(qc) -> { assert qc.entry.cx.is_std_module }
+          None -> panic("the std buffer's entry module was not found by mod_path")
+        }
       }
+      WorkspaceMember(_) -> panic("a std source is not a workspace member")
     }
-    WorkspaceMember(_) -> panic("a std source is not a workspace member")
-  }
 
-  # a buffer that is not one of the bundle's files stays `main`
-  let elsewhere = "/tmp/dawn-selfhost-lsp-std/cursor.dawn"
-  let _ = io.mkdirs("/tmp/dawn-selfhost-lsp-std")
-  match io.write_file(elsewhere, text) {
-    Ok(_) -> ()
-    Err(e) -> panic("test setup: " ++ e.message)
-  }
-  let d2 = standalone_doc(st, "file://" ++ elsewhere, Some(elsewhere),
-    Some(canon(elsewhere)), text, 0, no_modules)
-  match d2.analysis {
-    Standalone(prog2, entry2, _) -> {
-      assert entry2 == "main"
-      assert len(prog2.diags) > 0
+    # a buffer that is not one of the bundle's files stays `main`
+    let elsewhere = "/tmp/dawn-selfhost-lsp-std/cursor.dawn"
+    let _ = io.mkdirs("/tmp/dawn-selfhost-lsp-std")
+    match io.write_file(elsewhere, text) {
+      Ok(_) -> ()
+      Err(e) -> panic("test setup: " ++ e.message)
     }
-    WorkspaceMember(_) -> panic("a standalone buffer is not a workspace member")
-  }
+    let d2 = standalone_doc(st, "file://" ++ elsewhere, Some(elsewhere),
+      Some(canon(elsewhere)), text, 0, no_modules)
+    match d2.analysis {
+      Standalone(prog2, entry2, _) -> {
+        assert entry2 == "main"
+        assert len(prog2.diags) > 0
+      }
+      WorkspaceMember(_) -> panic("a standalone buffer is not a workspace member")
+    }
+  })
 }
 
 test "the language server's std is the toolchain's, not the client's cwd" {
@@ -2093,13 +2104,13 @@ fn def_probe_text() -> String =
     ""
   ], "\n")
 
-fn def_probe_put(path: String, text: String) -> Unit !io =
+fn def_probe_put(path: String, text: String) -> Unit !Fs !io =
   match io.write_file(path, text) {
     Ok(_) -> ()
     Err(e) -> panic("test setup: " ++ e.message)
   }
 
-fn def_probe_doc_named(st: LspState, name: String, text: String) -> Doc !io = {
+fn def_probe_doc_named(st: LspState, name: String, text: String) -> Doc !Fs !io = {
   let dir = "/tmp/dawn-selfhost-lsp-def"
   let path = dir ++ "/" ++ name
   let _ = io.mkdirs(dir)
@@ -2109,7 +2120,7 @@ fn def_probe_doc_named(st: LspState, name: String, text: String) -> Doc !io = {
     0, no_modules)
 }
 
-fn def_probe_doc(st: LspState, text: String) -> Doc !io =
+fn def_probe_doc(st: LspState, text: String) -> Doc !Fs !io =
   def_probe_doc_named(st, "main.dawn", text)
 
 fn def_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -> Target = {
@@ -2138,162 +2149,170 @@ fn def_probe_span(t: Target, what: String) -> (Int, Int) =
   }
 
 test "a definition in std names std's file and points at the declaration" {
-  # The bug this pins: `def_path` None means "the document being analyzed", and
-  # std used to answer with it. `location_of` then mapped std's offsets through
-  # the requesting buffer's line table and replied with that buffer's uri, so
-  # "go to definition" on `reverse` jumped to an unrelated place in the file the
-  # request came from. A confidently wrong location, not a missing one.
-  let std = match load_std("std") {
-    Ok(sc) -> sc
-    Err(e) -> panic("std: " ++ std_load_error_text(e))
-  }
-  let st = def_probe_state(std)
-  let text = def_probe_text()
-  let d = def_probe_doc(st, text)
-
-  let t = def_probe_at(st, d, text, "list.reverse", 5)
-  let dp = match t.def_path {
-    Some(p) -> p
-    None -> panic("a definition in std must name std's file")
-  }
-  assert dp == canon("std/list.dawn")
-
-  # The span is std's, so it only means anything read against std's own text.
-  # Slicing the file is what tells a right answer from a plausible one: the
-  # pre-fix reply had a range too, and it addressed the wrong document.
-  let (lo, hi) = def_probe_span(t, "list.reverse")
-  let src = match io.read_file(dp) {
-    Ok(s) -> s
-    Err(e) -> panic("std/list.dawn: " ++ e.message)
-  }
-  assert str.slice(src, lo, hi) == "reverse"
-
-  # and the Location the client is handed names that file, not this buffer
-  let nokey: Option[String] = None
-  match location_of(st, d, nokey, nokey, t.def_path, lo, hi) {
-    Some(loc) -> {
-      assert ostr(loc, "uri") == path_to_uri(canon("std/list.dawn"))
-      assert ostr(loc, "uri") != d.uri
+  io.with_fs_real(() => {
+    # The bug this pins: `def_path` None means "the document being analyzed", and
+    # std used to answer with it. `location_of` then mapped std's offsets through
+    # the requesting buffer's line table and replied with that buffer's uri, so
+    # "go to definition" on `reverse` jumped to an unrelated place in the file the
+    # request came from. A confidently wrong location, not a missing one.
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
-    None -> panic("a std file that exists must resolve to a Location")
-  }
+    let st = def_probe_state(std)
+    let text = def_probe_text()
+    let d = def_probe_doc(st, text)
 
-  # `use std/list` reaches location_of through DUseModule, which reads
-  # ModExports.src_path -- and std modules are checked with no src_path on
-  # purpose, so the bundle's own record is the only thing that can answer.
-  let u = def_probe_at(st, d, text, "std/list", 0)
-  assert u.def_path == Some(canon("std/list.dawn"))
+    let t = def_probe_at(st, d, text, "list.reverse", 5)
+    let dp = match t.def_path {
+      Some(p) -> p
+      None -> panic("a definition in std must name std's file")
+    }
+    assert dp == canon("std/list.dawn")
+
+    # The span is std's, so it only means anything read against std's own text.
+    # Slicing the file is what tells a right answer from a plausible one: the
+    # pre-fix reply had a range too, and it addressed the wrong document.
+    let (lo, hi) = def_probe_span(t, "list.reverse")
+    let src = match io.read_file(dp) {
+      Ok(s) -> s
+      Err(e) -> panic("std/list.dawn: " ++ e.message)
+    }
+    assert str.slice(src, lo, hi) == "reverse"
+
+    # and the Location the client is handed names that file, not this buffer
+    let nokey: Option[String] = None
+    match location_of(st, d, nokey, nokey, t.def_path, lo, hi) {
+      Some(loc) -> {
+        assert ostr(loc, "uri") == path_to_uri(canon("std/list.dawn"))
+        assert ostr(loc, "uri") != d.uri
+      }
+      None -> panic("a std file that exists must resolve to a Location")
+    }
+
+    # `use std/list` reaches location_of through DUseModule, which reads
+    # ModExports.src_path -- and std modules are checked with no src_path on
+    # purpose, so the bundle's own record is the only thing that can answer.
+    let u = def_probe_at(st, d, text, "std/list", 0)
+    assert u.def_path == Some(canon("std/list.dawn"))
+  })
 }
 
 test "an embedded std offers no definition instead of one in the wrong file" {
-  # A released toolchain in a project with no std directory: the embedded copy
-  # answers, and there is no file on disk to jump into. The honest reply is no
-  # definition at all. Emitting a None path here would be the original bug --
-  # None is the entry document, and std is not it.
-  let emb = match load_std("/tmp/dawn-selfhost-lsp-def/no-std-here") {
-    Ok(sc) -> sc
-    Err(e) -> panic("embedded std: " ++ std_load_error_text(e))
-  }
-  let absent: Option[String] = None
-  assert emb.dir == absent
-  let st = def_probe_state(emb)
-  let text = def_probe_text()
-  let d = def_probe_doc(st, text)
+  io.with_fs_real(() => {
+    # A released toolchain in a project with no std directory: the embedded copy
+    # answers, and there is no file on disk to jump into. The honest reply is no
+    # definition at all. Emitting a None path here would be the original bug --
+    # None is the entry document, and std is not it.
+    let emb = match load_std("/tmp/dawn-selfhost-lsp-def/no-std-here") {
+      Ok(sc) -> sc
+      Err(e) -> panic("embedded std: " ++ std_load_error_text(e))
+    }
+    let absent: Option[String] = None
+    assert emb.dir == absent
+    let st = def_probe_state(emb)
+    let text = def_probe_text()
+    let d = def_probe_doc(st, text)
 
-  let t = def_probe_at(st, d, text, "list.reverse", 5)
-  match t.def {
-    Some(_) -> panic("an embedded std module has no file to point into")
-    None -> ()
-  }
-  # `handle_definition` replies [] on a None def, so location_of is never
-  # reached and cannot invent a range.
+    let t = def_probe_at(st, d, text, "list.reverse", 5)
+    match t.def {
+      Some(_) -> panic("an embedded std module has no file to point into")
+      None -> ()
+    }
+    # `handle_definition` replies [] on a None def, so location_of is never
+    # reached and cannot invent a range.
 
-  # What must survive: hover travels independently of def/def_path, and losing
-  # the jump must not cost the text.
-  assert str.contains(t.hover, "reverse")
-  assert str.contains(t.hover, "List[T]")
+    # What must survive: hover travels independently of def/def_path, and losing
+    # the jump must not cost the text.
+    assert str.contains(t.hover, "reverse")
+    assert str.contains(t.hover, "List[T]")
 
-  # local definitions are unaffected by which half of std answered
-  let l = def_probe_at(st, d, text, "helper(xs", 0)
-  assert l.def_path == absent
-  let (llo, lhi) = def_probe_span(l, "helper")
-  assert str.slice(text, llo, lhi) == "helper"
+    # local definitions are unaffected by which half of std answered
+    let l = def_probe_at(st, d, text, "helper(xs", 0)
+    assert l.def_path == absent
+    let (llo, lhi) = def_probe_span(l, "helper")
+    assert str.slice(text, llo, lhi) == "helper"
+  })
 }
 
 test "a definition of a std constant names std's file too" {
-  # `def_of_const_in` reaches std through its own loop rather than through
-  # `module_ast_by_class`, and today's bundle declares no `pub const` at all,
-  # so the real std cannot exercise it: a mutant reverting that branch on its
-  # own survived the whole suite. The probe std is what makes the branch
-  # reachable, and it is a one-module std for the same reason the id-counter
-  # probe in driver/stdlib is -- the real bundle's contents are not the thing
-  # under test.
-  let root = "/tmp/dawn-selfhost-lsp-def/conststd"
-  let _ = io.mkdirs(root)
-  def_probe_put(root ++ "/modules.txt", "constprobe\n")
-  def_probe_put(root ++ "/constprobe.dawn", "pub const PROBE_LIMIT: Int = 7\n")
-  let cstd = match load_std(root) {
-    Ok(sc) -> sc
-    Err(e) -> panic("probe std: " ++ std_load_error_text(e))
-  }
-  let st = def_probe_state(cstd)
-  let text = join([
-    "use std/constprobe.{PROBE_LIMIT}",
-    "",
-    "fn limit() -> Int = PROBE_LIMIT + 1",
-    ""
-  ], "\n")
-  let d = def_probe_doc_named(st, "constuser.dawn", text)
+  io.with_fs_real(() => {
+    # `def_of_const_in` reaches std through its own loop rather than through
+    # `module_ast_by_class`, and today's bundle declares no `pub const` at all,
+    # so the real std cannot exercise it: a mutant reverting that branch on its
+    # own survived the whole suite. The probe std is what makes the branch
+    # reachable, and it is a one-module std for the same reason the id-counter
+    # probe in driver/stdlib is -- the real bundle's contents are not the thing
+    # under test.
+    let root = "/tmp/dawn-selfhost-lsp-def/conststd"
+    let _ = io.mkdirs(root)
+    def_probe_put(root ++ "/modules.txt", "constprobe\n")
+    def_probe_put(root ++ "/constprobe.dawn", "pub const PROBE_LIMIT: Int = 7\n")
+    let cstd = match load_std(root) {
+      Ok(sc) -> sc
+      Err(e) -> panic("probe std: " ++ std_load_error_text(e))
+    }
+    let st = def_probe_state(cstd)
+    let text = join([
+      "use std/constprobe.{PROBE_LIMIT}",
+      "",
+      "fn limit() -> Int = PROBE_LIMIT + 1",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "constuser.dawn", text)
 
-  let t = def_probe_at(st, d, text, "PROBE_LIMIT + 1", 0)
-  let dp = match t.def_path {
-    Some(p) -> p
-    None -> panic("a std constant must name std's file")
-  }
-  assert dp == canon(root ++ "/constprobe.dawn")
-  let (lo, hi) = def_probe_span(t, "PROBE_LIMIT")
-  let src = match io.read_file(dp) {
-    Ok(s) -> s
-    Err(e) -> panic("probe std module: " ++ e.message)
-  }
-  assert str.slice(src, lo, hi) == "PROBE_LIMIT"
+    let t = def_probe_at(st, d, text, "PROBE_LIMIT + 1", 0)
+    let dp = match t.def_path {
+      Some(p) -> p
+      None -> panic("a std constant must name std's file")
+    }
+    assert dp == canon(root ++ "/constprobe.dawn")
+    let (lo, hi) = def_probe_span(t, "PROBE_LIMIT")
+    let src = match io.read_file(dp) {
+      Ok(s) -> s
+      Err(e) -> panic("probe std module: " ++ e.message)
+    }
+    assert str.slice(src, lo, hi) == "PROBE_LIMIT"
+  })
 }
 
 test "a local definition still resolves against the requesting document" {
-  # The contract the std fix leans on, from the other side. `def_path` None has
-  # to keep meaning "this buffer" -- that is what makes a definition in the file
-  # being edited resolve against the live text rather than whatever is on disk.
-  let std = match load_std("std") {
-    Ok(sc) -> sc
-    Err(e) -> panic("std: " ++ std_load_error_text(e))
-  }
-  let st = def_probe_state(std)
-  let text = def_probe_text()
-  let d = def_probe_doc(st, text)
-
-  let t = def_probe_at(st, d, text, "helper(xs", 0)
-  let absent: Option[String] = None
-  assert t.def_path == absent
-  let (lo, hi) = def_probe_span(t, "helper")
-  assert str.slice(text, lo, hi) == "helper"
-
-  let nokey: Option[String] = None
-  match location_of(st, d, nokey, nokey, t.def_path, lo, hi) {
-    Some(loc) -> {
-      assert ostr(loc, "uri") == d.uri
-      let r = match oget(loc, "range") {
-        Some(j) -> j
-        None -> panic("a Location has a range")
-      }
-      let start = match oget(r, "start") {
-        Some(j) -> j
-        None -> panic("a range has a start")
-      }
-      # line 2 of the probe text, where `fn helper` is written
-      assert oint(start, "line") == 2
+  io.with_fs_real(() => {
+    # The contract the std fix leans on, from the other side. `def_path` None has
+    # to keep meaning "this buffer" -- that is what makes a definition in the file
+    # being edited resolve against the live text rather than whatever is on disk.
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
-    None -> panic("a definition in the requesting document must resolve")
-  }
+    let st = def_probe_state(std)
+    let text = def_probe_text()
+    let d = def_probe_doc(st, text)
+
+    let t = def_probe_at(st, d, text, "helper(xs", 0)
+    let absent: Option[String] = None
+    assert t.def_path == absent
+    let (lo, hi) = def_probe_span(t, "helper")
+    assert str.slice(text, lo, hi) == "helper"
+
+    let nokey: Option[String] = None
+    match location_of(st, d, nokey, nokey, t.def_path, lo, hi) {
+      Some(loc) -> {
+        assert ostr(loc, "uri") == d.uri
+        let r = match oget(loc, "range") {
+          Some(j) -> j
+          None -> panic("a Location has a range")
+        }
+        let start = match oget(r, "start") {
+          Some(j) -> j
+          None -> panic("a range has a start")
+        }
+        # line 2 of the probe text, where `fn helper` is written
+        assert oint(start, "line") == 2
+      }
+      None -> panic("a definition in the requesting document must resolve")
+    }
+  })
 }
 
 # ---- handler state cells: what the reader points at, and what answers ----
@@ -2319,57 +2338,59 @@ fn cell_probe_text() -> String =
   ], "\n")
 
 test "a handler state cell answers at every spelling of it" {
-  # A cell is not an ordinary binding by the time it is typed: the checker
-  # rewrites every read into `cell_get`/`cell_take` and every write into
-  # `cell_set`, and the binding itself holds an erased slot
-  # (docs/handler-state-design.md). Left to the shapes an `XLocal` and a
-  # `TSAssign` make, the query answers nothing here -- and the type it would
-  # answer with is the erased cell, which names nothing the author wrote.
-  let std = match load_std("std") {
-    Ok(sc) -> sc
-    Err(e) -> panic("std: " ++ std_load_error_text(e))
-  }
-  let st = def_probe_state(std)
-  let text = cell_probe_text()
-  let d = def_probe_doc_named(st, "cells.dawn", text)
-  let absent: Option[String] = None
+  io.with_fs_real(() => {
+    # A cell is not an ordinary binding by the time it is typed: the checker
+    # rewrites every read into `cell_get`/`cell_take` and every write into
+    # `cell_set`, and the binding itself holds an erased slot
+    # (docs/handler-state-design.md). Left to the shapes an `XLocal` and a
+    # `TSAssign` make, the query answers nothing here -- and the type it would
+    # answer with is the erased cell, which names nothing the author wrote.
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
+    }
+    let st = def_probe_state(std)
+    let text = cell_probe_text()
+    let d = def_probe_doc_named(st, "cells.dawn", text)
+    let absent: Option[String] = None
 
-  # the declaration: the slot's type, not the erased cell, and its own name as
-  # the place to jump to
-  let decl = def_probe_at(st, d, text, "acc: List[Int]", 0)
-  assert decl.hover == "var acc: List[Int]"
-  let (dlo, dhi) = def_probe_span(decl, "the cell declaration")
-  assert str.slice(text, dlo, dhi) == "acc"
-  assert decl.def_path == absent
+    # the declaration: the slot's type, not the erased cell, and its own name as
+    # the place to jump to
+    let decl = def_probe_at(st, d, text, "acc: List[Int]", 0)
+    assert decl.hover == "var acc: List[Int]"
+    let (dlo, dhi) = def_probe_span(decl, "the cell declaration")
+    assert str.slice(text, dlo, dhi) == "acc"
+    assert decl.def_path == absent
 
-  # the write, whose left-hand side is a name the author wrote and the checker
-  # did not keep: same text, and the jump lands on the declaration
-  let w = def_probe_at(st, d, text, "acc = acc", 0)
-  assert w.hover == "var acc: List[Int]"
-  let (wlo, whi) = def_probe_span(w, "the cell write")
-  assert (wlo, whi) == (dlo, dhi)
+    # the write, whose left-hand side is a name the author wrote and the checker
+    # did not keep: same text, and the jump lands on the declaration
+    let w = def_probe_at(st, d, text, "acc = acc", 0)
+    assert w.hover == "var acc: List[Int]"
+    let (wlo, whi) = def_probe_span(w, "the cell write")
+    assert (wlo, whi) == (dlo, dhi)
 
-  # the read inside that write's right-hand side
-  let r = def_probe_at(st, d, text, "acc ++", 0)
-  assert r.hover == "var acc: List[Int]"
-  assert def_probe_span(r, "the cell read") == (dlo, dhi)
+    # the read inside that write's right-hand side
+    let r = def_probe_at(st, d, text, "acc ++", 0)
+    assert r.hover == "var acc: List[Int]"
+    assert def_probe_span(r, "the cell read") == (dlo, dhi)
 
-  # the right-hand side itself has a type again -- `Int` and not the block's
-  # `List[Int]`, which is what the whole handler answered with when nothing
-  # inside it was walked
-  let rhs = def_probe_at(st, d, text, "w * 2", 2)
-  assert rhs.hover == "Int"
+    # the right-hand side itself has a type again -- `Int` and not the block's
+    # `List[Int]`, which is what the whole handler answered with when nothing
+    # inside it was walked
+    let rhs = def_probe_at(st, d, text, "w * 2", 2)
+    assert rhs.hover == "Int"
 
-  # the arm's parameter, which is only reachable once the arm is paired with
-  # the closure the checker made of it
-  let p = def_probe_at(st, d, text, "emit(w) =>", 5)
-  assert p.hover == "w: Int"
-  let (plo, phi) = def_probe_span(p, "the arm parameter")
-  assert str.slice(text, plo, phi) == "w"
+    # the arm's parameter, which is only reachable once the arm is paired with
+    # the closure the checker made of it
+    let p = def_probe_at(st, d, text, "emit(w) =>", 5)
+    assert p.hover == "w: Int"
+    let (plo, phi) = def_probe_span(p, "the arm parameter")
+    assert str.slice(text, plo, phi) == "w"
 
-  # and a read from the block below the handler, which is the remainder
-  # closure rather than the arm
-  let tail = def_probe_at(st, d, text, "acc\n}", 0)
-  assert tail.hover == "var acc: List[Int]"
-  assert def_probe_span(tail, "the cell read below the handler") == (dlo, dhi)
+    # and a read from the block below the handler, which is the remainder
+    # closure rather than the arm
+    let tail = def_probe_at(st, d, text, "acc\n}", 0)
+    assert tail.hover == "var acc: List[Int]"
+    assert def_probe_span(tail, "the cell read below the handler") == (dlo, dhi)
+  })
 }

@@ -4,6 +4,7 @@
 # file (no pipe-buffer deadlock on large output), then read back.
 use std/str
 use std/io
+use std/io.{Fs, with_fs_real}
 use java "java.lang.ProcessBuilder"
 use java "java.io.File"
 use java "java.util.concurrent.TimeUnit"
@@ -37,7 +38,7 @@ fn truncate(s: String) -> (String, Bool) =
     (s, false)
   }
 
-fn slurp(path: String) -> String !io =
+fn slurp(path: String) -> String !Fs !io =
   match io.read_file(path) {
     Ok(s) -> s
     Err(_) -> ""
@@ -90,7 +91,7 @@ fn cleanup(dir: String) -> Unit !io = {
 #
 # The budget is `compile_timeout_secs()` — separate from the run budget, since
 # a cold compiler is legitimately slower than the program it produces.
-fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !io = {
+fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !Fs !io = {
   let build_out = "$dir/build.txt"
   let bp = ProcessBuilder.new(sandboxed(dir, [dawn_bin(), "build", src, "-o", jar]))
   bp.redirectErrorStream(true)
@@ -113,7 +114,11 @@ fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !
 # Compile-only entry for /check (editor diagnostics): stage and compile, never
 # run. Success carries no output — the client only cares whether diagnostics
 # exist. Same sandbox as /run: comptime executes user code at compile time.
-pub fn check(code: String) -> Outcome !io = {
+## Both entry points install the file system handler themselves: main hands
+## them to `with_gate` as a `fn() -> T !io` body, a closed row the label
+## cannot travel through (spec §6.5), and one snippet's staging directory is
+## the whole unit of file work anyway.
+pub fn check(code: String) -> Outcome !io = with_fs_real(() => {
   let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
   let dir = "${temp_root()}/dawn-play-$id"
   let src = "$dir/prog.dawn"
@@ -130,9 +135,9 @@ pub fn check(code: String) -> Outcome !io = {
   }
   cleanup(dir)
   outcome
-}
+})
 
-pub fn execute(code: String) -> Outcome !io = {
+pub fn execute(code: String) -> Outcome !io = with_fs_real(() => {
   let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
   let dir = "${temp_root()}/dawn-play-$id"
   let src = "$dir/prog.dawn"
@@ -174,4 +179,4 @@ pub fn execute(code: String) -> Outcome !io = {
   }
   cleanup(dir)
   outcome
-}
+})

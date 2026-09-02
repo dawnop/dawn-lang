@@ -15,6 +15,7 @@
 #                                         class-path packages in (standalone)
 
 use std/io
+use std/io.{Fs}
 use std/str
 use std/bytes
 use std/map
@@ -225,7 +226,7 @@ fn path_sep() -> String !io = File.pathSeparator!
 ## later as a NoClassDefFoundError naming something the user never wrote — or
 ## did not resurface, and shipped a jar with a hole in it. The path and the real
 ## exception are both worth having at the moment they are known.
-fn write_class(dir: String, name: String, bs: Bytes) -> Result[Unit, String] !io = {
+fn write_class(dir: String, name: String, bs: Bytes) -> Result[Unit, String] !Fs !io = {
   let path = dir ++ "/" ++ name ++ ".class"
   let parent = match str.last_index_of(path, "/") {
     Some(i) -> str.take(path, i)
@@ -257,7 +258,7 @@ fn collect_program(
   opts: CtOpts,
   closure: Bool,
   std_tests: Bool
-) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !io = {
+) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !Fs !io = {
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
   var mods: List[CheckedMod] = []
@@ -734,7 +735,7 @@ fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !io = {
 
 ## `--cp <jars>` / `--cp=jars`; repeatable, `:`-separated, every entry must
 ## exist; (jars, args without the flag).
-fn extract_cp(rest: List[String]) -> (List[String], List[String]) !io = {
+fn extract_cp(rest: List[String]) -> (List[String], List[String]) !Fs !io = {
   var jars: List[String] = []
   var out: List[String] = []
   var i = 0
@@ -780,7 +781,7 @@ fn run_usage() -> String =
   "usage: dawn run [compiler-options] <target> [-- <program-args>...]"
 
 ## Parse compiler options through the target, then preserve program argv raw.
-fn parse_run_args(rest: List[String]) -> RunArgs !io = {
+fn parse_run_args(rest: List[String]) -> RunArgs !Fs !io = {
   var cpjars: List[String] = []
   var fuel = DEFAULT_FUEL
   var ffi = false
@@ -861,7 +862,7 @@ fn parse_run_args(rest: List[String]) -> RunArgs !io = {
 
 ## Render compile diagnostics, the count line, and exit 1 (the Kotlin
 ## compileProject failure shape).
-fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
+fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
   io.eprint(diag.render_all(pairs))
@@ -887,7 +888,7 @@ fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
 ## nothing was written, and exit 1. Separate from `fail_compile` because the
 ## last line is the whole point: the user asked for a rewrite and did not get
 ## one, and a bare diagnostic dump leaves that ambiguous.
-fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !io = {
+fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !Fs !io = {
   io.eprint(diag.render_all(pairs))
   io.eprintln(diag.count_line(len(pairs)))
   io.eprintln("these files do not lex and were left unchanged")
@@ -897,7 +898,7 @@ fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !io = {
 
 ## Render diagnostics without the count line and exit 1 (the Kotlin cmdDoc
 ## failure shape).
-fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
+fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
   io.eprint(diag.render_all(pairs))
@@ -960,7 +961,7 @@ fn fail_std(e: StdLoadError) -> StdCtx !io = {
 ## `dawn cache verify` — re-hash every entry in the package cache and compare
 ## it with the hash its directory name claims (PKG-02's companion command:
 ## the per-use check catches the entry a build touches, this sweeps them all).
-fn run_cache(rest: List[String]) -> Unit !io = {
+fn run_cache(rest: List[String]) -> Unit !Fs !io = {
   if len(rest) != 1 || rest[0] != "verify" {
     return cli_error("usage: dawn cache verify")
   }
@@ -994,7 +995,7 @@ fn run_cache(rest: List[String]) -> Unit !io = {
 }
 
 ## `selfhost __pkghash <dir>` — the d1 canonical tree hash (dawn __pkghash).
-fn run_pkghash(rest: List[String]) -> Unit !io = {
+fn run_pkghash(rest: List[String]) -> Unit !Fs !io = {
   let dir = if len(rest) > 0 { rest[0] } else { "." }
   if not io.is_dir(dir) { return cli_error("not a directory: " ++ dir) }
   match pkgfetch.tree_hash(dir) {
@@ -1003,7 +1004,7 @@ fn run_pkghash(rest: List[String]) -> Unit !io = {
   }
 }
 
-fn run_source_inputs(rest: List[String]) -> Unit !io = {
+fn run_source_inputs(rest: List[String]) -> Unit !Fs !io = {
   if len(rest) != 3 || rest[0] != "--base" {
     return cli_error("usage: dawn __source-inputs --base <repo> <project-dir>")
   }
@@ -1059,7 +1060,7 @@ fn peek_target(rest: List[String]) -> String = {
 }
 
 ## The target's resolved java-deps jars, with the Kotlin CLI's progress line.
-fn resolve_java_deps(target: String) -> List[String] !io = {
+fn resolve_java_deps(target: String) -> List[String] !Fs !io = {
   let none: List[String] = []
   if not io.exists(target) { return none }
   if not io.is_dir(target) && not str.ends_with(target, ".dawn") { return none }
@@ -1082,7 +1083,7 @@ fn resolve_java_deps(target: String) -> List[String] !io = {
   }
 }
 
-fn source_target(target: String) -> source.SourceTarget !io =
+fn source_target(target: String) -> source.SourceTarget !Fs !io =
   if io.is_dir(target) { source.ProjectDirectory(target) } else { source.SourceFile(target) }
 
 ## Analyze one already planned and loaded target under only its resolved Java
@@ -1092,7 +1093,7 @@ fn analyze_target_scoped(
   plan: ProjectPlan,
   loaded: LoadResult,
   std: StdCtx
-) -> Result[Program, String] !io = {
+) -> Result[Program, String] !Fs !io = {
   let no_jars: List[String] = []
   let jars = if len(plan.source.diags) > 0 {
     # Planner diagnostics keep their existing precedence. In particular, an
@@ -1122,7 +1123,12 @@ fn lsp_lease_problem(path: String, message: String) -> LocDiag =
     hint: "save to retry lock or transient setup failures; after changing dawn.toml, close every document in this project and reopen one to capture a fresh plan"
   } }
 
-fn lsp_target_lease(plan: source.SourcePlan) -> Result[JsigLease, LocDiag] !io = {
+## The lease is taken from a frame that does not otherwise touch the file
+## system, so the handler is installed here rather than threaded through it.
+fn lsp_target_lease(plan: source.SourcePlan) -> Result[JsigLease, LocDiag] !io =
+  io.with_fs_real(() => lsp_target_lease_fs(plan))
+
+fn lsp_target_lease_fs(plan: source.SourcePlan) -> Result[JsigLease, LocDiag] !Fs !io = {
   let no_jars: List[String] = []
   let jars = if len(plan.diags) > 0 {
     no_jars
@@ -1144,7 +1150,7 @@ fn lsp_standalone_lease() -> JsigLease !io = jsig_for([])
 ## `dawn lock [--check] [<dir>]` — write (or verify) the resolved [java-deps]
 ## closure. This is the only command that rewrites dawn.lock; every other one
 ## only refuses to disagree with it.
-fn run_lock(rest: List[String]) -> Unit !io = {
+fn run_lock(rest: List[String]) -> Unit !Fs !io = {
   var check_only = false
   var target = "."
   var seen_target = false
@@ -1231,7 +1237,7 @@ fn maybe_with_known_deps(
   rest: List[String],
   target: String,
   cpjars: List[String]
-) -> Unit !io = {
+) -> Unit !Fs !io = {
   match io.getenv("DAWN_SELFHOST_CP") {
     Some(_) -> return
     None -> ()
@@ -1255,7 +1261,7 @@ fn maybe_with_known_deps(
 }
 
 ## test/build have no program argv, so their existing filters remain safe here.
-fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
+fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !Fs !io = {
   match io.getenv("DAWN_SELFHOST_CP") {
     Some(_) -> return
     None -> ()
@@ -1287,7 +1293,7 @@ fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
 ## makes running it again on the ordinary exit path harmless. Removing it would
 ## also have to cope with `removeShutdownHook` throwing once shutdown has begun,
 ## which is precisely the case this exists for.
-fn reap_on_exit(child: Process, scratch: String) -> Unit !io = {
+fn reap_on_exit(child: Process, scratch: String) -> Unit !Fs !io = {
   let rt = Runtime.getRuntime().expect("runtime")
   let _ = rt.addShutdownHook(Thread.new(() => {
     let _ = child.destroy()
@@ -1298,7 +1304,7 @@ fn reap_on_exit(child: Process, scratch: String) -> Unit !io = {
 }
 
 ## `reap_on_exit` and then wait; the child's exit code.
-fn wait_reaped(child: Process, scratch: String) -> Int !io = {
+fn wait_reaped(child: Process, scratch: String) -> Int !Fs !io = {
   reap_on_exit(child, scratch)
   child.waitFor()
 }
@@ -1308,7 +1314,7 @@ fn wait_reaped(child: Process, scratch: String) -> Int !io = {
 ## `wait_reaped` removes it if the driver is terminated before that. Nothing
 ## else ever would -- the directories used to survive every ordinary run, and
 ## 3384 of them holding 2.9G had piled up in /tmp by the time anyone looked.
-fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
+fn write_temp_classes(classes: List[(String, Bytes)]) -> String !Fs !io = {
   let dir =
     match io.temp_dir("", "selfhost-run") {
       Ok(d) -> d
@@ -1330,7 +1336,7 @@ fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
 ## Spawn `java <child_java_cmd> -cp <cp> <cls> <args...>` inheriting stdio;
 ## the exit code. `scratch` is the directory the classes were written to, which
 ## the reaping wait removes if this driver is terminated mid-run.
-fn spawn_java(cp: String, cls: String, args: List[String], scratch: String) -> Int !io = {
+fn spawn_java(cp: String, cls: String, args: List[String], scratch: String) -> Int !Fs !io = {
   var cmd: List[String] = child_java_cmd() ++ ["-cp", cp, cls]
   cmd = cmd ++ args
   let pb = ProcessBuilder.new(cmd)
@@ -1342,7 +1348,7 @@ fn spawn_java(cp: String, cls: String, args: List[String], scratch: String) -> I
 ## of `dawn run`,
 ## via a subprocess over freshly emitted classes (the host class path rides
 ## along so `use java` third-party classes stay visible).
-fn run_run(run: RunArgs) -> Unit !io = {
+fn run_run(run: RunArgs) -> Unit !Fs !io = {
   let (classes, entry, _) =
     collect_program(run.target, run.std_dir, run.opts, run.closure, false)
   if entry == "" {
@@ -1362,7 +1368,7 @@ fn run_run(run: RunArgs) -> Unit !io = {
 ## project — its modules see the intrinsics no user module may name, and its
 ## `impl Iter[String]` is an orphan anywhere else — so `dawn test std/str.dawn`
 ## cannot be made to work, and a flag is the whole mechanism.
-fn run_test(rest0: List[String]) -> Unit !io = {
+fn run_test(rest0: List[String]) -> Unit !Fs !io = {
   let (_, rest1) = extract_cp(rest0)
   let (opts, restb) = extract_ct_opts(rest1)
   let (closure2, restc) = extract_flag(restb, "--closure")
@@ -1410,7 +1416,7 @@ fn run_test(rest0: List[String]) -> Unit !io = {
 
 ## `selfhost emit [<target>] [--std <dir>] -o <dir>`: write every class of the
 ## compiled program under <dir> (`emitrt` is the historical alias).
-fn run_emitrt(rest: List[String]) -> Unit !io = {
+fn run_emitrt(rest: List[String]) -> Unit !Fs !io = {
   var out = ""
   var target = ""
   var std_dir = "std"
@@ -1509,7 +1515,7 @@ fn any_repeat(xs: List[String]) -> Bool = {
 ## before the caller copies any, so an unreadable jar used to be reported before
 ## `lib/` was touched. The fast path finds it mid-copy, with the same message.
 ## `lib/` was never all-or-nothing anyway -- a failing write panics mid-loop too.
-fn vendored_names(jars: List[String]) -> List[(String, String)] !io = {
+fn vendored_names(jars: List[String]) -> List[(String, String)] !Fs !io = {
   var names: List[String] = []
   for j in jars { names = names ++ [jar_basename(j)] }
   if any_repeat(names) {
@@ -1535,7 +1541,7 @@ fn vendored_names(jars: List[String]) -> List[(String, String)] !io = {
 ## Copy resolved jars next to the output jar, under lib/ — coursier's cache is
 ## a content-addressed path in the user's home, fine to compile against and
 ## useless to a deployed jar. Returns the manifest Class-Path entries.
-fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
+fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !Fs !io = {
   var entries: List[String] = []
   if len(jars) == 0 { return entries }
   let found = vendored_names(jars)
@@ -1600,7 +1606,7 @@ fn uri_path(p: String) -> String = {
 
 ## The names `maven.artifacts` gives `jars`, which is what `vendored_names` must
 ## answer whichever path it takes.
-fn hashed_names(jars: List[String]) -> List[(String, String)] !io = {
+fn hashed_names(jars: List[String]) -> List[(String, String)] !Fs !io = {
   var out: List[(String, String)] = []
   match maven.artifacts(jars) {
     Ok(found) -> {
@@ -1617,46 +1623,48 @@ fn hashed_names(jars: List[String]) -> List[(String, String)] !io = {
 # hash there would answer two identical names, agree with nothing, and this test
 # is the only thing that says so.
 test "vendored file names are the hashed ones, hash or no hash" {
-  let root = match io.temp_dir("", "dawn-vendored-names-") {
-    Ok(d) -> d
-    Err(e) -> panic("temp dir: " ++ e.message)
-  }
-  with r <- bracket(root, p => pkgfetch.delete_tree(p))
-  let a = r ++ "/a"
-  let b = r ++ "/b"
-  let _ = io.mkdirs(a)
-  let _ = io.mkdirs(b)
-  for pair in [(a ++ "/api-1.0.jar", "one"), (b ++ "/api-1.0.jar", "two"),
-    (a ++ "/util-2.0.jar", "three"), (a ++ "/dup-3.0.jar", "same"),
-    (b ++ "/dup-3.0.jar", "same")] {
-    let (path, text) = pair
-    match io.write_file(path, text) {
-      Ok(_) -> ()
-      Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
+  io.with_fs_real(() => {
+    let root = match io.temp_dir("", "dawn-vendored-names-") {
+      Ok(d) -> d
+      Err(e) -> panic("temp dir: " ++ e.message)
     }
-  }
-  # distinct file names: no hash is read, and the answer is the file names
-  let plain = [a ++ "/api-1.0.jar", a ++ "/util-2.0.jar"]
-  assert vendored_names(plain) ==
-    [(a ++ "/api-1.0.jar", "api-1.0.jar"), (a ++ "/util-2.0.jar", "util-2.0.jar")]
-  assert vendored_names(plain) == hashed_names(plain)
-  # one file name over two contents: every member of the group is qualified by
-  # twelve hex digits of its content, so the answer does not depend on the order
-  # Coursier returned them in
-  let clash = [a ++ "/api-1.0.jar", b ++ "/api-1.0.jar"]
-  assert vendored_names(clash) ==
-    [(a ++ "/api-1.0.jar", "7692c3ad3540-api-1.0.jar"),
-      (b ++ "/api-1.0.jar", "3fc4ccfe7458-api-1.0.jar")]
-  assert vendored_names(clash) == hashed_names(clash)
-  # the same bytes twice under one name is one artifact, not a collision, and
-  # the second copy does not become a second lib/ entry
-  let dup = [a ++ "/dup-3.0.jar", b ++ "/dup-3.0.jar"]
-  assert vendored_names(dup) == [(a ++ "/dup-3.0.jar", "dup-3.0.jar")]
-  assert vendored_names(dup) == hashed_names(dup)
-  # no jars at all, and a path with no directory in it
-  let none: List[String] = []
-  assert vendored_names(none) == []
-  assert jar_basename("api-1.0.jar") == "api-1.0.jar"
+    with r <- bracket(root, p => pkgfetch.delete_tree(p))
+    let a = r ++ "/a"
+    let b = r ++ "/b"
+    let _ = io.mkdirs(a)
+    let _ = io.mkdirs(b)
+    for pair in [(a ++ "/api-1.0.jar", "one"), (b ++ "/api-1.0.jar", "two"),
+      (a ++ "/util-2.0.jar", "three"), (a ++ "/dup-3.0.jar", "same"),
+      (b ++ "/dup-3.0.jar", "same")] {
+      let (path, text) = pair
+      match io.write_file(path, text) {
+        Ok(_) -> ()
+        Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
+      }
+    }
+    # distinct file names: no hash is read, and the answer is the file names
+    let plain = [a ++ "/api-1.0.jar", a ++ "/util-2.0.jar"]
+    assert vendored_names(plain) ==
+      [(a ++ "/api-1.0.jar", "api-1.0.jar"), (a ++ "/util-2.0.jar", "util-2.0.jar")]
+    assert vendored_names(plain) == hashed_names(plain)
+    # one file name over two contents: every member of the group is qualified by
+    # twelve hex digits of its content, so the answer does not depend on the order
+    # Coursier returned them in
+    let clash = [a ++ "/api-1.0.jar", b ++ "/api-1.0.jar"]
+    assert vendored_names(clash) ==
+      [(a ++ "/api-1.0.jar", "7692c3ad3540-api-1.0.jar"),
+        (b ++ "/api-1.0.jar", "3fc4ccfe7458-api-1.0.jar")]
+    assert vendored_names(clash) == hashed_names(clash)
+    # the same bytes twice under one name is one artifact, not a collision, and
+    # the second copy does not become a second lib/ entry
+    let dup = [a ++ "/dup-3.0.jar", b ++ "/dup-3.0.jar"]
+    assert vendored_names(dup) == [(a ++ "/dup-3.0.jar", "dup-3.0.jar")]
+    assert vendored_names(dup) == hashed_names(dup)
+    # no jars at all, and a path with no directory in it
+    let none: List[String] = []
+    assert vendored_names(none) == []
+    assert jar_basename("api-1.0.jar") == "api-1.0.jar"
+  })
 }
 
 test "a class-path entry is a URI reference, not a path" {
@@ -1721,7 +1729,7 @@ fn run_native_image(
   bin_out: String,
   user_cp: List[String],
   entry: String
-) -> Unit !io = {
+) -> Unit !Fs !io = {
   let ni = match find_native_image() {
     Some(p) -> p
     None ->
@@ -1772,7 +1780,7 @@ fn run_native_image(
 ## internal package path (e.g. org/objectweb/asm) whose classes are copied in
 ## from java.class.path — building selfhost itself vendors ASM and the
 ## coursier interface, which is what makes the jar standalone.
-fn run_build(rest0: List[String]) -> Unit !io = {
+fn run_build(rest0: List[String]) -> Unit !Fs !io = {
   let (user_cp, rest1) = extract_cp(rest0)
   let (opts, restb) = extract_ct_opts(rest1)
   let (closure, rest) = extract_flag(restb, "--closure")
@@ -1867,7 +1875,7 @@ fn run_build(rest0: List[String]) -> Unit !io = {
 }
 
 ## Every .dawn file under `dir`, recursively; paths are `dir`-prefixed.
-fn dawn_files_under(dir: String) -> List[String] !io = {
+fn dawn_files_under(dir: String) -> List[String] !Fs !io = {
   var out: List[String] = []
   match io.list_dir(dir) {
     Ok(files) -> {
@@ -1901,7 +1909,7 @@ fn dawn_files_under(dir: String) -> List[String] !io = {
 ##
 ## The lexer refusal is per file: the rest of the batch still formats, and the
 ## diagnostics for every refused file are rendered together at the end.
-fn run_fmt(rest: List[String]) -> Unit !io = {
+fn run_fmt(rest: List[String]) -> Unit !Fs !io = {
   var check = false
   var paths: List[String] = []
   for a in rest {
@@ -1951,7 +1959,7 @@ fn run_fmt(rest: List[String]) -> Unit !io = {
 }
 
 ## `selfhost doc <target>` / `selfhost doc --builtins` — mirror of `dawn doc`.
-fn run_doc(rest: List[String]) -> Unit !io = {
+fn run_doc(rest: List[String]) -> Unit !Fs !io = {
   var std_dir = "std"
   var builtins_mode = false
   var stdlib_mode = false
@@ -2024,7 +2032,7 @@ fn run_doc(rest: List[String]) -> Unit !io = {
 ##
 ## Each module is lowered inside catch_panic so one gap does not hide the
 ## rest: a single run lists everything still missing.
-fn run_lower(rest: List[String]) -> Unit !io = {
+fn run_lower(rest: List[String]) -> Unit !Fs !io = {
   var std_dir = "std"
   var dump_dir = ""
   var targets: List[String] = []
@@ -2065,18 +2073,20 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   fn one(cls: String, tm: TModule) -> CModule =
     lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)
 
-  ## Count and dump one lowered module. Returns the node count so the
-  ## coverage gate keeps working unchanged.
-  fn two(cls: String, core: CModule, modes: Map[(String, String), List[CMode]]) -> Int !io = {
+  ## Count one lowered module and, when dumping, render it. Returns the node
+  ## count so the coverage gate keeps working unchanged, and the rendered
+  ## text for the loop below to write.
+  ##
+  ## The write is not in here on purpose. A local fn is `!io` or pure and
+  ## cannot spell `Fs`; one whose body reached `io.write_file` anyway would
+  ## pass the checker (the label resolves from the enclosing frame) and then
+  ## fail at run time with "effect evidence missing", which is what `--dump`
+  ## did when the io.* file functions moved onto Fs (dawn-lang #43). Keeping
+  ## the local fn pure keeps its row honest.
+  fn two(cls: String, core: CModule, modes: Map[(String, String), List[CMode]]) -> (Int, String) = {
     let m = rc.rc_module(infer.stamp_modes(core, modes), modes)
-    if dumping {
-      let path = dump_to ++ "/" ++ join(str.split(cls, "/"), ".") ++ ".core"
-      match io.write_file(path, coredump.render(adts, m)) {
-        Ok(_u) -> ()
-        Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
-      }
-    }
-    lower_size(m)
+    let text = if dumping { coredump.render(adts, m) } else { "" }
+    (lower_size(m), text)
   }
 
   var ok = 0
@@ -2123,7 +2133,17 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   for pr in cores {
     let (cls, m) = pr
     match catch_panic(() => two(cls, m, modes)) {
-      Ok(_n) -> { ok = ok + 1 }
+      Ok(counted) -> {
+        let (_n, text) = counted
+        if dumping {
+          let path = dump_to ++ "/" ++ join(str.split(cls, "/"), ".") ++ ".core"
+          match io.write_file(path, text) {
+            Ok(_u) -> ()
+            Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
+          }
+        }
+        ok = ok + 1
+      }
       Err(e) -> {
         bad = bad + 1
         if not set.has(seen, e.message) {
@@ -2157,7 +2177,7 @@ fn lower_size(m: CModule) -> Int = {
 ## the trivial subset instead of class files. Hidden and unsupported --
 ## `emitc.dawn` panics on anything outside that subset, and both are
 ## superseded once Core IR lands.
-fn run_emitc(rest: List[String]) -> Unit !io = {
+fn run_emitc(rest: List[String]) -> Unit !Fs !io = {
   var std_dir = "std"
   var out = ""
   var target = ""
@@ -2217,7 +2237,7 @@ fn check_args(rest: List[String]) -> (String, List[String]) = {
   (std_dir, targets)
 }
 
-fn check_std(std_dir: String) -> StdCtx !io =
+fn check_std(std_dir: String) -> StdCtx !Fs !io =
   match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
@@ -2234,7 +2254,7 @@ fn check_std(std_dir: String) -> StdCtx !io =
 ##
 ## Diagnostics from every target are rendered together, so a multi-target run
 ## reports all of them rather than the first target's.
-fn run_check(rest: List[String]) -> Unit !io = {
+fn run_check(rest: List[String]) -> Unit !Fs !io = {
   let (std_dir, targets) = check_args(rest)
   if len(targets) == 0 {
     return cli_error("usage: dawn check [--std <dir>] <target>...")
@@ -2275,7 +2295,7 @@ fn run_check(rest: List[String]) -> Unit !io = {
 ## `dawn __check` — the golden dump (driver/checkdump.dawn), one block per
 ## target, exit 0 either way. Read by scripts/checker-corpus/run.sh and the
 ## N vs N-1 differential.
-fn run_checkdump(rest: List[String]) -> Unit !io = {
+fn run_checkdump(rest: List[String]) -> Unit !Fs !io = {
   let (std_dir, targets) = check_args(rest)
   let std = check_std(std_dir)
   for t in targets {
@@ -2286,7 +2306,12 @@ fn run_checkdump(rest: List[String]) -> Unit !io = {
   }
 }
 
-pub fn main() -> Unit !io = {
+## The file system handler is installed here, once, for every subcommand:
+## main is the outermost frame and the one place with nothing above it to
+## answer `Fs` (spec §6.5). The dispatch itself runs under it.
+pub fn main() -> Unit !io = io.with_fs_real(() => dispatch())
+
+fn dispatch() -> Unit !Fs !io = {
   match args() {
     [] -> {
       print(usage())

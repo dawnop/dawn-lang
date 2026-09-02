@@ -1,6 +1,7 @@
 # The lexer-only residency shape. The source string survives every iteration;
 # each iteration's token and diagnostic graphs do not.
 use std/io
+use std/io.{Fs}
 use selfhost/front/lexer
 
 fn positive_int(text: String) -> Int =
@@ -21,22 +22,24 @@ fn ready(checksum: Int) -> Unit !io = {
 }
 
 pub fn main() -> Unit !io = {
-  match args() {
-    [path, reps_text] -> {
-      let reps = positive_int(reps_text)
-      let text = match io.read_file(path) {
-        Ok(s) -> s
-        Err(e) -> panic(e.message)
+  io.with_fs_real(() => {
+    match args() {
+      [path, reps_text] -> {
+        let reps = positive_int(reps_text)
+        let text = match io.read_file(path) {
+          Ok(s) -> s
+          Err(e) -> panic(e.message)
+        }
+        var seen = 0
+        var i = 0
+        while i < reps {
+          let (tokens, diags) = lexer.lex(text)
+          seen = seen + len(tokens) + len(diags)
+          i = i + 1
+        }
+        ready(seen)
       }
-      var seen = 0
-      var i = 0
-      while i < reps {
-        let (tokens, diags) = lexer.lex(text)
-        seen = seen + len(tokens) + len(diags)
-        i = i + 1
-      }
-      ready(seen)
+      _ -> panic("usage: slab-bench-lexer <source> <repetitions>")
     }
-    _ -> panic("usage: slab-bench-lexer <source> <repetitions>")
-  }
+  })
 }

@@ -40,6 +40,7 @@
 use std/str
 use std/list
 use std/io
+use std/io.{Fs}
 use json/parser.{parse}
 use json/value.{Json, JStr, error_text}
 use json/render.{render}
@@ -103,7 +104,7 @@ fn api_index(api: Json, lang: Lang) -> List[Row] = {
 ## the page, so the fragments cannot drift from the anchors: a heading counter
 ## that moved would move both at once. The URL mapper is the identity because
 ## nothing here reads the rendered html -- only the table of contents.
-fn doc_index(src: String, page: String, detail: String) -> List[Row] !io = {
+fn doc_index(src: String, page: String, detail: String) -> List[Row] !Fs !io = {
   let blocks =
     match parser.parse(must_read(src)) {
       Ok(bs) -> bs
@@ -114,7 +115,7 @@ fn doc_index(src: String, page: String, detail: String) -> List[Row] !io = {
 }
 
 ## The tutorial, one row per chapter page.
-fn tutorial_index(src: String, lang: Lang, detail: String) -> List[Row] !io = {
+fn tutorial_index(src: String, lang: Lang, detail: String) -> List[Row] !Fs !io = {
   var rows: List[Row] = []
   let titles = chapter_titles(src)
   for i in range(0, len(titles)) {
@@ -130,7 +131,7 @@ fn tutorial_index(src: String, lang: Lang, detail: String) -> List[Row] !io = {
 ## The nav table is read rather than restated: the seven entries a reader can
 ## click in the header are seven pages the search has to be able to reach, and
 ## a nav item added without a row here would be a page the panel cannot find.
-fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !io = {
+fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !Fs !io = {
   var rows: List[Row] = []
   rows = rows ++ [Row {
     group: "examples",
@@ -211,7 +212,7 @@ fn row_json(r: Row) -> String =
     quoted(r.href)], ",") ++ "]"
 
 ## Every row of one language's index, in the order the file will carry them.
-pub fn index_rows(api: Json, lang: Lang) -> List[Row] !io = {
+pub fn index_rows(api: Json, lang: Lang) -> List[Row] !Fs !io = {
   let w = words(lang)
   let (spec_src, design_src, tut_src) = sources(lang)
   api_index(api, lang)
@@ -227,7 +228,7 @@ pub fn index_rows(api: Json, lang: Lang) -> List[Row] !io = {
 ## anyway: the asset is fetched by a wasm module built from a different source
 ## tree at a different time, and the day the two disagree the version is the
 ## only place the disagreement can be seen.
-pub fn search_index(api: Json, lang: Lang) -> String !io = {
+pub fn search_index(api: Json, lang: Lang) -> String !Fs !io = {
   let rows = index_rows(api, lang)
   "{\"v\":1,\"lang\":" ++ quoted(lang_code_of(lang))
     ++ ",\"items\":[" ++ join(list.map(rows, r => row_json(r)), ",") ++ "]}"
@@ -246,7 +247,7 @@ fn lang_code_of(lang: Lang) -> String =
 ## The parsed `dawn doc --stdlib` document, or a stop. Read here rather than
 ## passed down from gen/pages, so that the asset and the page it indexes read
 ## the same file the same way.
-pub fn read_api() -> Json !io = {
+pub fn read_api() -> Json !Fs !io = {
   let text =
     match io.read_file("site/build/stdlib.json") {
       Ok(t) -> t
@@ -297,14 +298,16 @@ fn probe_api() -> Json =
 ## Only the four groups the panel draws. A fifth would be scored, matched and
 ## then dropped without a word, so it is refused here instead.
 test "every row lands in one of the four groups the panel draws" {
-  let drawn = ["stdlib", "spec", "tutorial", "examples"]
-  for lang in [En, Zh] {
-    for r in index_rows(probe_api(), lang) {
-      assert list.contains(drawn, r.group)
-      assert r.title != ""
-      assert r.href != ""
+  io.with_fs_real(() => {
+    let drawn = ["stdlib", "spec", "tutorial", "examples"]
+    for lang in [En, Zh] {
+      for r in index_rows(probe_api(), lang) {
+        assert list.contains(drawn, r.group)
+        assert r.title != ""
+        assert r.href != ""
+      }
     }
-  }
+  })
 }
 
 ## A note is one line and is bounded. The bound is what keeps the asset a few
@@ -332,26 +335,28 @@ test "each language indexes its own documents" {
 ## hrefs are relative to the site root rather than to a page, and the Chinese
 ## one is the Chinese one.
 test "the index carries all four sources and addresses them from the site root" {
-  let api = probe_api()
-  let en = index_rows(api, En)
-  let zh = index_rows(api, Zh)
-  for group in ["stdlib", "spec", "tutorial", "examples"] {
-    assert len(list.filter(en, r => r.group == group)) > 0
-    assert len(list.filter(zh, r => r.group == group)) > 0
-  }
-  # site-root relative: no leading slash, no `./`, no `../`
-  for r in en ++ zh {
-    assert not str.starts_with(r.href, "/")
-    assert not str.starts_with(r.href, ".")
-  }
-  # and the Chinese tree is where the Chinese rows point
-  for r in zh {
-    assert str.starts_with(r.href, "zh/")
-  }
-  for r in en {
-    assert not str.starts_with(r.href, "zh/")
-  }
-  # the stdlib rows are anchored into the stdlib page, in each language's tree
-  assert list.filter(en, r => r.group == "stdlib")[0].href == "stdlib.html#g-io"
-  assert list.filter(zh, r => r.group == "stdlib")[0].href == "zh/stdlib.html#g-io"
+  io.with_fs_real(() => {
+    let api = probe_api()
+    let en = index_rows(api, En)
+    let zh = index_rows(api, Zh)
+    for group in ["stdlib", "spec", "tutorial", "examples"] {
+      assert len(list.filter(en, r => r.group == group)) > 0
+      assert len(list.filter(zh, r => r.group == group)) > 0
+    }
+    # site-root relative: no leading slash, no `./`, no `../`
+    for r in en ++ zh {
+      assert not str.starts_with(r.href, "/")
+      assert not str.starts_with(r.href, ".")
+    }
+    # and the Chinese tree is where the Chinese rows point
+    for r in zh {
+      assert str.starts_with(r.href, "zh/")
+    }
+    for r in en {
+      assert not str.starts_with(r.href, "zh/")
+    }
+    # the stdlib rows are anchored into the stdlib page, in each language's tree
+    assert list.filter(en, r => r.group == "stdlib")[0].href == "stdlib.html#g-io"
+    assert list.filter(zh, r => r.group == "stdlib")[0].href == "zh/stdlib.html#g-io"
+  })
 }

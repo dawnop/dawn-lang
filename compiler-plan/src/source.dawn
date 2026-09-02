@@ -7,6 +7,7 @@
 # diagnostic record; compiler consumers convert it only at rendering edges.
 
 use std/io
+use std/io.{Fs}
 use std/str
 use std/list
 use std/map
@@ -61,7 +62,7 @@ fn canon(p: String) -> String !io = fspath.absolute(p, io.cwd())
 fn mf_get(
   cache0: Map[String, Option[ManifestV]],
   dir: String
-) -> (Option[ManifestV], List[LocDiag], Map[String, Option[ManifestV]]) !io = {
+) -> (Option[ManifestV], List[LocDiag], Map[String, Option[ManifestV]]) !Fs !io = {
   let dc = canon(dir)
   if map.has(cache0, dc) {
     return (map.get(cache0, dc).expect("cached manifest"), [], cache0)
@@ -148,7 +149,7 @@ fn source_roots(target: SourceTarget) -> (String, String) !io =
 ## Resolve source packages once, then derive Java coordinates from the final
 ## selected graph. Callers choose the target kind explicitly; CLI
 ## existence/type rejection belongs to main.dawn.
-pub fn source_plan(target: SourceTarget) -> SourcePlan !io = {
+pub fn source_plan(target: SourceTarget) -> SourcePlan !Fs !io = {
   let (project, source_root) = source_roots(target)
   let no_mfc: Map[String, Option[ManifestV]] = map.empty()
   let (url_resolved, url_names, sdiags, mfc) = select_url_deps(project, no_mfc)
@@ -173,7 +174,7 @@ pub fn source_plan(target: SourceTarget) -> SourcePlan !io = {
 
 fn source_input_display(path: String) -> String = str.replace(path, "\n", "\\n")
 
-fn source_input_path_ok(path: String) -> Result[Unit, String] !io = {
+fn source_input_path_ok(path: String) -> Result[Unit, String] !Fs !io = {
   if str.contains(path, "\n") {
     return Err("source input path contains LF: " ++ source_input_display(path))
   }
@@ -188,7 +189,7 @@ fn source_input_path_ok(path: String) -> Result[Unit, String] !io = {
   Ok(())
 }
 
-fn validate_source_file(path: String, optional: Bool) -> Result[Unit, String] !io = {
+fn validate_source_file(path: String, optional: Bool) -> Result[Unit, String] !Fs !io = {
   match source_input_path_ok(path) {
     Err(e) -> return Err(e)
     Ok(_) -> ()
@@ -206,7 +207,7 @@ fn validate_source_file(path: String, optional: Bool) -> Result[Unit, String] !i
   }
 }
 
-fn validate_source_tree(path: String) -> Result[Unit, String] !io = {
+fn validate_source_tree(path: String) -> Result[Unit, String] !Fs !io = {
   match source_input_path_ok(path) {
     Err(e) -> return Err(e)
     Ok(_) -> ()
@@ -246,7 +247,7 @@ fn validate_source_tree(path: String) -> Result[Unit, String] !io = {
   Ok(())
 }
 
-fn validate_source_input(input: SourceInput) -> Result[Unit, String] !io =
+fn validate_source_input(input: SourceInput) -> Result[Unit, String] !Fs !io =
   match input.kind {
     InputFile -> validate_source_file(input.path, false)
     InputOptional -> validate_source_file(input.path, true)
@@ -300,7 +301,7 @@ fn source_input_record(base: String, input: SourceInput) -> String = {
 pub fn bootstrap_source_input_manifest(
   plan: SourcePlan,
   base: String
-) -> Result[String, String] !io = {
+) -> Result[String, String] !Fs !io = {
   match plan.target {
     SourceFile(_) ->
       return Err("cannot serialize bootstrap source inputs for a source file target")
@@ -408,7 +409,7 @@ fn url_pkg_root(
   name: String,
   r: UrlReq,
   failed0: UrlFailures
-) -> (Option[String], List[LocDiag], UrlFailures, Bool) !io = {
+) -> (Option[String], List[LocDiag], UrlFailures, Bool) !Fs !io = {
   let entry = pkgfetch.cache_dir(r.hash)
   let root = if r.subdir == "" { entry } else { entry ++ "/" ++ r.subdir }
   if mirror_failure_seen(failed0, r.hash, r.url) {
@@ -474,7 +475,7 @@ fn select_url_deps(
   root_dir: String,
   mfc0: Map[String, Option[ManifestV]]
 ) -> (Map[String, Option[String]], Map[String, String], List[LocDiag],
-  Map[String, Option[ManifestV]]) !io = {
+  Map[String, Option[ManifestV]]) !Fs !io = {
   var mfc = mfc0
   var reqs: Map[String, List[UrlReq]] = map.empty()
   var url_names: Map[String, String] = map.empty()
@@ -629,7 +630,7 @@ fn resolve_src_deps(
   names0: Map[String, String],
   mfc0: Map[String, Option[ManifestV]]
 ) -> (Map[String, PkgR], List[LocDiag], Map[String, Option[PkgR]], Map[String, String],
-  Map[String, Option[ManifestV]]) !io = {
+  Map[String, Option[ManifestV]]) !Fs !io = {
   var out: Map[String, PkgR] = map.empty()
   var diags: List[LocDiag] = []
   var cache = cache0
@@ -792,22 +793,24 @@ test "SourcePlan owns the directory and file source roots" {
 }
 
 test "bootstrap source inputs reject file plans before inspecting the base" {
-  let no_pkgs: Map[String, PkgR] = map.empty()
-  let no_diags: List[LocDiag] = []
-  let plan = SourcePlan {
-    target: SourceFile("/tmp/dawn-planner-file/src/main.dawn"),
-    project: "/tmp/dawn-planner-file",
-    source_root: "/tmp/dawn-planner-file/src",
-    pkgs: no_pkgs,
-    java_coords: [],
-    diags: no_diags
-  }
-  match bootstrap_source_input_manifest(plan, "") {
-    Ok(_) -> { assert false }
-    Err(error) -> {
-      assert error == "cannot serialize bootstrap source inputs for a source file target"
+  io.with_fs_real(() => {
+    let no_pkgs: Map[String, PkgR] = map.empty()
+    let no_diags: List[LocDiag] = []
+    let plan = SourcePlan {
+      target: SourceFile("/tmp/dawn-planner-file/src/main.dawn"),
+      project: "/tmp/dawn-planner-file",
+      source_root: "/tmp/dawn-planner-file/src",
+      pkgs: no_pkgs,
+      java_coords: [],
+      diags: no_diags
     }
-  }
+    match bootstrap_source_input_manifest(plan, "") {
+      Ok(_) -> { assert false }
+      Err(error) -> {
+        assert error == "cannot serialize bootstrap source inputs for a source file target"
+      }
+    }
+  })
 }
 
 test "Java coordinates follow the final source graph order once" {

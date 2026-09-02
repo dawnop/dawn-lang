@@ -82,7 +82,7 @@ old = '''pub fn load_entries_over(
   plan: ProjectPlan,
   entries: List[String],
   over: Map[String, String]
-) -> LoadResult !io =
+) -> LoadResult !Fs !io =
   resolve(
     plan.source.source_root,
     entries,
@@ -95,7 +95,7 @@ new = '''pub fn load_entries_over(
   plan: ProjectPlan,
   entries: List[String],
   over: Map[String, String]
-) -> LoadResult !io = {
+) -> LoadResult !Fs !io = {
   let fresh = project_plan(plan.source.target)
   resolve(
     fresh.source.source_root,

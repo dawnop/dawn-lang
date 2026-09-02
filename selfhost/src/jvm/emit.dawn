@@ -78,6 +78,7 @@ use java "org.objectweb.asm.ClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
 use java "java.lang.System"
+use std/io.{Fs}
 use jvm/ops.{
   ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
   COMPUTE_FRAMES, OP_AALOAD, OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY,
@@ -934,7 +935,7 @@ fn emit_sam_conversion(
 ## a call site can always be made to hand one over. A value crossing to Java
 ## has no later call site, so it carries what it was made under, and this class
 ## is the only shape in the compiler that holds a pack in a field.
-fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
+fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !Fs !io = {
   let fnd = "L" ++ fn_iface(s.arity) ++ ";"
   let evd = ev_desc()
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
@@ -1453,7 +1454,7 @@ fn gen_jvm_main(gx: GenCtx, cw: ClassWriter) -> Unit !io = {
 }
 
 ## The per-trait dictionary interface: one erased method per trait method.
-pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Bytes !io = {
+pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Bytes !Fs !io = {
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
     tr_iface(tr.owner, tr.name), obj())
@@ -1735,7 +1736,7 @@ pub fn emit_module(
   # Empty for a module the driver kept no AST for, which is every std module
   src: String,
   decls: List[Decl]
-) -> List[(String, Bytes)] !io = {
+) -> List[(String, Bytes)] !Fs !io = {
   var out: List[(String, Bytes)] = []
   for aid in own_adt_ids {
     out = out ++ gen_adt(supers, adts, adt_of(adts, aid),
@@ -1861,7 +1862,7 @@ pub fn emit_module(
 ## plus the dictionary -- whether lowering filled it with a bridge to an
 ## impl, a trait default, or a synthesised primitive. So this forwards, and
 ## knows nothing about which of the three it is.
-fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, Bytes) !io = {
+fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, Bytes) !Fs !io = {
   let tr = trait_of(gx.traits, dd.trait_id)
   let cls = dict_class(gx.class_name, dd.key)
   let iface = tr_iface(tr.owner, tr.name)
@@ -2128,7 +2129,7 @@ fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExp
 ## That adaptation is the whole of what LambdaMetafactory did here. It is the
 ## mirror of `gen_cdynamic`, which boxes arguments before an `apply` and
 ## unerases the result after it -- the same two helpers, the other way round.
-fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (String, Bytes) !io = {
+fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (String, Bytes) !Fs !io = {
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
   Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
   var caps_desc = ""

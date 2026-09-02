@@ -9,6 +9,7 @@
 # dynamic, which is all three of RFC 1951's kinds.
 use std/bytes
 use std/io
+use std/io.{Fs}
 use std/str
 use inflate/gzip
 use inflate/deflate
@@ -314,13 +315,13 @@ fn check_bounded(src: Bytes) -> Int !io = {
   bad
 }
 
-pub fn main() -> Unit !io =
-  match args() {
-    ["--bomb", n] -> bomb_case(parse_int(n).unwrap_or(512))
-    _ -> differential()
-  }
+pub fn main() -> Unit !io = io.with_fs_real(() =>
+    match args() {
+      ["--bomb", n] -> bomb_case(parse_int(n).unwrap_or(512))
+      _ -> differential()
+    })
 
-fn differential() -> Unit !io = {
+fn differential() -> Unit !Fs !io = {
   var bad = 0
   var cases: List[String] = ["", "a", "hello world", rep("a", 1000)]
   # highly repetitive: long back-references, and runs where the copy overlaps

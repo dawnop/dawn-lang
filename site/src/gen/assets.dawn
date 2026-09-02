@@ -45,6 +45,7 @@ use md/text.{cp_at}
 use gen/common.{must_read, must_list, take_n}
 use gen/fingerprint.{is_fingerprinted, plain_name}
 use html/page.{En, Zh, lang_code}
+use std/io.{Fs, with_fs_real}
 
 ## One `content:` declaration that puts words on a page: which file it is in,
 ## the selector with its language qualifier removed, and the language it is
@@ -296,7 +297,7 @@ fn check_alias_pairs(names: List[String]) -> List[String] = {
   bad
 }
 
-pub fn check_assets(out: String) -> Unit !io = {
+pub fn check_assets(out: String) -> Unit !Fs !io = {
   let known = [default_code()] ++ override_codes()
   let names = must_list("$out/assets")
   var bad: List[String] = check_alias_pairs(names)
@@ -463,12 +464,14 @@ test "a bundle is scanned for words, not for fullwidth punctuation" {
 ## The stylesheet in the tree, held to the rules directly -- `dawn test` says
 ## so without a site build. The badge is the string that was wrong.
 test "the output badge is English by default and Chinese only under lang=zh-CN" {
-  var badge: List[(String, String)] = []
-  for d in declarations(must_read("site/assets/style.css")) {
-    let (sel, decl) = d
-    if base_selector(sel) == "pre.output::before" && prop_of(decl) == "content" {
-      badge = badge ++ [(unwrap_or(get(lang_codes_in(sel), 0), ""), decl)]
+  with_fs_real(() => {
+    var badge: List[(String, String)] = []
+    for d in declarations(must_read("site/assets/style.css")) {
+      let (sel, decl) = d
+      if base_selector(sel) == "pre.output::before" && prop_of(decl) == "content" {
+        badge = badge ++ [(unwrap_or(get(lang_codes_in(sel), 0), ""), decl)]
+      }
     }
-  }
-  assert badge == [("", "content: \"Output\""), ("zh-CN", "content: \"输出\"")]
+    assert badge == [("", "content: \"Output\""), ("zh-CN", "content: \"输出\"")]
+  })
 }

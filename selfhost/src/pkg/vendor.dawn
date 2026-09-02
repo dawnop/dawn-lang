@@ -25,6 +25,7 @@
 use std/str
 use std/list
 use std/io
+use std/io.{Fs}
 use std/bytes
 use sha2/sha256
 use java "java.io.File"
@@ -76,7 +77,7 @@ fn entry_bytes(ins: InputStream) -> Bytes !io = {
 ## `dawn/rt/<outer>` plus every nested `dawn/rt/<outer>$…` beside it, as
 ## (class name, bytes) pairs sorted by name. Requires the compiler jar on the
 ## class path (the same condition the checker's reflection already needs).
-pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
+pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !Fs !io = {
   let res = "dawn/rt/" ++ outer ++ ".class"
   let loader = ClassLoader.getSystemClassLoader().expect("system loader")
   let url = match loader.getResource(res) {
@@ -161,7 +162,7 @@ fn lookup_bytes(pairs: List[(String, Bytes)], nm: String) -> Bytes = {
 }
 
 ## Class names (internal, no ".class") under `root`/`rel`, recursive.
-fn dir_classes_under(root: String, rel: String) -> List[String] !io = {
+fn dir_classes_under(root: String, rel: String) -> List[String] !Fs !io = {
   var out: List[String] = []
   match io.list_dir(root ++ "/" ++ rel) {
     Ok(files) -> {
@@ -328,7 +329,7 @@ fn check_vendored(prefix: String, pairs: List[(String, Bytes)]) -> Unit = {
 ## this is where the bytes are checked. Putting it in the shell callers instead
 ## would mean four copies of the same check and a fifth caller arriving without
 ## one.
-pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
+pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !Fs !io = {
   let cp = match System.getProperty("java.class.path") {
     Some(s) -> s
     None -> panic("java.class.path is unset")

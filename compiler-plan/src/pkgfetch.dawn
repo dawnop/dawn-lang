@@ -12,6 +12,7 @@ use std/str
 use std/bytes
 use std/list
 use std/io
+use std/io.{Fs}
 use fspath/fspath
 use sha2/sha256
 use inflate/gzip
@@ -71,7 +72,7 @@ fn origins_render(urls: List[String]) -> String = {
 ## The urls recorded for `hash` under cache root `root`. A missing record is
 ## an empty list, not an error: the entry may predate this file or have been
 ## copied in by hand.
-pub fn recorded_origins(root: String, hash: String) -> List[String] !io =
+pub fn recorded_origins(root: String, hash: String) -> List[String] !Fs !io =
   match io.read_file(origins_file(root, hash)) {
     Ok(t) -> origins_parse(t)
     Err(_) -> []
@@ -80,7 +81,7 @@ pub fn recorded_origins(root: String, hash: String) -> List[String] !io =
 ## Add `url` to `hash`'s record. A failed write is dropped on purpose: the
 ## record is an optimization over re-fetching, so losing it costs one download
 ## and never a build. Concurrent writers can lose an entry the same way.
-pub fn record_origin(root: String, hash: String, url: String) -> Unit !io = {
+pub fn record_origin(root: String, hash: String, url: String) -> Unit !Fs !io = {
   let have = recorded_origins(root, hash)
   for u in have { if u == url { return () } }
   mkdirs(origins_dir(root))
@@ -92,7 +93,7 @@ pub fn record_origin(root: String, hash: String, url: String) -> Unit !io = {
 
 fn zero_byte() -> Bytes = bytes.utf8(str.from_char('\u{0000}'))
 
-fn read_bytes(path: String) -> Result[Bytes, String] !io =
+fn read_bytes(path: String) -> Result[Bytes, String] !Fs !io =
   match io.read_bytes(path) {
     Ok(b) -> Ok(b)
     Err(e) -> Err("cannot read " ++ path ++ ": " ++ e.message)
@@ -100,7 +101,7 @@ fn read_bytes(path: String) -> Result[Bytes, String] !io =
 
 ## Regular files under `root`, sorted by relative path; symlinks are refused
 ## (they do not survive archives portably, so the hash refuses them).
-fn collect_files(root: String, rel: String) -> Result[List[String], String] !io = {
+fn collect_files(root: String, rel: String) -> Result[List[String], String] !Fs !io = {
   var out: List[String] = []
   let dir = if rel == "" { root } else { root ++ "/" ++ rel }
   match io.list_dir(dir) {
@@ -128,7 +129,7 @@ fn collect_files(root: String, rel: String) -> Result[List[String], String] !io 
 }
 
 ## The d1 canonical tree hash of a directory: `d1:` + 64 hex digits.
-pub fn tree_hash(root: String) -> Result[String, String] !io = {
+pub fn tree_hash(root: String) -> Result[String, String] !Fs !io = {
   let files = match collect_files(root, "") {
     Ok(fs) -> sort(fs)
     Err(e) -> return Err(e)
@@ -183,7 +184,7 @@ fn too_big(what: String, n: Int, limit: Int) -> String =
 ## no code at all: curl reads them, which the JDK never did. `--max-filesize`
 ## is advisory (servers may not send a length), so the size is checked again
 ## on the downloaded bytes.
-fn http_get(url: String) -> Result[Bytes, String] !io = {
+fn http_get(url: String) -> Result[Bytes, String] !Fs !io = {
   let staged = match io.temp_dir("", "dawn-fetch-") {
     Ok(d) -> d
     Err(e) -> return Err("cannot create a temp directory: " ++ e.message)
@@ -225,7 +226,7 @@ fn http_get(url: String) -> Result[Bytes, String] !io = {
   out
 }
 
-fn download(url: String) -> Result[Bytes, String] !io =
+fn download(url: String) -> Result[Bytes, String] !Fs !io =
   if str.starts_with(url, "file://") {
     let path = str.strip_prefix(url, "file://").unwrap_or(url)
     if io.is_dir(path) {
@@ -242,12 +243,12 @@ fn download(url: String) -> Result[Bytes, String] !io =
 
 # ---- unpack: zip or tar.gz, told apart by magic bytes ----
 
-fn mkdirs(path: String) -> Unit !io = {
+fn mkdirs(path: String) -> Unit !Fs !io = {
   let _ = io.mkdirs(path)
   ()
 }
 
-fn write_file_bytes(path: String, bs: Bytes) -> Result[Unit, String] !io = {
+fn write_file_bytes(path: String, bs: Bytes) -> Result[Unit, String] !Fs !io = {
   match str.last_index_of(path, "/") {
     Some(i) -> mkdirs(str.take(path, i))
     None -> ()
@@ -284,7 +285,7 @@ fn entry_path(dest: String, name: String) -> Result[String, String] !io = {
 ## left of the archive budget -- and stops the entry mid-expansion when its
 ## directory lied. Between the two there is no point at which a bomb has been
 ## materialised and is waiting to be measured.
-fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !io = {
+fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !io = {
   let metas = match zip.headers(bs) {
     Ok(ms) -> ms
     Err(e) -> return Err(e ++
@@ -394,7 +395,7 @@ fn pax_path(recs: String) -> Option[String] = {
   out
 }
 
-fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !io = {
+fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !Fs !io = {
   # The ceiling goes in, rather than a length check coming out: `gunzip` used
   # to materialise the whole member first, so the archive budget was a thing
   # this learned about a bomb after paying for it. The caller has already
@@ -471,7 +472,7 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !io = {
   }
 }
 
-fn unpack(bs: Bytes, dest: String) -> Result[Unit, String] !io =
+fn unpack(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !io =
   if bytes.len(bs) >= 2 && bytes.at(bs, 0) == 31 && bytes.at(bs, 1) == 139 {
     untar(bs, dest)
   } else {
@@ -480,7 +481,7 @@ fn unpack(bs: Bytes, dest: String) -> Result[Unit, String] !io =
 
 ## GitHub-style archives wrap everything in `<repo>-<tag>/`: when the unpacked
 ## root holds exactly one directory and nothing else, that directory is the tree.
-fn strip_single_top_dir(work: String) -> String !io =
+fn strip_single_top_dir(work: String) -> String !Fs !io =
   match io.list_dir(work) {
     Ok(names) ->
       if len(names) == 1 && io.is_dir(work ++ "/" ++ names[0]) {
@@ -493,7 +494,7 @@ fn strip_single_top_dir(work: String) -> String !io =
 
 ## Remove `path` and everything under it. A missing path is not an error, and
 ## a symbolic link is removed rather than followed.
-pub fn delete_tree(path: String) -> Unit !io = {
+pub fn delete_tree(path: String) -> Unit !Fs !io = {
   if io.is_dir(path) && not io.is_symlink(path) {
     match io.list_dir(path) {
       Ok(names) -> { for f in names { delete_tree(path ++ "/" ++ f) } }
@@ -507,7 +508,7 @@ pub fn delete_tree(path: String) -> Unit !io = {
 ## Fetch `url`, unpack, hash, and file the tree into the cache under its own
 ## (actual) hash. Returns (cache entry, d1 hash) — `add` uses this to learn the
 ## hash of an archive it has never seen.
-pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !io = {
+pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !Fs !io = {
   mkdirs(cache_root())
   # staged inside the cache root, so the publishing rename below stays on one
   # filesystem and is therefore atomic
@@ -530,7 +531,7 @@ pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !io = {
 ## The body of the fetch. Still its own function, but no longer *because* of
 ## the release: the staging directory now has a bracket around it, and this
 ## keeps its four early `Err` returns, which the sugared region would refuse.
-fn fetch_into(url: String, work: String) -> Result[(String, String), String] !io = {
+fn fetch_into(url: String, work: String) -> Result[(String, String), String] !Fs !io = {
   let body = match download(url) {
     Ok(b) -> b
     Err(e) -> return Err(e)
@@ -578,7 +579,7 @@ fn fetch_into(url: String, work: String) -> Result[(String, String), String] !io
 ## claims (PKG-02): the cache is content-addressed, so the name is the
 ## declaration and a fresh d1 walk is the whole verification — hand edits,
 ## disk rot and a half-written concurrent unpack all surface as a mismatch.
-pub fn verify_cached(dir: String, hash: String) -> Result[Unit, String] !io =
+pub fn verify_cached(dir: String, hash: String) -> Result[Unit, String] !Fs !io =
   match tree_hash(dir) {
     Err(e) -> Err("cache entry " ++ dir ++ " is unreadable: " ++ e ++
         "\n  delete it and re-run; the next fetch re-downloads")
@@ -607,7 +608,7 @@ pub fn verify_cached(dir: String, hash: String) -> Result[Unit, String] !io =
 ## An entry with no record is verified rather than adopted. Adopting would be
 ## cheaper and would let exactly one bump through — the first one after this
 ## code ships, which is the occurrence it was written for.
-pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !io = {
+pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !Fs !io = {
   let root = cache_root()
   for u in recorded_origins(root, hash) { if u == url { return Ok(()) } }
   match fetch_and_hash(url) {
@@ -640,7 +641,7 @@ pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !io = {
 ## when the entry exists and the `subdir` inside it does not. The url/hash
 ## guard therefore hangs off the resolver as well; extending PKG-02's re-hash
 ## to every warm build is a separate decision with a per-build price tag.
-pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !io = {
+pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !Fs !io = {
   let target = cache_dir(hash)
   if io.is_dir(target) {
     match verify_cached(target, hash) {
@@ -668,26 +669,28 @@ pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !io = 
 }
 
 test "origin records round-trip and accumulate urls" {
-  let h = "d1:" ++ str.repeat("a", 64)
-  let root = match io.temp_dir("", "dawn-origins-") {
-    Ok(d) -> d
-    Err(e) -> panic("temp dir: " ++ e.message)
-  }
-  with r <- bracket(root, delete_tree)
-  # an entry nobody fetched has no record, which is what makes check_origin
-  # verify it instead of trusting it
-  assert recorded_origins(r, h) == []
-  record_origin(r, h, "file:///one.zip")
-  assert recorded_origins(r, h) == ["file:///one.zip"]
-  # a second url for the same bytes (a mirror) joins the first, and neither
-  # url nor a repeat of it is written twice
-  record_origin(r, h, "file:///one.zip")
-  record_origin(r, h, "https://mirror/two.zip")
-  assert recorded_origins(r, h) == ["file:///one.zip", "https://mirror/two.zip"]
-  # the record is a sibling of the entry, never a file under it: the entry's
-  # name is the d1 hash of its own tree, so a file inside would fail verify
-  assert not io.exists(r ++ "/d1-" ++ str.repeat("a", 64))
-  assert io.exists(r ++ "/.origins/d1-" ++ str.repeat("a", 64))
+  io.with_fs_real(() => {
+    let h = "d1:" ++ str.repeat("a", 64)
+    let root = match io.temp_dir("", "dawn-origins-") {
+      Ok(d) -> d
+      Err(e) -> panic("temp dir: " ++ e.message)
+    }
+    with r <- bracket(root, delete_tree)
+    # an entry nobody fetched has no record, which is what makes check_origin
+    # verify it instead of trusting it
+    assert recorded_origins(r, h) == []
+    record_origin(r, h, "file:///one.zip")
+    assert recorded_origins(r, h) == ["file:///one.zip"]
+    # a second url for the same bytes (a mirror) joins the first, and neither
+    # url nor a repeat of it is written twice
+    record_origin(r, h, "file:///one.zip")
+    record_origin(r, h, "https://mirror/two.zip")
+    assert recorded_origins(r, h) == ["file:///one.zip", "https://mirror/two.zip"]
+    # the record is a sibling of the entry, never a file under it: the entry's
+    # name is the d1 hash of its own tree, so a file inside would fail verify
+    assert not io.exists(r ++ "/d1-" ++ str.repeat("a", 64))
+    assert io.exists(r ++ "/.origins/d1-" ++ str.repeat("a", 64))
+  })
 }
 
 test "origin records ignore blank lines" {

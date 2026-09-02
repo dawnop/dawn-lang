@@ -9,49 +9,52 @@ use gen/examples.{gen_examples}
 use gen/stdlib.{gen_stdlib}
 use gen/links.{check_links}
 use gen/assets.{check_assets}
+use std/io.{Fs, with_fs_real}
 
 pub fn main() -> Unit !io = {
-  let out = "site/dist"
-  # The names the assets got: content-hashed, so that the one-year
-  # `immutable` header /assets/ is served with stops holding a returning
-  # visitor on a stale copy. Every page below links to what this hands back.
-  let assets = gen_assets(out)
-  # English is the site's default and lives at `/`; the Chinese front page
-  # is at `/zh/`. Everything below this pair is Chinese and unpaired.
-  gen_index(out, assets, En)
-  gen_index(out, assets, Zh)
-  # The tutorial is the second paired document: English at /tutorial/, its
-  # translation at /zh/tutorial/, each page linked to its twin.
-  gen_tutorial(out, assets, En)
-  gen_tutorial(out, assets, Zh)
-  # And the rest of the paired ones. The standard library reference is a
-  # translated intro over entries that are English in both runs -- the doc
-  # comments are the compiler's own text; the gallery and the Playground are a
-  # translated shell over programs and an editor that have no language.
-  gen_examples(out, assets, En)
-  gen_examples(out, assets, Zh)
-  gen_stdlib(out, assets, En)
-  gen_stdlib(out, assets, Zh)
-  gen_playground(out, assets, En)
-  gen_playground(out, assets, Zh)
-  # The browser demo: two wasm reactors built by site/build.sh, mounted by the
-  # bridge vendored alongside them. Translated shell and translated prose over
-  # two applications that draw the same English either way.
-  gen_tea(out, assets, En)
-  gen_tea(out, assets, Zh)
-  # The last two to be paired (2026-08-07). These are the one pair whose
-  # original is the Chinese half -- they are living documents, edited in
-  # Chinese by every language batch, and the English is registered against
-  # them in scripts/doc-check.py. The layout does not care which way that
-  # runs: English at `/`, Chinese at `/zh/`, same as everything above.
-  gen_spec(out, assets, En)
-  gen_spec(out, assets, Zh)
-  gen_design(out, assets, En)
-  gen_design(out, assets, Zh)
-  check_links(out)
-  # The chrome follows `Lang` because every function above takes one. The
-  # stylesheet is copied verbatim into both trees and takes nothing, so the
-  # text it injects is checked here instead.
-  check_assets(out)
-  println("site generated into $out")
+  with_fs_real(() => {
+    let out = "site/dist"
+    # The names the assets got: content-hashed, so that the one-year
+    # `immutable` header /assets/ is served with stops holding a returning
+    # visitor on a stale copy. Every page below links to what this hands back.
+    let assets = gen_assets(out)
+    # English is the site's default and lives at `/`; the Chinese front page
+    # is at `/zh/`. Everything below this pair is Chinese and unpaired.
+    gen_index(out, assets, En)
+    gen_index(out, assets, Zh)
+    # The tutorial is the second paired document: English at /tutorial/, its
+    # translation at /zh/tutorial/, each page linked to its twin.
+    gen_tutorial(out, assets, En)
+    gen_tutorial(out, assets, Zh)
+    # And the rest of the paired ones. The standard library reference is a
+    # translated intro over entries that are English in both runs -- the doc
+    # comments are the compiler's own text; the gallery and the Playground are a
+    # translated shell over programs and an editor that have no language.
+    gen_examples(out, assets, En)
+    gen_examples(out, assets, Zh)
+    gen_stdlib(out, assets, En)
+    gen_stdlib(out, assets, Zh)
+    gen_playground(out, assets, En)
+    gen_playground(out, assets, Zh)
+    # The browser demo: two wasm reactors built by site/build.sh, mounted by the
+    # bridge vendored alongside them. Translated shell and translated prose over
+    # two applications that draw the same English either way.
+    gen_tea(out, assets, En)
+    gen_tea(out, assets, Zh)
+    # The last two to be paired (2026-08-07). These are the one pair whose
+    # original is the Chinese half -- they are living documents, edited in
+    # Chinese by every language batch, and the English is registered against
+    # them in scripts/doc-check.py. The layout does not care which way that
+    # runs: English at `/`, Chinese at `/zh/`, same as everything above.
+    gen_spec(out, assets, En)
+    gen_spec(out, assets, Zh)
+    gen_design(out, assets, En)
+    gen_design(out, assets, Zh)
+    check_links(out)
+    # The chrome follows `Lang` because every function above takes one. The
+    # stylesheet is copied verbatim into both trees and takes nothing, so the
+    # text it injects is checked here instead.
+    check_assets(out)
+    println("site generated into $out")
+  })
 }

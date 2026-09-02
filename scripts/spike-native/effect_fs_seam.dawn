@@ -70,14 +70,14 @@ fn exercise(root: String) -> List[String] !Fs = {
 
 pub fn main() -> Unit !io = {
   io.println("-- against the host, through with_fs_real --")
-  let dir = with_fs_real(() => match fs_temp_dir("", "dawn-spike-fs-") {
-    Ok(d) -> d
-    Err(_) -> ""
-  })
-  line("scratch is a dir", io.is_dir(dir))
-  for l in with_fs_real(() => exercise(dir)) { io.println(l) }
-  # the operations and the io.* functions see one file system
   with_fs_real(() => {
+    let dir = match fs_temp_dir("", "dawn-spike-fs-") {
+      Ok(d) -> d
+      Err(_) -> ""
+    }
+    line("scratch is a dir", io.is_dir(dir))
+    for l in exercise(dir) { io.println(l) }
+    # the operations and the io.* functions see one file system
     line("io sees b       ", io.exists(dir ++ "/b.txt"))
     line("bytes agree     ", fs_read_bytes(dir ++ "/b.txt") == Ok(bytes.utf8("beta")))
     let staged = match fs_temp_file(dir, "stage-") {
@@ -93,6 +93,12 @@ pub fn main() -> Unit !io = {
     line("cleaned up      ", fs_delete(dir) == Ok(true) && not io.exists(dir))
   })
 
+  table_run()
+  # and the table left the host alone
+  with_fs_real(() => line("host untouched  ", not io.exists("/t")))
+}
+
+fn table_run() -> Unit !io = {
   io.println("-- against a table, no host --")
   let absent = (p: String) => ForeignError { kind: "table.absent", message: p, cause: None }
   with handle Fs {
@@ -130,5 +136,4 @@ pub fn main() -> Unit !io = {
   }
   for l in exercise("/t") { io.println(l) }
   io.println("table holds   = " ++ to_string(list.map(files, (e: Entry) => e.path ++ ":" ++ e.body)))
-  line("host untouched  ", not io.exists("/t"))
 }

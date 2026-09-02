@@ -8,6 +8,7 @@
 # calls them too.
 
 use std/io
+use std/io.{Fs}
 use std/map
 use std/str
 use ir/core.{CValue, CFun, CModule, CParam, CMode, COwned, CBorrowed, mode_owned}
@@ -480,24 +481,28 @@ pub fn c_test_text(
 pub fn runtime_source(name: String) -> Option[String] = rtsrc.source(name)
 
 test "the embedded C runtime matches runtime/c on disk" {
-  # the staleness gate for the generated rtsrc.dawn, same shape as the
-  # embedded-std one in stdlib.dawn
-  for f in ["dawn_rt.c", "dawn_rt.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
-    let disk = match io.read_file("runtime/c/" ++ f) {
-      Ok(t) -> t
-      Err(e) -> panic("runtime/c/" ++ f ++ ": " ++ e.message)
-    }
-    match rtsrc.source(f) {
-      Some(t) -> {
-        if t != disk {
-          println("stale embedded runtime: " ++ f ++ " (run python3 scripts/gen-rtsrc.py)")
+  # The real disk, deliberately: runtime/c in the working tree is the object
+  # under assertion, as with the embedded-std gate in stdlib.dawn.
+  io.with_fs_real(() => {
+    # the staleness gate for the generated rtsrc.dawn, same shape as the
+    # embedded-std one in stdlib.dawn
+    for f in ["dawn_rt.c", "dawn_rt.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
+      let disk = match io.read_file("runtime/c/" ++ f) {
+        Ok(t) -> t
+        Err(e) -> panic("runtime/c/" ++ f ++ ": " ++ e.message)
+      }
+      match rtsrc.source(f) {
+        Some(t) -> {
+          if t != disk {
+            println("stale embedded runtime: " ++ f ++ " (run python3 scripts/gen-rtsrc.py)")
+          }
+          assert t == disk
         }
-        assert t == disk
-      }
-      None -> {
-        println("missing from embedded runtime: " ++ f ++ " (run python3 scripts/gen-rtsrc.py)")
-        assert false
+        None -> {
+          println("missing from embedded runtime: " ++ f ++ " (run python3 scripts/gen-rtsrc.py)")
+          assert false
+        }
       }
     }
-  }
+  })
 }

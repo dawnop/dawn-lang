@@ -295,30 +295,31 @@ test "fold visits every entry exactly once, in no promised order" {
   assert fold(from([("only", 9)]), 100, (acc, _k, v) => acc + v) == 109
 }
 
-# The step's effect is `!io`, the disk through `io.temp_dir` and friends.
-# What the block pins is that fold's row is polymorphic; which effect rides
-# on it is beside the point, and the row follows io's file functions when
-# they move onto std/io's `Fs`.
+# The step's effect is `Fs`, the disk through `io.temp_dir` and friends,
+# answered by the real handler. What the block pins is that fold's row is
+# polymorphic; which effect rides on it is beside the point.
 test "fold's row is polymorphic: the step may perform an effect" {
-  let m: Map[String, Int] = from([("a", 1), ("b", 2), ("c", 3)])
-  let d = match io.temp_dir("", "dawn-map-fold-") {
-    Ok(p) -> p
-    Err(_) -> ""
-  }
-  assert d != ""
-  # one file per entry, written by the step itself, so the walk really
-  # performed the effect once per entry -- and the sum is unchanged by it
-  let total = fold(m, 0, (acc, k, v) => {
-    let _ = io.write_file(d ++ "/" ++ k, to_string(v))
-    acc + v
-  })
-  assert total == 6
-  for k in ["a", "b", "c"] {
-    match io.read_file(d ++ "/" ++ k) {
-      Ok(s) -> { assert s == to_string(get(m, k).unwrap_or(-1)) }
-      Err(_) -> { assert false }
+  io.with_fs_real(() => {
+    let m: Map[String, Int] = from([("a", 1), ("b", 2), ("c", 3)])
+    let d = match io.temp_dir("", "dawn-map-fold-") {
+      Ok(p) -> p
+      Err(_) -> ""
     }
-  }
+    assert d != ""
+    # one file per entry, written by the step itself, so the walk really
+    # performed the effect once per entry -- and the sum is unchanged by it
+    let total = fold(m, 0, (acc, k, v) => {
+      let _ = io.write_file(d ++ "/" ++ k, to_string(v))
+      acc + v
+    })
+    assert total == 6
+    for k in ["a", "b", "c"] {
+      match io.read_file(d ++ "/" ++ k) {
+        Ok(s) -> { assert s == to_string(get(m, k).unwrap_or(-1)) }
+        Err(_) -> { assert false }
+      }
+    }
+  })
 }
 
 test "for over a Map yields every entry once, in entries' order" {

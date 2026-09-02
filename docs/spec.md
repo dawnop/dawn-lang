@@ -2984,7 +2984,8 @@ url/文件名安全字母表且
 没人依赖它——[标准库参考](https://dawn-lang.dawnop.com/zh/stdlib.html)因此也不列这两个模块。
 容器的语义（持久接口、键须 `Eq + Hash`、迭代按插入序、相等与顺序无关）在 §2.2。
 
-**IO 的表态。** `std/io` 全部 `!io`，会失败的一律回 `Result[T, ForeignError]`（§9.8.1）——
+**IO 的表态。** `std/io` 的控制台、环境与子进程函数是 `!io`；文件函数走具名效果 `Fs`（§6.5），
+生产 handler 是 `io.with_fs_real`，测试用一张表应答。会失败的一律回 `Result[T, ForeignError]`（§9.8.1）——
 结构化载荷而非屏障渲染好的那句话，理由见
 [`audit/error-model-design.md`](audit/error-model-design.md)。另有以下规范性行为：
 

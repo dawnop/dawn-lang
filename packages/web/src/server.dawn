@@ -6,7 +6,7 @@ use std/str
 use std/bytes
 use std/list
 use std/map
-use std/io.{delete, Deleted, NotFound}
+use std/io.{delete, Deleted, NotFound, with_fs_real}
 use java "com.sun.net.httpserver.HttpServer"
 use java "com.sun.net.httpserver.HttpExchange"
 use java "com.sun.net.httpserver.Headers"
@@ -576,12 +576,18 @@ fn close_spill(o: FileOutputStream) -> Unit !io = o.close()
 # file and a failed delete are different log lines because they are different
 # facts: the first is a double release (worth knowing, harmless), the second
 # is a temp file that will outlive the request.
+#
+# The file system handler is installed here rather than threaded up to the
+# route: every caller sits inside a `Handler`, whose row is the closed `!io`
+# (types.dawn), so the label could not travel through it (spec §6.5, the
+# handler is the call site's). The innermost boundary that owns the whole
+# unit of file work is this one delete.
 fn delete_quietly(path: String) -> Unit !io =
-  match delete(path) {
+  with_fs_real(() => match delete(path) {
     Ok(Deleted) -> ()
     Ok(NotFound) -> println("temp body file was already absent: $path")
     Err(m) -> println("temp body file not deleted: $path (${m.message})")
-  }
+  })
 
 ## The release for the spilled request body: a Request owns its temp file for
 ## exactly the length of the handler call, and there is nothing to delete when

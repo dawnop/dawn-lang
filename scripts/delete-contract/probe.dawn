@@ -1,7 +1,7 @@
 # Behavioral contract for std/io.delete. It prints only the public outcome
 # categories, never backend-specific error text, so JVM and native must agree.
 use std/io
-use std/io.{DeleteOutcome, Deleted, NotFound}
+use std/io.{DeleteOutcome, Deleted, NotFound, Fs}
 
 fn made(r: Result[String, ForeignError]) -> String =
   match r {
@@ -46,47 +46,49 @@ fn env_query(label: String, result: Result[Option[String], ForeignError]) -> Uni
   })
 
 pub fn main() -> Unit !io = {
-  let root = made(io.temp_dir("", "dawn-delete-contract-"))
-  let file = root ++ "/file"
-  let empty = root ++ "/empty"
-  let nonempty = root ++ "/nonempty"
-  let child = nonempty ++ "/child"
-  let nul_prefix = root ++ "/nul-prefix"
-  let nul_dir = root ++ "/nul-dir"
-  let nul_symlink = io.cwd() ++ "/delete-contract-nul-symlink"
-  let trailing = root ++ "/trailing"
-  let cwd_sentinel = io.cwd() ++ "/delete-contract-cwd-sentinel"
-  done(io.write_file(file, "x"))
-  done(io.mkdirs(empty))
-  done(io.write_file(child, "x"))
-  done(io.write_file(nul_prefix, "x"))
-  done(io.mkdirs(nul_dir))
-  done(io.write_file(trailing, "x"))
-  done(io.write_file(cwd_sentinel, "x"))
+  io.with_fs_real(() => {
+    let root = made(io.temp_dir("", "dawn-delete-contract-"))
+    let file = root ++ "/file"
+    let empty = root ++ "/empty"
+    let nonempty = root ++ "/nonempty"
+    let child = nonempty ++ "/child"
+    let nul_prefix = root ++ "/nul-prefix"
+    let nul_dir = root ++ "/nul-dir"
+    let nul_symlink = io.cwd() ++ "/delete-contract-nul-symlink"
+    let trailing = root ++ "/trailing"
+    let cwd_sentinel = io.cwd() ++ "/delete-contract-cwd-sentinel"
+    done(io.write_file(file, "x"))
+    done(io.mkdirs(empty))
+    done(io.write_file(child, "x"))
+    done(io.write_file(nul_prefix, "x"))
+    done(io.mkdirs(nul_dir))
+    done(io.write_file(trailing, "x"))
+    done(io.write_file(cwd_sentinel, "x"))
 
-  show("file", io.delete(file))
-  show("repeat", io.delete(file))
-  show("empty", io.delete(empty))
-  show("missing", io.delete(root ++ "/missing"))
-  show("nonempty", io.delete(nonempty))
-  show("nul", io.delete(nul_prefix ++ "\u{0}suffix"))
-  line("nul prefix remains", io.exists(nul_prefix))
-  query("nul exists", catch_fault(() => io.exists(nul_prefix ++ "\u{0}suffix")))
-  query("nul is_dir", catch_fault(() => io.is_dir(nul_dir ++ "\u{0}suffix")))
-  query("nul is_symlink", catch_fault(() => io.is_symlink(nul_symlink ++ "\u{0}suffix")))
-  env_query("nul getenv", catch_fault(() => io.getenv("DAWN_DELETE\u{0}CONTRACT")))
-  line("nul directory remains", io.is_dir(nul_dir))
-  line("nul symlink remains", io.is_symlink(nul_symlink))
-  show_error("empty path", io.delete(""))
-  line("empty target remains", io.exists(cwd_sentinel))
-  show_error("trailing slash", io.delete(trailing ++ "/"))
-  line("trailing target remains", io.exists(trailing))
-  show("child", io.delete(child))
-  show("nonempty cleanup", io.delete(nonempty))
-  let _ = io.delete(nul_prefix)
-  let _ = io.delete(nul_dir)
-  let _ = io.delete(nul_symlink)
-  let _ = io.delete(trailing)
-  let _ = io.delete(cwd_sentinel)
-  show("root", io.delete(root))
+    show("file", io.delete(file))
+    show("repeat", io.delete(file))
+    show("empty", io.delete(empty))
+    show("missing", io.delete(root ++ "/missing"))
+    show("nonempty", io.delete(nonempty))
+    show("nul", io.delete(nul_prefix ++ "\u{0}suffix"))
+    line("nul prefix remains", io.exists(nul_prefix))
+    query("nul exists", catch_fault(() => io.exists(nul_prefix ++ "\u{0}suffix")))
+    query("nul is_dir", catch_fault(() => io.is_dir(nul_dir ++ "\u{0}suffix")))
+    query("nul is_symlink", catch_fault(() => io.is_symlink(nul_symlink ++ "\u{0}suffix")))
+    env_query("nul getenv", catch_fault(() => io.getenv("DAWN_DELETE\u{0}CONTRACT")))
+    line("nul directory remains", io.is_dir(nul_dir))
+    line("nul symlink remains", io.is_symlink(nul_symlink))
+    show_error("empty path", io.delete(""))
+    line("empty target remains", io.exists(cwd_sentinel))
+    show_error("trailing slash", io.delete(trailing ++ "/"))
+    line("trailing target remains", io.exists(trailing))
+    show("child", io.delete(child))
+    show("nonempty cleanup", io.delete(nonempty))
+    let _ = io.delete(nul_prefix)
+    let _ = io.delete(nul_dir)
+    let _ = io.delete(nul_symlink)
+    let _ = io.delete(trailing)
+    let _ = io.delete(cwd_sentinel)
+    show("root", io.delete(root))
+  })
 }

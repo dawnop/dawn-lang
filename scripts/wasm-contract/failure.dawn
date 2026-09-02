@@ -12,6 +12,7 @@
 # the one differential where "panic"/"fault" is the same spelling on both
 # sides.
 use std/io
+use std/io.{Fs}
 use std/str
 
 fn n(i: Int) -> Int !io = i
@@ -45,7 +46,7 @@ fn leg_routing() -> Unit !io =
 
 ## And the io barrier does take a fault (io.read_file is catch_fault around
 ## the raw read -- the barrier that lands here is std/io's own).
-fn leg_fault() -> Unit !io =
+fn leg_fault() -> Unit !Fs !io =
   match io.read_file("/no/such/dawn/path") {
     Ok(_) -> println("fault: no fault?")
     Err(e) -> println("fault: kind=" ++ e.kind)
@@ -135,13 +136,15 @@ fn leg_release_escape() -> Unit !io =
   }
 
 pub fn main() -> Unit !io = {
-  leg_message()
-  leg_routing()
-  leg_fault()
-  leg_nested()
-  leg_repanic()
-  leg_live()
-  leg_bracket()
-  leg_release_escape()
-  println("failure corpus done")
+  io.with_fs_real(() => {
+    leg_message()
+    leg_routing()
+    leg_fault()
+    leg_nested()
+    leg_repanic()
+    leg_live()
+    leg_bracket()
+    leg_release_escape()
+    println("failure corpus done")
+  })
 }

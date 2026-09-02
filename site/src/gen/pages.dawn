@@ -2,6 +2,7 @@
 
 use std/str
 use std/io
+use std/io.{Fs}
 use std/bytes
 use md/ast.{Block}
 use md/parser.{parse}
@@ -14,7 +15,7 @@ use gen/copy.{Copy, load_copy, line, body}
 use gen/fingerprint.{fingerprint}
 use gen/search.{read_api, search_index}
 
-fn parsed(path: String) -> List[Block] !io =
+fn parsed(path: String) -> List[Block] !Fs !io =
   match parse(must_read(path)) {
     Ok(bs) -> bs
     Err(e) -> panic("$path: $e")
@@ -31,13 +32,13 @@ fn parsed(path: String) -> List[Block] !io =
 # and with it the JVM-vs-native comparison site/README.md calls a project
 # tradition. std's byte IO is on both backends; scripts/site-dist-diff.sh is
 # what now says so.
-fn read_bin(src: String) -> Bytes !io =
+fn read_bin(src: String) -> Bytes !Fs !io =
   match io.read_bytes(src) {
     Ok(b) -> b
     Err(e) -> panic("cannot read $src: $e")
   }
 
-fn write_bin(dst: String, content: Bytes) -> Unit !io =
+fn write_bin(dst: String, content: Bytes) -> Unit !Fs !io =
   match io.write_bytes(dst, content) {
     Ok(_) -> println("  wrote $dst")
     Err(e) -> panic("cannot write $dst: $e")
@@ -58,7 +59,7 @@ fn write_bin(dst: String, content: Bytes) -> Unit !io =
 ## a 404 and the page into unstyled HTML. The alias carries the same bytes,
 ## fix included, so it is not a stale copy either. It can be dropped once no
 ## pre-fingerprint HTML is plausibly still in a cache.
-fn emit_asset(out: String, name: String, content: Bytes) -> String !io = {
+fn emit_asset(out: String, name: String, content: Bytes) -> String !Fs !io = {
   let fp = fingerprint(name, content)
   write_bin("$out/assets/$fp", content)
   write_bin("$out/assets/$name", content)
@@ -68,10 +69,10 @@ fn emit_asset(out: String, name: String, content: Bytes) -> String !io = {
 ## Text assets keep the trailing newline write_page used to add, so that the
 ## bytes on disk -- and therefore the hash -- do not depend on which helper
 ## wrote them.
-fn emit_text(out: String, name: String, text: String) -> String !io =
+fn emit_text(out: String, name: String, text: String) -> String !Fs !io =
   emit_asset(out, name, bytes.utf8(text ++ "\n"))
 
-pub fn gen_assets(out: String) -> Assets !io = {
+pub fn gen_assets(out: String) -> Assets !Fs !io = {
   # Read once, used twice: the two search indexes are built from the same
   # `dawn doc --stdlib` document gen/stdlib later renders into the page,
   # and an index built from a second read would be an index of a document
@@ -144,7 +145,7 @@ pub fn gen_assets(out: String) -> Assets !io = {
 ## order (wasi <- reactor, dom <- app) rather than a loop over a directory
 ## listing, and the order is the reason: a name cannot be written into an
 ## importer before the file it names has been hashed.
-fn emit_bridge(out: String) -> String !io = {
+fn emit_bridge(out: String) -> String !Fs !io = {
   let wasi = emit_text(out, "tea-wasi.mjs", bridge_src("wasi.mjs"))
   let reactor = emit_text(out, "tea-reactor.mjs",
     repoint(bridge_src("reactor.mjs"), "./wasi.mjs", wasi))
@@ -153,7 +154,7 @@ fn emit_bridge(out: String) -> String !io = {
     repoint(repoint(bridge_src("app.mjs"), "./reactor.mjs", reactor), "./dom.mjs", dom))
 }
 
-fn bridge_src(name: String) -> String !io = str.trim(must_read("packages/tea-dom/js/$name"))
+fn bridge_src(name: String) -> String !Fs !io = str.trim(must_read("packages/tea-dom/js/$name"))
 
 ## Point one vendored module at the name another really got.
 ##
@@ -178,7 +179,7 @@ fn repoint(text: String, spec: String, name: String) -> String !io = {
 ## toolchain still builds the whole site; the demo page then fails to compile
 ## its module and reports it, which is the same deal the Playground makes when
 ## its editor bundle is missing.
-fn emit_wasm(out: String, name: String, src: String) -> String !io =
+fn emit_wasm(out: String, name: String, src: String) -> String !Fs !io =
   match io.read_bytes(src) {
     Ok(b) -> emit_asset(out, name, b)
     Err(_) -> {
@@ -187,7 +188,7 @@ fn emit_wasm(out: String, name: String, src: String) -> String !io =
     }
   }
 
-fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String !io =
+fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String !Fs !io =
   match io.read_file(src) {
     Ok(text) -> emit_text(out, name, text)
     Err(_) -> {
@@ -202,14 +203,14 @@ fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String 
 # compiling, or one that still compiles and now prints something else, turns
 # the gate red. Reading it with must_read is the other half: a card cannot be
 # added without an expectation, because the build dies without the file.
-fn card_source(base: String) -> String !io =
+fn card_source(base: String) -> String !Fs !io =
   highlight_dawn(str.trim(must_read("$base.dawn")))
 
-fn card_output(base: String) -> String !io =
+fn card_output(base: String) -> String !Fs !io =
   `<pre class="output"><code>` ++ escape_html(str.trim(must_read("$base.out"))) ++
   "</code></pre>"
 
-fn hero_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String !io = {
+fn hero_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String !Fs !io = {
   let hl = card_source("site/pages/hero")
   let out = card_output("site/pages/hero")
   let eyebrow = line(c, "eyebrow", mu)
@@ -239,7 +240,7 @@ $out
 """
 }
 
-fn feature_block(title: String, desc: String, base: String) -> String !io = {
+fn feature_block(title: String, desc: String, base: String) -> String !Fs !io = {
   let hl = card_source(base)
   let out = card_output(base)
   """
@@ -259,7 +260,7 @@ $out</div>
 ## languages, because their comments are English like the rest of the code in
 ## this repository, and doc-check.py holds every one of them to the output
 ## printed next to it.
-fn feature_section(c: Copy, mu: fn(String) -> String) -> String !io = {
+fn feature_section(c: Copy, mu: fn(String) -> String) -> String !Fs !io = {
   let f1 = feature_block(line(c, "feature-effects-title", mu),
     line(c, "feature-effects-body", mu), "site/pages/feat_effects")
   let f2 = feature_block(line(c, "feature-comptime-title", mu),
@@ -279,7 +280,7 @@ fn feature_section(c: Copy, mu: fn(String) -> String) -> String !io = {
 ## the face that everybody sees and nobody proofreads. This way it lands on
 ## the Chinese text, whose reader is the author, and doc-check.py's
 ## translation digest says when it has.
-pub fn gen_index(out: String, a: Assets, lang: Lang) -> Unit !io = {
+pub fn gen_index(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let docs = doc_files()
   let (src, dst, root, title) =
     match lang {
@@ -312,7 +313,7 @@ fn doc_source(base: String, out: String, lang: Lang) -> (String, String, String)
     Zh -> ("docs/$base.md", "$out/zh/$base.html", "..")
   }
 
-fn gen_doc_page(out: String, a: Assets, lang: Lang, base: String) -> Unit !io = {
+fn gen_doc_page(out: String, a: Assets, lang: Lang, base: String) -> Unit !Fs !io = {
   let docs = doc_files()
   let (src, dst, root) = doc_source(base, out, lang)
   let doc = render_doc(parsed(src), u => map_doc_url(root, docs, u))
@@ -320,10 +321,10 @@ fn gen_doc_page(out: String, a: Assets, lang: Lang, base: String) -> Unit !io = 
     page_with_toc(a, lang, "$base.html", "${doc.title} — Dawn", root, base, doc.toc, doc.html))
 }
 
-pub fn gen_spec(out: String, a: Assets, lang: Lang) -> Unit !io =
+pub fn gen_spec(out: String, a: Assets, lang: Lang) -> Unit !Fs !io =
   gen_doc_page(out, a, lang, "spec")
 
-pub fn gen_design(out: String, a: Assets, lang: Lang) -> Unit !io =
+pub fn gen_design(out: String, a: Assets, lang: Lang) -> Unit !Fs !io =
   gen_doc_page(out, a, lang, "design")
 
 test "each language's document is read from its own file and lands in its own place" {
@@ -339,7 +340,7 @@ test "each language's document is read from its own file and lands in its own pl
 ## the shell around it: nav, footer and the language switch, which is the whole
 ## reason it is paired. Translating the editor is a job in site/play-ui and has
 ## nothing to do with this generator.
-pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !io = {
+pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let (dst, root) =
     match lang {
       En -> ("$out/playground.html", ".")
@@ -480,7 +481,7 @@ $source
 ## Only the pure half: `main.dawn` is host wiring -- stdin, stdout and the
 ## reactor's exports -- and the point of the page above is that none of that is
 ## where the application lives.
-fn tea_source(summary: String, path: String) -> String !io = {
+fn tea_source(summary: String, path: String) -> String !Fs !io = {
   let src = str.trim(must_read(path))
   `<details class="tea-src"><summary>` ++ escape_html(summary) ++ "</summary>\n"
     ++ `<pre class="dawn"><code>` ++ highlight_dawn(src) ++ "</code></pre>\n</details>"
@@ -499,7 +500,7 @@ fn todo_source_path() -> String = "examples/projects/tea_dom_todo_keyed/src/todo
 ## The prose is translated and the two applications are not: they are Dawn
 ## programs, English like the rest of the code here, and what they draw is
 ## `dawn counter` and `dawn todo` on both sides.
-pub fn gen_tea(out: String, a: Assets, lang: Lang) -> Unit !io = {
+pub fn gen_tea(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let (dst, root) =
     match lang {
       En -> ("$out/tea.html", ".")
@@ -511,7 +512,7 @@ pub fn gen_tea(out: String, a: Assets, lang: Lang) -> Unit !io = {
 ## The whole page as markup, without writing it -- which is what the tests
 ## below read, so that what they check is the document a browser gets and not
 ## a fragment assembled a second way.
-fn tea_page(a: Assets, lang: Lang, root: String) -> String !io = {
+fn tea_page(a: Assets, lang: Lang, root: String) -> String !Fs !io = {
   let c = tea_copy(lang, root,
     lang_path(lang, "examples/tea_dom_counter.html"),
     lang_path(lang, "examples/tea_dom_todo_keyed.html"))
@@ -537,14 +538,16 @@ fn tea_page(a: Assets, lang: Lang, root: String) -> String !io = {
 ## document-based resolver. Text-level, because nothing else in the repo
 ## executes this file; the mutation it is against is deleting the abs() wrap.
 test "the search glue resolves every resource against the document, not itself" {
-  let js = must_read("site/assets/search.js")
-  assert str.contains(js, "new URL(u, document.baseURI)")
-  assert str.contains(js, "import(abs(d.searchApp))")
-  assert str.contains(js, "fetch(abs(d.searchWasm))")
-  assert str.contains(js, "fetch(abs(d.searchIndex))")
-  assert not str.contains(js, "import(d.searchApp)")
-  assert not str.contains(js, "fetch(d.searchWasm)")
-  assert not str.contains(js, "fetch(d.searchIndex)")
+  io.with_fs_real(() => {
+    let js = must_read("site/assets/search.js")
+    assert str.contains(js, "new URL(u, document.baseURI)")
+    assert str.contains(js, "import(abs(d.searchApp))")
+    assert str.contains(js, "fetch(abs(d.searchWasm))")
+    assert str.contains(js, "fetch(abs(d.searchIndex))")
+    assert not str.contains(js, "import(d.searchApp)")
+    assert not str.contains(js, "fetch(d.searchWasm)")
+    assert not str.contains(js, "fetch(d.searchIndex)")
+  })
 }
 
 ## The counter's section is the counter's file. The mutation this is against
@@ -552,47 +555,53 @@ test "the search glue resolves every resource against the document, not itself" 
 ## project, reads as a source file, highlights fine, and would put host wiring
 ## under a demo whose whole claim is that the application is pure.
 test "the counter demo shows counter.dawn and not the host wiring next to it" {
-  let p = tea_page(plain_assets(), En, ".")
-  assert str.contains(p, `<details class="tea-src">`)
-  # `update`'s deliberate panic, spelled the way counter.dawn spells it and no
-  # other file in either project does.
-  assert str.contains(p, "boom: update failed on purpose at n=")
-  # main.dawn's opening line and its one call, neither of which belongs here.
-  assert not str.contains(p, "The whole io surface of the demo")
-  assert not str.contains(p, "decode, upd, vw")
+  io.with_fs_real(() => {
+    let p = tea_page(plain_assets(), En, ".")
+    assert str.contains(p, `<details class="tea-src">`)
+    # `update`'s deliberate panic, spelled the way counter.dawn spells it and no
+    # other file in either project does.
+    assert str.contains(p, "boom: update failed on purpose at n=")
+    # main.dawn's opening line and its one call, neither of which belongs here.
+    assert not str.contains(p, "The whole io surface of the demo")
+    assert not str.contains(p, "decode, upd, vw")
+  })
 }
 
 ## The keyed list is the reason there are two demos rather than one, so the
 ## line that makes it keyed is the line worth pinning.
 test "the todo demo shows todo.dawn, keyed call included" {
-  let p = tea_page(plain_assets(), En, ".")
-  assert str.contains(p, "keyed(")
-  assert str.contains(p, "boom: update failed on purpose with ")
-  # codec.dawn's wire format is the other half of that project and not this.
-  assert not str.contains(p, "enc_editing")
-  # Escaping lives inside the highlighter; emitting the raw source instead
-  # stays green on every assertion above and ships broken HTML. todo.dawn's
-  # comments spell `<ul>`, so the page must carry it entity-escaped.
-  assert str.contains(p, "&lt;ul&gt;")
+  io.with_fs_real(() => {
+    let p = tea_page(plain_assets(), En, ".")
+    assert str.contains(p, "keyed(")
+    assert str.contains(p, "boom: update failed on purpose with ")
+    # codec.dawn's wire format is the other half of that project and not this.
+    assert not str.contains(p, "enc_editing")
+    # Escaping lives inside the highlighter; emitting the raw source instead
+    # stays green on every assertion above and ships broken HTML. todo.dawn's
+    # comments spell `<ul>`, so the page must carry it entity-escaped.
+    assert str.contains(p, "&lt;ul&gt;")
+  })
 }
 
 ## Both languages get both sections: the Chinese page is a twin, not a page
 ## with the code left out of it.
 test "each language folds both sources away under its own summary" {
-  let en = tea_page(plain_assets(), En, ".")
-  let zh = tea_page(plain_assets(), Zh, "..")
-  assert count_sub(en, `<details class="tea-src">`) == 2
-  assert count_sub(zh, `<details class="tea-src">`) == 2
-  assert str.contains(en, "<summary>View the source · counter.dawn</summary>")
-  assert str.contains(en, "<summary>View the source · todo.dawn</summary>")
-  assert str.contains(zh, "<summary>查看源码 · counter.dawn</summary>")
-  assert str.contains(zh, "<summary>查看源码 · todo.dawn</summary>")
-  # Folded away: `<details>` with no `open` is closed, and the page says so by
-  # not saying anything.
-  assert not str.contains(en, `<details class="tea-src" open>`)
-  # The gallery links stay where they were.
-  assert str.contains(en, `<a href="./examples/tea_dom_counter.html">`)
-  assert str.contains(zh, `<a href="../zh/examples/tea_dom_todo_keyed.html">`)
+  io.with_fs_real(() => {
+    let en = tea_page(plain_assets(), En, ".")
+    let zh = tea_page(plain_assets(), Zh, "..")
+    assert count_sub(en, `<details class="tea-src">`) == 2
+    assert count_sub(zh, `<details class="tea-src">`) == 2
+    assert str.contains(en, "<summary>View the source · counter.dawn</summary>")
+    assert str.contains(en, "<summary>View the source · todo.dawn</summary>")
+    assert str.contains(zh, "<summary>查看源码 · counter.dawn</summary>")
+    assert str.contains(zh, "<summary>查看源码 · todo.dawn</summary>")
+    # Folded away: `<details>` with no `open` is closed, and the page says so by
+    # not saying anything.
+    assert not str.contains(en, `<details class="tea-src" open>`)
+    # The gallery links stay where they were.
+    assert str.contains(en, `<a href="./examples/tea_dom_counter.html">`)
+    assert str.contains(zh, `<a href="../zh/examples/tea_dom_todo_keyed.html">`)
+  })
 }
 
 fn count_sub(hay: String, needle: String) -> Int = len(str.split(hay, needle)) - 1

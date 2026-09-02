@@ -12,57 +12,60 @@
 # wraps the same primitive in `catch_fault`, and the last case here is about the
 # raise itself -- a program that is not there is a failure, not a status.
 use std/io
+use std/io.{Fs}
 use std/raw
 use std/str
 
 fn tmp(name: String) -> String = "/tmp/dawn-io-run-" ++ name
 
-fn slurp(path: String) -> String !io =
+fn slurp(path: String) -> String !Fs !io =
   match io.read_file(path) {
     Ok(s) -> s
     Err(_) -> "<missing>"
   }
 
 pub fn main() -> Unit !io = {
-  let out = tmp("out")
-  let err = tmp("err")
+  io.with_fs_real(() => {
+    let out = tmp("out")
+    let err = tmp("err")
 
-  io.println("-- the status is the child's own --")
-  io.println("0  -> " ++ to_string(raw.run(["sh", "-c", "exit 0"], out, err)))
-  io.println("3  -> " ++ to_string(raw.run(["sh", "-c", "exit 3"], out, err)))
-  io.println("42 -> " ++ to_string(raw.run(["sh", "-c", "exit 42"], out, err)))
+    io.println("-- the status is the child's own --")
+    io.println("0  -> " ++ to_string(raw.run(["sh", "-c", "exit 0"], out, err)))
+    io.println("3  -> " ++ to_string(raw.run(["sh", "-c", "exit 3"], out, err)))
+    io.println("42 -> " ++ to_string(raw.run(["sh", "-c", "exit 42"], out, err)))
 
-  io.println("-- the two streams stay apart --")
-  let _ = raw.run(["sh", "-c", "printf out; printf err >&2"], out, err)
-  io.println("stdout = " ++ slurp(out))
-  io.println("stderr = " ++ slurp(err))
+    io.println("-- the two streams stay apart --")
+    let _ = raw.run(["sh", "-c", "printf out; printf err >&2"], out, err)
+    io.println("stdout = " ++ slurp(out))
+    io.println("stderr = " ++ slurp(err))
 
-  io.println("-- each run truncates, it does not append --")
-  let _ = raw.run(["sh", "-c", "printf second"], out, err)
-  io.println("stdout = " ++ slurp(out))
+    io.println("-- each run truncates, it does not append --")
+    let _ = raw.run(["sh", "-c", "printf second"], out, err)
+    io.println("stdout = " ++ slurp(out))
 
-  io.println("-- more output than a pipe would buffer --")
-  # 8192 * 64 = 512 KiB, eight times the usual pipe capacity. Written by the
-  # shell itself so this does not depend on `head -c`, which POSIX does not
-  # have. A primitive that waited for the child before reading would hang here
-  # rather than print a number.
-  let _ = raw.run(["sh", "-c", "i=0; while [ \$i -lt 8192 ]; do printf %064d \$i; i=\$((i+1)); done"],
-    out, err)
-  io.println("bytes = " ++ to_string(str.len(slurp(out))))
+    io.println("-- more output than a pipe would buffer --")
+    # 8192 * 64 = 512 KiB, eight times the usual pipe capacity. Written by the
+    # shell itself so this does not depend on `head -c`, which POSIX does not
+    # have. A primitive that waited for the child before reading would hang here
+    # rather than print a number.
+    let _ = raw.run(["sh", "-c", "i=0; while [ \$i -lt 8192 ]; do printf %064d \$i; i=\$((i+1)); done"],
+      out, err)
+    io.println("bytes = " ++ to_string(str.len(slurp(out))))
 
-  io.println("-- empty paths inherit, so nothing is redirected --")
-  io.println("7 -> " ++ to_string(raw.run(["sh", "-c", "exit 7"], "", "")))
+    io.println("-- empty paths inherit, so nothing is redirected --")
+    io.println("7 -> " ++ to_string(raw.run(["sh", "-c", "exit 7"], "", "")))
 
-  io.println("-- argv reaches the program as given, unparsed --")
-  let _ = raw.run(["printf", "[%s]", "a b", "c*d", "-n"], out, err)
-  io.println("argv = " ++ slurp(out))
+    io.println("-- argv reaches the program as given, unparsed --")
+    let _ = raw.run(["printf", "[%s]", "a b", "c*d", "-n"], out, err)
+    io.println("argv = " ++ slurp(out))
 
-  io.println("-- a program that is not there is a failure, not a status --")
-  match catch_panic(() => raw.run(["dawn-no-such-program"], out, err)) {
-    Ok(code) -> io.println("returned " ++ to_string(code))
-    Err(_) -> io.println("refused")
-  }
+    io.println("-- a program that is not there is a failure, not a status --")
+    match catch_panic(() => raw.run(["dawn-no-such-program"], out, err)) {
+      Ok(code) -> io.println("returned " ++ to_string(code))
+      Err(_) -> io.println("refused")
+    }
 
-  let _ = io.delete(out)
-  let _ = io.delete(err)
+    let _ = io.delete(out)
+    let _ = io.delete(err)
+  })
 }

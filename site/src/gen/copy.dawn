@@ -22,11 +22,12 @@ use md/ast.{Block, Heading, Para}
 use md/parser.{parse}
 use html/render.{inline_run, inline_text, render_doc}
 use gen/common.{must_read}
+use std/io.{Fs, with_fs_real}
 
 pub type Copy = { path: String, sections: List[(String, List[Block])] }
 
 ## Read a copy file and split it on its `## key` headings.
-pub fn load_copy(path: String) -> Copy !io = {
+pub fn load_copy(path: String) -> Copy !Fs !io = {
   let blocks =
     match parse(must_read(path)) {
       Ok(bs) -> bs
@@ -93,11 +94,13 @@ pub fn body(c: Copy, key: String, map_url: fn(String) -> String) -> String =
 fn keep_url(u: String) -> String = u
 
 test "sections split on ## and prose above the first one is dropped" {
-  let c = load_copy("site/pages/home.md")
-  assert line(c, "eyebrow", keep_url) == "type · match · effect · !io"
-  assert str.contains(line(c, "cta-primary", keep_url), "tutorial")
-  # inline code in the copy becomes markup, which is why the copy is Markdown
-  assert str.contains(line(c, "feature-effects-body", keep_url), "<code>!io</code>")
-  # a multi-paragraph section keeps its own <p>
-  assert str.contains(body(c, "closing", keep_url), "<p>")
+  with_fs_real(() => {
+    let c = load_copy("site/pages/home.md")
+    assert line(c, "eyebrow", keep_url) == "type · match · effect · !io"
+    assert str.contains(line(c, "cta-primary", keep_url), "tutorial")
+    # inline code in the copy becomes markup, which is why the copy is Markdown
+    assert str.contains(line(c, "feature-effects-body", keep_url), "<code>!io</code>")
+    # a multi-paragraph section keeps its own <p>
+    assert str.contains(body(c, "closing", keep_url), "<p>")
+  })
 }

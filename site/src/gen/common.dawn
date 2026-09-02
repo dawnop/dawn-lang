@@ -3,23 +3,24 @@
 
 use std/str
 use std/io
+use std/io.{Fs}
 use std/list
 use md/ast.{Block, Rule}
 
 ## read_file or die — the generator is fail-fast lint for its inputs.
-pub fn must_read(path: String) -> String !io =
+pub fn must_read(path: String) -> String !Fs !io =
   match io.read_file(path) {
     Ok(t) -> t
     Err(e) -> panic("cannot read $path: $e")
   }
 
-pub fn must_list(path: String) -> List[String] !io =
+pub fn must_list(path: String) -> List[String] !Fs !io =
   match io.list_dir(path) {
     Ok(names) -> names
     Err(e) -> panic("cannot list $path: $e")
   }
 
-pub fn write_page(path: String, content: String) -> Unit !io =
+pub fn write_page(path: String, content: String) -> Unit !Fs !io =
   match io.write_file(path, content ++ "\n") {
     Ok(_) -> println("  wrote $path")
     Err(e) -> panic("cannot write $path: $e")
@@ -38,7 +39,7 @@ pub fn drop_trailing_rule(bs: List[Block]) -> List[Block] =
 ## included, as "dir/file.md" (docs/audit/ was the first one, and a top-level
 ## listing declared its files nonexistent). Read once by the caller:
 ## map_doc_url must stay pure (render_doc takes a pure fn(String)->String).
-pub fn doc_files() -> List[String] !io = {
+pub fn doc_files() -> List[String] !Fs !io = {
   var out: List[String] = []
   match io.list_dir("docs") {
     Ok(fs) -> {

@@ -9,6 +9,7 @@ use std/list
 use std/map
 use std/set
 use std/io
+use std/io.{Fs}
 use front/lexer
 use front/parser
 use front/token.{Token}
@@ -437,7 +438,7 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
   close_obj(w1)
 }
 
-pub fn project_json(prog: Program) -> String !io = {
+pub fn project_json(prog: Program) -> String !Fs !io = {
   var w = w_new()
   w = open_obj(w)
   w = w_key(w, "modules")
@@ -830,51 +831,55 @@ pub fn stdlib_json(std: StdCtx) -> String = {
 }
 
 test "the reference leaves out the representation modules" {
-  # std/hamt and std/pvec used to get a section each, and a reader who
-  # followed one got `use std/hamt` -- a compile error outside std. The
-  # published reference is the API a program may write, so the filter is
-  # the same list the checker refuses `use` against.
-  let std = match load_std("std") {
-    Ok(s) -> s
-    Err(e) -> panic("std: " ++ std_load_error_text(e))
-  }
-  let j = builtins_json(std)
-  for internal in internal_std_modules() {
-    assert not str.contains(j, quote(internal))
-  }
-  # the modules that stayed are still there
-  assert str.contains(j, quote("std/map"))
-  assert str.contains(j, quote("std/str"))
+  io.with_fs_real(() => {
+    # std/hamt and std/pvec used to get a section each, and a reader who
+    # followed one got `use std/hamt` -- a compile error outside std. The
+    # published reference is the API a program may write, so the filter is
+    # the same list the checker refuses `use` against.
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
+    }
+    let j = builtins_json(std)
+    for internal in internal_std_modules() {
+      assert not str.contains(j, quote(internal))
+    }
+    # the modules that stayed are still there
+    assert str.contains(j, quote("std/map"))
+    assert str.contains(j, quote("std/str"))
+  })
 }
 
 test "the standard library reference carries what --builtins cannot" {
-  let std = match load_std("std") {
-    Ok(s) -> s
-    Err(e) -> panic("std: " ++ std_load_error_text(e))
-  }
-  let j = stdlib_json(std)
-  # the prelude's own names, unqualified
-  assert str.contains(j, quote("catch_fault"))
-  # the prelude traits and their methods, which live in no module at all
-  assert str.contains(j, quote("Iter"))
-  assert str.contains(j, quote("iter_start"))
-  # a std module's types and impls -- the two `--builtins` has no room for
-  assert str.contains(j, quote("Cursor"))
-  assert str.contains(j, quote("Ord[Cursor]"))
-  # every user-visible module documents itself
-  for sm in std.srcs {
-    let (mp, text, m) = sm
-    if list.contains(internal_std_modules(), mp) { continue }
-    assert str.contains(j, quote(mp))
-    if module_doc_of(doc_src_of(text), m) == None {
-      println("std module without a doc comment: " ++ mp)
-      assert false
+  io.with_fs_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
-  }
-  # and the representation modules stay out of this one too
-  for internal in internal_std_modules() {
-    assert not str.contains(j, quote(internal))
-  }
+    let j = stdlib_json(std)
+    # the prelude's own names, unqualified
+    assert str.contains(j, quote("catch_fault"))
+    # the prelude traits and their methods, which live in no module at all
+    assert str.contains(j, quote("Iter"))
+    assert str.contains(j, quote("iter_start"))
+    # a std module's types and impls -- the two `--builtins` has no room for
+    assert str.contains(j, quote("Cursor"))
+    assert str.contains(j, quote("Ord[Cursor]"))
+    # every user-visible module documents itself
+    for sm in std.srcs {
+      let (mp, text, m) = sm
+      if list.contains(internal_std_modules(), mp) { continue }
+      assert str.contains(j, quote(mp))
+      if module_doc_of(doc_src_of(text), m) == None {
+        println("std module without a doc comment: " ++ mp)
+        assert false
+      }
+    }
+    # and the representation modules stay out of this one too
+    for internal in internal_std_modules() {
+      assert not str.contains(j, quote(internal))
+    }
+  })
 }
 
 test "a documented first declaration is not also the module's doc" {

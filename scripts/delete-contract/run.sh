@@ -383,7 +383,7 @@ import sys
 
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
-old = '''pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !io =
+old = '''pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !Fs =
   if path == "" {
     Err(ForeignError {
       kind: "io.invalid_delete_path",
@@ -397,13 +397,13 @@ old = '''pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !io 
       cause: None
     })
   } else {
-    match catch_fault(() => io_delete(path)) {
+    match fs_delete(path) {
       Ok(gone) -> if gone { Ok(Deleted) } else { Ok(NotFound) }
       Err(e) -> Err(e)
     }
   }'''
-new = '''pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !io =
-  match catch_fault(() => io_delete(path)) {
+new = '''pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !Fs =
+  match fs_delete(path) {
     Ok(gone) -> if gone { Ok(Deleted) } else { Ok(NotFound) }
     Err(e) -> Err(e)
   }'''

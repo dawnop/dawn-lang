@@ -13,6 +13,7 @@
 use std/str
 use std/list
 use std/io
+use std/io.{Fs}
 use compiler_plan/toml.{TomlDoc, parse, render, set_string, remove, remove_table}
 use compiler_plan/manifestv.{
   validate, mcoord_parse, mcoord_show, ManifestV, SemV, semv_show, bad_subdir
@@ -35,7 +36,7 @@ fn render_plan_manifest(path: String, text: String, ds: List[diagnostic.Diag]) -
 }
 
 ## The added package's manifest, validated with rendered diagnostics.
-fn read_pkg(dir: String) -> Result[ManifestV, String] !io = {
+fn read_pkg(dir: String) -> Result[ManifestV, String] !Fs !io = {
   let path = dir ++ "/dawn.toml"
   let text = match io.read_file(path) {
     Ok(t) -> t
@@ -55,7 +56,7 @@ fn edit_url(
   spec: String,
   subdir: Option[String],
   as_name: Option[String]
-) -> Result[Edit, String] !io = {
+) -> Result[Edit, String] !Fs !io = {
   match subdir {
     Some(s) -> {
       if bad_subdir(s) {
@@ -120,7 +121,7 @@ fn edit_path(
   project_dir: String,
   spec: String,
   as_name: Option[String]
-) -> Result[Edit, String] !io = {
+) -> Result[Edit, String] !Fs !io = {
   let pkg_dir = if str.starts_with(spec, "/") { spec } else { project_dir ++ "/" ++ spec }
   let pm = match read_pkg(pkg_dir) {
     Ok(m) -> m
@@ -142,7 +143,7 @@ pub fn add_dependency(
   spec: String,
   subdir: Option[String],
   as_name: Option[String]
-) -> Result[String, String] !io = {
+) -> Result[String, String] !Fs !io = {
   let mf_path = project_dir ++ "/dawn.toml"
   let text = match io.read_file(mf_path) {
     Ok(t) -> t
@@ -196,7 +197,7 @@ pub fn add_dependency(
 }
 
 ## Flag parsing for `add`; Err carries the CLI error message.
-pub fn run_add(rest: List[String]) -> Result[String, String] !io = {
+pub fn run_add(rest: List[String]) -> Result[String, String] !Fs !io = {
   var spec: Option[String] = None
   var subdir: Option[String] = None
   var as_name: Option[String] = None

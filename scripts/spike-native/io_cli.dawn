@@ -17,29 +17,32 @@
 # The harness compares stdout, stderr and the exit code, which is exactly the
 # three surfaces these touch.
 use std/io
+use std/io.{Fs}
 use std/raw
 
 pub fn main() -> Unit !io = {
-  io.println("-- stderr is a channel, not a method handle --")
-  io.eprint("on stderr: ")
-  io.eprintln("no trailing space before this")
+  io.with_fs_real(() => {
+    io.println("-- stderr is a channel, not a method handle --")
+    io.eprint("on stderr: ")
+    io.eprintln("no trailing space before this")
 
-  io.println("-- existence and directories --")
-  # absolute paths, so the answers do not depend on where the harness was run
-  io.println("exists /          = " ++ to_string(io.exists("/")))
-  io.println("exists /nonexist  = " ++ to_string(io.exists("/nonexistent-zzz")))
-  io.println("is_dir /          = " ++ to_string(io.is_dir("/")))
-  io.println("is_dir /nonexist  = " ++ to_string(io.is_dir("/nonexistent-zzz")))
+    io.println("-- existence and directories --")
+    # absolute paths, so the answers do not depend on where the harness was run
+    io.println("exists /          = " ++ to_string(io.exists("/")))
+    io.println("exists /nonexist  = " ++ to_string(io.exists("/nonexistent-zzz")))
+    io.println("is_dir /          = " ++ to_string(io.is_dir("/")))
+    io.println("is_dir /nonexist  = " ++ to_string(io.is_dir("/nonexistent-zzz")))
 
-  io.println("-- mkdirs is idempotent --")
-  # a fixed path, and deliberately run twice: creating what already exists is
-  # not a failure, which is the half of the contract a first run cannot show
-  let d = "/tmp/dawn-spike-io-cli/a/b"
-  raw.mkdirs(d)
-  raw.mkdirs(d)
-  io.println("made and remade   = " ++ to_string(io.is_dir(d)))
+    io.println("-- mkdirs is idempotent --")
+    # a fixed path, and deliberately run twice: creating what already exists is
+    # not a failure, which is the half of the contract a first run cannot show
+    let d = "/tmp/dawn-spike-io-cli/a/b"
+    raw.mkdirs(d)
+    raw.mkdirs(d)
+    io.println("made and remade   = " ++ to_string(io.is_dir(d)))
 
-  io.println("-- exit ends it --")
-  io.exit(0)
-  io.println("unreachable")
+    io.println("-- exit ends it --")
+    io.exit(0)
+    io.println("unreachable")
+  })
 }

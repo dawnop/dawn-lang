@@ -16,6 +16,7 @@
 # told apart in words instead of both saying "bundled std is broken".
 
 use std/io
+use std/io.{Fs}
 use std/str
 use std/map
 use std/set
@@ -223,7 +224,7 @@ pub type StdLoadError = {
 
 ## A std source file: the directory first (repo development edits win), then
 ## the embedded copy `stdsrc.dawn` carries. The flag says which one answered.
-fn std_read_from(dir: String, name: String) -> Result[(String, Bool), String] !io =
+fn std_read_from(dir: String, name: String) -> Result[(String, Bool), String] !Fs !io =
   match io.read_file(dir ++ "/" ++ name) {
     Ok(t) -> Ok((t, true))
     Err(e) ->
@@ -233,7 +234,7 @@ fn std_read_from(dir: String, name: String) -> Result[(String, Bool), String] !i
       }
   }
 
-fn std_read(dir: String, name: String) -> Result[String, String] !io = {
+fn std_read(dir: String, name: String) -> Result[String, String] !Fs !io = {
   let (text, _) = std_read_from(dir, name)?
   Ok(text)
 }
@@ -246,7 +247,7 @@ fn std_read(dir: String, name: String) -> Result[String, String] !io = {
 ## reads one side twice can only ever agree. The absent case is a real answer
 ## rather than an error, because a std that predates the stamp, and the
 ## one-module stds tests assemble, both land there.
-fn dir_declared_version(dir: String) -> Option[String] !io =
+fn dir_declared_version(dir: String) -> Option[String] !Fs !io =
   match io.read_file(dir ++ "/VERSION") {
     Ok(t) -> Some(str.trim(t))
     Err(_) -> None
@@ -266,7 +267,7 @@ fn index_names(text: String) -> List[String] = {
 }
 
 ## Read modules.txt: one name per line, `#` comments, blanks skipped.
-pub fn read_index(dir: String) -> Result[List[String], String] !io = {
+pub fn read_index(dir: String) -> Result[List[String], String] !Fs !io = {
   let text = std_read(dir, "modules.txt")?
   Ok(index_names(text))
 }
@@ -350,7 +351,7 @@ pub fn std_load_error_text(e: StdLoadError) -> String !io = {
 }
 
 ## Load, check and comptime-evaluate the bundled std from a directory.
-pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !io = {
+pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !io = {
   # modules.txt decides the whole load, so whichever half answers for it is
   # the std being loaded, and that is what the diagnostics below name.
   let (idx_text, idx_from_dir) = match std_read_from(dir, "modules.txt") {
@@ -561,361 +562,387 @@ pub fn is_std_dir(std: StdCtx, dir: String) -> Bool !io =
 
 # ---- tests ----
 
-fn put(p: String, text: String) -> Unit !io =
+fn put(p: String, text: String) -> Unit !Fs !io =
   match io.write_file(p, text) {
     Ok(_) -> ()
     Err(e) -> panic("test setup: " ++ e.message)
   }
 
 test "the embedded std matches std/ on disk" {
-  # the staleness gate for the generated stdsrc.dawn: an edit under std/
-  # that forgot to regenerate fails here, in every `dawn test selfhost`
-  let names = match read_index("std") {
-    Ok(ns) -> ns
-    Err(e) -> panic("std index: " ++ e)
-  }
-  var files = ["modules.txt"]
-  for n in names { files = files ++ [n ++ ".dawn"] }
-  for f in files {
-    let disk = match io.read_file("std/" ++ f) {
-      Ok(t) -> t
-      Err(e) -> panic("std/" ++ f ++ ": " ++ e.message)
+  # The real disk, deliberately: the working tree's std/ is the object under
+  # assertion, so a table handler here would assert nothing.
+  io.with_fs_real(() => {
+    # the staleness gate for the generated stdsrc.dawn: an edit under std/
+    # that forgot to regenerate fails here, in every `dawn test selfhost`
+    let names = match read_index("std") {
+      Ok(ns) -> ns
+      Err(e) -> panic("std index: " ++ e)
     }
-    match stdsrc.source(f) {
-      Some(t) -> {
-        if t != disk {
-          println("stale embedded std: " ++ f ++ " (run python3 scripts/gen-stdsrc.py)")
+    var files = ["modules.txt"]
+    for n in names { files = files ++ [n ++ ".dawn"] }
+    for f in files {
+      let disk = match io.read_file("std/" ++ f) {
+        Ok(t) -> t
+        Err(e) -> panic("std/" ++ f ++ ": " ++ e.message)
+      }
+      match stdsrc.source(f) {
+        Some(t) -> {
+          if t != disk {
+            println("stale embedded std: " ++ f ++ " (run python3 scripts/gen-stdsrc.py)")
+          }
+          assert t == disk
         }
-        assert t == disk
-      }
-      None -> {
-        println("missing from embedded std: " ++ f ++ " (run python3 scripts/gen-stdsrc.py)")
-        assert false
+        None -> {
+          println("missing from embedded std: " ++ f ++ " (run python3 scripts/gen-stdsrc.py)")
+          assert false
+        }
       }
     }
-  }
+  })
 }
 
 test "the loader's id counter opens past every prelude id" {
-  # `load_std` used to open its counter at the literal 2, which is
-  # `ForeignError`'s ADT id, and it is the counter the production path
-  # actually reads. Nothing ever fired, for a reason that is not a
-  # guarantee: std/cursor is first in modules.txt and its first declaration
-  # is an `opaque type`, which claims no ADT id, so the opening value went to
-  # a type variable instead -- a separate id space where a collision is
-  # harmless. Reorder std, or give cursor a sum type, and the first minted ADT
-  # id would land on `ForeignError`'s entry and replace it. A map insert has no
-  # opinion about what was there, so the first symptom was several files away:
-  # `e.message` on a `catch_fault` result, reported as a field access on
-  # whatever the new ADT 2 happened to be.
-  #
-  # So this does not read the real std, whose declaration order is the very
-  # thing not to depend on. It supplies a one-module std whose first
-  # declaration is a plain sum type -- the case that does claim an id -- and
-  # asks what the loader did with the prelude's ADT table.
-  let root = "/tmp/dawn-selfhost-stdlib/idprobe"
-  let _ = io.mkdirs(root)
-  put(root ++ "/modules.txt", "idprobe\n")
-  put(root ++ "/idprobe.dawn", "pub type IdProbe = | IpA | IpB\n")
-  let probe = match load_std(root) {
-    Ok(sc) -> sc
-    Err(e) -> panic("probe std: " ++ std_load_error_text(e))
-  }
-  # the prelude ADTs came through unreplaced
-  assert adt_of(probe.adts, OPTION_ID).name == "Option"
-  assert adt_of(probe.adts, RESULT_ID).name == "Result"
-  assert adt_of(probe.adts, FOREIGN_ERROR_ID).name == "ForeignError"
-  # and the probe was minted an id of its own, past every prelude id
-  var probe_id = -1
-  for pr in map.entries(probe.adts) {
-    let (i, a) = pr
-    if a.name == "IdProbe" { probe_id = i }
-  }
-  assert probe_id >= first_minted_id()
+  io.with_fs_real(() => {
+    # `load_std` used to open its counter at the literal 2, which is
+    # `ForeignError`'s ADT id, and it is the counter the production path
+    # actually reads. Nothing ever fired, for a reason that is not a
+    # guarantee: std/cursor is first in modules.txt and its first declaration
+    # is an `opaque type`, which claims no ADT id, so the opening value went to
+    # a type variable instead -- a separate id space where a collision is
+    # harmless. Reorder std, or give cursor a sum type, and the first minted ADT
+    # id would land on `ForeignError`'s entry and replace it. A map insert has no
+    # opinion about what was there, so the first symptom was several files away:
+    # `e.message` on a `catch_fault` result, reported as a field access on
+    # whatever the new ADT 2 happened to be.
+    #
+    # So this does not read the real std, whose declaration order is the very
+    # thing not to depend on. It supplies a one-module std whose first
+    # declaration is a plain sum type -- the case that does claim an id -- and
+    # asks what the loader did with the prelude's ADT table.
+    let root = "/tmp/dawn-selfhost-stdlib/idprobe"
+    let _ = io.mkdirs(root)
+    put(root ++ "/modules.txt", "idprobe\n")
+    put(root ++ "/idprobe.dawn", "pub type IdProbe = | IpA | IpB\n")
+    let probe = match load_std(root) {
+      Ok(sc) -> sc
+      Err(e) -> panic("probe std: " ++ std_load_error_text(e))
+    }
+    # the prelude ADTs came through unreplaced
+    assert adt_of(probe.adts, OPTION_ID).name == "Option"
+    assert adt_of(probe.adts, RESULT_ID).name == "Result"
+    assert adt_of(probe.adts, FOREIGN_ERROR_ID).name == "ForeignError"
+    # and the probe was minted an id of its own, past every prelude id
+    var probe_id = -1
+    for pr in map.entries(probe.adts) {
+      let (i, a) = pr
+      if a.name == "IdProbe" { probe_id = i }
+    }
+    assert probe_id >= first_minted_id()
+  })
 }
 
 test "production comptime body tables contain only direct std functions" {
-  let std = match load_std("std") {
-    Ok(s) -> s
-    Err(e) -> panic("std: " ++ std_load_error_text(e))
-  }
+  io.with_fs_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
+    }
 
-  # The real bundle supplies many impl bodies (std/list alone supplies Iter,
-  # Eq, Hash, Ord and Show), so this is not a vacuous shape check. Bundled std
-  # has no source trait default today; default_of is still checked because the
-  # production table contract excludes both identities by the same rule.
-  var saw_bundled_impl = false
-  for entry in std.mods {
-    let (mod_path, _cx, tm, _ct) = entry
-    if mod_path == "std/list" {
-      for f in tm.fns {
-        match f.impl_of {
-          Some(_) -> { saw_bundled_impl = true }
-          None -> ()
+    # The real bundle supplies many impl bodies (std/list alone supplies Iter,
+    # Eq, Hash, Ord and Show), so this is not a vacuous shape check. Bundled std
+    # has no source trait default today; default_of is still checked because the
+    # production table contract excludes both identities by the same rule.
+    var saw_bundled_impl = false
+    for entry in std.mods {
+      let (mod_path, _cx, tm, _ct) = entry
+      if mod_path == "std/list" {
+        for f in tm.fns {
+          match f.impl_of {
+            Some(_) -> { saw_bundled_impl = true }
+            None -> ()
+          }
         }
       }
     }
-  }
-  assert saw_bundled_impl
+    assert saw_bundled_impl
 
-  for f in map.values(std.fn_decls) {
-    assert f.impl_of == None
-    assert f.default_of == None
-  }
-  for owner in map.keys(std.by_owner) {
-    let tbl = map.get(std.by_owner, owner).expect("loaded owner table")
-    for f in map.values(tbl) {
+    for f in map.values(std.fn_decls) {
       assert f.impl_of == None
       assert f.default_of == None
     }
-  }
+    for owner in map.keys(std.by_owner) {
+      let tbl = map.get(std.by_owner, owner).expect("loaded owner table")
+      for f in map.values(tbl) {
+        assert f.impl_of == None
+        assert f.default_of == None
+      }
+    }
+  })
 }
 
 test "the numeric parsers still have somewhere to land" {
-  # `lower` rewrites `parse_int(s)` into a direct call to std/fmt.atoi. Since
-  # v0.55.0 those three are not exported, so no call site names them and no
-  # export check sees them; the coupling is one table (`lower.parser_impl`) and
-  # this is the other end.
-  #
-  # What this adds, measured rather than assumed (a rename of `atod` inside
-  # std/fmt, tests and comments included, 2026-08-06): codegen already refuses
-  # a `CDirect` to a name it cannot find -- `panic: codegen: unknown fn
-  # std/fmt.atod` -- so the coupling is NOT silent, and the first claim written
-  # here, that it stayed green until a NoSuchMethod at run time, was wrong.
-  # What that panic depends on is somebody compiling a `parse_*` call, and
-  # today that is only true because the compiler happens to use all three
-  # (pkgfetch, lexer, interp). This test is what makes it true on purpose, and
-  # it names the two ends instead of printing a mangled symbol.
-  let std = match load_std("std") {
-    Ok(s) -> s
-    Err(e) -> panic("std: " ++ std_load_error_text(e))
-  }
-  let own = match map.get(std.by_owner, "std/fmt") {
-    Some(o) -> o
-    None -> panic("std/fmt is not a loaded module")
-  }
-  for b in ["parse_int", "parse_int_radix", "parse_float"] {
-    let target = match parser_impl(b) {
-      Some(f) -> f
-      None -> panic("lower has no std/fmt target for the builtin `" ++ b ++ "`")
+  io.with_fs_real(() => {
+    # `lower` rewrites `parse_int(s)` into a direct call to std/fmt.atoi. Since
+    # v0.55.0 those three are not exported, so no call site names them and no
+    # export check sees them; the coupling is one table (`lower.parser_impl`) and
+    # this is the other end.
+    #
+    # What this adds, measured rather than assumed (a rename of `atod` inside
+    # std/fmt, tests and comments included, 2026-08-06): codegen already refuses
+    # a `CDirect` to a name it cannot find -- `panic: codegen: unknown fn
+    # std/fmt.atod` -- so the coupling is NOT silent, and the first claim written
+    # here, that it stayed green until a NoSuchMethod at run time, was wrong.
+    # What that panic depends on is somebody compiling a `parse_*` call, and
+    # today that is only true because the compiler happens to use all three
+    # (pkgfetch, lexer, interp). This test is what makes it true on purpose, and
+    # it names the two ends instead of printing a mangled symbol.
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
-    assert map.has(own, target)
-  }
-  # and the builtins that must NOT be routed there
-  assert parser_impl("to_string") == None
-  assert parser_impl("atoi") == None
+    let own = match map.get(std.by_owner, "std/fmt") {
+      Some(o) -> o
+      None -> panic("std/fmt is not a loaded module")
+    }
+    for b in ["parse_int", "parse_int_radix", "parse_float"] {
+      let target = match parser_impl(b) {
+        Some(f) -> f
+        None -> panic("lower has no std/fmt target for the builtin `" ++ b ++ "`")
+      }
+      assert map.has(own, target)
+    }
+    # and the builtins that must NOT be routed there
+    assert parser_impl("to_string") == None
+    assert parser_impl("atoi") == None
+  })
 }
 
 test "float rendering and parsing fold through std/fmt, not the host" {
-  # The RP-12 gate's float line, after audits RP-01/RP-05 moved the answers
-  # into std: `to_string(Float)` lowers to std/fmt.dtoa and the parsers to
-  # fmt.atoi/atod, so a comptime fold interprets the program's own std Core.
-  # The expected strings below are spec §4.3's, written literally -- if the
-  # fold ever rode a host renderer or host grammar again, a JDK could change
-  # them out from under the spec and this test is what would say so.
-  let std = match load_std("std") {
-    Ok(s) -> s
-    Err(e) -> panic("std: " ++ std_load_error_text(e))
-  }
-  let src = "const A: String = comptime { to_string(0.1) }\n" ++
-    "const B: String = comptime { to_string(3.0e-7) }\n" ++
-    "const C: String = comptime { to_string(1.0e300) }\n" ++
-    "const D: String = comptime { to_string(-0.0) }\n" ++
-    "const E: String = comptime { to_string(0.0 / 0.0) }\n" ++
-    "const F: String = comptime { to_string(1.0 / 0.0) }\n" ++
-    "const G: String = comptime { to_string(9999999.0) }\n" ++
-    "const H: String = comptime { to_string(10000000.0) }\n" ++
-    "const P: Bool = comptime { parse_float(\"1.5f\") == None }\n" ++
-    "const Q: Bool = comptime { parse_float(\"Infinity\") == Some(1.0 / 0.0) }\n" ++
-    "const R: Bool = comptime { parse_int(\" 42 \") == Some(42) }\n" ++
-    "const S: Bool = comptime { parse_int(\"9223372036854775808\") == None }\n"
-  let (m, pdiags) = parser.parse_module(src)
-  assert len(pdiags) == 0
-  var cx = cx_new(None, None)
-  cx = Cx { ..cx, next_id: std.next_id, impl_table: std.impls }
-  let (cx1, tm) = check_module(cx, m, std.exports)
-  assert len(cx1.diags) == 0
-  let ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns,
-    std.std_names, cx1.adts, cx1.traits, cx1.impl_table, "m", ct_default())
-  if len(ct.diags) > 0 { println("FOLD DIAG: " ++ ct.diags[0].msg) }
-  assert len(ct.diags) == 0
-  assert map.get(ct.consts, "A") == Some(VStr("0.1"))
-  assert map.get(ct.consts, "B") == Some(VStr("3.0E-7"))
-  assert map.get(ct.consts, "C") == Some(VStr("1.0E300"))
-  assert map.get(ct.consts, "D") == Some(VStr("-0.0"))
-  assert map.get(ct.consts, "E") == Some(VStr("NaN"))
-  assert map.get(ct.consts, "F") == Some(VStr("Infinity"))
-  assert map.get(ct.consts, "G") == Some(VStr("9999999.0"))
-  assert map.get(ct.consts, "H") == Some(VStr("1.0E7"))
-  assert map.get(ct.consts, "P") == Some(VBool(true))
-  assert map.get(ct.consts, "Q") == Some(VBool(true))
-  assert map.get(ct.consts, "R") == Some(VBool(true))
-  assert map.get(ct.consts, "S") == Some(VBool(true))
+  io.with_fs_real(() => {
+    # The RP-12 gate's float line, after audits RP-01/RP-05 moved the answers
+    # into std: `to_string(Float)` lowers to std/fmt.dtoa and the parsers to
+    # fmt.atoi/atod, so a comptime fold interprets the program's own std Core.
+    # The expected strings below are spec §4.3's, written literally -- if the
+    # fold ever rode a host renderer or host grammar again, a JDK could change
+    # them out from under the spec and this test is what would say so.
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
+    }
+    let src = "const A: String = comptime { to_string(0.1) }\n" ++
+      "const B: String = comptime { to_string(3.0e-7) }\n" ++
+      "const C: String = comptime { to_string(1.0e300) }\n" ++
+      "const D: String = comptime { to_string(-0.0) }\n" ++
+      "const E: String = comptime { to_string(0.0 / 0.0) }\n" ++
+      "const F: String = comptime { to_string(1.0 / 0.0) }\n" ++
+      "const G: String = comptime { to_string(9999999.0) }\n" ++
+      "const H: String = comptime { to_string(10000000.0) }\n" ++
+      "const P: Bool = comptime { parse_float(\"1.5f\") == None }\n" ++
+      "const Q: Bool = comptime { parse_float(\"Infinity\") == Some(1.0 / 0.0) }\n" ++
+      "const R: Bool = comptime { parse_int(\" 42 \") == Some(42) }\n" ++
+      "const S: Bool = comptime { parse_int(\"9223372036854775808\") == None }\n"
+    let (m, pdiags) = parser.parse_module(src)
+    assert len(pdiags) == 0
+    var cx = cx_new(None, None)
+    cx = Cx { ..cx, next_id: std.next_id, impl_table: std.impls }
+    let (cx1, tm) = check_module(cx, m, std.exports)
+    assert len(cx1.diags) == 0
+    let ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns,
+      std.std_names, cx1.adts, cx1.traits, cx1.impl_table, "m", ct_default())
+    if len(ct.diags) > 0 { println("FOLD DIAG: " ++ ct.diags[0].msg) }
+    assert len(ct.diags) == 0
+    assert map.get(ct.consts, "A") == Some(VStr("0.1"))
+    assert map.get(ct.consts, "B") == Some(VStr("3.0E-7"))
+    assert map.get(ct.consts, "C") == Some(VStr("1.0E300"))
+    assert map.get(ct.consts, "D") == Some(VStr("-0.0"))
+    assert map.get(ct.consts, "E") == Some(VStr("NaN"))
+    assert map.get(ct.consts, "F") == Some(VStr("Infinity"))
+    assert map.get(ct.consts, "G") == Some(VStr("9999999.0"))
+    assert map.get(ct.consts, "H") == Some(VStr("1.0E7"))
+    assert map.get(ct.consts, "P") == Some(VBool(true))
+    assert map.get(ct.consts, "Q") == Some(VBool(true))
+    assert map.get(ct.consts, "R") == Some(VBool(true))
+    assert map.get(ct.consts, "S") == Some(VBool(true))
+  })
 }
 
 test "the bundled std loads, checks and evaluates" {
-  match load_std("std") {
-    Ok(std) -> {
-      assert map.has(std.exports, "std/str")
-      assert map.has(std.exports, "std/cursor")
-      # the implicit surface is exactly the prelude names
-      assert map.has(std.std_fns, "println")
-      assert map.has(std.std_fns, "map")
-      assert not map.has(std.std_fns, "trim")
-      # ... harvested from their owning modules. `fold` is the name two
-      # modules export: bare `fold` must stay std/list's (three parameters,
-      # the subject a List), not map.fold, which the harvest would otherwise
-      # take because std/map is checked later
-      match map.get(std.std_fns, "fold") {
-        Some(s) -> {
-          assert s.owner == Some("std/list")
-          match s.param_tys[0] {
-            TyList(_) -> ()
-            _ -> { assert false }
+  io.with_fs_real(() => {
+    match load_std("std") {
+      Ok(std) -> {
+        assert map.has(std.exports, "std/str")
+        assert map.has(std.exports, "std/cursor")
+        # the implicit surface is exactly the prelude names
+        assert map.has(std.std_fns, "println")
+        assert map.has(std.std_fns, "map")
+        assert not map.has(std.std_fns, "trim")
+        # ... harvested from their owning modules. `fold` is the name two
+        # modules export: bare `fold` must stay std/list's (three parameters,
+        # the subject a List), not map.fold, which the harvest would otherwise
+        # take because std/map is checked later
+        match map.get(std.std_fns, "fold") {
+          Some(s) -> {
+            assert s.owner == Some("std/list")
+            match s.param_tys[0] {
+              TyList(_) -> ()
+              _ -> { assert false }
+            }
           }
+          None -> { assert false }
         }
-        None -> { assert false }
+        # everything else moved behind its module
+        assert map.get(std.moved, "map_insert") == Some("use std/map, then map.insert(...)")
+        # the hint names the *public* spelling, which for length is not the
+        # primitive's own name any more (audit RD-06)
+        assert map.get(std.moved, "map_size") == Some("use std/map, then map.len(...)")
+        assert map.get(std.moved, "set_size") == Some("use std/set, then set.len(...)")
+        assert map.get(std.moved, "trim") == Some("use std/str, then str.trim(...)")
+        assert set.has(std.std_names, "trim")
       }
-      # everything else moved behind its module
-      assert map.get(std.moved, "map_insert") == Some("use std/map, then map.insert(...)")
-      # the hint names the *public* spelling, which for length is not the
-      # primitive's own name any more (audit RD-06)
-      assert map.get(std.moved, "map_size") == Some("use std/map, then map.len(...)")
-      assert map.get(std.moved, "set_size") == Some("use std/set, then set.len(...)")
-      assert map.get(std.moved, "trim") == Some("use std/str, then str.trim(...)")
-      assert set.has(std.std_names, "trim")
+      Err(e) -> {
+        println("STD LOAD FAILED: " ++ std_load_error_text(e))
+        assert false
+      }
     }
-    Err(e) -> {
-      println("STD LOAD FAILED: " ++ std_load_error_text(e))
-      assert false
-    }
-  }
+  })
 }
 
 test "std/ stamps itself with this toolchain's version" {
-  # The stamp is only worth reading if it is kept true, and nothing about
-  # editing `version.dawn` touches `std/VERSION`. This is what makes a release
-  # that bumped one and not the other fail here instead of shipping a
-  # toolchain that refuses its own std.
-  let stamped = match io.read_file("std/VERSION") {
-    Ok(t) -> str.trim(t)
-    Err(e) -> panic("std/VERSION: " ++ e.message)
-  }
-  if stamped != VERSION {
-    println("std/VERSION says " ++ stamped ++ " but version.dawn says " ++ VERSION)
-  }
-  assert stamped == VERSION
+  # The real disk, deliberately: the file in the working tree is the object
+  # under assertion.
+  io.with_fs_real(() => {
+    # The stamp is only worth reading if it is kept true, and nothing about
+    # editing `version.dawn` touches `std/VERSION`. This is what makes a release
+    # that bumped one and not the other fail here instead of shipping a
+    # toolchain that refuses its own std.
+    let stamped = match io.read_file("std/VERSION") {
+      Ok(t) -> str.trim(t)
+      Err(e) -> panic("std/VERSION: " ++ e.message)
+    }
+    if stamped != VERSION {
+      println("std/VERSION says " ++ stamped ++ " but version.dawn says " ++ VERSION)
+    }
+    assert stamped == VERSION
+  })
 }
 
 test "a std directory from another release is refused by version, not by symptom" {
-  # The reachability half of the diagnostic. Before this, a std out of step
-  # with the compiler surfaced wherever it first failed to type-check, and the
-  # message that came out named a std module and a type error: true, and no
-  # help at all in working out that the two halves came from different
-  # releases.
-  let root = "/tmp/dawn-selfhost-stdlib/skew"
-  let _ = io.mkdirs(root)
-  put(root ++ "/VERSION", "0.0.1-not-this-one\n")
-  put(root ++ "/modules.txt", "skew\n")
-  put(root ++ "/skew.dawn", "pub fn skew() -> Int = 1\n")
-  match load_std(root) {
-    Ok(_) -> {
-      println("a std stamped 0.0.1-not-this-one loaded into a " ++ VERSION ++ " toolchain")
-      assert false
+  io.with_fs_real(() => {
+    # The reachability half of the diagnostic. Before this, a std out of step
+    # with the compiler surfaced wherever it first failed to type-check, and the
+    # message that came out named a std module and a type error: true, and no
+    # help at all in working out that the two halves came from different
+    # releases.
+    let root = "/tmp/dawn-selfhost-stdlib/skew"
+    let _ = io.mkdirs(root)
+    put(root ++ "/VERSION", "0.0.1-not-this-one\n")
+    put(root ++ "/modules.txt", "skew\n")
+    put(root ++ "/skew.dawn", "pub fn skew() -> Int = 1\n")
+    match load_std(root) {
+      Ok(_) -> {
+        println("a std stamped 0.0.1-not-this-one loaded into a " ++ VERSION ++ " toolchain")
+        assert false
+      }
+      Err(e) -> {
+        # not the compiler's fault, and it says so rather than panicking
+        assert not std_load_is_bug(e)
+        let text = std_load_error_text(e)
+        assert str.contains(text, "std version mismatch")
+        # both halves are named, which is the whole point: one version alone
+        # cannot tell you which of the two to change
+        assert str.contains(text, "0.0.1-not-this-one")
+        assert str.contains(text, VERSION)
+        assert str.contains(text, root)
+        # and the sentence that says what to do about it
+        assert str.contains(text, "Use the " ++ VERSION ++ " std")
+      }
     }
-    Err(e) -> {
-      # not the compiler's fault, and it says so rather than panicking
-      assert not std_load_is_bug(e)
-      let text = std_load_error_text(e)
-      assert str.contains(text, "std version mismatch")
-      # both halves are named, which is the whole point: one version alone
-      # cannot tell you which of the two to change
-      assert str.contains(text, "0.0.1-not-this-one")
-      assert str.contains(text, VERSION)
-      assert str.contains(text, root)
-      # and the sentence that says what to do about it
-      assert str.contains(text, "Use the " ++ VERSION ++ " std")
-    }
-  }
+  })
 }
 
 test "an unstamped std directory that will not load is not called a compiler bug" {
-  # The other side of the same rule. A directory with no VERSION file is every
-  # std published before the stamp existed, so it must stay loadable and its
-  # failures must still point at the directory. Only the copy compiled into
-  # this binary earns "this is a bug in dawn".
-  let root = "/tmp/dawn-selfhost-stdlib/unstamped"
-  let _ = io.mkdirs(root)
-  put(root ++ "/modules.txt", "broken\n")
-  put(root ++ "/broken.dawn", "pub fn broken() -> Int = \"not an Int\"\n")
-  match load_std(root) {
-    Ok(_) -> {
-      println("a std whose only module does not check loaded anyway")
-      assert false
+  io.with_fs_real(() => {
+    # The other side of the same rule. A directory with no VERSION file is every
+    # std published before the stamp existed, so it must stay loadable and its
+    # failures must still point at the directory. Only the copy compiled into
+    # this binary earns "this is a bug in dawn".
+    let root = "/tmp/dawn-selfhost-stdlib/unstamped"
+    let _ = io.mkdirs(root)
+    put(root ++ "/modules.txt", "broken\n")
+    put(root ++ "/broken.dawn", "pub fn broken() -> Int = \"not an Int\"\n")
+    match load_std(root) {
+      Ok(_) -> {
+        println("a std whose only module does not check loaded anyway")
+        assert false
+      }
+      Err(e) -> {
+        assert not std_load_is_bug(e)
+        let text = std_load_error_text(e)
+        # the failure it actually hit, not a version claim it cannot make
+        assert str.contains(text, "does not check")
+        assert not str.contains(text, "std version mismatch")
+        # the directory is named, and so is the reason there is no version to
+        # compare against
+        assert str.contains(text, root)
+        assert str.contains(text, "no VERSION stamp")
+        assert not str.contains(text, "bug in dawn")
+      }
     }
-    Err(e) -> {
-      assert not std_load_is_bug(e)
-      let text = std_load_error_text(e)
-      # the failure it actually hit, not a version claim it cannot make
-      assert str.contains(text, "does not check")
-      assert not str.contains(text, "std version mismatch")
-      # the directory is named, and so is the reason there is no version to
-      # compare against
-      assert str.contains(text, root)
-      assert str.contains(text, "no VERSION stamp")
-      assert not str.contains(text, "bug in dawn")
-    }
-  }
+  })
 }
 
 test "a std directory with no modules.txt falls back to the embedded copy" {
-  # `--std` pointed somewhere that has nothing to do with std is not a skew:
-  # the embedded index answers, so the load is the embedded std's and must
-  # succeed. This is the negative control for the version check, an absent
-  # directory must not be reported as a version mismatch.
-  let root = "/tmp/dawn-selfhost-stdlib/absent"
-  let _ = io.mkdirs(root)
-  match load_std(root ++ "/nothing-here") {
-    Ok(std) -> { assert map.has(std.exports, "std/str") }
-    Err(e) -> {
-      println("embedded fallback failed: " ++ std_load_error_text(e))
-      assert false
+  io.with_fs_real(() => {
+    # `--std` pointed somewhere that has nothing to do with std is not a skew:
+    # the embedded index answers, so the load is the embedded std's and must
+    # succeed. This is the negative control for the version check, an absent
+    # directory must not be reported as a version mismatch.
+    let root = "/tmp/dawn-selfhost-stdlib/absent"
+    let _ = io.mkdirs(root)
+    match load_std(root ++ "/nothing-here") {
+      Ok(std) -> { assert map.has(std.exports, "std/str") }
+      Err(e) -> {
+        println("embedded fallback failed: " ++ std_load_error_text(e))
+        assert false
+      }
     }
-  }
+  })
 }
 
 test "a std module's file is only known when a directory supplied it" {
-  # `std_file_of` is what lets a reader jump into std, and the answer it must
-  # not invent is the one for a module the embedded copy filled in: there is no
-  # file, and naming `<dir>/<name>.dawn` anyway would point at whatever happens
-  # to sit there.
-  let std = match load_std("std") {
-    Ok(s) -> s
-    Err(e) -> panic("std: " ++ std_load_error_text(e))
-  }
-  let f = match std_file_of(std, "std/list") {
-    Some(p) -> p
-    None -> panic("std/list came off the directory and has a file")
-  }
-  # the same one fact read in both directions, not two records that could drift
-  assert std_module_of(std, f) == Some("std/list")
-  # absolute, because that is the spelling `dir_modules` is keyed by and the
-  # spelling a definition reply has to survive being resolved from any cwd
-  assert str.starts_with(f, "/")
-  assert str.ends_with(f, "/std/list.dawn")
-  # a module path no std ever had
-  let absent: Option[String] = None
-  assert std_file_of(std, "std/not-a-module") == absent
-
-  # and the embedded half: every module loaded, none of them has a file
-  let root = "/tmp/dawn-selfhost-stdlib/absent"
-  let _ = io.mkdirs(root)
-  match load_std(root ++ "/nothing-here") {
-    Ok(emb) -> {
-      assert map.has(emb.exports, "std/list")
-      assert std_file_of(emb, "std/list") == absent
-      assert emb.dir == absent
+  io.with_fs_real(() => {
+    # `std_file_of` is what lets a reader jump into std, and the answer it must
+    # not invent is the one for a module the embedded copy filled in: there is no
+    # file, and naming `<dir>/<name>.dawn` anyway would point at whatever happens
+    # to sit there.
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
-    Err(e) -> panic("embedded fallback failed: " ++ std_load_error_text(e))
-  }
+    let f = match std_file_of(std, "std/list") {
+      Some(p) -> p
+      None -> panic("std/list came off the directory and has a file")
+    }
+    # the same one fact read in both directions, not two records that could drift
+    assert std_module_of(std, f) == Some("std/list")
+    # absolute, because that is the spelling `dir_modules` is keyed by and the
+    # spelling a definition reply has to survive being resolved from any cwd
+    assert str.starts_with(f, "/")
+    assert str.ends_with(f, "/std/list.dawn")
+    # a module path no std ever had
+    let absent: Option[String] = None
+    assert std_file_of(std, "std/not-a-module") == absent
+
+    # and the embedded half: every module loaded, none of them has a file
+    let root = "/tmp/dawn-selfhost-stdlib/absent"
+    let _ = io.mkdirs(root)
+    match load_std(root ++ "/nothing-here") {
+      Ok(emb) -> {
+        assert map.has(emb.exports, "std/list")
+        assert std_file_of(emb, "std/list") == absent
+        assert emb.dir == absent
+      }
+      Err(e) -> panic("embedded fallback failed: " ++ std_load_error_text(e))
+    }
+  })
 }

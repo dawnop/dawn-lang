@@ -28,23 +28,23 @@ fn round_trip(text: String) -> String =
     Err(e) -> "ERR: " ++ error_text(e)
   }
 
-pub fn main() -> Unit !io =
-  match get(args(), 0) {
-    None -> println("invalid")
-    Some(path) ->
-      if path == "--suite" {
-        let dir = unwrap_or(get(args(), 1), "suite/test_parsing")
-        let t = suite.run(dir)
-        # Dawn has no exit builtin, so a nonzero exit status is a panic. The
-        # summary is already printed, so this only has to be non-Ok.
-        if t.fail > 0 { panic("JSONTestSuite: " ++ to_string(t.fail) ++ " mandatory case(s) failed") } else { () }
-      } else {
-        match io.read_file(path) {
-          Ok(text) -> println(check(text))
-          Err(_) -> println("invalid")
+pub fn main() -> Unit !io = io.with_fs_real(() =>
+    match get(args(), 0) {
+      None -> println("invalid")
+      Some(path) ->
+        if path == "--suite" {
+          let dir = unwrap_or(get(args(), 1), "suite/test_parsing")
+          let t = suite.run(dir)
+          # Dawn has no exit builtin, so a nonzero exit status is a panic. The
+          # summary is already printed, so this only has to be non-Ok.
+          if t.fail > 0 { panic("JSONTestSuite: " ++ to_string(t.fail) ++ " mandatory case(s) failed") } else { () }
+        } else {
+          match io.read_file(path) {
+            Ok(text) -> println(check(text))
+            Err(_) -> println("invalid")
+          }
         }
-      }
-  }
+    })
 
 test "parses scalars, arrays, and objects" {
   assert check("123") == "valid"

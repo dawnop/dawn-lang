@@ -200,10 +200,10 @@ expect_inject() { # label, expected-result, expected-content, out, names-staging
 }
 
 inject_helper='## Injected by scripts/atomic-write-contract.
-fn inject_fault(step: String) -> Result[Unit, ForeignError] !io =
+fn inject_fault(step: String) -> Result[Unit, ForeignError] !Fs =
   Err(ForeignError { kind: "inject." ++ step, message: "injected", cause: None })
 
-fn inject_bytes_fault(step: String) -> Result[Bytes, ForeignError] !io =
+fn inject_bytes_fault(step: String) -> Result[Bytes, ForeignError] !Fs =
   Err(ForeignError { kind: "inject." ++ step, message: "injected", cause: None })'
 
 # 1. create -- a real host failure: the directory takes no new entries. Nothing
@@ -383,7 +383,7 @@ patch_std "$work/std-m2" "mutant fixed-temp-name" \
   '    match temp_file(parent_dir(path), ".dawn-atomic-") {' \
   '    match fixed_temp(parent_dir(path)) {'
 append_std "$work/std-m2" '## Injected by scripts/atomic-write-contract.
-fn fixed_temp(dir: String) -> Result[String, ForeignError] !io = Ok(dir ++ "/.dawn-atomic.tmp")'
+fn fixed_temp(dir: String) -> Result[String, ForeignError] !Fs = Ok(dir ++ "/.dawn-atomic.tmp")'
 mutant_run m2 "$work/std-m2"
 expect_red "fixed staging name" "$work/mutant-m2.out" 'squat content = new'
 
@@ -414,7 +414,7 @@ patch_std "$work/std-m4" "mutant delete-before-rename" \
   '                match rename(tmp, path) {' \
   '                match rename_after_delete(tmp, path) {'
 append_std "$work/std-m4" '## Injected by scripts/atomic-write-contract.
-fn rename_after_delete(tmp: String, path: String) -> Result[Unit, ForeignError] !io = {
+fn rename_after_delete(tmp: String, path: String) -> Result[Unit, ForeignError] !Fs = {
   let _ = delete(path)
   rename(tmp, path)
 }'
@@ -432,11 +432,11 @@ expect_red "followed symlink" "$work/mutant-m5.out" 'symlink still link = true'
 # 6. leave the staging file behind on failure.
 fork_std "$work/std-m6"
 patch_std "$work/std-m6" "mutant no-cleanup" \
-  'fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !io = {
+  'fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !Fs = {
   let _ = delete(tmp)
   Err(e)
 }' \
-  'fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !io = {
+  'fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !Fs = {
   let _ = tmp
   Err(e)
 }'

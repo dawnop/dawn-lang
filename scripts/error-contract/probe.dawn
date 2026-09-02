@@ -22,6 +22,7 @@
 # class: its name cannot drift with the host JDK, and a Dawn panic is the one
 # foreign failure every program can raise without `use java`.
 use std/io
+use std/io.{Fs}
 use std/str
 use std/bytes
 
@@ -66,7 +67,7 @@ fn a_string_as_object() -> Object !io = {
 ## A file holding `c0 af`, which is not UTF-8. Written through `write_bytes`
 ## because `write_file` takes a String and a String cannot hold those two bytes
 ## -- which is the same reason `read_file` may refuse to hand one back.
-fn malformed_file() -> String !io = {
+fn malformed_file() -> String !Fs !io = {
   let dir = match io.temp_dir("", "dawn-error-contract-") {
     Ok(d) -> d
     Err(e) -> panic("no temporary directory: " ++ e.message)
@@ -82,111 +83,113 @@ fn malformed_file() -> String !io = {
 }
 
 pub fn main() -> Unit !io = {
-  let p = taken(boom)
-  let n = taken(not_a_number)
-  let f = match catch_fault(not_a_number) {
-    Ok(_) -> panic("parseLong accepted `nope`")
-    Err(e) -> e
-  }
-  var bad = 0
-  bad = bad + check("a Dawn panic's kind is the runtime class's binary name",
-    p.kind, "dawn.rt.PanicError")
-  bad = bad + check("a Dawn panic's message is what panic was given", p.message, "boom")
-  bad = bad + check("a Dawn panic has no cause", to_string(p.cause), "None")
-  bad = bad + check("a JDK exception's kind is its binary name",
-    n.kind, "java.lang.NumberFormatException")
-  # the distinction the whole field exists for: `toString()` would have put
-  # the message here behind a colon
-  bad = bad + check_true("the kind is a name and not a rendering",
-    not str.contains(n.kind, ":"))
-  bad = bad + check_true("the message is the exception's own",
-    str.contains(n.message, "nope"))
-  # the fault barrier fills the same fields the same way -- the two differ in
-  # what they catch, not in what they report
-  bad = bad + check("both barriers report the same kind", f.kind, n.kind)
-  bad = bad + check("both barriers report the same message", f.message, n.message)
+  io.with_fs_real(() => {
+    let p = taken(boom)
+    let n = taken(not_a_number)
+    let f = match catch_fault(not_a_number) {
+      Ok(_) -> panic("parseLong accepted `nope`")
+      Err(e) -> e
+    }
+    var bad = 0
+    bad = bad + check("a Dawn panic's kind is the runtime class's binary name",
+      p.kind, "dawn.rt.PanicError")
+    bad = bad + check("a Dawn panic's message is what panic was given", p.message, "boom")
+    bad = bad + check("a Dawn panic has no cause", to_string(p.cause), "None")
+    bad = bad + check("a JDK exception's kind is its binary name",
+      n.kind, "java.lang.NumberFormatException")
+    # the distinction the whole field exists for: `toString()` would have put
+    # the message here behind a colon
+    bad = bad + check_true("the kind is a name and not a rendering",
+      not str.contains(n.kind, ":"))
+    bad = bad + check_true("the message is the exception's own",
+      str.contains(n.message, "nope"))
+    # the fault barrier fills the same fields the same way -- the two differ in
+    # what they catch, not in what they report
+    bad = bad + check("both barriers report the same kind", f.kind, n.kind)
+    bad = bad + check("both barriers report the same message", f.message, n.message)
 
-  # ---- step B: the reclaim whose failure is a value -----------------------
-  #
-  # `cast` used to be declared pure and leave by throwing (design doc 一.3,
-  # LANG-02). It hands the failure back instead, and answers two questions on
-  # this backend: a hit is `Ok` with the value intact, and a miss is `Err`
-  # under the JVM's own name for it.
-  let o = a_string_as_object()
-  let hit: Result[String, ForeignError] = cast(o)
-  bad = bad + check("a cast that hits carries the value through",
-    match hit {
-      Ok(s) -> s
-      Err(e) -> "Err(" ++ e.kind ++ ")"
-    }, "hello")
-  let miss: Result[Bytes, ForeignError] = cast(o)
-  let m = match miss {
-    Ok(_) -> panic("cast accepted a String as Bytes")
-    Err(e) -> e
-  }
-  bad = bad + check("a cast that misses names the JVM's own failure class",
-    m.kind, "java.lang.ClassCastException")
-  # the same distinction the barriers are checked for: a name, not a rendering
-  bad = bad + check_true("the kind is a name and not a rendering",
-    not str.contains(m.kind, ":"))
-  bad = bad + check("nothing sits under a failed cast", to_string(m.cause), "None")
-  # Two lines here used to show that the transitional spelling and this one
-  # were one reclaim. One spelling is left, and the budget goes to the half of
-  # the payload nothing was asking about: `message` names both classes -- what
-  # the object is and what it could not become. That is the JVM's own wording
-  # for a failed `Class.cast`, and asserting it is how "read off a real
-  # exception" is told apart from "a string this compiler made up", which is
-  # the same distinction the `kind` lines above draw one field over.
-  bad = bad + check_true("the message names the class the object is",
-    str.contains(m.message, "java.lang.String"))
-  bad = bad + check_true("the message names the class it could not become",
-    str.contains(m.message, "[B"))
+    # ---- step B: the reclaim whose failure is a value -----------------------
+    #
+    # `cast` used to be declared pure and leave by throwing (design doc 一.3,
+    # LANG-02). It hands the failure back instead, and answers two questions on
+    # this backend: a hit is `Ok` with the value intact, and a miss is `Err`
+    # under the JVM's own name for it.
+    let o = a_string_as_object()
+    let hit: Result[String, ForeignError] = cast(o)
+    bad = bad + check("a cast that hits carries the value through",
+      match hit {
+        Ok(s) -> s
+        Err(e) -> "Err(" ++ e.kind ++ ")"
+      }, "hello")
+    let miss: Result[Bytes, ForeignError] = cast(o)
+    let m = match miss {
+      Ok(_) -> panic("cast accepted a String as Bytes")
+      Err(e) -> e
+    }
+    bad = bad + check("a cast that misses names the JVM's own failure class",
+      m.kind, "java.lang.ClassCastException")
+    # the same distinction the barriers are checked for: a name, not a rendering
+    bad = bad + check_true("the kind is a name and not a rendering",
+      not str.contains(m.kind, ":"))
+    bad = bad + check("nothing sits under a failed cast", to_string(m.cause), "None")
+    # Two lines here used to show that the transitional spelling and this one
+    # were one reclaim. One spelling is left, and the budget goes to the half of
+    # the payload nothing was asking about: `message` names both classes -- what
+    # the object is and what it could not become. That is the JVM's own wording
+    # for a failed `Class.cast`, and asserting it is how "read off a real
+    # exception" is told apart from "a string this compiler made up", which is
+    # the same distinction the `kind` lines above draw one field over.
+    bad = bad + check_true("the message names the class the object is",
+      str.contains(m.message, "java.lang.String"))
+    bad = bad + check_true("the message names the class it could not become",
+      str.contains(m.message, "[B"))
 
-  # ---- the fault an io *reader* raises on input that is not text ---------
-  #
-  # `read_file` decodes with REPORT (#113), so a file that is not UTF-8 is a
-  # failed read rather than a string full of U+FFFD. That failure class is
-  # a JDK one and it belongs here for the reason every other name does: the
-  # differential corpus (scripts/spike-native/io_utf8.dawn) can only ask that
-  # the fault barrier takes it, because the C runtime calls the same failure
-  # `fault` and the two texts are not meant to agree.
-  let mal = match io.read_file(malformed_file()) {
-    Ok(_) -> panic("read_file accepted bytes that are not UTF-8")
-    Err(e) -> e
-  }
-  bad = bad + check("a malformed read names the JDK's decoder failure",
-    mal.kind, "java.nio.charset.MalformedInputException")
-  bad = bad + check_true("the kind is a name and not a rendering",
-    not str.contains(mal.kind, ":"))
+    # ---- the fault an io *reader* raises on input that is not text ---------
+    #
+    # `read_file` decodes with REPORT (#113), so a file that is not UTF-8 is a
+    # failed read rather than a string full of U+FFFD. That failure class is
+    # a JDK one and it belongs here for the reason every other name does: the
+    # differential corpus (scripts/spike-native/io_utf8.dawn) can only ask that
+    # the fault barrier takes it, because the C runtime calls the same failure
+    # `fault` and the two texts are not meant to agree.
+    let mal = match io.read_file(malformed_file()) {
+      Ok(_) -> panic("read_file accepted bytes that are not UTF-8")
+      Err(e) -> e
+    }
+    bad = bad + check("a malformed read names the JDK's decoder failure",
+      mal.kind, "java.nio.charset.MalformedInputException")
+    bad = bad + check_true("the kind is a name and not a rendering",
+      not str.contains(mal.kind, ":"))
 
-  # ---- bracket: a release ran, and it changed nothing --------------------
-  #
-  # `bracket` is the barrier family's third member and the only one that
-  # reports nothing -- it runs a release and gets out of the way. So what it
-  # owes this file is the absence of a difference: the `kind` and `message`
-  # that reach the catch have to be the same *text* a bare `catch_fault` gets,
-  # not merely a name of the same shape. The differential corpus cannot ask
-  # that, because it may not print either field.
-  #
-  # The release is observed rather than assumed, through a list it appends to.
-  # An assertion that the failure came out unchanged is worth nothing if the
-  # release never ran: the two would then agree because bracket did nothing at
-  # all.
-  let released = ArrayList.new()
-  let crossed = match catch_fault(() =>
-    bracket("a resource", (r: String) => {
-      released.add("released " ++ r)
-      ()
-    }, (_r: String) => not_a_number())) {
-    Ok(_) -> panic("parseLong accepted `nope`")
-    Err(e) -> e
-  }
-  bad = bad + check("the release ran, exactly once",
-    to_string(released.size()), "1")
-  bad = bad + check("a fault that crossed a bracket keeps its kind",
-    crossed.kind, n.kind)
-  bad = bad + check("a fault that crossed a bracket keeps its message",
-    crossed.message, n.message)
+    # ---- bracket: a release ran, and it changed nothing --------------------
+    #
+    # `bracket` is the barrier family's third member and the only one that
+    # reports nothing -- it runs a release and gets out of the way. So what it
+    # owes this file is the absence of a difference: the `kind` and `message`
+    # that reach the catch have to be the same *text* a bare `catch_fault` gets,
+    # not merely a name of the same shape. The differential corpus cannot ask
+    # that, because it may not print either field.
+    #
+    # The release is observed rather than assumed, through a list it appends to.
+    # An assertion that the failure came out unchanged is worth nothing if the
+    # release never ran: the two would then agree because bracket did nothing at
+    # all.
+    let released = ArrayList.new()
+    let crossed = match catch_fault(() =>
+        bracket("a resource", (r: String) => {
+          released.add("released " ++ r)
+          ()
+        }, (_r: String) => not_a_number())) {
+          Ok(_) -> panic("parseLong accepted `nope`")
+          Err(e) -> e
+        }
+    bad = bad + check("the release ran, exactly once",
+      to_string(released.size()), "1")
+    bad = bad + check("a fault that crossed a bracket keeps its kind",
+      crossed.kind, n.kind)
+    bad = bad + check("a fault that crossed a bracket keeps its message",
+      crossed.message, n.message)
 
-  println("mismatches " ++ to_string(bad))
+    println("mismatches " ++ to_string(bad))
+  })
 }

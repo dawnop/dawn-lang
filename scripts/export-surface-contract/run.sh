@@ -485,13 +485,19 @@ run_mutant() {
       mutant_drops "$1" reject_assoc_trait 'projection `Item` trait' ;;
     reject-all-effects)
       # the witness is in the tree since std declared its first effect:
-      # the `pub effect Fs` in std/io.dawn sits on public operations and on
-      # `with_fs_real`'s public signature, so a pass that leaks every effect
-      # makes the bundled std itself unloadable, before `accepted.dawn` and
-      # its `pub effect Ask` are ever reached
+      # the `pub effect Fs` in std/io.dawn sits on public operations, on
+      # `with_fs_real`'s public signature and, since the file functions
+      # moved onto it, on every `pub fn ... !Fs` row of io, so a pass that
+      # leaks every effect makes the bundled std itself unloadable, before
+      # `accepted.dawn` and its `pub effect Ask` are ever reached. The
+      # first row the checker reaches is `is_dir`, the first public file
+      # function in source order, and it is named so that the std breaking
+      # for some other reason cannot pass as this mutant
       grep -q '^pub effect Fs' "$root/std/io.dawn" \
         || fail "$1: the witness moved; std/io.dawn no longer declares Fs, retarget this mutant"
-      mutant_breaks_std "$1" 'public effect `Fs` operation `fs_is_dir` exposes private effect `Fs`' ;;
+      grep -q '^pub fn is_dir(.*!Fs' "$root/std/io.dawn" \
+        || fail "$1: the witness moved; io.is_dir no longer carries !Fs, retarget this mutant"
+      mutant_breaks_std "$1" 'public function `is_dir` exposes private effect `Fs`' ;;
     pass-all-effects)
       mutant_drops "$1" reject_private_effect 'exposes private effect `Hidden`' ;;
     skip-impl-constraints)

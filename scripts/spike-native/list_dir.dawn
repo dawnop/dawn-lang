@@ -18,31 +18,34 @@
 # U+1F600 first. An unsorted readdir walk could answer either by luck once,
 # but not the whole list.
 use std/io
+use std/io.{Fs}
 use std/raw
 use std/bytes
 
 pub fn main() -> Unit !io = {
-  let dir = raw.temp_dir("", "dawn-list-dir-")
-  let names = ["b", from_code_points(['\u{1F600}']), "a", from_code_points(['\u{FFFD}']), "c"]
-  for n in names {
-    raw.write_bytes(dir ++ "/" ++ n, bytes.utf8("x"))
-  }
-  raw.mkdirs(dir ++ "/sub")
-
-  io.println("-- code-point order: ascii, then U+FFFD, then U+1F600 --")
-  match io.list_dir(dir) {
-    Ok(entries) -> {
-      for e in entries {
-        io.println(e)
-      }
+  io.with_fs_real(() => {
+    let dir = raw.temp_dir("", "dawn-list-dir-")
+    let names = ["b", from_code_points(['\u{1F600}']), "a", from_code_points(['\u{FFFD}']), "c"]
+    for n in names {
+      raw.write_bytes(dir ++ "/" ++ n, bytes.utf8("x"))
     }
-    Err(_) -> io.println("unreachable")
-  }
+    raw.mkdirs(dir ++ "/sub")
 
-  for n in names {
-    let _ = io.delete(dir ++ "/" ++ n)
-  }
-  let _ = io.delete(dir ++ "/sub")
-  let _ = io.delete(dir)
-  io.println("cleaned up " ++ to_string(not io.exists(dir)))
+    io.println("-- code-point order: ascii, then U+FFFD, then U+1F600 --")
+    match io.list_dir(dir) {
+      Ok(entries) -> {
+        for e in entries {
+          io.println(e)
+        }
+      }
+      Err(_) -> io.println("unreachable")
+    }
+
+    for n in names {
+      let _ = io.delete(dir ++ "/" ++ n)
+    }
+    let _ = io.delete(dir ++ "/sub")
+    let _ = io.delete(dir)
+    io.println("cleaned up " ++ to_string(not io.exists(dir)))
+  })
 }

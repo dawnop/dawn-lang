@@ -16,7 +16,7 @@
 # std/io. Delete deliberately goes through std/io because its public
 # Deleted/NotFound/Err split is the contract under test. See stdext/raw.dawn.
 use std/io
-use std/io.{DeleteOutcome, Deleted, NotFound}
+use std/io.{DeleteOutcome, Deleted, NotFound, Fs}
 use std/raw
 use std/str
 use std/bytes
@@ -37,47 +37,49 @@ fn is_set(o: Option[String]) -> Bool =
   }
 
 pub fn main() -> Unit !io = {
-  io.println("-- the process's own view --")
-  line("cwd is absolute ", str.starts_with(io.cwd(), "/"))
-  line("PATH is set     ", is_set(io.getenv("PATH")))
-  line("no such var     ", is_set(io.getenv("DAWN_SPIKE_NO_SUCH_VAR")))
+  io.with_fs_real(() => {
+    io.println("-- the process's own view --")
+    line("cwd is absolute ", str.starts_with(io.cwd(), "/"))
+    line("PATH is set     ", is_set(io.getenv("PATH")))
+    line("no such var     ", is_set(io.getenv("DAWN_SPIKE_NO_SUCH_VAR")))
 
-  # a fresh directory rather than a fixed path: two of these primitives are
-  # about publishing something indivisibly, and a shared scratch path would let
-  # one run see another's leftovers
-  io.println("-- a scratch directory of our own --")
-  let dir = raw.temp_dir("", "dawn-spike-files-")
-  line("fresh and a dir ", io.is_dir(dir))
-  line("not a symlink   ", io.is_symlink(dir))
+    # a fresh directory rather than a fixed path: two of these primitives are
+    # about publishing something indivisibly, and a shared scratch path would let
+    # one run see another's leftovers
+    io.println("-- a scratch directory of our own --")
+    let dir = raw.temp_dir("", "dawn-spike-files-")
+    line("fresh and a dir ", io.is_dir(dir))
+    line("not a symlink   ", io.is_symlink(dir))
 
-  # the parent directories do not exist: the JVM side has always created them
-  # and the C side had not, which no corpus had ever asked
-  io.println("-- bytes round-trip, through parents that did not exist --")
-  let nested = dir ++ "/one/two/three.bin"
-  let payload = bytes.utf8("héllo — 字节")
-  raw.write_bytes(nested, payload)
-  let back = raw.read_bytes(nested)
-  line("parents created ", io.exists(nested))
-  line("bytes agree     ", back == payload)
-  line("multi-byte kept ", bytes.len(back) == bytes.len(payload))
+    # the parent directories do not exist: the JVM side has always created them
+    # and the C side had not, which no corpus had ever asked
+    io.println("-- bytes round-trip, through parents that did not exist --")
+    let nested = dir ++ "/one/two/three.bin"
+    let payload = bytes.utf8("héllo — 字节")
+    raw.write_bytes(nested, payload)
+    let back = raw.read_bytes(nested)
+    line("parents created ", io.exists(nested))
+    line("bytes agree     ", back == payload)
+    line("multi-byte kept ", bytes.len(back) == bytes.len(payload))
 
-  io.println("-- rename is a move, not a copy --")
-  let moved = dir ++ "/one/two/moved.bin"
-  raw.rename(nested, moved)
-  line("source is gone  ", not io.exists(nested))
-  line("target is there ", io.exists(moved))
+    io.println("-- rename is a move, not a copy --")
+    let moved = dir ++ "/one/two/moved.bin"
+    raw.rename(nested, moved)
+    line("source is gone  ", not io.exists(nested))
+    line("target is there ", io.exists(moved))
 
-  io.println("-- delete separates deletion, absence and failure --")
-  delete_line("first delete    ", io.delete(moved))
-  delete_line("second delete   ", io.delete(moved))
+    io.println("-- delete separates deletion, absence and failure --")
+    delete_line("first delete    ", io.delete(moved))
+    delete_line("second delete   ", io.delete(moved))
 
-  # the harness runs both backends with stdin at /dev/null, so a short read is
-  # the end-of-input signal and both must agree on it
-  io.println("-- stdin at end of input --")
-  line("nothing to read ", bytes.len(io.read_stdin(16)) == 0)
+    # the harness runs both backends with stdin at /dev/null, so a short read is
+    # the end-of-input signal and both must agree on it
+    io.println("-- stdin at end of input --")
+    line("nothing to read ", bytes.len(io.read_stdin(16)) == 0)
 
-  io.println("-- and it cleans up after itself --")
-  let _ = io.delete(dir ++ "/one/two")
-  let _ = io.delete(dir ++ "/one")
-  delete_line("scratch removed ", io.delete(dir))
+    io.println("-- and it cleans up after itself --")
+    let _ = io.delete(dir ++ "/one/two")
+    let _ = io.delete(dir ++ "/one")
+    delete_line("scratch removed ", io.delete(dir))
+  })
 }

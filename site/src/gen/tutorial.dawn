@@ -7,6 +7,7 @@ use html/render.{render_doc, render_doc_play, inline_text}
 use html/play.{Play, play_decode}
 use html/page.{Assets, Lang, En, Zh, page, contents_label, lang_path, playground_label}
 use gen/common.{must_read, write_page, map_doc_url, doc_files, pad2, drop_trailing_rule}
+use std/io.{Fs}
 
 type Chapter = { title: List[Inline], body: List[Block] }
 
@@ -85,7 +86,7 @@ fn chapter_nav(chapters: List[Chapter], i: Int, lang: Lang) -> String = {
 ## own (`tutorial/01.html` and up), so its title is a page title and the index
 ## has nowhere to put a fragment. Numbering is the caller's -- the page names
 ## are `pad2(i + 1)`, exactly as [gen_tutorial] writes them.
-pub fn chapter_titles(src: String) -> List[String] !io = {
+pub fn chapter_titles(src: String) -> List[String] !Fs !io = {
   let blocks =
     match parse(must_read(src)) {
       Ok(bs) -> bs
@@ -128,7 +129,7 @@ fn tutorial_play(root: String, lang: Lang) -> Play =
 ## layout (`tutorial/03.html`) rather than by a pair of hrefs; html/page.dawn's
 ## [site_url] turns that into the switch link and the hreflang URLs, which
 ## differ between the two runs only in `root`.
-pub fn gen_tutorial(out: String, a: Assets, lang: Lang) -> Unit !io = {
+pub fn gen_tutorial(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let (src, dir, root) = tutorial_source(out, lang)
   let blocks =
     match parse(must_read(src)) {

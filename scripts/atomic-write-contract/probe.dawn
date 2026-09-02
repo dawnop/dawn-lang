@@ -10,63 +10,66 @@
 # host is not (std/io says why), so those cases print `err` and the property
 # that matters -- what survived -- is printed next to it.
 use std/io
+use std/io.{Fs}
 use std/set
 use std/str
 
 pub fn main() -> Unit !io = {
-  # a/ -- the ordinary pair: a destination that does not exist yet, and one
-  # that does. `created.toml` is written first so both listings below name it.
-  say("create", io.atomic_write_file("a/created.toml", "new\n"))
-  line("create content", slurp("a/created.toml"))
-  say("overwrite", io.atomic_write_file("a/target.toml", "new\n"))
-  line("overwrite content", slurp("a/target.toml"))
-  line("create entries", entries("a"))
+  io.with_fs_real(() => {
+    # a/ -- the ordinary pair: a destination that does not exist yet, and one
+    # that does. `created.toml` is written first so both listings below name it.
+    say("create", io.atomic_write_file("a/created.toml", "new\n"))
+    line("create content", slurp("a/created.toml"))
+    say("overwrite", io.atomic_write_file("a/target.toml", "new\n"))
+    line("overwrite content", slurp("a/target.toml"))
+    line("create entries", entries("a"))
 
-  # b/ -- a symbolic link is refused, not followed. Both halves matter: the
-  # link is still a link, and what it points at is untouched.
-  say("symlink", io.atomic_write_file("b/link.toml", "new\n"))
-  line("symlink still link", to_string(io.is_symlink("b/link.toml")))
-  line("symlink target", slurp("b/secret.txt"))
-  line("symlink entries", entries("b"))
+    # b/ -- a symbolic link is refused, not followed. Both halves matter: the
+    # link is still a link, and what it points at is untouched.
+    say("symlink", io.atomic_write_file("b/link.toml", "new\n"))
+    line("symlink still link", to_string(io.is_symlink("b/link.toml")))
+    line("symlink target", slurp("b/secret.txt"))
+    line("symlink entries", entries("b"))
 
-  # c/ -- a second hard link to the destination keeps the old contents. The
-  # directory entry is replaced; the inode is not written through.
-  say("hardlink", io.atomic_write_file("c/hard.toml", "new\n"))
-  line("hardlink this", slurp("c/hard.toml"))
-  line("hardlink other", slurp("c/hard.other"))
+    # c/ -- a second hard link to the destination keeps the old contents. The
+    # directory entry is replaced; the inode is not written through.
+    say("hardlink", io.atomic_write_file("c/hard.toml", "new\n"))
+    line("hardlink this", slurp("c/hard.toml"))
+    line("hardlink other", slurp("c/hard.other"))
 
-  # d/ -- the destination is an existing directory, so the final rename is the
-  # step that fails. The directory must survive it.
-  say("dir target", io.atomic_write_file("d/target.toml", "new\n"))
-  line("dir target is dir", to_string(io.is_dir("d/target.toml")))
-  line("dir target entries", entries("d"))
+    # d/ -- the destination is an existing directory, so the final rename is the
+    # step that fails. The directory must survive it.
+    say("dir target", io.atomic_write_file("d/target.toml", "new\n"))
+    line("dir target is dir", to_string(io.is_dir("d/target.toml")))
+    line("dir target entries", entries("d"))
 
-  # e/ -- something is already sitting on the name a fixed staging name would
-  # have taken. A host-chosen name is not that name, so the write goes through.
-  say("squat", io.atomic_write_file("e/target.toml", "new\n"))
-  line("squat content", slurp("e/target.toml"))
-  line("squat entries", entries("e"))
+    # e/ -- something is already sitting on the name a fixed staging name would
+    # have taken. A host-chosen name is not that name, so the write goes through.
+    say("squat", io.atomic_write_file("e/target.toml", "new\n"))
+    line("squat content", slurp("e/target.toml"))
+    line("squat entries", entries("e"))
 
-  # f/ -- the directory is not writable but the destination file is, which is
-  # the one shape where staging fails and an unguarded direct write would not.
-  say("readonly dir", io.atomic_write_file("f/target.toml", "new\n"))
-  line("readonly dir content", slurp("f/target.toml"))
-  # The staging file is this primitive's own device, named at random. A caller
-  # printing this message must not be shown a file it never created, so the
-  # message is checked for the staging prefix and not merely for its kind.
-  line("readonly dir names staging",
-    names_staging(io.atomic_write_file("f/target.toml", "new\n")))
+    # f/ -- the directory is not writable but the destination file is, which is
+    # the one shape where staging fails and an unguarded direct write would not.
+    say("readonly dir", io.atomic_write_file("f/target.toml", "new\n"))
+    line("readonly dir content", slurp("f/target.toml"))
+    # The staging file is this primitive's own device, named at random. A caller
+    # printing this message must not be shown a file it never created, so the
+    # message is checked for the staging prefix and not merely for its kind.
+    line("readonly dir names staging",
+      names_staging(io.atomic_write_file("f/target.toml", "new\n")))
 
-  # The two spellings refused before any backend sees them.
-  say("empty path", io.atomic_write_file("", "new\n"))
-  say("trailing slash", io.atomic_write_file("a/", "new\n"))
+    # The two spellings refused before any backend sees them.
+    say("empty path", io.atomic_write_file("", "new\n"))
+    say("trailing slash", io.atomic_write_file("a/", "new\n"))
 
-  # Staging names are picked by the host, one per call, and the file is there
-  # when the call returns -- the two properties an exclusive create buys.
-  temp_names()
+    # Staging names are picked by the host, one per call, and the file is there
+    # when the call returns -- the two properties an exclusive create buys.
+    temp_names()
+  })
 }
 
-fn temp_names() -> Unit !io = {
+fn temp_names() -> Unit !Fs !io = {
   var made: List[String] = []
   var i = 0
   while i < 16 {
@@ -106,13 +109,13 @@ fn names_staging(r: Result[Unit, ForeignError]) -> String =
 
 fn line(label: String, value: String) -> Unit !io = io.println(label ++ " = " ++ value)
 
-fn slurp(path: String) -> String !io =
+fn slurp(path: String) -> String !Fs !io =
   match io.read_file(path) {
     Ok(s) -> str.trim(s)
     Err(_) -> "<unreadable>"
   }
 
-fn entries(dir: String) -> String !io =
+fn entries(dir: String) -> String !Fs !io =
   match io.list_dir(dir) {
     Ok(xs) -> to_string(xs)
     Err(_) -> "<unlistable>"

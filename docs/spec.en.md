@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 7c631e914ed119f2 -->
+<!-- doc-check: translation-of docs/spec.md @ 6c50780eca0636ec -->
 
 # Dawn Language Specification
 
@@ -3727,7 +3727,9 @@ be replaceable, and being replaceable requires that nobody depends on it — whi
 two modules either. The semantics of the containers (persistent interface, keys must be
 `Eq + Hash`, iteration in insertion order, equality independent of order) are in §2.2.
 
-**Where IO stands.** Everything in `std/io` is `!io`, and anything that can fail returns
+**Where IO stands.** `std/io`'s console, environment and subprocess functions are `!io`; the
+file functions ride the named effect `Fs` (§6.5), whose production handler is `io.with_fs_real`
+and which a test answers from a table. Anything that can fail returns
 `Result[T, ForeignError]` (§9.8.1) — a structured payload rather than the sentence a
 barrier has already rendered; the reasoning is in
 [`audit/error-model-design.md`](audit/error-model-design.md). The further normative

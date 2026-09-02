@@ -10,6 +10,7 @@
 # payload and a zero its sign there; dtoa's own comparison still sees both).
 
 use std/io
+use std/io.{Fs}
 use std/str
 use std/fmt
 
@@ -60,56 +61,58 @@ fn from_bits(bits: Int) -> Float = {
 }
 
 pub fn main() -> Unit !io = {
-  let path = args()[0]
-  let text = match io.read_file(path) {
-    Ok(s) -> s
-    Err(e) -> panic("read: " ++ e.message)
-  }
-  var n = 0
-  var bad = 0
-  var crossbad = 0
-  var rtbad = 0
-  for line in str.split(text, "\n") {
-    if line != "" {
-      let parts = str.split(line, "\t")
-      let bits = parse_int(parts[0]).expect("bits")
-      let want = parts[1]
-      let v = from_bits(bits)
-      if not (v != v) {
-        let back = parse_float(want).expect("oracle parse")
-        if not (back == v) {
-          crossbad = crossbad + 1
-          if crossbad < 10 {
-            println("REBUILD " ++ parts[0] ++ " want " ++ want)
+  io.with_fs_real(() => {
+    let path = args()[0]
+    let text = match io.read_file(path) {
+      Ok(s) -> s
+      Err(e) -> panic("read: " ++ e.message)
+    }
+    var n = 0
+    var bad = 0
+    var crossbad = 0
+    var rtbad = 0
+    for line in str.split(text, "\n") {
+      if line != "" {
+        let parts = str.split(line, "\t")
+        let bits = parse_int(parts[0]).expect("bits")
+        let want = parts[1]
+        let v = from_bits(bits)
+        if not (v != v) {
+          let back = parse_float(want).expect("oracle parse")
+          if not (back == v) {
+            crossbad = crossbad + 1
+            if crossbad < 10 {
+              println("REBUILD " ++ parts[0] ++ " want " ++ want)
+            }
           }
         }
-      }
-      let got = fmt.dtoa(v)
-      n = n + 1
-      if got != want {
-        bad = bad + 1
-        if bad < 20 {
-          println("MISMATCH bits=" ++ parts[0] ++ " want=" ++ want ++ " got=" ++ got)
-        }
-      }
-      # the round-trip law, on the string this language actually emits
-      let closed = match parse_float(got) {
-        Some(w) ->
-          if v != v {
-            w != w
-          } else if v == 0.0 {
-            w == 0.0 && fmt.dtoa(w) == got
-          } else {
-            w == v
+        let got = fmt.dtoa(v)
+        n = n + 1
+        if got != want {
+          bad = bad + 1
+          if bad < 20 {
+            println("MISMATCH bits=" ++ parts[0] ++ " want=" ++ want ++ " got=" ++ got)
           }
-        None -> false
-      }
-      if not closed {
-        rtbad = rtbad + 1
-        if rtbad < 10 { println("ROUNDTRIP OPEN " ++ got) }
+        }
+        # the round-trip law, on the string this language actually emits
+        let closed = match parse_float(got) {
+          Some(w) ->
+            if v != v {
+              w != w
+            } else if v == 0.0 {
+              w == 0.0 && fmt.dtoa(w) == got
+            } else {
+              w == v
+            }
+          None -> false
+        }
+        if not closed {
+          rtbad = rtbad + 1
+          if rtbad < 10 { println("ROUNDTRIP OPEN " ++ got) }
+        }
       }
     }
-  }
-  println(to_string(n) ++ " samples, " ++ to_string(bad) ++ " dtoa mismatches, " ++
-    to_string(crossbad) ++ " rebuild mismatches, " ++ to_string(rtbad) ++ " open roundtrips")
+    println(to_string(n) ++ " samples, " ++ to_string(bad) ++ " dtoa mismatches, " ++
+        to_string(crossbad) ++ " rebuild mismatches, " ++ to_string(rtbad) ++ " open roundtrips")
+  })
 }

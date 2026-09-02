@@ -446,11 +446,14 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
 `with_fs_real`），它是 `std/` 与 `selfhost/src/` 下唯一的 `effect` 声明。这份清单由
 `scripts/doc-check.py` 的 `NAMED_EFFECT_EXPECTED` 枚举、`check_named_effect_status` 三向钉住
 （清单外的声明、清单内文件失去声明、清单列了不存在的文件，都红；见 [README.md](../README.md)
-的效果一节）。样本的坐标：声明与 handler 在 `std/io.dawn`；消费侧的签名噪音落在编译器的驱动层，
-预研按可达性数出 131 条签名要带上 `Fs`，其中 23 条是干净的 `!Fs`、108 条是 `!Fs !io` 叠加
-（叠加的大头是同时可达 `catch_fault` 或 Java FFI 的函数，任何 std 分解都清不掉）。消费者迁移
-要等种子推进一轮（编译器由上一 release 的工具链配它发布时的 std 编译，那份 std 里没有 `Fs`），
-迁移落地时按实测回填这两个数。
+的效果一节）。样本的坐标：声明与 handler 在 `std/io.dawn`；消费侧的签名噪音落在编译器的驱动层。
+预研按可达性数出 131 条签名要带上 `Fs`，其中 23 条是干净的 `!Fs`、108 条是 `!Fs !io` 叠加；
+消费者迁移落地（刀 1b）的实测是 158 条（`selfhost/src` 129 条、`compiler-plan/src` 29 条），
+全部拼作 `!Fs !io`，干净的 `!Fs` 是 0 条。叠加的大头是同时可达 `catch_fault` 或 Java FFI 的
+函数，任何 std 分解都清不掉；预研数出的那 23 条干净的也故意拼成叠加，因为上一 release 的
+工具链配它发布时的 std 编译这棵树，那份 std 里 `io.read_file` 一族仍是 `!io`，单写 `!Fs`
+盖不住（[bootstrap.md](bootstrap.md) 的特性纪律 4）。种子带上这份 std 之后它们可以去掉 `!io`，
+届时再回填。
 
 **裁决：已知风险，暂无缓解；效果集别名等第二个族（Console 或 Env）的样本到了再裁。**
 第一个样本只登记坐标：多个效果同时在场、跨模块传播这两件在 Fs 上会发生，但一个样本不足以

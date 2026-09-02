@@ -1,7 +1,7 @@
 ## The outside world: console, files, environment and subprocesses.
-## Everything here is `!io`, and everything that can fail answers
-## `Result[T, ForeignError]` (spec §9.8.1). The file system also has a
-## named-effect form, `Fs`, whose production handler is `with_fs_real`.
+## Console, environment and subprocesses are `!io`; the file system is the
+## named effect `Fs`, whose production handler is `with_fs_real`. Everything
+## that can fail answers `Result[T, ForeignError]` (spec §9.8.1).
 #
 # These write over the io_* intrinsics, which every backend implements; the
 # handwritten dawn.rt.StdIo is retired. They need no `unsafe_pure`: they are
@@ -56,25 +56,23 @@ pub fn read_line() -> Option[String] !io = io_read_line()
 
 ## Whether `path` names a directory. Invalid host path spellings, including an
 ## embedded NUL, answer `false` rather than escaping this Bool interface.
-pub fn is_dir(path: String) -> Bool !io = io_is_dir(path)
+pub fn is_dir(path: String) -> Bool !Fs = fs_is_dir(path)
 
 ## Whether anything exists at `path` -- a file, a directory, anything. Invalid
 ## host path spellings, including an embedded NUL, answer `false`.
-pub fn exists(path: String) -> Bool !io = io_exists(path)
+pub fn exists(path: String) -> Bool !Fs = fs_exists(path)
 
 ## Create `path` and every missing directory above it.
 ## An existing directory is not a failure; an existing *file* is.
-pub fn mkdirs(path: String) -> Result[Unit, ForeignError] !io =
-  catch_fault(() => io_mkdirs(path))
+pub fn mkdirs(path: String) -> Result[Unit, ForeignError] !Fs = fs_mkdirs(path)
 
 ## Read a whole file as a UTF-8 string.
-pub fn read_file(path: String) -> Result[String, ForeignError] !io =
-  catch_fault(() => io_read_file(path))
+pub fn read_file(path: String) -> Result[String, ForeignError] !Fs = fs_read_file(path)
 
 ## Write a string to a file, creating missing parent directories.
 ## `Ok` carries nothing: the only count worth returning would be bytes on disk.
-pub fn write_file(path: String, content: String) -> Result[Unit, ForeignError] !io =
-  catch_fault(() => io_write_file(path, content))
+pub fn write_file(path: String, content: String) -> Result[Unit, ForeignError] !Fs =
+  fs_write_file(path, content)
 
 ## The process's working directory, as an absolute path.
 pub fn cwd() -> String !io = io_cwd()
@@ -84,12 +82,11 @@ pub fn cwd() -> String !io = io_cwd()
 pub fn getenv(name: String) -> Option[String] !io = io_getenv(name)
 
 ## Read a whole file as bytes. The text half is `read_file`.
-pub fn read_bytes(path: String) -> Result[Bytes, ForeignError] !io =
-  catch_fault(() => io_read_bytes(path))
+pub fn read_bytes(path: String) -> Result[Bytes, ForeignError] !Fs = fs_read_bytes(path)
 
 ## Write bytes to a file, creating missing parent directories.
-pub fn write_bytes(path: String, content: Bytes) -> Result[Unit, ForeignError] !io =
-  catch_fault(() => io_write_bytes(path, content))
+pub fn write_bytes(path: String, content: Bytes) -> Result[Unit, ForeignError] !Fs =
+  fs_write_bytes(path, content)
 
 ## The two normal outcomes of deleting a path. Host failures are not outcomes:
 ## they stay in `delete`'s `Err` branch.
@@ -102,7 +99,7 @@ pub type DeleteOutcome = Deleted | NotFound
 ## them. Hosts normalize those spellings differently, and delete must never
 ## change which filesystem object the caller named as a side effect of choosing
 ## a backend.
-pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !io =
+pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !Fs =
   if path == "" {
     Err(ForeignError {
       kind: "io.invalid_delete_path",
@@ -116,7 +113,7 @@ pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !io =
       cause: None
     })
   } else {
-    match catch_fault(() => io_delete(path)) {
+    match fs_delete(path) {
       Ok(gone) -> if gone { Ok(Deleted) } else { Ok(NotFound) }
       Err(e) -> Err(e)
     }
@@ -127,13 +124,12 @@ pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !io =
 ## caller is publishing something it has already verified, and a move that can
 ## be observed half-done would defeat that. Stage with `temp_dir` under the
 ## destination's own directory to stay on one filesystem.
-pub fn rename(src: String, dst: String) -> Result[Unit, ForeignError] !io =
-  catch_fault(() => io_rename(src, dst))
+pub fn rename(src: String, dst: String) -> Result[Unit, ForeignError] !Fs = fs_rename(src, dst)
 
 ## A fresh directory under `parent`, named after `prefix`. An empty `parent`
 ## means the system temporary directory.
-pub fn temp_dir(parent: String, prefix: String) -> Result[String, ForeignError] !io =
-  catch_fault(() => io_temp_dir(parent, prefix))
+pub fn temp_dir(parent: String, prefix: String) -> Result[String, ForeignError] !Fs =
+  fs_temp_dir(parent, prefix)
 
 ## A fresh, empty file under `parent`, named after `prefix`. An empty `parent`
 ## means the system temporary directory.
@@ -143,8 +139,8 @@ pub fn temp_dir(parent: String, prefix: String) -> Result[String, ForeignError] 
 ## spelled a name and opened it afterwards has a window in which another
 ## process can put something else -- a symbolic link, say -- at that name. On a
 ## POSIX host the file arrives readable and writable by its owner alone.
-pub fn temp_file(parent: String, prefix: String) -> Result[String, ForeignError] !io =
-  catch_fault(() => io_temp_file(parent, prefix))
+pub fn temp_file(parent: String, prefix: String) -> Result[String, ForeignError] !Fs =
+  fs_temp_file(parent, prefix)
 
 ## Give `dst` the permissions `src` has.
 ##
@@ -155,13 +151,13 @@ pub fn temp_file(parent: String, prefix: String) -> Result[String, ForeignError]
 ## This exists because publishing by rename loses them: the file that ends up
 ## at the destination is a *new* file, whose mode came from the call that
 ## created it and the umask, and nothing else remembers what it replaced.
-pub fn copy_permissions(src: String, dst: String) -> Result[Unit, ForeignError] !io =
-  catch_fault(() => io_copy_permissions(src, dst))
+pub fn copy_permissions(src: String, dst: String) -> Result[Unit, ForeignError] !Fs =
+  fs_copy_permissions(src, dst)
 
 ## Whether `path` is a symbolic link. The link itself is examined, not its
 ## target, so a link to a directory is a link and not a directory. Invalid host
 ## path spellings, including an embedded NUL, answer `false`.
-pub fn is_symlink(path: String) -> Bool !io = io_is_symlink(path)
+pub fn is_symlink(path: String) -> Bool !Fs = fs_is_symlink(path)
 
 ## Write `content` to `path` so that a reader ever only sees the old file or
 ## the new one, never a half-written one and never nothing at all.
@@ -204,7 +200,7 @@ pub fn is_symlink(path: String) -> Bool !io = io_is_symlink(path)
 ## about a randomly named file this function invented, so passing it on would
 ## name that file to a caller who never asked for it. The backend's own words
 ## are kept in `cause`.
-pub fn atomic_write_file(path: String, content: String) -> Result[Unit, ForeignError] !io =
+pub fn atomic_write_file(path: String, content: String) -> Result[Unit, ForeignError] !Fs =
   if path == "" {
     Err(ForeignError {
       kind: "io.invalid_atomic_write_path",
@@ -256,7 +252,7 @@ fn parent_dir(path: String) -> String =
 ## Everything after the staging file exists. Split out because every failure
 ## from here on has to take that file away again, and a single expression with
 ## five nested `match`es would have five copies of the same cleanup.
-fn stage_replace(path: String, content: String, tmp: String) -> Result[Unit, ForeignError] !io =
+fn stage_replace(path: String, content: String, tmp: String) -> Result[Unit, ForeignError] !Fs =
   match write_file(tmp, content) {
     Err(e) -> abandon(tmp, e)
     Ok(_) ->
@@ -294,14 +290,14 @@ fn stage_replace(path: String, content: String, tmp: String) -> Result[Unit, For
 ## Carry the destination's permissions onto the staging file, when there is a
 ## destination to carry them from. A path that does not exist yet has no mode
 ## to preserve, and the new file keeps the one its creation gave it.
-fn carry_permissions(path: String, tmp: String) -> Result[Unit, ForeignError] !io =
+fn carry_permissions(path: String, tmp: String) -> Result[Unit, ForeignError] !Fs =
   if exists(path) { copy_permissions(path, tmp) } else { Ok(()) }
 
 ## Give up: take the staging file away and hand back the failure that caused
 ## it. The delete's own outcome is dropped on purpose -- the caller is being
 ## told why the write did not happen, and replacing that with "and also the
 ## cleanup failed" would lose the reason.
-fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !io = {
+fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !Fs = {
   let _ = delete(tmp)
   Err(e)
 }
@@ -350,9 +346,9 @@ pub fn stdin_ready(timeout_ms: Int) -> Bool !io = io_stdin_ready(timeout_ms)
 ## whatever the backend called it, and this failure never reaches a backend,
 ## because the check happens first. It is spelled as a name rather than a
 ## sentence for the same reason every other `kind` is — a caller may match on it.
-pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
+pub fn list_dir(path: String) -> Result[List[String], ForeignError] !Fs =
   if is_dir(path) {
-    match catch_fault(() => io_list_names(path)) {
+    match fs_list_names(path) {
       Ok(names) -> Ok(list.sort(names))
       Err(e) -> Err(e)
     }
@@ -388,12 +384,12 @@ pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int
 
 # ---- the file system as a named effect ----
 #
-# Everything above reaches the host directly. `Fs` is the same file system as
-# a seam a test can answer: one operation per host primitive, answered in
-# production by `with_fs_real` and in a test by arms over a table. It is the
-# first `effect` std declares, and the shape is the one dawnop-site's Clock
-# and Upstream effects settled: a plain declaration, a plain wrapper function
-# as the default handler, and no language support beyond `with handle`.
+# The file functions above are the public face of the operations below: one
+# operation per host primitive, answered in production by `with_fs_real` and
+# in a test by arms over a table. `Fs` is the first `effect` std declares, and
+# the shape is the one dawnop-site's Clock and Upstream effects settled: a
+# plain declaration, a plain wrapper function as the default handler, and no
+# language support beyond `with handle`.
 #
 # The seam sits BELOW the error surface on purpose, as Upstream's does. An
 # arm answers with the raw `ForeignError` the host would have raised, not with
@@ -406,13 +402,11 @@ pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int
 # No operation declares effects of its own (spec §6.5): what an arm does is
 # charged where the handler is installed, and `with_fs_real` is `!io`.
 #
-# The `io.*` file functions above still say `!io` and still call the host
-# themselves. They move onto these operations one release from now, not in
-# the release that declares them: the compiler and the differential corpora
-# are built by the previous release's toolchain against the std it shipped
-# with (docs/bootstrap.md, the seed feature discipline), and that std has no
-# `Fs` to name. A caller that wants the seam today installs `with_fs_real`
-# and calls the operations.
+# The declaration shipped one release before the functions moved onto it:
+# the compiler and the differential corpora are built by the previous
+# release's toolchain against the std it shipped with (docs/bootstrap.md, the
+# seed feature discipline), so a std that had renamed the row and a compiler
+# that spelled the old one could not have met.
 
 ## The file system, as operations a handler answers. Names carry an `fs_`
 ## prefix because `use std/io.{Fs}` brings every operation into the importing
@@ -442,8 +436,8 @@ pub effect Fs {
 }
 
 ## Run `body` against the real file system. Every arm is the host primitive
-## behind the `io.*` function of the same name, through the same barrier, so
-## an operation answered here and the function answer alike.
+## behind the `io.*` function of the same name, through the barrier that used
+## to sit inside the function.
 ##
 ## This is the production handler: a program's `main` (or the innermost
 ## boundary that owns a whole unit of file work) installs it once, and
@@ -491,314 +485,328 @@ pub fn with_fs_real[T](body: fn() -> T !Fs !io) -> T !io = {
 # when the tree moves, and these run from wherever the runner was started.
 
 test "temp_dir makes a fresh directory, and a file round trips through it" {
-  let ok = (r: Result[Unit, ForeignError]) => match r {
-    Ok(_) -> true
-    Err(_) -> false
-  }
-  let made = (r: Result[String, ForeignError]) => match r {
-    Ok(p) -> p
-    Err(_) -> ""
-  }
-  let d = made(temp_dir("", "dawn-std-test-"))
-  assert d != ""
-  assert exists(d)
-  assert is_dir(d)
-  # fresh: a second call is a different directory, not the same one again
-  let d2 = made(temp_dir("", "dawn-std-test-"))
-  assert d2 != ""
-  assert d != d2
-  # and `parent` is honoured, so a caller can stage on one filesystem
-  let inner = made(temp_dir(d, "inner-"))
-  assert inner != ""
-  assert is_dir(inner)
+  with_fs_real(() => {
+    let ok = (r: Result[Unit, ForeignError]) => match r {
+      Ok(_) -> true
+      Err(_) -> false
+    }
+    let made = (r: Result[String, ForeignError]) => match r {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    let d = made(temp_dir("", "dawn-std-test-"))
+    assert d != ""
+    assert exists(d)
+    assert is_dir(d)
+    # fresh: a second call is a different directory, not the same one again
+    let d2 = made(temp_dir("", "dawn-std-test-"))
+    assert d2 != ""
+    assert d != d2
+    # and `parent` is honoured, so a caller can stage on one filesystem
+    let inner = made(temp_dir(d, "inner-"))
+    assert inner != ""
+    assert is_dir(inner)
 
-  let f = d ++ "/hello.txt"
-  assert not exists(f)
-  assert ok(write_file(f, "hello"))
-  assert exists(f)
-  assert not is_dir(f)
-  assert read_file(f) == Ok("hello")
-  # overwriting is not appending
-  assert ok(write_file(f, "again"))
-  assert read_file(f) == Ok("again")
-  assert ok(write_file(f, ""))
-  assert read_file(f) == Ok("")
-  # missing parents are created on the way
-  let nested = d ++ "/a/b/c.txt"
-  assert ok(write_file(nested, "deep"))
-  assert read_file(nested) == Ok("deep")
-  assert is_dir(d ++ "/a/b")
+    let f = d ++ "/hello.txt"
+    assert not exists(f)
+    assert ok(write_file(f, "hello"))
+    assert exists(f)
+    assert not is_dir(f)
+    assert read_file(f) == Ok("hello")
+    # overwriting is not appending
+    assert ok(write_file(f, "again"))
+    assert read_file(f) == Ok("again")
+    assert ok(write_file(f, ""))
+    assert read_file(f) == Ok("")
+    # missing parents are created on the way
+    let nested = d ++ "/a/b/c.txt"
+    assert ok(write_file(nested, "deep"))
+    assert read_file(nested) == Ok("deep")
+    assert is_dir(d ++ "/a/b")
 
-  assert delete(f) == Ok(Deleted)
-  assert delete(nested) == Ok(Deleted)
-  assert delete(d ++ "/a/b") == Ok(Deleted)
-  assert delete(d ++ "/a") == Ok(Deleted)
-  assert delete(inner) == Ok(Deleted)
-  assert delete(d) == Ok(Deleted)
-  assert delete(d2) == Ok(Deleted)
-  assert not exists(d)
+    assert delete(f) == Ok(Deleted)
+    assert delete(nested) == Ok(Deleted)
+    assert delete(d ++ "/a/b") == Ok(Deleted)
+    assert delete(d ++ "/a") == Ok(Deleted)
+    assert delete(inner) == Ok(Deleted)
+    assert delete(d) == Ok(Deleted)
+    assert delete(d2) == Ok(Deleted)
+    assert not exists(d)
+  })
 }
 
 test "a path that is not there is an Err, and never a panic" {
-  let made = (r: Result[String, ForeignError]) => match r {
-    Ok(p) -> p
-    Err(_) -> ""
-  }
-  let d = made(temp_dir("", "dawn-std-test-"))
-  # spec 9.8.1: the outside world saying no is a value, so every one of these
-  # is a branch the caller takes. Which failure it was is the backend's word
-  # and is not asserted here -- on the JVM these are java.nio names, and a
-  # second backend has no reason to spell them the same.
-  match read_file(d ++ "/nope.txt") {
-    Ok(_) -> { assert false }
-    Err(_) -> ()
-  }
-  match read_bytes(d ++ "/nope.bin") {
-    Ok(_) -> { assert false }
-    Err(_) -> ()
-  }
-  match rename(d ++ "/nope", d ++ "/x") {
-    Ok(_) -> { assert false }
-    Err(_) -> ()
-  }
-  # a directory is not a file, in both directions
-  match read_file(d) {
-    Ok(_) -> { assert false }
-    Err(_) -> ()
-  }
-  match write_file(d, "x") {
-    Ok(_) -> { assert false }
-    Err(_) -> ()
-  }
-  # ... and the queries that answer Bool rather than Result just say no
-  assert not exists(d ++ "/nope")
-  assert not is_dir(d ++ "/nope")
-  assert not is_symlink(d ++ "/nope")
-  let nul_path = d ++ "\u{0}suffix"
-  assert not exists(nul_path)
-  assert not is_dir(nul_path)
-  assert not is_symlink(nul_path)
-  assert is_dir(d)
-  assert delete(d ++ "/nope") == Ok(NotFound)
-  assert getenv("DAWN_STD_TEST_DEFINITELY_UNSET_VARIABLE") == None
-  assert getenv("DAWN_STD_TEST\u{0}INVALID_VARIABLE") == None
-  # cwd is somewhere, and it is a directory
-  assert cwd() != ""
-  assert is_dir(cwd())
-  assert delete(d) == Ok(Deleted)
+  with_fs_real(() => {
+    let made = (r: Result[String, ForeignError]) => match r {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    let d = made(temp_dir("", "dawn-std-test-"))
+    # spec 9.8.1: the outside world saying no is a value, so every one of these
+    # is a branch the caller takes. Which failure it was is the backend's word
+    # and is not asserted here -- on the JVM these are java.nio names, and a
+    # second backend has no reason to spell them the same.
+    match read_file(d ++ "/nope.txt") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    match read_bytes(d ++ "/nope.bin") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    match rename(d ++ "/nope", d ++ "/x") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    # a directory is not a file, in both directions
+    match read_file(d) {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    match write_file(d, "x") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    # ... and the queries that answer Bool rather than Result just say no
+    assert not exists(d ++ "/nope")
+    assert not is_dir(d ++ "/nope")
+    assert not is_symlink(d ++ "/nope")
+    let nul_path = d ++ "\u{0}suffix"
+    assert not exists(nul_path)
+    assert not is_dir(nul_path)
+    assert not is_symlink(nul_path)
+    assert is_dir(d)
+    assert delete(d ++ "/nope") == Ok(NotFound)
+    assert getenv("DAWN_STD_TEST_DEFINITELY_UNSET_VARIABLE") == None
+    assert getenv("DAWN_STD_TEST\u{0}INVALID_VARIABLE") == None
+    # cwd is somewhere, and it is a directory
+    assert cwd() != ""
+    assert is_dir(cwd())
+    assert delete(d) == Ok(Deleted)
+  })
 }
 
 test "list_dir sorts by code point, and names a non-directory itself" {
-  let ok = (r: Result[Unit, ForeignError]) => match r {
-    Ok(_) -> true
-    Err(_) -> false
-  }
-  let made = (r: Result[String, ForeignError]) => match r {
-    Ok(p) -> p
-    Err(_) -> ""
-  }
-  let d = made(temp_dir("", "dawn-std-test-"))
-  let nothing: List[String] = []
-  assert list_dir(d) == Ok(nothing)
-  assert ok(write_file(d ++ "/zeta", "1"))
-  assert ok(write_file(d ++ "/Alpha", "1"))
-  assert ok(write_file(d ++ "/mid", "1"))
-  # not the order the OS handed over, and not case-insensitive: 'A' is 65
-  assert list_dir(d) == Ok(["Alpha", "mid", "zeta"])
-  assert delete(d ++ "/zeta") == Ok(Deleted)
-  assert delete(d ++ "/Alpha") == Ok(Deleted)
-  assert delete(d ++ "/mid") == Ok(Deleted)
+  with_fs_real(() => {
+    let ok = (r: Result[Unit, ForeignError]) => match r {
+      Ok(_) -> true
+      Err(_) -> false
+    }
+    let made = (r: Result[String, ForeignError]) => match r {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    let d = made(temp_dir("", "dawn-std-test-"))
+    let nothing: List[String] = []
+    assert list_dir(d) == Ok(nothing)
+    assert ok(write_file(d ++ "/zeta", "1"))
+    assert ok(write_file(d ++ "/Alpha", "1"))
+    assert ok(write_file(d ++ "/mid", "1"))
+    # not the order the OS handed over, and not case-insensitive: 'A' is 65
+    assert list_dir(d) == Ok(["Alpha", "mid", "zeta"])
+    assert delete(d ++ "/zeta") == Ok(Deleted)
+    assert delete(d ++ "/Alpha") == Ok(Deleted)
+    assert delete(d ++ "/mid") == Ok(Deleted)
 
-  # The clause the sort exists for. In code-point order U+FFFD (65533) comes
-  # before U+1F600 (128512); in UTF-16 unit order it does not, because the
-  # astral name begins with the surrogate 0xD83D (55357). A backend sorting
-  # its own way -- `Arrays.sort` is UTF-16 units -- answers these two the
-  # other way round, which is why the sort is in std and not below it.
-  assert ok(write_file(d ++ "/\u{1F600}", "1"))
-  assert ok(write_file(d ++ "/\u{FFFD}", "1"))
-  assert list_dir(d) == Ok(["\u{FFFD}", "\u{1F600}"])
-  assert delete(d ++ "/\u{1F600}") == Ok(Deleted)
-  assert delete(d ++ "/\u{FFFD}") == Ok(Deleted)
+    # The clause the sort exists for. In code-point order U+FFFD (65533) comes
+    # before U+1F600 (128512); in UTF-16 unit order it does not, because the
+    # astral name begins with the surrogate 0xD83D (55357). A backend sorting
+    # its own way -- `Arrays.sort` is UTF-16 units -- answers these two the
+    # other way round, which is why the sort is in std and not below it.
+    assert ok(write_file(d ++ "/\u{1F600}", "1"))
+    assert ok(write_file(d ++ "/\u{FFFD}", "1"))
+    assert list_dir(d) == Ok(["\u{FFFD}", "\u{1F600}"])
+    assert delete(d ++ "/\u{1F600}") == Ok(Deleted)
+    assert delete(d ++ "/\u{FFFD}") == Ok(Deleted)
 
-  # the one kind std mints, so the one a caller may match on
-  assert ok(write_file(d ++ "/plain.txt", "1"))
-  match list_dir(d ++ "/plain.txt") {
-    Ok(_) -> { assert false }
-    Err(e) -> { assert e.kind == "io.not_a_directory" }
-  }
-  # a missing path is the same answer as a plain file: the check happens before
-  # anything is read, so the two are deliberately not told apart
-  match list_dir(d ++ "/nope") {
-    Ok(_) -> { assert false }
-    Err(e) -> { assert e.kind == "io.not_a_directory" }
-  }
-  assert delete(d ++ "/plain.txt") == Ok(Deleted)
-  assert delete(d) == Ok(Deleted)
+    # the one kind std mints, so the one a caller may match on
+    assert ok(write_file(d ++ "/plain.txt", "1"))
+    match list_dir(d ++ "/plain.txt") {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert e.kind == "io.not_a_directory" }
+    }
+    # a missing path is the same answer as a plain file: the check happens before
+    # anything is read, so the two are deliberately not told apart
+    match list_dir(d ++ "/nope") {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert e.kind == "io.not_a_directory" }
+    }
+    assert delete(d ++ "/plain.txt") == Ok(Deleted)
+    assert delete(d) == Ok(Deleted)
+  })
 }
 
 test "mkdirs is idempotent on a directory; delete says what it removed" {
-  let ok = (r: Result[Unit, ForeignError]) => match r {
-    Ok(_) -> true
-    Err(_) -> false
-  }
-  let made = (r: Result[String, ForeignError]) => match r {
-    Ok(p) -> p
-    Err(_) -> ""
-  }
-  let d = made(temp_dir("", "dawn-std-test-"))
-  # every missing directory above it, in one call
-  assert ok(mkdirs(d ++ "/m1/m2"))
-  assert is_dir(d ++ "/m1")
-  assert is_dir(d ++ "/m1/m2")
-  # an existing directory is not a failure
-  assert ok(mkdirs(d ++ "/m1/m2"))
-  assert ok(mkdirs(d))
-  # an existing *file* is
-  assert ok(write_file(d ++ "/f.txt", "x"))
-  assert not ok(mkdirs(d ++ "/f.txt"))
+  with_fs_real(() => {
+    let ok = (r: Result[Unit, ForeignError]) => match r {
+      Ok(_) -> true
+      Err(_) -> false
+    }
+    let made = (r: Result[String, ForeignError]) => match r {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    let d = made(temp_dir("", "dawn-std-test-"))
+    # every missing directory above it, in one call
+    assert ok(mkdirs(d ++ "/m1/m2"))
+    assert is_dir(d ++ "/m1")
+    assert is_dir(d ++ "/m1/m2")
+    # an existing directory is not a failure
+    assert ok(mkdirs(d ++ "/m1/m2"))
+    assert ok(mkdirs(d))
+    # an existing *file* is
+    assert ok(write_file(d ++ "/f.txt", "x"))
+    assert not ok(mkdirs(d ++ "/f.txt"))
 
-  # Missing is a normal outcome. A non-empty directory is a host refusal, not
-  # another spelling of absence, and delete never empties it for the caller.
-  assert delete(d ++ "/nope") == Ok(NotFound)
-  match delete(d ++ "/m1") {
-    Ok(_) -> { assert false }
-    Err(_) -> ()
-  }
-  assert is_dir(d ++ "/m1")
-  assert delete(d ++ "/m1/m2") == Ok(Deleted)
-  assert delete(d ++ "/m1") == Ok(Deleted)
-  assert not exists(d ++ "/m1")
-  assert delete(d ++ "/f.txt") == Ok(Deleted)
-  assert delete(d ++ "/f.txt") == Ok(NotFound)
-  assert delete(d) == Ok(Deleted)
+    # Missing is a normal outcome. A non-empty directory is a host refusal, not
+    # another spelling of absence, and delete never empties it for the caller.
+    assert delete(d ++ "/nope") == Ok(NotFound)
+    match delete(d ++ "/m1") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    assert is_dir(d ++ "/m1")
+    assert delete(d ++ "/m1/m2") == Ok(Deleted)
+    assert delete(d ++ "/m1") == Ok(Deleted)
+    assert not exists(d ++ "/m1")
+    assert delete(d ++ "/f.txt") == Ok(Deleted)
+    assert delete(d ++ "/f.txt") == Ok(NotFound)
+    assert delete(d) == Ok(Deleted)
+  })
 }
 
 test "delete rejects ambiguous path spellings without changing the target" {
-  let ok = (r: Result[Unit, ForeignError]) => match r {
-    Ok(_) -> true
-    Err(_) -> false
-  }
-  let made = (r: Result[String, ForeignError]) => match r {
-    Ok(p) -> p
-    Err(_) -> ""
-  }
-  let d = made(temp_dir("", "dawn-std-test-"))
-  let f = d ++ "/kept"
-  assert ok(write_file(f, "x"))
-
-  match delete("") {
-    Ok(_) -> { assert false }
-    Err(e) -> {
-      assert e.kind == "io.invalid_delete_path"
-      assert e.message == "io.delete: path must not be empty"
+  with_fs_real(() => {
+    let ok = (r: Result[Unit, ForeignError]) => match r {
+      Ok(_) -> true
+      Err(_) -> false
     }
-  }
-  assert exists(f)
-
-  match delete(f ++ "/") {
-    Ok(_) -> { assert false }
-    Err(e) -> {
-      assert e.kind == "io.invalid_delete_path"
-      assert e.message == "io.delete: path must not end with '/'"
+    let made = (r: Result[String, ForeignError]) => match r {
+      Ok(p) -> p
+      Err(_) -> ""
     }
-  }
-  assert exists(f)
+    let d = made(temp_dir("", "dawn-std-test-"))
+    let f = d ++ "/kept"
+    assert ok(write_file(f, "x"))
 
-  # A backend may name this failure differently, but it must reject the whole
-  # path rather than silently delete the prefix before the NUL.
-  match delete(f ++ "\u{0}suffix") {
-    Ok(_) -> { assert false }
-    Err(_) -> ()
-  }
-  assert exists(f)
-  assert delete(f) == Ok(Deleted)
-  assert delete(d) == Ok(Deleted)
+    match delete("") {
+      Ok(_) -> { assert false }
+      Err(e) -> {
+        assert e.kind == "io.invalid_delete_path"
+        assert e.message == "io.delete: path must not be empty"
+      }
+    }
+    assert exists(f)
+
+    match delete(f ++ "/") {
+      Ok(_) -> { assert false }
+      Err(e) -> {
+        assert e.kind == "io.invalid_delete_path"
+        assert e.message == "io.delete: path must not end with '/'"
+      }
+    }
+    assert exists(f)
+
+    # A backend may name this failure differently, but it must reject the whole
+    # path rather than silently delete the prefix before the NUL.
+    match delete(f ++ "\u{0}suffix") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    assert exists(f)
+    assert delete(f) == Ok(Deleted)
+    assert delete(d) == Ok(Deleted)
+  })
 }
 
 test "rename replaces the destination; bytes survive what a String need not" {
-  let ok = (r: Result[Unit, ForeignError]) => match r {
-    Ok(_) -> true
-    Err(_) -> false
-  }
-  let made = (r: Result[String, ForeignError]) => match r {
-    Ok(p) -> p
-    Err(_) -> ""
-  }
-  let d = made(temp_dir("", "dawn-std-test-"))
-  assert ok(write_file(d ++ "/src.txt", "moved"))
-  assert ok(rename(d ++ "/src.txt", d ++ "/dst.txt"))
-  assert not exists(d ++ "/src.txt")
-  assert read_file(d ++ "/dst.txt") == Ok("moved")
-  # onto an existing destination: replaced, not refused
-  assert ok(write_file(d ++ "/src.txt", "second"))
-  assert ok(rename(d ++ "/src.txt", d ++ "/dst.txt"))
-  assert read_file(d ++ "/dst.txt") == Ok("second")
-  assert not exists(d ++ "/src.txt")
-  assert not ok(rename(d ++ "/nope", d ++ "/dst.txt"))
+  with_fs_real(() => {
+    let ok = (r: Result[Unit, ForeignError]) => match r {
+      Ok(_) -> true
+      Err(_) -> false
+    }
+    let made = (r: Result[String, ForeignError]) => match r {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    let d = made(temp_dir("", "dawn-std-test-"))
+    assert ok(write_file(d ++ "/src.txt", "moved"))
+    assert ok(rename(d ++ "/src.txt", d ++ "/dst.txt"))
+    assert not exists(d ++ "/src.txt")
+    assert read_file(d ++ "/dst.txt") == Ok("moved")
+    # onto an existing destination: replaced, not refused
+    assert ok(write_file(d ++ "/src.txt", "second"))
+    assert ok(rename(d ++ "/src.txt", d ++ "/dst.txt"))
+    assert read_file(d ++ "/dst.txt") == Ok("second")
+    assert not exists(d ++ "/src.txt")
+    assert not ok(rename(d ++ "/nope", d ++ "/dst.txt"))
 
-  # the byte pair is the point: 0x00 0xFF is not UTF-8, so this round trip is
-  # one `read_file`/`write_file` could not make
-  let raw = bytes_from_array(array_push(array_push(array_new(), 0x00), 0xFF))
-  assert ok(write_bytes(d ++ "/raw.bin", raw))
-  assert read_bytes(d ++ "/raw.bin") == Ok(raw)
-  let none_at_all = bytes_from_array(array_new())
-  assert ok(write_bytes(d ++ "/empty.bin", none_at_all))
-  assert read_bytes(d ++ "/empty.bin") == Ok(none_at_all)
-  # and the two halves see the same file
-  assert ok(write_file(d ++ "/text.txt", "abc"))
-  assert read_bytes(d ++ "/text.txt") == Ok(bytes_utf8("abc"))
+    # the byte pair is the point: 0x00 0xFF is not UTF-8, so this round trip is
+    # one `read_file`/`write_file` could not make
+    let raw = bytes_from_array(array_push(array_push(array_new(), 0x00), 0xFF))
+    assert ok(write_bytes(d ++ "/raw.bin", raw))
+    assert read_bytes(d ++ "/raw.bin") == Ok(raw)
+    let none_at_all = bytes_from_array(array_new())
+    assert ok(write_bytes(d ++ "/empty.bin", none_at_all))
+    assert read_bytes(d ++ "/empty.bin") == Ok(none_at_all)
+    # and the two halves see the same file
+    assert ok(write_file(d ++ "/text.txt", "abc"))
+    assert read_bytes(d ++ "/text.txt") == Ok(bytes_utf8("abc"))
 
-  assert delete(d ++ "/dst.txt") == Ok(Deleted)
-  assert delete(d ++ "/raw.bin") == Ok(Deleted)
-  assert delete(d ++ "/empty.bin") == Ok(Deleted)
-  assert delete(d ++ "/text.txt") == Ok(Deleted)
-  assert delete(d) == Ok(Deleted)
+    assert delete(d ++ "/dst.txt") == Ok(Deleted)
+    assert delete(d ++ "/raw.bin") == Ok(Deleted)
+    assert delete(d ++ "/empty.bin") == Ok(Deleted)
+    assert delete(d ++ "/text.txt") == Ok(Deleted)
+    assert delete(d) == Ok(Deleted)
+  })
 }
 
 test "run answers the exit status; a program that cannot start is an Err" {
-  let ok = (r: Result[Unit, ForeignError]) => match r {
-    Ok(_) -> true
-    Err(_) -> false
-  }
-  let made = (r: Result[String, ForeignError]) => match r {
-    Ok(p) -> p
-    Err(_) -> ""
-  }
-  let d = made(temp_dir("", "dawn-std-test-"))
-  # `sh` rather than a coreutil, because POSIX guarantees it is on PATH
-  assert run(["sh", "-c", "exit 0"], "", "") == Ok(0)
-  # a non-zero status is the answer, not a failure -- the distinction this
-  # signature exists to make
-  assert run(["sh", "-c", "exit 3"], "", "") == Ok(3)
-  assert run(["sh", "-c", "exit 1"], "", "") == Ok(1)
-  # not being able to start it at all is the failure
-  match run(["dawn-no-such-program-anywhere-on-this-path"], "", "") {
-    Ok(_) -> { assert false }
-    Err(_) -> ()
-  }
-  # no argv[0] to run. std mints this one, so unlike every other kind here it
-  # is the same string on both backends and is worth pinning -- it is what the
-  # JVM used to answer with `java.lang.ArrayIndexOutOfBoundsException`.
-  match run([], "", "") {
-    Ok(_) -> { assert false }
-    Err(e) -> { assert e.kind == "io.no_program" }
-  }
-  # each stream goes to the file named, truncating it
-  let out = d ++ "/out.txt"
-  assert run(["sh", "-c", "printf first"], out, "") == Ok(0)
-  assert read_file(out) == Ok("first")
-  assert run(["sh", "-c", "printf second"], out, "") == Ok(0)
-  assert read_file(out) == Ok("second")
-  # stdout and stderr are separated
-  let err = d ++ "/err.txt"
-  assert run(["sh", "-c", "printf out; printf err 1>&2"], out, err) == Ok(0)
-  assert read_file(out) == Ok("out")
-  assert read_file(err) == Ok("err")
-  assert ok(write_file(d ++ "/keep.txt", "x"))
-  assert delete(d ++ "/keep.txt") == Ok(Deleted)
-  assert delete(out) == Ok(Deleted)
-  assert delete(err) == Ok(Deleted)
-  assert delete(d) == Ok(Deleted)
+  with_fs_real(() => {
+    let ok = (r: Result[Unit, ForeignError]) => match r {
+      Ok(_) -> true
+      Err(_) -> false
+    }
+    let made = (r: Result[String, ForeignError]) => match r {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    let d = made(temp_dir("", "dawn-std-test-"))
+    # `sh` rather than a coreutil, because POSIX guarantees it is on PATH
+    assert run(["sh", "-c", "exit 0"], "", "") == Ok(0)
+    # a non-zero status is the answer, not a failure -- the distinction this
+    # signature exists to make
+    assert run(["sh", "-c", "exit 3"], "", "") == Ok(3)
+    assert run(["sh", "-c", "exit 1"], "", "") == Ok(1)
+    # not being able to start it at all is the failure
+    match run(["dawn-no-such-program-anywhere-on-this-path"], "", "") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    # no argv[0] to run. std mints this one, so unlike every other kind here it
+    # is the same string on both backends and is worth pinning -- it is what the
+    # JVM used to answer with `java.lang.ArrayIndexOutOfBoundsException`.
+    match run([], "", "") {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert e.kind == "io.no_program" }
+    }
+    # each stream goes to the file named, truncating it
+    let out = d ++ "/out.txt"
+    assert run(["sh", "-c", "printf first"], out, "") == Ok(0)
+    assert read_file(out) == Ok("first")
+    assert run(["sh", "-c", "printf second"], out, "") == Ok(0)
+    assert read_file(out) == Ok("second")
+    # stdout and stderr are separated
+    let err = d ++ "/err.txt"
+    assert run(["sh", "-c", "printf out; printf err 1>&2"], out, err) == Ok(0)
+    assert read_file(out) == Ok("out")
+    assert read_file(err) == Ok("err")
+    assert ok(write_file(d ++ "/keep.txt", "x"))
+    assert delete(d ++ "/keep.txt") == Ok(Deleted)
+    assert delete(out) == Ok(Deleted)
+    assert delete(err) == Ok(Deleted)
+    assert delete(d) == Ok(Deleted)
+  })
 }
 
 test "with_fs_real answers every operation from the host" {
@@ -904,5 +912,11 @@ test "a handler over a table answers Fs without a host" {
   assert ok(fs_write_file("/virt/m.txt", "more"))
   # the table saw the writes in order, and no host was involved
   assert writes == [("/virt/n.txt", "new"), ("/virt/m.txt", "more")]
-  assert not exists("/virt")
+  # and the public functions ride the same handler
+  assert exists("/virt/a.txt")
+  assert not exists("/virt/nothing")
+  assert read_file("/virt/a.txt") == Ok("alpha")
+  assert list_dir("/virt") == Ok(["a", "b"])
+  assert delete("/virt/a.txt") == Ok(Deleted)
+  assert delete("/virt/gone") == Ok(NotFound)
 }

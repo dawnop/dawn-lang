@@ -743,24 +743,31 @@ pair "test (usage)" test
 echo "== test, the assertions really run =="
 cat > "$OUT/sidefx.dawn" <<'EOF'
 use std/io
+use std/io.{Fs}
 
-pub fn note(tag: String) -> Bool !io = {
+pub fn note(tag: String) -> Bool !Fs !io = {
   println("  side effect: " ++ tag)
   let _ = io.write_file("MARK-" ++ tag, tag)
   true
 }
 
 test "the first test's assertion is evaluated" {
-  assert note("a")
+  io.with_fs_real(() => {
+    assert note("a")
+  })
 }
 
 test "the second test evaluates both of its assertions, then fails" {
-  assert note("b")
-  assert note("c") && false
+  io.with_fs_real(() => {
+    assert note("b")
+    assert note("c") && false
+  })
 }
 
 test "a third test runs even though the second one failed" {
-  assert note("d")
+  io.with_fs_real(() => {
+    assert note("d")
+  })
 }
 EOF
 # --std is absolute because each side runs from its own directory; the argv
