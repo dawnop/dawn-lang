@@ -425,17 +425,16 @@ SPEC_CONTRACTS = (
 
 SPEC_PATHS = {ROOT / "docs/spec.md", ROOT / "docs/spec.en.md"}
 
-# This marker starts a machine-readable list of builtin function names in a
-# normative-spec paragraph. The list extends to the next blank line, so normal
-# Markdown wrapping cannot move names out of the check. The declaration mirror
-# is already held against the compiler's intrinsic table by
-# builtin-decl-contract; checking the marked prose against that mirror closes
-# the other half, where prose can mint a builtin that does not exist. Only
-# lower-case identifier spans are function names, so adjacent type names such
-# as `Int` and `Float` stay ordinary prose. Each spec marks both its complete
-# prelude builtin list and the focused math-conversion list.
+# These markers start machine-readable builtin function names in a
+# normative-spec paragraph. A marked region extends to the next blank line, so
+# normal Markdown wrapping cannot move names out of the check. The complete
+# inventory must equal the public declaration mirror exactly; focused lists,
+# such as the math-conversion row, may name a subset but cannot mint a function.
+# Neither kind permits duplicate names within its region. Only lower-case
+# identifier spans are function names, so adjacent types such as `Int` and
+# `Float` stay ordinary prose.
+SPEC_BUILTIN_INVENTORY_MARKER = "<!-- doc-check: builtin-inventory -->"
 SPEC_BUILTIN_LIST_MARKER = "<!-- doc-check: builtin-list -->"
-SPEC_BUILTIN_LISTS_PER_SPEC = 2
 PUBLIC_BUILTIN_DECL = re.compile(r"(?m)^pub fn\s+([a-z][A-Za-z0-9_]*)\b")
 BUILTIN_DECL_PATH = ROOT / "selfhost/builtins.dawn"
 
@@ -1545,7 +1544,7 @@ def propagation_contract_problems(rel: str, text: str) -> tuple[list[str], int]:
 
 def builtin_list_contract_problems(
         texts: dict[pathlib.Path, str]) -> tuple[list[str], int]:
-    """Hold every builtin name explicitly listed in the specs to the mirror."""
+    """Hold the exact inventory and focused builtin claims to the mirror."""
     declared = set(PUBLIC_BUILTIN_DECL.findall(
         BUILTIN_DECL_PATH.read_text(encoding="utf-8")))
     if not declared:
@@ -1559,27 +1558,35 @@ def builtin_list_contract_problems(
         if text is None:
             bad.append(f"{rel}: cannot check builtin list; document missing")
             continue
-        marker_count = text.count(SPEC_BUILTIN_LIST_MARKER)
-        if marker_count != SPEC_BUILTIN_LISTS_PER_SPEC:
-            bad.append(f"{rel}: expected {SPEC_BUILTIN_LISTS_PER_SPEC} "
-                       f"{SPEC_BUILTIN_LIST_MARKER} markers, found {marker_count}")
-            continue
-        offset = 0
-        for marker_index in range(1, marker_count + 1):
-            marker_at = text.index(SPEC_BUILTIN_LIST_MARKER, offset)
-            start = marker_at + len(SPEC_BUILTIN_LIST_MARKER)
+        for label, marker, exact in (
+                ("builtin inventory", SPEC_BUILTIN_INVENTORY_MARKER, True),
+                ("builtin list", SPEC_BUILTIN_LIST_MARKER, False)):
+            marker_count = text.count(marker)
+            if marker_count != 1:
+                bad.append(f"{rel}: expected one {marker}, found {marker_count}")
+                continue
+            marker_at = text.index(marker)
+            start = marker_at + len(marker)
             region = text[start:].split("\n\n", 1)[0]
-            offset = start
-            names = [name for name in inline_code_spans(region)
+            names = [name for name in re.findall(
+                     r"`([^`\n]+)`", active_markdown(region))
                      if re.fullmatch(r"[a-z][A-Za-z0-9_]*", name)]
             if not names:
-                bad.append(f"{rel}: builtin-list marker {marker_index} names no "
-                           "builtin functions")
+                bad.append(f"{rel}: {label} names no builtin functions")
                 continue
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            if duplicates:
+                bad.append(f"{rel}: {label} repeats function(s): "
+                           f"{', '.join(duplicates)}")
             unknown = sorted(set(names) - declared)
             if unknown:
-                bad.append(f"{rel}: builtin-list names function(s) absent from "
+                bad.append(f"{rel}: {label} names function(s) absent from "
                            f"selfhost/builtins.dawn: {', '.join(unknown)}")
+            if exact:
+                missing = sorted(declared - set(names))
+                if missing:
+                    bad.append(f"{rel}: builtin inventory omits declared function(s): "
+                               f"{', '.join(missing)}")
             seen += len(names)
     return bad, seen
 
@@ -1650,8 +1657,25 @@ def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[
         SPEC_BUILTIN_LIST_MARKER,
         SPEC_BUILTIN_LIST_MARKER + "\n`sqrt`、", 1)
     bad, _ = spec_contract_problems(false_builtin)
-    if not any("builtin-list names function(s) absent" in problem for problem in bad):
+    if not any("builtin list names function(s) absent" in problem for problem in bad):
         return ["spec contract self-test: a nonexistent builtin passed the prose mirror"], 0
+
+    missing_builtin = dict(texts)
+    if "`len`/" not in missing_builtin[zh]:
+        return ["spec contract self-test: exact builtin fixture is absent"], 0
+    missing_builtin[zh] = missing_builtin[zh].replace("`len`/", "", 1)
+    bad, _ = spec_contract_problems(missing_builtin)
+    if not any("builtin inventory omits declared function(s): len" in problem
+               for problem in bad):
+        return ["spec contract self-test: an omitted builtin passed the inventory"], 0
+
+    duplicate_builtin = dict(texts)
+    duplicate_builtin[zh] = duplicate_builtin[zh].replace(
+        "`len`/", "`len`/`len`/", 1)
+    bad, _ = spec_contract_problems(duplicate_builtin)
+    if not any("builtin inventory repeats function(s): len" in problem
+               for problem in bad):
+        return ["spec contract self-test: a duplicate builtin passed the inventory"], 0
 
     fixtures = (
         (ROOT / "docs/spec.md", "3.1 函数",
@@ -1702,7 +1726,7 @@ def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[
         if not any(problem.startswith(rel + ":")
                    and "expression-level Option/Result propagation" in problem for problem in bad):
             return [f"spec contract self-test: {rel} accepted obsolete ? semantics"], 0
-    return [], 8
+    return [], 10
 
 
 def check_effect_inference_probe() -> tuple[list[str], int]:

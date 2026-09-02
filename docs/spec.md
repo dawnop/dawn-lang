@@ -2835,9 +2835,11 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
 `println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的
-<!-- doc-check: builtin-list --> `len`/`get`/`range`/`to_string`/`join`/`parse_int`/
-`parse_float`/`parse_int_radix`/`panic`/`todo`/`expect`/`unwrap_or`/`cast`/
-`catch_fault`/`catch_panic`/`bracket`/`args` 等一屏以内
+<!-- doc-check: builtin-inventory --> `panic`/`todo`/`bracket`/`catch_fault`/`catch_panic`/
+`discard`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
+`sort_by`/`join`/`parse_int`/`parse_float`/`parse_int_radix`/`code_points`/
+`from_code_points`/`char_is_letter`/`char_is_digit`/`char_is_alnum`/`char_is_upper`/
+`char_is_lower`/`char_is_space`/`args`/`cast`，共一屏以内
 （全集见[标准库参考](https://dawn-lang.dawnop.com/zh/stdlib.html)，由 `dawn doc --stdlib` 生成）。
 
 **顶层声明可以遮蔽 builtin/std 函数名**（§10.3，Rust 式）：解析序是本模块声明 →
