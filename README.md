@@ -128,23 +128,32 @@ pub fn main() -> Unit !io = {
 }
 ```
 
-That tier is **tail resumption**: a handler arm is an ordinary closure, no continuation
-is captured, and so neither backend needs its own stack magic for it. The price is that
-multi-shot and non-tail resumption are not supported. It is specified, implemented on
-both backends and held by the differential corpus, and it has
-**its first internal consumer**: `std/io` declares `Fs`, the file system as fourteen
-operations, with `with_fs_real` as the handler production installs, so a test can answer
-a file read from a table. The same module declares `Proc`, running another program as one
-operation, with `with_proc_real` for production, so a test can hold a command line without
-starting anything. The third is `std/gpu`, which declares `Gpu`, the host side of a
-device as six operations, with a pure fake device as the handler a test installs, so a
-`!Gpu` program runs on a machine with no GPU. Those are the three declarations, in the two
-files under `std/` and `selfhost/src/` that carry any; `doc-check.py` keeps the list
-(`NAMED_EFFECT_EXPECTED`) and reds this paragraph when a declaration appears outside it or
-one of them goes away. So read it as a working feature
-that has carried one real seam and not yet a real program, rather than as the thing that
-makes Dawn different. ([docs/spec.md](docs/spec.md) §6.5; differential corpus
-`scripts/spike-native/effect_handler.dawn`.)
+Arms come in two shapes. A **tail-resumptive** arm is an ordinary closure: it runs in
+place, its return value is the operation's result, and no continuation is captured, so
+neither backend needs stack magic for it. An effect declared `ctl` may also carry a
+**control arm** (`op(x) resume k => ...`), which binds the continuation instead of
+resuming it: `k` is an ordinary function value, it may outlive the frame that installed
+the handler, and it may be resumed **once**. Resuming twice is not supported. A
+continuation that will never be resumed is abandoned by calling `discard` on it, which
+is what runs the releases the suspended frames are holding.
+
+Both shapes are specified, implemented on both backends and held by the differential
+corpus, and **the tier's internal consumers are in this repository**: `std/io` declares
+`Fs`, the file system as fourteen operations, with `with_fs_real` as the handler
+production installs, so a test can answer a file read from a table. The same module
+declares `Proc`, running another program as one operation, with `with_proc_real` for
+production, so a test can hold a command line without starting anything. The third is
+`std/gpu`, which declares `Gpu`, the host side of a device as six operations, with a
+pure fake device as the handler a test installs, so a `!Gpu` program runs on a machine
+with no GPU. Those are the three declarations, in the two files under `std/` and
+`selfhost/src/` that carry any; `doc-check.py` keeps the list (`NAMED_EFFECT_EXPECTED`)
+and reds this paragraph when a declaration appears outside it or one of them goes away.
+The compiler itself runs on the tier: its `main` installs `with_fs_real` around the
+whole dispatch, so every file the toolchain reads or writes goes through `Fs`, and the
+driver's analysis tests run that same code over a file tree held in a table
+(`selfhost/src/driver/fsmem.dawn`). ([docs/spec.md](docs/spec.md) §6.5;
+[docs/oneshot-design.md](docs/oneshot-design.md); differential corpus
+`scripts/spike-native/effect_handler.dawn`; gallery `examples/effects/`.)
 
 ### 2. Two backends, one answer, machine-enforced
 

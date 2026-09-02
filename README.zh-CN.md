@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 6deab85c77e9bfce -->
+<!-- doc-check: translation-of README.md @ aeadef2a93b224e7 -->
 
 # Dawn
 
@@ -111,17 +111,24 @@ pub fn main() -> Unit !io = {
 }
 ```
 
-这一档是**尾恢复**：handler 臂就是普通闭包，没有延续捕获，于是两个后端不必为它各造一套栈
-魔法；代价是不支持多次恢复与非尾恢复。它有规范、两个后端都实现了、对拍语料也盯着，并且有了
-**第一个内部使用者**：`std/io` 声明了 `Fs`，把文件系统写成十四个操作，生产安装的 handler 是
-`with_fs_real`，于是测试可以用一张表应答一次文件读取。同一个模块还声明了 `Proc`，把「跑另一个程序」
-写成一个操作，生产 handler 是 `with_proc_real`，于是测试可以按住一整条命令行而不启动任何东西。
-第三个是 `std/gpu`：它声明了 `Gpu`，把设备的宿主侧写成
-六个操作，测试安装的 handler 是一个纯的假设备，于是 `!Gpu` 程序在没有 GPU 的机器上也能跑。这三条声明
-落在 `std/` 与 `selfhost/src/` 下仅有的两个文件里；`doc-check.py` 持有这份清单（`NAMED_EFFECT_EXPECTED`），清单外冒出声明、或其中一条
-消失，它都会把这一段判红。所以请把它读成一个扛过一条真实接缝、还没扛过一个真实程序的可用特性，
-而不是「Dawn 与众不同」的那个理由。
-（[docs/spec.md](docs/spec.md) §6.5；对拍语料 `scripts/spike-native/effect_handler.dawn`。）
+臂有两种形状。**尾恢复**臂就是普通闭包：就地运行，返回值即操作的结果，不捕获延续，于是两个
+后端都不必为它各造一套栈魔法。声明为 `ctl` 的效果还可以带**控制臂**
+（`op(x) resume k => ...`）：它绑定延续而不是恢复延续，`k` 是一个普通函数值，可以活得比装
+handler 的那一帧更久，并且可以被恢复**一次**。恢复两次不支持。确定不会再恢复的延续，对它调
+`discard` 丢弃，被挂起的那些帧攒下的释放动作由这一下跑完。
+
+两种形状都有规范、两个后端都实现了、对拍语料也盯着，而且**这一档的内部使用者就在本仓**：
+`std/io` 声明了 `Fs`，把文件系统写成十四个操作，生产安装的 handler 是 `with_fs_real`，
+于是测试可以用一张表应答一次文件读取。同一个模块还声明了 `Proc`，把「跑另一个程序」写成一个
+操作，生产 handler 是 `with_proc_real`，于是测试可以按住一整条命令行而不启动任何东西。第三个
+是 `std/gpu`：它声明了 `Gpu`，把设备的宿主侧写成六个操作，测试安装的 handler 是一个纯的假
+设备，于是 `!Gpu` 程序在没有 GPU 的机器上也能跑。这三条声明落在 `std/` 与 `selfhost/src/` 下
+仅有的两个文件里；`doc-check.py` 持有这份清单（`NAMED_EFFECT_EXPECTED`），清单外冒出声明、
+或其中一条消失，它都会把这一段判红。编译器自己就跑在这一档上：它的 `main` 把整个 dispatch 包在
+`with_fs_real` 里，于是工具链读写的每个文件都过 `Fs`，而 driver 的分析测试把同一份代码跑在
+一张表装的文件树上（`selfhost/src/driver/fsmem.dawn`）。
+（[docs/spec.md](docs/spec.md) §6.5；[docs/oneshot-design.md](docs/oneshot-design.md)；
+对拍语料 `scripts/spike-native/effect_handler.dawn`；示例集 `examples/effects/`。）
 
 ### 二、两个后端，一个答案，机器保证
 
