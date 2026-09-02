@@ -1,0 +1,229 @@
+## `TileProg` as Tile IR text: the `cuda_tile` dialect's assembly, one module
+## with one entry, spelled the way `cuda-tile-translate` prints it. The text is
+## layer 0 of tile-backend-design 6.2: scripts/tile-golden pins it byte for
+## byte, and it is what a person reads when the bytecode (knife 3) disagrees
+## with the device.
+#
+# Spelling follows the specification's appendix example (vector add over
+# `tile<ptr<f32>>` parameters) and the dialect's own round-trip tests
+# (`test/Bytecode/operationsTest.mlir`: `make_token`, `token=%N` on the
+# token-ordered memory operations). The three facts the text depends on:
+#
+#   * A memory operation takes a TILE of pointers, never a scalar pointer
+#     plus an index. An entry parameter is a scalar `tile<ptr<T>>`, so every
+#     load and store first spreads it: `reshape` to `tile<1xptr<T>>`,
+#     `broadcast` to `tile<Nxptr<T>>`, then `offset` by a `tile<Nxi32>` of
+#     element offsets, which is `iota` plus the block's base `idx * N`
+#     broadcast the same way. The renderer emits that ladder once per distinct
+#     (parameter, index, width) and once per distinct (index, width) for the
+#     offsets, in first-use order, so the text stays deterministic and does
+#     not repeat itself.
+#   * Memory operations are ordered by tokens: `load_ptr_tko weak %p
+#     token=%t : ... -> tile<..>, token` answers a value and the next token,
+#     `store_ptr_tko weak %p, %v token=%t : ... -> token` answers the next
+#     token, and `make_token : token` starts the chain. The program's own
+#     `tok_in` / `tok_out` fields are rendered as they are; the renderer does
+#     not invent an order.
+#   * `addf` carries `rounding<nearest_even>` explicitly; tile-backend-design
+#     3.2's double-rounding theorem holds for that mode and no other.
+#
+# SSA names are renumbered on the way out (`%0`, `%1`, ... in emission order,
+# as scripts/core-golden's coredump does): the program's handles are trace
+# numbers with gaps where the ladders go, and a name that is a function of
+# the text alone is what makes two renderings comparable.
+use std/list
+use std/map
+use std/str
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, AddF, For}
+
+# The renderer's state, threaded through pure helpers rather than held in
+# `var`s, because the helpers are called from inside a `for` and a closure may
+# not capture a `var` (spec 4.5).
+type R = {
+  next: Int,
+  names: Map[Int, String],
+  memo: Map[String, String],
+  lines: List[String],
+}
+
+fn fresh(r: R) -> (R, String) = (R { ..r, next: r.next + 1 }, "%${r.next}")
+
+fn emit(r: R, line: String) -> R = R { ..r, lines: r.lines ++ ["    " ++ line] }
+
+fn bind(r: R, handle: Int, name: String) -> R = R { ..r, names: map.insert(r.names, handle, name) }
+
+fn name_of(r: R, handle: Int, what: String) -> String = match map.get(r.names, handle) {
+  Some(s) -> s
+  None -> panic("tileir: `${what}` refers to handle ${handle}, which no earlier operation defined")
+}
+
+fn vec(n: Int, elem: String) -> String = "tile<${n}x${elem}>"
+
+fn ptr_of(dtype: String) -> String = "ptr<${dtype}>"
+
+# `%off = idx * n + iota`, an `n`-wide tile of i32 element offsets. Memoised
+# per (idx handle, n).
+fn offsets(r0: R, idx: Int, n: Int) -> (R, String) = {
+  let key = "off:${idx}:${n}"
+  match map.get(r0.memo, key) {
+    Some(s) -> (r0, s)
+    None -> {
+      let base = name_of(r0, idx, "load/store index")
+      let (r1, c) = fresh(r0)
+      let r2 = emit(r1, "${c} = constant <i32: ${n}> : tile<i32>")
+      let (r3, m) = fresh(r2)
+      let r4 = emit(r3, "${m} = muli ${base}, ${c} : tile<i32>")
+      let (r5, m1) = fresh(r4)
+      let r6 = emit(r5, "${m1} = reshape ${m} : tile<i32> -> tile<1xi32>")
+      let (r7, mb) = fresh(r6)
+      let r8 = emit(r7, "${mb} = broadcast ${m1} : tile<1xi32> -> ${vec(n, "i32")}")
+      let (r9, io) = fresh(r8)
+      let r10 = emit(r9, "${io} = iota : ${vec(n, "i32")}")
+      let (r11, off) = fresh(r10)
+      let r12 = emit(r11, "${off} = addi ${mb}, ${io} : ${vec(n, "i32")}")
+      (R { ..r12, memo: map.insert(r12.memo, key, off) }, off)
+    }
+  }
+}
+
+# The `n`-wide tile of pointers into parameter `param` at `%off`. Memoised per
+# (param, idx handle, n).
+fn pointers(r0: R, param: Int, dtype: String, idx: Int, n: Int) -> (R, String) = {
+  let key = "ptr:${param}:${idx}:${n}"
+  match map.get(r0.memo, key) {
+    Some(s) -> (r0, s)
+    None -> {
+      let (r1, off) = offsets(r0, idx, n)
+      let p = ptr_of(dtype)
+      let (r2, p1) = fresh(r1)
+      let r3 = emit(r2, "${p1} = reshape %arg${param} : tile<${p}> -> tile<1x${p}>")
+      let (r4, pn) = fresh(r3)
+      let r5 = emit(r4, "${pn} = broadcast ${p1} : tile<1x${p}> -> ${vec(n, p)}")
+      let (r6, pt) = fresh(r5)
+      let r7 = emit(r6, "${pt} = offset ${pn}, ${off} : ${vec(n, p)}, ${vec(n, "i32")} -> ${vec(n, p)}")
+      (R { ..r7, memo: map.insert(r7.memo, key, pt) }, pt)
+    }
+  }
+}
+
+fn render_op(r0: R, op: TileOp) -> R = match op {
+  MakeToken(dst) -> {
+    let (r1, t) = fresh(r0)
+    bind(emit(r1, "${t} = make_token : token"), dst, t)
+  }
+  BlockId(dst, axis) -> {
+    let (r1, x) = fresh(r0)
+    let (r2, y) = fresh(r1)
+    let (r3, z) = fresh(r2)
+    let r4 = emit(r3, "${x}, ${y}, ${z} = get_tile_block_id : tile<i32>")
+    bind(r4, dst, if axis == 0 { x } else if axis == 1 { y } else { z })
+  }
+  Load(dst, tok_out, param, dtype, idx, n, tok_in) -> {
+    let tin = name_of(r0, tok_in, "load token")
+    let (r1, pt) = pointers(r0, param, dtype, idx, n)
+    let (r2, v) = fresh(r1)
+    let (r3, t) = fresh(r2)
+    let r4 = emit(r3,
+      "${v}, ${t} = load_ptr_tko weak ${pt} token=${tin} : ${vec(n, ptr_of(dtype))} -> ${vec(n, dtype)}, token")
+    bind(bind(r4, dst, v), tok_out, t)
+  }
+  Store(tok_out, param, dtype, idx, n, value, tok_in) -> {
+    let tin = name_of(r0, tok_in, "store token")
+    let v = name_of(r0, value, "store value")
+    let (r1, pt) = pointers(r0, param, dtype, idx, n)
+    let (r2, t) = fresh(r1)
+    let r3 = emit(r2,
+      "${t} = store_ptr_tko weak ${pt}, ${v} token=${tin} : ${vec(n, ptr_of(dtype))}, ${vec(n, dtype)} -> token")
+    bind(r3, tok_out, t)
+  }
+  AddF(dst, dtype, n, lhs, rhs) -> {
+    let a = name_of(r0, lhs, "addf lhs")
+    let b = name_of(r0, rhs, "addf rhs")
+    let (r1, d) = fresh(r0)
+    bind(emit(r1, "${d} = addf ${a}, ${b} rounding<nearest_even> : ${vec(n, dtype)}"), dst, d)
+  }
+  For(_iv, _lower, _upper, _step, _inits, _carried, _results, _body) ->
+    panic("tileir: `For` is not rendered in this release (tile-backend-design 5.2, knife 5)")
+}
+
+fn join(lines: List[String]) -> String = list.fold(lines, "", (acc, l) => acc ++ l ++ "\n")
+
+## `prog` as one `cuda_tile.module @m` holding one `entry @<name>`. Every
+## parameter is a scalar pointer tile of its dtype; the body is `prog.ops` in
+## order, each memory operation preceded by the pointer ladder it needs, and
+## `return` closes it. The text ends with a newline.
+pub fn render(prog: TileProg) -> String = {
+  var args: List[String] = []
+  var i = 0
+  for dt in prog.params {
+    args = args ++ ["%arg${i}: tile<${ptr_of(dt)}>"]
+    i = i + 1
+  }
+  let head = list.fold(args, "", (acc, a) => if acc == "" { a } else { acc ++ ", " ++ a })
+  var r = R { next: 0, names: map.empty(), memo: map.empty(), lines: [] }
+  for op in prog.ops {
+    r = render_op(r, op)
+  }
+  join(["cuda_tile.module @m {", "  entry @${prog.name}(${head}) {"] ++ r.lines ++ ["    return", "  }", "}"])
+}
+
+# ---- tests ----
+#
+# The byte-for-byte pin is scripts/tile-golden (both backends, against the
+# recorded .mlir). These blocks pin the pieces a golden diff would only show
+# as a whole: the ladder is emitted once per parameter, the token chain is the
+# program's, and a dangling handle is refused rather than rendered as a name.
+
+fn two_loads_one_param() -> TileProg = TileProg {
+  name: "twice",
+  params: ["f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 128, 0),
+    Load(4, 5, 0, "f64", 1, 128, 3),
+    AddF(6, "f64", 128, 2, 4),
+    Store(7, 0, "f64", 1, 128, 6, 5)
+  ]
+}
+
+fn count(hay: String, needle: String) -> Int = len(str.split(hay, needle)) - 1
+
+test "the pointer ladder for one parameter at one index is emitted once, not once per memory operation" {
+  let text = render(two_loads_one_param())
+  assert count(text, " = offset ") == 1
+  assert count(text, " = iota ") == 1
+  assert count(text, "load_ptr_tko weak ") == 2
+  assert count(text, "store_ptr_tko weak ") == 1
+}
+
+test "the token chain in the text is the program's: make_token feeds the first load, each memory op feeds the next" {
+  let text = render(two_loads_one_param())
+  assert str.contains(text, "%0 = make_token : token\n")
+  assert str.contains(text, "%13, %14 = load_ptr_tko weak %12 token=%0 :")
+  assert str.contains(text, "%15, %16 = load_ptr_tko weak %12 token=%14 :")
+  assert str.contains(text, "%18 = store_ptr_tko weak %12, %17 token=%16 :")
+  assert str.contains(text, "%17 = addf %13, %15 rounding<nearest_even> : tile<128xf64>\n")
+}
+
+test "the entry signature lists every parameter as a scalar pointer tile of its format" {
+  let p = TileProg { name: "k", params: ["f32", "f64"], ops: [MakeToken(0)] }
+  let text = render(p)
+  assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<ptr<f64>>) {\n")
+  assert str.ends_with(text, "    return\n  }\n}\n")
+}
+
+test "block ids along the three axes bind the matching result of one get_tile_block_id" {
+  let p = TileProg {
+    name: "axes",
+    params: ["f64"],
+    ops: [MakeToken(0), BlockId(1, 2), Load(2, 3, 0, "f64", 1, 8, 0)]
+  }
+  let text = render(p)
+  assert str.contains(text, "%1, %2, %3 = get_tile_block_id : tile<i32>\n")
+  assert str.contains(text, "= muli %3, %4 : tile<i32>\n")
+}
+
+test "rendering the same program twice gives the same text" {
+  assert render(two_loads_one_param()) == render(two_loads_one_param())
+}

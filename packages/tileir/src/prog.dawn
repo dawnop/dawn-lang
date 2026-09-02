@@ -1,0 +1,181 @@
+## A tile program as data: `TileProg`, the SSA record a recording handler
+## keeps of one run of a kernel body, and `trace_kernel`, that handler. The
+## text renderer (render.dawn) and the bytecode writer (knife 3) are its two
+## consumers; the golden pins the text, `tileiras` pins the bytes.
+#
+# Handles are the SSA names of the trace: a counter the handler owns, starting
+# at 1 (0 is the entry token). Every operation that produces a value takes the
+# next number, so a body that issues the same operations in the same order
+# records the same program, which is the assertion this module exists for:
+# a kernel traced twice is equal, and its text is the golden's.
+#
+# Memory operations are ordered by a linear token chain (tile-backend-design
+# 5.1): the handler holds the current token in a state cell, every load and
+# store consumes it and produces the next, and `MakeToken(0)` at the head of
+# `ops` is where the chain starts. Nothing else orders them; Tile IR gives
+# program order no meaning between memory operations.
+use std/list
+use std/gpu.{F64, F32}
+use dev.{Dev, Param, param, block_id, load, store, addf}
+
+## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
+## this operation defines; every other handle field refers to an earlier
+## definition. `param` is a position in `TileProg.params`; `n` is a tile
+## width; `dtype` is a std/gpu dtype name.
+##
+## `For` is reserved for knife 5 (tile-backend-design 5.2): a region with an
+## induction variable, carried values entering as `inits`, named `carried`
+## inside the body and `results` after it, and the body's own operations
+## nested. No handler records it in this release and the renderer refuses it.
+pub type TileOp =
+  | MakeToken(dst: Int)
+  | BlockId(dst: Int, axis: Int)
+  | Load(dst: Int, tok_out: Int, param: Int, dtype: String, idx: Int, n: Int, tok_in: Int)
+  | Store(tok_out: Int, param: Int, dtype: String, idx: Int, n: Int, value: Int, tok_in: Int)
+  | AddF(dst: Int, dtype: String, n: Int, lhs: Int, rhs: Int)
+  | For(iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
+derive Show
+
+## A kernel as recorded: its entry name, the dtype name of each parameter in
+## order (every parameter is a pointer to that format), and its operations in
+## issue order, `MakeToken(0)` first.
+pub type TileProg = {
+  name: String,
+  params: List[String],
+  ops: List[TileOp],
+} derive Show
+
+fn refuse(name: String, what: String) -> Never =
+  panic("tileir: kernel `${name}`: ${what}")
+
+# A tile width is a power of two from 1 up; Tile IR shapes are.
+fn is_pow2(n: Int) -> Bool = n >= 1 && (n & (n - 1)) == 0
+
+fn check_shape(name: String, n: Int) -> Unit =
+  if is_pow2(n) { () } else { refuse(name, "a tile width is a power of two, got ${n}") }
+
+# A memory operation names a declared parameter and reads it as the format it
+# was declared with. Both are the body's `Param[D]` against the `params` list
+# the caller gave `trace_kernel`, and disagreement is a bug in the caller: the
+# entry signature would say one format and the load another.
+fn check_param(name: String, params: List[String], pos: Int, dtype: String, verb: String) -> Unit =
+  if pos < 0 || pos >= len(params) {
+    refuse(name, "${verb} names parameter ${pos}, but ${len(params)} parameter(s) are declared")
+  } else if params[pos] != dtype {
+    refuse(name, "parameter ${pos} is declared ${params[pos]}, but a ${verb} reads it as ${dtype}")
+  } else {
+    ()
+  }
+
+## Run `body` once under a handler that records what it issues, and answer
+## the record. `params` is the dtype name of each entry parameter in order;
+## the body's `param(d, pos)` values must agree with it (position in range,
+## same format) or the run panics. Two runs of the same body answer equal
+## programs.
+pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev) -> TileProg = {
+  with handle Dev {
+    var next: Int = 1
+    var tok: Int = 0
+    var ops: List[TileOp] = []
+    t_block_id(axis) => {
+      if axis < 0 || axis > 2 { refuse(name, "block_id axis is 0, 1 or 2, got ${axis}") } else { () }
+      let d = next
+      next = next + 1
+      ops = ops ++ [BlockId(d, axis)]
+      d
+    }
+    t_load(param, dtype, idx, n) => {
+      check_param(name, params, param, dtype, "load")
+      check_shape(name, n)
+      let d = next
+      let t = next + 1
+      next = next + 2
+      ops = ops ++ [Load(d, t, param, dtype, idx, n, tok)]
+      tok = t
+      d
+    }
+    t_store(param, dtype, idx, n, v) => {
+      check_param(name, params, param, dtype, "store")
+      check_shape(name, n)
+      let t = next
+      next = next + 1
+      ops = ops ++ [Store(t, param, dtype, idx, n, v, tok)]
+      tok = t
+      ()
+    }
+    t_addf(dtype, n, a, b) => {
+      check_shape(name, n)
+      let d = next
+      next = next + 1
+      ops = ops ++ [AddF(d, dtype, n, a, b)]
+      d
+    }
+  }
+  body()
+  TileProg { name: name, params: params, ops: [MakeToken(0)] ++ ops }
+}
+
+## The handles a program defines, in definition order: what a consumer that
+## renumbers (the renderer) or checks well-formedness walks.
+pub fn defined(op: TileOp) -> List[Int] = match op {
+  MakeToken(dst) -> [dst]
+  BlockId(dst, _axis) -> [dst]
+  Load(dst, tok_out, _param, _dtype, _idx, _n, _tok_in) -> [dst, tok_out]
+  Store(tok_out, _param, _dtype, _idx, _n, _value, _tok_in) -> [tok_out]
+  AddF(dst, _dtype, _n, _lhs, _rhs) -> [dst]
+  For(_iv, _lower, _upper, _step, _inits, _carried, results, _body) -> results
+}
+
+# ---- tests ----
+
+fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let ta = load(a, i, 128)
+  let tb = load(b, i, 128)
+  store(out, i, 128, addf(F64, 128, ta, tb))
+}
+
+fn trace_vadd() -> TileProg =
+  trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
+
+test "vadd records five operations behind the entry token, with the token chain threaded through the memory ones" {
+  let p = trace_vadd()
+  assert p.name == "vadd"
+  assert p.params == ["f64", "f64", "f64"]
+  assert p.ops == [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 128, 0),
+    Load(4, 5, 1, "f64", 1, 128, 3),
+    AddF(6, "f64", 128, 2, 4),
+    Store(7, 2, "f64", 1, 128, 6, 5)
+  ]
+}
+
+test "the same body traced twice records the same program" {
+  assert trace_vadd() == trace_vadd()
+}
+
+fn scale_f32(x: Param[F32], out: Param[F32]) -> Unit !Dev = {
+  let i = block_id(0)
+  let t = load(x, i, 64)
+  store(out, i, 64, addf(F32, 64, t, t))
+}
+
+test "an f32 kernel records f32 loads, stores and sums" {
+  let p = trace_kernel("scale_f32", ["f32", "f32"], () => scale_f32(param(F32, 0), param(F32, 1)))
+  assert p.ops == [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f32", 1, 64, 0),
+    AddF(4, "f32", 64, 2, 2),
+    Store(5, 1, "f32", 1, 64, 4, 3)
+  ]
+}
+
+test "every handle an operation defines is fresh and increasing" {
+  let p = trace_vadd()
+  let none: List[Int] = []
+  let all = list.fold(p.ops, none, (acc, op) => acc ++ defined(op))
+  assert all == [0, 1, 2, 3, 4, 5, 6, 7]
+}
