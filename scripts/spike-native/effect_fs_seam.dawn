@@ -1,0 +1,134 @@
+# std/io's `Fs` on both backends: the production handler `with_fs_real` has
+# to reach each backend's own file primitives through the effect machinery,
+# and a table handler has to keep both backends off the disk entirely. The
+# first is the seam's whole point; the second is what a test relies on.
+#
+# The operations sit below std's error surface, so `io.delete`'s spelling
+# check and `io.list_dir`'s sort are not what runs here: `fs_delete` answers
+# the bare flag and `fs_list_names` the host's order, which the program sorts
+# itself so the two backends print one line.
+use std/io
+use std/io.{Fs, with_fs_real, fs_is_dir, fs_exists, fs_mkdirs, fs_read_file, fs_write_file,
+  fs_read_bytes, fs_write_bytes, fs_delete, fs_rename, fs_temp_dir, fs_temp_file,
+  fs_copy_permissions, fs_is_symlink, fs_list_names }
+use std/list
+use std/bytes
+
+fn line(label: String, v: Bool) -> Unit !io = io.println(label ++ " = " ++ to_string(v))
+
+fn ok(r: Result[Unit, ForeignError]) -> Bool =
+  match r {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+
+fn text(r: Result[String, ForeignError]) -> String =
+  match r {
+    Ok(s) -> s
+    Err(_) -> "<err>"
+  }
+
+## The table a handler answers from: one entry per path it has been given.
+type Entry = { path: String, body: String }
+
+fn has(files: List[Entry], path: String) -> Bool =
+  list.any(files, (e: Entry) => e.path == path)
+
+fn lookup(files: List[Entry], path: String) -> Option[String] =
+  match list.find(files, (e: Entry) => e.path == path) {
+    Some(e) -> Some(e.body)
+    None -> None
+  }
+
+fn without(files: List[Entry], path: String) -> List[Entry] =
+  list.filter(files, (e: Entry) => e.path != path)
+
+## Everything a program does with files, said once against `Fs` and run twice
+## below: once against the host, once against a table.
+fn exercise(root: String) -> List[String] !Fs = {
+  let a = root ++ "/a.txt"
+  let _ = fs_mkdirs(root ++ "/sub")
+  let _ = fs_write_file(a, "alpha")
+  let _ = fs_write_file(root ++ "/sub/b.txt", "beta")
+  let _ = fs_rename(root ++ "/sub/b.txt", root ++ "/b.txt")
+  let names = match fs_list_names(root) {
+    Ok(ns) -> list.sort(ns)
+    Err(_) -> []
+  }
+  [
+    "read a      = " ++ text(fs_read_file(a)),
+    "read b      = " ++ text(fs_read_file(root ++ "/b.txt")),
+    "read absent = " ++ text(fs_read_file(root ++ "/nope")),
+    "names       = " ++ to_string(names),
+    "a exists    = " ++ to_string(fs_exists(a)),
+    "sub is dir  = " ++ to_string(fs_is_dir(root ++ "/sub")),
+    "a is dir    = " ++ to_string(fs_is_dir(a)),
+    "delete a    = " ++ to_string(fs_delete(a)),
+    "delete a    = " ++ to_string(fs_delete(a)),
+  ]
+}
+
+pub fn main() -> Unit !io = {
+  io.println("-- against the host, through with_fs_real --")
+  let dir = with_fs_real(() => match fs_temp_dir("", "dawn-spike-fs-") {
+    Ok(d) -> d
+    Err(_) -> ""
+  })
+  line("scratch is a dir", io.is_dir(dir))
+  for l in with_fs_real(() => exercise(dir)) { io.println(l) }
+  # the operations and the io.* functions see one file system
+  with_fs_real(() => {
+    line("io sees b       ", io.exists(dir ++ "/b.txt"))
+    line("bytes agree     ", fs_read_bytes(dir ++ "/b.txt") == Ok(bytes.utf8("beta")))
+    let staged = match fs_temp_file(dir, "stage-") {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    line("temp file made  ", fs_exists(staged) && not fs_is_symlink(staged))
+    line("perms copied    ", ok(fs_copy_permissions(dir ++ "/b.txt", staged)))
+    line("bytes written   ", ok(fs_write_bytes(staged, bytes.utf8("x"))))
+    let _ = fs_delete(staged)
+    let _ = fs_delete(dir ++ "/b.txt")
+    let _ = fs_delete(dir ++ "/sub")
+    line("cleaned up      ", fs_delete(dir) == Ok(true) && not io.exists(dir))
+  })
+
+  io.println("-- against a table, no host --")
+  let absent = (p: String) => ForeignError { kind: "table.absent", message: p, cause: None }
+  with handle Fs {
+    var files: List[Entry] = []
+    fs_is_dir(path) => path == "/t" || path == "/t/sub"
+    fs_exists(path) => has(files, path)
+    fs_is_symlink(_path) => false
+    fs_mkdirs(_path) => Ok(())
+    fs_read_file(path) => match lookup(files, path) {
+      Some(body) -> Ok(body)
+      None -> Err(absent(path))
+    }
+    fs_write_file(path, content) => {
+      files = without(files, path) ++ [Entry { path: path, body: content }]
+      Ok(())
+    }
+    fs_read_bytes(path) => Err(absent(path))
+    fs_write_bytes(path, _content) => Err(absent(path))
+    fs_delete(path) => {
+      let had = has(files, path)
+      files = without(files, path)
+      Ok(had)
+    }
+    fs_rename(src, dst) => match lookup(files, src) {
+      Some(body) -> {
+        files = without(files, src) ++ [Entry { path: dst, body: body }]
+        Ok(())
+      }
+      None -> Err(absent(src))
+    }
+    fs_temp_dir(parent, prefix) => Ok(parent ++ "/" ++ prefix ++ "0")
+    fs_temp_file(parent, prefix) => Ok(parent ++ "/" ++ prefix ++ "0")
+    fs_copy_permissions(_src, _dst) => Ok(())
+    fs_list_names(_path) => Ok(list.map(files, (e: Entry) => e.path))
+  }
+  for l in exercise("/t") { io.println(l) }
+  io.println("table holds   = " ++ to_string(list.map(files, (e: Entry) => e.path ++ ":" ++ e.body)))
+  line("host untouched  ", not io.exists("/t"))
+}
