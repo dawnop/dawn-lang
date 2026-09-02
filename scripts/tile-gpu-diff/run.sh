@@ -9,16 +9,19 @@
 #
 # The run:
 #
-#   assemble  scripts/tile-golden/vadd.tilebc and vadd_bf16.tilebc (the
-#             recorded bytecode goldens) through the pinned tileiras into
-#             cubins for toolchain.txt's gpu-name. install-tileiras.sh
+#   assemble  scripts/tile-golden's recorded bytecode goldens (vadd,
+#             vadd_bf16 and the six boundary kernels) through the pinned
+#             tileiras into cubins for toolchain.txt's gpu-name. install-tileiras.sh
 #             installs the pin under $TILEIRAS_DIR (default
 #             ~/.cache/dawn-tileiras) unless $TILEIRAS names a binary.
 #   jvm       vadd_diff.dawn on the JVM stops at the first operation with
 #             `gpu.unsupported_backend`: the JVM has no device runtime and
 #             says so by construction rather than by a LinkageError.
 #   native    vadd_diff.dawn built natively runs four f64 and three bf16
-#             input sets under `with_gpu_real` and `with_gpu_fake` and prints a transcript
+#             input sets, and mask_diff.dawn the six boundary kernels of
+#             knife 7a (each with an output buffer longer than its answer, so
+#             that what the mask keeps is compared too),
+#             under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
 #             (the driver refused at that stage, the same way in every set;
@@ -44,6 +47,14 @@
 #                      every driver; the device never sees the difference
 #                      between a truncated and a rounded operand as such,
 #                      only the fake device does.
+#     mask-all-true    the package's lowering answers an all-true mask
+#                      instead of the comparison -> layers 0 and 1 move but
+#                      stay legal (an all-true mask is a mask), and on the
+#                      device every boundary kernel writes the lanes past the
+#                      end of its vector, so the sentinel in the output
+#                      buffer's tail is gone and all six say differ:result.
+#                      A launch-layer claim, so SKIP where the clean run is
+#                      blocked, for grid-zero's reason
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -220,14 +231,23 @@ fi
 grep -q "V${want_tileiras}\b" "$work/tileiras.version" ||
   { cat "$work/tileiras.version" >&2; fail "tileiras is not the pinned ${want_tileiras} (toolchain.txt)"; }
 
-for k in vadd vadd_bf16; do
-  "$tileiras" --gpu-name "$gpu_name" -o "$work/$k.cubin" "$golden/$k.tilebc" > "$work/assemble.log" 2>&1 ||
-    { cat "$work/assemble.log" >&2; fail "tileiras refused scripts/tile-golden/$k.tilebc"; }
-  [ "$(head -c 4 "$work/$k.cubin" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] ||
-    fail "tileiras wrote no ELF cubin for $k"
+# The boundary kernels of knife 7a, in the order mask_diff takes them.
+masked=(vadd_tail copy relu leaky_relu clip elemops)
+
+assemble_golden() { # kernel, tilebc, cubin
+  "$tileiras" --gpu-name "$gpu_name" -o "$3" "$2" > "$work/assemble.log" 2>&1 ||
+    { cat "$work/assemble.log" >&2; fail "tileiras refused $2"; }
+  [ "$(head -c 4 "$3" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] ||
+    fail "tileiras wrote no ELF cubin for $1"
+}
+
+for k in vadd vadd_bf16 "${masked[@]}"; do
+  assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
 cubins=("$work/vadd.cubin" "$work/vadd_bf16.cubin")
+masked_cubins=()
+for k in "${masked[@]}"; do masked_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -241,12 +261,13 @@ rt_obj="$work/dawn_rt.o"
   -I "$root/runtime/c" -c -o "$rt_obj" "$root/runtime/c/dawn_rt.c" ||
   fail "the C runtime does not compile"
 
-build_native() { # std-dir, bin
-  "$root/bin/dawn" __emitc --std "$1" "$here/vadd_diff.dawn" -o "$2.c" > "$2.emit" 2>&1 ||
-    { cat "$2.emit" >&2; fail "native emit failed against $1"; }
+build_native() { # std-dir, bin, program (default vadd_diff.dawn)
+  local program="${3:-$here/vadd_diff.dawn}"
+  "$root/bin/dawn" __emitc --std "$1" "$program" -o "$2.c" > "$2.emit" 2>&1 ||
+    { cat "$2.emit" >&2; fail "native emit failed for $program against $1"; }
   "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -I "$root/runtime/c" -o "$2" "$2.c" "$rt_obj" -lm > "$2.cc" 2>&1 ||
-    { cat "$2.cc" >&2; fail "native compile failed against $1"; }
+    { cat "$2.cc" >&2; fail "native compile failed for $program against $1"; }
 }
 
 verdict_of() { # transcript
@@ -276,6 +297,30 @@ case "$verdict" in
   *) cat "$work/clean.err" >&2; fail "vadd_diff printed no verdict (exit $rc)" ;;
 esac
 note="$(sed -n 's/^  note  //p' "$work/clean.out" | head -n 1)"
+
+# ---- native, the boundary kernels (knife 7a)
+build_native "$root/std" "$work/masked.bin" "$here/mask_diff.dawn"
+rc=0
+"$work/masked.bin" "${masked_cubins[@]}" > "$work/masked.out" 2> "$work/masked.err" || rc=$?
+cat "$work/masked.out"
+masked_verdict="$(verdict_of "$work/masked.out")"
+case "$masked_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the six boundary kernels on the GPU are bit-identical to the fake device, tail lanes included" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $masked_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $masked_verdict" ;;
+  fail) cat "$work/masked.err" >&2; fail "the device answered and disagreed with the fake device on a boundary kernel (see the transcript above)" ;;
+  *) cat "$work/masked.err" >&2; fail "mask_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/masked.out" | head -n 1)"
+
+# The ledger records one verdict for the tree: both programs pass, or the
+# first thing that stopped one of them.
+if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ]; then
+  verdict=pass
+elif [ "$verdict" = pass ]; then
+  verdict="$masked_verdict"
+fi
 
 # ---- mutants: a copy of std with one anchor rewritten in std/gpu.dawn
 if command -v md5sum > /dev/null 2>&1; then
@@ -367,6 +412,60 @@ else
   echo "SKIP  mutant: grid-zero not verifiable on this driver: the clean run is $verdict, before any launch reaches the device"
 fi
 
+# 4. mask-all-true: the package's lowering answers an all-true `i1` constant
+#    where it should answer the comparison, so every kernel still carries a
+#    mask operand and every lane of it is 1. The text and the bytes move (a
+#    `--record` would take them), `tileiras` accepts them (an all-true mask
+#    is a mask), and on the device the last block reads and writes the lanes
+#    past the end of the vector: the sentinel in the output buffer's tail is
+#    overwritten and every one of the six kernels differs from the fake
+#    device. This is the claim only layer 2 can make, and the reason knife 7a
+#    is a boundary knife and not an arithmetic one.
+mutant_pkg="$work/pkg-mask-all-true"
+rm -rf "$mutant_pkg"
+cp -r "$root/packages/tileir" "$mutant_pkg"
+before=$(digest "$mutant_pkg/src/lower.dawn")
+python3 "$here/mutate.py" "$mutant_pkg/src/lower.dawn" mask-all-true \
+  'emit(l1, CmpInt(d, pred, i32_vec(n), i1_vec(n), a, b))' \
+  'emit(l1, ConstInt(d, i1_vec(n), 1))'
+after=$(digest "$mutant_pkg/src/lower.dawn")
+echo "      mask-all-true: packages/tileir/src/lower.dawn md5 $before -> $after"
+
+mkdir -p "$work/mk/src"
+cp "$golden/kernels.dawn" "$work/mk/src/main.dawn"
+cat > "$work/mk/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
+
+[deps]
+tileir = "$mutant_pkg"
+TOML
+mutant_cubins=()
+for k in "${masked[@]}"; do
+  "$root/bin/dawn" run "$work/mk" -- "$k" --bytecode "$work/m-$k.tilebc" > "$work/mk.$k.log" 2>&1 ||
+    { cat "$work/mk.$k.log" >&2; fail "mask-all-true: $k did not encode"; }
+  cmp -s "$golden/$k.tilebc" "$work/m-$k.tilebc" &&
+    fail "mask-all-true mutant stayed green: $k.tilebc is unchanged"
+  assemble_golden "$k" "$work/m-$k.tilebc" "$work/m-$k.cubin"
+  mutant_cubins+=("$work/m-$k.cubin")
+done
+echo "      mask-all-true: the six .tilebc files differ from the goldens and tileiras still accepts them"
+rc=0
+"$work/masked.bin" "${mutant_cubins[@]}" > "$work/m-mask-all-true.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-mask-all-true.out")"
+if [ "$masked_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-mask-all-true.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#masked[@]}" ]; then
+    cat "$work/m-mask-all-true.out" >&2
+    fail "mask-all-true mutant stayed green: expected verdict fail (exit 1) with all ${#masked[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  echo "PASS  mutant: mask-all-true (all ${#masked[@]} kernels write past the end of the vector; verdict fail, exit 1)"
+else
+  [ "$mverdict" = "$masked_verdict" ] ||
+    { cat "$work/m-mask-all-true.out" >&2; fail "mask-all-true: the clean run is $masked_verdict but the mutant is $mverdict; a mutant the driver never runs should be indistinguishable"; }
+  echo "SKIP  mutant: mask-all-true not verifiable on this driver: the clean run is $masked_verdict, before any launch reaches the device"
+fi
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -376,7 +475,8 @@ fi
 [ "$pinned_driver" = "$driver" ] ||
   fail "toolchain.txt says driver $pinned_driver and nvidia-smi says $driver: set the driver line to $driver, commit, and run again (the three numbers move together; the ledger commit adds a line and nothing else)"
 dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c \
-  scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn)"
+  scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn \
+  scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"

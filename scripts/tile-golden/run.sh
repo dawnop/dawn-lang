@@ -89,6 +89,13 @@
 #                            same claim (the rounding flag) is not a mutant
 #                            here: tileiras accepts every mode, so only the
 #                            device (scripts/tile-gpu-diff) could see it
+#     load-pad-flag-as-token the writer gives a masked load's padding value
+#                            the token's flag bit, so the flags promise one
+#                            operand and the body carries another -> the text
+#                            is untouched, the bytes are the same length and
+#                            differ, and tileiras loses the stream. The flag
+#                            bits are the whole of what says which optional
+#                            operands a memory operation carries
 #     bf16-tag-as-i16        the writer's type table gives bf16 the i16 tag
 #                            -> vadd_bf16's text is untouched, its bytes are
 #                            the same length and differ, and tileiras refuses
@@ -106,7 +113,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/tile-golden"
-kernels=(vadd vadd_f32 vadd_bf16 sum)
+kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -356,8 +363,8 @@ mutant_run_bytecode() { # name, kernel
 #    and renders (exit 0), and vadd's text differs from its golden on both
 #    backends, in the store line and nowhere else.
 mutant_project drop-store-token render.dawn \
-  ', ${name(value)} token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)} -> token' \
-  ', ${name(value)} : ${ty(ptr_ty)}, ${ty(val_ty)} -> token'
+  ' token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token' \
+  ' : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token'
 mutant_run drop-store-token vadd
 for backend in jvm native; do
   out="$work/m-drop-store-token.vadd.$backend"
@@ -375,8 +382,8 @@ echo "PASS  mutant: drop-store-token (vadd.mlir red on both backends; exactly th
 #    trace_kernel refuses it: non-zero exit, the refusal on stderr, nothing
 #    rendered. vadd, whose parameters are f64, is untouched on both backends.
 mutant_project load-dtype-f64 dev.dawn \
-  't_load(position(p), param_dtype(p), i, n)' \
-  't_load(position(p), "f64", i, n)'
+  't_load(position(p), param_dtype(p), i, n, none, none)' \
+  't_load(position(p), "f64", i, n, none, none)'
 mutant_run load-dtype-f64 vadd_f32
 mutant_run load-dtype-f64 vadd
 refusal='tileir: kernel `vadd_f32`: parameter 0 is declared f32, but a load reads it as f64'
@@ -487,8 +494,8 @@ writer_mutant_checks make-token-as-iota vadd same-size \
 #    takes the next byte, `return`'s opcode 0x5C, for the token's value index
 #    and refuses it: 92 is past the 27 values (3 parameters, 24 results).
 mutant_project store-token-unwritten bytecode.dawn \
-  'emit_ref(emit_ref(emit_ref(w1, ptrs), value), tok_in)' \
-  'emit_ref(emit_ref(w1, ptrs), value)'
+  'emit_ref(emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask), tok_in)' \
+  'emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask)'
 writer_mutant_checks store-token-unwritten vadd func-one-short \
   "operand index 92 out of bounds (size=27) for token segment"
 
@@ -545,8 +552,8 @@ writer_mutant_checks for-results-not-rolled-back sum same-size \
 #    still renders (exit 0) and differs from its golden in the addf line
 #    and nowhere else, on both backends.
 mutant_project addf-no-rounding render.dawn \
-  ' rounding<nearest_even> : ${ty(t)}"' \
-  ' : ${ty(t)}"'
+  'fn rounding(op: String) -> String = if rounds(op) { " rounding<nearest_even>" } else { "" }' \
+  'fn rounding(op: String) -> String = if rounds(op) { "" } else { "" }'
 mutant_run addf-no-rounding vadd_bf16
 for backend in jvm native; do
   out="$work/m-addf-no-rounding.vadd_bf16.$backend"
@@ -567,5 +574,19 @@ mutant_project bf16-tag-as-i16 bytecode.dawn \
   '  "bf16" -> 2'
 writer_mutant_checks bf16-tag-as-i16 vadd_bf16 same-size \
   "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi16>'"
+
+# 11. The writer gives the padding value the token's flag bit, so a masked
+#     load says "mask and token, no padding value" while its operand list
+#     still carries all three. The flags are the only thing that says how
+#     many operands follow, so the reader takes the padding value for the
+#     token and then reads the rest of the function one operand out of step.
+#     The text is untouched (the renderer prints the operand it was given,
+#     not the flag) and the file is the same length: a flag bit is a flag
+#     bit either way. Only layer 1 sees it.
+mutant_project load-pad-flag-as-token bytecode.dawn \
+  'const LOAD_FLAG_PAD: Int = 8' \
+  'const LOAD_FLAG_PAD: Int = 16'
+writer_mutant_checks load-pad-flag-as-token vadd_tail same-size \
+  "failed to get result type 0 for"
 
 echo "tile golden ok"
