@@ -72,7 +72,7 @@ fn origins_render(urls: List[String]) -> String = {
 ## The urls recorded for `hash` under cache root `root`. A missing record is
 ## an empty list, not an error: the entry may predate this file or have been
 ## copied in by hand.
-pub fn recorded_origins(root: String, hash: String) -> List[String] !Fs !io =
+pub fn recorded_origins(root: String, hash: String) -> List[String] !Fs =
   match io.read_file(origins_file(root, hash)) {
     Ok(t) -> origins_parse(t)
     Err(_) -> []
@@ -81,7 +81,7 @@ pub fn recorded_origins(root: String, hash: String) -> List[String] !Fs !io =
 ## Add `url` to `hash`'s record. A failed write is dropped on purpose: the
 ## record is an optimization over re-fetching, so losing it costs one download
 ## and never a build. Concurrent writers can lose an entry the same way.
-pub fn record_origin(root: String, hash: String, url: String) -> Unit !Fs !io = {
+pub fn record_origin(root: String, hash: String, url: String) -> Unit !Fs = {
   let have = recorded_origins(root, hash)
   for u in have { if u == url { return () } }
   mkdirs(origins_dir(root))
@@ -93,7 +93,7 @@ pub fn record_origin(root: String, hash: String, url: String) -> Unit !Fs !io = 
 
 fn zero_byte() -> Bytes = bytes.utf8(str.from_char('\u{0000}'))
 
-fn read_bytes(path: String) -> Result[Bytes, String] !Fs !io =
+fn read_bytes(path: String) -> Result[Bytes, String] !Fs =
   match io.read_bytes(path) {
     Ok(b) -> Ok(b)
     Err(e) -> Err("cannot read " ++ path ++ ": " ++ e.message)
@@ -101,7 +101,7 @@ fn read_bytes(path: String) -> Result[Bytes, String] !Fs !io =
 
 ## Regular files under `root`, sorted by relative path; symlinks are refused
 ## (they do not survive archives portably, so the hash refuses them).
-fn collect_files(root: String, rel: String) -> Result[List[String], String] !Fs !io = {
+fn collect_files(root: String, rel: String) -> Result[List[String], String] !Fs = {
   var out: List[String] = []
   let dir = if rel == "" { root } else { root ++ "/" ++ rel }
   match io.list_dir(dir) {
@@ -129,7 +129,7 @@ fn collect_files(root: String, rel: String) -> Result[List[String], String] !Fs 
 }
 
 ## The d1 canonical tree hash of a directory: `d1:` + 64 hex digits.
-pub fn tree_hash(root: String) -> Result[String, String] !Fs !io = {
+pub fn tree_hash(root: String) -> Result[String, String] !Fs = {
   let files = match collect_files(root, "") {
     Ok(fs) -> sort(fs)
     Err(e) -> return Err(e)
@@ -243,12 +243,12 @@ fn download(url: String) -> Result[Bytes, String] !Fs !io =
 
 # ---- unpack: zip or tar.gz, told apart by magic bytes ----
 
-fn mkdirs(path: String) -> Unit !Fs !io = {
+fn mkdirs(path: String) -> Unit !Fs = {
   let _ = io.mkdirs(path)
   ()
 }
 
-fn write_file_bytes(path: String, bs: Bytes) -> Result[Unit, String] !Fs !io = {
+fn write_file_bytes(path: String, bs: Bytes) -> Result[Unit, String] !Fs = {
   match str.last_index_of(path, "/") {
     Some(i) -> mkdirs(str.take(path, i))
     None -> ()
@@ -481,7 +481,7 @@ fn unpack(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !io =
 
 ## GitHub-style archives wrap everything in `<repo>-<tag>/`: when the unpacked
 ## root holds exactly one directory and nothing else, that directory is the tree.
-fn strip_single_top_dir(work: String) -> String !Fs !io =
+fn strip_single_top_dir(work: String) -> String !Fs =
   match io.list_dir(work) {
     Ok(names) ->
       if len(names) == 1 && io.is_dir(work ++ "/" ++ names[0]) {
@@ -494,7 +494,7 @@ fn strip_single_top_dir(work: String) -> String !Fs !io =
 
 ## Remove `path` and everything under it. A missing path is not an error, and
 ## a symbolic link is removed rather than followed.
-pub fn delete_tree(path: String) -> Unit !Fs !io = {
+pub fn delete_tree(path: String) -> Unit !Fs = {
   if io.is_dir(path) && not io.is_symlink(path) {
     match io.list_dir(path) {
       Ok(names) -> { for f in names { delete_tree(path ++ "/" ++ f) } }
@@ -579,7 +579,7 @@ fn fetch_into(url: String, work: String) -> Result[(String, String), String] !Fs
 ## claims (PKG-02): the cache is content-addressed, so the name is the
 ## declaration and a fresh d1 walk is the whole verification — hand edits,
 ## disk rot and a half-written concurrent unpack all surface as a mismatch.
-pub fn verify_cached(dir: String, hash: String) -> Result[Unit, String] !Fs !io =
+pub fn verify_cached(dir: String, hash: String) -> Result[Unit, String] !Fs =
   match tree_hash(dir) {
     Err(e) -> Err("cache entry " ++ dir ++ " is unreadable: " ++ e ++
         "\n  delete it and re-run; the next fetch re-downloads")

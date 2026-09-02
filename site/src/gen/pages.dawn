@@ -15,7 +15,7 @@ use gen/copy.{Copy, load_copy, line, body}
 use gen/fingerprint.{fingerprint}
 use gen/search.{read_api, search_index}
 
-fn parsed(path: String) -> List[Block] !Fs !io =
+fn parsed(path: String) -> List[Block] !Fs =
   match parse(must_read(path)) {
     Ok(bs) -> bs
     Err(e) -> panic("$path: $e")
@@ -32,7 +32,7 @@ fn parsed(path: String) -> List[Block] !Fs !io =
 # and with it the JVM-vs-native comparison site/README.md calls a project
 # tradition. std's byte IO is on both backends; scripts/site-dist-diff.sh is
 # what now says so.
-fn read_bin(src: String) -> Bytes !Fs !io =
+fn read_bin(src: String) -> Bytes !Fs =
   match io.read_bytes(src) {
     Ok(b) -> b
     Err(e) -> panic("cannot read $src: $e")
@@ -154,7 +154,7 @@ fn emit_bridge(out: String) -> String !Fs !io = {
     repoint(repoint(bridge_src("app.mjs"), "./reactor.mjs", reactor), "./dom.mjs", dom))
 }
 
-fn bridge_src(name: String) -> String !Fs !io = str.trim(must_read("packages/tea-dom/js/$name"))
+fn bridge_src(name: String) -> String !Fs = str.trim(must_read("packages/tea-dom/js/$name"))
 
 ## Point one vendored module at the name another really got.
 ##
@@ -203,14 +203,14 @@ fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String 
 # compiling, or one that still compiles and now prints something else, turns
 # the gate red. Reading it with must_read is the other half: a card cannot be
 # added without an expectation, because the build dies without the file.
-fn card_source(base: String) -> String !Fs !io =
+fn card_source(base: String) -> String !Fs =
   highlight_dawn(str.trim(must_read("$base.dawn")))
 
-fn card_output(base: String) -> String !Fs !io =
+fn card_output(base: String) -> String !Fs =
   `<pre class="output"><code>` ++ escape_html(str.trim(must_read("$base.out"))) ++
   "</code></pre>"
 
-fn hero_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String !Fs !io = {
+fn hero_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String !Fs = {
   let hl = card_source("site/pages/hero")
   let out = card_output("site/pages/hero")
   let eyebrow = line(c, "eyebrow", mu)
@@ -240,7 +240,7 @@ $out
 """
 }
 
-fn feature_block(title: String, desc: String, base: String) -> String !Fs !io = {
+fn feature_block(title: String, desc: String, base: String) -> String !Fs = {
   let hl = card_source(base)
   let out = card_output(base)
   """
@@ -260,7 +260,7 @@ $out</div>
 ## languages, because their comments are English like the rest of the code in
 ## this repository, and doc-check.py holds every one of them to the output
 ## printed next to it.
-fn feature_section(c: Copy, mu: fn(String) -> String) -> String !Fs !io = {
+fn feature_section(c: Copy, mu: fn(String) -> String) -> String !Fs = {
   let f1 = feature_block(line(c, "feature-effects-title", mu),
     line(c, "feature-effects-body", mu), "site/pages/feat_effects")
   let f2 = feature_block(line(c, "feature-comptime-title", mu),
@@ -481,7 +481,7 @@ $source
 ## Only the pure half: `main.dawn` is host wiring -- stdin, stdout and the
 ## reactor's exports -- and the point of the page above is that none of that is
 ## where the application lives.
-fn tea_source(summary: String, path: String) -> String !Fs !io = {
+fn tea_source(summary: String, path: String) -> String !Fs = {
   let src = str.trim(must_read(path))
   `<details class="tea-src"><summary>` ++ escape_html(summary) ++ "</summary>\n"
     ++ `<pre class="dawn"><code>` ++ highlight_dawn(src) ++ "</code></pre>\n</details>"
@@ -512,7 +512,7 @@ pub fn gen_tea(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
 ## The whole page as markup, without writing it -- which is what the tests
 ## below read, so that what they check is the document a browser gets and not
 ## a fragment assembled a second way.
-fn tea_page(a: Assets, lang: Lang, root: String) -> String !Fs !io = {
+fn tea_page(a: Assets, lang: Lang, root: String) -> String !Fs = {
   let c = tea_copy(lang, root,
     lang_path(lang, "examples/tea_dom_counter.html"),
     lang_path(lang, "examples/tea_dom_todo_keyed.html"))
