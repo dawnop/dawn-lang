@@ -72,7 +72,13 @@ pub type ProjectPlan = {
 ## A path in the one spelling the compiler compares module identities by:
 ## absolute and normalized. The language server needs the same answer, and
 ## used to reach it through its own copy of this line.
-pub fn canon(p: String) -> String !io = fspath.absolute(p, io.cwd())
+##
+## A path that is already absolute is normalized without asking the host where
+## it is. `absolute` ignores its base for such a path, but an argument is
+## evaluated whether or not the callee reads it, so the eager `io.cwd()` this
+## used to pass was one system call per path for an answer nobody looked at.
+pub fn canon(p: String) -> String !io =
+  if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
 fn seg_ok(s: String) -> Bool = {
   if s == "" { return false }
@@ -1056,9 +1062,14 @@ pub fn analyze_document(
 # paths still read `/tmp/...` because that is what a project directory looks
 # like; nothing under them is ever created.
 fn in_mem[T](body: fn() -> T !Fs !io) -> T !io = {
-  let (out, _) = fsmem.with_fs_mem(fsmem.mem_std(), body)
+  let (out, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE), body)
   out
 }
+
+# The std the table mounts, spelled absolutely. The bare `std` the command line
+# defaults to would be resolved against the process's working directory: one
+# host call per std file, for a base the table does not share.
+fn std_dir() -> String = fsmem.mem_std_dir(fsmem.MEM_BASE)
 
 fn mkdirs(p: String) -> Unit !Fs = {
   let _ = io.mkdirs(p)
@@ -1079,7 +1090,7 @@ test "a two-module project analyzes end to end" {
       "use std/str\npub fn greet(n: String) -> String = \"hi \" ++ str.trim(n)\n")
     put(root ++ "/src/main.dawn",
       "use util\npub fn main() -> Unit !io = println(util.greet(\" dawn \"))\n")
-    let std = match load_std("std") {
+    let std = match load_std(std_dir()) {
       Ok(sc) -> sc
       Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
@@ -1102,7 +1113,7 @@ test "the representation modules are closed to user code (audit RD-06)" {
     # import std/set's primitives and the bundle as a whole is checked with the
     # gate on. A std module that the gate wrongly refused would fail this load
     # with "does not check", so the two halves are one test.
-    let std = match load_std("std") {
+    let std = match load_std(std_dir()) {
       Ok(sc) -> sc
       Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
@@ -1138,7 +1149,7 @@ test "an impl is in force in every module, not just its own (spec §3.5)" {
         "pub fn main() -> Unit !io = println(to_string(lib.describe(Box { n: 1 }))\n" ++
         "  ++ to_string(lib.sizey(Box { n: 2 })) ++ to_string(sizey(Box { n: 3 }))\n" ++
         "  ++ to_string(Box { n: 4 }.sizey()) ++ to_string(Box { n: 5 }))\n")
-    let std = match load_std("std") {
+    let std = match load_std(std_dir()) {
       Ok(sc) -> sc
       Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
@@ -1169,7 +1180,7 @@ test "a second module cannot supply a rival impl" {
       "use lib.{Sizey, Box}\n" ++
         "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n }\n" ++
         "pub fn main() -> Unit !io = ()\n")
-    let std = match load_std("std") {
+    let std = match load_std(std_dir()) {
       Ok(sc) -> sc
       Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
@@ -1230,7 +1241,7 @@ test "a module alias collides with an imported name in either source order" {
     # bind_import catches `use a/b` before `use a/b.{b}` by reading the alias
     # table as it stands. Nothing read the name table on the way in, so the same
     # pair reversed used to pass and `b` became a binding *and* an alias (#185).
-    let std = match load_std("std") {
+    let std = match load_std(std_dir()) {
       Ok(sc) -> sc
       Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
@@ -1336,7 +1347,7 @@ test "the editor's standalone path judges the buffer's name too" {
     # editor, on the same file.
     let root = "/tmp/dawn-selfhost-analyze/standalone"
     mkdirs(root)
-    let std = match load_std("std") {
+    let std = match load_std(std_dir()) {
       Ok(sc) -> sc
       Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
@@ -1425,7 +1436,7 @@ test "an aliased path dep canonicalizes to the package's real name" {
 # ---- std identity (a file's provenance, never its module path) ----
 
 fn std_or_die() -> StdCtx !Fs !io =
-  match load_std("std") {
+  match load_std(std_dir()) {
     Ok(sc) -> sc
     Err(e) -> panic("std: " ++ std_load_error_text(e))
   }
@@ -1454,13 +1465,13 @@ test "every bundled std source checks clean on its own" {
     # This walks modules.txt rather than listing names, so a std module added
     # later is covered the day it is added.
     let std = std_or_die()
-    let names = match read_index("std") {
+    let names = match read_index(std_dir()) {
       Ok(ns) -> ns
       Err(e) -> panic("std index: " ++ e)
     }
     assert len(names) > 0
     for n in names {
-      let file = "std/" ++ n ++ ".dawn"
+      let file = std_dir() ++ "/" ++ n ++ ".dawn"
       let prog = analyze_program(load_file(file), std, ct_default(), jsig_refused())
       if len(prog.diags) > 0 { println(file ++ ": " ++ prog.diags[0].d.msg) }
       assert len(prog.diags) == 0
@@ -1484,7 +1495,7 @@ test "std identity is where the file came from, not what the module is called" {
     let root = "/tmp/dawn-selfhost-analyze/stdspell"
     mkdirs(root ++ "/src/std")
     let impostor = root ++ "/src/std/cursor.dawn"
-    put(impostor, slurp("std/cursor.dawn"))
+    put(impostor, slurp(std_dir() ++ "/cursor.dawn"))
     let prog = analyze_program(load_file(impostor), std, ct_default(), jsig_refused())
     assert len(prog.modules) == 1
     assert prog.modules[0].mod_path == "std/cursor"
@@ -1493,7 +1504,7 @@ test "std identity is where the file came from, not what the module is called" {
     assert has_msg(prog, "undefined function: cursor_start")
 
     # the same question asked directly, on the same module path, twice
-    assert std_module_of(std, "std/cursor.dawn") == Some("std/cursor")
+    assert std_module_of(std, std_dir() ++ "/cursor.dawn") == Some("std/cursor")
     let absent: Option[String] = None
     assert std_module_of(std, impostor) == absent
   })
@@ -1531,8 +1542,9 @@ test "the editor's standalone path gives a bundled std buffer its std identity" 
     # names every buffer `main` -- so the buffer's name can never be the
     # evidence, and this is the case a name-shaped fix cannot reach.
     let std = std_or_die()
-    let text = slurp("std/cursor.dawn")
-    let prog = analyze_standalone("std/cursor.dawn", text, std, ct_default(), jsig_refused())
+    let text = slurp(std_dir() ++ "/cursor.dawn")
+    let prog =
+      analyze_standalone(std_dir() ++ "/cursor.dawn", text, std, ct_default(), jsig_refused())
     assert len(prog.diags) == 0
     assert standalone_entry(prog) == "std/cursor"
 
@@ -1547,7 +1559,8 @@ test "the editor's standalone path gives a bundled std buffer its std identity" 
 
     # and the project-aware branch, for a std module with `use` edges of its own
     let doc = analyze_document_planned(
-      "std/list.dawn", slurp("std/list.dawn"), std, ct_default(), jsig_refused())
+      std_dir() ++ "/list.dawn", slurp(std_dir() ++ "/list.dawn"), std, ct_default(),
+      jsig_refused())
     assert len(doc.prog.diags) == 0
     assert doc.entry == "std/list"
   })
@@ -1560,13 +1573,14 @@ test "the bundled std directory is not a project target" {
     # one. Recognised by provenance, so a project that happens to be called
     # `std` still gets the project diagnostics.
     let std = std_or_die()
-    let refusal = match std_dir_target(std, "std") {
+    let refusal = match std_dir_target(std, std_dir()) {
       Some(lr) -> lr
       None -> panic("the loaded std directory was not recognised")
     }
     assert len(refusal.modules) == 0
     assert len(refusal.diags) == 1
-    assert refusal.diags[0].d.msg == "`std` is the bundled standard library, not a Dawn project"
+    assert refusal.diags[0].d.msg ==
+      "`" ++ std_dir() ++ "` is the bundled standard library, not a Dawn project"
 
     let root = "/tmp/dawn-selfhost-analyze/notthebundle/std"
     mkdirs(root ++ "/src")
@@ -1587,7 +1601,7 @@ test "the analysis reads the declared tree, and no file system behind it" {
   # to ask). Both are questions about the table now.
   let root = "/tmp/dawn-selfhost-analyze/never-on-disk"
   let main_src = "use util\npub fn main() -> Unit !io = println(util.tag())\n"
-  let (_, table) = fsmem.with_fs_mem(fsmem.mem_std(), () => {
+  let (_, table) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE), () => {
     mkdirs(root ++ "/src")
     put(root ++ "/src/main.dawn", main_src)
     put(root ++ "/src/util.dawn", "pub fn tag() -> String = \"t\"\n")
@@ -1596,7 +1610,7 @@ test "the analysis reads the declared tree, and no file system behind it" {
     assert len(loaded.modules) == 2
     # the loader's text is the text this test wrote, not a file's contents
     assert loaded.modules[1].text == main_src
-    let std = match load_std("std") {
+    let std = match load_std(std_dir()) {
       Ok(sc) -> sc
       Err(e) -> panic("std: " ++ std_load_error_text(e))
     }
