@@ -4710,7 +4710,9 @@ dawn_adt *dawn_gpu_upload_host(int64_t devptr, const dawn_array *data) {
   if (e != NULL) return e;
   int64_t n = dawn_array_len(data);
   double *buf = (double *)dawn_alloc((size_t)(n > 0 ? n : 1) * sizeof(double));
-  for (int64_t i = 0; i < n; i++) buf[i] = dawn_unbox_float(dawn_array_get(data, i));
+  /* the slots are borrowed: read them, do not `dawn_unbox_*` them, which
+   * releases the box (see the note above dawn_unbox_int) */
+  for (int64_t i = 0; i < n; i++) buf[i] = ((dawn_box *)dawn_array_get(data, i))->val.f;
   dawn_cu_result r = dawn_gpu.memcpy_htod((dawn_cu_deviceptr)devptr, buf, (size_t)n * sizeof(double));
   free(buf);
   if (r != 0) return dawn_gpu_cu_error("cuMemcpyHtoD_v2", r);
@@ -4757,7 +4759,7 @@ dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t grid,
     (dawn_cu_deviceptr *)dawn_alloc((size_t)(n > 0 ? n : 1) * sizeof(dawn_cu_deviceptr));
   void **params = (void **)dawn_alloc((size_t)(n > 0 ? n : 1) * sizeof(void *));
   for (int64_t i = 0; i < n; i++) {
-    ptrs[i] = (dawn_cu_deviceptr)dawn_unbox_int(dawn_array_get(args, i));
+    ptrs[i] = (dawn_cu_deviceptr)((dawn_box *)dawn_array_get(args, i))->val.i; /* borrowed */
     params[i] = &ptrs[i];
   }
   r = dawn_gpu.launch_kernel(fn, (unsigned int)grid, 1, 1, 1, 1, 1, 0, NULL, params, NULL);

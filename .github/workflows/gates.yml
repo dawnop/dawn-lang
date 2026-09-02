@@ -1121,12 +1121,24 @@ jobs:
   # kernel and three mutants). With the checkout and the toolchain action
   # (~45s, the carried estimate) that is 45 + 25 + 100 = 170s; doubled for
   # a cold runner, 340s. Under the run pole.
+  #
+  # The last step is layer 2's ledger gate (docs 6.4, decision D4):
+  # scripts/tile-gpu-diff/run.sh --check reads the last line of
+  # scripts/tile-gpu-diff/ledger.txt and requires its commit to be an
+  # ancestor of HEAD with no tile path changed since, its result pass or
+  # blocked, and toolchain.txt's driver line to agree. The GPU run itself
+  # happens on a developer machine with a driver (the runner has none);
+  # the gate proves it happened at this tree. A few git commands, well
+  # under a second, and no change to the budget; the checkout is full
+  # depth because the ancestry test needs the history.
   tile:
     runs-on: ubuntu-latest
     # budget: 3x 340s planning value (170s local, doubled)
     timeout-minutes: 17
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: ./.github/actions/dawn-toolchain
         with:
@@ -1140,6 +1152,9 @@ jobs:
 
       - name: tile IR goldens and tileiras (both backends, five mutants)
         run: ./scripts/tile-golden/run.sh
+
+      - name: GPU diff ledger is current (layer 2 ran at this tree)
+        run: ./scripts/tile-gpu-diff/run.sh --check
 
   # The checker's diagnostics, recorded in the order `cerr` appends them.
   # Nothing else here can see them -- grammar-corpus stops at the parser,
