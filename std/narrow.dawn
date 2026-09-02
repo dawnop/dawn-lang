@@ -1,0 +1,422 @@
+## Narrow binary floating point: bfloat16, IEEE binary16 and binary32 as
+## opaque types over Float, with correctly rounded arithmetic on each.
+#
+# Dawn has one floating type, the 64-bit `Float`. Code that wants to know what
+# a computation does at a narrower width (quantised weights, a kernel that
+# will run on hardware in bf16) needs the narrow formats as *values* whose
+# every operation rounds the way the hardware rounds. There is no
+# float-to-bits primitive and the operators are not user traits (spec 3.5),
+# so this is not a new numeric type; it is three opaque types (spec 2.7) whose
+# invariant is "the Float inside is representable in the format", a rounding
+# function that establishes it, and a trait whose every operation re-rounds.
+#
+# Why "compute in Float, then round" is the format's own answer, and for
+# which operations: Figueroa's double-rounding theorem. When the wide format
+# has at least 2p + 2 significand bits, rounding the exact result to wide and
+# then to narrow equals rounding it to narrow once, for + - * / and square
+# root. Float has 53 bits; the widest format here needs 2 * 24 + 2 = 50. So
+# `add`, `sub`, `mul` and `div` below are the correctly rounded operations of
+# their format, bit for bit, and scripts/narrow-contract pins that against an
+# exact rational oracle on both backends. `sqrt` is correctly rounded too,
+# by a different route: Dawn has no Float square root primitive, and a
+# p-bit root needs only about 2p + 2 bits of integer work, so it is computed
+# exactly in Int and never rounds twice. The theorem does not cover fused
+# multiply-add or the transcendental functions, and neither is offered: a
+# `bf16` exp would be "exp in Float, then round", which is a definition and
+# not the hardware's answer, and a name that looks like the others while
+# meaning something weaker is the mistake this module is here to avoid.
+#
+# `round_binary` is pure arithmetic on purpose. Without `float_to_bits` the
+# exponent is found by exact doublings and halvings, the significand is
+# scaled to the integer domain by an exact power of two, `to_int` truncates
+# it and ties are broken by hand. That is a few hundred iterations in the
+# worst case (a Float subnormal), which is what a reference implementation
+# may cost; a faster decomposition would be held to the same oracle.
+#
+# The widening member is `to_f64` and not `to_float`: a trait method shadows
+# the builtin of the same spelling throughout the declaring module (spec
+# 10.3), and `round_binary` needs the builtin `to_float` to bring its integer
+# significand back.
+
+# ---- the formats ----
+
+## A bfloat16 value: 8 significand bits, exponents -126..127.
+pub opaque type BF16 = Float
+
+## An IEEE binary16 value: 11 significand bits, exponents -14..15.
+pub opaque type FP16 = Float
+
+## An IEEE binary32 value: 24 significand bits, exponents -126..127.
+pub opaque type F32 = Float
+
+# ---- rounding ----
+
+## The nearest value of the binary format with `p` significand bits (hidden
+## bit included), minimum normal exponent `emin` and maximum exponent `emax`,
+## ties to even. Above the largest finite value the answer is the infinity of
+## the sign; below the normal range it lies on the subnormal grid
+## 2^(emin - p + 1), and may be zero of the sign. NaN, the two zeros and the
+## two infinities pass through unchanged.
+pub fn round_binary(x: Float, p: Int, emin: Int, emax: Int) -> Float =
+  if x != x || x == 0.0 {
+    x
+  } else {
+    let neg = x < 0.0
+    let a = if neg { -x } else { x }
+    let inf = 1.0 / 0.0
+    if a == inf {
+      x
+    } else {
+      let e = exponent(a)
+      # the quantum: one unit in the last place at this exponent, clamped
+      # to the subnormal grid below emin
+      let qe = (if e < emin { emin } else { e }) - p + 1
+      let q = pow2(qe)
+      # a / q is exact (a power-of-two scaling), and lies below 2^p, so
+      # `to_int` truncates without saturating; the tie is broken by hand
+      let m = a / q
+      let fl = to_int(m)
+      let r = m - to_float(fl)
+      let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else if fl % 2 == 0 { fl } else { fl + 1 }
+      let v = to_float(n) * q
+      # the largest finite value is (2 - 2^(1 - p)) * 2^emax; a result above
+      # it (a carry out of the top exponent included) is the infinity
+      let max_finite = (2.0 - pow2(1 - p)) * pow2(emax)
+      let out = if v > max_finite { inf } else { v }
+      if neg { -out } else { out }
+    }
+  }
+
+# 2^k by exact doublings or halvings; k stays within Float's exponent range
+# for every caller here (the quantum of a Float subnormal is 2^-1074).
+fn pow2(k: Int) -> Float = {
+  var q = 1.0
+  var i = k
+  while i > 0 {
+    q = q * 2.0
+    i = i - 1
+  }
+  while i < 0 {
+    q = q * 0.5
+    i = i + 1
+  }
+  q
+}
+
+## `x` rounded to bfloat16.
+pub fn round_bf16(x: Float) -> Float = round_binary(x, 8, -126, 127)
+
+## `x` rounded to binary16.
+pub fn round_fp16(x: Float) -> Float = round_binary(x, 11, -14, 15)
+
+## `x` rounded to binary32.
+pub fn round_f32(x: Float) -> Float = round_binary(x, 24, -126, 127)
+
+# ---- construction ----
+
+## The bfloat16 nearest to `x`.
+pub fn bf16(x: Float) -> BF16 = round_bf16(x)
+
+## The binary16 nearest to `x`.
+pub fn fp16(x: Float) -> FP16 = round_fp16(x)
+
+## The binary32 nearest to `x`.
+pub fn f32(x: Float) -> F32 = round_f32(x)
+
+# ---- arithmetic ----
+
+## The operations every narrow format offers. `add`, `sub`, `mul`, `div` and
+## `sqrt` are the format's correctly rounded operations (ties to even, overflow
+## to infinity, gradual underflow); `neg` and `abs` are exact. Equality and
+## order are the Float's, as on any opaque type, so `==` and `<` need no
+## member.
+pub trait Narrow[T] {
+  ## The value as a Float; exact, since every value of the format is one.
+  fn to_f64(a: T) -> Float
+  ## Correctly rounded sum.
+  fn add(a: T, b: T) -> T
+  ## Correctly rounded difference.
+  fn sub(a: T, b: T) -> T
+  ## Correctly rounded product.
+  fn mul(a: T, b: T) -> T
+  ## Correctly rounded quotient.
+  fn div(a: T, b: T) -> T
+  ## Correctly rounded square root.
+  fn sqrt(a: T) -> T
+  ## The negation.
+  fn neg(a: T) -> T
+  ## The magnitude.
+  fn abs(a: T) -> T
+}
+
+impl Narrow[BF16] {
+  fn to_f64(a: BF16) -> Float = a
+  fn add(a: BF16, b: BF16) -> BF16 = {
+    let x: Float = a
+    let y: Float = b
+    round_bf16(x + y)
+  }
+  fn sub(a: BF16, b: BF16) -> BF16 = {
+    let x: Float = a
+    let y: Float = b
+    round_bf16(x - y)
+  }
+  fn mul(a: BF16, b: BF16) -> BF16 = {
+    let x: Float = a
+    let y: Float = b
+    round_bf16(x * y)
+  }
+  fn div(a: BF16, b: BF16) -> BF16 = {
+    let x: Float = a
+    let y: Float = b
+    round_bf16(x / y)
+  }
+  fn sqrt(a: BF16) -> BF16 = {
+    let x: Float = a
+    sqrt_binary(x, 8)
+  }
+  fn neg(a: BF16) -> BF16 = {
+    let x: Float = a
+    -x
+  }
+  fn abs(a: BF16) -> BF16 = {
+    let x: Float = a
+    magnitude(x)
+  }
+}
+
+impl Narrow[FP16] {
+  fn to_f64(a: FP16) -> Float = a
+  fn add(a: FP16, b: FP16) -> FP16 = {
+    let x: Float = a
+    let y: Float = b
+    round_fp16(x + y)
+  }
+  fn sub(a: FP16, b: FP16) -> FP16 = {
+    let x: Float = a
+    let y: Float = b
+    round_fp16(x - y)
+  }
+  fn mul(a: FP16, b: FP16) -> FP16 = {
+    let x: Float = a
+    let y: Float = b
+    round_fp16(x * y)
+  }
+  fn div(a: FP16, b: FP16) -> FP16 = {
+    let x: Float = a
+    let y: Float = b
+    round_fp16(x / y)
+  }
+  fn sqrt(a: FP16) -> FP16 = {
+    let x: Float = a
+    sqrt_binary(x, 11)
+  }
+  fn neg(a: FP16) -> FP16 = {
+    let x: Float = a
+    -x
+  }
+  fn abs(a: FP16) -> FP16 = {
+    let x: Float = a
+    magnitude(x)
+  }
+}
+
+impl Narrow[F32] {
+  fn to_f64(a: F32) -> Float = a
+  fn add(a: F32, b: F32) -> F32 = {
+    let x: Float = a
+    let y: Float = b
+    round_f32(x + y)
+  }
+  fn sub(a: F32, b: F32) -> F32 = {
+    let x: Float = a
+    let y: Float = b
+    round_f32(x - y)
+  }
+  fn mul(a: F32, b: F32) -> F32 = {
+    let x: Float = a
+    let y: Float = b
+    round_f32(x * y)
+  }
+  fn div(a: F32, b: F32) -> F32 = {
+    let x: Float = a
+    let y: Float = b
+    round_f32(x / y)
+  }
+  fn sqrt(a: F32) -> F32 = {
+    let x: Float = a
+    sqrt_binary(x, 24)
+  }
+  fn neg(a: F32) -> F32 = {
+    let x: Float = a
+    -x
+  }
+  fn abs(a: F32) -> F32 = {
+    let x: Float = a
+    magnitude(x)
+  }
+}
+
+# `<=` rather than `<` so that -0.0 comes out as +0.0, as the IEEE operation
+# does. NaN is not <= 0 and passes through.
+fn magnitude(x: Float) -> Float = if x <= 0.0 { 0.0 - x } else { x }
+
+# The correctly rounded p-bit square root of `x`, a value of the p-bit format.
+#
+# Scale x by an even power of two to an integer N in [2^(2p), 2^(2p + 2)), so
+# that sqrt(N) is in [2^p, 2^(p + 1)): p bits plus one. Scaling is exact
+# because x has at most p significant bits (the caller's invariant) and N is
+# at most 50 bits. The integer root t = floor(sqrt(N)) then carries the p-bit
+# significand in its high bits, the rounding bit in its low bit, and whether
+# anything was thrown away in N - t * t. A square root is never exactly
+# halfway between two p-bit values (the square of a midpoint has 2p + 2
+# significant bits and x has p), so the tie branch is unreachable and kept
+# only so the rule reads whole. No overflow or underflow is possible: the
+# root of the largest finite value is finite and the root of the smallest
+# subnormal is a normal number.
+fn sqrt_binary(x: Float, p: Int) -> Float =
+  if x != x || x == 0.0 || x == 1.0 / 0.0 {
+    x
+  } else if x < 0.0 {
+    0.0 / 0.0
+  } else {
+    let e = exponent(x)
+    # 2k = 2p - e, made even by taking one more when e is odd
+    let k2 = if e % 2 == 0 { 2 * p - e } else { 2 * p - e + 1 }
+    let n = to_int(x * pow2(k2))
+    let t = isqrt(n)
+    let q = t / 2
+    let rounded = if t % 2 == 0 {
+      q
+    } else if t * t != n {
+      q + 1
+    } else if q % 2 == 0 {
+      q
+    } else {
+      q + 1
+    }
+    # sqrt(x) = sqrt(N) / 2^k, and sqrt(N) rounds to 2 * rounded
+    to_float(rounded) * pow2(1 - k2 / 2)
+  }
+
+# floor(sqrt(n)) for n >= 0, by Newton's method from a power-of-two
+# overestimate; the iterate decreases monotonically to the answer.
+fn isqrt(n: Int) -> Int =
+  if n < 2 {
+    n
+  } else {
+    var guess = 1
+    while guess * guess < n {
+      guess = guess * 2
+    }
+    var next = (guess + n / guess) / 2
+    while next < guess {
+      guess = next
+      next = (guess + n / guess) / 2
+    }
+    guess
+  }
+
+# e with 2^e <= x < 2^(e + 1), for finite positive x, by exact doublings and
+# halvings of a running power of two.
+fn exponent(x: Float) -> Int = {
+  var pow = 1.0
+  var e = 0
+  while x >= pow * 2.0 {
+    pow = pow * 2.0
+    e = e + 1
+  }
+  while x < pow {
+    pow = pow * 0.5
+    e = e - 1
+  }
+  e
+}
+
+# ---- tests ----
+#
+# Representative cases only. The exact-oracle corpus that pins every path of
+# `round_binary` and every trait operation on both backends, boundaries and
+# random bit patterns alike, is scripts/spike-native/narrow_round.dawn, which
+# scripts/narrow-contract generates from a rational oracle.
+
+test "rounding breaks ties to even and rounds away otherwise" {
+  # 1 + 2^-8 sits exactly between 1 and 1 + 2^-7 in bf16; the even one wins
+  assert round_bf16(1.0 + 1.0 / 256.0) == 1.0
+  # 1 + 3 * 2^-8 sits between 1 + 2^-7 and 1 + 2^-6; even is the upper one
+  assert round_bf16(1.0 + 3.0 / 256.0) == 1.0 + 1.0 / 64.0
+  # just above the midpoint rounds up, just below rounds down
+  assert round_bf16(1.0 + 3.0 / 512.0) == 1.0 + 1.0 / 128.0
+  assert round_bf16(1.0 + 1.0 / 512.0) == 1.0
+  # the same tie in the two other formats, at their own last places
+  assert round_fp16(1.0 + 1.0 / 2048.0) == 1.0
+  assert round_f32(1.0 + 1.0 / 16777216.0) == 1.0
+}
+
+test "rounding overflows to infinity and keeps the largest finite value" {
+  let inf = 1.0 / 0.0
+  # bf16 max finite is (2 - 2^-7) * 2^127
+  assert round_bf16(3.3895313892515355e38) == 3.3895313892515355e38
+  assert round_bf16(3.4e38) == inf
+  assert round_bf16(-3.4e38) == -inf
+  # fp16 max finite is 65504; 65520 is the midpoint above it and rounds even,
+  # which is the carry out of the top exponent, so infinity
+  assert round_fp16(65504.0) == 65504.0
+  assert round_fp16(65519.0) == 65504.0
+  assert round_fp16(65520.0) == inf
+  # f32 max finite
+  assert round_f32(3.4028234663852886e38) == 3.4028234663852886e38
+  assert round_f32(3.4028235677973366e38) == inf
+  # the non-finite values pass through
+  assert round_bf16(inf) == inf
+  assert round_fp16(-inf) == -inf
+  let nan = round_f32(0.0 / 0.0)
+  assert nan != nan
+}
+
+test "rounding lands tiny values on the subnormal grid" {
+  # the bf16 subnormal quantum is 2^-133; 1e-40 is 1.09 quanta, so one
+  assert round_bf16(1.0e-40) == 9.183549615799121e-41
+  # the smallest bf16 subnormal, and half of it, which is a tie down to zero
+  assert round_bf16(9.183549615799121e-41) == 9.183549615799121e-41
+  assert round_bf16(4.591774807899561e-41) == 0.0
+  # a negative underflow is the negative zero
+  assert 1.0 / round_bf16(-4.591774807899561e-41) == -1.0 / 0.0
+  # fp16: quantum 2^-24, so 1e-7 (1.68 quanta) rounds to two of them
+  assert round_fp16(1.0e-7) == 1.1920928955078125e-7
+  # f32: the smallest subnormal is 2^-149
+  assert round_f32(1.401298464324817e-45) == 1.401298464324817e-45
+  assert round_f32(1.0e-46) == 0.0
+  # a Float subnormal is far below every grid here
+  assert round_bf16(5.0e-324) == 0.0
+  assert round_f32(5.0e-324) == 0.0
+}
+
+test "the trait operations are the format's, with the theorem's rounding" {
+  # bf16 cannot hold 1 + 2^-8: the sum of two exact operands ties to even
+  let one = bf16(1.0)
+  let tiny = bf16(1.0 / 256.0)
+  assert to_f64(add(one, tiny)) == 1.0
+  assert to_f64(add(bf16(1.0 + 1.0 / 128.0), tiny)) == 1.0 + 1.0 / 64.0
+  # 0.1 is not a bf16; the constructor rounds and the value is closed
+  assert to_f64(bf16(0.1)) == 0.10009765625
+  assert to_f64(mul(bf16(0.1), bf16(3.0))) == round_bf16(0.10009765625 * 3.0)
+  # division and square root round the same way
+  assert to_f64(div(bf16(1.0), bf16(3.0))) == 0.333984375
+  assert to_f64(sqrt(bf16(2.0))) == 1.4140625
+  assert to_f64(sqrt(fp16(2.0))) == 1.4140625
+  assert to_f64(sqrt(f32(2.0))) == 1.4142135381698608
+  # overflow is the infinity, underflow the zero of the sign
+  let inf = 1.0 / 0.0
+  assert to_f64(mul(bf16(3.0e38), bf16(2.0))) == inf
+  assert to_f64(div(fp16(1.0), fp16(0.0))) == inf
+  assert 1.0 / to_f64(mul(fp16(-1.0e-7), fp16(0.25))) == -inf
+  # the exact operations
+  assert to_f64(neg(bf16(1.5))) == -1.5
+  assert to_f64(abs(bf16(-1.5))) == 1.5
+  assert 1.0 / to_f64(abs(bf16(-0.0))) == inf
+  assert to_f64(sub(f32(1.0), f32(1.0e-8))) == 1.0
+  # equality and order are the Float's
+  assert bf16(1.0) == bf16(1.0 + 1.0 / 512.0)
+  assert bf16(1.0) < bf16(1.01)
+}

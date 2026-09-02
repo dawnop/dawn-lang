@@ -278,9 +278,15 @@ jobs:
     # evidence corpus 2026-08-31 is one `dawn run` and one `dawn test` of a
     # small program, 2.0s locally for the pair; doubled and rounded up, the
     # planning value is 265 + 4 = 269s, whose 3x is 807s and still inside this
-    # job's fourteen minutes, so the timeout does not move.
-    # budget: 3x 269s planning value (265s worst observed + 4s)
-    timeout-minutes: 14
+    # job's fourteen minutes, so the timeout does not move. The narrow
+    # contract step added 2026-09-02 is 27s locally (one generator check, the
+    # corpus on both backends as the clean control, and three mutants at one
+    # JVM run plus one C build and run each; the runtime object is built
+    # once); doubled, the planning value is 269 + 54 = 323s, whose 3x is 969s,
+    # so the timeout goes to 17. The run's wall clock does not move: 323s is
+    # far under the native-diff pole.
+    # budget: 3x 323s planning value (265s worst observed + 4s + 54s)
+    timeout-minutes: 17
     steps:
       - uses: actions/checkout@v4
 
@@ -299,6 +305,18 @@ jobs:
       # learned a flag instead.
       - name: standard library tests
         run: ./bin/dawn test --stdlib
+
+      # std/narrow's rounding against an exact rational oracle. Both backends
+      # compile the same Dawn source, so their agreement (native-diff runs the
+      # same corpus entry) cannot see a wrong rounding rule: the generator in
+      # scripts/narrow-contract is the outside opinion, and the corpus is its
+      # output written down as literals. The step checks the corpus is what
+      # the generator generates, runs it on both backends, and then removes
+      # each of the three rounding rules in turn (ties to even, the subnormal
+      # clamp, the overflow threshold) from a copy of std and requires the
+      # section that owns the rule to go red on both backends. 27s locally.
+      - name: narrow float contract (exact oracle, both backends, three mutants)
+        run: ./scripts/narrow-contract/run.sh
 
       # compiler-plan is an internal top-level package, not one of the
       # publishable packages/* discovered below. Its inline tests own the
@@ -932,6 +950,15 @@ jobs:
       # `!io` one (a continuation carries its remainder's io bit now); the
       # pure spelling is a checker-corpus refusal (`continuation_row.dawn`)
       # and the program's output is unchanged, so nothing here moved.
+      #
+      # `narrow_round`, added 2026-09-02 with std/narrow, is a both-backends
+      # entry and the largest program in the corpus (3,470 generated lines of
+      # Float literals): one emitc, two cc builds, three runs. 18.5s serially
+      # (SPIKE_JOBS=1, the entry alone). Two interleaved pairs on an idle
+      # machine: 331/316s without it and 331/318s with, so +0s and +2s. The
+      # budget line is not restated for `effect_handler_state`'s reason: a
+      # corpus this parallel absorbs one entry into a scheduling gap, and
+      # 557s is a runner observation on an unchanged script.
       - name: native differential (both backends, plus written expectations)
         run: ./scripts/spike-native/run.sh
 

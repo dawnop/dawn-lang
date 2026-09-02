@@ -1,0 +1,74 @@
+# std/narrow's three opaque types are over Float, and the module gives them no
+# impl of their own for equality, order or rendering: `==`, `<` and
+# `to_string` on a BF16 are meant to be the Float's, which is exactly the
+# property this gate is named for. The declaration lives in std, where the
+# sed on this file cannot reach it, so this case does what char.dawn does:
+# declares a twin of its own so the substitution still runs, and checks every
+# claim about the narrow types *against the Float inside*, in one run, with a
+# `panic` on disagreement. Printing alone would not do -- a wrong answer that
+# both spellings agree on is an empty diff (run.sh's header).
+#
+# Hashing and `cmp`/`sort` are not among the claims: Float is neither a
+# `Hash` key nor `Ord` (NaN leaves it without a total order), so neither is
+# an opaque type over it, and a `Map[BF16, _]` or a `sort` of them is a
+# compile error on both sides. `<` is the order Float does have, and it is
+# checked.
+#
+# What is deliberately not compared: the arithmetic. `narrow.add(a, b)` is not
+# `to_f64(a) + to_f64(b)` -- it rounds -- and spec 2.7 says the conversion is
+# at assignment, argument and return position and never inside an
+# expression, so `a + b` on a BF16 is a compile error in both spellings. The
+# exact values the arithmetic must produce are the narrow contract's
+# (scripts/narrow-contract), not the twin's.
+use std/io
+use std/narrow
+
+opaque type Twin = Float
+
+fn same(what: String, a: String, b: String) -> Unit =
+  if a != b { panic("BF16 disagrees with Float about " ++ what ++ ": " ++ a ++ " vs " ++ b) } else { () }
+
+pub fn main() -> Unit !io = {
+  let x = narrow.bf16(0.1)
+  let y = narrow.bf16(1.5)
+  let z = narrow.bf16(0.1 + 1.0 / 1024.0)
+  let fx = narrow.to_f64(x)
+  let fy = narrow.to_f64(y)
+  let fz = narrow.to_f64(z)
+  let t: Twin = 1.5
+
+  println("-- the value inside is the rounded Float, and it renders as one --")
+  same("to_string", to_string(x), to_string(fx))
+  same("interpolation", "${x}", "${fx}")
+  same("show", show(x), show(fx))
+  same("in a list", to_string([x, y]), to_string([fx, fy]))
+  println(to_string(x))
+  println("${y}")
+  println(to_string([x, y]))
+
+  println("-- equality is the Float's: two inputs that round to one value are equal --")
+  same("eq", to_string(x == z), to_string(fx == fz))
+  same("neq", to_string(x == y), to_string(fx == fy))
+  println(to_string(x == z))
+  println(to_string(x == y))
+
+  println("-- order is the Float's --")
+  same("lt", to_string(x < y), to_string(fx < fy))
+  same("gt", to_string(y < x), to_string(fy < fx))
+  println(to_string(x < y))
+
+  println("-- the other two formats, the same way --")
+  let h = narrow.fp16(0.1)
+  let s = narrow.f32(0.1)
+  same("fp16 to_string", to_string(h), to_string(narrow.to_f64(h)))
+  same("f32 to_string", to_string(s), to_string(narrow.to_f64(s)))
+  same("fp16 eq", to_string(h == narrow.fp16(0.1 + 1.0e-6)), to_string(narrow.to_f64(h) == narrow.to_f64(narrow.fp16(0.1 + 1.0e-6))))
+  same("f32 lt", to_string(s < narrow.f32(0.2)), to_string(narrow.to_f64(s) < 0.2))
+  println(to_string(h))
+  println(to_string(s))
+
+  println("-- the declared twin beside it --")
+  println(to_string(t == t))
+  println("${t}")
+  println(to_string(t < t))
+}
