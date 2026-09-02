@@ -266,12 +266,30 @@ def matching_delimiter(code, pos):
     return len(code)
 
 
+def body_brace(code, pos):
+    """First brace at header depth, after any grouped condition/scrutinee."""
+    stack = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    while pos < len(code):
+        c = code[pos]
+        if c == "{" and not stack:
+            return pos
+        if c in "([{":
+            stack.append(c)
+        elif c in ")]}":
+            if not stack or stack[-1] != pairs[c]:
+                return -1
+            stack.pop()
+        pos += 1
+    return -1
+
+
 def if_arm_bodies(expr, code, start):
     """Return the bodies of one `if` / `else if` / `else` expression."""
     out = []
     pos = start
     while word_at(code, pos, "if"):
-        brace = code.find("{", pos + 2)
+        brace = body_brace(code, pos + len("if"))
         if brace < 0:
             return []
         close = matching_delimiter(code, brace)
@@ -315,7 +333,7 @@ def match_arrows(code, start, end):
 
 def match_arm_bodies(expr, code, start):
     """Return each top-level match arm RHS, excluding its pattern."""
-    brace = code.find("{", start + len("match"))
+    brace = body_brace(code, start + len("match"))
     if brace < 0:
         return []
     close = matching_delimiter(code, brace)
@@ -338,8 +356,10 @@ def match_arm_bodies(expr, code, start):
                 end = line
             else:
                 comma = code.rfind(",", rhs, next_arrow)
-                if comma >= rhs:
-                    end = comma
+                semicolon = code.rfind(";", rhs, next_arrow)
+                separator = max(comma, semicolon)
+                if separator >= rhs:
+                    end = separator
         body = expr[rhs:end].rstrip()
         if body.endswith(","):
             body = body[:-1].rstrip()
@@ -349,8 +369,18 @@ def match_arm_bodies(expr, code, start):
 
 def branch_bodies(expr):
     """Possible complete RHS/body expressions, or [] for a non-branch."""
-    code = code_mask(expr)
-    start = skip_space(code, 0)
+    while True:
+        code = code_mask(expr)
+        start = skip_space(code, 0)
+        end = len(code)
+        while end > start and code[end - 1].isspace():
+            end -= 1
+        if start >= end or code[start] != "(":
+            break
+        close = matching_delimiter(code, start)
+        if close != end - 1:
+            break
+        expr = expr[start + 1 : close]
     if word_at(code, start, "if"):
         return if_arm_bodies(expr, code, start)
     if word_at(code, start, "match"):
@@ -637,6 +667,37 @@ def self_test():
         ("other char message",),
     ]:
         print("FAIL: a char literal brace changed match structure", file=sys.stderr)
+        return 1
+    branch_condition = (
+        "if (match flag { True -> true\nFalse -> false }) { "
+        '"condition yes message" } else { "condition no message" }'
+    )
+    if patterns(literals(branch_condition), branch_condition) != [
+        ("condition yes message",),
+        ("condition no message",),
+    ]:
+        print("FAIL: a nested branch stole its enclosing if body", file=sys.stderr)
+        return 1
+    branch_scrutinee = (
+        'match (if flag { "left-key" } else { "right-key" }) {\n'
+        '  "left-key" -> "left message"\n'
+        '  "right-key" -> "right message"\n}'
+    )
+    if patterns(literals(branch_scrutinee), branch_scrutinee) != [
+        ("left message",),
+        ("right message",),
+    ]:
+        print("FAIL: a nested branch stole its enclosing match body", file=sys.stderr)
+        return 1
+    grouped_branch = (
+        'if outer { (if inner { "group yes message" } '
+        'else { "group no message" }) }'
+    )
+    if patterns(literals(grouped_branch), grouped_branch) != [
+        ("group yes message",),
+        ("group no message",),
+    ]:
+        print("FAIL: grouping hid a nested branch", file=sys.stderr)
         return 1
     print("coverage selftest: ordered chunks and branch structure verified")
     return 0
