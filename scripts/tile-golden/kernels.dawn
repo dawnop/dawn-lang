@@ -9,7 +9,7 @@
 use std/io
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32, BF16}
-use tileir/dev.{Dev, Param, Tile, Idx, I32, param, block_id, load, load_masked, store, store_masked, addf, sub, mul, div,
+use tileir/dev.{Dev, Param, Tile, Idx, I32, param, block_id, tile_at, load, load_masked, store, store_masked, addf, sub, mul, div,
   maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
   d_for, d_for3, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
   spread, d_reduce, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select }
@@ -20,19 +20,19 @@ use tileir/bytecode.{encode, bytecode_version}
 # f64 vector add over 128-wide tiles: the first milestone's kernel
 # (tile-backend-design 1), and the shape std/gpu's vadd_ref answers for.
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let i = block_id(0)
-  let ta = load(a, i, 128)
-  let tb = load(b, i, 128)
-  store(out, i, 128, addf(F64, 128, ta, tb))
+  let blk = tile_at(block_id(0), 128)
+  let ta = load(a, blk, [128])
+  let tb = load(b, blk, [128])
+  store(out, blk, [128], addf(F64, [128], ta, tb))
 }
 
 # The same kernel over f32 and 64-wide tiles: the case that reds when a load
 # stops reading its parameter's format (run.sh's load-dtype-f64 mutant).
 fn vadd_f32(a: Param[F32], b: Param[F32], out: Param[F32]) -> Unit !Dev = {
-  let i = block_id(0)
-  let ta = load(a, i, 64)
-  let tb = load(b, i, 64)
-  store(out, i, 64, addf(F32, 64, ta, tb))
+  let blk = tile_at(block_id(0), 64)
+  let ta = load(a, blk, [64])
+  let tb = load(b, blk, [64])
+  store(out, blk, [64], addf(F32, [64], ta, tb))
 }
 
 # The same kernel over bf16 and 128-wide tiles: the second milestone's format
@@ -42,10 +42,10 @@ fn vadd_f32(a: Param[F32], b: Param[F32], out: Param[F32]) -> Unit !Dev = {
 # answers for a bf16 output buffer; scripts/tile-gpu-diff holds the device
 # to it.
 fn vadd_bf16(a: Param[BF16], b: Param[BF16], out: Param[BF16]) -> Unit !Dev = {
-  let i = block_id(0)
-  let ta = load(a, i, 128)
-  let tb = load(b, i, 128)
-  store(out, i, 128, addf(BF16, 128, ta, tb))
+  let blk = tile_at(block_id(0), 128)
+  let ta = load(a, blk, [128])
+  let tb = load(b, blk, [128])
+  store(out, blk, [128], addf(BF16, [128], ta, tb))
 }
 
 # f64 block-wise tile sum, the second milestone's loop kernel
@@ -58,12 +58,12 @@ fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
   let b = block_id(0)
   let n = idx_const(chunks)
   let base = idx_mul(b, n)
-  let first = load(x, base, 128)
+  let first = load(x, tile_at(base, 128), [128])
   let one = idx_const(1)
   let lo = idx_add(base, one)
   let up = idx_add(base, n)
-  let acc = d_for(lo, up, one, first, (k, t) => addf(F64, 128, t, load(x, k, 128)))
-  store(out, b, 128, acc)
+  let acc = d_for(lo, up, one, first, (k, t) => addf(F64, [128], t, load(x, tile_at(k, 128), [128])))
+  store(out, tile_at(b, 128), [128], acc)
 }
 
 # ---- the boundary kernels (knife 7a) ----
@@ -88,28 +88,31 @@ const CLIP_TILE: Int = 64
 # Addition) and, over a flattened matrix, 8 (Matrix Addition).
 fn vadd_tail(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, TAIL_TILE, TAIL_N)
-  let pad = f_const(F64, TAIL_TILE, 0.0)
-  let ta = load_masked(a, i, TAIL_TILE, m, pad)
-  let tb = load_masked(b, i, TAIL_TILE, m, pad)
-  store_masked(out, i, TAIL_TILE, m, addf(F64, TAIL_TILE, ta, tb))
+  let blk = tile_at(i, TAIL_TILE)
+  let m = tail_mask(blk, [TAIL_TILE], TAIL_N)
+  let pad = f_const(F64, [TAIL_TILE], 0.0)
+  let ta = load_masked(a, blk, [TAIL_TILE], m, pad)
+  let tb = load_masked(b, blk, [TAIL_TILE], m, pad)
+  store_masked(out, blk, [TAIL_TILE], m, addf(F64, [TAIL_TILE], ta, tb))
 }
 
 # Element-wise copy: leetgpu 31 (Matrix Copy). The mask is the whole kernel.
 fn copy(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, TAIL_TILE, TAIL_N)
-  let pad = f_const(F64, TAIL_TILE, 0.0)
-  store_masked(out, i, TAIL_TILE, m, load_masked(x, i, TAIL_TILE, m, pad))
+  let blk = tile_at(i, TAIL_TILE)
+  let m = tail_mask(blk, [TAIL_TILE], TAIL_N)
+  let pad = f_const(F64, [TAIL_TILE], 0.0)
+  store_masked(out, blk, [TAIL_TILE], m, load_masked(x, blk, [TAIL_TILE], m, pad))
 }
 
 # max(x, 0): leetgpu 21 (ReLU).
 fn relu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, TAIL_TILE, TAIL_N)
-  let zero = f_const(F64, TAIL_TILE, 0.0)
-  let t = load_masked(x, i, TAIL_TILE, m, zero)
-  store_masked(out, i, TAIL_TILE, m, maxf(F64, TAIL_TILE, t, zero))
+  let blk = tile_at(i, TAIL_TILE)
+  let m = tail_mask(blk, [TAIL_TILE], TAIL_N)
+  let zero = f_const(F64, [TAIL_TILE], 0.0)
+  let t = load_masked(x, blk, [TAIL_TILE], m, zero)
+  store_masked(out, blk, [TAIL_TILE], m, maxf(F64, [TAIL_TILE], t, zero))
 }
 
 # x where x >= 0, 0.01 * x where x < 0: leetgpu 23 (Leaky ReLU). Written with
@@ -117,23 +120,25 @@ fn relu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # masked-branch kernel later takes.
 fn leaky_relu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, TAIL_TILE, TAIL_N)
-  let zero = f_const(F64, TAIL_TILE, 0.0)
-  let alpha = f_const(F64, TAIL_TILE, 0.01)
-  let t = load_masked(x, i, TAIL_TILE, m, zero)
-  let leaked = mul(F64, TAIL_TILE, t, alpha)
-  store_masked(out, i, TAIL_TILE, m, select(F64, TAIL_TILE, lt(F64, TAIL_TILE, t, zero), leaked, t))
+  let blk = tile_at(i, TAIL_TILE)
+  let m = tail_mask(blk, [TAIL_TILE], TAIL_N)
+  let zero = f_const(F64, [TAIL_TILE], 0.0)
+  let alpha = f_const(F64, [TAIL_TILE], 0.01)
+  let t = load_masked(x, blk, [TAIL_TILE], m, zero)
+  let leaked = mul(F64, [TAIL_TILE], t, alpha)
+  store_masked(out, blk, [TAIL_TILE], m, select(F64, [TAIL_TILE], lt(F64, [TAIL_TILE], t, zero), leaked, t))
 }
 
 # min(max(x, -1), 1) over a second shape: leetgpu 62 (Value Clipping).
 fn clip(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, CLIP_TILE, CLIP_N)
-  let zero = f_const(F64, CLIP_TILE, 0.0)
-  let lo = f_const(F64, CLIP_TILE, -1.0)
-  let hi = f_const(F64, CLIP_TILE, 1.0)
-  let t = load_masked(x, i, CLIP_TILE, m, zero)
-  store_masked(out, i, CLIP_TILE, m, minf(F64, CLIP_TILE, maxf(F64, CLIP_TILE, t, lo), hi))
+  let blk = tile_at(i, CLIP_TILE)
+  let m = tail_mask(blk, [CLIP_TILE], CLIP_N)
+  let zero = f_const(F64, [CLIP_TILE], 0.0)
+  let lo = f_const(F64, [CLIP_TILE], -1.0)
+  let hi = f_const(F64, [CLIP_TILE], 1.0)
+  let t = load_masked(x, blk, [CLIP_TILE], m, zero)
+  store_masked(out, blk, [CLIP_TILE], m, minf(F64, [CLIP_TILE], maxf(F64, [CLIP_TILE], t, lo), hi))
 }
 
 # No leetgpu problem needs this one: it exists so that every operation knife
@@ -147,22 +152,23 @@ fn clip(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # agree bit for bit (a general `fma` does not, and the reference says so).
 fn elemops(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, TAIL_TILE, TAIL_N)
-  let zero = f_const(F64, TAIL_TILE, 0.0)
-  let two = f_const(F64, TAIL_TILE, 2.0)
-  let a = load_masked(x, i, TAIL_TILE, m, zero)
-  let b = load_masked(y, i, TAIL_TILE, m, zero)
-  let d = sub(F64, TAIL_TILE, a, b)
-  let q = div(F64, TAIL_TILE, mul(F64, TAIL_TILE, a, b), two)
-  let v = abs(F64, TAIL_TILE, neg(F64, TAIL_TILE, q))
-  let f = fma(F64, TAIL_TILE, a, two, b)
-  let s1 = select(F64, TAIL_TILE, lt(F64, TAIL_TILE, a, b), d, v)
-  let s2 = select(F64, TAIL_TILE, ge(F64, TAIL_TILE, a, b), s1, f)
-  let s3 = select(F64, TAIL_TILE, eq(F64, TAIL_TILE, a, b), minf(F64, TAIL_TILE, a, b), s2)
-  let s4 = select(F64, TAIL_TILE, ne(F64, TAIL_TILE, a, b), s3, maxf(F64, TAIL_TILE, a, b))
-  let s5 = select(F64, TAIL_TILE, gt(F64, TAIL_TILE, a, b), s4, d)
-  let s6 = select(F64, TAIL_TILE, le(F64, TAIL_TILE, a, b), s5, v)
-  store_masked(out, i, TAIL_TILE, m, s6)
+  let blk = tile_at(i, TAIL_TILE)
+  let m = tail_mask(blk, [TAIL_TILE], TAIL_N)
+  let zero = f_const(F64, [TAIL_TILE], 0.0)
+  let two = f_const(F64, [TAIL_TILE], 2.0)
+  let a = load_masked(x, blk, [TAIL_TILE], m, zero)
+  let b = load_masked(y, blk, [TAIL_TILE], m, zero)
+  let d = sub(F64, [TAIL_TILE], a, b)
+  let q = div(F64, [TAIL_TILE], mul(F64, [TAIL_TILE], a, b), two)
+  let v = abs(F64, [TAIL_TILE], neg(F64, [TAIL_TILE], q))
+  let f = fma(F64, [TAIL_TILE], a, two, b)
+  let s1 = select(F64, [TAIL_TILE], lt(F64, [TAIL_TILE], a, b), d, v)
+  let s2 = select(F64, [TAIL_TILE], ge(F64, [TAIL_TILE], a, b), s1, f)
+  let s3 = select(F64, [TAIL_TILE], eq(F64, [TAIL_TILE], a, b), minf(F64, [TAIL_TILE], a, b), s2)
+  let s4 = select(F64, [TAIL_TILE], ne(F64, [TAIL_TILE], a, b), s3, maxf(F64, [TAIL_TILE], a, b))
+  let s5 = select(F64, [TAIL_TILE], gt(F64, [TAIL_TILE], a, b), s4, d)
+  let s6 = select(F64, [TAIL_TILE], le(F64, [TAIL_TILE], a, b), s5, v)
+  store_masked(out, blk, [TAIL_TILE], m, s6)
 }
 
 # ---- the reduction, transcendental and region kernels (knife 7b) ----
@@ -215,28 +221,30 @@ fn neg_inf() -> Float = 0.0 - 1.0 / 0.0
 # with `pad` in the lanes past the end.
 fn whole(x: Param[F64], pad: Float) -> (Tile[F64], Tile[F64], Tile[F64]) !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let p = f_const(F64, RED_TILE, pad)
-  (load_masked(x, i, RED_TILE, m, p), p, p)
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let p = f_const(F64, [RED_TILE], pad)
+  (load_masked(x, blk, [RED_TILE], m, p), p, p)
 }
 
 # The sum of an RED_TILE-wide tile as one rank-0 tile.
 fn sum_of(t: Tile[F64]) -> Tile[F64] !Dev =
-  spread(F64, 1, d_reduce(F64, RED_TILE, t, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  spread(F64, [1], d_reduce(F64, [RED_TILE], t, 0.0, (e, acc) => s_addf(F64, e, acc)))
 
 # Write one f64 at element 0 of `out`. Every one-answer kernel here ends in
 # this: a 1-wide tile at index 0, so the rest of the output buffer is left
 # exactly as it was and scripts/tile-gpu-diff's sentinel is still there.
-fn store_one(out: Param[F64], i: Idx, v: Tile[F64]) -> Unit !Dev = store(out, i, 1, v)
+fn store_one(out: Param[F64], i: Idx, v: Tile[F64]) -> Unit !Dev = store(out, tile_at(i, 1), [1], v)
 
 # Sum of a vector: leetgpu 4 (Reduction). The identity is 0.0 and the fold
 # is the device's own; `tileiras` accepts a wrong identity (measured), which
 # is what scripts/tile-gpu-diff's reduce-identity-wrong mutant rests on.
 fn reduce_sum(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let zero = f_const(F64, RED_TILE, 0.0)
-  store_one(out, i, sum_of(load_masked(x, i, RED_TILE, m, zero)))
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let zero = f_const(F64, [RED_TILE], 0.0)
+  store_one(out, i, sum_of(load_masked(x, blk, [RED_TILE], m, zero)))
 }
 
 # exp(x - max) / sum(exp(x - max)): leetgpu 5 (Softmax). Two reductions, a
@@ -245,46 +253,50 @@ fn reduce_sum(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # softmax-no-max-subtract removes.
 fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let ninf = f_const(F64, RED_TILE, neg_inf())
-  let zero = f_const(F64, RED_TILE, 0.0)
-  let t = load_masked(x, i, RED_TILE, m, ninf)
-  let mx = spread(F64, RED_TILE, d_reduce(F64, RED_TILE, t, neg_inf(), (e, acc) => s_maxf(F64, e, acc)))
-  let ex = exp(F64, RED_TILE, sub(F64, RED_TILE, t, mx))
-  let inside = select(F64, RED_TILE, m, ex, zero)
-  let total = spread(F64, RED_TILE, d_reduce(F64, RED_TILE, inside, 0.0, (e, acc) => s_addf(F64, e, acc)))
-  store_masked(out, i, RED_TILE, m, div(F64, RED_TILE, ex, total))
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let ninf = f_const(F64, [RED_TILE], neg_inf())
+  let zero = f_const(F64, [RED_TILE], 0.0)
+  let t = load_masked(x, blk, [RED_TILE], m, ninf)
+  let mx = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], t, neg_inf(), (e, acc) => s_maxf(F64, e, acc)))
+  let ex = exp(F64, [RED_TILE], sub(F64, [RED_TILE], t, mx))
+  let inside = select(F64, [RED_TILE], m, ex, zero)
+  let total = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], inside, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  store_masked(out, blk, [RED_TILE], m, div(F64, [RED_TILE], ex, total))
 }
 
 # sum(a * b): leetgpu 17 (Dot Product). The masked-off lanes read 0.0, so
 # their product is 0.0 and the identity carries them.
 fn dot(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let zero = f_const(F64, RED_TILE, 0.0)
-  let ta = load_masked(a, i, RED_TILE, m, zero)
-  let tb = load_masked(b, i, RED_TILE, m, zero)
-  store_one(out, i, sum_of(mul(F64, RED_TILE, ta, tb)))
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let zero = f_const(F64, [RED_TILE], 0.0)
+  let ta = load_masked(a, blk, [RED_TILE], m, zero)
+  let tb = load_masked(b, blk, [RED_TILE], m, zero)
+  store_one(out, i, sum_of(mul(F64, [RED_TILE], ta, tb)))
 }
 
 # mean((p - t)^2): leetgpu 27 (Mean Squared Error).
 fn mse(pred: Param[F64], target: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let zero = f_const(F64, RED_TILE, 0.0)
-  let d = sub(F64, RED_TILE, load_masked(pred, i, RED_TILE, m, zero), load_masked(target, i, RED_TILE, m, zero))
-  let s = sum_of(mul(F64, RED_TILE, d, d))
-  store_one(out, i, div(F64, 1, s, f_const(F64, 1, to_float(RED_N))))
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let zero = f_const(F64, [RED_TILE], 0.0)
+  let d = sub(F64, [RED_TILE], load_masked(pred, blk, [RED_TILE], m, zero), load_masked(target, blk, [RED_TILE], m, zero))
+  let s = sum_of(mul(F64, [RED_TILE], d, d))
+  store_one(out, i, div(F64, [1], s, f_const(F64, [1], to_float(RED_N))))
 }
 
 # (b - a) * mean(y): leetgpu 35 (Monte Carlo Integration). `a` and `b` are
 # host constants of the recorded kernel, as every shape here is.
 fn monte_carlo(y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let zero = f_const(F64, RED_TILE, 0.0)
-  let s = sum_of(load_masked(y, i, RED_TILE, m, zero))
-  store_one(out, i, mul(F64, 1, s, f_const(F64, 1, mc_scale())))
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let zero = f_const(F64, [RED_TILE], 0.0)
+  let s = sum_of(load_masked(y, blk, [RED_TILE], m, zero))
+  store_one(out, i, mul(F64, [1], s, f_const(F64, [1], mc_scale())))
 }
 
 # x / sqrt(mean(x^2) + eps): leetgpu 50 (RMS Normalization). `sqrt` is the
@@ -293,54 +305,58 @@ fn monte_carlo(y: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # neighbours cannot.
 fn rms_norm(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let zero = f_const(F64, RED_TILE, 0.0)
-  let t = load_masked(x, i, RED_TILE, m, zero)
-  let s = spread(F64, RED_TILE, d_reduce(F64, RED_TILE, mul(F64, RED_TILE, t, t), 0.0, (e, acc) => s_addf(F64, e, acc)))
-  let mean = div(F64, RED_TILE, s, f_const(F64, RED_TILE, to_float(RED_N)))
-  let r = sqrt(F64, RED_TILE, addf(F64, RED_TILE, mean, f_const(F64, RED_TILE, RMS_EPS)))
-  store_masked(out, i, RED_TILE, m, div(F64, RED_TILE, t, r))
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let zero = f_const(F64, [RED_TILE], 0.0)
+  let t = load_masked(x, blk, [RED_TILE], m, zero)
+  let s = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], mul(F64, [RED_TILE], t, t), 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let mean = div(F64, [RED_TILE], s, f_const(F64, [RED_TILE], to_float(RED_N)))
+  let r = sqrt(F64, [RED_TILE], addf(F64, [RED_TILE], mean, f_const(F64, [RED_TILE], RMS_EPS)))
+  store_masked(out, blk, [RED_TILE], m, div(F64, [RED_TILE], t, r))
 }
 
 # x / (1 + exp(-x)): leetgpu 52 (Sigmoid Linear Unit). No reduction, so the
 # tolerance is `exp`'s alone.
 fn silu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let zero = f_const(F64, RED_TILE, 0.0)
-  let one = f_const(F64, RED_TILE, 1.0)
-  let t = load_masked(x, i, RED_TILE, m, zero)
-  let d = addf(F64, RED_TILE, one, exp(F64, RED_TILE, neg(F64, RED_TILE, t)))
-  store_masked(out, i, RED_TILE, m, div(F64, RED_TILE, t, d))
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let zero = f_const(F64, [RED_TILE], 0.0)
+  let one = f_const(F64, [RED_TILE], 1.0)
+  let t = load_masked(x, blk, [RED_TILE], m, zero)
+  let d = addf(F64, [RED_TILE], one, exp(F64, [RED_TILE], neg(F64, [RED_TILE], t)))
+  store_masked(out, blk, [RED_TILE], m, div(F64, [RED_TILE], t, d))
 }
 
 # 1 / (1 + exp(-x)): leetgpu 68 (Sigmoid Activation).
 fn sigmoid(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let zero = f_const(F64, RED_TILE, 0.0)
-  let one = f_const(F64, RED_TILE, 1.0)
-  let t = load_masked(x, i, RED_TILE, m, zero)
-  let d = addf(F64, RED_TILE, one, exp(F64, RED_TILE, neg(F64, RED_TILE, t)))
-  store_masked(out, i, RED_TILE, m, div(F64, RED_TILE, one, d))
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let zero = f_const(F64, [RED_TILE], 0.0)
+  let one = f_const(F64, [RED_TILE], 1.0)
+  let t = load_masked(x, blk, [RED_TILE], m, zero)
+  let d = addf(F64, [RED_TILE], one, exp(F64, [RED_TILE], neg(F64, [RED_TILE], t)))
+  store_masked(out, blk, [RED_TILE], m, div(F64, [RED_TILE], one, d))
 }
 
 # -mean(min(r * A, clip(r, 1 - e, 1 + e) * A)) with r = exp(new - old):
 # leetgpu 107 (PPO Clipped Surrogate Loss).
 fn ppo_loss(new: Param[F64], old: Param[F64], adv: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let zero = f_const(F64, RED_TILE, 0.0)
-  let tn = load_masked(new, i, RED_TILE, m, zero)
-  let to = load_masked(old, i, RED_TILE, m, zero)
-  let ta = load_masked(adv, i, RED_TILE, m, zero)
-  let r = exp(F64, RED_TILE, sub(F64, RED_TILE, tn, to))
-  let lo = f_const(F64, RED_TILE, 1.0 - PPO_EPS)
-  let hi = f_const(F64, RED_TILE, 1.0 + PPO_EPS)
-  let clipped = minf(F64, RED_TILE, maxf(F64, RED_TILE, r, lo), hi)
-  let both = minf(F64, RED_TILE, mul(F64, RED_TILE, r, ta), mul(F64, RED_TILE, clipped, ta))
-  let s = sum_of(select(F64, RED_TILE, m, both, zero))
-  store_one(out, i, neg(F64, 1, div(F64, 1, s, f_const(F64, 1, to_float(RED_N)))))
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let zero = f_const(F64, [RED_TILE], 0.0)
+  let tn = load_masked(new, blk, [RED_TILE], m, zero)
+  let to = load_masked(old, blk, [RED_TILE], m, zero)
+  let ta = load_masked(adv, blk, [RED_TILE], m, zero)
+  let r = exp(F64, [RED_TILE], sub(F64, [RED_TILE], tn, to))
+  let lo = f_const(F64, [RED_TILE], 1.0 - PPO_EPS)
+  let hi = f_const(F64, [RED_TILE], 1.0 + PPO_EPS)
+  let clipped = minf(F64, [RED_TILE], maxf(F64, [RED_TILE], r, lo), hi)
+  let both = minf(F64, [RED_TILE], mul(F64, [RED_TILE], r, ta), mul(F64, [RED_TILE], clipped, ta))
+  let s = sum_of(select(F64, [RED_TILE], m, both, zero))
+  store_one(out, i, neg(F64, [1], div(F64, [1], s, f_const(F64, [1], to_float(RED_N)))))
 }
 
 # -mean(log(sigmoid(beta * ((pc - pr) - (rc - rr))))): leetgpu 108 (DPO
@@ -348,15 +364,16 @@ fn ppo_loss(new: Param[F64], old: Param[F64], adv: Param[F64], out: Param[F64]) 
 # both.
 fn dpo_loss(pc: Param[F64], pr: Param[F64], rc: Param[F64], rr: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let zero = f_const(F64, RED_TILE, 0.0)
-  let one = f_const(F64, RED_TILE, 1.0)
-  let a = sub(F64, RED_TILE, load_masked(pc, i, RED_TILE, m, zero), load_masked(pr, i, RED_TILE, m, zero))
-  let b = sub(F64, RED_TILE, load_masked(rc, i, RED_TILE, m, zero), load_masked(rr, i, RED_TILE, m, zero))
-  let z = mul(F64, RED_TILE, f_const(F64, RED_TILE, DPO_BETA), sub(F64, RED_TILE, a, b))
-  let sg = div(F64, RED_TILE, one, addf(F64, RED_TILE, one, exp(F64, RED_TILE, neg(F64, RED_TILE, z))))
-  let s = sum_of(select(F64, RED_TILE, m, log(F64, RED_TILE, sg), zero))
-  store_one(out, i, neg(F64, 1, div(F64, 1, s, f_const(F64, 1, to_float(RED_N)))))
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let zero = f_const(F64, [RED_TILE], 0.0)
+  let one = f_const(F64, [RED_TILE], 1.0)
+  let a = sub(F64, [RED_TILE], load_masked(pc, blk, [RED_TILE], m, zero), load_masked(pr, blk, [RED_TILE], m, zero))
+  let b = sub(F64, [RED_TILE], load_masked(rc, blk, [RED_TILE], m, zero), load_masked(rr, blk, [RED_TILE], m, zero))
+  let z = mul(F64, [RED_TILE], f_const(F64, [RED_TILE], DPO_BETA), sub(F64, [RED_TILE], a, b))
+  let sg = div(F64, [RED_TILE], one, addf(F64, [RED_TILE], one, exp(F64, [RED_TILE], neg(F64, [RED_TILE], z))))
+  let s = sum_of(select(F64, [RED_TILE], m, log(F64, [RED_TILE], sg), zero))
+  store_one(out, i, neg(F64, [1], div(F64, [1], s, f_const(F64, [1], to_float(RED_N)))))
 }
 
 # No leetgpu problem needs this one: it is to `exp`, `log` and their
@@ -368,20 +385,21 @@ fn dpo_loss(pc: Param[F64], pr: Param[F64], rc: Param[F64], rr: Param[F64], out:
 # tolerance. Tolerance tier, and no corpus could make it exact.
 fn mathops(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, TAIL_TILE, TAIL_N)
-  let one = f_const(F64, TAIL_TILE, 1.0)
-  let a = load_masked(x, i, TAIL_TILE, m, one)
-  let b = load_masked(y, i, TAIL_TILE, m, one)
-  let s1 = addf(F64, TAIL_TILE, exp(F64, TAIL_TILE, a), exp2(F64, TAIL_TILE, a))
-  let s2 = addf(F64, TAIL_TILE, s1, log(F64, TAIL_TILE, a))
-  let s3 = addf(F64, TAIL_TILE, s2, log2(F64, TAIL_TILE, a))
-  let s4 = addf(F64, TAIL_TILE, s3, sqrt(F64, TAIL_TILE, a))
-  let s5 = addf(F64, TAIL_TILE, s4, rsqrt(F64, TAIL_TILE, a))
-  let s6 = addf(F64, TAIL_TILE, s5, tanh(F64, TAIL_TILE, a))
-  let s7 = addf(F64, TAIL_TILE, s6, pow(F64, TAIL_TILE, a, b))
-  let s8 = addf(F64, TAIL_TILE, s7, floor(F64, TAIL_TILE, b))
-  let s9 = addf(F64, TAIL_TILE, s8, ceil(F64, TAIL_TILE, b))
-  store_masked(out, i, TAIL_TILE, m, s9)
+  let blk = tile_at(i, TAIL_TILE)
+  let m = tail_mask(blk, [TAIL_TILE], TAIL_N)
+  let one = f_const(F64, [TAIL_TILE], 1.0)
+  let a = load_masked(x, blk, [TAIL_TILE], m, one)
+  let b = load_masked(y, blk, [TAIL_TILE], m, one)
+  let s1 = addf(F64, [TAIL_TILE], exp(F64, [TAIL_TILE], a), exp2(F64, [TAIL_TILE], a))
+  let s2 = addf(F64, [TAIL_TILE], s1, log(F64, [TAIL_TILE], a))
+  let s3 = addf(F64, [TAIL_TILE], s2, log2(F64, [TAIL_TILE], a))
+  let s4 = addf(F64, [TAIL_TILE], s3, sqrt(F64, [TAIL_TILE], a))
+  let s5 = addf(F64, [TAIL_TILE], s4, rsqrt(F64, [TAIL_TILE], a))
+  let s6 = addf(F64, [TAIL_TILE], s5, tanh(F64, [TAIL_TILE], a))
+  let s7 = addf(F64, [TAIL_TILE], s6, pow(F64, [TAIL_TILE], a, b))
+  let s8 = addf(F64, [TAIL_TILE], s7, floor(F64, [TAIL_TILE], b))
+  let s9 = addf(F64, [TAIL_TILE], s8, ceil(F64, [TAIL_TILE], b))
+  store_masked(out, blk, [TAIL_TILE], m, s9)
 }
 
 # Nor does any problem need this one: it is the oracle for the two region
@@ -396,13 +414,13 @@ fn foldif(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
   let n = idx_const(chunks)
   let base = idx_mul(b, n)
   let one = idx_const(1)
-  let first = load(x, base, FOLD_TILE)
+  let first = load(x, tile_at(base, FOLD_TILE), [FOLD_TILE])
   let (total, hi, lo) = d_for3(idx_add(base, one), idx_add(base, n), one, first, first, first, (k, s, h, l) => {
-    let t = load(x, k, FOLD_TILE)
-    (addf(F64, FOLD_TILE, s, t), maxf(F64, FOLD_TILE, h, t), minf(F64, FOLD_TILE, l, t))
+    let t = load(x, tile_at(k, FOLD_TILE), [FOLD_TILE])
+    (addf(F64, [FOLD_TILE], s, t), maxf(F64, [FOLD_TILE], h, t), minf(F64, [FOLD_TILE], l, t))
   })
-  let r = d_if(idx_eq(b, idx_const(0)), () => total, () => sub(F64, FOLD_TILE, hi, lo))
-  store(out, b, FOLD_TILE, r)
+  let r = d_if(idx_eq(b, idx_const(0)), () => total, () => sub(F64, [FOLD_TILE], hi, lo))
+  store(out, tile_at(b, FOLD_TILE), [FOLD_TILE], r)
 }
 
 # And nor does this one: it is the oracle for the N-ary reduction, the shape
@@ -412,15 +430,16 @@ fn foldif(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
 # decides who wins and the INDEX decides where the 1 lands.
 fn argmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
-  let m = tail_mask(i, RED_TILE, RED_N)
-  let ninf = f_const(F64, RED_TILE, neg_inf())
-  let t = load_masked(x, i, RED_TILE, m, ninf)
-  let (_best, where) = d_reduce2(F64, RED_TILE, t, lanes(i, RED_TILE), neg_inf(), 0 - 1, (ev, ei, av, ai) => {
+  let blk = tile_at(i, RED_TILE)
+  let m = tail_mask(blk, [RED_TILE], RED_N)
+  let ninf = f_const(F64, [RED_TILE], neg_inf())
+  let t = load_masked(x, blk, [RED_TILE], m, ninf)
+  let (_best, where) = d_reduce2(F64, [RED_TILE], t, lanes(blk, [RED_TILE]), neg_inf(), 0 - 1, (ev, ei, av, ai) => {
     let win = s_gt(F64, ev, av)
     (s_select(F64, win, ev, av), s_select(I32, win, ei, ai))
   })
-  let hot = eq_i(RED_TILE, lanes(i, RED_TILE), spread(I32, RED_TILE, where))
-  store_masked(out, i, RED_TILE, m, select(F64, RED_TILE, hot, f_const(F64, RED_TILE, 1.0), f_const(F64, RED_TILE, 0.0)))
+  let hot = eq_i([RED_TILE], lanes(blk, [RED_TILE]), spread(I32, [RED_TILE], where))
+  store_masked(out, blk, [RED_TILE], m, select(F64, [RED_TILE], hot, f_const(F64, [RED_TILE], 1.0), f_const(F64, [RED_TILE], 0.0)))
 }
 
 fn trace(name: String) -> TileProg = match name {

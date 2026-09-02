@@ -17,22 +17,20 @@
 use std/list
 use std/str
 use dev.{RedId, IdF, IdI}
-use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, CmpFloat, CmpInt, SelectTile, ForLoop, Cont, ReduceTile, IfElse, YieldVals, Ret}
+use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, FloatMma, CmpFloat, CmpInt, SelectTile, ForLoop, Cont, ReduceTile, IfElse, YieldVals, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
   PtrTo(name) -> "ptr<${name}>"
 }
 
-## `t` as the assembly spells it: `token`, `tile<f64>`, `tile<128xf64>`.
+## `t` as the assembly spells it: `token`, `tile<f64>`, `tile<128xf64>`,
+## `tile<64x32xf64>`. Every dimension in order, `x`-separated, the element
+## format last; the rank-0 tile is the element format alone.
 pub fn ty(t: Ty) -> String = match t {
   Token -> "token"
-  Tile(shape, e) -> match shape {
-    [] -> "tile<${elem(e)}>"
-    [n] -> "tile<${n}x${elem(e)}>"
-    _ -> panic("tileir: a tile of rank ${len(shape)} has no spelling in this release")
-  }
+  Tile(shape, e) -> "tile<" ++ list.fold(shape, "", (acc, d) => acc ++ "${d}x") ++ elem(e) ++ ">"
 }
 
 fn name(r: Ref) -> String = match r {
@@ -125,6 +123,9 @@ fn line(i: Instr) -> String = match i {
   FloatBin(dst, op, t, lhs, rhs) -> "${v(dst)} = ${op} ${name(lhs)}, ${name(rhs)}${rounding(op)} : ${ty(t)}"
   FloatFma(dst, t, lhs, rhs, acc) ->
     "${v(dst)} = fma ${name(lhs)}, ${name(rhs)}, ${name(acc)} rounding<nearest_even> : ${ty(t)}"
+  FloatMma(dst, t, lhs_ty, rhs_ty, lhs, rhs, acc) ->
+    "${v(dst)} = mmaf ${name(lhs)}, ${name(rhs)}, ${name(acc)}"
+    ++ " : ${ty(lhs_ty)}, ${ty(rhs_ty)}, ${ty(t)}"
   CmpFloat(dst, pred, t, res_ty, lhs, rhs) ->
     "${v(dst)} = cmpf ${predicate(pred)} ordered ${name(lhs)}, ${name(rhs)} : ${ty(t)} -> ${ty(res_ty)}"
   CmpInt(dst, pred, t, res_ty, lhs, rhs) ->
@@ -207,10 +208,12 @@ fn two_loads_one_param() -> TileProg = TileProg {
   ops: [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, 128, None, None, 0),
-    Load(4, 5, 0, "f64", 1, 128, None, None, 3),
-    BinaryF(6, "addf", "f64", 128, 2, 4),
-    Store(7, 0, "f64", 1, 128, 6, None, 5)
+    IdxConst(2, 128),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0),
+    Load(6, 7, 0, "f64", 3, [128], [1], None, None, 5),
+    BinaryF(8, "addf", "f64", [128], 4, 6),
+    Store(9, 0, "f64", 3, [128], [1], 8, None, 7)
   ]
 }
 
@@ -244,7 +247,8 @@ test "block ids along the three axes bind the matching result of one get_tile_bl
   let p = TileProg {
     name: "axes",
     params: ["f64"],
-    ops: [MakeToken(0), BlockId(1, 2), Load(2, 3, 0, "f64", 1, 8, None, None, 0)]
+    ops: [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
+      Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0)]
   }
   let text = render(p)
   assert str.contains(text, "%1, %2, %3 = get_tile_block_id : tile<i32>\n")
@@ -269,16 +273,22 @@ fn sum_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 4),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, 128, None, None, 0),
-    IdxConst(6, 1),
-    IdxAdd(7, 3, 6),
-    IdxAdd(8, 3, 2),
-    For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [
-      Load(12, 13, 0, "f64", 9, 128, None, None, 11),
-      BinaryF(14, "addf", "f64", 128, 10, 12),
-      Continue([14, 13])
+    IdxConst(4, 128),
+    IdxMul(5, 3, 4),
+    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0),
+    IdxConst(8, 1),
+    IdxAdd(9, 3, 8),
+    IdxAdd(10, 3, 2),
+    For(11, 9, 10, 8, [6, 7], [12, 13], [19, 20], [
+      IdxConst(14, 128),
+      IdxMul(15, 11, 14),
+      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
+      BinaryF(18, "addf", "f64", [128], 12, 16),
+      Continue([18, 17])
     ]),
-    Store(17, 1, "f64", 1, 128, 15, None, 16)
+    IdxConst(21, 128),
+    IdxMul(22, 1, 21),
+    Store(23, 1, "f64", 22, [128], [1], 19, None, 20)
   ]
 }
 
@@ -299,13 +309,15 @@ fn total_prog() -> TileProg = TileProg {
   ops: [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
-    Reduce([7], 0, 8, [IdF("f64", 0.0)], [2], [4, 5], [
-      BinaryF(6, "addf", "f64", 0, 4, 5),
-      Yield([6])
+    IdxConst(2, 8),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Reduce([9], 0, [8], [IdF("f64", 0.0)], [4], [6, 7], [
+      BinaryF(8, "addf", "f64", [], 6, 7),
+      Yield([8])
     ]),
-    Spread(8, "f64", 1, 7),
-    Store(9, 1, "f64", 1, 1, 8, None, 3)
+    Spread(10, "f64", [1], 9),
+    Store(11, 1, "f64", 3, [1], [1], 10, None, 5)
   ]
 }
 
@@ -326,12 +338,14 @@ fn branch_prog() -> TileProg = TileProg {
   ops: [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
-    IdxConst(4, 0),
-    CmpI(5, "eq", 0, 1, 4),
-    If([8], 5, [BinaryF(6, "addf", "f64", 8, 2, 2), Yield([6])],
-      [BinaryF(7, "mulf", "f64", 8, 2, 2), Yield([7])]),
-    Store(9, 1, "f64", 1, 8, 8, None, 3)
+    IdxConst(2, 8),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    IdxConst(6, 0),
+    CmpI(7, "eq", [], 1, 6),
+    If([10], 7, [BinaryF(8, "addf", "f64", [8], 4, 4), Yield([8])],
+      [BinaryF(9, "mulf", "f64", [8], 4, 4), Yield([9])]),
+    Store(11, 1, "f64", 3, [8], [1], 10, None, 5)
   ]
 }
 
@@ -356,15 +370,17 @@ test "the transcendentals spell the modifiers they carry and no others" {
     ops: [
       MakeToken(0),
       BlockId(1, 0),
-      Load(2, 3, 0, "f64", 1, 8, None, None, 0),
-      UnaryF(4, "exp", "f64", 8, 2),
-      UnaryF(5, "exp2", "f64", 8, 2),
-      UnaryF(6, "sqrt", "f64", 8, 2),
-      UnaryF(7, "rsqrt", "f64", 8, 2),
-      UnaryF(8, "tanh", "f64", 8, 2),
-      UnaryF(9, "floor", "f64", 8, 2),
-      UnaryF(10, "ceil", "f64", 8, 2),
-      BinaryF(11, "pow", "f64", 8, 2, 2)
+      IdxConst(2, 8),
+      IdxMul(3, 1, 2),
+      Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+      UnaryF(6, "exp", "f64", [8], 4),
+      UnaryF(7, "exp2", "f64", [8], 4),
+      UnaryF(8, "sqrt", "f64", [8], 4),
+      UnaryF(9, "rsqrt", "f64", [8], 4),
+      UnaryF(10, "tanh", "f64", [8], 4),
+      UnaryF(11, "floor", "f64", [8], 4),
+      UnaryF(12, "ceil", "f64", [8], 4),
+      BinaryF(13, "pow", "f64", [8], 4, 4)
     ]
   }
   let text = render(p)

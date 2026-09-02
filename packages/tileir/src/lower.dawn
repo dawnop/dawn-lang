@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF}
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -114,6 +114,7 @@ pub type Instr =
   | FloatUn(dst: Int, op: String, ty: Ty, src: Ref)
   | FloatBin(dst: Int, op: String, ty: Ty, lhs: Ref, rhs: Ref)
   | FloatFma(dst: Int, ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
+  | FloatMma(dst: Int, ty: Ty, lhs_ty: Ty, rhs_ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
   | CmpFloat(dst: Int, pred: String, ty: Ty, res_ty: Ty, lhs: Ref, rhs: Ref)
   | CmpInt(dst: Int, pred: String, ty: Ty, res_ty: Ty, lhs: Ref, rhs: Ref)
   | SelectTile(dst: Int, cond_ty: Ty, ty: Ty, cond: Ref, lhs: Ref, rhs: Ref)
@@ -137,28 +138,28 @@ pub type Kernel = {
 ## The scalar `tile<i32>`.
 pub fn i32_scalar() -> Ty = Tile([], Num("i32"))
 
-## The `n`-wide `tile<n x i32>`.
-pub fn i32_vec(n: Int) -> Ty = Tile(shape_of(n), Num("i32"))
+## The i32 tile of `shape`.
+pub fn i32_tile(shape: List[Int]) -> Ty = Tile(shape, Num("i32"))
 
 ## The scalar pointer tile an entry parameter of format `dtype` is.
 pub fn param_ty(dtype: String) -> Ty = Tile([], PtrTo(dtype))
 
-## The `n`-wide `tile<n x i1>`, the type of a mask and of a comparison; `n`
-## of 0 is the rank-0 `tile<i1>` an `if` branches on.
-pub fn i1_vec(n: Int) -> Ty = Tile(shape_of(n), Num("i1"))
+## The `i1` tile of `shape`, the type of a mask and of a comparison; the
+## empty shape is the rank-0 `tile<i1>` an `if` branches on.
+pub fn i1_tile(shape: List[Int]) -> Ty = Tile(shape, Num("i1"))
 
-## The shape a tile width names: `[n]`, or `[]` for the rank-0 tile, which
-## is what width 0 means everywhere in this package (prog.dawn's
-## `check_shape` says so).
-pub fn shape_of(n: Int) -> List[Int] = if n == 0 { [] } else { [n] }
+## The tile of `shape` and the named element format.
+pub fn num_tile(shape: List[Int], dtype: String) -> Ty = Tile(shape, Num(dtype))
 
-## The `n`-wide tile of the named element format, rank 0 when `n` is 0.
-pub fn num_tile(n: Int, dtype: String) -> Ty = Tile(shape_of(n), Num(dtype))
+## The product of `shape`'s dimensions: how many lanes a tile of it has, and
+## `1` for the rank-0 tile.
+pub fn lanes_in(shape: List[Int]) -> Int = list.fold(shape, 1, (acc, d) => acc * d)
 
-# The rank-0 tile of the same element format as `t`.
-fn rank0_of(t: Ty) -> Ty = match t {
-  Token -> panic("tileir: a token has no rank-0 form")
-  Tile(_shape, e) -> Tile([], e)
+# `t` with dimension `dim` dropped: the shape a reduction along `dim`
+# answers.
+fn without_dim(t: Ty, dim: Int) -> Ty = match t {
+  Token -> panic("tileir: a token has no dimensions")
+  Tile(shape, e) -> Tile(list.map(list.filter(range(0, len(shape)), k => k != dim), k => shape[k]), e)
 }
 
 # The lowering's state, threaded through pure helpers rather than held in
@@ -221,47 +222,101 @@ fn define_all(l0: L, handles: List[Int], tys: List[Ty]) -> (L, List[Int]) = {
   })
 }
 
-# `off = idx * n + iota`, an `n`-wide tile of i32 element offsets. Memoised
-# per (idx handle, n).
-fn offsets(l0: L, idx: Int, n: Int) -> (L, Ref) = {
-  let key = "off:${idx}:${n}"
+# The shape of `shape`'s rank with every dimension 1: what a rank-0 value
+# reshapes to before it is broadcast over the whole tile, and what one
+# dimension's `iota` reshapes to with its own dimension put back.
+fn ones_but(shape: List[Int], dim: Int) -> List[Int] =
+  list.map(range(0, len(shape)), k => if k == dim { shape[k] } else { 1 })
+
+# `src`, a tile of `from` and rank `len(shape)`, broadcast to `shape` unless
+# it is already that shape.
+fn broadcast_to(l0: L, src: Ref, from: Ty, shape: List[Int], e: Elem) -> (L, Ref) = {
+  let full = Tile(shape, e)
+  if from == full {
+    (l0, src)
+  } else {
+    let (l1, v) = fresh(l0)
+    (emit(l1, Broadcast(v, src, from, full)), Val(v))
+  }
+}
+
+# A RANK-0 `src` spread over every lane of `shape`: a `reshape` to one lane
+# a dimension and a `broadcast` to `shape`. Both are always emitted (a
+# one-lane tile is still reshaped and broadcast), which is what a
+# one-dimensional ladder did before shapes were lists. A rank-0 `shape`
+# needs neither.
+fn spread_rank0(l0: L, src: Ref, from: Ty, shape: List[Int], e: Elem) -> (L, Ref) =
+  if len(shape) == 0 {
+    (l0, src)
+  } else {
+    let ones = Tile(list.map(shape, _d => 1), e)
+    let (l1, v) = fresh(l0)
+    let l2 = emit(l1, Reshape(v, src, from, ones))
+    let (l3, w) = fresh(l2)
+    (emit(l3, Broadcast(w, Val(v), ones, Tile(shape, e))), Val(w))
+  }
+
+# A one-dimensional `src` of length `shape[dim]` spread along dimension
+# `dim` of `shape`: a `reshape` that puts it at `dim` with ones elsewhere
+# and a `broadcast` to `shape`. A one-dimensional `shape` needs neither, so
+# a rank-1 ladder is one bare `iota`, as it was.
+fn spread_dim(l0: L, src: Ref, from: Ty, shape: List[Int], dim: Int, e: Elem) -> (L, Ref) =
+  if len(shape) <= 1 {
+    (l0, src)
+  } else {
+    let mid = Tile(ones_but(shape, dim), e)
+    let (l1, v) = fresh(l0)
+    let l2 = emit(l1, Reshape(v, src, from, mid))
+    broadcast_to(l2, Val(v), mid, shape, e)
+  }
+
+# `off[i, j, ..] = base + i * strides[0] + j * strides[1] + ..`, an i32 tile
+# of `shape` holding one element offset a lane. One `iota` a dimension,
+# reshaped and broadcast to `shape` and scaled by that dimension's stride;
+# a stride of one is no `muli` and a rank-0 tile is the base itself.
+# Memoised per (base handle, shape, strides).
+fn offsets(l0: L, base: Int, shape: List[Int], strides: List[Int]) -> (L, Ref) = {
+  let key = "off:${base}:${show(shape)}:${show(strides)}"
   match map.get(l0.memo, key) {
     Some(r) -> (l0, r)
     None -> {
-      let base = ref_of(l0, idx, "load/store index")
-      let (l1, c) = fresh(l0)
-      let l2 = emit(l1, ConstInt(c, i32_scalar(), n))
-      let (l3, m) = fresh(l2)
-      let l4 = emit(l3, MulInt(m, i32_scalar(), base, Val(c)))
-      let (l5, m1) = fresh(l4)
-      let l6 = emit(l5, Reshape(m1, Val(m), i32_scalar(), i32_vec(1)))
-      let (l7, mb) = fresh(l6)
-      let l8 = emit(l7, Broadcast(mb, Val(m1), i32_vec(1), i32_vec(n)))
-      let (l9, io) = fresh(l8)
-      let l10 = emit(l9, IotaTile(io, i32_vec(n)))
-      let (l11, off) = fresh(l10)
-      let l12 = emit(l11, AddInt(off, i32_vec(n), Val(mb), Val(io)))
-      (L { ..l12, memo: map.insert(l12.memo, key, Val(off)) }, Val(off))
+      let b = ref_of(l0, base, "load/store base")
+      let full = i32_tile(shape)
+      let (l1, bb) = spread_rank0(l0, b, i32_scalar(), shape, Num("i32"))
+      let (l2, acc) = list.fold(range(0, len(shape)), (l1, bb), (st, k) => {
+        let (la, sofar) = st
+        let (lb, io) = fresh(la)
+        let lc = emit(lb, IotaTile(io, i32_tile([shape[k]])))
+        let (ld, term0) = spread_dim(lc, Val(io), i32_tile([shape[k]]), shape, k, Num("i32"))
+        let (le, term) = if strides[k] == 1 {
+          (ld, term0)
+        } else {
+          let (lx, c) = fresh(ld)
+          let ly = emit(lx, ConstInt(c, full, strides[k]))
+          let (lz, m) = fresh(ly)
+          (emit(lz, MulInt(m, full, term0, Val(c))), Val(m))
+        }
+        let (lf, sum) = fresh(le)
+        (emit(lf, AddInt(sum, full, sofar, term)), Val(sum))
+      })
+      (L { ..l2, memo: map.insert(l2.memo, key, acc) }, acc)
     }
   }
 }
 
-# The `n`-wide tile of pointers into parameter `param` at `off`. Memoised per
-# (param, idx handle, n).
-fn pointers(l0: L, param: Int, dtype: String, idx: Int, n: Int) -> (L, Ref) = {
-  let key = "ptr:${param}:${idx}:${n}"
+# The tile of pointers into parameter `param` at `off`, of `shape`. Memoised
+# per (param, base handle, shape, strides).
+fn pointers(l0: L, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int]) -> (L, Ref) = {
+  let key = "ptr:${param}:${base}:${show(shape)}:${show(strides)}"
   match map.get(l0.memo, key) {
     Some(r) -> (l0, r)
     None -> {
-      let (l1, off) = offsets(l0, idx, n)
+      let (l1, off) = offsets(l0, base, shape, strides)
       let p = PtrTo(dtype)
-      let (l2, p1) = fresh(l1)
-      let l3 = emit(l2, Reshape(p1, Arg(param), Tile([], p), Tile([1], p)))
-      let (l4, pn) = fresh(l3)
-      let l5 = emit(l4, Broadcast(pn, Val(p1), Tile([1], p), Tile([n], p)))
-      let (l6, pt) = fresh(l5)
-      let l7 = emit(l6, Offset(pt, Val(pn), off, Tile([n], p), i32_vec(n)))
-      (L { ..l7, memo: map.insert(l7.memo, key, Val(pt)) }, Val(pt))
+      let (l2, pn) = spread_rank0(l1, Arg(param), Tile([], p), shape, p)
+      let (l3, pt) = fresh(l2)
+      let l4 = emit(l3, Offset(pt, pn, off, Tile(shape, p), i32_tile(shape)))
+      (L { ..l4, memo: map.insert(l4.memo, key, Val(pt)) }, Val(pt))
     }
   }
 }
@@ -278,86 +333,94 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let l4 = emit(l3, BlockIds(x, y, z))
     bind(l4, dst, Val(if axis == 0 { x } else if axis == 1 { y } else { z }), i32_scalar())
   }
-  Load(dst, tok_out, param, dtype, idx, n, mask, pad, tok_in) -> {
+  Load(dst, tok_out, param, dtype, base, shape, strides, mask, pad, tok_in) -> {
     let tin = ref_of(l0, tok_in, "load token")
     let m = opt_ref(l0, mask, "load mask")
     let pd = opt_ref(l0, pad, "load padding value")
-    let (l1, pt) = pointers(l0, param, dtype, idx, n)
-    let val_ty = num_tile(n, dtype)
+    let (l1, pt) = pointers(l0, param, dtype, base, shape, strides)
+    let val_ty = num_tile(shape, dtype)
     let (l2, v) = define(l1, dst, val_ty)
     let (l3, t) = define(l2, tok_out, Token)
-    emit(l3, LoadPtr(v, t, pt, m, pd, tin, Tile([n], PtrTo(dtype)), i1_vec(n), val_ty))
+    emit(l3, LoadPtr(v, t, pt, m, pd, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
   }
-  Store(tok_out, param, dtype, idx, n, value, mask, tok_in) -> {
+  Store(tok_out, param, dtype, base, shape, strides, value, mask, tok_in) -> {
     let tin = ref_of(l0, tok_in, "store token")
     let v = ref_of(l0, value, "store value")
     let m = opt_ref(l0, mask, "store mask")
-    let (l1, pt) = pointers(l0, param, dtype, idx, n)
+    let (l1, pt) = pointers(l0, param, dtype, base, shape, strides)
     let (l2, t) = define(l1, tok_out, Token)
-    emit(l2, StorePtr(t, pt, v, m, tin, Tile([n], PtrTo(dtype)), i1_vec(n), num_tile(n, dtype)))
+    emit(l2, StorePtr(t, pt, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), num_tile(shape, dtype)))
   }
-  ConstF(dst, dtype, n, value) -> {
-    let ty = num_tile(n, dtype)
+  ConstF(dst, dtype, shape, value) -> {
+    let ty = num_tile(shape, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, ConstFloat(d, ty, value))
   }
-  ConstI(dst, dtype, n, value) -> {
-    let ty = num_tile(n, dtype)
+  ConstI(dst, dtype, shape, value) -> {
+    let ty = num_tile(shape, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, ConstInt(d, ty, value))
   }
   Iota(dst, n) -> {
-    let ty = i32_vec(n)
+    let ty = i32_tile([n])
     let (l1, d) = define(l0, dst, ty)
     emit(l1, IotaTile(d, ty))
   }
-  Lanes(dst, idx, n) -> {
-    # the element indices of block `idx` are the offsets the pointer
-    # arithmetic of a load at `idx` is built from: the same ladder, memoised,
+  Lanes(dst, base, shape, strides) -> {
+    # the element offsets a tile at `base` reads are the offsets the pointer
+    # arithmetic of a load there is built from: the same ladder, memoised,
     # so a masked load costs no instruction more than an unmasked one
-    let (l1, off) = offsets(l0, idx, n)
-    bind(l1, dst, off, i32_vec(n))
+    let (l1, off) = offsets(l0, base, shape, strides)
+    bind(l1, dst, off, i32_tile(shape))
   }
-  UnaryF(dst, op, dtype, n, src) -> {
+  UnaryF(dst, op, dtype, shape, src) -> {
     let a = ref_of(l0, src, "${op} operand")
-    let ty = num_tile(n, dtype)
+    let ty = num_tile(shape, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, FloatUn(d, op, ty, a))
   }
-  BinaryF(dst, op, dtype, n, lhs, rhs) -> {
+  BinaryF(dst, op, dtype, shape, lhs, rhs) -> {
     let a = ref_of(l0, lhs, "${op} lhs")
     let b = ref_of(l0, rhs, "${op} rhs")
-    let ty = num_tile(n, dtype)
+    let ty = num_tile(shape, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, FloatBin(d, op, ty, a, b))
   }
-  Fma(dst, dtype, n, lhs, rhs, acc) -> {
+  Fma(dst, dtype, shape, lhs, rhs, acc) -> {
     let a = ref_of(l0, lhs, "fma lhs")
     let b = ref_of(l0, rhs, "fma rhs")
     let c = ref_of(l0, acc, "fma accumulator")
-    let ty = num_tile(n, dtype)
+    let ty = num_tile(shape, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, FloatFma(d, ty, a, b, c))
   }
-  CmpF(dst, pred, dtype, n, lhs, rhs) -> {
+  MmaF(dst, dtype, m, k, n, lhs, rhs, acc) -> {
+    let a = ref_of(l0, lhs, "mmaf lhs")
+    let b = ref_of(l0, rhs, "mmaf rhs")
+    let c = ref_of(l0, acc, "mmaf accumulator")
+    let ty = num_tile([m, n], dtype)
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, FloatMma(d, ty, num_tile([m, k], dtype), num_tile([k, n], dtype), a, b, c))
+  }
+  CmpF(dst, pred, dtype, shape, lhs, rhs) -> {
     let a = ref_of(l0, lhs, "cmpf lhs")
     let b = ref_of(l0, rhs, "cmpf rhs")
-    let (l1, d) = define(l0, dst, i1_vec(n))
-    emit(l1, CmpFloat(d, pred, num_tile(n, dtype), i1_vec(n), a, b))
+    let (l1, d) = define(l0, dst, i1_tile(shape))
+    emit(l1, CmpFloat(d, pred, num_tile(shape, dtype), i1_tile(shape), a, b))
   }
-  CmpI(dst, pred, n, lhs, rhs) -> {
+  CmpI(dst, pred, shape, lhs, rhs) -> {
     let a = ref_of(l0, lhs, "cmpi lhs")
     let b = ref_of(l0, rhs, "cmpi rhs")
-    let (l1, d) = define(l0, dst, i1_vec(n))
-    emit(l1, CmpInt(d, pred, i32_vec(n), i1_vec(n), a, b))
+    let (l1, d) = define(l0, dst, i1_tile(shape))
+    emit(l1, CmpInt(d, pred, i32_tile(shape), i1_tile(shape), a, b))
   }
-  Select(dst, dtype, n, cond, lhs, rhs) -> {
+  Select(dst, dtype, shape, cond, lhs, rhs) -> {
     let c = ref_of(l0, cond, "select condition")
     let a = ref_of(l0, lhs, "select value if true")
     let b = ref_of(l0, rhs, "select value if false")
-    let ty = num_tile(n, dtype)
+    let ty = num_tile(shape, dtype)
     let (l1, d) = define(l0, dst, ty)
-    emit(l1, SelectTile(d, i1_vec(n), ty, c, a, b))
+    emit(l1, SelectTile(d, i1_tile(shape), ty, c, a, b))
   }
   IdxConst(dst, value) -> {
     let (l1, d) = define(l0, dst, i32_scalar())
@@ -375,17 +438,19 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l1, d) = define(l0, dst, i32_scalar())
     emit(l1, MulInt(d, i32_scalar(), a, b))
   }
-  Spread(dst, dtype, n, src) -> {
-    # a rank-0 tile to `n` lanes: reshape to one lane, broadcast to n
+  Spread(dst, dtype, shape, src) -> {
+    # a rank-0 tile to `shape`: reshape to one lane a dimension, broadcast
+    # to the whole tile
     let a = ref_of(l0, src, "spread operand")
-    let one = Tile([1], Num(dtype))
+    let e = Num(dtype)
+    let ones = Tile(list.map(shape, _d => 1), e)
     let (l1, r) = fresh(l0)
-    let l2 = emit(l1, Reshape(r, a, Tile([], Num(dtype)), one))
-    let (l3, d) = define(l2, dst, num_tile(n, dtype))
-    emit(l3, Broadcast(d, Val(r), one, num_tile(n, dtype)))
+    let l2 = emit(l1, Reshape(r, a, Tile([], e), ones))
+    let (l3, d) = define(l2, dst, num_tile(shape, dtype))
+    emit(l3, Broadcast(d, Val(r), ones, num_tile(shape, dtype)))
   }
   For(iv, lower, upper, step, inits, carried, results, body) -> lower_for(l0, iv, lower, upper, step, inits, carried, results, body)
-  Reduce(results, dim, n, identities, operands, args, body) -> lower_reduce(l0, results, dim, n, identities, operands, args, body)
+  Reduce(results, dim, shape, identities, operands, args, body) -> lower_reduce(l0, results, dim, shape, identities, operands, args, body)
   If(results, cond, on_true, on_false) -> lower_if(l0, results, cond, on_true, on_false)
   Yield(values) -> {
     let refs = list.map(values, h => ref_of(l0, h, "yield value"))
@@ -455,7 +520,7 @@ fn yielded(body: List[Instr], what: String) -> List[Ty] = match body[len(body) -
 # the results are the rank-0 tiles of the same element formats, numbered
 # first (the order the text reads in), then the `2 * k` region arguments,
 # then the body. On the way out the region's scope is closed, as a loop's is.
-fn lower_reduce(l0: L, results: List[Int], dim: Int, n: Int, identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp]) -> L = {
+fn lower_reduce(l0: L, results: List[Int], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp]) -> L = {
   if len(args) != 2 * len(operands) || len(results) != len(operands) {
     panic("tileir: a reduction over ${len(operands)} operand(s) names ${len(args)} region argument(s) and ${len(results)} result(s)")
   } else {
@@ -463,7 +528,7 @@ fn lower_reduce(l0: L, results: List[Int], dim: Int, n: Int, identities: List[Re
   }
   let operand_refs = list.map(operands, h => ref_of(l0, h, "reduce operand"))
   let operand_tys = list.map(operands, h => ty_of(l0, h))
-  let res_tys = list.map(operand_tys, rank0_of)
+  let res_tys = list.map(operand_tys, ot => without_dim(ot, dim))
   let (l1, res) = define_all(l0, results, res_tys)
   # the region takes the element and the accumulator of each operand, in
   # operand order, both rank-0
@@ -477,8 +542,8 @@ fn lower_reduce(l0: L, results: List[Int], dim: Int, n: Int, identities: List[Re
     ()
   }
   let l3 = close_scope(l1, inner)
-  # `n` is the width the record carried; the operand types say it again
-  let _n = n
+  # `shape` is the shape the record carried; the operand types say it again
+  let _shape = shape
   emit(l3, ReduceTile(res, res_tys, dim, identities, operand_refs, operand_tys, argv, inner.body))
 }
 
@@ -542,6 +607,7 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   FloatUn(dst, _op, _ty, _src) -> [dst]
   FloatBin(dst, _op, _ty, _lhs, _rhs) -> [dst]
   FloatFma(dst, _ty, _lhs, _rhs, _acc) -> [dst]
+  FloatMma(dst, _ty, _lhs_ty, _rhs_ty, _lhs, _rhs, _acc) -> [dst]
   CmpFloat(dst, _pred, _ty, _res_ty, _lhs, _rhs) -> [dst]
   CmpInt(dst, _pred, _ty, _res_ty, _lhs, _rhs) -> [dst]
   SelectTile(dst, _cond_ty, _ty, _cond, _lhs, _rhs) -> [dst]
@@ -582,10 +648,12 @@ fn two_loads_one_param() -> TileProg = TileProg {
   ops: [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, 128, None, None, 0),
-    Load(4, 5, 0, "f64", 1, 128, None, None, 3),
-    BinaryF(6, "addf", "f64", 128, 2, 4),
-    Store(7, 0, "f64", 1, 128, 6, None, 5)
+    IdxConst(2, 128),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0),
+    Load(6, 7, 0, "f64", 3, [128], [1], None, None, 5),
+    BinaryF(8, "addf", "f64", [128], 4, 6),
+    Store(9, 0, "f64", 3, [128], [1], 8, None, 7)
   ]
 }
 
@@ -618,10 +686,10 @@ test "the token chain is the program's: make_token feeds the first load, each me
   let f64_128 = Tile([128], Num("f64"))
   let p64_128 = Tile([128], PtrTo("f64"))
   assert k.body[0] == MakeTok(0)
-  assert k.body[11] == LoadPtr(13, 14, Val(12), None, None, Val(0), p64_128, i1_vec(128), f64_128)
-  assert k.body[12] == LoadPtr(15, 16, Val(12), None, None, Val(14), p64_128, i1_vec(128), f64_128)
+  assert k.body[11] == LoadPtr(13, 14, Val(12), None, None, Val(0), p64_128, i1_tile([128]), f64_128)
+  assert k.body[12] == LoadPtr(15, 16, Val(12), None, None, Val(14), p64_128, i1_tile([128]), f64_128)
   assert k.body[13] == FloatBin(17, "addf", f64_128, Val(13), Val(15))
-  assert k.body[14] == StorePtr(18, Val(12), Val(17), None, Val(16), p64_128, i1_vec(128), f64_128)
+  assert k.body[14] == StorePtr(18, Val(12), Val(17), None, Val(16), p64_128, i1_tile([128]), f64_128)
 }
 
 test "the ladder reads the entry parameter as an argument, not as a value" {
@@ -633,7 +701,8 @@ test "block ids along the three axes bind the matching result of one get_tile_bl
   let p = TileProg {
     name: "axes",
     params: ["f64"],
-    ops: [MakeToken(0), BlockId(1, 2), Load(2, 3, 0, "f64", 1, 8, None, None, 0)]
+    ops: [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
+      Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0)]
   }
   let k = lower(p)
   assert k.body[1] == BlockIds(1, 2, 3)
@@ -653,16 +722,22 @@ fn sum_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 4),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, 128, None, None, 0),
-    IdxConst(6, 1),
-    IdxAdd(7, 3, 6),
-    IdxAdd(8, 3, 2),
-    For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [
-      Load(12, 13, 0, "f64", 9, 128, None, None, 11),
-      BinaryF(14, "addf", "f64", 128, 10, 12),
-      Continue([14, 13])
+    IdxConst(4, 128),
+    IdxMul(5, 3, 4),
+    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0),
+    IdxConst(8, 1),
+    IdxAdd(9, 3, 8),
+    IdxAdd(10, 3, 2),
+    For(11, 9, 10, 8, [6, 7], [12, 13], [19, 20], [
+      IdxConst(14, 128),
+      IdxMul(15, 11, 14),
+      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
+      BinaryF(18, "addf", "f64", [128], 12, 16),
+      Continue([18, 17])
     ]),
-    Store(17, 1, "f64", 1, 128, 15, None, 16)
+    IdxConst(21, 128),
+    IdxMul(22, 1, 21),
+    Store(23, 1, "f64", 22, [128], [1], 19, None, 20)
   ]
 }
 
@@ -687,7 +762,7 @@ test "a loop lowers to one For whose results, block arguments and body are numbe
       assert carried == [23, 24]
       assert defines_inside(body)[0] == 25
       # the body's load reads its pointers at the induction variable and the carried token
-      assert body[len(body) - 3] == LoadPtr(34, 35, Val(33), None, None, Val(24), Tile([128], PtrTo("f64")), i1_vec(128), f64_128)
+      assert body[len(body) - 3] == LoadPtr(34, 35, Val(33), None, None, Val(24), Tile([128], PtrTo("f64")), i1_tile([128]), f64_128)
       assert body[len(body) - 2] == FloatBin(36, "addf", f64_128, Val(23), Val(34))
       assert body[len(body) - 1] == Cont([Val(36), Val(35)], [f64_128, Token])
     }
@@ -720,13 +795,15 @@ fn total_prog() -> TileProg = TileProg {
   ops: [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
-    Reduce([7], 0, 8, [IdF("f64", 0.0)], [2], [4, 5], [
-      BinaryF(6, "addf", "f64", 0, 4, 5),
-      Yield([6])
+    IdxConst(2, 8),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Reduce([9], 0, [8], [IdF("f64", 0.0)], [4], [6, 7], [
+      BinaryF(8, "addf", "f64", [], 6, 7),
+      Yield([8])
     ]),
-    Spread(8, "f64", 1, 7),
-    Store(9, 1, "f64", 1, 1, 8, None, 3)
+    Spread(10, "f64", [1], 9),
+    Store(11, 1, "f64", 3, [1], [1], 10, None, 5)
   ]
 }
 
@@ -775,12 +852,14 @@ fn branch_prog() -> TileProg = TileProg {
   ops: [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
-    IdxConst(4, 0),
-    CmpI(5, "eq", 0, 1, 4),
-    If([8], 5, [BinaryF(6, "addf", "f64", 8, 2, 2), Yield([6])],
-      [BinaryF(7, "mulf", "f64", 8, 2, 2), Yield([7])]),
-    Store(9, 1, "f64", 1, 8, 8, None, 3)
+    IdxConst(2, 8),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    IdxConst(6, 0),
+    CmpI(7, "eq", [], 1, 6),
+    If([10], 7, [BinaryF(8, "addf", "f64", [8], 4, 4), Yield([8])],
+      [BinaryF(9, "mulf", "f64", [8], 4, 4), Yield([9])]),
+    Store(11, 1, "f64", 3, [8], [1], 10, None, 5)
   ]
 }
 
@@ -812,9 +891,9 @@ test "an if lowers to one IfElse whose two branches are numbered after its resul
 }
 
 test "a value one branch of an if defined is refused by name in the other and after it" {
-  # the store takes the then branch's addf (6) instead of the if's result (8)
+  # the store takes the then branch's addf (8) instead of the if's result (10)
   let bad = TileProg { ..branch_prog(),
-    ops: list.take(branch_prog().ops, 6) ++ [Store(9, 1, "f64", 1, 8, 6, None, 3)] }
+    ops: list.take(branch_prog().ops, 8) ++ [Store(11, 1, "f64", 3, [8], [1], 8, None, 5)] }
   match catch_panic(() => lower(bad)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "which a loop body defined and which is not visible after the loop") }
@@ -822,21 +901,24 @@ test "a value one branch of an if defined is refused by name in the other and af
 }
 
 test "a value a loop body defined is refused by name after the loop" {
-  # the store's token is the body's load token (13) instead of the loop's token result (16)
-  let bad = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 9) ++ [Store(17, 1, "f64", 1, 128, 15, None, 13)] }
+  # the store's token is the body's load token (17) instead of the loop's token result (20)
+  let bad = TileProg { ..sum_prog(),
+    ops: list.take(sum_prog().ops, 11) ++ [Store(23, 1, "f64", 1, [128], [1], 19, None, 17)] }
   match catch_panic(() => lower(bad)) {
     Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e.message, "`store token` refers to handle 13, which a loop body defined and which is not visible after the loop") }
+    Err(e) -> { assert str.contains(e.message, "`store token` refers to handle 17, which a loop body defined and which is not visible after the loop") }
   }
 }
 
 test "a loop whose carried lists disagree, or whose body does not end in continue, is refused" {
-  let short = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 8) ++ [For(9, 7, 8, 6, [4, 5], [10], [15, 16], [Continue([10, 11])])] }
+  let short = TileProg { ..sum_prog(),
+    ops: list.take(sum_prog().ops, 10) ++ [For(11, 9, 10, 8, [6, 7], [12], [19, 20], [Continue([12, 13])])] }
   match catch_panic(() => lower(short)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "a loop carrying 2 value(s) names 1 inside and 2 after") }
   }
-  let open = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 8) ++ [For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [BinaryF(12, "addf", "f64", 128, 10, 10)])] }
+  let open = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 10)
+    ++ [For(11, 9, 10, 8, [6, 7], [12, 13], [19, 20], [BinaryF(14, "addf", "f64", [128], 12, 12)])] }
   match catch_panic(() => lower(open)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "a loop body ends in something other than continue") }
