@@ -15,7 +15,12 @@
 > 八个 intrinsic、原生运行时的 `dlopen libcuda`、JVM 拒绝类、`with_gpu_real`、`scripts/tile-gpu-diff`
 > 的对拍脚本与台账、CI 台账门），§4.2、§4.4 与 §6.4 描述的就是它；**GPU 对拍本身待驱动**：本机
 > 560.94 上管线走到 `cuModuleLoadData` 被 `CUDA_ERROR_INVALID_IMAGE` 拦住，台账第一行记的就是这一步
-> （§6.4）。刀 0 与刀 6 未动工。
+> （§6.4）。**刀 0 已落地**（`std/narrow`：三个 opaque 格式、`round_binary`、`Narrow` trait，
+> `scripts/narrow-contract` 的精确 oracle），§3.2 描述的就是它。**刀 6 已落地**（`gpu.BF16`
+> 标记与 `Tensor[BF16]`、`std/narrow` 的 bf16 位模式编解码、宿主侧 `Bytes` 打包与两个 `Bytes`
+> 版 intrinsic、假设备按缓冲格式舍入并把格式交给参考实现、`vadd_bf16` 的层 0 / 1 golden 与
+> cubin、对拍脚本的三组 bf16 语料），§3.2、§3.3、§4.3、§4.4 与 §6.4 描述的就是它；**六刀全部
+> 落地，层 2 待驱动**：bf16 的设备对拍与 f64 的一样停在 `cuModuleLoadData`（§6.4）。
 > 前置勘察与计划稿是两份不入库的研究备忘录（agent-handoff 的
 > `cutile-backend-fit.md` 与 `tile-backend-plan.md`），探索过程留在那里，
 > 本文只保留结论与证据坐标。
@@ -135,11 +140,17 @@ pub fn add(a: BF16, b: BF16) -> BF16 = {
 
 设备侧硬要求：所有 `addf / mulf / divf` 显式写 `rounding<nearest_even>`，其它模式让定理失效。
 
-模块面：只导出 `opaque BF16 / FP16 / F32`、四个 `round_*`、每格式的
-`of / to_f64 / add / sub / mul / div / sqrt`。不导出运算符（做不到）、不导出 fma。
-不给 `BF16` 写 `impl Display`，渲染沿用 `Float`。登记进 `std/modules.txt`。
-Emit-Change 面按刀 1 的实测预估：**全部十个 `emit` label 都动**（见 §8），实报以 prev-diff
-与真父提交对照为准。
+模块面（落地形状以 `std/narrow.dawn` 为准）：导出 `opaque BF16 / FP16 / F32`、四个 `round_*`、
+三个构造子 `bf16 / fp16 / f32`、`Narrow` trait（`to_f64 / add / sub / mul / div / sqrt / neg / abs`），
+以及刀 6 加的 **bf16 位模式编解码** `bf16_bits(x: Float) -> Int` / `bf16_of_bits(bits: Int) -> Float`：
+没有 float-to-bits 原语，位模式用 `round_binary` 同款的精确算术拼出来（指数靠倍增减半，尾数靠
+2 的幂缩放到整数域）。`bf16_bits` 对不在格点上的值**截断**（等于取 binary32 高半字的位），
+不舍入，所以调用方先 `round_bf16`；NaN 一律答规范 quiet NaN `0x7FC0`（`Float` 没有程序能读的
+payload），超出范围答该符号的无穷。std 测试对全部 65536 个位模式做「解码 → 编码」往返：65282 个
+非 NaN 模式逐位回到自己且 `round_bf16(v) == v`（编解码的格点就是舍入的格点），254 个 NaN 模式
+解码成 NaN、编码回 `0x7FC0`。只做 bf16；fp16 / f32 的编解码同形，有客户再加。不导出运算符
+（做不到）、不导出 fma。不给 `BF16` 写 `impl Display`，渲染沿用 `Float`。登记进 `std/modules.txt`。
+Emit-Change 面：刀 0 与刀 6 实报都是全部十个 `emit` label 都动（见 §8）。
 
 ### 3.3 `Dtype` 与 `Tensor[D]`（刀 1 已落地）
 
@@ -149,6 +160,7 @@ Emit-Change 面按刀 1 的实测预估：**全部十个 `emit` label 都动**�
 ```dawn
 pub type F64 = | F64
 pub type F32 = | F32
+pub type BF16 = | BF16          # 刀 6
 
 pub trait Dtype[D] {
   fn dtype_name(d: D) -> String
@@ -173,8 +185,18 @@ grid 检查都在效果**之上**、由 std 函数做，于是两种 handler 都
 张量值本身就得知道自己多长。std 自己铸的失败种类：`gpu.bad_length`（`alloc` 的 `len < 1`）、
 `gpu.length_mismatch`（`upload` 的长度不符）、`gpu.bad_grid`（`launch` 的 `grid < 1`），
 三者在每个 handler 下都是同一个字符串。
-bf16 的标记类型不在刀 1 里：它与 `std/narrow` 的 opaque `BF16` 是两个东西（元素格式标签
-对宿主上的值），命名要等 `narrow` 落地后一起定，随刀 6 进来。
+
+**bf16 标记（刀 6 已落地）**：`gpu.BF16 = | BF16`，`dtype_name` 答 `"bf16"`、`dtype_bytes` 答 2。
+它与 `std/narrow` 的 opaque `BF16` **同名不同物**：标记是缓冲元素格式的标签（无内容的值，按名传给
+`alloc`），narrow 的是宿主上的一个数；`gpu.F32` 与 `narrow.F32` 早就是这个关系，bf16 照做，程序
+用限定名 `gpu.BF16` / `narrow.BF16` 区分（同一模块不带别名地同时 `use` 两者会撞名，这是既有事实）。
+没有复用 narrow 的类型做标记：那样 `alloc(narrow.bf16(0.0), n)` 得造一个值当标签，而效果操作
+只搬字符串，两边本就不需要认识对方的类型。**宿主值在每种格式下都是 `List[Float]`**：`upload` 到
+bf16 张量把每个 Float 舍入到最近的 bf16（ties-to-even，设备自己的 load 也不会拒绝一个 f64），
+`download` 把每个 bf16 精确地答成 Float；两个 handler 共用 `element_bytes(dtype) -> Option[Int]`
+（`f64` → 8、`bf16` → 2、其它 `None`）决定接不接受一个 `gpu_alloc`，`f32` 仍是「能打字不能分配」。
+`Tensor[D]` 的 target 没变（仍是 `(Int, Int)`，格式记在 handler 的表里），所以 opaque-twin 与
+checker-corpus 的语料一字未动。
 
 `Tensor[F64]` 传给要 `Tensor[F32]` 的参数是类型错误，`scripts/checker-corpus/cases/phantom_opaque.dawn`
 把这条钉成 must-red 语料。
@@ -212,9 +234,10 @@ pub effect Gpu {
 
 v1 刻意缺的：`gpu_load_module(bytes)`（第一里程碑 kernel 由 `launch` 的名字查表，模块在
 handler 安装时一次性给；第二里程碑再把「字节码到模块句柄」做成操作）；三维 grid
-（`grid: Int` 先一维，`(Int, Int, Int)` 是零成本升级）；`upload / download` 的
-`List[Float]` 在大数据下应是 `Bytes`，v1 用 `List[Float]` 是为了和假设备的参考实现同一种值，
-第二里程碑换 `Bytes` 并让 `narrow` 提供 bf16 的打包。
+（`grid: Int` 先一维，`(Int, Int, Int)` 是零成本升级）。`upload / download` 的 `List[Float]`
+**保留到了刀 6 之后**：操作面在每种格式下都搬 `List[Float]`（与假设备的参考实现同一种值），
+bf16 的打包发生在操作**之下**、真 handler 里（§4.4 的 `Bytes` 版 intrinsic），假设备则按缓冲
+格式舍入；计划稿「换 `Bytes`」的那一步没有必要，因为格式转换只有真设备那一侧需要字节。
 
 ### 4.2 `with_gpu_real` 形态（刀 4 已落地）
 
@@ -235,9 +258,14 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
   （`cuModuleLoadData: CUresult 200 (...)`）。没有 libcuda 可装载答 `gpu.no_driver`，JVM 上一律
   `gpu.unsupported_backend`。**接缝仍在错误面之下**：臂把这个 `ForeignError`原样交出，不加工。
 
-handler 的状态与假设备同款：句柄从 1 起编号、`Map[Int, (设备指针, 元素数)]` 一张表，未签发或已释放
-的句柄答 `gpu.no_such_buffer`；`gpu_alloc` 本版只收 `"f64"`（操作面搬的是 `List[Float]`），其它答
-`gpu.unsupported_dtype`。`gpu_launch` 先查名字、再查参数（`gpu.no_arguments`、`gpu.no_such_buffer`），
+handler 的状态与假设备同款：句柄从 1 起编号、`Map[Int, (设备指针, 元素数, 格式名)]` 一张表，未签发
+或已释放的句柄答 `gpu.no_such_buffer`；`gpu_alloc` 收 `element_bytes` 认识的格式（`f64`、刀 6 起
+`bf16`），按元素字节数分配，其它答 `gpu.unsupported_dtype`。f64 缓冲经 `Array[Float]` 过运行时
+（逐 double 复制，NaN payload 也不丢）；bf16 缓冲在 std 里 `pack_bf16`（先 `round_bf16` 再
+`bf16_bits`，低字节在前）成 `Bytes` 交给 `gpu_upload_bytes_host`，`download` 取 `n * 2` 字节回来
+`unpack_bf16`。**f64 没有改走 `Bytes`**：Dawn 没有 float-to-bits，纯 Dawn 把 f64 拆成 8 字节要每个
+元素跑一遍指数循环、还会丢 NaN payload，而 `Array[Float]` 那条缝对每一个位模式都精确且零成本；
+两条缝各是自己格式最便宜的精确缝。`gpu_launch` 先查名字、再查参数（`gpu.no_arguments`、`gpu.no_such_buffer`），
 **然后才碰设备**：cubin 在该 kernel 第一次 `launch` 时交给 `cuModuleLoadData`，模块句柄留到本次
 安装结束，所以不 launch 的程序不装模块，alloc/upload/download 在装不了模块的驱动上照样可用，
 这正是 560.94 上能验到的那一半。grid 计 tile block 数，intrinsic 以 block dims `(1,1,1)`、
@@ -250,21 +278,34 @@ shared 0 调 `cuLaunchKernel`（cuda-tile 宿主示例的启动形态）。第�
 ### 4.3 假设备 `with_gpu_fake`（刀 1 已落地）
 
 ```dawn
-pub fn with_gpu_fake[T](kernels: Map[String, fn(List[List[Float]]) -> List[Float]],
+pub fn with_gpu_fake[T](kernels: Map[String, fn(List[String], List[List[Float]]) -> List[Float]],
                         body: fn() -> T !Gpu) -> T
-pub fn vadd_ref(ins: List[List[Float]]) -> List[Float]
-pub fn reference_kernels() -> Map[String, fn(List[List[Float]]) -> List[Float]]
+pub fn vadd_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float]
+pub fn sum_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float]
+pub fn round_to(dtype: String, x: Float) -> Float
+pub fn reference_kernels() -> Map[String, fn(List[String], List[List[Float]]) -> List[Float]]
 ```
 
 - **纯**（签名无 `!io`），所以它进得了 `dawn test --stdlib` 与 comptime。
-- 句柄从 1 起编号，缓冲是 `Map[Int, List[Float]]`；`gpu_alloc` 只接受 `"f64"`（v1 缓冲
-  是 `Float` 表），其它 dtype 答 `Err(kind: "gpu.unsupported_dtype")`，与真设备拒绝它没有
-  的格式同形；不存在的句柄答 `gpu.no_such_buffer`；`gpu_upload` 原样存入，不查长度
-  （长度检查在效果之上）；`gpu_launch` 按名查 `kernels`，把每个实参句柄的内容按序交给
-  参考实现，返回值写进**最后一个**实参的缓冲；名字不在表里答 `gpu.no_kernel`，一个实参都没有
-  答 `gpu.no_arguments`；`grid` 被忽略（参考实现一次算整个向量）。
+- 句柄从 1 起编号，缓冲是 `Map[Int, (格式名, List[Float])]`；`gpu_alloc` 接受 `element_bytes`
+  认识的格式（`f64`、`bf16`），其它 dtype 答 `Err(kind: "gpu.unsupported_dtype")`，与真设备拒绝
+  它没有的格式同形；不存在的句柄答 `gpu.no_such_buffer`；**缓冲持有的是该格式的内存会持有的值**：
+  `gpu_upload` 存入前按缓冲格式 `round_to`（f64 就是原样），launch 写进输出缓冲的值也按输出格式
+  舍入；长度不查（长度检查在效果之上）；`gpu_launch` 按名查 `kernels`，把每个实参缓冲的**格式表**
+  与内容按序交给参考实现，返回值写进**最后一个**实参的缓冲；名字不在表里答 `gpu.no_kernel`，
+  一个实参都没有答 `gpu.no_arguments`；`grid` 被忽略（参考实现一次算整个向量）。
+- **参考实现知道 dtype**（刀 6 的改动面：签名前面加一个 `List[String]`，`vadd_ref` / `sum_ref` /
+  `reference_kernels` / `with_gpu_fake` 四处签名，`vadd_diff.dawn` 只经 `reference_kernels()`
+  用它、没有改）。原因是寄存器语义：内存里的舍入假设备自己做，但 `sum` 的累加 tile 在 bf16 下
+  **每一步** `addf` 都舍入，一个只在最后写内存时舍入的假设备会把多步双舍入算错；所以 `vadd_ref`
+  对输出格式 `round_to` 每个和、`sum_ref` 对每一步 `acc + x` 舍入。`vadd_bf16` 与 `vadd` 用同一个
+  参考（`reference_kernels` 把两个名字都指向 `vadd_ref`）。
 - `launch` 用的是宿主侧参考实现，第一里程碑就是 `vadd_ref`。同一个参考实现是层 2 对拍
   `.expect` 的来源之一（另一来源是手写的期望值）。
+- 刀 6 的 std 测试把假设备钉在 narrow 上：全部 65536 个 bf16 位模式各配一个固定种子 LCG 抽出的
+  随机位模式，bf16 `vadd` 在假设备上的答案与 `narrow.add(bf16(a), bf16(b))` 逐值渲染相同（`to_string`
+  分得清 `-0.0` 与 NaN）；另一组 1024 对格点外的随机 Float，验的是上传时的舍入（假设备若不舍入
+  就答 `round(a + b)` 而不是 `round(round(a) + round(b))`，这组会红）。
 - 今天写不出的断言「一个 `!Gpu` 程序在没有 GPU 的机器上跑完 vadd 并得到正确答案」是
   `std/gpu.dawn` 的第一个 test 块。
 
@@ -273,15 +314,18 @@ pub fn reference_kernels() -> Map[String, fn(List[List[Float]]) -> List[Float]]
 
 ### 4.4 intrinsic 与运行时落点（刀 4 已落地）
 
-- `types.dawn` 的 `Rt` 加 `RtGpu`；`intrinsics()` 登记**八项**而不是六项，全部 `internal: true`、
-  行是 `!io`、归属 `RtGpu`：六个操作的 `gpu_{alloc,upload,download,launch,free,sync}_host`，
+- `types.dawn` 的 `Rt` 加 `RtGpu`；`intrinsics()` 登记**十项**（刀 4 八项、刀 6 两项），全部
+  `internal: true`、行是 `!io`、归属 `RtGpu`：六个操作的 `gpu_{alloc,upload,download,launch,free,sync}_host`，
   加 `gpu_load_module_host(cubin: Bytes) -> Result[Int, ForeignError]`（答 CUmodule 句柄）与
-  `gpu_close_host() -> Unit`（释放上下文与库）。多出的两个是刻意的：装模块单独成操作才能懒到
-  第一次 launch（§4.2），close 单独成操作才有地方在 handler 退出时释放（LSan 下实测零漏）。
-  ABI 上缓冲区是裸设备指针（`Int`）、数据是 `Array[Float]`、launch 参数是 `Array[Int]`：
-  `Array` 是两个后端都能在运行时边界叫出名字的唯一容器，List 到 Array 的一趟走在 std 里
-  （`std/pvec` 的 `Vec` 是记录不是 `List`，std 源码里两者不能互换，所以用 `array_new/array_push`
-  循环）；返回值全是 `Result`，理由见 §4.2。
+  `gpu_close_host() -> Unit`（释放上下文与库），再加刀 6 的 `gpu_upload_bytes_host(devptr, data: Bytes)`
+  与 `gpu_download_bytes_host(devptr, nbytes) -> Result[Bytes, ForeignError]`。多出的两个是刻意的：
+  装模块单独成操作才能懒到第一次 launch（§4.2），close 单独成操作才有地方在 handler 退出时释放
+  （LSan 下实测零漏）。ABI 上缓冲区是裸设备指针（`Int`）、f64 数据是 `Array[Float]`、打包格式的数据
+  是 `Bytes`、launch 参数是 `Array[Int]`：`Array` 与 `Bytes` 是两个后端都能在运行时边界叫出名字的
+  容器，List 到 Array 的一趟与 bf16 的打包都走在 std 里（`std/pvec` 的 `Vec` 是记录不是 `List`，
+  std 源码里两者不能互换，所以用 `array_new/array_push` 循环；打包用 `bytes.Buf`）；返回值全是
+  `Result`，理由见 §4.2。C 侧的两个 `Bytes` 函数只是 `cuMemcpyHtoD_v2` / `cuMemcpyDtoH_v2` 加一次
+  `dawn_bytes_of`，不认识任何格式。
 - C 侧：`runtime/c/dawn_rt.c` 末尾一段，夹在 `DAWN_RT_GPU_BEGIN / END` 两个标记之间（台账门
   按这一段比较，§6.4）。`dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL)`，`dlsym` 十三个入口
   （版本化符号要自己拼：`cuCtxCreate_v2 / cuMemAlloc_v2 / cuMemcpyHtoD_v2 / cuMemcpyDtoH_v2 /
@@ -295,8 +339,10 @@ pub fn reference_kernels() -> Map[String, fn(List[List[Float]]) -> List[Float]]
   无条件发射。「抛异常」改成「答 Err」是因为错误模型：按构造拒绝应当是值不是 `LinkageError`。
 - 分组表不用动：`RtGpu` 走 `rt` 表项，`lower.dawn` 的分配测试按 `rt: Some(_)` 自动归组；
   `scripts/intrinsic-parity.py` 只读 inline 两组，也不用动（计划稿说的 `rt_class` 锚点并不存在）。
-  要动的是三处计数与一张表：`types.dawn` / `lower.dawn` 的 intrinsic 总数 99 → 107，
-  `ir/interp.dawn` 的 `comptime_rejects` 加八个名字（77 → 85，编译期不许开驱动，理由同 io）。
+  要动的是三处计数与两张表：`types.dawn` / `lower.dawn` 的 intrinsic 总数 99 → 107 → 109，
+  `ir/interp.dawn` 的 `comptime_rejects` 加名字（77 → 85 → 87，编译期不许开驱动，理由同 io），
+  以及 `selfhost/builtins.dawn` 的镜像行（`scripts/builtin-decl-contract` 双向对账；刀 4 漏了这张表，
+  `825b465b` 补上，刀 6 的两项随手同步）。
 
 ### 4.5 kernel 怎么被 `launch` 点名
 
@@ -561,15 +607,19 @@ cubin，台账第一行记的是 `blocked`，「算的对不对」这一格要�
 
 ### 6.4 本机对拍脚本与台账（D4 的机器强制点，刀 4 已落地）
 
-**脚本** `scripts/tile-gpu-diff/run.sh`（本机一次约 25 s，含一次 tileiras、一次 JVM 运行、三次
-原生构建）：用钉版本的 `tileiras` 把 `scripts/tile-golden/vadd.tilebc` 汇编成 cubin；先在 JVM 上跑
-`vadd_diff.dawn`，要求真 handler 在第一个操作就答 `gpu.unsupported_backend`；再原生跑它：四组输入
-（128 / 1024 / 128 / 4096 个元素，含负数、百万量级、`-0.0`、`1e300`、`1e-300`），每组在
-`with_gpu_real` 与 `with_gpu_fake` 下各走一遍 alloc → upload → 回读第一个输入 → launch → sync →
-download，逐段打印设备答的 kind，结果按 `to_string` 的整段渲染比（分得清 `-0.0` 与 NaN，即逐位）。
-末行判词三种：`pass`（每组逐位相同）、`blocked:<kind>@<stage>`（驱动在该段拒绝，各组一致）、
-`fail`（设备答了但数字不同，或内存回读就不同）。计划稿里的「容差档」本版没有客体（vadd 是逐位档），
-随 matmul 一起来。两个变异体内置在脚本里（§7 刀 4 行）。
+**脚本** `scripts/tile-gpu-diff/run.sh`（本机一次约 26 s，含两次 tileiras、一次 JVM 运行、
+四次原生构建）：用钉版本的 `tileiras` 把 `scripts/tile-golden/vadd.tilebc` 与 `vadd_bf16.tilebc` 汇编成
+两个 cubin；先在 JVM 上跑 `vadd_diff.dawn`，要求真 handler 在第一个操作就答 `gpu.unsupported_backend`；
+再原生跑它：**四组 f64 输入**（128 / 1024 / 128 / 4096 个元素，含负数、百万量级、`-0.0`、`1e300`、
+`1e-300`，走 `vadd`）加**三组 bf16 输入**（刀 6：128 个「十分之几对二分之几」、1024 个随机 Float 对
+随机位模式、**全部 65536 个位模式按序对随机 Float**，走 `vadd_bf16`；每组都故意含格点外的 Float），
+每组在 `with_gpu_real` 与 `with_gpu_fake` 下各走一遍 alloc → upload → 回读两个输入 → launch → sync →
+download，逐段打印设备答的 kind；回读与该格式会持有的值比（`round_to`），结果按 `to_string` 的整段
+渲染比（分得清 `-0.0` 与 NaN，即逐位）。末行判词三种：`pass`（每组逐位相同）、
+`blocked:<kind>@<stage>`（驱动在该段拒绝，各组一致）、`fail`（设备答了但数字不同，或内存回读就
+不同）。计划稿里的「容差档」本版没有客体（vadd 是逐位档），随 matmul 一起来。三个变异体内置在脚本里
+（§7 刀 4 行的两个，加刀 6 的 `pack-truncates`：打包层不再先 `round_bf16`、让 `bf16_bits` 截断，三组
+bf16 的回读全部 `differ:roundtrip`、四组 f64 不动；与 `download-short` 同层，所以在 560.94 上就要红）。
 
 **台账** `scripts/tile-gpu-diff/ledger.txt`，脚本追加、不手写，一行
 `<commit> <date> <driver> <tileiras> <gpu-name> <result> [# note]`。commit 是 HEAD 的 12 位；tile
@@ -586,7 +636,7 @@ ad03cbb02b18 2026-09-02 560.94 13.3.36 sm_86 blocked:cuda.CUDA_ERROR_INVALID_IMA
 `packages/tileir`、`std/gpu.dawn`、`scripts/tile-golden`、`scripts/tile-gpu-diff`（台账本身除外）与
 `runtime/c/dawn_rt.c` 里 `DAWN_RT_GPU_BEGIN / END` 之间那一段（运行时其它部分不是 tile 路径，
 两个版本各取该段比较，标记丢了算改了）；`toolchain.txt` 的 `driver` 与 `tileiras` 行等于台账末行。
-与计划稿的出入：`std/narrow.dawn` 暂不在 tile 路径里（GPU 路径还没用到它，刀 6 接 bf16 时加进去）；
+`std/narrow.dawn` 自刀 6 起在 tile 路径里（假设备用它舍入、打包用它编码）；
 「blocked 是允许状态」是新加的语义，因为一台装不进 cubin 的机器的诚实记录比没有记录有用，
 门拒绝的是沉默。负控：把末行 commit 改成一个非祖先（另一分支的 sha），`--check` 红，原文见刀 4 报告。
 
@@ -598,10 +648,28 @@ ad03cbb02b18 2026-09-02 560.94 13.3.36 sm_86 blocked:cuda.CUDA_ERROR_INVALID_IMA
 路径（`ASAN_OPTIONS=protect_shadow_gap=0`，否则 `cuMemAlloc` 在 ASan 的影子内存下答 OUT_OF_MEMORY；
 `leak:libcuda.so` 压掉驱动自己的两处内部分配）本仓运行时零漏，`dlclose` 四次安装各一次无事。
 
-**升驱动后要做的事**，就一步：Windows 侧把 NVIDIA 驱动升到 r580 以上（WSL2 的 `libcuda.so.1`
-随宿主驱动来，WSL 内不装驱动），`nvidia-smi` 确认版本后把 `toolchain.txt` 的 `driver` 行改成
-该版本、提交，跑 `./scripts/tile-gpu-diff/run.sh`，提交它追加的台账行。预期末行变 `pass`，
-`grid-zero` 变异体从 SKIP 变成 PASS。若变成 `fail`，那是这条线的第一个真问题。
+**刀 6 在 560.94 上的实况，与一个新发现**：bf16 的三组与 f64 的四组停在同一处，launch 之前的
+alloc（2 字节一元素）、`Bytes` 上传、回读（含 65536 个位模式的整段打包往返与格点外 Float 的舍入）
+全部 `same`。但刀 4 记录的「`cuModuleLoadData` 答 `CUDA_ERROR_INVALID_IMAGE`」**只是那台机器当天
+的堆布局**：刀 6 把对拍程序改成七组、std 的 handler 换了形状之后，同一个驱动在第三次装模块时
+在 `cuModuleLoadData` 内部**向空指针写**（ASan 报 `SEGV on unknown address 0xb`，栈全在 libcuda
+里；同一份 cubin、同一 rc = 2、同一字节，`-O0`/`-O2` 崩、`-O1` 不崩，加一句 `fprintf` 不崩，把
+image 拷到页对齐的缓冲有时不崩，old 程序配新 std 崩、配 main 的 std 不崩：纯堆布局轮盘，与
+dlclose 无关，也与 image 后面的字节无关，都逐一试过）。一个 12.x 的装载器读 CUDA 13 的 ELF
+（EI_ABIVERSION = 8）没有干净的拒绝路径，所以刀 6 让运行时**先看再问**：`dawn_gpu_open` 多取
+`cuDriverGetVersion`，`gpu_load_module_host` 读 image 的 ELF ABI 版本字节，ABI ≥ 8 而驱动 API
+< 13000 就答 `gpu.driver_too_old`（消息带两个数字），不把字节交给装载器。台账末行因此从
+`blocked:cuda.CUDA_ERROR_INVALID_IMAGE@launch` 变成 `blocked:gpu.driver_too_old@launch`；刀 4
+那一行留在历史里，是这个装载器答过的话。`pack-truncates` 与 `download-short` 在这台机器上都已红过。
+
+**升驱动后要做的事**：Windows 侧把 NVIDIA 驱动升到 r580 以上（WSL2 的 `libcuda.so.1` 随宿主驱动来，
+WSL 内不装驱动），`nvidia-smi` 确认版本后把 `toolchain.txt` 的 `driver` 行改成该版本、提交，跑
+`./scripts/tile-gpu-diff/run.sh`，提交它追加的台账行。预期末行变 `pass`：f64 四组与 bf16 三组全部
+`identical`，其中第三组 bf16 就是 §7 刀 6 行的断言「设备 bf16 `addf` 与 `narrow.round_bf16(f64 加)`
+对全部 65536 个 bf16 值对加随机对逐位一致」；`grid-zero` 变异体从 SKIP 变成 PASS。若 f64 组
+`identical` 而某组 bf16 `differ:result`，那是 §8 墙一的剩余风险成真：该代硬件的 bf16 `addf` 不守
+nearest_even，处置是把 bf16 降到容差档并在 §3.2 的表里改那一格。若 f64 组就 `differ:result`，
+那是这条线的第一个真问题。
 
 ### 6.5 墙钟
 
@@ -610,7 +678,10 @@ ad03cbb02b18 2026-09-02 560.94 13.3.36 sm_86 blocked:cuda.CUDA_ERROR_INVALID_IMA
 加 checkout 与工具链动作按 45 s 估，planning value 110 s，翻倍 220 s，`timeout-minutes: 11`，
 远在 run-pole 660 s 之下）。刀 5 实测 `run.sh` 本机 100 s（三个 kernel、十一次 `tileiras`、
 八个变异体各一次 native 构建），planning value 170 s，翻倍 340 s，`timeout-minutes: 17`，
-仍在 run-pole 之下。刀 2 时挂在 `test` job 里的 tile-golden 步随之搬走，`test` 的 budget
+仍在 run-pole 之下。刀 6 实测 `run.sh` 本机 91 s（四个 kernel、十四次 `tileiras`、
+十个变异体；比刀 5 的 100 s 快是机器当天的事，不是脚本变轻），仍在 170 s 的 planning value 之内，
+`tile` job 的 budget 不动。`dawn test --stdlib` 多了 65536 次编解码往返与 65536 对假设备
+vadd，本机 12.7 s → 13.5 s，`test` job 的 budget 不动。刀 2 时挂在 `test` job 里的 tile-golden 步随之搬走，`test` 的 budget
 回到 323 s。刀 1 与刀 0 只加 std 测试，落在 `test` job 的 `dawn test --stdlib` 步，秒级。
 
 ## 7. 刀序
@@ -627,7 +698,7 @@ ad03cbb02b18 2026-09-02 560.94 13.3.36 sm_86 blocked:cuda.CUDA_ERROR_INVALID_IMA
 | **3 字节码写入器 + CI 层 1**（已落地） | 「`tileiras --gpu-name sm_86` 接受我们写的字节码并产出 cubin」 | `packages/tileir/src/lower.dawn`（两个消费者共用的指令表，渲染器改吃它、文本 golden 逐字节未动）与 `bytecode.dawn`（约 330 行含测试，比估的 1500 少：只编码指令表装得下的十三种操作）、`scripts/tile-golden` 加 `*.tilebc` golden、`toolchain.txt`、`install-tileiras.sh`、三个写入器变异体，`gates.yml` 新 job `tile` | 本机 `tileiras` 13.3.36 接受，8320 字节 cubin（§6.1）；CI `tile` job | 三个写入器变异体各被 `tileiras` 以具名报文拒绝（§6.2） | 4 到 6（实报 1；`run.sh` 本机 40 s，`tile` job budget 220 s planning value） |
 | **4 `with_gpu_real` + 本机对拍**（管线落地，GPU 对拍待驱动） | 「GPU 算出的 vadd 与假设备逐位一致」 | `RtGpu` 加八个 intrinsic（六操作 + 装模块 + close）、`dawn_rt.c` 的 `dlopen libcuda`（约 300 行 C）、JVM `dawn/rt/Gpu` 拒绝类、`with_gpu_real`、`scripts/tile-gpu-diff/{run.sh,vadd_diff.dawn,ledger.txt}`、`gates.yml` 的 `--check` 步；parity 脚本不必动 | 本机 `run.sh` 走到 `cuModuleLoadData` 被 560.94 拦住，台账记 `blocked`；CI 台账门绿 | `download-short`（handler 少取一个元素）对拍在 560.94 上就红；`grid-zero`（launch 传 0 block）在 560.94 上 SKIP 并明说原因，升驱动后要红；台账 commit 写成非祖先，`--check` 红 | 3 到 4（实报 1；`run.sh` 本机 25 s，`--check` 亚秒，`tile` job budget 不变） |
 | **5 结构化控制流 + 第二个 kernel**（已落地） | 「带 `d_for` 的归约 kernel 与假设备逐位一致」 | `d_for / d_for2` 普通函数加 `t_loop_begin / t_loop_end` 与三个索引算术操作、区域栈、token 穿过循环携带值、`For` 的降低 / 渲染 / 字节码区域编码、`sum` kernel 与 `std/gpu.sum_ref`；`d_if` 未做（§5.2） | `scripts/tile-golden` 加 `sum.mlir / sum.tilebc`、层 1 含 `FUNC GLOBAL sum`；本机对拍归刀 4 的脚本 | 循环后 token 不换（`loop-token-not-carried`）与区域栈弹反（`region-stack-pop`）→ 降低时按名拒绝；写入器不回滚值索引（`for-results-not-rolled-back`）→ `tileiras` 红 | 3 到 4（实报 1；`run.sh` 本机 100 s，`tile` job budget 340 s planning value） |
-| **6 BF16 tile** | 「设备 bf16 `addf` 与 `narrow.round_bf16(f64 加)` 对全部 65536 个 bf16 值对加随机对逐位一致」 | `Tensor[BF16 标记]` 的 dtype 表项、宿主 `Bytes` 打包、对拍脚本的逐位档 | 本机对拍；台账 | 设备侧 rounding 属性改 `approx`，对拍红 | 2 |
+| **6 BF16 tile**（落地，GPU 对拍待驱动） | 「设备 bf16 `addf` 与 `narrow.round_bf16(f64 加)` 对全部 65536 个 bf16 值对加随机对逐位一致」 | `gpu.BF16` 标记与 `element_bytes`、`narrow.bf16_bits / bf16_of_bits`、`pack_bf16 / unpack_bf16` 与两个 `Bytes` 版 intrinsic（`builtins.dawn` 镜像同步）、假设备按格式舍入并把 `dtypes` 交给参考实现、`vadd_bf16` 的 `.mlir / .tilebc` golden、对拍脚本三组 bf16 语料、台账门加 `std/narrow.dawn` | 层 0 / 1 本机与 CI 绿（`FUNC GLOBAL vadd_bf16`）；假设备 65536 对 = narrow；本机对拍走到 `cuModuleLoadData` 被 560.94 拦住，台账记 `blocked`（§6.4） | 计划的「设备侧 rounding 改 `approx`」在 560 上验不了，换成层 0 / 1 能红的等价物：`addf-no-rounding`（渲染器丢掉 `rounding<nearest_even>`，`vadd_bf16.mlir` 红；写入器那一半 `tileiras` 每种模式都收，只有设备能看见，故不设变异体）与 `bf16-tag-as-i16`（写入器 bf16 标签改 i16，`tileiras` 拒绝）；打包层 `pack-truncates`（`round_bf16` 漏掉、`bf16_bits` 截断）在 std 测试与 560 上的回读都红；假设备上传不舍入，格点外那组 std 语料红 | 2（实报 1；`run.sh` 本机 91 s，`tile-gpu-diff/run.sh` 26 s） |
 | 7（期权）混合路线 | 「同一个 kernel 体经编译期发射器与经记录 handler 产出相同的 Tile 程序」 | `selfhost/src/tile/emit_tile.dawn` | 两路 `TileProg` 相等 | 不在本计划内 | 6 到 10 |
 
 合计（不含刀 7）16 到 23 人日。字节码写入器是最大的单块，也是唯一能让 CI 的绿有信息量的
