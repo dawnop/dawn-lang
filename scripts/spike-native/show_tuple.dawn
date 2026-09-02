@@ -1,0 +1,62 @@
+# `show` at a tuple, which is the trait method rather than `to_string`.
+#
+# A tuple has no head, so nobody can write `impl Show[(A, B)]` and the checker
+# grants the witness itself (`show_tuple_witness`). Lowering then has two
+# routes to the same rendering, and only one of them was walked: a bound
+# forwarded through a dictionary reached the synthesised slot, while a call
+# whose subject is statically a tuple asked the impl table for a row that
+# cannot exist and panicked (#46). `to_string` and `${}` never hit it because
+# they reach the structural expansion directly instead of through a witness,
+# which is why show_derive.dawn's tuple lines stayed green over a hole.
+#
+# So every line here says `show` on purpose. What it watches is that the two
+# routes -- devirtualised at a ground subject, and a dictionary built out of
+# the elements' at a non-ground one -- render the same, and that both backends
+# compile the one definition behind them.
+use std/io
+
+pub type Point = | Point(x: Int, y: Int) derive Show
+
+fn render[T: Show](x: T) -> String = show(x)
+
+# The subject *contains* a rigid variable rather than being one, so the whole's
+# dictionary is built out of the parts' (trait-v2-design 3.8).
+fn render_snd[T: Show](x: (Int, T)) -> String = show(x)
+
+pub fn main() -> Unit !io = {
+  println("-- flat, at every arity the language has --")
+  println(show((1, 4)))
+  println(show((1, 2, 3)))
+  println(show((1, 2, 3, 4, 5)))
+
+  println("-- bound first, which is the issue's second reproduction --")
+  let t = (1, 4)
+  println(show(t))
+
+  println("-- nested --")
+  println(show((1, (2, 3))))
+  println(show(((1, 2), (3, (4, 5)))))
+
+  println("-- a String is quoted here, as it is in any nested position --")
+  println(show((1, "a")))
+  println(show(("a", "b")))
+
+  println("-- the elements are shown by their own rule, not by the tuple's --")
+  println(show((Point(1, 2), 'x', 1.5, true)))
+  let nothing: Option[Int] = None
+  println(show((Some(1), nothing)))
+
+  println("-- inside a container, and one around a container --")
+  println(show([(1, 2), (3, 4)]))
+  println(show(([1, 2], "x")))
+
+  println("-- through a generic consumer, which is the route that worked --")
+  println(render((1, 4)))
+  println(render((1, ("a", 2))))
+  println(render([(1, "a")]))
+
+  println("-- and one whose subject is not ground --")
+  println(render_snd((1, "a")))
+  println(render_snd((1, Point(0, 0))))
+  println(render_snd((1, (2, 3))))
+}
