@@ -21,9 +21,12 @@
 #             input sets under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
-#             (the driver refused at that stage, the same way in every set)
-#             or `fail` (the device answered and the numbers differ, or the
-#             memory round trip did).
+#             (the driver refused at that stage, the same way in every set;
+#             on a driver older than the cubin's CUDA generation the runtime
+#             refuses the module itself with gpu.driver_too_old, since such
+#             a driver's loader answers INVALID_IMAGE or crashes depending on
+#             the heap layout) or `fail` (the device answered and the numbers
+#             differ, or the memory round trip did).
 #   mutant    one rule removed from a copy of std/gpu.dawn's real handler,
 #             the program rebuilt against that copy, and the verdict
 #             required to move:
