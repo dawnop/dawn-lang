@@ -1,0 +1,69 @@
+# The accepted half of #43: what a local `fn` may do with a named effect.
+#
+# A local function is lifted to an ordinary function with no evidence parameter
+# of its own, and its row is `!io` or pure (spec §6.5 "boundaries"), so its body
+# may not raise a label it does not answer itself. The checker refuses that
+# now; the refused shapes are recorded next door in
+# scripts/checker-corpus/cases/local_fn.dawn. Two shapes stay legal, and the
+# only way to know they stay legal is to run them:
+#
+#   * the local function installs the handler inside its own body. The evidence
+#     it reads is a local of that body, so nothing has to cross the lift.
+#   * the local function builds a closure that raises the label. The label
+#     rides out in the closure's row and the call that runs the closure
+#     supplies the evidence, which is the ordinary rule for every lambda and
+#     has nothing to do with where the closure was written.
+#
+# Before the refusal a third shape checked clean and was not legal at all: a
+# local function raising a label answered by its enclosing signature or by a
+# handler in the enclosing body compiled to a read of `ev_slot`'s placeholder
+# and panicked with "effect evidence missing" (#43).
+use std/io
+
+effect Ask {
+  fn get() -> Int
+}
+
+# the handler is inside the local function's own body: nothing crosses the lift
+fn own_handler() -> Int = {
+  fn inner(n: Int) -> Int = {
+    with handle Ask { get() => 6 }
+    get() * n
+  }
+  inner(7)
+}
+
+# the local function's caller answers a closure the local function built
+fn rides_out() -> Int !Ask = {
+  fn make(n: Int) -> (fn() -> Int !Ask) = () => get() + n
+  let f = make(1)
+  f() + f()
+}
+
+# the two nested: the closure's raise is answered where the closure is called,
+# and that is inside a region the local function installed itself
+fn own_handler_over_closure() -> Int = {
+  fn inner() -> Int = {
+    with handle Ask { get() => 5 }
+    let f = () => get() * 2
+    f()
+  }
+  inner()
+}
+
+test "a local function answers the label its own body raises" {
+  assert own_handler() == 42
+  assert own_handler_over_closure() == 10
+}
+
+test "a closure a local function returns is answered at the call" {
+  with handle Ask { get() => 10 }
+  assert rides_out() == 22
+}
+
+pub fn main() -> Unit !io = {
+  io.println("${own_handler()}")
+  io.println("${own_handler_over_closure()}")
+  with handle Ask { get() => 10 }
+  io.println("${rides_out()}")
+}
