@@ -3189,6 +3189,45 @@ pub fn builtins() -> Map[String, Sig] = {
         TyInt),
       EIo
     ),
+    # gpu_*_host intrinsics: the CUDA driver primitives std/gpu's production
+    # handler `with_gpu_real` writes over (docs/tile-backend-design.md 4.4).
+    # All !io, all std-only, all answering `Result` themselves rather than
+    # faulting: a driver failure arrives as a `ForeignError` whose kind is the
+    # CUresult's own name under a `cuda.` prefix, which a fault-then-barrier
+    # shape could not carry (a native fault has a message and nothing else).
+    # The native runtime implements them over a dlopen'd libcuda; the JVM
+    # runtime refuses every one with `gpu.unsupported_backend`.
+    #
+    # Buffers cross as raw device pointers, kernels as the CUmodule handle
+    # `gpu_load_module_host` answered, data as `Array` (the shape both
+    # backends can name; the handle table and the List<->Array walk stay
+    # std's). `gpu_launch_host` runs `kernel` from `module` over `grid` tile
+    # blocks with `args` as its device-pointer parameters in order.
+    # `gpu_close_host` releases the context and the library the first
+    # operation opened; std calls it when the handler's body has returned.
+    eff1(
+      bsig("gpu_load_module_host", [TyBytes], ["cubin"], result_ty(TyInt, foreign_error_ty())),
+      EIo
+    ),
+    eff1(bsig("gpu_alloc_host", [TyInt], ["nbytes"], result_ty(TyInt, foreign_error_ty())), EIo),
+    eff1(
+      bsig("gpu_upload_host", [TyInt, TyArray(TyFloat)], ["devptr", "data"],
+        result_ty(TyUnit, foreign_error_ty())),
+      EIo
+    ),
+    eff1(
+      bsig("gpu_download_host", [TyInt, TyInt], ["devptr", "len"],
+        result_ty(TyArray(TyFloat), foreign_error_ty())),
+      EIo
+    ),
+    eff1(
+      bsig("gpu_launch_host", [TyInt, TyString, TyInt, TyArray(TyInt)],
+        ["module", "kernel", "grid", "args"], result_ty(TyUnit, foreign_error_ty())),
+      EIo
+    ),
+    eff1(bsig("gpu_free_host", [TyInt], ["devptr"], result_ty(TyUnit, foreign_error_ty())), EIo),
+    eff1(bsig("gpu_sync_host", [], [], result_ty(TyUnit, foreign_error_ty())), EIo),
+    eff1(bsig("gpu_close_host", [], [], TyUnit), EIo),
     Sig { ..bsig("map_empty", [], [], TyMap(k, v)), tparams: [k, v] },
     tp1(bsig("set_empty", [], [], TySet(t)), t),
     keyed2(bsig("map_from", [TyList(TyTuple([k, v]))], ["entries"], TyMap(k, v)), k, v),
@@ -3265,6 +3304,7 @@ pub type Rt =
   | RtBytes
   | RtArray
   | RtIo
+  | RtGpu
 
 pub type Intr = {
   sig: Sig,
@@ -3361,6 +3401,13 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # spec 8 routed around by spelling a name (RD-02).
   for op in io_in_rt ++ ["list_names", "run"] {
     internal = set.insert(internal, "io_" ++ op)
+  }
+  # The GPU primitives: one runtime module, every one std-only. std/gpu is the
+  # only caller, and the handler above them is where a device pointer becomes
+  # a handle a program cannot forge.
+  for op in ["load_module", "alloc", "upload", "download", "launch", "free", "sync", "close"] {
+    rt_of = map.insert(rt_of, "gpu_" ++ op ++ "_host", RtGpu)
+    internal = set.insert(internal, "gpu_" ++ op ++ "_host")
   }
   rt_of = map.insert(rt_of, "catch_fault", RtIo)
   rt_of = map.insert(rt_of, "catch_panic", RtIo)
@@ -4057,7 +4104,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 99
+  assert map_size2(bs) == 107
 }
 
 test "the reclaim's failure is a value, under the one name left" {

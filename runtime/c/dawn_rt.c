@@ -4538,3 +4538,300 @@ dawn_array *dawn_args(void) {
   }
   return a;
 }
+
+/* ---- GPU: the CUDA driver behind std/gpu's with_gpu_real -------------------
+ *
+ * The dawn_gpu_*_host family is the `RtGpu` runtime module
+ * (docs/tile-backend-design.md 4.4). It reaches the driver through
+ * dlopen("libcuda.so.1") rather than a link-time -lcuda, so a machine with
+ * no GPU compiles and runs every other native program unchanged and learns
+ * about the gap only when a program installs `with_gpu_real` and issues an
+ * operation. (glibc 2.34 and later carry dlopen in libc itself, so no -ldl
+ * is added to any link line.)
+ *
+ * Every function answers a `Result[_, ForeignError]` itself and never
+ * faults. A driver refusal becomes `Err(ForeignError { kind, message })`
+ * with kind = "cuda." ++ cuGetErrorName(result), message naming the driver
+ * call and the numeric CUresult; a missing library or symbol is
+ * `gpu.no_driver`. The one exception to "the raw device outcome" is a grid
+ * or length that does not fit the driver's unsigned parameter, refused here
+ * as `gpu.bad_grid` / `gpu.bad_length` rather than truncated into a launch
+ * of the wrong size.
+ *
+ * State is one process-wide context, opened by the first operation that
+ * needs it (cuInit, device 0, cuCtxCreate_v2) and released by
+ * dawn_gpu_close_host, which std/gpu calls when the handler's body has
+ * returned: cuCtxDestroy_v2 frees every allocation and module of the
+ * context, then the library handle is dlclose'd. The versioned symbol names
+ * (`_v2`) are the ones cuda.h maps the plain names to; dlsym has to spell
+ * them itself.
+ *
+ * The launch shape is cuda-tile's host example: a Tile IR kernel is
+ * launched with the grid counting tile blocks, block dims (1, 1, 1) and no
+ * dynamic shared memory; the kernel's parameters are its entry's pointer
+ * arguments, one 8-byte device pointer each, in order.
+ *
+ * The section between these two markers is what scripts/tile-gpu-diff's
+ * ledger gate compares across commits; keep it contiguous.
+ * === DAWN_RT_GPU_BEGIN === */
+
+#ifndef __wasi__
+#include <dlfcn.h>
+
+typedef int dawn_cu_result;
+typedef int dawn_cu_device;
+typedef void *dawn_cu_context;
+typedef void *dawn_cu_module;
+typedef void *dawn_cu_function;
+typedef unsigned long long dawn_cu_deviceptr;
+
+static struct {
+  void *lib;
+  dawn_cu_context ctx;
+  bool ready;
+  dawn_cu_result (*init)(unsigned int);
+  dawn_cu_result (*device_get)(dawn_cu_device *, int);
+  dawn_cu_result (*ctx_create)(dawn_cu_context *, unsigned int, dawn_cu_device);
+  dawn_cu_result (*ctx_destroy)(dawn_cu_context);
+  dawn_cu_result (*ctx_synchronize)(void);
+  dawn_cu_result (*mem_alloc)(dawn_cu_deviceptr *, size_t);
+  dawn_cu_result (*mem_free)(dawn_cu_deviceptr);
+  dawn_cu_result (*memcpy_htod)(dawn_cu_deviceptr, const void *, size_t);
+  dawn_cu_result (*memcpy_dtoh)(void *, dawn_cu_deviceptr, size_t);
+  dawn_cu_result (*module_load_data)(dawn_cu_module *, const void *);
+  dawn_cu_result (*module_get_function)(dawn_cu_function *, dawn_cu_module, const char *);
+  dawn_cu_result (*launch_kernel)(dawn_cu_function, unsigned int, unsigned int, unsigned int,
+                                  unsigned int, unsigned int, unsigned int, unsigned int,
+                                  void *, void **, void **);
+  dawn_cu_result (*get_error_name)(dawn_cu_result, const char **);
+} dawn_gpu;
+
+/* `Err(ForeignError { kind, message, cause: None })`, both strings copied. */
+static dawn_adt *dawn_gpu_refuse(const char *kind, const char *message) {
+  dawn_adt *a = dawn_adt_new(DAWN_TAG_FOREIGN_ERROR, 3, DAWN_MASK_THREE_BOXED);
+  a->fields[0].p = dawn_str_copy(kind, (int64_t)strlen(kind));
+  a->fields[1].p = dawn_str_copy(message, (int64_t)strlen(message));
+  a->fields[2].p = dawn_none();
+  return dawn_err(a);
+}
+
+/* A driver refusal as the error model spells it: the CUresult's own name
+ * under `cuda.`, and a message that says which call and which number. */
+static dawn_adt *dawn_gpu_cu_error(const char *call, dawn_cu_result r) {
+  const char *name = NULL;
+  if (dawn_gpu.get_error_name == NULL || dawn_gpu.get_error_name(r, &name) != 0 || name == NULL) {
+    name = "CUDA_ERROR_UNKNOWN";
+  }
+  char kind[128];
+  char message[256];
+  snprintf(kind, sizeof kind, "cuda.%s", name);
+  snprintf(message, sizeof message, "%s: CUresult %d (%s)", call, r, name);
+  return dawn_gpu_refuse(kind, message);
+}
+
+static void dawn_gpu_reset(void) {
+  if (dawn_gpu.lib != NULL) dlclose(dawn_gpu.lib);
+  memset(&dawn_gpu, 0, sizeof dawn_gpu);
+}
+
+/* One symbol, or the reason there is none (NULL means it was found). */
+static dawn_adt *dawn_gpu_sym(void **slot, const char *name) {
+  *slot = dlsym(dawn_gpu.lib, name);
+  if (*slot != NULL) return NULL;
+  char message[256];
+  snprintf(message, sizeof message, "libcuda.so.1 has no %s", name);
+  return dawn_gpu_refuse("gpu.no_driver", message);
+}
+
+#define DAWN_GPU_SYM(field, name) \
+  do { \
+    dawn_adt *e_ = dawn_gpu_sym((void **)&dawn_gpu.field, name); \
+    if (e_ != NULL) { dawn_gpu_reset(); return e_; } \
+  } while (0)
+
+/* The library, the entry points and one context on device 0. NULL when the
+ * device is ready; otherwise the refusal, with everything opened so far
+ * released again. */
+static dawn_adt *dawn_gpu_open(void) {
+  if (dawn_gpu.ready) return NULL;
+  dawn_gpu.lib = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+  if (dawn_gpu.lib == NULL) {
+    const char *why = dlerror();
+    char message[512];
+    snprintf(message, sizeof message, "cannot load libcuda.so.1: %s", why == NULL ? "dlopen failed" : why);
+    memset(&dawn_gpu, 0, sizeof dawn_gpu);
+    return dawn_gpu_refuse("gpu.no_driver", message);
+  }
+  DAWN_GPU_SYM(get_error_name, "cuGetErrorName");
+  DAWN_GPU_SYM(init, "cuInit");
+  DAWN_GPU_SYM(device_get, "cuDeviceGet");
+  DAWN_GPU_SYM(ctx_create, "cuCtxCreate_v2");
+  DAWN_GPU_SYM(ctx_destroy, "cuCtxDestroy_v2");
+  DAWN_GPU_SYM(ctx_synchronize, "cuCtxSynchronize");
+  DAWN_GPU_SYM(mem_alloc, "cuMemAlloc_v2");
+  DAWN_GPU_SYM(mem_free, "cuMemFree_v2");
+  DAWN_GPU_SYM(memcpy_htod, "cuMemcpyHtoD_v2");
+  DAWN_GPU_SYM(memcpy_dtoh, "cuMemcpyDtoH_v2");
+  DAWN_GPU_SYM(module_load_data, "cuModuleLoadData");
+  DAWN_GPU_SYM(module_get_function, "cuModuleGetFunction");
+  DAWN_GPU_SYM(launch_kernel, "cuLaunchKernel");
+  dawn_cu_result r = dawn_gpu.init(0);
+  if (r != 0) { dawn_adt *e = dawn_gpu_cu_error("cuInit", r); dawn_gpu_reset(); return e; }
+  dawn_cu_device dev = 0;
+  r = dawn_gpu.device_get(&dev, 0);
+  if (r != 0) { dawn_adt *e = dawn_gpu_cu_error("cuDeviceGet", r); dawn_gpu_reset(); return e; }
+  r = dawn_gpu.ctx_create(&dawn_gpu.ctx, 0, dev);
+  if (r != 0) { dawn_adt *e = dawn_gpu_cu_error("cuCtxCreate_v2", r); dawn_gpu_reset(); return e; }
+  dawn_gpu.ready = true;
+  return NULL;
+}
+
+dawn_adt *dawn_gpu_load_module_host(const dawn_bytes *cubin) {
+  dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  dawn_cu_module mod = NULL;
+  dawn_cu_result r = dawn_gpu.module_load_data(&mod, cubin->p);
+  if (r != 0) return dawn_gpu_cu_error("cuModuleLoadData", r);
+  return dawn_ok(dawn_box_int((int64_t)(intptr_t)mod));
+}
+
+dawn_adt *dawn_gpu_alloc_host(int64_t nbytes) {
+  dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  if (nbytes < 0) return dawn_gpu_refuse("gpu.bad_length", "gpu_alloc_host: negative byte count");
+  dawn_cu_deviceptr p = 0;
+  dawn_cu_result r = dawn_gpu.mem_alloc(&p, (size_t)nbytes);
+  if (r != 0) return dawn_gpu_cu_error("cuMemAlloc_v2", r);
+  return dawn_ok(dawn_box_int((int64_t)p));
+}
+
+dawn_adt *dawn_gpu_upload_host(int64_t devptr, const dawn_array *data) {
+  dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  int64_t n = dawn_array_len(data);
+  double *buf = (double *)dawn_alloc((size_t)(n > 0 ? n : 1) * sizeof(double));
+  for (int64_t i = 0; i < n; i++) buf[i] = dawn_unbox_float(dawn_array_get(data, i));
+  dawn_cu_result r = dawn_gpu.memcpy_htod((dawn_cu_deviceptr)devptr, buf, (size_t)n * sizeof(double));
+  free(buf);
+  if (r != 0) return dawn_gpu_cu_error("cuMemcpyHtoD_v2", r);
+  return dawn_ok(dawn_box_unit(DAWN_UNIT));
+}
+
+dawn_adt *dawn_gpu_download_host(int64_t devptr, int64_t len) {
+  dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  if (len < 0) return dawn_gpu_refuse("gpu.bad_length", "gpu_download_host: negative element count");
+  double *buf = (double *)dawn_alloc((size_t)(len > 0 ? len : 1) * sizeof(double));
+  dawn_cu_result r = dawn_gpu.memcpy_dtoh(buf, (dawn_cu_deviceptr)devptr, (size_t)len * sizeof(double));
+  if (r != 0) {
+    free(buf);
+    return dawn_gpu_cu_error("cuMemcpyDtoH_v2", r);
+  }
+  dawn_array *a = dawn_array_new();
+  for (int64_t i = 0; i < len; i++) a = dawn_array_push_own(a, dawn_box_float(buf[i]));
+  free(buf);
+  return dawn_ok(a);
+}
+
+dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t grid,
+                               const dawn_array *args) {
+  dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  /* gridDimX is an unsigned int and the driver's own ceiling is 2^31 - 1: a
+   * count that does not fit is refused, never truncated into a smaller grid */
+  if (grid < 0 || grid > 0x7fffffff) {
+    return dawn_gpu_refuse("gpu.bad_grid", "gpu_launch_host: grid does not fit a launch dimension");
+  }
+  if (dawn_has_nul(kernel)) {
+    return dawn_gpu_refuse("gpu.bad_kernel_name", "gpu_launch_host: kernel name contains NUL");
+  }
+  char *name = (char *)dawn_alloc((size_t)kernel->len + 1);
+  if (kernel->len > 0) memcpy(name, kernel->p, (size_t)kernel->len);
+  name[kernel->len] = '\0';
+  dawn_cu_function fn = NULL;
+  dawn_cu_result r = dawn_gpu.module_get_function(&fn, (dawn_cu_module)(intptr_t)module, name);
+  free(name);
+  if (r != 0) return dawn_gpu_cu_error("cuModuleGetFunction", r);
+  int64_t n = dawn_array_len(args);
+  dawn_cu_deviceptr *ptrs =
+    (dawn_cu_deviceptr *)dawn_alloc((size_t)(n > 0 ? n : 1) * sizeof(dawn_cu_deviceptr));
+  void **params = (void **)dawn_alloc((size_t)(n > 0 ? n : 1) * sizeof(void *));
+  for (int64_t i = 0; i < n; i++) {
+    ptrs[i] = (dawn_cu_deviceptr)dawn_unbox_int(dawn_array_get(args, i));
+    params[i] = &ptrs[i];
+  }
+  r = dawn_gpu.launch_kernel(fn, (unsigned int)grid, 1, 1, 1, 1, 1, 0, NULL, params, NULL);
+  free(params);
+  free(ptrs);
+  if (r != 0) return dawn_gpu_cu_error("cuLaunchKernel", r);
+  return dawn_ok(dawn_box_unit(DAWN_UNIT));
+}
+
+dawn_adt *dawn_gpu_free_host(int64_t devptr) {
+  dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  dawn_cu_result r = dawn_gpu.mem_free((dawn_cu_deviceptr)devptr);
+  if (r != 0) return dawn_gpu_cu_error("cuMemFree_v2", r);
+  return dawn_ok(dawn_box_unit(DAWN_UNIT));
+}
+
+dawn_adt *dawn_gpu_sync_host(void) {
+  dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  dawn_cu_result r = dawn_gpu.ctx_synchronize();
+  if (r != 0) return dawn_gpu_cu_error("cuCtxSynchronize", r);
+  return dawn_ok(dawn_box_unit(DAWN_UNIT));
+}
+
+dawn_unit dawn_gpu_close_host(void) {
+  if (dawn_gpu.ready && dawn_gpu.ctx != NULL) dawn_gpu.ctx_destroy(dawn_gpu.ctx);
+  dawn_gpu_reset();
+  return DAWN_UNIT;
+}
+
+#else /* __wasi__: no dlopen, no driver, no device */
+
+static dawn_adt *dawn_gpu_refuse_wasi(const char *call) {
+  dawn_adt *a = dawn_adt_new(DAWN_TAG_FOREIGN_ERROR, 3, DAWN_MASK_THREE_BOXED);
+  a->fields[0].p = DAWN_LIT("gpu.unsupported_backend");
+  char message[128];
+  snprintf(message, sizeof message, "%s: the GPU runtime is not available on wasm", call);
+  a->fields[1].p = dawn_str_copy(message, (int64_t)strlen(message));
+  a->fields[2].p = dawn_none();
+  return dawn_err(a);
+}
+
+dawn_adt *dawn_gpu_load_module_host(const dawn_bytes *cubin) {
+  (void)cubin;
+  return dawn_gpu_refuse_wasi("gpu_load_module_host");
+}
+dawn_adt *dawn_gpu_alloc_host(int64_t nbytes) {
+  (void)nbytes;
+  return dawn_gpu_refuse_wasi("gpu_alloc_host");
+}
+dawn_adt *dawn_gpu_upload_host(int64_t devptr, const dawn_array *data) {
+  (void)devptr;
+  (void)data;
+  return dawn_gpu_refuse_wasi("gpu_upload_host");
+}
+dawn_adt *dawn_gpu_download_host(int64_t devptr, int64_t len) {
+  (void)devptr;
+  (void)len;
+  return dawn_gpu_refuse_wasi("gpu_download_host");
+}
+dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t grid,
+                               const dawn_array *args) {
+  (void)module;
+  (void)kernel;
+  (void)grid;
+  (void)args;
+  return dawn_gpu_refuse_wasi("gpu_launch_host");
+}
+dawn_adt *dawn_gpu_free_host(int64_t devptr) {
+  (void)devptr;
+  return dawn_gpu_refuse_wasi("gpu_free_host");
+}
+dawn_adt *dawn_gpu_sync_host(void) { return dawn_gpu_refuse_wasi("gpu_sync_host"); }
+dawn_unit dawn_gpu_close_host(void) { return DAWN_UNIT; }
+#endif
+/* === DAWN_RT_GPU_END === */

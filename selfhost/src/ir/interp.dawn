@@ -802,7 +802,7 @@ fn interp_arms() -> List[String] = [
 ##
 ## Read it as the real answer to "what can a `const` do". Spec §7.2.2 answers
 ## in prose, and the prose is short by an order of magnitude: it names Map and
-## Set, which is 18 of the 74 names below (audit RP-11). The list is measured
+## Set, which is 18 of the 85 names below (audit RP-11). The list is measured
 ## here -- the gate test calls each one and checks it really is refused -- and
 ## rewriting the spec against it is a separate job.
 fn comptime_rejects() -> List[String] = {
@@ -844,6 +844,11 @@ fn comptime_rejects() -> List[String] = {
   # The retained reactor root is process/module state. A comptime evaluation
   # has neither a reactor instance nor a turn boundary in which one could live.
   out = out ++ ["reactor_state_has", "reactor_state_get", "reactor_state_set"]
+  # The GPU primitives are io at a device: a compile must not open a driver
+  # any more than it may read a file, and `CValue` has no Array to hand them.
+  for op in ["load_module", "alloc", "upload", "download", "launch", "free", "sync", "close"] {
+    out = out ++ ["gpu_" ++ op ++ "_host"]
+  }
   # `cast` unerases a host object, and comptime never has one. Its failure
   # being a value rather than a throw (the error model's step B) did not change
   # that: there is still no host object to reclaim, and an `Err` here would be
@@ -2358,7 +2363,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
   assert len(arms) == 43
-  assert len(rejects) == 77
+  assert len(rejects) == 85
 }
 
 fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =

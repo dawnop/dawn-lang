@@ -1,8 +1,9 @@
 ## The host side of a GPU: a `Gpu` effect whose operations a handler answers,
-## typed tensors over it, and a fake device that answers every operation from
-## host memory so a `!Gpu` program runs on a machine with no GPU at all.
-## The device side (kernels, Tile IR) is not here; see
-## docs/tile-backend-design.md.
+## typed tensors over it, a fake device that answers every operation from
+## host memory so a `!Gpu` program runs on a machine with no GPU at all, and
+## the real device, `with_gpu_real`, which answers the same operations from
+## the CUDA driver through the native runtime. The device side (kernels,
+## Tile IR) is not here; see docs/tile-backend-design.md.
 #
 # The shape is std/io's `Fs`: a plain `effect` declaration, plain functions
 # over its operations, and a plain wrapper function as each handler. Effect
@@ -17,10 +18,12 @@
 # every handler, and the three failure kinds they mint are the same string
 # under every handler.
 #
-# `with_gpu_fake` is the only handler in this release. The production one,
-# `with_gpu_real`, arrives with the device runtime (tile-backend-design §4.2)
-# and is `!io`; this one is pure, which is what lets it run inside
-# `dawn test --stdlib` and at comptime.
+# Two handlers. `with_gpu_fake` is pure, which is what lets it run inside
+# `dawn test --stdlib` and at comptime; `with_gpu_real` is `!io` and stands on
+# the `gpu_*_host` intrinsics (tile-backend-design §4.2, §4.4), which only the
+# native runtime implements: on the JVM every one of them answers
+# `gpu.unsupported_backend`, and the handler passes that on unchanged.
+use std/bytes
 use std/list
 use std/map
 
@@ -195,8 +198,14 @@ pub fn sum_ref(ins: List[List[Float]]) -> List[Float] = {
 pub fn reference_kernels() -> Map[String, fn(List[List[Float]]) -> List[Float]] =
   map.from([("vadd", vadd_ref), ("sum", sum_ref)])
 
-fn no_such_buffer(handle: Int) -> ForeignError =
-  refuse("gpu.no_such_buffer", "fake device: no buffer with handle ${handle}")
+fn no_such_buffer(who: String, handle: Int) -> ForeignError =
+  refuse("gpu.no_such_buffer", "${who}: no buffer with handle ${handle}")
+
+fn no_kernel(who: String, kernel: String) -> ForeignError =
+  refuse("gpu.no_kernel", "${who}: no kernel named `${kernel}`")
+
+fn no_arguments(who: String, kernel: String) -> ForeignError =
+  refuse("gpu.no_arguments", "${who}: `${kernel}` launched with no buffers")
 
 ## Run `body` against a device that is a table in host memory. Handles count
 ## up from 1 per installation; a buffer is a `List[Float]`, so only the `f64`
@@ -236,21 +245,21 @@ pub fn with_gpu_fake[T](kernels: Map[String, fn(List[List[Float]]) -> List[Float
         store = map.insert(store, handle, data)
         Ok(())
       } else {
-        Err(no_such_buffer(handle))
+        Err(no_such_buffer("fake device", handle))
       }
     gpu_download(handle) => match map.get(store, handle) {
       Some(v) -> Ok(v)
-      None -> Err(no_such_buffer(handle))
+      None -> Err(no_such_buffer("fake device", handle))
     }
     gpu_launch(kernel, _grid, args) => match map.get(kernels, kernel) {
       Some(f) ->
         if len(args) == 0 {
-          Err(refuse("gpu.no_arguments", "fake device: `${kernel}` launched with no buffers"))
+          Err(no_arguments("fake device", kernel))
         } else {
           # a handler's state cell cannot be captured by a lambda: read it first
           let s = store
           match list.find(args, a => not map.has(s, a)) {
-            Some(missing) -> Err(no_such_buffer(missing))
+            Some(missing) -> Err(no_such_buffer("fake device", missing))
             None -> {
               let ins = list.map(args, a => unwrap_or(map.get(s, a), []))
               store = map.insert(store, args[len(args) - 1], f(ins))
@@ -258,27 +267,163 @@ pub fn with_gpu_fake[T](kernels: Map[String, fn(List[List[Float]]) -> List[Float
             }
           }
         }
-      None -> Err(refuse("gpu.no_kernel", "fake device: no kernel named `${kernel}`"))
+      None -> Err(no_kernel("fake device", kernel))
     }
     gpu_free(handle) =>
       if map.has(store, handle) {
         store = map.remove(store, handle)
         Ok(())
       } else {
-        Err(no_such_buffer(handle))
+        Err(no_such_buffer("fake device", handle))
       }
     gpu_sync() => Ok(())
   }
   body()
 }
 
+# ---- the real device ----
+
+# The intrinsics traffic in `Array`, the one container shape both backends
+# can name across the runtime boundary; the list walk stays here.
+fn to_array(xs: List[Float]) -> Array[Float] = {
+  var a: Array[Float] = array_new()
+  for x in xs {
+    a = array_push(a, x)
+  }
+  a
+}
+
+fn of_array(a: Array[Float]) -> List[Float] = list.map(range(0, array_len(a)), i => array_get(a, i))
+
+# The device pointers behind `args`, in order. Every handle was checked
+# against the table before this is called.
+fn device_pointers(table: Map[Int, (Int, Int)], args: List[Int]) -> Array[Int] = {
+  var a: Array[Int] = array_new()
+  for h in args {
+    match map.get(table, h) {
+      Some(b) -> {
+        let (p, _n) = b
+        a = array_push(a, p)
+      }
+      None -> ()
+    }
+  }
+  a
+}
+
+## Run `body` against the machine's GPU through the CUDA driver. `kernels`
+## maps a kernel name to the cubin that defines an entry of that name (the
+## `tileiras` output for one `packages/tileir` program), the way
+## `with_gpu_fake`'s table maps a name to a reference implementation.
+##
+## Handles are the same currency as the fake device's: they count up from 1
+## per installation, a buffer is `(device pointer, element count)` in a table
+## the handler owns, and a handle never issued or already freed answers
+## `gpu.no_such_buffer` before the device is asked. `gpu_alloc` accepts
+## `"f64"` only in this release (the operations move `List[Float]`) and
+## answers `gpu.unsupported_dtype` otherwise, as the fake device does.
+## `gpu_launch` looks the name up first (`gpu.no_kernel`), then the
+## arguments (`gpu.no_arguments`, `gpu.no_such_buffer`), and only then
+## touches the device: the cubin is handed to the driver the first time its
+## kernel is launched and the module handle is kept for the rest of the
+## installation, so a program that never launches never loads a module. The
+## grid counts tile blocks; the intrinsic launches with block dims (1, 1, 1)
+## and no shared memory, which is how a Tile IR kernel is launched.
+##
+## The seam is below the error surface: everything the driver refuses
+## arrives as the `ForeignError` the runtime built from the CUresult, with
+## kind `cuda.<CUresult name>` (`gpu.no_driver` when there is no libcuda to
+## load, `gpu.unsupported_backend` on the JVM, which has no device runtime),
+## unchanged. The first operation that needs the device opens it; when
+## `body` has returned the context and the library are released, which also
+## frees any buffer the program did not.
+pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -> T !io = {
+  with handle Gpu {
+    var next: Int = 1
+    var bufs: Map[Int, (Int, Int)] = map.empty()
+    var mods: Map[String, Int] = map.empty()
+    gpu_alloc(dtype, len) =>
+      if dtype != "f64" {
+        Err(refuse("gpu.unsupported_dtype", "real device: this release moves f64 only, got ${dtype}"))
+      } else {
+        match gpu_alloc_host(len * 8) {
+          Ok(p) -> {
+            let h = next
+            next = next + 1
+            bufs = map.insert(bufs, h, (p, len))
+            Ok(h)
+          }
+          Err(e) -> Err(e)
+        }
+      }
+    gpu_upload(handle, data) => match map.get(bufs, handle) {
+      Some(b) -> {
+        let (p, _n) = b
+        gpu_upload_host(p, to_array(data))
+      }
+      None -> Err(no_such_buffer("real device", handle))
+    }
+    gpu_download(handle) => match map.get(bufs, handle) {
+      Some(b) -> {
+        let (p, n) = b
+        match gpu_download_host(p, n) {
+          Ok(a) -> Ok(of_array(a))
+          Err(e) -> Err(e)
+        }
+      }
+      None -> Err(no_such_buffer("real device", handle))
+    }
+    gpu_launch(kernel, grid, args) => match map.get(kernels, kernel) {
+      Some(cubin) ->
+        if len(args) == 0 {
+          Err(no_arguments("real device", kernel))
+        } else {
+          # a handler's state cell cannot be captured by a lambda: read it first
+          let table = bufs
+          match list.find(args, a => not map.has(table, a)) {
+            Some(missing) -> Err(no_such_buffer("real device", missing))
+            None -> {
+              let loaded: Result[Int, ForeignError] = match map.get(mods, kernel) {
+                Some(m) -> Ok(m)
+                None -> gpu_load_module_host(cubin)
+              }
+              match loaded {
+                Ok(m) -> {
+                  mods = map.insert(mods, kernel, m)
+                  gpu_launch_host(m, kernel, grid, device_pointers(table, args))
+                }
+                Err(e) -> Err(e)
+              }
+            }
+          }
+        }
+      None -> Err(no_kernel("real device", kernel))
+    }
+    gpu_free(handle) => match map.get(bufs, handle) {
+      Some(b) -> {
+        let (p, _n) = b
+        bufs = map.remove(bufs, handle)
+        gpu_free_host(p)
+      }
+      None -> Err(no_such_buffer("real device", handle))
+    }
+    gpu_sync() => gpu_sync_host()
+  }
+  let out = body()
+  gpu_close_host()
+  out
+}
+
 # ---- tests ----
 #
-# Every block below runs the fake device: there is no other handler in this
-# release, and the assertion the module exists for is the first one, a `!Gpu`
-# program finishing a vector add on a machine with no GPU. Failure kinds are
-# asserted by name only where std or the fake device minted them; a real
-# device's kinds are its own (the same rule std/io's blocks follow).
+# Every block below but the last runs the fake device, and the assertion the
+# module exists for is the first one, a `!Gpu` program finishing a vector add
+# on a machine with no GPU. Failure kinds are asserted by name only where std
+# or a handler minted them above the device; a real device's kinds are its
+# own (the same rule std/io's blocks follow), and nothing here reaches one:
+# `dawn test --stdlib` runs on both backends and on machines with and without
+# a driver, and its report is compared byte for byte. The real handler
+# against a real device is scripts/tile-gpu-diff, and its ledger.
 
 fn vadd_on_device(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
   let n = len(xs)
@@ -443,4 +588,35 @@ test "a freed buffer answers nothing, and two installations share nothing" {
   # handles start over: the second installation did not inherit the first's table
   let second = with_gpu_fake(reference_kernels(), use_after_free)
   assert second == first
+}
+
+fn real_refusals() -> List[String] !Gpu = {
+  # a handle nothing issued: every operation on it is answered from the table
+  let ghost: Tensor[F64] = (7, 2)
+  let f32: Result[Tensor[F32], ForeignError] = alloc(F32, 4)
+  [
+    kind_of(f32),
+    kind_of(upload(ghost, [1.0, 2.0])),
+    kind_of(download(ghost)),
+    kind_of(free(ghost)),
+    # the name is looked up before anything else
+    kind_of(launch("nope", 1, [handle_of(ghost)])),
+    # a known name with no buffers, and with a buffer nobody has
+    kind_of(launch("vadd", 1, [])),
+    kind_of(launch("vadd", 1, [handle_of(ghost)]))
+  ]
+}
+
+test "the real handler refuses, above the device, what it can answer without one" {
+  # None of these reaches the driver, so the answer is the same on a machine
+  # with a GPU, one without, and on the JVM, where there is no device runtime
+  # at all: the dtype check, the handle table and the kernel table are the
+  # handler's own, and `launch` consults all three before it loads a module.
+  # The bytes are never handed to the driver, so they need not be a cubin.
+  let r = with_gpu_real(map.from([("vadd", bytes.utf8("not a cubin"))]), real_refusals)
+  assert r
+    == [
+      "gpu.unsupported_dtype", "gpu.no_such_buffer", "gpu.no_such_buffer", "gpu.no_such_buffer",
+      "gpu.no_kernel", "gpu.no_arguments", "gpu.no_such_buffer"
+    ]
 }

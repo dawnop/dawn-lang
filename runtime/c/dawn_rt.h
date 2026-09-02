@@ -718,6 +718,25 @@ bool dawn_io_stdin_ready(int64_t timeout_ms);
 int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path);
 dawn_array *dawn_args(void);
 
+/* The GPU runtime module behind std/gpu's `with_gpu_real`: the CUDA driver
+ * through a dlopen'd libcuda.so.1 (see the section in dawn_rt.c). Every one
+ * answers Result[_, ForeignError] itself and never faults; a driver refusal
+ * has kind "cuda." ++ its CUresult name, a missing driver "gpu.no_driver",
+ * and on wasm every one is "gpu.unsupported_backend". Arguments are borrowed
+ * like every other intrinsic's; the Result and what it holds are the
+ * caller's. Buffers are raw device pointers, a module is the CUmodule
+ * handle load_module answered, `data` holds boxed doubles and `args` boxed
+ * device pointers. */
+dawn_adt *dawn_gpu_load_module_host(const dawn_bytes *cubin);   /* Result[Int, _] */
+dawn_adt *dawn_gpu_alloc_host(int64_t nbytes);                   /* Result[Int, _] */
+dawn_adt *dawn_gpu_upload_host(int64_t devptr, const dawn_array *data);
+dawn_adt *dawn_gpu_download_host(int64_t devptr, int64_t len);   /* Result[Array[Float], _] */
+dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t grid,
+                               const dawn_array *args);
+dawn_adt *dawn_gpu_free_host(int64_t devptr);
+dawn_adt *dawn_gpu_sync_host(void);
+dawn_unit dawn_gpu_close_host(void); /* releases the context and the library; idempotent */
+
 /* `f` returns an erased slot, so one cast serves whatever `T` is -- the same
  * reason the JVM hands these an `Fn0` whose `apply` returns `Object`.
  *

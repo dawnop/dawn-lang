@@ -626,6 +626,8 @@ pub const BYTES_CLASS: String = "dawn/rt/Bytes"
 
 pub const IO_CLASS: String = "dawn/rt/Io"
 
+pub const GPU_CLASS: String = "dawn/rt/Gpu"
+
 pub const STRINGS_CLASS: String = "dawn/rt/Strings"
 
 ## The class a `List` is at run time: the record at the root of the Dawn
@@ -1459,6 +1461,61 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
+}
+
+## dawn/rt/Gpu: the GPU runtime module, on the backend that has none.
+##
+## Every `gpu_*_host` intrinsic (types.intrinsics) is a static here, at the
+## descriptor `method_desc` derives from its declared signature, and every
+## one answers `Err(ForeignError { kind: "gpu.unsupported_backend", ... })`
+## without touching anything: the JVM backend has no device runtime, and
+## refusing by construction is how a backend says so in the error model rather
+## than with a `LinkageError` at the first call (docs/tile-backend-design.md
+## 4.4; docs/runtime-intrinsics-design.md 12.5). `gpu_close_host` answers
+## Unit, since there is nothing to release. The native runtime's dawn_gpu_*
+## family is the implementation this class stands in for; a program that
+## wants the device runs natively.
+##
+## Emitted unconditionally, as dawn/rt/Io is. Straight-line bodies with no
+## branch and no handler, so the class needs no stack-map frames and no entry
+## in `supers_of`.
+pub fn gen_gpu_class(supers: List[String]) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, GPU_CLASS, obj())
+  let res = "LResult;"
+  let arr = "L" ++ ARRAY_CLASS ++ ";"
+  gen_gpu_refusal(cw, "gpu_load_module_host", "([B)" ++ res)
+  gen_gpu_refusal(cw, "gpu_alloc_host", "(J)" ++ res)
+  gen_gpu_refusal(cw, "gpu_upload_host", "(J" ++ arr ++ ")" ++ res)
+  gen_gpu_refusal(cw, "gpu_download_host", "(JJ)" ++ res)
+  gen_gpu_refusal(cw, "gpu_launch_host", "(JLjava/lang/String;J" ++ arr ++ ")" ++ res)
+  gen_gpu_refusal(cw, "gpu_free_host", "(J)" ++ res)
+  gen_gpu_refusal(cw, "gpu_sync_host", "()" ++ res)
+  let cv = open_static(cw, "gpu_close_host", "()L" ++ UNIT_CLASS ++ ";")
+  return_unit(cv)
+  close_mv(cv)
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## One refusing static: `new Result$Err(new ForeignError(kind, message, None))`.
+## The kind is the one string std/gpu documents for this backend; the message
+## names the primitive so a transcript says which call was refused.
+fn gen_gpu_refusal(cw: ClassWriter, name: String, desc: String) -> Unit !io = {
+  let m = open_static(cw, name, desc)
+  m.visitTypeInsn(OP_NEW, "Result\$Err")
+  m.visitInsn(OP_DUP)
+  m.visitTypeInsn(OP_NEW, FERR_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitLdcInsn("gpu.unsupported_backend")
+  m.visitLdcInsn(name ++ ": the GPU runtime is not available on the JVM backend")
+  m.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+  m.visitMethodInsn(OP_INVOKESPECIAL, FERR_CLASS, "<init>",
+    "(Ljava/lang/String;Ljava/lang/String;LOption;)V", false)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Err", "<init>", "(Ljava/lang/Object;)V", false)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+  ()
 }
 
 ## The process's view of the world: working directory and environment.
