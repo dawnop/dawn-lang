@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 6c28f04de9e25b65 -->
+<!-- doc-check: translation-of docs/spec.md @ 5f50264eff1e6d8b -->
 
 # Dawn Language Specification
 
@@ -2454,6 +2454,11 @@ each has its own criterion.
   rigid effect has no name for `with handle` to spell.
 - **comptime / const initialisers**: compile-time evaluation performs no named effect and cannot
   install a handler either.
+- **Local functions**: a local `fn`'s row is `!io` or pure, and its body may not perform a label
+  it does not itself handle; it is lifted to an ordinary function with no evidence parameter, so
+  reaching an enclosing handler lexically is not the same as holding that evidence at run time,
+  and the ways out are lifting it to the top level to declare the label, or installing a handler
+  for it inside its own body.
 - **Written function types**: `fn(…) -> T !E` is legal in every `TypeRef` position, including
   parameters, return types, `let` annotations, `alias` targets, record/variant fields, generic
   arguments, tuple elements, and trait / impl method parameter types. A written label reads as
