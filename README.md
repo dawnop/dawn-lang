@@ -110,10 +110,9 @@ signature that stays silent about it is a compile error. (`scripts/doc-check.py`
 effect-inference probe pins both branches: an explicitly pure signature that calls
 `println` is rejected, an unannotated one infers `!io`.)
 
-There is a second axis, and nothing in this repository uses it yet: **named effects you
-declare yourself**. `effect` declares the operations, `with handle` answers them on the
-spot, the label propagates along signatures and is subtracted at exactly one syntactic
-node, the handler.
+There is a second axis: **named effects you declare yourself**. `effect` declares the
+operations, `with handle` answers them on the spot, the label propagates along
+signatures and is subtracted at exactly one syntactic node, the handler.
 
 ```dawn run
 effect Ask {
@@ -129,20 +128,32 @@ pub fn main() -> Unit !io = {
 }
 ```
 
-That tier is **tail resumption**: a handler arm is an ordinary closure, no continuation
-is captured, and so neither backend needs its own stack magic for it. The price is that
-multi-shot and non-tail resumption are not supported. It is specified, implemented on
-both backends and held by the differential corpus, and it has
-**its first internal consumer**: `std/io` declares `Fs`, the file system as fourteen
-operations, with `with_fs_real` as the handler production installs, so a test can answer
-a file read from a table. The second is `std/gpu`, which declares `Gpu`, the host side of a
-device as six operations, with a pure fake device as the handler a test installs, so a
-`!Gpu` program runs on a machine with no GPU. Those are the two declarations under `std/`
-and `selfhost/src/`; `doc-check.py` keeps the list (`NAMED_EFFECT_EXPECTED`) and reds this paragraph when a
-declaration appears outside it or this one goes away. So read it as a working feature
-that has carried one real seam and not yet a real program, rather than as the thing that
-makes Dawn different. ([docs/spec.md](docs/spec.md) §6.5; differential corpus
-`scripts/spike-native/effect_handler.dawn`.)
+Arms come in two shapes. A **tail-resumptive** arm is an ordinary closure: it runs in
+place, its return value is the operation's result, and no continuation is captured, so
+neither backend needs stack magic for it. An effect declared `ctl` may also carry a
+**control arm** (`op(x) resume k => ...`), which binds the continuation instead of
+resuming it: `k` is an ordinary function value, it may outlive the frame that installed
+the handler, and it may be resumed **once**. Resuming twice is not supported. A
+continuation that will never be resumed is abandoned by calling `discard` on it, which
+is what runs the releases the suspended frames are holding.
+
+Both shapes are specified, implemented on both backends and held by the differential
+corpus, and **the tier's internal consumers are in this repository**: `std/io` declares
+`Fs`, the file system as fourteen operations, with `with_fs_real` as the handler
+production installs, so a test can answer a file read from a table. The same module
+declares `Proc`, running another program as one operation, with `with_proc_real` for
+production, so a test can hold a command line without starting anything. The third is
+`std/gpu`, which declares `Gpu`, the host side of a device as six operations, with a
+pure fake device as the handler a test installs, so a `!Gpu` program runs on a machine
+with no GPU. Those are the three declarations, in the two files under `std/` and
+`selfhost/src/` that carry any; `doc-check.py` keeps the list (`NAMED_EFFECT_EXPECTED`)
+and reds this paragraph when a declaration appears outside it or one of them goes away.
+The compiler itself runs on the tier: its `main` installs `with_fs_real` around the
+whole dispatch, so every file the toolchain reads or writes goes through `Fs`, and the
+driver's analysis tests run that same code over a file tree held in a table
+(`selfhost/src/driver/fsmem.dawn`). ([docs/spec.md](docs/spec.md) §6.5;
+[docs/oneshot-design.md](docs/oneshot-design.md); differential corpus
+`scripts/spike-native/effect_handler.dawn`; gallery `examples/effects/`.)
 
 ### 2. Two backends, one answer, machine-enforced
 
@@ -155,9 +166,9 @@ list here, because a divergence is a red build:
   on only one backend is red.
 - `scripts/native-cli-diff.sh` — pins the native binary's `fmt`/`doc`/`add`/`lsp`
   output **byte for byte** to the JVM toolchain's.
-- All of the above run on every push, alongside eight contracts:
-  `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`. Too expensive for
-  every push is `scripts/native-fixpoint.sh` — **the whole compiler**: the C the JVM
+- All of the above run on every push, alongside nine contracts:
+  `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`/`narrow`. Too expensive
+  for every push is `scripts/native-fixpoint.sh` — **the whole compiler**: the C the JVM
   emits == the C the native binary emits == the C it emits again.
 
 The spec writes this down as a promise ([docs/spec.md](docs/spec.md) §12.1). Its
@@ -193,6 +204,11 @@ language carries its own:
   agree on their Unicode version. (`scripts/unicode-contract`, every push.)
 - **`Float` rendering is Schubfach in pure Dawn** (`std/fmt.dawn`): the rule is owned
   by the spec and does not follow the host if the host changes algorithm.
+- **The narrow float formats are arithmetic, not a cast to the host's**
+  (`std/narrow.dawn`): bfloat16, binary16 and binary32 are opaque types over
+  `Float` whose every operation is that format's correctly rounded one, checked
+  against an exact rational oracle on both backends. (`scripts/narrow-contract`,
+  every push.)
 - **The UTF-8 decoder is our own strict walker** (`runtime/c/dawn_rt.c`): it rejects
   overlong forms, surrogate halves and anything past U+10FFFF, answers U+FFFD on
   malformed input and reports how many bytes it consumed.
@@ -203,11 +219,11 @@ language carries its own:
 
 Single-parameter, nominal typeclasses with dictionary passing. Conditional impls
 (`impl[T: Eq] Eq[List[T]]`) and associated types (`type Item`, with `C.Item`
-projections reduced at instantiation) are both in. Four of the six built-in traits
-carry syntax on their back: `Eq`→`==`, `Show`→`${...}`, `Iter`→`for..in`, `Index`→`[]`
-— write an impl for your type and the syntax works. There is no monomorphization:
-**a call site at a concrete type does not go through a dictionary, it is a direct
-static call**; dictionaries appear only at generic boundaries.
+projections reduced at instantiation) are both in. Five of the seven built-in traits
+carry syntax on their back: `Eq`→`==`, `Ord`→`<`, `Show`→`${...}`, `Iter`→`for..in`,
+`Index`→`[]` — write an impl for your type and the syntax works. There is no
+monomorphization: **a call site at a concrete type does not go through a dictionary,
+it is a direct static call**; dictionaries appear only at generic boundaries.
 
 `Map`/`Set` are 32-way HAMTs and the persistent `List` is a pvec, all written in pure
 Dawn under `std/`. The only collection primitives a backend owes are five `Array`
@@ -351,8 +367,9 @@ written.
 
 Current toolchain 0.72.0, M0–M8 implemented. <!-- doc-check: version --> The lines of
 work since then — the C backend and native bootstrap, Perceus, trait v2, effect
-handlers, package management — are recorded in their own design documents under
-`docs/`.
+handlers, package management, and the
+[cuTile device backend](docs/tile-backend-design.md) — are recorded in their own
+design documents under `docs/`.
 
 ## Roadmap and contributing
 

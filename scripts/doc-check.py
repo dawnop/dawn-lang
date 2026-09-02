@@ -425,6 +425,19 @@ SPEC_CONTRACTS = (
 
 SPEC_PATHS = {ROOT / "docs/spec.md", ROOT / "docs/spec.en.md"}
 
+# These markers start machine-readable builtin function names in a
+# normative-spec paragraph. A marked region extends to the next blank line, so
+# normal Markdown wrapping cannot move names out of the check. The complete
+# inventory must equal the public declaration mirror exactly; focused lists,
+# such as the math-conversion row, may name a subset but cannot mint a function.
+# Neither kind permits duplicate names within its region. Only lower-case
+# identifier spans are function names, so adjacent types such as `Int` and
+# `Float` stay ordinary prose.
+SPEC_BUILTIN_INVENTORY_MARKER = "<!-- doc-check: builtin-inventory -->"
+SPEC_BUILTIN_LIST_MARKER = "<!-- doc-check: builtin-list -->"
+PUBLIC_BUILTIN_DECL = re.compile(r"(?m)^pub fn\s+([a-z][A-Za-z0-9_]*)\b")
+BUILTIN_DECL_PATH = ROOT / "selfhost/builtins.dawn"
+
 HISTORICAL_V01_MARKER = "<!-- doc-check: historical-v0-1 -->"
 
 HISTORICAL_AUDIT_HEADING = "冻结后的历史状态层（截至 `76491bb`）"
@@ -1529,6 +1542,55 @@ def propagation_contract_problems(rel: str, text: str) -> tuple[list[str], int]:
     return bad, int(bool(propagation)) + int(bool(jumps))
 
 
+def builtin_list_contract_problems(
+        texts: dict[pathlib.Path, str]) -> tuple[list[str], int]:
+    """Hold the exact inventory and focused builtin claims to the mirror."""
+    declared = set(PUBLIC_BUILTIN_DECL.findall(
+        BUILTIN_DECL_PATH.read_text(encoding="utf-8")))
+    if not declared:
+        return [f"{BUILTIN_DECL_PATH.relative_to(ROOT)}: no public builtin declarations found"], 0
+
+    bad: list[str] = []
+    seen = 0
+    for path in sorted(SPEC_PATHS):
+        rel = str(path.relative_to(ROOT))
+        text = texts.get(path)
+        if text is None:
+            bad.append(f"{rel}: cannot check builtin list; document missing")
+            continue
+        for label, marker, exact in (
+                ("builtin inventory", SPEC_BUILTIN_INVENTORY_MARKER, True),
+                ("builtin list", SPEC_BUILTIN_LIST_MARKER, False)):
+            marker_count = text.count(marker)
+            if marker_count != 1:
+                bad.append(f"{rel}: expected one {marker}, found {marker_count}")
+                continue
+            marker_at = text.index(marker)
+            start = marker_at + len(marker)
+            region = text[start:].split("\n\n", 1)[0]
+            names = [name for name in re.findall(
+                     r"`([^`\n]+)`", active_markdown(region))
+                     if re.fullmatch(r"[a-z][A-Za-z0-9_]*", name)]
+            if not names:
+                bad.append(f"{rel}: {label} names no builtin functions")
+                continue
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            if duplicates:
+                bad.append(f"{rel}: {label} repeats function(s): "
+                           f"{', '.join(duplicates)}")
+            unknown = sorted(set(names) - declared)
+            if unknown:
+                bad.append(f"{rel}: {label} names function(s) absent from "
+                           f"selfhost/builtins.dawn: {', '.join(unknown)}")
+            if exact:
+                missing = sorted(declared - set(names))
+                if missing:
+                    bad.append(f"{rel}: builtin inventory omits declared function(s): "
+                               f"{', '.join(missing)}")
+            seen += len(names)
+    return bad, seen
+
+
 def spec_contract_problems(texts: dict[pathlib.Path, str]) -> tuple[list[str], int]:
     normalized = {path: normalize_prose(text) for path, text in texts.items()}
     bad: list[str] = []
@@ -1561,6 +1623,9 @@ def spec_contract_problems(texts: dict[pathlib.Path, str]) -> tuple[list[str], i
         problems, count = propagation_contract_problems(rel, text)
         bad += problems
         seen += count
+    problems, count = builtin_list_contract_problems(texts)
+    bad += problems
+    seen += count
     return bad, seen
 
 
@@ -1584,6 +1649,33 @@ def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[
     bad, _ = spec_contract_problems(mutated)
     if not any("release failure precedence" in problem for problem in bad):
         return ["spec contract self-test: an HTML comment falsely satisfied a clause"], 0
+
+    false_builtin = dict(texts)
+    if SPEC_BUILTIN_LIST_MARKER not in false_builtin[zh]:
+        return ["spec contract self-test: builtin-list fixture is absent"], 0
+    false_builtin[zh] = false_builtin[zh].replace(
+        SPEC_BUILTIN_LIST_MARKER,
+        SPEC_BUILTIN_LIST_MARKER + "\n`sqrt`、", 1)
+    bad, _ = spec_contract_problems(false_builtin)
+    if not any("builtin list names function(s) absent" in problem for problem in bad):
+        return ["spec contract self-test: a nonexistent builtin passed the prose mirror"], 0
+
+    missing_builtin = dict(texts)
+    if "`len`/" not in missing_builtin[zh]:
+        return ["spec contract self-test: exact builtin fixture is absent"], 0
+    missing_builtin[zh] = missing_builtin[zh].replace("`len`/", "", 1)
+    bad, _ = spec_contract_problems(missing_builtin)
+    if not any("builtin inventory omits declared function(s): len" in problem
+               for problem in bad):
+        return ["spec contract self-test: an omitted builtin passed the inventory"], 0
+
+    duplicate_builtin = dict(texts)
+    duplicate_builtin[zh] = duplicate_builtin[zh].replace(
+        "`len`/", "`len`/`len`/", 1)
+    bad, _ = spec_contract_problems(duplicate_builtin)
+    if not any("builtin inventory repeats function(s): len" in problem
+               for problem in bad):
+        return ["spec contract self-test: a duplicate builtin passed the inventory"], 0
 
     fixtures = (
         (ROOT / "docs/spec.md", "3.1 函数",
@@ -1634,7 +1726,7 @@ def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[
         if not any(problem.startswith(rel + ":")
                    and "expression-level Option/Result propagation" in problem for problem in bad):
             return [f"spec contract self-test: {rel} accepted obsolete ? semantics"], 0
-    return [], 7
+    return [], 10
 
 
 def check_effect_inference_probe() -> tuple[list[str], int]:
@@ -1676,10 +1768,10 @@ pub fn main() -> Unit !io = infers_io()
 # The README and the front page both say, in both languages, who the
 # named-effect tier's internal consumers are. For a long time the answer was
 # "nobody", and that is exactly the shape of sentence that stops being true
-# without anybody noticing; today the answer is a list of one, `std/io`, which
-# declares `Fs`, and a list is the same shape of sentence twice over: a second
-# declaration can appear without the documents hearing of it, and the first
-# can disappear the same way.
+# without anybody noticing; today the answer is a list, `std/io` with `Fs` and
+# `Proc` and `std/gpu` with `Gpu`, and a list is the same shape of sentence
+# several times over: another declaration can appear without the documents
+# hearing of it, and any of these can disappear the same way.
 #
 # So the list is held from both sides, at file granularity, the way
 # builtin-decl-mirror and opaque-twin hold theirs. NAMED_EFFECT_EXPECTED names
@@ -1698,14 +1790,31 @@ NAMED_EFFECT_ROOTS = ("std", "selfhost/src")
 NAMED_EFFECT_DECL = re.compile(r"(?m)^(?:pub\s+)?effect\s+[A-Za-z_]")
 NAMED_EFFECT_EXPECTED = ("std/gpu.dawn", "std/io.dawn")
 NAMED_EFFECT_STATUS = (
-    ("README.md", "its first internal consumer"),
-    ("README.zh-CN.md", "第一个内部使用者"),
-    ("site/pages/home.md", "its first internal consumer"),
-    ("site/pages/home.zh.md", "第一个内部使用者"),
+    ("README.md", "the tier's internal consumers are in this repository"),
+    ("README.zh-CN.md", "内部使用者就在本仓"),
+    ("site/pages/home.md", "the tier's internal consumers are in this repository"),
+    ("site/pages/home.zh.md", "内部使用者就在本仓"),
 )
-# The sentence the documents used to carry. Half an edit leaves both in one
-# paragraph, and the new phrase alone would pass it.
-NAMED_EFFECT_STALE = ("no internal consumer", "没有内部使用者")
+# Sentences the documents used to carry, each with what it was true about.
+# Half an edit leaves the old phrase in the paragraph beside the new one, and
+# the new phrase alone would pass the check below; so every retired wording
+# stays listed here rather than being deleted along with the prose.
+#
+# The list is not only about the consumer count. A paragraph this narrow goes
+# stale in whatever direction the language moved, so a claim retired for any
+# reason is registered here: the resumption sentence was retired by control
+# arms, not by a new declaration.
+NAMED_EFFECT_STALE = (
+    ("no internal consumer", "the tier had no consumer at all"),
+    ("没有内部使用者", "the tier had no consumer at all"),
+    ("its first internal consumer", "std/io was the only declarer"),
+    ("第一个内部使用者", "std/io was the only declarer"),
+    ("not yet a real program", "no program ran on the tier"),
+    ("还没扛过一个真实程序", "no program ran on the tier"),
+    ("multi-shot and non-tail resumption are not supported",
+     "every arm was tail-resumptive"),
+    ("不支持多次恢复与非尾恢复", "every arm was tail-resumptive"),
+)
 
 
 def named_effect_users(sources: dict[str, str]) -> list[str]:
@@ -1743,11 +1852,13 @@ def named_effect_status_problems(sources: dict[str, str],
             bad.append(f"{rel}: registered for the named-effect status claim, "
                        f"but does not exist")
             continue
-        stale = [old for old in NAMED_EFFECT_STALE if old in text]
+        stale = [(old, why) for old, why in NAMED_EFFECT_STALE if old in text]
         if stale:
-            bad.append(f"{rel}: still says the named-effect tier has no internal "
-                       f"consumer ({stale[0]!r}), but {', '.join(sorted(users))} "
-                       f"declares one. The tier has been adopted; say so.")
+            phrase, why = stale[0]
+            bad.append(f"{rel}: still says {phrase!r}, which was true when "
+                       f"{why}. It is not true today; the paragraph the four "
+                       f"outward documents carry has to be rewritten in all "
+                       f"four, not half-edited.")
         elif fragment not in text:
             bad.append(f"{rel}: {', '.join(expected)} declares the named-effect "
                        f"tier's internal consumer, so this document has to say so; "
@@ -1821,21 +1932,42 @@ def check_named_effect_status_selftest() -> tuple[list[str], int]:
         return ["named-effect status self-test: a listed file that does not exist "
                 "stayed green"], 0
 
-    # And the documents: dropping the sentence, or leaving the old one in.
-    silent = dict(docs)
-    silent["README.md"] = silent["README.md"].replace(
-        "its first internal consumer", "a consumer somewhere", 1)
-    bad, _ = named_effect_status_problems(sources, silent)
-    if not any("has to say so" in problem for problem in bad):
-        return ["named-effect status self-test: dropping the claim from README.md "
-                "stayed green"], 0
-    regressed = dict(docs)
-    regressed["README.md"] = regressed["README.md"] + "\nIt has no internal consumer.\n"
-    bad, _ = named_effect_status_problems(sources, regressed)
-    if not any("still says" in problem for problem in bad):
-        return ["named-effect status self-test: README.md carrying the retired "
-                "sentence beside the new one stayed green"], 0
-    return [], 7
+    # And the documents. Four copies of one paragraph is four chances to edit
+    # three of them, so each copy is dropped in turn rather than only the
+    # README's: a control that names one file measures one file.
+    for rel, fragment in NAMED_EFFECT_STATUS:
+        silent = dict(docs)
+        silent[rel] = silent[rel].replace(fragment, "a consumer somewhere", 1)
+        bad, _ = named_effect_status_problems(sources, silent)
+        if not any(problem.startswith(f"{rel}: ") and "has to say so" in problem
+                   for problem in bad):
+            return ["named-effect status self-test: dropping the claim from "
+                    f"{rel} stayed green"], 0
+
+    # A retired wording reappearing is the other half, and it is the half a
+    # rewrite actually risks: the phrases below were all true once, so a
+    # revert, a bad merge or a copy from an older paragraph puts one back
+    # while the new sentence stays in place and satisfies the fragment above.
+    # Each is planted in each copy, because the stale list is shared and a
+    # phrase that only reddened README.md would leave the other three open.
+    for phrase, _why in NAMED_EFFECT_STALE:
+        for rel, _fragment in NAMED_EFFECT_STATUS:
+            regressed = dict(docs)
+            regressed[rel] = regressed[rel] + f"\n{phrase}\n"
+            bad, _ = named_effect_status_problems(sources, regressed)
+            if not any(problem.startswith(f"{rel}: still says") for problem in bad):
+                return ["named-effect status self-test: "
+                        f"{rel} carrying the retired wording {phrase!r} beside "
+                        "the new one stayed green"], 0
+
+    # Positive control for the two loops above: the real documents, unedited,
+    # are green. Without it a `named_effect_status_problems` that reddened on
+    # everything would pass every control in this function.
+    bad, _ = named_effect_status_problems(sources, docs)
+    if bad:
+        return ["named-effect status self-test: the unedited documents went "
+                f"red: {bad[0]}"], 0
+    return [], 5 + len(NAMED_EFFECT_STATUS) * (1 + len(NAMED_EFFECT_STALE)) + 1
 
 
 REPOSITORY_POLICY_FILES = (

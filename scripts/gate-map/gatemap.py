@@ -106,6 +106,15 @@ paths no gate watches) is a ratchet checked in both directions.
      module, and the coupling is invisible from either side. This is what
      3c51ae1 and 9e64179 needed.
      From: string literals in the Dawn sources against the gate scripts' text.
+  F  std/modules.txt selects the bundled-module set printed by the unknown-std
+     diagnostic. The checker corpus records that sorted set byte for byte, so
+     the index itself and the module paths it names are exact for the corpus.
+     A direct query reads the current index; `--changed` reads both the base
+     and head indexes, so removal and rename paths remain attributable after
+     they disappear. An unlisted std/*.dawn file is not part of this rule.
+     From: the diagnostic expression in selfhost/src/check/passes.dawn, the
+     recorded line in scripts/checker-corpus/cases/imports.expected, and the
+     workflow step that runs scripts/checker-corpus/run.sh.
 
 `--labels` answers the neighbouring question, from the same file: which
 differential owns which declarable label. `scripts/emit-labels.txt` is
@@ -180,12 +189,20 @@ MIN_LITERAL = 14
 # not a path list: every value is required to be a directory that exists.
 CLI_TARGET_ALIASES = {"--stdlib": "std"}
 
-# The three tree files this checker reads as evidence, named once so that rules
-# C and D, rule A/B's attribution and the structural checks all mean the same
+# The tree files this checker reads as evidence, named once so that rules C, D
+# and F, rule A/B's attribution and the structural checks all mean the same
 # files.
 CORE_GOLDEN = "scripts/core-golden/selfhost.sha"
 EMIT_LABELS = "scripts/emit-labels.txt"
 PREV_DIFF = "scripts/selfhost-prev-diff.sh"
+STD_MODULE_INDEX = "std/modules.txt"
+CHECKER_CORPUS = "scripts/checker-corpus/run.sh"
+CHECKER_CORPUS_GOLDEN = "scripts/checker-corpus/cases/imports.expected"
+BUNDLED_MODULE_DIAGNOSTIC = "selfhost/src/check/passes.dawn"
+BUNDLED_MODULE_EXPRESSION = (
+    '"bundled modules: " ++ join(sort(std_names), ", "))'
+)
+BUNDLED_MODULE_GOLDEN_TEXT = "\tbundled modules: "
 SELFHOST_PROJECT = "selfhost"
 SELFHOST_MANIFEST = "selfhost/dawn.toml"
 SELFHOST_LOCK = "selfhost/dawn.lock"
@@ -234,7 +251,14 @@ HEAD_COMPILER_REASON = (
 # use these constants and nothing else: delete a use and the rule it belongs to
 # stops working, loudly.
 SELF = "scripts/gate-map/gatemap.py"
-SELF_INPUTS = (CORE_GOLDEN, EMIT_LABELS, PREV_DIFF)
+SELF_INPUTS = (
+    CORE_GOLDEN,
+    EMIT_LABELS,
+    PREV_DIFF,
+    STD_MODULE_INDEX,
+    BUNDLED_MODULE_DIAGNOSTIC,
+    CHECKER_CORPUS_GOLDEN,
+)
 
 
 PATH_TOKEN = re.compile(r"[A-Za-z0-9_*][A-Za-z0-9_.$@+*-]*(?:/[A-Za-z0-9_.$@+*-]+)+")
@@ -255,6 +279,16 @@ LEVELS = ("exact", "coupled", "coarse", "blind")
 REPORT_ORDER = ("exact", "blind", "coupled", "coarse")
 
 
+def std_module_paths(index_text):
+    """The module paths selected by modules.txt, mirroring stdlib.index_names."""
+    names = []
+    for line in index_text.split("\n"):
+        name = line.split("#", 1)[0].strip()
+        if name:
+            names.append(f"std/{name}.dawn")
+    return set(names)
+
+
 def run_git(args, cwd=ROOT, check=True):
     proc = subprocess.run(
         ["git", "-C", str(cwd)] + args, capture_output=True, text=True
@@ -262,6 +296,39 @@ def run_git(args, cwd=ROOT, check=True):
     if check and proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
     return proc.stdout
+
+
+def file_at_revision(revision, path):
+    """A file at a revision, or empty text when that revision lacks it."""
+    proc = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{revision}:{path}"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0:
+        return proc.stdout
+    valid = subprocess.run(
+        ["git", "-C", str(ROOT), "cat-file", "-e", f"{revision}^{{tree}}"],
+        capture_output=True,
+        text=True,
+    )
+    if valid.returncode != 0:
+        raise RuntimeError(
+            f"git cannot resolve revision {revision}: {valid.stderr.strip()}"
+        )
+    return ""
+
+
+def std_modules_at_revision(revision):
+    return std_module_paths(file_at_revision(revision, STD_MODULE_INDEX))
+
+
+def changed_paths(revision, end=None):
+    """Paths changed from revision, keeping both sides of every rename."""
+    args = ["diff", "--no-renames", "--name-only", revision]
+    if end is not None:
+        args.append(end)
+    return [path for path in run_git(args).split("\n") if path]
 
 
 class Tree:
@@ -1069,6 +1136,8 @@ class Map:
         self.owned = {}
         self.direct = {}
         self.problems = []
+        self.std_modules = std_module_paths(tree.read(STD_MODULE_INDEX))
+        self.std_module_observation = None
         self._build()
 
     def add(self, path, obs):
@@ -1443,15 +1512,94 @@ class Map:
                 ),
             )
 
+    # ---- rule F -------------------------------------------------------
+    def _rule_f(self):
+        """The checker golden records the modules selected by modules.txt.
+
+        Rule B cannot derive this edge: the checker script names its golden,
+        but it has no reason to name the index that built the compiler's env.
+        A removed path is also absent from Tree.files. Keep the observations
+        only while all three parts of the evidence remain readable.
+        """
+        gate = self.gate_running(CHECKER_CORPUS)
+        if gate is None:
+            self.problems.append(
+                f"no workflow step runs {CHECKER_CORPUS}, so the bundled std "
+                "module-set rule has no gate to attribute; rule F is void"
+            )
+
+        source_lines = [
+            n
+            for n, line in enumerate(
+                self.tree.read(BUNDLED_MODULE_DIAGNOSTIC).splitlines(), 1
+            )
+            if BUNDLED_MODULE_EXPRESSION in line
+        ]
+        if len(source_lines) != 1:
+            self.problems.append(
+                f"{BUNDLED_MODULE_DIAGNOSTIC} has {len(source_lines)} copies "
+                "of the sorted bundled-module diagnostic expression, not "
+                "one; rule F is void"
+            )
+
+        golden_lines = [
+            n
+            for n, line in enumerate(
+                self.tree.read(CHECKER_CORPUS_GOLDEN).splitlines(), 1
+            )
+            if BUNDLED_MODULE_GOLDEN_TEXT in line
+        ]
+        if len(golden_lines) != 1:
+            self.problems.append(
+                f"{CHECKER_CORPUS_GOLDEN} has {len(golden_lines)} recorded "
+                "bundled-module diagnostics, not one; rule F is void"
+            )
+
+        if gate is None or len(source_lines) != 1 or len(golden_lines) != 1:
+            return
+
+        module_observation = Observation(
+            "exact",
+            gate.id,
+            f"{STD_MODULE_INDEX} lists this path in the relevant tree's "
+            f"bundled-module set; {BUNDLED_MODULE_DIAGNOSTIC}:"
+            f"{source_lines[0]} prints that sorted set into a diagnostic that "
+            f"{CHECKER_CORPUS_GOLDEN}:{golden_lines[0]} records",
+            gate.tag_only,
+        )
+        index_observation = Observation(
+            "exact",
+            gate.id,
+            f"{STD_MODULE_INDEX} selects the bundled-module set that "
+            f"{BUNDLED_MODULE_DIAGNOSTIC}:{source_lines[0]} prints into a "
+            f"diagnostic and {CHECKER_CORPUS_GOLDEN}:{golden_lines[0]} records",
+            gate.tag_only,
+        )
+        self.std_module_observation = module_observation
+        self.add(STD_MODULE_INDEX, index_observation)
+        for path in self.std_modules:
+            self.add(path, module_observation)
+
     def _build(self):
         self._rule_ab()
         self._rule_c()
         self._rule_d()
         self._rule_e()
+        self._rule_f()
 
     # ---- queries ------------------------------------------------------
-    def verdict(self, path):
-        obs = sorted(self.by_path.get(path, []), key=lambda o: o.key())
+    def verdict(self, path, additional_std_modules=None):
+        obs = list(self.by_path.get(path, []))
+        # `--changed` supplies the base index as additional context. That is
+        # how an old module path keeps its verdict after a removal or rename;
+        # direct queries deliberately use only the current index.
+        if (
+            additional_std_modules is not None
+            and path in additional_std_modules
+            and self.std_module_observation is not None
+        ):
+            obs.append(self.std_module_observation)
+        obs.sort(key=lambda o: o.key())
         # deduplicate: one line per (level, gate, why)
         seen = set()
         out = []
@@ -1654,21 +1802,24 @@ def couplings(tree):
 # reporting
 
 
-def report(gm, paths, stream=sys.stdout):
+def report(gm, paths, additional_std_modules=None, stream=sys.stdout):
     for path in paths:
         path = path.rstrip("/")
         members = gm.tree.under(path)
         if not members:
-            print(f"{path}\n  ?       not a tracked path in this tree\n", file=stream)
-            continue
-        if members != [path]:
+            obs = gm.verdict(path, additional_std_modules)
+            if not obs:
+                print(f"{path}\n  ?       not a tracked path in this tree\n", file=stream)
+                continue
+            print(f"{path}  (not tracked in this tree)", file=stream)
+        elif members != [path]:
             print(f"{path}  ({len(members)} tracked files)", file=stream)
             obs = []
             for member in members:
-                obs.extend(gm.verdict(member))
+                obs.extend(gm.verdict(member, additional_std_modules))
         else:
             print(path, file=stream)
-            obs = gm.verdict(path)
+            obs = gm.verdict(path, additional_std_modules)
         if not obs:
             print("  none    no gate reads, runs or records this file", file=stream)
         # One line per (level, gate). A driver module can share a dozen usage
@@ -1899,6 +2050,8 @@ def parse_fixtures(path):
 
         name:     what it is
         tree:     a commit whose tree the map is run on
+        changed:  a base revision; every query must occur in its no-renames
+                  diff to `tree`, and rule F reads both revisions' std indexes
         overlay:  <commit> <path>   (repeatable) files taken from another commit,
                   for a batch whose tree never landed as one commit
         ground:   a sentence about what happened, checked against git (below)
@@ -1913,6 +2066,7 @@ def parse_fixtures(path):
     is a claim about the repository's own history, measured from git:
 
         touched <commit> <path>          the commit's diff includes that path
+        added <commit> <path>            the commit adds that path from nothing
         contains <rev>:<path> <text>     the file at that rev has that text
         lacks <rev>:<path> <text>        it does not
         golden-moved <commit> <module>   the commit rewrote that module's line
@@ -1966,6 +2120,23 @@ def check_ground(fixture):
                 problems.append(
                     f"{fixture['name']}: `{line}` is not true; {commit} does "
                     f"not touch {path.strip()}"
+                )
+        elif verb == "added":
+            commit, _, path = rest.partition(" ")
+            names = run_git(
+                [
+                    "diff-tree",
+                    "--no-commit-id",
+                    "--name-only",
+                    "--diff-filter=A",
+                    "-r",
+                    commit,
+                ]
+            ).split("\n")
+            if path.strip() not in names:
+                problems.append(
+                    f"{fixture['name']}: `{line}` is not true; {commit} does "
+                    f"not add {path.strip()}"
                 )
         elif verb in ("contains", "lacks"):
             where, _, needle = rest.partition(" ")
@@ -2049,9 +2220,26 @@ def run_fixtures(path, verbose=True):
         with tempfile.TemporaryDirectory(prefix="gatemap-fx-") as tmp:
             files = materialise(fx["tree"], fx["overlay"], Path(tmp))
             gm = Map(Tree(tmp, files))
+            additional_std_modules = None
+            if "changed" in fx:
+                if fx["overlay"]:
+                    problems.append(
+                        f"{fx['name']}: `changed` cannot be combined with an "
+                        "overlay, because the overlay is not a Git tree the "
+                        "diff can measure"
+                    )
+                changed = set(changed_paths(fx["changed"], fx["tree"]))
+                additional_std_modules = std_modules_at_revision(fx["changed"])
+                for query in fx["query"]:
+                    if query not in changed:
+                        problems.append(
+                            f"{fx['name']}: `{query}` is not changed from "
+                            f"{fx['changed']} to {fx['tree']}, so the "
+                            "--changed fixture would never query it"
+                        )
             lines = []
             for query in fx["query"]:
-                for o in gm.verdict(query):
+                for o in gm.verdict(query, additional_std_modules):
                     lines.append((query, o.level, f"{o.gate_id} :: {o.why}"))
             for want in fx["expect"]:
                 level, _, needle = want.partition(" ")
@@ -3575,16 +3763,16 @@ def main(argv=None):
         return rc
 
     paths = list(args.paths)
+    additional_std_modules = None
     if args.changed:
-        paths += [
-            p
-            for p in run_git(["diff", "--name-only", args.changed]).split("\n")
-            if p
-        ]
+        # The head modules are already in gm. Supplying the base modules lets
+        # rule F recognise a registered path removed or renamed since REV.
+        additional_std_modules = std_modules_at_revision(args.changed)
+        paths += changed_paths(args.changed)
     if not paths:
         ap.error("give at least one path, or --changed REV, or --check")
 
-    report(gm, paths)
+    report(gm, paths, additional_std_modules)
 
     labels, tag = declared_window(ROOT)
     if labels is None:

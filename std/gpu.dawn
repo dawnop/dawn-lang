@@ -259,11 +259,88 @@ pub fn sum_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   })
 }
 
+# ---- references for kernels with a boundary ----
+#
+# A kernel over a vector whose length is not a multiple of the tile width
+# covers the whole of the last block and masks the lanes past the end: it
+# neither reads nor writes them. So a buffer is allocated to the block
+# boundary and only its first `n` elements are the answer; the rest are
+# whatever the buffer already held. Each reference below takes that `n` and
+# copies the output buffer's own tail past it, which is what the device
+# leaves behind, and is why a reference that wrote the whole buffer would
+# hide a kernel whose mask did nothing.
+#
+# `ins` is the contents of every argument buffer in order, the output buffer
+# last, as the fake device passes them; `dtypes` their formats. Each of these
+# is a plain function of `n` and those two, so a caller builds the map the
+# fake device wants by fixing `n` (and the constants, where a kernel has any)
+# for the kernel it recorded: one kernel per shape, and the shape is a host
+# constant at recording time (docs/tile-backend-design.md 5.2).
+
+# The output buffer's own element `i`, which is what a masked-off lane keeps.
+fn kept(old: List[Float], i: Int) -> Float = old[i]
+
+## Element-wise sum of the first two buffers into the third, over the first
+## `n` lanes: leetgpu 1 (Vector Addition) and 8 (Matrix Addition).
+pub fn masked_vadd_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), i => if i < n { round_to(dt, a[i] + b[i]) } else { kept(old, i) })
+}
+
+## The first buffer into the second, over the first `n` lanes: leetgpu 31
+## (Matrix Copy).
+pub fn masked_copy_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i => if i < n { round_to(dt, x[i]) } else { kept(old, i) })
+}
+
+## `max(x, 0)` over the first `n` lanes: leetgpu 21 (ReLU). The kernel is
+## `maxf` with neither `propagate_nan` nor `flush_to_zero`, whose answer on a
+## NaN operand is the other operand and on `(-0.0, +0.0)` is either zero;
+## this answers `+0.0` for both, so a corpus that exercised them would be
+## asserting something this release has not pinned.
+pub fn relu_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i => if i < n { round_to(dt, if x[i] > 0.0 { x[i] } else { 0.0 }) } else { kept(old, i) })
+}
+
+## `x` where `x >= 0` and `alpha * x` where `x < 0`, over the first `n`
+## lanes: leetgpu 23 (Leaky ReLU). The kernel is an ordered `lt` and a
+## `select`, so NaN and `-0.0` both answer themselves here as they do there.
+pub fn leaky_relu_ref(n: Int, alpha: Float, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i =>
+      if i < n { round_to(dt, if x[i] < 0.0 { x[i] * alpha } else { x[i] }) } else { kept(old, i) })
+}
+
+## `min(max(x, lo), hi)` over the first `n` lanes: leetgpu 62 (Value
+## Clipping). `maxf` and `minf` again, so the NaN and signed-zero caveat of
+## `relu_ref` holds.
+pub fn clip_ref(n: Int, lo: Float, hi: Float, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i =>
+      if i < n { round_to(dt, if x[i] < lo { lo } else if x[i] > hi { hi } else { x[i] }) } else { kept(old, i) })
+}
+
 ## The reference implementations the fake device answers `launch` with, by
-## kernel name: `vadd`, `vadd_bf16` (one reference; the buffers tell it the
-## format) and `sum` in this release.
-pub fn reference_kernels() -> Map[String, fn(List[String], List[List[Float]]) -> List[Float]] =
-  map.from([("vadd", vadd_ref), ("vadd_bf16", vadd_ref), ("sum", sum_ref)])
+## kernel name. Each entry carries the exact number of buffers the device
+## kernel takes beside its body: three for `vadd` / `vadd_bf16` (two inputs
+## and one output), two for `sum` (one input and one output). The masked
+## references above are not here because each needs the length its kernel was
+## recorded for; a caller adds them to this map with that length fixed.
+pub fn reference_kernels() -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] =
+  map.from([("vadd", (3, vadd_ref)), ("vadd_bf16", (3, vadd_ref)), ("sum", (2, sum_ref))])
 
 fn no_such_buffer(who: String, handle: Int) -> ForeignError =
   refuse("gpu.no_such_buffer", "${who}: no buffer with handle ${handle}")
@@ -274,6 +351,9 @@ fn no_kernel(who: String, kernel: String) -> ForeignError =
 fn no_arguments(who: String, kernel: String) -> ForeignError =
   refuse("gpu.no_arguments", "${who}: `${kernel}` launched with no buffers")
 
+fn bad_arity(who: String, kernel: String, wanted: Int, got: Int) -> ForeignError =
+  refuse("gpu.bad_arity", "${who}: `${kernel}` wants ${wanted} buffer(s), got ${got}")
+
 ## Run `body` against a device that is a table in host memory. Handles count
 ## up from 1 per installation; a buffer is its format and a `List[Float]`
 ## holding values of that format, and the formats are `element_bytes`'s
@@ -281,9 +361,11 @@ fn no_arguments(who: String, kernel: String) -> ForeignError =
 ## was freed answers `gpu.no_such_buffer`. `gpu_launch` looks `kernel` up in
 ## `kernels`, hands the reference implementation the format and the contents
 ## of every argument buffer in order, and stores what it returns as the
-## contents of the LAST argument; `grid` is not consulted, a reference
-## implementation computes the whole vector at once; an unknown name answers
-## `gpu.no_kernel`. A buffer holds what memory of its format would: what
+## contents of the LAST argument. Before the body is called, its entry's
+## arity must equal the number of buffers (`gpu.bad_arity` otherwise); `grid`
+## is not consulted, a reference implementation computes the whole vector at
+## once; an unknown name answers `gpu.no_kernel`. A buffer holds what memory
+## of its format would: what
 ## `gpu_upload` stores and what a launch writes is rounded to the buffer's
 ## format (`round_to`), which for `f64` is the data as given. The length
 ## check is `upload`'s, above the operation, and is the same code under
@@ -296,7 +378,7 @@ fn no_arguments(who: String, kernel: String) -> ForeignError =
 # into a qualified call, and std has to keep compiling under it so that the
 # mutant reddens the assertions it owns and nothing else (measured: one such
 # pipe here turned every pipe-contract assertion red).
-pub fn with_gpu_fake[T](kernels: Map[String, fn(List[String], List[List[Float]]) -> List[Float]],
+pub fn with_gpu_fake[T](kernels: Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])],
   body: fn() -> T !Gpu) -> T = {
   with handle Gpu {
     var next: Int = 1
@@ -326,9 +408,12 @@ pub fn with_gpu_fake[T](kernels: Map[String, fn(List[String], List[List[Float]])
       None -> Err(no_such_buffer("fake device", handle))
     }
     gpu_launch(kernel, _grid, args) => match map.get(kernels, kernel) {
-      Some(f) ->
+      Some(entry) -> {
+        let (arity, f) = entry
         if len(args) == 0 {
           Err(no_arguments("fake device", kernel))
+        } else if len(args) != arity {
+          Err(bad_arity("fake device", kernel, arity, len(args)))
         } else {
           # a handler's state cell cannot be captured by a lambda: read it first
           let s = store
@@ -351,6 +436,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, fn(List[String], List[List[Float]])
             }
           }
         }
+      }
       None -> Err(no_kernel("fake device", kernel))
     }
     gpu_free(handle) =>
@@ -769,6 +855,37 @@ test "launch refuses a grid of zero above the effect; the fake device refuses wh
     == ["gpu.bad_grid", "gpu.no_kernel", "gpu.no_arguments", "gpu.no_such_buffer", "ok"]
 }
 
+fn too_few_buffers() -> Result[Unit, ForeignError] !Gpu = {
+  let a = alloc(F64, 2)?
+  launch("vadd", 1, [handle_of(a)])
+}
+
+test "the fake device refuses too few buffers before invoking the reference kernel" {
+  match with_gpu_fake(reference_kernels(), too_few_buffers) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.kind == "gpu.bad_arity"
+      assert e.message == "fake device: `vadd` wants 3 buffer(s), got 1"
+    }
+  }
+}
+
+fn one_short_buffer() -> Result[Unit, ForeignError] !Gpu = {
+  let a = alloc(F64, 2)?
+  let b = alloc(F64, 2)?
+  launch("vadd", 1, [handle_of(a), handle_of(b)])
+}
+
+test "the fake device refuses one buffer short instead of overwriting an input" {
+  match with_gpu_fake(reference_kernels(), one_short_buffer) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.kind == "gpu.bad_arity"
+      assert e.message == "fake device: `vadd` wants 3 buffer(s), got 2"
+    }
+  }
+}
+
 fn use_after_free() -> (Int, Int, String, String) !Gpu = {
   let a: Result[Tensor[F64], ForeignError] = alloc(F64, 2)
   let b: Result[Tensor[F64], ForeignError] = alloc(F64, 2)
@@ -821,4 +938,68 @@ test "the real handler refuses, above the device, what it can answer without one
       "gpu.unsupported_dtype", "gpu.no_such_buffer", "gpu.no_such_buffer", "gpu.no_such_buffer",
       "gpu.no_kernel", "gpu.no_arguments", "gpu.no_such_buffer"
     ]
+}
+
+# The five references above, on a buffer allocated to the block boundary:
+# the fake device is handed the same shape the real one is (an output buffer
+# longer than the answer), so what a masked kernel leaves untouched is part
+# of what the reference has to answer.
+fn masked_kernels() -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] =
+  map.from([
+    ("vadd_tail", (3, (dts, ins) => masked_vadd_ref(5, dts, ins))),
+    ("copy", (2, (dts, ins) => masked_copy_ref(5, dts, ins))),
+    ("relu", (2, (dts, ins) => relu_ref(5, dts, ins))),
+    ("leaky_relu", (2, (dts, ins) => leaky_relu_ref(5, 0.5, dts, ins))),
+    ("clip", (2, (dts, ins) => clip_ref(5, -1.0, 1.0, dts, ins)))
+  ])
+
+# Run `kernel` over the 8-element inputs `xs` (and `ys` where it takes two),
+# with an output buffer of eight elements holding `-7.0` in every lane, and
+# answer what the output buffer holds afterwards. Five of the eight lanes are
+# the kernel's, the other three are the tail the mask keeps.
+fn masked_run(kernel: String, xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+  let tail = list.map(range(0, 8), _i => 0.0 - 7.0)
+  match (alloc(F64, 8), alloc(F64, 8), alloc(F64, 8)) {
+    (Ok(a), Ok(b), Ok(out)) -> {
+      let _u1 = upload(a, xs)
+      let _u2 = upload(b, ys)
+      let _u3 = upload(out, tail)
+      let args = if len(ys) == 0 { [handle_of(a), handle_of(out)] } else { [handle_of(a), handle_of(b), handle_of(out)] }
+      match launch(kernel, 1, args) {
+        Ok(_) -> download(out)
+        Err(e) -> Err(e)
+      }
+    }
+    _ -> Err(refuse("gpu.test", "the test could not allocate"))
+  }
+}
+
+fn masked_answers() -> List[List[Float]] !Gpu = {
+  let xs = [1.0, 0.0 - 2.0, 3.0, 0.0 - 4.0, 5.0, 6.0, 7.0, 8.0]
+  let ys = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]
+  let none: List[Float] = []
+  list.map(["vadd_tail", "copy", "relu", "leaky_relu", "clip"], k =>
+      match masked_run(k, xs, if k == "vadd_tail" { ys } else { none }) {
+        Ok(v) -> v
+        Err(_e) -> []
+      })
+}
+
+test "a masked kernel's reference answers the first n lanes and keeps the output buffer's tail" {
+  let got = with_gpu_fake(masked_kernels(), masked_answers)
+  let tail = [0.0 - 7.0, 0.0 - 7.0, 0.0 - 7.0]
+  assert got[0] == [11.0, 18.0, 33.0, 36.0, 55.0] ++ tail
+  assert got[1] == [1.0, 0.0 - 2.0, 3.0, 0.0 - 4.0, 5.0] ++ tail
+  assert got[2] == [1.0, 0.0, 3.0, 0.0, 5.0] ++ tail
+  assert got[3] == [1.0, 0.0 - 1.0, 3.0, 0.0 - 2.0, 5.0] ++ tail
+  assert got[4] == [1.0, 0.0 - 1.0, 1.0, 0.0 - 1.0, 1.0] ++ tail
+}
+
+test "a masked reference rounds its answer to the output buffer's format, like an unmasked one" {
+  # 0.1 is not a bf16, and neither is 0.1 + 0.2; the reference rounds the sum
+  # the way the device's addf over a bf16 tile does (docs 3.2).
+  let dts = ["bf16", "bf16", "bf16"]
+  let ins = [[0.1, 0.1], [0.2, 0.2], [0.0, 0.0]]
+  assert masked_vadd_ref(1, dts, ins) == [narrow.round_bf16(0.1 + 0.2), 0.0]
+  assert masked_copy_ref(1, ["bf16", "bf16"], [[0.1, 0.1], [0.0, 0.0]]) == [narrow.round_bf16(0.1), 0.0]
 }

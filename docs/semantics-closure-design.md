@@ -366,6 +366,25 @@ NoSuchMethodError: 'long ordprim.dawn$default$Ord$cmp(Object, Object, Object)'
 教训与 §11.3 那条同形:**一个关系有两个入口时,语料必须两个都写**。补的语料是
 `scripts/spike-native/show_tuple.dawn`,每一行都写 `show`。
 
+### 6.2 尾款:元组的 `Ord` 承诺已有 lowering,少的是见证(2026-09-03,#53)
+
+spec §3.5 说前四个预置 trait 都为元组按结构合成,checker 却只给 `Eq`/`Hash`/`Show`
+发元组见证。这里有两条可行路线:删掉规范里的 `Ord`,或补全词典序。选择后者不是重新造
+一套排序机制——`lower.struct_cmp_body` 已经有 `TyTuple` 分支,逐元素调用 `cmp_at`,再由
+`lexicographic` 取第一个非零结果;嵌套元组自然递归走同一条路。
+
+非 ground 的字典轨也已经闭合:`type_args_of(TyTuple)` 暴露每个元素,
+`sub_goals` 把 `(Int,T)` 分解为 `Ord[Int]` 与 `Ord[T]`,`WApply` 携这些见证,
+`struct_rel_fn` 与 `make_prim_slot` 再把字典放回 `cmp_at`。因此真正缺的只有两扇门:
+checker 按元素解一份元组见证,以及 `primitive_subject` 承认「没有 impl」的元组 `Ord`
+是语言自己定义的关系。两处必须同时补;只补前者会让已通过检查的 `cmp((1,2),(1,3))`
+在 lowering 查一条永远写不出来的 impl。
+
+**不做规范收窄。** 那会丢掉一项已有 Core 定义和完整字典基础设施的能力,而没有换来
+架构简化。放行也不是无条件的:每个元素仍须独立解出 `Ord`;`Bool`、`Float` 或函数值
+出现在任一层都必须拒绝。`scripts/spike-native/ord_tuple.dawn` 同时钉直接、嵌套、
+二元/三元与两种泛型路径;checker 诊断语料钉住不可排序元素的负例。
+
 ## 7. S1.5:不是「六表合一」,是「拆开被合错的、合并被拆错的」
 
 > **已落地(2026-07-26)。** 两件破坏性改动照裁定做了:`Hash[Float]` 与

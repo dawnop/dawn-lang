@@ -1,0 +1,98 @@
+# Narrow floats: bfloat16 and binary16 as values that round the way the
+# hardware rounds.
+#
+# Dawn has one floating type, the 64-bit `Float`. `std/narrow` adds three
+# opaque types over it -- `BF16`, `FP16`, `F32` -- whose invariant is "the
+# Float inside is a value of that format", with a rounding function that
+# establishes it and a trait whose every operation re-establishes it. So these
+# are not `Float` under a smaller name: `add` on two `BF16` is the bfloat16
+# sum, bit for bit, and never a wide sum that happens to be printed short.
+#
+# Where the difference shows is a chain. Rounding once at the end and rounding
+# after every step are different numbers, and the second one is what a device
+# holding bf16 accumulators computes. `sums` below prints both.
+#
+# The operators stay away on purpose: `+` is not a user-implementable trait
+# (spec §3.5), so arithmetic here is `add` / `mul` / `sqrt` by name. `==` and
+# `<` do work, because an opaque type takes them from the type it wraps.
+#
+# Run: dawn run examples/data/narrow.dawn
+
+use std/io
+use std/narrow
+use std/narrow.{BF16, FP16, bf16, fp16, to_f64, add, mul, sqrt}
+
+## The same number in three widths. `to_f64` is exact -- every value of a
+## narrow format is a Float -- so what these show is the rounding, not the
+## printing.
+fn widths(x: Float) -> List[Float] = [x, to_f64(bf16(x)), to_f64(fp16(x))]
+
+## `x` added to itself `n` times, with every intermediate result rounded to
+## bfloat16. This is the accumulator a bf16 kernel keeps.
+fn step_by_step(x: Float, n: Int) -> Float = {
+  var acc: BF16 = bf16(0.0)
+  for _i in range(0, n) {
+    acc = add(acc, bf16(x))
+  }
+  to_f64(acc)
+}
+
+## The same sum kept in `Float` and rounded once at the end.
+fn once_at_the_end(x: Float, n: Int) -> Float =
+  to_f64(bf16(fold(range(0, n), 0.0, (a, _i) => a + x)))
+
+## Products drift the same way, and `mul` is the format's product: the exact
+## product of two bf16 values, rounded once to bf16. Note that `rate` is
+## rounded before the first multiplication, so the drift starts at the input:
+## 1.01 is not a bfloat16 and 1.0078125 is the nearest one.
+fn compound(rate: Float, n: Int) -> Float = {
+  var acc: BF16 = bf16(1.0)
+  for _i in range(0, n) {
+    acc = mul(acc, bf16(rate))
+  }
+  to_f64(acc)
+}
+
+pub fn main() -> Unit !io = {
+  io.println("0.1 as Float, bf16, fp16: ${widths(0.1)}")
+  io.println("1.0 as Float, bf16, fp16: ${widths(1.0)}")
+  io.println("ten times 0.1, rounded every step: ${step_by_step(0.1, 10)}")
+  io.println("ten times 0.1, rounded once:       ${once_at_the_end(0.1, 10)}")
+  io.println("1.01 compounded 100 times in bf16: ${compound(1.01, 100)}")
+  io.println("sqrt 2 in bf16: ${to_f64(sqrt(bf16(2.0)))}")
+  io.println("65504 and 70000 in fp16: ${to_f64(fp16(65504.0))} ${to_f64(fp16(70000.0))}")
+}
+
+test "a value the format holds exactly comes back unchanged" {
+  assert to_f64(bf16(1.0)) == 1.0
+  assert to_f64(bf16(0.5)) == 0.5
+  assert to_f64(fp16(256.0)) == 256.0
+}
+
+test "rounding is to the nearest value of the format" {
+  # 0.1 is on neither grid, and eight significand bits is about two decimal
+  # digits: bf16 lands above it, fp16 (eleven bits) below and much closer.
+  assert to_f64(bf16(0.1)) == 0.10009765625
+  assert to_f64(fp16(0.1)) == 0.0999755859375
+}
+
+test "the two ways of summing are different numbers" {
+  assert step_by_step(0.1, 10) == 1.0078125
+  assert once_at_the_end(0.1, 10) == 1.0
+}
+
+test "fp16 runs out of exponent where bf16 does not" {
+  # bf16 keeps binary32's eight exponent bits and spends the difference on
+  # the significand, so it reaches far past fp16's largest finite value and
+  # is coarser everywhere.
+  assert to_f64(fp16(65504.0)) == 65504.0
+  assert to_f64(bf16(70000.0)) == 70144.0
+  # Past the largest finite value the answer is the infinity of the sign.
+  assert to_f64(fp16(65504.0)) < to_f64(fp16(70000.0))
+}
+
+test "order and equality come from the Float inside" {
+  assert bf16(1.0) < bf16(2.0)
+  assert bf16(0.1) == bf16(0.1)
+  assert not (bf16(0.1) == bf16(0.2))
+}

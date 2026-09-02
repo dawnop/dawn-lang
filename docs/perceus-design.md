@@ -853,6 +853,15 @@ record spread 的 direct-map 预算，而是新增 focused record-wrapper leg：
 热缓存下以各自冻结的 native compiler 连跑自编译，旧版 5 次中位数 6.81s、新版 5 次中位数
 6.91s（约 +1.5%，在墙钟噪声量级内）；确定性的复用计数上升，但没有可声称的墙钟收益。
 
+**#40 已解除单语句限制（2026-09-03）。** 调度器现在可从多语句块尾部向前找到最近的
+合格 `CSLet`，把字段绑定直接插在 base 后；若 base 或它的本地别名在中间（包括嵌套块）
+被重新赋值则保守拒绝。以 v0.72.0 的 `cb2984c4` 冻结前后 native compiler，仍跑同一
+`check selfhost/src/check/checker.dawn` 前端负载，`array_with` 前后均为
+`197,885 / 29,163`（87.16%），即增益为 **0**。生成 C 已把 `load_directory_planned` 的
+`loaded` 释放从 `pvec.concat` 之后移到之前；但 `loaded.diags` 的独立字段 owner 在这个
+borrowed concat 调用处仍需一次 dup，所以没有新增原地数组写入。这是本刀的实测边界，
+不是把预算抬高后的“收益”。
+
 **#31 已接在 #30 后落地（2026-09-01）。** `std/hamt.node_put` 的 branch descent 现在与
 `std/pvec.push_tail` 用同一个合同：先以 `array_steal(kids, pos)` 暂时清空 slot，把 child 的
 slot owner 交给递归，再以 `array_with` 把 rebuilt child 写回同一位置。shared array 上 steal

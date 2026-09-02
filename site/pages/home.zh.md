@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/home.md @ 6e4c510c1cce6643 -->
+<!-- doc-check: translation-of site/pages/home.md @ 9f2e8afda852d89c -->
 
 # 首页文案 —— 中文译本
 
@@ -34,7 +34,7 @@ type · match · effect · !io
 
 ## feature-effects-body
 
-函数默认是纯的，碰 IO 必须在签名标 `!io`——看签名即知它碰不碰外界，纯函数测试零 mock。第二条轴是你自己声明的**具名效果**：`effect` 声明操作、`with handle` 就地应答，标签随签名传播，只在 handle 这一个语法节点上被减掉。这一档有规范、两个后端都实现了、也有测试，并且有了**第一个内部使用者**：标准库的 `std/io` 声明了 `Fs`，把文件系统做成具名效果，生产 handler 是 `with_fs_real`；`std/gpu` 跟着声明了 `Gpu`，设备的宿主侧，测试里由一个纯的假设备应答。
+函数默认是纯的，碰 IO 必须在签名标 `!io`——看签名即知它碰不碰外界，纯函数测试零 mock。第二条轴是你自己声明的**具名效果**：`effect` 声明操作、`with handle` 就地应答，标签随签名传播，只在 handle 这一个语法节点上被减掉。臂默认是尾恢复的；声明为 `ctl` 的效果还可以带控制臂（`op(x) resume k => ...`），它绑定延续而不是恢复延续，稍后再恢复一次，恢复两次不支持。这一档有规范、两个后端都实现了、也有测试，而且**内部使用者就在本仓**：标准库的 `std/io` 声明了 `Fs`，把文件系统做成具名效果，生产 handler 是 `with_fs_real`，还声明了 `Proc`，把「跑另一个程序」做成一个操作，生产 handler 是 `with_proc_real`；`std/gpu` 跟着声明了 `Gpu`，设备的宿主侧，测试里由一个纯的假设备应答。编译器自己就跑在这一档上：它的 `main` 把整个 dispatch 包在 `with_fs_real` 里，于是工具链读写的每个文件都过 `Fs`。
 
 ## feature-comptime-title
 

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 4389020e54f40c70 -->
+<!-- doc-check: translation-of docs/tutorial.md @ b7032c255fff8ea3 -->
 
 # Dawn 教程
 
@@ -841,11 +841,72 @@ pub fn main() -> Unit !io = {
 [101, 102, 103]
 ```
 
+### handler 的状态：臂表里的 `var`
+
+臂表的开头可以声明若干 `var`。每一个都是一格**状态格子**：属于这一次 handler 安装的可变
+状态。臂读它写它，`with handle` 之后的块剩余再读它，这就是一个攒东西的 handler 把攒下来的
+东西交回给安装点的方式。
+
+```dawn run
+effect Spend {
+  fn spend(item: String, n: Int) -> Bool
+}
+
+## 没有预算参数，也没有累加量：`shop` 只知道自己在问。
+fn shop(orders: List[(String, Int)]) -> List[String] !Spend = {
+  var bought: List[String] = []
+  for o in orders {
+    let (item, cost) = o
+    if spend(item, cost) {
+      bought = bought ++ [item]
+    }
+  }
+  bought
+}
+
+pub fn main() -> Unit !io = {
+  with handle Spend {
+    var left: Int = 10
+    var skipped: List[String] = []
+    spend(item, n) =>
+      if n <= left {
+        left = left - n
+        true
+      } else {
+        skipped = skipped ++ [item]
+        false
+      }
+  }
+  let bought = shop([("bread", 3), ("cheese", 12), ("apples", 4)])
+  println("${bought} left=${left} skipped=${skipped}")
+}
+```
+```output
+["bread", "apples"] left=3 skipped=["cheese"]
+```
+
+`shop` 没有预算参数、没有累加器，返回值里也不带一个。预算是 handler 的，两格格子是它存
+预算的地方，`main` 的最后一行就是「`with handle` 之后的块剩余」在读它们。没有 return 臂，
+格子是带状态的 handler 唯一的交回表面。
+
+格子必须**全部排在臂之前**，而且类型标注不可省：臂表的花括号里没有可推的上下文。
+
+两条规则把格子和普通 `var` 分开：
+
+- 臂是闭包，所以臂里不能写外层的 `var`（本节开头那条规则）。例外是它自己的格子：那是这次
+  安装自己的状态，不是从外面捕获进来的绑定。
+- 格子出不去。臂**里面**手写的 lambda 不许捕获它，格子本身也没有可拼写的类型，所以没有第二
+  个名字够得着它。
+
+每次安装各有各的格子。同一个效果再嵌套装一次，格子是另一套，内层攒的东西不会跑到外层去。
+
 ### v1 的边界
 
-- 一个臂就是一次普通调用、返回值即结果（**尾恢复**）。没有「把延续存起来以后再恢复」
-  「恢复两次」这类玩法——那需要延续捕获，不在这一档里。
-- 「操作不返回调用点」的用法请走既有的失败机制：`Result` + `?`、
+- **尾恢复**臂就是一次普通调用、返回值即结果。声明为 `ctl` 的效果还可以带**控制臂**
+  （`op(...) resume k => ...`）：臂绑住这次操作的延续而不恢复它，臂的值就是整个
+  `with handle` 的值，`k` 是个普通函数值，可以存下来以后再恢复。只能一次：「恢复两次」
+  不在这一档里；永远不会恢复的那一个用 `discard` 丢弃，它会跑掉挂起帧的释放。
+- 「操作不返回调用点」的用法通常走既有的失败机制：`Result` + `?`、
   `catch_fault`/`catch_panic`/`bracket`。
 - 效果不带类型参数（没有 `effect Yield[T]`）。
 - comptime / const 初始化不发具名效果，也装不了 handler。trait / impl 方法可以带标签，
@@ -853,7 +914,8 @@ pub fn main() -> Unit !io = {
   标签与 trait 恰相等的行，因为每个标签都是这个方法的一格隐藏参数。
 - 带标签的函数可以当函数值传：标签进到值的类型里，由调用点供 handler。只有**操作**本身
   不行，它背后没有可取的函数符号；包一层 lambda（`() => ask()`）即可。
-- 臂是闭包，所以臂里不能写外层的 `var`，也不能 `return`/`break` 跳出去。
+- 臂是闭包，所以臂里不能写外层的 `var`，也不能 `return`/`break` 跳出去。例外是它自己的
+  格子，也就是上面那一节。
 
 完整规则见 [spec.md](spec.md) §6.5，设计取舍见
 [effects-design.md](effects-design.md)。

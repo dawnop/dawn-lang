@@ -265,7 +265,8 @@ handler 的状态与假设备同款：句柄从 1 起编号、`Map[Int, (设备�
 `bf16_bits`，低字节在前）成 `Bytes` 交给 `gpu_upload_bytes_host`，`download` 取 `n * 2` 字节回来
 `unpack_bf16`。**f64 没有改走 `Bytes`**：Dawn 没有 float-to-bits，纯 Dawn 把 f64 拆成 8 字节要每个
 元素跑一遍指数循环、还会丢 NaN payload，而 `Array[Float]` 那条缝对每一个位模式都精确且零成本；
-两条缝各是自己格式最便宜的精确缝。`gpu_launch` 先查名字、再查参数（`gpu.no_arguments`、`gpu.no_such_buffer`），
+两条缝各是自己格式最便宜的精确缝。`gpu_launch` 先查名字、再查参数（`gpu.no_arguments`、
+`gpu.no_such_buffer`），
 **然后才碰设备**：cubin 在该 kernel 第一次 `launch` 时交给 `cuModuleLoadData`，模块句柄留到本次
 安装结束，所以不 launch 的程序不装模块，alloc/upload/download 在装不了模块的驱动上照样可用，
 这正是 560.94 上能验到的那一半。grid 计 tile block 数，intrinsic 以 block dims `(1,1,1)`、
@@ -278,12 +279,12 @@ shared 0 调 `cuLaunchKernel`（cuda-tile 宿主示例的启动形态）。第�
 ### 4.3 假设备 `with_gpu_fake`（刀 1 已落地）
 
 ```dawn
-pub fn with_gpu_fake[T](kernels: Map[String, fn(List[String], List[List[Float]]) -> List[Float]],
+pub fn with_gpu_fake[T](kernels: Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])],
                         body: fn() -> T !Gpu) -> T
 pub fn vadd_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float]
 pub fn sum_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float]
 pub fn round_to(dtype: String, x: Float) -> Float
-pub fn reference_kernels() -> Map[String, fn(List[String], List[List[Float]]) -> List[Float]]
+pub fn reference_kernels() -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])]
 ```
 
 - **纯**（签名无 `!io`），所以它进得了 `dawn test --stdlib` 与 comptime。
@@ -302,6 +303,9 @@ pub fn reference_kernels() -> Map[String, fn(List[String], List[List[Float]]) ->
   参考（`reference_kernels` 把两个名字都指向 `vadd_ref`）。
 - `launch` 用的是宿主侧参考实现，第一里程碑就是 `vadd_ref`。同一个参考实现是层 2 对拍
   `.expect` 的来源之一（另一来源是手写的期望值）。
+- 每个参考实现的表项把缓冲参数个数与函数放在一起；假设备在调用函数之前做精确相等检查，
+  不等时答 `gpu.bad_arity`，message 同时写 kernel 名、期望数和实际数。零参数仍保留既有
+  `gpu.no_arguments`；`vadd` / `vadd_bf16` 要 3 个（两输入一输出），`sum` 要 2 个。
 - 刀 6 的 std 测试把假设备钉在 narrow 上：全部 65536 个 bf16 位模式各配一个固定种子 LCG 抽出的
   随机位模式，bf16 `vadd` 在假设备上的答案与 `narrow.add(bf16(a), bf16(b))` 逐值渲染相同（`to_string`
   分得清 `-0.0` 与 NaN）；另一组 1024 对格点外的随机 Float，验的是上传时的舍入（假设备若不舍入
@@ -480,6 +484,12 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   结果再从那里编。指令表的编号是文本的，写入器用一张 `index` 表把表值映射到这套索引，
   不是第二套编号。负控 `for-results-not-rolled-back` 删掉回滚，`tileiras` 以
   `operand index 39 out of bounds (size=25)` 拒绝。
+- **刀 7a 加了什么、没加什么**：加的是边界（`load_ptr_tko` 的 `mask` 与 `paddingValue`、
+  `store_ptr_tko` 的 `mask`，都是这两个操作本来就有的可选操作数段，零新类型）与逐元素算术
+  （`subf mulf divf negf absf maxf minf fma`、`cmpf cmpi select`、`constant` 的浮点与整数
+  splat、`iota`）。**仍然没有**：`reduce` / `scan`（要 `identities` 属性与归约区域）、
+  超越函数、二维及以上的 tile（`render.ty` 的 rank ≥ 2 仍 panic）、`mmaf`、多维 grid、
+  整数与窄浮点缓冲、view 类型族。逐条归属见 agent-handoff 的 cuTile 覆盖计划。
 - **`d_if` 没做**：归约 kernel 用不到它。Tile IR 的 `if` 是 `yield` 结尾的两个区域、结果
   类型列表在头上，与 `for` 同一套区域编码，加的时候照 `lower_for` 的形状加一个 `IfOp`
   即可；要不要做等第一个需要 tile 值条件的 kernel。
@@ -681,7 +691,13 @@ nearest_even，处置是把 bf16 降到容差档并在 §3.2 的表里改那一�
 仍在 run-pole 之下。刀 6 实测 `run.sh` 本机 91 s（四个 kernel、十四次 `tileiras`、
 十个变异体；比刀 5 的 100 s 快是机器当天的事，不是脚本变轻），仍在 170 s 的 planning value 之内，
 `tile` job 的 budget 不动。`dawn test --stdlib` 多了 65536 次编解码往返与 65536 对假设备
-vadd，本机 12.7 s → 13.5 s，`test` job 的 budget 不动。刀 2 时挂在 `test` job 里的 tile-golden 步随之搬走，`test` 的 budget
+vadd，本机 12.7 s → 13.5 s，`test` job 的 budget 不动。刀 7a 实测：同一台机器上
+`run.sh` 122 s（改动前，四个 kernel 十个变异体）→ 129 s（改动后，十个 kernel 二十次 `tileiras`
+十一个变异体）。多出来的只有 7 s，因为墙钟的大头是每个变异体一次 native 构建，而这一刀只加了
+一个变异体（两次测量前后相连，机器状态相同；换一个时段整段可以到 165 s，所以有意义的是这个
+差值而不是绝对值）；仍在 170 s 的 planning value 之内，`tile` job 的 budget 不动。`tile-gpu-diff/run.sh` 26 s → 46 s
+（多一个 native 构建、六个 kernel 的真机对拍与 `mask-all-true` 变异体的六次汇编），它只在本机跑，
+CI 上仍只有亚秒的 `--check`。`scripts/leetgpu-diff/check.py` 与它的 `--self-test` 各亚秒。刀 2 时挂在 `test` job 里的 tile-golden 步随之搬走，`test` 的 budget
 回到 323 s。刀 1 与刀 0 只加 std 测试，落在 `test` job 的 `dawn test --stdlib` 步，秒级。
 
 ## 7. 刀序
@@ -699,6 +715,7 @@ vadd，本机 12.7 s → 13.5 s，`test` job 的 budget 不动。刀 2 时挂在
 | **4 `with_gpu_real` + 本机对拍**（管线落地，GPU 对拍待驱动） | 「GPU 算出的 vadd 与假设备逐位一致」 | `RtGpu` 加八个 intrinsic（六操作 + 装模块 + close）、`dawn_rt.c` 的 `dlopen libcuda`（约 300 行 C）、JVM `dawn/rt/Gpu` 拒绝类、`with_gpu_real`、`scripts/tile-gpu-diff/{run.sh,vadd_diff.dawn,ledger.txt}`、`gates.yml` 的 `--check` 步；parity 脚本不必动 | 本机 `run.sh` 走到 `cuModuleLoadData` 被 560.94 拦住，台账记 `blocked`；CI 台账门绿 | `download-short`（handler 少取一个元素）对拍在 560.94 上就红；`grid-zero`（launch 传 0 block）在 560.94 上 SKIP 并明说原因，升驱动后要红；台账 commit 写成非祖先，`--check` 红 | 3 到 4（实报 1；`run.sh` 本机 25 s，`--check` 亚秒，`tile` job budget 不变） |
 | **5 结构化控制流 + 第二个 kernel**（已落地） | 「带 `d_for` 的归约 kernel 与假设备逐位一致」 | `d_for / d_for2` 普通函数加 `t_loop_begin / t_loop_end` 与三个索引算术操作、区域栈、token 穿过循环携带值、`For` 的降低 / 渲染 / 字节码区域编码、`sum` kernel 与 `std/gpu.sum_ref`；`d_if` 未做（§5.2） | `scripts/tile-golden` 加 `sum.mlir / sum.tilebc`、层 1 含 `FUNC GLOBAL sum`；本机对拍归刀 4 的脚本 | 循环后 token 不换（`loop-token-not-carried`）与区域栈弹反（`region-stack-pop`）→ 降低时按名拒绝；写入器不回滚值索引（`for-results-not-rolled-back`）→ `tileiras` 红 | 3 到 4（实报 1；`run.sh` 本机 100 s，`tile` job budget 340 s planning value） |
 | **6 BF16 tile**（落地，GPU 对拍待驱动） | 「设备 bf16 `addf` 与 `narrow.round_bf16(f64 加)` 对全部 65536 个 bf16 值对加随机对逐位一致」 | `gpu.BF16` 标记与 `element_bytes`、`narrow.bf16_bits / bf16_of_bits`、`pack_bf16 / unpack_bf16` 与两个 `Bytes` 版 intrinsic（`builtins.dawn` 镜像同步）、假设备按格式舍入并把 `dtypes` 交给参考实现、`vadd_bf16` 的 `.mlir / .tilebc` golden、对拍脚本三组 bf16 语料、台账门加 `std/narrow.dawn` | 层 0 / 1 本机与 CI 绿（`FUNC GLOBAL vadd_bf16`）；假设备 65536 对 = narrow；本机对拍走到 `cuModuleLoadData` 被 560.94 拦住，台账记 `blocked`（§6.4） | 计划的「设备侧 rounding 改 `approx`」在 560 上验不了，换成层 0 / 1 能红的等价物：`addf-no-rounding`（渲染器丢掉 `rounding<nearest_even>`，`vadd_bf16.mlir` 红；写入器那一半 `tileiras` 每种模式都收，只有设备能看见，故不设变异体）与 `bf16-tag-as-i16`（写入器 bf16 标签改 i16，`tileiras` 拒绝）；打包层 `pack-truncates`（`round_bf16` 漏掉、`bf16_bits` 截断）在 std 测试与 560 上的回读都红；假设备上传不舍入，格点外那组 std 语料红 | 2（实报 1；`run.sh` 本机 91 s，`tile-gpu-diff/run.sh` 26 s） |
+| **7a 边界与逐元素**（已落地） | 「一个长度不是 tile 宽度整数倍的向量，最后一块越界的 lane 既不读也不写，且设备算得与手写参考逐位一致」 | `Dev` 加 `t_load / t_store` 的可选 mask 与 pad、`t_constf / t_consti / t_iota / t_lanes / t_unaryf / t_binaryf`（`t_addf` 并入）`/ t_fma / t_cmpf / t_cmpi / t_select`；包内 `I32 / I1` 两个 tile 元素格式标记；`lower` 的 `LoadPtr / StorePtr` 带可选操作数、`ConstInt / ConstFloat / FloatUn / FloatBin / FloatFma / CmpFloat / CmpInt / SelectTile`；`bytecode` 加 11 个 opcode 与 mask / paddingValue 两个 flag 位、`ieee_bits` 纯算术拼位模式；`std/gpu` 五个带 `n` 的参考实现；`scripts/tile-golden` 六个 kernel；`scripts/tile-gpu-diff/mask_diff.dawn`；`scripts/leetgpu-diff` 台账与门 | 层 0/1 六个新 golden，`FUNC GLOBAL` 六个；层 2 本机 3080 六个 kernel 逐位一致（含 mask 保住的尾部 lane）；leetgpu 1 / 8 / 21 / 23 / 31 / 62 可解 | `mask-all-true`（降低时把 `cmpi` 换成恒真 `i1` 常量）→ 层 0 变、层 1 收、**层 2 六个 kernel 全红**；`load-pad-flag-as-token`（padding 的 flag 位改成 token 的）→ 文本不动、字节同长，`tileiras` 丢流 | 2 到 3（实报 1；`tile-golden/run.sh` 本机 122 s → 129 s、`tile-gpu-diff/run.sh` 26 s → 46 s） |
 | 7（期权）混合路线 | 「同一个 kernel 体经编译期发射器与经记录 handler 产出相同的 Tile 程序」 | `selfhost/src/tile/emit_tile.dawn` | 两路 `TileProg` 相等 | 不在本计划内 | 6 到 10 |
 
 合计（不含刀 7）16 到 23 人日。字节码写入器是最大的单块，也是唯一能让 CI 的绿有信息量的

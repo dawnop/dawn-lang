@@ -48,7 +48,7 @@
 use std/list
 use std/map
 use std/str
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, AddF, IdxConst, IdxAdd, IdxMul, For, Continue}
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -78,6 +78,12 @@ derive Show
 ## instruction, plus the operand types the assembly prints (`from` / `to` on
 ## the shape operations, `ptr_ty` / `off_ty` / `val_ty` on the memory ones).
 ##
+## A memory instruction carries the mask and the padding value it was given,
+## `None` standing for the operand the assembly and the bytecode both leave
+## out; `mask_ty` is the `i1` tile type both spell when there is one. A
+## comparison carries the type of its operands and the `i1` type of its
+## result, as its assembly prints both.
+##
 ## `ForLoop` is the loop: `results` are the values it defines after itself,
 ## typed `tys` (one per carried value); `iv` (a scalar i32) and `carried`
 ## (typed `tys` again) are the block arguments its `body` sees; `lower`,
@@ -86,16 +92,22 @@ derive Show
 pub type Instr =
   | MakeTok(dst: Int)
   | BlockIds(x: Int, y: Int, z: Int)
-  | ConstI32(dst: Int, value: Int)
+  | ConstInt(dst: Int, ty: Ty, value: Int)
+  | ConstFloat(dst: Int, ty: Ty, value: Float)
   | MulInt(dst: Int, ty: Ty, lhs: Ref, rhs: Ref)
   | AddInt(dst: Int, ty: Ty, lhs: Ref, rhs: Ref)
   | Reshape(dst: Int, src: Ref, from: Ty, to: Ty)
   | Broadcast(dst: Int, src: Ref, from: Ty, to: Ty)
-  | Iota(dst: Int, ty: Ty)
+  | IotaTile(dst: Int, ty: Ty)
   | Offset(dst: Int, ptrs: Ref, offs: Ref, ptr_ty: Ty, off_ty: Ty)
-  | LoadPtr(dst: Int, tok_out: Int, ptrs: Ref, tok_in: Ref, ptr_ty: Ty, val_ty: Ty)
-  | StorePtr(tok_out: Int, ptrs: Ref, value: Ref, tok_in: Ref, ptr_ty: Ty, val_ty: Ty)
-  | AddFloat(dst: Int, ty: Ty, lhs: Ref, rhs: Ref)
+  | LoadPtr(dst: Int, tok_out: Int, ptrs: Ref, mask: Option[Ref], pad: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty)
+  | StorePtr(tok_out: Int, ptrs: Ref, value: Ref, mask: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty)
+  | FloatUn(dst: Int, op: String, ty: Ty, src: Ref)
+  | FloatBin(dst: Int, op: String, ty: Ty, lhs: Ref, rhs: Ref)
+  | FloatFma(dst: Int, ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
+  | CmpFloat(dst: Int, pred: String, ty: Ty, res_ty: Ty, lhs: Ref, rhs: Ref)
+  | CmpInt(dst: Int, pred: String, ty: Ty, res_ty: Ty, lhs: Ref, rhs: Ref)
+  | SelectTile(dst: Int, cond_ty: Ty, ty: Ty, cond: Ref, lhs: Ref, rhs: Ref)
   | ForLoop(results: List[Int], tys: List[Ty], iv: Int, lower: Ref, upper: Ref, step: Ref, inits: List[Ref], carried: List[Int], body: List[Instr])
   | Cont(values: List[Ref], tys: List[Ty])
   | Ret
@@ -118,6 +130,9 @@ pub fn i32_vec(n: Int) -> Ty = Tile([n], Num("i32"))
 
 ## The scalar pointer tile an entry parameter of format `dtype` is.
 pub fn param_ty(dtype: String) -> Ty = Tile([], PtrTo(dtype))
+
+## The `n`-wide `tile<n x i1>`, the type of a mask and of a comparison.
+pub fn i1_vec(n: Int) -> Ty = Tile([n], Num("i1"))
 
 # The lowering's state, threaded through pure helpers rather than held in
 # `var`s, because the helpers are called from inside a `for` and a closure may
@@ -151,6 +166,13 @@ fn ref_of(l: L, handle: Int, what: String) -> Ref = match map.get(l.names, handl
     }
 }
 
+# The operand an optional handle names, or `None` when the operation was
+# issued without it.
+fn opt_ref(l: L, handle: Option[Int], what: String) -> Option[Ref] = match handle {
+  Some(h) -> Some(ref_of(l, h, what))
+  None -> None
+}
+
 fn ty_of(l: L, handle: Int) -> Ty = match map.get(l.tys, handle) {
   Some(t) -> t
   None -> panic("tileir: handle ${handle} has no type; it was bound without one")
@@ -181,7 +203,7 @@ fn offsets(l0: L, idx: Int, n: Int) -> (L, Ref) = {
     None -> {
       let base = ref_of(l0, idx, "load/store index")
       let (l1, c) = fresh(l0)
-      let l2 = emit(l1, ConstI32(c, n))
+      let l2 = emit(l1, ConstInt(c, i32_scalar(), n))
       let (l3, m) = fresh(l2)
       let l4 = emit(l3, MulInt(m, i32_scalar(), base, Val(c)))
       let (l5, m1) = fresh(l4)
@@ -189,7 +211,7 @@ fn offsets(l0: L, idx: Int, n: Int) -> (L, Ref) = {
       let (l7, mb) = fresh(l6)
       let l8 = emit(l7, Broadcast(mb, Val(m1), i32_vec(1), i32_vec(n)))
       let (l9, io) = fresh(l8)
-      let l10 = emit(l9, Iota(io, i32_vec(n)))
+      let l10 = emit(l9, IotaTile(io, i32_vec(n)))
       let (l11, off) = fresh(l10)
       let l12 = emit(l11, AddInt(off, i32_vec(n), Val(mb), Val(io)))
       (L { ..l12, memo: map.insert(l12.memo, key, Val(off)) }, Val(off))
@@ -229,31 +251,90 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let l4 = emit(l3, BlockIds(x, y, z))
     bind(l4, dst, Val(if axis == 0 { x } else if axis == 1 { y } else { z }), i32_scalar())
   }
-  Load(dst, tok_out, param, dtype, idx, n, tok_in) -> {
+  Load(dst, tok_out, param, dtype, idx, n, mask, pad, tok_in) -> {
     let tin = ref_of(l0, tok_in, "load token")
+    let m = opt_ref(l0, mask, "load mask")
+    let pd = opt_ref(l0, pad, "load padding value")
     let (l1, pt) = pointers(l0, param, dtype, idx, n)
     let val_ty = Tile([n], Num(dtype))
     let (l2, v) = define(l1, dst, val_ty)
     let (l3, t) = define(l2, tok_out, Token)
-    emit(l3, LoadPtr(v, t, pt, tin, Tile([n], PtrTo(dtype)), val_ty))
+    emit(l3, LoadPtr(v, t, pt, m, pd, tin, Tile([n], PtrTo(dtype)), i1_vec(n), val_ty))
   }
-  Store(tok_out, param, dtype, idx, n, value, tok_in) -> {
+  Store(tok_out, param, dtype, idx, n, value, mask, tok_in) -> {
     let tin = ref_of(l0, tok_in, "store token")
     let v = ref_of(l0, value, "store value")
+    let m = opt_ref(l0, mask, "store mask")
     let (l1, pt) = pointers(l0, param, dtype, idx, n)
     let (l2, t) = define(l1, tok_out, Token)
-    emit(l2, StorePtr(t, pt, v, tin, Tile([n], PtrTo(dtype)), Tile([n], Num(dtype))))
+    emit(l2, StorePtr(t, pt, v, m, tin, Tile([n], PtrTo(dtype)), i1_vec(n), Tile([n], Num(dtype))))
   }
-  AddF(dst, dtype, n, lhs, rhs) -> {
-    let a = ref_of(l0, lhs, "addf lhs")
-    let b = ref_of(l0, rhs, "addf rhs")
+  ConstF(dst, dtype, n, value) -> {
     let ty = Tile([n], Num(dtype))
     let (l1, d) = define(l0, dst, ty)
-    emit(l1, AddFloat(d, ty, a, b))
+    emit(l1, ConstFloat(d, ty, value))
+  }
+  ConstI(dst, dtype, n, value) -> {
+    let ty = Tile([n], Num(dtype))
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, ConstInt(d, ty, value))
+  }
+  Iota(dst, n) -> {
+    let ty = i32_vec(n)
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, IotaTile(d, ty))
+  }
+  Lanes(dst, idx, n) -> {
+    # the element indices of block `idx` are the offsets the pointer
+    # arithmetic of a load at `idx` is built from: the same ladder, memoised,
+    # so a masked load costs no instruction more than an unmasked one
+    let (l1, off) = offsets(l0, idx, n)
+    bind(l1, dst, off, i32_vec(n))
+  }
+  UnaryF(dst, op, dtype, n, src) -> {
+    let a = ref_of(l0, src, "${op} operand")
+    let ty = Tile([n], Num(dtype))
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, FloatUn(d, op, ty, a))
+  }
+  BinaryF(dst, op, dtype, n, lhs, rhs) -> {
+    let a = ref_of(l0, lhs, "${op} lhs")
+    let b = ref_of(l0, rhs, "${op} rhs")
+    let ty = Tile([n], Num(dtype))
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, FloatBin(d, op, ty, a, b))
+  }
+  Fma(dst, dtype, n, lhs, rhs, acc) -> {
+    let a = ref_of(l0, lhs, "fma lhs")
+    let b = ref_of(l0, rhs, "fma rhs")
+    let c = ref_of(l0, acc, "fma accumulator")
+    let ty = Tile([n], Num(dtype))
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, FloatFma(d, ty, a, b, c))
+  }
+  CmpF(dst, pred, dtype, n, lhs, rhs) -> {
+    let a = ref_of(l0, lhs, "cmpf lhs")
+    let b = ref_of(l0, rhs, "cmpf rhs")
+    let (l1, d) = define(l0, dst, i1_vec(n))
+    emit(l1, CmpFloat(d, pred, Tile([n], Num(dtype)), i1_vec(n), a, b))
+  }
+  CmpI(dst, pred, n, lhs, rhs) -> {
+    let a = ref_of(l0, lhs, "cmpi lhs")
+    let b = ref_of(l0, rhs, "cmpi rhs")
+    let (l1, d) = define(l0, dst, i1_vec(n))
+    emit(l1, CmpInt(d, pred, i32_vec(n), i1_vec(n), a, b))
+  }
+  Select(dst, dtype, n, cond, lhs, rhs) -> {
+    let c = ref_of(l0, cond, "select condition")
+    let a = ref_of(l0, lhs, "select value if true")
+    let b = ref_of(l0, rhs, "select value if false")
+    let ty = Tile([n], Num(dtype))
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, SelectTile(d, i1_vec(n), ty, c, a, b))
   }
   IdxConst(dst, value) -> {
     let (l1, d) = define(l0, dst, i32_scalar())
-    emit(l1, ConstI32(d, value))
+    emit(l1, ConstInt(d, i32_scalar(), value))
   }
   IdxAdd(dst, lhs, rhs) -> {
     let a = ref_of(l0, lhs, "index add lhs")
@@ -329,16 +410,22 @@ pub fn lower(prog: TileProg) -> Kernel = {
 pub fn defines(i: Instr) -> List[Int] = match i {
   MakeTok(dst) -> [dst]
   BlockIds(x, y, z) -> [x, y, z]
-  ConstI32(dst, _value) -> [dst]
+  ConstInt(dst, _ty, _value) -> [dst]
+  ConstFloat(dst, _ty, _value) -> [dst]
   MulInt(dst, _ty, _lhs, _rhs) -> [dst]
   AddInt(dst, _ty, _lhs, _rhs) -> [dst]
   Reshape(dst, _src, _from, _to) -> [dst]
   Broadcast(dst, _src, _from, _to) -> [dst]
-  Iota(dst, _ty) -> [dst]
+  IotaTile(dst, _ty) -> [dst]
   Offset(dst, _ptrs, _offs, _ptr_ty, _off_ty) -> [dst]
-  LoadPtr(dst, tok_out, _ptrs, _tok_in, _ptr_ty, _val_ty) -> [dst, tok_out]
-  StorePtr(tok_out, _ptrs, _value, _tok_in, _ptr_ty, _val_ty) -> [tok_out]
-  AddFloat(dst, _ty, _lhs, _rhs) -> [dst]
+  LoadPtr(dst, tok_out, _ptrs, _mask, _pad, _tok_in, _ptr_ty, _mask_ty, _val_ty) -> [dst, tok_out]
+  StorePtr(tok_out, _ptrs, _value, _mask, _tok_in, _ptr_ty, _mask_ty, _val_ty) -> [tok_out]
+  FloatUn(dst, _op, _ty, _src) -> [dst]
+  FloatBin(dst, _op, _ty, _lhs, _rhs) -> [dst]
+  FloatFma(dst, _ty, _lhs, _rhs, _acc) -> [dst]
+  CmpFloat(dst, _pred, _ty, _res_ty, _lhs, _rhs) -> [dst]
+  CmpInt(dst, _pred, _ty, _res_ty, _lhs, _rhs) -> [dst]
+  SelectTile(dst, _cond_ty, _ty, _cond, _lhs, _rhs) -> [dst]
   ForLoop(results, _tys, _iv, _lower, _upper, _step, _inits, _carried, _body) -> results
   Cont(_values, _tys) -> []
   Ret -> []
@@ -369,10 +456,10 @@ fn two_loads_one_param() -> TileProg = TileProg {
   ops: [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, 128, 0),
-    Load(4, 5, 0, "f64", 1, 128, 3),
-    AddF(6, "f64", 128, 2, 4),
-    Store(7, 0, "f64", 1, 128, 6, 5)
+    Load(2, 3, 0, "f64", 1, 128, None, None, 0),
+    Load(4, 5, 0, "f64", 1, 128, None, None, 3),
+    BinaryF(6, "addf", "f64", 128, 2, 4),
+    Store(7, 0, "f64", 1, 128, 6, None, 5)
   ]
 }
 
@@ -382,7 +469,7 @@ fn is_offset(i: Instr) -> Bool = match i {
 }
 
 fn is_iota(i: Instr) -> Bool = match i {
-  Iota(_dst, _ty) -> true
+  IotaTile(_dst, _ty) -> true
   _ -> false
 }
 
@@ -405,10 +492,10 @@ test "the token chain is the program's: make_token feeds the first load, each me
   let f64_128 = Tile([128], Num("f64"))
   let p64_128 = Tile([128], PtrTo("f64"))
   assert k.body[0] == MakeTok(0)
-  assert k.body[11] == LoadPtr(13, 14, Val(12), Val(0), p64_128, f64_128)
-  assert k.body[12] == LoadPtr(15, 16, Val(12), Val(14), p64_128, f64_128)
-  assert k.body[13] == AddFloat(17, f64_128, Val(13), Val(15))
-  assert k.body[14] == StorePtr(18, Val(12), Val(17), Val(16), p64_128, f64_128)
+  assert k.body[11] == LoadPtr(13, 14, Val(12), None, None, Val(0), p64_128, i1_vec(128), f64_128)
+  assert k.body[12] == LoadPtr(15, 16, Val(12), None, None, Val(14), p64_128, i1_vec(128), f64_128)
+  assert k.body[13] == FloatBin(17, "addf", f64_128, Val(13), Val(15))
+  assert k.body[14] == StorePtr(18, Val(12), Val(17), None, Val(16), p64_128, i1_vec(128), f64_128)
 }
 
 test "the ladder reads the entry parameter as an argument, not as a value" {
@@ -420,7 +507,7 @@ test "block ids along the three axes bind the matching result of one get_tile_bl
   let p = TileProg {
     name: "axes",
     params: ["f64"],
-    ops: [MakeToken(0), BlockId(1, 2), Load(2, 3, 0, "f64", 1, 8, 0)]
+    ops: [MakeToken(0), BlockId(1, 2), Load(2, 3, 0, "f64", 1, 8, None, None, 0)]
   }
   let k = lower(p)
   assert k.body[1] == BlockIds(1, 2, 3)
@@ -440,16 +527,16 @@ fn sum_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 4),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, 128, 0),
+    Load(4, 5, 0, "f64", 3, 128, None, None, 0),
     IdxConst(6, 1),
     IdxAdd(7, 3, 6),
     IdxAdd(8, 3, 2),
     For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [
-      Load(12, 13, 0, "f64", 9, 128, 11),
-      AddF(14, "f64", 128, 10, 12),
+      Load(12, 13, 0, "f64", 9, 128, None, None, 11),
+      BinaryF(14, "addf", "f64", 128, 10, 12),
       Continue([14, 13])
     ]),
-    Store(17, 1, "f64", 1, 128, 15, 16)
+    Store(17, 1, "f64", 1, 128, 15, None, 16)
   ]
 }
 
@@ -474,8 +561,8 @@ test "a loop lowers to one For whose results, block arguments and body are numbe
       assert carried == [23, 24]
       assert defines_inside(body)[0] == 25
       # the body's load reads its pointers at the induction variable and the carried token
-      assert body[len(body) - 3] == LoadPtr(34, 35, Val(33), Val(24), Tile([128], PtrTo("f64")), f64_128)
-      assert body[len(body) - 2] == AddFloat(36, f64_128, Val(23), Val(34))
+      assert body[len(body) - 3] == LoadPtr(34, 35, Val(33), None, None, Val(24), Tile([128], PtrTo("f64")), i1_vec(128), f64_128)
+      assert body[len(body) - 2] == FloatBin(36, "addf", f64_128, Val(23), Val(34))
       assert body[len(body) - 1] == Cont([Val(36), Val(35)], [f64_128, Token])
     }
     _ -> { assert false }
@@ -490,7 +577,7 @@ test "after a loop the store consumes the loop's results, not values from inside
   let p64_128 = Tile([128], PtrTo("f64"))
   let store = k.body[len(k.body) - 2]
   match store {
-    StorePtr(_tok_out, _ptrs, value, tok_in, _ptr_ty, _val_ty) -> { assert (value, tok_in) == (Val(20), Val(21)) }
+    StorePtr(_tok_out, _ptrs, value, _mask, tok_in, _ptr_ty, _mask_ty, _val_ty) -> { assert (value, tok_in) == (Val(20), Val(21)) }
     _ -> { assert false }
   }
   assert k.body[len(k.body) - 1] == Ret
@@ -501,7 +588,7 @@ test "after a loop the store consumes the loop's results, not values from inside
 
 test "a value a loop body defined is refused by name after the loop" {
   # the store's token is the body's load token (13) instead of the loop's token result (16)
-  let bad = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 9) ++ [Store(17, 1, "f64", 1, 128, 15, 13)] }
+  let bad = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 9) ++ [Store(17, 1, "f64", 1, 128, 15, None, 13)] }
   match catch_panic(() => lower(bad)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "`store token` refers to handle 13, which a loop body defined and which is not visible after the loop") }
@@ -514,7 +601,7 @@ test "a loop whose carried lists disagree, or whose body does not end in continu
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "a loop carrying 2 value(s) names 1 inside and 2 after") }
   }
-  let open = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 8) ++ [For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [AddF(12, "f64", 128, 10, 10)])] }
+  let open = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 8) ++ [For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [BinaryF(12, "addf", "f64", 128, 10, 10)])] }
   match catch_panic(() => lower(open)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "a loop body ends in something other than continue") }

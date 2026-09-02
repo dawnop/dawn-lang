@@ -2700,11 +2700,12 @@ fn ctor_show(st: LSt, x: CExpr, sc: Ty, aid: Int, ci: Int) -> (LSt, CExpr) = {
 ## Does this witness stand for a relation the language defines itself, rather
 ## than for an impl body to call?
 ##
-## Three shapes qualify: the prelude Eq/Hash over a scalar, the prelude Ord
-## over an ordered scalar, and the structural Eq/Hash default. None of them
-## has an impl with a body, so a call has to reach `prim_relation` -- routing
-## Ord's here instead is what fixes `cmp(3, 9)`, which used to compile and
-## then die at run time looking for a trait default that does not exist.
+## Four shapes qualify: the prelude Eq/Hash over a scalar, the prelude Ord
+## over an ordered scalar, the structural Eq/Hash default, and the headless
+## tuple exceptions for Ord/Show. None of them has an impl with a body, so a
+## call has to reach `prim_relation` -- routing Ord's here instead is what
+## fixes `cmp(3, 9)`, which used to compile and then die at run time looking
+## for a trait default that does not exist.
 fn subject_of(w: WitRef) -> Ty =
   match w {
     WConcrete(_, s) -> s
@@ -2718,7 +2719,8 @@ fn subject_of(w: WitRef) -> Ty =
 ## underived bodyless impl is primitive only when it is one of the prelude
 ## rows minted without a source owner. A user's empty impl can inherit trait
 ## defaults, so treating every empty `provided` list as primitive skips the
-## `CDefault` body. No impl at all means Eq/Hash's structural default.
+## `CDefault` body. No impl at all means Eq/Hash's structural default, or one
+## of the tuple relations that source cannot name an impl subject for.
 fn primitive_witness(st: LSt, w: WitRef, tid: Int) -> Bool =
   match w {
     WConcrete(_, subject) -> primitive_subject(st, tid, subject)
@@ -2734,7 +2736,21 @@ fn primitive_subject(st: LSt, tid: Int, subject: Ty) -> Bool =
     # ended up written twice: once in bytecode, never in Core.
     Some(imp) -> imp.derived ||
       (imp.owner == None && imp.src_path == None && len(imp.provided) == 0)
-    None -> tid == EQ_ID || tid == HASH_ID || (tid == SHOW_ID && shows_structurally(subject))
+    None -> tid == EQ_ID || tid == HASH_ID ||
+      (tid == ORD_ID && orders_structurally(subject)) ||
+      (tid == SHOW_ID && shows_structurally(subject))
+  }
+
+## Does a missing `Ord` impl still mean the language orders this type itself?
+##
+## Only for tuples. Records and unions need `derive Ord` or a handwritten
+## impl; tuples have no head and therefore have no source spelling for either.
+## `cmp_at` already defines their lexicographic relation over the elements,
+## including the dictionaries of rigid element types.
+fn orders_structurally(t: Ty) -> Bool =
+  match t {
+    TyTuple(_) -> true
+    _ -> false
   }
 
 ## Does a missing `Show` impl still mean the language renders this type

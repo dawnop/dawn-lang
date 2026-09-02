@@ -1,0 +1,34 @@
+# The leetgpu ledger: which of https://leetgpu.com/'s problems this backend
+# can solve today, and with what. One line per problem, appended as a knife
+# lands; check.py is the gate that keeps it from being a claim.
+#
+#   <id> | <title> | <kernel> | <reference> | <corpus> | <tier>
+#
+#   id         the problem's id on leetgpu.com (and in AlphaGPU/leetgpu-challenges)
+#   kernel     the kernel scripts/tile-golden pins under that name: it must
+#              have a .mlir and a .tilebc golden, be in run.sh's kernel list
+#              and be traced by kernels.dawn
+#   reference  the hand-written host reference the fake device answers with,
+#              as <module>.<function>; it must exist there. It is the second
+#              opinion, never the kernel's own code path
+#   corpus     the layer-2 program and case that runs the kernel on the GPU
+#              against that reference (<program>:<case>)
+#   tier       exact     -- bit for bit, every lane, no tolerance
+#              tolerance -- an atol/rtol claim, for a kernel whose operations
+#                           are not IEEE-exact (none yet; the transcendental
+#                           functions and the tensor-core path arrive there)
+#
+# Two problems share one kernel where the problem is the same computation
+# over a different shape: a matrix is a vector to a kernel that reads it
+# flat, so 8 (Matrix Addition) is 1 (Vector Addition) and nothing more.
+#
+# 6 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
+# and out of range). The plan that orders the rest is the cuTile coverage
+# memo; knife 7a is the boundary knife and these are the problems a boundary
+# alone unlocks.
+1 | Vector Addition | vadd_tail | std/gpu.masked_vadd_ref | mask_diff:vadd_tail | exact
+8 | Matrix Addition | vadd_tail | std/gpu.masked_vadd_ref | mask_diff:vadd_tail | exact
+21 | ReLU | relu | std/gpu.relu_ref | mask_diff:relu | exact
+23 | Leaky ReLU | leaky_relu | std/gpu.leaky_relu_ref | mask_diff:leaky_relu | exact
+31 | Matrix Copy | copy | std/gpu.masked_copy_ref | mask_diff:copy | exact
+62 | Value Clipping | clip | std/gpu.clip_ref | mask_diff:clip | exact

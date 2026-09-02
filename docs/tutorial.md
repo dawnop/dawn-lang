@@ -902,13 +902,81 @@ pub fn main() -> Unit !io = {
 [101, 102, 103]
 ```
 
+### Handler state: a `var` in the arm table
+
+An arm table may open with `var` declarations. Each one is a **cell**: mutable state that
+belongs to this one installation of the handler. The arms read and write it, and the block
+after the `with handle` reads it afterwards, which is how a handler that accumulates
+something hands what it accumulated back to the code that installed it.
+
+```dawn run
+effect Spend {
+  fn spend(item: String, n: Int) -> Bool
+}
+
+## No budget parameter, no running total: `shop` only knows that it asks.
+fn shop(orders: List[(String, Int)]) -> List[String] !Spend = {
+  var bought: List[String] = []
+  for o in orders {
+    let (item, cost) = o
+    if spend(item, cost) {
+      bought = bought ++ [item]
+    }
+  }
+  bought
+}
+
+pub fn main() -> Unit !io = {
+  with handle Spend {
+    var left: Int = 10
+    var skipped: List[String] = []
+    spend(item, n) =>
+      if n <= left {
+        left = left - n
+        true
+      } else {
+        skipped = skipped ++ [item]
+        false
+      }
+  }
+  let bought = shop([("bread", 3), ("cheese", 12), ("apples", 4)])
+  println("${bought} left=${left} skipped=${skipped}")
+}
+```
+```output
+["bread", "apples"] left=3 skipped=["cheese"]
+```
+
+`shop` has no budget parameter, no accumulator and no return value carrying one. The
+budget is the handler's, the two cells are where it is kept, and the last line of `main`
+is the block after the `with handle` reading them. There is no return arm; the cells are
+the only surface a stateful handler hands anything back through.
+
+Cells must be declared **before** the arms, and their type annotation is not optional:
+inside the arm table there is no context to infer it from.
+
+Two rules keep a cell apart from an ordinary `var`:
+
+- An arm is a closure, so it cannot write to an enclosing `var` (that is the rule from the
+  start of this section). Its own cells are the exception: they are this installation's
+  state rather than a binding captured from outside it.
+- A cell cannot leave. A lambda written **inside** an arm may not capture one, and a cell
+  has no type a program can write down, so no second name reaches it.
+
+Each installation gets its own cells. A nested `with handle` for the same effect keeps a
+separate set, and what the inner one accumulates does not reach the outer one.
+
 ### The v1 boundary
 
-- An arm is one ordinary call and its return value is the result (**tail resumption**).
-  There is no storing the continuation to resume later and no resuming twice — those
-  need continuation capture, which is not in this tier.
-- For "the operation does not come back to the call site", use the failure machinery
-  that already exists: `Result` + `?`, `catch_fault`/`catch_panic`/`bracket`.
+- A **tail-resumptive** arm is one ordinary call and its return value is the result.
+  An effect declared `ctl` may also carry **control arms**
+  (`op(...) resume k => ...`), which bind the continuation instead of resuming: the
+  arm's value becomes the value of the whole `with handle`, and `k` is an ordinary
+  function value that may be stored and resumed later. Once only: resuming twice is not
+  in this tier, and one that will never be resumed is abandoned with `discard`, which
+  is what runs the suspended frames' releases.
+- For "the operation does not come back to the call site" the failure machinery is
+  usually the answer: `Result` + `?`, `catch_fault`/`catch_panic`/`bracket`.
 - An effect takes no type parameters (there is no `effect Yield[T]`).
 - comptime and const initialisers raise no named effect and cannot install a handler.
   Trait and impl methods do take labels, and so does any written function type (an `alias`
@@ -918,7 +986,7 @@ pub fn main() -> Unit !io = {
   type, and the call site supplies the handler. Only an **operation** cannot, since there
   is no function symbol behind it; wrap it in a lambda (`() => ask()`).
 - An arm is a closure, so it cannot write to an enclosing `var` and cannot `return` or
-  `break` its way out.
+  `break` its way out. Its own cells are the exception, and they are the section above.
 
 The full rules are in [spec.en.md](spec.en.md) §6.5 and the design trade-offs in
 [effects-design.md](effects-design.md).

@@ -1,0 +1,56 @@
+# Lexicographic `Ord` for tuples, through every witness shape that can reach
+# it. A tuple has no head and therefore cannot name an impl in Dawn source;
+# the checker supplies a witness whose implementation is the same structural
+# comparison `derive Ord` uses for a record.
+#
+# The direct calls and operators below devirtualise a ground tuple. `through`
+# forwards one dictionary for the whole tuple, while `through_tail` and
+# `less_tail` build the non-ground `(Int, T)` relation from the caller's
+# `Ord[T]`. Both are needed: a corpus containing only concrete tuple calls can
+# leave the parameterised dictionary path broken while every visible answer
+# stays green.
+use std/io
+
+pub type Bomb = | Bomb
+
+# The second tuple element must not be compared after the first differs.
+impl Ord[Bomb] {
+  fn cmp(_a: Bomb, _b: Bomb) -> Int = panic("tuple Ord evaluated past the first difference")
+}
+
+fn sign(n: Int) -> String = if n < 0 { "lt" } else if n > 0 { "gt" } else { "eq" }
+
+fn line(label: String, n: Int) -> Unit !io = io.println(label ++ sign(n))
+
+fn through[T: Ord](a: T, b: T) -> Int = cmp(a, b)
+
+fn through_tail[T: Ord](a: (Int, T), b: (Int, T)) -> Int = cmp(a, b)
+
+fn less_tail[T: Ord](a: (Int, T), b: (Int, T)) -> Bool = a < b
+
+pub fn main() -> Unit !io = {
+  io.println("-- pairs --")
+  line("first tie, second differs: ", cmp((1, 2), (1, 3)))
+  line("first differs:             ", cmp((2, 0), (1, 999)))
+  line("equal:                     ", cmp((1, 2), (1, 2)))
+  io.println("operator:                  " ++ to_string((1, 2) < (1, 3)))
+
+  io.println("-- triples --")
+  line("middle decides: ", cmp((1, 2, 9), (1, 3, 0)))
+  line("last decides:   ", cmp((1, 3, 1), (1, 3, 0)))
+  line("equal:          ", cmp((1, 2, 3), (1, 2, 3)))
+
+  io.println("-- nested --")
+  line("left nested:  ", cmp(((1, 2), 3), ((1, 3), 0)))
+  line("right nested: ", cmp((1, (3, 0)), (1, (2, 9))))
+  line("nested equal: ", cmp(((1, 2), (3, 4)), ((1, 2), (3, 4))))
+
+  io.println("-- short circuit --")
+  line("Bomb stays cold: ", cmp((0, Bomb), (1, Bomb)))
+
+  io.println("-- generic dictionaries --")
+  line("whole tuple forwarded: ", through((1, "a"), (1, "b")))
+  line("tuple built from T:    ", through_tail((1, "a"), (1, "b")))
+  io.println("operator built from T: " ++ to_string(less_tail((1, "a"), (1, "b"))))
+  line("nested T dictionary:   ", through_tail((1, (2, 3)), (1, (2, 4))))
+}

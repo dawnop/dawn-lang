@@ -2008,9 +2008,10 @@ native 上是停下那条栈、换另一条来跑，两者不同是刻意的。�
   trait 方法的**默认体**照普通函数体检查：它能沿变量或擦除的证据格转发（调那个闭包），
   但装不了 handler——刚性效果没有名字可供 `with handle` 点名。
 - **comptime / const 初始化**：编译期求值不发具名效果，也装不了 handler。
-- **局部函数**：局部 `fn` 的行只能是 `!io` 或纯，它的体也不能发一条自己没有应答的标签；
-  它被提升成一个没有证据参数的普通函数，词法上够得着外层的 handler 不等于运行时拿得到那格证据，
-  出路是提到顶层去声明这个标签，或者在它自己的体里装 handler 应答掉。
+- **局部函数**：局部 `fn` 的行只能是 `!io` 或纯，它的体不能使用一格只由外层签名持有的
+  证据（具名标签、效果变量或关联效果投影）；它被提升成一个没有证据参数的普通函数，词法上
+  够得着外层 binding 不等于运行时拿得到那格证据。具名标签可以在它自己的体里装 handler
+  应答掉；否则只能把函数提到顶层，在自己的签名上声明相应的标签、变量或投影。
 - **写出来的函数类型**：任何 `TypeRef` 位置的 `fn(…) -> T !E` 都合法，包括参数、返回、
   `let` 注解、`alias` 目标、record/variant 字段、泛型实参、元组元素、trait / impl 方法的
   参数类型。写出来的标签读作「调用我的人得供 handler」，这正是它的运行时含义。
@@ -2837,9 +2838,12 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 由限定或选择性引入消歧。
 
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
-`println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的 `len`/`get`/`range`/
-`to_string`/`join`/`parse_*`/`panic`/`todo`/`expect`/`unwrap_or`/`cast`/
-`catch_fault`/`catch_panic`/`bracket`/`args` 等一屏以内
+`println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的
+<!-- doc-check: builtin-inventory --> `panic`/`todo`/`bracket`/`catch_fault`/`catch_panic`/
+`discard`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
+`sort_by`/`join`/`parse_int`/`parse_float`/`parse_int_radix`/`code_points`/
+`from_code_points`/`char_is_letter`/`char_is_digit`/`char_is_alnum`/`char_is_upper`/
+`char_is_lower`/`char_is_space`/`args`/`cast`，共一屏以内
 （全集见[标准库参考](https://dawn-lang.dawnop.com/zh/stdlib.html)，由 `dawn doc --stdlib` 生成）。
 
 **顶层声明可以遮蔽 builtin/std 函数名**（§10.3，Rust 式）：解析序是本模块声明 →
@@ -3031,8 +3035,10 @@ url/文件名安全字母表且
     overlong 编码顺流而下、被下游按码点走的原语当成真字符
     （[`stdlib-impl-notes.md`](stdlib-impl-notes.md)）
 
-**数学**（`abs min max sin cos sqrt pow to_float to_int ...`）是纯的——内部以 `unsafe_pure`
-包装 `java.lang.Math`。
+**数学内建。** 当前没有通用数学函数族，也没有宿主数学库包装。数字的内建表面限于
+`Int`/`Float` 算术运算符；内建转换函数是
+<!-- doc-check: builtin-list --> `to_float`、`to_int`。
+额外运算由纯 Dawn 源库提供，例如 `std/narrow` 用整数算法计算平方根，不依赖宿主数学库。
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
 全部是**纯 Dawn 源**（`List` = `std/pvec` 持久向量，`Map`/`Set` = `std/hamt` 持久 HAMT，

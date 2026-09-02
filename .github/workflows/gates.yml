@@ -53,7 +53,7 @@ name: gates
 # raising the pole is a visible, reviewable edit rather than a silent slide.
 # 660s = native-diff's historical worst (589s, in export-surface's note) with
 # headroom for its documented non-reproducibility; every other job's figure
-# sits at or under 557s. This pins the per-job claims, not the literal run
+# sits at or under 558s. This pins the per-job claims, not the literal run
 # wall clock: queueing and the coverage guard's tail are outside it, and a
 # checker cannot read a future run.
 # run-pole: 660s (the worst figure any job's budget line may claim)
@@ -72,8 +72,12 @@ jobs:
     # this job used to take was there because 3x six seconds is a bound no
     # runner could meet; at 53s that reason has expired, so it takes the
     # ordinary 3x rule like every other job of its size.
-    # budget: 3x 53s worst observed
-    timeout-minutes: 3
+    # 2026-09-03: the map step reads Emit-Change declarations back to the last
+    # tag, so it grows with the commits since that tag; at 25 commits past
+    # v0.72.0 it took 3m21s (run 33684451459) and the 3-minute bound cancelled
+    # the job twice. Sized to that observation; it shrinks again at each tag.
+    # budget: 3x 201s worst observed
+    timeout-minutes: 11
     steps:
       - uses: actions/checkout@v4
         with:
@@ -475,9 +479,16 @@ jobs:
     # the two measurements are on comparable machines). Doubled and rounded up,
     # +13, so the planning value is 478 + 13 = 491s -- over 24 minutes' worth
     # of 3x, so the timeout goes to 25. Still under the native-diff pole, so
-    # the run's wall clock does not move.
-    # budget: 3x 491s planning value (356s observed + 70s + 5s + 9s + 1s + 5s + 6s + 26s + 13s)
-    timeout-minutes: 25
+    # the run's wall clock does not move. PR #34 then made map-reuse build a
+    # private compiler, taking that step from 7s to 33s locally. Rather than
+    # add another doubled estimate to the ledger, five consecutive complete
+    # main runs measured this job at 558/496/534/521/414s (runs 33527666436,
+    # 33525141306, 33486981520, 33477989743 and 33475732421). The 558s worst
+    # observation supersedes the 491s planning value; 3x is 1674s, so the
+    # timeout is 28 minutes. It remains below the 660s run-pole, which does
+    # not move.
+    # budget: 3x 558s worst observed (five consecutive main runs)
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -582,7 +593,10 @@ jobs:
       # every call it counts comes from std/pvec; `map.insert` reaches the
       # same primitive through std/hamt and the two rates move independently.
       # They did, by 29 points, while the step above measured the identical
-      # 11241/11241 on both sides. 7s wall, in a job budgeted at 13min.
+      # 11241/11241 on both sides. The whole script is 33s locally on a warm
+      # toolchain (66s runner-doubled), of which about 31s is the private
+      # compiler build for the keep-record-spread-source mutant. It runs in
+      # `contracts`, budgeted at 28 minutes from a 558s worst observation.
       - name: Map reuse contract
         run: ./scripts/map-reuse-contract/run.sh
 
@@ -1153,11 +1167,16 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (both backends, ten mutants)
+      - name: tile IR goldens and tileiras (both backends, eleven mutants)
         run: ./scripts/tile-golden/run.sh
 
       - name: GPU diff ledger is current (layer 2 ran at this tree)
         run: ./scripts/tile-gpu-diff/run.sh --check
+
+      - name: the leetgpu ledger (a listed problem has a kernel and a device run)
+        run: |
+          python3 scripts/leetgpu-diff/check.py
+          python3 scripts/leetgpu-diff/check.py --self-test
 
   # The checker's diagnostics, recorded in the order `cerr` appends them.
   # Nothing else here can see them -- grammar-corpus stops at the parser,

@@ -1,0 +1,117 @@
+# Handler state: a `var` declared in the arm table, and the block below the
+# handler reading what the arms left there.
+#
+# `shop` below spends from a budget it cannot see. It has no running total, no
+# accumulator parameter and no return value carrying one; its signature says
+# `!Spend` and that is all it knows. The budget is a cell belonging to one
+# installation of the handler, the arms read and write it, and the block after
+# `with handle` reads it afterwards. That block is the only way a stateful
+# handler hands anything back: there is no `return` arm (spec §6.5).
+#
+# Three things a cell is not. It is not visible to the code that raises the
+# operation. It is not shared with another installation, not even a nested one
+# of the same handler. And it cannot leave: a closure that is not one of this
+# installation's arms may not capture it, so no second name reaches it, and it
+# has no type a program can write down.
+#
+# Cells must be declared before the arms, and their type annotation is not
+# optional -- inside the arm table there is no context to infer it from.
+#
+# Run: dawn run examples/effects/cells.dawn
+
+use std/io
+
+effect Spend {
+  ## Take `n` from the budget for `item`. `false` when there was not enough
+  ## left, in which case nothing was taken.
+  fn spend(item: String, n: Int) -> Bool
+}
+
+type Order = { item: String, cost: Int }
+
+## Buys what it can afford, in order, and answers what it got. Nothing in here
+## could tell you the budget, or what is left of it.
+fn shop(orders: List[Order]) -> List[String] !Spend = {
+  var bought: List[String] = []
+  for o in orders {
+    if spend(o.item, o.cost) {
+      bought = bought ++ [o.item]
+    }
+  }
+  bought
+}
+
+type Trip = { bought: List[String], left: Int, ledger: List[String] }
+
+## One installation, with two cells: the money and the paper trail. `shop`
+## runs under it, and the three lines after `with handle` are where the cells
+## are read.
+fn trip(budget: Int, orders: List[Order]) -> Trip = {
+  with handle Spend {
+    var left: Int = budget
+    var ledger: List[String] = []
+    spend(item, n) =>
+      if n <= left {
+        left = left - n
+        ledger = ledger ++ ["-$n $item"]
+        true
+      } else {
+        ledger = ledger ++ ["skip $item ($n)"]
+        false
+      }
+  }
+  let bought = shop(orders)
+  Trip { bought: bought, left: left, ledger: ledger }
+}
+
+fn basket() -> List[Order] = [
+  Order { item: "bread", cost: 3 },
+  Order { item: "cheese", cost: 12 },
+  Order { item: "apples", cost: 4 },
+]
+
+fn show(t: Trip) -> String = "${t.bought} left=${t.left} ${t.ledger}"
+
+pub fn main() -> Unit !io = {
+  io.println("budget 20: ${show(trip(20, basket()))}")
+  io.println("budget 10: ${show(trip(10, basket()))}")
+}
+
+test "the arms keep the tally and the block below reads it" {
+  let t = trip(20, basket())
+  assert t.bought == ["bread", "cheese", "apples"]
+  assert t.left == 1
+  assert t.ledger == ["-3 bread", "-12 cheese", "-4 apples"]
+}
+
+test "a refusal is an answer, not a failure: shopping goes on" {
+  let t = trip(10, basket())
+  assert t.bought == ["bread", "apples"]
+  assert t.left == 3
+  assert t.ledger == ["-3 bread", "skip cheese (12)", "-4 apples"]
+}
+
+test "each installation starts from its own budget" {
+  assert trip(20, basket()).left == 1
+  assert trip(20, basket()).left == 1
+}
+
+test "a nested installation spends its own money" {
+  with handle Spend {
+    var left: Int = 10
+    spend(_item, n) =>
+      if n <= left {
+        left = left - n
+        true
+      } else {
+        false
+      }
+  }
+  let outer = shop([Order { item: "bread", cost: 3 }])
+  let inner = trip(100, [Order { item: "cheese", cost: 50 }])
+  assert outer == ["bread"]
+  assert inner.bought == ["cheese"]
+  assert inner.left == 50
+  # The nested handler answered its own operations; this cell never saw them.
+  assert left == 7
+}

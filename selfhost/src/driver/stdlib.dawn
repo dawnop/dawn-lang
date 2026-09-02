@@ -41,7 +41,8 @@ use fspath/fspath
 ## A path in the one spelling module identities are compared by: absolute and
 ## normalized. `driver/analyze.dawn` exports the same line under the same name;
 ## this file is below it in the layering and cannot import it.
-fn canon(p: String) -> String !io = fspath.absolute(p, io.cwd())
+fn canon(p: String) -> String !io =
+  if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
 ## Everything user-module analysis needs from std.
 pub type StdCtx = {
@@ -224,7 +225,7 @@ pub type StdLoadError = {
 
 ## A std source file: the directory first (repo development edits win), then
 ## the embedded copy `stdsrc.dawn` carries. The flag says which one answered.
-fn std_read_from(dir: String, name: String) -> Result[(String, Bool), String] !Fs !io =
+fn std_read_from(dir: String, name: String) -> Result[(String, Bool), String] !Fs =
   match io.read_file(dir ++ "/" ++ name) {
     Ok(t) -> Ok((t, true))
     Err(e) ->
@@ -234,7 +235,7 @@ fn std_read_from(dir: String, name: String) -> Result[(String, Bool), String] !F
       }
   }
 
-fn std_read(dir: String, name: String) -> Result[String, String] !Fs !io = {
+fn std_read(dir: String, name: String) -> Result[String, String] !Fs = {
   let (text, _) = std_read_from(dir, name)?
   Ok(text)
 }
@@ -247,7 +248,7 @@ fn std_read(dir: String, name: String) -> Result[String, String] !Fs !io = {
 ## reads one side twice can only ever agree. The absent case is a real answer
 ## rather than an error, because a std that predates the stamp, and the
 ## one-module stds tests assemble, both land there.
-fn dir_declared_version(dir: String) -> Option[String] !Fs !io =
+fn dir_declared_version(dir: String) -> Option[String] !Fs =
   match io.read_file(dir ++ "/VERSION") {
     Ok(t) -> Some(str.trim(t))
     Err(_) -> None
@@ -267,7 +268,7 @@ fn index_names(text: String) -> List[String] = {
 }
 
 ## Read modules.txt: one name per line, `#` comments, blanks skipped.
-pub fn read_index(dir: String) -> Result[List[String], String] !Fs !io = {
+pub fn read_index(dir: String) -> Result[List[String], String] !Fs = {
   let text = std_read(dir, "modules.txt")?
   Ok(index_names(text))
 }
@@ -562,7 +563,7 @@ pub fn is_std_dir(std: StdCtx, dir: String) -> Bool !io =
 
 # ---- tests ----
 
-fn put(p: String, text: String) -> Unit !Fs !io =
+fn put(p: String, text: String) -> Unit !Fs =
   match io.write_file(p, text) {
     Ok(_) -> ()
     Err(e) -> panic("test setup: " ++ e.message)

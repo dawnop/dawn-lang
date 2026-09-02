@@ -53,7 +53,8 @@ type SourceInputKind = InputFile | InputOptional | InputTree
 
 type SourceInput = { kind: SourceInputKind, path: String }
 
-fn canon(p: String) -> String !io = fspath.absolute(p, io.cwd())
+fn canon(p: String) -> String !io =
+  if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
 ## The manifest beside `dir`'s dawn.toml, validated once per canonical
 ## directory (the Kotlin ResolveCtx.manifest): a missing file is None without
@@ -174,7 +175,7 @@ pub fn source_plan(target: SourceTarget) -> SourcePlan !Fs !io = {
 
 fn source_input_display(path: String) -> String = str.replace(path, "\n", "\\n")
 
-fn source_input_path_ok(path: String) -> Result[Unit, String] !Fs !io = {
+fn source_input_path_ok(path: String) -> Result[Unit, String] !Fs = {
   if str.contains(path, "\n") {
     return Err("source input path contains LF: " ++ source_input_display(path))
   }
@@ -189,7 +190,7 @@ fn source_input_path_ok(path: String) -> Result[Unit, String] !Fs !io = {
   Ok(())
 }
 
-fn validate_source_file(path: String, optional: Bool) -> Result[Unit, String] !Fs !io = {
+fn validate_source_file(path: String, optional: Bool) -> Result[Unit, String] !Fs = {
   match source_input_path_ok(path) {
     Err(e) -> return Err(e)
     Ok(_) -> ()
@@ -207,7 +208,7 @@ fn validate_source_file(path: String, optional: Bool) -> Result[Unit, String] !F
   }
 }
 
-fn validate_source_tree(path: String) -> Result[Unit, String] !Fs !io = {
+fn validate_source_tree(path: String) -> Result[Unit, String] !Fs = {
   match source_input_path_ok(path) {
     Err(e) -> return Err(e)
     Ok(_) -> ()
@@ -247,7 +248,7 @@ fn validate_source_tree(path: String) -> Result[Unit, String] !Fs !io = {
   Ok(())
 }
 
-fn validate_source_input(input: SourceInput) -> Result[Unit, String] !Fs !io =
+fn validate_source_input(input: SourceInput) -> Result[Unit, String] !Fs =
   match input.kind {
     InputFile -> validate_source_file(input.path, false)
     InputOptional -> validate_source_file(input.path, true)

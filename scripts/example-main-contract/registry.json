@@ -54,6 +54,19 @@
       ]
     },
     {
+      "target": "examples/data/narrow.dawn",
+      "cases": [
+        {
+          "name": "three-widths-and-two-summations",
+          "argv": [],
+          "stdin": "",
+          "stdout": "0.1 as Float, bf16, fp16: [0.1, 0.10009765625, 0.0999755859375]\n1.0 as Float, bf16, fp16: [1.0, 1.0, 1.0]\nten times 0.1, rounded every step: 1.0078125\nten times 0.1, rounded once:       1.0\n1.01 compounded 100 times in bf16: 2.0625\nsqrt 2 in bf16: 1.4140625\n65504 and 70000 in fp16: 65504.0 Infinity\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    {
       "target": "examples/data/records.dawn",
       "cases": [
         {
@@ -74,6 +87,32 @@
           "argv": [],
           "stdin": "",
           "stdout": "circle with r = 1.0\nrect 2.0 x 3.0\na point\na huge circle\nrect 2.0 x 3.0\nequal: true\ntotal area: 125672.74158999999\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    {
+      "target": "examples/effects/cells.dawn",
+      "cases": [
+        {
+          "name": "two-budgets-one-basket",
+          "argv": [],
+          "stdin": "",
+          "stdout": "budget 20: [\"bread\", \"cheese\", \"apples\"] left=1 [\"-3 bread\", \"-12 cheese\", \"-4 apples\"]\nbudget 10: [\"bread\", \"apples\"] left=3 [\"-3 bread\", \"skip cheese (12)\", \"-4 apples\"]\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    {
+      "target": "examples/effects/files.dawn",
+      "cases": [
+        {
+          "name": "disk-and-table",
+          "argv": [],
+          "stdin": "",
+          "stdout": "disk:    name=orion retries=3\ntable:   name=fixture retries=7\nmissing: error: no settings directory at /etc/nope\n",
           "stderr": "",
           "exit": 0
         }
@@ -166,6 +205,19 @@
           "stdout": "dawn-calc (0.1.2)\nusage: calc <expr>\n",
           "stderr": "",
           "exit": 1
+        }
+      ]
+    },
+    {
+      "target": "examples/projects/gpu_fake",
+      "cases": [
+        {
+          "name": "tile-ir-and-the-fake-device",
+          "argv": [],
+          "stdin": "",
+          "stdout": "cuda_tile.module @m {\n  entry @vadd(%arg0: tile<ptr<f64>>, %arg1: tile<ptr<f64>>, %arg2: tile<ptr<f64>>) {\n    %0 = make_token : token\n    %1, %2, %3 = get_tile_block_id : tile<i32>\n    %4 = constant <i32: 128> : tile<i32>\n    %5 = muli %1, %4 : tile<i32>\n    %6 = reshape %5 : tile<i32> -> tile<1xi32>\n    %7 = broadcast %6 : tile<1xi32> -> tile<128xi32>\n    %8 = iota : tile<128xi32>\n    %9 = addi %7, %8 : tile<128xi32>\n    %10 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>\n    %11 = broadcast %10 : tile<1xptr<f64>> -> tile<128xptr<f64>>\n    %12 = offset %11, %9 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>\n    %13, %14 = load_ptr_tko weak %12 token=%0 : tile<128xptr<f64>> -> tile<128xf64>, token\n    %15 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>\n    %16 = broadcast %15 : tile<1xptr<f64>> -> tile<128xptr<f64>>\n    %17 = offset %16, %9 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>\n    %18, %19 = load_ptr_tko weak %17 token=%14 : tile<128xptr<f64>> -> tile<128xf64>, token\n    %20 = addf %13, %18 rounding<nearest_even> : tile<128xf64>\n    %21 = reshape %arg2 : tile<ptr<f64>> -> tile<1xptr<f64>>\n    %22 = broadcast %21 : tile<1xptr<f64>> -> tile<128xptr<f64>>\n    %23 = offset %22, %9 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>\n    %24 = store_ptr_tko weak %23, %20 token=%19 : tile<128xptr<f64>>, tile<128xf64> -> token\n    return\n  }\n}\nvadd on the fake device: [11.0, 22.0, 33.0, 44.0]\n",
+          "stderr": "",
+          "exit": 0
         }
       ]
     },

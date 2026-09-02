@@ -64,3 +64,38 @@ pub fn label_rides_out_on_a_closure() -> Int !Ask = {
   fn inner() -> (fn() -> Int !Ask) = () => get()
   inner()()
 }
+
+# #54: a call through an effect variable needs the enclosing function's erased
+# evidence slot. A local function is lifted without that slot, so resolving the
+# outer name here would only postpone the failure to `ev_slot` at run time.
+fn twice(f: fn() -> Int !e) -> Int !e = f() + f()
+
+pub fn variable_from_signature(f: fn() -> Int !e) -> Int !e !io = {
+  fn probe() -> Int !io = twice(f)
+  probe()
+}
+
+pub trait Runner[T] {
+  effect E
+  fn run(x: T) -> Int !T.E
+}
+
+# A rigid associated-effect projection has the same erased evidence ABI as an
+# effect variable. It must be refused at the same boundary rather than reading
+# the outer generic function's projection slot from the lifted body.
+pub fn projection_from_signature[T: Runner](x: T) -> Int !T.E = {
+  fn probe() -> Int = run(x)
+  probe()
+}
+
+# Own-axis controls: ordinary pure and !io function values need no hidden
+# evidence slot, so local functions keep forwarding both through captures.
+pub fn pure_parameter(f: fn() -> Int) -> Int = {
+  fn probe() -> Int = f()
+  probe()
+}
+
+pub fn io_parameter(f: fn() -> Int !io) -> Int !io = {
+  fn probe() -> Int !io = f()
+  probe()
+}
