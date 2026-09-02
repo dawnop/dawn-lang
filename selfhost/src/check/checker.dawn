@@ -291,16 +291,16 @@ fn ev_bound_within(cx: Cx, name: String, boundary: Int) -> Bool = {
   false
 }
 
-## The local function this raise sits directly in, when `name`'s evidence is
-## not answered inside that function's own body. `None` when there is no such
-## function, and `None` when the body answers the atom itself.
+## The local function this evidence use sits directly in, when `name`'s
+## evidence is not answered inside that function's own body. `None` when there
+## is no such function, and `None` when the body answers the atom itself.
 ##
 ## A local `fn` is lifted to an ordinary function with no evidence parameter,
 ## and its row is `!io` or pure (`check_local_fn`, spec §6.5 "boundaries"), so
-## a label its body raises has nowhere to arrive from: the lexical lookup walks
-## out to the enclosing function's hidden parameter, and the lifted body cannot
-## read that. Without this the program checked clean and met `ev_slot`'s
-## placeholder at run time (#43).
+## any label, variable or projection its body uses has nowhere to arrive from:
+## the lexical lookup walks out to the enclosing function's hidden parameter,
+## and the lifted body cannot read that. The label path was closed in #43; the
+## erased variable/projection paths were the same hole one ABI slot over (#54).
 ##
 ## Only the *innermost* closure is asked, because a lambda is the opposite
 ## case: its row carries the label out and the call that runs it supplies the
@@ -6873,6 +6873,7 @@ fn check_local_fn(
   let (cxb, ret) = resolve_return_type(cx1, ret_ref)
   cx1 = cxb
   var eff = EPure
+  var body_local_fn: Option[String] = Some(name)
   if len(effs) == 0 {
     eff = EPure
   } else if len(effs) == 1 && effs[0] == "io" {
@@ -6881,12 +6882,15 @@ fn check_local_fn(
     cx1 = cerr_h(cx1, "local functions cannot declare effect variables", nlo, nhi,
       "a local function is `!io` or pure; lift it to the top level for effect polymorphism")
     eff = EIo
+    # The declaration error is the whole refusal. Suppress a second report
+    # from the body for the same written row; this function will not lower.
+    body_local_fn = None
   }
   let ft = TyFn(ptys, ret, eff)
   let (cxc, sid) = declare(cx1, name, ft, false, nlo, nhi)
   cx1 = cxc
   let (cxd, actual, lam) =
-    check_lambda(cx1, params, body, false, false, false, None, Some(name), Some(ft), lo, hi)
+    check_lambda(cx1, params, body, false, false, false, None, body_local_fn, Some(ft), lo, hi)
   cx1 = cxd
   match actual {
     TyFn(_, ar, ae) -> {
@@ -7845,7 +7849,18 @@ fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExp
   # slot it would have filled is answered by whatever is left.
   var envs: List[TExpr] = []
   for v in vs {
-    let (svid, _) = v
+    let (svid, svname) = v
+    var blocked = false
+    if not cx1.frame.isolated {
+      match local_fn_missing_evidence(cx1, ev_var_local_name(svid)) {
+        Some(fname) -> {
+          cx1 = local_fn_effect_var(cx1, fname, svname, lo, hi)
+          blocked = true
+        }
+        None -> ()
+      }
+    }
+    if blocked { continue }
     let (cxa, found) =
       ev_expr(cx1, ev_var_local_name(svid), var_key(svid), erased_ev_ty(), lo, hi)
     cx1 = cxa
@@ -7855,7 +7870,18 @@ fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExp
     }
   }
   for a in asx {
-    let (_, av, at2, an) = a
+    let (asubj, av, at2, an) = a
+    var blocked = false
+    if not cx1.frame.isolated {
+      match local_fn_missing_evidence(cx1, ev_assoc_local_name(av, at2, an)) {
+        Some(fname) -> {
+          cx1 = local_fn_effect_assoc(cx1, fname, asubj, an, lo, hi)
+          blocked = true
+        }
+        None -> ()
+      }
+    }
+    if blocked { continue }
     let (cxa, found) =
       ev_expr(cx1, ev_assoc_local_name(av, at2, an), assoc_key(at2), erased_ev_ty(), lo, hi)
     cx1 = cxa
@@ -8102,6 +8128,31 @@ fn local_fn_effect(cx: Cx, fname: String, eid: Int, lo: Int, hi: Int) -> Cx = {
     lo, hi,
     "lift `" ++ fname ++ "` to the top level and declare !" ++ nm ++
       ", or handle it inside its body with `with handle " ++ nm ++ " { ... }`")
+}
+
+## The erased-evidence twins of `local_fn_effect`. Unlike a written label, a
+## variable or projection cannot be answered by a handler in the local body:
+## it is an abstract row whose only source is a hidden slot in the enclosing
+## signature. Lifting the function is therefore the sole honest repair.
+fn local_fn_effect_var(cx: Cx, fname: String, name: String, lo: Int, hi: Int) -> Cx =
+  cerr_h(cx, "`" ++ fname ++ "` uses the effect variable `!" ++ name ++
+      "`, but a local function cannot carry an effect variable",
+    lo, hi,
+    "lift `" ++ fname ++ "` to the top level so its signature can declare !" ++ name)
+
+fn local_fn_effect_assoc(
+  cx: Cx,
+  fname: String,
+  subject: String,
+  name: String,
+  lo: Int,
+  hi: Int
+) -> Cx = {
+  let atom = subject ++ "." ++ name
+  cerr_h(cx, "`" ++ fname ++ "` uses the effect projection `!" ++ atom ++
+      "`, but a local function cannot carry an effect projection",
+    lo, hi,
+    "lift `" ++ fname ++ "` to the top level so its signature can declare !" ++ atom)
 }
 
 ## docs/effects-design.md §4.2: the effect is used, and nothing in scope
@@ -11741,6 +11792,52 @@ test "a local function io hint groups its returned function type" {
   assert cx1.diags[0].msg == "the body of `local` performs io"
   assert cx1.diags[0].hint ==
     "declare it: fn local(...) -> (fn() -> Int) !io = ..."
+}
+
+test "local functions refuse outer erased evidence slots" {
+  let src = "fn twice(f: fn() -> Int !e) -> Int !e = f() + f()\n" ++
+    "fn outer(f: fn() -> Int !e) -> Int !e !io = {\n" ++
+    "  fn probe() -> Int !io = twice(f)\n  probe()\n}\n" ++
+    "trait Runner[T] {\n  effect E\n  fn run(x: T) -> Int !T.E\n}\n" ++
+    "fn projected[T: Runner](x: T) -> Int !T.E = {\n" ++
+    "  fn probe() -> Int = run(x)\n  probe()\n}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 2
+  assert cx1.diags[0].msg ==
+    "`probe` uses the effect variable `!e`, but a local function cannot carry an effect variable"
+  assert cx1.diags[0].hint ==
+    "lift `probe` to the top level so its signature can declare !e"
+  assert cx1.diags[1].msg ==
+    "`probe` uses the effect projection `!T.E`, but a local function cannot carry an effect projection"
+  assert cx1.diags[1].hint ==
+    "lift `probe` to the top level so its signature can declare !T.E"
+
+  # Pure and concrete io rows have no erased evidence slot, and remain legal.
+  let controls = "fn pure_outer(f: fn() -> Int) -> Int = {\n" ++
+    "  fn probe() -> Int = f()\n  probe()\n}\n" ++
+    "fn io_outer(f: fn() -> Int !io) -> Int !io = {\n" ++
+    "  fn probe() -> Int !io = f()\n  probe()\n}\n" ++
+    # A nested lambda remains the opposite boundary: its row carries the
+    # variable out, so the call that eventually runs it supplies the pack.
+    "fn lambda_outer(f: fn() -> Int !e) -> (fn() -> Int !e) = {\n" ++
+    "  fn build() -> (fn() -> Int !e) = () => f()\n  build()\n}\n"
+  let (m2, pdiags2) = parser.parse_module(controls)
+  assert len(pdiags2) == 0
+  let (cx2, _) = check_module(test_cx(), m2, env)
+  assert len(cx2.diags) == 0
+
+  # An invalid local row already has the declaration diagnostic; its body must
+  # not echo the same refusal from the evidence pack.
+  let invalid = "fn outer() -> Int = {\n" ++
+    "  fn bad(f: fn() -> Int !e) -> Int !e = f()\n  1\n}\n"
+  let (m3, pdiags3) = parser.parse_module(invalid)
+  assert len(pdiags3) == 0
+  let (cx3, _) = check_module(test_cx(), m3, env)
+  assert len(cx3.diags) == 1
+  assert cx3.diags[0].msg == "local functions cannot declare effect variables"
 }
 
 test "check_module: a type declaration refuses the effect names it did not bind" {
