@@ -140,6 +140,11 @@ Java 类。**要做的是把这个模型长全。**
 > (4 个操作),换后端 = 实现一个数组类型,而非重写 ~20 个集合 intrinsic。**str 是唯一不能塌成一个原语的**——Unicode +
 > native 表示(UTF-8 vs UTF-16,§8 开放决策)使然,故保持画细:`code_points`/`from_code_points` + 少数性能敏感项
 > (如 `str_len` 直给、不走物化)保留粗 intrinsic,其余纯 Dawn 拼。
+
+`args` 是这张表里唯一的**整程序输入**：调用它的模块不改变答案，入口模块与任意依赖模块都看到启动
+这个程序时传入的同一份 argv。它不归 `RtIo`，因为 JVM 的载体是本次产物入口类上的字段，而不是可能被
+同一 JVM 中多个程序共享的 runtime static；“字段在入口类”只是载体选择，不是“只能从入口模块调用”的
+可见性限制。native 的进程全局与 JVM 的入口字段实现的是同一条整程序语义。
 >
 > **迭代不进后端契约**:集合成纯 ADT 后,`for-in` 靠一个 **`Iter` trait**(语言侧,像 Rust `IntoIterator`)dispatch 到集合的
 > Dawn 迭代函数,而非后端 `iter` intrinsic。于是「迭代」也从后端接口移到语言 trait + Dawn 源——同样朝「后端接口更小」走。

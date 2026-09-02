@@ -615,6 +615,11 @@ in-process run、test runner、native-image 各一处）外加一个仅为此存
 运行期常量」的 builtin（env？工作目录？），届时再统一做载体，一次布线摊给
 多个住户才划算。
 
+**2026-09-03 补充：载体归入口类，不等于调用权归入口模块。** `args()` 的语义是整程序的
+启动参数，依赖模块调用时必须看到同一份；JVM emitter 因此把整程序已经确定的入口类名带进
+每个模块，让 inline intrinsic 都读入口字段。仍不新增 runtime static，所以上面关于同一 JVM
+里多程序串值的裁决不变；修的是读错 owner，不是推翻载体选择。
+
 ## 十八、S2.4 收束：不是收窄 `unsafe_pure`，是让它没有用户（2026-07-27）
 
 `codebase-audit.md` 的 **LANG-01（P0）** 说 `unsafe_pure` 是「对用户开放的不健全逃生门」。

@@ -485,6 +485,18 @@ fn collect_program(
     const_vals = map.insert(const_vals, cls, ct.consts)
   }
   for cm in mods { const_vals = map.insert(const_vals, cm.mod_path, cm.ct.consts) }
+  # Resolve the argv holder before emitting any module. The JVM wrapper writes
+  # the entry class's field, and an `args()` call in a library must name that
+  # same field rather than the uninitialised field on its own class.
+  var entry = ""
+  for cm in mods {
+    if entry == "" {
+      for tf in cm.tm.fns {
+        let plain = match tf.impl_of { Some(_) -> false, None -> match tf.default_of { Some(_) -> false, None -> true } }
+        if plain && tf.name == "main" { entry = cm.class_name }
+      }
+    }
+  }
   var seen: Set[String] = set.empty()
   var si = 0
   for sm in std_mods {
@@ -492,7 +504,7 @@ fn collect_program(
     # std carries no source path or AST here (StdCtx keeps neither), so a std
     # class that outgrows the class file format reports what it always did
     let no_decls: List[Decl] = []
-    classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cls,
+    classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, entry, cls,
       own_trait_ids(cx.traits, cls), own_adts_of(cx.adts, cls, seen),
       tm, std_lm[si], ct, cdriver.merged_consts(cx, ct, const_vals), "", no_decls)
     si = si + 1
@@ -500,7 +512,6 @@ fn collect_program(
       seen = set.insert(seen, adt_jvm_name(adt_of(cx.adts, aid)))
     }
   }
-  var entry = ""
   var tests_info: List[(String, String, List[String])] = []
   if std_tests {
     for sm in std_mods {
@@ -514,19 +525,13 @@ fn collect_program(
   }
   var ui = 0
   for cm in mods {
-    classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns,
+    classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, entry,
       cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name),
       own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, user_lm[ui], cm.ct,
       cdriver.merged_consts(cm.cx, cm.ct, const_vals), cm.path, cm.m.decls)
     ui = ui + 1
     for aid in own_adts_of(cm.cx.adts, cm.class_name, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cm.cx.adts, aid)))
-    }
-    if entry == "" {
-      for tf in cm.tm.fns {
-        let plain = match tf.impl_of { Some(_) -> false, None -> match tf.default_of { Some(_) -> false, None -> true } }
-        if plain && tf.name == "main" { entry = cm.class_name }
-      }
     }
     if len(cm.tm.tests) > 0 {
       var names: List[String] = []

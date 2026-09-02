@@ -152,9 +152,19 @@ blocked() { printf '  %-28s blocked\n' "$1"; }
 # rather than shared. `continue` was a `for` body's early exit; it is `return`
 # now, and means the same thing.
 run_corpus() {
-  local prog="$1" name expect jvm_rc jvm_ran fatal_ok nat_rc asan_rc c
+  local prog="$1" name expect jvm_rc jvm_ran fatal_ok nat_rc asan_rc c arg
+  local -a prog_args=() jvm_tail=()
   name="$(basename "$prog" .dawn)"
   expect="$here/$name.expect"
+  # One argument per line. The marker exists only when argv is part of the
+  # corpus contract; without it the historical no-argument invocation remains
+  # byte for byte the same. `--` belongs to dawn's driver namespace and is not
+  # forwarded, while the native binary receives the same array directly.
+  if [ -f "$here/$name.args" ]; then
+    while IFS= read -r arg || [ -n "$arg" ]; do prog_args+=("$arg"); done \
+      < "$here/$name.args"
+    jvm_tail=(-- "${prog_args[@]}")
+  fi
   echo "$name"
 
   # A failed JVM run blocks only the checks that read its output. `emitc`,
@@ -176,7 +186,8 @@ run_corpus() {
   # would otherwise hang the developer's shell and read something different in
   # CI. At /dev/null both backends see end of input, which is itself a case
   # worth agreeing on.
-  "$root/bin/dawn" run --std "$stdcopy" "$prog" >"$work/$name.jvm" 2>"$work/$name.jvm.err" \
+  "$root/bin/dawn" run --std "$stdcopy" "$prog" "${jvm_tail[@]}" \
+    >"$work/$name.jvm" 2>"$work/$name.jvm.err" \
     </dev/null || jvm_rc=$?
   if [ "$jvm_rc" -ne 0 ] && [ "$fatal_ok" -eq 0 ]; then
     verdict "$name:jvm-run" bad "$(cat "$work/$name.jvm.err")"
@@ -248,7 +259,7 @@ run_corpus() {
   fi
 
   nat_rc=0
-  "$work/$name.bin" >"$work/$name.native" 2>"$work/$name.native.err" \
+  "$work/$name.bin" "${prog_args[@]}" >"$work/$name.native" 2>"$work/$name.native.err" \
     </dev/null || nat_rc=$?
 
   # -O0 so the report names the Dawn function rather than whatever it was
@@ -260,7 +271,7 @@ run_corpus() {
       -o "$work/$name.asan" "$work/$name.c" "$root/runtime/c/dawn_rt.c" -lm \
       >"$work/$name.asan.cc" 2>&1; then
       asan_rc=0
-      ASAN_OPTIONS=detect_leaks=1 "$work/$name.asan" \
+      ASAN_OPTIONS=detect_leaks=1 "$work/$name.asan" "${prog_args[@]}" \
         >/dev/null 2>"$work/$name.asan.err" </dev/null || asan_rc=$?
       # LeakSanitizer prints its own banner, and a program that already
       # exits 1 (the panic corpus) would hide a leak behind a matching code

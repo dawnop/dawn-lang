@@ -3130,7 +3130,8 @@ error: usage: dawn run [compiler-options] <target> [-- <program-args>...]
 ```
 
 分隔符自身不转发；其后的 token 不再解释，逐字原样进入程序的 `args()`，包括空串、`--`、
-`--comptime-ffi` 与 `-o`。JVM 与 native 驱动各自实现 parser，以共同的绝对
+`--comptime-ffi` 与 `-o`。`args()` 是整程序输入：无论调用写在入口模块还是任意依赖模块，
+都返回启动该程序时传入的同一份列表。JVM 与 native 驱动各自实现 parser，以共同的绝对
 stdout/stderr/exit 契约保持一致；完整理由见 `run-argv-boundary-design.md`。
 
 `dawnc` 少的那几个子命令不是缺口，是后端的边界：**它拒绝 `use java`**（Java 互操作是
