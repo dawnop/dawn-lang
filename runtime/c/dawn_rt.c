@@ -4589,7 +4589,9 @@ static struct {
   void *lib;
   dawn_cu_context ctx;
   bool ready;
+  int driver_version; /* cuDriverGetVersion: 12060 for 560.94, 13000 and up for r580 */
   dawn_cu_result (*init)(unsigned int);
+  dawn_cu_result (*driver_get_version)(int *);
   dawn_cu_result (*device_get)(dawn_cu_device *, int);
   dawn_cu_result (*ctx_create)(dawn_cu_context *, unsigned int, dawn_cu_device);
   dawn_cu_result (*ctx_destroy)(dawn_cu_context);
@@ -4664,6 +4666,7 @@ static dawn_adt *dawn_gpu_open(void) {
   }
   DAWN_GPU_SYM(get_error_name, "cuGetErrorName");
   DAWN_GPU_SYM(init, "cuInit");
+  DAWN_GPU_SYM(driver_get_version, "cuDriverGetVersion");
   DAWN_GPU_SYM(device_get, "cuDeviceGet");
   DAWN_GPU_SYM(ctx_create, "cuCtxCreate_v2");
   DAWN_GPU_SYM(ctx_destroy, "cuCtxDestroy_v2");
@@ -4677,6 +4680,7 @@ static dawn_adt *dawn_gpu_open(void) {
   DAWN_GPU_SYM(launch_kernel, "cuLaunchKernel");
   dawn_cu_result r = dawn_gpu.init(0);
   if (r != 0) { dawn_adt *e = dawn_gpu_cu_error("cuInit", r); dawn_gpu_reset(); return e; }
+  if (dawn_gpu.driver_get_version(&dawn_gpu.driver_version) != 0) dawn_gpu.driver_version = 0;
   dawn_cu_device dev = 0;
   r = dawn_gpu.device_get(&dev, 0);
   if (r != 0) { dawn_adt *e = dawn_gpu_cu_error("cuDeviceGet", r); dawn_gpu_reset(); return e; }
@@ -4686,8 +4690,30 @@ static dawn_adt *dawn_gpu_open(void) {
   return NULL;
 }
 
+/* The CUDA generation that built a cubin is in its ELF header: EI_ABIVERSION
+ * (byte 8) is 8 from CUDA 13 on, and a Tile IR cubin needs a driver of that
+ * generation (r580, API 13000). A driver of an older generation does not
+ * refuse such an image cleanly: 560.94 (API 12060) answers
+ * CUDA_ERROR_INVALID_IMAGE from cuModuleLoadData on some heap layouts and
+ * writes through a null pointer inside it on others (measured across
+ * optimisation levels and std variants, 2026-09-02). So the refusal is made
+ * here, before the loader sees the bytes, and it names both numbers. */
+static dawn_adt *dawn_gpu_image_needs_newer_driver(const dawn_bytes *cubin) {
+  if (cubin->len < 16 || memcmp(cubin->p, "\x7f" "ELF", 4) != 0) return NULL;
+  int abi = cubin->p[8];
+  int need = abi >= 8 ? 13000 : 0;
+  if (dawn_gpu.driver_version >= need) return NULL;
+  char message[256];
+  snprintf(message, sizeof message,
+           "cuModuleLoadData: a cubin with ELF ABI version %d needs driver API %d and this driver is %d",
+           abi, need, dawn_gpu.driver_version);
+  return dawn_gpu_refuse("gpu.driver_too_old", message);
+}
+
 dawn_adt *dawn_gpu_load_module_host(const dawn_bytes *cubin) {
   dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  e = dawn_gpu_image_needs_newer_driver(cubin);
   if (e != NULL) return e;
   dawn_cu_module mod = NULL;
   dawn_cu_result r = dawn_gpu.module_load_data(&mod, cubin->p);
