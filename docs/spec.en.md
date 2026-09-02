@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 6c50780eca0636ec -->
+<!-- doc-check: translation-of docs/spec.md @ 29d09407eb5f1b9c -->
 
 # Dawn Language Specification
 
@@ -3790,8 +3790,11 @@ behaviours are:
     taken for real characters by primitives that walk by code point
     ([`stdlib-impl-notes.md`](stdlib-impl-notes.md))
 
-**Maths** (`abs min max sin cos sqrt pow to_float to_int ...`) is pure — internally it
-wraps `java.lang.Math` with `unsafe_pure`.
+**Math builtins.** There is no general math-function family and no host-math wrapper. The
+builtin numeric surface is limited to `Int`/`Float` arithmetic operators; the builtin
+conversion functions are `to_float` and `to_int`.<!-- doc-check: builtin-list --> Additional
+operations live in pure Dawn source libraries; for example, `std/narrow` computes square
+roots with integer arithmetic and does not depend on a host math library.
 
 Implementation strategy: wrap Java thinly wherever a thin wrapper will do (`String` simply
 is `java.lang.String`), while the persistent `List`/`Map`/`Set` are **pure Dawn source**

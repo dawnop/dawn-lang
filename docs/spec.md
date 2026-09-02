@@ -3028,8 +3028,9 @@ url/文件名安全字母表且
     overlong 编码顺流而下、被下游按码点走的原语当成真字符
     （[`stdlib-impl-notes.md`](stdlib-impl-notes.md)）
 
-**数学**（`abs min max sin cos sqrt pow to_float to_int ...`）是纯的——内部以 `unsafe_pure`
-包装 `java.lang.Math`。
+**数学内建。** 当前没有通用数学函数族，也没有宿主数学库包装。数字的内建表面限于
+`Int`/`Float` 算术运算符；内建转换函数是 `to_float`、`to_int`。<!-- doc-check: builtin-list -->
+额外运算由纯 Dawn 源库提供，例如 `std/narrow` 用整数算法计算平方根，不依赖宿主数学库。
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
 全部是**纯 Dawn 源**（`List` = `std/pvec` 持久向量，`Map`/`Set` = `std/hamt` 持久 HAMT，
