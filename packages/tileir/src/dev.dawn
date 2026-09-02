@@ -7,11 +7,21 @@
 ## `TileProg`: docs/tile-backend-design.md 5.
 #
 # The shape is std/gpu's. Effect operations cannot be generic (spec 6.5), so
-# the operations traffic in SSA handles (`Int`) and dtype names (`String`),
-# and the functions below add the phantom-typed `Tile[D]` / `Param[D]` and
-# are the only surface a kernel body uses. The dtype markers are std/gpu's
-# `F64` / `F32`, so a `Param[F64]` and a `Tensor[F64]` agree on what "f64"
-# means without a second declaration.
+# the operations traffic in SSA handles (`Int`), dtype names (`String`) and
+# operation names (`String`), and the functions below add the phantom-typed
+# `Tile[D]` / `Param[D]` and are the only surface a kernel body uses. The
+# dtype markers for buffer formats are std/gpu's `F64` / `F32` / `BF16`, so a
+# `Param[F64]` and a `Tensor[F64]` agree on what "f64" means without a second
+# declaration; `I32` and `I1` are declared here instead, because they are tile
+# element formats and not buffer formats: std/gpu's `element_bytes` does not
+# know them and a `Tensor[I1]` cannot be allocated.
+#
+# One effect operation per shape rather than per operation: `t_binaryf` takes
+# the operation's name, so adding `subf` is a name in a list rather than a
+# tenth operation. The cost is that a misspelled name is a refusal when the
+# kernel is recorded (prog.dawn checks the names against a whitelist) instead
+# of a type error; the public functions below are the typed surface that
+# spells the names, so a kernel body never writes one.
 #
 # Handles are minted by the handler; a body never invents one. The three
 # opaque types below are three kinds of handle a body can hold, and mixing
@@ -19,7 +29,8 @@
 # `Tile[F64]` slot, or a host `Int` where an index tile is wanted, are both
 # refused by the checker.
 use std/list
-use std/gpu.{Dtype, dtype_name, F64, F32}
+use std/str
+use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it.
 ## `D` is a phantom (spec 2.7): `Tile[F64]` and `Tile[F32]` are two types over
@@ -38,14 +49,53 @@ pub opaque type Idx = Int
 ## dictionary the effect could not carry.
 pub opaque type Param[D] = (Int, String)
 
+## The 32-bit signed integer tile format: what `arange` and `lanes` answer and
+## what an integer comparison reads. A tile element format, not a buffer
+## format: there is no `Tensor[I32]` in this release.
+pub type I32 = | I32
+
+## The one-bit tile format: what a comparison answers and what a mask is. A
+## tile element format, not a buffer format.
+pub type I1 = | I1
+
+impl Dtype[I32] {
+  fn dtype_name(d: I32) -> String = "i32"
+  fn dtype_bytes(d: I32) -> Int = 4
+}
+
+impl Dtype[I1] {
+  fn dtype_name(d: I1) -> String = "i1"
+  fn dtype_bytes(d: I1) -> Int = 1
+}
+
 ## The device, as operations a recording handler answers. Names carry a `t_`
 ## prefix for the reason std/gpu's carry `gpu_`: `use tileir/dev.{Dev}` brings
 ## every operation into the importing module's namespace (spec 6.5).
 ##
 ## `t_block_id` answers the handle of the block index along `axis` (0, 1, 2).
 ## `t_load` answers the handle of an `n`-wide tile of `dtype` read from
-## parameter `param` at element offset `idx * n`; `t_store` writes one there;
-## `t_addf` answers the handle of the element-wise sum of two `n`-wide tiles.
+## parameter `param` at element offset `idx * n`; `t_store` writes one there.
+## Both take an optional `mask` (an `n`-wide `i1` tile: a lane whose mask bit
+## is 0 is not read and not written), and `t_load` an optional `pad` (an
+## `n`-wide tile of `dtype`: what a masked-off lane reads instead). `None` for
+## both is the unmasked memory operation of the earlier releases, which is
+## what `load` and `store` still issue.
+##
+## `t_constf` / `t_consti` answer an `n`-wide tile every lane of which holds
+## the given host constant; `t_iota` the `n`-wide i32 tile `[0, 1, .., n-1]`;
+## `t_lanes` the `n`-wide i32 tile of the ELEMENT indices block `idx` covers,
+## which is `idx * n + iota` and is the same tile the pointer arithmetic of a
+## load at `idx` is built from.
+##
+## `t_unaryf(op, ..)` / `t_binaryf(op, ..)` / `t_fma` are the element-wise
+## floating-point arithmetic: `op` is one of `negf` / `absf` for the unary
+## form and `addf` / `subf` / `mulf` / `divf` / `maxf` / `minf` for the binary
+## one. `t_cmpf(pred, ..)` / `t_cmpi(pred, ..)` answer an `n`-wide `i1` tile,
+## `pred` being one of `eq` / `ne` / `lt` / `le` / `gt` / `ge`; a float
+## comparison is ORDERED, so every predicate answers 0 on a NaN operand.
+## `t_select` takes an `i1` tile and two `dtype` tiles and answers the second
+## where the condition is 1 and the third where it is 0.
+##
 ## `t_idx_const` / `t_idx_add` / `t_idx_mul` answer scalar i32 handles: a
 ## host constant, and the sum and product of two index handles.
 ##
@@ -62,9 +112,18 @@ pub opaque type Param[D] = (Int, String)
 ## `d_for` and `d_for2` call the pair; a body calls those.
 pub effect Dev {
   fn t_block_id(axis: Int) -> Int
-  fn t_load(param: Int, dtype: String, idx: Int, n: Int) -> Int
-  fn t_store(param: Int, dtype: String, idx: Int, n: Int, v: Int) -> Unit
-  fn t_addf(dtype: String, n: Int, a: Int, b: Int) -> Int
+  fn t_load(param: Int, dtype: String, idx: Int, n: Int, mask: Option[Int], pad: Option[Int]) -> Int
+  fn t_store(param: Int, dtype: String, idx: Int, n: Int, v: Int, mask: Option[Int]) -> Unit
+  fn t_constf(dtype: String, n: Int, value: Float) -> Int
+  fn t_consti(dtype: String, n: Int, value: Int) -> Int
+  fn t_iota(n: Int) -> Int
+  fn t_lanes(idx: Int, n: Int) -> Int
+  fn t_unaryf(op: String, dtype: String, n: Int, a: Int) -> Int
+  fn t_binaryf(op: String, dtype: String, n: Int, a: Int, b: Int) -> Int
+  fn t_fma(dtype: String, n: Int, a: Int, b: Int, c: Int) -> Int
+  fn t_cmpf(pred: String, dtype: String, n: Int, a: Int, b: Int) -> Int
+  fn t_cmpi(pred: String, n: Int, a: Int, b: Int) -> Int
+  fn t_select(dtype: String, n: Int, cond: Int, a: Int, b: Int) -> Int
   fn t_idx_const(value: Int) -> Int
   fn t_idx_add(a: Int, b: Int) -> Int
   fn t_idx_mul(a: Int, b: Int) -> Int
@@ -101,26 +160,188 @@ pub fn block_id(axis: Int) -> Idx !Dev = {
 }
 
 ## The `n`-wide tile of `p`'s format starting at element `idx * n` of `p`.
+## Every lane is read, so `p` must hold at least `(idx + 1) * n` elements;
+## `load_masked` is the one to use when it does not.
 pub fn load[D](p: Param[D], idx: Idx, n: Int) -> Tile[D] !Dev = {
   let i: Int = idx
-  let h: Tile[D] = t_load(position(p), param_dtype(p), i, n)
+  let none: Option[Int] = None
+  let h: Tile[D] = t_load(position(p), param_dtype(p), i, n, none, none)
   h
 }
 
-## Write the `n`-wide tile `v` at element `idx * n` of `p`.
+## `load`, reading only the lanes `mask` selects: a lane whose mask bit is 0
+## is not read at all and answers the matching lane of `pad`. The mask and
+## the padding tile are `n` wide, like the result.
+pub fn load_masked[D](p: Param[D], idx: Idx, n: Int, mask: Tile[I1], pad: Tile[D]) -> Tile[D] !Dev = {
+  let i: Int = idx
+  let hm: Int = mask
+  let hp: Int = pad
+  let h: Tile[D] = t_load(position(p), param_dtype(p), i, n, Some(hm), Some(hp))
+  h
+}
+
+## Write the `n`-wide tile `v` at element `idx * n` of `p`. Every lane is
+## written; `store_masked` is the one to use when `p` is shorter than
+## `(idx + 1) * n`.
 pub fn store[D](p: Param[D], idx: Idx, n: Int, v: Tile[D]) -> Unit !Dev = {
   let i: Int = idx
   let hv: Int = v
-  t_store(position(p), param_dtype(p), i, n, hv)
+  let none: Option[Int] = None
+  t_store(position(p), param_dtype(p), i, n, hv, none)
+}
+
+## `store`, writing only the lanes `mask` selects: a lane whose mask bit is 0
+## leaves memory as it was.
+pub fn store_masked[D](p: Param[D], idx: Idx, n: Int, mask: Tile[I1], v: Tile[D]) -> Unit !Dev = {
+  let i: Int = idx
+  let hm: Int = mask
+  let hv: Int = v
+  t_store(position(p), param_dtype(p), i, n, hv, Some(hm))
+}
+
+# The handle of a binary float operation over two `n`-wide tiles of `d`.
+fn binary[D: Dtype](d: D, op: String, n: Int, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Tile[D] = t_binaryf(op, dtype_name(d), n, x, y)
+  h
+}
+
+fn unary[D: Dtype](d: D, op: String, n: Int, a: Tile[D]) -> Tile[D] !Dev = {
+  let x: Int = a
+  let h: Tile[D] = t_unaryf(op, dtype_name(d), n, x)
+  h
+}
+
+fn compare[D: Dtype](d: D, pred: String, n: Int, a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Tile[I1] = t_cmpf(pred, dtype_name(d), n, x, y)
+  h
+}
+
+fn compare_int(pred: String, n: Int, a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Tile[I1] = t_cmpi(pred, n, x, y)
+  h
 }
 
 ## The element-wise sum of two `n`-wide tiles of format `d`, rounded to
 ## nearest even (the one rounding mode tile-backend-design 3.2's theorem
-## covers).
-pub fn addf[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
+## covers). Every arithmetic operation here carries that rounding mode and no
+## other.
+pub fn addf[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "addf", n, a, b)
+
+## The element-wise difference `a - b`.
+pub fn sub[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "subf", n, a, b)
+
+## The element-wise product `a * b`.
+pub fn mul[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "mulf", n, a, b)
+
+## The element-wise quotient `a / b`.
+pub fn div[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "divf", n, a, b)
+
+## The element-wise larger of `a` and `b`. Neither `flush_to_zero` nor
+## `propagate_nan` is set, so a NaN operand answers the other operand.
+pub fn maxf[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "maxf", n, a, b)
+
+## The element-wise smaller of `a` and `b`.
+pub fn minf[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "minf", n, a, b)
+
+## The element-wise negation `-a`: a sign flip, exact for every value.
+pub fn neg[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "negf", n, a)
+
+## The element-wise absolute value `|a|`: a sign clear, exact for every value.
+pub fn abs[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "absf", n, a)
+
+## The element-wise fused multiply-add `a * b + c`, rounded ONCE (the product
+## is not rounded before the sum). A host reference that multiplies and then
+## adds agrees with this only where the product is exact.
+pub fn fma[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D], c: Tile[D]) -> Tile[D] !Dev = {
   let x: Int = a
   let y: Int = b
-  let h: Tile[D] = t_addf(dtype_name(d), n, x, y)
+  let z: Int = c
+  let h: Tile[D] = t_fma(dtype_name(d), n, x, y, z)
+  h
+}
+
+## The `n`-wide tile of format `d` every lane of which holds `value`. The
+## constant is fixed when the kernel is recorded, which is what a host
+## `Float` in a kernel body means.
+pub fn f_const[D: Dtype](d: D, n: Int, value: Float) -> Tile[D] !Dev = {
+  let h: Tile[D] = t_constf(dtype_name(d), n, value)
+  h
+}
+
+## The `n`-wide i32 tile every lane of which holds `value`.
+pub fn i_const(n: Int, value: Int) -> Tile[I32] !Dev = {
+  let h: Tile[I32] = t_consti("i32", n, value)
+  h
+}
+
+## The `n`-wide `i1` tile every lane of which holds `value`.
+pub fn bool_const(n: Int, value: Bool) -> Tile[I1] !Dev = {
+  let h: Tile[I1] = t_consti("i1", n, if value { 1 } else { 0 })
+  h
+}
+
+## The `n`-wide i32 tile `[0, 1, .., n-1]`.
+pub fn arange(n: Int) -> Tile[I32] !Dev = {
+  let h: Tile[I32] = t_iota(n)
+  h
+}
+
+## The `n`-wide i32 tile of the element indices block `idx` covers:
+## `[idx * n, idx * n + 1, .., idx * n + n - 1]`.
+pub fn lanes(idx: Idx, n: Int) -> Tile[I32] !Dev = {
+  let i: Int = idx
+  let h: Tile[I32] = t_lanes(i, n)
+  h
+}
+
+## `a == b`, `a != b`, `a < b`, `a <= b`, `a > b`, `a >= b` over two `n`-wide
+## tiles of format `d`, as an `n`-wide mask. Ordered: a NaN operand answers 0
+## for every one of the six, `ne` included.
+pub fn eq[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "eq", n, a, b)
+
+pub fn ne[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ne", n, a, b)
+
+pub fn lt[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "lt", n, a, b)
+
+pub fn le[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "le", n, a, b)
+
+pub fn gt[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "gt", n, a, b)
+
+pub fn ge[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ge", n, a, b)
+
+## The same six over two `n`-wide i32 tiles, signed.
+pub fn eq_i(n: Int, a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = compare_int("eq", n, a, b)
+
+pub fn ne_i(n: Int, a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = compare_int("ne", n, a, b)
+
+pub fn lt_i(n: Int, a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = compare_int("lt", n, a, b)
+
+pub fn le_i(n: Int, a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = compare_int("le", n, a, b)
+
+pub fn gt_i(n: Int, a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = compare_int("gt", n, a, b)
+
+pub fn ge_i(n: Int, a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = compare_int("ge", n, a, b)
+
+## The mask of the lanes of block `idx` that fall inside a buffer of `limit`
+## elements: `lanes(idx, n) < limit`. The boundary of every kernel over a
+## vector whose length is not a multiple of the tile width, and the reason
+## `load_masked` and `store_masked` exist.
+pub fn tail_mask(idx: Idx, n: Int, limit: Int) -> Tile[I1] !Dev =
+  lt_i(n, lanes(idx, n), i_const(n, limit))
+
+## The element-wise choice: lane `i` of `a` where lane `i` of `cond` is 1,
+## lane `i` of `b` where it is 0.
+pub fn select[D: Dtype](d: D, n: Int, cond: Tile[I1], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
+  let c: Int = cond
+  let x: Int = a
+  let y: Int = b
+  let h: Tile[D] = t_select(dtype_name(d), n, c, x, y)
   h
 }
 
@@ -210,8 +431,8 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 #
 # The recording handler lives in prog.dawn and is tested there. These blocks
 # pin what this module owns: the handles a body holds are the raw values the
-# operations answered, and the typed surface passes position and dtype
-# through without touching them.
+# operations answered, and the typed surface passes position, dtype and
+# operation name through without touching them.
 
 fn under_counter[T](body: fn() -> T !Dev) -> T = {
   with handle Dev {
@@ -221,13 +442,58 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
-    t_load(_param, _dtype, _idx, _n) => {
+    t_load(_param, _dtype, _idx, _n, _mask, _pad) => {
       let h = next
       next = next + 1
       h
     }
-    t_store(_param, _dtype, _idx, _n, _v) => ()
-    t_addf(_dtype, _n, _a, _b) => {
+    t_store(_param, _dtype, _idx, _n, _v, _mask) => ()
+    t_constf(_dtype, _n, _value) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_consti(_dtype, _n, _value) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_iota(_n) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_lanes(_idx, _n) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_unaryf(_op, _dtype, _n, _a) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_binaryf(_op, _dtype, _n, _a, _b) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_fma(_dtype, _n, _a, _b, _c) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_cmpf(_pred, _dtype, _n, _a, _b) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_cmpi(_pred, _n, _a, _b) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_select(_dtype, _n, _cond, _a, _b) => {
       let h = next
       next = next + 1
       h
@@ -289,6 +555,11 @@ test "a parameter remembers its position and its format" {
   assert param_dtype(b) == "f32"
 }
 
+test "the tile element formats name themselves as Tile IR spells them" {
+  assert (dtype_name(I32), dtype_bytes(I32)) == ("i32", 4)
+  assert (dtype_name(I1), dtype_bytes(I1)) == ("i1", 1)
+}
+
 fn dtype_passed_to_load() -> List[String] !Dev = {
   let a = param(F32, 1)
   let i = block_id(2)
@@ -296,30 +567,160 @@ fn dtype_passed_to_load() -> List[String] !Dev = {
   []
 }
 
-test "load hands the handler the parameter's own format, not a fixed one" {
-  let seen = {
-    with handle Dev {
-      var log: List[String] = []
-      t_block_id(axis) => {
-        log = log ++ ["block_id ${axis}"]
-        0
-      }
-      t_load(param, dtype, idx, n) => {
-        log = log ++ ["load ${param} ${dtype} ${idx} ${n}"]
-        1
-      }
-      t_store(_param, _dtype, _idx, _n, _v) => ()
-      t_addf(_dtype, _n, _a, _b) => 2
-      t_idx_const(_value) => 3
-      t_idx_add(_a, _b) => 4
-      t_idx_mul(_a, _b) => 5
-      t_loop_begin(_lower, _upper, _step, inits) => (6, inits)
-      t_loop_end(outs) => outs
+# What an operation looks like in the log below: `None` for an absent
+# optional operand, its handle for a present one.
+fn opt(o: Option[Int]) -> String = match o {
+  Some(h) -> "Some(${h})"
+  None -> "None"
+}
+
+# Run `body` under a handler that answers a fixed handle per operation and
+# writes one line per operation it saw, and answer the lines. The state cell
+# is the handler's own: a closure may not capture a `var` (spec 4.5), so the
+# log cannot be passed in.
+fn logged(body: fn() -> Unit !Dev) -> List[String] = {
+  with handle Dev {
+    var log: List[String] = []
+    t_block_id(axis) => {
+      log = log ++ ["block_id ${axis}"]
+      0
     }
-    let _r = dtype_passed_to_load()
-    log
+    t_load(param, dtype, idx, n, mask, pad) => {
+      log = log ++ ["load ${param} ${dtype} ${idx} ${n} ${opt(mask)} ${opt(pad)}"]
+      1
+    }
+    t_store(param, dtype, idx, n, v, mask) => {
+      log = log ++ ["store ${param} ${dtype} ${idx} ${n} ${v} ${opt(mask)}"]
+    }
+    t_constf(dtype, n, value) => {
+      log = log ++ ["constf ${dtype} ${n} ${value}"]
+      2
+    }
+    t_consti(dtype, n, value) => {
+      log = log ++ ["consti ${dtype} ${n} ${value}"]
+      3
+    }
+    t_iota(n) => {
+      log = log ++ ["iota ${n}"]
+      4
+    }
+    t_lanes(idx, n) => {
+      log = log ++ ["lanes ${idx} ${n}"]
+      5
+    }
+    t_unaryf(op, dtype, n, a) => {
+      log = log ++ ["unaryf ${op} ${dtype} ${n} ${a}"]
+      6
+    }
+    t_binaryf(op, dtype, n, a, b) => {
+      log = log ++ ["binaryf ${op} ${dtype} ${n} ${a} ${b}"]
+      7
+    }
+    t_fma(dtype, n, a, b, c) => {
+      log = log ++ ["fma ${dtype} ${n} ${a} ${b} ${c}"]
+      8
+    }
+    t_cmpf(pred, dtype, n, a, b) => {
+      log = log ++ ["cmpf ${pred} ${dtype} ${n} ${a} ${b}"]
+      9
+    }
+    t_cmpi(pred, n, a, b) => {
+      log = log ++ ["cmpi ${pred} ${n} ${a} ${b}"]
+      10
+    }
+    t_select(dtype, n, cond, a, b) => {
+      log = log ++ ["select ${dtype} ${n} ${cond} ${a} ${b}"]
+      11
+    }
+    t_idx_const(_value) => 12
+    t_idx_add(_a, _b) => 13
+    t_idx_mul(_a, _b) => 14
+    t_loop_begin(_lower, _upper, _step, inits) => (15, inits)
+    t_loop_end(outs) => outs
   }
-  assert seen == ["block_id 2", "load 1 f32 0 64"]
+  body()
+  log
+}
+
+test "load hands the handler the parameter's own format, not a fixed one" {
+  let seen = logged(() => {
+    let _r = dtype_passed_to_load()
+    ()
+  })
+  assert seen == ["block_id 2", "load 1 f32 0 64 None None"]
+}
+
+fn every_arithmetic_name() -> Unit !Dev = {
+  let a = param(F64, 0)
+  let i = block_id(0)
+  let m = tail_mask(i, 8, 5)
+  let pad = f_const(F64, 8, 0.0)
+  let x = load_masked(a, i, 8, m, pad)
+  let y = load(a, i, 8)
+  let s = addf(F64, 8, x, y)
+  let d = sub(F64, 8, s, y)
+  let p = mul(F64, 8, d, y)
+  let q = div(F64, 8, p, y)
+  let hi = maxf(F64, 8, q, y)
+  let lo = minf(F64, 8, hi, y)
+  let n1 = neg(F64, 8, lo)
+  let a1 = abs(F64, 8, n1)
+  let f1 = fma(F64, 8, a1, y, x)
+  let c = lt(F64, 8, f1, y)
+  let r = select(F64, 8, c, f1, y)
+  store_masked(a, i, 8, m, r)
+}
+
+test "the typed surface spells every operation name the handler sees" {
+  let seen = logged(every_arithmetic_name)
+  assert seen == [
+    "block_id 0",
+    "lanes 0 8",
+    "consti i32 8 5",
+    "cmpi lt 8 5 3",
+    "constf f64 8 0.0",
+    "load 0 f64 0 8 Some(10) Some(2)",
+    "load 0 f64 0 8 None None",
+    "binaryf addf f64 8 1 1",
+    "binaryf subf f64 8 7 1",
+    "binaryf mulf f64 8 7 1",
+    "binaryf divf f64 8 7 1",
+    "binaryf maxf f64 8 7 1",
+    "binaryf minf f64 8 7 1",
+    "unaryf negf f64 8 7",
+    "unaryf absf f64 8 6",
+    "fma f64 8 6 1 1",
+    "cmpf lt f64 8 8 1",
+    "select f64 8 9 8 1",
+    "store 0 f64 0 8 11 Some(10)"
+  ]
+}
+
+test "the six comparison predicates reach the handler by name, floating point and integer alike" {
+  let seen = {
+    let log = logged(() => {
+      let a = param(F64, 0)
+      let i = block_id(0)
+      let x = load(a, i, 8)
+      let ints = arange(8)
+      let _c = [
+        eq(F64, 8, x, x), ne(F64, 8, x, x), lt(F64, 8, x, x),
+        le(F64, 8, x, x), gt(F64, 8, x, x), ge(F64, 8, x, x)
+      ]
+      let _d = [
+        eq_i(8, ints, ints), ne_i(8, ints, ints), lt_i(8, ints, ints),
+        le_i(8, ints, ints), gt_i(8, ints, ints), ge_i(8, ints, ints)
+      ]
+      ()
+    })
+    list.filter(log, l => str.starts_with(l, "cmp"))
+  }
+  assert seen == [
+    "cmpf eq f64 8 1 1", "cmpf ne f64 8 1 1", "cmpf lt f64 8 1 1",
+    "cmpf le f64 8 1 1", "cmpf gt f64 8 1 1", "cmpf ge f64 8 1 1",
+    "cmpi eq 8 4 4", "cmpi ne 8 4 4", "cmpi lt 8 4 4",
+    "cmpi le 8 4 4", "cmpi gt 8 4 4", "cmpi ge 8 4 4"
+  ]
 }
 
 fn loop_seen() -> (Int, Int, Int, Int, Int) !Dev = {
@@ -349,12 +750,21 @@ test "d_for hands the body the carried handle and passes its answer back as the 
     with handle Dev {
       var log: List[String] = []
       t_block_id(_axis) => 0
-      t_load(_param, _dtype, _idx, _n) => 1
-      t_store(_param, _dtype, _idx, _n, _v) => ()
-      t_addf(_dtype, _n, a, b) => {
-        log = log ++ ["addf ${a} ${b}"]
+      t_load(_param, _dtype, _idx, _n, _mask, _pad) => 1
+      t_store(_param, _dtype, _idx, _n, _v, _mask) => ()
+      t_constf(_dtype, _n, _value) => 2
+      t_consti(_dtype, _n, _value) => 3
+      t_iota(_n) => 4
+      t_lanes(_idx, _n) => 5
+      t_unaryf(_op, _dtype, _n, _a) => 6
+      t_binaryf(op, _dtype, _n, a, b) => {
+        log = log ++ ["${op} ${a} ${b}"]
         2
       }
+      t_fma(_dtype, _n, _a, _b, _c) => 7
+      t_cmpf(_pred, _dtype, _n, _a, _b) => 8
+      t_cmpi(_pred, _n, _a, _b) => 9
+      t_select(_dtype, _n, _cond, _a, _b) => 10
       t_idx_const(value) => value + 10
       t_idx_add(_a, _b) => 4
       t_idx_mul(_a, _b) => 5

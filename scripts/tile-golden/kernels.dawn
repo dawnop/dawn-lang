@@ -9,7 +9,8 @@
 use std/io
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32, BF16}
-use tileir/dev.{Dev, Param, param, block_id, load, store, addf, idx_const, idx_add, idx_mul, d_for}
+use tileir/dev.{Dev, Param, Tile, param, block_id, load, load_masked, store, store_masked, addf, sub, mul, div,
+  maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, select, tail_mask, idx_const, idx_add, idx_mul, d_for}
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -63,6 +64,105 @@ fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
   store(out, b, 128, acc)
 }
 
+# ---- the boundary kernels (knife 7a) ----
+#
+# Every kernel below covers a vector whose length is NOT a multiple of the
+# tile width, which is the shape every leetgpu problem has: the last block's
+# lanes past the end are masked off, so they are neither read nor written,
+# and the load answers the padding value there instead. The lengths and the
+# widths are host constants, fixed when the kernel is recorded.
+
+# The length and tile width of the 128-wide kernels: 1000 = 7 * 128 + 104, so
+# the last of the eight blocks has 24 lanes past the end.
+const TAIL_N: Int = 1000
+const TAIL_TILE: Int = 128
+
+# The clipping kernel is the second shape: 333 = 5 * 64 + 13, five full
+# blocks and 51 lanes past the end of the sixth.
+const CLIP_N: Int = 333
+const CLIP_TILE: Int = 64
+
+# f64 vector add over a vector of TAIL_N elements: leetgpu 1 (Vector
+# Addition) and, over a flattened matrix, 8 (Matrix Addition).
+fn vadd_tail(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, TAIL_TILE, TAIL_N)
+  let pad = f_const(F64, TAIL_TILE, 0.0)
+  let ta = load_masked(a, i, TAIL_TILE, m, pad)
+  let tb = load_masked(b, i, TAIL_TILE, m, pad)
+  store_masked(out, i, TAIL_TILE, m, addf(F64, TAIL_TILE, ta, tb))
+}
+
+# Element-wise copy: leetgpu 31 (Matrix Copy). The mask is the whole kernel.
+fn copy(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, TAIL_TILE, TAIL_N)
+  let pad = f_const(F64, TAIL_TILE, 0.0)
+  store_masked(out, i, TAIL_TILE, m, load_masked(x, i, TAIL_TILE, m, pad))
+}
+
+# max(x, 0): leetgpu 21 (ReLU).
+fn relu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, TAIL_TILE, TAIL_N)
+  let zero = f_const(F64, TAIL_TILE, 0.0)
+  let t = load_masked(x, i, TAIL_TILE, m, zero)
+  store_masked(out, i, TAIL_TILE, m, maxf(F64, TAIL_TILE, t, zero))
+}
+
+# x where x >= 0, 0.01 * x where x < 0: leetgpu 23 (Leaky ReLU). Written with
+# `lt` and `select` rather than `maxf`, because that is the shape every
+# masked-branch kernel later takes.
+fn leaky_relu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, TAIL_TILE, TAIL_N)
+  let zero = f_const(F64, TAIL_TILE, 0.0)
+  let alpha = f_const(F64, TAIL_TILE, 0.01)
+  let t = load_masked(x, i, TAIL_TILE, m, zero)
+  let leaked = mul(F64, TAIL_TILE, t, alpha)
+  store_masked(out, i, TAIL_TILE, m, select(F64, TAIL_TILE, lt(F64, TAIL_TILE, t, zero), leaked, t))
+}
+
+# min(max(x, -1), 1) over a second shape: leetgpu 62 (Value Clipping).
+fn clip(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, CLIP_TILE, CLIP_N)
+  let zero = f_const(F64, CLIP_TILE, 0.0)
+  let lo = f_const(F64, CLIP_TILE, -1.0)
+  let hi = f_const(F64, CLIP_TILE, 1.0)
+  let t = load_masked(x, i, CLIP_TILE, m, zero)
+  store_masked(out, i, CLIP_TILE, m, minf(F64, CLIP_TILE, maxf(F64, CLIP_TILE, t, lo), hi))
+}
+
+# No leetgpu problem needs this one: it exists so that every operation knife
+# 7a added crosses `tileiras` (layer 1) and is computed on the device against
+# a hand-written reference (layer 2). An opcode copied from the wrong row of
+# the frozen table assembles as some other operation, and the only thing that
+# tells `subf` from `divf` is an answer.
+#
+# The fused multiply-add is `a * 2 + b`: the product is exact, so a host
+# reference that multiplies and then adds rounds once as well and the two
+# agree bit for bit (a general `fma` does not, and the reference says so).
+fn elemops(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, TAIL_TILE, TAIL_N)
+  let zero = f_const(F64, TAIL_TILE, 0.0)
+  let two = f_const(F64, TAIL_TILE, 2.0)
+  let a = load_masked(x, i, TAIL_TILE, m, zero)
+  let b = load_masked(y, i, TAIL_TILE, m, zero)
+  let d = sub(F64, TAIL_TILE, a, b)
+  let q = div(F64, TAIL_TILE, mul(F64, TAIL_TILE, a, b), two)
+  let v = abs(F64, TAIL_TILE, neg(F64, TAIL_TILE, q))
+  let f = fma(F64, TAIL_TILE, a, two, b)
+  let s1 = select(F64, TAIL_TILE, lt(F64, TAIL_TILE, a, b), d, v)
+  let s2 = select(F64, TAIL_TILE, ge(F64, TAIL_TILE, a, b), s1, f)
+  let s3 = select(F64, TAIL_TILE, eq(F64, TAIL_TILE, a, b), minf(F64, TAIL_TILE, a, b), s2)
+  let s4 = select(F64, TAIL_TILE, ne(F64, TAIL_TILE, a, b), s3, maxf(F64, TAIL_TILE, a, b))
+  let s5 = select(F64, TAIL_TILE, gt(F64, TAIL_TILE, a, b), s4, d)
+  let s6 = select(F64, TAIL_TILE, le(F64, TAIL_TILE, a, b), s5, v)
+  store_masked(out, i, TAIL_TILE, m, s6)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -72,6 +172,18 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("vadd_bf16", ["bf16", "bf16", "bf16"], () => vadd_bf16(param(BF16, 0), param(BF16, 1), param(BF16, 2)))
   "sum" ->
     trace_kernel("sum", ["f64", "f64"], () => sum(param(F64, 0), param(F64, 1), 4))
+  "vadd_tail" ->
+    trace_kernel("vadd_tail", ["f64", "f64", "f64"], () => vadd_tail(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "copy" ->
+    trace_kernel("copy", ["f64", "f64"], () => copy(param(F64, 0), param(F64, 1)))
+  "relu" ->
+    trace_kernel("relu", ["f64", "f64"], () => relu(param(F64, 0), param(F64, 1)))
+  "leaky_relu" ->
+    trace_kernel("leaky_relu", ["f64", "f64"], () => leaky_relu(param(F64, 0), param(F64, 1)))
+  "clip" ->
+    trace_kernel("clip", ["f64", "f64"], () => clip(param(F64, 0), param(F64, 1)))
+  "elemops" ->
+    trace_kernel("elemops", ["f64", "f64", "f64"], () => elemops(param(F64, 0), param(F64, 1), param(F64, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -93,5 +205,6 @@ pub fn main() -> Unit !io = match args() {
       Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
     }
   }
-  _ -> panic("usage: kernels <vadd|vadd_f32|vadd_bf16|sum> [--bytecode <path>] | kernels --bytecode-version")
+  _ -> panic("usage: kernels <vadd|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops>"
+      ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

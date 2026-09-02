@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32}
-use dev.{Dev, Tile, Param, param, block_id, load, store, addf, idx_const, idx_add, idx_mul, d_for, d_for2}
+use dev.{Dev, Tile, I1, Param, param, block_id, load, load_masked, store, store_masked, addf, sub, mul, div, maxf, minf, neg, abs, fma, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, d_for, d_for2}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -39,9 +39,18 @@ use dev.{Dev, Tile, Param, param, block_id, load, store, addf, idx_const, idx_ad
 pub type TileOp =
   | MakeToken(dst: Int)
   | BlockId(dst: Int, axis: Int)
-  | Load(dst: Int, tok_out: Int, param: Int, dtype: String, idx: Int, n: Int, tok_in: Int)
-  | Store(tok_out: Int, param: Int, dtype: String, idx: Int, n: Int, value: Int, tok_in: Int)
-  | AddF(dst: Int, dtype: String, n: Int, lhs: Int, rhs: Int)
+  | Load(dst: Int, tok_out: Int, param: Int, dtype: String, idx: Int, n: Int, mask: Option[Int], pad: Option[Int], tok_in: Int)
+  | Store(tok_out: Int, param: Int, dtype: String, idx: Int, n: Int, value: Int, mask: Option[Int], tok_in: Int)
+  | ConstF(dst: Int, dtype: String, n: Int, value: Float)
+  | ConstI(dst: Int, dtype: String, n: Int, value: Int)
+  | Iota(dst: Int, n: Int)
+  | Lanes(dst: Int, idx: Int, n: Int)
+  | UnaryF(dst: Int, op: String, dtype: String, n: Int, src: Int)
+  | BinaryF(dst: Int, op: String, dtype: String, n: Int, lhs: Int, rhs: Int)
+  | Fma(dst: Int, dtype: String, n: Int, lhs: Int, rhs: Int, acc: Int)
+  | CmpF(dst: Int, pred: String, dtype: String, n: Int, lhs: Int, rhs: Int)
+  | CmpI(dst: Int, pred: String, n: Int, lhs: Int, rhs: Int)
+  | Select(dst: Int, dtype: String, n: Int, cond: Int, lhs: Int, rhs: Int)
   | IdxConst(dst: Int, value: Int)
   | IdxAdd(dst: Int, lhs: Int, rhs: Int)
   | IdxMul(dst: Int, lhs: Int, rhs: Int)
@@ -76,6 +85,37 @@ fn is_pow2(n: Int) -> Bool = n >= 1 && (n & (n - 1)) == 0
 
 fn check_shape(name: String, n: Int) -> Unit =
   if is_pow2(n) { () } else { refuse(name, "a tile width is a power of two, got ${n}") }
+
+# The operation names and predicates the typed surface spells. An effect
+# operation cannot be generic (spec 6.5), so `t_binaryf` and its neighbours
+# take the name as a string; this is where a name that is not one of them is
+# refused, at the point the kernel is recorded, rather than reaching a
+# renderer that would print it and a writer that would have no opcode for it.
+fn one_of(names: List[String], op: String) -> Bool = list.any(names, n => n == op)
+
+fn check_unary(name: String, op: String) -> Unit =
+  if one_of(["negf", "absf"], op) { () } else { refuse(name, "`${op}` is not a unary float operation") }
+
+fn check_binary(name: String, op: String) -> Unit =
+  if one_of(["addf", "subf", "mulf", "divf", "maxf", "minf"], op) {
+    ()
+  } else {
+    refuse(name, "`${op}` is not a binary float operation")
+  }
+
+fn check_pred(name: String, pred: String) -> Unit =
+  if one_of(["eq", "ne", "lt", "le", "gt", "ge"], pred) {
+    ()
+  } else {
+    refuse(name, "`${pred}` is not a comparison predicate")
+  }
+
+fn check_int_dtype(name: String, dtype: String) -> Unit =
+  if one_of(["i32", "i1"], dtype) {
+    ()
+  } else {
+    refuse(name, "`${dtype}` is not an integer tile format")
+  }
 
 # A memory operation names a declared parameter and reads it as the format it
 # was declared with. Both are the body's `Param[D]` against the `params` list
@@ -144,30 +184,98 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         ops = ops ++ [BlockId(d, axis)]
         d
       }
-      t_load(param, dtype, idx, n) => {
+      t_load(param, dtype, idx, n, mask, pad) => {
         check_param(name, params, param, dtype, "load")
         check_shape(name, n)
         let d = next
         let t = next + 1
         next = mint(name, next, 2)
-        ops = ops ++ [Load(d, t, param, dtype, idx, n, tok)]
+        ops = ops ++ [Load(d, t, param, dtype, idx, n, mask, pad, tok)]
         tok = t
         d
       }
-      t_store(param, dtype, idx, n, v) => {
+      t_store(param, dtype, idx, n, v, mask) => {
         check_param(name, params, param, dtype, "store")
         check_shape(name, n)
         let t = next
         next = mint(name, next, 1)
-        ops = ops ++ [Store(t, param, dtype, idx, n, v, tok)]
+        ops = ops ++ [Store(t, param, dtype, idx, n, v, mask, tok)]
         tok = t
         ()
       }
-      t_addf(dtype, n, a, b) => {
+      t_constf(dtype, n, value) => {
         check_shape(name, n)
         let d = next
         next = mint(name, next, 1)
-        ops = ops ++ [AddF(d, dtype, n, a, b)]
+        ops = ops ++ [ConstF(d, dtype, n, value)]
+        d
+      }
+      t_consti(dtype, n, value) => {
+        check_shape(name, n)
+        check_int_dtype(name, dtype)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [ConstI(d, dtype, n, value)]
+        d
+      }
+      t_iota(n) => {
+        check_shape(name, n)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Iota(d, n)]
+        d
+      }
+      t_lanes(idx, n) => {
+        check_shape(name, n)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Lanes(d, idx, n)]
+        d
+      }
+      t_unaryf(op, dtype, n, a) => {
+        check_shape(name, n)
+        check_unary(name, op)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [UnaryF(d, op, dtype, n, a)]
+        d
+      }
+      t_binaryf(op, dtype, n, a, b) => {
+        check_shape(name, n)
+        check_binary(name, op)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [BinaryF(d, op, dtype, n, a, b)]
+        d
+      }
+      t_fma(dtype, n, a, b, c) => {
+        check_shape(name, n)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Fma(d, dtype, n, a, b, c)]
+        d
+      }
+      t_cmpf(pred, dtype, n, a, b) => {
+        check_shape(name, n)
+        check_pred(name, pred)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [CmpF(d, pred, dtype, n, a, b)]
+        d
+      }
+      t_cmpi(pred, n, a, b) => {
+        check_shape(name, n)
+        check_pred(name, pred)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [CmpI(d, pred, n, a, b)]
+        d
+      }
+      t_select(dtype, n, cond, a, b) => {
+        check_shape(name, n)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Select(d, dtype, n, cond, a, b)]
         d
       }
       t_idx_const(value) => {
@@ -239,9 +347,18 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
 pub fn defined(op: TileOp) -> List[Int] = match op {
   MakeToken(dst) -> [dst]
   BlockId(dst, _axis) -> [dst]
-  Load(dst, tok_out, _param, _dtype, _idx, _n, _tok_in) -> [dst, tok_out]
-  Store(tok_out, _param, _dtype, _idx, _n, _value, _tok_in) -> [tok_out]
-  AddF(dst, _dtype, _n, _lhs, _rhs) -> [dst]
+  Load(dst, tok_out, _param, _dtype, _idx, _n, _mask, _pad, _tok_in) -> [dst, tok_out]
+  Store(tok_out, _param, _dtype, _idx, _n, _value, _mask, _tok_in) -> [tok_out]
+  ConstF(dst, _dtype, _n, _value) -> [dst]
+  ConstI(dst, _dtype, _n, _value) -> [dst]
+  Iota(dst, _n) -> [dst]
+  Lanes(dst, _idx, _n) -> [dst]
+  UnaryF(dst, _op, _dtype, _n, _src) -> [dst]
+  BinaryF(dst, _op, _dtype, _n, _lhs, _rhs) -> [dst]
+  Fma(dst, _dtype, _n, _lhs, _rhs, _acc) -> [dst]
+  CmpF(dst, _pred, _dtype, _n, _lhs, _rhs) -> [dst]
+  CmpI(dst, _pred, _n, _lhs, _rhs) -> [dst]
+  Select(dst, _dtype, _n, _cond, _lhs, _rhs) -> [dst]
   IdxConst(dst, _value) -> [dst]
   IdxAdd(dst, _lhs, _rhs) -> [dst]
   IdxMul(dst, _lhs, _rhs) -> [dst]
@@ -280,10 +397,10 @@ test "vadd records five operations behind the entry token, with the token chain 
   assert p.ops == [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, 128, 0),
-    Load(4, 5, 1, "f64", 1, 128, 3),
-    AddF(6, "f64", 128, 2, 4),
-    Store(7, 2, "f64", 1, 128, 6, 5)
+    Load(2, 3, 0, "f64", 1, 128, None, None, 0),
+    Load(4, 5, 1, "f64", 1, 128, None, None, 3),
+    BinaryF(6, "addf", "f64", 128, 2, 4),
+    Store(7, 2, "f64", 1, 128, 6, None, 5)
   ]
 }
 
@@ -302,9 +419,9 @@ test "an f32 kernel records f32 loads, stores and sums" {
   assert p.ops == [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f32", 1, 64, 0),
-    AddF(4, "f32", 64, 2, 2),
-    Store(5, 1, "f32", 1, 64, 4, 3)
+    Load(2, 3, 0, "f32", 1, 64, None, None, 0),
+    BinaryF(4, "addf", "f32", 64, 2, 2),
+    Store(5, 1, "f32", 1, 64, 4, None, 3)
   ]
 }
 
@@ -339,18 +456,18 @@ test "a loop records as one For holding the body's operations, with the token ca
     BlockId(1, 0),
     IdxConst(2, 4),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, 128, 0),
+    Load(4, 5, 0, "f64", 3, 128, None, None, 0),
     IdxConst(6, 1),
     IdxAdd(7, 3, 6),
     IdxAdd(8, 3, 2),
     # iv 9; carried: the tile 10 and the token 11 (entering as 4 and 5);
     # inside: load 12 with token 13, addf 14; results: tile 15, token 16
     For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [
-      Load(12, 13, 0, "f64", 9, 128, 11),
-      AddF(14, "f64", 128, 10, 12),
+      Load(12, 13, 0, "f64", 9, 128, None, None, 11),
+      BinaryF(14, "addf", "f64", 128, 10, 12),
       Continue([14, 13])
     ]),
-    Store(17, 1, "f64", 1, 128, 15, 16)
+    Store(17, 1, "f64", 1, 128, 15, None, 16)
   ]
 }
 
@@ -384,7 +501,7 @@ test "a loop carrying two tiles answers two results in order, the token behind t
     _ -> { assert false }
   }
   # the store after the loop consumes the loop's token result
-  assert p.ops[len(p.ops) - 1] == Store(23, 2, "f64", 1, 8, 22, 21)
+  assert p.ops[len(p.ops) - 1] == Store(23, 2, "f64", 1, 8, 22, None, 21)
 }
 
 fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {

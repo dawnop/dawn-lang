@@ -16,8 +16,8 @@
 # tile<i32> iter_values(%a = %init) -> (ty) { ... continue %v : ty }`).
 use std/list
 use std/str
-use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AddF, IdxConst, IdxAdd, IdxMul, For, Continue}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstI32, MulInt, AddInt, Reshape, Broadcast, Iota, Offset, LoadPtr, StorePtr, AddFloat, ForLoop, Cont, Ret}
+use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, CmpFloat, CmpInt, SelectTile, ForLoop, Cont, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -47,22 +47,73 @@ fn commas(xs: List[String]) -> String =
 # `%a, %b = ` for the values an instruction defines, or nothing for none.
 fn results(ids: List[Int]) -> String = if len(ids) == 0 { "" } else { commas(list.map(ids, v)) ++ " = " }
 
+# The element format a tile type holds, as a constant's `<f64: ..>` prefix
+# spells it.
+fn elem_of(t: Ty) -> String = match t {
+  Token -> panic("tileir: a token holds no element format")
+  Tile(_shape, e) -> elem(e)
+}
+
+# `, %x` for an operand the assembly prints when it is there, "" for one it
+# leaves out; `sep_ty` the same for the type list.
+fn opt_operand(r: Option[Ref]) -> String = match r {
+  Some(x) -> ", ${name(x)}"
+  None -> ""
+}
+
+fn opt_ty(r: Option[Ref], t: Ty) -> String = match r {
+  Some(_x) -> ", ${ty(t)}"
+  None -> ""
+}
+
+# The predicate, as `custom<ComparisonPredicate>` prints it.
+fn predicate(pred: String) -> String = match pred {
+  "eq" -> "equal"
+  "ne" -> "not_equal"
+  "lt" -> "less_than"
+  "le" -> "less_than_or_equal"
+  "gt" -> "greater_than"
+  "ge" -> "greater_than_or_equal"
+  _ -> panic("tileir: `${pred}` is not a comparison predicate")
+}
+
+# The rounding mode is spelled by the operations that take one, and by no
+# other: `maxf` and `minf` have `flush_to_zero` and `propagate_nan` and no
+# rounding mode at all, and this is the list the bytecode writer encodes
+# from as well.
+fn rounds(op: String) -> Bool = op == "addf" || op == "subf" || op == "mulf" || op == "divf"
+
+fn rounding(op: String) -> String = if rounds(op) { " rounding<nearest_even>" } else { "" }
+
 fn line(i: Instr) -> String = match i {
   MakeTok(dst) -> "${v(dst)} = make_token : token"
   BlockIds(x, y, z) -> "${v(x)}, ${v(y)}, ${v(z)} = get_tile_block_id : tile<i32>"
-  ConstI32(dst, value) -> "${v(dst)} = constant <i32: ${value}> : tile<i32>"
+  ConstInt(dst, t, value) -> "${v(dst)} = constant <${elem_of(t)}: ${value}> : ${ty(t)}"
+  ConstFloat(dst, t, value) -> "${v(dst)} = constant <${elem_of(t)}: ${value}> : ${ty(t)}"
   MulInt(dst, t, lhs, rhs) -> "${v(dst)} = muli ${name(lhs)}, ${name(rhs)} : ${ty(t)}"
   AddInt(dst, t, lhs, rhs) -> "${v(dst)} = addi ${name(lhs)}, ${name(rhs)} : ${ty(t)}"
   Reshape(dst, src, from, to) -> "${v(dst)} = reshape ${name(src)} : ${ty(from)} -> ${ty(to)}"
   Broadcast(dst, src, from, to) -> "${v(dst)} = broadcast ${name(src)} : ${ty(from)} -> ${ty(to)}"
-  Iota(dst, t) -> "${v(dst)} = iota : ${ty(t)}"
+  IotaTile(dst, t) -> "${v(dst)} = iota : ${ty(t)}"
   Offset(dst, ptrs, offs, ptr_ty, off_ty) ->
     "${v(dst)} = offset ${name(ptrs)}, ${name(offs)} : ${ty(ptr_ty)}, ${ty(off_ty)} -> ${ty(ptr_ty)}"
-  LoadPtr(dst, tok_out, ptrs, tok_in, ptr_ty, val_ty) ->
-    "${v(dst)}, ${v(tok_out)} = load_ptr_tko weak ${name(ptrs)} token=${name(tok_in)} : ${ty(ptr_ty)} -> ${ty(val_ty)}, token"
-  StorePtr(tok_out, ptrs, value, tok_in, ptr_ty, val_ty) ->
-    "${v(tok_out)} = store_ptr_tko weak ${name(ptrs)}, ${name(value)} token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)} -> token"
-  AddFloat(dst, t, lhs, rhs) -> "${v(dst)} = addf ${name(lhs)}, ${name(rhs)} rounding<nearest_even> : ${ty(t)}"
+  LoadPtr(dst, tok_out, ptrs, mask, pad, tok_in, ptr_ty, mask_ty, val_ty) ->
+    "${v(dst)}, ${v(tok_out)} = load_ptr_tko weak ${name(ptrs)}${opt_operand(mask)}${opt_operand(pad)}"
+      ++ " token=${name(tok_in)} : ${ty(ptr_ty)}${opt_ty(mask, mask_ty)}${opt_ty(pad, val_ty)}"
+      ++ " -> ${ty(val_ty)}, token"
+  StorePtr(tok_out, ptrs, value, mask, tok_in, ptr_ty, mask_ty, val_ty) ->
+    "${v(tok_out)} = store_ptr_tko weak ${name(ptrs)}, ${name(value)}${opt_operand(mask)}"
+      ++ " token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token"
+  FloatUn(dst, op, t, src) -> "${v(dst)} = ${op} ${name(src)} : ${ty(t)}"
+  FloatBin(dst, op, t, lhs, rhs) -> "${v(dst)} = ${op} ${name(lhs)}, ${name(rhs)}${rounding(op)} : ${ty(t)}"
+  FloatFma(dst, t, lhs, rhs, acc) ->
+    "${v(dst)} = fma ${name(lhs)}, ${name(rhs)}, ${name(acc)} rounding<nearest_even> : ${ty(t)}"
+  CmpFloat(dst, pred, t, res_ty, lhs, rhs) ->
+    "${v(dst)} = cmpf ${predicate(pred)} ordered ${name(lhs)}, ${name(rhs)} : ${ty(t)} -> ${ty(res_ty)}"
+  CmpInt(dst, pred, t, res_ty, lhs, rhs) ->
+    "${v(dst)} = cmpi ${predicate(pred)} ${name(lhs)}, ${name(rhs)}, signed : ${ty(t)} -> ${ty(res_ty)}"
+  SelectTile(dst, cond_ty, t, cond, lhs, rhs) ->
+    "${v(dst)} = select ${name(cond)}, ${name(lhs)}, ${name(rhs)} : ${ty(cond_ty)}, ${ty(t)}"
   ForLoop(res, tys, iv, lower, upper, step, inits, carried, _body) -> {
     let iters = if len(inits) == 0 {
       ""
@@ -122,10 +173,10 @@ fn two_loads_one_param() -> TileProg = TileProg {
   ops: [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, 128, 0),
-    Load(4, 5, 0, "f64", 1, 128, 3),
-    AddF(6, "f64", 128, 2, 4),
-    Store(7, 0, "f64", 1, 128, 6, 5)
+    Load(2, 3, 0, "f64", 1, 128, None, None, 0),
+    Load(4, 5, 0, "f64", 1, 128, None, None, 3),
+    BinaryF(6, "addf", "f64", 128, 2, 4),
+    Store(7, 0, "f64", 1, 128, 6, None, 5)
   ]
 }
 
@@ -159,7 +210,7 @@ test "block ids along the three axes bind the matching result of one get_tile_bl
   let p = TileProg {
     name: "axes",
     params: ["f64"],
-    ops: [MakeToken(0), BlockId(1, 2), Load(2, 3, 0, "f64", 1, 8, 0)]
+    ops: [MakeToken(0), BlockId(1, 2), Load(2, 3, 0, "f64", 1, 8, None, None, 0)]
   }
   let text = render(p)
   assert str.contains(text, "%1, %2, %3 = get_tile_block_id : tile<i32>\n")
@@ -184,16 +235,16 @@ fn sum_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 4),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, 128, 0),
+    Load(4, 5, 0, "f64", 3, 128, None, None, 0),
     IdxConst(6, 1),
     IdxAdd(7, 3, 6),
     IdxAdd(8, 3, 2),
     For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [
-      Load(12, 13, 0, "f64", 9, 128, 11),
-      AddF(14, "f64", 128, 10, 12),
+      Load(12, 13, 0, "f64", 9, 128, None, None, 11),
+      BinaryF(14, "addf", "f64", 128, 10, 12),
       Continue([14, 13])
     ]),
-    Store(17, 1, "f64", 1, 128, 15, 16)
+    Store(17, 1, "f64", 1, 128, 15, None, 16)
   ]
 }
 

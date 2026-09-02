@@ -56,9 +56,10 @@
 use std/bytes
 use std/list
 use std/map
+use std/narrow
 use std/str
-use prog.{TileProg, MakeToken, BlockId, Load, Store, AddF, IdxConst, IdxAdd, IdxMul, For, Continue}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstI32, MulInt, AddInt, Reshape, Broadcast, Iota, Offset, LoadPtr, StorePtr, AddFloat, ForLoop, Cont, Ret}
+use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, CmpFloat, CmpInt, SelectTile, ForLoop, Cont, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
@@ -71,21 +72,79 @@ pub const BYTECODE_MINOR: Int = 2
 pub fn bytecode_version() -> String = "${BYTECODE_MAJOR}.${BYTECODE_MINOR}"
 
 # Opcodes (BytecodeOpcodes.td, frozen).
+const OP_ABSF: Int = 0x00
 const OP_ADDF: Int = 0x02
 const OP_ADDI: Int = 0x03
 const OP_BROADCAST: Int = 0x0B
+const OP_CMPF: Int = 0x0E
+const OP_CMPI: Int = 0x0F
 const OP_CONSTANT: Int = 0x10
 const OP_CONTINUE: Int = 0x11
+const OP_DIVF: Int = 0x14
+const OP_FMA: Int = 0x28
 const OP_FOR: Int = 0x29
 const OP_GET_TILE_BLOCK_ID: Int = 0x30
 const OP_IOTA: Int = 0x3A
 const OP_LOAD_PTR_TKO: Int = 0x3D
 const OP_MAKE_TOKEN: Int = 0x44
+const OP_MAXF: Int = 0x45
+const OP_MINF: Int = 0x47
+const OP_MULF: Int = 0x4C
 const OP_MULI: Int = 0x4E
+const OP_NEGF: Int = 0x4F
 const OP_OFFSET: Int = 0x51
 const OP_RESHAPE: Int = 0x5B
 const OP_RETURN: Int = 0x5C
+const OP_SELECT: Int = 0x5F
 const OP_STORE_PTR_TKO: Int = 0x65
+const OP_SUBF: Int = 0x67
+
+# The flag bits of a memory operation, in the order the reader assigns them:
+# the optional attributes of the operation in declaration order first
+# (`memory_scope`, `optimization_hints`), then its optional operands
+# (`mask`, `paddingValue`, `token` on a load; `mask`, `token` on a store).
+const LOAD_FLAG_MASK: Int = 4
+const LOAD_FLAG_PAD: Int = 8
+const LOAD_FLAG_TOKEN: Int = 16
+const STORE_FLAG_MASK: Int = 4
+const STORE_FLAG_TOKEN: Int = 8
+
+# `memory_ordering_semantics`: weak. `comparison_ordering`: ordered, so every
+# predicate answers 0 on a NaN operand. `signedness`: signed. `rounding_mode`:
+# nearest_even, the one mode tile-backend-design 3.2's theorem covers.
+const ORDER_WEAK: Int = 0
+const CMP_ORDERED: Int = 1
+const SIGNED: Int = 1
+const ROUND_NEAREST_EVEN: Int = 0
+
+# The `comparison_predicate` values (AttrDefs.td, an i32 enum).
+fn predicate_value(pred: String) -> Int = match pred {
+  "eq" -> 0
+  "ne" -> 1
+  "lt" -> 2
+  "le" -> 3
+  "gt" -> 4
+  "ge" -> 5
+  _ -> panic("tileir: `${pred}` is not a comparison predicate")
+}
+
+# The opcode of an element-wise float operation, and whether it carries a
+# rounding mode. `maxf` and `minf` take `propagate_nan` and `flush_to_zero`
+# instead, both of which are unit attributes and so are flag bits with no
+# payload; `negf` and `absf` take nothing at all.
+fn float_op(op: String) -> Int = match op {
+  "addf" -> OP_ADDF
+  "subf" -> OP_SUBF
+  "mulf" -> OP_MULF
+  "divf" -> OP_DIVF
+  "maxf" -> OP_MAXF
+  "minf" -> OP_MINF
+  "negf" -> OP_NEGF
+  "absf" -> OP_ABSF
+  _ -> panic("tileir: `${op}` is not a float operation")
+}
+
+fn float_op_rounds(op: String) -> Bool = op == "addf" || op == "subf" || op == "mulf" || op == "divf"
 
 # Type tags (BytecodeTypeOpcodes.td, frozen).
 const TAG_PTR: Int = 12
@@ -115,6 +174,132 @@ fn num_tag(name: String) -> Int = match name {
   "tf32" -> 8
   "f64" -> 9
   _ -> panic("tileir: `${name}` has no Tile IR type tag")
+}
+
+# ---- constant payloads
+#
+# A `constant` names an index into the constant section, and the blob there is
+# the raw memory of a DenseElementsAttr of the result's tile type. MLIR's
+# raw-buffer contract accepts a SPLAT: one element's bytes stand for every
+# lane, which is the only form written here (every constant this package
+# emits repeats one host value). The `i1` case is the dialect reader's own,
+# not MLIR's: over eight lanes a single byte is the splat and bit 0 is its
+# value; at eight or fewer the blob is the bit-packed tile, so the bits of
+# the lanes that exist must all be set.
+#
+# There is no float-to-bits primitive in Dawn, so the pattern is assembled
+# from exact arithmetic the way std/narrow's `bf16_bits` is: the exponent by
+# doublings and halvings, the significand by an exact power-of-two scaling.
+
+# 2^k by exact doublings or halvings, for k within Float's exponent range.
+fn pow2(k: Int) -> Float = {
+  var q = 1.0
+  var i = k
+  while i > 0 {
+    q = q * 2.0
+    i = i - 1
+  }
+  while i < 0 {
+    q = q * 0.5
+    i = i + 1
+  }
+  q
+}
+
+# The e with 2^e <= x < 2^(e+1), for a finite positive x.
+fn exponent(x: Float) -> Int = {
+  var pw = 1.0
+  var e = 0
+  while x >= pw * 2.0 {
+    pw = pw * 2.0
+    e = e + 1
+  }
+  while x < pw {
+    pw = pw * 0.5
+    e = e - 1
+  }
+  e
+}
+
+## The IEEE pattern of `x` in the binary format with `p` significand bits
+## (the hidden bit included) and minimum normal exponent `emin`, as an Int of
+## `p + 1 + the exponent width` bits: the sign, the biased exponent, the
+## significand. `x` must already be a value of the format (the callers round
+## it first); a value above the format's range answers the infinity of its
+## sign and NaN answers the canonical quiet NaN.
+pub fn ieee_bits(x: Float, p: Int, emin: Int, emax: Int) -> Int = {
+  let mant = p - 1
+  let bias = 1 - emin
+  let all_ones = emax + bias + 1
+  if x != x {
+    (all_ones << mant) | (1 << (mant - 1))
+  } else {
+    let neg = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    let sign_bit = if neg { 1 << (mant + exp_width(all_ones)) } else { 0 }
+    let a = if neg { 0.0 - x } else { x }
+    let body = if a == 0.0 {
+      0
+    } else if a == 1.0 / 0.0 {
+      all_ones << mant
+    } else {
+      let e = exponent(a)
+      if e > emax {
+        all_ones << mant
+      } else if e < emin {
+        to_int(a / pow2(emin - mant))
+      } else {
+        ((e + bias) << mant) | to_int((a / pow2(e) - 1.0) * pow2(mant))
+      }
+    }
+    sign_bit | body
+  }
+}
+
+# The width of the exponent field, from its all-ones value.
+fn exp_width(all_ones: Int) -> Int = {
+  var w = 0
+  var v = all_ones
+  while v > 0 {
+    v = v >>> 1
+    w = w + 1
+  }
+  w
+}
+
+# The raw bytes one lane of `dtype` holds for the float value `value`, and
+# how many bytes that is.
+fn float_payload(dtype: String, value: Float) -> Bytes = match dtype {
+  "f64" -> bytes.freeze(put_le(bytes.buf(), ieee_bits(value, 53, -1022, 1023), 8))
+  "f32" -> bytes.freeze(put_le(bytes.buf(), ieee_bits(narrow.round_f32(value), 24, -126, 127), 4))
+  "bf16" -> bytes.freeze(put_le(bytes.buf(), narrow.bf16_bits(narrow.round_bf16(value)), 2))
+  _ -> panic("tileir: a float constant of format `${dtype}` has no encoding")
+}
+
+# The raw bytes of an integer constant tile of `n` lanes of `dtype`.
+fn int_payload(dtype: String, n: Int, value: Int) -> Bytes = match dtype {
+  "i32" -> bytes.freeze(put_le(bytes.buf(), value, 4))
+  "i64" -> bytes.freeze(put_le(bytes.buf(), value, 8))
+  "i1" ->
+    if n > 8 {
+      bytes.freeze(bytes.put(bytes.buf(), value & 1))
+    } else {
+      bytes.freeze(bytes.put(bytes.buf(), if (value & 1) == 1 { (1 << n) - 1 } else { 0 }))
+    }
+  _ -> panic("tileir: an integer constant of format `${dtype}` has no encoding")
+}
+
+# The lanes of a tile type, for the i1 splat rule; a scalar tile is one lane.
+fn lanes_of(t: Ty) -> Int = match t {
+  Token -> panic("tileir: a token is not a tile")
+  Tile(shape, _elem) -> list.fold(shape, 1, (acc, d) => acc * d)
+}
+
+fn elem_name(t: Ty) -> String = match t {
+  Token -> panic("tileir: a token has no element format")
+  Tile(_shape, e) -> match e {
+    Num(nm) -> nm
+    PtrTo(nm) -> panic("tileir: a constant of pointers to ${nm} has no encoding")
+  }
 }
 
 # ---- primitives
@@ -230,6 +415,19 @@ fn emit(w: W, x: Int) -> W = W { ..w, body: put_varint(w.body, x) }
 
 fn emit_ref(w: W, r: Ref) -> W = emit(w, ref_index(w, r))
 
+# An optional operand: its index when it is there, nothing when it is not.
+# The flag bit says which, and the two must agree or the reader takes the
+# next byte of the stream for the operand's index.
+fn emit_opt_ref(w: W, r: Option[Ref]) -> W = match r {
+  Some(x) -> emit_ref(w, x)
+  None -> w
+}
+
+fn opt_flag(r: Option[Ref], bit: Int) -> Int = match r {
+  Some(_x) -> bit
+  None -> 0
+}
+
 # The next index, given to table value `id`.
 fn number(w: W, id: Int) -> W = W { ..w, index: map.insert(w.index, id, w.nvals), nvals: w.nvals + 1 }
 
@@ -247,35 +445,65 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let (w1, ti) = ty(w0, Tile([], Num("i32")))
     emit(emit(emit(emit(w1, OP_GET_TILE_BLOCK_ID), ti), ti), ti)
   }
-  ConstI32(_dst, value) -> {
-    let w1 = emit_op(w0, OP_CONSTANT, Tile([], Num("i32")))
-    let (w2, ci) = const_of(w1, bytes.freeze(put_le(bytes.buf(), value, 4)))
+  ConstInt(_dst, t, value) -> {
+    let w1 = emit_op(w0, OP_CONSTANT, t)
+    let (w2, ci) = const_of(w1, int_payload(elem_name(t), lanes_of(t), value))
+    emit(w2, ci)
+  }
+  ConstFloat(_dst, t, value) -> {
+    let w1 = emit_op(w0, OP_CONSTANT, t)
+    let (w2, ci) = const_of(w1, float_payload(elem_name(t), value))
     emit(w2, ci)
   }
   MulInt(_dst, t, lhs, rhs) -> emit_ref(emit_ref(emit(emit_op(w0, OP_MULI, t), 0), lhs), rhs)
   AddInt(_dst, t, lhs, rhs) -> emit_ref(emit_ref(emit(emit_op(w0, OP_ADDI, t), 0), lhs), rhs)
   Reshape(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_RESHAPE, to), src)
   Broadcast(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_BROADCAST, to), src)
-  Iota(_dst, t) -> emit_op(w0, OP_IOTA, t)
+  IotaTile(_dst, t) -> emit_op(w0, OP_IOTA, t)
   Offset(_dst, ptrs, offs, ptr_ty, _off_ty) -> emit_ref(emit_ref(emit_op(w0, OP_OFFSET, ptr_ty), ptrs), offs)
-  LoadPtr(_dst, _tok_out, ptrs, tok_in, _ptr_ty, val_ty) -> {
-    # results: the tile, the token; flags: token present (bit 4);
-    # memory_ordering_semantics weak; operands: source, token.
+  LoadPtr(_dst, _tok_out, ptrs, mask, pad, tok_in, _ptr_ty, _mask_ty, val_ty) -> {
+    # results: the tile, the token; flags: which of the optional operands
+    # follow; memory_ordering_semantics weak; operands: source, then the
+    # mask, the padding value and the token, each present exactly when its
+    # flag bit is set.
     let w1 = emit_op(w0, OP_LOAD_PTR_TKO, val_ty)
     let (w2, tok) = ty(w1, Token)
-    let w3 = emit(emit(emit(w2, tok), 16), 0)
-    emit_ref(emit_ref(w3, ptrs), tok_in)
+    let flags = LOAD_FLAG_TOKEN | opt_flag(mask, LOAD_FLAG_MASK) | opt_flag(pad, LOAD_FLAG_PAD)
+    let w3 = emit(emit(emit(w2, tok), flags), ORDER_WEAK)
+    emit_ref(emit_opt_ref(emit_opt_ref(emit_ref(w3, ptrs), mask), pad), tok_in)
   }
-  StorePtr(_tok_out, ptrs, value, tok_in, _ptr_ty, _val_ty) -> {
-    # result: the token; flags: token present (bit 3); weak; operands:
-    # destination, value, token.
-    let w1 = emit(emit(emit_op(w0, OP_STORE_PTR_TKO, Token), 8), 0)
-    emit_ref(emit_ref(emit_ref(w1, ptrs), value), tok_in)
+  StorePtr(_tok_out, ptrs, value, mask, tok_in, _ptr_ty, _mask_ty, _val_ty) -> {
+    # result: the token; flags: the mask when there is one, the token;
+    # weak; operands: destination, value, mask, token.
+    let flags = STORE_FLAG_TOKEN | opt_flag(mask, STORE_FLAG_MASK)
+    let w1 = emit(emit(emit_op(w0, OP_STORE_PTR_TKO, Token), flags), ORDER_WEAK)
+    emit_ref(emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask), tok_in)
   }
-  AddFloat(_dst, t, lhs, rhs) -> {
-    # flags: no flush_to_zero; rounding_mode nearest_even.
-    emit_ref(emit_ref(emit(emit(emit_op(w0, OP_ADDF, t), 0), 0), lhs), rhs)
+  FloatUn(_dst, op, t, src) -> emit_ref(emit_op(w0, float_op(op), t), src)
+  FloatBin(_dst, op, t, lhs, rhs) -> {
+    # flags: neither flush_to_zero nor propagate_nan, both unit attributes
+    # and so bits with no payload; then the rounding mode, on the four
+    # operations that take one.
+    let w1 = emit(emit_op(w0, float_op(op), t), 0)
+    let w2 = if float_op_rounds(op) { emit(w1, ROUND_NEAREST_EVEN) } else { w1 }
+    emit_ref(emit_ref(w2, lhs), rhs)
   }
+  FloatFma(_dst, t, lhs, rhs, acc) -> {
+    let w1 = emit(emit(emit_op(w0, OP_FMA, t), 0), ROUND_NEAREST_EVEN)
+    emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc)
+  }
+  CmpFloat(_dst, pred, _t, res_ty, lhs, rhs) -> {
+    # the result is the i1 tile; the predicate and the ordering are required
+    # enum attributes, so they are read inline and there is no flags field.
+    let w1 = emit(emit(emit_op(w0, OP_CMPF, res_ty), predicate_value(pred)), CMP_ORDERED)
+    emit_ref(emit_ref(w1, lhs), rhs)
+  }
+  CmpInt(_dst, pred, _t, res_ty, lhs, rhs) -> {
+    let w1 = emit(emit(emit_op(w0, OP_CMPI, res_ty), predicate_value(pred)), SIGNED)
+    emit_ref(emit_ref(w1, lhs), rhs)
+  }
+  SelectTile(_dst, _cond_ty, t, cond, lhs, rhs) ->
+    emit_ref(emit_ref(emit_ref(emit_op(w0, OP_SELECT, t), cond), lhs), rhs)
   ForLoop(_results, tys, iv, lower, upper, step, inits, carried, body) -> {
     # results: their count, then a type each; flags: `unsigned` absent
     # (13.2 and later know the field); operands: their count, then the
@@ -417,10 +645,10 @@ fn vadd() -> TileProg = TileProg {
   ops: [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, 128, 0),
-    Load(4, 5, 1, "f64", 1, 128, 3),
-    AddF(6, "f64", 128, 2, 4),
-    Store(7, 2, "f64", 1, 128, 6, 5)
+    Load(2, 3, 0, "f64", 1, 128, None, None, 0),
+    Load(4, 5, 1, "f64", 1, 128, None, None, 3),
+    BinaryF(6, "addf", "f64", 128, 2, 4),
+    Store(7, 2, "f64", 1, 128, 6, None, 5)
   ]
 }
 
@@ -453,16 +681,16 @@ fn sum_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 4),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, 128, 0),
+    Load(4, 5, 0, "f64", 3, 128, None, None, 0),
     IdxConst(6, 1),
     IdxAdd(7, 3, 6),
     IdxAdd(8, 3, 2),
     For(9, 7, 8, 6, [4, 5], [10, 11], [15, 16], [
-      Load(12, 13, 0, "f64", 9, 128, 11),
-      AddF(14, "f64", 128, 10, 12),
+      Load(12, 13, 0, "f64", 9, 128, None, None, 11),
+      BinaryF(14, "addf", "f64", 128, 10, 12),
       Continue([14, 13])
     ]),
-    Store(17, 1, "f64", 1, 128, 15, 16)
+    Store(17, 1, "f64", 1, 128, 15, None, 16)
   ]
 }
 
