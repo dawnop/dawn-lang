@@ -449,11 +449,24 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
 的效果一节）。样本的坐标：声明与 handler 在 `std/io.dawn`；消费侧的签名噪音落在编译器的驱动层。
 预研按可达性数出 131 条签名要带上 `Fs`，其中 23 条是干净的 `!Fs`、108 条是 `!Fs !io` 叠加；
 消费者迁移落地（刀 1b）的实测是 158 条（`selfhost/src` 129 条、`compiler-plan/src` 29 条），
-全部拼作 `!Fs !io`，干净的 `!Fs` 是 0 条。叠加的大头是同时可达 `catch_fault` 或 Java FFI 的
-函数，任何 std 分解都清不掉；预研数出的那 23 条干净的也故意拼成叠加，因为上一 release 的
+全部拼作 `!Fs !io`，干净的 `!Fs` 是 0 条。当时全部叠加不是取值，是硬约束：上一 release 的
 工具链配它发布时的 std 编译这棵树，那份 std 里 `io.read_file` 一族仍是 `!io`，单写 `!Fs`
-盖不住（[bootstrap.md](bootstrap.md) 的特性纪律 4）。种子带上这份 std 之后它们可以去掉 `!io`，
-届时再回填。
+盖不住（[bootstrap.md](bootstrap.md) 的特性纪律 4）。
+
+种子推进到 v0.72.0（它带的 std 已含刀 1b）之后回填了一次（刀 3）：全树 226 条 `!Fs !io`
+逐条去掉 `!io` 交给检查器，76 条过、150 条留。过的分布是 `site/src` 27 条、`selfhost/src`
+26 条、`compiler-plan/src` 14 条、契约脚本 7 条、`examples` 与 `playground` 各 1 条；折到
+上面那 158 条上是 40 条转干净，预研估的 23 条偏低。留下的 150 条，按检查器点名的那个操作
+分：控制台输出 42 条（`println` 一族 24 条，`cli_error` 一类包装 18 条）、`io.cwd` 17 条
+（`canon` 拿它把相对路径钉到当前目录），其余是各层 `!io` 辅助函数往上传，尽头是 `getenv`、
+`args`、子进程（`ProcessBuilder` / `Process.waitFor`）、Java FFI（`AsmWriter.of`、
+`ClassLoader.getSystemClassLoader`）与 `catch_fault`。所以「叠加的大头是 std 分解清不掉的
+东西」这句仍然成立，只是大头换了个名字：不是 `catch_fault`，是控制台与 cwd。
+
+三个安装点照旧写 `!Fs !io`，且检查器当场拒绝去掉：`std/io.with_fs_real` 与两个测试对应物
+（`driver/fsmem.with_fs_mem`、`driver/analyze.in_mem`）收的是 body，body 允许同时做 io，
+去掉 `!io` 是把它们能接的实参集合改小。这一刀不动发射：`selfhost-prev-diff.sh` 无声明全绿，
+Core golden 只动了两个模块里三个闭包类型上印出来的效果行。
 
 **裁决：已知风险，暂无缓解；效果集别名等第二个族（Console 或 Env）的样本到了再裁。**
 第一个样本只登记坐标：多个效果同时在场、跨模块传播这两件在 Fs 上会发生，但一个样本不足以
