@@ -197,7 +197,7 @@ def literals(expr):
 # `if` body or a `match` arm's right-hand side is a possible wording: literals
 # in the condition or pattern decide which wording runs, but are not emitted.
 def code_mask(expr):
-    """Replace strings and comments with spaces, preserving offsets."""
+    """Hide quoted contents and comments while preserving offsets and quotes."""
     mask = list(expr)
     i = 0
     while i < len(expr):
@@ -208,17 +208,24 @@ def code_mask(expr):
                 mask[j] = " "
             i = end
             continue
-        if expr[i] == '"':
+        if expr[i] in "\"'":
+            quote = expr[i]
             j = i + 1
+            closed = False
             while j < len(expr):
                 if expr[j] == "\\" and j + 1 < len(expr):
                     j += 2
                     continue
-                if expr[j] == '"':
+                if expr[j] == quote:
                     j += 1
+                    closed = True
                     break
                 j += 1
-            for k in range(i, j):
+            # Keep the delimiters so skip_space can still find a quoted RHS.
+            # Its contents must be invisible to brace and arrow scans; char
+            # literals in particular may themselves contain `{` or `}`.
+            content_end = j - 1 if closed else j
+            for k in range(i + 1, content_end):
                 mask[k] = " "
             i = j
             continue
@@ -370,12 +377,15 @@ def patterns(lits, expr):
     # `if`/`match`. Each arm is a possible complete wording. Do not split an
     # arbitrary concatenation merely because it contains a conditional: that
     # would turn a prefix outside the conditional back into a one-chunk match.
-    bodies = branch_bodies(expr)
-    if bodies:
-        for body in bodies:
-            add(literals(body))
-    else:
-        add(lits)
+    def add_wordings(body, chunks=None):
+        branches = branch_bodies(body)
+        if branches:
+            for branch in branches:
+                add_wordings(branch)
+            return
+        add(literals(body) if chunks is None else chunks)
+
+    add_wordings(expr, lits)
     return cands
 
 
@@ -577,10 +587,58 @@ def self_test():
     ]:
         print("FAIL: match patterns displaced or became message candidates", file=sys.stderr)
         return 1
-    print(
-        "coverage selftest: complete ordered chunks accepted; "
-        "shared-chunk, reversed, condition, and pattern controls refused"
+    bare_match = (
+        'match kind {\n  "alpha" -> "alpha message"\n'
+        '  "beta" -> "beta message"\n}'
     )
+    if patterns(literals(bare_match), bare_match) != [
+        ("alpha message",),
+        ("beta message",),
+    ]:
+        print("FAIL: a bare-string match arm was lost", file=sys.stderr)
+        return 1
+    nested_if = (
+        'if outer { if inner { "nested yes message" } '
+        'else { "nested no message" } }'
+    )
+    if patterns(literals(nested_if), nested_if) != [
+        ("nested yes message",),
+        ("nested no message",),
+    ]:
+        print("FAIL: nested if wordings were combined", file=sys.stderr)
+        return 1
+    match_if = (
+        'match kind {\n  "nested" -> if inner { "match yes message" } '
+        'else { "match no message" }\n  _ -> "other match message"\n}'
+    )
+    if patterns(literals(match_if), match_if) != [
+        ("match yes message",),
+        ("match no message",),
+        ("other match message",),
+    ]:
+        print("FAIL: a match arm's nested if wordings were combined", file=sys.stderr)
+        return 1
+    char_condition = (
+        "if marker == '{' { \"opening brace message\" } "
+        "else { \"other brace message\" }"
+    )
+    if patterns(literals(char_condition), char_condition) != [
+        ("opening brace message",),
+        ("other brace message",),
+    ]:
+        print("FAIL: a char literal brace changed if structure", file=sys.stderr)
+        return 1
+    char_pattern = (
+        "match marker {\n  '}' -> \"closing brace message\"\n"
+        "  _ -> \"other char message\"\n}"
+    )
+    if patterns(literals(char_pattern), char_pattern) != [
+        ("closing brace message",),
+        ("other char message",),
+    ]:
+        print("FAIL: a char literal brace changed match structure", file=sys.stderr)
+        return 1
+    print("coverage selftest: ordered chunks and branch structure verified")
     return 0
 
 
