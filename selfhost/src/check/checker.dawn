@@ -277,6 +277,46 @@ fn ev_crossed(cx: Cx, name: String) -> Bool = {
   false
 }
 
+## Was `name` bound inside the closure whose scopes begin at `boundary`?
+##
+## `ev_crossed` asks the neighbouring question of every open closure at once;
+## this asks it of exactly one, because the only frame that has to answer it
+## alone is a local function's body.
+fn ev_bound_within(cx: Cx, name: String, boundary: Int) -> Bool = {
+  var i = len(cx.frame.scopes) - 1
+  while i >= boundary {
+    if map.has(cx.frame.scopes[i], name) { return true }
+    i = i - 1
+  }
+  false
+}
+
+## The local function this raise sits directly in, when `name`'s evidence is
+## not answered inside that function's own body. `None` when there is no such
+## function, and `None` when the body answers the atom itself.
+##
+## A local `fn` is lifted to an ordinary function with no evidence parameter,
+## and its row is `!io` or pure (`check_local_fn`, spec §6.5 "boundaries"), so
+## a label its body raises has nowhere to arrive from: the lexical lookup walks
+## out to the enclosing function's hidden parameter, and the lifted body cannot
+## read that. Without this the program checked clean and met `ev_slot`'s
+## placeholder at run time (#43).
+##
+## Only the *innermost* closure is asked, because a lambda is the opposite
+## case: its row carries the label out and the call that runs it supplies the
+## evidence, which holds just as well for a lambda a local function builds and
+## returns. What a local function may not do is raise the label itself.
+fn local_fn_missing_evidence(cx: Cx, name: String) -> Option[String] = {
+  let d = len(cx.frame.lambda_stack)
+  if d == 0 { return None }
+  let lc = cx.frame.lambda_stack[d - 1]
+  match lc.local_fn {
+    None -> None
+    Some(fname) ->
+      if ev_bound_within(cx, name, lc.boundary) { None } else { Some(fname) }
+  }
+}
+
 ## One atom's evidence as an expression, from wherever the frame being checked
 ## can reach it. `None` means nothing answers it and the caller decides what to
 ## say about that.
@@ -2210,6 +2250,7 @@ test "loop jumps respect lambda boundaries" {
         sugar: false,
         arm: false,
         ctl: false,
+        local_fn: None,
         handler_of: None
       }]
     }
@@ -3504,7 +3545,7 @@ test "an isolated context reports its own effects, then restores all eight field
       dict_syms: outer_dicts,
       lambda_stack: [LambdaCx {
         boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false,
-        ctl: false, handler_of: None
+        ctl: false, local_fn: None, handler_of: None
       }],
       loop_stack: [7],
       isolated: false
@@ -3818,6 +3859,7 @@ fn eta_bounded_fn_value(
     sugar: false,
     arm: false,
     ctl: false,
+    local_fn: None,
     handler_of: None
   }
   var cx1 = Cx {
@@ -4760,7 +4802,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       check_ctor_call(cx, cname, cargs, spread, if has_braces { CBraces } else { CBare },
         expected, None, cclo, cchi, lo, hi)
     ELambda(params, body, sugar, lo, hi) ->
-      check_lambda(cx, params, body, sugar, false, false, None, expected, lo, hi)
+      check_lambda(cx, params, body, sugar, false, false, None, None, expected, lo, hi)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
@@ -5187,6 +5229,11 @@ fn check_unsafe_pure(cx: Cx, body: Expr, expected: Option[Ty], lo: Int, hi: Int)
 ## operation's (docs/oneshot-design.md §11.2, §11.3). Nothing in this function
 ## reads it; it is written into the frame for the three consumers listed on
 ## `cx.LambdaCx.ctl`.
+##
+## `local_fn` is the name of the local `fn` whose body this closure is, and is
+## non-`None` only on the call from `check_local_fn`. Nothing here reads it
+## either: it is written into the frame for `local_fn_missing_evidence`, which
+## is the one question a lifted body has to answer differently from a closure.
 fn check_lambda(
   cx: Cx,
   params: List[LambdaParam],
@@ -5195,6 +5242,7 @@ fn check_lambda(
   arm: Bool,
   ctl: Bool,
   handler_of: Option[Int],
+  local_fn: Option[String],
   expected: Option[Ty],
   lo: Int,
   hi: Int
@@ -5276,6 +5324,7 @@ fn check_lambda(
       sugar: sugar,
       arm: arm,
       ctl: ctl,
+      local_fn: local_fn,
       handler_of: handler_of
     }
   cx1 = Cx {
@@ -5429,8 +5478,8 @@ fn declare_cells(cx: Cx, cells: List[HandlerCell], hid: Int) -> (Cx, List[TStmt]
 fn check_rest(cx: Cx, rest: Expr, hid: Int, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
   match rest {
     ELambda(params, body, sugar, rlo, rhi) ->
-      check_lambda(cx, params, body, sugar, false, false, Some(hid), rest_expected(expected),
-        rlo, rhi)
+      check_lambda(cx, params, body, sugar, false, false, Some(hid), None,
+        rest_expected(expected), rlo, rhi)
     _ -> check_expr(cx, rest, rest_expected(expected))
   }
 
@@ -5972,7 +6021,7 @@ fn check_handle_arms(
               "the arm is the operation's body: " ++ ty_show(cxa.adts, field.ty))
           }
           let (cxb, at, ax) = check_lambda(cxa, a.params, a.body, true, true, false,
-            Some(hid), Some(field.ty), a.lo, a.hi)
+            Some(hid), None, Some(field.ty), a.lo, a.hi)
           cxa = cxb
           let (_, aret, aeff) = fn_ty_parts(at)
           if not assignable(cxa, aret, fret) {
@@ -6076,7 +6125,7 @@ fn check_control_arm(
   let k_ty = TyFn([fret], answer, cont_row(reff))
   let kp = LambdaParam { name: kname, ann: None, lo: a.blo, hi: a.bhi }
   let (cxb, at, ax) = check_lambda(cx1, a.params ++ [kp], a.body, true, true, true,
-    Some(hid), Some(TyFn(fptys ++ [k_ty], answer, EPure)), a.lo, a.hi)
+    Some(hid), None, Some(TyFn(fptys ++ [k_ty], answer, EPure)), a.lo, a.hi)
   cx1 = cxb
   let (_, aret, aeff) = fn_ty_parts(at)
   if not assignable(cx1, aret, answer) {
@@ -6766,7 +6815,7 @@ fn check_local_fn(
   let (cxc, sid) = declare(cx1, name, ft, false, nlo, nhi)
   cx1 = cxc
   let (cxd, actual, lam) =
-    check_lambda(cx1, params, body, false, false, false, None, Some(ft), lo, hi)
+    check_lambda(cx1, params, body, false, false, false, None, Some(name), Some(ft), lo, hi)
   cx1 = cxd
   match actual {
     TyFn(_, ar, ae) -> {
@@ -7818,6 +7867,19 @@ fn dyn_evidence_args(cx: Cx, feff: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr], L
 fn resolve_label_evidence(cx: Cx, eid: Int, lo: Int, hi: Int) -> (Cx, TExpr, Bool) = {
   var cx1 = cx
   let nm = ev_local_name(cx1, eid)
+  # a local function is lifted without evidence parameters, so a name resolving
+  # through the enclosing body is not evidence it can read; the refusal is here
+  # rather than at run time (#43). Inside comptime the refusal belongs to
+  # `leave_isolated`, as below.
+  if not cx1.frame.isolated {
+    match local_fn_missing_evidence(cx1, nm) {
+      Some(fname) -> {
+        cx1 = local_fn_effect(cx1, fname, eid, lo, hi)
+        return (cx1, XError(lo, hi), false)
+      }
+      None -> ()
+    }
+  }
   let (cxa, found) = ev_expr(cx1, nm, label_key(eid), TyAdt(eid, []), lo, hi)
   cx1 = cxa
   match found {
@@ -7955,6 +8017,20 @@ fn eff_drop(e: Eff, ids: List[Int]) -> Eff = {
     if not list.contains(ids, id) { ls = ls ++ [l] }
   }
   eff_with_labels(eff_base(e), ls)
+}
+
+## A local function raised a label its own body does not answer. It has no way
+## to declare one (`check_local_fn` refuses every row but `!io` and pure) and
+## no slot to receive one, so both halves of the way out are elsewhere: the top
+## level, where a signature can carry the label, or a handler inside this very
+## body, which needs no signature at all.
+fn local_fn_effect(cx: Cx, fname: String, eid: Int, lo: Int, hi: Int) -> Cx = {
+  let nm = effect_of(cx, eid).name
+  cerr_h(cx, "`" ++ fname ++ "` uses the effect `" ++ nm ++
+      "`, but a local function cannot carry an effect label",
+    lo, hi,
+    "lift `" ++ fname ++ "` to the top level and declare !" ++ nm ++
+      ", or handle it inside its body with `with handle " ++ nm ++ " { ... }`")
 }
 
 ## docs/effects-design.md §4.2: the effect is used, and nothing in scope
@@ -12555,6 +12631,7 @@ fn arm_cx() -> Cx =
           sugar: true,
           arm: true,
           ctl: false,
+          local_fn: None,
           handler_of: None
         }]
       }
