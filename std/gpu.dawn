@@ -794,6 +794,22 @@ test "the fake device refuses too few buffers before invoking the reference kern
   }
 }
 
+fn one_short_buffer() -> Result[Unit, ForeignError] !Gpu = {
+  let a = alloc(F64, 2)?
+  let b = alloc(F64, 2)?
+  launch("vadd", 1, [handle_of(a), handle_of(b)])
+}
+
+test "the fake device refuses one buffer short instead of overwriting an input" {
+  match with_gpu_fake(reference_kernels(), one_short_buffer) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.kind == "gpu.bad_arity"
+      assert e.message == "fake device: `vadd` wants 3 buffer(s), got 2"
+    }
+  }
+}
+
 fn use_after_free() -> (Int, Int, String, String) !Gpu = {
   let a: Result[Tensor[F64], ForeignError] = alloc(F64, 2)
   let b: Result[Tensor[F64], ForeignError] = alloc(F64, 2)

@@ -347,6 +347,25 @@ NoSuchMethodError: 'long ordprim.dawn$default$Ord$cmp(Object, Object, Object)'
 `interp.dawn` 把非标量渲染成 `"<value>"` 那条(`const_fold:jvm`)也在这里闭合:
 有了字典,解释器有真的东西可调。
 
+### 6.1 尾款:元组少的是见证那条路(2026-09-03,#46)
+
+上面那句「渲染与 `Eq`/`Hash`/`Ord` 走同一条字典轨」对元组只成立了一半。
+
+一个类型到渲染有两条路:`to_string` 与 `${...}` 直接落在 `to_str`/`show_at`,
+而 `show(x)` 是 trait 方法,先解见证再由 `lower_trait_call` 决定去哪。第二条路上有
+一道岔口 `primitive_subject`:表里查不到 impl 时,它只对 `Eq`/`Hash` 答「那就是语言
+自己定义的关系」。元组没有 head,谁也写不出 `impl Show[(A, B)]`,checker 于是自己
+发见证(`show_tuple_witness`),lowering 却拿这个见证去表里找一条不可能存在的行,
+`show((1, 4))` 死在 `lower: no impl for trait 3`。
+
+**为什么两年没人踩到:走 bound 的那条路是好的。** `[T: Show]` 实例化到元组时见证
+是字典,槽由 `make_prim_slot` 合成,合成物调的正是 `show_at`。所以泛型消费者、
+`to_string`、插值三种写法全绿,只有「静态类型就是元组的直接 `show`」这一种红。
+`show_derive.dawn` 里那两行元组恰好写的是 `to_string`,于是语料在洞的正上方绿着。
+
+教训与 §11.3 那条同形:**一个关系有两个入口时,语料必须两个都写**。补的语料是
+`scripts/spike-native/show_tuple.dawn`,每一行都写 `show`。
+
 ## 7. S1.5:不是「六表合一」,是「拆开被合错的、合并被拆错的」
 
 > **已落地(2026-07-26)。** 两件破坏性改动照裁定做了:`Hash[Float]` 与
