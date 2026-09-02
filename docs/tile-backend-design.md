@@ -5,7 +5,9 @@
 > （0.71.0 发布之后、种子已推进到 v0.71.0）；文中 file:line 对 `aca84fb9`（0.71.0），
 > 两者之间只有种子推进，源码未动。
 > **刀 1 已落地**（`std/gpu.dawn`：`Gpu` 效果、`Dtype`、`Tensor[D]`、`with_gpu_fake`），
-> 落地形状以源码为准，§4 描述的就是它；刀 0 与刀 2 起未动工。
+> 落地形状以源码为准，§4 描述的就是它。**刀 2 已落地**（`packages/tileir`：`Dev` 效果、
+> `Tile[D] / Param[D] / Idx`、`TileProg`、记录 handler、文本渲染器，`scripts/tile-golden`），
+> §5.1 描述的就是它；刀 0 与刀 3 起未动工。
 > 前置勘察与计划稿是两份不入库的研究备忘录（agent-handoff 的
 > `cutile-backend-fit.md` 与 `tile-backend-plan.md`），探索过程留在那里，
 > 本文只保留结论与证据坐标。
@@ -266,13 +268,15 @@ pub fn reference_kernels() -> Map[String, fn(List[List[Float]]) -> List[Float]]
 
 ## 5. 设备层（分阶段路线）
 
-### 5.1 kernel 体是什么值
+### 5.1 kernel 体是什么值（刀 2 已落地）
 
-一个只发 `Dev` 效果的普通 Dawn 函数。操作单态、句柄级，与 `Gpu` 同款；类型化包装加幻影：
+一个只发 `Dev` 效果的普通 Dawn 函数。操作单态、句柄级，与 `Gpu` 同款；类型化包装加幻影
+（落地形状以 `packages/tileir/src/dev.dawn` 为准）：
 
 ```dawn
 pub opaque type Tile[D] = Int                 # kernel 内的 SSA 名
 pub opaque type Param[D] = (Int, String)      # 参数位与 dtype 名，在 param() 处定格
+pub opaque type Idx = Int                     # 标量 i32 tile 的句柄：block id 及其派生
 
 pub effect Dev {
   fn t_block_id(axis: Int) -> Int
@@ -289,20 +293,37 @@ fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
 }
 ```
 
-`trace_kernel("vadd", [...], () => vadd(param(F64,0), param(F64,1), param(F64,2)))` 在记录
-handler 下跑一遍，草案已产出一段 `cuda_tile.module @m { entry @vadd(...) { ... } }` 文本，
-其中 `get_tile_block_id`、两个 `load_ptr_tko`、`addf ... rounding<nearest_even>`、
-`store_ptr_tko` 与 token 链 `%2 → %4 → %6` 都在。那段文本只证明机制，不是合法 Tile IR：
-真正的 `load_ptr_tko` 要先用 `iota / reshape / broadcast / offset` 把标量指针铺成
-`tile<128xptr<f64>>`。刀 2 的第一件事就是换成规范拼写，以本机 `cuda-tile-translate`
-round-trip 一次为准。
+`trace_kernel("vadd", ["f64","f64","f64"], () => vadd(param(F64,0), param(F64,1), param(F64,2)))`
+在记录 handler 下跑一遍，`render` 出的文本就是 `scripts/tile-golden/vadd.mlir`（26 行）。
+拼写按 Tile IR 规范附录的向量加示例与 `cuda-tile` 仓库的 round-trip 测试
+（`test/Bytecode/operationsTest.mlir`）：入口参数是标量 `tile<ptr<f64>>`，每个 load / store
+之前先 `reshape → broadcast → offset` 把它铺成 `tile<128xptr<f64>>`，偏移是
+`idx * 128 + iota`（`constant / muli / reshape / broadcast / iota / addi` 六行）；
+链头 `%0 = make_token : token`，`load_ptr_tko weak %p token=%t : ... -> tile<128xf64>, token`
+与 `store_ptr_tko weak %p, %v token=%t : ... -> token` 各消费一个 token 产生一个；
+`addf` 显式 `rounding<nearest_even>`。同一 (参数, 索引, 宽度) 的指针梯子只发一次。
+**文本合法性只对照了规范文本与那份测试**：本机没有 `cuda-tile-translate`（不在 pip，
+要从钉在特定 LLVM commit 的源码构建），round-trip 推迟到刀 3 的 `tileiras` 层，
+那一层的退出码才是机器判词。
 
-两个设计点：
+落地的设计点：
 
-- **Tile 程序的正式表示是 ADT 不是字符串**：`TileProg = { name, params, ops: List[TileOp] }`，
-  `TileOp` 是 SSA 形式的变体。文本渲染与字节码编码是它的两个消费者，golden 钉文本，
-  `tileiras` 钉字节码。
-- **token 链线性**：handler 里一个 `tok` 状态格，每个内存操作消费上一个、产生下一个。
+- **Tile 程序的正式表示是 ADT 不是字符串**：`TileProg = { name, params: List[String], ops: List[TileOp] }`，
+  `TileOp` 是 SSA 形式的变体：`MakeToken(dst)`、`BlockId(dst, axis)`、
+  `Load(dst, tok_out, param, dtype, idx, n, tok_in)`、`Store(tok_out, param, dtype, idx, n, value, tok_in)`、
+  `AddF(dst, dtype, n, lhs, rhs)`，外加给刀 5 留位的
+  `For(iv, lower, upper, step, inits, carried, results, body)`（本版无人记录、渲染器拒绝）。
+  文本渲染与字节码编码是它的两个消费者，golden 钉文本，`tileiras` 钉字节码。
+  记录里的句柄是 trace 编号（从 1 起，0 是入口 token），渲染时按出现顺序重编，
+  因为指针梯子的中间名在记录里没有。
+- **token 链线性**：handler 里一个 `tok` 状态格，每个内存操作消费上一个、产生下一个，
+  `MakeToken(0)` 是链头。
+- **记录 handler 在效果之上做两项校验并 `panic`**：`param(d, pos)` 必须与 `trace_kernel`
+  的 `params` 表一致（位置在范围内、格式相同），tile 宽度必须是 2 的幂。前者是刀 2
+  负控「`load` 的 dtype 写死 f64」变红的位置：f32 kernel 的入口说 f32、load 说 f64，
+  在记录时就被拒，而不是等到 `tileiras`。
+- 与计划稿的一处出入：索引不是裸 `Int` 而是 `opaque type Idx = Int`。宿主整数与 SSA
+  句柄在类型上分开，把宿主数当索引传给 `load` 是类型错误，不是渲染器里的悬空句柄。
 
 ### 5.2 kernel 内的控制流
 
@@ -408,7 +429,7 @@ kernel 秒级，包测试秒级；budget 行按 `check-gate-budgets.py` 规则�
 |----|-----------------|--------|------|------|------|
 | **1 宿主效果 + 假设备**（已落地） | 「一个 `!Gpu` 程序在没有 GPU 的机器上跑完 vadd 并得到正确答案」 | `std/gpu.dawn`、`modules.txt`、`std.gpu.core` golden、checker-corpus 一条幻影 must-red、opaque-twin 第三种标记与语料 | `dawn test --stdlib` 过 | 删掉 `upload` 的长度校验，假设备下长度不符仍 `Ok` 的测试要红 | 1 到 2 |
 | **0 窄浮点**（与刀 1 并行，D3） | 「`round_bf16(a + b)` 在两个后端上与精确 oracle 逐位一致」 | `std/narrow.dawn`、`scripts/narrow-contract/`、`spike-native/narrow_round.dawn` 加 `.expect`、`opaque-twin/narrow.dawn` | 174 条以上 `differential ok`；twin 过 | ties-to-even 改成 ties-away，oracle 用例红；删量子钳位，`1e-40` 用例红 | 1 到 2 |
-| **2 记录 handler + 文本 golden** | 「同一个 kernel 体记录两次产出逐字节相同的 Tile IR 文本，且与手写 golden 相同」 | `packages/tileir`（`Dev`、`Tile[D] / Param[D]`、`TileProg`、渲染器）、`scripts/tile-golden/vadd.mlir`、包测试 | golden 逐字节；本机 `cuda-tile-translate` 接受文本 | 渲染器少发一个 token 操作数，golden 红；`t_load` 的 dtype 写死 `f64`，`Tile[F32]` 用例红 | 2 到 3 |
+| **2 记录 handler + 文本 golden**（已落地） | 「同一个 kernel 体记录两次产出逐字节相同的 Tile IR 文本，且与手写 golden 相同」 | `packages/tileir`（`Dev`、`Tile[D] / Param[D] / Idx`、`TileProg`、渲染器）、`scripts/tile-golden/{vadd,vadd_f32}.mlir` 与 `run.sh`（两后端）、opaque-twin 一条语料、包测试 | golden 逐字节，两后端；`cuda-tile-translate` 本机没有，round-trip 推迟到刀 3 | 渲染器少发 store 的 token 操作数，`vadd.mlir` 红；`load` 的 dtype 写死 `f64`，f32 kernel 在记录时被拒而 f64 的不动（两条都内置在 `run.sh`，两后端各验） | 2 到 3（实报 1；门禁 17s 本机，落在 `test` job，budget 323s → 357s） |
 | **3 字节码写入器 + CI 层 1** | 「`tileiras --gpu-name sm_86` 接受我们写的字节码并产出 cubin」 | `packages/tileir/bytecode.dawn`（对照 cuTile.jl `encodings.jl` 与 `writer.jl`，估 1500 行）、`gates.yml` 新 job `tile`、`toolchain.txt` | CI 绿；本机 round-trip 与文本 golden 一致 | 改错一个 op 编码，`tileiras` 红（层 1 的阳性对照，要先证明它会红） | 4 到 6 |
 | **4 `with_gpu_real` + 本机对拍** | 「GPU 算出的 vadd 与假设备逐位一致」 | `RtGpu` 加六个 intrinsic、`dawn_rt.c` 的 `dlopen libcuda`、JVM `dawn/rt/Gpu` 拒绝类、`with_gpu_real`、`scripts/tile-gpu-diff/`、`intrinsic-parity.py` 锚点、CI 台账检查 | 本机 `run.sh` 全绿并写台账；CI 台账门绿 | `launch` 的 grid 写成 0，对拍红；台账 commit 写成非祖先，CI 红 | 3 到 4 |
 | **5 结构化控制流 + 第二个 kernel** | 「带 `d_for` 的归约 kernel 与假设备逐位一致」 | `d_for / d_if` 普通函数加 `t_loop_begin / t_loop_end` 操作、区域栈、token 穿过循环携带值 | 新 golden、层 1、本机对拍 | 循环携带值漏一个，golden 或 `tileiras` 红 | 3 到 4 |
