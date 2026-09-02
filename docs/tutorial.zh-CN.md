@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 4389020e54f40c70 -->
+<!-- doc-check: translation-of docs/tutorial.md @ ee4c79efbe5c1587 -->
 
 # Dawn 教程
 
@@ -843,9 +843,11 @@ pub fn main() -> Unit !io = {
 
 ### v1 的边界
 
-- 一个臂就是一次普通调用、返回值即结果（**尾恢复**）。没有「把延续存起来以后再恢复」
-  「恢复两次」这类玩法——那需要延续捕获，不在这一档里。
-- 「操作不返回调用点」的用法请走既有的失败机制：`Result` + `?`、
+- **尾恢复**臂就是一次普通调用、返回值即结果。声明为 `ctl` 的效果还可以带**控制臂**
+  （`op(...) resume k => ...`）：臂绑住这次操作的延续而不恢复它，臂的值就是整个
+  `with handle` 的值，`k` 是个普通函数值，可以存下来以后再恢复。只能一次：「恢复两次」
+  不在这一档里；永远不会恢复的那一个用 `discard` 丢弃，它会跑掉挂起帧的释放。
+- 「操作不返回调用点」的用法通常走既有的失败机制：`Result` + `?`、
   `catch_fault`/`catch_panic`/`bracket`。
 - 效果不带类型参数（没有 `effect Yield[T]`）。
 - comptime / const 初始化不发具名效果，也装不了 handler。trait / impl 方法可以带标签，
@@ -853,7 +855,9 @@ pub fn main() -> Unit !io = {
   标签与 trait 恰相等的行，因为每个标签都是这个方法的一格隐藏参数。
 - 带标签的函数可以当函数值传：标签进到值的类型里，由调用点供 handler。只有**操作**本身
   不行，它背后没有可取的函数符号；包一层 lambda（`() => ask()`）即可。
-- 臂是闭包，所以臂里不能写外层的 `var`，也不能 `return`/`break` 跳出去。
+- 臂是闭包，所以臂里不能写外层的 `var`，也不能 `return`/`break` 跳出去。例外是 handler
+  自己的状态：臂表开头可以声明若干 `var` 格子，为这一次安装私有，臂读它写它，
+  `with handle` 之后的块剩余读它。
 
 完整规则见 [spec.md](spec.md) §6.5，设计取舍见
 [effects-design.md](effects-design.md)。

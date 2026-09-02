@@ -904,11 +904,15 @@ pub fn main() -> Unit !io = {
 
 ### The v1 boundary
 
-- An arm is one ordinary call and its return value is the result (**tail resumption**).
-  There is no storing the continuation to resume later and no resuming twice — those
-  need continuation capture, which is not in this tier.
-- For "the operation does not come back to the call site", use the failure machinery
-  that already exists: `Result` + `?`, `catch_fault`/`catch_panic`/`bracket`.
+- A **tail-resumptive** arm is one ordinary call and its return value is the result.
+  An effect declared `ctl` may also carry **control arms**
+  (`op(...) resume k => ...`), which bind the continuation instead of resuming: the
+  arm's value becomes the value of the whole `with handle`, and `k` is an ordinary
+  function value that may be stored and resumed later. Once only: resuming twice is not
+  in this tier, and one that will never be resumed is abandoned with `discard`, which
+  is what runs the suspended frames' releases.
+- For "the operation does not come back to the call site" the failure machinery is
+  usually the answer: `Result` + `?`, `catch_fault`/`catch_panic`/`bracket`.
 - An effect takes no type parameters (there is no `effect Yield[T]`).
 - comptime and const initialisers raise no named effect and cannot install a handler.
   Trait and impl methods do take labels, and so does any written function type (an `alias`
@@ -918,7 +922,9 @@ pub fn main() -> Unit !io = {
   type, and the call site supplies the handler. Only an **operation** cannot, since there
   is no function symbol behind it; wrap it in a lambda (`() => ask()`).
 - An arm is a closure, so it cannot write to an enclosing `var` and cannot `return` or
-  `break` its way out.
+  `break` its way out. Its own state is the exception: the arm table may open with
+  `var` declarations, private to this one installation, which the arms read and write
+  and the block after the `with handle` reads afterwards.
 
 The full rules are in [spec.en.md](spec.en.md) §6.5 and the design trade-offs in
 [effects-design.md](effects-design.md).
