@@ -1,0 +1,387 @@
+## `TileProg` as CUDA Tile IR bytecode: the file `tileiras` assembles into a
+## cubin. Layer 1 of tile-backend-design 6.2: scripts/tile-golden pins the
+## bytes and then hands them to `tileiras --gpu-name sm_86`, whose exit code
+## is the one machine verdict on whether what we emit is a Tile IR program.
+#
+# The format is the one NVIDIA/cuda-tile's BytecodeWriter.cpp writes and its
+# BytecodeReader.cpp reads (commit be0889cd, 2026-09); the opcode, type-tag and
+# attribute-tag tables are the frozen ones in BytecodeOpcodes.td,
+# BytecodeTypeOpcodes.td and BytecodeAttrOpcodes.td, and the per-operation
+# layout is what the tablegen backend (tools/cuda-tile-tblgen/BytecodeGen.cpp)
+# generates from Ops.td. cuTile.jl's src/bytecode (writer.jl, encodings.jl,
+# types.jl) is an independent writer of the same format and was read
+# alongside; where the two disagree in what they emit (it always writes a
+# debug section, we never do; it pre-registers i1 and i32 at type indices 0
+# and 1, we register types in first-use order) both forms are accepted by the
+# reader and the C++ writer's is the one followed here.
+#
+#   file      =: magic[8: 7F 'T' 'i' 'l' 'e' 'I' 'R' 00] major[u8] minor[u8]
+#                tag[u16 LE] section* end[00]
+#   section   =: id[u8, bit 7 = aligned] length[varint] (alignment[varint]
+#                padding[CB* to the alignment, counted from the start of the
+#                file])? data
+#   Func (2, aligned 8) =: numFunctions[varint] function*
+#   function  =: nameIndex[varint] signatureIndex[varint] flags[u8: bit 1 =
+#                kernel] locIndex[varint, 0 = unknown] bodyLength[varint] body
+#   body      =: instruction*, values numbered from 0: the entry parameters
+#                first, then each result in order
+#   instruction =: opcode[varint] resultTypeIndex[varint]* (flags[varint])?
+#                attributes operands[varint]*
+#   Constant (4, aligned 8), Type (5, aligned 4), String (1, aligned 4) =:
+#                count[varint] padding[to the index width] offset[u64 or u32
+#                LE]* data*, where a constant is length[varint] + raw bytes,
+#                a type is tag[u8] + tag-specific data, a string is its bytes
+#
+# Only what the instruction table can hold is encoded: the memory operations
+# are `weak`, unmasked, with the token operand present (flags bit 4 on a load,
+# bit 3 on a store); `addf` is `rounding<nearest_even>` (0) with no
+# flush-to-zero (flags 0); the integer operations carry `overflow` none (0).
+# A tile is rank 0 or 1. Nothing here is versioned by anything but the header:
+# the bytecode this writes is the same at 13.1, 13.2 and 13.3, and only
+# the number in the header says which; `tileiras` 13.3.36 accepted all three.
+use std/bytes
+use std/list
+use std/map
+use std/str
+use prog.{TileProg, MakeToken, BlockId, Load, Store, AddF}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstI32, MulInt, AddInt, Reshape, Broadcast, Iota, Offset, LoadPtr, StorePtr, AddFloat, Ret}
+
+## The bytecode version written into the header (tile-backend-design 6.3).
+## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
+## three numbers that must move together are this one, the `tileiras` pin in
+## scripts/tile-golden/toolchain.txt, and the driver in the ledger.
+pub const BYTECODE_MAJOR: Int = 13
+pub const BYTECODE_MINOR: Int = 2
+
+## The version as `tileiras --list-versions` spells it.
+pub fn bytecode_version() -> String = "${BYTECODE_MAJOR}.${BYTECODE_MINOR}"
+
+# Opcodes (BytecodeOpcodes.td, frozen).
+const OP_ADDF: Int = 0x02
+const OP_ADDI: Int = 0x03
+const OP_BROADCAST: Int = 0x0B
+const OP_CONSTANT: Int = 0x10
+const OP_GET_TILE_BLOCK_ID: Int = 0x30
+const OP_IOTA: Int = 0x3A
+const OP_LOAD_PTR_TKO: Int = 0x3D
+const OP_MAKE_TOKEN: Int = 0x44
+const OP_MULI: Int = 0x4E
+const OP_OFFSET: Int = 0x51
+const OP_RESHAPE: Int = 0x5B
+const OP_RETURN: Int = 0x5C
+const OP_STORE_PTR_TKO: Int = 0x65
+
+# Type tags (BytecodeTypeOpcodes.td, frozen).
+const TAG_PTR: Int = 12
+const TAG_TILE: Int = 13
+const TAG_FUNC: Int = 16
+const TAG_TOKEN: Int = 17
+
+# Section ids (BytecodeEnums.h).
+const SEC_STRING: Int = 1
+const SEC_FUNC: Int = 2
+const SEC_CONSTANT: Int = 4
+const SEC_TYPE: Int = 5
+
+const PAD_BYTE: Int = 0xCB
+const FLAG_KERNEL: Int = 0x02
+
+# The tag of a scalar number type by its Tile IR name.
+fn num_tag(name: String) -> Int = match name {
+  "i1" -> 0
+  "i8" -> 1
+  "i16" -> 2
+  "i32" -> 3
+  "i64" -> 4
+  "f16" -> 5
+  "bf16" -> 6
+  "f32" -> 7
+  "tf32" -> 8
+  "f64" -> 9
+  _ -> panic("tileir: `${name}` has no Tile IR type tag")
+}
+
+# ---- primitives
+
+## `x` as an unsigned LEB128 varint appended to `b`.
+pub fn put_varint(b: bytes.Buf, x: Int) -> bytes.Buf =
+  if x < 0 {
+    panic("tileir: a varint is unsigned, got ${x}")
+  } else if x < 128 {
+    bytes.put(b, x)
+  } else {
+    put_varint(bytes.put(b, (x & 0x7F) | 0x80), x >>> 7)
+  }
+
+fn put_le(b: bytes.Buf, x: Int, width: Int) -> bytes.Buf =
+  if width == 0 { b } else { put_le(bytes.put(b, x & 0xFF), x >>> 8, width - 1) }
+
+fn pad_to(b: bytes.Buf, align: Int) -> bytes.Buf =
+  if bytes.size(b) % align == 0 { b } else { pad_to(bytes.put(b, PAD_BYTE), align) }
+
+fn varint(x: Int) -> Bytes = bytes.freeze(put_varint(bytes.buf(), x))
+
+# ---- interning tables
+
+# An interning table: each distinct encoding once, in first-use order; its
+# index is its position.
+type Table = {
+  items: List[Bytes],
+  index: Map[String, Int],
+}
+
+fn table() -> Table = Table { items: [], index: map.empty() }
+
+fn intern(t: Table, enc: Bytes) -> (Table, Int) = {
+  let key = bytes.to_hex(enc)
+  match map.get(t.index, key) {
+    Some(i) -> (t, i)
+    None -> {
+      let i = len(t.items)
+      (Table { items: t.items ++ [enc], index: map.insert(t.index, key, i) }, i)
+    }
+  }
+}
+
+# The writer's state: the three tables, the body under construction, and how
+# many entry parameters precede the values in the body's index space.
+type W = {
+  strs: Table,
+  types: Table,
+  consts: Table,
+  body: bytes.Buf,
+  nargs: Int,
+}
+
+fn ty_of(w: W, enc: Bytes) -> (W, Int) = {
+  let (t, i) = intern(w.types, enc)
+  (W { ..w, types: t }, i)
+}
+
+fn num_ty(w: W, name: String) -> (W, Int) = ty_of(w, bytes.freeze(bytes.put(bytes.buf(), num_tag(name))))
+
+# Dependent types are registered before the type that names them, as the C++
+# writer does; the reader is lazy and would accept either order.
+fn elem_ty(w: W, e: Elem) -> (W, Int) = match e {
+  Num(name) -> num_ty(w, name)
+  PtrTo(name) -> {
+    let (w1, pointee) = num_ty(w, name)
+    ty_of(w1, bytes.freeze(put_varint(bytes.put(bytes.buf(), TAG_PTR), pointee)))
+  }
+}
+
+fn ty(w: W, t: Ty) -> (W, Int) = match t {
+  Token -> ty_of(w, bytes.freeze(bytes.put(bytes.buf(), TAG_TOKEN)))
+  Tile(shape, e) -> {
+    let (w1, ei) = elem_ty(w, e)
+    let b0 = put_varint(put_varint(bytes.put(bytes.buf(), TAG_TILE), ei), len(shape))
+    let b1 = list.fold(shape, b0, (b, d) => put_le(b, d, 8))
+    ty_of(w1, bytes.freeze(b1))
+  }
+}
+
+fn func_ty(w: W, ins: List[Int], outs: List[Int]) -> (W, Int) = {
+  let b0 = put_varint(bytes.put(bytes.buf(), TAG_FUNC), len(ins))
+  let b1 = list.fold(ins, b0, (b, i) => put_varint(b, i))
+  let b2 = put_varint(b1, len(outs))
+  let b3 = list.fold(outs, b2, (b, i) => put_varint(b, i))
+  ty_of(w, bytes.freeze(b3))
+}
+
+fn const_of(w: W, raw: Bytes) -> (W, Int) = {
+  let (t, i) = intern(w.consts, bytes.freeze(bytes.put_bytes(put_varint(bytes.buf(), bytes.len(raw)), raw)))
+  (W { ..w, consts: t }, i)
+}
+
+fn str_of(w: W, s: String) -> (W, Int) = {
+  let (t, i) = intern(w.strs, bytes.utf8(s))
+  (W { ..w, strs: t }, i)
+}
+
+# ---- the body
+
+fn ref_index(w: W, r: Ref) -> Int = match r {
+  Arg(pos) -> pos
+  Val(id) -> w.nargs + id
+}
+
+fn emit(w: W, x: Int) -> W = W { ..w, body: put_varint(w.body, x) }
+
+fn emit_ref(w: W, r: Ref) -> W = emit(w, ref_index(w, r))
+
+# opcode, then one result type index.
+fn emit_op(w: W, opcode: Int, result: Ty) -> W = {
+  let (w1, ti) = ty(w, result)
+  emit(emit(w1, opcode), ti)
+}
+
+fn instr(w0: W, i: Instr) -> W = match i {
+  MakeTok(_dst) -> emit_op(w0, OP_MAKE_TOKEN, Token)
+  BlockIds(_x, _y, _z) -> {
+    let (w1, ti) = ty(w0, Tile([], Num("i32")))
+    emit(emit(emit(emit(w1, OP_GET_TILE_BLOCK_ID), ti), ti), ti)
+  }
+  ConstI32(_dst, value) -> {
+    let w1 = emit_op(w0, OP_CONSTANT, Tile([], Num("i32")))
+    let (w2, ci) = const_of(w1, bytes.freeze(put_le(bytes.buf(), value, 4)))
+    emit(w2, ci)
+  }
+  MulInt(_dst, t, lhs, rhs) -> emit_ref(emit_ref(emit(emit_op(w0, OP_MULI, t), 0), lhs), rhs)
+  AddInt(_dst, t, lhs, rhs) -> emit_ref(emit_ref(emit(emit_op(w0, OP_ADDI, t), 0), lhs), rhs)
+  Reshape(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_RESHAPE, to), src)
+  Broadcast(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_BROADCAST, to), src)
+  Iota(_dst, t) -> emit_op(w0, OP_IOTA, t)
+  Offset(_dst, ptrs, offs, ptr_ty, _off_ty) -> emit_ref(emit_ref(emit_op(w0, OP_OFFSET, ptr_ty), ptrs), offs)
+  LoadPtr(_dst, _tok_out, ptrs, tok_in, _ptr_ty, val_ty) -> {
+    # results: the tile, the token; flags: token present (bit 4);
+    # memory_ordering_semantics weak; operands: source, token.
+    let w1 = emit_op(w0, OP_LOAD_PTR_TKO, val_ty)
+    let (w2, tok) = ty(w1, Token)
+    let w3 = emit(emit(emit(w2, tok), 16), 0)
+    emit_ref(emit_ref(w3, ptrs), tok_in)
+  }
+  StorePtr(_tok_out, ptrs, value, tok_in, _ptr_ty, _val_ty) -> {
+    # result: the token; flags: token present (bit 3); weak; operands:
+    # destination, value, token.
+    let w1 = emit(emit(emit_op(w0, OP_STORE_PTR_TKO, Token), 8), 0)
+    emit_ref(emit_ref(emit_ref(w1, ptrs), value), tok_in)
+  }
+  AddFloat(_dst, t, lhs, rhs) -> {
+    # flags: no flush_to_zero; rounding_mode nearest_even.
+    emit_ref(emit_ref(emit(emit(emit_op(w0, OP_ADDF, t), 0), 0), lhs), rhs)
+  }
+  Ret -> emit(emit(emit(w0, OP_RETURN), 0), 0)
+}
+
+# ---- the file
+
+fn section(out: bytes.Buf, id: Int, content: Bytes, align: Int) -> bytes.Buf = {
+  let o1 = put_varint(bytes.put(out, if align > 1 { id | 0x80 } else { id }), bytes.len(content))
+  let o2 = if align > 1 { pad_to(put_varint(o1, align), align) } else { o1 }
+  bytes.put_bytes(o2, content)
+}
+
+# count, padding to the index width, one offset per item, the items.
+fn table_section(items: List[Bytes], width: Int) -> Bytes = {
+  let b0 = pad_to(put_varint(bytes.buf(), len(items)), width)
+  let (b1, _end) = list.fold(items, (b0, 0), (acc, it) => {
+    let (b, off) = acc
+    (put_le(b, off, width), off + bytes.len(it))
+  })
+  bytes.freeze(list.fold(items, b1, (b, it) => bytes.put_bytes(b, it)))
+}
+
+fn magic() -> bytes.Buf = bytes.put(bytes.put(bytes.put(bytes.put(bytes.put(bytes.put(bytes.put(bytes.put(bytes.buf(), 0x7F), 0x54), 0x69), 0x6C), 0x65), 0x49), 0x52), 0x00)
+
+## `k` as a bytecode file holding one kernel entry.
+pub fn encode_kernel(k: Kernel) -> Bytes = {
+  var w = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), nargs: len(k.params) }
+  var params: List[Int] = []
+  for dt in k.params {
+    let (w1, pi) = ty(w, Tile([], PtrTo(dt)))
+    w = w1
+    params = params ++ [pi]
+  }
+  let (w2, sig) = func_ty(w, params, [])
+  let (w3, name) = str_of(w2, k.name)
+  w = w3
+  for i in k.body {
+    w = instr(w, i)
+  }
+  let body = bytes.freeze(w.body)
+  let func = bytes.freeze(bytes.put_bytes(
+    put_varint(put_varint(bytes.put(put_varint(put_varint(put_varint(bytes.buf(), 1), name), sig), FLAG_KERNEL), 0), bytes.len(body)),
+    body))
+
+  let h = put_le(bytes.put(bytes.put(magic(), BYTECODE_MAJOR), BYTECODE_MINOR), 0, 2)
+  let s1 = section(h, SEC_FUNC, func, 8)
+  let s2 = if len(w.consts.items) == 0 { s1 } else { section(s1, SEC_CONSTANT, table_section(w.consts.items, 8), 8) }
+  let s3 = section(s2, SEC_TYPE, table_section(w.types.items, 4), 4)
+  let s4 = section(s3, SEC_STRING, table_section(w.strs.items, 4), 4)
+  bytes.freeze(bytes.put(s4, 0))
+}
+
+## `prog` lowered and encoded.
+pub fn encode(prog: TileProg) -> Bytes = encode_kernel(lower(prog))
+
+# ---- tests ----
+#
+# The pin on the whole file is scripts/tile-golden (both backends against the
+# recorded .tilebc, then `tileiras`). These blocks pin the pieces a rejected
+# file would not name: the varint, the section framing, the interning, and
+# that the header carries the version constant.
+
+
+fn hex(b: Bytes) -> String = bytes.to_hex(b)
+
+test "varints are LEB128: seven bits a byte, low bits first, high bit continues" {
+  assert hex(varint(0)) == "00"
+  assert hex(varint(127)) == "7f"
+  assert hex(varint(128)) == "8001"
+  assert hex(varint(300)) == "ac02"
+  assert hex(varint(16384)) == "808001"
+}
+
+test "an unaligned section is id, length, data; an aligned one sets bit 7 and pads from the file start" {
+  let one = bytes.freeze(bytes.put(bytes.buf(), 0x2A))
+  assert hex(bytes.freeze(section(bytes.buf(), 7, one, 1))) == "07012a"
+  # header is 3 bytes (id, length, alignment) so one pad byte reaches 4.
+  assert hex(bytes.freeze(section(bytes.buf(), 5, one, 4))) == "850104cb2a"
+}
+
+test "a table section counts, pads to its index width, then offsets, then data" {
+  let items = [bytes.freeze(bytes.put(bytes.buf(), 0xAA)), bytes.freeze(bytes.put(bytes.put(bytes.buf(), 0xBB), 0xCC))]
+  # count 2, pad to 4, offsets 0 and 1 as u32, data.
+  assert hex(table_section(items, 4)) == "02cbcbcb" ++ "00000000" ++ "01000000" ++ "aa" ++ "bbcc"
+}
+
+test "interning answers one index per distinct encoding, in first-use order" {
+  let t0 = table()
+  let (t1, a) = intern(t0, bytes.freeze(bytes.put(bytes.buf(), 1)))
+  let (t2, b) = intern(t1, bytes.freeze(bytes.put(bytes.buf(), 2)))
+  let (t3, c) = intern(t2, bytes.freeze(bytes.put(bytes.buf(), 1)))
+  assert [a, b, c] == [0, 1, 0]
+  assert len(t3.items) == 2
+}
+
+test "a tile type names its element type first, so the element's index is lower" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), nargs: 0 }
+  let (w1, ti) = ty(w0, Tile([128], PtrTo("f64")))
+  # f64 (tag 9), ptr<f64>, tile<128xptr<f64>>: three types, the tile last.
+  assert ti == 2
+  assert list.map(w1.types.items, hex) == ["09", "0c00", "0d01018000000000000000"]
+}
+
+fn vadd() -> TileProg = TileProg {
+  name: "vadd",
+  params: ["f64", "f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 128, 0),
+    Load(4, 5, 1, "f64", 1, 128, 3),
+    AddF(6, "f64", 128, 2, 4),
+    Store(7, 2, "f64", 1, 128, 6, 5)
+  ]
+}
+
+test "the file opens with the magic and the version constants, and closes with the end section" {
+  let b = encode(vadd())
+  assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d02" ++ "0000"
+  assert bytes.at(b, bytes.len(b) - 1) == 0
+  assert bytecode_version() == "13.2"
+}
+
+test "the function entry is a kernel with an unknown location and the entry name is the one string" {
+  let b = encode(vadd())
+  # After the 12-byte header: Func section id with the aligned bit, length,
+  # alignment 8, three pad bytes to offset 16, then count 1, name 0, sig, flags 2, loc 0.
+  assert hex(bytes.slice(b, 12, 16)) == "82" ++ hex(bytes.slice(b, 13, 14)) ++ "08cb"
+  assert hex(bytes.slice(b, 16, 20)) == "0100" ++ hex(bytes.slice(b, 18, 19)) ++ "02"
+  assert bytes.at(b, 20) == 0
+  assert str.ends_with(hex(b), hex(bytes.utf8("vadd")) ++ "00")
+}
+
+test "encoding the same program twice gives the same bytes" {
+  assert encode(vadd()) == encode(vadd())
+}
