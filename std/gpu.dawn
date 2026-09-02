@@ -260,10 +260,11 @@ pub fn sum_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
 }
 
 ## The reference implementations the fake device answers `launch` with, by
-## kernel name: `vadd`, `vadd_bf16` (one reference; the buffers tell it the
-## format) and `sum` in this release.
-pub fn reference_kernels() -> Map[String, fn(List[String], List[List[Float]]) -> List[Float]] =
-  map.from([("vadd", vadd_ref), ("vadd_bf16", vadd_ref), ("sum", sum_ref)])
+## kernel name. Each entry carries the exact number of buffers the device
+## kernel takes beside its body: three for `vadd` / `vadd_bf16` (two inputs
+## and one output), two for `sum` (one input and one output).
+pub fn reference_kernels() -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] =
+  map.from([("vadd", (3, vadd_ref)), ("vadd_bf16", (3, vadd_ref)), ("sum", (2, sum_ref))])
 
 fn no_such_buffer(who: String, handle: Int) -> ForeignError =
   refuse("gpu.no_such_buffer", "${who}: no buffer with handle ${handle}")
@@ -274,6 +275,9 @@ fn no_kernel(who: String, kernel: String) -> ForeignError =
 fn no_arguments(who: String, kernel: String) -> ForeignError =
   refuse("gpu.no_arguments", "${who}: `${kernel}` launched with no buffers")
 
+fn bad_arity(who: String, kernel: String, wanted: Int, got: Int) -> ForeignError =
+  refuse("gpu.bad_arity", "${who}: `${kernel}` wants ${wanted} buffer(s), got ${got}")
+
 ## Run `body` against a device that is a table in host memory. Handles count
 ## up from 1 per installation; a buffer is its format and a `List[Float]`
 ## holding values of that format, and the formats are `element_bytes`'s
@@ -281,9 +285,11 @@ fn no_arguments(who: String, kernel: String) -> ForeignError =
 ## was freed answers `gpu.no_such_buffer`. `gpu_launch` looks `kernel` up in
 ## `kernels`, hands the reference implementation the format and the contents
 ## of every argument buffer in order, and stores what it returns as the
-## contents of the LAST argument; `grid` is not consulted, a reference
-## implementation computes the whole vector at once; an unknown name answers
-## `gpu.no_kernel`. A buffer holds what memory of its format would: what
+## contents of the LAST argument. Before the body is called, its entry's
+## arity must equal the number of buffers (`gpu.bad_arity` otherwise); `grid`
+## is not consulted, a reference implementation computes the whole vector at
+## once; an unknown name answers `gpu.no_kernel`. A buffer holds what memory
+## of its format would: what
 ## `gpu_upload` stores and what a launch writes is rounded to the buffer's
 ## format (`round_to`), which for `f64` is the data as given. The length
 ## check is `upload`'s, above the operation, and is the same code under
@@ -296,7 +302,7 @@ fn no_arguments(who: String, kernel: String) -> ForeignError =
 # into a qualified call, and std has to keep compiling under it so that the
 # mutant reddens the assertions it owns and nothing else (measured: one such
 # pipe here turned every pipe-contract assertion red).
-pub fn with_gpu_fake[T](kernels: Map[String, fn(List[String], List[List[Float]]) -> List[Float]],
+pub fn with_gpu_fake[T](kernels: Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])],
   body: fn() -> T !Gpu) -> T = {
   with handle Gpu {
     var next: Int = 1
@@ -326,9 +332,12 @@ pub fn with_gpu_fake[T](kernels: Map[String, fn(List[String], List[List[Float]])
       None -> Err(no_such_buffer("fake device", handle))
     }
     gpu_launch(kernel, _grid, args) => match map.get(kernels, kernel) {
-      Some(f) ->
+      Some(entry) -> {
+        let (arity, f) = entry
         if len(args) == 0 {
           Err(no_arguments("fake device", kernel))
+        } else if len(args) != arity {
+          Err(bad_arity("fake device", kernel, arity, len(args)))
         } else {
           # a handler's state cell cannot be captured by a lambda: read it first
           let s = store
@@ -351,6 +360,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, fn(List[String], List[List[Float]])
             }
           }
         }
+      }
       None -> Err(no_kernel("fake device", kernel))
     }
     gpu_free(handle) =>
@@ -767,6 +777,37 @@ fn launch_refusals() -> List[String] !Gpu = {
 test "launch refuses a grid of zero above the effect; the fake device refuses what it does not have" {
   assert with_gpu_fake(reference_kernels(), launch_refusals)
     == ["gpu.bad_grid", "gpu.no_kernel", "gpu.no_arguments", "gpu.no_such_buffer", "ok"]
+}
+
+fn too_few_buffers() -> Result[Unit, ForeignError] !Gpu = {
+  let a = alloc(F64, 2)?
+  launch("vadd", 1, [handle_of(a)])
+}
+
+test "the fake device refuses too few buffers before invoking the reference kernel" {
+  match with_gpu_fake(reference_kernels(), too_few_buffers) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.kind == "gpu.bad_arity"
+      assert e.message == "fake device: `vadd` wants 3 buffer(s), got 1"
+    }
+  }
+}
+
+fn one_short_buffer() -> Result[Unit, ForeignError] !Gpu = {
+  let a = alloc(F64, 2)?
+  let b = alloc(F64, 2)?
+  launch("vadd", 1, [handle_of(a), handle_of(b)])
+}
+
+test "the fake device refuses one buffer short instead of overwriting an input" {
+  match with_gpu_fake(reference_kernels(), one_short_buffer) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.kind == "gpu.bad_arity"
+      assert e.message == "fake device: `vadd` wants 3 buffer(s), got 2"
+    }
+  }
 }
 
 fn use_after_free() -> (Int, Int, String, String) !Gpu = {

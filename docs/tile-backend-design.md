@@ -265,7 +265,8 @@ handler 的状态与假设备同款：句柄从 1 起编号、`Map[Int, (设备�
 `bf16_bits`，低字节在前）成 `Bytes` 交给 `gpu_upload_bytes_host`，`download` 取 `n * 2` 字节回来
 `unpack_bf16`。**f64 没有改走 `Bytes`**：Dawn 没有 float-to-bits，纯 Dawn 把 f64 拆成 8 字节要每个
 元素跑一遍指数循环、还会丢 NaN payload，而 `Array[Float]` 那条缝对每一个位模式都精确且零成本；
-两条缝各是自己格式最便宜的精确缝。`gpu_launch` 先查名字、再查参数（`gpu.no_arguments`、`gpu.no_such_buffer`），
+两条缝各是自己格式最便宜的精确缝。`gpu_launch` 先查名字、再查参数（`gpu.no_arguments`、
+`gpu.no_such_buffer`），
 **然后才碰设备**：cubin 在该 kernel 第一次 `launch` 时交给 `cuModuleLoadData`，模块句柄留到本次
 安装结束，所以不 launch 的程序不装模块，alloc/upload/download 在装不了模块的驱动上照样可用，
 这正是 560.94 上能验到的那一半。grid 计 tile block 数，intrinsic 以 block dims `(1,1,1)`、
@@ -278,12 +279,12 @@ shared 0 调 `cuLaunchKernel`（cuda-tile 宿主示例的启动形态）。第�
 ### 4.3 假设备 `with_gpu_fake`（刀 1 已落地）
 
 ```dawn
-pub fn with_gpu_fake[T](kernels: Map[String, fn(List[String], List[List[Float]]) -> List[Float]],
+pub fn with_gpu_fake[T](kernels: Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])],
                         body: fn() -> T !Gpu) -> T
 pub fn vadd_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float]
 pub fn sum_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float]
 pub fn round_to(dtype: String, x: Float) -> Float
-pub fn reference_kernels() -> Map[String, fn(List[String], List[List[Float]]) -> List[Float]]
+pub fn reference_kernels() -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])]
 ```
 
 - **纯**（签名无 `!io`），所以它进得了 `dawn test --stdlib` 与 comptime。
@@ -302,6 +303,9 @@ pub fn reference_kernels() -> Map[String, fn(List[String], List[List[Float]]) ->
   参考（`reference_kernels` 把两个名字都指向 `vadd_ref`）。
 - `launch` 用的是宿主侧参考实现，第一里程碑就是 `vadd_ref`。同一个参考实现是层 2 对拍
   `.expect` 的来源之一（另一来源是手写的期望值）。
+- 每个参考实现的表项把缓冲参数个数与函数放在一起；假设备在调用函数之前做精确相等检查，
+  不等时答 `gpu.bad_arity`，message 同时写 kernel 名、期望数和实际数。零参数仍保留既有
+  `gpu.no_arguments`；`vadd` / `vadd_bf16` 要 3 个（两输入一输出），`sum` 要 2 个。
 - 刀 6 的 std 测试把假设备钉在 narrow 上：全部 65536 个 bf16 位模式各配一个固定种子 LCG 抽出的
   随机位模式，bf16 `vadd` 在假设备上的答案与 `narrow.add(bf16(a), bf16(b))` 逐值渲染相同（`to_string`
   分得清 `-0.0` 与 NaN）；另一组 1024 对格点外的随机 Float，验的是上传时的舍入（假设备若不舍入
