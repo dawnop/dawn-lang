@@ -113,3 +113,73 @@ ground: contains 9b4c9f8:scripts/selfhost-prev-diff.sh "${HEAD_BIN[@]}" __emit "
 query: packages/web/src/server.dawn
 expect: blind `emit packages/web` compiles this same source in both output legs
 reject: exact N vs N-1 differential
+
+# 2026-09-02, a new indexed std module moved a diagnostic that lists every
+# bundled module. The module and its modules.txt entry landed in 23705ad0, but
+# the checker corpus was not re-recorded until the red main run forced
+# 17990767. This direct query uses the file that was genuinely added, not a
+# remembered representative of the std directory.
+name: 23705ad0, a new std module moves the bundled-module diagnostic
+tree: 23705ad0
+ground: added 23705ad0 std/narrow.dawn
+ground: touched 23705ad0 std/modules.txt
+ground: contains 23705ad0:std/modules.txt narrow
+ground: lacks 23705ad0:scripts/checker-corpus/cases/imports.expected std/narrow
+ground: touched 17990767 scripts/checker-corpus/cases/imports.expected
+ground: contains 17990767:scripts/checker-corpus/cases/imports.expected std/narrow
+query: std/narrow.dawn
+expect: exact checker diagnostic corpus
+expect: exact std/modules.txt lists this path in the relevant tree's bundled-module set; selfhost/src/check/passes.dawn:3413 prints that sorted set into a diagnostic that scripts/checker-corpus/cases/imports.expected:9 records
+
+# The same event through the --changed path. The fixture checks that narrow is
+# really in the no-renames diff before asking with both indexes in scope.
+name: 23705ad0, --changed sees the newly indexed std module
+tree: 23705ad0
+changed: 23705ad0^
+ground: added 23705ad0 std/narrow.dawn
+ground: touched 23705ad0 std/modules.txt
+query: std/narrow.dawn
+expect: exact std/modules.txt lists this path in the relevant tree's bundled-module set
+
+# The negative control is the same real narrow source overlaid on its parent
+# without the modules.txt half of the commit. A top-level std/*.dawn file is
+# not bundled merely by existing; a directory-glob rule makes this fixture red.
+name: 23705ad0, an unindexed std module does not move the diagnostic
+tree: 23705ad0^
+overlay: 23705ad0 std/narrow.dawn
+ground: added 23705ad0 std/narrow.dawn
+ground: lacks 23705ad0^:std/modules.txt narrow
+query: std/narrow.dawn
+reject: exact relevant tree's bundled-module set
+
+# An index-only std change must still name checker-corpus. This commit changed
+# no std/*.dawn path; direct and --changed therefore have only modules.txt from
+# which to learn that an index edit owns the diagnostic set.
+name: db1dd878, an index-only std change owns the bundled-module diagnostic
+tree: db1dd878
+changed: db1dd878^
+ground: touched db1dd878 std/modules.txt
+query: std/modules.txt
+expect: exact std/modules.txt selects the bundled-module set that selfhost/src/check/passes.dawn:3413 prints into a diagnostic and scripts/checker-corpus/cases/imports.expected:9 records
+
+# The old side of a removal is absent at the queried tree. --changed reads the
+# base index as well as the head index, so fspath remains attributable.
+name: bf87ef47, --changed keeps a removed indexed std module visible
+tree: cb2984c4
+changed: bf87ef47^
+ground: touched bf87ef47 std/fspath.dawn
+ground: contains bf87ef47^:std/modules.txt fspath
+ground: lacks cb2984c4:std/modules.txt fspath
+query: std/fspath.dawn
+expect: exact std/modules.txt lists this path in the relevant tree's bundled-module set
+
+# Rename detection normally folds a rename to its destination. The no-renames
+# diff exposes the old path, and the base index establishes that it was bundled.
+name: a98e85fb, --changed keeps the old side of an indexed rename visible
+tree: cb2984c4
+changed: a98e85fb^
+ground: touched a98e85fb std/path.dawn
+ground: contains a98e85fb^:std/modules.txt path
+ground: lacks cb2984c4:std/modules.txt path
+query: std/path.dawn
+expect: exact std/modules.txt lists this path in the relevant tree's bundled-module set
