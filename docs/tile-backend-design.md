@@ -694,7 +694,8 @@ nearest_even，处置是把 bf16 降到容差档并在 §3.2 的表里改那一�
 vadd，本机 12.7 s → 13.5 s，`test` job 的 budget 不动。刀 7a 实测：同一台机器上
 `run.sh` 122 s（改动前，四个 kernel 十个变异体）→ 129 s（改动后，十个 kernel 二十次 `tileiras`
 十一个变异体）。多出来的只有 7 s，因为墙钟的大头是每个变异体一次 native 构建，而这一刀只加了
-一个变异体；仍在 170 s 的 planning value 之内，`tile` job 的 budget 不动。`tile-gpu-diff/run.sh` 26 s → 46 s
+一个变异体（两次测量前后相连，机器状态相同；换一个时段整段可以到 165 s，所以有意义的是这个
+差值而不是绝对值）；仍在 170 s 的 planning value 之内，`tile` job 的 budget 不动。`tile-gpu-diff/run.sh` 26 s → 46 s
 （多一个 native 构建、六个 kernel 的真机对拍与 `mask-all-true` 变异体的六次汇编），它只在本机跑，
 CI 上仍只有亚秒的 `--check`。`scripts/leetgpu-diff/check.py` 与它的 `--self-test` 各亚秒。刀 2 时挂在 `test` job 里的 tile-golden 步随之搬走，`test` 的 budget
 回到 323 s。刀 1 与刀 0 只加 std 测试，落在 `test` job 的 `dawn test --stdlib` 步，秒级。
