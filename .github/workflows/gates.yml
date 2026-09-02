@@ -284,14 +284,13 @@ jobs:
     # JVM run plus one C build and run each; the runtime object is built
     # once); doubled, the planning value is 269 + 54 = 323s, whose 3x is 969s,
     # so the timeout goes to 17. The run's wall clock does not move: 323s is
-    # far under the native-diff pole. The tile golden step added 2026-09-02
-    # is 17s locally (one native build of the clean project, two kernels on
-    # both backends, and two mutants at one native build plus one to two runs
-    # per backend each; the runtime object is built once); doubled, the
-    # planning value is 323 + 34 = 357s, whose 3x is 1071s, so the timeout
-    # goes to 18. Still far under the native-diff pole.
-    # budget: 3x 357s planning value (265s worst observed + 4s + 54s + 34s)
-    timeout-minutes: 18
+    # far under the native-diff pole. The tile golden step lived here for one
+    # day (2026-09-02, +34s planning value); it moved to the `tile` job below
+    # the same day, when it grew a tileiras step behind a 150 MB wheel
+    # download that nothing else here needs, so the planning value is back
+    # to 323s and the timeout to 17.
+    # budget: 3x 323s planning value (265s worst observed + 4s + 54s)
+    timeout-minutes: 17
     steps:
       - uses: actions/checkout@v4
 
@@ -322,17 +321,6 @@ jobs:
       # section that owns the rule to go red on both backends. 27s locally.
       - name: narrow float contract (exact oracle, both backends, three mutants)
         run: ./scripts/narrow-contract/run.sh
-
-      # packages/tileir's recording handler and Tile IR text renderer against
-      # scripts/tile-golden/*.mlir, byte for byte, on both backends (layer 0
-      # of docs/tile-backend-design.md 6.2). The script traces each kernel
-      # twice and requires one program, compares the text with the golden,
-      # then removes the store's token operand from a copy of the renderer
-      # (vadd's golden must go red) and pins `load`'s dtype to f64 in a copy
-      # of the typed surface (the f32 kernel must be refused at trace time,
-      # the f64 one untouched). 17s locally.
-      - name: tile IR text golden (both backends, two mutants)
-        run: ./scripts/tile-golden/run.sh
 
       # compiler-plan is an internal top-level package, not one of the
       # publishable packages/* discovered below. Its inline tests own the
@@ -1099,6 +1087,54 @@ jobs:
       # needs both, one leg per side of the boundary).
       - name: wasm DOM bridge contract
         run: ./scripts/wasm-dom-contract/run.sh
+
+  # packages/tileir's Tile IR against the two records that can say it is
+  # wrong: the text and bytecode goldens beside scripts/tile-golden/run.sh
+  # (layer 0 of docs/tile-backend-design.md 6.2: both backends, byte for
+  # byte, plus the handler's determinism) and NVIDIA's `tileiras` assembling
+  # each bytecode golden for sm_86 (layer 1: the one verdict from outside
+  # this repository, with a reader and a verifier behind it that name the
+  # offset and the operation when they refuse). Five mutants: two on the
+  # handler and renderer that the text golden catches, three on the writer
+  # (an opcode swap, a flagged operand left unwritten, a wrong type tag)
+  # that the text cannot see and tileiras refuses.
+  #
+  # tileiras is an offline assembler: no GPU, no driver, it links libc, libm
+  # and libpthread only and reads libnvvm.so.4 and execs ptxas from two
+  # sibling wheels. install-tileiras.sh downloads the three wheels
+  # scripts/tile-golden/toolchain.txt pins by exact version and refuses any
+  # whose sha256 differs, the same rule as the wasi-sdk step above (a
+  # checksum from the same place as the file is not a check); the pin and
+  # the bytecode version the writer emits are held together by run.sh.
+  #
+  # Its own job because the wheels are 150 MB and nothing else needs them,
+  # and so that a slow package index delays nothing but this. Nothing
+  # `needs:` it. Local wall clock (2026-09-02): 8s for the wheels from a
+  # warm pip cache, ~25s cold; 40s for run.sh (one native build of the clean
+  # project, two kernels on both backends in text and bytecode, seven
+  # tileiras runs, five mutants at one native build and two to four runs
+  # each; the runtime object is built once). With the checkout and the
+  # toolchain action (~45s, the carried estimate) that is 45 + 25 + 40 =
+  # 110s; doubled for a cold runner, 220s. Under the run pole.
+  tile:
+    runs-on: ubuntu-latest
+    # budget: 3x 220s planning value (110s local, doubled)
+    timeout-minutes: 11
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (both backends, five mutants)
+        run: ./scripts/tile-golden/run.sh
 
   # The checker's diagnostics, recorded in the order `cerr` appends them.
   # Nothing else here can see them -- grammar-corpus stops at the parser,

@@ -397,12 +397,13 @@ writer_mutant_checks make-token-as-iota same-size \
 #    writes the operand. vadd has one store and its token index is one
 #    varint byte, so the function section is one byte short (the file is
 #    not: the constant section's alignment padding grows by one); the reader
-#    takes the next byte for the operand and refuses what follows.
+#    takes the next byte, `return`'s opcode 0x5C, for the token's value index
+#    and refuses it: 92 is past the 27 values (3 parameters, 24 results).
 mutant_project store-token-unwritten bytecode.dawn \
   'emit_ref(emit_ref(emit_ref(w1, ptrs), value), tok_in)' \
   'emit_ref(emit_ref(w1, ptrs), value)'
 writer_mutant_checks store-token-unwritten func-one-short \
-  "error:"
+  "operand index 92 out of bounds (size=27) for token segment"
 
 # 5. The writer's type table gives f64 the i64 tag. Same length, the type
 #    section differs, and the verifier refuses addf over an integer tile.

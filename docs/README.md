@@ -130,7 +130,7 @@
 | [operator-traits-design.md](operator-traits-design.md) | historical | `[]` 背后的 `Index`，第六个 prelude trait；权威条文在 spec §4.8。 |
 | [prelude-namespace-design.md](prelude-namespace-design.md) | historical | 函数命名空间的「一道门」与追加兼容性，三刀于 2026-08-02 完成。 |
 | [effects-design.md](effects-design.md) | historical | 用户具名效果 + `with handle`，尾恢复档；权威条文在 spec §6.5，教程见 tutorial §17。 |
-| [tile-backend-design.md](tile-backend-design.md) | current | 接 CUDA Tile IR 后端的立项设计：用户 2026-09-02 裁决分阶段路线（kernel 体是 `!Dev` 效果函数，宿主运行期记录成 Tile 程序）、第一里程碑 vadd f64 端到端、`std/narrow` 立即做、本机 GPU 对拍走台账门。刀 1 已落地：`std/gpu` 的 `Gpu` 效果、`Dtype`、幻影 `Tensor[D]` 与纯的假设备 `with_gpu_fake`。刀 2 已落地：`packages/tileir` 的 `Dev` 效果、`TileProg`、记录 handler 与 Tile IR 文本渲染器，`scripts/tile-golden` 两后端逐字节钉文本。 |
+| [tile-backend-design.md](tile-backend-design.md) | current | 接 CUDA Tile IR 后端的立项设计：用户 2026-09-02 裁决分阶段路线（kernel 体是 `!Dev` 效果函数，宿主运行期记录成 Tile 程序）、第一里程碑 vadd f64 端到端、`std/narrow` 立即做、本机 GPU 对拍走台账门。刀 1 已落地：`std/gpu` 的 `Gpu` 效果、`Dtype`、幻影 `Tensor[D]` 与纯的假设备 `with_gpu_fake`。刀 2 已落地：`packages/tileir` 的 `Dev` 效果、`TileProg`、记录 handler 与 Tile IR 文本渲染器，`scripts/tile-golden` 两后端逐字节钉文本。刀 3 已落地：`lower` 指令表（渲染器与写入器共用）与 `bytecode` 字节码写入器，`scripts/tile-golden` 加字节码 golden 并由钉版本的 `tileiras` 编成 sm_86 cubin（层 1），CI 新 job `tile`。 |
 | [oneshot-design.md](oneshot-design.md) | current | 一次性恢复（one-shot resumption）的**勘察结账**：四路勘察给出本仓第一批实测数字（JVM `Continuation` 70–460 ns、native 影子栈税 15%/5%/2–4%、传染面 1.45%），排除全栈复制/侧栈/wasm 非 CPS 三条路线，路线为 yield 冒泡；2026-08-31 用户立项，§9 六问全裁毕，施工中。 |
 | [core-move2-design.md](core-move2-design.md) | historical | Move 2 的结账与 `CSProtect` 关档。 |
 | [arch-split-design.md](arch-split-design.md) | historical | ARCH-01 拆 `Cx` + ARCH-02 拆 `Gen`，**取代 lowered-ir-design.md §3.2 的六组件方案**。这一块里唯一仍值得整篇读的，理由见下。 |

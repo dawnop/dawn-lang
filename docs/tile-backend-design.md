@@ -7,7 +7,9 @@
 > **刀 1 已落地**（`std/gpu.dawn`：`Gpu` 效果、`Dtype`、`Tensor[D]`、`with_gpu_fake`），
 > 落地形状以源码为准，§4 描述的就是它。**刀 2 已落地**（`packages/tileir`：`Dev` 效果、
 > `Tile[D] / Param[D] / Idx`、`TileProg`、记录 handler、文本渲染器，`scripts/tile-golden`），
-> §5.1 描述的就是它；刀 0 与刀 3 起未动工。
+> §5.1 描述的就是它。**刀 3 已落地**（`packages/tileir` 的 `lower`（两个消费者共用的指令表）与
+> `bytecode`（字节码写入器），`scripts/tile-golden` 加字节码 golden 与 `tileiras` 层 1，
+> CI 新 job `tile`），§5.3 与 §6 描述的就是它；刀 0 与刀 4 起未动工。
 > 前置勘察与计划稿是两份不入库的研究备忘录（agent-handoff 的
 > `cutile-backend-fit.md` 与 `tile-backend-plan.md`），探索过程留在那里，
 > 本文只保留结论与证据坐标。
@@ -302,9 +304,11 @@ fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
 链头 `%0 = make_token : token`，`load_ptr_tko weak %p token=%t : ... -> tile<128xf64>, token`
 与 `store_ptr_tko weak %p, %v token=%t : ... -> token` 各消费一个 token 产生一个；
 `addf` 显式 `rounding<nearest_even>`。同一 (参数, 索引, 宽度) 的指针梯子只发一次。
-**文本合法性只对照了规范文本与那份测试**：本机没有 `cuda-tile-translate`（不在 pip，
-要从钉在特定 LLVM commit 的源码构建），round-trip 推迟到刀 3 的 `tileiras` 层，
-那一层的退出码才是机器判词。
+文本合法性刀 2 时只对照了规范文本与那份测试；刀 3 起文本与字节码由同一张指令表产出
+（`lower.dawn`，见 §5.3），字节码被 `tileiras` 13.3.36 接受并编成 sm_86 cubin（§6.1），
+而 `tileiras` 内含 `cuda-tile` 的 reader 与 verifier（拒绝时给出字节偏移与 op 名，§6.2），
+所以那个退出码就是这同一张表的机器判词。`cuda-tile-translate` 仍不在本机，文本本身没有过
+parser 的 round-trip，这一点没变。
 
 落地的设计点：
 
@@ -312,8 +316,9 @@ fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   `TileOp` 是 SSA 形式的变体：`MakeToken(dst)`、`BlockId(dst, axis)`、
   `Load(dst, tok_out, param, dtype, idx, n, tok_in)`、`Store(tok_out, param, dtype, idx, n, value, tok_in)`、
   `AddF(dst, dtype, n, lhs, rhs)`，外加给刀 5 留位的
-  `For(iv, lower, upper, step, inits, carried, results, body)`（本版无人记录、渲染器拒绝）。
-  文本渲染与字节码编码是它的两个消费者，golden 钉文本，`tileiras` 钉字节码。
+  `For(iv, lower, upper, step, inits, carried, results, body)`（本版无人记录、lowering 拒绝）。
+  文本渲染与字节码编码是它的两个消费者，golden 钉文本，`tileiras` 钉字节码；两者之间
+  自刀 3 起隔着一张共用的线性指令表（§5.3）。
   记录里的句柄是 trace 编号（从 1 起，0 是入口 token），渲染时按出现顺序重编，
   因为指针梯子的中间名在记录里没有。
 - **token 链线性**：handler 里一个 `tok` 状态格，每个内存操作消费上一个、产生下一个，
@@ -361,6 +366,26 @@ pub fn d_for(start: Int, end: Int, carried: List[Int],
   `ceval` 能跑 `with handle`，不在本计划内。
 - **产物**：字节码是终态，文本是 golden 与 spike。
 
+**刀 3 落地的形状**（`packages/tileir/src/lower.dawn`、`bytecode.dawn`）：
+
+- `lower(prog: TileProg) -> Kernel` 把记录降成一张线性指令表：`Instr` 是 Tile IR 的一条操作
+  （`MakeTok / BlockIds / ConstI32 / MulInt / AddInt / Reshape / Broadcast / Iota / Offset /
+  LoadPtr / StorePtr / AddFloat / Ret`），值按定义序从 0 密集编号，操作数是 `Arg(pos)`（入口参数）
+  或 `Val(id)`。指针梯子、去重、SSA 重编全在这里，渲染器与写入器各只是「一条 `Instr` 一种拼法」，
+  不再各自决定发什么。抽出这一层时文本 golden 逐字节未动，这是纯重构的证据。
+- `encode(prog) -> Bytes` 写 `cuda-tile` 字节码：头（magic + 13.2）、Func / Constant / Type /
+  String 四个 section、结束字节。只编码指令表装得下的东西：内存操作 `weak`、无 mask、带 token
+  操作数；`addf` 为 `rounding<nearest_even>`、不 flush-to-zero；整数操作 `overflow` none；tile 为
+  0 或 1 阶。不写 debug section（函数位置索引 0 = unknown），不写 entry 的 optimization_hints
+  （`tileiras --gpu-name` 已给了架构）。版本常量 `BYTECODE_MAJOR / BYTECODE_MINOR` 钉在包里。
+- 格式的权威来源是 `NVIDIA/cuda-tile` 仓库（commit `be0889cd`，2026-09）的
+  `lib/Bytecode/Writer/BytecodeWriter.cpp`、`Reader/BytecodeReader.cpp`、三张冻结的编号表
+  （`BytecodeOpcodes.td` / `BytecodeTypeOpcodes.td` / `BytecodeAttrOpcodes.td`）与生成逐操作
+  布局的 `tools/cuda-tile-tblgen/BytecodeGen.cpp`（结果类型 → 可选字段的 flags 位域 → 属性 →
+  操作数 → 区域；flags 位按版本分组、组内先属性后操作数）。cuTile.jl（`5717de1d`）的
+  `src/bytecode/{writer,encodings,types}.jl` 是同一格式的独立实现，用作对照；它总写 debug section、
+  并把 i1 / i32 预注册在类型表 0 / 1 位，本实现按首用序注册且不写 debug section，两种形态 reader
+  都收。
 ### 5.4 子集编译（期权，只记录）
 
 子集 = 「`eff == EPure` 或只含 `!Dev`、一阶、单态、标量只有 Int / Float / Bool、容器只有
@@ -371,35 +396,63 @@ pub fn d_for(start: Int, end: Int, carried: List[Int],
 
 ## 6. 工具链与 CI
 
-### 6.1 `tileiras`：能进 CI，钉法照 wasi-sdk
+### 6.1 `tileiras`：能进 CI，钉法照 wasi-sdk（刀 3 实测）
 
-- `pip install nvidia-cuda-tileiras==13.3.36 --only-binary=:all: --no-deps`，wheel 37 MB。
-  钉版本加行内 sha256（`gates.yml:1024-1031` 的写法）。已见版本：13.1.80 / 13.2.51 /
-  13.2.78 / 13.2.86 / 13.3.36 / 13.4.46rc1。sm_86 要字节码不低于 13.2，推荐钉 13.3.36
-  并 `--bytecode-version=13.2`。
-- **许可未核实**：PyPI 页面不标 license，wheel 内应有 NVIDIA 的 SLA 文本，装之前人读一遍，
-  不能自动进 CI。`cuda-tile` 本身是 Apache-2.0 with LLVM Exceptions。
-- `cuda-tile-translate` 不在 pip；构建要 LLVM 特定 commit，小时级，且 2026 年已有 4 个
-  `[LLVM-FIX] Breaking commit` tag。不进 CI，本机构建一次做 round-trip。
+- 钉 `nvidia-cuda-tileiras==13.3.36`（manylinux2014 x86_64 wheel 37,050,964 字节，
+  sha256 `9221618a…8f00eca`，与 PyPI JSON API 给的一致）。**`--no-deps` 单装跑不起来**：它对每个
+  输入（含空模块）都答 `error: failed to compile Tile IR program`；逐个文件移除实测，它在运行时要
+  旁边有 `libnvvm.so.4`（`nvidia-nvvm==13.3.73`，69 MB）与 `ptxas`（`nvidia-cuda-nvcc==13.3.73`，
+  44 MB），第三个声明的依赖 `nvidia-nvjitlink` 与 libdevice 都不需要。三个 wheel 的版本与 sha256
+  记在 `scripts/tile-golden/toolchain.txt`，`install-tileiras.sh` 按精确版本下载、`sha256sum -c`、
+  再 `--no-index --no-deps` 装进一个 venv（wasi-sdk 那步的规矩：校验和不与文件同源）。
+  二进制只链 libc / libm / libpthread（`ldd`），无 CUDA 驱动依赖，`nvidia-smi` 不存在也能跑。
+- **版本区间实测**：`tileiras --list-versions` 答 13.1 / 13.2 / 13.3；同一 vadd 写成三个版本号，
+  三份都被 `--gpu-name sm_86` 接受且 cubin 逐字节相同（8320 字节，ELF 内 `FUNC GLOBAL vadd`
+  512 字节 SASS）；13.4 被拒 `unsupported Tile IR bytecode version: 13.4`。钉 13.2：cuTile.jl 的
+  兼容表说 Ampere / Ada 的最低字节码是 13.2（`launch.jl` 的 `tile_ir_requirement`）。
+- **许可已读**（wheel 内 `License.txt`，NVIDIA SLA）：授权是「安装并使用 SDK」，开发者工具
+  「仅供内部使用」除非另标可分发；CI 上是从 PyPI 安装使用、不再分发，落在授权内。这是本文的判断，
+  不是律师的；若日后不许，层 1 退回本机，见 §8。
+- `cuda-tile-translate` 仍不在 pip、未构建。刀 3 不再需要它做 round-trip：`tileiras` 内含
+  `cuda-tile` 的 bytecode reader 与 MLIR verifier，拒绝时给出字节偏移与 op 名（§6.2 的变异体
+  报文），比一个只会打印文本的翻译器说得更多。CUDA 13.4 起 wheel 旁会有 `tileirdisasm`
+  （cuTile.jl 已接），升钉时可把它接进 run.sh 做文本对拍。
 
 ### 6.2 三层门
 
 | 层 | 每次 push | 工具 | 抓什么 | 抓不到什么 |
 |----|-----------|------|--------|-----------|
 | 0 文本 golden | 是 | 无 | 记录 handler 与渲染器改了没 | 发的对不对 |
-| 1 字节码编译 | 是（刀 3 之后） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
+| 1 字节码编译 | 是（刀 3 起，`tile` job） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
 | 2 执行对拍 | 否，本机 | 3080 加驱动不低于 580 | 算的对不对（逐位与容差两档） | 其它架构 |
 
-层 0 golden 放 `scripts/tile-golden/*.mlir`，确定性规则照 `coredump.dawn`（SSA 号按首现重编）。
-层 1 是 `packages/tileir` 包测试之外的一个 CI 步骤：对每个 golden 的字节码跑 `tileiras`，
-退出码即判词。
+层 0 golden 放 `scripts/tile-golden/*.mlir` 与 `*.tilebc`（字节码也钉，两后端逐字节），确定性
+规则照 `coredump.dawn`（SSA 号按首现重编）。层 1 是同一个 `run.sh` 的 `assemble` 步：对每个
+`.tilebc` golden 跑 `tileiras --gpu-name sm_86`，退出码即判词，产物须是 ELF。三个写入器变异体
+证明这一层有信息量（文本 golden 看不见它们，字节码 golden 只能说「变了」、一次 `--record` 就洗白）：
 
-### 6.3 版本钉法
+| 变异体 | 改哪 | `tileiras` 的原话 |
+|--------|------|-------------------|
+| `make-token-as-iota` | `OP_MAKE_TOKEN` 0x44 → 0x3A | `'cuda_tile.iota' op result #0 must be tile of i1 or i8 or i16 or i32 or i64 values, but got '!cuda_tile.token'` |
+| `store-token-unwritten` | store 仍置 token 位、不再写 token 操作数 | `error at offset 84: operand index 92 out of bounds (size=27) for token segment, element 0`（92 = 下一条 `return` 的 opcode） |
+| `f64-tag-as-i64` | 类型表 f64 → tag 4 | `'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi64>'` |
 
-三个数同批改：`nvidia-cuda-tileiras` 的版本与 sha256（`gates.yml`）、`--bytecode-version`
-（`packages/tileir` 的常量，写入字节码头）、本机台账里的驱动版本。
-`scripts/tile-golden/toolchain.txt` 记三者，`gatemap.py` 把它登记为 `packages/tileir/**`
-的 coupled 依赖。
+阳性对照先于接受：接受之前先证明它会拒（坏 magic → `input does not correspond to Tile IR
+bytecode`；截断 → `section length 4 exceeds remaining bytecode data`；未分配 opcode 0x7F →
+`unsupported opcode 127 for bytecode version 13.2`）。今天三层各有：层 0 两个 golden 文件
+两后端；层 1 CI 每 push；层 2 无（刀 4）。
+
+### 6.3 版本钉法（刀 3 实况）
+
+三个数同批改：`tileiras` 的版本与三个 wheel 的 sha256、字节码版本（`packages/tileir/src/bytecode.dawn`
+的 `BYTECODE_MAJOR / BYTECODE_MINOR`，写入头）、本机台账里的驱动版本。全部记在
+`scripts/tile-golden/toolchain.txt`（`bytecode 13.2` / `tileiras 13.3.36` / `gpu-name sm_86` /
+三行 `wheel … sha256=…` / `driver none`），而且不是散文：`install-tileiras.sh` 只认它的 `wheel` 行，
+`run.sh` 拿 `kernels --bytecode-version` 对 `bytecode` 行、拿 `tileiras --version` 对 `tileiras` 行，
+任一不符直接红。与计划稿的一处出入：wheel 的 sha256 不写在 `gates.yml` 里而写在这个文件里，
+因为本机装与 CI 装要读同一份。`gatemap.py` 对它的判词是 `exact`（`tile` job 的两步都以它为输入），
+对 `packages/tileir/src/bytecode.dawn` 是 `coarse`（`run.sh` 点名 `packages/tileir`）；
+计划稿想要的「coupled」不必另加规则，run.sh 的交叉校验就是那条耦合的机器形态。
 
 ### 6.4 本机对拍脚本与台账（D4 的机器强制点）
 
@@ -415,9 +468,11 @@ pub fn d_for(start: Int, end: Int, carried: List[Int],
 
 ### 6.5 墙钟
 
-新 job `tile` 并行，不 `needs:` 任何长杆。预估：pip 装 37 MB 约 10 s，`tileiras` 编几个
-kernel 秒级，包测试秒级；budget 行按 `check-gate-budgets.py` 规则写。刀 1 与刀 0 只加 std
-测试，落在 `test` job 的 `dawn test --stdlib` 步（`gates.yml:301`），秒级。
+新 job `tile` 并行，不 `needs:` 任何长杆（刀 3 实测：wheel 热缓存 8 s、冷约 25 s；`run.sh`
+本机 40 s，含一次 native 构建、两个 kernel 两后端两种输出、七次 `tileiras`、五个变异体；
+加 checkout 与工具链动作按 45 s 估，planning value 110 s，翻倍 220 s，`timeout-minutes: 11`，
+远在 run-pole 660 s 之下）。刀 2 时挂在 `test` job 里的 tile-golden 步随之搬走，`test` 的 budget
+回到 323 s。刀 1 与刀 0 只加 std 测试，落在 `test` job 的 `dawn test --stdlib` 步，秒级。
 
 ## 7. 刀序
 
@@ -430,7 +485,7 @@ kernel 秒级，包测试秒级；budget 行按 `check-gate-budgets.py` 规则�
 | **1 宿主效果 + 假设备**（已落地） | 「一个 `!Gpu` 程序在没有 GPU 的机器上跑完 vadd 并得到正确答案」 | `std/gpu.dawn`、`modules.txt`、`std.gpu.core` golden、checker-corpus 一条幻影 must-red、opaque-twin 第三种标记与语料 | `dawn test --stdlib` 过 | 删掉 `upload` 的长度校验，假设备下长度不符仍 `Ok` 的测试要红 | 1 到 2 |
 | **0 窄浮点**（与刀 1 并行，D3） | 「`round_bf16(a + b)` 在两个后端上与精确 oracle 逐位一致」 | `std/narrow.dawn`、`scripts/narrow-contract/`、`spike-native/narrow_round.dawn` 加 `.expect`、`opaque-twin/narrow.dawn` | 174 条以上 `differential ok`；twin 过 | ties-to-even 改成 ties-away，oracle 用例红；删量子钳位，`1e-40` 用例红 | 1 到 2 |
 | **2 记录 handler + 文本 golden**（已落地） | 「同一个 kernel 体记录两次产出逐字节相同的 Tile IR 文本，且与手写 golden 相同」 | `packages/tileir`（`Dev`、`Tile[D] / Param[D] / Idx`、`TileProg`、渲染器）、`scripts/tile-golden/{vadd,vadd_f32}.mlir` 与 `run.sh`（两后端）、opaque-twin 一条语料、包测试 | golden 逐字节，两后端；`cuda-tile-translate` 本机没有，round-trip 推迟到刀 3 | 渲染器少发 store 的 token 操作数，`vadd.mlir` 红；`load` 的 dtype 写死 `f64`，f32 kernel 在记录时被拒而 f64 的不动（两条都内置在 `run.sh`，两后端各验） | 2 到 3（实报 1；门禁 17s 本机，落在 `test` job，budget 323s → 357s） |
-| **3 字节码写入器 + CI 层 1** | 「`tileiras --gpu-name sm_86` 接受我们写的字节码并产出 cubin」 | `packages/tileir/bytecode.dawn`（对照 cuTile.jl `encodings.jl` 与 `writer.jl`，估 1500 行）、`gates.yml` 新 job `tile`、`toolchain.txt` | CI 绿；本机 round-trip 与文本 golden 一致 | 改错一个 op 编码，`tileiras` 红（层 1 的阳性对照，要先证明它会红） | 4 到 6 |
+| **3 字节码写入器 + CI 层 1**（已落地） | 「`tileiras --gpu-name sm_86` 接受我们写的字节码并产出 cubin」 | `packages/tileir/src/lower.dawn`（两个消费者共用的指令表，渲染器改吃它、文本 golden 逐字节未动）与 `bytecode.dawn`（约 330 行含测试，比估的 1500 少：只编码指令表装得下的十三种操作）、`scripts/tile-golden` 加 `*.tilebc` golden、`toolchain.txt`、`install-tileiras.sh`、三个写入器变异体，`gates.yml` 新 job `tile` | 本机 `tileiras` 13.3.36 接受，8320 字节 cubin（§6.1）；CI `tile` job | 三个写入器变异体各被 `tileiras` 以具名报文拒绝（§6.2） | 4 到 6（实报 1；`run.sh` 本机 40 s，`tile` job budget 220 s planning value） |
 | **4 `with_gpu_real` + 本机对拍** | 「GPU 算出的 vadd 与假设备逐位一致」 | `RtGpu` 加六个 intrinsic、`dawn_rt.c` 的 `dlopen libcuda`、JVM `dawn/rt/Gpu` 拒绝类、`with_gpu_real`、`scripts/tile-gpu-diff/`、`intrinsic-parity.py` 锚点、CI 台账检查 | 本机 `run.sh` 全绿并写台账；CI 台账门绿 | `launch` 的 grid 写成 0，对拍红；台账 commit 写成非祖先，CI 红 | 3 到 4 |
 | **5 结构化控制流 + 第二个 kernel** | 「带 `d_for` 的归约 kernel 与假设备逐位一致」 | `d_for / d_if` 普通函数加 `t_loop_begin / t_loop_end` 操作、区域栈、token 穿过循环携带值 | 新 golden、层 1、本机对拍 | 循环携带值漏一个，golden 或 `tileiras` 红 | 3 到 4 |
 | **6 BF16 tile** | 「设备 bf16 `addf` 与 `narrow.round_bf16(f64 加)` 对全部 65536 个 bf16 值对加随机对逐位一致」 | `Tensor[BF16 标记]` 的 dtype 表项、宿主 `Bytes` 打包、对拍脚本的逐位档 | 本机对拍；台账 | 设备侧 rounding 属性改 `approx`，对拍红 | 2 |
@@ -455,10 +510,14 @@ kernel 记录出来的是一阶单态 SSA。换来的限制是 §5.2 的结构�
 
 其它：
 
-- `cuda-tile` 随 LLVM 漂移：只影响本机 round-trip 工具；字节码规范有版本号与兼容规则，
-  我们写 13.2 版字节码，`tileiras` 13.3.36 应读得了，刀 3 第一天验证。
-- `tileiras` 许可：若不许在 CI 上用，层 1 退回本机，CI 只剩层 0，那时把台账门的触发面扩到
-  `scripts/tile-golden/**`。
+- `cuda-tile` 随 LLVM 漂移：只影响本机 round-trip 工具，而刀 3 没有用到它；字节码规范有版本号
+  与兼容规则，我们写 13.2 版字节码，`tileiras` 13.3.36 读得了（13.1 / 13.2 / 13.3 三个版本号都接受，
+  cubin 相同，§6.1 已验证）。
+- `tileiras` 许可：SLA 已读（§6.1），CI 上安装使用落在授权内；若日后不许，层 1 退回本机，
+  CI 只剩层 0，那时把台账门的触发面扩到 `scripts/tile-golden/**`。
+- `tileiras` 的 wheel 依赖没有写在它能读的地方：`--no-deps` 装出来的二进制对任何输入都答一句
+  `failed to compile Tile IR program`，不说少了什么。刀 3 花在这上的时间比花在格式上的多；
+  `toolchain.txt` 把「要哪两个文件」写成了实测结论，升钉时先重跑那个移除实验。
 - 效果操作的闭包参数不能写自己的效果（§5.2 已核实）：`d_for / d_if` 走普通函数加区域栈。
 - 命名空间与状态格捕获：§2.3。
 - **std 声明的第一个 trait 撞出一处编译器缺陷**：`dawn doc --builtins` 用只含 prelude trait 的表
