@@ -9,7 +9,10 @@
 > `Tile[D] / Param[D] / Idx`、`TileProg`、记录 handler、文本渲染器，`scripts/tile-golden`），
 > §5.1 描述的就是它。**刀 3 已落地**（`packages/tileir` 的 `lower`（两个消费者共用的指令表）与
 > `bytecode`（字节码写入器），`scripts/tile-golden` 加字节码 golden 与 `tileiras` 层 1，
-> CI 新 job `tile`），§5.3 与 §6 描述的就是它；刀 0 与刀 4 起未动工。
+> CI 新 job `tile`），§5.3 与 §6 描述的就是它。**刀 5 已落地**（`packages/tileir` 的
+> 索引算术与 `d_for` / `d_for2`、记录 handler 的区域栈、`For` 的降低 / 渲染 / 编码，
+> 第二个 kernel `sum` 与 `std/gpu.sum_ref`），§5.2 描述的就是它；刀 0、刀 4、刀 6 未动工
+> （刀 4 与刀 5 并行开工，各自的合并以后到者 rebase 为准）。
 > 前置勘察与计划稿是两份不入库的研究备忘录（agent-handoff 的
 > `cutile-backend-fit.md` 与 `tile-backend-plan.md`），探索过程留在那里，
 > 本文只保留结论与证据坐标。
@@ -330,7 +333,7 @@ parser 的 round-trip，这一点没变。
 - 与计划稿的一处出入：索引不是裸 `Int` 而是 `opaque type Idx = Int`。宿主整数与 SSA
   句柄在类型上分开，把宿主数当索引传给 `load` 是类型错误，不是渲染器里的悬空句柄。
 
-### 5.2 kernel 内的控制流
+### 5.2 kernel 内的控制流（刀 5 已落地）
 
 记录时 Dawn 的 `if / for / while` 是宿主求值：条件只依赖宿主已知量（形状、参数位、常量）时，
 展开是对的、免费的，也就是 cuTile 里 `ct.Constant` 折叠的效果。条件依赖 tile 值时 Dawn 的
@@ -339,21 +342,83 @@ parser 的 round-trip，这一点没变。
 **已核实**：效果操作的参数可以是函数类型，handler 臂里能调用它，但那个函数类型不能写
 `!Dev`（在 `effect Dev` 自己的声明体里 `!Dev` 还不在作用域）；写效果变量 `!e` 能过 check，
 但传进去的闭包只准纯或 `!io`（spec.md §6.3：名义类型绑定的效果参数只走空证据），一个发
-`Dev` 操作的循环体在调用点就被拒。所以 `d_for / d_if` 不做成操作，做成 `packages/tileir`
-里的普通函数：
+`Dev` 操作的循环体在调用点就被拒。所以 `d_for` 不做成操作，做成 `packages/tileir` 里的
+普通函数，夹在两个操作之间（落地形状以 `packages/tileir/src/dev.dawn` 为准）：
 
 ```dawn
-pub fn d_for(start: Int, end: Int, carried: List[Int],
-             body: fn(Int, List[Int]) -> List[Int] !Dev) -> List[Int] !Dev = {
-  let iv = t_loop_begin(start, end, carried)     # 操作：开区域，答归纳变量与区域内携带值名
-  let outs = body(iv, carried_names)             # 宿主跑一次体，体内发的操作落进当前区域
-  t_loop_end(outs)                               # 操作：关区域，答循环之后的携带值名
+pub effect Dev {
+  # ... 刀 2 的四个操作 ...
+  fn t_idx_const(value: Int) -> Int                 # 标量 i32 tile：宿主常量
+  fn t_idx_add(a: Int, b: Int) -> Int
+  fn t_idx_mul(a: Int, b: Int) -> Int
+  fn t_loop_begin(lower: Int, upper: Int, step: Int, inits: List[Int]) -> (Int, List[Int])
+  fn t_loop_end(outs: List[Int]) -> List[Int]
 }
+
+pub fn idx_const(value: Int) -> Idx !Dev
+pub fn idx_add(a: Idx, b: Idx) -> Idx !Dev
+pub fn idx_mul(a: Idx, b: Idx) -> Idx !Dev
+
+pub fn d_for[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
+                body: fn(Idx, Tile[D]) -> Tile[D] !Dev) -> Tile[D] !Dev
+pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
+                    body: fn(Idx, Tile[A], Tile[B]) -> (Tile[A], Tile[B]) !Dev) -> (Tile[A], Tile[B]) !Dev
 ```
 
-普通函数的参数类型写 `!Dev` 没有限制。记录 handler 因此维护一个区域栈，这正是 JAX
-`lax.scan` 的 tracing 形状。`d_if` 同理，条件是 `Tile[Bool]` 句柄，两臂各跑一次。
-递归 helper：记录时展开，递归即无限展开；handler 维护展开深度计数，超限 `panic`。
+`d_for` 调 `t_loop_begin` 开区域（答归纳变量句柄与区域内的携带值句柄），在宿主上把 `body`
+**跑一次**（体内发的操作落进当前区域），再调 `t_loop_end(outs)` 关区域（答循环之后的携带值
+句柄）。普通函数的参数类型写 `!Dev` 没有限制。
+
+落地的设计点，与计划稿的出入逐条标出：
+
+- **区域栈**：记录 handler 多一格 `frames: List[Frame]`，`Frame` 存开区域时的外层操作表与
+  循环头（`iv / lower / upper / step / inits / carried`）。`t_loop_begin` 压栈并把当前操作表
+  清空，`t_loop_end` 弹栈、把体包成 `For(iv, lower, upper, step, inits, carried, results, body)`
+  接回外层表；`body` 以 `Continue(values)` 结尾（下一轮收到的值）。这正是 JAX `lax.scan`
+  的 tracing 形状。
+- **token 穿过循环携带值**：handler 把 `tok` 作为**最后一个**携带值自己带进带出：`inits`
+  末尾是循环前的 token，体从区域内的携带 token 起链，`Continue` 末尾是体的最后一个 token，
+  循环后 `tok` 换成 `results` 末尾。kernel 体看不见它。负控 `loop-token-not-carried`
+  （run.sh）把「循环后换 token」这一行删掉，`sum` 在降低时被按名拒绝。
+- **循环边界与步长是 `Idx`**（SSA 句柄）而不是宿主 `Int`：`for` 的三个操作数在 Tile IR 里是
+  `tile<i32>` 值，块相关的边界（`b * chunks + 1`）本来就要算；宿主常量走 `idx_const`，这是
+  三个索引算术操作进 `Dev` 的原因。计划稿写的是 `(start, end)` 宿主整数。
+- **公开面是带类型的 `d_for` / `d_for2`，句柄级的 `d_for(carried: List[Int], ...)` 是模块私有**
+  （`loop_handles`）：opaque 只在声明模块内能拆包（spec.md §2.7），一个外部 kernel 体既造
+  不出 `Int` 也换不回 `Tile[D]`，句柄级签名在模块外不可用；导出拆包函数会让幻影可伪造。
+  两个 tile 之外的携带值组合等有客户再加。
+- **降低时按区域限定作用域**：`lower.dawn` 的名字表与指针梯子的 memo 在进区域时继承外层、
+  出区域时回到外层加上 `results`；体内定义的句柄记进 `closed`，之后再被引用按名拒绝
+  （「a loop body defined and which is not visible after the loop」），而不是渲染成一个越出
+  支配关系的 SSA 名。指令表给 `For` 编号的次序是文本的阅读序：结果、归纳变量、携带值、体。
+- **字节码的区域布局**（`BytecodeWriter.cpp` 的 `writeRegion / writeBlock` 与
+  `BytecodeGen.cpp`）：`for` = opcode、**结果个数**（有变长操作数或结果的操作都先写个数，
+  `return` 与 `continue` 的两个 0 就是这个）、结果类型、**flags**（`unsigned` 是 13.2 加的
+  可选字段，写入器只在目标版本不低于 13.2 时写这一格，所以字节码从此与版本号相关）、
+  操作数个数与操作数、区域数 1、块数 1、块参数个数与类型、块内操作数与操作。**值编号**：
+  块参数接着外层计数往下编，块内结果继续，块结束时计数**回滚**到块参数之前，`for` 自己的
+  结果再从那里编。指令表的编号是文本的，写入器用一张 `index` 表把表值映射到这套索引，
+  不是第二套编号。负控 `for-results-not-rolled-back` 删掉回滚，`tileiras` 以
+  `operand index 39 out of bounds (size=25)` 拒绝。
+- **`d_if` 没做**：归约 kernel 用不到它。Tile IR 的 `if` 是 `yield` 结尾的两个区域、结果
+  类型列表在头上，与 `for` 同一套区域编码，加的时候照 `lower_for` 的形状加一个 `IfOp`
+  即可；要不要做等第一个需要 tile 值条件的 kernel。
+- **递归上限**：两个常量，`MAX_LOOP_DEPTH = 16`（区域栈深度，递归穿过 `d_for` 的 helper
+  在这里停）与 `MAX_HANDLES = 65536`（一次记录能铸的句柄数，不进循环的递归 helper 在这里
+  停）。都是 `panic`，报文点名原因。
+
+第二个 kernel `sum`（`scripts/tile-golden/kernels.dawn`，golden `sum.mlir` 46 行 /
+`sum.tilebc` 392 字节，cubin 8448 字节、`FUNC GLOBAL sum` 768 字节 SASS）：块 b 把 `x` 里
+编号 `b*chunks .. b*chunks+chunks-1` 的 `chunks` 个连续 128 宽 tile 折进 `out` 的一个 tile，
+第一个 tile 作携带值进循环，其余按序 `addf`；`chunks` 是记录时的宿主常量（golden 为 4）。
+没有用 `reduce`：它要 `identities` 属性（ArrayAttr 套 FloatAttr）与带块参数的归约区域，
+是另一套属性编码，而「每块出一个 tile」已经是两阶段归约的第一阶段，第二阶段（tile 内归约
+写标量）等有客户再加。**逐位一致的论证**：宿主参考 `std/gpu.sum_ref` 按同一顺序折叠
+（第一个 tile 起、逐 tile 左结合），设备侧 `addf` 是 `rounding<nearest_even>`、不 flush-to-zero，
+每一步都是 IEEE double 加法，操作数与顺序相同则结果逐位相同；从第一个 tile 起而不是从 0.0 起，
+是因为 `0.0 + -0.0 = +0.0` 会让全 `-0.0` 的 lane 差一个符号位。`std/gpu` 的测试把块 0 的
+四个 tile 定成 `2^53, 1, 1, -2^53`：左结合得 0.0、右结合得 2.0、成对得 1.0，答案本身说出
+用的是哪种顺序。层 2 的 GPU 对拍归刀 4 的脚本与台账。
 
 ### 5.3 谁把它变成 Tile IR、何时
 
@@ -439,8 +504,12 @@ pub fn d_for(start: Int, end: Int, carried: List[Int],
 
 阳性对照先于接受：接受之前先证明它会拒（坏 magic → `input does not correspond to Tile IR
 bytecode`；截断 → `section length 4 exceeds remaining bytecode data`；未分配 opcode 0x7F →
-`unsupported opcode 127 for bytecode version 13.2`）。今天三层各有：层 0 两个 golden 文件
-两后端；层 1 CI 每 push；层 2 无（刀 4）。
+`unsupported opcode 127 for bytecode version 13.2`）。刀 5 又加三个（`sum` 上）：
+`loop-token-not-carried` 与 `region-stack-pop` 是 handler 变异体，降低时按名拒绝、不出文本；
+`for-results-not-rolled-back` 是写入器变异体，文本不动、字节同长、`tileiras` 答
+`operand index 39 out of bounds (size=25) for operand 1`。层 1 还多查每个 cubin 的符号表里有
+`GLOBAL FUNC <kernel>`（python 直接读 ELF64，不依赖 binutils）。今天三层各有：层 0 三个
+golden 文件两后端；层 1 CI 每 push；层 2 无（刀 4）。
 
 ### 6.3 版本钉法（刀 3 实况）
 
@@ -471,7 +540,9 @@ bytecode`；截断 → `section length 4 exceeds remaining bytecode data`；未�
 新 job `tile` 并行，不 `needs:` 任何长杆（刀 3 实测：wheel 热缓存 8 s、冷约 25 s；`run.sh`
 本机 40 s，含一次 native 构建、两个 kernel 两后端两种输出、七次 `tileiras`、五个变异体；
 加 checkout 与工具链动作按 45 s 估，planning value 110 s，翻倍 220 s，`timeout-minutes: 11`，
-远在 run-pole 660 s 之下）。刀 2 时挂在 `test` job 里的 tile-golden 步随之搬走，`test` 的 budget
+远在 run-pole 660 s 之下）。刀 5 实测 `run.sh` 本机 100 s（三个 kernel、十一次 `tileiras`、
+八个变异体各一次 native 构建），planning value 170 s，翻倍 340 s，`timeout-minutes: 17`，
+仍在 run-pole 之下。刀 2 时挂在 `test` job 里的 tile-golden 步随之搬走，`test` 的 budget
 回到 323 s。刀 1 与刀 0 只加 std 测试，落在 `test` job 的 `dawn test --stdlib` 步，秒级。
 
 ## 7. 刀序
@@ -487,7 +558,7 @@ bytecode`；截断 → `section length 4 exceeds remaining bytecode data`；未�
 | **2 记录 handler + 文本 golden**（已落地） | 「同一个 kernel 体记录两次产出逐字节相同的 Tile IR 文本，且与手写 golden 相同」 | `packages/tileir`（`Dev`、`Tile[D] / Param[D] / Idx`、`TileProg`、渲染器）、`scripts/tile-golden/{vadd,vadd_f32}.mlir` 与 `run.sh`（两后端）、opaque-twin 一条语料、包测试 | golden 逐字节，两后端；`cuda-tile-translate` 本机没有，round-trip 推迟到刀 3 | 渲染器少发 store 的 token 操作数，`vadd.mlir` 红；`load` 的 dtype 写死 `f64`，f32 kernel 在记录时被拒而 f64 的不动（两条都内置在 `run.sh`，两后端各验） | 2 到 3（实报 1；门禁 17s 本机，落在 `test` job，budget 323s → 357s） |
 | **3 字节码写入器 + CI 层 1**（已落地） | 「`tileiras --gpu-name sm_86` 接受我们写的字节码并产出 cubin」 | `packages/tileir/src/lower.dawn`（两个消费者共用的指令表，渲染器改吃它、文本 golden 逐字节未动）与 `bytecode.dawn`（约 330 行含测试，比估的 1500 少：只编码指令表装得下的十三种操作）、`scripts/tile-golden` 加 `*.tilebc` golden、`toolchain.txt`、`install-tileiras.sh`、三个写入器变异体，`gates.yml` 新 job `tile` | 本机 `tileiras` 13.3.36 接受，8320 字节 cubin（§6.1）；CI `tile` job | 三个写入器变异体各被 `tileiras` 以具名报文拒绝（§6.2） | 4 到 6（实报 1；`run.sh` 本机 40 s，`tile` job budget 220 s planning value） |
 | **4 `with_gpu_real` + 本机对拍** | 「GPU 算出的 vadd 与假设备逐位一致」 | `RtGpu` 加六个 intrinsic、`dawn_rt.c` 的 `dlopen libcuda`、JVM `dawn/rt/Gpu` 拒绝类、`with_gpu_real`、`scripts/tile-gpu-diff/`、`intrinsic-parity.py` 锚点、CI 台账检查 | 本机 `run.sh` 全绿并写台账；CI 台账门绿 | `launch` 的 grid 写成 0，对拍红；台账 commit 写成非祖先，CI 红 | 3 到 4 |
-| **5 结构化控制流 + 第二个 kernel** | 「带 `d_for` 的归约 kernel 与假设备逐位一致」 | `d_for / d_if` 普通函数加 `t_loop_begin / t_loop_end` 操作、区域栈、token 穿过循环携带值 | 新 golden、层 1、本机对拍 | 循环携带值漏一个，golden 或 `tileiras` 红 | 3 到 4 |
+| **5 结构化控制流 + 第二个 kernel**（已落地） | 「带 `d_for` 的归约 kernel 与假设备逐位一致」 | `d_for / d_for2` 普通函数加 `t_loop_begin / t_loop_end` 与三个索引算术操作、区域栈、token 穿过循环携带值、`For` 的降低 / 渲染 / 字节码区域编码、`sum` kernel 与 `std/gpu.sum_ref`；`d_if` 未做（§5.2） | `scripts/tile-golden` 加 `sum.mlir / sum.tilebc`、层 1 含 `FUNC GLOBAL sum`；本机对拍归刀 4 的脚本 | 循环后 token 不换（`loop-token-not-carried`）与区域栈弹反（`region-stack-pop`）→ 降低时按名拒绝；写入器不回滚值索引（`for-results-not-rolled-back`）→ `tileiras` 红 | 3 到 4（实报 1；`run.sh` 本机 100 s，`tile` job budget 340 s planning value） |
 | **6 BF16 tile** | 「设备 bf16 `addf` 与 `narrow.round_bf16(f64 加)` 对全部 65536 个 bf16 值对加随机对逐位一致」 | `Tensor[BF16 标记]` 的 dtype 表项、宿主 `Bytes` 打包、对拍脚本的逐位档 | 本机对拍；台账 | 设备侧 rounding 属性改 `approx`，对拍红 | 2 |
 | 7（期权）混合路线 | 「同一个 kernel 体经编译期发射器与经记录 handler 产出相同的 Tile 程序」 | `selfhost/src/tile/emit_tile.dawn` | 两路 `TileProg` 相等 | 不在本计划内 | 6 到 10 |
 
@@ -518,7 +589,9 @@ kernel 记录出来的是一阶单态 SSA。换来的限制是 §5.2 的结构�
 - `tileiras` 的 wheel 依赖没有写在它能读的地方：`--no-deps` 装出来的二进制对任何输入都答一句
   `failed to compile Tile IR program`，不说少了什么。刀 3 花在这上的时间比花在格式上的多；
   `toolchain.txt` 把「要哪两个文件」写成了实测结论，升钉时先重跑那个移除实验。
-- 效果操作的闭包参数不能写自己的效果（§5.2 已核实）：`d_for / d_if` 走普通函数加区域栈。
+- 效果操作的闭包参数不能写自己的效果（§5.2 已核实）：`d_for` 走普通函数加区域栈。
+- opaque 只在声明模块内能拆包：句柄级的循环签名在 `packages/tileir` 外不可用，公开面只能
+  是带类型的 `d_for / d_for2`（§5.2）。
 - 命名空间与状态格捕获：§2.3。
 - **std 声明的第一个 trait 撞出一处编译器缺陷**：`dawn doc --builtins` 用只含 prelude trait 的表
   渲染 std 签名，`alloc[D: Dtype]` 的 bound 让它 `panic("unknown trait id")`。刀 1 顺手修成按

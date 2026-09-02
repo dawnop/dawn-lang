@@ -1094,10 +1094,14 @@ jobs:
   # byte, plus the handler's determinism) and NVIDIA's `tileiras` assembling
   # each bytecode golden for sm_86 (layer 1: the one verdict from outside
   # this repository, with a reader and a verifier behind it that name the
-  # offset and the operation when they refuse). Five mutants: two on the
-  # handler and renderer that the text golden catches, three on the writer
-  # (an opcode swap, a flagged operand left unwritten, a wrong type tag)
-  # that the text cannot see and tileiras refuses.
+  # offset and the operation when they refuse), and every cubin carrying a
+  # GLOBAL FUNC named after its kernel. Eight mutants: two on the handler
+  # and renderer that the text golden catches, two on the handler's region
+  # stack that the lowering refuses before any text (a loop's token not
+  # carried out, the stack popped the wrong way round), four on the writer
+  # (an opcode swap, a flagged operand left unwritten, a wrong type tag,
+  # a loop's value index not rolled back) that the text cannot see and
+  # tileiras refuses.
   #
   # tileiras is an offline assembler: no GPU, no driver, it links libc, libm
   # and libpthread only and reads libnvvm.so.4 and execs ptxas from two
@@ -1109,17 +1113,18 @@ jobs:
   #
   # Its own job because the wheels are 150 MB and nothing else needs them,
   # and so that a slow package index delays nothing but this. Nothing
-  # `needs:` it. Local wall clock (2026-09-02): 8s for the wheels from a
-  # warm pip cache, ~25s cold; 40s for run.sh (one native build of the clean
-  # project, two kernels on both backends in text and bytecode, seven
-  # tileiras runs, five mutants at one native build and two to four runs
-  # each; the runtime object is built once). With the checkout and the
-  # toolchain action (~45s, the carried estimate) that is 45 + 25 + 40 =
-  # 110s; doubled for a cold runner, 220s. Under the run pole.
+  # `needs:` it. Local wall clock (2026-09-02, knife 5): 8s for the wheels
+  # from a warm pip cache, ~25s cold; 100s for run.sh (one native build of
+  # the clean project, three kernels on both backends in text and bytecode,
+  # eleven tileiras runs, eight mutants at one native build and two to four
+  # runs each; the runtime object is built once; knife 3's 40s grew by a
+  # kernel and three mutants). With the checkout and the toolchain action
+  # (~45s, the carried estimate) that is 45 + 25 + 100 = 170s; doubled for
+  # a cold runner, 340s. Under the run pole.
   tile:
     runs-on: ubuntu-latest
-    # budget: 3x 220s planning value (110s local, doubled)
-    timeout-minutes: 11
+    # budget: 3x 340s planning value (170s local, doubled)
+    timeout-minutes: 17
     steps:
       - uses: actions/checkout@v4
 
