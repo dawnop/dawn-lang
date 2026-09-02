@@ -58,8 +58,9 @@ use std/list
 use std/map
 use std/narrow
 use std/str
-use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, CmpFloat, CmpInt, SelectTile, ForLoop, Cont, Ret}
+use dev.{RedId, IdF, IdI}
+use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, CmpFloat, CmpInt, SelectTile, ForLoop, Cont, ReduceTile, IfElse, YieldVals, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
@@ -76,16 +77,23 @@ const OP_ABSF: Int = 0x00
 const OP_ADDF: Int = 0x02
 const OP_ADDI: Int = 0x03
 const OP_BROADCAST: Int = 0x0B
+const OP_CEIL: Int = 0x0D
 const OP_CMPF: Int = 0x0E
 const OP_CMPI: Int = 0x0F
 const OP_CONSTANT: Int = 0x10
 const OP_CONTINUE: Int = 0x11
 const OP_DIVF: Int = 0x14
+const OP_EXP: Int = 0x17
+const OP_EXP2: Int = 0x18
+const OP_FLOOR: Int = 0x27
 const OP_FMA: Int = 0x28
 const OP_FOR: Int = 0x29
 const OP_GET_TILE_BLOCK_ID: Int = 0x30
+const OP_IF: Int = 0x32
 const OP_IOTA: Int = 0x3A
 const OP_LOAD_PTR_TKO: Int = 0x3D
+const OP_LOG: Int = 0x3F
+const OP_LOG2: Int = 0x40
 const OP_MAKE_TOKEN: Int = 0x44
 const OP_MAXF: Int = 0x45
 const OP_MINF: Int = 0x47
@@ -93,11 +101,17 @@ const OP_MULF: Int = 0x4C
 const OP_MULI: Int = 0x4E
 const OP_NEGF: Int = 0x4F
 const OP_OFFSET: Int = 0x51
+const OP_POW: Int = 0x54
+const OP_REDUCE: Int = 0x58
 const OP_RESHAPE: Int = 0x5B
 const OP_RETURN: Int = 0x5C
+const OP_RSQRT: Int = 0x5D
 const OP_SELECT: Int = 0x5F
+const OP_SQRT: Int = 0x64
 const OP_STORE_PTR_TKO: Int = 0x65
 const OP_SUBF: Int = 0x67
+const OP_TANH: Int = 0x6A
+const OP_YIELD: Int = 0x6D
 
 # The flag bits of a memory operation, in the order the reader assigns them:
 # the optional attributes of the operation in declaration order first
@@ -116,6 +130,17 @@ const ORDER_WEAK: Int = 0
 const CMP_ORDERED: Int = 1
 const SIGNED: Int = 1
 const ROUND_NEAREST_EVEN: Int = 0
+
+# `rounding_mode`: full, the CUDA Math API's own precision. The only mode an
+# f64 `tanh` accepts (`nearest_even` is refused and `approx` is f32-only,
+# both measured), and its default, which is why the text prints nothing.
+const ROUND_FULL: Int = 5
+
+# Attribute tags (BytecodeAttrOpcodes.td, frozen). A reduction's identities
+# are an ArrayAttr, whose elements are written SELF-CONTAINED: each carries
+# its tag and the index of its element type before its payload.
+const ATTR_INTEGER: Int = 1
+const ATTR_FLOAT: Int = 2
 
 # The `comparison_predicate` values (AttrDefs.td, an i32 enum).
 fn predicate_value(pred: String) -> Int = match pred {
@@ -139,12 +164,45 @@ fn float_op(op: String) -> Int = match op {
   "divf" -> OP_DIVF
   "maxf" -> OP_MAXF
   "minf" -> OP_MINF
+  "pow" -> OP_POW
   "negf" -> OP_NEGF
   "absf" -> OP_ABSF
+  "exp" -> OP_EXP
+  "exp2" -> OP_EXP2
+  "log" -> OP_LOG
+  "log2" -> OP_LOG2
+  "sqrt" -> OP_SQRT
+  "rsqrt" -> OP_RSQRT
+  "tanh" -> OP_TANH
+  "floor" -> OP_FLOOR
+  "ceil" -> OP_CEIL
   _ -> panic("tileir: `${op}` is not a float operation")
 }
 
 fn float_op_rounds(op: String) -> Bool = op == "addf" || op == "subf" || op == "mulf" || op == "divf"
+
+# Whether an operation writes a flags varint: it does exactly when it has an
+# optional field the targeted bytecode version knows (BytecodeGen.cpp
+# generateFlagsFieldSerialization), and every optional field here is a
+# `UnitAttr` that is never set, so the varint is always 0. `pow` has none;
+# `exp` has none at 13.2 (its `rounding_mode` is 13.3 and a reader that met
+# one here would take the next byte for the operand); `tanh` has a
+# `rounding_mode` that is REQUIRED at 13.2 and so is not a flag either.
+# Every measurement behind this table is scripts/tile-golden's layer 1: each
+# wrong shape was handed to `tileiras` and refused.
+fn float_op_has_flags(op: String) -> Bool = not (op == "pow" || one_of_op(op, ["exp", "log", "log2", "floor", "ceil", "tanh", "negf", "absf"]))
+
+# The rounding mode a unary operation writes after its flags, or `None`.
+fn unary_rounding(op: String) -> Option[Int] =
+  if op == "sqrt" {
+    Some(ROUND_NEAREST_EVEN)
+  } else if op == "tanh" {
+    Some(ROUND_FULL)
+  } else {
+    None
+  }
+
+fn one_of_op(op: String, names: List[String]) -> Bool = list.any(names, n => n == op)
 
 # Type tags (BytecodeTypeOpcodes.td, frozen).
 const TAG_PTR: Int = 12
@@ -305,6 +363,39 @@ fn elem_name(t: Ty) -> String = match t {
 
 # ---- primitives
 
+## `x`, a 64-bit PATTERN whose top bit may be set, as an LEB128 varint.
+## `put_varint` refuses a negative Int because a length, an index and a
+## value number never are; a zigzagged float pattern can be.
+pub fn put_varint_u64(b: bytes.Buf, x: Int) -> bytes.Buf =
+  if x >= 0 && x < 128 {
+    bytes.put(b, x)
+  } else {
+    put_varint_u64(bytes.put(b, (x & 0x7F) | 0x80), x >>> 7)
+  }
+
+## The reader's `writeSignedVarInt` encoding: zigzag, so a pattern with its
+## sign bit set (every negative float, `-inf` among them) is a short varint
+## and not a ten-byte one. The shift is arithmetic, which is what makes the
+## mask all ones for a negative value.
+pub fn zigzag(x: Int) -> Int = (x << 1) ^ (x >> 63)
+
+# The IEEE pattern of `value` in the named format, and how wide it is.
+fn float_bits(dtype: String, value: Float) -> Int = match dtype {
+  "f64" -> ieee_bits(value, 53, -1022, 1023)
+  "f32" -> ieee_bits(narrow.round_f32(value), 24, -126, 127)
+  "bf16" -> narrow.bf16_bits(narrow.round_bf16(value))
+  _ -> panic("tileir: a float identity of format `${dtype}` has no encoding")
+}
+
+# An integer identity is written as the reader reads an IntegerAttr: the
+# ZERO-EXTENDED value of the format's width, as a plain varint (not zigzag,
+# unlike a float's pattern).
+fn int_zext(dtype: String, value: Int) -> Int = match dtype {
+  "i32" -> value & 0xFFFFFFFF
+  "i64" -> value
+  _ -> panic("tileir: an integer identity of format `${dtype}` has no encoding")
+}
+
 ## `x` as an unsigned LEB128 varint appended to `b`.
 pub fn put_varint(b: bytes.Buf, x: Int) -> bytes.Buf =
   if x < 0 {
@@ -435,6 +526,31 @@ fn number(w: W, id: Int) -> W = W { ..w, index: map.insert(w.index, id, w.nvals)
 fn number_all(w: W, ids: List[Int]) -> W = list.fold(ids, w, number)
 
 # opcode, then one result type index.
+# One element of a reduction's `identities` array, self-contained: its tag,
+# the index of its ELEMENT type (`f64`, not `tile<128xf64>`) and its
+# payload. `tileiras` checks the format against the operand's and refuses a
+# mismatch; it does not look at the value (measured), which is why the
+# value is a layer-2 claim.
+fn identity_attr(w0: W, id: RedId) -> W = match id {
+  IdF(dtype, value) -> {
+    let (w1, ti) = num_ty(w0, dtype)
+    let w2 = emit(emit(w1, ATTR_FLOAT), ti)
+    W { ..w2, body: put_varint_u64(w2.body, zigzag(float_bits(dtype, value))) }
+  }
+  IdI(dtype, value) -> {
+    let (w1, ti) = num_ty(w0, dtype)
+    emit(emit(emit(w1, ATTR_INTEGER), ti), int_zext(dtype, value))
+  }
+}
+
+# The reader numbers a block's values from the enclosing count and rolls
+# that count BACK when the block ends, so the region-holding operation's own
+# results take the indices the body just used (BytecodeWriter.cpp's
+# `writeBlock`). This is that roll-back, and `for`, `reduce` and `if` all go
+# through it: three copies of one rule would be three places to get it
+# wrong, and the mutant that removes it would only reach one of them.
+fn roll_back(before: W, after: W) -> W = W { ..after, index: before.index, nvals: before.nvals }
+
 fn emit_op(w: W, opcode: Int, result: Ty) -> W = {
   let (w1, ti) = ty(w, result)
   emit(emit(w1, opcode), ti)
@@ -480,12 +596,22 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w1 = emit(emit(emit_op(w0, OP_STORE_PTR_TKO, Token), flags), ORDER_WEAK)
     emit_ref(emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask), tok_in)
   }
-  FloatUn(_dst, op, t, src) -> emit_ref(emit_op(w0, float_op(op), t), src)
+  FloatUn(_dst, op, t, src) -> {
+    # flags where the operation has an optional field (never set here), then
+    # the rounding mode where it has a required one
+    let w1 = emit_op(w0, float_op(op), t)
+    let w2 = if float_op_has_flags(op) { emit(w1, 0) } else { w1 }
+    let w3 = match unary_rounding(op) {
+      Some(mode) -> emit(w2, mode)
+      None -> w2
+    }
+    emit_ref(w3, src)
+  }
   FloatBin(_dst, op, t, lhs, rhs) -> {
     # flags: neither flush_to_zero nor propagate_nan, both unit attributes
     # and so bits with no payload; then the rounding mode, on the four
-    # operations that take one.
-    let w1 = emit(emit_op(w0, float_op(op), t), 0)
+    # operations that take one. `pow` has neither.
+    let w1 = if float_op_has_flags(op) { emit(emit_op(w0, float_op(op), t), 0) } else { emit_op(w0, float_op(op), t) }
     let w2 = if float_op_rounds(op) { emit(w1, ROUND_NEAREST_EVEN) } else { w1 }
     emit_ref(emit_ref(w2, lhs), rhs)
   }
@@ -527,10 +653,55 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w8 = number_all(number(w7, iv), carried)
     let w9 = list.fold(body, emit(w8, len(body)), instr)
     # the block is over: its indices roll back, the loop's results take them
-    W { ..w9, index: w7.index, nvals: w7.nvals }
+    roll_back(w7, w9)
   }
+  ReduceTile(_results, tys, dim, identities, operands, _operand_tys, args, body) -> {
+    # results: their count, then a type each; no flags (a reduction has no
+    # optional field); attributes in declaration order: `dim` inline, then
+    # the `identities` array as its length and one self-contained attribute
+    # each; operands: their count, then the tiles; one region of one block
+    # whose arguments are the element and the accumulator of each operand,
+    # in operand order.
+    let w1 = emit(emit(w0, OP_REDUCE), len(tys))
+    let w2 = list.fold(tys, w1, (w, t) => {
+      let (wt, ti) = ty(w, t)
+      emit(wt, ti)
+    })
+    let w3 = emit(emit(w2, dim), len(identities))
+    let w4 = list.fold(identities, w3, identity_attr)
+    let w5 = list.fold(operands, emit(w4, len(operands)), emit_ref)
+    let w6 = emit(emit(emit(w5, 1), 1), len(args))
+    let w7 = list.fold(range(0, len(args)), w6, (w, k) => {
+      let (wt, ti) = ty(w, tys[k / 2])
+      emit(wt, ti)
+    })
+    let w8 = number_all(w7, args)
+    let w9 = list.fold(body, emit(w8, len(body)), instr)
+    # the block is over: its indices roll back, the results take them
+    roll_back(w7, w9)
+  }
+  IfElse(_results, tys, cond, _cond_ty, on_true, on_false) -> {
+    # results, then the condition, then TWO regions: the reader counts them
+    # and refuses one or three (measured). Neither takes block arguments.
+    let w1 = emit(emit(w0, OP_IF), len(tys))
+    let w2 = list.fold(tys, w1, (w, t) => {
+      let (wt, ti) = ty(w, t)
+      emit(wt, ti)
+    })
+    let w3 = emit(emit_ref(w2, cond), 2)
+    region(region(w3, on_true), on_false)
+  }
+  YieldVals(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_YIELD), 0), len(values)), emit_ref)
   Cont(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_CONTINUE), 0), len(values)), emit_ref)
   Ret -> emit(emit(emit(w0, OP_RETURN), 0), 0)
+}
+
+# One region of one block with no arguments: the block's values take the
+# next indices and roll back when it ends, as the reader numbers them.
+fn region(w0: W, body: List[Instr]) -> W = {
+  let w1 = emit(emit(w0, 1), 0)
+  let w2 = list.fold(body, emit(w1, len(body)), instr)
+  roll_back(w0, w2)
 }
 
 # `for` gained its optional `unsigned` field in 13.2, so from that version on
@@ -772,6 +943,139 @@ test "a for is its opcode, result count and types, the flags, the operand count 
   assert str.contains(whole, hex(tail) ++ "03")
   assert bytecode_version() == "13.2"
   assert for_has_flags()
+}
+
+test "zigzag is the reader's signed varint, and a pattern with its top bit set still encodes" {
+  # the encoding the reader's writeSignedVarInt performs:
+  # (v << 1) ^ (int64(v) >> 63)
+  assert zigzag(0) == 0
+  assert zigzag(1) == 2
+  assert zigzag(0 - 1) == 1
+  assert zigzag(0 - 2) == 3
+  # 1.0 is 0x3FF0000000000000, a positive pattern: a plain doubling
+  assert zigzag(0x3FF0000000000000) == 0x7FE0000000000000
+  # -inf is 0xFFF0000000000000, which as an Int is negative
+  assert zigzag(ieee_bits(0.0 - 1.0 / 0.0, 53, 0 - 1022, 1023)) == 0x001FFFFFFFFFFFFF
+  # -0.0's pattern is the smallest Int, and its zigzag has the top bit set:
+  # this is the case put_varint refuses and put_varint_u64 exists for
+  assert zigzag(ieee_bits(0.0 * (0.0 - 1.0), 53, 0 - 1022, 1023)) < 0
+  assert hex(bytes.freeze(put_varint_u64(bytes.buf(), 0 - 1))) == str.repeat("ff", 9) ++ "01"
+  assert hex(bytes.freeze(put_varint_u64(bytes.buf(), 300))) == "ac02"
+}
+
+test "a reduction identity is a self-contained attribute: its tag, the index of its ELEMENT type, its payload" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  # a float identity: tag 2, the f64 type index, the zigzagged pattern
+  let w1 = identity_attr(w0, IdF("f64", 0.0))
+  assert hex(bytes.freeze(w1.body)) == "0200" ++ "00"
+  assert list.map(w1.types.items, hex) == ["09"]
+  # -inf, the identity of a maximum: the same tag and type, a longer payload
+  let w2 = identity_attr(w0, IdF("f64", 0.0 - 1.0 / 0.0))
+  assert hex(bytes.freeze(w2.body)) == "0200" ++ hex(bytes.freeze(put_varint_u64(bytes.buf(), 0x001FFFFFFFFFFFFF)))
+  # an integer identity: tag 1, the i32 type index, the ZERO-EXTENDED value
+  # as a plain varint, not a zigzagged one
+  let w3 = identity_attr(w0, IdI("i32", 0 - 1))
+  assert hex(bytes.freeze(w3.body)) == "0100" ++ hex(bytes.freeze(put_varint(bytes.buf(), 0xFFFFFFFF)))
+  assert list.map(w3.types.items, hex) == ["03"]
+}
+
+fn total_prog() -> TileProg = TileProg {
+  name: "total",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
+    Reduce([7], 0, 8, [IdF("f64", 0.0)], [2], [4, 5], [
+      BinaryF(6, "addf", "f64", 0, 4, 5),
+      Yield([6])
+    ]),
+    Spread(8, "f64", 1, 7),
+    Store(9, 1, "f64", 1, 1, 8, None, 3)
+  ]
+}
+
+test "a reduce is its opcode, result count and types, dim, the identities array, the operands and one region" {
+  let k = lower(total_prog())
+  let (w, whole) = body_of(k)
+  # opcode 0x58, 1 result, the rank-0 f64 type index, dim 0, 1 identity
+  # (tag 2, the f64 element type index, payload 0), 1 operand at index 15
+  # (2 parameters and 13 values before it), then 1 region, 1 block, 2 args.
+  # There is NO flags field: a reduction has no optional attribute or
+  # operand, and the reader would take the next byte for `dim` if one were
+  # written (measured through tileiras).
+  # the type indices are the writer's own; interning is idempotent, so
+  # asking the finished table for them answers what the encoder used
+  let (w1, rank0) = ty(w, Tile([], Num("f64")))
+  let (_w2, elem) = num_ty(w1, "f64")
+  let expect = list.fold(
+    [OP_REDUCE, 1, rank0, 0, 1, ATTR_FLOAT, elem, 0, 1, 15, 1, 1, 2, rank0, rank0, 2],
+    bytes.buf(), put_varint)
+  assert str.contains(whole, hex(bytes.freeze(expect)))
+  # the region's two block arguments take the next indices and roll back,
+  # so the reduction's own result takes the first of them
+  assert map.get(w.index, 15) == Some(17)
+  assert not map.has(w.index, 16)
+  assert not map.has(w.index, 17)
+}
+
+fn branch_prog() -> TileProg = TileProg {
+  name: "branch",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
+    IdxConst(4, 0),
+    CmpI(5, "eq", 0, 1, 4),
+    If([8], 5, [BinaryF(6, "addf", "f64", 8, 2, 2), Yield([6])],
+      [BinaryF(7, "mulf", "f64", 8, 2, 2), Yield([7])]),
+    Store(9, 1, "f64", 1, 8, 8, None, 3)
+  ]
+}
+
+test "an if is its opcode, result count and types, the condition, then TWO regions whose blocks take the same indices" {
+  let k = lower(branch_prog())
+  let (w, whole) = body_of(k)
+  # opcode 0x32, 1 result, the tile<8xf64> type index, the condition's
+  # index (18: 2 parameters and 16 values), then 2 regions, each one block
+  # of no arguments and two operations
+  let (_w1, f64v) = ty(w, Tile([8], Num("f64")))
+  let expect = list.fold([OP_IF, 1, f64v, 18, 2, 1, 0, 2], bytes.buf(), put_varint)
+  assert str.contains(whole, hex(bytes.freeze(expect)))
+  # both branches numbered their addf and mulf at the same index and rolled
+  # back, so the if's own result takes it
+  assert map.get(w.index, 17) == Some(19)
+  assert not map.has(w.index, 18)
+  assert not map.has(w.index, 19)
+  assert encode(branch_prog()) == encode(branch_prog())
+}
+
+test "a unary float operation writes flags only where it has an optional field, and a rounding mode only where it has one" {
+  # measured against tileiras, one wrong shape at a time: exp with a
+  # rounding varint loses the stream, exp2 without its flags reads an
+  # operand index out of bounds, sqrt without its flags reads 15 for an
+  # enum, tanh without its rounding mode does the same
+  assert not float_op_has_flags("exp")
+  assert float_op_has_flags("exp2")
+  assert float_op_has_flags("rsqrt")
+  assert float_op_has_flags("sqrt")
+  assert not float_op_has_flags("tanh")
+  assert not float_op_has_flags("log")
+  assert not float_op_has_flags("log2")
+  assert not float_op_has_flags("floor")
+  assert not float_op_has_flags("ceil")
+  assert not float_op_has_flags("pow")
+  assert float_op_has_flags("addf")
+  assert float_op_has_flags("maxf")
+  assert unary_rounding("sqrt") == Some(ROUND_NEAREST_EVEN)
+  assert unary_rounding("tanh") == Some(ROUND_FULL)
+  assert unary_rounding("exp") == None
+  assert unary_rounding("rsqrt") == None
+  # the opcodes, from the frozen table
+  assert (float_op("exp"), float_op("exp2"), float_op("log"), float_op("log2")) == (0x17, 0x18, 0x3F, 0x40)
+  assert (float_op("sqrt"), float_op("rsqrt"), float_op("tanh"), float_op("pow")) == (0x64, 0x5D, 0x6A, 0x54)
+  assert (float_op("floor"), float_op("ceil")) == (0x27, 0x0D)
 }
 
 test "encoding a loop twice gives the same bytes, and the file still opens and closes as before" {

@@ -48,7 +48,8 @@
 use std/list
 use std/map
 use std/str
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue}
+use dev.{RedId, IdF}
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -84,6 +85,14 @@ derive Show
 ## comparison carries the type of its operands and the `i1` type of its
 ## result, as its assembly prints both.
 ##
+## `ReduceTile` is the reduction: `results` are its rank-0 results, typed
+## `tys`; `operands` the tiles it folds, typed `operand_tys`; `identities`
+## one per operand; `args` the `2 * k` rank-0 block arguments of its one
+## region (element then accumulator, per operand) and `body` that region,
+## `YieldVals` last. `IfElse` is the two-region conditional: `cond` is a
+## rank-0 `i1`, `on_true` and `on_false` are its regions and each ends in
+## its own `YieldVals`, and `results` are the values it defines after both.
+##
 ## `ForLoop` is the loop: `results` are the values it defines after itself,
 ## typed `tys` (one per carried value); `iv` (a scalar i32) and `carried`
 ## (typed `tys` again) are the block arguments its `body` sees; `lower`,
@@ -110,6 +119,9 @@ pub type Instr =
   | SelectTile(dst: Int, cond_ty: Ty, ty: Ty, cond: Ref, lhs: Ref, rhs: Ref)
   | ForLoop(results: List[Int], tys: List[Ty], iv: Int, lower: Ref, upper: Ref, step: Ref, inits: List[Ref], carried: List[Int], body: List[Instr])
   | Cont(values: List[Ref], tys: List[Ty])
+  | ReduceTile(results: List[Int], tys: List[Ty], dim: Int, identities: List[RedId], operands: List[Ref], operand_tys: List[Ty], args: List[Int], body: List[Instr])
+  | IfElse(results: List[Int], tys: List[Ty], cond: Ref, cond_ty: Ty, on_true: List[Instr], on_false: List[Instr])
+  | YieldVals(values: List[Ref], tys: List[Ty])
   | Ret
 derive Show
 
@@ -126,13 +138,28 @@ pub type Kernel = {
 pub fn i32_scalar() -> Ty = Tile([], Num("i32"))
 
 ## The `n`-wide `tile<n x i32>`.
-pub fn i32_vec(n: Int) -> Ty = Tile([n], Num("i32"))
+pub fn i32_vec(n: Int) -> Ty = Tile(shape_of(n), Num("i32"))
 
 ## The scalar pointer tile an entry parameter of format `dtype` is.
 pub fn param_ty(dtype: String) -> Ty = Tile([], PtrTo(dtype))
 
-## The `n`-wide `tile<n x i1>`, the type of a mask and of a comparison.
-pub fn i1_vec(n: Int) -> Ty = Tile([n], Num("i1"))
+## The `n`-wide `tile<n x i1>`, the type of a mask and of a comparison; `n`
+## of 0 is the rank-0 `tile<i1>` an `if` branches on.
+pub fn i1_vec(n: Int) -> Ty = Tile(shape_of(n), Num("i1"))
+
+## The shape a tile width names: `[n]`, or `[]` for the rank-0 tile, which
+## is what width 0 means everywhere in this package (prog.dawn's
+## `check_shape` says so).
+pub fn shape_of(n: Int) -> List[Int] = if n == 0 { [] } else { [n] }
+
+## The `n`-wide tile of the named element format, rank 0 when `n` is 0.
+pub fn num_tile(n: Int, dtype: String) -> Ty = Tile(shape_of(n), Num(dtype))
+
+# The rank-0 tile of the same element format as `t`.
+fn rank0_of(t: Ty) -> Ty = match t {
+  Token -> panic("tileir: a token has no rank-0 form")
+  Tile(_shape, e) -> Tile([], e)
+}
 
 # The lowering's state, threaded through pure helpers rather than held in
 # `var`s, because the helpers are called from inside a `for` and a closure may
@@ -256,7 +283,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let m = opt_ref(l0, mask, "load mask")
     let pd = opt_ref(l0, pad, "load padding value")
     let (l1, pt) = pointers(l0, param, dtype, idx, n)
-    let val_ty = Tile([n], Num(dtype))
+    let val_ty = num_tile(n, dtype)
     let (l2, v) = define(l1, dst, val_ty)
     let (l3, t) = define(l2, tok_out, Token)
     emit(l3, LoadPtr(v, t, pt, m, pd, tin, Tile([n], PtrTo(dtype)), i1_vec(n), val_ty))
@@ -267,15 +294,15 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let m = opt_ref(l0, mask, "store mask")
     let (l1, pt) = pointers(l0, param, dtype, idx, n)
     let (l2, t) = define(l1, tok_out, Token)
-    emit(l2, StorePtr(t, pt, v, m, tin, Tile([n], PtrTo(dtype)), i1_vec(n), Tile([n], Num(dtype))))
+    emit(l2, StorePtr(t, pt, v, m, tin, Tile([n], PtrTo(dtype)), i1_vec(n), num_tile(n, dtype)))
   }
   ConstF(dst, dtype, n, value) -> {
-    let ty = Tile([n], Num(dtype))
+    let ty = num_tile(n, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, ConstFloat(d, ty, value))
   }
   ConstI(dst, dtype, n, value) -> {
-    let ty = Tile([n], Num(dtype))
+    let ty = num_tile(n, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, ConstInt(d, ty, value))
   }
@@ -293,14 +320,14 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
   }
   UnaryF(dst, op, dtype, n, src) -> {
     let a = ref_of(l0, src, "${op} operand")
-    let ty = Tile([n], Num(dtype))
+    let ty = num_tile(n, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, FloatUn(d, op, ty, a))
   }
   BinaryF(dst, op, dtype, n, lhs, rhs) -> {
     let a = ref_of(l0, lhs, "${op} lhs")
     let b = ref_of(l0, rhs, "${op} rhs")
-    let ty = Tile([n], Num(dtype))
+    let ty = num_tile(n, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, FloatBin(d, op, ty, a, b))
   }
@@ -308,7 +335,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let a = ref_of(l0, lhs, "fma lhs")
     let b = ref_of(l0, rhs, "fma rhs")
     let c = ref_of(l0, acc, "fma accumulator")
-    let ty = Tile([n], Num(dtype))
+    let ty = num_tile(n, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, FloatFma(d, ty, a, b, c))
   }
@@ -316,7 +343,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let a = ref_of(l0, lhs, "cmpf lhs")
     let b = ref_of(l0, rhs, "cmpf rhs")
     let (l1, d) = define(l0, dst, i1_vec(n))
-    emit(l1, CmpFloat(d, pred, Tile([n], Num(dtype)), i1_vec(n), a, b))
+    emit(l1, CmpFloat(d, pred, num_tile(n, dtype), i1_vec(n), a, b))
   }
   CmpI(dst, pred, n, lhs, rhs) -> {
     let a = ref_of(l0, lhs, "cmpi lhs")
@@ -328,7 +355,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let c = ref_of(l0, cond, "select condition")
     let a = ref_of(l0, lhs, "select value if true")
     let b = ref_of(l0, rhs, "select value if false")
-    let ty = Tile([n], Num(dtype))
+    let ty = num_tile(n, dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, SelectTile(d, i1_vec(n), ty, c, a, b))
   }
@@ -348,7 +375,23 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l1, d) = define(l0, dst, i32_scalar())
     emit(l1, MulInt(d, i32_scalar(), a, b))
   }
+  Spread(dst, dtype, n, src) -> {
+    # a rank-0 tile to `n` lanes: reshape to one lane, broadcast to n
+    let a = ref_of(l0, src, "spread operand")
+    let one = Tile([1], Num(dtype))
+    let (l1, r) = fresh(l0)
+    let l2 = emit(l1, Reshape(r, a, Tile([], Num(dtype)), one))
+    let (l3, d) = define(l2, dst, num_tile(n, dtype))
+    emit(l3, Broadcast(d, Val(r), one, num_tile(n, dtype)))
+  }
   For(iv, lower, upper, step, inits, carried, results, body) -> lower_for(l0, iv, lower, upper, step, inits, carried, results, body)
+  Reduce(results, dim, n, identities, operands, args, body) -> lower_reduce(l0, results, dim, n, identities, operands, args, body)
+  If(results, cond, on_true, on_false) -> lower_if(l0, results, cond, on_true, on_false)
+  Yield(values) -> {
+    let refs = list.map(values, h => ref_of(l0, h, "yield value"))
+    let tys = list.map(values, h => ty_of(l0, h))
+    emit(l0, YieldVals(refs, tys))
+  }
   Continue(values) -> {
     let refs = list.map(values, h => ref_of(l0, h, "continue value"))
     let tys = list.map(values, h => ty_of(l0, h))
@@ -388,10 +431,86 @@ fn lower_for(l0: L, iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int]
     _ -> panic("tileir: a loop body ends in something other than continue")
   }
   # close the body's scope: what it bound is gone, its numbers stay spent
-  let opened = list.filter(map.keys(inner.names), h => not map.has(l1.names, h))
-  let closed = list.fold(opened, l1.closed, (m, h) => map.insert(m, h, ()))
-  let l4 = L { ..l1, next: inner.next, closed: closed }
+  let l4 = close_scope(l1, inner)
   emit(l4, ForLoop(res, tys, ivn, lo, up, st, init_refs, args, inner.body))
+}
+
+# The handles a finished region defined, closed: what `lower_for` does on
+# the way out, shared with the two regions below. `before` is the state the
+# region opened from, `inner` the state it ended in.
+fn close_scope(before: L, inner: L) -> L = {
+  let opened = list.filter(map.keys(inner.names), h => not map.has(before.names, h))
+  let closed = list.fold(opened, before.closed, (m, h) => map.insert(m, h, ()))
+  L { ..before, next: inner.next, closed: closed }
+}
+
+# The values a region's terminator yields, or a refusal when the region does
+# not end in one.
+fn yielded(body: List[Instr], what: String) -> List[Ty] = match body[len(body) - 1] {
+  YieldVals(_values, tys) -> tys
+  _ -> panic("tileir: ${what} does not end in yield")
+}
+
+# Lower a reduction. The operands and their types are the enclosing scope's;
+# the results are the rank-0 tiles of the same element formats, numbered
+# first (the order the text reads in), then the `2 * k` region arguments,
+# then the body. On the way out the region's scope is closed, as a loop's is.
+fn lower_reduce(l0: L, results: List[Int], dim: Int, n: Int, identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp]) -> L = {
+  if len(args) != 2 * len(operands) || len(results) != len(operands) {
+    panic("tileir: a reduction over ${len(operands)} operand(s) names ${len(args)} region argument(s) and ${len(results)} result(s)")
+  } else {
+    ()
+  }
+  let operand_refs = list.map(operands, h => ref_of(l0, h, "reduce operand"))
+  let operand_tys = list.map(operands, h => ty_of(l0, h))
+  let res_tys = list.map(operand_tys, rank0_of)
+  let (l1, res) = define_all(l0, results, res_tys)
+  # the region takes the element and the accumulator of each operand, in
+  # operand order, both rank-0
+  let arg_tys = list.map(range(0, len(args)), k => res_tys[k / 2])
+  let (l2, argv) = define_all(l1, args, arg_tys)
+  let inner = list.fold(body, L { ..l2, body: [] }, lower_op)
+  let ytys = yielded(inner.body, "a reduction's body")
+  if len(ytys) != len(operands) {
+    panic("tileir: a reduction over ${len(operands)} operand(s) yields ${len(ytys)}")
+  } else {
+    ()
+  }
+  let l3 = close_scope(l1, inner)
+  # `n` is the width the record carried; the operand types say it again
+  let _n = n
+  emit(l3, ReduceTile(res, res_tys, dim, identities, operand_refs, operand_tys, argv, inner.body))
+}
+
+# Lower an `if`. Its result types are the types of what its then-branch
+# yields, and those are only known once that branch is lowered; the results
+# have to be numbered BEFORE it, because that is the order the text reads
+# in. So the branch is lowered twice: once from the enclosing state to read
+# the types off its terminator, and once for real. Lowering is a pure
+# function of its input, so the two passes agree by construction, and the
+# probe's numbering and memo table are dropped.
+fn lower_if(l0: L, results: List[Int], cond: Int, on_true: List[TileOp], on_false: List[TileOp]) -> L = {
+  let c = ref_of(l0, cond, "if condition")
+  let cond_ty = ty_of(l0, cond)
+  let probe = list.fold(on_true, L { ..l0, body: [] }, lower_op)
+  let tys = yielded(probe.body, "an if's then branch")
+  if len(tys) != len(results) {
+    panic("tileir: an if defining ${len(results)} result(s) yields ${len(tys)}")
+  } else {
+    ()
+  }
+  let (l1, res) = define_all(l0, results, tys)
+  let then_inner = list.fold(on_true, L { ..l1, body: [] }, lower_op)
+  let l2 = close_scope(l1, then_inner)
+  let else_inner = list.fold(on_false, L { ..l2, body: [] }, lower_op)
+  let etys = yielded(else_inner.body, "an if's else branch")
+  if len(etys) != len(tys) {
+    panic("tileir: an if whose then branch yields ${len(tys)} value(s) has an else branch yielding ${len(etys)}")
+  } else {
+    ()
+  }
+  let l3 = close_scope(l2, else_inner)
+  emit(l3, IfElse(res, tys, c, cond_ty, then_inner.body, else_inner.body))
 }
 
 ## `prog` as a `Kernel`: its operations in order, each memory operation
@@ -428,6 +547,9 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   SelectTile(dst, _cond_ty, _ty, _cond, _lhs, _rhs) -> [dst]
   ForLoop(results, _tys, _iv, _lower, _upper, _step, _inits, _carried, _body) -> results
   Cont(_values, _tys) -> []
+  ReduceTile(results, _tys, _dim, _identities, _operands, _operand_tys, _args, _body) -> results
+  IfElse(results, _tys, _cond, _cond_ty, _on_true, _on_false) -> results
+  YieldVals(_values, _tys) -> []
   Ret -> []
 }
 
@@ -439,6 +561,10 @@ pub fn defines_inside(body: List[Instr]) -> List[Int] = {
   list.fold(body, none, (acc, i) => match i {
     ForLoop(results, _tys, iv, _lower, _upper, _step, _inits, carried, inner) ->
       acc ++ results ++ [iv] ++ carried ++ defines_inside(inner)
+    ReduceTile(results, _tys, _dim, _identities, _operands, _operand_tys, args, inner) ->
+      acc ++ results ++ args ++ defines_inside(inner)
+    IfElse(results, _tys, _cond, _cond_ty, on_true, on_false) ->
+      acc ++ results ++ defines_inside(on_true) ++ defines_inside(on_false)
     _ -> acc ++ defines(i)
   })
 }
@@ -584,6 +710,115 @@ test "after a loop the store consumes the loop's results, not values from inside
   # the ladder inside the loop is the body's; the one after it is built anew
   assert len(list.filter(k.body, is_offset)) == 2
   assert (f64_128, p64_128) == (Tile([128], Num("f64")), Tile([128], PtrTo("f64")))
+}
+
+# The reduction kernel prog.dawn records: a block-wide sum, spread back to
+# one lane and stored at element 0.
+fn total_prog() -> TileProg = TileProg {
+  name: "total",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
+    Reduce([7], 0, 8, [IdF("f64", 0.0)], [2], [4, 5], [
+      BinaryF(6, "addf", "f64", 0, 4, 5),
+      Yield([6])
+    ]),
+    Spread(8, "f64", 1, 7),
+    Store(9, 1, "f64", 1, 1, 8, None, 3)
+  ]
+}
+
+fn is_reduce(i: Instr) -> Bool = match i {
+  ReduceTile(_results, _tys, _dim, _identities, _operands, _operand_tys, _args, _body) -> true
+  _ -> false
+}
+
+test "a reduction lowers to one ReduceTile whose result is rank 0 and whose region arguments are rank 0 too" {
+  let k = lower(total_prog())
+  let f64s = Tile([], Num("f64"))
+  let reduces = list.filter(k.body, is_reduce)
+  assert len(reduces) == 1
+  match reduces[0] {
+    ReduceTile(results, tys, dim, identities, operands, operand_tys, args, body) -> {
+      assert tys == [f64s]
+      assert dim == 0
+      assert identities == [IdF("f64", 0.0)]
+      assert operand_tys == [Tile([8], Num("f64"))]
+      assert len(operands) == 1
+      # the result is numbered first, then the two region arguments, then
+      # the body: the order the text reads in
+      assert args == [results[0] + 1, results[0] + 2]
+      assert body == [FloatBin(results[0] + 3, "addf", f64s, Val(args[0]), Val(args[1])),
+        YieldVals([Val(results[0] + 3)], [f64s])]
+    }
+    _ -> { assert false }
+  }
+  assert defines_inside(k.body) == range(0, len(defines_inside(k.body)))
+  assert lower(total_prog()) == lower(total_prog())
+}
+
+test "spread lowers to a reshape to one lane and a broadcast to the width" {
+  let k = lower(total_prog())
+  let f64s = Tile([], Num("f64"))
+  let f64_1 = Tile([1], Num("f64"))
+  # the reduction answers %15; spread reshapes it to one lane and broadcasts
+  # to the width it was asked for, which here is also one
+  assert list.any(k.body, i => i == Reshape(19, Val(15), f64s, f64_1))
+  assert list.any(k.body, i => i == Broadcast(20, Val(19), f64_1, f64_1))
+}
+
+fn branch_prog() -> TileProg = TileProg {
+  name: "branch",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
+    IdxConst(4, 0),
+    CmpI(5, "eq", 0, 1, 4),
+    If([8], 5, [BinaryF(6, "addf", "f64", 8, 2, 2), Yield([6])],
+      [BinaryF(7, "mulf", "f64", 8, 2, 2), Yield([7])]),
+    Store(9, 1, "f64", 1, 8, 8, None, 3)
+  ]
+}
+
+fn is_if(i: Instr) -> Bool = match i {
+  IfElse(_results, _tys, _cond, _cond_ty, _on_true, _on_false) -> true
+  _ -> false
+}
+
+test "an if lowers to one IfElse whose two branches are numbered after its result and each end in a yield" {
+  let k = lower(branch_prog())
+  let f64v = Tile([8], Num("f64"))
+  let ifs = list.filter(k.body, is_if)
+  assert len(ifs) == 1
+  match ifs[0] {
+    IfElse(results, tys, _cond, cond_ty, on_true, on_false) -> {
+      assert tys == [f64v]
+      assert cond_ty == Tile([], Num("i1"))
+      # the result first, then the then branch, then the else branch
+      assert on_true == [FloatBin(results[0] + 1, "addf", f64v, Val(13), Val(13)),
+        YieldVals([Val(results[0] + 1)], [f64v])]
+      # the table numbers the else branch after the then branch; the
+      # BYTECODE rolls both back to the same index (bytecode.dawn)
+      assert on_false == [FloatBin(results[0] + 2, "mulf", f64v, Val(13), Val(13)),
+        YieldVals([Val(results[0] + 2)], [f64v])]
+    }
+    _ -> { assert false }
+  }
+  assert defines_inside(k.body) == range(0, len(defines_inside(k.body)))
+}
+
+test "a value one branch of an if defined is refused by name in the other and after it" {
+  # the store takes the then branch's addf (6) instead of the if's result (8)
+  let bad = TileProg { ..branch_prog(),
+    ops: list.take(branch_prog().ops, 6) ++ [Store(9, 1, "f64", 1, 8, 6, None, 3)] }
+  match catch_panic(() => lower(bad)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "which a loop body defined and which is not visible after the loop") }
+  }
 }
 
 test "a value a loop body defined is refused by name after the loop" {

@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32}
-use dev.{Dev, Tile, I1, Param, param, block_id, load, load_masked, store, store_masked, addf, sub, mul, div, maxf, minf, neg, abs, fma, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, d_for, d_for2}
+use dev.{Dev, Tile, Scalar, I1, I32, Param, RedId, IdF, IdI, param, block_id, load, load_masked, store, store_masked, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_if, spread, s_addf, s_maxf, s_gt, s_select}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -36,6 +36,15 @@ use dev.{Dev, Tile, I1, Param, param, block_id, load, load_masked, store, store_
 ## each end in a token handle and `Continue` ends in the body's last token.
 ## `iv`, `carried` and everything `body` defines are visible inside the
 ## region only; `results` are the loop's values after it.
+##
+## `Spread` widens a rank-0 tile to `n` lanes. `Reduce` and `If` are the two
+## other regions. A `Reduce` over `k` operands folds them along `dim` with
+## one identity each; `args` are the `2 * k` rank-0 handles the body sees
+## (element then accumulator, per operand, in operand order) and `results`
+## the `k` rank-0 handles after it; `body` ends in `Yield(values)`, the new
+## accumulators. An `If` holds TWO regions, `on_true` and `on_false`, each
+## ending in its own `Yield`; `results` are the handles after it. `n` is 0
+## for a rank-0 tile everywhere it appears.
 pub type TileOp =
   | MakeToken(dst: Int)
   | BlockId(dst: Int, axis: Int)
@@ -56,6 +65,10 @@ pub type TileOp =
   | IdxMul(dst: Int, lhs: Int, rhs: Int)
   | For(iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
   | Continue(values: List[Int])
+  | Spread(dst: Int, dtype: String, n: Int, src: Int)
+  | Reduce(results: List[Int], dim: Int, n: Int, identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp])
+  | If(results: List[Int], cond: Int, on_true: List[TileOp], on_false: List[TileOp])
+  | Yield(values: List[Int])
 derive Show
 
 ## How deep loops may nest. A kernel body that recurses through `d_for`
@@ -80,11 +93,17 @@ pub type TileProg = {
 fn refuse(name: String, what: String) -> Never =
   panic("tileir: kernel `${name}`: ${what}")
 
-# A tile width is a power of two from 1 up; Tile IR shapes are.
+# A tile width is a power of two from 1 up; Tile IR shapes are. Width 0 is
+# the rank-0 tile (`tile<f64>`, not `tile<0xf64>`): what a reduction answers
+# and an `if` branches on.
 fn is_pow2(n: Int) -> Bool = n >= 1 && (n & (n - 1)) == 0
 
 fn check_shape(name: String, n: Int) -> Unit =
-  if is_pow2(n) { () } else { refuse(name, "a tile width is a power of two, got ${n}") }
+  if n == 0 || is_pow2(n) {
+    ()
+  } else {
+    refuse(name, "a tile width is a power of two or 0 for a rank-0 tile, got ${n}")
+  }
 
 # The operation names and predicates the typed surface spells. An effect
 # operation cannot be generic (spec 6.5), so `t_binaryf` and its neighbours
@@ -94,10 +113,14 @@ fn check_shape(name: String, n: Int) -> Unit =
 fn one_of(names: List[String], op: String) -> Bool = list.any(names, n => n == op)
 
 fn check_unary(name: String, op: String) -> Unit =
-  if one_of(["negf", "absf"], op) { () } else { refuse(name, "`${op}` is not a unary float operation") }
+  if one_of(["negf", "absf", "exp", "exp2", "log", "log2", "sqrt", "rsqrt", "tanh", "floor", "ceil"], op) {
+    ()
+  } else {
+    refuse(name, "`${op}` is not a unary float operation")
+  }
 
 fn check_binary(name: String, op: String) -> Unit =
-  if one_of(["addf", "subf", "mulf", "divf", "maxf", "minf"], op) {
+  if one_of(["addf", "subf", "mulf", "divf", "maxf", "minf", "pow"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a binary float operation")
@@ -131,15 +154,22 @@ fn check_param(name: String, params: List[String], pos: Int, dtype: String, verb
   }
 
 # An open region: the operations of the enclosing region as they stood when
-# it opened, and the loop header that closes over them at `t_loop_end`.
-type Frame = {
-  outer: List[TileOp],
-  iv: Int,
-  lower: Int,
-  upper: Int,
-  step: Int,
-  inits: List[Int],
-  carried: List[Int],
+# it opened, and whatever the closing operation needs to build the region
+# around them. One variant per kind of region, because an `if` is two of
+# them in a row and a reduction carries what a loop does not.
+type Frame =
+  | LoopFrame(outer: List[TileOp], iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int])
+  | ReduceFrame(outer: List[TileOp], dim: Int, n: Int, identities: List[RedId], operands: List[Int], args: List[Int])
+  | ThenFrame(outer: List[TileOp], cond: Int)
+  | ElseFrame(outer: List[TileOp], cond: Int, on_true: List[TileOp])
+
+# A reduction's or an `if`'s region is pure: the dialect requires it of a
+# reduction's body and neither carries the memory ordering token, so a load,
+# a store or a loop (which carries the token through itself) inside one has
+# no order to be in. This is what says so.
+fn is_pure_region(f: Frame) -> Bool = match f {
+  LoopFrame(_outer, _iv, _lower, _upper, _step, _inits, _carried) -> false
+  _ -> true
 }
 
 # The next free handle after minting `k` from `next`, or a refusal when the
@@ -185,6 +215,8 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         d
       }
       t_load(param, dtype, idx, n, mask, pad) => {
+        let open = frames
+        if list.any(open, is_pure_region) { refuse(name, "a load inside a reduce or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "load")
         check_shape(name, n)
         let d = next
@@ -195,6 +227,8 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         d
       }
       t_store(param, dtype, idx, n, v, mask) => {
+        let open = frames
+        if list.any(open, is_pure_region) { refuse(name, "a store inside a reduce or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "store")
         check_shape(name, n)
         let t = next
@@ -297,6 +331,8 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         d
       }
       t_loop_begin(lower, upper, step, inits) => {
+        let open = frames
+        if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce or if region has no memory order") } else { () }
         if len(frames) >= MAX_LOOP_DEPTH {
           refuse(name, "loops nest deeper than ${MAX_LOOP_DEPTH}; a body that recurses through d_for unrolls forever")
         } else {
@@ -308,33 +344,133 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         let base = next + 1
         next = mint(name, next, 1 + len(all))
         let carried = list.map(range(0, len(all)), k => base + k)
-        frames = frames ++ [Frame { outer: ops, iv: iv, lower: lower, upper: upper, step: step, inits: all, carried: carried }]
+        frames = frames ++ [LoopFrame(ops, iv, lower, upper, step, all, carried)]
         ops = []
         tok = last(carried)
         (iv, but_last(carried))
       }
       t_loop_end(outs) => {
         if len(frames) == 0 { refuse(name, "loop_end with no loop open") } else { () }
-        let frame = frames[len(frames) - 1]
-        let want = len(frame.inits) - 1
-        if len(outs) != want {
-          refuse(name, "a loop body carrying ${want} value(s) answered ${len(outs)}")
+        match frames[len(frames) - 1] {
+          LoopFrame(saved, iv, lower, upper, step, inits, carried) -> {
+            let want = len(inits) - 1
+            if len(outs) != want {
+              refuse(name, "a loop body carrying ${want} value(s) answered ${len(outs)}")
+            } else {
+              ()
+            }
+            let (outer, inner) = (saved, ops)
+            let base = next
+            next = mint(name, next, len(inits))
+            let results = list.map(range(0, len(inits)), k => base + k)
+            let body = inner ++ [Continue(outs ++ [tok])]
+            frames = list.take(frames, len(frames) - 1)
+            ops = outer ++ [For(iv, lower, upper, step, inits, carried, results, body)]
+            tok = last(results)
+            but_last(results)
+          }
+          _ -> refuse(name, "loop_end closes a region that is not a loop")
+        }
+      }
+      t_spread(dtype, n, src) => {
+        check_shape(name, n)
+        if n == 0 { refuse(name, "spread widens a rank-0 tile to a width, and 0 is not one") } else { () }
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Spread(d, dtype, n, src)]
+        d
+      }
+      t_reduce_begin(dim, n, identities, operands) => {
+        if len(frames) >= MAX_LOOP_DEPTH {
+          refuse(name, "regions nest deeper than ${MAX_LOOP_DEPTH}")
         } else {
           ()
         }
-        let (outer, inner) = (frame.outer, ops)
+        check_shape(name, n)
+        if n == 0 { refuse(name, "a reduction reduces a tile with a dimension, not a rank-0 one") } else { () }
+        if dim != 0 {
+          refuse(name, "a rank-1 tile has one dimension to reduce along, got dim=${dim}")
+        } else {
+          ()
+        }
+        if len(identities) != len(operands) {
+          refuse(name, "a reduction over ${len(operands)} operand(s) carries ${len(identities)} identity/identities")
+        } else {
+          ()
+        }
+        if len(operands) == 0 { refuse(name, "a reduction with no operands") } else { () }
         let base = next
-        next = mint(name, next, len(frame.inits))
-        let results = list.map(range(0, len(frame.inits)), k => base + k)
-        let body = inner ++ [Continue(outs ++ [tok])]
-        frames = list.take(frames, len(frames) - 1)
-        ops = outer ++ [For(frame.iv, frame.lower, frame.upper, frame.step, frame.inits, frame.carried, results, body)]
-        tok = last(results)
-        but_last(results)
+        next = mint(name, next, 2 * len(operands))
+        let args = list.map(range(0, 2 * len(operands)), k => base + k)
+        frames = frames ++ [ReduceFrame(ops, dim, n, identities, operands, args)]
+        ops = []
+        args
+      }
+      t_reduce_end(yields) => {
+        if len(frames) == 0 { refuse(name, "reduce_end with no reduction open") } else { () }
+        match frames[len(frames) - 1] {
+          ReduceFrame(outer, dim, n, identities, operands, args) -> {
+            if len(yields) != len(operands) {
+              refuse(name, "a reduction over ${len(operands)} operand(s) yielded ${len(yields)}")
+            } else {
+              ()
+            }
+            let inner = ops
+            let base = next
+            next = mint(name, next, len(operands))
+            let results = list.map(range(0, len(operands)), k => base + k)
+            frames = list.take(frames, len(frames) - 1)
+            ops = outer ++ [Reduce(results, dim, n, identities, operands, args, inner ++ [Yield(yields)])]
+            results
+          }
+          _ -> refuse(name, "reduce_end closes a region that is not a reduction")
+        }
+      }
+      t_if_begin(cond) => {
+        if len(frames) >= MAX_LOOP_DEPTH {
+          refuse(name, "regions nest deeper than ${MAX_LOOP_DEPTH}")
+        } else {
+          ()
+        }
+        frames = frames ++ [ThenFrame(ops, cond)]
+        ops = []
+      }
+      t_if_else(yields) => {
+        if len(frames) == 0 { refuse(name, "if_else with no if open") } else { () }
+        match frames[len(frames) - 1] {
+          ThenFrame(outer, cond) -> {
+            frames = list.take(frames, len(frames) - 1) ++ [ElseFrame(outer, cond, ops ++ [Yield(yields)])]
+            ops = []
+          }
+          _ -> refuse(name, "if_else closes a region that is not an if's then branch")
+        }
+      }
+      t_if_end(yields) => {
+        if len(frames) == 0 { refuse(name, "if_end with no if open") } else { () }
+        match frames[len(frames) - 1] {
+          ElseFrame(outer, cond, on_true) -> {
+            let want = match on_true[len(on_true) - 1] {
+              Yield(values) -> len(values)
+              _ -> 0
+            }
+            if len(yields) != want {
+              refuse(name, "an if whose then branch yields ${want} value(s) has an else branch yielding ${len(yields)}")
+            } else {
+              ()
+            }
+            let base = next
+            next = mint(name, next, len(yields))
+            let results = list.map(range(0, len(yields)), k => base + k)
+            frames = list.take(frames, len(frames) - 1)
+            ops = outer ++ [If(results, cond, on_true, ops ++ [Yield(yields)])]
+            results
+          }
+          _ -> refuse(name, "if_end closes an if whose then branch is still open")
+        }
       }
     }
     body()
-    if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} loop(s) still open") } else { () }
+    if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} region(s) still open") } else { () }
     ops
   }
   TileProg { name: name, params: params, ops: [MakeToken(0)] ++ ops }
@@ -364,16 +500,25 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   IdxMul(dst, _lhs, _rhs) -> [dst]
   For(_iv, _lower, _upper, _step, _inits, _carried, results, _body) -> results
   Continue(_values) -> []
+  Spread(dst, _dtype, _n, _src) -> [dst]
+  Reduce(results, _dim, _n, _identities, _operands, _args, _body) -> results
+  If(results, _cond, _on_true, _on_false) -> results
+  Yield(_values) -> []
 }
 
 ## Every handle `ops` define, at any depth, in issue order: for a `For`, its
 ## results, then its induction variable, its carried handles and what its
-## body defines.
+## body defines; for a `Reduce`, its results, its region arguments and its
+## body; for an `If`, its results and then each branch in turn.
 pub fn defined_inside(ops: List[TileOp]) -> List[Int] = {
   let none: List[Int] = []
   list.fold(ops, none, (acc, op) => match op {
     For(iv, _lower, _upper, _step, _inits, carried, results, body) ->
       acc ++ results ++ [iv] ++ carried ++ defined_inside(body)
+    Reduce(results, _dim, _n, _identities, _operands, args, body) ->
+      acc ++ results ++ args ++ defined_inside(body)
+    If(results, _cond, on_true, on_false) ->
+      acc ++ results ++ defined_inside(on_true) ++ defined_inside(on_false)
     _ -> acc ++ defined(op)
   })
 }
@@ -552,6 +697,149 @@ test "a body that recurses through d_for is refused at the depth limit rather th
   }
 }
 
+# A block-wide sum, spread back and stored at element 0: the shape every
+# reduction kernel of knife 7b has.
+fn total(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let t = load(x, i, 8)
+  store(out, i, 1, spread(F64, 1, d_reduce(F64, 8, t, 0.0, (e, acc) => s_addf(F64, e, acc))))
+}
+
+fn trace_total() -> TileProg =
+  trace_kernel("total", ["f64", "f64"], () => total(param(F64, 0), param(F64, 1)))
+
+test "a reduction records as one Reduce holding its region, with the element and the accumulator as its arguments" {
+  let p = trace_total()
+  assert p.ops == [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
+    # region arguments 4 and 5, the body's addf 6, the result 7 (minted
+    # when the region closes, as a loop's results are)
+    Reduce([7], 0, 8, [IdF("f64", 0.0)], [2], [4, 5], [
+      BinaryF(6, "addf", "f64", 0, 4, 5),
+      Yield([6])
+    ]),
+    Spread(8, "f64", 1, 7),
+    Store(9, 1, "f64", 1, 1, 8, None, 3)
+  ]
+  assert trace_total() == trace_total()
+  # the reading order the lowering renumbers into: the result, then the
+  # region arguments, then the body
+  assert defined_inside(p.ops) == [0, 1, 2, 3, 7, 4, 5, 6, 8, 9]
+}
+
+fn branch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let t = load(x, i, 8)
+  store(out, i, 8, d_if(idx_eq(i, idx_const(0)), () => addf(F64, 8, t, t), () => mul(F64, 8, t, t)))
+}
+
+test "an if records two regions, each ending in its own yield, and one result after both" {
+  let p = trace_kernel("branch", ["f64", "f64"], () => branch(param(F64, 0), param(F64, 1)))
+  match p.ops[5] {
+    If(results, cond, on_true, on_false) -> {
+      assert results == [8]
+      # the condition is the rank-0 cmpi, width 0
+      assert cond == 5
+      assert on_true == [BinaryF(6, "addf", "f64", 8, 2, 2), Yield([6])]
+      assert on_false == [BinaryF(7, "mulf", "f64", 8, 2, 2), Yield([7])]
+    }
+    _ -> { assert false }
+  }
+  # the result is listed before either branch, the reading order
+  assert defined_inside(p.ops) == [0, 1, 2, 3, 4, 5, 8, 6, 7, 9]
+}
+
+fn load_in_reduce() -> Unit !Dev = {
+  let x = param(F64, 0)
+  let i = block_id(0)
+  let t = load(x, i, 8)
+  let _s = d_reduce(F64, 8, t, 0.0, (e, acc) => {
+    let _extra = load(x, i, 8)
+    s_addf(F64, e, acc)
+  })
+  ()
+}
+
+fn store_in_if() -> Unit !Dev = {
+  let x = param(F64, 0)
+  let i = block_id(0)
+  let t = load(x, i, 8)
+  let _r = d_if(idx_eq(i, i), () => {
+    store(x, i, 8, t)
+    t
+  }, () => t)
+  ()
+}
+
+fn loop_in_reduce() -> Unit !Dev = {
+  let x = param(F64, 0)
+  let i = block_id(0)
+  let t = load(x, i, 8)
+  let z = idx_const(0)
+  let _s = d_reduce(F64, 8, t, 0.0, (e, acc) => {
+    let _u = d_for(z, z, z, t, (_k, v) => v)
+    s_addf(F64, e, acc)
+  })
+  ()
+}
+
+test "a memory operation or a loop inside a reduce or an if region is refused: neither region carries the token" {
+  assert str.contains(refusal(load_in_reduce), "a load inside a reduce or if region has no memory order")
+  assert str.contains(refusal(store_in_if), "a store inside a reduce or if region has no memory order")
+  assert str.contains(refusal(loop_in_reduce), "a loop inside a reduce or if region has no memory order")
+}
+
+fn reduce_never_closed() -> Unit !Dev = {
+  let _args = t_reduce_begin(0, 8, [IdF("f64", 0.0)], [1])
+  ()
+}
+
+fn reduce_never_opened() -> Unit !Dev = {
+  let _outs = t_reduce_end([1])
+  ()
+}
+
+fn reduce_wrong_arity() -> Unit !Dev = {
+  let _args = t_reduce_begin(0, 8, [IdF("f64", 0.0)], [1])
+  let _outs = t_reduce_end([1, 1])
+  ()
+}
+
+fn reduce_identity_count() -> Unit !Dev = {
+  let _args = t_reduce_begin(0, 8, [IdF("f64", 0.0)], [1, 2])
+  ()
+}
+
+fn reduce_rank0() -> Unit !Dev = {
+  let _args = t_reduce_begin(0, 0, [IdF("f64", 0.0)], [1])
+  ()
+}
+
+fn if_end_before_else() -> Unit !Dev = {
+  t_if_begin(1)
+  let _outs = t_if_end([1])
+  ()
+}
+
+fn if_branches_disagree() -> Unit !Dev = {
+  t_if_begin(1)
+  t_if_else([1])
+  let _outs = t_if_end([1, 1])
+  ()
+}
+
+test "a region opened and closed wrongly is refused when the kernel is recorded, not when it is lowered" {
+  assert str.contains(refusal(reduce_never_closed), "the body ended with 1 region(s) still open")
+  assert str.contains(refusal(reduce_never_opened), "reduce_end with no reduction open")
+  assert str.contains(refusal(reduce_wrong_arity), "a reduction over 1 operand(s) yielded 2")
+  assert str.contains(refusal(reduce_identity_count), "a reduction over 2 operand(s) carries 1 identity/identities")
+  assert str.contains(refusal(reduce_rank0), "a reduction reduces a tile with a dimension, not a rank-0 one")
+  assert str.contains(refusal(if_end_before_else), "if_end closes an if whose then branch is still open")
+  assert str.contains(refusal(if_branches_disagree), "an if whose then branch yields 1 value(s) has an else branch yielding 2")
+}
+
 # Below the typed surface: the operations themselves, misused.
 fn wrong_arity() -> Unit !Dev = {
   let (_iv, _inside) = t_loop_begin(0, 0, 0, [1])
@@ -576,6 +864,6 @@ fn refusal(body: fn() -> Unit !Dev) -> String !io = match catch_panic(() => trac
 
 test "a loop body answering the wrong number of carried values, a loop never closed, and a close with no loop open are refused" {
   assert str.contains(refusal(wrong_arity), "a loop body carrying 1 value(s) answered 0")
-  assert str.contains(refusal(never_closed), "the body ended with 1 loop(s) still open")
+  assert str.contains(refusal(never_closed), "the body ended with 1 region(s) still open")
   assert str.contains(refusal(never_opened), "loop_end with no loop open")
 }

@@ -16,8 +16,9 @@
 # tile<i32> iter_values(%a = %init) -> (ty) { ... continue %v : ty }`).
 use std/list
 use std/str
-use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, CmpFloat, CmpInt, SelectTile, ForLoop, Cont, Ret}
+use dev.{RedId, IdF, IdI}
+use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, CmpFloat, CmpInt, SelectTile, ForLoop, Cont, ReduceTile, IfElse, YieldVals, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -85,6 +86,22 @@ fn rounds(op: String) -> Bool = op == "addf" || op == "subf" || op == "mulf" || 
 
 fn rounding(op: String) -> String = if rounds(op) { " rounding<nearest_even>" } else { "" }
 
+# The unary operations that print a rounding mode. `sqrt` takes one and
+# `nearest_even` is what makes it the correctly rounded square root; `tanh`
+# takes one too but the only mode an f64 tile accepts is `full`, which is
+# its default and which the dialect's own printer leaves out (its examples
+# spell the default `tanh %in : tile<4xf32>`); `exp`'s field does not exist
+# before bytecode 13.3 at all. `exp2` and `rsqrt` take `flush_to_zero`,
+# which is never set here and so is never printed.
+fn un_rounding(op: String) -> String = if op == "sqrt" { " rounding<nearest_even>" } else { "" }
+
+# One reduction identity, as the assembly spells an element of the
+# `identities` array: the value and the format it is a value of.
+fn identity(id: RedId) -> String = match id {
+  IdF(dtype, value) -> "${value} : ${dtype}"
+  IdI(dtype, value) -> "${value} : ${dtype}"
+}
+
 fn line(i: Instr) -> String = match i {
   MakeTok(dst) -> "${v(dst)} = make_token : token"
   BlockIds(x, y, z) -> "${v(x)}, ${v(y)}, ${v(z)} = get_tile_block_id : tile<i32>"
@@ -104,7 +121,7 @@ fn line(i: Instr) -> String = match i {
   StorePtr(tok_out, ptrs, value, mask, tok_in, ptr_ty, mask_ty, val_ty) ->
     "${v(tok_out)} = store_ptr_tko weak ${name(ptrs)}, ${name(value)}${opt_operand(mask)}"
     ++ " token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token"
-  FloatUn(dst, op, t, src) -> "${v(dst)} = ${op} ${name(src)} : ${ty(t)}"
+  FloatUn(dst, op, t, src) -> "${v(dst)} = ${op} ${name(src)}${un_rounding(op)} : ${ty(t)}"
   FloatBin(dst, op, t, lhs, rhs) -> "${v(dst)} = ${op} ${name(lhs)}, ${name(rhs)}${rounding(op)} : ${ty(t)}"
   FloatFma(dst, t, lhs, rhs, acc) ->
     "${v(dst)} = fma ${name(lhs)}, ${name(rhs)}, ${name(acc)} rounding<nearest_even> : ${ty(t)}"
@@ -125,14 +142,31 @@ fn line(i: Instr) -> String = match i {
   }
   Cont(values, tys) ->
     if len(values) == 0 { "continue" } else { "continue ${commas(list.map(values, name))} : ${commas(list.map(tys, ty))}" }
+  ReduceTile(res, tys, dim, identities, operands, operand_tys, args, _body) -> {
+    let pairs = list.map(range(0, len(args)), k => "${v(args[k])}: ${ty(tys[k / 2])}")
+    "${results(res)}reduce ${commas(list.map(operands, name))} dim=${dim}"
+      ++ " identities=[${commas(list.map(identities, identity))}]"
+      ++ " : ${commas(list.map(operand_tys, ty))} -> ${commas(list.map(tys, ty))}"
+      ++ " (${commas(pairs)}) {"
+  }
+  IfElse(res, tys, cond, _cond_ty, _on_true, _on_false) ->
+    if len(tys) == 0 { "if ${name(cond)} {" } else { "${results(res)}if ${name(cond)} -> (${commas(list.map(tys, ty))}) {" }
+  YieldVals(values, tys) ->
+    if len(values) == 0 { "yield" } else { "yield ${commas(list.map(values, name))} : ${commas(list.map(tys, ty))}" }
   Ret -> "return"
 }
 
-# An instruction at `indent` columns: one line, or for a loop its header,
-# its body two columns further in, and the closing brace.
+# An instruction at `indent` columns: one line, or for a region its header,
+# its body two columns further in, and the closing brace; an `if` is two
+# regions and the brace between them says which is which.
 fn lines(indent: String, i: Instr) -> List[String] = match i {
   ForLoop(_res, _tys, _iv, _lower, _upper, _step, _inits, _carried, body) ->
     [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
+  ReduceTile(_res, _tys, _dim, _identities, _operands, _operand_tys, _args, body) ->
+    [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
+  IfElse(_res, _tys, _cond, _cond_ty, on_true, on_false) ->
+    [indent ++ line(i)] ++ block(indent ++ "  ", on_true) ++ [indent ++ "} else {"]
+    ++ block(indent ++ "  ", on_false) ++ [indent ++ "}"]
   _ -> [indent ++ line(i)]
 }
 
@@ -257,6 +291,91 @@ test "a loop is its header with the carried values, a body two columns in, and a
   # after the loop, the store takes the loop's results
   assert str.contains(text, "store_ptr_tko weak %45, %20 token=%21 :")
   assert str.ends_with(text, "    return\n  }\n}\n")
+}
+
+fn total_prog() -> TileProg = TileProg {
+  name: "total",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
+    Reduce([7], 0, 8, [IdF("f64", 0.0)], [2], [4, 5], [
+      BinaryF(6, "addf", "f64", 0, 4, 5),
+      Yield([6])
+    ]),
+    Spread(8, "f64", 1, 7),
+    Store(9, 1, "f64", 1, 1, 8, None, 3)
+  ]
+}
+
+test "a reduction is its header with the dimension, the identities and the region arguments, a body two columns in, and a closing brace" {
+  let text = render(total_prog())
+  assert str.contains(text, "\n    %15 = reduce %13 dim=0 identities=[0.0 : f64] : tile<8xf64> -> tile<f64>"
+      ++ " (%16: tile<f64>, %17: tile<f64>) {\n")
+  assert str.contains(text, "\n      %18 = addf %16, %17 rounding<nearest_even> : tile<f64>\n")
+  assert str.contains(text, "\n      yield %18 : tile<f64>\n    }\n")
+  # spread is a reshape to one lane and a broadcast to the width
+  assert str.contains(text, "\n    %19 = reshape %15 : tile<f64> -> tile<1xf64>\n")
+  assert str.contains(text, "\n    %20 = broadcast %19 : tile<1xf64> -> tile<1xf64>\n")
+}
+
+fn branch_prog() -> TileProg = TileProg {
+  name: "branch",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 8, None, None, 0),
+    IdxConst(4, 0),
+    CmpI(5, "eq", 0, 1, 4),
+    If([8], 5, [BinaryF(6, "addf", "f64", 8, 2, 2), Yield([6])],
+      [BinaryF(7, "mulf", "f64", 8, 2, 2), Yield([7])]),
+    Store(9, 1, "f64", 1, 8, 8, None, 3)
+  ]
+}
+
+test "an if is its header with the result types, two bodies and the brace between them" {
+  let text = render(branch_prog())
+  # the condition is a rank-0 comparison: tile<i1>, not tile<Nxi1>
+  assert str.contains(text, "\n    %16 = cmpi equal %1, %15, signed : tile<i32> -> tile<i1>\n")
+  assert str.contains(text, "\n    %17 = if %16 -> (tile<8xf64>) {\n")
+  assert str.contains(text, "\n      yield %18 : tile<8xf64>\n    } else {\n")
+  assert str.contains(text, "\n      %19 = mulf %13, %13 rounding<nearest_even> : tile<8xf64>\n")
+  assert str.contains(text, "\n      yield %19 : tile<8xf64>\n    }\n")
+}
+
+test "the transcendentals spell the modifiers they carry and no others" {
+  # sqrt prints its rounding mode; tanh's only f64 mode is `full`, which is
+  # its default and which the dialect's own printer leaves out; exp has no
+  # such field at all before bytecode 13.3; exp2 and rsqrt take
+  # flush_to_zero, which is never set here
+  let p = TileProg {
+    name: "m",
+    params: ["f64"],
+    ops: [
+      MakeToken(0),
+      BlockId(1, 0),
+      Load(2, 3, 0, "f64", 1, 8, None, None, 0),
+      UnaryF(4, "exp", "f64", 8, 2),
+      UnaryF(5, "exp2", "f64", 8, 2),
+      UnaryF(6, "sqrt", "f64", 8, 2),
+      UnaryF(7, "rsqrt", "f64", 8, 2),
+      UnaryF(8, "tanh", "f64", 8, 2),
+      UnaryF(9, "floor", "f64", 8, 2),
+      UnaryF(10, "ceil", "f64", 8, 2),
+      BinaryF(11, "pow", "f64", 8, 2, 2)
+    ]
+  }
+  let text = render(p)
+  assert str.contains(text, "\n    %15 = exp %13 : tile<8xf64>\n")
+  assert str.contains(text, "\n    %16 = exp2 %13 : tile<8xf64>\n")
+  assert str.contains(text, "\n    %17 = sqrt %13 rounding<nearest_even> : tile<8xf64>\n")
+  assert str.contains(text, "\n    %18 = rsqrt %13 : tile<8xf64>\n")
+  assert str.contains(text, "\n    %19 = tanh %13 : tile<8xf64>\n")
+  assert str.contains(text, "\n    %20 = floor %13 : tile<8xf64>\n")
+  assert str.contains(text, "\n    %21 = ceil %13 : tile<8xf64>\n")
+  assert str.contains(text, "\n    %22 = pow %13, %13 : tile<8xf64>\n")
 }
 
 test "index arithmetic spells as scalar i32 constant, addi and muli" {

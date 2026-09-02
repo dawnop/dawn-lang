@@ -49,6 +49,33 @@ pub opaque type Idx = Int
 ## dictionary the effect could not carry.
 pub opaque type Param[D] = (Int, String)
 
+## A RANK-0 tile inside a kernel: `tile<f64>`, not `tile<128xf64>`. What a
+## reduction answers, what its region folds over, and what an `if`'s
+## condition is. Distinct from `Tile[D]` (which is rank 1 here) because the
+## two are not interchangeable in Tile IR: `if` wants a rank-0 `i1` and
+## refuses a rank-1 one (measured), and a store wants a tile as wide as its
+## pointers. `spread` is the one way across.
+##
+## Distinct from `Idx` as well, though both are rank-0 `i32` at the machine
+## level: `Idx` is a scalar index (a block id, a loop bound) and
+## `Scalar[I32]` is a reduction's accumulator over an index tile. Nothing
+## converts between them implicitly.
+pub opaque type Scalar[D] = Int
+
+## The identity of one operand of a reduction: what a fold that has seen
+## nothing starts from, in that operand's tile format. `reduce` carries one
+## per operand.
+##
+## Its FORMAT is checked outside this repository (`tileiras` refuses an f32
+## identity for an f64 operand, measured) and its VALUE is not: a sum whose
+## identity is 1.0 assembles into a cubin. So the value is a layer-2 claim
+## and nothing else, which is what scripts/tile-gpu-diff's
+## reduce-identity-wrong mutant is for.
+pub type RedId =
+  | IdF(dtype: String, value: Float)
+  | IdI(dtype: String, value: Int)
+derive Show
+
 ## The 32-bit signed integer tile format: what `arange` and `lanes` answer and
 ## what an integer comparison reads. A tile element format, not a buffer
 ## format: there is no `Tensor[I32]` in this release.
@@ -110,6 +137,35 @@ impl Dtype[I1] {
 ## value as they stand after the loop. The handler carries the memory
 ## ordering token through the loop on its own; a body never sees it. Only
 ## `d_for` and `d_for2` call the pair; a body calls those.
+##
+## `n` is a tile width, a power of two, EXCEPT that 0 means the rank-0 tile
+## (`tile<f64>`): the shape a reduction answers and an `if` branches on. The
+## typed surface spells rank 0 as `Scalar[D]` and passes the 0 itself, so a
+## kernel body never writes it.
+##
+## `t_spread(dtype, n, src)` widens a rank-0 tile to `n` lanes, every lane
+## the same value: a `reshape` to one lane and a `broadcast` to `n`.
+##
+## `t_reduce_begin` / `t_reduce_end` and `t_if_begin` / `t_if_else` /
+## `t_if_end` bracket a region the way the loop pair does.
+## `t_reduce_begin(dim, n, identities, operands)` opens a reduction of the
+## `n`-wide tiles `operands` along `dim`, one identity per operand in the
+## same order, and answers TWO rank-0 handles per operand as the body sees
+## them: for operand `i`, the element at `2 * i` and the accumulator at
+## `2 * i + 1`, which is the order the dialect's region takes them in.
+## `t_reduce_end(yields)` closes it with the new accumulator of each operand
+## and answers one rank-0 result per operand.
+## `t_if_begin(cond)` opens the then-region of an `if` over the rank-0 `i1`
+## handle `cond`; `t_if_else(yields)` closes it with what it yields and
+## opens the else-region; `t_if_end(yields)` closes that one and answers one
+## handle per yielded value. The plan's sketch put no arguments on
+## `t_if_else`; the then-region's yields have to reach the record somewhere,
+## and this is the only operation of the bracket that can carry them.
+##
+## A load or a store inside a reduction or an `if` is REFUSED: the dialect
+## requires a reduction's body to be pure, and neither region carries the
+## memory ordering token, so a memory operation inside one would have no
+## order at all.
 pub effect Dev {
   fn t_block_id(axis: Int) -> Int
   fn t_load(param: Int, dtype: String, idx: Int, n: Int, mask: Option[Int], pad: Option[Int]) -> Int
@@ -129,6 +185,12 @@ pub effect Dev {
   fn t_idx_mul(a: Int, b: Int) -> Int
   fn t_loop_begin(lower: Int, upper: Int, step: Int, inits: List[Int]) -> (Int, List[Int])
   fn t_loop_end(outs: List[Int]) -> List[Int]
+  fn t_spread(dtype: String, n: Int, src: Int) -> Int
+  fn t_reduce_begin(dim: Int, n: Int, identities: List[RedId], operands: List[Int]) -> List[Int]
+  fn t_reduce_end(yields: List[Int]) -> List[Int]
+  fn t_if_begin(cond: Int) -> Unit
+  fn t_if_else(yields: List[Int]) -> Unit
+  fn t_if_end(yields: List[Int]) -> List[Int]
 }
 
 ## Parameter `pos` of the entry, of format `d`. Positions count from zero and
@@ -254,6 +316,53 @@ pub fn neg[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "negf"
 
 ## The element-wise absolute value `|a|`: a sign clear, exact for every value.
 pub fn abs[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "absf", n, a)
+
+## The element-wise exponential `e^a`. The device computes it with the CUDA
+## Math API (the dialect's `full` rounding mode, its default and the only
+## one an f64 tile accepts here), which is an APPROXIMATION: a kernel built
+## on it is a tolerance-tier kernel and no corpus makes it exact
+## (docs/tile-backend-design.md 6.5).
+##
+## At bytecode 13.2 `exp` carries no attribute at all. Its `rounding_mode`
+## field was added in 13.3, and a 13.2 reader that met one would take the
+## next byte of the stream for something else (measured: `failed to get
+## result type 0 for CmpIOp`).
+pub fn exp[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "exp", n, a)
+
+## The element-wise `2^a`, without `flush_to_zero`. Tolerance tier.
+pub fn exp2[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "exp2", n, a)
+
+## The element-wise natural logarithm. Tolerance tier.
+pub fn log[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "log", n, a)
+
+## The element-wise base-2 logarithm. Tolerance tier.
+pub fn log2[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "log2", n, a)
+
+## The element-wise square root, `rounding<nearest_even>` and no
+## `flush_to_zero`. Unlike its neighbours here this one is a CORRECTLY
+## ROUNDED operation in IEEE 754, so a kernel built on it can be held to the
+## bit-exact tier; the tier is a measurement, not an assumption, and
+## scripts/tile-gpu-diff records which one each kernel passed under.
+pub fn sqrt[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "sqrt", n, a)
+
+## The element-wise reciprocal square root, without `flush_to_zero`: a
+## hardware approximation, tolerance tier.
+pub fn rsqrt[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "rsqrt", n, a)
+
+## The element-wise hyperbolic tangent, `rounding<full>` (the only mode an
+## f64 tile accepts: `approx` is f32-only and `nearest_even` is refused,
+## both measured). Tolerance tier.
+pub fn tanh[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "tanh", n, a)
+
+## The element-wise largest integer not above `a`. Exact for every value it
+## is defined on, so a kernel built on it stays in the bit-exact tier.
+pub fn floor[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "floor", n, a)
+
+## The element-wise smallest integer not below `a`. Exact.
+pub fn ceil[D: Dtype](d: D, n: Int, a: Tile[D]) -> Tile[D] !Dev = unary(d, "ceil", n, a)
+
+## The element-wise `a` raised to the power `b`. Tolerance tier.
+pub fn pow[D: Dtype](d: D, n: Int, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "pow", n, a, b)
 
 ## The element-wise fused multiply-add `a * b + c`, rounded ONCE (the product
 ## is not rounded before the sum). A host reference that multiplies and then
@@ -427,6 +536,202 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   (oa, ob)
 }
 
+## `d_for` carrying three tiles, of formats `A`, `B` and `C`, in order:
+## what an online softmax needs (a running maximum, a running sum and an
+## accumulator move through one loop together).
+pub fn d_for3[A, B, C](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B], c: Tile[C],
+  body: fn(Idx, Tile[A], Tile[B], Tile[C]) -> (Tile[A], Tile[B], Tile[C]) !Dev) -> (Tile[A], Tile[B], Tile[C]) !Dev = {
+  let ha: Int = a
+  let hb: Int = b
+  let hc: Int = c
+  let outs = loop_handles(lower, upper, step, [ha, hb, hc], (i, inside) => {
+    let ta: Tile[A] = inside[0]
+    let tb: Tile[B] = inside[1]
+    let tc: Tile[C] = inside[2]
+    let (ra, rb, rc) = body(i, ta, tb, tc)
+    let xa: Int = ra
+    let xb: Int = rb
+    let xc: Int = rc
+    [xa, xb, xc]
+  })
+  let oa: Tile[A] = outs[0]
+  let ob: Tile[B] = outs[1]
+  let oc: Tile[C] = outs[2]
+  (oa, ob, oc)
+}
+
+## `d_for` carrying four tiles, in order.
+pub fn d_for4[A, B, C, E](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B], c: Tile[C], e: Tile[E],
+  body: fn(Idx, Tile[A], Tile[B], Tile[C], Tile[E]) -> (Tile[A], Tile[B], Tile[C], Tile[E]) !Dev) -> (Tile[A], Tile[B], Tile[C], Tile[E]) !Dev = {
+  let ha: Int = a
+  let hb: Int = b
+  let hc: Int = c
+  let he: Int = e
+  let outs = loop_handles(lower, upper, step, [ha, hb, hc, he], (i, inside) => {
+    let ta: Tile[A] = inside[0]
+    let tb: Tile[B] = inside[1]
+    let tc: Tile[C] = inside[2]
+    let te: Tile[E] = inside[3]
+    let (ra, rb, rc, re) = body(i, ta, tb, tc, te)
+    let xa: Int = ra
+    let xb: Int = rb
+    let xc: Int = rc
+    let xe: Int = re
+    [xa, xb, xc, xe]
+  })
+  let oa: Tile[A] = outs[0]
+  let ob: Tile[B] = outs[1]
+  let oc: Tile[C] = outs[2]
+  let oe: Tile[E] = outs[3]
+  (oa, ob, oc, oe)
+}
+
+# ---- rank-0 tiles ----
+#
+# The rank-0 tile is width 0 at the operation layer (dev.dawn's `Dev` doc
+# says why); everything below passes that 0 so that a kernel body never
+# writes it.
+
+# The rank-0 tile every lane of an `n`-wide tile widens from, and back.
+fn rank0() -> Int = 0
+
+## The `n`-wide tile every lane of which is `s`: a `reshape` to one lane and
+## a `broadcast` to `n`. The one way from `Scalar[D]` to `Tile[D]`, and what
+## a kernel does with a reduction's answer before it stores or divides by
+## it.
+pub fn spread[D: Dtype](d: D, n: Int, s: Scalar[D]) -> Tile[D] !Dev = {
+  let h: Int = s
+  let r: Tile[D] = t_spread(dtype_name(d), n, h)
+  r
+}
+
+# A binary float operation over two rank-0 tiles of `d`.
+fn s_binary[D: Dtype](d: D, op: String, a: Scalar[D], b: Scalar[D]) -> Scalar[D] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Scalar[D] = t_binaryf(op, dtype_name(d), rank0(), x, y)
+  h
+}
+
+## The sum of two rank-0 tiles, `rounding<nearest_even>`: the body of a sum
+## reduction.
+pub fn s_addf[D: Dtype](d: D, a: Scalar[D], b: Scalar[D]) -> Scalar[D] !Dev = s_binary(d, "addf", a, b)
+
+## The larger of two rank-0 tiles: the body of a max reduction. Neither
+## `propagate_nan` nor `flush_to_zero`, as `maxf` here never is.
+pub fn s_maxf[D: Dtype](d: D, a: Scalar[D], b: Scalar[D]) -> Scalar[D] !Dev = s_binary(d, "maxf", a, b)
+
+## The smaller of two rank-0 tiles: the body of a min reduction.
+pub fn s_minf[D: Dtype](d: D, a: Scalar[D], b: Scalar[D]) -> Scalar[D] !Dev = s_binary(d, "minf", a, b)
+
+## `a > b` over two rank-0 float tiles, as a rank-0 mask: what an argmax
+## reduction branches on. Ordered, like every comparison here.
+pub fn s_gt[D: Dtype](d: D, a: Scalar[D], b: Scalar[D]) -> Scalar[I1] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Scalar[I1] = t_cmpf("gt", dtype_name(d), rank0(), x, y)
+  h
+}
+
+## The rank-0 choice: `a` where `cond` is 1, `b` where it is 0.
+pub fn s_select[D: Dtype](d: D, cond: Scalar[I1], a: Scalar[D], b: Scalar[D]) -> Scalar[D] !Dev = {
+  let c: Int = cond
+  let x: Int = a
+  let y: Int = b
+  let h: Scalar[D] = t_select(dtype_name(d), rank0(), c, x, y)
+  h
+}
+
+# The comparison of two index tiles, as a rank-0 mask.
+fn idx_compare(pred: String, a: Idx, b: Idx) -> Scalar[I1] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Scalar[I1] = t_cmpi(pred, rank0(), x, y)
+  h
+}
+
+## `a == b`, `a != b`, `a < b`, `a <= b`, `a > b`, `a >= b` over two index
+## tiles, as the rank-0 mask `d_if` branches on. Signed.
+pub fn idx_eq(a: Idx, b: Idx) -> Scalar[I1] !Dev = idx_compare("eq", a, b)
+
+pub fn idx_ne(a: Idx, b: Idx) -> Scalar[I1] !Dev = idx_compare("ne", a, b)
+
+pub fn idx_lt(a: Idx, b: Idx) -> Scalar[I1] !Dev = idx_compare("lt", a, b)
+
+pub fn idx_le(a: Idx, b: Idx) -> Scalar[I1] !Dev = idx_compare("le", a, b)
+
+pub fn idx_gt(a: Idx, b: Idx) -> Scalar[I1] !Dev = idx_compare("gt", a, b)
+
+pub fn idx_ge(a: Idx, b: Idx) -> Scalar[I1] !Dev = idx_compare("ge", a, b)
+
+# ---- reductions ----
+
+## The reduction of the `n`-wide tile `t` along its one dimension: `body`
+## runs ONCE, on the host, with an element of the tile and the accumulator
+## as the region sees them, and answers the new accumulator; what it issues
+## in between is the region. `identity` is what a fold that has seen nothing
+## starts from (0.0 for a sum, -inf for a max) and must be the identity of
+## `body` or the answer is wrong on the device and nowhere else.
+##
+## THE ORDER IS NOT SPECIFIED. Tile IR requires the function to be
+## associative and commutative and says nothing about the tree, so a host
+## reference that folds left is not an oracle for this in general
+## (docs/tile-backend-design.md 6.5). A corpus on which every order is
+## exact, or a tolerance, is.
+pub fn d_reduce[D: Dtype](d: D, n: Int, t: Tile[D], identity: Float,
+  body: fn(Scalar[D], Scalar[D]) -> Scalar[D] !Dev) -> Scalar[D] !Dev = {
+  let h: Int = t
+  let args = t_reduce_begin(0, n, [IdF(dtype_name(d), identity)], [h])
+  let e: Scalar[D] = args[0]
+  let acc: Scalar[D] = args[1]
+  let r: Int = body(e, acc)
+  let outs = t_reduce_end([r])
+  let out: Scalar[D] = outs[0]
+  out
+}
+
+## `d_reduce` over TWO tiles at once, a float tile and the i32 index tile
+## beside it: the shape argmax and argmin have, where the winning value and
+## the lane it came from must travel together through one fold. `body` takes
+## the element and accumulator of each, in that order, and answers the new
+## accumulator of each.
+pub fn d_reduce2[A: Dtype](a: A, n: Int, values: Tile[A], idxs: Tile[I32],
+  value_identity: Float, index_identity: Int,
+  body: fn(Scalar[A], Scalar[I32], Scalar[A], Scalar[I32]) -> (Scalar[A], Scalar[I32]) !Dev) -> (Scalar[A], Scalar[I32]) !Dev = {
+  let hv: Int = values
+  let hi: Int = idxs
+  let args = t_reduce_begin(0, n, [IdF(dtype_name(a), value_identity), IdI("i32", index_identity)], [hv, hi])
+  let ev: Scalar[A] = args[0]
+  let av: Scalar[A] = args[1]
+  let ei: Scalar[I32] = args[2]
+  let ai: Scalar[I32] = args[3]
+  let (rv, ri) = body(ev, ei, av, ai)
+  let xv: Int = rv
+  let xi: Int = ri
+  let outs = t_reduce_end([xv, xi])
+  let ov: Scalar[A] = outs[0]
+  let oi: Scalar[I32] = outs[1]
+  (ov, oi)
+}
+
+## The `if` over the rank-0 mask `cond`: `on_true` and `on_false` each run
+## ONCE, on the host, and what each issues is one of the operation's two
+## regions; each answers the tile its region yields and the two must have
+## the same shape and format. The answer is the tile the operation defines.
+##
+## Both regions are always written, as the dialect's reader requires (an
+## `if` with one region is refused, measured). Neither may load or store.
+pub fn d_if[D](cond: Scalar[I1], on_true: fn() -> Tile[D] !Dev, on_false: fn() -> Tile[D] !Dev) -> Tile[D] !Dev = {
+  let c: Int = cond
+  t_if_begin(c)
+  let th: Int = on_true()
+  t_if_else([th])
+  let el: Int = on_false()
+  let outs = t_if_end([el])
+  let out: Tile[D] = outs[0]
+  out
+}
+
 # ---- tests ----
 #
 # The recording handler lives in prog.dawn and is tested there. These blocks
@@ -523,6 +828,28 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       let base = next
       next = next + len(outs)
       list.map(range(0, len(outs)), k => base + k)
+    }
+    t_spread(_dtype, _n, _src) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_reduce_begin(_dim, _n, _identities, operands) => {
+      let base = next
+      next = next + 2 * len(operands)
+      list.map(range(0, 2 * len(operands)), k => base + k)
+    }
+    t_reduce_end(yields) => {
+      let base = next
+      next = next + len(yields)
+      list.map(range(0, len(yields)), k => base + k)
+    }
+    t_if_begin(_cond) => ()
+    t_if_else(_yields) => ()
+    t_if_end(yields) => {
+      let base = next
+      next = next + len(yields)
+      list.map(range(0, len(yields)), k => base + k)
     }
   }
   body()
@@ -637,6 +964,28 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_idx_mul(_a, _b) => 14
     t_loop_begin(_lower, _upper, _step, inits) => (15, inits)
     t_loop_end(outs) => outs
+    t_spread(dtype, n, src) => {
+      log = log ++ ["spread ${dtype} ${n} ${src}"]
+      16
+    }
+    t_reduce_begin(dim, n, identities, operands) => {
+      log = log ++ ["reduce_begin ${dim} ${n} ${show(identities)} ${show(operands)}"]
+      list.map(range(0, 2 * len(operands)), k => 20 + k)
+    }
+    t_reduce_end(yields) => {
+      log = log ++ ["reduce_end ${show(yields)}"]
+      list.map(range(0, len(yields)), k => 30 + k)
+    }
+    t_if_begin(cond) => {
+      log = log ++ ["if_begin ${cond}"]
+    }
+    t_if_else(yields) => {
+      log = log ++ ["if_else ${show(yields)}"]
+    }
+    t_if_end(yields) => {
+      log = log ++ ["if_end ${show(yields)}"]
+      list.map(range(0, len(yields)), k => 40 + k)
+    }
   }
   body()
   log
@@ -694,6 +1043,90 @@ test "the typed surface spells every operation name the handler sees" {
     "select f64 8 9 8 1",
     "store 0 f64 0 8 11 Some(10)"
   ]
+}
+
+fn every_transcendental() -> Unit !Dev = {
+  let a = param(F64, 0)
+  let i = block_id(0)
+  let x = load(a, i, 8)
+  let _r = [
+    exp(F64, 8, x), exp2(F64, 8, x), log(F64, 8, x), log2(F64, 8, x), sqrt(F64, 8, x),
+    rsqrt(F64, 8, x), tanh(F64, 8, x), floor(F64, 8, x), ceil(F64, 8, x), pow(F64, 8, x, x)
+  ]
+  ()
+}
+
+test "the typed surface spells every transcendental's name the way Tile IR does" {
+  let seen = {
+    let log_lines = logged(every_transcendental)
+    list.filter(log_lines, l => str.starts_with(l, "unaryf") || str.starts_with(l, "binaryf"))
+  }
+  assert seen == [
+    "unaryf exp f64 8 1", "unaryf exp2 f64 8 1", "unaryf log f64 8 1", "unaryf log2 f64 8 1",
+    "unaryf sqrt f64 8 1", "unaryf rsqrt f64 8 1", "unaryf tanh f64 8 1", "unaryf floor f64 8 1",
+    "unaryf ceil f64 8 1", "binaryf pow f64 8 1 1"
+  ]
+}
+
+fn one_reduction() -> Unit !Dev = {
+  let a = param(F64, 0)
+  let i = block_id(0)
+  let x = load(a, i, 8)
+  let s = d_reduce(F64, 8, x, 0.0, (e, acc) => s_addf(F64, e, acc))
+  let _w = spread(F64, 8, s)
+  ()
+}
+
+test "a reduction hands the handler the width, the identity and the operand, and its region the element and the accumulator" {
+  # `logged` answers 20 and 21 for the two region arguments and 30 for the
+  # result; the body's addf is over those two.
+  assert logged(one_reduction) == [
+    "block_id 0",
+    "load 0 f64 0 8 None None",
+    "reduce_begin 0 8 [IdF(\"f64\", 0.0)] [1]",
+    "binaryf addf f64 0 20 21",
+    "reduce_end [7]",
+    "spread f64 8 30"
+  ]
+}
+
+fn one_branch() -> Unit !Dev = {
+  let a = param(F64, 0)
+  let i = block_id(0)
+  let x = load(a, i, 8)
+  let _r = d_if(idx_eq(i, idx_const(0)), () => addf(F64, 8, x, x), () => mul(F64, 8, x, x))
+  ()
+}
+
+test "an if hands the handler its condition, then each branch's yield in turn" {
+  assert logged(one_branch) == [
+    "block_id 0",
+    "load 0 f64 0 8 None None",
+    "cmpi eq 0 0 12",
+    "if_begin 10",
+    "binaryf addf f64 8 1 1",
+    "if_else [7]",
+    "binaryf mulf f64 8 1 1",
+    "if_end [7]"
+  ]
+}
+
+test "d_for3 carries three tiles into the loop and answers three after it" {
+  let seen = under_counter(() => {
+    let a = param(F64, 0)
+    let i = block_id(0)
+    let x = load(a, i, 8)
+    let z = idx_const(0)
+    let (p, q, r) = d_for3(z, z, z, x, x, x, (_k, u, v, w) => (u, v, w))
+    let hp: Int = p
+    let hq: Int = q
+    let hr: Int = r
+    (hp, hq, hr)
+  })
+  # block_id 100, load 101, idx_const 102; loop_begin takes 103 for the
+  # induction variable and 104, 105, 106 for the three carried tiles, and
+  # loop_end answers 107, 108, 109 for the three after the loop.
+  assert seen == (107, 108, 109)
 }
 
 test "the six comparison predicates reach the handler by name, floating point and integer alike" {
@@ -788,6 +1221,12 @@ test "d_for hands the body the carried handle and passes its answer back as the 
         log = log ++ ["loop_end ${show(outs)}"]
         [40]
       }
+      t_spread(_dtype, _n, _src) => 16
+      t_reduce_begin(_dim, _n, _identities, operands) => list.map(range(0, 2 * len(operands)), k => 20 + k)
+      t_reduce_end(yields) => list.map(range(0, len(yields)), k => 30 + k)
+      t_if_begin(_cond) => ()
+      t_if_else(_yields) => ()
+      t_if_end(yields) => list.map(range(0, len(yields)), k => 40 + k)
     }
     let _r = loop_seen()
     log
