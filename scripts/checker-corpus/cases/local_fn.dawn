@@ -23,3 +23,44 @@ pub fn returns_fn() -> Unit = {
   }
   ()
 }
+
+pub effect Ask {
+  fn get() -> Int
+}
+
+# #43: a local `fn` is lifted with no evidence parameter of its own, so a label
+# its body raises has nowhere to arrive from even though the name resolves
+# through the enclosing signature. Refused at the raise, which is the only
+# place that can name the call.
+pub fn label_from_signature() -> Int !Ask = {
+  fn inner() -> Int = get()
+  inner()
+}
+
+# the same hole one step over: the handler is in the enclosing *body* rather
+# than the enclosing signature, and the lifted body cannot read that either.
+pub fn label_from_enclosing_handler() -> Int = {
+  with handle Ask { get() => 1 }
+  fn inner() -> Int = get()
+  inner()
+}
+
+# Accepted: the local function answers the label inside its own body, which
+# needs no signature. Nothing is recorded for this one or the next; that they
+# add no line to the golden is the statement that the rule does not
+# over-refuse.
+pub fn label_handled_in_body() -> Int = {
+  fn inner() -> Int = {
+    with handle Ask { get() => 2 }
+    get()
+  }
+  inner()
+}
+
+# Accepted: the label is raised by a *lambda* the local function returns, so it
+# rides out in that closure's row and the call that runs it supplies the
+# evidence. Only a raise in the local function's own frame is refused.
+pub fn label_rides_out_on_a_closure() -> Int !Ask = {
+  fn inner() -> (fn() -> Int !Ask) = () => get()
+  inner()()
+}

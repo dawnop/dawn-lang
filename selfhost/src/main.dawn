@@ -2081,11 +2081,12 @@ fn run_lower(rest: List[String]) -> Unit !Fs !io = {
   ## text for the loop below to write.
   ##
   ## The write is not in here on purpose. A local fn is `!io` or pure and
-  ## cannot spell `Fs`; one whose body reached `io.write_file` anyway would
-  ## pass the checker (the label resolves from the enclosing frame) and then
-  ## fail at run time with "effect evidence missing", which is what `--dump`
-  ## did when the io.* file functions moved onto Fs (dawn-lang #43). Keeping
-  ## the local fn pure keeps its row honest.
+  ## cannot spell `Fs`; one whose body reached `io.write_file` anyway is now
+  ## refused by the checker (spec §6.5 "boundaries"). It was not always: the
+  ## label resolved from the enclosing frame, the program checked clean, and
+  ## `--dump` failed at run time with "effect evidence missing" when the io.*
+  ## file functions moved onto Fs (dawn-lang #43). Keeping the local fn pure
+  ## keeps its row honest either way.
   fn two(cls: String, core: CModule, modes: Map[(String, String), List[CMode]]) -> (Int, String) = {
     let m = rc.rc_module(infer.stamp_modes(core, modes), modes)
     let text = if dumping { coredump.render(adts, m) } else { "" }
