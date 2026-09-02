@@ -462,6 +462,71 @@ pub fn with_fs_real[T](body: fn() -> T !Fs !io) -> T !io = {
   body()
 }
 
+# ---- running a program as a named effect ----
+#
+# `run` above is the public face of the one operation below, on the shape the
+# `Fs` block settled: a plain declaration, a plain wrapper function as the
+# production handler, and the seam below the error surface. An arm answers the
+# raw `ForeignError` a host refusal would have carried rather than a finished
+# outcome, so `run`'s own empty-argv check and the `io.no_program` it mints
+# stay the code under test when a fake answers.
+#
+# One operation, not four. `exit`, `cwd` and `getenv` are the rest of what this
+# module knows about a process and stay `!io`: an operation is worth its label
+# only where it makes an assertion writable that is not writable today, and
+# theirs are not that. `args` could not join in any case, whatever it was
+# worth: argv arrives on a static field of the program's own entry class, and
+# a handler living here compiles to a different class (the note at the top of
+# this file).
+#
+# What such a handler sees is narrower than what an `Fs` handler sees, and the
+# difference is worth stating rather than discovering. The file system belongs
+# to `Fs` because this module is the only way a Dawn program reaches it. A
+# process is not like that: `io_run` waits for a child and sends each stream to
+# a file, and a caller that wants an environment, an inherited console, a
+# handle or a deadline reaches past this module for `ProcessBuilder` or
+# `posix_spawn` directly. Nothing on that path passes through an arm here.
+#
+# The wrapper's body row is `!e` rather than a closed `!(Proc | io)`, and that
+# is not decoration. A closed row can only be the outermost wrapper:
+# `with_fs_real`'s is closed, so `with_proc_real(() => with_fs_real(...))` does
+# not check, and with a closed row here neither would the order that does. The
+# first test below is that claim, made machine-checked. A new wrapper in this
+# module takes `!e`; `with_fs_real` keeps the closed row it has until something
+# needs to sit outside it, because widening it costs a release.
+#
+# As with `Fs`, the declaration ships one release before anything moves onto
+# it (docs/bootstrap.md, the seed feature discipline). `run` is unchanged here:
+# it still reaches `io_run` itself, and it is a caller of `proc_run` no earlier
+# than the release after this one.
+
+## Running another program, as the one operation a handler answers. The name
+## carries a `proc_` prefix for the reason the `fs_` ones do: `use
+## std/io.{Proc}` brings the operation into the importing module's own
+## namespace (spec §6.5), where `run` is a name a module may well have taken.
+##
+## The arguments are `run`'s, and so is the answer: an exit status for a child
+## that ran, an `Err` for one that could not be started. Nothing here declares
+## effects of its own (spec §6.5); what an arm does is charged where the
+## handler is installed.
+pub effect Proc {
+  fn proc_run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError]
+}
+
+## Run `body` against real processes. The arm is the host primitive behind
+## `run`, through the barrier that sits inside `run` today.
+##
+## This is the production handler: a program installs it at the boundary that
+## owns a whole unit of work, and everything beneath sees `Proc`. A test
+## installs an arm of its own instead.
+pub fn with_proc_real[T, !e](body: fn() -> T !Proc !e) -> T !io = {
+  with handle Proc {
+    proc_run(argv, out_path, err_path) =>
+      catch_fault(() => io_run(argv, out_path, err_path))
+  }
+  body()
+}
+
 # What these blocks may and may not assert is decided by one fact: `kind` is
 # whatever the backend called the failure. On the JVM a missing file is
 # `java.nio.file.NoSuchFileException`; a second backend has no reason to spell
@@ -919,4 +984,74 @@ test "a handler over a table answers Fs without a host" {
   assert list_dir("/virt") == Ok(["a", "b"])
   assert delete("/virt/a.txt") == Ok(Deleted)
   assert delete("/virt/gone") == Ok(NotFound)
+}
+
+test "with_proc_real answers run from the host, one wrapper inside the other" {
+  # The nesting is an assertion, not a setting. `with_fs_real`'s body row is
+  # closed, so it can only be the outer one; this order checks only because
+  # `with_proc_real`'s row is `!e`. Spell that row `!(Proc | io)` instead and
+  # this block stops compiling: `argument type mismatch: expected fn() -> Unit
+  # !(Proc|io), got fn() -> Unit !(Fs|Proc)`.
+  with_fs_real(() => with_proc_real(() => {
+    let made = (r: Result[String, ForeignError]) => match r {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    let d = made(temp_dir("", "dawn-std-proc-"))
+    assert d != ""
+    # `sh` rather than a coreutil, because POSIX guarantees it is on PATH.
+    # A non-zero status is the answer, not a failure, and the status proves
+    # the second and third elements of argv arrived as separate words.
+    assert proc_run(["sh", "-c", "exit 0"], "", "") == Ok(0)
+    assert proc_run(["sh", "-c", "exit 5"], "", "") == Ok(5)
+    # not being able to start it at all is the failure, and it arrives as the
+    # host's own `ForeignError` rather than as a status
+    match proc_run(["dawn-no-such-program-anywhere-on-this-path"], "", "") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    # the stream paths are the operation's, not the wrapper's: what the child
+    # wrote is at the file the caller named
+    let out = d ++ "/out.txt"
+    assert proc_run(["sh", "-c", "printf hello"], out, "") == Ok(0)
+    assert read_file(out) == Ok("hello")
+    let err = d ++ "/err.txt"
+    assert proc_run(["sh", "-c", "printf out; printf err 1>&2"], out, err) == Ok(0)
+    assert read_file(out) == Ok("out")
+    assert read_file(err) == Ok("err")
+    assert delete(out) == Ok(Deleted)
+    assert delete(err) == Ok(Deleted)
+    assert delete(d) == Ok(Deleted)
+  }))
+}
+
+test "a handler over a table answers Proc without a host" {
+  # What the fake is for: a command line is a list, and the only way to hold
+  # one is to compare the whole list. Nothing below starts a process.
+  let refused = ForeignError {
+    kind: "test.refused",
+    message: "nothing was started",
+    cause: None
+  }
+  with handle Proc {
+    var calls: List[(List[String], String, String)] = []
+    proc_run(argv, out_path, err_path) => {
+      calls = calls ++ [(argv, out_path, err_path)]
+      if len(argv) > 0 && argv[0] == "curl" { Ok(22) } else { Err(refused) }
+    }
+  }
+  assert proc_run(["curl", "--fail", "--max-time", "30", "https://example.invalid"],
+    "/virt/body", "/virt/diag") == Ok(22)
+  # the seam is below the error surface, so an arm's `Err` reaches the caller
+  # with the arm's own `kind` and nothing rewritten on the way
+  match proc_run(["cc", "--target=wasm32-wasip1", "-print-file-name=crt1.o"], "", "") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.kind == "test.refused" }
+  }
+  # every element, in order, and both stream paths, for both calls
+  assert calls == [
+    (["curl", "--fail", "--max-time", "30", "https://example.invalid"],
+      "/virt/body", "/virt/diag"),
+    (["cc", "--target=wasm32-wasip1", "-print-file-name=crt1.o"], "", "")
+  ]
 }

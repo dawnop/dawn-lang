@@ -39,7 +39,7 @@ Effects in the type
 
 ## feature-effects-body
 
-Functions are pure by default; touching IO requires `!io` on the signature — the signature tells you whether it reaches outside, so testing a pure function needs no mocks. A second axis is **named effects you declare yourself**: `effect` declares the operations, `with handle` answers them on the spot, and the label propagates along signatures until exactly one syntactic node subtracts it. That tier is specified, implemented on both backends and tested, and it has **its first internal consumer**: the standard library's `std/io` declares `Fs`, the file system as a named effect, with `with_fs_real` as the production handler; `std/gpu` follows with `Gpu`, the host side of a device, answered in tests by a pure fake device.
+Functions are pure by default; touching IO requires `!io` on the signature — the signature tells you whether it reaches outside, so testing a pure function needs no mocks. A second axis is **named effects you declare yourself**: `effect` declares the operations, `with handle` answers them on the spot, and the label propagates along signatures until exactly one syntactic node subtracts it. That tier is specified, implemented on both backends and tested, and it has **its first internal consumer**: the standard library's `std/io` declares `Fs`, the file system as a named effect, with `with_fs_real` as the production handler, and `Proc`, running another program, with `with_proc_real`; `std/gpu` follows with `Gpu`, the host side of a device, answered in tests by a pure fake device.
 
 ## feature-comptime-title
 

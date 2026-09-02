@@ -443,7 +443,10 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
    唯一的减法点是 `with handle`。这是健全性要求，但方向上是放大签名噪音而不是缩小。
 
 第一个真实样本已经在了：`std/io` 声明了 `Fs`（文件系统的十四个操作，生产 handler
-`with_fs_real`），它是 `std/` 与 `selfhost/src/` 下唯一的 `effect` 声明。这份清单由
+`with_fs_real`）。今天 `std/` 与 `selfhost/src/` 下共三条 `effect` 声明，落在两个文件里：
+`std/io` 的 `Fs` 与 `Proc`（跑另一个程序，一个操作 `proc_run`，生产 handler
+`with_proc_real`），以及 `std/gpu` 的 `Gpu`（设备宿主侧的六个操作，测试里由一个纯的假设备
+应答）。这份清单由
 `scripts/doc-check.py` 的 `NAMED_EFFECT_EXPECTED` 枚举、`check_named_effect_status` 三向钉住
 （清单外的声明、清单内文件失去声明、清单列了不存在的文件，都红；见 [README.md](../README.md)
 的效果一节）。样本的坐标：声明与 handler 在 `std/io.dawn`；消费侧的签名噪音落在编译器的驱动层。
@@ -468,7 +471,11 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
 去掉 `!io` 是把它们能接的实参集合改小。这一刀不动发射：`selfhost-prev-diff.sh` 无声明全绿，
 Core golden 只动了两个模块里三个闭包类型上印出来的效果行。
 
-**裁决：已知风险，暂无缓解；效果集别名等第二个族（Console 或 Env）的样本到了再裁。**
+`Proc`（2026-09-03 落地）目前一条消费者签名都没长出来：按同一条特性纪律，`io.run` 与两棵树的
+调用点要等下一 release 才搬得上去，预研按可达性数出的 46 条届时全部拼作 `!Fs !Proc !io`，
+纯叠加，没有一条会变干净。所以别名这个悬案在今天的树上没有新证据可读。
+
+**裁决：已知风险，暂无缓解；效果集别名等第二个族的消费者样本到了再裁。**
 第一个样本只登记坐标：多个效果同时在场、跨模块传播这两件在 Fs 上会发生，但一个样本不足以
 看出别名该长什么形状。
 
@@ -497,10 +504,22 @@ Core golden 只动了两个模块里三个闭包类型上印出来的效果行�
   （spec §6.5）；吸收禁令（spec §6.2 规则 7）另外挡住了「静默吞掉外层效果」的静态形态，因为
   `with handle` 只减自己应答的那个标签，别的原子必须留在行里。这两条都不是对顺序的检查。
 
-规模上这笔账今天不疼。`std/` 与 `selfhost/src/` 零 `effect` 声明（§8.1 末段）；仓外的
-backend-dawn 只有一个 `pub effect Clock`（`backend-dawn/src/util/clock.dawn`），生产与测试
-各就地装一次同名 handler，从不与第二个效果嵌套；本仓 `examples/projects/tea_dom_counter`
-的 `effect Emit` 同样是单效果单 handler。
+规模上这笔账今天已经不是零了。`std/` 与 `selfhost/src/` 下有三条 `effect` 声明（§8.1 末段），
+其中 `Fs` 与 `Proc` 同住 `std/io`，两个生产 handler 第一次要考虑谁装在谁外面；仓外的
+backend-dawn 有 `Clock`（`backend-dawn/src/util/clock.dawn`）与 `Upstream`
+（`backend-dawn/src/util/http.dawn`）两个，且它们在生产路径上真的嵌套：
+`svc/monitor.lighthouse_start` 的行是 `!Upstream !io`，体内就地装 `Clock`，而调用它的
+`api/api_monitor` 已经把 `with_upstream` 装在外面；本仓 `examples/projects/tea_dom_counter`
+的 `effect Emit` 仍是单效果单 handler。
+
+**顺序这件事在本仓已经有一条机器判词了，虽然它答的不是难的那一半。** wrapper 的 body 行
+写闭合行还是写行多态（`!e`），决定它能不能被套进别人里面：`with_fs_real` 的 body 行是闭合的
+`fn() -> T !(Fs|io)`，于是它只能当最外层；`with_proc_real` 的 body 行写 `!e`，于是
+`with_fs_real(() => with_proc_real(...))` 通过，而反过来的次序被检查器按参数类型不匹配拒掉
+（`expected fn() -> T !(Fs|io), got fn() -> T !(Fs|Proc|io)`，`T` 处是具体的返回类型）。`std/io` 里那条
+「one wrapper inside the other」的 test 就是这条判词的看护：把 `!e` 换回闭合行，它编译不过。
+这不是对「两个 handler 装错顺序」的检查（octachron 那条结论一个字都没被削弱），它只是把
+「哪一个能当外层」从口头约定变成了签名上的事实。
 
 不过**安装点的选择已经不平凡了，单效果也一样**：clock.dawn 的头注释记了这条实测，
 handler 只把证据供给自己那个块的剩余部分，路由闭包在块内建起来却不捕获它，于是 handler 只能
