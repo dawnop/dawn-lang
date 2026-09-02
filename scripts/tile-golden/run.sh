@@ -36,7 +36,8 @@
 #                equal <kernel>.tilebc byte for byte, and the version the
 #                program writes into the header is toolchain.txt's.
 #   assemble  -- tileiras is the version toolchain.txt pins and turns each
-#                <kernel>.tilebc into an ELF cubin.
+#                <kernel>.tilebc into an ELF cubin whose symbol table has a
+#                global function named after the kernel.
 #   mutant    -- one rule removed from a copy of the package, the kernels run
 #                against that copy on both backends, and one named kernel
 #                required to go red in the way the rule predicts:
@@ -59,6 +60,26 @@
 #                            -> the text is untouched, the bytes are the same
 #                            length and differ, and tileiras refuses them:
 #                            addf wants a float tile
+#     loop-token-not-carried the handler no longer continues from the loop's
+#                            token result after the loop, so the store after
+#                            sum's loop names the token of a load inside it
+#                            -> sum is refused when lowered (a loop body's
+#                            value is not visible after the loop), nothing
+#                            rendered; vadd, which has no loop, is untouched
+#     region-stack-pop       the handler pops the region stack the wrong way
+#                            round: what the loop body issued stays outside
+#                            and what came before it goes inside -> sum is
+#                            refused when lowered (the body's load names the
+#                            loop's carried token before the loop defines
+#                            it), nothing rendered; vadd untouched
+#     for-results-not-rolled-back
+#                            the writer keeps counting after a loop's block
+#                            instead of rolling the value index back before
+#                            numbering the loop's results -> sum's text is
+#                            untouched, its bytes are the same length and
+#                            differ, and tileiras refuses them: the store
+#                            after the loop names an index past the last
+#                            value
 #
 # The anchor each mutant rewrites must match exactly once, so a refactor that
 # moves it fails here instead of silently un-mutating (scripts/narrow-contract
@@ -69,7 +90,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/tile-golden"
-kernels=(vadd vadd_f32)
+kernels=(vadd vadd_f32 sum)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -189,6 +210,32 @@ is_elf() { # file
   [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ]
 }
 
+# The cubin's symbol table has a GLOBAL FUNC named <name>: the kernel came
+# out the other end under its own name. ELF64 little-endian, read directly
+# so the check does not depend on binutils being installed.
+has_global_func() { # cubin, name
+  python3 - "$1" "$2" <<'PY'
+import struct
+import sys
+
+data = open(sys.argv[1], "rb").read()
+want = sys.argv[2].encode()
+shoff = struct.unpack_from("<Q", data, 0x28)[0]
+shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
+sections = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+for _name, kind, _flags, _addr, off, size, link, _info, _align, entsize in sections:
+    if kind != 2:  # SHT_SYMTAB
+        continue
+    strtab_off = sections[link][4]
+    for j in range(size // entsize):
+        st_name, st_info, _other, _shndx, _value, _size = struct.unpack_from("<IBBHQQ", data, off + j * entsize)
+        end = data.index(b"\0", strtab_off + st_name)
+        if data[strtab_off + st_name:end] == want and st_info & 0xF == 2 and st_info >> 4 == 1:
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 # Assemble one bytecode file; the exit code is tileiras's, its output is in
 # <out>.log and the cubin (if any) in <out>.
 assemble() { # tilebc, out
@@ -245,7 +292,8 @@ for k in "${kernels[@]}"; do
     if ! [ -s "$work/$k.cubin" ] || ! is_elf "$work/$k.cubin"; then
       fail "$k: tileiras exited 0 but wrote no ELF cubin"
     fi
-    echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
+    has_global_func "$work/$k.cubin" "$k" || fail "$k: the cubin has no GLOBAL FUNC named $k"
+    echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, FUNC GLOBAL $k, tileiras V$want_tileiras, $gpu_name)"
   else
     echo "SKIP  assemble: $k.tilebc not handed to tileiras (--without-tileiras)"
   fi
@@ -337,52 +385,75 @@ func_len() { # tilebc
   od -An -tu1 -j 13 -N 1 "$1" | tr -d ' \n'
 }
 
-# A writer mutant: the text of vadd is untouched on both backends (the
-# renderer was not edited), the bytes differ from vadd.tilebc on both and
-# agree with each other, and tileiras refuses them with the given fragment
-# in its output. <shape> says how the mutant's file relates to the golden's:
-# `same-size` (a value changed in place) or `func-one-short` (the function
-# section lost one byte; the file itself need not shrink, the next section's
-# alignment padding absorbs it).
-writer_mutant_checks() { # name, shape, fragment
-  local name="$1" shape="$2" fragment="$3" backend out golden_size mutant_size golden_func
-  mutant_run "$name" vadd
-  mutant_run_bytecode "$name" vadd
-  golden_size=$(wc -c < "$here/vadd.tilebc")
-  golden_func=$(func_len "$here/vadd.tilebc")
+# A writer mutant: the text of <kernel> is untouched on both backends (the
+# renderer was not edited), the bytes differ from <kernel>.tilebc on both
+# and agree with each other, and tileiras refuses them with the given
+# fragment in its output. <shape> says how the mutant's file relates to the
+# golden's: `same-size` (a value changed in place) or `func-one-short` (the
+# function section lost one byte; the file itself need not shrink, the next
+# section's alignment padding absorbs it).
+writer_mutant_checks() { # name, kernel, shape, fragment
+  local name="$1" k="$2" shape="$3" fragment="$4" backend out golden_size mutant_size golden_func
+  mutant_run "$name" "$k"
+  mutant_run_bytecode "$name" "$k"
+  golden_size=$(wc -c < "$here/$k.tilebc")
+  golden_func=$(func_len "$here/$k.tilebc")
   for backend in jvm native; do
-    out="$work/m-$name.vadd.$backend"
-    if [ "$(cat "$out.rc")" != 0 ] || ! cmp -s "$here/vadd.mlir" "$out"; then
+    out="$work/m-$name.$k.$backend"
+    if [ "$(cat "$out.rc")" != 0 ] || ! cmp -s "$here/$k.mlir" "$out"; then
       cat "$out.err" >&2
-      fail "$name: the renderer was not edited, so vadd.mlir should still match on $backend"
+      fail "$name: the renderer was not edited, so $k.mlir should still match on $backend"
     fi
-    out="$work/m-$name.vadd.$backend.tilebc"
-    [ "$(cat "$out.rc")" = 0 ] || { cat "$work/m-$name.vadd.$backend.out.err" >&2; fail "$name: vadd did not encode on $backend"; }
-    cmp -s "$here/vadd.tilebc" "$out" && fail "$name mutant stayed green on $backend: vadd.tilebc still matches"
+    out="$work/m-$name.$k.$backend.tilebc"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$work/m-$name.$k.$backend.out.err" >&2; fail "$name: $k did not encode on $backend"; }
+    cmp -s "$here/$k.tilebc" "$out" && fail "$name mutant stayed green on $backend: $k.tilebc still matches"
     mutant_size=$(wc -c < "$out")
     case "$shape" in
       same-size)
         [ "$mutant_size" = "$golden_size" ] ||
-          fail "$name: vadd.tilebc is $golden_size bytes and the mutant's is $mutant_size on $backend; expected the same size" ;;
+          fail "$name: $k.tilebc is $golden_size bytes and the mutant's is $mutant_size on $backend; expected the same size" ;;
       func-one-short)
         [ "$(func_len "$out")" = "$((golden_func - 1))" ] ||
           fail "$name: the golden's Func section is $golden_func bytes and the mutant's is $(func_len "$out") on $backend; expected one byte fewer" ;;
       *) fail "writer_mutant_checks: unknown shape $shape" ;;
     esac
   done
-  cmp -s "$work/m-$name.vadd.jvm.tilebc" "$work/m-$name.vadd.native.tilebc" ||
+  cmp -s "$work/m-$name.$k.jvm.tilebc" "$work/m-$name.$k.native.tilebc" ||
     fail "$name: the two backends disagree on the mutant's bytes"
   if [ -n "$tileiras" ]; then
-    if assemble "$work/m-$name.vadd.jvm.tilebc" "$work/m-$name.cubin"; then
+    if assemble "$work/m-$name.$k.jvm.tilebc" "$work/m-$name.cubin"; then
       fail "$name mutant stayed green: tileiras accepted the mutant's bytecode"
     fi
     grep -Fq "$fragment" "$work/m-$name.cubin.log" ||
       { cat "$work/m-$name.cubin.log" >&2; fail "$name: tileiras refused the bytecode for something other than: $fragment"; }
-    echo "PASS  mutant: $name (vadd.mlir untouched, vadd.tilebc red on both backends; tileiras: $fragment)"
+    echo "PASS  mutant: $name ($k.mlir untouched, $k.tilebc red on both backends; tileiras: $fragment)"
   else
-    echo "PASS  mutant: $name (vadd.mlir untouched, vadd.tilebc red on both backends)"
+    echo "PASS  mutant: $name ($k.mlir untouched, $k.tilebc red on both backends)"
     echo "SKIP  mutant: $name not handed to tileiras (--without-tileiras)"
   fi
+}
+
+# A handler or lowering mutant that a loop kernel trips over before any text
+# is rendered: <kernel> exits non-zero on both backends with <fragment> on
+# stderr and nothing on stdout, while vadd, which has no loop, still renders
+# its golden.
+refused_mutant_checks() { # name, kernel, fragment
+  local name="$1" k="$2" fragment="$3" backend out ctrl
+  mutant_run "$name" "$k"
+  mutant_run "$name" vadd
+  for backend in jvm native; do
+    out="$work/m-$name.$k.$backend"
+    [ "$(cat "$out.rc")" != 0 ] || { cat "$out" >&2; fail "$name mutant stayed green on $backend: $k still renders (exit 0)"; }
+    grep -Fq "$fragment" "$out.err" ||
+      { cat "$out.err" >&2; fail "$name: $k failed on $backend for something other than: $fragment"; }
+    [ ! -s "$out" ] || fail "$name: $k printed text before being refused on $backend"
+    ctrl="$work/m-$name.vadd.$backend"
+    if [ "$(cat "$ctrl.rc")" != 0 ] || ! cmp -s "$here/vadd.mlir" "$ctrl"; then
+      cat "$ctrl.err" >&2
+      fail "$name: vadd (no loop) should be untouched on $backend"
+    fi
+  done
+  echo "PASS  mutant: $name ($k refused before rendering on both backends: $fragment; vadd untouched)"
 }
 
 # 3. The writer encodes make_token with iota's opcode. Same length, one byte
@@ -390,7 +461,7 @@ writer_mutant_checks() { # name, shape, fragment
 mutant_project make-token-as-iota bytecode.dawn \
   'const OP_MAKE_TOKEN: Int = 0x44' \
   'const OP_MAKE_TOKEN: Int = 0x3A'
-writer_mutant_checks make-token-as-iota same-size \
+writer_mutant_checks make-token-as-iota vadd same-size \
   "'cuda_tile.iota' op result #0 must be tile of"
 
 # 4. The writer's store still sets the token-present flag but no longer
@@ -402,7 +473,7 @@ writer_mutant_checks make-token-as-iota same-size \
 mutant_project store-token-unwritten bytecode.dawn \
   'emit_ref(emit_ref(emit_ref(w1, ptrs), value), tok_in)' \
   'emit_ref(emit_ref(w1, ptrs), value)'
-writer_mutant_checks store-token-unwritten func-one-short \
+writer_mutant_checks store-token-unwritten vadd func-one-short \
   "operand index 92 out of bounds (size=27) for token segment"
 
 # 5. The writer's type table gives f64 the i64 tag. Same length, the type
@@ -410,7 +481,46 @@ writer_mutant_checks store-token-unwritten func-one-short \
 mutant_project f64-tag-as-i64 bytecode.dawn \
   '  "f64" -> 9' \
   '  "f64" -> 4'
-writer_mutant_checks f64-tag-as-i64 same-size \
+writer_mutant_checks f64-tag-as-i64 vadd same-size \
   "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi64>'"
+
+# 6. The handler stops carrying the token out of a loop: after `t_loop_end`
+#    the token cell keeps the body's last token instead of taking the loop's
+#    token result. sum's store after the loop then names a load token from
+#    inside it, and the lowering, which closes a body's names when the loop
+#    ends, refuses it by name. Nothing is rendered; the text golden never
+#    sees a file.
+mutant_project loop-token-not-carried prog.dawn \
+  '        tok = last(results)
+' \
+  '        ()
+'
+refused_mutant_checks loop-token-not-carried sum \
+  'tileir: `store token` refers to handle 13, which a loop body defined and which is not visible after the loop'
+
+# 7. The handler pops the region stack the wrong way round: the operations
+#    the loop body issued stay in the enclosing region and the ones issued
+#    before the loop become the body. sum's first operation is then the
+#    body's load, whose token is the loop's carried token, which nothing
+#    has defined yet.
+mutant_project region-stack-pop prog.dawn \
+  'let (outer, inner) = (frame.outer, ops)' \
+  'let (outer, inner) = (ops, frame.outer)'
+refused_mutant_checks region-stack-pop sum \
+  'tileir: `load token` refers to handle 11, which no earlier operation defined'
+
+# 8. The writer forgets the reader's rule that a block's value indices roll
+#    back before the loop's own results are numbered. sum's results take the
+#    indices after its body instead of the body's first two, and everything
+#    after the loop shifts with them; the file is the same length (every
+#    index is one varint byte either way), the text is untouched, and the
+#    reader stops at the first operand past the values it has: 39 where it
+#    knows 25 (2 parameters, 20 values before the loop, its 2 results and
+#    the constant after it).
+mutant_project for-results-not-rolled-back bytecode.dawn \
+  '    W { ..w9, index: w7.index, nvals: w7.nvals }' \
+  '    w9'
+writer_mutant_checks for-results-not-rolled-back sum same-size \
+  "operand index 39 out of bounds (size=25) for operand 1"
 
 echo "tile golden ok"

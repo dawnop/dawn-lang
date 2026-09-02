@@ -9,7 +9,7 @@
 use std/io
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32}
-use tileir/dev.{Dev, Param, param, block_id, load, store, addf}
+use tileir/dev.{Dev, Param, param, block_id, load, store, addf, idx_const, idx_add, idx_mul, d_for}
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -32,11 +32,31 @@ fn vadd_f32(a: Param[F32], b: Param[F32], out: Param[F32]) -> Unit !Dev = {
   store(out, i, 64, addf(F32, 64, ta, tb))
 }
 
+# f64 block-wise tile sum, the second milestone's loop kernel
+# (tile-backend-design 5.2): block b folds the `chunks` consecutive 128-wide
+# tiles of x numbered b*chunks .. b*chunks+chunks-1 into one tile of out,
+# the first tile entering the loop and the rest added in order, which is
+# the order std/gpu's sum_ref adds in. `chunks` is a host constant: fixed
+# when the kernel is recorded, 4 in the golden.
+fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
+  let b = block_id(0)
+  let n = idx_const(chunks)
+  let base = idx_mul(b, n)
+  let first = load(x, base, 128)
+  let one = idx_const(1)
+  let lo = idx_add(base, one)
+  let up = idx_add(base, n)
+  let acc = d_for(lo, up, one, first, (k, t) => addf(F64, 128, t, load(x, k, 128)))
+  store(out, b, 128, acc)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
   "vadd_f32" ->
     trace_kernel("vadd_f32", ["f32", "f32", "f32"], () => vadd_f32(param(F32, 0), param(F32, 1), param(F32, 2)))
+  "sum" ->
+    trace_kernel("sum", ["f64", "f64"], () => sum(param(F64, 0), param(F64, 1), 4))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -58,5 +78,5 @@ pub fn main() -> Unit !io = match args() {
       Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
     }
   }
-  _ -> panic("usage: kernels <vadd|vadd_f32> [--bytecode <path>] | kernels --bytecode-version")
+  _ -> panic("usage: kernels <vadd|vadd_f32|sum> [--bytecode <path>] | kernels --bytecode-version")
 }
