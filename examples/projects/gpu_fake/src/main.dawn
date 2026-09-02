@@ -1,0 +1,130 @@
+# A GPU program on a machine with no GPU: one kernel, two sides, two handlers.
+#
+# The device side is `vadd`. It is an ordinary Dawn function whose only effect
+# is `!Dev`, and running it does not compute anything: `packages/tileir`'s
+# recording handler writes down the operations it raises, and the record
+# renders as Tile IR text or encodes as the bytecode `tileiras` assembles into
+# a cubin.
+#
+# The host side is `run` -- allocate, upload, launch, download, free -- whose
+# only effect is `!Gpu`. `std/gpu`'s `with_gpu_real` answers those operations
+# from the CUDA driver. `with_gpu_fake` answers them from a table in host
+# memory, computing each launch with a reference implementation, and it is
+# pure: this program and its tests need no device, no driver and no `!io`.
+#
+# The Tile IR this prints is the same text `scripts/tile-golden` pins for
+# this kernel, on purpose: the gate holds the renderer and the gallery shows
+# what it emits, and a change to either moves both together.
+#
+# What the fake device is worth is that it is not a stub. It issues and
+# retires handles, refuses a format it cannot hold, refuses a kernel it does
+# not know and a launch of the wrong arity, and rounds what it stores to the
+# buffer's format -- so the code that survives it is the code that runs.
+#
+# Run: dawn run examples/projects/gpu_fake
+
+use std/gpu
+use std/gpu.{Gpu, F64, with_gpu_fake, reference_kernels, alloc, upload, download, launch, free, sync, handle_of}
+use std/io
+use std/map
+use std/str
+use tileir/dev.{Dev, Param, param, block_id, load, store, addf}
+use tileir/prog.{trace_kernel}
+use tileir/render.{render}
+
+const WIDTH: Int = 128
+
+# ---- the device side ----
+
+## One 128-wide tile per block: two loads, one add, one store. `!Dev` and
+## nothing else -- there is no host memory here, and no way to look at a
+## number.
+fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let ta = load(a, i, WIDTH)
+  let tb = load(b, i, WIDTH)
+  store(out, i, WIDTH, addf(F64, WIDTH, ta, tb))
+}
+
+## The kernel's Tile IR. `trace_kernel` installs the recording handler, calls
+## the body once, and answers the record; `render` turns it into the text a
+## reader (and a golden) can hold. `params` is the entry signature, and a
+## `param` in the body that disagrees with it is refused here rather than by
+## the assembler.
+fn vadd_text() -> String =
+  render(trace_kernel("vadd", ["f64", "f64", "f64"],
+    () => vadd(param(F64, 0), param(F64, 1), param(F64, 2))))
+
+# ---- the host side ----
+
+## Three buffers, one launch, one answer back. Which device this is, is the
+## handler's business; `run` names only `!Gpu`.
+fn run(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+  let n = len(xs)
+  let a = alloc(F64, n)?
+  let b = alloc(F64, n)?
+  let out = alloc(F64, n)?
+  upload(a, xs)?
+  upload(b, ys)?
+  launch("vadd", blocks(n), [handle_of(a), handle_of(b), handle_of(out)])?
+  sync()?
+  let got = download(out)?
+  free(a)?
+  free(b)?
+  free(out)?
+  Ok(got)
+}
+
+## One block per tile. The fake device does not consult the grid -- a
+## reference implementation computes the whole vector at once -- so this is
+## the number the real device would need, kept honest by the kernel's width.
+fn blocks(n: Int) -> Int = (n + WIDTH - 1) / WIDTH
+
+fn on_fake(xs: List[Float], ys: List[Float]) -> String =
+  match with_gpu_fake(reference_kernels(), () => run(xs, ys)) {
+    Ok(zs) -> "${zs}"
+    Err(e) -> "refused: ${e.kind}"
+  }
+
+fn left() -> List[Float] = [1.0, 2.0, 3.0, 4.0]
+
+fn right() -> List[Float] = [10.0, 20.0, 30.0, 40.0]
+
+pub fn main() -> Unit !io = {
+  io.print(vadd_text())
+  io.println("vadd on the fake device: ${on_fake(left(), right())}")
+}
+
+test "the record is a function of the body, not of the run" {
+  let once = trace_kernel("vadd", ["f64", "f64", "f64"],
+    () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
+  let twice = trace_kernel("vadd", ["f64", "f64", "f64"],
+    () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
+  assert once == twice
+}
+
+test "the kernel renders as one Tile IR entry" {
+  let text = vadd_text()
+  assert str.contains(text, "cuda_tile.module @m")
+  assert str.contains(text, "entry @vadd")
+  assert str.contains(text, "tile<128xf64>")
+}
+
+test "the same program on the fake device adds the vectors" {
+  assert with_gpu_fake(reference_kernels(), () => run(left(), right())) ==
+    Ok([11.0, 22.0, 33.0, 44.0])
+}
+
+test "a kernel the device does not have is refused, and nothing is computed" {
+  let missing = with_gpu_fake(map.empty(), () => run(left(), right()))
+  match missing {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.kind == "gpu.no_kernel" }
+  }
+}
+
+test "one block covers a tile, and a vector longer than a tile needs more" {
+  assert blocks(1) == 1
+  assert blocks(128) == 1
+  assert blocks(129) == 2
+}

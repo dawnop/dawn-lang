@@ -1,0 +1,186 @@
+# The file system as a named effect: one reader, two handlers.
+#
+# `read_settings` below opens files. Its signature says `!Fs` and nothing
+# more, so it does not say *which* file system: `with_fs_real` is the handler
+# std ships for the host's, and `with_fs_table` further down is an association
+# list. The tests at the bottom run that same `read_settings` under the table
+# and never touch a disk -- no fixture directory, nothing to clean up
+# afterwards, and no second implementation of the thing under test.
+#
+# `!Fs` and `!io` are different axes and not two names for "impure". Reading a
+# file is `!Fs` alone, which is why the table handler is pure and the tests
+# declare no effect at all.
+#
+# Run: dawn run examples/effects/files.dawn
+
+use std/io
+use std/io.{Fs, with_fs_real}
+use std/str
+
+type Settings = { name: String, retries: Int }
+
+# ---- the reader: it asks, and does not care who answers ----
+
+## Two files under `dir`, and an error message for whatever went wrong. The
+## only thing in the signature about the outside world is the label.
+fn read_settings(dir: String) -> Result[Settings, String] !Fs = {
+  if not io.is_dir(dir) {
+    return Err("no settings directory at $dir")
+  }
+  let name = line("$dir/name")?
+  let retries = line("$dir/retries")?
+  match parse_int(retries) {
+    Some(n) -> Ok(Settings { name: name, retries: n })
+    None -> Err("retries is not a number: $retries")
+  }
+}
+
+## `ForeignError.kind` is whatever the backend called the failure, so a
+## message built from it would read differently on each. This one is ours.
+fn line(path: String) -> Result[String, String] !Fs =
+  match io.read_file(path) {
+    Ok(text) -> Ok(str.trim(text))
+    Err(_e) -> Err("cannot read $path")
+  }
+
+fn describe(r: Result[Settings, String]) -> String =
+  match r {
+    Ok(s) -> "name=${s.name} retries=${s.retries}"
+    Err(m) -> "error: $m"
+  }
+
+# ---- handler one: the disk, through std ----
+
+## `with_fs_real` is installed once, around everything that touches a file.
+## Everything under it sees `Fs`; nothing under it had to be written for it.
+fn on_disk() -> Unit !Fs !io = {
+  match io.temp_dir("", "dawn-settings") {
+    Ok(dir) -> {
+      let _ = io.write_file("$dir/name", "orion\n")
+      let _ = io.write_file("$dir/retries", "3\n")
+      io.println("disk:    ${describe(read_settings(dir))}")
+      let _ = io.delete("$dir/name")
+      let _ = io.delete("$dir/retries")
+      let _ = io.delete(dir)
+      ()
+    }
+    Err(_e) -> io.println("disk:    error: no temporary directory")
+  }
+}
+
+# ---- handler two: a table, written here ----
+
+## A read-only file system that is a list of `(path, contents)`.
+##
+## Every operation of `Fs` needs an arm: a handler answers all of an effect or
+## none of it, so the ones this example never calls are here too, answering
+## the way an empty read-only disk would. That is the price, and it is paid
+## once per table rather than once per test.
+fn with_fs_table[T](files: List[(String, String)], body: fn() -> T !Fs) -> T = {
+  with handle Fs {
+    fs_is_dir(path) => is_dir_in(files, path)
+    fs_exists(path) => is_dir_in(files, path) || has_file(files, path)
+    fs_is_symlink(_path) => false
+    fs_read_file(path) =>
+      match lookup(files, path) {
+        Some(text) -> Ok(text)
+        None -> Err(missing(path))
+      }
+    fs_list_names(path) => Ok(children(files, path))
+    fs_read_bytes(path) => Err(text_only("read_bytes", path))
+    fs_write_file(path, _content) => Err(read_only("write_file", path))
+    fs_write_bytes(path, _content) => Err(read_only("write_bytes", path))
+    fs_mkdirs(path) => Err(read_only("mkdirs", path))
+    fs_delete(path) => Err(read_only("delete", path))
+    fs_rename(src, _dst) => Err(read_only("rename", src))
+    fs_temp_dir(parent, _prefix) => Err(read_only("temp_dir", parent))
+    fs_temp_file(parent, _prefix) => Err(read_only("temp_file", parent))
+    fs_copy_permissions(src, _dst) => Err(read_only("copy_permissions", src))
+  }
+  body()
+}
+
+fn missing(path: String) -> ForeignError =
+  ForeignError { kind: "table.no_such_file", message: "no file at $path", cause: None }
+
+fn read_only(op: String, path: String) -> ForeignError =
+  ForeignError { kind: "table.read_only", message: "$op: the table holds no writes ($path)", cause: None }
+
+fn text_only(op: String, path: String) -> ForeignError =
+  ForeignError { kind: "table.text_only", message: "$op: the table holds text only ($path)", cause: None }
+
+fn lookup(files: List[(String, String)], path: String) -> Option[String] = {
+  for entry in files {
+    let (p, text) = entry
+    if p == path { return Some(text) }
+  }
+  None
+}
+
+fn has_file(files: List[(String, String)], path: String) -> Bool =
+  match lookup(files, path) {
+    Some(_) -> true
+    None -> false
+  }
+
+## A directory is a path something is stored under. The table stores files;
+## the directories are what the paths imply.
+fn is_dir_in(files: List[(String, String)], path: String) -> Bool = {
+  for entry in files {
+    let (p, _text) = entry
+    if str.starts_with(p, "$path/") { return true }
+  }
+  false
+}
+
+fn children(files: List[(String, String)], dir: String) -> List[String] = {
+  var names: List[String] = []
+  for entry in files {
+    let (p, _text) = entry
+    match str.strip_prefix(p, "$dir/") {
+      Some(rest) -> if not str.contains(rest, "/") { names = names ++ [rest] }
+      None -> ()
+    }
+  }
+  names
+}
+
+fn fixture() -> List[(String, String)] =
+  [("/etc/app/name", "fixture\n"), ("/etc/app/retries", "7\n")]
+
+pub fn main() -> Unit !io = {
+  with_fs_real(() => on_disk())
+  io.println("table:   ${describe(with_fs_table(fixture(), () => read_settings("/etc/app")))}")
+  io.println("missing: ${describe(with_fs_table(fixture(), () => read_settings("/etc/nope")))}")
+}
+
+test "the reader under a table reads files that were never written" {
+  assert with_fs_table(fixture(), () => read_settings("/etc/app")) ==
+    Ok(Settings { name: "fixture", retries: 7 })
+}
+
+test "a directory the table does not imply is not there" {
+  assert with_fs_table(fixture(), () => read_settings("/etc/nope")) ==
+    Err("no settings directory at /etc/nope")
+}
+
+test "a file the table is missing comes back as this reader's own message" {
+  let half = [("/etc/app/name", "fixture\n")]
+  assert with_fs_table(half, () => read_settings("/etc/app")) ==
+    Err("cannot read /etc/app/retries")
+}
+
+test "contents the reader cannot parse are the reader's error, not the handler's" {
+  let junk = [("/etc/app/name", "fixture\n"), ("/etc/app/retries", "often\n")]
+  assert with_fs_table(junk, () => read_settings("/etc/app")) ==
+    Err("retries is not a number: often")
+}
+
+test "the table answers the rest of Fs too" {
+  with_fs_table(fixture(), () => {
+    assert io.exists("/etc/app/name")
+    assert not io.exists("/etc/app/timeout")
+    assert io.list_dir("/etc/app") == Ok(["name", "retries"])
+    assert not io.is_symlink("/etc/app/name")
+  })
+}
