@@ -425,13 +425,17 @@ SPEC_CONTRACTS = (
 
 SPEC_PATHS = {ROOT / "docs/spec.md", ROOT / "docs/spec.en.md"}
 
-# A line carrying this marker is a machine-readable list of builtin function
-# names claimed by the normative specs. The declaration mirror is already held
-# against the compiler's intrinsic table by builtin-decl-contract; checking the
-# marked prose against that mirror closes the other half, where prose can mint
-# a builtin that does not exist. Only lower-case identifier spans are function
-# names, so adjacent type names such as `Int` and `Float` stay ordinary prose.
+# This marker starts a machine-readable list of builtin function names in a
+# normative-spec paragraph. The list extends to the next blank line, so normal
+# Markdown wrapping cannot move names out of the check. The declaration mirror
+# is already held against the compiler's intrinsic table by
+# builtin-decl-contract; checking the marked prose against that mirror closes
+# the other half, where prose can mint a builtin that does not exist. Only
+# lower-case identifier spans are function names, so adjacent type names such
+# as `Int` and `Float` stay ordinary prose. Each spec marks both its complete
+# prelude builtin list and the focused math-conversion list.
 SPEC_BUILTIN_LIST_MARKER = "<!-- doc-check: builtin-list -->"
+SPEC_BUILTIN_LISTS_PER_SPEC = 2
 PUBLIC_BUILTIN_DECL = re.compile(r"(?m)^pub fn\s+([a-z][A-Za-z0-9_]*)\b")
 BUILTIN_DECL_PATH = ROOT / "selfhost/builtins.dawn"
 
@@ -1555,22 +1559,28 @@ def builtin_list_contract_problems(
         if text is None:
             bad.append(f"{rel}: cannot check builtin list; document missing")
             continue
-        marked = [line for line in text.splitlines()
-                  if SPEC_BUILTIN_LIST_MARKER in line]
-        if len(marked) != 1:
-            bad.append(f"{rel}: expected one {SPEC_BUILTIN_LIST_MARKER} line, "
-                       f"found {len(marked)}")
+        marker_count = text.count(SPEC_BUILTIN_LIST_MARKER)
+        if marker_count != SPEC_BUILTIN_LISTS_PER_SPEC:
+            bad.append(f"{rel}: expected {SPEC_BUILTIN_LISTS_PER_SPEC} "
+                       f"{SPEC_BUILTIN_LIST_MARKER} markers, found {marker_count}")
             continue
-        names = [name for name in inline_code_spans(marked[0])
-                 if re.fullmatch(r"[a-z][A-Za-z0-9_]*", name)]
-        if not names:
-            bad.append(f"{rel}: builtin-list marker names no builtin functions")
-            continue
-        unknown = sorted(set(names) - declared)
-        if unknown:
-            bad.append(f"{rel}: builtin-list names function(s) absent from "
-                       f"selfhost/builtins.dawn: {', '.join(unknown)}")
-        seen += len(names)
+        offset = 0
+        for marker_index in range(1, marker_count + 1):
+            marker_at = text.index(SPEC_BUILTIN_LIST_MARKER, offset)
+            start = marker_at + len(SPEC_BUILTIN_LIST_MARKER)
+            region = text[start:].split("\n\n", 1)[0]
+            offset = start
+            names = [name for name in inline_code_spans(region)
+                     if re.fullmatch(r"[a-z][A-Za-z0-9_]*", name)]
+            if not names:
+                bad.append(f"{rel}: builtin-list marker {marker_index} names no "
+                           "builtin functions")
+                continue
+            unknown = sorted(set(names) - declared)
+            if unknown:
+                bad.append(f"{rel}: builtin-list names function(s) absent from "
+                           f"selfhost/builtins.dawn: {', '.join(unknown)}")
+            seen += len(names)
     return bad, seen
 
 
@@ -1634,12 +1644,11 @@ def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[
         return ["spec contract self-test: an HTML comment falsely satisfied a clause"], 0
 
     false_builtin = dict(texts)
-    marked = next((line for line in false_builtin[zh].splitlines()
-                   if SPEC_BUILTIN_LIST_MARKER in line), None)
-    if marked is None or "`to_int`" not in marked:
+    if SPEC_BUILTIN_LIST_MARKER not in false_builtin[zh]:
         return ["spec contract self-test: builtin-list fixture is absent"], 0
     false_builtin[zh] = false_builtin[zh].replace(
-        marked, marked.replace("`to_int`", "`sqrt`"), 1)
+        SPEC_BUILTIN_LIST_MARKER,
+        SPEC_BUILTIN_LIST_MARKER + "\n`sqrt`、", 1)
     bad, _ = spec_contract_problems(false_builtin)
     if not any("builtin-list names function(s) absent" in problem for problem in bad):
         return ["spec contract self-test: a nonexistent builtin passed the prose mirror"], 0

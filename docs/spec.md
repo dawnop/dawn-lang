@@ -2834,8 +2834,9 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 由限定或选择性引入消歧。
 
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
-`println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的 `len`/`get`/`range`/
-`to_string`/`join`/`parse_*`/`panic`/`todo`/`expect`/`unwrap_or`/`cast`/
+`println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的
+<!-- doc-check: builtin-list --> `len`/`get`/`range`/`to_string`/`join`/`parse_int`/
+`parse_float`/`parse_int_radix`/`panic`/`todo`/`expect`/`unwrap_or`/`cast`/
 `catch_fault`/`catch_panic`/`bracket`/`args` 等一屏以内
 （全集见[标准库参考](https://dawn-lang.dawnop.com/zh/stdlib.html)，由 `dawn doc --stdlib` 生成）。
 
@@ -3029,7 +3030,8 @@ url/文件名安全字母表且
     （[`stdlib-impl-notes.md`](stdlib-impl-notes.md)）
 
 **数学内建。** 当前没有通用数学函数族，也没有宿主数学库包装。数字的内建表面限于
-`Int`/`Float` 算术运算符；内建转换函数是 `to_float`、`to_int`。<!-- doc-check: builtin-list -->
+`Int`/`Float` 算术运算符；内建转换函数是
+<!-- doc-check: builtin-list --> `to_float`、`to_int`。
 额外运算由纯 Dawn 源库提供，例如 `std/narrow` 用整数算法计算平方根，不依赖宿主数学库。
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
