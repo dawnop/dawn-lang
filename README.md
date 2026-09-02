@@ -365,7 +365,7 @@ written.
 
 ## Status
 
-Current toolchain 0.72.0, M0–M8 implemented. <!-- doc-check: version --> The lines of
+Current toolchain 0.73.0, M0–M8 implemented. <!-- doc-check: version --> The lines of
 work since then — the C backend and native bootstrap, Perceus, trait v2, effect
 handlers, package management, and the
 [cuTile device backend](docs/tile-backend-design.md) — are recorded in their own
