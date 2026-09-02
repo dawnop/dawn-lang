@@ -104,7 +104,7 @@ fn api_index(api: Json, lang: Lang) -> List[Row] = {
 ## the page, so the fragments cannot drift from the anchors: a heading counter
 ## that moved would move both at once. The URL mapper is the identity because
 ## nothing here reads the rendered html -- only the table of contents.
-fn doc_index(src: String, page: String, detail: String) -> List[Row] !Fs !io = {
+fn doc_index(src: String, page: String, detail: String) -> List[Row] !Fs = {
   let blocks =
     match parser.parse(must_read(src)) {
       Ok(bs) -> bs
@@ -115,7 +115,7 @@ fn doc_index(src: String, page: String, detail: String) -> List[Row] !Fs !io = {
 }
 
 ## The tutorial, one row per chapter page.
-fn tutorial_index(src: String, lang: Lang, detail: String) -> List[Row] !Fs !io = {
+fn tutorial_index(src: String, lang: Lang, detail: String) -> List[Row] !Fs = {
   var rows: List[Row] = []
   let titles = chapter_titles(src)
   for i in range(0, len(titles)) {
@@ -131,7 +131,7 @@ fn tutorial_index(src: String, lang: Lang, detail: String) -> List[Row] !Fs !io 
 ## The nav table is read rather than restated: the seven entries a reader can
 ## click in the header are seven pages the search has to be able to reach, and
 ## a nav item added without a row here would be a page the panel cannot find.
-fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !Fs !io = {
+fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !Fs = {
   var rows: List[Row] = []
   rows = rows ++ [Row {
     group: "examples",
@@ -212,7 +212,7 @@ fn row_json(r: Row) -> String =
     quoted(r.href)], ",") ++ "]"
 
 ## Every row of one language's index, in the order the file will carry them.
-pub fn index_rows(api: Json, lang: Lang) -> List[Row] !Fs !io = {
+pub fn index_rows(api: Json, lang: Lang) -> List[Row] !Fs = {
   let w = words(lang)
   let (spec_src, design_src, tut_src) = sources(lang)
   api_index(api, lang)
@@ -228,7 +228,7 @@ pub fn index_rows(api: Json, lang: Lang) -> List[Row] !Fs !io = {
 ## anyway: the asset is fetched by a wasm module built from a different source
 ## tree at a different time, and the day the two disagree the version is the
 ## only place the disagreement can be seen.
-pub fn search_index(api: Json, lang: Lang) -> String !Fs !io = {
+pub fn search_index(api: Json, lang: Lang) -> String !Fs = {
   let rows = index_rows(api, lang)
   "{\"v\":1,\"lang\":" ++ quoted(lang_code_of(lang))
     ++ ",\"items\":[" ++ join(list.map(rows, r => row_json(r)), ",") ++ "]}"
@@ -247,7 +247,7 @@ fn lang_code_of(lang: Lang) -> String =
 ## The parsed `dawn doc --stdlib` document, or a stop. Read here rather than
 ## passed down from gen/pages, so that the asset and the page it indexes read
 ## the same file the same way.
-pub fn read_api() -> Json !Fs !io = {
+pub fn read_api() -> Json !Fs = {
   let text =
     match io.read_file("site/build/stdlib.json") {
       Ok(t) -> t
