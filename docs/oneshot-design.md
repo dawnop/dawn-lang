@@ -518,6 +518,14 @@ native 永久帧税，换回 §6.2 那条断言。裁「不做」是完全成立
 > [runtime-intrinsics-design.md](runtime-intrinsics-design.md) 的操作可枚举化），
 > **排在本项目之后**。②至⑥的形状裁决仍开放，落齐之前不动工。
 
+> **后继项目的族裁决（2026-09-03，Proc 立项同批）：`Net` 不立项，`Upstream` 不升进 std。**
+> 树内今天的出站请求只有 `compiler-plan/src/pkgfetch.http_get` 一处，而它 spawn `curl`，
+> 于是它想要的断言全是 `Proc` 的（断言的是 curl 的 argv，不是 URL 与 header）。
+> **重开判据两条，须同时成立**：一、树内出现第二个出站客户（playground 回源、site 抓外链、
+> LSP 查索引之类），也就是这一族第一次有超过一个消费者；二、native 侧的 TLS 有答案，
+> 要么链一个 TLS 栈，要么接受「native 不能联网」并说明包管理器怎么办（native 驱动
+> `nmain` 正是包管理器要用的那个）。写死是因为不写死，这个问题每半年会被重新问一次。
+
 ② **`io` 永不承载一次性恢复的 handler。** 这条裁决直接决定传染面是 1.45% 还是 21.4%
 （再加上 664 个 `!io`），也决定 `main` 与整个 `packages/web` 是否留在直接风格。**建议裁「永不」。**
 

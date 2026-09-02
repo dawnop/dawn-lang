@@ -13,8 +13,8 @@
 #
 # Directories are implied by the paths in the table, so `is_dir`, `exists` and
 # `list_names` answer what the real file system would answer for the same tree.
-# Paths are normalized against one working directory captured at construction:
-# nothing below reads the host, not even for the current directory.
+# Paths are normalized against the base directory the caller names at
+# construction: nothing here reads the host, not even for the current directory.
 
 use std/io
 use std/io.{Fs, Deleted, NotFound}
@@ -197,10 +197,20 @@ fn mem_present(st: MemFs, p: String) -> Bool = {
   map.has(st.files, k) || is_dir_key(st, k)
 }
 
-## An empty tree. The working directory is read once, here, so that every path
-## the handler is later handed can be normalized without touching the host.
-pub fn mem_empty() -> MemFs !io =
-  MemFs { base: io.cwd(), files: map.empty(), dirs: map.empty(), seq: 0 }
+## The base a table uses when its caller has no reason to name one of its own.
+## Absolute, so it is a base at all, and a directory no host has, so a path
+## built from it cannot be confused with one that names a real file.
+pub const MEM_BASE: String = "/dawn-memfs"
+
+## An empty tree whose relative paths resolve against `base`.
+##
+## The base is a parameter rather than `io.cwd()`, which is what it used to be:
+## reading it made this function `!io`, and with it every test built on the
+## table, for a value not one of them depended on. What the base has to be is
+## the same string for the whole life of one table, which a parameter says and
+## a host query only happened to provide.
+pub fn mem_empty(base: String) -> MemFs =
+  MemFs { base: base, files: map.empty(), dirs: map.empty(), seq: 0 }
 
 ## `st` with one more file in it; the directories above it come along.
 pub fn mem_put(st: MemFs, path: String, content: String) -> MemFs = {
@@ -216,18 +226,27 @@ pub fn mem_content(st: MemFs, path: String) -> Option[String] =
 ## implied by these.
 pub fn mem_files(st: MemFs) -> List[String] = sort(map.keys(st.files))
 
-## An empty tree with the bundled std mounted where the default `--std` spells
-## it, so `load_std("std")` loads a real standard library out of the table.
+## Where `mem_std` mounts the bundled std in a table based at `base`.
+##
+## A test spells its `--std` with this rather than with the bare `std` the
+## default uses: a relative directory is resolved against the process's working
+## directory, which is a host call per std file and a base the table does not
+## share, while this one is a path the table already holds.
+pub fn mem_std_dir(base: String) -> String = base ++ "/std"
+
+## An empty tree rooted at `base` with the bundled std mounted at
+## `mem_std_dir(base)`, so `load_std(mem_std_dir(base))` loads a real standard
+## library out of the table.
 ##
 ## The text is the embedded copy (`embed/stdsrc`), which `driver/stdlib`'s own
 ## round-trip test holds equal to `std/` on disk: what a test reads here is
 ## what the directory would have answered with.
-pub fn mem_std() -> MemFs !io = {
+pub fn mem_std(base: String) -> MemFs = {
   let index = match stdsrc.source("modules.txt") {
     Some(t) -> t
     None -> panic("the embedded std carries no modules.txt")
   }
-  var st = mem_put(mem_empty(), "std/modules.txt", index)
+  var st = mem_put(mem_empty(base), "std/modules.txt", index)
   st = mem_put(st, "std/VERSION", VERSION ++ "\n")
   for line in str.split(index, "\n") {
     let cut = match str.index_of(line, "#") {
@@ -317,7 +336,7 @@ fn ok(r: Result[Unit, ForeignError]) -> Bool =
   }
 
 test "the table answers the operations the way the tree implies" {
-  let (_, table) = with_fs_mem(mem_empty(), () => {
+  let (_, table) = with_fs_mem(mem_empty(MEM_BASE), () => {
     assert ok(io.mkdirs("/t/sub"))
     assert ok(io.write_file("/t/sub/a.txt", "alpha"))
     assert ok(io.write_file("/t/b.txt", "beta"))
@@ -367,9 +386,12 @@ test "the table answers the operations the way the tree implies" {
 }
 
 test "the mounted std is the embedded std, and nothing else is there" {
-  let (_, table) = with_fs_mem(mem_std(), () => {
+  let (_, table) = with_fs_mem(mem_std(MEM_BASE), () => {
     assert io.is_dir("std")
+    # and the mount point `mem_std_dir` names is the one the text is at
+    assert io.is_dir(mem_std_dir(MEM_BASE))
     assert io.read_file("std/VERSION") == Ok(VERSION ++ "\n")
+    assert io.read_file(mem_std_dir(MEM_BASE) ++ "/VERSION") == Ok(VERSION ++ "\n")
     assert io.read_file("std/io.dawn") == Ok(stdsrc.source("io.dawn").expect("embedded io"))
     # nothing above the mount point, and no host tree behind it
     assert not io.exists("/usr")

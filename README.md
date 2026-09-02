@@ -110,8 +110,7 @@ signature that stays silent about it is a compile error. (`scripts/doc-check.py`
 effect-inference probe pins both branches: an explicitly pure signature that calls
 `println` is rejected, an unannotated one infers `!io`.)
 
-There is a second axis, and nothing in this repository uses it yet: **named effects you
-declare yourself**. `effect` declares the operations, `with handle` answers them on the
+There is a second axis: **named effects you declare yourself**. `effect` declares the operations, `with handle` answers them on the
 spot, the label propagates along signatures and is subtracted at exactly one syntactic
 node, the handler.
 
@@ -135,11 +134,14 @@ multi-shot and non-tail resumption are not supported. It is specified, implement
 both backends and held by the differential corpus, and it has
 **its first internal consumer**: `std/io` declares `Fs`, the file system as fourteen
 operations, with `with_fs_real` as the handler production installs, so a test can answer
-a file read from a table. The second is `std/gpu`, which declares `Gpu`, the host side of a
+a file read from a table. The same module declares `Proc`, running another program as one
+operation, with `with_proc_real` for production, so a test can hold a command line without
+starting anything. The third is `std/gpu`, which declares `Gpu`, the host side of a
 device as six operations, with a pure fake device as the handler a test installs, so a
-`!Gpu` program runs on a machine with no GPU. Those are the two declarations under `std/`
-and `selfhost/src/`; `doc-check.py` keeps the list (`NAMED_EFFECT_EXPECTED`) and reds this paragraph when a
-declaration appears outside it or this one goes away. So read it as a working feature
+`!Gpu` program runs on a machine with no GPU. Those are the three declarations, in the two
+files under `std/` and `selfhost/src/` that carry any; `doc-check.py` keeps the list
+(`NAMED_EFFECT_EXPECTED`) and reds this paragraph when a declaration appears outside it or
+one of them goes away. So read it as a working feature
 that has carried one real seam and not yet a real program, rather than as the thing that
 makes Dawn different. ([docs/spec.md](docs/spec.md) §6.5; differential corpus
 `scripts/spike-native/effect_handler.dawn`.)
