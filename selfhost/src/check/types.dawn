@@ -3207,8 +3207,9 @@ pub fn builtins() -> Map[String, Sig] = {
     # shape both backends can name, copied double for double) or as `Bytes`
     # for a packed format (bf16: std/gpu packs and unpacks, the runtime copies
     # bytes and knows no format); the handle table and the List<->Array walk
-    # stay std's. `gpu_launch_host` runs `kernel` from `module` over `grid`
-    # tile blocks with `args` as its device-pointer parameters in order.
+    # stay std's. `gpu_launch_host` runs `kernel` from `module` over a
+    # `gx` by `gy` by `gz` grid of tile blocks with `args` as its
+    # device-pointer parameters in order.
     # `gpu_close_host` releases the context and the library the first
     # operation opened; std calls it when the handler's body has returned.
     eff1(
@@ -3237,8 +3238,8 @@ pub fn builtins() -> Map[String, Sig] = {
       EIo
     ),
     eff1(
-      bsig("gpu_launch_host", [TyInt, TyString, TyInt, TyArray(TyInt)],
-        ["module", "kernel", "grid", "args"], result_ty(TyUnit, foreign_error_ty())),
+      bsig("gpu_launch_host", [TyInt, TyString, TyInt, TyInt, TyInt, TyArray(TyInt)],
+        ["module", "kernel", "gx", "gy", "gz", "args"], result_ty(TyUnit, foreign_error_ty())),
       EIo
     ),
     eff1(bsig("gpu_free_host", [TyInt], ["devptr"], result_ty(TyUnit, foreign_error_ty())), EIo),

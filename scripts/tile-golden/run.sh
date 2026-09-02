@@ -391,8 +391,8 @@ echo "PASS  mutant: drop-store-token (vadd.mlir red on both backends; exactly th
 #    trace_kernel refuses it: non-zero exit, the refusal on stderr, nothing
 #    rendered. vadd, whose parameters are f64, is untouched on both backends.
 mutant_project load-dtype-f64 dev.dawn \
-  't_load(position(p), param_dtype(p), i, n, none, none)' \
-  't_load(position(p), "f64", i, n, none, none)'
+  't_load(position(p), param_dtype(p), i, shape, strides, none, none)' \
+  't_load(position(p), "f64", i, shape, strides, none, none)'
 mutant_run load-dtype-f64 vadd_f32
 mutant_run load-dtype-f64 vadd
 refusal='tileir: kernel `vadd_f32`: parameter 0 is declared f32, but a load reads it as f64'
@@ -528,18 +528,18 @@ mutant_project loop-token-not-carried prog.dawn \
   '        ()
 '
 refused_mutant_checks loop-token-not-carried sum \
-  'tileir: `store token` refers to handle 13, which a loop body defined and which is not visible after the loop'
+  'tileir: `store token` refers to handle 17, which a loop body defined and which is not visible after the loop'
 
 # 7. The handler pops the region stack the wrong way round: the operations
 #    the loop body issued stay in the enclosing region and the ones issued
 #    before the loop become the body. sum's first operation is then the
-#    body's load, whose token is the loop's carried token, which nothing
-#    has defined yet.
+#    body's own index arithmetic, over the induction variable, which
+#    nothing outside the loop has defined.
 mutant_project region-stack-pop prog.dawn \
   'let (outer, inner) = (saved, ops)' \
   'let (outer, inner) = (ops, saved)'
 refused_mutant_checks region-stack-pop sum \
-  'tileir: `load token` refers to handle 11, which no earlier operation defined'
+  'tileir: `index mul lhs` refers to handle 11, which no earlier operation defined'
 
 # 8. The writer forgets the reader's rule that a block's value indices roll
 #    back before the loop's own results are numbered. sum's results take the

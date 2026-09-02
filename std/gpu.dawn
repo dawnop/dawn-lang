@@ -146,14 +146,15 @@ pub fn size[D](t: Tensor[D]) -> Int = {
 ## Every operation answers `Result`, with an `Err` for what the device
 ## refused. `gpu_alloc` answers a fresh handle for `len` elements of the named
 ## format; `gpu_upload` and `gpu_download` move a whole buffer; `gpu_launch`
-## runs the kernel of that name over a one-dimensional grid with the given
-## buffers as its arguments; `gpu_sync` waits for every launch so far.
+## runs the kernel of that name over a `gx` by `gy` by `gz` grid of tile
+## blocks with the given buffers as its arguments; `gpu_sync` waits for
+## every launch so far.
 ## Handles are opaque integers a program never invents.
 pub effect Gpu {
   fn gpu_alloc(dtype: String, len: Int) -> Result[Int, ForeignError]
   fn gpu_upload(handle: Int, data: List[Float]) -> Result[Unit, ForeignError]
   fn gpu_download(handle: Int) -> Result[List[Float], ForeignError]
-  fn gpu_launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, ForeignError]
+  fn gpu_launch(kernel: String, gx: Int, gy: Int, gz: Int, args: List[Int]) -> Result[Unit, ForeignError]
   fn gpu_free(handle: Int) -> Result[Unit, ForeignError]
   fn gpu_sync() -> Result[Unit, ForeignError]
 }
@@ -197,16 +198,24 @@ pub fn download[D](t: Tensor[D]) -> Result[List[Float], ForeignError] !Gpu =
 ## Release `t`. Its handle answers nothing afterwards.
 pub fn free[D](t: Tensor[D]) -> Result[Unit, ForeignError] !Gpu = gpu_free(handle_of(t))
 
-## Run the kernel named `kernel` over `grid` blocks with `args` as its
-## arguments, in order. `Err(kind: "gpu.bad_grid")` for a `grid` below one,
-## before any handler is asked; a name no handler knows is the handler's
-## refusal (`gpu.no_kernel` from the fake device).
-pub fn launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, ForeignError] !Gpu =
-  if grid < 1 {
-    Err(refuse("gpu.bad_grid", "gpu.launch: a grid has at least one block, got ${grid}"))
+## Run the kernel named `kernel` over a `gx` by `gy` by `gz` grid of tile
+## blocks with `args` as its arguments, in order. A kernel reads the three
+## axes with `block_id(0)` / `block_id(1)` / `block_id(2)`.
+## `Err(kind: "gpu.bad_grid")` for an axis below one, before any handler is
+## asked; a name no handler knows is the handler's refusal
+## (`gpu.no_kernel` from the fake device).
+pub fn launch3(kernel: String, gx: Int, gy: Int, gz: Int, args: List[Int]) -> Result[Unit, ForeignError] !Gpu =
+  if gx < 1 || gy < 1 || gz < 1 {
+    Err(refuse("gpu.bad_grid",
+      "gpu.launch: a grid has at least one block along each axis, got (${gx}, ${gy}, ${gz})"))
   } else {
-    gpu_launch(kernel, grid, args)
+    gpu_launch(kernel, gx, gy, gz, args)
   }
+
+## `launch3` over a one-dimensional grid: `gy` and `gz` are 1, so a kernel
+## that only reads `block_id(0)` sees the grid it always did.
+pub fn launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, ForeignError] !Gpu =
+  launch3(kernel, grid, 1, 1, args)
 
 ## Wait until every launch so far has finished. A launch returning is not the
 ## kernel having run; a download after `sync` sees the kernel's writes.
@@ -628,9 +637,9 @@ fn bad_arity(who: String, kernel: String, wanted: Int, got: Int) -> ForeignError
 ## `kernels`, hands the reference implementation the format and the contents
 ## of every argument buffer in order, and stores what it returns as the
 ## contents of the LAST argument. Before the body is called, its entry's
-## arity must equal the number of buffers (`gpu.bad_arity` otherwise); `grid`
-## is not consulted, a reference implementation computes the whole vector at
-## once; an unknown name answers `gpu.no_kernel`. A buffer holds what memory
+## arity must equal the number of buffers (`gpu.bad_arity` otherwise); the
+## grid is not consulted, a reference implementation computes the whole
+## buffer at once; an unknown name answers `gpu.no_kernel`. A buffer holds what memory
 ## of its format would: what
 ## `gpu_upload` stores and what a launch writes is rounded to the buffer's
 ## format (`round_to`), which for `f64` is the data as given. The length
@@ -673,7 +682,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, fn(List[String], List[List[Fl
       }
       None -> Err(no_such_buffer("fake device", handle))
     }
-    gpu_launch(kernel, _grid, args) => match map.get(kernels, kernel) {
+    gpu_launch(kernel, _gx, _gy, _gz, args) => match map.get(kernels, kernel) {
       Some(entry) -> {
         let (arity, f) = entry
         if len(args) == 0 {
@@ -767,8 +776,9 @@ fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[Int]) -> Arra
 ## touches the device: the cubin is handed to the driver the first time its
 ## kernel is launched and the module handle is kept for the rest of the
 ## installation, so a program that never launches never loads a module. The
-## grid counts tile blocks; the intrinsic launches with block dims (1, 1, 1)
-## and no shared memory, which is how a Tile IR kernel is launched.
+## three grid axes count tile blocks; the intrinsic launches with block dims
+## (1, 1, 1) and no shared memory, which is how a Tile IR kernel is
+## launched.
 ##
 ## The seam is below the error surface: everything the driver refuses
 ## arrives as the `ForeignError` the runtime built from the CUresult, with
@@ -818,7 +828,7 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
       }
       None -> Err(no_such_buffer("real device", handle))
     }
-    gpu_launch(kernel, grid, args) => match map.get(kernels, kernel) {
+    gpu_launch(kernel, gx, gy, gz, args) => match map.get(kernels, kernel) {
       Some(cubin) ->
         if len(args) == 0 {
           Err(no_arguments("real device", kernel))
@@ -835,7 +845,7 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
               match loaded {
                 Ok(m) -> {
                   mods = map.insert(mods, kernel, m)
-                  gpu_launch_host(m, kernel, grid, device_pointers(table, args))
+                  gpu_launch_host(m, kernel, gx, gy, gz, device_pointers(table, args))
                 }
                 Err(e) -> Err(e)
               }
@@ -1046,7 +1056,7 @@ test "upload of a vector of the wrong length is refused above the effect" {
       gpu_alloc(_dtype, _len) => Ok(1)
       gpu_upload(_handle, _data) => Ok(())
       gpu_download(_handle) => Ok([])
-      gpu_launch(_kernel, _grid, _args) => Ok(())
+      gpu_launch(_kernel, _gx, _gy, _gz, _args) => Ok(())
       gpu_free(_handle) => Ok(())
       gpu_sync() => Ok(())
     }

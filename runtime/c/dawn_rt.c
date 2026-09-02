@@ -4785,14 +4785,15 @@ dawn_adt *dawn_gpu_download_bytes_host(int64_t devptr, int64_t nbytes) {
   return dawn_ok(dawn_bytes_of(buf, nbytes));
 }
 
-dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t grid,
-                               const dawn_array *args) {
+dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t gx, int64_t gy,
+                               int64_t gz, const dawn_array *args) {
   dawn_adt *e = dawn_gpu_open();
   if (e != NULL) return e;
-  /* gridDimX is an unsigned int and the driver's own ceiling is 2^31 - 1: a
-   * count that does not fit is refused, never truncated into a smaller grid */
-  if (grid < 0 || grid > 0x7fffffff) {
-    return dawn_gpu_refuse("gpu.bad_grid", "gpu_launch_host: grid does not fit a launch dimension");
+  /* each grid dimension is an unsigned int and the driver's own ceiling is
+   * 2^31 - 1: a count that does not fit is refused, never truncated into a
+   * smaller grid */
+  if (gx < 0 || gx > 0x7fffffff || gy < 0 || gy > 0x7fffffff || gz < 0 || gz > 0x7fffffff) {
+    return dawn_gpu_refuse("gpu.bad_grid", "gpu_launch_host: a grid dimension does not fit a launch dimension");
   }
   if (dawn_has_nul(kernel)) {
     return dawn_gpu_refuse("gpu.bad_kernel_name", "gpu_launch_host: kernel name contains NUL");
@@ -4812,7 +4813,8 @@ dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t grid,
     ptrs[i] = (dawn_cu_deviceptr)((dawn_box *)dawn_array_get(args, i))->val.i; /* borrowed */
     params[i] = &ptrs[i];
   }
-  r = dawn_gpu.launch_kernel(fn, (unsigned int)grid, 1, 1, 1, 1, 1, 0, NULL, params, NULL);
+  r = dawn_gpu.launch_kernel(fn, (unsigned int)gx, (unsigned int)gy, (unsigned int)gz, 1, 1, 1, 0,
+                             NULL, params, NULL);
   free(params);
   free(ptrs);
   if (r != 0) return dawn_gpu_cu_error("cuLaunchKernel", r);
@@ -4881,11 +4883,13 @@ dawn_adt *dawn_gpu_download_bytes_host(int64_t devptr, int64_t nbytes) {
   (void)nbytes;
   return dawn_gpu_refuse_wasi("gpu_download_bytes_host");
 }
-dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t grid,
-                               const dawn_array *args) {
+dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t gx, int64_t gy,
+                               int64_t gz, const dawn_array *args) {
   (void)module;
   (void)kernel;
-  (void)grid;
+  (void)gx;
+  (void)gy;
+  (void)gz;
   (void)args;
   return dawn_gpu_refuse_wasi("gpu_launch_host");
 }
