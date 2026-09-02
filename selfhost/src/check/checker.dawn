@@ -1619,6 +1619,13 @@ pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRe
       }
     _ -> ()
   }
+  # A tuple has no head, so no source impl can be written for it. Its order is
+  # nevertheless the order of its elements (spec 3.5), just like a derived
+  # record's; keep the operator path on the same witness rule as `cmp` below.
+  match t {
+    TyTuple(es) -> return ord_tuple_witness(cx, t, es, lo, hi, "comparison")
+    _ -> ()
+  }
   match t {
     TyVar(_, vid) ->
       match map.get(cx.frame.dict_syms, (vid, ORD_ID)) {
@@ -4126,6 +4133,16 @@ pub fn resolve_witness(
                 return (structural_gap_err(cx, trait_id, t, bad, lo, hi), no_wit())
             }
           }
+          # Ord is not a structural default in general: an ADT still needs an
+          # impl or `derive Ord`. A tuple is headless, though, and its order is
+          # the lexicographic order of its elements, so the compiler has to
+          # supply the witness nobody can write in source.
+          if trait_id == ORD_ID {
+            match t {
+              TyTuple(es) -> return ord_tuple_witness(cx, t, es, lo, hi, requirer)
+              _ -> ()
+            }
+          }
           # Show has no structural default -- an ADT without `derive Show` is
           # not printable, and saying otherwise is how the flag became three
           # things. A tuple is the exception, and not a special case so much as
@@ -4163,6 +4180,37 @@ pub fn resolve_witness(
           (cerr_h(cx, "no impl of `" ++ tr.name ++ "` for `" ++ ts ++ "`", lo, hi, hint), no_wit())
         }
       }
+  }
+}
+
+## `Ord[(A, B)]`: every element has to be orderable. Ground tuples collapse
+## directly to lowering's lexicographic relation; a tuple containing a rigid
+## variable carries each element witness so a generic caller can build the
+## dictionary. This is the ordering twin of `show_tuple_witness`.
+fn ord_tuple_witness(
+  cx: Cx,
+  t: Ty,
+  es: List[Ty],
+  lo: Int,
+  hi: Int,
+  requirer: String
+) -> (Cx, Option[WitRef]) = {
+  var cx1 = cx
+  var ws: List[WitRef] = []
+  var ok = true
+  for e in es {
+    let (cx2, w) = resolve_witness(cx1, ORD_ID, e, lo, hi, requirer)
+    cx1 = cx2
+    match w {
+      Some(wr) -> { ws = ws ++ [wr] }
+      None -> { ok = false }
+    }
+  }
+  if not ok { return (cx1, no_wit()) }
+  if is_ground(t) {
+    (cx1, Some(WConcrete(ORD_ID, t)))
+  } else {
+    (capture_wits(cx1, ws), Some(WApply(ORD_ID, t, ws)))
   }
 }
 
@@ -4357,6 +4405,15 @@ test "ctor values and witnesses" {
   assert cx4.diags[0].msg == "no impl of `Ord` for `Bool`"
   # Ord over a non-ADT gets the ordering-specific hint (the Kotlin implHint order)
   assert str.contains(cx4.diags[0].hint, "Float has no total order")
+  # A ground tuple gets the compiler's lexicographic witness, but every part
+  # must still provide Ord -- Bool cannot hide inside the structural rule.
+  let pair = TyTuple([TyInt, TyString])
+  let (cx4a, ok4a) = resolve_witness(cx, ORD_ID, pair, 0, 4, "`sort`")
+  assert len(cx4a.diags) == 0
+  assert ok4a == Some(WConcrete(ORD_ID, pair))
+  let (cx4b, ok4b) = resolve_witness(cx, ORD_ID, TyTuple([TyInt, TyBool]), 0, 4, "`sort`")
+  assert ok4b == None
+  assert cx4b.diags[0].msg == "no impl of `Ord` for `Bool`"
   # Eq over a type with no impl is the structural default, and it is the same
   # kind of witness as one an impl supplies -- the table, not the witness,
   # records which of the two it was
@@ -4430,6 +4487,20 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
   let (cx5, w5) = resolve_witness(bound, EQ_ID, opt_ty(TyInt), 0, 4, "`f`")
   assert len(cx5.diags) == 0
   assert w5 == Some(WConcrete(EQ_ID, opt_ty(TyInt)))
+  # Tuple Ord uses the same applied-witness shape. Both the generic builtin
+  # route (`cmp`) and the operator route have to return it, or one of the two
+  # entry points loses the caller's Ord[T] dictionary.
+  let ord_dicts = map.insert(cx.frame.dict_syms, (900, ORD_ID), 78)
+  let ord_bound = Cx { ..cx, frame: Frame { ..cx.frame, dict_syms: ord_dicts } }
+  let pair = TyTuple([TyInt, tv])
+  let applied = Some(WApply(ORD_ID, pair,
+    [WConcrete(ORD_ID, TyInt), WForward(78)]))
+  let (cx6, w6) = resolve_witness(ord_bound, ORD_ID, pair, 0, 4, "`cmp`")
+  assert len(cx6.diags) == 0
+  assert w6 == applied
+  let (cx7, w7) = resolve_ord_witness(ord_bound, pair, 0, 4)
+  assert len(cx7.diags) == 0
+  assert w7 == applied
 }
 
 # ---- the recursive expression checker (pass 5 core) ----
