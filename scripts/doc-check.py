@@ -1768,10 +1768,10 @@ pub fn main() -> Unit !io = infers_io()
 # The README and the front page both say, in both languages, who the
 # named-effect tier's internal consumers are. For a long time the answer was
 # "nobody", and that is exactly the shape of sentence that stops being true
-# without anybody noticing; today the answer is a list of one, `std/io`, which
-# declares `Fs`, and a list is the same shape of sentence twice over: a second
-# declaration can appear without the documents hearing of it, and the first
-# can disappear the same way.
+# without anybody noticing; today the answer is a list, `std/io` with `Fs` and
+# `Proc` and `std/gpu` with `Gpu`, and a list is the same shape of sentence
+# several times over: another declaration can appear without the documents
+# hearing of it, and any of these can disappear the same way.
 #
 # So the list is held from both sides, at file granularity, the way
 # builtin-decl-mirror and opaque-twin hold theirs. NAMED_EFFECT_EXPECTED names
@@ -1790,14 +1790,31 @@ NAMED_EFFECT_ROOTS = ("std", "selfhost/src")
 NAMED_EFFECT_DECL = re.compile(r"(?m)^(?:pub\s+)?effect\s+[A-Za-z_]")
 NAMED_EFFECT_EXPECTED = ("std/gpu.dawn", "std/io.dawn")
 NAMED_EFFECT_STATUS = (
-    ("README.md", "its first internal consumer"),
-    ("README.zh-CN.md", "第一个内部使用者"),
-    ("site/pages/home.md", "its first internal consumer"),
-    ("site/pages/home.zh.md", "第一个内部使用者"),
+    ("README.md", "the tier's internal consumers are in this repository"),
+    ("README.zh-CN.md", "内部使用者就在本仓"),
+    ("site/pages/home.md", "the tier's internal consumers are in this repository"),
+    ("site/pages/home.zh.md", "内部使用者就在本仓"),
 )
-# The sentence the documents used to carry. Half an edit leaves both in one
-# paragraph, and the new phrase alone would pass it.
-NAMED_EFFECT_STALE = ("no internal consumer", "没有内部使用者")
+# Sentences the documents used to carry, each with what it was true about.
+# Half an edit leaves the old phrase in the paragraph beside the new one, and
+# the new phrase alone would pass the check below; so every retired wording
+# stays listed here rather than being deleted along with the prose.
+#
+# The list is not only about the consumer count. A paragraph this narrow goes
+# stale in whatever direction the language moved, so a claim retired for any
+# reason is registered here: the resumption sentence was retired by control
+# arms, not by a new declaration.
+NAMED_EFFECT_STALE = (
+    ("no internal consumer", "the tier had no consumer at all"),
+    ("没有内部使用者", "the tier had no consumer at all"),
+    ("its first internal consumer", "std/io was the only declarer"),
+    ("第一个内部使用者", "std/io was the only declarer"),
+    ("not yet a real program", "no program ran on the tier"),
+    ("还没扛过一个真实程序", "no program ran on the tier"),
+    ("multi-shot and non-tail resumption are not supported",
+     "every arm was tail-resumptive"),
+    ("不支持多次恢复与非尾恢复", "every arm was tail-resumptive"),
+)
 
 
 def named_effect_users(sources: dict[str, str]) -> list[str]:
@@ -1835,11 +1852,13 @@ def named_effect_status_problems(sources: dict[str, str],
             bad.append(f"{rel}: registered for the named-effect status claim, "
                        f"but does not exist")
             continue
-        stale = [old for old in NAMED_EFFECT_STALE if old in text]
+        stale = [(old, why) for old, why in NAMED_EFFECT_STALE if old in text]
         if stale:
-            bad.append(f"{rel}: still says the named-effect tier has no internal "
-                       f"consumer ({stale[0]!r}), but {', '.join(sorted(users))} "
-                       f"declares one. The tier has been adopted; say so.")
+            phrase, why = stale[0]
+            bad.append(f"{rel}: still says {phrase!r}, which was true when "
+                       f"{why}. It is not true today; the paragraph the four "
+                       f"outward documents carry has to be rewritten in all "
+                       f"four, not half-edited.")
         elif fragment not in text:
             bad.append(f"{rel}: {', '.join(expected)} declares the named-effect "
                        f"tier's internal consumer, so this document has to say so; "
@@ -1913,21 +1932,42 @@ def check_named_effect_status_selftest() -> tuple[list[str], int]:
         return ["named-effect status self-test: a listed file that does not exist "
                 "stayed green"], 0
 
-    # And the documents: dropping the sentence, or leaving the old one in.
-    silent = dict(docs)
-    silent["README.md"] = silent["README.md"].replace(
-        "its first internal consumer", "a consumer somewhere", 1)
-    bad, _ = named_effect_status_problems(sources, silent)
-    if not any("has to say so" in problem for problem in bad):
-        return ["named-effect status self-test: dropping the claim from README.md "
-                "stayed green"], 0
-    regressed = dict(docs)
-    regressed["README.md"] = regressed["README.md"] + "\nIt has no internal consumer.\n"
-    bad, _ = named_effect_status_problems(sources, regressed)
-    if not any("still says" in problem for problem in bad):
-        return ["named-effect status self-test: README.md carrying the retired "
-                "sentence beside the new one stayed green"], 0
-    return [], 7
+    # And the documents. Four copies of one paragraph is four chances to edit
+    # three of them, so each copy is dropped in turn rather than only the
+    # README's: a control that names one file measures one file.
+    for rel, fragment in NAMED_EFFECT_STATUS:
+        silent = dict(docs)
+        silent[rel] = silent[rel].replace(fragment, "a consumer somewhere", 1)
+        bad, _ = named_effect_status_problems(sources, silent)
+        if not any(problem.startswith(f"{rel}: ") and "has to say so" in problem
+                   for problem in bad):
+            return ["named-effect status self-test: dropping the claim from "
+                    f"{rel} stayed green"], 0
+
+    # A retired wording reappearing is the other half, and it is the half a
+    # rewrite actually risks: the phrases below were all true once, so a
+    # revert, a bad merge or a copy from an older paragraph puts one back
+    # while the new sentence stays in place and satisfies the fragment above.
+    # Each is planted in each copy, because the stale list is shared and a
+    # phrase that only reddened README.md would leave the other three open.
+    for phrase, _why in NAMED_EFFECT_STALE:
+        for rel, _fragment in NAMED_EFFECT_STATUS:
+            regressed = dict(docs)
+            regressed[rel] = regressed[rel] + f"\n{phrase}\n"
+            bad, _ = named_effect_status_problems(sources, regressed)
+            if not any(problem.startswith(f"{rel}: still says") for problem in bad):
+                return ["named-effect status self-test: "
+                        f"{rel} carrying the retired wording {phrase!r} beside "
+                        "the new one stayed green"], 0
+
+    # Positive control for the two loops above: the real documents, unedited,
+    # are green. Without it a `named_effect_status_problems` that reddened on
+    # everything would pass every control in this function.
+    bad, _ = named_effect_status_problems(sources, docs)
+    if bad:
+        return ["named-effect status self-test: the unedited documents went "
+                f"red: {bad[0]}"], 0
+    return [], 5 + len(NAMED_EFFECT_STATUS) * (1 + len(NAMED_EFFECT_STALE)) + 1
 
 
 REPOSITORY_POLICY_FILES = (
