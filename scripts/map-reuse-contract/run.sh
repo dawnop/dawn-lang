@@ -43,9 +43,12 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/map-reuse-contract"
 cc_bin="${CC:-cc}"
 
-# in-place/(in-place+copied), in percent. The original direct-hamt assertion
-# keeps its measured cliff; the record-spread leg has its own post-fix band.
+# Each rate keeps its own measured band. child_steal_taken's direct-leg
+# baselines are clean 682,352/682,352 stolen, get-hamt-child-again 0/0, and
+# borrow-hamt-assoc-again 0/682,352; 95% preserves the clean 100% result while
+# both mutants stay red, including the zero-call case that has no rate.
 hamt_rate_budget=95
+steal_rate_budget=95
 record_rate_budget=95
 
 work="$(mktemp -d)"
@@ -116,10 +119,10 @@ EOF
   steal_total=$((stolen + steal_dup))
   steal_pct=$((stolen * 100 / (steal_total == 0 ? 1 : steal_total)))
   if [ "$steal_total" -gt 0 ] &&
-      [ "$((stolen * 100))" -ge "$((steal_total * hamt_rate_budget))" ]; then
+      [ "$((stolen * 100))" -ge "$((steal_total * steal_rate_budget))" ]; then
     echo "     child_steal_taken  ok    ${stolen}/${steal_total} taken (${steal_pct}%)"
   else
-    echo "     child_steal_taken  FAIL  ${stolen}/${steal_total} taken (${steal_pct}%, budget ${hamt_rate_budget}%)"
+    echo "     child_steal_taken  FAIL  ${stolen}/${steal_total} taken (${steal_pct}%, budget ${steal_rate_budget}%)"
     [ -z "$label" ] || printf 'red\t%s\t%s\n' "$label" child_steal_taken >> "$observed"
     [ -n "$label" ] ||
       fail "hamt.node_put stopped stealing its descent child"
