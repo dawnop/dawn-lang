@@ -160,10 +160,40 @@ pub fn vadd_ref(ins: List[List[Float]]) -> List[Float] = {
   list.map(range(0, len(a)), i => a[i] + b[i])
 }
 
+## Block-wise tile sum of the first argument into the second: the host-side
+## reference for the `sum` kernel. `out` has `128 * blocks` elements and `x`
+## has `chunks` times as many; block `b` folds the `chunks` consecutive
+## 128-wide tiles of `x` numbered `b * chunks` onward into one tile of `out`,
+## lane by lane: `out[b * 128 + j]` is the first of those tiles' lane `j`,
+## plus the second's, plus the third's, and so on in tile order. That is
+## the order the kernel adds in (its loop carries the first tile in and adds
+## one tile per iteration), so the two agree bit for bit under IEEE double
+## addition; a fold from zero would differ on `-0.0`, a pairwise or reversed
+## fold on carries. `chunks` is `len(x) / len(out)`; a shape the kernel
+## would read out of bounds on (`len(out)` not a multiple of 128, `len(x)`
+## not a multiple of `len(out)`) is the caller's bug and reads out of range
+## here as it would there.
+pub fn sum_ref(ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let out = ins[1]
+  let w = 128
+  let n = len(out)
+  let chunks = if n == 0 { 0 } else { len(x) / n }
+  list.map(range(0, n), i => {
+    let b = i / w
+    let j = i % w
+    if chunks == 0 {
+      0.0
+    } else {
+      list.fold(range(1, chunks), x[(b * chunks) * w + j], (acc, k) => acc + x[(b * chunks + k) * w + j])
+    }
+  })
+}
+
 ## The reference implementations the fake device answers `launch` with, by
-## kernel name: `vadd` in this release.
+## kernel name: `vadd` and `sum` in this release.
 pub fn reference_kernels() -> Map[String, fn(List[List[Float]]) -> List[Float]] =
-  map.from([("vadd", vadd_ref)])
+  map.from([("vadd", vadd_ref), ("sum", sum_ref)])
 
 fn no_such_buffer(handle: Int) -> ForeignError =
   refuse("gpu.no_such_buffer", "fake device: no buffer with handle ${handle}")
@@ -273,6 +303,52 @@ test "a !Gpu program runs vadd on a machine without a GPU and gets the right ans
   assert r == Ok([11.0, 3.0, 0.0, 0.0, 1.0, 1000000.5, -1.0, 7.0])
   # a single element, and the last argument is the one written
   assert with_gpu_fake(reference_kernels(), () => vadd_on_device([2.0], [3.0])) == Ok([5.0])
+}
+
+fn sum_on_device(xs: List[Float], blocks: Int) -> Result[List[Float], ForeignError] !Gpu = {
+  let x = alloc(F64, len(xs))?
+  let out = alloc(F64, blocks * 128)?
+  upload(x, xs)?
+  launch("sum", blocks, [handle_of(x), handle_of(out)])?
+  sync()?
+  let r = download(out)?
+  free(x)?
+  free(out)?
+  Ok(r)
+}
+
+# Two blocks of four 128-wide tiles. Block 0's four tiles are 2^53, 1, 1,
+# -2^53 in every lane: added first to last that is ((2^53 + 1) + 1) - 2^53 =
+# 0.0 (2^53 + 1 ties to the even 2^53), while last to first gives 2.0 and
+# pairwise gives 1.0, so the answer says which order was used. Block 1's
+# tile k holds 1000 k + j in lane j, exact in any order, so it says which
+# lanes and tiles each block read.
+fn sum_input() -> List[Float] = list.map(range(0, 1024), i => {
+  let tile = i / 128
+  let j = i % 128
+  if tile < 4 {
+    if tile == 0 { 9007199254740992.0 } else if tile == 3 { 0.0 - 9007199254740992.0 } else { 1.0 }
+  } else {
+    to_float(1000 * (tile - 4) + j)
+  }
+})
+
+test "a !Gpu program runs the sum kernel on the fake device, and the answer is the kernel's own left-to-right order" {
+  let r = with_gpu_fake(reference_kernels(), () => sum_on_device(sum_input(), 2))
+  let want = list.map(range(0, 256), i => if i < 128 { 0.0 } else { to_float(6000 + 4 * (i - 128)) })
+  assert r == Ok(want)
+  # the same sum on the host, tile by tile from the first, is bit for bit the device's
+  let xs = sum_input()
+  let host = list.map(range(0, 256), i => {
+    let b = i / 128
+    let j = i % 128
+    let first = xs[(b * 4) * 128 + j]
+    ((first + xs[(b * 4 + 1) * 128 + j]) + xs[(b * 4 + 2) * 128 + j]) + xs[(b * 4 + 3) * 128 + j]
+  })
+  assert r == Ok(host)
+  # one block, one chunk: the loop runs zero times and the first tile is the answer
+  let one = list.map(range(0, 128), i => to_float(i) * 0.5)
+  assert with_gpu_fake(reference_kernels(), () => sum_on_device(one, 1)) == Ok(one)
 }
 
 fn kind_of[T](r: Result[T, ForeignError]) -> String = match r {
