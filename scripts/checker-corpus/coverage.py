@@ -193,15 +193,11 @@ def literals(expr):
     return out
 
 
-# A message expression is often an `if`/`match` over several wordings. Splitting
-# on the branch boundaries gives one candidate per wording; the flattened whole
-# is kept as a candidate too, for the messages that interpolate a branch into
-# the middle of one sentence.
-BRANCH = re.compile(r"\}\s*else\s*\{|->|\bif\b|\bmatch\b|[{}]")
-
-
-def branch_segments(expr):
-    """Split only on branch syntax in code, never on words inside strings."""
+# A message expression is often an `if`/`match` over several wordings. Only an
+# `if` body or a `match` arm's right-hand side is a possible wording: literals
+# in the condition or pattern decide which wording runs, but are not emitted.
+def code_mask(expr):
+    """Replace strings and comments with spaces, preserving offsets."""
     mask = list(expr)
     i = 0
     while i < len(expr):
@@ -227,14 +223,132 @@ def branch_segments(expr):
             i = j
             continue
         i += 1
-    code = "".join(mask)
+    return "".join(mask)
+
+
+def skip_space(code, pos, end=None):
+    limit = len(code) if end is None else end
+    while pos < limit and code[pos].isspace():
+        pos += 1
+    return pos
+
+
+def word_at(code, pos, word):
+    end = pos + len(word)
+    return (
+        code[pos:end] == word
+        and (pos == 0 or not (code[pos - 1].isalnum() or code[pos - 1] == "_"))
+        and (end == len(code) or not (code[end].isalnum() or code[end] == "_"))
+    )
+
+
+def matching_delimiter(code, pos):
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    opener = code[pos]
+    closer = pairs[opener]
+    depth = 1
+    i = pos + 1
+    while i < len(code):
+        if code[i] == opener:
+            depth += 1
+        elif code[i] == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return len(code)
+
+
+def if_arm_bodies(expr, code, start):
+    """Return the bodies of one `if` / `else if` / `else` expression."""
     out = []
-    start = 0
-    for m in BRANCH.finditer(code):
-        out.append(expr[start : m.start()])
-        start = m.end()
-    out.append(expr[start:])
+    pos = start
+    while word_at(code, pos, "if"):
+        brace = code.find("{", pos + 2)
+        if brace < 0:
+            return []
+        close = matching_delimiter(code, brace)
+        if close >= len(code):
+            return []
+        out.append(expr[brace + 1 : close])
+        pos = skip_space(code, close + 1)
+        if not word_at(code, pos, "else"):
+            return out
+        pos = skip_space(code, pos + len("else"))
+        if word_at(code, pos, "if"):
+            continue
+        if pos >= len(code) or code[pos] != "{":
+            return []
+        close = matching_delimiter(code, pos)
+        if close >= len(code):
+            return []
+        out.append(expr[pos + 1 : close])
+        return out
+    return []
+
+
+def match_arrows(code, start, end):
+    """Top-level arm arrows inside a match body."""
+    stack = []
+    out = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    i = start
+    while i < end:
+        c = code[i]
+        if c in "([{":
+            stack.append(c)
+        elif c in ")]}" and stack and stack[-1] == pairs[c]:
+            stack.pop()
+        elif c == "-" and i + 1 < end and code[i + 1] == ">" and not stack:
+            out.append(i)
+            i += 1
+        i += 1
     return out
+
+
+def match_arm_bodies(expr, code, start):
+    """Return each top-level match arm RHS, excluding its pattern."""
+    brace = code.find("{", start + len("match"))
+    if brace < 0:
+        return []
+    close = matching_delimiter(code, brace)
+    if close >= len(code):
+        return []
+    arrows = match_arrows(code, brace + 1, close)
+    out = []
+    for i, arrow in enumerate(arrows):
+        rhs = skip_space(code, arrow + 2, close)
+        end = close
+        if rhs < close and code[rhs] in "([{":
+            paired = matching_delimiter(code, rhs)
+            after = skip_space(code, paired + 1, close)
+            if paired < close and code[after : after + 2] != "++":
+                end = paired + 1
+        if end == close and i + 1 < len(arrows):
+            next_arrow = arrows[i + 1]
+            line = expr.rfind("\n", rhs, next_arrow)
+            if line >= rhs:
+                end = line
+            else:
+                comma = code.rfind(",", rhs, next_arrow)
+                if comma >= rhs:
+                    end = comma
+        body = expr[rhs:end].rstrip()
+        if body.endswith(","):
+            body = body[:-1].rstrip()
+        out.append(body)
+    return out
+
+
+def branch_bodies(expr):
+    """Possible complete RHS/body expressions, or [] for a non-branch."""
+    code = code_mask(expr)
+    start = skip_space(code, 0)
+    if word_at(code, start, "if"):
+        return if_arm_bodies(expr, code, start)
+    if word_at(code, start, "match"):
+        return match_arm_bodies(expr, code, start)
+    return []
 
 
 def patterns(lits, expr):
@@ -256,10 +370,10 @@ def patterns(lits, expr):
     # `if`/`match`. Each arm is a possible complete wording. Do not split an
     # arbitrary concatenation merely because it contains a conditional: that
     # would turn a prefix outside the conditional back into a one-chunk match.
-    stripped = expr.lstrip()
-    if stripped.startswith("if ") or stripped.startswith("match "):
-        for seg in branch_segments(expr):
-            add(literals(seg))
+    bodies = branch_bodies(expr)
+    if bodies:
+        for body in bodies:
+            add(literals(body))
     else:
         add(lits)
     return cands
@@ -442,9 +556,30 @@ def self_test():
     if site_reached({"pats": branch_pats}, ["left message\tright hint"]):
         print("FAIL: chunks from different branches reached the site", file=sys.stderr)
         return 1
+    condition_strings = (
+        'if d.name == "Option" || d.name == "Result" || d.name == "ForeignError" { '
+        '"`" ++ d.name ++ "` is a prelude type and cannot be redefined" '
+        '} else { "type `" ++ d.name ++ "` is defined twice" }'
+    )
+    if patterns(literals(condition_strings), condition_strings) != [
+        ("`", "` is a prelude type and cannot be redefined"),
+        ("type `", "` is defined twice"),
+    ]:
+        print("FAIL: literals from an if condition became a message candidate", file=sys.stderr)
+        return 1
+    pattern_strings = (
+        'match kind { "alpha" -> ("alpha message", "alpha hint") '
+        '"beta" -> ("beta message", "beta hint") }'
+    )
+    if patterns(literals(pattern_strings), pattern_strings) != [
+        ("alpha message", "alpha hint"),
+        ("beta message", "beta hint"),
+    ]:
+        print("FAIL: match patterns displaced or became message candidates", file=sys.stderr)
+        return 1
     print(
         "coverage selftest: complete ordered chunks accepted; "
-        "shared-chunk and reversed controls refused"
+        "shared-chunk, reversed, condition, and pattern controls refused"
     )
     return 0
 
