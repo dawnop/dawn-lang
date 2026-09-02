@@ -17,16 +17,19 @@
 # corpus that spelled the kind out would pass on one backend by construction.
 #
 # The second subject is sharper and is why this file exists now rather than
-# with §7. The discard runs from a signature the checker types as **pure**:
-# §11.2 gives a continuation the type `fn(T) -> U` with a pure row, so a pure
-# function can hold one, and `discard` is pure for the same reason. Since
-# `catch_fault` stopped raising a row of its own
-# (docs/audit/error-model-design.md §7.5) the observation point is pure too.
-# `drop_caught` below therefore has a pure signature, is handed to a slot that
-# accepts only a pure function value, and returns `Err`. That is the named
-# exception to "a fault only comes from io" recorded in spec §9.8.1, and it is
-# a §11.2 hole rather than a barrier one: nothing about the barrier's row put
-# the io there, the continuation did.
+# with §7: where the io that a discard's release does gets charged. The
+# barrier adds nothing (`catch_fault` stopped raising a row of its own,
+# docs/audit/error-model-design.md §7.5), and `discard` adds nothing either,
+# so the only row on `drop_caught` below is the one the continuation brings.
+# It brings `!io`, because a continuation carries its remainder's io bit
+# (spec §6.5 "control arms") and the remainder here holds a release that
+# prints. So `drop_caught` is `!io`, is handed to a slot that takes an `!io`
+# function value, and returns `Err`; the same signature with a pure row and a
+# pure slot is the refusal pinned in scripts/checker-corpus
+# (`continuation_row.dawn`). Until 2026-09-02 this file compiled that pure
+# shape and ran it, and that was the named exception spec §9.8.1 carried to
+# "a fault only comes from io": a §11.2 continuation had a pure row whatever
+# its remainder did, so a pure signature could deliver the remainder's fault.
 use std/io
 use std/str
 use std/raw
@@ -55,21 +58,25 @@ fn faulting_release(tag: String) -> Unit !io = {
   io.println("unreachable ${to_string(read_missing())}")
 }
 
-## The observation point, and the whole point: no row. `discard` is pure
-## because a continuation is an ordinary value (§11.2), and `catch_fault` adds
-## nothing to the row it is given (§7.5), so this signature is pure -- and it
-## can still answer `Err`.
-fn drop_caught(k: fn(Int) -> Result[String, ForeignError]) -> Result[Unit, ForeignError] =
+## The observation point, and the whole point: the only row here is `k`'s.
+## `discard` carries its continuation's row and `catch_fault` adds nothing to
+## the row it is given (§7.5), so this signature is `!io` exactly because the
+## remainder it may unwind is.
+fn drop_caught(
+  k: fn(Int) -> Result[String, ForeignError] !io
+) -> Result[Unit, ForeignError] !io =
   catch_fault(() => discard(k))
 
-## A slot that takes a pure function value. `drop_caught` reaching the arm
-## through here is a claim about its *row*, checked at compile time: an
-## observation point that had kept a row of its own would not fit, and this
-## file would stop compiling rather than print a different number.
-fn apply_pure(
-  f: fn(fn(Int) -> Result[String, ForeignError]) -> Result[Unit, ForeignError],
-  k: fn(Int) -> Result[String, ForeignError]
-) -> Result[Unit, ForeignError] = f(k)
+## A slot whose function value is `!io` and whose continuation is `!io`.
+## `drop_caught` reaching the arm through here is a claim about its *row*,
+## checked at compile time: had either barrier put a row of its own on top,
+## this would still fit, so the file cannot tell "the continuation brought the
+## io" from "a barrier did"; the corpus case beside this one does, by refusing
+## the pure spelling.
+fn apply_io(
+  f: fn(fn(Int) -> Result[String, ForeignError] !io) -> Result[Unit, ForeignError] !io,
+  k: fn(Int) -> Result[String, ForeignError] !io
+) -> Result[Unit, ForeignError] !io = f(k)
 
 ## Two brackets around a suspension, the inner one released by `rel`. The arm
 ## abandons the continuation, so both releases run innermost first while the
@@ -77,7 +84,7 @@ fn apply_pure(
 fn discarding(rel: fn(String) -> Unit !io) -> Result[String, ForeignError] !io = {
   with handle Ask {
     ask(n) resume k =>
-      match apply_pure(drop_caught, k) {
+      match apply_io(drop_caught, k) {
         Ok(_) -> Ok("discard finished at ${to_string(n)}")
         Err(e) -> Err(e)
       }

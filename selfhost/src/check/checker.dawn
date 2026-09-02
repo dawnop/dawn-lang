@@ -48,6 +48,7 @@ use check/types.{
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes,
   eff_suffix, eff_base, eff_labels, eff_ctl_labels, eff_vars, eff_with_labels, eff_assocs,
+  cont_row,
   eff_map_assocs,
   eff_carries,
   erased_ev_ty, erased_cell_ty,
@@ -5797,7 +5798,7 @@ fn check_handle(
     rx = rx0
     revs = rv0
     let (cxa, ns, sl, ae, als) =
-      check_handle_arms(cx1, info, rec, chosen, hid, name, Some(rret), nlo, nhi)
+      check_handle_arms(cx1, info, rec, chosen, hid, name, Some((rret, reff)), nlo, nhi)
     cx1 = cxa
     arm_nodes = ns
     slots = sl
@@ -5807,7 +5808,7 @@ fn check_handle(
     cx1 = cxp
     arm_env = env
   } else {
-    let no_answer: Option[Ty] = None
+    let no_answer: Option[(Ty, Eff)] = None
     let (cxa, ns, sl, ae, als) =
       check_handle_arms(cx1, info, rec, chosen, hid, name, no_answer, nlo, nhi)
     cx1 = cxa
@@ -5915,11 +5916,12 @@ fn check_handle_remainder(
 ## charged to this block: an arm's body runs where the handler was installed,
 ## not where the operation was raised.
 ##
-## `answer` is the block's answer type `A`, and it is `Some` exactly when this
-## installation has a control arm -- which is also exactly when the caller has
-## already checked the remainder and so has an `A` to give. A tail-resumptive
-## arm never reads it: it answers with the *operation's* return type, today and
-## under a `ctl` effect alike.
+## `answer` is the block's answer type `A` together with the remainder's row,
+## and it is `Some` exactly when this installation has a control arm -- which
+## is also exactly when the caller has already checked the remainder and so has
+## both to give. The row is what `k`'s own row is read off (`types.cont_row`).
+## A tail-resumptive arm never reads either: it answers with the *operation's*
+## return type, today and under a `ctl` effect alike.
 ##
 ## The per-arm row goes to two places, and neither is a closure: `record_effect`
 ## charges it to the frame this installation was written in (the `⋃base_i` of
@@ -5936,7 +5938,7 @@ fn check_handle_arms(
   chosen: List[Option[HandlerArm]],
   hid: Int,
   name: String,
-  answer: Option[Ty],
+  answer: Option[(Ty, Eff)],
   nlo: Int,
   nhi: Int
 ) -> (Cx, List[TExpr], List[Option[Int]], Eff, List[TStmt]) !io = {
@@ -5953,9 +5955,10 @@ fn check_handle_arms(
       None -> XError(nlo, nhi)
       Some(a) ->
         if arm_is_control(a) {
+          let (aty, reff) = answer_parts(answer)
           let (cxc, wrap, alet, aeff) =
             check_control_arm(cx1, a, k, field.ty, fptys, fret, hid, name, info.ctl,
-              answer_ty(answer))
+              aty, reff)
           cx1 = cxc
           arm_lets = arm_lets ++ [alet]
           arms_eff = eff_union([arms_eff, aeff])
@@ -5990,35 +5993,48 @@ fn check_handle_arms(
   (cx1, arm_nodes, slots, arms_eff, arm_lets)
 }
 
-## `A` when the caller has one. `TyError` otherwise, which cannot be reached
-## from a control arm -- the caller passes `Some` exactly when one exists -- and
-## is absorbed by `assignable` if a later change ever makes it reachable.
-fn answer_ty(answer: Option[Ty]) -> Ty =
+## `A` and the remainder's row when the caller has them. `TyError` and a pure
+## row otherwise, which cannot be reached from a control arm -- the caller
+## passes `Some` exactly when one exists -- and is absorbed by `assignable` if
+## a later change ever makes it reachable.
+fn answer_parts(answer: Option[(Ty, Eff)]) -> (Ty, Eff) =
   match answer {
-    Some(t) -> t
-    None -> TyError
+    Some(p) -> p
+    None -> (TyError, EPure)
   }
 
 ## One control arm: `op(a, b) resume k => body`.
 ##
 ## **What it is checked against** (docs/oneshot-design.md §11.2, §11.3):
-## `fn(P..., fn(R) -> A) -> A` with a pure row, where `P...` are the operation's
-## parameters, `R` is its return type and `A` is the block's answer type. The
-## binder is not in `a.params` -- the parser stored a name and two spans, not a
-## parameter node -- so it is synthesized here and appended, unannotated: the
-## expected function type supplies its type, and `is_concrete` answers true for
-## a `TyFn`, so no inference had to change to let that through.
+## `fn(P..., fn(R) -> A !k) -> A` with a pure row, where `P...` are the
+## operation's parameters, `R` is its return type, `A` is the block's answer
+## type and `!k` is the remainder row's io bit (`types.cont_row`: `!io` when
+## the remainder's base axis has io, a variable or a projection, pure
+## otherwise). The binder is not in `a.params` -- the parser stored a name and
+## two spans, not a parameter node -- so it is synthesized here and appended,
+## unannotated: the expected function type supplies its type, and
+## `is_concrete` answers true for a `TyFn`, so no inference had to change to
+## let that through.
 ##
-## **Why `k`'s row is pure.** The pack the remainder needs was built at the
-## installation point and handed over there; a continuation is a remainder that
-## has already started, so that pack is inside it and calling `k` supplies
-## nothing. The converse is what settles it: a `k` carrying the remainder's row
-## would make the *call site* build a pack for a row that contains `E` itself,
-## and the arm cannot see `E`'s evidence -- it would resolve to an outer handler
-## of the same name, or to nothing. A row is recorded where its pack is
-## supplied, and this one was supplied already. The precedent is the SAM
-## snapshot, which charges the row at the conversion and hands over a value that
-## asks its caller for nothing.
+## **Why `k`'s row carries no label.** The pack the remainder needs was built
+## at the installation point and handed over there; a continuation is a
+## remainder that has already started, so that pack is inside it and calling
+## `k` supplies nothing. The converse is what settles it: a `k` carrying the
+## remainder's labels would make the *call site* build a pack for a row that
+## contains `E` itself, and the arm cannot see `E`'s evidence -- it would
+## resolve to an outer handler of the same name, or to nothing. A row is
+## recorded where its pack is supplied, and this one was supplied already. The
+## precedent is the SAM snapshot, which charges the row at the conversion and
+## hands over a value that asks its caller for nothing.
+##
+## **Why it carries the io bit all the same.** io occupies no evidence slot, so
+## an `!io` on `k` asks its caller for nothing either; what it does is refuse
+## the call from a frame whose signature says pure. Without it a pure frame
+## could resume a remainder that reads a file and faults, and spec §9.8.1 had
+## to carry "a fault only comes from io" with an exception for exactly this.
+## The remainder's row is in hand when the arm is checked (`check_handle`
+## checks the remainder first whenever a control arm exists, for §11.1's
+## answer type), so this costs no second pass.
 ##
 ## **Why the binder needs the effect's permission.** Decision 3 makes the clause
 ## the arm's kind mark, and §11.6 S1 makes suspendability a property of the
@@ -6037,7 +6053,8 @@ fn check_control_arm(
   hid: Int,
   ename: String,
   effect_is_ctl: Bool,
-  answer: Ty
+  answer: Ty,
+  reff: Eff
 ) -> (Cx, TExpr, TStmt, Eff) !io = {
   var cx1 = cx
   let kname = match a.binder {
@@ -6056,7 +6073,7 @@ fn check_control_arm(
         to_string(len(fptys)), a.nlo, a.nhi,
       "the binder is the continuation, not a parameter: " ++ ty_show(cx1.adts, field_ty))
   }
-  let k_ty = TyFn([fret], answer, EPure)
+  let k_ty = TyFn([fret], answer, cont_row(reff))
   let kp = LambdaParam { name: kname, ann: None, lo: a.blo, hi: a.bhi }
   let (cxb, at, ax) = check_lambda(cx1, a.params ++ [kp], a.body, true, true, true,
     Some(hid), Some(TyFn(fptys ++ [k_ty], answer, EPure)), a.lo, a.hi)
@@ -12218,6 +12235,51 @@ test "a control arm's arity counts the binder separately" {
       "  with handle Ask { ask() => 0 }\n  ask(1)\n}\n")
   assert plain.diags[0].msg ==
     "arm `ask` takes 0 parameter(s), but operation `ask` declares 1"
+}
+
+test "a continuation carries its remainder's io bit and no label" {
+  # The binder's type is `fn(R) -> A !k` with `!k = cont_row(reff)`
+  # (docs/oneshot-design.md §11.2 postscript). A pure remainder hands out a
+  # pure `k`, which is the shape examples/effects/resumption.dawn stores in an
+  # ADT field with a pure row; a remainder that does io hands out an `!io` one,
+  # and the same field refuses it. The diagnostic is the ordinary field
+  # mismatch, because `k` is an ordinary function value and this is an
+  # ordinary row.
+  let held = "type Held = Ready(v: Int) | Waiting(k: fn(Int) -> Held)\n" ++
+    "fn tick() -> Unit !io = ()\n"
+  let pure_rem = ctl_check(held ++
+      "fn f() -> Held = {\n  with handle Ask { ask(n) resume k => Waiting(k) }\n" ++
+      "  Ready(ask(1))\n}\n")
+  assert len(pure_rem.diags) == 0
+  let io_rem = ctl_check(held ++
+      "fn f() -> Held !io = {\n  with handle Ask { ask(n) resume k => Waiting(k) }\n" ++
+      "  tick()\n  Ready(ask(1))\n}\n")
+  assert len(io_rem.diags) == 1
+  assert io_rem.diags[0].msg ==
+    "field `k` of `Waiting` is fn(Int) -> Held, got fn(Int) -> Held !io"
+  # spell the field `!io` and the same program is accepted
+  let io_field = ctl_check(
+    "type Held = Ready(v: Int) | Waiting(k: fn(Int) -> Held !io)\n" ++
+      "fn tick() -> Unit !io = ()\n" ++
+      "fn f() -> Held !io = {\n  with handle Ask { ask(n) resume k => Waiting(k) }\n" ++
+      "  tick()\n  Ready(ask(1))\n}\n")
+  assert len(io_field.diags) == 0
+  # the label axis does not travel: a remainder whose only effect is a label
+  # hands out a pure `k`, because the pack that answers the label is inside the
+  # continuation already and io is the one component that occupies no slot
+  let label_rem = ctl_check(held ++
+      "effect Log {\n  fn note(s: String) -> Unit\n}\n" ++
+      "fn f() -> Held !Log = {\n  with handle Ask { ask(n) resume k => Waiting(k) }\n" ++
+      "  note(\"x\")\n  Ready(ask(1))\n}\n")
+  assert len(label_rem.diags) == 0
+  # and an arm that resumes an `!io` continuation is an arm that does io,
+  # charged to the frame the handler was installed in, as any arm's io is
+  let arm_io = ctl_check(
+    "fn tick() -> Unit !io = ()\n" ++
+      "fn f() -> Int = {\n  with handle Ask { ask(n) resume k => k(n) }\n" ++
+      "  tick()\n  ask(1)\n}\n")
+  assert len(arm_io.diags) == 1
+  assert str.contains(arm_io.diags[0].msg, "is not declared !io but calls `ask` (!io)")
 }
 
 test "a binder under a non-`ctl` effect is refused at the clause" {

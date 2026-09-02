@@ -342,8 +342,9 @@
   失败，通往外部世界的每条路已经记过 `io` 的账，屏障不必再记一笔；panic 没人记账，只剩
   屏障能记。本条原始建议里那句「`catch_fault` 是否应保持 IO-only 可单独由 fault source
   决定，不应把 panic 与 cleanup 一并绑死」到此兑现。三个屏障从此排成一条线，而不是二比一。
-  不变式「fault 只从 io 来」带一个具名例外（续延是纯 fn 值，见
-  [`oneshot-design.md`](../oneshot-design.md) §11.2），实测确认、本次不修。见
+  不变式「fault 只从 io 来」当时带一个具名例外（续延是纯 fn 值，见
+  [`oneshot-design.md`](../oneshot-design.md) §11.2），实测确认、那次不修；2026-09-02 起
+  续延带 remainder 的 io 位，例外取消（§11.2 后记）。见
   [`error-model-design.md`](../audit/error-model-design.md) §7.5。
 
 ## SEM-12 — P2 — “私有函数推断效果”实际只推断 base IO（已修）

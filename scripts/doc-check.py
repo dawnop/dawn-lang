@@ -391,11 +391,19 @@ SPEC_CONTRACTS = (
         ),
     ),
     (
-        "the fault-only-from-io invariant, and its one exception",
+        "the fault-only-from-io invariant, without an exception",
         (
-            ("docs/spec.md", "**fault 只从 io 来，除非它是被一条续延带过纯边界的。**"),
-            ("docs/spec.en.md", "**a fault only comes from io, unless a continuation "
-             "carried it across a pure boundary.**"),
+            ("docs/spec.md", "**这条线依赖一条不变式**：**fault 只从 io 来。**"),
+            ("docs/spec.en.md", "**The line rests on an invariant**: **a fault only comes "
+             "from io.**"),
+        ),
+    ),
+    (
+        "a continuation carries its remainder's io bit",
+        (
+            ("docs/spec.md", "**它的行是块剩余的行在基轴上的 io 位**"),
+            ("docs/spec.en.md", "**Its row is the io bit of the rest of the block's row, on "
+             "the base axis**"),
         ),
     ),
     (

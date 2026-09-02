@@ -3076,11 +3076,14 @@ void *dawn_ctl_yield(int64_t hid, void *arm, void *env, int64_t nargs,
  * discard-then-resume, resume-then-discard and discard-twice are one test and
  * one family of messages.
  *
- * The argument is borrowed, like every intrinsic's (perceus-design.md 5.1). */
-dawn_unit dawn_discard(void *kv) {
+ * The argument is borrowed, like every intrinsic's (perceus-design.md 5.1).
+ * `ev` is the evidence slot the `!e` binder buys and is not read: the
+ * continuation carries its own pack (see the header). */
+dawn_unit dawn_discard(void *kv, void *ev) {
   dawn_clo *k;
   dawn_ctl *f;
   dawn_carrier *c;
+  (void)ev;
   if (kv == NULL || ((dawn_hdr *)kv)->kind != DAWN_K_CLO ||
       ((dawn_clo *)kv)->fn != (void *)dawn_ctl_k_apply) {
     dawn_panic(DAWN_LIT("dawn: `discard` expects a continuation"));
@@ -3138,8 +3141,9 @@ void *dawn_ctl_yield(int64_t hid, void *arm, void *env, int64_t nargs,
   return NULL;
 }
 
-dawn_unit dawn_discard(void *kv) {
+dawn_unit dawn_discard(void *kv, void *ev) {
   (void)kv;
+  (void)ev;
   dawn_panic(DAWN_LIT("dawn: one-shot resumption is not available on wasm"));
   return DAWN_UNIT;
 }

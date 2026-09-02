@@ -66,6 +66,36 @@ pub fn with_cell() -> Int = {
   ask(1)
 }
 
+# the continuation's row is the remainder's io bit (`types.cont_row`). This
+# remainder is pure, so `k` is a plain `fn(Int) -> Held` and goes into a field
+# with a pure row, which is the shape examples/effects/resumption.dawn and the
+# reactor rest on. The same field under a remainder that does io is refused in
+# `continuation_row.dawn`
+pub type Held =
+  | Ready(v: Int)
+  | Waiting(k: fn(Int) -> Held)
+
+pub fn pure_remainder_pure_field() -> Held = {
+  with handle Ask { ask(n) resume k => Waiting(k) }
+  Ready(ask(1))
+}
+
+# and the frame that resumes or discards a pure continuation stays pure
+pub fn pure_frame_resumes(k: fn(Int) -> Held) -> Held = k(1)
+
+pub fn pure_frame_discards(k: fn(Int) -> Held) -> Unit = discard(k)
+
+# a remainder that does io hands out `fn(Int) -> Held !io`, and an arm in an
+# `!io` frame resumes it as before: the arm's io is charged to the frame the
+# handler was installed in, which is `!io` here
+fn tick() -> Unit !io = ()
+
+pub fn io_remainder_resumed_in_arm() -> Int !io = {
+  with handle Ask { ask(n) resume k => k(n + 1) }
+  tick()
+  ask(1)
+}
+
 # --- refused --------------------------------------------------------------
 
 # the binder needs the effect's permission: decision 3 makes the clause the

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 33149af9d3017ac0 -->
+<!-- doc-check: translation-of docs/spec.md @ 7c631e914ed119f2 -->
 
 # Dawn Language Specification
 
@@ -2207,17 +2207,25 @@ Java boundary can read. `ctl` is a licence rather than a requirement: a tail-res
 binding clause is legal under a `ctl` effect.
 
 - **The answer type**: let the type of the rest of the `with handle` block be `A`; then **the
-  block's type is `A`**, every control arm's body must be `A` too, and `k`'s type is `fn(R) -> A`,
-  where `R` is the return type declared for that operation. `A` is not a new type variable, it is
-  the type of the rest of the block; in a handler with no control arm this rule says nothing.
+  block's type is `A`**, every control arm's body must be `A` too, and `k`'s type is `fn(R) -> A`
+  (its row is the next point), where `R` is the return type declared for that operation. `A` is
+  not a new type variable, it is the type of the rest of the block; in a handler with no control
+  arm this rule says nothing.
 - **The arm's value is the block's value**, and has nothing to do with the operation's declared
   return type. Not resuming at all is legal: the arm's value becomes the block's answer directly,
   and the part of the block after the suspension does not run again.
-- **`k` is an ordinary function value**, with a pure row and no type of its own: it goes in an ADT
-  field, in a cell, in a list, and it may be called after the frame that installed the handler has
-  returned. The pure row is not leniency but a consequence of the supply-point discipline (see
-  "Implementation" below): the pack the rest of the block wants was built at the installation point
-  and handed to the continuation, so whoever calls it neither has to supply one nor can.
+- **`k` is an ordinary function value**, with no type of its own: it goes in an ADT field, in a
+  cell, in a list, and it may be called after the frame that installed the handler has returned.
+  **Its row is the io bit of the rest of the block's row, on the base axis**: if the rest has io, or
+  an effect variable or an associated-effect projection (either may be instantiated with io, so
+  they fold in conservatively), `k` is `fn(R) -> A !io`; otherwise it is the pure `fn(R) -> A`.
+  Labels never travel. Dropping the labels is not leniency but a consequence of the supply-point
+  discipline (see "Implementation" below): the pack the rest of the block wants was built at the
+  installation point and handed to the continuation, so whoever calls it neither has to supply one
+  nor can. The io bit travels because it occupies no evidence slot and asks the caller for nothing;
+  the one thing it forbids is resuming or discarding a rest that does io from a frame whose
+  signature says pure. So §9.8.1's "a fault only comes from io" needs no exception for
+  continuations.
 - **`k` is deep**: calling it reinstalls this installation, so the rest of the block performing the
   same effect again after the resumption is answered by this installation, reading the cells of this
   activation.
@@ -2303,14 +2311,16 @@ recognises only an **explicit** trigger.
 - **`discard` is the sanctioned path.**
 
   ```dawn
-  fn discard[T, U](k: fn(T) -> U) -> Unit
+  fn discard[T, U, !e](k: fn(T) -> U !e) -> Unit !e
   ```
 
   It resumes the abandoned computation with a poison, so the unwind lands on every `bracket` between
   the suspension and the installation and runs its `release`, **innermost first**, and then answers
   `Unit`. The parameter's type is the continuation's own type and nothing narrower: `k` was ruled an
   ordinary function value above, and this does not take that back. So any function value satisfies
-  the type and **whether it is a continuation is decided at run time**. `discard` spends the same
+  the type and **whether it is a continuation is decided at run time**. `!e` is the continuation's
+  own row: discarding a pure rest's continuation is pure, discarding one that carries io is `!io`,
+  and discarding owes the same row resuming does. `discard` spends the same
   ticket a resumption spends: a discarded continuation cannot be resumed, and a resumed one cannot
   be discarded. Comptime refuses it.
 
@@ -3222,17 +3232,19 @@ So **the three barriers line up**: the `bracket` of §9.8.2 observes nothing,
 `catch_fault` observes a failure `io` has already been charged for, and `catch_panic`
 observes one nobody was charged for. The first two carry a variable, the third `!io`.
 
-> **The line rests on an invariant that has one exception**:
-> **a fault only comes from io, unless a continuation carried it across a pure boundary.**
-> A continuation has the type `fn(T) -> U` with a pure row
-> ([`docs/oneshot-design.md`](oneshot-design.md) §11.2: `k` has to be an ordinary value,
-> one that goes into an ADT field, a cell, a list), so a function with a **pure
-> signature** that resumes or discards one brings the remainder's io — and its faults —
-> back into its own frame. Both backends were measured doing this. The hole belongs to
-> oneshot-design.md §11.2, it predates this clause, and this section neither repairs it
-> nor pretends it is absent: an expression the checker types as pure can therefore hand
-> back an `Err`, whose `kind` is backend-dependent (above). Closing it means changing the
-> continuation's type, not the barriers' rows.
+> **The line rests on an invariant**: **a fault only comes from io.** It used to carry one
+> named exception: a continuation's row was once unconditionally pure, so a function with a
+> **pure signature** that resumed or discarded one brought the remainder's io, and its
+> faults, back into its own frame (both backends were measured doing this). Since
+> 2026-09-02 a continuation carries its remainder's io bit (§6.5 "Control arms"): a
+> remainder that can fault hands out an `!io` continuation, no pure frame can call it, and
+> the exception is gone. `k` is still an ordinary function value with no type of its own;
+> what changed is the io bit of its row and nothing else
+> ([`docs/oneshot-design.md`](oneshot-design.md) §11.2, postscript). The one shape left is a
+> remainder whose only effects are labels, where a label's arm does io at **its own
+> installation point**: that is the standing supply-point doctrine (the boundary clause
+> under §6.5 "Implementation", the same one the SAM snapshot rests on), the arm's io is
+> charged to the frame that installed it, and it is not an exception to this clause.
 
 The full argument, and the condition under which it reopens, is in
 [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.

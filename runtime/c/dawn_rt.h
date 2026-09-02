@@ -796,17 +796,22 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use, void *ev);
  * was resumed with, owned; it does not return at all if the continuation is
  * dropped.
  *
- * `dawn_discard(k)` abandons the computation `k` would have resumed, running
- * every bracket release inside it innermost-first (docs/oneshot-design.md
- * 11.12). It is the one of the three that is language surface: `discard` is a
- * builtin the io runtime module owns, so the name here carries no `ctl`
- * prefix. It consumes the one-shot ticket, so resume-after-discard and
- * discard-twice are the same panic family as resume-twice.
+ * `dawn_discard(k, ev)` abandons the computation `k` would have resumed,
+ * running every bracket release inside it innermost-first
+ * (docs/oneshot-design.md 11.12). It is the one of the three that is language
+ * surface: `discard` is a builtin the io runtime module owns, so the name here
+ * carries no `ctl` prefix. It consumes the one-shot ticket, so
+ * resume-after-discard and discard-twice are the same panic family as
+ * resume-twice. `ev` is the evidence slot its signature buys by binding `!e`
+ * over the continuation (`discard[T, U, !e]`, the same reason `dawn_bracket`
+ * takes one); it is never read, because a continuation carries the pack its
+ * remainder was installed with, so the parameter exists to make the call
+ * site's arity and the shim's agree.
  *
  * All three borrow like every other primitive here. */
 void *dawn_ctl_enter(int64_t hid, void *rest, void *evs);
 void *dawn_ctl_yield(int64_t hid, void *arm, void *env, int64_t nargs, void **args);
-dawn_unit dawn_discard(void *k);
+dawn_unit dawn_discard(void *k, void *ev);
 
 /* Simple (1:1) Unicode case mapping: a code point in `lo..hi` maps to itself
  * plus `delta`, and one in no range maps to itself.

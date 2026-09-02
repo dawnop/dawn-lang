@@ -113,7 +113,10 @@ fn not_catchable() -> String !io = {
 # resumption -- which is why the trigger here is explicit and why `discard`
 # spends the same one-shot ticket a resumption spends. So `release esc` prints
 # once, and the resumption that follows the discard panics by name.
-type Held = Ready(v: String) | Waiting(k: fn(Int) -> Held)
+# The field spells `!io` because the remainder under `escaping`'s suspension
+# prints and releases: a continuation carries its remainder's io bit
+# (spec §6.5 "control arms"), so a pure-rowed field would not take this one.
+type Held = Ready(v: String) | Waiting(k: fn(Int) -> Held !io)
 
 fn escaping() -> Held !io = {
   with handle Ask { ask(n) resume k => Waiting(k) }

@@ -776,6 +776,17 @@ spec §9.8.1 末尾按这个写法记着，不写成无例外的正条文。
 让 `k` 能当普通值存起来而裁掉的 `TyCont`。张力记在这里，重开归
 [`oneshot-design.md`](../oneshot-design.md) §11.2。
 
+> **后记（2026-09-02）：洞已关闭，用的不是 `TyCont`。** 上一段把「携带剩余的行」与
+> `TyCont` 画了等号，漏了行的三种成分 ABI 代价不同：标签与变量占证据槽，**io 位不占**
+> （`sig_abi_eff`）。于是 `k` 可以仍是普通 `TyFn`，只把剩余行基轴上的 io 位带上
+> （`types.cont_row`：剩余含 io、效果变量或关联投影则 `!io`，否则纯；标签一律剥掉），
+> 调用点一个 pack 都不用建，§11.2 的 ABI 论据原样保留。配套 `discard` 放开成
+> `discard[T, U, !e](k: fn(T) -> U !e) -> Unit !e`，`!e` 由 `k` 自己的行实例化，本段
+> 「绑行变量给零」的前提（实参永远是纯 fn 类型）随之不再成立。spec §9.8.1 的不变式恢复
+> 无例外正条文；`ctl_discard_fault.dawn` 里那条纯签名的 `drop_caught` 翻成拒编负控
+> （`scripts/checker-corpus/cases/continuation_row.dawn`）。落地提交的主题是
+> 「Give a continuation its remainder's io bit」。
+
 #### 7.5.4 定价：今天的收益接近零，理由是向前的
 
 同一条不变式把收益也框住了：`catch_fault` 的调用点绝大多数被护闭包本来就 `!io`（因为它

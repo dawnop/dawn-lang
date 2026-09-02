@@ -1,0 +1,105 @@
+# checker.dawn `check_control_arm`, types.dawn `cont_row`: the row a captured
+# continuation carries is its remainder's io bit and nothing else
+# (docs/oneshot-design.md §11.2 as refined on 2026-09-02, spec §6.5 "control
+# arms"). Labels come off, because the pack the remainder needs was built at
+# the installation and a call site cannot supply `E`'s evidence; io stays on,
+# because it occupies no slot and it is what keeps a pure frame from resuming
+# a remainder that reads a file and faults (the exception spec §9.8.1 used to
+# carry). The accepted half is next door in `handler_resume.dawn`; this file
+# is the refused half, plus the two shapes that say where the line is.
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+ctl effect Tell {
+  fn tell(s: String) -> Int
+}
+
+pub effect Log {
+  fn note(s: String) -> Unit
+}
+
+pub type Held =
+  | Ready(v: Int)
+  | Waiting(k: fn(Int) -> Held)
+
+pub type HeldIo =
+  | ReadyIo(v: Int)
+  | WaitingIo(k: fn(Int) -> HeldIo !io)
+
+fn read_missing() -> Int !io = 1
+
+# --- accepted -------------------------------------------------------------
+
+# a remainder that does io hands out an `!io` continuation, and a field spelled
+# `!io` takes it
+pub fn io_remainder_io_field() -> HeldIo !io = {
+  with handle Ask { ask(n) resume k => WaitingIo(k) }
+  let _ = read_missing()
+  ReadyIo(ask(1))
+}
+
+# a remainder whose only effect is a label hands out a pure continuation: the
+# label is answered by the pack inside the continuation, and the io bit is what
+# travels, not the row
+pub fn label_remainder_pure_field() -> Held !Log = {
+  with handle Ask { ask(n) resume k => Waiting(k) }
+  note("hi")
+  Ready(ask(1))
+}
+
+# an `!io` frame may resume or discard an `!io` continuation
+pub fn io_frame_resumes(k: fn(Int) -> HeldIo !io) -> HeldIo !io = k(1)
+
+pub fn io_frame_discards(k: fn(Int) -> HeldIo !io) -> Unit !io = discard(k)
+
+# --- refused --------------------------------------------------------------
+
+# the shape scripts/spike-native/ctl_discard_fault.dawn used to compile and
+# run: a pure signature discards a continuation whose remainder does io, and
+# is handed to a slot that takes only a pure function value. The discard is
+# where the io is charged now, so the pure signature is what is refused
+pub fn drop_caught(
+  k: fn(Int) -> Result[String, ForeignError] !io
+) -> Result[Unit, ForeignError] =
+  catch_fault(() => discard(k))
+
+pub fn apply_pure(
+  f: fn(fn(Int) -> Result[String, ForeignError]) -> Result[Unit, ForeignError],
+  k: fn(Int) -> Result[String, ForeignError]
+) -> Result[Unit, ForeignError] = f(k)
+
+# resuming is the same charge as discarding
+pub fn pure_frame_resumes(k: fn(Int) -> HeldIo !io) -> HeldIo = k(1)
+
+# the remainder does io, so the continuation is `!io`, and a field with a pure
+# row does not take it. The diagnostic is the ordinary field mismatch: `k` is
+# an ordinary function value, and this is an ordinary row
+pub fn io_remainder_pure_field() -> Held !io = {
+  with handle Ask { ask(n) resume k => Waiting(k) }
+  let _ = read_missing()
+  Ready(ask(1))
+}
+
+# nested installations are each other's remainder: the inner handler's
+# remainder does io, so the inner `k2` is `!io`; the outer remainder contains
+# the inner installation and its io, so the outer `k` is `!io` too. Both fields
+# are refused, innermost first because the inner arm is checked first
+pub fn nested_pure_fields() -> Held !io = {
+  with handle Ask { ask(n) resume k => Waiting(k) }
+  with handle Tell { tell(s) resume k2 => Waiting(k2) }
+  let _ = read_missing()
+  Ready(ask(1) + tell("t"))
+}
+
+# a remainder whose base axis is an effect variable folds to `!io`: the
+# variable may be instantiated with io, and its evidence is not something a
+# call site of `k` could supply. So the arm's `k(n)` is an io call, charged to
+# a frame whose row is `!e` and not io. This is the conservative spelling's
+# price, recorded rather than hidden: a continuation captured under an
+# effect-polymorphic remainder can only be resumed from a frame charged io
+pub fn variable_remainder[!e](f: fn() -> Int !e) -> Int !e = {
+  with handle Ask { ask(n) resume k => k(n) }
+  f() + ask(1)
+}

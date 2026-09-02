@@ -116,6 +116,48 @@ pub fn eff_labels(e: Eff) -> List[(Int, String)] =
     _ -> []
   }
 
+## The row a captured continuation carries: the remainder row's io bit, and
+## nothing else (docs/oneshot-design.md §11.2, spec §6.5 "control arms").
+##
+## A continuation is a remainder that has already started, and the pack the
+## remainder needs was built at the installation point and is inside it. So
+## the labels come off: a `k` whose row named `E` would make its call site build
+## a pack for `E`, and the arm cannot see `E`'s evidence. That is the ABI
+## argument §11.2 made, and it stands. What that argument never covered is the
+## io bit, because io occupies no evidence slot (`nev`): a `k` spelled `!io`
+## asks its caller for nothing and forbids it one thing, resuming from a frame
+## whose signature says pure. That is the whole repair of the hole spec §9.8.1
+## used to record as an exception: a fault only comes from io, and a remainder
+## that can fault has io on its base axis, so its continuation now has it too.
+##
+## A variable or a projection on the base axis folds into io rather than
+## travelling. Both are pending evidence the call site would have to supply,
+## which is the ABI argument again, and both may be instantiated with io, so
+## pure is not safe either. Conservative is the only spelling left, and the
+## price is that a `k` captured under an `!e` remainder cannot be resumed from
+## a frame that is not charged io.
+pub fn cont_row(remainder: Eff) -> Eff = {
+  let (io, vars, atoms) = base_parts(eff_base(remainder))
+  if io || len(vars) > 0 || len(atoms) > 0 { EIo } else { EPure }
+}
+
+test "a continuation carries the remainder's io bit and nothing else" {
+  let ask = (7, "Ask")
+  # a pure remainder, with or without labels, hands out a pure `k`
+  assert cont_row(EPure) == EPure
+  assert cont_row(ELabeled(EPure, [ask])) == EPure
+  # io comes through, and the labels do not come with it
+  assert cont_row(EIo) == EIo
+  assert cont_row(ELabeled(EIo, [ask, (9, "Tell")])) == EIo
+  # a variable or a projection might be io once instantiated, so it folds in
+  assert cont_row(EffVar("e", 1)) == EIo
+  assert cont_row(ELabeled(EffVar("e", 1), [ask])) == EIo
+  assert cont_row(EffAssoc("T", 4, 3, "E")) == EIo
+  assert cont_row(EUnion([(1, "e")], [], false)) == EIo
+  # and the answer is always one of the two, never a label carrier or a union
+  assert nev(cont_row(ELabeled(EUnion([(1, "e")], [("T", 4, 3, "E")], true), [ask]))) == 0
+}
+
 ## `Sig.eparams` out of the table a signature's resolution filled: the effect
 ## variables it introduced, id-sorted.
 ##
@@ -2883,11 +2925,12 @@ pub fn builtins() -> Map[String, Sig] = {
     # signatures differ from here on: nothing in the row records a panic, so
     # the observer is the only place it can be recorded.
     #
-    # The rule has one hole and it is `k`, not this primitive: §11.2 gives a
-    # continuation the type `fn(T) -> U` with a pure row, so a pure signature
-    # that resumes or discards one can deliver a fault after all. That is a
-    # §11.2 hole, it predates this entry, and it is written down in spec §9.8.1
-    # rather than papered over here.
+    # The rule used to have one hole and it was `k`, not this primitive: §11.2
+    # gave a continuation the type `fn(T) -> U` with a pure row, so a pure
+    # signature that resumed or discarded one could deliver a fault after all.
+    # Closed on the continuation's side (`cont_row`): `k` now carries the
+    # remainder's io bit, so a remainder that can fault hands out an `!io`
+    # continuation and no pure frame can run it.
     #
     # `!e` is declared rather than merely mentioned, because `sig_abi_eff`
     # counts binders: without the binder the row would carry no variable, the
@@ -2999,26 +3042,36 @@ pub fn builtins() -> Map[String, Sig] = {
     # (docs/oneshot-design.md 11.12).
     #
     # **The parameter type is the continuation's own type and nothing
-    # narrower.** 11.2 ruled that `k` is a plain `fn(R) -> A` with a pure row,
-    # and that ruling is what makes it storable in an ADT, a cell and a list;
-    # a `TyCont` invented here would take it back. So any function value type-
-    # checks and the check is dynamic, which is the discipline one-shot already
-    # runs under -- the type does not say "at most once" either, and the second
+    # narrower.** 11.2 ruled that `k` is a plain `fn(R) -> A`, and that ruling
+    # is what makes it storable in an ADT, a cell and a list; a `TyCont`
+    # invented here would take it back. So any function value type-checks and
+    # the check is dynamic, which is the discipline one-shot already runs under
+    # -- the type does not say "at most once" either, and the second
     # resumption is a run-time panic. A value that is not a continuation
     # panics by name.
     #
-    # **The row is pure, and that is 11.2's argument read a second time.**
-    # Resuming a continuation runs the rest of a block that may do anything,
-    # and `k`'s row is pure all the same, because the pack the remainder needs
-    # was built at the installation and the accounting happened there.
+    # **The row is the continuation's own, and that is 11.2's argument read a
+    # second time.** Resuming a continuation runs the rest of a block, and `k`
+    # carries exactly the io bit of that rest (`cont_row`): the pack the
+    # remainder needs was built at the installation and the label accounting
+    # happened there, the io bit occupies no slot and so travels for free.
     # Discarding runs a *subset* of the same code -- the releases of brackets
-    # the remainder had already entered -- so it can owe no row that resuming
-    # does not. Pinning it to `!io` would mean an arm that abandons its
-    # continuation is impure while one that resumes it is not.
-    Sig {
-      ..bsig("discard", [TyFn([t], u, EPure)], ["k"], TyUnit),
-      tparams: [t, u]
-    },
+    # the remainder had already entered -- so it owes exactly the row resuming
+    # owes and no other: `!e` here is instantiated from `k`'s own row, pure for
+    # a pure remainder and `!io` for one that could fault. Pinning it either
+    # way would be wrong in one direction: `!io` makes an arm that abandons a
+    # pure remainder impure, pure lets a pure frame run the releases of a
+    # remainder that does io (the hole spec §9.8.1 used to record).
+    #
+    # Same shape as `bracket` above: `!e` is declared as well as mentioned,
+    # because `sig_abi_eff` counts binders.
+    effp1(
+      Sig {
+        ..bsig("discard", [TyFn([t], u, e)], ["k"], TyUnit),
+        tparams: [t, u]
+      },
+      e
+    ),
     # io_* intrinsics: the console/file primitives std/io writes over. All !io.
     # The JVM backend emits them into dawn/rt/Io. read_file/write_file/list_names
     # throw on failure; std wraps them in a barrier. read_line returns Option
@@ -4138,6 +4191,29 @@ test "bracket protects a resource and hands the body's own answer back" {
   assert not i.internal
   # the row is erased before either backend sees it, so the same runtime method
   # serves every instantiation -- effect polymorphism costs the emitters nothing
+  assert i.sig.eff == EffVar("e", -1)
+}
+
+test "discard carries its continuation's row" {
+  # The row is the continuation's own (`cont_row`), so the entry binds `!e` the
+  # way `bracket` does rather than pinning pure: a pure remainder's `k` keeps a
+  # pure discard, and a remainder that does io hands out an `!io` `k` whose
+  # discard is `!io` too, which is what stops a pure frame from running that
+  # remainder's releases (spec §9.8.1's former exception).
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  match map.get(builtins(), "discard") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn discard[T, U, !e](k: fn(T) -> U !e) -> Unit !e"
+      # one binder, one slot: the call site fills it from `k`'s own row, and io
+      # alone would fill it with nothing at all
+      assert nev(sig_abi_eff(s)) == 1
+    }
+    None -> { assert false }
+  }
+  let i = intr_at("discard").expect("discard")
+  assert i.rt == Some(RtIo)
   assert i.sig.eff == EffVar("e", -1)
 }
 

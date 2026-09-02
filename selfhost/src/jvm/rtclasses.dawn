@@ -1068,9 +1068,16 @@ fn gen_bracket(cw: ClassWriter) -> Unit !io = {
 ## there). `discard` lives in the io runtime module for the reason `bracket`
 ## does -- it is a primitive with one implementation per backend and a name
 ## the table already knows how to spell.
+##
+## The second parameter is the evidence slot the signature buys by binding
+## `!e` over the continuation (`discard[T, U, !e]`), for the reason `bracket`
+## takes one: `sig_abi_eff` counts binders and the call site fills the slot.
+## It is never loaded, because a continuation carries the pack its remainder
+## was installed with; it is here so the descriptor the emitter derives from
+## the signature and the one this shim declares are the same string.
 fn gen_discard(cw: ClassWriter) -> Unit !io = {
   let m = open_static(cw, "discard",
-    "(L" ++ fn_iface(2) ++ ";)L" ++ UNIT_CLASS ++ ";")
+    "(L" ++ fn_iface(2) ++ ";Ljava/lang/Object;)L" ++ UNIT_CLASS ++ ";")
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "discardK", "()V", true)
   return_unit(m)
