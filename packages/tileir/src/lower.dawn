@@ -1,0 +1,307 @@
+## `TileProg` as a linear Tile IR instruction table: the one sequence both
+## consumers emit. The text renderer (render.dawn) spells each instruction as
+## `cuda_tile` assembly and the bytecode writer (bytecode.dawn) encodes it;
+## neither invents an operation, an operand order or a value number of its
+## own, so the text scripts/tile-golden pins and the bytes `tileiras` accepts
+## are two spellings of this table and cannot drift apart.
+#
+# What lowering adds to the program (tile-backend-design 5.1):
+#
+#   * A memory operation takes a TILE of pointers, never a scalar pointer
+#     plus an index. An entry parameter is a scalar `tile<ptr<T>>`, so every
+#     load and store first spreads it: `reshape` to `tile<1xptr<T>>`,
+#     `broadcast` to `tile<Nxptr<T>>`, then `offset` by a `tile<Nxi32>` of
+#     element offsets, which is `iota` plus the block's base `idx * N`
+#     broadcast the same way. The ladder is emitted once per distinct
+#     (parameter, index, width) and once per distinct (index, width) for the
+#     offsets, in first-use order, so the table is deterministic and does not
+#     repeat itself.
+#   * Memory operations are ordered by tokens: `make_token` starts the chain,
+#     each load answers a value and the next token, each store answers the
+#     next token. The program's own `tok_in` / `tok_out` fields are carried
+#     as they are; lowering does not invent an order.
+#   * `addf` carries `rounding<nearest_even>`; tile-backend-design 3.2's
+#     double-rounding theorem holds for that mode and no other. The renderer
+#     spells it and the writer encodes it; the table has no field for it
+#     because there is no other value it could take.
+#   * `return` closes the body, so a consumer walks one list and nothing else.
+#
+# Values are renumbered on the way out (0, 1, ... in definition order, as
+# scripts/core-golden's coredump does): the program's handles are trace
+# numbers with gaps where the ladders go, and a number that is a function of
+# the table alone is what makes two consumers' outputs comparable. Entry
+# parameters are not values in this numbering: an operand is `Arg(pos)` or
+# `Val(id)`, and each consumer maps the two onto its own name space (`%argN`
+# and `%N` in the text; one flat index space in the bytecode, where the
+# parameters come first).
+use std/list
+use std/map
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, AddF, For}
+
+## The element type of a tile: a number format by its Tile IR name (`i32`,
+## `f32`, `f64`), or a pointer to one.
+pub type Elem =
+  | Num(name: String)
+  | PtrTo(name: String)
+derive Show
+
+## A Tile IR value type: the ordering token, or a tile of `elem` with the
+## given shape (`[]` is the scalar `tile<elem>`, `[n]` is `tile<n x elem>`).
+pub type Ty =
+  | Token
+  | Tile(shape: List[Int], elem: Elem)
+derive Show
+
+## An operand: an entry parameter by position, or the value an earlier
+## instruction defined, by its number.
+pub type Ref =
+  | Arg(pos: Int)
+  | Val(id: Int)
+derive Show
+
+## One Tile IR instruction. Every `dst` / `tok_out` / `x` / `y` / `z` is a
+## value number this instruction defines; every `Ref` refers to a parameter
+## or an earlier definition. The types are the ones the operation's assembly
+## and bytecode both state: a result type on every value-producing
+## instruction, plus the operand types the assembly prints (`from` / `to` on
+## the shape operations, `ptr_ty` / `off_ty` / `val_ty` on the memory ones).
+pub type Instr =
+  | MakeTok(dst: Int)
+  | BlockIds(x: Int, y: Int, z: Int)
+  | ConstI32(dst: Int, value: Int)
+  | MulInt(dst: Int, ty: Ty, lhs: Ref, rhs: Ref)
+  | AddInt(dst: Int, ty: Ty, lhs: Ref, rhs: Ref)
+  | Reshape(dst: Int, src: Ref, from: Ty, to: Ty)
+  | Broadcast(dst: Int, src: Ref, from: Ty, to: Ty)
+  | Iota(dst: Int, ty: Ty)
+  | Offset(dst: Int, ptrs: Ref, offs: Ref, ptr_ty: Ty, off_ty: Ty)
+  | LoadPtr(dst: Int, tok_out: Int, ptrs: Ref, tok_in: Ref, ptr_ty: Ty, val_ty: Ty)
+  | StorePtr(tok_out: Int, ptrs: Ref, value: Ref, tok_in: Ref, ptr_ty: Ty, val_ty: Ty)
+  | AddFloat(dst: Int, ty: Ty, lhs: Ref, rhs: Ref)
+  | Ret
+derive Show
+
+## A lowered kernel: its entry name, the dtype name of each parameter in
+## order (every parameter is a scalar `tile<ptr<dtype>>`), and its body,
+## `Ret` last.
+pub type Kernel = {
+  name: String,
+  params: List[String],
+  body: List[Instr],
+} derive Show
+
+## The scalar `tile<i32>`.
+pub fn i32_scalar() -> Ty = Tile([], Num("i32"))
+
+## The `n`-wide `tile<n x i32>`.
+pub fn i32_vec(n: Int) -> Ty = Tile([n], Num("i32"))
+
+## The scalar pointer tile an entry parameter of format `dtype` is.
+pub fn param_ty(dtype: String) -> Ty = Tile([], PtrTo(dtype))
+
+# The lowering's state, threaded through pure helpers rather than held in
+# `var`s, because the helpers are called from inside a `for` and a closure may
+# not capture a `var` (spec 4.5).
+type L = {
+  next: Int,
+  names: Map[Int, Ref],
+  memo: Map[String, Ref],
+  body: List[Instr],
+}
+
+fn fresh(l: L) -> (L, Int) = (L { ..l, next: l.next + 1 }, l.next)
+
+fn emit(l: L, i: Instr) -> L = L { ..l, body: l.body ++ [i] }
+
+fn bind(l: L, handle: Int, r: Ref) -> L = L { ..l, names: map.insert(l.names, handle, r) }
+
+fn ref_of(l: L, handle: Int, what: String) -> Ref = match map.get(l.names, handle) {
+  Some(r) -> r
+  None -> panic("tileir: `${what}` refers to handle ${handle}, which no earlier operation defined")
+}
+
+# `off = idx * n + iota`, an `n`-wide tile of i32 element offsets. Memoised
+# per (idx handle, n).
+fn offsets(l0: L, idx: Int, n: Int) -> (L, Ref) = {
+  let key = "off:${idx}:${n}"
+  match map.get(l0.memo, key) {
+    Some(r) -> (l0, r)
+    None -> {
+      let base = ref_of(l0, idx, "load/store index")
+      let (l1, c) = fresh(l0)
+      let l2 = emit(l1, ConstI32(c, n))
+      let (l3, m) = fresh(l2)
+      let l4 = emit(l3, MulInt(m, i32_scalar(), base, Val(c)))
+      let (l5, m1) = fresh(l4)
+      let l6 = emit(l5, Reshape(m1, Val(m), i32_scalar(), i32_vec(1)))
+      let (l7, mb) = fresh(l6)
+      let l8 = emit(l7, Broadcast(mb, Val(m1), i32_vec(1), i32_vec(n)))
+      let (l9, io) = fresh(l8)
+      let l10 = emit(l9, Iota(io, i32_vec(n)))
+      let (l11, off) = fresh(l10)
+      let l12 = emit(l11, AddInt(off, i32_vec(n), Val(mb), Val(io)))
+      (L { ..l12, memo: map.insert(l12.memo, key, Val(off)) }, Val(off))
+    }
+  }
+}
+
+# The `n`-wide tile of pointers into parameter `param` at `off`. Memoised per
+# (param, idx handle, n).
+fn pointers(l0: L, param: Int, dtype: String, idx: Int, n: Int) -> (L, Ref) = {
+  let key = "ptr:${param}:${idx}:${n}"
+  match map.get(l0.memo, key) {
+    Some(r) -> (l0, r)
+    None -> {
+      let (l1, off) = offsets(l0, idx, n)
+      let p = PtrTo(dtype)
+      let (l2, p1) = fresh(l1)
+      let l3 = emit(l2, Reshape(p1, Arg(param), Tile([], p), Tile([1], p)))
+      let (l4, pn) = fresh(l3)
+      let l5 = emit(l4, Broadcast(pn, Val(p1), Tile([1], p), Tile([n], p)))
+      let (l6, pt) = fresh(l5)
+      let l7 = emit(l6, Offset(pt, Val(pn), off, Tile([n], p), i32_vec(n)))
+      (L { ..l7, memo: map.insert(l7.memo, key, Val(pt)) }, Val(pt))
+    }
+  }
+}
+
+fn lower_op(l0: L, op: TileOp) -> L = match op {
+  MakeToken(dst) -> {
+    let (l1, t) = fresh(l0)
+    bind(emit(l1, MakeTok(t)), dst, Val(t))
+  }
+  BlockId(dst, axis) -> {
+    let (l1, x) = fresh(l0)
+    let (l2, y) = fresh(l1)
+    let (l3, z) = fresh(l2)
+    let l4 = emit(l3, BlockIds(x, y, z))
+    bind(l4, dst, Val(if axis == 0 { x } else if axis == 1 { y } else { z }))
+  }
+  Load(dst, tok_out, param, dtype, idx, n, tok_in) -> {
+    let tin = ref_of(l0, tok_in, "load token")
+    let (l1, pt) = pointers(l0, param, dtype, idx, n)
+    let (l2, v) = fresh(l1)
+    let (l3, t) = fresh(l2)
+    let l4 = emit(l3, LoadPtr(v, t, pt, tin, Tile([n], PtrTo(dtype)), Tile([n], Num(dtype))))
+    bind(bind(l4, dst, Val(v)), tok_out, Val(t))
+  }
+  Store(tok_out, param, dtype, idx, n, value, tok_in) -> {
+    let tin = ref_of(l0, tok_in, "store token")
+    let v = ref_of(l0, value, "store value")
+    let (l1, pt) = pointers(l0, param, dtype, idx, n)
+    let (l2, t) = fresh(l1)
+    let l3 = emit(l2, StorePtr(t, pt, v, tin, Tile([n], PtrTo(dtype)), Tile([n], Num(dtype))))
+    bind(l3, tok_out, Val(t))
+  }
+  AddF(dst, dtype, n, lhs, rhs) -> {
+    let a = ref_of(l0, lhs, "addf lhs")
+    let b = ref_of(l0, rhs, "addf rhs")
+    let (l1, d) = fresh(l0)
+    bind(emit(l1, AddFloat(d, Tile([n], Num(dtype)), a, b)), dst, Val(d))
+  }
+  For(_iv, _lower, _upper, _step, _inits, _carried, _results, _body) ->
+    panic("tileir: `For` is not lowered in this release (tile-backend-design 5.2, knife 5)")
+}
+
+## `prog` as a `Kernel`: its operations in order, each memory operation
+## preceded by the pointer ladder it needs, `Ret` last. A handle no earlier
+## operation defined is refused rather than numbered.
+pub fn lower(prog: TileProg) -> Kernel = {
+  var l = L { next: 0, names: map.empty(), memo: map.empty(), body: [] }
+  for op in prog.ops {
+    l = lower_op(l, op)
+  }
+  Kernel { name: prog.name, params: prog.params, body: l.body ++ [Ret] }
+}
+
+## The values an instruction defines, in definition order.
+pub fn defines(i: Instr) -> List[Int] = match i {
+  MakeTok(dst) -> [dst]
+  BlockIds(x, y, z) -> [x, y, z]
+  ConstI32(dst, _value) -> [dst]
+  MulInt(dst, _ty, _lhs, _rhs) -> [dst]
+  AddInt(dst, _ty, _lhs, _rhs) -> [dst]
+  Reshape(dst, _src, _from, _to) -> [dst]
+  Broadcast(dst, _src, _from, _to) -> [dst]
+  Iota(dst, _ty) -> [dst]
+  Offset(dst, _ptrs, _offs, _ptr_ty, _off_ty) -> [dst]
+  LoadPtr(dst, tok_out, _ptrs, _tok_in, _ptr_ty, _val_ty) -> [dst, tok_out]
+  StorePtr(tok_out, _ptrs, _value, _tok_in, _ptr_ty, _val_ty) -> [tok_out]
+  AddFloat(dst, _ty, _lhs, _rhs) -> [dst]
+  Ret -> []
+}
+
+# ---- tests ----
+#
+# The two consumers pin their spellings (render.dawn's tests, the text golden,
+# the bytecode golden and `tileiras`). These blocks pin what the table itself
+# promises: values are numbered densely in definition order, the ladder is
+# shared, the token chain is carried, and a dangling handle is refused.
+
+fn two_loads_one_param() -> TileProg = TileProg {
+  name: "twice",
+  params: ["f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    Load(2, 3, 0, "f64", 1, 128, 0),
+    Load(4, 5, 0, "f64", 1, 128, 3),
+    AddF(6, "f64", 128, 2, 4),
+    Store(7, 0, "f64", 1, 128, 6, 5)
+  ]
+}
+
+fn is_offset(i: Instr) -> Bool = match i {
+  Offset(_dst, _ptrs, _offs, _ptr_ty, _off_ty) -> true
+  _ -> false
+}
+
+fn is_iota(i: Instr) -> Bool = match i {
+  Iota(_dst, _ty) -> true
+  _ -> false
+}
+
+test "values are numbered densely in definition order and the body ends in return" {
+  let k = lower(two_loads_one_param())
+  let none: List[Int] = []
+  let all = list.fold(k.body, none, (acc, i) => acc ++ defines(i))
+  assert all == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+  assert k.body[len(k.body) - 1] == Ret
+}
+
+test "the pointer ladder for one parameter at one index is emitted once, not once per memory operation" {
+  let k = lower(two_loads_one_param())
+  assert len(list.filter(k.body, is_offset)) == 1
+  assert len(list.filter(k.body, is_iota)) == 1
+}
+
+test "the token chain is the program's: make_token feeds the first load, each memory op feeds the next" {
+  let k = lower(two_loads_one_param())
+  let f64_128 = Tile([128], Num("f64"))
+  let p64_128 = Tile([128], PtrTo("f64"))
+  assert k.body[0] == MakeTok(0)
+  assert k.body[11] == LoadPtr(13, 14, Val(12), Val(0), p64_128, f64_128)
+  assert k.body[12] == LoadPtr(15, 16, Val(12), Val(14), p64_128, f64_128)
+  assert k.body[13] == AddFloat(17, f64_128, Val(13), Val(15))
+  assert k.body[14] == StorePtr(18, Val(12), Val(17), Val(16), p64_128, f64_128)
+}
+
+test "the ladder reads the entry parameter as an argument, not as a value" {
+  let k = lower(two_loads_one_param())
+  assert k.body[8] == Reshape(10, Arg(0), Tile([], PtrTo("f64")), Tile([1], PtrTo("f64")))
+}
+
+test "block ids along the three axes bind the matching result of one get_tile_block_id" {
+  let p = TileProg {
+    name: "axes",
+    params: ["f64"],
+    ops: [MakeToken(0), BlockId(1, 2), Load(2, 3, 0, "f64", 1, 8, 0)]
+  }
+  let k = lower(p)
+  assert k.body[1] == BlockIds(1, 2, 3)
+  assert k.body[3] == MulInt(5, i32_scalar(), Val(3), Val(4))
+}
+
+test "lowering the same program twice gives the same table" {
+  assert lower(two_loads_one_param()) == lower(two_loads_one_param())
+}

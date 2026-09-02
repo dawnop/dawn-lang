@@ -176,8 +176,8 @@ mutant_run() { # name, kernel
 #    and renders (exit 0), and vadd's text differs from its golden on both
 #    backends, in the store line and nowhere else.
 mutant_project drop-store-token render.dawn \
-  ', ${v} token=${tin} : ${vec(n, ptr_of(dtype))}, ${vec(n, dtype)} -> token' \
-  ', ${v} : ${vec(n, ptr_of(dtype))}, ${vec(n, dtype)} -> token'
+  ', ${name(value)} token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)} -> token' \
+  ', ${name(value)} : ${ty(ptr_ty)}, ${ty(val_ty)} -> token'
 mutant_run drop-store-token vadd
 for backend in jvm native; do
   out="$work/m-drop-store-token.vadd.$backend"
