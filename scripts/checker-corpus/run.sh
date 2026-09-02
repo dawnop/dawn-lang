@@ -92,6 +92,7 @@ done
 # reaches is invisible to every golden above, so the set of unreached sites is
 # a ratchet in both directions -- adding one fails the build, and so does
 # covering one without striking it off uncovered.txt.
+./scripts/checker-corpus/coverage.py --selftest
 if [ "$mode" = record ]; then
   echo "recorded $n cases, $n_diags diagnostics"
   ./scripts/checker-corpus/coverage.py --record

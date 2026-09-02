@@ -12,9 +12,9 @@ ones with no case.
 
 By message text, not by execution. Each site's message expression is expanded
 one level through local `let`/`var` bindings and through same-file helper
-functions, and every string-literal chunk in it (interpolations cut out)
-becomes a candidate; the site counts as reached when a recorded diagnostic
-contains one of them.
+functions. A possible wording becomes a sequence of string-literal chunks
+(interpolations cut out); the site counts as reached only when one recorded
+diagnostic contains every chunk of one possible wording, in source order.
 
 Two consequences, both deliberate:
 
@@ -51,7 +51,6 @@ CASES = "scripts/checker-corpus/cases"
 UNCOVERED = "scripts/checker-corpus/uncovered.txt"
 
 CALL = re.compile(r"\bcerr(_h|_o)?\(")
-STR = re.compile(r'"((?:[^"\\]|\\.)*)"')
 LET = re.compile(
     r"^\s*(?:let|var)\s+(\(?[A-Za-z_][A-Za-z0-9_, ]*\)?)\s*(?::[^=]*)?=", re.M
 )
@@ -136,19 +135,61 @@ def block_after(text, pos):
 
 
 def literals(expr):
-    """Literal chunks of a message expression, interpolations cut out."""
+    """Literal chunks emitted by an expression, interpolations cut out.
+
+    Formatting helpers carry their own literal arguments -- the separator in
+    `join(names, ", ")`, for example. Those are data for the helper rather than
+    fixed chunks of the diagnostic, and requiring them would make a one-item
+    join look unreached. Keep only literals at the expression's shallowest
+    nesting level. Splitting an `if`/`match` branch below gives each branch its
+    own level, while nested helper arguments remain deeper.
+    """
+    found = []
+    depth = 0
+    i = 0
+    while i < len(expr):
+        c = expr[i]
+        if c == "#":
+            end = expr.find("\n", i)
+            i = len(expr) if end < 0 else end + 1
+            continue
+        if c == '"':
+            j = i + 1
+            raw = []
+            while j < len(expr):
+                if expr[j] == "\\" and j + 1 < len(expr):
+                    raw.append(expr[j : j + 2])
+                    j += 2
+                    continue
+                if expr[j] == '"':
+                    break
+                raw.append(expr[j])
+                j += 1
+            body = "".join(raw)
+            body = (
+                body.replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace('\\"', '"')
+                .replace("\\\\", "\\")
+            )
+            found.append((depth, body))
+            i = j + 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}" and depth > 0:
+            depth -= 1
+        i += 1
+
+    if not found:
+        return []
+    shallowest = min(depth for depth, _ in found)
     out = []
-    for m in STR.finditer(expr):
-        body = m.group(1)
-        body = (
-            body.replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace('\\"', '"')
-            .replace("\\\\", "\\")
-        )
-        for piece in re.split(r"\$\{[^}]*\}", body):
-            if piece:
-                out.append(piece)
+    for depth, body in found:
+        if depth == shallowest:
+            for piece in re.split(r"\$\{[^}]*\}", body):
+                if piece:
+                    out.append(piece)
     return out
 
 
@@ -159,10 +200,45 @@ def literals(expr):
 BRANCH = re.compile(r"\}\s*else\s*\{|->|\bif\b|\bmatch\b|[{}]")
 
 
+def branch_segments(expr):
+    """Split only on branch syntax in code, never on words inside strings."""
+    mask = list(expr)
+    i = 0
+    while i < len(expr):
+        if expr[i] == "#":
+            end = expr.find("\n", i)
+            end = len(expr) if end < 0 else end
+            for j in range(i, end):
+                mask[j] = " "
+            i = end
+            continue
+        if expr[i] == '"':
+            j = i + 1
+            while j < len(expr):
+                if expr[j] == "\\" and j + 1 < len(expr):
+                    j += 2
+                    continue
+                if expr[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            for k in range(i, j):
+                mask[k] = " "
+            i = j
+            continue
+        i += 1
+    code = "".join(mask)
+    out = []
+    start = 0
+    for m in BRANCH.finditer(code):
+        out.append(expr[start : m.start()])
+        start = m.end()
+    out.append(expr[start:])
+    return out
+
+
 def patterns(lits, expr):
-    """Regexes a recorded diagnostic may match for this site. Chunks in order,
-    joined by `.*` -- so a site is reached only by a message that has its
-    literal pieces in its literal order, not merely one piece of it."""
+    """Literal sequences a recorded diagnostic may match for this site."""
     cands = []
 
     def add(chunks):
@@ -172,17 +248,40 @@ def patterns(lits, expr):
             return
         if max(len(c) for c in chunks) < MIN_CHUNK and len(chunks) < 3:
             return
-        cands.append(".*".join(re.escape(c) for c in chunks))
+        candidate = tuple(chunks)
+        if candidate not in cands:
+            cands.append(candidate)
 
-    add(lits)
-    # Prefixes too: a message built with `join(...)` or an inner lambda drags
-    # that helper's own literals in after the sentence, and only the sentence
-    # is in the diagnostic.
-    for k in range(1, len(lits)):
-        add(lits[:k])
-    for seg in BRANCH.split(expr):
-        add(literals(seg))
+    # An indirect message helper may choose a complete (message, hint) pair by
+    # `if`/`match`. Each arm is a possible complete wording. Do not split an
+    # arbitrary concatenation merely because it contains a conditional: that
+    # would turn a prefix outside the conditional back into a one-chunk match.
+    stripped = expr.lstrip()
+    if stripped.startswith("if ") or stripped.startswith("match "):
+        for seg in branch_segments(expr):
+            add(literals(seg))
+    else:
+        add(lits)
     return cands
+
+
+def contains_chunks(message, chunks):
+    """Whether every chunk occurs in `message`, in order and without reuse."""
+    at = 0
+    for chunk in chunks:
+        at = message.find(chunk, at)
+        if at < 0:
+            return False
+        at += len(chunk)
+    return True
+
+
+def site_reached(site, messages):
+    return any(
+        contains_chunks(message, chunks)
+        for chunks in site["pats"]
+        for message in messages
+    )
 
 
 def collect_sites():
@@ -226,9 +325,9 @@ def collect_sites():
                 owner = "cerr"
             if owner in ("cerr", "cerr_h", "cerr_o"):
                 continue
-            full = expr
             lits = literals(expr)
-            if not patterns(lits, expr):
+            pats = patterns(lits, expr)
+            if not pats:
                 # An indirect message: either `helper(...)` or a local `msg`.
                 # Expanding any identifier anywhere would drag in every `let cx
                 # = ...` in the file, so resolve a call by its callee's body and
@@ -252,10 +351,11 @@ def collect_sites():
                 # Two rounds: `let (msg, hint) = helper(...)` needs the
                 # binding resolved first and the helper's body after it.
                 for _round in range(2):
+                    resolved = []
                     for body in bodies:
-                        full += " " + body
-                        lits += literals(body)
-                    if lits:
+                        resolved += patterns(literals(body), body)
+                    if resolved:
+                        pats = resolved
                         break
                     nxt = []
                     for body in bodies:
@@ -268,7 +368,7 @@ def collect_sites():
                     "file": rel,
                     "line": line,
                     "expr": " ".join(expr.split()),
-                    "pats": patterns(lits, full),
+                    "pats": pats,
                 }
             )
     return sites
@@ -291,7 +391,67 @@ def recorded_messages():
     return msgs
 
 
+def self_test():
+    shared = (
+        '"`" ++ fname ++ "` uses the effect `" ++ name ++ '
+        '"`, but a local function cannot carry an effect label"'
+    )
+    echoed = (
+        "`unanswered` uses the effect `Ask`, but its signature does not declare !Ask"
+    )
+    pats = patterns(literals(shared), shared)
+    legacy_hit = any(
+        chunk in echoed
+        for chunk in literals(shared)
+        if len(chunk) >= MIN_CHUNK
+    )
+    if not legacy_hit:
+        print("FAIL: shared-chunk control no longer exercises the old matcher", file=sys.stderr)
+        return 1
+    if site_reached({"pats": pats}, [echoed]):
+        print(
+            "FAIL: a diagnostic that echoes only one literal chunk reached the site",
+            file=sys.stderr,
+        )
+        return 1
+    actual = (
+        "`inner` uses the effect `Ask`, but a local function cannot carry an "
+        "effect label"
+    )
+    if not site_reached({"pats": pats}, [actual]):
+        print("FAIL: the complete site wording did not reach the site", file=sys.stderr)
+        return 1
+    ordered = patterns(["first literal", "second literal"], "")
+    if site_reached({"pats": ordered}, ["second literal, then first literal"]):
+        print("FAIL: reversed literal chunks reached the site", file=sys.stderr)
+        return 1
+    joined = '"cannot infer " ++ join(names, ", ") ++ " for `" ++ name ++ "`"'
+    if patterns(literals(joined), joined) != [
+        ("cannot infer ", " for `", "`")
+    ]:
+        print("FAIL: a nested formatting literal became a message chunk", file=sys.stderr)
+        return 1
+    branched = (
+        'if flag { ("left message", "left hint") } '
+        'else { ("right message", "right hint") }'
+    )
+    branch_pats = patterns(literals(branched), branched)
+    if not site_reached({"pats": branch_pats}, ["left message\tleft hint"]):
+        print("FAIL: a complete branch wording did not reach the site", file=sys.stderr)
+        return 1
+    if site_reached({"pats": branch_pats}, ["left message\tright hint"]):
+        print("FAIL: chunks from different branches reached the site", file=sys.stderr)
+        return 1
+    print(
+        "coverage selftest: complete ordered chunks accepted; "
+        "shared-chunk and reversed controls refused"
+    )
+    return 0
+
+
 def main():
+    if "--selftest" in sys.argv:
+        return self_test()
     record = "--record" in sys.argv
     sites = collect_sites()
     msgs = recorded_messages()
@@ -301,7 +461,7 @@ def main():
     n_cov = 0
     for s in sites:
         k = key_of(s, seen)
-        hit = any(re.search(p, m) for p in s["pats"] for m in msgs)
+        hit = site_reached(s, msgs)
         if hit:
             n_cov += 1
         else:
