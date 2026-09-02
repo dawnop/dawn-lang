@@ -284,9 +284,14 @@ jobs:
     # JVM run plus one C build and run each; the runtime object is built
     # once); doubled, the planning value is 269 + 54 = 323s, whose 3x is 969s,
     # so the timeout goes to 17. The run's wall clock does not move: 323s is
-    # far under the native-diff pole.
-    # budget: 3x 323s planning value (265s worst observed + 4s + 54s)
-    timeout-minutes: 17
+    # far under the native-diff pole. The tile golden step added 2026-09-02
+    # is 17s locally (one native build of the clean project, two kernels on
+    # both backends, and two mutants at one native build plus one to two runs
+    # per backend each; the runtime object is built once); doubled, the
+    # planning value is 323 + 34 = 357s, whose 3x is 1071s, so the timeout
+    # goes to 18. Still far under the native-diff pole.
+    # budget: 3x 357s planning value (265s worst observed + 4s + 54s + 34s)
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
 
@@ -317,6 +322,17 @@ jobs:
       # section that owns the rule to go red on both backends. 27s locally.
       - name: narrow float contract (exact oracle, both backends, three mutants)
         run: ./scripts/narrow-contract/run.sh
+
+      # packages/tileir's recording handler and Tile IR text renderer against
+      # scripts/tile-golden/*.mlir, byte for byte, on both backends (layer 0
+      # of docs/tile-backend-design.md 6.2). The script traces each kernel
+      # twice and requires one program, compares the text with the golden,
+      # then removes the store's token operand from a copy of the renderer
+      # (vadd's golden must go red) and pins `load`'s dtype to f64 in a copy
+      # of the typed surface (the f32 kernel must be refused at trace time,
+      # the f64 one untouched). 17s locally.
+      - name: tile IR text golden (both backends, two mutants)
+        run: ./scripts/tile-golden/run.sh
 
       # compiler-plan is an internal top-level package, not one of the
       # publishable packages/* discovered below. Its inline tests own the

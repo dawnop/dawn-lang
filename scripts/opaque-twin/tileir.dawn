@@ -1,0 +1,82 @@
+# The three handle types packages/tileir gives a kernel body: two phantoms
+# over one representation each (`Tile[D] = Int`, `Param[D] = (Int, String)`)
+# and a plain wrapper (`Idx = Int`). Declared here rather than imported for
+# the reason phantom.dawn gives: the gate's substitution runs over this file,
+# and what it must flip is the declaration itself.
+#
+# On the opaque side the run pins, against each target, that identity is the
+# target's: `==`, hashing (a Map key) and rendering of a `Tile[F64]`, a
+# `Param[F32]` and an `Idx` are those of the Int, the (Int, String) and the
+# Int under them. The phantom parameter is bound from the argument
+# (`raw_of(t)` needs no annotation), which is what the alias twin cannot do:
+# with `alias Tile[D] = Int` the argument is a bare Int and `D` has nothing
+# to bind from, so every such call is refused with "cannot infer type
+# parameter(s)" and nothing else. `Idx` alone would compare clean both ways;
+# it rides in this case so the three declarations stay one corpus entry.
+# twin-infer-only: `Tile[D]` and `Param[D]` are phantoms; once the wrappers
+#   are aliases their parameter has nothing to bind from, so the alias side is
+#   refused by inference alone
+use std/io
+use std/map
+
+type F64 = | F64
+type F32 = | F32
+
+opaque type Tile[D] = Int
+opaque type Param[D] = (Int, String)
+opaque type Idx = Int
+
+fn raw_of[D](t: Tile[D]) -> Int = {
+  let h: Int = t
+  h
+}
+
+fn pos_of[D](p: Param[D]) -> Int = {
+  let t: (Int, String) = p
+  let (pos, _dt) = t
+  pos
+}
+
+fn same(what: String, a: String, b: String) -> Unit =
+  if a != b { panic("tileir handle disagrees with its target about " ++ what ++ ": " ++ a ++ " vs " ++ b) } else { () }
+
+pub fn main() -> Unit !io = {
+  let a: Tile[F64] = 7
+  let b: Tile[F64] = 7
+  let c: Tile[F64] = 9
+  same("Tile ==", to_string(a == b), to_string(7 == 7))
+  same("Tile == across handles", to_string(a == c), to_string(7 == 9))
+  same("Tile rendering", to_string(a), to_string(7))
+  let m: Map[Tile[F64], Int] = map.from([(a, 1), (c, 2)])
+  let n: Map[Int, Int] = map.from([(7, 1), (9, 2)])
+  same("Tile hash lookup", to_string(map.get(m, b)), to_string(map.get(n, 7)))
+  same("Tile distinct keys", to_string(map.len(m)), to_string(map.len(n)))
+
+  let p: Param[F32] = (0, "f32")
+  let q: Param[F32] = (0, "f32")
+  let r: Param[F32] = (1, "f32")
+  let rawp: (Int, String) = (0, "f32")
+  let rawr: (Int, String) = (1, "f32")
+  same("Param ==", to_string(p == q), to_string(rawp == rawp))
+  same("Param == across positions", to_string(p == r), to_string(rawp == rawr))
+  same("Param rendering", to_string(p), to_string(rawp))
+  let pm: Map[Param[F32], Int] = map.from([(p, 1), (r, 2)])
+  let pn: Map[(Int, String), Int] = map.from([(rawp, 1), (rawr, 2)])
+  same("Param hash lookup", to_string(map.get(pm, q)), to_string(map.get(pn, rawp)))
+
+  let i: Idx = 3
+  let j: Idx = 3
+  same("Idx ==", to_string(i == j), to_string(3 == 3))
+  same("Idx rendering", to_string(i), to_string(3))
+  same("Idx <", to_string(i < c_idx(4)), to_string(3 < 4))
+
+  # the phantom is bound from the argument, no annotation needed
+  println(to_string(raw_of(a)))
+  println(to_string(pos_of(r)))
+  println("tileir-twin ok")
+}
+
+fn c_idx(v: Int) -> Idx = {
+  let i: Idx = v
+  i
+}
