@@ -1,6 +1,7 @@
 ## The outside world: console, files, environment and subprocesses.
 ## Everything here is `!io`, and everything that can fail answers
-## `Result[T, ForeignError]` (spec §9.8.1).
+## `Result[T, ForeignError]` (spec §9.8.1). The file system also has a
+## named-effect form, `Fs`, whose production handler is `with_fs_real`.
 #
 # These write over the io_* intrinsics, which every backend implements; the
 # handwritten dawn.rt.StdIo is retired. They need no `unsafe_pure`: they are
@@ -385,6 +386,88 @@ pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int
     catch_fault(() => io_run(argv, out_path, err_path))
   }
 
+# ---- the file system as a named effect ----
+#
+# Everything above reaches the host directly. `Fs` is the same file system as
+# a seam a test can answer: one operation per host primitive, answered in
+# production by `with_fs_real` and in a test by arms over a table. It is the
+# first `effect` std declares, and the shape is the one dawnop-site's Clock
+# and Upstream effects settled: a plain declaration, a plain wrapper function
+# as the default handler, and no language support beyond `with handle`.
+#
+# The seam sits BELOW the error surface on purpose, as Upstream's does. An
+# arm answers with the raw `ForeignError` the host would have raised, not with
+# a finished outcome, so `delete`'s spelling checks and its `DeleteOutcome`,
+# `list_dir`'s sort and its `io.not_a_directory`, and the whole staging
+# protocol of `atomic_write_file` stay the code under test when a fake
+# answers. That is also why there are fourteen operations and not fifteen:
+# `atomic_write_file` is composed of the others and has no primitive of its own.
+#
+# No operation declares effects of its own (spec §6.5): what an arm does is
+# charged where the handler is installed, and `with_fs_real` is `!io`.
+#
+# The `io.*` file functions above still say `!io` and still call the host
+# themselves. They move onto these operations one release from now, not in
+# the release that declares them: the compiler and the differential corpora
+# are built by the previous release's toolchain against the std it shipped
+# with (docs/bootstrap.md, the seed feature discipline), and that std has no
+# `Fs` to name. A caller that wants the seam today installs `with_fs_real`
+# and calls the operations.
+
+## The file system, as operations a handler answers. Names carry an `fs_`
+## prefix because `use std/io.{Fs}` brings every operation into the importing
+## module's own namespace (spec §6.5), where `mkdirs` or `read_bytes` is a
+## name a module may well have taken for a helper of its own.
+##
+## The Bool queries answer `false` for whatever the host cannot spell, as
+## their `io.*` twins do; everything else answers `Result`, with an `Err` for
+## what the host refused. `fs_delete` answers whether something was removed
+## (`true`) or was already absent (`false`); `fs_list_names` answers the
+## entries in whatever order the host gave them.
+pub effect Fs {
+  fn fs_is_dir(path: String) -> Bool
+  fn fs_exists(path: String) -> Bool
+  fn fs_is_symlink(path: String) -> Bool
+  fn fs_mkdirs(path: String) -> Result[Unit, ForeignError]
+  fn fs_read_file(path: String) -> Result[String, ForeignError]
+  fn fs_write_file(path: String, content: String) -> Result[Unit, ForeignError]
+  fn fs_read_bytes(path: String) -> Result[Bytes, ForeignError]
+  fn fs_write_bytes(path: String, content: Bytes) -> Result[Unit, ForeignError]
+  fn fs_delete(path: String) -> Result[Bool, ForeignError]
+  fn fs_rename(src: String, dst: String) -> Result[Unit, ForeignError]
+  fn fs_temp_dir(parent: String, prefix: String) -> Result[String, ForeignError]
+  fn fs_temp_file(parent: String, prefix: String) -> Result[String, ForeignError]
+  fn fs_copy_permissions(src: String, dst: String) -> Result[Unit, ForeignError]
+  fn fs_list_names(path: String) -> Result[List[String], ForeignError]
+}
+
+## Run `body` against the real file system. Every arm is the host primitive
+## behind the `io.*` function of the same name, through the same barrier, so
+## an operation answered here and the function answer alike.
+##
+## This is the production handler: a program's `main` (or the innermost
+## boundary that owns a whole unit of file work) installs it once, and
+## everything beneath sees `Fs`. A test installs arms of its own instead.
+pub fn with_fs_real[T](body: fn() -> T !Fs !io) -> T !io = {
+  with handle Fs {
+    fs_is_dir(path) => io_is_dir(path)
+    fs_exists(path) => io_exists(path)
+    fs_is_symlink(path) => io_is_symlink(path)
+    fs_mkdirs(path) => catch_fault(() => io_mkdirs(path))
+    fs_read_file(path) => catch_fault(() => io_read_file(path))
+    fs_write_file(path, content) => catch_fault(() => io_write_file(path, content))
+    fs_read_bytes(path) => catch_fault(() => io_read_bytes(path))
+    fs_write_bytes(path, content) => catch_fault(() => io_write_bytes(path, content))
+    fs_delete(path) => catch_fault(() => io_delete(path))
+    fs_rename(src, dst) => catch_fault(() => io_rename(src, dst))
+    fs_temp_dir(parent, prefix) => catch_fault(() => io_temp_dir(parent, prefix))
+    fs_temp_file(parent, prefix) => catch_fault(() => io_temp_file(parent, prefix))
+    fs_copy_permissions(src, dst) => catch_fault(() => io_copy_permissions(src, dst))
+    fs_list_names(path) => catch_fault(() => io_list_names(path))
+  }
+  body()
+}
+
 # What these blocks may and may not assert is decided by one fact: `kind` is
 # whatever the backend called the failure. On the JVM a missing file is
 # `java.nio.file.NoSuchFileException`; a second backend has no reason to spell
@@ -716,4 +799,110 @@ test "run answers the exit status; a program that cannot start is an Err" {
   assert delete(out) == Ok(Deleted)
   assert delete(err) == Ok(Deleted)
   assert delete(d) == Ok(Deleted)
+}
+
+test "with_fs_real answers every operation from the host" {
+  let ok = (r: Result[Unit, ForeignError]) => match r {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+  with_fs_real(() => {
+    let d = match fs_temp_dir("", "dawn-std-fs-") {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    assert d != ""
+    assert fs_is_dir(d)
+    assert fs_exists(d)
+    assert not fs_is_symlink(d)
+    # the operations see the same file system the functions do
+    assert exists(d)
+    assert ok(fs_mkdirs(d ++ "/sub"))
+    assert is_dir(d ++ "/sub")
+    let f = d ++ "/sub/a.txt"
+    assert ok(fs_write_file(f, "alpha"))
+    assert fs_read_file(f) == Ok("alpha")
+    assert read_file(f) == Ok("alpha")
+    assert fs_read_bytes(f) == Ok(bytes_utf8("alpha"))
+    assert ok(fs_write_bytes(d ++ "/sub/b.bin", bytes_utf8("beta")))
+    assert ok(fs_rename(d ++ "/sub/b.bin", d ++ "/sub/c.bin"))
+    assert not fs_exists(d ++ "/sub/b.bin")
+    assert ok(fs_copy_permissions(f, d ++ "/sub/c.bin"))
+    # unsorted is the contract of the primitive; the sort is list_dir's
+    match fs_list_names(d ++ "/sub") {
+      Ok(names) -> { assert list.sort(names) == ["a.txt", "c.bin"] }
+      Err(_) -> { assert false }
+    }
+    let t = match fs_temp_file(d, "stage-") {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    assert t != ""
+    assert fs_exists(t)
+    # what the host refuses comes back as an Err, not a panic
+    match fs_read_file(d ++ "/nope") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    match fs_list_names(d ++ "/nope") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    # delete answers the bare flag: removed, or already absent
+    assert fs_delete(t) == Ok(true)
+    assert fs_delete(t) == Ok(false)
+    assert fs_delete(f) == Ok(true)
+    assert fs_delete(d ++ "/sub/c.bin") == Ok(true)
+    assert fs_delete(d ++ "/sub") == Ok(true)
+    assert fs_delete(d) == Ok(true)
+    assert not exists(d)
+  })
+}
+
+test "a handler over a table answers Fs without a host" {
+  let ok = (r: Result[Unit, ForeignError]) => match r {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+  let absent = (p: String) => ForeignError {
+    kind: "test.absent",
+    message: "no such entry: " ++ p,
+    cause: None
+  }
+  with handle Fs {
+    var writes: List[(String, String)] = []
+    fs_is_dir(path) => path == "/virt"
+    fs_exists(path) => path == "/virt" || path == "/virt/a.txt"
+    fs_is_symlink(_path) => false
+    fs_mkdirs(_path) => Ok(())
+    fs_read_file(path) => if path == "/virt/a.txt" { Ok("alpha") } else { Err(absent(path)) }
+    fs_write_file(path, content) => {
+      writes = writes ++ [(path, content)]
+      Ok(())
+    }
+    fs_read_bytes(path) => Err(absent(path))
+    fs_write_bytes(path, _content) => Err(absent(path))
+    fs_delete(path) => Ok(path == "/virt/a.txt")
+    fs_rename(src, _dst) => Err(absent(src))
+    fs_temp_dir(parent, prefix) => Ok(parent ++ "/" ++ prefix ++ "0")
+    fs_temp_file(parent, prefix) => Ok(parent ++ "/" ++ prefix ++ "0")
+    fs_copy_permissions(_src, _dst) => Ok(())
+    fs_list_names(path) => if path == "/virt" { Ok(["b", "a"]) } else { Err(absent(path)) }
+  }
+  assert fs_is_dir("/virt")
+  assert not fs_is_dir("/virt/a.txt")
+  assert fs_read_file("/virt/a.txt") == Ok("alpha")
+  match fs_read_file("/virt/z.txt") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.kind == "test.absent" }
+  }
+  assert fs_list_names("/virt") == Ok(["b", "a"])
+  assert fs_temp_dir("/virt", "t-") == Ok("/virt/t-0")
+  assert fs_delete("/virt/a.txt") == Ok(true)
+  assert fs_delete("/virt/gone") == Ok(false)
+  assert ok(fs_write_file("/virt/n.txt", "new"))
+  assert ok(fs_write_file("/virt/m.txt", "more"))
+  # the table saw the writes in order, and no host was involved
+  assert writes == [("/virt/n.txt", "new"), ("/virt/m.txt", "more")]
+  assert not exists("/virt")
 }

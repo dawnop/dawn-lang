@@ -1673,28 +1673,39 @@ pub fn main() -> Unit !io = infers_io()
 
 
 # --- the named-effect tier's status ----------------------------------------
-# The README and the front page both say, in both languages, that the
-# named-effect layer has no internal consumer. That is true today, and it is
-# exactly the shape of sentence that stops being true without anybody noticing:
-# the day `std` or the compiler declares its first `effect`, four outward
-# documents would go on apologising for a feature that had just been adopted,
-# and the only thing that would have caught it is somebody remembering.
+# The README and the front page both say, in both languages, who the
+# named-effect tier's internal consumers are. For a long time the answer was
+# "nobody", and that is exactly the shape of sentence that stops being true
+# without anybody noticing; today the answer is a list of one, `std/io`, which
+# declares `Fs`, and a list is the same shape of sentence twice over: a second
+# declaration can appear without the documents hearing of it, and the first
+# can disappear the same way.
 #
-# So the claim is held from both sides. With no declaration under the roots
-# below, every registered document must carry its sentence; with a declaration,
-# none of them may. Whichever way it moves, the failing check names the
-# documents to edit.
+# So the list is held from both sides, at file granularity, the way
+# builtin-decl-mirror and opaque-twin hold theirs. NAMED_EFFECT_EXPECTED names
+# every file under the roots that declares an effect. A declaration anywhere
+# else is red, which keeps the property the original check was worth: the
+# next person to declare an effect in std or the compiler is named, and has to
+# put it on the list and in the documents. A listed file that stops declaring
+# is red. A listed file that does not exist is red: an exemption has to prove
+# itself (the jvm-only marker taught that one). And every registered document
+# has to carry its sentence about the consumer that exists.
 #
-# Deliberately not covered: whether the tier is *worth* a consumer, and whether
-# a consumer that exists is more than a token. This counts declarations.
+# Deliberately not covered: whether a consumer is more than a token, and
+# whether the compiler ought to be a declarer as well as a consumer. This
+# counts declarations against a list.
 NAMED_EFFECT_ROOTS = ("std", "selfhost/src")
 NAMED_EFFECT_DECL = re.compile(r"(?m)^(?:pub\s+)?effect\s+[A-Za-z_]")
+NAMED_EFFECT_EXPECTED = ("std/io.dawn",)
 NAMED_EFFECT_STATUS = (
-    ("README.md", "no internal consumer"),
-    ("README.zh-CN.md", "没有内部使用者"),
-    ("site/pages/home.md", "no internal consumer"),
-    ("site/pages/home.zh.md", "没有内部使用者"),
+    ("README.md", "its first internal consumer"),
+    ("README.zh-CN.md", "第一个内部使用者"),
+    ("site/pages/home.md", "its first internal consumer"),
+    ("site/pages/home.zh.md", "第一个内部使用者"),
 )
+# The sentence the documents used to carry. Half an edit leaves both in one
+# paragraph, and the new phrase alone would pass it.
+NAMED_EFFECT_STALE = ("no internal consumer", "没有内部使用者")
 
 
 def named_effect_users(sources: dict[str, str]) -> list[str]:
@@ -1703,24 +1714,44 @@ def named_effect_users(sources: dict[str, str]) -> list[str]:
 
 
 def named_effect_status_problems(sources: dict[str, str],
-                                 docs: dict[str, str]) -> tuple[list[str], int]:
-    users = named_effect_users(sources)
+                                 docs: dict[str, str],
+                                 expected: tuple[str, ...] = NAMED_EFFECT_EXPECTED
+                                 ) -> tuple[list[str], int]:
+    users = set(named_effect_users(sources))
     roots = ", ".join(f"{root}/" for root in NAMED_EFFECT_ROOTS)
     bad: list[str] = []
     seen = 0
+    for rel in expected:
+        if rel not in sources:
+            bad.append(f"{rel}: listed in NAMED_EFFECT_EXPECTED as a named-effect "
+                       f"declarer, but no such file exists under {roots}; an "
+                       f"exemption has to name a real file")
+        elif rel not in users:
+            bad.append(f"{rel}: listed in NAMED_EFFECT_EXPECTED as a named-effect "
+                       f"declarer, but declares no effect. Either the declaration "
+                       f"moved (list its new file) or the tier lost its consumer "
+                       f"(say so in the four outward documents)")
+        else:
+            seen += 1
+    for rel in sorted(users - set(expected)):
+        bad.append(f"{rel}: declares an effect, and is not in NAMED_EFFECT_EXPECTED. "
+                   f"The named-effect tier's internal consumers are enumerated: "
+                   f"add the file to the list and the outward documents")
     for rel, fragment in NAMED_EFFECT_STATUS:
         text = docs.get(rel)
         if text is None:
             bad.append(f"{rel}: registered for the named-effect status claim, "
                        f"but does not exist")
             continue
-        if users and fragment in text:
-            bad.append(f"{rel}: still claims the named-effect tier has no internal "
-                       f"consumer ({fragment!r}), but {', '.join(users)} declares "
-                       f"one. The tier has been adopted; say so.")
-        elif not users and fragment not in text:
-            bad.append(f"{rel}: nothing under {roots} declares an effect, so this "
-                       f"document has to say so; expected the phrase {fragment!r}")
+        stale = [old for old in NAMED_EFFECT_STALE if old in text]
+        if stale:
+            bad.append(f"{rel}: still says the named-effect tier has no internal "
+                       f"consumer ({stale[0]!r}), but {', '.join(sorted(users))} "
+                       f"declares one. The tier has been adopted; say so.")
+        elif fragment not in text:
+            bad.append(f"{rel}: {', '.join(expected)} declares the named-effect "
+                       f"tier's internal consumer, so this document has to say so; "
+                       f"expected the phrase {fragment!r}")
         else:
             seen += 1
     return bad, seen
@@ -1761,21 +1792,50 @@ def check_named_effect_status_selftest() -> tuple[list[str], int]:
         return ["named-effect status self-test: prose about effects was read as "
                 f"adoption: {bad[0]}"], 0
 
-    adopted = dict(sources)
-    adopted["std/ask.dawn"] = "pub effect Ask {\n  fn ask() -> Int\n}\n"
-    bad, _ = named_effect_status_problems(adopted, docs)
-    if len(bad) != len(NAMED_EFFECT_STATUS):
-        return ["named-effect status self-test: one declaration in std reddened "
-                f"{len(bad)} of {len(NAMED_EFFECT_STATUS)} outward claims"], 0
+    # A declaration outside the list is the case the original check existed
+    # for, and the list must not have weakened it: one stray declaration, in
+    # either root, reddens and is named.
+    for stray in ("std/ask.dawn", "selfhost/src/check/ask.dawn"):
+        adopted = dict(sources)
+        adopted[stray] = "pub effect Ask {\n  fn ask() -> Int\n}\n"
+        bad, _ = named_effect_status_problems(adopted, docs)
+        if not any(problem.startswith(f"{stray}: declares an effect") for problem in bad):
+            return ["named-effect status self-test: a declaration outside "
+                    f"NAMED_EFFECT_EXPECTED ({stray}) stayed green"], 0
 
+    # The listed file losing its declaration is the reverse direction, and the
+    # documents would go on naming a consumer that is gone.
+    lost = dict(sources)
+    for rel in NAMED_EFFECT_EXPECTED:
+        lost[rel] = NAMED_EFFECT_DECL.sub("# effect gone", lost[rel])
+    bad, _ = named_effect_status_problems(lost, docs)
+    if not any("declares no effect" in problem for problem in bad):
+        return ["named-effect status self-test: removing the listed declaration "
+                "stayed green"], 0
+
+    # An exemption has to prove itself: a listed file that does not exist is
+    # not a consumer, it is a typo with the power to silence the check.
+    bad, _ = named_effect_status_problems(sources, docs,
+                                          NAMED_EFFECT_EXPECTED + ("std/ghost.dawn",))
+    if not any(problem.startswith("std/ghost.dawn: listed") for problem in bad):
+        return ["named-effect status self-test: a listed file that does not exist "
+                "stayed green"], 0
+
+    # And the documents: dropping the sentence, or leaving the old one in.
     silent = dict(docs)
     silent["README.md"] = silent["README.md"].replace(
-        "no internal consumer", "in use throughout the compiler", 1)
+        "its first internal consumer", "a consumer somewhere", 1)
     bad, _ = named_effect_status_problems(sources, silent)
     if not any("has to say so" in problem for problem in bad):
         return ["named-effect status self-test: dropping the claim from README.md "
                 "stayed green"], 0
-    return [], 3
+    regressed = dict(docs)
+    regressed["README.md"] = regressed["README.md"] + "\nIt has no internal consumer.\n"
+    bad, _ = named_effect_status_problems(sources, regressed)
+    if not any("still says" in problem for problem in bad):
+        return ["named-effect status self-test: README.md carrying the retired "
+                "sentence beside the new one stayed green"], 0
+    return [], 7
 
 
 REPOSITORY_POLICY_FILES = (
