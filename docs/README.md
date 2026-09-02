@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` 下现有 97 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 98 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
@@ -130,6 +130,7 @@
 | [operator-traits-design.md](operator-traits-design.md) | historical | `[]` 背后的 `Index`，第六个 prelude trait；权威条文在 spec §4.8。 |
 | [prelude-namespace-design.md](prelude-namespace-design.md) | historical | 函数命名空间的「一道门」与追加兼容性，三刀于 2026-08-02 完成。 |
 | [effects-design.md](effects-design.md) | historical | 用户具名效果 + `with handle`，尾恢复档；权威条文在 spec §6.5，教程见 tutorial §17。 |
+| [tile-backend-design.md](tile-backend-design.md) | current | 接 CUDA Tile IR 后端的立项设计：用户 2026-09-02 裁决分阶段路线（kernel 体是 `!Dev` 效果函数，宿主运行期记录成 Tile 程序）、第一里程碑 vadd f64 端到端、`std/narrow` 立即做、本机 GPU 对拍走台账门。刀 1 已落地：`std/gpu` 的 `Gpu` 效果、`Dtype`、幻影 `Tensor[D]` 与纯的假设备 `with_gpu_fake`。 |
 | [oneshot-design.md](oneshot-design.md) | current | 一次性恢复（one-shot resumption）的**勘察结账**：四路勘察给出本仓第一批实测数字（JVM `Continuation` 70–460 ns、native 影子栈税 15%/5%/2–4%、传染面 1.45%），排除全栈复制/侧栈/wasm 非 CPS 三条路线，路线为 yield 冒泡；2026-08-31 用户立项，§9 六问全裁毕，施工中。 |
 | [core-move2-design.md](core-move2-design.md) | historical | Move 2 的结账与 `CSProtect` 关档。 |
 | [arch-split-design.md](arch-split-design.md) | historical | ARCH-01 拆 `Cx` + ARCH-02 拆 `Gen`，**取代 lowered-ir-design.md §3.2 的六组件方案**。这一块里唯一仍值得整篇读的，理由见下。 |

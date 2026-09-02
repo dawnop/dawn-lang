@@ -1,0 +1,476 @@
+# Tile 后端：宿主效果、假设备与分阶段路线
+
+> 状态：**current**。立项计划由用户于 2026-09-02 裁决（§2 的 D1 至 D4 四条均按推荐），
+> 本文是那份计划稿的正式版，自此是 tile 后端这条线的权威说明。基线 dawn-lang `6396f017`
+> （0.71.0 发布之后、种子已推进到 v0.71.0）；文中 file:line 对 `aca84fb9`（0.71.0），
+> 两者之间只有种子推进，源码未动。
+> **刀 1 已落地**（`std/gpu.dawn`：`Gpu` 效果、`Dtype`、`Tensor[D]`、`with_gpu_fake`），
+> 落地形状以源码为准，§4 描述的就是它；刀 0 与刀 2 起未动工。
+> 前置勘察与计划稿是两份不入库的研究备忘录（agent-handoff 的
+> `cutile-backend-fit.md` 与 `tile-backend-plan.md`），探索过程留在那里，
+> 本文只保留结论与证据坐标。
+> 代码块都不标 `dawn run` / `dawn compile`，`doc-check.py` 不编译它们；
+> 已落地的部分以 `std/gpu.dawn` 及其 test 块为准。
+
+## 1. 目标与非目标
+
+**目标**：让一个 Dawn 程序在宿主侧描述一个 tile kernel，把它编成 CUDA Tile IR 字节码，
+由 `tileiras` 编成 cubin，经 driver API 在 NVIDIA GPU 上启动；并且**同一段宿主程序在没有
+GPU 的机器上用假设备跑完并给出相同答案**。后半句是让宿主逻辑能进 CI 的唯一办法。
+第一里程碑是 f64 向量加法端到端；第二里程碑是 bf16 tile 与循环、条件。
+
+**非目标**，每条都核实过「真的能不碰」：
+
+| 不做 | 核实 |
+|------|------|
+| 通用 GPU 语言、SIMT、线程索引 | Tile IR 本身没有线程索引，无从做起 |
+| 自动并行挖掘（把 `for` 变 tile 运算） | 分阶段路线下 kernel 体显式调用 tile 级操作，没有「从标量循环抬向量」这一步 |
+| 改 checker 的类型规则 | `opaque`（spec.md §2.7）、trait（spec.md §3.5）、`effect` 与 `with handle`（spec.md §6.5）三件现成机制拼出全部类型面，草案与刀 1 均只用它们。唯一例外是门禁脚本 `scripts/opaque-twin/run.sh` 多一种标记（§3.4），那不是 checker |
+| 动 Core、lowering、两个发射器 | 宿主侧新 intrinsic 只加表项与运行时函数（§4.4），发射器按契约不动（runtime-intrinsics-design.md §12.1）。`lower.dawn:1163` 的分组表要不要加组见 §4.4 |
+| CPU 解释器、Tile IR 模拟器 | 假设备答的是 `launch` 这一整个操作（宿主侧参考实现），不模拟 Tile IR 语义；Tile IR 层的正确性只由本机对拍保证（D4） |
+| f32 / bf16 进 `Ty` | D3 已裁：`std/narrow` 的 opaque 方案覆盖 + − × ÷ √ |
+| 接 MLIR、在 CI 里构建 `cuda-tile` | §6.1；本机构建一次只作 round-trip 对拍工具 |
+| 多设备、流、异步 | `Gpu` 效果 v1 同步；`gpu_sync` 存在只为把「launch 返回不等于算完」写进契约 |
+| kernel 之间的函数调用 | Tile IR 无 call；分阶段路线下 Dawn 函数调用在记录时展开，天然内联。递归 helper 靠 handler 的深度计数拒绝（§5.2） |
+
+## 2. 裁决
+
+### 2.1 四条裁决项（用户 2026-09-02 裁决：全部按推荐）
+
+| # | 问题 | 选项 | 推荐（即裁决） | 一句话理由 |
+|---|------|------|---------------|-----------|
+| D1 | 路线 | (a) 子集编译：Core 到 Tile IR 的发射器；(b) 分阶段：kernel 体是 `!Dev` 效果函数，记录 handler 在宿主运行期把一次执行变成 Tile 程序；(c) 混合：(b) 为主，第二里程碑再给同一个 kernel 体加编译期发射 | **(b)，(c) 记为期权而非承诺** | (b) 零编译器改动、零 Core 节点、零 checker 改动；「无 call 对字典传递」这堵墙留在宿主侧自然消失；草案已跑出 vadd 的 Tile IR 文本。代价是 kernel 内依赖 tile 值的控制流要走 `d_if` / `d_for` 而不是 Dawn 的 `if` / `for`（§5.2）。(a) 换来的只是 kernel 里能写原生 `if` / `for` / `+`，要付的是子集标注、第三份「机器的事」语义与那堵墙；(c) 的编译期发射器要等 (b) 稳定后才知道该吃什么形状 |
+| D2 | 第一里程碑范围 | (i) vadd f64 端到端：trace、文本、字节码、`tileiras`、3080 上跑、与假设备对拍；(ii) 只到文本 golden；(iii) 直接含 bf16 | **(i)** | (ii) 的绿没有信息量；(iii) 把类型层与设备层两个未知量绑在一刀里。(i) 是「每一层都被下一层校验过一次」的最小闭环 |
+| D3 | 窄浮点 opaque 进不进 std | (i) 现在进，独立模块 `std/narrow`，与 tile 解耦；(ii) 先只做 f64 tile，bf16 等第二里程碑；(iii) 不做 opaque，等 f32 进 `Ty` | **(i)，排在刀 1 之后、与 tile 并行**；tile 侧第一里程碑仍只用 f64 | 方案核实成立：`opaque type BF16 = Float` 过 checker，`round_binary` 纯 Dawn 实现对 174 个精确 oracle 用例（含溢出、次正规、tie）在 JVM 与 native 上逐位一致且 ASan 干净，opaque 换 alias 后测试照过（§3.2）。它有独立价值（CPU 上模拟量化），Emit-Change 面小。(iii) 是 5 到 10 人日的 checker 战役 |
+| D4 | 本机 GPU 作为 oracle 的纪律 | (i) 本地里程碑门 + 台账文件，CI 检查台账不落后于 tile 相关改动；(ii) 自托管 runner；(iii) 只信层 0 与层 1 | **(i)** | (ii) 把本机 WSL2 暴露给公开仓库的 PR 触发面；(iii) 与「门禁的绿要有信息量」正面冲突。(i) 的机器强制点见 §6.4。前提：本机驱动 560.94 低于 cuTile 硬要求的 r580，先升 Windows 侧驱动；本机也还没装 `nvidia-cuda-tileiras` |
+
+### 2.2 对三条设计前提的修正
+
+维护者给了三条前提（窄浮点 opaque、张量幻影参数、倾向分阶段路线）。核实后三处要改：
+
+1. **「每个运算 = f64 运算后 `round_bf16`」成立，但拼不成运算符。** Dawn 只有 `Index`
+   可由用户实现，`+ - * /` 不是 trait（spec.md §3.5 预置的七个，spec.md:575），且 opaque
+   在声明模块内也不许 `u + 1`（spec.md:385）。所以 bf16 是一族具名函数
+   `narrow.add / mul / ...`，不是 `a + b`。语义结论不变，人体工学降一档（§3.2）。
+2. **「opaque-twin 门禁成立」对 `BF16` 成立，对 `Tensor[D]` 幻影不成立。** 把
+   `pub opaque type Tensor[D] = ...` 换成 `alias` 后 `D` 失去载体，`upload[D](t: Tensor[D])`
+   一类签名处处「cannot infer type parameter(s) D」。这是 spec.md:397 五件事里的
+   「统一判定」在起作用，合法；但 `run.sh` 只有 `twin-rejected`（双方都拒）与
+   `twin-normalise` 两种标记，没有「alias 侧拒、opaque 侧过」。刀 1 给门禁加了第三种（§3.4）。
+3. **层 1「CI 里跑 `tileiras` 编译检查」多一条前置。** `tileiras` 吃字节码不吃 MLIR 文本
+   （README 流水线是 `cuda-tile-translate --mlir-to-cudatilebc` 再 `tileiras`），而
+   `cuda-tile-translate` 不在任何 pip 包里，要从钉在特定 LLVM commit 上的源码构建。所以
+   CI 的编译检查必须等自写字节码写入器（刀 3）落地才进得去；文本 golden（层 0）不受影响。
+   刀序因此把字节码写入器提前到 GPU 运行时之前（§7）。`tileiras` 本身有 pip 包
+   `nvidia-cuda-tileiras`（manylinux x86_64 wheel，37 MB），CI 可钉版本加 sha256 装（§6.1）。
+
+### 2.3 草案里撞到的两个语言事实
+
+- `effect`、`trait`、`type` 共一个命名空间（`passes.dawn:1158`）：`effect Tile` 与
+  `opaque type Tile[D]` 撞名。名字因此一次定好：宿主效果叫 `Gpu`，类型叫 `Tensor[D]`，
+  trait 叫 `Dtype`；`Tile` 与 `Dev` 留给 `packages/tileir`。
+- handler 的状态格不能被 lambda 捕获（`checker.dawn:1978`）：臂里要先 `let s = store`
+  再进 `list.map`。假设备与记录 handler 都会反复撞到，是人体工学坑不是设计坑。
+
+## 3. 类型层
+
+### 3.1 opaque 机制的坐标
+
+- `opaque type X = Float` 合法，spec.md:351 的示例正是 `pub opaque type Meters = Float`；
+  语法与 `alias` 相同，差别只在谁能看穿（spec.md:371）。
+- 转换只在赋值、传参、返回位置；声明模块内 `u + 1` 也是错（spec.md:385）。所有运算都是
+  `let x: Float = a` 解包、算、以 opaque 位置返回自动回包。
+- 运行期 opaque 就是目标（spec.md:388-390），`peel_opaque`（types.dawn:638）是后端看表示的
+  唯一入口；只有五件事允许看见 `TyOpaque`（spec.md:396-403）。
+- 幻影参数明文允许：「即使某个类型参数根本不出现在 target 里，`Phantom[Int]` 与
+  `Phantom[String]` 仍是两个类型」（spec.md:392-394）。
+
+### 3.2 窄浮点：`std/narrow`（刀 0，D3）
+
+没有 `float_to_bits` 一类 intrinsic，舍入用纯算术：找指数（精确的倍增与减半）、按 2 的幂
+缩放到整数域（精确）、`to_int` 截断后手工 ties-to-even、再乘回。次正规靠把量子钳在
+`2^(emin-p+1)`；溢出比较最大有限值后给 `1.0/0.0`。
+
+```dawn
+pub opaque type BF16 = Float
+
+pub fn round_binary(x: Float, p: Int, emin: Int, emax: Int) -> Float
+pub fn round_bf16(x: Float) -> Float = round_binary(x, 8, -126, 127)
+pub fn round_fp16(x: Float) -> Float = round_binary(x, 11, -14, 15)
+pub fn round_f32(x: Float) -> Float = round_binary(x, 24, -126, 127)
+
+pub fn bf16(x: Float) -> BF16 = round_bf16(x)
+pub fn add(a: BF16, b: BF16) -> BF16 = {
+  let x: Float = a
+  let y: Float = b
+  round_bf16(x + y)
+}
+```
+
+证据：Python 用 `fractions.Fraction` 做精确 round-to-nearest-even 作 oracle，58 个输入
+（手挑的 tie、次正规、溢出、`5e-324`、`1.79e308` 边界加 40 个随机 64 位模式）乘三种格式
+共 174 条，JVM `bad=0`，`scripts/spike-native/run.sh` 七项全部 `differential ok`。
+落地时语料进 `scripts/spike-native/narrow_round.dawn` 加手写 `.expect`，oracle 生成脚本进
+`scripts/narrow-contract/`（同 `dtoa-contract` 的形状）。
+
+双舍入定理的适用面：
+
+| 运算 | bf16 (p=8) | fp16 (p=11) | f32 (p=24) | 说明 |
+|------|-----------|-------------|------------|------|
+| `+ − × ÷ √` | 成立，需宽格式精度至少 18 | 至少 24 | 至少 50 | Figueroa：宽格式精度不小于 2p+2 时「宽算一次加窄舍一次」等于窄格式正确舍入。设备上 `addf ... rounding<nearest_even> : tile<Nxbf16>` 是原生 bf16 加，与 `round_bf16(a + b)` 逐位相等就是定理的内容 |
+| fma | 不覆盖 | 不覆盖 | 不覆盖 | 三元运算无定理；拆 `mulf` 加 `addf` 各自舍入，或声明容差 |
+| 超越函数 | 无定理 | 无定理 | 无定理 | 定义为「f64 算再舍入」；设备侧只能容差契约 |
+| matmul / `mmaf` | 容差 | 容差 | 容差 | tensor core 内部 f32 累加且顺序不定。层 2 对拍从第一天就分「逐位」与「容差」两档，逐位那档才是门禁 |
+| fmod | 精确 | 精确 | 精确 | 任何精度下都精确，不需舍入 |
+
+设备侧硬要求：所有 `addf / mulf / divf` 显式写 `rounding<nearest_even>`，其它模式让定理失效。
+
+模块面：只导出 `opaque BF16 / FP16 / F32`、四个 `round_*`、每格式的
+`of / to_f64 / add / sub / mul / div / sqrt`。不导出运算符（做不到）、不导出 fma。
+不给 `BF16` 写 `impl Display`，渲染沿用 `Float`。登记进 `std/modules.txt`。
+Emit-Change 面按刀 1 的实测预估：**全部十个 `emit` label 都动**（见 §8），实报以 prev-diff
+与真父提交对照为准。
+
+### 3.3 `Dtype` 与 `Tensor[D]`（刀 1 已落地）
+
+约束来自 spec.md:636-640：类型参数只出现在投影或不出现在参数位的方法按名字不可调用，
+所以 dtype 以**标记值**入参：
+
+```dawn
+pub type F64 = | F64
+pub type F32 = | F32
+
+pub trait Dtype[D] {
+  fn dtype_name(d: D) -> String
+  fn dtype_bytes(d: D) -> Int
+}
+
+pub opaque type Tensor[D] = (Int, Int)     # 句柄与元素个数；D 幻影
+
+pub fn alloc[D: Dtype](d: D, len: Int) -> Result[Tensor[D], ForeignError] !Gpu
+pub fn upload[D](t: Tensor[D], data: List[Float]) -> Result[Unit, ForeignError] !Gpu
+pub fn download[D](t: Tensor[D]) -> Result[List[Float], ForeignError] !Gpu
+pub fn free[D](t: Tensor[D]) -> Result[Unit, ForeignError] !Gpu
+pub fn launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, ForeignError] !Gpu
+pub fn sync() -> Result[Unit, ForeignError] !Gpu
+pub fn handle_of[D](t: Tensor[D]) -> Int
+pub fn size[D](t: Tensor[D]) -> Int
+```
+
+与计划稿的一处出入：target 从 `Int` 改成 `(Int, Int)`，句柄旁边带上元素个数。原因是
+§4.2 那条纪律：接缝在错误面之下，`upload` 的长度检查、`alloc` 的长度检查、`launch` 的
+grid 检查都在效果**之上**、由 std 函数做，于是两种 handler 都覆盖得到；而长度检查要能做，
+张量值本身就得知道自己多长。std 自己铸的失败种类：`gpu.bad_length`（`alloc` 的 `len < 1`）、
+`gpu.length_mismatch`（`upload` 的长度不符）、`gpu.bad_grid`（`launch` 的 `grid < 1`），
+三者在每个 handler 下都是同一个字符串。
+bf16 的标记类型不在刀 1 里：它与 `std/narrow` 的 opaque `BF16` 是两个东西（元素格式标签
+对宿主上的值），命名要等 `narrow` 落地后一起定，随刀 6 进来。
+
+`Tensor[F64]` 传给要 `Tensor[F32]` 的参数是类型错误，`scripts/checker-corpus/cases/phantom_opaque.dawn`
+把这条钉成 must-red 语料。
+
+### 3.4 opaque-twin 怎么对待这两个 opaque
+
+- `BF16`：`sed 's/^pub opaque type /pub alias /'` 后 `dawn test` 照过，可以按原样进
+  `scripts/opaque-twin/narrow.dawn`，形状照 `char.dawn`：在一次运行内把 `bf16` 上的
+  `==` / `<` / hash 与 `Float` 上的比对，不一致就 `panic`。
+- `Tensor[D]`：alias 版推断失败，是五件事里「可赋值性与统一判定」的合法差异。刀 1 给
+  `run.sh` 加了第三种标记 `# twin-infer-only: <why>`，含义是「opaque 侧必须编译并运行；
+  alias 侧必须被拒，且每条诊断都是 cannot infer type parameter(s)」。它把幻影与 alias
+  的唯一差别拼写成了一个判词：alias 侧若某天开始接受（`D` 从虚空里推出来了）或开始报别的
+  错，都会红。语料 `scripts/opaque-twin/phantom.dawn` 同时在 opaque 侧钉住身份仍是目标的
+  （句柄的 `==` / `<` / hash 与 `(Int, Int)` 一致）。
+
+## 4. 宿主层：`Gpu` 效果族
+
+### 4.1 操作清单（刀 1 已落地）
+
+效果操作不能带类型参数，效果本身也不能（spec.md §6.5），所以操作面是单态、句柄级的；
+§3.3 的类型化包装是唯一的用户面。名字带 `gpu_` 前缀，理由与 `Fs` 的 `fs_` 相同
+（`std/io.dawn:417-420`：`use std/gpu.{Gpu}` 会把操作名倒进引入方命名空间）。
+
+```dawn
+pub effect Gpu {
+  fn gpu_alloc(dtype: String, len: Int) -> Result[Int, ForeignError]
+  fn gpu_upload(handle: Int, data: List[Float]) -> Result[Unit, ForeignError]
+  fn gpu_download(handle: Int) -> Result[List[Float], ForeignError]
+  fn gpu_launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, ForeignError]
+  fn gpu_free(handle: Int) -> Result[Unit, ForeignError]
+  fn gpu_sync() -> Result[Unit, ForeignError]
+}
+```
+
+v1 刻意缺的：`gpu_load_module(bytes)`（第一里程碑 kernel 由 `launch` 的名字查表，模块在
+handler 安装时一次性给；第二里程碑再把「字节码到模块句柄」做成操作）；三维 grid
+（`grid: Int` 先一维，`(Int, Int, Int)` 是零成本升级）；`upload / download` 的
+`List[Float]` 在大数据下应是 `Bytes`，v1 用 `List[Float]` 是为了和假设备的参考实现同一种值，
+第二里程碑换 `Bytes` 并让 `narrow` 提供 bf16 的打包。
+
+### 4.2 `with_gpu_real` 形态（刀 4，接口先定）
+
+照 `with_fs_real`（`std/io.dawn:451-469`）：
+
+```dawn
+pub fn with_gpu_real[T](module: Bytes, body: fn() -> T !Gpu !io) -> T !io
+```
+
+臂里每个操作是一条 `catch_fault(() => gpu_*_host(...))`，`gpu_*_host` 是 `RtGpu` 名下的
+intrinsic（§4.4）。**接缝在错误面之下**（`std/io.dawn:398-406` 的措辞）：臂答的是宿主
+driver 返回的 `ForeignError`（`kind` 是 CUDA 错误名的字符串，与
+runtime-intrinsics-design.md §12.5 说的「后端相关契约位」同待遇），不是加工过的结果。
+
+### 4.3 假设备 `with_gpu_fake`（刀 1 已落地）
+
+```dawn
+pub fn with_gpu_fake[T](kernels: Map[String, fn(List[List[Float]]) -> List[Float]],
+                        body: fn() -> T !Gpu) -> T
+pub fn vadd_ref(ins: List[List[Float]]) -> List[Float]
+pub fn reference_kernels() -> Map[String, fn(List[List[Float]]) -> List[Float]]
+```
+
+- **纯**（签名无 `!io`），所以它进得了 `dawn test --stdlib` 与 comptime。
+- 句柄从 1 起编号，缓冲是 `Map[Int, List[Float]]`；`gpu_alloc` 只接受 `"f64"`（v1 缓冲
+  是 `Float` 表），其它 dtype 答 `Err(kind: "gpu.unsupported_dtype")`，与真设备拒绝它没有
+  的格式同形；不存在的句柄答 `gpu.no_such_buffer`；`gpu_upload` 原样存入，不查长度
+  （长度检查在效果之上）；`gpu_launch` 按名查 `kernels`，把每个实参句柄的内容按序交给
+  参考实现，返回值写进**最后一个**实参的缓冲；名字不在表里答 `gpu.no_kernel`，一个实参都没有
+  答 `gpu.no_arguments`；`grid` 被忽略（参考实现一次算整个向量）。
+- `launch` 用的是宿主侧参考实现，第一里程碑就是 `vadd_ref`。同一个参考实现是层 2 对拍
+  `.expect` 的来源之一（另一来源是手写的期望值）。
+- 今天写不出的断言「一个 `!Gpu` 程序在没有 GPU 的机器上跑完 vadd 并得到正确答案」是
+  `std/gpu.dawn` 的第一个 test 块。
+
+层 2 对拍的形状：同一个 `!Gpu` 程序跑两遍，一遍 `with_gpu_fake` 一遍 `with_gpu_real`，
+输出同一组行。这与 `scripts/spike-native/effect_fs_seam.dawn`（`c569ff18`）一模一样。
+
+### 4.4 intrinsic 与运行时落点（刀 4）
+
+- `types.dawn:3263` 的 `Rt` 加 `RtGpu`；`intrinsics()` 登记 `gpu_alloc_host` 等六项，
+  `internal: true`。运行时模块归属与效果行是两张表（runtime-intrinsics-design.md §12.5）：
+  `gpu_*_host` 的行是 `!io`，归属是 `RtGpu`。
+- C 侧：`runtime/c/dawn_rt.c` 加 `dawn_gpu_*` 六个函数，`dlopen("libcuda.so.1")` 而不是
+  链接期 `-lcuda`，否则每个 native 程序都要装 CUDA 才能链接。
+- JVM 侧：`emit.dawn:794 rt_class` 加一臂映射到 `dawn/rt/Gpu` 类，方法体统一抛
+  「not available on this backend」。发射 `dawn/rt/*` 类字节属于 Emit-Change 大户；按可达性
+  发射意味着不用 gpu 的程序零变化，但 `rtclasses` 生成器改动本身要实报。
+- 分组表：`lower.dawn:1163 inline_intrinsics` 与 `:1229 jvm_only_intrinsics` 只有「两边都有
+  臂」与「JVM 独有」两组，`RtGpu` 走 `rt` 表项不走 inline，所以不必进这两组；但
+  `scripts/intrinsic-parity.py` 的 `rt_class` 锚点要认识 `RtGpu`。门禁改动，墙钟秒级。
+
+### 4.5 kernel 怎么被 `launch` 点名
+
+分阶段路线下不需要 `CFnRef`：kernel 是 §5 记录出来的值，有名字（`entry @vadd`），
+`gpu_launch("vadd", ...)` 传字符串；`with_gpu_real` 装机时拿到整个模块的字节码，
+`cuModuleGetFunction` 按名取。模块与 kernel 名的绑定在宿主层是一张 `Map[String, TileProg]`，
+名字不在表里两种 handler 都答 `Err(kind: "gpu.no_kernel")`。
+
+## 5. 设备层（分阶段路线）
+
+### 5.1 kernel 体是什么值
+
+一个只发 `Dev` 效果的普通 Dawn 函数。操作单态、句柄级，与 `Gpu` 同款；类型化包装加幻影：
+
+```dawn
+pub opaque type Tile[D] = Int                 # kernel 内的 SSA 名
+pub opaque type Param[D] = (Int, String)      # 参数位与 dtype 名，在 param() 处定格
+
+pub effect Dev {
+  fn t_block_id(axis: Int) -> Int
+  fn t_load(param: Int, dtype: String, idx: Int, n: Int) -> Int
+  fn t_store(param: Int, dtype: String, idx: Int, n: Int, v: Int) -> Unit
+  fn t_addf(dtype: String, n: Int, a: Int, b: Int) -> Int
+}
+
+fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let ta = load(a, i, 128)
+  let tb = load(b, i, 128)
+  store(out, i, 128, addf(F64, 128, ta, tb))
+}
+```
+
+`trace_kernel("vadd", [...], () => vadd(param(F64,0), param(F64,1), param(F64,2)))` 在记录
+handler 下跑一遍，草案已产出一段 `cuda_tile.module @m { entry @vadd(...) { ... } }` 文本，
+其中 `get_tile_block_id`、两个 `load_ptr_tko`、`addf ... rounding<nearest_even>`、
+`store_ptr_tko` 与 token 链 `%2 → %4 → %6` 都在。那段文本只证明机制，不是合法 Tile IR：
+真正的 `load_ptr_tko` 要先用 `iota / reshape / broadcast / offset` 把标量指针铺成
+`tile<128xptr<f64>>`。刀 2 的第一件事就是换成规范拼写，以本机 `cuda-tile-translate`
+round-trip 一次为准。
+
+两个设计点：
+
+- **Tile 程序的正式表示是 ADT 不是字符串**：`TileProg = { name, params, ops: List[TileOp] }`，
+  `TileOp` 是 SSA 形式的变体。文本渲染与字节码编码是它的两个消费者，golden 钉文本，
+  `tileiras` 钉字节码。
+- **token 链线性**：handler 里一个 `tok` 状态格，每个内存操作消费上一个、产生下一个。
+
+### 5.2 kernel 内的控制流
+
+记录时 Dawn 的 `if / for / while` 是宿主求值：条件只依赖宿主已知量（形状、参数位、常量）时，
+展开是对的、免费的，也就是 cuTile 里 `ct.Constant` 折叠的效果。条件依赖 tile 值时 Dawn 的
+`if` 拿不到它（`Tile[D]` 是句柄），必须走结构化操作。
+
+**已核实**：效果操作的参数可以是函数类型，handler 臂里能调用它，但那个函数类型不能写
+`!Dev`（在 `effect Dev` 自己的声明体里 `!Dev` 还不在作用域）；写效果变量 `!e` 能过 check，
+但传进去的闭包只准纯或 `!io`（spec.md §6.3：名义类型绑定的效果参数只走空证据），一个发
+`Dev` 操作的循环体在调用点就被拒。所以 `d_for / d_if` 不做成操作，做成 `packages/tileir`
+里的普通函数：
+
+```dawn
+pub fn d_for(start: Int, end: Int, carried: List[Int],
+             body: fn(Int, List[Int]) -> List[Int] !Dev) -> List[Int] !Dev = {
+  let iv = t_loop_begin(start, end, carried)     # 操作：开区域，答归纳变量与区域内携带值名
+  let outs = body(iv, carried_names)             # 宿主跑一次体，体内发的操作落进当前区域
+  t_loop_end(outs)                               # 操作：关区域，答循环之后的携带值名
+}
+```
+
+普通函数的参数类型写 `!Dev` 没有限制。记录 handler 因此维护一个区域栈，这正是 JAX
+`lax.scan` 的 tracing 形状。`d_if` 同理，条件是 `Tile[Bool]` 句柄，两臂各跑一次。
+递归 helper：记录时展开，递归即无限展开；handler 维护展开深度计数，超限 `panic`。
+
+### 5.3 谁把它变成 Tile IR、何时
+
+- **谁**：`packages/tileir`（纯 Dawn 源码包，与 `packages/inflate` 同类）。它声明 `Dev`、
+  `Tile[D] / Param[D]`、记录 handler、`TileProg`、文本渲染器、字节码写入器。不进 std：
+  它不需要 intrinsic（只有 std 能名 intrinsic，`checker.dawn:1801`），而且包可以有自己的
+  版本与 `dawn.toml`，Tile IR 字节码版本钉在包常量里（§6.3）。`std/gpu` 只认 `Bytes`
+  与 kernel 名，不认识 `TileProg`，两边解耦。
+- **何时**：宿主运行期，`launch` 前一次、按 kernel 名缓存。comptime 折叠是期权，前提是
+  `ceval` 能跑 `with handle`，不在本计划内。
+- **产物**：字节码是终态，文本是 golden 与 spike。
+
+### 5.4 子集编译（期权，只记录）
+
+子集 = 「`eff == EPure` 或只含 `!Dev`、一阶、单态、标量只有 Int / Float / Bool、容器只有
+`Param`、控制流只有 Core 三种」；kernel 由 `gpu_launch` 的 `CFnRef` 点名而不加声明标记；
+发射器 `selfhost/src/tile/emit_tile.dawn` 吃 Core，按名拒绝其它节点；SSA 构造、跨层 break、
+循环内 return 的三合一改写是主体。与 §5.1 的兼容点：kernel 体若只用 `Dev` 操作，两条路线
+吃的是同一个函数，这是 D1(c) 期权的形状。
+
+## 6. 工具链与 CI
+
+### 6.1 `tileiras`：能进 CI，钉法照 wasi-sdk
+
+- `pip install nvidia-cuda-tileiras==13.3.36 --only-binary=:all: --no-deps`，wheel 37 MB。
+  钉版本加行内 sha256（`gates.yml:1024-1031` 的写法）。已见版本：13.1.80 / 13.2.51 /
+  13.2.78 / 13.2.86 / 13.3.36 / 13.4.46rc1。sm_86 要字节码不低于 13.2，推荐钉 13.3.36
+  并 `--bytecode-version=13.2`。
+- **许可未核实**：PyPI 页面不标 license，wheel 内应有 NVIDIA 的 SLA 文本，装之前人读一遍，
+  不能自动进 CI。`cuda-tile` 本身是 Apache-2.0 with LLVM Exceptions。
+- `cuda-tile-translate` 不在 pip；构建要 LLVM 特定 commit，小时级，且 2026 年已有 4 个
+  `[LLVM-FIX] Breaking commit` tag。不进 CI，本机构建一次做 round-trip。
+
+### 6.2 三层门
+
+| 层 | 每次 push | 工具 | 抓什么 | 抓不到什么 |
+|----|-----------|------|--------|-----------|
+| 0 文本 golden | 是 | 无 | 记录 handler 与渲染器改了没 | 发的对不对 |
+| 1 字节码编译 | 是（刀 3 之后） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
+| 2 执行对拍 | 否，本机 | 3080 加驱动不低于 580 | 算的对不对（逐位与容差两档） | 其它架构 |
+
+层 0 golden 放 `scripts/tile-golden/*.mlir`，确定性规则照 `coredump.dawn`（SSA 号按首现重编）。
+层 1 是 `packages/tileir` 包测试之外的一个 CI 步骤：对每个 golden 的字节码跑 `tileiras`，
+退出码即判词。
+
+### 6.3 版本钉法
+
+三个数同批改：`nvidia-cuda-tileiras` 的版本与 sha256（`gates.yml`）、`--bytecode-version`
+（`packages/tileir` 的常量，写入字节码头）、本机台账里的驱动版本。
+`scripts/tile-golden/toolchain.txt` 记三者，`gatemap.py` 把它登记为 `packages/tileir/**`
+的 coupled 依赖。
+
+### 6.4 本机对拍脚本与台账（D4 的机器强制点）
+
+- `scripts/tile-gpu-diff/run.sh`：装 `with_gpu_real` 跑每个 `scripts/tile-gpu-diff/*.dawn`，
+  与 `with_gpu_fake` 的输出比（逐位档），再跑容差档；写 `ledger.txt` 一行：
+  `<commit> <date> <driver> <tileiras> <gpu> <pass/fail>`。
+- CI `tile` job 的最后一步：`git diff --name-only <ledger.commit>..HEAD -- packages/tileir
+  std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c scripts/tile-golden` 非空而 `ledger.txt`
+  未在本 push 更新就红。它不证明 GPU 结果进了 CI，它证明**有人在有 GPU 的机器上看过这个
+  commit**。台账 commit 必须是 HEAD 的祖先（照 `advance-seed.sh` 复核 tag 的做法）。
+- 前置：本机 Windows 驱动升到 r580 以上（现 560.94）；WSL2 内装 `nvidia-cuda-tileiras`；
+  `nvidia-smi` 已能看到 3080 / 8.6。驱动升级是用户的事，计划在此处停下等它。
+
+### 6.5 墙钟
+
+新 job `tile` 并行，不 `needs:` 任何长杆。预估：pip 装 37 MB 约 10 s，`tileiras` 编几个
+kernel 秒级，包测试秒级；budget 行按 `check-gate-budgets.py` 规则写。刀 1 与刀 0 只加 std
+测试，落在 `test` job 的 `dawn test --stdlib` 步（`gates.yml:301`），秒级。
+
+## 7. 刀序
+
+种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
+只要求 N−1 jar 能编 HEAD selfhost）。Fs 的那条教训（`std/io.dawn:410-416`：io 函数不能在
+声明 `Fs` 的同一版里改走 `Fs` 操作）在这里不触发，因为没有任何既有 std 函数要改走 `Gpu`。
+
+| 刀 | 今天写不出的断言 | 改动面 | 验收 | 负控 | 人日 |
+|----|-----------------|--------|------|------|------|
+| **1 宿主效果 + 假设备**（已落地） | 「一个 `!Gpu` 程序在没有 GPU 的机器上跑完 vadd 并得到正确答案」 | `std/gpu.dawn`、`modules.txt`、`std.gpu.core` golden、checker-corpus 一条幻影 must-red、opaque-twin 第三种标记与语料 | `dawn test --stdlib` 过 | 删掉 `upload` 的长度校验，假设备下长度不符仍 `Ok` 的测试要红 | 1 到 2 |
+| **0 窄浮点**（与刀 1 并行，D3） | 「`round_bf16(a + b)` 在两个后端上与精确 oracle 逐位一致」 | `std/narrow.dawn`、`scripts/narrow-contract/`、`spike-native/narrow_round.dawn` 加 `.expect`、`opaque-twin/narrow.dawn` | 174 条以上 `differential ok`；twin 过 | ties-to-even 改成 ties-away，oracle 用例红；删量子钳位，`1e-40` 用例红 | 1 到 2 |
+| **2 记录 handler + 文本 golden** | 「同一个 kernel 体记录两次产出逐字节相同的 Tile IR 文本，且与手写 golden 相同」 | `packages/tileir`（`Dev`、`Tile[D] / Param[D]`、`TileProg`、渲染器）、`scripts/tile-golden/vadd.mlir`、包测试 | golden 逐字节；本机 `cuda-tile-translate` 接受文本 | 渲染器少发一个 token 操作数，golden 红；`t_load` 的 dtype 写死 `f64`，`Tile[F32]` 用例红 | 2 到 3 |
+| **3 字节码写入器 + CI 层 1** | 「`tileiras --gpu-name sm_86` 接受我们写的字节码并产出 cubin」 | `packages/tileir/bytecode.dawn`（对照 cuTile.jl `encodings.jl` 与 `writer.jl`，估 1500 行）、`gates.yml` 新 job `tile`、`toolchain.txt` | CI 绿；本机 round-trip 与文本 golden 一致 | 改错一个 op 编码，`tileiras` 红（层 1 的阳性对照，要先证明它会红） | 4 到 6 |
+| **4 `with_gpu_real` + 本机对拍** | 「GPU 算出的 vadd 与假设备逐位一致」 | `RtGpu` 加六个 intrinsic、`dawn_rt.c` 的 `dlopen libcuda`、JVM `dawn/rt/Gpu` 拒绝类、`with_gpu_real`、`scripts/tile-gpu-diff/`、`intrinsic-parity.py` 锚点、CI 台账检查 | 本机 `run.sh` 全绿并写台账；CI 台账门绿 | `launch` 的 grid 写成 0，对拍红；台账 commit 写成非祖先，CI 红 | 3 到 4 |
+| **5 结构化控制流 + 第二个 kernel** | 「带 `d_for` 的归约 kernel 与假设备逐位一致」 | `d_for / d_if` 普通函数加 `t_loop_begin / t_loop_end` 操作、区域栈、token 穿过循环携带值 | 新 golden、层 1、本机对拍 | 循环携带值漏一个，golden 或 `tileiras` 红 | 3 到 4 |
+| **6 BF16 tile** | 「设备 bf16 `addf` 与 `narrow.round_bf16(f64 加)` 对全部 65536 个 bf16 值对加随机对逐位一致」 | `Tensor[BF16 标记]` 的 dtype 表项、宿主 `Bytes` 打包、对拍脚本的逐位档 | 本机对拍；台账 | 设备侧 rounding 属性改 `approx`，对拍红 | 2 |
+| 7（期权）混合路线 | 「同一个 kernel 体经编译期发射器与经记录 handler 产出相同的 Tile 程序」 | `selfhost/src/tile/emit_tile.dawn` | 两路 `TileProg` 相等 | 不在本计划内 | 6 到 10 |
+
+合计（不含刀 7）16 到 23 人日。字节码写入器是最大的单块，也是唯一能让 CI 的绿有信息量的
+一块。每一刀的门禁改动都要报墙钟；没有一刀碰长杆。
+
+## 8. 风险
+
+**墙一（无 f32 / bf16）**：处置 = `std/narrow` 的 opaque 加双舍入定理，已核实可行，代价是
+没有运算符语法。定理只护 `+ − × ÷ √`，其余按 §3.2 的表分「f64 算再舍」与「容差契约」两档；
+tensor core 路径永远只是容差档。剩余风险：某代硬件上 bf16 `addf` 不遵守 nearest_even，
+对拍会抓到但没有修法，只能把该 dtype 降到容差档。
+
+**墙二（无 call 对字典传递）**：分阶段路线下消失：字典传递、闭包、泛型全在宿主运行期跑完，
+kernel 记录出来的是一阶单态 SSA。换来的限制是 §5.2 的结构化控制流与递归上限。
+混合路线（刀 7）重新面对这堵墙。
+
+**墙三（无 CI 执行 oracle）**：处置 = D4。CI 只到层 1，执行只在本机，台账把「有人跑过」
+变成机器可查的事实。剩余风险是一台机器、一种架构（sm_86）。前置：驱动升级。
+
+其它：
+
+- `cuda-tile` 随 LLVM 漂移：只影响本机 round-trip 工具；字节码规范有版本号与兼容规则，
+  我们写 13.2 版字节码，`tileiras` 13.3.36 应读得了，刀 3 第一天验证。
+- `tileiras` 许可：若不许在 CI 上用，层 1 退回本机，CI 只剩层 0，那时把台账门的触发面扩到
+  `scripts/tile-golden/**`。
+- 效果操作的闭包参数不能写自己的效果（§5.2 已核实）：`d_for / d_if` 走普通函数加区域栈。
+- 命名空间与状态格捕获：§2.3。
+- **std 声明的第一个 trait 撞出一处编译器缺陷**：`dawn doc --builtins` 用只含 prelude trait 的表
+  渲染 std 签名，`alloc[D: Dtype]` 的 bound 让它 `panic("unknown trait id")`。刀 1 顺手修成按
+  各模块自己的 trait 表渲染（`selfhost/src/doc.dawn` 的 `builtins_json`）。另一处顺带发现、
+  **未修**的缺陷：`show((1, 4))` 顶层对元组调用在 lowering 里 `panic("lower: no impl for trait 3")`
+  （嵌在列表里 `show([(1, 4)])` 正常），与 opaque 无关，在 main 上可复现，待开 issue。
+- Emit-Change 面：计划稿预估「新 std 模块无人引用，只落 `emit selfhost`」，**刀 1 实测推翻**：
+  与真父提交对照，十个 `emit` label 全动。两个原因，都与引用无关：std 模块的类整体发射进
+  每个程序的输出（`std/gpu.class`、它的闭包与字典类都在 calc 的输出里），而且新模块让
+  ADT id 重编号，生成的字典类名（`gen$common$dict$1$Adt1810` 之类）跟着改。`doc --builtins`
+  也动（参考页列出新模块）。刀 0 同理按十个 label 预估；刀 4 的 `dawn/rt/Gpu` 类与
+  `rtclasses` 改动另计，按 prev-diff 实报。
+- 假设备把旧 bug 固化：`with_gpu_fake` 的参考实现若错，GPU 对拍会「一致地错」。所以每个
+  对拍语料的 `.expect` 必须手写（`spike-native/run.sh` 的规矩），参考实现只是第二份意见。
+
+## 9. 出处
+
+- 本仓：spec.md §2.7（351-411）、§3.5（552-640）、§6.3、§6.5（1573-1660）、§9.8.1、
+  §10.6（2819-2870）；`std/io.dawn:389-475, 860-908`（`Fs` 声明、`with_fs_real`、表 handler
+  测试）；`selfhost/src/check/types.dawn:638, 3263-3300`；`selfhost/src/ir/lower.dawn:1113-1290`；
+  `selfhost/src/jvm/emit.dawn:794-806`；`selfhost/src/check/checker.dawn:1801, 1978`、
+  `passes.dawn:1158`；`scripts/opaque-twin/run.sh`；`scripts/spike-native/run.sh`；
+  `scripts/intrinsic-parity.py`；`scripts/gate-map/gatemap.py`；`.github/workflows/gates.yml`；
+  [bootstrap.md](bootstrap.md)（种子特性纪律）；[runtime-intrinsics-design.md](runtime-intrinsics-design.md)
+  §5、§12.1、§12.5；[effects-design.md](effects-design.md) §1、§2、§6；
+  提交 `b262dcc9`（`Fs` 声明的 Emit-Change 清单）、`c569ff18`（`Fs` seam 双后端语料）。
+- 不入库的研究备忘录：agent-handoff 的 `cutile-backend-fit.md`（Tile IR 事实核实）与
+  `tile-backend-plan.md`（本文的前身，含草案跑出的 Tile IR 文本与 174 条 oracle 的生成脚本）。
+- 外部：NVIDIA/cuda-tile README（MLIR 示例、`cuda-tile-translate --bytecode-version=13.1
+  --mlir-to-cudatilebc`、`tileiras --gpu-name sm_100`、Apache-2.0 with LLVM Exceptions、
+  不接受外部贡献）；Tile IR 规范 operations 节（`get_tile_block_id`、`load_ptr_tko /
+  store_ptr_tko`、`addf ... rounding<nearest_even>`、舍入模式清单）；PyPI
+  `nvidia-cuda-tileiras`（版本表、wheel 平台、未标 license）；PyPI `cuda-tile`（1.5.0，
+  `tileiras` 13.2 只支持 Blackwell 与 Ampere/Ada，驱动不低于 r580，无 CPU 模拟器）；
+  本机 `nvidia-smi`：RTX 3080 / 8.6 / 560.94。
