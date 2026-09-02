@@ -135,8 +135,10 @@ multi-shot and non-tail resumption are not supported. It is specified, implement
 both backends and held by the differential corpus, and it has
 **its first internal consumer**: `std/io` declares `Fs`, the file system as fourteen
 operations, with `with_fs_real` as the handler production installs, so a test can answer
-a file read from a table. That is the one declaration under `std/` and `selfhost/src/`;
-`doc-check.py` keeps the list (`NAMED_EFFECT_EXPECTED`) and reds this paragraph when a
+a file read from a table. The second is `std/gpu`, which declares `Gpu`, the host side of a
+device as six operations, with a pure fake device as the handler a test installs, so a
+`!Gpu` program runs on a machine with no GPU. Those are the two declarations under `std/`
+and `selfhost/src/`; `doc-check.py` keeps the list (`NAMED_EFFECT_EXPECTED`) and reds this paragraph when a
 declaration appears outside it or this one goes away. So read it as a working feature
 that has carried one real seam and not yet a real program, rather than as the thing that
 makes Dawn different. ([docs/spec.md](docs/spec.md) §6.5; differential corpus

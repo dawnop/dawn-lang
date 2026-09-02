@@ -1,0 +1,370 @@
+## The host side of a GPU: a `Gpu` effect whose operations a handler answers,
+## typed tensors over it, and a fake device that answers every operation from
+## host memory so a `!Gpu` program runs on a machine with no GPU at all.
+## The device side (kernels, Tile IR) is not here; see
+## docs/tile-backend-design.md.
+#
+# The shape is std/io's `Fs`: a plain `effect` declaration, plain functions
+# over its operations, and a plain wrapper function as each handler. Effect
+# operations cannot be generic (spec §6.5), so the operations traffic in raw
+# handles and dtype names; the functions below add the phantom-typed
+# `Tensor[D]` and are the only surface a program uses.
+#
+# The seam sits BELOW the error surface, as `Fs`'s does. A handler answers
+# with the raw outcome of the device it stands for; the checks std makes
+# itself (`alloc`'s length, `upload`'s length, `launch`'s grid) live in the
+# functions above the operations, so they are the code under test under
+# every handler, and the three failure kinds they mint are the same string
+# under every handler.
+#
+# `with_gpu_fake` is the only handler in this release. The production one,
+# `with_gpu_real`, arrives with the device runtime (tile-backend-design §4.2)
+# and is `!io`; this one is pure, which is what lets it run inside
+# `dawn test --stdlib` and at comptime.
+use std/list
+use std/map
+
+# ---- element formats ----
+
+## Marker types for element formats: values with no content, passed where a
+## function needs to know the format of a tensor it is about to create.
+## `Dtype` is implemented for each; nothing else is.
+pub type F64 = | F64
+
+## The 32-bit float format. The fake device holds only f64 buffers, so a
+## tensor of this format can be typed but not, in this release, allocated.
+pub type F32 = | F32
+
+## What a device needs to know about an element format. The marker value is
+## the first argument so the methods can be called by name (spec §3.5: a type
+## parameter that appears in no argument position cannot be inferred).
+pub trait Dtype[D] {
+  fn dtype_name(d: D) -> String
+  fn dtype_bytes(d: D) -> Int
+}
+
+impl Dtype[F64] {
+  fn dtype_name(d: F64) -> String = "f64"
+  fn dtype_bytes(d: F64) -> Int = 8
+}
+
+impl Dtype[F32] {
+  fn dtype_name(d: F32) -> String = "f32"
+  fn dtype_bytes(d: F32) -> Int = 4
+}
+
+# ---- tensors ----
+
+## A tensor on the device: the handle the handler issued and its element
+## count. `D` is a phantom (spec §2.7): `Tensor[F64]` and `Tensor[F32]` are two
+## types over one representation, so a kernel argument of the wrong format is
+## a type error and not a launch failure.
+pub opaque type Tensor[D] = (Int, Int)
+
+## The handle a handler issued for `t`, as `launch` wants it.
+pub fn handle_of[D](t: Tensor[D]) -> Int = {
+  let p: (Int, Int) = t
+  let (h, _n) = p
+  h
+}
+
+## The number of elements `t` was allocated with.
+pub fn size[D](t: Tensor[D]) -> Int = {
+  let p: (Int, Int) = t
+  let (_h, n) = p
+  n
+}
+
+# ---- the effect ----
+
+## The device, as operations a handler answers. Names carry a `gpu_` prefix
+## because `use std/gpu.{Gpu}` brings every operation into the importing
+## module's own namespace (spec §6.5).
+##
+## Every operation answers `Result`, with an `Err` for what the device
+## refused. `gpu_alloc` answers a fresh handle for `len` elements of the named
+## format; `gpu_upload` and `gpu_download` move a whole buffer; `gpu_launch`
+## runs the kernel of that name over a one-dimensional grid with the given
+## buffers as its arguments; `gpu_sync` waits for every launch so far.
+## Handles are opaque integers a program never invents.
+pub effect Gpu {
+  fn gpu_alloc(dtype: String, len: Int) -> Result[Int, ForeignError]
+  fn gpu_upload(handle: Int, data: List[Float]) -> Result[Unit, ForeignError]
+  fn gpu_download(handle: Int) -> Result[List[Float], ForeignError]
+  fn gpu_launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, ForeignError]
+  fn gpu_free(handle: Int) -> Result[Unit, ForeignError]
+  fn gpu_sync() -> Result[Unit, ForeignError]
+}
+
+# std's own refusals. Minted above the operations, so they read the same under
+# every handler; a device's own refusals arrive as whatever it called them.
+fn refuse(kind: String, message: String) -> ForeignError =
+  ForeignError { kind: kind, message: message, cause: None }
+
+## A tensor of `len` elements of format `d`. `Err(kind: "gpu.bad_length")`
+## for a `len` below one, before any handler is asked.
+pub fn alloc[D: Dtype](d: D, len: Int) -> Result[Tensor[D], ForeignError] !Gpu =
+  if len < 1 {
+    Err(refuse("gpu.bad_length", "gpu.alloc: a tensor has at least one element, got ${len}"))
+  } else {
+    match gpu_alloc(dtype_name(d), len) {
+      Ok(h) -> {
+        let t: Tensor[D] = (h, len)
+        Ok(t)
+      }
+      Err(e) -> Err(e)
+    }
+  }
+
+## Copy `data` into `t`. `Err(kind: "gpu.length_mismatch")` when `data` does
+## not have exactly `size(t)` elements, before any handler is asked.
+pub fn upload[D](t: Tensor[D], data: List[Float]) -> Result[Unit, ForeignError] !Gpu = {
+  let n = size(t)
+  if len(data) != n {
+    Err(refuse("gpu.length_mismatch",
+      "gpu.upload: the tensor holds ${n} element(s), the data has ${len(data)}"))
+  } else {
+    gpu_upload(handle_of(t), data)
+  }
+}
+
+## The contents of `t`, `size(t)` elements.
+pub fn download[D](t: Tensor[D]) -> Result[List[Float], ForeignError] !Gpu =
+  gpu_download(handle_of(t))
+
+## Release `t`. Its handle answers nothing afterwards.
+pub fn free[D](t: Tensor[D]) -> Result[Unit, ForeignError] !Gpu = gpu_free(handle_of(t))
+
+## Run the kernel named `kernel` over `grid` blocks with `args` as its
+## arguments, in order. `Err(kind: "gpu.bad_grid")` for a `grid` below one,
+## before any handler is asked; a name no handler knows is the handler's
+## refusal (`gpu.no_kernel` from the fake device).
+pub fn launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, ForeignError] !Gpu =
+  if grid < 1 {
+    Err(refuse("gpu.bad_grid", "gpu.launch: a grid has at least one block, got ${grid}"))
+  } else {
+    gpu_launch(kernel, grid, args)
+  }
+
+## Wait until every launch so far has finished. A launch returning is not the
+## kernel having run; a download after `sync` sees the kernel's writes.
+pub fn sync() -> Result[Unit, ForeignError] !Gpu = gpu_sync()
+
+# ---- the fake device ----
+
+## Element-wise addition of the first two arguments: the host-side reference
+## for the `vadd` kernel, and the first entry of `reference_kernels`.
+pub fn vadd_ref(ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  list.map(range(0, len(a)), i => a[i] + b[i])
+}
+
+## The reference implementations the fake device answers `launch` with, by
+## kernel name: `vadd` in this release.
+pub fn reference_kernels() -> Map[String, fn(List[List[Float]]) -> List[Float]] =
+  map.from([("vadd", vadd_ref)])
+
+fn no_such_buffer(handle: Int) -> ForeignError =
+  refuse("gpu.no_such_buffer", "fake device: no buffer with handle ${handle}")
+
+## Run `body` against a device that is a table in host memory. Handles count
+## up from 1 per installation; a buffer is a `List[Float]`, so only the `f64`
+## format is allocatable (`gpu.unsupported_dtype` otherwise); a handle that
+## was never issued or was freed answers `gpu.no_such_buffer`. `gpu_launch`
+## looks `kernel` up in `kernels`, hands the reference implementation the
+## contents of every argument buffer in order, and stores what it returns as
+## the contents of the LAST argument; `grid` is not consulted, a reference
+## implementation computes the whole vector at once; an unknown name answers
+## `gpu.no_kernel`. `gpu_upload` stores its data as given: the length check
+## is `upload`'s, above the operation, and is the same code under every
+## handler.
+##
+## Pure. Two installations share nothing.
+#
+# No `|> list.map(...)` anywhere in this module's non-test code: the pipe
+# contract's drop-method-prepend mutant removes the parser arm that pipes
+# into a qualified call, and std has to keep compiling under it so that the
+# mutant reddens the assertions it owns and nothing else (measured: one such
+# pipe here turned every pipe-contract assertion red).
+pub fn with_gpu_fake[T](kernels: Map[String, fn(List[List[Float]]) -> List[Float]],
+  body: fn() -> T !Gpu) -> T = {
+  with handle Gpu {
+    var next: Int = 1
+    var store: Map[Int, List[Float]] = map.empty()
+    gpu_alloc(dtype, len) =>
+      if dtype != "f64" {
+        Err(refuse("gpu.unsupported_dtype", "fake device: buffers are f64, got ${dtype}"))
+      } else {
+        let h = next
+        next = next + 1
+        store = map.insert(store, h, list.map(range(0, len), _i => 0.0))
+        Ok(h)
+      }
+    gpu_upload(handle, data) =>
+      if map.has(store, handle) {
+        store = map.insert(store, handle, data)
+        Ok(())
+      } else {
+        Err(no_such_buffer(handle))
+      }
+    gpu_download(handle) => match map.get(store, handle) {
+      Some(v) -> Ok(v)
+      None -> Err(no_such_buffer(handle))
+    }
+    gpu_launch(kernel, _grid, args) => match map.get(kernels, kernel) {
+      Some(f) ->
+        if len(args) == 0 {
+          Err(refuse("gpu.no_arguments", "fake device: `${kernel}` launched with no buffers"))
+        } else {
+          # a handler's state cell cannot be captured by a lambda: read it first
+          let s = store
+          match list.find(args, a => not map.has(s, a)) {
+            Some(missing) -> Err(no_such_buffer(missing))
+            None -> {
+              let ins = list.map(args, a => unwrap_or(map.get(s, a), []))
+              store = map.insert(store, args[len(args) - 1], f(ins))
+              Ok(())
+            }
+          }
+        }
+      None -> Err(refuse("gpu.no_kernel", "fake device: no kernel named `${kernel}`"))
+    }
+    gpu_free(handle) =>
+      if map.has(store, handle) {
+        store = map.remove(store, handle)
+        Ok(())
+      } else {
+        Err(no_such_buffer(handle))
+      }
+    gpu_sync() => Ok(())
+  }
+  body()
+}
+
+# ---- tests ----
+#
+# Every block below runs the fake device: there is no other handler in this
+# release, and the assertion the module exists for is the first one, a `!Gpu`
+# program finishing a vector add on a machine with no GPU. Failure kinds are
+# asserted by name only where std or the fake device minted them; a real
+# device's kinds are its own (the same rule std/io's blocks follow).
+
+fn vadd_on_device(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+  let n = len(xs)
+  let a = alloc(F64, n)?
+  let b = alloc(F64, n)?
+  let out = alloc(F64, n)?
+  upload(a, xs)?
+  upload(b, ys)?
+  launch("vadd", 1, [handle_of(a), handle_of(b), handle_of(out)])?
+  sync()?
+  let r = download(out)?
+  free(a)?
+  free(b)?
+  free(out)?
+  Ok(r)
+}
+
+test "a !Gpu program runs vadd on a machine without a GPU and gets the right answer" {
+  let xs = [1.0, 2.5, -3.0, 4.0, 0.125, 1000000.0, -0.5, 7.0]
+  let ys = [10.0, 0.5, 3.0, -4.0, 0.875, 0.5, -0.5, 0.0]
+  let r = with_gpu_fake(reference_kernels(), () => vadd_on_device(xs, ys))
+  assert r == Ok([11.0, 3.0, 0.0, 0.0, 1.0, 1000000.5, -1.0, 7.0])
+  # a single element, and the last argument is the one written
+  assert with_gpu_fake(reference_kernels(), () => vadd_on_device([2.0], [3.0])) == Ok([5.0])
+}
+
+fn kind_of[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn wrong_length_upload() -> Result[List[Float], ForeignError] !Gpu = {
+  let t = alloc(F64, 3)?
+  match upload(t, [1.0, 2.0, 3.0, 4.0]) {
+    Ok(_) -> Err(refuse("test.accepted", "a wrong-length upload was accepted"))
+    Err(e) ->
+      if e.kind == "gpu.length_mismatch" { download(t) } else { Err(e) }
+  }
+}
+
+test "upload of a vector of the wrong length is refused above the effect" {
+  # refused with std's own kind, and the buffer is untouched
+  assert with_gpu_fake(reference_kernels(), wrong_length_upload) == Ok([0.0, 0.0, 0.0])
+  # the same refusal under a handler that would have accepted anything: the
+  # check is not the fake device's
+  let under_yes = {
+    with handle Gpu {
+      gpu_alloc(_dtype, _len) => Ok(1)
+      gpu_upload(_handle, _data) => Ok(())
+      gpu_download(_handle) => Ok([])
+      gpu_launch(_kernel, _grid, _args) => Ok(())
+      gpu_free(_handle) => Ok(())
+      gpu_sync() => Ok(())
+    }
+    wrong_length_upload()
+  }
+  # had the check been the handler's, this handler accepts and `test.accepted` comes back
+  assert under_yes == Ok([])
+}
+
+fn alloc_refusals() -> (String, String, String) !Gpu = {
+  let empty: Result[Tensor[F64], ForeignError] = alloc(F64, 0)
+  let negative: Result[Tensor[F64], ForeignError] = alloc(F64, 0 - 4)
+  let f32: Result[Tensor[F32], ForeignError] = alloc(F32, 4)
+  (kind_of(empty), kind_of(negative), kind_of(f32))
+}
+
+test "alloc refuses an empty tensor above the effect, and the fake device refuses a format it cannot hold" {
+  assert with_gpu_fake(reference_kernels(), alloc_refusals)
+    == ("gpu.bad_length", "gpu.bad_length", "gpu.unsupported_dtype")
+  assert dtype_name(F64) == "f64"
+  assert dtype_bytes(F64) == 8
+  assert dtype_name(F32) == "f32"
+  assert dtype_bytes(F32) == 4
+}
+
+fn launch_refusals() -> List[String] !Gpu = {
+  let a: Result[Tensor[F64], ForeignError] = alloc(F64, 2)
+  let h = match a {
+    Ok(t) -> handle_of(t)
+    Err(_) -> 0 - 1
+  }
+  [
+    # the grid is checked before the name is looked up: `nope` never reaches the device
+    kind_of(launch("nope", 0, [h])),
+    kind_of(launch("nope", 1, [h])),
+    kind_of(launch("vadd", 1, [])),
+    kind_of(launch("vadd", 1, [h, h, 99])),
+    kind_of(launch("vadd", 4, [h, h, h]))
+  ]
+}
+
+test "launch refuses a grid of zero above the effect; the fake device refuses what it does not have" {
+  assert with_gpu_fake(reference_kernels(), launch_refusals)
+    == ["gpu.bad_grid", "gpu.no_kernel", "gpu.no_arguments", "gpu.no_such_buffer", "ok"]
+}
+
+fn use_after_free() -> (Int, Int, String, String) !Gpu = {
+  let a: Result[Tensor[F64], ForeignError] = alloc(F64, 2)
+  let b: Result[Tensor[F64], ForeignError] = alloc(F64, 2)
+  match (a, b) {
+    (Ok(ta), Ok(tb)) -> {
+      let freed = kind_of(free(ta))
+      let after = kind_of(download(ta))
+      let twice = kind_of(free(ta))
+      let still = kind_of(download(tb))
+      (handle_of(ta), size(tb), freed ++ "/" ++ after ++ "/" ++ twice, still)
+    }
+    _ -> (0, 0, "alloc failed", "alloc failed")
+  }
+}
+
+test "a freed buffer answers nothing, and two installations share nothing" {
+  let first = with_gpu_fake(reference_kernels(), use_after_free)
+  assert first == (1, 2, "ok/gpu.no_such_buffer/gpu.no_such_buffer", "ok")
+  # handles start over: the second installation did not inherit the first's table
+  let second = with_gpu_fake(reference_kernels(), use_after_free)
+  assert second == first
+}

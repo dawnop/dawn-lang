@@ -39,6 +39,26 @@
 #      0 on the opaque side. A ratchet both ways, so a case cannot quietly stop
 #      compiling *or* quietly start.
 #
+# ## The third verdict: a phantom parameter
+#
+# `opaque type Tensor[D] = (Int, Int)` has a parameter its target drops. spec
+# 2.7 says the instances are still distinct types, and the way that shows is
+# the one place the twin cannot follow: `fn handle_of[D](t: Tensor[D])` binds
+# `D` from the argument on the opaque side, while on the alias side the
+# argument is a bare `(Int, Int)` and `D` has nothing to bind from, so every
+# call is refused with "cannot infer type parameter(s)". That is spec 2.7's
+# "unification" in the list of five things allowed to see the wrapper, and it
+# is legitimate -- but neither verdict above spells it: the case is not
+# rejected on the opaque side, and the two sides cannot agree. So a case whose
+# only alias-side difference is inference carries `# twin-infer-only: <why>`,
+# which means: the opaque side must compile and run, the alias side must be
+# refused, and every error it is refused with must be that one. A wrapper that
+# started *unlocking* inference (the alias side compiling), or a checker that
+# started refusing the alias side for some other reason, both fail the case.
+# The opaque side still runs in full, so the identity claims it makes (`==`,
+# hash, rendering are the tuple's) are still checked, against the target,
+# inside one run, the way char.dawn does it.
+#
 # `--self-check` drives 1 and 2 with deliberately broken toolchains and requires
 # a non-zero exit, since a liveness check nobody has seen fail is a comment.
 #
@@ -155,6 +175,7 @@ for c in "${cases[@]}"; do
   "$DAWN" run "$src" > "$OUT/$c.opaque" 2>&1
   opaque_rc=$?
   "$DAWN" run "$OUT/${c}_twin.dawn" > "$OUT/$c.alias" 2>&1
+  alias_rc=$?
 
   # The case's own verdict, declared in the case. Without this a case that
   # stops compiling keeps agreeing with itself forever; with it, "rejected" is
@@ -171,6 +192,28 @@ for c in "${cases[@]}"; do
     printf '       (a case that must stay rejected declares: # twin-rejected: <why>)\n'
     sed 's/^/       /' "$OUT/$c.opaque" | head -10
     fail=1
+    continue
+  fi
+
+  # The phantom verdict (see header): the alias twin must be refused, and only
+  # for inference. No diff is taken, because the two sides are declared to
+  # differ; what is checked instead is *how* they differ.
+  if grep -q '^# twin-infer-only' "$src"; then
+    if [ "$alias_rc" -eq 0 ]; then
+      printf 'FAIL %s -- declares twin-infer-only, but its alias twin compiles and runs now:\n' "$c"
+      printf '       the parameter is no longer a phantom, or the checker infers it from nothing\n'
+      fail=1
+    elif grep '^error:' "$OUT/$c.alias" | grep -qv 'cannot infer type parameter'; then
+      printf 'FAIL %s -- its alias twin is refused for something other than inference\n' "$c"
+      grep '^error:' "$OUT/$c.alias" | grep -v 'cannot infer type parameter' | sed 's/^/       /' | head -10
+      fail=1
+    elif ! grep -q '^error:' "$OUT/$c.alias"; then
+      printf 'FAIL %s -- its alias twin failed (exit %d) without a diagnostic\n' "$c" "$alias_rc"
+      sed 's/^/       /' "$OUT/$c.alias" | head -10
+      fail=1
+    else
+      printf 'ok   %s (alias twin refused, inference only)\n' "$c"
+    fi
     continue
   fi
 

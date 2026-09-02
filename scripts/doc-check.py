@@ -1696,7 +1696,7 @@ pub fn main() -> Unit !io = infers_io()
 # counts declarations against a list.
 NAMED_EFFECT_ROOTS = ("std", "selfhost/src")
 NAMED_EFFECT_DECL = re.compile(r"(?m)^(?:pub\s+)?effect\s+[A-Za-z_]")
-NAMED_EFFECT_EXPECTED = ("std/io.dawn",)
+NAMED_EFFECT_EXPECTED = ("std/gpu.dawn", "std/io.dawn")
 NAMED_EFFECT_STATUS = (
     ("README.md", "its first internal consumer"),
     ("README.zh-CN.md", "第一个内部使用者"),

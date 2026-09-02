@@ -1,0 +1,23 @@
+# spec §2.7: a generic opaque type's instance identity carries its type
+# arguments even when the target drops every one of them. std/gpu's
+# `Tensor[D]` is the phantom this repository ships: one `(Int, Int)` handle
+# under every `D`, so a `Tensor[F64]` handed to a `Tensor[F32]` slot has to be
+# refused by the checker, because nothing at run time could tell them apart
+# (docs/tile-backend-design.md 3.3). `opaque_type_args` pins the same rule on a
+# module-local phantom; this case pins it on the std one, so that `Tensor`
+# quietly becoming an alias, or losing its parameter, reds here.
+use std/gpu.{Gpu, Tensor, F32, F64, alloc, size}
+
+fn wants_f32(t: Tensor[F32]) -> Int = size(t)
+
+# accepted: the format the slot asks for
+fn ok() -> Result[Int, ForeignError] !Gpu = {
+  let t = alloc(F32, 4)?
+  Ok(wants_f32(t))
+}
+
+# refused: an f64 tensor in an f32 slot
+fn bad() -> Result[Int, ForeignError] !Gpu = {
+  let t = alloc(F64, 4)?
+  Ok(wants_f32(t))
+}
