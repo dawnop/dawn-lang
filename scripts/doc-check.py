@@ -425,6 +425,16 @@ SPEC_CONTRACTS = (
 
 SPEC_PATHS = {ROOT / "docs/spec.md", ROOT / "docs/spec.en.md"}
 
+# A line carrying this marker is a machine-readable list of builtin function
+# names claimed by the normative specs. The declaration mirror is already held
+# against the compiler's intrinsic table by builtin-decl-contract; checking the
+# marked prose against that mirror closes the other half, where prose can mint
+# a builtin that does not exist. Only lower-case identifier spans are function
+# names, so adjacent type names such as `Int` and `Float` stay ordinary prose.
+SPEC_BUILTIN_LIST_MARKER = "<!-- doc-check: builtin-list -->"
+PUBLIC_BUILTIN_DECL = re.compile(r"(?m)^pub fn\s+([a-z][A-Za-z0-9_]*)\b")
+BUILTIN_DECL_PATH = ROOT / "selfhost/builtins.dawn"
+
 HISTORICAL_V01_MARKER = "<!-- doc-check: historical-v0-1 -->"
 
 HISTORICAL_AUDIT_HEADING = "冻结后的历史状态层（截至 `76491bb`）"
@@ -1529,6 +1539,41 @@ def propagation_contract_problems(rel: str, text: str) -> tuple[list[str], int]:
     return bad, int(bool(propagation)) + int(bool(jumps))
 
 
+def builtin_list_contract_problems(
+        texts: dict[pathlib.Path, str]) -> tuple[list[str], int]:
+    """Hold every builtin name explicitly listed in the specs to the mirror."""
+    declared = set(PUBLIC_BUILTIN_DECL.findall(
+        BUILTIN_DECL_PATH.read_text(encoding="utf-8")))
+    if not declared:
+        return [f"{BUILTIN_DECL_PATH.relative_to(ROOT)}: no public builtin declarations found"], 0
+
+    bad: list[str] = []
+    seen = 0
+    for path in sorted(SPEC_PATHS):
+        rel = str(path.relative_to(ROOT))
+        text = texts.get(path)
+        if text is None:
+            bad.append(f"{rel}: cannot check builtin list; document missing")
+            continue
+        marked = [line for line in text.splitlines()
+                  if SPEC_BUILTIN_LIST_MARKER in line]
+        if len(marked) != 1:
+            bad.append(f"{rel}: expected one {SPEC_BUILTIN_LIST_MARKER} line, "
+                       f"found {len(marked)}")
+            continue
+        names = [name for name in inline_code_spans(marked[0])
+                 if re.fullmatch(r"[a-z][A-Za-z0-9_]*", name)]
+        if not names:
+            bad.append(f"{rel}: builtin-list marker names no builtin functions")
+            continue
+        unknown = sorted(set(names) - declared)
+        if unknown:
+            bad.append(f"{rel}: builtin-list names function(s) absent from "
+                       f"selfhost/builtins.dawn: {', '.join(unknown)}")
+        seen += len(names)
+    return bad, seen
+
+
 def spec_contract_problems(texts: dict[pathlib.Path, str]) -> tuple[list[str], int]:
     normalized = {path: normalize_prose(text) for path, text in texts.items()}
     bad: list[str] = []
@@ -1561,6 +1606,9 @@ def spec_contract_problems(texts: dict[pathlib.Path, str]) -> tuple[list[str], i
         problems, count = propagation_contract_problems(rel, text)
         bad += problems
         seen += count
+    problems, count = builtin_list_contract_problems(texts)
+    bad += problems
+    seen += count
     return bad, seen
 
 
@@ -1584,6 +1632,17 @@ def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[
     bad, _ = spec_contract_problems(mutated)
     if not any("release failure precedence" in problem for problem in bad):
         return ["spec contract self-test: an HTML comment falsely satisfied a clause"], 0
+
+    false_builtin = dict(texts)
+    marked = next((line for line in false_builtin[zh].splitlines()
+                   if SPEC_BUILTIN_LIST_MARKER in line), None)
+    if marked is None or "`to_int`" not in marked:
+        return ["spec contract self-test: builtin-list fixture is absent"], 0
+    false_builtin[zh] = false_builtin[zh].replace(
+        marked, marked.replace("`to_int`", "`sqrt`"), 1)
+    bad, _ = spec_contract_problems(false_builtin)
+    if not any("builtin-list names function(s) absent" in problem for problem in bad):
+        return ["spec contract self-test: a nonexistent builtin passed the prose mirror"], 0
 
     fixtures = (
         (ROOT / "docs/spec.md", "3.1 函数",
@@ -1634,7 +1693,7 @@ def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[
         if not any(problem.startswith(rel + ":")
                    and "expression-level Option/Result propagation" in problem for problem in bad):
             return [f"spec contract self-test: {rel} accepted obsolete ? semantics"], 0
-    return [], 7
+    return [], 8
 
 
 def check_effect_inference_probe() -> tuple[list[str], int]:
