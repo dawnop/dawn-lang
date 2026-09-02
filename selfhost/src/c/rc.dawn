@@ -1135,39 +1135,153 @@ fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
     CContinue(_) -> (st, e)
   }
 
+fn assigns_spread_list(es: List[CExpr], sym: Int) -> Bool = {
+  for e in es {
+    if assigns_spread_expr(e, sym) { return true }
+  }
+  false
+}
+
+fn assigns_spread_opt(e: Option[CExpr], sym: Int) -> Bool =
+  match e {
+    None -> false
+    Some(x) -> assigns_spread_expr(x, sym)
+  }
+
+# A projection may move ahead of the statements between its binding and the
+# rebuilt constructor only while those statements still name the same record.
+# Assignments can hide in a nested block or branch, so the test walks the full
+# Core expression rather than looking only for a top-level CSAssign.
+fn assigns_spread_expr(e: CExpr, sym: Int) -> Bool =
+  match e {
+    CCall(callee, args, _) -> {
+      let in_callee = match callee {
+        CDynamic(target) -> assigns_spread_expr(target, sym)
+        CMethod(dict, _, _, _, _) -> assigns_spread_expr(dict, sym)
+        _ -> false
+      }
+      in_callee || assigns_spread_list(args, sym)
+    }
+    CIntrinsic(_, args, _) -> assigns_spread_list(args, sym)
+    CCtor(_, _, args, _) -> assigns_spread_list(args, sym)
+    CField(target, _, _, _, _) -> assigns_spread_expr(target, sym)
+    CIsCtor(target, _, _) -> assigns_spread_expr(target, sym)
+    CTagOf(target, _) -> assigns_spread_expr(target, sym)
+    CClosure(_, _, caps, _) -> assigns_spread_list(caps, sym)
+    CDictApply(_, args, _) -> assigns_spread_list(args, sym)
+    CDictArg(dict, _, _, _, _) -> assigns_spread_expr(dict, sym)
+    CTuple(elems, _) -> assigns_spread_list(elems, sym)
+    CTupleGet(target, _, _) -> assigns_spread_expr(target, sym)
+    CBox(inner, _) -> assigns_spread_expr(inner, sym)
+    CUnbox(inner, _) -> assigns_spread_expr(inner, sym)
+    CBinary(_, left, right, _) ->
+      assigns_spread_expr(left, sym) || assigns_spread_expr(right, sym)
+    CUnary(_, operand, _) -> assigns_spread_expr(operand, sym)
+    CIf(cond, thn, els, _) ->
+      assigns_spread_expr(cond, sym) || assigns_spread_expr(thn, sym) ||
+      assigns_spread_opt(els, sym)
+    CBlock(stmts, tail, _) ->
+      assigns_spread_stmts(stmts, sym) || assigns_spread_opt(tail, sym)
+    CListLit(elems, _) -> assigns_spread_list(elems, sym)
+    CReturn(value) -> assigns_spread_opt(value, sym)
+    CDup(inner, _) -> assigns_spread_expr(inner, sym)
+    CForeign(j, _) -> {
+      let in_target = match j.target {
+        None -> false
+        Some(target) -> assigns_spread_expr(target, sym)
+      }
+      in_target || assigns_spread_list(j.args, sym) ||
+        assigns_spread_list(sam_ev_exprs(j), sym)
+    }
+    CInt(_) -> false
+    CFloat(_) -> false
+    CBool(_) -> false
+    CStr(_) -> false
+    CUnit -> false
+    CLocal(_, _) -> false
+    CFnRef(_, _, _) -> false
+    CDictRef(_, _, _, _) -> false
+    CConstRef(_, _, _) -> false
+    CComptime(_, _, _) -> false
+    CBreak(_) -> false
+    CContinue(_) -> false
+  }
+
+fn assigns_spread_stmt(s: CStmt, sym: Int) -> Bool =
+  match s {
+    CSLet(_, _, init) -> assigns_spread_expr(init, sym)
+    CSAssign(target, value) -> target == sym || assigns_spread_expr(value, sym)
+    CSDiscard(value) -> assigns_spread_expr(value, sym)
+    CSLoop(_, body, step) ->
+      assigns_spread_expr(body, sym) || assigns_spread_opt(step, sym)
+    CSIf(cond, thn, els) ->
+      assigns_spread_expr(cond, sym) || assigns_spread_expr(thn, sym) ||
+      assigns_spread_opt(els, sym)
+    CSDrop(_) -> false
+  }
+
+fn assigns_spread_stmts(stmts: List[CStmt], sym: Int) -> Bool = {
+  for s in stmts {
+    if assigns_spread_stmt(s, sym) { return true }
+  }
+  false
+}
+
+fn assigned_after(stmts: List[CStmt], at: Int, sym: Int) -> Bool = {
+  var i = at + 1
+  while i < len(stmts) {
+    if assigns_spread_stmt(stmts[i], sym) { return true }
+    i = i + 1
+  }
+  false
+}
+
 fn schedule_record_update(st: RSt, stmts: List[CStmt], tail: Option[CExpr]) ->
   (RSt, List[CStmt], Option[CExpr]) = {
-    if len(stmts) != 1 { return (st, stmts, tail) }
-    match stmts[0] {
-      CSLet(base, _, init) ->
-        match tail {
-          Some(t) ->
-            match spread_rebuild(t, base) {
-              Some((adt, ci)) -> {
-                let source = match init {
-                  CLocal(sym, _) -> sym
-                  _ -> -1
+    match tail {
+      None -> (st, stmts, tail)
+      Some(t) -> {
+        # Prefer the nearest eligible binding. Besides moving projections the
+        # shortest distance, this preserves the old single-statement choice
+        # if a hand-written constructor happens to project several records.
+        var at = len(stmts) - 1
+        while at >= 0 {
+          match stmts[at] {
+            CSLet(base, _, init) ->
+              match spread_rebuild(t, base) {
+                Some((adt, ci)) -> {
+                  let source = match init {
+                    CLocal(sym, _) -> sym
+                    _ -> -1
+                  }
+                  let changed = assigned_after(stmts, at, base) || assigns_spread_expr(t, base) ||
+                    (source >= 0 &&
+                        (assigned_after(stmts, at, source) || assigns_spread_expr(t, source)))
+                  if not changed {
+                    let seed = SpreadLift {
+                      base: base, source: source, adt: adt, ci: ci, next_sym: st.next_sym,
+                      fields: map.empty(), lets: []
+                    }
+                    let (lifted, t1) = lift_spread_expr(seed, t)
+                    if len(lifted.lets) > 0 {
+                      let after = at + 1
+                      return (
+                        RSt { ..st, next_sym: lifted.next_sym },
+                        list.take(stmts, after) ++ lifted.lets ++ list.drop(stmts, after),
+                        Some(t1)
+                      )
+                    }
+                  }
                 }
-                let seed = SpreadLift {
-                  base: base, source: source, adt: adt, ci: ci, next_sym: st.next_sym,
-                  fields: map.empty(), lets: []
-                }
-                let (lifted, t1) = lift_spread_expr(seed, t)
-                if len(lifted.lets) > 0 {
-                  return (
-                    RSt { ..st, next_sym: lifted.next_sym },
-                    stmts ++ lifted.lets,
-                    Some(t1)
-                  )
-                }
-              }
-              None -> ()
-            },
-          None -> ()
-        },
-      _ -> ()
+                None -> ()
+              },
+            _ -> ()
+          }
+          at = at - 1
+        }
+        (st, stmts, tail)
+      }
     }
-    (st, stmts, tail)
   }
 
 ## `consume` says whether the value is handed over; `after` is the bindings
@@ -2395,6 +2509,87 @@ test "a record update releases its spread owner before an updated field runs" {
       }
     }
     _ -> panic("expected the scheduled update block")
+  }
+}
+
+test "a record bound after an earlier statement is released before its update" {
+  let rec = TyAdt(7, [])
+  let ref = TyList(TyInt)
+  let rebuilt = CCtor(7, 0, [
+    CField(CLocal(2, rec), 7, 0, 0, ref),
+    CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref)
+  ], rec)
+  let body = CBlock(
+    [
+      CSDiscard(CInt(0)),
+      CSLet(2, rec, CCall(CDirect("m", "load"), [], rec)),
+      CSDiscard(CInt(1))
+    ],
+    Some(rebuilt),
+    rec
+  )
+  let m = rc_module(one_fn([], rec, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  match m.fns[0].body {
+    CBlock(ss, tail, _) -> {
+      # Both field owners are inserted immediately after `loaded`, before the
+      # statement that used to separate its binding from the tail constructor.
+      match ss[2] {
+        CSLet(_, _, CDup(CField(CLocal(2, _), _, _, 0, _), _)) -> ()
+        _ -> panic("expected the first field lifted after the record binding")
+      }
+      match ss[3] {
+        CSLet(_, _, CDup(CField(CLocal(2, _), _, _, 1, _), _)) -> ()
+        _ -> panic("expected the updated field lifted after the record binding")
+      }
+      match ss[4] {
+        CSDrop(2) -> ()
+        _ -> panic("expected the earlier record binding released before the update")
+      }
+      match ss[5] {
+        CSDiscard(CInt(1)) -> ()
+        _ -> panic("expected the following statement to remain after the release")
+      }
+      match tail {
+        Some(CCtor(_, _, [CLocal(_, _), CCall(_, [CLocal(_, _)], _)], _)) -> ()
+        _ -> panic("expected the rebuilt record to consume the lifted fields")
+      }
+    }
+    _ -> panic("expected the scheduled multi-statement block")
+  }
+}
+
+test "a reassigned record is not lifted ahead of the assignment" {
+  let rec = TyAdt(7, [])
+  let ref = TyList(TyInt)
+  let rebuilt = CCtor(7, 0, [CField(CLocal(2, rec), 7, 0, 0, ref)], rec)
+  let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec))]
+  # spread_rebuild follows tail blocks, so an assignment in one is just as
+  # much "between" the binding and constructor as an outer statement is.
+  let tail = CBlock(
+    [CSIf(
+      CBool(true),
+      CBlock(
+        [CSAssign(2, CCall(CDirect("m", "replace"), [], rec))],
+        None,
+        TyUnit
+      ),
+      None
+    )],
+    Some(rebuilt),
+    rec
+  )
+  let st = RSt {
+    scopes: [], dict_syms: set.empty(), modes: owned_modes(),
+    borrowed_syms: set.empty(), hoisting: false, fname: "m.f",
+    next_sym: 100, pinned: false
+  }
+  let (st1, ss1, tail1) = schedule_record_update(st, stmts, Some(tail))
+  assert st1.next_sym == 100
+  assert len(ss1) == 1
+  match tail1 {
+    Some(CBlock(_, Some(CCtor(_, _, [CField(CLocal(2, _), _, _, 0, _)], _)), _)) -> ()
+    _ -> panic("expected the projection to remain after the assignment")
   }
 }
 
