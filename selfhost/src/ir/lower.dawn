@@ -2734,7 +2734,24 @@ fn primitive_subject(st: LSt, tid: Int, subject: Ty) -> Bool =
     # ended up written twice: once in bytecode, never in Core.
     Some(imp) -> imp.derived ||
       (imp.owner == None && imp.src_path == None && len(imp.provided) == 0)
-    None -> tid == EQ_ID || tid == HASH_ID
+    None -> tid == EQ_ID || tid == HASH_ID || (tid == SHOW_ID && shows_structurally(subject))
+  }
+
+## Does a missing `Show` impl still mean the language renders this type
+## itself?
+##
+## Not in general: an ADT without `derive Show` is not printable, and the
+## checker refuses it. A tuple is the one subject that has no head, so nobody
+## can write `impl Show[(A, B)]` and the checker grants the witness on its own
+## (`show_tuple_witness`). `show_at` has always known how to spell the
+## rendering out; without this arm the devirtualised call went looking for an
+## impl that cannot exist and lowering panicked on a program the checker had
+## accepted (#46). Interpolation and `to_string` never hit it because they
+## reach `show_at` directly rather than through a witness.
+fn shows_structurally(t: Ty) -> Bool =
+  match t {
+    TyTuple(_) -> true
+    _ -> false
   }
 
 ## `!=`, given what `==` lowered to. A scalar comparison keeps its own node:
