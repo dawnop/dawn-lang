@@ -577,7 +577,7 @@ download，逐段打印设备答的 kind，结果按 `to_string` 的整段渲染
 `nvidia-smi` 不符时也拒绝（先改那一行、提交、再跑，于是台账提交只加一行）。第一行：
 
 ```
-d4a98cd76809 2026-09-02 560.94 13.3.36 sm_86 blocked:cuda.CUDA_ERROR_INVALID_IMAGE@launch # cuModuleLoadData: CUresult 200 (CUDA_ERROR_INVALID_IMAGE)
+ad03cbb02b18 2026-09-02 560.94 13.3.36 sm_86 blocked:cuda.CUDA_ERROR_INVALID_IMAGE@launch # cuModuleLoadData: CUresult 200 (CUDA_ERROR_INVALID_IMAGE)
 ```
 
 **CI 门** `run.sh --check`，`tile` job 最后一步（几条 git 命令，亚秒；checkout 改为 `fetch-depth: 0`，
