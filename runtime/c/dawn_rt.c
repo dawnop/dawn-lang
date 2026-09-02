@@ -4735,6 +4735,30 @@ dawn_adt *dawn_gpu_download_host(int64_t devptr, int64_t len) {
   return dawn_ok(a);
 }
 
+/* The packed-format seam: std/gpu has already laid the buffer out byte for
+ * byte (bf16: std/gpu.pack_bf16), so the runtime copies and knows no
+ * format. */
+dawn_adt *dawn_gpu_upload_bytes_host(int64_t devptr, const dawn_bytes *data) {
+  dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  dawn_cu_result r = dawn_gpu.memcpy_htod((dawn_cu_deviceptr)devptr, data->p, (size_t)data->len);
+  if (r != 0) return dawn_gpu_cu_error("cuMemcpyHtoD_v2", r);
+  return dawn_ok(dawn_box_unit(DAWN_UNIT));
+}
+
+dawn_adt *dawn_gpu_download_bytes_host(int64_t devptr, int64_t nbytes) {
+  dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  if (nbytes < 0) return dawn_gpu_refuse("gpu.bad_length", "gpu_download_bytes_host: negative byte count");
+  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)(nbytes > 0 ? nbytes : 1));
+  dawn_cu_result r = dawn_gpu.memcpy_dtoh(buf, (dawn_cu_deviceptr)devptr, (size_t)nbytes);
+  if (r != 0) {
+    free(buf);
+    return dawn_gpu_cu_error("cuMemcpyDtoH_v2", r);
+  }
+  return dawn_ok(dawn_bytes_of(buf, nbytes));
+}
+
 dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t grid,
                                const dawn_array *args) {
   dawn_adt *e = dawn_gpu_open();
@@ -4820,6 +4844,16 @@ dawn_adt *dawn_gpu_download_host(int64_t devptr, int64_t len) {
   (void)devptr;
   (void)len;
   return dawn_gpu_refuse_wasi("gpu_download_host");
+}
+dawn_adt *dawn_gpu_upload_bytes_host(int64_t devptr, const dawn_bytes *data) {
+  (void)devptr;
+  (void)data;
+  return dawn_gpu_refuse_wasi("gpu_upload_bytes_host");
+}
+dawn_adt *dawn_gpu_download_bytes_host(int64_t devptr, int64_t nbytes) {
+  (void)devptr;
+  (void)nbytes;
+  return dawn_gpu_refuse_wasi("gpu_download_bytes_host");
 }
 dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t grid,
                                const dawn_array *args) {

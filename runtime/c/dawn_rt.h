@@ -731,6 +731,8 @@ dawn_adt *dawn_gpu_load_module_host(const dawn_bytes *cubin);   /* Result[Int, _
 dawn_adt *dawn_gpu_alloc_host(int64_t nbytes);                   /* Result[Int, _] */
 dawn_adt *dawn_gpu_upload_host(int64_t devptr, const dawn_array *data);
 dawn_adt *dawn_gpu_download_host(int64_t devptr, int64_t len);   /* Result[Array[Float], _] */
+dawn_adt *dawn_gpu_upload_bytes_host(int64_t devptr, const dawn_bytes *data);
+dawn_adt *dawn_gpu_download_bytes_host(int64_t devptr, int64_t nbytes); /* Result[Bytes, _] */
 dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t grid,
                                const dawn_array *args);
 dawn_adt *dawn_gpu_free_host(int64_t devptr);

@@ -80,6 +80,22 @@
 #                            differ, and tileiras refuses them: the store
 #                            after the loop names an index past the last
 #                            value
+#     addf-no-rounding       the renderer drops addf's `rounding<nearest_even>`
+#                            -> vadd_bf16's text differs from its golden in
+#                            the addf line and nowhere else, exit 0. The
+#                            attribute is the theorem's precondition (docs
+#                            3.2): without it the device's bf16 sum need not
+#                            be narrow.round_bf16's. The writer's half of the
+#                            same claim (the rounding flag) is not a mutant
+#                            here: tileiras accepts every mode, so only the
+#                            device (scripts/tile-gpu-diff) could see it
+#     bf16-tag-as-i16        the writer's type table gives bf16 the i16 tag
+#                            -> vadd_bf16's text is untouched, its bytes are
+#                            the same length and differ, and tileiras refuses
+#                            them: addf wants a float tile. The bf16 twin of
+#                            f64-tag-as-i64; a tag one off the other way
+#                            (f16, 5) would assemble and only the device
+#                            could tell
 #
 # The anchor each mutant rewrites must match exactly once, so a refactor that
 # moves it fails here instead of silently un-mutating (scripts/narrow-contract
@@ -90,7 +106,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/tile-golden"
-kernels=(vadd vadd_f32 sum)
+kernels=(vadd vadd_f32 vadd_bf16 sum)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -522,5 +538,34 @@ mutant_project for-results-not-rolled-back bytecode.dawn \
   '    w9'
 writer_mutant_checks for-results-not-rolled-back sum same-size \
   "operand index 39 out of bounds (size=25) for operand 1"
+
+# 9. The renderer forgets addf's rounding attribute. Every kernel with an
+#    addf moves, but the claim is bf16's: `rounding<nearest_even>` is what
+#    makes the device's bf16 sum narrow.round_bf16's (docs 3.2). vadd_bf16
+#    still renders (exit 0) and differs from its golden in the addf line
+#    and nowhere else, on both backends.
+mutant_project addf-no-rounding render.dawn \
+  ' rounding<nearest_even> : ${ty(t)}"' \
+  ' : ${ty(t)}"'
+mutant_run addf-no-rounding vadd_bf16
+for backend in jvm native; do
+  out="$work/m-addf-no-rounding.vadd_bf16.$backend"
+  [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "addf-no-rounding: vadd_bf16 did not run to completion on $backend"; }
+  cmp -s "$here/vadd_bf16.mlir" "$out" && fail "addf-no-rounding mutant stayed green on $backend: vadd_bf16.mlir still matches"
+  changed=$(diff "$here/vadd_bf16.mlir" "$out" | grep -c '^[<>]' || true)
+  [ "$changed" = 2 ] || { diff "$here/vadd_bf16.mlir" "$out" >&2 || true; fail "addf-no-rounding: expected exactly the addf line to move on $backend, got $changed changed line(s)"; }
+  grep -q '^< .*addf .* rounding<nearest_even> : tile<128xbf16>$' <(diff "$here/vadd_bf16.mlir" "$out") ||
+    { diff "$here/vadd_bf16.mlir" "$out" >&2 || true; fail "addf-no-rounding: the moved line is not the bf16 addf on $backend"; }
+done
+echo "PASS  mutant: addf-no-rounding (vadd_bf16.mlir red on both backends; exactly the addf line moved)"
+
+# 10. The writer's type table gives bf16 the i16 tag. Same length, the type
+#     section differs, and the verifier refuses addf over an integer tile:
+#     the bf16 twin of f64-tag-as-i64.
+mutant_project bf16-tag-as-i16 bytecode.dawn \
+  '  "bf16" -> 6' \
+  '  "bf16" -> 2'
+writer_mutant_checks bf16-tag-as-i16 vadd_bf16 same-size \
+  "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi16>'"
 
 echo "tile golden ok"

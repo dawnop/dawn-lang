@@ -8,7 +8,7 @@
 # which run.sh holds against toolchain.txt).
 use std/io
 use std/io.{with_fs_real, write_bytes}
-use std/gpu.{F64, F32}
+use std/gpu.{F64, F32, BF16}
 use tileir/dev.{Dev, Param, param, block_id, load, store, addf, idx_const, idx_add, idx_mul, d_for}
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
@@ -30,6 +30,19 @@ fn vadd_f32(a: Param[F32], b: Param[F32], out: Param[F32]) -> Unit !Dev = {
   let ta = load(a, i, 64)
   let tb = load(b, i, 64)
   store(out, i, 64, addf(F32, 64, ta, tb))
+}
+
+# The same kernel over bf16 and 128-wide tiles: the second milestone's format
+# (tile-backend-design 3.2). `addf` over a bf16 tile with
+# `rounding<nearest_even>` is, by the double-rounding theorem, bit for bit
+# `narrow.round_bf16` of the exact sum, which is what std/gpu's vadd_ref
+# answers for a bf16 output buffer; scripts/tile-gpu-diff holds the device
+# to it.
+fn vadd_bf16(a: Param[BF16], b: Param[BF16], out: Param[BF16]) -> Unit !Dev = {
+  let i = block_id(0)
+  let ta = load(a, i, 128)
+  let tb = load(b, i, 128)
+  store(out, i, 128, addf(BF16, 128, ta, tb))
 }
 
 # f64 block-wise tile sum, the second milestone's loop kernel
@@ -55,6 +68,8 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
   "vadd_f32" ->
     trace_kernel("vadd_f32", ["f32", "f32", "f32"], () => vadd_f32(param(F32, 0), param(F32, 1), param(F32, 2)))
+  "vadd_bf16" ->
+    trace_kernel("vadd_bf16", ["bf16", "bf16", "bf16"], () => vadd_bf16(param(BF16, 0), param(BF16, 1), param(BF16, 2)))
   "sum" ->
     trace_kernel("sum", ["f64", "f64"], () => sum(param(F64, 0), param(F64, 1), 4))
   _ -> panic("tile-golden: no kernel named `${name}`")
@@ -78,5 +93,5 @@ pub fn main() -> Unit !io = match args() {
       Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
     }
   }
-  _ -> panic("usage: kernels <vadd|vadd_f32|sum> [--bytecode <path>] | kernels --bytecode-version")
+  _ -> panic("usage: kernels <vadd|vadd_f32|vadd_bf16|sum> [--bytecode <path>] | kernels --bytecode-version")
 }

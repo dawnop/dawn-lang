@@ -2,13 +2,16 @@
 # runs vadd under `with_gpu_real` against the machine's GPU and under
 # `with_gpu_fake` against the host reference, and prints what each device
 # answered at every stage, so run.sh can say whether the two agree bit for
-# bit, and if not, where the real one stopped.
+# bit, and if not, where the real one stopped. Two formats: f64 through the
+# `vadd` kernel and bf16 through `vadd_bf16`, whose device-side `addf` is
+# held to `narrow.round_bf16` of the exact sum (docs 3.2, through the fake
+# device, which std/gpu's tests hold to narrow).
 #
-#   vadd_diff <vadd.cubin>
+#   vadd_diff <vadd.cubin> <vadd_bf16.cubin>
 #
 # One block per input set, then one verdict line:
 #
-#   set <i> n=<n> grid=<n/128>
+#   set <i> <dtype> n=<n> grid=<n/128>
 #     fake  launch=ok result=<digest>
 #     real  alloc=<kind> upload=<kind> roundtrip=<same|differ|kind> launch=<kind> sync=<kind>
 #           download=<kind> result=<digest>
@@ -16,22 +19,28 @@
 #     verdict identical | blocked:<kind>@<stage> | differ:<stage>
 #   tile-gpu-diff: pass | blocked:<kind>@<stage> | fail
 #
-# `roundtrip` is upload-then-download of the first input, compared with the
-# input as rendered text: the stage a driver can pass before it can run a
-# kernel at all, and the one that says the memory path is honest. The
-# comparison of results is on the rendered text too (`to_string` of the
-# whole vector), which tells -0.0 from 0.0 and NaN from anything, so
-# "identical" means bit for bit for every finite value and sign of zero.
+# `roundtrip` is upload-then-download of both inputs, each compared with the
+# input as the format holds it (`gpu.round_to`: the Float itself for f64,
+# its nearest bf16 for bf16), as rendered text: the stage a driver can pass
+# before it can run a kernel at all, and the one that says the memory path,
+# packing included, is honest. The comparison of results is on the rendered
+# text too (`to_string` of the whole vector), which tells -0.0 from 0.0 and
+# NaN from anything, so "identical" means bit for bit for every finite value
+# and sign of zero.
 #
 # Every set's length is a multiple of 128, the kernel's tile width: the
-# kernel has no mask (packages/tileir), so grid = n / 128 exactly.
+# kernel has no mask (packages/tileir), so grid = n / 128 exactly. The bf16
+# sets carry Floats off the bf16 grid on purpose, in every set: the packing
+# has to round them, and a packing that truncated would show in the round
+# trip of every bf16 set (run.sh's pack-truncates mutant).
 use std/io
 use std/io.{with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, reference_kernels, alloc, upload,
-  download, free, launch, sync, handle_of }
+use std/gpu.{Gpu, Dtype, F64, BF16, Tensor, with_gpu_fake, with_gpu_real, reference_kernels, alloc,
+  upload, download, free, launch, sync, handle_of, dtype_name }
 use std/list
 use std/map
+use std/narrow
 
 type Trace = {
   alloc: String,
@@ -68,19 +77,25 @@ fn blank() -> Trace =
     note: ""
   }
 
-fn release(ts: List[Tensor[F64]]) -> Unit !Gpu = {
+fn release[D](ts: List[Tensor[D]]) -> Unit !Gpu = {
   for t in ts {
     let _ = free(t)
   }
 }
 
-## The whole vadd, one stage at a time, stopping at the first refusal and
-## saying which stage it was.
-fn stages(xs: List[Float], ys: List[Float]) -> Trace !Gpu = {
+# `xs` as a buffer of format `d` holds it.
+fn held[D: Dtype](d: D, xs: List[Float]) -> List[Float] = {
+  let dt = dtype_name(d)
+  list.map(xs, x => gpu.round_to(dt, x))
+}
+
+## The whole vadd of format `d` through `kernel`, one stage at a time,
+## stopping at the first refusal and saying which stage it was.
+fn stages[D: Dtype](d: D, kernel: String, xs: List[Float], ys: List[Float]) -> Trace !Gpu = {
   let n = len(xs)
-  let ra = alloc(F64, n)
-  let rb = alloc(F64, n)
-  let ro = alloc(F64, n)
+  let ra = alloc(d, n)
+  let rb = alloc(d, n)
+  let ro = alloc(d, n)
   match (ra, rb, ro) {
     (Ok(a), Ok(b), Ok(out)) -> {
       let t0 = Trace { ..blank(), alloc: "ok" }
@@ -90,12 +105,19 @@ fn stages(xs: List[Float], ys: List[Float]) -> Trace !Gpu = {
         (Ok(_), Ok(_)) -> {
           let t1 = Trace { ..t0, upload: "ok" }
           let back = download(a)
-          let rt = match back {
-            Ok(v) -> if to_string(v) == to_string(xs) { "same" } else { "differ" }
-            Err(e) -> e.kind
+          let back2 = download(b)
+          let rt = match (back, back2) {
+            (Ok(v), Ok(w)) ->
+              if to_string(v) == to_string(held(d, xs)) && to_string(w) == to_string(held(d, ys)) {
+                "same"
+              } else {
+                "differ"
+              }
+            (Err(e), _) -> e.kind
+            (_, Err(e)) -> e.kind
           }
-          let t2 = Trace { ..t1, roundtrip: rt, note: message(back) }
-          let l = launch("vadd", n / 128, [handle_of(a), handle_of(b), handle_of(out)])
+          let t2 = Trace { ..t1, roundtrip: rt, note: message(back) ++ message(back2) }
+          let l = launch(kernel, n / 128, [handle_of(a), handle_of(b), handle_of(out)])
           match l {
             Ok(_) -> {
               let s = sync()
@@ -184,6 +206,40 @@ fn verdict(fake: Trace, real: Trace) -> String = {
 # `0.0 - 0.0` is +0.0; the sign comes from a product
 fn neg_zero() -> Float = 0.0 * (0.0 - 1.0)
 
+# A fixed-seed 31-bit LCG, so the random sets are the same on every run.
+fn lcg(seed: Int) -> Int = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+
+# `n` pseudo-random Floats from `seed`, off the bf16 grid almost always:
+# thousandths in [-100, 100).
+fn random_floats(seed: Int, n: Int) -> List[Float] = {
+  var out: List[Float] = []
+  var r = seed
+  var i = 0
+  while i < n {
+    r = lcg(r)
+    out = out ++ [to_float(r % 200000) / 1000.0 - 100.0]
+    i = i + 1
+  }
+  out
+}
+
+# `n` bf16 values with pseudo-random bit patterns from `seed`: every
+# exponent, both signs, the infinities and NaNs included.
+fn random_patterns(seed: Int, n: Int) -> List[Float] = {
+  var out: List[Float] = []
+  var r = seed
+  var i = 0
+  while i < n {
+    r = lcg(r)
+    out = out ++ [narrow.bf16_of_bits((r >>> 8) & 0xFFFF)]
+    i = i + 1
+  }
+  out
+}
+
+# The four f64 sets are the first four; the three bf16 sets follow.
+fn dtype_of_set(i: Int) -> String = if i < 4 { "f64" } else { "bf16" }
+
 fn input_set(i: Int) -> (List[Float], List[Float]) =
   if i == 0 {
     # small, negative and around a million
@@ -207,39 +263,62 @@ fn input_set(i: Int) -> (List[Float], List[Float]) =
           if k == 0 { neg_zero() } else if k == 1 { neg_zero() } else if k == 2 { 1.0e300 }
           else if k == 3 { 0.0 - 1.0e-300 } else { 0.2 * to_float(k) })
     )
-  } else {
+  } else if i == 3 {
     # many blocks: 32 tiles of 128
     (
       list.map(range(0, 4096), k => to_float(k % 251) * 1000.0 - 125000.0),
       list.map(range(0, 4096), k => to_float(4096 - k) / 3.0)
     )
+  } else if i == 4 {
+    # bf16: tenths (off the grid) against halves (on it), one block
+    (
+      list.map(range(0, 128), k => 0.1 * to_float(k) - 6.4),
+      list.map(range(0, 128), k => to_float(k) * 0.5 - 32.0)
+    )
+  } else if i == 5 {
+    # bf16: random Floats against random bit patterns, eight blocks
+    (random_floats(11, 1024), random_patterns(12, 1024))
+  } else {
+    # bf16: every one of the 65536 bit patterns, in order, against a random
+    # Float, 512 blocks
+    (list.map(range(0, 65536), k => narrow.bf16_of_bits(k)), random_floats(13, 65536))
   }
+
+fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("vadd_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
 
 pub fn main() -> Unit !io = {
   let argv = args()
-  if len(argv) != 1 {
-    io.eprintln("usage: vadd_diff <vadd.cubin>")
+  if len(argv) != 2 {
+    io.eprintln("usage: vadd_diff <vadd.cubin> <vadd_bf16.cubin>")
     io.exit(2)
   }
-  let cubin = match with_fs_real(() => io.read_bytes(argv[0])) {
-    Ok(b) -> b
-    Err(e) -> {
-      io.eprintln("vadd_diff: cannot read ${argv[0]}: ${e.message}")
-      io.exit(2)
-      bytes_of_nothing()
-    }
-  }
-  let kernels = map.from([("vadd", cubin)])
+  let kernels = map.from([("vadd", read_cubin(argv[0])), ("vadd_bf16", read_cubin(argv[1]))])
   var all_identical = true
   var blocked = ""
   var any_differ = false
-  for i in range(0, 4) {
+  for i in range(0, 7) {
     let (xs, ys) = input_set(i)
     let n = len(xs)
-    let fake = with_gpu_fake(reference_kernels(), () => stages(xs, ys))
-    let real = with_gpu_real(kernels, () => stages(xs, ys))
+    let dt = dtype_of_set(i)
+    let fake = if dt == "f64" {
+      with_gpu_fake(reference_kernels(), () => stages(F64, "vadd", xs, ys))
+    } else {
+      with_gpu_fake(reference_kernels(), () => stages(BF16, "vadd_bf16", xs, ys))
+    }
+    let real = if dt == "f64" {
+      with_gpu_real(kernels, () => stages(F64, "vadd", xs, ys))
+    } else {
+      with_gpu_real(kernels, () => stages(BF16, "vadd_bf16", xs, ys))
+    }
     let v = verdict(fake, real)
-    io.println("set ${i} n=${n} grid=${n / 128}")
+    io.println("set ${i} ${dt} n=${n} grid=${n / 128}")
     io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
     io.println("  real  alloc=${real.alloc} upload=${real.upload} roundtrip=${real.roundtrip}"
         ++ " launch=${real.launch} sync=${real.sync} download=${real.download}"

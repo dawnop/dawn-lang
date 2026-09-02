@@ -7,7 +7,11 @@
 本包是那里的刀 2 与刀 3，不进 std（它不需要 intrinsic，且字节码版本要钉在包常量里）。
 
 宿主侧（缓冲、launch）在 `std/gpu`，它只认 kernel 名与字节码，不认识 `TileProg`；
-dtype 标记复用 `std/gpu` 的 `F64` / `F32`，本包不再声明一份。
+dtype 标记复用 `std/gpu` 的 `F64` / `F32` / `BF16`，本包不再声明一份。bf16 kernel 的写法与
+f64 的相同（`Param[BF16]`、`addf(BF16, ...)`），dtype 名 `"bf16"` 贯穿记录、降低、渲染
+（`tile<128xbf16>`）与字节码（类型标签 6）；设备侧 `addf ... rounding<nearest_even>` 对 bf16
+的答案按双舍入定理等于 `std/narrow.round_bf16(f64 加)`，`scripts/tile-golden` 的 `vadd_bf16`
+钉文本与字节码，`scripts/tile-gpu-diff` 拿设备对假设备。
 
 ## 模块
 
@@ -77,7 +81,9 @@ fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
   在记录里没有。同一 (参数, 索引, 宽度) 的指针梯子只发一次。渲染器把 `Val(k)` 拼成 `%k`、
   `Arg(i)` 拼成 `%argi`；写入器把入口参数排在前、值紧随其后，成一个平坦的索引空间。
 - `addf` 是 `rounding<nearest_even>`：设计文档 §3.2 的双舍入定理只对这一种模式成立；
-  指令表里没有这个字段，因为它没有第二个取值。
+  指令表里没有这个字段，因为它没有第二个取值。`scripts/tile-golden` 的 `addf-no-rounding`
+  变异体把渲染器的这个属性删掉，`vadd_bf16.mlir` 红；`bf16-tag-as-i16` 把写入器的 bf16
+  标签改成 i16，`tileiras` 拒绝。
 - **循环**记录成 `For(iv, lower, upper, step, inits, carried, results, body)`，`body` 以
   `Continue(values)` 结尾。handler 维护区域栈：`t_loop_begin` 压栈并清空当前操作表，
   `t_loop_end` 弹栈把体包成 `For` 接回外层。**token 作为最后一个携带值穿过循环**：`inits`

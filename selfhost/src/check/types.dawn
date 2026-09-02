@@ -3199,10 +3199,12 @@ pub fn builtins() -> Map[String, Sig] = {
     # runtime refuses every one with `gpu.unsupported_backend`.
     #
     # Buffers cross as raw device pointers, kernels as the CUmodule handle
-    # `gpu_load_module_host` answered, data as `Array` (the shape both
-    # backends can name; the handle table and the List<->Array walk stay
-    # std's). `gpu_launch_host` runs `kernel` from `module` over `grid` tile
-    # blocks with `args` as its device-pointer parameters in order.
+    # `gpu_load_module_host` answered, data as `Array[Float]` for f64 (the
+    # shape both backends can name, copied double for double) or as `Bytes`
+    # for a packed format (bf16: std/gpu packs and unpacks, the runtime copies
+    # bytes and knows no format); the handle table and the List<->Array walk
+    # stay std's. `gpu_launch_host` runs `kernel` from `module` over `grid`
+    # tile blocks with `args` as its device-pointer parameters in order.
     # `gpu_close_host` releases the context and the library the first
     # operation opened; std calls it when the handler's body has returned.
     eff1(
@@ -3218,6 +3220,16 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(
       bsig("gpu_download_host", [TyInt, TyInt], ["devptr", "len"],
         result_ty(TyArray(TyFloat), foreign_error_ty())),
+      EIo
+    ),
+    eff1(
+      bsig("gpu_upload_bytes_host", [TyInt, TyBytes], ["devptr", "data"],
+        result_ty(TyUnit, foreign_error_ty())),
+      EIo
+    ),
+    eff1(
+      bsig("gpu_download_bytes_host", [TyInt, TyInt], ["devptr", "nbytes"],
+        result_ty(TyBytes, foreign_error_ty())),
       EIo
     ),
     eff1(
@@ -3405,7 +3417,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # The GPU primitives: one runtime module, every one std-only. std/gpu is the
   # only caller, and the handler above them is where a device pointer becomes
   # a handle a program cannot forge.
-  for op in ["load_module", "alloc", "upload", "download", "launch", "free", "sync", "close"] {
+  for op in ["load_module", "alloc", "upload", "download", "upload_bytes", "download_bytes", "launch", "free", "sync", "close"] {
     rt_of = map.insert(rt_of, "gpu_" ++ op ++ "_host", RtGpu)
     internal = set.insert(internal, "gpu_" ++ op ++ "_host")
   }
@@ -4104,7 +4116,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 107
+  assert map_size2(bs) == 109
 }
 
 test "the reclaim's failure is a value, under the one name left" {

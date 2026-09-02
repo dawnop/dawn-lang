@@ -333,6 +333,70 @@ fn exponent(x: Float) -> Int = {
   e
 }
 
+# ---- bit patterns ----
+#
+# The one place a narrow format's bits matter to a Dawn program is a device
+# whose memory holds them (std/gpu's bf16 tensors). There is no float-to-bits
+# primitive, so the pattern is assembled from the same exact arithmetic
+# `round_binary` uses: the exponent by doublings and halvings, the
+# significand by an exact power-of-two scaling. Only bfloat16 has a codec
+# here; binary16 and binary32 would take the same shape with their own
+# widths, and get one when something needs it.
+
+## The 16-bit pattern of the bfloat16 value `x`: the sign bit, eight exponent
+## bits biased by 127, seven significand bits, as the value sits in memory.
+## `x` is a value of the format, as `round_bf16` leaves it. For a Float off
+## the bf16 grid the answer is the pattern with the extra significand bits
+## dropped (truncation toward zero, what reading the high half of a binary32
+## gives), NOT the nearest bf16: round first. A value beyond the format's
+## range answers the infinity of its sign. NaN answers the canonical quiet
+## NaN `0x7FC0`: a Float carries no payload a program can read, so none can
+## be preserved.
+pub fn bf16_bits(x: Float) -> Int =
+  if x != x {
+    0x7FC0
+  } else {
+    let neg = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    let sign = if neg { 0x8000 } else { 0 }
+    let a = if neg { -x } else { x }
+    if a == 0.0 {
+      sign
+    } else if a == 1.0 / 0.0 {
+      sign | 0x7F80
+    } else {
+      let e = exponent(a)
+      if e < -126 {
+        # below the normal range: no hidden bit, the significand counts
+        # quanta of 2^-133
+        sign | to_int(a / pow2(-133))
+      } else if e > 127 {
+        sign | 0x7F80
+      } else {
+        sign | ((e + 127) << 7) | to_int((a / pow2(e) - 1.0) * 128.0)
+      }
+    }
+  }
+
+## The bfloat16 value whose 16-bit pattern is the low 16 bits of `bits`,
+## exactly, as a Float (every bf16 value is one). An exponent field of all
+## ones is the infinity of the sign when the significand field is zero and
+## NaN otherwise; an exponent field of zero is a subnormal, or the zero of
+## the sign.
+pub fn bf16_of_bits(bits: Int) -> Float = {
+  let b = bits & 0xFFFF
+  let neg = (b & 0x8000) != 0
+  let e = (b >>> 7) & 0xFF
+  let m = b & 0x7F
+  let a = if e == 0xFF {
+    if m == 0 { 1.0 / 0.0 } else { 0.0 / 0.0 }
+  } else if e == 0 {
+    to_float(m) * pow2(-133)
+  } else {
+    (1.0 + to_float(m) / 128.0) * pow2(e - 127)
+  }
+  if neg { -a } else { a }
+}
+
 # ---- tests ----
 #
 # Representative cases only. The exact-oracle corpus that pins every path of
@@ -419,4 +483,59 @@ test "the trait operations are the format's, with the theorem's rounding" {
   # equality and order are the Float's
   assert bf16(1.0) == bf16(1.0 + 1.0 / 512.0)
   assert bf16(1.0) < bf16(1.01)
+}
+
+test "every bf16 bit pattern round-trips through its value, and the value is on round_bf16's grid" {
+  # 65536 patterns: every one that is not a NaN comes back as itself, and
+  # `round_bf16` leaves its value alone, so the codec's grid is the
+  # rounding's grid. The 254 NaN patterns (exponent all ones, significand
+  # nonzero, either sign) decode to a NaN and re-encode to the canonical one.
+  var bad = 0
+  var nans = 0
+  var b = 0
+  while b < 65536 {
+    let v = bf16_of_bits(b)
+    if v != v {
+      nans = nans + 1
+      if bf16_bits(v) != 0x7FC0 { bad = bad + 1 } else { () }
+    } else if bf16_bits(v) != b || round_bf16(v) != v {
+      bad = bad + 1
+    } else {
+      ()
+    }
+    b = b + 1
+  }
+  assert bad == 0
+  assert nans == 254
+}
+
+test "the bf16 codec spells the special values and the named boundaries" {
+  let inf = 1.0 / 0.0
+  assert bf16_bits(1.0) == 0x3F80
+  assert bf16_bits(-1.5) == 0xBFC0
+  assert bf16_bits(0.0) == 0x0000
+  # the negative zero keeps its sign, both ways
+  assert bf16_bits(0.0 * (0.0 - 1.0)) == 0x8000
+  assert 1.0 / bf16_of_bits(0x8000) == -inf
+  assert bf16_bits(inf) == 0x7F80
+  assert bf16_bits(-inf) == 0xFF80
+  assert bf16_of_bits(0x7F80) == inf
+  let nan = bf16_of_bits(0x7F81)
+  assert nan != nan
+  assert bf16_bits(0.0 / 0.0) == 0x7FC0
+  # the smallest subnormal, the largest subnormal, the smallest normal
+  assert bf16_of_bits(0x0001) == 9.183549615799121e-41
+  assert bf16_bits(9.183549615799121e-41) == 0x0001
+  assert bf16_of_bits(0x007F) == 127.0 * 9.183549615799121e-41
+  assert bf16_of_bits(0x0080) == 1.1754943508222875e-38
+  # the largest finite value
+  assert bf16_of_bits(0x7F7F) == 3.3895313892515355e38
+  assert bf16_bits(3.3895313892515355e38) == 0x7F7F
+  # off the grid: the bits truncate, the rounding does not; a value past the
+  # range is the infinity
+  assert bf16_bits(1.0 + 3.0 / 512.0) == 0x3F80
+  assert bf16_bits(round_bf16(1.0 + 3.0 / 512.0)) == 0x3F81
+  assert bf16_bits(1.0e300) == 0x7F80
+  # bits above the sixteenth are ignored
+  assert bf16_of_bits(0x13F80) == 1.0
 }

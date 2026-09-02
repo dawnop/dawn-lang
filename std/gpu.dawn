@@ -26,17 +26,30 @@
 use std/bytes
 use std/list
 use std/map
+use std/narrow
 
 # ---- element formats ----
 
 ## Marker types for element formats: values with no content, passed where a
 ## function needs to know the format of a tensor it is about to create.
-## `Dtype` is implemented for each; nothing else is.
+## `Dtype` is implemented for each; nothing else is. A marker names a format
+## a buffer holds; the values a program moves in and out are `Float` under
+## every format (`upload` / `download`), so a marker is not std/narrow's
+## value type of the same name (`narrow.BF16` is a number, `gpu.BF16` is a
+## label), the way `gpu.F32` was never `narrow.F32`.
 pub type F64 = | F64
 
-## The 32-bit float format. The fake device holds only f64 buffers, so a
-## tensor of this format can be typed but not, in this release, allocated.
+## The 32-bit float format. Neither handler moves it in this release, so a
+## tensor of this format can be typed but not allocated.
 pub type F32 = | F32
+
+## The bfloat16 format: two bytes an element. A buffer of it holds bf16
+## values; `upload` rounds each Float to the nearest one (ties to even, the
+## conversion a device's own load would perform) and `download` answers each
+## exactly, as a Float. The device's `addf` over bf16 tiles is then
+## `narrow.round_bf16` of the exact sum, bit for bit (tile-backend-design
+## 3.2's theorem), which is what the fake device computes.
+pub type BF16 = | BF16
 
 ## What a device needs to know about an element format. The marker value is
 ## the first argument so the methods can be called by name (spec §3.5: a type
@@ -55,6 +68,52 @@ impl Dtype[F32] {
   fn dtype_name(d: F32) -> String = "f32"
   fn dtype_bytes(d: F32) -> Int = 4
 }
+
+impl Dtype[BF16] {
+  fn dtype_name(d: BF16) -> String = "bf16"
+  fn dtype_bytes(d: BF16) -> Int = 2
+}
+
+## The bytes one element of the named format occupies in a device buffer, or
+## `None` for a format this release's handlers do not move: `f64` (8) and
+## `bf16` (2). Both handlers consult this and nothing else to accept a
+## `gpu_alloc`, so they refuse the same formats with `gpu.unsupported_dtype`.
+pub fn element_bytes(dtype: String) -> Option[Int] = match dtype {
+  "f64" -> Some(8)
+  "bf16" -> Some(2)
+  _ -> None
+}
+
+## `x` as a buffer of the named format holds it: rounded to bfloat16 for
+## `bf16`, to binary32 for `f32`, unchanged for `f64`. What a store into such
+## a buffer does to a value, and what a reference implementation does after
+## every operation whose result the device would keep at that width.
+pub fn round_to(dtype: String, x: Float) -> Float = match dtype {
+  "bf16" -> narrow.round_bf16(x)
+  "f32" -> narrow.round_f32(x)
+  _ -> x
+}
+
+# ---- the bf16 wire format ----
+
+## `xs` as the bytes a bf16 buffer holds: each value rounded to the nearest
+## bfloat16, then its 16-bit pattern, low byte first. The rounding is this
+## function's: `narrow.bf16_bits` truncates a value off the grid, and a
+## truncating upload would put a different number on the device than the
+## fake device holds.
+pub fn pack_bf16(xs: List[Float]) -> Bytes = {
+  var b = bytes.buf()
+  for x in xs {
+    let bits = narrow.bf16_bits(narrow.round_bf16(x))
+    b = bytes.put(bytes.put(b, bits & 0xFF), bits >>> 8)
+  }
+  bytes.freeze(b)
+}
+
+## The values a bf16 buffer holds, from its bytes: one per two bytes, each
+## the exact Float of its pattern.
+pub fn unpack_bf16(b: Bytes) -> List[Float] =
+  list.map(range(0, bytes.len(b) / 2), i => narrow.bf16_of_bits(bytes.at(b, 2 * i) | (bytes.at(b, 2 * i + 1) << 8)))
 
 # ---- tensors ----
 
@@ -155,12 +214,17 @@ pub fn sync() -> Result[Unit, ForeignError] !Gpu = gpu_sync()
 
 # ---- the fake device ----
 
-## Element-wise addition of the first two arguments: the host-side reference
-## for the `vadd` kernel, and the first entry of `reference_kernels`.
-pub fn vadd_ref(ins: List[List[Float]]) -> List[Float] = {
+## Element-wise addition of the first two arguments, each sum rounded to
+## the format of the last (the output): the host-side reference for the
+## `vadd` kernels of every format, and the first entry of
+## `reference_kernels`. `dtypes` is the format of each argument buffer in
+## order, as the fake device passes it; the device's `addf` rounds its
+## result to the tile's format, and so does this.
+pub fn vadd_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let a = ins[0]
   let b = ins[1]
-  list.map(range(0, len(a)), i => a[i] + b[i])
+  let out = dtypes[len(dtypes) - 1]
+  list.map(range(0, len(a)), i => round_to(out, a[i] + b[i]))
 }
 
 ## Block-wise tile sum of the first argument into the second: the host-side
@@ -175,10 +239,12 @@ pub fn vadd_ref(ins: List[List[Float]]) -> List[Float] = {
 ## fold on carries. `chunks` is `len(x) / len(out)`; a shape the kernel
 ## would read out of bounds on (`len(out)` not a multiple of 128, `len(x)`
 ## not a multiple of `len(out)`) is the caller's bug and reads out of range
-## here as it would there.
-pub fn sum_ref(ins: List[List[Float]]) -> List[Float] = {
+## here as it would there. Every addition is rounded to the output's format
+## (`dtypes[1]`), the way the kernel's accumulator tile is at that width.
+pub fn sum_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let x = ins[0]
   let out = ins[1]
+  let dt = dtypes[1]
   let w = 128
   let n = len(out)
   let chunks = if n == 0 { 0 } else { len(x) / n }
@@ -188,15 +254,16 @@ pub fn sum_ref(ins: List[List[Float]]) -> List[Float] = {
     if chunks == 0 {
       0.0
     } else {
-      list.fold(range(1, chunks), x[(b * chunks) * w + j], (acc, k) => acc + x[(b * chunks + k) * w + j])
+      list.fold(range(1, chunks), x[(b * chunks) * w + j], (acc, k) => round_to(dt, acc + x[(b * chunks + k) * w + j]))
     }
   })
 }
 
 ## The reference implementations the fake device answers `launch` with, by
-## kernel name: `vadd` and `sum` in this release.
-pub fn reference_kernels() -> Map[String, fn(List[List[Float]]) -> List[Float]] =
-  map.from([("vadd", vadd_ref), ("sum", sum_ref)])
+## kernel name: `vadd`, `vadd_bf16` (one reference; the buffers tell it the
+## format) and `sum` in this release.
+pub fn reference_kernels() -> Map[String, fn(List[String], List[List[Float]]) -> List[Float]] =
+  map.from([("vadd", vadd_ref), ("vadd_bf16", vadd_ref), ("sum", sum_ref)])
 
 fn no_such_buffer(who: String, handle: Int) -> ForeignError =
   refuse("gpu.no_such_buffer", "${who}: no buffer with handle ${handle}")
@@ -208,16 +275,19 @@ fn no_arguments(who: String, kernel: String) -> ForeignError =
   refuse("gpu.no_arguments", "${who}: `${kernel}` launched with no buffers")
 
 ## Run `body` against a device that is a table in host memory. Handles count
-## up from 1 per installation; a buffer is a `List[Float]`, so only the `f64`
-## format is allocatable (`gpu.unsupported_dtype` otherwise); a handle that
-## was never issued or was freed answers `gpu.no_such_buffer`. `gpu_launch`
-## looks `kernel` up in `kernels`, hands the reference implementation the
-## contents of every argument buffer in order, and stores what it returns as
-## the contents of the LAST argument; `grid` is not consulted, a reference
+## up from 1 per installation; a buffer is its format and a `List[Float]`
+## holding values of that format, and the formats are `element_bytes`'s
+## (`gpu.unsupported_dtype` otherwise); a handle that was never issued or
+## was freed answers `gpu.no_such_buffer`. `gpu_launch` looks `kernel` up in
+## `kernels`, hands the reference implementation the format and the contents
+## of every argument buffer in order, and stores what it returns as the
+## contents of the LAST argument; `grid` is not consulted, a reference
 ## implementation computes the whole vector at once; an unknown name answers
-## `gpu.no_kernel`. `gpu_upload` stores its data as given: the length check
-## is `upload`'s, above the operation, and is the same code under every
-## handler.
+## `gpu.no_kernel`. A buffer holds what memory of its format would: what
+## `gpu_upload` stores and what a launch writes is rounded to the buffer's
+## format (`round_to`), which for `f64` is the data as given. The length
+## check is `upload`'s, above the operation, and is the same code under
+## every handler.
 ##
 ## Pure. Two installations share nothing.
 #
@@ -226,29 +296,33 @@ fn no_arguments(who: String, kernel: String) -> ForeignError =
 # into a qualified call, and std has to keep compiling under it so that the
 # mutant reddens the assertions it owns and nothing else (measured: one such
 # pipe here turned every pipe-contract assertion red).
-pub fn with_gpu_fake[T](kernels: Map[String, fn(List[List[Float]]) -> List[Float]],
+pub fn with_gpu_fake[T](kernels: Map[String, fn(List[String], List[List[Float]]) -> List[Float]],
   body: fn() -> T !Gpu) -> T = {
   with handle Gpu {
     var next: Int = 1
-    var store: Map[Int, List[Float]] = map.empty()
-    gpu_alloc(dtype, len) =>
-      if dtype != "f64" {
-        Err(refuse("gpu.unsupported_dtype", "fake device: buffers are f64, got ${dtype}"))
-      } else {
+    var store: Map[Int, (String, List[Float])] = map.empty()
+    gpu_alloc(dtype, len) => match element_bytes(dtype) {
+      None -> Err(refuse("gpu.unsupported_dtype", "fake device: buffers are f64 or bf16, got ${dtype}"))
+      Some(_w) -> {
         let h = next
         next = next + 1
-        store = map.insert(store, h, list.map(range(0, len), _i => 0.0))
+        store = map.insert(store, h, (dtype, list.map(range(0, len), _i => 0.0)))
         Ok(h)
       }
-    gpu_upload(handle, data) =>
-      if map.has(store, handle) {
-        store = map.insert(store, handle, data)
+    }
+    gpu_upload(handle, data) => match map.get(store, handle) {
+      Some(b) -> {
+        let (dt, _old) = b
+        store = map.insert(store, handle, (dt, list.map(data, x => round_to(dt, x))))
         Ok(())
-      } else {
-        Err(no_such_buffer("fake device", handle))
       }
+      None -> Err(no_such_buffer("fake device", handle))
+    }
     gpu_download(handle) => match map.get(store, handle) {
-      Some(v) -> Ok(v)
+      Some(b) -> {
+        let (_dt, v) = b
+        Ok(v)
+      }
       None -> Err(no_such_buffer("fake device", handle))
     }
     gpu_launch(kernel, _grid, args) => match map.get(kernels, kernel) {
@@ -261,8 +335,18 @@ pub fn with_gpu_fake[T](kernels: Map[String, fn(List[List[Float]]) -> List[Float
           match list.find(args, a => not map.has(s, a)) {
             Some(missing) -> Err(no_such_buffer("fake device", missing))
             None -> {
-              let ins = list.map(args, a => unwrap_or(map.get(s, a), []))
-              store = map.insert(store, args[len(args) - 1], f(ins))
+              let bufs = list.map(args, a => unwrap_or(map.get(s, a), ("f64", [])))
+              let dtypes = list.map(bufs, b => {
+                let (dt, _v) = b
+                dt
+              })
+              let ins = list.map(bufs, b => {
+                let (_dt, v) = b
+                v
+              })
+              let out_dt = dtypes[len(dtypes) - 1]
+              let written = list.map(f(dtypes, ins), x => round_to(out_dt, x))
+              store = map.insert(store, args[len(args) - 1], (out_dt, written))
               Ok(())
             }
           }
@@ -297,12 +381,12 @@ fn of_array(a: Array[Float]) -> List[Float] = list.map(range(0, array_len(a)), i
 
 # The device pointers behind `args`, in order. Every handle was checked
 # against the table before this is called.
-fn device_pointers(table: Map[Int, (Int, Int)], args: List[Int]) -> Array[Int] = {
+fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[Int]) -> Array[Int] = {
   var a: Array[Int] = array_new()
   for h in args {
     match map.get(table, h) {
       Some(b) -> {
-        let (p, _n) = b
+        let (p, _n, _dt) = b
         a = array_push(a, p)
       }
       None -> ()
@@ -317,11 +401,15 @@ fn device_pointers(table: Map[Int, (Int, Int)], args: List[Int]) -> Array[Int] =
 ## `with_gpu_fake`'s table maps a name to a reference implementation.
 ##
 ## Handles are the same currency as the fake device's: they count up from 1
-## per installation, a buffer is `(device pointer, element count)` in a table
-## the handler owns, and a handle never issued or already freed answers
-## `gpu.no_such_buffer` before the device is asked. `gpu_alloc` accepts
-## `"f64"` only in this release (the operations move `List[Float]`) and
-## answers `gpu.unsupported_dtype` otherwise, as the fake device does.
+## per installation, a buffer is `(device pointer, element count, format)`
+## in a table the handler owns, and a handle never issued or already freed
+## answers `gpu.no_such_buffer` before the device is asked. `gpu_alloc`
+## accepts the formats `element_bytes` knows, `f64` and `bf16`, and answers
+## `gpu.unsupported_dtype` otherwise, as the fake device does. An f64 buffer
+## crosses to the runtime as an `Array[Float]` the runtime copies double for
+## double; a bf16 buffer crosses as `Bytes`, packed here (`pack_bf16`,
+## which rounds) and unpacked here (`unpack_bf16`), so the runtime copies
+## bytes and knows nothing about the format.
 ## `gpu_launch` looks the name up first (`gpu.no_kernel`), then the
 ## arguments (`gpu.no_arguments`, `gpu.no_such_buffer`), and only then
 ## touches the device: the cubin is handed to the driver the first time its
@@ -340,35 +428,40 @@ fn device_pointers(table: Map[Int, (Int, Int)], args: List[Int]) -> Array[Int] =
 pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -> T !io = {
   with handle Gpu {
     var next: Int = 1
-    var bufs: Map[Int, (Int, Int)] = map.empty()
+    var bufs: Map[Int, (Int, Int, String)] = map.empty()
     var mods: Map[String, Int] = map.empty()
-    gpu_alloc(dtype, len) =>
-      if dtype != "f64" {
-        Err(refuse("gpu.unsupported_dtype", "real device: this release moves f64 only, got ${dtype}"))
-      } else {
-        match gpu_alloc_host(len * 8) {
-          Ok(p) -> {
-            let h = next
-            next = next + 1
-            bufs = map.insert(bufs, h, (p, len))
-            Ok(h)
-          }
-          Err(e) -> Err(e)
+    gpu_alloc(dtype, len) => match element_bytes(dtype) {
+      None -> Err(refuse("gpu.unsupported_dtype", "real device: this release moves f64 and bf16, got ${dtype}"))
+      Some(w) -> match gpu_alloc_host(len * w) {
+        Ok(p) -> {
+          let h = next
+          next = next + 1
+          bufs = map.insert(bufs, h, (p, len, dtype))
+          Ok(h)
         }
+        Err(e) -> Err(e)
       }
+    }
     gpu_upload(handle, data) => match map.get(bufs, handle) {
       Some(b) -> {
-        let (p, _n) = b
-        gpu_upload_host(p, to_array(data))
+        let (p, _n, dt) = b
+        if dt == "bf16" { gpu_upload_bytes_host(p, pack_bf16(data)) } else { gpu_upload_host(p, to_array(data)) }
       }
       None -> Err(no_such_buffer("real device", handle))
     }
     gpu_download(handle) => match map.get(bufs, handle) {
       Some(b) -> {
-        let (p, n) = b
-        match gpu_download_host(p, n) {
-          Ok(a) -> Ok(of_array(a))
-          Err(e) -> Err(e)
+        let (p, n, dt) = b
+        if dt == "bf16" {
+          match gpu_download_bytes_host(p, n * 2) {
+            Ok(raw) -> Ok(unpack_bf16(raw))
+            Err(e) -> Err(e)
+          }
+        } else {
+          match gpu_download_host(p, n) {
+            Ok(a) -> Ok(of_array(a))
+            Err(e) -> Err(e)
+          }
         }
       }
       None -> Err(no_such_buffer("real device", handle))
@@ -401,7 +494,7 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
     }
     gpu_free(handle) => match map.get(bufs, handle) {
       Some(b) -> {
-        let (p, _n) = b
+        let (p, _n, _dt) = b
         bufs = map.remove(bufs, handle)
         gpu_free_host(p)
       }
@@ -425,14 +518,14 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
 # a driver, and its report is compared byte for byte. The real handler
 # against a real device is scripts/tile-gpu-diff, and its ledger.
 
-fn vadd_on_device(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+fn vadd_as[D: Dtype](d: D, kernel: String, xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
   let n = len(xs)
-  let a = alloc(F64, n)?
-  let b = alloc(F64, n)?
-  let out = alloc(F64, n)?
+  let a = alloc(d, n)?
+  let b = alloc(d, n)?
+  let out = alloc(d, n)?
   upload(a, xs)?
   upload(b, ys)?
-  launch("vadd", 1, [handle_of(a), handle_of(b), handle_of(out)])?
+  launch(kernel, 1, [handle_of(a), handle_of(b), handle_of(out)])?
   sync()?
   let r = download(out)?
   free(a)?
@@ -440,6 +533,9 @@ fn vadd_on_device(xs: List[Float], ys: List[Float]) -> Result[List[Float], Forei
   free(out)?
   Ok(r)
 }
+
+fn vadd_on_device(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu =
+  vadd_as(F64, "vadd", xs, ys)
 
 test "a !Gpu program runs vadd on a machine without a GPU and gets the right answer" {
   let xs = [1.0, 2.5, -3.0, 4.0, 0.125, 1000000.0, -0.5, 7.0]
@@ -544,6 +640,112 @@ test "alloc refuses an empty tensor above the effect, and the fake device refuse
   assert dtype_bytes(F64) == 8
   assert dtype_name(F32) == "f32"
   assert dtype_bytes(F32) == 4
+  assert dtype_name(BF16) == "bf16"
+  assert dtype_bytes(BF16) == 2
+  # the one table both handlers accept formats from
+  assert element_bytes("f64") == Some(8)
+  assert element_bytes("bf16") == Some(2)
+  assert element_bytes("f32") == None
+}
+
+# ---- bf16 ----
+
+test "packing rounds every value to bf16 and lays the pattern down low byte first; unpacking is exact" {
+  # 1 + 3/512 is off the grid; its nearest bf16 is 1 + 1/128, and the two
+  # pack alike. A truncating pack would give 1.0's bytes instead.
+  assert pack_bf16([1.0 + 3.0 / 512.0]) == pack_bf16([1.0 + 1.0 / 128.0])
+  assert bytes.to_hex(pack_bf16([1.0 + 3.0 / 512.0])) == "813f"
+  assert bytes.to_hex(pack_bf16([1.0, -1.5, 0.0])) == "803fc0bf0000"
+  let inf = 1.0 / 0.0
+  let xs = [0.1, -2.0, 1.0e-40, 3.4e38, 0.0 * (0.0 - 1.0), inf, 65504.0]
+  let back = unpack_bf16(pack_bf16(xs))
+  assert to_string(back) == to_string(list.map(xs, x => narrow.round_bf16(x)))
+  assert 1.0 / back[4] == 0.0 - inf
+  assert back[3] == inf
+  assert bytes.len(pack_bf16(xs)) == 14
+  assert unpack_bf16(bytes.utf8("")) == []
+}
+
+# A fixed-seed 31-bit LCG: the random half of every pair below is a function
+# of nothing but its position, so the test is the same on every run and on
+# both backends.
+fn lcg(seed: Int) -> Int = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+
+# Every bf16 pattern in order, paired with a pseudo-random pattern.
+fn all_patterns() -> (List[Float], List[Float]) = {
+  var xs: List[Float] = []
+  var ys: List[Float] = []
+  var r = 20260902
+  var i = 0
+  while i < 65536 {
+    r = lcg(r)
+    xs = xs ++ [narrow.bf16_of_bits(i)]
+    ys = ys ++ [narrow.bf16_of_bits((r >>> 8) & 0xFFFF)]
+    i = i + 1
+  }
+  (xs, ys)
+}
+
+# The sum narrow computes, value by value: round each operand to bf16, add
+# exactly, round once, which is the device's addf by the theorem.
+fn narrow_sums(xs: List[Float], ys: List[Float]) -> List[Float] =
+  list.map(range(0, len(xs)), i => narrow.to_f64(narrow.add(narrow.bf16(xs[i]), narrow.bf16(ys[i]))))
+
+test "bf16 vadd on the fake device is narrow's add, bit for bit, over every bf16 pattern paired with a random one" {
+  let (xs, ys) = all_patterns()
+  let r = with_gpu_fake(reference_kernels(), () => vadd_as(BF16, "vadd_bf16", xs, ys))
+  match r {
+    Ok(got) -> {
+      assert len(got) == 65536
+      # `to_string` tells -0.0 from 0.0 and NaN from anything, so equal
+      # renderings are equal bits
+      assert to_string(got) == to_string(narrow_sums(xs, ys))
+    }
+    Err(_) -> { assert false }
+  }
+}
+
+# 1024 pairs of Floats off the bf16 grid (thousandths and ten-thousandths).
+fn off_grid_pairs() -> (List[Float], List[Float]) = {
+  var xs: List[Float] = []
+  var ys: List[Float] = []
+  var r = 7
+  var i = 0
+  while i < 1024 {
+    r = lcg(r)
+    let x = to_float(r % 200001) / 1000.0 - 100.0
+    r = lcg(r)
+    let y = to_float(r % 20001) / 10000.0 - 1.0
+    xs = xs ++ [x]
+    ys = ys ++ [y]
+    i = i + 1
+  }
+  (xs, ys)
+}
+
+fn there_and_back(xs: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+  let t = alloc(BF16, len(xs))?
+  upload(t, xs)?
+  download(t)
+}
+
+test "uploading Floats off the bf16 grid rounds them on the way in, so the fake device adds what a bf16 buffer holds" {
+  # off-grid operands: the device holds their nearest bf16 and adds those;
+  # adding the Floats and rounding once would differ
+  let (xs, ys) = off_grid_pairs()
+  let r2 = with_gpu_fake(reference_kernels(), () => vadd_as(BF16, "vadd", xs, ys))
+  match r2 {
+    Ok(got) -> {
+      assert to_string(got) == to_string(narrow_sums(xs, ys))
+      # and a download of an input answers the rounded values, not the Floats
+      let back = with_gpu_fake(reference_kernels(), () => there_and_back(xs))
+      let rounded: Result[List[Float], ForeignError] = Ok(list.map(xs, x => narrow.round_bf16(x)))
+      let as_given: Result[List[Float], ForeignError] = Ok(xs)
+      assert to_string(back) == to_string(rounded)
+      assert to_string(back) != to_string(as_given)
+    }
+    Err(_) -> { assert false }
+  }
 }
 
 fn launch_refusals() -> List[String] !Gpu = {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Layer 2 of docs/tile-backend-design.md 6.2: the vadd kernel on this
-# machine's GPU against the fake device, bit for bit, and the ledger that
-# says it was done (6.4, decision D4).
+# Layer 2 of docs/tile-backend-design.md 6.2: the vadd kernels (f64 and
+# bf16) on this machine's GPU against the fake device, bit for bit, and the
+# ledger that says it was done (6.4, decision D4).
 #
 #   ./scripts/tile-gpu-diff/run.sh            # run, and append a ledger line
 #   ./scripts/tile-gpu-diff/run.sh --dry      # run, append nothing
@@ -9,16 +9,16 @@
 #
 # The run:
 #
-#   assemble  scripts/tile-golden/vadd.tilebc (the recorded bytecode golden)
-#             through the pinned tileiras into a cubin for toolchain.txt's
-#             gpu-name. install-tileiras.sh installs the pin under
-#             $TILEIRAS_DIR (default ~/.cache/dawn-tileiras) unless $TILEIRAS
-#             names a binary.
+#   assemble  scripts/tile-golden/vadd.tilebc and vadd_bf16.tilebc (the
+#             recorded bytecode goldens) through the pinned tileiras into
+#             cubins for toolchain.txt's gpu-name. install-tileiras.sh
+#             installs the pin under $TILEIRAS_DIR (default
+#             ~/.cache/dawn-tileiras) unless $TILEIRAS names a binary.
 #   jvm       vadd_diff.dawn on the JVM stops at the first operation with
 #             `gpu.unsupported_backend`: the JVM has no device runtime and
 #             says so by construction rather than by a LinkageError.
-#   native    vadd_diff.dawn built natively runs four input sets under
-#             `with_gpu_real` and `with_gpu_fake` and prints a transcript
+#   native    vadd_diff.dawn built natively runs four f64 and three bf16
+#             input sets under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
 #             (the driver refused at that stage, the same way in every set)
@@ -28,11 +28,19 @@
 #             the program rebuilt against that copy, and the verdict
 #             required to move:
 #
-#     download-short   the handler asks the device for n-1 elements ->
-#                      every set's round trip differs, verdict `fail`.
+#     download-short   the handler asks the device for n-1 f64 elements ->
+#                      every f64 set's round trip differs, verdict `fail`.
 #                      A handler-layer claim, so it is required on every
 #                      driver, blocked or not: the memory path is the part
 #                      a pre-r580 driver can already run.
+#     pack-truncates   the bf16 packer stops rounding and lets
+#                      narrow.bf16_bits truncate the Float instead -> every
+#                      bf16 set's round trip differs (each set carries
+#                      Floats off the grid on purpose), verdict `fail`.
+#                      The same layer as download-short, so required on
+#                      every driver; the device never sees the difference
+#                      between a truncated and a rounded operand as such,
+#                      only the fake device does.
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -55,7 +63,8 @@
 #   HEAD; its date is a day that has happened; its result is `pass` or
 #   `blocked:...` (a recorded `fail` may sit in the history but not at the
 #   end); no tile path changed between that commit and HEAD, where the tile
-#   paths are packages/tileir, std/gpu.dawn, scripts/tile-golden,
+#   paths are packages/tileir, std/gpu.dawn, std/narrow.dawn (the bf16
+#   reference the fake device rounds with), scripts/tile-golden,
 #   scripts/tile-gpu-diff minus the ledger itself, and the GPU section of
 #   runtime/c/dawn_rt.c (between its DAWN_RT_GPU_BEGIN / END markers; the
 #   rest of the runtime is not a tile path); and toolchain.txt's driver
@@ -102,8 +111,8 @@ import subprocess
 import sys
 
 ledger, toolchain = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-TILE_PATHS = ["packages/tileir", "std/gpu.dawn", "scripts/tile-golden", "scripts/tile-gpu-diff",
-              ":(exclude)scripts/tile-gpu-diff/ledger.txt"]
+TILE_PATHS = ["packages/tileir", "std/gpu.dawn", "std/narrow.dawn", "scripts/tile-golden",
+              "scripts/tile-gpu-diff", ":(exclude)scripts/tile-gpu-diff/ledger.txt"]
 BEGIN, END = "=== DAWN_RT_GPU_BEGIN ===", "=== DAWN_RT_GPU_END ==="
 problems = []
 
@@ -208,11 +217,14 @@ fi
 grep -q "V${want_tileiras}\b" "$work/tileiras.version" ||
   { cat "$work/tileiras.version" >&2; fail "tileiras is not the pinned ${want_tileiras} (toolchain.txt)"; }
 
-"$tileiras" --gpu-name "$gpu_name" -o "$work/vadd.cubin" "$golden/vadd.tilebc" > "$work/assemble.log" 2>&1 ||
-  { cat "$work/assemble.log" >&2; fail "tileiras refused scripts/tile-golden/vadd.tilebc"; }
-[ "$(head -c 4 "$work/vadd.cubin" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] ||
-  fail "tileiras wrote no ELF cubin"
-echo "PASS  assemble: vadd.tilebc -> cubin ($(wc -c < "$work/vadd.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
+for k in vadd vadd_bf16; do
+  "$tileiras" --gpu-name "$gpu_name" -o "$work/$k.cubin" "$golden/$k.tilebc" > "$work/assemble.log" 2>&1 ||
+    { cat "$work/assemble.log" >&2; fail "tileiras refused scripts/tile-golden/$k.tilebc"; }
+  [ "$(head -c 4 "$work/$k.cubin" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] ||
+    fail "tileiras wrote no ELF cubin for $k"
+  echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
+done
+cubins=("$work/vadd.cubin" "$work/vadd_bf16.cubin")
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -240,7 +252,7 @@ verdict_of() { # transcript
 
 # ---- jvm
 rc=0
-"$root/bin/dawn" run "$here/vadd_diff.dawn" -- "$work/vadd.cubin" > "$work/jvm.out" 2> "$work/jvm.err" || rc=$?
+"$root/bin/dawn" run "$here/vadd_diff.dawn" -- "${cubins[@]}" > "$work/jvm.out" 2> "$work/jvm.err" || rc=$?
 [ "$rc" = 0 ] || { cat "$work/jvm.err" >&2; fail "vadd_diff did not run on the JVM (exit $rc)"; }
 [ "$(verdict_of "$work/jvm.out")" = "blocked:gpu.unsupported_backend@alloc" ] ||
   { cat "$work/jvm.out" >&2; fail "on the JVM the real handler must stop at the first operation with gpu.unsupported_backend"; }
@@ -249,12 +261,12 @@ echo "PASS  jvm: the real handler refuses every operation with gpu.unsupported_b
 # ---- native, clean std
 build_native "$root/std" "$work/clean.bin"
 rc=0
-"$work/clean.bin" "$work/vadd.cubin" > "$work/clean.out" 2> "$work/clean.err" || rc=$?
+"$work/clean.bin" "${cubins[@]}" > "$work/clean.out" 2> "$work/clean.err" || rc=$?
 cat "$work/clean.out"
 verdict="$(verdict_of "$work/clean.out")"
 case "$verdict" in
   pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
-        echo "PASS  native: vadd on the GPU is bit-identical to the fake device in every set" ;;
+        echo "PASS  native: vadd and vadd_bf16 on the GPU are bit-identical to the fake device in every set" ;;
   blocked:*) [ "$rc" = 0 ] || fail "verdict $verdict with exit $rc"
         echo "BLOCKED  native: the driver refused before a result could be compared: $verdict" ;;
   fail) cat "$work/clean.err" >&2; fail "the device answered and disagreed with the fake device (see the transcript above)" ;;
@@ -291,26 +303,46 @@ PY
   echo "$dir"
 }
 
-# 1. download-short: the real handler asks the device for one element fewer
-#    than the buffer holds. The round trip of the first input is then one
-#    element short in every set, and the program says `fail`. Required on
-#    every driver: alloc, upload and download are the part a pre-r580 driver
-#    can already run.
-std_ds="$(mutant_std download-short \
-  '        match gpu_download_host(p, n) {' \
-  '        match gpu_download_host(p, n - 1) {')"
-build_native "$std_ds" "$work/m-download-short.bin"
-rc=0
-"$work/m-download-short.bin" "$work/vadd.cubin" > "$work/m-download-short.out" 2>&1 || rc=$?
-if [ "$(verdict_of "$work/m-download-short.out")" != fail ] || [ "$rc" != 1 ]; then
-  cat "$work/m-download-short.out" >&2
-  fail "download-short mutant stayed green: the round trip should differ in every set (verdict $(verdict_of "$work/m-download-short.out"), exit $rc)"
-fi
-[ "$(grep -c '^  verdict differ:roundtrip$' "$work/m-download-short.out")" = 4 ] ||
-  { cat "$work/m-download-short.out" >&2; fail "download-short: expected all four sets to say differ:roundtrip"; }
-echo "PASS  mutant: download-short (every set's round trip differs; verdict fail, exit 1)"
+# A memory-path mutant: the program says `fail` with exit 1, and exactly
+# the sets of <dtype> (all <count> of them) say differ:roundtrip, the
+# other format's sets being untouched. Required on every driver: alloc,
+# upload and download are the part a pre-r580 driver can already run.
+roundtrip_mutant_checks() { # name, std-dir, dtype, count
+  local name="$1" std_dir="$2" dtype="$3" count="$4" rc=0 hit
+  build_native "$std_dir" "$work/m-$name.bin"
+  "$work/m-$name.bin" "${cubins[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  if [ "$(verdict_of "$work/m-$name.out")" != fail ] || [ "$rc" != 1 ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name mutant stayed green: the $dtype round trips should differ (verdict $(verdict_of "$work/m-$name.out"), exit $rc)"
+  fi
+  hit=$(grep -c '^  verdict differ:roundtrip$' "$work/m-$name.out" || true)
+  [ "$hit" = "$count" ] ||
+    { cat "$work/m-$name.out" >&2; fail "$name: expected all $count $dtype sets and no other to say differ:roundtrip, got $hit"; }
+  # every differing set is one of the format's: the other format is untouched
+  awk -v dt="$dtype" '/^set /{cur=$3} /^  verdict differ:roundtrip$/ && cur != dt {bad=1} END {exit bad}' "$work/m-$name.out" ||
+    { cat "$work/m-$name.out" >&2; fail "$name: a set of the other format moved"; }
+  echo "PASS  mutant: $name (every $dtype set's round trip differs, the other format's do not; verdict fail, exit 1)"
+}
 
-# 2. grid-zero: the real handler launches over zero tile blocks. Where the
+# 1. download-short: the real handler asks the device for one f64 element
+#    fewer than the buffer holds. The round trip is then one element short
+#    in every f64 set; the bf16 sets, which download bytes, are untouched.
+std_ds="$(mutant_std download-short \
+  '          match gpu_download_host(p, n) {' \
+  '          match gpu_download_host(p, n - 1) {')"
+roundtrip_mutant_checks download-short "$std_ds" f64 4
+
+# 2. pack-truncates: the bf16 packer no longer rounds, so narrow.bf16_bits
+#    truncates each Float's extra significand bits instead of rounding them
+#    (the mistake a bit-cast of the high half of a binary32 makes). Every
+#    bf16 set carries Floats off the grid, so every bf16 round trip differs
+#    from what the format holds; the f64 sets are untouched.
+std_pt="$(mutant_std pack-truncates \
+  '    let bits = narrow.bf16_bits(narrow.round_bf16(x))' \
+  '    let bits = narrow.bf16_bits(x)')"
+roundtrip_mutant_checks pack-truncates "$std_pt" bf16 3
+
+# 3. grid-zero: the real handler launches over zero tile blocks. Where the
 #    clean run passed, the driver must refuse the launch and the verdict must
 #    move off `pass`. Where the clean run is blocked before or at the launch,
 #    the mutant cannot be told from it, and saying PASS would be the green
@@ -320,7 +352,7 @@ std_gz="$(mutant_std grid-zero \
   '                  gpu_launch_host(m, kernel, 0, device_pointers(table, args))')"
 build_native "$std_gz" "$work/m-grid-zero.bin"
 rc=0
-"$work/m-grid-zero.bin" "$work/vadd.cubin" > "$work/m-grid-zero.out" 2>&1 || rc=$?
+"$work/m-grid-zero.bin" "${cubins[@]}" > "$work/m-grid-zero.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-grid-zero.out")"
 if [ "$verdict" = pass ]; then
   [ "$mverdict" != pass ] ||
@@ -340,8 +372,8 @@ if [ "$append" = no ]; then
 fi
 [ "$pinned_driver" = "$driver" ] ||
   fail "toolchain.txt says driver $pinned_driver and nvidia-smi says $driver: set the driver line to $driver, commit, and run again (the three numbers move together; the ledger commit adds a line and nothing else)"
-dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn runtime/c/dawn_rt.c scripts/tile-golden \
-  scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn)"
+dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c \
+  scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"
