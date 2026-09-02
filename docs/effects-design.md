@@ -442,12 +442,19 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
 3. **反向的一笔一起记。** 吸收禁令（[spec.md](spec.md) §6.2 规则 7）让一条行只增不减，
    唯一的减法点是 `with handle`。这是健全性要求，但方向上是放大签名噪音而不是缩小。
 
-本仓手上没有真实样本可量：具名效果这一档零内部使用者，`std/` 与 `selfhost/src/` 下没有任何
-`effect` 声明，这条陈述由 `scripts/doc-check.py` 的 `check_named_effect_status` 从两侧钉住
-（有声明而文档还说没有，或没声明而文档不说，都红；见 [README.md](../README.md) 的效果一节）。
+第一个真实样本已经在了：`std/io` 声明了 `Fs`（文件系统的十四个操作，生产 handler
+`with_fs_real`），它是 `std/` 与 `selfhost/src/` 下唯一的 `effect` 声明。这份清单由
+`scripts/doc-check.py` 的 `NAMED_EFFECT_EXPECTED` 枚举、`check_named_effect_status` 三向钉住
+（清单外的声明、清单内文件失去声明、清单列了不存在的文件，都红；见 [README.md](../README.md)
+的效果一节）。样本的坐标：声明与 handler 在 `std/io.dawn`；消费侧的签名噪音落在编译器的驱动层，
+预研按可达性数出 131 条签名要带上 `Fs`，其中 23 条是干净的 `!Fs`、108 条是 `!Fs !io` 叠加
+（叠加的大头是同时可达 `catch_fault` 或 Java FFI 的函数，任何 std 分解都清不掉）。消费者迁移
+要等种子推进一轮（编译器由上一 release 的工具链配它发布时的 std 编译，那份 std 里没有 `Fs`），
+迁移落地时按实测回填这两个数。
 
-**裁决：已知风险，暂无缓解，等真实的签名噪音样本再裁。** 样本的形状是多个效果同时在场、
-跨模块传播、以及库要不要为效果改签名；这三件今天一件都没发生。
+**裁决：已知风险，暂无缓解；效果集别名等第二个族（Console 或 Env）的样本到了再裁。**
+第一个样本只登记坐标：多个效果同时在场、跨模块传播这两件在 Fs 上会发生，但一个样本不足以
+看出别名该长什么形状。
 
 ### 8.2 风险二：多 handler 组合的动态语义
 
