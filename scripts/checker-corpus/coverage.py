@@ -134,7 +134,7 @@ def block_after(text, pos):
     return text[pos:n]
 
 
-def literals(expr):
+def literals(expr, at_depth=None):
     """Literal chunks emitted by an expression, interpolations cut out.
 
     Formatting helpers carry their own literal arguments -- the separator in
@@ -142,7 +142,8 @@ def literals(expr):
     fixed chunks of the diagnostic, and requiring them would make a one-item
     join look unreached. Keep only literals at the expression's shallowest
     nesting level. Splitting an `if`/`match` branch below gives each branch its
-    own level, while nested helper arguments remain deeper.
+    own level, while nested helper arguments remain deeper. Tuple expansion
+    can request an exact depth after it has removed the tuple's parentheses.
     """
     found = []
     depth = 0
@@ -183,10 +184,10 @@ def literals(expr):
 
     if not found:
         return []
-    shallowest = min(depth for depth, _ in found)
+    wanted = min(depth for depth, _ in found) if at_depth is None else at_depth
     out = []
     for depth, body in found:
-        if depth == shallowest:
+        if depth == wanted:
             for piece in re.split(r"\$\{[^}]*\}", body):
                 if piece:
                     out.append(piece)
@@ -267,11 +268,19 @@ def matching_delimiter(code, pos):
 
 
 def body_brace(code, pos):
-    """First brace at header depth, after any grouped condition/scrutinee."""
+    """First brace belonging to this header, past nested branch expressions."""
+    # Dawn's no-tail-block header mode still permits a primary `if` or `match`,
+    # without grouping, so its complete body must be skipped structurally.
     stack = []
     pairs = {")": "(", "]": "[", "}": "{"}
     while pos < len(code):
         c = code[pos]
+        nested = branch_keyword(code, pos)
+        if nested is not None:
+            after = branch_expression_end(code, pos, nested)
+            if after > pos:
+                pos = after
+                continue
         if c == "{" and not stack:
             return pos
         if c in "([{":
@@ -282,6 +291,44 @@ def body_brace(code, pos):
             stack.pop()
         pos += 1
     return -1
+
+
+def branch_keyword(code, pos):
+    """A branch keyword here, excluding a keyword used as a member name."""
+    keyword = None
+    if word_at(code, pos, "if"):
+        keyword = "if"
+    elif word_at(code, pos, "match"):
+        keyword = "match"
+    if keyword is None:
+        return None
+    before = pos - 1
+    while before >= 0 and code[before].isspace():
+        before -= 1
+    return None if before >= 0 and code[before] == "." else keyword
+
+
+def branch_expression_end(code, start, keyword):
+    """End of an `if`/`match` expression that starts inside a header."""
+    brace = body_brace(code, start + len(keyword))
+    if brace < 0:
+        return start
+    close = matching_delimiter(code, brace)
+    if close >= len(code):
+        return start
+    end = close + 1
+    if keyword != "if":
+        return end
+    pos = skip_space(code, end)
+    if not word_at(code, pos, "else"):
+        return end
+    pos = skip_space(code, pos + len("else"))
+    if word_at(code, pos, "if"):
+        return branch_expression_end(code, pos, "if")
+    if pos >= len(code) or code[pos] != "{":
+        return start
+    close = matching_delimiter(code, pos)
+    return start if close >= len(code) else close + 1
 
 
 def if_arm_bodies(expr, code, start):
@@ -367,20 +414,48 @@ def match_arm_bodies(expr, code, start):
     return out
 
 
+def outer_parens(expr):
+    """Contents when one pair of parentheses encloses the whole expression."""
+    code = code_mask(expr)
+    start = skip_space(code, 0)
+    end = len(code)
+    while end > start and code[end - 1].isspace():
+        end -= 1
+    if start >= end or code[start] != "(":
+        return None
+    close = matching_delimiter(code, start)
+    return expr[start + 1 : close] if close == end - 1 else None
+
+
+def top_level_parts(expr):
+    """Comma-separated expression parts at this delimiter depth."""
+    code = code_mask(expr)
+    stack = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    out = []
+    start = 0
+    for pos, c in enumerate(code):
+        if c in "([{":
+            stack.append(c)
+        elif c in ")]}":
+            if stack and stack[-1] == pairs[c]:
+                stack.pop()
+        elif c == "," and not stack:
+            out.append(expr[start:pos])
+            start = pos + 1
+    out.append(expr[start:])
+    return out
+
+
 def branch_bodies(expr):
     """Possible complete RHS/body expressions, or [] for a non-branch."""
     while True:
-        code = code_mask(expr)
-        start = skip_space(code, 0)
-        end = len(code)
-        while end > start and code[end - 1].isspace():
-            end -= 1
-        if start >= end or code[start] != "(":
+        inner = outer_parens(expr)
+        if inner is None or len(top_level_parts(inner)) != 1:
             break
-        close = matching_delimiter(code, start)
-        if close != end - 1:
-            break
-        expr = expr[start + 1 : close]
+        expr = inner
+    code = code_mask(expr)
+    start = skip_space(code, 0)
     if word_at(code, start, "if"):
         return if_arm_bodies(expr, code, start)
     if word_at(code, start, "match"):
@@ -407,15 +482,32 @@ def patterns(lits, expr):
     # `if`/`match`. Each arm is a possible complete wording. Do not split an
     # arbitrary concatenation merely because it contains a conditional: that
     # would turn a prefix outside the conditional back into a one-chunk match.
-    def add_wordings(body, chunks=None):
+    def wordings(body, chunks=None, direct=False):
+        inner = outer_parens(body)
+        if inner is not None:
+            parts = top_level_parts(inner)
+            if len(parts) > 1:
+                combinations = [()]
+                for part in parts:
+                    choices = wordings(part, direct=True)
+                    combinations = [
+                        prefix + choice
+                        for prefix in combinations
+                        for choice in choices
+                    ]
+                return combinations
+            return wordings(inner, direct=direct)
         branches = branch_bodies(body)
         if branches:
+            out = []
             for branch in branches:
-                add_wordings(branch)
-            return
-        add(literals(body) if chunks is None else chunks)
+                out += wordings(branch, direct=direct)
+            return out
+        found = literals(body, 0) if direct else literals(body)
+        return [tuple(found if chunks is None else chunks)]
 
-    add_wordings(expr, lits)
+    for chunks in wordings(expr, lits):
+        add(chunks)
     return cands
 
 
@@ -698,6 +790,61 @@ def self_test():
         ("group no message",),
     ]:
         print("FAIL: grouping hid a nested branch", file=sys.stderr)
+        return 1
+    conditional_message = (
+        '(if flag { "left message" } else { "right message" }, "shared hint")'
+    )
+    if patterns(literals(conditional_message), conditional_message) != [
+        ("left message", "shared hint"),
+        ("right message", "shared hint"),
+    ]:
+        print("FAIL: a conditional tuple message lost its hint", file=sys.stderr)
+        return 1
+    conditional_hint = (
+        '("shared message", if flag { "left hint" } else { "right hint" })'
+    )
+    if patterns(literals(conditional_hint), conditional_hint) != [
+        ("shared message", "left hint"),
+        ("shared message", "right hint"),
+    ]:
+        print("FAIL: a conditional tuple hint lost its branch", file=sys.stderr)
+        return 1
+    conditional_pair = (
+        '(if left { "first message" } else { "second message" }, '
+        'if right { "first hint" } else { "second hint" })'
+    )
+    if patterns(literals(conditional_pair), conditional_pair) != [
+        ("first message", "first hint"),
+        ("first message", "second hint"),
+        ("second message", "first hint"),
+        ("second message", "second hint"),
+    ]:
+        print("FAIL: conditional tuple elements were not combined", file=sys.stderr)
+        return 1
+    tuple_formatter = '("shared message", join(names, ", "))'
+    if patterns(literals(tuple_formatter), tuple_formatter) != [("shared message",)]:
+        print("FAIL: tuple expansion promoted a formatting literal", file=sys.stderr)
+        return 1
+    ungrouped_condition = (
+        "if match flag { true -> true\nfalse -> false } { "
+        '"ungrouped yes message" } else { "ungrouped no message" }'
+    )
+    if patterns(literals(ungrouped_condition), ungrouped_condition) != [
+        ("ungrouped yes message",),
+        ("ungrouped no message",),
+    ]:
+        print("FAIL: an ungrouped branch stole its enclosing if body", file=sys.stderr)
+        return 1
+    ungrouped_scrutinee = (
+        'match if flag { "left-key" } else { "right-key" } {\n'
+        '  "left-key" -> "ungrouped left message"\n'
+        '  "right-key" -> "ungrouped right message"\n}'
+    )
+    if patterns(literals(ungrouped_scrutinee), ungrouped_scrutinee) != [
+        ("ungrouped left message",),
+        ("ungrouped right message",),
+    ]:
+        print("FAIL: an ungrouped branch stole its enclosing match body", file=sys.stderr)
         return 1
     print("coverage selftest: ordered chunks and branch structure verified")
     return 0
