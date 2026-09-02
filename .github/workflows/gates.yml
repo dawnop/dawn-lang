@@ -1109,7 +1109,11 @@ jobs:
   # each bytecode golden for sm_86 (layer 1: the one verdict from outside
   # this repository, with a reader and a verifier behind it that name the
   # offset and the operation when they refuse), and every cubin carrying a
-  # GLOBAL FUNC named after its kernel. Eight mutants: two on the handler
+  # GLOBAL FUNC named after its kernel. Layer 1's verdict is the exit code
+  # AND an empty error stream: knife 7b measured tileiras writing a cubin,
+  # exiting 0 and printing a refusal (an f64 `tanh` with a rounding mode it
+  # does not accept), which a gate reading only the status would have
+  # called green. Eight mutants: two on the handler
   # and renderer that the text golden catches, two on the handler's region
   # stack that the lowering refuses before any text (a loop's token not
   # carried out, the stack popped the wrong way round), four on the writer
@@ -1150,8 +1154,15 @@ jobs:
   # depth because the ancestry test needs the history.
   tile:
     runs-on: ubuntu-latest
-    # budget: 3x 340s planning value (170s local, doubled)
-    timeout-minutes: 17
+    # budget: 3x 520s planning value (260s local, doubled). Knife 7b took
+    # run.sh from ten kernels to twenty-three and measured 123s -> 188s
+    # locally, paired back to back (docs/tile-backend-design.md 6.5); the
+    # planning value moved with it. The run pole is 660s and this is 520s:
+    # the margin is 140s where it used to be 320s, so the NEXT knife that
+    # doubles the kernel count shards this job by `kernels=()` rather than
+    # raising the budget again. The eleven mutants are not the cost any
+    # more; the kernel loop is.
+    timeout-minutes: 26
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1167,7 +1178,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (both backends, eleven mutants)
+      - name: tile IR goldens and tileiras (23 kernels, both backends, eleven mutants)
         run: ./scripts/tile-golden/run.sh
 
       - name: GPU diff ledger is current (layer 2 ran at this tree)

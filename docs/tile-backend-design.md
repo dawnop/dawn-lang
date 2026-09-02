@@ -134,7 +134,7 @@ pub fn add(a: BF16, b: BF16) -> BF16 = {
 |------|-----------|-------------|------------|------|
 | `+ − × ÷ √` | 成立，需宽格式精度至少 18 | 至少 24 | 至少 50 | Figueroa：宽格式精度不小于 2p+2 时「宽算一次加窄舍一次」等于窄格式正确舍入。设备上 `addf ... rounding<nearest_even> : tile<Nxbf16>` 是原生 bf16 加，与 `round_bf16(a + b)` 逐位相等就是定理的内容 |
 | fma | 不覆盖 | 不覆盖 | 不覆盖 | 三元运算无定理；拆 `mulf` 加 `addf` 各自舍入，或声明容差 |
-| 超越函数 | 无定理 | 无定理 | 无定理 | 定义为「f64 算再舍入」；设备侧只能容差契约 |
+| 超越函数 | 无定理 | 无定理 | 无定理 | 定义为「f64 算再舍入」；设备侧只能容差契约。**刀 7b 起这一格有客户了**：`exp / exp2 / log / log2 / rsqrt / tanh / pow` 七个操作与它们的七个 kernel 全在容差档，判词 `atol = rtol = 1e-5`（§6.6）。`sqrt` 是例外，IEEE 754 要求它正确舍入，本机实测设备答案与宿主参考逐位相同 |
 | matmul / `mmaf` | 容差 | 容差 | 容差 | tensor core 内部 f32 累加且顺序不定。层 2 对拍从第一天就分「逐位」与「容差」两档，逐位那档才是门禁 |
 | fmod | 精确 | 精确 | 精确 | 任何精度下都精确，不需舍入 |
 
@@ -490,9 +490,34 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   splat、`iota`）。**仍然没有**：`reduce` / `scan`（要 `identities` 属性与归约区域）、
   超越函数、二维及以上的 tile（`render.ty` 的 rank ≥ 2 仍 panic）、`mmaf`、多维 grid、
   整数与窄浮点缓冲、view 类型族。逐条归属见 agent-handoff 的 cuTile 覆盖计划。
-- **`d_if` 没做**：归约 kernel 用不到它。Tile IR 的 `if` 是 `yield` 结尾的两个区域、结果
-  类型列表在头上，与 `for` 同一套区域编码，加的时候照 `lower_for` 的形状加一个 `IfOp`
-  即可；要不要做等第一个需要 tile 值条件的 kernel。
+- **`d_if` 刀 7b 做了**（刀 5 时判为「等第一个需要 tile 值条件的 kernel」）。它是本包第一个
+  **两个区域**的操作：`if` 的读取器数区域数，给一个或三个都当场拒（实测），所以没有 else 的
+  `if` 也要写第二个区域。条件是 **rank-0 的 `tile<i1>`**，rank-1 的会被拒
+  （`op operand #0 must be 0D tile of i1 values`，实测），这也是 `Scalar[D]` 这个 opaque
+  存在的原因：`Tile[D]` 在本包里是 rank 1，两者在 Tile IR 里不可互换，`spread` 是唯一的桥。
+- **降低 `if` 要把 then 分支降两遍**：结果的类型是 then 分支 `yield` 出来的东西的类型，而
+  结果的编号必须在两个分支之前（文本的阅读序）。所以 `lower_if` 先用外层状态把 then 分支
+  降一遍、只从它的终结子读类型，丢掉编号与 memo，再正式降一遍。降低是纯函数，两遍必然一致。
+- **刀 7b 加了什么、没加什么**：加的是归约（`reduce` 0x58 + `yield` 0x6D，含 N 元与
+  `identities` 属性）、两区域的 `if`（0x32）、十个超越函数
+  （`exp` 0x17、`exp2` 0x18、`log` 0x3F、`log2` 0x40、`sqrt` 0x64、`rsqrt` 0x5D、
+  `tanh` 0x6A、`pow` 0x54、`floor` 0x27、`ceil` 0x0D）、rank-0 tile（`Scalar[D]` 与
+  `spread`）、`d_for3 / d_for4`。**仍然没有**：`scan`（0x5E，与 `reduce` 同一套区域编码，
+  归刀 13）、二维及以上的 tile（`render.ty` 的 rank ≥ 2 仍 panic）、`mmaf`、多维 grid、
+  整数与窄浮点缓冲、view 类型族、`sin / cos / tan / sinh / cosh / atan2 / remf`
+  （同族、零新机制，有客户再加）、跨 block 的归约（一次 launch 只归约一个 tile block 内的
+  一个 tile，所以本刀的归约 kernel 都是「整条向量装进一个 1024 宽的 tile、grid = 1」的形状）。
+- **归约区域与 `if` 区域里禁止访存**：方言要求归约体是纯的，而两种区域都不携带内存序 token,
+  所以里面的 load / store / `d_for` 一律在记录时按名拒绝（`a load inside a reduce or if
+  region has no memory order`）。这是本包自己立的规矩，不是方言的。
+- **各操作的属性形状是量出来的，不是猜的**：`exp` 在 13.2 **一个属性都不写**（它的
+  `rounding_mode` 是 13.3 才加的；写了会让读取器把下一个字节当别的东西，实测报
+  `failed to get result type 0 for CmpIOp`）；`exp2 / rsqrt` 只写 flags（`flush_to_zero`
+  是 UnitAttr，只占一个 flag 位、没有载荷）；`sqrt` 写 flags 再写 `rounding<nearest_even>`；
+  `tanh` **不写 flags、只写 rounding**，而且 f64 只接受 `full`（写 `nearest_even` 会被拒，
+  写 `approx` 报 f32-only，都实测）；`log / log2 / floor / ceil / pow` 什么都不写。
+  每一种错的形状都单独喂过 `tileiras`，报文记在 `packages/tileir/src/bytecode.dawn` 的
+  测试块里。
 - **递归上限**：两个常量，`MAX_LOOP_DEPTH = 16`（区域栈深度，递归穿过 `d_for` 的 helper
   在这里停）与 `MAX_HANDLES = 65536`（一次记录能铸的句柄数，不进循环的递归 helper 在这里
   停）。都是 `panic`，报文点名原因。
@@ -598,7 +623,15 @@ bytecode`；截断 → `section length 4 exceeds remaining bytecode data`；未�
 `loop-token-not-carried` 与 `region-stack-pop` 是 handler 变异体，降低时按名拒绝、不出文本；
 `for-results-not-rolled-back` 是写入器变异体，文本不动、字节同长、`tileiras` 答
 `operand index 39 out of bounds (size=25) for operand 1`。层 1 还多查每个 cubin 的符号表里有
-`GLOBAL FUNC <kernel>`（python 直接读 ELF64，不依赖 binutils）。今天三层各有：层 0 三个
+`GLOBAL FUNC <kernel>`（python 直接读 ELF64，不依赖 binutils）。
+
+**刀 7b 补了层 1 的一个洞：退出码不是它的全部判词。** `tileiras` 会一边退出 0、一边把拒绝
+写在标准错误上：实测 `tanh` 带 `rounding<nearest_even>`（f64 的 `tanh` 不接受这个模式）照样
+写出 cubin、退出 0，同时打印
+`'cuda_tile.tanh' op invalid rounding mode specified, expect one of [approx, full]`。
+只读退出码的门会把它当绿。`run.sh` 的 `assemble` 因此改成「退出码为 0 **且** 输出里没有
+`^error:`」，`tile-gpu-diff` 那边的 `assemble_golden` 同改。这是「门的绿没有信息量」的又一个
+实例：这一格从刀 3 起一直是绿的，而它从来没看过 stderr。今天三层各有：层 0 三个
 golden 文件两后端；层 1 CI 每 push；层 2 有脚本、台账与 CI 门（§6.4），但本机驱动 560.94 装不进
 cubin，台账第一行记的是 `blocked`，「算的对不对」这一格要等驱动升级才有第一个答案。
 
@@ -700,6 +733,79 @@ vadd，本机 12.7 s → 13.5 s，`test` job 的 budget 不动。刀 7a 实测�
 CI 上仍只有亚秒的 `--check`。`scripts/leetgpu-diff/check.py` 与它的 `--self-test` 各亚秒。刀 2 时挂在 `test` job 里的 tile-golden 步随之搬走，`test` 的 budget
 回到 323 s。刀 1 与刀 0 只加 std 测试，落在 `test` job 的 `dawn test --stdlib` 步，秒级。
 
+**刀 7b 的实测与一次预算调整**：同一台机器上、前后相连地成对测量（绝对值随机器当天的负载
+浮动，有意义的是差值）：`tile-golden/run.sh` **123 s（改动前，十个 kernel、二十次 `tileiras`、
+十一个变异体）→ 188 s（改动后，二十三个 kernel、四十六次 `tileiras`、同样十一个变异体）**，
+**多 65 s / +53%**。变异体一个没加，多出来的全是十三个新 kernel 的两后端两种输出与二十六次
+`tileiras`。也就是说墙钟的结构变了：刀 7a 时大头是「每个变异体一次 native 构建」，现在
+kernel 循环已经和它同量级。
+
+按同一比例，`tile` job 的 planning value 从 170 s 抬到 **260 s**（45 s checkout 加工具链
++ 25 s wheel + 190 s run.sh），翻倍给冷跑的 runner 是 **520 s**，`timeout-minutes` 按惯例
+取三倍，从 17 抬到 **26**。**run-pole 660 s 没有被越过，但余量从 320 s 缩到 140 s**。
+所以这里把处置先写下来：**下一刀再让 kernel 数翻一番，就分片，不再抬预算**。分片的形状是
+`mutants` 那 19 片的形状：`tile` job 按 `kernels=()` 切成 N 片，每片跑自己那一段的
+trace / golden / bytecode / assemble；十一个变异体那部分不分片，它们已经是墙钟的小头，
+而且每一个都要一次完整的 native 构建，切开只会重复构建。
+
+`tile-gpu-diff/run.sh` **40 s → 91 s**（同样成对测量：多一个 native 构建、十三个 kernel 的
+真机对拍、`reduce-identity-wrong` 的十三次汇编与一次对拍、`softmax-no-max-subtract` 的一次
+汇编与一次对拍）。它只在本机跑，CI 上仍只有亚秒的 `--check`。`scripts/leetgpu-diff/check.py`
+与它的 `--self-test` 仍各亚秒。`dawn test --stdlib` 多了三个级数函数与它们的五个测试，本机
+秒级，`test` job 的 budget 不动。
+
+### 6.6 两档判词：逐位与容差（刀 7b）
+
+层 2 从第一天就写着「分逐位与容差两档」（§6.2 的表、§3.2 的 matmul 行），但直到刀 7b 容差档
+才有第一个客户。这一节把两档写成判词。
+
+**逐位档**：整段缓冲区的渲染文本逐字相等（渲染能分辨 `-0.0` 与 `0.0`）。一个 kernel 进这一档
+要同时满足两条：
+
+1. 它的每一个操作在 IEEE 754 下都是精确的或正确舍入的（`addf / subf / mulf / divf / sqrt`、
+   符号翻转、`select`、比较、乘积精确时的 `fma`）；
+2. **它的语料使归约的折叠顺序不可见**。这一条是刀 7b 才被迫写下来的：Tile IR 只要求归约函数
+   结合且交换，**不规定树形**，所以 `sum_ref` 的左折叠不是一般语料上的 oracle。本刀的逐位档
+   语料全是整数值、且每一个部分和都远在 2^53 之内，此时任何折叠顺序都是同一个精确整数。
+
+**容差档**：逐 lane `|got - want| <= atol + rtol * |want|`，`atol = rtol = 1e-5`，这是
+leetgpu 自己的判词。`exp / exp2 / log / log2 / rsqrt / tanh / pow` 是设备 libdevice 的近似
+实现，宿主参考是级数（Dawn 没有浮点超越函数，`std/gpu` 的 `ref_exp / ref_log / ref_sqrt` 是
+为此写的，精度到最后几个 ulp），**两边是两个意见，谁也不是谁的定义**，所以带这些操作的
+kernel 永远在容差档，没有语料能让它们进逐位档。`rms_norm` 也在这一档，不是因为 `sqrt`
+（IEEE 754 要求它正确舍入），而是因为它的宿主参考用牛顿迭代求根、不保证最后一位；本机实测
+它恰好逐位相同，转录里记的是 `identical:tolerance`。
+
+两档都实现在 `scripts/tile-gpu-diff/red_diff.dawn` 里，因为档位是 kernel 的属性而不是某次运行
+的属性；每道题的档位记在 `scripts/leetgpu-diff/problems.txt` 的 `tier` 列，
+`scripts/leetgpu-diff/check.py` **读 `red_diff.dawn` 自己的 `tolerance_tier()` 名单**，
+把台账那一列与程序对账，所以一行不能声称一个这次运行并没有做的判词。台账行的注释里记两档
+各几个（`tiers exact=6 tolerance=7`）。
+
+**顺序探针（记录，不是断言）**：拿 `[2^53, 1, 1, -2^53]` 后面补零的语料跑一次 `reduce_sum`，
+答案本身说出设备用的是哪种折叠顺序：左折叠 0、成对 1、右折叠 2。**本机 RTX 3080 +
+tileiras 13.3.36 实测答 1.0，即成对（树形）折叠**。`sum_ref` 的左折叠确实不是 oracle，
+这不是理论上的担心。探针的答案进台账注释（`fold-order=... (pairwise)`），`tileiras` 升级后
+顺序变了会被看见，而不是被发现。
+
+**只有层 2 能红的两个负控**（刀 7a 的 `mask-all-true` 是第一个）：
+
+| 变异体 | 改哪 | 层 0 | 层 1 | 层 2 |
+|--------|------|------|------|------|
+| `reduce-identity-wrong` | `d_reduce` 把 identity 加 1：求和的 identity 从 `0.0` 变 `1.0`，求最大值的 `-inf` 不动（`-inf + 1 = -inf`） | 变（文本印 `identities=[1.0 : f64]`，`--record` 能洗白） | **收**（`tileiras` 只校验 identity 的**格式**与操作数是否一致，从不看**值**，实测） | 十三个 kernel 里带求和归约的**八个**全红，另外五个一动不动 |
+| `softmax-no-max-subtract` | softmax kernel 不再减最大值 | 变（少一个 `reduce`） | 收（是一个合法的、更短的 kernel） | 只有 softmax 红：在 1000 附近的语料上设备算 `exp(1000)` 溢出成 `+inf`，`inf / inf = NaN`，而参考是有限的。**语料是判词的一部分**，所以语料与 kernel 放在一起 |
+
+第二个变异体值得单说：它在小语料上**数值上完全正确**，层 2 也照样是绿的。让它红的是语料，
+不是机制。这就是为什么 `red_diff.dawn` 里 softmax 的语料是 `1000 + i % 17` 而不是随手一组数。
+
+**`tileirdisasm` round-trip：未做。** 计划里那一格是「若本机能构建或找到
+`cuda-tile-translate`（`--mlir-to-cudatilebc` 的逆向），把 `.tilebc` 反汇编回文本与 `.mlir`
+golden 对拍」。本机没有：pin 的三个 wheel（`nvidia-cuda-tileiras` / `nvidia-nvvm` /
+`nvidia-cuda-nvcc`）里只有 `tileiras` 一个可执行文件，它只读字节码、不写文本；
+`NVIDIA/cuda-tile` 的 `cuda-tile-translate` 要从源码连同 MLIR / LLVM 一起构建，不在这一刀的
+范围内。**所以「文本与字节码说的是同一件事」今天仍然只有一个人类可读的论证**（两个消费者
+读同一张指令表，`lower.dawn` 的表是唯一真相），没有机器判词。这一格是空的，不是绿的。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
@@ -716,6 +822,7 @@ CI 上仍只有亚秒的 `--check`。`scripts/leetgpu-diff/check.py` 与它的 `
 | **5 结构化控制流 + 第二个 kernel**（已落地） | 「带 `d_for` 的归约 kernel 与假设备逐位一致」 | `d_for / d_for2` 普通函数加 `t_loop_begin / t_loop_end` 与三个索引算术操作、区域栈、token 穿过循环携带值、`For` 的降低 / 渲染 / 字节码区域编码、`sum` kernel 与 `std/gpu.sum_ref`；`d_if` 未做（§5.2） | `scripts/tile-golden` 加 `sum.mlir / sum.tilebc`、层 1 含 `FUNC GLOBAL sum`；本机对拍归刀 4 的脚本 | 循环后 token 不换（`loop-token-not-carried`）与区域栈弹反（`region-stack-pop`）→ 降低时按名拒绝；写入器不回滚值索引（`for-results-not-rolled-back`）→ `tileiras` 红 | 3 到 4（实报 1；`run.sh` 本机 100 s，`tile` job budget 340 s planning value） |
 | **6 BF16 tile**（落地，GPU 对拍待驱动） | 「设备 bf16 `addf` 与 `narrow.round_bf16(f64 加)` 对全部 65536 个 bf16 值对加随机对逐位一致」 | `gpu.BF16` 标记与 `element_bytes`、`narrow.bf16_bits / bf16_of_bits`、`pack_bf16 / unpack_bf16` 与两个 `Bytes` 版 intrinsic（`builtins.dawn` 镜像同步）、假设备按格式舍入并把 `dtypes` 交给参考实现、`vadd_bf16` 的 `.mlir / .tilebc` golden、对拍脚本三组 bf16 语料、台账门加 `std/narrow.dawn` | 层 0 / 1 本机与 CI 绿（`FUNC GLOBAL vadd_bf16`）；假设备 65536 对 = narrow；本机对拍走到 `cuModuleLoadData` 被 560.94 拦住，台账记 `blocked`（§6.4） | 计划的「设备侧 rounding 改 `approx`」在 560 上验不了，换成层 0 / 1 能红的等价物：`addf-no-rounding`（渲染器丢掉 `rounding<nearest_even>`，`vadd_bf16.mlir` 红；写入器那一半 `tileiras` 每种模式都收，只有设备能看见，故不设变异体）与 `bf16-tag-as-i16`（写入器 bf16 标签改 i16，`tileiras` 拒绝）；打包层 `pack-truncates`（`round_bf16` 漏掉、`bf16_bits` 截断）在 std 测试与 560 上的回读都红；假设备上传不舍入，格点外那组 std 语料红 | 2（实报 1；`run.sh` 本机 91 s，`tile-gpu-diff/run.sh` 26 s） |
 | **7a 边界与逐元素**（已落地） | 「一个长度不是 tile 宽度整数倍的向量，最后一块越界的 lane 既不读也不写，且设备算得与手写参考逐位一致」 | `Dev` 加 `t_load / t_store` 的可选 mask 与 pad、`t_constf / t_consti / t_iota / t_lanes / t_unaryf / t_binaryf`（`t_addf` 并入）`/ t_fma / t_cmpf / t_cmpi / t_select`；包内 `I32 / I1` 两个 tile 元素格式标记；`lower` 的 `LoadPtr / StorePtr` 带可选操作数、`ConstInt / ConstFloat / FloatUn / FloatBin / FloatFma / CmpFloat / CmpInt / SelectTile`；`bytecode` 加 11 个 opcode 与 mask / paddingValue 两个 flag 位、`ieee_bits` 纯算术拼位模式；`std/gpu` 五个带 `n` 的参考实现；`scripts/tile-golden` 六个 kernel；`scripts/tile-gpu-diff/mask_diff.dawn`；`scripts/leetgpu-diff` 台账与门 | 层 0/1 六个新 golden，`FUNC GLOBAL` 六个；层 2 本机 3080 六个 kernel 逐位一致（含 mask 保住的尾部 lane）；leetgpu 1 / 8 / 21 / 23 / 31 / 62 可解 | `mask-all-true`（降低时把 `cmpi` 换成恒真 `i1` 常量）→ 层 0 变、层 1 收、**层 2 六个 kernel 全红**；`load-pad-flag-as-token`（padding 的 flag 位改成 token 的）→ 文本不动、字节同长，`tileiras` 丢流 | 2 到 3（实报 1；`tile-golden/run.sh` 本机 122 s → 129 s、`tile-gpu-diff/run.sh` 26 s → 46 s） |
+| **7b 归约、超越函数与两档判词**（已落地） | 「设备的归约与手写参考在一个折叠顺序不可见的语料上逐位一致，而带 `exp` 的 kernel 在 `atol = rtol = 1e-5` 下一致」 | `Dev` 加 `t_spread / t_reduce_begin / t_reduce_end / t_if_begin / t_if_else / t_if_end`，`t_unaryf / t_binaryf` 的名单加十个超越函数；`Scalar[D]` 与 `RedId` 两个新公开类型、`spread / d_reduce / d_reduce2 / d_if / d_for3 / d_for4 / s_*` / 六个 `idx_*` 比较；宽度 0 表示 rank-0 tile；`prog` 的区域栈变成四种 `Frame` 的 ADT、归约与 `if` 区域内禁访存；`lower` 加 `ReduceTile / IfElse / YieldVals` 与 `close_scope`（`if` 的 then 分支降两遍读类型）；`bytecode` 加 13 个 opcode、`ArrayAttr` 里的自包含属性、zigzag 与 u64 varint、两区域编码；`std/gpu` 加 `ref_exp / ref_log / ref_sqrt` 与十个参考实现；十三个 kernel 与它们的 golden；`scripts/tile-gpu-diff/red_diff.dawn`（两档判词 + 顺序探针）；`problems.txt` 加十行、`check.py` 加档位对账 | 层 0/1 十三个新 golden，`FUNC GLOBAL` 十三个；层 2 本机 3080 十三个 kernel 全绿（逐位 6、容差 7，最大误差 8.3e-11，是容差的 1e-10 倍）；leetgpu 4 / 5 / 17 / 27 / 35 / 50 / 52 / 68 / 107 / 108 可解，累计 16 / 97 | `reduce-identity-wrong`（求和 identity 0.0 → 1.0）→ 层 0 变、层 1 **收**、层 2 八个带求和的 kernel 红、另外五个不动；`softmax-no-max-subtract`（不减最大值）→ 层 0/1 都收，层 2 在 1000 附近的语料上溢出成 NaN，只有 softmax 红。另外补上层 1 的一个洞：`tileiras` 会退出 0 还打印 `error:`（f64 `tanh` 带 `nearest_even`），`assemble` 改成两条都要过 | 2 到 3（实报 1；`tile-golden/run.sh` 本机 123 s → 188 s、`tile-gpu-diff/run.sh` 40 s → 91 s） |
 | 7（期权）混合路线 | 「同一个 kernel 体经编译期发射器与经记录 handler 产出相同的 Tile 程序」 | `selfhost/src/tile/emit_tile.dawn` | 两路 `TileProg` 相等 | 不在本计划内 | 6 到 10 |
 
 合计（不含刀 7）16 到 23 人日。字节码写入器是最大的单块，也是唯一能让 CI 的绿有信息量的

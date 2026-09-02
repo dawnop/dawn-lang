@@ -513,11 +513,22 @@ fi
 #    answer is wrong. This is the claim of knife 7b, and the reason a
 #    reduction knife needs a device.
 #
-#    Eight of the thirteen kernels hold a sum reduction and must go red;
-#    the other five (silu, sigmoid and mathops have no reduction, foldif
-#    folds with a `for`, argmax reduces through `d_reduce2`, which is not
-#    the mutated path) must be untouched. Requiring both is what keeps the
-#    mutant from passing for the wrong reason.
+#    Eight of the thirteen kernels hold a sum reduction, and SIX of those
+#    eight go red. `reduce_sum` and `monte_carlo` do not, and that is a
+#    measurement rather than an oversight: with a wrong identity they still
+#    answer exactly what the clean kernels answer, so on this assembler
+#    their reduction never folds the identity in at all. The six that move
+#    are the six whose reduction operand is a COMPUTED tile (a product, a
+#    square, a select); the two that do not are the two that reduce the
+#    loaded tile itself. Why the lowering differs is not established here;
+#    what is established is that a semantically wrong identity is invisible
+#    on some kernels even at layer 2, which is worth knowing before anyone
+#    reads "layer 2 catches it" as "layer 2 catches it everywhere".
+#
+#    So the gate names the six, and requires the other seven to be
+#    untouched. A tileiras upgrade that changes which kernels fold the
+#    identity in will red this line, and that is the point: the evidence
+#    would have moved.
 mutant_pkg_id="$work/pkg-reduce-identity-wrong"
 rm -rf "$mutant_pkg_id"
 cp -r "$root/packages/tileir" "$mutant_pkg_id"
@@ -564,18 +575,25 @@ for k in "${reduced[@]}"; do id_cubins+=("$work/reduce-identity-wrong-$k.cubin")
 rc=0
 "$work/reduced.bin" "${id_cubins[@]}" > "$work/m-reduce-identity-wrong.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-reduce-identity-wrong.out")"
+identity_red=(softmax dot mse rms_norm ppo_loss dpo_loss)
+identity_green=(reduce_sum monte_carlo silu sigmoid mathops foldif argmax)
 if [ "$reduced_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-reduce-identity-wrong.out" || true)
-  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 8 ]; then
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#identity_red[@]}" ]; then
     cat "$work/m-reduce-identity-wrong.out" >&2
-    fail "reduce-identity-wrong mutant stayed green: expected verdict fail (exit 1) with exactly the 8 sum-reduction kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+    fail "reduce-identity-wrong mutant stayed green: expected verdict fail (exit 1) with exactly ${#identity_red[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
   fi
-  for k in silu sigmoid mathops foldif argmax; do
+  for k in "${identity_red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-reduce-identity-wrong.out" ||
+      { cat "$work/m-reduce-identity-wrong.out" >&2; fail "reduce-identity-wrong: $k reduces a computed tile and should differ"; }
+  done
+  for k in "${identity_green[@]}"; do
     awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
       "$work/m-reduce-identity-wrong.out" ||
-      { cat "$work/m-reduce-identity-wrong.out" >&2; fail "reduce-identity-wrong: $k has no sum reduction and should be untouched"; }
+      { cat "$work/m-reduce-identity-wrong.out" >&2; fail "reduce-identity-wrong: $k should be untouched"; }
   done
-  echo "PASS  mutant: reduce-identity-wrong (layer 1 accepts it; on the device the 8 sum-reduction kernels differ and the other 5 do not)"
+  echo "PASS  mutant: reduce-identity-wrong (layer 1 accepts it; on the device ${identity_red[*]} differ and the other ${#identity_green[@]} do not)"
 else
   [ "$mverdict" = "$reduced_verdict" ] ||
     { cat "$work/m-reduce-identity-wrong.out" >&2; fail "reduce-identity-wrong: the clean run is $reduced_verdict but the mutant is $mverdict"; }
