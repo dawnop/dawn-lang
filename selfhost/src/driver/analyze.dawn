@@ -23,6 +23,7 @@ use check/passes.{
 use check/checker.{check_module, exports_of, check_fn, check_fn_inferred}
 use ir/interp.{eval_comptime, CtOut, CtOpts, ct_default}
 use check/jsig.{Jsig, jsig_refused}
+use driver/fsmem
 use driver/stdlib.{
   StdCtx, load_std, std_load_error_text, std_module_of, is_std_dir, read_index
 }
@@ -1049,6 +1050,16 @@ pub fn analyze_document(
 
 # ---- tests ----
 
+# Every test below runs against `driver/fsmem`'s table rather than the disk:
+# the tree a test writes is the whole file system its analysis can reach, and
+# the std it loads is the embedded copy mounted where `--std` defaults to. The
+# paths still read `/tmp/...` because that is what a project directory looks
+# like; nothing under them is ever created.
+fn in_mem[T](body: fn() -> T !Fs !io) -> T !io = {
+  let (out, _) = fsmem.with_fs_mem(fsmem.mem_std(), body)
+  out
+}
+
 fn mkdirs(p: String) -> Unit !Fs !io = {
   let _ = io.mkdirs(p)
   ()
@@ -1061,7 +1072,7 @@ fn put(p: String, text: String) -> Unit !Fs !io =
   }
 
 test "a two-module project analyzes end to end" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/proj1"
     mkdirs(root ++ "/src")
     put(root ++ "/src/util.dawn",
@@ -1085,7 +1096,7 @@ test "a two-module project analyzes end to end" {
 }
 
 test "the representation modules are closed to user code (audit RD-06)" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # The accept half is `load_std` itself: std/map is a `use std/hamt`-free
     # module only because lowering rewrites its primitives, but std/list does
     # import std/set's primitives and the bundle as a whole is checked with the
@@ -1109,7 +1120,7 @@ test "the representation modules are closed to user code (audit RD-06)" {
 }
 
 test "an impl is in force in every module, not just its own (spec §3.5)" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/trait-cross"
     mkdirs(root ++ "/src")
     put(root ++ "/src/lib.dawn",
@@ -1140,7 +1151,7 @@ test "an impl is in force in every module, not just its own (spec §3.5)" {
 }
 
 test "a second module cannot supply a rival impl" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # The program-wide coherence check now sees the whole program's table, but
     # it is not what reports this: the orphan rule gets there first, and between
     # two *different* modules it always does. An impl may only live with its
@@ -1169,7 +1180,7 @@ test "a second module cannot supply a rival impl" {
 }
 
 test "closure loading skips an unreferenced module (module-access 2.2)" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/closure1"
     mkdirs(root ++ "/src")
     put(root ++ "/src/main.dawn", "pub fn main() -> Unit !io = println(\"hi\")\n")
@@ -1186,7 +1197,7 @@ test "closure loading skips an unreferenced module (module-access 2.2)" {
 }
 
 test "a module may be imported qualified and selectively at once" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # Two different acts: one binds a module alias to call through, the other
     # binds names. A module that exports a type AND functions needs both, and
     # the qualified spelling is the whole point of the former.
@@ -1215,7 +1226,7 @@ test "a module may be imported qualified and selectively at once" {
 }
 
 test "a module alias collides with an imported name in either source order" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # bind_import catches `use a/b` before `use a/b.{b}` by reading the alias
     # table as it stands. Nothing read the name table on the way in, so the same
     # pair reversed used to pass and `b` became a binding *and* an alias (#185).
@@ -1259,7 +1270,7 @@ test "a module alias collides with an imported name in either source order" {
 }
 
 test "loader reports cycles and missing modules" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/proj2"
     mkdirs(root ++ "/src")
     put(root ++ "/src/main.dawn", "use a\npub fn main() -> Unit !io = ()\n")
@@ -1284,7 +1295,7 @@ test "loader reports cycles and missing modules" {
 }
 
 test "a file whose name is not a path segment is refused, not folded" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # The `use` grammar cannot spell these, so only the entry file -- the one
     # named on the command line -- can carry them in. The old folding turned
     # `a-b` and `a_b` into one class name, and `9x` into `m_9x`, which is the
@@ -1317,7 +1328,7 @@ test "a file whose name is not a path segment is refused, not folded" {
 }
 
 test "the editor's standalone path judges the buffer's name too" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # The asymmetry this closes (#176): `analyze_standalone` hardcodes mod_path
     # "main", so the buffer's own file name never reached the check `resolve`
     # runs on its seeds. The language server accepted, in silence, a file that
@@ -1349,7 +1360,7 @@ test "the editor's standalone path judges the buffer's name too" {
 }
 
 test "use_candidates enumerates the tree and its deps the way `use` spells them" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     let base = "/tmp/dawn-selfhost-analyze/cands"
     mkdirs(base ++ "/app/src/deep")
     mkdirs(base ++ "/pkg/web/src")
@@ -1373,7 +1384,7 @@ test "use_candidates enumerates the tree and its deps the way `use` spells them"
 }
 
 test "directory mode refuses one badly named module without losing the rest" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/entrydir"
     mkdirs(root ++ "/src")
     put(root ++ "/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
@@ -1387,7 +1398,7 @@ test "directory mode refuses one badly named module without losing the rest" {
 }
 
 test "an aliased path dep canonicalizes to the package's real name" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     let base = "/tmp/dawn-selfhost-analyze/proj4"
     mkdirs(base ++ "/pkg/web/src")
     mkdirs(base ++ "/app/src")
@@ -1433,7 +1444,7 @@ fn has_msg(prog: Program, msg: String) -> Bool = {
 }
 
 test "every bundled std source checks clean on its own" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # The bug this closes: `dawn check std/cursor.dawn` reported 281 errors
     # across the bundle -- the first of them on line 50, the line that defines
     # the very `cursor.start` its hint told the reader to call instead. std was
@@ -1462,7 +1473,7 @@ test "every bundled std source checks clean on its own" {
 }
 
 test "std identity is where the file came from, not what the module is called" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # A project file at src/std/cursor.dawn is spelled exactly like a bundled
     # module and is not one. The loader's reserved-path diagnostic already
     # refused it -- and that diagnostic used to be the *only* thing refusing it,
@@ -1489,7 +1500,7 @@ test "std identity is where the file came from, not what the module is called" {
 }
 
 test "user code still cannot reach a std-only builtin" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # The negative control for all of the above. Opening std to its own sources
     # is worth nothing if it also opened the intrinsic table to everyone, and
     # the same hint the bug report quoted is what user code is supposed to get.
@@ -1513,7 +1524,7 @@ test "user code still cannot reach a std-only builtin" {
 }
 
 test "the editor's standalone path gives a bundled std buffer its std identity" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # The journey the bug was reported from: an editor opens std/list.dawn and
     # every line that touches a std-only builtin is underlined. Both language
     # server entries (didOpen and didChange) land in `analyze_standalone`, which
@@ -1543,7 +1554,7 @@ test "the editor's standalone path gives a bundled std buffer its std identity" 
 }
 
 test "the bundled std directory is not a project target" {
-  io.with_fs_real(() => {
+  in_mem(() => {
     # `dawn check std` used to answer "project directory has no `src/` folder",
     # which is true and useless: std is not a project and cannot be made into
     # one. Recognised by provenance, so a project that happens to be called
@@ -1565,5 +1576,43 @@ test "the bundled std directory is not a project target" {
       None -> ()
     }
     assert len(load_target(std, root).diags) == 0
+  })
+}
+
+test "the analysis reads the declared tree, and no file system behind it" {
+  # What `Fs` bought. The setup below used to run on the real disk, so neither
+  # half of this could be asserted: not "the loader read exactly these bytes"
+  # (the answer came from /tmp, where an earlier run's leftovers answer too),
+  # and not "the run reached no file outside the tree" (there was no boundary
+  # to ask). Both are questions about the table now.
+  let root = "/tmp/dawn-selfhost-analyze/never-on-disk"
+  let main_src = "use util\npub fn main() -> Unit !io = println(util.tag())\n"
+  let (_, table) = fsmem.with_fs_mem(fsmem.mem_std(), () => {
+    mkdirs(root ++ "/src")
+    put(root ++ "/src/main.dawn", main_src)
+    put(root ++ "/src/util.dawn", "pub fn tag() -> String = \"t\"\n")
+    let loaded = load_directory(root)
+    assert len(loaded.diags) == 0
+    assert len(loaded.modules) == 2
+    # the loader's text is the text this test wrote, not a file's contents
+    assert loaded.modules[1].text == main_src
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
+    }
+    assert len(analyze_program(loaded, std, ct_default(), jsig_refused()).diags) == 0
+  })
+  # the table is the only source of truth, so what was written can be read back
+  assert fsmem.mem_content(table, root ++ "/src/main.dawn") == Some(main_src)
+  # and every file the run touched came from the declared tree or the mounted
+  # std: a load that reached out would have left a path here that is neither
+  for f in fsmem.mem_files(table) {
+    assert str.starts_with(f, root ++ "/") || str.contains(f, "/std/")
+  }
+  # the strongest half, and the one no assertion could reach before: ask the
+  # host. A run of the same setup on the real disk leaves this directory
+  # behind; this one has not been there at all.
+  io.with_fs_real(() => {
+    assert not io.exists(root)
   })
 }
