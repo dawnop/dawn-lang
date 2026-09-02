@@ -157,8 +157,8 @@ list here, because a divergence is a red build:
   on only one backend is red.
 - `scripts/native-cli-diff.sh` — pins the native binary's `fmt`/`doc`/`add`/`lsp`
   output **byte for byte** to the JVM toolchain's.
-- All of the above run on every push, alongside eight contracts:
-  `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`. Too expensive for
+- All of the above run on every push, alongside nine contracts:
+  `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`/`narrow`. Too expensive for
   every push is `scripts/native-fixpoint.sh` — **the whole compiler**: the C the JVM
   emits == the C the native binary emits == the C it emits again.
 
@@ -195,6 +195,11 @@ language carries its own:
   agree on their Unicode version. (`scripts/unicode-contract`, every push.)
 - **`Float` rendering is Schubfach in pure Dawn** (`std/fmt.dawn`): the rule is owned
   by the spec and does not follow the host if the host changes algorithm.
+- **The narrow float formats are arithmetic, not a cast to the host's**
+  (`std/narrow.dawn`): bfloat16, binary16 and binary32 are opaque types over
+  `Float` whose every operation is that format's correctly rounded one, checked
+  against an exact rational oracle on both backends. (`scripts/narrow-contract`,
+  every push.)
 - **The UTF-8 decoder is our own strict walker** (`runtime/c/dawn_rt.c`): it rejects
   overlong forms, surrogate halves and anything past U+10FFFF, answers U+FFFD on
   malformed input and reports how many bytes it consumed.
@@ -205,9 +210,9 @@ language carries its own:
 
 Single-parameter, nominal typeclasses with dictionary passing. Conditional impls
 (`impl[T: Eq] Eq[List[T]]`) and associated types (`type Item`, with `C.Item`
-projections reduced at instantiation) are both in. Four of the six built-in traits
-carry syntax on their back: `Eq`→`==`, `Show`→`${...}`, `Iter`→`for..in`, `Index`→`[]`
-— write an impl for your type and the syntax works. There is no monomorphization:
+projections reduced at instantiation) are both in. Five of the seven built-in traits
+carry syntax on their back: `Eq`→`==`, `Ord`→`<`, `Show`→`${...}`, `Iter`→`for..in`,
+`Index`→`[]` — write an impl for your type and the syntax works. There is no monomorphization:
 **a call site at a concrete type does not go through a dictionary, it is a direct
 static call**; dictionaries appear only at generic boundaries.
 
@@ -353,8 +358,9 @@ written.
 
 Current toolchain 0.72.0, M0–M8 implemented. <!-- doc-check: version --> The lines of
 work since then — the C backend and native bootstrap, Perceus, trait v2, effect
-handlers, package management — are recorded in their own design documents under
-`docs/`.
+handlers, package management, and the
+[cuTile device backend](docs/tile-backend-design.md) — are recorded in their own
+design documents under `docs/`.
 
 ## Roadmap and contributing
 

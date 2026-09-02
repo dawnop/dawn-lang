@@ -132,8 +132,8 @@ pub fn main() -> Unit !io = {
 - `scripts/intrinsic-parity.py`——走原语表，任何 primitive 只在一个后端有实现就红。
 - `scripts/native-cli-diff.sh`——把 native 二进制的 `fmt`/`doc`/`add`/`lsp` 输出按**字节**
   钉在 JVM 工具链的输出上。
-- 以上每次 push 都跑，另有 `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`
-  八份契约同行。太贵而不进每次 push 的是 `scripts/native-fixpoint.sh`——**整个编译器**：
+- 以上每次 push 都跑，另有 `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`/`narrow`
+  九份契约同行。太贵而不进每次 push 的是 `scripts/native-fixpoint.sh`——**整个编译器**：
   JVM 发的 C == native 自己发的 C == 再发一次的 C。
 
 规范把它写成了承诺（[docs/spec.md](docs/spec.md) §12.1）。它的**适用范围**是两个后端都能编的
@@ -159,6 +159,9 @@ pub fn main() -> Unit !io = {
   `Character.toUpperCase`、另一边生成的头文件——那只在两个 JDK 的 Unicode 版本恰好相同时才是
   「一个答案」。（`scripts/unicode-contract`，每次 push。）
 - **`Float` 渲染是纯 Dawn 的 Schubfach**（`std/fmt.dawn`），规则由规范拥有，宿主换算法也不跟。
+- **窄浮点格式是自己的算术，不是向宿主的一次转换**（`std/narrow.dawn`）：bfloat16、
+  binary16、binary32 是 `Float` 之上的 opaque 类型，每个运算都是该格式正确舍入的那一个，
+  在两个后端上对着精确有理数 oracle 核对。（`scripts/narrow-contract`，每次 push。）
 - **UTF-8 解码器是自己的严格 walker**（`runtime/c/dawn_rt.c`）：拒 overlong 形式、代理半区、
   超出 U+10FFFF，畸形输入答 U+FFFD 并报告吃掉几个字节。
 - `Ord[String]` 是**码点序**，`cmp` 只承诺 `-1`/`0`/`1`（[docs/spec.md](docs/spec.md) §3.5）。
@@ -166,8 +169,8 @@ pub fn main() -> Unit !io = {
 ### 五、trait 有条件 impl 和关联类型，集合是 Dawn 写的
 
 单参数、名义式的 typeclass，字典传递。条件 impl（`impl[T: Eq] Eq[List[T]]`）与关联类型
-（`type Item`，`C.Item` 投影随实例化归约）都在；六个预置 trait 里有四个背着语法：
-`Eq`→`==`、`Show`→`${...}`、`Iter`→`for..in`、`Index`→`[]`，用户类型写个 impl 就能用。
+（`type Item`，`C.Item` 投影随实例化归约）都在；七个预置 trait 里有五个背着语法：
+`Eq`→`==`、`Ord`→`<`、`Show`→`${...}`、`Iter`→`for..in`、`Index`→`[]`，用户类型写个 impl 就能用。
 没有单态化——**具体类型的调用点不走字典，直接静态调用**，字典只在泛型边界出现。
 
 `Map`/`Set` 是 32 路 HAMT、持久 `List` 是 pvec，都在 `std/` 里用纯 Dawn 写。后端要实现的
@@ -281,7 +284,8 @@ C 后端，不是那个 flag。把 flag 读成「把 JVM 那份产物提前打�
 ## 状态
 
 当前工具链 0.72.0，M0–M8 已实现。此后的主线（C 后端与 native 自举、Perceus、trait v2、
-效果处理器、包管理）落地记录在 `docs/` 各自的设计文档里。
+效果处理器、包管理，以及 [cuTile 设备后端](docs/tile-backend-design.md)）落地记录在
+`docs/` 各自的设计文档里。
 
 ## 路线图与贡献
 
