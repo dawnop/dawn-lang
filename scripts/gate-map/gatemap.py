@@ -106,6 +106,14 @@ paths no gate watches) is a ratchet checked in both directions.
      module, and the coupling is invisible from either side. This is what
      3c51ae1 and 9e64179 needed.
      From: string literals in the Dawn sources against the gate scripts' text.
+  F  Adding, removing or renaming a top-level `std/*.dawn` file changes the
+     bundled-module set printed by the unknown-std-module diagnostic. The
+     checker corpus records that sorted set byte for byte, so every path in
+     that set is exact for the corpus, including a path absent from the current
+     tree after a removal or rename.
+     From: the diagnostic expression in selfhost/src/check/passes.dawn, the
+     recorded line in scripts/checker-corpus/cases/imports.expected, and the
+     workflow step that runs scripts/checker-corpus/run.sh.
 
 `--labels` answers the neighbouring question, from the same file: which
 differential owns which declarable label. `scripts/emit-labels.txt` is
@@ -180,12 +188,19 @@ MIN_LITERAL = 14
 # not a path list: every value is required to be a directory that exists.
 CLI_TARGET_ALIASES = {"--stdlib": "std"}
 
-# The three tree files this checker reads as evidence, named once so that rules
-# C and D, rule A/B's attribution and the structural checks all mean the same
+# The tree files this checker reads as evidence, named once so that rules C, D
+# and F, rule A/B's attribution and the structural checks all mean the same
 # files.
 CORE_GOLDEN = "scripts/core-golden/selfhost.sha"
 EMIT_LABELS = "scripts/emit-labels.txt"
 PREV_DIFF = "scripts/selfhost-prev-diff.sh"
+CHECKER_CORPUS = "scripts/checker-corpus/run.sh"
+CHECKER_CORPUS_GOLDEN = "scripts/checker-corpus/cases/imports.expected"
+BUNDLED_MODULE_DIAGNOSTIC = "selfhost/src/check/passes.dawn"
+BUNDLED_MODULE_EXPRESSION = (
+    '"bundled modules: " ++ join(sort(std_names), ", "))'
+)
+BUNDLED_MODULE_GOLDEN_TEXT = "\tbundled modules: "
 SELFHOST_PROJECT = "selfhost"
 SELFHOST_MANIFEST = "selfhost/dawn.toml"
 SELFHOST_LOCK = "selfhost/dawn.lock"
@@ -234,7 +249,13 @@ HEAD_COMPILER_REASON = (
 # use these constants and nothing else: delete a use and the rule it belongs to
 # stops working, loudly.
 SELF = "scripts/gate-map/gatemap.py"
-SELF_INPUTS = (CORE_GOLDEN, EMIT_LABELS, PREV_DIFF)
+SELF_INPUTS = (
+    CORE_GOLDEN,
+    EMIT_LABELS,
+    PREV_DIFF,
+    BUNDLED_MODULE_DIAGNOSTIC,
+    CHECKER_CORPUS_GOLDEN,
+)
 
 
 PATH_TOKEN = re.compile(r"[A-Za-z0-9_*][A-Za-z0-9_.$@+*-]*(?:/[A-Za-z0-9_.$@+*-]+)+")
@@ -253,6 +274,16 @@ LEVELS = ("exact", "coupled", "coarse", "blind")
 # batch that declared five labels no oracle could see would have had to scroll
 # past every `coarse` line to reach it.
 REPORT_ORDER = ("exact", "blind", "coupled", "coarse")
+
+
+def is_std_module_path(path):
+    """A member of the top-level `std/*.dawn` module set.
+
+    This deliberately does not ask whether the path exists. A deletion, or the
+    old side of a rename out of std, is absent from the current Tree but still
+    changes the set whose diagnostic the checker corpus records.
+    """
+    return re.fullmatch(r"std/[^/]+\.dawn", path) is not None
 
 
 def run_git(args, cwd=ROOT, check=True):
@@ -1069,6 +1100,7 @@ class Map:
         self.owned = {}
         self.direct = {}
         self.problems = []
+        self.std_module_set_observation = None
         self._build()
 
     def add(self, path, obs):
@@ -1443,15 +1475,85 @@ class Map:
                 ),
             )
 
+    # ---- rule F -------------------------------------------------------
+    def _rule_f(self):
+        """The checker golden records the set of top-level std modules.
+
+        Rule B cannot derive this edge: the checker script names its golden,
+        but it has no reason to name a module that does not exist yet, and a
+        removed path is not in Tree.files at all. Keep the observation only
+        while all three parts of the evidence remain readable.
+        """
+        gate = self.gate_running(CHECKER_CORPUS)
+        if gate is None:
+            self.problems.append(
+                f"no workflow step runs {CHECKER_CORPUS}, so the bundled std "
+                "module-set rule has no gate to attribute; rule F is void"
+            )
+
+        source_lines = [
+            n
+            for n, line in enumerate(
+                self.tree.read(BUNDLED_MODULE_DIAGNOSTIC).splitlines(), 1
+            )
+            if BUNDLED_MODULE_EXPRESSION in line
+        ]
+        if len(source_lines) != 1:
+            self.problems.append(
+                f"{BUNDLED_MODULE_DIAGNOSTIC} has {len(source_lines)} copies "
+                "of the sorted bundled-module diagnostic expression, not "
+                "one; rule F is void"
+            )
+
+        golden_lines = [
+            n
+            for n, line in enumerate(
+                self.tree.read(CHECKER_CORPUS_GOLDEN).splitlines(), 1
+            )
+            if BUNDLED_MODULE_GOLDEN_TEXT in line
+        ]
+        if len(golden_lines) != 1:
+            self.problems.append(
+                f"{CHECKER_CORPUS_GOLDEN} has {len(golden_lines)} recorded "
+                "bundled-module diagnostics, not one; rule F is void"
+            )
+
+        if gate is None or len(source_lines) != 1 or len(golden_lines) != 1:
+            return
+
+        observation = Observation(
+            "exact",
+            gate.id,
+            f"{BUNDLED_MODULE_DIAGNOSTIC}:{source_lines[0]} prints the sorted "
+            "bundled-module set into a diagnostic that "
+            f"{CHECKER_CORPUS_GOLDEN}:{golden_lines[0]} records",
+            gate.tag_only,
+        )
+        self.std_module_set_observation = observation
+        for path in self.tree.files:
+            if is_std_module_path(path):
+                self.add(path, observation)
+
     def _build(self):
         self._rule_ab()
         self._rule_c()
         self._rule_d()
         self._rule_e()
+        self._rule_f()
 
     # ---- queries ------------------------------------------------------
     def verdict(self, path):
-        obs = sorted(self.by_path.get(path, []), key=lambda o: o.key())
+        obs = list(self.by_path.get(path, []))
+        # A removed file cannot be in by_path, but its removal is still the
+        # change `--changed` is asking about. Rule F is a path-set rule, so it
+        # is the one verdict that can answer for an absent current-tree path.
+        if (
+            path not in self.tree.fileset
+            and is_std_module_path(path)
+            and self.std_module_set_observation is not None
+        ):
+            obs.append(self.std_module_set_observation)
+        obs.sort(key=lambda o: o.key())
         # deduplicate: one line per (level, gate, why)
         seen = set()
         out = []
@@ -1659,9 +1761,12 @@ def report(gm, paths, stream=sys.stdout):
         path = path.rstrip("/")
         members = gm.tree.under(path)
         if not members:
-            print(f"{path}\n  ?       not a tracked path in this tree\n", file=stream)
-            continue
-        if members != [path]:
+            obs = gm.verdict(path)
+            if not obs:
+                print(f"{path}\n  ?       not a tracked path in this tree\n", file=stream)
+                continue
+            print(f"{path}  (not tracked in this tree)", file=stream)
+        elif members != [path]:
             print(f"{path}  ({len(members)} tracked files)", file=stream)
             obs = []
             for member in members:
@@ -1913,6 +2018,7 @@ def parse_fixtures(path):
     is a claim about the repository's own history, measured from git:
 
         touched <commit> <path>          the commit's diff includes that path
+        added <commit> <path>            the commit adds that path from nothing
         contains <rev>:<path> <text>     the file at that rev has that text
         lacks <rev>:<path> <text>        it does not
         golden-moved <commit> <module>   the commit rewrote that module's line
@@ -1966,6 +2072,23 @@ def check_ground(fixture):
                 problems.append(
                     f"{fixture['name']}: `{line}` is not true; {commit} does "
                     f"not touch {path.strip()}"
+                )
+        elif verb == "added":
+            commit, _, path = rest.partition(" ")
+            names = run_git(
+                [
+                    "diff-tree",
+                    "--no-commit-id",
+                    "--name-only",
+                    "--diff-filter=A",
+                    "-r",
+                    commit,
+                ]
+            ).split("\n")
+            if path.strip() not in names:
+                problems.append(
+                    f"{fixture['name']}: `{line}` is not true; {commit} does "
+                    f"not add {path.strip()}"
                 )
         elif verb in ("contains", "lacks"):
             where, _, needle = rest.partition(" ")
@@ -3578,7 +3701,14 @@ def main(argv=None):
     if args.changed:
         paths += [
             p
-            for p in run_git(["diff", "--name-only", args.changed]).split("\n")
+            # With rename detection Git may report only the destination. A
+            # rename out of std would then hide the removed `std/*.dawn` side,
+            # even though it changes the bundled-module set. Treat renames as
+            # their deletion and addition halves so both path-set boundaries
+            # stay visible.
+            for p in run_git(
+                ["diff", "--no-renames", "--name-only", args.changed]
+            ).split("\n")
             if p
         ]
     if not paths:

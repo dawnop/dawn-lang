@@ -113,3 +113,27 @@ ground: contains 9b4c9f8:scripts/selfhost-prev-diff.sh "${HEAD_BIN[@]}" __emit "
 query: packages/web/src/server.dawn
 expect: blind `emit packages/web` compiles this same source in both output legs
 reject: exact N vs N-1 differential
+
+# 2026-09-02, a new top-level std module moved a diagnostic that lists every
+# bundled module. The module landed in 23705ad0, but the checker corpus was not
+# re-recorded until the red main run forced 17990767. This uses the file that
+# was genuinely added, not a remembered representative of the std directory.
+name: 23705ad0, a new std module moves the bundled-module diagnostic
+tree: 23705ad0
+ground: added 23705ad0 std/narrow.dawn
+ground: lacks 23705ad0:scripts/checker-corpus/cases/imports.expected std/narrow
+ground: touched 17990767 scripts/checker-corpus/cases/imports.expected
+ground: contains 17990767:scripts/checker-corpus/cases/imports.expected std/narrow
+query: std/narrow.dawn
+expect: exact checker diagnostic corpus
+expect: exact selfhost/src/check/passes.dawn:3413 prints the sorted bundled-module set into a diagnostic that scripts/checker-corpus/cases/imports.expected:9 records
+
+# The same commit also added a second narrow.dawn as an opaque-twin probe. Its
+# basename and extension match the new module, but it is outside the top-level
+# std set and cannot change the diagnostic. This is the scope control: a rule
+# matching the name or every Dawn file would make it red.
+name: 23705ad0, a same-named Dawn fixture is not a bundled std module
+tree: 23705ad0
+ground: added 23705ad0 scripts/opaque-twin/narrow.dawn
+query: scripts/opaque-twin/narrow.dawn
+reject: exact sorted bundled-module set
