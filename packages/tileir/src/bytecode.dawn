@@ -182,10 +182,8 @@ fn num_tag(name: String) -> Int = match name {
 # the raw memory of a DenseElementsAttr of the result's tile type. MLIR's
 # raw-buffer contract accepts a SPLAT: one element's bytes stand for every
 # lane, which is the only form written here (every constant this package
-# emits repeats one host value). The `i1` case is the dialect reader's own,
-# not MLIR's: over eight lanes a single byte is the splat and bit 0 is its
-# value; at eight or fewer the blob is the bit-packed tile, so the bits of
-# the lanes that exist must all be set.
+# emits repeats one host value), except for `i1`, which is bit-packed
+# (`int_payload` says why).
 #
 # There is no float-to-bits primitive in Dawn, so the pattern is assembled
 # from exact arithmetic the way std/narrow's `bf16_bits` is: the exponent by
@@ -279,12 +277,15 @@ fn float_payload(dtype: String, value: Float) -> Bytes = match dtype {
 fn int_payload(dtype: String, n: Int, value: Int) -> Bytes = match dtype {
   "i32" -> bytes.freeze(put_le(bytes.buf(), value, 4))
   "i64" -> bytes.freeze(put_le(bytes.buf(), value, 8))
-  "i1" ->
-    if n > 8 {
-      bytes.freeze(bytes.put(bytes.buf(), value & 1))
-    } else {
-      bytes.freeze(bytes.put(bytes.buf(), if (value & 1) == 1 { (1 << n) - 1 } else { 0 }))
-    }
+  "i1" -> {
+    # bit-packed, ceil(n / 8) bytes, every lane the same: the bits past the
+    # last lane of the final byte are ignored. The reader of a later Tile IR
+    # also takes a ONE-byte splat for a tile of more than eight lanes; the
+    # pinned 13.3.36 does not (measured: `failed to validate buffer size and
+    # format`), and the packed form is what both accept.
+    let byte = if (value & 1) == 1 { 0xFF } else { 0x00 }
+    bytes.freeze(list.fold(range(0, (n + 7) / 8), bytes.buf(), (b, _k) => bytes.put(b, byte)))
+  }
   _ -> panic("tileir: an integer constant of format `${dtype}` has no encoding")
 }
 
@@ -629,6 +630,42 @@ test "interning answers one index per distinct encoding, in first-use order" {
   let (t3, c) = intern(t2, bytes.freeze(bytes.put(bytes.buf(), 1)))
   assert [a, b, c] == [0, 1, 0]
   assert len(t3.items) == 2
+}
+
+test "a float constant's blob is the IEEE pattern of one lane, low byte first" {
+  # 1.0 = 0x3FF0000000000000, -2.0 = 0xC000000000000000, the smallest
+  # subnormal = 0x0000000000000001, and -0.0 is the sign bit alone.
+  assert hex(float_payload("f64", 1.0)) == "000000000000f03f"
+  assert hex(float_payload("f64", 0.0 - 2.0)) == "00000000000000c0"
+  assert hex(float_payload("f64", 0.0)) == "0000000000000000"
+  assert hex(float_payload("f64", 0.0 * (0.0 - 1.0))) == "0000000000000080"
+  assert hex(float_payload("f64", 1.0 / 0.0)) == "000000000000f07f"
+  assert hex(float_payload("f32", 1.0)) == "0000803f"
+  assert hex(float_payload("bf16", 1.0)) == "803f"
+}
+
+test "ieee_bits is the pattern of the value in the named format" {
+  assert ieee_bits(1.0, 53, -1022, 1023) == 0x3FF0000000000000
+  assert ieee_bits(0.5, 53, -1022, 1023) == 0x3FE0000000000000
+  assert ieee_bits(0.0, 53, -1022, 1023) == 0
+  # the smallest subnormal double, 2^-1074, and the largest finite one
+  assert ieee_bits(4.9e-324, 53, -1022, 1023) == 1
+  assert ieee_bits(1.7976931348623157e308, 53, -1022, 1023) == 0x7FEFFFFFFFFFFFFF
+  # a NaN is the canonical quiet one; an out-of-range value the infinity
+  assert ieee_bits(0.0 / 0.0, 53, -1022, 1023) == 0x7FF8000000000000
+  assert ieee_bits(1.0e300, 24, -126, 127) == 0x7F800000
+  assert ieee_bits(1.0, 8, -126, 127) == 0x3F80
+}
+
+test "an i1 constant is bit-packed, one bit a lane, and an i32 one is four bytes" {
+  # 128 lanes of true is sixteen 0xFF bytes; the pinned tileiras refuses the
+  # one-byte splat a later reader accepts (measured), so the packed form is
+  # the one written.
+  assert hex(int_payload("i1", 128, 1)) == str.repeat("ff", 16)
+  assert hex(int_payload("i1", 128, 0)) == str.repeat("00", 16)
+  assert hex(int_payload("i1", 8, 1)) == "ff"
+  assert hex(int_payload("i32", 128, 1000)) == "e8030000"
+  assert hex(int_payload("i32", 1, 0 - 1)) == "ffffffff"
 }
 
 test "a tile type names its element type first, so the element's index is lower" {
