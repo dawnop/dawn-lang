@@ -882,6 +882,18 @@ fn comptime_rejects() -> List[String] = {
   # everywhere else too -- `lower.staged_intrinsics` refuses both on the way to
   # a backend -- so an arm here would be the only implementation of a feature
   # that does not run yet, in the one evaluator that cannot reach it.
+  #
+  # Before either name is ever admitted here, the continuation's effect
+  # account has to be answered first, not after. comptime may call any pure
+  # function (spec §7), and a continuation is an ordinary function value; the
+  # only thing that keeps a pure `k` from smuggling a remainder's io into a
+  # fold is that `k` carries the remainder's io bit (`types.cont_row`, spec
+  # §6.5 "control arms"), which is a checker rule this evaluator inherits
+  # rather than enforces. Admitting `ctl_*` here without re-reading that rule
+  # against whatever the fold can then construct would reopen the hole spec
+  # §9.8.1 used to record as an exception. Today the isolation is doubly
+  # structural (no `with handle`, no `ctl_*`), which is why nothing here has
+  # had to reason about it.
   out = out ++ ["ctl_yield", "ctl_run"]
   # `discard` is the user-facing third of that family and is refused for the
   # first of those reasons alone: its argument is a continuation, a `const`
