@@ -571,21 +571,27 @@ fn std/gpu.sum_ref -> List[Float]
         local v4 : String
       box from=Unit
         unit
-fn std/gpu.reference_kernels -> Map[String, fn(List[String], List[List[Float]]) -> List[Float]]
+fn std/gpu.reference_kernels -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])]
   call direct std/map.from : Map[K, V]
-    listlit : List[(String, fn(List[String], List[List[Float]]) -> List[Float])]
-      box from=(String, fn(List[String], List[List[Float]]) -> List[Float])
-        tuple : (String, fn(List[String], List[List[Float]]) -> List[Float])
+    listlit : List[(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
           str "vadd"
-          closure std/gpu.lambda$4 : fn(List[String], List[List[Float]]) -> List[Float]
-      box from=(String, fn(List[String], List[List[Float]]) -> List[Float])
-        tuple : (String, fn(List[String], List[List[Float]]) -> List[Float])
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+            int 3
+            closure std/gpu.lambda$4 : fn(List[String], List[List[Float]]) -> List[Float]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
           str "vadd_bf16"
-          closure std/gpu.lambda$5 : fn(List[String], List[List[Float]]) -> List[Float]
-      box from=(String, fn(List[String], List[List[Float]]) -> List[Float])
-        tuple : (String, fn(List[String], List[List[Float]]) -> List[Float])
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+            int 3
+            closure std/gpu.lambda$5 : fn(List[String], List[List[Float]]) -> List[Float]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
           str "sum"
-          closure std/gpu.lambda$6 : fn(List[String], List[List[Float]]) -> List[Float]
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+            int 2
+            closure std/gpu.lambda$6 : fn(List[String], List[List[Float]]) -> List[Float]
     dictref dict$1$String trait=1 subject=String : <dict>
     dictref dict$2$String trait=2 subject=String : <dict>
 fn std/gpu.no_such_buffer -> ForeignError
@@ -670,8 +676,76 @@ fn std/gpu.no_arguments -> ForeignError
       drop v6
       drop v2
       local v7 : String
+fn std/gpu.bad_arity -> ForeignError
+  param v0 : String borrowed
+  param v1 : String borrowed
+  param v2 : Int owned
+  param v3 : Int owned
+  call direct std/gpu.refuse : ForeignError
+    str "gpu.bad_arity"
+    block : String
+      let v4 : String
+        block : String
+          let v5 : String
+            block : String
+              let v6 : String
+                block : String
+                  let v7 : String
+                    block : String
+                      let v8 : String
+                        binary concat : String
+                          local v0 : String
+                          str ": `"
+                      let v9 : String
+                        dup
+                          local v1 : String
+                      let v10 : String
+                        binary concat : String
+                          local v8 : String
+                          local v9 : String
+                      drop v9
+                      drop v8
+                      local v10 : String
+                  let v11 : String
+                    str "` wants "
+                  let v12 : String
+                    binary concat : String
+                      local v7 : String
+                      local v11 : String
+                  drop v11
+                  drop v7
+                  local v12 : String
+              let v13 : String
+                intrinsic str_of_int : String
+                  local v2 : Int
+              let v14 : String
+                binary concat : String
+                  local v6 : String
+                  local v13 : String
+              drop v13
+              drop v6
+              local v14 : String
+          let v15 : String
+            str " buffer(s), got "
+          let v16 : String
+            binary concat : String
+              local v5 : String
+              local v15 : String
+          drop v15
+          drop v5
+          local v16 : String
+      let v17 : String
+        intrinsic str_of_int : String
+          local v3 : Int
+      let v18 : String
+        binary concat : String
+          local v4 : String
+          local v17 : String
+      drop v17
+      drop v4
+      local v18 : String
 fn std/gpu.with_gpu_fake -> T
-  param v0 : Map[String, fn(List[String], List[List[Float]]) -> List[Float]] owned
+  param v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] owned
   param v1 : fn() -> T !Gpu owned
   block : T
     block : T
@@ -696,7 +770,7 @@ fn std/gpu.with_gpu_fake -> T
             dup
               local v3 : cell
           closure std/gpu.lambda$12 : fn(String, Int, List[Int]) -> Result[Unit, ForeignError]
-            local v0 : Map[String, fn(List[String], List[List[Float]]) -> List[Float]]
+            local v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])]
             dup
               local v3 : cell
           closure std/gpu.lambda$18 : fn(Int) -> Result[Unit, ForeignError]
@@ -2134,6 +2208,47 @@ fn std/gpu.launch_refusals -> List[String]
                 local v0 : ev$Gpu
     drop v0
     local v6 : List[String]
+fn std/gpu.too_few_buffers -> Result[Unit, ForeignError]
+  ev v0 : ev$Gpu owned
+  block : Result[Unit, ForeignError]
+    let v1 : Tensor[F64]
+      block : Tensor[F64]
+        let v2 : Result[Tensor[F64], ForeignError]
+          call direct std/gpu.alloc : Result[Tensor[D], ForeignError]
+            box from=F64
+              ctor F64/F64 : F64
+            int 2
+            dictref dict$1941$Adt1934 trait=1941 subject=F64 : <dict>
+            dup
+              local v0 : ev$Gpu
+        sif
+          isctor Result/Err
+            local v2 : Result[Tensor[F64], ForeignError]
+          block : Never
+            let v3 : Result[Tensor[F64], ForeignError]
+              ctor Result/Err : Result[Tensor[F64], ForeignError]
+                dup
+                  field Result/Err.0 : E
+                    local v2 : Result[Tensor[F64], ForeignError]
+            drop v2
+            drop v0
+            return
+              local v3 : Result[Tensor[F64], ForeignError]
+        let v4 : Tensor[F64]
+          unbox to=Tensor[F64]
+            dup
+              field Result/Ok.0 : T
+                local v2 : Result[Tensor[F64], ForeignError]
+        drop v2
+        local v4 : Tensor[F64]
+    call direct std/gpu.launch : Result[Unit, ForeignError]
+      str "vadd"
+      int 1
+      listlit : List[Int]
+        box from=Int
+          call direct std/gpu.handle_of : Int
+            local v1 : Tensor[F64]
+      local v0 : ev$Gpu
 fn std/gpu.use_after_free -> (Int, Int, String, String)
   ev v0 : ev$Gpu owned
   block : (Int, Int, String, String)
@@ -3056,16 +3171,16 @@ fn std/gpu.lambda$17 -> Float
     drop v2
     local v3 : Float
 fn std/gpu.lambda$12 -> Result[Unit, ForeignError]
-  capture v0 : Map[String, fn(List[String], List[List[Float]]) -> List[Float]] owned
+  capture v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] owned
   capture v1 : cell owned
   param v2 : String owned
   param v3 : Int owned
   param v4 : List[Int] owned
   ev v5 : ev owned
   block : Result[Unit, ForeignError]
-    let v6 : Option[fn(List[String], List[List[Float]]) -> List[Float]]
+    let v6 : Option[(Int, fn(List[String], List[List[Float]]) -> List[Float])]
       call direct std/map.get : Option[V]
-        local v0 : Map[String, fn(List[String], List[List[Float]]) -> List[Float]]
+        local v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])]
         box from=String
           dup
             local v2 : String
@@ -3077,178 +3192,209 @@ fn std/gpu.lambda$12 -> Result[Unit, ForeignError]
       intrinsic null_ref : Result[Unit, ForeignError]
     sif
       isctor Option/Some
-        local v6 : Option[fn(List[String], List[List[Float]]) -> List[Float]]
+        local v6 : Option[(Int, fn(List[String], List[List[Float]]) -> List[Float])]
       block : Unit
-        let v8 : fn(List[String], List[List[Float]]) -> List[Float]
-          unbox to=fn(List[String], List[List[Float]]) -> List[Float]
+        let v8 : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+          unbox to=(Int, fn(List[String], List[List[Float]]) -> List[Float])
             dup
               field Option/Some.0 : T
-                local v6 : Option[fn(List[String], List[List[Float]]) -> List[Float]]
+                local v6 : Option[(Int, fn(List[String], List[List[Float]]) -> List[Float])]
         drop v6
         let v9 : Result[Unit, ForeignError]
-          if : Result[Unit, ForeignError]
-            binary eq : Bool
-              intrinsic len : Int
-                local v4 : List[Int]
-              int 0
-            block : Result[Unit, ForeignError]
-              let v10 : Result[Unit, ForeignError]
-                ctor Result/Err : Result[Unit, ForeignError]
-                  box from=ForeignError
-                    call direct std/gpu.no_arguments : ForeignError
-                      str "fake device"
-                      local v2 : String
-              drop v8
-              drop v4
-              drop v2
-              drop v1
-              local v10 : Result[Unit, ForeignError]
-            block : Result[Unit, ForeignError]
-              let v11 : Map[Int, (String, List[Float])]
-                unbox to=Map[Int, (String, List[Float])]
-                  intrinsic cell_get : cell
-                    local v1 : cell
-              drop v2
+          block : Result[Unit, ForeignError]
+            let v10 : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+              local v8 : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+            let v11 : Int
+              tupleget 0 : Int
+                local v10 : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+            let v12 : fn(List[String], List[List[Float]]) -> List[Float]
+              dup
+                tupleget 1 : fn(List[String], List[List[Float]]) -> List[Float]
+                  local v10 : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+            drop v10
+            if : Result[Unit, ForeignError]
+              binary eq : Bool
+                intrinsic len : Int
+                  local v4 : List[Int]
+                int 0
               block : Result[Unit, ForeignError]
-                let v12 : Option[Int]
-                  call direct std/list.find : Option[T]
-                    dup
-                      local v4 : List[Int]
-                    closure std/gpu.lambda$13 : fn(Int) -> Bool
-                      dup
-                        local v11 : Map[Int, (String, List[Float])]
-                    box from=Unit
-                      unit
                 let v13 : Result[Unit, ForeignError]
-                  intrinsic null_ref : Result[Unit, ForeignError]
-                sif
-                  isctor Option/Some
-                    local v12 : Option[Int]
-                  block : Unit
-                    let v14 : Int
-                      unbox to=Int
-                        field Option/Some.0 : T
-                          local v12 : Option[Int]
-                    drop v1
-                    drop v4
-                    drop v8
-                    drop v11
-                    drop v12
-                    let v15 : Result[Unit, ForeignError]
-                      ctor Result/Err : Result[Unit, ForeignError]
-                        box from=ForeignError
-                          call direct std/gpu.no_such_buffer : ForeignError
-                            str "fake device"
-                            local v14 : Int
-                    drop v13
-                    assign v13
-                      local v15 : Result[Unit, ForeignError]
-                  block : Unit
+                  ctor Result/Err : Result[Unit, ForeignError]
+                    box from=ForeignError
+                      call direct std/gpu.no_arguments : ForeignError
+                        str "fake device"
+                        local v2 : String
+                drop v12
+                drop v4
+                drop v2
+                drop v1
+                local v13 : Result[Unit, ForeignError]
+              if : Result[Unit, ForeignError]
+                binary ne : Bool
+                  intrinsic len : Int
+                    local v4 : List[Int]
+                  local v11 : Int
+                block : Result[Unit, ForeignError]
+                  let v14 : Result[Unit, ForeignError]
+                    ctor Result/Err : Result[Unit, ForeignError]
+                      box from=ForeignError
+                        call direct std/gpu.bad_arity : ForeignError
+                          str "fake device"
+                          local v2 : String
+                          local v11 : Int
+                          intrinsic len : Int
+                            local v4 : List[Int]
+                  drop v12
+                  drop v4
+                  drop v2
+                  drop v1
+                  local v14 : Result[Unit, ForeignError]
+                block : Result[Unit, ForeignError]
+                  let v15 : Map[Int, (String, List[Float])]
+                    unbox to=Map[Int, (String, List[Float])]
+                      intrinsic cell_get : cell
+                        local v1 : cell
+                  drop v2
+                  block : Result[Unit, ForeignError]
+                    let v16 : Option[Int]
+                      call direct std/list.find : Option[T]
+                        dup
+                          local v4 : List[Int]
+                        closure std/gpu.lambda$13 : fn(Int) -> Bool
+                          dup
+                            local v15 : Map[Int, (String, List[Float])]
+                        box from=Unit
+                          unit
+                    let v17 : Result[Unit, ForeignError]
+                      intrinsic null_ref : Result[Unit, ForeignError]
                     sif
-                      isctor Option/None
-                        local v12 : Option[Int]
+                      isctor Option/Some
+                        local v16 : Option[Int]
                       block : Unit
-                        let v16 : Result[Unit, ForeignError]
-                          block : Result[Unit, ForeignError]
-                            let v17 : List[(String, List[Float])]
-                              call direct std/list.map : List[U]
-                                dup
-                                  local v4 : List[Int]
-                                closure std/gpu.lambda$14 : fn(Int) -> (String, List[Float])
-                                  local v11 : Map[Int, (String, List[Float])]
-                                box from=Unit
-                                  unit
-                            drop v12
-                            let v18 : List[String]
-                              call direct std/list.map : List[U]
-                                dup
-                                  local v17 : List[(String, List[Float])]
-                                closure std/gpu.lambda$15 : fn((String, List[Float])) -> String
-                                box from=Unit
-                                  unit
-                            let v19 : List[List[Float]]
-                              call direct std/list.map : List[U]
-                                local v17 : List[(String, List[Float])]
-                                closure std/gpu.lambda$16 : fn((String, List[Float])) -> List[Float]
-                                box from=Unit
-                                  unit
-                            let v20 : String
-                              unbox to=String
-                                intrinsic list_index : E
-                                  local v18 : List[String]
-                                  binary sub : Int
-                                    intrinsic len : Int
-                                      local v18 : List[String]
-                                    int 1
-                            let v21 : List[Float]
-                              call direct std/list.map : List[U]
-                                call dynamic : List[Float]
-                                  local v8 : fn(List[String], List[List[Float]]) -> List[Float]
-                                  local v18 : List[String]
-                                  local v19 : List[List[Float]]
-                                  box from=Unit
-                                    unit
-                                closure std/gpu.lambda$17 : fn(Float) -> Float
-                                  dup
-                                    local v20 : String
-                                box from=Unit
-                                  unit
-                            drop v8
-                            discard
-                              intrinsic cell_set : Unit
-                                local v1 : cell
-                                box from=Map[Int, (String, List[Float])]
-                                  call direct std/map.insert : Map[K, V]
-                                    unbox to=Map[Int, (String, List[Float])]
-                                      intrinsic cell_take : cell
-                                        local v1 : cell
-                                    box from=Int
-                                      block : Int
-                                        let v22 : E
-                                          intrinsic list_index : E
-                                            local v4 : List[Int]
-                                            binary sub : Int
-                                              intrinsic len : Int
-                                                local v4 : List[Int]
-                                              int 1
-                                        let v23 : Int
-                                          unbox to=Int
-                                            local v22 : E
-                                        drop v22
-                                        local v23 : Int
-                                    box from=(String, List[Float])
-                                      tuple : (String, List[Float])
-                                        local v20 : String
-                                        local v21 : List[Float]
-                                    dictref dict$1$Int trait=1 subject=Int : <dict>
-                                    dictref dict$2$Int trait=2 subject=Int : <dict>
-                            drop v1
-                            drop v4
-                            ctor Result/Ok : Result[Unit, ForeignError]
-                              box from=Unit
-                                unit
-                        drop v13
-                        assign v13
-                          local v16 : Result[Unit, ForeignError]
-                      block : Unit
-                        discard
-                          intrinsic panic : Never
-                            str "unreachable match"
+                        let v18 : Int
+                          unbox to=Int
+                            field Option/Some.0 : T
+                              local v16 : Option[Int]
                         drop v1
                         drop v4
-                        drop v8
-                        drop v11
                         drop v12
-                local v13 : Result[Unit, ForeignError]
+                        drop v15
+                        drop v16
+                        let v19 : Result[Unit, ForeignError]
+                          ctor Result/Err : Result[Unit, ForeignError]
+                            box from=ForeignError
+                              call direct std/gpu.no_such_buffer : ForeignError
+                                str "fake device"
+                                local v18 : Int
+                        drop v17
+                        assign v17
+                          local v19 : Result[Unit, ForeignError]
+                      block : Unit
+                        sif
+                          isctor Option/None
+                            local v16 : Option[Int]
+                          block : Unit
+                            let v20 : Result[Unit, ForeignError]
+                              block : Result[Unit, ForeignError]
+                                let v21 : List[(String, List[Float])]
+                                  call direct std/list.map : List[U]
+                                    dup
+                                      local v4 : List[Int]
+                                    closure std/gpu.lambda$14 : fn(Int) -> (String, List[Float])
+                                      local v15 : Map[Int, (String, List[Float])]
+                                    box from=Unit
+                                      unit
+                                drop v16
+                                let v22 : List[String]
+                                  call direct std/list.map : List[U]
+                                    dup
+                                      local v21 : List[(String, List[Float])]
+                                    closure std/gpu.lambda$15 : fn((String, List[Float])) -> String
+                                    box from=Unit
+                                      unit
+                                let v23 : List[List[Float]]
+                                  call direct std/list.map : List[U]
+                                    local v21 : List[(String, List[Float])]
+                                    closure std/gpu.lambda$16 : fn((String, List[Float])) -> List[Float]
+                                    box from=Unit
+                                      unit
+                                let v24 : String
+                                  unbox to=String
+                                    intrinsic list_index : E
+                                      local v22 : List[String]
+                                      binary sub : Int
+                                        intrinsic len : Int
+                                          local v22 : List[String]
+                                        int 1
+                                let v25 : List[Float]
+                                  call direct std/list.map : List[U]
+                                    call dynamic : List[Float]
+                                      local v12 : fn(List[String], List[List[Float]]) -> List[Float]
+                                      local v22 : List[String]
+                                      local v23 : List[List[Float]]
+                                      box from=Unit
+                                        unit
+                                    closure std/gpu.lambda$17 : fn(Float) -> Float
+                                      dup
+                                        local v24 : String
+                                    box from=Unit
+                                      unit
+                                drop v12
+                                discard
+                                  intrinsic cell_set : Unit
+                                    local v1 : cell
+                                    box from=Map[Int, (String, List[Float])]
+                                      call direct std/map.insert : Map[K, V]
+                                        unbox to=Map[Int, (String, List[Float])]
+                                          intrinsic cell_take : cell
+                                            local v1 : cell
+                                        box from=Int
+                                          block : Int
+                                            let v26 : E
+                                              intrinsic list_index : E
+                                                local v4 : List[Int]
+                                                binary sub : Int
+                                                  intrinsic len : Int
+                                                    local v4 : List[Int]
+                                                  int 1
+                                            let v27 : Int
+                                              unbox to=Int
+                                                local v26 : E
+                                            drop v26
+                                            local v27 : Int
+                                        box from=(String, List[Float])
+                                          tuple : (String, List[Float])
+                                            local v24 : String
+                                            local v25 : List[Float]
+                                        dictref dict$1$Int trait=1 subject=Int : <dict>
+                                        dictref dict$2$Int trait=2 subject=Int : <dict>
+                                drop v1
+                                drop v4
+                                ctor Result/Ok : Result[Unit, ForeignError]
+                                  box from=Unit
+                                    unit
+                            drop v17
+                            assign v17
+                              local v20 : Result[Unit, ForeignError]
+                          block : Unit
+                            discard
+                              intrinsic panic : Never
+                                str "unreachable match"
+                            drop v1
+                            drop v4
+                            drop v12
+                            drop v15
+                            drop v16
+                    local v17 : Result[Unit, ForeignError]
         drop v7
         assign v7
           local v9 : Result[Unit, ForeignError]
       block : Unit
         sif
           isctor Option/None
-            local v6 : Option[fn(List[String], List[List[Float]]) -> List[Float]]
+            local v6 : Option[(Int, fn(List[String], List[List[Float]]) -> List[Float])]
           block : Unit
-            let v24 : Result[Unit, ForeignError]
+            let v28 : Result[Unit, ForeignError]
               ctor Result/Err : Result[Unit, ForeignError]
                 box from=ForeignError
                   call direct std/gpu.no_kernel : ForeignError
@@ -3256,7 +3402,7 @@ fn std/gpu.lambda$12 -> Result[Unit, ForeignError]
                     local v2 : String
             drop v7
             assign v7
-              local v24 : Result[Unit, ForeignError]
+              local v28 : Result[Unit, ForeignError]
             drop v1
             drop v2
             drop v4
