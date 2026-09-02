@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ e555c99733750503 -->
+<!-- doc-check: translation-of README.md @ 6deab85c77e9bfce -->
 
 # Dawn
 

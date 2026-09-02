@@ -110,9 +110,9 @@ signature that stays silent about it is a compile error. (`scripts/doc-check.py`
 effect-inference probe pins both branches: an explicitly pure signature that calls
 `println` is rejected, an unannotated one infers `!io`.)
 
-There is a second axis: **named effects you declare yourself**. `effect` declares the operations, `with handle` answers them on the
-spot, the label propagates along signatures and is subtracted at exactly one syntactic
-node, the handler.
+There is a second axis: **named effects you declare yourself**. `effect` declares the
+operations, `with handle` answers them on the spot, the label propagates along
+signatures and is subtracted at exactly one syntactic node, the handler.
 
 ```dawn run
 effect Ask {
@@ -158,8 +158,8 @@ list here, because a divergence is a red build:
 - `scripts/native-cli-diff.sh` — pins the native binary's `fmt`/`doc`/`add`/`lsp`
   output **byte for byte** to the JVM toolchain's.
 - All of the above run on every push, alongside nine contracts:
-  `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`/`narrow`. Too expensive for
-  every push is `scripts/native-fixpoint.sh` — **the whole compiler**: the C the JVM
+  `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`/`narrow`. Too expensive
+  for every push is `scripts/native-fixpoint.sh` — **the whole compiler**: the C the JVM
   emits == the C the native binary emits == the C it emits again.
 
 The spec writes this down as a promise ([docs/spec.md](docs/spec.md) §12.1). Its
@@ -212,9 +212,9 @@ Single-parameter, nominal typeclasses with dictionary passing. Conditional impls
 (`impl[T: Eq] Eq[List[T]]`) and associated types (`type Item`, with `C.Item`
 projections reduced at instantiation) are both in. Five of the seven built-in traits
 carry syntax on their back: `Eq`→`==`, `Ord`→`<`, `Show`→`${...}`, `Iter`→`for..in`,
-`Index`→`[]` — write an impl for your type and the syntax works. There is no monomorphization:
-**a call site at a concrete type does not go through a dictionary, it is a direct
-static call**; dictionaries appear only at generic boundaries.
+`Index`→`[]` — write an impl for your type and the syntax works. There is no
+monomorphization: **a call site at a concrete type does not go through a dictionary,
+it is a direct static call**; dictionaries appear only at generic boundaries.
 
 `Map`/`Set` are 32-way HAMTs and the persistent `List` is a pvec, all written in pure
 Dawn under `std/`. The only collection primitives a backend owes are five `Array`
