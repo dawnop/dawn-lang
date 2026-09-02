@@ -9,8 +9,10 @@
 use std/io
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32, BF16}
-use tileir/dev.{Dev, Param, Tile, param, block_id, load, load_masked, store, store_masked, addf, sub, mul, div,
-  maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, select, tail_mask, idx_const, idx_add, idx_mul, d_for}
+use tileir/dev.{Dev, Param, Tile, Idx, I32, param, block_id, load, load_masked, store, store_masked, addf, sub, mul, div,
+  maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
+  d_for, d_for3, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
+  spread, d_reduce, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select }
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -163,6 +165,264 @@ fn elemops(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store_masked(out, i, TAIL_TILE, m, s6)
 }
 
+# ---- the reduction, transcendental and region kernels (knife 7b) ----
+#
+# Every kernel below covers the WHOLE vector in one tile block: the shape a
+# reduction over a vector has, since a reduce folds along a tile's dimension
+# and this release has no cross-block reduction. 1000 elements in a
+# 1024-wide tile, one block, the last 24 lanes masked off.
+#
+# The tiers these kernels are compared under are docs/tile-backend-design.md
+# 6.5's, and scripts/leetgpu-diff/problems.txt records one per problem:
+#
+#   exact      every operation is IEEE-exact AND the corpus is one on which
+#              every fold order of the reduction gives the same bits (the
+#              order is not specified: Tile IR asks the function to be
+#              associative and commutative and says nothing about the tree).
+#   tolerance  an `exp`, `log`, `tanh`, `pow` or `rsqrt` is in the kernel;
+#              those are libdevice approximations and no corpus makes them
+#              bit-exact.
+const RED_N: Int = 1000
+const RED_TILE: Int = 1024
+
+# Monte Carlo integration over [MC_A, MC_B] with RED_N samples: the estimate
+# is the sample mean times the width of the interval, and the whole factor
+# is one host constant fixed when the kernel is recorded.
+const MC_A: Float = 0.0
+const MC_B: Float = 2.0
+
+# The epsilon under the root of the RMS normalisation, and the clipping
+# half-width of the PPO surrogate: leetgpu's own defaults.
+const RMS_EPS: Float = 1.0e-5
+const PPO_EPS: Float = 0.2
+
+# The temperature of the DPO loss.
+const DPO_BETA: Float = 0.1
+
+# The shape of the loop-and-branch kernel: two blocks, four 128-wide tiles
+# each, so its input is 1024 elements and its output 256.
+const FOLD_TILE: Int = 128
+const FOLD_CHUNKS: Int = 4
+
+fn mc_scale() -> Float = (MC_B - MC_A) / to_float(RED_N)
+
+# `-inf`, the identity of a maximum and the padding value of a load whose
+# masked-off lanes must lose every comparison. Written as a quotient because
+# a Dawn source has no spelling for it.
+fn neg_inf() -> Float = 0.0 - 1.0 / 0.0
+
+# The mask, the zero tile and the whole vector of a one-block kernel, read
+# with `pad` in the lanes past the end.
+fn whole(x: Param[F64], pad: Float) -> (Tile[F64], Tile[F64], Tile[F64]) !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let p = f_const(F64, RED_TILE, pad)
+  (load_masked(x, i, RED_TILE, m, p), p, p)
+}
+
+# The sum of an RED_TILE-wide tile as one rank-0 tile.
+fn sum_of(t: Tile[F64]) -> Tile[F64] !Dev =
+  spread(F64, 1, d_reduce(F64, RED_TILE, t, 0.0, (e, acc) => s_addf(F64, e, acc)))
+
+# Write one f64 at element 0 of `out`. Every one-answer kernel here ends in
+# this: a 1-wide tile at index 0, so the rest of the output buffer is left
+# exactly as it was and scripts/tile-gpu-diff's sentinel is still there.
+fn store_one(out: Param[F64], i: Idx, v: Tile[F64]) -> Unit !Dev = store(out, i, 1, v)
+
+# Sum of a vector: leetgpu 4 (Reduction). The identity is 0.0 and the fold
+# is the device's own; `tileiras` accepts a wrong identity (measured), which
+# is what scripts/tile-gpu-diff's reduce-identity-wrong mutant rests on.
+fn reduce_sum(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let zero = f_const(F64, RED_TILE, 0.0)
+  store_one(out, i, sum_of(load_masked(x, i, RED_TILE, m, zero)))
+}
+
+# exp(x - max) / sum(exp(x - max)): leetgpu 5 (Softmax). Two reductions, a
+# transcendental and a division. The maximum is subtracted so that a corpus
+# of large values does not overflow, which is the claim
+# softmax-no-max-subtract removes.
+fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let ninf = f_const(F64, RED_TILE, neg_inf())
+  let zero = f_const(F64, RED_TILE, 0.0)
+  let t = load_masked(x, i, RED_TILE, m, ninf)
+  let mx = spread(F64, RED_TILE, d_reduce(F64, RED_TILE, t, neg_inf(), (e, acc) => s_maxf(F64, e, acc)))
+  let ex = exp(F64, RED_TILE, sub(F64, RED_TILE, t, mx))
+  let inside = select(F64, RED_TILE, m, ex, zero)
+  let total = spread(F64, RED_TILE, d_reduce(F64, RED_TILE, inside, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  store_masked(out, i, RED_TILE, m, div(F64, RED_TILE, ex, total))
+}
+
+# sum(a * b): leetgpu 17 (Dot Product). The masked-off lanes read 0.0, so
+# their product is 0.0 and the identity carries them.
+fn dot(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let zero = f_const(F64, RED_TILE, 0.0)
+  let ta = load_masked(a, i, RED_TILE, m, zero)
+  let tb = load_masked(b, i, RED_TILE, m, zero)
+  store_one(out, i, sum_of(mul(F64, RED_TILE, ta, tb)))
+}
+
+# mean((p - t)^2): leetgpu 27 (Mean Squared Error).
+fn mse(pred: Param[F64], target: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let zero = f_const(F64, RED_TILE, 0.0)
+  let d = sub(F64, RED_TILE, load_masked(pred, i, RED_TILE, m, zero), load_masked(target, i, RED_TILE, m, zero))
+  let s = sum_of(mul(F64, RED_TILE, d, d))
+  store_one(out, i, div(F64, 1, s, f_const(F64, 1, to_float(RED_N))))
+}
+
+# (b - a) * mean(y): leetgpu 35 (Monte Carlo Integration). `a` and `b` are
+# host constants of the recorded kernel, as every shape here is.
+fn monte_carlo(y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let zero = f_const(F64, RED_TILE, 0.0)
+  let s = sum_of(load_masked(y, i, RED_TILE, m, zero))
+  store_one(out, i, mul(F64, 1, s, f_const(F64, 1, mc_scale())))
+}
+
+# x / sqrt(mean(x^2) + eps): leetgpu 50 (RMS Normalization). `sqrt` is the
+# one operation knife 7b adds that IEEE 754 requires to be correctly
+# rounded, so this kernel can be held to the bit-exact tier while its
+# neighbours cannot.
+fn rms_norm(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let zero = f_const(F64, RED_TILE, 0.0)
+  let t = load_masked(x, i, RED_TILE, m, zero)
+  let s = spread(F64, RED_TILE, d_reduce(F64, RED_TILE, mul(F64, RED_TILE, t, t), 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let mean = div(F64, RED_TILE, s, f_const(F64, RED_TILE, to_float(RED_N)))
+  let r = sqrt(F64, RED_TILE, addf(F64, RED_TILE, mean, f_const(F64, RED_TILE, RMS_EPS)))
+  store_masked(out, i, RED_TILE, m, div(F64, RED_TILE, t, r))
+}
+
+# x / (1 + exp(-x)): leetgpu 52 (Sigmoid Linear Unit). No reduction, so the
+# tolerance is `exp`'s alone.
+fn silu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let zero = f_const(F64, RED_TILE, 0.0)
+  let one = f_const(F64, RED_TILE, 1.0)
+  let t = load_masked(x, i, RED_TILE, m, zero)
+  let d = addf(F64, RED_TILE, one, exp(F64, RED_TILE, neg(F64, RED_TILE, t)))
+  store_masked(out, i, RED_TILE, m, div(F64, RED_TILE, t, d))
+}
+
+# 1 / (1 + exp(-x)): leetgpu 68 (Sigmoid Activation).
+fn sigmoid(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let zero = f_const(F64, RED_TILE, 0.0)
+  let one = f_const(F64, RED_TILE, 1.0)
+  let t = load_masked(x, i, RED_TILE, m, zero)
+  let d = addf(F64, RED_TILE, one, exp(F64, RED_TILE, neg(F64, RED_TILE, t)))
+  store_masked(out, i, RED_TILE, m, div(F64, RED_TILE, one, d))
+}
+
+# -mean(min(r * A, clip(r, 1 - e, 1 + e) * A)) with r = exp(new - old):
+# leetgpu 107 (PPO Clipped Surrogate Loss).
+fn ppo_loss(new: Param[F64], old: Param[F64], adv: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let zero = f_const(F64, RED_TILE, 0.0)
+  let tn = load_masked(new, i, RED_TILE, m, zero)
+  let to = load_masked(old, i, RED_TILE, m, zero)
+  let ta = load_masked(adv, i, RED_TILE, m, zero)
+  let r = exp(F64, RED_TILE, sub(F64, RED_TILE, tn, to))
+  let lo = f_const(F64, RED_TILE, 1.0 - PPO_EPS)
+  let hi = f_const(F64, RED_TILE, 1.0 + PPO_EPS)
+  let clipped = minf(F64, RED_TILE, maxf(F64, RED_TILE, r, lo), hi)
+  let both = minf(F64, RED_TILE, mul(F64, RED_TILE, r, ta), mul(F64, RED_TILE, clipped, ta))
+  let s = sum_of(select(F64, RED_TILE, m, both, zero))
+  store_one(out, i, neg(F64, 1, div(F64, 1, s, f_const(F64, 1, to_float(RED_N)))))
+}
+
+# -mean(log(sigmoid(beta * ((pc - pr) - (rc - rr))))): leetgpu 108 (DPO
+# Sequence Loss). `log` and `exp` in one kernel, so the tolerance covers
+# both.
+fn dpo_loss(pc: Param[F64], pr: Param[F64], rc: Param[F64], rr: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let zero = f_const(F64, RED_TILE, 0.0)
+  let one = f_const(F64, RED_TILE, 1.0)
+  let a = sub(F64, RED_TILE, load_masked(pc, i, RED_TILE, m, zero), load_masked(pr, i, RED_TILE, m, zero))
+  let b = sub(F64, RED_TILE, load_masked(rc, i, RED_TILE, m, zero), load_masked(rr, i, RED_TILE, m, zero))
+  let z = mul(F64, RED_TILE, f_const(F64, RED_TILE, DPO_BETA), sub(F64, RED_TILE, a, b))
+  let sg = div(F64, RED_TILE, one, addf(F64, RED_TILE, one, exp(F64, RED_TILE, neg(F64, RED_TILE, z))))
+  let s = sum_of(select(F64, RED_TILE, m, log(F64, RED_TILE, sg), zero))
+  store_one(out, i, neg(F64, 1, div(F64, 1, s, f_const(F64, 1, to_float(RED_N)))))
+}
+
+# No leetgpu problem needs this one: it is to `exp`, `log` and their
+# neighbours what `elemops` is to `subf` and `divf`. Every transcendental
+# knife 7b adds is applied to the same tile and the ten results are summed
+# in a fixed order, so an opcode copied from the wrong row of the frozen
+# table -- which `tileiras` would accept, since every one of them takes a
+# float tile and answers one -- moves the sum by far more than the
+# tolerance. Tolerance tier, and no corpus could make it exact.
+fn mathops(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, TAIL_TILE, TAIL_N)
+  let one = f_const(F64, TAIL_TILE, 1.0)
+  let a = load_masked(x, i, TAIL_TILE, m, one)
+  let b = load_masked(y, i, TAIL_TILE, m, one)
+  let s1 = addf(F64, TAIL_TILE, exp(F64, TAIL_TILE, a), exp2(F64, TAIL_TILE, a))
+  let s2 = addf(F64, TAIL_TILE, s1, log(F64, TAIL_TILE, a))
+  let s3 = addf(F64, TAIL_TILE, s2, log2(F64, TAIL_TILE, a))
+  let s4 = addf(F64, TAIL_TILE, s3, sqrt(F64, TAIL_TILE, a))
+  let s5 = addf(F64, TAIL_TILE, s4, rsqrt(F64, TAIL_TILE, a))
+  let s6 = addf(F64, TAIL_TILE, s5, tanh(F64, TAIL_TILE, a))
+  let s7 = addf(F64, TAIL_TILE, s6, pow(F64, TAIL_TILE, a, b))
+  let s8 = addf(F64, TAIL_TILE, s7, floor(F64, TAIL_TILE, b))
+  let s9 = addf(F64, TAIL_TILE, s8, ceil(F64, TAIL_TILE, b))
+  store_masked(out, i, TAIL_TILE, m, s9)
+}
+
+# Nor does any problem need this one: it is the oracle for the two region
+# shapes a reduction does not reach. A loop carrying THREE tiles (`d_for3`,
+# which an online softmax needs) folds the sum, the maximum and the minimum
+# of a block's chunks at once, and an `if` over a rank-0 mask -- the first
+# operation in this package with two regions -- chooses the sum in block 0
+# and the range everywhere else. Both branches are taken by the corpus,
+# because the grid has two blocks.
+fn foldif(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
+  let b = block_id(0)
+  let n = idx_const(chunks)
+  let base = idx_mul(b, n)
+  let one = idx_const(1)
+  let first = load(x, base, FOLD_TILE)
+  let (total, hi, lo) = d_for3(idx_add(base, one), idx_add(base, n), one, first, first, first, (k, s, h, l) => {
+    let t = load(x, k, FOLD_TILE)
+    (addf(F64, FOLD_TILE, s, t), maxf(F64, FOLD_TILE, h, t), minf(F64, FOLD_TILE, l, t))
+  })
+  let r = d_if(idx_eq(b, idx_const(0)), () => total, () => sub(F64, FOLD_TILE, hi, lo))
+  store(out, b, FOLD_TILE, r)
+}
+
+# And nor does this one: it is the oracle for the N-ary reduction, the shape
+# argmax has, where the winning value and the lane it came from must travel
+# through one fold together. The answer is the one-hot vector of the argmax,
+# so that both halves of the pair are visible in an f64 buffer: the value
+# decides who wins and the INDEX decides where the 1 lands.
+fn argmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let m = tail_mask(i, RED_TILE, RED_N)
+  let ninf = f_const(F64, RED_TILE, neg_inf())
+  let t = load_masked(x, i, RED_TILE, m, ninf)
+  let (_best, where) = d_reduce2(F64, RED_TILE, t, lanes(i, RED_TILE), neg_inf(), 0 - 1, (ev, ei, av, ai) => {
+    let win = s_gt(F64, ev, av)
+    (s_select(F64, win, ev, av), s_select(I32, win, ei, ai))
+  })
+  let hot = eq_i(RED_TILE, lanes(i, RED_TILE), spread(I32, RED_TILE, where))
+  store_masked(out, i, RED_TILE, m, select(F64, RED_TILE, hot, f_const(F64, RED_TILE, 1.0), f_const(F64, RED_TILE, 0.0)))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -184,6 +444,34 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("clip", ["f64", "f64"], () => clip(param(F64, 0), param(F64, 1)))
   "elemops" ->
     trace_kernel("elemops", ["f64", "f64", "f64"], () => elemops(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "reduce_sum" ->
+    trace_kernel("reduce_sum", ["f64", "f64"], () => reduce_sum(param(F64, 0), param(F64, 1)))
+  "softmax" ->
+    trace_kernel("softmax", ["f64", "f64"], () => softmax(param(F64, 0), param(F64, 1)))
+  "dot" ->
+    trace_kernel("dot", ["f64", "f64", "f64"], () => dot(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "mse" ->
+    trace_kernel("mse", ["f64", "f64", "f64"], () => mse(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "monte_carlo" ->
+    trace_kernel("monte_carlo", ["f64", "f64"], () => monte_carlo(param(F64, 0), param(F64, 1)))
+  "rms_norm" ->
+    trace_kernel("rms_norm", ["f64", "f64"], () => rms_norm(param(F64, 0), param(F64, 1)))
+  "silu" ->
+    trace_kernel("silu", ["f64", "f64"], () => silu(param(F64, 0), param(F64, 1)))
+  "sigmoid" ->
+    trace_kernel("sigmoid", ["f64", "f64"], () => sigmoid(param(F64, 0), param(F64, 1)))
+  "ppo_loss" ->
+    trace_kernel("ppo_loss", ["f64", "f64", "f64", "f64"],
+      () => ppo_loss(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "dpo_loss" ->
+    trace_kernel("dpo_loss", ["f64", "f64", "f64", "f64", "f64"],
+      () => dpo_loss(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3), param(F64, 4)))
+  "mathops" ->
+    trace_kernel("mathops", ["f64", "f64", "f64"], () => mathops(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "foldif" ->
+    trace_kernel("foldif", ["f64", "f64"], () => foldif(param(F64, 0), param(F64, 1), FOLD_CHUNKS))
+  "argmax" ->
+    trace_kernel("argmax", ["f64", "f64"], () => argmax(param(F64, 0), param(F64, 1)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -205,6 +493,7 @@ pub fn main() -> Unit !io = match args() {
       Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
     }
   }
-  _ -> panic("usage: kernels <vadd|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops>"
+  _ -> panic("usage: kernels <vadd|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
+      ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

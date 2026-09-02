@@ -1,0 +1,636 @@
+# Layer 2 for the reduction, transcendental and region kernels (knife 7b),
+# the third of these programs after vadd_diff and mask_diff: one `!Gpu`
+# program runs each of the thirteen kernels scripts/tile-golden pins under
+# `with_gpu_real` against the machine's GPU and under `with_gpu_fake`
+# against hand-written host references, and prints what each device
+# answered and under WHICH TIER the two agree.
+#
+#   red_diff <reduce_sum.cubin> <softmax.cubin> <dot.cubin> <mse.cubin>
+#            <monte_carlo.cubin> <rms_norm.cubin> <silu.cubin>
+#            <sigmoid.cubin> <ppo_loss.cubin> <dpo_loss.cubin>
+#            <mathops.cubin> <foldif.cubin> <argmax.cubin>
+#
+# THE TWO TIERS (docs/tile-backend-design.md 6.5) are what this knife is
+# about, and both of them are here rather than in the shell around it,
+# because the tier is a property of the kernel and not of the run:
+#
+#   exact      the answers are compared BIT FOR BIT, on the rendered text of
+#              the whole buffer, which tells -0.0 from 0.0. A kernel earns
+#              this only when every operation in it is IEEE-exact AND its
+#              corpus is one on which every fold order of its reduction
+#              gives the same bits. `reduce`'s order is NOT specified: Tile
+#              IR asks the function to be associative and commutative and
+#              promises no tree, so `sum_ref`'s left fold is not an oracle
+#              for a general corpus. The corpora below are integer-valued
+#              with every partial sum inside the 53-bit significand, and
+#              there every order is the same exact integer.
+#   tolerance  `|got - want| <= atol + rtol * |want|` per lane, with
+#              `atol = rtol = 1e-5`, which is leetgpu's own criterion. Every
+#              kernel holding an `exp`, `log`, `tanh`, `pow` or `rsqrt` is
+#              here and cannot leave: those are libdevice approximations and
+#              the host reference is a series, so the two are two opinions
+#              and neither is the definition of the other. `rms_norm` is
+#              here too even though `sqrt` is correctly rounded in IEEE 754,
+#              because its host reference computes the root by Newton's
+#              iteration and not to the last bit; the transcript says
+#              whether it happened to agree bit for bit anyway.
+#
+# THE ORDER PROBE is not an assertion. It runs `reduce_sum` over
+# `[2^53, 1, 1, -2^53]` padded with zeros, a corpus on which the fold order
+# is visible in the answer: a left fold gives 0, a pairwise tree gives 1 and
+# a right fold gives 2. Whatever the device answers is printed and goes into
+# the ledger note, so that a `tileiras` upgrade that changes the tree is
+# seen rather than discovered.
+use std/io
+use std/io.{with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, alloc, upload, download, free, launch, sync,
+  handle_of, ref_exp, ref_log, ref_sqrt, LN2, reduce_sum_ref, softmax_ref, dot_ref, mse_ref, monte_carlo_ref,
+  rms_norm_ref, silu_ref, sigmoid_ref, ppo_loss_ref, dpo_loss_ref }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a value no kernel
+## here computes, so a lane that still has it is a lane nothing wrote.
+pub const SENTINEL: Float = 0.0 - 12345.678
+
+## leetgpu's own agreement criterion, and the tolerance tier's.
+pub const ATOL: Float = 1.0e-5
+pub const RTOL: Float = 1.0e-5
+
+## The vector length and tile width the one-block kernels were recorded
+## with, and the buffer every kernel here is given: 1024 lanes, of which the
+## first 1000 are the vector. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const RED_N: Int = 1000
+pub const RED_TILE: Int = 1024
+
+## The boundary shape `mathops` was recorded with, the same as `elemops`.
+pub const TAIL_N: Int = 1000
+pub const TAIL_TILE: Int = 128
+
+## The loop-and-branch kernel: two blocks of four 128-wide chunks.
+pub const FOLD_TILE: Int = 128
+pub const FOLD_CHUNKS: Int = 4
+pub const FOLD_BLOCKS: Int = 2
+
+## The constants the kernels were recorded with.
+pub const MC_A: Float = 0.0
+pub const MC_B: Float = 2.0
+pub const RMS_EPS: Float = 1.0e-5
+pub const PPO_EPS: Float = 0.2
+pub const DPO_BETA: Float = 0.1
+
+fn mc_scale() -> Float = (MC_B - MC_A) / to_float(RED_N)
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+fn release(ts: List[Tensor[F64]]) -> Unit !Gpu = {
+  for t in ts {
+    let _ = free(t)
+  }
+}
+
+fn alloc_many(count: Int, size: Int, acc: List[Tensor[F64]]) -> Result[List[Tensor[F64]], ForeignError] !Gpu =
+  if count == 0 {
+    Ok(acc)
+  } else {
+    match alloc(F64, size) {
+      Ok(t) -> alloc_many(count - 1, size, acc ++ [t])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(ts: List[Tensor[F64]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(ts) {
+    Ok(())
+  } else {
+    match upload(ts[i], data[i]) {
+      Ok(_) -> upload_all(ts, data, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+## One kernel over `data` (the input buffers, then the output buffer's
+## initial contents), one stage at a time, stopping at the first refusal and
+## saying which stage it was. Every buffer is `len(data[0])` long.
+fn stages(kernel: String, grid: Int, data: List[List[Float]]) -> Trace !Gpu = {
+  let size = len(data[0])
+  match alloc_many(len(data), size, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(ts) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(ts, data, 0) {
+        Err(e) -> {
+          release(ts)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match launch(kernel, grid, list.map(ts, handle_of)) {
+            Err(e) -> {
+              release(ts)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = sync()
+              let r = download(ts[len(ts) - 1])
+              release(ts)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+# ---- the two tiers ----
+
+## Whether `got` is within the tolerance tier's distance of `want`, by
+## leetgpu's own criterion. A NaN on either side is never within: two NaNs
+## are not agreement, they are two failures.
+pub fn within(got: Float, want: Float) -> Bool =
+  if got != got || want != want {
+    false
+  } else if got == want {
+    true
+  } else if got - got != 0.0 || want - want != 0.0 {
+    false
+  } else {
+    let d = if got > want { got - want } else { want - got }
+    let m = if want > 0.0 { want } else { 0.0 - want }
+    d <= ATOL + RTOL * m
+  }
+
+## The largest relative-and-absolute miss between two vectors, as the
+## tolerance criterion measures it: 0.0 when they are bit-identical.
+pub fn worst(got: List[Float], want: List[Float]) -> Float =
+  list.fold(range(0, len(want)), 0.0, (acc, i) => {
+    let a = got[i]
+    let b = want[i]
+    let d = if a > b { a - b } else { b - a }
+    let m = if b > 0.0 { b } else { 0.0 - b }
+    let scaled = d / (ATOL + RTOL * m)
+    if scaled > acc { scaled } else { acc }
+  })
+
+fn all_within(got: List[Float], want: List[Float]) -> Bool =
+  len(got) == len(want) && list.all(range(0, len(want)), i => within(got[i], want[i]))
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one kernel under its tier: `identical:exact` (bit for
+## bit), `close:tolerance` (within atol/rtol and not bit for bit),
+## `identical:tolerance` (a tolerance-tier kernel that happened to agree bit
+## for bit as well, which is worth seeing), `differ:result`, or
+## `blocked:<kind>@<stage>` where the driver stopped.
+fn verdict(tier: String, fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:" ++ tier
+  } else if tier == "exact" {
+    "differ:result"
+  } else {
+    match (real.result, fake.result) {
+      (Some(a), Some(b)) -> if all_within(a, b) { "close:tolerance" } else { "differ:result" }
+      _ -> "differ:result"
+    }
+  }
+}
+
+# ---- the corpora ----
+#
+# Every buffer is RED_TILE lanes; the output buffer is the sentinel on the
+# way in, and the lanes a kernel does not write must still be the sentinel
+# on the way out.
+#
+# The EXACT-tier corpora are integer-valued and small: every element is a
+# whole number, every product and square of two of them is a whole number,
+# and every partial sum is far inside 2^53. On such a corpus every fold
+# order of the reduction is the same exact integer, which is what lets a
+# left-folding host reference stand as an oracle for a device tree nobody
+# specified.
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+fn cdiv(a: Int, b: Int) -> Int = (a + b - 1) / b
+
+# Whole numbers in [-500, 500], never all the same, zero among them.
+fn ints_corpus(n: Int, span: Int, shift: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float((i * 37) % span - shift))
+
+# Whole numbers in [-30, 30]: small enough that products stay whole and
+# their total stays inside the significand.
+fn small_ints(n: Int, span: Int, shift: Int, step: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float((i * step) % span - shift))
+
+# Positive values in [0.5, 4.0], the domain `log`, `sqrt` and `pow` need.
+fn positive_corpus(n: Int) -> List[Float] =
+  list.map(range(0, n), i => 0.5 + to_float(i % 71) * 0.05)
+
+# Values in [-3.5, 3.5] with a fractional part, so that `floor` and `ceil`
+# differ on every lane and `tanh` sees both signs.
+fn fractional_corpus(n: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float(i % 29) * 0.25 - 3.5)
+
+# The softmax corpus: large values, so that a kernel that did not subtract
+# the maximum would overflow rather than merely round differently. This is
+# the corpus scripts/tile-gpu-diff/run.sh's softmax-no-max-subtract mutant
+# is measured on.
+fn large_corpus(n: Int) -> List[Float] =
+  list.map(range(0, n), i => 1000.0 + to_float(i % 17))
+
+# The order probe: 2^53, 1, 1, -2^53 and zeros. A left fold answers 0 (the
+# two ones are lost off the end of the significand and the last term
+# cancels), a pairwise tree answers 1, a right fold answers 2.
+fn pow2_53() -> Float = {
+  var q = 1.0
+  var i = 0
+  while i < 53 {
+    q = q * 2.0
+    i = i + 1
+  }
+  q
+}
+
+fn probe_corpus(n: Int) -> List[Float] =
+  list.map(range(0, n), i =>
+      if i == 0 {
+        pow2_53()
+      } else if i == 1 || i == 2 {
+        1.0
+      } else if i == 3 {
+        0.0 - pow2_53()
+      } else {
+        0.0
+      })
+
+# ---- the references this program owns ----
+#
+# `mathops`, `foldif` and `argmax` answer no leetgpu problem: each is an
+# oracle for something `tileiras` cannot see, so its reference lives beside
+# the corpus rather than in std/gpu.
+
+fn ref_exp2(x: Float) -> Float = ref_exp(x * LN2)
+
+fn ref_log2(x: Float) -> Float = ref_log(x) / LN2
+
+fn ref_rsqrt(x: Float) -> Float = 1.0 / ref_sqrt(x)
+
+fn ref_tanh(x: Float) -> Float = {
+  let e = ref_exp(2.0 * x)
+  (e - 1.0) / (e + 1.0)
+}
+
+fn ref_pow(a: Float, b: Float) -> Float = ref_exp(b * ref_log(a))
+
+fn ref_floor(x: Float) -> Float = {
+  let t = to_float(to_int(x))
+  if t > x { t - 1.0 } else { t }
+}
+
+fn ref_ceil(x: Float) -> Float = {
+  let t = to_float(to_int(x))
+  if t < x { t + 1.0 } else { t }
+}
+
+# The ten transcendentals of `mathops`, summed in the order the kernel adds
+# them. An opcode taken from the wrong row of the frozen table assembles
+# (every one of these takes a float tile and answers one), and only this
+# sum tells `exp` from `exp2` or `floor` from `ceil`.
+fn mathops_lane(a: Float, b: Float) -> Float = {
+  let s1 = ref_exp(a) + ref_exp2(a)
+  let s2 = s1 + ref_log(a)
+  let s3 = s2 + ref_log2(a)
+  let s4 = s3 + ref_sqrt(a)
+  let s5 = s4 + ref_rsqrt(a)
+  let s6 = s5 + ref_tanh(a)
+  let s7 = s6 + ref_pow(a, b)
+  let s8 = s7 + ref_floor(b)
+  s8 + ref_ceil(b)
+}
+
+fn mathops_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let old = ins[2]
+  list.map(range(0, len(old)), i => if i < n { mathops_lane(a[i], b[i]) } else { old[i] })
+}
+
+# `foldif`: block `b` folds its FOLD_CHUNKS consecutive tiles lane by lane
+# into a sum, a maximum and a minimum at once, and then answers the sum in
+# block 0 and the range everywhere else. The loop's own fold is left to
+# right by construction (it is a `for`, not a `reduce`), so the order here
+# is the device's.
+fn foldif_ref(_dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  list.map(range(0, len(old)), i => {
+    let b = i / FOLD_TILE
+    let j = i % FOLD_TILE
+    if b >= FOLD_BLOCKS {
+      old[i]
+    } else {
+      let at = (k: Int) => x[(b * FOLD_CHUNKS + k) * FOLD_TILE + j]
+      let total = list.fold(range(1, FOLD_CHUNKS), at(0), (acc, k) => acc + at(k))
+      let hi = list.fold(range(1, FOLD_CHUNKS), at(0), (acc, k) => if at(k) > acc { at(k) } else { acc })
+      let lo = list.fold(range(1, FOLD_CHUNKS), at(0), (acc, k) => if at(k) < acc { at(k) } else { acc })
+      if b == 0 { total } else { hi - lo }
+    }
+  })
+}
+
+# `argmax`: the one-hot vector of the largest of the first `n` lanes. The
+# kernel keeps the FIRST maximum (its fold takes the new element only when
+# it is strictly greater), and so does this; the corpus has a unique one
+# anyway.
+fn argmax_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let best = list.fold(range(1, n), 0, (acc, i) => if x[i] > x[acc] { i } else { acc })
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        if i == best { 1.0 } else { 0.0 }
+      } else {
+        old[i]
+      })
+}
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String =
+  ["reduce_sum", "softmax", "dot", "mse", "monte_carlo", "rms_norm", "silu", "sigmoid",
+    "ppo_loss", "dpo_loss", "mathops", "foldif", "argmax"][i]
+
+## The kernels of the tolerance tier: every one holds an `exp`, a `log`, a
+## `tanh`, a `pow` or an `rsqrt`, except `rms_norm`, which is here because
+## its host reference computes the square root by iteration rather than to
+## the last bit. Everything else is the exact tier.
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier` column
+## of scripts/leetgpu-diff/problems.txt against it, so a row cannot claim a
+## tier this program does not compare under.
+pub fn tolerance_tier() -> List[String] =
+  ["softmax", "rms_norm", "silu", "sigmoid", "ppo_loss", "dpo_loss", "mathops"]
+
+## The tier `case_name(i)` is compared under.
+fn case_tier(i: Int) -> String = {
+  let name = case_name(i)
+  if list.any(tolerance_tier(), t => t == name) { "tolerance" } else { "exact" }
+}
+
+## How many tile blocks each was recorded for.
+fn case_grid(i: Int) -> Int = {
+  let name = case_name(i)
+  if name == "mathops" {
+    cdiv(TAIL_N, TAIL_TILE)
+  } else if name == "foldif" {
+    FOLD_BLOCKS
+  } else {
+    1
+  }
+}
+
+## The buffers each is handed: its inputs, then the output buffer's initial
+## contents.
+fn case_data(i: Int) -> List[List[Float]] = {
+  let out = sentinel_buffer(RED_TILE)
+  let name = case_name(i)
+  if name == "reduce_sum" {
+    [ints_corpus(RED_TILE, 1001, 500), out]
+  } else if name == "softmax" {
+    [large_corpus(RED_TILE), out]
+  } else if name == "dot" {
+    [small_ints(RED_TILE, 61, 30, 7), small_ints(RED_TILE, 61, 30, 13), out]
+  } else if name == "mse" {
+    [small_ints(RED_TILE, 201, 100, 11), small_ints(RED_TILE, 201, 100, 3), out]
+  } else if name == "monte_carlo" {
+    [small_ints(RED_TILE, 61, 30, 5), out]
+  } else if name == "rms_norm" {
+    [fractional_corpus(RED_TILE), out]
+  } else if name == "silu" {
+    [fractional_corpus(RED_TILE), out]
+  } else if name == "sigmoid" {
+    [fractional_corpus(RED_TILE), out]
+  } else if name == "ppo_loss" {
+    [list.map(range(0, RED_TILE), k => to_float(k % 13) * 0.01),
+      list.map(range(0, RED_TILE), k => to_float(k % 7) * 0.02),
+      small_ints(RED_TILE, 11, 5, 3), out]
+  } else if name == "dpo_loss" {
+    [list.map(range(0, RED_TILE), k => to_float(k % 13) * 0.1),
+      list.map(range(0, RED_TILE), k => to_float(k % 7) * 0.1),
+      list.map(range(0, RED_TILE), k => to_float(k % 5) * 0.1),
+      list.map(range(0, RED_TILE), k => to_float(k % 11) * 0.1),
+      out]
+  } else if name == "mathops" {
+    [positive_corpus(RED_TILE), fractional_corpus(RED_TILE), out]
+  } else if name == "foldif" {
+    [small_ints(RED_TILE, 101, 50, 17), out]
+  } else {
+    # argmax: a unique maximum, at a lane the mask keeps
+    [list.map(range(0, RED_TILE), k => if k == 617 { 999.0 } else { to_float(k % 91) }), out]
+  }
+}
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] = {
+  let name = case_name(i)
+  if name == "reduce_sum" {
+    map.from([("reduce_sum", (2, (dts, ins) => reduce_sum_ref(RED_N, dts, ins)))])
+  } else if name == "softmax" {
+    map.from([("softmax", (2, (dts, ins) => softmax_ref(RED_N, dts, ins)))])
+  } else if name == "dot" {
+    map.from([("dot", (3, (dts, ins) => dot_ref(RED_N, dts, ins)))])
+  } else if name == "mse" {
+    map.from([("mse", (3, (dts, ins) => mse_ref(RED_N, dts, ins)))])
+  } else if name == "monte_carlo" {
+    map.from([("monte_carlo", (2, (dts, ins) => monte_carlo_ref(RED_N, mc_scale(), dts, ins)))])
+  } else if name == "rms_norm" {
+    map.from([("rms_norm", (2, (dts, ins) => rms_norm_ref(RED_N, RMS_EPS, dts, ins)))])
+  } else if name == "silu" {
+    map.from([("silu", (2, (dts, ins) => silu_ref(RED_N, dts, ins)))])
+  } else if name == "sigmoid" {
+    map.from([("sigmoid", (2, (dts, ins) => sigmoid_ref(RED_N, dts, ins)))])
+  } else if name == "ppo_loss" {
+    map.from([("ppo_loss", (4, (dts, ins) => ppo_loss_ref(RED_N, PPO_EPS, dts, ins)))])
+  } else if name == "dpo_loss" {
+    map.from([("dpo_loss", (5, (dts, ins) => dpo_loss_ref(RED_N, DPO_BETA, dts, ins)))])
+  } else if name == "mathops" {
+    map.from([("mathops", (3, (dts, ins) => mathops_ref(TAIL_N, dts, ins)))])
+  } else if name == "foldif" {
+    map.from([("foldif", (2, foldif_ref))])
+  } else {
+    map.from([("argmax", (2, (dts, ins) => argmax_ref(RED_N, dts, ins)))])
+  }
+}
+
+## A vector as a line: its length, its first lanes, the lanes around the
+## boundary and the tail the mask must have left alone.
+fn digest(v: List[Float], n: Int) -> String =
+  if len(v) <= 16 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))}"
+      ++ " last_inside=${to_string(list.take(list.drop(v, n - 2), 2))}"
+      ++ " tail=${to_string(list.take(list.drop(v, n), 2))}"
+  }
+
+fn shown(o: Option[List[Float]], n: Int) -> String = match o {
+  Some(v) -> digest(v, n)
+  None -> "-"
+}
+
+fn miss(fake: Trace, real: Trace) -> String = match (real.result, fake.result) {
+  (Some(a), Some(b)) -> "${worst(a, b)}"
+  _ -> "-"
+}
+
+fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("red_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+## The order probe: `reduce_sum` over `[2^53, 1, 1, -2^53]` and zeros. Not
+## an assertion; the answer is printed and goes into the ledger note.
+fn probe_reading(x: Float) -> String =
+  if x == 0.0 {
+    "left"
+  } else if x == 1.0 {
+    "pairwise"
+  } else if x == 2.0 {
+    "right"
+  } else {
+    "unrecognised"
+  }
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  let count = 13
+  if len(argv) != count {
+    io.eprintln("usage: red_diff <reduce_sum.cubin> <softmax.cubin> <dot.cubin> <mse.cubin>"
+        ++ " <monte_carlo.cubin> <rms_norm.cubin> <silu.cubin> <sigmoid.cubin> <ppo_loss.cubin>"
+        ++ " <dpo_loss.cubin> <mathops.cubin> <foldif.cubin> <argmax.cubin>")
+    io.exit(2)
+  }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var tolerance_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let tier = case_tier(i)
+    let n = if name == "foldif" { FOLD_TILE * FOLD_BLOCKS } else { RED_N }
+    let data = case_data(i)
+    let grid = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, grid, data))
+    let real = with_gpu_real(cubins, () => stages(name, grid, data))
+    let v = verdict(tier, fake, real)
+    io.println("kernel ${name} tier=${tier} n=${n} buffers=${len(data)} lanes=${len(data[0])} grid=${grid}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result, n)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result, n)}")
+    io.println("  miss  ${miss(fake, real)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})")
+    if real.note != "" { io.println("  note  ${real.note}") }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v == "close:tolerance" || v == "identical:tolerance" { tolerance_count = tolerance_count + 1 } else { () }
+    if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+      && v != "identical:tolerance" {
+        blocked = v
+      } else {
+        ()
+      }
+  }
+  # the order probe, on the reduce_sum cubin, recorded and not asserted
+  let probe_data = [probe_corpus(RED_TILE), sentinel_buffer(RED_TILE)]
+  let probe = with_gpu_real(cubins, () => stages("reduce_sum", 1, probe_data))
+  let answer = match probe.result {
+    Some(v) -> v[0]
+    None -> 0.0 / 0.0
+  }
+  if stopped(probe) == "" {
+    io.println("probe fold-order sum([2^53, 1, 1, -2^53]) = ${answer} (${probe_reading(answer)})")
+  } else {
+    io.println("probe fold-order blocked:${stopped(probe)}")
+  }
+  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+}
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")

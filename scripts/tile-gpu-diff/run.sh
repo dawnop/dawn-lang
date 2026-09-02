@@ -234,20 +234,31 @@ grep -q "V${want_tileiras}\b" "$work/tileiras.version" ||
 # The boundary kernels of knife 7a, in the order mask_diff takes them.
 masked=(vadd_tail copy relu leaky_relu clip elemops)
 
+# The reduction, transcendental and region kernels of knife 7b, in the order
+# red_diff takes them.
+reduced=(reduce_sum softmax dot mse monte_carlo rms_norm silu sigmoid ppo_loss dpo_loss mathops foldif argmax)
+
+# tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
+# `assemble` says which one), so the empty error stream is part of the
+# verdict here too.
 assemble_golden() { # kernel, tilebc, cubin
   "$tileiras" --gpu-name "$gpu_name" -o "$3" "$2" > "$work/assemble.log" 2>&1 ||
     { cat "$work/assemble.log" >&2; fail "tileiras refused $2"; }
+  ! grep -q '^error:' "$work/assemble.log" ||
+    { cat "$work/assemble.log" >&2; fail "tileiras exited 0 but refused $2"; }
   [ "$(head -c 4 "$3" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] ||
     fail "tileiras wrote no ELF cubin for $1"
 }
 
-for k in vadd vadd_bf16 "${masked[@]}"; do
+for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
 cubins=("$work/vadd.cubin" "$work/vadd_bf16.cubin")
 masked_cubins=()
 for k in "${masked[@]}"; do masked_cubins+=("$work/$k.cubin"); done
+reduced_cubins=()
+for k in "${reduced[@]}"; do reduced_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -314,10 +325,36 @@ case "$masked_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/masked.out" | head -n 1)"
 
+# ---- native, the reduction and transcendental kernels (knife 7b)
+build_native "$root/std" "$work/reduced.bin" "$here/red_diff.dawn"
+rc=0
+"$work/reduced.bin" "${reduced_cubins[@]}" > "$work/reduced.out" 2> "$work/reduced.err" || rc=$?
+cat "$work/reduced.out"
+reduced_verdict="$(verdict_of "$work/reduced.out")"
+case "$reduced_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#reduced[@]} reduction and transcendental kernels agree with the fake device, each under its own tier" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $reduced_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $reduced_verdict" ;;
+  fail) cat "$work/reduced.err" >&2; fail "the device answered and disagreed with the fake device on a reduction kernel (see the transcript above)" ;;
+  *) cat "$work/reduced.err" >&2; fail "red_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/reduced.out" | head -n 1)"
+
+# The tier summary and the fold-order probe go into the ledger note: the
+# probe is a RECORD and not an assertion (docs 6.5), so a tileiras upgrade
+# that changes the device's reduction tree shows up in the ledger rather
+# than in a red run.
+tiers="$(sed -n 's/^tiers //p' "$work/reduced.out" | tail -n 1)"
+probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
+echo "      tiers: $tiers; fold-order probe: $probe"
+
 # The ledger records one verdict for the tree: both programs pass, or the
 # first thing that stopped one of them.
-if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ]; then
+if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ]; then
   verdict=pass
+elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ]; then
+  verdict="$reduced_verdict"
 elif [ "$verdict" = pass ]; then
   verdict="$masked_verdict"
 fi
@@ -466,6 +503,141 @@ else
   echo "SKIP  mutant: mask-all-true not verifiable on this driver: the clean run is $masked_verdict, before any launch reaches the device"
 fi
 
+# 5. reduce-identity-wrong: `d_reduce` hands the reduction an identity one
+#    greater than the one it was given. A sum's identity becomes 1.0 instead
+#    of 0.0; a maximum's stays -inf, since -inf + 1 is -inf, so the mutant
+#    lands on the sums alone. Layer 0 MOVES (the text prints
+#    `identities=[1.0 : f64]`, and a `--record` would take it), layer 1
+#    ACCEPTS it -- tileiras checks the identity's format against the
+#    operand's and never its value, measured -- and only the device says the
+#    answer is wrong. This is the claim of knife 7b, and the reason a
+#    reduction knife needs a device.
+#
+#    Eight of the thirteen kernels hold a sum reduction and must go red;
+#    the other five (silu, sigmoid and mathops have no reduction, foldif
+#    folds with a `for`, argmax reduces through `d_reduce2`, which is not
+#    the mutated path) must be untouched. Requiring both is what keeps the
+#    mutant from passing for the wrong reason.
+mutant_pkg_id="$work/pkg-reduce-identity-wrong"
+rm -rf "$mutant_pkg_id"
+cp -r "$root/packages/tileir" "$mutant_pkg_id"
+before=$(digest "$mutant_pkg_id/src/dev.dawn")
+python3 "$here/mutate.py" "$mutant_pkg_id/src/dev.dawn" reduce-identity-wrong \
+  'let args = t_reduce_begin(0, n, [IdF(dtype_name(d), identity)], [h])' \
+  'let args = t_reduce_begin(0, n, [IdF(dtype_name(d), identity + 1.0)], [h])'
+after=$(digest "$mutant_pkg_id/src/dev.dawn")
+echo "      reduce-identity-wrong: packages/tileir/src/dev.dawn md5 $before -> $after"
+
+# The kernels of a mutated package, encoded and assembled into $work/<tag>-<k>.cubin.
+mutant_kernels() { # tag, pkgdir, kernels...
+  local tag="$1" pkg="$2"
+  shift 2
+  mkdir -p "$work/proj-$tag/src"
+  cp "$golden/kernels.dawn" "$work/proj-$tag/src/main.dawn"
+  cat > "$work/proj-$tag/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
+
+[deps]
+tileir = "$pkg"
+TOML
+  local k
+  for k in "$@"; do
+    "$root/bin/dawn" run "$work/proj-$tag" -- "$k" --bytecode "$work/$tag-$k.tilebc" > "$work/proj-$tag.$k.log" 2>&1 ||
+      { cat "$work/proj-$tag.$k.log" >&2; fail "$tag: $k did not encode"; }
+    assemble_golden "$k" "$work/$tag-$k.tilebc" "$work/$tag-$k.cubin"
+  done
+}
+
+mutant_kernels reduce-identity-wrong "$mutant_pkg_id" "${reduced[@]}"
+# the eight kernels with a sum reduction move at layer 0; the five without
+# one do not, and that is the mutant's own control
+moved=0
+for k in "${reduced[@]}"; do
+  if cmp -s "$golden/$k.tilebc" "$work/reduce-identity-wrong-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+done
+[ "$moved" = 8 ] ||
+  fail "reduce-identity-wrong: expected exactly 8 of the ${#reduced[@]} kernels' bytecode to move, got $moved"
+echo "      reduce-identity-wrong: 8 of ${#reduced[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+id_cubins=()
+for k in "${reduced[@]}"; do id_cubins+=("$work/reduce-identity-wrong-$k.cubin"); done
+rc=0
+"$work/reduced.bin" "${id_cubins[@]}" > "$work/m-reduce-identity-wrong.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-reduce-identity-wrong.out")"
+if [ "$reduced_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-reduce-identity-wrong.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 8 ]; then
+    cat "$work/m-reduce-identity-wrong.out" >&2
+    fail "reduce-identity-wrong mutant stayed green: expected verdict fail (exit 1) with exactly the 8 sum-reduction kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in silu sigmoid mathops foldif argmax; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-reduce-identity-wrong.out" ||
+      { cat "$work/m-reduce-identity-wrong.out" >&2; fail "reduce-identity-wrong: $k has no sum reduction and should be untouched"; }
+  done
+  echo "PASS  mutant: reduce-identity-wrong (layer 1 accepts it; on the device the 8 sum-reduction kernels differ and the other 5 do not)"
+else
+  [ "$mverdict" = "$reduced_verdict" ] ||
+    { cat "$work/m-reduce-identity-wrong.out" >&2; fail "reduce-identity-wrong: the clean run is $reduced_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: reduce-identity-wrong not verifiable on this driver: the clean run is $reduced_verdict, before any launch reaches the device"
+fi
+
+# 6. softmax-no-max-subtract: the softmax kernel stops subtracting the
+#    maximum before exponentiating. Every layer below the device is happy --
+#    the text and the bytes are a legal, shorter kernel and tileiras
+#    assembles it -- and it is even numerically identical on a corpus of
+#    small values. On red_diff's corpus, which is around 1000, the device
+#    computes exp(1000), overflows to +inf, divides inf by inf and answers
+#    NaN, while the reference (which subtracts) is finite. The corpus is
+#    part of the claim, which is why it lives beside the kernel.
+mutant_kernels_src="$work/kernels-softmax.dawn"
+cp "$golden/kernels.dawn" "$mutant_kernels_src"
+before=$(digest "$mutant_kernels_src")
+python3 "$here/mutate.py" "$mutant_kernels_src" softmax-no-max-subtract \
+  '  let mx = spread(F64, RED_TILE, d_reduce(F64, RED_TILE, t, neg_inf(), (e, acc) => s_maxf(F64, e, acc)))' \
+  '  let mx = f_const(F64, RED_TILE, 0.0)'
+after=$(digest "$mutant_kernels_src")
+echo "      softmax-no-max-subtract: scripts/tile-golden/kernels.dawn md5 $before -> $after"
+mkdir -p "$work/proj-softmax/src"
+cp "$mutant_kernels_src" "$work/proj-softmax/src/main.dawn"
+cat > "$work/proj-softmax/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
+
+[deps]
+tileir = "$root/packages/tileir"
+TOML
+"$root/bin/dawn" run "$work/proj-softmax" -- softmax --bytecode "$work/softmax-nomax.tilebc" > "$work/proj-softmax.log" 2>&1 ||
+  { cat "$work/proj-softmax.log" >&2; fail "softmax-no-max-subtract: softmax did not encode"; }
+cmp -s "$golden/softmax.tilebc" "$work/softmax-nomax.tilebc" &&
+  fail "softmax-no-max-subtract mutant stayed green: softmax.tilebc is unchanged"
+assemble_golden softmax "$work/softmax-nomax.tilebc" "$work/softmax-nomax.cubin"
+echo "      softmax-no-max-subtract: softmax.tilebc differs from the golden and tileiras still accepts it"
+nomax_cubins=()
+for k in "${reduced[@]}"; do
+  if [ "$k" = softmax ]; then nomax_cubins+=("$work/softmax-nomax.cubin"); else nomax_cubins+=("$work/$k.cubin"); fi
+done
+rc=0
+"$work/reduced.bin" "${nomax_cubins[@]}" > "$work/m-softmax-no-max.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-softmax-no-max.out")"
+if [ "$reduced_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-softmax-no-max.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-softmax-no-max.out" >&2
+    fail "softmax-no-max-subtract mutant stayed green: expected verdict fail (exit 1) with softmax alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "softmax" {bad=1} END {exit bad}' \
+    "$work/m-softmax-no-max.out" ||
+    { cat "$work/m-softmax-no-max.out" >&2; fail "softmax-no-max-subtract: a kernel other than softmax moved"; }
+  grep -q 'kernel softmax' "$work/m-softmax-no-max.out" ||
+    fail "softmax-no-max-subtract: softmax is not in the transcript"
+  echo "PASS  mutant: softmax-no-max-subtract (softmax alone overflows to NaN on a corpus around 1000; the other 12 kernels are untouched)"
+else
+  [ "$mverdict" = "$reduced_verdict" ] ||
+    { cat "$work/m-softmax-no-max.out" >&2; fail "softmax-no-max-subtract: the clean run is $reduced_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: softmax-no-max-subtract not verifiable on this driver: the clean run is $reduced_verdict, before any launch reaches the device"
+fi
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -476,13 +648,14 @@ fi
   fail "toolchain.txt says driver $pinned_driver and nvidia-smi says $driver: set the driver line to $driver, commit, and run again (the three numbers move together; the ledger commit adds a line and nothing else)"
 dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c \
   scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn \
-  scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/mutate.py)"
+  scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"
 today="$(date -u +%F)"
 line="$commit $today $driver $want_tileiras $gpu_name $verdict"
-[ -z "$note" ] || line="$line # $note"
+summary="$tiers fold-order=$probe"
+if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"
 echo "tile-gpu-diff: $verdict"

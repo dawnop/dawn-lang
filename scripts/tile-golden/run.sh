@@ -113,7 +113,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/tile-golden"
-kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops)
+kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops reduce_sum softmax dot mse
+  monte_carlo rms_norm silu sigmoid ppo_loss dpo_loss mathops foldif argmax)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -259,10 +260,18 @@ raise SystemExit(1)
 PY
 }
 
-# Assemble one bytecode file; the exit code is tileiras's, its output is in
-# <out>.log and the cubin (if any) in <out>.
+# Assemble one bytecode file; its output is in <out>.log and the cubin (if
+# any) in <out>.
+#
+# The verdict is the exit code AND an empty error stream. tileiras can exit
+# 0 while refusing something: measured on knife 7b, a `tanh` carrying
+# `rounding<nearest_even>` (a mode an f64 tanh does not accept) writes a
+# cubin, exits 0 and prints `'cuda_tile.tanh' op invalid rounding mode
+# specified, expect one of [approx, full]`. Reading only the exit code would
+# have let that through, and layer 1 is the only place it could be seen.
 assemble() { # tilebc, out
-  "$tileiras" --gpu-name "$gpu_name" -o "$2" "$1" > "$2.log" 2>&1
+  "$tileiras" --gpu-name "$gpu_name" -o "$2" "$1" > "$2.log" 2>&1 || return 1
+  ! grep -q '^error:' "$2.log"
 }
 
 # ---------------------------------------------------------------- trace + golden
@@ -527,8 +536,8 @@ refused_mutant_checks loop-token-not-carried sum \
 #    body's load, whose token is the loop's carried token, which nothing
 #    has defined yet.
 mutant_project region-stack-pop prog.dawn \
-  'let (outer, inner) = (frame.outer, ops)' \
-  'let (outer, inner) = (ops, frame.outer)'
+  'let (outer, inner) = (saved, ops)' \
+  'let (outer, inner) = (ops, saved)'
 refused_mutant_checks region-stack-pop sum \
   'tileir: `load token` refers to handle 11, which no earlier operation defined'
 
@@ -541,8 +550,8 @@ refused_mutant_checks region-stack-pop sum \
 #    knows 25 (2 parameters, 20 values before the loop, its 2 results and
 #    the constant after it).
 mutant_project for-results-not-rolled-back bytecode.dawn \
-  '    W { ..w9, index: w7.index, nvals: w7.nvals }' \
-  '    w9'
+  'fn roll_back(before: W, after: W) -> W = W { ..after, index: before.index, nvals: before.nvals }' \
+  'fn roll_back(before: W, after: W) -> W = after'
 writer_mutant_checks for-results-not-rolled-back sum same-size \
   "operand index 39 out of bounds (size=25) for operand 1"
 

@@ -13,7 +13,10 @@ that is a claim; this turns each row into things a machine can look up:
     goldens are not files nobody compares);
   * the reference exists in the module the row names, and is public;
   * the layer-2 program names the kernel as one of its cases (so the GPU
-    computed it against that reference);
+    computed it against that reference), and classifies it under the tier
+    the row claims (the program's own `tolerance_tier()` list is the
+    authority, so a row cannot promise bit-exactness the run does not
+    check);
   * and the layer-2 ledger's last line records a run that PASSED. A problem
     is listed as solved only while a device has agreed, so a `blocked` run --
     which scripts/tile-gpu-diff/run.sh --check accepts, because an honest
@@ -34,6 +37,18 @@ TABLE = ROOT / "scripts" / "leetgpu-diff" / "problems.txt"
 GOLDEN = ROOT / "scripts" / "tile-golden"
 LEDGER = ROOT / "scripts" / "tile-gpu-diff" / "ledger.txt"
 TIERS = ("exact", "tolerance")
+
+
+def tolerance_tier(program_text):
+    """The kernels a layer-2 program compares under the tolerance tier.
+
+    Read off its `tolerance_tier()` list, which is the program's own answer;
+    a program without one compares everything bit for bit.
+    """
+    m = re.search(r"pub fn tolerance_tier\(\) -> List\[String\] =\s*\[([^\]]*)\]", program_text)
+    if not m:
+        return set()
+    return {name.strip().strip(chr(34)) for name in m.group(1).split(",") if name.strip()}
 
 
 def rows(text):
@@ -109,6 +124,12 @@ def check(table_text, files, ledger_text):
                 problems.append(f"line {n}: layer-2 program {path} does not exist")
             elif f'"{case}"' not in files[path]:
                 problems.append(f"line {n}: {path} has no case named {case}")
+            else:
+                claimed = "tolerance" if case in tolerance_tier(files[path]) else "exact"
+                if claimed != tier:
+                    problems.append(
+                        f"line {n}: the row claims tier {tier!r} but {path} compares {case} under "
+                        f"{claimed!r}")
             if case != kernel:
                 problems.append(f"line {n}: the corpus runs {case} but the row names kernel {kernel}")
 
@@ -136,6 +157,7 @@ def gather():
         "std/gpu.dawn",
         "scripts/tile-gpu-diff/mask_diff.dawn",
         "scripts/tile-gpu-diff/vadd_diff.dawn",
+        "scripts/tile-gpu-diff/red_diff.dawn",
     ]:
         files[path] = read(ROOT / path)
     for golden in GOLDEN.glob("*"):
@@ -170,6 +192,9 @@ def self_test():
          "has no public function"),
         ("a corpus case the layer-2 program does not run",
          good + "\n99 | Nope | relu | std/gpu.relu_ref | mask_diff:ghost | exact\n", "has no case named ghost"),
+        ("a row claiming a tier the layer-2 program does not compare under",
+         good.replace("| red_diff:softmax | tolerance", "| red_diff:softmax | exact"),
+         "compares softmax under 'tolerance'"),
         ("an empty table", "# nothing\n", "lists no problems at all"),
     ]
     bad = 0
