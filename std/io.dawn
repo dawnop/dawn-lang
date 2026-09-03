@@ -11,10 +11,12 @@
 # compiler's own `errio.dawn` existed to reach `System.err`, a static field
 # the `use java` interop cannot name, through a method handle.
 #
-# `args` is deliberately NOT here: argv arrives on a static field of the program's
-# own entry class, and a std function compiles to a different class, so it cannot
-# name that field. Parking argv on a runtime class instead would make it shared
-# by every program in one JVM — see pure-ffi-design.md §十七.
+# `args` is deliberately NOT here: it is the language builtin for whole-program
+# startup input, not an `std/io` wrapper. On the JVM argv still lives on the
+# program's entry class, but the emitter gives every emitted module (including
+# std) that program-known owner so each call names the same field. Parking argv
+# on a runtime class instead would make it shared by every program in one JVM —
+# see pure-ffi-design.md §十七.
 #
 # The failing ones compose with `catch_fault`, which is an intrinsic and stays
 # in the compiler. That is not a workaround: `Result` is a Dawn ADT and cannot be
@@ -474,10 +476,11 @@ pub fn with_fs_real[T](body: fn() -> T !Fs !io) -> T !io = {
 # One operation, not four. `exit`, `cwd` and `getenv` are the rest of what this
 # module knows about a process and stay `!io`: an operation is worth its label
 # only where it makes an assertion writable that is not writable today, and
-# theirs are not that. `args` could not join in any case, whatever it was
-# worth: argv arrives on a static field of the program's own entry class, and
-# a handler living here compiles to a different class (the note at the top of
-# this file).
+# theirs are not that. `args` does not join `Proc`: it remains the language
+# builtin for immutable whole-program startup input, not a handler operation
+# or wrapper owned by this module. Its JVM field still lives on the program's
+# entry class, and every emitted module names that same program-known owner
+# (the note at the top of this file).
 #
 # What such a handler sees is narrower than what an `Fs` handler sees, and the
 # difference is worth stating rather than discovering. The file system belongs

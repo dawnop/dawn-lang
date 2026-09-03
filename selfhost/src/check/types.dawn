@@ -2884,6 +2884,10 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("bytes_from_array", [TyArray(TyInt)], ["a"], TyBytes)
   ]
   sigs = sigs ++ [
+    # The argv supplied when this program starts. It is process input and is
+    # visible from every module, not state belonging to the entry module or a
+    # privilege reserved to it. Backends must therefore give the same list to
+    # a call in a library as to a call written beside `main`.
     eff1(bsig("args", [], [], TyList(TyString)), EIo),
     # The io barrier. It catches a *fault* -- the outside world said no -- and
     # lets a panic through, which is the split spec 9.8 is about and the one
@@ -3347,6 +3351,12 @@ pub fn intrinsics() -> Map[String, Intr] = {
   var rt_of: Map[String, Rt] = map.empty()
   var erased: Set[String] = set.empty()
   var internal: Set[String] = set.empty()
+
+  # `args` deliberately has no `Rt`: it is tied to one emitted program rather
+  # than to the shared io runtime. The JVM stores argv on that program's entry
+  # class, and every module's inline read names the same class; native reads its
+  # process-global argv. This placement must not narrow its cross-module
+  # visibility -- that is part of the signature's contract above.
 
   # No runtime module owns a list primitive any more. Each one is a call on
   # the Dawn vector in std/pvec, written by whichever backend is emitting --

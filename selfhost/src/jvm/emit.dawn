@@ -179,6 +179,11 @@ pub type ConstF = { fname: String, v: CValue, ty: Ty }
 ## means two of them in every result tuple.
 pub type GenCtx = {
   class_name: String,
+  # The class whose JVM wrapper receives this program's argv. `args()` is a
+  # process input, not state owned by the module containing the call, so every
+  # emitted module reads this one field. Empty only for emission without an
+  # entry point; those calls retain their own class as the unresolved holder.
+  args_owner: String,
   adts: Adts,
   traits: Traits,
   impl_table: Impls,
@@ -1720,6 +1725,7 @@ pub fn emit_module(
   traits: Traits,
   impl_table: Impls,
   prog_fns: Map[(String, String), Sig],
+  args_owner: String,
   class_name: String,
   own_trait_ids: List[Int],
   own_adt_ids: List[Int],
@@ -1755,6 +1761,7 @@ pub fn emit_module(
   let no_ckey: Map[String, String] = map.empty()
   let gx = GenCtx {
     class_name: class_name,
+    args_owner: args_owner,
     adts: adts,
     traits: traits,
     impl_table: impl_table,
@@ -2818,7 +2825,8 @@ fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Op
     return Some((g1, true))
   }
   if name == "args" {
-    g.mv.visitFieldInsn(OP_GETSTATIC, gx.class_name, ARGS_FIELD, "[Ljava/lang/String;")
+    let owner = if gx.args_owner == "" { gx.class_name } else { gx.args_owner }
+    g.mv.visitFieldInsn(OP_GETSTATIC, owner, ARGS_FIELD, "[Ljava/lang/String;")
     g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "asList",
       "([" ++ obj ++ ")" ++ jl, false)
     of_host(g.mv)

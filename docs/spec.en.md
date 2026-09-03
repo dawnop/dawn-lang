@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ e08b0f99f88ef6be -->
+<!-- doc-check: translation-of docs/spec.md @ 9272b3d761e851b0 -->
 
 # Dawn Language Specification
 
@@ -3915,7 +3915,9 @@ error: usage: dawn run [compiler-options] <target> [-- <program-args>...]
 
 The separator itself is not forwarded. Every token after it reaches the program's `args()`
 verbatim and without further interpretation, including an empty string, `--`,
-`--comptime-ffi`, and `-o`. The JVM and native drivers keep independent parsers and are held
+`--comptime-ffi`, and `-o`. `args()` is whole-program input: whether the call is in the entry
+module or any dependency module, it returns the same list supplied when that program was
+started. The JVM and native drivers keep independent parsers and are held
 to one absolute stdout/stderr/exit contract; see `run-argv-boundary-design.md` for the full
 rationale.
 
