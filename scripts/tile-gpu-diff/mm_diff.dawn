@@ -37,7 +37,7 @@
 use std/io
 use std/io.{with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, alloc, upload, download, free, launch3, sync,
+use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free, launch3, sync,
   handle_of, matmul_ref, batched_matmul_ref, transpose_ref, layer_norm_ref, batch_norm_ref, group_norm_ref,
   fused_rms_norm_ref }
 use std/list
@@ -355,23 +355,23 @@ fn case_data(i: Int) -> List[List[Float]] = {
 }
 
 ## The reference table the fake device answers with, for one case.
-fn case_kernels(i: Int) -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] = {
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   let name = case_name(i)
   if name == "matmul" {
-    map.from([("matmul", (3, (dts, ins) => matmul_ref(MM_M, MM_K, MM_N, dts, ins)))])
+    map.from([("matmul", (3, last_out((dts, ins) => matmul_ref(MM_M, MM_K, MM_N, dts, ins))))])
   } else if name == "batched_matmul" {
-    map.from([("batched_matmul", (3, (dts, ins) => batched_matmul_ref(BMM_B, BMM_M, BMM_K, BMM_N, dts, ins)))])
+    map.from([("batched_matmul", (3, last_out((dts, ins) => batched_matmul_ref(BMM_B, BMM_M, BMM_K, BMM_N, dts, ins))))])
   } else if name == "transpose" {
-    map.from([("transpose", (2, (dts, ins) => transpose_ref(TR_ROWS, TR_COLS, dts, ins)))])
+    map.from([("transpose", (2, last_out((dts, ins) => transpose_ref(TR_ROWS, TR_COLS, dts, ins))))])
   } else if name == "layer_norm" {
-    map.from([("layer_norm", (4, (dts, ins) => layer_norm_ref(LN_ROWS, LN_D, LN_EPS, dts, ins)))])
+    map.from([("layer_norm", (4, last_out((dts, ins) => layer_norm_ref(LN_ROWS, LN_D, LN_EPS, dts, ins))))])
   } else if name == "batch_norm" {
-    map.from([("batch_norm", (4, (dts, ins) => batch_norm_ref(BN_ROWS, BN_CHANNELS, BN_EPS, dts, ins)))])
+    map.from([("batch_norm", (4, last_out((dts, ins) => batch_norm_ref(BN_ROWS, BN_CHANNELS, BN_EPS, dts, ins))))])
   } else if name == "group_norm" {
     map.from([("group_norm",
-      (4, (dts, ins) => group_norm_ref(GN_N, GN_C, GN_HW, GN_GROUPS, GN_EPS, dts, ins)))])
+      (4, last_out((dts, ins) => group_norm_ref(GN_N, GN_C, GN_HW, GN_GROUPS, GN_EPS, dts, ins))))])
   } else {
-    map.from([("fused_rms_norm", (4, (dts, ins) => fused_rms_norm_ref(FR_ROWS, FR_D, FR_EPS, dts, ins)))])
+    map.from([("fused_rms_norm", (4, last_out((dts, ins) => fused_rms_norm_ref(FR_ROWS, FR_D, FR_EPS, dts, ins))))])
   }
 }
 

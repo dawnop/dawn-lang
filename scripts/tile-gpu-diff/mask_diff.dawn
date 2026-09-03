@@ -32,8 +32,8 @@
 use std/io
 use std/io.{with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, masked_vadd_ref, masked_copy_ref, relu_ref,
-  leaky_relu_ref, clip_ref, alloc, upload, download, free, launch, sync, handle_of}
+use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, masked_vadd_ref, masked_copy_ref, relu_ref,
+  leaky_relu_ref, clip_ref, alloc, upload, download, free, launch, sync, handle_of }
 use std/list
 use std/map
 
@@ -292,20 +292,20 @@ fn elemops_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Fl
   list.map(range(0, len(old)), i => if i < n { elemops_lane(a[i], b[i]) } else { old[i] })
 }
 
-fn kernels_map() -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] =
+fn kernels_map() -> Map[String, (Int, WideRefFn)] =
   map.from([
-    ("vadd_tail", (3, (dts, ins) => masked_vadd_ref(TAIL_N, dts, ins))),
-    ("copy", (2, (dts, ins) => masked_copy_ref(TAIL_N, dts, ins))),
-    ("relu", (2, (dts, ins) => relu_ref(TAIL_N, dts, ins))),
-    ("leaky_relu", (2, (dts, ins) => leaky_relu_ref(TAIL_N, ALPHA, dts, ins))),
-    ("elemops", (3, (dts, ins) => elemops_ref(TAIL_N, dts, ins)))
+    ("vadd_tail", (3, last_out((dts, ins) => masked_vadd_ref(TAIL_N, dts, ins)))),
+    ("copy", (2, last_out((dts, ins) => masked_copy_ref(TAIL_N, dts, ins)))),
+    ("relu", (2, last_out((dts, ins) => relu_ref(TAIL_N, dts, ins)))),
+    ("leaky_relu", (2, last_out((dts, ins) => leaky_relu_ref(TAIL_N, ALPHA, dts, ins)))),
+    ("elemops", (3, last_out((dts, ins) => elemops_ref(TAIL_N, dts, ins))))
   ])
 
 # The clipping kernel is the only one of a different length, so its reference
 # is bound to its own; `kernels_map` above is the 1000-lane family and this
 # is the map the clipping case runs under.
-fn clip_kernels_map() -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] =
-  map.from([("clip", (2, (dts, ins) => clip_ref(CLIP_N, CLIP_LO, CLIP_HI, dts, ins)))])
+fn clip_kernels_map() -> Map[String, (Int, WideRefFn)] =
+  map.from([("clip", (2, last_out((dts, ins) => clip_ref(CLIP_N, CLIP_LO, CLIP_HI, dts, ins))))])
 
 ## The kernels this program runs, in the order their cubins are given: the
 ## name, the vector's length, the tile width and the buffers to hand it.

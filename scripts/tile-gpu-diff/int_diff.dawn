@@ -53,7 +53,7 @@
 use std/io
 use std/io.{with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, I32, Tensor, with_gpu_fake, with_gpu_real, alloc, upload, download, free, launch3, sync,
+use std/gpu.{Gpu, I32, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free, launch3, sync,
   handle_of, wrap_i32, count_eq_ref, subarray_sum_ref, rainbow_ref, int_ops_ref }
 use std/list
 use std/map
@@ -300,16 +300,16 @@ fn case_data(i: Int) -> List[List[Float]] = {
 }
 
 ## The reference table the fake device answers with, for one case.
-fn case_kernels(i: Int) -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] = {
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   let name = case_name(i)
   if name == "count_eq" {
-    map.from([("count_eq", (2, (dts, ins) => count_eq_ref(CNT_N, CNT_TARGET, dts, ins)))])
+    map.from([("count_eq", (2, last_out((dts, ins) => count_eq_ref(CNT_N, CNT_TARGET, dts, ins))))])
   } else if name == "subarray_sum" {
-    map.from([("subarray_sum", (2, (dts, ins) => subarray_sum_ref(SUB_LO, SUB_HI, dts, ins)))])
+    map.from([("subarray_sum", (2, last_out((dts, ins) => subarray_sum_ref(SUB_LO, SUB_HI, dts, ins))))])
   } else if name == "rainbow" {
-    map.from([("rainbow", (2, (dts, ins) => rainbow_ref(IOP_N, RB_ROUNDS, RB_K1, RB_K2, RB_K3, dts, ins)))])
+    map.from([("rainbow", (2, last_out((dts, ins) => rainbow_ref(IOP_N, RB_ROUNDS, RB_K1, RB_K2, RB_K3, dts, ins))))])
   } else {
-    map.from([("int_ops", (3, (dts, ins) => int_ops_ref(IOP_N, dts, ins)))])
+    map.from([("int_ops", (3, last_out((dts, ins) => int_ops_ref(IOP_N, dts, ins))))])
   }
 }
 

@@ -29,7 +29,7 @@
 use std/io
 use std/io.{with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, alloc, upload, download, free, launch3, sync,
+use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free, launch3, sync,
   handle_of, transpose_ref, conv1d_ref, conv2d_ref, max_pool_ref, interleave_ref, rgb_gray_ref, jacobi_ref,
   depthwise_conv1d_ref, gaussian_blur_ref }
 use std/list
@@ -333,26 +333,26 @@ fn case_data(i: Int) -> List[List[Float]] = {
 }
 
 ## The reference table the fake device answers with, for one case.
-fn case_kernels(i: Int) -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] = {
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   let name = case_name(i)
   if name == "transpose_tail" {
-    map.from([("transpose_tail", (2, (dts, ins) => transpose_ref(TT_ROWS, TT_COLS, dts, ins)))])
+    map.from([("transpose_tail", (2, last_out((dts, ins) => transpose_ref(TT_ROWS, TT_COLS, dts, ins))))])
   } else if name == "conv1d" {
-    map.from([("conv1d", (3, (dts, ins) => conv1d_ref(C1_N - C1_K + 1, C1_K, dts, ins)))])
+    map.from([("conv1d", (3, last_out((dts, ins) => conv1d_ref(C1_N - C1_K + 1, C1_K, dts, ins))))])
   } else if name == "conv2d" {
-    map.from([("conv2d", (3, (dts, ins) => conv2d_ref(C2_H, C2_W, C2_K, dts, ins)))])
+    map.from([("conv2d", (3, last_out((dts, ins) => conv2d_ref(C2_H, C2_W, C2_K, dts, ins))))])
   } else if name == "max_pool" {
-    map.from([("max_pool", (2, (dts, ins) => max_pool_ref(MP_H, MP_W, MP_K, dts, ins)))])
+    map.from([("max_pool", (2, last_out((dts, ins) => max_pool_ref(MP_H, MP_W, MP_K, dts, ins))))])
   } else if name == "interleave" {
-    map.from([("interleave", (3, (dts, ins) => interleave_ref(IL_N, dts, ins)))])
+    map.from([("interleave", (3, last_out((dts, ins) => interleave_ref(IL_N, dts, ins))))])
   } else if name == "rgb_gray" {
-    map.from([("rgb_gray", (2, (dts, ins) => rgb_gray_ref(RG_N, RG_R, RG_G, RG_B, dts, ins)))])
+    map.from([("rgb_gray", (2, last_out((dts, ins) => rgb_gray_ref(RG_N, RG_R, RG_G, RG_B, dts, ins))))])
   } else if name == "jacobi" {
-    map.from([("jacobi", (2, (dts, ins) => jacobi_ref(JC_H, JC_W, dts, ins)))])
+    map.from([("jacobi", (2, last_out((dts, ins) => jacobi_ref(JC_H, JC_W, dts, ins))))])
   } else if name == "depthwise_conv1d" {
-    map.from([("depthwise_conv1d", (3, (dts, ins) => depthwise_conv1d_ref(DW_C, DW_L, DW_K, dts, ins)))])
+    map.from([("depthwise_conv1d", (3, last_out((dts, ins) => depthwise_conv1d_ref(DW_C, DW_L, DW_K, dts, ins))))])
   } else {
-    map.from([("gaussian_blur", (3, (dts, ins) => gaussian_blur_ref(GB_H, GB_W, GB_K, dts, ins)))])
+    map.from([("gaussian_blur", (3, last_out((dts, ins) => gaussian_blur_ref(GB_H, GB_W, GB_K, dts, ins))))])
   }
 }
 

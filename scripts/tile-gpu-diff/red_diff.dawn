@@ -44,7 +44,7 @@
 use std/io
 use std/io.{with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, alloc, upload, download, free, launch, sync,
+use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free, launch, sync,
   handle_of, ref_exp, ref_log, ref_sqrt, LN2, reduce_sum_ref, softmax_ref, dot_ref, mse_ref, monte_carlo_ref,
   rms_norm_ref, silu_ref, sigmoid_ref, ppo_loss_ref, dpo_loss_ref }
 use std/list
@@ -488,34 +488,34 @@ fn case_data(i: Int) -> List[List[Float]] = {
 }
 
 ## The reference table the fake device answers with, for one case.
-fn case_kernels(i: Int) -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] = {
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   let name = case_name(i)
   if name == "reduce_sum" {
-    map.from([("reduce_sum", (2, (dts, ins) => reduce_sum_ref(RED_N, dts, ins)))])
+    map.from([("reduce_sum", (2, last_out((dts, ins) => reduce_sum_ref(RED_N, dts, ins))))])
   } else if name == "softmax" {
-    map.from([("softmax", (2, (dts, ins) => softmax_ref(RED_N, dts, ins)))])
+    map.from([("softmax", (2, last_out((dts, ins) => softmax_ref(RED_N, dts, ins))))])
   } else if name == "dot" {
-    map.from([("dot", (3, (dts, ins) => dot_ref(RED_N, dts, ins)))])
+    map.from([("dot", (3, last_out((dts, ins) => dot_ref(RED_N, dts, ins))))])
   } else if name == "mse" {
-    map.from([("mse", (3, (dts, ins) => mse_ref(RED_N, dts, ins)))])
+    map.from([("mse", (3, last_out((dts, ins) => mse_ref(RED_N, dts, ins))))])
   } else if name == "monte_carlo" {
-    map.from([("monte_carlo", (2, (dts, ins) => monte_carlo_ref(RED_N, mc_scale(), dts, ins)))])
+    map.from([("monte_carlo", (2, last_out((dts, ins) => monte_carlo_ref(RED_N, mc_scale(), dts, ins))))])
   } else if name == "rms_norm" {
-    map.from([("rms_norm", (2, (dts, ins) => rms_norm_ref(RED_N, RMS_EPS, dts, ins)))])
+    map.from([("rms_norm", (2, last_out((dts, ins) => rms_norm_ref(RED_N, RMS_EPS, dts, ins))))])
   } else if name == "silu" {
-    map.from([("silu", (2, (dts, ins) => silu_ref(RED_N, dts, ins)))])
+    map.from([("silu", (2, last_out((dts, ins) => silu_ref(RED_N, dts, ins))))])
   } else if name == "sigmoid" {
-    map.from([("sigmoid", (2, (dts, ins) => sigmoid_ref(RED_N, dts, ins)))])
+    map.from([("sigmoid", (2, last_out((dts, ins) => sigmoid_ref(RED_N, dts, ins))))])
   } else if name == "ppo_loss" {
-    map.from([("ppo_loss", (4, (dts, ins) => ppo_loss_ref(RED_N, PPO_EPS, dts, ins)))])
+    map.from([("ppo_loss", (4, last_out((dts, ins) => ppo_loss_ref(RED_N, PPO_EPS, dts, ins))))])
   } else if name == "dpo_loss" {
-    map.from([("dpo_loss", (5, (dts, ins) => dpo_loss_ref(RED_N, DPO_BETA, dts, ins)))])
+    map.from([("dpo_loss", (5, last_out((dts, ins) => dpo_loss_ref(RED_N, DPO_BETA, dts, ins))))])
   } else if name == "mathops" {
-    map.from([("mathops", (3, (dts, ins) => mathops_ref(TAIL_N, dts, ins)))])
+    map.from([("mathops", (3, last_out((dts, ins) => mathops_ref(TAIL_N, dts, ins))))])
   } else if name == "foldif" {
-    map.from([("foldif", (2, foldif_ref))])
+    map.from([("foldif", (2, last_out(foldif_ref)))])
   } else {
-    map.from([("argmax", (2, (dts, ins) => argmax_ref(RED_N, dts, ins)))])
+    map.from([("argmax", (2, last_out((dts, ins) => argmax_ref(RED_N, dts, ins))))])
   }
 }
 
