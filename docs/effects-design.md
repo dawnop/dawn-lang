@@ -548,6 +548,34 @@ driver/stdlib 4、lsp/server 2、source 2）：它们的路径全是自己造的
 是一个没人依赖的值。留在真 handler 上的十处，`--std` 拼的是相对目录，宿主的工作目录
 就是它们的输入之一，每处安装点写了这一行说明。
 
+第二个断言客户（刀 3，2026-09-03）是 `driver/analyze` 的 21 条测试侧安装点：18 条走
+`in_mem`、2 条走 `in_mem_proc`，另一条自己把三层 handler 摊开写。它们全部改成
+`envmem.with_env_table`，声明的工作目录是 `fsmem.MEM_BASE`——文件表本来就拿它解析相对
+路径，两个 handler 因此对「相对路径是什么意思」给同一个答案。表里还声明了
+`DAWN_PKG_CACHE`，指向表自己树内的一个目录：此前 `pkgfetch.cache_root()` 读的是开发者的
+`HOME`，两条 url 依赖测试的缓存条目就落在那个答案下面。
+
+那条「the analysis reads the declared tree, and no file system behind it」升级成
+`no host behind it`，判词不是名字而是三条空日志：文件系统是表，进程是空脚本（真要 spawn
+会因为没有回复而 panic），环境是表且 `envlog == []`——目标是绝对路径，`canon` 于是一次
+`io.cwd()` 都没问。这一条此前没有观察者，只能靠读 `canon` 的代码推断。
+
+新补的一条是反向的：`load_directory("proj")` 这样的**相对目标**按声明的工作目录解析，
+断言落在模块索引上（`by_use["util"] == "/dawn-memfs/proj/src/util.dawn"`），
+并当场向宿主问一次 `io.cwd()` 证明声明的目录不是测试运行的目录。全树没有 `chdir`，
+所以这条断言在 `Env` 之前无论如何都写不出来。
+
+三条 wrapper 的 body 行这一轮仍是 `!Fs !Proc !Env !io`，`!io` 去不掉：它们调的每一个生产
+函数都还带着 `!io`，而 stage 1 拿种子那份 std 编这棵树，那份 std 里 `io.cwd` 与 `io.getenv`
+还是 `!io`（[bootstrap.md](bootstrap.md) 的特性纪律 4）。实测把行收成 `!Fs !Proc !Env`
+的诊断是 `expected fn() -> Unit !(Env|Fs|Proc), got fn() -> Unit !(Env|Fs|Proc|io)`，
+20 条测试全红。所以「`in_mem` 那一行 `grep '!io'` 无命中」是尾款的验收，不是这一刀的。
+这一刀改为把行**逐字钉住**：`scripts/doc-check.py` 的 `check_analyze_env_table` 从文件外面
+钉三条 wrapper 的行、钉 `analyze.dawn` 里 `with_env_real` 只许出现在两处登记的位置
+（生产安装点，与相对目标那条测试里那次刻意的宿主问询），并要求本节写着这两句话。
+负控四类都在它的自测里：行少 `!Env`、行少 `!io`、某条测试把真 handler 装回去、
+两个登记位置各自消失。尾款到来时，改行的人必须同时改这里。
+
 **裁决：已知风险，暂无缓解；效果集别名仍不裁。**
 第二个族的消费者样本到了，答案是它还不够：三个原子的行（`!Fs !Proc !io`）读起来仍然可以，
 `Proc` 也没有把任何一条行推到四个原子。真正会逼出别名的是 `cwd` 与 `exit`。

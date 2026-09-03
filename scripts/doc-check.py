@@ -1980,6 +1980,160 @@ def check_named_effect_status_selftest() -> tuple[list[str], int]:
     return [], 7 + len(NAMED_EFFECT_STATUS) * (1 + len(NAMED_EFFECT_STALE)) + 1
 
 
+# --- the analyze tests' handler rows ----------------------------------------
+# `driver/analyze`'s test block answers all three named effects from tables:
+# `driver/fsmem` for `Fs`, `procmem` for `Proc` where a test scripts one, and
+# `envmem` for `Env`. That is what lets the block say "no host behind it" and
+# what lets one test declare a working directory and assert a relative target
+# resolved against it.
+#
+# Neither half of that is visible in a test's own output. A body that quietly
+# went back to `io.with_env_real` would still pass every assertion it makes,
+# because the assertions are about paths and the host answers with a path
+# too; only the declared row and the absence of the real handler say which
+# one answered. So both are held from outside the file, the way
+# NAMED_EFFECT_EXPECTED holds the declarer list.
+#
+# The rows still end in `!io`, and that is a pinned decision rather than an
+# omission: stage 1 of the bootstrap compiles this tree against the std the
+# seed shipped with, where `io.cwd` and `io.getenv` are `!io` and not `Env`
+# (docs/bootstrap.md, feature discipline 4), so every production function
+# these tests call declares it. Pinning the row exactly means the backfill a
+# seed round from now has to come here and say so, and means neither atom can
+# be added or dropped quietly in the meantime.
+ANALYZE_ENV_SOURCE = "selfhost/src/driver/analyze.dawn"
+ANALYZE_ENV_ROW = "body: fn() -> T !Fs !Proc !Env !io"
+ANALYZE_ENV_WRAPPERS = ("in_mem", "in_mem_env", "in_mem_proc")
+# Every `with_env_real` the file is allowed to spell, and what each is for.
+# Anything else is a test that went back to the host.
+ANALYZE_ENV_REAL_ANCHORS = (
+    ("io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => {",
+     "the production install point in analyze_document"),
+    ("io.with_fs_real(() => io.with_env_real(() => {",
+     "the deliberate host query that says the declared directory is not this one"),
+)
+ANALYZE_ENV_DOC = "docs/effects-design.md"
+ANALYZE_ENV_DOC_CLAUSES = (
+    "no host behind it",
+    "`driver/analyze` 的 21 条测试侧安装点",
+)
+
+
+def analyze_env_table_problems(source: str, doc: str) -> tuple[list[str], int]:
+    bad: list[str] = []
+    seen = 0
+
+    for name in ANALYZE_ENV_WRAPPERS:
+        declaration = re.search(rf"(?m)^fn {name}\[T\]\((.*?)^\) ->",
+                                source, re.S)
+        head = declaration.group(1) if declaration else None
+        if head is None:
+            single = re.search(rf"(?m)^fn {name}\[T\]\((.*)\) ->", source)
+            head = single.group(1) if single else None
+        if head is None:
+            bad.append(f"{ANALYZE_ENV_SOURCE}: no test-side handler wrapper "
+                       f"`{name}` to hold a row on; the analyze tests' effect "
+                       f"boundary moved and this check has to move with it")
+        elif ANALYZE_ENV_ROW not in head:
+            bad.append(f"{ANALYZE_ENV_SOURCE}: `{name}` does not declare its body "
+                       f"row as `{ANALYZE_ENV_ROW}`. `Env` missing means the tests "
+                       f"under it answer the environment from the host; `!io` "
+                       f"missing or extra is a decision (see the comment above "
+                       f"`in_mem`), so say it in both places or in neither")
+        else:
+            seen += 1
+
+    spelled = source.count("with_env_real")
+    accounted = 0
+    for literal, why in ANALYZE_ENV_REAL_ANCHORS:
+        count = source.count(literal)
+        if count != 1:
+            bad.append(f"{ANALYZE_ENV_SOURCE}: expected exactly one "
+                       f"{why} ({literal!r}), found {count}")
+        else:
+            accounted += 1
+            seen += 1
+    # the comment above `in_mem` names the check, so it spells the identifier
+    # too; that mention is a `with_env_real` the count has to allow for
+    mentions = len(re.findall(r"`with_env_real`", source))
+    if spelled != accounted + mentions:
+        bad.append(f"{ANALYZE_ENV_SOURCE}: spells `with_env_real` {spelled} times, "
+                   f"but only {accounted} production install(s) and {mentions} "
+                   f"prose mention(s) are registered. A test that installs the real "
+                   f"handler answers the environment from the machine it runs on, "
+                   f"which is the thing the tables exist to stop")
+    else:
+        seen += 1
+
+    for clause in ANALYZE_ENV_DOC_CLAUSES:
+        if clause not in doc:
+            bad.append(f"{ANALYZE_ENV_DOC}: the effect-design record does not carry "
+                       f"{clause!r}; the analyze tables' verdict is stated in the "
+                       f"source and has to be stated here too")
+        else:
+            seen += 1
+    return bad, seen
+
+
+def read_analyze_env_inputs() -> tuple[str, str]:
+    return ((ROOT / ANALYZE_ENV_SOURCE).read_text(encoding="utf-8"),
+            (ROOT / ANALYZE_ENV_DOC).read_text(encoding="utf-8"))
+
+
+def check_analyze_env_table() -> tuple[list[str], int]:
+    return analyze_env_table_problems(*read_analyze_env_inputs())
+
+
+def check_analyze_env_table_selftest() -> tuple[list[str], int]:
+    source, doc = read_analyze_env_inputs()
+    baseline, _ = analyze_env_table_problems(source, doc)
+    if baseline:
+        return [f"analyze env-table self-test baseline is invalid: {baseline[0]}"], 0
+
+    # Dropping the named effect is the case that matters: the tests go on
+    # passing, and the environment behind them is the machine's again.
+    for atom in ("!Env ", "!io"):
+        weakened = source.replace(ANALYZE_ENV_ROW,
+                                  ANALYZE_ENV_ROW.replace(atom, "", 1))
+        bad, _ = analyze_env_table_problems(weakened, doc)
+        if not any("does not declare its body row" in problem for problem in bad):
+            return ["analyze env-table self-test: a wrapper row without "
+                    f"{atom.strip()!r} stayed green"], 0
+
+    # And putting the real handler back on a test, which is the same regression
+    # spelled the other way and leaves every assertion in the file passing.
+    restored = source.replace("  in_mem(() => {",
+                              "  in_mem(() => io.with_env_real(() => {", 1)
+    bad, _ = analyze_env_table_problems(restored, doc)
+    if not any("only" in problem and "registered" in problem for problem in bad):
+        return ["analyze env-table self-test: a test that reinstalled "
+                "`with_env_real` stayed green"], 0
+
+    # The production install point disappearing is the opposite failure: the
+    # tests would be fine and the compiler would answer `Env` nowhere.
+    for literal, why in ANALYZE_ENV_REAL_ANCHORS:
+        gone = source.replace(literal, "HANDLER_REMOVED", 1)
+        bad, _ = analyze_env_table_problems(gone, doc)
+        if not any("expected exactly one" in problem for problem in bad):
+            return ["analyze env-table self-test: losing "
+                    f"{why} stayed green"], 0
+
+    for clause in ANALYZE_ENV_DOC_CLAUSES:
+        silent = doc.replace(clause, "something else", 1)
+        bad, _ = analyze_env_table_problems(source, silent)
+        if not any("does not carry" in problem for problem in bad):
+            return ["analyze env-table self-test: dropping "
+                    f"{clause!r} from the record stayed green"], 0
+
+    # Positive control: the unedited pair is green, so the controls above
+    # measured the mutation rather than a checker that reddens on everything.
+    bad, _ = analyze_env_table_problems(source, doc)
+    if bad:
+        return ["analyze env-table self-test: the unedited pair went red: "
+                f"{bad[0]}"], 0
+    return [], 4 + len(ANALYZE_ENV_REAL_ANCHORS) + len(ANALYZE_ENV_DOC_CLAUSES)
+
+
 REPOSITORY_POLICY_FILES = (
     ".editorconfig",
     ".github/workflows/release.yml",
@@ -3872,6 +4026,12 @@ def main() -> None:
     problems += bad
     policies_seen += n
     bad, n = check_named_effect_status_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_analyze_env_table()
+    problems += bad
+    policies_seen += n
+    bad, n = check_analyze_env_table_selftest()
     problems += bad
     selftests_seen += n
     bad, n = check_markdown_section_selftest()
