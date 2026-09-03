@@ -611,6 +611,116 @@ test "a test block is a root like any other function" {
   assert u.str_upper
 }
 
+test "the walk hands back the functions it reached, not only the tables" {
+  let app = tmod("app", [
+    tfn("app", "main", CCall(CDirect("std/str", "to_lower"), [], TyString))
+  ])
+  let std_str = tmod("std/str", [
+    tfn("std/str", "to_lower", intr("str_lower")),
+    tfn("std/str", "to_upper", intr("str_upper"))
+  ])
+  let l = live_set([app, std_str], ["app"], [])
+  assert set.has(l.fns, fn_key(app.fns[0]))
+  assert set.has(l.fns, fn_key(std_str.fns[0]))
+  # the whole point: emitted today, unreachable, and now droppable
+  assert not set.has(l.fns, fn_key(std_str.fns[1]))
+}
+
+test "a root the emitter spells directly is a root" {
+  # the ten std/pvec names a list literal and `++` become are written by the
+  # emitters, not by Core, so nothing in the call graph reaches them
+  let app = tmod("app", [tfn("app", "main", CUnit)])
+  let pvec = tmod("std/pvec", [
+    tfn("std/pvec", "from_array", CUnit),
+    tfn("std/pvec", "sort_by", CUnit)
+  ])
+  let without = live_set([app, pvec], ["app"], [])
+  assert not set.has(without.fns, fn_key(pvec.fns[0]))
+  let with_root = live_set([app, pvec], ["app"], [("std/pvec", "from_array")])
+  assert set.has(with_root.fns, fn_key(pvec.fns[0]))
+  # and only the one named: an extra root is a name, not a module
+  assert not set.has(with_root.fns, fn_key(pvec.fns[1]))
+}
+
+test "which module's copy of a dictionary is kept does not depend on load order" {
+  # issue #69: two modules lower the same Eq[String] slot bridge, identical
+  # but for the owner. The emitter keeps one copy, and it used to keep
+  # whichever it met first -- which is the order std/modules.txt lists
+  # modules in, so a `==` on strings linked against std/gpu's copy and
+  # pinned the module.
+  let dict_at = (owner: String) =>
+    CDictDef {
+      key: "Eq\$String",
+      trait_id: 0,
+      subject: TyString,
+      nargs: 0,
+      slots: [CSlotFn(owner, "prim\$0\$String\$eq")]
+    }
+  let copy_in = (owner: String) =>
+    CModule {
+      owner: owner,
+      fns: [tfn(owner, "prim\$0\$String\$eq", CUnit)],
+      dicts: [dict_at(owner)],
+      next_sym: 0
+    }
+  let gpu = copy_in("std/gpu")
+  let list = copy_in("std/list")
+  let app = tmod("app", [
+    tfn("app", "main", CDictRef("Eq\$String", 0, TyString, TyUnit))
+  ])
+  let one_way = dict_owners([app, gpu, list])
+  let other_way = dict_owners([app, list, gpu])
+  assert map.get(one_way, "Eq\$String") == map.get(other_way, "Eq\$String")
+  assert map.get(one_way, "Eq\$String") == Some("std/gpu")
+
+  # and the walk marks the copy the C emitter will write, whichever order the
+  # modules arrive in
+  let a = live_set([app, gpu, list], ["app"], [])
+  let b = live_set([app, list, gpu], ["app"], [])
+  assert set.has(a.fns, fn_key(gpu.fns[0])) == set.has(b.fns, fn_key(gpu.fns[0]))
+  assert set.has(a.fns, fn_key(list.fns[0])) == set.has(b.fns, fn_key(list.fns[0]))
+  assert set.has(a.fns, fn_key(gpu.fns[0]))
+  assert not set.has(a.fns, fn_key(list.fns[0]))
+  assert dict_live(a, "Eq\$String")
+}
+
+test "the module that referenced a dictionary keeps its own copy too" {
+  # the JVM writes a dictionary class per module, forwarding to that module's
+  # own slot bodies. Marking only the copy the C emitter keeps would leave the
+  # JVM's class pointing at a method that was not written.
+  let dict_at = (owner: String) =>
+    CDictDef {
+      key: "Eq\$String",
+      trait_id: 0,
+      subject: TyString,
+      nargs: 0,
+      slots: [CSlotFn(owner, "bridge")]
+    }
+  let std_list = CModule {
+    owner: "std/list",
+    fns: [tfn("std/list", "bridge", CUnit)],
+    dicts: [dict_at("std/list")],
+    next_sym: 0
+  }
+  let app = CModule {
+    owner: "app",
+    fns: [
+      tfn("app", "main", CDictRef("Eq\$String", 0, TyString, TyUnit)),
+      tfn("app", "bridge", CUnit)
+    ],
+    dicts: [dict_at("app")],
+    next_sym: 0
+  }
+  let l = live_set([app, std_list], ["app"], [])
+  # "app" sorts before "std/list", so the C emitter keeps app's copy
+  assert set.has(l.fns, fn_key(app.fns[1]))
+  # ...and std/list's own copy is live because std/list has a class of its own
+  # only where it referenced the dictionary, which it did not -- so here the
+  # cheaper answer is the right one
+  assert not own_dict_live(l, "std/list", "Eq\$String")
+  assert own_dict_live(l, "app", "Eq\$String")
+}
+
 test "a test's description never shadows a function of the same name" {
   # a test body is named by its description string, so `test \"shout\"` beside
   # `fn shout` would take over the (owner, name) key calls resolve by
