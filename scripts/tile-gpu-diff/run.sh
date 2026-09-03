@@ -31,7 +31,11 @@
 #             output buffer, the first that write a buffer they read, and the
 #             first over f16, i8 and u8) and gath_diff.dawn the four gather
 #             and scatter kernels of knife 12 (the first whose ADDRESSES are
-#             computed rather than recorded, two of them out of a buffer),
+#             computed rather than recorded, two of them out of a buffer) and
+#             scan_diff.dawn the six scan kernels of knife 13 (the first
+#             whose region bodies need not commute, and the first family
+#             whose float tier is decided by a measurement of the device's
+#             fold order rather than by a chosen corpus),
 #             under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
@@ -194,6 +198,24 @@
 #                      are still computed and still correct, and only the
 #                      device says the answer is the input. The scatter is
 #                      what turns a rank into a sort
+#     scan-reverse-ignored
+#                      the writer pins a scan's `reverse` attribute to
+#                      false -> layer 0 is blind (the renderer prints the
+#                      record's own `reverse=true`) and layer 1 accepts it,
+#                      and on the device `gae` alone answers a forward
+#                      prefix where leetgpu 110 wants a backward one. It is
+#                      also the only kernel whose BYTES move, so the other
+#                      five are the control twice over
+#     exclusive-scan-as-inclusive
+#                      `compact` scatters at the inclusive count of kept
+#                      lanes instead of the exclusive one -> every value
+#                      lands one place late and element 0 is never written.
+#                      The dialect's scan is inclusive and has no attribute
+#                      to make it exclusive, so subtracting the lane's own
+#                      element is the only spelling and getting it wrong is
+#                      a legal kernel. `seg_scan` takes the same step in
+#                      floats through a different expression and is the
+#                      control
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -405,6 +427,14 @@ wide=(sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matm
 # three mutants below are held to.
 gathered=(token_embed sort_rank merge_rank scatter_perm)
 
+# The scan kernels of knife 13, in the order scan_diff takes them. Only
+# `gae` scans in reverse and only `compact` turns an inclusive scan into an
+# exclusive one at the point where it matters, which are the two splits the
+# mutants below are held to. Two are integer scans and exact tier; the four
+# float ones are tolerance tier, because the device does not fold a prefix
+# the way a host reference does (measured, see the order probe).
+scanned=(prefix_sum max_subarray seg_scan compact linrec gae)
+
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
@@ -418,7 +448,7 @@ assemble_golden() { # kernel, tilebc, cubin
 }
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
-  "${wide[@]}" "${gathered[@]}"; do
+  "${wide[@]}" "${gathered[@]}" "${scanned[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -437,6 +467,8 @@ wide_cubins=()
 for k in "${wide[@]}"; do wide_cubins+=("$work/$k.cubin"); done
 gath_cubins=()
 for k in "${gathered[@]}"; do gath_cubins+=("$work/$k.cubin"); done
+scan_cubins=()
+for k in "${scanned[@]}"; do scan_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -599,6 +631,22 @@ case "$gath_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/gath.out" | head -n 1)"
 
+# ---- native, the scan kernels (knife 13)
+build_native "$root/std" "$work/scan.bin" "$here/scan_diff.dawn"
+rc=0
+"$work/scan.bin" "${scan_cubins[@]}" > "$work/scan.out" 2> "$work/scan.err" || rc=$?
+cat "$work/scan.out"
+scan_verdict="$(verdict_of "$work/scan.out")"
+case "$scan_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#scanned[@]} scan kernels agree with the fake device, each under its own tier" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $scan_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $scan_verdict" ;;
+  fail) cat "$work/scan.err" >&2; fail "the device answered and disagreed with the fake device on a scan kernel (see the transcript above)" ;;
+  *) cat "$work/scan.err" >&2; fail "scan_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/scan.out" | head -n 1)"
+
 # A scatter whose lanes name one element twice has NO answer on the device,
 # so a corpus that stopped being a permutation would turn every verdict
 # above into a coin toss rather than a comparison. gath_diff counts the
@@ -620,15 +668,21 @@ tiers="$tiers strided:$(sed -n 's/^tiers //p' "$work/strided.out" | tail -n 1)"
 tiers="$tiers int:$(sed -n 's/^tiers //p' "$work/ints.out" | tail -n 1)"
 tiers="$tiers wide:$(sed -n 's/^tiers //p' "$work/wide.out" | tail -n 1)"
 tiers="$tiers gath:$(sed -n 's/^tiers //p' "$work/gath.out" | tail -n 1)"
+tiers="$tiers scan:$(sed -n 's/^tiers //p' "$work/scan.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
-echo "      tiers: $tiers; fold-order probe: $probe"
+scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.out")"
+echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe"
 
 # The ledger records one verdict for the tree: both programs pass, or the
 # first thing that stopped one of them.
 if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
   && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
-  && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ]; then
+  && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ] && [ "$scan_verdict" = pass ]; then
   verdict=pass
+elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
+  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
+  && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ]; then
+  verdict="$scan_verdict"
 elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
   && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
   && [ "$wide_verdict" = pass ]; then
@@ -1626,6 +1680,138 @@ gath_kernel_mutant rank-scatter-in-lane-order sort_rank \
   '  store(out, zero, s1, load(x, zero, s1))'
 gath_kernel_check rank-scatter-in-lane-order sort_rank
 
+# A kernel-source mutant for the scan family: the gath_ pair above with
+# scan_diff's kernel list. Two helpers rather than one generic pair because
+# each closes over its own program's cubin order, and a wrong order here
+# would be a silently weaker gate rather than a failure.
+scan_kernel_mutant() { # name, kernel, old, new
+  local name="$1" k="$2" src="$work/kernels-$1.dawn" before after
+  cp "$golden/kernels.dawn" "$src"
+  before=$(digest "$src")
+  python3 "$here/mutate.py" "$src" "$name" "$3" "$4"
+  after=$(digest "$src")
+  echo "      $name: scripts/tile-golden/kernels.dawn md5 $before -> $after"
+  mkdir -p "$work/proj-$name/src"
+  cp "$src" "$work/proj-$name/src/main.dawn"
+  cat > "$work/proj-$name/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
+
+[deps]
+tileir = "$root/packages/tileir"
+TOML
+  "$root/bin/dawn" run "$work/proj-$name" -- "$k" --bytecode "$work/$name.tilebc" > "$work/proj-$name.log" 2>&1 ||
+    { cat "$work/proj-$name.log" >&2; fail "$name: $k did not encode"; }
+  cmp -s "$golden/$k.tilebc" "$work/$name.tilebc" &&
+    fail "$name mutant stayed green: $k.tilebc is unchanged"
+  assemble_golden "$k" "$work/$name.tilebc" "$work/$name.cubin"
+  echo "      $name: $k.tilebc differs from the golden and tileiras still accepts it"
+}
+
+# Run scan_diff with `kernel`'s cubin replaced by the mutant's, and require
+# that kernel and no other to differ.
+scan_kernel_check() { # name, kernel
+  local name="$1" k="$2" rc=0 mverdict differ cubs=()
+  local one
+  for one in "${scanned[@]}"; do
+    if [ "$one" = "$k" ]; then cubs+=("$work/$name.cubin"); else cubs+=("$work/$one.cubin"); fi
+  done
+  "$work/scan.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  if [ "$scan_verdict" = pass ]; then
+    differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+    if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+      cat "$work/m-$name.out" >&2
+      fail "$name mutant stayed green: expected verdict fail (exit 1) with $k alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+    fi
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != want {bad=1} END {exit bad}' \
+      "$work/m-$name.out" ||
+      { cat "$work/m-$name.out" >&2; fail "$name: a kernel other than $k moved"; }
+    echo "PASS  mutant: $name ($k alone reds; the other $(( ${#scanned[@]} - 1 )) scan kernels are untouched)"
+  else
+    [ "$mverdict" = "$scan_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $scan_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $scan_verdict, before any launch reaches the device"
+  fi
+}
+
+# 19. scan-reverse-ignored: the WRITER pins a scan's `reverse` attribute to
+#     false, whatever the record says. Layer 0 is blind by construction (the
+#     renderer prints `reverse=true` from the record, not from the byte) and
+#     layer 1 accepts it -- a forward scan is a legal scan -- so only the
+#     device can say the prefix now runs the wrong way.
+#
+#     Exactly ONE of the six kernels sets the attribute, and it is the only
+#     one whose bytes move: `gae` accumulates from the end of its row, which
+#     is what leetgpu 110 asks for and what `reverse` exists for. The other
+#     five already wrote a zero there, so they are the control in the bytes
+#     as well as on the device -- a stronger statement than five that red.
+mutant_pkg_rev="$work/pkg-scan-reverse-ignored"
+rm -rf "$mutant_pkg_rev"
+cp -r "$root/packages/tileir" "$mutant_pkg_rev"
+before=$(digest "$mutant_pkg_rev/src/bytecode.dawn")
+python3 "$here/mutate.py" "$mutant_pkg_rev/src/bytecode.dawn" scan-reverse-ignored \
+  '    let w3 = emit(emit(emit(w2, dim), if reverse { 1 } else { 0 }), len(identities))' \
+  '    let w3 = emit(emit(emit(w2, dim), 0), len(identities))'
+after=$(digest "$mutant_pkg_rev/src/bytecode.dawn")
+echo "      scan-reverse-ignored: packages/tileir/src/bytecode.dawn md5 $before -> $after"
+
+mutant_kernels scan-reverse-ignored "$mutant_pkg_rev" "${scanned[@]}"
+reverse_red=(gae)
+moved=0
+for k in "${scanned[@]}"; do
+  if cmp -s "$golden/$k.tilebc" "$work/scan-reverse-ignored-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+done
+[ "$moved" = "${#reverse_red[@]}" ] ||
+  fail "scan-reverse-ignored: expected exactly ${#reverse_red[@]} of the ${#scanned[@]} kernels' bytecode to move, got $moved"
+echo "      scan-reverse-ignored: ${#reverse_red[@]} of ${#scanned[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+rev_cubins=()
+for k in "${scanned[@]}"; do rev_cubins+=("$work/scan-reverse-ignored-$k.cubin"); done
+rc=0
+"$work/scan.bin" "${rev_cubins[@]}" > "$work/m-scan-reverse.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-scan-reverse.out")"
+if [ "$scan_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-scan-reverse.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#reverse_red[@]}" ]; then
+    cat "$work/m-scan-reverse.out" >&2
+    fail "scan-reverse-ignored mutant stayed green: expected verdict fail (exit 1) with exactly ${#reverse_red[@]} kernel saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${reverse_red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-scan-reverse.out" ||
+      { cat "$work/m-scan-reverse.out" >&2; fail "scan-reverse-ignored: $k scans in reverse and should differ"; }
+  done
+  for k in prefix_sum max_subarray seg_scan compact linrec; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-scan-reverse.out" ||
+      { cat "$work/m-scan-reverse.out" >&2; fail "scan-reverse-ignored: $k scans forward and should be untouched"; }
+  done
+  echo "PASS  mutant: scan-reverse-ignored (layer 1 accepts it; on the device ${reverse_red[*]} differs and the other five do not, and their bytes do not move either)"
+else
+  [ "$mverdict" = "$scan_verdict" ] ||
+    { cat "$work/m-scan-reverse.out" >&2; fail "scan-reverse-ignored: the clean run is $scan_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: scan-reverse-ignored not verifiable on this driver: the clean run is $scan_verdict, before any launch reaches the device"
+fi
+
+# 20. exclusive-scan-as-inclusive: `compact` scatters each kept value at the
+#     INCLUSIVE count of kept lanes instead of the exclusive one, which is
+#     the count with the lane's own bit still in it. Every value moves one
+#     place late and element 0 of the output is never written at all.
+#
+#     This is the one boundary a scan has that a reduction does not. The
+#     dialect's scan is inclusive and there is no attribute to make it
+#     exclusive; a kernel that wants the exclusive prefix subtracts its own
+#     element, and getting that wrong is a legal kernel with a wrong answer.
+#     Layer 0 moves (one `subi` disappears), layer 1 accepts it, and only
+#     the device says where the values landed. `seg_scan` makes the same
+#     step in floats and is untouched here: its exclusive prefix is a
+#     different expression, which is why the red set is one kernel and not
+#     two.
+scan_kernel_mutant exclusive-scan-as-inclusive compact \
+  '  scatter_masked(out, sub_i(s, incl, ones), s, keep, t)' \
+  '  scatter_masked(out, incl, s, keep, t)'
+scan_kernel_check exclusive-scan-as-inclusive compact
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -1638,7 +1824,8 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn \
   scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mm_diff.dawn \
   scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/int_diff.dawn scripts/tile-gpu-diff/wide_diff.dawn \
-  scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/mutate.py)"
+  scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/scan_diff.dawn \
+  scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"
