@@ -839,10 +839,11 @@ kernel 的两后端两种输出与十八次 `tileiras`。kernel 数从 30 涨到
 **刀 10 的实测：仍然不分片。** 同一台机器、同一棵树上成对测量 `tile-golden/run.sh`，
 两次运行的唯一差别是 `kernels=()` 里那四个名字：**260 s（39 个 kernel）→ 279 s（43 个）**，
 差值 **+19 s / +7%**。四个 kernel 是 +10%，离 §6.5 上面那句话设的「翻一番」还很远，
-planning value 与 `timeout-minutes` 都不动。这条脚本里一条变异体也没加（新的两个都在
-`tile-gpu-diff/run.sh`）。
+planning value 与 `timeout-minutes` 都不动。这之后又加了第十二个变异体
+（`ftoi-rounds-instead-of-truncates`，它本来是按层 2 写的、被 `tileiras` 收走了，见 §6.6），
+整条脚本落到 **299 s**：一个变异体 +20 s，与刀 3 以来每个写入器变异体的量级一样。
 
-`tile-gpu-diff/run.sh` **129 s → GPUDIFF_AFTER**（多一个 native 构建、四个 kernel 的真机对拍，
+`tile-gpu-diff/run.sh` **129 s → 154 s**（多一个 native 构建、四个 kernel 的真机对拍，
 以及两个新变异体，各四次汇编一次对拍）。它只在本机跑，CI 上仍只有亚秒的 `--check`。
 `dawn test --stdlib` 多了四个参考实现与三个测试，秒级不变。
 
@@ -939,11 +940,29 @@ bf16 的输出缓冲（`ftof` 把 f32 累加器转回 bf16），归刀 11。
 | 变异体 | 改哪 | 层 0 | 层 1 | 层 2 |
 |--------|------|------|------|------|
 | `shri-always-logical` | **写入器**把 `shri` 的 `signedness` 写成 unsigned，算术右移全变逻辑右移 | **看不见**：渲染器有自己的拼写表，`.mlir` 照印 `signed`，`--record` 洗不出任何东西 | 收（`signedness<unsigned>` 与 `<signed>` 同样合法，汇编器对一个 kernel 想要哪个没有意见） | 四个 kernel 里做算术右移的**两个**红（`rainbow` / `int_ops`），另外两个不动。**语料是判词的一半**：两种右移在每个非负操作数上答案相同，所以 `int_diff` 的数据铺满整个 i32 值域 |
-| `ftoi-rounds-instead-of-truncates` | 写入器把 `ftoi` 的舍入模式写成 nearest_even，而方言只接受向零 | **看不见**（同上） | 收 | 只有 `int_ops` 红，且只在**奇数** lane 上：`a / 2` 落在两个整数正中间时两种模式才分道扬镳 |
+| `exti-sign-extends` | 写入器把 `exti` 的 `signedness` 写成 signed，于是一个比较掩码展宽成 0 与 **-1** 而不是 0 与 1 | **看不见**（同上，文本照印 `unsigned`） | 收（有符号展宽也是合法操作，只是不是这一处要的那个） | 展宽掩码的**两个**红（`count_eq` 答出取负的计数，`int_ops` 的奇偶项翻号），另外两个不动 |
 
 这一对比刀 7b、刀 8 的负控更深一格：那几个至少还会动 `.mlir`，一次 `--record` 能把它们
 洗白（这正是「层 0 的绿没有信息量」）。这两个连 `--record` 都洗不到，因为渲染器与写入器
 各持一张表，文本那张没有被改。能红它们的只有设备。
+
+**计划里的第二个负控没有落在层 2，而是落在层 1**：`ftoi-rounds-instead-of-truncates`
+（把 `ftoi` 的舍入模式写成 nearest_even）是按「奇数 lane 上 `a / 2` 落在两个整数正中间」
+设计的层 2 判词，实测 `tileiras` **直接拒**：`'cuda_tile.ftoi' op invalid rounding mode
+specified. Only 'nearest_int_to_zero' is supported`。设备根本见不到它，所以它登记在
+`scripts/tile-golden/run.sh` 的写入器变异体里（文本不动、字节同长、汇编器点名），
+层 2 那一格换成了 `exti-sign-extends`。**变异体落在哪一层是测出来的，不是设计出来的。**
+
+**这一刀真正被层 2 抓到的错，是 `divi` 的属性布局。** 写入器最初在每个「有默认值的属性」
+前面写一个 flags varint，理由是把 `DefaultValuedAttr` 当成了可选字段；tblgen 的
+`isOptional()` 只认 `OptionalAttr`，`BytecodeGen.cpp` 把带默认值的属性送去**必填**那条路
+（读 `extractDefaultValue` 的那一支），所以它是内联写的。**这个错在只有一个属性的操作上
+完全看不见**：`addi` 的「flags 0」与它的「overflow none」是同一个字节，`tileiras` 分不出
+两种读法，层 0 与层 1 都是绿的。`divi` 有两个属性（先 `signedness` 后 `rounding`），
+多出来的那个字节把两个都挪了一格，读者把 0 当成 signedness，于是设备做的是**无符号除法**——
+一个完全合法的程序，汇编器照收。是 `int_ops` 在带负被除数的语料上把它逼出来的：
+1000 个 lane 里 499 个红，红的恰好是 `a < 0` 的那些。修好后 `int_ops.tilebc` 动了一个字节，
+`int_ops.mlir` **一个字符没动**——这就是那条错误从头到尾的可见性。
 
 **`tileirdisasm` round-trip：未做。** 计划里那一格是「若本机能构建或找到
 `cuda-tile-translate`（`--mlir-to-cudatilebc` 的逆向），把 `.tilebc` 反汇编回文本与 `.mlir`
@@ -972,6 +991,7 @@ golden 对拍」。本机没有：pin 的三个 wheel（`nvidia-cuda-tileiras` /
 | **7b 归约、超越函数与两档判词**（已落地） | 「设备的归约与手写参考在一个折叠顺序不可见的语料上逐位一致，而带 `exp` 的 kernel 在 `atol = rtol = 1e-5` 下一致」 | `Dev` 加 `t_spread / t_reduce_begin / t_reduce_end / t_if_begin / t_if_else / t_if_end`，`t_unaryf / t_binaryf` 的名单加十个超越函数；`Scalar[D]` 与 `RedId` 两个新公开类型、`spread / d_reduce / d_reduce2 / d_if / d_for3 / d_for4 / s_*` / 六个 `idx_*` 比较；宽度 0 表示 rank-0 tile；`prog` 的区域栈变成四种 `Frame` 的 ADT、归约与 `if` 区域内禁访存；`lower` 加 `ReduceTile / IfElse / YieldVals` 与 `close_scope`（`if` 的 then 分支降两遍读类型）；`bytecode` 加 13 个 opcode、`ArrayAttr` 里的自包含属性、zigzag 与 u64 varint、两区域编码；`std/gpu` 加 `ref_exp / ref_log / ref_sqrt` 与十个参考实现；十三个 kernel 与它们的 golden；`scripts/tile-gpu-diff/red_diff.dawn`（两档判词 + 顺序探针）；`problems.txt` 加十行、`check.py` 加档位对账 | 层 0/1 十三个新 golden，`FUNC GLOBAL` 十三个；层 2 本机 3080 十三个 kernel 全绿（逐位 6、容差 7，最大误差 8.3e-11，是容差的 1e-10 倍）；leetgpu 4 / 5 / 17 / 27 / 35 / 50 / 52 / 68 / 107 / 108 可解，累计 16 / 97 | `reduce-identity-wrong`（求和 identity 0.0 → 1.0）→ 层 0 变、层 1 **收**、层 2 八个带求和的 kernel 红、另外五个不动；`softmax-no-max-subtract`（不减最大值）→ 层 0/1 都收，层 2 在 1000 附近的语料上溢出成 NaN，只有 softmax 红。另外补上层 1 的一个洞：`tileiras` 会退出 0 还打印 `error:`（f64 `tanh` 带 `nearest_even`），`assemble` 改成两条都要过 | 2 到 3（实报 1；`tile-golden/run.sh` 本机 123 s → 188 s、`tile-gpu-diff/run.sh` 40 s → 91 s） |
 | **8 二维 tile、多维 grid 与 `mmaf`**（已落地） | 「设备算出的矩阵乘积、转置与四种归一化与手写参考在 `atol = rtol = 1e-5` 下一致，而 grid 的第二根轴真的被启动了」 | 包：`n: Int` → `shape: List[Int]` 全线（`Dev` / `TileOp` / `Instr` / `render.ty` 的 rank ≥ 2）、以元素为单位的任意 stride 的指针梯子（零新 opcode）、`t_mmaf`（0x49）、`d_reduce_dim`（`dim` 不再只有 0）、`tile_at` / `row_major` / `load_strided` / `store_strided`；宿主：`gpu_launch_host` 的 `grid` 换成 `gx, gy, gz`（`dawn_rt.c` / `dawn_rt.h` / JVM 拒绝类 / `types.dawn` / `builtins.dawn` 镜像 / `rtsrc.dawn`），`launch3` 与仍是一维的 `launch`；`std/gpu` 七个参考实现；七个 kernel 与它们的 golden；`scripts/tile-gpu-diff/mm_diff.dawn`；`problems.txt` 加六行 | 层 0/1 七个新 golden，`FUNC GLOBAL` 七个；层 2 本机 3080 七个全绿（逐位 1、容差 6，最大 miss 1.02e-10，是容差的 1e-10 倍）；leetgpu 2 / 30 / 40 / 83 / 105 / 113 可解，累计 22 / 97。刀 7a / 7b 的 23 个 golden 一字节没动 | `grid-y-ignored`（C 运行时把 gridDimY 写死 1）→ 层 0 与层 1 **都看不见**，层 2 只有 grid 有第二根轴的四个红；`mma-acc-not-carried`（K 循环不携带累加器）→ 层 0 变、层 1 收，层 2 只有 `matmul` 红 | 4 到 6（实报 1；`tile-golden/run.sh` 本机 227 s → 233 s、`tile-gpu-diff/run.sh` 91 s → 99 s） |
 | **9 任意 stride 的指针梯子**（已落地） | 「设备算出的转置、卷积、池化与模板与手写参考**逐位**一致，而两维 stride 没有被对调」 | 包：`permute` / `axis_strides` / `coord` / `and_mask` / `in_range` / `axis_mask`（**零新 opcode**，全是已有的 `iota / muli / addi / offset / cmpi / select`；`load_strided` 与 `store_strided` 刀 8 就有了，公开面仍是「shape 与 strides 两张表」而不是 `Layout` 记录，理由写在 `dev.dawn` 的 `permute` 头上：`shape` 同时是每个算术操作的参数，记录只会让每隔一次调用就要拆一次包）；`std/gpu` 八个参考实现；九个 kernel 与它们的 golden；`scripts/tile-gpu-diff/stride_diff.dawn`；`problems.txt` 加九行 | 层 0/1 九个新 golden，`FUNC GLOBAL` 九个；层 2 本机 3080 九个**全部逐位一致**（这一刀没有容差档：只有取址变了）；leetgpu 3 / 9 / 10 / 28 / 42 / 63 / 66 / 69 / 90 可解，累计 31 / 97。刀 7a / 7b / 8 的 30 个 golden 一字节没动 | `stride-row-major-swapped`（转置的输出布局取成输入的两个维度）→ 层 0 变、层 1 收，层 2 只有 `transpose_tail` 红，6000 个 lane 里 5880 个错位；**方阵会放过它**，因为 `rows == cols` 时两个表达式是同一张表，连字节都不动，所以矩阵取 100 × 60。`ladder-strides-reversed`（降低时每一维取对面那一维的 stride）→ 六个 kernel 的字节动、`tileiras` 全收，层 2 **只有 `depthwise_conv1d` 红**：把一个 kernel 里的每张布局一起反过来，等于把 tile 自己的两根轴换名，方 tile 上会对消（4 × 32 的 tile 躲不掉）。这条记下来是因为意外本身就是证据：降低层的 stride 对调在方 tile 上是看不见的。`halo-one-lane-short`（模糊 kernel 的 tap 边界少一格）→ 层 0 变、层 1 收，层 2 只有 `gaussian_blur` 红 | 1 到 2（实报 1；`tile-golden/run.sh` 本机 241 s → 263 s、`tile-gpu-diff/run.sh` 99 s → 129 s） |
+| **10 整数 tile、i32 缓冲、位运算与转换**（已落地） | 「设备算出的计数、子数组和、哈希链与整数算术全家桶与手写参考**逐位**一致，而这一次逐位不靠语料而靠代数」 | 包：`Dev` 加 `t_unaryi` / `t_binaryi` / `t_convert` 三个操作（覆盖 20 个 opcode）；公开面 `add_i`…`shr_u`（`shri` 与 `shru` 是同一个 opcode 的两种 signedness）、`neg_i` / `abs_i` / `mulhi_i`、`s_addi` / `d_reduce_i`、五个转换 `int_to_float` / `float_to_int` / `mask_to_int` / `int_to_mask` / `bits_to_float` / `bits_to_int`；`prog` 三个 `TileOp` 与三张白名单；`lower` 的 `IntUn` / `IntBin` / `Cast`（`addi` / `muli` 复用梯子已有的 `AddInt` / `MulInt`）；`bytecode` 加 20 个 opcode 与 `int_op` / `int_attrs` / `cast_op` / `cast_attrs` 四张表，逐条读自 `Ops.td` 与 `BytecodeGen.cpp`；渲染器给 i32 常量做回绕（`0x9E3779B1` 在 i32 lane 里是 -1640531535）。宿主：`I32` 从包搬进 `std/gpu`（i32 从此既是 tile 格式又是缓冲格式）、`element_bytes("i32") = 4`、`round_to` 的向零截断加二补数回绕、`wrap_i32`、`pack_i32` / `unpack_i32` 与真设备的字节通道；四个参考实现；四个 kernel 与它们的 golden；`scripts/tile-gpu-diff/int_diff.dawn`；`problems.txt` 加五行 | 层 0/1 四个新 golden，`FUNC GLOBAL` 四个；层 2 本机 3080 四个**全部逐位一致**，且这一档是**代数**给的不是语料给的（i32 结果只有一个值，整数加法模 2^32 精确结合交换，`List[Float]` 通道对 i32 无损）；leetgpu 24 / 43 / 44 / 45 / 47 可解，累计 36 / 97。刀 7a/7b/8/9 的 39 个 golden 一字节没动 | `shri-always-logical`（写入器把 `shri` 的 signedness 写成 unsigned）→ 层 0 **看不见**（渲染器另有一张表）、层 1 收，层 2 只有做算术右移的 `rainbow` / `int_ops` 红，另外两个不动；语料必须铺满整个 i32 值域，两种右移在非负操作数上是同一件事。`exti-sign-extends`（掩码有符号展宽成 0 与 -1）→ 层 0 看不见、层 1 收，层 2 只有 `count_eq` / `int_ops` 红。计划里的 `ftoi-rounds-instead-of-truncates` 实测被 `tileiras` 拒，改登记为层 1 的写入器变异体。**真正被层 2 抓到的错是 `divi` 的属性布局**：把 `DefaultValuedAttr` 当成可选字段多写了一个 flags 字节，在只有一个属性的操作上与 `overflow none` 同字节因而全绿，`divi` 有两个属性于是设备做了无符号除法，`int_ops` 在负被除数上 499 lane 红 | 2 到 3（实报 1；`tile-golden/run.sh` 本机 260 s → 279 s，加第十二个变异体后 299 s；`tile-gpu-diff/run.sh` 129 s → 154 s） |
 | 7（期权）混合路线 | 「同一个 kernel 体经编译期发射器与经记录 handler 产出相同的 Tile 程序」 | `selfhost/src/tile/emit_tile.dawn` | 两路 `TileProg` 相等 | 不在本计划内 | 6 到 10 |
 
 合计（不含刀 7）16 到 23 人日。字节码写入器是最大的单块，也是唯一能让 CI 的绿有信息量的
