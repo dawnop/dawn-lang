@@ -39,10 +39,37 @@ and release.yml are not under the pole -- their jobs (the secrets scan, the
 release pipeline) are not part of the every-push gate run whose length the
 pole exists to hold.
 
+Both halves of that arithmetic read the same file the claim lives in, so
+neither can notice a claim that has simply stopped being true: a job can
+double in cost while its timeout stays three times a number nobody remeasured.
+On 2026-09-03 twenty-one of gates.yml's budget lines were under their job's
+own worst run since 09-02, native-diff's by 562s, and every gate was green.
+
+    --observed <file>   compare each claim with what the job actually took
+
+The file is written by scripts/gate-observations.py, which reads the Actions
+API. That is why this mode is not in CI: a gate that needs the network and a
+token is a gate that goes red for the network. It is the audit to run by hand
+before restating a budget line, and it is what a restatement cites:
+
+    scripts/gate-observations.py --since 2026-09-02T00:00:00Z --out /tmp/obs.json
+    scripts/check-gate-budgets.py --observed /tmp/obs.json
+
+A `3x <N>s` claim is refused when the observed maximum is above N. A `floor`
+claim is refused when three times the observation no longer fits inside the
+timeout the floor was granted -- the floor exists because 3x six seconds is a
+bound no runner could meet, and a job that grew to minutes is no longer
+covered by that reason. A job with no observation (a shard whose first run has
+not happened) is reported and not refused; its budget line says "planning
+value" for exactly that reason. The default invocation is unchanged: it is
+what CI runs, and it does not read this file.
+
 Run with --selftest to see each rule refuse a mutated input; a checker whose
 red has never been observed is a checker nobody can rely on.
 """
 
+import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -103,6 +130,70 @@ def check_text(text, name):
                 f" or restate the observation"
             )
     return problems
+
+
+def collect_budgets(text, name):
+    """Every budgeted timeout in one file: (job, line_number, claim, minutes).
+
+    The same walk check_text does, kept as its own function because the
+    observation audit asks a different question of the same records and must
+    not change what CI's walk refuses.
+    """
+    lines = text.splitlines()
+    records = []
+    job = "?"
+    for i, line in enumerate(lines):
+        job_match = JOB_RE.match(line)
+        if job_match:
+            job = job_match.group(1)
+            continue
+        timeout_match = TIMEOUT_RE.match(line)
+        if not timeout_match or i == 0:
+            continue
+        budget_match = BUDGET_RE.match(lines[i - 1])
+        if not budget_match:
+            continue
+        records.append((job, i + 1, budget_match.group(1), int(timeout_match.group(2))))
+    return records
+
+
+def check_observed(records, observations, name):
+    """Return (problems, notes) from comparing declared values with real runs.
+
+    A claim is a claim about the worst case, so the comparison is against the
+    maximum, not the median: an average puts a routinely-observed run inside
+    the kill window, which is the reasoning the 3x rule already carries.
+    """
+    problems = []
+    notes = []
+    for job, line_number, claim, minutes in records:
+        where = f"{name}:{line_number} ({job})"
+        seconds = observations.get(job)
+        if seconds is None:
+            notes.append(f"{where}: no observation in this window")
+            continue
+        three_x = THREE_X_RE.match(claim)
+        if three_x:
+            declared = int(three_x.group(1))
+            if seconds > declared:
+                problems.append(
+                    f"{where}: declares {declared}s but ran {seconds}s"
+                    f" -- {seconds - declared}s of the worst case is undeclared;"
+                    f" restate the line as 3x {seconds}s and take the timeout to"
+                    f" {-(-MULTIPLE * seconds // 60)}min"
+                )
+            continue
+        if FLOOR_RE.match(claim):
+            if MULTIPLE * seconds > minutes * 60:
+                problems.append(
+                    f"{where}: claims the floor but ran {seconds}s, and"
+                    f" {MULTIPLE}x that is over the {minutes}min it was granted"
+                    " -- the floor is for jobs whose own 3x no runner could"
+                    " meet, so this one has outgrown it and owes a real"
+                    " observation"
+                )
+            continue
+    return problems, notes
 
 
 def check_run_pole(text, name):
@@ -197,6 +288,31 @@ jobs:
          pole_good.replace("# run-pole: 660s", "# run-pole: 900s\n# run-pole: 660s")),
     ]
 
+    # The observation audit. Its whole point is that the two numbers come from
+    # different places, so the mutants move the observation as well as the
+    # claim: a claim under the run is refused, a claim over it is not, and a
+    # floor granted to a seconds-scale job is refused once the job is not one.
+    observed_good = """\
+jobs:
+  slow:
+    # budget: 3x 600s worst observed
+    timeout-minutes: 30
+  quick:
+    # budget: floor (seconds-scale job)
+    timeout-minutes: 10
+"""
+    observed_runs = {"slow": 550, "quick": 8}
+    observed_mutants = [
+        ("a claim under the job's own worst run",
+         observed_good, {"slow": 700, "quick": 8}),
+        ("a claim one second under it",
+         observed_good, {"slow": 601, "quick": 8}),
+        ("a floor on a job that grew to minutes",
+         observed_good, {"slow": 550, "quick": 400}),
+        ("a claim restated downwards past the run",
+         observed_good.replace("3x 600s", "3x 300s"), observed_runs),
+    ]
+
     failures = []
     if check_text(good, "good.yml"):
         failures.append("the unmutated input was refused: " + "; ".join(check_text(good, "good.yml")))
@@ -217,23 +333,80 @@ jobs:
         else:
             print(f"  refused: {label}")
 
+    clean_found, clean_notes = check_observed(
+        collect_budgets(observed_good, "good-observed.yml"), observed_runs,
+        "good-observed.yml")
+    if clean_found:
+        failures.append(
+            "the unmutated observation input was refused: "
+            + "; ".join(clean_found)
+        )
+    if clean_notes:
+        failures.append(
+            "a job with an observation was reported as unobserved: "
+            + "; ".join(clean_notes)
+        )
+    for label, text, runs in observed_mutants:
+        found, _notes = check_observed(
+            collect_budgets(text, "mutant-observed.yml"), runs,
+            "mutant-observed.yml")
+        if not found:
+            failures.append(f"mutant not caught: {label}")
+        else:
+            print(f"  refused: {label}")
+
+    # A job the observation window never saw is a note, not a refusal: the
+    # shard whose first run has not happened yet is exactly the case, and
+    # refusing it would make the audit unrunnable on the tree that needs it.
+    _found, unseen = check_observed(
+        collect_budgets(observed_good, "unseen.yml"), {"quick": 8}, "unseen.yml")
+    if _found:
+        failures.append("an unobserved job was refused rather than reported")
+    elif len(unseen) != 1:
+        failures.append(f"an unobserved job was not reported: {unseen}")
+    else:
+        print("  reported (not refused): a job with no observation in the window")
+
     if failures:
         for f in failures:
             print(f"SELFTEST FAIL: {f}", file=sys.stderr)
         return 1
     print(
-        f"selftest: {len(mutants) + len(pole_mutants)} mutant(s) refused, "
-        "clean inputs accepted"
+        f"selftest: {len(mutants) + len(pole_mutants) + len(observed_mutants)}"
+        " mutant(s) refused, clean inputs accepted"
     )
     return 0
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument(
+        "--observed",
+        type=Path,
+        default=None,
+        help="a scripts/gate-observations.py report; refuse every claim under"
+        " the maximum it records (manual audit, not run in CI)",
+    )
+    args = ap.parse_args()
+
     root = Path(__file__).resolve().parent.parent
-    if "--selftest" in sys.argv[1:]:
+    if args.selftest:
         return selftest(root)
 
+    observations = None
+    if args.observed is not None:
+        report = json.loads(args.observed.read_text(encoding="utf-8"))
+        observations = report["jobs"]
+        print(
+            f"observations: {len(observations)} job(s) over"
+            f" {len(report.get('runs', []))} run(s)"
+            f" ({report.get('oldest_run_created', '?')}"
+            f" .. {report.get('newest_run_created', '?')})"
+        )
+
     problems = []
+    notes = []
     checked = 0
     for name in WORKFLOWS:
         path = root / ".github" / "workflows" / name
@@ -244,18 +417,31 @@ def main():
         problems.extend(check_text(text, name))
         if name == RUN_POLE_FILE:
             problems.extend(check_run_pole(text, name))
+        if observations is not None:
+            found, said = check_observed(
+                collect_budgets(text, name), observations, name
+            )
+            problems.extend(found)
+            notes.extend(said)
 
     if not checked:
         print("no workflow files found -- this check saw nothing", file=sys.stderr)
         return 1
+    for note in notes:
+        print(f"note: {note}")
     if problems:
-        for p in problems:
-            print(p, file=sys.stderr)
+        for problem in problems:
+            print(problem, file=sys.stderr)
         return 1
 
     rc = selftest(root)
     if rc:
         return rc
+    if observations is not None:
+        print(
+            "OK: every budget line is at or above the worst run in the"
+            " observation file"
+        )
     print(f"OK: {checked} workflow file(s), every timeout backed by a budget line")
     return 0
 
