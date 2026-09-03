@@ -32,10 +32,17 @@
 # indices the caller reads its buffer with, so 43, 44 and 45 are one kernel
 # over a flat run of elements, the way 1 and 8 are.
 #
-# 36 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
+# Two problems share one reference where the reference does not depend on
+# the format: `matmul_ref` is a triple loop that rounds to the output
+# buffer's format, so it is the second opinion for an f16 product and an i8
+# one as much as for an f64 one. The KERNELS differ, and the corpora do.
+#
+# 42 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
 # and out of range). The plan that orders the rest is the cuTile coverage
 # memo; knife 7a is the boundary knife, 7b the reduction one, 8 the
-# two-dimensional one, 9 the strided one and 10 the integer one.
+# two-dimensional one, 9 the strided one, 10 the integer one and 11 the wide
+# one (more than one output buffer, in place, and the f16 / i8 / u8
+# formats).
 1 | Vector Addition | vadd_tail | std/gpu.masked_vadd_ref | mask_diff:vadd_tail | exact
 8 | Matrix Addition | vadd_tail | std/gpu.masked_vadd_ref | mask_diff:vadd_tail | exact
 21 | ReLU | relu | std/gpu.relu_ref | mask_diff:relu | exact
@@ -72,3 +79,9 @@
 44 | Count 2D Array Element | count_eq | std/gpu.count_eq_ref | int_diff:count_eq | exact
 45 | Count 3D Array Element | count_eq | std/gpu.count_eq_ref | int_diff:count_eq | exact
 47 | Subarray Sum | subarray_sum | std/gpu.subarray_sum_ref | int_diff:subarray_sum | exact
+7 | Color Inversion | invert | std/gpu.invert_ref | wide_diff:invert | exact
+19 | Reverse Array | reverse | std/gpu.reverse_ref | wide_diff:reverse | exact
+22 | GEMM (FP16) | matmul_f16 | std/gpu.matmul_ref | wide_diff:matmul_f16 | exact
+32 | INT8 Quantized MatMul | matmul_i8 | std/gpu.matmul_ref | wide_diff:matmul_i8 | exact
+57 | FP16 Batched MatMul | batched_matmul_f16 | std/gpu.batched_matmul_ref | wide_diff:batched_matmul_f16 | exact
+58 | FP16 Dot Product | dot_f16 | std/gpu.dot_f16_ref | wide_diff:dot_f16 | exact
