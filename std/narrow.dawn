@@ -339,9 +339,10 @@ fn exponent(x: Float) -> Int = {
 # whose memory holds them (std/gpu's bf16 tensors). There is no float-to-bits
 # primitive, so the pattern is assembled from the same exact arithmetic
 # `round_binary` uses: the exponent by doublings and halvings, the
-# significand by an exact power-of-two scaling. Only bfloat16 has a codec
-# here; binary16 and binary32 would take the same shape with their own
-# widths, and get one when something needs it.
+# significand by an exact power-of-two scaling. bfloat16 and binary16 have a
+# codec here, the second because a device buffer of f16 elements needed one
+# (std/gpu's `pack_f16`); binary32 would take the same shape with its own
+# widths, and gets one when something needs it.
 
 ## The 16-bit pattern of the bfloat16 value `x`: the sign bit, eight exponent
 ## bits biased by 127, seven significand bits, as the value sits in memory.
@@ -376,6 +377,63 @@ pub fn bf16_bits(x: Float) -> Int =
       }
     }
   }
+
+## The 16-bit pattern of the IEEE binary16 value `x`: the sign bit, five
+## exponent bits biased by 15, ten significand bits, as the value sits in
+## memory. The bfloat16 function's shape at binary16's widths, and the same
+## contract: `x` is a value of the format, as `round_fp16` leaves it, and a
+## Float off the binary16 grid answers the pattern with the extra
+## significand bits dropped rather than the nearest binary16. A value beyond
+## the format's range answers the infinity of its sign; NaN answers the
+## canonical quiet NaN `0x7E00`.
+##
+## The subnormal arm counts quanta of 2^-24, which is binary16's least
+## positive value, where bfloat16 counts 2^-133; the two formats differ in
+## every constant here and in nothing else.
+pub fn fp16_bits(x: Float) -> Int =
+  if x != x {
+    0x7E00
+  } else {
+    let neg = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    let sign = if neg { 0x8000 } else { 0 }
+    let a = if neg { -x } else { x }
+    if a == 0.0 {
+      sign
+    } else if a == 1.0 / 0.0 {
+      sign | 0x7C00
+    } else {
+      let e = exponent(a)
+      if e < -14 {
+        # below the normal range: no hidden bit, the significand counts
+        # quanta of 2^-24
+        sign | to_int(a / pow2(-24))
+      } else if e > 15 {
+        sign | 0x7C00
+      } else {
+        sign | ((e + 15) << 10) | to_int((a / pow2(e) - 1.0) * 1024.0)
+      }
+    }
+  }
+
+## The IEEE binary16 value whose 16-bit pattern is the low 16 bits of `bits`,
+## exactly, as a Float (every binary16 value is one). An exponent field of
+## all ones is the infinity of the sign when the significand field is zero
+## and NaN otherwise; an exponent field of zero is a subnormal, or the zero
+## of the sign.
+pub fn fp16_of_bits(bits: Int) -> Float = {
+  let b = bits & 0xFFFF
+  let neg = (b & 0x8000) != 0
+  let e = (b >>> 10) & 0x1F
+  let m = b & 0x3FF
+  let a = if e == 0x1F {
+    if m == 0 { 1.0 / 0.0 } else { 0.0 / 0.0 }
+  } else if e == 0 {
+    to_float(m) * pow2(-24)
+  } else {
+    (1.0 + to_float(m) / 1024.0) * pow2(e - 15)
+  }
+  if neg { -a } else { a }
+}
 
 ## The bfloat16 value whose 16-bit pattern is the low 16 bits of `bits`,
 ## exactly, as a Float (every bf16 value is one). An exponent field of all
@@ -507,6 +565,60 @@ test "every bf16 bit pattern round-trips through its value, and the value is on 
   }
   assert bad == 0
   assert nans == 254
+}
+
+test "every fp16 bit pattern round-trips through its value, and the value is on round_fp16's grid" {
+  # The bf16 exhaustive check at binary16's widths. 2046 NaN patterns here
+  # against bf16's 254: binary16 has a ten-bit significand under an
+  # all-ones exponent, and both signs.
+  var bad = 0
+  var nans = 0
+  var b = 0
+  while b < 65536 {
+    let v = fp16_of_bits(b)
+    if v != v {
+      nans = nans + 1
+      if fp16_bits(v) != 0x7E00 { bad = bad + 1 } else { () }
+    } else if fp16_bits(v) != b || round_fp16(v) != v {
+      bad = bad + 1
+    } else {
+      ()
+    }
+    b = b + 1
+  }
+  assert bad == 0
+  assert nans == 2046
+}
+
+test "the fp16 codec spells the special values and the named boundaries" {
+  let inf = 1.0 / 0.0
+  assert fp16_bits(1.0) == 0x3C00
+  assert fp16_bits(-1.5) == 0xBE00
+  assert fp16_bits(0.0) == 0x0000
+  # the negative zero keeps its sign, both ways
+  assert fp16_bits(0.0 * (0.0 - 1.0)) == 0x8000
+  assert 1.0 / fp16_of_bits(0x8000) == -inf
+  assert fp16_bits(inf) == 0x7C00
+  assert fp16_bits(-inf) == 0xFC00
+  assert fp16_of_bits(0x7C00) == inf
+  let nan = fp16_of_bits(0x7C01)
+  assert nan != nan
+  assert fp16_bits(0.0 / 0.0) == 0x7E00
+  # the smallest subnormal (2^-24), the largest subnormal, the smallest normal
+  assert fp16_of_bits(0x0001) == 5.960464477539063e-8
+  assert fp16_bits(5.960464477539063e-8) == 0x0001
+  assert fp16_of_bits(0x03FF) == 1023.0 * 5.960464477539063e-8
+  assert fp16_of_bits(0x0400) == 0.00006103515625
+  # the largest finite value
+  assert fp16_of_bits(0x7BFF) == 65504.0
+  assert fp16_bits(65504.0) == 0x7BFF
+  # off the grid: the bits truncate, the rounding does not; a value past the
+  # range is the infinity
+  assert fp16_bits(1.0 + 3.0 / 4096.0) == 0x3C00
+  assert fp16_bits(round_fp16(1.0 + 3.0 / 4096.0)) == 0x3C01
+  assert fp16_bits(1.0e300) == 0x7C00
+  # bits above the sixteenth are ignored
+  assert fp16_of_bits(0x13C00) == 1.0
 }
 
 test "the bf16 codec spells the special values and the named boundaries" {
