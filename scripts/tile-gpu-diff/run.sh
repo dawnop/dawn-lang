@@ -21,8 +21,9 @@
 #             input sets, mask_diff.dawn the six boundary kernels of
 #             knife 7a (each with an output buffer longer than its answer, so
 #             that what the mask keeps is compared too), red_diff.dawn the
-#             thirteen reduction and transcendental kernels of knife 7b and
-#             mm_diff.dawn the seven two-dimensional kernels of knife 8,
+#             thirteen reduction and transcendental kernels of knife 7b,
+#             mm_diff.dawn the seven two-dimensional kernels of knife 8 and
+#             stride_diff.dawn the nine strided kernels of knife 9,
 #             under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
@@ -70,6 +71,26 @@
 #                      layer 0 moves and tileiras accepts the result (it is
 #                      a legal kernel), and only the device says matmul
 #                      answers the last K slice rather than the product
+#     stride-row-major-swapped
+#                      the package's lowering applies a tile's strides in
+#                      REVERSE order, so the two dimensions of every rank-2
+#                      layout are swapped -> layer 0 moves and `tileiras`
+#                      accepts the result (a permuted layout is a layout),
+#                      and only the device says the addresses are wrong.
+#                      A rank-1 ladder has one stride and cannot move, so
+#                      the three one-dimensional kernels of knife 9 are the
+#                      mutant's own control. A SQUARE transpose would be a
+#                      control too, for the wrong reason: read transposed
+#                      and written transposed the two swaps cancel, which
+#                      is why stride_diff's corpora are rectangular
+#     halo-one-lane-short
+#                      the gaussian blur's tap bound stops one lane early,
+#                      so a neighbour at the far edge of the image counts as
+#                      padding -> layer 0 moves, layer 1 accepts it (a mask
+#                      is a mask) and the device answers a blurred image
+#                      that is wrong along two of its four edges.
+#                      gaussian_blur is the only kernel with a halo, so the
+#                      other eight are the control
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -257,6 +278,11 @@ reduced=(reduce_sum softmax dot mse monte_carlo rms_norm silu sigmoid ppo_loss d
 # The first three run over a grid with more than one axis.
 twod=(matmul batched_matmul transpose layer_norm batch_norm group_norm fused_rms_norm)
 
+# The strided kernels of knife 9, in the order stride_diff takes them. Six
+# read or write a rank-2 layout and three are rank-1 ladders, which is the
+# split stride-row-major-swapped below is held to.
+strided=(transpose_tail conv1d conv2d max_pool interleave rgb_gray jacobi depthwise_conv1d gaussian_blur)
+
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
@@ -269,7 +295,7 @@ assemble_golden() { # kernel, tilebc, cubin
     fail "tileiras wrote no ELF cubin for $1"
 }
 
-for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}"; do
+for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -280,6 +306,8 @@ reduced_cubins=()
 for k in "${reduced[@]}"; do reduced_cubins+=("$work/$k.cubin"); done
 twod_cubins=()
 for k in "${twod[@]}"; do twod_cubins+=("$work/$k.cubin"); done
+strided_cubins=()
+for k in "${strided[@]}"; do strided_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -378,19 +406,39 @@ case "$twod_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/twod.out" | head -n 1)"
 
+# ---- native, the strided kernels (knife 9)
+build_native "$root/std" "$work/strided.bin" "$here/stride_diff.dawn"
+rc=0
+"$work/strided.bin" "${strided_cubins[@]}" > "$work/strided.out" 2> "$work/strided.err" || rc=$?
+cat "$work/strided.out"
+strided_verdict="$(verdict_of "$work/strided.out")"
+case "$strided_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#strided[@]} strided kernels are bit-identical to the fake device, tails included" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $strided_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $strided_verdict" ;;
+  fail) cat "$work/strided.err" >&2; fail "the device answered and disagreed with the fake device on a strided kernel (see the transcript above)" ;;
+  *) cat "$work/strided.err" >&2; fail "stride_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/strided.out" | head -n 1)"
+
 # The tier summary and the fold-order probe go into the ledger note: the
 # probe is a RECORD and not an assertion (docs 6.5), so a tileiras upgrade
 # that changes the device's reduction tree shows up in the ledger rather
 # than in a red run.
 tiers="$(sed -n 's/^tiers //p' "$work/reduced.out" | tail -n 1) 2d:$(sed -n 's/^tiers //p' "$work/twod.out" | tail -n 1)"
+tiers="$tiers strided:$(sed -n 's/^tiers //p' "$work/strided.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe"
 
 # The ledger records one verdict for the tree: both programs pass, or the
 # first thing that stopped one of them.
 if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
-  && [ "$twod_verdict" = pass ]; then
+  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ]; then
   verdict=pass
+elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
+  && [ "$twod_verdict" = pass ]; then
+  verdict="$strided_verdict"
 elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ]; then
   verdict="$twod_verdict"
 elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ]; then
@@ -802,6 +850,132 @@ else
   echo "SKIP  mutant: mma-acc-not-carried not verifiable on this driver: the clean run is $twod_verdict, before any launch reaches the device"
 fi
 
+# 9. stride-row-major-swapped: the package's lowering walks a tile's
+#    dimensions in the order it was given but takes the STRIDE of the
+#    opposite one, so `[w, 1]` addresses as `[1, w]` and every rank-2 layout
+#    has its two dimensions swapped. Layer 0 moves (a `--record` would take
+#    it) and layer 1 accepts it -- a permuted layout is a layout, and the
+#    types are unchanged -- so only the device says the addresses are wrong.
+#
+#    A rank-1 ladder has one stride and reversing a one-element list changes
+#    nothing, so the three one-dimensional kernels here are the mutant's own
+#    control. So would a SQUARE transpose be, for a reason worth writing
+#    down: a tile read transposed and written transposed is the tile it
+#    started from, the two swaps cancel and the answer is right. That is why
+#    stride_diff's shapes are rectangular (100 by 60, 40 by 36, 36 by 20,
+#    34 by 34 with a 3-tap halo, 6 by 100, 20 by 24) and why the corpus is
+#    `distinct`.
+mutant_pkg_st="$work/pkg-stride-row-major-swapped"
+rm -rf "$mutant_pkg_st"
+cp -r "$root/packages/tileir" "$mutant_pkg_st"
+before=$(digest "$mutant_pkg_st/src/lower.dawn")
+python3 "$here/mutate.py" "$mutant_pkg_st/src/lower.dawn" stride-row-major-swapped \
+  '        let (le, term) = if strides[k] == 1 {' \
+  '        let (le, term) = if strides[len(shape) - 1 - k] == 1 {'
+python3 "$here/mutate.py" "$mutant_pkg_st/src/lower.dawn" stride-row-major-swapped \
+  '          let ly = emit(lx, ConstInt(c, full, strides[k]))' \
+  '          let ly = emit(lx, ConstInt(c, full, strides[len(shape) - 1 - k]))'
+after=$(digest "$mutant_pkg_st/src/lower.dawn")
+echo "      stride-row-major-swapped: packages/tileir/src/lower.dawn md5 $before -> $after"
+
+mutant_kernels stride-row-major-swapped "$mutant_pkg_st" "${strided[@]}"
+# the six kernels with a rank-2 layout move at layer 0; the three rank-1
+# ladders cannot, and that is the mutant's own control
+moved=0
+for k in "${strided[@]}"; do
+  if cmp -s "$golden/$k.tilebc" "$work/stride-row-major-swapped-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+done
+[ "$moved" = 6 ] ||
+  fail "stride-row-major-swapped: expected exactly 6 of the ${#strided[@]} kernels' bytecode to move, got $moved"
+echo "      stride-row-major-swapped: 6 of ${#strided[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+swap_cubins=()
+for k in "${strided[@]}"; do swap_cubins+=("$work/stride-row-major-swapped-$k.cubin"); done
+rc=0
+"$work/strided.bin" "${swap_cubins[@]}" > "$work/m-stride-swapped.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-stride-swapped.out")"
+swap_red=(transpose_tail conv2d max_pool jacobi depthwise_conv1d gaussian_blur)
+swap_green=(conv1d interleave rgb_gray)
+if [ "$strided_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-stride-swapped.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#swap_red[@]}" ]; then
+    cat "$work/m-stride-swapped.out" >&2
+    fail "stride-row-major-swapped mutant stayed green: expected verdict fail (exit 1) with exactly ${#swap_red[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${swap_red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-stride-swapped.out" ||
+      { cat "$work/m-stride-swapped.out" >&2; fail "stride-row-major-swapped: $k has a rank-2 layout and should differ"; }
+  done
+  for k in "${swap_green[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-stride-swapped.out" ||
+      { cat "$work/m-stride-swapped.out" >&2; fail "stride-row-major-swapped: $k is a rank-1 ladder and should be untouched"; }
+  done
+  echo "PASS  mutant: stride-row-major-swapped (only the ${#swap_red[@]} kernels with a rank-2 layout differ: ${swap_red[*]})"
+else
+  [ "$mverdict" = "$strided_verdict" ] ||
+    { cat "$work/m-stride-swapped.out" >&2; fail "stride-row-major-swapped: the clean run is $strided_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: stride-row-major-swapped not verifiable on this driver: the clean run is $strided_verdict, before any launch reaches the device"
+fi
+
+# 10. halo-one-lane-short: the gaussian blur's tap bound stops one lane
+#     early, so the last row (or column) of the image counts as padding for
+#     the tap that reaches past it and its contribution is dropped. Layer 0
+#     moves (one constant in a mask) and layer 1 accepts it -- an off-by-one
+#     mask is a mask -- and only the device says the image is wrong along
+#     two of its four edges. `gaussian_blur` is the only kernel here with a
+#     halo, so the other eight are the control.
+#
+#     A boundary claim needs a shape with a boundary INSIDE the tile: the
+#     image is 20 by 24 in 16 by 16 tiles, so the edge the mutant drops is
+#     not the tile's edge and the per-axis masks are already doing work
+#     there.
+mutant_blur_src="$work/kernels-blur.dawn"
+cp "$golden/kernels.dawn" "$mutant_blur_src"
+before=$(digest "$mutant_blur_src")
+python3 "$here/mutate.py" "$mutant_blur_src" halo-one-lane-short \
+  'fn gb_hi(n: Int, t: Int) -> Int = if t > gb_half() { n - (t - gb_half()) } else { n }' \
+  'fn gb_hi(n: Int, t: Int) -> Int = if t > gb_half() { n - (t - gb_half()) - 1 } else { n }'
+after=$(digest "$mutant_blur_src")
+echo "      halo-one-lane-short: scripts/tile-golden/kernels.dawn md5 $before -> $after"
+mkdir -p "$work/proj-blur/src"
+cp "$mutant_blur_src" "$work/proj-blur/src/main.dawn"
+cat > "$work/proj-blur/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
+
+[deps]
+tileir = "$root/packages/tileir"
+TOML
+"$root/bin/dawn" run "$work/proj-blur" -- gaussian_blur --bytecode "$work/blur-short.tilebc" > "$work/proj-blur.log" 2>&1 ||
+  { cat "$work/proj-blur.log" >&2; fail "halo-one-lane-short: gaussian_blur did not encode"; }
+cmp -s "$golden/gaussian_blur.tilebc" "$work/blur-short.tilebc" &&
+  fail "halo-one-lane-short mutant stayed green: gaussian_blur.tilebc is unchanged"
+assemble_golden gaussian_blur "$work/blur-short.tilebc" "$work/blur-short.cubin"
+echo "      halo-one-lane-short: gaussian_blur.tilebc differs from the golden and tileiras still accepts it"
+short_cubins=()
+for k in "${strided[@]}"; do
+  if [ "$k" = gaussian_blur ]; then short_cubins+=("$work/blur-short.cubin"); else short_cubins+=("$work/$k.cubin"); fi
+done
+rc=0
+"$work/strided.bin" "${short_cubins[@]}" > "$work/m-halo-short.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-halo-short.out")"
+if [ "$strided_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-halo-short.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-halo-short.out" >&2
+    fail "halo-one-lane-short mutant stayed green: expected verdict fail (exit 1) with gaussian_blur alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "gaussian_blur" {bad=1} END {exit bad}' \
+    "$work/m-halo-short.out" ||
+    { cat "$work/m-halo-short.out" >&2; fail "halo-one-lane-short: a kernel other than gaussian_blur moved"; }
+  echo "PASS  mutant: halo-one-lane-short (gaussian_blur alone drops the far edge of every tap; the other 8 kernels are untouched)"
+else
+  [ "$mverdict" = "$strided_verdict" ] ||
+    { cat "$work/m-halo-short.out" >&2; fail "halo-one-lane-short: the clean run is $strided_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: halo-one-lane-short not verifiable on this driver: the clean run is $strided_verdict, before any launch reaches the device"
+fi
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -813,7 +987,7 @@ fi
 dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c \
   scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn \
   scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mm_diff.dawn \
-  scripts/tile-gpu-diff/mutate.py)"
+  scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"

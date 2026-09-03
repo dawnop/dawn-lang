@@ -748,6 +748,192 @@ pub fn fused_rms_norm_ref(rows: Int, d: Int, eps: Float, dtypes: List[String],
   list.map(range(0, rows * d), idx => round_to(dt, h[idx] / scale[idx / d] * w[idx % d]))
 }
 
+# ---- references for the strided kernels (knife 9) ----
+#
+# Every kernel of knife 9 differs from the ones above in ADDRESSING and
+# nothing else: a transpose is a permutation of strides, a convolution tap
+# is a shifted base, a pooling window is a stride, a colour channel is a
+# stride of three. So the arithmetic below is the same `+` and `*` the
+# earlier references use, folded in the kernel's own order, and the
+# comparison is bit for bit.
+#
+# Each takes the shape it was recorded for, then the `dtypes` and the buffer
+# contents the fake device passes; the output buffer is last, and every one
+# of these copies its tail past the answer, so a mask that wrote where it
+# should not have is visible (the `kept` discipline of knife 7a).
+
+## `out[i] = sum(x[i + t] * w[t])` over `k` taps, for the first `n` lanes:
+## leetgpu 9 (1D Convolution), valid mode, so `n` is `len(x) - k + 1`.
+## `ins` is `[x, w, old]`. The taps are folded in increasing `t`, which is
+## the order the kernel unrolls them in.
+pub fn conv1d_ref(n: Int, k: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let w = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        list.fold(range(0, k), 0.0, (acc, t) => round_to(dt, acc + round_to(dt, x[i + t] * w[t])))
+      } else {
+        kept(old, i)
+      })
+}
+
+## The same in two dimensions over an `h` by `w` image and a `k` by `k`
+## kernel, valid mode: leetgpu 10 (2D Convolution). The output is
+## `(h - k + 1)` by `(w - k + 1)`, and the taps are folded in row-major
+## order over the kernel, which is the order the two host loops unroll in.
+pub fn conv2d_ref(h: Int, w: Int, k: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let f = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  let ow = w - k + 1
+  let lanes = (h - k + 1) * ow
+  list.map(range(0, len(old)), idx =>
+      if idx < lanes {
+        let r = idx / ow
+        let c = idx % ow
+        list.fold(range(0, k * k), 0.0, (acc, t) =>
+            round_to(dt, acc + round_to(dt, x[(r + t / k) * w + c + t % k] * f[t])))
+      } else {
+        kept(old, idx)
+      })
+}
+
+## The largest element of each `k` by `k` window of an `h` by `w` image,
+## the windows `k` apart in both directions: leetgpu 42 (Max Pooling), with
+## the stride equal to the window and no padding, so the output is `h / k`
+## by `w / k`. `ins` is `[x, old]`. The fold starts from the negative
+## infinity the kernel's accumulator does, and takes the later element only
+## when it is strictly larger, which is what `maxf` answers on a tie.
+pub fn max_pool_ref(h: Int, w: Int, k: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  let ow = w / k
+  let lanes = (h / k) * ow
+  list.map(range(0, len(old)), idx =>
+      if idx < lanes {
+        let r = idx / ow
+        let c = idx % ow
+        round_to(dt, list.fold(range(0, k * k), 0.0 - 1.0 / 0.0, (acc, t) => {
+          let v = x[(r * k + t / k) * w + c * k + t % k]
+          if v > acc { v } else { acc }
+        }))
+      } else {
+        kept(old, idx)
+      })
+}
+
+## `out[2i] = a[i]` and `out[2i + 1] = b[i]` for the first `n` pairs:
+## leetgpu 63 (Interleave). `ins` is `[a, b, old]`.
+pub fn interleave_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), idx =>
+      if idx < 2 * n {
+        round_to(dt, if idx % 2 == 0 { a[idx / 2] } else { b[idx / 2] })
+      } else {
+        kept(old, idx)
+      })
+}
+
+## The luminance of the first `n` pixels of an interleaved RGB buffer:
+## leetgpu 66 (RGB to Grayscale). `ins` is `[x, old]`, `x` three elements a
+## pixel. Red and green are summed first and blue added to that, which is
+## how the kernel brackets it.
+pub fn rgb_gray_ref(n: Int, wr: Float, wg: Float, wb: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        let red = round_to(dt, x[3 * i] * wr)
+        let green = round_to(dt, x[3 * i + 1] * wg)
+        let blue = round_to(dt, x[3 * i + 2] * wb)
+        round_to(dt, round_to(dt, red + green) + blue)
+      } else {
+        kept(old, i)
+      })
+}
+
+## One sweep of the five-point stencil over an `h` by `w` grid: leetgpu 69
+## (Jacobi Stencil). An interior point becomes a quarter of the sum of its
+## four neighbours, summed up, down, left, right in that order; a boundary
+## point keeps its value. `ins` is `[x, old]`.
+pub fn jacobi_ref(h: Int, w: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), idx =>
+      if idx < h * w {
+        let r = idx / w
+        let c = idx % w
+        if r > 0 && r < h - 1 && c > 0 && c < w - 1 {
+          let s = round_to(dt, round_to(dt, round_to(dt, x[idx - w] + x[idx + w]) + x[idx - 1]) + x[idx + 1])
+          round_to(dt, s * 0.25)
+        } else {
+          round_to(dt, x[idx])
+        }
+      } else {
+        kept(old, idx)
+      })
+}
+
+## `c` independent 1D convolutions, one a channel, each with its own `k`
+## taps: leetgpu 90 (Depthwise 1D Convolution). `x` is `c` by `l`, `w` is
+## `c` by `k`, and the output is `c` by `l - k + 1`. `ins` is
+## `[x, w, old]`.
+pub fn depthwise_conv1d_ref(c: Int, l: Int, k: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let w = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  let ol = l - k + 1
+  list.map(range(0, len(old)), idx =>
+      if idx < c * ol {
+        let ch = idx / ol
+        let i = idx % ol
+        list.fold(range(0, k), 0.0, (acc, t) =>
+            round_to(dt, acc + round_to(dt, x[ch * l + i + t] * w[ch * k + t])))
+      } else {
+        kept(old, idx)
+      })
+}
+
+## A `k` by `k` convolution over an `h` by `w` image that keeps the image's
+## size, everything outside it counting as zero: leetgpu 28 (Gaussian
+## Blur), where the weights are the ones the caller uploads. `ins` is
+## `[x, f, old]`. A tap that reaches outside contributes `0.0 * f[t]`
+## rather than being skipped, which is what the kernel's padded load leaves
+## in that lane.
+pub fn gaussian_blur_ref(h: Int, w: Int, k: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let f = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  let half = k / 2
+  list.map(range(0, len(old)), idx =>
+      if idx < h * w {
+        let r = idx / w
+        let c = idx % w
+        list.fold(range(0, k * k), 0.0, (acc, t) => {
+          let rr = r + t / k - half
+          let cc = c + t % k - half
+          let v = if rr < 0 || rr >= h || cc < 0 || cc >= w { 0.0 } else { x[rr * w + cc] }
+          round_to(dt, acc + round_to(dt, v * f[t]))
+        })
+      } else {
+        kept(old, idx)
+      })
+}
+
 ## The reference implementations the fake device answers `launch` with, by
 ## kernel name. Each entry carries the exact number of buffers the device
 ## kernel takes beside its body: three for `vadd` / `vadd_bf16` (two inputs
@@ -1496,4 +1682,32 @@ test "a masked reference rounds its answer to the output buffer's format, like a
   let ins = [[0.1, 0.1], [0.2, 0.2], [0.0, 0.0]]
   assert masked_vadd_ref(1, dts, ins) == [narrow.round_bf16(0.1 + 0.2), 0.0]
   assert masked_copy_ref(1, ["bf16", "bf16"], [[0.1, 0.1], [0.0, 0.0]]) == [narrow.round_bf16(0.1), 0.0]
+}
+
+test "the strided references answer what a reader can check by hand" {
+  let f3 = ["f64", "f64", "f64"]
+  let f2 = ["f64", "f64"]
+  # two taps over three elements: one output lane fewer than the input has,
+  # and the output buffer's third element is the tail the mask keeps
+  assert conv1d_ref(2, 2, f3, [[1.0, 2.0, 3.0], [10.0, 100.0], [0.0, 0.0, 7.0]]) == [210.0, 320.0, 7.0]
+  # a 2x2 kernel picking the two diagonal corners of each window of a 3x3 image
+  assert conv2d_ref(3, 3, 2, f3, [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], [1.0, 0.0, 0.0, 1.0],
+    [0.0, 0.0, 0.0, 0.0, 7.0]]) == [6.0, 8.0, 12.0, 14.0, 7.0]
+  # 2x2 windows of a 4x4 image count up, so each window's maximum is its last element
+  assert max_pool_ref(4, 4, 2, f2, [list.map(range(0, 16), i => to_float(i)), [0.0, 0.0, 0.0, 0.0, 7.0]])
+    == [5.0, 7.0, 13.0, 15.0, 7.0]
+  assert interleave_ref(2, f3, [[1.0, 2.0], [3.0, 4.0], [0.0, 0.0, 0.0, 0.0, 7.0]]) == [1.0, 3.0, 2.0, 4.0, 7.0]
+  # weights that halve the red and quarter the other two: 2/2 + 4/4 + 8/4
+  assert rgb_gray_ref(1, 0.5, 0.25, 0.25, f2, [[2.0, 4.0, 8.0], [0.0, 7.0]]) == [4.0, 7.0]
+  # a 3x3 grid of ones with a nine in the middle: the one interior point
+  # becomes the average of its four neighbours, and the boundary keeps its value
+  assert jacobi_ref(3, 3, f2, [[1.0, 1.0, 1.0, 1.0, 9.0, 1.0, 1.0, 1.0, 1.0], list.map(range(0, 9), _i => 0.0)])
+    == list.map(range(0, 9), _i => 1.0)
+  # two channels, each with its own two taps
+  assert depthwise_conv1d_ref(2, 3, 2, f3, [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [1.0, 10.0, 100.0, 1000.0],
+    [0.0, 0.0, 0.0, 0.0, 7.0]]) == [21.0, 32.0, 5400.0, 6500.0, 7.0]
+  # a 3x3 kernel that sums a row, over a 2x2 image: every lane has a halo,
+  # and what falls outside contributes zero
+  assert gaussian_blur_ref(2, 2, 3, f3, [[1.0, 2.0, 3.0, 4.0],
+    [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]) == [3.0, 3.0, 7.0, 7.0]
 }

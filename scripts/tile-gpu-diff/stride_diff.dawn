@@ -1,0 +1,422 @@
+# Layer 2 for the strided kernels (knife 9), the fifth of these programs
+# after vadd_diff, mask_diff, red_diff and mm_diff: one `!Gpu` program runs
+# each of the nine kernels scripts/tile-golden pins under `with_gpu_real`
+# against the machine's GPU and under `with_gpu_fake` against hand-written
+# host references, and prints what each device answered.
+#
+#   stride_diff <transpose_tail.cubin> <conv1d.cubin> <conv2d.cubin>
+#               <max_pool.cubin> <interleave.cubin> <rgb_gray.cubin>
+#               <jacobi.cubin> <depthwise_conv1d.cubin> <gaussian_blur.cubin>
+#
+# What is new here and nowhere else:
+#
+#   * every kernel is EXACT tier. Nothing here reduces, takes a square root
+#     or calls a transcendental: the arithmetic is `mulf`, `addf` and `maxf`
+#     in a fixed order and only the ADDRESSING is new, so the device's
+#     answer is the reference's bit for bit or the kernel is wrong. That is
+#     the knife's own claim (docs/tile-backend-design.md 6.5's exact tier),
+#     and it is why this program has no tolerance branch to hide behind.
+#   * the layouts are not row-major. `transpose_tail` writes with the two
+#     strides permuted, `max_pool` reads with the window's stride,
+#     `interleave` stores with a stride of two, `rgb_gray` reads three
+#     channels three elements apart, and `depthwise_conv1d` reads a weight
+#     with a stride of zero along one axis and `k` along the other.
+#   * every extent is NOT a multiple of its tile and every two-dimensional
+#     one is RECTANGULAR. Both matter: the first is what the per-axis masks
+#     are for, and the second is what makes a swap of the two strides
+#     visible (see `distinct` below, and run.sh's
+#     stride-row-major-swapped).
+use std/io
+use std/io.{with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, alloc, upload, download, free, launch3, sync,
+  handle_of, transpose_ref, conv1d_ref, conv2d_ref, max_pool_ref, interleave_ref, rgb_gray_ref, jacobi_ref,
+  depthwise_conv1d_ref, gaussian_blur_ref }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a value no kernel
+## here computes, so a lane that still has it is a lane nothing wrote.
+pub const SENTINEL: Float = 0.0 - 12345.678
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const TT_ROWS: Int = 100
+pub const TT_COLS: Int = 60
+pub const TT_TILE: Int = 32
+
+pub const C1_N: Int = 1000
+pub const C1_K: Int = 5
+pub const C1_TILE: Int = 128
+
+pub const C2_H: Int = 40
+pub const C2_W: Int = 36
+pub const C2_K: Int = 3
+pub const C2_TILE: Int = 16
+
+pub const MP_H: Int = 36
+pub const MP_W: Int = 20
+pub const MP_K: Int = 2
+pub const MP_TILE: Int = 16
+
+pub const IL_N: Int = 500
+pub const IL_TILE: Int = 128
+pub const IL_OUT: Int = 1024
+
+pub const RG_N: Int = 1000
+pub const RG_TILE: Int = 128
+pub const RG_OUT: Int = 1024
+pub const RG_R: Float = 0.299
+pub const RG_G: Float = 0.587
+pub const RG_B: Float = 0.114
+
+pub const JC_H: Int = 34
+pub const JC_W: Int = 34
+pub const JC_TILE: Int = 16
+pub const JC_OUT: Int = 1184
+
+pub const DW_C: Int = 6
+pub const DW_L: Int = 100
+pub const DW_K: Int = 3
+pub const DW_TC: Int = 4
+pub const DW_TL: Int = 32
+
+pub const GB_H: Int = 20
+pub const GB_W: Int = 24
+pub const GB_K: Int = 3
+pub const GB_TILE: Int = 16
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+fn release(ts: List[Tensor[F64]]) -> Unit !Gpu = {
+  for t in ts {
+    let _ = free(t)
+  }
+}
+
+fn alloc_all(sizes: List[Int], i: Int, acc: List[Tensor[F64]]) -> Result[List[Tensor[F64]], ForeignError] !Gpu =
+  if i >= len(sizes) {
+    Ok(acc)
+  } else {
+    match alloc(F64, sizes[i]) {
+      Ok(t) -> alloc_all(sizes, i + 1, acc ++ [t])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(ts: List[Tensor[F64]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(ts) {
+    Ok(())
+  } else {
+    match upload(ts[i], data[i]) {
+      Ok(_) -> upload_all(ts, data, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+## One kernel over `data` (the input buffers, then the output buffer's
+## initial contents) on a `gx` by `gy` by `gz` grid, one stage at a time,
+## stopping at the first refusal and saying which stage it was.
+fn stages(kernel: String, gx: Int, gy: Int, gz: Int, data: List[List[Float]]) -> Trace !Gpu = {
+  let sizes = list.map(data, d => len(d))
+  match alloc_all(sizes, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(ts) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(ts, data, 0) {
+        Err(e) -> {
+          release(ts)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match launch3(kernel, gx, gy, gz, list.map(ts, handle_of)) {
+            Err(e) -> {
+              release(ts)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = sync()
+              let r = download(ts[len(ts) - 1])
+              release(ts)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn same_bits(got: Option[List[Float]], want: Option[List[Float]]) -> Bool = match (got, want) {
+  (Some(a), Some(b)) -> len(a) == len(b) && list.all(range(0, len(a)), i => to_string(a[i]) == to_string(b[i]))
+  _ -> false
+}
+
+## The number of lanes the two answers differ in, and the first one, as a
+## line: what a wrong stride or a mask one lane short looks like from here.
+fn misses(got: Option[List[Float]], want: Option[List[Float]]) -> String = match (got, want) {
+  (Some(a), Some(b)) ->
+    if len(a) != len(b) {
+      "lengths ${len(a)} and ${len(b)}"
+    } else {
+      let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+      if len(bad) == 0 {
+        "none"
+      } else {
+        "${len(bad)} of ${len(a)} lanes, first at ${bad[0]}: ${a[bad[0]]} vs ${b[bad[0]]}"
+      }
+    }
+  _ -> "-"
+}
+
+## The verdict for one kernel: `identical:exact` (bit for bit),
+## `differ:result`, or `blocked:<kind>@<stage>` where the driver stopped.
+## There is no tolerance branch: every kernel here is exact tier.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if same_bits(real.result, fake.result) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+# ---- the corpora ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+# The number of tile blocks it takes to cover `n` lanes `tile` at a time.
+fn blocks(n: Int, tile: Int) -> Int = (n + tile - 1) / tile
+
+# DISTINCT values, one per element, and the reason every two-dimensional
+# corpus here is RECTANGULAR. A transpose of a SQUARE matrix hides a swap of
+# the two strides: the tile is read transposed and written transposed, the
+# two cancel, and the answer is right for the wrong reason. Make the matrix
+# 100 by 60 and the two bases stop agreeing, so the swap moves the answer.
+# The same holds for every other kernel here whose two strides differ.
+fn distinct(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i) + 0.5)
+
+# Values that are NOT on the binary grid: tenths. Every sum and product
+# below is one IEEE operation on each side, in the same order, so these
+# compare bit for bit anyway; what they add is that a REASSOCIATION would
+# not (a tap folded in another order is a different Float here, and the
+# same corpus in whole numbers would forgive it).
+fn tenths(n: Int, step: Int, span: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float((i * step) % span - span / 2) * 0.1)
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String =
+  ["transpose_tail", "conv1d", "conv2d", "max_pool", "interleave", "rgb_gray", "jacobi", "depthwise_conv1d",
+    "gaussian_blur"][i]
+
+## The kernels of the tolerance tier: NONE. Every kernel here computes with
+## `mulf`, `addf` and `maxf` in an order its reference repeats exactly, so
+## every one is held to the bit.
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier` column
+## of scripts/leetgpu-diff/problems.txt against it.
+pub fn tolerance_tier() -> List[String] = []
+
+## The grid each kernel was recorded for, as (gx, gy, gz).
+fn case_grid(i: Int) -> (Int, Int, Int) = {
+  let name = case_name(i)
+  if name == "transpose_tail" {
+    (blocks(TT_ROWS, TT_TILE), blocks(TT_COLS, TT_TILE), 1)
+  } else if name == "conv1d" {
+    (blocks(C1_N - C1_K + 1, C1_TILE), 1, 1)
+  } else if name == "conv2d" {
+    (blocks(C2_H - C2_K + 1, C2_TILE), blocks(C2_W - C2_K + 1, C2_TILE), 1)
+  } else if name == "max_pool" {
+    (blocks(MP_H / MP_K, MP_TILE), blocks(MP_W / MP_K, MP_TILE), 1)
+  } else if name == "interleave" {
+    (blocks(IL_N, IL_TILE), 1, 1)
+  } else if name == "rgb_gray" {
+    (blocks(RG_N, RG_TILE), 1, 1)
+  } else if name == "jacobi" {
+    (blocks(JC_H, JC_TILE), blocks(JC_W, JC_TILE), 1)
+  } else if name == "depthwise_conv1d" {
+    (blocks(DW_C, DW_TC), blocks(DW_L - DW_K + 1, DW_TL), 1)
+  } else {
+    (blocks(GB_H, GB_TILE), blocks(GB_W, GB_TILE), 1)
+  }
+}
+
+## The buffers each is handed: its inputs, then the output buffer's initial
+## contents. Every output buffer but the transpose's is LONGER than the
+## answer, so the sentinel in its tail says whether a mask wrote where it
+## should not have; the transpose covers its output exactly.
+fn case_data(i: Int) -> List[List[Float]] = {
+  let name = case_name(i)
+  if name == "transpose_tail" {
+    [distinct(TT_ROWS * TT_COLS), sentinel_buffer(TT_ROWS * TT_COLS)]
+  } else if name == "conv1d" {
+    [tenths(C1_N, 7, 41), tenths(C1_K, 3, 11), sentinel_buffer(1024)]
+  } else if name == "conv2d" {
+    [tenths(C2_H * C2_W, 5, 29), tenths(C2_K * C2_K, 3, 13), sentinel_buffer(1308)]
+  } else if name == "max_pool" {
+    [distinct(MP_H * MP_W), sentinel_buffer(192)]
+  } else if name == "interleave" {
+    [distinct(IL_N), tenths(IL_N, 5, 23), sentinel_buffer(IL_OUT)]
+  } else if name == "rgb_gray" {
+    [tenths(3 * RG_N, 7, 31), sentinel_buffer(RG_OUT)]
+  } else if name == "jacobi" {
+    [tenths(JC_H * JC_W, 5, 29), sentinel_buffer(JC_OUT)]
+  } else if name == "depthwise_conv1d" {
+    [tenths(DW_C * DW_L, 7, 37), tenths(DW_C * DW_K, 3, 11), sentinel_buffer(600)]
+  } else {
+    [tenths(GB_H * GB_W, 5, 29), tenths(GB_K * GB_K, 3, 13), sentinel_buffer(496)]
+  }
+}
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] = {
+  let name = case_name(i)
+  if name == "transpose_tail" {
+    map.from([("transpose_tail", (2, (dts, ins) => transpose_ref(TT_ROWS, TT_COLS, dts, ins)))])
+  } else if name == "conv1d" {
+    map.from([("conv1d", (3, (dts, ins) => conv1d_ref(C1_N - C1_K + 1, C1_K, dts, ins)))])
+  } else if name == "conv2d" {
+    map.from([("conv2d", (3, (dts, ins) => conv2d_ref(C2_H, C2_W, C2_K, dts, ins)))])
+  } else if name == "max_pool" {
+    map.from([("max_pool", (2, (dts, ins) => max_pool_ref(MP_H, MP_W, MP_K, dts, ins)))])
+  } else if name == "interleave" {
+    map.from([("interleave", (3, (dts, ins) => interleave_ref(IL_N, dts, ins)))])
+  } else if name == "rgb_gray" {
+    map.from([("rgb_gray", (2, (dts, ins) => rgb_gray_ref(RG_N, RG_R, RG_G, RG_B, dts, ins)))])
+  } else if name == "jacobi" {
+    map.from([("jacobi", (2, (dts, ins) => jacobi_ref(JC_H, JC_W, dts, ins)))])
+  } else if name == "depthwise_conv1d" {
+    map.from([("depthwise_conv1d", (3, (dts, ins) => depthwise_conv1d_ref(DW_C, DW_L, DW_K, dts, ins)))])
+  } else {
+    map.from([("gaussian_blur", (3, (dts, ins) => gaussian_blur_ref(GB_H, GB_W, GB_K, dts, ins)))])
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones. The
+## tail is where an unmasked write shows: it is the sentinel the buffer was
+## uploaded with unless the kernel went past its answer.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("stride_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  let count = 9
+  if len(argv) != count {
+    io.eprintln("usage: stride_diff <transpose_tail.cubin> <conv1d.cubin> <conv2d.cubin> <max_pool.cubin>"
+        ++ " <interleave.cubin> <rgb_gray.cubin> <jacobi.cubin> <depthwise_conv1d.cubin> <gaussian_blur.cubin>")
+    io.exit(2)
+  }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let data = case_data(i)
+    let (gx, gy, gz) = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, data))
+    let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, data))
+    let v = verdict(fake, real)
+    io.println("kernel ${name} tier=exact buffers=${len(data)} out_lanes=${len(data[len(data) - 1])}"
+        ++ " grid=(${gx}, ${gy}, ${gz})")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  miss  ${misses(real.result, fake.result)}")
+    if real.note != "" { io.println("  note  ${real.note}") }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+}
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
