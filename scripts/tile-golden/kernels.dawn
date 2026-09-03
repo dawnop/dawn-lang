@@ -8,15 +8,16 @@
 # which run.sh holds against toolchain.txt).
 use std/io
 use std/io.{with_fs_real, write_bytes}
-use std/gpu.{F64, F32, BF16, I32}
+use std/gpu.{F64, F32, BF16, F16, I32, I8}
 use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
   store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, in_range, axis_mask,
   mmaf, addf, sub, mul, div,
   maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
   d_for, d_for3, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
   spread, d_reduce, d_reduce_dim, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select,
-  i_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i, shr_u,
-  neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
+  i_const, i8_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i,
+  shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
+  float_to_float, ext_u8, trunc_u8, mmai,
   d_reduce_i, s_addi }
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
@@ -1084,6 +1085,209 @@ fn int_ops(x: Param[I32], y: Param[I32], out: Param[I32]) -> Unit !Dev = {
   store_masked(out, blk, s, m, xor_i(s, c14, bc))
 }
 
+# ---- the wide kernels (knife 11) ----
+#
+# What is new here is on the HOST side, not in the tile instructions: a
+# kernel may fill more than one buffer, and it may write the buffer it read.
+# Neither is visible in the Tile IR -- a store is a store, and the entry
+# signature does not say which parameters are outputs -- so the claim lives
+# entirely in std/gpu's references, which now say WHICH argument positions
+# moved, and in the device, which is what says whether the kernel agrees.
+#
+# The formats are new as well: `f16` tiles (and the `ftof` that widens them),
+# and `i8` tiles under a `u8` buffer. There is no `u8` TILE in the dialect;
+# a kernel over an unsigned octet buffer declares `Param[I8]` and widens
+# with `exti`, whose UNSIGNED signedness is where the format's reading
+# lives.
+
+const WIDE_N: Int = 1000
+const WIDE_TILE: Int = 128
+
+# Two outputs from two inputs: `sum` gets a + b and `diff` gets a - b, over
+# the same masked lanes. No leetgpu problem is this; it is the kernel that
+# gives the multi-output path a golden and a device, the way `int_ops` did
+# for the integer opcodes. A device that wrote only its last argument would
+# leave `sum` holding the sentinel.
+fn sum_diff(a: Param[F64], b: Param[F64], sum: Param[F64], diff: Param[F64]) -> Unit !Dev = {
+  let s = [WIDE_TILE]
+  let blk = tile_at(block_id(0), WIDE_TILE)
+  let m = tail_mask(blk, s, WIDE_N)
+  let z = f_const(F64, s, 0.0)
+  let ta = load_masked(a, blk, s, m, z)
+  let tb = load_masked(b, blk, s, m, z)
+  store_masked(sum, blk, s, m, addf(F64, s, ta, tb))
+  store_masked(diff, blk, s, m, sub(F64, s, ta, tb))
+}
+
+# In-place reversal of a vector: leetgpu 19 (Reverse Array). ONE parameter,
+# read and written.
+#
+# Each block owns a tile of the FIRST HALF and the mirror of that tile in
+# the second half: it loads both, then stores each where the other was. The
+# mirror is a stride of -1 from `REV_N - 1 - base`, which is the first use
+# of a negative stride in this file and needs nothing from the ladder that a
+# positive one does not. The grid covers `REV_N / 2` lanes, so every element
+# is touched exactly once and no two blocks touch the same one.
+#
+# REV_N is EVEN. An odd length would leave the middle element to a block
+# that does not exist, and the reference says so as well.
+const REV_N: Int = 1000
+const REV_TILE: Int = 128
+
+fn reverse(x: Param[F64]) -> Unit !Dev = {
+  let s = [REV_TILE]
+  let blk = tile_at(block_id(0), REV_TILE)
+  let m = tail_mask(blk, s, REV_N / 2)
+  let z = f_const(F64, s, 0.0)
+  let fwd = load_masked(x, blk, s, m, z)
+  let back = idx_add(idx_const(REV_N - 1), idx_mul(blk, idx_const(0 - 1)))
+  let rev = load_strided_masked(x, back, s, [0 - 1], m, z)
+  store_strided_masked(x, back, s, [0 - 1], m, fwd)
+  store_masked(x, blk, s, m, rev)
+}
+
+# In-place colour inversion of a u8 image: leetgpu 7 (Color Inversion). ONE
+# parameter, read and written, and the first kernel over an 8-bit buffer.
+#
+# The arithmetic is done at i32: `exti` widens each octet UNSIGNED (so a
+# byte holding 200 is 200 and not -56), the subtraction happens there, and
+# `trunci` puts the low octet back. Doing it in i8 would need an i8 constant
+# 255, which is not an i8 value; doing it unsigned at 8 bits would need a
+# `u8` tile, which the dialect does not have.
+const INV_N: Int = 1000
+const INV_TILE: Int = 128
+
+fn invert(img: Param[I8]) -> Unit !Dev = {
+  let s = [INV_TILE]
+  let blk = tile_at(block_id(0), INV_TILE)
+  let m = tail_mask(blk, s, INV_N)
+  let t = load_masked(img, blk, s, m, i8_const(s, 0))
+  store_masked(img, blk, s, m, trunc_u8(s, sub_i(s, i_const(s, 255), ext_u8(s, t))))
+}
+
+# `((a + b) * a) - b` over f16 tiles: the f16 twin of `elemops` and
+# `int_ops`, and no leetgpu problem. Three operations the double-rounding
+# theorem covers, each landing its result in an f16 tile, so every one of
+# them is `narrow.round_fp16` of the exact answer and the whole kernel is
+# bit-exact against a host reference that rounds after each step.
+const F16E_N: Int = 1000
+const F16E_TILE: Int = 128
+
+fn f16_ops(a: Param[F16], b: Param[F16], out: Param[F16]) -> Unit !Dev = {
+  let s = [F16E_TILE]
+  let blk = tile_at(block_id(0), F16E_TILE)
+  let m = tail_mask(blk, s, F16E_N)
+  let z = f_const(F16, s, 0.0)
+  let ta = load_masked(a, blk, s, m, z)
+  let tb = load_masked(b, blk, s, m, z)
+  store_masked(out, blk, s, m, sub(F16, s, mul(F16, s, addf(F16, s, ta, tb), ta), tb))
+}
+
+# The dot product of two f16 vectors into an f64 answer: leetgpu 58 (FP16
+# Dot Product), and the one client of `ftof`.
+#
+# The operands are f16 and the arithmetic is not: each tile is widened with
+# `ftof` (exact in this direction, f16 to f64) and the product and the
+# reduction happen at f64. That is what the problem asks for -- a dot
+# product of half-precision inputs accumulated at full precision -- and it
+# is also what makes a bit-exact comparison possible at all, since an f16
+# accumulator over a thousand lanes would lose more than any tolerance
+# worth writing down.
+const DF16_N: Int = 1000
+const DF16_TILE: Int = 1024
+
+fn dot_f16(a: Param[F16], b: Param[F16], out: Param[F64]) -> Unit !Dev = {
+  let s = [DF16_TILE]
+  let i = block_id(0)
+  let blk = tile_at(i, DF16_TILE)
+  let m = tail_mask(blk, s, DF16_N)
+  let z = f_const(F16, s, 0.0)
+  let ta = float_to_float(F16, F64, s, load_masked(a, blk, s, m, z))
+  let tb = float_to_float(F16, F64, s, load_masked(b, blk, s, m, z))
+  let prod = mul(F64, s, ta, tb)
+  store(out, tile_at(i, 1), [1],
+    spread(F64, [1], d_reduce(F64, s, prod, 0.0, (e, acc) => s_addf(F64, e, acc))))
+}
+
+# The f16 GEMM: leetgpu 22. Knife 8's `matmul` at f16, with an f16
+# accumulator (the dialect allows f16 operands with an f16 or an f32
+# result; this surface's `mmaf` takes one format for all three).
+#
+# `--remarks=tensorcore` says this one DOES reach a tensor core on sm_86
+# (`Tensor-core SM80, Shape = [16, 8, 16]`), which knife 8 found only bf16
+# did among the formats it tried.
+const MMF_M: Int = 64
+const MMF_N: Int = 64
+const MMF_K: Int = 64
+const MMF_T: Int = 32
+
+fn matmul_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let a_row = idx_mul(bm, idx_const(MMF_T * MMF_K))
+  let b_col = idx_mul(bn, idx_const(MMF_T))
+  let zero = f_const(F16, [MMF_T, MMF_T], 0.0)
+  let acc = d_for(idx_const(0), idx_const(MMF_K / MMF_T), idx_const(1), zero, (k, sofar) => {
+    let ta = load_strided(a, idx_add(a_row, idx_mul(k, idx_const(MMF_T))), [MMF_T, MMF_T], [MMF_K, 1])
+    let tb = load_strided(b, idx_add(b_col, idx_mul(k, idx_const(MMF_T * MMF_N))), [MMF_T, MMF_T], [MMF_N, 1])
+    mmaf(F16, MMF_T, MMF_T, MMF_T, ta, tb, sofar)
+  })
+  store_strided(c, idx_add(idx_mul(bm, idx_const(MMF_T * MMF_N)), b_col), [MMF_T, MMF_T], [MMF_N, 1], acc)
+}
+
+# The batched f16 GEMM: leetgpu 57. `batched_matmul` at f16, the batch on
+# the grid's third axis.
+const BMF_B: Int = 2
+const BMF_M: Int = 32
+const BMF_N: Int = 32
+const BMF_K: Int = 32
+const BMF_T: Int = 16
+
+fn batched_matmul_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let bb = block_id(2)
+  let a_row = idx_add(idx_mul(bb, idx_const(BMF_M * BMF_K)), idx_mul(bm, idx_const(BMF_T * BMF_K)))
+  let b_col = idx_add(idx_mul(bb, idx_const(BMF_K * BMF_N)), idx_mul(bn, idx_const(BMF_T)))
+  let zero = f_const(F16, [BMF_T, BMF_T], 0.0)
+  let acc = d_for(idx_const(0), idx_const(BMF_K / BMF_T), idx_const(1), zero, (k, sofar) => {
+    let ta = load_strided(a, idx_add(a_row, idx_mul(k, idx_const(BMF_T))), [BMF_T, BMF_T], [BMF_K, 1])
+    let tb = load_strided(b, idx_add(b_col, idx_mul(k, idx_const(BMF_T * BMF_N))), [BMF_T, BMF_T], [BMF_N, 1])
+    mmaf(F16, BMF_T, BMF_T, BMF_T, ta, tb, sofar)
+  })
+  let c_base = idx_add(idx_add(idx_mul(bb, idx_const(BMF_M * BMF_N)), idx_mul(bm, idx_const(BMF_T * BMF_N))),
+    idx_mul(bn, idx_const(BMF_T)))
+  store_strided(c, c_base, [BMF_T, BMF_T], [BMF_N, 1], acc)
+}
+
+# The int8 GEMM: leetgpu 32 (INT8 Quantized MatMul). `mmai`, whose operands
+# are i8 tiles and whose accumulator and result are i32 ones, so the three
+# buffers are two i8 and one i32.
+#
+# Bit-exact by ALGEBRA, not by corpus: every partial product of two i8
+# values fits in fifteen bits and the accumulator is i32, so the sum over
+# `k` is one integer whatever order the device folds it in. That is the
+# same argument knife 10's integer family rests on, and it is why an
+# `mmai` kernel is exact tier where an `mmaf` one cannot be.
+const MMI_M: Int = 64
+const MMI_N: Int = 64
+const MMI_K: Int = 64
+const MMI_T: Int = 32
+
+fn matmul_i8(a: Param[I8], b: Param[I8], c: Param[I32]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let a_row = idx_mul(bm, idx_const(MMI_T * MMI_K))
+  let b_col = idx_mul(bn, idx_const(MMI_T))
+  let zero = i_const([MMI_T, MMI_T], 0)
+  let acc = d_for(idx_const(0), idx_const(MMI_K / MMI_T), idx_const(1), zero, (k, sofar) => {
+    let ta = load_strided(a, idx_add(a_row, idx_mul(k, idx_const(MMI_T))), [MMI_T, MMI_T], [MMI_K, 1])
+    let tb = load_strided(b, idx_add(b_col, idx_mul(k, idx_const(MMI_T * MMI_N))), [MMI_T, MMI_T], [MMI_N, 1])
+    mmai(MMI_T, MMI_T, MMI_T, ta, tb, sofar)
+  })
+  store_strided(c, idx_add(idx_mul(bm, idx_const(MMI_T * MMI_N)), b_col), [MMI_T, MMI_T], [MMI_N, 1], acc)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -1181,6 +1385,28 @@ fn trace(name: String) -> TileProg = match name {
   "int_ops" ->
     trace_kernel("int_ops", ["i32", "i32", "i32"],
       () => int_ops(param(I32, 0), param(I32, 1), param(I32, 2)))
+  "sum_diff" ->
+    trace_kernel("sum_diff", ["f64", "f64", "f64", "f64"],
+      () => sum_diff(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "reverse" ->
+    trace_kernel("reverse", ["f64"], () => reverse(param(F64, 0)))
+  "invert" ->
+    trace_kernel("invert", ["i8"], () => invert(param(I8, 0)))
+  "f16_ops" ->
+    trace_kernel("f16_ops", ["f16", "f16", "f16"],
+      () => f16_ops(param(F16, 0), param(F16, 1), param(F16, 2)))
+  "dot_f16" ->
+    trace_kernel("dot_f16", ["f16", "f16", "f64"],
+      () => dot_f16(param(F16, 0), param(F16, 1), param(F64, 2)))
+  "matmul_f16" ->
+    trace_kernel("matmul_f16", ["f16", "f16", "f16"],
+      () => matmul_f16(param(F16, 0), param(F16, 1), param(F16, 2)))
+  "batched_matmul_f16" ->
+    trace_kernel("batched_matmul_f16", ["f16", "f16", "f16"],
+      () => batched_matmul_f16(param(F16, 0), param(F16, 1), param(F16, 2)))
+  "matmul_i8" ->
+    trace_kernel("matmul_i8", ["i8", "i8", "i32"],
+      () => matmul_i8(param(I8, 0), param(I8, 1), param(I32, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -1206,6 +1432,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax"
       ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
       ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
-      ++ "|count_eq|subarray_sum|rainbow|int_ops>"
+      ++ "|count_eq|subarray_sum|rainbow|int_ops"
+      ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

@@ -124,7 +124,8 @@ kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops
   monte_carlo rms_norm silu sigmoid ppo_loss dpo_loss mathops foldif argmax
   matmul batched_matmul transpose layer_norm batch_norm group_norm fused_rms_norm
   transpose_tail conv1d conv2d max_pool interleave rgb_gray jacobi depthwise_conv1d gaussian_blur
-  count_eq subarray_sum rainbow int_ops)
+  count_eq subarray_sum rainbow int_ops
+  sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matmul_i8)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

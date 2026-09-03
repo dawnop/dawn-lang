@@ -1,0 +1,529 @@
+# Layer 2 for the wide kernels (knife 11), the seventh of these programs
+# after vadd_diff, mask_diff, red_diff, mm_diff, stride_diff and int_diff:
+# one `!Gpu` program runs each of the eight kernels scripts/tile-golden pins
+# under `with_gpu_real` against the machine's GPU and under `with_gpu_fake`
+# against hand-written host references, and prints what each device
+# answered.
+#
+#   wide_diff <sum_diff.cubin> <reverse.cubin> <invert.cubin> <f16_ops.cubin>
+#             <dot_f16.cubin> <matmul_f16.cubin> <batched_matmul_f16.cubin>
+#             <matmul_i8.cubin>
+#
+# What is new here and nowhere else:
+#
+#   * a case has MORE THAN ONE buffer to read back, and the buffers of one
+#     case have DIFFERENT formats. Every earlier program allocates one
+#     format and downloads the last argument; here `sum_diff` fills two
+#     buffers, `dot_f16` takes two f16 inputs into an f64 output, and
+#     `matmul_i8` takes two i8 inputs into an i32 one.
+#   * three kernels write a buffer they also READ (`reverse`, `invert`, and
+#     `sum_diff` does not, which is the control). The reference says so by
+#     naming that argument position, and the comparison downloads it. A
+#     device that wrote its answer somewhere else would still pass every
+#     earlier program here, and that is what run.sh's inplace-writes-copy
+#     turns into a red run.
+#   * the f16, i8 and u8 buffer formats. f16 and bf16 are the same WIDTH
+#     and a different codec, which is invisible to `round_to` (it rounds
+#     through narrow either way) and visible only on the device: the
+#     f16-rounds-like-bf16 mutant lives on `f16_ops`'s corpus below.
+#
+# Every case here is EXACT tier, and three different arguments earn it:
+#
+#   * `sum_diff`, `reverse`, `invert` and `f16_ops` do one IEEE (or one
+#     integer) operation per lane in the same order on both sides. Nothing
+#     is reassociated, so nothing has to be chosen.
+#   * `matmul_i8` is exact by ALGEBRA, the way knife 10's integer family
+#     is: every partial product of two i8 values fits in fifteen bits, the
+#     accumulator is i32, and integer addition is associative, so the
+#     unspecified fold over `k` answers what a left fold does.
+#   * `dot_f16`, `matmul_f16` and `batched_matmul_f16` are exact by CORPUS,
+#     and this is the one place the choice is doing real work. The plan for
+#     this knife expected the f16 GEMM to be a tolerance-tier kernel; it
+#     cannot be. `mmaf` with an f16 accumulator rounds after every step of
+#     `k`, and ONE f16 rounding is already up to 2^-11 (4.9e-4) relative,
+#     forty-nine times the tier's own rtol of 1e-5. No fold order and no
+#     corpus of general values could bring it inside. So the corpora below
+#     are chosen so that every partial sum is EXACTLY representable at the
+#     accumulator's width -- multiples of a quarter, bounded well under
+#     2048 quarters -- and then the fold order cannot show at all and the
+#     comparison is bit for bit. The cost is stated rather than hidden:
+#     what these three cases test is the data path, the layouts, the grid
+#     and `ftof`, and not f16's rounding under accumulation, which no
+#     verdict at this tier could hold.
+#
+# `f16_ops` is where f16's rounding IS tested: its corpus is deliberately
+# off the binary16 grid, on both the way in (the upload rounds) and after
+# each of the three operations (the tile rounds).
+use std/io
+use std/io.{with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, sum_diff_ref, reverse_ref, invert_ref,
+  f16_ops_ref, dot_f16_ref, matmul_ref, batched_matmul_ref }
+use std/list
+use std/map
+use std/narrow
+
+## The sentinel every output buffer holds before a launch: a value no kernel
+## here computes, so a lane that still has it is a lane nothing wrote. It
+## has to be representable in EVERY format a case allocates, and the u8
+## buffers are the tight one, so it is a small non-negative integer rather
+## than the large negative number the other programs use.
+pub const SENTINEL: Float = 7.0
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const WIDE_N: Int = 1000
+pub const WIDE_TILE: Int = 128
+pub const WIDE_BUF: Int = 1024
+
+pub const REV_N: Int = 1000
+pub const REV_TILE: Int = 128
+
+pub const INV_N: Int = 1000
+pub const INV_TILE: Int = 128
+
+pub const F16E_N: Int = 1000
+pub const F16E_TILE: Int = 128
+
+pub const DF16_N: Int = 1000
+
+pub const MMF: Int = 64
+pub const MMF_T: Int = 32
+
+pub const BMF_B: Int = 2
+pub const BMF: Int = 32
+pub const BMF_T: Int = 16
+
+pub const MMI: Int = 64
+pub const MMI_T: Int = 32
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  results: Option[List[List[Float]]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", results: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order. Written
+# as recursion rather than a `for` with `?` in it: on the C backend a `?`
+# that returns out of a loop body leaves the loop's binding live and the
+# reference counter refuses the program.
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn download_all(hs: List[Int], reads: List[Int], i: Int, acc: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu =
+  if i >= len(reads) {
+    Ok(acc)
+  } else {
+    match gpu.gpu_download(hs[reads[i]]) {
+      Ok(v) -> download_all(hs, reads, i + 1, acc ++ [v])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a `gx`
+## by `gy` by `gz` grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. `reads` are the argument positions to
+## download afterwards, which for an in-place kernel is a position that was
+## also an input.
+##
+## The operations are `gpu`'s raw ones rather than the typed `alloc` /
+## `upload` / `download`, because a case's buffers do not share a format and
+## `Tensor[D]` is one format per handle. The length check `upload` makes
+## above the effect is not skipped: every buffer here is allocated with the
+## length of the data that is about to go into it.
+fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Float])],
+  reads: List[Int]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, gy, gz, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = download_all(hs, reads, 0, [])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                results: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn same_lanes(a: List[Float], b: List[Float]) -> Bool =
+  len(a) == len(b) && list.all(range(0, len(a)), i => to_string(a[i]) == to_string(b[i]))
+
+## Whether EVERY buffer read back agrees, bit for bit. A kernel with two
+## outputs is identical only when both are: a device that filled one and
+## left the other holding the sentinel differs here and nowhere else.
+fn same_bits(got: Option[List[List[Float]]], want: Option[List[List[Float]]]) -> Bool = match (got, want) {
+  (Some(a), Some(b)) -> len(a) == len(b) && list.all(range(0, len(a)), i => same_lanes(a[i], b[i]))
+  _ -> false
+}
+
+# The lanes one buffer differs in, and the first of them.
+fn miss_one(a: List[Float], b: List[Float]) -> String =
+  if len(a) != len(b) {
+    "lengths ${len(a)} and ${len(b)}"
+  } else {
+    let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+    if len(bad) == 0 {
+      "none"
+    } else {
+      "${len(bad)} of ${len(a)} lanes, first at ${bad[0]}: ${a[bad[0]]} vs ${b[bad[0]]}"
+    }
+  }
+
+## One line per buffer read back, so a two-output kernel says which of the
+## two moved.
+fn misses(got: Option[List[List[Float]]], want: Option[List[List[Float]]], reads: List[Int]) -> String =
+  match (got, want) {
+    (Some(a), Some(b)) ->
+      if len(a) != len(b) {
+        "read back ${len(a)} buffer(s) and ${len(b)}"
+      } else {
+        list.fold(range(0, len(a)), "", (acc, i) => {
+          let sep = if acc == "" { "" } else { "; " }
+          acc ++ sep ++ "arg${reads[i]}: " ++ miss_one(a[i], b[i])
+        })
+      }
+    _ -> "-"
+  }
+
+## The verdict for one kernel: `identical:exact` (bit for bit, every buffer
+## read back), `differ:result`, or `blocked:<kind>@<stage>` where the driver
+## stopped. There is no tolerance branch: every kernel here is exact tier,
+## for the three reasons the header gives.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if same_bits(real.results, fake.results) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+# ---- the corpora ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+# The number of tile blocks it takes to cover `n` lanes `tile` at a time.
+fn blocks(n: Int, tile: Int) -> Int = (n + tile - 1) / tile
+
+# DISTINCT values, tenths, one per element: off the binary grid, so a lane
+# that landed in the wrong place is visible and a reassociation would be
+# too. `sum_diff` and `reverse` take these.
+fn tenths(n: Int, base: Float) -> List[Float] = list.map(range(0, n), i => base + to_float(i) / 10.0)
+
+# `n` octet values covering the WHOLE u8 range including both ends: 0 and
+# 255 are the two `255 - x` maps to each other, and 128 is the value an i8
+# reading would call -128. A corpus of the low half alone would not tell an
+# unsigned widening from a signed one.
+fn octets(n: Int) -> List[Float] = list.map(range(0, n), i => to_float((i * 37) % 256))
+
+# `n` values OFF the binary16 grid, and off it in a way an upload cannot
+# repair: tenths again, scaled so the chain `((a + b) * a) - b` stays well
+# inside binary16's range (its largest finite value is 65504, and the
+# products here are under 400). This is the corpus f16-rounds-like-bf16
+# lives on: bf16 and f16 round these to different numbers, and nothing
+# below layer 2 can see which one the device holds.
+fn off_grid_f16(n: Int, base: Float) -> List[Float] =
+  list.map(range(0, n), i => narrow.round_fp16(base + to_float(i % 173) / 10.0))
+
+# `n` small INTEGER values in [-64, 64]: exact in binary16, and their
+# products and sums are exact in binary64, so `dot_f16`'s reduction answers
+# one number whatever order the device folds it in.
+fn small_ints(n: Int, a: Int, b: Int) -> List[Float] = list.map(range(0, n), i => to_float((i * a + b) % 129 - 64))
+
+# `n` values that are multiples of a HALF in [-2, 2]: exact in binary16,
+# and so is every product (a multiple of a quarter in [-4, 4]) and every
+# partial sum over `k` of them (at most `4 * k` quarters, and 2048 quarters
+# is where binary16's integers stop). With k at 64 that is 1024, half the
+# room. The f16 GEMMs' corpus, and the reason they are exact tier.
+fn halves(n: Int, a: Int, b: Int) -> List[Float] = list.map(range(0, n), i => to_float((i * a + b) % 9 - 4) / 2.0)
+
+# `n` i8 values spanning the whole signed octet range but never -128: the
+# corpus is a product, and while nothing here overflows, leaving the one
+# value whose negation is itself out of the data keeps the reference's
+# arithmetic ordinary.
+fn i8s(n: Int, a: Int, b: Int) -> List[Float] = list.map(range(0, n), i => to_float((i * a + b) % 255 - 127))
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String =
+  ["sum_diff", "reverse", "invert", "f16_ops", "dot_f16", "matmul_f16", "batched_matmul_f16", "matmul_i8"][i]
+
+## The kernels of the tolerance tier: NONE. See the header for the three
+## arguments that earn the exact tier here, and for what the third one
+## costs.
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier` column
+## of scripts/leetgpu-diff/problems.txt against it.
+pub fn tolerance_tier() -> List[String] = []
+
+## The grid each kernel was recorded for, as (gx, gy, gz).
+fn case_grid(i: Int) -> (Int, Int, Int) = {
+  let name = case_name(i)
+  if name == "sum_diff" {
+    (blocks(WIDE_N, WIDE_TILE), 1, 1)
+  } else if name == "reverse" {
+    (blocks(REV_N / 2, REV_TILE), 1, 1)
+  } else if name == "invert" {
+    (blocks(INV_N, INV_TILE), 1, 1)
+  } else if name == "f16_ops" {
+    (blocks(F16E_N, F16E_TILE), 1, 1)
+  } else if name == "dot_f16" {
+    (1, 1, 1)
+  } else if name == "matmul_f16" {
+    (MMF / MMF_T, MMF / MMF_T, 1)
+  } else if name == "batched_matmul_f16" {
+    (BMF / BMF_T, BMF / BMF_T, BMF_B)
+  } else {
+    (MMI / MMI_T, MMI / MMI_T, 1)
+  }
+}
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order. An in-place kernel has one buffer that is both.
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let name = case_name(i)
+  if name == "sum_diff" {
+    [("f64", tenths(WIDE_N, 1.0)), ("f64", tenths(WIDE_N, 0.0 - 500.0)),
+      ("f64", sentinel_buffer(WIDE_BUF)), ("f64", sentinel_buffer(WIDE_BUF))]
+  } else if name == "reverse" {
+    [("f64", tenths(REV_N, 3.0) ++ sentinel_buffer(WIDE_BUF - REV_N))]
+  } else if name == "invert" {
+    [("u8", octets(INV_N) ++ sentinel_buffer(WIDE_BUF - INV_N))]
+  } else if name == "f16_ops" {
+    [("f16", off_grid_f16(F16E_N, 0.5)), ("f16", off_grid_f16(F16E_N, 0.0 - 3.25)),
+      ("f16", sentinel_buffer(WIDE_BUF))]
+  } else if name == "dot_f16" {
+    [("f16", small_ints(DF16_N, 7, 3)), ("f16", small_ints(DF16_N, 11, 5)),
+      ("f64", sentinel_buffer(8))]
+  } else if name == "matmul_f16" {
+    [("f16", halves(MMF * MMF, 5, 1)), ("f16", halves(MMF * MMF, 3, 2)),
+      ("f16", sentinel_buffer(MMF * MMF))]
+  } else if name == "batched_matmul_f16" {
+    [("f16", halves(BMF_B * BMF * BMF, 5, 1)), ("f16", halves(BMF_B * BMF * BMF, 3, 2)),
+      ("f16", sentinel_buffer(BMF_B * BMF * BMF))]
+  } else {
+    [("i8", i8s(MMI * MMI, 7, 1)), ("i8", i8s(MMI * MMI, 13, 5)),
+      ("i32", sentinel_buffer(MMI * MMI))]
+  }
+}
+
+## The argument positions to download after the launch. For `reverse` and
+## `invert` that is position 0, which is also the input: the whole of what
+## "in place" means on the host side.
+fn case_reads(i: Int) -> List[Int] = {
+  let name = case_name(i)
+  if name == "sum_diff" {
+    [2, 3]
+  } else if name == "reverse" {
+    [0]
+  } else if name == "invert" {
+    [0]
+  } else {
+    [2]
+  }
+}
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
+  let name = case_name(i)
+  if name == "sum_diff" {
+    map.from([("sum_diff", (4, (dts, ins) => sum_diff_ref(WIDE_N, dts, ins)))])
+  } else if name == "reverse" {
+    map.from([("reverse", (1, (dts, ins) => reverse_ref(REV_N, dts, ins)))])
+  } else if name == "invert" {
+    map.from([("invert", (1, (dts, ins) => invert_ref(INV_N, dts, ins)))])
+  } else if name == "f16_ops" {
+    map.from([("f16_ops", (3, last_out((dts, ins) => f16_ops_ref(F16E_N, dts, ins))))])
+  } else if name == "dot_f16" {
+    map.from([("dot_f16", (3, last_out((dts, ins) => dot_f16_ref(DF16_N, dts, ins))))])
+  } else if name == "matmul_f16" {
+    map.from([("matmul_f16", (3, last_out((dts, ins) => matmul_ref(MMF, MMF, MMF, dts, ins))))])
+  } else if name == "batched_matmul_f16" {
+    map.from([("batched_matmul_f16",
+      (3, last_out((dts, ins) => batched_matmul_ref(BMF_B, BMF, BMF, BMF, dts, ins))))])
+  } else {
+    map.from([("matmul_i8", (3, last_out((dts, ins) => matmul_ref(MMI, MMI, MMI, dts, ins))))])
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones. The
+## tail is where an unmasked write shows.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[List[Float]]]) -> String = match o {
+  Some(vs) -> list.fold(range(0, len(vs)), "", (acc, i) => {
+    let sep = if acc == "" { "" } else { " | " }
+    acc ++ sep ++ digest(vs[i])
+  })
+  None -> "-"
+}
+
+fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("wide_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+## What one case's buffers are, as a line: the formats in argument order and
+## which positions are read back. A case that quietly stopped being
+## in place (the read positions no longer overlapping the inputs) is
+## visible in the transcript rather than only in a verdict.
+fn shape_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  let formats = list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+  let reads = case_reads(i)
+  let inplace = len(list.filter(reads, r => r < len(bufs) - len(reads)))
+  "bufs=${formats} reads=${to_string(reads)} in_place=${inplace}"
+}
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  let count = 8
+  if len(argv) != count {
+    io.eprintln("usage: wide_diff <sum_diff.cubin> <reverse.cubin> <invert.cubin> <f16_ops.cubin>"
+        ++ " <dot_f16.cubin> <matmul_f16.cubin> <batched_matmul_f16.cubin> <matmul_i8.cubin>")
+    io.exit(2)
+  }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let reads = case_reads(i)
+    let (gx, gy, gz) = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, bufs, reads))
+    let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, bufs, reads))
+    let v = verdict(fake, real)
+    io.println("kernel ${name} tier=exact ${shape_of(i)} grid=(${gx}, ${gy}, ${gz})")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")
+    io.println("  miss  ${misses(real.results, fake.results, reads)}")
+    if real.note != "" { io.println("  note  ${real.note}") }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+}
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")

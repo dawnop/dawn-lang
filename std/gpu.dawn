@@ -2246,19 +2246,38 @@ fn wide_kernels() -> Map[String, (Int, WideRefFn)] =
     ("off_the_end", (1, (_dts, _ins) => [(1, [0.0])]))
   ])
 
+# The loops are written as recursion rather than `for` with `?` inside:
+# on the C backend a `?` that returns out of a `for` body leaves the loop's
+# own binding live and the reference counter says so (`unbalanced in
+# std/gpu: a return left a binding behind`), which is dawn-lang's bug and
+# not this module's. Measured while writing these tests.
+fn wide_alloc(dtype: String, bufs: List[List[Float]], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    match gpu_alloc(dtype, len(bufs[i])) {
+      Ok(h) -> match gpu_upload(h, bufs[i]) {
+        Ok(_) -> wide_alloc(dtype, bufs, i + 1, acc ++ [h])
+        Err(e) -> Err(e)
+      }
+      Err(e) -> Err(e)
+    }
+  }
+
+fn wide_read(hs: List[Int], i: Int, acc: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(acc)
+  } else {
+    match gpu_download(hs[i]) {
+      Ok(v) -> wide_read(hs, i + 1, acc ++ [v])
+      Err(e) -> Err(e)
+    }
+  }
+
 fn wide_run(kernel: String, dtype: String, bufs: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu = {
-  var hs: List[Int] = []
-  for b in bufs {
-    let h = gpu_alloc(dtype, len(b))?
-    gpu_upload(h, b)?
-    hs = hs ++ [h]
-  }
+  let hs = wide_alloc(dtype, bufs, 0, [])?
   gpu_launch(kernel, 1, 1, 1, hs)?
-  var out: List[List[Float]] = []
-  for h in hs {
-    out = out ++ [gpu_download(h)?]
-  }
-  Ok(out)
+  wide_read(hs, 0, [])
 }
 
 test "a reference naming two buffers writes both, and one naming the buffer it read rewrites it in place" {

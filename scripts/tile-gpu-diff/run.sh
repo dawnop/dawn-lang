@@ -23,10 +23,13 @@
 #             that what the mask keeps is compared too), red_diff.dawn the
 #             thirteen reduction and transcendental kernels of knife 7b,
 #             mm_diff.dawn the seven two-dimensional kernels of knife 8,
-#             stride_diff.dawn the nine strided kernels of knife 9 and
+#             stride_diff.dawn the nine strided kernels of knife 9,
 #             int_diff.dawn the four integer kernels of knife 10 (the first
 #             over i32 buffers, and the first family that is exact tier by
-#             algebra rather than by a chosen corpus),
+#             algebra rather than by a chosen corpus) and wide_diff.dawn the
+#             eight wide kernels of knife 11 (the first with more than one
+#             output buffer, the first that write a buffer they read, and the
+#             first over f16, i8 and u8),
 #             under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
@@ -128,6 +131,41 @@
 #                      mutant list), because `nearest_int_to_zero` is the one
 #                      integer rounding mode the dialect accepts and tileiras
 #                      says so. Measured, not assumed
+#     inplace-writes-copy
+#                      the fake device applies a reference's write-back to a
+#                      handle NOBODY HAS instead of the argument position the
+#                      reference named -> layers 0 and 1 are blind by
+#                      construction (std/gpu emits no Tile IR; not one
+#                      golden byte moves) and every one of the eight wide
+#                      kernels differs, because its answer now lands where
+#                      nothing reads it. The two IN-PLACE kernels are where
+#                      the mistake is legible rather than merely fatal:
+#                      `reverse` and `invert` read back the buffer they were
+#                      given, so under the mutant that buffer still holds the
+#                      CORPUS, while the six others read back a buffer that
+#                      still holds the sentinel. The gate checks both
+#                      readings
+#     f16-rounds-like-bf16
+#                      the f16 packer rounds with `narrow.round_bf16` before
+#                      laying down the binary16 pattern, which is the mistake
+#                      of copying `pack_bf16` and changing only the codec ->
+#                      layer 0 and layer 1 are blind again, and on the device
+#                      exactly ONE of the eight goes red. The corpus is the
+#                      whole of the difference: bf16 and f16 agree on every
+#                      value with eight significand bits, so `dot_f16`'s
+#                      small integers and the two GEMMs' multiples of a half
+#                      pack identically under both roundings even though all
+#                      three upload f16 buffers. Only `f16_ops`, whose corpus
+#                      is deliberately off the bf16 grid, can see it. Three
+#                      f16 kernels as the control and a fourth that reds is a
+#                      stronger statement than four that red
+#     u8-reads-signed  the real handler unpacks a u8 buffer with `unpack_i8`,
+#                      so an octet above 127 comes back negative -> layers 0
+#                      and 1 blind, and `invert` alone reds: it is the only
+#                      kernel here over an 8-bit buffer, and its corpus spans
+#                      the WHOLE octet range on purpose. A corpus of the low
+#                      half would forgive this entirely, which is the same
+#                      shape as knife 10's shri-always-logical
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -326,6 +364,13 @@ strided=(transpose_tail conv1d conv2d max_pool interleave rgb_gray jacobi depthw
 # which is the split the two mutants below are held to.
 integers=(count_eq subarray_sum rainbow int_ops)
 
+# The wide kernels of knife 11, in the order wide_diff takes them. Two are
+# in place (reverse, invert), one fills two buffers (sum_diff), four upload
+# f16 buffers (f16_ops, dot_f16, matmul_f16, batched_matmul_f16) and one is
+# over 8-bit buffers (invert), which are the four splits the mutants below
+# are held to.
+wide=(sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matmul_i8)
+
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
@@ -338,7 +383,8 @@ assemble_golden() { # kernel, tilebc, cubin
     fail "tileiras wrote no ELF cubin for $1"
 }
 
-for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}"; do
+for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
+  "${wide[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -353,6 +399,8 @@ strided_cubins=()
 for k in "${strided[@]}"; do strided_cubins+=("$work/$k.cubin"); done
 int_cubins=()
 for k in "${integers[@]}"; do int_cubins+=("$work/$k.cubin"); done
+wide_cubins=()
+for k in "${wide[@]}"; do wide_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -483,6 +531,22 @@ case "$int_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/ints.out" | head -n 1)"
 
+# ---- native, the wide kernels (knife 11)
+build_native "$root/std" "$work/wide.bin" "$here/wide_diff.dawn"
+rc=0
+"$work/wide.bin" "${wide_cubins[@]}" > "$work/wide.out" 2> "$work/wide.err" || rc=$?
+cat "$work/wide.out"
+wide_verdict="$(verdict_of "$work/wide.out")"
+case "$wide_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#wide[@]} wide kernels on the GPU are bit-identical to the fake device, both outputs and both in-place buffers included" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $wide_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $wide_verdict" ;;
+  fail) cat "$work/wide.err" >&2; fail "the device answered and disagreed with the fake device on a wide kernel (see the transcript above)" ;;
+  *) cat "$work/wide.err" >&2; fail "wide_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/wide.out" | head -n 1)"
+
 # The tier summary and the fold-order probe go into the ledger note: the
 # probe is a RECORD and not an assertion (docs 6.5), so a tileiras upgrade
 # that changes the device's reduction tree shows up in the ledger rather
@@ -490,14 +554,19 @@ esac
 tiers="$(sed -n 's/^tiers //p' "$work/reduced.out" | tail -n 1) 2d:$(sed -n 's/^tiers //p' "$work/twod.out" | tail -n 1)"
 tiers="$tiers strided:$(sed -n 's/^tiers //p' "$work/strided.out" | tail -n 1)"
 tiers="$tiers int:$(sed -n 's/^tiers //p' "$work/ints.out" | tail -n 1)"
+tiers="$tiers wide:$(sed -n 's/^tiers //p' "$work/wide.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe"
 
 # The ledger records one verdict for the tree: both programs pass, or the
 # first thing that stopped one of them.
 if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
-  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ]; then
+  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
+  && [ "$wide_verdict" = pass ]; then
   verdict=pass
+elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
+  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ]; then
+  verdict="$wide_verdict"
 elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
   && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ]; then
   verdict="$int_verdict"
@@ -1223,6 +1292,130 @@ else
   echo "SKIP  mutant: exti-sign-extends not verifiable on this driver: the clean run is $int_verdict, before any launch reaches the device"
 fi
 
+# 13. inplace-writes-copy: the fake device applies a reference's write-back
+#     to a handle nobody has (a negative one, which `gpu_alloc` never mints)
+#     instead of the argument position the reference named. This is the
+#     mistake a device makes when it "writes the answer somewhere": every
+#     buffer the launch was given comes back holding what it held before.
+#
+#     Layers 0 and 1 are blind BY CONSTRUCTION rather than by measurement:
+#     std/gpu is the host side and emits no Tile IR at all, so not one
+#     golden byte can move. That is worth saying out loud, because the
+#     earlier mutants here earned their blindness (the renderer's own
+#     spelling table, an all-true mask being a legal mask) and this one
+#     simply has nowhere to show.
+#
+#     All eight wide kernels differ, and the two readings are not the same
+#     reading: `reverse` and `invert` read back the buffer they were HANDED,
+#     so it still holds the corpus, and the other six read back an output
+#     buffer that still holds the sentinel. The gate requires both.
+std_iw="$(mutant_std inplace-writes-copy \
+  '                    store = map.insert(store, args[pos], (dt, list.map(v, x => round_to(dt, x))))' \
+  '                    store = map.insert(store, 0 - 1 - pos, (dt, list.map(v, x => round_to(dt, x))))')"
+build_native "$std_iw" "$work/m-inplace-writes-copy.bin" "$here/wide_diff.dawn"
+rc=0
+"$work/m-inplace-writes-copy.bin" "${wide_cubins[@]}" > "$work/m-inplace.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-inplace.out")"
+if [ "$wide_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-inplace.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#wide[@]}" ]; then
+    cat "$work/m-inplace.out" >&2
+    fail "inplace-writes-copy mutant stayed green: expected verdict fail (exit 1) with all ${#wide[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  # the in-place pair reads back its INPUT, not the sentinel: the fake
+  # device's line for reverse starts at the corpus's first value (3.0) and
+  # invert's at its first octet (0.0)
+  grep -q '^kernel reverse ' "$work/m-inplace.out" ||
+    { cat "$work/m-inplace.out" >&2; fail "inplace-writes-copy: the transcript has no reverse case"; }
+  awk '/^kernel /{cur=$2} /^  fake /&&cur=="reverse"{print}' "$work/m-inplace.out" | grep -q 'head=\[3\.0' ||
+    { cat "$work/m-inplace.out" >&2; fail "inplace-writes-copy: reverse should read back its own input under the mutant"; }
+  awk '/^kernel /{cur=$2} /^  fake /&&cur=="invert"{print}' "$work/m-inplace.out" | grep -q 'head=\[0\.0' ||
+    { cat "$work/m-inplace.out" >&2; fail "inplace-writes-copy: invert should read back its own input under the mutant"; }
+  echo "PASS  mutant: inplace-writes-copy (all ${#wide[@]} wide kernels differ; the two in-place buffers come back holding the corpus)"
+else
+  [ "$mverdict" = "$wide_verdict" ] ||
+    { cat "$work/m-inplace.out" >&2; fail "inplace-writes-copy: the clean run is $wide_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: inplace-writes-copy not verifiable on this driver: the clean run is $wide_verdict, before any launch reaches the device"
+fi
+
+# 14. f16-rounds-like-bf16: the f16 packer rounds with `narrow.round_bf16`
+#     and then lays down the binary16 pattern of THAT. It is the mistake of
+#     copying `pack_bf16` and changing only the codec, and it is invisible
+#     everywhere but on a device: `round_to("f16", ..)` is a different
+#     function and still rounds correctly, so the fake device holds the
+#     right number and the real one holds a bf16.
+#
+#     Exactly ONE of the eight goes red, and the other three f16 kernels are
+#     the reason to say it: `dot_f16` uploads small integers and the two
+#     GEMMs upload multiples of a half, all of which have eight significand
+#     bits and pack the same under both roundings. Only `f16_ops`, whose
+#     corpus is tenths rounded to the f16 grid, is off the bf16 grid, and
+#     that is why its corpus is written the way it is.
+std_f16="$(mutant_std f16-rounds-like-bf16 \
+  '    let bits = narrow.fp16_bits(narrow.round_fp16(x))' \
+  '    let bits = narrow.fp16_bits(narrow.round_bf16(x))')"
+build_native "$std_f16" "$work/m-f16-bf16.bin" "$here/wide_diff.dawn"
+rc=0
+"$work/m-f16-bf16.bin" "${wide_cubins[@]}" > "$work/m-f16-bf16.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-f16-bf16.out")"
+f16_red=(f16_ops)
+f16_green=(sum_diff reverse invert dot_f16 matmul_f16 batched_matmul_f16 matmul_i8)
+if [ "$wide_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-f16-bf16.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#f16_red[@]}" ]; then
+    cat "$work/m-f16-bf16.out" >&2
+    fail "f16-rounds-like-bf16 mutant stayed green: expected verdict fail (exit 1) with exactly ${#f16_red[@]} kernel saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${f16_red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-f16-bf16.out" ||
+      { cat "$work/m-f16-bf16.out" >&2; fail "f16-rounds-like-bf16: $k uploads values off the bf16 grid and should differ"; }
+  done
+  for k in "${f16_green[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-f16-bf16.out" ||
+      { cat "$work/m-f16-bf16.out" >&2; fail "f16-rounds-like-bf16: $k uploads nothing off the bf16 grid and should be untouched"; }
+  done
+  echo "PASS  mutant: f16-rounds-like-bf16 (layers 0 and 1 blind; ${f16_red[*]} differs and the other three f16 kernels do not, because their corpora are on the bf16 grid)"
+else
+  [ "$mverdict" = "$wide_verdict" ] ||
+    { cat "$work/m-f16-bf16.out" >&2; fail "f16-rounds-like-bf16: the clean run is $wide_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: f16-rounds-like-bf16 not verifiable on this driver: the clean run is $wide_verdict, before any launch reaches the device"
+fi
+
+# 15. u8-reads-signed: the real handler unpacks a u8 buffer the way it
+#     unpacks an i8 one, so an octet above 127 comes back negative. The
+#     bytes on the device are the same bytes; what moves is the reading,
+#     which is the whole of the difference between the two 8-bit formats.
+#
+#     `invert` alone is over an 8-bit buffer and it alone reds -- and only
+#     because its corpus covers the WHOLE octet range. Half the lanes of
+#     that corpus are above 127; a picture of dark pixels would forgive
+#     this mutant completely, which is knife 10's shri-always-logical
+#     lesson at another width.
+std_u8="$(mutant_std u8-reads-signed \
+  '  "u8" -> unpack_u8(raw)' \
+  '  "u8" -> unpack_i8(raw)')"
+build_native "$std_u8" "$work/m-u8-signed.bin" "$here/wide_diff.dawn"
+rc=0
+"$work/m-u8-signed.bin" "${wide_cubins[@]}" > "$work/m-u8-signed.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-u8-signed.out")"
+if [ "$wide_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-u8-signed.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-u8-signed.out" >&2
+    fail "u8-reads-signed mutant stayed green: expected verdict fail (exit 1) with invert alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "invert" {bad=1} END {exit bad}' \
+    "$work/m-u8-signed.out" ||
+    { cat "$work/m-u8-signed.out" >&2; fail "u8-reads-signed: a kernel other than invert moved, and only invert has an 8-bit buffer"; }
+  echo "PASS  mutant: u8-reads-signed (invert alone reds; its corpus spans the whole octet range, and half of it is above 127)"
+else
+  [ "$mverdict" = "$wide_verdict" ] ||
+    { cat "$work/m-u8-signed.out" >&2; fail "u8-reads-signed: the clean run is $wide_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: u8-reads-signed not verifiable on this driver: the clean run is $wide_verdict, before any launch reaches the device"
+fi
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -1234,7 +1427,8 @@ fi
 dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c \
   scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn \
   scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mm_diff.dawn \
-  scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/int_diff.dawn scripts/tile-gpu-diff/mutate.py)"
+  scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/int_diff.dawn scripts/tile-gpu-diff/wide_diff.dawn \
+  scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"
