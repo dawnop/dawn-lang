@@ -472,7 +472,14 @@ fn shape_of(i: Int) -> String = {
     acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
   })
   let reads = case_reads(i)
-  let inplace = len(list.filter(reads, r => r < len(bufs) - len(reads)))
+  # a buffer read back that was NOT handed the sentinel is a buffer the
+  # kernel both read and wrote: the whole of "in place" as this program can
+  # see it, and it is printed rather than asserted so that a case that
+  # quietly stopped being in place is visible in the transcript
+  let inplace = len(list.filter(reads, r => {
+    let (_dt, data) = bufs[r]
+    not list.all(range(0, len(data)), j => data[j] == SENTINEL)
+  }))
   "bufs=${formats} reads=${to_string(reads)} in_place=${inplace}"
 }
 
