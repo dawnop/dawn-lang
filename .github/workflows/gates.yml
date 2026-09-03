@@ -127,8 +127,12 @@ jobs:
     # (1111s) is ~370s of mutants per shard, plus the fixture contracts
     # (~40s) and the toolchain (~38s): ~450s was predicted for the worst
     # shard; the first run came in at 397/316/340s across the three shards.
-    # budget: 3x 397s worst observed (run 32286226622)
-    timeout-minutes: 20
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 472s (run 33736919486), which the
+    # 397s claim was 75s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 472s worst observed
+    timeout-minutes: 24
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -148,8 +152,12 @@ jobs:
 
   syntax-mutants-2:
     runs-on: ubuntu-latest
-    # budget: 3x 316s worst observed (run 32286226622)
-    timeout-minutes: 16
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 506s (run 33683419900), which the
+    # 316s claim was 190s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 506s worst observed
+    timeout-minutes: 26
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -169,8 +177,12 @@ jobs:
 
   syntax-mutants-3:
     runs-on: ubuntu-latest
-    # budget: 3x 340s worst observed (run 32286226622)
-    timeout-minutes: 17
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 404s (run 33727540404), which the
+    # 340s claim was 64s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 404s worst observed
+    timeout-minutes: 21
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -201,8 +213,12 @@ jobs:
     # (848s) is ~420s of mutants per shard, plus the probe and the toolchain:
     # ~470s was predicted for the worst shard; the first run came in at
     # 477/359s across the two shards.
-    # budget: 3x 477s worst observed (run 32286226622)
-    timeout-minutes: 24
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 557s (run 33734826386), which the
+    # 477s claim was 80s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 557s worst observed
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -222,8 +238,12 @@ jobs:
 
   builtin-type-2:
     runs-on: ubuntu-latest
-    # budget: 3x 359s worst observed (run 32286226622)
-    timeout-minutes: 18
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 553s (run 33742987376), which the
+    # 359s claim was 194s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 553s worst observed
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -254,8 +274,12 @@ jobs:
     # ~180s for the mutant block inside the contracts job's 246~258s
     # classfile step, plus the real-compiler probe, javac and the toolchain:
     # ~260s was predicted; the first run came in at 258s.
-    # budget: 3x 258s worst observed (run 32286226622)
-    timeout-minutes: 13
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 282s (run 33744995496), which the
+    # 258s claim was 24s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 282s worst observed
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -293,8 +317,12 @@ jobs:
     # shards below the same day, when it grew a tileiras step behind a 150 MB
     # wheel download that nothing else here needs, so the planning value is
     # back to 323s and the timeout to 17.
-    # budget: 3x 323s planning value (265s worst observed + 4s + 54s)
-    timeout-minutes: 17
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 515s (run 33748678694), which the
+    # 323s claim was 192s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 515s worst observed
+    timeout-minutes: 26
     steps:
       - uses: actions/checkout@v4
 
@@ -430,8 +458,41 @@ jobs:
   # JDK's own Schubfach and Unicode tables, java.util.zip, AddressSanitizer.
   # These share nothing with the suite above but the toolchain, and together
   # they were 180s of the old `test` job.
-  contracts:
-    runs-on: ubuntu-latest
+  # The contract block, in two jobs since 2026-09-03. It was 759s against a
+  # 660s run pole, and with native-diff sharded it would have been the run's
+  # longest job. Its 25 steps share nothing but the toolchain -- each drives
+  # its own script over its own fixtures -- so the boundary is drawn where the
+  # measured seconds balance, and nothing else had to change.
+  #
+  # No matrix and no `--shard`: what is being divided is a written list of
+  # steps, not a list of items a runner iterates, so a shard library would add
+  # a coverage record whose oracle is the file it was copied from. Dealing
+  # steps between two jobs is visible in the diff and in the two job logs, and
+  # a step deleted from both halves is a step deleted from the workflow, which
+  # is what review is for. (The shard family exists for the other shape: a
+  # matrix the runner walks, where a skipped slice prints the same output.)
+  #
+  # Where each step went, and why, from the per-step maxima of five main runs
+  # (33748678694, 33744995496, 33742987376, 33736919486, 33734826386):
+  #
+  #   contracts-1  375s  classfile 46, opaque twin 35, Map reuse 80, tea
+  #                      reconciler 78, Inflate 31, ASM adapter 25, dtoa 17,
+  #                      Core IR 16, Array 11, adapter call sites 8, JSON 6,
+  #                      Collection 5, table freight 5, builtin mirror 5,
+  #                      Unicode 3, Path 2, Error model 2, intrinsic parity 0
+  #   contracts-2  346s  atomic write 84, RC parameter-mode 71, source loop
+  #                      label 57, ctl-live 54, range bound 34, display
+  #                      layering 24, RC contract 22
+  #
+  # 29s apart, which is under 4% and inside the spread of a single step
+  # between runs. The split is also contiguous in the old file order, and that
+  # is not a coincidence dressed up as a plan: the expensive half is the seven
+  # steps that build a private compiler or a sanitized runtime, and they were
+  # already written together at the end of the list. Balancing by seconds and
+  # cutting along that seam turned out to be the same cut.
+  #
+  # The ledger below is the old job's, kept because it is where each step's
+  # cost was argued; the two budget lines that follow supersede its arithmetic.
     # 545~576s complete on five consecutive main runs (2026-08-18/19, with
     # both of the steps the older 654s planning value had to add on paper).
     # The classfile step's thirteen Never mutants (~180s of its 246~258s)
@@ -487,8 +548,18 @@ jobs:
     # observation supersedes the 491s planning value; 3x is 1674s, so the
     # timeout is 28 minutes. It remains below the 660s run-pole, which does
     # not move.
-    # budget: 3x 558s worst observed (five consecutive main runs)
-    timeout-minutes: 28
+  contracts-1:
+    runs-on: ubuntu-latest
+    # No CI observation of this half exists yet -- the job is new. The
+    # planning value is this half's own steps at their worst over the five
+    # runs above (375s) plus the job's fixed overhead at its worst over the
+    # same five (checkout 3s, the toolchain action 32s, set-up and the two
+    # post steps 3s = 38s): 413s. That is a sum of runner observations rather
+    # than a local measurement doubled, which is the better estimate available
+    # here and is why it is not doubled again. It supersedes the 558s line the
+    # unsplit job carried, and the first run of this job replaces it.
+    # budget: 3x 413s planning value (this half's observed steps plus setup)
+    timeout-minutes: 21
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -658,6 +729,20 @@ jobs:
       - name: Error model contract
         run: ./scripts/error-contract/run.sh
 
+  # The other half: the steps that build a private compiler or a sanitized
+  # runtime. See contracts-1 for the split and the arithmetic.
+  contracts-2:
+    runs-on: ubuntu-latest
+    # 346s of steps plus the same 38s of fixed overhead, from the same five
+    # runs; no observation of this job itself yet.
+    # budget: 3x 384s planning value (this half's observed steps plus setup)
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       # The atomic manifest write, its six failure steps, a live mutant per
       # promise, and the two call sites it was raised for -- `dawn add` and
       # `dawn lock`, each with a private selfhost JAR that puts it back to
@@ -736,8 +821,12 @@ jobs:
     runs-on: ubuntu-latest
     # 262s predicted (194s + 68s moved in); 270s then 281s measured on two
     # consecutive runs of the same tree, so the budget follows the worse one.
-    # budget: 3x 281s worst observed
-    timeout-minutes: 15
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 301s (run 33672841752), which the
+    # 281s claim was 20s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 301s worst observed
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1018,8 +1107,12 @@ jobs:
     # took 92s for the complete DOM contract and 250s for this whole job,
     # including setup and the failure contract. Both are below the existing
     # 300s planning value, so the budget does not move.
-    # budget: 3x 300s planning value (250s job observed in run 33318400446)
-    timeout-minutes: 15
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 341s (run 33748678694), which the
+    # 300s claim was 41s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 341s worst observed
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1268,8 +1361,12 @@ jobs:
     # (175~202s remote), the Java narrowing contract (30~34s) and the
     # toolchain (~38s) — was ~280s predicted from those same runs; the first
     # run without the syntax step came in at 240s.
-    # budget: 3x 240s worst observed (run 32286226622)
-    timeout-minutes: 12
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 357s (run 33748678694), which the
+    # 240s claim was 117s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 357s worst observed
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1312,8 +1409,12 @@ jobs:
     # export-surface's measured 122s -> 206s ratio for the same kind of work;
     # the budget takes the worse of the two, as `test` explains. Re-derive from
     # the first run to carry them, the way 30af350 did for export-surface.
-    # budget: 3x 258s worst observed
-    timeout-minutes: 13
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 284s (run 33727540404), which the
+    # 258s claim was 26s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 284s worst observed
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1324,8 +1425,12 @@ jobs:
 
   pipe-contract-2:
     runs-on: ubuntu-latest
-    # budget: 3x 258s worst observed
-    timeout-minutes: 13
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 265s (run 33744995496), which the
+    # 258s claim was 7s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 265s worst observed
+    timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1395,8 +1500,12 @@ jobs:
     # more: 84.96 -> 88.74s locally, two runs each side and nothing else on the
     # machine. Doubled for the runner that is ~7.5s against the same 232s
     # worst, so the budget line does not move for the same reason.
-    # budget: 3x 232s worst observed (run 33294261922)
-    timeout-minutes: 12
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 302s (run 33742987376), which the
+    # 232s claim was 70s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 302s worst observed
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
 
@@ -1451,8 +1560,12 @@ jobs:
     # 484s before the move, 475s after; see the note in `test`. The tea-core
     # leg of native-cli-diff.sh (the #9 regression oracle) adds ~6s locally,
     # doubled for the runner.
-    # budget: 3x 496s planning value (484s observed + the tea-core leg)
-    timeout-minutes: 25
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 526s (run 33748678694), which the
+    # 496s claim was 30s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 526s worst observed
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1490,8 +1603,16 @@ jobs:
   # JSON reader, the synthetic Linux process tree and the two source mutants.
   compiler-weight-contract:
     runs-on: ubuntu-latest
-    # budget: floor (seconds-scale synthetic job)
-    timeout-minutes: 5
+    # 2026-09-03: this claimed the floor, and the floor is for jobs whose own
+    # 3x no runner could meet. It has not been one of those for a while: the
+    # worst of 57 completed main runs since 09-02 is 200s (run 33622624446),
+    # of which the contract step itself is a flat 183s on every run in the
+    # window. 3x that is 600s against the 300s the floor was granted, so the
+    # claim was not merely stale, it was the wrong kind of claim.
+    # scripts/check-gate-budgets.py --observed is what named it; the job is
+    # unchanged, only what is said about it.
+    # budget: 3x 200s worst observed
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -1517,8 +1638,12 @@ jobs:
     # doubled for the runner, which is the planning value the two sharded
     # mutant jobs used before their first runs corrected them (#299); replace
     # it with the observation once there is one.
-    # budget: 3x 290s planning value (local 145s, doubled for the runner)
-    timeout-minutes: 15
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 307s (run 33734826386), which the
+    # 290s claim was 17s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 307s worst observed
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1605,7 +1730,11 @@ jobs:
   prev-diff:
     runs-on: ubuntu-latest
     # 210s before the move and 210s after it; see the note in `test`.
-    # budget: 3x 210s worst observed
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 213s (run 33731092049), which the
+    # 210s claim was 3s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 213s worst observed
     timeout-minutes: 11
     steps:
       - uses: actions/checkout@v4
@@ -1661,8 +1790,12 @@ jobs:
 
   export-surface-2:
     runs-on: ubuntu-latest
-    # budget: 3x 206s worst observed
-    timeout-minutes: 11
+    # 2026-09-03: restated from the Actions API -- the worst of 57
+    # completed main runs since 09-02 is 227s (run 33708763790), which the
+    # 206s claim was 21s under. scripts/gate-observations.py pulled it;
+    # scripts/check-gate-budgets.py --observed is the audit that named it.
+    # budget: 3x 227s worst observed
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
