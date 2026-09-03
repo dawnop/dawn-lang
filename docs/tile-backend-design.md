@@ -519,8 +519,8 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   **零新 opcode**，`iota / reshape / broadcast / muli / addi / offset` 都是现成的）、
   `mmaf`（0x49）、`reduce` 的 `dim` 真的有多个取值、**三维 grid**（`gpu_launch_host` 的
   `grid: Int` 换成 `gx, gy, gz`，是本刀唯一动运行时的地方）。
-  **仍然没有**：`scan`（0x5E，归刀 13）、`permute`（0x53）与 `cat`（0x0C）——转置用两个
-  对调的 stride 就够了，零新 opcode，见下——整数与窄浮点缓冲（归刀 10 / 11）、
+  **仍然没有**：`scan`（0x5E，归刀 13）、`permute`（0x53）与 `cat`（0x0C）：转置用两个
+  对调的 stride 就够了，零新 opcode，见下。也没有整数与窄浮点缓冲（归刀 10 / 11）、
   gather / scatter（归刀 12）、原子操作（归刀 14）、`erf`（归刀 15）、view 类型族与 TMA、
   `mmaf` 的 `fast_acc`（13.3 的 flag，我们钉 13.2，不写）、`mmai`（整数 MMA，等整数缓冲）。
 - **`n: Int` → `shape: List[Int]` 是纯重构，有机器判词**：改完之后 `--record` 重录，
@@ -862,7 +862,7 @@ tileiras 13.3.36 实测答 1.0，即成对（树形）折叠**。`sum_ref` 的�
 | `mma-acc-not-carried` | GEMM 的 K 循环不再携带累加器，每轮从新的零 tile 起 | 变（`--record` 能洗白） | 收（是一个合法、同样良类型的 kernel） | 只有 `matmul` 红：它答的是最后一片 K 的乘积而不是整个和 |
 
 `grid-y-ignored` 是这条线上第一个**编译器与包都看不到**的变异体：它改的是 C 运行时，
-而三层门里只有层 2 会启动 kernel。刀 7 之前也写不出来——那时每个 kernel 的 grid 都是一维的，
+而三层门里只有层 2 会启动 kernel。刀 7 之前也写不出来，那时每个 kernel 的 grid 都是一维的，
 把 gridDimY 写死 1 什么也不改变。
 
 **f64 `mmaf` 在 sm_86 上：汇编得了，但不落 tensor core。** 开工第一件事是拿一个手写的最小
@@ -885,9 +885,9 @@ bf16 的输出缓冲（`ftof` 把 f32 累加器转回 bf16），归刀 11。
 **计划里的 tfloat32 与 f32 两组语料没有跑，理由是形状不对**：计划写的是「f32 输入时同时跑
 一组 tfloat32 舍入的和一组 f32-as-f32 的」，而本刀的缓冲只有 f64（f32 缓冲要 `element_bytes`
 认识 4 字节，是刀 11 的事）。换成了本机能做的等价记录：`matmul` 的语料是整数值、每个部分和
-都远在 2^53 之内，所以任何求和顺序都是同一个精确整数——实测设备与参考**逐位相同**
+都远在 2^53 之内，所以任何求和顺序都是同一个精确整数。实测设备与参考**逐位相同**
 （`identical:tolerance`，miss 0.0），这是**赠品**而不是判词；`batched_matmul` 的语料是十分之几，
-不在二进制格点上，求和的分组因此可见——实测 `close:tolerance`，最大 miss **1.02e-10**
+不在二进制格点上，求和的分组因此可见。实测 `close:tolerance`，最大 miss **1.02e-10**
 （判词的 1e-10 倍）。这一对就是「容差档在这里确实在干活」的证据。
 
 **`tileirdisasm` round-trip：未做。** 计划里那一格是「若本机能构建或找到
