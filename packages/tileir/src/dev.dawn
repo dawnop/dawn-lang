@@ -102,6 +102,22 @@ impl Dtype[I1] {
 ## `shape`: what a masked-off lane reads instead). `None` for both is the
 ## unmasked memory operation of the earlier releases.
 ##
+## `t_gather` / `t_scatter` are those same two operations with the element
+## offsets given as an i32 TILE rather than built from `base` and
+## `strides`: lane `[i, j, ..]` reads or writes element `index[i, j, ..]`
+## of `param`. There is NO new dialect operation behind them (knife 12).
+## `offset`, which every load already goes through, takes any `tile<Nxi32>`
+## as its offset operand, so an index tile that came out of memory is the
+## same instruction as one the stride ladder computed, and all the two
+## spellings differ in is where the numbers come from. `mask` and `pad`
+## mean what they mean on `t_load`: a lane the mask blocks is neither read
+## nor written, so an index outside the array is legal there.
+##
+## A `t_scatter` whose `index` names one element twice has NO defined
+## answer: the dialect does not order the lanes of a single store against
+## each other. Every kernel and every corpus here writes a permutation, and
+## scripts/tile-gpu-diff/gath_diff.dawn says so beside its data.
+##
 ## `t_constf` / `t_consti` answer a tile of `shape` every lane of which
 ## holds the given host constant; `t_iota` the `n`-wide i32 tile
 ## `[0, 1, .., n-1]` (Tile IR's `iota` is one-dimensional and this is it);
@@ -202,6 +218,10 @@ pub effect Dev {
   fn t_load(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
     mask: Option[Int], pad: Option[Int]) -> Int
   fn t_store(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
+    v: Int, mask: Option[Int]) -> Unit
+  fn t_gather(param: Int, dtype: String, index: Int, shape: List[Int],
+    mask: Option[Int], pad: Option[Int]) -> Int
+  fn t_scatter(param: Int, dtype: String, index: Int, shape: List[Int],
     v: Int, mask: Option[Int]) -> Unit
   fn t_constf(dtype: String, shape: List[Int], value: Float) -> Int
   fn t_consti(dtype: String, shape: List[Int], value: Int) -> Int
@@ -324,6 +344,12 @@ pub fn coord(base: Idx, shape: List[Int], axis: Int, step: Int) -> Tile[I32] !De
 pub fn and_mask(shape: List[Int], a: Tile[I1], b: Tile[I1]) -> Tile[I1] !Dev =
   select(I1, shape, a, b, bool_const(shape, false))
 
+## The lanes either mask selects: a `select`, `a` where it is 1 choosing
+## the all-true tile and `b` elsewhere. The `or` to `and_mask`'s `and`,
+## written the same way and for the same reason.
+pub fn or_mask(shape: List[Int], a: Tile[I1], b: Tile[I1]) -> Tile[I1] !Dev =
+  select(I1, shape, a, bool_const(shape, true), b)
+
 ## The lanes whose coordinate `c` satisfies `lo <= c < hi`. Both bounds are
 ## host constants; `lo` is not always zero, because a stencil reads a
 ## coordinate one before the tile's own.
@@ -405,6 +431,62 @@ pub fn store[D](p: Param[D], base: Idx, shape: List[Int], v: Tile[D]) -> Unit !D
 ## `store_masked` over a contiguous tile.
 pub fn store_masked[D](p: Param[D], base: Idx, shape: List[Int], mask: Tile[I1], v: Tile[D]) -> Unit !Dev =
   store_strided_masked(p, base, shape, row_major(shape), mask, v)
+
+## The tile of `p`'s format and `shape` whose lane `[i, j, ..]` is element
+## `index[i, j, ..]` of `p`: a load whose element offsets come from a tile
+## instead of from `base` and `strides`. Every lane is read, so every
+## index must be inside `p`; `gather_masked` is the one to use when some
+## of them are not.
+##
+## Nothing new reaches the device here (knife 12). A strided load already
+## builds an i32 tile of element offsets and hands it to `offset`; this
+## hands `offset` a tile somebody else computed. Which is why an index
+## tile LOADED from a buffer is the whole of data-dependent addressing:
+## `load` it, then gather with it.
+pub fn gather[D](p: Param[D], index: Tile[I32], shape: List[Int]) -> Tile[D] !Dev = {
+  let hi: Int = index
+  let none: Option[Int] = None
+  let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape, none, none)
+  h
+}
+
+## `gather`, reading only the lanes `mask` selects: a lane whose mask bit
+## is 0 is not read at all and answers the matching lane of `pad`. This is
+## how an index OUTSIDE the array is handled, and the reason the corpora
+## carry such indices: the mask, not the arithmetic, is what keeps the
+## read inside the buffer.
+pub fn gather_masked[D](p: Param[D], index: Tile[I32], shape: List[Int],
+  mask: Tile[I1], pad: Tile[D]) -> Tile[D] !Dev = {
+  let hi: Int = index
+  let hm: Int = mask
+  let hp: Int = pad
+  let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape, Some(hm), Some(hp))
+  h
+}
+
+## Write lane `[i, j, ..]` of `v` to element `index[i, j, ..]` of `p`: a
+## store whose element offsets come from a tile. Every lane is written, so
+## every index must be inside `p`, and NO TWO LANES MAY NAME THE SAME
+## ELEMENT: the dialect gives the lanes of one store no order against each
+## other, so a duplicated index has no answer at all rather than one of
+## two. A permutation is the shape every caller here writes.
+pub fn scatter[D](p: Param[D], index: Tile[I32], shape: List[Int], v: Tile[D]) -> Unit !Dev = {
+  let hi: Int = index
+  let hv: Int = v
+  let none: Option[Int] = None
+  t_scatter(position(p), param_dtype(p), hi, shape, hv, none)
+}
+
+## `scatter`, writing only the lanes `mask` selects: a lane whose mask bit
+## is 0 leaves memory as it was, which is what an index outside the array
+## gets. The lanes the mask keeps must still name distinct elements.
+pub fn scatter_masked[D](p: Param[D], index: Tile[I32], shape: List[Int],
+  mask: Tile[I1], v: Tile[D]) -> Unit !Dev = {
+  let hi: Int = index
+  let hm: Int = mask
+  let hv: Int = v
+  t_scatter(position(p), param_dtype(p), hi, shape, hv, Some(hm))
+}
 
 # The handle of a binary float operation over two tiles of `shape` and `d`.
 fn binary[D: Dtype](d: D, op: String, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
@@ -1201,6 +1283,12 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       h
     }
     t_store(_param, _dtype, _base, _shape, _strides, _v, _mask) => ()
+    t_gather(_param, _dtype, _index, _shape, _mask, _pad) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_scatter(_param, _dtype, _index, _shape, _v, _mask) => ()
     t_mmaf(_dtype, _m, _k, _n, _a, _b, _c) => {
       let h = next
       next = next + 1
@@ -1407,6 +1495,13 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_store(param, dtype, base, shape, strides, v, mask) => {
       log = log ++ ["store ${param} ${dtype} ${base} ${show(shape)} ${show(strides)} ${v} ${opt(mask)}"]
     }
+    t_gather(param, dtype, index, shape, mask, pad) => {
+      log = log ++ ["gather ${param} ${dtype} ${index} ${show(shape)} ${opt(mask)} ${opt(pad)}"]
+      1
+    }
+    t_scatter(param, dtype, index, shape, v, mask) => {
+      log = log ++ ["scatter ${param} ${dtype} ${index} ${show(shape)} ${v} ${opt(mask)}"]
+    }
     t_constf(dtype, shape, value) => {
       log = log ++ ["constf ${dtype} ${show(shape)} ${value}"]
       2
@@ -1505,6 +1600,31 @@ test "load hands the handler the parameter's own format, not a fixed one" {
     ()
   })
   assert seen == ["block_id 2", "load 1 f32 14 [64] [1] None None"]
+}
+
+fn indexed_surface() -> Unit !Dev = {
+  let idx = param(I32, 0)
+  let src = param(F64, 1)
+  let out = param(F64, 2)
+  let i = load(idx, idx_const(0), [8])
+  let ok = lt_i([8], i, i_const([8], 8))
+  let pad = f_const(F64, [8], 0.0)
+  let v = gather_masked(src, i, [8], ok, pad)
+  scatter(out, i, [8], v)
+  scatter_masked(out, i, [8], ok, gather(src, i, [8]))
+}
+
+test "gather and scatter hand the handler the index tile and the parameter's own format, with no strides at all" {
+  assert logged(indexed_surface) == [
+    "load 0 i32 12 [8] [1] None None",
+    "consti i32 [8] 8",
+    "cmpi lt [8] 1 3",
+    "constf f64 [8] 0.0",
+    "gather 1 f64 1 [8] Some(10) Some(2)",
+    "scatter 2 f64 1 [8] 1 None",
+    "gather 1 f64 1 [8] None None",
+    "scatter 2 f64 1 [8] 1 Some(10)"
+  ]
 }
 
 fn every_arithmetic_name() -> Unit !Dev = {
@@ -1725,6 +1845,8 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_block_id(_axis) => 0
       t_load(_param, _dtype, _base, _shape, _strides, _mask, _pad) => 1
       t_store(_param, _dtype, _base, _shape, _strides, _v, _mask) => ()
+      t_gather(_param, _dtype, _index, _shape, _mask, _pad) => 1
+      t_scatter(_param, _dtype, _index, _shape, _v, _mask) => ()
       t_constf(_dtype, _shape, _value) => 2
       t_consti(_dtype, _shape, _value) => 3
       t_iota(_n) => 4

@@ -10,12 +10,13 @@ use std/io
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32, BF16, F16, I32, I8}
 use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
-  store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, in_range, axis_mask,
+  store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, or_mask, in_range, axis_mask,
+  gather, gather_masked, scatter, scatter_masked, axis_strides,
   mmaf, addf, sub, mul, div,
   maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
   d_for, d_for3, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
   spread, d_reduce, d_reduce_dim, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select,
-  i_const, i8_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i,
+  i_const, i8_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i, lt_i,
   shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
   float_to_float, ext_u8, trunc_u8, mmai,
   d_reduce_i, s_addi }
@@ -1288,6 +1289,149 @@ fn matmul_i8(a: Param[I8], b: Param[I8], c: Param[I32]) -> Unit !Dev = {
   store_strided(c, idx_add(idx_mul(bm, idx_const(MMI_T * MMI_N)), b_col), [MMI_T, MMI_T], [MMI_N, 1], acc)
 }
 
+
+# ---- the gather and scatter kernels (knife 12) ----
+#
+# The four kernels below address memory with a TILE OF INDICES rather than
+# with a base and a stride ladder. Nothing new reaches the device: `offset`,
+# the instruction every load already goes through, takes any `tile<Nxi32>`
+# as its offset operand, so `gather` hands it a tile somebody computed
+# instead of the ladder `load_strided` builds. What is new is that the
+# numbers may come from memory, which is what "data dependent" means.
+#
+# Two rules the corpora carry, and this is where they are stated:
+#
+#   * an index OUTSIDE the array is legal wherever a mask blocks its lane,
+#     and illegal everywhere else. `token_embed` and `scatter_perm` both
+#     carry such indices, and both clamp the address arithmetic as well
+#     (`and_i` against a power-of-two extent), so a blocked lane still
+#     forms an address inside the buffer. The mask decides the VALUE; the
+#     clamp decides the ADDRESS. That separation is what lets
+#     scripts/tile-gpu-diff's gather-mask-dropped mutant answer a WRONG
+#     number rather than fault, which is the only way layer 2 can see it.
+#   * a scatter whose lanes name one element twice has no answer at all.
+#     Every scatter here writes a permutation and the corpora keep it one:
+#     `sort_rank`'s ranks are distinct because ties are broken by lane,
+#     `merge_rank`'s are the merge-path ranks (distinct by the same
+#     argument), and `scatter_perm`'s corpus is a permutation with some
+#     lanes taken out of range, never two lanes put on one destination.
+#
+# Duplicate GATHER indices are ordinary: `token_embed`'s corpus repeats
+# token ids on purpose.
+
+# The embedding table: EMB_ROWS rows of EMB_DIM, TOK_TILE tokens a block.
+# EMB_ROWS is a power of two so the address clamp is one `andi`. TOK_N is
+# not a multiple of TOK_TILE, so the last block covers lanes past the last
+# token, and the corpus puts out-of-range ids there as well as inside.
+const EMB_ROWS: Int = 64
+const EMB_DIM: Int = 16
+const TOK_TILE: Int = 8
+const TOK_N: Int = 100
+
+# What a token id outside [0, EMB_ROWS) reads: a value no row of the table
+# holds, so a lane that read the table instead of this is visible.
+const EMB_MISS: Float = 0.0 - 777.0
+
+# Row `i` of the output is row `ids[i]` of the table, and the MISS row
+# where that id is outside the table: leetgpu 106 (Token Embedding).
+#
+# The id tile is a load with a stride of zero along the embedding
+# dimension (knife 9's `axis_strides`), so one id serves a whole row; the
+# gather's index is that id scaled by the row length plus the column
+# coordinate. The store is NOT masked: an out-of-range id is a defined
+# answer here (the MISS row), not a lane to leave alone, which is what
+# gives the gather's mask something the output can show.
+fn token_embed(ids: Param[I32], table: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [TOK_TILE, EMB_DIM]
+  let b = block_id(0)
+  let blk = tile_at(b, TOK_TILE)
+  let id = load_strided(ids, blk, s, axis_strides(2, 0, 1))
+  let ok = in_range(s, id, 0, EMB_ROWS)
+  let row = and_i(s, id, i_const(s, EMB_ROWS - 1))
+  let off = add_i(s, mul_i(s, row, i_const(s, EMB_DIM)), coord(idx_const(0), s, 1, 1))
+  store(out, tile_at(b, TOK_TILE * EMB_DIM), s,
+    gather_masked(table, off, s, ok, f_const(F64, s, EMB_MISS)))
+}
+
+# The rank sort's shape: one block, SORT_N values, an SORT_N by SORT_N
+# comparison tile. O(n^2) comparisons is the sort a tile machine with no
+# shuffle can write in one launch, and it is exact: nothing is added but
+# ones and zeroes.
+const SORT_N: Int = 32
+
+# The SORT_N values of the first buffer, sorted, in the second: leetgpu 15
+# (Sorting).
+#
+# The rank of x[i] is the number of j whose value comes BEFORE it, where
+# "before" is `x[j] < x[i]`, or `x[j] == x[i]` and `j < i`. That tie-break
+# is not decoration: it is what makes the ranks a permutation, and a
+# scatter whose lanes collided would have no answer. The corpus repeats
+# values on purpose so that the tie-break is exercised.
+#
+# The count is folded in f64 over ones and zeroes, so the fold order the
+# dialect leaves unspecified cannot show: every partial sum is an integer
+# below 32 and exact in binary64.
+fn sort_rank(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s2 = [SORT_N, SORT_N]
+  let s1 = [SORT_N]
+  let zero = idx_const(0)
+  let row = load_strided(x, zero, s2, [1, 0])
+  let col = load_strided(x, zero, s2, [0, 1])
+  let tie = and_mask(s2, eq(F64, s2, col, row),
+    lt_i(s2, coord(zero, s2, 1, 1), coord(zero, s2, 0, 1)))
+  let before = or_mask(s2, lt(F64, s2, col, row), tie)
+  let hit = select(F64, s2, before, f_const(F64, s2, 1.0), f_const(F64, s2, 0.0))
+  let rank = d_reduce_dim(F64, s2, 1, hit, 0.0, (e, acc) => s_addf(F64, e, acc))
+  scatter(out, float_to_int(F64, s1, rank), s1, load(x, zero, s1))
+}
+
+# The merge's shape: two sorted runs of MG_N in one block.
+const MG_N: Int = 32
+
+# The two sorted buffers merged into the third: leetgpu 71 (Parallel
+# Merge). The merge-path rank of a[i] is `i` plus the number of b below
+# it, and of b[j] is `j` plus the number of a at or below it. The strict
+# comparison on one side and the loose one on the other is what makes the
+# two rank sets disjoint when the buffers share a value, so the two
+# scatters never write one element twice; the corpus puts values in both
+# buffers on purpose.
+fn merge_rank(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s2 = [MG_N, MG_N]
+  let s1 = [MG_N]
+  let zero = idx_const(0)
+  let one = f_const(F64, s2, 1.0)
+  let nought = f_const(F64, s2, 0.0)
+  let arow = load_strided(a, zero, s2, [1, 0])
+  let bcol = load_strided(b, zero, s2, [0, 1])
+  let below = select(F64, s2, lt(F64, s2, bcol, arow), one, nought)
+  let atmost = select(F64, s2, le(F64, s2, arow, bcol), one, nought)
+  let ca = d_reduce_dim(F64, s2, 1, below, 0.0, (e, acc) => s_addf(F64, e, acc))
+  let cb = d_reduce_dim(F64, s2, 0, atmost, 0.0, (e, acc) => s_addf(F64, e, acc))
+  let lane = lanes(zero, s1)
+  scatter(out, add_i(s1, lane, float_to_int(F64, s1, ca)), s1, load(a, zero, s1))
+  scatter(out, add_i(s1, lane, float_to_int(F64, s1, cb)), s1, load(b, zero, s1))
+}
+
+# The permutation scatter's shape: SC_N destinations, SC_TILE lanes a
+# block. SC_N is a power of two so the address clamp is one `andi`.
+const SC_N: Int = 256
+const SC_TILE: Int = 128
+
+# `out[perm[i]] = x[i]`, and nothing at all where `perm[i]` is outside the
+# output: the scatter twin of `int_ops`, a kernel with no leetgpu problem
+# behind it whose only job is to give the masked scatter a golden and a
+# device. `reverse` (knife 11) writes a permutation too, but with a
+# STRIDE; this one reads its permutation out of a buffer.
+fn scatter_perm(perm: Param[I32], x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [SC_TILE]
+  let b = block_id(0)
+  let blk = tile_at(b, SC_TILE)
+  let p = load(perm, blk, s)
+  let ok = in_range(s, p, 0, SC_N)
+  let dst = and_i(s, p, i_const(s, SC_N - 1))
+  scatter_masked(out, dst, s, ok, load(x, blk, s))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -1407,6 +1551,17 @@ fn trace(name: String) -> TileProg = match name {
   "matmul_i8" ->
     trace_kernel("matmul_i8", ["i8", "i8", "i32"],
       () => matmul_i8(param(I8, 0), param(I8, 1), param(I32, 2)))
+  "token_embed" ->
+    trace_kernel("token_embed", ["i32", "f64", "f64"],
+      () => token_embed(param(I32, 0), param(F64, 1), param(F64, 2)))
+  "sort_rank" ->
+    trace_kernel("sort_rank", ["f64", "f64"], () => sort_rank(param(F64, 0), param(F64, 1)))
+  "merge_rank" ->
+    trace_kernel("merge_rank", ["f64", "f64", "f64"],
+      () => merge_rank(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "scatter_perm" ->
+    trace_kernel("scatter_perm", ["i32", "f64", "f64"],
+      () => scatter_perm(param(I32, 0), param(F64, 1), param(F64, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -1433,6 +1588,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
       ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
       ++ "|count_eq|subarray_sum|rainbow|int_ops"
-      ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8>"
+      ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
+      ++ "|token_embed|sort_rank|merge_rank|scatter_perm>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

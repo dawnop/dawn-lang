@@ -115,7 +115,7 @@
 #
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time -- one local run measured
-# 204s for the 51 kernels (102 JVM starts, and nothing else) against 175s for
+# 204s for 51 kernels (102 JVM starts, and nothing else) against 175s for
 # the 12 mutants (a native rebuild each) -- so splitting by kind would leave
 # one job carrying the slower half. `--shard I/N` takes every Nth item of the
 # mixed list instead, which also spreads the outliers (`reverse` alone costs
@@ -145,7 +145,8 @@ kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops
   matmul batched_matmul transpose layer_norm batch_norm group_norm fused_rms_norm
   transpose_tail conv1d conv2d max_pool interleave rgb_gray jacobi depthwise_conv1d gaussian_blur
   count_eq subarray_sum rainbow int_ops
-  sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matmul_i8)
+  sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matmul_i8
+  token_embed sort_rank merge_rank scatter_perm)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

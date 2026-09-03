@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF}
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, Gather, Scatter, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -332,6 +332,28 @@ fn pointers(l0: L, param: Int, dtype: String, base: Int, shape: List[Int], strid
   }
 }
 
+# The tile of pointers into parameter `param` at the element offsets the
+# i32 tile `index` holds, of `shape`. The same three instructions
+# `pointers` emits, with somebody else's tile where the stride ladder
+# would have been: a gather is an `offset` whose operand came from memory.
+# Memoised per (param, index handle, shape), so a gather and a scatter
+# through one index tile share the pointer tile the way two loads at one
+# base do.
+fn index_pointers(l0: L, param: Int, dtype: String, index: Int, shape: List[Int]) -> (L, Ref) = {
+  let key = "iptr:${param}:${index}:${show(shape)}"
+  match map.get(l0.memo, key) {
+    Some(r) -> (l0, r)
+    None -> {
+      let off = ref_of(l0, index, "gather/scatter index")
+      let p = PtrTo(dtype)
+      let (l1, pn) = spread_rank0(l0, Arg(param), Tile([], p), shape, p)
+      let (l2, pt) = fresh(l1)
+      let l3 = emit(l2, Offset(pt, pn, off, Tile(shape, p), i32_tile(shape)))
+      (L { ..l3, memo: map.insert(l3.memo, key, Val(pt)) }, Val(pt))
+    }
+  }
+}
+
 fn lower_op(l0: L, op: TileOp) -> L = match op {
   MakeToken(dst) -> {
     let (l1, t) = define(l0, dst, Token)
@@ -361,6 +383,24 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l1, pt) = pointers(l0, param, dtype, base, shape, strides)
     let (l2, t) = define(l1, tok_out, Token)
     emit(l2, StorePtr(t, pt, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), num_tile(shape, dtype)))
+  }
+  Gather(dst, tok_out, param, dtype, index, shape, mask, pad, tok_in) -> {
+    let tin = ref_of(l0, tok_in, "gather token")
+    let m = opt_ref(l0, mask, "gather mask")
+    let pd = opt_ref(l0, pad, "gather padding value")
+    let (l1, pt) = index_pointers(l0, param, dtype, index, shape)
+    let val_ty = num_tile(shape, dtype)
+    let (l2, v) = define(l1, dst, val_ty)
+    let (l3, tk) = define(l2, tok_out, Token)
+    emit(l3, LoadPtr(v, tk, pt, m, pd, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
+  }
+  Scatter(tok_out, param, dtype, index, shape, value, mask, tok_in) -> {
+    let tin = ref_of(l0, tok_in, "scatter token")
+    let v = ref_of(l0, value, "scatter value")
+    let m = opt_ref(l0, mask, "scatter mask")
+    let (l1, pt) = index_pointers(l0, param, dtype, index, shape)
+    let (l2, tk) = define(l1, tok_out, Token)
+    emit(l2, StorePtr(tk, pt, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), num_tile(shape, dtype)))
   }
   ConstF(dst, dtype, shape, value) -> {
     let ty = num_tile(shape, dtype)
@@ -734,6 +774,42 @@ test "the pointer ladder for one parameter at one index is emitted once, not onc
   let k = lower(two_loads_one_param())
   assert len(list.filter(k.body, is_offset)) == 1
   assert len(list.filter(k.body, is_iota)) == 1
+}
+
+# A load of an index tile, a gather through it and a scatter of the result
+# through the same tile: no `base`, no strides, one index tile serving two
+# memory operations.
+fn gather_then_scatter() -> TileProg = TileProg {
+  name: "indexed",
+  params: ["i32", "f64", "f64"],
+  ops: [
+    MakeToken(0),
+    IdxConst(1, 0),
+    Load(2, 3, 0, "i32", 1, [8], [1], None, None, 0),
+    Gather(4, 5, 1, "f64", 2, [8], None, None, 3),
+    Scatter(6, 2, "f64", 2, [8], 4, None, 5)
+  ]
+}
+
+test "a gather offsets the parameter by the index tile itself: no iota, no stride ladder" {
+  let k = lower(gather_then_scatter())
+  let i32_8 = Tile([8], Num("i32"))
+  let p64_8 = Tile([8], PtrTo("f64"))
+  # the one iota and the one offset with it belong to the index LOAD; the
+  # gather's own offset takes that load's result, which is the whole of
+  # what "data dependent" means here
+  assert len(list.filter(k.body, is_iota)) == 1
+  assert len(list.filter(k.body, is_offset)) == 3
+  assert k.body[9] == LoadPtr(9, 10, Val(8), None, None, Val(0), Tile([8], PtrTo("i32")), i1_tile([8]), i32_8)
+  assert k.body[12] == Offset(13, Val(12), Val(9), p64_8, i32_8)
+}
+
+test "a gather and a scatter through one index tile into one parameter share the pointer tile" {
+  let k = lower(TileProg { ..gather_then_scatter(),
+    ops: list.take(gather_then_scatter().ops, 4) ++ [Scatter(6, 1, "f64", 2, [8], 4, None, 5)] })
+  # both memory operations name parameter 1 through the same index tile,
+  # so the reshape / broadcast / offset trio is emitted once
+  assert len(list.filter(k.body, is_offset)) == 2
 }
 
 test "the token chain is the program's: make_token feeds the first load, each memory op feeds the next" {

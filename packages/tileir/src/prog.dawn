@@ -16,8 +16,8 @@
 # program order no meaning between memory operations.
 use std/list
 use std/str
-use std/gpu.{F64, F32}
-use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_if, spread, s_addf, s_maxf, s_gt, s_select}
+use std/gpu.{F64, F32, I32}
+use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_if, spread, s_addf, s_maxf, s_gt, s_select}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -50,6 +50,8 @@ pub type TileOp =
   | BlockId(dst: Int, axis: Int)
   | Load(dst: Int, tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], mask: Option[Int], pad: Option[Int], tok_in: Int)
   | Store(tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], value: Int, mask: Option[Int], tok_in: Int)
+  | Gather(dst: Int, tok_out: Int, param: Int, dtype: String, index: Int, shape: List[Int], mask: Option[Int], pad: Option[Int], tok_in: Int)
+  | Scatter(tok_out: Int, param: Int, dtype: String, index: Int, shape: List[Int], value: Int, mask: Option[Int], tok_in: Int)
   | ConstF(dst: Int, dtype: String, shape: List[Int], value: Float)
   | ConstI(dst: Int, dtype: String, shape: List[Int], value: Int)
   | Iota(dst: Int, n: Int)
@@ -273,6 +275,29 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         let t = next
         next = mint(name, next, 1)
         ops = ops ++ [Store(t, param, dtype, base, shape, strides, v, mask, tok)]
+        tok = t
+        ()
+      }
+      t_gather(param, dtype, index, shape, mask, pad) => {
+        let open = frames
+        if list.any(open, is_pure_region) { refuse(name, "a gather inside a reduce or if region has no memory order") } else { () }
+        check_param(name, params, param, dtype, "gather")
+        check_shape(name, shape)
+        let d = next
+        let t = next + 1
+        next = mint(name, next, 2)
+        ops = ops ++ [Gather(d, t, param, dtype, index, shape, mask, pad, tok)]
+        tok = t
+        d
+      }
+      t_scatter(param, dtype, index, shape, v, mask) => {
+        let open = frames
+        if list.any(open, is_pure_region) { refuse(name, "a scatter inside a reduce or if region has no memory order") } else { () }
+        check_param(name, params, param, dtype, "scatter")
+        check_shape(name, shape)
+        let t = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Scatter(t, param, dtype, index, shape, v, mask, tok)]
         tok = t
         ()
       }
@@ -573,6 +598,8 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   BlockId(dst, _axis) -> [dst]
   Load(dst, tok_out, _param, _dtype, _base, _shape, _strides, _mask, _pad, _tok_in) -> [dst, tok_out]
   Store(tok_out, _param, _dtype, _base, _shape, _strides, _value, _mask, _tok_in) -> [tok_out]
+  Gather(dst, tok_out, _param, _dtype, _index, _shape, _mask, _pad, _tok_in) -> [dst, tok_out]
+  Scatter(tok_out, _param, _dtype, _index, _shape, _value, _mask, _tok_in) -> [tok_out]
   ConstF(dst, _dtype, _shape, _value) -> [dst]
   ConstI(dst, _dtype, _shape, _value) -> [dst]
   Iota(dst, _n) -> [dst]
@@ -783,6 +810,49 @@ test "loops nest: the inner For sits in the outer body and the outer continue pa
     _ -> { assert false }
   }
   assert p == trace_kernel("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
+}
+
+# A gather through an index tile read out of one buffer, and a scatter of
+# the result through the same tile: the shape of every knife-12 kernel.
+fn indexed(idx: Param[I32], src: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = load(idx, idx_const(0), [8])
+  let ok = lt_i([8], i, i_const([8], 8))
+  let v = gather_masked(src, i, [8], ok, f_const(F64, [8], 0.0))
+  scatter(out, i, [8], v)
+}
+
+test "a gather and a scatter record their index tile and sit in the token chain, and neither carries a stride" {
+  let p = trace_kernel("indexed", ["i32", "f64", "f64"],
+    () => indexed(param(I32, 0), param(F64, 1), param(F64, 2)))
+  # make_token 0, idx_const 1, load 2 + token 3, i_const 4, cmpi 5,
+  # constf 6, gather 7 + token 8, scatter token 9
+  assert list.filter(p.ops, o => match o {
+    Gather(_d, _t, _param, _dt, _i, _s, _m, _pd, _ti) -> true
+    _ -> false
+  }) == [Gather(7, 8, 1, "f64", 2, [8], Some(5), Some(6), 3)]
+  assert list.filter(p.ops, o => match o {
+    Scatter(_t, _param, _dt, _i, _s, _v, _m, _ti) -> true
+    _ -> false
+  }) == [Scatter(9, 2, "f64", 2, [8], 7, None, 8)]
+  assert p == trace_kernel("indexed", ["i32", "f64", "f64"],
+    () => indexed(param(I32, 0), param(F64, 1), param(F64, 2)))
+}
+
+test "a gather inside a reduction region is refused: a pure region carries no memory order" {
+  let outcome = catch_panic(() => trace_kernel("bad_gather", ["i32", "f64"], () => {
+    let idx = param(I32, 0)
+    let src = param(F64, 1)
+    let i = load(idx, idx_const(0), [8])
+    let _r = d_reduce(F64, [8], gather(src, i, [8]), 0.0, (e, acc) => {
+      let _inner = gather(src, i, [8])
+      s_addf(F64, e, acc)
+    })
+    ()
+  }))
+  match outcome {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "a gather inside a reduce or if region has no memory order") }
+  }
 }
 
 fn deeper(x: Param[F64], depth: Int, t: Tile[F64]) -> Tile[F64] !Dev = {
