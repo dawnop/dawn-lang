@@ -1787,7 +1787,7 @@ pub fn main() -> Unit !io = infers_io()
 # whether the compiler ought to be a declarer as well as a consumer. This
 # counts declarations against a list.
 NAMED_EFFECT_ROOTS = ("std", "selfhost/src")
-NAMED_EFFECT_DECL = re.compile(r"(?m)^(?:pub\s+)?effect\s+[A-Za-z_]")
+NAMED_EFFECT_DECL = re.compile(r"(?m)^(?:pub\s+)?(?:ctl\s+)?effect\s+[A-Za-z_]")
 NAMED_EFFECT_EXPECTED = ("std/gpu.dawn", "std/io.dawn")
 NAMED_EFFECT_STATUS = (
     ("README.md", "the tier's internal consumers are in this repository"),
@@ -1906,13 +1906,23 @@ def check_named_effect_status_selftest() -> tuple[list[str], int]:
     # A declaration outside the list is the case the original check existed
     # for, and the list must not have weakened it: one stray declaration, in
     # either root, reddens and is named.
-    for stray in ("std/ask.dawn", "selfhost/src/check/ask.dawn"):
+    #
+    # Both spellings, because a control effect is a declaration too. `ctl
+    # effect` has been accepted since the one-shot resume work (spec 6.5), and
+    # the pattern above did not match it until #67: a `pub ctl effect` in std
+    # was counted as nothing at all, and the status paragraph was not held to
+    # it. A control that plants only the plain spelling cannot tell.
+    for stray, decl in (("std/ask.dawn", "pub effect Ask"),
+                        ("selfhost/src/check/ask.dawn", "pub effect Ask"),
+                        ("std/ctlask.dawn", "pub ctl effect Ask"),
+                        ("selfhost/src/check/ctlask.dawn", "ctl effect Ask")):
         adopted = dict(sources)
-        adopted[stray] = "pub effect Ask {\n  fn ask() -> Int\n}\n"
+        adopted[stray] = f"{decl} {{\n  fn ask() -> Int\n}}\n"
         bad, _ = named_effect_status_problems(adopted, docs)
         if not any(problem.startswith(f"{stray}: declares an effect") for problem in bad):
             return ["named-effect status self-test: a declaration outside "
-                    f"NAMED_EFFECT_EXPECTED ({stray}) stayed green"], 0
+                    f"NAMED_EFFECT_EXPECTED ({stray}, spelled {decl!r}) "
+                    "stayed green"], 0
 
     # The listed file losing its declaration is the reverse direction, and the
     # documents would go on naming a consumer that is gone.
@@ -1967,7 +1977,7 @@ def check_named_effect_status_selftest() -> tuple[list[str], int]:
     if bad:
         return ["named-effect status self-test: the unedited documents went "
                 f"red: {bad[0]}"], 0
-    return [], 5 + len(NAMED_EFFECT_STATUS) * (1 + len(NAMED_EFFECT_STALE)) + 1
+    return [], 7 + len(NAMED_EFFECT_STATUS) * (1 + len(NAMED_EFFECT_STALE)) + 1
 
 
 REPOSITORY_POLICY_FILES = (
