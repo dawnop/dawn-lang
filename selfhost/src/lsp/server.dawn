@@ -9,7 +9,7 @@
 
 use std/char
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Proc}
 use std/str
 use std/map
 use std/list
@@ -676,7 +676,7 @@ pub fn lsp_std_dir(flag: Option[String], from_env: Option[String]) -> String =
 ## The driver supplies resource factories rather than one process-global Java
 ## oracle. The JVM host creates a platform-only standalone lease and one lease
 ## per target; the native host creates lifecycle-compatible refusals.
-pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !io = {
+pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !Proc !io = {
   let std_dir = lsp_std_dir(std_flag, io.getenv("DAWN_STD"))
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
@@ -813,7 +813,7 @@ pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !io = {
 const DEBOUNCE_MS: Int = 150
 
 ## Run the analysis a document sync deferred, if there is one.
-fn flush(st: LspState, pending: Option[(String, String, Int)]) -> LspState !Fs !io =
+fn flush(st: LspState, pending: Option[(String, String, Int)]) -> LspState !Fs !Proc !io =
   match pending {
     Some(p) -> {
       let (uri, text, version) = p
@@ -1106,15 +1106,16 @@ fn respond_error(id: Json, code: Int, message: String) -> Unit !io =
 fn notify(method: String, params: Json) -> Unit !io =
   send(jobj([("jsonrpc", JStr("2.0")), ("method", JStr(method)), ("params", params)]))
 
-## One message, under the real file system. The handler is installed per
-## message rather than once around the read loop because the loop's state
-## threads through `var`s the loop reads back, and `with` cannot see a `var`
-## declared before it (spec §4.10); the innermost boundary that owns a whole
-## unit of work is the message.
+## One message, under the real file system and real processes. The handlers
+## are installed per message rather than once around the read loop because the
+## loop's state threads through `var`s the loop reads back, and `with` cannot
+## see a `var` declared before it (spec §4.10); the innermost boundary that
+## owns a whole unit of work is the message. `Proc` arrives here through the
+## project plan, which may fetch a url dependency.
 fn handle(st0: LspState, msg: Json) -> LspState !io =
-  io.with_fs_real(() => handle_fs(st0, msg))
+  io.with_fs_real(() => io.with_proc_real(() => handle_fs(st0, msg)))
 
-fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !io = {
+fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !io = {
   var st = st0
   let method = ostr(msg, "method")
   let id = match oget(msg, "id") {
@@ -1506,7 +1507,7 @@ fn standalone_doc(
   }
 }
 
-fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !Fs !io =
+fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !io =
   match uri_to_path(uri) {
     None -> {
       let no_path: Option[String] = None
@@ -1617,7 +1618,7 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
     }
   }
 
-fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState !Fs !io =
+fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !io =
   match map.get(st.docs, uri) {
     Some(old) -> update_existing_doc(st, old, text, version)
     None -> open_new_doc(st, uri, text, version)
@@ -1699,7 +1700,7 @@ fn pos_offset(d: Doc, params: Json) -> Int = {
 
 # ---- language features ----
 
-fn handle_completion(st: LspState, params: Json) -> Json !Fs !io = {
+fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !io = {
   match doc_of(st, params) {
     Some(d) ->
       match analysis_of(st, d) {

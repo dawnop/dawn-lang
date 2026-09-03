@@ -497,7 +497,7 @@ elif name == "fetch-with-planner-diags":
 elif name == "plan-before-preflight":
     old = '''pub fn project_plan_for_load(
   target: source.SourceTarget
-) -> Result[ProjectPlan, LoadResult] !Fs !io =
+) -> Result[ProjectPlan, LoadResult] !Fs !Proc !io =
   match target {
     source.ProjectDirectory(dir) ->
       if io.is_dir(dir ++ "/src") {
@@ -509,7 +509,7 @@ elif name == "plan-before-preflight":
   }'''
     new = '''pub fn project_plan_for_load(
   target: source.SourceTarget
-) -> Result[ProjectPlan, LoadResult] !Fs !io = Ok(project_plan(target))'''
+) -> Result[ProjectPlan, LoadResult] !Fs !Proc !io = Ok(project_plan(target))'''
     analyze = replace_once(analyze, old, new)
 elif name == "drop-asm-bridge":
     jreflect = replace_once(

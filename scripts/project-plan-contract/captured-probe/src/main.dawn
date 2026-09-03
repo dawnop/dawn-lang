@@ -3,7 +3,7 @@
 # the compatibility wrapper that intentionally captures a fresh plan.
 
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Proc}
 use std/map
 use std/list
 use std/str
@@ -17,7 +17,7 @@ fn require(ok: Bool, message: String) -> Unit =
   if ok { () } else { panic(message) }
 
 pub fn main() -> Unit !io = {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_proc_real(() => {
     let fixture = io.getenv("DAWN_PROJECT_PLAN_FIXTURE").expect("fixture root")
     let app = fixture ++ "/app"
     let entry = app ++ "/src/main.dawn"
@@ -51,5 +51,5 @@ pub fn main() -> Unit !io = {
     require(not has_module(fresh, "pkg_a/api"),
       "fresh loader retained dependency A")
     io.println("captured-plan: OK")
-  })
+  }))
 }

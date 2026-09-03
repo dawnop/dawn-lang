@@ -12,7 +12,7 @@ use std/str
 use std/bytes
 use std/list
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Proc}
 use fspath/fspath
 use sha2/sha256
 use inflate/gzip
@@ -184,7 +184,7 @@ fn too_big(what: String, n: Int, limit: Int) -> String =
 ## no code at all: curl reads them, which the JDK never did. `--max-filesize`
 ## is advisory (servers may not send a length), so the size is checked again
 ## on the downloaded bytes.
-fn http_get(url: String) -> Result[Bytes, String] !Fs !io = {
+fn http_get(url: String) -> Result[Bytes, String] !Fs !Proc !io = {
   let staged = match io.temp_dir("", "dawn-fetch-") {
     Ok(d) -> d
     Err(e) -> return Err("cannot create a temp directory: " ++ e.message)
@@ -226,7 +226,7 @@ fn http_get(url: String) -> Result[Bytes, String] !Fs !io = {
   out
 }
 
-fn download(url: String) -> Result[Bytes, String] !Fs !io =
+fn download(url: String) -> Result[Bytes, String] !Fs !Proc !io =
   if str.starts_with(url, "file://") {
     let path = str.strip_prefix(url, "file://").unwrap_or(url)
     if io.is_dir(path) {
@@ -508,7 +508,7 @@ pub fn delete_tree(path: String) -> Unit !Fs = {
 ## Fetch `url`, unpack, hash, and file the tree into the cache under its own
 ## (actual) hash. Returns (cache entry, d1 hash) — `add` uses this to learn the
 ## hash of an archive it has never seen.
-pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !Fs !io = {
+pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !Fs !Proc !io = {
   mkdirs(cache_root())
   # staged inside the cache root, so the publishing rename below stays on one
   # filesystem and is therefore atomic
@@ -531,7 +531,7 @@ pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !Fs !io =
 ## The body of the fetch. Still its own function, but no longer *because* of
 ## the release: the staging directory now has a bracket around it, and this
 ## keeps its four early `Err` returns, which the sugared region would refuse.
-fn fetch_into(url: String, work: String) -> Result[(String, String), String] !Fs !io = {
+fn fetch_into(url: String, work: String) -> Result[(String, String), String] !Fs !Proc !io = {
   let body = match download(url) {
     Ok(b) -> b
     Err(e) -> return Err(e)
@@ -608,7 +608,7 @@ pub fn verify_cached(dir: String, hash: String) -> Result[Unit, String] !Fs =
 ## An entry with no record is verified rather than adopted. Adopting would be
 ## cheaper and would let exactly one bump through — the first one after this
 ## code ships, which is the occurrence it was written for.
-pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !Fs !io = {
+pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !Fs !Proc !io = {
   let root = cache_root()
   for u in recorded_origins(root, hash) { if u == url { return Ok(()) } }
   match fetch_and_hash(url) {
@@ -641,7 +641,7 @@ pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !Fs !io =
 ## when the entry exists and the `subdir` inside it does not. The url/hash
 ## guard therefore hangs off the resolver as well; extending PKG-02's re-hash
 ## to every warm build is a separate decision with a per-build price tag.
-pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !Fs !io = {
+pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !Fs !Proc !io = {
   let target = cache_dir(hash)
   if io.is_dir(target) {
     match verify_cached(target, hash) {

@@ -373,7 +373,7 @@ pub fn list_dir(path: String) -> Result[List[String], ForeignError] !Fs =
 ## An empty `argv` is `"io.no_program"`, another failure kind std mints itself,
 ## and for `list_dir`'s reason: the check happens first, so the failure never
 ## reaches a backend and every backend words it the same.
-pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !io =
+pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !Proc =
   if len(argv) == 0 {
     Err(ForeignError {
       kind: "io.no_program",
@@ -381,7 +381,7 @@ pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int
       cause: None
     })
   } else {
-    catch_fault(() => io_run(argv, out_path, err_path))
+    proc_run(argv, out_path, err_path)
   }
 
 # ---- the file system as a named effect ----
@@ -498,10 +498,10 @@ pub fn with_fs_real[T](body: fn() -> T !Fs !io) -> T !io = {
 # module takes `!e`; `with_fs_real` keeps the closed row it has until something
 # needs to sit outside it, because widening it costs a release.
 #
-# As with `Fs`, the declaration ships one release before anything moves onto
-# it (docs/bootstrap.md, the seed feature discipline). `run` is unchanged here:
-# it still reaches `io_run` itself, and it is a caller of `proc_run` no earlier
-# than the release after this one.
+# As with `Fs`, the declaration shipped one release before anything moved onto
+# it (docs/bootstrap.md, the seed feature discipline). `run` is that caller
+# now: it forwards to `proc_run`, and the empty-argv check stays above the
+# operation so an arm is never handed an argv with no program in it.
 
 ## Running another program, as the one operation a handler answers. The name
 ## carries a `proc_` prefix for the reason the `fs_` ones do: `use
@@ -830,7 +830,7 @@ test "rename replaces the destination; bytes survive what a String need not" {
 }
 
 test "run answers the exit status; a program that cannot start is an Err" {
-  with_fs_real(() => {
+  with_fs_real(() => with_proc_real(() => {
     let ok = (r: Result[Unit, ForeignError]) => match r {
       Ok(_) -> true
       Err(_) -> false
@@ -874,7 +874,7 @@ test "run answers the exit status; a program that cannot start is an Err" {
     assert delete(out) == Ok(Deleted)
     assert delete(err) == Ok(Deleted)
     assert delete(d) == Ok(Deleted)
-  })
+  }))
 }
 
 test "with_fs_real answers every operation from the host" {
@@ -1056,5 +1056,31 @@ test "a handler over a table answers Proc without a host" {
     (["curl", "--fail", "--max-time", "30", "https://example.invalid"],
       "/virt/body", "/virt/diag"),
     (["cc", "--target=wasm32-wasip1", "-print-file-name=crt1.o"], "", "")
+  ]
+}
+
+test "run reaches the table, and the empty-argv check stays above it" {
+  # The seam is real from the public function, not only from the operation:
+  # what `run` is handed is what the arm sees, element for element, and the
+  # status the arm answers is what `run` returns. Nothing below starts a
+  # process.
+  with handle Proc {
+    var calls: List[(List[String], String, String)] = []
+    proc_run(argv, out_path, err_path) => {
+      calls = calls ++ [(argv, out_path, err_path)]
+      Ok(7)
+    }
+  }
+  assert run(["true"], "", "") == Ok(7)
+  assert run(["sh", "-c", "printf hi"], "/virt/out", "/virt/err") == Ok(7)
+  # the empty-argv check happens first, so `io.no_program` is still minted
+  # here and the arm is never handed an argv with no program in it
+  match run([], "/virt/out", "") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.kind == "io.no_program" }
+  }
+  assert calls == [
+    (["true"], "", ""),
+    (["sh", "-c", "printf hi"], "/virt/out", "/virt/err")
   ]
 }

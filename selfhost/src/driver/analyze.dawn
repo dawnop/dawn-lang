@@ -5,7 +5,7 @@
 # accumulated exports of everything before it (std pre-seeded).
 
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Proc}
 use std/str
 use std/list
 use std/map
@@ -190,7 +190,7 @@ fn missing_source_root(dir: String) -> LoadResult = {
 ## result use this seam rather than planning first and trying to undo it.
 pub fn project_plan_for_load(
   target: source.SourceTarget
-) -> Result[ProjectPlan, LoadResult] !Fs !io =
+) -> Result[ProjectPlan, LoadResult] !Fs !Proc !io =
   match target {
     source.ProjectDirectory(dir) ->
       if io.is_dir(dir ++ "/src") {
@@ -238,7 +238,7 @@ pub fn load_planned(plan: ProjectPlan) -> LoadResult !Fs !io =
   }
 
 ## Directory mode: root = <dir>/src, entry = <dir>/src/main.dawn (spec §10.1).
-pub fn load_directory(dir: String) -> LoadResult !Fs !io =
+pub fn load_directory(dir: String) -> LoadResult !Fs !Proc !io =
   match project_plan_for_load(source.ProjectDirectory(dir)) {
     Ok(plan) -> load_planned(plan)
     Err(rejected) -> rejected
@@ -273,7 +273,7 @@ pub fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !Fs !io
 
 ## One command-line target, loaded as a file or a project directory, with the
 ## std directory answered by `std_dir_target` instead.
-pub fn load_target(std: StdCtx, target: String) -> LoadResult !Fs !io =
+pub fn load_target(std: StdCtx, target: String) -> LoadResult !Fs !Proc !io =
   match std_dir_target(std, target) {
     Some(refusal) -> refusal
     None -> if io.is_dir(target) { load_directory(target) } else { load_file(target) }
@@ -347,13 +347,13 @@ fn read_over(over: Map[String, String], c: String, f: String) -> Result[String, 
 
 ## File mode: root = nearest `src` ancestor, else the file's own directory;
 ## loads the entry plus its transitive use-closure.
-pub fn load_file(file: String) -> LoadResult !Fs !io = {
+pub fn load_file(file: String) -> LoadResult !Fs !Proc !io = {
   let no_over: Map[String, String] = map.empty()
   load_file_over(file, no_over)
 }
 
 ## `load_file` with editor-buffer overrides.
-pub fn load_file_over(file: String, over: Map[String, String]) -> LoadResult !Fs !io = {
+pub fn load_file_over(file: String, over: Map[String, String]) -> LoadResult !Fs !Proc !io = {
   let plan = project_plan(source.SourceFile(file))
   load_entries_over(plan, [file], over)
 }
@@ -881,7 +881,7 @@ fn index_files(
 ## Capture source resolution and derive every compiler-facing module path from
 ## it. The project tree is walked once. Direct dependencies sharing one source
 ## root reuse the same walk while still receiving each consumer alias prefix.
-pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !io = {
+pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !Proc !io = {
   let source_plan = source.source_plan(target)
   let project_files = walk_dawn(source_plan.source_root)
   var by_use: Map[String, String] = map.empty()
@@ -923,7 +923,7 @@ pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !io = {
 ## ProjectPlan. A cold url dep is fetched here the way `dawn check` would fetch
 ## it; the LSP's project-aware path instead reuses the index captured during
 ## analysis.
-pub fn use_candidates(file: String) -> Map[String, String] !Fs !io = {
+pub fn use_candidates(file: String) -> Map[String, String] !Fs !Proc !io = {
   # a buffer with no file behind it (`<lsp>`) has no tree to walk, and canon()
   # would resolve that placeholder against the server's own directory
   if not str.ends_with(file, ".dawn") {
@@ -1013,7 +1013,7 @@ pub fn analyze_document_planned(
   std: StdCtx,
   opts: CtOpts,
   js: Jsig
-) -> DocumentAnalysis !Fs !io = {
+) -> DocumentAnalysis !Fs !Proc !io = {
   if not has_module_use(text) {
     let prog = analyze_standalone(path, text, std, opts, js)
     return DocumentAnalysis { prog: prog, entry: standalone_entry(prog), plan: None }
@@ -1049,10 +1049,10 @@ pub fn analyze_document(
   std: StdCtx,
   opts: CtOpts,
   js: Jsig
-) -> (Program, String) !io = io.with_fs_real(() => {
+) -> (Program, String) !io = io.with_fs_real(() => io.with_proc_real(() => {
   let analyzed = analyze_document_planned(path, text, std, opts, js)
   (analyzed.prog, analyzed.entry)
-})
+}))
 
 # ---- tests ----
 
@@ -1061,8 +1061,13 @@ pub fn analyze_document(
 # the std it loads is the embedded copy mounted where `--std` defaults to. The
 # paths still read `/tmp/...` because that is what a project directory looks
 # like; nothing under them is ever created.
-fn in_mem[T](body: fn() -> T !Fs !io) -> T !io = {
-  let (out, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE), body)
+# The table answers `Fs`; `Proc` is answered by the real handler, which the
+# planning path below can reach when a project names a url dependency. No test
+# here declares one, so no arm of it ever fires -- but the row has to be
+# answered somewhere, and this is the boundary that owns the whole test.
+fn in_mem[T](body: fn() -> T !Fs !Proc !io) -> T !io = {
+  let (out, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
+    () => io.with_proc_real(body))
   out
 }
 
@@ -1601,21 +1606,22 @@ test "the analysis reads the declared tree, and no file system behind it" {
   # to ask). Both are questions about the table now.
   let root = "/tmp/dawn-selfhost-analyze/never-on-disk"
   let main_src = "use util\npub fn main() -> Unit !io = println(util.tag())\n"
-  let (_, table) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE), () => {
-    mkdirs(root ++ "/src")
-    put(root ++ "/src/main.dawn", main_src)
-    put(root ++ "/src/util.dawn", "pub fn tag() -> String = \"t\"\n")
-    let loaded = load_directory(root)
-    assert len(loaded.diags) == 0
-    assert len(loaded.modules) == 2
-    # the loader's text is the text this test wrote, not a file's contents
-    assert loaded.modules[1].text == main_src
-    let std = match load_std(std_dir()) {
-      Ok(sc) -> sc
-      Err(e) -> panic("std: " ++ std_load_error_text(e))
-    }
-    assert len(analyze_program(loaded, std, ct_default(), jsig_refused()).diags) == 0
-  })
+  let (_, table) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
+    () => io.with_proc_real(() => {
+      mkdirs(root ++ "/src")
+      put(root ++ "/src/main.dawn", main_src)
+      put(root ++ "/src/util.dawn", "pub fn tag() -> String = \"t\"\n")
+      let loaded = load_directory(root)
+      assert len(loaded.diags) == 0
+      assert len(loaded.modules) == 2
+      # the loader's text is the text this test wrote, not a file's contents
+      assert loaded.modules[1].text == main_src
+      let std = match load_std(std_dir()) {
+        Ok(sc) -> sc
+        Err(e) -> panic("std: " ++ std_load_error_text(e))
+      }
+      assert len(analyze_program(loaded, std, ct_default(), jsig_refused()).diags) == 0
+    }))
   # the table is the only source of truth, so what was written can be read back
   assert fsmem.mem_content(table, root ++ "/src/main.dawn") == Some(main_src)
   # and every file the run touched came from the declared tree or the mounted

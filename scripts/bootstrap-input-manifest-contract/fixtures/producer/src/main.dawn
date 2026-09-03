@@ -3,7 +3,7 @@
 # is tested after a valid graph exists rather than conflated with plan errors.
 
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Proc}
 use compiler_plan/source.{ProjectDirectory, bootstrap_source_input_manifest, source_plan}
 
 fn fail(message: String) -> Unit !io = {
@@ -11,7 +11,7 @@ fn fail(message: String) -> Unit !io = {
   let _ = io.exit(1)
 }
 
-fn emit(base: String, target: String, mutation: String) -> Unit !Fs !io = {
+fn emit(base: String, target: String, mutation: String) -> Unit !Fs !Proc !io = {
   let plan = source_plan(ProjectDirectory(target))
   if len(plan.diags) != 0 { panic("producer probe received SourcePlan diagnostics") }
   if mutation == "--remove-manifest" {
@@ -31,7 +31,7 @@ fn emit(base: String, target: String, mutation: String) -> Unit !Fs !io = {
 }
 
 pub fn main() -> Unit !io = {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_proc_real(() => {
     let argv = args()
     if len(argv) == 2 {
       emit(argv[0], argv[1], "")
@@ -40,5 +40,5 @@ pub fn main() -> Unit !io = {
     } else {
       panic("producer probe expects <base> <project> or <mutation> <base> <project>")
     }
-  })
+  }))
 }

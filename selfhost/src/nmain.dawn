@@ -25,7 +25,7 @@
 # DAWN_SELF and runs the whole scripted session against this binary.
 
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Proc}
 use std/str
 use front/token.{Diag}
 use front/diag
@@ -335,7 +335,7 @@ fn load_or_die(std_dir: String) -> StdCtx !Fs !io =
     Err(e) -> fail_std(e)
   }
 
-fn analyzed(std: StdCtx, target: String) -> Program !Fs !io = {
+fn analyzed(std: StdCtx, target: String) -> Program !Fs !Proc !io = {
   if not io.exists(target) {
     cli_error("no such file or directory: " ++ target)
   }
@@ -348,7 +348,7 @@ fn analyzed(std: StdCtx, target: String) -> Program !Fs !io = {
   prog
 }
 
-fn emitted(std_dir: String, target: String) -> String !Fs !io = {
+fn emitted(std_dir: String, target: String) -> String !Fs !Proc !io = {
   let std = load_or_die(std_dir)
   let prog = analyzed(std, target)
   match cdriver.c_text(std, prog) {
@@ -374,7 +374,7 @@ fn default_out(target: String) -> String = {
 ## leave the binary at `out`. The cc diagnostics stream to this process's
 ## stderr -- an empty err_path means "inherit", and cc failing is the user's
 ## compile error to read.
-fn cc_build(ctext: String, out: String) -> Unit !Fs !io = cc_build_for(ctext, out, false, false)
+fn cc_build(ctext: String, out: String) -> Unit !Fs !Proc !io = cc_build_for(ctext, out, false, false)
 
 ## The reactor's only export, appended to the emitted C.
 ##
@@ -436,7 +436,7 @@ fn wasm_toolchain_hint() -> String =
 ## sdk never has to print the deprecation warning, and an unusable compiler
 ## falls through to the old spelling and fails in the compile below, where the
 ## install hint is.
-fn wasm_triple(cc: String, work: String) -> String !Fs !io = {
+fn wasm_triple(cc: String, work: String) -> String !Fs !Proc !io = {
   let probe = work ++ "/crt1.path"
   let ask = [cc, "--target=wasm32-wasip1", "-print-file-name=crt1.o"]
   let modern = match io.run(ask, probe, work ++ "/crt1.err") {
@@ -451,7 +451,7 @@ fn wasm_triple(cc: String, work: String) -> String !Fs !io = {
   if modern { "wasm32-wasip1" } else { "wasm32-wasi" }
 }
 
-fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !Fs !io = {
+fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !Fs !Proc !io = {
   let work = match io.temp_dir("", "dawnc") {
     Ok(d) -> d
     Err(e) -> {
@@ -584,7 +584,7 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !
   }
 }
 
-fn cmd_check(rest: List[String]) -> Unit !Fs !io = {
+fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !io = {
   if wants_help(rest) { return print(subcommand_help("check")) }
   let (std_dir, targets) = check_args(rest)
   if len(targets) == 0 {
@@ -609,7 +609,7 @@ fn cmd_check(rest: List[String]) -> Unit !Fs !io = {
   println("ok")
 }
 
-fn cmd_emitc(rest: List[String]) -> Unit !Fs !io = {
+fn cmd_emitc(rest: List[String]) -> Unit !Fs !Proc !io = {
   let (std_dir, out, target) = parse_compile_tail(
     "dawn emitc",
     "usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]",
@@ -626,7 +626,7 @@ fn cmd_emitc(rest: List[String]) -> Unit !Fs !io = {
   }
 }
 
-fn cmd_build(rest: List[String]) -> Unit !Fs !io = {
+fn cmd_build(rest: List[String]) -> Unit !Fs !Proc !io = {
   # Ahead of the parser, not inside it: `--help` is a request for the contract,
   # so it must not be able to fail on the argv it is asking about. The parser
   # would take it for the target and report a missing file (which is what it
@@ -659,7 +659,7 @@ fn build_and_exec(
   bin_name: String,
   what: String,
   program_args: List[String]
-) -> Unit !Fs !io = {
+) -> Unit !Fs !Proc !io = {
   let work = match io.temp_dir("", dir_prefix) {
     Ok(d) -> d
     Err(e) -> {
@@ -686,7 +686,7 @@ fn build_and_exec(
   }
 }
 
-fn cmd_run(rest: List[String]) -> Unit !Fs !io = {
+fn cmd_run(rest: List[String]) -> Unit !Fs !Proc !io = {
   let run = parse_run_tail(rest)
   build_and_exec(
     emitted(run.std_dir, run.target),
@@ -780,7 +780,7 @@ fn cmd_fmt(rest: List[String]) -> Unit !Fs !io = {
 ## one hands it the refusing hook, as every other native subcommand does. For a
 ## target without `use java` the two produce the same JSON, and a target with
 ## it is not a program this backend compiles at all.
-fn cmd_doc(rest: List[String]) -> Unit !Fs !io = {
+fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !io = {
   var std_dir = "std"
   var builtins_mode = false
   var stdlib_mode = false
@@ -855,7 +855,7 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !io = {
 ## The comptime flags (`--comptime-fuel`, `--comptime-ffi`, `--closure`) are
 ## not taken here because no subcommand of this driver takes them; that gap is
 ## the driver's, not this subcommand's.
-fn cmd_test(rest: List[String]) -> Unit !Fs !io = {
+fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !io = {
   var std_dir = "std"
   var target = ""
   var std_tests = false
@@ -938,11 +938,14 @@ fn cmd_test(rest: List[String]) -> Unit !Fs !io = {
   build_and_exec(ctext, "dawnc-test", "tests", "tests", [])
 }
 
-## The native driver's outermost frame installs the file system handler once,
-## as main.dawn's does; every subcommand runs under it.
-pub fn main() -> Unit !io = io.with_fs_real(() => dispatch())
+## The native driver's outermost frame installs the file system and process
+## handlers once, as main.dawn's does; every subcommand runs under both. The
+## process one matters most here: the C driver's toolchain probe and every
+## compile it runs reach the host through `io.run`.
+pub fn main() -> Unit !io =
+  io.with_fs_real(() => io.with_proc_real(() => dispatch()))
 
-fn dispatch() -> Unit !Fs !io = {
+fn dispatch() -> Unit !Fs !Proc !io = {
   match args() {
     [] -> fail_usage()
     [mode, ..rest] ->

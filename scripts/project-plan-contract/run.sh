@@ -96,7 +96,9 @@ new = '''pub fn load_entries_over(
   entries: List[String],
   over: Map[String, String]
 ) -> LoadResult !Fs !io = {
-  let fresh = project_plan(plan.source.target)
+  # `project_plan` is `!Proc` since io.run moved onto the effect, and this row
+  # is not; answering it here keeps the mutation to one function.
+  let fresh = io.with_proc_real(() => project_plan(plan.source.target))
   resolve(
     fresh.source.source_root,
     entries,

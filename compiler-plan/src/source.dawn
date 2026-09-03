@@ -7,7 +7,7 @@
 # diagnostic record; compiler consumers convert it only at rendering edges.
 
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Proc}
 use std/str
 use std/list
 use std/map
@@ -150,7 +150,7 @@ fn source_roots(target: SourceTarget) -> (String, String) !io =
 ## Resolve source packages once, then derive Java coordinates from the final
 ## selected graph. Callers choose the target kind explicitly; CLI
 ## existence/type rejection belongs to main.dawn.
-pub fn source_plan(target: SourceTarget) -> SourcePlan !Fs !io = {
+pub fn source_plan(target: SourceTarget) -> SourcePlan !Fs !Proc !io = {
   let (project, source_root) = source_roots(target)
   let no_mfc: Map[String, Option[ManifestV]] = map.empty()
   let (url_resolved, url_names, sdiags, mfc) = select_url_deps(project, no_mfc)
@@ -410,7 +410,7 @@ fn url_pkg_root(
   name: String,
   r: UrlReq,
   failed0: UrlFailures
-) -> (Option[String], List[LocDiag], UrlFailures, Bool) !Fs !io = {
+) -> (Option[String], List[LocDiag], UrlFailures, Bool) !Fs !Proc !io = {
   let entry = pkgfetch.cache_dir(r.hash)
   let root = if r.subdir == "" { entry } else { entry ++ "/" ++ r.subdir }
   if mirror_failure_seen(failed0, r.hash, r.url) {
@@ -476,7 +476,7 @@ fn select_url_deps(
   root_dir: String,
   mfc0: Map[String, Option[ManifestV]]
 ) -> (Map[String, Option[String]], Map[String, String], List[LocDiag],
-  Map[String, Option[ManifestV]]) !Fs !io = {
+  Map[String, Option[ManifestV]]) !Fs !Proc !io = {
   var mfc = mfc0
   var reqs: Map[String, List[UrlReq]] = map.empty()
   var url_names: Map[String, String] = map.empty()
