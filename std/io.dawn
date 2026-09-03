@@ -715,6 +715,20 @@ pub fn with_exit_real[T, !e](body: fn() -> T !Exit !e) -> T !io = {
 # The wrapper's body row is `!e`, as `with_exit_real`'s is and for the same
 # reason.
 #
+# What no test in this module can say: the four production arms are one-liners
+# onto the host primitives, and a process cannot read back its own console.
+# `Fs` can be checked against itself (a file is written and read again) and so
+# can `Env` (`env_cwd() == cwd()`), but write `console_eprintln(s) =>
+# io_println(s)` here and every test in this file still passes. Two things
+# stand in for the assertion, and neither is one. The table handler below
+# fixes what an arm is supposed to mean, because it records the stream and the
+# line ending separately. And `scripts/native-cli-diff.sh` compares the whole
+# `dawn test --stdlib` transcript byte for byte across the two backends, which
+# catches one backend's arms disagreeing with the other's but not both being
+# wrong the same way. The first real assertion on this seam is knife 2's
+# `consolemem` clients, where a diagnostic read back off the wrong stream is a
+# failing test.
+#
 # As with the three effects above, the declaration ships one release before
 # anything moves onto it (docs/bootstrap.md, the seed feature discipline).
 # `print`, `println`, `eprint` and `eprintln` are unchanged here and still
