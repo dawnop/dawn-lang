@@ -164,6 +164,7 @@ def gather():
         "scripts/tile-gpu-diff/wide_diff.dawn",
         "scripts/tile-gpu-diff/gath_diff.dawn",
         "scripts/tile-gpu-diff/scan_diff.dawn",
+        "scripts/tile-gpu-diff/atom_diff.dawn",
     ]:
         files[path] = read(ROOT / path)
     for golden in GOLDEN.glob("*"):

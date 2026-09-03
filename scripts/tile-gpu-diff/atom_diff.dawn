@@ -1,0 +1,465 @@
+# Layer 2 for the atomic kernels (knife 14), the tenth of these programs
+# after vadd_diff, mask_diff, red_diff, mm_diff, stride_diff, int_diff,
+# wide_diff, gath_diff and scan_diff: one `!Gpu` program runs each of the
+# two kernels scripts/tile-golden pins under `with_gpu_real` against the
+# machine's GPU and under `with_gpu_fake` against hand-written host
+# references, and prints what each device answered.
+#
+#   atom_diff [--corpus unique] <histogram.cubin> <cas_swap.cubin>
+#
+# What is new here and nowhere else: TWO LANES MAY NAME ONE ELEMENT. Every
+# scatter in this tree writes a permutation, because the dialect gives the
+# lanes of one store no order against each other and a duplicated
+# destination therefore has no answer. An atomic is the operation that
+# gives one, and `histogram` is the kernel that needs it: 500 values into
+# 16 bins over eight tile blocks is nothing but collisions.
+#
+# THE TIERS: both kernels are exact, and by algebra rather than by a chosen
+# corpus, which is knife 10's argument again. Integer addition modulo 2^32
+# is associative and commutative, so whatever order the colliding lanes
+# arrive in the histogram's total is the same value; `cas_swap` gives every
+# slot to exactly one lane, so there is no order in it at all.
+#
+# THE CORPUS IS HALF THE CLAIM, and this program is where that is measured
+# rather than asserted in prose:
+#
+#   * `--corpus main` is the histogram's real corpus: every bin is hit from
+#     more than one BLOCK. The `index` line counts the repeats and the
+#     cross-block bins, and scripts/tile-gpu-diff/run.sh holds both above
+#     zero. Without collisions an atomic add and a plain load-add-store
+#     answer the same thing and the atomic-as-plain-store mutant is green.
+#   * `--corpus unique` is the same kernel on a corpus with exactly one
+#     lane a bin, and no bin hit twice anywhere. run.sh runs the mutant
+#     against it as the CONTROL: the mutant must stay green there, which is
+#     what says the corpus and not the kernel is what makes it bite.
+#
+#   * `cas_swap`'s corpus must carry all three outcomes -- a lane whose
+#     expected value matches (the slot takes the new value), one whose
+#     expected value does not (the slot is left alone) and one that is
+#     masked out entirely. Without the first, a mutant that ignores the
+#     comparison would swap nothing where nothing was to be swapped and
+#     stay green; the `slots` line counts all three and run.sh holds the
+#     first two above zero.
+use std/io
+use std/io.{with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, histogram_ref, cas_swap_ref}
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a value no
+## kernel here computes, so a lane that still has it is a lane nothing
+## wrote. The histogram's BINS are the exception and start at zero, because
+## the kernel only adds and leetgpu's own reference zeroes them first; its
+## tail past the bins still carries the sentinel.
+pub const SENTINEL: Float = 0.0 - 12345.0
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const HIST_BINS: Int = 16
+pub const HIST_TILE: Int = 64
+pub const HIST_N: Int = 500
+pub const CAS_SLOTS: Int = 128
+pub const CAS_TILE: Int = 32
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  results: Option[List[List[Float]]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", results: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, for the reason
+# gath_diff gives (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn download_all(hs: List[Int], reads: List[Int], i: Int, acc: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu =
+  if i >= len(reads) {
+    Ok(acc)
+  } else {
+    match gpu.gpu_download(hs[reads[i]]) {
+      Ok(v) -> download_all(hs, reads, i + 1, acc ++ [v])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a
+## `gx` by 1 by 1 grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. `reads` are the argument positions to
+## download afterwards.
+fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])],
+  reads: List[Int]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = download_all(hs, reads, 0, [])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                results: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn same_lanes(a: List[Float], b: List[Float]) -> Bool =
+  len(a) == len(b) && list.all(range(0, len(a)), i => to_string(a[i]) == to_string(b[i]))
+
+## Whether EVERY buffer read back agrees bit for bit.
+fn same_bits(got: Option[List[List[Float]]], want: Option[List[List[Float]]]) -> Bool = match (got, want) {
+  (Some(a), Some(b)) -> len(a) == len(b) && list.all(range(0, len(a)), i => same_lanes(a[i], b[i]))
+  _ -> false
+}
+
+fn miss_one(a: List[Float], b: List[Float]) -> String =
+  if len(a) != len(b) {
+    "lengths ${len(a)} and ${len(b)}"
+  } else {
+    let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+    if len(bad) == 0 {
+      "none"
+    } else {
+      "${len(bad)} of ${len(a)} lanes differ, first at ${bad[0]}: ${a[bad[0]]} vs ${b[bad[0]]}"
+    }
+  }
+
+fn misses(got: Option[List[List[Float]]], want: Option[List[List[Float]]], reads: List[Int]) -> String =
+  match (got, want) {
+    (Some(a), Some(b)) ->
+      if len(a) != len(b) {
+        "read back ${len(a)} buffer(s) and ${len(b)}"
+      } else {
+        list.fold(range(0, len(a)), "", (acc, i) => {
+          let sep = if acc == "" { "" } else { "; " }
+          acc ++ sep ++ "arg${reads[i]}: " ++ miss_one(a[i], b[i])
+        })
+      }
+    _ -> "-"
+  }
+
+## The verdict for one kernel: `identical:exact`, `differ:result` or
+## `blocked:<kind>@<stage>`. Both kernels here are exact tier, so there is
+## no tolerance branch to take.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if same_bits(real.results, fake.results) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+# ---- the corpora ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+fn zero_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => 0.0)
+
+## The histogram's real corpus: `i * 7` modulo the bin count, which visits
+## every bin (7 and 16 are coprime), with two families of value OUTSIDE the
+## bins mixed in -- one above the last bin and one negative. Neither is
+## counted, which is what leetgpu's own reference does, and the negative
+## ones are also what says the address clamp handles a negative index
+## (`-1 & 15` is 15).
+fn hist_values(n: Int) -> List[Float] =
+  list.map(range(0, n), i =>
+      if i % 37 == 5 {
+        to_float(HIST_BINS + i % 9)
+      } else if i % 53 == 11 {
+        to_float(0 - 1 - i % 7)
+      } else {
+        to_float(i * 7 % HIST_BINS)
+      })
+
+## The control corpus: exactly one lane per bin, at lane `31 * k`, so no
+## two participating lanes are in one block either. Every other lane holds
+## a value past the last bin and is masked out. Under this corpus an
+## atomic add and a plain load-add-store answer the same thing, which is
+## the whole point of running it.
+fn hist_unique(n: Int) -> List[Float] =
+  list.map(range(0, n), i => if i % 31 == 0 && i / 31 < HIST_BINS { to_float(i / 31) } else { 999.0 })
+
+## The block a lane belongs to, which is what "cross-block" counts.
+fn block_of(i: Int) -> Int = i / HIST_TILE
+
+## The lanes of `x` that land in a bin.
+fn in_bins(x: List[Float], n: Int) -> List[Int] =
+  list.filter(range(0, n), i => to_int(x[i]) >= 0 && to_int(x[i]) < HIST_BINS)
+
+## The histogram corpus as three counts: how many lanes are counted, how
+## many INCREMENTS beyond the first each bin takes (zero when no bin is hit
+## twice) and how many bins are hit from more than one tile block. The
+## second and third are what run.sh holds; the atomic-as-plain-store mutant
+## is green wherever they are zero.
+fn index_shape(x: List[Float]) -> String = {
+  let live = in_bins(x, HIST_N)
+  let used = list.filter(range(0, HIST_BINS), b =>
+      list.any(live, i => to_int(x[i]) == b))
+  let cross = list.filter(range(0, HIST_BINS), b => {
+    let blocks = list.map(list.filter(live, i => to_int(x[i]) == b), block_of)
+    list.any(blocks, u => list.any(blocks, w => u != w))
+  })
+  "counted=${len(live)} of ${HIST_N} bins_used=${len(used)}"
+    ++ " bin_repeated=${len(live) - len(used)} cross_block_bins=${len(cross)}"
+}
+
+## The slots' initial contents: nothing near the new values, so a swap is
+## always visible.
+fn cas_state(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i * 13 % 97))
+
+## What each lane expects to find. Every fifth lane expects a negative
+## value and is masked out; of the rest, every third expects what the slot
+## holds (the swap happens) and the others expect something else (it does
+## not).
+fn cas_cmp(n: Int) -> List[Float] =
+  list.map(range(0, n), i =>
+      if i % 5 == 0 {
+        to_float(0 - 1 - i % 3)
+      } else if i % 3 == 0 {
+        to_float(i * 13 % 97)
+      } else {
+        to_float(i * 13 % 97 + 1 + i % 7)
+      })
+
+## What each lane writes if it wins: far from every value a slot can hold,
+## so a slot that took one is unmistakable.
+fn cas_val(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(1000 + i))
+
+## The compare-and-swap corpus as three counts: how many lanes take part,
+## how many of those find what they expect (and swap) and how many are
+## masked out. run.sh holds the first two above zero: a corpus with no
+## match at all would forgive a mutant that ignores the comparison.
+fn slot_shape() -> String = {
+  let cmp = cas_cmp(CAS_SLOTS)
+  let state = cas_state(CAS_SLOTS)
+  let active = list.filter(range(0, CAS_SLOTS), i => cmp[i] >= 0.0)
+  let matched = list.filter(active, i => cmp[i] == state[i])
+  "slots=${CAS_SLOTS} active=${len(active)} matched=${len(matched)}"
+    ++ " masked=${CAS_SLOTS - len(active)}"
+}
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String = ["histogram", "cas_swap"][i]
+
+## Neither kernel is tolerance tier: both are exact by algebra.
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier`
+## column of scripts/leetgpu-diff/problems.txt against it.
+pub fn tolerance_tier() -> List[String] = []
+
+fn case_grid(i: Int) -> Int = if case_name(i) == "histogram" { HIST_N / HIST_TILE + 1 } else { CAS_SLOTS / CAS_TILE }
+
+## The histogram's input under the corpus this run was asked for.
+fn hist_input(unique: Bool) -> List[Float] =
+  if unique { hist_unique(HIST_N) } else { hist_values(HIST_N) }
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order. Every output buffer is LONGER than the answer, so the
+## sentinel in its tail says whether a write went past the end. The
+## histogram's bins themselves start at zero rather than at the sentinel:
+## the kernel adds and never assigns, and leetgpu's own reference zeroes
+## them before it counts.
+fn case_bufs(i: Int, unique: Bool) -> List[(String, List[Float])] =
+  if case_name(i) == "histogram" {
+    [("i32", hist_input(unique)), ("i32", zero_buffer(HIST_BINS) ++ sentinel_buffer(8))]
+  } else {
+    [("i32", cas_state(CAS_SLOTS) ++ sentinel_buffer(8)), ("i32", cas_cmp(CAS_SLOTS)),
+      ("i32", cas_val(CAS_SLOTS)), ("i32", sentinel_buffer(CAS_SLOTS + 8))]
+  }
+
+## The argument positions to download after the launch: the histogram's one
+## output, and the compare-and-swap's IN-PLACE slots together with the
+## buffer it reports the old values in.
+fn case_reads(i: Int) -> List[Int] = if case_name(i) == "histogram" { [1] } else { [0, 3] }
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
+  if case_name(i) == "histogram" {
+    map.from([("histogram", (2, last_out((dts, ins) => histogram_ref(HIST_N, HIST_BINS, dts, ins))))])
+  } else {
+    map.from([("cas_swap", (4, (dts, ins) => cas_swap_ref(CAS_SLOTS, dts, ins)))])
+  }
+
+## A vector as a line: its length, its first lanes and its last ones.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[List[Float]]]) -> String = match o {
+  Some(vs) -> list.fold(range(0, len(vs)), "", (acc, i) => {
+    let sep = if acc == "" { "" } else { " | " }
+    acc ++ sep ++ digest(vs[i])
+  })
+  None -> "-"
+}
+
+fn shape_of(i: Int, unique: Bool) -> String = {
+  let bufs = case_bufs(i, unique)
+  let formats = list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+  "bufs=${formats} reads=${to_string(case_reads(i))}"
+}
+
+fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("atom_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !io = {
+  io.eprintln("usage: atom_diff [--corpus unique] <histogram.cubin> <cas_swap.cubin>")
+  io.exit(2)
+}
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  let count = 2
+  let unique = len(argv) == count + 2 && argv[0] == "--corpus" && argv[1] == "unique"
+  let paths = if unique { list.drop(argv, 2) } else { argv }
+  if len(paths) != count { usage() } else { () }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i, unique)
+    let reads = case_reads(i)
+    let gx = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs, reads))
+    let real = with_gpu_real(cubins, () => stages(name, gx, bufs, reads))
+    let v = verdict(fake, real)
+    io.println("kernel ${name} tier=exact ${shape_of(i, unique)} grid=(${gx}, 1, 1)")
+    if name == "histogram" {
+      io.println("  index corpus=${if unique { "unique" } else { "main" }} ${index_shape(hist_input(unique))}")
+    } else {
+      io.println("  index ${slot_shape()}")
+    }
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")
+    io.println("  miss  ${misses(real.results, fake.results, reads)}")
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+}
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")

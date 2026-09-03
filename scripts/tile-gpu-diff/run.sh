@@ -35,7 +35,10 @@
 #             scan_diff.dawn the six scan kernels of knife 13 (the first
 #             whose region bodies need not commute, and the first family
 #             whose float tier is decided by a measurement of the device's
-#             fold order rather than by a chosen corpus),
+#             fold order rather than by a chosen corpus) and atom_diff.dawn
+#             the two atomic kernels of knife 14 (the first in which two
+#             lanes may name ONE element, which every scatter here is
+#             forbidden to do),
 #             under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
@@ -216,6 +219,31 @@
 #                      a legal kernel. `seg_scan` takes the same step in
 #                      floats through a different expression and is the
 #                      control
+#     atomic-as-plain-store
+#                      the package's `atomic_add_masked` stops issuing an
+#                      atomic and issues a gather, an addi and a scatter
+#                      instead, which is what the operation would be if the
+#                      lanes never collided -> layer 0 moves and layer 1
+#                      accepts it (a load and a store are a load and a
+#                      store), and on the device the histogram loses every
+#                      increment but one per bin per block. `cas_swap` does
+#                      not use the surface and is the control in the bytes
+#                      as well as on the device.
+#                      Its CORPUS is the other half of the claim and is
+#                      checked as one: the same mutant is run a second time
+#                      with atom_diff's `--corpus unique`, one lane a bin
+#                      and no bin twice, where it must stay GREEN. Without
+#                      that second run "the mutant reds" would not say
+#                      whether the atomic or the corpus did the work
+#     cas-compare-ignored
+#                      `cas_swap` hands the compare-and-swap the value it is
+#                      about to write as the value it expects to find, so
+#                      the comparison can never decide anything -> layer 0
+#                      moves, layer 1 accepts it (one i32 tile is as legal
+#                      as another) and only the device says that the 34
+#                      slots that should have taken a new value kept the
+#                      old one. The histogram is the control and its bytes
+#                      do not move
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -437,6 +465,11 @@ gathered=(token_embed sort_rank merge_rank scatter_perm)
 # axis.
 scanned=(prefix_sum max_subarray seg_scan compact linrec gae ssm_scan)
 
+# The atomic kernels of knife 14, in the order atom_diff takes them. Only
+# `histogram` has colliding lanes and only `cas_swap` compares, which are
+# the two splits the mutants below are held to.
+atomic=(histogram cas_swap)
+
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
@@ -450,7 +483,7 @@ assemble_golden() { # kernel, tilebc, cubin
 }
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
-  "${wide[@]}" "${gathered[@]}" "${scanned[@]}"; do
+  "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -471,6 +504,8 @@ gath_cubins=()
 for k in "${gathered[@]}"; do gath_cubins+=("$work/$k.cubin"); done
 scan_cubins=()
 for k in "${scanned[@]}"; do scan_cubins+=("$work/$k.cubin"); done
+atom_cubins=()
+for k in "${atomic[@]}"; do atom_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -649,6 +684,58 @@ case "$scan_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/scan.out" | head -n 1)"
 
+# ---- native, the atomic kernels (knife 14)
+build_native "$root/std" "$work/atom.bin" "$here/atom_diff.dawn"
+rc=0
+"$work/atom.bin" "${atom_cubins[@]}" > "$work/atom.out" 2> "$work/atom.err" || rc=$?
+cat "$work/atom.out"
+atom_verdict="$(verdict_of "$work/atom.out")"
+case "$atom_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#atomic[@]} atomic kernels on the GPU are bit-identical to the fake device, colliding lanes and all" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $atom_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $atom_verdict" ;;
+  fail) cat "$work/atom.err" >&2; fail "the device answered and disagreed with the fake device on an atomic kernel (see the transcript above)" ;;
+  *) cat "$work/atom.err" >&2; fail "atom_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/atom.out" | head -n 1)"
+
+# The same two programs on the CONTROL corpus, where no two lanes share a
+# bin. The clean run must pass there as well -- it is the same kernel -- and
+# the number that matters is the collision count on the line below, which
+# the atomic-as-plain-store mutant needs to be zero here and nonzero above.
+rc=0
+"$work/atom.bin" --corpus unique "${atom_cubins[@]}" > "$work/atom-unique.out" 2> "$work/atom-unique.err" || rc=$?
+atom_unique_verdict="$(verdict_of "$work/atom-unique.out")"
+[ "$atom_unique_verdict" = "$atom_verdict" ] ||
+  { cat "$work/atom-unique.out" >&2; fail "the control corpus answers $atom_unique_verdict where the main one answers $atom_verdict"; }
+
+# An atomic add is only an atomic where two lanes meet. gath_diff holds its
+# scatter's repeats DOWN to zero for the opposite reason; here the repeats
+# are the point, and a corpus that stopped having them would leave the
+# mutant below nothing to catch.
+hist_shape="$(awk '/^kernel histogram /{f=1} f && /^  index /{print; exit}' "$work/atom.out")"
+case "$hist_shape" in
+  *bin_repeated=0*) fail "the histogram's corpus has no repeated bin, so its atomic is not being tested: $hist_shape" ;;
+  *cross_block_bins=0*) fail "the histogram's corpus has no bin shared between blocks: $hist_shape" ;;
+  *) echo "PASS  corpus: the histogram's bins collide, and across blocks ($hist_shape)" ;;
+esac
+hist_unique_shape="$(awk '/^kernel histogram /{f=1} f && /^  index /{print; exit}' "$work/atom-unique.out")"
+case "$hist_unique_shape" in
+  *bin_repeated=0*) echo "PASS  corpus: the control corpus has one lane a bin ($hist_unique_shape)" ;;
+  *) fail "the control corpus has repeated bins, so it is not a control: $hist_unique_shape" ;;
+esac
+
+# A compare-and-swap whose corpus never matches would forgive a mutant that
+# ignores the comparison, and one that never masks would leave half the
+# surface untested.
+slot_shape="$(awk '/^kernel cas_swap /{f=1} f && /^  index /{print; exit}' "$work/atom.out")"
+case "$slot_shape" in
+  *matched=0*) fail "no slot in the compare-and-swap's corpus matches, so nothing is ever swapped: $slot_shape" ;;
+  *masked=0*) fail "no slot in the compare-and-swap's corpus is masked out: $slot_shape" ;;
+  *) echo "PASS  corpus: the compare-and-swap's corpus matches, misses and masks ($slot_shape)" ;;
+esac
+
 # A scatter whose lanes name one element twice has NO answer on the device,
 # so a corpus that stopped being a permutation would turn every verdict
 # above into a coin toss rather than a comparison. gath_diff counts the
@@ -671,6 +758,7 @@ tiers="$tiers int:$(sed -n 's/^tiers //p' "$work/ints.out" | tail -n 1)"
 tiers="$tiers wide:$(sed -n 's/^tiers //p' "$work/wide.out" | tail -n 1)"
 tiers="$tiers gath:$(sed -n 's/^tiers //p' "$work/gath.out" | tail -n 1)"
 tiers="$tiers scan:$(sed -n 's/^tiers //p' "$work/scan.out" | tail -n 1)"
+tiers="$tiers atom:$(sed -n 's/^tiers //p' "$work/atom.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.out")"
 echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe"
@@ -679,8 +767,13 @@ echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe"
 # first thing that stopped one of them.
 if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
   && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
-  && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ] && [ "$scan_verdict" = pass ]; then
+  && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ] && [ "$scan_verdict" = pass ] \
+  && [ "$atom_verdict" = pass ]; then
   verdict=pass
+elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
+  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
+  && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ] && [ "$scan_verdict" = pass ]; then
+  verdict="$atom_verdict"
 elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
   && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
   && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ]; then
@@ -1814,6 +1907,141 @@ scan_kernel_mutant exclusive-scan-as-inclusive compact \
   '  scatter_masked(out, incl, s, keep, t)'
 scan_kernel_check exclusive-scan-as-inclusive compact
 
+# 21. atomic-as-plain-store: the PACKAGE's `atomic_add_masked` issues a
+#     gather, an addi and a scatter where it issued an atomic. That is
+#     exactly the program an atomic add would be if no two lanes ever met,
+#     and layer 1 has no way to prefer one to the other: a masked load and
+#     a masked store are as legal as the atomic they replace.
+#
+#     On the device the histogram loses every increment but one per bin per
+#     block, because the lanes of one store are not ordered against each
+#     other. `cas_swap` does not go through this surface, so its bytes do
+#     not move and it is the control at layer 0 as well as at layer 2.
+mutant_pkg_atom="$work/pkg-atomic-as-plain-store"
+rm -rf "$mutant_pkg_atom"
+cp -r "$root/packages/tileir" "$mutant_pkg_atom"
+before=$(digest "$mutant_pkg_atom/src/dev.dawn")
+python3 "$here/mutate.py" "$mutant_pkg_atom/src/dev.dawn" atomic-as-plain-store \
+  '  let _old = atomic_rmw_masked(p, "add", index, shape, mask, v)
+  ()' \
+  '  let old = gather_masked(p, index, shape, mask, i_const(shape, 0))
+  scatter_masked(p, index, shape, mask, add_i(shape, old, v))'
+after=$(digest "$mutant_pkg_atom/src/dev.dawn")
+echo "      atomic-as-plain-store: packages/tileir/src/dev.dawn md5 $before -> $after"
+
+mutant_kernels atomic-as-plain-store "$mutant_pkg_atom" "${atomic[@]}"
+atom_red=(histogram)
+moved=0
+for k in "${atomic[@]}"; do
+  if cmp -s "$golden/$k.tilebc" "$work/atomic-as-plain-store-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+done
+[ "$moved" = "${#atom_red[@]}" ] ||
+  fail "atomic-as-plain-store: expected exactly ${#atom_red[@]} of the ${#atomic[@]} kernels' bytecode to move, got $moved"
+echo "      atomic-as-plain-store: ${#atom_red[@]} of ${#atomic[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+atom_mut_cubins=()
+for k in "${atomic[@]}"; do atom_mut_cubins+=("$work/atomic-as-plain-store-$k.cubin"); done
+rc=0
+"$work/atom.bin" "${atom_mut_cubins[@]}" > "$work/m-atomic-as-plain-store.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-atomic-as-plain-store.out")"
+if [ "$atom_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-atomic-as-plain-store.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#atom_red[@]}" ]; then
+    cat "$work/m-atomic-as-plain-store.out" >&2
+    fail "atomic-as-plain-store mutant stayed green: expected verdict fail (exit 1) with exactly ${#atom_red[@]} kernel saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${atom_red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-atomic-as-plain-store.out" ||
+      { cat "$work/m-atomic-as-plain-store.out" >&2; fail "atomic-as-plain-store: $k has colliding lanes and should differ"; }
+  done
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == "cas_swap" {bad=1} END {exit bad}' \
+    "$work/m-atomic-as-plain-store.out" ||
+    { cat "$work/m-atomic-as-plain-store.out" >&2; fail "atomic-as-plain-store: cas_swap does not add and should be untouched"; }
+  # THE CONTROL. The same mutant on a corpus with one lane a bin: the
+  # atomic and the load-add-store are then the same program, so it must be
+  # green. This is what says the mutant is caught by the collisions and
+  # not by anything else the kernel does.
+  rc=0
+  "$work/atom.bin" --corpus unique "${atom_mut_cubins[@]}" > "$work/m-atomic-as-plain-store-unique.out" 2>&1 || rc=$?
+  cverdict="$(verdict_of "$work/m-atomic-as-plain-store-unique.out")"
+  if [ "$cverdict" != pass ] || [ "$rc" != 0 ]; then
+    cat "$work/m-atomic-as-plain-store-unique.out" >&2
+    fail "atomic-as-plain-store: the control corpus should forgive the mutant entirely, got $cverdict (exit $rc)"
+  fi
+  echo "PASS  mutant: atomic-as-plain-store (layer 1 accepts it; on the device ${atom_red[*]} differs, cas_swap does not, and the collision-free corpus forgives it)"
+else
+  [ "$mverdict" = "$atom_verdict" ] ||
+    { cat "$work/m-atomic-as-plain-store.out" >&2; fail "atomic-as-plain-store: the clean run is $atom_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: atomic-as-plain-store not verifiable on this driver: the clean run is $atom_verdict, before any launch reaches the device"
+fi
+
+# A kernel-source mutant for the atomic family: the gath_ and scan_ pair
+# with atom_diff's kernel list.
+atom_kernel_mutant() { # name, kernel, old, new
+  local name="$1" k="$2" src="$work/kernels-$1.dawn" before after
+  cp "$golden/kernels.dawn" "$src"
+  before=$(digest "$src")
+  python3 "$here/mutate.py" "$src" "$name" "$3" "$4"
+  after=$(digest "$src")
+  echo "      $name: scripts/tile-golden/kernels.dawn md5 $before -> $after"
+  mkdir -p "$work/proj-$name/src"
+  cp "$src" "$work/proj-$name/src/main.dawn"
+  cat > "$work/proj-$name/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
+
+[deps]
+tileir = "$root/packages/tileir"
+TOML
+  "$root/bin/dawn" run "$work/proj-$name" -- "$k" --bytecode "$work/$name.tilebc" > "$work/proj-$name.log" 2>&1 ||
+    { cat "$work/proj-$name.log" >&2; fail "$name: $k did not encode"; }
+  cmp -s "$golden/$k.tilebc" "$work/$name.tilebc" &&
+    fail "$name mutant stayed green: $k.tilebc is unchanged"
+  assemble_golden "$k" "$work/$name.tilebc" "$work/$name.cubin"
+  echo "      $name: $k.tilebc differs from the golden and tileiras still accepts it"
+}
+
+# Run atom_diff with `kernel`'s cubin replaced by the mutant's, and require
+# that kernel and no other to differ.
+atom_kernel_check() { # name, kernel
+  local name="$1" k="$2" rc=0 mverdict differ cubs=()
+  local one
+  for one in "${atomic[@]}"; do
+    if [ "$one" = "$k" ]; then cubs+=("$work/$name.cubin"); else cubs+=("$work/$one.cubin"); fi
+  done
+  "$work/atom.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  if [ "$atom_verdict" = pass ]; then
+    differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+    if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+      cat "$work/m-$name.out" >&2
+      fail "$name mutant stayed green: expected verdict fail (exit 1) with $k alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+    fi
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != want {bad=1} END {exit bad}' \
+      "$work/m-$name.out" ||
+      { cat "$work/m-$name.out" >&2; fail "$name: a kernel other than $k moved"; }
+    echo "PASS  mutant: $name ($k alone reds; the other $(( ${#atomic[@]} - 1 )) atomic kernel is untouched)"
+  else
+    [ "$mverdict" = "$atom_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $atom_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $atom_verdict, before any launch reaches the device"
+  fi
+}
+
+# 22. cas-compare-ignored: `cas_swap` hands the compare-and-swap the value
+#     it is about to write as the value it expects to find. The comparison
+#     then always fails on this corpus (no slot holds a value near 1000),
+#     so no slot takes a new value and the 34 that should have are wrong.
+#
+#     The comparison is the whole of what separates a compare-and-swap from
+#     an exchange, and nothing below the device knows which of the two tile
+#     operands is which: `AllTypesMatch<["cmp", "val", "result"]>` is
+#     satisfied either way, which is why tileiras accepts it.
+atom_kernel_mutant cas-compare-ignored cas_swap \
+  '  let prev = atomic_cas_masked(state, lanes(blk, s), s, active, c, v)' \
+  '  let prev = atomic_cas_masked(state, lanes(blk, s), s, active, v, v)'
+atom_kernel_check cas-compare-ignored cas_swap
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -1827,6 +2055,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mm_diff.dawn \
   scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/int_diff.dawn scripts/tile-gpu-diff/wide_diff.dawn \
   scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/scan_diff.dawn \
+  scripts/tile-gpu-diff/atom_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
