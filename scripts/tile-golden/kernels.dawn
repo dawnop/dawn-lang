@@ -19,7 +19,8 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_mask
   i_const, i8_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i, lt_i,
   shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
   float_to_float, ext_u8, trunc_u8, mmai,
-  d_reduce_i, s_addi }
+  d_reduce_i, s_addi, s_maxi,
+  d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const }
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -1433,6 +1434,222 @@ fn scatter_perm(perm: Param[I32], x: Param[F64], out: Param[F64]) -> Unit !Dev =
   scatter_masked(out, dst, s, ok, load(x, blk, s))
 }
 
+# ---- the scan kernels (knife 13) ----
+#
+# `scan` is `reduce` with the intermediate results kept: position `j` of the
+# answer is the fold of everything at or before `j` along the scanned
+# dimension, and the answer has the operand's shape rather than the
+# operand's shape with that dimension dropped. One new opcode (0x5E), one
+# attribute more than `reduce` (`reverse`), the same region encoding.
+#
+# Three facts about it were MEASURED on the device rather than read, and
+# every kernel below rests on them (packages/tileir/src/dev.dawn says where):
+#
+#   * the region's FIRST argument is the accumulator and the second the
+#     element, in both directions. `reduce`'s bodies are all commutative and
+#     could never say which; a scan's need not be, and three of the six
+#     kernels here are wrong under the other reading.
+#   * the IDENTITY is not folded in at the first position: the prefix of one
+#     element is that element. So `linrec`'s first output is `x[0]` whatever
+#     `a[0]` is, which is what leetgpu 82 asks for, and no kernel here may
+#     lean on an identity to fix up its first lane.
+#   * a MULTI-OPERAND scan runs, though the dialect's prose says `scan` "is
+#     restricted to only support single tile input". Its verifier does not
+#     say so and neither does tileiras. Three kernels here need it: a
+#     first-order linear recurrence composes affine maps, and an affine map
+#     is two numbers.
+#
+# The float scans are TOLERANCE tier and cannot be anything else: the
+# evaluation order inside a prefix is implementation-defined, and the
+# device's is measurably not the sequential left fold a host reference
+# writes. The integer scans are exact tier by the same algebra the integer
+# reductions use (knife 10): addition modulo 2^32 is associative, so every
+# regrouping of one prefix is one value.
+
+# The scan family's shape: one block, a 128-wide tile, 100 live lanes. One
+# block because a prefix sum crosses every lane of its dimension, which is
+# the same reason every reduction in this backend covers its problem in one
+# launch.
+const SCAN_TILE: Int = 128
+const SCAN_N: Int = 100
+
+# The inclusive prefix sum of the first SCAN_N lanes: leetgpu 16 (Prefix
+# Sum). Masked at both ends of the operation, so the lanes past the end are
+# neither read nor written and the padding zero they fold in is the sum's
+# identity.
+fn prefix_sum(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [SCAN_TILE]
+  let z = idx_const(0)
+  let m = tail_mask(z, s, SCAN_N)
+  let t = load_masked(x, z, s, m, f_const(F64, s, 0.0))
+  store_masked(out, z, s, m, d_scan(F64, s, 0, false, t, 0.0, (acc, e) => s_addf(F64, acc, e)))
+}
+
+# The sliding window's shape: MSA_W consecutive of MSA_N values, in one
+# block of MSA_TILE lanes. MSA_W + MSA_N is below MSA_TILE, which is what
+# lets the shifted run live in the same tile.
+const MSA_TILE: Int = 128
+const MSA_N: Int = 100
+const MSA_W: Int = 7
+
+# Nothing is a smaller window sum than this, and it is not INT_MIN: the
+# reduction below never adds it, but a value at the edge of the range is a
+# hazard nobody needs.
+const MSA_FLOOR: Int = 0 - 2000000000
+
+# The largest sum of MSA_W consecutive of the first MSA_N elements, at
+# element 0 of the output: leetgpu 51 (Max Subarray Sum).
+#
+# The window sum ending at lane `j` is `P[j] - P[j - MSA_W]`, where `P` is
+# the inclusive prefix sum. A tile cannot be shifted along itself -- there
+# is no lane-to-lane move in this dialect and a tile is not in memory -- so
+# the shifted prefix is a SECOND scan of the same buffer read MSA_W lanes
+# late: `Q[j] = sum of x[0 .. j - MSA_W]`, which is `P[j - MSA_W]` for
+# `j >= MSA_W` and 0 at `j = MSA_W - 1`, where the first window's left
+# neighbour is nothing at all.
+#
+# Integer throughout, so this is exact tier whatever the device's fold tree
+# is, and the subtraction of two prefix sums is exact for the same reason.
+fn max_subarray(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let s = [MSA_TILE]
+  let z = idx_const(0)
+  let zero = i_const(s, 0)
+  let lane = lanes(z, s)
+  let live = tail_mask(z, s, MSA_N)
+  let t = load_masked(x, z, s, live, zero)
+  let p = d_scan_i(s, 0, false, t, 0, (acc, e) => s_addi(acc, e))
+  # the same run read MSA_W lanes late; the address is clamped as well as
+  # masked, so a blocked lane still names an element of the buffer
+  let late = in_range(s, lane, MSA_W, MSA_W + MSA_N)
+  let back = max_i(s, sub_i(s, lane, i_const(s, MSA_W)), zero)
+  let q = d_scan_i(s, 0, false, gather_masked(x, back, s, late, zero), 0, (acc, e) => s_addi(acc, e))
+  let ends = in_range(s, lane, MSA_W - 1, MSA_N)
+  let win = select(I32, s, ends, sub_i(s, p, q), i_const(s, MSA_FLOOR))
+  store(out, tile_at(z, 1), [1],
+    spread(I32, [1], d_reduce_i(s, win, MSA_FLOOR, (acc, e) => s_maxi(acc, e))))
+}
+
+# The exclusive prefix sum of each segment of the first SCAN_N lanes, where
+# a segment starts at every lane whose flag is 1: leetgpu 70 (Segmented
+# Exclusive Prefix Sum).
+#
+# Two scans and a subtraction, which is leetgpu's own reference written in
+# tiles: the segment's exclusive sum at `j` is the GLOBAL exclusive sum at
+# `j` minus the global exclusive sum at the segment's first lane. The
+# global exclusive sum is the inclusive scan less the lane's own value; the
+# segment start's is a scan whose body is "the last element that carried a
+# flag, and otherwise what came before", which is associative and NOT
+# commutative -- the first body in this tree that would answer differently
+# under the other reading of the region's arguments.
+#
+# That body needs the flag and the value of one lane together, so it is a
+# two-operand scan. The corpus must set the flag of lane 0: with no
+# segment open at all there is nothing to subtract, and leetgpu's own tests
+# always open one there.
+fn seg_scan(values: Param[F64], flags: Param[I32], out: Param[F64]) -> Unit !Dev = {
+  let s = [SCAN_TILE]
+  let z = idx_const(0)
+  let m = tail_mask(z, s, SCAN_N)
+  let v = load_masked(values, z, s, m, f_const(F64, s, 0.0))
+  let f = int_to_float(F64, s, load_masked(flags, z, s, m, i_const(s, 0)))
+  let incl = d_scan(F64, s, 0, false, v, 0.0, (acc, e) => s_addf(F64, acc, e))
+  let excl = sub(F64, s, incl, v)
+  let (_open, carry) = d_scan2(F64, s, 0, false, f, excl, 0.0, 0.0, (af, av, ef, ev) => {
+    let start = s_gt(F64, ef, s_const(F64, 0.5))
+    (s_select(F64, start, ef, af), s_select(F64, start, ev, av))
+  })
+  store_masked(out, z, s, m, sub(F64, s, excl, carry))
+}
+
+# The positive values of the first SCAN_N lanes, packed to the front of the
+# output and nothing written after them: leetgpu 72 (Stream Compaction).
+#
+# The destination of a kept lane is the number of kept lanes before it,
+# which is the EXCLUSIVE prefix count: an inclusive integer scan of the
+# predicate less the lane's own bit. Exclusive is spelled that way and not
+# with the identity, because the identity is not folded in.
+#
+# Exact tier: the values are moved and never arithmetic, and the counts are
+# integers. The destinations are distinct by construction (a strictly
+# increasing count over the kept lanes), which is what a scatter requires;
+# the lanes that are not kept are masked and write nothing.
+fn compact(a: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [SCAN_TILE]
+  let z = idx_const(0)
+  let live = tail_mask(z, s, SCAN_N)
+  let t = load_masked(a, z, s, live, f_const(F64, s, 0.0))
+  let keep = and_mask(s, live, gt(F64, s, t, f_const(F64, s, 0.0)))
+  let ones = select(I32, s, keep, i_const(s, 1), i_const(s, 0))
+  let incl = d_scan_i(s, 0, false, ones, 0, (acc, e) => s_addi(acc, e))
+  scatter_masked(out, sub_i(s, incl, ones), s, keep, t)
+}
+
+# The recurrence family's shape: LR_B rows of LR_L, one block a row.
+const LR_B: Int = 4
+const LR_L: Int = 64
+
+# `h[t] = a[t] * h[t-1] + x[t]`, with `h[0] = x[0]`: leetgpu 82 (Linear
+# Recurrence).
+#
+# The scan folds AFFINE MAPS. Element `t` is the map `u -> a[t] * u + x[t]`,
+# written as the pair `(a[t], x[t])`, and composing the accumulated map
+# `(A, X)` with it gives `(a[t] * A, a[t] * X + x[t])` -- associative,
+# because function composition is, and not commutative, because
+# composition is not. The second half of the answer at `t` is `h[t]`,
+# because the accumulated map applied to the initial state 0 is its own
+# addend.
+#
+# `h[0] = x[0]` falls out of the identity not being folded in: the prefix
+# of one element is that element, so lane 0 is `(a[0], x[0])` and `a[0]` is
+# never used. That is exactly what leetgpu's reference does.
+fn linrec(a: Param[F64], x: Param[F64], h: Param[F64]) -> Unit !Dev = {
+  let s = [LR_L]
+  let b = block_id(0)
+  let blk = tile_at(b, LR_L)
+  let (_c, hh) = d_scan2(F64, s, 0, false, load(a, blk, s), load(x, blk, s), 1.0, 0.0,
+    (ac, av, ec, ev) => (s_mulf(F64, ec, ac), s_fma(F64, ec, av, ev)))
+  store(h, blk, s, hh)
+}
+
+# The advantage estimator's shape: GAE_B rows of GAE_S. GAE_B * GAE_S is a
+# power of two so the shifted read's address clamp is one `andi`.
+const GAE_B: Int = 4
+const GAE_S: Int = 64
+
+# The discount and the trace decay, host constants folded in at recording
+# time, as every scalar parameter of a leetgpu problem is.
+fn gae_gamma() -> Float = 0.99
+fn gae_lam() -> Float = 0.95
+
+# The generalised advantage estimate, a REVERSE scan: leetgpu 110 (Parallel
+# Reverse Scan).
+#
+# `A[t] = delta[t] + gamma * lam * A[t+1]`, which is `linrec`'s affine
+# composition with a constant coefficient, run from the end. `reverse` is
+# what makes it one launch instead of a loop, and it is the only kernel in
+# this tree that sets the attribute -- so scripts/tile-gpu-diff's
+# scan-reverse-ignored mutant reds here and nowhere else.
+#
+# `delta[t] = rewards[t] + gamma * values[t+1] - values[t]`, with
+# `values[t+1]` past the end of the row taken as zero. The shifted read is
+# a gather one lane late: masked at the row's last lane and clamped into
+# the buffer, so the blocked lane still names an element.
+fn gae(rewards: Param[F64], values: Param[F64], adv: Param[F64]) -> Unit !Dev = {
+  let s = [GAE_S]
+  let b = block_id(0)
+  let blk = tile_at(b, GAE_S)
+  let nxt = and_i(s, add_i(s, lanes(blk, s), i_const(s, 1)), i_const(s, GAE_B * GAE_S - 1))
+  let ok = in_range(s, lanes(idx_const(0), s), 0, GAE_S - 1)
+  let nv = gather_masked(values, nxt, s, ok, f_const(F64, s, 0.0))
+  let v = load(values, blk, s)
+  let delta = sub(F64, s, addf(F64, s, load(rewards, blk, s),
+    mul(F64, s, f_const(F64, s, gae_gamma()), nv)), v)
+  let dec = f_const(F64, s, gae_gamma() * gae_lam())
+  let (_c, ad) = d_scan2(F64, s, 0, true, dec, delta, 1.0, 0.0,
+    (ac, av, ec, ev) => (s_mulf(F64, ec, ac), s_fma(F64, ec, av, ev)))
+  store(adv, blk, s, ad)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -1563,6 +1780,21 @@ fn trace(name: String) -> TileProg = match name {
   "scatter_perm" ->
     trace_kernel("scatter_perm", ["i32", "f64", "f64"],
       () => scatter_perm(param(I32, 0), param(F64, 1), param(F64, 2)))
+  "prefix_sum" ->
+    trace_kernel("prefix_sum", ["f64", "f64"], () => prefix_sum(param(F64, 0), param(F64, 1)))
+  "max_subarray" ->
+    trace_kernel("max_subarray", ["i32", "i32"], () => max_subarray(param(I32, 0), param(I32, 1)))
+  "seg_scan" ->
+    trace_kernel("seg_scan", ["f64", "i32", "f64"],
+      () => seg_scan(param(F64, 0), param(I32, 1), param(F64, 2)))
+  "compact" ->
+    trace_kernel("compact", ["f64", "f64"], () => compact(param(F64, 0), param(F64, 1)))
+  "linrec" ->
+    trace_kernel("linrec", ["f64", "f64", "f64"],
+      () => linrec(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "gae" ->
+    trace_kernel("gae", ["f64", "f64", "f64"],
+      () => gae(param(F64, 0), param(F64, 1), param(F64, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -1590,6 +1822,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
       ++ "|count_eq|subarray_sum|rainbow|int_ops"
       ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
-      ++ "|token_embed|sort_rank|merge_rank|scatter_perm>"
+      ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
+      ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

@@ -1,0 +1,570 @@
+# Layer 2 for the scan kernels (knife 13), the ninth of these programs after
+# vadd_diff, mask_diff, red_diff, mm_diff, stride_diff, int_diff, wide_diff
+# and gath_diff: one `!Gpu` program runs each of the six kernels
+# scripts/tile-golden pins under `with_gpu_real` against the machine's GPU
+# and under `with_gpu_fake` against hand-written host references, and prints
+# what each device answered and under which TIER the two agree.
+#
+#   scan_diff <prefix_sum.cubin> <max_subarray.cubin> <seg_scan.cubin>
+#             <compact.cubin> <linrec.cubin> <gae.cubin>
+#
+# What is new here and nowhere else: an operation whose answer keeps every
+# intermediate accumulator, and whose BODY NEED NOT COMMUTE. A reduction's
+# body may be applied in any order over any tree, so every body in this tree
+# before now was commutative and no corpus could tell one region argument
+# from the other. A scan's cannot be reordered across the dimension, and
+# three of the six kernels here (`seg_scan`, `linrec`, `gae`) answer a
+# different number under the other reading of its two arguments.
+#
+# THE TIERS, and why each kernel is where it is:
+#
+#   exact      `max_subarray` and `compact`. Both scan INTEGERS, and integer
+#              addition modulo 2^32 is exactly associative, so whatever tree
+#              the device folds each prefix with is the value a host
+#              reference's left fold gives. `compact` never adds a value at
+#              all: it counts, and then moves. This is knife 10's argument,
+#              not a chosen corpus.
+#   tolerance  `prefix_sum`, `seg_scan`, `linrec` and `gae`, at leetgpu's own
+#              `atol = rtol = 1e-5`. A float prefix sum is NOT the sequential
+#              left fold on this device: the dialect leaves the order inside
+#              a prefix implementation-defined, and the measurement that says
+#              so is the ORDER PROBE below. The plan for this knife predicted
+#              the opposite ("a scan is ordered, so floats can be compared to
+#              the bit"); it was wrong, and the honest tier is this one.
+#
+# THE ORDER PROBE is not an assertion, in red_diff's shape. It prints the
+# device's `prefix_sum` beside a left fold and a right fold of the same
+# corpus, and counts the lanes on which each differs, so that a tileiras
+# upgrade that changes the tree is seen rather than discovered. The corpus is
+# reciprocals, on which no two orders agree.
+#
+# What the corpora have to carry, and why:
+#
+#   * `seg_scan`'s flags must open a segment at LANE 0. With no segment open
+#     there is nothing to subtract and the problem has no answer there;
+#     leetgpu's own tests always set that flag, and this says so rather than
+#     leaving it to arithmetic.
+#   * `compact`'s corpus must hold values on BOTH sides of zero, and a zero:
+#     the predicate is `> 0`, and a corpus of positives would compact to
+#     itself and forgive any destination at all.
+#   * `linrec`'s coefficients include 0 and 1 (a row that forgets everything
+#     and a row that is a plain prefix sum) as well as ordinary values: those
+#     are the three cases leetgpu's own tests are built from.
+#   * `gae`'s rows must be longer than one so that the SHIFTED read of
+#     `values` has a lane to shift, and its last lane's shifted read is the
+#     one the mask blocks -- the padding zero there is what the reference's
+#     `values[t+1] = 0` past the end means.
+use std/io
+use std/io.{with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, prefix_sum_ref, max_subarray_ref,
+  seg_scan_ref, compact_ref, linrec_ref, gae_ref }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a value no kernel
+## here computes, so a lane that still has it is a lane nothing wrote.
+pub const SENTINEL: Float = 0.0 - 12345.0
+
+## leetgpu's own agreement criterion, and the tolerance tier's.
+pub const ATOL: Float = 1.0e-5
+pub const RTOL: Float = 1.0e-5
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const SCAN_TILE: Int = 128
+pub const SCAN_N: Int = 100
+pub const MSA_W: Int = 7
+pub const LR_B: Int = 4
+pub const LR_L: Int = 64
+pub const GAE_B: Int = 4
+pub const GAE_S: Int = 64
+pub const GAE_GAMMA: Float = 0.99
+pub const GAE_LAM: Float = 0.95
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  results: Option[List[List[Float]]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", results: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, for the reason
+# gath_diff gives (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn download_all(hs: List[Int], reads: List[Int], i: Int, acc: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu =
+  if i >= len(reads) {
+    Ok(acc)
+  } else {
+    match gpu.gpu_download(hs[reads[i]]) {
+      Ok(v) -> download_all(hs, reads, i + 1, acc ++ [v])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a `gx`
+## by 1 by 1 grid, one stage at a time, stopping at the first refusal and
+## saying which stage it was. `reads` are the argument positions to download
+## afterwards. The raw operations rather than the typed ones, because a
+## case's buffers do not share a format.
+fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])],
+  reads: List[Int]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = download_all(hs, reads, 0, [])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                results: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+# ---- the two tiers ----
+
+## Whether `got` is within the tolerance tier's distance of `want`, by
+## leetgpu's own criterion. A NaN on either side is never within.
+fn within(got: Float, want: Float) -> Bool =
+  if got != got || want != want {
+    false
+  } else if got == want {
+    true
+  } else if got - got != 0.0 || want - want != 0.0 {
+    false
+  } else {
+    let d = if got > want { got - want } else { want - got }
+    let m = if want > 0.0 { want } else { 0.0 - want }
+    d <= ATOL + RTOL * m
+  }
+
+fn same_lanes(a: List[Float], b: List[Float]) -> Bool =
+  len(a) == len(b) && list.all(range(0, len(a)), i => to_string(a[i]) == to_string(b[i]))
+
+fn close_lanes(a: List[Float], b: List[Float]) -> Bool =
+  len(a) == len(b) && list.all(range(0, len(a)), i => within(a[i], b[i]))
+
+## Whether EVERY buffer read back agrees bit for bit.
+fn same_bits(got: Option[List[List[Float]]], want: Option[List[List[Float]]]) -> Bool = match (got, want) {
+  (Some(a), Some(b)) -> len(a) == len(b) && list.all(range(0, len(a)), i => same_lanes(a[i], b[i]))
+  _ -> false
+}
+
+## Whether every buffer read back is within the tolerance.
+fn all_close(got: Option[List[List[Float]]], want: Option[List[List[Float]]]) -> Bool = match (got, want) {
+  (Some(a), Some(b)) -> len(a) == len(b) && list.all(range(0, len(a)), i => close_lanes(a[i], b[i]))
+  _ -> false
+}
+
+# The lanes one buffer differs in, and the first of them, measured as the
+# tolerance criterion measures it (1.0 is exactly the tolerance).
+fn miss_one(a: List[Float], b: List[Float]) -> String =
+  if len(a) != len(b) {
+    "lengths ${len(a)} and ${len(b)}"
+  } else {
+    let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+    let worst = list.fold(range(0, len(b)), 0.0, (acc, i) => {
+      let d = if a[i] > b[i] { a[i] - b[i] } else { b[i] - a[i] }
+      let m = if b[i] > 0.0 { b[i] } else { 0.0 - b[i] }
+      let scaled = d / (ATOL + RTOL * m)
+      if scaled > acc { scaled } else { acc }
+    })
+    if len(bad) == 0 {
+      "none"
+    } else {
+      "${len(bad)} of ${len(a)} lanes not bit-equal, first at ${bad[0]}: ${a[bad[0]]} vs ${b[bad[0]]}"
+        ++ ", worst ${worst}"
+    }
+  }
+
+fn misses(got: Option[List[List[Float]]], want: Option[List[List[Float]]], reads: List[Int]) -> String =
+  match (got, want) {
+    (Some(a), Some(b)) ->
+      if len(a) != len(b) {
+        "read back ${len(a)} buffer(s) and ${len(b)}"
+      } else {
+        list.fold(range(0, len(a)), "", (acc, i) => {
+          let sep = if acc == "" { "" } else { "; " }
+          acc ++ sep ++ "arg${reads[i]}: " ++ miss_one(a[i], b[i])
+        })
+      }
+    _ -> "-"
+  }
+
+## The verdict for one kernel under its tier: `identical:exact`,
+## `identical:tolerance` (a tolerance-tier kernel that agreed bit for bit
+## anyway, worth seeing), `close:tolerance`, `differ:result`, or
+## `blocked:<kind>@<stage>`.
+fn verdict(tier: String, fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if same_bits(real.results, fake.results) {
+    "identical:" ++ tier
+  } else if tier == "exact" {
+    "differ:result"
+  } else if all_close(real.results, fake.results) {
+    "close:tolerance"
+  } else {
+    "differ:result"
+  }
+}
+
+# ---- the corpora ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+## The reciprocals whose prefix sums no two fold orders agree on: lane 0 is
+## 1 and lane `i` is `1 / (7i + 3)`, none of them a binary fraction. This is
+## the corpus the order probe reads and `prefix_sum` runs on, and it is
+## deliberately the OPPOSITE of the reduction kernels' integer-valued
+## corpora: those were chosen so the fold order could not show, and this one
+## is chosen so that it does.
+fn reciprocals(n: Int) -> List[Float] =
+  list.map(range(0, n), i => if i == 0 { 1.0 } else { 1.0 / (to_float(i) * 7.0 + 3.0) })
+
+## `n` integers spanning both signs, with a run of large values around lane
+## 40 so that the largest window is not at either end.
+fn windowed(n: Int) -> List[Float] =
+  list.map(range(0, n), i =>
+    to_float(if i >= 40 && i < 40 + MSA_W { 90 + i % 5 } else { i * 13 % 21 - 10 }))
+
+## `n` values on both sides of zero, with exact zeros: the predicate is
+## `> 0`, so the zeros must be dropped and a corpus without them would not
+## say whether the kernel tested `> 0` or `>= 0`.
+fn mixed_signs(n: Int) -> List[Float] =
+  list.map(range(0, n), i =>
+    if i % 7 == 3 { 0.0 } else { to_float(i * 11 % 23 - 11) + 0.5 })
+
+## Segment flags: lane 0 always opens one, and after that every lane whose
+## index is one of an irregular set, so the segments have different lengths
+## and one of them is a single lane.
+fn seg_flags(n: Int) -> List[Float] =
+  list.map(range(0, n), i =>
+    if i == 0 || i == 1 || i == 5 || i == 17 || i == 18 || i == 42 || i == 71 { 1.0 } else { 0.0 })
+
+## Values with no exact prefix sums, so the segmented answer is a real float
+## answer and not a run of integers.
+fn seg_values(n: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float(i % 9) - 4.0 + 1.0 / (to_float(i) + 3.0))
+
+## The recurrence's coefficients: row 0 forgets everything (all zero), row 1
+## is a plain prefix sum (all one), rows 2 and 3 decay. Those are the three
+## shapes leetgpu's own test cases are built from.
+fn lr_coefficients(b: Int, l: Int) -> List[Float] =
+  list.map(range(0, b * l), k => {
+    let row = k / l
+    if row == 0 { 0.0 } else if row == 1 { 1.0 } else { 0.5 + to_float(k % 3) * 0.125 }
+  })
+
+fn lr_addends(b: Int, l: Int) -> List[Float] =
+  list.map(range(0, b * l), k => to_float(k % 11) - 5.0 + 1.0 / (to_float(k % 7) + 2.0))
+
+fn gae_rewards(b: Int, s: Int) -> List[Float] =
+  list.map(range(0, b * s), k => to_float(k % 13) - 6.0 + 1.0 / (to_float(k % 5) + 3.0))
+
+fn gae_values(b: Int, s: Int) -> List[Float] =
+  list.map(range(0, b * s), k => to_float(k % 17) - 8.0 + 1.0 / (to_float(k % 3) + 4.0))
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String =
+  ["prefix_sum", "max_subarray", "seg_scan", "compact", "linrec", "gae"][i]
+
+## The kernels of the tolerance tier: every float scan, because the device
+## does not fold a prefix the way a host reference does. The two integer
+## kernels are exact by algebra.
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier` column
+## of scripts/leetgpu-diff/problems.txt against it.
+pub fn tolerance_tier() -> List[String] = ["prefix_sum", "seg_scan", "linrec", "gae"]
+
+fn case_tier(i: Int) -> String =
+  if list.any(tolerance_tier(), t => t == case_name(i)) { "tolerance" } else { "exact" }
+
+## The grid each kernel was recorded for. The four that scan one run cover
+## it in one block, as every reduction in this backend does; the two
+## row-wise ones take one block a row.
+fn case_grid(i: Int) -> Int = {
+  let name = case_name(i)
+  if name == "linrec" {
+    LR_B
+  } else if name == "gae" {
+    GAE_B
+  } else {
+    1
+  }
+}
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order. Every output buffer is LONGER than the answer, so the
+## sentinel in its tail says whether a store went past the end.
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let name = case_name(i)
+  if name == "prefix_sum" {
+    [("f64", reciprocals(SCAN_N)), ("f64", sentinel_buffer(SCAN_N + 8))]
+  } else if name == "max_subarray" {
+    [("i32", windowed(SCAN_N)), ("i32", sentinel_buffer(9))]
+  } else if name == "seg_scan" {
+    [("f64", seg_values(SCAN_N)), ("i32", seg_flags(SCAN_N)), ("f64", sentinel_buffer(SCAN_N + 8))]
+  } else if name == "compact" {
+    [("f64", mixed_signs(SCAN_N)), ("f64", sentinel_buffer(SCAN_N + 8))]
+  } else if name == "linrec" {
+    [("f64", lr_coefficients(LR_B, LR_L)), ("f64", lr_addends(LR_B, LR_L)),
+      ("f64", sentinel_buffer(LR_B * LR_L + 8))]
+  } else {
+    [("f64", gae_rewards(GAE_B, GAE_S)), ("f64", gae_values(GAE_B, GAE_S)),
+      ("f64", sentinel_buffer(GAE_B * GAE_S + 8))]
+  }
+}
+
+## The argument positions to download after the launch: the one output
+## buffer of each, which is the last argument in all six.
+fn case_reads(i: Int) -> List[Int] = [len(case_bufs(i)) - 1]
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
+  let name = case_name(i)
+  if name == "prefix_sum" {
+    map.from([("prefix_sum", (2, last_out((dts, ins) => prefix_sum_ref(SCAN_N, dts, ins))))])
+  } else if name == "max_subarray" {
+    map.from([("max_subarray", (2, last_out((dts, ins) => max_subarray_ref(SCAN_N, MSA_W, dts, ins))))])
+  } else if name == "seg_scan" {
+    map.from([("seg_scan", (3, last_out((dts, ins) => seg_scan_ref(SCAN_N, dts, ins))))])
+  } else if name == "compact" {
+    map.from([("compact", (2, last_out((dts, ins) => compact_ref(SCAN_N, dts, ins))))])
+  } else if name == "linrec" {
+    map.from([("linrec", (3, last_out((dts, ins) => linrec_ref(LR_B, LR_L, dts, ins))))])
+  } else {
+    map.from([("gae", (3, last_out((dts, ins) => gae_ref(GAE_B, GAE_S, GAE_GAMMA, GAE_LAM, dts, ins))))])
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[List[Float]]]) -> String = match o {
+  Some(vs) -> list.fold(range(0, len(vs)), "", (acc, i) => {
+    let sep = if acc == "" { "" } else { " | " }
+    acc ++ sep ++ digest(vs[i])
+  })
+  None -> "-"
+}
+
+fn shape_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  let formats = list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+  "bufs=${formats} reads=${to_string(case_reads(i))}"
+}
+
+fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("scan_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+# The left fold of the order probe's corpus: what a host reference computes
+# and the device does not.
+fn left_scan(xs: List[Float]) -> List[Float] = {
+  var acc = 0.0
+  var out: List[Float] = []
+  for x in xs {
+    acc = acc + x
+    out = out ++ [acc]
+  }
+  out
+}
+
+# The same prefix sums with each prefix folded from its own END, which is
+# another legal order and another set of bits.
+fn right_folded(xs: List[Float]) -> List[Float] =
+  list.map(range(0, len(xs)), j =>
+    list.fold(range(0, j + 1), 0.0, (acc, k) => acc + xs[j - k]))
+
+# How many of the first `n` lanes of two vectors are not bit-equal.
+fn unlike(a: List[Float], b: List[Float], n: Int) -> Int =
+  len(list.filter(range(0, n), i => to_string(a[i]) != to_string(b[i])))
+
+## The order probe: the device's own prefix sums against two host orders of
+## the same corpus. Not an assertion -- what it prints goes into the ledger
+## note, so that a toolchain that changes the tree is seen.
+fn order_probe(got: Option[List[List[Float]]]) -> String = match got {
+  Some(vs) -> {
+    let device = vs[0]
+    let l = left_scan(reciprocals(SCAN_N))
+    let r = right_folded(reciprocals(SCAN_N))
+    "left-fold differs in ${unlike(device, l, SCAN_N)} of ${SCAN_N} lanes,"
+      ++ " right-fold in ${unlike(device, r, SCAN_N)}"
+  }
+  None -> "-"
+}
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  let count = 6
+  if len(argv) != count {
+    io.eprintln("usage: scan_diff <prefix_sum.cubin> <max_subarray.cubin> <seg_scan.cubin>"
+        ++ " <compact.cubin> <linrec.cubin> <gae.cubin>")
+    io.exit(2)
+  }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var tolerance_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let tier = case_tier(i)
+    let bufs = case_bufs(i)
+    let reads = case_reads(i)
+    let gx = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs, reads))
+    let real = with_gpu_real(cubins, () => stages(name, gx, bufs, reads))
+    let v = verdict(tier, fake, real)
+    io.println("kernel ${name} tier=${tier} ${shape_of(i)} grid=(${gx}, 1, 1)")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")
+    io.println("  miss  ${misses(real.results, fake.results, reads)}"
+        ++ " (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})")
+    if name == "prefix_sum" { io.println("  order ${order_probe(real.results)}") } else { () }
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v == "close:tolerance" || v == "identical:tolerance" {
+      tolerance_count = tolerance_count + 1
+    } else {
+      ()
+    }
+    if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" {
+      all_agreed = false
+    } else {
+      ()
+    }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+      && v != "identical:tolerance" {
+      blocked = v
+    } else {
+      ()
+    }
+  }
+  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+}
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")

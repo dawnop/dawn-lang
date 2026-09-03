@@ -112,6 +112,17 @@
 #                            f64-tag-as-i64; a tag one off the other way
 #                            (f16, 5) would assemble and only the device
 #                            could tell
+#     scan-result-drops-the-dim
+#                            the writer gives a `scan` the result types a
+#                            `reduce` would have, the scanned dimension
+#                            dropped -> prefix_sum's text is untouched, its
+#                            bytes are the same length and differ, and
+#                            tileiras refuses them: a scan's result has the
+#                            shape of its operand. That is the one thing
+#                            that separates the two operations' encodings
+#                            beyond the opcode and the `reverse` byte, and
+#                            layer 0 cannot see it (the renderer prints the
+#                            types it was handed)
 #
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time -- one local run measured
@@ -146,7 +157,8 @@ kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops
   transpose_tail conv1d conv2d max_pool interleave rgb_gray jacobi depthwise_conv1d gaussian_blur
   count_eq subarray_sum rainbow int_ops
   sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matmul_i8
-  token_embed sort_rank merge_rank scatter_perm)
+  token_embed sort_rank merge_rank scatter_perm
+  prefix_sum max_subarray seg_scan compact linrec gae)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -194,6 +206,7 @@ mutants=(
   bf16-tag-as-i16
   load-pad-flag-as-token
   ftoi-rounds-instead-of-truncates
+  scan-result-drops-the-dim
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -737,6 +750,27 @@ if run_item ftoi-rounds-instead-of-truncates; then
     '  "ftoi" -> [SIGNED, ROUND_NEAREST_EVEN]'
   writer_mutant_checks ftoi-rounds-instead-of-truncates int_ops same-size \
     "'cuda_tile.ftoi' op invalid rounding mode specified. Only 'nearest_int_to_zero' is supported"
+fi
+
+# 13. The writer gives a `scan` a `reduce`'s result types: the operand's
+#     shape with the scanned dimension dropped. Every other byte is the
+#     same -- a type index is one varint either way, and prefix_sum's type
+#     table already holds the rank-0 f64 its region arguments use -- so the
+#     file is the same length, the text is untouched, and the verifier says
+#     what a scan's result is: the type of its operand.
+#
+#     The claim is the whole difference between `reduce` and `scan` below
+#     the opcode: `lower_reduce` drops `dim` from the result types and
+#     `lower_scan` keeps every dimension. Nothing under layer 1 knows which
+#     is right -- the renderer prints the types it was handed either way.
+if run_item scan-result-drops-the-dim; then
+  mutant_project scan-result-drops-the-dim bytecode.dawn \
+    '    let w1 = emit(emit(w0, OP_SCAN), len(tys))
+    let w2 = list.fold(tys, w1, (w, t) => {' \
+    '    let w1 = emit(emit(w0, OP_SCAN), len(tys))
+    let w2 = list.fold(list.map(tys, rank0_of), w1, (w, t) => {'
+  writer_mutant_checks scan-result-drops-the-dim prefix_sum same-size \
+    "'cuda_tile.scan' op expect same type for operand at index: 0 and result at index: 0"
 fi
 
 shard_report "${#items[@]}"

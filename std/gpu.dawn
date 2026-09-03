@@ -1481,6 +1481,148 @@ pub fn scatter_perm_ref(lanes: Int, n: Int, dtypes: List[String],
   })
 }
 
+# ---- references for the scan kernels (knife 13) ----
+#
+# Every float reference here folds LEFT, and the device does not: the
+# dialect leaves the evaluation order inside a prefix implementation-defined
+# and the measurement says the device's tree differs from a sequential fold
+# in the last bits (docs/tile-backend-design.md 6.6). So the three float
+# scans are tolerance tier and the two integer ones are exact, by the same
+# algebra knife 10's reductions use.
+
+## The inclusive prefix sum of the first `n` lanes of the first buffer, into
+## the second: leetgpu 16 (Prefix Sum). `ins` is `[x, old out]`, and the
+## lanes past `n` keep what they held.
+pub fn prefix_sum_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  var acc = 0.0
+  var run: List[Float] = []
+  for i in range(0, n) {
+    acc = acc + x[i]
+    run = run ++ [acc]
+  }
+  let p = run
+  list.map(range(0, len(old)), i => if i < n { round_to(dt, p[i]) } else { kept(old, i) })
+}
+
+## The largest sum of `w` consecutive of the first `n` elements of the first
+## buffer, at element 0 of the second: leetgpu 51 (Max Subarray Sum). `ins`
+## is `[x, old out]`.
+##
+## A direct sum over each window, which is NOT what the kernel computes (it
+## subtracts two prefix sums). Both are exact in the integers modulo 2^32,
+## which is what makes this an independent opinion rather than the same
+## arithmetic written twice.
+pub fn max_subarray_ref(n: Int, w: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let sums = list.map(range(0, n - w + 1), i =>
+    list.fold(range(i, i + w), 0, (acc, k) => wrap_i32(acc + as_i32(x, k))))
+  let best = list.fold(sums, sums[0], (acc, s) => if s > acc { s } else { acc })
+  one_answer(ins[1], dtypes[1], to_float(best))
+}
+
+## The exclusive prefix sum WITHIN each segment of the first `n` lanes, into
+## the third buffer: leetgpu 70 (Segmented Exclusive Prefix Sum). `ins` is
+## `[values, flags, old out]`; a segment begins at every lane whose flag is
+## not zero, and lane 0's flag must be one of them.
+##
+## Written the way leetgpu's own reference is: the global exclusive prefix
+## sum, less the global exclusive prefix sum at the lane's segment start.
+## Summing inside each segment instead would be a different number in
+## floating point, and the kernel does this one.
+pub fn seg_scan_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let v = ins[0]
+  let f = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  var acc = 0.0
+  var excl: List[Float] = []
+  for i in range(0, n) {
+    excl = excl ++ [acc]
+    acc = acc + v[i]
+  }
+  let g = excl
+  var carry = 0.0
+  var out: List[Float] = []
+  for i in range(0, n) {
+    if to_int(f[i]) != 0 { carry = g[i] } else { () }
+    out = out ++ [g[i] - carry]
+  }
+  let seg = out
+  list.map(range(0, len(old)), i => if i < n { round_to(dt, seg[i]) } else { kept(old, i) })
+}
+
+## The positive values among the first `n` lanes of the first buffer, packed
+## to the front of the second: leetgpu 72 (Stream Compaction). `ins` is
+## `[a, old out]`. Everything after the last kept value keeps what it held,
+## which is what leetgpu's reference does (it writes `out[:k]` and no more).
+pub fn compact_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  let picked = list.filter(range(0, n), i => a[i] > 0.0)
+  list.map(range(0, len(old)), k =>
+    if k < len(picked) { round_to(dt, a[picked[k]]) } else { kept(old, k) })
+}
+
+## `h[t] = a[t] * h[t-1] + x[t]` along each of `b` rows of `l`, with
+## `h[0] = x[0]`: leetgpu 82 (Linear Recurrence). `ins` is `[a, x, old h]`.
+##
+## The recurrence spelled out, which is the definition; the kernel folds
+## affine maps instead, and the two agree only up to the tier. The kernel
+## also fuses its multiply and add into one rounding and this does not,
+## which is one more reason the tier is tolerance and not the bit.
+pub fn linrec_ref(b: Int, l: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let x = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  var out: List[Float] = []
+  for r in range(0, b) {
+    var h = 0.0
+    for s in range(0, l) {
+      h = if s == 0 { x[r * l] } else { a[r * l + s] * h + x[r * l + s] }
+      out = out ++ [h]
+    }
+  }
+  let hs = out
+  list.map(range(0, len(old)), k => if k < b * l { round_to(dt, hs[k]) } else { kept(old, k) })
+}
+
+## The generalised advantage estimate along each of `b` rows of `s`:
+## leetgpu 110 (Parallel Reverse Scan). `ins` is
+## `[rewards, values, old advantages]`.
+##
+## `delta[t] = rewards[t] + gamma * values[t+1] - values[t]`, with
+## `values[t+1]` past the row's end taken as zero, and
+## `A[t] = delta[t] + gamma * lam * A[t+1]` from the end. A loop backwards,
+## where the kernel is one reverse scan.
+pub fn gae_ref(b: Int, s: Int, gamma: Float, lam: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let r = ins[0]
+  let v = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  let decay = gamma * lam
+  var out: List[Float] = []
+  for row in range(0, b) {
+    var g = 0.0
+    var rev: List[Float] = []
+    for k in range(0, s) {
+      let t = s - 1 - k
+      let nv = if t + 1 < s { v[row * s + t + 1] } else { 0.0 }
+      let delta = r[row * s + t] + gamma * nv - v[row * s + t]
+      g = delta + decay * g
+      rev = [g] ++ rev
+    }
+    out = out ++ rev
+  }
+  let adv = out
+  list.map(range(0, len(old)), k => if k < b * s { round_to(dt, adv[k]) } else { kept(old, k) })
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
@@ -2526,6 +2668,31 @@ test "the gather and scatter references answer what a reader can check by hand" 
   # nothing and the element nobody named keeps what it held
   assert scatter_perm_ref(3, 3, f3, [[2.0, 9.0, 0.0], [10.0, 20.0, 30.0], [7.0, 7.0, 7.0, 7.0]])
     == [30.0, 7.0, 10.0, 7.0]
+}
+
+test "the scan references answer what a reader can check by hand" {
+  let f2 = ["f64", "f64"]
+  let f3 = ["f64", "f64", "f64"]
+  let i2 = ["i32", "i32"]
+  let vf3 = ["f64", "i32", "f64"]
+  # four values scanned, with a tail the answer keeps
+  assert prefix_sum_ref(4, f2, [[1.0, 2.0, 3.0, 4.0, 99.0], [0.0, 0.0, 0.0, 0.0, 7.0]])
+    == [1.0, 3.0, 6.0, 10.0, 7.0]
+  # windows of two over five values: 3, 6, 5, 4 -- the largest is 6
+  assert max_subarray_ref(5, 2, i2, [[1.0, 2.0, 4.0, 1.0, 3.0], [0.0, 9.0]]) == [6.0, 9.0]
+  # three segments [1,2,3] [4,5] [6], whose exclusive sums restart at each
+  assert seg_scan_ref(6, vf3, [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [1.0, 0.0, 0.0, 1.0, 0.0, 1.0],
+    list.map(range(0, 7), _i => 7.0)]) == [0.0, 1.0, 3.0, 0.0, 4.0, 0.0, 7.0]
+  # the positives packed to the front; everything after them is untouched
+  assert compact_ref(6, f2, [[1.0, 0.0 - 2.0, 3.0, 0.0, 0.0 - 1.0, 4.0],
+    list.map(range(0, 6), _i => 7.0)]) == [1.0, 3.0, 4.0, 7.0, 7.0, 7.0]
+  # one row of three: h = [x0, a1*x0 + x1, a2*(a1*x0+x1) + x2], and a0 unused
+  assert linrec_ref(1, 3, f3, [[9.0, 2.0, 3.0], [1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 7.0]])
+    == [1.0, 3.0, 10.0, 7.0]
+  # one row of two with gamma = lam = 1: delta = [r0 + v1 - v0, r1 - v1],
+  # and A = [delta0 + delta1, delta1]
+  assert gae_ref(1, 2, 1.0, 1.0, f3, [[1.0, 2.0], [10.0, 20.0], [0.0, 0.0, 7.0]])
+    == [0.0 - 7.0, 0.0 - 18.0, 7.0]
 }
 
 test "the strided references answer what a reader can check by hand" {
