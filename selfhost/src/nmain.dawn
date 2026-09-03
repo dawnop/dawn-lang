@@ -451,7 +451,41 @@ fn wasm_triple(cc: String, work: String) -> String !Fs !Proc !io = {
   if modern { "wasm32-wasip1" } else { "wasm32-wasi" }
 }
 
-fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !Fs !Proc !io = {
+## The compiler a target is built with, and the variable that overrides it.
+##
+## The wasm spelling is clang's and only clang's (cc cross-compiles no wasm),
+## so its override is a separate variable rather than CC: one environment can
+## hold a native CC and a wasi-sdk clang at the same time.
+fn cc_command(wasm: Bool) -> String !io =
+  if wasm {
+    match io.getenv("DAWN_WASM_CC") {
+      Some(c) -> c
+      None -> "clang"
+    }
+  } else {
+    match io.getenv("CC") {
+      Some(c) -> c
+      None -> "cc"
+    }
+  }
+
+fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !Fs !Proc !io =
+  cc_build_with(cc_command(wasm), ctext, out, wasm, reactor)
+
+## Stage the C sources and drive `cc` over them.
+##
+## The compiler is a parameter rather than a second reading of the environment:
+## the command lines below are the whole of what this backend hands the
+## assembler, and a test can only hold them element by element if the name at
+## the front of each is one the test chose (the tests at the bottom of this
+## file do exactly that, with `Proc` answered from a table).
+fn cc_build_with(
+  cc: String,
+  ctext: String,
+  out: String,
+  wasm: Bool,
+  reactor: Bool
+) -> Unit !Fs !Proc !io = {
   let work = match io.temp_dir("", "dawnc") {
     Ok(d) -> d
     Err(e) -> {
@@ -473,25 +507,11 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !
       return ()
     }
   }
-  # The wasm spelling is clang's and only clang's (cc cross-compiles no wasm),
-  # so its override is a separate variable rather than CC: one environment
-  # can hold a native CC and a wasi-sdk clang at the same time. The flag
-  # differences against the native row are the target's, not choices:
+  # The flag differences against the native row are the target's, not choices:
   # no -pthread (wasi-libc has none), and -fwasm-exceptions in place of
   # -fexceptions -- it defines the exception tag dawn_rt.c's raise throws
   # and adds no landing pads to C, so the emitted C compiles unchanged
   # (the failure landing is the A1 shadow stack; see dawn_rt.c).
-  let cc = if wasm {
-    match io.getenv("DAWN_WASM_CC") {
-      Some(c) -> c
-      None -> "clang"
-    }
-  } else {
-    match io.getenv("CC") {
-      Some(c) -> c
-      None -> "cc"
-    }
-  }
   let triple = if wasm { wasm_triple(cc, work) } else { "" }
   # The wasm catch site is C++ (runtime/c/dawn_rt_wasi_eh.cc says why) and
   # wants spellings the C row must not carry (-x c++, -fno-rtti), while
