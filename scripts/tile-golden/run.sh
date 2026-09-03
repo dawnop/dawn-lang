@@ -8,6 +8,8 @@
 #   ./scripts/tile-golden/run.sh --tileiras <bin>    # compare with this assembler
 #   ./scripts/tile-golden/run.sh --without-tileiras  # layers 0 only; every layer-1 line says SKIP
 #   ./scripts/tile-golden/run.sh --record            # re-record the .mlir and .tilebc files
+#   ./scripts/tile-golden/run.sh --shard 1/2         # one round-robin slice of matrix.txt
+#   ./scripts/tile-golden/run.sh --only <item>       # one kernel or one mutant, nothing else
 #
 # Layers, as docs/tile-backend-design.md 6.2 numbers them:
 #
@@ -111,6 +113,24 @@
 #                            (f16, 5) would assemble and only the device
 #                            could tell
 #
+# Sharding: the work items are the kernels and the mutants in one list, which
+# matrix.txt records. Both halves cost real time -- one local run measured
+# 204s for the 51 kernels (102 JVM starts, and nothing else) against 175s for
+# the 12 mutants (a native rebuild each) -- so splitting by kind would leave
+# one job carrying the slower half. `--shard I/N` takes every Nth item of the
+# mixed list instead, which also spreads the outliers (`reverse` alone costs
+# five average kernels).
+#
+# What is divided is the items, never a verdict. A kernel's four runs, its
+# two goldens and its assembly all happen inside one shard, and a mutant's
+# comparisons are against the recorded goldens on disk rather than against
+# this shard's own kernel output -- so a mutant and the clean kernel it names
+# may land in different shards and the conjunction still holds, as long as
+# every item runs somewhere. That last clause is the one new way to be wrong,
+# and it is the only thing a shard cannot vouch for about itself: each writes
+# down what it ran and scripts/mutant-coverage/check.py holds the union to
+# matrix.txt.
+#
 # The anchor each mutant rewrites must match exactly once, so a refactor that
 # moves it fails here instead of silently un-mutating (scripts/narrow-contract
 # is the precedent for the whole shape). Without tileiras the three writer
@@ -130,15 +150,22 @@ cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# shellcheck source=scripts/mutant-coverage/shard.sh
+source "$root/scripts/mutant-coverage/shard.sh"
+shard_parse "$@"
+if [ "${#shard_rest[@]}" -gt 0 ]; then set -- "${shard_rest[@]}"; else set --; fi
+
 mode=check
 tileiras="${TILEIRAS:-}"
 without_tileiras=no
+only=
 while [ $# -gt 0 ]; do
   case "$1" in
     --record) mode=record ;;
     --tileiras) tileiras="$2"; shift ;;
     --without-tileiras) without_tileiras=yes ;;
-    *) echo "usage: run.sh [--record] [--tileiras <bin> | --without-tileiras]" >&2; exit 2 ;;
+    --only) only="$2"; shift ;;
+    *) echo "usage: run.sh [--record] [--shard I/N] [--only <item>] [--tileiras <bin> | --without-tileiras]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -146,6 +173,64 @@ done
 fail() {
   echo "FAIL: $*" >&2
   exit 1
+}
+
+# The executable work items, in run order: the kernels above, then the mutants
+# in the order their blocks appear below. matrix.txt is the persistent record
+# scripts/mutant-coverage/check.py reads; the two are held equal in both
+# directions here, so an item added to one place cannot go missing from the
+# other, and run_item holds the running order to it as well.
+mutants=(
+  drop-store-token
+  load-dtype-f64
+  make-token-as-iota
+  store-token-unwritten
+  f64-tag-as-i64
+  loop-token-not-carried
+  region-stack-pop
+  for-results-not-rolled-back
+  addf-no-rounding
+  bf16-tag-as-i16
+  load-pad-flag-as-token
+  ftoi-rounds-instead-of-truncates
+)
+items=("${kernels[@]}" "${mutants[@]}")
+
+printf '%s\n' "${items[@]}" > "$work/matrix.executable"
+grep -v '^#' "$here/matrix.txt" | grep -v '^$' > "$work/matrix.recorded" || true
+cmp -s "$work/matrix.executable" "$work/matrix.recorded" || {
+  diff -u "$work/matrix.recorded" "$work/matrix.executable" >&2 || true
+  fail "matrix.txt and the runner's executable item list disagree"
+}
+
+if [ -n "$only" ]; then
+  printf '%s\n' "${items[@]}" | grep -qxF "$only" || fail "no kernel or mutant named $only"
+  # One item is not a shard's worth of coverage, so it must not be filed as one.
+  MUTANT_COVERAGE_DIR=
+fi
+if [ "$mode" = record ] && [ "$shard_total" != 1 ]; then
+  fail "--record re-records every golden, so it cannot run on one shard of the matrix"
+fi
+
+shard_begin tile-golden
+
+# True when this shard -- and --only, if given -- is the one to run the named
+# item. Called once per item in run order, which is also how the running order
+# is held to matrix.txt: round-robin reads positions off that file, so a block
+# moved without the list moving with it would silently change which shard runs
+# it, and no PASS line would look any different.
+item_position=0
+run_item() { # name
+  local name="$1" position=$item_position
+  item_position=$(( item_position + 1 ))
+  [ "${items[$position]}" = "$name" ] ||
+    fail "run order: matrix position $position is ${items[$position]}, the runner reached $name"
+  if [ -n "$only" ]; then
+    [ "$name" = "$only" ] || return 1
+  elif shard_skips "$position"; then
+    return 1
+  fi
+  shard_record "$name"
 }
 
 if command -v md5sum > /dev/null 2>&1; then
@@ -297,6 +382,7 @@ run_jvm "$work/clean" "$work/version.jvm" --bytecode-version ||
 echo "PASS  version: the writer and toolchain.txt agree on bytecode $want_bytecode"
 
 for k in "${kernels[@]}"; do
+  run_item "$k" || continue
   golden="$here/$k.mlir"
   bc_golden="$here/$k.tilebc"
   run_jvm "$work/clean" "$work/$k.jvm" "$k" ||
@@ -382,44 +468,48 @@ mutant_run_bytecode() { # name, kernel
 # 1. The renderer drops the store's token operand. The kernel still traces
 #    and renders (exit 0), and vadd's text differs from its golden on both
 #    backends, in the store line and nowhere else.
-mutant_project drop-store-token render.dawn \
-  ' token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token' \
-  ' : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token'
-mutant_run drop-store-token vadd
-for backend in jvm native; do
-  out="$work/m-drop-store-token.vadd.$backend"
-  [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "drop-store-token: vadd did not run to completion on $backend"; }
-  cmp -s "$here/vadd.mlir" "$out" && fail "drop-store-token mutant stayed green on $backend: vadd.mlir still matches"
-  changed=$(diff "$here/vadd.mlir" "$out" | grep -c '^[<>]' || true)
-  [ "$changed" = 2 ] || { diff "$here/vadd.mlir" "$out" >&2 || true; fail "drop-store-token: expected exactly the store line to move on $backend, got $changed changed line(s)"; }
-  grep -q '^> .*store_ptr_tko weak' <(diff "$here/vadd.mlir" "$out") ||
-    { diff "$here/vadd.mlir" "$out" >&2 || true; fail "drop-store-token: the moved line is not the store on $backend"; }
-done
-echo "PASS  mutant: drop-store-token (vadd.mlir red on both backends; exactly the store line moved)"
+if run_item drop-store-token; then
+  mutant_project drop-store-token render.dawn \
+    ' token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token' \
+    ' : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token'
+  mutant_run drop-store-token vadd
+  for backend in jvm native; do
+    out="$work/m-drop-store-token.vadd.$backend"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "drop-store-token: vadd did not run to completion on $backend"; }
+    cmp -s "$here/vadd.mlir" "$out" && fail "drop-store-token mutant stayed green on $backend: vadd.mlir still matches"
+    changed=$(diff "$here/vadd.mlir" "$out" | grep -c '^[<>]' || true)
+    [ "$changed" = 2 ] || { diff "$here/vadd.mlir" "$out" >&2 || true; fail "drop-store-token: expected exactly the store line to move on $backend, got $changed changed line(s)"; }
+    grep -q '^> .*store_ptr_tko weak' <(diff "$here/vadd.mlir" "$out") ||
+      { diff "$here/vadd.mlir" "$out" >&2 || true; fail "drop-store-token: the moved line is not the store on $backend"; }
+  done
+  echo "PASS  mutant: drop-store-token (vadd.mlir red on both backends; exactly the store line moved)"
+fi
 
 # 2. `load` hands the handler a fixed "f64" instead of its parameter's format.
 #    The f32 kernel's entry declares f32 and its first load now claims f64, so
 #    trace_kernel refuses it: non-zero exit, the refusal on stderr, nothing
 #    rendered. vadd, whose parameters are f64, is untouched on both backends.
-mutant_project load-dtype-f64 dev.dawn \
-  't_load(position(p), param_dtype(p), i, shape, strides, none, none)' \
-  't_load(position(p), "f64", i, shape, strides, none, none)'
-mutant_run load-dtype-f64 vadd_f32
-mutant_run load-dtype-f64 vadd
-refusal='tileir: kernel `vadd_f32`: parameter 0 is declared f32, but a load reads it as f64'
-for backend in jvm native; do
-  out="$work/m-load-dtype-f64.vadd_f32.$backend"
-  [ "$(cat "$out.rc")" != 0 ] || { cat "$out" >&2; fail "load-dtype-f64 mutant stayed green on $backend: vadd_f32 still renders (exit 0)"; }
-  grep -Fq "$refusal" "$out.err" ||
-    { cat "$out.err" >&2; fail "load-dtype-f64: vadd_f32 failed on $backend for something other than the dtype refusal"; }
-  [ ! -s "$out" ] || fail "load-dtype-f64: vadd_f32 printed text before being refused on $backend"
-  ctrl="$work/m-load-dtype-f64.vadd.$backend"
-  if [ "$(cat "$ctrl.rc")" != 0 ] || ! cmp -s "$here/vadd.mlir" "$ctrl"; then
-    cat "$ctrl.err" >&2
-    fail "load-dtype-f64: vadd (all f64) should be untouched on $backend"
-  fi
-done
-echo "PASS  mutant: load-dtype-f64 (vadd_f32 refused at trace time on both backends; vadd untouched)"
+if run_item load-dtype-f64; then
+  mutant_project load-dtype-f64 dev.dawn \
+    't_load(position(p), param_dtype(p), i, shape, strides, none, none)' \
+    't_load(position(p), "f64", i, shape, strides, none, none)'
+  mutant_run load-dtype-f64 vadd_f32
+  mutant_run load-dtype-f64 vadd
+  refusal='tileir: kernel `vadd_f32`: parameter 0 is declared f32, but a load reads it as f64'
+  for backend in jvm native; do
+    out="$work/m-load-dtype-f64.vadd_f32.$backend"
+    [ "$(cat "$out.rc")" != 0 ] || { cat "$out" >&2; fail "load-dtype-f64 mutant stayed green on $backend: vadd_f32 still renders (exit 0)"; }
+    grep -Fq "$refusal" "$out.err" ||
+      { cat "$out.err" >&2; fail "load-dtype-f64: vadd_f32 failed on $backend for something other than the dtype refusal"; }
+    [ ! -s "$out" ] || fail "load-dtype-f64: vadd_f32 printed text before being refused on $backend"
+    ctrl="$work/m-load-dtype-f64.vadd.$backend"
+    if [ "$(cat "$ctrl.rc")" != 0 ] || ! cmp -s "$here/vadd.mlir" "$ctrl"; then
+      cat "$ctrl.err" >&2
+      fail "load-dtype-f64: vadd (all f64) should be untouched on $backend"
+    fi
+  done
+  echo "PASS  mutant: load-dtype-f64 (vadd_f32 refused at trace time on both backends; vadd untouched)"
+fi
 
 # The length varint of the Func section: byte 13, after the 12-byte header
 # and the section id. One byte while the section is under 128 bytes, which
@@ -501,11 +591,13 @@ refused_mutant_checks() { # name, kernel, fragment
 
 # 3. The writer encodes make_token with iota's opcode. Same length, one byte
 #    differs, and the verifier behind the reader says a token is not a tile.
-mutant_project make-token-as-iota bytecode.dawn \
-  'const OP_MAKE_TOKEN: Int = 0x44' \
-  'const OP_MAKE_TOKEN: Int = 0x3A'
-writer_mutant_checks make-token-as-iota vadd same-size \
-  "'cuda_tile.iota' op result #0 must be tile of"
+if run_item make-token-as-iota; then
+  mutant_project make-token-as-iota bytecode.dawn \
+    'const OP_MAKE_TOKEN: Int = 0x44' \
+    'const OP_MAKE_TOKEN: Int = 0x3A'
+  writer_mutant_checks make-token-as-iota vadd same-size \
+    "'cuda_tile.iota' op result #0 must be tile of"
+fi
 
 # 4. The writer's store still sets the token-present flag but no longer
 #    writes the operand. vadd has one store and its token index is one
@@ -513,19 +605,23 @@ writer_mutant_checks make-token-as-iota vadd same-size \
 #    not: the constant section's alignment padding grows by one); the reader
 #    takes the next byte, `return`'s opcode 0x5C, for the token's value index
 #    and refuses it: 92 is past the 27 values (3 parameters, 24 results).
-mutant_project store-token-unwritten bytecode.dawn \
-  'emit_ref(emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask), tok_in)' \
-  'emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask)'
-writer_mutant_checks store-token-unwritten vadd func-one-short \
-  "operand index 92 out of bounds (size=27) for token segment"
+if run_item store-token-unwritten; then
+  mutant_project store-token-unwritten bytecode.dawn \
+    'emit_ref(emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask), tok_in)' \
+    'emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask)'
+  writer_mutant_checks store-token-unwritten vadd func-one-short \
+    "operand index 92 out of bounds (size=27) for token segment"
+fi
 
 # 5. The writer's type table gives f64 the i64 tag. Same length, the type
 #    section differs, and the verifier refuses addf over an integer tile.
-mutant_project f64-tag-as-i64 bytecode.dawn \
-  '  "f64" -> 9' \
-  '  "f64" -> 4'
-writer_mutant_checks f64-tag-as-i64 vadd same-size \
-  "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi64>'"
+if run_item f64-tag-as-i64; then
+  mutant_project f64-tag-as-i64 bytecode.dawn \
+    '  "f64" -> 9' \
+    '  "f64" -> 4'
+  writer_mutant_checks f64-tag-as-i64 vadd same-size \
+    "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi64>'"
+fi
 
 # 6. The handler stops carrying the token out of a loop: after `t_loop_end`
 #    the token cell keeps the body's last token instead of taking the loop's
@@ -533,24 +629,28 @@ writer_mutant_checks f64-tag-as-i64 vadd same-size \
 #    inside it, and the lowering, which closes a body's names when the loop
 #    ends, refuses it by name. Nothing is rendered; the text golden never
 #    sees a file.
-mutant_project loop-token-not-carried prog.dawn \
-  '        tok = last(results)
+if run_item loop-token-not-carried; then
+  mutant_project loop-token-not-carried prog.dawn \
+    '        tok = last(results)
 ' \
-  '        ()
+    '        ()
 '
-refused_mutant_checks loop-token-not-carried sum \
-  'tileir: `store token` refers to handle 17, which a loop body defined and which is not visible after the loop'
+  refused_mutant_checks loop-token-not-carried sum \
+    'tileir: `store token` refers to handle 17, which a loop body defined and which is not visible after the loop'
+fi
 
 # 7. The handler pops the region stack the wrong way round: the operations
 #    the loop body issued stay in the enclosing region and the ones issued
 #    before the loop become the body. sum's first operation is then the
 #    body's own index arithmetic, over the induction variable, which
 #    nothing outside the loop has defined.
-mutant_project region-stack-pop prog.dawn \
-  'let (outer, inner) = (saved, ops)' \
-  'let (outer, inner) = (ops, saved)'
-refused_mutant_checks region-stack-pop sum \
-  'tileir: `index mul lhs` refers to handle 11, which no earlier operation defined'
+if run_item region-stack-pop; then
+  mutant_project region-stack-pop prog.dawn \
+    'let (outer, inner) = (saved, ops)' \
+    'let (outer, inner) = (ops, saved)'
+  refused_mutant_checks region-stack-pop sum \
+    'tileir: `index mul lhs` refers to handle 11, which no earlier operation defined'
+fi
 
 # 8. The writer forgets the reader's rule that a block's value indices roll
 #    back before the loop's own results are numbered. sum's results take the
@@ -560,40 +660,46 @@ refused_mutant_checks region-stack-pop sum \
 #    reader stops at the first operand past the values it has: 39 where it
 #    knows 25 (2 parameters, 20 values before the loop, its 2 results and
 #    the constant after it).
-mutant_project for-results-not-rolled-back bytecode.dawn \
-  'fn roll_back(before: W, after: W) -> W = W { ..after, index: before.index, nvals: before.nvals }' \
-  'fn roll_back(before: W, after: W) -> W = after'
-writer_mutant_checks for-results-not-rolled-back sum same-size \
-  "operand index 39 out of bounds (size=25) for operand 1"
+if run_item for-results-not-rolled-back; then
+  mutant_project for-results-not-rolled-back bytecode.dawn \
+    'fn roll_back(before: W, after: W) -> W = W { ..after, index: before.index, nvals: before.nvals }' \
+    'fn roll_back(before: W, after: W) -> W = after'
+  writer_mutant_checks for-results-not-rolled-back sum same-size \
+    "operand index 39 out of bounds (size=25) for operand 1"
+fi
 
 # 9. The renderer forgets addf's rounding attribute. Every kernel with an
 #    addf moves, but the claim is bf16's: `rounding<nearest_even>` is what
 #    makes the device's bf16 sum narrow.round_bf16's (docs 3.2). vadd_bf16
 #    still renders (exit 0) and differs from its golden in the addf line
 #    and nowhere else, on both backends.
-mutant_project addf-no-rounding render.dawn \
-  'fn rounding(op: String) -> String = if rounds(op) { " rounding<nearest_even>" } else { "" }' \
-  'fn rounding(op: String) -> String = if rounds(op) { "" } else { "" }'
-mutant_run addf-no-rounding vadd_bf16
-for backend in jvm native; do
-  out="$work/m-addf-no-rounding.vadd_bf16.$backend"
-  [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "addf-no-rounding: vadd_bf16 did not run to completion on $backend"; }
-  cmp -s "$here/vadd_bf16.mlir" "$out" && fail "addf-no-rounding mutant stayed green on $backend: vadd_bf16.mlir still matches"
-  changed=$(diff "$here/vadd_bf16.mlir" "$out" | grep -c '^[<>]' || true)
-  [ "$changed" = 2 ] || { diff "$here/vadd_bf16.mlir" "$out" >&2 || true; fail "addf-no-rounding: expected exactly the addf line to move on $backend, got $changed changed line(s)"; }
-  grep -q '^< .*addf .* rounding<nearest_even> : tile<128xbf16>$' <(diff "$here/vadd_bf16.mlir" "$out") ||
-    { diff "$here/vadd_bf16.mlir" "$out" >&2 || true; fail "addf-no-rounding: the moved line is not the bf16 addf on $backend"; }
-done
-echo "PASS  mutant: addf-no-rounding (vadd_bf16.mlir red on both backends; exactly the addf line moved)"
+if run_item addf-no-rounding; then
+  mutant_project addf-no-rounding render.dawn \
+    'fn rounding(op: String) -> String = if rounds(op) { " rounding<nearest_even>" } else { "" }' \
+    'fn rounding(op: String) -> String = if rounds(op) { "" } else { "" }'
+  mutant_run addf-no-rounding vadd_bf16
+  for backend in jvm native; do
+    out="$work/m-addf-no-rounding.vadd_bf16.$backend"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "addf-no-rounding: vadd_bf16 did not run to completion on $backend"; }
+    cmp -s "$here/vadd_bf16.mlir" "$out" && fail "addf-no-rounding mutant stayed green on $backend: vadd_bf16.mlir still matches"
+    changed=$(diff "$here/vadd_bf16.mlir" "$out" | grep -c '^[<>]' || true)
+    [ "$changed" = 2 ] || { diff "$here/vadd_bf16.mlir" "$out" >&2 || true; fail "addf-no-rounding: expected exactly the addf line to move on $backend, got $changed changed line(s)"; }
+    grep -q '^< .*addf .* rounding<nearest_even> : tile<128xbf16>$' <(diff "$here/vadd_bf16.mlir" "$out") ||
+      { diff "$here/vadd_bf16.mlir" "$out" >&2 || true; fail "addf-no-rounding: the moved line is not the bf16 addf on $backend"; }
+  done
+  echo "PASS  mutant: addf-no-rounding (vadd_bf16.mlir red on both backends; exactly the addf line moved)"
+fi
 
 # 10. The writer's type table gives bf16 the i16 tag. Same length, the type
 #     section differs, and the verifier refuses addf over an integer tile:
 #     the bf16 twin of f64-tag-as-i64.
-mutant_project bf16-tag-as-i16 bytecode.dawn \
-  '  "bf16" -> 6' \
-  '  "bf16" -> 2'
-writer_mutant_checks bf16-tag-as-i16 vadd_bf16 same-size \
-  "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi16>'"
+if run_item bf16-tag-as-i16; then
+  mutant_project bf16-tag-as-i16 bytecode.dawn \
+    '  "bf16" -> 6' \
+    '  "bf16" -> 2'
+  writer_mutant_checks bf16-tag-as-i16 vadd_bf16 same-size \
+    "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi16>'"
+fi
 
 # 11. The writer gives the padding value the token's flag bit, so a masked
 #     load says "mask and token, no padding value" while its operand list
@@ -603,11 +709,13 @@ writer_mutant_checks bf16-tag-as-i16 vadd_bf16 same-size \
 #     The text is untouched (the renderer prints the operand it was given,
 #     not the flag) and the file is the same length: a flag bit is a flag
 #     bit either way. Only layer 1 sees it.
-mutant_project load-pad-flag-as-token bytecode.dawn \
-  'const LOAD_FLAG_PAD: Int = 8' \
-  'const LOAD_FLAG_PAD: Int = 16'
-writer_mutant_checks load-pad-flag-as-token vadd_tail same-size \
-  "failed to get result type 0 for"
+if run_item load-pad-flag-as-token; then
+  mutant_project load-pad-flag-as-token bytecode.dawn \
+    'const LOAD_FLAG_PAD: Int = 8' \
+    'const LOAD_FLAG_PAD: Int = 16'
+  writer_mutant_checks load-pad-flag-as-token vadd_tail same-size \
+    "failed to get result type 0 for"
+fi
 
 # 12. The writer gives `ftoi` the nearest-even rounding mode where the
 #     dialect accepts only `nearest_int_to_zero`. The text is untouched
@@ -622,10 +730,13 @@ writer_mutant_checks load-pad-flag-as-token vadd_tail same-size \
 #     device never sees it. Recorded where it actually lands. The
 #     conversion mutant that does reach layer 2 is
 #     scripts/tile-gpu-diff's exti-sign-extends.
-mutant_project ftoi-rounds-instead-of-truncates bytecode.dawn \
-  '  "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]' \
-  '  "ftoi" -> [SIGNED, ROUND_NEAREST_EVEN]'
-writer_mutant_checks ftoi-rounds-instead-of-truncates int_ops same-size \
-  "'cuda_tile.ftoi' op invalid rounding mode specified. Only 'nearest_int_to_zero' is supported"
+if run_item ftoi-rounds-instead-of-truncates; then
+  mutant_project ftoi-rounds-instead-of-truncates bytecode.dawn \
+    '  "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]' \
+    '  "ftoi" -> [SIGNED, ROUND_NEAREST_EVEN]'
+  writer_mutant_checks ftoi-rounds-instead-of-truncates int_ops same-size \
+    "'cuda_tile.ftoi' op invalid rounding mode specified. Only 'nearest_int_to_zero' is supported"
+fi
 
+shard_report "${#items[@]}"
 echo "tile golden ok"

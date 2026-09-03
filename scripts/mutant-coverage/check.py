@@ -33,6 +33,15 @@ red.
 Shard indices are 1-based (`--shard 1/3` .. `3/3`), matching the spelling
 export-surface-contract established in this repository.
 
+"Mutant" is the word throughout, because mutants were all the matrices held
+when this was written. scripts/tile-golden's does not: it lists the kernels
+its golden loop iterates and then its mutants, one list in run order, because
+both halves cost minutes there and a split by kind would have left one shard
+carrying the slower one. Nothing here changes for that. This compares names
+against a matrix file and knows nothing about what a name denotes, so read
+"mutant" below as "work item": a kernel absent from the union is refused
+exactly as a mutant absent from it is.
+
 Usage:
     check.py --coverage-dir DIR [--root REPO_ROOT]
     check.py --self-test
