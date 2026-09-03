@@ -51,6 +51,19 @@ pub type F32 = | F32
 ## 3.2's theorem), which is what the fake device computes.
 pub type BF16 = | BF16
 
+## The 32-bit signed integer format: four bytes an element. A buffer of it
+## holds two's-complement i32 values; `upload` truncates each Float toward
+## zero and wraps it into the range (`round_to`), and `download` answers each
+## exactly, as a Float.
+##
+## The `List[Float]` channel is LOSSLESS for this format. A binary64
+## significand holds 53 bits, and every i32 (and every u32) value fits in
+## fewer, so a value crosses `upload` / `download` unrounded and the fake
+## device's buffer holds exactly what the real device's does. That is not
+## true of `bf16`, and it is why an integer kernel can be held to the bit
+## without a word about tolerance.
+pub type I32 = | I32
+
 ## What a device needs to know about an element format. The marker value is
 ## the first argument so the methods can be called by name (spec §3.5: a type
 ## parameter that appears in no argument position cannot be inferred).
@@ -74,24 +87,49 @@ impl Dtype[BF16] {
   fn dtype_bytes(d: BF16) -> Int = 2
 }
 
+impl Dtype[I32] {
+  fn dtype_name(d: I32) -> String = "i32"
+  fn dtype_bytes(d: I32) -> Int = 4
+}
+
 ## The bytes one element of the named format occupies in a device buffer, or
-## `None` for a format this release's handlers do not move: `f64` (8) and
-## `bf16` (2). Both handlers consult this and nothing else to accept a
-## `gpu_alloc`, so they refuse the same formats with `gpu.unsupported_dtype`.
+## `None` for a format this release's handlers do not move: `f64` (8),
+## `i32` (4) and `bf16` (2). Both handlers consult this and nothing else to
+## accept a `gpu_alloc`, so they refuse the same formats with
+## `gpu.unsupported_dtype`.
 pub fn element_bytes(dtype: String) -> Option[Int] = match dtype {
   "f64" -> Some(8)
+  "i32" -> Some(4)
   "bf16" -> Some(2)
   _ -> None
 }
 
 ## `x` as a buffer of the named format holds it: rounded to bfloat16 for
-## `bf16`, to binary32 for `f32`, unchanged for `f64`. What a store into such
-## a buffer does to a value, and what a reference implementation does after
+## `bf16`, to binary32 for `f32`, truncated toward zero and wrapped into the
+## 32-bit range for `i32`, unchanged for `f64`. What a store into such a
+## buffer does to a value, and what a reference implementation does after
 ## every operation whose result the device would keep at that width.
+##
+## The `i32` arm is the whole of what "a 32-bit buffer holds" means here:
+## `to_int` truncates toward zero (spec: `to_int(-2.7) == -2`, which is the
+## dialect's own `nearest_int_to_zero`), and `wrap_i32` is the two's
+## complement wrap the device's `addi` and `muli` perform. A reference that
+## truncated without wrapping would disagree with the device on every sum
+## that leaves the range, which is the case a corpus above 2^31 exists for.
 pub fn round_to(dtype: String, x: Float) -> Float = match dtype {
   "bf16" -> narrow.round_bf16(x)
   "f32" -> narrow.round_f32(x)
+  "i32" -> to_float(wrap_i32(to_int(x)))
   _ -> x
+}
+
+## `n` as a two's-complement 32-bit signed integer: the low 32 bits, read
+## as a signed value. What every integer operation on the device answers,
+## and what a host reference must apply after each of its own so that the
+## two agree where the arithmetic overflows.
+pub fn wrap_i32(n: Int) -> Int = {
+  let low = n & 0xFFFFFFFF
+  if low >= 0x80000000 { low - 0x100000000 } else { low }
 }
 
 # ---- the bf16 wire format ----
@@ -114,6 +152,30 @@ pub fn pack_bf16(xs: List[Float]) -> Bytes = {
 ## the exact Float of its pattern.
 pub fn unpack_bf16(b: Bytes) -> List[Float] =
   list.map(range(0, bytes.len(b) / 2), i => narrow.bf16_of_bits(bytes.at(b, 2 * i) | (bytes.at(b, 2 * i + 1) << 8)))
+
+# ---- the i32 wire format ----
+
+## `xs` as the bytes an i32 buffer holds: each value truncated toward zero
+## and wrapped into the 32-bit range (`round_to`'s `i32` arm), then its
+## 32-bit two's-complement pattern, low byte first. The little-endian order
+## is the device's, so the runtime copies bytes and knows nothing about the
+## format, exactly as it does for `bf16`.
+pub fn pack_i32(xs: List[Float]) -> Bytes = {
+  var b = bytes.buf()
+  for x in xs {
+    let v = wrap_i32(to_int(x))
+    b = bytes.put(bytes.put(bytes.put(bytes.put(b, v & 0xFF), (v >>> 8) & 0xFF), (v >>> 16) & 0xFF), (v >>> 24) & 0xFF)
+  }
+  bytes.freeze(b)
+}
+
+## The values an i32 buffer holds, from its bytes: one per four bytes, each
+## the exact Float of its two's-complement pattern. Exact in both
+## directions, because a binary64 significand covers the whole i32 range.
+pub fn unpack_i32(b: Bytes) -> List[Float] =
+  list.map(range(0, bytes.len(b) / 4), i =>
+    to_float(wrap_i32(bytes.at(b, 4 * i) | (bytes.at(b, 4 * i + 1) << 8)
+      | (bytes.at(b, 4 * i + 2) << 16) | (bytes.at(b, 4 * i + 3) << 24))))
 
 # ---- tensors ----
 
@@ -985,7 +1047,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, fn(List[String], List[List[Fl
     var next: Int = 1
     var store: Map[Int, (String, List[Float])] = map.empty()
     gpu_alloc(dtype, len) => match element_bytes(dtype) {
-      None -> Err(refuse("gpu.unsupported_dtype", "fake device: buffers are f64 or bf16, got ${dtype}"))
+      None -> Err(refuse("gpu.unsupported_dtype", "fake device: buffers are f64, i32 or bf16, got ${dtype}"))
       Some(_w) -> {
         let h = next
         next = next + 1
@@ -1091,12 +1153,13 @@ fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[Int]) -> Arra
 ## per installation, a buffer is `(device pointer, element count, format)`
 ## in a table the handler owns, and a handle never issued or already freed
 ## answers `gpu.no_such_buffer` before the device is asked. `gpu_alloc`
-## accepts the formats `element_bytes` knows, `f64` and `bf16`, and answers
-## `gpu.unsupported_dtype` otherwise, as the fake device does. An f64 buffer
-## crosses to the runtime as an `Array[Float]` the runtime copies double for
-## double; a bf16 buffer crosses as `Bytes`, packed here (`pack_bf16`,
-## which rounds) and unpacked here (`unpack_bf16`), so the runtime copies
-## bytes and knows nothing about the format.
+## accepts the formats `element_bytes` knows, `f64`, `i32` and `bf16`, and
+## answers `gpu.unsupported_dtype` otherwise, as the fake device does. An
+## f64 buffer crosses to the runtime as an `Array[Float]` the runtime copies
+## double for double; a bf16 buffer crosses as `Bytes`, packed here
+## (`pack_bf16`, which rounds) and unpacked here (`unpack_bf16`), and an i32
+## buffer the same way (`pack_i32` / `unpack_i32`, which are exact both
+## ways), so the runtime copies bytes and knows nothing about the format.
 ## `gpu_launch` looks the name up first (`gpu.no_kernel`), then the
 ## arguments (`gpu.no_arguments`, `gpu.no_such_buffer`), and only then
 ## touches the device: the cubin is handed to the driver the first time its
@@ -1119,7 +1182,7 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
     var bufs: Map[Int, (Int, Int, String)] = map.empty()
     var mods: Map[String, Int] = map.empty()
     gpu_alloc(dtype, len) => match element_bytes(dtype) {
-      None -> Err(refuse("gpu.unsupported_dtype", "real device: this release moves f64 and bf16, got ${dtype}"))
+      None -> Err(refuse("gpu.unsupported_dtype", "real device: this release moves f64, i32 and bf16, got ${dtype}"))
       Some(w) -> match gpu_alloc_host(len * w) {
         Ok(p) -> {
           let h = next
@@ -1133,7 +1196,13 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
     gpu_upload(handle, data) => match map.get(bufs, handle) {
       Some(b) -> {
         let (p, _n, dt) = b
-        if dt == "bf16" { gpu_upload_bytes_host(p, pack_bf16(data)) } else { gpu_upload_host(p, to_array(data)) }
+        if dt == "bf16" {
+          gpu_upload_bytes_host(p, pack_bf16(data))
+        } else if dt == "i32" {
+          gpu_upload_bytes_host(p, pack_i32(data))
+        } else {
+          gpu_upload_host(p, to_array(data))
+        }
       }
       None -> Err(no_such_buffer("real device", handle))
     }
@@ -1143,6 +1212,11 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
         if dt == "bf16" {
           match gpu_download_bytes_host(p, n * 2) {
             Ok(raw) -> Ok(unpack_bf16(raw))
+            Err(e) -> Err(e)
+          }
+        } else if dt == "i32" {
+          match gpu_download_bytes_host(p, n * 4) {
+            Ok(raw) -> Ok(unpack_i32(raw))
             Err(e) -> Err(e)
           }
         } else {

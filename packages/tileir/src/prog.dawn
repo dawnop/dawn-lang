@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32}
-use dev.{Dev, Tile, Scalar, I1, I32, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_if, spread, s_addf, s_maxf, s_gt, s_select}
+use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_if, spread, s_addf, s_maxf, s_gt, s_select}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -60,6 +60,9 @@ pub type TileOp =
   | MmaF(dst: Int, dtype: String, m: Int, k: Int, n: Int, lhs: Int, rhs: Int, acc: Int)
   | CmpF(dst: Int, pred: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
   | CmpI(dst: Int, pred: String, shape: List[Int], lhs: Int, rhs: Int)
+  | UnaryI(dst: Int, op: String, dtype: String, shape: List[Int], src: Int)
+  | BinaryI(dst: Int, op: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
+  | Convert(dst: Int, op: String, from: String, to: String, shape: List[Int], src: Int)
   | Select(dst: Int, dtype: String, shape: List[Int], cond: Int, lhs: Int, rhs: Int)
   | IdxConst(dst: Int, value: Int)
   | IdxAdd(dst: Int, lhs: Int, rhs: Int)
@@ -139,6 +142,31 @@ fn check_pred(name: String, pred: String) -> Unit =
     ()
   } else {
     refuse(name, "`${pred}` is not a comparison predicate")
+  }
+
+# The integer operation names the typed surface spells. `shri` and `shru`
+# are one dialect opcode under two signedness attributes and are two names
+# here, because the surface that spells them has to say which.
+fn check_unary_int(name: String, op: String) -> Unit =
+  if one_of(["negi", "absi"], op) {
+    ()
+  } else {
+    refuse(name, "`${op}` is not a unary integer operation")
+  }
+
+fn check_binary_int(name: String, op: String) -> Unit =
+  if one_of(["addi", "subi", "muli", "divi", "remi", "maxi", "mini", "mulhii",
+    "andi", "ori", "xori", "shli", "shri", "shru"], op) {
+    ()
+  } else {
+    refuse(name, "`${op}` is not a binary integer operation")
+  }
+
+fn check_convert(name: String, op: String) -> Unit =
+  if one_of(["itof", "ftoi", "exti", "trunci", "bitcast"], op) {
+    ()
+  } else {
+    refuse(name, "`${op}` is not a conversion")
   }
 
 fn check_int_dtype(name: String, dtype: String) -> Unit =
@@ -321,6 +349,32 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [CmpI(d, pred, shape, a, b)]
+        d
+      }
+      t_unaryi(op, dtype, shape, a) => {
+        check_shape(name, shape)
+        check_unary_int(name, op)
+        check_int_dtype(name, dtype)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [UnaryI(d, op, dtype, shape, a)]
+        d
+      }
+      t_binaryi(op, dtype, shape, a, b) => {
+        check_shape(name, shape)
+        check_binary_int(name, op)
+        check_int_dtype(name, dtype)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [BinaryI(d, op, dtype, shape, a, b)]
+        d
+      }
+      t_convert(op, from, to, shape, a) => {
+        check_shape(name, shape)
+        check_convert(name, op)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Convert(d, op, from, to, shape, a)]
         d
       }
       t_select(dtype, shape, cond, a, b) => {
@@ -521,6 +575,9 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   MmaF(dst, _dtype, _m, _k, _n, _lhs, _rhs, _acc) -> [dst]
   CmpF(dst, _pred, _dtype, _shape, _lhs, _rhs) -> [dst]
   CmpI(dst, _pred, _shape, _lhs, _rhs) -> [dst]
+  UnaryI(dst, _op, _dtype, _shape, _src) -> [dst]
+  BinaryI(dst, _op, _dtype, _shape, _lhs, _rhs) -> [dst]
+  Convert(dst, _op, _from, _to, _shape, _src) -> [dst]
   Select(dst, _dtype, _shape, _cond, _lhs, _rhs) -> [dst]
   IdxConst(dst, _value) -> [dst]
   IdxAdd(dst, _lhs, _rhs) -> [dst]

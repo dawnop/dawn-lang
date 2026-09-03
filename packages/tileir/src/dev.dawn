@@ -10,11 +10,12 @@
 # the operations traffic in SSA handles (`Int`), dtype names (`String`) and
 # operation names (`String`), and the functions below add the phantom-typed
 # `Tile[D]` / `Param[D]` and are the only surface a kernel body uses. The
-# dtype markers for buffer formats are std/gpu's `F64` / `F32` / `BF16`, so a
-# `Param[F64]` and a `Tensor[F64]` agree on what "f64" means without a second
-# declaration; `I32` and `I1` are declared here instead, because they are tile
-# element formats and not buffer formats: std/gpu's `element_bytes` does not
-# know them and a `Tensor[I1]` cannot be allocated.
+# dtype markers for buffer formats are std/gpu's `F64` / `F32` / `BF16` /
+# `I32`, so a `Param[F64]` and a `Tensor[F64]` agree on what "f64" means
+# without a second declaration. `I32` moved there with knife 10, when i32
+# became a buffer format as well as a tile one; `I1` is still declared here,
+# because it is a tile element format alone: std/gpu's `element_bytes` does
+# not know it and a `Tensor[I1]` cannot be allocated.
 #
 # One effect operation per shape rather than per operation: `t_binaryf` takes
 # the operation's name, so adding `subf` is a name in a list rather than a
@@ -30,7 +31,7 @@
 # refused by the checker.
 use std/list
 use std/str
-use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32}
+use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, I32}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it.
 ## `D` is a phantom (spec 2.7): `Tile[F64]` and `Tile[F32]` are two types over
@@ -76,19 +77,10 @@ pub type RedId =
   | IdI(dtype: String, value: Int)
 derive Show
 
-## The 32-bit signed integer tile format: what `arange` and `lanes` answer and
-## what an integer comparison reads. A tile element format, not a buffer
-## format: there is no `Tensor[I32]` in this release.
-pub type I32 = | I32
-
 ## The one-bit tile format: what a comparison answers and what a mask is. A
-## tile element format, not a buffer format.
+## tile element format, not a buffer format. Its i32 neighbour is std/gpu's
+## `I32`, which is both (knife 10).
 pub type I1 = | I1
-
-impl Dtype[I32] {
-  fn dtype_name(d: I32) -> String = "i32"
-  fn dtype_bytes(d: I32) -> Int = 4
-}
 
 impl Dtype[I1] {
   fn dtype_name(d: I1) -> String = "i1"
@@ -127,6 +119,32 @@ impl Dtype[I1] {
 ## answers the second where the condition is 1 and the third where it is 0.
 ## `t_mmaf` is the matrix multiply-accumulate: `a` is `[m, k]`, `b` is
 ## `[k, n]`, `c` and the answer are `[m, n]`.
+##
+## `t_unaryi(op, ..)` / `t_binaryi(op, ..)` are the element-wise INTEGER
+## arithmetic (knife 10): `op` is `negi` / `absi` for the unary form and one
+## of `addi` / `subi` / `muli` / `divi` / `remi` / `maxi` / `mini` /
+## `mulhii` / `andi` / `ori` / `xori` / `shli` / `shri` / `shru` for the
+## binary one. Every one of them is EXACT on the device: an i32 result has
+## one value and no rounding mode, which is why the layer-2 corpus for
+## these has no tolerance branch.
+##
+## `shri` and `shru` are one dialect opcode under two signedness
+## attributes: `shri` is arithmetic (the sign bit is copied down) and
+## `shru` is logical (zeros are shifted in), and the two differ on every
+## negative operand. `divi` / `remi` / `maxi` / `mini` are signed, as
+## `t_cmpi` is; `mulhii` takes no signedness at all (the dialect defines it
+## for unsigned operands, and `bytecode.dawn` says so where it is encoded).
+## Overflow is `none` everywhere: the device wraps, and so must a host
+## reference (std/gpu's `wrap_i32`).
+##
+## `t_convert(op, from, to, shape, a)` is the width and format change:
+## `itof` (integer tile to float, signed, `nearest_even`), `ftoi` (float
+## tile to integer, signed, `nearest_int_to_zero`, the one mode the dialect
+## accepts here), `exti` (a narrower integer tile to a wider one, UNSIGNED,
+## so an `i1` mask widens to 0 or 1 rather than to 0 or -1), `trunci` (a
+## wider integer tile to a narrower one, which for `i32` to `i1` is the low
+## bit) and `bitcast` (the same bits read as another format of the same
+## width, `i32` and `f32` here).
 ##
 ## `t_idx_const` / `t_idx_add` / `t_idx_mul` answer scalar i32 handles: a
 ## host constant, and the sum and product of two index handles.
@@ -189,6 +207,9 @@ pub effect Dev {
   fn t_mmaf(dtype: String, m: Int, k: Int, n: Int, a: Int, b: Int, c: Int) -> Int
   fn t_cmpf(pred: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_cmpi(pred: String, shape: List[Int], a: Int, b: Int) -> Int
+  fn t_unaryi(op: String, dtype: String, shape: List[Int], a: Int) -> Int
+  fn t_binaryi(op: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
+  fn t_convert(op: String, from: String, to: String, shape: List[Int], a: Int) -> Int
   fn t_select(dtype: String, shape: List[Int], cond: Int, a: Int, b: Int) -> Int
   fn t_idx_const(value: Int) -> Int
   fn t_idx_add(a: Int, b: Int) -> Int
@@ -287,8 +308,12 @@ pub fn axis_strides(rank: Int, axis: Int, step: Int) -> List[Int] =
 pub fn coord(base: Idx, shape: List[Int], axis: Int, step: Int) -> Tile[I32] !Dev =
   lanes_strided(base, shape, axis_strides(len(shape), axis, step))
 
-## The lanes both masks select. There is no `andi` in this release, so this
-## is a `select`: `a` where it is 1 chooses `b`, and 0 elsewhere.
+## The lanes both masks select: a `select`, `a` where it is 1 choosing `b`
+## and 0 elsewhere. Knife 10 brought `andi`, which computes the same tile
+## over `i1` operands; this is still a `select` because switching it would
+## re-record six kernels that were measured against a device under the
+## spelling they have, and buy no claim the `andi` clients below do not
+## already make.
 pub fn and_mask(shape: List[Int], a: Tile[I1], b: Tile[I1]) -> Tile[I1] !Dev =
   select(I1, shape, a, b, bool_const(shape, false))
 
@@ -574,6 +599,153 @@ pub fn gt_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = com
 
 pub fn ge_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = compare_int("ge", shape, a, b)
 
+# ---- integer arithmetic (knife 10) ----
+#
+# Every function below is EXACT on the device: an i32 result is one value,
+# there is no rounding mode to carry and there is no fold order to be
+# unspecified. That is the whole point of this family as a control group for
+# the tolerance tiers of the float kernels (docs/tile-backend-design.md 6.5).
+#
+# Overflow is `none`, which is Tile IR for "the compiler assumes nothing":
+# the device wraps modulo 2^32 and a host reference must wrap too
+# (std/gpu's `wrap_i32`).
+
+fn binary_int(op: String, shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Tile[I32] = t_binaryi(op, "i32", shape, x, y)
+  h
+}
+
+fn unary_int(op: String, shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let h: Tile[I32] = t_unaryi(op, "i32", shape, x)
+  h
+}
+
+## The element-wise sum `a + b`, wrapping modulo 2^32.
+pub fn add_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("addi", shape, a, b)
+
+## The element-wise difference `a - b`, wrapping.
+pub fn sub_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("subi", shape, a, b)
+
+## The element-wise product `a * b`, wrapping: the LOW 32 bits of the
+## 64-bit product. `mulhi_i` is the other half.
+pub fn mul_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("muli", shape, a, b)
+
+## The element-wise signed quotient `a / b`, rounded toward zero (the
+## dialect's default rounding for `divi`, and `to_int`'s). Division by zero
+## is undefined on the device, as it is in CUDA.
+pub fn div_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("divi", shape, a, b)
+
+## The element-wise signed remainder `a % b`, whose sign follows the
+## dividend (the remainder of a quotient rounded toward zero).
+pub fn rem_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("remi", shape, a, b)
+
+## The element-wise signed larger of `a` and `b`.
+pub fn max_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("maxi", shape, a, b)
+
+## The element-wise signed smaller of `a` and `b`.
+pub fn min_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("mini", shape, a, b)
+
+## The HIGH 32 bits of the 64-bit product of `a` and `b`, read as UNSIGNED
+## operands: the dialect defines `mulhii` for unsigned integers and gives it
+## no signedness attribute (Ops.td, `MulhiIOp`). A hash that needs the whole
+## product takes this beside `mul_i`.
+pub fn mulhi_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("mulhii", shape, a, b)
+
+## The element-wise bitwise `a & b`.
+pub fn and_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("andi", shape, a, b)
+
+## The element-wise bitwise `a | b`.
+pub fn or_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("ori", shape, a, b)
+
+## The element-wise bitwise `a ^ b`.
+pub fn xor_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("xori", shape, a, b)
+
+## The element-wise left shift `a << b`, wrapping: the bits shifted past the
+## top are dropped. A shift count outside `[0, 32)` is undefined on the
+## device.
+pub fn shl_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("shli", shape, a, b)
+
+## The element-wise ARITHMETIC right shift `a >> b`: the sign bit is copied
+## into the vacated positions, so a negative operand stays negative. This
+## is `shri` with `signedness<signed>`.
+pub fn shr_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("shri", shape, a, b)
+
+## The element-wise LOGICAL right shift `a >>> b`: zeros are shifted in, so
+## a negative operand becomes a large positive one. This is the SAME opcode
+## as `shr_i` with `signedness<unsigned>`, and the two differ on every
+## negative operand and nowhere else -- which is what
+## scripts/tile-gpu-diff's shri-always-logical mutant measures.
+pub fn shr_u(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("shru", shape, a, b)
+
+## The element-wise negation `-a`, wrapping (so `-(-2^31)` is `-2^31`).
+pub fn neg_i(shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = unary_int("negi", shape, a)
+
+## The element-wise absolute value `|a|`, wrapping (so `|-2^31|` is
+## `-2^31`).
+pub fn abs_i(shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = unary_int("absi", shape, a)
+
+# ---- conversions (knife 10) ----
+
+## The float tile of format `d` holding each lane of the signed integer tile
+## `a`, rounded to nearest even. Exact for every i32 into an f64 tile (a
+## binary64 significand covers the whole range) and not always exact into an
+## f32 one.
+pub fn int_to_float[D: Dtype](d: D, shape: List[Int], a: Tile[I32]) -> Tile[D] !Dev = {
+  let x: Int = a
+  let h: Tile[D] = t_convert("itof", "i32", dtype_name(d), shape, x)
+  h
+}
+
+## The signed integer tile holding each lane of the float tile `a`,
+## TRUNCATED TOWARD ZERO. A lane that is infinite, NaN or outside the i32
+## range is undefined on the device (the dialect says so), so a kernel that
+## uses this owes a bound on its input.
+pub fn float_to_int[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let h: Tile[I32] = t_convert("ftoi", dtype_name(d), "i32", shape, x)
+  h
+}
+
+## The i32 tile holding 1 where the mask is set and 0 where it is not: an
+## `exti` from `i1`, ZERO-extending. Signedness is the whole of the claim
+## here -- a signed widening of a one-bit 1 is -1, not 1 -- and it is why a
+## count of the lanes a comparison selects is this and not a `select`.
+pub fn mask_to_int(shape: List[Int], a: Tile[I1]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let h: Tile[I32] = t_convert("exti", "i1", "i32", shape, x)
+  h
+}
+
+## The mask holding the LOW BIT of each lane of `a`: a `trunci` from `i32`
+## to `i1`. The parity test, and the one direction back from an integer to
+## a mask that costs no comparison.
+pub fn int_to_mask(shape: List[Int], a: Tile[I32]) -> Tile[I1] !Dev = {
+  let x: Int = a
+  let h: Tile[I1] = t_convert("trunci", "i32", "i1", shape, x)
+  h
+}
+
+## The f32 tile whose lanes hold the BITS of `a` unchanged: a `bitcast`,
+## which moves no bits and reads them as another format of the same width.
+## Not `int_to_float`, which preserves the value rather than the pattern.
+pub fn bits_to_float(shape: List[Int], a: Tile[I32]) -> Tile[F32] !Dev = {
+  let x: Int = a
+  let h: Tile[F32] = t_convert("bitcast", "i32", "f32", shape, x)
+  h
+}
+
+## The i32 tile whose lanes hold the bits of the f32 tile `a` unchanged: the
+## inverse of `bits_to_float`, and its round trip is the identity on every
+## bit pattern.
+pub fn bits_to_int(shape: List[Int], a: Tile[F32]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let h: Tile[I32] = t_convert("bitcast", "f32", "i32", shape, x)
+  h
+}
+
 ## The mask of the lanes at `base` that fall inside a buffer of `limit`
 ## elements: `lanes(base, shape) < limit`. The boundary of every kernel over a
 ## vector whose length is not a multiple of the tile width, and the reason
@@ -779,6 +951,30 @@ pub fn s_select[D: Dtype](d: D, cond: Scalar[I1], a: Scalar[D], b: Scalar[D]) ->
   h
 }
 
+# A binary integer operation over two rank-0 i32 tiles.
+fn s_binary_int(op: String, a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Scalar[I32] = t_binaryi(op, "i32", rank0(), x, y)
+  h
+}
+
+## The wrapping sum of two rank-0 i32 tiles: the body of an integer sum
+## reduction. Integer addition modulo 2^32 is associative AND commutative
+## exactly, so the device's fold tree, whatever it is, answers what a host
+## reference's left fold does -- bit for bit, on every corpus. That is the
+## one place in this package where the unspecified fold order costs nothing,
+## and it is why the integer kernels are exact tier by algebra rather than
+## by a carefully chosen corpus (docs/tile-backend-design.md 6.5).
+pub fn s_addi(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int("addi", a, b)
+
+## The signed larger of two rank-0 i32 tiles: the body of an integer maximum
+## reduction. Associative and commutative exactly, as `s_addi` is.
+pub fn s_maxi(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int("maxi", a, b)
+
+## The signed smaller of two rank-0 i32 tiles.
+pub fn s_mini(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int("mini", a, b)
+
 # The comparison of two index tiles, as a rank-0 mask.
 fn idx_compare(pred: String, a: Idx, b: Idx) -> Scalar[I1] !Dev = {
   let x: Int = a
@@ -847,6 +1043,42 @@ pub fn d_reduce_dim[D: Dtype](d: D, shape: List[Int], dim: Int, t: Tile[D], iden
   let r: Int = body(e, acc)
   let outs = t_reduce_end([r])
   let out: Tile[D] = outs[0]
+  out
+}
+
+## The reduction of the i32 tile `t` of `shape` along dimension 0, with an
+## INTEGER identity: what a count or an integer sum folds with. `body` runs
+## ONCE, on the host, over the element and the accumulator as the region
+## sees them.
+##
+## Unlike `d_reduce`, this one's answer does not depend on the fold order at
+## all: the operations `s_addi` / `s_maxi` / `s_mini` are exactly
+## associative and commutative over i32, so any tree the device chooses
+## gives the same value as a host reference's left fold. A corpus is not
+## part of this claim.
+pub fn d_reduce_i(shape: List[Int], t: Tile[I32], identity: Int,
+  body: fn(Scalar[I32], Scalar[I32]) -> Scalar[I32] !Dev) -> Scalar[I32] !Dev = {
+  let h: Int = t
+  let args = t_reduce_begin(0, shape, [IdI("i32", identity)], [h])
+  let e: Scalar[I32] = args[0]
+  let acc: Scalar[I32] = args[1]
+  let r: Int = body(e, acc)
+  let outs = t_reduce_end([r])
+  let out: Scalar[I32] = outs[0]
+  out
+}
+
+## `d_reduce_i` along dimension `dim`, which answers an i32 tile of `shape`
+## with that dimension dropped: the shape a row-wise count has.
+pub fn d_reduce_i_dim(shape: List[Int], dim: Int, t: Tile[I32], identity: Int,
+  body: fn(Scalar[I32], Scalar[I32]) -> Scalar[I32] !Dev) -> Tile[I32] !Dev = {
+  let h: Int = t
+  let args = t_reduce_begin(dim, shape, [IdI("i32", identity)], [h])
+  let e: Scalar[I32] = args[0]
+  let acc: Scalar[I32] = args[1]
+  let r: Int = body(e, acc)
+  let outs = t_reduce_end([r])
+  let out: Tile[I32] = outs[0]
   out
 }
 
@@ -959,6 +1191,21 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       h
     }
     t_cmpi(_pred, _shape, _a, _b) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_unaryi(_op, _dtype, _shape, _a) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_binaryi(_op, _dtype, _shape, _a, _b) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_convert(_op, _from, _to, _shape, _a) => {
       let h = next
       next = next + 1
       h
@@ -1138,6 +1385,18 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_cmpi(pred, shape, a, b) => {
       log = log ++ ["cmpi ${pred} ${show(shape)} ${a} ${b}"]
       10
+    }
+    t_unaryi(op, dtype, shape, a) => {
+      log = log ++ ["unaryi ${op} ${dtype} ${show(shape)} ${a}"]
+      18
+    }
+    t_binaryi(op, dtype, shape, a, b) => {
+      log = log ++ ["binaryi ${op} ${dtype} ${show(shape)} ${a} ${b}"]
+      19
+    }
+    t_convert(op, from, to, shape, a) => {
+      log = log ++ ["convert ${op} ${from} ${to} ${show(shape)} ${a}"]
+      20
     }
     t_select(dtype, shape, cond, a, b) => {
       log = log ++ ["select ${dtype} ${show(shape)} ${cond} ${a} ${b}"]
@@ -1414,6 +1673,9 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_mmaf(_dtype, _m, _k, _n, _a, _b, _c) => 17
       t_cmpf(_pred, _dtype, _shape, _a, _b) => 8
       t_cmpi(_pred, _shape, _a, _b) => 9
+      t_unaryi(_op, _dtype, _shape, _a) => 11
+      t_binaryi(_op, _dtype, _shape, _a, _b) => 12
+      t_convert(_op, _from, _to, _shape, _a) => 13
       t_select(_dtype, _shape, _cond, _a, _b) => 10
       t_idx_const(value) => value + 10
       t_idx_add(_a, _b) => 4

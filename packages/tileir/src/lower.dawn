@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF}
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -117,6 +117,9 @@ pub type Instr =
   | FloatMma(dst: Int, ty: Ty, lhs_ty: Ty, rhs_ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
   | CmpFloat(dst: Int, pred: String, ty: Ty, res_ty: Ty, lhs: Ref, rhs: Ref)
   | CmpInt(dst: Int, pred: String, ty: Ty, res_ty: Ty, lhs: Ref, rhs: Ref)
+  | IntUn(dst: Int, op: String, ty: Ty, src: Ref)
+  | IntBin(dst: Int, op: String, ty: Ty, lhs: Ref, rhs: Ref)
+  | Cast(dst: Int, op: String, from: Ty, to: Ty, src: Ref)
   | SelectTile(dst: Int, cond_ty: Ty, ty: Ty, cond: Ref, lhs: Ref, rhs: Ref)
   | ForLoop(results: List[Int], tys: List[Ty], iv: Int, lower: Ref, upper: Ref, step: Ref, inits: List[Ref], carried: List[Int], body: List[Instr])
   | Cont(values: List[Ref], tys: List[Ty])
@@ -421,6 +424,34 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l1, d) = define(l0, dst, i1_tile(shape))
     emit(l1, CmpInt(d, pred, i32_tile(shape), i1_tile(shape), a, b))
   }
+  UnaryI(dst, op, dtype, shape, src) -> {
+    let a = ref_of(l0, src, "${op} operand")
+    let ty = num_tile(shape, dtype)
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, IntUn(d, op, ty, a))
+  }
+  BinaryI(dst, op, dtype, shape, lhs, rhs) -> {
+    # `addi` and `muli` are the ladder's own instructions, so an integer
+    # sum or product of tiles goes down the same arm the pointer arithmetic
+    # does; the rest have no other client and are `IntBin`.
+    let a = ref_of(l0, lhs, "${op} lhs")
+    let b = ref_of(l0, rhs, "${op} rhs")
+    let ty = num_tile(shape, dtype)
+    let (l1, d) = define(l0, dst, ty)
+    if op == "addi" {
+      emit(l1, AddInt(d, ty, a, b))
+    } else if op == "muli" {
+      emit(l1, MulInt(d, ty, a, b))
+    } else {
+      emit(l1, IntBin(d, op, ty, a, b))
+    }
+  }
+  Convert(dst, op, from, to, shape, src) -> {
+    let a = ref_of(l0, src, "${op} operand")
+    let ty = num_tile(shape, to)
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, Cast(d, op, num_tile(shape, from), ty, a))
+  }
   Select(dst, dtype, shape, cond, lhs, rhs) -> {
     let c = ref_of(l0, cond, "select condition")
     let a = ref_of(l0, lhs, "select value if true")
@@ -619,6 +650,9 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   FloatMma(dst, _ty, _lhs_ty, _rhs_ty, _lhs, _rhs, _acc) -> [dst]
   CmpFloat(dst, _pred, _ty, _res_ty, _lhs, _rhs) -> [dst]
   CmpInt(dst, _pred, _ty, _res_ty, _lhs, _rhs) -> [dst]
+  IntUn(dst, _op, _ty, _src) -> [dst]
+  IntBin(dst, _op, _ty, _lhs, _rhs) -> [dst]
+  Cast(dst, _op, _from, _to, _src) -> [dst]
   SelectTile(dst, _cond_ty, _ty, _cond, _lhs, _rhs) -> [dst]
   ForLoop(results, _tys, _iv, _lower, _upper, _step, _inits, _carried, _body) -> results
   Cont(_values, _tys) -> []
