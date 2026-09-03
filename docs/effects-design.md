@@ -545,8 +545,10 @@ Core golden 只动了两个模块里三个闭包类型上印出来的效果行�
 `mode_flips_from_env` 未设时答 `[]`，也就是 159 个变异体的干净对照，此前只有整跑一遍
 才观察得到。同一刀把 13 个测试侧安装点从 `with_env_real` 换成表（pkgfetch 5、
 driver/stdlib 4、lsp/server 2、source 2）：它们的路径全是自己造的绝对目录，工作目录
-是一个没人依赖的值。留在真 handler 上的十处，`--std` 拼的是相对目录，宿主的工作目录
-就是它们的输入之一，每处安装点写了这一行说明。
+是一个没人依赖的值。那一刀在这四个文件里留在真 handler 上的是九处（`driver/stdlib` 5、
+`lsp/server` 4）：`--std` 拼的是相对目录，宿主的工作目录就是它们的输入之一，每处安装点
+写了这一行说明。（此处原记「十处」，把 `lsp/server.handle` 这个生产安装点也数了进去，
+它已经算在上面那四个安装点里。）
 
 第二个断言客户（刀 3，2026-09-03）是 `driver/analyze` 的 21 条测试侧安装点：18 条走
 `in_mem`、2 条走 `in_mem_proc`，另一条自己把三层 handler 摊开写。它们全部改成
@@ -564,6 +566,10 @@ driver/stdlib 4、lsp/server 2、source 2）：它们的路径全是自己造的
 断言落在模块索引上（`by_use["util"] == "/dawn-memfs/proj/src/util.dawn"`），
 并当场向宿主问一次 `io.cwd()` 证明声明的目录不是测试运行的目录。全树没有 `chdir`，
 所以这条断言在 `Env` 之前无论如何都写不出来。
+
+两刀之后，两棵编译树里留在真 handler 上的测试侧安装点是 12 处：`driver/stdlib` 5、
+`lsp/server` 4、`doc` 2——这 11 处 `load_std("std")` 拼的是相对目录，宿主的工作目录就是
+它们的输入之一——外加 `driver/analyze` 1 处，就是上面那次刻意的问询。
 
 三条 wrapper 的 body 行这一轮仍是 `!Fs !Proc !Env !io`，`!io` 去不掉：它们调的每一个生产
 函数都还带着 `!io`，而 stage 1 拿种子那份 std 编这棵树，那份 std 里 `io.cwd` 与 `io.getenv`
