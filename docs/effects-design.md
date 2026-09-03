@@ -483,6 +483,20 @@ Core golden 只动了两个模块里三个闭包类型上印出来的效果行�
 测试侧另有 `driver/analyze.in_mem`（表答 `Fs`，真 handler 答 `Proc`，本组测试没有一条会让它开火）。
 里外顺序不是设置：`with_fs_real` 的 body 行是闭合的，只能在最外层，`with_proc_real` 的是 `!e`。
 
+种子推进到 v0.74.0（它带的 std 里 `io.run` 已落在 `Proc` 上）之后回填了第二次：全树 152 条
+与 `!Fs` / `!Proc` 同行的 `!io` 逐条去掉交给检查器，取到定点 6 轮，3 条过、149 条留。过的
+三条是 `compiler-plan/src/pkgfetch` 的 `http_get` 与 `download`、`selfhost/src/nmain` 的
+`wasm_triple`，与预研估的 3 条一致：它们的 `!io` 从头到尾只有 `io.run` 一个来源。于是
+`!Fs !Proc !io` 从 62 条降到 59 条（外加一条写作 `!Proc !Fs !io`），干净的 `!Fs !Proc` 从
+0 条变成 3 条，`!Proc !io` 仍是 0 条，`!Fs !io` 93 条一条未动。
+
+留下的 149 条按检查器点名的操作分（一条可以同时踩到几个）。`selfhost/src` 与
+`compiler-plan/src` 的 120 条：`io.cwd` 49 条、`io.exit` 36 条、控制台 34 条、Java FFI 22 条
+（`AsmWriter.of`、`ProcessBuilder`、`ClassLoader.getSystemClassLoader` 一族）、`io.getenv`
+5 条、`catch_panic` 3 条、`args` 3 条、handler 安装点 2 条、`io.read_stdin` 1 条。其余 29 条
+在 `site/src`、`examples`、`playground` 与契约脚本里：控制台 27 条、`io.getenv` 1 条、
+`ProcessBuilder` 1 条。下一族的候选顺序由这张表定，`cwd` 与 `exit` 仍是前两名。
+
 **裁决：已知风险，暂无缓解；效果集别名仍不裁。**
 第二个族的消费者样本到了，答案是它还不够：三个原子的行（`!Fs !Proc !io`）读起来仍然可以，
 `Proc` 也没有把任何一条行推到四个原子。真正会逼出别名的是 `exit`（可达 65 条）与
