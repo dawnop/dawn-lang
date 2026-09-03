@@ -151,6 +151,10 @@ const SIGNED: Int = 1
 const UNSIGNED: Int = 0
 const ROUND_NEAREST_EVEN: Int = 0
 
+# `rounding`: zero, integer division truncating toward zero. The dialect's
+# own default for `divi`, and `to_int`'s rounding on the host.
+const ROUND_ZERO: Int = 1
+
 # `rounding_mode`: nearest_int_to_zero, the ONE mode `ftoi` accepts
 # (Ops.td's FToIOp says so and `custom<IntegerRoundingMode>` is its printer).
 # Not `zero` (1), which is the integer DIVISION rounding.
@@ -185,13 +189,29 @@ fn predicate_value(pred: String) -> Int = match pred {
 # ---- the integer family (knife 10) ----
 #
 # The layout of each operation is BytecodeGen.cpp's: result types, then a
-# flags varint IF the operation has an optional field the targeted version
-# knows, then the attributes in DECLARATION order (a required one always, an
-# optional one only when its flag bit is set), then the operands. So an
-# operation with an optional `overflow` writes a flags varint (0, meaning
-# absent, so the default `none` applies) and no attribute payload, and one
-# with a required `signedness` writes no flags and the attribute inline.
-# Both halves are read off Ops.td and neither is a guess.
+# flags varint IF the operation has an OPTIONAL field the targeted version
+# knows, then the attributes in DECLARATION order, then the operands.
+#
+# `DefaultValuedAttr` is NOT an optional field. tblgen's `isOptional()` is
+# `OptionalAttr`'s alone, and `generateAttributeSerialization` sends an
+# attribute with a default value down the REQUIRED path (it is the branch
+# that reads `extractDefaultValue`): the value is written inline, guarded
+# only by the version the field arrived in. So every integer operation here
+# writes its attributes inline and NONE of them writes a flags varint; the
+# only fields that ever reach the flags word are `OptionalAttr`s, unit
+# attributes and optional operands, which is what the memory operations and
+# `maxf` have and no operation below does.
+#
+# This cost a wrong answer on the device and is the reason it is written
+# out here. Writing a flags 0 in front of a one-attribute operation is
+# INVISIBLE at layers 0 and 1: the byte is the same one the attribute would
+# have used when the attribute's value is 0, so `addi`'s "flags 0" and its
+# "overflow none" are the same stream and tileiras cannot tell the two
+# readings apart. `divi` has TWO attributes (`signedness`, then `rounding`),
+# so the spurious flags byte shifted both: the reader took 0 for the
+# signedness and answered UNSIGNED division. tileiras accepted it -- an
+# unsigned divide is a legal program -- and scripts/tile-gpu-diff's
+# int_ops caught it on a corpus with negative dividends.
 
 # The opcode of an integer operation. `shri` and `shru` are one opcode; the
 # signedness attribute below is what separates them.
@@ -215,29 +235,35 @@ fn int_op(op: String) -> Int = match op {
   _ -> panic("tileir: `${op}` is not an integer operation")
 }
 
-# Whether an integer operation writes a flags varint: it does exactly when
-# it has an optional field the targeted version knows. `addi` / `subi` /
-# `muli` / `shli` carry an optional `overflow` since 13.1 and `negi` since
-# 13.2, so all five write one at this version; `trunci`'s is 13.1 as well
-# (see `cast_has_flags`). The rest have no optional field at all and write
-# NO flags varint: a reader given one would take it for the first operand.
-fn int_op_has_flags(op: String) -> Bool =
-  op == "addi" || op == "subi" || op == "muli" || op == "shli" || op == "negi" || op == "divi"
-
-# The `signedness` attribute an integer operation carries, or `None` where
-# it has none. `divi` / `remi` / `maxi` / `mini` are signed, as `cmpi` is;
-# `shri` is the ARITHMETIC shift and `shru` the logical one, which is the
-# only difference between the two and the one scripts/tile-gpu-diff's
-# shri-always-logical mutant removes. `mulhii` takes no signedness at all:
-# the dialect defines it for unsigned operands and gives it no attribute.
-fn int_signedness(op: String) -> Option[Int] = match op {
-  "divi" -> Some(SIGNED)
-  "remi" -> Some(SIGNED)
-  "maxi" -> Some(SIGNED)
-  "mini" -> Some(SIGNED)
-  "shri" -> Some(SIGNED)
-  "shru" -> Some(UNSIGNED)
-  _ -> None
+# The attributes an integer operation writes inline, in declaration order.
+#
+#   `overflow` none    the four wrapping operations and `negi`: the device
+#                      wraps and the compiler is told to assume nothing
+#   `signedness`       `divi` / `remi` / `maxi` / `mini` are signed, as
+#                      `cmpi` is; `shri` is the ARITHMETIC right shift and
+#                      `shru` the logical one, the same opcode under the
+#                      other signedness. That one attribute is the whole
+#                      difference between them, which is what
+#                      scripts/tile-gpu-diff's shri-always-logical measures
+#   `rounding` zero    `divi` alone: integer division truncating toward
+#                      zero, which is the dialect's default and C's
+#
+# `mulhii` takes nothing at all -- the dialect defines it for unsigned
+# operands and gives it no signedness -- and neither do the three bitwise
+# operations or `absi`.
+fn int_attrs(op: String) -> List[Int] = match op {
+  "addi" -> [OVERFLOW_NONE]
+  "subi" -> [OVERFLOW_NONE]
+  "muli" -> [OVERFLOW_NONE]
+  "shli" -> [OVERFLOW_NONE]
+  "negi" -> [OVERFLOW_NONE]
+  "divi" -> [SIGNED, ROUND_ZERO]
+  "remi" -> [SIGNED]
+  "maxi" -> [SIGNED]
+  "mini" -> [SIGNED]
+  "shri" -> [SIGNED]
+  "shru" -> [UNSIGNED]
+  _ -> []
 }
 
 # The opcode of a conversion.
@@ -250,17 +276,16 @@ fn cast_op(op: String) -> Int = match op {
   _ -> panic("tileir: `${op}` is not a conversion")
 }
 
-# `trunci` is the one conversion with an optional field (`overflow`, 13.1),
-# so it is the one that writes a flags varint.
-fn cast_has_flags(op: String) -> Bool = op == "trunci"
-
-# The required attributes of a conversion, in declaration order: the
-# signedness, then the rounding mode where there is one. `exti` widens a
-# mask and is UNSIGNED, so a one-bit 1 becomes 1 and not -1.
+# The attributes a conversion writes inline, in declaration order. `exti`
+# widens a mask and is UNSIGNED, so a one-bit 1 becomes 1 and not -1;
+# `ftoi` takes the only integer rounding mode the dialect accepts
+# (`nearest_int_to_zero`, Ops.td's FToIOp), which is not the integer
+# division's `zero`; `trunci` carries an `overflow` and `bitcast` nothing.
 fn cast_attrs(op: String) -> List[Int] = match op {
   "itof" -> [SIGNED, ROUND_NEAREST_EVEN]
   "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]
   "exti" -> [UNSIGNED]
+  "trunci" -> [OVERFLOW_NONE]
   _ -> []
 }
 
@@ -748,30 +773,17 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     emit_ref(emit_ref(w1, lhs), rhs)
   }
   IntUn(_dst, op, t, src) -> {
-    # `negi` carries an optional `overflow` (13.2) and `absi` nothing at
-    # all, so one writes a flags varint and the other does not.
-    let w1 = emit_op(w0, int_op(op), t)
-    let w2 = if int_op_has_flags(op) { emit(w1, OVERFLOW_NONE) } else { w1 }
-    emit_ref(w2, src)
+    # no operation here has an optional field, so no flags varint: the
+    # attributes follow the result type directly.
+    emit_ref(list.fold(int_attrs(op), emit_op(w0, int_op(op), t), emit), src)
   }
   IntBin(_dst, op, t, lhs, rhs) -> {
-    # flags where the operation has an optional `overflow` or `rounding`
-    # (never set here), then the required `signedness` where it has one,
-    # then the two operands.
-    let w1 = emit_op(w0, int_op(op), t)
-    let w2 = if int_op_has_flags(op) { emit(w1, OVERFLOW_NONE) } else { w1 }
-    let w3 = match int_signedness(op) {
-      Some(sign) -> emit(w2, sign)
-      None -> w2
-    }
-    emit_ref(emit_ref(w3, lhs), rhs)
+    let w1 = list.fold(int_attrs(op), emit_op(w0, int_op(op), t), emit)
+    emit_ref(emit_ref(w1, lhs), rhs)
   }
   Cast(_dst, op, _from, to, src) -> {
-    # the result is the TARGET type; then `trunci`'s flags, then the
-    # required attributes in declaration order, then the operand.
-    let w1 = emit_op(w0, cast_op(op), to)
-    let w2 = if cast_has_flags(op) { emit(w1, OVERFLOW_NONE) } else { w1 }
-    emit_ref(list.fold(cast_attrs(op), w2, emit), src)
+    # the result is the TARGET type, then the attributes, then the operand.
+    emit_ref(list.fold(cast_attrs(op), emit_op(w0, cast_op(op), to), emit), src)
   }
   SelectTile(_dst, _cond_ty, t, cond, lhs, rhs) ->
     emit_ref(emit_ref(emit_ref(emit_op(w0, OP_SELECT, t), cond), lhs), rhs)
@@ -1236,7 +1248,7 @@ test "a unary float operation writes flags only where it has an optional field, 
   assert (float_op("floor"), float_op("ceil")) == (0x27, 0x0D)
 }
 
-test "the integer and conversion opcodes are the frozen table's, and each writes flags only where it has an optional field" {
+test "the integer and conversion opcodes are the frozen table's, and each writes its attributes inline" {
   # BytecodeOpcodes.td at NVIDIA/cuda-tile be0889cd, read off the file and
   # not from the coverage memo: a table copied twice is a table that can be
   # copied wrong twice.
@@ -1249,40 +1261,36 @@ test "the integer and conversion opcodes are the frozen table's, and each writes
   # `shri` and `shru` are one opcode under two signedness attributes
   assert int_op("shri") == int_op("shru")
   assert int_op("shri") == 0x61
-  assert int_signedness("shri") == Some(SIGNED)
-  assert int_signedness("shru") == Some(UNSIGNED)
-  # the four signed operations, and the ones with no signedness at all
-  assert int_signedness("divi") == Some(SIGNED)
-  assert int_signedness("remi") == Some(SIGNED)
-  assert int_signedness("maxi") == Some(SIGNED)
-  assert int_signedness("mini") == Some(SIGNED)
-  assert int_signedness("mulhii") == None
-  assert int_signedness("addi") == None
-  assert int_signedness("andi") == None
-  # the optional fields: `overflow` on the four wrapping operations and on
-  # `negi` and `trunci`, `rounding` on `divi`, nothing anywhere else
-  assert int_op_has_flags("addi")
-  assert int_op_has_flags("subi")
-  assert int_op_has_flags("muli")
-  assert int_op_has_flags("shli")
-  assert int_op_has_flags("negi")
-  assert int_op_has_flags("divi")
-  assert not int_op_has_flags("remi")
-  assert not int_op_has_flags("maxi")
-  assert not int_op_has_flags("mulhii")
-  assert not int_op_has_flags("andi")
-  assert not int_op_has_flags("shri")
-  assert not int_op_has_flags("absi")
-  assert cast_has_flags("trunci")
-  assert not cast_has_flags("itof")
-  assert not cast_has_flags("exti")
-  assert not cast_has_flags("bitcast")
+  assert int_attrs("shri") == [SIGNED]
+  assert int_attrs("shru") == [UNSIGNED]
+  # `divi` carries TWO attributes, signedness before rounding, and getting
+  # that wrong is what the device caught: a spurious leading 0 shifted both
+  # and the reader answered UNSIGNED division. One-attribute operations
+  # hide the same mistake, because a flags 0 and an `overflow` none are the
+  # same byte.
+  assert int_attrs("divi") == [SIGNED, ROUND_ZERO]
+  assert int_attrs("remi") == [SIGNED]
+  assert int_attrs("maxi") == [SIGNED]
+  assert int_attrs("mini") == [SIGNED]
+  assert int_attrs("addi") == [OVERFLOW_NONE]
+  assert int_attrs("subi") == [OVERFLOW_NONE]
+  assert int_attrs("muli") == [OVERFLOW_NONE]
+  assert int_attrs("shli") == [OVERFLOW_NONE]
+  assert int_attrs("negi") == [OVERFLOW_NONE]
+  # nothing at all: `mulhii` (defined for unsigned operands, no attribute),
+  # the three bitwise operations and `absi`
+  assert int_attrs("mulhii") == []
+  assert int_attrs("andi") == []
+  assert int_attrs("ori") == []
+  assert int_attrs("xori") == []
+  assert int_attrs("absi") == []
   # `ftoi` takes nearest_int_to_zero (6), not the integer division's zero (1)
   assert cast_attrs("itof") == [SIGNED, ROUND_NEAREST_EVEN]
   assert cast_attrs("ftoi") == [SIGNED, ROUND_INT_TO_ZERO]
   assert cast_attrs("exti") == [UNSIGNED]
-  assert cast_attrs("trunci") == []
+  assert cast_attrs("trunci") == [OVERFLOW_NONE]
   assert cast_attrs("bitcast") == []
+  assert ROUND_ZERO != ROUND_INT_TO_ZERO
 }
 
 test "encoding a loop twice gives the same bytes, and the file still opens and closes as before" {

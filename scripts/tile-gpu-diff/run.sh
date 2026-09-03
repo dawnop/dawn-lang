@@ -1108,8 +1108,8 @@ rm -rf "$mutant_pkg_shr"
 cp -r "$root/packages/tileir" "$mutant_pkg_shr"
 before=$(digest "$mutant_pkg_shr/src/bytecode.dawn")
 python3 "$here/mutate.py" "$mutant_pkg_shr/src/bytecode.dawn" shri-always-logical \
-  '  "shri" -> Some(SIGNED)' \
-  '  "shri" -> Some(UNSIGNED)'
+  '  "shri" -> [SIGNED]' \
+  '  "shri" -> [UNSIGNED]'
 after=$(digest "$mutant_pkg_shr/src/bytecode.dawn")
 echo "      shri-always-logical: packages/tileir/src/bytecode.dawn md5 $before -> $after"
 
