@@ -15,8 +15,10 @@ use std/io
 use std/io.{Fs, Proc}
 use fspath/fspath
 use sha2/sha256
+use inflate/crc32
 use inflate/gzip
 use inflate/zip
+use procmem
 
 ## The content-addressed cache root: $DAWN_PKG_CACHE, then ~/.dawn/pkg. An
 ## environment variable and nothing else — the tests set it too, and there is
@@ -31,7 +33,14 @@ pub fn cache_root() -> String !io =
       }
   }
 
-pub fn cache_dir(hash: String) -> String !io = cache_root() ++ "/" ++ str.replace(hash, ":", "-")
+## The entry for `hash` under an explicitly named cache root. The root is a
+## parameter throughout the fetch below rather than a fresh `cache_root()` at
+## every step: one fetch stages, publishes and records under one root, which
+## is what a caller means, and it is what lets a test point the whole
+## operation at a directory of its own.
+fn entry_dir(root: String, hash: String) -> String = root ++ "/" ++ str.replace(hash, ":", "-")
+
+pub fn cache_dir(hash: String) -> String !io = entry_dir(cache_root(), hash)
 
 # ---- origin records: which urls were seen to produce which hash ----
 #
@@ -508,20 +517,24 @@ pub fn delete_tree(path: String) -> Unit !Fs = {
 ## Fetch `url`, unpack, hash, and file the tree into the cache under its own
 ## (actual) hash. Returns (cache entry, d1 hash) — `add` uses this to learn the
 ## hash of an archive it has never seen.
-pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !Fs !Proc !io = {
-  mkdirs(cache_root())
+pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !Fs !Proc !io =
+  fetch_and_hash_in(cache_root(), url)
+
+## The same, under a named cache root.
+fn fetch_and_hash_in(root: String, url: String) -> Result[(String, String), String] !Fs !Proc !io = {
+  mkdirs(root)
   # staged inside the cache root, so the publishing rename below stays on one
   # filesystem and is therefore atomic
-  let staged = match io.temp_dir(cache_root(), "fetch-") {
+  let staged = match io.temp_dir(root, "fetch-") {
     Ok(d) -> d
-    Err(e) -> return Err("cannot create a temp directory under " ++ cache_root() ++ ": " ++ e.message)
+    Err(e) -> return Err("cannot create a temp directory under " ++ root ++ ": " ++ e.message)
   }
   with work <- bracket(staged, delete_tree)
-  let got = fetch_into(url, work)
+  let got = fetch_into(root, url, work)
   match got {
     Ok(pr) -> {
       let (_, actual) = pr
-      record_origin(cache_root(), actual, url)
+      record_origin(root, actual, url)
     }
     Err(_) -> ()
   }
@@ -531,7 +544,7 @@ pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !Fs !Proc
 ## The body of the fetch. Still its own function, but no longer *because* of
 ## the release: the staging directory now has a bracket around it, and this
 ## keeps its four early `Err` returns, which the sugared region would refuse.
-fn fetch_into(url: String, work: String) -> Result[(String, String), String] !Fs !Proc !io = {
+fn fetch_into(root: String, url: String, work: String) -> Result[(String, String), String] !Fs !Proc !io = {
   let body = match download(url) {
     Ok(b) -> b
     Err(e) -> return Err(e)
@@ -540,16 +553,16 @@ fn fetch_into(url: String, work: String) -> Result[(String, String), String] !Fs
     Ok(_) -> ()
     Err(e) -> return Err(e)
   }
-  let root = strip_single_top_dir(work)
-  let actual = match tree_hash(root) {
+  let tree = strip_single_top_dir(work)
+  let actual = match tree_hash(tree) {
     Ok(h) -> h
     Err(e) -> return Err(e)
   }
-  let target = cache_dir(actual)
+  let target = entry_dir(root, actual)
   var adopted = true
   if not io.is_dir(target) {
     # rename into place; a concurrent fetch of the same hash yields the same bytes
-    let moved = io.rename(root, target)
+    let moved = io.rename(tree, target)
     match moved {
       Ok(_) -> { adopted = false }
       Err(e) -> { if not io.is_dir(target) { return Err("cannot move into the cache: " ++ e.message) } }
@@ -608,10 +621,13 @@ pub fn verify_cached(dir: String, hash: String) -> Result[Unit, String] !Fs =
 ## An entry with no record is verified rather than adopted. Adopting would be
 ## cheaper and would let exactly one bump through — the first one after this
 ## code ships, which is the occurrence it was written for.
-pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !Fs !Proc !io = {
-  let root = cache_root()
+pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !Fs !Proc !io =
+  check_origin_in(cache_root(), url, hash)
+
+## The same, under a named cache root.
+fn check_origin_in(root: String, url: String, hash: String) -> Result[Unit, String] !Fs !Proc !io = {
   for u in recorded_origins(root, hash) { if u == url { return Ok(()) } }
-  match fetch_and_hash(url) {
+  match fetch_and_hash_in(root, url) {
     Err(e) -> Err(e)
     Ok(pr) -> {
       let (_, actual) = pr
@@ -641,19 +657,23 @@ pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !Fs !Proc
 ## when the entry exists and the `subdir` inside it does not. The url/hash
 ## guard therefore hangs off the resolver as well; extending PKG-02's re-hash
 ## to every warm build is a separate decision with a per-build price tag.
-pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !Fs !Proc !io = {
-  let target = cache_dir(hash)
+pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !Fs !Proc !io =
+  ensure_cached_in(cache_root(), url, hash)
+
+## The same, under a named cache root.
+fn ensure_cached_in(root: String, url: String, hash: String) -> Result[String, String] !Fs !Proc !io = {
+  let target = entry_dir(root, hash)
   if io.is_dir(target) {
     match verify_cached(target, hash) {
       Ok(_) -> ()
       Err(e) -> return Err(e)
     }
-    match check_origin(url, hash) {
+    match check_origin_in(root, url, hash) {
       Ok(_) -> return Ok(target)
       Err(e) -> return Err(e)
     }
   }
-  match fetch_and_hash(url) {
+  match fetch_and_hash_in(root, url) {
     Ok(pr) -> {
       let (dir, actual) = pr
       if actual != hash {
@@ -667,6 +687,119 @@ pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !Fs !P
     Err(e) -> Err(e)
   }
 }
+
+# ---- tests ----
+#
+# The download path is under test here rather than under `scripts/pkg-origin-
+# contract/run.sh`: that gate spells every url `file://`, so it never enters
+# `http_get` at all. What stands in for `curl` below is `procmem.with_proc_table`,
+# which answers `Proc` from a script and hands back every invocation, and the
+# archives it answers with are built here byte by byte. Nothing in this file
+# starts a process.
+
+const NUL: String = "\u{0000}"
+
+## `n` as `digits` octal digits, zero-padded, the way every numeric tar header
+## field is written.
+fn oct(n: Int, digits: Int) -> String = {
+  var out = ""
+  var v = n
+  var i = 0
+  while i < digits {
+    out = str.slice("01234567", v % 8, v % 8 + 1) ++ out
+    v = v / 8
+    i = i + 1
+  }
+  out
+}
+
+## `s` in a fixed-width tar header field, NUL-padded.
+fn field(s: String, width: Int) -> String = s ++ str.repeat(NUL, width - str.len(s))
+
+## The 512-byte ustar header for one entry, checksum included.
+##
+## The checksum is computed over the header with its own field blanked, which
+## is the definition, so the fixture is an archive `tar` itself would accept
+## and not merely one this file's reader tolerates.
+fn tar_header(name: String, size: Int, typeflag: String) -> Bytes = {
+  let head =
+    field(name, 100) ++ field("0000644", 8) ++ field("0000000", 8) ++
+    field("0000000", 8) ++ oct(size, 11) ++ NUL ++ oct(0, 11) ++ NUL
+  let tail =
+    typeflag ++ field("", 100) ++ "ustar" ++ NUL ++ "00" ++ field("", 32) ++
+    field("", 32) ++ field("", 8) ++ field("", 8) ++ field("", 155) ++ field("", 12)
+  let blank = bytes.utf8(head ++ str.repeat(" ", 8) ++ tail)
+  var sum = 0
+  var i = 0
+  while i < bytes.len(blank) {
+    sum = sum + bytes.at(blank, i)
+    i = i + 1
+  }
+  bytes.utf8(head ++ oct(sum, 6) ++ NUL ++ " " ++ tail)
+}
+
+## A tar of `(name, content)` pairs: one header and one padded payload each,
+## then the two zero blocks that end the archive.
+fn tar_of(entries: List[(String, String)]) -> Bytes = {
+  var out = bytes.buf()
+  for e in entries {
+    let (name, content) = e
+    let data = bytes.utf8(content)
+    let n = bytes.len(data)
+    out = bytes.put_bytes(out, tar_header(name, n, "0"))
+    out = bytes.put_bytes(out, data)
+    var pad = (512 - n % 512) % 512
+    while pad > 0 {
+      out = bytes.put(out, 0)
+      pad = pad - 1
+    }
+  }
+  var end = 1024
+  while end > 0 {
+    out = bytes.put(out, 0)
+    end = end - 1
+  }
+  bytes.freeze(out)
+}
+
+## `raw` in a gzip member, as one stored deflate block. Stored rather than
+## compressed because a writer is not what is under test: the reader is, and it
+## reaches the same `gunzip_bounded` either way.
+fn gzip_of(raw: Bytes) -> Bytes = {
+  let n = bytes.len(raw)
+  if n > 65535 { panic("gzip_of: a fixture this large needs more than one stored block") }
+  var out = bytes.buf()
+  for h in [0x1F, 0x8B, 0x08, 0, 0, 0, 0, 0, 0, 0xFF] { out = bytes.put(out, h) }
+  out = bytes.put(out, 0x01)
+  out = bytes.put(out, n & 0xFF)
+  out = bytes.put(out, (n >>> 8) & 0xFF)
+  out = bytes.put(out, (~n) & 0xFF)
+  out = bytes.put(out, ((~n) >>> 8) & 0xFF)
+  out = bytes.put_bytes(out, raw)
+  let sum = crc32.sum(raw)
+  for sh in [0, 8, 16, 24] { out = bytes.put(out, (sum >>> sh) & 0xFF) }
+  for sh in [0, 8, 16, 24] { out = bytes.put(out, (n >>> sh) & 0xFF) }
+  bytes.freeze(out)
+}
+
+## The fixture package, wrapped in a single top-level directory the way a
+## GitHub tag archive wraps one.
+fn fixture_targz() -> Bytes = gzip_of(tar_of([
+  ("greeter-1.0.0/dawn.toml", "schema = 1\nname = \"greeter\"\n"),
+  ("greeter-1.0.0/src/hello.dawn", "pub fn greet() -> String = \"hello\"\n")
+]))
+
+## The d1 hash of the tree `fixture_targz` unpacks to, written down rather than
+## recomputed: a literal is what makes the assertion cover gunzip, the ustar
+## walk, the file bytes and the d1 canonicalization at once, instead of
+## comparing the chain against itself.
+const FIXTURE_HASH: String = "d1:eb02cdf3c710c0c77ff47ea10c6771544e2e928f2845245a1e559a5ed2f5e06a"
+
+fn temp_root(prefix: String) -> String !Fs =
+  match io.temp_dir("", prefix) {
+    Ok(d) -> d
+    Err(e) -> panic("temp dir: " ++ e.message)
+  }
 
 test "origin records round-trip and accumulate urls" {
   io.with_fs_real(() => {
@@ -706,4 +839,206 @@ test "tar octal and pax records parse" {
   # the length field counts the whole record, its own digits included
   assert pax_path("32 path=some/very/long/name.txt\n") == Some("some/very/long/name.txt")
   assert pax_path("16 uid=1000\n") == None
+}
+
+test "curl is asked for exactly the command line the constants spell" {
+  let url = "https://example.invalid/greeter/v1.0.0.tar.gz"
+  let (got, log) = io.with_fs_real(() => procmem.with_proc_table(
+    [procmem.wrote(bytes.utf8("archive bytes"))],
+    () => http_get(url)
+  ))
+  assert got == Ok(bytes.utf8("archive bytes"))
+  # one invocation, and the whole of it: a command line is a list, so the
+  # assertion is the list
+  assert len(log) == 1
+  let argv = procmem.call_argv(log, 0)
+  assert len(argv) == 12
+  assert argv[0] == "curl"
+  assert argv[1] == "--silent"
+  assert argv[2] == "--show-error"
+  assert argv[3] == "--location"
+  assert argv[4] == "--fail"
+  assert argv[5] == "--connect-timeout"
+  assert argv[6] == "30"
+  assert argv[7] == "--max-time"
+  assert argv[8] == "300"
+  assert argv[9] == "--max-filesize"
+  assert argv[10] == "268435456"
+  # the url is last, so nothing after it can be read as a flag
+  assert argv[11] == url
+  # the three numbers above are the constants, not a second copy of them
+  assert argv[6] == to_string(FETCH_CONNECT_TIMEOUT_SECS)
+  assert argv[8] == to_string(FETCH_REQUEST_TIMEOUT_SECS)
+  assert argv[10] == to_string(MAX_ARCHIVE_BYTES)
+  # no proxy argument, and that is the design: curl reads https_proxy itself,
+  # which is the sentence at the top of `http_get` made checkable
+  assert not list.contains(argv, "--proxy")
+  assert not list.contains(argv, "-x")
+  # each stream goes to a file of its own inside the staging directory
+  assert str.ends_with(log[0].out_path, "/body")
+  assert str.ends_with(log[0].err_path, "/stderr")
+  assert log[0].out_path != log[0].err_path
+}
+
+test "a file:// url is read off disk and never reaches curl" {
+  let (got, log) = io.with_fs_real(() => procmem.with_proc_table([], () => {
+    let dir = temp_root("dawn-file-url-")
+    with d <- bracket(dir, delete_tree)
+    let f = d ++ "/pkg.bin"
+    let _ = io.write_file(f, "on disk")
+    download("file://" ++ f)
+  }))
+  assert got == Ok(bytes.utf8("on disk"))
+  # the empty script is the assertion: any invocation would have panicked
+  assert len(log) == 0
+}
+
+test "a curl refusal is reported with what curl said and where to look" {
+  let url = "https://example.invalid/gone.tar.gz"
+  let (got, log) = io.with_fs_real(() => procmem.with_proc_table(
+    [procmem.failed(22, "curl: (22) The requested URL returned error: 404\n")],
+    () => http_get(url)
+  ))
+  assert got == Err(
+    "cannot fetch https://example.invalid/gone.tar.gz: " ++
+      "curl: (22) The requested URL returned error: 404" ++
+      "\n  check the network (https_proxy is honored) or pre-seed the cache")
+  assert len(log) == 1
+}
+
+test "a curl exit with nothing on stderr is reported by its code" {
+  let url = "https://example.invalid/quiet.tar.gz"
+  let (got, _) = io.with_fs_real(() => procmem.with_proc_table(
+    [procmem.exited(28)],
+    () => http_get(url)
+  ))
+  assert got == Err(
+    "cannot fetch https://example.invalid/quiet.tar.gz: curl exited 28" ++
+      "\n  check the network (https_proxy is honored) or pre-seed the cache")
+}
+
+test "curl missing from PATH is reported with the install hint" {
+  let url = "https://example.invalid/pkg.tar.gz"
+  let (got, _) = io.with_fs_real(() => procmem.with_proc_table(
+    [procmem.unstartable("cannot run program \"curl\"")],
+    () => http_get(url)
+  ))
+  assert got == Err(
+    "cannot fetch https://example.invalid/pkg.tar.gz: cannot run program \"curl\"" ++
+      "\n  fetching a remote package needs `curl` on PATH")
+}
+
+test "a fetched archive unpacks, hashes and lands in the cache under its name" {
+  let url = "https://example.invalid/greeter/v1.0.0.tar.gz"
+  io.with_fs_real(() => {
+    let root = temp_root("dawn-fetch-cache-")
+    with r <- bracket(root, delete_tree)
+    let (got, log) = procmem.with_proc_table(
+      [procmem.wrote(fixture_targz())],
+      () => fetch_and_hash_in(r, url)
+    )
+    # one download, and the chain from its bytes: gunzip, ustar walk, the
+    # single top directory stripped, d1 over the tree
+    assert len(log) == 1
+    assert procmem.call_argv(log, 0)[11] == url
+    let (entry, hash) = match got {
+      Ok(pr) -> pr
+      Err(e) -> panic("fetch: " ++ e)
+    }
+    assert hash == FIXTURE_HASH
+    assert entry == r ++ "/d1-" ++ str.strip_prefix(FIXTURE_HASH, "d1:").unwrap_or("")
+    assert io.is_dir(entry)
+    assert io.read_file(entry ++ "/dawn.toml") == Ok("schema = 1\nname = \"greeter\"\n")
+    assert io.read_file(entry ++ "/src/hello.dawn") ==
+      Ok("pub fn greet() -> String = \"hello\"\n")
+    # the entry answers for its own name, which is what a warm build re-checks
+    match verify_cached(entry, hash) {
+      Ok(_) -> ()
+      Err(e) -> panic("verify: " ++ e)
+    }
+    # and the url that produced these bytes is recorded beside the entry
+    assert recorded_origins(r, hash) == [url]
+    # the staging directory is gone: what is left under the root is the entry
+    # and the record, nothing else
+    assert io.list_dir(r) == Ok([".origins", "d1-" ++ str.strip_prefix(FIXTURE_HASH, "d1:").unwrap_or("")])
+  })
+}
+
+test "a declared hash the fetched bytes do not produce is refused, naming both" {
+  let url = "https://example.invalid/greeter/v1.0.0.tar.gz"
+  let declared = "d1:" ++ str.repeat("b", 64)
+  io.with_fs_real(() => {
+    let root = temp_root("dawn-fetch-mismatch-")
+    with r <- bracket(root, delete_tree)
+    let (got, log) = procmem.with_proc_table(
+      [procmem.wrote(fixture_targz())],
+      () => ensure_cached_in(r, url, declared)
+    )
+    assert len(log) == 1
+    assert got == Err(
+      "hash mismatch for " ++ url ++
+        "\n  declared:  " ++ declared ++
+        "\n  actual:    " ++ FIXTURE_HASH ++
+        "\n  if you just wrote this dependency, copy the actual value into `hash`")
+    # the bytes still went into the cache under the hash they really have: the
+    # refusal is about the manifest, not about the download
+    assert io.is_dir(r ++ "/d1-" ++ str.strip_prefix(FIXTURE_HASH, "d1:").unwrap_or(""))
+  })
+}
+
+test "a warm entry that changed on disk is refused before the url is consulted" {
+  let url = "https://example.invalid/greeter/v1.0.0.tar.gz"
+  io.with_fs_real(() => {
+    let root = temp_root("dawn-warm-")
+    with r <- bracket(root, delete_tree)
+    let entry = r ++ "/d1-" ++ str.strip_prefix(FIXTURE_HASH, "d1:").unwrap_or("")
+    mkdirs(entry)
+    let _ = io.write_file(entry ++ "/dawn.toml", "not what was fetched\n")
+    let (got, log) = procmem.with_proc_table([], () => ensure_cached_in(r, url, FIXTURE_HASH))
+    # the empty script is the assertion: a re-fetch would have panicked
+    assert len(log) == 0
+    let actual = match tree_hash(entry) {
+      Ok(h) -> h
+      Err(e) -> panic("hash: " ++ e)
+    }
+    assert got == Err(
+      "cache entry " ++ entry ++ " does not match its own name" ++
+        "\n  named:     " ++ FIXTURE_HASH ++ "\n  actual:    " ++ actual ++
+        "\n  the local copy was modified or damaged after fetch; delete it and re-run")
+  })
+}
+
+test "the single top directory a tag archive wraps is stripped before hashing" {
+  let wrapped = fixture_targz()
+  let bare = gzip_of(tar_of([
+    ("dawn.toml", "schema = 1\nname = \"greeter\"\n"),
+    ("src/hello.dawn", "pub fn greet() -> String = \"hello\"\n")
+  ]))
+  assert wrapped != bare
+  io.with_fs_real(() => {
+    let root = temp_root("dawn-strip-")
+    with r <- bracket(root, delete_tree)
+    let (got, _) = procmem.with_proc_table(
+      [procmem.wrote(bare)],
+      () => fetch_and_hash_in(r, "https://example.invalid/bare.tar.gz")
+    )
+    # different archives, one tree, one cache entry: the wrapper directory is
+    # not part of what is hashed
+    assert got == Ok((r ++ "/d1-" ++ str.strip_prefix(FIXTURE_HASH, "d1:").unwrap_or(""), FIXTURE_HASH))
+  })
+}
+
+test "a fetched tar entry that escapes the extraction root is refused" {
+  let escaping = gzip_of(tar_of([("../escape.txt", "owned\n")]))
+  io.with_fs_real(() => {
+    let root = temp_root("dawn-escape-")
+    with r <- bracket(root, delete_tree)
+    let (got, log) = procmem.with_proc_table(
+      [procmem.wrote(escaping)],
+      () => fetch_and_hash_in(r, "https://example.invalid/evil.tar.gz")
+    )
+    assert len(log) == 1
+    assert got == Err("archive entry escapes the extraction root: ../escape.txt")
+    assert not io.exists(r ++ "/escape.txt")
+  })
 }
