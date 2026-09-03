@@ -32,7 +32,8 @@ use check/types.{
   is_ref_ty, Eff, EPure, hash_scalars, ord_scalars, intr_owned_args,
   ev_pack_adt, EV_MISS_MSG
 }
-use ir/reach.{TableUse}
+use ir/reach
+use ir/reach.{TableUse, Live}
 use embed/unicode_case
 use embed/rtsrc
 use embed/unicode_class
@@ -2217,9 +2218,27 @@ pub fn test_symbol(owner: String, idx: Int) -> String = mangle(owner, test_name(
 ## the declarations, the dictionaries and every function body. Two callers
 ## finish it differently -- `emit_program` writes the program's own `main`,
 ## and `dawn test` on this backend appends a generated runner instead.
+## What this translation unit may leave out: the functions and dictionaries a
+## chain of calls from the program's own modules cannot reach (ir/reach).
+## `None` prunes nothing, which is what `dawn test --stdlib` hands over --
+## there is no user module to root a walk at, and std's own tests are the
+## program.
+fn fn_kept(live: Option[Live], f: CFun) -> Bool =
+  match live {
+    None -> true
+    Some(l) -> reach.is_live(l, f)
+  }
+
+fn dict_kept(live: Option[Live], key: String) -> Bool =
+  match live {
+    None -> true
+    Some(l) -> reach.dict_live(l, key)
+  }
+
 fn emit_units(
   units: List[EmitMod],
   u: TableUse,
+  live: Option[Live],
   adts: Adts,
   modes: Map[(String, String), List[CMode]]
 ) -> CSt = {
@@ -2267,7 +2286,7 @@ fn emit_units(
   # C needs declarations before use; Dawn does not order top-level functions
   for u in units {
     for f in u.m.fns {
-      if not f.is_test {
+      if not f.is_test && fn_kept(live, f) {
         st = line(st, fn_signature(f) ++ ";")
         if is_lifted(f) {
           st = line(st, adapter_signature(f) ++ ";")
@@ -2288,7 +2307,12 @@ fn emit_units(
   # first is therefore sound, and `slot_shape` is what says so -- it drops the
   # owner and holds the rest to being identical, so a real disagreement about
   # what fills a slot is a panic rather than a silent choice.
+  var cores: List[CModule] = []
+  for u in units { cores = cores ++ [u.m] }
+  let dict_owner = reach.dict_owners(cores)
   var seen: Map[String, String] = map.empty()
+  var dict_order: List[String] = []
+  var chosen: Map[String, CDictDef] = map.empty()
   for u in units {
     for d in u.m.dicts {
       let shape = slot_shape(d)
@@ -2300,8 +2324,24 @@ fn emit_units(
           }
         None -> {
           seen = map.insert(seen, d.key, shape)
-          st = line(st, dict_line(d))
+          dict_order = dict_order ++ [d.key]
         }
+      }
+      match map.get(dict_owner, d.key) {
+        Some(o) -> if o == u.m.owner { chosen = map.insert(chosen, d.key, d) }
+        None -> ()
+      }
+    }
+  }
+  # Written in the order the units first asked for each key, but filled from
+  # the copy `reach.dict_owners` picked rather than from the first one met:
+  # which module's slot bodies the program links against must not depend on
+  # the order std happens to load in (issue #69).
+  for k in dict_order {
+    if dict_kept(live, k) {
+      match map.get(chosen, k) {
+        Some(d) -> { st = line(st, dict_line(d)) }
+        None -> ()
       }
     }
   }
@@ -2333,7 +2373,7 @@ fn emit_units(
       cur_owner: u.m.owner
     }
     for f in u.m.fns {
-      if not f.is_test {
+      if not f.is_test && fn_kept(live, f) {
         st = emit_fn(st, f)
         st = line(st, "")
         if is_lifted(f) {
@@ -2352,10 +2392,11 @@ pub fn emit_program(
   units: List[EmitMod],
   entry: String,
   u: TableUse,
+  live: Option[Live],
   adts: Adts,
   modes: Map[(String, String), List[CMode]]
 ) -> String = {
-  var st = emit_units(units, u, adts, modes)
+  var st = emit_units(units, u, live, adts, modes)
   # The program body runs on the runtime's own stack, not the OS default one
   # (dawn_rt.h, "the program's stack"). The thunk exists because the entry's
   # C return type follows its Dawn one, and `dawn_rt_main` takes one shape;
@@ -2382,10 +2423,11 @@ pub fn emit_program(
 pub fn emit_headless(
   units: List[EmitMod],
   u: TableUse,
+  live: Option[Live],
   adts: Adts,
   modes: Map[(String, String), List[CMode]]
 ) -> String =
-  join(emit_units(units, u, adts, modes).out, "")
+  join(emit_units(units, u, live, adts, modes).out, "")
 
 # ---- tests ----
 

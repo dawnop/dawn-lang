@@ -22,7 +22,7 @@ use c/rc
 use c/infer
 use c/infer.{ForcedMode}
 use ir/reach
-use ir/reach.{TableUse}
+use ir/reach.{TableUse, Live}
 use c/emitc
 use c/emitc.{EmitMod}
 use c/ctestrun
@@ -456,21 +456,37 @@ fn build_units(
   (units, entry, adts, modes)
 }
 
-## Which Unicode tables ride: the same question, and the same answer, as the
-## JVM path. The units are already lowered (rc included; the walk ignores
-## CDup/CSDrop), so reach reads them as they are.
+## What this program can reach: which Unicode tables ride, and which std
+## functions and dictionaries the emitter still has to write. One walk answers
+## both -- the same question, and the same answer, as the JVM path. The units
+## are already lowered (rc included; the walk ignores CDup/CSDrop), so reach
+## reads them as they are.
 ##
 ## `dawn test --stdlib` has no user module to root the walk at, so it carries
-## everything -- again the JVM path's answer, whose targetless `collect_program`
-## reaches for `all_tables` for the same reason.
-fn tables(units: List[EmitMod], prog: Program, std_tests: Bool) -> TableUse = {
-  if std_tests { return reach.all_tables() }
+## everything -- again the JVM path's answer, whose targetless
+## `collect_program` prunes nothing for the same reason. `None` says so: an
+## empty walk would say "nothing is reachable" and emit an empty translation
+## unit, which is the failure this special case exists to prevent.
+##
+## The emitter's own ten `std/pvec` spellings seed the walk beside the user's
+## modules: a list literal and `++` become calls Core never wrote down, so
+## nothing in the graph reaches `from_array` or `concat`.
+fn live(units: List[EmitMod], prog: Program, std_tests: Bool) -> Option[Live] = {
+  if std_tests { return None }
   var reach_mods: List[CModule] = []
   for u2 in units { reach_mods = reach_mods ++ [u2.m] }
   var reach_roots: List[String] = []
   for cm in prog.modules { reach_roots = reach_roots ++ [cm.class_name] }
-  reach.table_use(reach_mods, reach_roots)
+  var extra: List[(String, String)] = []
+  for n in emitc.emitter_named_pvec_fns() { extra = extra ++ [("std/pvec", n)] }
+  Some(reach.live_set(reach_mods, reach_roots, extra))
 }
+
+fn tables(live: Option[Live]) -> TableUse =
+  match live {
+    None -> reach.all_tables()
+    Some(l) -> l.tables
+  }
 
 ## An analyzed program as one C translation unit, or Err when it has no
 ## `main`. std goes in first: a C translation unit needs a definition for
@@ -479,7 +495,8 @@ fn tables(units: List[EmitMod], prog: Program, std_tests: Bool) -> TableUse = {
 pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !Env !io = {
   let (units, entry, adts, modes) = build_units(std, prog, false, false)
   if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
-  Ok(emitc.emit_program(units, entry, tables(units, prog, false), adts, modes))
+  let lv = live(units, prog, false)
+  Ok(emitc.emit_program(units, entry, tables(lv), lv, adts, modes))
 }
 
 ## The same translation unit with the test blocks compiled in and a generated
@@ -499,7 +516,8 @@ pub fn c_test_text(
   std_tests: Bool
 ) -> Result[String, String] !Env !io = {
   let (units, _entry, adts, modes) = build_units(std, prog, true, std_tests)
-  Ok(emitc.emit_headless(units, tables(units, prog, std_tests), adts, modes) ++
+  let lv = live(units, prog, std_tests)
+  Ok(emitc.emit_headless(units, tables(lv), lv, adts, modes) ++
       ctestrun.runner(tests))
 }
 

@@ -463,6 +463,35 @@ pub fn subject_key(t: Ty) -> String =
     _ -> ty_key(t)
   }
 
+## One function's identity across the whole program, as a string.
+##
+## The backends prune what a program cannot reach (ir/reach), and the answer
+## has to travel from the walk to the emitters as a set. A position in a flat
+## list would do it only while both sides build that list the same way, which
+## is a coupling nobody would notice breaking; a name would not do it at all,
+## because an impl body, a trait default and a plain function may all be
+## called `eq` in one module. So the key carries what the backends already
+## mangle with: the owner, which of the three this is, and the name.
+##
+## Newline is the separator because none of the three parts can contain one:
+## a module path is slash-spelled, a subject key is minted from a type, and a
+## Dawn name is an identifier (or a `lambda$N` lowering minted).
+pub fn fn_key(f: CFun) -> String = {
+  let tag =
+    match f.impl_of {
+      Some(pair) -> {
+        let (tid, subject) = pair
+        "impl$" ++ to_string(tid) ++ "$" ++ subject_key(subject)
+      }
+      None ->
+        match f.default_of {
+          Some(tid) -> "default$" ++ to_string(tid)
+          None -> if f.is_test { "test" } else { "fn" }
+        }
+    }
+  f.owner ++ "\n" ++ tag ++ "\n" ++ f.name
+}
+
 ## The same spelling, but injective over *instantiated* types.
 ##
 ## `ty_key` may drop type arguments because everything it names is a v1 impl
@@ -564,6 +593,33 @@ pub fn diverges(e: CExpr) -> Bool =
   }
 
 # ---- tests ----
+
+test "the three kinds of body with one name are three keys" {
+  let base = CFun {
+    name: "eq",
+    owner: "m",
+    captures: [],
+    params: [],
+    dicts: [],
+    evs: [],
+    ret: TyUnit,
+    body: CUnit,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  let plain = fn_key(base)
+  let as_impl = fn_key(CFun { ..base, impl_of: Some((3, TyString)) })
+  let as_default = fn_key(CFun { ..base, default_of: Some(3) })
+  assert plain != as_impl
+  assert plain != as_default
+  assert as_impl != as_default
+  # and two impls of one trait at different subjects are two keys, which is
+  # the collision a bare (owner, name) pair would have
+  assert fn_key(CFun { ..base, impl_of: Some((3, TyInt)) }) != as_impl
+  # the owner is part of it: the same function name in two modules is two
+  assert fn_key(CFun { ..base, owner: "n" }) != plain
+}
 
 test "a function type's identity key counts its evidence slot" {
   # `ty_key` decides whether two shapes may share a synthesised symbol, so it

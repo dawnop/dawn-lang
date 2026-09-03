@@ -1,5 +1,11 @@
-# Which functions can run, starting from the user's modules, and which of the
-# Unicode-table intrinsics those functions touch.
+# Which functions can run, starting from the user's modules: which of the
+# Unicode-table intrinsics they touch, and -- since the per-program std
+# pruning knife -- which functions and dictionaries the backends still have to
+# emit.
+#
+# The two answers come out of one walk on purpose. They are the same question
+# asked twice, and a second walk would be a second answer to drift from this
+# one; `table_use` below is the Unicode half kept under its old name.
 #
 # Both backends used to carry the Unicode tables -- simple case mapping and
 # the classification sets (#65/#66) -- into every program they emitted: 52KB
@@ -34,7 +40,7 @@
 # there.
 
 use ir/core.{
-  CModule, CFun, CExpr, CStmt, CCallee, CDictSlot, CDictDef, subject_key,
+  CModule, CFun, CExpr, CStmt, CCallee, CDictSlot, CDictDef, subject_key, fn_key,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic, CCtor,
   CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg, CTuple,
   CTupleGet, CBox, CUnbox, CBinary, CUnary, CIf, CBlock, CListLit, CConstRef,
@@ -104,15 +110,85 @@ type Idx = {
   by_name: Map[(String, String), Int],
   by_impl: Map[(String, Int, String, String), Int],
   by_default: Map[(String, String), List[Int]],
-  dicts: Map[String, List[CDictSlot]]
+  # the slots of the copy the C emitter keeps, per key (see `dict_owners`)
+  dicts: Map[String, List[CDictSlot]],
+  # the slots of every module's own copy, per (module, key), which is what
+  # the JVM emitter writes into that module's dictionary class
+  own_dicts: Map[(String, String), List[CDictSlot]]
 }
 
 type Rch = {
   idx: Idx,
   seen: Set[Int],
   work: List[Int],
+  # the module whose body is being walked, for the per-module half of
+  # `dict_edge`. Set once per work item rather than threaded through `walk`.
+  cur: String,
   seen_dicts: Set[String],
+  seen_own_dicts: Set[String],
+  live_dicts: Set[String],
   u: TableUse
+}
+
+## What one walk answers. The Unicode half is `tables`; the rest is the
+## pruning knife's: a function the backends may drop, a dictionary they may
+## not write.
+##
+## Overshoot in any of the three costs bytes. Undershoot is loud rather than
+## silent -- see the note at the top of this file.
+pub type Live = {
+  tables: TableUse,
+  ## `core.fn_key` of every function a chain of calls from the roots reaches
+  fns: Set[String],
+  ## the dictionary keys reached, for the C emitter's one-per-program table
+  dicts: Set[String],
+  ## `<owner>\n<key>` for each module's own copy, for the JVM's dictionary
+  ## classes, which are per module
+  own_dicts: Set[String]
+}
+
+## The three readers. There is no "everything live" value on purpose: the
+## paths that prune nothing (`dawn test --stdlib`, the runtime-only jar built
+## without a target) hand the emitters `None` instead, so "keep it all" is a
+## missing answer rather than a full one that has to stay in agreement with
+## the walk.
+pub fn is_live(l: Live, f: CFun) -> Bool = set.has(l.fns, fn_key(f))
+
+pub fn dict_live(l: Live, key: String) -> Bool = set.has(l.dicts, key)
+
+pub fn own_dict_live(l: Live, owner: String, key: String) -> Bool =
+  set.has(l.own_dicts, own_dict_key(owner, key))
+
+fn own_dict_key(owner: String, key: String) -> String = owner ++ "\n" ++ key
+
+## Which module's copy of a dictionary the program keeps, per key.
+##
+## Every module that needs `Eq[String]` lowers its own copy of the slot
+## bridge, identical to every other but for the owner it is mangled from
+## (`emitc.slot_shape` holds them to that and panics otherwise). One
+## translation unit can define the symbol once, so the C emitter picks a copy
+## -- and it used to pick whichever it met first, which is a function of the
+## order `std/modules.txt` happens to list modules in. That made `std/gpu`,
+## the first std module to materialise `Eq[String]`, the owner of the copy
+## every program with a `==` on strings linked against (issue #69). Harmless
+## while std was emitted whole; a 8,000-line module pinned by one comparison
+## once it is not.
+##
+## The smallest owner is an arbitrary choice, and that is the point: it is
+## arbitrary the same way every time, and reordering `modules.txt` cannot
+## move it. The walk reads this table so that the copy it marks live is the
+## copy the emitter writes.
+pub fn dict_owners(mods: List[CModule]) -> Map[String, String] = {
+  var out: Map[String, String] = map.empty()
+  for m in mods {
+    for d in m.dicts {
+      match map.get(out, d.key) {
+        Some(prev) -> if m.owner < prev { out = map.insert(out, d.key, m.owner) }
+        None -> { out = map.insert(out, d.key, m.owner) }
+      }
+    }
+  }
+  out
 }
 
 fn build_idx(mods: List[CModule]) -> Idx = {
@@ -121,6 +197,8 @@ fn build_idx(mods: List[CModule]) -> Idx = {
   var by_impl: Map[(String, Int, String, String), Int] = map.empty()
   var by_default: Map[(String, String), List[Int]] = map.empty()
   var dicts: Map[String, List[CDictSlot]] = map.empty()
+  var own_dicts: Map[(String, String), List[CDictSlot]] = map.empty()
+  let owners = dict_owners(mods)
   var i = 0
   for m in mods {
     for f in m.fns {
@@ -156,13 +234,24 @@ fn build_idx(mods: List[CModule]) -> Idx = {
     }
     for d in m.dicts {
       # the same key in two modules is the same shape (emitc dedupes program
-      # dictionaries on exactly that); the first one seen is enough
-      if map.get(dicts, d.key) == None {
-        dicts = map.insert(dicts, d.key, d.slots)
+      # dictionaries on exactly that), so which copy this records changes only
+      # the owner the slot symbols are mangled from -- and the C emitter has
+      # to be told the same one, hence `dict_owners` rather than "first seen"
+      match map.get(owners, d.key) {
+        Some(o) -> if o == m.owner { dicts = map.insert(dicts, d.key, d.slots) }
+        None -> ()
       }
+      own_dicts = map.insert(own_dicts, (m.owner, d.key), d.slots)
     }
   }
-  Idx { fns: fns, by_name: by_name, by_impl: by_impl, by_default: by_default, dicts: dicts }
+  Idx {
+    fns: fns,
+    by_name: by_name,
+    by_impl: by_impl,
+    by_default: by_default,
+    dicts: dicts,
+    own_dicts: own_dicts
+  }
 }
 
 fn touch(st: Rch, oi: Option[Int]) -> Rch =
@@ -193,23 +282,48 @@ fn default_edge(st0: Rch, owner: String, method: String) -> Rch = {
   st
 }
 
+fn mark_slots(st0: Rch, slots: List[CDictSlot]) -> Rch = {
+  var st = st0
+  for s in slots {
+    st = match s {
+      CSlotFn(owner, name) -> direct(st, owner, name)
+      CSlotDefault(owner, method) -> default_edge(st, owner, method)
+    }
+  }
+  st
+}
+
 ## A dictionary reference reaches every slot the dictionary carries: which
 ## slot a CMethod call reads is a runtime fact, so all of them count.
+##
+## It reaches them in *two* copies, because the two backends materialise a
+## dictionary differently and both have to link. C has one translation unit
+## and one dictionary per key, filled from the copy `dict_owners` picked; the
+## JVM has a dictionary class per module, filled from that module's own copy.
+## Marking only one of the two would prune a slot body the other backend's
+## dictionary still names -- a link error on C, a NoSuchMethodError on the
+## JVM. The overlap is the common case and costs nothing: `touch` is
+## idempotent.
 fn dict_edge(st0: Rch, key: String) -> Rch = {
-  if set.has(st0.seen_dicts, key) {
-    return st0
-  }
-  var st = Rch { ..st0, seen_dicts: set.insert(st0.seen_dicts, key) }
-  match map.get(st.idx.dicts, key) {
-    Some(slots) -> {
-      for s in slots {
-        st = match s {
-          CSlotFn(owner, name) -> direct(st, owner, name)
-          CSlotDefault(owner, method) -> default_edge(st, owner, method)
-        }
-      }
+  var st = st0
+  if not set.has(st.seen_dicts, key) {
+    st = Rch {
+      ..st,
+      seen_dicts: set.insert(st.seen_dicts, key),
+      live_dicts: set.insert(st.live_dicts, key)
     }
-    None -> ()
+    st = match map.get(st.idx.dicts, key) {
+      Some(slots) -> mark_slots(st, slots)
+      None -> st
+    }
+  }
+  let ok = own_dict_key(st.cur, key)
+  if not set.has(st.seen_own_dicts, ok) {
+    st = Rch { ..st, seen_own_dicts: set.insert(st.seen_own_dicts, ok) }
+    st = match map.get(st.idx.own_dicts, (st.cur, key)) {
+      Some(slots) -> mark_slots(st, slots)
+      None -> st
+    }
   }
   st
 }
@@ -345,7 +459,19 @@ fn walk(st0: Rch, e: CExpr) -> Rch =
 ## The entry point. `roots` names the user's module classes; every function
 ## they own seeds the walk, and everything else -- std above all -- counts
 ## only if a chain of calls from those seeds reaches it.
-pub fn table_use(mods: List[CModule], roots: List[String]) -> TableUse = {
+##
+## `extra_roots` is the seam the walk cannot see from Core: a call an emitter
+## spells directly. Both backends do it for the same ten `std/pvec` functions
+## -- a list literal, `++`, the list primitives and the Array host boundary
+## are emitted as calls rather than lowered into CDirect -- and
+## `emitc.emitter_named_pvec_fns` is the one list of them, held to the
+## emitter's actual spellings by a test beside it. Passing them in rather than
+## naming std here keeps this module ignorant of which functions std has.
+pub fn live_set(
+  mods: List[CModule],
+  roots: List[String],
+  extra_roots: List[(String, String)]
+) -> Live = {
   let idx = build_idx(mods)
   var rootset: Set[String] = set.empty()
   for r in roots { rootset = set.insert(rootset, r) }
@@ -353,7 +479,10 @@ pub fn table_use(mods: List[CModule], roots: List[String]) -> TableUse = {
     idx: idx,
     seen: set.empty(),
     work: [],
+    cur: "",
     seen_dicts: set.empty(),
+    seen_own_dicts: set.empty(),
+    live_dicts: set.empty(),
     u: no_tables()
   }
   var i = 0
@@ -363,15 +492,36 @@ pub fn table_use(mods: List[CModule], roots: List[String]) -> TableUse = {
     }
     i = i + 1
   }
+  for pr in extra_roots {
+    let (owner, name) = pr
+    st = direct(st, owner, name)
+  }
   # the queue only grows; `seen` guards each position against re-entry
   var qi = 0
   while qi < len(st.work) {
     let fi = st.work[qi]
     qi = qi + 1
-    st = walk(st, st.idx.fns[fi].body)
+    let f = st.idx.fns[fi]
+    st = walk(Rch { ..st, cur: f.owner }, f.body)
   }
-  st.u
+  var live: Set[String] = set.empty()
+  var li = 0
+  for f in st.idx.fns {
+    if set.has(st.seen, li) { live = set.insert(live, fn_key(f)) }
+    li = li + 1
+  }
+  Live {
+    tables: st.u,
+    fns: live,
+    dicts: st.live_dicts,
+    own_dicts: st.seen_own_dicts
+  }
 }
+
+## The Unicode half under its old name, so the freight question reads the way
+## it did before pruning existed and the tests below stay the tests they were.
+pub fn table_use(mods: List[CModule], roots: List[String]) -> TableUse =
+  live_set(mods, roots, []).tables
 
 # ---- tests ----
 
