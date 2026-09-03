@@ -1369,6 +1369,118 @@ pub fn dot_f16_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List
   one_answer(old, dt, list.fold(range(0, n), 0.0, (acc, i) => round_to(dt, acc + a[i] * b[i])))
 }
 
+# ---- the gather and scatter references (knife 12) ----
+#
+# Every one of these is EXACT tier, and for the same reason the integer
+# family is: nothing is rounded. A gather moves a value the buffer already
+# holds, and a scatter moves it somewhere else; the arithmetic is over
+# element indices, which are integers in an f64 channel that holds every
+# i32 exactly. Where a count IS folded (the two rank kernels below), the
+# summands are ones and zeroes and the totals stay under 32, so no fold
+# order can show either.
+
+## Row `i` of the answer is row `ids[i]` of `table`, and `miss` where that
+## id is outside `[0, rows)`: leetgpu 106 (Token Embedding). `ins` is
+## `[ids, table, old out]`; `n` is how many ids the launch covered and
+## `dim` the width of a row.
+##
+## An id outside the table is a defined answer here, not a lane to leave
+## alone: the kernel masks its GATHER and not its store. Which is what
+## gives the mask something an output buffer can show, and the reason
+## scripts/tile-gpu-diff's corpus carries such ids.
+pub fn token_embed_ref(n: Int, rows: Int, dim: Int, miss: Float,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let ids = ins[0]
+  let table = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), k =>
+      if k >= n * dim {
+        kept(old, k)
+      } else {
+        let id = to_int(ids[k / dim])
+        round_to(dt, if id >= 0 && id < rows { table[id * dim + k % dim] } else { miss })
+      })
+}
+
+## The first `n` values of the first buffer in ascending order, in the
+## second: leetgpu 15 (Sorting). `ins` is `[x, old out]`.
+##
+## This is a SORT, not the kernel's rank-and-scatter written twice: the
+## device computes where each value goes and writes it there, and this
+## grows an ordered list by insertion. Equal values are interchangeable in
+## the answer, so the kernel's tie-break (which keeps its ranks distinct,
+## so that no two lanes scatter to one element) does not have to be
+## repeated here to agree with it.
+##
+## `std/list`'s own `sort` wants `Ord`, which `Float` does not implement,
+## so the comparison is spelled out.
+fn insert_sorted(sorted: List[Float], v: Float) -> List[Float] = {
+  let below = list.filter(sorted, w => w <= v)
+  below ++ [v] ++ list.drop(sorted, len(below))
+}
+
+pub fn sort_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  let nothing: List[Float] = []
+  let sorted = list.fold(range(0, n), nothing, (acc, i) => insert_sorted(acc, x[i]))
+  list.map(range(0, len(old)), i => if i < n { round_to(dt, sorted[i]) } else { kept(old, i) })
+}
+
+## The first `m` values of the first buffer and the first `n` of the
+## second, both already ascending, merged into the third: leetgpu 71
+## (Parallel Merge). `ins` is `[a, b, old out]`.
+##
+## A two-pointer merge, which is the algorithm the kernel does NOT use: the
+## device computes each value's rank against the other run and scatters it
+## there. Ties go to `a`, matching the kernel's strict comparison on one
+## side and loose one on the other, which is also what keeps the two rank
+## sets disjoint.
+pub fn merge_ref(m: Int, n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  var out: List[Float] = []
+  var i = 0
+  var j = 0
+  for _k in range(0, m + n) {
+    let take_a = i < m && (j >= n || a[i] <= b[j])
+    if take_a {
+      out = out ++ [a[i]]
+      i = i + 1
+    } else {
+      out = out ++ [b[j]]
+      j = j + 1
+    }
+  }
+  let merged = out
+  list.map(range(0, len(old)), k => if k < m + n { round_to(dt, merged[k]) } else { kept(old, k) })
+}
+
+## `out[perm[i]] = x[i]` for every lane whose destination is inside
+## `[0, n)`, and nothing at all for the others: the scatter twin of
+## `int_ops_ref`, with no leetgpu problem behind it. `ins` is
+## `[perm, x, old out]`, and `lanes` is how many lanes the launch covered.
+##
+## The caller must hand this a `perm` whose in-range entries are DISTINCT.
+## A scatter that names one element twice has no answer on the device (the
+## dialect does not order the lanes of one store against each other), so a
+## reference that answered anything for it would be inventing a rule.
+pub fn scatter_perm_ref(lanes: Int, n: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let perm = ins[0]
+  let x = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), k => {
+    let from = list.filter(range(0, lanes), i => to_int(perm[i]) == k && k < n)
+    if len(from) == 0 { kept(old, k) } else { round_to(dt, x[from[0]]) }
+  })
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
@@ -2392,6 +2504,28 @@ test "a masked reference rounds its answer to the output buffer's format, like a
   let ins = [[0.1, 0.1], [0.2, 0.2], [0.0, 0.0]]
   assert masked_vadd_ref(1, dts, ins) == [narrow.round_bf16(0.1 + 0.2), 0.0]
   assert masked_copy_ref(1, ["bf16", "bf16"], [[0.1, 0.1], [0.0, 0.0]]) == [narrow.round_bf16(0.1), 0.0]
+}
+
+test "the gather and scatter references answer what a reader can check by hand" {
+  let f3 = ["i32", "f64", "f64"]
+  let g3 = ["f64", "f64", "f64"]
+  let f2 = ["f64", "f64"]
+  # three ids over a table of two rows of two: the middle id is outside the
+  # table and reads the miss value, and the first id is repeated, which is
+  # what a gather may do and a scatter may not
+  assert token_embed_ref(3, 2, 2, 0.0 - 9.0, f3,
+    [[0.0, 5.0, 0.0], [1.0, 2.0, 3.0, 4.0], list.map(range(0, 8), _i => 7.0)])
+    == [1.0, 2.0, 0.0 - 9.0, 0.0 - 9.0, 1.0, 2.0, 7.0, 7.0]
+  # a sort with a repeated value, and a tail past `n` the answer keeps
+  assert sort_ref(4, f2, [[3.0, 1.0, 3.0, 2.0, 99.0], [0.0, 0.0, 0.0, 0.0, 7.0]])
+    == [1.0, 2.0, 3.0, 3.0, 7.0]
+  # a merge whose runs share a value: it appears twice and `a` goes first
+  assert merge_ref(3, 3, g3, [[1.0, 4.0, 5.0], [2.0, 4.0, 6.0], list.map(range(0, 7), _i => 7.0)])
+    == [1.0, 2.0, 4.0, 4.0, 5.0, 6.0, 7.0]
+  # a permutation with one destination outside the output: that lane writes
+  # nothing and the element nobody named keeps what it held
+  assert scatter_perm_ref(3, 3, f3, [[2.0, 9.0, 0.0], [10.0, 20.0, 30.0], [7.0, 7.0, 7.0, 7.0]])
+    == [30.0, 7.0, 10.0, 7.0]
 }
 
 test "the strided references answer what a reader can check by hand" {
