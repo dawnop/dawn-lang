@@ -98,7 +98,7 @@ JVM 侧没有同一个缺陷：`dict_class(gx.class_name, key)` 本来就是每�
 | 裁掉的是死码，不是活码 | `bin/dawn` 的自举（编译器用裁过的 std 编译自己）、`dawn test selfhost`、`scripts/selfhost-fixpoint.sh`、`scripts/native-fixpoint.sh`、`scripts/spike-native/run.sh` 的 119 条语料七道检查、`scripts/package-tests.sh`、`scripts/example-tests.sh`、`site/build.sh` |
 | lowering 那一侧没被碰 | `scripts/selfhost-core-diff.sh` 的 17 份 `*.core` |
 | `--stdlib` 全留 | `dawn test --stdlib` 的 137 条 |
-| 字典归属与 `modules.txt` 的排法无关 | `ir/reach.dawn` 的 "which module's copy of a dictionary is kept does not depend on load order"；外加把 `gpu` 挪到 `map` 之后重新 emit，字典表逐字节不动 |
+| 字典归属与 `modules.txt` 的排法无关 | `scripts/dict-owner-contract/run.sh`（把 `gpu` 挪到 `map` 之后重新 emit，字典表须逐字节不动、非空、且不由任何 std 模块填），与 `ir/reach.dawn` 的 "which module's copy of a dictionary is kept does not depend on load order" |
 
 JVM 上裁错一个活方法是运行期的 NoSuchMethodError，不是构建失败——这是 JVM 惰性解析常量池
 的性质，不是这把刀引入的。补的是**跑**：上表第三行里每一项都执行发射出来的字节，
