@@ -597,6 +597,16 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 四个 tile 定成 `2^53, 1, 1, -2^53`：左结合得 0.0、右结合得 2.0、成对得 1.0，答案本身说出
 用的是哪种顺序。层 2 的 GPU 对拍归刀 4 的脚本与台账。
 
+- **刀 14 加了什么、没加什么**：加的是两个原子操作，`atomic_rmw_tko`（0x08，模式枚举
+  and / or / xor / add / addf / max / min / umax / umin / xchg）与 `atomic_cas_tko`（0x07）。
+  取址方式与 gather / scatter 相同（一张 i32 索引 tile 而不是 base 加 stride 梯子），因为
+  想要原子的理由就是目的地由数据决定。公开面 `atomic_rmw` / `atomic_rmw_masked` /
+  `atomic_add_masked` / `atomic_cas` / `atomic_cas_masked`。**仍然没有**：
+  `atomic_red_view_tko`（0x75，13.3 才有，要 view 类型族，本仓钉 13.2）、`erf`（归刀 15）、
+  view 类型族与 TMA、`loop` / `break`（清点下来 leetgpu 没有一道题需要，见刀单）。
+  两个操作都只在 i32 缓冲上有客户：`addf` 模式的浮点原子加机制齐了，但射程内没有题需要它，
+  而一个没有客户的模式在这棵树上等于没有被测过（刀 13 的区域参数顺序就是这么错了两刀半的）。
+
 ### 5.3 谁把它变成 Tile IR、何时
 
 - **谁**：`packages/tileir`（纯 Dawn 源码包，与 `packages/inflate` 同类）。它声明 `Dev`、
@@ -977,6 +987,54 @@ input」，但它的 verifier 不这么说，`tileiras` 收下，设备也算对
 `h[t] = a[t] * h[t-1] + x[t]` 折的是仿射映射，而一个仿射映射是两个数，所以 82 / 110 / 94
 三道题全靠双操作数 scan；`ssm_scan` 更把它开在一张 rank-2 的 tile 上，一次 launch 带走一个
 通道的全部隐状态。散文与机器分歧时以机器为准，并把测量写在这里，是这一条的处置。
+
+**刀 14 的实测（原子操作）**。`atomic_rmw_tko`（0x08）与 `atomic_cas_tko`（0x07）是这棵树上
+第一对「两个 lane 可以指向同一个元素」的操作。在它们之前每一个 scatter 都必须写一个置换，
+因为方言不给单次 store 的各 lane 之间任何顺序，重复的目的地于是没有答案；原子操作正是给出
+答案的那个机制，而 13 Histogramming 是射程内唯一严格需要它的题。
+
+1. **属性布局一次写对，判据是刀 10 立下的那条**。两个操作的 `memory_scope` 都是必填参数
+   （`CudaTileArg<CudaTile_MemoryScopeAttr, ..>`），不像 `load_ptr_tko` 的那个是
+   `OptionalAttr`；于是它们**没有任何可选属性**，flags 的第一位就是第一个可选**操作数**
+   `mask`（1）、第二位是 `token`（2），而 load 的这两位是 4 与 16。必填属性按声明序内联：
+   `memory_ordering_semantics`、`memory_scope`，`atomic_rmw_tko` 再多一个 `mode`。
+   `tileiras` 第一次就收下，设备也逐位证实。三张枚举表读自 `AttrDefs.td`：`AtomicRMWMode`
+   的顺序是 and 0 / or 1 / xor 2 / add 3 / addf 4 / max 5 / min 6 / umax 7 / umin 8 /
+   xchg 9（不是字母序，也不是 `add` 打头），`MemoryScope` 是 tl_blk 0 / device 1 / sys 2，
+   `MemoryOrderingSemantics` 是 weak 0 / relaxed 1 / acquire 2 / release 3 / acq_rel 4。
+2. **`weak` 是这两个操作唯一不接受的内存序**。`Ops.td` 给它们的是
+   `OnlyVariants<["RELAXED", "ACQUIRE", "RELEASE", "ACQ_REL"]>`：`weak` 的语义正是
+   「假设没有别的线程碰这个位置」，与原子操作的目的相反，方言把这条矛盾做成了拒绝而不是
+   忽略。所以它是一个层 1 变异体而不是一句注释。
+3. **语料是判词的一半，而这一刀把那一半做成了可测量的**。原子加与「gather、addi、scatter」
+   三条指令在**没有冲突的语料上是同一个程序**。所以 `atom_diff` 除了主语料还带一个
+   `--corpus unique`（每个 bin 恰好一个 lane、跨块也不重复），`run.sh` 把
+   `atomic-as-plain-store` 变异体在两个语料上各跑一次：主语料上必须红、控制语料上必须绿。
+   主语料的冲突计数印在转录里（`counted=476 of 500`、`bin_repeated=460`、
+   `cross_block_bins=16`）并被 `run.sh` 钉在零以上。这是刀 12 把 scatter 的
+   `in_range_repeated` 钉在零那条规矩的反向用法：一边把重复钉死为零，一边把重复钉死为正。
+   没有第三步，「变异体会红」并不能区分是原子在起作用还是别的什么在起作用。
+4. **两个 kernel 都是逐位档，而且和刀 10 一样靠代数不靠语料**：模 2^32 的整数加法精确结合
+   交换，所以直方图不管冲突的 lane 以什么顺序到达都是同一个总数；`cas_swap` 每个槽位只有
+   一个 lane，根本没有顺序可言。
+5. **CAS 在 leetgpu 上没有客户**，所以照刀 12 对 `scatter_perm` 的做法加了一个无题的覆盖
+   kernel `cas_swap`：128 个槽位、每槽一个 lane，期望值为负的 lane 被掩码挡住，返回的旧值
+   写进第四个缓冲。语料同时含「命中并交换」34 个、「不命中而保持」若干与「被掩码」26 个，
+   三者都被 `run.sh` 钉在零以上，否则 `cas-compare-ignored` 没有东西可红。
+
+**刀 14 的两个层 1 变异体，一个同长一个长一字节**：
+
+| 变异体 | 改哪 | 层 0 | 层 1 |
+|--------|------|------|------|
+| `atomic-rmw-claims-weak-ordering` | 写入器给 `atomic_rmw_tko` 写 `weak`（0）而不是 `relaxed`（1） | **看不见**：渲染器有自己的拼写表，`.mlir` 照印 `relaxed` | 拒：`'cuda_tile.atomic_rmw_tko' op memory ordering semantics must be one of: relaxed, acquire, release, acq_rel` |
+| `atomic-cas-writes-an-rmw-mode` | 写入器给 CAS 也写一个 `mode` 字节，这是读这两个操作时最容易犯的复制错 | 看不见 | 拒：字节**多一个**，读者从那里起每个操作数都错一格，`failed to parse function body for function 'cas_swap'`。`writer_mutant_checks` 因此第一次需要 `func-one-long` 这个形状 |
+
+**刀 14 的两个层 2 变异体**：
+
+| 变异体 | 改哪 | 层 0 | 层 1 | 层 2 |
+|--------|------|------|------|------|
+| `atomic-as-plain-store` | 包的 `atomic_add_masked` 改发 gather、`addi`、scatter 三条 | 变（histogram 的字节动，`cas_swap` 的不动） | 收（一次 load 加一次 store 是合法的） | **只有 `histogram` 红**：24 个 lane 里 16 个错，每个 bin 每块只剩一次增量。控制语料（每 bin 一个 lane）上**必须绿**，这一格是判词的另一半 |
+| `cas-compare-ignored` | `cas_swap` 把要写的值当成期望值交给 CAS | 变（`cas_swap` 的字节动，histogram 的不动） | 收（`AllTypesMatch<["cmp","val","result"]>` 两种交法都满足） | **只有 `cas_swap` 红**：该换值的 34 个槽位一个也没换 |
 
 **只有层 2 能红的两个负控**（刀 7a 的 `mask-all-true` 是第一个）：
 
