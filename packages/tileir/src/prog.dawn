@@ -58,6 +58,7 @@ pub type TileOp =
   | BinaryF(dst: Int, op: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
   | Fma(dst: Int, dtype: String, shape: List[Int], lhs: Int, rhs: Int, acc: Int)
   | MmaF(dst: Int, dtype: String, m: Int, k: Int, n: Int, lhs: Int, rhs: Int, acc: Int)
+  | MmaI(dst: Int, m: Int, k: Int, n: Int, lhs: Int, rhs: Int, acc: Int)
   | CmpF(dst: Int, pred: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
   | CmpI(dst: Int, pred: String, shape: List[Int], lhs: Int, rhs: Int)
   | UnaryI(dst: Int, op: String, dtype: String, shape: List[Int], src: Int)
@@ -163,14 +164,14 @@ fn check_binary_int(name: String, op: String) -> Unit =
   }
 
 fn check_convert(name: String, op: String) -> Unit =
-  if one_of(["itof", "ftoi", "exti", "trunci", "bitcast"], op) {
+  if one_of(["itof", "ftoi", "ftof", "exti", "trunci", "bitcast"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a conversion")
   }
 
 fn check_int_dtype(name: String, dtype: String) -> Unit =
-  if one_of(["i32", "i1"], dtype) {
+  if one_of(["i32", "i8", "i1"], dtype) {
     ()
   } else {
     refuse(name, "`${dtype}` is not an integer tile format")
@@ -333,6 +334,13 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [MmaF(d, dtype, m, k, n, a, b, c)]
+        d
+      }
+      t_mmai(m, k, n, a, b, c) => {
+        check_shape(name, [m, k, n])
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [MmaI(d, m, k, n, a, b, c)]
         d
       }
       t_cmpf(pred, dtype, shape, a, b) => {
@@ -573,6 +581,7 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   BinaryF(dst, _op, _dtype, _shape, _lhs, _rhs) -> [dst]
   Fma(dst, _dtype, _shape, _lhs, _rhs, _acc) -> [dst]
   MmaF(dst, _dtype, _m, _k, _n, _lhs, _rhs, _acc) -> [dst]
+  MmaI(dst, _m, _k, _n, _lhs, _rhs, _acc) -> [dst]
   CmpF(dst, _pred, _dtype, _shape, _lhs, _rhs) -> [dst]
   CmpI(dst, _pred, _shape, _lhs, _rhs) -> [dst]
   UnaryI(dst, _op, _dtype, _shape, _src) -> [dst]

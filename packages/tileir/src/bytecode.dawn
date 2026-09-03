@@ -59,8 +59,8 @@ use std/map
 use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI}
-use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, FloatMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, IfElse, YieldVals, Ret}
+use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, IfElse, YieldVals, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
@@ -91,6 +91,7 @@ const OP_EXP: Int = 0x17
 const OP_EXP2: Int = 0x18
 const OP_EXTI: Int = 0x25
 const OP_FLOOR: Int = 0x27
+const OP_FTOF: Int = 0x2A
 const OP_FTOI: Int = 0x2B
 const OP_FMA: Int = 0x28
 const OP_FOR: Int = 0x29
@@ -107,6 +108,7 @@ const OP_MAXI: Int = 0x46
 const OP_MINF: Int = 0x47
 const OP_MINI: Int = 0x48
 const OP_MMAF: Int = 0x49
+const OP_MMAI: Int = 0x4A
 const OP_MULF: Int = 0x4C
 const OP_MULHII: Int = 0x4D
 const OP_MULI: Int = 0x4E
@@ -270,6 +272,7 @@ fn int_attrs(op: String) -> List[Int] = match op {
 fn cast_op(op: String) -> Int = match op {
   "itof" -> OP_ITOF
   "ftoi" -> OP_FTOI
+  "ftof" -> OP_FTOF
   "exti" -> OP_EXTI
   "trunci" -> OP_TRUNCI
   "bitcast" -> OP_BITCAST
@@ -281,9 +284,19 @@ fn cast_op(op: String) -> Int = match op {
 # `ftoi` takes the only integer rounding mode the dialect accepts
 # (`nearest_int_to_zero`, Ops.td's FToIOp), which is not the integer
 # division's `zero`; `trunci` carries an `overflow` and `bitcast` nothing.
+#
+# `ftof` carries a rounding mode ALONE, and it is a `DefaultValuedAttr`
+# (Ops.td's FToFOp: `DefaultValuedAttr<CudaTile_RoundingModeAttr,
+# NEAREST_EVEN>`, arrived in 13.1). By the rule at the head of this section
+# that is still the required path: written inline, no flags varint. Its
+# value happens to equal the default, so the byte would be 0 either way and
+# tileiras cannot tell a spurious flags word from it -- exactly the shape
+# that cost a wrong answer on `divi`, and the reason the device is the judge
+# here as well.
 fn cast_attrs(op: String) -> List[Int] = match op {
   "itof" -> [SIGNED, ROUND_NEAREST_EVEN]
   "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]
+  "ftof" -> [ROUND_NEAREST_EVEN]
   "exti" -> [UNSIGNED]
   "trunci" -> [OVERFLOW_NONE]
   _ -> []
@@ -464,12 +477,14 @@ fn float_payload(dtype: String, value: Float) -> Bytes = match dtype {
   "f64" -> bytes.freeze(put_le(bytes.buf(), ieee_bits(value, 53, -1022, 1023), 8))
   "f32" -> bytes.freeze(put_le(bytes.buf(), ieee_bits(narrow.round_f32(value), 24, -126, 127), 4))
   "bf16" -> bytes.freeze(put_le(bytes.buf(), narrow.bf16_bits(narrow.round_bf16(value)), 2))
+  "f16" -> bytes.freeze(put_le(bytes.buf(), narrow.fp16_bits(narrow.round_fp16(value)), 2))
   _ -> panic("tileir: a float constant of format `${dtype}` has no encoding")
 }
 
 # The raw bytes of an integer constant tile of `n` lanes of `dtype`.
 fn int_payload(dtype: String, n: Int, value: Int) -> Bytes = match dtype {
   "i32" -> bytes.freeze(put_le(bytes.buf(), value, 4))
+  "i8" -> bytes.freeze(put_le(bytes.buf(), value, 1))
   "i64" -> bytes.freeze(put_le(bytes.buf(), value, 8))
   "i1" -> {
     # bit-packed, ceil(n / 8) bytes, every lane the same: the bits past the
@@ -520,6 +535,7 @@ fn float_bits(dtype: String, value: Float) -> Int = match dtype {
   "f64" -> ieee_bits(value, 53, -1022, 1023)
   "f32" -> ieee_bits(narrow.round_f32(value), 24, -126, 127)
   "bf16" -> narrow.bf16_bits(narrow.round_bf16(value))
+  "f16" -> narrow.fp16_bits(narrow.round_fp16(value))
   _ -> panic("tileir: a float identity of format `${dtype}` has no encoding")
 }
 
@@ -753,6 +769,16 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   }
   FloatFma(_dst, t, lhs, rhs, acc) -> {
     let w1 = emit(emit(emit_op(w0, OP_FMA, t), 0), ROUND_NEAREST_EVEN)
+    emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc)
+  }
+  IntMma(_dst, t, _lhs_ty, _rhs_ty, lhs, rhs, acc) -> {
+    # the result type (which is the accumulator's i32 tile), then the two
+    # REQUIRED signedness attributes in declaration order (`signedness_lhs`,
+    # `signedness_rhs`, both 13.1 and neither optional), then the three
+    # operands. `mmai` has no optional field at any version, so there is no
+    # flags varint here at all -- and unlike `ftof` above, a spurious one
+    # would be VISIBLE, because the two attributes would shift.
+    let w1 = emit(emit(emit_op(w0, OP_MMAI, t), SIGNED), SIGNED)
     emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc)
   }
   FloatMma(_dst, t, _lhs_ty, _rhs_ty, lhs, rhs, acc) -> {
@@ -1291,6 +1317,48 @@ test "the integer and conversion opcodes are the frozen table's, and each writes
   assert cast_attrs("trunci") == [OVERFLOW_NONE]
   assert cast_attrs("bitcast") == []
   assert ROUND_ZERO != ROUND_INT_TO_ZERO
+}
+
+test "ftof and mmai are the frozen table's opcodes, with the attribute lists their Ops.td definitions declare" {
+  # Both read off NVIDIA/cuda-tile at be0889cd, in the files named beside
+  # them, and not from the coverage memo. `include/cuda_tile/Dialect/
+  # CudaTile/IR/BytecodeOpcodes.td` has the two `PublicOpcode` lines; `Ops.td`
+  # has the argument lists the attributes come from.
+  assert cast_op("ftof") == 0x2A
+  assert OP_MMAI == 0x4A
+  # FToFOp: one operand and one attribute, `rounding_mode`, a
+  # DefaultValuedAttr whose default is NEAREST_EVEN (0) -- written inline
+  # on the required path, with no flags varint in front of it. Only
+  # `nearest_even` is supported for a target that is not f8E8M0FNU.
+  assert cast_attrs("ftof") == [ROUND_NEAREST_EVEN]
+  assert len(cast_attrs("ftof")) == 1
+  # MmaIOp: lhs and rhs are i8, acc and result are i32, and the two
+  # signedness attributes are REQUIRED (CudaTileArg<CudaTile_SignednessAttr,
+  # .., "13.1">), so they are inline too and in declaration order. Both are
+  # `signed` here; `Signedness` is 0 for unsigned and 1 for signed
+  # (AttrDefs.td).
+  assert SIGNED == 1
+  assert UNSIGNED == 0
+  # the element formats those tiles are spelled with
+  assert num_tag("i8") == 1
+  assert num_tag("f16") == 5
+  assert num_tag("i32") == 3
+}
+
+test "an f16 constant lays down the binary16 pattern, low byte first, and an i8 one a single octet" {
+  assert hex(float_payload("f16", 1.0)) == "003c"
+  assert hex(float_payload("f16", -2.0)) == "00c0"
+  # off the grid, the constant ROUNDS: 1 + 3 * 2^-12 is above the midpoint
+  # between 1 and 1 + 2^-10
+  assert hex(float_payload("f16", 1.0 + 3.0 / 4096.0)) == "013c"
+  # 65504 is the largest finite binary16; 70000 is the infinity
+  assert hex(float_payload("f16", 65504.0)) == "ff7b"
+  assert hex(float_payload("f16", 70000.0)) == "007c"
+  # one octet, the low one, whatever the host Int was
+  assert hex(int_payload("i8", 4, 0)) == "00"
+  assert hex(int_payload("i8", 4, 255)) == "ff"
+  assert hex(int_payload("i8", 4, 0 - 1)) == "ff"
+  assert hex(int_payload("i8", 4, 0 - 128)) == "80"
 }
 
 test "encoding a loop twice gives the same bytes, and the file still opens and closes as before" {

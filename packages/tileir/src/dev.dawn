@@ -31,7 +31,7 @@
 # refused by the checker.
 use std/list
 use std/str
-use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, I32}
+use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, I32, I8}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it.
 ## `D` is a phantom (spec 2.7): `Tile[F64]` and `Tile[F32]` are two types over
@@ -118,7 +118,12 @@ impl Dtype[I1] {
 ## NaN operand. `t_select` takes an `i1` tile and two `dtype` tiles and
 ## answers the second where the condition is 1 and the third where it is 0.
 ## `t_mmaf` is the matrix multiply-accumulate: `a` is `[m, k]`, `b` is
-## `[k, n]`, `c` and the answer are `[m, n]`.
+## `[k, n]`, `c` and the answer are `[m, n]`. `t_mmai` is the INTEGER one
+## (knife 11): its `a` and `b` are `i8` tiles, its `c` and its answer are
+## `i32` ones, and both operands are read SIGNED. It takes no dtype
+## argument for that reason -- the three formats are fixed by the dialect
+## (Ops.td's MmaIOp: `lhs` and `rhs` are `i8`, `acc` and `result` are
+## `i32`), and there is nothing for a caller to choose.
 ##
 ## `t_unaryi(op, ..)` / `t_binaryi(op, ..)` are the element-wise INTEGER
 ## arithmetic (knife 10): `op` is `negi` / `absi` for the unary form and one
@@ -138,6 +143,7 @@ impl Dtype[I1] {
 ## reference (std/gpu's `wrap_i32`).
 ##
 ## `t_convert(op, from, to, shape, a)` is the width and format change:
+## `ftof` (a float tile to another float format, `nearest_even`),
 ## `itof` (integer tile to float, signed, `nearest_even`), `ftoi` (float
 ## tile to integer, signed, `nearest_int_to_zero`, the one mode the dialect
 ## accepts here), `exti` (a narrower integer tile to a wider one, UNSIGNED,
@@ -205,6 +211,7 @@ pub effect Dev {
   fn t_binaryf(op: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_fma(dtype: String, shape: List[Int], a: Int, b: Int, c: Int) -> Int
   fn t_mmaf(dtype: String, m: Int, k: Int, n: Int, a: Int, b: Int, c: Int) -> Int
+  fn t_mmai(m: Int, k: Int, n: Int, a: Int, b: Int, c: Int) -> Int
   fn t_cmpf(pred: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_cmpi(pred: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_unaryi(op: String, dtype: String, shape: List[Int], a: Int) -> Int
@@ -529,6 +536,25 @@ pub fn mmaf[D: Dtype](d: D, m: Int, k: Int, n: Int, a: Tile[D], b: Tile[D], c: T
   h
 }
 
+## The INTEGER matrix multiply-accumulate `a * b + c` (knife 11): `a` is an
+## `i8` tile of `[m, k]`, `b` an `i8` tile of `[k, n]`, and `c` and the
+## answer are `i32` tiles of `[m, n]`. Both operands are read SIGNED (the
+## dialect carries `signedness_lhs` and `signedness_rhs` separately; this
+## surface fixes both, because a kernel that wanted the unsigned reading
+## would want a `u8` tile type the dialect does not have).
+##
+## Unlike `mmaf`, this is an EXACT operation: every partial product of two
+## i8 values fits in 15 bits and the accumulator is i32, so the sum over `k`
+## is the same integer whatever order the device folds it in. A kernel built
+## on it is exact tier, and that is a theorem rather than a corpus.
+pub fn mmai(m: Int, k: Int, n: Int, a: Tile[I8], b: Tile[I8], c: Tile[I32]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let z: Int = c
+  let h: Tile[I32] = t_mmai(m, k, n, x, y, z)
+  h
+}
+
 ## The tile of `shape` and format `d` every lane of which holds `value`. The
 ## constant is fixed when the kernel is recorded, which is what a host
 ## `Float` in a kernel body means.
@@ -540,6 +566,17 @@ pub fn f_const[D: Dtype](d: D, shape: List[Int], value: Float) -> Tile[D] !Dev =
 ## The i32 tile of `shape` every lane of which holds `value`.
 pub fn i_const(shape: List[Int], value: Int) -> Tile[I32] !Dev = {
   let h: Tile[I32] = t_consti("i32", shape, value)
+  h
+}
+
+## The `i8` tile of `shape` every lane of which holds the low octet of
+## `value`, read as a two's-complement signed byte. The padding value of a
+## masked load over an 8-bit buffer, and the only way to name an i8
+## constant here: there is no i8 ARITHMETIC in this surface (`exti` widens
+## to i32 and `trunci` comes back), so this and the memory operations are
+## the whole of what an i8 tile does.
+pub fn i8_const(shape: List[Int], value: Int) -> Tile[I8] !Dev = {
+  let h: Tile[I8] = t_consti("i8", shape, value)
   h
 }
 
@@ -743,6 +780,46 @@ pub fn bits_to_float(shape: List[Int], a: Tile[I32]) -> Tile[F32] !Dev = {
 pub fn bits_to_int(shape: List[Int], a: Tile[F32]) -> Tile[I32] !Dev = {
   let x: Int = a
   let h: Tile[I32] = t_convert("bitcast", "f32", "i32", shape, x)
+  h
+}
+
+# ---- the width changes knife 11 needs ----
+
+## The float tile of format `to_d` holding each lane of the float tile `a`,
+## which is of format `from_d`, rounded to nearest even: the dialect's
+## `ftof`. Widening (f16 to f64) is exact and narrowing rounds; the rounding
+## mode is the one `nearest_even` the dialect supports for every target but
+## `f8E8M0FNU`, which this surface cannot name.
+##
+## The two formats must DIFFER (Ops.td's FToFOp says so and its verifier
+## enforces it); `ftof` from a format to itself is refused by `tileiras`,
+## not here, because nothing in a phantom type says two markers are the
+## same one.
+pub fn float_to_float[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
+  let x: Int = a
+  let h: Tile[B] = t_convert("ftof", dtype_name(from_d), dtype_name(to_d), shape, x)
+  h
+}
+
+## The i32 tile holding each lane of the `i8` tile `a` widened UNSIGNED, so
+## an octet reads as a value in [0, 255]. This is how a kernel over a
+## `Tensor[U8]` gets at its pixels: the dialect has no `u8` tile type, and
+## the signedness of the widening is where the format's reading lives
+## (std/gpu's `U8` says the same thing from the host's side).
+pub fn ext_u8(shape: List[Int], a: Tile[I8]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let h: Tile[I32] = t_convert("exti", "i8", "i32", shape, x)
+  h
+}
+
+## The `i8` tile holding the LOW OCTET of each lane of the i32 tile `a`: a
+## `trunci`, which keeps the bits and drops the rest. What a kernel stores
+## back into an 8-bit buffer, and the reason a value outside [0, 255] is the
+## caller's problem rather than an error: the octet is what the buffer
+## holds, and std/gpu's `wrap_u8` is the host reading of the same byte.
+pub fn trunc_u8(shape: List[Int], a: Tile[I32]) -> Tile[I8] !Dev = {
+  let x: Int = a
+  let h: Tile[I8] = t_convert("trunci", "i32", "i8", shape, x)
   h
 }
 
@@ -1129,6 +1206,11 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_mmai(_m, _k, _n, _a, _b, _c) => {
+      let h = next
+      next = next + 1
+      h
+    }
     t_constf(_dtype, _shape, _value) => {
       let h = next
       next = next + 1
@@ -1356,6 +1438,10 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_mmaf(dtype, m, k, n, a, b, c) => {
       log = log ++ ["mmaf ${dtype} ${m} ${k} ${n} ${a} ${b} ${c}"]
       17
+    }
+    t_mmai(m, k, n, a, b, c) => {
+      log = log ++ ["mmai ${m} ${k} ${n} ${a} ${b} ${c}"]
+      18
     }
     t_cmpf(pred, dtype, shape, a, b) => {
       log = log ++ ["cmpf ${pred} ${dtype} ${show(shape)} ${a} ${b}"]
@@ -1650,6 +1736,7 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       }
       t_fma(_dtype, _shape, _a, _b, _c) => 7
       t_mmaf(_dtype, _m, _k, _n, _a, _b, _c) => 17
+      t_mmai(_m, _k, _n, _a, _b, _c) => 18
       t_cmpf(_pred, _dtype, _shape, _a, _b) => 8
       t_cmpi(_pred, _shape, _a, _b) => 9
       t_unaryi(_op, _dtype, _shape, _a) => 11

@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF}
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -115,6 +115,7 @@ pub type Instr =
   | FloatBin(dst: Int, op: String, ty: Ty, lhs: Ref, rhs: Ref)
   | FloatFma(dst: Int, ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
   | FloatMma(dst: Int, ty: Ty, lhs_ty: Ty, rhs_ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
+  | IntMma(dst: Int, ty: Ty, lhs_ty: Ty, rhs_ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
   | CmpFloat(dst: Int, pred: String, ty: Ty, res_ty: Ty, lhs: Ref, rhs: Ref)
   | CmpInt(dst: Int, pred: String, ty: Ty, res_ty: Ty, lhs: Ref, rhs: Ref)
   | IntUn(dst: Int, op: String, ty: Ty, src: Ref)
@@ -412,6 +413,16 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l1, d) = define(l0, dst, ty)
     emit(l1, FloatMma(d, ty, num_tile([m, k], dtype), num_tile([k, n], dtype), a, b, c))
   }
+  MmaI(dst, m, k, n, lhs, rhs, acc) -> {
+    let a = ref_of(l0, lhs, "mmai lhs")
+    let b = ref_of(l0, rhs, "mmai rhs")
+    let c = ref_of(l0, acc, "mmai accumulator")
+    # the three formats are the dialect's, not the caller's: i8 operands,
+    # an i32 accumulator, an i32 result
+    let ty = i32_tile([m, n])
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, IntMma(d, ty, num_tile([m, k], "i8"), num_tile([k, n], "i8"), a, b, c))
+  }
   CmpF(dst, pred, dtype, shape, lhs, rhs) -> {
     let a = ref_of(l0, lhs, "cmpf lhs")
     let b = ref_of(l0, rhs, "cmpf rhs")
@@ -648,6 +659,7 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   FloatBin(dst, _op, _ty, _lhs, _rhs) -> [dst]
   FloatFma(dst, _ty, _lhs, _rhs, _acc) -> [dst]
   FloatMma(dst, _ty, _lhs_ty, _rhs_ty, _lhs, _rhs, _acc) -> [dst]
+  IntMma(dst, _ty, _lhs_ty, _rhs_ty, _lhs, _rhs, _acc) -> [dst]
   CmpFloat(dst, _pred, _ty, _res_ty, _lhs, _rhs) -> [dst]
   CmpInt(dst, _pred, _ty, _res_ty, _lhs, _rhs) -> [dst]
   IntUn(dst, _op, _ty, _src) -> [dst]
