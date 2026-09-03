@@ -737,7 +737,7 @@ bf16 的回读全部 `differ:roundtrip`、四组 f64 不动；与 `download-shor
 ad03cbb02b18 2026-09-02 560.94 13.3.36 sm_86 blocked:cuda.CUDA_ERROR_INVALID_IMAGE@launch # cuModuleLoadData: CUresult 200 (CUDA_ERROR_INVALID_IMAGE)
 ```
 
-**CI 门** `run.sh --check`，`tile` job 最后一步（几条 git 命令，亚秒；checkout 改为 `fetch-depth: 0`，
+**CI 门** `run.sh --check`，`tile-golden-1` 的倒数第二步（几条 git 命令，亚秒；checkout 改为 `fetch-depth: 0`，
 祖先判定要历史）：台账末行要能解析；commit 存在且是 HEAD 的祖先；日期是过去的一天；结果是 `pass` 或
 `blocked:...`（`fail` 可以留在历史里，不能在末行）；自该 commit 起 tile 路径没变，tile 路径 =
 `packages/tileir`、`std/gpu.dawn`、`scripts/tile-golden`、`scripts/tile-gpu-diff`（台账本身除外）与
@@ -856,6 +856,41 @@ planning value 与 `timeout-minutes` 都不动。这之后又加了第十二个�
 `tile-gpu-diff/run.sh` **129 s → 154 s**（多一个 native 构建、四个 kernel 的真机对拍，
 以及两个新变异体，各四次汇编一次对拍）。它只在本机跑，CI 上仍只有亚秒的 `--check`。
 `dawn test --stdlib` 多了四个参考实现与三个测试，秒级不变。
+
+**分片：`tile` 拆成 `tile-golden-1 / tile-golden-2`（刀 12 之前的前置工作）。** 刀 11 之后 CI 实测
+`tile` job **609 s**（run 33748678694，其中 `run.sh` 那一步 567 s），已经越过它自己声明的 520 s
+planning value，距 run-pole 660 s 只剩 51 s。按刀 9 / 10 / 11 的斜率外推每刀约 +88 s，刀 12 就会到
+约 710 s。所以这一刀先分片，不再抬预算。
+
+**为什么不按上面写的「按 `kernels=()` 切」。** 刀 7b 写下的处置是「按 kernel 切片，变异体那部分不分片，
+它们已经是墙钟的小头」。本机相位实测把后半句推翻了：51 个 kernel 的循环 **204 s**（几乎全是 102 次 JVM
+启动，原生二进制跑完 51 个 kernel 只要 0.3 s、51 次 `tileiras` 一共 3.3 s），12 个变异体 **175 s**
+（每个一次原生重建，均 9.25 s）。两半没有哪一半单独主导，而且 kernel 那半涨得更快（新 kernel 每个约 8 s，
+新变异体每个约 21 s）。只切变异体等于没切，只切 kernel 会把 175 s 那半整块留给一个 job。
+
+**切法：一张混合 matrix。** `scripts/tile-golden/matrix.txt` 一行一个工作项，前 51 行是 kernel 名、
+后 12 行是变异体名，按运行顺序；`run.sh --shard I/N` 复用仓库已有的 `scripts/mutant-coverage/shard.sh`，
+round-robin 取模而不是切连续块，因为工作项成本相差五倍以上（`reverse` 一个抵五个普通 kernel），
+连续块会把贵的凑在一片里。启动时把可执行列表与 matrix.txt 双向 `cmp`，运行时 `run_item` 再把实际
+运行顺序钉到同一张表上，于是加了 kernel 不加 matrix 行、或者搬动一个变异体块，都当场红。
+
+**分片切不到判词。** 一个 kernel 的四次运行、两份 golden 与一次汇编都在同一片里做完；变异体比对的是
+磁盘上已入库的 golden，不是本片 kernel 循环的产物，所以一个变异体和它点名的干净 kernel 落在不同片上，
+合取仍然成立。分片唯一新增的失败路径是 shard.sh 头注写死的那条：某片静默少跑了工作项，PASS 行长得
+一模一样、也照样退出 0。由每片记下自己跑了什么、`mutant-shards-complete` 把并集对到 matrix.txt 兜住；
+`tile-golden-1 / tile-golden-2` 加进了它的 `needs:`（gates.yml 头注给它的那条唯一 `needs:` 豁免）。
+
+**本机实测（同一台机器、同一棵树、同一个 tileiras，机器上没有别的活）**：不分片 **387 s**，两片
+**186 s** 与 **175 s**。（同两片还有一对 254 s / 299 s 的观测，那次机器上并行跑着另一个 job，不采信：
+runner 不与人共享。）两片 PASS 行的并集与不分片那次**逐行相同**（218 行），
+十二条变异体的 PASS 行各只出现一次；`check.py --coverage-dir` 收下并集。CI 每片的 planning value =
+本机片值 + 70 s（checkout 与工具链 45 s、wheel 25 s），翻倍写进 budget 行；这是 planning value
+不是观测，第一次真实的分片 run 落地后要用观测改写它。
+
+**转 N = 3 的触发条件写进了 job 注释**：任一片自己的观测过 550 s 就再分，而不是重述预算（550 s 翻倍
+已经过了 660 s 的 pole）。按每刀每片约 +50 s 外推，那是两刀之后的事。反过来说现在不多切：本 workflow
+一次 run 是 **32 个 job**、账号并发上限 20，而 `tile` 从来不是 run 的长杆（native-diff 783 到 1119 s
+才是），第三片只会排队，买不到墙钟。
 
 ### 6.6 两档判词：逐位与容差（刀 7b）
 

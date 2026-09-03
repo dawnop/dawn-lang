@@ -289,10 +289,10 @@ jobs:
     # once); doubled, the planning value is 269 + 54 = 323s, whose 3x is 969s,
     # so the timeout goes to 17. The run's wall clock does not move: 323s is
     # far under the native-diff pole. The tile golden step lived here for one
-    # day (2026-09-02, +34s planning value); it moved to the `tile` job below
-    # the same day, when it grew a tileiras step behind a 150 MB wheel
-    # download that nothing else here needs, so the planning value is back
-    # to 323s and the timeout to 17.
+    # day (2026-09-02, +34s planning value); it moved to the tile-golden
+    # shards below the same day, when it grew a tileiras step behind a 150 MB
+    # wheel download that nothing else here needs, so the planning value is
+    # back to 323s and the timeout to 17.
     # budget: 3x 323s planning value (265s worst observed + 4s + 54s)
     timeout-minutes: 17
     steps:
@@ -1130,55 +1130,59 @@ jobs:
   # checksum from the same place as the file is not a check); the pin and
   # the bytecode version the writer emits are held together by run.sh.
   #
-  # Its own job because the wheels are 150 MB and nothing else needs them,
-  # and so that a slow package index delays nothing but this. Nothing
-  # `needs:` it. Local wall clock (2026-09-02, knife 5): 8s for the wheels
-  # from a warm pip cache, ~25s cold; 100s for run.sh (one native build of
-  # the clean project, three kernels on both backends in text and bytecode,
-  # eleven tileiras runs, eight mutants at one native build and two to four
-  # runs each; the runtime object is built once; knife 3's 40s grew by a
-  # kernel and three mutants). With the checkout and the toolchain action
-  # (~45s, the carried estimate) that is 45 + 25 + 100 = 170s; doubled for
-  # a cold runner, 340s. Under the run pole. Knife 6 (bf16) added a fourth
-  # kernel and two mutants (ten in all, fourteen tileiras runs) and measured
-  # 91s locally for run.sh on the same machine on a lighter day, within the
-  # 100s the planning value carries, so the budget line does not move.
+  # Two jobs of their own because the wheels are 150 MB and nothing else needs
+  # them, so a slow package index delays nothing but these. Nothing `needs:`
+  # them. They are the two round-robin shards of one matrix
+  # (scripts/tile-golden/matrix.txt: the 51 kernels, then the 12 mutants, in
+  # run order). Sharding by kind was the plan written down at knife 7b and the
+  # phase measurement retired it: locally the kernel loop is 204s (102 JVM
+  # starts, and nothing else -- the native binary runs all 51 kernels in 0.3s
+  # and tileiras takes 3.3s for the lot) against the mutants' 175s (a native
+  # rebuild each, 9.2s a time). Neither half dominates, the kernel half is the
+  # one growing faster (~8s per new kernel against ~21s per new mutant), and a
+  # split by kind would have left one job carrying it. Every Nth item of the
+  # mixed list divides both at once, and spreads the outliers with them
+  # (`reverse` alone costs five average kernels).
   #
-  # The last step is layer 2's ledger gate (docs 6.4, decision D4):
+  # The split cannot reach the verdicts. A kernel's four runs, its two goldens
+  # and its assembly all happen inside one shard, and each mutant compares
+  # against the recorded goldens on disk rather than against its own shard's
+  # kernel output -- so the twelve named red sets survive being dealt into two
+  # jobs, one shard at a time. What it does introduce is the shard family's
+  # one failure: a shard that silently skips a slice prints the same PASS
+  # lines and exits 0. So each records what it ran, and mutant-shards-complete
+  # holds the union to matrix.txt.
+  #
+  # Trigger for N=3: split again when either shard's own observation passes
+  # 550s, rather than restate the budget -- 550s doubled is already past the
+  # 660s pole. Knives 12 to 15 are projected at roughly +50s per knife per
+  # shard, which puts that two knives out. Against splitting earlier: runs of
+  # this workflow hold 32 jobs against an account concurrency limit of 20 (the
+  # arithmetic is in this file's header), and tile has never been a run's long
+  # pole -- native-diff at 783~1119s over the last fortnight is -- so a third
+  # shard buys budget headroom and not wall clock.
+  #
+  # Shard 1 carries two more steps, both well under a second and neither
+  # shardable. The first is layer 2's ledger gate (docs 6.4, decision D4):
   # scripts/tile-gpu-diff/run.sh --check reads the last line of
   # scripts/tile-gpu-diff/ledger.txt and requires its commit to be an
   # ancestor of HEAD with no tile path changed since, its result pass or
   # blocked, and toolchain.txt's driver line to agree. The GPU run itself
   # happens on a developer machine with a driver (the runner has none);
-  # the gate proves it happened at this tree. A few git commands, well
-  # under a second, and no change to the budget; the checkout is full
-  # depth because the ancestry test needs the history.
-  tile:
+  # the gate proves it happened at this tree. Its checkout is full depth
+  # because the ancestry test needs the history, which is why shard 2's is
+  # not: only this one reads git. The second is the leetgpu ledger.
+  tile-golden-1:
     runs-on: ubuntu-latest
-    # Knife 7b took run.sh from ten kernels to twenty-three and measured
-    # 123s -> 188s locally, paired back to back on one machine
-    # (docs/tile-backend-design.md 6.5); the planning value moved with it,
-    # from 170s to 260s local. The run pole is 660s and the doubled value
-    # is 520s: the margin is 140s.
-    #
-    # Knife 8 took it from twenty-three kernels to thirty and measured the
-    # pair twice, in both orders on one machine: +6s (227 -> 233) and +21s
-    # (201 -> 222). Seven kernels are +30%, not the doubling the note above
-    # made the sharding trigger, and the differential is under +10%, so the
-    # budget does not move and neither does the shape of this job.
-    # Sharding by `kernels=()` is still the answer when the count doubles,
-    # with one caveat measured since: this workflow already runs 24 jobs
-    # against an account concurrency limit of 20 (see the mutants matrix
-    # below), so a new leg would queue rather than shorten the wall clock.
-    #
-    # Knife 9 took it from thirty kernels to thirty-nine, 241s -> 263s
-    # (+9%), and knife 10 from thirty-nine to forty-three, measured as a
-    # back-to-back pair on one machine at one tree (the only difference
-    # being the four names in `kernels=()`): 260s -> 279s, +19s / +7%, and
-    # 299s once the twelfth mutant landed. Both are far from the doubling
-    # that would make sharding worth it; the budget and the shape of this
-    # job stay as they are.
-    # budget: 3x 520s planning value (260s local, doubled)
+    # Local wall clock, one machine, 2026-09-03, one tree and one tileiras,
+    # nothing else running: unsharded 387s, this shard 186s, the other 175s.
+    # Plus the checkout, the toolchain action and the wheels (~45s and ~25s,
+    # the carried estimates) that is 256s, doubled for a cold runner. An
+    # earlier pair of the same two shards measured 254s and 299s with a second
+    # job on the machine and is not carried: a runner here is not shared. This
+    # is a planning value and not an observation of the thing it budgets -- no
+    # sharded CI run exists yet -- and the first one replaces the line.
+    # budget: 3x 512s planning value (256s local, doubled)
     timeout-minutes: 26
     steps:
       - uses: actions/checkout@v4
@@ -1195,8 +1199,18 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (43 kernels, both backends, twelve mutants)
-        run: ./scripts/tile-golden/run.sh
+      - name: tile IR goldens and tileiras (51 kernels and twelve mutants, both backends; shard 1)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 1/2
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-1
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
 
       - name: GPU diff ledger is current (layer 2 ran at this tree)
         run: ./scripts/tile-gpu-diff/run.sh --check
@@ -1205,6 +1219,39 @@ jobs:
         run: |
           python3 scripts/leetgpu-diff/check.py
           python3 scripts/leetgpu-diff/check.py --self-test
+
+  tile-golden-2:
+    runs-on: ubuntu-latest
+    # 175s locally for this shard, plus the same ~70s of checkout, toolchain
+    # and wheels; the note above tile-golden-1 carries the measurements and
+    # the reasoning.
+    # budget: 3x 490s planning value (245s local, doubled)
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (51 kernels and twelve mutants, both backends; shard 2)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 2/2
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-2
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
 
   # The checker's diagnostics, recorded in the order `cerr` appends them.
   # Nothing else here can see them -- grammar-corpus stops at the parser,
@@ -1660,6 +1707,8 @@ jobs:
       - syntax-mutants-3
       - builtin-type-1
       - builtin-type-2
+      - tile-golden-1
+      - tile-golden-2
     if: ${{ always() }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
