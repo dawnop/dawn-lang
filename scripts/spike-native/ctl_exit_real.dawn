@@ -1,0 +1,34 @@
+# `io.exit` called from under `with_exit_real`, which is a `ctl` handler arm.
+#
+# The subject is the exit code and stderr, not stdout: both backends already
+# print `start` and `in work` and stop there. On native the arm runs on a
+# carrier thread and the continuation it suspended is counted live, so the
+# at-exit report about suspended continuations (`dawn_ctl_report`) used to fire
+# on the way out and replace the requested status with 70, on a process that
+# was ending because the program asked it to. The runtime's `dawn_ctl_dying`
+# flag is the distinction between a deliberate end and an accident; an uncaught
+# panic and an uncaught fault already set it, and `dawn_io_exit` is the third
+# such path (issue #72).
+#
+# `.exits-nonzero` is what lets this file be checked at all: without it a
+# non-zero JVM exit is a failed run, which blocks the three checks -- `diff`,
+# `stderr`, `exit` -- that a program about ending the run is entirely about.
+# The code itself is still compared between the backends.
+#
+# What this file cannot see, and `scripts/ctl-live-contract/` can: whether the
+# report still fires for a program that did *not* ask to exit. Its `live.dawn`
+# never calls `io.exit`, so the flag set here is not on that program's path.
+use std/io
+use std/io.{Exit, exit_now, with_exit_real}
+
+fn work(n: Int) -> Unit !Exit !io = {
+  io.println("in work")
+  if n > 0 { exit_now(n) }
+  io.println("no exit")
+}
+
+pub fn main() -> Unit !io = {
+  io.println("start")
+  with_exit_real(() => work(7))
+  io.println("after")
+}

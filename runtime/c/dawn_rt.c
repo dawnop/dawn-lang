@@ -1388,7 +1388,19 @@ dawn_unit dawn_io_eprintln(dawn_str *s) {
   return DAWN_UNIT;
 }
 
+/* Set by the three places the process ends on purpose: an uncaught panic, an
+ * uncaught fault, and `io.exit` just below. It suppresses the
+ * live-continuation report at exit (dawn_ctl_report, see "one-shot
+ * resumption"): a program that has already said why it is ending, or that
+ * asked for a status, must not have that overridden by a second line about
+ * what it was holding on the way out. Defined here rather than beside the
+ * report because `dawn_io_exit` is the earliest of the three writers. */
+static bool dawn_ctl_dying;
+
 dawn_unit dawn_io_exit(int64_t code) {
+  /* the arm that calls this may be a `ctl` handler arm holding a suspended
+   * continuation; the report at exit must not turn a requested status into 70 */
+  dawn_ctl_dying = true;
   /* exit() flushes stdio, which the block buffering above makes load-bearing */
   exit((int)code);
 }
@@ -1793,12 +1805,6 @@ typedef struct dawn_handler {
 #endif
 
 static DAWN_STACK_LOCAL dawn_handler *dawn_handlers;
-
-/* Set by the two places a failure ends the process. It suppresses the
- * live-continuation report at exit (see "one-shot resumption"): a program
- * dying of an uncaught failure has already said why, and a second line about
- * what it was holding when it died is noise rather than a finding. */
-static bool dawn_ctl_dying;
 
 /* One failure, as a value: what a raise hands to the handler that takes it.
  *
