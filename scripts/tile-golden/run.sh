@@ -158,7 +158,7 @@ kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops
   count_eq subarray_sum rainbow int_ops
   sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matmul_i8
   token_embed sort_rank merge_rank scatter_perm
-  prefix_sum max_subarray seg_scan compact linrec gae)
+  prefix_sum max_subarray seg_scan compact linrec gae ssm_scan)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

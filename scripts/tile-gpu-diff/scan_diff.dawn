@@ -6,7 +6,7 @@
 # what each device answered and under which TIER the two agree.
 #
 #   scan_diff <prefix_sum.cubin> <max_subarray.cubin> <seg_scan.cubin>
-#             <compact.cubin> <linrec.cubin> <gae.cubin>
+#             <compact.cubin> <linrec.cubin> <gae.cubin> <ssm_scan.cubin>
 #
 # What is new here and nowhere else: an operation whose answer keeps every
 # intermediate accumulator, and whose BODY NEED NOT COMMUTE. A reduction's
@@ -54,11 +54,16 @@
 #     `values` has a lane to shift, and its last lane's shifted read is the
 #     one the mask blocks -- the padding zero there is what the reference's
 #     `values[t+1] = 0` past the end means.
+#   * `ssm_scan`'s `A` must be NEGATIVE and its `delta` positive, which is
+#     what the model itself asks for: `exp(delta * A)` is then in (0, 1] and
+#     the state decays. A positive `A` would let the recurrence grow like
+#     `e^(32 * delta * A)` over the sequence and the comparison would be
+#     about overflow rather than about the scan.
 use std/io
 use std/io.{with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, prefix_sum_ref, max_subarray_ref,
-  seg_scan_ref, compact_ref, linrec_ref, gae_ref }
+  seg_scan_ref, compact_ref, linrec_ref, gae_ref, ssm_scan_ref }
 use std/list
 use std/map
 
@@ -81,6 +86,10 @@ pub const GAE_B: Int = 4
 pub const GAE_S: Int = 64
 pub const GAE_GAMMA: Float = 0.99
 pub const GAE_LAM: Float = 0.95
+pub const SSM_BATCH: Int = 2
+pub const SSM_T: Int = 32
+pub const SSM_D: Int = 8
+pub const SSM_N: Int = 16
 
 type Trace = {
   alloc: String,
@@ -147,11 +156,11 @@ fn release(hs: List[Int]) -> Unit !Gpu = {
 }
 
 ## One kernel over `bufs` (each a format and its initial contents) on a `gx`
-## by 1 by 1 grid, one stage at a time, stopping at the first refusal and
+## by `gy` by 1 grid, one stage at a time, stopping at the first refusal and
 ## saying which stage it was. `reads` are the argument positions to download
 ## afterwards. The raw operations rather than the typed ones, because a
 ## case's buffers do not share a format.
-fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])],
+fn stages(kernel: String, gx: Int, gy: Int, bufs: List[(String, List[Float])],
   reads: List[Int]) -> Trace !Gpu =
   match alloc_all(bufs, 0, []) {
     Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
@@ -164,7 +173,7 @@ fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])],
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+          match gpu.gpu_launch(kernel, gx, gy, 1, hs) {
             Err(e) -> {
               release(hs)
               Trace { ..t1, launch: e.kind, note: e.message }
@@ -353,11 +362,30 @@ fn gae_rewards(b: Int, s: Int) -> List[Float] =
 fn gae_values(b: Int, s: Int) -> List[Float] =
   list.map(range(0, b * s), k => to_float(k % 17) - 8.0 + 1.0 / (to_float(k % 3) + 4.0))
 
+## The selective scan's inputs. `ssm_delta` is positive and `ssm_a`
+## negative, so every discretised coefficient `exp(delta * A)` is in (0, 1].
+fn ssm_u() -> List[Float] =
+  list.map(range(0, SSM_BATCH * SSM_T * SSM_D), k => to_float(k % 7) - 3.0 + 1.0 / (to_float(k % 5) + 2.0))
+
+fn ssm_delta() -> List[Float] =
+  list.map(range(0, SSM_BATCH * SSM_T * SSM_D), k => 0.125 + to_float(k % 11) / 32.0)
+
+fn ssm_a() -> List[Float] =
+  list.map(range(0, SSM_D * SSM_N), k => 0.0 - 0.25 - to_float(k % 13) / 8.0)
+
+fn ssm_b() -> List[Float] =
+  list.map(range(0, SSM_BATCH * SSM_T * SSM_N), k => to_float(k % 9) / 8.0 - 0.5)
+
+fn ssm_c() -> List[Float] =
+  list.map(range(0, SSM_BATCH * SSM_T * SSM_N), k => to_float(k % 5) / 4.0 - 0.5)
+
+fn ssm_skip() -> List[Float] = list.map(range(0, SSM_D), d => to_float(d) / 8.0 - 0.5)
+
 # ---- the cases ----
 
 ## The kernels this program runs, in the order their cubins are given.
 fn case_name(i: Int) -> String =
-  ["prefix_sum", "max_subarray", "seg_scan", "compact", "linrec", "gae"][i]
+  ["prefix_sum", "max_subarray", "seg_scan", "compact", "linrec", "gae", "ssm_scan"][i]
 
 ## The kernels of the tolerance tier: every float scan, because the device
 ## does not fold a prefix the way a host reference does. The two integer
@@ -365,7 +393,8 @@ fn case_name(i: Int) -> String =
 ##
 ## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier` column
 ## of scripts/leetgpu-diff/problems.txt against it.
-pub fn tolerance_tier() -> List[String] = ["prefix_sum", "seg_scan", "linrec", "gae"]
+pub fn tolerance_tier() -> List[String] =
+  ["prefix_sum", "seg_scan", "linrec", "gae", "ssm_scan"]
 
 fn case_tier(i: Int) -> String =
   if list.any(tolerance_tier(), t => t == case_name(i)) { "tolerance" } else { "exact" }
@@ -379,10 +408,15 @@ fn case_grid(i: Int) -> Int = {
     LR_B
   } else if name == "gae" {
     GAE_B
+  } else if name == "ssm_scan" {
+    SSM_BATCH
   } else {
     1
   }
 }
+
+## The second grid axis, which only `ssm_scan` has: one block per channel.
+fn case_grid_y(i: Int) -> Int = if case_name(i) == "ssm_scan" { SSM_D } else { 1 }
 
 ## The buffers each kernel is handed: a FORMAT and the initial contents, in
 ## argument order. Every output buffer is LONGER than the answer, so the
@@ -400,9 +434,13 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
   } else if name == "linrec" {
     [("f64", lr_coefficients(LR_B, LR_L)), ("f64", lr_addends(LR_B, LR_L)),
       ("f64", sentinel_buffer(LR_B * LR_L + 8))]
-  } else {
+  } else if name == "gae" {
     [("f64", gae_rewards(GAE_B, GAE_S)), ("f64", gae_values(GAE_B, GAE_S)),
       ("f64", sentinel_buffer(GAE_B * GAE_S + 8))]
+  } else {
+    [("f64", ssm_u()), ("f64", ssm_delta()), ("f64", ssm_a()), ("f64", ssm_b()),
+      ("f64", ssm_c()), ("f64", ssm_skip()),
+      ("f64", sentinel_buffer(SSM_BATCH * SSM_T * SSM_D + 8))]
   }
 }
 
@@ -423,8 +461,11 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
     map.from([("compact", (2, last_out((dts, ins) => compact_ref(SCAN_N, dts, ins))))])
   } else if name == "linrec" {
     map.from([("linrec", (3, last_out((dts, ins) => linrec_ref(LR_B, LR_L, dts, ins))))])
-  } else {
+  } else if name == "gae" {
     map.from([("gae", (3, last_out((dts, ins) => gae_ref(GAE_B, GAE_S, GAE_GAMMA, GAE_LAM, dts, ins))))])
+  } else {
+    map.from([("ssm_scan",
+      (7, last_out((dts, ins) => ssm_scan_ref(SSM_BATCH, SSM_T, SSM_D, SSM_N, dts, ins))))])
   }
 }
 
@@ -501,10 +542,10 @@ fn order_probe(got: Option[List[List[Float]]]) -> String = match got {
 
 pub fn main() -> Unit !io = {
   let argv = args()
-  let count = 6
+  let count = 7
   if len(argv) != count {
     io.eprintln("usage: scan_diff <prefix_sum.cubin> <max_subarray.cubin> <seg_scan.cubin>"
-        ++ " <compact.cubin> <linrec.cubin> <gae.cubin>")
+        ++ " <compact.cubin> <linrec.cubin> <gae.cubin> <ssm_scan.cubin>")
     io.exit(2)
   }
   var cubins: Map[String, Bytes] = map.empty()
@@ -522,11 +563,12 @@ pub fn main() -> Unit !io = {
     let bufs = case_bufs(i)
     let reads = case_reads(i)
     let gx = case_grid(i)
+    let gy = case_grid_y(i)
     let refs = case_kernels(i)
-    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs, reads))
-    let real = with_gpu_real(cubins, () => stages(name, gx, bufs, reads))
+    let fake = with_gpu_fake(refs, () => stages(name, gx, gy, bufs, reads))
+    let real = with_gpu_real(cubins, () => stages(name, gx, gy, bufs, reads))
     let v = verdict(tier, fake, real)
-    io.println("kernel ${name} tier=${tier} ${shape_of(i)} grid=(${gx}, 1, 1)")
+    io.println("kernel ${name} tier=${tier} ${shape_of(i)} grid=(${gx}, ${gy}, 1)")
     io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
     io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
         ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")

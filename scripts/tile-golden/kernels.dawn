@@ -1650,6 +1650,52 @@ fn gae(rewards: Param[F64], values: Param[F64], adv: Param[F64]) -> Unit !Dev = 
   store(adv, blk, s, ad)
 }
 
+# The selective scan's shape: SSM_BATCH sequences of SSM_T steps, SSM_D
+# channels, SSM_N hidden states a channel. One block per (sequence,
+# channel), so the grid has two axes and the tile is the whole (step,
+# state) plane of that channel.
+const SSM_BATCH: Int = 2
+const SSM_T: Int = 32
+const SSM_D: Int = 8
+const SSM_N: Int = 16
+
+# The Mamba-style selective scan: leetgpu 94 (SSM Selective Scan).
+#
+# `h[t, n] = exp(delta[t] * A[n]) * h[t-1, n] + delta[t] * B[t, n] * u[t]`
+# for each channel, and `y[t] = sum_n C[t, n] * h[t, n] + skip * u[t]`.
+# The recurrence is `linrec`'s affine composition run over a RANK-2 tile:
+# one scan along the step axis carries SSM_N independent states at once,
+# which is what "the operands are tiles" buys over "the operands are
+# numbers". The output is then a reduction along the state axis, so this
+# kernel is a scan and a reduce over the same plane.
+#
+# Every operand is a strided read of the same plane: `delta` and `u` are
+# constant along the state axis (stride 0), `A` is constant along the step
+# axis, and `B` and `C` are dense in both. Nothing is masked: every extent
+# divides its tile.
+fn ssm_scan(u: Param[F64], delta: Param[F64], amat: Param[F64], bmat: Param[F64],
+  cmat: Param[F64], skip: Param[F64], y: Param[F64]) -> Unit !Dev = {
+  let s2 = [SSM_T, SSM_N]
+  let s1 = [SSM_T]
+  let b = block_id(0)
+  let d = block_id(1)
+  # the (sequence, channel) row of a (batch, step, channel) buffer, the
+  # (sequence) plane of a (batch, step, state) one, and row `d` of A
+  let ud = idx_add(idx_mul(b, idx_const(SSM_T * SSM_D)), d)
+  let bc = idx_mul(b, idx_const(SSM_T * SSM_N))
+  let ad = idx_mul(d, idx_const(SSM_N))
+  let dt = load_strided(delta, ud, s2, [SSM_D, 0])
+  let uu = load_strided(u, ud, s2, [SSM_D, 0])
+  let abar = exp(F64, s2, mul(F64, s2, dt, load_strided(amat, ad, s2, [0, 1])))
+  let bbar = mul(F64, s2, mul(F64, s2, dt, load_strided(bmat, bc, s2, [SSM_N, 1])), uu)
+  let (_c, h) = d_scan2(F64, s2, 0, false, abar, bbar, 1.0, 0.0,
+    (ac, av, ec, ev) => (s_mulf(F64, ec, ac), s_fma(F64, ec, av, ev)))
+  let cy = mul(F64, s2, load_strided(cmat, bc, s2, [SSM_N, 1]), h)
+  let yt = d_reduce_dim(F64, s2, 1, cy, 0.0, (acc, e) => s_addf(F64, acc, e))
+  let side = mul(F64, s1, load_strided(skip, d, s1, [0]), load_strided(u, ud, s1, [SSM_D]))
+  store_strided(y, ud, s1, [SSM_D], addf(F64, s1, yt, side))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -1795,6 +1841,10 @@ fn trace(name: String) -> TileProg = match name {
   "gae" ->
     trace_kernel("gae", ["f64", "f64", "f64"],
       () => gae(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "ssm_scan" ->
+    trace_kernel("ssm_scan", ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+      () => ssm_scan(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3),
+        param(F64, 4), param(F64, 5), param(F64, 6)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -1823,6 +1873,6 @@ pub fn main() -> Unit !io = match args() {
       ++ "|count_eq|subarray_sum|rainbow|int_ops"
       ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
       ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
-      ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae>"
+      ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

@@ -205,7 +205,7 @@
 #                      and on the device `gae` alone answers a forward
 #                      prefix where leetgpu 110 wants a backward one. It is
 #                      also the only kernel whose BYTES move, so the other
-#                      five are the control twice over
+#                      six are the control twice over
 #     exclusive-scan-as-inclusive
 #                      `compact` scatters at the inclusive count of kept
 #                      lanes instead of the exclusive one -> every value
@@ -430,10 +430,12 @@ gathered=(token_embed sort_rank merge_rank scatter_perm)
 # The scan kernels of knife 13, in the order scan_diff takes them. Only
 # `gae` scans in reverse and only `compact` turns an inclusive scan into an
 # exclusive one at the point where it matters, which are the two splits the
-# mutants below are held to. Two are integer scans and exact tier; the four
+# mutants below are held to. Two are integer scans and exact tier; the five
 # float ones are tolerance tier, because the device does not fold a prefix
-# the way a host reference does (measured, see the order probe).
-scanned=(prefix_sum max_subarray seg_scan compact linrec gae)
+# the way a host reference does (measured, see the order probe). `ssm_scan`
+# is the only one over a rank-2 tile and the only one with a second grid
+# axis.
+scanned=(prefix_sum max_subarray seg_scan compact linrec gae ssm_scan)
 
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
@@ -957,7 +959,7 @@ mutant_kernels_src="$work/kernels-softmax.dawn"
 cp "$golden/kernels.dawn" "$mutant_kernels_src"
 before=$(digest "$mutant_kernels_src")
 python3 "$here/mutate.py" "$mutant_kernels_src" softmax-no-max-subtract \
-  '  let mx = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], t, neg_inf(), (e, acc) => s_maxf(F64, e, acc)))' \
+  '  let mx = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], t, neg_inf(), (acc, e) => s_maxf(F64, acc, e)))' \
   '  let mx = f_const(F64, [RED_TILE], 0.0)'
 after=$(digest "$mutant_kernels_src")
 echo "      softmax-no-max-subtract: scripts/tile-golden/kernels.dawn md5 $before -> $after"
@@ -1741,11 +1743,11 @@ scan_kernel_check() { # name, kernel
 #     layer 1 accepts it -- a forward scan is a legal scan -- so only the
 #     device can say the prefix now runs the wrong way.
 #
-#     Exactly ONE of the six kernels sets the attribute, and it is the only
+#     Exactly ONE of the seven kernels sets the attribute, and it is the only
 #     one whose bytes move: `gae` accumulates from the end of its row, which
 #     is what leetgpu 110 asks for and what `reverse` exists for. The other
-#     five already wrote a zero there, so they are the control in the bytes
-#     as well as on the device -- a stronger statement than five that red.
+#     six already wrote a zero there, so they are the control in the bytes
+#     as well as on the device -- a stronger statement than six that red.
 mutant_pkg_rev="$work/pkg-scan-reverse-ignored"
 rm -rf "$mutant_pkg_rev"
 cp -r "$root/packages/tileir" "$mutant_pkg_rev"
@@ -1781,12 +1783,12 @@ if [ "$scan_verdict" = pass ]; then
       "$work/m-scan-reverse.out" ||
       { cat "$work/m-scan-reverse.out" >&2; fail "scan-reverse-ignored: $k scans in reverse and should differ"; }
   done
-  for k in prefix_sum max_subarray seg_scan compact linrec; do
+  for k in prefix_sum max_subarray seg_scan compact linrec ssm_scan; do
     awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
       "$work/m-scan-reverse.out" ||
       { cat "$work/m-scan-reverse.out" >&2; fail "scan-reverse-ignored: $k scans forward and should be untouched"; }
   done
-  echo "PASS  mutant: scan-reverse-ignored (layer 1 accepts it; on the device ${reverse_red[*]} differs and the other five do not, and their bytes do not move either)"
+  echo "PASS  mutant: scan-reverse-ignored (layer 1 accepts it; on the device ${reverse_red[*]} differs and the other six do not, and their bytes do not move either)"
 else
   [ "$mverdict" = "$scan_verdict" ] ||
     { cat "$work/m-scan-reverse.out" >&2; fail "scan-reverse-ignored: the clean run is $scan_verdict but the mutant is $mverdict"; }

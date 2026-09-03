@@ -1623,6 +1623,54 @@ pub fn gae_ref(b: Int, s: Int, gamma: Float, lam: Float, dtypes: List[String],
   list.map(range(0, len(old)), k => if k < b * s { round_to(dt, adv[k]) } else { kept(old, k) })
 }
 
+## The Mamba-style selective scan: leetgpu 94 (SSM Selective Scan). `ins`
+## is `[u, delta, A, B, C, skip, old y]`, with `u` and `delta` and `y`
+## shaped (batch, steps, channels), `A` (channels, states), `B` and `C`
+## (batch, steps, states) and `skip` (channels).
+##
+## The recurrence written out, one channel at a time, where the kernel
+## folds affine maps over a whole (step, state) plane at once. `ref_exp` is
+## the host's own series, so the discretisation is a second opinion rather
+## than the same call twice, and the tier is tolerance for that reason
+## before any question of fold order arises.
+pub fn ssm_scan_ref(batch: Int, steps: Int, channels: Int, states: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let u = ins[0]
+  let delta = ins[1]
+  let amat = ins[2]
+  let bmat = ins[3]
+  let cmat = ins[4]
+  let skip = ins[5]
+  let old = ins[6]
+  let dt = dtypes[6]
+  let rows = list.map(range(0, batch * channels), key => {
+    let b = key / channels
+    let d = key % channels
+    var h = list.map(range(0, states), _n => 0.0)
+    var ys: List[Float] = []
+    for s in range(0, steps) {
+      let dv = delta[(b * steps + s) * channels + d]
+      let uv = u[(b * steps + s) * channels + d]
+      let prev = h
+      h = list.map(range(0, states), n =>
+        ref_exp(dv * amat[d * states + n]) * prev[n] + dv * bmat[(b * steps + s) * states + n] * uv)
+      let now = h
+      let dot = list.fold(range(0, states), 0.0,
+        (acc, n) => acc + cmat[(b * steps + s) * states + n] * now[n])
+      ys = ys ++ [dot + skip[d] * uv]
+    }
+    ys
+  })
+  list.map(range(0, len(old)), k =>
+    if k < batch * steps * channels {
+      let d = k % channels
+      let rest = k / channels
+      round_to(dt, rows[(rest / steps) * channels + d][rest % steps])
+    } else {
+      kept(old, k)
+    })
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
