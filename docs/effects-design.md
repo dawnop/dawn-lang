@@ -584,6 +584,39 @@ driver/stdlib 4、lsp/server 2、source 2）：它们的路径全是自己造的
 负控四类都在它的自测里：行少 `!Env`、行少 `!io`、某条测试把真 handler 装回去、
 两个登记位置各自消失。尾款到来时，改行的人必须同时改这里。
 
+**尾款（2026-09-04，种子已到 v0.76.0）**：种子那份 std 里 `io.cwd` 与 `io.getenv` 已经只欠
+`!Env`，刀 1b 被迫写上的 `!io` 于是可以在没有别的东西欠它的行上去掉。口径是「只动带 `!Env`
+的行」，不顺手做全局 `!io` 收敛。135 条签名行里 **60 条去掉了 `!io`**，75 条留着。
+`compiler-plan/src` 的 24 条全去（这棵树的 `!Env` 行从此一条不带 `!io`）；`selfhost/src` 的
+107 条去 35 条（`lsp/server` 10、`driver/analyze` 8、`driver/stdlib` 6、`c/cdriver` 4、
+`main` 3、`pkg/add` 3、`nmain` 1）；`scripts/` 的四条探针行去 1 条。
+
+清点是机械做的：删掉一条行的 ` !io`，对看得见它的树跑 `dawn check`，检查器拒绝就把这条留下、
+并把诊断的第一行记成理由；跑到不动点为止。要迭代是因为被调用方去掉这个原子之后调用方才去得掉，
+第一轮只找到 10 条，第 14 轮才停在 60 条。预研数的是 50 条：它的搜索一次删光再按诊断点名的
+函数往回恢复，恢复的是整条调用链而不是卡住它的那一行，所以偏保守 10 条。偏差不是散的：多出来的 10 条整齐地落在 `lsp/server` 一个文件里（预研把它整个划进「留下」），其余八个文件与预研的清单逐行相同。
+
+留下的 75 条按检查器点名的终点分四类：控制台与退出那条链 34 条（`cli_error` / `print` /
+`println` / `notify` / `respond` / `fail_compile` 一族）；Java FFI 21 条（终点是
+`check/checker.check_module`，它走 `pass_java_uses` 做 `use java` 的反射解析，另有
+`main.path_sep` 的 `File.pathSeparator`）；`io.args` 2 条；handler wrapper 的参数行 5 条。
+剩下 13 条是第五类，也是这一批唯一一处口径的代价：它们卡在一条**不带 `!Env`** 的行上
+（`analyze.topo_sort`、`lspc.use_completions` 一族），那些行自己多写了一个原子，按口径不动。
+这印证了刀 1b 那条观测：85 条里有一部分是「别人多写了」而不是「自己欠着」，那是另一张单。
+
+三条 `in_mem*` 的 body 行仍是 `body: fn() -> T !Fs !Proc !Env !io`，`lsp/server.no_host` 与
+`driver/stdlib.no_host` 两条同样留着。所以上一段那句「`in_mem` 那一行 `grep '!io'` 无命中是
+尾款的验收」**没有兑现**：这三行的 `!io` 不是种子的，是它们底下那条 jsig / `use java` 链的，
+换一轮种子不会走。实测把 `in_mem` 的行收成 `!Fs !Proc !Env`，诊断是
+`expected fn() -> Unit !(Env|Fs|Proc), got fn() -> Unit !(Env|Fs|Proc|io)`，与刀 3 那次一字不差。
+`scripts/doc-check.py` 的 `check_analyze_env_table` 因此期望文本一字未改，尾款之后照样绿；
+`analyze.dawn` 里那段解释理由的注释改了，因为理由从「种子的 std」换成了「底下那条链」。
+
+这一批对 emit 逐字节不可见：`!io` 不是具名效果，不占 evidence 槽。量法是同一个编译器读
+同一批绝对路径下的两份源码，跑 prev-diff 那十个语料目标加 `doc --builtins`，逐字节全等。
+阳性对照是把 `main.dawn` 的一条字面量改一个字母，同一把尺子当场看得见，所以这个「全等」
+不是没看。
+
 `Exit` 与 `Console` 是第四、第五族，2026-09-04 一起走到声明为止：`std/io` 多了
 `pub ctl effect Exit`（一个操作 `exit_now(code) -> Never`，生产 handler `with_exit_real`）
 与 `pub effect Console`（四个操作 `console_print` / `console_println` / `console_eprint` /

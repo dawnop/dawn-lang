@@ -1084,12 +1084,15 @@ pub fn analyze_document(
 # relative path against `io.cwd()`, so before this the answer was the
 # directory the runner happened to be started in.
 #
-# The `!io` on the three rows below is the seed's, not these tests'. Every
-# production function they call still declares it, because stage 1 of the
-# bootstrap compiles this tree against the std the seed shipped with, where
-# `io.cwd` and `io.getenv` are `!io` and not `Env` (docs/bootstrap.md, feature
-# discipline 4). It comes off in the backfill one seed round from now, and the
-# rows are pinned meanwhile by `scripts/doc-check.py`'s
+# The `!io` on the three rows below was the seed's when they were written, and
+# the backfill a seed round later was supposed to take it off. It did not, and
+# the rows say why: the production functions these tests call still declare
+# `!io` for a reason of their own, which is the `use java` reflection behind
+# `check.checker.check_module`, not `io.cwd` and `io.getenv`. Narrowing a row
+# to `!Fs !Proc !Env` is refused with `expected fn() -> Unit !(Env|Fs|Proc),
+# got fn() -> Unit !(Env|Fs|Proc|io)`. So `!io` here is not a seed artifact and
+# will not come off with the next one; it comes off when the Java signature
+# chain does. The rows stay pinned by `scripts/doc-check.py`'s
 # `check_analyze_env_table`, which is also what says no test below installs
 # `with_env_real` any more.
 fn in_mem[T](body: fn() -> T !Fs !Proc !Env !io) -> T !io = {

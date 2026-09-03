@@ -1995,12 +1995,13 @@ def check_named_effect_status_selftest() -> tuple[list[str], int]:
 # NAMED_EFFECT_EXPECTED holds the declarer list.
 #
 # The rows still end in `!io`, and that is a pinned decision rather than an
-# omission: stage 1 of the bootstrap compiles this tree against the std the
-# seed shipped with, where `io.cwd` and `io.getenv` are `!io` and not `Env`
-# (docs/bootstrap.md, feature discipline 4), so every production function
-# these tests call declares it. Pinning the row exactly means the backfill a
-# seed round from now has to come here and say so, and means neither atom can
-# be added or dropped quietly in the meantime.
+# omission. It was pinned when the reason was the seed's std, where `io.cwd`
+# and `io.getenv` were `!io` and not `Env`; the seed moved on and the rows did
+# not, because the `!io` these tests actually owe comes from the `use java`
+# reflection behind `check.checker.check_module`. That is the value of pinning
+# the row exactly: the backfill had to come here, and what it found was that
+# the stated reason had been the wrong one. Neither atom can be added or
+# dropped quietly meanwhile.
 ANALYZE_ENV_SOURCE = "selfhost/src/driver/analyze.dawn"
 ANALYZE_ENV_ROW = "body: fn() -> T !Fs !Proc !Env !io"
 ANALYZE_ENV_WRAPPERS = ("in_mem", "in_mem_env", "in_mem_proc")
