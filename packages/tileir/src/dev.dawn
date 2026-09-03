@@ -254,6 +254,58 @@ pub fn row_major(shape: List[Int]) -> List[Int] = {
   out
 }
 
+## The strides of a PERMUTED view of an array laid out by `strides`:
+## dimension `k` of the view is dimension `perm[k]` of the array, so
+## `permute(row_major([r, c]), [1, 0])` is the layout that reads a row-major
+## `r` by `c` array transposed. A permutation is a rearrangement of the
+## strides and nothing else: no operation is issued, no element moves, and
+## the tile a load answers is already in the order the permuted view has.
+## This is why there is no `permute` instruction here (the dialect's own
+## opcode 0x53 has no client): a transpose is a layout, not a shuffle.
+##
+## Why the layout is two lists rather than one `Layout` record: `shape` is
+## also what every arithmetic operation takes (`addf(F64, shape, ..)`), so a
+## record would have to be unpacked at every second call; and knife 8 had
+## already fixed `load_strided(p, base, shape, strides)`. A record would be a
+## second spelling of the same pair, not a shorter one.
+pub fn permute(strides: List[Int], perm: List[Int]) -> List[Int] =
+  list.map(range(0, len(perm)), k => strides[perm[k]])
+
+## The strides that walk ONE axis of a tile of `rank` dimensions and hold
+## every other still: `step` at `axis` and zero elsewhere. A load with these
+## reads the same element down a whole axis, and `lanes_strided` with them
+## answers that axis's coordinate.
+pub fn axis_strides(rank: Int, axis: Int, step: Int) -> List[Int] =
+  list.map(range(0, rank), k => if k == axis { step } else { 0 })
+
+## The i32 tile of `shape` whose lane `[i, j, ..]` holds the coordinate of
+## that lane along `axis`, counted from `base` in steps of `step`: lane
+## `[i, j]` of `coord(base, shape, 0, 1)` is `base + i`. The one thing a
+## multi-dimensional boundary needs and a flat `lanes` cannot say, because a
+## tile at the edge of an array is outside it along one axis and inside it
+## along the other.
+pub fn coord(base: Idx, shape: List[Int], axis: Int, step: Int) -> Tile[I32] !Dev =
+  lanes_strided(base, shape, axis_strides(len(shape), axis, step))
+
+## The lanes both masks select. There is no `andi` in this release, so this
+## is a `select`: `a` where it is 1 chooses `b`, and 0 elsewhere.
+pub fn and_mask(shape: List[Int], a: Tile[I1], b: Tile[I1]) -> Tile[I1] !Dev =
+  select(I1, shape, a, b, bool_const(shape, false))
+
+## The lanes whose coordinate `c` satisfies `lo <= c < hi`. Both bounds are
+## host constants; `lo` is not always zero, because a stencil reads a
+## coordinate one before the tile's own.
+pub fn in_range(shape: List[Int], c: Tile[I32], lo: Int, hi: Int) -> Tile[I1] !Dev =
+  and_mask(shape, ge_i(shape, c, i_const(shape, lo)), lt_i(shape, c, i_const(shape, hi)))
+
+## The lanes whose `axis` coordinate, counted from `base`, falls inside
+## `[0, limit)`: `tail_mask` for one axis of a multi-dimensional tile. A
+## tile over an array whose extent is not a multiple of the tile's covers
+## the whole of the last block along each axis, and this is the mask that
+## keeps it from reading or writing what is past the end along that one.
+pub fn axis_mask(base: Idx, shape: List[Int], axis: Int, limit: Int) -> Tile[I1] !Dev =
+  in_range(shape, coord(base, shape, axis, 1), 0, limit)
+
 ## The tile of `p`'s format and `shape` whose element `[i, j, ..]` is at
 ## element `base + i * strides[0] + j * strides[1] + ..` of `p`. Every lane
 ## is read, so every one of those elements must be inside `p`;
@@ -993,6 +1045,18 @@ test "a parameter remembers its position and its format" {
   assert param_dtype(a) == "f64"
   assert position(b) == 5
   assert param_dtype(b) == "f32"
+}
+
+test "a layout is a permutation of strides, and a transpose is one" {
+  assert row_major([4, 6]) == [6, 1]
+  assert permute(row_major([4, 6]), [1, 0]) == [1, 6]
+  # a permutation twice over is the layout it started from
+  assert permute(permute(row_major([4, 6]), [1, 0]), [1, 0]) == row_major([4, 6])
+  assert permute(row_major([2, 3, 4]), [2, 0, 1]) == [1, 12, 4]
+  # one axis walked, the others held: what a coordinate tile reads with
+  assert axis_strides(2, 0, 1) == [1, 0]
+  assert axis_strides(2, 1, 1) == [0, 1]
+  assert axis_strides(3, 1, 5) == [0, 5, 0]
 }
 
 test "the tile element formats name themselves as Tile IR spells them" {
