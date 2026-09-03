@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF}
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, Gather, Scatter, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, Gather, Scatter, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -85,10 +85,14 @@ derive Show
 ## comparison carries the type of its operands and the `i1` type of its
 ## result, as its assembly prints both.
 ##
+## `ScanTile` is the prefix scan, `ReduceTile` with one attribute more
+## (`reverse`) and results that keep every dimension: its `tys` are its
+## `operand_tys`, where a reduction's drop `dim`.
+##
 ## `ReduceTile` is the reduction: `results` are its rank-0 results, typed
 ## `tys`; `operands` the tiles it folds, typed `operand_tys`; `identities`
 ## one per operand; `args` the `2 * k` rank-0 block arguments of its one
-## region (element then accumulator, per operand) and `body` that region,
+## region (accumulator then element, per operand) and `body` that region,
 ## `YieldVals` last. `IfElse` is the two-region conditional: `cond` is a
 ## rank-0 `i1`, `on_true` and `on_false` are its regions and each ends in
 ## its own `YieldVals`, and `results` are the values it defines after both.
@@ -125,6 +129,7 @@ pub type Instr =
   | ForLoop(results: List[Int], tys: List[Ty], iv: Int, lower: Ref, upper: Ref, step: Ref, inits: List[Ref], carried: List[Int], body: List[Instr])
   | Cont(values: List[Ref], tys: List[Ty])
   | ReduceTile(results: List[Int], tys: List[Ty], dim: Int, identities: List[RedId], operands: List[Ref], operand_tys: List[Ty], args: List[Int], body: List[Instr])
+  | ScanTile(results: List[Int], tys: List[Ty], dim: Int, reverse: Bool, identities: List[RedId], operands: List[Ref], operand_tys: List[Ty], args: List[Int], body: List[Instr])
   | IfElse(results: List[Int], tys: List[Ty], cond: Ref, cond_ty: Ty, on_true: List[Instr], on_false: List[Instr])
   | YieldVals(values: List[Ref], tys: List[Ty])
   | Ret
@@ -540,6 +545,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
   }
   For(iv, lower, upper, step, inits, carried, results, body) -> lower_for(l0, iv, lower, upper, step, inits, carried, results, body)
   Reduce(results, dim, shape, identities, operands, args, body) -> lower_reduce(l0, results, dim, shape, identities, operands, args, body)
+  Scan(results, dim, reverse, shape, identities, operands, args, body) -> lower_scan(l0, results, dim, reverse, shape, identities, operands, args, body)
   If(results, cond, on_true, on_false) -> lower_if(l0, results, cond, on_true, on_false)
   Yield(values) -> {
     let refs = list.map(values, h => ref_of(l0, h, "yield value"))
@@ -619,7 +625,7 @@ fn lower_reduce(l0: L, results: List[Int], dim: Int, shape: List[Int], identitie
   let operand_tys = list.map(operands, h => ty_of(l0, h))
   let res_tys = list.map(operand_tys, ot => without_dim(ot, dim))
   let (l1, res) = define_all(l0, results, res_tys)
-  # the region takes the element and the accumulator of each operand, in
+  # the region takes the accumulator and the element of each operand, in
   # operand order, both RANK-0 whatever the operand's rank is (the
   # dialect's own example over a `tile<8x64xf32>` takes `tile<f32>`
   # arguments): only the RESULT loses the reduced dimension.
@@ -636,6 +642,33 @@ fn lower_reduce(l0: L, results: List[Int], dim: Int, shape: List[Int], identitie
   # `shape` is the shape the record carried; the operand types say it again
   let _shape = shape
   emit(l3, ReduceTile(res, res_tys, dim, identities, operand_refs, operand_tys, argv, inner.body))
+}
+
+# Lower a scan. The same shape as a reduction, with one difference that is
+# the whole of what a scan is: its results keep every dimension, so their
+# types ARE the operands' types rather than the operands' types with `dim`
+# dropped.
+fn lower_scan(l0: L, results: List[Int], dim: Int, reverse: Bool, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp]) -> L = {
+  if len(args) != 2 * len(operands) || len(results) != len(operands) {
+    panic("tileir: a scan over ${len(operands)} operand(s) names ${len(args)} region argument(s) and ${len(results)} result(s)")
+  } else {
+    ()
+  }
+  let operand_refs = list.map(operands, h => ref_of(l0, h, "scan operand"))
+  let operand_tys = list.map(operands, h => ty_of(l0, h))
+  let (l1, res) = define_all(l0, results, operand_tys)
+  let arg_tys = list.map(range(0, len(args)), k => rank0_of(operand_tys[k / 2]))
+  let (l2, argv) = define_all(l1, args, arg_tys)
+  let inner = list.fold(body, L { ..l2, body: [] }, lower_op)
+  let ytys = yielded(inner.body, "a scan's body")
+  if len(ytys) != len(operands) {
+    panic("tileir: a scan over ${len(operands)} operand(s) yields ${len(ytys)}")
+  } else {
+    ()
+  }
+  let l3 = close_scope(l1, inner)
+  let _shape = shape
+  emit(l3, ScanTile(res, operand_tys, dim, reverse, identities, operand_refs, operand_tys, argv, inner.body))
 }
 
 # Lower an `if`. Its result types are the types of what its then-branch
@@ -709,6 +742,7 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   ForLoop(results, _tys, _iv, _lower, _upper, _step, _inits, _carried, _body) -> results
   Cont(_values, _tys) -> []
   ReduceTile(results, _tys, _dim, _identities, _operands, _operand_tys, _args, _body) -> results
+  ScanTile(results, _tys, _dim, _reverse, _identities, _operands, _operand_tys, _args, _body) -> results
   IfElse(results, _tys, _cond, _cond_ty, _on_true, _on_false) -> results
   YieldVals(_values, _tys) -> []
   Ret -> []
@@ -723,6 +757,8 @@ pub fn defines_inside(body: List[Instr]) -> List[Int] = {
     ForLoop(results, _tys, iv, _lower, _upper, _step, _inits, carried, inner) ->
       acc ++ results ++ [iv] ++ carried ++ defines_inside(inner)
     ReduceTile(results, _tys, _dim, _identities, _operands, _operand_tys, args, inner) ->
+      acc ++ results ++ args ++ defines_inside(inner)
+    ScanTile(results, _tys, _dim, _reverse, _identities, _operands, _operand_tys, args, inner) ->
       acc ++ results ++ args ++ defines_inside(inner)
     IfElse(results, _tys, _cond, _cond_ty, on_true, on_false) ->
       acc ++ results ++ defines_inside(on_true) ++ defines_inside(on_false)

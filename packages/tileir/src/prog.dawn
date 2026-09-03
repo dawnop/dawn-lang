@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32, I32}
-use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_if, spread, s_addf, s_maxf, s_gt, s_select}
+use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -38,9 +38,11 @@ use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at
 ## region only; `results` are the loop's values after it.
 ##
 ## `Spread` widens a rank-0 tile to `n` lanes. `Reduce` and `If` are the two
-## other regions. A `Reduce` over `k` operands folds them along `dim` with
+## other regions. A `Scan` is a `Reduce` that keeps every dimension and
+## carries one attribute more (`reverse`): its results have the shape of
+## its operands. A `Reduce` over `k` operands folds them along `dim` with
 ## one identity each; `args` are the `2 * k` rank-0 handles the body sees
-## (element then accumulator, per operand, in operand order) and `results`
+## (accumulator then element, per operand, in operand order) and `results`
 ## the `k` rank-0 handles after it; `body` ends in `Yield(values)`, the new
 ## accumulators. An `If` holds TWO regions, `on_true` and `on_false`, each
 ## ending in its own `Yield`; `results` are the handles after it. `n` is 0
@@ -74,6 +76,7 @@ pub type TileOp =
   | Continue(values: List[Int])
   | Spread(dst: Int, dtype: String, shape: List[Int], src: Int)
   | Reduce(results: List[Int], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp])
+  | Scan(results: List[Int], dim: Int, reverse: Bool, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp])
   | If(results: List[Int], cond: Int, on_true: List[TileOp], on_false: List[TileOp])
   | Yield(values: List[Int])
 derive Show
@@ -199,13 +202,15 @@ fn check_param(name: String, params: List[String], pos: Int, dtype: String, verb
 type Frame =
   | LoopFrame(outer: List[TileOp], iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int])
   | ReduceFrame(outer: List[TileOp], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int])
+  | ScanFrame(outer: List[TileOp], dim: Int, reverse: Bool, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int])
   | ThenFrame(outer: List[TileOp], cond: Int)
   | ElseFrame(outer: List[TileOp], cond: Int, on_true: List[TileOp])
 
-# A reduction's or an `if`'s region is pure: the dialect requires it of a
-# reduction's body and neither carries the memory ordering token, so a load,
-# a store or a loop (which carries the token through itself) inside one has
-# no order to be in. This is what says so.
+# A reduction's, a scan's or an `if`'s region is pure: the dialect requires
+# it of the first two and none of the three carries the memory ordering
+# token, so a load, a store or a loop (which carries the token through
+# itself) inside one has no order to be in. This is what says so: every
+# frame but the loop's.
 fn is_pure_region(f: Frame) -> Bool = match f {
   LoopFrame(_outer, _iv, _lower, _upper, _step, _inits, _carried) -> false
   _ -> true
@@ -255,7 +260,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
       }
       t_load(param, dtype, base, shape, strides, mask, pad) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a load inside a reduce or if region has no memory order") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a load inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "load")
         check_shape(name, shape)
         check_strides(name, shape, strides)
@@ -268,7 +273,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
       }
       t_store(param, dtype, base, shape, strides, v, mask) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a store inside a reduce or if region has no memory order") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a store inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "store")
         check_shape(name, shape)
         check_strides(name, shape, strides)
@@ -280,7 +285,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
       }
       t_gather(param, dtype, index, shape, mask, pad) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a gather inside a reduce or if region has no memory order") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a gather inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "gather")
         check_shape(name, shape)
         let d = next
@@ -292,7 +297,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
       }
       t_scatter(param, dtype, index, shape, v, mask) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a scatter inside a reduce or if region has no memory order") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a scatter inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "scatter")
         check_shape(name, shape)
         let t = next
@@ -437,7 +442,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
       }
       t_loop_begin(lower, upper, step, inits) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce or if region has no memory order") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce, scan or if region has no memory order") } else { () }
         if len(frames) >= MAX_LOOP_DEPTH {
           refuse(name, "loops nest deeper than ${MAX_LOOP_DEPTH}; a body that recurses through d_for unrolls forever")
         } else {
@@ -539,6 +544,56 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
           _ -> refuse(name, "reduce_end closes a region that is not a reduction")
         }
       }
+      t_scan_begin(dim, reverse, shape, identities, operands) => {
+        if len(frames) >= MAX_LOOP_DEPTH {
+          refuse(name, "regions nest deeper than ${MAX_LOOP_DEPTH}")
+        } else {
+          ()
+        }
+        check_shape(name, shape)
+        if len(shape) == 0 {
+          refuse(name, "a scan scans a tile with a dimension, not a rank-0 one")
+        } else {
+          ()
+        }
+        if dim < 0 || dim >= len(shape) {
+          refuse(name, "a rank-${len(shape)} tile has dimensions 0 to ${len(shape) - 1} to scan along, got dim=${dim}")
+        } else {
+          ()
+        }
+        if len(identities) != len(operands) {
+          refuse(name, "a scan over ${len(operands)} operand(s) carries ${len(identities)} identity/identities")
+        } else {
+          ()
+        }
+        if len(operands) == 0 { refuse(name, "a scan with no operands") } else { () }
+        let base = next
+        next = mint(name, next, 2 * len(operands))
+        let args = list.map(range(0, 2 * len(operands)), k => base + k)
+        frames = frames ++ [ScanFrame(ops, dim, reverse, shape, identities, operands, args)]
+        ops = []
+        args
+      }
+      t_scan_end(yields) => {
+        if len(frames) == 0 { refuse(name, "scan_end with no scan open") } else { () }
+        match frames[len(frames) - 1] {
+          ScanFrame(outer, dim, reverse, shape, identities, operands, args) -> {
+            if len(yields) != len(operands) {
+              refuse(name, "a scan over ${len(operands)} operand(s) yielded ${len(yields)}")
+            } else {
+              ()
+            }
+            let inner = ops
+            let base = next
+            next = mint(name, next, len(operands))
+            let results = list.map(range(0, len(operands)), k => base + k)
+            frames = list.take(frames, len(frames) - 1)
+            ops = outer ++ [Scan(results, dim, reverse, shape, identities, operands, args, inner ++ [Yield(yields)])]
+            results
+          }
+          _ -> refuse(name, "scan_end closes a region that is not a scan")
+        }
+      }
       t_if_begin(cond) => {
         if len(frames) >= MAX_LOOP_DEPTH {
           refuse(name, "regions nest deeper than ${MAX_LOOP_DEPTH}")
@@ -622,6 +677,7 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   Continue(_values) -> []
   Spread(dst, _dtype, _shape, _src) -> [dst]
   Reduce(results, _dim, _shape, _identities, _operands, _args, _body) -> results
+  Scan(results, _dim, _reverse, _shape, _identities, _operands, _args, _body) -> results
   If(results, _cond, _on_true, _on_false) -> results
   Yield(_values) -> []
 }
@@ -636,6 +692,8 @@ pub fn defined_inside(ops: List[TileOp]) -> List[Int] = {
     For(iv, _lower, _upper, _step, _inits, carried, results, body) ->
       acc ++ results ++ [iv] ++ carried ++ defined_inside(body)
     Reduce(results, _dim, _shape, _identities, _operands, args, body) ->
+      acc ++ results ++ args ++ defined_inside(body)
+    Scan(results, _dim, _reverse, _shape, _identities, _operands, args, body) ->
       acc ++ results ++ args ++ defined_inside(body)
     If(results, _cond, on_true, on_false) ->
       acc ++ results ++ defined_inside(on_true) ++ defined_inside(on_false)
@@ -843,15 +901,15 @@ test "a gather inside a reduction region is refused: a pure region carries no me
     let idx = param(I32, 0)
     let src = param(F64, 1)
     let i = load(idx, idx_const(0), [8])
-    let _r = d_reduce(F64, [8], gather(src, i, [8]), 0.0, (e, acc) => {
+    let _r = d_reduce(F64, [8], gather(src, i, [8]), 0.0, (acc, e) => {
       let _inner = gather(src, i, [8])
-      s_addf(F64, e, acc)
+      s_addf(F64, acc, e)
     })
     ()
   }))
   match outcome {
     Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e.message, "a gather inside a reduce or if region has no memory order") }
+    Err(e) -> { assert str.contains(e.message, "a gather inside a reduce, scan or if region has no memory order") }
   }
 }
 
@@ -879,13 +937,13 @@ test "a body that recurses through d_for is refused at the depth limit rather th
 fn total(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
   let t = load(x, i, [8])
-  store(out, i, [1], spread(F64, [1], d_reduce(F64, [8], t, 0.0, (e, acc) => s_addf(F64, e, acc))))
+  store(out, i, [1], spread(F64, [1], d_reduce(F64, [8], t, 0.0, (acc, e) => s_addf(F64, acc, e))))
 }
 
 fn trace_total() -> TileProg =
   trace_kernel("total", ["f64", "f64"], () => total(param(F64, 0), param(F64, 1)))
 
-test "a reduction records as one Reduce holding its region, with the element and the accumulator as its arguments" {
+test "a reduction records as one Reduce holding its region, with the accumulator and the element as its arguments" {
   let p = trace_total()
   assert p.ops == [
     MakeToken(0),
@@ -932,9 +990,9 @@ fn load_in_reduce() -> Unit !Dev = {
   let x = param(F64, 0)
   let i = block_id(0)
   let t = load(x, i, [8])
-  let _s = d_reduce(F64, [8], t, 0.0, (e, acc) => {
+  let _s = d_reduce(F64, [8], t, 0.0, (acc, e) => {
     let _extra = load(x, i, [8])
-    s_addf(F64, e, acc)
+    s_addf(F64, acc, e)
   })
   ()
 }
@@ -955,17 +1013,17 @@ fn loop_in_reduce() -> Unit !Dev = {
   let i = block_id(0)
   let t = load(x, i, [8])
   let z = idx_const(0)
-  let _s = d_reduce(F64, [8], t, 0.0, (e, acc) => {
+  let _s = d_reduce(F64, [8], t, 0.0, (acc, e) => {
     let _u = d_for(z, z, z, t, (_k, v) => v)
-    s_addf(F64, e, acc)
+    s_addf(F64, acc, e)
   })
   ()
 }
 
 test "a memory operation or a loop inside a reduce or an if region is refused: neither region carries the token" {
-  assert str.contains(refusal(load_in_reduce), "a load inside a reduce or if region has no memory order")
-  assert str.contains(refusal(store_in_if), "a store inside a reduce or if region has no memory order")
-  assert str.contains(refusal(loop_in_reduce), "a loop inside a reduce or if region has no memory order")
+  assert str.contains(refusal(load_in_reduce), "a load inside a reduce, scan or if region has no memory order")
+  assert str.contains(refusal(store_in_if), "a store inside a reduce, scan or if region has no memory order")
+  assert str.contains(refusal(loop_in_reduce), "a loop inside a reduce, scan or if region has no memory order")
 }
 
 fn reduce_never_closed() -> Unit !Dev = {

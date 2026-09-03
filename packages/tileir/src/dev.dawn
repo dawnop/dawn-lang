@@ -196,12 +196,36 @@ impl Dtype[I1] {
 ## `t_reduce_begin(dim, shape, identities, operands)` opens a reduction of
 ## the `operands`, tiles of `shape`, along `dim`, one identity per operand
 ## in the same order, and answers TWO handles per operand as the body sees
-## them: for operand `i`, the element at `2 * i` and the accumulator at
-## `2 * i + 1`, which is the order the dialect's region takes them in. The
+## them: for operand `i`, the ACCUMULATOR at `2 * i` and the ELEMENT at
+## `2 * i + 1`. The
 ## result of a reduction of a rank-`r` tile is rank `r - 1`: the dimension
 ## `dim` is dropped.
+##
+## That order is MEASURED, not read: Ops.td's prose says the region
+## arguments are `[op_0_current_iter, op_0_prev_iter, ...]` (element first)
+## and its own mlirExample names them `(%acc, %elem)` (accumulator first),
+## and the two cannot both be true. A kernel whose body answers its first
+## region argument and nothing else answers the FIRST element of the
+## dimension on the device, and one that answers its second answers the
+## LAST, for `reduce` and for `scan`, forward and reversed (09-04, sm_86,
+## tileiras 13.3.36). So argument `2 * i` is the fold of everything before
+## this point and `2 * i + 1` is the value arriving now. It could never
+## show under `reduce` alone -- every reduction body in this tree is
+## commutative -- and it decides the answer under `scan`, whose bodies are
+## not.
+##
+## The same probe says the IDENTITY is not folded in at the first position:
+## the fold of one element is that element, not `f(identity, element)`.
+## Every identity here is a real identity of its body, so the two readings
+## agree, and this is written down rather than relied on.
 ## `t_reduce_end(yields)` closes it with the new accumulator of each operand
 ## and answers one result per operand.
+## `t_scan_begin` / `t_scan_end` are the same bracket for the prefix scan:
+## the same `dim`, `shape`, `identities` and `operands`, the same two
+## handles per operand, and one attribute more, `reverse`. What differs is
+## the SHAPE OF THE RESULT: a scan keeps every dimension (it answers the
+## running accumulator at each position along `dim`) where a reduction
+## drops the one it folded.
 ## `t_if_begin(cond)` opens the then-region of an `if` over the rank-0 `i1`
 ## handle `cond`; `t_if_else(yields)` closes it with what it yields and
 ## opens the else-region; `t_if_end(yields)` closes that one and answers one
@@ -246,6 +270,8 @@ pub effect Dev {
   fn t_spread(dtype: String, shape: List[Int], src: Int) -> Int
   fn t_reduce_begin(dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int]) -> List[Int]
   fn t_reduce_end(yields: List[Int]) -> List[Int]
+  fn t_scan_begin(dim: Int, reverse: Bool, shape: List[Int], identities: List[RedId], operands: List[Int]) -> List[Int]
+  fn t_scan_end(yields: List[Int]) -> List[Int]
   fn t_if_begin(cond: Int) -> Unit
   fn t_if_else(yields: List[Int]) -> Unit
   fn t_if_end(yields: List[Int]) -> List[Int]
@@ -1092,6 +1118,32 @@ pub fn s_maxf[D: Dtype](d: D, a: Scalar[D], b: Scalar[D]) -> Scalar[D] !Dev = s_
 ## The smaller of two rank-0 tiles: the body of a min reduction.
 pub fn s_minf[D: Dtype](d: D, a: Scalar[D], b: Scalar[D]) -> Scalar[D] !Dev = s_binary(d, "minf", a, b)
 
+## The product of two rank-0 tiles, `rounding<nearest_even>`: the body of a
+## running product, and half of the affine composition a first-order linear
+## recurrence scans with.
+pub fn s_mulf[D: Dtype](d: D, a: Scalar[D], b: Scalar[D]) -> Scalar[D] !Dev = s_binary(d, "mulf", a, b)
+
+## `a * b + c` over rank-0 tiles, ONE rounding: the other half of that
+## composition. A `fma` and not a `mulf` then an `addf`, so that a host
+## reference which fuses the same way agrees with it.
+pub fn s_fma[D: Dtype](d: D, a: Scalar[D], b: Scalar[D], c: Scalar[D]) -> Scalar[D] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let z: Int = c
+  let h: Scalar[D] = t_fma(dtype_name(d), rank0(), x, y, z)
+  h
+}
+
+## `a == b` over two rank-0 float tiles, as a rank-0 mask. Ordered, so a
+## NaN operand answers 0 and `s_eq(d, x, x)` is "x is not a NaN": the test
+## a scan that carries a NaN sentinel through its fold is written with.
+pub fn s_eq[D: Dtype](d: D, a: Scalar[D], b: Scalar[D]) -> Scalar[I1] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Scalar[I1] = t_cmpf("eq", dtype_name(d), rank0(), x, y)
+  h
+}
+
 ## `a > b` over two rank-0 float tiles, as a rank-0 mask: what an argmax
 ## reduction branches on. Ordered, like every comparison here.
 pub fn s_gt[D: Dtype](d: D, a: Scalar[D], b: Scalar[D]) -> Scalar[I1] !Dev = {
@@ -1127,6 +1179,12 @@ fn s_binary_int(op: String, a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev 
 ## by a carefully chosen corpus (docs/tile-backend-design.md 6.5).
 pub fn s_addi(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int("addi", a, b)
 
+## The larger of two rank-0 i32 tiles: the body of an integer max reduction
+## or scan. Exact under any fold tree, as `s_addi` is, and for the stronger
+## reason: `maxi` is associative, commutative AND idempotent over the
+## integers, with no wrap-around to speak of.
+pub fn s_maxi(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int("maxi", a, b)
+
 # The comparison of two index tiles, as a rank-0 mask.
 fn idx_compare(pred: String, a: Idx, b: Idx) -> Scalar[I1] !Dev = {
   let x: Int = a
@@ -1152,9 +1210,9 @@ pub fn idx_ge(a: Idx, b: Idx) -> Scalar[I1] !Dev = idx_compare("ge", a, b)
 # ---- reductions ----
 
 ## The reduction of the tile `t` of `shape` along dimension 0: `body`
-## runs ONCE, on the host, with an element of the tile and the accumulator
-## as the region sees them, and answers the new accumulator; what it issues
-## in between is the region. `identity` is what a fold that has seen nothing
+## runs ONCE, on the host, with the accumulator and an element of the tile
+## as the region sees them, IN THAT ORDER, and answers the new
+## accumulator; what it issues in between is the region. `identity` is what a fold that has seen nothing
 ## starts from (0.0 for a sum, -inf for a max) and must be the identity of
 ## `body` or the answer is wrong on the device and nowhere else.
 ##
@@ -1167,9 +1225,9 @@ pub fn d_reduce[D: Dtype](d: D, shape: List[Int], t: Tile[D], identity: Float,
   body: fn(Scalar[D], Scalar[D]) -> Scalar[D] !Dev) -> Scalar[D] !Dev = {
   let h: Int = t
   let args = t_reduce_begin(0, shape, [IdF(dtype_name(d), identity)], [h])
-  let e: Scalar[D] = args[0]
-  let acc: Scalar[D] = args[1]
-  let r: Int = body(e, acc)
+  let acc: Scalar[D] = args[0]
+  let e: Scalar[D] = args[1]
+  let r: Int = body(acc, e)
   let outs = t_reduce_end([r])
   let out: Scalar[D] = outs[0]
   out
@@ -1178,7 +1236,7 @@ pub fn d_reduce[D: Dtype](d: D, shape: List[Int], t: Tile[D], identity: Float,
 ## The reduction of the tile `t` of `shape` along dimension `dim`, which
 ## answers a tile of `shape` with that dimension DROPPED: reducing a
 ## `[64, 32]` tile along dimension 1 answers a `[64]` one. `body` runs
-## ONCE, on the host, over the RANK-0 element and accumulator the region
+## ONCE, on the host, over the RANK-0 accumulator and element the region
 ## sees, whatever the operand's rank is; `identity` is what a fold that has
 ## seen nothing starts from.
 ##
@@ -1190,9 +1248,9 @@ pub fn d_reduce_dim[D: Dtype](d: D, shape: List[Int], dim: Int, t: Tile[D], iden
   body: fn(Scalar[D], Scalar[D]) -> Scalar[D] !Dev) -> Tile[D] !Dev = {
   let h: Int = t
   let args = t_reduce_begin(dim, shape, [IdF(dtype_name(d), identity)], [h])
-  let e: Scalar[D] = args[0]
-  let acc: Scalar[D] = args[1]
-  let r: Int = body(e, acc)
+  let acc: Scalar[D] = args[0]
+  let e: Scalar[D] = args[1]
+  let r: Int = body(acc, e)
   let outs = t_reduce_end([r])
   let out: Tile[D] = outs[0]
   out
@@ -1200,7 +1258,7 @@ pub fn d_reduce_dim[D: Dtype](d: D, shape: List[Int], dim: Int, t: Tile[D], iden
 
 ## The reduction of the i32 tile `t` of `shape` along dimension 0, with an
 ## INTEGER identity: what a count or an integer sum folds with. `body` runs
-## ONCE, on the host, over the element and the accumulator as the region
+## ONCE, on the host, over the accumulator and the element as the region
 ## sees them.
 ##
 ## Unlike `d_reduce`, this one's answer does not depend on the fold order at
@@ -1212,9 +1270,9 @@ pub fn d_reduce_i(shape: List[Int], t: Tile[I32], identity: Int,
   body: fn(Scalar[I32], Scalar[I32]) -> Scalar[I32] !Dev) -> Scalar[I32] !Dev = {
   let h: Int = t
   let args = t_reduce_begin(0, shape, [IdI("i32", identity)], [h])
-  let e: Scalar[I32] = args[0]
-  let acc: Scalar[I32] = args[1]
-  let r: Int = body(e, acc)
+  let acc: Scalar[I32] = args[0]
+  let e: Scalar[I32] = args[1]
+  let r: Int = body(acc, e)
   let outs = t_reduce_end([r])
   let out: Scalar[I32] = outs[0]
   out
@@ -1223,7 +1281,7 @@ pub fn d_reduce_i(shape: List[Int], t: Tile[I32], identity: Int,
 ## `d_reduce` over TWO tiles at once, a float tile and the i32 index tile
 ## beside it: the shape argmax and argmin have, where the winning value and
 ## the lane it came from must travel together through one fold. `body` takes
-## the element and accumulator of each, in that order, and answers the new
+## the accumulator and element of each, in that order, and answers the new
 ## accumulator of each.
 pub fn d_reduce2[A: Dtype](a: A, shape: List[Int], values: Tile[A], idxs: Tile[I32],
   value_identity: Float, index_identity: Int,
@@ -1231,17 +1289,109 @@ pub fn d_reduce2[A: Dtype](a: A, shape: List[Int], values: Tile[A], idxs: Tile[I
   let hv: Int = values
   let hi: Int = idxs
   let args = t_reduce_begin(0, shape, [IdF(dtype_name(a), value_identity), IdI("i32", index_identity)], [hv, hi])
-  let ev: Scalar[A] = args[0]
-  let av: Scalar[A] = args[1]
-  let ei: Scalar[I32] = args[2]
-  let ai: Scalar[I32] = args[3]
-  let (rv, ri) = body(ev, ei, av, ai)
+  let av: Scalar[A] = args[0]
+  let ev: Scalar[A] = args[1]
+  let ai: Scalar[I32] = args[2]
+  let ei: Scalar[I32] = args[3]
+  let (rv, ri) = body(av, ai, ev, ei)
   let xv: Int = rv
   let xi: Int = ri
   let outs = t_reduce_end([xv, xi])
   let ov: Scalar[A] = outs[0]
   let oi: Scalar[I32] = outs[1]
   (ov, oi)
+}
+
+# ---- scans ----
+
+## The inclusive prefix scan of the tile `t` of `shape` along dimension
+## `dim`: an answer of the SAME shape whose position `j` is the fold of
+## everything at or before `j` along that dimension. `body` runs ONCE, on
+## the host, with the ACCUMULATOR (everything folded so far) and the
+## ELEMENT arriving now, in that order, and answers the new accumulator;
+## what it issues in between is the region. With `reverse` the prefix runs
+## the other way: position `j` folds everything at or after it, and the
+## accumulator is still the first argument.
+##
+## `identity` is what a fold that has seen nothing starts from, as a
+## reduction's is. The device does not fold it in at the first position
+## (measured, see `t_reduce_begin` above), so it must be a real identity of
+## `body` or nothing at all depends on it.
+##
+## THE EVALUATION ORDER IS NOT SPECIFIED, the same way `d_reduce`'s is
+## not: the dialect asks the function to be associative and says the order
+## within each prefix is implementation-defined. Measured on sm_86, the
+## device's float prefix sum is NOT the sequential left fold -- it differs
+## in the last bits from lane 2 onwards -- so a host reference that folds
+## left is not a bit oracle for a float scan, and a float scan kernel is
+## tolerance tier (docs/tile-backend-design.md 6.6). What a scan does NOT
+## need is COMMUTATIVITY: every element keeps its side of the accumulator,
+## which is why a non-commutative body (an affine composition, "the last
+## value that carried a flag") is legal here and is not under `reduce`.
+pub fn d_scan[D: Dtype](d: D, shape: List[Int], dim: Int, reverse: Bool, t: Tile[D], identity: Float,
+  body: fn(Scalar[D], Scalar[D]) -> Scalar[D] !Dev) -> Tile[D] !Dev = {
+  let h: Int = t
+  let args = t_scan_begin(dim, reverse, shape, [IdF(dtype_name(d), identity)], [h])
+  let acc: Scalar[D] = args[0]
+  let e: Scalar[D] = args[1]
+  let r: Int = body(acc, e)
+  let outs = t_scan_end([r])
+  let out: Tile[D] = outs[0]
+  out
+}
+
+## The inclusive prefix scan of the i32 tile `t` with an INTEGER identity:
+## what a running count or an integer prefix sum folds with.
+##
+## Unlike `d_scan`, this one's answer does not depend on the evaluation
+## order at all when `body` is `s_addi`: integer addition modulo 2^32 is
+## exactly associative, so every regrouping of one prefix gives the value a
+## host reference's left fold gives. A corpus is not part of that claim.
+pub fn d_scan_i(shape: List[Int], dim: Int, reverse: Bool, t: Tile[I32], identity: Int,
+  body: fn(Scalar[I32], Scalar[I32]) -> Scalar[I32] !Dev) -> Tile[I32] !Dev = {
+  let h: Int = t
+  let args = t_scan_begin(dim, reverse, shape, [IdI("i32", identity)], [h])
+  let acc: Scalar[I32] = args[0]
+  let e: Scalar[I32] = args[1]
+  let r: Int = body(acc, e)
+  let outs = t_scan_end([r])
+  let out: Tile[I32] = outs[0]
+  out
+}
+
+## `d_scan` over TWO tiles at once, both of format `D`: the shape a
+## first-order linear recurrence has, where a step's coefficient and its
+## addend must travel through one fold together. `body` takes the
+## accumulator and the element of each, in that order, and answers the new
+## accumulator of each.
+##
+## The dialect's own description says `scan` "is restricted to only
+## support single tile input". Its verifier does not say so, `tileiras`
+## assembles a two-operand scan, and the DEVICE answers one correctly:
+## measured on sm_86 with the affine composition
+## `(c, v) . (c', v') = (c * c', c' * v + v')`, which is
+## `h[t] = a[t] * h[t-1] + x[t]` (docs/tile-backend-design.md 6.6). The
+## sentence in the dialect's prose is the only thing that says otherwise
+## and nothing enforces it, so this is recorded as a measurement and the
+## two kernels that need it name it.
+pub fn d_scan2[D: Dtype](d: D, shape: List[Int], dim: Int, reverse: Bool, a: Tile[D], b: Tile[D],
+  a_identity: Float, b_identity: Float,
+  body: fn(Scalar[D], Scalar[D], Scalar[D], Scalar[D]) -> (Scalar[D], Scalar[D]) !Dev) -> (Tile[D], Tile[D]) !Dev = {
+  let ha: Int = a
+  let hb: Int = b
+  let args = t_scan_begin(dim, reverse, shape,
+    [IdF(dtype_name(d), a_identity), IdF(dtype_name(d), b_identity)], [ha, hb])
+  let aa: Scalar[D] = args[0]
+  let ea: Scalar[D] = args[1]
+  let ab: Scalar[D] = args[2]
+  let eb: Scalar[D] = args[3]
+  let (ra, rb) = body(aa, ab, ea, eb)
+  let xa: Int = ra
+  let xb: Int = rb
+  let outs = t_scan_end([xa, xb])
+  let oa: Tile[D] = outs[0]
+  let ob: Tile[D] = outs[1]
+  (oa, ob)
 }
 
 ## The `if` over the rank-0 mask `cond`: `on_true` and `on_false` each run
@@ -1401,6 +1551,16 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       list.map(range(0, 2 * len(operands)), k => base + k)
     }
     t_reduce_end(yields) => {
+      let base = next
+      next = next + len(yields)
+      list.map(range(0, len(yields)), k => base + k)
+    }
+    t_scan_begin(_dim, _reverse, _shape, _identities, operands) => {
+      let base = next
+      next = next + 2 * len(operands)
+      list.map(range(0, 2 * len(operands)), k => base + k)
+    }
+    t_scan_end(yields) => {
       let base = next
       next = next + len(yields)
       list.map(range(0, len(yields)), k => base + k)
@@ -1579,6 +1739,14 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       log = log ++ ["reduce_end ${show(yields)}"]
       list.map(range(0, len(yields)), k => 30 + k)
     }
+    t_scan_begin(dim, reverse, shape, identities, operands) => {
+      log = log ++ ["scan_begin ${dim} ${reverse} ${show(shape)} ${show(identities)} ${show(operands)}"]
+      list.map(range(0, 2 * len(operands)), k => 20 + k)
+    }
+    t_scan_end(yields) => {
+      log = log ++ ["scan_end ${show(yields)}"]
+      list.map(range(0, len(yields)), k => 30 + k)
+    }
     t_if_begin(cond) => {
       log = log ++ ["if_begin ${cond}"]
     }
@@ -1701,12 +1869,12 @@ fn one_reduction() -> Unit !Dev = {
   let a = param(F64, 0)
   let i = block_id(0)
   let x = load(a, tile_at(i, 8), [8])
-  let s = d_reduce(F64, [8], x, 0.0, (e, acc) => s_addf(F64, e, acc))
+  let s = d_reduce(F64, [8], x, 0.0, (acc, e) => s_addf(F64, acc, e))
   let _w = spread(F64, [8], s)
   ()
 }
 
-test "a reduction hands the handler the width, the identity and the operand, and its region the element and the accumulator" {
+test "a reduction hands the handler the width, the identity and the operand, and its region the accumulator and the element" {
   # `logged` answers 20 and 21 for the two region arguments and 30 for the
   # result; the body's addf is over those two.
   assert logged(one_reduction) == [
@@ -1879,6 +2047,8 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_spread(_dtype, _shape, _src) => 16
       t_reduce_begin(_dim, _shape, _identities, operands) => list.map(range(0, 2 * len(operands)), k => 20 + k)
       t_reduce_end(yields) => list.map(range(0, len(yields)), k => 30 + k)
+      t_scan_begin(_dim, _reverse, _shape, _identities, operands) => list.map(range(0, 2 * len(operands)), k => 20 + k)
+      t_scan_end(yields) => list.map(range(0, len(yields)), k => 30 + k)
       t_if_begin(_cond) => ()
       t_if_else(_yields) => ()
       t_if_end(yields) => list.map(range(0, len(yields)), k => 40 + k)

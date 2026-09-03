@@ -236,7 +236,7 @@ fn whole(x: Param[F64], pad: Float) -> (Tile[F64], Tile[F64], Tile[F64]) !Dev = 
 
 # The sum of an RED_TILE-wide tile as one rank-0 tile.
 fn sum_of(t: Tile[F64]) -> Tile[F64] !Dev =
-  spread(F64, [1], d_reduce(F64, [RED_TILE], t, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  spread(F64, [1], d_reduce(F64, [RED_TILE], t, 0.0, (acc, e) => s_addf(F64, acc, e)))
 
 # Write one f64 at element 0 of `out`. Every one-answer kernel here ends in
 # this: a 1-wide tile at index 0, so the rest of the output buffer is left
@@ -265,10 +265,10 @@ fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let ninf = f_const(F64, [RED_TILE], neg_inf())
   let zero = f_const(F64, [RED_TILE], 0.0)
   let t = load_masked(x, blk, [RED_TILE], m, ninf)
-  let mx = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], t, neg_inf(), (e, acc) => s_maxf(F64, e, acc)))
+  let mx = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], t, neg_inf(), (acc, e) => s_maxf(F64, acc, e)))
   let ex = exp(F64, [RED_TILE], sub(F64, [RED_TILE], t, mx))
   let inside = select(F64, [RED_TILE], m, ex, zero)
-  let total = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], inside, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let total = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], inside, 0.0, (acc, e) => s_addf(F64, acc, e)))
   store_masked(out, blk, [RED_TILE], m, div(F64, [RED_TILE], ex, total))
 }
 
@@ -316,7 +316,7 @@ fn rms_norm(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let m = tail_mask(blk, [RED_TILE], RED_N)
   let zero = f_const(F64, [RED_TILE], 0.0)
   let t = load_masked(x, blk, [RED_TILE], m, zero)
-  let s = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], mul(F64, [RED_TILE], t, t), 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let s = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], mul(F64, [RED_TILE], t, t), 0.0, (acc, e) => s_addf(F64, acc, e)))
   let mean = div(F64, [RED_TILE], s, f_const(F64, [RED_TILE], to_float(RED_N)))
   let r = sqrt(F64, [RED_TILE], addf(F64, [RED_TILE], mean, f_const(F64, [RED_TILE], RMS_EPS)))
   store_masked(out, blk, [RED_TILE], m, div(F64, [RED_TILE], t, r))
@@ -441,9 +441,9 @@ fn argmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let m = tail_mask(blk, [RED_TILE], RED_N)
   let ninf = f_const(F64, [RED_TILE], neg_inf())
   let t = load_masked(x, blk, [RED_TILE], m, ninf)
-  let (_best, where) = d_reduce2(F64, [RED_TILE], t, lanes(blk, [RED_TILE]), neg_inf(), 0 - 1, (ev, ei, av, ai) => {
-    let win = s_gt(F64, ev, av)
-    (s_select(F64, win, ev, av), s_select(I32, win, ei, ai))
+  let (_best, where) = d_reduce2(F64, [RED_TILE], t, lanes(blk, [RED_TILE]), neg_inf(), 0 - 1, (av, ai, ev, ei) => {
+    let win = s_gt(F64, av, ev)
+    (s_select(F64, win, av, ev), s_select(I32, win, ai, ei))
   })
   let hot = eq_i([RED_TILE], lanes(blk, [RED_TILE]), spread(I32, [RED_TILE], where))
   store_masked(out, blk, [RED_TILE], m, select(F64, [RED_TILE], hot, f_const(F64, [RED_TILE], 1.0), f_const(F64, [RED_TILE], 0.0)))
@@ -539,10 +539,10 @@ const LN_EPS: Float = 1.0e-5
 # shares, over a tile of `shape` holding `count` values.
 fn normalise(shape: List[Int], count: Int, eps: Float, t: Tile[F64]) -> Tile[F64] !Dev = {
   let n = f_const(F64, shape, to_float(count))
-  let total = spread(F64, shape, d_reduce(F64, shape, t, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let total = spread(F64, shape, d_reduce(F64, shape, t, 0.0, (acc, e) => s_addf(F64, acc, e)))
   let mean = div(F64, shape, total, n)
   let d = sub(F64, shape, t, mean)
-  let sq = spread(F64, shape, d_reduce(F64, shape, mul(F64, shape, d, d), 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let sq = spread(F64, shape, d_reduce(F64, shape, mul(F64, shape, d, d), 0.0, (acc, e) => s_addf(F64, acc, e)))
   let variance = div(F64, shape, sq, n)
   div(F64, shape, d, sqrt(F64, shape, addf(F64, shape, variance, f_const(F64, shape, eps))))
 }
@@ -599,12 +599,12 @@ fn group_norm(x: Param[F64], gamma: Param[F64], beta: Param[F64], out: Param[F64
   let bt = load_strided(beta, chan, shape, [1, 0])
   let count = per * GN_HW
   let n = f_const(F64, shape, to_float(count))
-  let rows = d_reduce_dim(F64, shape, 1, t, 0.0, (e, acc) => s_addf(F64, e, acc))
-  let total = spread(F64, shape, d_reduce(F64, [per], rows, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let rows = d_reduce_dim(F64, shape, 1, t, 0.0, (acc, e) => s_addf(F64, acc, e))
+  let total = spread(F64, shape, d_reduce(F64, [per], rows, 0.0, (acc, e) => s_addf(F64, acc, e)))
   let mean = div(F64, shape, total, n)
   let d = sub(F64, shape, t, mean)
-  let sqrows = d_reduce_dim(F64, shape, 1, mul(F64, shape, d, d), 0.0, (e, acc) => s_addf(F64, e, acc))
-  let sq = spread(F64, shape, d_reduce(F64, [per], sqrows, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let sqrows = d_reduce_dim(F64, shape, 1, mul(F64, shape, d, d), 0.0, (acc, e) => s_addf(F64, acc, e))
+  let sq = spread(F64, shape, d_reduce(F64, [per], sqrows, 0.0, (acc, e) => s_addf(F64, acc, e)))
   let variance = div(F64, shape, sq, n)
   let r = div(F64, shape, d, sqrt(F64, shape, addf(F64, shape, variance, f_const(F64, shape, GN_EPS))))
   store_strided(out, base, shape, [GN_HW, 1], addf(F64, shape, mul(F64, shape, r, gt), bt))
@@ -622,7 +622,7 @@ fn fused_rms_norm(x: Param[F64], res: Param[F64], w: Param[F64], out: Param[F64]
   let h = addf(F64, [FR_D], load(x, row, [FR_D]), load(res, row, [FR_D]))
   let g = load(w, idx_const(0), [FR_D])
   let n = f_const(F64, [FR_D], to_float(FR_D))
-  let sq = spread(F64, [FR_D], d_reduce(F64, [FR_D], mul(F64, [FR_D], h, h), 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let sq = spread(F64, [FR_D], d_reduce(F64, [FR_D], mul(F64, [FR_D], h, h), 0.0, (acc, e) => s_addf(F64, acc, e)))
   let ms = div(F64, [FR_D], sq, n)
   let r = div(F64, [FR_D], h, sqrt(F64, [FR_D], addf(F64, [FR_D], ms, f_const(F64, [FR_D], FR_EPS))))
   store(out, row, [FR_D], mul(F64, [FR_D], r, g))
@@ -974,7 +974,7 @@ fn count_eq(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let miss = i_const([CNT_TILE], CNT_MISS)
   let t = load_masked(x, blk, [CNT_TILE], m, miss)
   let hit = mask_to_int([CNT_TILE], eq_i([CNT_TILE], t, i_const([CNT_TILE], CNT_TARGET)))
-  let n = d_reduce_i([CNT_TILE], hit, 0, (e, acc) => s_addi(e, acc))
+  let n = d_reduce_i([CNT_TILE], hit, 0, (acc, e) => s_addi(acc, e))
   store(out, tile_at(i, 1), [1], spread(I32, [1], n))
 }
 
@@ -993,7 +993,7 @@ fn subarray_sum(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let inside = in_range([CNT_TILE], c, SUB_LO, SUB_HI)
   let zero = i_const([CNT_TILE], 0)
   let t = load_masked(x, blk, [CNT_TILE], inside, zero)
-  let s = d_reduce_i([CNT_TILE], t, 0, (e, acc) => s_addi(e, acc))
+  let s = d_reduce_i([CNT_TILE], t, 0, (acc, e) => s_addi(acc, e))
   store(out, tile_at(i, 1), [1], spread(I32, [1], s))
 }
 
@@ -1207,7 +1207,7 @@ fn dot_f16(a: Param[F16], b: Param[F16], out: Param[F64]) -> Unit !Dev = {
   let tb = float_to_float(F16, F64, s, load_masked(b, blk, s, m, z))
   let prod = mul(F64, s, ta, tb)
   store(out, tile_at(i, 1), [1],
-    spread(F64, [1], d_reduce(F64, s, prod, 0.0, (e, acc) => s_addf(F64, e, acc))))
+    spread(F64, [1], d_reduce(F64, s, prod, 0.0, (acc, e) => s_addf(F64, acc, e))))
 }
 
 # The f16 GEMM: leetgpu 22. Knife 8's `matmul` at f16, with an f16
@@ -1382,7 +1382,7 @@ fn sort_rank(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
     lt_i(s2, coord(zero, s2, 1, 1), coord(zero, s2, 0, 1)))
   let before = or_mask(s2, lt(F64, s2, col, row), tie)
   let hit = select(F64, s2, before, f_const(F64, s2, 1.0), f_const(F64, s2, 0.0))
-  let rank = d_reduce_dim(F64, s2, 1, hit, 0.0, (e, acc) => s_addf(F64, e, acc))
+  let rank = d_reduce_dim(F64, s2, 1, hit, 0.0, (acc, e) => s_addf(F64, acc, e))
   scatter(out, float_to_int(F64, s1, rank), s1, load(x, zero, s1))
 }
 
@@ -1406,8 +1406,8 @@ fn merge_rank(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let bcol = load_strided(b, zero, s2, [0, 1])
   let below = select(F64, s2, lt(F64, s2, bcol, arow), one, nought)
   let atmost = select(F64, s2, le(F64, s2, arow, bcol), one, nought)
-  let ca = d_reduce_dim(F64, s2, 1, below, 0.0, (e, acc) => s_addf(F64, e, acc))
-  let cb = d_reduce_dim(F64, s2, 0, atmost, 0.0, (e, acc) => s_addf(F64, e, acc))
+  let ca = d_reduce_dim(F64, s2, 1, below, 0.0, (acc, e) => s_addf(F64, acc, e))
+  let cb = d_reduce_dim(F64, s2, 0, atmost, 0.0, (acc, e) => s_addf(F64, acc, e))
   let lane = lanes(zero, s1)
   scatter(out, add_i(s1, lane, float_to_int(F64, s1, ca)), s1, load(a, zero, s1))
   scatter(out, add_i(s1, lane, float_to_int(F64, s1, cb)), s1, load(b, zero, s1))

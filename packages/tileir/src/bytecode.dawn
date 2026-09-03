@@ -59,8 +59,8 @@ use std/map
 use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI}
-use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, IfElse, YieldVals, Ret}
+use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
@@ -122,6 +122,7 @@ const OP_REMI: Int = 0x5A
 const OP_RESHAPE: Int = 0x5B
 const OP_RETURN: Int = 0x5C
 const OP_RSQRT: Int = 0x5D
+const OP_SCAN: Int = 0x5E
 const OP_SELECT: Int = 0x5F
 const OP_SHLI: Int = 0x60
 const OP_SHRI: Int = 0x61
@@ -842,7 +843,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # optional field); attributes in declaration order: `dim` inline, then
     # the `identities` array as its length and one self-contained attribute
     # each; operands: their count, then the tiles; one region of one block
-    # whose arguments are the element and the accumulator of each operand,
+    # whose arguments are the accumulator and the element of each operand,
     # in operand order.
     let w1 = emit(emit(w0, OP_REDUCE), len(tys))
     let w2 = list.fold(tys, w1, (w, t) => {
@@ -862,6 +863,32 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w8 = number_all(w7, args)
     let w9 = list.fold(body, emit(w8, len(body)), instr)
     # the block is over: its indices roll back, the results take them
+    roll_back(w7, w9)
+  }
+  ScanTile(_results, tys, dim, reverse, identities, operands, operand_tys, args, body) -> {
+    # `reduce`'s layout with one attribute more. The arguments are declared
+    # `operands`, `dim`, `reverse`, `identities`, so the attributes go out
+    # in that order: `dim` inline, then `reverse` as ONE BYTE (0 or 1: the
+    # writer's bool path is writeByte, not an enum's varint), then the
+    # identities array. `reverse` is a plain BoolAttr, not an
+    # `OptionalAttr`, so it takes no flags bit and the operation writes no
+    # flags varint, by knife 10's judgement.
+    let w1 = emit(emit(w0, OP_SCAN), len(tys))
+    let w2 = list.fold(tys, w1, (w, t) => {
+      let (wt, ti) = ty(w, t)
+      emit(wt, ti)
+    })
+    let w3 = emit(emit(emit(w2, dim), if reverse { 1 } else { 0 }), len(identities))
+    let w4 = list.fold(identities, w3, identity_attr)
+    let w5 = list.fold(operands, emit(w4, len(operands)), emit_ref)
+    let w6 = emit(emit(emit(w5, 1), 1), len(args))
+    let w7 = list.fold(range(0, len(args)), w6, (w, k) => {
+      # rank-0 block arguments, as a reduction's are
+      let (wt, ti) = ty(w, rank0_of(operand_tys[k / 2]))
+      emit(wt, ti)
+    })
+    let w8 = number_all(w7, args)
+    let w9 = list.fold(body, emit(w8, len(body)), instr)
     roll_back(w7, w9)
   }
   IfElse(_results, tys, cond, _cond_ty, on_true, on_false) -> {
