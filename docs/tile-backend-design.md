@@ -665,7 +665,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 | 层 | 每次 push | 工具 | 抓什么 | 抓不到什么 |
 |----|-----------|------|--------|-----------|
 | 0 文本 golden | 是 | 无 | 记录 handler 与渲染器改了没 | 发的对不对 |
-| 1 字节码编译 | 是（刀 3 起，`tile` job） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
+| 1 字节码编译 | 是（刀 3 起；今天是 `tile-golden-1 / tile-golden-2` 两片） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
 | 2 执行对拍 | 否，本机 | 3080 加驱动不低于 580 | 算的对不对（逐位与容差两档） | 其它架构 |
 
 层 0 golden 放 `scripts/tile-golden/*.mlir` 与 `*.tilebc`（字节码也钉，两后端逐字节），确定性
@@ -708,7 +708,7 @@ kernel 的文本与字节码 golden，两后端逐字节；层 1 CI 每 push；�
 `run.sh` 拿 `kernels --bytecode-version` 对 `bytecode` 行、拿 `tileiras --version` 对 `tileiras` 行，
 任一不符直接红；刀 4 起 `driver` 行也是机器读的：`tile-gpu-diff/run.sh` 在它与 `nvidia-smi` 不符时
 拒绝写台账，`--check` 要求它等于台账末行的驱动（§6.4）。与计划稿的一处出入：wheel 的 sha256 不写在 `gates.yml` 里而写在这个文件里，
-因为本机装与 CI 装要读同一份。`gatemap.py` 对它的判词是 `exact`（`tile` job 的两步都以它为输入），
+因为本机装与 CI 装要读同一份。`gatemap.py` 对它的判词是 `exact`（两个 tile-golden 分片各自的两步都以它为输入），
 对 `packages/tileir/src/bytecode.dawn` 是 `coarse`（`run.sh` 点名 `packages/tileir`）；
 计划稿想要的「coupled」不必另加规则，run.sh 的交叉校验就是那条耦合的机器形态。
 
