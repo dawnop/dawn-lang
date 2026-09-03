@@ -1,0 +1,181 @@
+# Child processes answered from a script, without a host.
+#
+# Test support, and the `Proc` counterpart of `driver/fsmem`'s `Fs` table. A
+# test writes down what it expects to be asked and what the answer is, runs the
+# code under test, and reads back every invocation the code made: the two
+# things a real `curl` or `cc` cannot offer, because a command line is a list
+# and the only way to hold one is to compare the whole list.
+#
+# It lives in compiler-plan rather than in std for `driver/fsmem`'s reason. The
+# bootstrap seed compiles HEAD against the std the seed shipped with, so a std
+# function added in this release cannot be called here until the next one; a
+# table handler in std would be unusable for a whole release. compiler-plan is
+# a dependency of selfhost, so a handler here is reachable from both.
+#
+# A reply's bytes go to the caller's `out_path` through `Fs`, which is what the
+# host primitive does and the reason the arms are charged `!Fs` where this is
+# installed. Whichever `Fs` handler is in scope decides where they land: a real
+# directory under `io.with_fs_real`, a table under a table.
+
+use std/io
+use std/io.{Fs, Proc}
+use std/bytes
+
+## One invocation, recorded exactly as the arm received it.
+pub type ProcCall = {
+  argv: List[String],
+  out_path: String,
+  err_path: String
+}
+
+## The answer to one invocation: what `run` returns, plus what the child is
+## taken to have written to each stream.
+##
+## `answer` is `run`'s own answer and carries the same distinction: `Ok(n)` is
+## a child that ran and exited `n`, `Err` is one that could not be started at
+## all. The two byte fields are written before the answer is given, in the
+## order a child writes them, so code that reads `err_path` after a non-zero
+## status finds what the script put there.
+pub type ProcReply = {
+  answer: Result[Int, ForeignError],
+  out: Bytes,
+  err: String
+}
+
+## A child that exited `status` and wrote nothing.
+pub fn exited(status: Int) -> ProcReply =
+  ProcReply { answer: Ok(status), out: bytes.utf8(""), err: "" }
+
+## A child that exited 0 after writing `out` to the file named by `out_path`.
+pub fn wrote(out: Bytes) -> ProcReply =
+  ProcReply { answer: Ok(0), out: out, err: "" }
+
+## A child that exited `status` after writing `err` to the file named by
+## `err_path`, which is the shape of a `curl --fail` refusal.
+pub fn failed(status: Int, err: String) -> ProcReply =
+  ProcReply { answer: Ok(status), out: bytes.utf8(""), err: err }
+
+## A program that could not be started, answered with a `ForeignError` where a
+## host would have raised its own. The `kind` is the table's, so a test that
+## matches on it is asserting about the table and not about a backend's
+## spelling of a missing executable.
+pub fn unstartable(message: String) -> ProcReply =
+  ProcReply {
+    answer: Err(ForeignError {
+      kind: "proctable.unstartable",
+      message: message,
+      cause: None
+    }),
+    out: bytes.utf8(""),
+    err: ""
+  }
+
+fn show_argv(argv: List[String]) -> String = {
+  var out = ""
+  for a in argv {
+    out = if out == "" { "`" ++ a ++ "`" } else { out ++ " `" ++ a ++ "`" }
+  }
+  out
+}
+
+## Run `body` with `Proc` answered from `script`, one reply per invocation in
+## order, and hand back every invocation that was made.
+##
+## An invocation the script has no reply for is a panic naming the argv rather
+## than an `Err`: a test that asks one more question than it wrote down has
+## stopped describing the code under test, and an `Err` there would be read as
+## the code's own failure.
+##
+## Every arm resumes in tail position. The cursor and the log are handler cells
+## (spec §6.5), which is what lets one invocation be seen by the next one and
+## by the caller here.
+pub fn with_proc_table[T](
+  script: List[ProcReply],
+  body: fn() -> T !Proc !Fs !io
+) -> (T, List[ProcCall]) !Fs !io = {
+  with handle Proc {
+    var log: List[ProcCall] = []
+    var next: Int = 0
+    proc_run(argv, out_path, err_path) => {
+      log = log ++ [ProcCall { argv: argv, out_path: out_path, err_path: err_path }]
+      if next >= len(script) {
+        panic("with_proc_table: no reply left for " ++ show_argv(argv))
+      }
+      let reply = script[next]
+      next = next + 1
+      # Each stream goes to the file the caller named, truncating it, which is
+      # what `io.run` documents; an empty path leaves that stream where this
+      # process's already points, so nothing is written for it.
+      if out_path != "" {
+        match io.write_bytes(out_path, reply.out) {
+          Ok(_) -> ()
+          Err(e) -> panic("with_proc_table: cannot write " ++ out_path ++ ": " ++ e.message)
+        }
+      }
+      if err_path != "" {
+        match io.write_file(err_path, reply.err) {
+          Ok(_) -> ()
+          Err(e) -> panic("with_proc_table: cannot write " ++ err_path ++ ": " ++ e.message)
+        }
+      }
+      reply.answer
+    }
+  }
+  let out = body()
+  (out, log)
+}
+
+## The argv of the `n`th invocation, for a test that walks one command line an
+## element at a time.
+pub fn call_argv(log: List[ProcCall], n: Int) -> List[String] = log[n].argv
+
+# ---- tests ----
+
+test "the table answers in order and records what it was asked" {
+  let (kinds, log) = io.with_fs_real(() => with_proc_table(
+    [exited(0), failed(22, "curl: (22) 404\n"), unstartable("no curl on PATH")],
+    () => {
+      var out: List[String] = []
+      assert io.run(["true"], "", "") == Ok(0)
+      assert io.run(["curl", "--fail", "https://example.invalid"], "", "") == Ok(22)
+      # the seam is below the error surface, so the arm's own `kind` arrives
+      # unrewritten
+      match io.run(["curl"], "", "") {
+        Ok(_) -> { assert false }
+        Err(e) -> { out = out ++ [e.kind] }
+      }
+      out
+    }
+  ))
+  assert kinds == ["proctable.unstartable"]
+  # every element, in order, and both stream paths, for every invocation
+  assert len(log) == 3
+  assert log[0] == ProcCall { argv: ["true"], out_path: "", err_path: "" }
+  assert call_argv(log, 1) == ["curl", "--fail", "https://example.invalid"]
+  assert call_argv(log, 2) == ["curl"]
+}
+
+test "a reply's bytes land at the paths the caller named" {
+  io.with_fs_real(() => {
+    let dir = match io.temp_dir("", "dawn-proctable-") {
+      Ok(d) -> d
+      Err(e) -> panic("temp dir: " ++ e.message)
+    }
+    let body = dir ++ "/body"
+    let diag = dir ++ "/diag"
+    let (status, log) = with_proc_table(
+      [failed(7, "it went wrong\n")],
+      () => io.run(["curl", "-o", body], body, diag)
+    )
+    assert status == Ok(7)
+    assert io.read_file(diag) == Ok("it went wrong\n")
+    # the out path is truncated even when the child wrote nothing to it
+    assert io.read_file(body) == Ok("")
+    assert log[0].out_path == body
+    assert log[0].err_path == diag
+    let _ = io.delete(body)
+    let _ = io.delete(diag)
+    let _ = io.delete(dir)
+    ()
+  })
+}
