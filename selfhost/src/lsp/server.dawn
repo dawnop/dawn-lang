@@ -24,6 +24,7 @@ use driver/analyze.{
   project_module_path, load_entries_over, canon
 }
 use compiler_plan/source
+use compiler_plan/envmem
 use ir/interp.{ct_default}
 use check/jsig.{JsigLease, jsig_refused_lease}
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
@@ -99,6 +100,14 @@ fn jrange(v: SourceView, ls: List[Int], lo: Int, hi: Int) -> Json = {
 
 fn jpos(line: Int, ch: Int) -> Json =
   jobj([("line", JInt(line)), ("character", JInt(ch))])
+
+## Run `body` with no host environment behind it, for the tests below whose
+## `--std` is an absolute directory of their own making. `handle` above
+## installs the real handler because a real editor session is what it serves.
+fn no_host[T](body: fn() -> T !Env !Fs !io) -> T !Fs !io = {
+  let (out, _) = envmem.with_env_table(envmem.TABLE_CWD, [], body)
+  out
+}
 
 test "positions bridge code-point offsets and utf-16 columns at the boundary" {
   # "a🎈b\nx": 🎈 is one code point but two UTF-16 units. `b` is code-point
@@ -1969,6 +1978,8 @@ fn handle_formatting(st: LspState, params: Json) -> Json !io = {
 }
 
 test "a bundled std buffer keeps its std identity through the document seam" {
+  # the real handler stays: `load_std("std")` names a relative directory, so
+  # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
     # `standalone_doc` is where `textDocument/didOpen` records what a buffer is.
     # It used to write the literal "main", which `analyze_standalone` proposes
@@ -2152,6 +2163,8 @@ fn def_probe_span(t: Target, what: String) -> (Int, Int) =
   }
 
 test "a definition in std names std's file and points at the declaration" {
+  # the real handler stays: `load_std("std")` names a relative directory, so
+  # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
     # The bug this pins: `def_path` None means "the document being analyzed", and
     # std used to answer with it. `location_of` then mapped std's offsets through
@@ -2202,7 +2215,7 @@ test "a definition in std names std's file and points at the declaration" {
 }
 
 test "an embedded std offers no definition instead of one in the wrong file" {
-  io.with_fs_real(() => io.with_env_real(() => {
+  io.with_fs_real(() => no_host(() => {
     # A released toolchain in a project with no std directory: the embedded copy
     # answers, and there is no file on disk to jump into. The honest reply is no
     # definition at all. Emitting a None path here would be the original bug --
@@ -2239,7 +2252,7 @@ test "an embedded std offers no definition instead of one in the wrong file" {
 }
 
 test "a definition of a std constant names std's file too" {
-  io.with_fs_real(() => io.with_env_real(() => {
+  io.with_fs_real(() => no_host(() => {
     # `def_of_const_in` reaches std through its own loop rather than through
     # `module_ast_by_class`, and today's bundle declares no `pub const` at all,
     # so the real std cannot exercise it: a mutant reverting that branch on its
@@ -2280,6 +2293,8 @@ test "a definition of a std constant names std's file too" {
 }
 
 test "a local definition still resolves against the requesting document" {
+  # the real handler stays: `load_std("std")` names a relative directory, so
+  # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
     # The contract the std fix leans on, from the other side. `def_path` None has
     # to keep meaning "this buffer" -- that is what makes a definition in the file
@@ -2341,6 +2356,8 @@ fn cell_probe_text() -> String =
   ], "\n")
 
 test "a handler state cell answers at every spelling of it" {
+  # the real handler stays: `load_std("std")` names a relative directory, so
+  # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
     # A cell is not an ordinary binding by the time it is typed: the checker
     # rewrites every read into `cell_get`/`cell_take` and every write into

@@ -37,6 +37,7 @@ use embed/stdsrc
 use ir/lower.{parser_impl}
 use version.{VERSION}
 use fspath/fspath
+use compiler_plan/envmem
 
 ## A path in the one spelling module identities are compared by: absolute and
 ## normalized. The body is one of three byte-identical copies:
@@ -572,6 +573,14 @@ fn put(p: String, text: String) -> Unit !Fs =
     Err(e) -> panic("test setup: " ++ e.message)
   }
 
+## Run `body` with no host environment behind it, for the tests below whose
+## `--std` is an absolute directory of their own making: the working directory
+## is a value none of them depend on, and a directory no host has says so.
+fn no_host[T](body: fn() -> T !Env !Fs !io) -> T !Fs !io = {
+  let (out, _) = envmem.with_env_table(envmem.TABLE_CWD, [], body)
+  out
+}
+
 test "the embedded std matches std/ on disk" {
   # The real disk, deliberately: the working tree's std/ is the object under
   # assertion, so a table handler here would assert nothing.
@@ -606,7 +615,7 @@ test "the embedded std matches std/ on disk" {
 }
 
 test "the loader's id counter opens past every prelude id" {
-  io.with_fs_real(() => io.with_env_real(() => {
+  io.with_fs_real(() => no_host(() => {
     # `load_std` used to open its counter at the literal 2, which is
     # `ForeignError`'s ADT id, and it is the counter the production path
     # actually reads. Nothing ever fired, for a reason that is not a
@@ -646,6 +655,8 @@ test "the loader's id counter opens past every prelude id" {
 }
 
 test "production comptime body tables contain only direct std functions" {
+  # the real handler stays: `load_std("std")` names a relative directory, so
+  # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
     let std = match load_std("std") {
       Ok(s) -> s
@@ -685,6 +696,8 @@ test "production comptime body tables contain only direct std functions" {
 }
 
 test "the numeric parsers still have somewhere to land" {
+  # the real handler stays: `load_std("std")` names a relative directory, so
+  # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
     # `lower` rewrites `parse_int(s)` into a direct call to std/fmt.atoi. Since
     # v0.55.0 those three are not exported, so no call site names them and no
@@ -722,6 +735,8 @@ test "the numeric parsers still have somewhere to land" {
 }
 
 test "float rendering and parsing fold through std/fmt, not the host" {
+  # the real handler stays: `load_std("std")` names a relative directory, so
+  # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
     # The RP-12 gate's float line, after audits RP-01/RP-05 moved the answers
     # into std: `to_string(Float)` lowers to std/fmt.dtoa and the parsers to
@@ -771,6 +786,8 @@ test "float rendering and parsing fold through std/fmt, not the host" {
 }
 
 test "the bundled std loads, checks and evaluates" {
+  # the real handler stays: `load_std("std")` names a relative directory, so
+  # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
     match load_std("std") {
       Ok(std) -> {
@@ -831,7 +848,7 @@ test "std/ stamps itself with this toolchain's version" {
 }
 
 test "a std directory from another release is refused by version, not by symptom" {
-  io.with_fs_real(() => io.with_env_real(() => {
+  io.with_fs_real(() => no_host(() => {
     # The reachability half of the diagnostic. Before this, a std out of step
     # with the compiler surfaced wherever it first failed to type-check, and the
     # message that came out named a std module and a type error: true, and no
@@ -865,7 +882,7 @@ test "a std directory from another release is refused by version, not by symptom
 }
 
 test "an unstamped std directory that will not load is not called a compiler bug" {
-  io.with_fs_real(() => io.with_env_real(() => {
+  io.with_fs_real(() => no_host(() => {
     # The other side of the same rule. A directory with no VERSION file is every
     # std published before the stamp existed, so it must stay loadable and its
     # failures must still point at the directory. Only the copy compiled into
@@ -896,7 +913,7 @@ test "an unstamped std directory that will not load is not called a compiler bug
 }
 
 test "a std directory with no modules.txt falls back to the embedded copy" {
-  io.with_fs_real(() => io.with_env_real(() => {
+  io.with_fs_real(() => no_host(() => {
     # `--std` pointed somewhere that has nothing to do with std is not a skew:
     # the embedded index answers, so the load is the embedded std's and must
     # succeed. This is the negative control for the version check, an absent
@@ -914,6 +931,8 @@ test "a std directory with no modules.txt falls back to the embedded copy" {
 }
 
 test "a std module's file is only known when a directory supplied it" {
+  # the real handler stays: `load_std("std")` names a relative directory, so
+  # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
     # `std_file_of` is what lets a reader jump into std, and the answer it must
     # not invent is the one for a module the embedded copy filled in: there is no

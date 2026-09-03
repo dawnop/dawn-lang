@@ -13,6 +13,7 @@ use std/list
 use std/map
 use std/set
 use diagnostic.{Diag}
+use envmem
 use manifestv.{
   ManifestV, VPath, VUrl, SemV, MCoord, semv_show, semv_lt, mcoord_show, validate,
   check_v2_name
@@ -787,8 +788,16 @@ fn proj_of_root(root: String) -> String =
     None -> root
   }
 
+## Run `body` with no host environment behind it. Every path the tests below
+## name is absolute, so `canon` asks for the working directory and resolves a
+## name the answer cannot move; a directory no host has says so.
+fn no_host[T](body: fn() -> T !Env !Fs !io) -> T !Fs !io = {
+  let (out, _) = envmem.with_env_table(envmem.TABLE_CWD, [], body)
+  out
+}
+
 test "SourcePlan owns the directory and file source roots" {
-  io.with_env_real(() => {
+  let (_, log) = envmem.with_env_table(envmem.TABLE_CWD, [], () => {
     let (dir_project, dir_root) =
       source_roots(ProjectDirectory("/tmp/dawn-planner-dir"))
     assert dir_project == "/tmp/dawn-planner-dir"
@@ -799,10 +808,13 @@ test "SourcePlan owns the directory and file source roots" {
     assert file_project == "/tmp/dawn-planner-file"
     assert file_root == "/tmp/dawn-planner-file/src"
   })
+  # an absolute target is planned without one question to the host: both roots
+  # above are arithmetic on the name that was handed in
+  assert log == []
 }
 
 test "bootstrap source inputs reject file plans before inspecting the base" {
-  io.with_fs_real(() => io.with_env_real(() => {
+  io.with_fs_real(() => no_host(() => {
     let no_pkgs: Map[String, PkgR] = map.empty()
     let no_diags: List[LocDiag] = []
     let plan = SourcePlan {
