@@ -25,7 +25,7 @@ use envmem.{AskedCwd, AskedGet}
 ## The content-addressed cache root: $DAWN_PKG_CACHE, then ~/.dawn/pkg. An
 ## environment variable and nothing else — the tests set it too, and there is
 ## no JVM system property in the chain for a native build to be missing.
-pub fn cache_root() -> String !Env !io =
+pub fn cache_root() -> String !Env =
   match io.getenv("DAWN_PKG_CACHE") {
     Some(p) -> p
     None ->
@@ -279,7 +279,7 @@ fn write_file_bytes(path: String, bs: Bytes) -> Result[Unit, String] !Fs = {
 ## there are no links of the archive's making to follow, and a link already in
 ## the destination would be the caller's own. What has to be refused is `..`,
 ## and that is arithmetic on the name.
-fn entry_path(dest: String, name: String) -> Result[String, String] !Env !io = {
+fn entry_path(dest: String, name: String) -> Result[String, String] !Env = {
   let base = fspath.absolute(dest, io.cwd())
   let out = fspath.absolute(dest ++ "/" ++ name, io.cwd())
   if out == base || str.starts_with(out, base ++ "/") {
@@ -298,7 +298,7 @@ fn entry_path(dest: String, name: String) -> Result[String, String] !Env !io = {
 ## left of the archive budget -- and stops the entry mid-expansion when its
 ## directory lied. Between the two there is no point at which a bomb has been
 ## materialised and is waiting to be measured.
-fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !Env !io = {
+fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
   let metas = match zip.headers(bs) {
     Ok(ms) -> ms
     Err(e) -> return Err(e ++
@@ -408,7 +408,7 @@ fn pax_path(recs: String) -> Option[String] = {
   out
 }
 
-fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !Fs !Env !io = {
+fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
   # The ceiling goes in, rather than a length check coming out: `gunzip` used
   # to materialise the whole member first, so the archive budget was a thing
   # this learned about a bomb after paying for it. The caller has already
@@ -485,7 +485,7 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !Fs !Env !io = {
   }
 }
 
-fn unpack(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !Env !io =
+fn unpack(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !Env =
   if bytes.len(bs) >= 2 && bytes.at(bs, 0) == 31 && bytes.at(bs, 1) == 139 {
     untar(bs, dest)
   } else {
@@ -521,11 +521,11 @@ pub fn delete_tree(path: String) -> Unit !Fs = {
 ## Fetch `url`, unpack, hash, and file the tree into the cache under its own
 ## (actual) hash. Returns (cache entry, d1 hash) — `add` uses this to learn the
 ## hash of an archive it has never seen.
-pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !Fs !Proc !Env !io =
+pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !Fs !Proc !Env =
   fetch_and_hash_in(cache_root(), url)
 
 ## The same, under a named cache root.
-fn fetch_and_hash_in(root: String, url: String) -> Result[(String, String), String] !Fs !Proc !Env !io = {
+fn fetch_and_hash_in(root: String, url: String) -> Result[(String, String), String] !Fs !Proc !Env = {
   mkdirs(root)
   # staged inside the cache root, so the publishing rename below stays on one
   # filesystem and is therefore atomic
@@ -548,7 +548,7 @@ fn fetch_and_hash_in(root: String, url: String) -> Result[(String, String), Stri
 ## The body of the fetch. Still its own function, but no longer *because* of
 ## the release: the staging directory now has a bracket around it, and this
 ## keeps its four early `Err` returns, which the sugared region would refuse.
-fn fetch_into(root: String, url: String, work: String) -> Result[(String, String), String] !Fs !Proc !Env !io = {
+fn fetch_into(root: String, url: String, work: String) -> Result[(String, String), String] !Fs !Proc !Env = {
   let body = match download(url) {
     Ok(b) -> b
     Err(e) -> return Err(e)
@@ -625,11 +625,11 @@ pub fn verify_cached(dir: String, hash: String) -> Result[Unit, String] !Fs =
 ## An entry with no record is verified rather than adopted. Adopting would be
 ## cheaper and would let exactly one bump through — the first one after this
 ## code ships, which is the occurrence it was written for.
-pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !Fs !Proc !Env !io =
+pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !Fs !Proc !Env =
   check_origin_in(cache_root(), url, hash)
 
 ## The same, under a named cache root.
-fn check_origin_in(root: String, url: String, hash: String) -> Result[Unit, String] !Fs !Proc !Env !io = {
+fn check_origin_in(root: String, url: String, hash: String) -> Result[Unit, String] !Fs !Proc !Env = {
   for u in recorded_origins(root, hash) { if u == url { return Ok(()) } }
   match fetch_and_hash_in(root, url) {
     Err(e) -> Err(e)
@@ -661,11 +661,11 @@ fn check_origin_in(root: String, url: String, hash: String) -> Result[Unit, Stri
 ## when the entry exists and the `subdir` inside it does not. The url/hash
 ## guard therefore hangs off the resolver as well; extending PKG-02's re-hash
 ## to every warm build is a separate decision with a per-build price tag.
-pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !Fs !Proc !Env !io =
+pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !Fs !Proc !Env =
   ensure_cached_in(cache_root(), url, hash)
 
 ## The same, under a named cache root.
-fn ensure_cached_in(root: String, url: String, hash: String) -> Result[String, String] !Fs !Proc !Env !io = {
+fn ensure_cached_in(root: String, url: String, hash: String) -> Result[String, String] !Fs !Proc !Env = {
   let target = cache_dir(root, hash)
   if io.is_dir(target) {
     match verify_cached(target, hash) {
@@ -812,7 +812,7 @@ fn temp_root(prefix: String) -> String !Fs =
 ## answer cannot move. Naming a directory no host has says that: with the
 ## real handler the tests read the machine's cwd for a value none of them
 ## depend on.
-fn no_host[T](body: fn() -> T !Env !Fs !Proc !io) -> T !Fs !Proc !io = {
+fn no_host[T](body: fn() -> T !Env !Fs !Proc) -> T !Fs !Proc !io = {
   let (out, _) = envmem.with_env_table(envmem.TABLE_CWD, [], body)
   out
 }

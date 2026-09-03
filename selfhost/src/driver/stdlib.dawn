@@ -45,7 +45,7 @@ use compiler_plan/envmem
 ## file is below it in the layering, so it cannot import it, and
 ## `compiler-plan/src/source.dawn` is in another package that does not depend
 ## on the compiler at all. A change to the spelling is a change to all three.
-fn canon(p: String) -> String !Env !io =
+fn canon(p: String) -> String !Env =
   if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
 ## Everything user-module analysis needs from std.
@@ -280,14 +280,14 @@ pub fn read_index(dir: String) -> Result[List[String], String] !Fs = {
 ## The directory as a reader can act on it: a relative one is resolved against
 ## the working directory it was resolved against, because `std` on its own does
 ## not say which `std`, and the default `--std` is exactly that spelling.
-fn located(dir: String) -> String !Env !io =
+fn located(dir: String) -> String !Env =
   if str.starts_with(dir, "/") {
     dir
   } else {
     dir ++ " (under " ++ io.cwd() ++ ")"
   }
 
-fn origin_text(o: StdOrigin) -> String !Env !io =
+fn origin_text(o: StdOrigin) -> String !Env =
   match o {
     StdFromDir(d) -> "the std in " ++ located(d)
     StdEmbedded -> "the std compiled into this toolchain"
@@ -336,7 +336,7 @@ fn advice(e: StdLoadError) -> String =
 
 ## The one place a failed std load turns into words; both drivers render
 ## through it, so `scripts/native-cli-diff.sh` compares the same sentences.
-pub fn std_load_error_text(e: StdLoadError) -> String !Env !io = {
+pub fn std_load_error_text(e: StdLoadError) -> String !Env = {
   let head = origin_text(e.origin)
   match e.why {
     StdVersionSkew -> {
@@ -528,7 +528,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
 ## a std reached through a symlinked directory is not recognised through the
 ## other spelling. That fails closed: the file checks as user code and reports
 ## the std-only names it uses, which is the pre-existing behaviour.
-pub fn std_module_of(std: StdCtx, path: String) -> Option[String] !Env !io = {
+pub fn std_module_of(std: StdCtx, path: String) -> Option[String] !Env = {
   # an embedded std has no files at all, and canon() costs a cwd read
   if len(map.keys(std.dir_modules)) == 0 {
     let none: Option[String] = None
@@ -559,7 +559,7 @@ pub fn std_file_of(std: StdCtx, mod_path: String) -> Option[String] = {
 
 ## Is `dir` the very directory this compiler read its std from? Used to answer
 ## a directory target as what it is instead of as a malformed project.
-pub fn is_std_dir(std: StdCtx, dir: String) -> Bool !Env !io =
+pub fn is_std_dir(std: StdCtx, dir: String) -> Bool !Env =
   match std.dir {
     Some(d) -> d == canon(dir)
     None -> false

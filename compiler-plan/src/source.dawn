@@ -60,7 +60,7 @@ type SourceInput = { kind: SourceInputKind, path: String }
 ## carry the other two. Nothing is shared, because this is a different package
 ## and compiler-plan does not depend on the compiler. A change to the spelling
 ## is a change to all three.
-fn canon(p: String) -> String !Env !io =
+fn canon(p: String) -> String !Env =
   if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
 ## The manifest beside `dir`'s dawn.toml, validated once per canonical
@@ -70,7 +70,7 @@ fn canon(p: String) -> String !Env !io =
 fn mf_get(
   cache0: Map[String, Option[ManifestV]],
   dir: String
-) -> (Option[ManifestV], List[LocDiag], Map[String, Option[ManifestV]]) !Fs !Env !io = {
+) -> (Option[ManifestV], List[LocDiag], Map[String, Option[ManifestV]]) !Fs !Env = {
   let dc = canon(dir)
   if map.has(cache0, dc) {
     return (map.get(cache0, dc).expect("cached manifest"), [], cache0)
@@ -145,7 +145,7 @@ fn collect_java_coords(root_coords: List[MCoord], pkgs: Map[String, PkgR]) -> Li
 
 # Compute the project and source root together so no consumer has to rediscover
 # the nearest `src` ancestor independently.
-fn source_roots(target: SourceTarget) -> (String, String) !Env !io =
+fn source_roots(target: SourceTarget) -> (String, String) !Env =
   match target {
     ProjectDirectory(dir) -> (dir, dir ++ "/src")
     SourceFile(file) -> {
@@ -157,7 +157,7 @@ fn source_roots(target: SourceTarget) -> (String, String) !Env !io =
 ## Resolve source packages once, then derive Java coordinates from the final
 ## selected graph. Callers choose the target kind explicitly; CLI
 ## existence/type rejection belongs to main.dawn.
-pub fn source_plan(target: SourceTarget) -> SourcePlan !Fs !Proc !Env !io = {
+pub fn source_plan(target: SourceTarget) -> SourcePlan !Fs !Proc !Env = {
   let (project, source_root) = source_roots(target)
   let no_mfc: Map[String, Option[ManifestV]] = map.empty()
   let (url_resolved, url_names, sdiags, mfc) = select_url_deps(project, no_mfc)
@@ -266,7 +266,7 @@ fn collect_source_pkg_inputs(
   pkg: PkgR,
   inputs0: List[SourceInput],
   seen0: Set[String]
-) -> (List[SourceInput], Set[String]) !Env !io = {
+) -> (List[SourceInput], Set[String]) !Env = {
   let root = canon(pkg.root)
   if set.has(seen0, root) { return (inputs0, seen0) }
   var inputs = inputs0
@@ -309,7 +309,7 @@ fn source_input_record(base: String, input: SourceInput) -> String = {
 pub fn bootstrap_source_input_manifest(
   plan: SourcePlan,
   base: String
-) -> Result[String, String] !Fs !Env !io = {
+) -> Result[String, String] !Fs !Env = {
   match plan.target {
     SourceFile(_) ->
       return Err("cannot serialize bootstrap source inputs for a source file target")
@@ -417,7 +417,7 @@ fn url_pkg_root(
   name: String,
   r: UrlReq,
   failed0: UrlFailures
-) -> (Option[String], List[LocDiag], UrlFailures, Bool) !Fs !Proc !Env !io = {
+) -> (Option[String], List[LocDiag], UrlFailures, Bool) !Fs !Proc !Env = {
   let entry = pkgfetch.cache_dir(pkgfetch.cache_root(), r.hash)
   let root = if r.subdir == "" { entry } else { entry ++ "/" ++ r.subdir }
   if mirror_failure_seen(failed0, r.hash, r.url) {
@@ -483,7 +483,7 @@ fn select_url_deps(
   root_dir: String,
   mfc0: Map[String, Option[ManifestV]]
 ) -> (Map[String, Option[String]], Map[String, String], List[LocDiag],
-  Map[String, Option[ManifestV]]) !Fs !Proc !Env !io = {
+  Map[String, Option[ManifestV]]) !Fs !Proc !Env = {
   var mfc = mfc0
   var reqs: Map[String, List[UrlReq]] = map.empty()
   var url_names: Map[String, String] = map.empty()
@@ -638,7 +638,7 @@ fn resolve_src_deps(
   names0: Map[String, String],
   mfc0: Map[String, Option[ManifestV]]
 ) -> (Map[String, PkgR], List[LocDiag], Map[String, Option[PkgR]], Map[String, String],
-  Map[String, Option[ManifestV]]) !Fs !Env !io = {
+  Map[String, Option[ManifestV]]) !Fs !Env = {
   var out: Map[String, PkgR] = map.empty()
   var diags: List[LocDiag] = []
   var cache = cache0
@@ -753,7 +753,7 @@ fn resolve_src_deps(
   (out, diags, cache, names, mfc)
 }
 
-fn nearest_src_root(file: String) -> String !Env !io = {
+fn nearest_src_root(file: String) -> String !Env = {
   let abs = canon(file)
   var dir = match str.last_index_of(abs, "/") {
     Some(i) -> str.take(abs, i)
@@ -791,7 +791,7 @@ fn proj_of_root(root: String) -> String =
 ## Run `body` with no host environment behind it. Every path the tests below
 ## name is absolute, so `canon` asks for the working directory and resolves a
 ## name the answer cannot move; a directory no host has says so.
-fn no_host[T](body: fn() -> T !Env !Fs !io) -> T !Fs !io = {
+fn no_host[T](body: fn() -> T !Env !Fs) -> T !Fs !io = {
   let (out, _) = envmem.with_env_table(envmem.TABLE_CWD, [], body)
   out
 }

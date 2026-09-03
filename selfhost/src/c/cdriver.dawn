@@ -221,7 +221,7 @@ fn parse_mode_flips(spec: String) -> List[ModeFlip] = {
 ## return their inputs unchanged, and the produced C is byte-for-byte what it
 ## was before the channel existed (the harness pins that as its clean
 ## control).
-fn mode_flips_from_env() -> List[ModeFlip] !Env !io =
+fn mode_flips_from_env() -> List[ModeFlip] !Env =
   match io.getenv("DAWN_RC_MODE_FLIPS") {
     None -> [],
     Some(s) -> parse_mode_flips(s)
@@ -355,7 +355,7 @@ fn build_units(
   prog: Program,
   with_tests: Bool,
   std_tests: Bool
-) -> (List[EmitMod], String, Adts, Map[(String, String), List[CMode]]) !Env !io = {
+) -> (List[EmitMod], String, Adts, Map[(String, String), List[CMode]]) !Env = {
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
   # `flips` is the mutant harness's injection channel (see ModeFlip above)
   # and is empty on every compile that did not set DAWN_RC_MODE_FLIPS.
@@ -492,7 +492,7 @@ fn tables(live: Option[Live]) -> TableUse =
 ## `main`. std goes in first: a C translation unit needs a definition for
 ## everything it calls, and after S3 the collections *are* std -- `[1, 2]`
 ## calls `std/pvec.from_array`.
-pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !Env !io = {
+pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !Env = {
   let (units, entry, adts, modes) = build_units(std, prog, false, false)
   if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
   let lv = live(units, prog, false)
@@ -514,7 +514,7 @@ pub fn c_test_text(
   prog: Program,
   tests: List[(String, Int, String)],
   std_tests: Bool
-) -> Result[String, String] !Env !io = {
+) -> Result[String, String] !Env = {
   let (units, _entry, adts, modes) = build_units(std, prog, true, std_tests)
   let lv = live(units, prog, std_tests)
   Ok(emitc.emit_headless(units, tables(lv), lv, adts, modes) ++

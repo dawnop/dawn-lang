@@ -85,7 +85,7 @@ pub type ProjectPlan = {
 ## below this file in the layering and cannot import it, and
 ## `compiler-plan/src/source.dawn` is in another package that does not depend
 ## on the compiler at all. A change to the spelling is a change to all three.
-pub fn canon(p: String) -> String !Env !io =
+pub fn canon(p: String) -> String !Env =
   if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
 fn seg_ok(s: String) -> Bool = {
@@ -143,7 +143,7 @@ fn module_path_of(root_abs: String, file_abs: String) -> String = {
 ## The legal module path `file` has inside one captured project plan. LSP
 ## workspace membership uses the same derivation and rejection as the loader,
 ## including unsaved files that are not present in the captured tree walk.
-pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !Env !io = {
+pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !Env = {
   if not str.ends_with(file, ".dawn") { return None }
   let mod_path = module_path_of(canon(plan.source.source_root), canon(file))
   if len(bad_segments(mod_path)) == 0 { Some(mod_path) } else { None }
@@ -198,7 +198,7 @@ fn missing_source_root(dir: String) -> LoadResult = {
 ## result use this seam rather than planning first and trying to undo it.
 pub fn project_plan_for_load(
   target: source.SourceTarget
-) -> Result[ProjectPlan, LoadResult] !Fs !Proc !Env !io =
+) -> Result[ProjectPlan, LoadResult] !Fs !Proc !Env =
   match target {
     source.ProjectDirectory(dir) ->
       if io.is_dir(dir ++ "/src") {
@@ -268,7 +268,7 @@ pub fn load_directory(dir: String) -> LoadResult !Fs !Proc !Env !io =
 ## Provenance, not spelling: this is the directory `--std` actually answered
 ## from, whatever it is named, and a project directory called `std` still gets
 ## the project diagnostics.
-pub fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !Fs !Env !io = {
+pub fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !Fs !Env = {
   let none: Option[LoadResult] = None
   if not io.is_dir(target) { return none }
   if not is_std_dir(std, target) { return none }
@@ -742,7 +742,7 @@ fn empty_ctout() -> CtOut = {
 ## in its declarations (`declared_audience`), so a half-identity -- std powers
 ## under the name `hamt` -- publishes an internal module to the world and
 ## fails a different way.
-fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !Env !io =
+fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !Env =
   match std_module_of(std, mf.path) {
     Some(mod_path) -> (LoadedModule { ..mf, mod_path: mod_path, class_name: mod_path }, true)
     None -> (mf, false)
@@ -873,7 +873,7 @@ fn index_files(
   root: String,
   prefix: String,
   files: List[String]
-) -> Map[String, String] !Env !io = {
+) -> Map[String, String] !Env = {
   var out = out0
   let root_abs = canon(root)
   for f in files {
@@ -889,7 +889,7 @@ fn index_files(
 ## Capture source resolution and derive every compiler-facing module path from
 ## it. The project tree is walked once. Direct dependencies sharing one source
 ## root reuse the same walk while still receiving each consumer alias prefix.
-pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !Proc !Env !io = {
+pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !Proc !Env = {
   let source_plan = source.source_plan(target)
   let project_files = walk_dawn(source_plan.source_root)
   var by_use: Map[String, String] = map.empty()
@@ -931,7 +931,7 @@ pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !Proc !Env !
 ## ProjectPlan. A cold url dep is fetched here the way `dawn check` would fetch
 ## it; the LSP's project-aware path instead reuses the index captured during
 ## analysis.
-pub fn use_candidates(file: String) -> Map[String, String] !Fs !Proc !Env !io = {
+pub fn use_candidates(file: String) -> Map[String, String] !Fs !Proc !Env = {
   # a buffer with no file behind it (`<lsp>`) has no tree to walk, and canon()
   # would resolve that placeholder against the server's own directory
   if not str.ends_with(file, ".dawn") {

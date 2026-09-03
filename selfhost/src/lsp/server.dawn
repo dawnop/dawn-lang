@@ -420,7 +420,7 @@ type WorkspaceIdentity = {
 fn workspace_key_part(value: String) -> String =
   to_string(str.len(value)) ++ ":" ++ value
 
-fn workspace_identity(plan: ProjectPlan) -> WorkspaceIdentity !Env !io = {
+fn workspace_identity(plan: ProjectPlan) -> WorkspaceIdentity !Env = {
   let project = canon(plan.source.project)
   let source_root = canon(plan.source.source_root)
   WorkspaceIdentity {
@@ -1231,7 +1231,7 @@ fn add_loc_diag(
   path_by_uri: Map[String, String],
   out0: Map[String, List[Json]],
   ld: LocDiag
-) -> Map[String, List[Json]] !Fs !Env !io = {
+) -> Map[String, List[Json]] !Fs !Env = {
   var out = out0
   let target = canon(ld.path)
   var matched = false
@@ -1261,7 +1261,7 @@ fn diagnostics_of_program(
   st: LspState,
   path_by_uri: Map[String, String],
   prog: Program
-) -> Map[String, List[Json]] !Fs !Env !io = {
+) -> Map[String, List[Json]] !Fs !Env = {
   var out: Map[String, List[Json]] = map.empty()
   for ld in prog.diags { out = add_loc_diag(st, path_by_uri, out, ld) }
   out
@@ -1271,7 +1271,7 @@ fn diagnostics_of_problem(
   st: LspState,
   path_by_uri: Map[String, String],
   problem: LocDiag
-) -> Map[String, List[Json]] !Fs !Env !io = {
+) -> Map[String, List[Json]] !Fs !Env = {
   let out: Map[String, List[Json]] = map.empty()
   add_loc_diag(st, path_by_uri, out, problem)
 }
@@ -1280,7 +1280,7 @@ fn workspace_inputs(
   st: LspState,
   plan: ProjectPlan,
   path_by_uri: Map[String, String]
-) -> WorkspaceInputs !Env !io = {
+) -> WorkspaceInputs !Env = {
   var texts: Map[String, String] = map.empty()
   var overlay: Map[String, String] = map.empty()
   var entries: List[String] = []
@@ -1362,7 +1362,7 @@ fn unavailable_workspace(
   plan: ProjectPlan,
   path_by_uri: Map[String, String],
   problem: LocDiag
-) -> UnavailableWorkspace !Fs !Env !io =
+) -> UnavailableWorkspace !Fs !Env =
   UnavailableWorkspace {
     plan: plan,
     path_by_uri: path_by_uri,
@@ -1425,7 +1425,7 @@ fn slot_uris(slot: WorkspaceSlot) -> Set[String] = {
   add_uris(out, map.keys(slot_diagnostics(slot)))
 }
 
-fn standalone_diagnostics(d: Doc, prog: Program) -> List[Json] !Env !io = {
+fn standalone_diagnostics(d: Doc, prog: Program) -> List[Json] !Env = {
   var out: List[Json] = []
   for ld in prog.diags {
     let own = match d.canonical_path {
@@ -1440,7 +1440,7 @@ fn standalone_diagnostics(d: Doc, prog: Program) -> List[Json] !Env !io = {
 ## Aggregate every root's contribution before publishing one URI. This is the
 ## clearing rule that prevents one root from erasing another root's diagnostic
 ## when both point at the same manifest, lock or dependency file.
-fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !Env !io = {
+fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !Env = {
   var out: List[Json] = []
   for workspace_key in sort(map.keys(st.workspaces)) {
     let slot = map.get(st.workspaces, workspace_key).expect("workspace")
@@ -1767,7 +1767,7 @@ fn handle_hover(st: LspState, params: Json) -> Json !io = {
   }
 }
 
-fn handle_definition(st: LspState, params: Json) -> Json !Fs !Env !io = {
+fn handle_definition(st: LspState, params: Json) -> Json !Fs !Env = {
   match doc_of(st, params) {
     Some(d) ->
       match analysis_of(st, d) {
@@ -1826,7 +1826,7 @@ fn location_of(
   def_path: Option[String],
   lo: Int,
   hi: Int
-) -> Option[Json] !Fs !Env !io = {
+) -> Option[Json] !Fs !Env = {
   let same = match def_path {
     None -> true
     Some(dp) ->
