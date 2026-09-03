@@ -142,10 +142,12 @@ corpus, and **the tier's internal consumers are in this repository**: `std/io` d
 `Fs`, the file system as fourteen operations, with `with_fs_real` as the handler
 production installs, so a test can answer a file read from a table. The same module
 declares `Proc`, running another program as one operation, with `with_proc_real` for
-production, so a test can hold a command line without starting anything. The third is
-`std/gpu`, which declares `Gpu`, the host side of a device as six operations, with a
-pure fake device as the handler a test installs, so a `!Gpu` program runs on a machine
-with no GPU. Those are the three declarations, in the two files under `std/` and
+production, so a test can hold a command line without starting anything, and `Env`, the
+working directory and the environment as two operations, with `with_env_real` for
+production, so a test can decide what a program reads out of its surroundings. The
+fourth is `std/gpu`, which declares `Gpu`, the host side of a device as six operations,
+with a pure fake device as the handler a test installs, so a `!Gpu` program runs on a
+machine with no GPU. Those are the four declarations, in the two files under `std/` and
 `selfhost/src/` that carry any; `doc-check.py` keeps the list (`NAMED_EFFECT_EXPECTED`)
 and reds this paragraph when a declaration appears outside it or one of them goes away.
 The compiler itself runs on the tier: its `main` installs `with_fs_real` around the

@@ -473,10 +473,11 @@ pub fn with_fs_real[T](body: fn() -> T !Fs !io) -> T !io = {
 # outcome, so `run`'s own empty-argv check and the `io.no_program` it mints
 # stay the code under test when a fake answers.
 #
-# One operation, not four. `exit`, `cwd` and `getenv` are the rest of what this
-# module knows about a process and stay `!io`: an operation is worth its label
-# only where it makes an assertion writable that is not writable today, and
-# theirs are not that. `args` does not join `Proc`: it remains the language
+# One operation, not four. `exit` is the rest of what this module knows about a
+# process and stays `!io`: an operation is worth its label only where it makes
+# an assertion writable that is not writable today, and `exit`'s is not that.
+# `cwd` and `getenv` were set aside here for the same reason and were later
+# found to fail it -- they are `Env` below. `args` does not join `Proc`: it remains the language
 # builtin for immutable whole-program startup input, not a handler operation
 # or wrapper owned by this module. Its JVM field still lives on the program's
 # entry class, and every emitted module names that same program-known owner
@@ -526,6 +527,72 @@ pub fn with_proc_real[T, !e](body: fn() -> T !Proc !e) -> T !io = {
   with handle Proc {
     proc_run(argv, out_path, err_path) =>
       catch_fault(() => io_run(argv, out_path, err_path))
+  }
+  body()
+}
+
+# ---- the process environment as a named effect ----
+#
+# `cwd` and `getenv` above are the public face of the two operations below, on
+# the shape `Fs` settled and `Proc` repeated: a plain declaration, a plain
+# wrapper function as the production handler, and the seam below the error
+# surface. There is no `Result` here to put the seam under, and there does not
+# need to be: `env_get` answers `Option[String]`, so an unset name and a name
+# the host cannot represent are values a caller branches on, and whatever a
+# caller does with `None` stays the code under test when a fake answers.
+#
+# Two operations, and they are the pair the `Proc` block set aside. What
+# changed is not their price but what the tree turned out to be doing with
+# them unlabelled: `pkgfetch.cache_root`'s three branches,
+# `nmain.cc_command`'s four, and `c/cdriver.mode_flips_from_env` all read the
+# environment, all decide something, and none of them has a single assertion.
+# That is not an oversight anyone can fix in place, because there is no
+# `setenv` and no `chdir` in this language to write one with -- the only way
+# to ask what a function does with an environment is to be the environment.
+# `exit` is still not here: its assertion is a different shape, and it arrives
+# with `Console` or not at all.
+#
+# `args` does not join, for the reason the `Proc` block gives about it: it is
+# the language builtin for immutable whole-program startup input, and its JVM
+# field lives on the program's own entry class.
+#
+# The wrapper's body row is `!e` rather than a closed `!(Env | io)`, for the
+# reason `with_proc_real`'s is. A closed row can only be the outermost
+# wrapper, and this one is meant to be the innermost of three: a program
+# installs `with_fs_real`, then `with_proc_real`, then this. The third test
+# below is that claim, made machine-checked rather than remembered.
+#
+# As with `Fs` and `Proc`, the declaration ships one release before anything
+# moves onto it (docs/bootstrap.md, the seed feature discipline). `cwd` and
+# `getenv` are unchanged here: they still reach `io_cwd` and `io_getenv`
+# themselves, and they are callers of these operations no earlier than the
+# release after this one.
+
+## The process environment, as the two operations a handler answers. The names
+## carry an `env_` prefix for the reason the `fs_` and `proc_` ones do: `use
+## std/io.{Env}` brings every operation into the importing module's own
+## namespace (spec §6.5), where `cwd` and `get` are names a module may well
+## have taken for something of its own.
+##
+## `env_get` answers `None` for a name the host has no value for and for one
+## it cannot represent, including an embedded NUL, as its `io.*` twin does.
+## Nothing here declares effects of its own (spec §6.5); what an arm does is
+## charged where the handler is installed.
+pub effect Env {
+  fn env_cwd() -> String
+  fn env_get(name: String) -> Option[String]
+}
+
+## Run `body` against the real process environment. Each arm is the host
+## primitive behind the `io.*` function of the same meaning.
+##
+## This is the production handler: a program installs it at the boundary that
+## owns a whole unit of work, innermost of the three this module offers, and
+## everything beneath sees `Env`. A test installs arms of its own instead.
+pub fn with_env_real[T, !e](body: fn() -> T !Env !e) -> T !io = {
+  with handle Env {
+    env_cwd() => io_cwd()
+    env_get(name) => io_getenv(name)
   }
   body()
 }
@@ -1083,4 +1150,61 @@ test "run reaches the table, and the empty-argv check stays above it" {
     (["true"], "", ""),
     (["sh", "-c", "printf hi"], "/virt/out", "/virt/err")
   ]
+}
+
+test "with_env_real answers cwd and getenv from the host" {
+  with_env_real(() => {
+    # the arm is the host primitive, so the operation and the `io.*` function
+    # of the same meaning are the same question asked twice
+    assert env_cwd() == cwd()
+    assert env_cwd() != ""
+    # a name nothing sets, and a name the host environment API cannot
+    # represent at all: both are `None`, and neither is an error
+    assert env_get("DAWN_STD_TEST_DEFINITELY_UNSET_VARIABLE") == None
+    assert env_get("DAWN_STD_TEST\u{0}INVALID_VARIABLE") == None
+    # whatever the host says about a name it may or may not have, the
+    # operation says the same
+    assert env_get("HOME") == getenv("HOME")
+    assert env_get("PATH") == getenv("PATH")
+  })
+}
+
+test "a handler over a table answers Env without a host" {
+  # What the fake is for: which name a function asks for is the thing worth
+  # asserting, and no host is consulted below.
+  with handle Env {
+    var asked: List[String] = []
+    env_cwd() => "/virt/work"
+    env_get(name) => {
+      asked = asked ++ [name]
+      if name == "DAWN_PKG_CACHE" { Some("/virt/cache") } else { None }
+    }
+  }
+  assert env_cwd() == "/virt/work"
+  assert env_get("DAWN_PKG_CACHE") == Some("/virt/cache")
+  # the seam is below the error surface: an unset name is `None` at the
+  # operation, and what that means is the caller's decision, not the arm's
+  assert env_get("DAWN_PKG_CACHE_NOT_SET") == None
+  assert env_get("HOME") == None
+  # every name, in order, and nothing the caller did not ask for
+  assert asked == ["DAWN_PKG_CACHE", "DAWN_PKG_CACHE_NOT_SET", "HOME"]
+}
+
+test "the three real wrappers nest, and the order is the body rows' doing" {
+  # The nesting is an assertion, not a setting. `with_fs_real`'s body row is
+  # closed, so it can only be the outer one; `with_proc_real` and
+  # `with_env_real` take `!e`, so each can sit inside. Spell `with_env_real`'s
+  # row `!(Env | io)` instead and this block stops compiling: `argument type
+  # mismatch: expected fn() -> Unit !(Env|io), got fn() -> Unit
+  # !(Env|Fs|Proc)`.
+  with_fs_real(() => with_proc_real(() => with_env_real(() => {
+    # all three effects are live in here, and each is answered by its own
+    # wrapper: the environment says where the process is, the file system
+    # agrees that is a directory, and a child process runs there.
+    let here = env_cwd()
+    assert here != ""
+    assert is_dir(here)
+    assert proc_run(["sh", "-c", "exit 0"], "", "") == Ok(0)
+    assert env_get("DAWN_STD_TEST_DEFINITELY_UNSET_VARIABLE") == None
+  })))
 }

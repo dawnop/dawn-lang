@@ -443,9 +443,10 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
    唯一的减法点是 `with handle`。这是健全性要求，但方向上是放大签名噪音而不是缩小。
 
 第一个真实样本已经在了：`std/io` 声明了 `Fs`（文件系统的十四个操作，生产 handler
-`with_fs_real`）。今天 `std/` 与 `selfhost/src/` 下共三条 `effect` 声明，落在两个文件里：
-`std/io` 的 `Fs` 与 `Proc`（跑另一个程序，一个操作 `proc_run`，生产 handler
-`with_proc_real`），以及 `std/gpu` 的 `Gpu`（设备宿主侧的六个操作，测试里由一个纯的假设备
+`with_fs_real`）。今天 `std/` 与 `selfhost/src/` 下共四条 `effect` 声明，落在两个文件里：
+`std/io` 的 `Fs`、`Proc`（跑另一个程序，一个操作 `proc_run`，生产 handler
+`with_proc_real`）与 `Env`（进程环境的两个操作 `env_cwd` / `env_get`，生产 handler
+`with_env_real`），以及 `std/gpu` 的 `Gpu`（设备宿主侧的六个操作，测试里由一个纯的假设备
 应答）。这份清单由
 `scripts/doc-check.py` 的 `NAMED_EFFECT_EXPECTED` 枚举、`check_named_effect_status` 三向钉住
 （清单外的声明、清单内文件失去声明、清单列了不存在的文件，都红；见 [README.md](../README.md)
@@ -497,10 +498,27 @@ Core golden 只动了两个模块里三个闭包类型上印出来的效果行�
 在 `site/src`、`examples`、`playground` 与契约脚本里：控制台 27 条、`io.getenv` 1 条、
 `ProcessBuilder` 1 条。下一族的候选顺序由这张表定，`cwd` 与 `exit` 仍是前两名。
 
+`Env` 是这张表点名的第三族，2026-09-03 走到声明为止：`std/io` 多了 `pub effect Env`
+（两个操作 `env_cwd` 与 `env_get`）与生产 handler `with_env_real`，外加三条 std 自测。
+`io.cwd` 与 `io.getenv` 一个字未改，`selfhost/src` 与 `compiler-plan/src` 一行未动，
+理由与前两族的刀 1a 相同（[bootstrap.md](bootstrap.md) 的特性纪律 4）：种子那份 std 里
+还没有 `Env`，消费者要等下一轮种子推进才迁得动，回填再等一轮。开这一族的理由不在行数
+（预研数出 46 条签名会去掉 `!io`、另有 32 条裸 `!io` 会平移成 `!Env`），在断言：
+`pkgfetch.cache_root` 的三个分支、`nmain.cc_command` 的四个分支、
+`c/cdriver.mode_flips_from_env` 至今零断言，而全树没有 `setenv` 也没有 `chdir`，
+这三条断言今天用任何手段都写不出。`args` 不进这一族（对可达数与转干净数都是 0 增益），
+`exit` 与 `Console` 仍未开族。
+
+`with_env_real` 的 body 行是 `!e`，于是它能当三层的最内层：
+`with_fs_real(() => with_proc_real(() => with_env_real(...)))` 通过。这条次序由 `std/io`
+里那条「the three real wrappers nest」的 test 看着，把行改成闭合的 `!(Env | io)`
+它就编译不过（`expected fn() -> Unit !(Env|io), got fn() -> Unit !(Env|Fs|Proc)`）。
+
 **裁决：已知风险，暂无缓解；效果集别名仍不裁。**
 第二个族的消费者样本到了，答案是它还不够：三个原子的行（`!Fs !Proc !io`）读起来仍然可以，
-`Proc` 也没有把任何一条行推到四个原子。真正会逼出别名的是 `exit`（可达 65 条）与
-`cwd`（86 条），而那两个今天没有独立的断言撑腰，还没有开族的理由。
+`Proc` 也没有把任何一条行推到四个原子。真正会逼出别名的是 `cwd` 与 `exit`。`cwd` 已经开族
+（上面的 `Env`，今天只到声明），四原子的行（`!Fs !Proc !Env !io`）要等它的消费者落地才第一次
+出现，别名的账留到那时按实景看；`exit` 今天仍没有独立的断言撑腰。
 
 ### 8.2 风险二：多 handler 组合的动态语义
 
@@ -527,8 +545,8 @@ Core golden 只动了两个模块里三个闭包类型上印出来的效果行�
   （spec §6.5）；吸收禁令（spec §6.2 规则 7）另外挡住了「静默吞掉外层效果」的静态形态，因为
   `with handle` 只减自己应答的那个标签，别的原子必须留在行里。这两条都不是对顺序的检查。
 
-规模上这笔账今天已经不是零了。`std/` 与 `selfhost/src/` 下有三条 `effect` 声明（§8.1 末段），
-其中 `Fs` 与 `Proc` 同住 `std/io`，两个生产 handler 第一次要考虑谁装在谁外面；仓外的
+规模上这笔账今天已经不是零了。`std/` 与 `selfhost/src/` 下有四条 `effect` 声明（§8.1 末段），
+其中 `Fs`、`Proc` 与 `Env` 同住 `std/io`，三个生产 handler 要考虑谁装在谁外面；仓外的
 backend-dawn 有 `Clock`（`backend-dawn/src/util/clock.dawn`）与 `Upstream`
 （`backend-dawn/src/util/http.dawn`）两个，且它们在生产路径上真的嵌套：
 `svc/monitor.lighthouse_start` 的行是 `!Upstream !io`，体内就地装 `Clock`，而调用它的
@@ -541,6 +559,8 @@ backend-dawn 有 `Clock`（`backend-dawn/src/util/clock.dawn`）与 `Upstream`
 `with_fs_real(() => with_proc_real(...))` 通过，而反过来的次序被检查器按参数类型不匹配拒掉
 （`expected fn() -> T !(Fs|io), got fn() -> T !(Fs|Proc|io)`，`T` 处是具体的返回类型）。`std/io` 里那条
 「one wrapper inside the other」的 test 就是这条判词的看护：把 `!e` 换回闭合行，它编译不过。
+`with_env_real` 也写 `!e`，于是三个 wrapper 的次序由同一条判词管着，看护是同一个文件里那条
+「the three real wrappers nest」。
 这不是对「两个 handler 装错顺序」的检查（octachron 那条结论一个字都没被削弱），它只是把
 「哪一个能当外层」从口头约定变成了签名上的事实。
 

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ aeadef2a93b224e7 -->
+<!-- doc-check: translation-of README.md @ fe52bee9587e4e07 -->
 
 # Dawn
 
@@ -120,9 +120,11 @@ handler 的那一帧更久，并且可以被恢复**一次**。恢复两次不�
 两种形状都有规范、两个后端都实现了、对拍语料也盯着，而且**这一档的内部使用者就在本仓**：
 `std/io` 声明了 `Fs`，把文件系统写成十四个操作，生产安装的 handler 是 `with_fs_real`，
 于是测试可以用一张表应答一次文件读取。同一个模块还声明了 `Proc`，把「跑另一个程序」写成一个
-操作，生产 handler 是 `with_proc_real`，于是测试可以按住一整条命令行而不启动任何东西。第三个
-是 `std/gpu`：它声明了 `Gpu`，把设备的宿主侧写成六个操作，测试安装的 handler 是一个纯的假
-设备，于是 `!Gpu` 程序在没有 GPU 的机器上也能跑。这三条声明落在 `std/` 与 `selfhost/src/` 下
+操作，生产 handler 是 `with_proc_real`，于是测试可以按住一整条命令行而不启动任何东西。还声明了
+`Env`，把工作目录与环境变量写成两个操作，生产 handler 是 `with_env_real`，于是测试可以自己
+决定程序从周遭读到什么。第四个是 `std/gpu`：它声明了 `Gpu`，把设备的宿主侧写成六个操作，
+测试安装的 handler 是一个纯的假设备，于是 `!Gpu` 程序在没有 GPU 的机器上也能跑。这四条声明
+落在 `std/` 与 `selfhost/src/` 下
 仅有的两个文件里；`doc-check.py` 持有这份清单（`NAMED_EFFECT_EXPECTED`），清单外冒出声明、
 或其中一条消失，它都会把这一段判红。编译器自己就跑在这一档上：它的 `main` 把整个 dispatch 包在
 `with_fs_real` 里，于是工具链读写的每个文件都过 `Fs`，而 driver 的分析测试把同一份代码跑在
