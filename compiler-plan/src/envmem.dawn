@@ -1,0 +1,155 @@
+# The process environment answered from a table, without a host.
+#
+# Test support, and the `Env` counterpart of `driver/fsmem`'s `Fs` table and
+# of `procmem`'s `Proc` script. A test writes down the working directory and
+# the variables it wants the code under test to see, runs it, and reads back
+# every question that was asked, in the order it was asked.
+#
+# Nothing else in this language can make that assertion. There is no `setenv`
+# and no `chdir` here, so before this handler a test could not choose the
+# answer to `io.cwd()` or to `io.getenv(name)` by any means, dirty ones
+# included. Three functions read the environment, branch on what comes back,
+# and carried no assertion at all: `pkgfetch.cache_root` with three branches,
+# `nmain.cc_command` with four, and `c/cdriver.mode_flips_from_env` with two.
+#
+# It lives in compiler-plan rather than in std for `procmem`'s reason. The
+# bootstrap seed compiles HEAD against the std the seed shipped with, so a std
+# function added in this release cannot be called here until the next one; a
+# table handler in std would be unusable for a whole release. compiler-plan is
+# a dependency of selfhost, so a handler here is reachable from both.
+#
+# The arms answer out of their own arguments and reach nothing else, so the
+# wrapper's row is `!e`: whatever the body already needed and not one atom
+# more. That is what lets one of these sit inside an `Fs` table, inside a
+# `Proc` script, inside both, or inside neither.
+
+use std/io
+use std/io.{Env, Fs, Proc}
+use std/bytes
+use procmem
+
+## The working directory a table names when its caller has no reason to name
+## one of its own. Absolute, so it is a working directory at all, and one no
+## host has, so a path resolved against it cannot be confused with a real one.
+pub const TABLE_CWD: String = "/dawn-envtable"
+
+## One question the code under test asked, recorded as the arm received it.
+##
+## `AskedCwd` carries nothing because `env_cwd` takes nothing: a log that
+## spelled both queries the same way could not tell "asked where it is" from
+## "asked for a variable named cwd".
+pub type EnvCall =
+  | AskedCwd
+  | AskedGet(name: String)
+
+## The first value declared for `name`, or `None`.
+##
+## Later duplicates are ignored rather than refused: a table is a test's own
+## literal, and the one thing a duplicate must not do is make the answer
+## depend on where in the list it sits.
+fn lookup(vars: List[(String, String)], name: String) -> Option[String] = {
+  var out: Option[String] = None
+  for (k, v) in vars {
+    match out {
+      None -> { if k == name { out = Some(v) } }
+      Some(_) -> ()
+    }
+  }
+  out
+}
+
+## Run `body` with `Env` answered from `cwd` and `vars`, and hand back every
+## query that was made.
+##
+## A name the table does not list answers `None`, which is what a host answers
+## for a name it has no value for: the seam sits below that distinction on
+## purpose (std/io's `Env` block says why), so the branch a caller takes on an
+## unset variable is the caller's own code under test.
+##
+## Both arms resume in tail position. The log is a handler cell (spec §6.5),
+## which is what lets one query be seen by the next one and by the caller
+## here.
+pub fn with_env_table[T, !e](
+  cwd: String,
+  vars: List[(String, String)],
+  body: fn() -> T !Env !e
+) -> (T, List[EnvCall]) !e = {
+  with handle Env {
+    var log: List[EnvCall] = []
+    env_cwd() => {
+      log = log ++ [AskedCwd]
+      cwd
+    }
+    env_get(name) => {
+      log = log ++ [AskedGet(name)]
+      lookup(vars, name)
+    }
+  }
+  let out = body()
+  (out, log)
+}
+
+## The names `env_get` was asked for, in order, with the `env_cwd` queries
+## dropped. For a test that cares which variables were consulted and not how
+## the working directory was interleaved with them.
+pub fn asked_names(log: List[EnvCall]) -> List[String] = {
+  var out: List[String] = []
+  for c in log {
+    match c {
+      AskedCwd -> ()
+      AskedGet(n) -> { out = out ++ [n] }
+    }
+  }
+  out
+}
+
+# ---- tests ----
+
+test "the table answers cwd, a set name and an unset one" {
+  let (seen, log) = with_env_table(
+    "/virt/work",
+    [("DAWN_PKG_CACHE", "/virt/cache"), ("HOME", "/virt/home")],
+    () => [
+      io.cwd(),
+      match io.getenv("DAWN_PKG_CACHE") { Some(p) -> p, None -> "<unset>" },
+      match io.getenv("HOME") { Some(p) -> p, None -> "<unset>" },
+      match io.getenv("CC") { Some(p) -> p, None -> "<unset>" }
+    ]
+  )
+  assert seen == ["/virt/work", "/virt/cache", "/virt/home", "<unset>"]
+  # a name the table does not list is `None`, not the empty string and not the
+  # host's answer for it
+  assert len(log) == 4
+  assert log[0] == AskedCwd
+  assert log[1] == AskedGet("DAWN_PKG_CACHE")
+  assert log[3] == AskedGet("CC")
+  assert asked_names(log) == ["DAWN_PKG_CACHE", "HOME", "CC"]
+}
+
+test "the log is the order the questions were asked in" {
+  let (_, log) = with_env_table("/virt/work", [("A", "1")], () => {
+    let _ = io.getenv("B")
+    let _ = io.cwd()
+    let _ = io.getenv("A")
+    let _ = io.getenv("B")
+    ()
+  })
+  assert log == [AskedGet("B"), AskedCwd, AskedGet("A"), AskedGet("B")]
+  # the same name asked twice is two entries: the log is a sequence, not a set
+  assert asked_names(log) == ["B", "A", "B"]
+}
+
+test "an env table sits inside a proc script and answers only its own effect" {
+  let ((triple, envlog), proclog) = io.with_fs_real(() => procmem.with_proc_table(
+    [procmem.wrote(bytes.utf8("/sysroot/crt1.o\n"))],
+    () => with_env_table("/virt/work", [("CC", "gcc-14")], () => {
+      let cc = match io.getenv("CC") { Some(c) -> c, None -> "cc" }
+      let status = io.run([cc, "-print-file-name=crt1.o"], "", "")
+      (cc, status)
+    })
+  ))
+  assert triple == ("gcc-14", Ok(0))
+  assert envlog == [AskedGet("CC")]
+  # the process the table's answer named, asked of the `Proc` handler outside
+  assert procmem.call_argv(proclog, 0) == ["gcc-14", "-print-file-name=crt1.o"]
+}
