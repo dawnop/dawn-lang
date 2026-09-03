@@ -2103,9 +2103,16 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     if peel_opaque(f.ret) == TyUnit {
       line(discard(st2, v), "return DAWN_UNIT;")
     } else if no_value(f.body) {
-      # unreachable, and C still needs it written: the function ends in a
-      # `return` on every path, or in a panic
-      line(st2, "return " ++ c_zero(f.ret) ++ ";")
+      # Unreachable, and C still needs the `return` written: the function ends
+      # in a `return` on every path, or in a panic. But the tail is discarded
+      # rather than dropped, because "produces no value" is not "has nothing
+      # left to emit". The forms this arm was written for hand back the literal
+      # "DAWN_UNIT" after emitting themselves as statements -- `panic`, `todo`,
+      # CReturn, CBreak, CContinue -- and `discard` is a no-op on that literal,
+      # so their C is unchanged. The form it dropped is a tail call at type
+      # Never, which `emit_call` hands back as an expression string like any
+      # other call; a C expression never written down is never evaluated.
+      line(discard(st2, v), "return " ++ c_zero(f.ret) ++ ";")
     } else {
       line(st2, "return " ++ v ++ ";")
     }

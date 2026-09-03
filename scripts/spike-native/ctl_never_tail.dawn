@@ -1,0 +1,41 @@
+# A function whose Core return type is `Never` and whose body's tail is an
+# expression the C backend hands back as a value: a `ctl` operation call.
+#
+# `emit_fn`'s `no_value` arm has to write a `return` for C's sake, and it used
+# to write only that -- dropping the tail expression on the floor, so the
+# operation was never performed and the program answered 0 (issue #73). The
+# arm was written for bodies that had already emitted everything they do as
+# statements (`panic`, `todo`, `CReturn`, `CBreak`, `CContinue`, all of which
+# hand back the literal `DAWN_UNIT`); a tail call at type `Never` is not one of
+# those.
+#
+# `thud` is the control and has to stay: its only difference from `boom` is the
+# written return type, and it was right on both backends the whole time. Without
+# a case that was already right, a fix that made every `Never` tail emit twice
+# would look exactly as green as a correct one.
+#
+# The JVM was never wrong here for a structural reason rather than a lucky one:
+# it emits bytecode as it walks the body, so there is no expression-as-string a
+# caller can decline to write.
+use std/io
+use std/io.{Exit, exit_now}
+
+# tail is a ctl operation; return type is Never
+fn boom(code: Int) -> Never !Exit = exit_now(code)
+
+# same tail, but the return type is Unit (Never subsumes to Unit)
+fn thud(code: Int) -> Unit !Exit = exit_now(code)
+
+fn capture[!e](body: fn() -> Unit !Exit !e) -> Int !e = {
+  with handle Exit {
+    exit_now(code) resume k => code
+  }
+  body()
+  0
+}
+
+pub fn main() -> Unit !io = {
+  io.println("named Never = " ++ to_string(capture(() => boom(41))))
+  io.println("named Unit  = " ++ to_string(capture(() => thud(42))))
+  io.println("lambda      = " ++ to_string(capture(() => exit_now(43))))
+}
