@@ -443,10 +443,12 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
    唯一的减法点是 `with handle`。这是健全性要求，但方向上是放大签名噪音而不是缩小。
 
 第一个真实样本已经在了：`std/io` 声明了 `Fs`（文件系统的十四个操作，生产 handler
-`with_fs_real`）。今天 `std/` 与 `selfhost/src/` 下共四条 `effect` 声明，落在两个文件里：
+`with_fs_real`）。今天 `std/` 与 `selfhost/src/` 下共六条 `effect` 声明，落在两个文件里：
 `std/io` 的 `Fs`、`Proc`（跑另一个程序，一个操作 `proc_run`，生产 handler
-`with_proc_real`）与 `Env`（进程环境的两个操作 `env_cwd` / `env_get`，生产 handler
-`with_env_real`），以及 `std/gpu` 的 `Gpu`（设备宿主侧的六个操作，测试里由一个纯的假设备
+`with_proc_real`）、`Env`（进程环境的两个操作 `env_cwd` / `env_get`，生产 handler
+`with_env_real`）、`Exit`（结束进程，一个 `ctl` 操作 `exit_now`，生产 handler
+`with_exit_real`）与 `Console`（控制台的四个操作，生产 handler `with_console_real`），
+以及 `std/gpu` 的 `Gpu`（设备宿主侧的六个操作，测试里由一个纯的假设备
 应答）。这份清单由
 `scripts/doc-check.py` 的 `NAMED_EFFECT_EXPECTED` 枚举、`check_named_effect_status` 三向钉住
 （清单外的声明、清单内文件失去声明、清单列了不存在的文件，都红；见 [README.md](../README.md)
@@ -582,13 +584,65 @@ driver/stdlib 4、lsp/server 2、source 2）：它们的路径全是自己造的
 负控四类都在它的自测里：行少 `!Env`、行少 `!io`、某条测试把真 handler 装回去、
 两个登记位置各自消失。尾款到来时，改行的人必须同时改这里。
 
+`Exit` 与 `Console` 是第四、第五族，2026-09-04 一起走到声明为止：`std/io` 多了
+`pub ctl effect Exit`（一个操作 `exit_now(code) -> Never`，生产 handler `with_exit_real`）
+与 `pub effect Console`（四个操作 `console_print` / `console_println` / `console_eprint` /
+`console_eprintln`，生产 handler `with_console_real`），外加四条 std 自测。`io.exit` 与四个
+打印函数一个字未改，`selfhost/src` 与 `compiler-plan/src` 一行未动，理由与前三族的刀 1a 相同
+（[bootstrap.md](bootstrap.md) 的特性纪律 4）。
+
+**两族一起开，因为要它们的那条断言要的是两半。** 预研数出 `Exit` 可达 71 条签名、
+`Console` 可达 125 条横跨五棵树，而两族**各自的转干净数都是 0**：每条签名只是多一个原子。
+所以开族的理由不在行数，在 `main.cli_error` / `nmain.cli_error` 与六个 `fail_*` 包装的形状：
+它们打印一行诊断，然后结束进程。退出码归 `Exit`、诊断行归 `Console`，单做任何一个都只读回
+半次 CLI 失败。`scripts/native-cli-diff.sh` 那 913 行就是这些用例，它们跑在进程外，是因为
+在进程内当时没有东西观察得到它们。
+
+**`Exit` 用 `ctl`，而且非用不可。** 尾恢复的臂总会回来，所以一个想应答 `exit` 的 handler
+只能拿 `panic` 加一圈 `catch_panic` 去模仿「结束」，那等于把退出码编码到错误面上、让测试从
+一条消息里把它读回来。控制臂不必这样：臂的值就是整个 `with handle` 块的值，挂起点之后的块
+剩余不再运行（[spec.md](spec.md) §6.5），这正是 `exit` 自己那句「Nothing after the call
+runs」写成类型的样子。操作的返回类型是 `Never`，这在这里恰好合法：`Never` 是 return-only，
+而效果操作的返回位是它可以出现的位置之一（spec §2）。`io.exit` 的公开签名仍是 `Unit`，
+因为 `io_exit` 是既有的 void intrinsic ABI。
+
+**裁决：生产臂裸丢弃 `k`，不调 `discard`。** 两条实测理由，外加一条语义上的巧合。
+其一，`discard(k)` 在这里根本推不出类型：`k` 是 `fn(Never) -> T`，`discard` 的类型参数落在
+`Never` 上，没有任何东西能推动它（`cannot infer type parameter(s) T for discard`）。
+其二，把操作改成返回 `Unit` 好让它推得出来之后，`discard` 会给 wrapper 收一笔 `!io` 的税，
+理由与宿主无关：`k` 的行就是块剩余的行，展开欠的和恢复欠的是同一条。巧合是第三条：
+`discard` 会把挂起点下面每一个 `bracket` 的 release 跑一遍，而 `System.exit` 一个都不跑，
+所以裸丢弃与宿主的行为本来就是一致的，反倒是 `discard` 会说谎。
+
+`with_exit_real` 与 `with_console_real` 的 body 行都是 `!e`，于是五个 wrapper 可以一层套一层，
+`with_fs_real` 在最外层（它的行是五个里唯一闭合的那一个）。看护是 `std/io` 里那条
+「the five real wrappers nest」的 test。
+
+**刀 1（消费者迁移，下一轮种子之后）**：`io.exit` 的体改调 `exit_now`，四个打印函数的体改调
+四个 `console_*`；可达的签名各加一个原子；handler 装在**既有的 `Fs` 边界**上，也就是今天
+`with_fs_real` / `with_proc_real` / `with_env_real` 已经站着的那四处（`main.main`、
+`nmain.main`、`lsp/server.handle`、`driver/analyze.analyze_document`），加上 `scripts/` 下
+那五个探针程序。**边界数是「已有 `Fs` 边界的个数」，不是「可达根的个数」**，这是 `Env` 刀 1b
+留下的教训（上面那段：预研把 `lsp/server.handle` 划掉了，而 `with_fs_real` 的闭合行让 `Env`
+穿不过去），这一族按同一条规则数。`Console` 与前三族有一点不同要先记下：它是第一个在 `std`
+自己（`std/reactor.serve`）与随包分发的 package（`packages/web` 的日志中间件）里就有消费者
+的效果，所以这一刀比 `Fs`、`Proc`、`Env` 的对应刀更宽。
+
+**刀 2（第一个断言客户）**：`compiler-plan/src/` 加 `exitmem.dawn` 与 `consolemem.dawn`
+两个表 handler，形制照 `envmem.with_env_table` 与 `procmem.with_proc_table`：用 handler
+局部状态记下退出码与每一条写出去的行（连同它去的是哪个流、有没有换行），返回 `(T, Log)`。
+放在 compiler-plan 而不是 std，理由与 `procmem`、`envmem` 同。它存在的目的只有一个：把
+`scripts/native-cli-diff.sh` 的用例搬进树内的内联测试，让「这条命令行失败时打印了什么、
+用什么退出码结束」第一次成为一条断言，而不是一次跨进程的字节对拍。
+
 **裁决：已知风险，暂无缓解；效果集别名仍不裁。**
 第二个族的消费者样本到了，答案是它还不够：三个原子的行（`!Fs !Proc !io`）读起来仍然可以，
 `Proc` 也没有把任何一条行推到四个原子。真正会逼出别名的是 `cwd` 与 `exit`。
 `cwd` 的消费者已经落地：四原子的行（`!Fs !Proc !Env !io`）第一次出现，56 条，
 会在树里待满一整个 release 周期，直到下一轮种子推进把 `!io` 回填掉。别名的账在那之前
-不重裁——要看的是回填之后还剩多少条四原子的行，而不是回填之前有多少条；
-`exit` 今天仍没有独立的断言撑腰。
+不重裁——要看的是回填之后还剩多少条四原子的行，而不是回填之前有多少条。
+`exit` 已经开族（下面的 `Exit`，今天只到声明），它的消费者会把那批行推到五个原子甚至六个，
+所以别名要看的实景是两轮之后的事，不是今天。
 
 ### 8.2 风险二：多 handler 组合的动态语义
 
@@ -615,8 +669,8 @@ driver/stdlib 4、lsp/server 2、source 2）：它们的路径全是自己造的
   （spec §6.5）；吸收禁令（spec §6.2 规则 7）另外挡住了「静默吞掉外层效果」的静态形态，因为
   `with handle` 只减自己应答的那个标签，别的原子必须留在行里。这两条都不是对顺序的检查。
 
-规模上这笔账今天已经不是零了。`std/` 与 `selfhost/src/` 下有四条 `effect` 声明（§8.1 末段），
-其中 `Fs`、`Proc` 与 `Env` 同住 `std/io`，三个生产 handler 要考虑谁装在谁外面；仓外的
+规模上这笔账今天已经不是零了。`std/` 与 `selfhost/src/` 下有六条 `effect` 声明（§8.1 末段），
+其中 `Fs`、`Proc`、`Env`、`Exit` 与 `Console` 同住 `std/io`，五个生产 handler 要考虑谁装在谁外面；仓外的
 backend-dawn 有 `Clock`（`backend-dawn/src/util/clock.dawn`）与 `Upstream`
 （`backend-dawn/src/util/http.dawn`）两个，且它们在生产路径上真的嵌套：
 `svc/monitor.lighthouse_start` 的行是 `!Upstream !io`，体内就地装 `Clock`，而调用它的
@@ -630,7 +684,9 @@ backend-dawn 有 `Clock`（`backend-dawn/src/util/clock.dawn`）与 `Upstream`
 （`expected fn() -> T !(Fs|io), got fn() -> T !(Fs|Proc|io)`，`T` 处是具体的返回类型）。`std/io` 里那条
 「one wrapper inside the other」的 test 就是这条判词的看护：把 `!e` 换回闭合行，它编译不过。
 `with_env_real` 也写 `!e`，于是三个 wrapper 的次序由同一条判词管着，看护是同一个文件里那条
-「the three real wrappers nest」。
+「the three real wrappers nest」。`with_exit_real` 与 `with_console_real` 也写 `!e`，
+看护是同一个文件里那条「the five real wrappers nest」：五个 wrapper 一层套一层，
+`with_fs_real` 在最外层，因为它的行是五个里唯一闭合的那一个。
 这不是对「两个 handler 装错顺序」的检查（octachron 那条结论一个字都没被削弱），它只是把
 「哪一个能当外层」从口头约定变成了签名上的事实。
 
