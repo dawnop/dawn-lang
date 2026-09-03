@@ -79,6 +79,17 @@ pub fn main() -> Unit !io = println("${via_wide_sam(false)}")
 WIDE_SAM_EXPECTED = "81\n"
 
 
+# The export every real run has. std declares a `ctl` effect, so every emitted
+# program links dawn/rt/Ctl, CtlCont and CtlK (selfhost/src/jvm/rtclasses.dawn)
+# and CtlCont extends jdk.internal.vm.Continuation, which java.base does not
+# export to the unnamed module. `dawn run` puts this option on every JVM it
+# spawns (selfhost/src/main.dawn, child_java_cmd) and every jar carries it as
+# `Add-Exports` (selfhost/src/jvm/jarw.dawn, manifest_text); a `java -cp` here
+# has neither, so it says so itself. Only the `-cp` commands need it: the
+# compiler runs below are `java -jar` and read the manifest.
+ADD_EXPORTS = ["--add-exports", "java.base/jdk.internal.vm=ALL-UNNAMED"]
+
+
 def compiler_command(jar, *args):
     return ["java", "-Xss512m", "-Xmx2g", "-jar", str(jar), *args]
 
@@ -324,6 +335,7 @@ def main():
             for emitted_dir in emitted_dirs:
                 verify = run([
                     "java",
+                    *ADD_EXPORTS,
                     "-cp",
                     f"{verify_classes}:{jar}",
                     "Verify",
@@ -336,6 +348,7 @@ def main():
                 failed.append("NEVER_CORE_CALL_FORMS")
             verify = run([
                 "java",
+                *ADD_EXPORTS,
                 "-cp",
                 f"{verify_classes}:{jar}",
                 "Verify",
@@ -343,12 +356,13 @@ def main():
             ])
             if verify.returncode != 0:
                 failed.append("NEVER_CLASSFILE_VERIFY")
-            executed = run(["java", "-cp", str(out_dir), "never_calls"])
+            executed = run(["java", *ADD_EXPORTS, "-cp", str(out_dir), "never_calls"])
             if executed.returncode != 0 or executed.stdout != EXPECTED or executed.stderr != "":
                 failed.append("NEVER_CALL_RUNTIME")
             if wide_accepts:
                 wide_verify = run([
                     "java",
+                    *ADD_EXPORTS,
                     "-cp",
                     f"{verify_classes}:{jar}",
                     "Verify",
@@ -357,7 +371,7 @@ def main():
                 if wide_verify.returncode != 0:
                     failed.append("NEVER_CLASSFILE_VERIFY")
                 wide_executed = run([
-                    "java", "-cp", str(wide_out_dir), "never_wide_sam"
+                    "java", *ADD_EXPORTS, "-cp", str(wide_out_dir), "never_wide_sam"
                 ])
                 if (
                     wide_executed.returncode != 0

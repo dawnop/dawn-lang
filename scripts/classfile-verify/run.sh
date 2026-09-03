@@ -85,6 +85,21 @@ trap 'rm -rf "$work"' EXIT
 
 javac -d "$work" scripts/classfile-verify/Verify.java scripts/classfile-verify/AccessCheck.java
 
+# Every `java` below that loads emitted classes carries the export the runtime
+# carries. Since std declares a `ctl` effect, every emitted program links
+# dawn/rt/Ctl, CtlCont and CtlK (selfhost/src/jvm/rtclasses.dawn), and CtlCont
+# extends jdk.internal.vm.Continuation, which java.base does not export to the
+# unnamed module. A real run always has the export: `dawn run` puts this exact
+# option on every JVM it spawns (selfhost/src/main.dawn, child_java_cmd) and
+# every jar carries it as `Add-Exports` (selfhost/src/jvm/jarw.dawn,
+# manifest_text). Without it here the harness dies of IllegalAccessError while
+# reading CtlCont's fields -- it would be verifying under conditions no program
+# ever runs under. Granting the export is the fix rather than skipping
+# jdk.internal classes: the access check then passes because access is really
+# granted, which is what the check is for.
+add_exports=(--add-exports java.base/jdk.internal.vm=ALL-UNNAMED)
+
+
 if [ "$mode" != never ]; then
   # Prove the gate can fail before believing that it did not.
   scripts/classfile-verify/selftest.sh "$work"
@@ -325,17 +340,26 @@ generic_fn_value_fixture=scripts/classfile-verify/generic_fn_value.dawn
 # erased slot. Handing a long to a slot spelled `Ljava/lang/Object;` is a link
 # failure and nothing a type check or a differential can see, since both
 # backends emitted the same wrong shape.
-for t in selfhost site packages/json packages/web packages/sha2 packages/inflate \
-    playground examples/projects/calc.dawn examples/interop/interop.dawn \
-    examples/effects/handlers.dawn examples/text/chars.dawn \
-    examples/errors/barriers.dawn scripts/classfile-verify/effect_poly_evidence.dawn \
-    "$generic_fn_value_fixture" "$java_tail_fixture"; do
+# An array rather than a `for t in ...` word list so that the slash-free
+# entries state an input the way scripts/gate-map/gatemap.py reads one (rule B,
+# `+=(...)` context): `selfhost`, `site` and `playground` are three of the
+# largest corpora this gate emits, and until they were written here the map
+# reported that no file under selfhost/src was watched by this gate.
+corpus=(selfhost site playground)
+corpus+=(packages/json packages/web packages/sha2 packages/inflate)
+corpus+=(examples/projects/calc.dawn examples/interop/interop.dawn)
+corpus+=(examples/effects/handlers.dawn examples/text/chars.dawn)
+corpus+=(examples/errors/barriers.dawn)
+corpus+=(scripts/classfile-verify/effect_poly_evidence.dawn)
+corpus+=("$generic_fn_value_fixture" "$java_tail_fixture")
+for t in "${corpus[@]}"; do
   out="$work/emit/${t//\//_}"
   mkdir -p "$out"
   ./bin/dawn __emit "$t" -o "$out" > /dev/null
   # the toolchain jar (and its lib/) sit on the parent class path: selfhost's
   # own classes reference the vendored ASM and coursier types
-  if java -cp "$work:$root/build/dawn-selfhost.jar" Verify "$out" | sed "s|^|  $t: |"; then
+  if java "${add_exports[@]}" -cp "$work:$root/build/dawn-selfhost.jar" Verify "$out" \
+      | sed "s|^|  $t: |"; then
     :
   else
     fail=1
@@ -347,6 +371,37 @@ if [ "$fail" != 0 ]; then
   exit 1
 fi
 echo "OK: every emitted class links, and every reference it names resolves and is reachable"
+
+# Why every `java` above carries --add-exports, checked rather than remembered.
+# A `ctl` effect declared anywhere in std makes `program_has_ctl`
+# (selfhost/src/main.dawn) put dawn/rt/Ctl, CtlCont and CtlK
+# (selfhost/src/jvm/rtclasses.dawn) into every emitted program, and CtlCont extends jdk.internal.vm.Continuation,
+# which java.base exports to nobody. Both directions of that coupling are one
+# assertion: if std stops declaring one the flag above is guarding nothing, and
+# if the classes are emitted without it this gate dies on IllegalAccessError
+# before it reads a byte -- which is how it went red on 0e67fdda, the commit
+# that declared std's first `ctl` effect.
+ctl_declared=0
+if grep -q '^pub ctl effect ' std/*.dawn; then
+  ctl_declared=1
+fi
+for d in "$work"/emit/*; do
+  ctl_emitted=0
+  if [ -f "$d/dawn/rt/CtlCont.class" ]; then
+    ctl_emitted=1
+  fi
+  if [ "$ctl_emitted" != "$ctl_declared" ]; then
+    echo "FAIL: $(basename "$d") emitted CtlCont=$ctl_emitted, std declares ctl=$ctl_declared;" >&2
+    echo "      the --add-exports this gate runs under and the classes it covers disagree" >&2
+    exit 1
+  fi
+done
+if [ "$ctl_declared" = 1 ]; then
+  echo "OK: std declares a ctl effect, so every corpus carries dawn/rt/CtlCont and the"
+  echo "    export above is the one a real run has"
+else
+  echo "OK: no ctl effect in std, and no corpus carries dawn/rt/CtlCont"
+fi
 
 ./bin/dawn test "$java_tail_fixture"
 echo "OK: Java Unit-tail results are evaluated, discarded, and runnable"
@@ -368,7 +423,8 @@ echo "OK: a generic function value crosses erasure with the right answers"
 mut="$work/corpus-mutant"
 cp -r "$work/emit/selfhost" "$mut"
 scripts/classfile-verify/privatise.py "$mut/dawn/rt/Strings.class" join
-if java -cp "$work:$root/build/dawn-selfhost.jar" Verify "$mut" > /dev/null 2>&1; then
+if java "${add_exports[@]}" -cp "$work:$root/build/dawn-selfhost.jar" Verify "$mut" \
+    > /dev/null 2>&1; then
   echo "FAIL: the gate passed a corpus with a private dawn/rt/Strings.join in it," >&2
   echo "      so its verdict on the real corpora carries no information" >&2
   exit 1
