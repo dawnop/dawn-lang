@@ -1745,30 +1745,49 @@ test "the bundled std directory is not a project target" {
   })
 }
 
-test "the analysis reads the declared tree, and no file system behind it" {
+test "the analysis reads the declared tree, and no host behind it" {
   # What `Fs` bought. The setup below used to run on the real disk, so neither
   # half of this could be asserted: not "the loader read exactly these bytes"
   # (the answer came from /tmp, where an earlier run's leftovers answer too),
   # and not "the run reached no file outside the tree" (there was no boundary
   # to ask). Both are questions about the table now.
+  #
+  # And what `Env` bought is the rest of the sentence. This used to say "no
+  # file system behind it", because the file system was the only half a
+  # handler stood in front of: the environment was still the machine's, and a
+  # relative path in here would have been resolved against whatever directory
+  # the runner was started in. All three effects are tables now -- the file
+  # system, an empty process script, and an environment whose queries come
+  # back for inspection -- so nothing at all is behind this run, and the three
+  # logs below are how that is said rather than remembered.
   let root = "/tmp/dawn-selfhost-analyze/never-on-disk"
   let main_src = "use util\npub fn main() -> Unit !io = println(util.tag())\n"
-  let (_, table) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
-    () => io.with_proc_real(() => io.with_env_real(() => {
-      mkdirs(root ++ "/src")
-      put(root ++ "/src/main.dawn", main_src)
-      put(root ++ "/src/util.dawn", "pub fn tag() -> String = \"t\"\n")
-      let loaded = load_directory(root)
-      assert len(loaded.diags) == 0
-      assert len(loaded.modules) == 2
-      # the loader's text is the text this test wrote, not a file's contents
-      assert loaded.modules[1].text == main_src
-      let std = match load_std(std_dir()) {
-        Ok(sc) -> sc
-        Err(e) -> panic("std: " ++ std_load_error_text(e))
-      }
-      assert len(analyze_program(loaded, std, ct_default(), jsig_refused()).diags) == 0
-    })))
+  let (((_, envlog), proclog), table) = fsmem.with_fs_mem(
+    fsmem.mem_std(fsmem.MEM_BASE),
+    () => procmem.with_proc_table([],
+      () => envmem.with_env_table(fsmem.MEM_BASE, mem_vars(), () => {
+        mkdirs(root ++ "/src")
+        put(root ++ "/src/main.dawn", main_src)
+        put(root ++ "/src/util.dawn", "pub fn tag() -> String = \"t\"\n")
+        let loaded = load_directory(root)
+        assert len(loaded.diags) == 0
+        assert len(loaded.modules) == 2
+        # the loader's text is the text this test wrote, not a file's contents
+        assert loaded.modules[1].text == main_src
+        let std = match load_std(std_dir()) {
+          Ok(sc) -> sc
+          Err(e) -> panic("std: " ++ std_load_error_text(e))
+        }
+        assert len(analyze_program(loaded, std, ct_default(), jsig_refused()).diags) == 0
+      })))
+  # the target is absolute and so is the std, so the analysis had no reason to
+  # ask where it was standing -- and it did not. An empty environment log is
+  # the assertion `Env` exists for: before it, "this run consulted the host
+  # zero times" had no observer at all, only a reading of `canon`.
+  assert envlog == []
+  # the empty process script says the same about children: a spawn here would
+  # have panicked for want of a reply, and none was attempted
+  assert proclog == []
   # the table is the only source of truth, so what was written can be read back
   assert fsmem.mem_content(table, root ++ "/src/main.dawn") == Some(main_src)
   # and every file the run touched came from the declared tree or the mounted
@@ -1782,4 +1801,48 @@ test "the analysis reads the declared tree, and no file system behind it" {
   io.with_fs_real(() => {
     assert not io.exists(root)
   })
+}
+
+test "a relative target resolves against the declared working directory" {
+  # The other thing `Env` bought, and the one this file had no way to write
+  # before it. Every test above spells its project as an absolute `/tmp/...`
+  # path, and that is not a preference: `canon` resolves a relative path
+  # against `io.cwd()`, so a relative target's meaning was whatever directory
+  # the runner happened to be started in. There is no `chdir` in this
+  # language, so it could not be chosen either.
+  #
+  # Here it is chosen. The declared directory is the file table's base, so
+  # `proj` names the same tree to both handlers, and the module index below
+  # holds the absolute path the analysis derived -- which is the declaration,
+  # not the process.
+  let (plan, log) = in_mem_env(() => {
+    mkdirs("proj/src")
+    put("proj/src/main.dawn", "use util\npub fn main() -> Unit !io = ()\n")
+    put("proj/src/util.dawn", "pub fn tag() -> String = \"t\"\n")
+    let loaded = load_directory("proj")
+    assert len(loaded.diags) == 0
+    assert len(loaded.modules) == 2
+    let plan = project_plan(source.ProjectDirectory("proj"))
+    # the derivation runs the other way too, off the same base
+    assert project_module_path(plan, "proj/src/util.dawn") == Some("util")
+    plan
+  })
+  # the module index is keyed by `use` path and holds canonical file paths, so
+  # this is `canon("proj/src/util.dawn")` written out: the declared directory,
+  # and nothing of the host's
+  assert map.get(plan.modules.by_use, "util") ==
+    Some(fsmem.MEM_BASE ++ "/proj/src/util.dawn")
+  assert map.get(plan.modules.by_use, "main") ==
+    Some(fsmem.MEM_BASE ++ "/proj/src/main.dawn")
+  # the resolution asked, and asked for the working directory rather than for
+  # a variable: an implementation that resolved against something it already
+  # held would leave this log empty and still pass the paths above
+  assert len(log) > 0
+  assert log[0] == envmem.AskedCwd
+  assert envmem.asked_names(log) == []
+  # the declared directory is not the one this test runs in, which is what
+  # makes the paths above an assertion about the declaration
+  io.with_fs_real(() => io.with_env_real(() => {
+    assert io.cwd() != fsmem.MEM_BASE
+  }))
 }
