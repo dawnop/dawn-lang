@@ -14,6 +14,15 @@
 # Everything is a file:// url, so this needs no network and no curl: the
 # fetcher reads the bytes off disk, which exercises the same decision.
 #
+# What that sentence leaves out is that `download` short-circuits a file:// url
+# and never enters `http_get`, so nothing here has ever seen a command line.
+# The counterpart is in the tree: compiler-plan/src/pkgfetch.dawn's tests
+# answer `Proc` from `procmem.with_proc_table` and assert curl's argv element
+# by element, its refusal text, and the fetch chain on a non-file:// url. They
+# run in `dawn test compiler-plan`; the check below only holds the pointer to
+# them from going stale, because running them again here would repeat a job CI
+# already has.
+#
 # Case 2 proves the warm path does *not* re-fetch by deleting the archive
 # first: a run that still succeeds cannot have gone back to the url.
 #
@@ -40,6 +49,18 @@ check() { # label expected-exit actual-exit transcript
     fail=1
   fi
 }
+
+# The in-tree counterpart named in the header. A rename is fine; a deletion
+# leaves the claim above unbacked, and that is what this refuses.
+counterpart="$root/compiler-plan/src/pkgfetch.dawn"
+for t in "curl is asked for exactly the command line" \
+         "a curl refusal is reported" \
+         "unpacks, hashes and lands in the cache"; do
+  grep -qF "$t" "$counterpart" || {
+    echo "FAIL: no in-tree test for \"$t\" in $counterpart" >&2
+    echo "  the header's \"no network and no curl\" claim has no counterpart any more" >&2
+    exit 1; }
+done
 
 mk_pkg() { # dir greeting
   mkdir -p "$1/src"
