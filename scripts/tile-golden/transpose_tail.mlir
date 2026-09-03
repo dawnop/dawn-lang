@@ -1,0 +1,81 @@
+cuda_tile.module @m {
+  entry @transpose_tail(%arg0: tile<ptr<f64>>, %arg1: tile<ptr<f64>>) {
+    %0 = make_token : token
+    %1, %2, %3 = get_tile_block_id : tile<i32>
+    %4, %5, %6 = get_tile_block_id : tile<i32>
+    %7 = constant <i32: 32> : tile<i32>
+    %8 = muli %1, %7 : tile<i32>
+    %9 = constant <i32: 32> : tile<i32>
+    %10 = muli %5, %9 : tile<i32>
+    %11 = reshape %8 : tile<i32> -> tile<1x1xi32>
+    %12 = broadcast %11 : tile<1x1xi32> -> tile<32x32xi32>
+    %13 = iota : tile<32xi32>
+    %14 = reshape %13 : tile<32xi32> -> tile<32x1xi32>
+    %15 = broadcast %14 : tile<32x1xi32> -> tile<32x32xi32>
+    %16 = addi %12, %15 : tile<32x32xi32>
+    %17 = iota : tile<32xi32>
+    %18 = reshape %17 : tile<32xi32> -> tile<1x32xi32>
+    %19 = broadcast %18 : tile<1x32xi32> -> tile<32x32xi32>
+    %20 = constant <i32: 0> : tile<32x32xi32>
+    %21 = muli %19, %20 : tile<32x32xi32>
+    %22 = addi %16, %21 : tile<32x32xi32>
+    %23 = constant <i32: 100> : tile<32x32xi32>
+    %24 = cmpi less_than %22, %23, signed : tile<32x32xi32> -> tile<32x32xi1>
+    %25 = reshape %10 : tile<i32> -> tile<1x1xi32>
+    %26 = broadcast %25 : tile<1x1xi32> -> tile<32x32xi32>
+    %27 = iota : tile<32xi32>
+    %28 = reshape %27 : tile<32xi32> -> tile<32x1xi32>
+    %29 = broadcast %28 : tile<32x1xi32> -> tile<32x32xi32>
+    %30 = constant <i32: 0> : tile<32x32xi32>
+    %31 = muli %29, %30 : tile<32x32xi32>
+    %32 = addi %26, %31 : tile<32x32xi32>
+    %33 = iota : tile<32xi32>
+    %34 = reshape %33 : tile<32xi32> -> tile<1x32xi32>
+    %35 = broadcast %34 : tile<1x32xi32> -> tile<32x32xi32>
+    %36 = addi %32, %35 : tile<32x32xi32>
+    %37 = constant <i32: 60> : tile<32x32xi32>
+    %38 = cmpi less_than %36, %37, signed : tile<32x32xi32> -> tile<32x32xi1>
+    %39 = constant <i1: 0> : tile<32x32xi1>
+    %40 = select %24, %38, %39 : tile<32x32xi1>, tile<32x32xi1>
+    %41 = constant <f64: 0.0> : tile<32x32xf64>
+    %42 = constant <i32: 1920> : tile<i32>
+    %43 = muli %1, %42 : tile<i32>
+    %44 = addi %43, %10 : tile<i32>
+    %45 = reshape %44 : tile<i32> -> tile<1x1xi32>
+    %46 = broadcast %45 : tile<1x1xi32> -> tile<32x32xi32>
+    %47 = iota : tile<32xi32>
+    %48 = reshape %47 : tile<32xi32> -> tile<32x1xi32>
+    %49 = broadcast %48 : tile<32x1xi32> -> tile<32x32xi32>
+    %50 = constant <i32: 60> : tile<32x32xi32>
+    %51 = muli %49, %50 : tile<32x32xi32>
+    %52 = addi %46, %51 : tile<32x32xi32>
+    %53 = iota : tile<32xi32>
+    %54 = reshape %53 : tile<32xi32> -> tile<1x32xi32>
+    %55 = broadcast %54 : tile<1x32xi32> -> tile<32x32xi32>
+    %56 = addi %52, %55 : tile<32x32xi32>
+    %57 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
+    %58 = broadcast %57 : tile<1x1xptr<f64>> -> tile<32x32xptr<f64>>
+    %59 = offset %58, %56 : tile<32x32xptr<f64>>, tile<32x32xi32> -> tile<32x32xptr<f64>>
+    %60, %61 = load_ptr_tko weak %59, %40, %41 token=%0 : tile<32x32xptr<f64>>, tile<32x32xi1>, tile<32x32xf64> -> tile<32x32xf64>, token
+    %62 = constant <i32: 3200> : tile<i32>
+    %63 = muli %5, %62 : tile<i32>
+    %64 = addi %63, %8 : tile<i32>
+    %65 = reshape %64 : tile<i32> -> tile<1x1xi32>
+    %66 = broadcast %65 : tile<1x1xi32> -> tile<32x32xi32>
+    %67 = iota : tile<32xi32>
+    %68 = reshape %67 : tile<32xi32> -> tile<32x1xi32>
+    %69 = broadcast %68 : tile<32x1xi32> -> tile<32x32xi32>
+    %70 = addi %66, %69 : tile<32x32xi32>
+    %71 = iota : tile<32xi32>
+    %72 = reshape %71 : tile<32xi32> -> tile<1x32xi32>
+    %73 = broadcast %72 : tile<1x32xi32> -> tile<32x32xi32>
+    %74 = constant <i32: 100> : tile<32x32xi32>
+    %75 = muli %73, %74 : tile<32x32xi32>
+    %76 = addi %70, %75 : tile<32x32xi32>
+    %77 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
+    %78 = broadcast %77 : tile<1x1xptr<f64>> -> tile<32x32xptr<f64>>
+    %79 = offset %78, %76 : tile<32x32xptr<f64>>, tile<32x32xi32> -> tile<32x32xptr<f64>>
+    %80 = store_ptr_tko weak %79, %60, %40 token=%61 : tile<32x32xptr<f64>>, tile<32x32xf64>, tile<32x32xi1> -> token
+    return
+  }
+}

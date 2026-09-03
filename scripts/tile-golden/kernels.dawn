@@ -10,7 +10,8 @@ use std/io
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32, BF16}
 use tileir/dev.{Dev, Param, Tile, Idx, I32, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
-  store_strided, mmaf, addf, sub, mul, div,
+  store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, in_range, axis_mask,
+  mmaf, addf, sub, mul, div,
   maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
   d_for, d_for3, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
   spread, d_reduce, d_reduce_dim, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select }
@@ -622,6 +623,298 @@ fn fused_rms_norm(x: Param[F64], res: Param[F64], w: Param[F64], out: Param[F64]
   store(out, row, [FR_D], mul(F64, [FR_D], r, g))
 }
 
+# ---- the strided kernels (knife 9) ----
+#
+# Every kernel below reads or writes a tile whose LAYOUT is not the array's
+# own row-major one: a transpose is `permute`d strides, a convolution is one
+# load a tap at a shifted base, a pooling window is a stride of the window
+# size, an interleave is a store with a stride of two, and a colour channel
+# is a stride of three. Nothing here is a new instruction: the ladder was
+# already `iota * stride` summed over the dimensions (knife 8), and what
+# knife 9 adds is the arithmetic that puts arbitrary numbers in it and the
+# per-axis masks (`axis_mask`, `in_range`) that keep a tile whose array
+# extent is not a multiple of it from reading or writing past the end along
+# EITHER axis.
+#
+# So every kernel here is an EXACT-tier kernel: the arithmetic is the same
+# `mulf` and `addf` (and `maxf`) the earlier knives already pinned, and only
+# the addressing is new. A reference that folds its taps in the kernel's
+# order agrees bit for bit.
+#
+# Every extent below is deliberately NOT a multiple of its tile, and every
+# two-dimensional one is deliberately RECTANGULAR: a square array hides a
+# swap of the two strides (scripts/tile-gpu-diff's stride-row-major-swapped
+# says why).
+
+# leetgpu 3 (Matrix Transpose): a 100 by 60 matrix in 32 by 32 tiles. The
+# tile is read with the input's row-major strides and written with the
+# OUTPUT's permuted: `permute(row_major([cols, rows]), [1, 0])`, which is
+# `[1, rows]`. No element moves inside the tile and no shape operation is
+# issued; the transpose is the layout.
+const TT_ROWS: Int = 100
+const TT_COLS: Int = 60
+const TT_TILE: Int = 32
+
+fn transpose_tail(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let shape = [TT_TILE, TT_TILE]
+  let bi = block_id(0)
+  let bj = block_id(1)
+  let r0 = idx_mul(bi, idx_const(TT_TILE))
+  let c0 = idx_mul(bj, idx_const(TT_TILE))
+  let m = and_mask(shape, axis_mask(r0, shape, 0, TT_ROWS), axis_mask(c0, shape, 1, TT_COLS))
+  let pad = f_const(F64, shape, 0.0)
+  let base_in = idx_add(idx_mul(bi, idx_const(TT_TILE * TT_COLS)), c0)
+  let t = load_strided_masked(x, base_in, shape, row_major([TT_ROWS, TT_COLS]), m, pad)
+  let base_out = idx_add(idx_mul(bj, idx_const(TT_TILE * TT_ROWS)), r0)
+  store_strided_masked(out, base_out, shape, permute(row_major([TT_COLS, TT_ROWS]), [1, 0]), m, t)
+}
+
+# leetgpu 9 (1D Convolution), valid mode: `out[i] = sum(x[i + t] * w[t])`
+# over C1_K taps, so the output is C1_K - 1 shorter than the input. Each tap
+# is one load at a base one element further on, and the weight is one load
+# with a stride of ZERO: every lane of the tile reads the same `w[t]`,
+# which is a layout rather than a broadcast operation.
+const C1_N: Int = 1000
+const C1_K: Int = 5
+const C1_TILE: Int = 128
+
+fn c1_out() -> Int = C1_N - C1_K + 1
+
+fn conv1d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let shape = [C1_TILE]
+  let blk = tile_at(block_id(0), C1_TILE)
+  let m = tail_mask(blk, shape, c1_out())
+  let zero = f_const(F64, shape, 0.0)
+  var acc = zero
+  for t in range(0, C1_K) {
+    let xt = load_masked(x, idx_add(blk, idx_const(t)), shape, m, zero)
+    let wt = load_strided(w, idx_const(t), shape, [0])
+    acc = addf(F64, shape, acc, mul(F64, shape, xt, wt))
+  }
+  store_masked(out, blk, shape, m, acc)
+}
+
+# leetgpu 10 (2D Convolution), valid mode over a 40 by 36 image with a 3 by
+# 3 kernel, in 16 by 16 tiles. One load a tap again, now at a base shifted
+# by `p * width + q`, and the weight read with strides `[0, 0]`.
+const C2_H: Int = 40
+const C2_W: Int = 36
+const C2_K: Int = 3
+const C2_TILE: Int = 16
+
+fn c2_oh() -> Int = C2_H - C2_K + 1
+
+fn c2_ow() -> Int = C2_W - C2_K + 1
+
+fn conv2d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let shape = [C2_TILE, C2_TILE]
+  let bi = block_id(0)
+  let bj = block_id(1)
+  let r0 = idx_mul(bi, idx_const(C2_TILE))
+  let c0 = idx_mul(bj, idx_const(C2_TILE))
+  let m = and_mask(shape, axis_mask(r0, shape, 0, c2_oh()), axis_mask(c0, shape, 1, c2_ow()))
+  let zero = f_const(F64, shape, 0.0)
+  let corner = idx_add(idx_mul(bi, idx_const(C2_TILE * C2_W)), c0)
+  var acc = zero
+  for p in range(0, C2_K) {
+    for q in range(0, C2_K) {
+      let xt = load_strided_masked(x, idx_add(corner, idx_const(p * C2_W + q)), shape, [C2_W, 1], m, zero)
+      let wt = load_strided(w, idx_const(p * C2_K + q), shape, [0, 0])
+      acc = addf(F64, shape, acc, mul(F64, shape, xt, wt))
+    }
+  }
+  store_strided_masked(out, idx_add(idx_mul(bi, idx_const(C2_TILE * c2_ow())), c0), shape, [c2_ow(), 1], m, acc)
+}
+
+# leetgpu 42 (Max Pooling) over a 36 by 20 image with a 2 by 2 window and a
+# stride of 2. The window's stride is the tile's layout: the output tile
+# reads the input with strides `[MP_K * width, MP_K]`, so a pooling window
+# is addressing and nothing else, and the four elements of one window are
+# four loads a constant apart.
+const MP_H: Int = 36
+const MP_W: Int = 20
+const MP_K: Int = 2
+const MP_TILE: Int = 16
+
+fn mp_oh() -> Int = MP_H / MP_K
+
+fn mp_ow() -> Int = MP_W / MP_K
+
+fn max_pool(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let shape = [MP_TILE, MP_TILE]
+  let bi = block_id(0)
+  let bj = block_id(1)
+  let r0 = idx_mul(bi, idx_const(MP_TILE))
+  let c0 = idx_mul(bj, idx_const(MP_TILE))
+  let m = and_mask(shape, axis_mask(r0, shape, 0, mp_oh()), axis_mask(c0, shape, 1, mp_ow()))
+  let ninf = f_const(F64, shape, neg_inf())
+  let corner = idx_add(idx_mul(bi, idx_const(MP_TILE * MP_K * MP_W)), idx_mul(bj, idx_const(MP_TILE * MP_K)))
+  let window = [MP_K * MP_W, MP_K]
+  var acc = ninf
+  for p in range(0, MP_K) {
+    for q in range(0, MP_K) {
+      let t = load_strided_masked(x, idx_add(corner, idx_const(p * MP_W + q)), shape, window, m, ninf)
+      acc = maxf(F64, shape, acc, t)
+    }
+  }
+  store_strided_masked(out, idx_add(idx_mul(bi, idx_const(MP_TILE * mp_ow())), c0), shape, [mp_ow(), 1], m, acc)
+}
+
+# leetgpu 63 (Interleave): `out[2i] = a[i]`, `out[2i + 1] = b[i]`. Two
+# stores of the same tile width with a stride of TWO, one at an even base
+# and one an element on. The output buffer is longer than the answer, so
+# what the mask keeps is compared too.
+const IL_N: Int = 500
+const IL_TILE: Int = 128
+
+fn interleave(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let shape = [IL_TILE]
+  let blk = tile_at(block_id(0), IL_TILE)
+  let m = tail_mask(blk, shape, IL_N)
+  let zero = f_const(F64, shape, 0.0)
+  let ta = load_masked(a, blk, shape, m, zero)
+  let tb = load_masked(b, blk, shape, m, zero)
+  let even = idx_mul(blk, idx_const(2))
+  store_strided_masked(out, even, shape, [2], m, ta)
+  store_strided_masked(out, idx_add(even, idx_const(1)), shape, [2], m, tb)
+}
+
+# leetgpu 66 (RGB to Grayscale) over RG_N interleaved pixels: the three
+# channels are three loads of the same tile with a stride of THREE, three
+# elements apart. The weighted sum is folded red, then green, then blue,
+# which is the order the reference folds it in.
+const RG_N: Int = 1000
+const RG_TILE: Int = 128
+const RG_R: Float = 0.299
+const RG_G: Float = 0.587
+const RG_B: Float = 0.114
+
+fn rgb_gray(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let shape = [RG_TILE]
+  let blk = tile_at(block_id(0), RG_TILE)
+  let m = tail_mask(blk, shape, RG_N)
+  let zero = f_const(F64, shape, 0.0)
+  let base = idx_mul(blk, idx_const(3))
+  let r = load_strided_masked(x, base, shape, [3], m, zero)
+  let g = load_strided_masked(x, idx_add(base, idx_const(1)), shape, [3], m, zero)
+  let b = load_strided_masked(x, idx_add(base, idx_const(2)), shape, [3], m, zero)
+  let lit = addf(F64, shape,
+    addf(F64, shape, mul(F64, shape, r, f_const(F64, shape, RG_R)), mul(F64, shape, g, f_const(F64, shape, RG_G))),
+    mul(F64, shape, b, f_const(F64, shape, RG_B)))
+  store_masked(out, blk, shape, m, lit)
+}
+
+# leetgpu 69 (Jacobi Stencil): one sweep of the five-point stencil over a 34
+# by 34 grid. The interior is the average of its four neighbours and the
+# BOUNDARY KEEPS ITS VALUE, so there are two masks: `inside` says which
+# lanes are in the grid at all (the extent is not a multiple of the tile),
+# and `interior` says which have four neighbours. The four neighbour loads
+# carry `interior`, so the lane at row 0 never reads the row before it --
+# an unmasked load there would be an offset of -34 elements from the buffer.
+const JC_H: Int = 34
+const JC_W: Int = 34
+const JC_TILE: Int = 16
+
+fn jacobi(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let shape = [JC_TILE, JC_TILE]
+  let bi = block_id(0)
+  let bj = block_id(1)
+  let rows = coord(idx_mul(bi, idx_const(JC_TILE)), shape, 0, 1)
+  let cols = coord(idx_mul(bj, idx_const(JC_TILE)), shape, 1, 1)
+  let inside = and_mask(shape, in_range(shape, rows, 0, JC_H), in_range(shape, cols, 0, JC_W))
+  let interior = and_mask(shape, in_range(shape, rows, 1, JC_H - 1), in_range(shape, cols, 1, JC_W - 1))
+  let zero = f_const(F64, shape, 0.0)
+  let lay = row_major([JC_H, JC_W])
+  let base = idx_add(idx_mul(bi, idx_const(JC_TILE * JC_W)), idx_mul(bj, idx_const(JC_TILE)))
+  let centre = load_strided_masked(x, base, shape, lay, inside, zero)
+  let up = load_strided_masked(x, idx_add(base, idx_const(0 - JC_W)), shape, lay, interior, zero)
+  let down = load_strided_masked(x, idx_add(base, idx_const(JC_W)), shape, lay, interior, zero)
+  let left = load_strided_masked(x, idx_add(base, idx_const(0 - 1)), shape, lay, interior, zero)
+  let right = load_strided_masked(x, idx_add(base, idx_const(1)), shape, lay, interior, zero)
+  let s = addf(F64, shape, addf(F64, shape, addf(F64, shape, up, down), left), right)
+  let avg = mul(F64, shape, s, f_const(F64, shape, 0.25))
+  store_strided_masked(out, base, shape, lay, inside, select(F64, shape, interior, avg, centre))
+}
+
+# leetgpu 90 (Depthwise 1D Convolution): DW_C channels of length DW_L, each
+# convolved with its OWN DW_K taps. The tile is two-dimensional -- channels
+# by positions -- so one block covers four channels at once, and the tap's
+# weight is read with strides `[DW_K, 0]`: it walks the channel axis and
+# stands still along the position axis, which is the per-row broadcast this
+# kernel needs and the reason `axis_strides` exists.
+const DW_C: Int = 6
+const DW_L: Int = 100
+const DW_K: Int = 3
+const DW_TC: Int = 4
+const DW_TL: Int = 32
+
+fn dw_out() -> Int = DW_L - DW_K + 1
+
+fn depthwise_conv1d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let shape = [DW_TC, DW_TL]
+  let bc = block_id(0)
+  let bl = block_id(1)
+  let c0 = idx_mul(bc, idx_const(DW_TC))
+  let l0 = idx_mul(bl, idx_const(DW_TL))
+  let m = and_mask(shape, axis_mask(c0, shape, 0, DW_C), axis_mask(l0, shape, 1, dw_out()))
+  let zero = f_const(F64, shape, 0.0)
+  let corner = idx_add(idx_mul(bc, idx_const(DW_TC * DW_L)), l0)
+  let wcorner = idx_mul(bc, idx_const(DW_TC * DW_K))
+  var acc = zero
+  for t in range(0, DW_K) {
+    let xt = load_strided_masked(x, idx_add(corner, idx_const(t)), shape, [DW_L, 1], m, zero)
+    let wt = load_strided_masked(w, idx_add(wcorner, idx_const(t)), shape, [DW_K, 0], m, zero)
+    acc = addf(F64, shape, acc, mul(F64, shape, xt, wt))
+  }
+  store_strided_masked(out, idx_add(idx_mul(bc, idx_const(DW_TC * dw_out())), l0), shape, [dw_out(), 1], m, acc)
+}
+
+# leetgpu 28 (Gaussian Blur): a 3 by 3 kernel over a 20 by 24 image, SAME
+# size out, with what falls outside the image treated as zero. Unlike the
+# valid-mode convolution above, every tap here has a HALO: the tap `(p, q)`
+# reads the neighbour `(r + p - 1, c + q - 1)`, which is outside the image
+# for the first and last row and column, so each tap carries its own mask.
+# `gb_lo` and `gb_hi` are that mask's bounds, intersected with the image's
+# own, and an off-by-one in either is a wrong answer at the boundary that
+# every layer below the device accepts (scripts/tile-gpu-diff's
+# halo-one-lane-short).
+const GB_H: Int = 20
+const GB_W: Int = 24
+const GB_K: Int = 3
+const GB_TILE: Int = 16
+
+fn gb_half() -> Int = GB_K / 2
+
+# The first coordinate along an axis whose tap-`t` neighbour is inside the
+# image, and the first one past the last: `[max(0, half - t), min(n, n + half - t))`.
+fn gb_lo(t: Int) -> Int = if t < gb_half() { gb_half() - t } else { 0 }
+
+fn gb_hi(n: Int, t: Int) -> Int = if t > gb_half() { n - (t - gb_half()) } else { n }
+
+fn gaussian_blur(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let shape = [GB_TILE, GB_TILE]
+  let bi = block_id(0)
+  let bj = block_id(1)
+  let rows = coord(idx_mul(bi, idx_const(GB_TILE)), shape, 0, 1)
+  let cols = coord(idx_mul(bj, idx_const(GB_TILE)), shape, 1, 1)
+  let inside = and_mask(shape, in_range(shape, rows, 0, GB_H), in_range(shape, cols, 0, GB_W))
+  let zero = f_const(F64, shape, 0.0)
+  let lay = row_major([GB_H, GB_W])
+  let corner = idx_add(idx_mul(bi, idx_const(GB_TILE * GB_W)), idx_mul(bj, idx_const(GB_TILE)))
+  var acc = zero
+  for p in range(0, GB_K) {
+    for q in range(0, GB_K) {
+      let tap = and_mask(shape, in_range(shape, rows, gb_lo(p), gb_hi(GB_H, p)),
+        in_range(shape, cols, gb_lo(q), gb_hi(GB_W, q)))
+      let shift = (p - gb_half()) * GB_W + (q - gb_half())
+      let xt = load_strided_masked(x, idx_add(corner, idx_const(shift)), shape, lay, tap, zero)
+      let wt = load_strided(w, idx_const(p * GB_K + q), shape, [0, 0])
+      acc = addf(F64, shape, acc, mul(F64, shape, xt, wt))
+    }
+  }
+  store_strided_masked(out, corner, shape, lay, inside, acc)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -690,6 +983,26 @@ fn trace(name: String) -> TileProg = match name {
   "fused_rms_norm" ->
     trace_kernel("fused_rms_norm", ["f64", "f64", "f64", "f64"],
       () => fused_rms_norm(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "transpose_tail" ->
+    trace_kernel("transpose_tail", ["f64", "f64"], () => transpose_tail(param(F64, 0), param(F64, 1)))
+  "conv1d" ->
+    trace_kernel("conv1d", ["f64", "f64", "f64"], () => conv1d(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "conv2d" ->
+    trace_kernel("conv2d", ["f64", "f64", "f64"], () => conv2d(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "max_pool" ->
+    trace_kernel("max_pool", ["f64", "f64"], () => max_pool(param(F64, 0), param(F64, 1)))
+  "interleave" ->
+    trace_kernel("interleave", ["f64", "f64", "f64"], () => interleave(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "rgb_gray" ->
+    trace_kernel("rgb_gray", ["f64", "f64"], () => rgb_gray(param(F64, 0), param(F64, 1)))
+  "jacobi" ->
+    trace_kernel("jacobi", ["f64", "f64"], () => jacobi(param(F64, 0), param(F64, 1)))
+  "depthwise_conv1d" ->
+    trace_kernel("depthwise_conv1d", ["f64", "f64", "f64"],
+      () => depthwise_conv1d(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "gaussian_blur" ->
+    trace_kernel("gaussian_blur", ["f64", "f64", "f64"],
+      () => gaussian_blur(param(F64, 0), param(F64, 1), param(F64, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -713,6 +1026,7 @@ pub fn main() -> Unit !io = match args() {
   }
   _ -> panic("usage: kernels <vadd|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
       ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax"
-      ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm>"
+      ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
+      ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }
