@@ -28,7 +28,7 @@ use std/gpu.{Gpu, F64, with_gpu_fake, reference_kernels, alloc, upload, download
 use std/io
 use std/map
 use std/str
-use tileir/dev.{Dev, Param, param, block_id, load, store, addf}
+use tileir/dev.{Dev, Param, param, block_id, tile_at, load, store, addf}
 use tileir/prog.{trace_kernel}
 use tileir/render.{render}
 
@@ -40,10 +40,10 @@ const WIDTH: Int = 128
 ## nothing else -- there is no host memory here, and no way to look at a
 ## number.
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let i = block_id(0)
-  let ta = load(a, i, WIDTH)
-  let tb = load(b, i, WIDTH)
-  store(out, i, WIDTH, addf(F64, WIDTH, ta, tb))
+  let blk = tile_at(block_id(0), WIDTH)
+  let ta = load(a, blk, [WIDTH])
+  let tb = load(b, blk, [WIDTH])
+  store(out, blk, [WIDTH], addf(F64, [WIDTH], ta, tb))
 }
 
 ## The kernel's Tile IR. `trace_kernel` installs the recording handler, calls
