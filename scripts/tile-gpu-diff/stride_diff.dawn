@@ -239,12 +239,23 @@ fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL
 # The number of tile blocks it takes to cover `n` lanes `tile` at a time.
 fn blocks(n: Int, tile: Int) -> Int = (n + tile - 1) / tile
 
-# DISTINCT values, one per element, and the reason every two-dimensional
-# corpus here is RECTANGULAR. A transpose of a SQUARE matrix hides a swap of
-# the two strides: the tile is read transposed and written transposed, the
-# two cancel, and the answer is right for the wrong reason. Make the matrix
-# 100 by 60 and the two bases stop agreeing, so the swap moves the answer.
-# The same holds for every other kernel here whose two strides differ.
+# DISTINCT values, one per element, and the reason the transpose's matrix
+# is 100 by 60 and not square.
+#
+# A SQUARE matrix hides a swap of the two stride dimensions. The transpose
+# writes its tile with `permute(row_major([cols, rows]), [1, 0])`; with
+# `rows == cols` that is the same list as `permute(row_major([rows, cols]),
+# [1, 0])`, so writing the WRONG one is not a change at all, and no corpus
+# over a square matrix could ever tell them apart (run.sh's
+# stride-row-major-swapped is exactly that mutant). At 100 by 60 the two
+# differ by the column stride, 100 against 60, and 5880 of the 6000 lanes
+# land somewhere else.
+#
+# The tile being square hides a different swap: reversing EVERY layout in a
+# kernel at once, which is a relabelling of the tile's own two axes and
+# composes back to the identity. Only depthwise_conv1d, whose tile is 4 by
+# 32, can see that one (run.sh's ladder-strides-reversed). Two shapes,
+# two blindnesses; neither is the other's.
 fn distinct(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i) + 0.5)
 
 # Values that are NOT on the binary grid: tenths. Every sum and product

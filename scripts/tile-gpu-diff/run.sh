@@ -72,17 +72,26 @@
 #                      a legal kernel), and only the device says matmul
 #                      answers the last K slice rather than the product
 #     stride-row-major-swapped
-#                      the package's lowering applies a tile's strides in
-#                      REVERSE order, so the two dimensions of every rank-2
-#                      layout are swapped -> layer 0 moves and `tileiras`
-#                      accepts the result (a permuted layout is a layout),
-#                      and only the device says the addresses are wrong.
-#                      A rank-1 ladder has one stride and cannot move, so
-#                      the three one-dimensional kernels of knife 9 are the
-#                      mutant's own control. A SQUARE transpose would be a
-#                      control too, for the wrong reason: read transposed
-#                      and written transposed the two swaps cancel, which
-#                      is why stride_diff's corpora are rectangular
+#                      the transpose writes with the two stride dimensions
+#                      of its OUTPUT layout swapped (the extents of the
+#                      input, not of the output) -> layer 0 moves, layer 1
+#                      accepts it, and only the device says the values land
+#                      in the wrong place. On a SQUARE matrix the two
+#                      expressions are the same list and the mutant is not
+#                      even a change, which is why stride_diff's matrix is
+#                      100 by 60
+#     ladder-strides-reversed
+#                      the package's LOWERING takes each dimension's stride
+#                      from the opposite dimension, so every rank-2 layout
+#                      in a kernel is swapped at once -> six of the nine
+#                      kernels' bytes move, tileiras accepts all six, and
+#                      exactly ONE goes red on the device: reversing every
+#                      layout together is a relabelling of the tile's own
+#                      axes, which cancels on a square tile.
+#                      depthwise_conv1d's tile is 4 by 32 and cannot hide
+#                      behind it. Recorded because the surprise is the
+#                      evidence: a stride swap in the lowering is invisible
+#                      wherever the tile is square
 #     halo-one-lane-short
 #                      the gaussian blur's tap bound stops one lane early,
 #                      so a neighbour at the far edge of the image counts as
@@ -850,72 +859,126 @@ else
   echo "SKIP  mutant: mma-acc-not-carried not verifiable on this driver: the clean run is $twod_verdict, before any launch reaches the device"
 fi
 
-# 9. stride-row-major-swapped: the package's lowering walks a tile's
-#    dimensions in the order it was given but takes the STRIDE of the
-#    opposite one, so `[w, 1]` addresses as `[1, w]` and every rank-2 layout
-#    has its two dimensions swapped. Layer 0 moves (a `--record` would take
-#    it) and layer 1 accepts it -- a permuted layout is a layout, and the
-#    types are unchanged -- so only the device says the addresses are wrong.
+# 9. stride-row-major-swapped: the transpose kernel writes its tile with
+#    the two stride dimensions of the OUTPUT layout swapped -- it takes
+#    `row_major([rows, cols])` where the output is `cols` by `rows`, so the
+#    store's column stride is 60 instead of 100. Layer 0 moves (one
+#    constant) and layer 1 accepts it -- a stride is a stride -- so only the
+#    device says the values land in the wrong place.
 #
-#    A rank-1 ladder has one stride and reversing a one-element list changes
-#    nothing, so the three one-dimensional kernels here are the mutant's own
-#    control. So would a SQUARE transpose be, for a reason worth writing
-#    down: a tile read transposed and written transposed is the tile it
-#    started from, the two swaps cancel and the answer is right. That is why
-#    stride_diff's shapes are rectangular (100 by 60, 40 by 36, 36 by 20,
-#    34 by 34 with a 3-tap halo, 6 by 100, 20 by 24) and why the corpus is
-#    `distinct`.
-mutant_pkg_st="$work/pkg-stride-row-major-swapped"
-rm -rf "$mutant_pkg_st"
-cp -r "$root/packages/tileir" "$mutant_pkg_st"
-before=$(digest "$mutant_pkg_st/src/lower.dawn")
-python3 "$here/mutate.py" "$mutant_pkg_st/src/lower.dawn" stride-row-major-swapped \
-  '        let (le, term) = if strides[k] == 1 {' \
-  '        let (le, term) = if strides[len(shape) - 1 - k] == 1 {'
-python3 "$here/mutate.py" "$mutant_pkg_st/src/lower.dawn" stride-row-major-swapped \
-  '          let ly = emit(lx, ConstInt(c, full, strides[k]))' \
-  '          let ly = emit(lx, ConstInt(c, full, strides[len(shape) - 1 - k]))'
-after=$(digest "$mutant_pkg_st/src/lower.dawn")
-echo "      stride-row-major-swapped: packages/tileir/src/lower.dawn md5 $before -> $after"
+#    A SQUARE matrix would not catch this at all: with rows == cols the two
+#    expressions are the same list and the mutant is not even a change to
+#    the bytes. That is why stride_diff's matrix is 100 by 60, and it is
+#    written down beside the corpus (`distinct`, stride_diff.dawn) as well
+#    as here.
+mutant_ts_src="$work/kernels-transpose.dawn"
+cp "$golden/kernels.dawn" "$mutant_ts_src"
+before=$(digest "$mutant_ts_src")
+python3 "$here/mutate.py" "$mutant_ts_src" stride-row-major-swapped \
+  '  store_strided_masked(out, base_out, shape, permute(row_major([TT_COLS, TT_ROWS]), [1, 0]), m, t)' \
+  '  store_strided_masked(out, base_out, shape, permute(row_major([TT_ROWS, TT_COLS]), [1, 0]), m, t)'
+after=$(digest "$mutant_ts_src")
+echo "      stride-row-major-swapped: scripts/tile-golden/kernels.dawn md5 $before -> $after"
+mkdir -p "$work/proj-transpose/src"
+cp "$mutant_ts_src" "$work/proj-transpose/src/main.dawn"
+cat > "$work/proj-transpose/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
 
-mutant_kernels stride-row-major-swapped "$mutant_pkg_st" "${strided[@]}"
-# the six kernels with a rank-2 layout move at layer 0; the three rank-1
-# ladders cannot, and that is the mutant's own control
-moved=0
-for k in "${strided[@]}"; do
-  if cmp -s "$golden/$k.tilebc" "$work/stride-row-major-swapped-$k.tilebc"; then :; else moved=$((moved + 1)); fi
-done
-[ "$moved" = 6 ] ||
-  fail "stride-row-major-swapped: expected exactly 6 of the ${#strided[@]} kernels' bytecode to move, got $moved"
-echo "      stride-row-major-swapped: 6 of ${#strided[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+[deps]
+tileir = "$root/packages/tileir"
+TOML
+"$root/bin/dawn" run "$work/proj-transpose" -- transpose_tail --bytecode "$work/tt-swapped.tilebc" \
+  > "$work/proj-transpose.log" 2>&1 ||
+  { cat "$work/proj-transpose.log" >&2; fail "stride-row-major-swapped: transpose_tail did not encode"; }
+cmp -s "$golden/transpose_tail.tilebc" "$work/tt-swapped.tilebc" &&
+  fail "stride-row-major-swapped mutant stayed green: transpose_tail.tilebc is unchanged (is the matrix square again?)"
+assemble_golden transpose_tail "$work/tt-swapped.tilebc" "$work/tt-swapped.cubin"
+echo "      stride-row-major-swapped: transpose_tail.tilebc differs from the golden and tileiras still accepts it"
 swap_cubins=()
-for k in "${strided[@]}"; do swap_cubins+=("$work/stride-row-major-swapped-$k.cubin"); done
+for k in "${strided[@]}"; do
+  if [ "$k" = transpose_tail ]; then swap_cubins+=("$work/tt-swapped.cubin"); else swap_cubins+=("$work/$k.cubin"); fi
+done
 rc=0
 "$work/strided.bin" "${swap_cubins[@]}" > "$work/m-stride-swapped.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-stride-swapped.out")"
-swap_red=(transpose_tail conv2d max_pool jacobi depthwise_conv1d gaussian_blur)
-swap_green=(conv1d interleave rgb_gray)
 if [ "$strided_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-stride-swapped.out" || true)
-  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#swap_red[@]}" ]; then
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
     cat "$work/m-stride-swapped.out" >&2
-    fail "stride-row-major-swapped mutant stayed green: expected verdict fail (exit 1) with exactly ${#swap_red[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+    fail "stride-row-major-swapped mutant stayed green: expected verdict fail (exit 1) with transpose_tail alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
   fi
-  for k in "${swap_red[@]}"; do
-    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
-      "$work/m-stride-swapped.out" ||
-      { cat "$work/m-stride-swapped.out" >&2; fail "stride-row-major-swapped: $k has a rank-2 layout and should differ"; }
-  done
-  for k in "${swap_green[@]}"; do
-    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
-      "$work/m-stride-swapped.out" ||
-      { cat "$work/m-stride-swapped.out" >&2; fail "stride-row-major-swapped: $k is a rank-1 ladder and should be untouched"; }
-  done
-  echo "PASS  mutant: stride-row-major-swapped (only the ${#swap_red[@]} kernels with a rank-2 layout differ: ${swap_red[*]})"
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "transpose_tail" {bad=1} END {exit bad}' \
+    "$work/m-stride-swapped.out" ||
+    { cat "$work/m-stride-swapped.out" >&2; fail "stride-row-major-swapped: a kernel other than transpose_tail moved"; }
+  echo "PASS  mutant: stride-row-major-swapped (transpose_tail alone, and only because the matrix is rectangular)"
 else
   [ "$mverdict" = "$strided_verdict" ] ||
     { cat "$work/m-stride-swapped.out" >&2; fail "stride-row-major-swapped: the clean run is $strided_verdict but the mutant is $mverdict"; }
   echo "SKIP  mutant: stride-row-major-swapped not verifiable on this driver: the clean run is $strided_verdict, before any launch reaches the device"
+fi
+
+# 9b. ladder-strides-reversed: the LOWERING takes each dimension's stride
+#     from the opposite dimension, so every rank-2 layout in a kernel is
+#     swapped at once. Six of the nine kernels' bytecode moves and tileiras
+#     accepts every one of them.
+#
+#     On the device only ONE of the six goes red, and the reason is worth
+#     the line: reversing EVERY layout in a kernel is a relabelling of the
+#     tile's own two axes, and a relabelling cancels when the TILE is
+#     square. transpose_tail reads a 32 by 32 tile transposed and writes it
+#     transposed, and the two swaps compose back to the transpose; the same
+#     holds for conv2d, max_pool, jacobi and gaussian_blur, masks included,
+#     because each of their masks is built from the same reversed ladder.
+#     depthwise_conv1d's tile is 4 by 32, so there is no relabelling to
+#     hide behind and it answers the wrong channel.
+#
+#     So this mutant is not the strong one it looks like, and that is the
+#     point of recording it: a stride swap in the lowering is INVISIBLE on
+#     square tiles, which is most of them. The kernel-level swap above is
+#     the one that carries the claim.
+mutant_pkg_st="$work/pkg-ladder-strides-reversed"
+rm -rf "$mutant_pkg_st"
+cp -r "$root/packages/tileir" "$mutant_pkg_st"
+before=$(digest "$mutant_pkg_st/src/lower.dawn")
+python3 "$here/mutate.py" "$mutant_pkg_st/src/lower.dawn" ladder-strides-reversed \
+  '        let (le, term) = if strides[k] == 1 {' \
+  '        let (le, term) = if strides[len(shape) - 1 - k] == 1 {'
+python3 "$here/mutate.py" "$mutant_pkg_st/src/lower.dawn" ladder-strides-reversed \
+  '          let ly = emit(lx, ConstInt(c, full, strides[k]))' \
+  '          let ly = emit(lx, ConstInt(c, full, strides[len(shape) - 1 - k]))'
+after=$(digest "$mutant_pkg_st/src/lower.dawn")
+echo "      ladder-strides-reversed: packages/tileir/src/lower.dawn md5 $before -> $after"
+
+mutant_kernels ladder-strides-reversed "$mutant_pkg_st" "${strided[@]}"
+# the six kernels with a rank-2 layout move at layer 0; the three rank-1
+# ladders cannot, and that is the mutant's own control at layer 0
+moved=0
+for k in "${strided[@]}"; do
+  if cmp -s "$golden/$k.tilebc" "$work/ladder-strides-reversed-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+done
+[ "$moved" = 6 ] ||
+  fail "ladder-strides-reversed: expected exactly 6 of the ${#strided[@]} kernels' bytecode to move, got $moved"
+echo "      ladder-strides-reversed: 6 of ${#strided[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+rev_cubins=()
+for k in "${strided[@]}"; do rev_cubins+=("$work/ladder-strides-reversed-$k.cubin"); done
+rc=0
+"$work/strided.bin" "${rev_cubins[@]}" > "$work/m-ladder-reversed.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-ladder-reversed.out")"
+if [ "$strided_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-ladder-reversed.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-ladder-reversed.out" >&2
+    fail "ladder-strides-reversed mutant stayed green: expected verdict fail (exit 1) with depthwise_conv1d alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "depthwise_conv1d" {bad=1} END {exit bad}' \
+    "$work/m-ladder-reversed.out" ||
+    { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: a kernel other than depthwise_conv1d moved; a square tile should have hidden it"; }
+  echo "PASS  mutant: ladder-strides-reversed (six kernels' bytes move, and only depthwise_conv1d's 4 by 32 tile can see it)"
+else
+  [ "$mverdict" = "$strided_verdict" ] ||
+    { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: the clean run is $strided_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: ladder-strides-reversed not verifiable on this driver: the clean run is $strided_verdict, before any launch reaches the device"
 fi
 
 # 10. halo-one-lane-short: the gaussian blur's tap bound stops one lane
