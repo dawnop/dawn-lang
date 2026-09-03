@@ -13,6 +13,7 @@ use std/set
 use front/token.{Diag}
 use front/ast.{Module, Decl, DUseModule, module_uses, module_fns}
 use compiler_plan/pkgfetch
+use compiler_plan/envmem
 use compiler_plan/procmem
 use compiler_plan/source
 use check/cx.{ModExports, Cx, cx_new}
@@ -1074,11 +1075,46 @@ pub fn analyze_document(
 # two tests that use `in_mem_proc` declare one, and those answer `Proc` from a
 # table instead -- but the row has to be answered somewhere for the rest, and
 # this is the boundary that owns the whole test.
-fn in_mem[T](body: fn() -> T !Fs !Proc !io) -> T !io = {
-  let (out, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
-    () => io.with_proc_real(body))
+#
+# The environment is a table too (`compiler_plan/envmem`), so the working
+# directory these run in is declared rather than inherited. It is
+# `fsmem.MEM_BASE`, the directory the file table already resolves relative
+# paths against, which is what makes a relative target mean the same thing to
+# both handlers -- and what lets a test name one at all: `canon` resolves a
+# relative path against `io.cwd()`, so before this the answer was the
+# directory the runner happened to be started in.
+#
+# The `!io` on the three rows below is the seed's, not these tests'. Every
+# production function they call still declares it, because stage 1 of the
+# bootstrap compiles this tree against the std the seed shipped with, where
+# `io.cwd` and `io.getenv` are `!io` and not `Env` (docs/bootstrap.md, feature
+# discipline 4). It comes off in the backfill one seed round from now, and the
+# rows are pinned meanwhile by `scripts/doc-check.py`'s
+# `check_analyze_env_table`, which is also what says no test below installs
+# `with_env_real` any more.
+fn in_mem[T](body: fn() -> T !Fs !Proc !Env !io) -> T !io = {
+  let (out, _) = in_mem_env(body)
   out
 }
+
+## The same, with the environment queries handed back in the order they were
+## asked. For a test that says which of them the analysis made, including the
+## one that says it made none.
+fn in_mem_env[T](
+  body: fn() -> T !Fs !Proc !Env !io
+) -> (T, List[envmem.EnvCall]) !io = {
+  let (pair, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
+    () => io.with_proc_real(
+      () => envmem.with_env_table(fsmem.MEM_BASE, mem_vars(), body)))
+  pair
+}
+
+## The environment these tests declare. `DAWN_PKG_CACHE` names the package
+## cache inside the table's own tree: with the host answering,
+## `pkgfetch.cache_root()` read the developer's `HOME` and the url-dependency
+## tests below staged their cache entry under whatever came back.
+fn mem_vars() -> List[(String, String)] =
+  [("DAWN_PKG_CACHE", fsmem.MEM_BASE ++ "/pkg-cache")]
 
 ## The same, with the child processes scripted too: `script` answers `Proc` in
 ## order and every invocation comes back for inspection.
@@ -1089,11 +1125,14 @@ fn in_mem[T](body: fn() -> T !Fs !Proc !io) -> T !io = {
 ## asked the network is a value the test can read.
 fn in_mem_proc[T](
   script: List[procmem.ProcReply],
-  body: fn() -> T !Fs !Proc !io
+  body: fn() -> T !Fs !Proc !Env !io
 ) -> (T, List[procmem.ProcCall]) !io = {
-  let (out, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
-    () => procmem.with_proc_table(script, body))
-  out
+  let (paired, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
+    () => procmem.with_proc_table(script,
+      () => envmem.with_env_table(fsmem.MEM_BASE, mem_vars(), body)))
+  let (env_pair, calls) = paired
+  let (out, _) = env_pair
+  (out, calls)
 }
 
 # The std the table mounts, spelled absolutely. The bare `std` the command line
@@ -1113,7 +1152,7 @@ fn put(p: String, text: String) -> Unit !Fs =
   }
 
 test "a two-module project analyzes end to end" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/proj1"
     mkdirs(root ++ "/src")
     put(root ++ "/src/util.dawn",
@@ -1133,11 +1172,11 @@ test "a two-module project analyzes end to end" {
     # jsig_refused: a project with no `use java` analyzes without any oracle
     let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
     assert len(prog.diags) == 0
-  }))
+  })
 }
 
 test "the representation modules are closed to user code (audit RD-06)" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # The accept half is `load_std` itself: std/map is a `use std/hamt`-free
     # module only because lowering rewrites its primitives, but std/list does
     # import std/set's primitives and the bundle as a whole is checked with the
@@ -1157,11 +1196,11 @@ test "the representation modules are closed to user code (audit RD-06)" {
     assert str.contains(prog.diags[0].d.hint, "use std/map or std/set")
     assert prog.diags[1].d.msg == "`std/pvec` is internal to the standard library"
     assert str.contains(prog.diags[1].d.hint, "use std/list")
-  }))
+  })
 }
 
 test "an impl is in force in every module, not just its own (spec §3.5)" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/trait-cross"
     mkdirs(root ++ "/src")
     put(root ++ "/src/lib.dawn",
@@ -1188,11 +1227,11 @@ test "an impl is in force in every module, not just its own (spec §3.5)" {
     let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
     for d in prog.diags { panic("unexpected: " ++ d.d.msg) }
     assert len(prog.diags) == 0
-  }))
+  })
 }
 
 test "a second module cannot supply a rival impl" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # The program-wide coherence check now sees the whole program's table, but
     # it is not what reports this: the orphan rule gets there first, and between
     # two *different* modules it always does. An impl may only live with its
@@ -1217,11 +1256,11 @@ test "a second module cannot supply a rival impl" {
     let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
     assert len(prog.diags) == 1
     assert str.contains(prog.diags[0].d.msg, "orphan impl: `Sizey[Box]`")
-  }))
+  })
 }
 
 test "closure loading skips an unreferenced module (module-access 2.2)" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/closure1"
     mkdirs(root ++ "/src")
     put(root ++ "/src/main.dawn", "pub fn main() -> Unit !io = println(\"hi\")\n")
@@ -1234,11 +1273,11 @@ test "closure loading skips an unreferenced module (module-access 2.2)" {
     let clo = load_file(root ++ "/src/main.dawn")
     assert len(clo.modules) == 1
     assert clo.modules[0].mod_path == "main"
-  }))
+  })
 }
 
 test "a module may be imported qualified and selectively at once" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # Two different acts: one binds a module alias to call through, the other
     # binds names. A module that exports a type AND functions needs both, and
     # the qualified spelling is the whole point of the former.
@@ -1263,11 +1302,11 @@ test "a module may be imported qualified and selectively at once" {
       if str.contains(ld.d.msg, "imported more than once") { dup = true }
     }
     assert dup
-  }))
+  })
 }
 
 test "a module alias collides with an imported name in either source order" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # bind_import catches `use a/b` before `use a/b.{b}` by reading the alias
     # table as it stands. Nothing read the name table on the way in, so the same
     # pair reversed used to pass and `b` became a binding *and* an alias (#185).
@@ -1307,11 +1346,11 @@ test "a module alias collides with an imported name in either source order" {
         "pub fn main() -> Unit !io = println(trim(str.repeat(\" a \", 1)))\n")
     let ok = analyze_program(load_directory(root3), std, ct_default(), jsig_refused())
     assert len(ok.diags) == 0
-  }))
+  })
 }
 
 test "loader reports cycles and missing modules" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/proj2"
     mkdirs(root ++ "/src")
     put(root ++ "/src/main.dawn", "use a\npub fn main() -> Unit !io = ()\n")
@@ -1332,11 +1371,11 @@ test "loader reports cycles and missing modules" {
       if str.contains(ld.d.msg, "cannot find module `nope`") { missing = true }
     }
     assert missing
-  }))
+  })
 }
 
 test "a file whose name is not a path segment is refused, not folded" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # The `use` grammar cannot spell these, so only the entry file -- the one
     # named on the command line -- can carry them in. The old folding turned
     # `a-b` and `a_b` into one class name, and `9x` into `m_9x`, which is the
@@ -1365,11 +1404,11 @@ test "a file whose name is not a path segment is refused, not folded" {
     assert len(good.modules) == 1
     assert good.modules[0].mod_path == "ok_name2"
     assert good.modules[0].class_name == "ok_name2"
-  }))
+  })
 }
 
 test "the editor's standalone path judges the buffer's name too" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # The asymmetry this closes (#176): `analyze_standalone` hardcodes mod_path
     # "main", so the buffer's own file name never reached the check `resolve`
     # runs on its seeds. The language server accepted, in silence, a file that
@@ -1397,11 +1436,11 @@ test "the editor's standalone path judges the buffer's name too" {
     # an untitled buffer has no name to judge -- and `<lsp>` is not one
     let untitled = analyze_standalone("<lsp>", src, std, ct_default(), jsig_refused())
     assert len(untitled.diags) == 0
-  }))
+  })
 }
 
 test "use_candidates enumerates the tree and its deps the way `use` spells them" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     let base = "/tmp/dawn-selfhost-analyze/cands"
     mkdirs(base ++ "/app/src/deep")
     mkdirs(base ++ "/pkg/web/src")
@@ -1421,11 +1460,11 @@ test "use_candidates enumerates the tree and its deps the way `use` spells them"
 
     # a buffer with no file behind it has no tree to walk
     assert len(map.keys(use_candidates("<lsp>"))) == 0
-  }))
+  })
 }
 
 test "directory mode refuses one badly named module without losing the rest" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/entrydir"
     mkdirs(root ++ "/src")
     put(root ++ "/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
@@ -1435,11 +1474,11 @@ test "directory mode refuses one badly named module without losing the rest" {
     assert loaded.modules[0].mod_path == "main"
     assert len(loaded.diags) == 1
     assert loaded.diags[0].d.msg == "`bad-name` is not a valid module path segment"
-  }))
+  })
 }
 
 test "an aliased path dep canonicalizes to the package's real name" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     let base = "/tmp/dawn-selfhost-analyze/proj4"
     mkdirs(base ++ "/pkg/web/src")
     mkdirs(base ++ "/app/src")
@@ -1460,7 +1499,7 @@ test "an aliased path dep canonicalizes to the package's real name" {
       }
     }
     assert found
-  }))
+  })
 }
 
 # ---- a dependency the project does not have on disk ----
@@ -1489,13 +1528,13 @@ test "a cold url dependency is fetched while the project is planned" {
   let base = "/tmp/dawn-selfhost-analyze/proj-url-cold"
   let (loaded, log) = in_mem_proc(
     [procmem.failed(22, "curl: (22) The requested URL returned error: 404\n")],
-    () => io.with_env_real(() => {
+    () => {
       mkdirs(base ++ "/src")
       put(base ++ "/dawn.toml", url_dep_manifest())
       put(base ++ "/src/main.dawn",
         "use greeter/hello\n\npub fn main() -> Unit !io = println(hello.greet())\n")
       load_directory(base)
-    }))
+    })
   # planning the project reached the network exactly once, and this is what it
   # asked: the manifest's url, behind curl's own failure flag
   assert len(log) == 1
@@ -1516,7 +1555,7 @@ test "a cold url dependency is fetched while the project is planned" {
 
 test "a warm url dependency is analyzed without consulting curl" {
   let base = "/tmp/dawn-selfhost-analyze/proj-url-warm"
-  let (loaded, log) = in_mem_proc([], () => io.with_env_real(() => {
+  let (loaded, log) = in_mem_proc([], () => {
     # the cache entry, under the name the hash gives it, with the record that
     # says this url produced these bytes
     let root = pkgfetch.cache_root()
@@ -1530,7 +1569,7 @@ test "a warm url dependency is analyzed without consulting curl" {
     put(base ++ "/src/main.dawn",
       "use greeter/hello\n\npub fn main() -> Unit !io = println(hello.greet())\n")
     load_directory(base)
-  }))
+  })
   # the empty script is the assertion: a fetch here would have panicked for
   # want of a reply
   assert len(log) == 0
@@ -1568,7 +1607,7 @@ fn has_msg(prog: Program, msg: String) -> Bool = {
 }
 
 test "every bundled std source checks clean on its own" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # The bug this closes: `dawn check std/cursor.dawn` reported 281 errors
     # across the bundle -- the first of them on line 50, the line that defines
     # the very `cursor.start` its hint told the reader to call instead. std was
@@ -1593,11 +1632,11 @@ test "every bundled std source checks clean on its own" {
       assert prog.modules[0].mod_path == "std/" ++ n
       assert prog.modules[0].cx.is_std_module
     }
-  }))
+  })
 }
 
 test "std identity is where the file came from, not what the module is called" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # A project file at src/std/cursor.dawn is spelled exactly like a bundled
     # module and is not one. The loader's reserved-path diagnostic already
     # refused it -- and that diagnostic used to be the *only* thing refusing it,
@@ -1620,11 +1659,11 @@ test "std identity is where the file came from, not what the module is called" {
     assert std_module_of(std, std_dir() ++ "/cursor.dawn") == Some("std/cursor")
     let absent: Option[String] = None
     assert std_module_of(std, impostor) == absent
-  }))
+  })
 }
 
 test "user code still cannot reach a std-only builtin" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # The negative control for all of the above. Opening std to its own sources
     # is worth nothing if it also opened the intrinsic table to everyone, and
     # the same hint the bug report quoted is what user code is supposed to get.
@@ -1644,11 +1683,11 @@ test "user code still cannot reach a std-only builtin" {
       }
     }
     assert hinted
-  }))
+  })
 }
 
 test "the editor's standalone path gives a bundled std buffer its std identity" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # The journey the bug was reported from: an editor opens std/list.dawn and
     # every line that touches a std-only builtin is underlined. Both language
     # server entries (didOpen and didChange) land in `analyze_standalone`, which
@@ -1676,11 +1715,11 @@ test "the editor's standalone path gives a bundled std buffer its std identity" 
       jsig_refused())
     assert len(doc.prog.diags) == 0
     assert doc.entry == "std/list"
-  }))
+  })
 }
 
 test "the bundled std directory is not a project target" {
-  in_mem(() => io.with_env_real(() => {
+  in_mem(() => {
     # `dawn check std` used to answer "project directory has no `src/` folder",
     # which is true and useless: std is not a project and cannot be made into
     # one. Recognised by provenance, so a project that happens to be called
@@ -1703,7 +1742,7 @@ test "the bundled std directory is not a project target" {
       None -> ()
     }
     assert len(load_target(std, root).diags) == 0
-  }))
+  })
 }
 
 test "the analysis reads the declared tree, and no file system behind it" {
