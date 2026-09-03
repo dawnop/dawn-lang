@@ -772,6 +772,29 @@ pub fn d_reduce[D: Dtype](d: D, shape: List[Int], t: Tile[D], identity: Float,
   out
 }
 
+## The reduction of the tile `t` of `shape` along dimension `dim`, which
+## answers a tile of `shape` with that dimension DROPPED: reducing a
+## `[64, 32]` tile along dimension 1 answers a `[64]` one. `body` runs
+## ONCE, on the host, over the RANK-0 element and accumulator the region
+## sees, whatever the operand's rank is; `identity` is what a fold that has
+## seen nothing starts from.
+##
+## The order is not specified, as `d_reduce`'s is not. `d_reduce` is this
+## with `dim` 0 over a rank-1 tile, where the answer is rank 0 and so is a
+## `Scalar[D]` rather than a `Tile[D]`; the two cannot be one function
+## because the result types differ.
+pub fn d_reduce_dim[D: Dtype](d: D, shape: List[Int], dim: Int, t: Tile[D], identity: Float,
+  body: fn(Scalar[D], Scalar[D]) -> Scalar[D] !Dev) -> Tile[D] !Dev = {
+  let h: Int = t
+  let args = t_reduce_begin(dim, shape, [IdF(dtype_name(d), identity)], [h])
+  let e: Scalar[D] = args[0]
+  let acc: Scalar[D] = args[1]
+  let r: Int = body(e, acc)
+  let outs = t_reduce_end([r])
+  let out: Tile[D] = outs[0]
+  out
+}
+
 ## `d_reduce` over TWO tiles at once, a float tile and the i32 index tile
 ## beside it: the shape argmax and argmin have, where the winning value and
 ## the lane it came from must travel together through one fold. `body` takes

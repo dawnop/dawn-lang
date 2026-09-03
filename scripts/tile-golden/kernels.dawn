@@ -9,10 +9,11 @@
 use std/io
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32, BF16}
-use tileir/dev.{Dev, Param, Tile, Idx, I32, param, block_id, tile_at, load, load_masked, store, store_masked, addf, sub, mul, div,
+use tileir/dev.{Dev, Param, Tile, Idx, I32, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
+  store_strided, mmaf, addf, sub, mul, div,
   maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
   d_for, d_for3, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
-  spread, d_reduce, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select }
+  spread, d_reduce, d_reduce_dim, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select }
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -442,6 +443,185 @@ fn argmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store_masked(out, blk, [RED_TILE], m, select(F64, [RED_TILE], hot, f_const(F64, [RED_TILE], 1.0), f_const(F64, [RED_TILE], 0.0)))
 }
 
+# ---- the two-dimensional kernels (knife 8) ----
+#
+# Every kernel below reads a BLOCK of a larger array rather than a
+# contiguous run of it, which is what `load_strided` is for: the shape is
+# the tile and the strides are the array's, both host constants fixed when
+# the kernel is recorded. Nothing here is masked: every shape divides its
+# tile exactly, so the boundary machinery of knife 7a is not in the way of
+# reading what the two dimensions do.
+
+# The GEMM: C = A * B over 256x256 matrices in 64x64 tiles, walking K in
+# steps of 32. The grid is two-dimensional (M/TM by N/TN) and the
+# accumulator travels through the K loop as its carried value, which is the
+# claim scripts/tile-gpu-diff's mma-acc-not-carried removes.
+const MM_M: Int = 256
+const MM_N: Int = 256
+const MM_K: Int = 256
+const MM_TM: Int = 64
+const MM_TN: Int = 64
+const MM_TK: Int = 32
+
+fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let a_row = idx_mul(bm, idx_const(MM_TM * MM_K))
+  let b_col = idx_mul(bn, idx_const(MM_TN))
+  let zero = f_const(F64, [MM_TM, MM_TN], 0.0)
+  let acc = d_for(idx_const(0), idx_const(MM_K / MM_TK), idx_const(1), zero, (k, sofar) => {
+    let ta = load_strided(a, idx_add(a_row, idx_mul(k, idx_const(MM_TK))), [MM_TM, MM_TK], [MM_K, 1])
+    let tb = load_strided(b, idx_add(b_col, idx_mul(k, idx_const(MM_TK * MM_N))), [MM_TK, MM_TN], [MM_N, 1])
+    mmaf(F64, MM_TM, MM_TK, MM_TN, ta, tb, sofar)
+  })
+  store_strided(c, idx_add(idx_mul(bm, idx_const(MM_TM * MM_N)), b_col), [MM_TM, MM_TN], [MM_N, 1], acc)
+}
+
+# The batched GEMM: BMM_B independent 64x64 products in 32x32 tiles, the
+# batch on the grid's THIRD axis. leetgpu 30.
+const BMM_B: Int = 4
+const BMM_M: Int = 64
+const BMM_N: Int = 64
+const BMM_K: Int = 64
+const BMM_T: Int = 32
+
+fn batched_matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let bb = block_id(2)
+  let a_row = idx_add(idx_mul(bb, idx_const(BMM_M * BMM_K)), idx_mul(bm, idx_const(BMM_T * BMM_K)))
+  let b_col = idx_add(idx_mul(bb, idx_const(BMM_K * BMM_N)), idx_mul(bn, idx_const(BMM_T)))
+  let zero = f_const(F64, [BMM_T, BMM_T], 0.0)
+  let acc = d_for(idx_const(0), idx_const(BMM_K / BMM_T), idx_const(1), zero, (k, sofar) => {
+    let ta = load_strided(a, idx_add(a_row, idx_mul(k, idx_const(BMM_T))), [BMM_T, BMM_T], [BMM_K, 1])
+    let tb = load_strided(b, idx_add(b_col, idx_mul(k, idx_const(BMM_T * BMM_N))), [BMM_T, BMM_T], [BMM_N, 1])
+    mmaf(F64, BMM_T, BMM_T, BMM_T, ta, tb, sofar)
+  })
+  let c_base = idx_add(idx_add(idx_mul(bb, idx_const(BMM_M * BMM_N)), idx_mul(bm, idx_const(BMM_T * BMM_N))),
+    idx_mul(bn, idx_const(BMM_T)))
+  store_strided(c, c_base, [BMM_T, BMM_T], [BMM_N, 1], acc)
+}
+
+# The transpose of a 128x64 matrix in 32x32 tiles. No leetgpu problem here:
+# 3 (Matrix Transpose) has shapes that are not multiples of a tile and needs
+# the boundary of a later knife. This one is the ORACLE for a store whose
+# strides are not row-major: the tile is read `[C, 1]` and written `[1, R]`,
+# so the same values land transposed with no shape operation at all. The
+# matrix is deliberately not square, so swapping the two strides is a wrong
+# answer rather than a different spelling of the same one.
+const TR_ROWS: Int = 128
+const TR_COLS: Int = 64
+const TR_TILE: Int = 32
+
+fn transpose(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bi = block_id(0)
+  let bj = block_id(1)
+  let base_in = idx_add(idx_mul(bi, idx_const(TR_TILE * TR_COLS)), idx_mul(bj, idx_const(TR_TILE)))
+  let t = load_strided(x, base_in, [TR_TILE, TR_TILE], [TR_COLS, 1])
+  let base_out = idx_add(idx_mul(bj, idx_const(TR_TILE * TR_ROWS)), idx_mul(bi, idx_const(TR_TILE)))
+  store_strided(out, base_out, [TR_TILE, TR_TILE], [1, TR_ROWS], t)
+}
+
+# Layer normalisation over the last dimension of a LN_ROWS by LN_D matrix,
+# one row a block: leetgpu 113. `gamma` and `beta` are one LN_D-long vector
+# each, read at offset 0 by every block.
+const LN_ROWS: Int = 64
+const LN_D: Int = 256
+const LN_EPS: Float = 1.0e-5
+
+# `(t - mean) / sqrt(var + eps)`, the normalisation every kernel below
+# shares, over a tile of `shape` holding `count` values.
+fn normalise(shape: List[Int], count: Int, eps: Float, t: Tile[F64]) -> Tile[F64] !Dev = {
+  let n = f_const(F64, shape, to_float(count))
+  let total = spread(F64, shape, d_reduce(F64, shape, t, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let mean = div(F64, shape, total, n)
+  let d = sub(F64, shape, t, mean)
+  let sq = spread(F64, shape, d_reduce(F64, shape, mul(F64, shape, d, d), 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let variance = div(F64, shape, sq, n)
+  div(F64, shape, d, sqrt(F64, shape, addf(F64, shape, variance, f_const(F64, shape, eps))))
+}
+
+fn layer_norm(x: Param[F64], gamma: Param[F64], beta: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let row = tile_at(block_id(0), LN_D)
+  let t = load(x, row, [LN_D])
+  let g = load(gamma, idx_const(0), [LN_D])
+  let b = load(beta, idx_const(0), [LN_D])
+  let r = normalise([LN_D], LN_D, LN_EPS, t)
+  store(out, row, [LN_D], addf(F64, [LN_D], mul(F64, [LN_D], r, g), b))
+}
+
+# Batch normalisation over a BN_ROWS by BN_CHANNELS matrix, one CHANNEL a
+# block: leetgpu 40. The column a block reads is a stride of BN_CHANNELS,
+# and its `gamma` and `beta` are one element each, read with a stride of
+# ZERO so that the whole column sees the same value without a broadcast
+# operation of its own.
+const BN_ROWS: Int = 128
+const BN_CHANNELS: Int = 64
+const BN_EPS: Float = 1.0e-5
+
+fn batch_norm(x: Param[F64], gamma: Param[F64], beta: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let col = block_id(0)
+  let t = load_strided(x, col, [BN_ROWS], [BN_CHANNELS])
+  let g = load_strided(gamma, col, [BN_ROWS], [0])
+  let b = load_strided(beta, col, [BN_ROWS], [0])
+  let r = normalise([BN_ROWS], BN_ROWS, BN_EPS, t)
+  store_strided(out, col, [BN_ROWS], [BN_CHANNELS], addf(F64, [BN_ROWS], mul(F64, [BN_ROWS], r, g), b))
+}
+
+# Group normalisation over a (GN_N, GN_C, GN_HW) tensor with GN_GROUPS
+# groups of channels, one (sample, group) a block: leetgpu 105. The tile is
+# TWO-dimensional -- the group's channels by the spatial extent -- so the
+# mean is a reduction along dimension 1 followed by one along dimension 0,
+# which is the first kernel here whose `dim` is not 0.
+const GN_N: Int = 2
+const GN_C: Int = 8
+const GN_HW: Int = 32
+const GN_GROUPS: Int = 4
+const GN_EPS: Float = 1.0e-5
+
+fn gn_per_group() -> Int = GN_C / GN_GROUPS
+
+fn group_norm(x: Param[F64], gamma: Param[F64], beta: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let per = gn_per_group()
+  let shape = [per, GN_HW]
+  let s = block_id(0)
+  let g = block_id(1)
+  let base = idx_add(idx_mul(s, idx_const(GN_C * GN_HW)), idx_mul(g, idx_const(per * GN_HW)))
+  let t = load_strided(x, base, shape, [GN_HW, 1])
+  let chan = idx_mul(g, idx_const(per))
+  let gt = load_strided(gamma, chan, shape, [1, 0])
+  let bt = load_strided(beta, chan, shape, [1, 0])
+  let count = per * GN_HW
+  let n = f_const(F64, shape, to_float(count))
+  let rows = d_reduce_dim(F64, shape, 1, t, 0.0, (e, acc) => s_addf(F64, e, acc))
+  let total = spread(F64, shape, d_reduce(F64, [per], rows, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let mean = div(F64, shape, total, n)
+  let d = sub(F64, shape, t, mean)
+  let sqrows = d_reduce_dim(F64, shape, 1, mul(F64, shape, d, d), 0.0, (e, acc) => s_addf(F64, e, acc))
+  let sq = spread(F64, shape, d_reduce(F64, [per], sqrows, 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let variance = div(F64, shape, sq, n)
+  let r = div(F64, shape, d, sqrt(F64, shape, addf(F64, shape, variance, f_const(F64, shape, GN_EPS))))
+  store_strided(out, base, shape, [GN_HW, 1], addf(F64, shape, mul(F64, shape, r, gt), bt))
+}
+
+# The fused residual add and RMS normalisation of a FR_ROWS by FR_D matrix,
+# one row a block: leetgpu 83. `w` is one FR_D-long vector read at offset 0
+# by every block.
+const FR_ROWS: Int = 64
+const FR_D: Int = 256
+const FR_EPS: Float = 1.0e-5
+
+fn fused_rms_norm(x: Param[F64], res: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let row = tile_at(block_id(0), FR_D)
+  let h = addf(F64, [FR_D], load(x, row, [FR_D]), load(res, row, [FR_D]))
+  let g = load(w, idx_const(0), [FR_D])
+  let n = f_const(F64, [FR_D], to_float(FR_D))
+  let sq = spread(F64, [FR_D], d_reduce(F64, [FR_D], mul(F64, [FR_D], h, h), 0.0, (e, acc) => s_addf(F64, e, acc)))
+  let ms = div(F64, [FR_D], sq, n)
+  let r = div(F64, [FR_D], h, sqrt(F64, [FR_D], addf(F64, [FR_D], ms, f_const(F64, [FR_D], FR_EPS))))
+  store(out, row, [FR_D], mul(F64, [FR_D], r, g))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -491,6 +671,25 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("foldif", ["f64", "f64"], () => foldif(param(F64, 0), param(F64, 1), FOLD_CHUNKS))
   "argmax" ->
     trace_kernel("argmax", ["f64", "f64"], () => argmax(param(F64, 0), param(F64, 1)))
+  "matmul" ->
+    trace_kernel("matmul", ["f64", "f64", "f64"], () => matmul(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "batched_matmul" ->
+    trace_kernel("batched_matmul", ["f64", "f64", "f64"],
+      () => batched_matmul(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "transpose" ->
+    trace_kernel("transpose", ["f64", "f64"], () => transpose(param(F64, 0), param(F64, 1)))
+  "layer_norm" ->
+    trace_kernel("layer_norm", ["f64", "f64", "f64", "f64"],
+      () => layer_norm(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "batch_norm" ->
+    trace_kernel("batch_norm", ["f64", "f64", "f64", "f64"],
+      () => batch_norm(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "group_norm" ->
+    trace_kernel("group_norm", ["f64", "f64", "f64", "f64"],
+      () => group_norm(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "fused_rms_norm" ->
+    trace_kernel("fused_rms_norm", ["f64", "f64", "f64", "f64"],
+      () => fused_rms_norm(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -513,6 +712,7 @@ pub fn main() -> Unit !io = match args() {
     }
   }
   _ -> panic("usage: kernels <vadd|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
-      ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax>"
+      ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax"
+      ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

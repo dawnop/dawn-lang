@@ -114,7 +114,8 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/tile-golden"
 kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops reduce_sum softmax dot mse
-  monte_carlo rms_norm silu sigmoid ppo_loss dpo_loss mathops foldif argmax)
+  monte_carlo rms_norm silu sigmoid ppo_loss dpo_loss mathops foldif argmax
+  matmul batched_matmul transpose layer_norm batch_norm group_norm fused_rms_norm)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

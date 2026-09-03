@@ -155,6 +155,13 @@ pub fn num_tile(shape: List[Int], dtype: String) -> Ty = Tile(shape, Num(dtype))
 ## `1` for the rank-0 tile.
 pub fn lanes_in(shape: List[Int]) -> Int = list.fold(shape, 1, (acc, d) => acc * d)
 
+## The rank-0 tile of the same element format as `t`: what a reduction's
+## region takes, whatever the operand's rank is.
+pub fn rank0_of(t: Ty) -> Ty = match t {
+  Token -> panic("tileir: a token has no rank-0 form")
+  Tile(_shape, e) -> Tile([], e)
+}
+
 # `t` with dimension `dim` dropped: the shape a reduction along `dim`
 # answers.
 fn without_dim(t: Ty, dim: Int) -> Ty = match t {
@@ -531,8 +538,10 @@ fn lower_reduce(l0: L, results: List[Int], dim: Int, shape: List[Int], identitie
   let res_tys = list.map(operand_tys, ot => without_dim(ot, dim))
   let (l1, res) = define_all(l0, results, res_tys)
   # the region takes the element and the accumulator of each operand, in
-  # operand order, both rank-0
-  let arg_tys = list.map(range(0, len(args)), k => res_tys[k / 2])
+  # operand order, both RANK-0 whatever the operand's rank is (the
+  # dialect's own example over a `tile<8x64xf32>` takes `tile<f32>`
+  # arguments): only the RESULT loses the reduced dimension.
+  let arg_tys = list.map(range(0, len(args)), k => rank0_of(operand_tys[k / 2]))
   let (l2, argv) = define_all(l1, args, arg_tys)
   let inner = list.fold(body, L { ..l2, body: [] }, lower_op)
   let ytys = yielded(inner.body, "a reduction's body")

@@ -18,7 +18,7 @@ use std/list
 use std/str
 use dev.{RedId, IdF, IdI}
 use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, If, Yield}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, FloatMma, CmpFloat, CmpInt, SelectTile, ForLoop, Cont, ReduceTile, IfElse, YieldVals, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, FloatMma, CmpFloat, CmpInt, SelectTile, ForLoop, Cont, ReduceTile, IfElse, YieldVals, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -144,7 +144,7 @@ fn line(i: Instr) -> String = match i {
   Cont(values, tys) ->
     if len(values) == 0 { "continue" } else { "continue ${commas(list.map(values, name))} : ${commas(list.map(tys, ty))}" }
   ReduceTile(res, tys, dim, identities, operands, operand_tys, args, _body) -> {
-    let pairs = list.map(range(0, len(args)), k => "${v(args[k])}: ${ty(tys[k / 2])}")
+    let pairs = list.map(range(0, len(args)), k => "${v(args[k])}: ${ty(rank0_of(operand_tys[k / 2]))}")
     "${results(res)}reduce ${commas(list.map(operands, name))} dim=${dim}"
       ++ " identities=[${commas(list.map(identities, identity))}]"
       ++ " : ${commas(list.map(operand_tys, ty))} -> ${commas(list.map(tys, ty))}"
