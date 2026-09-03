@@ -1,0 +1,466 @@
+# Layer 2 for the two-dimensional kernels (knife 8), the fourth of these
+# programs after vadd_diff, mask_diff and red_diff: one `!Gpu` program runs
+# each of the seven kernels scripts/tile-golden pins under `with_gpu_real`
+# against the machine's GPU and under `with_gpu_fake` against hand-written
+# host references, and prints what each device answered and under WHICH
+# TIER the two agree.
+#
+#   mm_diff <matmul.cubin> <batched_matmul.cubin> <transpose.cubin>
+#           <layer_norm.cubin> <batch_norm.cubin> <group_norm.cubin>
+#           <fused_rms_norm.cubin>
+#
+# What is new here and nowhere else:
+#
+#   * the GRID HAS THREE AXES. `matmul` and `transpose` run over a
+#     two-dimensional grid and `batched_matmul` over a three-dimensional
+#     one, so a runtime that dropped an axis would compute a fraction of
+#     the answer and leave the rest as the sentinel. That is what
+#     scripts/tile-gpu-diff/run.sh's grid-y-ignored mutant removes, and no
+#     earlier program could hold it: every kernel before this knife has a
+#     one-dimensional grid, on which forcing gridDimY to 1 changes nothing.
+#   * `mmaf` is a MATRIX PRODUCT whose summation over `k` has no specified
+#     order and, on this machine, no tensor core either
+#     (`tileiras --remarks=tensorcore` answers `Instruction = FMA` for an
+#     f64 `mmaf` on sm_86: GA102 has no fast f64 tensor core). So the two
+#     GEMMs are tolerance-tier kernels permanently
+#     (docs/tile-backend-design.md 6.5), and their corpora say which part
+#     of that is measurable: `matmul`'s is integer-valued with every
+#     partial sum far inside the significand, so every summation order is
+#     the same exact integer and the transcript records whether the device
+#     happened to agree bit for bit; `batched_matmul`'s is tenths, which are
+#     not on the binary grid, so the grouping of its sum is visible and the
+#     tolerance is doing real work there.
+#   * a tile is a BLOCK of a larger array. Every load and store here reads
+#     a stride of the array rather than a contiguous run, `transpose`
+#     writes with the two strides swapped, and `batch_norm` reads its
+#     per-channel `gamma` with a stride of ZERO.
+use std/io
+use std/io.{with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, alloc, upload, download, free, launch3, sync,
+  handle_of, matmul_ref, batched_matmul_ref, transpose_ref, layer_norm_ref, batch_norm_ref, group_norm_ref,
+  fused_rms_norm_ref }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a value no kernel
+## here computes, so a lane that still has it is a lane nothing wrote.
+pub const SENTINEL: Float = 0.0 - 12345.678
+
+## leetgpu's own agreement criterion, and the tolerance tier's.
+pub const ATOL: Float = 1.0e-5
+pub const RTOL: Float = 1.0e-5
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const MM_M: Int = 256
+pub const MM_N: Int = 256
+pub const MM_K: Int = 256
+pub const MM_TM: Int = 64
+pub const MM_TN: Int = 64
+
+pub const BMM_B: Int = 4
+pub const BMM_M: Int = 64
+pub const BMM_N: Int = 64
+pub const BMM_K: Int = 64
+pub const BMM_T: Int = 32
+
+pub const TR_ROWS: Int = 128
+pub const TR_COLS: Int = 64
+pub const TR_TILE: Int = 32
+
+pub const LN_ROWS: Int = 64
+pub const LN_D: Int = 256
+pub const LN_EPS: Float = 1.0e-5
+
+pub const BN_ROWS: Int = 128
+pub const BN_CHANNELS: Int = 64
+pub const BN_EPS: Float = 1.0e-5
+
+pub const GN_N: Int = 2
+pub const GN_C: Int = 8
+pub const GN_HW: Int = 32
+pub const GN_GROUPS: Int = 4
+pub const GN_EPS: Float = 1.0e-5
+
+pub const FR_ROWS: Int = 64
+pub const FR_D: Int = 256
+pub const FR_EPS: Float = 1.0e-5
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+fn release(ts: List[Tensor[F64]]) -> Unit !Gpu = {
+  for t in ts {
+    let _ = free(t)
+  }
+}
+
+# One buffer a data set, each as long as its own data: unlike the earlier
+# programs here, a kernel's buffers are not all the same length (a
+# per-feature `gamma` is one row of what it scales).
+fn alloc_all(sizes: List[Int], i: Int, acc: List[Tensor[F64]]) -> Result[List[Tensor[F64]], ForeignError] !Gpu =
+  if i >= len(sizes) {
+    Ok(acc)
+  } else {
+    match alloc(F64, sizes[i]) {
+      Ok(t) -> alloc_all(sizes, i + 1, acc ++ [t])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(ts: List[Tensor[F64]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(ts) {
+    Ok(())
+  } else {
+    match upload(ts[i], data[i]) {
+      Ok(_) -> upload_all(ts, data, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+## One kernel over `data` (the input buffers, then the output buffer's
+## initial contents) on a `gx` by `gy` by `gz` grid, one stage at a time,
+## stopping at the first refusal and saying which stage it was.
+fn stages(kernel: String, gx: Int, gy: Int, gz: Int, data: List[List[Float]]) -> Trace !Gpu = {
+  let sizes = list.map(data, d => len(d))
+  match alloc_all(sizes, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(ts) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(ts, data, 0) {
+        Err(e) -> {
+          release(ts)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match launch3(kernel, gx, gy, gz, list.map(ts, handle_of)) {
+            Err(e) -> {
+              release(ts)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = sync()
+              let r = download(ts[len(ts) - 1])
+              release(ts)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+# ---- the two tiers (docs/tile-backend-design.md 6.5) ----
+
+## Whether `got` is within the tolerance tier's distance of `want`, by
+## leetgpu's own criterion. A NaN on either side is never within.
+pub fn within(got: Float, want: Float) -> Bool =
+  if got != got || want != want {
+    false
+  } else if got == want {
+    true
+  } else if got - got != 0.0 || want - want != 0.0 {
+    false
+  } else {
+    let d = if got > want { got - want } else { want - got }
+    let m = if want > 0.0 { want } else { 0.0 - want }
+    d <= ATOL + RTOL * m
+  }
+
+## The largest relative-and-absolute miss between two vectors, as the
+## tolerance criterion measures it: 0.0 when they are bit-identical.
+pub fn worst(got: List[Float], want: List[Float]) -> Float =
+  list.fold(range(0, len(want)), 0.0, (acc, i) => {
+    let a = got[i]
+    let b = want[i]
+    let d = if a > b { a - b } else { b - a }
+    let m = if b > 0.0 { b } else { 0.0 - b }
+    let scaled = d / (ATOL + RTOL * m)
+    if scaled > acc { scaled } else { acc }
+  })
+
+fn all_within(got: List[Float], want: List[Float]) -> Bool =
+  len(got) == len(want) && list.all(range(0, len(want)), i => within(got[i], want[i]))
+
+fn same_bits(got: Option[List[Float]], want: Option[List[Float]]) -> Bool = match (got, want) {
+  (Some(a), Some(b)) -> len(a) == len(b) && list.all(range(0, len(a)), i => to_string(a[i]) == to_string(b[i]))
+  _ -> false
+}
+
+## The verdict for one kernel under its tier: `identical:exact` (bit for
+## bit), `close:tolerance` (within atol/rtol and not bit for bit),
+## `identical:tolerance` (a tolerance-tier kernel that happened to agree bit
+## for bit as well, which is worth seeing), `differ:result`, or
+## `blocked:<kind>@<stage>` where the driver stopped.
+fn verdict(tier: String, fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if same_bits(real.result, fake.result) {
+    "identical:" ++ tier
+  } else if tier == "exact" {
+    "differ:result"
+  } else {
+    match (real.result, fake.result) {
+      (Some(a), Some(b)) -> if all_within(a, b) { "close:tolerance" } else { "differ:result" }
+      _ -> "differ:result"
+    }
+  }
+}
+
+# ---- the corpora ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+# Whole numbers in [-8, 8]. Every product of two is a whole number below 64
+# and every partial sum of 256 of them is far inside 2^53, so a matrix
+# product over this corpus is the same exact integer under any summation
+# order and the device's own order is not in the way of the comparison.
+fn small_ints(n: Int, step: Int, span: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float((i * step) % span - span / 2))
+
+# Values with a fractional part, in [-2, 2]. Multiples of an eighth, so
+# every sum of a few of them is exact: what a normalisation's corpus wants,
+# where the difference between the device and the reference should be the
+# square root and the division rather than the corpus.
+fn fractional(n: Int, step: Int, span: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float((i * step) % span - span / 2) * 0.125)
+
+# Values that are NOT on the binary grid: tenths. A sum of 64 products of
+# these depends on the order it is grouped in, so this is the corpus on
+# which `mmaf`'s unspecified summation is actually visible and the
+# tolerance tier is doing work rather than passing for free.
+fn tenths(n: Int, step: Int, span: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float((i * step) % span - span / 2) * 0.1)
+
+# Distinct values, one per element: what a transpose has to move to the
+# right place, and a corpus on which swapping the two strides is visible.
+fn distinct(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i) + 0.5)
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String =
+  ["matmul", "batched_matmul", "transpose", "layer_norm", "batch_norm", "group_norm", "fused_rms_norm"][i]
+
+## The kernels of the tolerance tier: the two GEMMs, whose summation over
+## `k` has no specified order, and the four normalisations, whose host
+## reference takes a square root by iteration and folds its sums left.
+## `transpose` moves values and computes nothing, so it is the exact tier.
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier` column
+## of scripts/leetgpu-diff/problems.txt against it.
+pub fn tolerance_tier() -> List[String] =
+  ["matmul", "batched_matmul", "layer_norm", "batch_norm", "group_norm", "fused_rms_norm"]
+
+fn case_tier(i: Int) -> String = {
+  let name = case_name(i)
+  if list.any(tolerance_tier(), t => t == name) { "tolerance" } else { "exact" }
+}
+
+## The grid each kernel was recorded for, as (gx, gy, gz).
+fn case_grid(i: Int) -> (Int, Int, Int) = {
+  let name = case_name(i)
+  if name == "matmul" {
+    (MM_M / MM_TM, MM_N / MM_TN, 1)
+  } else if name == "batched_matmul" {
+    (BMM_M / BMM_T, BMM_N / BMM_T, BMM_B)
+  } else if name == "transpose" {
+    (TR_ROWS / TR_TILE, TR_COLS / TR_TILE, 1)
+  } else if name == "layer_norm" {
+    (LN_ROWS, 1, 1)
+  } else if name == "batch_norm" {
+    (BN_CHANNELS, 1, 1)
+  } else if name == "group_norm" {
+    (GN_N, GN_GROUPS, 1)
+  } else {
+    (FR_ROWS, 1, 1)
+  }
+}
+
+## The buffers each is handed: its inputs, then the output buffer's initial
+## contents.
+fn case_data(i: Int) -> List[List[Float]] = {
+  let name = case_name(i)
+  if name == "matmul" {
+    [small_ints(MM_M * MM_K, 7, 17), small_ints(MM_K * MM_N, 11, 13), sentinel_buffer(MM_M * MM_N)]
+  } else if name == "batched_matmul" {
+    [tenths(BMM_B * BMM_M * BMM_K, 5, 29), tenths(BMM_B * BMM_K * BMM_N, 3, 23),
+      sentinel_buffer(BMM_B * BMM_M * BMM_N)]
+  } else if name == "transpose" {
+    [distinct(TR_ROWS * TR_COLS), sentinel_buffer(TR_ROWS * TR_COLS)]
+  } else if name == "layer_norm" {
+    [fractional(LN_ROWS * LN_D, 5, 29), fractional(LN_D, 3, 11), fractional(LN_D, 7, 13),
+      sentinel_buffer(LN_ROWS * LN_D)]
+  } else if name == "batch_norm" {
+    [fractional(BN_ROWS * BN_CHANNELS, 5, 29), fractional(BN_CHANNELS, 3, 11), fractional(BN_CHANNELS, 7, 13),
+      sentinel_buffer(BN_ROWS * BN_CHANNELS)]
+  } else if name == "group_norm" {
+    [fractional(GN_N * GN_C * GN_HW, 5, 29), fractional(GN_C, 3, 11), fractional(GN_C, 7, 13),
+      sentinel_buffer(GN_N * GN_C * GN_HW)]
+  } else {
+    [fractional(FR_ROWS * FR_D, 5, 29), fractional(FR_ROWS * FR_D, 3, 23), fractional(FR_D, 7, 13),
+      sentinel_buffer(FR_ROWS * FR_D)]
+  }
+}
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] = {
+  let name = case_name(i)
+  if name == "matmul" {
+    map.from([("matmul", (3, (dts, ins) => matmul_ref(MM_M, MM_K, MM_N, dts, ins)))])
+  } else if name == "batched_matmul" {
+    map.from([("batched_matmul", (3, (dts, ins) => batched_matmul_ref(BMM_B, BMM_M, BMM_K, BMM_N, dts, ins)))])
+  } else if name == "transpose" {
+    map.from([("transpose", (2, (dts, ins) => transpose_ref(TR_ROWS, TR_COLS, dts, ins)))])
+  } else if name == "layer_norm" {
+    map.from([("layer_norm", (4, (dts, ins) => layer_norm_ref(LN_ROWS, LN_D, LN_EPS, dts, ins)))])
+  } else if name == "batch_norm" {
+    map.from([("batch_norm", (4, (dts, ins) => batch_norm_ref(BN_ROWS, BN_CHANNELS, BN_EPS, dts, ins)))])
+  } else if name == "group_norm" {
+    map.from([("group_norm",
+      (4, (dts, ins) => group_norm_ref(GN_N, GN_C, GN_HW, GN_GROUPS, GN_EPS, dts, ins)))])
+  } else {
+    map.from([("fused_rms_norm", (4, (dts, ins) => fused_rms_norm_ref(FR_ROWS, FR_D, FR_EPS, dts, ins)))])
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones. A
+## kernel here writes its whole output buffer, so the interesting lanes are
+## the two ends: a grid axis nobody launched leaves the sentinel at one of
+## them.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn miss(fake: Trace, real: Trace) -> String = match (real.result, fake.result) {
+  (Some(a), Some(b)) -> "${worst(a, b)}"
+  _ -> "-"
+}
+
+fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("mm_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  let count = 7
+  if len(argv) != count {
+    io.eprintln("usage: mm_diff <matmul.cubin> <batched_matmul.cubin> <transpose.cubin> <layer_norm.cubin>"
+        ++ " <batch_norm.cubin> <group_norm.cubin> <fused_rms_norm.cubin>")
+    io.exit(2)
+  }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var tolerance_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let tier = case_tier(i)
+    let data = case_data(i)
+    let (gx, gy, gz) = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, data))
+    let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, data))
+    let v = verdict(tier, fake, real)
+    io.println("kernel ${name} tier=${tier} buffers=${len(data)} out_lanes=${len(data[len(data) - 1])}"
+        ++ " grid=(${gx}, ${gy}, ${gz})")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  miss  ${miss(fake, real)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})")
+    if real.note != "" { io.println("  note  ${real.note}") }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v == "close:tolerance" || v == "identical:tolerance" { tolerance_count = tolerance_count + 1 } else { () }
+    if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+      && v != "identical:tolerance" {
+        blocked = v
+      } else {
+        ()
+      }
+  }
+  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+}
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")

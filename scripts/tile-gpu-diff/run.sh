@@ -18,9 +18,11 @@
 #             `gpu.unsupported_backend`: the JVM has no device runtime and
 #             says so by construction rather than by a LinkageError.
 #   native    vadd_diff.dawn built natively runs four f64 and three bf16
-#             input sets, and mask_diff.dawn the six boundary kernels of
+#             input sets, mask_diff.dawn the six boundary kernels of
 #             knife 7a (each with an output buffer longer than its answer, so
-#             that what the mask keeps is compared too),
+#             that what the mask keeps is compared too), red_diff.dawn the
+#             thirteen reduction and transcendental kernels of knife 7b and
+#             mm_diff.dawn the seven two-dimensional kernels of knife 8,
 #             under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
@@ -55,6 +57,19 @@
 #                      buffer's tail is gone and all six say differ:result.
 #                      A launch-layer claim, so SKIP where the clean run is
 #                      blocked, for grid-zero's reason
+#     grid-y-ignored   the C runtime's cuLaunchKernel forces gridDimY to 1
+#                      -> layers 0 and 1 cannot see it at all (a grid is not
+#                      in the bytecode) and neither can any earlier program
+#                      here (every kernel before knife 8 has a
+#                      one-dimensional grid), while on the device the four
+#                      kernels with a second grid axis leave the sentinel
+#                      where the blocks nobody launched should have written
+#     mma-acc-not-carried
+#                      the GEMM's K loop starts from a fresh zero tile each
+#                      iteration instead of carrying its accumulator ->
+#                      layer 0 moves and tileiras accepts the result (it is
+#                      a legal kernel), and only the device says matmul
+#                      answers the last K slice rather than the product
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -238,6 +253,10 @@ masked=(vadd_tail copy relu leaky_relu clip elemops)
 # red_diff takes them.
 reduced=(reduce_sum softmax dot mse monte_carlo rms_norm silu sigmoid ppo_loss dpo_loss mathops foldif argmax)
 
+# The two-dimensional kernels of knife 8, in the order mm_diff takes them.
+# The first three run over a grid with more than one axis.
+twod=(matmul batched_matmul transpose layer_norm batch_norm group_norm fused_rms_norm)
+
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
@@ -250,7 +269,7 @@ assemble_golden() { # kernel, tilebc, cubin
     fail "tileiras wrote no ELF cubin for $1"
 }
 
-for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}"; do
+for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -259,6 +278,8 @@ masked_cubins=()
 for k in "${masked[@]}"; do masked_cubins+=("$work/$k.cubin"); done
 reduced_cubins=()
 for k in "${reduced[@]}"; do reduced_cubins+=("$work/$k.cubin"); done
+twod_cubins=()
+for k in "${twod[@]}"; do twod_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -341,18 +362,37 @@ case "$reduced_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/reduced.out" | head -n 1)"
 
+# ---- native, the two-dimensional kernels (knife 8)
+build_native "$root/std" "$work/twod.bin" "$here/mm_diff.dawn"
+rc=0
+"$work/twod.bin" "${twod_cubins[@]}" > "$work/twod.out" 2> "$work/twod.err" || rc=$?
+cat "$work/twod.out"
+twod_verdict="$(verdict_of "$work/twod.out")"
+case "$twod_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#twod[@]} two-dimensional kernels agree with the fake device, each under its own tier" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $twod_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $twod_verdict" ;;
+  fail) cat "$work/twod.err" >&2; fail "the device answered and disagreed with the fake device on a two-dimensional kernel (see the transcript above)" ;;
+  *) cat "$work/twod.err" >&2; fail "mm_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/twod.out" | head -n 1)"
+
 # The tier summary and the fold-order probe go into the ledger note: the
 # probe is a RECORD and not an assertion (docs 6.5), so a tileiras upgrade
 # that changes the device's reduction tree shows up in the ledger rather
 # than in a red run.
-tiers="$(sed -n 's/^tiers //p' "$work/reduced.out" | tail -n 1)"
+tiers="$(sed -n 's/^tiers //p' "$work/reduced.out" | tail -n 1) 2d:$(sed -n 's/^tiers //p' "$work/twod.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe"
 
 # The ledger records one verdict for the tree: both programs pass, or the
 # first thing that stopped one of them.
-if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ]; then
+if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
+  && [ "$twod_verdict" = pass ]; then
   verdict=pass
+elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ]; then
+  verdict="$twod_verdict"
 elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ]; then
   verdict="$reduced_verdict"
 elif [ "$verdict" = pass ]; then
@@ -433,8 +473,8 @@ roundtrip_mutant_checks pack-truncates "$std_pt" bf16 3
 #    the mutant cannot be told from it, and saying PASS would be the green
 #    with no information in it; it is a SKIP with the reason.
 std_gz="$(mutant_std grid-zero \
-  '                  gpu_launch_host(m, kernel, grid, device_pointers(table, args))' \
-  '                  gpu_launch_host(m, kernel, 0, device_pointers(table, args))')"
+  '                  gpu_launch_host(m, kernel, gx, gy, gz, device_pointers(table, args))' \
+  '                  gpu_launch_host(m, kernel, 0, gy, gz, device_pointers(table, args))')"
 build_native "$std_gz" "$work/m-grid-zero.bin"
 rc=0
 "$work/m-grid-zero.bin" "${cubins[@]}" > "$work/m-grid-zero.out" 2>&1 || rc=$?
@@ -463,8 +503,8 @@ rm -rf "$mutant_pkg"
 cp -r "$root/packages/tileir" "$mutant_pkg"
 before=$(digest "$mutant_pkg/src/lower.dawn")
 python3 "$here/mutate.py" "$mutant_pkg/src/lower.dawn" mask-all-true \
-  'emit(l1, CmpInt(d, pred, i32_vec(n), i1_vec(n), a, b))' \
-  'emit(l1, ConstInt(d, i1_vec(n), 1))'
+  'emit(l1, CmpInt(d, pred, i32_tile(shape), i1_tile(shape), a, b))' \
+  'emit(l1, ConstInt(d, i1_tile(shape), 1))'
 after=$(digest "$mutant_pkg/src/lower.dawn")
 echo "      mask-all-true: packages/tileir/src/lower.dawn md5 $before -> $after"
 
@@ -534,8 +574,8 @@ rm -rf "$mutant_pkg_id"
 cp -r "$root/packages/tileir" "$mutant_pkg_id"
 before=$(digest "$mutant_pkg_id/src/dev.dawn")
 python3 "$here/mutate.py" "$mutant_pkg_id/src/dev.dawn" reduce-identity-wrong \
-  'let args = t_reduce_begin(0, n, [IdF(dtype_name(d), identity)], [h])' \
-  'let args = t_reduce_begin(0, n, [IdF(dtype_name(d), identity + 1.0)], [h])'
+  'let args = t_reduce_begin(0, shape, [IdF(dtype_name(d), identity)], [h])' \
+  'let args = t_reduce_begin(0, shape, [IdF(dtype_name(d), identity + 1.0)], [h])'
 after=$(digest "$mutant_pkg_id/src/dev.dawn")
 echo "      reduce-identity-wrong: packages/tileir/src/dev.dawn md5 $before -> $after"
 
@@ -612,8 +652,8 @@ mutant_kernels_src="$work/kernels-softmax.dawn"
 cp "$golden/kernels.dawn" "$mutant_kernels_src"
 before=$(digest "$mutant_kernels_src")
 python3 "$here/mutate.py" "$mutant_kernels_src" softmax-no-max-subtract \
-  '  let mx = spread(F64, RED_TILE, d_reduce(F64, RED_TILE, t, neg_inf(), (e, acc) => s_maxf(F64, e, acc)))' \
-  '  let mx = f_const(F64, RED_TILE, 0.0)'
+  '  let mx = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], t, neg_inf(), (e, acc) => s_maxf(F64, e, acc)))' \
+  '  let mx = f_const(F64, [RED_TILE], 0.0)'
 after=$(digest "$mutant_kernels_src")
 echo "      softmax-no-max-subtract: scripts/tile-golden/kernels.dawn md5 $before -> $after"
 mkdir -p "$work/proj-softmax/src"
@@ -656,6 +696,112 @@ else
   echo "SKIP  mutant: softmax-no-max-subtract not verifiable on this driver: the clean run is $reduced_verdict, before any launch reaches the device"
 fi
 
+# 7. grid-y-ignored: the C RUNTIME launches with gridDimY forced to 1. This
+#    is the first mutant here below the Dawn source entirely: layer 0 and
+#    layer 1 cannot see it (a grid is not in the bytecode, and `tileiras`
+#    never launches anything), and the earlier layer-2 programs cannot
+#    either, because every kernel before this knife runs on a
+#    one-dimensional grid where gridDimY is already 1. Only the four
+#    kernels here whose grid has a second axis go red, and they go red by
+#    leaving the sentinel where the blocks that were never launched should
+#    have written.
+mutant_rt="$work/rt-grid-y-ignored"
+rm -rf "$mutant_rt"
+cp -r "$root/runtime/c" "$mutant_rt"
+before=$(digest "$mutant_rt/dawn_rt.c")
+python3 "$here/mutate.py" "$mutant_rt/dawn_rt.c" grid-y-ignored \
+  '  r = dawn_gpu.launch_kernel(fn, (unsigned int)gx, (unsigned int)gy, (unsigned int)gz, 1, 1, 1, 0,' \
+  '  r = dawn_gpu.launch_kernel(fn, (unsigned int)gx, 1, (unsigned int)gz, 1, 1, 1, 0,'
+after=$(digest "$mutant_rt/dawn_rt.c")
+echo "      grid-y-ignored: runtime/c/dawn_rt.c md5 $before -> $after"
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  -I "$mutant_rt" -c -o "$work/m-grid-y.o" "$mutant_rt/dawn_rt.c" ||
+  fail "grid-y-ignored: the mutated C runtime does not compile"
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  -I "$mutant_rt" -o "$work/m-grid-y.bin" "$work/twod.bin.c" "$work/m-grid-y.o" -lm ||
+  fail "grid-y-ignored: mm_diff does not link against the mutated runtime"
+rc=0
+"$work/m-grid-y.bin" "${twod_cubins[@]}" > "$work/m-grid-y.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-grid-y.out")"
+# the four kernels whose grid has a second axis, and the three that do not
+gridy_red=(matmul batched_matmul transpose group_norm)
+gridy_green=(layer_norm batch_norm fused_rms_norm)
+if [ "$twod_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-grid-y.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#gridy_red[@]}" ]; then
+    cat "$work/m-grid-y.out" >&2
+    fail "grid-y-ignored mutant stayed green: expected verdict fail (exit 1) with exactly ${#gridy_red[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${gridy_red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-grid-y.out" ||
+      { cat "$work/m-grid-y.out" >&2; fail "grid-y-ignored: $k has a second grid axis and should differ"; }
+  done
+  for k in "${gridy_green[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-grid-y.out" ||
+      { cat "$work/m-grid-y.out" >&2; fail "grid-y-ignored: $k has a one-dimensional grid and should be untouched"; }
+  done
+  echo "PASS  mutant: grid-y-ignored (only the ${#gridy_red[@]} kernels with a second grid axis differ: ${gridy_red[*]})"
+else
+  [ "$mverdict" = "$twod_verdict" ] ||
+    { cat "$work/m-grid-y.out" >&2; fail "grid-y-ignored: the clean run is $twod_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: grid-y-ignored not verifiable on this driver: the clean run is $twod_verdict, before any launch reaches the device"
+fi
+
+# 8. mma-acc-not-carried: the GEMM's K loop stops carrying its accumulator
+#    and starts each iteration from a fresh zero tile, so the answer is the
+#    LAST 32-wide slice of the product instead of the whole sum. Layer 0
+#    moves (a `--record` would take it), layer 1 accepts it -- it is a
+#    legal, equally well typed kernel -- and only the device says the
+#    matrix product is wrong. `matmul` alone is edited, so the other six
+#    kernels are the mutant's own control.
+mutant_mma_src="$work/kernels-mma.dawn"
+cp "$golden/kernels.dawn" "$mutant_mma_src"
+before=$(digest "$mutant_mma_src")
+python3 "$here/mutate.py" "$mutant_mma_src" mma-acc-not-carried \
+  '    mmaf(F64, MM_TM, MM_TK, MM_TN, ta, tb, sofar)' \
+  '    mmaf(F64, MM_TM, MM_TK, MM_TN, ta, tb, f_const(F64, [MM_TM, MM_TN], 0.0))'
+after=$(digest "$mutant_mma_src")
+echo "      mma-acc-not-carried: scripts/tile-golden/kernels.dawn md5 $before -> $after"
+mkdir -p "$work/proj-mma/src"
+cp "$mutant_mma_src" "$work/proj-mma/src/main.dawn"
+cat > "$work/proj-mma/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
+
+[deps]
+tileir = "$root/packages/tileir"
+TOML
+"$root/bin/dawn" run "$work/proj-mma" -- matmul --bytecode "$work/matmul-noacc.tilebc" > "$work/proj-mma.log" 2>&1 ||
+  { cat "$work/proj-mma.log" >&2; fail "mma-acc-not-carried: matmul did not encode"; }
+cmp -s "$golden/matmul.tilebc" "$work/matmul-noacc.tilebc" &&
+  fail "mma-acc-not-carried mutant stayed green: matmul.tilebc is unchanged"
+assemble_golden matmul "$work/matmul-noacc.tilebc" "$work/matmul-noacc.cubin"
+echo "      mma-acc-not-carried: matmul.tilebc differs from the golden and tileiras still accepts it"
+noacc_cubins=()
+for k in "${twod[@]}"; do
+  if [ "$k" = matmul ]; then noacc_cubins+=("$work/matmul-noacc.cubin"); else noacc_cubins+=("$work/$k.cubin"); fi
+done
+rc=0
+"$work/twod.bin" "${noacc_cubins[@]}" > "$work/m-mma-noacc.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-mma-noacc.out")"
+if [ "$twod_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-mma-noacc.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-mma-noacc.out" >&2
+    fail "mma-acc-not-carried mutant stayed green: expected verdict fail (exit 1) with matmul alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "matmul" {bad=1} END {exit bad}' \
+    "$work/m-mma-noacc.out" ||
+    { cat "$work/m-mma-noacc.out" >&2; fail "mma-acc-not-carried: a kernel other than matmul moved"; }
+  echo "PASS  mutant: mma-acc-not-carried (matmul alone answers the last K slice instead of the sum; the other 6 kernels are untouched)"
+else
+  [ "$mverdict" = "$twod_verdict" ] ||
+    { cat "$work/m-mma-noacc.out" >&2; fail "mma-acc-not-carried: the clean run is $twod_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: mma-acc-not-carried not verifiable on this driver: the clean run is $twod_verdict, before any launch reaches the device"
+fi
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -666,7 +812,8 @@ fi
   fail "toolchain.txt says driver $pinned_driver and nvidia-smi says $driver: set the driver line to $driver, commit, and run again (the three numbers move together; the ledger commit adds a line and nothing else)"
 dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c \
   scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn \
-  scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mutate.py)"
+  scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mm_diff.dawn \
+  scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"

@@ -608,6 +608,146 @@ pub fn dpo_loss_ref(n: Int, beta: Float, dtypes: List[String], ins: List[List[Fl
   one_answer(ins[4], dtypes[4], 0.0 - total / to_float(n))
 }
 
+# ---- the two-dimensional references (knife 8) ----
+#
+# Each of these reads its buffers as a matrix or a tensor of the shape its
+# kernel was recorded for: the shapes are the caller's arguments, as the
+# lengths of the masked references above are. Every one of them computes
+# the whole output buffer, because the fake device stores what it answers
+# as the contents of the last argument.
+#
+# The MATRIX-PRODUCT references fold `k` LEFT. That is not the device's
+# order: `mmaf` promises a matrix product and nothing about how the sum over
+# `k` is grouped, and on this machine it does not even reach a tensor core
+# (`tileiras --remarks=tensorcore` says `Instruction = FMA` for f64 on
+# sm_86). So a comparison against these is a TOLERANCE-tier comparison,
+# permanently (docs/tile-backend-design.md 6.5).
+
+## `c = a * b` for an `m` by `k` matrix and a `k` by `n` one, both row-major:
+## leetgpu 2 (Matrix Multiplication). `ins` is `[a, b, old c]`.
+pub fn matmul_ref(m: Int, k: Int, n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, m * n), idx => {
+    let i = idx / n
+    let j = idx % n
+    round_to(dt, list.fold(range(0, k), 0.0, (acc, p) => acc + a[i * k + p] * b[p * n + j]))
+  })
+}
+
+## `batch` independent `m` by `k` times `k` by `n` products, the batches laid
+## out one after another: leetgpu 30 (Batched Matrix Multiplication).
+pub fn batched_matmul_ref(batch: Int, m: Int, k: Int, n: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, batch * m * n), idx => {
+    let e = idx / (m * n)
+    let i = (idx % (m * n)) / n
+    let j = idx % n
+    round_to(dt, list.fold(range(0, k), 0.0, (acc, p) =>
+        acc + a[e * m * k + i * k + p] * b[e * k * n + p * n + j]))
+  })
+}
+
+## The transpose of a `rows` by `cols` row-major matrix, as a `cols` by
+## `rows` one. No leetgpu problem: this is the oracle for a store whose
+## strides are not row-major.
+pub fn transpose_ref(rows: Int, cols: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let dt = dtypes[1]
+  list.map(range(0, rows * cols), idx => round_to(dt, x[(idx % rows) * cols + idx / rows]))
+}
+
+# The mean and the variance of `count` values read from `xs` by `at`, both
+# folded left. A reference's own two passes, not the kernel's.
+fn mean_of(count: Int, at: fn(Int) -> Float) -> Float =
+  list.fold(range(0, count), 0.0, (acc, i) => acc + at(i)) / to_float(count)
+
+fn var_of(count: Int, mean: Float, at: fn(Int) -> Float) -> Float =
+  list.fold(range(0, count), 0.0, (acc, i) => acc + (at(i) - mean) * (at(i) - mean)) / to_float(count)
+
+## `(x - mean) / sqrt(var + eps) * gamma + beta` per ROW of a `rows` by `d`
+## matrix: leetgpu 113 (Layer Normalization). `ins` is
+## `[x, gamma, beta, old]`, with `gamma` and `beta` `d` long.
+pub fn layer_norm_ref(rows: Int, d: Int, eps: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let g = ins[1]
+  let b = ins[2]
+  let dt = dtypes[3]
+  let stats = list.map(range(0, rows), r => {
+    let mean = mean_of(d, i => x[r * d + i])
+    (mean, var_of(d, mean, i => x[r * d + i]))
+  })
+  list.map(range(0, rows * d), idx => {
+    let r = idx / d
+    let i = idx % d
+    let (mean, variance) = stats[r]
+    round_to(dt, (x[idx] - mean) / ref_sqrt(variance + eps) * g[i] + b[i])
+  })
+}
+
+## The same normalisation per CHANNEL of a `rows` by `channels` matrix, over
+## the column: leetgpu 40 (Batch Normalization). `gamma` and `beta` are
+## `channels` long.
+pub fn batch_norm_ref(rows: Int, channels: Int, eps: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let g = ins[1]
+  let b = ins[2]
+  let dt = dtypes[3]
+  let stats = list.map(range(0, channels), c => {
+    let mean = mean_of(rows, i => x[i * channels + c])
+    (mean, var_of(rows, mean, i => x[i * channels + c]))
+  })
+  list.map(range(0, rows * channels), idx => {
+    let c = idx % channels
+    let (mean, variance) = stats[c]
+    round_to(dt, (x[idx] - mean) / ref_sqrt(variance + eps) * g[c] + b[c])
+  })
+}
+
+## The same normalisation over each (sample, group) of an `n` by `c` by `hw`
+## tensor split into `groups` groups of channels: leetgpu 105 (Group
+## Normalization). `gamma` and `beta` are `c` long, one per channel.
+pub fn group_norm_ref(n: Int, c: Int, hw: Int, groups: Int, eps: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let g = ins[1]
+  let b = ins[2]
+  let dt = dtypes[3]
+  let per = c / groups
+  let count = per * hw
+  let stats = list.map(range(0, n * groups), s => {
+    let base = (s / groups) * c * hw + (s % groups) * count
+    let mean = mean_of(count, i => x[base + i])
+    (mean, var_of(count, mean, i => x[base + i]))
+  })
+  list.map(range(0, n * c * hw), idx => {
+    let chan = (idx / hw) % c
+    let (mean, variance) = stats[(idx / (c * hw)) * groups + chan / per]
+    round_to(dt, (x[idx] - mean) / ref_sqrt(variance + eps) * g[chan] + b[chan])
+  })
+}
+
+## `(x + residual) / sqrt(mean((x + residual)^2) + eps) * w` per ROW of a
+## `rows` by `d` matrix: leetgpu 83 (Fused Residual Add + RMS
+## Normalization). `ins` is `[x, residual, w, old]`, with `w` `d` long.
+pub fn fused_rms_norm_ref(rows: Int, d: Int, eps: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let res = ins[1]
+  let w = ins[2]
+  let dt = dtypes[3]
+  let h = list.map(range(0, rows * d), i => x[i] + res[i])
+  let scale = list.map(range(0, rows), r =>
+      ref_sqrt(list.fold(range(0, d), 0.0, (acc, i) => acc + h[r * d + i] * h[r * d + i]) / to_float(d) + eps))
+  list.map(range(0, rows * d), idx => round_to(dt, h[idx] / scale[idx / d] * w[idx % d]))
+}
+
 ## The reference implementations the fake device answers `launch` with, by
 ## kernel name. Each entry carries the exact number of buffers the device
 ## kernel takes beside its body: three for `vadd` / `vadd_bf16` (two inputs
