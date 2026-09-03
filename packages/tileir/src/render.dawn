@@ -17,8 +17,8 @@
 use std/list
 use std/str
 use dev.{RedId, IdF, IdI}
-use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, Ret}
+use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -168,6 +168,14 @@ fn line(i: Instr) -> String = match i {
   StorePtr(tok_out, ptrs, value, mask, tok_in, ptr_ty, mask_ty, val_ty) ->
     "${v(tok_out)} = store_ptr_tko weak ${name(ptrs)}, ${name(value)}${opt_operand(mask)}"
     ++ " token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token"
+  AtomicRMWPtr(dst, tok_out, ptrs, mode, arg, mask, tok_in, ptr_ty, mask_ty, val_ty) ->
+    "${v(dst)}, ${v(tok_out)} = atomic_rmw_tko relaxed device ${name(ptrs)}, ${mode}, ${name(arg)}"
+    ++ "${opt_operand(mask)} token=${name(tok_in)}"
+    ++ " : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> ${ty(val_ty)}, token"
+  AtomicCASPtr(dst, tok_out, ptrs, cmp, val, mask, tok_in, ptr_ty, mask_ty, val_ty) ->
+    "${v(dst)}, ${v(tok_out)} = atomic_cas_tko relaxed device ${name(ptrs)}, ${name(cmp)}, ${name(val)}"
+    ++ "${opt_operand(mask)} token=${name(tok_in)}"
+    ++ " : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> ${ty(val_ty)}, token"
   FloatUn(dst, op, t, src) -> "${v(dst)} = ${op} ${name(src)}${un_rounding(op)} : ${ty(t)}"
   FloatBin(dst, op, t, lhs, rhs) -> "${v(dst)} = ${op} ${name(lhs)}, ${name(rhs)}${rounding(op)} : ${ty(t)}"
   FloatFma(dst, t, lhs, rhs, acc) ->
@@ -301,6 +309,35 @@ test "the token chain in the text is the program's: make_token feeds the first l
   assert str.contains(text, "%15, %16 = load_ptr_tko weak %12 token=%14 :")
   assert str.contains(text, "%18 = store_ptr_tko weak %12, %17 token=%16 :")
   assert str.contains(text, "%17 = addf %13, %15 rounding<nearest_even> : tile<128xf64>\n")
+}
+
+test "an atomic spells its ordering, its scope and (for the rmw) its mode, and answers a value and a token" {
+  let p = TileProg {
+    name: "atomics",
+    params: ["i32", "i32"],
+    ops: [
+      MakeToken(0),
+      IdxConst(1, 0),
+      Load(2, 3, 0, "i32", 1, [8], [1], None, None, 0),
+      ConstI(4, "i32", [8], 1),
+      CmpI(5, "lt", [8], 2, 4),
+      AtomicRMW(6, 7, 0, "i32", "add", 2, [8], 4, Some(5), 3),
+      AtomicCAS(8, 9, 1, "i32", 2, [8], 4, 6, None, 7)
+    ]
+  }
+  let text = render(p)
+  # the mask is an operand AND a type, and it stands between the value
+  # operand and the token, which is the order the assembly format gives
+  assert str.contains(text,
+    " = atomic_rmw_tko relaxed device %15, add, %11, %12 token=%10"
+      ++ " : tile<8xptr<i32>>, tile<8xi32>, tile<8xi1> -> tile<8xi32>, token\n")
+  # the compare-and-swap has THREE tile operands and no mode
+  assert str.contains(text,
+    " = atomic_cas_tko relaxed device %20, %11, %16 token=%17"
+      ++ " : tile<8xptr<i32>>, tile<8xi32> -> tile<8xi32>, token\n")
+  # each answers two results, and the token of the first feeds the second
+  assert count(text, "atomic_rmw_tko") == 1
+  assert count(text, "atomic_cas_tko") == 1
 }
 
 test "the entry signature lists every parameter as a scalar pointer tile of its format" {

@@ -124,6 +124,31 @@
 #                            layer 0 cannot see it (the renderer prints the
 #                            types it was handed)
 #
+#     atomic-rmw-claims-weak-ordering
+#                            the writer gives an `atomic_rmw_tko` the `weak`
+#                            memory ordering (0) instead of `relaxed` (1)
+#                            -> histogram's text is untouched (the renderer
+#                            spells `relaxed` from its own table), its bytes
+#                            are the same length and differ, and tileiras
+#                            refuses them: `weak` is the ONE variant the
+#                            atomics do not accept (Ops.td's OnlyVariants).
+#                            `weak` means "assume nobody else touches this
+#                            location", which is the negation of what an
+#                            atomic is for, and the dialect refuses to let a
+#                            kernel say both
+#     atomic-cas-writes-an-rmw-mode
+#                            the writer gives `atomic_cas_tko` a `mode`
+#                            byte, which is the copy of the read-modify-write
+#                            block above that a reader of these two
+#                            operations is one keystroke away from ->
+#                            cas_swap's text is untouched, its bytes are ONE
+#                            LONGER, and tileiras loses the stream: every
+#                            operand after the mode is read one place out of
+#                            step. The two atomics differ in exactly this
+#                            attribute and in the operand count, and this is
+#                            the half of that a byte golden would simply be
+#                            re-recorded over
+#
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time -- one local run measured
 # 204s for 51 kernels (102 JVM starts, and nothing else) against 175s for
@@ -158,7 +183,8 @@ kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops
   count_eq subarray_sum rainbow int_ops
   sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matmul_i8
   token_embed sort_rank merge_rank scatter_perm
-  prefix_sum max_subarray seg_scan compact linrec gae ssm_scan)
+  prefix_sum max_subarray seg_scan compact linrec gae ssm_scan
+  histogram cas_swap)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -207,6 +233,8 @@ mutants=(
   load-pad-flag-as-token
   ftoi-rounds-instead-of-truncates
   scan-result-drops-the-dim
+  atomic-rmw-claims-weak-ordering
+  atomic-cas-writes-an-rmw-mode
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -536,9 +564,10 @@ func_len() { # tilebc
 # renderer was not edited), the bytes differ from <kernel>.tilebc on both
 # and agree with each other, and tileiras refuses them with the given
 # fragment in its output. <shape> says how the mutant's file relates to the
-# golden's: `same-size` (a value changed in place) or `func-one-short` (the
-# function section lost one byte; the file itself need not shrink, the next
-# section's alignment padding absorbs it).
+# golden's: `same-size` (a value changed in place), `func-one-short` (the
+# function section lost one byte) or `func-one-long` (it gained one; the
+# file itself need not change size either way, the next section's alignment
+# padding absorbs it).
 writer_mutant_checks() { # name, kernel, shape, fragment
   local name="$1" k="$2" shape="$3" fragment="$4" backend out golden_size mutant_size golden_func
   mutant_run "$name" "$k"
@@ -562,6 +591,9 @@ writer_mutant_checks() { # name, kernel, shape, fragment
       func-one-short)
         [ "$(func_len "$out")" = "$((golden_func - 1))" ] ||
           fail "$name: the golden's Func section is $golden_func bytes and the mutant's is $(func_len "$out") on $backend; expected one byte fewer" ;;
+      func-one-long)
+        [ "$(func_len "$out")" = "$((golden_func + 1))" ] ||
+          fail "$name: the golden's Func section is $golden_func bytes and the mutant's is $(func_len "$out") on $backend; expected one byte more" ;;
       *) fail "writer_mutant_checks: unknown shape $shape" ;;
     esac
   done
@@ -771,6 +803,34 @@ if run_item scan-result-drops-the-dim; then
     let w2 = list.fold(list.map(tys, rank0_of), w1, (w, t) => {'
   writer_mutant_checks scan-result-drops-the-dim prefix_sum same-size \
     "'cuda_tile.scan' op expect same type for operand at index: 0 and result at index: 0"
+fi
+
+# 14. The writer claims `weak` memory ordering on a read-modify-write. The
+#     renderer prints `relaxed` from its own spelling table, so the text is
+#     untouched and the file is the same length -- one enum value for
+#     another -- and the verifier names the attribute: the atomics take
+#     every ordering but that one.
+if run_item atomic-rmw-claims-weak-ordering; then
+  mutant_project atomic-rmw-claims-weak-ordering bytecode.dawn \
+    '    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE), rmw_mode_value(mode))' \
+    '    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_WEAK), SCOPE_DEVICE), rmw_mode_value(mode))'
+  writer_mutant_checks atomic-rmw-claims-weak-ordering histogram same-size \
+    "'cuda_tile.atomic_rmw_tko' op memory ordering semantics must be one of: relaxed, acquire, release, acq_rel"
+fi
+
+# 15. The writer gives a compare-and-swap the read-modify-write's `mode`
+#     byte. That is one attribute the operation does not have, so the file
+#     is one byte LONGER and every operand after it is read one place out
+#     of step. The text cannot see it and the byte golden would be
+#     re-recorded over it.
+if run_item atomic-cas-writes-an-rmw-mode; then
+  mutant_project atomic-cas-writes-an-rmw-mode bytecode.dawn \
+    '    let w3 = emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE)
+    emit_ref(emit_opt_ref(emit_ref(emit_ref(emit_ref(w3, ptrs), cmp), val), mask), tok_in)' \
+    '    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE), rmw_mode_value("add"))
+    emit_ref(emit_opt_ref(emit_ref(emit_ref(emit_ref(w3, ptrs), cmp), val), mask), tok_in)'
+  writer_mutant_checks atomic-cas-writes-an-rmw-mode cas_swap func-one-long \
+    "failed to parse function body for function 'cas_swap'"
 fi
 
 shard_report "${#items[@]}"

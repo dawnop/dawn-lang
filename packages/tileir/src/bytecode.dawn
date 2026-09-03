@@ -60,7 +60,7 @@ use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI}
 use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
@@ -74,6 +74,8 @@ pub fn bytecode_version() -> String = "${BYTECODE_MAJOR}.${BYTECODE_MINOR}"
 
 # Opcodes (BytecodeOpcodes.td, frozen).
 const OP_ABSF: Int = 0x00
+const OP_ATOMIC_CAS_TKO: Int = 0x07
+const OP_ATOMIC_RMW_TKO: Int = 0x08
 const OP_ABSI: Int = 0x01
 const OP_ADDF: Int = 0x02
 const OP_ADDI: Int = 0x03
@@ -145,10 +147,30 @@ const LOAD_FLAG_TOKEN: Int = 16
 const STORE_FLAG_MASK: Int = 4
 const STORE_FLAG_TOKEN: Int = 8
 
+# The atomics have NO optional attribute at all: their `memory_scope` is a
+# required argument where a load's is an `OptionalAttr` (Ops.td). So their
+# flag bits start at the first optional OPERAND, and both operations carry
+# the same two in the same order.
+const ATOMIC_FLAG_MASK: Int = 1
+const ATOMIC_FLAG_TOKEN: Int = 2
+
 # `memory_ordering_semantics`: weak. `comparison_ordering`: ordered, so every
 # predicate answers 0 on a NaN operand. `signedness`: signed. `rounding_mode`:
 # nearest_even, the one mode tile-backend-design 3.2's theorem covers.
 const ORDER_WEAK: Int = 0
+
+# `memory_ordering_semantics` on an ATOMIC: relaxed. `weak` (0) is the one
+# variant the two atomic operations do not accept -- Ops.td gives them
+# `OnlyVariants<["RELAXED", "ACQUIRE", "RELEASE", "ACQ_REL"]>`, and it is
+# refused rather than ignored, which is what makes it a layer-1 mutant.
+# `weak` means "assume nobody else touches this location", which is the
+# opposite of what every atomic here is for.
+const ORDER_RELAXED: Int = 1
+
+# `memory_scope`: device. The lanes that collide on one histogram bin are
+# in different tile BLOCKS, so `tl_blk` (0) would be too narrow; `sys` (2)
+# would be wider than one GPU needs.
+const SCOPE_DEVICE: Int = 1
 const CMP_ORDERED: Int = 1
 const SIGNED: Int = 1
 const UNSIGNED: Int = 0
@@ -177,6 +199,23 @@ const ROUND_FULL: Int = 5
 # its tag and the index of its element type before its payload.
 const ATTR_INTEGER: Int = 1
 const ATTR_FLOAT: Int = 2
+
+# The `rmw_mode` values (AttrDefs.td's AtomicRMWMode, an i32 enum). The
+# order is the enum's own and not alphabetical: `add` is 3 and `addf` 4,
+# with the three bitwise modes before them.
+fn rmw_mode_value(mode: String) -> Int = match mode {
+  "and" -> 0
+  "or" -> 1
+  "xor" -> 2
+  "add" -> 3
+  "addf" -> 4
+  "max" -> 5
+  "min" -> 6
+  "umax" -> 7
+  "umin" -> 8
+  "xchg" -> 9
+  _ -> panic("tileir: `${mode}` is not an atomic read-modify-write mode")
+}
 
 # The `comparison_predicate` values (AttrDefs.td, an i32 enum).
 fn predicate_value(pred: String) -> Int = match pred {
@@ -748,6 +787,31 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let flags = STORE_FLAG_TOKEN | opt_flag(mask, STORE_FLAG_MASK)
     let w1 = emit(emit(emit_op(w0, OP_STORE_PTR_TKO, Token), flags), ORDER_WEAK)
     emit_ref(emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask), tok_in)
+  }
+  AtomicRMWPtr(_dst, _tok_out, ptrs, mode, arg, mask, tok_in, _ptr_ty, _mask_ty, val_ty) -> {
+    # results: the old value, the token; flags: which optional operands
+    # follow; then the three REQUIRED attributes in declaration order
+    # (`memory_ordering_semantics`, `memory_scope`, `mode`) -- none of them
+    # is an `OptionalAttr`, so each is written inline (knife 10's rule);
+    # then the operands: the pointers, the argument, the mask and the
+    # token, each present exactly when its flag bit is set.
+    let w1 = emit_op(w0, OP_ATOMIC_RMW_TKO, val_ty)
+    let (w2, tok) = ty(w1, Token)
+    let flags = ATOMIC_FLAG_TOKEN | opt_flag(mask, ATOMIC_FLAG_MASK)
+    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE), rmw_mode_value(mode))
+    emit_ref(emit_opt_ref(emit_ref(emit_ref(w3, ptrs), arg), mask), tok_in)
+  }
+  AtomicCASPtr(_dst, _tok_out, ptrs, cmp, val, mask, tok_in, _ptr_ty, _mask_ty, val_ty) -> {
+    # the same shape with two attributes rather than three -- a
+    # compare-and-swap has no mode -- and three tile operands rather than
+    # two. A `mode` byte written here as well would be the copy of the
+    # block above that the reader cannot survive, which is the layer-1
+    # mutant atomic-cas-writes-an-rmw-mode.
+    let w1 = emit_op(w0, OP_ATOMIC_CAS_TKO, val_ty)
+    let (w2, tok) = ty(w1, Token)
+    let flags = ATOMIC_FLAG_TOKEN | opt_flag(mask, ATOMIC_FLAG_MASK)
+    let w3 = emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE)
+    emit_ref(emit_opt_ref(emit_ref(emit_ref(emit_ref(w3, ptrs), cmp), val), mask), tok_in)
   }
   FloatUn(_dst, op, t, src) -> {
     # flags where the operation has an optional field (never set here), then
@@ -1370,6 +1434,33 @@ test "ftof and mmai are the frozen table's opcodes, with the attribute lists the
   assert num_tag("i8") == 1
   assert num_tag("f16") == 5
   assert num_tag("i32") == 3
+}
+
+test "the atomics are the frozen table's opcodes, with the attribute values their Ops.td definitions declare" {
+  # `include/cuda_tile/Dialect/CudaTile/IR/BytecodeOpcodes.td` at
+  # NVIDIA/cuda-tile be0889cd: atomic_cas_tko is 0x7 and atomic_rmw_tko
+  # 0x8, so the compare-and-swap comes FIRST. Read off the file.
+  assert OP_ATOMIC_CAS_TKO == 0x07
+  assert OP_ATOMIC_RMW_TKO == 0x08
+  # AtomicRMWMode (AttrDefs.td): the three bitwise modes lead and the two
+  # additions are 3 and 4, so an alphabetical table would be wrong in
+  # eight places and a table that put `add` first in seven.
+  assert (rmw_mode_value("and"), rmw_mode_value("or"), rmw_mode_value("xor")) == (0, 1, 2)
+  assert (rmw_mode_value("add"), rmw_mode_value("addf")) == (3, 4)
+  assert (rmw_mode_value("max"), rmw_mode_value("min")) == (5, 6)
+  assert (rmw_mode_value("umax"), rmw_mode_value("umin"), rmw_mode_value("xchg")) == (7, 8, 9)
+  # MemoryOrderingSemantics: `weak` is 0 and `relaxed` 1, and the atomics
+  # accept every variant BUT `weak` (Ops.td's OnlyVariants). MemoryScope:
+  # tl_blk 0, device 1, sys 2.
+  assert ORDER_WEAK == 0
+  assert ORDER_RELAXED == 1
+  assert SCOPE_DEVICE == 1
+  # Both operations' only optional fields are the two operands `mask` and
+  # `token`, in that order, so their flag bits start at 1 where a load's
+  # start at 4: a load has `memory_scope` and `optimization_hints` as
+  # optional ATTRIBUTES ahead of them and these have neither.
+  assert (ATOMIC_FLAG_MASK, ATOMIC_FLAG_TOKEN) == (1, 2)
+  assert (LOAD_FLAG_MASK, LOAD_FLAG_TOKEN) == (4, 16)
 }
 
 test "an f16 constant lays down the binary16 pattern, low byte first, and an i8 one a single octet" {

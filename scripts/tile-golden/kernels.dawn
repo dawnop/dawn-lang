@@ -12,6 +12,7 @@ use std/gpu.{F64, F32, BF16, F16, I32, I8}
 use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
   store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, or_mask, in_range, axis_mask,
   gather, gather_masked, scatter, scatter_masked, axis_strides,
+  atomic_add_masked, atomic_cas_masked, ge_i,
   mmaf, addf, sub, mul, div,
   maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
   d_for, d_for3, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
@@ -1696,6 +1697,87 @@ fn ssm_scan(u: Param[F64], delta: Param[F64], amat: Param[F64], bmat: Param[F64]
   store_strided(y, ud, s1, [SSM_D], addf(F64, s1, yt, side))
 }
 
+# ---- the atomic kernels (knife 14) ----
+#
+# An atomic is what a scatter is not: two lanes may name ONE element, and
+# the update still happens once per lane. That is the whole of the
+# difference, and it is why 13 Histogramming is the only leetgpu problem
+# in this backend's range that needs one. Everything else that looks like
+# it needs an atomic (72 Stream Compaction, 36 Radix Sort, 46 BFS) has an
+# ordered spelling through `scan` and `scatter`, and an ordered spelling is
+# the one a bit-exact reference can be written against.
+#
+# What the corpora have to carry, and this is where it is stated:
+#
+#   * the histogram's corpus must have grid > 1 AND lanes in different
+#     blocks landing on ONE bin. With one block, or with one lane a bin,
+#     an atomic add and a plain load-add-store answer the same thing, and
+#     scripts/tile-gpu-diff's atomic-as-plain-store mutant would be green.
+#     The layer-2 harness counts the collisions and holds them above zero,
+#     and runs the same kernel a second time on a corpus with NO collisions
+#     to show that the corpus is what makes the mutant bite.
+#   * the mode must be one whose answer does not depend on the order the
+#     lanes arrive in. Integer `add` is; `xchg` is not. This is the same
+#     argument knife 10 made for the integer reductions: addition modulo
+#     2^32 is exactly associative and commutative, so the histogram is
+#     EXACT tier and not a tolerance claim.
+#   * a bin index outside the histogram is masked, and its address is
+#     clamped as well, for knife 12's reason: a mutant that drops the mask
+#     must answer a wrong NUMBER rather than fault, or layer 2 records
+#     `blocked` and `blocked` is not a difference.
+
+# The histogram's shape: HIST_BINS bins (a power of two, so the address
+# clamp is one `andi`), HIST_TILE lanes a block, HIST_N values. 500 is not
+# a multiple of 64, so the last of the eight blocks runs 12 lanes past the
+# end of the input and the tail mask is doing real work.
+const HIST_BINS: Int = 16
+const HIST_TILE: Int = 64
+const HIST_N: Int = 500
+
+# How many of the first HIST_N values fall in each bin: leetgpu 13
+# (Histogramming). The histogram buffer must arrive ZEROED, which is what
+# the problem's own reference does before it counts.
+#
+# Values outside [0, HIST_BINS) are not counted, as leetgpu's reference
+# says (it counts under a validity mask), and the corpus carries some.
+fn histogram(input: Param[I32], hist: Param[I32]) -> Unit !Dev = {
+  let s = [HIST_TILE]
+  let b = block_id(0)
+  let blk = tile_at(b, HIST_TILE)
+  let live = tail_mask(blk, s, HIST_N)
+  let x = load_masked(input, blk, s, live, i_const(s, 0 - 1))
+  let ok = and_mask(s, live, in_range(s, x, 0, HIST_BINS))
+  let bin = and_i(s, x, i_const(s, HIST_BINS - 1))
+  atomic_add_masked(hist, bin, s, ok, i_const(s, 1))
+}
+
+# The compare-and-swap's shape: CAS_SLOTS slots, CAS_TILE lanes a block,
+# so the four blocks cover every slot exactly once.
+const CAS_SLOTS: Int = 128
+const CAS_TILE: Int = 32
+
+# Every slot whose contents equal the lane's expected value takes the
+# lane's new value; the rest are left alone; and what each slot held
+# before goes into the fourth buffer. A coverage kernel with no leetgpu
+# problem behind it, the way `int_ops` and `scatter_perm` are: nothing in
+# the range of this backend needs a compare-and-swap, and the operation
+# still has to be exercised.
+#
+# One lane a slot, so the answer does not depend on the order the lanes
+# arrive in and the tier is exact. A lane whose expected value is negative
+# does not take part at all: that is the mask, and the slot and the
+# fourth buffer both keep what they had.
+fn cas_swap(state: Param[I32], cmp: Param[I32], val: Param[I32], old: Param[I32]) -> Unit !Dev = {
+  let s = [CAS_TILE]
+  let b = block_id(0)
+  let blk = tile_at(b, CAS_TILE)
+  let c = load(cmp, blk, s)
+  let v = load(val, blk, s)
+  let active = ge_i(s, c, i_const(s, 0))
+  let prev = atomic_cas_masked(state, lanes(blk, s), s, active, c, v)
+  store_masked(old, blk, s, active, prev)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -1845,6 +1927,11 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("ssm_scan", ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],
       () => ssm_scan(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3),
         param(F64, 4), param(F64, 5), param(F64, 6)))
+  "histogram" ->
+    trace_kernel("histogram", ["i32", "i32"], () => histogram(param(I32, 0), param(I32, 1)))
+  "cas_swap" ->
+    trace_kernel("cas_swap", ["i32", "i32", "i32", "i32"],
+      () => cas_swap(param(I32, 0), param(I32, 1), param(I32, 2), param(I32, 3)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -1873,6 +1960,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|count_eq|subarray_sum|rainbow|int_ops"
       ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
       ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
-      ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan>"
+      ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
+      ++ "|histogram|cas_swap>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

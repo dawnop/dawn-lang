@@ -1671,6 +1671,57 @@ pub fn ssm_scan_ref(batch: Int, steps: Int, channels: Int, states: Int,
       })
 }
 
+# ---- references for the atomic kernels (knife 14) ----
+#
+# Both are EXACT tier, and by algebra rather than by a chosen corpus. The
+# histogram counts, and integer addition modulo 2^32 is associative and
+# commutative, so the order the colliding lanes arrive in cannot change the
+# total; `cas_swap` gives every slot to one lane, so there is no order to
+# depend on at all.
+
+## How many of the first `n` values of the first buffer fall in each of the
+## first `bins` bins, into the second: leetgpu 13 (Histogramming). `ins` is
+## `[input, old histogram]`, and the lanes past `bins` keep what they held.
+##
+## Values outside `[0, bins)` are not counted, which is leetgpu's own rule:
+## its reference builds a validity mask before it counts. The problem's
+## reference also ZEROES the histogram first, and so does this one, so a
+## caller that hands it a buffer of anything but zeroes still gets the
+## counts. The KERNEL cannot do that -- it only adds -- which is why every
+## corpus for it starts the bins at zero and the two agree.
+pub fn histogram_ref(n: Int, bins: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), k =>
+      if k < bins {
+        round_to(dt, to_float(len(list.filter(range(0, n), i => to_int(x[i]) == k))))
+      } else {
+        kept(old, k)
+      })
+}
+
+## Slot `i` of the first buffer takes lane `i` of the third where it held
+## lane `i` of the second, and keeps what it had otherwise; the fourth
+## buffer takes what the slot held BEFORE. A lane whose expected value is
+## negative does not take part, and leaves both buffers alone. `ins` is
+## `[state, cmp, val, old]` and the answer rewrites positions 0 and 3,
+## which is the in-place shape knife 11 built.
+##
+## `n` is how many slots the launch covered. Every slot is one lane's, so
+## this says the whole of what the device does and there is no order in it.
+pub fn cas_swap_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[(Int, List[Float])] = {
+  let state = ins[0]
+  let cmp = ins[1]
+  let val = ins[2]
+  let old = ins[3]
+  let active = (i: Int) => i < n && cmp[i] >= 0.0
+  [(0, list.map(range(0, len(state)), i =>
+      if active(i) && state[i] == cmp[i] { round_to(dtypes[0], val[i]) } else { kept(state, i) })),
+    (3, list.map(range(0, len(old)), i =>
+        if active(i) { round_to(dtypes[3], state[i]) } else { kept(old, i) }))]
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
@@ -2741,6 +2792,24 @@ test "the scan references answer what a reader can check by hand" {
   # and A = [delta0 + delta1, delta1]
   assert gae_ref(1, 2, 1.0, 1.0, f3, [[1.0, 2.0], [10.0, 20.0], [0.0, 0.0, 7.0]])
     == [0.0 - 7.0, 0.0 - 18.0, 7.0]
+}
+
+test "the atomic references answer what a reader can check by hand" {
+  let i2 = ["i32", "i32"]
+  let i4 = ["i32", "i32", "i32", "i32"]
+  # leetgpu's own first example: [0, 1, 2, 1, 0] over three bins is [2, 2, 1],
+  # and the fourth lane of the buffer is the tail the answer keeps
+  assert histogram_ref(5, 3, i2, [[0.0, 1.0, 2.0, 1.0, 0.0], [0.0, 0.0, 0.0, 7.0]])
+    == [2.0, 2.0, 1.0, 7.0]
+  # a value outside the bins is not counted, and the reference zeroes the
+  # histogram first, so what the buffer held does not add to the counts
+  assert histogram_ref(4, 2, i2, [[0.0, 5.0, 1.0, 0.0 - 3.0], [9.0, 9.0, 9.0]])
+    == [1.0, 1.0, 9.0]
+  # slot 0 matches and takes 10; slot 1 does not match and keeps 5; slot 2's
+  # expected value is negative, so neither buffer moves there
+  assert cas_swap_ref(3, i4, [[1.0, 5.0, 6.0, 8.0], [1.0, 2.0, 0.0 - 1.0, 0.0],
+    [10.0, 20.0, 30.0, 0.0], [7.0, 7.0, 7.0, 7.0]])
+    == [(0, [10.0, 5.0, 6.0, 8.0]), (3, [1.0, 5.0, 7.0, 7.0])]
 }
 
 test "the strided references answer what a reader can check by hand" {

@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF}
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, Gather, Scatter, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield}
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -115,6 +115,8 @@ pub type Instr =
   | Offset(dst: Int, ptrs: Ref, offs: Ref, ptr_ty: Ty, off_ty: Ty)
   | LoadPtr(dst: Int, tok_out: Int, ptrs: Ref, mask: Option[Ref], pad: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty)
   | StorePtr(tok_out: Int, ptrs: Ref, value: Ref, mask: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty)
+  | AtomicRMWPtr(dst: Int, tok_out: Int, ptrs: Ref, mode: String, arg: Ref, mask: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty)
+  | AtomicCASPtr(dst: Int, tok_out: Int, ptrs: Ref, cmp: Ref, val: Ref, mask: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty)
   | FloatUn(dst: Int, op: String, ty: Ty, src: Ref)
   | FloatBin(dst: Int, op: String, ty: Ty, lhs: Ref, rhs: Ref)
   | FloatFma(dst: Int, ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
@@ -406,6 +408,27 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l1, pt) = index_pointers(l0, param, dtype, index, shape)
     let (l2, tk) = define(l1, tok_out, Token)
     emit(l2, StorePtr(tk, pt, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), num_tile(shape, dtype)))
+  }
+  AtomicRMW(dst, tok_out, param, dtype, mode, index, shape, value, mask, tok_in) -> {
+    let tin = ref_of(l0, tok_in, "atomic token")
+    let v = ref_of(l0, value, "atomic operand")
+    let m = opt_ref(l0, mask, "atomic mask")
+    let (l1, pt) = index_pointers(l0, param, dtype, index, shape)
+    let val_ty = num_tile(shape, dtype)
+    let (l2, d) = define(l1, dst, val_ty)
+    let (l3, tk) = define(l2, tok_out, Token)
+    emit(l3, AtomicRMWPtr(d, tk, pt, mode, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
+  }
+  AtomicCAS(dst, tok_out, param, dtype, index, shape, cmp, value, mask, tok_in) -> {
+    let tin = ref_of(l0, tok_in, "atomic token")
+    let c = ref_of(l0, cmp, "atomic comparison value")
+    let v = ref_of(l0, value, "atomic operand")
+    let m = opt_ref(l0, mask, "atomic mask")
+    let (l1, pt) = index_pointers(l0, param, dtype, index, shape)
+    let val_ty = num_tile(shape, dtype)
+    let (l2, d) = define(l1, dst, val_ty)
+    let (l3, tk) = define(l2, tok_out, Token)
+    emit(l3, AtomicCASPtr(d, tk, pt, c, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
   }
   ConstF(dst, dtype, shape, value) -> {
     let ty = num_tile(shape, dtype)
@@ -728,6 +751,8 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   Offset(dst, _ptrs, _offs, _ptr_ty, _off_ty) -> [dst]
   LoadPtr(dst, tok_out, _ptrs, _mask, _pad, _tok_in, _ptr_ty, _mask_ty, _val_ty) -> [dst, tok_out]
   StorePtr(tok_out, _ptrs, _value, _mask, _tok_in, _ptr_ty, _mask_ty, _val_ty) -> [tok_out]
+  AtomicRMWPtr(dst, tok_out, _ptrs, _mode, _arg, _mask, _tok_in, _ptr_ty, _mask_ty, _val_ty) -> [dst, tok_out]
+  AtomicCASPtr(dst, tok_out, _ptrs, _cmp, _val, _mask, _tok_in, _ptr_ty, _mask_ty, _val_ty) -> [dst, tok_out]
   FloatUn(dst, _op, _ty, _src) -> [dst]
   FloatBin(dst, _op, _ty, _lhs, _rhs) -> [dst]
   FloatFma(dst, _ty, _lhs, _rhs, _acc) -> [dst]
@@ -846,6 +871,22 @@ test "a gather and a scatter through one index tile into one parameter share the
   # both memory operations name parameter 1 through the same index tile,
   # so the reshape / broadcast / offset trio is emitted once
   assert len(list.filter(k.body, is_offset)) == 2
+}
+
+test "an atomic addresses through the index tile the way a gather does, and shares its pointer tile" {
+  # a gather out of parameter 1 and an atomic add into the same parameter
+  # through the same index tile: one reshape / broadcast / offset trio for
+  # the index load and one for the two of them together
+  let k = lower(TileProg { ..gather_then_scatter(),
+    ops: list.take(gather_then_scatter().ops, 4)
+      ++ [AtomicRMW(6, 7, 1, "f64", "add", 2, [8], 4, None, 5)] })
+  let f64_8 = Tile([8], Num("f64"))
+  let p64_8 = Tile([8], PtrTo("f64"))
+  assert len(list.filter(k.body, is_offset)) == 2
+  assert k.body[len(k.body) - 2]
+    == AtomicRMWPtr(16, 17, Val(13), "add", Val(14), None, Val(15), p64_8, i1_tile([8]), f64_8)
+  # both handles the record names are defined: the old value and the token
+  assert defines(k.body[len(k.body) - 2]) == [16, 17]
 }
 
 test "the token chain is the program's: make_token feeds the first load, each memory op feeds the next" {

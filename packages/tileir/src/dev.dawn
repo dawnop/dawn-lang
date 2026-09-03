@@ -118,6 +118,31 @@ impl Dtype[I1] {
 ## each other. Every kernel and every corpus here writes a permutation, and
 ## scripts/tile-gpu-diff/gath_diff.dawn says so beside its data.
 ##
+## `t_atomic_rmw` / `t_atomic_cas` are the two atomic operations (knife
+## 14), addressed the way `t_gather` and `t_scatter` are: an i32 index tile
+## rather than a base and a stride ladder, because the reason to want an
+## atomic is that the destination is data dependent. Both answer the tile
+## of values memory held BEFORE the update, and both take the same optional
+## `mask` (a lane it blocks is not touched at all).
+##
+## `t_atomic_rmw(param, dtype, mode, index, shape, v, mask)` applies `mode`
+## to the element and the matching lane of `v` in one transaction: `mode`
+## is one of `and` / `or` / `xor` / `add` / `addf` / `max` / `min` /
+## `umax` / `umin` / `xchg`. The integer modes want an integer buffer and
+## `addf` a float one; `add` is the integer sum and `addf` the float one,
+## two modes rather than one because the dialect spells them apart.
+## `t_atomic_cas(param, dtype, index, shape, cmp, v, mask)` writes the lane
+## of `v` where the element equals the matching lane of `cmp` and leaves it
+## alone otherwise, answering what was there either way. Its comparison is
+## on the BITS, so a float `cmp` that is a NaN never matches and the two
+## zeroes are two values.
+##
+## Unlike a scatter, an atomic whose lanes name ONE element twice is
+## defined: that is what an atomic is for. What is not defined is the
+## order they arrive in, so the fold has to be one whose answer does not
+## depend on it -- integer addition is, and `histogram` is the kernel that
+## rests on it.
+##
 ## `t_constf` / `t_consti` answer a tile of `shape` every lane of which
 ## holds the given host constant; `t_iota` the `n`-wide i32 tile
 ## `[0, 1, .., n-1]` (Tile IR's `iota` is one-dimensional and this is it);
@@ -247,6 +272,10 @@ pub effect Dev {
     mask: Option[Int], pad: Option[Int]) -> Int
   fn t_scatter(param: Int, dtype: String, index: Int, shape: List[Int],
     v: Int, mask: Option[Int]) -> Unit
+  fn t_atomic_rmw(param: Int, dtype: String, mode: String, index: Int, shape: List[Int],
+    v: Int, mask: Option[Int]) -> Int
+  fn t_atomic_cas(param: Int, dtype: String, index: Int, shape: List[Int],
+    cmp: Int, v: Int, mask: Option[Int]) -> Int
   fn t_constf(dtype: String, shape: List[Int], value: Float) -> Int
   fn t_consti(dtype: String, shape: List[Int], value: Int) -> Int
   fn t_iota(n: Int) -> Int
@@ -512,6 +541,75 @@ pub fn scatter_masked[D](p: Param[D], index: Tile[I32], shape: List[Int],
   let hm: Int = mask
   let hv: Int = v
   t_scatter(position(p), param_dtype(p), hi, shape, hv, Some(hm))
+}
+
+## Apply `mode` to element `index[i, j, ..]` of `p` and lane `[i, j, ..]`
+## of `v`, one indivisible transaction per lane, and answer what each
+## element held BEFORE. Only the lanes `mask` selects take part; the
+## others are not read and not written, which is how an index outside the
+## array is handled, exactly as on `scatter_masked`.
+##
+## Two lanes MAY name one element here -- that is the whole point of an
+## atomic, and the difference between this and `scatter_masked`. The order
+## they arrive in is still unspecified, so a caller may only use a `mode`
+## whose answer does not depend on it. Integer `add` is such a mode and is
+## the one `histogram` uses; `xchg` is not, and a kernel that used it on
+## colliding lanes would have no answer to compare against.
+pub fn atomic_rmw_masked[D](p: Param[D], mode: String, index: Tile[I32], shape: List[Int],
+  mask: Tile[I1], v: Tile[D]) -> Tile[D] !Dev = {
+  let hi: Int = index
+  let hm: Int = mask
+  let hv: Int = v
+  let h: Tile[D] = t_atomic_rmw(position(p), param_dtype(p), mode, hi, shape, hv, Some(hm))
+  h
+}
+
+## `atomic_rmw_masked` with every lane taking part.
+pub fn atomic_rmw[D](p: Param[D], mode: String, index: Tile[I32], shape: List[Int],
+  v: Tile[D]) -> Tile[D] !Dev = {
+  let hi: Int = index
+  let hv: Int = v
+  let none: Option[Int] = None
+  let h: Tile[D] = t_atomic_rmw(position(p), param_dtype(p), mode, hi, shape, hv, none)
+  h
+}
+
+## Add lane `[i, j, ..]` of `v` to element `index[i, j, ..]` of the integer
+## buffer `p` where `mask` selects it, and throw the old value away: the
+## scatter-with-collisions a histogram is. Named because the returned tile
+## is what a caller forgets to use, and a function that never answers it
+## cannot be misread as a plain store.
+pub fn atomic_add_masked(p: Param[I32], index: Tile[I32], shape: List[Int],
+  mask: Tile[I1], v: Tile[I32]) -> Unit !Dev = {
+  let _old = atomic_rmw_masked(p, "add", index, shape, mask, v)
+  ()
+}
+
+## Compare element `index[i, j, ..]` of `p` against lane `[i, j, ..]` of
+## `cmp`, write the matching lane of `v` where the two are equal, leave
+## the element alone where they are not, and answer what was there either
+## way -- one indivisible transaction per lane, on the lanes `mask`
+## selects. The comparison is on the BITS and not on the format's own
+## equality, so two NaNs with different payloads are two values.
+pub fn atomic_cas_masked[D](p: Param[D], index: Tile[I32], shape: List[Int],
+  mask: Tile[I1], cmp: Tile[D], v: Tile[D]) -> Tile[D] !Dev = {
+  let hi: Int = index
+  let hm: Int = mask
+  let hc: Int = cmp
+  let hv: Int = v
+  let h: Tile[D] = t_atomic_cas(position(p), param_dtype(p), hi, shape, hc, hv, Some(hm))
+  h
+}
+
+## `atomic_cas_masked` with every lane taking part.
+pub fn atomic_cas[D](p: Param[D], index: Tile[I32], shape: List[Int],
+  cmp: Tile[D], v: Tile[D]) -> Tile[D] !Dev = {
+  let hi: Int = index
+  let hc: Int = cmp
+  let hv: Int = v
+  let none: Option[Int] = None
+  let h: Tile[D] = t_atomic_cas(position(p), param_dtype(p), hi, shape, hc, hv, none)
+  h
 }
 
 # The handle of a binary float operation over two tiles of `shape` and `d`.
@@ -1447,6 +1545,16 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       h
     }
     t_scatter(_param, _dtype, _index, _shape, _v, _mask) => ()
+    t_atomic_rmw(_param, _dtype, _mode, _index, _shape, _v, _mask) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_atomic_cas(_param, _dtype, _index, _shape, _cmp, _v, _mask) => {
+      let h = next
+      next = next + 1
+      h
+    }
     t_mmaf(_dtype, _m, _k, _n, _a, _b, _c) => {
       let h = next
       next = next + 1
@@ -1670,6 +1778,14 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_scatter(param, dtype, index, shape, v, mask) => {
       log = log ++ ["scatter ${param} ${dtype} ${index} ${show(shape)} ${v} ${opt(mask)}"]
     }
+    t_atomic_rmw(param, dtype, mode, index, shape, v, mask) => {
+      log = log ++ ["atomic_rmw ${param} ${dtype} ${mode} ${index} ${show(shape)} ${v} ${opt(mask)}"]
+      1
+    }
+    t_atomic_cas(param, dtype, index, shape, cmp, v, mask) => {
+      log = log ++ ["atomic_cas ${param} ${dtype} ${index} ${show(shape)} ${cmp} ${v} ${opt(mask)}"]
+      1
+    }
     t_constf(dtype, shape, value) => {
       log = log ++ ["constf ${dtype} ${show(shape)} ${value}"]
       2
@@ -1800,6 +1916,36 @@ test "gather and scatter hand the handler the index tile and the parameter's own
     "scatter 2 f64 1 [8] 1 None",
     "gather 1 f64 1 [8] None None",
     "scatter 2 f64 1 [8] 1 Some(10)"
+  ]
+}
+
+fn atomic_surface() -> Unit !Dev = {
+  let hist = param(I32, 0)
+  let slots = param(I32, 1)
+  let i = load(hist, idx_const(0), [8])
+  let ok = lt_i([8], i, i_const([8], 8))
+  atomic_add_masked(hist, i, [8], ok, i_const([8], 1))
+  let _all = atomic_rmw(hist, "max", i, [8], i_const([8], 3))
+  let _one = atomic_cas_masked(slots, i, [8], ok, i_const([8], 0), i_const([8], 5))
+  let _two = atomic_cas(slots, i, [8], i_const([8], 0), i_const([8], 5))
+  ()
+}
+
+test "the atomics hand the handler the mode, the index tile and the parameter's own format" {
+  assert logged(atomic_surface) == [
+    "load 0 i32 12 [8] [1] None None",
+    "consti i32 [8] 8",
+    "cmpi lt [8] 1 3",
+    "consti i32 [8] 1",
+    "atomic_rmw 0 i32 add 1 [8] 3 Some(10)",
+    "consti i32 [8] 3",
+    "atomic_rmw 0 i32 max 1 [8] 3 None",
+    "consti i32 [8] 0",
+    "consti i32 [8] 5",
+    "atomic_cas 1 i32 1 [8] 3 3 Some(10)",
+    "consti i32 [8] 0",
+    "consti i32 [8] 5",
+    "atomic_cas 1 i32 1 [8] 3 3 None"
   ]
 }
 
@@ -2023,6 +2169,8 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_store(_param, _dtype, _base, _shape, _strides, _v, _mask) => ()
       t_gather(_param, _dtype, _index, _shape, _mask, _pad) => 1
       t_scatter(_param, _dtype, _index, _shape, _v, _mask) => ()
+      t_atomic_rmw(_param, _dtype, _mode, _index, _shape, _v, _mask) => 1
+      t_atomic_cas(_param, _dtype, _index, _shape, _cmp, _v, _mask) => 1
       t_constf(_dtype, _shape, _value) => 2
       t_consti(_dtype, _shape, _value) => 3
       t_iota(_n) => 4

@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32, I32}
-use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select}
+use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -54,6 +54,8 @@ pub type TileOp =
   | Store(tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], value: Int, mask: Option[Int], tok_in: Int)
   | Gather(dst: Int, tok_out: Int, param: Int, dtype: String, index: Int, shape: List[Int], mask: Option[Int], pad: Option[Int], tok_in: Int)
   | Scatter(tok_out: Int, param: Int, dtype: String, index: Int, shape: List[Int], value: Int, mask: Option[Int], tok_in: Int)
+  | AtomicRMW(dst: Int, tok_out: Int, param: Int, dtype: String, mode: String, index: Int, shape: List[Int], value: Int, mask: Option[Int], tok_in: Int)
+  | AtomicCAS(dst: Int, tok_out: Int, param: Int, dtype: String, index: Int, shape: List[Int], cmp: Int, value: Int, mask: Option[Int], tok_in: Int)
   | ConstF(dst: Int, dtype: String, shape: List[Int], value: Float)
   | ConstI(dst: Int, dtype: String, shape: List[Int], value: Int)
   | Iota(dst: Int, n: Int)
@@ -173,6 +175,19 @@ fn check_convert(name: String, op: String) -> Unit =
     ()
   } else {
     refuse(name, "`${op}` is not a conversion")
+  }
+
+# The read-modify-write modes the dialect defines, spelled as its own
+# assembly does. `add` is the integer sum and `addf` the float one: two
+# modes rather than one, because AtomicRMWMode is one enum over both and
+# the caller has to say which. A mode outside this list is a caller's
+# misspelling and is refused when the kernel is recorded, the way an
+# operation name is.
+fn check_rmw_mode(name: String, mode: String) -> Unit =
+  if one_of(["and", "or", "xor", "add", "addf", "max", "min", "umax", "umin", "xchg"], mode) {
+    ()
+  } else {
+    refuse(name, "`${mode}` is not an atomic read-modify-write mode")
   }
 
 fn check_int_dtype(name: String, dtype: String) -> Unit =
@@ -305,6 +320,31 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         ops = ops ++ [Scatter(t, param, dtype, index, shape, v, mask, tok)]
         tok = t
         ()
+      }
+      t_atomic_rmw(param, dtype, mode, index, shape, v, mask) => {
+        let open = frames
+        if list.any(open, is_pure_region) { refuse(name, "an atomic inside a reduce, scan or if region has no memory order") } else { () }
+        check_param(name, params, param, dtype, "atomic")
+        check_shape(name, shape)
+        check_rmw_mode(name, mode)
+        let d = next
+        let t = next + 1
+        next = mint(name, next, 2)
+        ops = ops ++ [AtomicRMW(d, t, param, dtype, mode, index, shape, v, mask, tok)]
+        tok = t
+        d
+      }
+      t_atomic_cas(param, dtype, index, shape, cmp, v, mask) => {
+        let open = frames
+        if list.any(open, is_pure_region) { refuse(name, "an atomic inside a reduce, scan or if region has no memory order") } else { () }
+        check_param(name, params, param, dtype, "atomic")
+        check_shape(name, shape)
+        let d = next
+        let t = next + 1
+        next = mint(name, next, 2)
+        ops = ops ++ [AtomicCAS(d, t, param, dtype, index, shape, cmp, v, mask, tok)]
+        tok = t
+        d
       }
       t_constf(dtype, shape, value) => {
         check_shape(name, shape)
@@ -655,6 +695,8 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   Store(tok_out, _param, _dtype, _base, _shape, _strides, _value, _mask, _tok_in) -> [tok_out]
   Gather(dst, tok_out, _param, _dtype, _index, _shape, _mask, _pad, _tok_in) -> [dst, tok_out]
   Scatter(tok_out, _param, _dtype, _index, _shape, _value, _mask, _tok_in) -> [tok_out]
+  AtomicRMW(dst, tok_out, _param, _dtype, _mode, _index, _shape, _value, _mask, _tok_in) -> [dst, tok_out]
+  AtomicCAS(dst, tok_out, _param, _dtype, _index, _shape, _cmp, _value, _mask, _tok_in) -> [dst, tok_out]
   ConstF(dst, _dtype, _shape, _value) -> [dst]
   ConstI(dst, _dtype, _shape, _value) -> [dst]
   Iota(dst, _n) -> [dst]
@@ -894,6 +936,47 @@ test "a gather and a scatter record their index tile and sit in the token chain,
   }) == [Scatter(9, 2, "f64", 2, [8], 7, None, 8)]
   assert p == trace_kernel("indexed", ["i32", "f64", "f64"],
     () => indexed(param(I32, 0), param(F64, 1), param(F64, 2)))
+}
+
+# One histogram bin's worth of the atomic surface: an add whose lanes may
+# collide, and a compare-and-swap whose lanes may not.
+fn atomics(hist: Param[I32], slots: Param[I32]) -> Unit !Dev = {
+  let i = load(hist, idx_const(0), [8])
+  let ok = lt_i([8], i, i_const([8], 8))
+  atomic_add_masked(hist, i, [8], ok, i_const([8], 1))
+  let _prev = atomic_cas(slots, i, [8], i_const([8], 0), i_const([8], 5))
+  ()
+}
+
+test "the atomics record their mode, index tile and comparison value, and sit in the token chain" {
+  let p = trace_kernel("atomics", ["i32", "i32"],
+    () => atomics(param(I32, 0), param(I32, 1)))
+  # make_token 0, idx_const 1, load 2 + token 3, i_const 4, cmpi 5,
+  # i_const 6, atomic_rmw 7 + token 8, i_const 9, i_const 10,
+  # atomic_cas 11 + token 12
+  assert list.filter(p.ops, o => match o {
+    AtomicRMW(_d, _t, _param, _dt, _mode, _i, _s, _v, _m, _ti) -> true
+    _ -> false
+  }) == [AtomicRMW(7, 8, 0, "i32", "add", 2, [8], 6, Some(5), 3)]
+  assert list.filter(p.ops, o => match o {
+    AtomicCAS(_d, _t, _param, _dt, _i, _s, _c, _v, _m, _ti) -> true
+    _ -> false
+  }) == [AtomicCAS(11, 12, 1, "i32", 2, [8], 9, 10, None, 8)]
+  assert p == trace_kernel("atomics", ["i32", "i32"],
+    () => atomics(param(I32, 0), param(I32, 1)))
+}
+
+test "an atomic mode outside the dialect's enumeration is refused when the kernel is recorded" {
+  let outcome = catch_panic(() => trace_kernel("bad_mode", ["i32"], () => {
+    let hist = param(I32, 0)
+    let i = load(hist, idx_const(0), [8])
+    let _r = atomic_rmw(hist, "sub", i, [8], i_const([8], 1))
+    ()
+  }))
+  match outcome {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "`sub` is not an atomic read-modify-write mode") }
+  }
 }
 
 test "a gather inside a reduction region is refused: a pure region carries no memory order" {
