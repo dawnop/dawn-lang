@@ -12,6 +12,8 @@ use std/map
 use std/set
 use front/token.{Diag}
 use front/ast.{Module, Decl, DUseModule, module_uses, module_fns}
+use compiler_plan/pkgfetch
+use compiler_plan/procmem
 use compiler_plan/source
 use check/cx.{ModExports, Cx, cx_new}
 use check/passes.{
@@ -1062,12 +1064,29 @@ pub fn analyze_document(
 # paths still read `/tmp/...` because that is what a project directory looks
 # like; nothing under them is ever created.
 # The table answers `Fs`; `Proc` is answered by the real handler, which the
-# planning path below can reach when a project names a url dependency. No test
-# here declares one, so no arm of it ever fires -- but the row has to be
-# answered somewhere, and this is the boundary that owns the whole test.
+# planning path below reaches when a project names a url dependency. Only the
+# two tests that use `in_mem_proc` declare one, and those answer `Proc` from a
+# table instead -- but the row has to be answered somewhere for the rest, and
+# this is the boundary that owns the whole test.
 fn in_mem[T](body: fn() -> T !Fs !Proc !io) -> T !io = {
   let (out, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
     () => io.with_proc_real(body))
+  out
+}
+
+## The same, with the child processes scripted too: `script` answers `Proc` in
+## order and every invocation comes back for inspection.
+##
+## A project that names a url dependency fetches it while it is being planned,
+## and that fetch is a `curl`. Under this handler the fetch is a table lookup:
+## nothing is downloaded, nothing is spawned, and what the resolver would have
+## asked the network is a value the test can read.
+fn in_mem_proc[T](
+  script: List[procmem.ProcReply],
+  body: fn() -> T !Fs !Proc !io
+) -> (T, List[procmem.ProcCall]) !io = {
+  let (out, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
+    () => procmem.with_proc_table(script, body))
   out
 }
 
@@ -1436,6 +1455,90 @@ test "an aliased path dep canonicalizes to the package's real name" {
     }
     assert found
   })
+}
+
+# ---- a dependency the project does not have on disk ----
+#
+# The one shape the tests above cannot reach with a tree alone: a `[deps.x]`
+# with a url, which the planner resolves by fetching. Both tests below declare
+# one and answer `Proc` from a table, so the resolver's reach for the network
+# is a recorded command line rather than a download.
+
+fn has_diag(loaded: LoadResult, msg: String) -> Bool = {
+  for ld in loaded.diags {
+    if ld.d.msg == msg { return true }
+  }
+  false
+}
+
+const URL_DEP_HASH: String = "d1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+const URL_DEP_URL: String = "https://example.invalid/greeter/v1.0.0.tar.gz"
+
+fn url_dep_manifest() -> String =
+  "schema = 1\nname = \"app\"\n\n[deps.greeter]\nurl = \"" ++ URL_DEP_URL ++
+  "\"\nversion = \"1.0.0\"\nhash = \"" ++ URL_DEP_HASH ++ "\"\n"
+
+test "a cold url dependency is fetched while the project is planned" {
+  let base = "/tmp/dawn-selfhost-analyze/proj-url-cold"
+  let (loaded, log) = in_mem_proc(
+    [procmem.failed(22, "curl: (22) The requested URL returned error: 404\n")],
+    () => {
+      mkdirs(base ++ "/src")
+      put(base ++ "/dawn.toml", url_dep_manifest())
+      put(base ++ "/src/main.dawn",
+        "use greeter/hello\n\npub fn main() -> Unit !io = println(hello.greet())\n")
+      load_directory(base)
+    }
+  )
+  # planning the project reached the network exactly once, and this is what it
+  # asked: the manifest's url, behind curl's own failure flag
+  assert len(log) == 1
+  let argv = procmem.call_argv(log, 0)
+  assert len(argv) == 12
+  assert argv[0] == "curl"
+  assert argv[4] == "--fail"
+  assert argv[11] == URL_DEP_URL
+  # and this is what the refusal becomes: the package the manifest names, at
+  # the version it asked for, followed by what curl said
+  assert has_diag(loaded, "package `greeter` 1.0.0: cannot fetch " ++ URL_DEP_URL ++
+      ": curl: (22) The requested URL returned error: 404" ++
+      "\n  check the network (https_proxy is honored) or pre-seed the cache")
+  # the dependency is not on disk, so its module is missing too -- one cause,
+  # two diagnostics, and the fetch failure is the one that explains it
+  assert has_diag(loaded, "cannot find module `greeter/hello`")
+}
+
+test "a warm url dependency is analyzed without consulting curl" {
+  let base = "/tmp/dawn-selfhost-analyze/proj-url-warm"
+  let (loaded, log) = in_mem_proc([], () => {
+    # the cache entry, under the name the hash gives it, with the record that
+    # says this url produced these bytes
+    let root = pkgfetch.cache_root()
+    let entry = pkgfetch.cache_dir(URL_DEP_HASH)
+    mkdirs(entry ++ "/src")
+    put(entry ++ "/dawn.toml", "schema = 1\nname = \"greeter\"\n")
+    put(entry ++ "/src/hello.dawn", "pub fn greet() -> String = \"hi\"\n")
+    pkgfetch.record_origin(root, URL_DEP_HASH, URL_DEP_URL)
+    mkdirs(base ++ "/src")
+    put(base ++ "/dawn.toml", url_dep_manifest())
+    put(base ++ "/src/main.dawn",
+      "use greeter/hello\n\npub fn main() -> Unit !io = println(hello.greet())\n")
+    load_directory(base)
+  })
+  # the empty script is the assertion: a fetch here would have panicked for
+  # want of a reply
+  assert len(log) == 0
+  assert len(loaded.diags) == 0
+  # the alias resolves to the package's own name, out of the cache entry
+  var found = false
+  for m in loaded.modules {
+    if m.mod_path == "greeter/hello" {
+      found = true
+      assert m.class_name == "dawn\$pkg\$greeter/hello"
+    }
+  }
+  assert found
 }
 
 # ---- std identity (a file's provenance, never its module path) ----
