@@ -1833,7 +1833,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
 commit="$(git rev-parse --short=12 HEAD)"
 today="$(date -u +%F)"
 line="$commit $today $driver $want_tileiras $gpu_name $verdict"
-summary="$tiers fold-order=$probe"
+summary="$tiers fold-order=$probe scan-order=$scan_probe"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"
