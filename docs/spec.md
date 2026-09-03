@@ -2,7 +2,7 @@
 
 *[English](spec.en.md) —— 本文是正本；英文是它的译本，`scripts/doc-check.py` 盯着两者不脱节。*
 
-> 状态：**normative（权威）**。适用版本：0.75.0（`selfhost/src/version.dawn` 的 `VERSION`）。<!-- doc-check: version -->
+> 状态：**normative（权威）**。适用版本：0.76.0（`selfhost/src/version.dawn` 的 `VERSION`）。<!-- doc-check: version -->
 > 实现与本文冲突时，以本文为准并把实现当 bug——除非本文某条被显式标注为「已被 X 取代」。
 >
 > 标题曾长期写「v0.1 草案」，改掉它那天工具链已经到 0.11：一份自称草案的文档没法充当裁判，<!-- doc-check: historical-v0-1 -->
