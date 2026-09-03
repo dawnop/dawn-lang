@@ -34,13 +34,15 @@ pub fn cache_root() -> String !io =
   }
 
 ## The entry for `hash` under an explicitly named cache root. The root is a
-## parameter throughout the fetch below rather than a fresh `cache_root()` at
-## every step: one fetch stages, publishes and records under one root, which
-## is what a caller means, and it is what lets a test point the whole
-## operation at a directory of its own.
-fn entry_dir(root: String, hash: String) -> String = root ++ "/" ++ str.replace(hash, ":", "-")
-
-pub fn cache_dir(hash: String) -> String !io = entry_dir(cache_root(), hash)
+## parameter here and throughout the fetch below rather than a fresh
+## `cache_root()` at every step: one fetch stages, publishes and records under
+## one root, which is what a caller means, and it is what lets a test point
+## the whole operation at a directory of its own. It is also the whole reason
+## this is a path computation and not an `!io` one -- a caller that already
+## knows its root does not ask the environment a second question whose answer
+## it is holding.
+pub fn cache_dir(root: String, hash: String) -> String =
+  root ++ "/" ++ str.replace(hash, ":", "-")
 
 # ---- origin records: which urls were seen to produce which hash ----
 #
@@ -558,7 +560,7 @@ fn fetch_into(root: String, url: String, work: String) -> Result[(String, String
     Ok(h) -> h
     Err(e) -> return Err(e)
   }
-  let target = entry_dir(root, actual)
+  let target = cache_dir(root, actual)
   var adopted = true
   if not io.is_dir(target) {
     # rename into place; a concurrent fetch of the same hash yields the same bytes
@@ -662,7 +664,7 @@ pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !Fs !P
 
 ## The same, under a named cache root.
 fn ensure_cached_in(root: String, url: String, hash: String) -> Result[String, String] !Fs !Proc !io = {
-  let target = entry_dir(root, hash)
+  let target = cache_dir(root, hash)
   if io.is_dir(target) {
     match verify_cached(target, hash) {
       Ok(_) -> ()
