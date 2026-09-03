@@ -1156,12 +1156,19 @@ jobs:
     runs-on: ubuntu-latest
     # Knife 7b took run.sh from ten kernels to twenty-three and measured
     # 123s -> 188s locally, paired back to back on one machine
-    # (docs/tile-backend-design.md 6.5); the planning value moves with it,
+    # (docs/tile-backend-design.md 6.5); the planning value moved with it,
     # from 170s to 260s local. The run pole is 660s and the doubled value
-    # is 520s: the margin is 140s where it used to be 320s, so the NEXT
-    # knife that doubles the kernel count shards this job by `kernels=()`
-    # rather than raising the budget again. The eleven mutants are not the
-    # cost any more; the kernel loop is.
+    # is 520s: the margin is 140s.
+    #
+    # Knife 8 took it from twenty-three kernels to thirty and measured the
+    # pair twice, in both orders on one machine: +6s (227 -> 233) and +21s
+    # (201 -> 222). Seven kernels are +30%, not the doubling the note above
+    # made the sharding trigger, and the differential is under +10%, so the
+    # budget does not move and neither does the shape of this job.
+    # Sharding by `kernels=()` is still the answer when the count doubles,
+    # with one caveat measured since: this workflow already runs 24 jobs
+    # against an account concurrency limit of 20 (see the mutants matrix
+    # below), so a new leg would queue rather than shorten the wall clock.
     # budget: 3x 520s planning value (260s local, doubled)
     timeout-minutes: 26
     steps:
@@ -1179,7 +1186,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (23 kernels, both backends, eleven mutants)
+      - name: tile IR goldens and tileiras (30 kernels, both backends, eleven mutants)
         run: ./scripts/tile-golden/run.sh
 
       - name: GPU diff ledger is current (layer 2 ran at this tree)

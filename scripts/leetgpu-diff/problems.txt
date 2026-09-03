@@ -15,17 +15,18 @@
 #              against that reference (<program>:<case>)
 #   tier       exact     -- bit for bit, every lane, no tolerance
 #              tolerance -- an atol/rtol claim, for a kernel whose operations
-#                           are not IEEE-exact (none yet; the transcendental
-#                           functions and the tensor-core path arrive there)
+#                           are not IEEE-exact: the transcendental functions,
+#                           and `mmaf`, whose summation over K has no
+#                           specified order
 #
 # Two problems share one kernel where the problem is the same computation
 # over a different shape: a matrix is a vector to a kernel that reads it
 # flat, so 8 (Matrix Addition) is 1 (Vector Addition) and nothing more.
 #
-# 6 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
+# 22 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
 # and out of range). The plan that orders the rest is the cuTile coverage
-# memo; knife 7a is the boundary knife and these are the problems a boundary
-# alone unlocks.
+# memo; knife 7a is the boundary knife, 7b the reduction one and 8 the
+# two-dimensional one.
 1 | Vector Addition | vadd_tail | std/gpu.masked_vadd_ref | mask_diff:vadd_tail | exact
 8 | Matrix Addition | vadd_tail | std/gpu.masked_vadd_ref | mask_diff:vadd_tail | exact
 21 | ReLU | relu | std/gpu.relu_ref | mask_diff:relu | exact
@@ -42,3 +43,9 @@
 68 | Sigmoid Activation | sigmoid | std/gpu.sigmoid_ref | red_diff:sigmoid | tolerance
 107 | PPO Clipped Surrogate Loss | ppo_loss | std/gpu.ppo_loss_ref | red_diff:ppo_loss | tolerance
 108 | DPO Sequence Loss | dpo_loss | std/gpu.dpo_loss_ref | red_diff:dpo_loss | tolerance
+2 | Matrix Multiplication | matmul | std/gpu.matmul_ref | mm_diff:matmul | tolerance
+30 | Batched Matrix Multiplication | batched_matmul | std/gpu.batched_matmul_ref | mm_diff:batched_matmul | tolerance
+40 | Batch Normalization | batch_norm | std/gpu.batch_norm_ref | mm_diff:batch_norm | tolerance
+83 | Fused Residual Add + RMS Normalization | fused_rms_norm | std/gpu.fused_rms_norm_ref | mm_diff:fused_rms_norm | tolerance
+105 | Group Normalization | group_norm | std/gpu.group_norm_ref | mm_diff:group_norm | tolerance
+113 | Layer Normalization | layer_norm | std/gpu.layer_norm_ref | mm_diff:layer_norm | tolerance

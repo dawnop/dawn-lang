@@ -21,6 +21,10 @@
 > 版 intrinsic、假设备按缓冲格式舍入并把格式交给参考实现、`vadd_bf16` 的层 0 / 1 golden 与
 > cubin、对拍脚本的三组 bf16 语料），§3.2、§3.3、§4.3、§4.4 与 §6.4 描述的就是它；**六刀全部
 > 落地，层 2 待驱动**：bf16 的设备对拍与 f64 的一样停在 `cuModuleLoadData`（§6.4）。
+> **刀 7a / 7b / 8 已落地，层 2 已通**（驱动升到 616.56 之后）：7a 是边界与逐元素算术，
+> 7b 是归约、超越函数与两档判词，**8 是二维 tile、任意 stride 的指针梯子、`mmaf` 与三维
+> grid**；三刀合起来 30 个 kernel 全部在本机 3080 上与手写参考对上，leetgpu 累计 22 / 97
+> （§7 的刀单，判词与负控见 §6.5、§6.6）。
 > 前置勘察与计划稿是两份不入库的研究备忘录（agent-handoff 的
 > `cutile-backend-fit.md` 与 `tile-backend-plan.md`），探索过程留在那里，
 > 本文只保留结论与证据坐标。
@@ -507,6 +511,40 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   整数与窄浮点缓冲、view 类型族、`sin / cos / tan / sinh / cosh / atan2 / remf`
   （同族、零新机制，有客户再加）、跨 block 的归约（一次 launch 只归约一个 tile block 内的
   一个 tile，所以本刀的归约 kernel 都是「整条向量装进一个 1024 宽的 tile、grid = 1」的形状）。
+- **刀 8 加了什么、没加什么**：加的是 **tile 的形状**（`Dev` 的每个操作、`TileOp`、`Instr`
+  的 `n: Int` 全线换成 `shape: List[Int]`，`render.ty` 的 rank ≥ 2 panic 拆掉，拼法是
+  `tile<64x32xf64>`；字节码的 tile 类型载荷本来就写 `int64 shape[]`，一个字没改）、
+  **任意 stride 的指针梯子**（`load` / `store` 除形状外还收一串以元素为单位的 stride，
+  梯子是每维一条 `iota`、`reshape` + `broadcast` 到整块、乘该维的 stride 再求和；
+  **零新 opcode**，`iota / reshape / broadcast / muli / addi / offset` 都是现成的）、
+  `mmaf`（0x49）、`reduce` 的 `dim` 真的有多个取值、**三维 grid**（`gpu_launch_host` 的
+  `grid: Int` 换成 `gx, gy, gz`，是本刀唯一动运行时的地方）。
+  **仍然没有**：`scan`（0x5E，归刀 13）、`permute`（0x53）与 `cat`（0x0C）——转置用两个
+  对调的 stride 就够了，零新 opcode，见下——整数与窄浮点缓冲（归刀 10 / 11）、
+  gather / scatter（归刀 12）、原子操作（归刀 14）、`erf`（归刀 15）、view 类型族与 TMA、
+  `mmaf` 的 `fast_acc`（13.3 的 flag，我们钉 13.2，不写）、`mmai`（整数 MMA，等整数缓冲）。
+- **`n: Int` → `shape: List[Int]` 是纯重构，有机器判词**：改完之后 `--record` 重录，
+  刀 7a / 7b 的 **23 个 `.mlir` 与 23 个 `.tilebc` 一字节没动**。两件事让它成立：rank-1
+  的梯子发的还是原来那几条指令（rank-0 的 base 与指针总是「reshape 到全 1 形状、broadcast
+  到整块」，一维的 `iota` 不 reshape 也不 broadcast，stride 为 1 不发 `muli`），而
+  block 索引乘 tile 宽度这一步从梯子里搬到了 kernel 源码的 `tile_at(idx, n)`，发的
+  `constant` 与 `muli` 落在原来的位置。
+- **转置不需要 `permute`**：`out[j][i] = x[i][j]` 就是「按 `[C, 1]` 读、按 `[1, R]` 写」，
+  同一块 tile 换一对 stride 存回去。`transpose` kernel 因此是 stride 的 oracle 而不是形状
+  操作的 oracle，而且矩阵是 128x64 的长方形，对调两个 stride 是错的答案而不是同一个答案的
+  另一种拼法。`permute` 与 `cat` 因此没有客户，不做。
+- **`reduce` 的结果掉的是被归约的那一维，区域参数永远是 rank-0**：方言散文说的是
+  「除被归约的那一维外形状不变」，但它自己的第二个 `mlirExample` 印的是
+  `tile<8x64xf32> dim=0 -> tile<8xf32>`。两者不一致，实测以实现为准：把结果类型写成保留
+  被归约的那一维，`tileiras` 报
+  `inferred type(s) '!cuda_tile.tile<2xf64>' are incompatible with return type(s) '!cuda_tile.tile<32xf64>'`。
+  区域的两个块参数则**与操作数的秩无关，一律 rank-0**；写入器一度把结果类型写进块参数，
+  `tileiras` 以 `'cuda_tile.addf' op failed to verify that all of {lhs, rhs, result} have
+  same type` 拒绝。两条都是量出来的。
+- **stride 为 0 是合法的，而且有用**：`batch_norm` 的每通道 `gamma` 是一个数，要作用在
+  整列上；把它按 `[BN_ROWS]` 形状、`[0]` stride 读，梯子发出的偏移量整块相同，
+  `load_ptr_tko` 就把同一个地址读 128 遍。`group_norm` 的每通道 `gamma` 同理，用
+  `[1, 0]`。这省掉了一族「把一维张成二维」的公开操作。
 - **归约区域与 `if` 区域里禁止访存**：方言要求归约体是纯的，而两种区域都不携带内存序 token,
   所以里面的 load / store / `d_for` 一律在记录时按名拒绝（`a load inside a reduce or if
   region has no memory order`）。这是本包自己立的规矩，不是方言的。
@@ -756,6 +794,22 @@ trace / golden / bytecode / assemble；十一个变异体那部分不分片，�
 与它的 `--self-test` 仍各亚秒。`dawn test --stdlib` 多了三个级数函数与它们的五个测试，本机
 秒级，`test` job 的 budget 不动。
 
+**刀 8 的实测：预算不动，也不分片。** 同一台机器上成对测量了两次、两个方向：
+`tile-golden/run.sh` **227 s（23 个 kernel）→ 233 s（30 个）**，反过来再测一次
+**222 s（30 个）→ 201 s（23 个）**。差值 +6 s 与 +21 s，机器当天的噪声就有 ±25 s，
+所以能说的是「七个 kernel 不到 +10%」。**kernel 数从 23 涨到 30 是 +30%，不是 §6.5 上面
+那句话设的「翻一番」触发条件**，所以 planning value 与 `timeout-minutes` 都不动。
+
+分片的处置本身仍然有效（按 `kernels=()` 切片，形状照 `mutants` 那 19 片），但这里补一条
+刀 7b 时没写的约束：**本 workflow 现在是 24 个 job，而本账号的并发上限是 20**
+（`gates.yml` 的 `mutants.strategy.matrix` 旁边记着这笔账）。再切一片 `tile` 出来只会排队，
+不会缩短墙钟。所以真到要分片的那一刀，得连着并发上限一起算，而不是只看 `tile` 自己。
+
+`tile-gpu-diff/run.sh` **91 s → 99 s**（多一个 native 构建、七个 kernel 的真机对拍、
+`grid-y-ignored` 的一次 C 运行时重编与一次对拍、`mma-acc-not-carried` 的一次汇编与一次
+对拍）。它只在本机跑，CI 上仍只有亚秒的 `--check`。`dawn test --stdlib` 多了七个参考实现，
+没有新测试，秒级不变。
+
 ### 6.6 两档判词：逐位与容差（刀 7b）
 
 层 2 从第一天就写着「分逐位与容差两档」（§6.2 的表、§3.2 的 matmul 行），但直到刀 7b 容差档
@@ -800,6 +854,42 @@ tileiras 13.3.36 实测答 1.0，即成对（树形）折叠**。`sum_ref` 的�
 第二个变异体值得单说：它在小语料上**数值上完全正确**，层 2 也照样是绿的。让它红的是语料，
 不是机制。这就是为什么 `red_diff.dawn` 里 softmax 的语料是 `1000 + i % 17` 而不是随手一组数。
 
+**刀 8 的两个负控，其中一个在 Dawn 源码以下**：
+
+| 变异体 | 改哪 | 层 0 | 层 1 | 层 2 |
+|--------|------|------|------|------|
+| `grid-y-ignored` | `runtime/c/dawn_rt.c` 的 `cuLaunchKernel` 把 gridDimY 写死 1 | **看不见**（grid 不在字节码里，也不在文本里） | **看不见**（`tileiras` 从不启动任何东西） | 七个 kernel 里 grid 有第二根轴的**四个**全红（`matmul` / `batched_matmul` / `transpose` / `group_norm`），一维 grid 的三个一动不动 |
+| `mma-acc-not-carried` | GEMM 的 K 循环不再携带累加器，每轮从新的零 tile 起 | 变（`--record` 能洗白） | 收（是一个合法、同样良类型的 kernel） | 只有 `matmul` 红：它答的是最后一片 K 的乘积而不是整个和 |
+
+`grid-y-ignored` 是这条线上第一个**编译器与包都看不到**的变异体：它改的是 C 运行时，
+而三层门里只有层 2 会启动 kernel。刀 7 之前也写不出来——那时每个 kernel 的 grid 都是一维的，
+把 gridDimY 写死 1 什么也不改变。
+
+**f64 `mmaf` 在 sm_86 上：汇编得了，但不落 tensor core。** 开工第一件事是拿一个手写的最小
+模块问 `tileiras`（一个 throwaway Python 写入器，先逐字节复现 `vadd.tilebc` 再改）：
+`mmaf` 的 f64、f32、bf16 三种输入在 sm_80 / sm_86 / sm_90 上都退出 0、stderr 干净。
+但 `--remarks=tensorcore` 说的是另一回事：
+
+- f64 64x32x64（`matmul` 的形状）：`remark[failed]: MMA operation failed to optimize to use
+  Tensor Cores, it is using FMA instructions instead`，`reason: MMA size does not fit in the
+  tensor core`，`note: Instruction = FMA`。f64 8x4x8、16x16x16 与 f32 64x32x64 一样。
+- bf16 输入、f32 累加、64x32x64：`remark[passed]: MMA operation successfully optimized to
+  use Tensor Cores`，`note: Instruction = Tensor-core SM80`。
+
+本机是 GA102，没有快速 f64 tensor core，所以这个结果就是硬件的实话，不是我们编错了。
+**处置**：本刀的两个 GEMM 用 f64 缓冲（`element_bytes` 今天只认 f64 与 bf16），走的是 FMA
+路径；`mmaf` 的容差档判词因此**不是**「tensor core 不精确」而是「K 上的求和顺序没有规定」，
+这一条与硬件无关，永久成立。真正走上 tensor core 的 bf16 × bf16 → f32 需要一个 f32 或
+bf16 的输出缓冲（`ftof` 把 f32 累加器转回 bf16），归刀 11。
+
+**计划里的 tfloat32 与 f32 两组语料没有跑，理由是形状不对**：计划写的是「f32 输入时同时跑
+一组 tfloat32 舍入的和一组 f32-as-f32 的」，而本刀的缓冲只有 f64（f32 缓冲要 `element_bytes`
+认识 4 字节，是刀 11 的事）。换成了本机能做的等价记录：`matmul` 的语料是整数值、每个部分和
+都远在 2^53 之内，所以任何求和顺序都是同一个精确整数——实测设备与参考**逐位相同**
+（`identical:tolerance`，miss 0.0），这是**赠品**而不是判词；`batched_matmul` 的语料是十分之几，
+不在二进制格点上，求和的分组因此可见——实测 `close:tolerance`，最大 miss **1.02e-10**
+（判词的 1e-10 倍）。这一对就是「容差档在这里确实在干活」的证据。
+
 **`tileirdisasm` round-trip：未做。** 计划里那一格是「若本机能构建或找到
 `cuda-tile-translate`（`--mlir-to-cudatilebc` 的逆向），把 `.tilebc` 反汇编回文本与 `.mlir`
 golden 对拍」。本机没有：pin 的三个 wheel（`nvidia-cuda-tileiras` / `nvidia-nvvm` /
@@ -825,6 +915,7 @@ golden 对拍」。本机没有：pin 的三个 wheel（`nvidia-cuda-tileiras` /
 | **6 BF16 tile**（落地，GPU 对拍待驱动） | 「设备 bf16 `addf` 与 `narrow.round_bf16(f64 加)` 对全部 65536 个 bf16 值对加随机对逐位一致」 | `gpu.BF16` 标记与 `element_bytes`、`narrow.bf16_bits / bf16_of_bits`、`pack_bf16 / unpack_bf16` 与两个 `Bytes` 版 intrinsic（`builtins.dawn` 镜像同步）、假设备按格式舍入并把 `dtypes` 交给参考实现、`vadd_bf16` 的 `.mlir / .tilebc` golden、对拍脚本三组 bf16 语料、台账门加 `std/narrow.dawn` | 层 0 / 1 本机与 CI 绿（`FUNC GLOBAL vadd_bf16`）；假设备 65536 对 = narrow；本机对拍走到 `cuModuleLoadData` 被 560.94 拦住，台账记 `blocked`（§6.4） | 计划的「设备侧 rounding 改 `approx`」在 560 上验不了，换成层 0 / 1 能红的等价物：`addf-no-rounding`（渲染器丢掉 `rounding<nearest_even>`，`vadd_bf16.mlir` 红；写入器那一半 `tileiras` 每种模式都收，只有设备能看见，故不设变异体）与 `bf16-tag-as-i16`（写入器 bf16 标签改 i16，`tileiras` 拒绝）；打包层 `pack-truncates`（`round_bf16` 漏掉、`bf16_bits` 截断）在 std 测试与 560 上的回读都红；假设备上传不舍入，格点外那组 std 语料红 | 2（实报 1；`run.sh` 本机 91 s，`tile-gpu-diff/run.sh` 26 s） |
 | **7a 边界与逐元素**（已落地） | 「一个长度不是 tile 宽度整数倍的向量，最后一块越界的 lane 既不读也不写，且设备算得与手写参考逐位一致」 | `Dev` 加 `t_load / t_store` 的可选 mask 与 pad、`t_constf / t_consti / t_iota / t_lanes / t_unaryf / t_binaryf`（`t_addf` 并入）`/ t_fma / t_cmpf / t_cmpi / t_select`；包内 `I32 / I1` 两个 tile 元素格式标记；`lower` 的 `LoadPtr / StorePtr` 带可选操作数、`ConstInt / ConstFloat / FloatUn / FloatBin / FloatFma / CmpFloat / CmpInt / SelectTile`；`bytecode` 加 11 个 opcode 与 mask / paddingValue 两个 flag 位、`ieee_bits` 纯算术拼位模式；`std/gpu` 五个带 `n` 的参考实现；`scripts/tile-golden` 六个 kernel；`scripts/tile-gpu-diff/mask_diff.dawn`；`scripts/leetgpu-diff` 台账与门 | 层 0/1 六个新 golden，`FUNC GLOBAL` 六个；层 2 本机 3080 六个 kernel 逐位一致（含 mask 保住的尾部 lane）；leetgpu 1 / 8 / 21 / 23 / 31 / 62 可解 | `mask-all-true`（降低时把 `cmpi` 换成恒真 `i1` 常量）→ 层 0 变、层 1 收、**层 2 六个 kernel 全红**；`load-pad-flag-as-token`（padding 的 flag 位改成 token 的）→ 文本不动、字节同长，`tileiras` 丢流 | 2 到 3（实报 1；`tile-golden/run.sh` 本机 122 s → 129 s、`tile-gpu-diff/run.sh` 26 s → 46 s） |
 | **7b 归约、超越函数与两档判词**（已落地） | 「设备的归约与手写参考在一个折叠顺序不可见的语料上逐位一致，而带 `exp` 的 kernel 在 `atol = rtol = 1e-5` 下一致」 | `Dev` 加 `t_spread / t_reduce_begin / t_reduce_end / t_if_begin / t_if_else / t_if_end`，`t_unaryf / t_binaryf` 的名单加十个超越函数；`Scalar[D]` 与 `RedId` 两个新公开类型、`spread / d_reduce / d_reduce2 / d_if / d_for3 / d_for4 / s_*` / 六个 `idx_*` 比较；宽度 0 表示 rank-0 tile；`prog` 的区域栈变成四种 `Frame` 的 ADT、归约与 `if` 区域内禁访存；`lower` 加 `ReduceTile / IfElse / YieldVals` 与 `close_scope`（`if` 的 then 分支降两遍读类型）；`bytecode` 加 13 个 opcode、`ArrayAttr` 里的自包含属性、zigzag 与 u64 varint、两区域编码；`std/gpu` 加 `ref_exp / ref_log / ref_sqrt` 与十个参考实现；十三个 kernel 与它们的 golden；`scripts/tile-gpu-diff/red_diff.dawn`（两档判词 + 顺序探针）；`problems.txt` 加十行、`check.py` 加档位对账 | 层 0/1 十三个新 golden，`FUNC GLOBAL` 十三个；层 2 本机 3080 十三个 kernel 全绿（逐位 6、容差 7，最大误差 8.3e-11，是容差的 1e-10 倍）；leetgpu 4 / 5 / 17 / 27 / 35 / 50 / 52 / 68 / 107 / 108 可解，累计 16 / 97 | `reduce-identity-wrong`（求和 identity 0.0 → 1.0）→ 层 0 变、层 1 **收**、层 2 八个带求和的 kernel 红、另外五个不动；`softmax-no-max-subtract`（不减最大值）→ 层 0/1 都收，层 2 在 1000 附近的语料上溢出成 NaN，只有 softmax 红。另外补上层 1 的一个洞：`tileiras` 会退出 0 还打印 `error:`（f64 `tanh` 带 `nearest_even`），`assemble` 改成两条都要过 | 2 到 3（实报 1；`tile-golden/run.sh` 本机 123 s → 188 s、`tile-gpu-diff/run.sh` 40 s → 91 s） |
+| **8 二维 tile、多维 grid 与 `mmaf`**（已落地） | 「设备算出的矩阵乘积、转置与四种归一化与手写参考在 `atol = rtol = 1e-5` 下一致，而 grid 的第二根轴真的被启动了」 | 包：`n: Int` → `shape: List[Int]` 全线（`Dev` / `TileOp` / `Instr` / `render.ty` 的 rank ≥ 2）、以元素为单位的任意 stride 的指针梯子（零新 opcode）、`t_mmaf`（0x49）、`d_reduce_dim`（`dim` 不再只有 0）、`tile_at` / `row_major` / `load_strided` / `store_strided`；宿主：`gpu_launch_host` 的 `grid` 换成 `gx, gy, gz`（`dawn_rt.c` / `dawn_rt.h` / JVM 拒绝类 / `types.dawn` / `builtins.dawn` 镜像 / `rtsrc.dawn`），`launch3` 与仍是一维的 `launch`；`std/gpu` 七个参考实现；七个 kernel 与它们的 golden；`scripts/tile-gpu-diff/mm_diff.dawn`；`problems.txt` 加六行 | 层 0/1 七个新 golden，`FUNC GLOBAL` 七个；层 2 本机 3080 七个全绿（逐位 1、容差 6，最大 miss 1.02e-10，是容差的 1e-10 倍）；leetgpu 2 / 30 / 40 / 83 / 105 / 113 可解，累计 22 / 97。刀 7a / 7b 的 23 个 golden 一字节没动 | `grid-y-ignored`（C 运行时把 gridDimY 写死 1）→ 层 0 与层 1 **都看不见**，层 2 只有 grid 有第二根轴的四个红；`mma-acc-not-carried`（K 循环不携带累加器）→ 层 0 变、层 1 收，层 2 只有 `matmul` 红 | 4 到 6（实报 1；`tile-golden/run.sh` 本机 227 s → 233 s、`tile-gpu-diff/run.sh` 91 s → 99 s） |
 | 7（期权）混合路线 | 「同一个 kernel 体经编译期发射器与经记录 handler 产出相同的 Tile 程序」 | `selfhost/src/tile/emit_tile.dawn` | 两路 `TileProg` 相等 | 不在本计划内 | 6 到 10 |
 
 合计（不含刀 7）16 到 23 人日。字节码写入器是最大的单块，也是唯一能让 CI 的绿有信息量的
