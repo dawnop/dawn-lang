@@ -96,6 +96,13 @@
 #                            differ, and tileiras loses the stream. The flag
 #                            bits are the whole of what says which optional
 #                            operands a memory operation carries
+#     ftoi-rounds-instead-of-truncates
+#                            the writer gives `ftoi` the nearest-even
+#                            rounding mode -> int_ops's text is untouched,
+#                            its bytes are the same length and differ, and
+#                            tileiras names the operation: only
+#                            `nearest_int_to_zero` is supported. Written as
+#                            a layer-2 mutant and measured its way here
 #     bf16-tag-as-i16        the writer's type table gives bf16 the i16 tag
 #                            -> vadd_bf16's text is untouched, its bytes are
 #                            the same length and differ, and tileiras refuses
@@ -600,5 +607,24 @@ mutant_project load-pad-flag-as-token bytecode.dawn \
   'const LOAD_FLAG_PAD: Int = 16'
 writer_mutant_checks load-pad-flag-as-token vadd_tail same-size \
   "failed to get result type 0 for"
+
+# 12. The writer gives `ftoi` the nearest-even rounding mode where the
+#     dialect accepts only `nearest_int_to_zero`. The text is untouched
+#     (the renderer prints the mode from its own table) and the file is
+#     the same length -- one enum value for another -- and the verifier
+#     names the operation and the mode it wanted.
+#
+#     This one was written as a LAYER 2 mutant (the coverage memo's plan
+#     for knife 10: a rounding mode is a semantic choice, and `int_ops`
+#     converts `a / 2` on odd lanes where the two modes disagree) and
+#     measured its way here instead: tileiras refuses it outright, so the
+#     device never sees it. Recorded where it actually lands. The
+#     conversion mutant that does reach layer 2 is
+#     scripts/tile-gpu-diff's exti-sign-extends.
+mutant_project ftoi-rounds-instead-of-truncates bytecode.dawn \
+  '  "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]' \
+  '  "ftoi" -> [SIGNED, ROUND_NEAREST_EVEN]'
+writer_mutant_checks ftoi-rounds-instead-of-truncates int_ops same-size \
+  "'cuda_tile.ftoi' op invalid rounding mode specified. Only 'nearest_int_to_zero' is supported"
 
 echo "tile golden ok"

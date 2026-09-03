@@ -114,12 +114,20 @@
 #                      corpus is half the claim: the two shifts agree on
 #                      every non-negative operand, so int_diff's data spans
 #                      the whole i32 range
-#     ftoi-rounds-instead-of-truncates
-#                      the writer gives `ftoi` the nearest-even rounding mode
-#                      instead of the toward-zero one the dialect requires
-#                      -> `int_ops` alone moves, and only on its ODD lanes,
-#                      where a half lands between two integers. The other
-#                      three kernels convert nothing and are the control
+#     exti-sign-extends
+#                      the writer gives `exti` the signed signedness, so a
+#                      comparison mask widens to 0 and -1 rather than 0 and 1
+#                      -> layer 0 is blind again (the renderer prints
+#                      `unsigned` from its own table), the bytes of the two
+#                      kernels that widen a mask move, tileiras accepts both,
+#                      and on the device `count_eq` answers the negated count
+#                      while `int_ops`'s parity term becomes -1. The other two
+#                      widen nothing and are the control.
+#                      Its sibling `ftoi-rounds-instead-of-truncates` is NOT
+#                      here: it is refused at layer 1 (scripts/tile-golden's
+#                      mutant list), because `nearest_int_to_zero` is the one
+#                      integer rounding mode the dialect accepts and tileiras
+#                      says so. Measured, not assumed
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -1152,51 +1160,67 @@ else
   echo "SKIP  mutant: shri-always-logical not verifiable on this driver: the clean run is $int_verdict, before any launch reaches the device"
 fi
 
-# 12. ftoi-rounds-instead-of-truncates: the writer gives `ftoi` the
-#     nearest-even rounding mode where the dialect's only integer rounding
-#     is toward zero. Layer 0 is blind again (the renderer prints
-#     `nearest_int_to_zero` from its own table) and layer 1 accepts it, so
-#     the device is the only place the difference exists -- and only on the
-#     ODD lanes of `int_ops`, where `a / 2` falls halfway between two
-#     integers and the two modes part company. `int_ops` is the only kernel
-#     here that converts anything; the other three are the control.
-mutant_pkg_ftoi="$work/pkg-ftoi-rounds"
-rm -rf "$mutant_pkg_ftoi"
-cp -r "$root/packages/tileir" "$mutant_pkg_ftoi"
-before=$(digest "$mutant_pkg_ftoi/src/bytecode.dawn")
-python3 "$here/mutate.py" "$mutant_pkg_ftoi/src/bytecode.dawn" ftoi-rounds-instead-of-truncates \
-  '  "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]' \
-  '  "ftoi" -> [SIGNED, ROUND_NEAREST_EVEN]'
-after=$(digest "$mutant_pkg_ftoi/src/bytecode.dawn")
-echo "      ftoi-rounds-instead-of-truncates: packages/tileir/src/bytecode.dawn md5 $before -> $after"
+# 12. exti-sign-extends: the writer gives `exti` the signed signedness where
+#     it widens a comparison mask, so each selected lane becomes -1 instead
+#     of 1. Layer 0 is blind (the renderer prints `unsigned` from its own
+#     table) and layer 1 accepts it -- a signed widening is a legal
+#     operation, just not this one's -- so the device is again the only
+#     place the difference exists: `count_eq` answers the negated count and
+#     `int_ops`'s parity term flips sign on every odd lane. `subarray_sum`
+#     and `rainbow` widen no mask and are the control, at layer 0 (their
+#     bytes do not move) and on the device both.
+#
+#     The conversion mutant the coverage memo named first,
+#     ftoi-rounds-instead-of-truncates, is a LAYER 1 mutant rather than a
+#     layer 2 one: `nearest_int_to_zero` is the only integer rounding mode
+#     `ftoi` accepts and tileiras refuses any other, so it is registered in
+#     scripts/tile-golden/run.sh with the other writer mutants. Measured
+#     while writing this one.
+mutant_pkg_exti="$work/pkg-exti-sign-extends"
+rm -rf "$mutant_pkg_exti"
+cp -r "$root/packages/tileir" "$mutant_pkg_exti"
+before=$(digest "$mutant_pkg_exti/src/bytecode.dawn")
+python3 "$here/mutate.py" "$mutant_pkg_exti/src/bytecode.dawn" exti-sign-extends \
+  '  "exti" -> [UNSIGNED]' \
+  '  "exti" -> [SIGNED]'
+after=$(digest "$mutant_pkg_exti/src/bytecode.dawn")
+echo "      exti-sign-extends: packages/tileir/src/bytecode.dawn md5 $before -> $after"
 
-mutant_kernels ftoi-rounds "$mutant_pkg_ftoi" "${integers[@]}"
+mutant_kernels exti-sign-extends "$mutant_pkg_exti" "${integers[@]}"
+exti_red=(count_eq int_ops)
 moved=0
 for k in "${integers[@]}"; do
-  if cmp -s "$golden/$k.tilebc" "$work/ftoi-rounds-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+  if cmp -s "$golden/$k.tilebc" "$work/exti-sign-extends-$k.tilebc"; then :; else moved=$((moved + 1)); fi
 done
-[ "$moved" = 1 ] ||
-  fail "ftoi-rounds-instead-of-truncates: expected exactly int_ops's bytecode to move, got $moved of ${#integers[@]}"
-echo "      ftoi-rounds-instead-of-truncates: 1 of ${#integers[@]} .tilebc files differs from the goldens and tileiras still accepts it"
-ftoi_cubins=()
-for k in "${integers[@]}"; do ftoi_cubins+=("$work/ftoi-rounds-$k.cubin"); done
+[ "$moved" = "${#exti_red[@]}" ] ||
+  fail "exti-sign-extends: expected exactly ${#exti_red[@]} of the ${#integers[@]} kernels' bytecode to move, got $moved"
+echo "      exti-sign-extends: ${#exti_red[@]} of ${#integers[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+exti_cubins=()
+for k in "${integers[@]}"; do exti_cubins+=("$work/exti-sign-extends-$k.cubin"); done
 rc=0
-"$work/ints.bin" "${ftoi_cubins[@]}" > "$work/m-ftoi-rounds.out" 2>&1 || rc=$?
-mverdict="$(verdict_of "$work/m-ftoi-rounds.out")"
+"$work/ints.bin" "${exti_cubins[@]}" > "$work/m-exti-signed.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-exti-signed.out")"
 if [ "$int_verdict" = pass ]; then
-  differ=$(grep -c '^  verdict differ:result$' "$work/m-ftoi-rounds.out" || true)
-  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
-    cat "$work/m-ftoi-rounds.out" >&2
-    fail "ftoi-rounds-instead-of-truncates mutant stayed green: expected verdict fail (exit 1) with int_ops alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-exti-signed.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#exti_red[@]}" ]; then
+    cat "$work/m-exti-signed.out" >&2
+    fail "exti-sign-extends mutant stayed green: expected verdict fail (exit 1) with exactly ${#exti_red[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
   fi
-  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "int_ops" {bad=1} END {exit bad}' \
-    "$work/m-ftoi-rounds.out" ||
-    { cat "$work/m-ftoi-rounds.out" >&2; fail "ftoi-rounds-instead-of-truncates: a kernel other than int_ops moved"; }
-  echo "PASS  mutant: ftoi-rounds-instead-of-truncates (int_ops alone, and only on the odd lanes; the other three convert nothing)"
+  for k in "${exti_red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-exti-signed.out" ||
+      { cat "$work/m-exti-signed.out" >&2; fail "exti-sign-extends: $k widens a mask and should differ"; }
+  done
+  for k in subarray_sum rainbow; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-exti-signed.out" ||
+      { cat "$work/m-exti-signed.out" >&2; fail "exti-sign-extends: $k widens nothing and should be untouched"; }
+  done
+  echo "PASS  mutant: exti-sign-extends (layer 0 blind, layer 1 accepts; on the device ${exti_red[*]} differ and the other two do not)"
 else
   [ "$mverdict" = "$int_verdict" ] ||
-    { cat "$work/m-ftoi-rounds.out" >&2; fail "ftoi-rounds-instead-of-truncates: the clean run is $int_verdict but the mutant is $mverdict"; }
-  echo "SKIP  mutant: ftoi-rounds-instead-of-truncates not verifiable on this driver: the clean run is $int_verdict, before any launch reaches the device"
+    { cat "$work/m-exti-signed.out" >&2; fail "exti-sign-extends: the clean run is $int_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: exti-sign-extends not verifiable on this driver: the clean run is $int_verdict, before any launch reaches the device"
 fi
 
 # ---- ledger
