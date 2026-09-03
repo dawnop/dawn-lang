@@ -66,6 +66,18 @@ name: gates
 # builtin-type-1's 557s, and the highest of the new planning values is 413s.
 # The pole did not move and no job asked it to.
 #
+# 2026-09-04: the std pruning knife (e797abb0) dropped the unreachable half
+# of std per program, and every job that compiles a program got cheaper: the
+# native-diff shards ran 195/140/166/126s on the pruned tree against
+# 360/288/217/286s on its parent, and the run's span went 883s to 715s. None
+# of those lines is restated downwards here. A claim is a claim about the
+# worst run in the observation window, pre-prune runs are still in that
+# window, and check-gate-budgets.py --observed refuses a claim under its
+# maximum; the nine lines restated below all went the other way. The tallest
+# claim in this file is still builtin-type-1's 557s, whose own worst
+# observation is now 521s, and the highest remaining planning value is
+# native-diff-1's 391s.
+#
 # What the pole cannot see is a claim that has quietly stopped being true:
 # check-gate-budgets.py compares the timeout with the claim and the claim with
 # the pole, and both numbers live in this file. On 2026-09-03 twenty-one lines
@@ -253,8 +265,15 @@ jobs:
 
   native-diff-2:
     runs-on: ubuntu-latest
-    # budget: 3x 267s planning value (see the note above)
-    timeout-minutes: 14
+    # 2026-09-04: the first sharded runs replace the planning value, as the
+    # note above says they would -- the worst over the four completed main
+    # runs of 2026-09-03 (15:26Z .. 17:42Z) is 302s (run 33779014329), 35s
+    # over the 267s planning value. On the pruned tree this shard ran 140s,
+    # which the line may not follow while pre-prune runs are in the window.
+    # scripts/gate-observations.py pulled it; scripts/check-gate-budgets.py
+    # --observed is the audit that named it.
+    # budget: 3x 302s worst observed
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -393,7 +412,9 @@ jobs:
     # completed main runs since 09-02 is 472s (run 33736919486), which the
     # 397s claim was 75s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 472s worst observed
+    # 2026-09-04: 476s (run 33774195662) over the four completed main runs of
+    # 2026-09-03 (15:26Z .. 17:42Z), 4s over the 472s claim.
+    # budget: 3x 476s worst observed
     timeout-minutes: 24
     steps:
       - uses: actions/checkout@v4
@@ -583,8 +604,11 @@ jobs:
     # completed main runs since 09-02 is 515s (run 33748678694), which the
     # 323s claim was 192s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 515s worst observed
-    timeout-minutes: 26
+    # 2026-09-04: 540s (run 33772614654) over the four completed main runs of
+    # 2026-09-03 (15:26Z .. 17:42Z), 25s over the 515s claim; 3x crosses 27
+    # minutes, so the timeout follows.
+    # budget: 3x 540s worst observed
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
 
@@ -820,7 +844,11 @@ jobs:
     # than a local measurement doubled, which is the better estimate available
     # here and is why it is not doubled again. It supersedes the 558s line the
     # unsplit job carried, and the first run of this job replaces it.
-    # budget: 3x 413s planning value (this half's observed steps plus setup)
+    # 2026-09-04: the first runs of this half replace the planning value --
+    # 419s (run 33774195662) over the four completed main runs of 2026-09-03
+    # (15:26Z .. 17:42Z), 6s over it. The pruned tree ran 271s; the line may
+    # not follow that while pre-prune runs are in the window.
+    # budget: 3x 419s worst observed
     timeout-minutes: 21
     steps:
       - uses: actions/checkout@v4
@@ -1005,7 +1033,10 @@ jobs:
     runs-on: ubuntu-latest
     # 346s of steps plus the same 38s of fixed overhead, from the same five
     # runs; no observation of this job itself yet.
-    # budget: 3x 384s planning value (this half's observed steps plus setup)
+    # 2026-09-04: 386s (run 33779014329) over the four completed main runs of
+    # 2026-09-03 (15:26Z .. 17:42Z) replaces the planning value, 2s over it.
+    # The pruned tree ran 215s, for the reason contracts-1 gives.
+    # budget: 3x 386s worst observed
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -1095,7 +1126,9 @@ jobs:
     # completed main runs since 09-02 is 301s (run 33672841752), which the
     # 281s claim was 20s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 301s worst observed
+    # 2026-09-04: 306s (run 33774195662) over the four completed main runs of
+    # 2026-09-03 (15:26Z .. 17:42Z), 5s over the 301s claim.
+    # budget: 3x 306s worst observed
     timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
@@ -1670,7 +1703,9 @@ jobs:
     # completed main runs since 09-02 is 302s (run 33742987376), which the
     # 232s claim was 70s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 302s worst observed
+    # 2026-09-04: 312s (run 33779014329) over the four completed main runs of
+    # 2026-09-03 (15:26Z .. 17:42Z), 10s over the 302s claim.
+    # budget: 3x 312s worst observed
     timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
@@ -1808,7 +1843,9 @@ jobs:
     # completed main runs since 09-02 is 307s (run 33734826386), which the
     # 290s claim was 17s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 307s worst observed
+    # 2026-09-04: 313s (run 33786130335) over the four completed main runs of
+    # 2026-09-03 (15:26Z .. 17:42Z), 6s over the 307s claim.
+    # budget: 3x 313s worst observed
     timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
@@ -1900,7 +1937,9 @@ jobs:
     # completed main runs since 09-02 is 213s (run 33731092049), which the
     # 210s claim was 3s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 213s worst observed
+    # 2026-09-04: 215s (run 33779014329) over the four completed main runs of
+    # 2026-09-03 (15:26Z .. 17:42Z), 2s over the 213s claim.
+    # budget: 3x 215s worst observed
     timeout-minutes: 11
     steps:
       - uses: actions/checkout@v4
