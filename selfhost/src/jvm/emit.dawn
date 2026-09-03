@@ -72,6 +72,8 @@ use ir/core.{
   CBinOp, CUnOp, cex_ty, CSlotFn, CSlotDefault
 }
 use ir/lower.{LMod}
+use ir/reach
+use ir/reach.{Live}
 use jvm/jreflect
 use java "dawn.rt.Asm"
 use java "dawn.rt.AsmWriter"
@@ -200,6 +202,16 @@ pub type GenCtx = {
   # dictionary from anything else is how the JVM backend spent a release not
   # noticing the table was wrong.
   dicts: List[CDictDef],
+  # What this program can reach (ir/reach), or `None` where nothing is being
+  # pruned: the runtime-only jar built without a target, and `dawn test
+  # --stdlib`, whose program *is* std and has no user module to walk from.
+  #
+  # A method the walk did not reach is not written. The JVM resolves a
+  # constant-pool entry at the call that uses it, so getting this wrong is a
+  # NoSuchMethodError at run time rather than a build failure -- which is why
+  # every user module's function is a root and only std can actually lose
+  # anything here.
+  live: Option[Live],
   consts: Map[String, CValue],
   blocks: Map[(Int, Int), CValue]
 }
@@ -1294,12 +1306,33 @@ fn gen_fn(
   name: String,
   desc: String
 ) -> Gen !io = {
-  var g0 = gen_cbody(gx, g, cw, cf, name, desc, false)
+  # A hoisted body is asked about on its own, not through its parent: a
+  # dictionary slot bridge is hoisted out of whatever function first needed
+  # the dictionary, and the dictionary can outlive that function. Dropping a
+  # bridge with its parent is how the dictionary class would come to forward
+  # to a method that is not there.
+  var g0 = if kept(gx, cf) { gen_cbody(gx, g, cw, cf, name, desc, false) } else { g }
   for lf in lifts {
-    g0 = gen_cbody(gx, g0, cw, lf, lf.name, lifted_desc(gx, g0, lf.name), true)
+    if kept(gx, lf) {
+      g0 = gen_cbody(gx, g0, cw, lf, lf.name, lifted_desc(gx, g0, lf.name), true)
+    }
   }
   g0
 }
+
+## Is this body one the emitted class has to carry? Everything is, unless a
+## reachability walk said otherwise (GenCtx.live).
+fn kept(gx: GenCtx, f: CFun) -> Bool =
+  match gx.live {
+    None -> true
+    Some(l) -> reach.is_live(l, f)
+  }
+
+fn dict_kept(gx: GenCtx, key: String) -> Bool =
+  match gx.live {
+    None -> true
+    Some(l) -> reach.own_dict_live(l, gx.class_name, key)
+  }
 
 ## The descriptor of every hoisted body of this module, before any of them is
 ## written: one may call another, and a call site needs the descriptor.
@@ -1735,6 +1768,10 @@ pub fn emit_module(
   # lower here, per function, and the two lowerings could disagree about
   # which bodies exist (docs/audit/re-audit-2026-07-30.md RC-04).
   lm: LMod,
+  # What the program can reach, or None to emit the module whole. Only std
+  # can lose a method: every function of every user module is a root of the
+  # walk (ir/reach), so `Some(..)` is not a narrower answer for them.
+  live: Option[Live],
   ct: CtOut,
   # this module's const-name → comptime value view, imported consts included
   # (their values live in the declaring module's CtOut)
@@ -1771,6 +1808,7 @@ pub fn emit_module(
     # lowering asked for them. Known up front so `is_slot_target` answers the
     # same for a hoisted body wherever in the class it is written.
     dicts: lm.dicts,
+    live: live,
     consts: all_consts,
     blocks: ct.blocks
   }
@@ -1827,7 +1865,7 @@ pub fn emit_module(
             g = gen_fn(gx, g, cw, cf, lifts, mname, fn_desc_with_dicts(gx, f.sig))
           }
           None -> {
-            if f.name == "main" { has_main = true }
+            if f.name == "main" && kept(gx, cf) { has_main = true }
             sites = note_lift_sites(sites, f.name, lifts)
             g = gen_fn(gx, g, cw, cf, lifts, f.name, fn_desc_with_dicts(gx, f.sig))
           }
@@ -1850,8 +1888,13 @@ pub fn emit_module(
   # never forwarded builds none, which is why a program with no `[T: Eq]`
   # carries no Eq machinery -- the same property the old whole-program scan
   # in main.dawn was there to preserve, now a consequence rather than a rule.
+  # A dictionary class forwards to this module's own slot bodies, so it goes
+  # only where the walk reached this module's copy -- `own_dict_live`, not the
+  # program-wide key the C backend dedupes on.
   for dd in gx.dicts {
-    out = out ++ [gen_dict_class(gx, supers, dd)]
+    if dict_kept(gx, dd.key) {
+      out = out ++ [gen_dict_class(gx, supers, dd)]
+    }
   }
   # the classes that stand where an invokedynamic used to. Emitted here
   # rather than as they are met, because each is a whole class file and the

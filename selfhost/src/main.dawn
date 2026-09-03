@@ -72,6 +72,7 @@ use check/types.{
 use jvm/emit.{emit_module, gen_trait_interface}
 use ir/core.{CModule, CValue, CMode}
 use ir/reach
+use ir/reach.{Live}
 use ir/lower
 use c/rc
 use c/infer
@@ -459,13 +460,19 @@ fn collect_program(
       [lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns, true)]
   }
 
-  # Which Unicode tables dawn/rt/Strings carries: what the user's modules can
-  # reach decides (reach.dawn). Without a target there is no program to reason
-  # from, so the runtime-only jar carries everything.
+  # What the user's modules can reach (reach.dawn), which answers two
+  # questions at once: which Unicode tables dawn/rt/Strings carries, and which
+  # std methods are worth writing into the artifact. Without a target there is
+  # no program to reason from, so the runtime-only jar carries everything --
+  # and so does `dawn test --stdlib`, whose program is std itself.
   #
   # `emitted_core`, not `.m`: this path emits the test blocks too, and a table
   # a test alone reaches has to ride or that test dies on a missing method.
-  var tuse = reach.all_tables()
+  #
+  # The ten `std/pvec` names the emitters spell directly (a list literal, `++`,
+  # the list primitives, the Array host boundary) are roots of their own: those
+  # calls are written by the emitter, so no chain in Core reaches them.
+  var live: Option[Live] = None
   if target != "" {
     var cmods: List[CModule] = []
     var reach_roots: List[String] = []
@@ -474,8 +481,15 @@ fn collect_program(
       cmods = cmods ++ [lower.emitted_core(l)]
       reach_roots = reach_roots ++ [l.m.owner]
     }
-    tuse = reach.table_use(cmods, reach_roots)
+    var extra: List[(String, String)] = []
+    for n in emitc.emitter_named_pvec_fns() { extra = extra ++ [("std/pvec", n)] }
+    live = Some(reach.live_set(cmods, reach_roots, extra))
   }
+  let tuse =
+    match live {
+      None -> reach.all_tables()
+      Some(l) -> l.tables
+    }
   classes = classes ++ [(STRINGS_CLASS, gen_strings_class(sup, tuse))]
 
   # const values by declaring module, so importers can materialize them
@@ -506,7 +520,7 @@ fn collect_program(
     let no_decls: List[Decl] = []
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, entry, cls,
       own_trait_ids(cx.traits, cls), own_adts_of(cx.adts, cls, seen),
-      tm, std_lm[si], ct, cdriver.merged_consts(cx, ct, const_vals), "", no_decls)
+      tm, std_lm[si], live, ct, cdriver.merged_consts(cx, ct, const_vals), "", no_decls)
     si = si + 1
     for aid in own_adts_of(cx.adts, cls, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cx.adts, aid)))
@@ -527,7 +541,7 @@ fn collect_program(
   for cm in mods {
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, entry,
       cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name),
-      own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, user_lm[ui], cm.ct,
+      own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, user_lm[ui], live, cm.ct,
       cdriver.merged_consts(cm.cx, cm.ct, const_vals), cm.path, cm.m.decls)
     ui = ui + 1
     for aid in own_adts_of(cm.cx.adts, cm.class_name, seen) {
