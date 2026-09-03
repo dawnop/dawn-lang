@@ -43,6 +43,8 @@ use pkg/add
 use lsp/server.{LspLeaseHost, run_lsp, lsp_std_flag}
 use compiler_plan/pkgfetch
 use compiler_plan/procmem
+use compiler_plan/envmem
+use compiler_plan/envmem.{AskedGet}
 use compiler_plan/source
 
 fn native_lsp_standalone_lease() -> JsigLease !io = jsig_refused_lease()
@@ -1055,6 +1057,56 @@ fn scratch(prefix: String) -> String !Fs =
     Ok(d) -> d
     Err(e) -> panic("temp dir: " ++ e.message)
   }
+
+# The environment both variables are set in, so that every assertion below
+# about which one was read is also an assertion that the other was there to
+# be read and was not. The values are not spellings of any real compiler:
+# what is under test is which name the answer came from.
+const BOTH_CCS: List[(String, String)] = [
+  ("DAWN_WASM_CC", "wasi-sdk-clang"),
+  ("CC", "native-gcc")
+]
+
+test "a wasm build takes its compiler from DAWN_WASM_CC" {
+  let (cc, log) = envmem.with_env_table(envmem.TABLE_CWD, BOTH_CCS, () => cc_command(true))
+  assert cc == "wasi-sdk-clang"
+  # CC is set here and is not what a wasm build reads: the two targets can be
+  # served by two compilers in one environment, which is why the override is a
+  # variable of its own
+  assert envmem.asked_names(log) == ["DAWN_WASM_CC"]
+}
+
+test "a wasm build with no override is clang, and only clang" {
+  let (cc, log) = envmem.with_env_table(
+    envmem.TABLE_CWD,
+    [("CC", "native-gcc")],
+    () => cc_command(true)
+  )
+  # the wasm spelling is clang's and only clang's, so the default names it
+  # rather than falling back to the native compiler CC already names
+  assert cc == "clang"
+  assert cc != "cc"
+  assert envmem.asked_names(log) == ["DAWN_WASM_CC"]
+}
+
+test "a native build takes its compiler from CC" {
+  let (cc, log) = envmem.with_env_table(envmem.TABLE_CWD, BOTH_CCS, () => cc_command(false))
+  assert cc == "native-gcc"
+  assert envmem.asked_names(log) == ["CC"]
+}
+
+test "a native build with no override is cc" {
+  let (cc, log) = envmem.with_env_table(
+    envmem.TABLE_CWD,
+    [("DAWN_WASM_CC", "wasi-sdk-clang")],
+    () => cc_command(false)
+  )
+  assert cc == "cc"
+  assert envmem.asked_names(log) == ["CC"]
+  # neither branch asks where it is: the compiler is a name for PATH to
+  # resolve, not a path this driver builds
+  assert log == [AskedGet("CC")]
+}
 
 test "the wasm triple is the modern spelling when the sysroot has the file" {
   io.with_fs_real(() => {
