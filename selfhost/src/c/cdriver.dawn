@@ -27,6 +27,8 @@ use c/emitc
 use c/emitc.{EmitMod}
 use c/ctestrun
 use embed/rtsrc
+use compiler_plan/envmem
+use compiler_plan/envmem.{AskedGet}
 
 ## The program-wide tables codegen reads: every module's ADTs, traits, impls
 ## and function signatures, std's first, later declarations winning.
@@ -316,6 +318,31 @@ test "mode flips parse and stamp both halves" {
 test "an empty flip list is the identity on the table" {
   let t = flip_table(rc.owned_modes(), [])
   assert len(map.entries(t)) == 0
+}
+
+test "a compile that was asked for no flips reads the variable and gets none" {
+  let (flips, log) = envmem.with_env_table(envmem.TABLE_CWD, [], () => mode_flips_from_env())
+  # the clean control the mutant harness pins every run against: with the
+  # channel unset the answer is no flips at all, not a parse of an empty
+  # spelling of the spec
+  assert flips == []
+  assert log == [AskedGet("DAWN_RC_MODE_FLIPS")]
+}
+
+test "a requested flip reaches the compile as the spec spells it" {
+  let spec = "std/cursor:done:2:0=both, std/str:len:1:0=callsite"
+  let (flips, log) = envmem.with_env_table(
+    envmem.TABLE_CWD,
+    [("DAWN_RC_MODE_FLIPS", spec)],
+    () => mode_flips_from_env()
+  )
+  # the channel end to end: the variable named above is the one read, and its
+  # value arrives at the compile as the parse of it and nothing else
+  assert flips == parse_mode_flips(spec)
+  assert len(flips) == 2
+  assert flips[0].owner == "std/cursor" && flips[0].name == "done"
+  assert flips[1].name == "len" && flips[1].callsite_side
+  assert log == [AskedGet("DAWN_RC_MODE_FLIPS")]
 }
 
 ## Every module of the program, std first, lowered and reference-counted.
