@@ -165,6 +165,7 @@ Emit-Change 面：刀 0 与刀 6 实报都是全部十个 `emit` label 都动（
 pub type F64 = | F64
 pub type F32 = | F32
 pub type BF16 = | BF16          # 刀 6
+pub type I32 = | I32            # 刀 10
 
 pub trait Dtype[D] {
   fn dtype_name(d: D) -> String
@@ -201,6 +202,19 @@ bf16 张量把每个 Float 舍入到最近的 bf16（ties-to-even，设备自己
 （`f64` → 8、`bf16` → 2、其它 `None`）决定接不接受一个 `gpu_alloc`，`f32` 仍是「能打字不能分配」。
 `Tensor[D]` 的 target 没变（仍是 `(Int, Int)`，格式记在 handler 的表里），所以 opaque-twin 与
 checker-corpus 的语料一字未动。
+
+**i32 标记（刀 10 已落地）**：`gpu.I32 = | I32`，`dtype_name` 答 `"i32"`、`dtype_bytes` 答 4，
+`element_bytes` 答 `Some(4)`。它原本声明在 `packages/tileir/src/dev.dawn` 里，因为那时 i32 只是
+tile 的元素格式、不是缓冲格式；刀 10 让它两者都是，于是按「缓冲格式归 std/gpu」搬了过来
+（Dawn 没有 re-export，所以是搬而不是转出；`I1` 仍留在包里，它只是 tile 格式）。
+`round_to("i32", x)` = **向零截断后按二补数回绕**——「32 位缓冲装得下什么」的完整含义，
+`to_int` 的截断正是方言 `ftoi` 的 `nearest_int_to_zero`，回绕正是 `addi` / `muli` 的行为；
+一个只截断不回绕的参考会在每个溢出的和上与设备分道扬镳。真设备侧走刀 6 的 `Bytes` 通道
+（`pack_i32` / `unpack_i32`，小端四字节），与 bf16 同一条路。
+
+**`List[Float]` 通道对 i32 无损**：binary64 尾数 53 位，i32 与 u32 的值域都在 32 位以内，
+所以一个整数值从 `upload` 到 `download` 一个 bit 也不动。这不是细节，是刀 10 能把整个族
+钉在逐位档上的前提之一（另一个是整数加法模 2^32 的精确结合律，见 §6.6）。
 
 `Tensor[F64]` 传给要 `Tensor[F32]` 的参数是类型错误，`scripts/checker-corpus/cases/phantom_opaque.dawn`
 把这条钉成 must-red 语料。
@@ -822,6 +836,16 @@ kernel 的两后端两种输出与十八次 `tileiras`。kernel 数从 30 涨到
 `ladder-strides-reversed` 九次汇编一次对拍）。它只在本机跑，CI 上仍只有亚秒的 `--check`。
 `dawn test --stdlib` 多了八个参考实现与一个测试，秒级不变。
 
+**刀 10 的实测：仍然不分片。** 同一台机器、同一棵树上成对测量 `tile-golden/run.sh`，
+两次运行的唯一差别是 `kernels=()` 里那四个名字：**260 s（39 个 kernel）→ 279 s（43 个）**，
+差值 **+19 s / +7%**。四个 kernel 是 +10%，离 §6.5 上面那句话设的「翻一番」还很远，
+planning value 与 `timeout-minutes` 都不动。这条脚本里一条变异体也没加（新的两个都在
+`tile-gpu-diff/run.sh`）。
+
+`tile-gpu-diff/run.sh` **129 s → GPUDIFF_AFTER**（多一个 native 构建、四个 kernel 的真机对拍，
+以及两个新变异体，各四次汇编一次对拍）。它只在本机跑，CI 上仍只有亚秒的 `--check`。
+`dawn test --stdlib` 多了四个参考实现与三个测试，秒级不变。
+
 ### 6.6 两档判词：逐位与容差（刀 7b）
 
 层 2 从第一天就写着「分逐位与容差两档」（§6.2 的表、§3.2 的 matmul 行），但直到刀 7b 容差档
@@ -901,6 +925,25 @@ bf16 的输出缓冲（`ftof` 把 f32 累加器转回 bf16），归刀 11。
 （`identical:tolerance`，miss 0.0），这是**赠品**而不是判词；`batched_matmul` 的语料是十分之几，
 不在二进制格点上，求和的分组因此可见。实测 `close:tolerance`，最大 miss **1.02e-10**
 （判词的 1e-10 倍）。这一对就是「容差档在这里确实在干活」的证据。
+
+**刀 10：逐位档的对照组，以及它凭什么不靠语料。** 上面两条逐位档的条件里，第 2 条
+（「语料使折叠顺序不可见」）一直是一个**关于语料**的条件，这让「容差」看起来像是层 2 的
+能力上限而不是操作的性质。整数族把这件事分开了：i32 的结果只有一个值、没有舍入模式，
+而**整数加法模 2^32 精确地结合且交换**，所以设备选什么折叠树都答同一个数——第 2 条对
+`s_addi` 无条件成立，不需要挑语料。加上 `List[Float]` 通道对 i32 无损（§3.3），
+`count_eq` / `subarray_sum` / `rainbow` / `int_ops` 四个 kernel 在同一条流水线上被钉在
+逐位档，靠的是代数而不是数据。于是「容差」是 `exp` 与 `mmaf` 的属性，不是层 2 的属性。
+
+**刀 10 的两个负控，两个层 0 都看不见**：
+
+| 变异体 | 改哪 | 层 0 | 层 1 | 层 2 |
+|--------|------|------|------|------|
+| `shri-always-logical` | **写入器**把 `shri` 的 `signedness` 写成 unsigned，算术右移全变逻辑右移 | **看不见**：渲染器有自己的拼写表，`.mlir` 照印 `signed`，`--record` 洗不出任何东西 | 收（`signedness<unsigned>` 与 `<signed>` 同样合法，汇编器对一个 kernel 想要哪个没有意见） | 四个 kernel 里做算术右移的**两个**红（`rainbow` / `int_ops`），另外两个不动。**语料是判词的一半**：两种右移在每个非负操作数上答案相同，所以 `int_diff` 的数据铺满整个 i32 值域 |
+| `ftoi-rounds-instead-of-truncates` | 写入器把 `ftoi` 的舍入模式写成 nearest_even，而方言只接受向零 | **看不见**（同上） | 收 | 只有 `int_ops` 红，且只在**奇数** lane 上：`a / 2` 落在两个整数正中间时两种模式才分道扬镳 |
+
+这一对比刀 7b、刀 8 的负控更深一格：那几个至少还会动 `.mlir`，一次 `--record` 能把它们
+洗白（这正是「层 0 的绿没有信息量」）。这两个连 `--record` 都洗不到，因为渲染器与写入器
+各持一张表，文本那张没有被改。能红它们的只有设备。
 
 **`tileirdisasm` round-trip：未做。** 计划里那一格是「若本机能构建或找到
 `cuda-tile-translate`（`--mlir-to-cudatilebc` 的逆向），把 `.tilebc` 反汇编回文本与 `.mlir`

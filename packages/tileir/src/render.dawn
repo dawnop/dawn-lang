@@ -100,6 +100,20 @@ fn identity(id: RedId) -> String = match id {
   IdI(dtype, value) -> "${value} : ${dtype}"
 }
 
+# An integer constant as the TILE holds it, not as the kernel spelled it: a
+# host `Int` is 64 bits wide and an i32 lane is not, so a constant written
+# `0x9E3779B1` (a hash multiplier, and the natural way to write one) holds
+# -1640531527 on the device. The bytes have always said so -- the writer
+# keeps the low 32 bits -- and this is the text saying the same thing. An
+# i1 lane holds one bit, and every constant reaching it is already 0 or 1.
+fn int_literal(elem: String, value: Int) -> Int =
+  if elem == "i32" {
+    let low = value & 0xFFFFFFFF
+    if low >= 0x80000000 { low - 0x100000000 } else { low }
+  } else {
+    value
+  }
+
 # `shri` and `shru` are one opcode under two signedness attributes; the
 # dialect's mnemonic is `shri` for both and the attribute is what says which
 # (Ops.td, ShRIOp). Every other name here is its own mnemonic.
@@ -133,7 +147,7 @@ fn cast_attrs(op: String) -> String = match op {
 fn line(i: Instr) -> String = match i {
   MakeTok(dst) -> "${v(dst)} = make_token : token"
   BlockIds(x, y, z) -> "${v(x)}, ${v(y)}, ${v(z)} = get_tile_block_id : tile<i32>"
-  ConstInt(dst, t, value) -> "${v(dst)} = constant <${elem_of(t)}: ${value}> : ${ty(t)}"
+  ConstInt(dst, t, value) -> "${v(dst)} = constant <${elem_of(t)}: ${int_literal(elem_of(t), value)}> : ${ty(t)}"
   ConstFloat(dst, t, value) -> "${v(dst)} = constant <${elem_of(t)}: ${value}> : ${ty(t)}"
   MulInt(dst, t, lhs, rhs) -> "${v(dst)} = muli ${name(lhs)}, ${name(rhs)} : ${ty(t)}"
   AddInt(dst, t, lhs, rhs) -> "${v(dst)} = addi ${name(lhs)}, ${name(rhs)} : ${ty(t)}"
@@ -427,6 +441,18 @@ test "the transcendentals spell the modifiers they carry and no others" {
   assert str.contains(text, "\n    %20 = floor %13 : tile<8xf64>\n")
   assert str.contains(text, "\n    %21 = ceil %13 : tile<8xf64>\n")
   assert str.contains(text, "\n    %22 = pow %13, %13 : tile<8xf64>\n")
+}
+
+test "an i32 constant prints what the tile holds, not what the kernel spelled" {
+  # 0x9E3779B1 is a hash multiplier, and a host Int holds it as 2654435761;
+  # an i32 lane holds -1640531527, which is what the writer's low 32 bits
+  # have always said. An in-range constant and an i1 one are untouched.
+  assert int_literal("i32", 2654435761) == 0 - 1640531535
+  assert int_literal("i32", 4294967295) == 0 - 1
+  assert int_literal("i32", 0 - 1) == 0 - 1
+  assert int_literal("i32", 1000) == 1000
+  assert int_literal("i32", 2147483647) == 2147483647
+  assert int_literal("i1", 1) == 1
 }
 
 test "index arithmetic spells as scalar i32 constant, addi and muli" {

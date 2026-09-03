@@ -22,8 +22,11 @@
 #             knife 7a (each with an output buffer longer than its answer, so
 #             that what the mask keeps is compared too), red_diff.dawn the
 #             thirteen reduction and transcendental kernels of knife 7b,
-#             mm_diff.dawn the seven two-dimensional kernels of knife 8 and
-#             stride_diff.dawn the nine strided kernels of knife 9,
+#             mm_diff.dawn the seven two-dimensional kernels of knife 8,
+#             stride_diff.dawn the nine strided kernels of knife 9 and
+#             int_diff.dawn the four integer kernels of knife 10 (the first
+#             over i32 buffers, and the first family that is exact tier by
+#             algebra rather than by a chosen corpus),
 #             under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
@@ -100,6 +103,23 @@
 #                      that is wrong along two of its four edges.
 #                      gaussian_blur is the only kernel with a halo, so the
 #                      other eight are the control
+#     shri-always-logical
+#                      the WRITER gives `shri` the unsigned signedness, so
+#                      every arithmetic right shift becomes a logical one ->
+#                      layer 0 cannot see it at all (the renderer has its own
+#                      table and still prints `signed`), the bytes of the two
+#                      kernels that shift right arithmetically move, tileiras
+#                      accepts both (a signedness is a signedness), and on the
+#                      device exactly those two answer differently. The
+#                      corpus is half the claim: the two shifts agree on
+#                      every non-negative operand, so int_diff's data spans
+#                      the whole i32 range
+#     ftoi-rounds-instead-of-truncates
+#                      the writer gives `ftoi` the nearest-even rounding mode
+#                      instead of the toward-zero one the dialect requires
+#                      -> `int_ops` alone moves, and only on its ODD lanes,
+#                      where a half lands between two integers. The other
+#                      three kernels convert nothing and are the control
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -292,6 +312,12 @@ twod=(matmul batched_matmul transpose layer_norm batch_norm group_norm fused_rms
 # split stride-row-major-swapped below is held to.
 strided=(transpose_tail conv1d conv2d max_pool interleave rgb_gray jacobi depthwise_conv1d gaussian_blur)
 
+# The integer kernels of knife 10, in the order int_diff takes them. The
+# first two reduce over one block; the last two are element-wise over eight.
+# Only the last two shift right arithmetically, and only the last converts,
+# which is the split the two mutants below are held to.
+integers=(count_eq subarray_sum rainbow int_ops)
+
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
@@ -304,7 +330,7 @@ assemble_golden() { # kernel, tilebc, cubin
     fail "tileiras wrote no ELF cubin for $1"
 }
 
-for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}"; do
+for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -317,6 +343,8 @@ twod_cubins=()
 for k in "${twod[@]}"; do twod_cubins+=("$work/$k.cubin"); done
 strided_cubins=()
 for k in "${strided[@]}"; do strided_cubins+=("$work/$k.cubin"); done
+int_cubins=()
+for k in "${integers[@]}"; do int_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -431,20 +459,40 @@ case "$strided_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/strided.out" | head -n 1)"
 
+# ---- native, the integer kernels (knife 10)
+build_native "$root/std" "$work/ints.bin" "$here/int_diff.dawn"
+rc=0
+"$work/ints.bin" "${int_cubins[@]}" > "$work/ints.out" 2> "$work/ints.err" || rc=$?
+cat "$work/ints.out"
+int_verdict="$(verdict_of "$work/ints.out")"
+case "$int_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#integers[@]} integer kernels on the GPU are bit-identical to the fake device, i32 buffers and tails included" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $int_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $int_verdict" ;;
+  fail) cat "$work/ints.err" >&2; fail "the device answered and disagreed with the fake device on an integer kernel (see the transcript above)" ;;
+  *) cat "$work/ints.err" >&2; fail "int_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/ints.out" | head -n 1)"
+
 # The tier summary and the fold-order probe go into the ledger note: the
 # probe is a RECORD and not an assertion (docs 6.5), so a tileiras upgrade
 # that changes the device's reduction tree shows up in the ledger rather
 # than in a red run.
 tiers="$(sed -n 's/^tiers //p' "$work/reduced.out" | tail -n 1) 2d:$(sed -n 's/^tiers //p' "$work/twod.out" | tail -n 1)"
 tiers="$tiers strided:$(sed -n 's/^tiers //p' "$work/strided.out" | tail -n 1)"
+tiers="$tiers int:$(sed -n 's/^tiers //p' "$work/ints.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe"
 
 # The ledger records one verdict for the tree: both programs pass, or the
 # first thing that stopped one of them.
 if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
-  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ]; then
+  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ]; then
   verdict=pass
+elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
+  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ]; then
+  verdict="$int_verdict"
 elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
   && [ "$twod_verdict" = pass ]; then
   verdict="$strided_verdict"
@@ -1039,6 +1087,118 @@ else
   echo "SKIP  mutant: halo-one-lane-short not verifiable on this driver: the clean run is $strided_verdict, before any launch reaches the device"
 fi
 
+# 11. shri-always-logical: the WRITER gives `shri` the unsigned signedness,
+#     so every arithmetic right shift in the package becomes a logical one.
+#
+#     This is the first mutant here that layer 0 cannot see AT ALL: the
+#     renderer keeps its own spelling table, so every .mlir still prints
+#     `signed` and a `--record` would take nothing. Layer 1 accepts it --
+#     `signedness<unsigned>` is as legal as `signedness<signed>` and
+#     tileiras has no opinion on which a kernel meant. Only the device
+#     answers, and only where an operand is NEGATIVE: the two shifts agree
+#     on every non-negative value, so int_diff's corpus spanning the whole
+#     i32 range is half of this claim and the mutant would be invisible
+#     without it.
+#
+#     Two of the four kernels shift right arithmetically and go red;
+#     count_eq and subarray_sum shift nothing and are the control, at layer
+#     0 (their bytes do not move) and on the device both.
+mutant_pkg_shr="$work/pkg-shri-always-logical"
+rm -rf "$mutant_pkg_shr"
+cp -r "$root/packages/tileir" "$mutant_pkg_shr"
+before=$(digest "$mutant_pkg_shr/src/bytecode.dawn")
+python3 "$here/mutate.py" "$mutant_pkg_shr/src/bytecode.dawn" shri-always-logical \
+  '  "shri" -> Some(SIGNED)' \
+  '  "shri" -> Some(UNSIGNED)'
+after=$(digest "$mutant_pkg_shr/src/bytecode.dawn")
+echo "      shri-always-logical: packages/tileir/src/bytecode.dawn md5 $before -> $after"
+
+mutant_kernels shri-always-logical "$mutant_pkg_shr" "${integers[@]}"
+# the two kernels with an arithmetic right shift move at layer 0; the two
+# without one cannot, and that is the mutant's own control in the bytes
+shri_red=(rainbow int_ops)
+moved=0
+for k in "${integers[@]}"; do
+  if cmp -s "$golden/$k.tilebc" "$work/shri-always-logical-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+done
+[ "$moved" = "${#shri_red[@]}" ] ||
+  fail "shri-always-logical: expected exactly ${#shri_red[@]} of the ${#integers[@]} kernels' bytecode to move, got $moved"
+echo "      shri-always-logical: ${#shri_red[@]} of ${#integers[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+shri_cubins=()
+for k in "${integers[@]}"; do shri_cubins+=("$work/shri-always-logical-$k.cubin"); done
+rc=0
+"$work/ints.bin" "${shri_cubins[@]}" > "$work/m-shri-logical.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-shri-logical.out")"
+if [ "$int_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-shri-logical.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#shri_red[@]}" ]; then
+    cat "$work/m-shri-logical.out" >&2
+    fail "shri-always-logical mutant stayed green: expected verdict fail (exit 1) with exactly ${#shri_red[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${shri_red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-shri-logical.out" ||
+      { cat "$work/m-shri-logical.out" >&2; fail "shri-always-logical: $k shifts right arithmetically over negative lanes and should differ"; }
+  done
+  for k in count_eq subarray_sum; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-shri-logical.out" ||
+      { cat "$work/m-shri-logical.out" >&2; fail "shri-always-logical: $k shifts nothing and should be untouched"; }
+  done
+  echo "PASS  mutant: shri-always-logical (layer 0 blind, layer 1 accepts; on the device ${shri_red[*]} differ and the other two do not)"
+else
+  [ "$mverdict" = "$int_verdict" ] ||
+    { cat "$work/m-shri-logical.out" >&2; fail "shri-always-logical: the clean run is $int_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: shri-always-logical not verifiable on this driver: the clean run is $int_verdict, before any launch reaches the device"
+fi
+
+# 12. ftoi-rounds-instead-of-truncates: the writer gives `ftoi` the
+#     nearest-even rounding mode where the dialect's only integer rounding
+#     is toward zero. Layer 0 is blind again (the renderer prints
+#     `nearest_int_to_zero` from its own table) and layer 1 accepts it, so
+#     the device is the only place the difference exists -- and only on the
+#     ODD lanes of `int_ops`, where `a / 2` falls halfway between two
+#     integers and the two modes part company. `int_ops` is the only kernel
+#     here that converts anything; the other three are the control.
+mutant_pkg_ftoi="$work/pkg-ftoi-rounds"
+rm -rf "$mutant_pkg_ftoi"
+cp -r "$root/packages/tileir" "$mutant_pkg_ftoi"
+before=$(digest "$mutant_pkg_ftoi/src/bytecode.dawn")
+python3 "$here/mutate.py" "$mutant_pkg_ftoi/src/bytecode.dawn" ftoi-rounds-instead-of-truncates \
+  '  "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]' \
+  '  "ftoi" -> [SIGNED, ROUND_NEAREST_EVEN]'
+after=$(digest "$mutant_pkg_ftoi/src/bytecode.dawn")
+echo "      ftoi-rounds-instead-of-truncates: packages/tileir/src/bytecode.dawn md5 $before -> $after"
+
+mutant_kernels ftoi-rounds "$mutant_pkg_ftoi" "${integers[@]}"
+moved=0
+for k in "${integers[@]}"; do
+  if cmp -s "$golden/$k.tilebc" "$work/ftoi-rounds-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+done
+[ "$moved" = 1 ] ||
+  fail "ftoi-rounds-instead-of-truncates: expected exactly int_ops's bytecode to move, got $moved of ${#integers[@]}"
+echo "      ftoi-rounds-instead-of-truncates: 1 of ${#integers[@]} .tilebc files differs from the goldens and tileiras still accepts it"
+ftoi_cubins=()
+for k in "${integers[@]}"; do ftoi_cubins+=("$work/ftoi-rounds-$k.cubin"); done
+rc=0
+"$work/ints.bin" "${ftoi_cubins[@]}" > "$work/m-ftoi-rounds.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-ftoi-rounds.out")"
+if [ "$int_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-ftoi-rounds.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-ftoi-rounds.out" >&2
+    fail "ftoi-rounds-instead-of-truncates mutant stayed green: expected verdict fail (exit 1) with int_ops alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "int_ops" {bad=1} END {exit bad}' \
+    "$work/m-ftoi-rounds.out" ||
+    { cat "$work/m-ftoi-rounds.out" >&2; fail "ftoi-rounds-instead-of-truncates: a kernel other than int_ops moved"; }
+  echo "PASS  mutant: ftoi-rounds-instead-of-truncates (int_ops alone, and only on the odd lanes; the other three convert nothing)"
+else
+  [ "$mverdict" = "$int_verdict" ] ||
+    { cat "$work/m-ftoi-rounds.out" >&2; fail "ftoi-rounds-instead-of-truncates: the clean run is $int_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: ftoi-rounds-instead-of-truncates not verifiable on this driver: the clean run is $int_verdict, before any launch reaches the device"
+fi
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -1050,7 +1210,7 @@ fi
 dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c \
   scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn \
   scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mm_diff.dawn \
-  scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/mutate.py)"
+  scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/int_diff.dawn scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"

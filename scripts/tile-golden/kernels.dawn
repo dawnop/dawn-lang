@@ -8,13 +8,16 @@
 # which run.sh holds against toolchain.txt).
 use std/io
 use std/io.{with_fs_real, write_bytes}
-use std/gpu.{F64, F32, BF16}
-use tileir/dev.{Dev, Param, Tile, Idx, I32, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
+use std/gpu.{F64, F32, BF16, I32}
+use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
   store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, in_range, axis_mask,
   mmaf, addf, sub, mul, div,
   maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
   d_for, d_for3, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
-  spread, d_reduce, d_reduce_dim, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select }
+  spread, d_reduce, d_reduce_dim, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select,
+  i_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i, shr_u,
+  neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
+  d_reduce_i, s_addi }
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -915,6 +918,172 @@ fn gaussian_blur(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store_strided_masked(out, corner, shape, lay, inside, acc)
 }
 
+# ---- the integer kernels (knife 10) ----
+#
+# Every kernel below is EXACT tier, and not because a corpus was chosen for
+# it: an i32 result has one value, integer addition modulo 2^32 is exactly
+# associative and commutative, so a reduction's unspecified fold tree cannot
+# move the answer, and the `List[Float]` channel carries every i32 without
+# rounding (53 significand bits over a 32-bit range). This family is the
+# control group for the tolerance tiers of knives 7b and 8: on the same
+# pipeline there is a set of kernels held to the bit, so "tolerance" is a
+# property of the operations and not of what layer 2 can measure.
+
+# The one-block shape the two reductions have: 1000 elements in a 1024-wide
+# tile, the last 24 lanes masked off. RED_N / RED_TILE's shape over i32.
+const CNT_N: Int = 1000
+const CNT_TILE: Int = 1024
+
+# The value `count_eq` counts, and the padding a masked-off lane reads,
+# which must not equal it or the tail would be counted.
+const CNT_TARGET: Int = 7
+const CNT_MISS: Int = 8
+
+# The half-open window `subarray_sum` adds up. Neither bound is a multiple
+# of anything: a window that started at 0 or ended at CNT_N would be a
+# kernel whose mask does nothing on one side.
+const SUB_LO: Int = 137
+const SUB_HI: Int = 902
+
+# The eight-block shape the two element-wise integer kernels have: 1000
+# elements in 128-wide tiles, so the last block has 24 lanes past the end.
+const IOP_N: Int = 1000
+const IOP_TILE: Int = 128
+
+# The hash chain's rounds and its three constants. Odd multipliers, so the
+# multiply is invertible modulo 2^32 and the chain does not collapse.
+const RB_ROUNDS: Int = 3
+const RB_K1: Int = 0x9E3779B1
+const RB_K2: Int = 0x7F4A7C15
+const RB_K3: Int = 0x85EBCA77
+
+# The number of elements of the first buffer equal to CNT_TARGET, at element
+# 0 of the second: leetgpu 43 (Count Array Element) and its 2D and 3D shapes
+# (44, 45), which are this same count read with more indices.
+#
+# The comparison mask is widened with `exti`, not turned into 1 and 0 with a
+# `select`: `exti` is UNSIGNED here, and a signed widening of a one-bit 1 is
+# -1, so the count would come out negated. That is the claim the conversion
+# carries and the reason this kernel is the one that makes it.
+fn count_eq(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let i = block_id(0)
+  let blk = tile_at(i, CNT_TILE)
+  let m = tail_mask(blk, [CNT_TILE], CNT_N)
+  let miss = i_const([CNT_TILE], CNT_MISS)
+  let t = load_masked(x, blk, [CNT_TILE], m, miss)
+  let hit = mask_to_int([CNT_TILE], eq_i([CNT_TILE], t, i_const([CNT_TILE], CNT_TARGET)))
+  let n = d_reduce_i([CNT_TILE], hit, 0, (e, acc) => s_addi(e, acc))
+  store(out, tile_at(i, 1), [1], spread(I32, [1], n))
+}
+
+# The wrapping sum of the elements of the first buffer whose index is in
+# `[SUB_LO, SUB_HI)`, at element 0 of the second: leetgpu 47 (Subarray Sum).
+# The window is a mask over the element index (`lanes` + `in_range`), so a
+# lane outside it is neither read nor added.
+#
+# The sum wraps modulo 2^32, exactly as `addi` does, and the corpus is
+# chosen so that it does wrap: a total that stayed inside the range would
+# leave `wrap_i32` untested on both sides.
+fn subarray_sum(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let i = block_id(0)
+  let blk = tile_at(i, CNT_TILE)
+  let c = lanes(blk, [CNT_TILE])
+  let inside = in_range([CNT_TILE], c, SUB_LO, SUB_HI)
+  let zero = i_const([CNT_TILE], 0)
+  let t = load_masked(x, blk, [CNT_TILE], inside, zero)
+  let s = d_reduce_i([CNT_TILE], t, 0, (e, acc) => s_addi(e, acc))
+  store(out, tile_at(i, 1), [1], spread(I32, [1], s))
+}
+
+# One round of the hash chain: multiply, xor with a LOGICAL right shift,
+# add, xor with an ARITHMETIC one, multiply, xor with a logical one. The two
+# kinds of shift are the same opcode under two signedness attributes and
+# differ on every negative value, which is what makes this chain the corpus
+# scripts/tile-gpu-diff's shri-always-logical mutant reddens; a chain of
+# non-negative values would forgive it.
+fn rb_round(h: Tile[I32]) -> Tile[I32] !Dev = {
+  let s = [IOP_TILE]
+  let h1 = mul_i(s, h, i_const(s, RB_K1))
+  let h2 = xor_i(s, h1, shr_u(s, h1, i_const(s, 15)))
+  let h3 = add_i(s, h2, i_const(s, RB_K2))
+  let h4 = xor_i(s, h3, shr_i(s, h3, i_const(s, 13)))
+  let h5 = mul_i(s, h4, i_const(s, RB_K3))
+  xor_i(s, h5, shr_u(s, h5, i_const(s, 16)))
+}
+
+# RB_ROUNDS applications of that round to each seed: leetgpu 24 (Rainbow
+# Table), whose chain is one hash applied over and over. The rounds are
+# unrolled on the host, as every count fixed at recording time is.
+fn rainbow(seeds: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let i = block_id(0)
+  let blk = tile_at(i, IOP_TILE)
+  let m = tail_mask(blk, [IOP_TILE], IOP_N)
+  let zero = i_const([IOP_TILE], 0)
+  var h = load_masked(seeds, blk, [IOP_TILE], m, zero)
+  for _r in range(0, RB_ROUNDS) {
+    h = rb_round(h)
+  }
+  store_masked(out, blk, [IOP_TILE], m, h)
+}
+
+# Every integer operation and every conversion the package can emit, folded
+# into one lane: the integer twin of `elemops` and `mathops`. Nothing here
+# is a leetgpu problem; it is the kernel that gives each opcode a golden and
+# a device.
+#
+# The divisor is `b | 1`, never zero. Two things the device leaves undefined
+# the corpus must avoid, and scripts/tile-gpu-diff's int_diff says so beside
+# its data: no lane of `a` may be -2^31, and the shift counts are host
+# constants inside [0, 32).
+fn int_ops(x: Param[I32], y: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let s = [IOP_TILE]
+  let i = block_id(0)
+  let blk = tile_at(i, IOP_TILE)
+  let m = tail_mask(blk, s, IOP_N)
+  let one = i_const(s, 1)
+  let a = load_masked(x, blk, s, m, one)
+  let b = load_masked(y, blk, s, m, one)
+  let odd = or_i(s, b, one)
+  let d = sub_i(s, a, b)
+  let hi = mulhi_i(s, a, b)
+  let q = div_i(s, a, odd)
+  let r = rem_i(s, a, odd)
+  let mx = max_i(s, a, b)
+  let mn = min_i(s, a, b)
+  let ng = neg_i(s, a)
+  let av = abs_i(s, d)
+  let sh = shl_i(s, a, i_const(s, 3))
+  let ar = shr_i(s, a, i_const(s, 5))
+  let lo = shr_u(s, a, i_const(s, 5))
+  # itof, one EXACT halving in f64, then ftoi: `a / 2` truncated toward
+  # zero. Halving is exact for every i32, so the only inexact step would be
+  # the rounding, and there is none: `ftoi` takes `nearest_int_to_zero` and
+  # the reference's `a / 2` truncates toward zero as well. On an odd `a` the
+  # two disagree with every other rounding mode, which is what
+  # scripts/tile-gpu-diff's ftoi-rounds-instead-of-truncates rests on.
+  let hf = float_to_int(F64, s, mul(F64, s, int_to_float(F64, s, a), f_const(F64, s, 0.5)))
+  # trunci to i1 and exti back: the low bit of `a`
+  let bit = mask_to_int(s, int_to_mask(s, a))
+  # bitcast there and back: the value itself, bit for bit
+  let bc = bits_to_int(s, bits_to_float(s, a))
+  let c0 = add_i(s, d, hi)
+  let c1 = xor_i(s, c0, q)
+  let c2 = add_i(s, c1, r)
+  let c3 = xor_i(s, c2, mx)
+  let c4 = add_i(s, c3, mn)
+  let c5 = xor_i(s, c4, ng)
+  let c6 = add_i(s, c5, av)
+  let c7 = xor_i(s, c6, sh)
+  let c8 = add_i(s, c7, ar)
+  let c9 = xor_i(s, c8, lo)
+  let c10 = add_i(s, c9, and_i(s, a, b))
+  let c11 = xor_i(s, c10, or_i(s, a, b))
+  let c12 = add_i(s, c11, xor_i(s, a, b))
+  let c13 = xor_i(s, c12, hf)
+  let c14 = add_i(s, c13, bit)
+  store_masked(out, blk, s, m, xor_i(s, c14, bc))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -1003,6 +1172,15 @@ fn trace(name: String) -> TileProg = match name {
   "gaussian_blur" ->
     trace_kernel("gaussian_blur", ["f64", "f64", "f64"],
       () => gaussian_blur(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "count_eq" ->
+    trace_kernel("count_eq", ["i32", "i32"], () => count_eq(param(I32, 0), param(I32, 1)))
+  "subarray_sum" ->
+    trace_kernel("subarray_sum", ["i32", "i32"], () => subarray_sum(param(I32, 0), param(I32, 1)))
+  "rainbow" ->
+    trace_kernel("rainbow", ["i32", "i32"], () => rainbow(param(I32, 0), param(I32, 1)))
+  "int_ops" ->
+    trace_kernel("int_ops", ["i32", "i32", "i32"],
+      () => int_ops(param(I32, 0), param(I32, 1), param(I32, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -1027,6 +1205,7 @@ pub fn main() -> Unit !io = match args() {
   _ -> panic("usage: kernels <vadd|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
       ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax"
       ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
-      ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur>"
+      ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
+      ++ "|count_eq|subarray_sum|rainbow|int_ops>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

@@ -174,8 +174,8 @@ pub fn pack_i32(xs: List[Float]) -> Bytes = {
 ## directions, because a binary64 significand covers the whole i32 range.
 pub fn unpack_i32(b: Bytes) -> List[Float] =
   list.map(range(0, bytes.len(b) / 4), i =>
-    to_float(wrap_i32(bytes.at(b, 4 * i) | (bytes.at(b, 4 * i + 1) << 8)
-      | (bytes.at(b, 4 * i + 2) << 16) | (bytes.at(b, 4 * i + 3) << 24))))
+      to_float(wrap_i32(bytes.at(b, 4 * i) | (bytes.at(b, 4 * i + 1) << 8)
+          | (bytes.at(b, 4 * i + 2) << 16) | (bytes.at(b, 4 * i + 3) << 24))))
 
 # ---- tensors ----
 
@@ -996,6 +996,147 @@ pub fn gaussian_blur_ref(h: Int, w: Int, k: Int, dtypes: List[String],
       })
 }
 
+# ---- references for the integer kernels (knife 10) ----
+#
+# Every one of these is EXACT against the device, and not because a corpus
+# was chosen for it: an i32 result has one value, integer addition modulo
+# 2^32 is exactly associative and commutative (so a reduction's unspecified
+# fold tree cannot move the answer), and the `List[Float]` channel carries
+# every i32 without rounding. That is what makes this family the control
+# group for the tolerance tiers of the float kernels
+# (docs/tile-backend-design.md 6.5).
+#
+# The arithmetic below is done in `Int` and wrapped with `wrap_i32` after
+# every step, because a Float cannot hold the intermediate of a 32-bit
+# multiply: the exact product of two i32 values needs 64 bits and a binary64
+# significand has 53. The buffers stay `List[Float]`; only the arithmetic
+# leaves them.
+
+# One buffer element as the i32 it is.
+fn as_i32(xs: List[Float], i: Int) -> Int = wrap_i32(to_int(xs[i]))
+
+# The unsigned 32-bit reading of an i32 value: what a logical shift and
+# `mulhii` operate on.
+fn as_u32(v: Int) -> Int = v & 0xFFFFFFFF
+
+## The number of the first `n` elements of the first buffer that equal
+## `target`, at element 0 of the second: leetgpu 43 (Count Array Element)
+## and its 2D and 3D shapes, 44 and 45, which are the same count over a
+## buffer the caller reads with more indices.
+##
+## The kernel counts by widening the comparison mask with `exti` and folding
+## with `addi`; a widening that sign-extended would count -1 a lane and
+## answer the negated count, which is what makes `exti`'s UNSIGNED
+## signedness a claim and not a detail.
+pub fn count_eq_ref(n: Int, target: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let hits = list.fold(range(0, n), 0, (acc, i) => if as_i32(x, i) == target { acc + 1 } else { acc })
+  one_answer(ins[1], dtypes[1], to_float(wrap_i32(hits)))
+}
+
+## The wrapping sum of the elements of the first buffer whose index is in
+## `[lo, hi)`, at element 0 of the second: leetgpu 47 (Subarray Sum). The
+## sum wraps modulo 2^32, as the device's `addi` does, so a corpus whose
+## total leaves the i32 range is part of the claim rather than a hazard.
+pub fn subarray_sum_ref(lo: Int, hi: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let total = list.fold(range(lo, hi), 0, (acc, i) => wrap_i32(acc + as_i32(x, i)))
+  one_answer(ins[1], dtypes[1], to_float(total))
+}
+
+## One round of the hash chain `rainbow_ref` and the `rainbow` kernel share:
+## multiply, xor with a LOGICAL right shift, add, xor with an ARITHMETIC
+## one, multiply, xor with a logical one. The two kinds of shift differ on
+## every negative value and nowhere else, which is the whole of what
+## scripts/tile-gpu-diff's shri-always-logical mutant moves.
+pub fn rainbow_round(h0: Int, k1: Int, k2: Int, k3: Int) -> Int = {
+  let h1 = wrap_i32(h0 * k1)
+  let h2 = wrap_i32(h1 ^ (as_u32(h1) >>> 15))
+  let h3 = wrap_i32(h2 + k2)
+  let h4 = wrap_i32(h3 ^ (h3 >> 13))
+  let h5 = wrap_i32(h4 * k3)
+  wrap_i32(h5 ^ (as_u32(h5) >>> 16))
+}
+
+## `rounds` applications of `rainbow_round` to each of the first `n`
+## elements of the first buffer, into the second: leetgpu 24 (Rainbow
+## Table), whose chain is a hash applied over and over. The constants are
+## the caller's, fixed when the kernel was recorded.
+pub fn rainbow_ref(n: Int, rounds: Int, k1: Int, k2: Int, k3: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        to_float(list.fold(range(0, rounds), as_i32(x, i), (h, _r) => rainbow_round(h, k1, k2, k3)))
+      } else {
+        kept(old, i)
+      })
+}
+
+## Every integer operation and every conversion the package can emit, folded
+## into one lane: the reference for the `int_ops` coverage kernel, as
+## `elemops` and `mathops` are for the float families. `ins` is `[a, b, old]`.
+##
+## The divisor is `b | 1`, so it is odd and never zero; the corpus still owes
+## the kernel two things the device leaves undefined and this does not:
+## no lane of `a` may be -2^31 (its `divi` by a `b | 1` of -1 would overflow,
+## and so would `absi` and `negi` in a way this reference cannot follow), and
+## the shift counts are host constants inside `[0, 32)`.
+pub fn int_ops_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let xa = ins[0]
+  let xb = ins[1]
+  let old = ins[2]
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        let a = as_i32(xa, i)
+        let b = as_i32(xb, i)
+        let odd = wrap_i32(b | 1)
+        let s = wrap_i32(a - b)
+        # the HIGH 32 bits of the unsigned product: the low 64 bits of the
+        # true product are exactly what an Int holds, so a logical shift
+        # takes the half `mulhii` answers
+        let hi = wrap_i32(as_u32(a) * as_u32(b) >>> 32)
+        let q = wrap_i32(a / odd)
+        let r = wrap_i32(a % odd)
+        let mx = if a > b { a } else { b }
+        let mn = if a < b { a } else { b }
+        let ng = wrap_i32(0 - a)
+        let av = wrap_i32(if s < 0 { 0 - s } else { s })
+        let sh = wrap_i32(a << 3)
+        let ar = wrap_i32(a >> 5)
+        let lo = wrap_i32(as_u32(a) >>> 5)
+        # itof, one exact halving in f64, then ftoi: `a / 2` truncated
+        # toward zero, which is what `Int` division already is
+        let hf = wrap_i32(a / 2)
+        # trunci to i1 and exti back: the low bit
+        let bit = a & 1
+        # bitcast there and back: the value itself
+        let bc = a
+        # the fold is spelled out because the kernel spells it out: the two
+        # must agree operation for operation, and a `list.fold` here would
+        # be a second shape to keep in step
+        let c0 = wrap_i32(s + hi)
+        let c1 = wrap_i32(c0 ^ q)
+        let c2 = wrap_i32(c1 + r)
+        let c3 = wrap_i32(c2 ^ mx)
+        let c4 = wrap_i32(c3 + mn)
+        let c5 = wrap_i32(c4 ^ ng)
+        let c6 = wrap_i32(c5 + av)
+        let c7 = wrap_i32(c6 ^ sh)
+        let c8 = wrap_i32(c7 + ar)
+        let c9 = wrap_i32(c8 ^ lo)
+        let c10 = wrap_i32(c9 + (a & b))
+        let c11 = wrap_i32(c10 ^ (a | b))
+        let c12 = wrap_i32(c11 + (a ^ b))
+        let c13 = wrap_i32(c12 ^ hf)
+        let c14 = wrap_i32(c13 + bit)
+        to_float(wrap_i32(c14 ^ bc))
+      } else {
+        kept(old, i)
+      })
+}
+
 ## The reference implementations the fake device answers `launch` with, by
 ## kernel name. Each entry carries the exact number of buffers the device
 ## kernel takes beside its body: three for `vadd` / `vadd_bf16` (two inputs
@@ -1486,6 +1627,46 @@ test "alloc refuses an empty tensor above the effect, and the fake device refuse
   assert element_bytes("f64") == Some(8)
   assert element_bytes("bf16") == Some(2)
   assert element_bytes("f32") == None
+}
+
+# ---- i32 ----
+
+test "wrap_i32 is the two's complement of the low 32 bits" {
+  assert wrap_i32(0) == 0
+  assert wrap_i32(2147483647) == 2147483647
+  assert wrap_i32(2147483648) == 0 - 2147483648
+  assert wrap_i32(4294967295) == 0 - 1
+  assert wrap_i32(4294967296) == 0
+  assert wrap_i32(5000000000) == 705032704
+  assert wrap_i32(0 - 2147483649) == 2147483647
+  # a 32-bit product wraps to its low half, which is what the device's
+  # `muli` answers
+  assert wrap_i32(65537 * 65537) == 131073
+}
+
+test "round_to i32 truncates toward zero and then wraps" {
+  assert round_to("i32", 2.7) == 2.0
+  assert round_to("i32", 0.0 - 2.7) == 0.0 - 2.0
+  assert round_to("i32", 0.0 - 0.5) == 0.0
+  assert round_to("i32", 2147483647.0) == 2147483647.0
+  assert round_to("i32", 2147483648.0) == 0.0 - 2147483648.0
+  assert round_to("i32", 5000000000.9) == 705032704.0
+  # f64 is untouched, and the two integer formats do not collide
+  assert round_to("f64", 2.7) == 2.7
+}
+
+test "an i32 buffer round-trips every value exactly, low byte first" {
+  assert bytes.to_hex(pack_i32([1.0])) == "01000000"
+  assert bytes.to_hex(pack_i32([0.0 - 1.0])) == "ffffffff"
+  assert bytes.to_hex(pack_i32([0.0 - 2147483648.0])) == "00000080"
+  assert bytes.to_hex(pack_i32([2147483647.0])) == "ffffff7f"
+  assert bytes.len(pack_i32([1.0, 2.0, 3.0])) == 12
+  # the List[Float] channel is LOSSLESS here: 53 significand bits cover the
+  # whole i32 range, so every extreme comes back as itself
+  let xs = [0.0, 1.0, 0.0 - 1.0, 2147483647.0, 0.0 - 2147483648.0, 123456789.0, 0.0 - 987654321.0]
+  assert unpack_i32(pack_i32(xs)) == xs
+  # a value above the range wraps on the way in, exactly as round_to says
+  assert unpack_i32(pack_i32([3000000000.0])) == [0.0 - 1294967296.0]
 }
 
 # ---- bf16 ----

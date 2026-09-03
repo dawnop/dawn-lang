@@ -968,13 +968,6 @@ fn s_binary_int(op: String, a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev 
 ## by a carefully chosen corpus (docs/tile-backend-design.md 6.5).
 pub fn s_addi(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int("addi", a, b)
 
-## The signed larger of two rank-0 i32 tiles: the body of an integer maximum
-## reduction. Associative and commutative exactly, as `s_addi` is.
-pub fn s_maxi(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int("maxi", a, b)
-
-## The signed smaller of two rank-0 i32 tiles.
-pub fn s_mini(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int("mini", a, b)
-
 # The comparison of two index tiles, as a rank-0 mask.
 fn idx_compare(pred: String, a: Idx, b: Idx) -> Scalar[I1] !Dev = {
   let x: Int = a
@@ -1052,8 +1045,8 @@ pub fn d_reduce_dim[D: Dtype](d: D, shape: List[Int], dim: Int, t: Tile[D], iden
 ## sees them.
 ##
 ## Unlike `d_reduce`, this one's answer does not depend on the fold order at
-## all: the operations `s_addi` / `s_maxi` / `s_mini` are exactly
-## associative and commutative over i32, so any tree the device chooses
+## all: integer addition modulo 2^32 is exactly associative and
+## commutative, so any tree the device chooses
 ## gives the same value as a host reference's left fold. A corpus is not
 ## part of this claim.
 pub fn d_reduce_i(shape: List[Int], t: Tile[I32], identity: Int,
@@ -1065,20 +1058,6 @@ pub fn d_reduce_i(shape: List[Int], t: Tile[I32], identity: Int,
   let r: Int = body(e, acc)
   let outs = t_reduce_end([r])
   let out: Scalar[I32] = outs[0]
-  out
-}
-
-## `d_reduce_i` along dimension `dim`, which answers an i32 tile of `shape`
-## with that dimension dropped: the shape a row-wise count has.
-pub fn d_reduce_i_dim(shape: List[Int], dim: Int, t: Tile[I32], identity: Int,
-  body: fn(Scalar[I32], Scalar[I32]) -> Scalar[I32] !Dev) -> Tile[I32] !Dev = {
-  let h: Int = t
-  let args = t_reduce_begin(dim, shape, [IdI("i32", identity)], [h])
-  let e: Scalar[I32] = args[0]
-  let acc: Scalar[I32] = args[1]
-  let r: Int = body(e, acc)
-  let outs = t_reduce_end([r])
-  let out: Tile[I32] = outs[0]
   out
 }
 

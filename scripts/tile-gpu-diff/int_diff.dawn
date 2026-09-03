@@ -1,0 +1,398 @@
+# Layer 2 for the integer kernels (knife 10), the sixth of these programs
+# after vadd_diff, mask_diff, red_diff, mm_diff and stride_diff: one `!Gpu`
+# program runs each of the four kernels scripts/tile-golden pins under
+# `with_gpu_real` against the machine's GPU and under `with_gpu_fake`
+# against hand-written host references, and prints what each device
+# answered.
+#
+#   int_diff <count_eq.cubin> <subarray_sum.cubin> <rainbow.cubin>
+#            <int_ops.cubin>
+#
+# What is new here and nowhere else:
+#
+#   * the buffers are `i32`, not `f64` or `bf16`. They cross to the device
+#     as bytes (std/gpu's `pack_i32` / `unpack_i32`) and the `List[Float]`
+#     channel that carries them is LOSSLESS: a binary64 significand holds 53
+#     bits and the whole i32 range needs 32, so nothing is rounded on the
+#     way in or out and a difference here is the kernel's.
+#   * every kernel is EXACT tier BY ALGEBRA rather than by corpus. The other
+#     five programs earn the exact tier by choosing data on which the
+#     device's fold order and its rounding cannot show; here there is
+#     nothing to choose. An i32 result has one value, and integer addition
+#     modulo 2^32 is exactly associative and commutative, so the reduction's
+#     unspecified tree answers what a left fold does whatever the numbers
+#     are. This is the control group for the tolerance verdicts of knives 7b
+#     and 8: on one pipeline there is a family held to the bit, so
+#     `tolerance` names a property of `exp` and `mmaf` and not a limit of
+#     layer 2.
+#
+# What the corpus has to carry, and why:
+#
+#   * NEGATIVE values, in every buffer. Signedness is an attribute on the
+#     bytes and nothing below layer 2 reads it: `tileiras` assembles a
+#     logical right shift as happily as an arithmetic one. `rainbow`'s chain
+#     xors with an arithmetic shift and `int_ops` takes both kinds of the
+#     same operand, so a corpus of non-negative values would forgive
+#     run.sh's shri-always-logical entirely.
+#   * values whose UNSIGNED reading is above 2^31, which is the same thing
+#     said from the other side: `shr_u` and `mulhii` read their operand
+#     unsigned, and every negative i32 is such a value.
+#   * a subarray whose total LEAVES the i32 range. `subarray_sum`'s window
+#     adds 765 values spread over the whole range, so it wraps many times
+#     over; a corpus whose sum stayed inside would leave `wrap_i32` untested
+#     on both the kernel's side and the reference's.
+#   * ODD values, for `int_ops`. Its `ftoi` truncates `a / 2` toward zero,
+#     and on an even `a` every rounding mode agrees; the odd lanes are what
+#     ftoi-rounds-instead-of-truncates moves.
+#
+# Two lanes the device leaves UNDEFINED and this corpus therefore avoids:
+# no lane of `int_ops`'s first buffer is -2^31 (its `divi` by a divisor of
+# -1 would overflow, and so would `absi` and `negi` in a way no host
+# reference can follow), and the shift counts are host constants inside
+# [0, 32). `clamped` below is what keeps the first of those.
+use std/io
+use std/io.{with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, I32, Tensor, with_gpu_fake, with_gpu_real, alloc, upload, download, free, launch3, sync,
+  handle_of, wrap_i32, count_eq_ref, subarray_sum_ref, rainbow_ref, int_ops_ref }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a value no kernel
+## here computes, so a lane that still has it is a lane nothing wrote. An
+## integer, because the buffers are.
+pub const SENTINEL: Float = 0.0 - 12345.0
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const CNT_N: Int = 1000
+pub const CNT_TILE: Int = 1024
+pub const CNT_TARGET: Int = 7
+
+pub const SUB_LO: Int = 137
+pub const SUB_HI: Int = 902
+
+pub const IOP_N: Int = 1000
+pub const IOP_TILE: Int = 128
+
+pub const RB_ROUNDS: Int = 3
+pub const RB_K1: Int = 0x9E3779B1
+pub const RB_K2: Int = 0x7F4A7C15
+pub const RB_K3: Int = 0x85EBCA77
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+fn release(ts: List[Tensor[I32]]) -> Unit !Gpu = {
+  for t in ts {
+    let _ = free(t)
+  }
+}
+
+fn alloc_all(sizes: List[Int], i: Int, acc: List[Tensor[I32]]) -> Result[List[Tensor[I32]], ForeignError] !Gpu =
+  if i >= len(sizes) {
+    Ok(acc)
+  } else {
+    match alloc(I32, sizes[i]) {
+      Ok(t) -> alloc_all(sizes, i + 1, acc ++ [t])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(ts: List[Tensor[I32]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(ts) {
+    Ok(())
+  } else {
+    match upload(ts[i], data[i]) {
+      Ok(_) -> upload_all(ts, data, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+## One kernel over `data` (the input buffers, then the output buffer's
+## initial contents) on a `gx` by `gy` by `gz` grid, one stage at a time,
+## stopping at the first refusal and saying which stage it was.
+fn stages(kernel: String, gx: Int, gy: Int, gz: Int, data: List[List[Float]]) -> Trace !Gpu = {
+  let sizes = list.map(data, d => len(d))
+  match alloc_all(sizes, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(ts) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(ts, data, 0) {
+        Err(e) -> {
+          release(ts)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match launch3(kernel, gx, gy, gz, list.map(ts, handle_of)) {
+            Err(e) -> {
+              release(ts)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = sync()
+              let r = download(ts[len(ts) - 1])
+              release(ts)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn same_bits(got: Option[List[Float]], want: Option[List[Float]]) -> Bool = match (got, want) {
+  (Some(a), Some(b)) -> len(a) == len(b) && list.all(range(0, len(a)), i => to_string(a[i]) == to_string(b[i]))
+  _ -> false
+}
+
+## The number of lanes the two answers differ in, and the first one, as a
+## line.
+fn misses(got: Option[List[Float]], want: Option[List[Float]]) -> String = match (got, want) {
+  (Some(a), Some(b)) ->
+    if len(a) != len(b) {
+      "lengths ${len(a)} and ${len(b)}"
+    } else {
+      let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+      if len(bad) == 0 {
+        "none"
+      } else {
+        "${len(bad)} of ${len(a)} lanes, first at ${bad[0]}: ${a[bad[0]]} vs ${b[bad[0]]}"
+      }
+    }
+  _ -> "-"
+}
+
+## The verdict for one kernel: `identical:exact` (bit for bit),
+## `differ:result`, or `blocked:<kind>@<stage>` where the driver stopped.
+## There is no tolerance branch: every kernel here is exact tier, and here
+## that is a theorem rather than a measurement.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if same_bits(real.result, fake.result) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+# ---- the corpora ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+# The number of tile blocks it takes to cover `n` lanes `tile` at a time.
+fn blocks(n: Int, tile: Int) -> Int = (n + tile - 1) / tile
+
+# `n` values of the linear congruence `i * a + b` wrapped into the i32
+# range: a spread over the WHOLE range, negatives and all, from a
+# generator a reader can evaluate by hand. `a` is odd in every use below,
+# so the sequence does not settle into a short cycle of small numbers.
+fn i32s(n: Int, a: Int, b: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float(wrap_i32(i * a + b)))
+
+# The same, with -2^31 moved one step: `int_ops` divides by a divisor that
+# can be -1, and -2^31 / -1 is the one integer division the device leaves
+# undefined. Moving the value rather than dropping the lane keeps the
+# buffer's length and the kernel's mask exactly as they were.
+fn clamped(xs: List[Float]) -> List[Float] =
+  list.map(range(0, len(xs)), i => if xs[i] == 0.0 - 2147483648.0 { 0.0 - 2147483647.0 } else { xs[i] })
+
+# A corpus for `count_eq`: the target appears where `i % 13 == 5` and
+# nowhere else, so the answer is a number a reader can count, and every
+# other lane is a wide-range value including negatives.
+fn count_corpus(n: Int) -> List[Float] =
+  list.map(range(0, n), i => if i % 13 == 5 { to_float(CNT_TARGET) } else {
+    let v = wrap_i32(i * 1103515245 + 12345)
+    to_float(if v == CNT_TARGET { CNT_TARGET + 1 } else { v })
+  })
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String = ["count_eq", "subarray_sum", "rainbow", "int_ops"][i]
+
+## The kernels of the tolerance tier: NONE, and here for a stronger reason
+## than in the other programs (see the header).
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier` column
+## of scripts/leetgpu-diff/problems.txt against it.
+pub fn tolerance_tier() -> List[String] = []
+
+## The grid each kernel was recorded for, as (gx, gy, gz). The two
+## reductions cover their whole vector in one block, as every reduction in
+## this backend does.
+fn case_grid(i: Int) -> (Int, Int, Int) = {
+  let name = case_name(i)
+  if name == "count_eq" {
+    (1, 1, 1)
+  } else if name == "subarray_sum" {
+    (1, 1, 1)
+  } else {
+    (blocks(IOP_N, IOP_TILE), 1, 1)
+  }
+}
+
+## The buffers each is handed: its inputs, then the output buffer's initial
+## contents. Every output buffer is LONGER than the answer, so the sentinel
+## in its tail says whether a mask wrote where it should not have.
+fn case_data(i: Int) -> List[List[Float]] = {
+  let name = case_name(i)
+  if name == "count_eq" {
+    [count_corpus(CNT_N), sentinel_buffer(8)]
+  } else if name == "subarray_sum" {
+    [i32s(CNT_N, 7654321, 0 - 1234567), sentinel_buffer(8)]
+  } else if name == "rainbow" {
+    [i32s(IOP_N, 1103515245, 12345), sentinel_buffer(1024)]
+  } else {
+    [clamped(i32s(IOP_N, 1103515245, 12345)), i32s(IOP_N, 22695477, 1), sentinel_buffer(1024)]
+  }
+}
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] = {
+  let name = case_name(i)
+  if name == "count_eq" {
+    map.from([("count_eq", (2, (dts, ins) => count_eq_ref(CNT_N, CNT_TARGET, dts, ins)))])
+  } else if name == "subarray_sum" {
+    map.from([("subarray_sum", (2, (dts, ins) => subarray_sum_ref(SUB_LO, SUB_HI, dts, ins)))])
+  } else if name == "rainbow" {
+    map.from([("rainbow", (2, (dts, ins) => rainbow_ref(IOP_N, RB_ROUNDS, RB_K1, RB_K2, RB_K3, dts, ins)))])
+  } else {
+    map.from([("int_ops", (3, (dts, ins) => int_ops_ref(IOP_N, dts, ins)))])
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones. The
+## tail is where an unmasked write shows.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("int_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+## How many lanes of the corpus are negative and how many are odd: the two
+## properties the mutants below need it to have, printed rather than
+## asserted, so a corpus that quietly lost one is visible in the transcript.
+fn corpus_shape(v: List[Float]) -> String = {
+  let neg = len(list.filter(range(0, len(v)), i => v[i] < 0.0))
+  let odd = len(list.filter(range(0, len(v)), i => wrap_i32(to_int(v[i])) % 2 != 0))
+  "negative=${neg}/${len(v)} odd=${odd}/${len(v)}"
+}
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  let count = 4
+  if len(argv) != count {
+    io.eprintln("usage: int_diff <count_eq.cubin> <subarray_sum.cubin> <rainbow.cubin> <int_ops.cubin>")
+    io.exit(2)
+  }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let data = case_data(i)
+    let (gx, gy, gz) = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, data))
+    let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, data))
+    let v = verdict(fake, real)
+    io.println("kernel ${name} tier=exact buffers=${len(data)} out_lanes=${len(data[len(data) - 1])}"
+        ++ " grid=(${gx}, ${gy}, ${gz})")
+    io.println("  input ${corpus_shape(data[0])}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  miss  ${misses(real.result, fake.result)}")
+    if real.note != "" { io.println("  note  ${real.note}") }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+}
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
