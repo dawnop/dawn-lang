@@ -4,6 +4,7 @@
 #
 #   ./scripts/spike-native/run.sh                  # every corpus file
 #   ./scripts/spike-native/run.sh prog.dawn ...    # just these
+#   ./scripts/spike-native/run.sh --shard 1/4      # one round-robin slice
 #   SPIKE_JOBS=1 ./scripts/spike-native/run.sh     # one at a time
 #
 # There is no `--record`, on purpose, and the reason is the paragraph below
@@ -19,6 +20,26 @@
 # fails still fails the run by name. See the driver at the bottom for how the
 # per-entry statuses are collected, and why a worker that is *killed* counts as
 # a failure rather than as nothing.
+#
+# The same independence is what lets the corpus be dealt across CI jobs.
+# `--shard I/N` runs every Nth entry of scripts/spike-native/matrix.txt, which
+# lists the corpus in run order; the driver holds that file and the corpus on
+# disk equal in both directions before it runs anything, so a new .dawn file
+# nobody recorded and a recorded line with no file behind it are both red at
+# startup rather than quietly out of the rotation. Sharding was not a
+# preference: the job was 1119s against a 660s run pole on 2026-09-03, and the
+# cost is the corpus growing (87 entries in August, 122 now) times a std every
+# program pays for, not any one entry.
+#
+# What sharding cannot reach is a verdict. Every check an entry has is made
+# inside the one shard that runs it, and known-red.txt is read per check by
+# name, so a shard's ratchet is the same ratchet -- except for the one clause
+# that is about the whole list rather than an entry: a *listed* check that
+# starts passing is fatal, and a shard only sees its own quarter of the list,
+# so an entry that got fixed is reported by whichever shard owns it. The new
+# way to be wrong is a slice nobody ran, which a shard cannot notice about
+# itself: each records what it ran (scripts/mutant-coverage/shard.sh) and
+# scripts/mutant-coverage/check.py holds the union to matrix.txt.
 #
 # This is the first of the three acceptance gates in
 # docs/native-backend-plan.md 5.
@@ -352,21 +373,66 @@ if [ "${SPIKE_WORKER:-}" = 1 ]; then
 fi
 
 # -------------------------------------------------------------- driver
+# shellcheck source=scripts/mutant-coverage/shard.sh
+source "$root/scripts/mutant-coverage/shard.sh"
+shard_parse "$@"
+if [ "${#shard_rest[@]}" -gt 0 ]; then set -- "${shard_rest[@]}"; else set --; fi
+
+# The corpus on disk, in run order. A corpus entry is a single file, or a
+# project directory when it needs a dependency -- `dawn run` and `__emitc`
+# both take either, and a project is the only way to drive a real package
+# (see json_lib).
+corpus=("$here"/*.dawn)
+# written as an `if` rather than `[ -f ] && corpus+=`: under `set -e` a
+# failing test as the body's last command takes the script with it
+for d in "$here"/*/; do
+  if [ -f "$d/dawn.toml" ]; then corpus+=("${d%/}"); fi
+done
+corpus_names=()
+for prog in "${corpus[@]}"; do corpus_names+=("$(basename "$prog" .dawn)"); done
+
+# matrix.txt is the persistent record scripts/mutant-coverage/check.py reads,
+# and it can only mean anything if it is the same list this script iterates.
+# Held equal in both directions, and before any work: a .dawn file added
+# without a line here would be out of the shard rotation and nothing would
+# print differently, while a line here with no file behind it would make the
+# coverage union unsatisfiable in every future run. Both are startup failures
+# instead. This runs on a targeted invocation too -- the disagreement is about
+# the tree, not about which entries this particular run picked.
+matrix_recorded="$(grep -v '^[[:space:]]*#' "$here/matrix.txt" | grep -v '^[[:space:]]*$' || true)"
+matrix_executable="$(printf '%s\n' "${corpus_names[@]}")"
+if [ "$matrix_recorded" != "$matrix_executable" ]; then
+  diff -u --label matrix.txt <(printf '%s\n' "$matrix_recorded") \
+    --label "corpus on disk" <(printf '%s\n' "$matrix_executable") >&2 || true
+  echo "matrix.txt and the corpus on disk disagree" >&2
+  exit 1
+fi
+
 full_corpus=0
 if [ "$#" -gt 0 ]; then
+  # A targeted run is not a slice of the matrix and must not be filed as one:
+  # its coverage record would claim a shard's worth of work from an arbitrary
+  # list. Same reason tile-golden's --only clears it.
+  if [ "$shard_total" != 1 ]; then
+    echo "FAIL  --shard runs the whole corpus in slices; it cannot be combined with an entry list" >&2
+    exit 2
+  fi
+  MUTANT_COVERAGE_DIR=
   progs=("$@")
 else
   full_corpus=1
-  # A corpus entry is a single file, or a project directory when it needs a
-  # dependency -- `dawn run` and `__emitc` both take either, and a project is
-  # the only way to drive a real package (see json_lib).
-  progs=("$here"/*.dawn)
-  # written as an `if` rather than `[ -f ] && progs+=`: under `set -e` a
-  # failing test as the body's last command takes the script with it
-  for d in "$here"/*/; do
-    if [ -f "$d/dawn.toml" ]; then progs+=("${d%/}"); fi
+  progs=()
+  position=0
+  for prog in "${corpus[@]}"; do
+    if ! shard_skips "$position"; then progs+=("$prog"); fi
+    position=$((position + 1))
   done
 fi
+
+shard_begin spike-native
+for prog in "${progs[@]}"; do
+  if [ "$full_corpus" -eq 1 ]; then shard_record "$(basename "$prog" .dawn)"; fi
+done
 
 work="$(mktemp -d)"
 mkdir -p "$work/logs"
@@ -419,7 +485,11 @@ if [ -z "$jobs" ]; then
   # false test would be the block's status, and `set -e` would take the script
   if [ "$jobs" -gt 4 ]; then jobs=4; fi
 fi
-echo "corpus: ${#progs[@]} entries, $jobs at a time"
+if [ "$shard_total" -gt 1 ]; then
+  echo "corpus: ${#progs[@]} entries, $jobs at a time (shard $shard_index/$shard_total of ${#corpus[@]})"
+else
+  echo "corpus: ${#progs[@]} entries, $jobs at a time"
+fi
 
 # Order is restored below, so this only has to finish; it does not have to
 # finish in sequence. xargs' own status is a second net under the per-entry
@@ -451,11 +521,22 @@ if [ "$xargs_rc" -ne 0 ] && [ "$fail" -eq 0 ]; then
   fail=1
 fi
 
+if [ "$full_corpus" -eq 1 ]; then shard_report "${#corpus[@]}"; fi
+
 # The corpus holds the written positive delete outcomes in io_files. A full CI
 # run also rebuilds both historical runtime regressions and requires their
 # behavior to go red; targeted corpus runs stay targeted rather than paying for
 # another selfhost build.
-if [ "$full_corpus" -eq 1 ] && [ "$fail" -eq 0 ]; then
+#
+# Sharded, it belongs to shard 1 and to no other: it is one selfhost rebuild
+# and it is not divisible, so running it in each shard would pay for it N
+# times, and running it nowhere would drop a gate. It stays inside this script
+# rather than becoming a step of shard 1's job so that `run.sh --shard 1/4` is
+# the same thing CI runs. The `fail` clause now reads shard 1's own slice
+# rather than the whole corpus, which is the one behavioural difference
+# sharding makes here: the contract is independent of the corpus, so what it
+# was ever waiting for was a run worth reading the output of.
+if [ "$full_corpus" -eq 1 ] && [ "$shard_index" -eq 1 ] && [ "$fail" -eq 0 ]; then
   echo
   if ! "$root/scripts/delete-contract/run.sh"; then fail=1; fi
 fi
