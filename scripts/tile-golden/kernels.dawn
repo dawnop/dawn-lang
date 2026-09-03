@@ -1320,8 +1320,10 @@ fn matmul_i8(a: Param[I8], b: Param[I8], c: Param[I32]) -> Unit !Dev = {
 
 # The embedding table: EMB_ROWS rows of EMB_DIM, TOK_TILE tokens a block.
 # EMB_ROWS is a power of two so the address clamp is one `andi`. TOK_N is
-# not a multiple of TOK_TILE, so the last block covers lanes past the last
-# token, and the corpus puts out-of-range ids there as well as inside.
+# the token count the grid was sized for and the KERNEL never reads it: 100
+# tokens is 13 blocks of 8, so the last block covers four lanes past the
+# last token, and the corpus fills those with ids outside the table (it
+# carries out-of-range ids inside the hundred as well).
 const EMB_ROWS: Int = 64
 const EMB_DIM: Int = 16
 const TOK_TILE: Int = 8
@@ -1352,7 +1354,7 @@ fn token_embed(ids: Param[I32], table: Param[F64], out: Param[F64]) -> Unit !Dev
     gather_masked(table, off, s, ok, f_const(F64, s, EMB_MISS)))
 }
 
-# The rank sort's shape: one block, SORT_N values, an SORT_N by SORT_N
+# The rank sort's shape: one block, SORT_N values, a SORT_N by SORT_N
 # comparison tile. O(n^2) comparisons is the sort a tile machine with no
 # shuffle can write in one launch, and it is exact: nothing is added but
 # ones and zeroes.
