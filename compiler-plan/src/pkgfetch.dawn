@@ -19,6 +19,8 @@ use inflate/crc32
 use inflate/gzip
 use inflate/zip
 use procmem
+use envmem
+use envmem.{AskedCwd, AskedGet}
 
 ## The content-addressed cache root: $DAWN_PKG_CACHE, then ~/.dawn/pkg. An
 ## environment variable and nothing else — the tests set it too, and there is
@@ -803,6 +805,18 @@ fn temp_root(prefix: String) -> String !Fs =
     Err(e) -> panic("temp dir: " ++ e.message)
   }
 
+## Run a fetch with no host environment behind it.
+##
+## Every `dest` these tests unpack into is an absolute temp directory, so
+## `entry_path` asks for the working directory and then resolves a path the
+## answer cannot move. Naming a directory no host has says that: with the
+## real handler the tests read the machine's cwd for a value none of them
+## depend on.
+fn no_host[T](body: fn() -> T !Env !Fs !Proc !io) -> T !Fs !Proc !io = {
+  let (out, _) = envmem.with_env_table(envmem.TABLE_CWD, [], body)
+  out
+}
+
 test "origin records round-trip and accumulate urls" {
   io.with_fs_real(() => {
     let h = "d1:" ++ str.repeat("a", 64)
@@ -937,7 +951,7 @@ test "a fetched archive unpacks, hashes and lands in the cache under its name" {
     with r <- bracket(root, delete_tree)
     let (got, log) = procmem.with_proc_table(
       [procmem.wrote(fixture_targz())],
-      () => io.with_env_real(() => fetch_and_hash_in(r, url)))
+      () => no_host(() => fetch_and_hash_in(r, url)))
     # one download, and the chain from its bytes: gunzip, ustar walk, the
     # single top directory stripped, d1 over the tree
     assert len(log) == 1
@@ -973,7 +987,7 @@ test "a declared hash the fetched bytes do not produce is refused, naming both" 
     with r <- bracket(root, delete_tree)
     let (got, log) = procmem.with_proc_table(
       [procmem.wrote(fixture_targz())],
-      () => io.with_env_real(() => ensure_cached_in(r, url, declared)))
+      () => no_host(() => ensure_cached_in(r, url, declared)))
     assert len(log) == 1
     assert got == Err(
       "hash mismatch for " ++ url ++
@@ -994,7 +1008,7 @@ test "a warm entry that changed on disk is refused before the url is consulted" 
     let entry = r ++ "/d1-" ++ str.strip_prefix(FIXTURE_HASH, "d1:").unwrap_or("")
     mkdirs(entry)
     let _ = io.write_file(entry ++ "/dawn.toml", "not what was fetched\n")
-    let (got, log) = procmem.with_proc_table([], () => io.with_env_real(() => ensure_cached_in(r, url, FIXTURE_HASH)))
+    let (got, log) = procmem.with_proc_table([], () => no_host(() => ensure_cached_in(r, url, FIXTURE_HASH)))
     # the empty script is the assertion: a re-fetch would have panicked
     assert len(log) == 0
     let actual = match tree_hash(entry) {
@@ -1020,7 +1034,7 @@ test "the single top directory a tag archive wraps is stripped before hashing" {
     with r <- bracket(root, delete_tree)
     let (got, _) = procmem.with_proc_table(
       [procmem.wrote(bare)],
-      () => io.with_env_real(() => fetch_and_hash_in(r, "https://example.invalid/bare.tar.gz")))
+      () => no_host(() => fetch_and_hash_in(r, "https://example.invalid/bare.tar.gz")))
     # different archives, one tree, one cache entry: the wrapper directory is
     # not part of what is hashed
     assert got == Ok((r ++ "/d1-" ++ str.strip_prefix(FIXTURE_HASH, "d1:").unwrap_or(""), FIXTURE_HASH))
@@ -1032,11 +1046,54 @@ test "a fetched tar entry that escapes the extraction root is refused" {
   io.with_fs_real(() => {
     let root = temp_root("dawn-escape-")
     with r <- bracket(root, delete_tree)
-    let (got, log) = procmem.with_proc_table(
+    let ((got, envlog), log) = procmem.with_proc_table(
       [procmem.wrote(escaping)],
-      () => io.with_env_real(() => fetch_and_hash_in(r, "https://example.invalid/evil.tar.gz")))
+      () => envmem.with_env_table(envmem.TABLE_CWD, [],
+        () => fetch_and_hash_in(r, "https://example.invalid/evil.tar.gz")))
     assert len(log) == 1
     assert got == Err("archive entry escapes the extraction root: ../escape.txt")
     assert not io.exists(r ++ "/escape.txt")
+    # the guard is lexical: `entry_path` asks for the working directory twice,
+    # once per side of the comparison, and refuses this name whatever the
+    # answer is -- here it is a directory no host could have named
+    assert envlog == [AskedCwd, AskedCwd]
   })
+}
+
+test "the cache root is DAWN_PKG_CACHE when that variable is set" {
+  let (root, log) = envmem.with_env_table(
+    envmem.TABLE_CWD,
+    [("DAWN_PKG_CACHE", "/virt/pkgcache"), ("HOME", "/virt/home")],
+    () => cache_root()
+  )
+  assert root == "/virt/pkgcache"
+  # the value is taken as it stands: no `.dawn/pkg` is appended to a root
+  # somebody named on purpose
+  assert not str.ends_with(root, "/.dawn/pkg")
+  # and HOME is not consulted at all once the override answers
+  assert envmem.asked_names(log) == ["DAWN_PKG_CACHE"]
+}
+
+test "the cache root falls back to a directory under HOME" {
+  let (root, log) = envmem.with_env_table(
+    envmem.TABLE_CWD,
+    [("HOME", "/virt/home")],
+    () => cache_root()
+  )
+  assert root == "/virt/home/.dawn/pkg"
+  # both variables were asked for, in that order: HOME is the fallback and
+  # not the first choice
+  assert envmem.asked_names(log) == ["DAWN_PKG_CACHE", "HOME"]
+  assert log == [AskedGet("DAWN_PKG_CACHE"), AskedGet("HOME")]
+}
+
+test "the cache root with neither variable set is relative to where the build runs" {
+  let (root, log) = envmem.with_env_table(envmem.TABLE_CWD, [], () => cache_root())
+  assert root == ".dawn-pkg"
+  # relative on purpose, and the one branch that is: a machine with no HOME
+  # gets a cache beside the build rather than at the root of the filesystem
+  assert not str.starts_with(root, "/")
+  assert envmem.asked_names(log) == ["DAWN_PKG_CACHE", "HOME"]
+  # nothing here asks where it is: the answer is a name, not a resolved path
+  assert not list.contains(log, AskedCwd)
 }
