@@ -1266,6 +1266,109 @@ pub fn int_ops_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List
       })
 }
 
+# ---- references for the wide kernels (knife 11) ----
+#
+# Four of these answer `List[(Int, List[Float])]` directly rather than
+# through `last_out`, because what they have to say is exactly which
+# buffers moved: `sum_diff` fills two, and `reverse` and `invert` rewrite
+# the buffer they read. The other two are ordinary single-output
+# references and go through the adapter with the rest.
+#
+# The two GEMMs of this knife have no reference of their own: `matmul_ref`
+# and `batched_matmul_ref` are triple loops over `ins[0]` and `ins[1]` that
+# round to the output buffer's format, and that is as true of an f16 or an
+# i8 product as of an f64 one. What changes with the format is the CORPUS
+# a bit-exact comparison is possible on, and that lives in
+# scripts/tile-gpu-diff/wide_diff.dawn beside the data.
+
+## Element-wise sum into the third buffer AND element-wise difference into
+## the fourth, over the first `n` lanes: the multi-output shape, and the
+## reference that a device writing only its last argument cannot satisfy.
+## `ins` is `[a, b, old sum, old diff]`; each output keeps its own tail past
+## `n`, as every masked reference does.
+pub fn sum_diff_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[(Int, List[Float])] = {
+  let a = ins[0]
+  let b = ins[1]
+  let old_sum = ins[2]
+  let old_diff = ins[3]
+  [(2, list.map(range(0, len(old_sum)), i =>
+      if i < n { round_to(dtypes[2], a[i] + b[i]) } else { kept(old_sum, i) })),
+    (3, list.map(range(0, len(old_diff)), i =>
+        if i < n { round_to(dtypes[3], a[i] - b[i]) } else { kept(old_diff, i) }))]
+}
+
+## The first `n` elements of the ONE buffer, reversed IN PLACE: leetgpu 19
+## (Reverse Array). `ins` is `[x]` and the answer rewrites position 0, which
+## is the position it read.
+##
+## `n` must be EVEN and is, in every recording: the kernel pairs lane `i`
+## with lane `n - 1 - i` and covers the first `n / 2` of them, so an odd `n`
+## would leave the middle element to a block that does not exist. Anything
+## past `n` is the buffer's own tail, kept, as under a mask.
+pub fn reverse_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[(Int, List[Float])] = {
+  let x = ins[0]
+  [(0, list.map(range(0, len(x)), i => if i < n { round_to(dtypes[0], x[n - 1 - i]) } else { kept(x, i) }))]
+}
+
+## `255 - x` over the first `n` elements of the ONE buffer, IN PLACE:
+## leetgpu 7 (Color Inversion) over a u8 image. `ins` is `[img]` and the
+## answer rewrites position 0.
+##
+## The subtraction is written on the values a `u8` buffer holds, which are
+## in [0, 255], so the answer is in [0, 255] and `round_to` has nothing to
+## wrap. That is the whole reason the host format is `U8` and not `I8`: on
+## an i8 buffer the same bytes read as [-128, 127] and `255 - x` would be a
+## different number in both places at once.
+pub fn invert_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[(Int, List[Float])] = {
+  let img = ins[0]
+  [(0, list.map(range(0, len(img)), i =>
+      if i < n { round_to(dtypes[0], 255.0 - img[i]) } else { kept(img, i) }))]
+}
+
+## `((a + b) * a) - b` over the first `n` lanes, ROUNDED AFTER EACH STEP to
+## the output buffer's format: the f16 twin of `int_ops`, and the kernel
+## that holds `addf`, `mulf` and `subf` at that width to the bit.
+##
+## The three roundings are not decoration. The device's tile is f16 and
+## every operation lands its result there, so a reference that computed the
+## whole expression in Float and rounded once would answer a different
+## number wherever an intermediate falls off the f16 grid. Each step here
+## is `narrow.round_fp16` of an exactly computed operation, which by the
+## double-rounding theorem is what the device's `addf` / `mulf` / `subf`
+## with `rounding<nearest_even>` answer, bit for bit (the theorem covers
+## + - * / and sqrt, and none of those three is outside it).
+pub fn f16_ops_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        let s = round_to(dt, a[i] + b[i])
+        let p = round_to(dt, s * a[i])
+        round_to(dt, p - b[i])
+      } else {
+        kept(old, i)
+      })
+}
+
+## The dot product of the first `n` lanes of two f16 buffers, accumulated at
+## the OUTPUT buffer's width: leetgpu 58 (FP16 Dot Product). `ins` is
+## `[a, b, old out]` and the answer is element 0 of the output, the rest of
+## it kept.
+##
+## The kernel widens each operand with `ftof` before multiplying, so the
+## products and the sum are the output format's and not f16's. The fold
+## here is left to right and the device's is unspecified; the corpus is
+## what makes the two agree (see wide_diff).
+pub fn dot_f16_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  one_answer(old, dt, list.fold(range(0, n), 0.0, (acc, i) => round_to(dt, acc + a[i] * b[i])))
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
@@ -2086,6 +2189,131 @@ test "the real handler refuses, above the device, what it can answer without one
 # the fake device is handed the same shape the real one is (an output buffer
 # longer than the answer), so what a masked kernel leaves untouched is part
 # of what the reference has to answer.
+# ---- the wide formats and the wide references (knife 11) ----
+
+test "an f16 buffer holds the nearest binary16 of what was uploaded, low byte first" {
+  # 1 + 3/4096 is off the grid; its nearest binary16 is 1 + 1/1024, and the
+  # two pack alike. A truncating pack would give 1.0's bytes instead, which
+  # is the whole of f16-rounds-like-bf16's first half.
+  assert pack_f16([1.0 + 3.0 / 4096.0]) == pack_f16([1.0 + 1.0 / 1024.0])
+  assert bytes.to_hex(pack_f16([1.0 + 3.0 / 4096.0])) == "013c"
+  assert bytes.to_hex(pack_f16([1.0, -1.5, 0.0])) == "003c00be0000"
+  let inf = 1.0 / 0.0
+  let xs = [0.1, -2.0, 1.0e-8, 70000.0, 0.0 * (0.0 - 1.0), inf, 65504.0]
+  let back = unpack_f16(pack_f16(xs))
+  assert to_string(back) == to_string(list.map(xs, x => narrow.round_fp16(x)))
+  assert 1.0 / back[4] == 0.0 - inf
+  assert back[3] == inf
+  assert bytes.len(pack_f16(xs)) == 14
+  assert unpack_f16(bytes.utf8("")) == []
+  # and it is NOT bf16's: the two formats disagree on every value whose
+  # significand needs more than eight bits
+  assert pack_f16([1.0]) != pack_bf16([1.0])
+}
+
+test "an i8 and a u8 buffer hold the same octet and read it two ways" {
+  assert bytes.to_hex(pack_u8([0.0, 1.0, 127.0, 128.0, 200.0, 255.0])) == "00017f80c8ff"
+  assert bytes.to_hex(pack_i8([0.0, 1.0, 127.0, -128.0, -56.0, -1.0])) == "00017f80c8ff"
+  # the same six bytes, the two readings
+  assert unpack_u8(pack_u8([0.0, 1.0, 127.0, 128.0, 200.0, 255.0])) == [0.0, 1.0, 127.0, 128.0, 200.0, 255.0]
+  assert unpack_i8(pack_u8([0.0, 1.0, 127.0, 128.0, 200.0, 255.0])) == [0.0, 1.0, 127.0, -128.0, -56.0, -1.0]
+  # both wrap what does not fit, the way round_to says
+  assert unpack_u8(pack_u8([300.0])) == [44.0]
+  assert unpack_i8(pack_i8([300.0])) == [44.0]
+  assert round_to("u8", 300.0) == 44.0
+  assert round_to("i8", 200.0) == 0.0 - 56.0
+  assert round_to("u8", 0.0 - 56.0) == 200.0
+  assert wrap_i8(200) == 0 - 56
+  assert wrap_u8(0 - 56) == 200
+  assert bytes.len(pack_i8([1.0, 2.0, 3.0])) == 3
+}
+
+test "pack_to and unpack_from are the round trip of every format the handlers move but f64" {
+  let xs = [0.0, 1.0, 2.0, 3.0]
+  for dt in ["bf16", "f16", "i32", "i8", "u8"] {
+    assert unpack_from(dt, pack_to(dt, xs)) == xs
+    assert bytes.len(pack_to(dt, xs)) == 4 * unwrap_or(element_bytes(dt), 0)
+  }
+}
+
+# A kernel that fills two buffers and one that rewrites the buffer it read,
+# on the fake device, with a third buffer nobody touches as the control.
+fn wide_kernels() -> Map[String, (Int, WideRefFn)] =
+  map.from([
+    ("sum_diff", (4, (dts, ins) => sum_diff_ref(3, dts, ins))),
+    ("reverse", (1, (dts, ins) => reverse_ref(4, dts, ins))),
+    ("invert", (1, (dts, ins) => invert_ref(3, dts, ins))),
+    ("off_the_end", (1, (_dts, _ins) => [(1, [0.0])]))
+  ])
+
+fn wide_run(kernel: String, dtype: String, bufs: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu = {
+  var hs: List[Int] = []
+  for b in bufs {
+    let h = gpu_alloc(dtype, len(b))?
+    gpu_upload(h, b)?
+    hs = hs ++ [h]
+  }
+  gpu_launch(kernel, 1, 1, 1, hs)?
+  var out: List[List[Float]] = []
+  for h in hs {
+    out = out ++ [gpu_download(h)?]
+  }
+  Ok(out)
+}
+
+test "a reference naming two buffers writes both, and one naming the buffer it read rewrites it in place" {
+  # sum_diff: two inputs, two outputs, three lanes each and a fourth lane
+  # of sentinel that the mask keeps in BOTH outputs
+  let got = with_gpu_fake(wide_kernels(), () => wide_run("sum_diff", "f64",
+    [[1.0, 2.0, 3.0, 9.0], [10.0, 20.0, 30.0, 9.0],
+      [0.0 - 7.0, 0.0 - 7.0, 0.0 - 7.0, 0.0 - 7.0], [0.0 - 7.0, 0.0 - 7.0, 0.0 - 7.0, 0.0 - 7.0]]))
+  assert got == Ok([[1.0, 2.0, 3.0, 9.0], [10.0, 20.0, 30.0, 9.0],
+    [11.0, 22.0, 33.0, 0.0 - 7.0], [0.0 - 9.0, 0.0 - 18.0, 0.0 - 27.0, 0.0 - 7.0]])
+  # in place over f64: the one buffer is both the input and the output
+  assert with_gpu_fake(wide_kernels(), () => wide_run("reverse", "f64", [[1.0, 2.0, 3.0, 4.0, 5.0]]))
+    == Ok([[4.0, 3.0, 2.0, 1.0, 5.0]])
+  # in place over u8: 255 - x, and the fourth lane is the tail the mask keeps
+  assert with_gpu_fake(wide_kernels(), () => wide_run("invert", "u8", [[0.0, 1.0, 200.0, 42.0]]))
+    == Ok([[255.0, 254.0, 55.0, 42.0]])
+}
+
+test "a write-back to an argument the launch does not have is refused, and nothing is written" {
+  let r = with_gpu_fake(wide_kernels(), () => wide_run("off_the_end", "f64", [[1.0, 2.0]]))
+  match r {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.kind == "gpu.bad_write_back"
+    }
+  }
+}
+
+fn f16_vadds(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+  let n = len(xs)
+  let a = alloc(F16, n)?
+  let b = alloc(F16, n)?
+  let out = alloc(F16, n)?
+  upload(a, xs)?
+  upload(b, ys)?
+  launch("vadd", 1, [handle_of(a), handle_of(b), handle_of(out)])?
+  download(out)
+}
+
+test "f16 vadd on the fake device is narrow's add, bit for bit, over a spread of binary16 patterns" {
+  # The bf16 claim at binary16's width, on one lane per 37th pattern (1772
+  # of the 65536, subnormals, normals and the boundaries alike) paired with
+  # a value off the grid. `narrow.add` is the correctly rounded binary16
+  # sum by the double-rounding theorem; the fake device's `round_to` is the
+  # same function, and the device's `addf` is what layer 2 holds to it.
+  let pats = list.filter(range(0, 65536), b => b % 37 == 0 && b != 0x7C00 && b != 0xFC00)
+  let xs = list.map(pats, b => {
+    let v = narrow.fp16_of_bits(b)
+    if v != v { 0.0 } else { v }
+  })
+  let ys = list.map(range(0, len(xs)), i => 0.375 * to_float(i % 17) - 3.0)
+  let want = list.map(range(0, len(xs)), i => narrow.round_fp16(xs[i] + narrow.round_fp16(ys[i])))
+  assert with_gpu_fake(reference_kernels(), () => f16_vadds(xs, ys)) == Ok(want)
+}
+
 fn masked_kernels() -> Map[String, (Int, WideRefFn)] =
   map.from([
     ("vadd_tail", (3, last_out((dts, ins) => masked_vadd_ref(5, dts, ins)))),
