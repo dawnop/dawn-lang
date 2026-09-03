@@ -298,13 +298,16 @@ pub fn and_mask(shape: List[Int], a: Tile[I1], b: Tile[I1]) -> Tile[I1] !Dev =
 pub fn in_range(shape: List[Int], c: Tile[I32], lo: Int, hi: Int) -> Tile[I1] !Dev =
   and_mask(shape, ge_i(shape, c, i_const(shape, lo)), lt_i(shape, c, i_const(shape, hi)))
 
-## The lanes whose `axis` coordinate, counted from `base`, falls inside
-## `[0, limit)`: `tail_mask` for one axis of a multi-dimensional tile. A
-## tile over an array whose extent is not a multiple of the tile's covers
-## the whole of the last block along each axis, and this is the mask that
-## keeps it from reading or writing what is past the end along that one.
+## The lanes whose `axis` coordinate, counted from `base`, is below
+## `limit`: `tail_mask` for one axis of a multi-dimensional tile. A tile
+## over an array whose extent is not a multiple of the tile's covers the
+## whole of the last block along each axis, and this is the mask that keeps
+## it from reading or writing what is past the end along that one. Like
+## `tail_mask` it tests the upper bound alone, because the coordinate it is
+## given starts at a block's own base and counts up; a stencil, whose taps
+## reach BELOW that base, wants `in_range`.
 pub fn axis_mask(base: Idx, shape: List[Int], axis: Int, limit: Int) -> Tile[I1] !Dev =
-  in_range(shape, coord(base, shape, axis, 1), 0, limit)
+  lt_i(shape, coord(base, shape, axis, 1), i_const(shape, limit))
 
 ## The tile of `p`'s format and `shape` whose element `[i, j, ..]` is at
 ## element `base + i * strides[0] + j * strides[1] + ..` of `p`. Every lane
