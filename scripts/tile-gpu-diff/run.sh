@@ -29,7 +29,9 @@
 #             algebra rather than by a chosen corpus) and wide_diff.dawn the
 #             eight wide kernels of knife 11 (the first with more than one
 #             output buffer, the first that write a buffer they read, and the
-#             first over f16, i8 and u8),
+#             first over f16, i8 and u8) and gath_diff.dawn the four gather
+#             and scatter kernels of knife 12 (the first whose ADDRESSES are
+#             computed rather than recorded, two of them out of a buffer),
 #             under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
@@ -166,6 +168,32 @@
 #                      the WHOLE octet range on purpose. A corpus of the low
 #                      half would forgive this entirely, which is the same
 #                      shape as knife 10's shri-always-logical
+#     gather-mask-dropped
+#                      the package's `gather_masked` stops passing the mask
+#                      and the padding value, so every gather reads every
+#                      lane -> layer 0 moves and layer 1 accepts it (a load
+#                      without a mask is a load), and only the device says
+#                      that `token_embed`'s eleven out-of-range ids read the
+#                      table instead of the miss value. It answers a WRONG
+#                      NUMBER rather than faulting because the kernel clamps
+#                      the address as well as masking the lane, which is
+#                      what makes this a layer-2 mutant at all. The other
+#                      three kernels gather nothing and are the control, in
+#                      the bytes and on the device both
+#     scatter-unpermuted
+#                      `scatter_perm`'s kernel writes at the LANE index
+#                      instead of at the destination it read out of a buffer
+#                      -> layer 0 moves, layer 1 accepts it (one index tile
+#                      is as legal as another), and the device says 255 of
+#                      264 lanes hold the wrong value. The permutation is
+#                      the whole of what the kernel does and nothing below
+#                      the device knows it
+#     rank-scatter-in-lane-order
+#                      `sort_rank` stores its values contiguously instead of
+#                      scattering them at the ranks it computed -> the ranks
+#                      are still computed and still correct, and only the
+#                      device says the answer is the input. The scatter is
+#                      what turns a rank into a sort
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -371,6 +399,12 @@ integers=(count_eq subarray_sum rainbow int_ops)
 # are held to.
 wide=(sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matmul_i8)
 
+# The gather and scatter kernels of knife 12, in the order gath_diff takes
+# them. Only `token_embed` gathers, only `scatter_perm` scatters through a
+# mask, and the two rank kernels scatter without one, which is the split the
+# three mutants below are held to.
+gathered=(token_embed sort_rank merge_rank scatter_perm)
+
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
@@ -384,7 +418,7 @@ assemble_golden() { # kernel, tilebc, cubin
 }
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
-  "${wide[@]}"; do
+  "${wide[@]}" "${gathered[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -401,6 +435,8 @@ int_cubins=()
 for k in "${integers[@]}"; do int_cubins+=("$work/$k.cubin"); done
 wide_cubins=()
 for k in "${wide[@]}"; do wide_cubins+=("$work/$k.cubin"); done
+gath_cubins=()
+for k in "${gathered[@]}"; do gath_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -547,6 +583,34 @@ case "$wide_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/wide.out" | head -n 1)"
 
+# ---- native, the gather and scatter kernels (knife 12)
+build_native "$root/std" "$work/gath.bin" "$here/gath_diff.dawn"
+rc=0
+"$work/gath.bin" "${gath_cubins[@]}" > "$work/gath.out" 2> "$work/gath.err" || rc=$?
+cat "$work/gath.out"
+gath_verdict="$(verdict_of "$work/gath.out")"
+case "$gath_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#gathered[@]} gather and scatter kernels on the GPU are bit-identical to the fake device, tails included" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $gath_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $gath_verdict" ;;
+  fail) cat "$work/gath.err" >&2; fail "the device answered and disagreed with the fake device on a gather or scatter kernel (see the transcript above)" ;;
+  *) cat "$work/gath.err" >&2; fail "gath_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/gath.out" | head -n 1)"
+
+# A scatter whose lanes name one element twice has NO answer on the device,
+# so a corpus that stopped being a permutation would turn every verdict
+# above into a coin toss rather than a comparison. gath_diff counts the
+# repeats among its IN-RANGE destinations and prints them; this is where the
+# count is held to zero. The gather case is the control: its ids repeat 31
+# times over and that is legal.
+scatter_repeats="$(awk '/^kernel scatter_perm /{f=1} f && /^  index /{print; exit}' "$work/gath.out")"
+case "$scatter_repeats" in
+  *in_range_repeated=0) echo "PASS  corpus: scatter_perm's destinations are a permutation ($scatter_repeats)" ;;
+  *) fail "scatter_perm's corpus is not a permutation, so its verdict means nothing: $scatter_repeats" ;;
+esac
+
 # The tier summary and the fold-order probe go into the ledger note: the
 # probe is a RECORD and not an assertion (docs 6.5), so a tileiras upgrade
 # that changes the device's reduction tree shows up in the ledger rather
@@ -555,6 +619,7 @@ tiers="$(sed -n 's/^tiers //p' "$work/reduced.out" | tail -n 1) 2d:$(sed -n 's/^
 tiers="$tiers strided:$(sed -n 's/^tiers //p' "$work/strided.out" | tail -n 1)"
 tiers="$tiers int:$(sed -n 's/^tiers //p' "$work/ints.out" | tail -n 1)"
 tiers="$tiers wide:$(sed -n 's/^tiers //p' "$work/wide.out" | tail -n 1)"
+tiers="$tiers gath:$(sed -n 's/^tiers //p' "$work/gath.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe"
 
@@ -562,8 +627,12 @@ echo "      tiers: $tiers; fold-order probe: $probe"
 # first thing that stopped one of them.
 if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
   && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
-  && [ "$wide_verdict" = pass ]; then
+  && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ]; then
   verdict=pass
+elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
+  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
+  && [ "$wide_verdict" = pass ]; then
+  verdict="$gath_verdict"
 elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
   && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ]; then
   verdict="$wide_verdict"
@@ -1416,6 +1485,147 @@ else
   echo "SKIP  mutant: u8-reads-signed not verifiable on this driver: the clean run is $wide_verdict, before any launch reaches the device"
 fi
 
+# 16. gather-mask-dropped: the package's `gather_masked` stops handing the
+#     handler the mask and the padding value, so every gather reads every
+#     lane of its index tile. Layer 0 MOVES (the load loses two operands and
+#     a `--record` would take it) and layer 1 ACCEPTS it -- an unmasked load
+#     is a load -- so the device is again the only place the difference
+#     exists.
+#
+#     `token_embed` alone gathers, and it reds because eleven of its 104 ids
+#     are outside the table: under the mutant those lanes read the row the
+#     kernel's address clamp put them on instead of the miss value, sixteen
+#     lanes each. That it answers a WRONG NUMBER rather than faulting is the
+#     kernel's clamp doing its job, and the reason this is a layer-2 mutant
+#     and not a crash: a gather that read past the allocation would be
+#     reported here as `blocked`, which is not a difference.
+#
+#     The other three kernels gather nothing; their bytes do not move and
+#     they are the control on the device too.
+mutant_pkg_gm="$work/pkg-gather-mask-dropped"
+rm -rf "$mutant_pkg_gm"
+cp -r "$root/packages/tileir" "$mutant_pkg_gm"
+before=$(digest "$mutant_pkg_gm/src/dev.dawn")
+python3 "$here/mutate.py" "$mutant_pkg_gm/src/dev.dawn" gather-mask-dropped \
+  '  let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape, Some(hm), Some(hp))' \
+  '  let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape, None, None)'
+after=$(digest "$mutant_pkg_gm/src/dev.dawn")
+echo "      gather-mask-dropped: packages/tileir/src/dev.dawn md5 $before -> $after"
+
+mutant_kernels gather-mask-dropped "$mutant_pkg_gm" "${gathered[@]}"
+gather_red=(token_embed)
+moved=0
+for k in "${gathered[@]}"; do
+  if cmp -s "$golden/$k.tilebc" "$work/gather-mask-dropped-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+done
+[ "$moved" = "${#gather_red[@]}" ] ||
+  fail "gather-mask-dropped: expected exactly ${#gather_red[@]} of the ${#gathered[@]} kernels' bytecode to move, got $moved"
+echo "      gather-mask-dropped: ${#gather_red[@]} of ${#gathered[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+gm_cubins=()
+for k in "${gathered[@]}"; do gm_cubins+=("$work/gather-mask-dropped-$k.cubin"); done
+rc=0
+"$work/gath.bin" "${gm_cubins[@]}" > "$work/m-gather-mask.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-gather-mask.out")"
+if [ "$gath_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-gather-mask.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#gather_red[@]}" ]; then
+    cat "$work/m-gather-mask.out" >&2
+    fail "gather-mask-dropped mutant stayed green: expected verdict fail (exit 1) with exactly ${#gather_red[@]} kernel saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${gather_red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-gather-mask.out" ||
+      { cat "$work/m-gather-mask.out" >&2; fail "gather-mask-dropped: $k gathers out-of-range ids and should differ"; }
+  done
+  for k in sort_rank merge_rank scatter_perm; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-gather-mask.out" ||
+      { cat "$work/m-gather-mask.out" >&2; fail "gather-mask-dropped: $k gathers nothing and should be untouched"; }
+  done
+  echo "PASS  mutant: gather-mask-dropped (layer 1 accepts it; on the device ${gather_red[*]} differs and the other three do not)"
+else
+  [ "$mverdict" = "$gath_verdict" ] ||
+    { cat "$work/m-gather-mask.out" >&2; fail "gather-mask-dropped: the clean run is $gath_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: gather-mask-dropped not verifiable on this driver: the clean run is $gath_verdict, before any launch reaches the device"
+fi
+
+# A kernel-source mutant: one anchor rewritten in a copy of
+# scripts/tile-golden/kernels.dawn, that kernel re-encoded and assembled,
+# and gath_diff run with it in place of the clean cubin. The shape
+# softmax-no-max-subtract and halo-one-lane-short use.
+gath_kernel_mutant() { # name, kernel, old, new
+  local name="$1" k="$2" src="$work/kernels-$1.dawn" before after
+  cp "$golden/kernels.dawn" "$src"
+  before=$(digest "$src")
+  python3 "$here/mutate.py" "$src" "$name" "$3" "$4"
+  after=$(digest "$src")
+  echo "      $name: scripts/tile-golden/kernels.dawn md5 $before -> $after"
+  mkdir -p "$work/proj-$name/src"
+  cp "$src" "$work/proj-$name/src/main.dawn"
+  cat > "$work/proj-$name/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
+
+[deps]
+tileir = "$root/packages/tileir"
+TOML
+  "$root/bin/dawn" run "$work/proj-$name" -- "$k" --bytecode "$work/$name.tilebc" > "$work/proj-$name.log" 2>&1 ||
+    { cat "$work/proj-$name.log" >&2; fail "$name: $k did not encode"; }
+  cmp -s "$golden/$k.tilebc" "$work/$name.tilebc" &&
+    fail "$name mutant stayed green: $k.tilebc is unchanged"
+  assemble_golden "$k" "$work/$name.tilebc" "$work/$name.cubin"
+  echo "      $name: $k.tilebc differs from the golden and tileiras still accepts it"
+}
+
+# Run gath_diff with `kernel`'s cubin replaced by the mutant's, and require
+# that kernel and no other to differ.
+gath_kernel_check() { # name, kernel
+  local name="$1" k="$2" rc=0 mverdict differ cubs=()
+  local one
+  for one in "${gathered[@]}"; do
+    if [ "$one" = "$k" ]; then cubs+=("$work/$name.cubin"); else cubs+=("$work/$one.cubin"); fi
+  done
+  "$work/gath.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  if [ "$gath_verdict" = pass ]; then
+    differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+    if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+      cat "$work/m-$name.out" >&2
+      fail "$name mutant stayed green: expected verdict fail (exit 1) with $k alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+    fi
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != want {bad=1} END {exit bad}' \
+      "$work/m-$name.out" ||
+      { cat "$work/m-$name.out" >&2; fail "$name: a kernel other than $k moved"; }
+    echo "PASS  mutant: $name ($k alone reds; the other $(( ${#gathered[@]} - 1 )) gather and scatter kernels are untouched)"
+  else
+    [ "$mverdict" = "$gath_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $gath_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $gath_verdict, before any launch reaches the device"
+  fi
+}
+
+# 17. scatter-unpermuted: `scatter_perm` writes each lane at its own index
+#     instead of at the destination it read out of a buffer. The mask is
+#     still the one the destinations decided, so the same lanes are written
+#     and the same ones are left alone; only WHERE moves. Layer 0 moves,
+#     layer 1 accepts it (one index tile is as legal as another), and the
+#     device says 255 of 264 lanes hold the wrong value.
+gath_kernel_mutant scatter-unpermuted scatter_perm \
+  '  scatter_masked(out, dst, s, ok, load(x, blk, s))' \
+  '  scatter_masked(out, lanes(blk, s), s, ok, load(x, blk, s))'
+gath_kernel_check scatter-unpermuted scatter_perm
+
+# 18. rank-scatter-in-lane-order: `sort_rank` still computes every rank and
+#     then stores its values contiguously instead of scattering them there.
+#     The comparison tile, the reduction and the conversion are all
+#     untouched and all still right; what is gone is the one instruction
+#     that turns a rank into a sort. The scatter here carries NO mask, which
+#     is the half of the surface scatter-unpermuted does not reach.
+gath_kernel_mutant rank-scatter-in-lane-order sort_rank \
+  '  scatter(out, float_to_int(F64, s1, rank), s1, load(x, zero, s1))' \
+  '  store(out, zero, s1, load(x, zero, s1))'
+gath_kernel_check rank-scatter-in-lane-order sort_rank
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -1428,7 +1638,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn \
   scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mm_diff.dawn \
   scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/int_diff.dawn scripts/tile-gpu-diff/wide_diff.dawn \
-  scripts/tile-gpu-diff/mutate.py)"
+  scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"

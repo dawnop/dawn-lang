@@ -37,12 +37,20 @@
 # buffer's format, so it is the second opinion for an f16 product and an i8
 # one as much as for an f64 one. The KERNELS differ, and the corpora do.
 #
-# 42 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
+# 45 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
 # and out of range). The plan that orders the rest is the cuTile coverage
 # memo; knife 7a is the boundary knife, 7b the reduction one, 8 the
-# two-dimensional one, 9 the strided one, 10 the integer one and 11 the wide
-# one (more than one output buffer, in place, and the f16 / i8 / u8
-# formats).
+# two-dimensional one, 9 the strided one, 10 the integer one, 11 the wide
+# one (more than one output buffer, in place, and the f16 / i8 / u8 formats)
+# and 12 the indexed one (an address a lane computes, or reads out of a
+# buffer, rather than one the strides fixed at recording time).
+#
+# A kernel is recorded for one shape and a row names the problem it solves
+# at that shape, which for the knife-12 rows means small ones: `sort_rank`
+# sorts 32 values with 32x32 comparisons and `merge_rank` merges two runs of
+# 32 the same way. Both are O(n^2) in comparisons, which is what a machine
+# with tiles and no shuffle does in ONE launch; the O(n log n) shapes need
+# several launches and a host loop between them.
 1 | Vector Addition | vadd_tail | std/gpu.masked_vadd_ref | mask_diff:vadd_tail | exact
 8 | Matrix Addition | vadd_tail | std/gpu.masked_vadd_ref | mask_diff:vadd_tail | exact
 21 | ReLU | relu | std/gpu.relu_ref | mask_diff:relu | exact
@@ -85,3 +93,6 @@
 32 | INT8 Quantized MatMul | matmul_i8 | std/gpu.matmul_ref | wide_diff:matmul_i8 | exact
 57 | FP16 Batched MatMul | batched_matmul_f16 | std/gpu.batched_matmul_ref | wide_diff:batched_matmul_f16 | exact
 58 | FP16 Dot Product | dot_f16 | std/gpu.dot_f16_ref | wide_diff:dot_f16 | exact
+15 | Sorting | sort_rank | std/gpu.sort_ref | gath_diff:sort_rank | exact
+71 | Parallel Merge | merge_rank | std/gpu.merge_ref | gath_diff:merge_rank | exact
+106 | Token Embedding | token_embed | std/gpu.token_embed_ref | gath_diff:token_embed | exact

@@ -1,0 +1,516 @@
+# Layer 2 for the gather and scatter kernels (knife 12), the eighth of
+# these programs after vadd_diff, mask_diff, red_diff, mm_diff,
+# stride_diff, int_diff and wide_diff: one `!Gpu` program runs each of the
+# four kernels scripts/tile-golden pins under `with_gpu_real` against the
+# machine's GPU and under `with_gpu_fake` against hand-written host
+# references, and prints what each device answered.
+#
+#   gath_diff <token_embed.cubin> <sort_rank.cubin> <merge_rank.cubin>
+#             <scatter_perm.cubin>
+#
+# What is new here and nowhere else: the ADDRESS a lane reads or writes is
+# a number the kernel computed, and in two of these four it is a number
+# that came out of a buffer. Every earlier program addresses memory with a
+# base and host-constant strides, so every earlier program's addresses are
+# fixed at recording time and visible in the golden. These are not, and
+# that is the whole of what layer 2 adds here: a wrong address is still a
+# legal kernel, still assembles, and answers the wrong number.
+#
+# Every case is EXACT tier, and by the same argument the integer family
+# uses rather than by a chosen corpus: nothing here is rounded. A gather
+# moves a value the buffer already holds and a scatter puts it somewhere
+# else; the two rank kernels do fold a count, but over ones and zeroes
+# with totals under 32, so no fold order can show.
+#
+# What the corpora have to carry, and why:
+#
+#   * INDICES OUTSIDE THE ARRAY, in `token_embed`'s ids and in
+#     `scatter_perm`'s destinations, on BOTH sides (below zero and past
+#     the end). They are what the masks are for, and without them
+#     run.sh's gather-mask-dropped mutant would have nothing to be wrong
+#     about.
+#   * and those out-of-range lanes must still form an address INSIDE the
+#     buffer, which is why both kernels clamp with an `andi` against a
+#     power-of-two extent. That is not belt and braces: a mutant that
+#     drops the mask has to answer a WRONG NUMBER for layer 2 to see it,
+#     and a mutant that reads past the allocation would fault instead,
+#     which this program would report as `blocked` rather than as a
+#     difference. The mask decides the value; the clamp decides the
+#     address. (A negative index is clamped too: `-1 & 63` is 63.)
+#   * DUPLICATE indices, in `token_embed`'s ids: a gather may read one
+#     element from many lanes and this corpus does, repeatedly.
+#   * NO duplicate destinations in any scatter. A scatter whose lanes name
+#     one element twice has no answer at all -- the dialect gives the lanes
+#     of one store no order against each other -- so this is a rule about
+#     the corpora and not a case anybody may add. `sort_rank`'s ranks are
+#     distinct because ties are broken by lane, `merge_rank`'s because the
+#     two rank sets are disjoint (one side compares strictly and the other
+#     loosely), and `scatter_perm`'s corpus is a permutation with some
+#     lanes taken OUT of range, never two lanes put onto one destination.
+#   * TIES, in both rank kernels. `sort_rank`'s corpus repeats values and
+#     `merge_rank`'s two runs share values on purpose: a corpus of
+#     distinct values would forgive a tie-break that collides, and a
+#     colliding tie-break is exactly the way these kernels can reach the
+#     undefined case above.
+use std/io
+use std/io.{with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, token_embed_ref, sort_ref, merge_ref,
+  scatter_perm_ref }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a value no
+## kernel here computes, so a lane that still has it is a lane nothing
+## wrote.
+pub const SENTINEL: Float = 0.0 - 12345.0
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const EMB_ROWS: Int = 64
+pub const EMB_DIM: Int = 16
+pub const TOK_TILE: Int = 8
+pub const TOK_N: Int = 100
+pub const EMB_MISS: Float = 0.0 - 777.0
+
+## The lanes `token_embed`'s grid covers: 13 blocks of 8, which is four
+## past the hundredth token. Those four are the tail the recording has and
+## the corpus fills with ids outside the table.
+pub const TOK_LANES: Int = 104
+
+pub const SORT_N: Int = 32
+pub const MG_N: Int = 32
+
+pub const SC_N: Int = 256
+pub const SC_TILE: Int = 128
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  results: Option[List[List[Float]]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", results: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order. Written
+# as recursion rather than a `for` with `?` in it: `out = out ++ [f()?]`
+# makes the C backend's reference counter refuse the program (dawn-lang
+# issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn download_all(hs: List[Int], reads: List[Int], i: Int, acc: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu =
+  if i >= len(reads) {
+    Ok(acc)
+  } else {
+    match gpu.gpu_download(hs[reads[i]]) {
+      Ok(v) -> download_all(hs, reads, i + 1, acc ++ [v])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a `gx`
+## by `gy` by `gz` grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. `reads` are the argument positions to
+## download afterwards, which for an in-place kernel is a position that was
+## also an input.
+##
+## The operations are `gpu`'s raw ones rather than the typed `alloc` /
+## `upload` / `download`, because a case's buffers do not share a format and
+## `Tensor[D]` is one format per handle. The length check `upload` makes
+## above the effect is not skipped: every buffer here is allocated with the
+## length of the data that is about to go into it.
+fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Float])],
+  reads: List[Int]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, gy, gz, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = download_all(hs, reads, 0, [])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                results: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn same_lanes(a: List[Float], b: List[Float]) -> Bool =
+  len(a) == len(b) && list.all(range(0, len(a)), i => to_string(a[i]) == to_string(b[i]))
+
+## Whether EVERY buffer read back agrees, bit for bit. A kernel with two
+## outputs is identical only when both are: a device that filled one and
+## left the other holding the sentinel differs here and nowhere else.
+fn same_bits(got: Option[List[List[Float]]], want: Option[List[List[Float]]]) -> Bool = match (got, want) {
+  (Some(a), Some(b)) -> len(a) == len(b) && list.all(range(0, len(a)), i => same_lanes(a[i], b[i]))
+  _ -> false
+}
+
+# The lanes one buffer differs in, and the first of them.
+fn miss_one(a: List[Float], b: List[Float]) -> String =
+  if len(a) != len(b) {
+    "lengths ${len(a)} and ${len(b)}"
+  } else {
+    let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+    if len(bad) == 0 {
+      "none"
+    } else {
+      "${len(bad)} of ${len(a)} lanes, first at ${bad[0]}: ${a[bad[0]]} vs ${b[bad[0]]}"
+    }
+  }
+
+## One line per buffer read back, so a two-output kernel says which of the
+## two moved.
+fn misses(got: Option[List[List[Float]]], want: Option[List[List[Float]]], reads: List[Int]) -> String =
+  match (got, want) {
+    (Some(a), Some(b)) ->
+      if len(a) != len(b) {
+        "read back ${len(a)} buffer(s) and ${len(b)}"
+      } else {
+        list.fold(range(0, len(a)), "", (acc, i) => {
+          let sep = if acc == "" { "" } else { "; " }
+          acc ++ sep ++ "arg${reads[i]}: " ++ miss_one(a[i], b[i])
+        })
+      }
+    _ -> "-"
+  }
+
+## The verdict for one kernel: `identical:exact` (bit for bit, every buffer
+## read back), `differ:result`, or `blocked:<kind>@<stage>` where the driver
+## stopped. There is no tolerance branch: every kernel here is exact tier,
+## for the three reasons the header gives.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if same_bits(real.results, fake.results) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+# ---- the corpora ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+# The number of tile blocks it takes to cover `n` lanes `tile` at a time.
+fn blocks(n: Int, tile: Int) -> Int = (n + tile - 1) / tile
+
+# The token id of lane `i`: mostly `7 * i` around the table, which repeats
+# every 64 lanes and so hands the gather DUPLICATE indices; every
+# seventeenth lane an id PAST the table and every twenty-third one BELOW
+# it. Both kinds are blocked by the kernel's mask and both are clamped by
+# its `andi`, so the device forms an address it owns either way.
+fn token_ids(n: Int) -> List[Float] =
+  list.map(range(0, n), i =>
+    to_float(if i % 17 == 3 {
+      EMB_ROWS + i % 5
+    } else if i % 23 == 5 {
+      0 - 1 - i % 3
+    } else {
+      i * 7 % EMB_ROWS
+    }))
+
+# The embedding table: row `r` column `c` holds `r + c / 100`, so a value
+# says which row and which column it came from and a row read one column
+# over is visible. Nothing here equals EMB_MISS.
+fn embedding_table(rows: Int, dim: Int) -> List[Float] =
+  list.map(range(0, rows * dim), k => to_float(k / dim) + to_float(k % dim) / 100.0)
+
+# `n` values with many REPEATS: seventeen distinct integers cycled by a
+# multiplier coprime with seventeen, so a 32-lane corpus holds each of
+# them once or twice. The repeats are what exercise `sort_rank`'s
+# tie-break, which is what keeps its ranks a permutation.
+fn with_ties(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i * 13 % 17) - 8.0)
+
+# `n` ascending values from `base` in steps of `step`: the two sorted runs
+# `merge_rank` takes. With step 1 and step 2 from the same base the two
+# runs SHARE every even value, which is the tie the merge's strict
+# comparison on one side and loose one on the other has to break.
+fn ascending(n: Int, base: Float, step: Float) -> List[Float] =
+  list.map(range(0, n), i => base + to_float(i) * step)
+
+# The destination of lane `i`: `37 * i + 11` around the output, which is a
+# permutation of [0, 256) because 37 is odd; every thirty-first lane a
+# destination PAST the output and every thirty-seventh one BELOW it. Both
+# kinds are blocked, so the elements they would have named keep the
+# sentinel, and the lanes that remain still name distinct elements.
+fn destinations(n: Int) -> List[Float] =
+  list.map(range(0, n), i =>
+    to_float(if i % 31 == 5 {
+      SC_N + i % 7
+    } else if i % 37 == 11 {
+      0 - 1 - i % 4
+    } else {
+      (i * 37 + 11) % SC_N
+    }))
+
+# DISTINCT values off the integer grid, one per lane: what `scatter_perm`
+# moves, so that a lane that landed in the wrong place is visible.
+fn halves(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i) + 0.5)
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String = ["token_embed", "sort_rank", "merge_rank", "scatter_perm"][i]
+
+## The kernels of the tolerance tier: NONE, for the reason the header
+## gives (nothing here is rounded).
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier`
+## column of scripts/leetgpu-diff/problems.txt against it.
+pub fn tolerance_tier() -> List[String] = []
+
+## The grid each kernel was recorded for, as (gx, gy, gz). The two rank
+## kernels cover their whole problem in one block, as every reduction in
+## this backend does.
+fn case_grid(i: Int) -> (Int, Int, Int) = {
+  let name = case_name(i)
+  if name == "token_embed" {
+    (blocks(TOK_LANES, TOK_TILE), 1, 1)
+  } else if name == "sort_rank" {
+    (1, 1, 1)
+  } else if name == "merge_rank" {
+    (1, 1, 1)
+  } else {
+    (blocks(SC_N, SC_TILE), 1, 1)
+  }
+}
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order. Every output buffer is LONGER than the answer, so the
+## sentinel in its tail says whether a store went past the end.
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let name = case_name(i)
+  if name == "token_embed" {
+    [("i32", token_ids(TOK_LANES)), ("f64", embedding_table(EMB_ROWS, EMB_DIM)),
+      ("f64", sentinel_buffer(TOK_LANES * EMB_DIM + 8))]
+  } else if name == "sort_rank" {
+    [("f64", with_ties(SORT_N)), ("f64", sentinel_buffer(SORT_N + 8))]
+  } else if name == "merge_rank" {
+    [("f64", ascending(MG_N, 0.0 - 8.0, 1.0)), ("f64", ascending(MG_N, 0.0 - 8.0, 2.0)),
+      ("f64", sentinel_buffer(2 * MG_N + 8))]
+  } else {
+    [("i32", destinations(SC_N)), ("f64", halves(SC_N)), ("f64", sentinel_buffer(SC_N + 8))]
+  }
+}
+
+## The argument positions to download after the launch: the one output
+## buffer of each, which is the last argument in all four.
+fn case_reads(i: Int) -> List[Int] = if case_name(i) == "sort_rank" { [1] } else { [2] }
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
+  let name = case_name(i)
+  if name == "token_embed" {
+    map.from([("token_embed",
+      (3, last_out((dts, ins) => token_embed_ref(TOK_LANES, EMB_ROWS, EMB_DIM, EMB_MISS, dts, ins))))])
+  } else if name == "sort_rank" {
+    map.from([("sort_rank", (2, last_out((dts, ins) => sort_ref(SORT_N, dts, ins))))])
+  } else if name == "merge_rank" {
+    map.from([("merge_rank", (3, last_out((dts, ins) => merge_ref(MG_N, MG_N, dts, ins))))])
+  } else {
+    map.from([("scatter_perm", (3, last_out((dts, ins) => scatter_perm_ref(SC_N, SC_N, dts, ins))))])
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones. The
+## tail is where a store past the end shows.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[List[Float]]]) -> String = match o {
+  Some(vs) -> list.fold(range(0, len(vs)), "", (acc, i) => {
+    let sep = if acc == "" { "" } else { " | " }
+    acc ++ sep ++ digest(vs[i])
+  })
+  None -> "-"
+}
+
+fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("gath_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+## An index buffer as three counts: how many entries are outside
+## `[0, limit)`, how many repeat an earlier entry, and how many repeat an
+## earlier entry that is IN range. A `-` where the case has no index
+## buffer.
+##
+## The three are not decoration. `out_of_range` is what the masks are for
+## and what run.sh's gather-mask-dropped needs; `repeated` is legal for a
+## gather and this corpus has plenty; `in_range_repeated` must be ZERO for
+## a scatter, because two lanes writing one element has no answer on the
+## device, and run.sh reads that number off this line rather than trusting
+## the arithmetic above to stay a permutation.
+fn index_shape(i: Int) -> String = {
+  let name = case_name(i)
+  let bufs = case_bufs(i)
+  if name == "token_embed" || name == "scatter_perm" {
+    let limit = if name == "token_embed" { EMB_ROWS } else { SC_N }
+    let (_dt, ix) = bufs[0]
+    let inside = (k: Int) => ix[k] >= 0.0 && ix[k] < to_float(limit)
+    let out = len(list.filter(range(0, len(ix)), k => not inside(k)))
+    let dup = len(list.filter(range(0, len(ix)), k => list.any(range(0, k), j => ix[j] == ix[k])))
+    let dup_in = len(list.filter(range(0, len(ix)),
+      k => inside(k) && list.any(range(0, k), j => ix[j] == ix[k])))
+    "indices=${len(ix)} out_of_range=${out} repeated=${dup} in_range_repeated=${dup_in}"
+  } else {
+    "indices=-"
+  }
+}
+
+## What each case allocates and reads back, as a line.
+fn shape_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  let formats = list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+  "bufs=${formats} reads=${to_string(case_reads(i))}"
+}
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  let count = 4
+  if len(argv) != count {
+    io.eprintln("usage: gath_diff <token_embed.cubin> <sort_rank.cubin> <merge_rank.cubin>"
+        ++ " <scatter_perm.cubin>")
+    io.exit(2)
+  }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let reads = case_reads(i)
+    let (gx, gy, gz) = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, bufs, reads))
+    let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, bufs, reads))
+    let v = verdict(fake, real)
+    io.println("kernel ${name} tier=exact ${shape_of(i)} grid=(${gx}, ${gy}, ${gz})")
+    io.println("  index ${index_shape(i)}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")
+    io.println("  miss  ${misses(real.results, fake.results, reads)}")
+    if real.note != "" { io.println("  note  ${real.note}") }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+}
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
