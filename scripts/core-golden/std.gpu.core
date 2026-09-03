@@ -7,15 +7,18 @@ dict dict$1$Int trait=1 subject=Int
   slot fn std/gpu.prim$1$Int$eq
 dict dict$2$Int trait=2 subject=Int
   slot fn std/gpu.prim$2$Int$hash
-dict dict$1987$Adt1979 trait=1987 subject=F64
-  slot fn std/gpu.bridge$1987$Adt1979$dtype_name
-  slot fn std/gpu.bridge$1987$Adt1979$dtype_bytes
-dict dict$1987$Adt1980 trait=1987 subject=F32
-  slot fn std/gpu.bridge$1987$Adt1980$dtype_name
-  slot fn std/gpu.bridge$1987$Adt1980$dtype_bytes
-dict dict$1987$Adt1981 trait=1987 subject=BF16
-  slot fn std/gpu.bridge$1987$Adt1981$dtype_name
-  slot fn std/gpu.bridge$1987$Adt1981$dtype_bytes
+dict dict$2007$Adt1996 trait=2007 subject=F64
+  slot fn std/gpu.bridge$2007$Adt1996$dtype_name
+  slot fn std/gpu.bridge$2007$Adt1996$dtype_bytes
+dict dict$2007$Adt1997 trait=2007 subject=F32
+  slot fn std/gpu.bridge$2007$Adt1997$dtype_name
+  slot fn std/gpu.bridge$2007$Adt1997$dtype_bytes
+dict dict$2007$Adt1998 trait=2007 subject=BF16
+  slot fn std/gpu.bridge$2007$Adt1998$dtype_name
+  slot fn std/gpu.bridge$2007$Adt1998$dtype_bytes
+dict dict$2007$Adt2000 trait=2007 subject=F16
+  slot fn std/gpu.bridge$2007$Adt2000$dtype_name
+  slot fn std/gpu.bridge$2007$Adt2000$dtype_bytes
 fn std/gpu.element_bytes -> Option[Int]
   param v0 : String owned
   block : Option[Int]
@@ -66,19 +69,61 @@ fn std/gpu.element_bytes -> Option[Int]
                 drop v1
               block : Unit
                 sif
-                  bool true
+                  binary eq : Bool
+                    local v1 : String
+                    str "f16"
                   block : Unit
                     let v6 : Option[Int]
-                      ctor Option/None : Option[Int]
+                      ctor Option/Some : Option[Int]
+                        box from=Int
+                          int 2
                     drop v2
                     assign v2
                       local v6 : Option[Int]
                     drop v1
                   block : Unit
-                    discard
-                      intrinsic panic : Never
-                        str "unreachable match"
-                    drop v1
+                    sif
+                      binary eq : Bool
+                        local v1 : String
+                        str "i8"
+                      block : Unit
+                        let v7 : Option[Int]
+                          ctor Option/Some : Option[Int]
+                            box from=Int
+                              int 1
+                        drop v2
+                        assign v2
+                          local v7 : Option[Int]
+                        drop v1
+                      block : Unit
+                        sif
+                          binary eq : Bool
+                            local v1 : String
+                            str "u8"
+                          block : Unit
+                            let v8 : Option[Int]
+                              ctor Option/Some : Option[Int]
+                                box from=Int
+                                  int 1
+                            drop v2
+                            assign v2
+                              local v8 : Option[Int]
+                            drop v1
+                          block : Unit
+                            sif
+                              bool true
+                              block : Unit
+                                let v9 : Option[Int]
+                                  ctor Option/None : Option[Int]
+                                drop v2
+                                assign v2
+                                  local v9 : Option[Int]
+                                drop v1
+                              block : Unit
+                                discard
+                                  intrinsic panic : Never
+                                    str "unreachable match"
+                                drop v1
     local v2 : Option[Int]
 fn std/gpu.round_to -> Float
   param v0 : String owned
@@ -101,36 +146,70 @@ fn std/gpu.round_to -> Float
         sif
           binary eq : Bool
             local v2 : String
-            str "f32"
+            str "f16"
           block : Unit
             assign v3
-              call direct std/narrow.round_f32 : Float
+              call direct std/narrow.round_fp16 : Float
                 local v1 : Float
             drop v2
           block : Unit
             sif
               binary eq : Bool
                 local v2 : String
-                str "i32"
+                str "f32"
               block : Unit
                 assign v3
-                  intrinsic to_float : Float
-                    call direct std/gpu.wrap_i32 : Int
-                      intrinsic to_int : Int
-                        local v1 : Float
+                  call direct std/narrow.round_f32 : Float
+                    local v1 : Float
                 drop v2
               block : Unit
                 sif
-                  bool true
+                  binary eq : Bool
+                    local v2 : String
+                    str "i32"
                   block : Unit
                     assign v3
-                      local v1 : Float
+                      intrinsic to_float : Float
+                        call direct std/gpu.wrap_i32 : Int
+                          intrinsic to_int : Int
+                            local v1 : Float
                     drop v2
                   block : Unit
-                    discard
-                      intrinsic panic : Never
-                        str "unreachable match"
-                    drop v2
+                    sif
+                      binary eq : Bool
+                        local v2 : String
+                        str "i8"
+                      block : Unit
+                        assign v3
+                          intrinsic to_float : Float
+                            call direct std/gpu.wrap_i8 : Int
+                              intrinsic to_int : Int
+                                local v1 : Float
+                        drop v2
+                      block : Unit
+                        sif
+                          binary eq : Bool
+                            local v2 : String
+                            str "u8"
+                          block : Unit
+                            assign v3
+                              intrinsic to_float : Float
+                                call direct std/gpu.wrap_u8 : Int
+                                  intrinsic to_int : Int
+                                    local v1 : Float
+                            drop v2
+                          block : Unit
+                            sif
+                              bool true
+                              block : Unit
+                                assign v3
+                                  local v1 : Float
+                                drop v2
+                              block : Unit
+                                discard
+                                  intrinsic panic : Never
+                                    str "unreachable match"
+                                drop v2
     local v3 : Float
 fn std/gpu.wrap_i32 -> Int
   param v0 : Int owned
@@ -149,6 +228,28 @@ fn std/gpu.wrap_i32 -> Int
           int 4294967296
       block : Int
         local v1 : Int
+fn std/gpu.wrap_i8 -> Int
+  param v0 : Int owned
+  block : Int
+    let v1 : Int
+      binary band : Int
+        local v0 : Int
+        int 255
+    if : Int
+      binary ge : Bool
+        local v1 : Int
+        int 128
+      block : Int
+        binary sub : Int
+          local v1 : Int
+          int 256
+      block : Int
+        local v1 : Int
+fn std/gpu.wrap_u8 -> Int
+  param v0 : Int owned
+  binary band : Int
+    local v0 : Int
+    int 255
 fn std/gpu.pack_bf16 -> Bytes
   param v0 : List[Float] owned
   block : Bytes
@@ -361,6 +462,245 @@ fn std/gpu.unpack_i32 -> List[Float]
           unit
     drop v0
     local v1 : List[Float]
+fn std/gpu.pack_f16 -> Bytes
+  param v0 : List[Float] owned
+  block : Bytes
+    let v1 : Buf
+      call direct std/bytes.buf : Buf
+    let v2 : List[Float]
+      local v0 : List[Float]
+    let v3 : Int
+      call impl std/list trait=4 subject=List[Float] iter_start : Int
+        dup
+          local v2 : List[Float]
+    loop L0
+      block : Unit
+        sif
+          call impl std/list trait=4 subject=List[Float] iter_done : Bool
+            dup
+              local v2 : List[Float]
+            local v3 : Int
+          break L0
+        let v4 : Float
+          block : Float
+            let v5 : T
+              call impl std/list trait=4 subject=List[Float] iter_get : T
+                dup
+                  local v2 : List[Float]
+                local v3 : Int
+            let v6 : Float
+              unbox to=Float
+                local v5 : T
+            drop v5
+            local v6 : Float
+        let v7 : Float
+          local v4 : Float
+        discard
+          block : Unit
+            let v8 : Int
+              call direct std/narrow.fp16_bits : Int
+                call direct std/narrow.round_fp16 : Float
+                  local v7 : Float
+            let v9 : Buf
+              block : Buf
+                let v10 : Buf
+                  call direct std/bytes.put : Buf
+                    local v1 : Buf
+                    binary band : Int
+                      local v8 : Int
+                      int 255
+                let v11 : Int
+                  binary ushr : Int
+                    local v8 : Int
+                    int 8
+                let v12 : Buf
+                  call direct std/bytes.put : Buf
+                    local v10 : Buf
+                    local v11 : Int
+                drop v10
+                local v12 : Buf
+            drop v1
+            assign v1
+              local v9 : Buf
+      step
+        block : Unit
+          assign v3
+            call impl std/list trait=4 subject=List[Float] iter_next : Int
+              dup
+                local v2 : List[Float]
+              local v3 : Int
+    drop v2
+    let v13 : Bytes
+      call direct std/bytes.freeze : Bytes
+        local v1 : Buf
+    drop v1
+    local v13 : Bytes
+fn std/gpu.unpack_f16 -> List[Float]
+  param v0 : Bytes owned
+  block : List[Float]
+    let v1 : List[Float]
+      call direct std/list.map : List[U]
+        intrinsic range : List[Int]
+          int 0
+          binary div : Int
+            call direct std/bytes.len : Int
+              local v0 : Bytes
+            int 2
+        closure std/gpu.lambda$2 : fn(Int) -> Float
+          dup
+            local v0 : Bytes
+        box from=Unit
+          unit
+    drop v0
+    local v1 : List[Float]
+fn std/gpu.pack_i8 -> Bytes
+  param v0 : List[Float] owned
+  block : Bytes
+    let v1 : Buf
+      call direct std/bytes.buf : Buf
+    let v2 : List[Float]
+      local v0 : List[Float]
+    let v3 : Int
+      call impl std/list trait=4 subject=List[Float] iter_start : Int
+        dup
+          local v2 : List[Float]
+    loop L0
+      block : Unit
+        sif
+          call impl std/list trait=4 subject=List[Float] iter_done : Bool
+            dup
+              local v2 : List[Float]
+            local v3 : Int
+          break L0
+        let v4 : Float
+          block : Float
+            let v5 : T
+              call impl std/list trait=4 subject=List[Float] iter_get : T
+                dup
+                  local v2 : List[Float]
+                local v3 : Int
+            let v6 : Float
+              unbox to=Float
+                local v5 : T
+            drop v5
+            local v6 : Float
+        let v7 : Float
+          local v4 : Float
+        discard
+          block : Unit
+            let v8 : Buf
+              call direct std/bytes.put : Buf
+                local v1 : Buf
+                binary band : Int
+                  call direct std/gpu.wrap_i8 : Int
+                    intrinsic to_int : Int
+                      local v7 : Float
+                  int 255
+            drop v1
+            assign v1
+              local v8 : Buf
+      step
+        block : Unit
+          assign v3
+            call impl std/list trait=4 subject=List[Float] iter_next : Int
+              dup
+                local v2 : List[Float]
+              local v3 : Int
+    drop v2
+    let v9 : Bytes
+      call direct std/bytes.freeze : Bytes
+        local v1 : Buf
+    drop v1
+    local v9 : Bytes
+fn std/gpu.unpack_i8 -> List[Float]
+  param v0 : Bytes owned
+  block : List[Float]
+    let v1 : List[Float]
+      call direct std/list.map : List[U]
+        intrinsic range : List[Int]
+          int 0
+          call direct std/bytes.len : Int
+            local v0 : Bytes
+        closure std/gpu.lambda$3 : fn(Int) -> Float
+          dup
+            local v0 : Bytes
+        box from=Unit
+          unit
+    drop v0
+    local v1 : List[Float]
+fn std/gpu.pack_u8 -> Bytes
+  param v0 : List[Float] owned
+  block : Bytes
+    let v1 : Buf
+      call direct std/bytes.buf : Buf
+    let v2 : List[Float]
+      local v0 : List[Float]
+    let v3 : Int
+      call impl std/list trait=4 subject=List[Float] iter_start : Int
+        dup
+          local v2 : List[Float]
+    loop L0
+      block : Unit
+        sif
+          call impl std/list trait=4 subject=List[Float] iter_done : Bool
+            dup
+              local v2 : List[Float]
+            local v3 : Int
+          break L0
+        let v4 : Float
+          block : Float
+            let v5 : T
+              call impl std/list trait=4 subject=List[Float] iter_get : T
+                dup
+                  local v2 : List[Float]
+                local v3 : Int
+            let v6 : Float
+              unbox to=Float
+                local v5 : T
+            drop v5
+            local v6 : Float
+        let v7 : Float
+          local v4 : Float
+        discard
+          block : Unit
+            let v8 : Buf
+              call direct std/bytes.put : Buf
+                local v1 : Buf
+                call direct std/gpu.wrap_u8 : Int
+                  intrinsic to_int : Int
+                    local v7 : Float
+            drop v1
+            assign v1
+              local v8 : Buf
+      step
+        block : Unit
+          assign v3
+            call impl std/list trait=4 subject=List[Float] iter_next : Int
+              dup
+                local v2 : List[Float]
+              local v3 : Int
+    drop v2
+    let v9 : Bytes
+      call direct std/bytes.freeze : Bytes
+        local v1 : Buf
+    drop v1
+    local v9 : Bytes
+fn std/gpu.unpack_u8 -> List[Float]
+  param v0 : Bytes owned
+  block : List[Float]
+    let v1 : List[Float]
+      call direct std/list.map : List[U]
+        intrinsic range : List[Int]
+          int 0
+          call direct std/bytes.len : Int
+            local v0 : Bytes
+        closure std/gpu.lambda$4 : fn(Int) -> Float
+          dup
+            local v0 : Bytes
+        box from=Unit
+          unit
+    drop v0
+    local v1 : List[Float]
 fn std/gpu.handle_of -> Int
   param v0 : Tensor[D] owned
   block : Int
@@ -435,7 +775,7 @@ fn std/gpu.alloc -> Result[Tensor[D], ForeignError]
           call dynamic : Result[Int, ForeignError]
             field ev$Gpu/ev$Gpu.0 : fn(String, Int) -> Result[Int, ForeignError]
               local v3 : ev$Gpu
-            call method trait=1987 dtype_name slot=0 : String
+            call method trait=2007 dtype_name slot=0 : String
               local v2 : <dict>
               local v0 : D
             local v1 : Int
@@ -759,7 +1099,7 @@ fn std/gpu.vadd_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v2 : List[Float]
-        closure std/gpu.lambda$2 : fn(Int) -> Float
+        closure std/gpu.lambda$5 : fn(Int) -> Float
           local v4 : String
           dup
             local v2 : List[Float]
@@ -809,7 +1149,7 @@ fn std/gpu.sum_ref -> List[Float]
       intrinsic range : List[Int]
         int 0
         local v6 : Int
-      closure std/gpu.lambda$3 : fn(Int) -> Float
+      closure std/gpu.lambda$6 : fn(Int) -> Float
         local v5 : Int
         local v7 : Int
         local v2 : List[Float]
@@ -860,7 +1200,7 @@ fn std/gpu.masked_vadd_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v5 : List[Float]
-        closure std/gpu.lambda$5 : fn(Int) -> Float
+        closure std/gpu.lambda$8 : fn(Int) -> Float
           local v0 : Int
           local v6 : String
           local v3 : List[Float]
@@ -897,7 +1237,7 @@ fn std/gpu.masked_copy_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v4 : List[Float]
-        closure std/gpu.lambda$6 : fn(Int) -> Float
+        closure std/gpu.lambda$9 : fn(Int) -> Float
           local v0 : Int
           local v5 : String
           local v3 : List[Float]
@@ -933,7 +1273,7 @@ fn std/gpu.relu_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v4 : List[Float]
-        closure std/gpu.lambda$7 : fn(Int) -> Float
+        closure std/gpu.lambda$10 : fn(Int) -> Float
           local v0 : Int
           local v5 : String
           local v3 : List[Float]
@@ -970,7 +1310,7 @@ fn std/gpu.leaky_relu_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v5 : List[Float]
-        closure std/gpu.lambda$8 : fn(Int) -> Float
+        closure std/gpu.lambda$11 : fn(Int) -> Float
           local v0 : Int
           local v6 : String
           local v4 : List[Float]
@@ -1009,7 +1349,7 @@ fn std/gpu.clip_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v6 : List[Float]
-        closure std/gpu.lambda$9 : fn(Int) -> Float
+        closure std/gpu.lambda$12 : fn(Int) -> Float
           local v0 : Int
           local v7 : String
           local v5 : List[Float]
@@ -1419,7 +1759,7 @@ fn std/gpu.sum_first -> Float
           local v1 : Int
         box from=Float
           float 0.0
-        closure std/gpu.lambda$10 : fn(Float, Int) -> Float
+        closure std/gpu.lambda$13 : fn(Float, Int) -> Float
           local v0 : List[Float]
         box from=Unit
           unit
@@ -1448,7 +1788,7 @@ fn std/gpu.max_first -> Float
                 local v3 : E
             drop v3
             local v4 : Float
-        closure std/gpu.lambda$11 : fn(Float, Int) -> Float
+        closure std/gpu.lambda$14 : fn(Float, Int) -> Float
           dup
             local v0 : List[Float]
         box from=Unit
@@ -1470,7 +1810,7 @@ fn std/gpu.one_answer -> List[Float]
           int 0
           intrinsic len : Int
             local v0 : List[Float]
-        closure std/gpu.lambda$12 : fn(Int) -> Float
+        closure std/gpu.lambda$15 : fn(Int) -> Float
           local v1 : String
           local v2 : Float
           dup
@@ -1528,7 +1868,7 @@ fn std/gpu.softmax_ref -> List[Float]
         intrinsic range : List[Int]
           int 0
           local v0 : Int
-        closure std/gpu.lambda$13 : fn(Int) -> Float
+        closure std/gpu.lambda$16 : fn(Int) -> Float
           local v3 : List[Float]
           local v6 : Float
         box from=Unit
@@ -1542,7 +1882,7 @@ fn std/gpu.softmax_ref -> List[Float]
               local v0 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$14 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$17 : fn(Float, Int) -> Float
               dup
                 local v7 : List[Float]
             box from=Unit
@@ -1558,7 +1898,7 @@ fn std/gpu.softmax_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v4 : List[Float]
-        closure std/gpu.lambda$15 : fn(Int) -> Float
+        closure std/gpu.lambda$18 : fn(Int) -> Float
           local v0 : Int
           local v5 : String
           local v7 : List[Float]
@@ -1601,7 +1941,7 @@ fn std/gpu.dot_ref -> List[Float]
               local v0 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$16 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$19 : fn(Float, Int) -> Float
               local v3 : List[Float]
               local v4 : List[Float]
             box from=Unit
@@ -1635,7 +1975,7 @@ fn std/gpu.mse_ref -> List[Float]
               local v0 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$17 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$20 : fn(Float, Int) -> Float
               local v3 : List[Float]
               local v4 : List[Float]
             box from=Unit
@@ -1710,7 +2050,7 @@ fn std/gpu.rms_norm_ref -> List[Float]
               local v0 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$18 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$21 : fn(Float, Int) -> Float
               dup
                 local v4 : List[Float]
             box from=Unit
@@ -1734,7 +2074,7 @@ fn std/gpu.rms_norm_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v5 : List[Float]
-        closure std/gpu.lambda$19 : fn(Int) -> Float
+        closure std/gpu.lambda$22 : fn(Int) -> Float
           local v0 : Int
           local v6 : String
           local v4 : List[Float]
@@ -1771,7 +2111,7 @@ fn std/gpu.silu_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v4 : List[Float]
-        closure std/gpu.lambda$20 : fn(Int) -> Float
+        closure std/gpu.lambda$23 : fn(Int) -> Float
           local v0 : Int
           local v5 : String
           local v3 : List[Float]
@@ -1807,7 +2147,7 @@ fn std/gpu.sigmoid_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v4 : List[Float]
-        closure std/gpu.lambda$21 : fn(Int) -> Float
+        closure std/gpu.lambda$24 : fn(Int) -> Float
           local v0 : Int
           local v5 : String
           local v3 : List[Float]
@@ -1847,7 +2187,7 @@ fn std/gpu.ppo_loss_ref -> List[Float]
               local v0 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$22 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$25 : fn(Float, Int) -> Float
               local v4 : List[Float]
               local v5 : List[Float]
               local v1 : Float
@@ -1909,7 +2249,7 @@ fn std/gpu.dpo_loss_ref -> List[Float]
               local v0 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$23 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$26 : fn(Float, Int) -> Float
               local v1 : Float
               local v4 : List[Float]
               local v5 : List[Float]
@@ -1965,7 +2305,7 @@ fn std/gpu.matmul_ref -> List[Float]
         binary mul : Int
           local v0 : Int
           local v2 : Int
-      closure std/gpu.lambda$24 : fn(Int) -> Float
+      closure std/gpu.lambda$27 : fn(Int) -> Float
         local v2 : Int
         local v7 : String
         local v1 : Int
@@ -2004,7 +2344,7 @@ fn std/gpu.batched_matmul_ref -> List[Float]
             local v0 : Int
             local v1 : Int
           local v3 : Int
-      closure std/gpu.lambda$26 : fn(Int) -> Float
+      closure std/gpu.lambda$29 : fn(Int) -> Float
         local v1 : Int
         local v3 : Int
         local v8 : String
@@ -2035,7 +2375,7 @@ fn std/gpu.transpose_ref -> List[Float]
         binary mul : Int
           local v0 : Int
           local v1 : Int
-      closure std/gpu.lambda$28 : fn(Int) -> Float
+      closure std/gpu.lambda$31 : fn(Int) -> Float
         local v5 : String
         local v4 : List[Float]
         local v0 : Int
@@ -2054,7 +2394,7 @@ fn std/gpu.mean_of -> Float
             local v0 : Int
           box from=Float
             float 0.0
-          closure std/gpu.lambda$29 : fn(Float, Int) -> Float
+          closure std/gpu.lambda$32 : fn(Float, Int) -> Float
             local v1 : fn(Int) -> Float
           box from=Unit
             unit
@@ -2078,7 +2418,7 @@ fn std/gpu.var_of -> Float
             local v0 : Int
           box from=Float
             float 0.0
-          closure std/gpu.lambda$30 : fn(Float, Int) -> Float
+          closure std/gpu.lambda$33 : fn(Float, Int) -> Float
             local v2 : fn(Int) -> Float
             local v1 : Float
           box from=Unit
@@ -2122,7 +2462,7 @@ fn std/gpu.layer_norm_ref -> List[Float]
         intrinsic range : List[Int]
           int 0
           local v0 : Int
-        closure std/gpu.lambda$31 : fn(Int) -> (Float, Float)
+        closure std/gpu.lambda$34 : fn(Int) -> (Float, Float)
           local v1 : Int
           dup
             local v5 : List[Float]
@@ -2134,7 +2474,7 @@ fn std/gpu.layer_norm_ref -> List[Float]
         binary mul : Int
           local v0 : Int
           local v1 : Int
-      closure std/gpu.lambda$34 : fn(Int) -> Float
+      closure std/gpu.lambda$37 : fn(Int) -> Float
         local v1 : Int
         local v9 : List[(Float, Float)]
         local v8 : String
@@ -2176,7 +2516,7 @@ fn std/gpu.batch_norm_ref -> List[Float]
         intrinsic range : List[Int]
           int 0
           local v1 : Int
-        closure std/gpu.lambda$35 : fn(Int) -> (Float, Float)
+        closure std/gpu.lambda$38 : fn(Int) -> (Float, Float)
           local v0 : Int
           dup
             local v5 : List[Float]
@@ -2189,7 +2529,7 @@ fn std/gpu.batch_norm_ref -> List[Float]
         binary mul : Int
           local v0 : Int
           local v1 : Int
-      closure std/gpu.lambda$38 : fn(Int) -> Float
+      closure std/gpu.lambda$41 : fn(Int) -> Float
         local v1 : Int
         local v9 : List[(Float, Float)]
         local v8 : String
@@ -2243,7 +2583,7 @@ fn std/gpu.group_norm_ref -> List[Float]
           binary mul : Int
             local v0 : Int
             local v3 : Int
-        closure std/gpu.lambda$39 : fn(Int) -> (Float, Float)
+        closure std/gpu.lambda$42 : fn(Int) -> (Float, Float)
           local v3 : Int
           local v1 : Int
           local v2 : Int
@@ -2260,7 +2600,7 @@ fn std/gpu.group_norm_ref -> List[Float]
             local v0 : Int
             local v1 : Int
           local v2 : Int
-      closure std/gpu.lambda$42 : fn(Int) -> Float
+      closure std/gpu.lambda$45 : fn(Int) -> Float
         local v2 : Int
         local v1 : Int
         local v13 : List[(Float, Float)]
@@ -2307,7 +2647,7 @@ fn std/gpu.fused_rms_norm_ref -> List[Float]
           binary mul : Int
             local v0 : Int
             local v1 : Int
-        closure std/gpu.lambda$43 : fn(Int) -> Float
+        closure std/gpu.lambda$46 : fn(Int) -> Float
           local v5 : List[Float]
           local v6 : List[Float]
         box from=Unit
@@ -2317,7 +2657,7 @@ fn std/gpu.fused_rms_norm_ref -> List[Float]
         intrinsic range : List[Int]
           int 0
           local v0 : Int
-        closure std/gpu.lambda$44 : fn(Int) -> Float
+        closure std/gpu.lambda$47 : fn(Int) -> Float
           local v1 : Int
           dup
             local v9 : List[Float]
@@ -2330,7 +2670,7 @@ fn std/gpu.fused_rms_norm_ref -> List[Float]
         binary mul : Int
           local v0 : Int
           local v1 : Int
-      closure std/gpu.lambda$46 : fn(Int) -> Float
+      closure std/gpu.lambda$49 : fn(Int) -> Float
         local v8 : String
         local v9 : List[Float]
         local v10 : List[Float]
@@ -2370,7 +2710,7 @@ fn std/gpu.conv1d_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v6 : List[Float]
-        closure std/gpu.lambda$47 : fn(Int) -> Float
+        closure std/gpu.lambda$50 : fn(Int) -> Float
           local v0 : Int
           local v1 : Int
           local v7 : String
@@ -2429,7 +2769,7 @@ fn std/gpu.conv2d_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v7 : List[Float]
-        closure std/gpu.lambda$49 : fn(Int) -> Float
+        closure std/gpu.lambda$52 : fn(Int) -> Float
           local v10 : Int
           local v9 : Int
           local v2 : Int
@@ -2481,7 +2821,7 @@ fn std/gpu.max_pool_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v6 : List[Float]
-        closure std/gpu.lambda$51 : fn(Int) -> Float
+        closure std/gpu.lambda$54 : fn(Int) -> Float
           local v9 : Int
           local v8 : Int
           local v7 : String
@@ -2525,7 +2865,7 @@ fn std/gpu.interleave_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v5 : List[Float]
-        closure std/gpu.lambda$53 : fn(Int) -> Float
+        closure std/gpu.lambda$56 : fn(Int) -> Float
           local v0 : Int
           local v6 : String
           local v3 : List[Float]
@@ -2565,7 +2905,7 @@ fn std/gpu.rgb_gray_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v7 : List[Float]
-        closure std/gpu.lambda$54 : fn(Int) -> Float
+        closure std/gpu.lambda$57 : fn(Int) -> Float
           local v0 : Int
           local v8 : String
           local v6 : List[Float]
@@ -2605,7 +2945,7 @@ fn std/gpu.jacobi_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v5 : List[Float]
-        closure std/gpu.lambda$55 : fn(Int) -> Float
+        closure std/gpu.lambda$58 : fn(Int) -> Float
           local v0 : Int
           local v1 : Int
           local v6 : String
@@ -2655,7 +2995,7 @@ fn std/gpu.depthwise_conv1d_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v7 : List[Float]
-        closure std/gpu.lambda$56 : fn(Int) -> Float
+        closure std/gpu.lambda$59 : fn(Int) -> Float
           local v0 : Int
           local v9 : Int
           local v2 : Int
@@ -2706,7 +3046,7 @@ fn std/gpu.gaussian_blur_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v7 : List[Float]
-        closure std/gpu.lambda$58 : fn(Int) -> Float
+        closure std/gpu.lambda$61 : fn(Int) -> Float
           local v0 : Int
           local v1 : Int
           local v2 : Int
@@ -2760,7 +3100,7 @@ fn std/gpu.count_eq_ref -> List[Float]
               local v0 : Int
             box from=Int
               int 0
-            closure std/gpu.lambda$60 : fn(Int, Int) -> Int
+            closure std/gpu.lambda$63 : fn(Int, Int) -> Int
               local v4 : List[Float]
               local v1 : Int
             box from=Unit
@@ -2802,7 +3142,7 @@ fn std/gpu.subarray_sum_ref -> List[Float]
               local v1 : Int
             box from=Int
               int 0
-            closure std/gpu.lambda$61 : fn(Int, Int) -> Int
+            closure std/gpu.lambda$64 : fn(Int, Int) -> Int
               local v4 : List[Float]
             box from=Unit
               unit
@@ -2890,7 +3230,7 @@ fn std/gpu.rainbow_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v8 : List[Float]
-        closure std/gpu.lambda$62 : fn(Int) -> Float
+        closure std/gpu.lambda$65 : fn(Int) -> Float
           local v0 : Int
           local v1 : Int
           local v7 : List[Float]
@@ -2929,7 +3269,7 @@ fn std/gpu.int_ops_ref -> List[Float]
           int 0
           intrinsic len : Int
             local v5 : List[Float]
-        closure std/gpu.lambda$64 : fn(Int) -> Float
+        closure std/gpu.lambda$67 : fn(Int) -> Float
           local v0 : Int
           local v3 : List[Float]
           local v4 : List[Float]
@@ -2939,27 +3279,259 @@ fn std/gpu.int_ops_ref -> List[Float]
           unit
     drop v5
     local v6 : List[Float]
-fn std/gpu.reference_kernels -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])]
-  call direct std/map.from : Map[K, V]
-    listlit : List[(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))]
-      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-          str "vadd"
-          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
-            int 3
-            closure std/gpu.lambda$65 : fn(List[String], List[List[Float]]) -> List[Float]
-      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-          str "vadd_bf16"
-          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
-            int 3
-            closure std/gpu.lambda$66 : fn(List[String], List[List[Float]]) -> List[Float]
-      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-          str "sum"
-          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+fn std/gpu.sum_diff_ref -> List[(Int, List[Float])]
+  param v0 : Int owned
+  param v1 : List[String] owned
+  param v2 : List[List[Float]] borrowed
+  block : List[(Int, List[Float])]
+    let v3 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 0
+    let v4 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 1
+    let v5 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 2
+    let v6 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 3
+    let v7 : List[(Int, List[Float])]
+      listlit : List[(Int, List[Float])]
+        box from=(Int, List[Float])
+          tuple : (Int, List[Float])
             int 2
-            closure std/gpu.lambda$67 : fn(List[String], List[List[Float]]) -> List[Float]
+            call direct std/list.map : List[U]
+              intrinsic range : List[Int]
+                int 0
+                intrinsic len : Int
+                  local v5 : List[Float]
+              closure std/gpu.lambda$68 : fn(Int) -> Float
+                local v0 : Int
+                dup
+                  local v1 : List[String]
+                dup
+                  local v3 : List[Float]
+                dup
+                  local v4 : List[Float]
+                dup
+                  local v5 : List[Float]
+              box from=Unit
+                unit
+        box from=(Int, List[Float])
+          tuple : (Int, List[Float])
+            int 3
+            call direct std/list.map : List[U]
+              intrinsic range : List[Int]
+                int 0
+                intrinsic len : Int
+                  local v6 : List[Float]
+              closure std/gpu.lambda$69 : fn(Int) -> Float
+                local v0 : Int
+                dup
+                  local v1 : List[String]
+                dup
+                  local v3 : List[Float]
+                dup
+                  local v4 : List[Float]
+                dup
+                  local v6 : List[Float]
+              box from=Unit
+                unit
+    drop v3
+    drop v4
+    drop v5
+    drop v6
+    drop v1
+    local v7 : List[(Int, List[Float])]
+fn std/gpu.reverse_ref -> List[(Int, List[Float])]
+  param v0 : Int owned
+  param v1 : List[String] owned
+  param v2 : List[List[Float]] borrowed
+  block : List[(Int, List[Float])]
+    let v3 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 0
+    let v4 : List[(Int, List[Float])]
+      listlit : List[(Int, List[Float])]
+        box from=(Int, List[Float])
+          tuple : (Int, List[Float])
+            int 0
+            call direct std/list.map : List[U]
+              intrinsic range : List[Int]
+                int 0
+                intrinsic len : Int
+                  local v3 : List[Float]
+              closure std/gpu.lambda$70 : fn(Int) -> Float
+                local v0 : Int
+                local v1 : List[String]
+                dup
+                  local v3 : List[Float]
+              box from=Unit
+                unit
+    drop v3
+    local v4 : List[(Int, List[Float])]
+fn std/gpu.invert_ref -> List[(Int, List[Float])]
+  param v0 : Int owned
+  param v1 : List[String] owned
+  param v2 : List[List[Float]] borrowed
+  block : List[(Int, List[Float])]
+    let v3 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 0
+    let v4 : List[(Int, List[Float])]
+      listlit : List[(Int, List[Float])]
+        box from=(Int, List[Float])
+          tuple : (Int, List[Float])
+            int 0
+            call direct std/list.map : List[U]
+              intrinsic range : List[Int]
+                int 0
+                intrinsic len : Int
+                  local v3 : List[Float]
+              closure std/gpu.lambda$71 : fn(Int) -> Float
+                local v0 : Int
+                local v1 : List[String]
+                dup
+                  local v3 : List[Float]
+              box from=Unit
+                unit
+    drop v3
+    local v4 : List[(Int, List[Float])]
+fn std/gpu.f16_ops_ref -> List[Float]
+  param v0 : Int owned
+  param v1 : List[String] borrowed
+  param v2 : List[List[Float]] borrowed
+  block : List[Float]
+    let v3 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 0
+    let v4 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 1
+    let v5 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 2
+    let v6 : String
+      unbox to=String
+        intrinsic list_index : E
+          local v1 : List[String]
+          int 2
+    let v7 : List[Float]
+      call direct std/list.map : List[U]
+        intrinsic range : List[Int]
+          int 0
+          intrinsic len : Int
+            local v5 : List[Float]
+        closure std/gpu.lambda$72 : fn(Int) -> Float
+          local v0 : Int
+          local v6 : String
+          local v3 : List[Float]
+          local v4 : List[Float]
+          dup
+            local v5 : List[Float]
+        box from=Unit
+          unit
+    drop v5
+    local v7 : List[Float]
+fn std/gpu.dot_f16_ref -> List[Float]
+  param v0 : Int owned
+  param v1 : List[String] borrowed
+  param v2 : List[List[Float]] borrowed
+  block : List[Float]
+    let v3 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 0
+    let v4 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 1
+    let v5 : List[Float]
+      unbox to=List[Float]
+        intrinsic list_index : E
+          local v2 : List[List[Float]]
+          int 2
+    let v6 : String
+      unbox to=String
+        intrinsic list_index : E
+          local v1 : List[String]
+          int 2
+    let v7 : List[Float]
+      call direct std/gpu.one_answer : List[Float]
+        local v5 : List[Float]
+        dup
+          local v6 : String
+        block : Float
+          let v8 : A
+            call direct std/list.fold : A
+              intrinsic range : List[Int]
+                int 0
+                local v0 : Int
+              box from=Float
+                float 0.0
+              closure std/gpu.lambda$73 : fn(Float, Int) -> Float
+                dup
+                  local v6 : String
+                local v3 : List[Float]
+                local v4 : List[Float]
+              box from=Unit
+                unit
+          let v9 : Float
+            unbox to=Float
+              local v8 : A
+          drop v8
+          local v9 : Float
+    drop v6
+    local v7 : List[Float]
+fn std/gpu.last_out -> fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+  param v0 : fn(List[String], List[List[Float]]) -> List[Float] owned
+  closure std/gpu.lambda$74 : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+    local v0 : fn(List[String], List[List[Float]]) -> List[Float]
+fn std/gpu.reference_kernels -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])]
+  call direct std/map.from : Map[K, V]
+    listlit : List[(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+          str "vadd"
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
+            int 3
+            call direct std/gpu.last_out : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+              closure std/gpu.lambda$75 : fn(List[String], List[List[Float]]) -> List[Float]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+          str "vadd_bf16"
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
+            int 3
+            call direct std/gpu.last_out : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+              closure std/gpu.lambda$76 : fn(List[String], List[List[Float]]) -> List[Float]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+          str "sum"
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
+            int 2
+            call direct std/gpu.last_out : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+              closure std/gpu.lambda$77 : fn(List[String], List[List[Float]]) -> List[Float]
     dictref dict$1$String trait=1 subject=String : <dict>
     dictref dict$2$String trait=2 subject=String : <dict>
 fn std/gpu.no_such_buffer -> ForeignError
@@ -3112,8 +3684,87 @@ fn std/gpu.bad_arity -> ForeignError
       drop v17
       drop v4
       local v18 : String
+fn std/gpu.bad_write_back -> ForeignError
+  param v0 : String borrowed
+  param v1 : String borrowed
+  param v2 : Int owned
+  param v3 : Int owned
+  call direct std/gpu.refuse : ForeignError
+    str "gpu.bad_write_back"
+    block : String
+      let v4 : String
+        block : String
+          let v5 : String
+            block : String
+              let v6 : String
+                block : String
+                  let v7 : String
+                    block : String
+                      let v8 : String
+                        block : String
+                          let v9 : String
+                            binary concat : String
+                              local v0 : String
+                              str ": `"
+                          let v10 : String
+                            dup
+                              local v1 : String
+                          let v11 : String
+                            binary concat : String
+                              local v9 : String
+                              local v10 : String
+                          drop v10
+                          drop v9
+                          local v11 : String
+                      let v12 : String
+                        str "` writes back to argument "
+                      let v13 : String
+                        binary concat : String
+                          local v8 : String
+                          local v12 : String
+                      drop v12
+                      drop v8
+                      local v13 : String
+                  let v14 : String
+                    intrinsic str_of_int : String
+                      local v2 : Int
+                  let v15 : String
+                    binary concat : String
+                      local v7 : String
+                      local v14 : String
+                  drop v14
+                  drop v7
+                  local v15 : String
+              let v16 : String
+                str ", and it was launched with "
+              let v17 : String
+                binary concat : String
+                  local v6 : String
+                  local v16 : String
+              drop v16
+              drop v6
+              local v17 : String
+          let v18 : String
+            intrinsic str_of_int : String
+              local v3 : Int
+          let v19 : String
+            binary concat : String
+              local v5 : String
+              local v18 : String
+          drop v18
+          drop v5
+          local v19 : String
+      let v20 : String
+        str " buffer(s)"
+      let v21 : String
+        binary concat : String
+          local v4 : String
+          local v20 : String
+      drop v20
+      drop v4
+      local v21 : String
 fn std/gpu.with_gpu_fake -> T
-  param v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] owned
+  param v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])] owned
   param v1 : fn() -> T !Gpu owned
   block : T
     block : T
@@ -3127,42 +3778,272 @@ fn std/gpu.with_gpu_fake -> T
             call direct std/map.empty : Map[K, V]
       let v4 : ev$Gpu
         ctor ev$Gpu/ev$Gpu : ev$Gpu
-          closure std/gpu.lambda$68 : fn(String, Int) -> Result[Int, ForeignError]
+          closure std/gpu.lambda$78 : fn(String, Int) -> Result[Int, ForeignError]
             local v2 : cell
             dup
               local v3 : cell
-          closure std/gpu.lambda$70 : fn(Int, List[Float]) -> Result[Unit, ForeignError]
+          closure std/gpu.lambda$80 : fn(Int, List[Float]) -> Result[Unit, ForeignError]
             dup
               local v3 : cell
-          closure std/gpu.lambda$72 : fn(Int) -> Result[List[Float], ForeignError]
+          closure std/gpu.lambda$82 : fn(Int) -> Result[List[Float], ForeignError]
             dup
               local v3 : cell
-          closure std/gpu.lambda$73 : fn(String, Int, Int, Int, List[Int]) -> Result[Unit, ForeignError]
-            local v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])]
+          closure std/gpu.lambda$83 : fn(String, Int, Int, Int, List[Int]) -> Result[Unit, ForeignError]
+            local v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])]
             dup
               local v3 : cell
-          closure std/gpu.lambda$79 : fn(Int) -> Result[Unit, ForeignError]
+          closure std/gpu.lambda$90 : fn(Int) -> Result[Unit, ForeignError]
             dup
               local v3 : cell
-          closure std/gpu.lambda$80 : fn() -> Result[Unit, ForeignError]
+          closure std/gpu.lambda$91 : fn() -> Result[Unit, ForeignError]
           box from=Unit
             unit
       drop v3
       block : T
         let v5 : fn() -> T !Gpu
-          closure std/gpu.lambda$81 : fn() -> T !Gpu
+          closure std/gpu.lambda$92 : fn() -> T !Gpu
             local v1 : fn() -> T !Gpu
         let v6 : T
           call dynamic : T
             local v5 : fn() -> T !Gpu
             ctor ev$Pack/ev$Pack : ev$Pack
-              int 5955
+              int 6015
               box from=ev$Gpu
                 local v4 : ev$Gpu
               box from=Unit
                 unit
         drop v5
         local v6 : T
+fn std/gpu.pack_to -> Bytes
+  param v0 : String owned
+  param v1 : List[Float] owned
+  block : Bytes
+    let v2 : String
+      dup
+        local v0 : String
+    let v3 : Bytes
+      intrinsic null_ref : Bytes
+    sif
+      binary eq : Bool
+        local v2 : String
+        str "bf16"
+      block : Unit
+        let v4 : Bytes
+          call direct std/gpu.pack_bf16 : Bytes
+            local v1 : List[Float]
+        drop v3
+        assign v3
+          local v4 : Bytes
+        drop v0
+        drop v2
+      block : Unit
+        sif
+          binary eq : Bool
+            local v2 : String
+            str "f16"
+          block : Unit
+            let v5 : Bytes
+              call direct std/gpu.pack_f16 : Bytes
+                local v1 : List[Float]
+            drop v3
+            assign v3
+              local v5 : Bytes
+            drop v0
+            drop v2
+          block : Unit
+            sif
+              binary eq : Bool
+                local v2 : String
+                str "i32"
+              block : Unit
+                let v6 : Bytes
+                  call direct std/gpu.pack_i32 : Bytes
+                    local v1 : List[Float]
+                drop v3
+                assign v3
+                  local v6 : Bytes
+                drop v0
+                drop v2
+              block : Unit
+                sif
+                  binary eq : Bool
+                    local v2 : String
+                    str "i8"
+                  block : Unit
+                    let v7 : Bytes
+                      call direct std/gpu.pack_i8 : Bytes
+                        local v1 : List[Float]
+                    drop v3
+                    assign v3
+                      local v7 : Bytes
+                    drop v0
+                    drop v2
+                  block : Unit
+                    sif
+                      binary eq : Bool
+                        local v2 : String
+                        str "u8"
+                      block : Unit
+                        let v8 : Bytes
+                          call direct std/gpu.pack_u8 : Bytes
+                            local v1 : List[Float]
+                        drop v3
+                        assign v3
+                          local v8 : Bytes
+                        drop v0
+                        drop v2
+                      block : Unit
+                        sif
+                          bool true
+                          block : Unit
+                            assign v3
+                              block : Never
+                                let v9 : String
+                                  block : String
+                                    let v10 : String
+                                      binary concat : String
+                                        str "gpu.pack_to: `"
+                                        local v0 : String
+                                    let v11 : String
+                                      str "` has no byte packing"
+                                    let v12 : String
+                                      binary concat : String
+                                        local v10 : String
+                                        local v11 : String
+                                    drop v11
+                                    drop v10
+                                    local v12 : String
+                                intrinsic panic : Never
+                                  local v9 : String
+                            drop v0
+                            drop v1
+                            drop v2
+                          block : Unit
+                            discard
+                              intrinsic panic : Never
+                                str "unreachable match"
+                            drop v0
+                            drop v1
+                            drop v2
+                        drop v0
+                        drop v1
+                        drop v2
+    local v3 : Bytes
+fn std/gpu.unpack_from -> List[Float]
+  param v0 : String owned
+  param v1 : Bytes owned
+  block : List[Float]
+    let v2 : String
+      dup
+        local v0 : String
+    let v3 : List[Float]
+      intrinsic null_ref : List[Float]
+    sif
+      binary eq : Bool
+        local v2 : String
+        str "bf16"
+      block : Unit
+        let v4 : List[Float]
+          call direct std/gpu.unpack_bf16 : List[Float]
+            local v1 : Bytes
+        drop v3
+        assign v3
+          local v4 : List[Float]
+        drop v0
+        drop v2
+      block : Unit
+        sif
+          binary eq : Bool
+            local v2 : String
+            str "f16"
+          block : Unit
+            let v5 : List[Float]
+              call direct std/gpu.unpack_f16 : List[Float]
+                local v1 : Bytes
+            drop v3
+            assign v3
+              local v5 : List[Float]
+            drop v0
+            drop v2
+          block : Unit
+            sif
+              binary eq : Bool
+                local v2 : String
+                str "i32"
+              block : Unit
+                let v6 : List[Float]
+                  call direct std/gpu.unpack_i32 : List[Float]
+                    local v1 : Bytes
+                drop v3
+                assign v3
+                  local v6 : List[Float]
+                drop v0
+                drop v2
+              block : Unit
+                sif
+                  binary eq : Bool
+                    local v2 : String
+                    str "i8"
+                  block : Unit
+                    let v7 : List[Float]
+                      call direct std/gpu.unpack_i8 : List[Float]
+                        local v1 : Bytes
+                    drop v3
+                    assign v3
+                      local v7 : List[Float]
+                    drop v0
+                    drop v2
+                  block : Unit
+                    sif
+                      binary eq : Bool
+                        local v2 : String
+                        str "u8"
+                      block : Unit
+                        let v8 : List[Float]
+                          call direct std/gpu.unpack_u8 : List[Float]
+                            local v1 : Bytes
+                        drop v3
+                        assign v3
+                          local v8 : List[Float]
+                        drop v0
+                        drop v2
+                      block : Unit
+                        sif
+                          bool true
+                          block : Unit
+                            assign v3
+                              block : Never
+                                let v9 : String
+                                  block : String
+                                    let v10 : String
+                                      binary concat : String
+                                        str "gpu.unpack_from: `"
+                                        local v0 : String
+                                    let v11 : String
+                                      str "` has no byte packing"
+                                    let v12 : String
+                                      binary concat : String
+                                        local v10 : String
+                                        local v11 : String
+                                    drop v11
+                                    drop v10
+                                    local v12 : String
+                                intrinsic panic : Never
+                                  local v9 : String
+                            drop v0
+                            drop v1
+                            drop v2
+                          block : Unit
+                            discard
+                              intrinsic panic : Never
+                                str "unreachable match"
+                            drop v0
+                            drop v1
+                            drop v2
+                        drop v0
+                        drop v1
+                        drop v2
+    local v3 : List[Float]
 fn std/gpu.to_array -> Array[Float]
   param v0 : List[Float] owned
   block : Array[Float]
@@ -3232,7 +4113,7 @@ fn std/gpu.of_array -> List[Float]
           int 0
           intrinsic array_len : Int
             local v0 : Array[Float]
-        closure std/gpu.lambda$82 : fn(Int) -> Float
+        closure std/gpu.lambda$93 : fn(Int) -> Float
           dup
             local v0 : Array[Float]
         box from=Unit
@@ -3366,37 +4247,37 @@ fn std/gpu.with_gpu_real -> T
             call direct std/map.empty : Map[K, V]
       let v5 : ev$Gpu
         ctor ev$Gpu/ev$Gpu : ev$Gpu
-          closure std/gpu.lambda$83 : fn(String, Int) -> Result[Int, ForeignError] !io
+          closure std/gpu.lambda$94 : fn(String, Int) -> Result[Int, ForeignError] !io
             local v2 : cell
             dup
               local v3 : cell
-          closure std/gpu.lambda$84 : fn(Int, List[Float]) -> Result[Unit, ForeignError] !io
+          closure std/gpu.lambda$95 : fn(Int, List[Float]) -> Result[Unit, ForeignError] !io
             dup
               local v3 : cell
-          closure std/gpu.lambda$85 : fn(Int) -> Result[List[Float], ForeignError] !io
+          closure std/gpu.lambda$96 : fn(Int) -> Result[List[Float], ForeignError] !io
             dup
               local v3 : cell
-          closure std/gpu.lambda$86 : fn(String, Int, Int, Int, List[Int]) -> Result[Unit, ForeignError] !io
+          closure std/gpu.lambda$97 : fn(String, Int, Int, Int, List[Int]) -> Result[Unit, ForeignError] !io
             local v0 : Map[String, Bytes]
             dup
               local v3 : cell
             local v4 : cell
-          closure std/gpu.lambda$88 : fn(Int) -> Result[Unit, ForeignError] !io
+          closure std/gpu.lambda$99 : fn(Int) -> Result[Unit, ForeignError] !io
             dup
               local v3 : cell
-          closure std/gpu.lambda$89 : fn() -> Result[Unit, ForeignError] !io
+          closure std/gpu.lambda$100 : fn() -> Result[Unit, ForeignError] !io
           box from=Unit
             unit
       drop v3
       block : T
         let v6 : fn() -> T !(Gpu|io)
-          closure std/gpu.lambda$90 : fn() -> T !(Gpu|io)
+          closure std/gpu.lambda$101 : fn() -> T !(Gpu|io)
             local v1 : fn() -> T !(Gpu|io)
         let v7 : T
           call dynamic : T
             local v6 : fn() -> T !(Gpu|io)
             ctor ev$Pack/ev$Pack : ev$Pack
-              int 5955
+              int 6015
               box from=ev$Gpu
                 local v5 : ev$Gpu
               box from=Unit
@@ -3815,7 +4696,7 @@ fn std/gpu.vadd_on_device -> Result[List[Float], ForeignError]
     str "vadd"
     local v0 : List[Float]
     local v1 : List[Float]
-    dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+    dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
     local v2 : ev$Gpu
 fn std/gpu.sum_on_device -> Result[List[Float], ForeignError]
   param v0 : List[Float] owned
@@ -3830,7 +4711,7 @@ fn std/gpu.sum_on_device -> Result[List[Float], ForeignError]
               ctor F64/F64 : F64
             intrinsic len : Int
               local v0 : List[Float]
-            dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+            dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
             dup
               local v2 : ev$Gpu
         sif
@@ -3863,7 +4744,7 @@ fn std/gpu.sum_on_device -> Result[List[Float], ForeignError]
             binary mul : Int
               local v1 : Int
               int 128
-            dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+            dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
             dup
               local v2 : ev$Gpu
         sif
@@ -4074,7 +4955,7 @@ fn std/gpu.sum_input -> List[Float]
     intrinsic range : List[Int]
       int 0
       int 1024
-    closure std/gpu.lambda$91 : fn(Int) -> Float
+    closure std/gpu.lambda$102 : fn(Int) -> Float
     box from=Unit
       unit
 fn std/gpu.kind_of -> String
@@ -4129,7 +5010,7 @@ fn std/gpu.wrong_length_upload -> Result[List[Float], ForeignError]
             box from=F64
               ctor F64/F64 : F64
             int 3
-            dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+            dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
             dup
               local v0 : ev$Gpu
         sif
@@ -4237,7 +5118,7 @@ fn std/gpu.alloc_refusals -> (String, String, String)
         box from=F64
           ctor F64/F64 : F64
         int 0
-        dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+        dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
         dup
           local v0 : ev$Gpu
     let v2 : Result[Tensor[F64], ForeignError]
@@ -4247,7 +5128,7 @@ fn std/gpu.alloc_refusals -> (String, String, String)
         binary sub : Int
           int 0
           int 4
-        dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+        dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
         dup
           local v0 : ev$Gpu
     let v3 : Result[Tensor[F32], ForeignError]
@@ -4255,7 +5136,7 @@ fn std/gpu.alloc_refusals -> (String, String, String)
         box from=F32
           ctor F32/F32 : F32
         int 4
-        dictref dict$1987$Adt1980 trait=1987 subject=F32 : <dict>
+        dictref dict$2007$Adt1997 trait=2007 subject=F32 : <dict>
         local v0 : ev$Gpu
     tuple : (String, String, String)
       call direct std/gpu.kind_of : String
@@ -4349,7 +5230,7 @@ fn std/gpu.narrow_sums -> List[Float]
           int 0
           intrinsic len : Int
             local v0 : List[Float]
-        closure std/gpu.lambda$92 : fn(Int) -> Float
+        closure std/gpu.lambda$103 : fn(Int) -> Float
           dup
             local v0 : List[Float]
           local v1 : List[Float]
@@ -4450,7 +5331,7 @@ fn std/gpu.there_and_back -> Result[List[Float], ForeignError]
               ctor BF16/BF16 : BF16
             intrinsic len : Int
               local v0 : List[Float]
-            dictref dict$1987$Adt1981 trait=1987 subject=BF16 : <dict>
+            dictref dict$2007$Adt1998 trait=2007 subject=BF16 : <dict>
             dup
               local v1 : ev$Gpu
         sif
@@ -4514,7 +5395,7 @@ fn std/gpu.launch_refusals -> List[String]
         box from=F64
           ctor F64/F64 : F64
         int 2
-        dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+        dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
         dup
           local v0 : ev$Gpu
     let v2 : Int
@@ -4622,7 +5503,7 @@ fn std/gpu.too_few_buffers -> Result[Unit, ForeignError]
             box from=F64
               ctor F64/F64 : F64
             int 2
-            dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+            dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
             dup
               local v0 : ev$Gpu
         sif
@@ -4663,7 +5544,7 @@ fn std/gpu.one_short_buffer -> Result[Unit, ForeignError]
             box from=F64
               ctor F64/F64 : F64
             int 2
-            dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+            dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
             dup
               local v0 : ev$Gpu
         sif
@@ -4693,7 +5574,7 @@ fn std/gpu.one_short_buffer -> Result[Unit, ForeignError]
             box from=F64
               ctor F64/F64 : F64
             int 2
-            dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+            dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
             dup
               local v0 : ev$Gpu
         sif
@@ -4736,7 +5617,7 @@ fn std/gpu.use_after_free -> (Int, Int, String, String)
         box from=F64
           ctor F64/F64 : F64
         int 2
-        dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+        dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
         dup
           local v0 : ev$Gpu
     let v2 : Result[Tensor[F64], ForeignError]
@@ -4744,7 +5625,7 @@ fn std/gpu.use_after_free -> (Int, Int, String, String)
         box from=F64
           ctor F64/F64 : F64
         int 2
-        dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+        dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
         dup
           local v0 : ev$Gpu
     block : (Int, Int, String, String)
@@ -4887,7 +5768,7 @@ fn std/gpu.real_refusals -> List[String]
         box from=F32
           ctor F32/F32 : F32
         int 4
-        dictref dict$1987$Adt1980 trait=1987 subject=F32 : <dict>
+        dictref dict$2007$Adt1997 trait=2007 subject=F32 : <dict>
         dup
           local v0 : ev$Gpu
     let v3 : List[String]
@@ -4956,39 +5837,673 @@ fn std/gpu.real_refusals -> List[String]
     drop v1
     drop v0
     local v3 : List[String]
-fn std/gpu.masked_kernels -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])]
+fn std/gpu.wide_kernels -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])]
   call direct std/map.from : Map[K, V]
-    listlit : List[(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))]
-      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
+    listlit : List[(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+          str "sum_diff"
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
+            int 4
+            closure std/gpu.lambda$104 : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+          str "reverse"
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
+            int 1
+            closure std/gpu.lambda$105 : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+          str "invert"
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
+            int 1
+            closure std/gpu.lambda$106 : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+          str "off_the_end"
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
+            int 1
+            closure std/gpu.lambda$107 : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+    dictref dict$1$String trait=1 subject=String : <dict>
+    dictref dict$2$String trait=2 subject=String : <dict>
+fn std/gpu.wide_alloc -> Result[List[Int], ForeignError]
+  param v0 : String owned
+  param v1 : List[List[Float]] owned
+  param v2 : Int owned
+  param v3 : List[Int] owned
+  ev v4 : ev$Gpu owned
+  block : Result[List[Int], ForeignError]
+    loop L0
+      return
+        if : Result[List[Int], ForeignError]
+          binary ge : Bool
+            local v2 : Int
+            intrinsic len : Int
+              local v1 : List[List[Float]]
+          block : Result[List[Int], ForeignError]
+            let v5 : Result[List[Int], ForeignError]
+              ctor Result/Ok : Result[List[Int], ForeignError]
+                box from=List[Int]
+                  local v3 : List[Int]
+            drop v4
+            drop v1
+            drop v0
+            local v5 : Result[List[Int], ForeignError]
+          block : Result[List[Int], ForeignError]
+            block : Result[List[Int], ForeignError]
+              let v6 : Result[Int, ForeignError]
+                call dynamic : Result[Int, ForeignError]
+                  field ev$Gpu/ev$Gpu.0 : fn(String, Int) -> Result[Int, ForeignError]
+                    local v4 : ev$Gpu
+                  dup
+                    local v0 : String
+                  block : Int
+                    let v7 : List[Float]
+                      unbox to=List[Float]
+                        intrinsic list_index : E
+                          local v1 : List[List[Float]]
+                          local v2 : Int
+                    let v8 : Int
+                      intrinsic len : Int
+                        local v7 : List[Float]
+                    drop v7
+                    local v8 : Int
+                  dup
+                    field ev$Gpu/ev$Gpu.6 : ev
+                      local v4 : ev$Gpu
+              let v9 : Result[List[Int], ForeignError]
+                intrinsic null_ref : Result[List[Int], ForeignError]
+              sif
+                isctor Result/Ok
+                  local v6 : Result[Int, ForeignError]
+                block : Unit
+                  let v10 : Int
+                    unbox to=Int
+                      field Result/Ok.0 : T
+                        local v6 : Result[Int, ForeignError]
+                  drop v6
+                  let v11 : Result[List[Int], ForeignError]
+                    block : Result[List[Int], ForeignError]
+                      let v12 : Result[Unit, ForeignError]
+                        call dynamic : Result[Unit, ForeignError]
+                          field ev$Gpu/ev$Gpu.1 : fn(Int, List[Float]) -> Result[Unit, ForeignError]
+                            local v4 : ev$Gpu
+                          local v10 : Int
+                          unbox to=List[Float]
+                            intrinsic list_index : E
+                              local v1 : List[List[Float]]
+                              local v2 : Int
+                          dup
+                            field ev$Gpu/ev$Gpu.6 : ev
+                              local v4 : ev$Gpu
+                      let v13 : Result[List[Int], ForeignError]
+                        intrinsic null_ref : Result[List[Int], ForeignError]
+                      sif
+                        isctor Result/Ok
+                          local v12 : Result[Unit, ForeignError]
+                        block : Unit
+                          assign v13
+                            block : Never
+                              let v14 : String
+                                dup
+                                  local v0 : String
+                              drop v12
+                              let v15 : List[List[Float]]
+                                dup
+                                  local v1 : List[List[Float]]
+                              let v16 : Int
+                                binary add : Int
+                                  local v2 : Int
+                                  int 1
+                              let v17 : List[Int]
+                                block : List[Int]
+                                  let v18 : List[Int]
+                                    dup
+                                      local v3 : List[Int]
+                                  let v19 : ?
+                                    box from=Int
+                                      local v10 : Int
+                                  let v20 : List[Int]
+                                    intrinsic list_push : List[Int]
+                                      local v18 : List[Int]
+                                      local v19 : ?
+                                  drop v19
+                                  local v20 : List[Int]
+                              let v21 : String
+                                local v14 : String
+                              drop v0
+                              assign v0
+                                local v21 : String
+                              let v22 : List[List[Float]]
+                                local v15 : List[List[Float]]
+                              drop v1
+                              assign v1
+                                local v22 : List[List[Float]]
+                              assign v2
+                                local v16 : Int
+                              let v23 : List[Int]
+                                local v17 : List[Int]
+                              drop v3
+                              assign v3
+                                local v23 : List[Int]
+                              block : Never
+                                drop v13
+                                drop v9
+                                continue L0
+                          drop v4
+                          drop v0
+                          drop v1
+                          drop v3
+                        block : Unit
+                          sif
+                            isctor Result/Err
+                              local v12 : Result[Unit, ForeignError]
+                            block : Unit
+                              let v24 : ForeignError
+                                unbox to=ForeignError
+                                  dup
+                                    field Result/Err.0 : E
+                                      local v12 : Result[Unit, ForeignError]
+                              drop v0
+                              drop v1
+                              drop v3
+                              drop v4
+                              drop v12
+                              let v25 : Result[List[Int], ForeignError]
+                                ctor Result/Err : Result[List[Int], ForeignError]
+                                  box from=ForeignError
+                                    local v24 : ForeignError
+                              drop v13
+                              assign v13
+                                local v25 : Result[List[Int], ForeignError]
+                            block : Unit
+                              discard
+                                intrinsic panic : Never
+                                  str "unreachable match"
+                              drop v0
+                              drop v1
+                              drop v3
+                              drop v4
+                              drop v12
+                      local v13 : Result[List[Int], ForeignError]
+                  drop v9
+                  assign v9
+                    local v11 : Result[List[Int], ForeignError]
+                block : Unit
+                  sif
+                    isctor Result/Err
+                      local v6 : Result[Int, ForeignError]
+                    block : Unit
+                      let v26 : ForeignError
+                        unbox to=ForeignError
+                          dup
+                            field Result/Err.0 : E
+                              local v6 : Result[Int, ForeignError]
+                      drop v0
+                      drop v1
+                      drop v3
+                      drop v4
+                      drop v6
+                      let v27 : Result[List[Int], ForeignError]
+                        ctor Result/Err : Result[List[Int], ForeignError]
+                          box from=ForeignError
+                            local v26 : ForeignError
+                      drop v9
+                      assign v9
+                        local v27 : Result[List[Int], ForeignError]
+                    block : Unit
+                      discard
+                        intrinsic panic : Never
+                          str "unreachable match"
+                      drop v0
+                      drop v1
+                      drop v3
+                      drop v4
+                      drop v6
+              local v9 : Result[List[Int], ForeignError]
+fn std/gpu.wide_read -> Result[List[List[Float]], ForeignError]
+  param v0 : List[Int] owned
+  param v1 : Int owned
+  param v2 : List[List[Float]] owned
+  ev v3 : ev$Gpu owned
+  block : Result[List[List[Float]], ForeignError]
+    loop L0
+      return
+        if : Result[List[List[Float]], ForeignError]
+          binary ge : Bool
+            local v1 : Int
+            intrinsic len : Int
+              local v0 : List[Int]
+          block : Result[List[List[Float]], ForeignError]
+            let v4 : Result[List[List[Float]], ForeignError]
+              ctor Result/Ok : Result[List[List[Float]], ForeignError]
+                box from=List[List[Float]]
+                  local v2 : List[List[Float]]
+            drop v3
+            drop v0
+            local v4 : Result[List[List[Float]], ForeignError]
+          block : Result[List[List[Float]], ForeignError]
+            block : Result[List[List[Float]], ForeignError]
+              let v5 : Result[List[Float], ForeignError]
+                call dynamic : Result[List[Float], ForeignError]
+                  field ev$Gpu/ev$Gpu.2 : fn(Int) -> Result[List[Float], ForeignError]
+                    local v3 : ev$Gpu
+                  block : Int
+                    let v6 : E
+                      intrinsic list_index : E
+                        local v0 : List[Int]
+                        local v1 : Int
+                    let v7 : Int
+                      unbox to=Int
+                        local v6 : E
+                    drop v6
+                    local v7 : Int
+                  dup
+                    field ev$Gpu/ev$Gpu.6 : ev
+                      local v3 : ev$Gpu
+              let v8 : Result[List[List[Float]], ForeignError]
+                intrinsic null_ref : Result[List[List[Float]], ForeignError]
+              sif
+                isctor Result/Ok
+                  local v5 : Result[List[Float], ForeignError]
+                block : Unit
+                  let v9 : List[Float]
+                    unbox to=List[Float]
+                      dup
+                        field Result/Ok.0 : T
+                          local v5 : Result[List[Float], ForeignError]
+                  drop v5
+                  assign v8
+                    block : Never
+                      let v10 : List[Int]
+                        dup
+                          local v0 : List[Int]
+                      let v11 : Int
+                        binary add : Int
+                          local v1 : Int
+                          int 1
+                      let v12 : List[List[Float]]
+                        intrinsic list_push : List[List[Float]]
+                          dup
+                            local v2 : List[List[Float]]
+                          box from=List[Float]
+                            local v9 : List[Float]
+                      drop v9
+                      let v13 : List[Int]
+                        local v10 : List[Int]
+                      drop v0
+                      assign v0
+                        local v13 : List[Int]
+                      assign v1
+                        local v11 : Int
+                      let v14 : List[List[Float]]
+                        local v12 : List[List[Float]]
+                      drop v2
+                      assign v2
+                        local v14 : List[List[Float]]
+                      block : Never
+                        drop v8
+                        continue L0
+                  drop v3
+                  drop v0
+                  drop v2
+                block : Unit
+                  sif
+                    isctor Result/Err
+                      local v5 : Result[List[Float], ForeignError]
+                    block : Unit
+                      let v15 : ForeignError
+                        unbox to=ForeignError
+                          dup
+                            field Result/Err.0 : E
+                              local v5 : Result[List[Float], ForeignError]
+                      drop v0
+                      drop v2
+                      drop v3
+                      drop v5
+                      let v16 : Result[List[List[Float]], ForeignError]
+                        ctor Result/Err : Result[List[List[Float]], ForeignError]
+                          box from=ForeignError
+                            local v15 : ForeignError
+                      drop v8
+                      assign v8
+                        local v16 : Result[List[List[Float]], ForeignError]
+                    block : Unit
+                      discard
+                        intrinsic panic : Never
+                          str "unreachable match"
+                      drop v0
+                      drop v2
+                      drop v3
+                      drop v5
+              local v8 : Result[List[List[Float]], ForeignError]
+fn std/gpu.wide_run -> Result[List[List[Float]], ForeignError]
+  param v0 : String owned
+  param v1 : String owned
+  param v2 : List[List[Float]] owned
+  ev v3 : ev$Gpu owned
+  block : Result[List[List[Float]], ForeignError]
+    let v4 : List[Int]
+      block : List[Int]
+        let v5 : Result[List[Int], ForeignError]
+          call direct std/gpu.wide_alloc : Result[List[Int], ForeignError]
+            local v1 : String
+            local v2 : List[List[Float]]
+            int 0
+            listlit : List[Int]
+            dup
+              local v3 : ev$Gpu
+        sif
+          isctor Result/Err
+            local v5 : Result[List[Int], ForeignError]
+          block : Never
+            let v6 : Result[List[Int], ForeignError]
+              ctor Result/Err : Result[List[Int], ForeignError]
+                dup
+                  field Result/Err.0 : E
+                    local v5 : Result[List[Int], ForeignError]
+            drop v5
+            drop v3
+            drop v0
+            return
+              local v6 : Result[List[Int], ForeignError]
+        let v7 : List[Int]
+          unbox to=List[Int]
+            dup
+              field Result/Ok.0 : T
+                local v5 : Result[List[Int], ForeignError]
+        drop v5
+        local v7 : List[Int]
+    discard
+      block : Unit
+        discard
+          block : Unit
+            let v8 : Result[Unit, ForeignError]
+              call dynamic : Result[Unit, ForeignError]
+                field ev$Gpu/ev$Gpu.3 : fn(String, Int, Int, Int, List[Int]) -> Result[Unit, ForeignError]
+                  local v3 : ev$Gpu
+                local v0 : String
+                int 1
+                int 1
+                int 1
+                dup
+                  local v4 : List[Int]
+                dup
+                  field ev$Gpu/ev$Gpu.6 : ev
+                    local v3 : ev$Gpu
+            sif
+              isctor Result/Err
+                local v8 : Result[Unit, ForeignError]
+              block : Never
+                let v9 : Result[Unit, ForeignError]
+                  ctor Result/Err : Result[Unit, ForeignError]
+                    dup
+                      field Result/Err.0 : E
+                        local v8 : Result[Unit, ForeignError]
+                drop v8
+                drop v4
+                drop v3
+                return
+                  local v9 : Result[Unit, ForeignError]
+            unbox to=Unit
+              field Result/Ok.0 : T
+                local v8 : Result[Unit, ForeignError]
+        drop v8
+    call direct std/gpu.wide_read : Result[List[List[Float]], ForeignError]
+      local v4 : List[Int]
+      int 0
+      listlit : List[List[Float]]
+      local v3 : ev$Gpu
+fn std/gpu.f16_vadds -> Result[List[Float], ForeignError]
+  param v0 : List[Float] owned
+  param v1 : List[Float] owned
+  ev v2 : ev$Gpu owned
+  block : Result[List[Float], ForeignError]
+    let v3 : Int
+      intrinsic len : Int
+        local v0 : List[Float]
+    let v4 : Tensor[F16]
+      block : Tensor[F16]
+        let v5 : Result[Tensor[F16], ForeignError]
+          call direct std/gpu.alloc : Result[Tensor[D], ForeignError]
+            box from=F16
+              ctor F16/F16 : F16
+            local v3 : Int
+            dictref dict$2007$Adt2000 trait=2007 subject=F16 : <dict>
+            dup
+              local v2 : ev$Gpu
+        sif
+          isctor Result/Err
+            local v5 : Result[Tensor[F16], ForeignError]
+          block : Never
+            let v6 : Result[Tensor[F16], ForeignError]
+              ctor Result/Err : Result[Tensor[F16], ForeignError]
+                dup
+                  field Result/Err.0 : E
+                    local v5 : Result[Tensor[F16], ForeignError]
+            drop v5
+            drop v2
+            drop v1
+            drop v0
+            return
+              local v6 : Result[Tensor[F16], ForeignError]
+        let v7 : Tensor[F16]
+          unbox to=Tensor[F16]
+            dup
+              field Result/Ok.0 : T
+                local v5 : Result[Tensor[F16], ForeignError]
+        drop v5
+        local v7 : Tensor[F16]
+    let v8 : Tensor[F16]
+      block : Tensor[F16]
+        let v9 : Result[Tensor[F16], ForeignError]
+          call direct std/gpu.alloc : Result[Tensor[D], ForeignError]
+            box from=F16
+              ctor F16/F16 : F16
+            local v3 : Int
+            dictref dict$2007$Adt2000 trait=2007 subject=F16 : <dict>
+            dup
+              local v2 : ev$Gpu
+        sif
+          isctor Result/Err
+            local v9 : Result[Tensor[F16], ForeignError]
+          block : Never
+            let v10 : Result[Tensor[F16], ForeignError]
+              ctor Result/Err : Result[Tensor[F16], ForeignError]
+                dup
+                  field Result/Err.0 : E
+                    local v9 : Result[Tensor[F16], ForeignError]
+            drop v9
+            drop v4
+            drop v2
+            drop v1
+            drop v0
+            return
+              local v10 : Result[Tensor[F16], ForeignError]
+        let v11 : Tensor[F16]
+          unbox to=Tensor[F16]
+            dup
+              field Result/Ok.0 : T
+                local v9 : Result[Tensor[F16], ForeignError]
+        drop v9
+        local v11 : Tensor[F16]
+    let v12 : Tensor[F16]
+      block : Tensor[F16]
+        let v13 : Result[Tensor[F16], ForeignError]
+          call direct std/gpu.alloc : Result[Tensor[D], ForeignError]
+            box from=F16
+              ctor F16/F16 : F16
+            local v3 : Int
+            dictref dict$2007$Adt2000 trait=2007 subject=F16 : <dict>
+            dup
+              local v2 : ev$Gpu
+        sif
+          isctor Result/Err
+            local v13 : Result[Tensor[F16], ForeignError]
+          block : Never
+            let v14 : Result[Tensor[F16], ForeignError]
+              ctor Result/Err : Result[Tensor[F16], ForeignError]
+                dup
+                  field Result/Err.0 : E
+                    local v13 : Result[Tensor[F16], ForeignError]
+            drop v13
+            drop v8
+            drop v4
+            drop v2
+            drop v1
+            drop v0
+            return
+              local v14 : Result[Tensor[F16], ForeignError]
+        let v15 : Tensor[F16]
+          unbox to=Tensor[F16]
+            dup
+              field Result/Ok.0 : T
+                local v13 : Result[Tensor[F16], ForeignError]
+        drop v13
+        local v15 : Tensor[F16]
+    discard
+      block : Unit
+        discard
+          block : Unit
+            let v16 : Result[Unit, ForeignError]
+              call direct std/gpu.upload : Result[Unit, ForeignError]
+                dup
+                  local v4 : Tensor[F16]
+                local v0 : List[Float]
+                dup
+                  local v2 : ev$Gpu
+            sif
+              isctor Result/Err
+                local v16 : Result[Unit, ForeignError]
+              block : Never
+                let v17 : Result[Unit, ForeignError]
+                  ctor Result/Err : Result[Unit, ForeignError]
+                    dup
+                      field Result/Err.0 : E
+                        local v16 : Result[Unit, ForeignError]
+                drop v16
+                drop v12
+                drop v8
+                drop v4
+                drop v2
+                drop v1
+                return
+                  local v17 : Result[Unit, ForeignError]
+            unbox to=Unit
+              field Result/Ok.0 : T
+                local v16 : Result[Unit, ForeignError]
+        drop v16
+    discard
+      block : Unit
+        discard
+          block : Unit
+            let v18 : Result[Unit, ForeignError]
+              call direct std/gpu.upload : Result[Unit, ForeignError]
+                dup
+                  local v8 : Tensor[F16]
+                local v1 : List[Float]
+                dup
+                  local v2 : ev$Gpu
+            sif
+              isctor Result/Err
+                local v18 : Result[Unit, ForeignError]
+              block : Never
+                let v19 : Result[Unit, ForeignError]
+                  ctor Result/Err : Result[Unit, ForeignError]
+                    dup
+                      field Result/Err.0 : E
+                        local v18 : Result[Unit, ForeignError]
+                drop v18
+                drop v12
+                drop v8
+                drop v4
+                drop v2
+                return
+                  local v19 : Result[Unit, ForeignError]
+            unbox to=Unit
+              field Result/Ok.0 : T
+                local v18 : Result[Unit, ForeignError]
+        drop v18
+    discard
+      block : Unit
+        discard
+          block : Unit
+            let v20 : Result[Unit, ForeignError]
+              call direct std/gpu.launch : Result[Unit, ForeignError]
+                str "vadd"
+                int 1
+                listlit : List[Int]
+                  box from=Int
+                    call direct std/gpu.handle_of : Int
+                      local v4 : Tensor[F16]
+                  box from=Int
+                    call direct std/gpu.handle_of : Int
+                      local v8 : Tensor[F16]
+                  box from=Int
+                    call direct std/gpu.handle_of : Int
+                      dup
+                        local v12 : Tensor[F16]
+                dup
+                  local v2 : ev$Gpu
+            sif
+              isctor Result/Err
+                local v20 : Result[Unit, ForeignError]
+              block : Never
+                let v21 : Result[Unit, ForeignError]
+                  ctor Result/Err : Result[Unit, ForeignError]
+                    dup
+                      field Result/Err.0 : E
+                        local v20 : Result[Unit, ForeignError]
+                drop v20
+                drop v12
+                drop v2
+                return
+                  local v21 : Result[Unit, ForeignError]
+            unbox to=Unit
+              field Result/Ok.0 : T
+                local v20 : Result[Unit, ForeignError]
+        drop v20
+    call direct std/gpu.download : Result[List[Float], ForeignError]
+      local v12 : Tensor[F16]
+      local v2 : ev$Gpu
+fn std/gpu.masked_kernels -> Map[String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])]
+  call direct std/map.from : Map[K, V]
+    listlit : List[(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
           str "vadd_tail"
-          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
             int 3
-            closure std/gpu.lambda$93 : fn(List[String], List[List[Float]]) -> List[Float]
-      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
+            call direct std/gpu.last_out : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+              closure std/gpu.lambda$108 : fn(List[String], List[List[Float]]) -> List[Float]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
           str "copy"
-          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
             int 2
-            closure std/gpu.lambda$94 : fn(List[String], List[List[Float]]) -> List[Float]
-      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
+            call direct std/gpu.last_out : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+              closure std/gpu.lambda$109 : fn(List[String], List[List[Float]]) -> List[Float]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
           str "relu"
-          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
             int 2
-            closure std/gpu.lambda$95 : fn(List[String], List[List[Float]]) -> List[Float]
-      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
+            call direct std/gpu.last_out : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+              closure std/gpu.lambda$110 : fn(List[String], List[List[Float]]) -> List[Float]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
           str "leaky_relu"
-          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
             int 2
-            closure std/gpu.lambda$96 : fn(List[String], List[List[Float]]) -> List[Float]
-      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
-        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[Float]))
+            call direct std/gpu.last_out : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+              closure std/gpu.lambda$111 : fn(List[String], List[List[Float]]) -> List[Float]
+      box from=(String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
+        tuple : (String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]))
           str "clip"
-          tuple : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+          tuple : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
             int 2
-            closure std/gpu.lambda$97 : fn(List[String], List[List[Float]]) -> List[Float]
+            call direct std/gpu.last_out : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+              closure std/gpu.lambda$112 : fn(List[String], List[List[Float]]) -> List[Float]
     dictref dict$1$String trait=1 subject=String : <dict>
     dictref dict$2$String trait=2 subject=String : <dict>
 fn std/gpu.masked_run -> Result[List[Float], ForeignError]
@@ -5002,7 +6517,7 @@ fn std/gpu.masked_run -> Result[List[Float], ForeignError]
         intrinsic range : List[Int]
           int 0
           int 8
-        closure std/gpu.lambda$98 : fn(Int) -> Float
+        closure std/gpu.lambda$113 : fn(Int) -> Float
         box from=Unit
           unit
     block : Result[List[Float], ForeignError]
@@ -5012,21 +6527,21 @@ fn std/gpu.masked_run -> Result[List[Float], ForeignError]
             box from=F64
               ctor F64/F64 : F64
             int 8
-            dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+            dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
             dup
               local v3 : ev$Gpu
           call direct std/gpu.alloc : Result[Tensor[D], ForeignError]
             box from=F64
               ctor F64/F64 : F64
             int 8
-            dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+            dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
             dup
               local v3 : ev$Gpu
           call direct std/gpu.alloc : Result[Tensor[D], ForeignError]
             box from=F64
               ctor F64/F64 : F64
             int 8
-            dictref dict$1987$Adt1979 trait=1987 subject=F64 : <dict>
+            dictref dict$2007$Adt1996 trait=2007 subject=F64 : <dict>
             dup
               local v3 : ev$Gpu
       let v6 : Result[List[Float], ForeignError]
@@ -5261,70 +6776,112 @@ fn std/gpu.masked_answers -> List[List[Float]]
           str "leaky_relu"
         box from=String
           str "clip"
-      closure std/gpu.lambda$99 : fn(String) -> List[Float] !Gpu
+      closure std/gpu.lambda$114 : fn(String) -> List[Float] !Gpu
         local v1 : List[Float]
         local v2 : List[Float]
         local v3 : List[Float]
       ctor ev$Pack/ev$Pack : ev$Pack
-        int 5955
+        int 6015
         box from=ev$Gpu
           local v0 : ev$Gpu
         box from=Unit
           unit
-fn std/gpu.dtype_name -> String impl_of=1987/F64
+fn std/gpu.dtype_name -> String impl_of=2007/F64
   param v0 : F64 owned
   block : String
     let v1 : String
       str "f64"
     drop v0
     local v1 : String
-fn std/gpu.dtype_bytes -> Int impl_of=1987/F64
+fn std/gpu.dtype_bytes -> Int impl_of=2007/F64
   param v0 : F64 owned
   block : Int
     let v1 : Int
       int 8
     drop v0
     local v1 : Int
-fn std/gpu.dtype_name -> String impl_of=1987/F32
+fn std/gpu.dtype_name -> String impl_of=2007/F32
   param v0 : F32 owned
   block : String
     let v1 : String
       str "f32"
     drop v0
     local v1 : String
-fn std/gpu.dtype_bytes -> Int impl_of=1987/F32
+fn std/gpu.dtype_bytes -> Int impl_of=2007/F32
   param v0 : F32 owned
   block : Int
     let v1 : Int
       int 4
     drop v0
     local v1 : Int
-fn std/gpu.dtype_name -> String impl_of=1987/BF16
+fn std/gpu.dtype_name -> String impl_of=2007/BF16
   param v0 : BF16 owned
   block : String
     let v1 : String
       str "bf16"
     drop v0
     local v1 : String
-fn std/gpu.dtype_bytes -> Int impl_of=1987/BF16
+fn std/gpu.dtype_bytes -> Int impl_of=2007/BF16
   param v0 : BF16 owned
   block : Int
     let v1 : Int
       int 2
     drop v0
     local v1 : Int
-fn std/gpu.dtype_name -> String impl_of=1987/I32
+fn std/gpu.dtype_name -> String impl_of=2007/I32
   param v0 : I32 owned
   block : String
     let v1 : String
       str "i32"
     drop v0
     local v1 : String
-fn std/gpu.dtype_bytes -> Int impl_of=1987/I32
+fn std/gpu.dtype_bytes -> Int impl_of=2007/I32
   param v0 : I32 owned
   block : Int
     let v1 : Int
       int 4
+    drop v0
+    local v1 : Int
+fn std/gpu.dtype_name -> String impl_of=2007/F16
+  param v0 : F16 owned
+  block : String
+    let v1 : String
+      str "f16"
+    drop v0
+    local v1 : String
+fn std/gpu.dtype_bytes -> Int impl_of=2007/F16
+  param v0 : F16 owned
+  block : Int
+    let v1 : Int
+      int 2
+    drop v0
+    local v1 : Int
+fn std/gpu.dtype_name -> String impl_of=2007/I8
+  param v0 : I8 owned
+  block : String
+    let v1 : String
+      str "i8"
+    drop v0
+    local v1 : String
+fn std/gpu.dtype_bytes -> Int impl_of=2007/I8
+  param v0 : I8 owned
+  block : Int
+    let v1 : Int
+      int 1
+    drop v0
+    local v1 : Int
+fn std/gpu.dtype_name -> String impl_of=2007/U8
+  param v0 : U8 owned
+  block : String
+    let v1 : String
+      str "u8"
+    drop v0
+    local v1 : String
+fn std/gpu.dtype_bytes -> Int impl_of=2007/U8
+  param v0 : U8 owned
+  block : Int
+    let v1 : Int
+      int 1
     drop v0
     local v1 : Int
 fn std/gpu.lambda$0 -> Float
@@ -5399,6 +6956,58 @@ fn std/gpu.lambda$1 -> Float
     drop v2
     local v3 : Float
 fn std/gpu.lambda$2 -> Float
+  capture v0 : Bytes owned
+  param v1 : Int owned
+  ev v2 : ev owned
+  block : Float
+    let v3 : Float
+      call direct std/narrow.fp16_of_bits : Float
+        binary bor : Int
+          call direct std/bytes.at : Int
+            local v0 : Bytes
+            binary mul : Int
+              int 2
+              local v1 : Int
+          binary shl : Int
+            call direct std/bytes.at : Int
+              local v0 : Bytes
+              binary add : Int
+                binary mul : Int
+                  int 2
+                  local v1 : Int
+                int 1
+            int 8
+    drop v0
+    drop v2
+    local v3 : Float
+fn std/gpu.lambda$3 -> Float
+  capture v0 : Bytes owned
+  param v1 : Int owned
+  ev v2 : ev owned
+  block : Float
+    let v3 : Float
+      intrinsic to_float : Float
+        call direct std/gpu.wrap_i8 : Int
+          call direct std/bytes.at : Int
+            local v0 : Bytes
+            local v1 : Int
+    drop v0
+    drop v2
+    local v3 : Float
+fn std/gpu.lambda$4 -> Float
+  capture v0 : Bytes owned
+  param v1 : Int owned
+  ev v2 : ev owned
+  block : Float
+    let v3 : Float
+      intrinsic to_float : Float
+        call direct std/bytes.at : Int
+          local v0 : Bytes
+          local v1 : Int
+    drop v0
+    drop v2
+    local v3 : Float
+fn std/gpu.lambda$5 -> Float
   capture v0 : String owned
   capture v1 : List[Float] owned
   capture v2 : List[Float] owned
@@ -5433,7 +7042,7 @@ fn std/gpu.lambda$2 -> Float
     drop v2
     drop v4
     local v5 : Float
-fn std/gpu.lambda$4 -> Float
+fn std/gpu.lambda$7 -> Float
   capture v0 : String owned
   capture v1 : List[Float] owned
   capture v2 : Int owned
@@ -5470,7 +7079,7 @@ fn std/gpu.lambda$4 -> Float
     drop v1
     drop v8
     local v9 : Float
-fn std/gpu.lambda$3 -> Float
+fn std/gpu.lambda$6 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : List[Float] owned
@@ -5521,7 +7130,7 @@ fn std/gpu.lambda$3 -> Float
                         local v11 : E
                     drop v11
                     local v12 : Float
-                closure std/gpu.lambda$4 : fn(Float, Int) -> Float
+                closure std/gpu.lambda$7 : fn(Float, Int) -> Float
                   local v3 : String
                   dup
                     local v2 : List[Float]
@@ -5538,7 +7147,7 @@ fn std/gpu.lambda$3 -> Float
             local v13 : Float
     drop v2
     local v8 : Float
-fn std/gpu.lambda$5 -> Float
+fn std/gpu.lambda$8 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -5588,7 +7197,7 @@ fn std/gpu.lambda$5 -> Float
     drop v4
     drop v6
     local v7 : Float
-fn std/gpu.lambda$6 -> Float
+fn std/gpu.lambda$9 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -5625,7 +7234,7 @@ fn std/gpu.lambda$6 -> Float
     drop v3
     drop v5
     local v6 : Float
-fn std/gpu.lambda$7 -> Float
+fn std/gpu.lambda$10 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -5678,7 +7287,7 @@ fn std/gpu.lambda$7 -> Float
     drop v3
     drop v5
     local v6 : Float
-fn std/gpu.lambda$8 -> Float
+fn std/gpu.lambda$11 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -5743,7 +7352,7 @@ fn std/gpu.lambda$8 -> Float
     drop v4
     drop v6
     local v7 : Float
-fn std/gpu.lambda$9 -> Float
+fn std/gpu.lambda$12 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -5813,7 +7422,7 @@ fn std/gpu.lambda$9 -> Float
     drop v5
     drop v7
     local v8 : Float
-fn std/gpu.lambda$10 -> Float
+fn std/gpu.lambda$13 -> Float
   capture v0 : List[Float] owned
   param v1 : Float owned
   param v2 : Int owned
@@ -5835,7 +7444,7 @@ fn std/gpu.lambda$10 -> Float
     drop v0
     drop v3
     local v4 : Float
-fn std/gpu.lambda$11 -> Float
+fn std/gpu.lambda$14 -> Float
   capture v0 : List[Float] owned
   param v1 : Float owned
   param v2 : Int owned
@@ -5871,7 +7480,7 @@ fn std/gpu.lambda$11 -> Float
     drop v0
     drop v3
     local v4 : Float
-fn std/gpu.lambda$12 -> Float
+fn std/gpu.lambda$15 -> Float
   capture v0 : String owned
   capture v1 : Float owned
   capture v2 : List[Float] owned
@@ -5897,7 +7506,7 @@ fn std/gpu.lambda$12 -> Float
     drop v2
     drop v4
     local v5 : Float
-fn std/gpu.lambda$13 -> Float
+fn std/gpu.lambda$16 -> Float
   capture v0 : List[Float] owned
   capture v1 : Float owned
   param v2 : Int owned
@@ -5920,7 +7529,7 @@ fn std/gpu.lambda$13 -> Float
     drop v0
     drop v3
     local v4 : Float
-fn std/gpu.lambda$14 -> Float
+fn std/gpu.lambda$17 -> Float
   capture v0 : List[Float] owned
   param v1 : Float owned
   param v2 : Int owned
@@ -5942,7 +7551,7 @@ fn std/gpu.lambda$14 -> Float
     drop v0
     drop v3
     local v4 : Float
-fn std/gpu.lambda$15 -> Float
+fn std/gpu.lambda$18 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -5982,7 +7591,7 @@ fn std/gpu.lambda$15 -> Float
     drop v4
     drop v6
     local v7 : Float
-fn std/gpu.lambda$16 -> Float
+fn std/gpu.lambda$19 -> Float
   capture v0 : List[Float] owned
   capture v1 : List[Float] owned
   param v2 : Float owned
@@ -6017,7 +7626,7 @@ fn std/gpu.lambda$16 -> Float
     drop v1
     drop v4
     local v5 : Float
-fn std/gpu.lambda$17 -> Float
+fn std/gpu.lambda$20 -> Float
   capture v0 : List[Float] owned
   capture v1 : List[Float] owned
   param v2 : Float owned
@@ -6074,7 +7683,7 @@ fn std/gpu.lambda$17 -> Float
     drop v1
     drop v4
     local v5 : Float
-fn std/gpu.lambda$18 -> Float
+fn std/gpu.lambda$21 -> Float
   capture v0 : List[Float] owned
   param v1 : Float owned
   param v2 : Int owned
@@ -6107,7 +7716,7 @@ fn std/gpu.lambda$18 -> Float
     drop v0
     drop v3
     local v4 : Float
-fn std/gpu.lambda$19 -> Float
+fn std/gpu.lambda$22 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -6147,7 +7756,7 @@ fn std/gpu.lambda$19 -> Float
     drop v4
     drop v6
     local v7 : Float
-fn std/gpu.lambda$20 -> Float
+fn std/gpu.lambda$23 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -6200,7 +7809,7 @@ fn std/gpu.lambda$20 -> Float
     drop v3
     drop v5
     local v6 : Float
-fn std/gpu.lambda$21 -> Float
+fn std/gpu.lambda$24 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -6244,7 +7853,7 @@ fn std/gpu.lambda$21 -> Float
     drop v3
     drop v5
     local v6 : Float
-fn std/gpu.lambda$22 -> Float
+fn std/gpu.lambda$25 -> Float
   capture v0 : List[Float] owned
   capture v1 : List[Float] owned
   capture v2 : Float owned
@@ -6339,7 +7948,7 @@ fn std/gpu.lambda$22 -> Float
           local v13 : Float
         block : Float
           local v16 : Float
-fn std/gpu.lambda$23 -> Float
+fn std/gpu.lambda$26 -> Float
   capture v0 : Float owned
   capture v1 : List[Float] owned
   capture v2 : List[Float] owned
@@ -6411,7 +8020,7 @@ fn std/gpu.lambda$23 -> Float
               binary sub : Float
                 float 0.0
                 local v8 : Float
-fn std/gpu.lambda$25 -> Float
+fn std/gpu.lambda$28 -> Float
   capture v0 : List[Float] owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -6458,7 +8067,7 @@ fn std/gpu.lambda$25 -> Float
     drop v3
     drop v8
     local v9 : Float
-fn std/gpu.lambda$24 -> Float
+fn std/gpu.lambda$27 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : Int owned
@@ -6486,7 +8095,7 @@ fn std/gpu.lambda$24 -> Float
               local v2 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$25 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$28 : fn(Float, Int) -> Float
               local v3 : List[Float]
               local v7 : Int
               local v2 : Int
@@ -6500,7 +8109,7 @@ fn std/gpu.lambda$24 -> Float
             local v9 : A
         drop v9
         local v10 : Float
-fn std/gpu.lambda$27 -> Float
+fn std/gpu.lambda$30 -> Float
   capture v0 : List[Float] owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -6561,7 +8170,7 @@ fn std/gpu.lambda$27 -> Float
     drop v5
     drop v10
     local v11 : Float
-fn std/gpu.lambda$26 -> Float
+fn std/gpu.lambda$29 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : String owned
@@ -6600,7 +8209,7 @@ fn std/gpu.lambda$26 -> Float
               local v3 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$27 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$30 : fn(Float, Int) -> Float
               local v4 : List[Float]
               local v8 : Int
               local v0 : Int
@@ -6616,7 +8225,7 @@ fn std/gpu.lambda$26 -> Float
             local v11 : A
         drop v11
         local v12 : Float
-fn std/gpu.lambda$28 -> Float
+fn std/gpu.lambda$31 -> Float
   capture v0 : String owned
   capture v1 : List[Float] owned
   capture v2 : Int owned
@@ -6648,7 +8257,7 @@ fn std/gpu.lambda$28 -> Float
     drop v1
     drop v5
     local v6 : Float
-fn std/gpu.lambda$29 -> Float
+fn std/gpu.lambda$32 -> Float
   capture v0 : fn(Int) -> Float owned
   param v1 : Float owned
   param v2 : Int owned
@@ -6665,7 +8274,7 @@ fn std/gpu.lambda$29 -> Float
     drop v0
     drop v3
     local v4 : Float
-fn std/gpu.lambda$30 -> Float
+fn std/gpu.lambda$33 -> Float
   capture v0 : fn(Int) -> Float owned
   capture v1 : Float owned
   param v2 : Float owned
@@ -6693,7 +8302,7 @@ fn std/gpu.lambda$30 -> Float
     drop v0
     drop v4
     local v5 : Float
-fn std/gpu.lambda$32 -> Float
+fn std/gpu.lambda$35 -> Float
   capture v0 : List[Float] owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -6715,7 +8324,7 @@ fn std/gpu.lambda$32 -> Float
     drop v0
     drop v4
     local v6 : Float
-fn std/gpu.lambda$33 -> Float
+fn std/gpu.lambda$36 -> Float
   capture v0 : List[Float] owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -6737,7 +8346,7 @@ fn std/gpu.lambda$33 -> Float
     drop v0
     drop v4
     local v6 : Float
-fn std/gpu.lambda$31 -> (Float, Float)
+fn std/gpu.lambda$34 -> (Float, Float)
   capture v0 : Int owned
   capture v1 : List[Float] owned
   param v2 : Int owned
@@ -6746,7 +8355,7 @@ fn std/gpu.lambda$31 -> (Float, Float)
     let v4 : Float
       call direct std/gpu.mean_of : Float
         local v0 : Int
-        closure std/gpu.lambda$32 : fn(Int) -> Float
+        closure std/gpu.lambda$35 : fn(Int) -> Float
           dup
             local v1 : List[Float]
           local v2 : Int
@@ -6757,11 +8366,11 @@ fn std/gpu.lambda$31 -> (Float, Float)
       call direct std/gpu.var_of : Float
         local v0 : Int
         local v4 : Float
-        closure std/gpu.lambda$33 : fn(Int) -> Float
+        closure std/gpu.lambda$36 : fn(Int) -> Float
           local v1 : List[Float]
           local v2 : Int
           local v0 : Int
-fn std/gpu.lambda$34 -> Float
+fn std/gpu.lambda$37 -> Float
   capture v0 : Int owned
   capture v1 : List[(Float, Float)] owned
   capture v2 : String owned
@@ -6840,7 +8449,7 @@ fn std/gpu.lambda$34 -> Float
     drop v5
     drop v6
     local v14 : Float
-fn std/gpu.lambda$36 -> Float
+fn std/gpu.lambda$39 -> Float
   capture v0 : List[Float] owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -6862,7 +8471,7 @@ fn std/gpu.lambda$36 -> Float
     drop v0
     drop v4
     local v6 : Float
-fn std/gpu.lambda$37 -> Float
+fn std/gpu.lambda$40 -> Float
   capture v0 : List[Float] owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -6884,7 +8493,7 @@ fn std/gpu.lambda$37 -> Float
     drop v0
     drop v4
     local v6 : Float
-fn std/gpu.lambda$35 -> (Float, Float)
+fn std/gpu.lambda$38 -> (Float, Float)
   capture v0 : Int owned
   capture v1 : List[Float] owned
   capture v2 : Int owned
@@ -6894,7 +8503,7 @@ fn std/gpu.lambda$35 -> (Float, Float)
     let v5 : Float
       call direct std/gpu.mean_of : Float
         local v0 : Int
-        closure std/gpu.lambda$36 : fn(Int) -> Float
+        closure std/gpu.lambda$39 : fn(Int) -> Float
           dup
             local v1 : List[Float]
           local v2 : Int
@@ -6905,11 +8514,11 @@ fn std/gpu.lambda$35 -> (Float, Float)
       call direct std/gpu.var_of : Float
         local v0 : Int
         local v5 : Float
-        closure std/gpu.lambda$37 : fn(Int) -> Float
+        closure std/gpu.lambda$40 : fn(Int) -> Float
           local v1 : List[Float]
           local v2 : Int
           local v3 : Int
-fn std/gpu.lambda$38 -> Float
+fn std/gpu.lambda$41 -> Float
   capture v0 : Int owned
   capture v1 : List[(Float, Float)] owned
   capture v2 : String owned
@@ -6984,7 +8593,7 @@ fn std/gpu.lambda$38 -> Float
     drop v5
     drop v6
     local v13 : Float
-fn std/gpu.lambda$40 -> Float
+fn std/gpu.lambda$43 -> Float
   capture v0 : List[Float] owned
   capture v1 : Int owned
   param v2 : Int owned
@@ -7003,7 +8612,7 @@ fn std/gpu.lambda$40 -> Float
     drop v0
     drop v3
     local v5 : Float
-fn std/gpu.lambda$41 -> Float
+fn std/gpu.lambda$44 -> Float
   capture v0 : List[Float] owned
   capture v1 : Int owned
   param v2 : Int owned
@@ -7022,7 +8631,7 @@ fn std/gpu.lambda$41 -> Float
     drop v0
     drop v3
     local v5 : Float
-fn std/gpu.lambda$39 -> (Float, Float)
+fn std/gpu.lambda$42 -> (Float, Float)
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -7049,7 +8658,7 @@ fn std/gpu.lambda$39 -> (Float, Float)
     let v8 : Float
       call direct std/gpu.mean_of : Float
         local v3 : Int
-        closure std/gpu.lambda$40 : fn(Int) -> Float
+        closure std/gpu.lambda$43 : fn(Int) -> Float
           dup
             local v4 : List[Float]
           local v7 : Int
@@ -7058,10 +8667,10 @@ fn std/gpu.lambda$39 -> (Float, Float)
       call direct std/gpu.var_of : Float
         local v3 : Int
         local v8 : Float
-        closure std/gpu.lambda$41 : fn(Int) -> Float
+        closure std/gpu.lambda$44 : fn(Int) -> Float
           local v4 : List[Float]
           local v7 : Int
-fn std/gpu.lambda$42 -> Float
+fn std/gpu.lambda$45 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : List[(Float, Float)] owned
@@ -7151,7 +8760,7 @@ fn std/gpu.lambda$42 -> Float
     drop v8
     drop v9
     local v16 : Float
-fn std/gpu.lambda$43 -> Float
+fn std/gpu.lambda$46 -> Float
   capture v0 : List[Float] owned
   capture v1 : List[Float] owned
   param v2 : Int owned
@@ -7183,7 +8792,7 @@ fn std/gpu.lambda$43 -> Float
     drop v1
     drop v3
     local v4 : Float
-fn std/gpu.lambda$45 -> Float
+fn std/gpu.lambda$48 -> Float
   capture v0 : List[Float] owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -7226,7 +8835,7 @@ fn std/gpu.lambda$45 -> Float
     drop v0
     drop v5
     local v6 : Float
-fn std/gpu.lambda$44 -> Float
+fn std/gpu.lambda$47 -> Float
   capture v0 : Int owned
   capture v1 : List[Float] owned
   capture v2 : Float owned
@@ -7245,7 +8854,7 @@ fn std/gpu.lambda$44 -> Float
                     local v0 : Int
                   box from=Float
                     float 0.0
-                  closure std/gpu.lambda$45 : fn(Float, Int) -> Float
+                  closure std/gpu.lambda$48 : fn(Float, Int) -> Float
                     local v1 : List[Float]
                     local v3 : Int
                     local v0 : Int
@@ -7261,7 +8870,7 @@ fn std/gpu.lambda$44 -> Float
           local v2 : Float
     drop v4
     local v5 : Float
-fn std/gpu.lambda$46 -> Float
+fn std/gpu.lambda$49 -> Float
   capture v0 : String owned
   capture v1 : List[Float] owned
   capture v2 : List[Float] owned
@@ -7314,7 +8923,7 @@ fn std/gpu.lambda$46 -> Float
     drop v4
     drop v6
     local v7 : Float
-fn std/gpu.lambda$48 -> Float
+fn std/gpu.lambda$51 -> Float
   capture v0 : String owned
   capture v1 : List[Float] owned
   capture v2 : Int owned
@@ -7360,7 +8969,7 @@ fn std/gpu.lambda$48 -> Float
     drop v3
     drop v6
     local v7 : Float
-fn std/gpu.lambda$47 -> Float
+fn std/gpu.lambda$50 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : String owned
@@ -7384,7 +8993,7 @@ fn std/gpu.lambda$47 -> Float
                   local v1 : Int
                 box from=Float
                   float 0.0
-                closure std/gpu.lambda$48 : fn(Float, Int) -> Float
+                closure std/gpu.lambda$51 : fn(Float, Int) -> Float
                   local v2 : String
                   local v3 : List[Float]
                   local v6 : Int
@@ -7408,7 +9017,7 @@ fn std/gpu.lambda$47 -> Float
     drop v5
     drop v7
     local v8 : Float
-fn std/gpu.lambda$50 -> Float
+fn std/gpu.lambda$53 -> Float
   capture v0 : String owned
   capture v1 : List[Float] owned
   capture v2 : Int owned
@@ -7467,7 +9076,7 @@ fn std/gpu.lambda$50 -> Float
     drop v6
     drop v9
     local v10 : Float
-fn std/gpu.lambda$49 -> Float
+fn std/gpu.lambda$52 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -7503,7 +9112,7 @@ fn std/gpu.lambda$49 -> Float
                 local v2 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$50 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$53 : fn(Float, Int) -> Float
               local v3 : String
               local v4 : List[Float]
               local v10 : Int
@@ -7529,7 +9138,7 @@ fn std/gpu.lambda$49 -> Float
       drop v4
       drop v3
       local v14 : Float
-fn std/gpu.lambda$52 -> Float
+fn std/gpu.lambda$55 -> Float
   capture v0 : List[Float] owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -7576,7 +9185,7 @@ fn std/gpu.lambda$52 -> Float
         local v8 : Float
       block : Float
         local v5 : Float
-fn std/gpu.lambda$51 -> Float
+fn std/gpu.lambda$54 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : String owned
@@ -7617,7 +9226,7 @@ fn std/gpu.lambda$51 -> Float
                   binary div : Float
                     float 1.0
                     float 0.0
-              closure std/gpu.lambda$52 : fn(Float, Int) -> Float
+              closure std/gpu.lambda$55 : fn(Float, Int) -> Float
                 local v4 : List[Float]
                 local v9 : Int
                 local v3 : Int
@@ -7640,7 +9249,7 @@ fn std/gpu.lambda$51 -> Float
       drop v4
       drop v2
       local v13 : Float
-fn std/gpu.lambda$53 -> Float
+fn std/gpu.lambda$56 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -7703,7 +9312,7 @@ fn std/gpu.lambda$53 -> Float
     drop v4
     drop v6
     local v7 : Float
-fn std/gpu.lambda$54 -> Float
+fn std/gpu.lambda$57 -> Float
   capture v0 : Int owned
   capture v1 : String owned
   capture v2 : List[Float] owned
@@ -7803,7 +9412,7 @@ fn std/gpu.lambda$54 -> Float
           local v19 : Float
     drop v1
     local v9 : Float
-fn std/gpu.lambda$55 -> Float
+fn std/gpu.lambda$58 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : String owned
@@ -7942,7 +9551,7 @@ fn std/gpu.lambda$55 -> Float
       drop v3
       drop v2
       local v21 : Float
-fn std/gpu.lambda$57 -> Float
+fn std/gpu.lambda$60 -> Float
   capture v0 : String owned
   capture v1 : List[Float] owned
   capture v2 : Int owned
@@ -7999,7 +9608,7 @@ fn std/gpu.lambda$57 -> Float
     drop v5
     drop v9
     local v10 : Float
-fn std/gpu.lambda$56 -> Float
+fn std/gpu.lambda$59 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -8035,7 +9644,7 @@ fn std/gpu.lambda$56 -> Float
               local v2 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$57 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$60 : fn(Float, Int) -> Float
               local v3 : String
               local v4 : List[Float]
               local v10 : Int
@@ -8061,7 +9670,7 @@ fn std/gpu.lambda$56 -> Float
       drop v4
       drop v3
       local v14 : Float
-fn std/gpu.lambda$59 -> Float
+fn std/gpu.lambda$62 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -8151,7 +9760,7 @@ fn std/gpu.lambda$59 -> Float
     drop v7
     drop v8
     local v17 : Float
-fn std/gpu.lambda$58 -> Float
+fn std/gpu.lambda$61 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -8189,7 +9798,7 @@ fn std/gpu.lambda$58 -> Float
                 local v2 : Int
             box from=Float
               float 0.0
-            closure std/gpu.lambda$59 : fn(Float, Int) -> Float
+            closure std/gpu.lambda$62 : fn(Float, Int) -> Float
               local v10 : Int
               local v2 : Int
               local v3 : Int
@@ -8217,7 +9826,7 @@ fn std/gpu.lambda$58 -> Float
       drop v5
       drop v4
       local v14 : Float
-fn std/gpu.lambda$60 -> Int
+fn std/gpu.lambda$63 -> Int
   capture v0 : List[Float] owned
   capture v1 : Int owned
   param v2 : Int owned
@@ -8240,7 +9849,7 @@ fn std/gpu.lambda$60 -> Int
     drop v0
     drop v4
     local v5 : Int
-fn std/gpu.lambda$61 -> Int
+fn std/gpu.lambda$64 -> Int
   capture v0 : List[Float] owned
   param v1 : Int owned
   param v2 : Int owned
@@ -8256,7 +9865,7 @@ fn std/gpu.lambda$61 -> Int
     drop v0
     drop v3
     local v4 : Int
-fn std/gpu.lambda$63 -> Int
+fn std/gpu.lambda$66 -> Int
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : Int owned
@@ -8272,7 +9881,7 @@ fn std/gpu.lambda$63 -> Int
         local v2 : Int
     drop v5
     local v6 : Int
-fn std/gpu.lambda$62 -> Float
+fn std/gpu.lambda$65 -> Float
   capture v0 : Int owned
   capture v1 : Int owned
   capture v2 : List[Float] owned
@@ -8300,7 +9909,7 @@ fn std/gpu.lambda$62 -> Float
                     call direct std/gpu.as_i32 : Int
                       local v2 : List[Float]
                       local v7 : Int
-                  closure std/gpu.lambda$63 : fn(Int, Int) -> Int
+                  closure std/gpu.lambda$66 : fn(Int, Int) -> Int
                     local v3 : Int
                     local v4 : Int
                     local v5 : Int
@@ -8319,7 +9928,7 @@ fn std/gpu.lambda$62 -> Float
     drop v6
     drop v8
     local v9 : Float
-fn std/gpu.lambda$64 -> Float
+fn std/gpu.lambda$67 -> Float
   capture v0 : Int owned
   capture v1 : List[Float] owned
   capture v2 : List[Float] owned
@@ -8530,7 +10139,335 @@ fn std/gpu.lambda$64 -> Float
       drop v2
       drop v1
       local v38 : Float
-fn std/gpu.lambda$65 -> List[Float]
+fn std/gpu.lambda$68 -> Float
+  capture v0 : Int owned
+  capture v1 : List[String] owned
+  capture v2 : List[Float] owned
+  capture v3 : List[Float] owned
+  capture v4 : List[Float] owned
+  param v5 : Int owned
+  ev v6 : ev owned
+  block : Float
+    let v7 : Float
+      if : Float
+        binary lt : Bool
+          local v5 : Int
+          local v0 : Int
+        block : Float
+          call direct std/gpu.round_to : Float
+            unbox to=String
+              intrinsic list_index : E
+                local v1 : List[String]
+                int 2
+            binary add : Float
+              block : Float
+                let v8 : E
+                  intrinsic list_index : E
+                    local v2 : List[Float]
+                    local v5 : Int
+                let v9 : Float
+                  unbox to=Float
+                    local v8 : E
+                drop v8
+                local v9 : Float
+              block : Float
+                let v10 : E
+                  intrinsic list_index : E
+                    local v3 : List[Float]
+                    local v5 : Int
+                let v11 : Float
+                  unbox to=Float
+                    local v10 : E
+                drop v10
+                local v11 : Float
+        block : Float
+          call direct std/gpu.kept : Float
+            local v4 : List[Float]
+            local v5 : Int
+    drop v1
+    drop v2
+    drop v3
+    drop v4
+    drop v6
+    local v7 : Float
+fn std/gpu.lambda$69 -> Float
+  capture v0 : Int owned
+  capture v1 : List[String] owned
+  capture v2 : List[Float] owned
+  capture v3 : List[Float] owned
+  capture v4 : List[Float] owned
+  param v5 : Int owned
+  ev v6 : ev owned
+  block : Float
+    let v7 : Float
+      if : Float
+        binary lt : Bool
+          local v5 : Int
+          local v0 : Int
+        block : Float
+          call direct std/gpu.round_to : Float
+            unbox to=String
+              intrinsic list_index : E
+                local v1 : List[String]
+                int 3
+            binary sub : Float
+              block : Float
+                let v8 : E
+                  intrinsic list_index : E
+                    local v2 : List[Float]
+                    local v5 : Int
+                let v9 : Float
+                  unbox to=Float
+                    local v8 : E
+                drop v8
+                local v9 : Float
+              block : Float
+                let v10 : E
+                  intrinsic list_index : E
+                    local v3 : List[Float]
+                    local v5 : Int
+                let v11 : Float
+                  unbox to=Float
+                    local v10 : E
+                drop v10
+                local v11 : Float
+        block : Float
+          call direct std/gpu.kept : Float
+            local v4 : List[Float]
+            local v5 : Int
+    drop v1
+    drop v2
+    drop v3
+    drop v4
+    drop v6
+    local v7 : Float
+fn std/gpu.lambda$70 -> Float
+  capture v0 : Int owned
+  capture v1 : List[String] owned
+  capture v2 : List[Float] owned
+  param v3 : Int owned
+  ev v4 : ev owned
+  block : Float
+    let v5 : Float
+      if : Float
+        binary lt : Bool
+          local v3 : Int
+          local v0 : Int
+        block : Float
+          call direct std/gpu.round_to : Float
+            unbox to=String
+              intrinsic list_index : E
+                local v1 : List[String]
+                int 0
+            block : Float
+              let v6 : E
+                intrinsic list_index : E
+                  local v2 : List[Float]
+                  binary sub : Int
+                    binary sub : Int
+                      local v0 : Int
+                      int 1
+                    local v3 : Int
+              let v7 : Float
+                unbox to=Float
+                  local v6 : E
+              drop v6
+              local v7 : Float
+        block : Float
+          call direct std/gpu.kept : Float
+            local v2 : List[Float]
+            local v3 : Int
+    drop v1
+    drop v2
+    drop v4
+    local v5 : Float
+fn std/gpu.lambda$71 -> Float
+  capture v0 : Int owned
+  capture v1 : List[String] owned
+  capture v2 : List[Float] owned
+  param v3 : Int owned
+  ev v4 : ev owned
+  block : Float
+    let v5 : Float
+      if : Float
+        binary lt : Bool
+          local v3 : Int
+          local v0 : Int
+        block : Float
+          call direct std/gpu.round_to : Float
+            unbox to=String
+              intrinsic list_index : E
+                local v1 : List[String]
+                int 0
+            binary sub : Float
+              float 255.0
+              block : Float
+                let v6 : E
+                  intrinsic list_index : E
+                    local v2 : List[Float]
+                    local v3 : Int
+                let v7 : Float
+                  unbox to=Float
+                    local v6 : E
+                drop v6
+                local v7 : Float
+        block : Float
+          call direct std/gpu.kept : Float
+            local v2 : List[Float]
+            local v3 : Int
+    drop v1
+    drop v2
+    drop v4
+    local v5 : Float
+fn std/gpu.lambda$72 -> Float
+  capture v0 : Int owned
+  capture v1 : String owned
+  capture v2 : List[Float] owned
+  capture v3 : List[Float] owned
+  capture v4 : List[Float] owned
+  param v5 : Int owned
+  ev v6 : ev owned
+  block : Float
+    let v7 : Float
+      if : Float
+        binary lt : Bool
+          local v5 : Int
+          local v0 : Int
+        block : Float
+          let v8 : Float
+            call direct std/gpu.round_to : Float
+              dup
+                local v1 : String
+              binary add : Float
+                block : Float
+                  let v9 : E
+                    intrinsic list_index : E
+                      local v2 : List[Float]
+                      local v5 : Int
+                  let v10 : Float
+                    unbox to=Float
+                      local v9 : E
+                  drop v9
+                  local v10 : Float
+                block : Float
+                  let v11 : E
+                    intrinsic list_index : E
+                      local v3 : List[Float]
+                      local v5 : Int
+                  let v12 : Float
+                    unbox to=Float
+                      local v11 : E
+                  drop v11
+                  local v12 : Float
+          drop v4
+          drop v6
+          let v13 : Float
+            call direct std/gpu.round_to : Float
+              dup
+                local v1 : String
+              binary mul : Float
+                local v8 : Float
+                block : Float
+                  let v14 : E
+                    intrinsic list_index : E
+                      local v2 : List[Float]
+                      local v5 : Int
+                  let v15 : Float
+                    unbox to=Float
+                      local v14 : E
+                  drop v14
+                  local v15 : Float
+          drop v2
+          call direct std/gpu.round_to : Float
+            local v1 : String
+            binary sub : Float
+              local v13 : Float
+              block : Float
+                let v16 : E
+                  intrinsic list_index : E
+                    local v3 : List[Float]
+                    local v5 : Int
+                let v17 : Float
+                  unbox to=Float
+                    local v16 : E
+                drop v16
+                local v17 : Float
+        block : Float
+          let v18 : Float
+            call direct std/gpu.kept : Float
+              local v4 : List[Float]
+              local v5 : Int
+          drop v6
+          drop v4
+          drop v2
+          drop v1
+          local v18 : Float
+    drop v3
+    local v7 : Float
+fn std/gpu.lambda$73 -> Float
+  capture v0 : String owned
+  capture v1 : List[Float] owned
+  capture v2 : List[Float] owned
+  param v3 : Float owned
+  param v4 : Int owned
+  ev v5 : ev owned
+  block : Float
+    let v6 : Float
+      call direct std/gpu.round_to : Float
+        local v0 : String
+        binary add : Float
+          local v3 : Float
+          binary mul : Float
+            block : Float
+              let v7 : E
+                intrinsic list_index : E
+                  local v1 : List[Float]
+                  local v4 : Int
+              let v8 : Float
+                unbox to=Float
+                  local v7 : E
+              drop v7
+              local v8 : Float
+            block : Float
+              let v9 : E
+                intrinsic list_index : E
+                  local v2 : List[Float]
+                  local v4 : Int
+              let v10 : Float
+                unbox to=Float
+                  local v9 : E
+              drop v9
+              local v10 : Float
+    drop v1
+    drop v2
+    drop v5
+    local v6 : Float
+fn std/gpu.lambda$74 -> List[(Int, List[Float])]
+  capture v0 : fn(List[String], List[List[Float]]) -> List[Float] owned
+  param v1 : List[String] owned
+  param v2 : List[List[Float]] owned
+  ev v3 : ev owned
+  block : List[(Int, List[Float])]
+    let v4 : List[(Int, List[Float])]
+      listlit : List[(Int, List[Float])]
+        box from=(Int, List[Float])
+          tuple : (Int, List[Float])
+            binary sub : Int
+              intrinsic len : Int
+                local v2 : List[List[Float]]
+              int 1
+            call dynamic : List[Float]
+              local v0 : fn(List[String], List[List[Float]]) -> List[Float]
+              local v1 : List[String]
+              dup
+                local v2 : List[List[Float]]
+              box from=Unit
+                unit
+    drop v0
+    drop v2
+    drop v3
+    local v4 : List[(Int, List[Float])]
+fn std/gpu.lambda$75 -> List[Float]
   param v0 : List[String] owned
   param v1 : List[List[Float]] owned
   ev v2 : ev owned
@@ -8543,7 +10480,7 @@ fn std/gpu.lambda$65 -> List[Float]
     drop v1
     drop v2
     local v3 : List[Float]
-fn std/gpu.lambda$66 -> List[Float]
+fn std/gpu.lambda$76 -> List[Float]
   param v0 : List[String] owned
   param v1 : List[List[Float]] owned
   ev v2 : ev owned
@@ -8556,7 +10493,7 @@ fn std/gpu.lambda$66 -> List[Float]
     drop v1
     drop v2
     local v3 : List[Float]
-fn std/gpu.lambda$67 -> List[Float]
+fn std/gpu.lambda$77 -> List[Float]
   param v0 : List[String] owned
   param v1 : List[List[Float]] owned
   ev v2 : ev owned
@@ -8593,7 +10530,7 @@ fn std/gpu.prim$2$String$hash -> Int
           local v0 : T
     drop v0
     local v2 : Int
-fn std/gpu.lambda$69 -> Float
+fn std/gpu.lambda$79 -> Float
   param v0 : Int owned
   ev v1 : ev owned
   block : Float
@@ -8625,7 +10562,7 @@ fn std/gpu.prim$2$Int$hash -> Int
           local v0 : T
     drop v0
     local v2 : Int
-fn std/gpu.lambda$68 -> Result[Int, ForeignError]
+fn std/gpu.lambda$78 -> Result[Int, ForeignError]
   capture v0 : cell owned
   capture v1 : cell owned
   param v2 : String owned
@@ -8649,7 +10586,7 @@ fn std/gpu.lambda$68 -> Result[Int, ForeignError]
               call direct std/gpu.refuse : ForeignError
                 str "gpu.unsupported_dtype"
                 binary concat : String
-                  str "fake device: buffers are f64, i32 or bf16, got "
+                  str "fake device: buffers are f64, i32, i8, u8, bf16 or f16, got "
                   local v2 : String
         drop v6
         assign v6
@@ -8713,7 +10650,7 @@ fn std/gpu.lambda$68 -> Result[Int, ForeignError]
                               intrinsic range : List[Int]
                                 int 0
                                 local v3 : Int
-                              closure std/gpu.lambda$69 : fn(Int) -> Float
+                              closure std/gpu.lambda$79 : fn(Int) -> Float
                               box from=Unit
                                 unit
                         dictref dict$1$Int trait=1 subject=Int : <dict>
@@ -8734,7 +10671,7 @@ fn std/gpu.lambda$68 -> Result[Int, ForeignError]
             drop v2
             drop v5
     local v6 : Result[Int, ForeignError]
-fn std/gpu.lambda$71 -> Float
+fn std/gpu.lambda$81 -> Float
   capture v0 : String owned
   param v1 : Float owned
   ev v2 : ev owned
@@ -8745,7 +10682,7 @@ fn std/gpu.lambda$71 -> Float
         local v1 : Float
     drop v2
     local v3 : Float
-fn std/gpu.lambda$70 -> Result[Unit, ForeignError]
+fn std/gpu.lambda$80 -> Result[Unit, ForeignError]
   capture v0 : cell owned
   param v1 : Int owned
   param v2 : List[Float] owned
@@ -8811,7 +10748,7 @@ fn std/gpu.lambda$70 -> Result[Unit, ForeignError]
                           local v12 : String
                         call direct std/list.map : List[U]
                           local v2 : List[Float]
-                          closure std/gpu.lambda$71 : fn(Float) -> Float
+                          closure std/gpu.lambda$81 : fn(Float) -> Float
                             dup
                               local v12 : String
                           box from=Unit
@@ -8851,7 +10788,7 @@ fn std/gpu.lambda$70 -> Result[Unit, ForeignError]
             drop v2
             drop v4
     local v8 : Result[Unit, ForeignError]
-fn std/gpu.lambda$72 -> Result[List[Float], ForeignError]
+fn std/gpu.lambda$82 -> Result[List[Float], ForeignError]
   capture v0 : cell owned
   param v1 : Int owned
   ev v2 : ev owned
@@ -8928,7 +10865,7 @@ fn std/gpu.lambda$72 -> Result[List[Float], ForeignError]
                 str "unreachable match"
             drop v3
     local v7 : Result[List[Float], ForeignError]
-fn std/gpu.lambda$74 -> Bool
+fn std/gpu.lambda$84 -> Bool
   capture v0 : Map[Int, (String, List[Float])] owned
   param v1 : Int owned
   ev v2 : ev owned
@@ -8944,7 +10881,7 @@ fn std/gpu.lambda$74 -> Bool
     drop v0
     drop v2
     local v3 : Bool
-fn std/gpu.lambda$75 -> (String, List[Float])
+fn std/gpu.lambda$85 -> (String, List[Float])
   capture v0 : Map[Int, (String, List[Float])] owned
   param v1 : Int owned
   ev v2 : ev owned
@@ -8969,7 +10906,7 @@ fn std/gpu.lambda$75 -> (String, List[Float])
     drop v0
     drop v2
     local v5 : (String, List[Float])
-fn std/gpu.lambda$76 -> String
+fn std/gpu.lambda$86 -> String
   param v0 : (String, List[Float]) owned
   ev v1 : ev owned
   block : String
@@ -8987,7 +10924,7 @@ fn std/gpu.lambda$76 -> String
     drop v2
     drop v4
     local v3 : String
-fn std/gpu.lambda$77 -> List[Float]
+fn std/gpu.lambda$87 -> List[Float]
   param v0 : (String, List[Float]) owned
   ev v1 : ev owned
   block : List[Float]
@@ -9005,7 +10942,35 @@ fn std/gpu.lambda$77 -> List[Float]
           local v2 : (String, List[Float])
     drop v2
     local v4 : List[Float]
-fn std/gpu.lambda$78 -> Float
+fn std/gpu.lambda$88 -> Bool
+  capture v0 : List[Int] owned
+  param v1 : (Int, List[Float]) owned
+  ev v2 : ev owned
+  block : Bool
+    let v3 : (Int, List[Float])
+      local v1 : (Int, List[Float])
+    drop v2
+    let v4 : Int
+      tupleget 0 : Int
+        local v3 : (Int, List[Float])
+    let v5 : List[Float]
+      dup
+        tupleget 1 : List[Float]
+          local v3 : (Int, List[Float])
+    drop v3
+    drop v5
+    let v6 : Bool
+      binary or : Bool
+        binary lt : Bool
+          local v4 : Int
+          int 0
+        binary ge : Bool
+          local v4 : Int
+          intrinsic len : Int
+            local v0 : List[Int]
+    drop v0
+    local v6 : Bool
+fn std/gpu.lambda$89 -> Float
   capture v0 : String owned
   param v1 : Float owned
   ev v2 : ev owned
@@ -9016,8 +10981,8 @@ fn std/gpu.lambda$78 -> Float
         local v1 : Float
     drop v2
     local v3 : Float
-fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
-  capture v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])] owned
+fn std/gpu.lambda$83 -> Result[Unit, ForeignError]
+  capture v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])] owned
   capture v1 : cell owned
   param v2 : String owned
   param v3 : Int owned
@@ -9026,9 +10991,9 @@ fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
   param v6 : List[Int] owned
   ev v7 : ev owned
   block : Result[Unit, ForeignError]
-    let v8 : Option[(Int, fn(List[String], List[List[Float]]) -> List[Float])]
+    let v8 : Option[(Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])]
       call direct std/map.get : Option[V]
-        local v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[Float])]
+        local v0 : Map[String, (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])]
         box from=String
           dup
             local v2 : String
@@ -9040,25 +11005,25 @@ fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
       intrinsic null_ref : Result[Unit, ForeignError]
     sif
       isctor Option/Some
-        local v8 : Option[(Int, fn(List[String], List[List[Float]]) -> List[Float])]
+        local v8 : Option[(Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])]
       block : Unit
-        let v10 : (Int, fn(List[String], List[List[Float]]) -> List[Float])
-          unbox to=(Int, fn(List[String], List[List[Float]]) -> List[Float])
+        let v10 : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
+          unbox to=(Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
             dup
               field Option/Some.0 : T
-                local v8 : Option[(Int, fn(List[String], List[List[Float]]) -> List[Float])]
+                local v8 : Option[(Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])]
         drop v8
         let v11 : Result[Unit, ForeignError]
           block : Result[Unit, ForeignError]
-            let v12 : (Int, fn(List[String], List[List[Float]]) -> List[Float])
-              local v10 : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+            let v12 : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
+              local v10 : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
             let v13 : Int
               tupleget 0 : Int
-                local v12 : (Int, fn(List[String], List[List[Float]]) -> List[Float])
-            let v14 : fn(List[String], List[List[Float]]) -> List[Float]
+                local v12 : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
+            let v14 : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
               dup
-                tupleget 1 : fn(List[String], List[List[Float]]) -> List[Float]
-                  local v12 : (Int, fn(List[String], List[List[Float]]) -> List[Float])
+                tupleget 1 : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+                  local v12 : (Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])
             drop v12
             if : Result[Unit, ForeignError]
               binary eq : Bool
@@ -9102,13 +11067,12 @@ fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
                     unbox to=Map[Int, (String, List[Float])]
                       intrinsic cell_get : cell
                         local v1 : cell
-                  drop v2
                   block : Result[Unit, ForeignError]
                     let v18 : Option[Int]
                       call direct std/list.find : Option[T]
                         dup
                           local v6 : List[Int]
-                        closure std/gpu.lambda$74 : fn(Int) -> Bool
+                        closure std/gpu.lambda$84 : fn(Int) -> Bool
                           dup
                             local v17 : Map[Int, (String, List[Float])]
                         box from=Unit
@@ -9124,6 +11088,7 @@ fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
                             field Option/Some.0 : T
                               local v18 : Option[Int]
                         drop v1
+                        drop v2
                         drop v6
                         drop v14
                         drop v17
@@ -9148,7 +11113,7 @@ fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
                                   call direct std/list.map : List[U]
                                     dup
                                       local v6 : List[Int]
-                                    closure std/gpu.lambda$75 : fn(Int) -> (String, List[Float])
+                                    closure std/gpu.lambda$85 : fn(Int) -> (String, List[Float])
                                       local v17 : Map[Int, (String, List[Float])]
                                     box from=Unit
                                       unit
@@ -9157,70 +11122,184 @@ fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
                                   call direct std/list.map : List[U]
                                     dup
                                       local v23 : List[(String, List[Float])]
-                                    closure std/gpu.lambda$76 : fn((String, List[Float])) -> String
+                                    closure std/gpu.lambda$86 : fn((String, List[Float])) -> String
                                     box from=Unit
                                       unit
                                 let v25 : List[List[Float]]
                                   call direct std/list.map : List[U]
                                     local v23 : List[(String, List[Float])]
-                                    closure std/gpu.lambda$77 : fn((String, List[Float])) -> List[Float]
+                                    closure std/gpu.lambda$87 : fn((String, List[Float])) -> List[Float]
                                     box from=Unit
                                       unit
-                                let v26 : String
-                                  unbox to=String
-                                    intrinsic list_index : E
+                                let v26 : List[(Int, List[Float])]
+                                  call dynamic : List[(Int, List[Float])]
+                                    local v14 : fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+                                    dup
                                       local v24 : List[String]
-                                      binary sub : Int
-                                        intrinsic len : Int
-                                          local v24 : List[String]
-                                        int 1
-                                let v27 : List[Float]
-                                  call direct std/list.map : List[U]
-                                    call dynamic : List[Float]
-                                      local v14 : fn(List[String], List[List[Float]]) -> List[Float]
-                                      local v24 : List[String]
-                                      local v25 : List[List[Float]]
-                                      box from=Unit
-                                        unit
-                                    closure std/gpu.lambda$78 : fn(Float) -> Float
-                                      dup
-                                        local v26 : String
+                                    local v25 : List[List[Float]]
                                     box from=Unit
                                       unit
                                 drop v14
-                                discard
-                                  intrinsic cell_set : Unit
-                                    local v1 : cell
-                                    box from=Map[Int, (String, List[Float])]
-                                      call direct std/map.insert : Map[K, V]
-                                        unbox to=Map[Int, (String, List[Float])]
-                                          intrinsic cell_take : cell
-                                            local v1 : cell
-                                        box from=Int
-                                          block : Int
-                                            let v28 : E
-                                              intrinsic list_index : E
-                                                local v6 : List[Int]
-                                                binary sub : Int
-                                                  intrinsic len : Int
-                                                    local v6 : List[Int]
-                                                  int 1
-                                            let v29 : Int
-                                              unbox to=Int
-                                                local v28 : E
-                                            drop v28
-                                            local v29 : Int
-                                        box from=(String, List[Float])
-                                          tuple : (String, List[Float])
-                                            local v26 : String
-                                            local v27 : List[Float]
-                                        dictref dict$1$Int trait=1 subject=Int : <dict>
-                                        dictref dict$2$Int trait=2 subject=Int : <dict>
-                                drop v1
-                                drop v6
-                                ctor Result/Ok : Result[Unit, ForeignError]
-                                  box from=Unit
-                                    unit
+                                block : Result[Unit, ForeignError]
+                                  let v27 : Option[(Int, List[Float])]
+                                    call direct std/list.find : Option[T]
+                                      dup
+                                        local v26 : List[(Int, List[Float])]
+                                      closure std/gpu.lambda$88 : fn((Int, List[Float])) -> Bool
+                                        dup
+                                          local v6 : List[Int]
+                                      box from=Unit
+                                        unit
+                                  let v28 : Result[Unit, ForeignError]
+                                    intrinsic null_ref : Result[Unit, ForeignError]
+                                  sif
+                                    isctor Option/Some
+                                      local v27 : Option[(Int, List[Float])]
+                                    block : Unit
+                                      let v29 : (Int, List[Float])
+                                        unbox to=(Int, List[Float])
+                                          dup
+                                            field Option/Some.0 : T
+                                              local v27 : Option[(Int, List[Float])]
+                                      drop v1
+                                      drop v24
+                                      drop v26
+                                      drop v27
+                                      let v30 : Result[Unit, ForeignError]
+                                        block : Result[Unit, ForeignError]
+                                          let v31 : (Int, List[Float])
+                                            local v29 : (Int, List[Float])
+                                          let v32 : Int
+                                            tupleget 0 : Int
+                                              local v31 : (Int, List[Float])
+                                          let v33 : List[Float]
+                                            dup
+                                              tupleget 1 : List[Float]
+                                                local v31 : (Int, List[Float])
+                                          drop v31
+                                          drop v33
+                                          ctor Result/Err : Result[Unit, ForeignError]
+                                            box from=ForeignError
+                                              call direct std/gpu.bad_write_back : ForeignError
+                                                str "fake device"
+                                                local v2 : String
+                                                local v32 : Int
+                                                intrinsic len : Int
+                                                  local v6 : List[Int]
+                                      drop v28
+                                      assign v28
+                                        local v30 : Result[Unit, ForeignError]
+                                      drop v2
+                                      drop v6
+                                    block : Unit
+                                      sif
+                                        isctor Option/None
+                                          local v27 : Option[(Int, List[Float])]
+                                        block : Unit
+                                          let v34 : Result[Unit, ForeignError]
+                                            block : Result[Unit, ForeignError]
+                                              let v35 : List[(Int, List[Float])]
+                                                local v26 : List[(Int, List[Float])]
+                                              drop v2
+                                              drop v27
+                                              let v36 : Int
+                                                call impl std/list trait=4 subject=List[(Int, List[Float])] iter_start : Int
+                                                  dup
+                                                    local v35 : List[(Int, List[Float])]
+                                              loop L0
+                                                block : Unit
+                                                  sif
+                                                    call impl std/list trait=4 subject=List[(Int, List[Float])] iter_done : Bool
+                                                      dup
+                                                        local v35 : List[(Int, List[Float])]
+                                                      local v36 : Int
+                                                    break L0
+                                                  let v37 : (Int, List[Float])
+                                                    unbox to=(Int, List[Float])
+                                                      call impl std/list trait=4 subject=List[(Int, List[Float])] iter_get : T
+                                                        dup
+                                                          local v35 : List[(Int, List[Float])]
+                                                        local v36 : Int
+                                                  let v38 : (Int, List[Float])
+                                                    local v37 : (Int, List[Float])
+                                                  discard
+                                                    block : Unit
+                                                      let v39 : (Int, List[Float])
+                                                        local v38 : (Int, List[Float])
+                                                      let v40 : Int
+                                                        tupleget 0 : Int
+                                                          local v39 : (Int, List[Float])
+                                                      let v41 : List[Float]
+                                                        dup
+                                                          tupleget 1 : List[Float]
+                                                            local v39 : (Int, List[Float])
+                                                      drop v39
+                                                      let v42 : String
+                                                        unbox to=String
+                                                          intrinsic list_index : E
+                                                            local v24 : List[String]
+                                                            local v40 : Int
+                                                      discard
+                                                        intrinsic cell_set : Unit
+                                                          local v1 : cell
+                                                          box from=Map[Int, (String, List[Float])]
+                                                            call direct std/map.insert : Map[K, V]
+                                                              unbox to=Map[Int, (String, List[Float])]
+                                                                intrinsic cell_take : cell
+                                                                  local v1 : cell
+                                                              box from=Int
+                                                                block : Int
+                                                                  let v43 : E
+                                                                    intrinsic list_index : E
+                                                                      local v6 : List[Int]
+                                                                      local v40 : Int
+                                                                  let v44 : Int
+                                                                    unbox to=Int
+                                                                      local v43 : E
+                                                                  drop v43
+                                                                  local v44 : Int
+                                                              box from=(String, List[Float])
+                                                                tuple : (String, List[Float])
+                                                                  dup
+                                                                    local v42 : String
+                                                                  call direct std/list.map : List[U]
+                                                                    local v41 : List[Float]
+                                                                    closure std/gpu.lambda$89 : fn(Float) -> Float
+                                                                      dup
+                                                                        local v42 : String
+                                                                    box from=Unit
+                                                                      unit
+                                                              dictref dict$1$Int trait=1 subject=Int : <dict>
+                                                              dictref dict$2$Int trait=2 subject=Int : <dict>
+                                                      drop v42
+                                                step
+                                                  block : Unit
+                                                    assign v36
+                                                      call impl std/list trait=4 subject=List[(Int, List[Float])] iter_next : Int
+                                                        dup
+                                                          local v35 : List[(Int, List[Float])]
+                                                        local v36 : Int
+                                              drop v1
+                                              drop v6
+                                              drop v24
+                                              drop v35
+                                              ctor Result/Ok : Result[Unit, ForeignError]
+                                                box from=Unit
+                                                  unit
+                                          drop v28
+                                          assign v28
+                                            local v34 : Result[Unit, ForeignError]
+                                        block : Unit
+                                          discard
+                                            intrinsic panic : Never
+                                              str "unreachable match"
+                                          drop v1
+                                          drop v2
+                                          drop v6
+                                          drop v24
+                                          drop v26
+                                          drop v27
+                                  local v28 : Result[Unit, ForeignError]
                             drop v19
                             assign v19
                               local v22 : Result[Unit, ForeignError]
@@ -9229,6 +11308,7 @@ fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
                               intrinsic panic : Never
                                 str "unreachable match"
                             drop v1
+                            drop v2
                             drop v6
                             drop v14
                             drop v17
@@ -9240,9 +11320,9 @@ fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
       block : Unit
         sif
           isctor Option/None
-            local v8 : Option[(Int, fn(List[String], List[List[Float]]) -> List[Float])]
+            local v8 : Option[(Int, fn(List[String], List[List[Float]]) -> List[(Int, List[Float])])]
           block : Unit
-            let v30 : Result[Unit, ForeignError]
+            let v45 : Result[Unit, ForeignError]
               ctor Result/Err : Result[Unit, ForeignError]
                 box from=ForeignError
                   call direct std/gpu.no_kernel : ForeignError
@@ -9250,7 +11330,7 @@ fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
                     local v2 : String
             drop v9
             assign v9
-              local v30 : Result[Unit, ForeignError]
+              local v45 : Result[Unit, ForeignError]
             drop v1
             drop v2
             drop v6
@@ -9264,7 +11344,7 @@ fn std/gpu.lambda$73 -> Result[Unit, ForeignError]
             drop v6
             drop v8
     local v9 : Result[Unit, ForeignError]
-fn std/gpu.lambda$79 -> Result[Unit, ForeignError]
+fn std/gpu.lambda$90 -> Result[Unit, ForeignError]
   capture v0 : cell owned
   param v1 : Int owned
   ev v2 : ev owned
@@ -9313,7 +11393,7 @@ fn std/gpu.lambda$79 -> Result[Unit, ForeignError]
       drop v2
       drop v0
       local v6 : Result[Unit, ForeignError]
-fn std/gpu.lambda$80 -> Result[Unit, ForeignError]
+fn std/gpu.lambda$91 -> Result[Unit, ForeignError]
   ev v0 : ev owned
   block : Result[Unit, ForeignError]
     let v1 : Result[Unit, ForeignError]
@@ -9322,7 +11402,7 @@ fn std/gpu.lambda$80 -> Result[Unit, ForeignError]
           unit
     drop v0
     local v1 : Result[Unit, ForeignError]
-fn std/gpu.lambda$81 -> T
+fn std/gpu.lambda$92 -> T
   capture v0 : fn() -> T !Gpu owned
   ev v1 : ev owned
   block : T
@@ -9330,18 +11410,18 @@ fn std/gpu.lambda$81 -> T
       call dynamic : T
         local v0 : fn() -> T !Gpu
         ctor ev$Pack/ev$Pack : ev$Pack
-          int 5955
+          int 6015
           box from=ev$Gpu
             unbox to=ev$Gpu
               intrinsic ev_get : ev
                 local v1 : ev
-                int 5955
+                int 6015
           box from=Unit
             unit
     drop v0
     drop v1
     local v2 : T
-fn std/gpu.lambda$82 -> Float
+fn std/gpu.lambda$93 -> Float
   capture v0 : Array[Float] owned
   param v1 : Int owned
   ev v2 : ev owned
@@ -9357,7 +11437,7 @@ fn std/gpu.lambda$82 -> Float
     drop v0
     drop v2
     local v4 : Float
-fn std/gpu.lambda$83 -> Result[Int, ForeignError]
+fn std/gpu.lambda$94 -> Result[Int, ForeignError]
   capture v0 : cell owned
   capture v1 : cell owned
   param v2 : String owned
@@ -9381,7 +11461,7 @@ fn std/gpu.lambda$83 -> Result[Int, ForeignError]
               call direct std/gpu.refuse : ForeignError
                 str "gpu.unsupported_dtype"
                 binary concat : String
-                  str "real device: this release moves f64, i32 and bf16, got "
+                  str "real device: this release moves f64, i32, i8, u8, bf16 and f16, got "
                   local v2 : String
         drop v6
         assign v6
@@ -9512,7 +11592,7 @@ fn std/gpu.lambda$83 -> Result[Int, ForeignError]
             drop v2
             drop v5
     local v6 : Result[Int, ForeignError]
-fn std/gpu.lambda$84 -> Result[Unit, ForeignError]
+fn std/gpu.lambda$95 -> Result[Unit, ForeignError]
   capture v0 : cell owned
   param v1 : Int owned
   param v2 : List[Float] owned
@@ -9564,56 +11644,40 @@ fn std/gpu.lambda$84 -> Result[Unit, ForeignError]
                 tupleget 2 : String
                   local v11 : (Int, Int, String)
             drop v11
-            let v15 : Result[Unit, ForeignError]
-              if : Result[Unit, ForeignError]
-                binary eq : Bool
-                  local v14 : String
-                  str "bf16"
-                block : Result[Unit, ForeignError]
+            if : Result[Unit, ForeignError]
+              binary eq : Bool
+                local v14 : String
+                str "f64"
+              block : Result[Unit, ForeignError]
+                let v15 : Result[Unit, ForeignError]
                   block : Result[Unit, ForeignError]
                     let v16 : Int
                       local v12 : Int
-                    let v17 : Bytes
-                      call direct std/gpu.pack_bf16 : Bytes
+                    let v17 : Array[Float]
+                      call direct std/gpu.to_array : Array[Float]
                         local v2 : List[Float]
                     let v18 : Result[Unit, ForeignError]
-                      intrinsic gpu_upload_bytes_host : Result[Unit, ForeignError]
+                      intrinsic gpu_upload_host : Result[Unit, ForeignError]
                         local v16 : Int
-                        local v17 : Bytes
+                        local v17 : Array[Float]
                     drop v17
                     local v18 : Result[Unit, ForeignError]
-                if : Result[Unit, ForeignError]
-                  binary eq : Bool
-                    local v14 : String
-                    str "i32"
-                  block : Result[Unit, ForeignError]
-                    block : Result[Unit, ForeignError]
-                      let v19 : Int
-                        local v12 : Int
-                      let v20 : Bytes
-                        call direct std/gpu.pack_i32 : Bytes
-                          local v2 : List[Float]
-                      let v21 : Result[Unit, ForeignError]
-                        intrinsic gpu_upload_bytes_host : Result[Unit, ForeignError]
-                          local v19 : Int
-                          local v20 : Bytes
-                      drop v20
-                      local v21 : Result[Unit, ForeignError]
-                  block : Result[Unit, ForeignError]
-                    block : Result[Unit, ForeignError]
-                      let v22 : Int
-                        local v12 : Int
-                      let v23 : Array[Float]
-                        call direct std/gpu.to_array : Array[Float]
-                          local v2 : List[Float]
-                      let v24 : Result[Unit, ForeignError]
-                        intrinsic gpu_upload_host : Result[Unit, ForeignError]
-                          local v22 : Int
-                          local v23 : Array[Float]
-                      drop v23
-                      local v24 : Result[Unit, ForeignError]
-            drop v14
-            local v15 : Result[Unit, ForeignError]
+                drop v14
+                local v15 : Result[Unit, ForeignError]
+              block : Result[Unit, ForeignError]
+                block : Result[Unit, ForeignError]
+                  let v19 : Int
+                    local v12 : Int
+                  let v20 : Bytes
+                    call direct std/gpu.pack_to : Bytes
+                      local v14 : String
+                      local v2 : List[Float]
+                  let v21 : Result[Unit, ForeignError]
+                    intrinsic gpu_upload_bytes_host : Result[Unit, ForeignError]
+                      local v19 : Int
+                      local v20 : Bytes
+                  drop v20
+                  local v21 : Result[Unit, ForeignError]
         drop v8
         assign v8
           local v10 : Result[Unit, ForeignError]
@@ -9622,7 +11686,7 @@ fn std/gpu.lambda$84 -> Result[Unit, ForeignError]
           isctor Option/None
             local v4 : Option[(Int, Int, String)]
           block : Unit
-            let v25 : Result[Unit, ForeignError]
+            let v22 : Result[Unit, ForeignError]
               ctor Result/Err : Result[Unit, ForeignError]
                 box from=ForeignError
                   call direct std/gpu.no_such_buffer : ForeignError
@@ -9630,7 +11694,7 @@ fn std/gpu.lambda$84 -> Result[Unit, ForeignError]
                     local v1 : Int
             drop v8
             assign v8
-              local v25 : Result[Unit, ForeignError]
+              local v22 : Result[Unit, ForeignError]
             drop v2
             drop v4
           block : Unit
@@ -9640,7 +11704,7 @@ fn std/gpu.lambda$84 -> Result[Unit, ForeignError]
             drop v2
             drop v4
     local v8 : Result[Unit, ForeignError]
-fn std/gpu.lambda$85 -> Result[List[Float], ForeignError]
+fn std/gpu.lambda$96 -> Result[List[Float], ForeignError]
   capture v0 : cell owned
   param v1 : Int owned
   ev v2 : ev owned
@@ -9694,46 +11758,44 @@ fn std/gpu.lambda$85 -> Result[List[Float], ForeignError]
             if : Result[List[Float], ForeignError]
               binary eq : Bool
                 local v13 : String
-                str "bf16"
+                str "f64"
               block : Result[List[Float], ForeignError]
                 block : Result[List[Float], ForeignError]
-                  let v14 : Result[Bytes, ForeignError]
-                    intrinsic gpu_download_bytes_host : Result[Bytes, ForeignError]
+                  let v14 : Result[Array[Float], ForeignError]
+                    intrinsic gpu_download_host : Result[Array[Float], ForeignError]
                       local v11 : Int
-                      binary mul : Int
-                        local v12 : Int
-                        int 2
+                      local v12 : Int
                   drop v13
                   let v15 : Result[List[Float], ForeignError]
                     intrinsic null_ref : Result[List[Float], ForeignError]
                   sif
                     isctor Result/Ok
-                      local v14 : Result[Bytes, ForeignError]
+                      local v14 : Result[Array[Float], ForeignError]
                     block : Unit
-                      let v16 : Bytes
-                        unbox to=Bytes
+                      let v16 : Array[Float]
+                        unbox to=Array[Float]
                           dup
                             field Result/Ok.0 : T
-                              local v14 : Result[Bytes, ForeignError]
+                              local v14 : Result[Array[Float], ForeignError]
                       drop v14
                       let v17 : Result[List[Float], ForeignError]
                         ctor Result/Ok : Result[List[Float], ForeignError]
                           box from=List[Float]
-                            call direct std/gpu.unpack_bf16 : List[Float]
-                              local v16 : Bytes
+                            call direct std/gpu.of_array : List[Float]
+                              local v16 : Array[Float]
                       drop v15
                       assign v15
                         local v17 : Result[List[Float], ForeignError]
                     block : Unit
                       sif
                         isctor Result/Err
-                          local v14 : Result[Bytes, ForeignError]
+                          local v14 : Result[Array[Float], ForeignError]
                         block : Unit
                           let v18 : ForeignError
                             unbox to=ForeignError
                               dup
                                 field Result/Err.0 : E
-                                  local v14 : Result[Bytes, ForeignError]
+                                  local v14 : Result[Array[Float], ForeignError]
                           drop v14
                           let v19 : Result[List[Float], ForeignError]
                             ctor Result/Err : Result[List[Float], ForeignError]
@@ -9748,114 +11810,73 @@ fn std/gpu.lambda$85 -> Result[List[Float], ForeignError]
                               str "unreachable match"
                           drop v14
                   local v15 : Result[List[Float], ForeignError]
-              if : Result[List[Float], ForeignError]
-                binary eq : Bool
-                  local v13 : String
-                  str "i32"
+              block : Result[List[Float], ForeignError]
                 block : Result[List[Float], ForeignError]
-                  block : Result[List[Float], ForeignError]
-                    let v20 : Result[Bytes, ForeignError]
-                      intrinsic gpu_download_bytes_host : Result[Bytes, ForeignError]
-                        local v11 : Int
-                        binary mul : Int
-                          local v12 : Int
-                          int 4
-                    drop v13
-                    let v21 : Result[List[Float], ForeignError]
-                      intrinsic null_ref : Result[List[Float], ForeignError]
-                    sif
-                      isctor Result/Ok
-                        local v20 : Result[Bytes, ForeignError]
-                      block : Unit
-                        let v22 : Bytes
-                          unbox to=Bytes
-                            dup
-                              field Result/Ok.0 : T
-                                local v20 : Result[Bytes, ForeignError]
-                        drop v20
-                        let v23 : Result[List[Float], ForeignError]
-                          ctor Result/Ok : Result[List[Float], ForeignError]
-                            box from=List[Float]
-                              call direct std/gpu.unpack_i32 : List[Float]
-                                local v22 : Bytes
-                        drop v21
-                        assign v21
-                          local v23 : Result[List[Float], ForeignError]
-                      block : Unit
-                        sif
-                          isctor Result/Err
-                            local v20 : Result[Bytes, ForeignError]
-                          block : Unit
-                            let v24 : ForeignError
-                              unbox to=ForeignError
-                                dup
-                                  field Result/Err.0 : E
-                                    local v20 : Result[Bytes, ForeignError]
-                            drop v20
-                            let v25 : Result[List[Float], ForeignError]
-                              ctor Result/Err : Result[List[Float], ForeignError]
-                                box from=ForeignError
-                                  local v24 : ForeignError
-                            drop v21
-                            assign v21
-                              local v25 : Result[List[Float], ForeignError]
-                          block : Unit
-                            discard
-                              intrinsic panic : Never
-                                str "unreachable match"
-                            drop v20
-                    local v21 : Result[List[Float], ForeignError]
-                block : Result[List[Float], ForeignError]
-                  block : Result[List[Float], ForeignError]
-                    let v26 : Result[Array[Float], ForeignError]
-                      intrinsic gpu_download_host : Result[Array[Float], ForeignError]
-                        local v11 : Int
+                  let v20 : Result[Bytes, ForeignError]
+                    intrinsic gpu_download_bytes_host : Result[Bytes, ForeignError]
+                      local v11 : Int
+                      binary mul : Int
                         local v12 : Int
-                    drop v13
-                    let v27 : Result[List[Float], ForeignError]
-                      intrinsic null_ref : Result[List[Float], ForeignError]
-                    sif
-                      isctor Result/Ok
-                        local v26 : Result[Array[Float], ForeignError]
-                      block : Unit
-                        let v28 : Array[Float]
-                          unbox to=Array[Float]
-                            dup
-                              field Result/Ok.0 : T
-                                local v26 : Result[Array[Float], ForeignError]
-                        drop v26
-                        let v29 : Result[List[Float], ForeignError]
-                          ctor Result/Ok : Result[List[Float], ForeignError]
-                            box from=List[Float]
-                              call direct std/gpu.of_array : List[Float]
-                                local v28 : Array[Float]
-                        drop v27
-                        assign v27
-                          local v29 : Result[List[Float], ForeignError]
-                      block : Unit
-                        sif
-                          isctor Result/Err
-                            local v26 : Result[Array[Float], ForeignError]
-                          block : Unit
-                            let v30 : ForeignError
-                              unbox to=ForeignError
-                                dup
-                                  field Result/Err.0 : E
-                                    local v26 : Result[Array[Float], ForeignError]
-                            drop v26
-                            let v31 : Result[List[Float], ForeignError]
-                              ctor Result/Err : Result[List[Float], ForeignError]
-                                box from=ForeignError
-                                  local v30 : ForeignError
-                            drop v27
-                            assign v27
-                              local v31 : Result[List[Float], ForeignError]
-                          block : Unit
-                            discard
-                              intrinsic panic : Never
-                                str "unreachable match"
-                            drop v26
-                    local v27 : Result[List[Float], ForeignError]
+                        block : Int
+                          let v21 : Option[Int]
+                            call direct std/gpu.element_bytes : Option[Int]
+                              dup
+                                local v13 : String
+                          let v22 : Int
+                            int 1
+                          let v23 : Int
+                            intrinsic unwrap_or : Int
+                              local v21 : Option[Int]
+                              local v22 : Int
+                          drop v21
+                          local v23 : Int
+                  let v24 : Result[List[Float], ForeignError]
+                    intrinsic null_ref : Result[List[Float], ForeignError]
+                  sif
+                    isctor Result/Ok
+                      local v20 : Result[Bytes, ForeignError]
+                    block : Unit
+                      let v25 : Bytes
+                        unbox to=Bytes
+                          dup
+                            field Result/Ok.0 : T
+                              local v20 : Result[Bytes, ForeignError]
+                      drop v20
+                      let v26 : Result[List[Float], ForeignError]
+                        ctor Result/Ok : Result[List[Float], ForeignError]
+                          box from=List[Float]
+                            call direct std/gpu.unpack_from : List[Float]
+                              local v13 : String
+                              local v25 : Bytes
+                      drop v24
+                      assign v24
+                        local v26 : Result[List[Float], ForeignError]
+                    block : Unit
+                      sif
+                        isctor Result/Err
+                          local v20 : Result[Bytes, ForeignError]
+                        block : Unit
+                          let v27 : ForeignError
+                            unbox to=ForeignError
+                              dup
+                                field Result/Err.0 : E
+                                  local v20 : Result[Bytes, ForeignError]
+                          drop v13
+                          drop v20
+                          let v28 : Result[List[Float], ForeignError]
+                            ctor Result/Err : Result[List[Float], ForeignError]
+                              box from=ForeignError
+                                local v27 : ForeignError
+                          drop v24
+                          assign v24
+                            local v28 : Result[List[Float], ForeignError]
+                        block : Unit
+                          discard
+                            intrinsic panic : Never
+                              str "unreachable match"
+                          drop v13
+                          drop v20
+                  local v24 : Result[List[Float], ForeignError]
         drop v7
         assign v7
           local v9 : Result[List[Float], ForeignError]
@@ -9864,7 +11885,7 @@ fn std/gpu.lambda$85 -> Result[List[Float], ForeignError]
           isctor Option/None
             local v3 : Option[(Int, Int, String)]
           block : Unit
-            let v32 : Result[List[Float], ForeignError]
+            let v29 : Result[List[Float], ForeignError]
               ctor Result/Err : Result[List[Float], ForeignError]
                 box from=ForeignError
                   call direct std/gpu.no_such_buffer : ForeignError
@@ -9872,7 +11893,7 @@ fn std/gpu.lambda$85 -> Result[List[Float], ForeignError]
                     local v1 : Int
             drop v7
             assign v7
-              local v32 : Result[List[Float], ForeignError]
+              local v29 : Result[List[Float], ForeignError]
             drop v3
           block : Unit
             discard
@@ -9880,7 +11901,7 @@ fn std/gpu.lambda$85 -> Result[List[Float], ForeignError]
                 str "unreachable match"
             drop v3
     local v7 : Result[List[Float], ForeignError]
-fn std/gpu.lambda$87 -> Bool
+fn std/gpu.lambda$98 -> Bool
   capture v0 : Map[Int, (Int, Int, String)] owned
   param v1 : Int owned
   ev v2 : ev owned
@@ -9896,7 +11917,7 @@ fn std/gpu.lambda$87 -> Bool
     drop v0
     drop v2
     local v3 : Bool
-fn std/gpu.lambda$86 -> Result[Unit, ForeignError]
+fn std/gpu.lambda$97 -> Result[Unit, ForeignError]
   capture v0 : Map[String, Bytes] owned
   capture v1 : cell owned
   capture v2 : cell owned
@@ -9959,7 +11980,7 @@ fn std/gpu.lambda$86 -> Result[Unit, ForeignError]
                   call direct std/list.find : Option[T]
                     dup
                       local v7 : List[Int]
-                    closure std/gpu.lambda$87 : fn(Int) -> Bool
+                    closure std/gpu.lambda$98 : fn(Int) -> Bool
                       dup
                         local v14 : Map[Int, (Int, Int, String)]
                     box from=Unit
@@ -10196,7 +12217,7 @@ fn std/gpu.lambda$86 -> Result[Unit, ForeignError]
             drop v7
             drop v9
     local v10 : Result[Unit, ForeignError]
-fn std/gpu.lambda$88 -> Result[Unit, ForeignError]
+fn std/gpu.lambda$99 -> Result[Unit, ForeignError]
   capture v0 : cell owned
   param v1 : Int owned
   ev v2 : ev owned
@@ -10288,14 +12309,14 @@ fn std/gpu.lambda$88 -> Result[Unit, ForeignError]
             drop v0
             drop v3
     local v7 : Result[Unit, ForeignError]
-fn std/gpu.lambda$89 -> Result[Unit, ForeignError]
+fn std/gpu.lambda$100 -> Result[Unit, ForeignError]
   ev v0 : ev owned
   block : Result[Unit, ForeignError]
     let v1 : Result[Unit, ForeignError]
       intrinsic gpu_sync_host : Result[Unit, ForeignError]
     drop v0
     local v1 : Result[Unit, ForeignError]
-fn std/gpu.lambda$90 -> T
+fn std/gpu.lambda$101 -> T
   capture v0 : fn() -> T !(Gpu|io) owned
   ev v1 : ev owned
   block : T
@@ -10303,12 +12324,12 @@ fn std/gpu.lambda$90 -> T
       call dynamic : T
         local v0 : fn() -> T !(Gpu|io)
         ctor ev$Pack/ev$Pack : ev$Pack
-          int 5955
+          int 6015
           box from=ev$Gpu
             unbox to=ev$Gpu
               intrinsic ev_get : ev
                 local v1 : ev
-                int 5955
+                int 6015
           box from=Unit
             unit
     drop v0
@@ -10316,19 +12337,19 @@ fn std/gpu.lambda$90 -> T
     discard
       intrinsic gpu_close_host : Unit
     local v2 : T
-fn std/gpu.bridge$1987$Adt1979$dtype_name -> String
+fn std/gpu.bridge$2007$Adt1996$dtype_name -> String
   param v0 : D owned
   dict v1 : <dict> owned
-  call impl std/gpu trait=1987 subject=F64 dtype_name : String
+  call impl std/gpu trait=2007 subject=F64 dtype_name : String
     unbox to=F64
       local v0 : D
-fn std/gpu.bridge$1987$Adt1979$dtype_bytes -> Int
+fn std/gpu.bridge$2007$Adt1996$dtype_bytes -> Int
   param v0 : D owned
   dict v1 : <dict> owned
-  call impl std/gpu trait=1987 subject=F64 dtype_bytes : Int
+  call impl std/gpu trait=2007 subject=F64 dtype_bytes : Int
     unbox to=F64
       local v0 : D
-fn std/gpu.lambda$91 -> Float
+fn std/gpu.lambda$102 -> Float
   param v0 : Int owned
   ev v1 : ev owned
   block : Float
@@ -10371,19 +12392,19 @@ fn std/gpu.lambda$91 -> Float
                 local v2 : Int
                 int 4
             local v3 : Int
-fn std/gpu.bridge$1987$Adt1980$dtype_name -> String
+fn std/gpu.bridge$2007$Adt1997$dtype_name -> String
   param v0 : D owned
   dict v1 : <dict> owned
-  call impl std/gpu trait=1987 subject=F32 dtype_name : String
+  call impl std/gpu trait=2007 subject=F32 dtype_name : String
     unbox to=F32
       local v0 : D
-fn std/gpu.bridge$1987$Adt1980$dtype_bytes -> Int
+fn std/gpu.bridge$2007$Adt1997$dtype_bytes -> Int
   param v0 : D owned
   dict v1 : <dict> owned
-  call impl std/gpu trait=1987 subject=F32 dtype_bytes : Int
+  call impl std/gpu trait=2007 subject=F32 dtype_bytes : Int
     unbox to=F32
       local v0 : D
-fn std/gpu.lambda$92 -> Float
+fn std/gpu.lambda$103 -> Float
   capture v0 : List[Float] owned
   capture v1 : List[Float] owned
   param v2 : Int owned
@@ -10418,19 +12439,87 @@ fn std/gpu.lambda$92 -> Float
     drop v1
     drop v3
     local v4 : Float
-fn std/gpu.bridge$1987$Adt1981$dtype_name -> String
+fn std/gpu.bridge$2007$Adt1998$dtype_name -> String
   param v0 : D owned
   dict v1 : <dict> owned
-  call impl std/gpu trait=1987 subject=BF16 dtype_name : String
+  call impl std/gpu trait=2007 subject=BF16 dtype_name : String
     unbox to=BF16
       local v0 : D
-fn std/gpu.bridge$1987$Adt1981$dtype_bytes -> Int
+fn std/gpu.bridge$2007$Adt1998$dtype_bytes -> Int
   param v0 : D owned
   dict v1 : <dict> owned
-  call impl std/gpu trait=1987 subject=BF16 dtype_bytes : Int
+  call impl std/gpu trait=2007 subject=BF16 dtype_bytes : Int
     unbox to=BF16
       local v0 : D
-fn std/gpu.lambda$93 -> List[Float]
+fn std/gpu.lambda$104 -> List[(Int, List[Float])]
+  param v0 : List[String] owned
+  param v1 : List[List[Float]] owned
+  ev v2 : ev owned
+  block : List[(Int, List[Float])]
+    let v3 : List[(Int, List[Float])]
+      call direct std/gpu.sum_diff_ref : List[(Int, List[Float])]
+        int 3
+        local v0 : List[String]
+        local v1 : List[List[Float]]
+    drop v1
+    drop v2
+    local v3 : List[(Int, List[Float])]
+fn std/gpu.lambda$105 -> List[(Int, List[Float])]
+  param v0 : List[String] owned
+  param v1 : List[List[Float]] owned
+  ev v2 : ev owned
+  block : List[(Int, List[Float])]
+    let v3 : List[(Int, List[Float])]
+      call direct std/gpu.reverse_ref : List[(Int, List[Float])]
+        int 4
+        local v0 : List[String]
+        local v1 : List[List[Float]]
+    drop v1
+    drop v2
+    local v3 : List[(Int, List[Float])]
+fn std/gpu.lambda$106 -> List[(Int, List[Float])]
+  param v0 : List[String] owned
+  param v1 : List[List[Float]] owned
+  ev v2 : ev owned
+  block : List[(Int, List[Float])]
+    let v3 : List[(Int, List[Float])]
+      call direct std/gpu.invert_ref : List[(Int, List[Float])]
+        int 3
+        local v0 : List[String]
+        local v1 : List[List[Float]]
+    drop v1
+    drop v2
+    local v3 : List[(Int, List[Float])]
+fn std/gpu.lambda$107 -> List[(Int, List[Float])]
+  param v0 : List[String] owned
+  param v1 : List[List[Float]] owned
+  ev v2 : ev owned
+  block : List[(Int, List[Float])]
+    let v3 : List[(Int, List[Float])]
+      listlit : List[(Int, List[Float])]
+        box from=(Int, List[Float])
+          tuple : (Int, List[Float])
+            int 1
+            listlit : List[Float]
+              box from=Float
+                float 0.0
+    drop v0
+    drop v1
+    drop v2
+    local v3 : List[(Int, List[Float])]
+fn std/gpu.bridge$2007$Adt2000$dtype_name -> String
+  param v0 : D owned
+  dict v1 : <dict> owned
+  call impl std/gpu trait=2007 subject=F16 dtype_name : String
+    unbox to=F16
+      local v0 : D
+fn std/gpu.bridge$2007$Adt2000$dtype_bytes -> Int
+  param v0 : D owned
+  dict v1 : <dict> owned
+  call impl std/gpu trait=2007 subject=F16 dtype_bytes : Int
+    unbox to=F16
+      local v0 : D
+fn std/gpu.lambda$108 -> List[Float]
   param v0 : List[String] owned
   param v1 : List[List[Float]] owned
   ev v2 : ev owned
@@ -10444,7 +12533,7 @@ fn std/gpu.lambda$93 -> List[Float]
     drop v1
     drop v2
     local v3 : List[Float]
-fn std/gpu.lambda$94 -> List[Float]
+fn std/gpu.lambda$109 -> List[Float]
   param v0 : List[String] owned
   param v1 : List[List[Float]] owned
   ev v2 : ev owned
@@ -10458,7 +12547,7 @@ fn std/gpu.lambda$94 -> List[Float]
     drop v1
     drop v2
     local v3 : List[Float]
-fn std/gpu.lambda$95 -> List[Float]
+fn std/gpu.lambda$110 -> List[Float]
   param v0 : List[String] owned
   param v1 : List[List[Float]] owned
   ev v2 : ev owned
@@ -10472,7 +12561,7 @@ fn std/gpu.lambda$95 -> List[Float]
     drop v1
     drop v2
     local v3 : List[Float]
-fn std/gpu.lambda$96 -> List[Float]
+fn std/gpu.lambda$111 -> List[Float]
   param v0 : List[String] owned
   param v1 : List[List[Float]] owned
   ev v2 : ev owned
@@ -10487,7 +12576,7 @@ fn std/gpu.lambda$96 -> List[Float]
     drop v1
     drop v2
     local v3 : List[Float]
-fn std/gpu.lambda$97 -> List[Float]
+fn std/gpu.lambda$112 -> List[Float]
   param v0 : List[String] owned
   param v1 : List[List[Float]] owned
   ev v2 : ev owned
@@ -10504,7 +12593,7 @@ fn std/gpu.lambda$97 -> List[Float]
     drop v1
     drop v2
     local v3 : List[Float]
-fn std/gpu.lambda$98 -> Float
+fn std/gpu.lambda$113 -> Float
   param v0 : Int owned
   ev v1 : ev owned
   block : Float
@@ -10514,7 +12603,7 @@ fn std/gpu.lambda$98 -> Float
         float 7.0
     drop v1
     local v2 : Float
-fn std/gpu.lambda$99 -> List[Float]
+fn std/gpu.lambda$114 -> List[Float]
   capture v0 : List[Float] owned
   capture v1 : List[Float] owned
   capture v2 : List[Float] owned
@@ -10539,7 +12628,7 @@ fn std/gpu.lambda$99 -> List[Float]
         unbox to=ev$Gpu
           intrinsic ev_get : ev
             local v4 : ev
-            int 5955
+            int 6015
     drop v3
     drop v4
     let v6 : List[Float]
