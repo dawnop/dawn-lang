@@ -1,7 +1,10 @@
 ## The outside world: console, files, environment and subprocesses.
-## Console, environment and subprocesses are `!io`; the file system is the
-## named effect `Fs`, whose production handler is `with_fs_real`. Everything
-## that can fail answers `Result[T, ForeignError]` (spec §9.8.1).
+## The file system is the named effect `Fs`, running another program is
+## `Proc` and the process environment is `Env`, each with a production handler
+## `with_*_real`. The console and ending the process are `!io` today; the
+## effects that will carry them, `Console` and `Exit`, are declared below and
+## their consumers are a release away. Everything that can fail answers
+## `Result[T, ForeignError]` (spec §9.8.1).
 #
 # These write over the io_* intrinsics, which every backend implements; the
 # handwritten dawn.rt.StdIo is retired. They need no `unsafe_pure`: they are
@@ -473,11 +476,13 @@ pub fn with_fs_real[T](body: fn() -> T !Fs !io) -> T !io = {
 # outcome, so `run`'s own empty-argv check and the `io.no_program` it mints
 # stay the code under test when a fake answers.
 #
-# One operation, not four. `exit` is the rest of what this module knows about a
-# process and stays `!io`: an operation is worth its label only where it makes
-# an assertion writable that is not writable today, and `exit`'s is not that.
-# `cwd` and `getenv` were set aside here for the same reason and were later
-# found to fail it -- they are `Env` below. `args` does not join `Proc`: it remains the language
+# One operation, not four. `exit`, `cwd` and `getenv` were set aside here on
+# the rule that an operation is worth its label only where it makes an
+# assertion writable that is not writable today. All three were later found to
+# fail that rule rather than pass it: `cwd` and `getenv` are `Env` below, and
+# `exit` is `Exit` below, declared alongside `Console` because a CLI failure
+# is a status and a line and neither half is the assertion on its own.
+# `args` does not join `Proc`: it remains the language
 # builtin for immutable whole-program startup input, not a handler operation
 # or wrapper owned by this module. Its JVM field still lives on the program's
 # entry class, and every emitted module names that same program-known owner
@@ -549,8 +554,8 @@ pub fn with_proc_real[T, !e](body: fn() -> T !Proc !e) -> T !io = {
 # That is not an oversight anyone can fix in place, because there is no
 # `setenv` and no `chdir` in this language to write one with -- the only way
 # to ask what a function does with an environment is to be the environment.
-# `exit` is still not here: its assertion is a different shape, and it arrives
-# with `Console` or not at all.
+# `exit` is not here: its assertion is a different shape, and it arrives with
+# `Console`. Both are the two blocks below this one.
 #
 # `args` does not join, for the reason the `Proc` block gives about it: it is
 # the language builtin for immutable whole-program startup input, and its JVM
@@ -593,6 +598,159 @@ pub fn with_env_real[T, !e](body: fn() -> T !Env !e) -> T !io = {
   with handle Env {
     env_cwd() => io_cwd()
     env_get(name) => io_getenv(name)
+  }
+  body()
+}
+
+# ---- ending the process as a named effect ----
+#
+# `exit` above is the public face of the one operation below, and it is the
+# first effect this module declares `ctl`. What forces that is what an arm has
+# to be able to do: end the block. A tail-resumptive arm always comes back, so
+# a handler answering `exit` could only imitate the ending with a `panic` and
+# a `catch_panic` around it, which puts an exit status on the error surface
+# and makes a test read it back out of a message. A control arm has no such
+# problem: the arm's value is the value of the whole `with handle` block, and
+# the block remainder after the suspension point does not run (spec §6.5).
+# That is `exit`'s own documented behaviour, "Nothing after the call runs",
+# written as a type rather than as a sentence.
+#
+# The operation answers `Never`, which is legal exactly here: `Never` is
+# return-only, and an effect operation's return position is one of the places
+# it may be written (spec §2). `io.exit` keeps its `Unit` signature, because
+# `io_exit` is the existing void intrinsic ABI and naming `Never` on an
+# operation does not change that public contract.
+#
+# The production arm drops `k` bare rather than handing it to `discard`, for
+# three reasons that agree. `discard(k)` cannot be typed here at all: `k` is
+# `fn(Never) -> T`, `discard`'s type parameter lands on `Never`, and nothing
+# infers it ("cannot infer type parameter(s) T for `discard`"). Spelled over
+# an operation returning `Unit` so that it can be typed, `discard` charges
+# `!io` on the wrapper for a reason unrelated to the host: `k`'s row is the
+# block remainder's row, so unwinding owes what resuming owes. And the two
+# behaviours are not equal anyway -- `discard` runs every `bracket` release
+# under the suspension and `System.exit` runs none of them, so an arm that
+# ran them would be the one misreporting what the host does.
+#
+# One operation. A status is an `Int` and there is nothing underneath it for a
+# seam to sit below, so this block has no error surface to be careful about
+# the way the three above it do.
+#
+# The wrapper's body row is `!e`, for the reason `with_proc_real`'s and
+# `with_env_real`'s are: only `with_fs_real`'s row is closed, and only a
+# closed row has to be outermost.
+#
+# As with the three effects above, the declaration ships one release before
+# anything moves onto it (docs/bootstrap.md, the seed feature discipline).
+# `io.exit` is unchanged here and still reaches `io_exit` itself.
+
+## Ending the process, as the one operation a handler answers. The name
+## carries an `exit_` prefix for the reason the `fs_`, `proc_` and `env_` ones
+## do: `use std/io.{Exit}` brings the operation into the importing module's
+## own namespace (spec §6.5), and here the bare name is taken by this very
+## module.
+##
+## `ctl` is what licenses an arm to bind the continuation instead of resuming
+## it (spec §6.5), and it is what this effect is for: an arm that does not
+## resume is how a process ends. The answer type is `Never` because a caller
+## has no answer to read, and an arm that ends the block owes none.
+pub ctl effect Exit {
+  fn exit_now(code: Int) -> Never
+}
+
+## Run `body` on a host that can really end this process. The arm calls the
+## exit primitive and never resumes, so nothing after a call to `exit_now`
+## runs, here or anywhere below.
+##
+## This is the production handler: a program installs it at the boundary that
+## owns a whole unit of work, and everything beneath sees `Exit`. A test
+## installs an arm that answers the status as a value instead, and the test
+## process goes on running.
+pub fn with_exit_real[T, !e](body: fn() -> T !Exit !e) -> T !io = {
+  with handle Exit {
+    exit_now(code) resume k => {
+      let _ = io_exit(code)
+      panic("io.exit returned")
+    }
+  }
+  body()
+}
+
+# ---- the console as a named effect ----
+#
+# The four print functions above are the public face of the four operations
+# below, on the shape the effects above settled: a plain declaration, a plain
+# wrapper function as the production handler, one operation per host
+# primitive. There is no error surface to put a seam below here. A host that
+# refuses a write does not tell these primitives about it, and the `Unit` an
+# operation answers is the `Unit` the function answers.
+#
+# Four operations, not two and not one. stdout and stderr are different
+# destinations and which one a diagnostic went to is precisely the assertion
+# this effect exists to make, so the destination is in the operation name
+# rather than in an argument a handler would have to branch on. Print and
+# print-with-newline stay apart for the reason they are apart in the public
+# functions: a handler that collects lines has to be told where a line ended.
+#
+# `read_line` and the rest of stdin do not join. They are the console read the
+# other way round, and an operation is worth its label where it makes an
+# assertion writable that is not writable today; no test in either tree asks
+# what a program read from a terminal.
+#
+# `Exit` and `Console` are declared together because the assertion that wants
+# them wants both halves. `main.cli_error`, `nmain.cli_error` and the six
+# `fail_*` wrappers print one diagnostic and then end the process: the status
+# is `Exit`'s half, the line is `Console`'s, and either alone reads back half
+# of a CLI failure. `scripts/native-cli-diff.sh` is 913 lines of exactly those
+# cases, run out of process because in process there was nothing to observe
+# them with; a table over both effects is what brings them inside a test
+# block, and that is the point of the pair.
+#
+# This is also the first effect in this module with consumers inside `std`
+# itself (`std/reactor.serve`) and inside a bundled package
+# (`packages/web`'s logging middleware), which `Fs`, `Proc` and `Env` do not
+# have. Nothing about that changes this knife, which declares and moves
+# nobody, but it is the reason the next one is larger than theirs.
+#
+# The wrapper's body row is `!e`, as `with_exit_real`'s is and for the same
+# reason.
+#
+# As with the three effects above, the declaration ships one release before
+# anything moves onto it (docs/bootstrap.md, the seed feature discipline).
+# `print`, `println`, `eprint` and `eprintln` are unchanged here and still
+# reach `io_print` and its three siblings themselves.
+
+## The console, as the four operations a handler answers. The names carry a
+## `console_` prefix for the reason the `fs_`, `proc_` and `env_` ones do:
+## `use std/io.{Console}` brings every operation into the importing module's
+## own namespace (spec §6.5), and here all four bare names are taken by this
+## very module.
+##
+## Each operation is one host write. The pairing is the public functions':
+## `console_println` and `console_eprintln` end the line, `console_print` and
+## `console_eprint` do not, and the `e` names write to stderr. Nothing here
+## declares effects of its own (spec §6.5); what an arm does is charged where
+## the handler is installed.
+pub effect Console {
+  fn console_print(s: String) -> Unit
+  fn console_println(s: String) -> Unit
+  fn console_eprint(s: String) -> Unit
+  fn console_eprintln(s: String) -> Unit
+}
+
+## Run `body` against the real console. Each arm is the host primitive behind
+## the `io.*` function of the same meaning.
+##
+## This is the production handler: a program installs it at the boundary that
+## owns a whole unit of work, and everything beneath sees `Console`. A test
+## installs arms of its own instead, and can then say what a program printed
+## and which stream it went to.
+pub fn with_console_real[T, !e](body: fn() -> T !Console !e) -> T !io = {
+  with handle Console {
+    console_print(s) => io_print(s)
+    console_println(s) => io_println(s)
+    console_eprint(s) => io_eprint(s)
+    console_eprintln(s) => io_eprintln(s)
   }
   body()
 }
@@ -1225,4 +1383,89 @@ test "cwd and getenv reach the table, name for name" {
   assert getenv("DAWN_WASM_CC") == Some("clang-20")
   assert getenv("HOME") == None
   assert asked == ["DAWN_WASM_CC", "HOME"]
+}
+
+test "an Exit arm that does not resume ends the block, and the test lives on" {
+  # The arm a test installs in place of `with_exit_real`: the arm's value is
+  # the value of the whole block (spec §6.5), so a status arrives as an `Int`,
+  # and `k` is dropped bare exactly as the production arm drops it. Nothing
+  # below ends anything.
+  let attempt = (code: Int, stop: Bool) => {
+    with handle Exit {
+      exit_now(c) resume k => (c, "stopped")
+    }
+    if stop {
+      exit_now(code)
+    }
+    (-1, "ran to the end")
+  }
+  # the status is a value, which is the thing `exit` cannot be asked for today
+  assert attempt(2, true) == (2, "stopped")
+  # nothing after the operation runs: the remainder is the block's answer
+  # whenever it is reached, and in the stopping case it never is
+  assert attempt(2, false) == (-1, "ran to the end")
+  # and this line runs after two calls to `exit_now`, which is the third
+  # claim: the process the test is in is still here to be asked
+  assert attempt(0, true) == (0, "stopped")
+}
+
+test "with_console_real writes through the host and answers the body" {
+  # The arms are the host primitives, so these four lines really are written,
+  # into the middle of a test report; they say where they came from. The
+  # stdout write without a newline comes first and the stderr write after it,
+  # which is the ordering both runtimes promise (runtime/c/dawn_rt.c flushes
+  # stdout before it touches stderr, and System.err autoflushes).
+  let answered = with_console_real(() => {
+    console_print("std/io: ")
+    console_println("Console reaches stdout, print then println")
+    console_eprint("std/io: ")
+    console_eprintln("Console reaches stderr, eprint then eprintln")
+    7
+  })
+  # the wrapper is transparent: the body's value is the block's value
+  assert answered == 7
+}
+
+test "a handler over a table answers Console without a host" {
+  # What the fake is for: which stream a write went to, and whether it ended
+  # the line, are the things worth asserting, and nothing below writes
+  # anywhere.
+  with handle Console {
+    var written: List[(String, String)] = []
+    console_print(s) => { written = written ++ [("out", s)] }
+    console_println(s) => { written = written ++ [("out", s ++ "\n")] }
+    console_eprint(s) => { written = written ++ [("err", s)] }
+    console_eprintln(s) => { written = written ++ [("err", s ++ "\n")] }
+  }
+  console_print("usage: ")
+  console_println("dawn build <project>")
+  console_eprint("error: ")
+  console_eprintln("no such file")
+  # every write, in order, on the stream and with the ending its operation
+  # name promised
+  assert written == [
+    ("out", "usage: "),
+    ("out", "dawn build <project>\n"),
+    ("err", "error: "),
+    ("err", "no such file\n")
+  ]
+}
+
+test "the five real wrappers nest, and the order is the body rows' doing" {
+  # The nesting is an assertion, not a setting. `with_fs_real`'s body row is
+  # closed, so it can only be the outer one; the other four take `!e`, so each
+  # can sit anywhere inside. Spell `with_exit_real`'s or `with_console_real`'s
+  # row as a closed `!(Exit | io)` or `!(Console | io)` and this block stops
+  # compiling, the way the three-wrapper test above says it does for `Env`.
+  with_fs_real(() => with_proc_real(() => with_env_real(() => with_exit_real(() =>
+      with_console_real(() => {
+        # four of the five effects are exercised here; the fifth is `Exit`, and
+        # calling `exit_now` under its real handler would end the test run,
+        # which is the whole reason the test above installs an arm of its own.
+        let here = env_cwd()
+        assert here != ""
+        assert is_dir(here)
+        assert proc_run(["sh", "-c", "exit 0"], "", "") == Ok(0)
+        console_println("std/io: all five real handlers are installed")
+      })))))
 }
