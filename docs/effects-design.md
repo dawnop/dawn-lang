@@ -530,6 +530,24 @@ Core golden 只动了两个模块里三个闭包类型上印出来的效果行�
 里那条「the three real wrappers nest」的 test 看着，把行改成闭合的 `!(Env | io)`
 它就编译不过（`expected fn() -> Unit !(Env|io), got fn() -> Unit !(Env|Fs|Proc)`）。
 
+表 handler（刀 2，2026-09-03）落在 `compiler-plan/src/envmem.dawn`：
+`with_env_table(cwd, vars, body) -> (T, List[EnvCall])` 用 handler 局部状态记下每一次
+`env_cwd` / `env_get` 的问询与它们的次序，形制照 `driver/fsmem.with_fs_mem` 与
+`procmem.with_proc_table`。放在 compiler-plan 而不是 std，理由与 `procmem` 同：std 里的
+表 handler 要等一轮种子推进才被 selfhost 调得动，而 compiler-plan 是 selfhost 的依赖，
+两边都够得着。它的 body 行是 `!e`，两个臂只读自己的参数，所以一张 Env 表可以套进 `Fs`
+表、`Proc` 脚本里面，也可以一个都不套。
+
+三条「今天用任何手段都写不出」的断言当场兑现，测试数 `pkgfetch.dawn` 13 → 16、
+`nmain.dawn` 7 → 11、`c/cdriver.dawn` 3 → 5：`cache_root` 的三个分支各答什么，
+且 `DAWN_PKG_CACHE` 应答时 `HOME` 一次都不问；`cc_command` 的四个分支各读哪个变量，
+两个变量在每张表里都设着，于是「读了哪个」同时是「另一个在那儿、没被读」；
+`mode_flips_from_env` 未设时答 `[]`，也就是 159 个变异体的干净对照，此前只有整跑一遍
+才观察得到。同一刀把 13 个测试侧安装点从 `with_env_real` 换成表（pkgfetch 5、
+driver/stdlib 4、lsp/server 2、source 2）：它们的路径全是自己造的绝对目录，工作目录
+是一个没人依赖的值。留在真 handler 上的十处，`--std` 拼的是相对目录，宿主的工作目录
+就是它们的输入之一，每处安装点写了这一行说明。
+
 **裁决：已知风险，暂无缓解；效果集别名仍不裁。**
 第二个族的消费者样本到了，答案是它还不够：三个原子的行（`!Fs !Proc !io`）读起来仍然可以，
 `Proc` 也没有把任何一条行推到四个原子。真正会逼出别名的是 `cwd` 与 `exit`。
@@ -643,3 +661,9 @@ Dagstuhl 18172（2018）那个效果系统 UX 工作组零产出；文献反复�
 其中 curl 的 12 个 argv 字段逐条断言、`--fail` 非零退出的错误文本与提示逐字断言、
 非 `file://` 的「下载字节 → 解包 → d1 哈希 → 落内容寻址缓存」主链有了端到端断言。
 全程零进程启动。
+
+第二个兑现记录在 `Env`，形状与 `Proc` 那次一样但更硬：`Proc` 的断言在有 curl 的机器上
+至少还跑得出来一次，`Env` 的三条则是全树没有 `setenv`、没有 `chdir`，装表之前用任何
+手段都选不出答案。`compiler-plan/src/envmem.dawn` 装上之后，`cache_root` 的 3 个分支、
+`cc_command` 的 4 个分支、`mode_flips_from_env` 的 2 个分支各有了断言，
+三份文件的 test 数从 13/7/3 变成 16/11/5。
