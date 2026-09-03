@@ -27,6 +27,7 @@
 use std/io
 use std/io.{Fs, Proc}
 use std/str
+use std/bytes
 use front/token.{Diag}
 use front/diag
 use driver/stdlib.{StdCtx, StdLoadError, load_std, std_load_error_text, std_load_is_bug}
@@ -41,6 +42,7 @@ use doc
 use pkg/add
 use lsp/server.{LspLeaseHost, run_lsp, lsp_std_flag}
 use compiler_plan/pkgfetch
+use compiler_plan/procmem
 use compiler_plan/source
 
 fn native_lsp_standalone_lease() -> JsigLease !io = jsig_refused_lease()
@@ -1025,4 +1027,268 @@ test "--help is recognised anywhere in a subcommand's tail" {
   assert wants_help(["-o", "out", "--help"])
   assert not wants_help([])
   assert not wants_help(["--target", "wasm", "prog.dawn"])
+}
+
+# ---- the toolchain this backend drives ----
+#
+# `cc` is this backend's assembler, so the command lines below are as much a
+# part of its codegen as the C above them, and until now nothing held them:
+# they were checked by running a real compiler, which means they were checked
+# only where a wasi-sdk was installed. `procmem.with_proc_table` answers `Proc`
+# from a script and hands back every invocation, so each flag can be named
+# where the comment that justifies it is. No test here starts a process.
+#
+# The staging directory is real (`io.with_fs_real`): `cc_build_with` writes the
+# emitted C and the embedded runtime into it and deletes it again on success,
+# and a table that cannot hold bytes could not carry that (issue #65). It is
+# read back out of the invocations rather than guessed -- a temp directory's
+# name is the host's to pick -- which also pins that all four command lines
+# name one directory.
+
+# `bracket` takes the release as a value, and a module-qualified name is not
+# one, so the delete is named here.
+fn scrub(path: String) -> Unit !Fs = pkgfetch.delete_tree(path)
+
+fn scratch(prefix: String) -> String !Fs =
+  match io.temp_dir("", prefix) {
+    Ok(d) -> d
+    Err(e) -> panic("temp dir: " ++ e.message)
+  }
+
+test "the wasm triple is the modern spelling when the sysroot has the file" {
+  io.with_fs_real(() => {
+    let dir = scratch("dawn-triple-modern-")
+    with d <- bracket(dir, scrub)
+    # what a sysroot that has crt1.o answers with: an absolute path, and one
+    # that is really there, because existence is what the driver reads
+    let crt = d ++ "/crt1.o"
+    let _ = io.write_file(crt, "")
+    let (triple, log) = procmem.with_proc_table(
+      [procmem.wrote(bytes.utf8(crt ++ "\n"))],
+      () => wasm_triple("fake-clang", d)
+    )
+    assert triple == "wasm32-wasip1"
+    # one process, and the whole of its command line
+    assert len(log) == 1
+    let argv = procmem.call_argv(log, 0)
+    assert len(argv) == 3
+    assert argv[0] == "fake-clang"
+    assert argv[1] == "--target=wasm32-wasip1"
+    assert argv[2] == "-print-file-name=crt1.o"
+    # the answer is collected in the work directory, not read off a pipe
+    assert log[0].out_path == d ++ "/crt1.path"
+    assert log[0].err_path == d ++ "/crt1.err"
+  })
+}
+
+test "the wasm triple falls back to the legacy spelling when the probe finds nothing" {
+  # The branch CI has never taken: the wasm-target job installs a pinned
+  # wasi-sdk, and wasi-sdk 34 removed `wasm32-wasi` outright, so the probe
+  # there always succeeds. Every way of not succeeding is one answer.
+  io.with_fs_real(() => {
+    let dir = scratch("dawn-triple-legacy-")
+    with d <- bracket(dir, scrub)
+    # clang exits 0 and echoes the bare name back when the sysroot lacks it,
+    # which is why exit status alone is not the question asked
+    let (echoed, log) = procmem.with_proc_table(
+      [procmem.wrote(bytes.utf8("crt1.o\n"))],
+      () => wasm_triple("fake-clang", d)
+    )
+    assert echoed == "wasm32-wasi"
+    assert len(log) == 1
+    let argv = procmem.call_argv(log, 0)
+    assert len(argv) == 3
+    assert argv[0] == "fake-clang"
+    # the probe is asked in the modern spelling either way: it is the question,
+    # not the answer
+    assert argv[1] == "--target=wasm32-wasip1"
+    assert argv[2] == "-print-file-name=crt1.o"
+
+    # a clang that ran and failed, and a clang that would not start at all,
+    # reach the same spelling -- the compile below diagnoses both, with the
+    # install hint
+    let (failed, flog) = procmem.with_proc_table(
+      [procmem.exited(1)],
+      () => wasm_triple("fake-clang", d)
+    )
+    assert failed == "wasm32-wasi"
+    assert len(flog) == 1
+    let (gone, glog) = procmem.with_proc_table(
+      [procmem.unstartable("no clang on PATH")],
+      () => wasm_triple("fake-clang", d)
+    )
+    assert gone == "wasm32-wasi"
+    assert len(glog) == 1
+  })
+}
+
+test "the native build is one command line, and this is every flag in it" {
+  io.with_fs_real(() => {
+    let dir = scratch("dawn-cc-native-")
+    with d <- bracket(dir, scrub)
+    let out = d ++ "/prog"
+    let (_, log) = procmem.with_proc_table(
+      [procmem.exited(0)],
+      () => cc_build_with("fake-cc", "int main(void) { return 0; }\n", out, false, false)
+    )
+    # no probe: nothing here is cross-compiled, so nothing is asked
+    assert len(log) == 1
+    let argv = procmem.call_argv(log, 0)
+    assert len(argv) == 14
+    assert argv[0] == "fake-cc"
+    assert argv[1] == "-std=c11"
+    assert argv[2] == "-O2"
+    assert argv[3] == "-fwrapv"
+    assert argv[4] == "-fexceptions"
+    assert argv[5] == "-fno-strict-aliasing"
+    assert argv[6] == "-pthread"
+    assert argv[7] == "-I"
+    let work = argv[8]
+    assert argv[9] == "-o"
+    assert argv[10] == out
+    assert argv[11] == work ++ "/main.c"
+    assert argv[12] == work ++ "/dawn_rt.c"
+    assert argv[13] == "-lm"
+    # the include path is the staging directory itself: dawn_rt.h is beside
+    # the C that includes it
+    assert work != ""
+    # nothing of the wasm row leaks into this one
+    let line = join(argv, " ")
+    assert not str.contains(line, "--target")
+    assert not str.contains(line, "-fwasm-exceptions")
+    assert not str.contains(line, "-Wno-parentheses-equality")
+    assert not str.contains(line, "-mexec-model")
+    assert not str.contains(line, "dawn_rt_wasi")
+    # both streams stay where this process's point: cc's diagnostics are the
+    # user's to read, and the driver never quotes them
+    assert log[0].out_path == ""
+    assert log[0].err_path == ""
+    # a cc that succeeded is done with the staging directory
+    assert not io.exists(work)
+  })
+}
+
+test "the wasm build is four command lines, and these are every flag in them" {
+  io.with_fs_real(() => {
+    let dir = scratch("dawn-cc-wasm-")
+    with d <- bracket(dir, scrub)
+    let crt = d ++ "/crt1.o"
+    let _ = io.write_file(crt, "")
+    let out = d ++ "/prog.wasm"
+    let (_, log) = procmem.with_proc_table(
+      [
+        procmem.wrote(bytes.utf8(crt ++ "\n")),
+        procmem.exited(0),
+        procmem.exited(0),
+        procmem.exited(0)
+      ],
+      () => cc_build_with("fake-clang", "int main(void) { return 0; }\n", out, true, false)
+    )
+    # the probe, the C++ shim, the exception tag, the compile-and-link
+    assert len(log) == 4
+    # every path below is inside the one staging directory the probe named
+    let work = str.strip_suffix(log[0].out_path, "/crt1.path").expect("probe path")
+
+    assert procmem.call_argv(log, 0) ==
+      ["fake-clang", "--target=wasm32-wasip1", "-print-file-name=crt1.o"]
+
+    # the shim is its own compile because it is C++ and carries spellings the
+    # C rows must not have; it produces the object the link picks up
+    let shim = procmem.call_argv(log, 1)
+    assert len(shim) == 12
+    assert shim[0] == "fake-clang"
+    assert shim[1] == "--target=wasm32-wasip1"
+    assert shim[2] == "-x"
+    assert shim[3] == "c++"
+    assert shim[4] == "-std=c++14"
+    assert shim[5] == "-O2"
+    assert shim[6] == "-fno-rtti"
+    assert shim[7] == "-fwasm-exceptions"
+    assert shim[8] == "-c"
+    assert shim[9] == work ++ "/dawn_rt_wasi_eh.cc"
+    assert shim[10] == "-o"
+    assert shim[11] == work ++ "/dawn_rt_wasi_eh.o"
+
+    # the tag is a third compile, in C and with no exception flag at all: a
+    # unit that neither throws nor catches is where the definition can sit
+    let tag = procmem.call_argv(log, 2)
+    assert len(tag) == 8
+    assert tag[0] == "fake-clang"
+    assert tag[1] == "--target=wasm32-wasip1"
+    assert tag[2] == "-std=c11"
+    assert tag[3] == "-O2"
+    assert tag[4] == "-c"
+    assert tag[5] == work ++ "/dawn_rt_wasi_tag.c"
+    assert tag[6] == "-o"
+    assert tag[7] == work ++ "/dawn_rt_wasi_tag.o"
+    assert not str.contains(join(tag, " "), "-fwasm-exceptions")
+    assert not str.contains(join(tag, " "), "-x")
+
+    # and the link, which is the native row with the target's differences:
+    # -fwasm-exceptions for -fexceptions, no -pthread, and the clang-only
+    # warning the emitted C trips silenced
+    let main = procmem.call_argv(log, 3)
+    assert len(main) == 17
+    assert main[0] == "fake-clang"
+    assert main[1] == "--target=wasm32-wasip1"
+    assert main[2] == "-std=c11"
+    assert main[3] == "-O2"
+    assert main[4] == "-fwrapv"
+    assert main[5] == "-fwasm-exceptions"
+    assert main[6] == "-fno-strict-aliasing"
+    assert main[7] == "-Wno-parentheses-equality"
+    assert main[8] == "-I"
+    assert main[9] == work
+    assert main[10] == "-o"
+    assert main[11] == out
+    assert main[12] == work ++ "/main.c"
+    assert main[13] == work ++ "/dawn_rt.c"
+    assert main[14] == work ++ "/dawn_rt_wasi_eh.o"
+    assert main[15] == work ++ "/dawn_rt_wasi_tag.o"
+    assert main[16] == "-lm"
+    assert not str.contains(join(main, " "), "-pthread")
+    assert not str.contains(join(main, " "), "-fexceptions")
+    # a command build has no reactor flag anywhere
+    assert not str.contains(join(main, " "), "-mexec-model")
+    # the two objects the link consumes are the two the compiles above wrote
+    assert main[14] == shim[11]
+    assert main[15] == tag[7]
+    # every invocation staged out of one directory, and it is gone afterwards
+    assert log[3].out_path == ""
+    assert log[3].err_path == ""
+    assert not io.exists(work)
+  })
+}
+
+test "a reactor build is the same link plus one flag" {
+  io.with_fs_real(() => {
+    let dir = scratch("dawn-cc-reactor-")
+    with d <- bracket(dir, scrub)
+    let crt = d ++ "/crt1.o"
+    let _ = io.write_file(crt, "")
+    let out = d ++ "/prog.wasm"
+    let (_, log) = procmem.with_proc_table(
+      [
+        procmem.wrote(bytes.utf8(crt ++ "\n")),
+        procmem.exited(0),
+        procmem.exited(0),
+        procmem.exited(0)
+      ],
+      () => cc_build_with("fake-clang", "int main(void) { return 0; }\n", out, true, true)
+    )
+    assert len(log) == 4
+    let work = str.strip_suffix(log[0].out_path, "/crt1.path").expect("probe path")
+    # the shim and the tag do not know about the exec model: it is a link-time
+    # choice, and the difference is exactly one flag in exactly one place
+    assert not str.contains(join(procmem.call_argv(log, 1), " "), "-mexec-model")
+    assert not str.contains(join(procmem.call_argv(log, 2), " "), "-mexec-model")
+    let main = procmem.call_argv(log, 3)
+    assert len(main) == 18
+    assert main[7] == "-Wno-parentheses-equality"
+    assert main[8] == "-mexec-model=reactor"
+    assert main[9] == "-I"
+    assert main[10] == work
+    assert main[11] == "-o"
+    assert main[12] == out
+  })
 }
