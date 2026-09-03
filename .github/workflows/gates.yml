@@ -63,7 +63,7 @@ name: gates
 # reached 1119s and contracts 759s, both of which would have had to claim
 # past 660s -- so both were split instead (four shards and two halves), which
 # is the move the pole exists to force. The tallest claim in this file is now
-# builtin-type-1's 557s, and the highest of the new planning values is 448s.
+# builtin-type-1's 557s, and the highest of the new planning values is 413s.
 # The pole did not move and no job asked it to.
 #
 # What the pole cannot see is a claim that has quietly stopped being true:
@@ -81,6 +81,248 @@ on:
   workflow_call:
 
 jobs:
+  # Acceptance gate 1 of docs/native-backend-plan.md 5, in four shards since
+  # 2026-09-03. Its own job since 2026-08-07, when it was 390s of the 860s
+  # test job and shared nothing with the rest of that list but the toolchain.
+  #
+  # Why four. This was the run's wall clock and had passed the pole: 1119s on
+  # run 33748678694 against a budget line claiming 557s and a 660s pole, with
+  # a daily median that went 675s (08-31) -> 812s (09-02) -> 999s (09-03). The
+  # cause is not any one entry -- gates.yml's own per-entry notes below add up
+  # to under +20s over the whole climb -- it is the corpus growing (87 entries
+  # in August, 122 now) times a std that every program pays for whether it
+  # uses it or not (std/gpu alone is 8,198 of the 24,126 lines of C a hello
+  # world now generates, and every entry compiles that twice). Restating the
+  # budget was the one option the pole exists to refuse.
+  #
+  # What is divided is entries, never a check. Every check an entry has is made
+  # inside the one shard that runs it, and known-red.txt is consulted per check
+  # by name, so the ratchet is unchanged in both directions -- including the
+  # half that fails a *listed* check which started passing, since whichever
+  # shard owns that entry is the one that sees it. What sharding introduces is
+  # the shard family's single failure: a slice nobody ran prints nothing
+  # different. Each shard records what it ran and mutant-shards-complete holds
+  # the union to scripts/spike-native/matrix.txt, which run.sh also holds
+  # against the corpus on disk in both directions at startup.
+  #
+  # The delete contract is shard 1's, decided in run.sh rather than here: it is
+  # one selfhost rebuild, it does not divide, and running it in four places
+  # would pay for it four times. `./scripts/spike-native/run.sh --shard 1/4`
+  # locally is then exactly what shard 1's job runs.
+  #
+  # Planning values, since no sharded run of this exists yet. Local wall clock,
+  # one machine, 2026-09-03, warm toolchain, shards run one after another:
+  # 150.35s / 97.25s / 106.57s / 107.00s, of which shard 1's ~47s is the delete
+  # contract. Rather than double those for the runner -- the usual convention
+  # here, and it would give smaller numbers -- they are scaled by this job's
+  # own worst runner observation: the 1080s step splits as ~110s of delete
+  # contract and ~970s of corpus, and each shard takes its measured local share
+  # of the corpus. Plus 39s of checkout, toolchain action and post steps, which
+  # is what those cost on the same run. That is 391s / 267s / 288s / 289s, and
+  # the first real run of each replaces its line.
+  #
+  # Two things that number cannot promise. This gate's cost is famously not
+  # reproducible -- 281s, 365s, 533s and 557s on an unchanged script, and 1119s
+  # now -- because run.sh drives the corpus four at a time on a 4-vCPU runner
+  # and how that lands is not ours to decide; the scaling above is anchored on
+  # the worst of those, not the median, for that reason. And the local machine
+  # was not idle (another build was running), which inflates the local figures
+  # rather than deflating them, so the direction of that error is safe.
+  #
+  # Trigger for N=8: split again when a shard's own observation passes 550s
+  # rather than restate a line, because 550s is where the next restatement
+  # collides with the pole. Against splitting further today: a run of this
+  # workflow already holds 36 jobs against an account ceiling of 20, so shards
+  # five through eight would queue behind the first wave and buy budget
+  # headroom rather than wall clock.
+
+  native-diff-1:
+    runs-on: ubuntu-latest
+    # This shard also runs scripts/delete-contract/run.sh, which run.sh gives
+    # to shard 1 alone: it is one selfhost rebuild and it does not divide.
+    # budget: 3x 391s planning value (see the note above)
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The per-entry ledger below is kept because it is where each corpus
+      # addition's cost was argued, and every one of its measurements stands.
+      # Its repeated conclusion does not: "the budget line is not restated"
+      # was right about each entry in isolation and wrong about the total,
+      # because the thing that grew was the floor every entry pays, and an
+      # A/B against the same std cannot see that. The budget lines above
+      # supersede it.
+      #
+      # The same program compiled by both backends must print the same bytes,
+      # and both must match a written-down expectation. It also guards the
+      # parts of lowering that only show up at runtime -- the spec §12.4
+      # self-tail-call rewrite is a stack overflow, not a wrong answer, so no
+      # amount of byte comparison catches it.
+      #
+      # No check is red today: known-red.txt holds no entries, only the record
+      # of what each deleted one had been hiding. That file is a ratchet in
+      # both directions: an unlisted failure fails the build, and so does a
+      # listed check that starts passing. An empty list is the ratchet's
+      # resting state, not its retirement, and it is not evidence that the
+      # backend is finished -- it says the corpus no longer catches it out,
+      # which is kept honest by adding programs rather than entries.
+      #
+      # The corpus entries run four at a time (run.sh's driver). No entry lost
+      # a check to that: the transcript is replayed in corpus order and a
+      # worker that is killed rather than failing is counted as a failure,
+      # because a parallel harness that swallows an exit code is a green light
+      # that means nothing.
+      #
+      # `effect_handler_state`, added 2026-08-30, is the only entry added since
+      # the 557s observation. It was measured rather than assumed: the whole
+      # corpus locally is 230.75s without it and 231.54s with it, four at a
+      # time both times. A corpus this parallel absorbs one 6s entry into a
+      # scheduling gap, so the budget line is not restated -- 557s is a runner
+      # observation and nothing here moved it. An entry that did move it would
+      # have to.
+      #
+      # `ctl_resume` and `ctl_nested` are not new entries, but their C halves
+      # are: they were `.jvm-only` until one-shot resumption got a native
+      # driving loop (docs/oneshot-design.md 11.10), and unblocking them adds
+      # an emitc, two cc builds and two runs each. Measured the same way, and
+      # it is a bigger number than the one above: the two C halves are 7.6s of
+      # serial work (11.81s vs 4.24s for the pair alone, medians of three,
+      # SPIKE_JOBS=1), and on the corpus at four at a time that lands as
+      # 210.84s against 205.69s, medians of two. So +5s of wall on a 206s
+      # local corpus, against runner observations that span 281s to 557s on an
+      # unchanged script. The budget line is not restated for the same reason
+      # as above; the serial figure is recorded because it is the one that
+      # would show if the pool ever stopped being four wide.
+      #
+      # `ctl_vthread` and `ctl_cross_thread`, added 2026-08-31, are two more
+      # entries and both are `.jvm-only`: one `dawn run` and one `__emitc` that
+      # is required to fail, no C half at all. 4.4s for the pair serially
+      # (SPIKE_JOBS=1). On the whole corpus four at a time, two interleaved
+      # pairs on an otherwise idle machine: 247.43/245.68s without them and
+      # 249.12/248.87s with, so +2.4s. The budget line is not restated, for
+      # `effect_handler_state`'s reason. Interleaving is not decoration -- the
+      # first attempt measured +23.6s because the "with" run shared the machine
+      # with another job and the "without" run did not, and a corpus this
+      # parallel makes a single unpaired comparison worthless.
+      #
+      # `ctl_discard`, added 2026-08-31 with the `discard` primitive
+      # (docs/oneshot-design.md 11.12), is a both-backends entry, so unlike the
+      # two above it does carry an emitc, two cc builds and two runs. Measured
+      # the same way, two interleaved pairs on an idle machine: 244.43/243.42s
+      # without it and 246.54/248.09s with, so +2.1s and +4.7s, +3.4s taken
+      # together. The budget line is not restated for the same reason: 557s is
+      # a runner observation on an unchanged script and a corpus this parallel
+      # absorbs three seconds into a scheduling gap.
+      #
+      # `ctl_discard_fault`, added 2026-09-01 with `catch_fault`'s effect row
+      # (docs/audit/error-model-design.md §7.5), is a both-backends entry: one
+      # emitc, two cc builds, two runs. 6.2s serially (SPIKE_JOBS=1, median of
+      # three: 6.23/6.26/6.22). Two interleaved pairs on an idle machine:
+      # 275.18/276.50s without it and 285.17/278.11s with, so +10.0s and +1.6s,
+      # +5.8s taken together. The spread between the two pairs is larger than
+      # the entry, which is the same scheduling noise the `ctl_discard` note
+      # above measured; the budget line is not restated for its reason either.
+      # On 2026-09-02 its observation point went from a pure signature to an
+      # `!io` one (a continuation carries its remainder's io bit now); the
+      # pure spelling is a checker-corpus refusal (`continuation_row.dawn`)
+      # and the program's output is unchanged, so nothing here moved.
+      #
+      # `narrow_round`, added 2026-09-02 with std/narrow, is a both-backends
+      # entry and the largest program in the corpus (3,470 generated lines of
+      # Float literals): one emitc, two cc builds, three runs. 18.5s serially
+      # (SPIKE_JOBS=1, the entry alone). Two interleaved pairs on an idle
+      # machine: 331/316s without it and 331/318s with, so +0s and +2s. The
+      # budget line is not restated for `effect_handler_state`'s reason: a
+      # corpus this parallel absorbs one entry into a scheduling gap, and
+      # 557s is a runner observation on an unchanged script.
+      - name: native differential (both backends, plus written expectations; shard 1 of 4)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/spike-native/run.sh --shard 1/4
+
+      - name: record which entries this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-spike-native-1
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  native-diff-2:
+    runs-on: ubuntu-latest
+    # budget: 3x 267s planning value (see the note above)
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The corpus ledger is above native-diff-1.
+      - name: native differential (both backends, plus written expectations; shard 2 of 4)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/spike-native/run.sh --shard 2/4
+
+      - name: record which entries this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-spike-native-2
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  native-diff-3:
+    runs-on: ubuntu-latest
+    # budget: 3x 288s planning value (see the note above)
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The corpus ledger is above native-diff-1.
+      - name: native differential (both backends, plus written expectations; shard 3 of 4)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/spike-native/run.sh --shard 3/4
+
+      - name: record which entries this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-spike-native-3
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  native-diff-4:
+    runs-on: ubuntu-latest
+    # budget: 3x 289s planning value (see the note above)
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The corpus ledger is above native-diff-1.
+      - name: native differential (both backends, plus written expectations; shard 4 of 4)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/spike-native/run.sh --shard 4/4
+
+      - name: record which entries this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-spike-native-4
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
   # The ssh login name and the site's real IP must not enter this public repo:
   # the redeploy scripts once hardcoded them and they survived in history until
   # a cleanup. This guard inspects only the checked-out tree, so it belongs in
@@ -985,110 +1227,6 @@ jobs:
       - name: project plan capture and completion consistency
         run: ./scripts/project-plan-contract/run.sh
 
-  # Acceptance gate 1 of docs/native-backend-plan.md 5. Its own job because it
-  # was 390s of the 860s test job (2026-08-07) and shares nothing with the rest
-  # of that list but the toolchain.
-  native-diff:
-    runs-on: ubuntu-latest
-    # This is the one gate whose cost is not reproducible: 281s, 365s, 533s
-    # and 557s (run 32102660458, 2026-08-18) on observations of an unchanged
-    # script, because run.sh drives the corpus four at a time on a 4-vCPU
-    # runner and how that lands is not ours to decide. The bound is 3x the
-    # worst of them, not 3x the average -- an average would put a
-    # routinely-observed run inside the kill window.
-    # budget: 3x 557s worst observed
-    timeout-minutes: 28
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # The same program compiled by both backends must print the same bytes,
-      # and both must match a written-down expectation. It also guards the
-      # parts of lowering that only show up at runtime -- the spec §12.4
-      # self-tail-call rewrite is a stack overflow, not a wrong answer, so no
-      # amount of byte comparison catches it.
-      #
-      # No check is red today: known-red.txt holds no entries, only the record
-      # of what each deleted one had been hiding. That file is a ratchet in
-      # both directions: an unlisted failure fails the build, and so does a
-      # listed check that starts passing. An empty list is the ratchet's
-      # resting state, not its retirement, and it is not evidence that the
-      # backend is finished -- it says the corpus no longer catches it out,
-      # which is kept honest by adding programs rather than entries.
-      #
-      # The corpus entries run four at a time (run.sh's driver). No entry lost
-      # a check to that: the transcript is replayed in corpus order and a
-      # worker that is killed rather than failing is counted as a failure,
-      # because a parallel harness that swallows an exit code is a green light
-      # that means nothing.
-      #
-      # `effect_handler_state`, added 2026-08-30, is the only entry added since
-      # the 557s observation. It was measured rather than assumed: the whole
-      # corpus locally is 230.75s without it and 231.54s with it, four at a
-      # time both times. A corpus this parallel absorbs one 6s entry into a
-      # scheduling gap, so the budget line is not restated -- 557s is a runner
-      # observation and nothing here moved it. An entry that did move it would
-      # have to.
-      #
-      # `ctl_resume` and `ctl_nested` are not new entries, but their C halves
-      # are: they were `.jvm-only` until one-shot resumption got a native
-      # driving loop (docs/oneshot-design.md 11.10), and unblocking them adds
-      # an emitc, two cc builds and two runs each. Measured the same way, and
-      # it is a bigger number than the one above: the two C halves are 7.6s of
-      # serial work (11.81s vs 4.24s for the pair alone, medians of three,
-      # SPIKE_JOBS=1), and on the corpus at four at a time that lands as
-      # 210.84s against 205.69s, medians of two. So +5s of wall on a 206s
-      # local corpus, against runner observations that span 281s to 557s on an
-      # unchanged script. The budget line is not restated for the same reason
-      # as above; the serial figure is recorded because it is the one that
-      # would show if the pool ever stopped being four wide.
-      #
-      # `ctl_vthread` and `ctl_cross_thread`, added 2026-08-31, are two more
-      # entries and both are `.jvm-only`: one `dawn run` and one `__emitc` that
-      # is required to fail, no C half at all. 4.4s for the pair serially
-      # (SPIKE_JOBS=1). On the whole corpus four at a time, two interleaved
-      # pairs on an otherwise idle machine: 247.43/245.68s without them and
-      # 249.12/248.87s with, so +2.4s. The budget line is not restated, for
-      # `effect_handler_state`'s reason. Interleaving is not decoration -- the
-      # first attempt measured +23.6s because the "with" run shared the machine
-      # with another job and the "without" run did not, and a corpus this
-      # parallel makes a single unpaired comparison worthless.
-      #
-      # `ctl_discard`, added 2026-08-31 with the `discard` primitive
-      # (docs/oneshot-design.md 11.12), is a both-backends entry, so unlike the
-      # two above it does carry an emitc, two cc builds and two runs. Measured
-      # the same way, two interleaved pairs on an idle machine: 244.43/243.42s
-      # without it and 246.54/248.09s with, so +2.1s and +4.7s, +3.4s taken
-      # together. The budget line is not restated for the same reason: 557s is
-      # a runner observation on an unchanged script and a corpus this parallel
-      # absorbs three seconds into a scheduling gap.
-      #
-      # `ctl_discard_fault`, added 2026-09-01 with `catch_fault`'s effect row
-      # (docs/audit/error-model-design.md §7.5), is a both-backends entry: one
-      # emitc, two cc builds, two runs. 6.2s serially (SPIKE_JOBS=1, median of
-      # three: 6.23/6.26/6.22). Two interleaved pairs on an idle machine:
-      # 275.18/276.50s without it and 285.17/278.11s with, so +10.0s and +1.6s,
-      # +5.8s taken together. The spread between the two pairs is larger than
-      # the entry, which is the same scheduling noise the `ctl_discard` note
-      # above measured; the budget line is not restated for its reason either.
-      # On 2026-09-02 its observation point went from a pure signature to an
-      # `!io` one (a continuation carries its remainder's io bit now); the
-      # pure spelling is a checker-corpus refusal (`continuation_row.dawn`)
-      # and the program's output is unchanged, so nothing here moved.
-      #
-      # `narrow_round`, added 2026-09-02 with std/narrow, is a both-backends
-      # entry and the largest program in the corpus (3,470 generated lines of
-      # Float literals): one emitc, two cc builds, three runs. 18.5s serially
-      # (SPIKE_JOBS=1, the entry alone). Two interleaved pairs on an idle
-      # machine: 331/316s without it and 331/318s with, so +0s and +2s. The
-      # budget line is not restated for `effect_handler_state`'s reason: a
-      # corpus this parallel absorbs one entry into a scheduling gap, and
-      # 557s is a runner observation on an unchanged script.
-      - name: native differential (both backends, plus written expectations)
-        run: ./scripts/spike-native/run.sh
-
   # The wasm target: the failure runtime, and the DOM bridge over it.
   #
   # Both harnesses ran by hand until now, and scripts/wasm-contract's own
@@ -1855,6 +1993,10 @@ jobs:
   # reusing this workflow at a tag cannot cross-read a branch run's records.
   mutant-shards-complete:
     needs:
+      - native-diff-1
+      - native-diff-2
+      - native-diff-3
+      - native-diff-4
       - syntax-mutants-1
       - syntax-mutants-2
       - syntax-mutants-3
