@@ -1170,7 +1170,7 @@ def load_samples(sample_dir: Path) -> list[tuple[str, str]]:
             ) from error
         if len(raw) > SOURCE_LIMIT_BYTES:
             raise MeasurementError(
-                f"sample {path.name} exceeds the Playground source limit"
+                f"sample {path} exceeds the Playground source limit, {len(raw)} is greater than {SOURCE_LIMIT_BYTES}"
             )
         samples.append((name, source))
     return samples
