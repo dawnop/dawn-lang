@@ -77,11 +77,11 @@ pub fn write_file(path: String, content: String) -> Result[Unit, ForeignError] !
   fs_write_file(path, content)
 
 ## The process's working directory, as an absolute path.
-pub fn cwd() -> String !io = io_cwd()
+pub fn cwd() -> String !Env = env_cwd()
 
 ## The value of the environment variable `name`, or `None` when it is unset or
 ## cannot be represented by the host environment API, including an embedded NUL.
-pub fn getenv(name: String) -> Option[String] !io = io_getenv(name)
+pub fn getenv(name: String) -> Option[String] !Env = env_get(name)
 
 ## Read a whole file as bytes. The text half is `read_file`.
 pub fn read_bytes(path: String) -> Result[Bytes, ForeignError] !Fs = fs_read_bytes(path)
@@ -562,11 +562,11 @@ pub fn with_proc_real[T, !e](body: fn() -> T !Proc !e) -> T !io = {
 # installs `with_fs_real`, then `with_proc_real`, then this. The third test
 # below is that claim, made machine-checked rather than remembered.
 #
-# As with `Fs` and `Proc`, the declaration ships one release before anything
-# moves onto it (docs/bootstrap.md, the seed feature discipline). `cwd` and
-# `getenv` are unchanged here: they still reach `io_cwd` and `io_getenv`
-# themselves, and they are callers of these operations no earlier than the
-# release after this one.
+# As with `Fs` and `Proc`, the declaration shipped one release before anything
+# moved onto it (docs/bootstrap.md, the seed feature discipline). `cwd` and
+# `getenv` are those callers now: each forwards to the operation of the same
+# meaning, and neither reaches `io_cwd` or `io_getenv` anywhere but in the
+# production handler's arms.
 
 ## The process environment, as the two operations a handler answers. The names
 ## carry an `env_` prefix for the reason the `fs_` and `proc_` ones do: `use
@@ -671,7 +671,7 @@ test "temp_dir makes a fresh directory, and a file round trips through it" {
 }
 
 test "a path that is not there is an Err, and never a panic" {
-  with_fs_real(() => {
+  with_fs_real(() => with_env_real(() => {
     let made = (r: Result[String, ForeignError]) => match r {
       Ok(p) -> p
       Err(_) -> ""
@@ -718,7 +718,7 @@ test "a path that is not there is an Err, and never a panic" {
     assert cwd() != ""
     assert is_dir(cwd())
     assert delete(d) == Ok(Deleted)
-  })
+  }))
 }
 
 test "list_dir sorts by code point, and names a non-directory itself" {
@@ -1207,4 +1207,22 @@ test "the three real wrappers nest, and the order is the body rows' doing" {
     assert proc_run(["sh", "-c", "exit 0"], "", "") == Ok(0)
     assert env_get("DAWN_STD_TEST_DEFINITELY_UNSET_VARIABLE") == None
   })))
+}
+
+test "cwd and getenv reach the table, name for name" {
+  # The seam is real from the public functions, not only from the operations:
+  # what `getenv` is handed is what the arm sees, and what the arm answers is
+  # what `cwd` and `getenv` return. Nothing below asks the host.
+  with handle Env {
+    var asked: List[String] = []
+    env_cwd() => "/virt/elsewhere"
+    env_get(name) => {
+      asked = asked ++ [name]
+      if name == "DAWN_WASM_CC" { Some("clang-20") } else { None }
+    }
+  }
+  assert cwd() == "/virt/elsewhere"
+  assert getenv("DAWN_WASM_CC") == Some("clang-20")
+  assert getenv("HOME") == None
+  assert asked == ["DAWN_WASM_CC", "HOME"]
 }

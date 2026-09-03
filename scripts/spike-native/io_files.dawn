@@ -16,7 +16,7 @@
 # std/io. Delete deliberately goes through std/io because its public
 # Deleted/NotFound/Err split is the contract under test. See stdext/raw.dawn.
 use std/io
-use std/io.{DeleteOutcome, Deleted, NotFound, Fs}
+use std/io.{DeleteOutcome, Deleted, NotFound, Fs, Env}
 use std/raw
 use std/str
 use std/bytes
@@ -37,7 +37,7 @@ fn is_set(o: Option[String]) -> Bool =
   }
 
 pub fn main() -> Unit !io = {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     io.println("-- the process's own view --")
     line("cwd is absolute ", str.starts_with(io.cwd(), "/"))
     line("PATH is set     ", is_set(io.getenv("PATH")))
@@ -81,5 +81,5 @@ pub fn main() -> Unit !io = {
     let _ = io.delete(dir ++ "/one/two")
     let _ = io.delete(dir ++ "/one")
     delete_line("scratch removed ", io.delete(dir))
-  })
+  }))
 }

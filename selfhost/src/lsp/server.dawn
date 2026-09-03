@@ -9,7 +9,7 @@
 
 use std/char
 use std/io
-use std/io.{Fs, Proc}
+use std/io.{Fs, Proc, Env}
 use std/str
 use std/map
 use std/list
@@ -411,7 +411,7 @@ type WorkspaceIdentity = {
 fn workspace_key_part(value: String) -> String =
   to_string(str.len(value)) ++ ":" ++ value
 
-fn workspace_identity(plan: ProjectPlan) -> WorkspaceIdentity !io = {
+fn workspace_identity(plan: ProjectPlan) -> WorkspaceIdentity !Env !io = {
   let project = canon(plan.source.project)
   let source_root = canon(plan.source.source_root)
   WorkspaceIdentity {
@@ -676,7 +676,7 @@ pub fn lsp_std_dir(flag: Option[String], from_env: Option[String]) -> String =
 ## The driver supplies resource factories rather than one process-global Java
 ## oracle. The JVM host creates a platform-only standalone lease and one lease
 ## per target; the native host creates lifecycle-compatible refusals.
-pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !Proc !io = {
+pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !Proc !Env !io = {
   let std_dir = lsp_std_dir(std_flag, io.getenv("DAWN_STD"))
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
@@ -813,7 +813,7 @@ pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !Proc !
 const DEBOUNCE_MS: Int = 150
 
 ## Run the analysis a document sync deferred, if there is one.
-fn flush(st: LspState, pending: Option[(String, String, Int)]) -> LspState !Fs !Proc !io =
+fn flush(st: LspState, pending: Option[(String, String, Int)]) -> LspState !Fs !Proc !Env !io =
   match pending {
     Some(p) -> {
       let (uri, text, version) = p
@@ -1106,16 +1106,18 @@ fn respond_error(id: Json, code: Int, message: String) -> Unit !io =
 fn notify(method: String, params: Json) -> Unit !io =
   send(jobj([("jsonrpc", JStr("2.0")), ("method", JStr(method)), ("params", params)]))
 
-## One message, under the real file system and real processes. The handlers
-## are installed per message rather than once around the read loop because the
-## loop's state threads through `var`s the loop reads back, and `with` cannot
-## see a `var` declared before it (spec §4.10); the innermost boundary that
-## owns a whole unit of work is the message. `Proc` arrives here through the
-## project plan, which may fetch a url dependency.
+## One message, under the real file system, real processes and the real
+## environment. The handlers are installed per message rather than once around
+## the read loop because the loop's state threads through `var`s the loop
+## reads back, and `with` cannot see a `var` declared before it (spec §4.10);
+## the innermost boundary that owns a whole unit of work is the message.
+## `Proc` arrives here through the project plan, which may fetch a url
+## dependency, and `Env` through the same plan's `canon`.
 fn handle(st0: LspState, msg: Json) -> LspState !io =
-  io.with_fs_real(() => io.with_proc_real(() => handle_fs(st0, msg)))
+  io.with_fs_real(() =>
+      io.with_proc_real(() => io.with_env_real(() => handle_fs(st0, msg))))
 
-fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !io = {
+fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !io = {
   var st = st0
   let method = ostr(msg, "method")
   let id = match oget(msg, "id") {
@@ -1220,7 +1222,7 @@ fn add_loc_diag(
   path_by_uri: Map[String, String],
   out0: Map[String, List[Json]],
   ld: LocDiag
-) -> Map[String, List[Json]] !Fs !io = {
+) -> Map[String, List[Json]] !Fs !Env !io = {
   var out = out0
   let target = canon(ld.path)
   var matched = false
@@ -1250,7 +1252,7 @@ fn diagnostics_of_program(
   st: LspState,
   path_by_uri: Map[String, String],
   prog: Program
-) -> Map[String, List[Json]] !Fs !io = {
+) -> Map[String, List[Json]] !Fs !Env !io = {
   var out: Map[String, List[Json]] = map.empty()
   for ld in prog.diags { out = add_loc_diag(st, path_by_uri, out, ld) }
   out
@@ -1260,7 +1262,7 @@ fn diagnostics_of_problem(
   st: LspState,
   path_by_uri: Map[String, String],
   problem: LocDiag
-) -> Map[String, List[Json]] !Fs !io = {
+) -> Map[String, List[Json]] !Fs !Env !io = {
   let out: Map[String, List[Json]] = map.empty()
   add_loc_diag(st, path_by_uri, out, problem)
 }
@@ -1269,7 +1271,7 @@ fn workspace_inputs(
   st: LspState,
   plan: ProjectPlan,
   path_by_uri: Map[String, String]
-) -> WorkspaceInputs !io = {
+) -> WorkspaceInputs !Env !io = {
   var texts: Map[String, String] = map.empty()
   var overlay: Map[String, String] = map.empty()
   var entries: List[String] = []
@@ -1322,7 +1324,7 @@ fn conflict_diagnostics(
 
 ## Rebuild one coherent workspace snapshot. Conflict detection happens before the
 ## overlay map can overwrite either live text, and discards the old program.
-fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !Fs !io =
+fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
   match workspace_inputs(st, ws0.plan, ws0.path_by_uri) {
     InputsConflict(paths) -> {
       let no_entries: Map[String, String] = map.empty()
@@ -1351,7 +1353,7 @@ fn unavailable_workspace(
   plan: ProjectPlan,
   path_by_uri: Map[String, String],
   problem: LocDiag
-) -> UnavailableWorkspace !Fs !io =
+) -> UnavailableWorkspace !Fs !Env !io =
   UnavailableWorkspace {
     plan: plan,
     path_by_uri: path_by_uri,
@@ -1365,7 +1367,7 @@ fn activate_workspace(
   st: LspState,
   plan: ProjectPlan,
   path_by_uri: Map[String, String]
-) -> WorkspaceSlot !Fs !io =
+) -> WorkspaceSlot !Fs !Env !io =
   match st.host.project(plan.source) {
     Ok(lease) -> {
       let no_prog: Option[Program] = None
@@ -1414,7 +1416,7 @@ fn slot_uris(slot: WorkspaceSlot) -> Set[String] = {
   add_uris(out, map.keys(slot_diagnostics(slot)))
 }
 
-fn standalone_diagnostics(d: Doc, prog: Program) -> List[Json] !io = {
+fn standalone_diagnostics(d: Doc, prog: Program) -> List[Json] !Env !io = {
   var out: List[Json] = []
   for ld in prog.diags {
     let own = match d.canonical_path {
@@ -1429,7 +1431,7 @@ fn standalone_diagnostics(d: Doc, prog: Program) -> List[Json] !io = {
 ## Aggregate every root's contribution before publishing one URI. This is the
 ## clearing rule that prevents one root from erasing another root's diagnostic
 ## when both point at the same manifest, lock or dependency file.
-fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !io = {
+fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !Env !io = {
   var out: List[Json] = []
   for workspace_key in sort(map.keys(st.workspaces)) {
     let slot = map.get(st.workspaces, workspace_key).expect("workspace")
@@ -1449,7 +1451,7 @@ fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !io = {
   out
 }
 
-fn publish_uris(st: LspState, uris: Set[String]) -> Unit !io = {
+fn publish_uris(st: LspState, uris: Set[String]) -> Unit !Env !io = {
   for uri in sort(set.to_list(uris)) {
     var fields: List[(String, Json)] = [
       ("uri", JStr(uri)),
@@ -1468,7 +1470,7 @@ fn install_workspace(
   identity: WorkspaceIdentity,
   slot: WorkspaceSlot,
   affected0: Set[String]
-) -> LspState !io = {
+) -> LspState !Env !io = {
   var affected = add_uris(affected0, set.to_list(slot_uris(slot)))
   let st = LspState {
     ..st0,
@@ -1486,7 +1488,7 @@ fn standalone_doc(
   text: String,
   version: Int,
   modules: Option[Map[String, String]]
-) -> Doc !io = {
+) -> Doc !Env !io = {
   let source_path = match path {
     Some(found) -> found
     None -> "<lsp>"
@@ -1507,7 +1509,7 @@ fn standalone_doc(
   }
 }
 
-fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !io =
+fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !Env !io =
   match uri_to_path(uri) {
     None -> {
       let no_path: Option[String] = None
@@ -1573,7 +1575,7 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
     }
   }
 
-fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> LspState !Fs !io =
+fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> LspState !Fs !Env !io =
   match old.analysis {
     Standalone(_, _, modules) -> {
       let source_path = match old.path {
@@ -1618,7 +1620,7 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
     }
   }
 
-fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !io =
+fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !Env !io =
   match map.get(st.docs, uri) {
     Some(old) -> update_existing_doc(st, old, text, version)
     None -> open_new_doc(st, uri, text, version)
@@ -1627,7 +1629,7 @@ fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState
 ## An unavailable root retries only at an explicit low-frequency boundary.
 ## didChange never reaches this function; new members use `activate_workspace`
 ## directly, and a fully closed root is newly planned when reopened.
-fn retry_unavailable(st: LspState, uri: String) -> LspState !Fs !io =
+fn retry_unavailable(st: LspState, uri: String) -> LspState !Fs !Env !io =
   match map.get(st.docs, uri) {
     Some(d) ->
       match d.analysis {
@@ -1645,7 +1647,7 @@ fn retry_unavailable(st: LspState, uri: String) -> LspState !Fs !io =
     None -> st
   }
 
-fn close_doc(st0: LspState, uri: String) -> LspState !Fs !io =
+fn close_doc(st0: LspState, uri: String) -> LspState !Fs !Env !io =
   match map.get(st0.docs, uri) {
     None -> {
       publish_uris(st0, set.from([uri]))
@@ -1700,7 +1702,7 @@ fn pos_offset(d: Doc, params: Json) -> Int = {
 
 # ---- language features ----
 
-fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !io = {
+fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !Env !io = {
   match doc_of(st, params) {
     Some(d) ->
       match analysis_of(st, d) {
@@ -1756,7 +1758,7 @@ fn handle_hover(st: LspState, params: Json) -> Json !io = {
   }
 }
 
-fn handle_definition(st: LspState, params: Json) -> Json !Fs !io = {
+fn handle_definition(st: LspState, params: Json) -> Json !Fs !Env !io = {
   match doc_of(st, params) {
     Some(d) ->
       match analysis_of(st, d) {
@@ -1815,7 +1817,7 @@ fn location_of(
   def_path: Option[String],
   lo: Int,
   hi: Int
-) -> Option[Json] !Fs !io = {
+) -> Option[Json] !Fs !Env !io = {
   let same = match def_path {
     None -> true
     Some(dp) ->
@@ -1967,7 +1969,7 @@ fn handle_formatting(st: LspState, params: Json) -> Json !io = {
 }
 
 test "a bundled std buffer keeps its std identity through the document seam" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # `standalone_doc` is where `textDocument/didOpen` records what a buffer is.
     # It used to write the literal "main", which `analyze_standalone` proposes
     # and is not always what comes back: a source file of the bundled std is
@@ -2037,7 +2039,7 @@ test "a bundled std buffer keeps its std identity through the document seam" {
       }
       WorkspaceMember(_) -> panic("a standalone buffer is not a workspace member")
     }
-  })
+  }))
 }
 
 test "the language server's std is the toolchain's, not the client's cwd" {
@@ -2111,7 +2113,7 @@ fn def_probe_put(path: String, text: String) -> Unit !Fs =
     Err(e) -> panic("test setup: " ++ e.message)
   }
 
-fn def_probe_doc_named(st: LspState, name: String, text: String) -> Doc !Fs !io = {
+fn def_probe_doc_named(st: LspState, name: String, text: String) -> Doc !Fs !Env !io = {
   let dir = "/tmp/dawn-selfhost-lsp-def"
   let path = dir ++ "/" ++ name
   let _ = io.mkdirs(dir)
@@ -2121,7 +2123,7 @@ fn def_probe_doc_named(st: LspState, name: String, text: String) -> Doc !Fs !io 
     0, no_modules)
 }
 
-fn def_probe_doc(st: LspState, text: String) -> Doc !Fs !io =
+fn def_probe_doc(st: LspState, text: String) -> Doc !Fs !Env !io =
   def_probe_doc_named(st, "main.dawn", text)
 
 fn def_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -> Target = {
@@ -2150,7 +2152,7 @@ fn def_probe_span(t: Target, what: String) -> (Int, Int) =
   }
 
 test "a definition in std names std's file and points at the declaration" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # The bug this pins: `def_path` None means "the document being analyzed", and
     # std used to answer with it. `location_of` then mapped std's offsets through
     # the requesting buffer's line table and replied with that buffer's uri, so
@@ -2196,11 +2198,11 @@ test "a definition in std names std's file and points at the declaration" {
     # purpose, so the bundle's own record is the only thing that can answer.
     let u = def_probe_at(st, d, text, "std/list", 0)
     assert u.def_path == Some(canon("std/list.dawn"))
-  })
+  }))
 }
 
 test "an embedded std offers no definition instead of one in the wrong file" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # A released toolchain in a project with no std directory: the embedded copy
     # answers, and there is no file on disk to jump into. The honest reply is no
     # definition at all. Emitting a None path here would be the original bug --
@@ -2233,11 +2235,11 @@ test "an embedded std offers no definition instead of one in the wrong file" {
     assert l.def_path == absent
     let (llo, lhi) = def_probe_span(l, "helper")
     assert str.slice(text, llo, lhi) == "helper"
-  })
+  }))
 }
 
 test "a definition of a std constant names std's file too" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # `def_of_const_in` reaches std through its own loop rather than through
     # `module_ast_by_class`, and today's bundle declares no `pub const` at all,
     # so the real std cannot exercise it: a mutant reverting that branch on its
@@ -2274,11 +2276,11 @@ test "a definition of a std constant names std's file too" {
       Err(e) -> panic("probe std module: " ++ e.message)
     }
     assert str.slice(src, lo, hi) == "PROBE_LIMIT"
-  })
+  }))
 }
 
 test "a local definition still resolves against the requesting document" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # The contract the std fix leans on, from the other side. `def_path` None has
     # to keep meaning "this buffer" -- that is what makes a definition in the file
     # being edited resolve against the live text rather than whatever is on disk.
@@ -2313,7 +2315,7 @@ test "a local definition still resolves against the requesting document" {
       }
       None -> panic("a definition in the requesting document must resolve")
     }
-  })
+  }))
 }
 
 # ---- handler state cells: what the reader points at, and what answers ----
@@ -2339,7 +2341,7 @@ fn cell_probe_text() -> String =
   ], "\n")
 
 test "a handler state cell answers at every spelling of it" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # A cell is not an ordinary binding by the time it is typed: the checker
     # rewrites every read into `cell_get`/`cell_take` and every write into
     # `cell_set`, and the binding itself holds an erased slot
@@ -2393,5 +2395,5 @@ test "a handler state cell answers at every spelling of it" {
     let tail = def_probe_at(st, d, text, "acc\n}", 0)
     assert tail.hover == "var acc: List[Int]"
     assert def_probe_span(tail, "the cell read below the handler") == (dlo, dhi)
-  })
+  }))
 }

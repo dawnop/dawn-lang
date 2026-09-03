@@ -46,13 +46,18 @@ def instrument(jreflect):
     close: () => {
       lease.close()
       io.eprintln("LSP_WORKSPACE_LEASE close " ++ to_string(count))
-      match io.getenv("DAWN_LSP_TEST_CLOSE_PANIC") {
-        Some(mode) ->
-          if mode == "project" && count > 0 {
-            panic("injected project lease close failure")
-          }
-        None -> ()
-      }
+      # `close` is a `fn() -> Unit !io` field, and `io.getenv` is `!Env`
+      # since the environment became a named effect. The instrumentation owns
+      # this closure, so it answers the row here rather than widening a
+      # production type for a probe.
+      io.with_env_real(() =>
+        match io.getenv("DAWN_LSP_TEST_CLOSE_PANIC") {
+          Some(mode) ->
+            if mode == "project" && count > 0 {
+              panic("injected project lease close failure")
+            }
+          None -> ()
+        })
     }
   }
 }""",
@@ -208,7 +213,7 @@ def mutate(name, server, main, analyze):
         )
     elif name == "extensionless-project-member":
         analyze_text = analyze.read_text(encoding="utf-8")
-        new = """pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !io = {
+        new = """pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !Env !io = {
   let mod_path = module_path_of(canon(plan.source.source_root), canon(file))
   if len(bad_segments(mod_path)) == 0 { Some(mod_path) } else { None }
 }"""
@@ -252,10 +257,13 @@ def mutate(name, server, main, analyze):
         )
     elif name == "merged-java-lease":
         old = "  match catch_fault(() => jsig_for(jars)) {"
-        new = """  let selected = match io.getenv("DAWN_LSP_MUTANT_MERGED_CP") {
-    Some(value) -> str.split(value, path_sep())
-    None -> jars
-  }
+        new = """  # `io.getenv` is `!Env`, and this row is not; the mutation answers it
+  # where it injects the read, so it stays one function wide.
+  let selected = io.with_env_real(() =>
+    match io.getenv("DAWN_LSP_MUTANT_MERGED_CP") {
+      Some(value) -> str.split(value, path_sep())
+      None -> jars
+    })
   match catch_fault(() => jsig_for(selected)) {"""
         main_text = replace_once(main_text, old, new, name)
     elif name == "last-close-retains-lease":

@@ -34,7 +34,7 @@
 # is made rather than every time a string is folded.
 use std/char
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Env}
 use std/list
 use std/str
 use java "java.lang.Character"
@@ -244,7 +244,7 @@ fn emit_class() -> Unit !io = {
 
 # ---- reading the committed tables ----
 
-fn table_dir() -> String !io =
+fn table_dir() -> String !Env !io =
   match io.getenv("DAWN_UNICODE_DIR") {
     Some(p) -> p
     None -> "selfhost/src/embed"
@@ -510,7 +510,7 @@ fn check_case_oracle(rs: List[(Int, Int, Int)], up: Bool) -> Int !io = {
   bad
 }
 
-fn check() -> Unit !Fs !io = {
+fn check() -> Unit !Fs !Env !io = {
   let case_text = read(table_dir() ++ "/unicode_case.dawn")
   let class_text = read(table_dir() ++ "/unicode_class.dawn")
   let upper = triples(case_text, "upper")
@@ -546,7 +546,8 @@ fn check() -> Unit !Fs !io = {
 }
 
 pub fn main() -> Unit !io = io.with_fs_real(() =>
-    match io.getenv("DAWN_UNICODE_EMIT") {
-      Some(what) -> if what == "class" { emit_class() } else { emit_case() }
-      None -> check()
-    })
+    io.with_env_real(() =>
+        match io.getenv("DAWN_UNICODE_EMIT") {
+          Some(what) -> if what == "class" { emit_class() } else { emit_case() }
+          None -> check()
+        }))

@@ -5,7 +5,7 @@
 # accumulated exports of everything before it (std pre-seeded).
 
 use std/io
-use std/io.{Fs, Proc}
+use std/io.{Fs, Proc, Env}
 use std/str
 use std/list
 use std/map
@@ -84,7 +84,7 @@ pub type ProjectPlan = {
 ## below this file in the layering and cannot import it, and
 ## `compiler-plan/src/source.dawn` is in another package that does not depend
 ## on the compiler at all. A change to the spelling is a change to all three.
-pub fn canon(p: String) -> String !io =
+pub fn canon(p: String) -> String !Env !io =
   if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
 fn seg_ok(s: String) -> Bool = {
@@ -142,7 +142,7 @@ fn module_path_of(root_abs: String, file_abs: String) -> String = {
 ## The legal module path `file` has inside one captured project plan. LSP
 ## workspace membership uses the same derivation and rejection as the loader,
 ## including unsaved files that are not present in the captured tree walk.
-pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !io = {
+pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !Env !io = {
   if not str.ends_with(file, ".dawn") { return None }
   let mod_path = module_path_of(canon(plan.source.source_root), canon(file))
   if len(bad_segments(mod_path)) == 0 { Some(mod_path) } else { None }
@@ -197,7 +197,7 @@ fn missing_source_root(dir: String) -> LoadResult = {
 ## result use this seam rather than planning first and trying to undo it.
 pub fn project_plan_for_load(
   target: source.SourceTarget
-) -> Result[ProjectPlan, LoadResult] !Fs !Proc !io =
+) -> Result[ProjectPlan, LoadResult] !Fs !Proc !Env !io =
   match target {
     source.ProjectDirectory(dir) ->
       if io.is_dir(dir ++ "/src") {
@@ -208,7 +208,7 @@ pub fn project_plan_for_load(
     source.SourceFile(_) -> Ok(project_plan(target))
   }
 
-fn load_directory_planned(dir: String, plan: ProjectPlan) -> LoadResult !Fs !io = {
+fn load_directory_planned(dir: String, plan: ProjectPlan) -> LoadResult !Fs !Env !io = {
   let root = dir ++ "/src"
   if not io.is_dir(root) { return missing_source_root(dir) }
   var diags: List[LocDiag] = []
@@ -235,7 +235,7 @@ fn load_directory_planned(dir: String, plan: ProjectPlan) -> LoadResult !Fs !io 
 }
 
 ## Load exactly the target captured by `plan`, without source replanning.
-pub fn load_planned(plan: ProjectPlan) -> LoadResult !Fs !io =
+pub fn load_planned(plan: ProjectPlan) -> LoadResult !Fs !Env !io =
   match plan.source.target {
     source.ProjectDirectory(dir) -> load_directory_planned(dir, plan)
     source.SourceFile(file) -> {
@@ -245,7 +245,7 @@ pub fn load_planned(plan: ProjectPlan) -> LoadResult !Fs !io =
   }
 
 ## Directory mode: root = <dir>/src, entry = <dir>/src/main.dawn (spec §10.1).
-pub fn load_directory(dir: String) -> LoadResult !Fs !Proc !io =
+pub fn load_directory(dir: String) -> LoadResult !Fs !Proc !Env !io =
   match project_plan_for_load(source.ProjectDirectory(dir)) {
     Ok(plan) -> load_planned(plan)
     Err(rejected) -> rejected
@@ -267,7 +267,7 @@ pub fn load_directory(dir: String) -> LoadResult !Fs !Proc !io =
 ## Provenance, not spelling: this is the directory `--std` actually answered
 ## from, whatever it is named, and a project directory called `std` still gets
 ## the project diagnostics.
-pub fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !Fs !io = {
+pub fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !Fs !Env !io = {
   let none: Option[LoadResult] = None
   if not io.is_dir(target) { return none }
   if not is_std_dir(std, target) { return none }
@@ -280,7 +280,7 @@ pub fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !Fs !io
 
 ## One command-line target, loaded as a file or a project directory, with the
 ## std directory answered by `std_dir_target` instead.
-pub fn load_target(std: StdCtx, target: String) -> LoadResult !Fs !Proc !io =
+pub fn load_target(std: StdCtx, target: String) -> LoadResult !Fs !Proc !Env !io =
   match std_dir_target(std, target) {
     Some(refusal) -> refusal
     None -> if io.is_dir(target) { load_directory(target) } else { load_file(target) }
@@ -354,13 +354,13 @@ fn read_over(over: Map[String, String], c: String, f: String) -> Result[String, 
 
 ## File mode: root = nearest `src` ancestor, else the file's own directory;
 ## loads the entry plus its transitive use-closure.
-pub fn load_file(file: String) -> LoadResult !Fs !Proc !io = {
+pub fn load_file(file: String) -> LoadResult !Fs !Proc !Env !io = {
   let no_over: Map[String, String] = map.empty()
   load_file_over(file, no_over)
 }
 
 ## `load_file` with editor-buffer overrides.
-pub fn load_file_over(file: String, over: Map[String, String]) -> LoadResult !Fs !Proc !io = {
+pub fn load_file_over(file: String, over: Map[String, String]) -> LoadResult !Fs !Proc !Env !io = {
   let plan = project_plan(source.SourceFile(file))
   load_entries_over(plan, [file], over)
 }
@@ -371,7 +371,7 @@ pub fn load_entries_over(
   plan: ProjectPlan,
   entries: List[String],
   over: Map[String, String]
-) -> LoadResult !Fs !io =
+) -> LoadResult !Fs !Env !io =
   resolve(
     plan.source.source_root,
     entries,
@@ -386,7 +386,7 @@ fn resolve(
   diags0: List[LocDiag],
   pkgs: Map[String, source.PkgR],
   over: Map[String, String]
-) -> LoadResult !Fs !io = {
+) -> LoadResult !Fs !Env !io = {
   var diags = diags0
   let root_abs = canon(root)
   var by_canon: Map[String, String] = map.empty()
@@ -741,7 +741,7 @@ fn empty_ctout() -> CtOut = {
 ## in its declarations (`declared_audience`), so a half-identity -- std powers
 ## under the name `hamt` -- publishes an internal module to the world and
 ## fails a different way.
-fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !io =
+fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !Env !io =
   match std_module_of(std, mf.path) {
     Some(mod_path) -> (LoadedModule { ..mf, mod_path: mod_path, class_name: mod_path }, true)
     None -> (mf, false)
@@ -749,7 +749,7 @@ fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !io =
 
 ## Check a loaded program in dependency order: each module sees the exports of
 ## everything before it (std pre-seeded); comptime runs on clean modules only.
-pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !io = {
+pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Env !io = {
   var diags = loaded.diags
   var exports = std.exports
   var out: List[CheckedMod] = []
@@ -872,7 +872,7 @@ fn index_files(
   root: String,
   prefix: String,
   files: List[String]
-) -> Map[String, String] !io = {
+) -> Map[String, String] !Env !io = {
   var out = out0
   let root_abs = canon(root)
   for f in files {
@@ -888,7 +888,7 @@ fn index_files(
 ## Capture source resolution and derive every compiler-facing module path from
 ## it. The project tree is walked once. Direct dependencies sharing one source
 ## root reuse the same walk while still receiving each consumer alias prefix.
-pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !Proc !io = {
+pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !Proc !Env !io = {
   let source_plan = source.source_plan(target)
   let project_files = walk_dawn(source_plan.source_root)
   var by_use: Map[String, String] = map.empty()
@@ -930,7 +930,7 @@ pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !Proc !io = 
 ## ProjectPlan. A cold url dep is fetched here the way `dawn check` would fetch
 ## it; the LSP's project-aware path instead reuses the index captured during
 ## analysis.
-pub fn use_candidates(file: String) -> Map[String, String] !Fs !Proc !io = {
+pub fn use_candidates(file: String) -> Map[String, String] !Fs !Proc !Env !io = {
   # a buffer with no file behind it (`<lsp>`) has no tree to walk, and canon()
   # would resolve that placeholder against the server's own directory
   if not str.ends_with(file, ".dawn") {
@@ -975,7 +975,7 @@ pub fn analyze_standalone(
   std: StdCtx,
   opts: CtOpts,
   js: Jsig
-) -> Program !io = {
+) -> Program !Env !io = {
   let (m, pdiags) = parser.parse_module(text)
   var diags: List[LocDiag] = []
   match entry_name_of(path) {
@@ -1020,7 +1020,7 @@ pub fn analyze_document_planned(
   std: StdCtx,
   opts: CtOpts,
   js: Jsig
-) -> DocumentAnalysis !Fs !Proc !io = {
+) -> DocumentAnalysis !Fs !Proc !Env !io = {
   if not has_module_use(text) {
     let prog = analyze_standalone(path, text, std, opts, js)
     return DocumentAnalysis { prog: prog, entry: standalone_entry(prog), plan: None }
@@ -1056,10 +1056,11 @@ pub fn analyze_document(
   std: StdCtx,
   opts: CtOpts,
   js: Jsig
-) -> (Program, String) !io = io.with_fs_real(() => io.with_proc_real(() => {
-  let analyzed = analyze_document_planned(path, text, std, opts, js)
-  (analyzed.prog, analyzed.entry)
-}))
+) -> (Program, String) !io =
+  io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => {
+    let analyzed = analyze_document_planned(path, text, std, opts, js)
+    (analyzed.prog, analyzed.entry)
+  })))
 
 # ---- tests ----
 
@@ -1112,7 +1113,7 @@ fn put(p: String, text: String) -> Unit !Fs =
   }
 
 test "a two-module project analyzes end to end" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     let root = "/tmp/dawn-selfhost-analyze/proj1"
     mkdirs(root ++ "/src")
     put(root ++ "/src/util.dawn",
@@ -1132,11 +1133,11 @@ test "a two-module project analyzes end to end" {
     # jsig_refused: a project with no `use java` analyzes without any oracle
     let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
     assert len(prog.diags) == 0
-  })
+  }))
 }
 
 test "the representation modules are closed to user code (audit RD-06)" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # The accept half is `load_std` itself: std/map is a `use std/hamt`-free
     # module only because lowering rewrites its primitives, but std/list does
     # import std/set's primitives and the bundle as a whole is checked with the
@@ -1156,11 +1157,11 @@ test "the representation modules are closed to user code (audit RD-06)" {
     assert str.contains(prog.diags[0].d.hint, "use std/map or std/set")
     assert prog.diags[1].d.msg == "`std/pvec` is internal to the standard library"
     assert str.contains(prog.diags[1].d.hint, "use std/list")
-  })
+  }))
 }
 
 test "an impl is in force in every module, not just its own (spec §3.5)" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     let root = "/tmp/dawn-selfhost-analyze/trait-cross"
     mkdirs(root ++ "/src")
     put(root ++ "/src/lib.dawn",
@@ -1187,11 +1188,11 @@ test "an impl is in force in every module, not just its own (spec §3.5)" {
     let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
     for d in prog.diags { panic("unexpected: " ++ d.d.msg) }
     assert len(prog.diags) == 0
-  })
+  }))
 }
 
 test "a second module cannot supply a rival impl" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # The program-wide coherence check now sees the whole program's table, but
     # it is not what reports this: the orphan rule gets there first, and between
     # two *different* modules it always does. An impl may only live with its
@@ -1216,11 +1217,11 @@ test "a second module cannot supply a rival impl" {
     let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
     assert len(prog.diags) == 1
     assert str.contains(prog.diags[0].d.msg, "orphan impl: `Sizey[Box]`")
-  })
+  }))
 }
 
 test "closure loading skips an unreferenced module (module-access 2.2)" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     let root = "/tmp/dawn-selfhost-analyze/closure1"
     mkdirs(root ++ "/src")
     put(root ++ "/src/main.dawn", "pub fn main() -> Unit !io = println(\"hi\")\n")
@@ -1233,11 +1234,11 @@ test "closure loading skips an unreferenced module (module-access 2.2)" {
     let clo = load_file(root ++ "/src/main.dawn")
     assert len(clo.modules) == 1
     assert clo.modules[0].mod_path == "main"
-  })
+  }))
 }
 
 test "a module may be imported qualified and selectively at once" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # Two different acts: one binds a module alias to call through, the other
     # binds names. A module that exports a type AND functions needs both, and
     # the qualified spelling is the whole point of the former.
@@ -1262,11 +1263,11 @@ test "a module may be imported qualified and selectively at once" {
       if str.contains(ld.d.msg, "imported more than once") { dup = true }
     }
     assert dup
-  })
+  }))
 }
 
 test "a module alias collides with an imported name in either source order" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # bind_import catches `use a/b` before `use a/b.{b}` by reading the alias
     # table as it stands. Nothing read the name table on the way in, so the same
     # pair reversed used to pass and `b` became a binding *and* an alias (#185).
@@ -1306,11 +1307,11 @@ test "a module alias collides with an imported name in either source order" {
         "pub fn main() -> Unit !io = println(trim(str.repeat(\" a \", 1)))\n")
     let ok = analyze_program(load_directory(root3), std, ct_default(), jsig_refused())
     assert len(ok.diags) == 0
-  })
+  }))
 }
 
 test "loader reports cycles and missing modules" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     let root = "/tmp/dawn-selfhost-analyze/proj2"
     mkdirs(root ++ "/src")
     put(root ++ "/src/main.dawn", "use a\npub fn main() -> Unit !io = ()\n")
@@ -1331,11 +1332,11 @@ test "loader reports cycles and missing modules" {
       if str.contains(ld.d.msg, "cannot find module `nope`") { missing = true }
     }
     assert missing
-  })
+  }))
 }
 
 test "a file whose name is not a path segment is refused, not folded" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # The `use` grammar cannot spell these, so only the entry file -- the one
     # named on the command line -- can carry them in. The old folding turned
     # `a-b` and `a_b` into one class name, and `9x` into `m_9x`, which is the
@@ -1364,11 +1365,11 @@ test "a file whose name is not a path segment is refused, not folded" {
     assert len(good.modules) == 1
     assert good.modules[0].mod_path == "ok_name2"
     assert good.modules[0].class_name == "ok_name2"
-  })
+  }))
 }
 
 test "the editor's standalone path judges the buffer's name too" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # The asymmetry this closes (#176): `analyze_standalone` hardcodes mod_path
     # "main", so the buffer's own file name never reached the check `resolve`
     # runs on its seeds. The language server accepted, in silence, a file that
@@ -1396,11 +1397,11 @@ test "the editor's standalone path judges the buffer's name too" {
     # an untitled buffer has no name to judge -- and `<lsp>` is not one
     let untitled = analyze_standalone("<lsp>", src, std, ct_default(), jsig_refused())
     assert len(untitled.diags) == 0
-  })
+  }))
 }
 
 test "use_candidates enumerates the tree and its deps the way `use` spells them" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     let base = "/tmp/dawn-selfhost-analyze/cands"
     mkdirs(base ++ "/app/src/deep")
     mkdirs(base ++ "/pkg/web/src")
@@ -1420,11 +1421,11 @@ test "use_candidates enumerates the tree and its deps the way `use` spells them"
 
     # a buffer with no file behind it has no tree to walk
     assert len(map.keys(use_candidates("<lsp>"))) == 0
-  })
+  }))
 }
 
 test "directory mode refuses one badly named module without losing the rest" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     let root = "/tmp/dawn-selfhost-analyze/entrydir"
     mkdirs(root ++ "/src")
     put(root ++ "/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
@@ -1434,11 +1435,11 @@ test "directory mode refuses one badly named module without losing the rest" {
     assert loaded.modules[0].mod_path == "main"
     assert len(loaded.diags) == 1
     assert loaded.diags[0].d.msg == "`bad-name` is not a valid module path segment"
-  })
+  }))
 }
 
 test "an aliased path dep canonicalizes to the package's real name" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     let base = "/tmp/dawn-selfhost-analyze/proj4"
     mkdirs(base ++ "/pkg/web/src")
     mkdirs(base ++ "/app/src")
@@ -1459,7 +1460,7 @@ test "an aliased path dep canonicalizes to the package's real name" {
       }
     }
     assert found
-  })
+  }))
 }
 
 # ---- a dependency the project does not have on disk ----
@@ -1488,14 +1489,13 @@ test "a cold url dependency is fetched while the project is planned" {
   let base = "/tmp/dawn-selfhost-analyze/proj-url-cold"
   let (loaded, log) = in_mem_proc(
     [procmem.failed(22, "curl: (22) The requested URL returned error: 404\n")],
-    () => {
+    () => io.with_env_real(() => {
       mkdirs(base ++ "/src")
       put(base ++ "/dawn.toml", url_dep_manifest())
       put(base ++ "/src/main.dawn",
         "use greeter/hello\n\npub fn main() -> Unit !io = println(hello.greet())\n")
       load_directory(base)
-    }
-  )
+    }))
   # planning the project reached the network exactly once, and this is what it
   # asked: the manifest's url, behind curl's own failure flag
   assert len(log) == 1
@@ -1516,7 +1516,7 @@ test "a cold url dependency is fetched while the project is planned" {
 
 test "a warm url dependency is analyzed without consulting curl" {
   let base = "/tmp/dawn-selfhost-analyze/proj-url-warm"
-  let (loaded, log) = in_mem_proc([], () => {
+  let (loaded, log) = in_mem_proc([], () => io.with_env_real(() => {
     # the cache entry, under the name the hash gives it, with the record that
     # says this url produced these bytes
     let root = pkgfetch.cache_root()
@@ -1530,7 +1530,7 @@ test "a warm url dependency is analyzed without consulting curl" {
     put(base ++ "/src/main.dawn",
       "use greeter/hello\n\npub fn main() -> Unit !io = println(hello.greet())\n")
     load_directory(base)
-  })
+  }))
   # the empty script is the assertion: a fetch here would have panicked for
   # want of a reply
   assert len(log) == 0
@@ -1548,7 +1548,7 @@ test "a warm url dependency is analyzed without consulting curl" {
 
 # ---- std identity (a file's provenance, never its module path) ----
 
-fn std_or_die() -> StdCtx !Fs !io =
+fn std_or_die() -> StdCtx !Fs !Env !io =
   match load_std(std_dir()) {
     Ok(sc) -> sc
     Err(e) -> panic("std: " ++ std_load_error_text(e))
@@ -1568,7 +1568,7 @@ fn has_msg(prog: Program, msg: String) -> Bool = {
 }
 
 test "every bundled std source checks clean on its own" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # The bug this closes: `dawn check std/cursor.dawn` reported 281 errors
     # across the bundle -- the first of them on line 50, the line that defines
     # the very `cursor.start` its hint told the reader to call instead. std was
@@ -1593,11 +1593,11 @@ test "every bundled std source checks clean on its own" {
       assert prog.modules[0].mod_path == "std/" ++ n
       assert prog.modules[0].cx.is_std_module
     }
-  })
+  }))
 }
 
 test "std identity is where the file came from, not what the module is called" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # A project file at src/std/cursor.dawn is spelled exactly like a bundled
     # module and is not one. The loader's reserved-path diagnostic already
     # refused it -- and that diagnostic used to be the *only* thing refusing it,
@@ -1620,11 +1620,11 @@ test "std identity is where the file came from, not what the module is called" {
     assert std_module_of(std, std_dir() ++ "/cursor.dawn") == Some("std/cursor")
     let absent: Option[String] = None
     assert std_module_of(std, impostor) == absent
-  })
+  }))
 }
 
 test "user code still cannot reach a std-only builtin" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # The negative control for all of the above. Opening std to its own sources
     # is worth nothing if it also opened the intrinsic table to everyone, and
     # the same hint the bug report quoted is what user code is supposed to get.
@@ -1644,11 +1644,11 @@ test "user code still cannot reach a std-only builtin" {
       }
     }
     assert hinted
-  })
+  }))
 }
 
 test "the editor's standalone path gives a bundled std buffer its std identity" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # The journey the bug was reported from: an editor opens std/list.dawn and
     # every line that touches a std-only builtin is underlined. Both language
     # server entries (didOpen and didChange) land in `analyze_standalone`, which
@@ -1676,11 +1676,11 @@ test "the editor's standalone path gives a bundled std buffer its std identity" 
       jsig_refused())
     assert len(doc.prog.diags) == 0
     assert doc.entry == "std/list"
-  })
+  }))
 }
 
 test "the bundled std directory is not a project target" {
-  in_mem(() => {
+  in_mem(() => io.with_env_real(() => {
     # `dawn check std` used to answer "project directory has no `src/` folder",
     # which is true and useless: std is not a project and cannot be made into
     # one. Recognised by provenance, so a project that happens to be called
@@ -1703,7 +1703,7 @@ test "the bundled std directory is not a project target" {
       None -> ()
     }
     assert len(load_target(std, root).diags) == 0
-  })
+  }))
 }
 
 test "the analysis reads the declared tree, and no file system behind it" {
@@ -1715,7 +1715,7 @@ test "the analysis reads the declared tree, and no file system behind it" {
   let root = "/tmp/dawn-selfhost-analyze/never-on-disk"
   let main_src = "use util\npub fn main() -> Unit !io = println(util.tag())\n"
   let (_, table) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
-    () => io.with_proc_real(() => {
+    () => io.with_proc_real(() => io.with_env_real(() => {
       mkdirs(root ++ "/src")
       put(root ++ "/src/main.dawn", main_src)
       put(root ++ "/src/util.dawn", "pub fn tag() -> String = \"t\"\n")
@@ -1729,7 +1729,7 @@ test "the analysis reads the declared tree, and no file system behind it" {
         Err(e) -> panic("std: " ++ std_load_error_text(e))
       }
       assert len(analyze_program(loaded, std, ct_default(), jsig_refused()).diags) == 0
-    }))
+    })))
   # the table is the only source of truth, so what was written can be read back
   assert fsmem.mem_content(table, root ++ "/src/main.dawn") == Some(main_src)
   # and every file the run touched came from the declared tree or the mounted

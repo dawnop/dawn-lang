@@ -15,7 +15,7 @@
 #                                         class-path packages in (standalone)
 
 use std/io
-use std/io.{Fs, Proc}
+use std/io.{Fs, Proc, Env}
 use std/str
 use std/bytes
 use std/map
@@ -260,7 +260,7 @@ fn collect_program(
   opts: CtOpts,
   closure: Bool,
   std_tests: Bool
-) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !Fs !Proc !io = {
+) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !Fs !Proc !Env !io = {
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
   var mods: List[CheckedMod] = []
@@ -959,7 +959,7 @@ fn cli_error(msg: String) -> Unit !io = {
 ## compiler's own fault; a directory is the user's environment, so it gets
 ## `error:` and the CLI exit code instead of a panic. `cli_error` exits, so the
 ## panic under it is the unreachable value this function's type needs.
-fn fail_std(e: StdLoadError) -> StdCtx !io = {
+fn fail_std(e: StdLoadError) -> StdCtx !Env !io = {
   let text = std_load_error_text(e)
   if std_load_is_bug(e) { panic(text) }
   cli_error(text)
@@ -969,7 +969,7 @@ fn fail_std(e: StdLoadError) -> StdCtx !io = {
 ## `dawn cache verify` — re-hash every entry in the package cache and compare
 ## it with the hash its directory name claims (PKG-02's companion command:
 ## the per-use check catches the entry a build touches, this sweeps them all).
-fn run_cache(rest: List[String]) -> Unit !Fs !io = {
+fn run_cache(rest: List[String]) -> Unit !Fs !Env !io = {
   if len(rest) != 1 || rest[0] != "verify" {
     return cli_error("usage: dawn cache verify")
   }
@@ -1012,7 +1012,7 @@ fn run_pkghash(rest: List[String]) -> Unit !Fs !io = {
   }
 }
 
-fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !io = {
+fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
   if len(rest) != 3 || rest[0] != "--base" {
     return cli_error("usage: dawn __source-inputs --base <repo> <project-dir>")
   }
@@ -1068,7 +1068,7 @@ fn peek_target(rest: List[String]) -> String = {
 }
 
 ## The target's resolved java-deps jars, with the Kotlin CLI's progress line.
-fn resolve_java_deps(target: String) -> List[String] !Fs !Proc !io = {
+fn resolve_java_deps(target: String) -> List[String] !Fs !Proc !Env !io = {
   let none: List[String] = []
   if not io.exists(target) { return none }
   if not io.is_dir(target) && not str.ends_with(target, ".dawn") { return none }
@@ -1101,7 +1101,7 @@ fn analyze_target_scoped(
   plan: ProjectPlan,
   loaded: LoadResult,
   std: StdCtx
-) -> Result[Program, String] !Fs !io = {
+) -> Result[Program, String] !Fs !Env !io = {
   let no_jars: List[String] = []
   let jars = if len(plan.source.diags) > 0 {
     # Planner diagnostics keep their existing precedence. In particular, an
@@ -1158,7 +1158,7 @@ fn lsp_standalone_lease() -> JsigLease !io = jsig_for([])
 ## `dawn lock [--check] [<dir>]` — write (or verify) the resolved [java-deps]
 ## closure. This is the only command that rewrites dawn.lock; every other one
 ## only refuses to disagree with it.
-fn run_lock(rest: List[String]) -> Unit !Fs !Proc !io = {
+fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
   var check_only = false
   var target = "."
   var seen_target = false
@@ -1228,7 +1228,7 @@ fn run_lock(rest: List[String]) -> Unit !Fs !Proc !io = {
 }
 
 ## Jar paths the parent invocation resolved, carried across the re-exec.
-fn deps_from_env() -> List[String] !io = {
+fn deps_from_env() -> List[String] !Env !io = {
   let none: List[String] = []
   match io.getenv("DAWN_SELFHOST_CP") {
     Some(s) -> if s == "" { none } else { str.split(s, path_sep()) }
@@ -1245,7 +1245,7 @@ fn maybe_with_known_deps(
   rest: List[String],
   target: String,
   cpjars: List[String]
-) -> Unit !Fs !Proc !io = {
+) -> Unit !Fs !Proc !Env !io = {
   match io.getenv("DAWN_SELFHOST_CP") {
     Some(_) -> return
     None -> ()
@@ -1269,7 +1269,7 @@ fn maybe_with_known_deps(
 }
 
 ## test/build have no program argv, so their existing filters remain safe here.
-fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !Fs !Proc !io = {
+fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !Fs !Proc !Env !io = {
   match io.getenv("DAWN_SELFHOST_CP") {
     Some(_) -> return
     None -> ()
@@ -1356,7 +1356,7 @@ fn spawn_java(cp: String, cls: String, args: List[String], scratch: String) -> I
 ## of `dawn run`,
 ## via a subprocess over freshly emitted classes (the host class path rides
 ## along so `use java` third-party classes stay visible).
-fn run_run(run: RunArgs) -> Unit !Fs !Proc !io = {
+fn run_run(run: RunArgs) -> Unit !Fs !Proc !Env !io = {
   let (classes, entry, _) =
     collect_program(run.target, run.std_dir, run.opts, run.closure, false)
   if entry == "" {
@@ -1376,7 +1376,7 @@ fn run_run(run: RunArgs) -> Unit !Fs !Proc !io = {
 ## project — its modules see the intrinsics no user module may name, and its
 ## `impl Iter[String]` is an orphan anywhere else — so `dawn test std/str.dawn`
 ## cannot be made to work, and a flag is the whole mechanism.
-fn run_test(rest0: List[String]) -> Unit !Fs !Proc !io = {
+fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !io = {
   let (_, rest1) = extract_cp(rest0)
   let (opts, restb) = extract_ct_opts(rest1)
   let (closure2, restc) = extract_flag(restb, "--closure")
@@ -1424,7 +1424,7 @@ fn run_test(rest0: List[String]) -> Unit !Fs !Proc !io = {
 
 ## `selfhost emit [<target>] [--std <dir>] -o <dir>`: write every class of the
 ## compiled program under <dir> (`emitrt` is the historical alias).
-fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !io = {
+fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
   var out = ""
   var target = ""
   var std_dir = "std"
@@ -1474,7 +1474,7 @@ fn target_stem(target: String) -> String = {
 }
 
 ## The absolute directory a jar path lands in.
-fn abs_parent(path: String) -> String !io =
+fn abs_parent(path: String) -> String !Env !io =
   match fspath.parent(fspath.absolute(path, io.cwd())) {
     Some(p) -> p
     None -> "."
@@ -1549,7 +1549,7 @@ fn vendored_names(jars: List[String]) -> List[(String, String)] !Fs = {
 ## Copy resolved jars next to the output jar, under lib/ — coursier's cache is
 ## a content-addressed path in the user's home, fine to compile against and
 ## useless to a deployed jar. Returns the manifest Class-Path entries.
-fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !Fs !io = {
+fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !Fs !Env !io = {
   var entries: List[String] = []
   if len(jars) == 0 { return entries }
   let found = vendored_names(jars)
@@ -1690,7 +1690,7 @@ test "a class-path entry is a URI reference, not a path" {
 ## Manifest Class-Path entries for --cp jars: relative when the jar sits
 ## under the output jar's directory, else an absolute file: URL (the Kotlin
 ## URI.relativize behavior).
-fn rel_entries(jars: List[String], jar_path: String) -> List[String] !io = {
+fn rel_entries(jars: List[String], jar_path: String) -> List[String] !Env !io = {
   var out: List[String] = []
   let base = abs_parent(jar_path) ++ "/"
   for j in jars {
@@ -1704,7 +1704,7 @@ fn rel_entries(jars: List[String], jar_path: String) -> List[String] !io = {
   out
 }
 
-fn find_native_image() -> Option[String] !io = {
+fn find_native_image() -> Option[String] !Env !io = {
   var candidates: List[String] = []
   match io.getenv("GRAALVM_HOME") {
     Some(h) -> { candidates = candidates ++ [h ++ "/bin/native-image"] }
@@ -1737,7 +1737,7 @@ fn run_native_image(
   bin_out: String,
   user_cp: List[String],
   entry: String
-) -> Unit !Fs !io = {
+) -> Unit !Fs !Env !io = {
   let ni = match find_native_image() {
     Some(p) -> p
     None ->
@@ -1788,7 +1788,7 @@ fn run_native_image(
 ## internal package path (e.g. org/objectweb/asm) whose classes are copied in
 ## from java.class.path — building selfhost itself vendors ASM and the
 ## coursier interface, which is what makes the jar standalone.
-fn run_build(rest0: List[String]) -> Unit !Fs !Proc !io = {
+fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !io = {
   let (user_cp, rest1) = extract_cp(rest0)
   let (opts, restb) = extract_ct_opts(rest1)
   let (closure, rest) = extract_flag(restb, "--closure")
@@ -1967,7 +1967,7 @@ fn run_fmt(rest: List[String]) -> Unit !Fs !io = {
 }
 
 ## `selfhost doc <target>` / `selfhost doc --builtins` — mirror of `dawn doc`.
-fn run_doc(rest: List[String]) -> Unit !Fs !Proc !io = {
+fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
   var std_dir = "std"
   var builtins_mode = false
   var stdlib_mode = false
@@ -2040,7 +2040,7 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !io = {
 ##
 ## Each module is lowered inside catch_panic so one gap does not hide the
 ## rest: a single run lists everything still missing.
-fn run_lower(rest: List[String]) -> Unit !Fs !Proc !io = {
+fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
   var std_dir = "std"
   var dump_dir = ""
   var targets: List[String] = []
@@ -2186,7 +2186,7 @@ fn lower_size(m: CModule) -> Int = {
 ## the trivial subset instead of class files. Hidden and unsupported --
 ## `emitc.dawn` panics on anything outside that subset, and both are
 ## superseded once Core IR lands.
-fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !io = {
+fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
   var std_dir = "std"
   var out = ""
   var target = ""
@@ -2246,7 +2246,7 @@ fn check_args(rest: List[String]) -> (String, List[String]) = {
   (std_dir, targets)
 }
 
-fn check_std(std_dir: String) -> StdCtx !Fs !io =
+fn check_std(std_dir: String) -> StdCtx !Fs !Env !io =
   match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
@@ -2263,7 +2263,7 @@ fn check_std(std_dir: String) -> StdCtx !Fs !io =
 ##
 ## Diagnostics from every target are rendered together, so a multi-target run
 ## reports all of them rather than the first target's.
-fn run_check(rest: List[String]) -> Unit !Fs !Proc !io = {
+fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
   let (std_dir, targets) = check_args(rest)
   if len(targets) == 0 {
     return cli_error("usage: dawn check [--std <dir>] <target>...")
@@ -2304,7 +2304,7 @@ fn run_check(rest: List[String]) -> Unit !Fs !Proc !io = {
 ## `dawn __check` — the golden dump (driver/checkdump.dawn), one block per
 ## target, exit 0 either way. Read by scripts/checker-corpus/run.sh and the
 ## N vs N-1 differential.
-fn run_checkdump(rest: List[String]) -> Unit !Fs !Proc !io = {
+fn run_checkdump(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
   let (std_dir, targets) = check_args(rest)
   let std = check_std(std_dir)
   for t in targets {
@@ -2315,15 +2315,16 @@ fn run_checkdump(rest: List[String]) -> Unit !Fs !Proc !io = {
   }
 }
 
-## The file system and process handlers are installed here, once, for every
-## subcommand: main is the outermost frame and the one place with nothing
-## above it to answer `Fs` or `Proc` (spec §6.5). The dispatch itself runs
-## under both. `with_fs_real`'s body row is closed, so it has to be the outer
-## one; `with_proc_real`'s is `!e`, which is what lets it sit inside.
+## The file system, process and environment handlers are installed here,
+## once, for every subcommand: main is the outermost frame and the one place
+## with nothing above it to answer `Fs`, `Proc` or `Env` (spec §6.5). The
+## dispatch itself runs under all three. `with_fs_real`'s body row is closed,
+## so it has to be the outer one; the other two take `!e`, which is what lets
+## them sit inside.
 pub fn main() -> Unit !io =
-  io.with_fs_real(() => io.with_proc_real(() => dispatch()))
+  io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => dispatch())))
 
-fn dispatch() -> Unit !Fs !Proc !io = {
+fn dispatch() -> Unit !Fs !Proc !Env !io = {
   match args() {
     [] -> {
       print(usage())

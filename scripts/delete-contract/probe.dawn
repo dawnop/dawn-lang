@@ -1,7 +1,7 @@
 # Behavioral contract for std/io.delete. It prints only the public outcome
 # categories, never backend-specific error text, so JVM and native must agree.
 use std/io
-use std/io.{DeleteOutcome, Deleted, NotFound, Fs}
+use std/io.{DeleteOutcome, Deleted, NotFound, Fs, Env}
 
 fn made(r: Result[String, ForeignError]) -> String =
   match r {
@@ -46,7 +46,7 @@ fn env_query(label: String, result: Result[Option[String], ForeignError]) -> Uni
   })
 
 pub fn main() -> Unit !io = {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     let root = made(io.temp_dir("", "dawn-delete-contract-"))
     let file = root ++ "/file"
     let empty = root ++ "/empty"
@@ -90,5 +90,5 @@ pub fn main() -> Unit !io = {
     let _ = io.delete(trailing)
     let _ = io.delete(cwd_sentinel)
     show("root", io.delete(root))
-  })
+  }))
 }

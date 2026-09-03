@@ -509,6 +509,22 @@ Core golden 只动了两个模块里三个闭包类型上印出来的效果行�
 这三条断言今天用任何手段都写不出。`args` 不进这一族（对可达数与转干净数都是 0 增益），
 `exit` 与 `Console` 仍未开族。
 
+`Env` 的消费者迁移（刀 1b，2026-09-03，种子已到 v0.75.0）实测 **124 条**签名：
+`selfhost/src` 102 条、`compiler-plan/src` 22 条。预研按词法调用图数的是 129 条，
+偏高 5 条，与它自己声明的 ±2% 误差同量级、方向相反（`Proc` 那次偏低 10 条）。
+拼法三种：`!Fs !Proc !Env !io` 56 条、`!Fs !Env !io` 32 条、`!Env !io` 36 条。
+`!io` 这一轮仍要写上，理由与前两族的刀 1b 同：种子那份 std 里 `io.cwd` 与 `io.getenv`
+还是 `!io`，单写 `!Env` 盖不住 stage 1。
+
+安装点四个，不是预研数的三个，且四个全部是 `with_fs_real` / `with_proc_real` 已在的边界，
+各在 `with_proc_real` 里面再套一层 `with_env_real`：`main.main`、`nmain.main`、
+`lsp/server.handle`、`driver/analyze.analyze_document`。预研把 `lsp/server.handle` 划掉了，
+理由是「`run_lsp` 已经在 `main` 的动态范围里」——对一半：`run_lsp` 确实不用单独装，但
+`handle` 自己就装着 `with_fs_real`，而 `with_fs_real` 的 body 行是闭合的 `!(Fs|io)`，
+`Env` 穿不过去。所以边界数是「已有 `Fs` 边界的个数」，不是「`Env` 可达根的个数」，
+这两个数在 `Fs` 与 `Proc` 那两族恰好相等，`Env` 是第一次不等。零新增边界这一条仍然成立。
+`scripts/` 下另有五个探针程序各在 `main` 上装一层。
+
 `with_env_real` 的 body 行是 `!e`，于是它能当三层的最内层：
 `with_fs_real(() => with_proc_real(() => with_env_real(...)))` 通过。这条次序由 `std/io`
 里那条「the three real wrappers nest」的 test 看着，把行改成闭合的 `!(Env | io)`
@@ -516,9 +532,11 @@ Core golden 只动了两个模块里三个闭包类型上印出来的效果行�
 
 **裁决：已知风险，暂无缓解；效果集别名仍不裁。**
 第二个族的消费者样本到了，答案是它还不够：三个原子的行（`!Fs !Proc !io`）读起来仍然可以，
-`Proc` 也没有把任何一条行推到四个原子。真正会逼出别名的是 `cwd` 与 `exit`。`cwd` 已经开族
-（上面的 `Env`，今天只到声明），四原子的行（`!Fs !Proc !Env !io`）要等它的消费者落地才第一次
-出现，别名的账留到那时按实景看；`exit` 今天仍没有独立的断言撑腰。
+`Proc` 也没有把任何一条行推到四个原子。真正会逼出别名的是 `cwd` 与 `exit`。
+`cwd` 的消费者已经落地：四原子的行（`!Fs !Proc !Env !io`）第一次出现，56 条，
+会在树里待满一整个 release 周期，直到下一轮种子推进把 `!io` 回填掉。别名的账在那之前
+不重裁——要看的是回填之后还剩多少条四原子的行，而不是回填之前有多少条；
+`exit` 今天仍没有独立的断言撑腰。
 
 ### 8.2 风险二：多 handler 组合的动态语义
 

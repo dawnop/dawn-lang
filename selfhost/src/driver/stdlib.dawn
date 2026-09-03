@@ -16,7 +16,7 @@
 # told apart in words instead of both saying "bundled std is broken".
 
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Env}
 use std/str
 use std/map
 use std/set
@@ -44,7 +44,7 @@ use fspath/fspath
 ## file is below it in the layering, so it cannot import it, and
 ## `compiler-plan/src/source.dawn` is in another package that does not depend
 ## on the compiler at all. A change to the spelling is a change to all three.
-fn canon(p: String) -> String !io =
+fn canon(p: String) -> String !Env !io =
   if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
 ## Everything user-module analysis needs from std.
@@ -279,14 +279,14 @@ pub fn read_index(dir: String) -> Result[List[String], String] !Fs = {
 ## The directory as a reader can act on it: a relative one is resolved against
 ## the working directory it was resolved against, because `std` on its own does
 ## not say which `std`, and the default `--std` is exactly that spelling.
-fn located(dir: String) -> String !io =
+fn located(dir: String) -> String !Env !io =
   if str.starts_with(dir, "/") {
     dir
   } else {
     dir ++ " (under " ++ io.cwd() ++ ")"
   }
 
-fn origin_text(o: StdOrigin) -> String !io =
+fn origin_text(o: StdOrigin) -> String !Env !io =
   match o {
     StdFromDir(d) -> "the std in " ++ located(d)
     StdEmbedded -> "the std compiled into this toolchain"
@@ -335,7 +335,7 @@ fn advice(e: StdLoadError) -> String =
 
 ## The one place a failed std load turns into words; both drivers render
 ## through it, so `scripts/native-cli-diff.sh` compares the same sentences.
-pub fn std_load_error_text(e: StdLoadError) -> String !io = {
+pub fn std_load_error_text(e: StdLoadError) -> String !Env !io = {
   let head = origin_text(e.origin)
   match e.why {
     StdVersionSkew -> {
@@ -355,7 +355,7 @@ pub fn std_load_error_text(e: StdLoadError) -> String !io = {
 }
 
 ## Load, check and comptime-evaluate the bundled std from a directory.
-pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !io = {
+pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
   # modules.txt decides the whole load, so whichever half answers for it is
   # the std being loaded, and that is what the diagnostics below name.
   let (idx_text, idx_from_dir) = match std_read_from(dir, "modules.txt") {
@@ -527,7 +527,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !io = {
 ## a std reached through a symlinked directory is not recognised through the
 ## other spelling. That fails closed: the file checks as user code and reports
 ## the std-only names it uses, which is the pre-existing behaviour.
-pub fn std_module_of(std: StdCtx, path: String) -> Option[String] !io = {
+pub fn std_module_of(std: StdCtx, path: String) -> Option[String] !Env !io = {
   # an embedded std has no files at all, and canon() costs a cwd read
   if len(map.keys(std.dir_modules)) == 0 {
     let none: Option[String] = None
@@ -558,7 +558,7 @@ pub fn std_file_of(std: StdCtx, mod_path: String) -> Option[String] = {
 
 ## Is `dir` the very directory this compiler read its std from? Used to answer
 ## a directory target as what it is instead of as a malformed project.
-pub fn is_std_dir(std: StdCtx, dir: String) -> Bool !io =
+pub fn is_std_dir(std: StdCtx, dir: String) -> Bool !Env !io =
   match std.dir {
     Some(d) -> d == canon(dir)
     None -> false
@@ -606,7 +606,7 @@ test "the embedded std matches std/ on disk" {
 }
 
 test "the loader's id counter opens past every prelude id" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # `load_std` used to open its counter at the literal 2, which is
     # `ForeignError`'s ADT id, and it is the counter the production path
     # actually reads. Nothing ever fired, for a reason that is not a
@@ -642,11 +642,11 @@ test "the loader's id counter opens past every prelude id" {
       if a.name == "IdProbe" { probe_id = i }
     }
     assert probe_id >= first_minted_id()
-  })
+  }))
 }
 
 test "production comptime body tables contain only direct std functions" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     let std = match load_std("std") {
       Ok(s) -> s
       Err(e) -> panic("std: " ++ std_load_error_text(e))
@@ -681,11 +681,11 @@ test "production comptime body tables contain only direct std functions" {
         assert f.default_of == None
       }
     }
-  })
+  }))
 }
 
 test "the numeric parsers still have somewhere to land" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # `lower` rewrites `parse_int(s)` into a direct call to std/fmt.atoi. Since
     # v0.55.0 those three are not exported, so no call site names them and no
     # export check sees them; the coupling is one table (`lower.parser_impl`) and
@@ -718,11 +718,11 @@ test "the numeric parsers still have somewhere to land" {
     # and the builtins that must NOT be routed there
     assert parser_impl("to_string") == None
     assert parser_impl("atoi") == None
-  })
+  }))
 }
 
 test "float rendering and parsing fold through std/fmt, not the host" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # The RP-12 gate's float line, after audits RP-01/RP-05 moved the answers
     # into std: `to_string(Float)` lowers to std/fmt.dtoa and the parsers to
     # fmt.atoi/atod, so a comptime fold interprets the program's own std Core.
@@ -767,11 +767,11 @@ test "float rendering and parsing fold through std/fmt, not the host" {
     assert map.get(ct.consts, "Q") == Some(VBool(true))
     assert map.get(ct.consts, "R") == Some(VBool(true))
     assert map.get(ct.consts, "S") == Some(VBool(true))
-  })
+  }))
 }
 
 test "the bundled std loads, checks and evaluates" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     match load_std("std") {
       Ok(std) -> {
         assert map.has(std.exports, "std/str")
@@ -808,7 +808,7 @@ test "the bundled std loads, checks and evaluates" {
         assert false
       }
     }
-  })
+  }))
 }
 
 test "std/ stamps itself with this toolchain's version" {
@@ -831,7 +831,7 @@ test "std/ stamps itself with this toolchain's version" {
 }
 
 test "a std directory from another release is refused by version, not by symptom" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # The reachability half of the diagnostic. Before this, a std out of step
     # with the compiler surfaced wherever it first failed to type-check, and the
     # message that came out named a std module and a type error: true, and no
@@ -861,11 +861,11 @@ test "a std directory from another release is refused by version, not by symptom
         assert str.contains(text, "Use the " ++ VERSION ++ " std")
       }
     }
-  })
+  }))
 }
 
 test "an unstamped std directory that will not load is not called a compiler bug" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # The other side of the same rule. A directory with no VERSION file is every
     # std published before the stamp existed, so it must stay loadable and its
     # failures must still point at the directory. Only the copy compiled into
@@ -892,11 +892,11 @@ test "an unstamped std directory that will not load is not called a compiler bug
         assert not str.contains(text, "bug in dawn")
       }
     }
-  })
+  }))
 }
 
 test "a std directory with no modules.txt falls back to the embedded copy" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # `--std` pointed somewhere that has nothing to do with std is not a skew:
     # the embedded index answers, so the load is the embedded std's and must
     # succeed. This is the negative control for the version check, an absent
@@ -910,11 +910,11 @@ test "a std directory with no modules.txt falls back to the embedded copy" {
         assert false
       }
     }
-  })
+  }))
 }
 
 test "a std module's file is only known when a directory supplied it" {
-  io.with_fs_real(() => {
+  io.with_fs_real(() => io.with_env_real(() => {
     # `std_file_of` is what lets a reader jump into std, and the answer it must
     # not invent is the one for a module the embedded copy filled in: there is no
     # file, and naming `<dir>/<name>.dawn` anyway would point at whatever happens
@@ -948,5 +948,5 @@ test "a std module's file is only known when a directory supplied it" {
       }
       Err(e) -> panic("embedded fallback failed: " ++ std_load_error_text(e))
     }
-  })
+  }))
 }
