@@ -2247,10 +2247,11 @@ fn wide_kernels() -> Map[String, (Int, WideRefFn)] =
   ])
 
 # The loops are written as recursion rather than `for` with `?` inside:
-# on the C backend a `?` that returns out of a `for` body leaves the loop's
-# own binding live and the reference counter says so (`unbalanced in
-# std/gpu: a return left a binding behind`), which is dawn-lang's bug and
-# not this module's. Measured while writing these tests.
+# `out = out ++ [gpu_download(h)?]` makes the C backend's reference counter
+# panic (`unbalanced in std/gpu: a return left a binding behind`), which is
+# dawn-lang issue #68 and not this module's bug. Binding the `?` to a `let`
+# first also avoids it; recursion is here because these two also carry the
+# accumulator.
 fn wide_alloc(dtype: String, bufs: List[List[Float]], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
   if i >= len(bufs) {
     Ok(acc)
