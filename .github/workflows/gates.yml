@@ -1425,7 +1425,7 @@ jobs:
   # Two jobs of their own because the wheels are 150 MB and nothing else needs
   # them, so a slow package index delays nothing but these. Nothing `needs:`
   # them. They are the two round-robin shards of one matrix
-  # (scripts/tile-golden/matrix.txt: the 51 kernels, then the 12 mutants, in
+  # (scripts/tile-golden/matrix.txt: the 55 kernels, then the 12 mutants, in
   # run order). Sharding by kind was the plan written down at knife 7b and the
   # phase measurement retired it: locally the kernel loop is 204s (102 JVM
   # starts, and nothing else -- the native binary runs all 51 kernels in 0.3s
@@ -1466,16 +1466,24 @@ jobs:
   # not: only this one reads git. The second is the leetgpu ledger.
   tile-golden-1:
     runs-on: ubuntu-latest
-    # Local wall clock, one machine, 2026-09-03, one tree and one tileiras,
-    # nothing else running: unsharded 387s, this shard 186s, the other 175s.
+    # Local wall clock, one machine, 2026-09-04, one tree and one tileiras,
+    # nothing else running: unsharded 423s, this shard 204s, the other 193s
+    # (knife 12 took the kernels from 51 to 55; the unsharded pair measured
+    # back to back the same hour was 386s before and 423s after, +10%).
     # Plus the checkout, the toolchain action and the wheels (~45s and ~25s,
-    # the carried estimates) that is 256s, doubled for a cold runner. An
-    # earlier pair of the same two shards measured 254s and 299s with a second
-    # job on the machine and is not carried: a runner here is not shared. This
-    # is a planning value and not an observation of the thing it budgets -- no
-    # sharded CI run exists yet -- and the first one replaces the line.
-    # budget: 3x 512s planning value (256s local, doubled)
-    timeout-minutes: 26
+    # the carried estimates) that is 274s, doubled for a cold runner. Absolute
+    # local numbers swing wide with what else the machine is doing -- the same
+    # two shards measured 274s and 228s with another job alongside, and are
+    # not carried, for the reason the knife-11 line already gave: a runner
+    # here is not shared.
+    #
+    # The planning value is deliberately above what CI does: run 33763512 at
+    # fffe98f8 observed 340s here and 348s in shard 2 against planning values
+    # of 512s and 490s, a ratio of about 0.66. Scaling those observations by
+    # the local growth puts this shard near 373s and the other near 384s, so
+    # the N=3 trigger below (an observation over 550s) is still two knives out.
+    # budget: 3x 548s planning value (274s local, doubled)
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1491,7 +1499,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (51 kernels and twelve mutants, both backends; shard 1)
+      - name: tile IR goldens and tileiras (55 kernels and twelve mutants, both backends; shard 1)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 1/2
@@ -1514,11 +1522,11 @@ jobs:
 
   tile-golden-2:
     runs-on: ubuntu-latest
-    # 175s locally for this shard, plus the same ~70s of checkout, toolchain
+    # 193s locally for this shard, plus the same ~70s of checkout, toolchain
     # and wheels; the note above tile-golden-1 carries the measurements and
     # the reasoning.
-    # budget: 3x 490s planning value (245s local, doubled)
-    timeout-minutes: 25
+    # budget: 3x 526s planning value (263s local, doubled)
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
 
@@ -1532,7 +1540,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (51 kernels and twelve mutants, both backends; shard 2)
+      - name: tile IR goldens and tileiras (55 kernels and twelve mutants, both backends; shard 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 2/2

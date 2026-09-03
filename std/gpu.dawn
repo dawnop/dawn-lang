@@ -1403,6 +1403,14 @@ pub fn token_embed_ref(n: Int, rows: Int, dim: Int, miss: Float,
       })
 }
 
+# `v` put into the already ordered `sorted`, after every value at or below
+# it. `std/list`'s own `sort` wants `Ord`, which `Float` does not
+# implement, so the comparison is spelled out here.
+fn insert_sorted(sorted: List[Float], v: Float) -> List[Float] = {
+  let below = list.filter(sorted, w => w <= v)
+  below ++ [v] ++ list.drop(sorted, len(below))
+}
+
 ## The first `n` values of the first buffer in ascending order, in the
 ## second: leetgpu 15 (Sorting). `ins` is `[x, old out]`.
 ##
@@ -1412,14 +1420,6 @@ pub fn token_embed_ref(n: Int, rows: Int, dim: Int, miss: Float,
 ## the answer, so the kernel's tie-break (which keeps its ranks distinct,
 ## so that no two lanes scatter to one element) does not have to be
 ## repeated here to agree with it.
-##
-## `std/list`'s own `sort` wants `Ord`, which `Float` does not implement,
-## so the comparison is spelled out.
-fn insert_sorted(sorted: List[Float], v: Float) -> List[Float] = {
-  let below = list.filter(sorted, w => w <= v)
-  below ++ [v] ++ list.drop(sorted, len(below))
-}
-
 pub fn sort_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let x = ins[0]
   let old = ins[1]
