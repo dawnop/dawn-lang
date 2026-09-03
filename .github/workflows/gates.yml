@@ -40,7 +40,10 @@ name: gates
 # the arithmetic lives in dawnop-site's ci.yml, measured 2026-08-15) and
 # creation order roughly tracks definition order: the jobs that queue should
 # be the short tail, which fits in slots the first finishers free. That is a
-# soft nudge, not a contract — GitHub does not promise dispatch order.
+# soft nudge, not a contract — GitHub does not promise dispatch order. A run
+# of this workflow holds 35 jobs (2026-09-03), and ci.yml adds its own
+# `secrets`, so 36 against the ceiling of 20: the second wave starts as the
+# first finishes, which is why the four native-diff shards are defined first.
 #
 # The setup they each repeat is ~40s and comes out of
 # .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
@@ -52,10 +55,27 @@ name: gates
 # pole must restate its budget, the restatement collides with the pole, and
 # raising the pole is a visible, reviewable edit rather than a silent slide.
 # 660s = native-diff's historical worst (589s, in export-surface's note) with
-# headroom for its documented non-reproducibility; every other job's figure
-# sits at or under 558s. This pins the per-job claims, not the literal run
-# wall clock: queueing and the coverage guard's tail are outside it, and a
-# checker cannot read a future run.
+# headroom for its documented non-reproducibility. This pins the per-job
+# claims, not the literal run wall clock: queueing and the coverage guard's
+# tail are outside it, and a checker cannot read a future run.
+#
+# 2026-09-03: the pole held, and it held by being enforced. native-diff had
+# reached 1119s and contracts 759s, both of which would have had to claim
+# past 660s -- so both were split instead (four shards and two halves), which
+# is the move the pole exists to force. The tallest claim in this file is now
+# builtin-type-1's 557s, and the highest of the new planning values is 448s.
+# The pole did not move and no job asked it to.
+#
+# What the pole cannot see is a claim that has quietly stopped being true:
+# check-gate-budgets.py compares the timeout with the claim and the claim with
+# the pole, and both numbers live in this file. On 2026-09-03 twenty-one lines
+# here were under their job's own worst run and every gate was green. The
+# audit that reads the other side is manual, because it needs the Actions API
+# and a token, and it is expected before a budget line is restated:
+#
+#   scripts/gate-observations.py --since <ISO> --out /tmp/obs.json
+#   scripts/check-gate-budgets.py --observed /tmp/obs.json
+#
 # run-pole: 660s (the worst figure any job's budget line may claim)
 on:
   workflow_call:
@@ -1250,7 +1270,7 @@ jobs:
   # 550s, rather than restate the budget -- 550s doubled is already past the
   # 660s pole. Knives 12 to 15 are projected at roughly +50s per knife per
   # shard, which puts that two knives out. Against splitting earlier: runs of
-  # this workflow hold 32 jobs against an account concurrency limit of 20 (the
+  # this workflow hold 36 jobs against an account concurrency limit of 20 (the
   # arithmetic is in this file's header), and tile has never been a run's long
   # pole -- native-diff at 783~1119s over the last fortnight is -- so a third
   # shard buys budget headroom and not wall clock.

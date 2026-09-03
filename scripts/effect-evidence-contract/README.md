@@ -23,7 +23,10 @@ Those programs existed. What did not exist was a gate whose subject they are:
   agreeing rather than one of them being right.
 * Nothing held the corpus to a roster. The differential globs its directory,
   so deleting `effect_io_absorb.dawn` was green, and a corpus that shrank
-  looked exactly like a corpus that never had the case.
+  looked exactly like a corpus that never had the case. (Since 2026-09-03 the
+  differential does hold its own glob to `scripts/spike-native/matrix.txt`,
+  which sharding needed; that catches a deletion, and it still says nothing
+  about whether anything ran a handler, which is what this gate is for.)
 * `scripts/gate-map/gatemap.py selfhost/src/check/types.dawn` returned
   nineteen verdicts across twelve jobs, and `native-diff` -- the one job that
   ran an effect program -- was not among them. Reading the map before touching
