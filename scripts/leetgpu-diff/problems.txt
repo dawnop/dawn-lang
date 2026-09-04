@@ -7,10 +7,18 @@
 #   id         the problem's id on leetgpu.com (and in AlphaGPU/leetgpu-challenges)
 #   kernel     the kernel scripts/tile-golden pins under that name: it must
 #              have a .mlir and a .tilebc golden, be in run.sh's kernel list
-#              and be traced by kernels.dawn
+#              and be traced by kernels.dawn. Since knife 16 this may be
+#              SEVERAL kernels joined with `+`, because a problem can be a
+#              sequence of launches: 85 is three, 84 is four launches over
+#              three. The set has to be exactly what the corpus runs, which
+#              is the layer-2 program's own `sequence_kernels()` list
+#              rather than anything written here
 #   reference  the hand-written host reference the fake device answers with,
 #              as <module>.<function>; it must exist there. It is the second
-#              opinion, never the kernel's own code path
+#              opinion, never the kernel's own code path. One per kernel,
+#              joined with `+` in the same order, since each launch of a
+#              sequence has its own second opinion (the same reference may
+#              appear twice: a product is a product)
 #   corpus     the layer-2 program and case that runs the kernel on the GPU
 #              against that reference (<program>:<case>)
 #   tier       exact     -- bit for bit, every lane, no tolerance
@@ -37,7 +45,7 @@
 # buffer's format, so it is the second opinion for an f16 product and an i8
 # one as much as for an f64 one. The KERNELS differ, and the corpora do.
 #
-# 54 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
+# 59 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
 # and out of range). The plan that orders the rest is the cuTile coverage
 # memo; knife 7a is the boundary knife, 7b the reduction one, 8 the
 # two-dimensional one, 9 the strided one, 10 the integer one, 11 the wide
@@ -50,7 +58,11 @@
 # range that needs two lanes to be allowed to name one element, and 15 the
 # composed one: it adds NO operation at all. Tile IR has no `erf`, so
 # `tileir/dev.erf` is Abramowitz-Stegun 7.1.26 written out of the
-# arithmetic already there, and 65 is the one problem that asks for one.
+# arithmetic already there, and 65 is the one problem that asks for one, and
+# 16 the multi-launch one: it adds no operation either, only a way for the
+# HOST to say "these launches, in this order, over these buffers" and a
+# verdict that holds one. That is what the last five rows below are, and
+# what the twenty-two problems still out of range for that reason need.
 #
 # A kernel is recorded for one shape and a row names the problem it solves
 # at that shape, which for the knife-12 rows means small ones: `sort_rank`
@@ -112,3 +124,8 @@
 94 | SSM Selective Scan | ssm_scan | std/gpu.ssm_scan_ref | scan_diff:ssm_scan | tolerance
 13 | Histogramming | histogram | std/gpu.histogram_ref | atom_diff:histogram | exact
 65 | Gaussian Error Gated Linear Unit | geglu | std/gpu.geglu_ref | erf_diff:geglu | tolerance
+6 | Softmax Attention | attn_scores+attn_softmax+attn_context | std/gpu.matmul_bt_ref+std/gpu.row_softmax_ref+std/gpu.matmul_ref | seq_diff:attention | tolerance
+85 | LoRA Linear | lora_base+lora_hidden+lora_out | std/gpu.matmul_bt_ref+std/gpu.matmul_bt_ref+std/gpu.lora_out_ref | seq_diff:lora | tolerance
+84 | SwiGLU MLP Block | swiglu_proj+swiglu_act+swiglu_down | std/gpu.matmul_ref+std/gpu.swiglu_act_ref+std/gpu.matmul_ref | seq_diff:swiglu | tolerance
+37 | Matrix Power | matpow_step | std/gpu.matmul_ref | seq_diff:matpow | tolerance
+73 | All-Pairs Shortest Paths | apsp_step | std/gpu.apsp_step_ref | seq_diff:apsp | exact

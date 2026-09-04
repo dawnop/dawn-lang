@@ -17,6 +17,14 @@ that is a claim; this turns each row into things a machine can look up:
     the row claims (the program's own `tolerance_tier()` list is the
     authority, so a row cannot promise bit-exactness the run does not
     check);
+  * the set of kernels the row names is EXACTLY the set the case runs.
+    Before knife 16 a problem was one launch of one kernel and this was the
+    equality `case == kernel`. A multi-launch problem is several kernels
+    under one case name, so the authority moved to the layer-2 program's
+    own `sequence_kernels()` list, the same way the tier's did: a row can
+    neither name a kernel the corpus does not launch nor leave out one it
+    does. A program without that list declares `{case}` and the old
+    equality is what comes out;
   * and the layer-2 ledger's last line records a run that PASSED. A problem
     is listed as solved only while a device has agreed, so a `blocked` run --
     which scripts/tile-gpu-diff/run.sh --check accepts, because an honest
@@ -49,6 +57,25 @@ def tolerance_tier(program_text):
     if not m:
         return set()
     return {name.strip().strip(chr(34)) for name in m.group(1).split(",") if name.strip()}
+
+
+def sequence_kernels(program_text):
+    """Which kernels each of a layer-2 program's cases launches.
+
+    Read off its `sequence_kernels()` list, which is the program's own
+    answer. A program without one runs one kernel per case under the case's
+    own name, which is what every program before knife 16 does.
+    """
+    m = re.search(
+        r"pub fn sequence_kernels\(\) -> List\[\(String, List\[String\]\)\] =", program_text
+    )
+    if not m:
+        return {}
+    block = program_text[m.end():].split("\n\n", 1)[0]
+    out = {}
+    for case, members in re.findall(r'\("([^"]+)",\s*\[([^\]]*)\]\)', block):
+        out[case] = {n.strip().strip(chr(34)) for n in members.split(",") if n.strip()}
+    return out
 
 
 def rows(text):
@@ -93,22 +120,34 @@ def check(table_text, files, ledger_text):
         if tier not in TIERS:
             problems.append(f"line {n}: tier {tier!r} is not one of {', '.join(TIERS)}")
 
-        for suffix in (".mlir", ".tilebc"):
-            if f"scripts/tile-golden/{kernel}{suffix}" not in files:
-                problems.append(f"line {n}: {kernel} has no {suffix} golden in scripts/tile-golden")
+        # A problem is a SEQUENCE of launches since knife 16, so both the
+        # kernel and the reference field may hold several members joined
+        # with `+`: one reference per launch, in the same order.
+        named = [k.strip() for k in kernel.split("+")]
+        refs = [r.strip() for r in reference.split("+")]
+        if len(refs) != len(named):
+            problems.append(
+                f"line {n}: {len(named)} kernel(s) and {len(refs)} reference(s): a launch has one "
+                f"second opinion, so the two lists are the same length and in the same order")
+
         run_sh = files.get("scripts/tile-golden/run.sh", "")
         kernels = re.search(r"^kernels=\(([^)]*)\)", run_sh, re.M)
         if not kernels:
             problems.append("scripts/tile-golden/run.sh has no kernels=( ... ) list")
-        elif kernel not in kernels.group(1).split():
-            problems.append(f"line {n}: {kernel} is not in scripts/tile-golden/run.sh's kernel list")
-        if f'"{kernel}" ->' not in files.get("scripts/tile-golden/kernels.dawn", ""):
-            problems.append(f"line {n}: scripts/tile-golden/kernels.dawn does not trace {kernel}")
+        for one in named:
+            for suffix in (".mlir", ".tilebc"):
+                if f"scripts/tile-golden/{one}{suffix}" not in files:
+                    problems.append(f"line {n}: {one} has no {suffix} golden in scripts/tile-golden")
+            if kernels and one not in kernels.group(1).split():
+                problems.append(f"line {n}: {one} is not in scripts/tile-golden/run.sh's kernel list")
+            if f'"{one}" ->' not in files.get("scripts/tile-golden/kernels.dawn", ""):
+                problems.append(f"line {n}: scripts/tile-golden/kernels.dawn does not trace {one}")
 
-        if "." not in reference:
-            problems.append(f"line {n}: reference {reference!r} is not <module>.<function>")
-        else:
-            module, fn = reference.rsplit(".", 1)
+        for one in refs:
+            if "." not in one:
+                problems.append(f"line {n}: reference {one!r} is not <module>.<function>")
+                continue
+            module, fn = one.rsplit(".", 1)
             path = module.replace(".", "/") + ".dawn"
             if path not in files:
                 problems.append(f"line {n}: reference module {path} does not exist")
@@ -130,8 +169,11 @@ def check(table_text, files, ledger_text):
                     problems.append(
                         f"line {n}: the row claims tier {tier!r} but {path} compares {case} under "
                         f"{claimed!r}")
-            if case != kernel:
-                problems.append(f"line {n}: the corpus runs {case} but the row names kernel {kernel}")
+                declared = sequence_kernels(files[path]).get(case, {case})
+                if declared != set(named):
+                    problems.append(
+                        f"line {n}: the corpus runs {'+'.join(sorted(declared))} but the row names "
+                        f"kernel {'+'.join(sorted(set(named)))}")
 
     if not listed:
         problems.append("the table lists no problems at all")
@@ -166,6 +208,7 @@ def gather():
         "scripts/tile-gpu-diff/scan_diff.dawn",
         "scripts/tile-gpu-diff/atom_diff.dawn",
         "scripts/tile-gpu-diff/erf_diff.dawn",
+        "scripts/tile-gpu-diff/seq_diff.dawn",
     ]:
         files[path] = read(ROOT / path)
     for golden in GOLDEN.glob("*"):
@@ -203,6 +246,24 @@ def self_test():
         ("a row claiming a tier the layer-2 program does not compare under",
          good.replace("| red_diff:softmax | tolerance", "| red_diff:softmax | exact"),
          "compares softmax under 'tolerance'"),
+        # The knife-16 half: a sequence's row must name the set of kernels
+        # the case actually launches, no more and no less.
+        ("a multi-launch row naming a kernel its sequence does not run",
+         good.replace("| swiglu_proj+swiglu_act+swiglu_down |",
+                      "| swiglu_proj+swiglu_act+swiglu_down+relu |")
+             .replace("| std/gpu.matmul_ref+std/gpu.swiglu_act_ref+std/gpu.matmul_ref |",
+                      "| std/gpu.matmul_ref+std/gpu.swiglu_act_ref+std/gpu.matmul_ref"
+                      "+std/gpu.relu_ref |"),
+         "the corpus runs swiglu_act+swiglu_down+swiglu_proj but the row names"),
+        ("a multi-launch row leaving out one of its sequence's kernels",
+         good.replace("| lora_base+lora_hidden+lora_out |", "| lora_base+lora_out |")
+             .replace("| std/gpu.matmul_bt_ref+std/gpu.matmul_bt_ref+std/gpu.lora_out_ref |",
+                      "| std/gpu.matmul_bt_ref+std/gpu.lora_out_ref |"),
+         "the corpus runs lora_base+lora_hidden+lora_out but the row names"),
+        ("a multi-launch row with one reference for three launches",
+         good.replace("| std/gpu.matmul_bt_ref+std/gpu.row_softmax_ref+std/gpu.matmul_ref |",
+                      "| std/gpu.matmul_bt_ref |"),
+         "3 kernel(s) and 1 reference(s)"),
         ("an empty table", "# nothing\n", "lists no problems at all"),
     ]
     bad = 0

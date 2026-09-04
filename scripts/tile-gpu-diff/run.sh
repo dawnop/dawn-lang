@@ -38,7 +38,13 @@
 #             fold order rather than by a chosen corpus) and atom_diff.dawn
 #             the two atomic kernels of knife 14 (the first in which two
 #             lanes may name ONE element, which every scatter here is
-#             forbidden to do),
+#             forbidden to do) and erf_diff.dawn the two error function
+#             kernels of knife 15 and seq_diff.dawn the five multi-launch
+#             problems of knife 16 (the first whose unit of comparison is a
+#             SEQUENCE of launches over shared device buffers rather than a
+#             kernel: one allocation, one upload, up to sixteen launches,
+#             one download, one verdict, and intermediates that never leave
+#             the device),
 #             under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
@@ -50,7 +56,12 @@
 #             differ, or the memory round trip did).
 #   mutant    one rule removed from a copy of std/gpu.dawn's real handler,
 #             the program rebuilt against that copy, and the verdict
-#             required to move:
+#             required to move. Knife 16's four are the exception and are
+#             not files at all: what they change is the launch SEQUENCE,
+#             which seq_diff.dawn carries as data, so they are applied
+#             in-process to the real device while the fake device keeps
+#             answering the honest sequence. Their red sets are held by
+#             name and by count where the seq family runs, below:
 #
 #     download-short   the handler asks the device for n-1 f64 elements ->
 #                      every f64 set's round trip differs, verdict `fail`.
@@ -500,6 +511,15 @@ atomic=(histogram cas_swap)
 # every mutant twice instead.
 erfs=(erf_sweep geglu)
 
+# The multi-launch kernels of knife 16, in the order seq_diff takes them on
+# the command line. These are not eight independent kernels the way every
+# list above is: they are the STEPS of five sequences, and what seq_diff
+# compares is one buffer at the end of a sequence, not one buffer per
+# kernel. `matpow_step` belongs to two sequences (leetgpu 37 and the
+# decoupled control) and `swiglu_proj` is launched twice inside one.
+sequenced=(lora_base lora_hidden lora_out attn_scores attn_softmax attn_context
+  matpow_step swiglu_proj swiglu_act swiglu_down apsp_step)
+
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
@@ -513,7 +533,7 @@ assemble_golden() { # kernel, tilebc, cubin
 }
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
-  "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}"; do
+  "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -538,6 +558,8 @@ atom_cubins=()
 for k in "${atomic[@]}"; do atom_cubins+=("$work/$k.cubin"); done
 erf_cubins=()
 for k in "${erfs[@]}"; do erf_cubins+=("$work/$k.cubin"); done
+seq_cubins=()
+for k in "${sequenced[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -769,6 +791,30 @@ atom_unique_verdict="$(verdict_of "$work/atom-unique.out")"
 [ "$atom_unique_verdict" = "$atom_verdict" ] ||
   { cat "$work/atom-unique.out" >&2; fail "the control corpus answers $atom_unique_verdict where the main one answers $atom_verdict"; }
 
+# ---- native, the multi-launch sequences (knife 16)
+#
+# One program, six sequences, and a verdict per sequence rather than per
+# kernel: this is the first family here whose unit of comparison is a
+# SEQUENCE of launches over shared device buffers. Its mutants are inside
+# the program, because the thing being mutated is the launch sequence and a
+# launch sequence is data (seq_diff.dawn's header says why); what this
+# script does is hold the verdicts, the red sets and the corpus counts the
+# program prints.
+build_native "$root/std" "$work/seq.bin" "$here/seq_diff.dawn"
+rc=0
+"$work/seq.bin" "${seq_cubins[@]}" > "$work/seq.out" 2> "$work/seq.err" || rc=$?
+cat "$work/seq.out"
+seq_verdict="$(verdict_of "$work/seq.out")"
+case "$seq_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the five multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $seq_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $seq_verdict" ;;
+  fail) cat "$work/seq.err" >&2; fail "the device answered and disagreed with the fake device on a sequence (see the transcript above)" ;;
+  *) cat "$work/seq.err" >&2; fail "seq_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/seq.out" | head -n 1)"
+
 # An atomic add is only an atomic where two lanes meet. gath_diff holds its
 # scatter's repeats DOWN to zero for the opposite reason; here the repeats
 # are the point, and a corpus that stopped having them would leave the
@@ -829,6 +875,99 @@ for k in "${erfs[@]}"; do
   esac
 done
 
+# THE SEQUENCE FAMILY'S CORPUS, and it is a measurement rather than a
+# sentence. A sequence of launches is only a sequence if a later launch
+# reads what an earlier one wrote; a corpus where it does not is a corpus
+# where every mutant below would be forgiven and every verdict would still
+# be green. seq_diff prints, for each sequence, how many lanes of the
+# ANSWER change when the intermediate is put back to what it was uploaded
+# with -- both sides the fake device, so this is a property of the corpus
+# and the references and not of the GPU.
+#
+# The five problems must be above zero. `decoupled` must be exactly zero:
+# it is two launches whose second does not read the first's output, and it
+# is the control that says the counter can print a zero at all. Without
+# it, "has never printed zero" and "cannot print zero" look the same.
+for s in lora attention matpow swiglu apsp; do
+  seq_shape="$(awk -v want="$s" '$1 == "sequence" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/seq.out")"
+  case "$seq_shape" in
+    *changed_by_first=0) fail "$s's answer does not depend on its earlier launches, so it is not a sequence: $seq_shape" ;;
+    *) echo "PASS  corpus: $s's answer depends on what an earlier launch wrote ($seq_shape)" ;;
+  esac
+done
+seq_control_shape="$(awk '$1 == "sequence" && $2 == "decoupled" {f=1} f && /^  index /{print; exit}' "$work/seq.out")"
+case "$seq_control_shape" in
+  *changed_by_first=0) echo "PASS  corpus: the decoupled control's answer depends on no earlier launch ($seq_control_shape)" ;;
+  *) fail "the decoupled control's second launch reads the first's output, so it is not a control: $seq_control_shape" ;;
+esac
+
+# `repeat`'s two boundaries. A repetition whose count is a host value can be
+# off by one in a way every sequence above would agree with, because they
+# would all be off by one together.
+seq_repeat="$(sed -n 's/^probe repeat //p' "$work/seq.out" | tail -n 1)"
+[ "$seq_repeat" = "one_round_equals_single=true zero_rounds_equals_upload=true" ] ||
+  fail "repeat(n) does not agree with itself at its boundaries: $seq_repeat"
+echo "PASS  repeat: one round is the single-round sequence and zero rounds leave every buffer as uploaded"
+
+# The mutants of the judgement itself, by NAME and by COUNT. Each is a
+# transformation of the sequence applied to the real device while the fake
+# device answers the honest one, and the table below is the whole claim:
+# which sequences each one reaches, and which it must leave alone.
+#
+#   second-launch-sees-stale-buffer
+#       the driver puts the intermediate's uploaded contents back just
+#       before the launch that reads it -> every problem reds. The
+#       decoupled control does not, which is the same argument knife 14's
+#       collision-free corpus makes: the mutant catches the DEPENDENCY and
+#       not the presence of a second launch.
+#   launch-order-swapped
+#       the launches are issued in reverse -> four of the five problems
+#       red. `apsp` does NOT, and not by luck: Floyd-Warshall's rounds
+#       commute. Split a shortest path at the LAST of its intermediates to
+#       be processed and both halves were finished before that round, in
+#       any order, so one pass over every k is correct however the k are
+#       ordered. What the sequence owes is that all sixteen run, which is
+#       last-launch-dropped's job, not that they run in order. Algebra
+#       again, the way knife 10's exact tier and knife 14's were: recorded
+#       here because a reader who expected a red would otherwise call this
+#       a hole.
+#   last-launch-dropped
+#       the final launch never happens -> everything reds, the control
+#       included. This is the one that says the launches all happen.
+#   grid-of-later-launch-copied-from-the-first
+#       every launch is given the first one's grid -> only `attention` and
+#       `swiglu` red. `matpow`, `apsp` and `decoupled` launch on one grid
+#       throughout, so the mutant is not a change there at all; `lora`'s
+#       middle launch IGNORES the second grid axis, so the extra blocks
+#       recompute the same tile and store the same bytes. That last one is
+#       worth the line: a grid mutant is invisible wherever the blocks it
+#       adds are idempotent, which is not a fact about this harness but
+#       about what a grid means.
+seq_reds="second-launch-sees-stale-buffer:lora launch-order-swapped:lora last-launch-dropped:lora"
+seq_reds="$seq_reds second-launch-sees-stale-buffer:attention launch-order-swapped:attention"
+seq_reds="$seq_reds last-launch-dropped:attention grid-of-later-launch-copied-from-the-first:attention"
+seq_reds="$seq_reds second-launch-sees-stale-buffer:matpow launch-order-swapped:matpow last-launch-dropped:matpow"
+seq_reds="$seq_reds second-launch-sees-stale-buffer:swiglu launch-order-swapped:swiglu"
+seq_reds="$seq_reds last-launch-dropped:swiglu grid-of-later-launch-copied-from-the-first:swiglu"
+seq_reds="$seq_reds second-launch-sees-stale-buffer:apsp last-launch-dropped:apsp"
+seq_reds="$seq_reds last-launch-dropped:decoupled"
+if [ "$seq_verdict" = pass ]; then
+  seq_probe="$(sed -n 's/^probe mutants //p' "$work/seq.out" | tail -n 1)"
+  [ "$seq_probe" = "red=17 $seq_reds" ] ||
+    { printf 'wanted: red=17 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
+      fail "the sequence mutants' red set moved"; }
+  echo "PASS  mutant: the four sequence mutants red on exactly 17 of the 24 (mutant, sequence) pairs, by name"
+  seq_controls="$(grep -c '^control intermediate-round-tripped ' "$work/seq.out" || true)"
+  seq_controls_moved="$(grep -c '^control intermediate-round-tripped .* verdict differ:result$' "$work/seq.out" || true)"
+  if [ "$seq_controls" != 6 ] || [ "$seq_controls_moved" != 0 ]; then
+    cat "$work/seq.out" >&2
+    fail "the round-trip control moved a verdict: $seq_controls_moved of $seq_controls"
+  fi
+  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (6 of 6)"
+else
+  echo "SKIP  mutant: the sequence mutants are not verifiable on this driver: the clean run is $seq_verdict, before any launch reaches the device"
+fi
+
 # The measurement the composition's doc comment claims: 7.1.26's absolute
 # error is at most 1.5e-7. `erf_sweep` puts the device's erf beside an
 # accurate series with nothing multiplied on top, so the number on its
@@ -859,6 +998,7 @@ tiers="$tiers gath:$(sed -n 's/^tiers //p' "$work/gath.out" | tail -n 1)"
 tiers="$tiers scan:$(sed -n 's/^tiers //p' "$work/scan.out" | tail -n 1)"
 tiers="$tiers atom:$(sed -n 's/^tiers //p' "$work/atom.out" | tail -n 1)"
 tiers="$tiers erf:$(sed -n 's/^tiers //p' "$work/erf.out" | tail -n 1)"
+tiers="$tiers seq:$(sed -n 's/^tiers //p' "$work/seq.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.out")"
 erf_probe="$(sed -n 's/^probe as-error //p' "$work/erf.out" | tail -n 1)"
@@ -2276,6 +2416,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/int_diff.dawn scripts/tile-gpu-diff/wide_diff.dawn \
   scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/scan_diff.dawn \
   scripts/tile-gpu-diff/atom_diff.dawn scripts/tile-gpu-diff/erf_diff.dawn \
+  scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }

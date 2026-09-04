@@ -1,0 +1,829 @@
+# Layer 2 for the multi-launch sequences (knife 16), the twelfth of these
+# programs after vadd_diff, mask_diff, red_diff, mm_diff, stride_diff,
+# int_diff, wide_diff, gath_diff, scan_diff, atom_diff and erf_diff.
+#
+#   seq_diff <lora_base.cubin> <lora_hidden.cubin> <lora_out.cubin>
+#            <attn_scores.cubin> <attn_softmax.cubin> <attn_context.cubin>
+#            <matpow_step.cubin> <swiglu_proj.cubin> <swiglu_act.cubin>
+#            <swiglu_down.cubin> <apsp_step.cubin>
+#
+# WHAT IS NEW HERE. Every earlier program runs ONE launch and compares one
+# buffer. This one runs a SEQUENCE of launches over shared device buffers:
+# one allocation, one upload, N launches, one sync, one download, one
+# verdict. The intermediate results never leave the device, and that is the
+# whole point -- twenty-seven of the leetgpu problems in range are a chain
+# of products with a softmax or an activation between them, and a backend
+# that can only write parameter buffers in a single launch cannot say what
+# they compute.
+#
+# Nothing under this program changed to make it possible. std/gpu's fake
+# device already keeps its buffer table across launches and hands each
+# reference the contents every buffer holds AT THAT LAUNCH; the real
+# handler's cubin table was always keyed by kernel name; and the runtime
+# launches on the null stream, which orders launch 2 after launch 1 without
+# a sync. What was missing was a way to SAY a sequence, and a verdict that
+# holds one. Both are here and nowhere else.
+#
+# THE REPRESENTATION. A sequence is data:
+#
+#   Buf   a NAMED buffer: its name, its format, and what it holds before
+#         the sequence starts.
+#   Step  one launch: which kernel, the grid, and the buffer NAMES it is
+#         handed in argument order. Names and not handles, because a
+#         sequence is written before the device has issued any handle, and
+#         because `launch-order-swapped` and its family are only readable
+#         as mutants if a reader can see which buffer a step is given.
+#   Seq   the buffers, the steps in order, the buffer the verdict reads,
+#         and `via` / `stale_at`: which intermediate a later launch reads
+#         and just before which launch, which is what the stale-buffer
+#         mutant needs to know.
+#
+# `repeat(n, body)` is the fixed-length repetition: `n` is a HOST value
+# (leetgpu 37's exponent, 73's node count), and `body(i)` may name different
+# buffers each round, which is how matrix power ping-pongs between two
+# accumulators. Data-dependent termination -- downloading a flag between
+# launches and deciding -- is deliberately not here; the one problem in
+# range that wants it (46 BFS) has a fixed V-1 bound.
+#
+# WHAT STAYS EXACT AND WHAT IS TOLERANCE. The tier is a property of the
+# operations, not of the number of launches. `apsp` is `minf` and `addf`
+# over f64 and nothing else, so it is EXACT tier over sixteen launches: a
+# sequence does not widen a tier by being long. The other four contain
+# `mmaf`, whose sum over K has no specified order, and three of them an
+# `exp` as well, so they are tolerance. What a sequence does change is
+# WHERE the tolerance is measured: the reference chain is end to end (step
+# two's reference input is step one's reference OUTPUT, not the device's),
+# so the miss reported below is the composed error of the whole sequence
+# and not any one launch's.
+use std/io
+use std/io.{with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, matmul_ref, matmul_bt_ref, lora_out_ref,
+  row_softmax_ref, swiglu_act_ref, apsp_step_ref }
+use std/list
+use std/map
+
+## What every buffer a launch writes holds before the sequence starts: a
+## value no kernel here computes, so a lane that still has it is a lane
+## nothing wrote. Small enough that `exp(-SENTINEL)` is a finite Float,
+## because a mutant answer full of infinities says less than one full of
+## the wrong numbers.
+pub const SENTINEL: Float = 0.0 - 123.5
+
+## leetgpu's own agreement criterion, and the tolerance tier's.
+pub const ATOL: Float = 1.0e-5
+pub const RTOL: Float = 1.0e-5
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const LORA_M: Int = 32
+pub const LORA_DIN: Int = 64
+pub const LORA_DOUT: Int = 64
+pub const LORA_RANK: Int = 16
+pub const LORA_SCALE: Float = 0.5
+pub const ATT_M: Int = 64
+pub const ATT_N: Int = 64
+pub const ATT_D: Int = 32
+pub const ATT_INV_SQRT_D: Float = 0.17677669529663687
+pub const MP_N: Int = 32
+pub const MP_P: Int = 4
+pub const SW_M: Int = 32
+pub const SW_DMODEL: Int = 64
+pub const SW_DFFN: Int = 128
+pub const SW_ACT_TILE: Int = 128
+pub const APSP_N: Int = 16
+
+## The unit-weight step of the distance corpus, and the weight of every
+## edge that is not one of them.
+pub const APSP_STEP: Int = 7
+pub const APSP_FAR: Float = 50.0
+
+# ---- the representation ----
+
+## A named device buffer: what it is called inside a sequence, its format,
+## and what it holds before the sequence starts.
+type Buf = { name: String, dtype: String, data: List[Float] }
+
+## One launch of a sequence: the kernel, the grid, and the buffers it is
+## handed, by name, in argument order.
+type Step = { kernel: String, gx: Int, gy: Int, gz: Int, args: List[String] }
+
+## A whole sequence.
+##
+## `read` is the buffer the verdict compares; every other buffer it writes
+## is an intermediate that never leaves the device.
+##
+## `via` and `stale_at` name the dependency the sequence exists to have:
+## `via` is written by a launch before `stale_at` and read by the launch at
+## `stale_at`. The stale-buffer mutant puts `via`'s original contents back
+## just before that launch. In four of the six sequences here `stale_at` is
+## 1 (the second launch consumes the first's output); in `lora` and
+## `swiglu` it is 2, because those two fan IN -- two independent projections
+## and then a combine -- so the first launch to read an earlier launch's
+## output is the third.
+type Seq = {
+  name: String,
+  tier: String,
+  bufs: List[Buf],
+  steps: List[Step],
+  read: String,
+  via: String,
+  stale_at: Int
+}
+
+fn step(kernel: String, gx: Int, gy: Int, gz: Int, args: List[String]) -> Step =
+  Step { kernel: kernel, gx: gx, gy: gy, gz: gz, args: args }
+
+## `body(0) ++ body(1) ++ .. ++ body(n - 1)`: a fixed-length repetition
+## whose length is a host value and whose rounds may differ.
+##
+## Its two boundaries are checked rather than asserted in prose (the
+## `probe repeat` line below): at `n = 1` the sequence must be the single
+## round, and at `n = 0` it must leave every buffer as uploaded.
+fn repeat(n: Int, body: fn(Int) -> List[Step]) -> List[Step] = {
+  var out: List[Step] = []
+  for i in range(0, n) {
+    out = out ++ body(i)
+  }
+  out
+}
+
+fn buf_pos(bufs: List[Buf], name: String) -> Int = {
+  var found = 0 - 1
+  for i in range(0, len(bufs)) {
+    if bufs[i].name == name { found = i } else { () }
+  }
+  if found < 0 { panic("seq_diff: no buffer named ${name}") } else { found }
+}
+
+# ---- running a sequence ----
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+# Allocate and fill one buffer per entry, in order. Written as recursion
+# rather than a `for` with `?` in it, for the reason gath_diff gives
+# (dawn-lang issue #68).
+fn alloc_all(bufs: List[Buf], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    match gpu.gpu_alloc(bufs[i].dtype, len(bufs[i].data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[Buf], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    match gpu.gpu_upload(hs[i], bufs[i].data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## Every step in order over buffers already allocated and filled.
+##
+## `reset` and `trip`, when they are not "", are the two things a driver
+## does before the step at `at` that an honest one does not: put a
+## buffer's ORIGINAL contents back (the stale-buffer mutant) or send its
+## current contents through the host and back (the control, which must
+## change nothing). Both are named here rather than in a mutated copy of
+## the driver because the object under test is the SEQUENCE, and a
+## sequence is data.
+fn launch_all(hs: List[Int], bufs: List[Buf], steps: List[Step], i: Int,
+  at: Int, reset: String, trip: String) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(steps) {
+    Ok(())
+  } else {
+    let pre: Result[Unit, ForeignError] = if i == at && reset != "" {
+      let p = buf_pos(bufs, reset)
+      gpu.gpu_upload(hs[p], bufs[p].data)
+    } else if i == at && trip != "" {
+      let p = buf_pos(bufs, trip)
+      match gpu.gpu_download(hs[p]) {
+        Ok(v) -> gpu.gpu_upload(hs[p], v)
+        Err(e) -> Err(e)
+      }
+    } else {
+      Ok(())
+    }
+    match pre {
+      Err(e) -> Err(e)
+      Ok(_) -> {
+        let s = steps[i]
+        let hands = list.map(s.args, a => hs[buf_pos(bufs, a)])
+        match gpu.gpu_launch(s.kernel, s.gx, s.gy, s.gz, hands) {
+          Ok(_) -> launch_all(hs, bufs, steps, i + 1, at, reset, trip)
+          Err(e) -> Err(e)
+        }
+      }
+    }
+  }
+
+## One allocation, one upload, every launch in order, one sync, one
+## download of `read`. The stages are the same five the single-launch
+## programs report, with `launch` covering the whole sequence: it is the
+## FIRST refusal that stops it, and `note` carries the message.
+fn stages(bufs: List[Buf], steps: List[Step], read: String,
+  at: Int, reset: String, trip: String) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match launch_all(hs, bufs, steps, 0, at, reset, trip) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = gpu.gpu_download(hs[buf_pos(bufs, read)])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+# ---- the tier ----
+
+pub fn within(got: Float, want: Float) -> Bool =
+  if got != got || want != want {
+    false
+  } else if got == want {
+    true
+  } else if got - got != 0.0 || want - want != 0.0 {
+    false
+  } else {
+    let d = if got > want { got - want } else { want - got }
+    let m = if want > 0.0 { want } else { 0.0 - want }
+    d <= ATOL + RTOL * m
+  }
+
+fn all_within(got: List[Float], want: List[Float]) -> Bool =
+  len(got) == len(want) && list.all(range(0, len(want)), i => within(got[i], want[i]))
+
+fn scaled_miss(got: List[Float], want: List[Float]) -> Float =
+  list.fold(range(0, len(want)), 0.0, (acc, i) => {
+    let a = got[i]
+    let b = want[i]
+    let d = if a > b { a - b } else { b - a }
+    let m = if b > 0.0 { b } else { 0.0 - b }
+    let s = d / (ATOL + RTOL * m)
+    if s > acc { s } else { acc }
+  })
+
+fn pair(real: Trace, fake: Trace) -> Option[(List[Float], List[Float])] =
+  match (real.result, fake.result) {
+    (Some(a), Some(b)) -> if len(a) == len(b) { Some((a, b)) } else { None }
+    _ -> None
+  }
+
+fn miss_line(real: Trace, fake: Trace) -> String = match pair(real, fake) {
+  Some((a, b)) -> "${scaled_miss(a, b)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})"
+  None -> "-"
+}
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one sequence, the same four shapes every program here
+## reports. An exact-tier sequence has to be bit-identical; a
+## tolerance-tier one may be `close`.
+fn verdict(tier: String, fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:" ++ tier
+  } else if tier == "exact" {
+    "differ:result"
+  } else {
+    match pair(real, fake) {
+      Some((a, b)) -> if all_within(a, b) { "close:tolerance" } else { "differ:result" }
+      None -> "differ:result"
+    }
+  }
+}
+
+# ---- the corpora ----
+
+fn sentinels(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+## A deterministic corpus of both signs: `((i * seed + 7) mod 19 - 9) *
+## scale`. 19 is prime and every seed below is coprime with it, so no
+## buffer is constant, and a reader can check any lane by arithmetic.
+fn wave(seed: Int, n: Int, scale: Float) -> List[Float] =
+  list.map(range(0, n), i => (to_float((i * seed + 7) % 19) - 9.0) * scale)
+
+## The distance matrix of a directed 16-cycle of step APSP_STEP with unit
+## edges, every other pair APSP_FAR apart and the diagonal zero.
+##
+## Why this graph and not a random one. Floyd-Warshall's round `k` is only
+## worth running if some shortest path goes through node `k`, and its
+## rounds are only ORDERED if some shortest path needs two intermediates in
+## increasing order. Here gcd(APSP_STEP, APSP_N) = 1, so the unit edges form
+## one cycle through every node: the distance from `i` to `j` is the number
+## of steps of 7 that reach it, every node lies on many shortest paths, and
+## no path of two unit edges has a one-edge alternative. Dropping any round,
+## reordering them, or undoing the first all change the answer, and the
+## `index` line below counts by how much.
+fn apsp_matrix() -> List[Float] =
+  list.map(range(0, APSP_N * APSP_N), idx => {
+    let i = idx / APSP_N
+    let j = idx % APSP_N
+    if i == j {
+      0.0
+    } else if j == (i + APSP_STEP) % APSP_N {
+      1.0
+    } else {
+      APSP_FAR
+    }
+  })
+
+# ---- the sequences ----
+
+## leetgpu 85 (LoRA Linear): base = x W^T, h = x A^T, out = base + s h B^T.
+## Three launches, two intermediates, and a FAN IN: the third launch is the
+## first that reads what an earlier one wrote.
+fn lora_seq() -> Seq = Seq {
+  name: "lora",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "x", dtype: "f64", data: wave(3, LORA_M * LORA_DIN, 0.1) },
+    Buf { name: "w", dtype: "f64", data: wave(5, LORA_DOUT * LORA_DIN, 0.02) },
+    Buf { name: "a", dtype: "f64", data: wave(7, LORA_RANK * LORA_DIN, 0.02) },
+    Buf { name: "b", dtype: "f64", data: wave(11, LORA_DOUT * LORA_RANK, 0.02) },
+    Buf { name: "base", dtype: "f64", data: sentinels(LORA_M * LORA_DOUT) },
+    Buf { name: "h", dtype: "f64", data: sentinels(LORA_M * LORA_RANK) },
+    Buf { name: "out", dtype: "f64", data: sentinels(LORA_M * LORA_DOUT) }
+  ],
+  steps: [
+    step("lora_base", 1, LORA_DOUT / 32, 1, ["x", "w", "base"]),
+    step("lora_hidden", 1, 1, 1, ["x", "a", "h"]),
+    step("lora_out", 1, LORA_DOUT / 32, 1, ["base", "h", "b", "out"])
+  ],
+  read: "out",
+  via: "base",
+  stale_at: 2
+}
+
+## leetgpu 6 (Softmax Attention): S = Q K^T / sqrt(d), P = softmax(S) by
+## row, O = P V. Three launches in a chain, which is the shape twelve of
+## the attention problems share.
+fn attn_seq() -> Seq = Seq {
+  name: "attention",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "q", dtype: "f64", data: wave(3, ATT_M * ATT_D, 0.1) },
+    Buf { name: "k", dtype: "f64", data: wave(5, ATT_N * ATT_D, 0.1) },
+    Buf { name: "v", dtype: "f64", data: wave(7, ATT_N * ATT_D, 0.1) },
+    Buf { name: "s", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
+    Buf { name: "p", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
+    Buf { name: "o", dtype: "f64", data: sentinels(ATT_M * ATT_D) }
+  ],
+  steps: [
+    step("attn_scores", ATT_M / 32, ATT_N / 32, 1, ["q", "k", "s"]),
+    step("attn_softmax", ATT_M, 1, 1, ["s", "p"]),
+    step("attn_context", ATT_M / 32, 1, 1, ["p", "v", "o"])
+  ],
+  read: "o",
+  via: "s",
+  stale_at: 1
+}
+
+## leetgpu 37 (Matrix Power): `MP_P - 1` products, the host ping-ponging
+## between two accumulators. The sequence's LENGTH is the problem's
+## exponent, which is the `repeat` client this knife exists to have.
+fn matpow_acc(i: Int) -> String = if i % 2 == 0 { "t0" } else { "t1" }
+
+fn matpow_steps(n: Int) -> List[Step] =
+  repeat(n, i => [step("matpow_step", 1, 1, 1,
+    [if i == 0 { "m" } else { matpow_acc(i - 1) }, "m", matpow_acc(i)])])
+
+fn matpow_read(n: Int) -> String = if n == 0 { "m" } else { matpow_acc(n - 1) }
+
+fn matpow_bufs() -> List[Buf] = [
+  Buf { name: "m", dtype: "f64", data: wave(3, MP_N * MP_N, 0.05) },
+  Buf { name: "t0", dtype: "f64", data: sentinels(MP_N * MP_N) },
+  Buf { name: "t1", dtype: "f64", data: sentinels(MP_N * MP_N) }
+]
+
+fn matpow_of(n: Int) -> Seq = Seq {
+  name: "matpow",
+  tier: "tolerance",
+  bufs: matpow_bufs(),
+  steps: matpow_steps(n),
+  read: matpow_read(n),
+  via: "t0",
+  stale_at: 1
+}
+
+fn matpow_seq() -> Seq = matpow_of(MP_P - 1)
+
+## leetgpu 84 (SwiGLU MLP Block): gate = x Wg, up = x Wu, h = silu(gate) *
+## up, out = h Wd. FOUR launches over THREE kernels: the projection runs
+## twice, on two weight buffers into two outputs, which is the case a
+## ledger of one kernel per problem cannot spell at all.
+fn swiglu_seq() -> Seq = Seq {
+  name: "swiglu",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "x", dtype: "f64", data: wave(3, SW_M * SW_DMODEL, 0.1) },
+    Buf { name: "wg", dtype: "f64", data: wave(5, SW_DMODEL * SW_DFFN, 0.02) },
+    Buf { name: "wu", dtype: "f64", data: wave(7, SW_DMODEL * SW_DFFN, 0.02) },
+    Buf { name: "wd", dtype: "f64", data: wave(11, SW_DFFN * SW_DMODEL, 0.02) },
+    Buf { name: "gate", dtype: "f64", data: sentinels(SW_M * SW_DFFN) },
+    Buf { name: "up", dtype: "f64", data: sentinels(SW_M * SW_DFFN) },
+    Buf { name: "h", dtype: "f64", data: sentinels(SW_M * SW_DFFN) },
+    Buf { name: "out", dtype: "f64", data: sentinels(SW_M * SW_DMODEL) }
+  ],
+  steps: [
+    step("swiglu_proj", 1, SW_DFFN / 32, 1, ["x", "wg", "gate"]),
+    step("swiglu_proj", 1, SW_DFFN / 32, 1, ["x", "wu", "up"]),
+    step("swiglu_act", SW_M * SW_DFFN / SW_ACT_TILE, 1, 1, ["gate", "up", "h"]),
+    step("swiglu_down", 1, SW_DMODEL / 32, 1, ["h", "wd", "out"])
+  ],
+  read: "out",
+  via: "gate",
+  stale_at: 2
+}
+
+## leetgpu 73 (All-Pairs Shortest Paths): APSP_N Floyd-Warshall rounds IN
+## PLACE on one matrix, the round index in a one-element i32 buffer. The
+## longest sequence here, the only one that is EXACT tier, and the only one
+## whose every launch is the same kernel on the same buffers.
+fn apsp_bufs() -> List[Buf] = {
+  var out: List[Buf] = [Buf { name: "d", dtype: "f64", data: apsp_matrix() }]
+  for k in range(0, APSP_N) {
+    out = out ++ [Buf { name: "k${k}", dtype: "i32", data: [to_float(k)] }]
+  }
+  out
+}
+
+fn apsp_seq() -> Seq = Seq {
+  name: "apsp",
+  tier: "exact",
+  bufs: apsp_bufs(),
+  steps: repeat(APSP_N, k => [step("apsp_step", 1, 1, 1, ["d", "k${k}"])]),
+  read: "d",
+  via: "d",
+  stale_at: 1
+}
+
+## THE CONTROL SEQUENCE, and the reason the counter below is a measurement
+## and not a decoration: two launches whose second does NOT read what the
+## first wrote. `changed_by_first` must be zero here and the stale-buffer
+## mutant must be GREEN, which is what says the mutant catches the
+## dependency and not merely the presence of a second launch.
+fn decoupled_seq() -> Seq = Seq {
+  name: "decoupled",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "m", dtype: "f64", data: wave(3, MP_N * MP_N, 0.05) },
+    Buf { name: "c0", dtype: "f64", data: sentinels(MP_N * MP_N) },
+    Buf { name: "c1", dtype: "f64", data: sentinels(MP_N * MP_N) }
+  ],
+  steps: [
+    step("matpow_step", 1, 1, 1, ["m", "m", "c0"]),
+    step("matpow_step", 1, 1, 1, ["m", "m", "c1"])
+  ],
+  read: "c1",
+  via: "c0",
+  stale_at: 1
+}
+
+fn sequences() -> List[Seq] =
+  [lora_seq(), attn_seq(), matpow_seq(), swiglu_seq(), apsp_seq(), decoupled_seq()]
+
+## The kernels each sequence launches, as a set: what
+## scripts/leetgpu-diff/check.py holds the `kernel` column of
+## problems.txt against, so that a row cannot name a kernel the corpus
+## does not run, nor omit one it does.
+pub fn sequence_kernels() -> List[(String, List[String])] =
+  [("lora", ["lora_base", "lora_hidden", "lora_out"]),
+    ("attention", ["attn_scores", "attn_softmax", "attn_context"]),
+    ("matpow", ["matpow_step"]),
+    ("swiglu", ["swiglu_proj", "swiglu_act", "swiglu_down"]),
+    ("apsp", ["apsp_step"]),
+    ("decoupled", ["matpow_step"])]
+
+## The sequences compared under the tolerance tier. `apsp` is not here:
+## sixteen launches of `minf` and `addf` over f64 are exact.
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier`
+## column of scripts/leetgpu-diff/problems.txt against it.
+pub fn tolerance_tier() -> List[String] = ["lora", "attention", "matpow", "swiglu", "decoupled"]
+
+# ---- the reference tables ----
+
+fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
+  if name == "lora" {
+    map.from([
+      ("lora_base", (3, last_out((dts, ins) => matmul_bt_ref(LORA_M, LORA_DIN, LORA_DOUT, 1.0, dts, ins)))),
+      ("lora_hidden", (3, last_out((dts, ins) => matmul_bt_ref(LORA_M, LORA_DIN, LORA_RANK, 1.0, dts, ins)))),
+      ("lora_out", (4, last_out((dts, ins) =>
+          lora_out_ref(LORA_M, LORA_RANK, LORA_DOUT, LORA_SCALE, dts, ins))))])
+  } else if name == "attention" {
+    map.from([
+      ("attn_scores", (3, last_out((dts, ins) =>
+          matmul_bt_ref(ATT_M, ATT_D, ATT_N, ATT_INV_SQRT_D, dts, ins)))),
+      ("attn_softmax", (2, last_out((dts, ins) => row_softmax_ref(ATT_M, ATT_N, dts, ins)))),
+      ("attn_context", (3, last_out((dts, ins) => matmul_ref(ATT_M, ATT_N, ATT_D, dts, ins))))])
+  } else if name == "swiglu" {
+    map.from([
+      ("swiglu_proj", (3, last_out((dts, ins) => matmul_ref(SW_M, SW_DMODEL, SW_DFFN, dts, ins)))),
+      ("swiglu_act", (3, last_out((dts, ins) => swiglu_act_ref(SW_M * SW_DFFN, dts, ins)))),
+      ("swiglu_down", (3, last_out((dts, ins) => matmul_ref(SW_M, SW_DFFN, SW_DMODEL, dts, ins))))])
+  } else if name == "apsp" {
+    map.from([("apsp_step", (2, (dts, ins) => [(0, apsp_step_ref(APSP_N, dts, ins))]))])
+  } else {
+    map.from([("matpow_step", (3, last_out((dts, ins) => matmul_ref(MP_N, MP_N, MP_N, dts, ins))))])
+  }
+
+# ---- the mutants ----
+#
+# Each is a transformation of the SEQUENCE, applied to the real device
+# while the fake device keeps answering the honest one. That is the same
+# arrangement every mutant in this directory has -- one thing changed, the
+# verdict required to move -- with the changed thing being the launch
+# sequence rather than a rule inside the package or the handler, because
+# the launch sequence is what this knife adds.
+
+fn reversed(steps: List[Step]) -> List[Step] =
+  list.map(range(0, len(steps)), i => steps[len(steps) - 1 - i])
+
+fn dropped_last(steps: List[Step]) -> List[Step] = list.take(steps, len(steps) - 1)
+
+fn first_grid(steps: List[Step]) -> List[Step] =
+  if len(steps) == 0 {
+    steps
+  } else {
+    let g = steps[0]
+    list.map(steps, s => Step { ..s, gx: g.gx, gy: g.gy, gz: g.gz })
+  }
+
+## The names, in the order run.sh reads them.
+pub fn mutants() -> List[String] =
+  ["second-launch-sees-stale-buffer", "launch-order-swapped", "last-launch-dropped",
+    "grid-of-later-launch-copied-from-the-first"]
+
+fn mutated(name: String, s: Seq) -> Seq =
+  if name == "launch-order-swapped" {
+    Seq { ..s, steps: reversed(s.steps) }
+  } else if name == "last-launch-dropped" {
+    Seq { ..s, steps: dropped_last(s.steps) }
+  } else if name == "grid-of-later-launch-copied-from-the-first" {
+    Seq { ..s, steps: first_grid(s.steps) }
+  } else {
+    s
+  }
+
+fn is_stale(name: String) -> Bool = name == "second-launch-sees-stale-buffer"
+
+# ---- printing ----
+
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn buffers_of(s: Seq) -> String =
+  list.fold(s.bufs, "", (acc, b) => {
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ b.name ++ ":" ++ b.dtype ++ "[" ++ to_string(len(b.data)) ++ "]"
+  })
+
+fn launches_of(s: Seq) -> String =
+  list.fold(s.steps, "", (acc, t) => {
+    let sep = if acc == "" { "" } else { " " }
+    acc ++ sep ++ t.kernel ++ "(" ++ list.fold(t.args, "", (a, n) =>
+        if a == "" { n } else { a ++ "," ++ n }) ++ ")@" ++ to_string(t.gx) ++ "x"
+      ++ to_string(t.gy) ++ "x" ++ to_string(t.gz)
+  })
+
+fn differing(a: Option[List[Float]], b: Option[List[Float]]) -> Int = match (a, b) {
+  (Some(x), Some(y)) ->
+    if len(x) != len(y) {
+      0 - 1
+    } else {
+      list.fold(range(0, len(x)), 0, (acc, i) => if to_string(x[i]) == to_string(y[i]) { acc } else { acc + 1 })
+    }
+  _ -> 0 - 1
+}
+
+fn lanes_of(o: Option[List[Float]]) -> Int = match o {
+  Some(v) -> len(v)
+  None -> 0 - 1
+}
+
+fn run_fake(s: Seq, at: Int, reset: String, trip: String) -> Trace =
+  with_gpu_fake(refs_for(s.name), () => stages(s.bufs, s.steps, s.read, at, reset, trip))
+
+fn run_real(cubins: Map[String, Bytes], s: Seq, at: Int, reset: String, trip: String) -> Trace !io =
+  with_gpu_real(cubins, () => stages(s.bufs, s.steps, s.read, at, reset, trip))
+
+fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("seq_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+## The cubins, in the order the command line takes them.
+fn cubin_names() -> List[String] =
+  ["lora_base", "lora_hidden", "lora_out", "attn_scores", "attn_softmax", "attn_context",
+    "matpow_step", "swiglu_proj", "swiglu_act", "swiglu_down", "apsp_step"]
+
+fn usage() -> Unit !io = {
+  io.eprintln("usage: seq_diff " ++ list.fold(cubin_names(), "", (a, n) =>
+      if a == "" { "<" ++ n ++ ".cubin>" } else { a ++ " <" ++ n ++ ".cubin>" }))
+  io.exit(2)
+}
+
+pub fn main() -> Unit !io = {
+  let argv = args()
+  let names = cubin_names()
+  if len(argv) != len(names) { usage() } else { () }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, len(names)) {
+    cubins = map.insert(cubins, names[i], read_cubin(argv[i]))
+  }
+
+  let seqs = sequences()
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var tolerance_count = 0
+  # every (mutant, sequence) that went red, in run order
+  var reds = ""
+  var red_count = 0
+
+  for s in seqs {
+    let fake = run_fake(s, 0 - 1, "", "")
+    let real = run_real(cubins, s, 0 - 1, "", "")
+    let v = verdict(s.tier, fake, real)
+    # The corpus measurement: how many lanes of the answer the launches
+    # BEFORE `stale_at` decide, as the difference between the honest
+    # sequence and the same sequence with `via` put back. Both sides are
+    # the fake device, so this is a property of the corpus and the
+    # references and not of the GPU.
+    let undone = run_fake(s, s.stale_at, s.via, "")
+    io.println("sequence ${s.name} tier=${s.tier} launches=${len(s.steps)} bufs=${len(s.bufs)}"
+        ++ " read=${s.read}")
+    io.println("  plan  ${launches_of(s)}")
+    io.println("  bufs  ${buffers_of(s)}")
+    io.println("  index lanes=${lanes_of(fake.result)}"
+        ++ " changed_by_first=${differing(fake.result, undone.result)}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  miss  ${miss_line(real, fake)}")
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" {
+      exact_count = exact_count + 1
+    } else if v == "close:tolerance" || v == "identical:tolerance" {
+      tolerance_count = tolerance_count + 1
+    } else {
+      ()
+    }
+    if v == "identical:exact" || v == "close:tolerance" || v == "identical:tolerance" {
+      ()
+    } else {
+      all_agreed = false
+    }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+      && v != "identical:tolerance" {
+        blocked = v
+      } else {
+        ()
+      }
+
+    # The control that must NOT move: the intermediate goes through the
+    # host between the launches and comes back. It is the same bytes, so
+    # the verdict has to be the clean one.
+    let trip = run_real(cubins, s, s.stale_at, "", s.via)
+    io.println("control intermediate-round-tripped sequence=${s.name} verdict ${verdict(s.tier, fake, trip)}")
+
+    # The mutants, all of them against the honest fake side.
+    for m in mutants() {
+      let broken = mutated(m, s)
+      let at = if is_stale(m) { s.stale_at } else { 0 - 1 }
+      let reset = if is_stale(m) { s.via } else { "" }
+      let got = run_real(cubins, broken, at, reset, "")
+      let mv = verdict(s.tier, fake, got)
+      io.println("mutant ${m} sequence=${s.name} verdict ${mv}")
+      if mv == "differ:result" {
+        let sep = if reds == "" { "" } else { " " }
+        reds = reds ++ sep ++ m ++ ":" ++ s.name
+        red_count = red_count + 1
+      } else {
+        ()
+      }
+    }
+  }
+
+  # `repeat`'s two boundaries, on the fake device: one round must be the
+  # single-round sequence, and zero rounds must leave every buffer as
+  # uploaded. Nearly free, and without them `repeat(n)` could be off by
+  # one in a way every sequence above would agree with.
+  let one = run_fake(matpow_of(1), 0 - 1, "", "")
+  let single = run_fake(Seq { ..matpow_of(1), steps: [step("matpow_step", 1, 1, 1, ["m", "m", "t0"])] },
+    0 - 1, "", "")
+  let zero = run_fake(matpow_of(0), 0 - 1, "", "")
+  io.println("probe repeat one_round_equals_single=${rendered(one.result) == rendered(single.result)}"
+      ++ " zero_rounds_equals_upload=${rendered(zero.result) == to_string(matpow_bufs()[0].data)}")
+  io.println("probe mutants red=${red_count} ${reds}")
+  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+}
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
