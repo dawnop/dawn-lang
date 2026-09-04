@@ -2215,6 +2215,241 @@ fn cce_mean(l: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store(out, idx_const(0), [1], div(F64, [1], total, f_const(F64, [1], to_float(CCE_N))))
 }
 
+# ---- knife 18: the mechanism-complete singles, and the head axis ----
+#
+# Nothing below adds an operation to the package. Seven of these eight
+# kernels are one launch each, written out of what knives 7a to 12 already
+# had, and the two at the end are the attention family read one HEAD at a
+# time. What knife 18 adds is the observation that a mechanism nobody has
+# spent is not the same as a problem nobody can solve.
+
+# leetgpu 18 (Sparse Matrix-Vector Multiplication). `A` is handed to
+# `solve` as a DENSE M by N buffer and the problem's own reference is
+# `torch.matmul(A, x)`, so "sparse" describes the data and not the format:
+# the zeroes are values. The vector is read with a stride of ZERO along the
+# row axis, so one `x[j]` serves every row, and the row sums are the
+# product folded along dimension 1. No `mmaf`, so a corpus of small whole
+# numbers makes this EXACT where the GEMMs are tolerance.
+const MV_M: Int = 64
+const MV_N: Int = 64
+
+fn matvec(a: Param[F64], x: Param[F64], y: Param[F64]) -> Unit !Dev = {
+  let sh = [MV_M, MV_N]
+  let ta = load(a, idx_const(0), sh)
+  let tx = load_strided(x, idx_const(0), sh, axis_strides(2, 1, 1))
+  let row = d_reduce_dim(F64, sh, 1, mul(F64, sh, ta, tx), 0.0, (acc, e) => s_addf(F64, acc, e))
+  store(y, idx_const(0), [MV_M], row)
+}
+
+# leetgpu 48 (2D Subarray Sum): the i32 sum of a RECTANGLE of an
+# S2_ROWS by S2_COLS matrix, at element 0 of the second buffer. leetgpu 47
+# is the same sum over a run of a flat buffer and `subarray_sum` masks it
+# with one `in_range` over `lanes`; a rectangle needs one per axis, because
+# a lane outside the window along the rows may be inside it along the
+# columns.
+#
+# The tile is RANK 1 and the two coordinates are recovered from the lane
+# number by a `divi` and a `remi`, rather than rank 2 with a `coord` an
+# axis. That is not a preference: `d_reduce_i` reduces to a SCALAR and so
+# reduces one dimension, and a rank-2 integer sum would need two of them.
+# The array's rank and the tile's are independent, which is the thing to
+# take from this kernel and the next.
+#
+# Both bounds are INCLUSIVE in the problem's statement, so the mask's upper
+# limits are one past them. Neither window touches an edge of the matrix,
+# so a mask that dropped either bound would show.
+const S2_ROWS: Int = 32
+const S2_COLS: Int = 64
+const S2_R0: Int = 5
+const S2_R1: Int = 27
+const S2_C0: Int = 9
+const S2_C1: Int = 52
+
+fn subarray_sum2d(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let sh = [S2_ROWS * S2_COLS]
+  let zero = idx_const(0)
+  let flat = lanes(zero, sh)
+  let cols = i_const(sh, S2_COLS)
+  let inside = and_mask(sh,
+    in_range(sh, div_i(sh, flat, cols), S2_R0, S2_R1 + 1),
+    in_range(sh, rem_i(sh, flat, cols), S2_C0, S2_C1 + 1))
+  let t = load_masked(x, zero, sh, inside, i_const(sh, 0))
+  let s = d_reduce_i(sh, t, 0, (acc, e) => s_addi(acc, e))
+  store(out, zero, [1], spread(I32, [1], s))
+}
+
+# leetgpu 49 (3D Subarray Sum): the same over a BOX of an
+# S3_DEP by S3_ROWS by S3_COLS array. One more axis is one more division
+# and nothing else: the tile stays rank 1, the depth is the lane number
+# divided by the plane, and the row is what is left over divided by the
+# width. A third dimension costs arithmetic here, not a tile rank.
+const S3_DEP: Int = 4
+const S3_ROWS: Int = 8
+const S3_COLS: Int = 32
+const S3_D0: Int = 1
+const S3_D1: Int = 2
+const S3_R0: Int = 2
+const S3_R1: Int = 6
+const S3_C0: Int = 3
+const S3_C1: Int = 29
+
+fn subarray_sum3d(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let sh = [S3_DEP * S3_ROWS * S3_COLS]
+  let zero = idx_const(0)
+  let flat = lanes(zero, sh)
+  let cols = i_const(sh, S3_COLS)
+  let plane = i_const(sh, S3_ROWS * S3_COLS)
+  let inside = and_mask(sh,
+    and_mask(sh,
+      in_range(sh, div_i(sh, flat, plane), S3_D0, S3_D1 + 1),
+      in_range(sh, rem_i(sh, div_i(sh, flat, cols), i_const(sh, S3_ROWS)), S3_R0, S3_R1 + 1)),
+    in_range(sh, rem_i(sh, flat, cols), S3_C0, S3_C1 + 1))
+  let t = load_masked(x, zero, sh, inside, i_const(sh, 0))
+  let s = d_reduce_i(sh, t, 0, (acc, e) => s_addi(acc, e))
+  store(out, zero, [1], spread(I32, [1], s))
+}
+
+# leetgpu 54 (Swish-Gated Linear Unit): `silu(x1) * x2` with
+# `x1, x2 = input.chunk(2)`, one buffer read at two bases the way `geglu`
+# reads its own. NOT leetgpu 84's third launch: that one is handed two
+# separate buffers a projection wrote, and this one is handed one buffer
+# and has to find its own halves. SWH_HALF is not a multiple of the tile,
+# so the last block runs past the end of both halves under one mask.
+const SWH_HALF: Int = 500
+const SWH_TILE: Int = 128
+
+fn swiglu_half(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let sh = [SWH_TILE]
+  let blk = tile_at(block_id(0), SWH_TILE)
+  let m = tail_mask(blk, sh, SWH_HALF)
+  let zero = f_const(F64, sh, 0.0)
+  let a = load_masked(x, blk, sh, m, zero)
+  let b = load_masked(x, idx_add(blk, idx_const(SWH_HALF)), sh, m, zero)
+  let d = addf(F64, sh, f_const(F64, sh, 1.0), exp(F64, sh, neg(F64, sh, a)))
+  store_masked(out, blk, sh, m, mul(F64, sh, div(F64, sh, a, d), b))
+}
+
+# leetgpu 64 (Weight Dequantization): `Y = X * S` where one element of `S`
+# scales a DQ_TS by DQ_TS block of `X`. The scale's address is
+# `(i / TS) * s_cols + (j / TS)`, an index each lane computes out of its
+# own coordinates, so this is knife 12's gather with no buffer read for the
+# index at all: the arithmetic is the whole of the indirection. Every index
+# is inside `S` by construction, so the gather is unmasked and this kernel
+# is `token_embed`'s control in run.sh's gather-mask-dropped.
+const DQ_M: Int = 64
+const DQ_N: Int = 64
+const DQ_TS: Int = 16
+
+fn dq_cols() -> Int = DQ_N / DQ_TS
+
+fn dequant(x: Param[F64], s: Param[F64], y: Param[F64]) -> Unit !Dev = {
+  let sh = [DQ_M, DQ_N]
+  let zero = idx_const(0)
+  let ts = i_const(sh, DQ_TS)
+  let at = add_i(sh,
+    mul_i(sh, div_i(sh, coord(zero, sh, 0, 1), ts), i_const(sh, dq_cols())),
+    div_i(sh, coord(zero, sh, 1, 1), ts))
+  store(y, zero, sh, mul(F64, sh, load(x, zero, sh), gather(s, at, sh)))
+}
+
+# leetgpu 11 (3D Convolution), valid mode. `conv2d` is one load a tap at a
+# base shifted by `p * width + q`; this is the same with the third
+# dimension on the GRID: block `d` computes output plane `d`, and the tap's
+# depth offset is a constant times the plane. The three extents differ and
+# so do the three kernel extents, so a kernel that confused two of them
+# would answer a different shape rather than a different number.
+const C3_D: Int = 8
+const C3_H: Int = 12
+const C3_W: Int = 16
+const C3_KD: Int = 2
+const C3_KH: Int = 3
+const C3_KW: Int = 3
+const C3_TILE: Int = 16
+
+fn c3_od() -> Int = C3_D - C3_KD + 1
+
+fn c3_oh() -> Int = C3_H - C3_KH + 1
+
+fn c3_ow() -> Int = C3_W - C3_KW + 1
+
+fn conv3d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let sh = [C3_TILE, C3_TILE]
+  let bd = block_id(0)
+  let zero = idx_const(0)
+  let m = and_mask(sh, axis_mask(zero, sh, 0, c3_oh()), axis_mask(zero, sh, 1, c3_ow()))
+  let pad = f_const(F64, sh, 0.0)
+  let corner = idx_mul(bd, idx_const(C3_H * C3_W))
+  var acc = pad
+  for p in range(0, C3_KD) {
+    for q in range(0, C3_KH) {
+      for r in range(0, C3_KW) {
+        let xt = load_strided_masked(x, idx_add(corner, idx_const(p * C3_H * C3_W + q * C3_W + r)), sh,
+          [C3_W, 1], m, pad)
+        let wt = load_strided(w, idx_const((p * C3_KH + q) * C3_KW + r), sh, [0, 0])
+        acc = addf(F64, sh, acc, mul(F64, sh, xt, wt))
+      }
+    }
+  }
+  store_strided_masked(out, idx_mul(bd, idx_const(c3_oh() * c3_ow())), sh, [c3_ow(), 1], m, acc)
+}
+
+# leetgpu 12 (Multi-Head Attention): the attention family with a HEAD axis.
+# `Q`, `K` and `V` are one N by d_model matrix each, head `h` owning the
+# columns `[h * DK, (h + 1) * DK)`, and the answer goes back into the same
+# columns of the output. So the head is not a separate matrix: it is a
+# COLUMN SLICE, which is a base offset and a row stride and nothing else.
+#
+# The middle launch is knife 16's `attn_softmax`, unchanged and
+# un-re-recorded: the scores of all MHA_H heads are written one head after
+# another, each head an MHA_N by MHA_N block, so the whole scores buffer is
+# MHA_H * MHA_N rows of MHA_N and a softmax by row is a softmax by row. The
+# grid does the rest. That is knife 17's lesson spent once more, on an axis
+# rather than on a mask.
+const MHA_N: Int = 64
+const MHA_DMODEL: Int = 64
+const MHA_H: Int = 2
+const MHA_DK: Int = 32
+const MHA_T: Int = 32
+
+# 1 / sqrt(MHA_DK), to the nearest Float.
+const MHA_INV_SQRT_DK: Float = 0.17677669529663687
+
+# Launch 1 of 3: S[h, M, N] = Q_h * K_h^T / sqrt(DK), the head on the
+# grid's THIRD axis and the head's columns at `bh * MHA_DK`.
+fn mha_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let bh = block_id(2)
+  let sh = [MHA_T, MHA_T]
+  let head = idx_mul(bh, idx_const(MHA_DK))
+  let tq = load_strided(q, idx_add(idx_mul(bm, idx_const(MHA_T * MHA_DMODEL)), head),
+    [MHA_T, MHA_DK], [MHA_DMODEL, 1])
+  let tk = load_strided(k, idx_add(idx_mul(bn, idx_const(MHA_T * MHA_DMODEL)), head),
+    [MHA_DK, MHA_T], permute([MHA_DMODEL, 1], [1, 0]))
+  let acc = mmaf(F64, MHA_T, MHA_DK, MHA_T, tq, tk, f_const(F64, sh, 0.0))
+  let base = idx_add(idx_add(idx_mul(bh, idx_const(MHA_N * MHA_N)),
+    idx_mul(bm, idx_const(MHA_T * MHA_N))), idx_mul(bn, idx_const(MHA_T)))
+  store_strided(s, base, sh, [MHA_N, 1], mul(F64, sh, acc, f_const(F64, sh, MHA_INV_SQRT_DK)))
+}
+
+# Launch 3 of 3: O[:, h] = P_h * V_h, reading the head's block of the
+# probabilities and the head's columns of `V`, and writing the head's
+# columns of the output.
+fn mha_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bh = block_id(2)
+  let sh = [MHA_T, MHA_DK]
+  let head = idx_mul(bh, idx_const(MHA_DK))
+  let rows = idx_add(idx_mul(bh, idx_const(MHA_N * MHA_N)), idx_mul(bm, idx_const(MHA_T * MHA_N)))
+  let acc = d_for(idx_const(0), idx_const(MHA_N / MHA_T), idx_const(1), f_const(F64, sh, 0.0), (kk, sofar) => {
+    let tp = load_strided(p, idx_add(rows, idx_mul(kk, idx_const(MHA_T))), [MHA_T, MHA_T], [MHA_N, 1])
+    let tv = load_strided(v, idx_add(idx_mul(kk, idx_const(MHA_T * MHA_DMODEL)), head),
+      [MHA_T, MHA_DK], [MHA_DMODEL, 1])
+    mmaf(F64, MHA_T, MHA_T, MHA_DK, tp, tv, sofar)
+  })
+  store_strided(o, idx_add(idx_mul(bm, idx_const(MHA_T * MHA_DMODEL)), head), sh, [MHA_DMODEL, 1], acc)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -2424,6 +2659,27 @@ fn trace(name: String) -> TileProg = match name {
       () => cce_row(param(F64, 0), param(I32, 1), param(F64, 2)))
   "cce_mean" ->
     trace_kernel("cce_mean", ["f64", "f64"], () => cce_mean(param(F64, 0), param(F64, 1)))
+  "matvec" ->
+    trace_kernel("matvec", ["f64", "f64", "f64"],
+      () => matvec(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "subarray_sum2d" ->
+    trace_kernel("subarray_sum2d", ["i32", "i32"], () => subarray_sum2d(param(I32, 0), param(I32, 1)))
+  "subarray_sum3d" ->
+    trace_kernel("subarray_sum3d", ["i32", "i32"], () => subarray_sum3d(param(I32, 0), param(I32, 1)))
+  "swiglu_half" ->
+    trace_kernel("swiglu_half", ["f64", "f64"], () => swiglu_half(param(F64, 0), param(F64, 1)))
+  "dequant" ->
+    trace_kernel("dequant", ["f64", "f64", "f64"],
+      () => dequant(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "conv3d" ->
+    trace_kernel("conv3d", ["f64", "f64", "f64"],
+      () => conv3d(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "mha_scores" ->
+    trace_kernel("mha_scores", ["f64", "f64", "f64"],
+      () => mha_scores(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "mha_context" ->
+    trace_kernel("mha_context", ["f64", "f64", "f64"],
+      () => mha_context(param(F64, 0), param(F64, 1), param(F64, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
