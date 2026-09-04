@@ -25,6 +25,11 @@ that is a claim; this turns each row into things a machine can look up:
     neither name a kernel the corpus does not launch nor leave out one it
     does. A program without that list declares `{case}` and the old
     equality is what comes out;
+  * the header's count of listed problems is the number of rows (the line
+    was written by hand and stopped being true after knife 18: it said 73
+    while 83 rows stood under it, through two knives, because nothing read
+    it. A number in a comment that nobody reads is a claim, and this file
+    exists to turn claims into lookups);
   * and the layer-2 ledger's last line records a run that PASSED. A problem
     is listed as solved only while a device has agreed, so a `blocked` run --
     which scripts/tile-gpu-diff/run.sh --check accepts, because an honest
@@ -178,6 +183,13 @@ def check(table_text, files, ledger_text):
     if not listed:
         problems.append("the table lists no problems at all")
 
+    # The header's own count. One line, matched literally, so a table without
+    # it is a table that makes no claim rather than one that fails.
+    m = re.search(r"^# (\d+) of the 97 reachable problems\b", table_text, re.M)
+    if m and int(m.group(1)) != len(listed):
+        problems.append(
+            f"the header says {m.group(1)} of the 97 reachable problems and {len(listed)} rows are listed")
+
     entries = [ln.split("#", 1)[0].split() for ln in ledger_text.splitlines()
                if ln.strip() and not ln.lstrip().startswith("#")]
     if not entries:
@@ -264,6 +276,9 @@ def self_test():
          good.replace("| std/gpu.matmul_bt_ref+std/gpu.row_softmax_ref+std/gpu.matmul_ref |",
                       "| std/gpu.matmul_bt_ref |"),
          "3 kernel(s) and 1 reference(s)"),
+        ("a header count that is not the number of rows",
+         good.replace("# 85 of the 97 reachable problems", "# 73 of the 97 reachable problems"),
+         "the header says 73 of the 97 reachable problems and 85 rows are listed"),
         ("an empty table", "# nothing\n", "lists no problems at all"),
     ]
     bad = 0
