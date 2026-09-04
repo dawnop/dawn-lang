@@ -26,6 +26,43 @@
 # The corpus is deliberately free of `use java`: the native driver refuses it
 # (jsig_refused), so `doc site` is not a divergence but the documented answer.
 #
+# ---- twenty-four cases left this file in 2026-09-04 ----
+#
+# `Console` and `Exit` became effects that day, so a usage refusal is readable
+# from inside the tree for the first time: `compiler-plan/src/consolemem.dawn`
+# answers the writes from a table and `exitmem.dawn` catches the status. Every
+# case whose whole content was "this argv printed that and exited with this"
+# is an inline test now, twice over -- once against `selfhost/src/main.dawn`'s
+# parsers and once against `selfhost/src/nmain.dawn`'s, which is the doubling
+# the pairing here used to provide. Look for `cli_read` in either file;
+# docs/effects-design.md §8.1 has the ledger.
+#
+#   check   zero targets, missing target
+#   test    zero targets, usage, multiple targets, the --stdlib conflict,
+#           missing target, wrong suffix, --cp with no path, --cp entry not found
+#   doc     zero targets, usage, multiple targets, all three mode conflicts,
+#           missing target
+#   build   zero targets, multiple targets
+#   fmt     zero targets, usage, missing target
+#   run     a bare token and a flag-like token after the target
+#
+# What stayed, by the reason it stayed. **Both backends at once**: every
+# `pair` judges "and the two agree", which no single-process test can say, and
+# the three `emitc` cases are entirely that (the drivers spell the command
+# differently, `__emitc` against `emitc`). **A build product**: the six
+# `pair_report` cases spawn a JVM or compile a binary and then read its
+# report. **The network and the package cache**: the five `add_pair` cases.
+# **A real process**: legs 1 and 4 need the N-1 release binary, and legs 4b,
+# 5, 7 and 8 judge framing on a real stdout, an answer mid-session, a file
+# dropped by an assertion, and a report that reached stdout before the process
+# ended. One movable case stayed too: `check (std stamped with another
+# release)` wants a std directory built on disk, so moving it would move the
+# fixture rather than the judgment.
+#
+# The moved cases are not lost coverage on this backend: `gates.yml` runs
+# `dawnc test selfhost/src/nmain.dawn` under the native binary, which is where
+# nmain's half of them executes. See that job's note.
+#
 #   ./scripts/native-cli-diff.sh              # builds the native driver
 #   DAWNC_BIN=/path/to/dawnc ./scripts/native-cli-diff.sh   # reuse one
 set -euo pipefail

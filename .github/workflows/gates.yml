@@ -41,10 +41,10 @@ name: gates
 # creation order roughly tracks definition order: the jobs that queue should
 # be the short tail, which fits in slots the first finishers free. That is a
 # soft nudge, not a contract — GitHub does not promise dispatch order. A run
-# of this workflow holds 36 jobs (2026-09-04, tile-golden's third shard), and
-# ci.yml adds its own `secrets`, so 37 against the ceiling of 20: the second
+# of this workflow holds 37 jobs (2026-09-04, native-selfhost-tests), and
+# ci.yml adds its own `secrets`, so 38 against the ceiling of 20: the second
 # wave starts as the first finishes, which is why the four native-diff shards
-# are defined first. The 36th job does not lengthen the run: with 36 already
+# are defined first. The 37th job does not lengthen the run: with 36 already
 # queuing against 20 runners the span is set by the tail, not by the count.
 #
 # The setup they each repeat is ~40s and comes out of
@@ -146,7 +146,7 @@ jobs:
   # Trigger for N=8: split again when a shard's own observation passes 550s
   # rather than restate a line, because 550s is where the next restatement
   # collides with the pole. Against splitting further today: a run of this
-  # workflow already holds 36 jobs against an account ceiling of 20, so shards
+  # workflow already holds 37 jobs against an account ceiling of 20, so shards
   # five through eight would queue behind the first wave and buy budget
   # headroom rather than wall clock.
 
@@ -1460,7 +1460,7 @@ jobs:
   # OBSERVED over 550s, and the projection is ~395 / 393 / 400s.
   #
   # A third shard buys budget headroom and not wall clock, and that is the
-  # whole of what it buys: runs of this workflow now hold 36 jobs against an
+  # whole of what it buys: runs of this workflow now hold 37 jobs against an
   # account concurrency limit of 20 (the arithmetic is in this file's header),
   # so the 36th queues behind the first wave rather than starting beside it,
   # and tile has never been a run's long pole -- native-diff at 783~1119s over
@@ -1868,6 +1868,77 @@ jobs:
       # a tag would publish, not one built beside it with the same recipe.
       - name: driver subcommands on the native backend
         run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/native-cli-diff.sh
+
+  # `dawn test selfhost`, on the other backend.
+  #
+  # Why it exists. `test` above runs `./bin/dawn test selfhost`, which is the
+  # JVM and only the JVM, so every inline test in the compiler was read by one
+  # backend. That was tolerable while those tests were about data structures.
+  # It stopped being tolerable on 2026-09-04, when `Console` and `Exit` became
+  # effects and twenty-four CLI cases moved out of scripts/native-cli-diff.sh
+  # and into `selfhost/src/main.dawn` and `nmain.dawn` (docs/effects-design.md
+  # §8.1): an inline test runs on whichever backend runs `dawn test`, so
+  # without this job each moved case would have traded two backends for one.
+  # This is the repayment, and it is worth more than the debt -- it puts the
+  # other 454 selfhost tests on the native backend too, where nothing ran them
+  # before.
+  #
+  # Why the target is `selfhost/src/nmain.dawn` and not `selfhost`. The native
+  # backend refuses `use java` (jsig_refused), and `main.dawn`, `jvm/emit`,
+  # `jvm/codegen` and `jvm/jreflect` are built on it -- `dawnc test selfhost`
+  # is 768 errors, all of them that refusal, and none of them a bug. The
+  # native driver's own module graph is the half of selfhost this backend
+  # compiles at all, and it is the half the moved cases' native halves live
+  # in. The JVM half stays covered by `test`'s own step, which is the only
+  # place `main.dawn`'s parsers can run.
+  #
+  # Why its own job rather than a step of prev-diff-native, which already has
+  # a native binary. Measured on one machine, warm toolchain, 2026-09-04:
+  # `dawnc test selfhost/src/nmain.dawn` is 75.2s and 75.1s on two runs, and
+  # the twenty-four cases leaving native-cli-diff.sh took 152.9s down to
+  # 139.5s (same binary via DAWNC_BIN, so only the cases moved). Net +61.8s
+  # local. That job's two steps are 252.3s local against a 526s worst
+  # observation, a runner factor of 2.08, so the step would put its claim at
+  # about 650s -- ten seconds under the 660s run pole. A claim that close to
+  # the pole is the situation the pole exists to force a split on, so it is
+  # split.
+  #
+  # It builds its own binary rather than release-native.sh's: this job's
+  # subject is the tests, not the artifact, and the plain emitc + cc recipe is
+  # the same one native-cli-diff.sh uses when DAWNC_BIN is unset. The recipe
+  # lives in scripts/native-selfhost-tests.sh so that it runs on a laptop too.
+  #
+  # This is gates.yml's 37th job (36 before). It does not shorten the run and
+  # is not meant to: with 36 already queuing against an account ceiling of 20
+  # runners, the span is set by the tail, and this job's projected 380s is
+  # well under the tallest claims (test 540s, prev-diff-native 526s).
+  native-selfhost-tests:
+    runs-on: ubuntu-latest
+    # No CI observation yet. Local, one machine, 2026-09-04: the script is
+    # 109.1s end to end with the toolchain already built (`__emitc` 7.4s, `cc`
+    # 42.6s, the test run 75.2s and 75.1s on two separate measurements), plus
+    # ~20s for the toolchain build itself = ~129s. Scaled by
+    # prev-diff-native's own runner factor of 2.08 -- the same shape of job
+    # (checkout, toolchain, build a native binary, run it), and that job's
+    # 252.3s local against its 526s worst observation is where the factor
+    # comes from -- that is ~268s, plus the ~39s of checkout, toolchain action
+    # and post steps its note measures. 380s rounds that up with room for a
+    # runner that is slower than 2.08x; replace it with the observation once
+    # there is one.
+    # budget: 3x 380s planning value (see the note above)
+    timeout-minutes: 19
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Builds the native driver and runs the suite through it. A script
+      # rather than four lines here, so the same thing runs on a laptop; its
+      # header carries the rest of the reasoning.
+      - name: selfhost tests on the native backend
+        run: ./scripts/native-selfhost-tests.sh
 
   # The hardware baseline itself stays local. CI exercises only the strict
   # JSON reader, the synthetic Linux process tree and the two source mutants.
