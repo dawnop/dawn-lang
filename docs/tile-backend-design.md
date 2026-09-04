@@ -1125,6 +1125,15 @@ CI 投影：run 33763512 观测到的 CI 与本机之比约 1.73，套到 249 / 
 `dawn test --stdlib` 与 `dawn test packages/tileir` 一个测试都没多（146 → 146、88 → 88）：
 这一刀往包里加了零个机制，判词全在层 2。
 
+**实施中途 main 落了 Console 刀 2，rebase 到 `fc85846a`。** 冲突仍然只有
+`scripts/core-golden/selfhost{,.norm}.sha` 两个文件，仍然按刀 18 立的规矩办：**取哪一边都会
+丢掉另一把刀的重录，正确做法是对合并后的树重录一次**。这一次合并后只有四个模块的哈希动
+（`main` / `nmain` / `consolemem` / `exitmem`，正是 Console 刀碰过的四个，它们的 id 被本刀
+的十个参考实现再推一次），另外 83 个与四份 `.core` 都已经是 rebase 前那次重录的样子。
+Emit-Change 对新基线又量了一遍，十一条判词逐条相同（八动两不动加 `doc --builtins`），
+ADT 位移仍是 +199。上面两轮墙钟是在 rebase 前的树上量的；Console 刀 2 不碰任何 tile 路径，
+所以那两轮读数照用。
+
 ### 6.6 两档判词：逐位与容差（刀 7b）
 
 层 2 从第一天就写着「分逐位与容差两档」（§6.2 的表、§3.2 的 matmul 行），但直到刀 7b 容差档
