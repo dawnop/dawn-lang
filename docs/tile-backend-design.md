@@ -607,6 +607,16 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   两个操作都只在 i32 缓冲上有客户：`addf` 模式的浮点原子加机制齐了，但射程内没有题需要它，
   而一个没有客户的模式在这棵树上等于没有被测过（刀 13 的区域参数顺序就是这么错了两刀半的）。
 
+- **刀 15 加了什么、没加什么**：**一个 opcode 也没加**。Tile IR 的一百个操作里没有 `erf`，
+  `ct` 里也没有，而 leetgpu 65 是拿 `torch.erf` 写的。所以 `tileir/dev.erf` 是一段
+  **组合**：Abramowitz & Stegun《Handbook of Mathematical Functions》7.1.26 的五项有理式
+  乘 `exp(-x^2)`，负半轴走奇对称 `erf(-x) = -erf(x)`（一个 `select`）。用到的操作
+  `absf / mulf / addf / divf / negf / exp / subf / cmpf / select` 全部是刀 7a 与 7b 就有的。
+  这是这棵树上**唯一一个不是「设备做什么的拼写」而是「近似」的公开函数**，它的误差
+  1.5e-7 是有出处的常数而不是实现细节，所以写进了 doc 注释，也被层 2 量出来钉住
+  （本机实测 1.380e-7，§6.6）。**仍然没有**：view 类型族与 TMA、`loop` / `break`
+  （清点下来 leetgpu 没有一道题需要，见刀单）、`atomic_red_view_tko`（0x75，要 13.3）。
+
 ### 5.3 谁把它变成 Tile IR、何时
 
 - **谁**：`packages/tileir`（纯 Dawn 源码包，与 `packages/inflate` 同类）。它声明 `Dev`、
@@ -1055,6 +1065,40 @@ input」，但它的 verifier 不这么说，`tileiras` 收下，设备也算对
 |--------|------|------|------|------|
 | `atomic-as-plain-store` | 包的 `atomic_add_masked` 改发 gather、`addi`、scatter 三条 | 变（histogram 的字节动，`cas_swap` 的不动） | 收（一次 load 加一次 store 是合法的） | **只有 `histogram` 红**：24 个 lane 里 16 个错，每个 bin 每块只剩一次增量。控制语料（每 bin 一个 lane）上**必须绿**，这一格是判词的另一半 |
 | `cas-compare-ignored` | `cas_swap` 把要写的值当成期望值交给 CAS | 变（`cas_swap` 的字节动，histogram 的不动） | 收（`AllTypesMatch<["cmp","val","result"]>` 两种交法都满足） | **只有 `cas_swap` 红**：该换值的 34 个槽位一个也没换 |
+
+**刀 15 的实测（`erf` 的组合实现）**。这一刀是这棵树上第一个**判词的主语是近似而不是设备**
+的刀，三条测量值得写下来：
+
+1. **1.5e-7 是有出处的常数，本机量到 1.380e-7**。Abramowitz-Stegun 7.1.26 的误差界是手册
+   自己写的；`erf_diff` 的 `error` 行印出设备答案与 `std/gpu.ref_erf` 的最大绝对差，
+   `run.sh` 把它钉在 `(0, 1.5e-7]` 里。**下界也钉**：差为零意味着参考实现变成了 kernel
+   自己的代码路径。`erf_sweep` 上是 **1.3797e-7**，`geglu` 上是 **3.6356e-7**（同一个误差
+   被乘子放大了，所以量误差要用没有乘子的那个 kernel）。
+
+2. **参考实现必须是另一个意见，而不是同一个有理式**。`std/gpu.ref_erf` 用的是全正项级数
+   `erf(x) = (2/√π) exp(-x²) Σ 2^n x^(2n+1) / (1·3·…·(2n+1))`，没有相消，精度约 4e-15
+   （`|x| > 6` 直接答 1，`erfc(6)` 是 2.2e-17）。如果参考也跑 7.1.26，那么**一个抄错了系数的
+   实现会与它一致**，而且这一刀的误差根本无从测量——这条比「参考不能调用 kernel」更强一点：
+   参考不能是同一个近似。
+
+3. **74 GPT-2 Block 用的不是 erf**。刀单把 65 与 74 排在一起，核实题面后发现 74 的前馈层写的是
+   `F.gelu(fc, approximate="tanh")`，即 tanh 近似；它一道 erf 也不用。它本来也进不来：
+   LayerNorm → QKV 投影 → 多头注意力 → 投影 → 残差 → LayerNorm → 前馈，是一串要中间缓冲的
+   乘积链，一次 launch 只写参数缓冲的后端表达不了（与刀 9 落选的 12 / 26 / 80 同因）。
+   于是刀 15 只解 65，累计 **54 / 97**。反过来，那个 tanh 公式正好当负控，见下表。
+
+**刀 15 的两个层 2 变异体**（都在包的 `erf` 里，因而两个 kernel 一起动；分开它们的是**语料**）：
+
+| 变异体 | 改哪 | 层 0 | 层 1 | 层 2 主语料 | 层 2 控制语料（`--corpus positive`） |
+|--------|------|------|------|------|------|
+| `erf-tanh-approx` | 换成 PyTorch `gelu(approximate="tanh")` 的公式，写成 erf 就是 `tanh(1.1283791670955128 x + 0.10091094891335171 x³)` | 变（两个 kernel 的字节都动） | 收（`tanh` 与 `exp` 一样合法） | **两个都红**：误差约 3.6e-4，是 `atol = 1e-5` 的 36 倍 | **两个仍红**：近似错了，正半轴也一样错 |
+| `erf-sign-not-flipped` | 去掉奇对称的 `select`，一律答 `erf(|x|)` | 变（两个 kernel 的字节都动） | 收（少一个比较与一个 select 的 kernel 仍是合法 kernel） | **两个都红**：负 lane 差到 2 | **必须全绿**：没有负 lane 时它是恒等改写 |
+
+第一条存在的理由是**证明容差档没选宽**：一个能放过 3.6e-4 的容差等于没有判词，第二条在控制
+语料上的绿也就没有意义了。第二条存在的理由是**证明语料在干活**：这是刀 14
+`atomic-as-plain-store`「无冲突语料上必须绿」那条规矩反过来用一次——一边把负 lane 钉在零以上，
+一边钉在零。两条语料判词都是 `PASS corpus` 行，`run.sh` 逐条查
+（`negative` / `tail` / `near_zero` 三个计数，主语料上三个都要大于零，控制语料上第一个必须为零）。
 
 **只有层 2 能红的两个负控**（刀 7a 的 `mask-all-true` 是第一个）：
 

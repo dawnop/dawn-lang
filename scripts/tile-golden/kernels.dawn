@@ -21,7 +21,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_mask
   shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
   float_to_float, ext_u8, trunc_u8, mmai,
   d_reduce_i, s_addi, s_maxi,
-  d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const }
+  d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const, erf }
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -1778,6 +1778,87 @@ fn cas_swap(state: Param[I32], cmp: Param[I32], val: Param[I32], old: Param[I32]
   store_masked(old, blk, s, active, prev)
 }
 
+# ---- the error function kernels (knife 15) ----
+#
+# Tile IR has no `erf`. Its hundred operations carry `exp`, `log`, `tanh`,
+# `pow` and the roots, and stop there; `ct` has no erf either. leetgpu 65
+# is stated in terms of `torch.erf`, so what answers it is a COMPOSITION,
+# `tileir/dev.erf`, which is Abramowitz-Stegun 7.1.26 over the arithmetic
+# that is already in the dialect. Zero new opcodes: this knife adds no
+# bytecode, only two kernels and a function in the package.
+#
+# What the corpora have to carry, and this is where it is stated:
+#
+#   * lanes with `|x| > 4`. 7.1.26 is a rational function of
+#     `t = 1 / (1 + p|x|)` times `exp(-x^2)`, and both factors are near
+#     their limits out there: `t` goes to 0 and `exp(-x^2)` underflows.
+#     A corpus that stopped at `|x| = 2` would never look at the tail.
+#   * lanes with `x < 0`. 7.1.26 holds for `x >= 0` and nothing else; the
+#     negative half is the odd symmetry, a `select` on the sign, and it is
+#     the one branch in the composition. scripts/tile-gpu-diff runs an
+#     all-non-negative CONTROL corpus beside the real one, so that the
+#     mutant that drops the flip can be shown to be caught by the negative
+#     lanes and not by anything else.
+#   * lanes near zero, where the approximation's absolute error is largest
+#     relative to the answer (7.1.26 is worst around |x| = 1.4 in absolute
+#     terms and the tier is absolute, so this is coverage rather than a
+#     hazard).
+#
+# Both kernels are TOLERANCE tier and cannot be anything else: 7.1.26's
+# error is 1.5e-7 by construction, and its host reference is an accurate
+# series rather than the same rational.
+
+# The sweep's shape: ERF_N values over ERF_TILE lanes a block. 500 is not a
+# multiple of 128, so the last of the four blocks runs 12 lanes past the end
+# and the tail mask is doing real work.
+const ERF_N: Int = 500
+const ERF_TILE: Int = 128
+
+# `erf(x)`, lane by lane: a coverage kernel with no leetgpu problem behind
+# it, the way `int_ops`, `scatter_perm` and `cas_swap` have none. 65 uses
+# the error function inside a product, where a large multiplier could hide
+# where the error is; here it is on its own, so what layer 2 measures is
+# 7.1.26's error and nothing else.
+fn erf_sweep(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ERF_TILE]
+  let blk = tile_at(block_id(0), ERF_TILE)
+  let m = tail_mask(blk, s, ERF_N)
+  let t = load_masked(x, blk, s, m, f_const(F64, s, 0.0))
+  store_masked(out, blk, s, m, erf(F64, s, t))
+}
+
+# The gate's shape: the input is one buffer of 2 * GEGLU_HALF values, its
+# first half the values to gate and its second half the gates, which is
+# leetgpu 65's `input.chunk(2)`. The output is GEGLU_HALF long. 300 is not
+# a multiple of 128, so the last of the three blocks runs 84 lanes past the
+# end of each half.
+const GEGLU_HALF: Int = 300
+const GEGLU_TILE: Int = 128
+
+# One over the square root of two, to the nearest Float: the problem's
+# `x / math.sqrt(2.0)` as a multiplication.
+const GEGLU_INV_SQRT2: Float = 0.7071067811865475
+
+# `x1 * 0.5 * x2 * (1 + erf(x2 / sqrt(2)))` with `x1, x2 = input.chunk(2)`:
+# leetgpu 65 (Gaussian Error Gated Linear Unit). The gate is the EXACT
+# gelu and not the tanh approximation, because the problem says
+# `torch.erf`.
+#
+# The second half is read with the SAME mask as the first, at a base
+# GEGLU_HALF elements further on: the two halves are one buffer, so the
+# lane's own tail mask is what keeps both loads inside it.
+fn geglu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [GEGLU_TILE]
+  let blk = tile_at(block_id(0), GEGLU_TILE)
+  let m = tail_mask(blk, s, GEGLU_HALF)
+  let zero = f_const(F64, s, 0.0)
+  let a = load_masked(x, blk, s, m, zero)
+  let b = load_masked(x, idx_add(blk, idx_const(GEGLU_HALF)), s, m, zero)
+  let g = erf(F64, s, mul(F64, s, b, f_const(F64, s, GEGLU_INV_SQRT2)))
+  let gate = mul(F64, s, mul(F64, s, f_const(F64, s, 0.5), b), addf(F64, s, f_const(F64, s, 1.0), g))
+  store_masked(out, blk, s, m, mul(F64, s, a, gate))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -1932,6 +2013,10 @@ fn trace(name: String) -> TileProg = match name {
   "cas_swap" ->
     trace_kernel("cas_swap", ["i32", "i32", "i32", "i32"],
       () => cas_swap(param(I32, 0), param(I32, 1), param(I32, 2), param(I32, 3)))
+  "erf_sweep" ->
+    trace_kernel("erf_sweep", ["f64", "f64"], () => erf_sweep(param(F64, 0), param(F64, 1)))
+  "geglu" ->
+    trace_kernel("geglu", ["f64", "f64"], () => geglu(param(F64, 0), param(F64, 1)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -1961,6 +2046,6 @@ pub fn main() -> Unit !io = match args() {
       ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
       ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
       ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
-      ++ "|histogram|cas_swap>"
+      ++ "|histogram|cas_swap|erf_sweep|geglu>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

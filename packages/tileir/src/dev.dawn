@@ -726,6 +726,63 @@ pub fn fma[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D], c: Tile[D])
   h
 }
 
+# ---- what the dialect does not have (knife 15) ----
+#
+# `erf` is not one of Tile IR's hundred operations, and leetgpu 65 is
+# stated in terms of one. It does not need to be an operation: it is a
+# rational function of `exp` and the arithmetic already here. What follows
+# costs ZERO new opcodes, which is the whole of the design decision, and it
+# is the only function in this module that is an approximation rather than
+# a spelling of something the device does.
+
+## The coefficients of Abramowitz and Stegun 7.1.26, and the pole of its
+## substitution `t = 1 / (1 + p x)`. Named rather than inlined so that a
+## reader can check them against the handbook.
+const AS_P: Float = 0.3275911
+const AS_A1: Float = 0.254829592
+const AS_A2: Float = 0.0 - 0.284496736
+const AS_A3: Float = 1.421413741
+const AS_A4: Float = 0.0 - 1.453152027
+const AS_A5: Float = 1.061405429
+
+## The error function of `a`, element-wise, BY COMPOSITION.
+##
+## Abramowitz and Stegun, Handbook of Mathematical Functions, formula
+## 7.1.26: for `x >= 0`, with `t = 1 / (1 + 0.3275911 x)`,
+##
+##   erf(x) = 1 - (a1 t + a2 t^2 + a3 t^3 + a4 t^4 + a5 t^5) exp(-x^2) + e
+##
+## with `|e| <= 1.5e-7` for every `x >= 0` (the handbook's own bound; the
+## largest this tree has measured is 1.385e-7, in a std/gpu test block).
+## The negative half comes from the odd symmetry `erf(-x) = -erf(x)`, which
+## is what the `select` below is: 7.1.26 holds for `x >= 0` only, and
+## dropping the sign flip answers `erf(|x|)`.
+##
+## 1.5e-7 is inside the `atol = 1e-5` leetgpu compares under
+## (docs/tile-backend-design.md 6.5), so every kernel built on this is a
+## TOLERANCE tier kernel and cannot be anything else. The host reference it
+## is compared against is `std/gpu.ref_erf`, a series accurate to 4e-15, so
+## the difference a device run reports IS this error and not a disagreement
+## between two approximations.
+##
+## Operations used, all of them already here: `absf`, `mulf`, `addf`,
+## `divf`, `negf`, `exp`, `subf`, a float compare and a `select`.
+pub fn erf[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev = {
+  let ax = abs(d, shape, a)
+  let one = f_const(d, shape, 1.0)
+  let t = div(d, shape, one, fma(d, shape, f_const(d, shape, AS_P), ax, one))
+  let inner = fma(d, shape, t,
+    fma(d, shape, t,
+      fma(d, shape, t,
+        fma(d, shape, t, f_const(d, shape, AS_A5), f_const(d, shape, AS_A4)),
+        f_const(d, shape, AS_A3)),
+      f_const(d, shape, AS_A2)),
+    f_const(d, shape, AS_A1))
+  let m = sub(d, shape, one,
+    mul(d, shape, mul(d, shape, t, inner), exp(d, shape, neg(d, shape, mul(d, shape, ax, ax)))))
+  select(d, shape, lt(d, shape, a, f_const(d, shape, 0.0)), neg(d, shape, m), m)
+}
+
 ## The matrix multiply-accumulate `a * b + c`: `a` is `[m, k]`, `b` is
 ## `[k, n]` and `c` and the answer are `[m, n]`, all of format `d`. This is
 ## the ONE operation here whose summation over `k` has no specified order

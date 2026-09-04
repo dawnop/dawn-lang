@@ -244,6 +244,29 @@
 #                      slots that should have taken a new value kept the
 #                      old one. The histogram is the control and its bytes
 #                      do not move
+#     erf-tanh-approx  the package's `erf` stops running Abramowitz-Stegun
+#                      7.1.26 and runs the tanh formula PyTorch calls
+#                      `gelu(approximate="tanh")` instead -> layer 0 moves
+#                      and layer 1 accepts it (a `tanh` is as legal as an
+#                      `exp`), and on the device both kernels are out by
+#                      about 3.6e-4, which is 36 times the `atol = 1e-5`
+#                      they are compared under. This one exists to show the
+#                      TIER IS NOT LOOSE: a tolerance that forgave it would
+#                      forgive an approximation nobody chose
+#     erf-sign-not-flipped
+#                      the package's `erf` drops the odd symmetry and
+#                      answers `erf(|x|)` -> layer 0 moves, layer 1 accepts
+#                      it (the `select` and its compare simply are not
+#                      there) and on the device every negative lane has the
+#                      wrong sign.
+#                      Its CORPUS is the other half of the claim and is
+#                      checked as one, the way atomic-as-plain-store's is:
+#                      the same mutant is run again with erf_diff's
+#                      `--corpus positive`, every lane non-negative, where
+#                      it must stay GREEN. The tanh mutant is run against
+#                      that corpus too and must still RED, which is what
+#                      separates "the corpus caught it" from "anything
+#                      would have"
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -470,6 +493,13 @@ scanned=(prefix_sum max_subarray seg_scan compact linrec gae ssm_scan)
 # the two splits the mutants below are held to.
 atomic=(histogram cas_swap)
 
+# The error function kernels of knife 15, in the order erf_diff takes them.
+# Both go through the package's `erf` composition, so both mutants below
+# move both of them: what separates the two mutants is the CORPUS, not the
+# kernel, which is why this family has no kernel-level control and runs
+# every mutant twice instead.
+erfs=(erf_sweep geglu)
+
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
@@ -483,7 +513,7 @@ assemble_golden() { # kernel, tilebc, cubin
 }
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
-  "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}"; do
+  "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -506,6 +536,8 @@ scan_cubins=()
 for k in "${scanned[@]}"; do scan_cubins+=("$work/$k.cubin"); done
 atom_cubins=()
 for k in "${atomic[@]}"; do atom_cubins+=("$work/$k.cubin"); done
+erf_cubins=()
+for k in "${erfs[@]}"; do erf_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -700,6 +732,33 @@ case "$atom_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/atom.out" | head -n 1)"
 
+# ---- native, the error function kernels (knife 15)
+build_native "$root/std" "$work/erf.bin" "$here/erf_diff.dawn"
+rc=0
+"$work/erf.bin" "${erf_cubins[@]}" > "$work/erf.out" 2> "$work/erf.err" || rc=$?
+cat "$work/erf.out"
+erf_verdict="$(verdict_of "$work/erf.out")"
+case "$erf_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#erfs[@]} error function kernels agree with the fake device inside the tolerance tier" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $erf_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $erf_verdict" ;;
+  fail) cat "$work/erf.err" >&2; fail "the device answered and disagreed with the fake device on an error function kernel (see the transcript above)" ;;
+  *) cat "$work/erf.err" >&2; fail "erf_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/erf.out" | head -n 1)"
+
+# The same two kernels on the CONTROL corpus, where no lane is negative and
+# the odd symmetry's `select` never chooses its negated arm. The clean run
+# must pass there as well -- it is the same kernel -- and what matters is
+# the negative count on the index lines, which the erf-sign-not-flipped
+# mutant needs to be zero here and nonzero above.
+rc=0
+"$work/erf.bin" --corpus positive "${erf_cubins[@]}" > "$work/erf-positive.out" 2> "$work/erf-positive.err" || rc=$?
+erf_positive_verdict="$(verdict_of "$work/erf-positive.out")"
+[ "$erf_positive_verdict" = "$erf_verdict" ] ||
+  { cat "$work/erf-positive.out" >&2; fail "the control corpus answers $erf_positive_verdict where the main one answers $erf_verdict"; }
+
 # The same two programs on the CONTROL corpus, where no two lanes share a
 # bin. The clean run must pass there as well -- it is the same kernel -- and
 # the number that matters is the collision count on the line below, which
@@ -748,6 +807,46 @@ case "$scatter_repeats" in
   *) fail "scatter_perm's corpus is not a permutation, so its verdict means nothing: $scatter_repeats" ;;
 esac
 
+# Abramowitz-Stegun 7.1.26 is an approximation, so the corpus is what says
+# WHERE it was checked. Three counts, all of them held above zero: the
+# negative lanes (the odd symmetry, and the only branch in the
+# composition), the lanes past |x| = 4 (the tail, where `t` goes to zero
+# and `exp(-x^2)` underflows) and the lanes near zero. Both kernels carry
+# all three; `geglu`'s are counted on what its gate hands the composition,
+# after the 1/sqrt(2).
+for k in "${erfs[@]}"; do
+  erf_shape="$(awk -v want="$k" '$1 == "kernel" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/erf.out")"
+  case "$erf_shape" in
+    *negative=0\ *) fail "$k's corpus has no negative lane, so the odd symmetry is not being tested: $erf_shape" ;;
+    *\ tail=0\ *) fail "$k's corpus never reaches |x| > 4, so 7.1.26's tail is not being tested: $erf_shape" ;;
+    *near_zero=0) fail "$k's corpus has no lane near zero: $erf_shape" ;;
+    *) echo "PASS  corpus: $k covers the negative half, the tail and the neighbourhood of zero ($erf_shape)" ;;
+  esac
+  erf_positive_shape="$(awk -v want="$k" '$1 == "kernel" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/erf-positive.out")"
+  case "$erf_positive_shape" in
+    *negative=0\ *) echo "PASS  corpus: $k's control corpus has no negative lane ($erf_positive_shape)" ;;
+    *) fail "$k's control corpus has negative lanes, so it is not a control: $erf_positive_shape" ;;
+  esac
+done
+
+# The measurement the composition's doc comment claims: 7.1.26's absolute
+# error is at most 1.5e-7. `erf_sweep` puts the device's erf beside an
+# accurate series with nothing multiplied on top, so the number on its
+# `error` line IS that error, and this is where the claim is a gate rather
+# than a sentence. Held above zero as well: an error of exactly zero would
+# mean the reference had become the kernel's own code path.
+if [ "$erf_verdict" = pass ]; then
+  as_error="$(awk '$1 == "kernel" && $2 == "erf_sweep" {f=1} f && $1 == "error" {print $NF; exit}' "$work/erf.out")"
+  python3 -c "
+import sys
+e = float(sys.argv[1])
+if not (0.0 < e <= 1.5e-7):
+    print(f'the sweep measured {e:.3e}, outside (0, 1.5e-7]: 7.1.26 does not have the error its doc comment claims')
+    sys.exit(1)
+print(f'PASS  measured: Abramowitz-Stegun 7.1.26 is out by {e:.3e} on the device, inside its 1.5e-7 bound')
+" "$as_error" || fail "the erf composition's measured error is outside the bound it claims ($as_error)"
+fi
+
 # The tier summary and the fold-order probe go into the ledger note: the
 # probe is a RECORD and not an assertion (docs 6.5), so a tileiras upgrade
 # that changes the device's reduction tree shows up in the ledger rather
@@ -759,9 +858,11 @@ tiers="$tiers wide:$(sed -n 's/^tiers //p' "$work/wide.out" | tail -n 1)"
 tiers="$tiers gath:$(sed -n 's/^tiers //p' "$work/gath.out" | tail -n 1)"
 tiers="$tiers scan:$(sed -n 's/^tiers //p' "$work/scan.out" | tail -n 1)"
 tiers="$tiers atom:$(sed -n 's/^tiers //p' "$work/atom.out" | tail -n 1)"
+tiers="$tiers erf:$(sed -n 's/^tiers //p' "$work/erf.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.out")"
-echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe"
+erf_probe="$(sed -n 's/^probe as-error //p' "$work/erf.out" | tail -n 1)"
+echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe; erf error: $erf_probe"
 
 # The ledger records one verdict for the tree: both programs pass, or the
 # first thing that stopped one of them.
@@ -2042,6 +2143,125 @@ atom_kernel_mutant cas-compare-ignored cas_swap \
   '  let prev = atomic_cas_masked(state, lanes(blk, s), s, active, v, v)'
 atom_kernel_check cas-compare-ignored cas_swap
 
+# The two mutants of the error function family (knife 15). Both live in the
+# PACKAGE's `erf` and therefore move both kernels; what tells them apart is
+# the corpus, so each is run twice, once on erf_diff's main corpus and once
+# on its `--corpus positive` control, and the pair of verdicts is the claim.
+#
+# `want_main` and `want_positive` are `fail` or `pass`.
+erf_pkg_mutant() { # name, old, new, want_main, want_positive
+  local name="$1" old="$2" new="$3" want_main="$4" want_positive="$5"
+  local pkg="$work/pkg-$name" before after k moved=0 rc=0 mverdict differ cubs=()
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/dev.dawn")
+  python3 "$here/mutate.py" "$pkg/src/dev.dawn" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/dev.dawn")
+  echo "      $name: packages/tileir/src/dev.dawn md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${erfs[@]}"
+  for k in "${erfs[@]}"; do
+    if cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+  done
+  [ "$moved" = "${#erfs[@]}" ] ||
+    fail "$name: every kernel here goes through the composition, so all ${#erfs[@]} should move at layer 0, got $moved"
+  echo "      $name: all ${#erfs[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+
+  for k in "${erfs[@]}"; do cubs+=("$work/$name-$k.cubin"); done
+  if [ "$erf_verdict" != pass ]; then
+    rc=0
+    "$work/erf.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$erf_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $erf_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $erf_verdict, before any launch reaches the device"
+    return 0
+  fi
+
+  erf_mutant_corpus "$name" main "$want_main" "${cubs[@]}"
+  erf_mutant_corpus "$name" positive "$want_positive" "${cubs[@]}"
+  if [ "$want_main" = fail ] && [ "$want_positive" = pass ]; then
+    echo "PASS  mutant: $name (layer 1 accepts it; on the device ${erfs[*]} differ, and the corpus with no negative lane forgives it entirely)"
+  else
+    echo "PASS  mutant: $name (layer 1 accepts it; on the device ${erfs[*]} differ on both corpora, so the tolerance tier is not what is forgiving it)"
+  fi
+}
+
+# One mutant against one corpus: `want` is the verdict the run must reach,
+# and when it is `fail` EVERY kernel of the family must be the one that
+# reds -- both go through the composition, so a mutant that moved only one
+# of them would be a mutant of something else.
+erf_mutant_corpus() { # name, corpus, want, cubins...
+  local name="$1" corpus="$2" want="$3"
+  shift 3
+  local out="$work/m-$name-$corpus.out" rc=0 mverdict differ
+  if [ "$corpus" = positive ]; then
+    "$work/erf.bin" --corpus positive "$@" > "$out" 2>&1 || rc=$?
+  else
+    "$work/erf.bin" "$@" > "$out" 2>&1 || rc=$?
+  fi
+  mverdict="$(verdict_of "$out")"
+  differ=$(grep -c '^  verdict differ:result$' "$out" || true)
+  if [ "$want" = fail ]; then
+    if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#erfs[@]}" ]; then
+      cat "$out" >&2
+      fail "$name on the $corpus corpus stayed green: expected fail (exit 1) with all ${#erfs[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+    fi
+  else
+    if [ "$mverdict" != pass ] || [ "$rc" != 0 ]; then
+      cat "$out" >&2
+      fail "$name on the $corpus corpus should be forgiven entirely, got $mverdict (exit $rc, $differ differing)"
+    fi
+  fi
+  echo "      $name: the $corpus corpus answers $mverdict ($differ of ${#erfs[@]} kernels differ)"
+}
+
+# 23. erf-tanh-approx: the package's `erf` runs the tanh formula PyTorch
+#     calls `gelu(approximate="tanh")` instead of Abramowitz-Stegun 7.1.26.
+#     Written in terms of erf rather than gelu it is
+#     `tanh(1.1283791670955128 x + 0.10091094891335171 x^3)`, and it is
+#     what leetgpu 74 (GPT-2 Block) actually asks for -- so this is not a
+#     straw man, it is the other formula a reader might reach for.
+#
+#     It is out by about 3.6e-4, 36 times the atol these kernels are
+#     compared under, so both of them red on BOTH corpora. That is the
+#     point of it: a tolerance tier wide enough to forgive this would be a
+#     tier that had stopped saying anything, and the sign mutant below
+#     would have no way to show that its own greenness on the control
+#     corpus means something.
+erf_pkg_mutant erf-tanh-approx \
+  '  let one = f_const(d, shape, 1.0)
+  let t = div(d, shape, one, fma(d, shape, f_const(d, shape, AS_P), ax, one))
+  let inner = fma(d, shape, t,
+    fma(d, shape, t,
+      fma(d, shape, t,
+        fma(d, shape, t, f_const(d, shape, AS_A5), f_const(d, shape, AS_A4)),
+        f_const(d, shape, AS_A3)),
+      f_const(d, shape, AS_A2)),
+    f_const(d, shape, AS_A1))
+  let m = sub(d, shape, one,
+    mul(d, shape, mul(d, shape, t, inner), exp(d, shape, neg(d, shape, mul(d, shape, ax, ax)))))' \
+  '  let m = tanh(d, shape,
+    fma(d, shape, mul(d, shape, ax, mul(d, shape, ax, ax)), f_const(d, shape, 0.10091094891335171),
+      mul(d, shape, f_const(d, shape, 1.1283791670955128), ax)))' \
+  fail fail
+
+# 24. erf-sign-not-flipped: the package's `erf` drops the odd symmetry and
+#     answers `erf(|x|)` on every lane. 7.1.26 is stated for `x >= 0` and
+#     for nothing else, and the `select` is the whole of what covers the
+#     other half; without it a negative lane gets the positive answer, out
+#     by up to 2.
+#
+#     THE CONTROL IS THE POINT. On erf_diff's `--corpus positive`, where no
+#     lane is negative, this mutant is a no-op and the run must pass. That
+#     is what says the negative lanes in the main corpus are doing the
+#     catching -- the same argument atomic-as-plain-store's collision-free
+#     corpus makes for knife 14, run the other way round.
+erf_pkg_mutant erf-sign-not-flipped \
+  '  select(d, shape, lt(d, shape, a, f_const(d, shape, 0.0)), neg(d, shape, m), m)' \
+  '  m' \
+  fail pass
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -2055,14 +2275,14 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mm_diff.dawn \
   scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/int_diff.dawn scripts/tile-gpu-diff/wide_diff.dawn \
   scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/scan_diff.dawn \
-  scripts/tile-gpu-diff/atom_diff.dawn \
+  scripts/tile-gpu-diff/atom_diff.dawn scripts/tile-gpu-diff/erf_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"
 today="$(date -u +%F)"
 line="$commit $today $driver $want_tileiras $gpu_name $verdict"
-summary="$tiers fold-order=$probe scan-order=$scan_probe"
+summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"

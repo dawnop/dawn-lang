@@ -664,6 +664,48 @@ pub fn ref_sqrt(x: Float) -> Float =
     y * pow2(k)
   }
 
+## Two over the square root of pi, to the nearest Float: the series below
+## and Abramowitz-Stegun 7.1.26 both carry it.
+pub const TWO_OVER_SQRT_PI: Float = 1.1283791670955126
+
+## The error function of `x`, by the series
+## `erf(x) = (2 / sqrt(pi)) * exp(-x^2) * sum 2^n x^(2n+1) / (1*3*..*(2n+1))`.
+## Every term of that sum is positive, so nothing cancels and the sum keeps
+## its relative accuracy however large `x^2` makes it grow; the `exp(-x^2)`
+## in front brings it back. Past `|x| = 6` the answer is 1 to the last bit
+## of a Float (`erfc(6)` is 2.2e-17) and this answers exactly 1 there.
+## Accurate to about 4e-15 over `[-8, 8]`, measured against a correctly
+## rounded erf.
+##
+## This is the SECOND OPINION for the device composition in
+## packages/tileir/src/dev.dawn, which is Abramowitz-Stegun 7.1.26 and has
+## an absolute error of 1.5e-7. A reference running the same five-term
+## rational would agree with a WRONG one, and would also leave the
+## approximation's error unmeasurable; against this series the difference
+## the device shows is 7.1.26's error and nothing else.
+pub fn ref_erf(x: Float) -> Float =
+  if x != x {
+    x
+  } else {
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let m = if ax > 6.0 {
+      1.0
+    } else {
+      var term = ax
+      var sum = ax
+      var n = 1
+      while n <= 400 && term > sum * 1.0e-18 {
+        term = term * 2.0 * ax * ax / (2.0 * to_float(n) + 1.0)
+        sum = sum + term
+        n = n + 1
+      }
+      # the last terms can push the product a bit past 1; erf cannot go there
+      let v = TWO_OVER_SQRT_PI * ref_exp(0.0 - ax * ax) * sum
+      if v > 1.0 { 1.0 } else { v }
+    }
+    if x < 0.0 { 0.0 - m } else { m }
+  }
+
 # ---- references for the reduction and transcendental kernels (knife 7b) ----
 #
 # Every one of these covers a vector of `n` elements in ONE tile block whose
@@ -1722,6 +1764,53 @@ pub fn cas_swap_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> Lis
         if active(i) { round_to(dtypes[3], state[i]) } else { kept(old, i) }))]
 }
 
+# ---- references for the error function kernels (knife 15) ----
+#
+# Both call `ref_erf`, the series above, and never the five-term rational
+# the device runs. That is the whole point of them: the tolerance these two
+# are compared under is a claim about an APPROXIMATION, and a claim about an
+# approximation cannot be checked against itself.
+
+## One over the square root of two, to the nearest Float. leetgpu 65 writes
+## `x / sqrt(2)`; the kernel and this reference both multiply by the
+## reciprocal, which differs from the division in the last bit and is far
+## inside the tier either way.
+pub const INV_SQRT2: Float = 0.7071067811865475
+
+## `erf(x)` over the first `n` lanes: a coverage reference with no leetgpu
+## problem behind it, the way `int_ops` and `cas_swap` have none. It is the
+## one place the composition is compared to an accurate erf on its own,
+## with nothing multiplied on top to hide where the error is.
+pub fn erf_sweep_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i =>
+      if i < n { round_to(dt, ref_erf(x[i])) } else { kept(old, i) })
+}
+
+## `x1 * (0.5 * x2 * (1 + erf(x2 / sqrt(2))))` where `x1` is the first half
+## of the input buffer and `x2` the second, over the first `n` lanes of the
+## output: leetgpu 65 (Gaussian Error Gated Linear Unit). `n` is half the
+## input length, which is what the problem calls `N // 2`.
+##
+## The gate is the EXACT gelu, `0.5 x (1 + erf(x / sqrt(2)))`, and not the
+## tanh approximation: 65 says `torch.erf`. (74 GPT-2 Block, which the plan
+## paired with this one, says `F.gelu(approximate="tanh")` instead, so it
+## does not need an erf at all.)
+pub fn geglu_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        let gate = 0.5 * x[n + i] * (1.0 + ref_erf(x[n + i] * INV_SQRT2))
+        round_to(dt, x[i] * gate)
+      } else {
+        kept(old, i)
+      })
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
@@ -2098,6 +2187,53 @@ test "ref_exp, ref_log and ref_sqrt answer values a reader can check by hand" {
   assert ref_sqrt(4.0) == 2.0
   assert ref_sqrt(0.0) == 0.0
   assert close(ref_sqrt(1.0e-8), 1.0e-4, 1.0e-15)
+}
+
+test "ref_erf answers values a reader can check by hand, and is odd" {
+  assert ref_erf(0.0) == 0.0
+  assert close(ref_erf(0.5), 0.5204998778130465, 1.0e-14)
+  assert close(ref_erf(1.0), 0.8427007929497149, 1.0e-14)
+  assert close(ref_erf(2.0), 0.9953222650189527, 1.0e-14)
+  assert close(ref_erf(3.0), 0.9999779095030014, 1.0e-14)
+  assert close(ref_erf(4.0), 0.9999999845827421, 1.0e-14)
+  # past six it is 1 to the last bit, and it must not go past 1 before that
+  assert ref_erf(6.5) == 1.0
+  assert ref_erf(100.0) == 1.0
+  assert ref_erf(5.9) <= 1.0
+  # odd symmetry, which is the branch the device composition mirrors
+  for k in range(1, 40) {
+    let x = to_float(k) * 0.31
+    assert ref_erf(0.0 - x) == 0.0 - ref_erf(x)
+  }
+  # and the small-argument slope is 2 / sqrt(pi)
+  assert close(ref_erf(1.0e-6) / 1.0e-6, TWO_OVER_SQRT_PI, 1.0e-11)
+}
+
+test "Abramowitz-Stegun 7.1.26 is inside 1.5e-7 of ref_erf everywhere the kernels look" {
+  # the device runs the five-term rational; this is the same arithmetic on
+  # the host, held to the error bound the doc comment on `tileir/dev.erf`
+  # claims. It is not the kernel's code path reaching into the reference:
+  # nothing outside this test block computes it here.
+  let p = 0.3275911
+  let a1 = 0.254829592
+  let a2 = 0.0 - 0.284496736
+  let a3 = 1.421413741
+  let a4 = 0.0 - 1.453152027
+  let a5 = 1.061405429
+  var worst = 0.0
+  for k in range(0 - 300, 301) {
+    let x = to_float(k) * 0.05
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + p * ax)
+    let poly = t * (a1 + t * (a2 + t * (a3 + t * (a4 + t * a5))))
+    let m = 1.0 - poly * ref_exp(0.0 - ax * ax)
+    let got = if x < 0.0 { 0.0 - m } else { m }
+    let want = ref_erf(x)
+    let d = if got > want { got - want } else { want - got }
+    worst = if d > worst { d } else { worst }
+  }
+  assert worst <= 1.5e-7
+  assert worst > 1.0e-7
 }
 
 test "the three are inverses of each other across a wide range of magnitudes" {
