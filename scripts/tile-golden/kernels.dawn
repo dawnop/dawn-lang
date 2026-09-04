@@ -226,6 +226,10 @@ fn mc_scale() -> Float = (MC_B - MC_A) / to_float(RED_N)
 # a Dawn source has no spelling for it.
 fn neg_inf() -> Float = 0.0 - 1.0 / 0.0
 
+# `+inf`, the identity of a minimum and the score a pair that must never win
+# is given. Knife 19's two argmin kernels are its only readers.
+fn pos_inf() -> Float = 1.0 / 0.0
+
 # The mask, the zero tile and the whole vector of a one-block kernel, read
 # with `pad` in the lanes past the end.
 fn whole(x: Param[F64], pad: Float) -> (Tile[F64], Tile[F64], Tile[F64]) !Dev = {
@@ -2450,6 +2454,308 @@ fn mha_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
   store_strided(o, idx_add(idx_mul(bm, idx_const(MHA_T * MHA_DMODEL)), head), sh, [MHA_DMODEL, 1], acc)
 }
 
+# ---- knife 19: the pairwise pair, and four more sequences ----
+#
+# Nothing below adds an operation to the package either. Two of these ten
+# are the whole of a problem (leetgpu 14 and 38, the last two in the
+# "mechanism complete, nobody wrote it" bucket); the other eight are steps
+# of four sequences whose middle launch is a kernel knives 16 and 17
+# already recorded.
+
+# leetgpu 14 (Multi-Agent Simulation). Each agent is four consecutive
+# floats -- x, y, vx, vy -- so the buffer is AG_N by 4 read with a stride
+# of 4 down each column, and an agent's own four are the same reads with a
+# stride of ZERO. One block an agent, and the block's tile runs over all
+# the OTHER agents: a lane is a pair, which is what makes this and
+# `nearest_idx` one shape and two problems.
+#
+# The self pair is removed the way the problem's own reference removes it,
+# by scoring the diagonal above the radius rather than by a second mask,
+# and an agent with no neighbour keeps its own velocity -- which is why the
+# division's denominator is a `select` and never a zero.
+const AG_N: Int = 64
+const AG_R2: Float = 25.0
+const AG_ALPHA: Float = 0.05
+
+fn agent_step(a: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let sh = [AG_N]
+  let one = [1]
+  let base = idx_mul(i, idx_const(4))
+  let px = load_strided(a, idx_const(0), sh, [4])
+  let py = load_strided(a, idx_const(1), sh, [4])
+  let vx = load_strided(a, idx_const(2), sh, [4])
+  let vy = load_strided(a, idx_const(3), sh, [4])
+  let mx = load_strided(a, base, sh, [0])
+  let my = load_strided(a, idx_add(base, idx_const(1)), sh, [0])
+  let ex = sub(F64, sh, mx, px)
+  let ey = sub(F64, sh, my, py)
+  let d2 = addf(F64, sh, mul(F64, sh, ex, ex), mul(F64, sh, ey, ey))
+  let is_self = eq_i(sh, coord(i, sh, 0, 0), coord(idx_const(0), sh, 0, 1))
+  let scored = select(F64, sh, is_self, f_const(F64, sh, AG_R2 + 1.0), d2)
+  let near = lt(F64, sh, scored, f_const(F64, sh, AG_R2))
+  let nil = f_const(F64, sh, 0.0)
+  let sx = spread(F64, one,
+    d_reduce(F64, sh, select(F64, sh, near, vx, nil), 0.0, (acc, e) => s_addf(F64, acc, e)))
+  let sy = spread(F64, one,
+    d_reduce(F64, sh, select(F64, sh, near, vy, nil), 0.0, (acc, e) => s_addf(F64, acc, e)))
+  let n = spread(F64, one,
+    d_reduce(F64, sh, select(F64, sh, near, f_const(F64, sh, 1.0), nil), 0.0, (acc, e) => s_addf(F64, acc, e)))
+  let has = gt(F64, one, n, f_const(F64, one, 0.0))
+  let den = select(F64, one, has, n, f_const(F64, one, 1.0))
+  let ox = load_strided(a, base, one, [0])
+  let oy = load_strided(a, idx_add(base, idx_const(1)), one, [0])
+  let ovx = load_strided(a, idx_add(base, idx_const(2)), one, [0])
+  let ovy = load_strided(a, idx_add(base, idx_const(3)), one, [0])
+  let avx = select(F64, one, has, div(F64, one, sx, den), ovx)
+  let avy = select(F64, one, has, div(F64, one, sy, den), ovy)
+  let alpha = f_const(F64, one, AG_ALPHA)
+  let nvx = addf(F64, one, ovx, mul(F64, one, alpha, sub(F64, one, avx, ovx)))
+  let nvy = addf(F64, one, ovy, mul(F64, one, alpha, sub(F64, one, avy, ovy)))
+  store(out, base, one, addf(F64, one, ox, nvx))
+  store(out, idx_add(base, idx_const(1)), one, addf(F64, one, oy, nvy))
+  store(out, idx_add(base, idx_const(2)), one, nvx)
+  store(out, idx_add(base, idx_const(3)), one, nvy)
+}
+
+# leetgpu 38 (Nearest Neighbor). The same pairwise tile as `agent_step`
+# over three coordinates instead of two, and the answer is an INDEX rather
+# than a number: `argmax`'s two-accumulator fold, but written into an i32
+# buffer instead of spread over a one-hot f64 one. It is the only kernel
+# recorded here that reads f64 and writes i32.
+#
+# The self pair is scored +inf rather than removed. Ties are not broken:
+# `d_reduce2`'s order is unspecified, so a corpus with two equally near
+# neighbours would have no answer, and stride_diff's `distinct` line counts
+# that the corpus has none.
+const NN_N: Int = 64
+
+fn nearest_idx(p: Param[F64], out: Param[I32]) -> Unit !Dev = {
+  let i = block_id(0)
+  let sh = [NN_N]
+  let base = idx_mul(i, idx_const(3))
+  let jx = load_strided(p, idx_const(0), sh, [3])
+  let jy = load_strided(p, idx_const(1), sh, [3])
+  let jz = load_strided(p, idx_const(2), sh, [3])
+  let ix = load_strided(p, base, sh, [0])
+  let iy = load_strided(p, idx_add(base, idx_const(1)), sh, [0])
+  let iz = load_strided(p, idx_add(base, idx_const(2)), sh, [0])
+  let ex = sub(F64, sh, ix, jx)
+  let ey = sub(F64, sh, iy, jy)
+  let ez = sub(F64, sh, iz, jz)
+  let d2 = addf(F64, sh, addf(F64, sh, mul(F64, sh, ex, ex), mul(F64, sh, ey, ey)), mul(F64, sh, ez, ez))
+  let lane = coord(idx_const(0), sh, 0, 1)
+  let is_self = eq_i(sh, coord(i, sh, 0, 0), lane)
+  let scored = select(F64, sh, is_self, f_const(F64, sh, pos_inf()), d2)
+  let (_best, which) = d_reduce2(F64, sh, scored, lane, pos_inf(), 0 - 1, (av, ai, ev, ei) => {
+    let win = s_gt(F64, ev, av)
+    (s_select(F64, win, av, ev), s_select(I32, win, ai, ei))
+  })
+  store(out, tile_at(i, 1), [1], spread(I32, [1], which))
+}
+
+# leetgpu 26 (Multi-Head Cross-Attention). `mha_scores` and `mha_context`
+# at TWO sequence lengths: Q has XA_M rows and K and V have XA_N, which is
+# the whole of what "cross" means here. The layout is knife 18's -- head
+# `h` owns the columns `[h * XA_D, (h + 1) * XA_D)` of a row of
+# XA_DMODEL -- so these two are that pair with the row count of the query
+# and the key told apart, and the middle launch is `attn_softmax` again,
+# over XA_H * XA_M rows of XA_N.
+const XA_M: Int = 32
+const XA_N: Int = 64
+const XA_H: Int = 2
+const XA_D: Int = 32
+const XA_DMODEL: Int = 64
+const XA_T: Int = 32
+
+# 1 / sqrt(XA_D), to the nearest Float.
+const XA_INV_SQRT_D: Float = 0.17677669529663687
+
+fn xattn_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let bh = block_id(2)
+  let sh = [XA_T, XA_T]
+  let head = idx_mul(bh, idx_const(XA_D))
+  let tq = load_strided(q, idx_add(idx_mul(bm, idx_const(XA_T * XA_DMODEL)), head),
+    [XA_T, XA_D], [XA_DMODEL, 1])
+  let tk = load_strided(k, idx_add(idx_mul(bn, idx_const(XA_T * XA_DMODEL)), head),
+    [XA_D, XA_T], permute([XA_DMODEL, 1], [1, 0]))
+  let acc = mmaf(F64, XA_T, XA_D, XA_T, tq, tk, f_const(F64, sh, 0.0))
+  let base = idx_add(idx_add(idx_mul(bh, idx_const(XA_M * XA_N)),
+    idx_mul(bm, idx_const(XA_T * XA_N))), idx_mul(bn, idx_const(XA_T)))
+  store_strided(s, base, sh, [XA_N, 1], mul(F64, sh, acc, f_const(F64, sh, XA_INV_SQRT_D)))
+}
+
+fn xattn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bh = block_id(2)
+  let sh = [XA_T, XA_D]
+  let head = idx_mul(bh, idx_const(XA_D))
+  let rows = idx_add(idx_mul(bh, idx_const(XA_M * XA_N)), idx_mul(bm, idx_const(XA_T * XA_N)))
+  let acc = d_for(idx_const(0), idx_const(XA_N / XA_T), idx_const(1), f_const(F64, sh, 0.0), (kk, sofar) => {
+    let tp = load_strided(p, idx_add(rows, idx_mul(kk, idx_const(XA_T))), [XA_T, XA_T], [XA_N, 1])
+    let tv = load_strided(v, idx_add(idx_mul(kk, idx_const(XA_T * XA_DMODEL)), head),
+      [XA_T, XA_D], [XA_DMODEL, 1])
+    mmaf(F64, XA_T, XA_T, XA_D, tp, tv, sofar)
+  })
+  store_strided(o, idx_add(idx_mul(bm, idx_const(XA_T * XA_DMODEL)), head), sh, [XA_DMODEL, 1], acc)
+}
+
+# leetgpu 80 (Grouped Query Attention). GQ_HQ query heads share GQ_HKV key
+# and value heads, `GQ_GROUPS` of the first to one of the second, and each
+# head is a CONTIGUOUS GQ_S by GQ_D matrix rather than a column slice. So
+# the head arithmetic runs the other way from leetgpu 12's: the grid's
+# third axis is the KV head and its first is the query's position INSIDE
+# the group, and `qh = kv * GQ_GROUPS + g` recovers the query head.
+#
+# That spelling is not a preference. A grid has three axes; a row block, a
+# column block, a group and a KV head are four, and `Idx` has no division
+# to fold two of them into one. Recording at GQ_S == GQ_T -- one block a
+# whole head -- is what frees the first axis for the group.
+const GQ_HQ: Int = 4
+const GQ_HKV: Int = 2
+const GQ_GROUPS: Int = 2
+const GQ_S: Int = 64
+const GQ_D: Int = 32
+const GQ_T: Int = 32
+
+# 1 / sqrt(GQ_D), to the nearest Float.
+const GQ_INV_SQRT_D: Float = 0.17677669529663687
+
+fn gqa_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bg = block_id(0)
+  let bkv = block_id(2)
+  let qh = idx_add(idx_mul(bkv, idx_const(GQ_GROUPS)), bg)
+  let sh = [GQ_S, GQ_S]
+  let tq = load(q, idx_mul(qh, idx_const(GQ_S * GQ_D)), [GQ_S, GQ_D])
+  let tk = load_strided(k, idx_mul(bkv, idx_const(GQ_S * GQ_D)), [GQ_D, GQ_S],
+    permute([GQ_D, 1], [1, 0]))
+  let acc = mmaf(F64, GQ_S, GQ_D, GQ_S, tq, tk, f_const(F64, sh, 0.0))
+  store(s, idx_mul(qh, idx_const(GQ_S * GQ_S)), sh, mul(F64, sh, acc, f_const(F64, sh, GQ_INV_SQRT_D)))
+}
+
+fn gqa_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let bg = block_id(0)
+  let bkv = block_id(2)
+  let qh = idx_add(idx_mul(bkv, idx_const(GQ_GROUPS)), bg)
+  let sh = [GQ_S, GQ_D]
+  let rows = idx_mul(qh, idx_const(GQ_S * GQ_S))
+  let acc = d_for(idx_const(0), idx_const(GQ_S / GQ_T), idx_const(1), f_const(F64, sh, 0.0), (kk, sofar) => {
+    let tp = load_strided(p, idx_add(rows, idx_mul(kk, idx_const(GQ_T))), [GQ_S, GQ_T], [GQ_S, 1])
+    let tv = load(v, idx_add(idx_mul(bkv, idx_const(GQ_S * GQ_D)), idx_mul(kk, idx_const(GQ_T * GQ_D))),
+      [GQ_T, GQ_D])
+    mmaf(F64, GQ_S, GQ_T, GQ_D, tp, tv, sofar)
+  })
+  store(o, idx_mul(qh, idx_const(GQ_S * GQ_D)), sh, acc)
+}
+
+# leetgpu 109 (GRPO Surrogate Loss). Three launches, and the third is knife
+# 17's `cce_mean` byte for byte: the loss is a mean over GR_B * GR_G rows,
+# and `cce_mean` averages 64 lanes into one. The NEGATION the problem asks
+# for is folded into the row launch rather than added after the mean --
+# negation is exact, so the mean of the negated rows is the negated mean --
+# which is the whole of why the last kernel is reused rather than written.
+const GR_B: Int = 8
+const GR_G: Int = 8
+const GR_S: Int = 32
+const GR_CLIP: Float = 0.2
+const GR_BETA: Float = 0.1
+const GR_STD_EPS: Float = 1.0e-8
+
+# Launch 1 of 3: the group-normalised advantage of every reward, one batch
+# a block. The problem's standard deviation is the BIASED one (torch's
+# `unbiased=False`), so both moments divide by GR_G.
+fn grpo_adv(r: Param[F64], adv: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let sh = [GR_G]
+  let at = tile_at(b, GR_G)
+  let g = f_const(F64, sh, to_float(GR_G))
+  let t = load(r, at, sh)
+  let total = spread(F64, sh, d_reduce(F64, sh, t, 0.0, (acc, e) => s_addf(F64, acc, e)))
+  let d = sub(F64, sh, t, div(F64, sh, total, g))
+  let sq = spread(F64, sh, d_reduce(F64, sh, mul(F64, sh, d, d), 0.0, (acc, e) => s_addf(F64, acc, e)))
+  let sd = sqrt(F64, sh, div(F64, sh, sq, g))
+  store(adv, at, sh, div(F64, sh, d, addf(F64, sh, sd, f_const(F64, sh, GR_STD_EPS))))
+}
+
+# Launch 2 of 3: minus the mean over the sequence of the clipped surrogate
+# less the KL penalty, one (batch, group) row a block. The row's advantage
+# is one number read with a stride of ZERO.
+fn grpo_row(lp: Param[F64], lo: Param[F64], lr: Param[F64], adv: Param[F64],
+  rows: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let sh = [GR_S]
+  let one = [1]
+  let at = tile_at(i, GR_S)
+  let a = load_strided(adv, i, sh, [0])
+  let p = load(lp, at, sh)
+  let o = load(lo, at, sh)
+  let f = load(lr, at, sh)
+  let ratio = exp(F64, sh, sub(F64, sh, p, o))
+  let clipped = minf(F64, sh, maxf(F64, sh, ratio, f_const(F64, sh, 1.0 - GR_CLIP)),
+    f_const(F64, sh, 1.0 + GR_CLIP))
+  let surrogate = minf(F64, sh, mul(F64, sh, ratio, a), mul(F64, sh, clipped, a))
+  let kd = sub(F64, sh, f, p)
+  let kl = sub(F64, sh, sub(F64, sh, exp(F64, sh, kd), kd), f_const(F64, sh, 1.0))
+  let term = sub(F64, sh, surrogate, mul(F64, sh, f_const(F64, sh, GR_BETA), kl))
+  let total = spread(F64, one, d_reduce(F64, sh, term, 0.0, (acc, e) => s_addf(F64, acc, e)))
+  store(rows, tile_at(i, 1), one, neg(F64, one, div(F64, one, total, f_const(F64, one, to_float(GR_S)))))
+}
+
+# leetgpu 20 (K-Means Clustering). Two kernels launched KM_ITERS times
+# each, alternately: the first `repeat` client whose ROUND is two launches
+# rather than one, and the first sequence whose intermediate is an i32
+# buffer the next launch reads as a label.
+#
+# `kmeans_centroid` writes TWO buffers and reads them both, in place, and
+# masks its store to `KM_K`: a block past the last cluster owns no
+# centroid, which is what keeps the grid mutant from writing off the end of
+# a four-element buffer.
+const KM_N: Int = 64
+const KM_K: Int = 4
+
+fn kmeans_assign(dx: Param[F64], dy: Param[F64], cx: Param[F64], cy: Param[F64],
+  lab: Param[I32]) -> Unit !Dev = {
+  let i = block_id(0)
+  let sh = [KM_K]
+  let zero = idx_const(0)
+  let ex = sub(F64, sh, load_strided(dx, i, sh, [0]), load(cx, zero, sh))
+  let ey = sub(F64, sh, load_strided(dy, i, sh, [0]), load(cy, zero, sh))
+  let d2 = addf(F64, sh, mul(F64, sh, ex, ex), mul(F64, sh, ey, ey))
+  let lane = coord(zero, sh, 0, 1)
+  let (_best, which) = d_reduce2(F64, sh, d2, lane, pos_inf(), 0 - 1, (av, ai, ev, ei) => {
+    let win = s_gt(F64, ev, av)
+    (s_select(F64, win, av, ev), s_select(I32, win, ai, ei))
+  })
+  store(lab, tile_at(i, 1), [1], spread(I32, [1], which))
+}
+
+fn kmeans_centroid(dx: Param[F64], dy: Param[F64], lab: Param[I32], cx: Param[F64],
+  cy: Param[F64]) -> Unit !Dev = {
+  let c = block_id(0)
+  let sh = [KM_N]
+  let one = [1]
+  let zero = idx_const(0)
+  let nil = f_const(F64, sh, 0.0)
+  let mine = eq_i(sh, load(lab, zero, sh), coord(c, sh, 0, 0))
+  let sx = spread(F64, one, d_reduce(F64, sh, select(F64, sh, mine, load(dx, zero, sh), nil), 0.0,
+    (acc, e) => s_addf(F64, acc, e)))
+  let sy = spread(F64, one, d_reduce(F64, sh, select(F64, sh, mine, load(dy, zero, sh), nil), 0.0,
+    (acc, e) => s_addf(F64, acc, e)))
+  let n = spread(F64, one, d_reduce(F64, sh, select(F64, sh, mine, f_const(F64, sh, 1.0), nil), 0.0,
+    (acc, e) => s_addf(F64, acc, e)))
+  let has = gt(F64, one, n, f_const(F64, one, 0.0))
+  let den = select(F64, one, has, n, f_const(F64, one, 1.0))
+  let at = tile_at(c, 1)
+  let live = in_range(one, coord(c, one, 0, 0), 0, KM_K)
+  let keep = f_const(F64, one, 0.0)
+  store_masked(cx, at, one, live,
+    select(F64, one, has, div(F64, one, sx, den), load_masked(cx, at, one, live, keep)))
+  store_masked(cy, at, one, live,
+    select(F64, one, has, div(F64, one, sy, den), load_masked(cy, at, one, live, keep)))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -2680,6 +2986,33 @@ fn trace(name: String) -> TileProg = match name {
   "mha_context" ->
     trace_kernel("mha_context", ["f64", "f64", "f64"],
       () => mha_context(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "agent_step" ->
+    trace_kernel("agent_step", ["f64", "f64"], () => agent_step(param(F64, 0), param(F64, 1)))
+  "nearest_idx" ->
+    trace_kernel("nearest_idx", ["f64", "i32"], () => nearest_idx(param(F64, 0), param(I32, 1)))
+  "xattn_scores" ->
+    trace_kernel("xattn_scores", ["f64", "f64", "f64"],
+      () => xattn_scores(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "xattn_context" ->
+    trace_kernel("xattn_context", ["f64", "f64", "f64"],
+      () => xattn_context(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "gqa_scores" ->
+    trace_kernel("gqa_scores", ["f64", "f64", "f64"],
+      () => gqa_scores(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "gqa_context" ->
+    trace_kernel("gqa_context", ["f64", "f64", "f64"],
+      () => gqa_context(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "grpo_adv" ->
+    trace_kernel("grpo_adv", ["f64", "f64"], () => grpo_adv(param(F64, 0), param(F64, 1)))
+  "grpo_row" ->
+    trace_kernel("grpo_row", ["f64", "f64", "f64", "f64", "f64"],
+      () => grpo_row(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3), param(F64, 4)))
+  "kmeans_assign" ->
+    trace_kernel("kmeans_assign", ["f64", "f64", "f64", "f64", "i32"],
+      () => kmeans_assign(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3), param(I32, 4)))
+  "kmeans_centroid" ->
+    trace_kernel("kmeans_centroid", ["f64", "f64", "i32", "f64", "f64"],
+      () => kmeans_centroid(param(F64, 0), param(F64, 1), param(I32, 2), param(F64, 3), param(F64, 4)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
