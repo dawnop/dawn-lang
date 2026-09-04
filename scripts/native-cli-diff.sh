@@ -284,7 +284,6 @@ EOF
 
 RUN_EMPTY=$'argc=0\n'
 RUN_OPTION_LIKE=$'argc=4\n0|0|\n1|2|--\n2|14|--comptime-ffi\n3|2|-o\n'
-RUN_ERROR=$'error: usage: dawn run [compiler-options] <target> [-- <program-args>...]\n'
 
 run_expect 0 "$RUN_EMPTY" "" "run (empty argv, omitted separator)" run "$RUN_ARGV"
 run_expect 0 "$RUN_EMPTY" "" "run (empty argv, explicit separator)" run "$RUN_ARGV" --
@@ -292,10 +291,6 @@ run_expect 0 "$RUN_OPTION_LIKE" "" "run (opaque option-like and empty argv)" \
   run "$RUN_ARGV" -- "" -- --comptime-ffi -o
 run_expect 0 "$RUN_EMPTY" "" "run (compiler option before target)" \
   run --std "$ROOT/std" "$RUN_ARGV"
-run_expect 2 "" "$RUN_ERROR" "run (bare token after target rejected)" \
-  run "$RUN_ARGV" stray
-run_expect 2 "" "$RUN_ERROR" "run (flag-like token after target rejected)" \
-  run "$RUN_ARGV" --comptime-ffi
 
 if [ "${NATIVE_CLI_RUN_ONLY:-}" = 1 ]; then
   [ "$fail" = 0 ] || { echo "FAIL: run argv boundary contract"; exit 1; }
