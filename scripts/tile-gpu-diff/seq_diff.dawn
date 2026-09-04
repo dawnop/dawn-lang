@@ -676,6 +676,16 @@ fn launches_of(s: Seq) -> String =
       ++ to_string(t.gy) ++ "x" ++ to_string(t.gz)
   })
 
+## How many launches each sequence issues, for the ledger note: the one
+## number about this family that ledger.txt could not otherwise carry, and
+## the one a future change to `repeat` could move without any verdict
+## moving with it.
+fn launch_counts(seqs: List[Seq]) -> String =
+  list.fold(seqs, "", (acc, s) => {
+    let sep = if acc == "" { "" } else { " " }
+    acc ++ sep ++ s.name ++ "=" ++ to_string(len(s.steps))
+  })
+
 fn differing(a: Option[List[Float]], b: Option[List[Float]]) -> Int = match (a, b) {
   (Some(x), Some(y)) ->
     if len(x) != len(y) {
@@ -813,6 +823,10 @@ pub fn main() -> Unit !io = {
   io.println("probe repeat one_round_equals_single=${rendered(one.result) == rendered(single.result)}"
       ++ " zero_rounds_equals_upload=${rendered(zero.result) == to_string(matpow_bufs()[0].data)}")
   io.println("probe mutants red=${red_count} ${reds}")
+  # How many launches each sequence actually issued, for the ledger: the
+  # one number about this family a reader of ledger.txt cannot get anywhere
+  # else, and the one a future change to `repeat` could move silently.
+  io.println("probe launches " ++ launch_counts(seqs))
   io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
   if all_agreed {
     io.println("tile-gpu-diff: pass")
