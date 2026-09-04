@@ -5,7 +5,7 @@
 # function-membership check.
 #
 #   ./scripts/builtin-type-contract/run.sh                 # everything
-#   ./scripts/builtin-type-contract/run.sh --shard 2/3     # probe + a third
+#   ./scripts/builtin-type-contract/run.sh --shard 2/4     # probe + a quarter
 #   ./scripts/builtin-type-contract/run.sh --only <mutant> # one mutant
 #
 #   ITEM_TIMES=<file> ./scripts/builtin-type-contract/run.sh

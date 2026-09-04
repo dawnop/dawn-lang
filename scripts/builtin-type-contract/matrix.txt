@@ -4,6 +4,17 @@
 # of the CI shards to it. Round-robin sharding reads positions off this order,
 # so reordering lines moves mutants between shards (harmless, but say so in
 # the commit if you do it on purpose).
+#
+# THIS ORDER IS NOT COST-BALANCED, and deliberately so. Per-mutant costs were
+# measured with `ITEM_TIMES=<file> ./scripts/builtin-type-contract/run.sh` on
+# one full local run (2026-09-04): 26 mutants at 24.79 to 31.57s, mean 27.94,
+# the whole matrix in 748s. A mutant here is one compiler build plus one
+# probe and nothing else, so the costs are flat -- 1.27x from cheapest to
+# dearest -- and a shard's load tracks how many mutants it holds, not which
+# ones. Dealing the four-shard split dearest-first is worth a few seconds on
+# a 200s shard, inside this gate's own run-to-run spread, so the order below
+# stays the one the mutants were written in. Remeasure rather than shuffling
+# by eye if that ever stops being true.
 stale-checker-consumer
 stale-lsp-consumer
 omit-return-lsp

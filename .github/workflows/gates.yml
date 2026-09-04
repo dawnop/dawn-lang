@@ -41,12 +41,12 @@ name: gates
 # creation order roughly tracks definition order: the jobs that queue should
 # be the short tail, which fits in slots the first finishers free. That is a
 # soft nudge, not a contract — GitHub does not promise dispatch order. A run
-# of this workflow holds 38 jobs (2026-09-04, tile-golden's fourth shard on
-# top of native-selfhost-tests), and ci.yml adds its own `secrets`, so 39
-# against the ceiling of 20: the second wave starts as the first finishes,
-# which is why the four native-diff shards are defined first. The 38th job
-# does not lengthen the run: with 38 already queuing against 20 runners the
-# span is set by the tail, not by the count.
+# of this workflow holds 40 jobs (2026-09-05, builtin-type's third and
+# fourth shards on top of tile-golden's fourth), and ci.yml adds its own
+# `secrets`, so 41 against the ceiling of 20: the second wave starts as the
+# first finishes, which is why the four native-diff shards are defined first.
+# The 39th and 40th jobs do not lengthen the run: with 38 already queuing
+# against 20 runners the span is set by the tail, not by the count.
 #
 # The setup they each repeat is ~40s and comes out of
 # .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
@@ -90,6 +90,12 @@ name: gates
 # no pre-prune run was left in the window. The tallest claim in this file
 # after that batch is pipe-contract-2's 611s, 49s under the pole. The pole did
 # not move and no job asked it to.
+#
+# 2026-09-05: that batch restated builtin-type's two shards to 585s and 590s,
+# and those are claims with nowhere left to go. The next observation either
+# splits the job or asks for the pole, so it split: four shards rather than
+# two, planning values 540 / 536 / 520 / 532s. Three was measured first and
+# refused, at 730 / 660 / 582s. The pole did not move and no job asked it to.
 #
 # What the pole cannot see is a claim that has quietly stopped being true:
 # check-gate-budgets.py compares the timeout with the claim and the claim with
@@ -157,7 +163,7 @@ jobs:
   # Trigger for N=8: split again when a shard's own observation passes 550s
   # rather than restate a line, because 550s is where the next restatement
   # collides with the pole. Against splitting further today: a run of this
-  # workflow already holds 38 jobs against an account ceiling of 20, so shards
+  # workflow already holds 40 jobs against an account ceiling of 20, so shards
   # five through eight would queue behind the first wave and buy budget
   # headroom rather than wall clock.
 
@@ -524,26 +530,73 @@ jobs:
 
   # SEM-14's builtin type inventory: twenty-six compiling mutants, measured
   # 721~848s as one step of the docs job on five consecutive main runs, which
-  # made docs the second-longest job of every run. Two round-robin shards
-  # (#299); each first runs probe.py against the real compiler, so no shard
-  # is a partial verdict, and each reports to mutant-shards-complete like the
-  # syntax shards above. Two shards rather than three because the third would
-  # buy ~140s that is not on the critical path and cost another queued job.
+  # made docs the second-longest job of every run. Round-robin shards since
+  # #299; each first runs probe.py against the real compiler, so no shard is
+  # a partial verdict, and each reports to mutant-shards-complete like the
+  # syntax shards above.
+  #
+  # N=2 -> N=4 on 2026-09-05, and the trigger was the POLE and not a single
+  # observation. Both halves had passed their claims in the post-prune window
+  # (585s and 590s against 557s and 553s), so both had to restate, and a
+  # restatement of 590s is a 3x 590s line -- 70s of headroom left under the
+  # pole and nothing to spend it on. #299's reason for stopping at two ("the
+  # third would buy ~140s that is not on the critical path") was an argument
+  # about wall clock, which is not what the pole is about.
+  #
+  # Three is not enough. The three-shard deal measured 295 / 260 / 221s
+  # locally on an idle machine (2026-09-04, one round, the three run back to
+  # back), whose planning values under this file's rule are 730 / 660 / 582s:
+  # the first is 70s over the pole and the second lands exactly on it. Four
+  # measures 200 / 198 / 190 / 196s locally, and the four planning values
+  # below are 540 / 536 / 520 / 532s: the tallest is 540s, 120s under the
+  # pole. The pole did not move and no job asked it to.
+  #
+  # matrix.txt is deliberately NOT dealt by cost, unlike tile-golden's.
+  # Per-mutant costs were measured with
+  # `ITEM_TIMES=<file> ./scripts/builtin-type-contract/run.sh` on one full
+  # local run (2026-09-04): 26 mutants at 24.79 to 31.57s, mean 27.94, whole
+  # matrix in 748s. A mutant here is one compiler build plus one probe and
+  # nothing else, so the costs are flat -- 1.27x from cheapest to dearest --
+  # and what sets a shard's load is how many mutants it holds, not which
+  # ones. Dealing the 9/9/8 split dearest-first buys 4.1s on a 250s shard,
+  # inside this gate's own run-to-run spread. The matrix keeps its documented
+  # run order, which is also what run.sh's executable list is held to.
+  #
+  # What is divided is mutants, never a check. Every assertion a mutant makes
+  # is made inside the one shard that runs it, and probe.py runs whole in
+  # every shard, so no shard is a partial verdict. What sharding introduces
+  # is the shard family's single failure: a slice nobody ran prints nothing
+  # different. Each shard records what it ran and mutant-shards-complete
+  # holds the union to scripts/builtin-type-contract/matrix.txt, which run.sh
+  # also holds against its own executable list in both directions at startup.
+  #
+  # Trigger for N=5: split again when a shard's own OBSERVATION passes 550s
+  # rather than restate a line, because 550s doubled is already past the
+  # pole. Against splitting further today: a run of this workflow already
+  # holds 40 jobs against an account ceiling of 20, so a fifth shard would
+  # queue behind the first wave and buy budget headroom rather than wall
+  # clock.
   builtin-type-1:
     runs-on: ubuntu-latest
-    # 26 mutants over two shards at the unsplit step's worst observation
-    # (848s) is ~420s of mutants per shard, plus the probe and the toolchain:
-    # ~470s was predicted for the worst shard; the first run came in at
-    # 477/359s across the two shards.
-    # 2026-09-03: restated from the Actions API -- the worst of 57
-    # completed main runs since 09-02 is 557s (run 33734826386), which the
-    # 477s claim was 80s under. scripts/gate-observations.py pulled it;
-    # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # 2026-09-04, post-prune window: 585s (run 33853792854) over the 20
-    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
-    # pruning knife (e797abb0), 28s over the 557s claim.
-    # budget: 3x 585s worst observed
-    timeout-minutes: 30
+    # The observation this replaces is 585s (run 33853792854, the post-prune
+    # window of 09-03T17:42Z .. 09-04T12:10Z), which is what forced the
+    # split: restating it would have claimed 3x 585s and left nothing under
+    # the pole. That observation belongs to a two-shard job and cannot be
+    # carried onto a quarter of the matrix, so all four lines below are
+    # planning values and the first real run of each replaces its line.
+    #
+    # Local wall clock, one machine, 2026-09-05, warm toolchain, the four
+    # round-robin shards run one after another, twice: 200 / 198 / 190 / 165s
+    # and 189 / 192 / 176 / 196s. Each line below takes the worse of its own
+    # two readings, which is what a budget line is about. The machine carried
+    # another agent's build throughout (load 2.7 to 7.1 of sixteen cores),
+    # which inflates these rather than deflating them, so the direction of
+    # that error is safe. Plus the checkout, the toolchain action and the
+    # post steps, doubled for a cold runner: the rule this file has used
+    # since the first split.
+    # 200 + 70 = 270, doubled is 540s.
+    # budget: 3x 540s planning value (200s local + 70s setup, doubled)
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -552,7 +605,7 @@ jobs:
       - name: builtin type inventory contract (shard 1)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/builtin-type-contract/run.sh --shard 1/2
+        run: ./scripts/builtin-type-contract/run.sh --shard 1/4
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
@@ -563,15 +616,13 @@ jobs:
 
   builtin-type-2:
     runs-on: ubuntu-latest
-    # 2026-09-03: restated from the Actions API -- the worst of 57
-    # completed main runs since 09-02 is 553s (run 33742987376), which the
-    # 359s claim was 194s under. scripts/gate-observations.py pulled it;
-    # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # 2026-09-04, post-prune window: 590s (run 33827988005) over the 20
-    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
-    # pruning knife (e797abb0), 37s over the 553s claim.
-    # budget: 3x 590s worst observed
-    timeout-minutes: 30
+    # The second shard, on the same matrix and the same arithmetic; the note
+    # above builtin-type-1 carries the measurements and why four rather than
+    # three. Each line restates the arithmetic on its own reading, because a
+    # budget line has to be readable beside the timeout it bounds.
+    # 198 + 70 = 268, doubled is 536s.
+    # budget: 3x 536s planning value (198s local + 70s setup, doubled)
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -580,11 +631,64 @@ jobs:
       - name: builtin type inventory contract (shard 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/builtin-type-contract/run.sh --shard 2/2
+        run: ./scripts/builtin-type-contract/run.sh --shard 2/4
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-builtin-type-2
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  builtin-type-3:
+    runs-on: ubuntu-latest
+    # The third shard, added with the N=2 -> N=4 split on 2026-09-05. Same
+    # matrix, same probe, same arithmetic; the note above builtin-type-1
+    # carries the measurements. This and the fourth hold six mutants each
+    # against the first two shards' seven: the per-mutant costs are flat to
+    # within 1.27x, so the count is what a shard's load tracks, and the
+    # readings sit in the order the counts predict.
+    # 190 + 70 = 260, doubled is 520s.
+    # budget: 3x 520s planning value (190s local + 70s setup, doubled)
+    timeout-minutes: 26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: builtin type inventory contract (shard 3)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/builtin-type-contract/run.sh --shard 3/4
+      - name: record which mutants this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-builtin-type-3
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  builtin-type-4:
+    runs-on: ubuntu-latest
+    # The fourth shard, added with the N=2 -> N=4 split on 2026-09-05. Same
+    # matrix, same probe, same arithmetic; the note above builtin-type-1
+    # carries the measurements. Six mutants, like the third.
+    # 196 + 70 = 266, doubled is 532s.
+    # budget: 3x 532s planning value (196s local + 70s setup, doubled)
+    timeout-minutes: 27
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: builtin type inventory contract (shard 4)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/builtin-type-contract/run.sh --shard 4/4
+      - name: record which mutants this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-builtin-type-4
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -1517,9 +1621,9 @@ jobs:
   # OBSERVED over 550s, and the projection is ~395 / 393 / 400s.
   #
   # A third shard buys budget headroom and not wall clock, and that is the
-  # whole of what it buys: runs of this workflow now hold 38 jobs against an
+  # whole of what it buys: runs of this workflow now hold 40 jobs against an
   # account concurrency limit of 20 (the arithmetic is in this file's header),
-  # so the 38th queues behind the first wave rather than starting beside it,
+  # so the 38th queued behind the first wave rather than starting beside it,
   # and tile has never been a run's long pole -- native-diff at 783~1119s over
   # the last fortnight is. The span does not shorten. What changes is that
   # every shard is back under the 660s pole with room for the next knife.
@@ -2023,11 +2127,12 @@ jobs:
   # the same one native-cli-diff.sh uses when DAWNC_BIN is unset. The recipe
   # lives in scripts/native-selfhost-tests.sh so that it runs on a laptop too.
   #
-  # This job was gates.yml's 37th (36 before); tile-golden's fourth shard has
-  # since made 38. It does not shorten the run and is not meant to: with 37
-  # already queuing against an account ceiling of 20 runners, the span is set
-  # by the tail, and this job's projected 380s is well under the tallest
-  # claims (test 540s, prev-diff-native 526s).
+  # This job was gates.yml's 37th (36 before); tile-golden's fourth shard and
+  # builtin-type's third and fourth have since made 40. It does not shorten
+  # the run and is not meant to: with 37 already queuing against an account
+  # ceiling of 20 runners, the span is set by the tail, and this job's
+  # projected 380s is well under the tallest claims (test 540s,
+  # prev-diff-native 526s).
   native-selfhost-tests:
     runs-on: ubuntu-latest
     # No CI observation yet. Local, one machine, 2026-09-04: the script is
@@ -2314,6 +2419,8 @@ jobs:
       - syntax-mutants-3
       - builtin-type-1
       - builtin-type-2
+      - builtin-type-3
+      - builtin-type-4
       - tile-golden-1
       - tile-golden-2
       - tile-golden-3
