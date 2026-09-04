@@ -617,6 +617,12 @@ driver/stdlib 4、lsp/server 2、source 2）：它们的路径全是自己造的
 阳性对照是把 `main.dawn` 的一条字面量改一个字母，同一把尺子当场看得见，所以这个「全等」
 不是没看。
 
+还有一条反直觉的：**这 60 条是个闭包，单独退回去一条不一定合法**。「加一个原子总是允许的」
+只对没有调用者的行成立。实测把 `pkgfetch.cache_root` 的 `!io` 加回去，`fetch_and_hash` /
+`check_origin` / `ensure_cached` / `source.url_pkg_root` 四个调用者当场红，因为它们也去掉了；
+`main.abs_parent` 与 `cdriver.mode_flips_from_env` 同理。加回去合法的是 `pkg/add.run_add`
+这种调用者仍写着 `!io` 的行。所以回滚这一批要整批回滚，不能挑行。
+
 `Exit` 与 `Console` 是第四、第五族，2026-09-04 一起走到声明为止：`std/io` 多了
 `pub ctl effect Exit`（一个操作 `exit_now(code) -> Never`，生产 handler `with_exit_real`）
 与 `pub effect Console`（四个操作 `console_print` / `console_println` / `console_eprint` /
