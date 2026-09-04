@@ -1405,3 +1405,161 @@ test "`dawnc check` with no target is one line on stderr and status 2" {
   assert envlog == []
   assert proclog == []
 }
+
+# ---- the rest of the CLI's refusals, in process ----
+#
+# The test above is the first of these and says why they are here. The rest
+# follow it in one shape, and `main.dawn` carries the same argvs against the
+# JVM driver's own parsers: the two drivers are independent implementations of
+# one command contract (this file's header says why), so each case is read
+# twice, once per parser. What `scripts/native-cli-diff.sh` keeps for the
+# cases it still owns is the judgment neither of these can make -- that the
+# two answers are the same answer.
+
+## Run one driver entry point with the console and the exit status answered
+## from tables, and read back what `pair_expect_error` reads: the status,
+## stderr, and stdout, in that order. `None` for the status means the entry
+## ran to the end rather than ending the process.
+##
+## `Fs` is the host's, because these entries ask whether a path exists and a
+## path that does not exist answers the same either way. `Proc` and `Env` are
+## tables so that "the host was not asked" is part of every case rather than a
+## case of its own: an empty process script panics if anything spawns, and the
+## environment table records every question.
+fn cli_read(
+  entry: fn() -> Unit !Fs !Proc !Env !Exit !Console !io
+) -> (Option[Int], String, String) !io = {
+  let (((status, log), envlog), proclog) = io.with_fs_real(() =>
+      procmem.with_proc_table([], () =>
+          envmem.with_env_table(envmem.TABLE_CWD, [], () =>
+              consolemem.with_console_table(() =>
+                  exitmem.with_exit_capture(entry)))))
+  if len(envlog) > 0 || len(proclog) > 0 {
+    panic("a refusal asked the host: " ++ to_string(len(envlog)) ++
+        " environment queries and " ++ to_string(len(proclog)) ++ " processes")
+  }
+  (status, consolemem.err_text(log), consolemem.out_text(log))
+}
+
+## `cli_read`, for the entries that load the standard library before they
+## refuse.
+##
+## `--std` defaults to a relative directory, so the host's working directory
+## is one of their inputs and the environment cannot be a table here. That is
+## `driver/stdlib`'s reason for keeping the real handler in its own tests too.
+fn cli_read_hosted(
+  entry: fn() -> Unit !Fs !Proc !Env !Exit !Console !io
+) -> (Option[Int], String, String) !io = {
+  let (status, log) = io.with_fs_real(() => io.with_proc_real(() =>
+      io.with_env_real(() =>
+          consolemem.with_console_table(() =>
+              exitmem.with_exit_capture(entry)))))
+  (status, consolemem.err_text(log), consolemem.out_text(log))
+}
+
+## A path no case below creates, so every `no such file or directory` in this
+## section is about the same absence.
+const NO_SUCH: String = "no-such-target-for-the-cli-contract"
+
+test "`dawnc check` refuses a target that names nothing" {
+  # scripts/native-cli-diff.sh: check (missing target)
+  assert cli_read(() => cmd_check([NO_SUCH]))
+    == (Some(2), "error: no such file or directory: " ++ NO_SUCH ++ "\n", "")
+}
+
+test "`dawnc fmt` refuses an argv with no path and one that names nothing" {
+  # scripts/native-cli-diff.sh: fmt (zero targets), fmt (usage), fmt (missing target)
+  assert cli_read(() => cmd_fmt([]))
+    == (Some(2), "error: usage: dawn fmt [--check] <file.dawn | dir>...\n", "")
+  assert cli_read(() => cmd_fmt([NO_SUCH]))
+    == (Some(2), "error: no such file or directory: " ++ NO_SUCH ++ "\n", "")
+}
+
+test "`dawnc test` refuses an argv that does not name exactly one suite" {
+  # scripts/native-cli-diff.sh: test (zero targets), test (usage),
+  # test (multiple targets), test (target conflicts with --stdlib)
+  assert cli_read(() => cmd_test([]))
+    == (Some(2), "error: usage: dawn test [--cp jars] <file.dawn | project-dir> " ++
+        "| dawn test --stdlib\n", "")
+  assert cli_read(() => cmd_test(["a.dawn", "b.dawn"]))
+    == (Some(2), "error: dawn test takes one target, got `a.dawn` and `b.dawn`; " ++
+        "a bare word after the target is not a flag this subcommand knows\n", "")
+  assert cli_read(() => cmd_test(["--stdlib", "a.dawn"]))
+    == (Some(2), "error: dawn test accepts exactly one of a target or --stdlib\n", "")
+}
+
+test "`dawnc test` refuses a target it cannot compile from" {
+  # scripts/native-cli-diff.sh: test (missing target), test (wrong suffix).
+  # Hosted, because this driver loads the standard library before it looks at
+  # the target; the JVM one checks the target first, which is a difference in
+  # order and not in answer -- the bytes below are the same on both.
+  assert cli_read_hosted(() => cmd_test([NO_SUCH]))
+    == (Some(2), "error: no such file or directory: " ++ NO_SUCH ++ "\n", "")
+  let dir = io.with_fs_real(() => scratch("dawn-cli-contract-"))
+  let plain = dir ++ "/plain.txt"
+  io.with_fs_real(() =>
+      match io.write_file(plain, "hello\n") {
+        Ok(_) -> ()
+        Err(e) -> panic("cannot write " ++ plain ++ ": " ++ e.message)
+      })
+  assert cli_read_hosted(() => cmd_test([plain]))
+    == (Some(2), "error: source files must end in .dawn: " ++ plain ++ "\n", "")
+  io.with_fs_real(() => scrub(dir))
+}
+
+test "`dawnc test` validates --cp before it compiles anything" {
+  # scripts/native-cli-diff.sh: test (--cp needs a path), test (--cp entry not found)
+  assert cli_read(() => cmd_test(["packages/sha2", "--cp"]))
+    == (Some(2), "error: --cp needs a path\n", "")
+  assert cli_read(() => cmd_test(["--cp", "/nonexistent.jar", "packages/sha2"]))
+    == (Some(2), "error: --cp entry not found: /nonexistent.jar\n", "")
+}
+
+test "`dawnc doc` refuses an argv that does not name exactly one input" {
+  # scripts/native-cli-diff.sh: doc (zero targets), doc (usage),
+  # doc (multiple targets), doc (stdlib conflicts with builtins),
+  # doc (target conflicts with stdlib), doc (target conflicts with builtins)
+  let usage = "error: usage: dawn doc <file.dawn | project-dir> | dawn doc --stdlib " ++
+    "| dawn doc --builtins\n"
+  let conflict = "error: dawn doc accepts exactly one of a target, --stdlib, or --builtins\n"
+  assert cli_read(() => cmd_doc([])) == (Some(2), usage, "")
+  assert cli_read(() => cmd_doc(["a.dawn", "b.dawn"]))
+    == (Some(2), "error: dawn doc takes one target, got `a.dawn` and `b.dawn`; " ++
+        "a bare word after the target is not a flag this subcommand knows\n", "")
+  assert cli_read(() => cmd_doc(["--stdlib", "--builtins"])) == (Some(2), conflict, "")
+  assert cli_read(() => cmd_doc(["a.dawn", "--stdlib"])) == (Some(2), conflict, "")
+  assert cli_read(() => cmd_doc(["a.dawn", "--builtins"])) == (Some(2), conflict, "")
+}
+
+test "`dawnc doc` refuses a target that names nothing" {
+  # scripts/native-cli-diff.sh: doc (missing target). Hosted, because this
+  # subcommand loads the standard library before it looks at the target.
+  assert cli_read_hosted(() => cmd_doc([NO_SUCH]))
+    == (Some(2), "error: no such file or directory: " ++ NO_SUCH ++ "\n", "")
+}
+
+test "`dawnc build` refuses an argv that does not name exactly one target" {
+  # scripts/native-cli-diff.sh: build (zero targets), build (multiple targets)
+  assert cli_read(() => cmd_build([]))
+    == (Some(2), "error: usage: dawn build [--cp jars] <file.dawn | project-dir> " ++
+        "[-o out] [--native]\n", "")
+  assert cli_read(() => cmd_build(["a.dawn", "b.dawn"]))
+    == (Some(2), "error: dawn build takes one target, got `a.dawn` and `b.dawn`; " ++
+        "a bare word after the target is not a flag this subcommand knows\n", "")
+}
+
+test "`dawnc run` stops taking options at the target" {
+  # scripts/native-cli-diff.sh: run (bare token after target rejected),
+  # run (flag-like token after target rejected). Both tails are opaque to the
+  # driver -- one looks like a word and one looks like a compiler flag -- and
+  # the refusal is the same, which is the boundary this pins.
+  let usage = "error: usage: dawn run [compiler-options] <target> [-- <program-args>...]\n"
+  assert cli_read(() => {
+    let _ = parse_run_tail(["prog.dawn", "stray"])
+    ()
+  }) == (Some(2), usage, "")
+  assert cli_read(() => {
+    let _ = parse_run_tail(["prog.dawn", "--comptime-ffi"])
+    ()
+  }) == (Some(2), usage, "")
+}
