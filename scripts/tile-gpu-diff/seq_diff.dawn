@@ -13,6 +13,37 @@
 #            <gqa_scores.cubin> <gqa_context.cubin>
 #            <grpo_adv.cubin> <grpo_row.cubin>
 #            <kmeans_assign.cubin> <kmeans_centroid.cubin>
+#            <kv_scores.cubin> <kv_context.cubin>
+#            <attn_bwd_mmt.cubin> <attn_bwd_ds.cubin>
+#            <lin_attn_s.cubin> <lin_attn_out.cubin>
+#            <ols_gram.cubin> <ols_elim.cubin> <ols_beta.cubin>
+#
+# KNIFE 20 added four problems and nine kernels, and spent the reuse harder
+# than any knife before it. Leetgpu 111 is SEVEN launches over five kernels
+# of which two are new: the forward pass is leetgpu 6's first two launches,
+# `dP = dO V^T / sqrt(d)` is `attn_scores` a second time on different
+# operands (the scale factors out of the softmax Jacobian that consumes it,
+# so it may be applied by whichever launch already applies one), `dQ = dS K`
+# is `attn_context`, and `dV = P^T dO` and `dK = dS^T Q` are one new kernel
+# run twice. It is also the first sequence with THREE outputs, which is why
+# a `Seq` reads a LIST of buffers: a verdict that looked at `dQ` alone would
+# be satisfied by a device that never wrote the other two.
+#
+# Leetgpu 56 is three launches over two kernels, and its reuse is on an
+# OPERAND: a column sum is a product with a column of ones, so `z` is
+# `lin_attn_s` run again with a buffer of ones where V was. Leetgpu 96 is
+# the first sequence whose buffers are not all f64 -- an int8 cache with a
+# per-position f32 scale -- and its middle launch is `attn_softmax` again.
+#
+# Leetgpu 33 is the one that is new in kind. Its launches are not a pipeline
+# of different computations but a GAUSSIAN ELIMINATION: the same kernel
+# driven `n_features` times over one matrix, with the pivot index in a
+# one-element i32 buffer the way `apsp_step` carries its round. It is the
+# THIRD exact-tier sequence here, and by a stronger argument than the other
+# two: every operation in it is an `addf`, `subf`, `mulf` or `divf` at f64
+# in an order both sides fix, and IEEE 754 requires all four to be correctly
+# rounded, so there is no fold whose tree could differ and no corpus is part
+# of the claim.
 #
 # KNIFE 19 added four problems and eight kernels. Three of the four spend
 # the same reuse the last two knives did, on a third and a fourth axis:
@@ -103,7 +134,8 @@ use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, matmul_ref,
   row_softmax_ref, swiglu_act_ref, apsp_step_ref, causal_scores_ref, alibi_scores_ref, window_scores_ref,
   sink_scores_ref, decay_scores_ref, cce_row_ref, mean_ref, mha_scores_ref, mha_context_ref,
   xattn_scores_ref, xattn_context_ref, gqa_scores_ref, gqa_context_ref, grpo_adv_ref, grpo_row_ref,
-  kmeans_assign_ref, kmeans_centroid_ref }
+  kmeans_assign_ref, kmeans_centroid_ref, kv_scores_ref, kv_context_ref, attn_bwd_mmt_ref,
+  attn_bwd_ds_ref, lin_attn_s_ref, lin_attn_out_ref, ols_gram_ref, ols_elim_ref, ols_beta_ref }
 use std/list
 use std/map
 
@@ -198,6 +230,27 @@ pub const KM_N: Int = 64
 pub const KM_K: Int = 4
 pub const KM_ITERS: Int = 3
 
+## leetgpu 96's shape: KV_H heads, each a single query of KV_D features
+## against a cache of KV_S int8 keys and values with one f32 scale a
+## position. KV_S is ATT_N so that the middle launch can be `attn_softmax`.
+pub const KV_H: Int = 8
+pub const KV_S: Int = 64
+pub const KV_D: Int = 32
+pub const KV_INV_SQRT_D: Float = 0.17677669529663687
+
+## leetgpu 56's shape: LA_M rows of LA_D features. The same M and d for
+## Q, K and V, which is what makes `S = phi(K)^T V` square.
+pub const LA_M: Int = 64
+pub const LA_D: Int = 32
+
+## leetgpu 33's shape: OLS_N samples of OLS_F features, the augmented
+## normal equations OLS_W wide (a power of two above OLS_F + 1). The
+## sequence is 2 + OLS_F launches, and OLS_F is the host value that decides
+## its length the way leetgpu 37's exponent decides its.
+pub const OLS_N: Int = 64
+pub const OLS_F: Int = 8
+pub const OLS_W: Int = 16
+
 ## The unit-weight step of the distance corpus, and the weight of every
 ## edge that is not one of them.
 pub const APSP_STEP: Int = 7
@@ -215,8 +268,12 @@ type Step = { kernel: String, gx: Int, gy: Int, gz: Int, args: List[String] }
 
 ## A whole sequence.
 ##
-## `read` is the buffer the verdict compares; every other buffer it writes
-## is an intermediate that never leaves the device.
+## `reads` are the buffers the verdict compares, downloaded in order and
+## laid end to end; every other buffer the sequence writes is an
+## intermediate that never leaves the device. It is a LIST because leetgpu
+## 111 has three outputs and a problem is not verified by looking at one of
+## them: a kernel that wrote only `dQ` correctly would pass a one-buffer
+## verdict and be wrong.
 ##
 ## `via` and `stale_at` name the dependency the sequence exists to have:
 ## `via` is written by a launch before `stale_at` and read by the launch at
@@ -231,7 +288,7 @@ type Seq = {
   tier: String,
   bufs: List[Buf],
   steps: List[Step],
-  read: String,
+  reads: List[String],
   via: String,
   stale_at: Int
 }
@@ -309,6 +366,19 @@ fn upload_all(hs: List[Int], bufs: List[Buf], i: Int) -> Result[Unit, ForeignErr
     }
   }
 
+## Every buffer the verdict reads, in order, laid end to end. Written as
+## recursion for `alloc_all`'s reason.
+fn download_all(hs: List[Int], bufs: List[Buf], names: List[String], i: Int,
+  acc: List[Float]) -> Result[List[Float], ForeignError] !Gpu =
+  if i >= len(names) {
+    Ok(acc)
+  } else {
+    match gpu.gpu_download(hs[buf_pos(bufs, names[i])]) {
+      Ok(v) -> download_all(hs, bufs, names, i + 1, acc ++ v)
+      Err(e) -> Err(e)
+    }
+  }
+
 fn release(hs: List[Int]) -> Unit !Gpu = {
   for h in hs {
     let _ = gpu.gpu_free(h)
@@ -355,10 +425,10 @@ fn launch_all(hs: List[Int], bufs: List[Buf], steps: List[Step], i: Int,
   }
 
 ## One allocation, one upload, every launch in order, one sync, one
-## download of `read`. The stages are the same five the single-launch
+## download of each buffer in `reads`. The stages are the same five the single-launch
 ## programs report, with `launch` covering the whole sequence: it is the
 ## FIRST refusal that stops it, and `note` carries the message.
-fn stages(bufs: List[Buf], steps: List[Step], read: String,
+fn stages(bufs: List[Buf], steps: List[Step], reads: List[String],
   at: Int, reset: String, trip: String) -> Trace !Gpu =
   match alloc_all(bufs, 0, []) {
     Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
@@ -378,7 +448,7 @@ fn stages(bufs: List[Buf], steps: List[Step], read: String,
             }
             Ok(_) -> {
               let s = gpu.gpu_sync()
-              let r = gpu.gpu_download(hs[buf_pos(bufs, read)])
+              let r = download_all(hs, bufs, reads, 0, [])
               release(hs)
               let value = match r {
                 Ok(v) -> Some(v)
@@ -513,6 +583,25 @@ fn apsp_matrix() -> List[Float] =
     }
   })
 
+## leetgpu 96's quantised cache: octets over the whole signed range, from a
+## cycle of length 251 (prime, coprime with every extent here, so no head
+## and no position repeats a pattern). `(i * 37 + 11) mod 251 - 125` lies
+## in [-125, 125], inside int8 and away from its ends, so nothing here
+## depends on how a wrap behaves.
+fn kv_cache(seed: Int, n: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float((i * seed + 11) % 251 - 125))
+
+## The per-position dequantisation scales, in [0.01, 0.1) as the problem's
+## own generator makes them. All positive, so no score changes sign for a
+## reason the cache did not decide.
+fn kv_scale(seed: Int, n: Int) -> List[Float] =
+  list.map(range(0, n), i => 0.01 + 0.001 * to_float((i * seed + 5) % 90))
+
+## leetgpu 56's buffer of ones: the operand that turns `lin_attn_s` into a
+## column sum. Its every lane is 1.0, so the second launch's answer is
+## `z[a]` repeated down each row of a LA_D by LA_D matrix.
+fn la_ones() -> List[Float] = list.map(range(0, LA_M * LA_D), _i => 1.0)
+
 ## leetgpu 20's samples: two coprime cycles over a 20 by 17 box, so no two
 ## samples coincide and no sample is equidistant from two centroids in any
 ## round (the `index` line's ties would say so). Every coordinate is a
@@ -559,7 +648,7 @@ fn lora_seq() -> Seq = Seq {
     step("lora_hidden", 1, 1, 1, ["x", "a", "h"]),
     step("lora_out", 1, LORA_DOUT / 32, 1, ["base", "h", "b", "out"])
   ],
-  read: "out",
+  reads: ["out"],
   via: "base",
   stale_at: 2
 }
@@ -583,7 +672,7 @@ fn attn_seq() -> Seq = Seq {
     step("attn_softmax", ATT_M, 1, 1, ["s", "p"]),
     step("attn_context", ATT_M / 32, 1, 1, ["p", "v", "o"])
   ],
-  read: "o",
+  reads: ["o"],
   via: "s",
   stale_at: 1
 }
@@ -597,7 +686,7 @@ fn matpow_steps(n: Int) -> List[Step] =
   repeat(n, i => [step("matpow_step", 1, 1, 1,
     [if i == 0 { "m" } else { matpow_acc(i - 1) }, "m", matpow_acc(i)])])
 
-fn matpow_read(n: Int) -> String = if n == 0 { "m" } else { matpow_acc(n - 1) }
+fn matpow_read(n: Int) -> List[String] = if n == 0 { ["m"] } else { [matpow_acc(n - 1)] }
 
 fn matpow_bufs() -> List[Buf] = [
   Buf { name: "m", dtype: "f64", data: wave(3, MP_N * MP_N, 0.05) },
@@ -610,7 +699,7 @@ fn matpow_of(n: Int) -> Seq = Seq {
   tier: "tolerance",
   bufs: matpow_bufs(),
   steps: matpow_steps(n),
-  read: matpow_read(n),
+  reads: matpow_read(n),
   via: "t0",
   stale_at: 1
 }
@@ -640,7 +729,7 @@ fn swiglu_seq() -> Seq = Seq {
     step("swiglu_act", SW_M * SW_DFFN / SW_ACT_TILE, 1, 1, ["gate", "up", "h"]),
     step("swiglu_down", 1, SW_DMODEL / 32, 1, ["h", "wd", "out"])
   ],
-  read: "out",
+  reads: ["out"],
   via: "gate",
   stale_at: 2
 }
@@ -662,7 +751,7 @@ fn apsp_seq() -> Seq = Seq {
   tier: "exact",
   bufs: apsp_bufs(),
   steps: repeat(APSP_N, k => [step("apsp_step", 1, 1, 1, ["d", "k${k}"])]),
-  read: "d",
+  reads: ["d"],
   via: "d",
   stale_at: 1
 }
@@ -690,7 +779,7 @@ fn masked_attn_seq(name: String, kernel: String) -> Seq = Seq {
     step("attn_softmax", ATT_M, 1, 1, ["s", "p"]),
     step("attn_context", ATT_M / 32, 1, 1, ["p", "v", "o"])
   ],
-  read: "o",
+  reads: ["o"],
   via: "s",
   stale_at: 1
 }
@@ -722,7 +811,7 @@ fn decay_seq() -> Seq = Seq {
     step("attn_decay", ATT_M / 32, ATT_N / 32, 1, ["q", "k", "s"]),
     step("attn_context", ATT_M / 32, 1, 1, ["s", "v", "o"])
   ],
-  read: "o",
+  reads: ["o"],
   via: "s",
   stale_at: 1
 }
@@ -751,7 +840,7 @@ fn cce_seq() -> Seq = Seq {
     step("cce_row", CCE_N, 1, 1, ["logits", "labels", "rows"]),
     step("cce_mean", 1, 1, 1, ["rows", "loss"])
   ],
-  read: "loss",
+  reads: ["loss"],
   via: "rows",
   stale_at: 1
 }
@@ -778,7 +867,7 @@ fn mha_seq() -> Seq = Seq {
     step("attn_softmax", MHA_H * MHA_N, 1, 1, ["s", "p"]),
     step("mha_context", MHA_N / MHA_T, 1, MHA_H, ["p", "v", "o"])
   ],
-  read: "o",
+  reads: ["o"],
   via: "s",
   stale_at: 1
 }
@@ -804,7 +893,7 @@ fn xattn_seq() -> Seq = Seq {
     step("attn_softmax", XA_H * XA_M, 1, 1, ["s", "p"]),
     step("xattn_context", XA_M / XA_T, 1, XA_H, ["p", "v", "o"])
   ],
-  read: "o",
+  reads: ["o"],
   via: "s",
   stale_at: 1
 }
@@ -830,7 +919,7 @@ fn gqa_seq() -> Seq = Seq {
     step("attn_softmax", GQ_HQ * GQ_S, 1, 1, ["s", "p"]),
     step("gqa_context", GQ_GROUPS, 1, GQ_HKV, ["p", "v", "o"])
   ],
-  read: "o",
+  reads: ["o"],
   via: "s",
   stale_at: 1
 }
@@ -856,7 +945,7 @@ fn grpo_seq() -> Seq = Seq {
     step("grpo_row", GR_B * GR_G, 1, 1, ["log_pi", "log_pi_old", "log_ref", "adv", "rows"]),
     step("cce_mean", 1, 1, 1, ["rows", "loss"])
   ],
-  read: "loss",
+  reads: ["loss"],
   via: "adv",
   stale_at: 1
 }
@@ -879,8 +968,141 @@ fn kmeans_seq() -> Seq = Seq {
     step("kmeans_assign", KM_N, 1, 1, ["dx", "dy", "cx", "cy", "lab"]),
     step("kmeans_centroid", KM_K, 1, 1, ["dx", "dy", "lab", "cx", "cy"])
   ]),
-  read: "cx",
+  reads: ["cx"],
   via: "lab",
+  stale_at: 1
+}
+
+## leetgpu 96 (INT8 KV-Cache Attention): one query a head against an int8
+## KV cache. Three launches, and the middle one is `attn_softmax` over
+## KV_H rows of KV_S -- the scores of all the heads are one KV_H by KV_S
+## matrix and a softmax by row does not need to know which head a row is.
+## The first sequence here whose buffers are not all f64.
+fn kv_seq() -> Seq = Seq {
+  name: "kv",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "q", dtype: "f64", data: wave(3, KV_H * KV_D, 0.1) },
+    Buf { name: "k", dtype: "i8", data: kv_cache(37, KV_H * KV_S * KV_D) },
+    Buf { name: "v", dtype: "i8", data: kv_cache(53, KV_H * KV_S * KV_D) },
+    Buf { name: "ks", dtype: "f64", data: kv_scale(13, KV_H * KV_S) },
+    Buf { name: "vs", dtype: "f64", data: kv_scale(17, KV_H * KV_S) },
+    Buf { name: "s", dtype: "f64", data: sentinels(KV_H * KV_S) },
+    Buf { name: "p", dtype: "f64", data: sentinels(KV_H * KV_S) },
+    Buf { name: "o", dtype: "f64", data: sentinels(KV_H * KV_D) }
+  ],
+  steps: [
+    step("kv_scores", KV_H, 1, 1, ["q", "k", "ks", "s"]),
+    step("attn_softmax", KV_H, 1, 1, ["s", "p"]),
+    step("kv_context", KV_H, 1, 1, ["p", "v", "vs", "o"])
+  ],
+  reads: ["o"],
+  via: "s",
+  stale_at: 1
+}
+
+## leetgpu 111 (Softmax Attention Backward): SEVEN launches, THREE outputs
+## and two new kernels. The forward pass is leetgpu 6's first two launches
+## unchanged; `dP = dO V^T / sqrt(d)` is `attn_scores` a SECOND time on
+## different operands, because the scale factors out of the Jacobian that
+## consumes it; `dQ = dS K` is `attn_context`; and the two transposed
+## products `dV = P^T dO` and `dK = dS^T Q` are one kernel run twice.
+##
+## The verdict reads all three gradients end to end. A sequence whose
+## judgement looked at one of them would be satisfied by a device that
+## never wrote the other two.
+fn attn_bwd_seq() -> Seq = Seq {
+  name: "attnbwd",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "q", dtype: "f64", data: wave(3, ATT_M * ATT_D, 0.1) },
+    Buf { name: "k", dtype: "f64", data: wave(5, ATT_N * ATT_D, 0.1) },
+    Buf { name: "v", dtype: "f64", data: wave(7, ATT_N * ATT_D, 0.1) },
+    Buf { name: "do", dtype: "f64", data: wave(11, ATT_M * ATT_D, 0.1) },
+    Buf { name: "s", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
+    Buf { name: "p", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
+    Buf { name: "dp", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
+    Buf { name: "ds", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
+    Buf { name: "dq", dtype: "f64", data: sentinels(ATT_M * ATT_D) },
+    Buf { name: "dk", dtype: "f64", data: sentinels(ATT_N * ATT_D) },
+    Buf { name: "dv", dtype: "f64", data: sentinels(ATT_N * ATT_D) }
+  ],
+  steps: [
+    step("attn_scores", ATT_M / 32, ATT_N / 32, 1, ["q", "k", "s"]),
+    step("attn_softmax", ATT_M, 1, 1, ["s", "p"]),
+    step("attn_bwd_mmt", ATT_N / 32, 1, 1, ["p", "do", "dv"]),
+    step("attn_scores", ATT_M / 32, ATT_N / 32, 1, ["do", "v", "dp"]),
+    step("attn_bwd_ds", ATT_M, 1, 1, ["dp", "p", "ds"]),
+    step("attn_context", ATT_M / 32, 1, 1, ["ds", "k", "dq"]),
+    step("attn_bwd_mmt", ATT_N / 32, 1, 1, ["ds", "q", "dk"])
+  ],
+  reads: ["dq", "dk", "dv"],
+  via: "s",
+  stale_at: 1
+}
+
+## leetgpu 56 (Linear Self-Attention): S = phi(K)^T V, z = sum_j phi(K)[j],
+## out = phi(Q) S / phi(Q) z. Three launches over TWO kernels: the second
+## is the first again with a buffer of ones where V was, which is a column
+## sum written as a product. The reuse here is on an OPERAND, where knife
+## 17's was on a mask, knife 18's on a grid and knife 19's on a scale.
+fn lin_attn_seq() -> Seq = Seq {
+  name: "linattn",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "q", dtype: "f64", data: wave(3, LA_M * LA_D, 0.1) },
+    Buf { name: "k", dtype: "f64", data: wave(5, LA_M * LA_D, 0.1) },
+    Buf { name: "v", dtype: "f64", data: wave(7, LA_M * LA_D, 0.1) },
+    Buf { name: "ones", dtype: "f64", data: la_ones() },
+    Buf { name: "s", dtype: "f64", data: sentinels(LA_D * LA_D) },
+    Buf { name: "z", dtype: "f64", data: sentinels(LA_D * LA_D) },
+    Buf { name: "out", dtype: "f64", data: sentinels(LA_M * LA_D) }
+  ],
+  steps: [
+    step("lin_attn_s", 1, 1, 1, ["k", "v", "s"]),
+    step("lin_attn_s", 1, 1, 1, ["k", "ones", "z"]),
+    step("lin_attn_out", LA_M / 32, 1, 1, ["q", "s", "z", "out"])
+  ],
+  reads: ["out"],
+  via: "s",
+  stale_at: 2
+}
+
+## leetgpu 33's pivot indices: one one-element i32 buffer a Gauss-Jordan
+## step, the way `apsp_bufs` carries one a Floyd-Warshall round.
+fn ols_bufs() -> List[Buf] = {
+  var out: List[Buf] = [
+    Buf { name: "x", dtype: "f64", data: wave(5, OLS_N * OLS_F, 0.1) },
+    Buf { name: "y", dtype: "f64", data: wave(3, OLS_N, 0.5) },
+    Buf { name: "a", dtype: "f64", data: sentinels(OLS_F * OLS_W) }
+  ]
+  for k in range(0, OLS_F) {
+    out = out ++ [Buf { name: "k${k}", dtype: "i32", data: [to_float(k)] }]
+  }
+  out ++ [Buf { name: "beta", dtype: "f64", data: sentinels(OLS_F) }]
+}
+
+## leetgpu 33 (Ordinary Least Squares): the augmented normal equations,
+## OLS_F Gauss-Jordan steps in place, then the answer column. Ten launches
+## here, `2 + n_features` in general, and the THIRD exact-tier sequence:
+## every operation is an `addf`, `subf`, `mulf` or `divf` at f64 in an
+## order both sides fix, and IEEE 754 requires all four to be correctly
+## rounded, so no fold tree is free to differ.
+##
+## The corpus is a wave, and what it has to be is non-degenerate: `beta`
+## must not come out a multiple of a coordinate vector (it did with the
+## first pair of seeds tried, because `y` was then exactly five times one
+## column of `X`), or seven of its eight lanes would be zero and the
+## verdict would be reading a constant.
+fn ols_seq() -> Seq = Seq {
+  name: "ols",
+  tier: "exact",
+  bufs: ols_bufs(),
+  steps: [step("ols_gram", 1, 1, 1, ["x", "y", "a"])]
+    ++ repeat(OLS_F, k => [step("ols_elim", 1, 1, 1, ["a", "k${k}"])])
+    ++ [step("ols_beta", 1, 1, 1, ["a", "beta"])],
+  reads: ["beta"],
+  via: "a",
   stale_at: 1
 }
 
@@ -901,7 +1123,7 @@ fn decoupled_seq() -> Seq = Seq {
     step("matpow_step", 1, 1, 1, ["m", "m", "c0"]),
     step("matpow_step", 1, 1, 1, ["m", "m", "c1"])
   ],
-  read: "c1",
+  reads: ["c1"],
   via: "c0",
   stale_at: 1
 }
@@ -910,6 +1132,7 @@ fn sequences() -> List[Seq] =
   [lora_seq(), attn_seq(), matpow_seq(), swiglu_seq(), apsp_seq(),
     causal_seq(), alibi_seq(), window_seq(), sinks_seq(), decay_seq(), cce_seq(), mha_seq(),
     xattn_seq(), gqa_seq(), grpo_seq(), kmeans_seq(),
+    kv_seq(), attn_bwd_seq(), lin_attn_seq(), ols_seq(),
     decoupled_seq()]
 
 ## The kernels each sequence launches, as a set: what
@@ -933,6 +1156,10 @@ pub fn sequence_kernels() -> List[(String, List[String])] =
     ("gqa", ["gqa_scores", "attn_softmax", "gqa_context"]),
     ("grpo", ["grpo_adv", "grpo_row", "cce_mean"]),
     ("kmeans", ["kmeans_assign", "kmeans_centroid"]),
+    ("kv", ["kv_scores", "attn_softmax", "kv_context"]),
+    ("attnbwd", ["attn_scores", "attn_softmax", "attn_bwd_mmt", "attn_bwd_ds", "attn_context"]),
+    ("linattn", ["lin_attn_s", "lin_attn_out"]),
+    ("ols", ["ols_gram", "ols_elim", "ols_beta"]),
     ("decoupled", ["matpow_step"])]
 
 ## The sequences compared under the tolerance tier. `apsp` is not here:
@@ -942,7 +1169,7 @@ pub fn sequence_kernels() -> List[(String, List[String])] =
 ## column of scripts/leetgpu-diff/problems.txt against it.
 pub fn tolerance_tier() -> List[String] =
   ["lora", "attention", "matpow", "swiglu", "causal", "alibi", "window", "sinks", "decay", "cce", "mha",
-    "xattn", "gqa", "grpo",
+    "xattn", "gqa", "grpo", "kv", "attnbwd", "linattn",
     "decoupled"]
 
 # ---- the reference tables ----
@@ -1027,6 +1254,30 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
     map.from([
       ("kmeans_assign", (5, last_out((dts, ins) => kmeans_assign_ref(KM_N, KM_K, dts, ins)))),
       ("kmeans_centroid", (5, (dts, ins) => kmeans_centroid_ref(KM_N, KM_K, dts, ins)))])
+  } else if name == "kv" {
+    map.from([
+      ("kv_scores", (4, last_out((dts, ins) =>
+          kv_scores_ref(KV_H, KV_S, KV_D, KV_INV_SQRT_D, dts, ins)))),
+      ("attn_softmax", (2, last_out((dts, ins) => row_softmax_ref(KV_H, KV_S, dts, ins)))),
+      ("kv_context", (4, last_out((dts, ins) => kv_context_ref(KV_H, KV_S, KV_D, dts, ins))))])
+  } else if name == "attnbwd" {
+    map.from([
+      ("attn_scores", (3, last_out((dts, ins) =>
+          matmul_bt_ref(ATT_M, ATT_D, ATT_N, ATT_INV_SQRT_D, dts, ins)))),
+      ("attn_softmax", (2, last_out((dts, ins) => row_softmax_ref(ATT_M, ATT_N, dts, ins)))),
+      ("attn_bwd_mmt", (3, last_out((dts, ins) =>
+          attn_bwd_mmt_ref(ATT_M, ATT_N, ATT_D, dts, ins)))),
+      ("attn_bwd_ds", (3, last_out((dts, ins) => attn_bwd_ds_ref(ATT_M, ATT_N, dts, ins)))),
+      ("attn_context", (3, last_out((dts, ins) => matmul_ref(ATT_M, ATT_N, ATT_D, dts, ins))))])
+  } else if name == "linattn" {
+    map.from([
+      ("lin_attn_s", (3, last_out((dts, ins) => lin_attn_s_ref(LA_M, LA_D, dts, ins)))),
+      ("lin_attn_out", (4, last_out((dts, ins) => lin_attn_out_ref(LA_M, LA_D, dts, ins))))])
+  } else if name == "ols" {
+    map.from([
+      ("ols_gram", (3, last_out((dts, ins) => ols_gram_ref(OLS_N, OLS_F, OLS_W, dts, ins)))),
+      ("ols_elim", (2, (dts, ins) => ols_elim_ref(OLS_F, OLS_W, dts, ins))),
+      ("ols_beta", (2, last_out((dts, ins) => ols_beta_ref(OLS_F, OLS_W, dts, ins))))])
   } else if name == "apsp" {
     map.from([("apsp_step", (2, (dts, ins) => [(0, apsp_step_ref(APSP_N, dts, ins))]))])
   } else {
@@ -1127,10 +1378,10 @@ fn lanes_of(o: Option[List[Float]]) -> Int = match o {
 }
 
 fn run_fake(s: Seq, at: Int, reset: String, trip: String) -> Trace =
-  with_gpu_fake(refs_for(s.name), () => stages(s.bufs, s.steps, s.read, at, reset, trip))
+  with_gpu_fake(refs_for(s.name), () => stages(s.bufs, s.steps, s.reads, at, reset, trip))
 
 fn run_real(cubins: Map[String, Bytes], s: Seq, at: Int, reset: String, trip: String) -> Trace !io =
-  with_gpu_real(cubins, () => stages(s.bufs, s.steps, s.read, at, reset, trip))
+  with_gpu_real(cubins, () => stages(s.bufs, s.steps, s.reads, at, reset, trip))
 
 fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
   Ok(b) -> b
@@ -1148,7 +1399,9 @@ fn cubin_names() -> List[String] =
     "attn_causal", "attn_alibi", "attn_window", "attn_sinks", "attn_decay", "cce_row", "cce_mean",
     "mha_scores", "mha_context",
     "xattn_scores", "xattn_context", "gqa_scores", "gqa_context", "grpo_adv", "grpo_row",
-    "kmeans_assign", "kmeans_centroid"]
+    "kmeans_assign", "kmeans_centroid",
+    "kv_scores", "kv_context", "attn_bwd_mmt", "attn_bwd_ds", "lin_attn_s", "lin_attn_out",
+    "ols_gram", "ols_elim", "ols_beta"]
 
 fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: seq_diff " ++ list.fold(cubin_names(), "", (a, n) =>
@@ -1188,7 +1441,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     # references and not of the GPU.
     let undone = run_fake(s, s.stale_at, s.via, "")
     io.println("sequence ${s.name} tier=${s.tier} launches=${len(s.steps)} bufs=${len(s.bufs)}"
-        ++ " read=${s.read}")
+        ++ " read=${list.fold(s.reads, "", (a, n) => if a == "" { n } else { a ++ "+" ++ n })}")
     io.println("  plan  ${launches_of(s)}")
     io.println("  bufs  ${buffers_of(s)}")
     io.println("  index lanes=${lanes_of(fake.result)}"

@@ -2492,6 +2492,193 @@ pub fn kmeans_centroid_ref(n: Int, k: Int, dtypes: List[String],
     (4, list.map(range(0, len(cy)), c => kmeans_mean(dy, lab, cy, n, k, c, dtypes[4])))]
 }
 
+# ---- references for knife 20's problems ----
+#
+# Four problems, nine kernels and five reused launches. Three of the nine
+# references below are the whole of a problem's arithmetic; the other six
+# are one launch each, and what a reader should check against this file is
+# not that a launch is right but that it is a SECOND opinion: none of them
+# shares a line with the kernel it answers for.
+
+## One head's dequantised cache row: `cache[h, j, dd] * scale[h, j]` read
+## as a signed octet. The host side of the kernel's `(u ^ 128) - 128`: an
+## `i8` buffer already holds signed values here (`round_to` wraps with
+## `wrap_i8`), so this reference simply reads them.
+fn kv_cell(cache: List[Float], scale: List[Float], seq: Int, d: Int,
+  h: Int, j: Int, dd: Int) -> Float =
+  cache[(h * seq + j) * d + dd] * scale[h * seq + j]
+
+## leetgpu 96's first launch: `s[h, j] = (Q[h] . dequant(K)[h, j]) /
+## sqrt(head_dim)`, `heads` rows of `seq`. `ins` is
+## `[Q, K_int8, k_scale, old s]`.
+pub fn kv_scores_ref(heads: Int, seq: Int, d: Int, inv_sqrt_d: Float,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let q = ins[0]
+  let k = ins[1]
+  let ks = ins[2]
+  let dt = dtypes[3]
+  list.map(range(0, heads * seq), idx => {
+    let h = idx / seq
+    let j = idx % seq
+    round_to(dt, inv_sqrt_d * list.fold(range(0, d), 0.0, (acc, dd) =>
+        acc + q[h * d + dd] * kv_cell(k, ks, seq, d, h, j, dd)))
+  })
+}
+
+## leetgpu 96's third launch: `o[h, dd] = sum_j p[h, j] *
+## dequant(V)[h, j, dd]`, `heads` rows of `head_dim`. `ins` is
+## `[p, V_int8, v_scale, old o]`.
+pub fn kv_context_ref(heads: Int, seq: Int, d: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let p = ins[0]
+  let v = ins[1]
+  let vs = ins[2]
+  let dt = dtypes[3]
+  list.map(range(0, heads * d), idx => {
+    let h = idx / d
+    let dd = idx % d
+    round_to(dt, list.fold(range(0, seq), 0.0, (acc, j) =>
+        acc + p[h * seq + j] * kv_cell(v, vs, seq, d, h, j, dd)))
+  })
+}
+
+## `c = a^T b` for an `m` by `n` matrix `a` and an `m` by `d` one, into an
+## `n` by `d` output: leetgpu 111's `dV = P^T dO` and its `dK = dS^T Q`,
+## which are the same product on different operands. `ins` is
+## `[a, b, old c]`.
+##
+## Folded LEFT over `m`, so a TOLERANCE-tier oracle for `mmaf`'s reason.
+pub fn attn_bwd_mmt_ref(m: Int, n: Int, d: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, n * d), idx => {
+    let j = idx / d
+    let dd = idx % d
+    round_to(dt, list.fold(range(0, m), 0.0, (acc, i) => acc + a[i * n + j] * b[i * d + dd]))
+  })
+}
+
+## The softmax Jacobian applied to a row: `dS = dP * P - P * rowsum(dP * P)`
+## over `rows` rows of `cols`, leetgpu 111's fifth launch. `ins` is
+## `[dP, P, old dS]`.
+##
+## The `1 / sqrt(d)` the problem divides by is NOT here: the expression is
+## linear in `dP`, and the launch that produced `dP` is `attn_scores`,
+## which already divided. Moving a scale to the launch that has one is what
+## makes this problem cost two kernels instead of four.
+pub fn attn_bwd_ds_ref(rows: Int, cols: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let dp = ins[0]
+  let p = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, rows * cols), idx => {
+    let i = idx / cols
+    let total = list.fold(range(0, cols), 0.0, (acc, j) =>
+        acc + dp[i * cols + j] * p[i * cols + j])
+    round_to(dt, dp[idx] * p[idx] - p[idx] * total)
+  })
+}
+
+## `phi(x) = ELU(x) + 1`: `x + 1` above zero and `exp(x)` at or below it.
+## leetgpu 56's feature map, and the reason its two kernels have no `expm1`
+## in them: `ELU(x) = exp(x) - 1` there and the `+ 1` cancels exactly.
+pub fn elu_plus_one(x: Float) -> Float = if x > 0.0 { x + 1.0 } else { ref_exp(x) }
+
+## leetgpu 56's first launch: `S[a, b] = sum_j phi(K[j, a]) * V[j, b]`, a
+## `d` by `d` answer over `m` rows. `ins` is `[K, V, old S]`.
+##
+## Its SECOND launch is this same function with a buffer of ones where `V`
+## is, which answers `z[a] = sum_j phi(K[j, a])` in every column.
+pub fn lin_attn_s_ref(m: Int, d: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let k = ins[0]
+  let v = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, d * d), idx => {
+    let a = idx / d
+    let b = idx % d
+    round_to(dt, list.fold(range(0, m), 0.0, (acc, j) =>
+        acc + elu_plus_one(k[j * d + a]) * v[j * d + b]))
+  })
+}
+
+## leetgpu 56's third launch: `out[i, b] = (phi(Q) S)[i, b] /
+## (phi(Q) z)[i]`, where `z` is the first COLUMN of the `d` by `d` matrix
+## the second launch wrote. `ins` is `[Q, S, Z, old out]`.
+pub fn lin_attn_out_ref(m: Int, d: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let q = ins[0]
+  let s = ins[1]
+  let z = ins[2]
+  let dt = dtypes[3]
+  list.map(range(0, m * d), idx => {
+    let i = idx / d
+    let b = idx % d
+    let num = list.fold(range(0, d), 0.0, (acc, a) =>
+        acc + elu_plus_one(q[i * d + a]) * s[a * d + b])
+    let den = list.fold(range(0, d), 0.0, (acc, a) =>
+        acc + elu_plus_one(q[i * d + a]) * z[a * d])
+    round_to(dt, num / den)
+  })
+}
+
+## leetgpu 33's first launch: the augmented normal equations of
+## `X^T X beta = X^T y` as an `f` by `w` matrix, columns 0..f-1 holding
+## `X^T X`, column `f` holding `X^T y` and the rest zero. `ins` is
+## `[X, y, old A]`.
+##
+## Folded LEFT over the samples, which is the order the kernel's `d_for`
+## adds them in, so this oracle is EXACT and not a tolerance claim: there
+## is no `mmaf` here and no reduction whose tree is unspecified.
+pub fn ols_gram_ref(n: Int, f: Int, w: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let y = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, f * w), idx => {
+    let r = idx / w
+    let c = idx % w
+    round_to(dt, list.fold(range(0, n), 0.0, (acc, i) => {
+      let other = if c < f { x[i * f + c] } else if c == f { y[i] } else { 0.0 }
+      acc + x[i * f + r] * other
+    }))
+  })
+}
+
+## One Gauss-Jordan step of leetgpu 33 IN PLACE: row `k` becomes itself
+## divided by its pivot and every other row loses its `k`-th multiple of
+## it, with `k` read from the SECOND buffer's element 0 the way
+## `apsp_step_ref` reads its round. `ins` is `[A, k]`, and the answer names
+## argument 0.
+##
+## No pivot search: `A`'s leading `f` columns are a Gram matrix, which is
+## symmetric positive definite, so every leading minor is positive and
+## every pivot this visits is non-zero.
+pub fn ols_elim_ref(f: Int, w: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[(Int, List[Float])] = {
+  let a = ins[0]
+  let dt = dtypes[0]
+  let k = to_int(ins[1][0])
+  let piv = a[k * w + k]
+  [(0, list.map(range(0, f * w), idx => {
+    let r = idx / w
+    let c = idx % w
+    let prow = a[k * w + c] / piv
+    round_to(dt, if r == k { prow } else { a[idx] - a[r * w + k] * prow })
+  }))]
+}
+
+## leetgpu 33's last launch: `beta` is column `f` of the reduced augmented
+## matrix. `ins` is `[A, old beta]`.
+pub fn ols_beta_ref(f: Int, w: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let dt = dtypes[1]
+  list.map(range(0, f), r => round_to(dt, a[r * w + f]))
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the

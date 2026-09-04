@@ -531,12 +531,18 @@ erf_green=(swiglu_half)
 # `attn_softmax` and `attn_context` are steps of five and six of them: knife
 # 17's four masked-score problems reuse both, and its decayed one reuses the
 # context product. That reuse is why six more problems cost seven kernels.
+# Knife 20 spends the same coin harder: `attn_scores` is a step of NINE
+# sequences after it (leetgpu 111 launches it twice inside one sequence, on
+# different operands), `attn_softmax` of ten, and leetgpu 56's two launches
+# of `lin_attn_s` differ only in which buffer is its second argument.
 sequenced=(lora_base lora_hidden lora_out attn_scores attn_softmax attn_context
   matpow_step swiglu_proj swiglu_act swiglu_down apsp_step
   attn_causal attn_alibi attn_window attn_sinks attn_decay cce_row cce_mean
   mha_scores mha_context
   xattn_scores xattn_context gqa_scores gqa_context grpo_adv grpo_row
-  kmeans_assign kmeans_centroid)
+  kmeans_assign kmeans_centroid
+  kv_scores kv_context attn_bwd_mmt attn_bwd_ds lin_attn_s lin_attn_out
+  ols_gram ols_elim ols_beta)
 
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
@@ -825,7 +831,7 @@ cat "$work/seq.out"
 seq_verdict="$(verdict_of "$work/seq.out")"
 case "$seq_verdict" in
   pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
-        echo "PASS  native: the sixteen multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
+        echo "PASS  native: the twenty multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
   blocked:*) [ "$rc" = 0 ] || fail "verdict $seq_verdict with exit $rc"
         echo "BLOCKED  native: the driver refused before a result could be compared: $seq_verdict" ;;
   fail) cat "$work/seq.err" >&2; fail "the device answered and disagreed with the fake device on a sequence (see the transcript above)" ;;
@@ -924,11 +930,12 @@ esac
 # with -- both sides the fake device, so this is a property of the corpus
 # and the references and not of the GPU.
 #
-# The twelve problems must be above zero. `decoupled` must be exactly zero:
+# The twenty problems must be above zero. `decoupled` must be exactly zero:
 # it is two launches whose second does not read the first's output, and it
 # is the control that says the counter can print a zero at all. Without
 # it, "has never printed zero" and "cannot print zero" look the same.
-for s in lora attention matpow swiglu apsp causal alibi window sinks decay cce mha xattn gqa grpo kmeans; do
+for s in lora attention matpow swiglu apsp causal alibi window sinks decay cce mha xattn gqa grpo kmeans \
+  kv attnbwd linattn ols; do
   seq_shape="$(awk -v want="$s" '$1 == "sequence" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/seq.out")"
   case "$seq_shape" in
     *changed_by_first=0) fail "$s's answer does not depend on its earlier launches, so it is not a sequence: $seq_shape" ;;
@@ -991,6 +998,16 @@ echo "PASS  repeat: one round is the single-round sequence and zero rounds leave
 #       Knife 18's `mha` is not one of them: its second launch is
 #       `attn_softmax` over MHA_H * MHA_N rows, so copying the first launch's
 #       2x2x2 grid onto it leaves all but two of those rows unwritten.
+#       Knife 20 adds two more of the invisible kind, and both are the FIRST
+#       kind rather than the idempotent one: `kv` launches on KV_H blocks
+#       three times over (one block a head, and its middle launch is
+#       `attn_softmax` over exactly those KV_H rows), and `ols` launches on
+#       one block throughout because a Gauss-Jordan step reads the pivot row
+#       while it writes every other, so two blocks would race. Neither green
+#       is a hole: the mutant copies a grid onto launches that already have
+#       it. Its two new reds are `attnbwd` (the first launch is 2x2x1 and the
+#       softmax after it wants ATT_M rows) and `linattn` (the first two
+#       launches are one block and the third is two).
 seq_reds="second-launch-sees-stale-buffer:lora launch-order-swapped:lora last-launch-dropped:lora"
 seq_reds="$seq_reds second-launch-sees-stale-buffer:attention launch-order-swapped:attention"
 seq_reds="$seq_reds last-launch-dropped:attention grid-of-later-launch-copied-from-the-first:attention"
@@ -1013,20 +1030,26 @@ for c in xattn gqa grpo; do
 done
 seq_reds="$seq_reds second-launch-sees-stale-buffer:kmeans launch-order-swapped:kmeans"
 seq_reds="$seq_reds last-launch-dropped:kmeans"
+seq_reds="$seq_reds second-launch-sees-stale-buffer:kv launch-order-swapped:kv last-launch-dropped:kv"
+for c in attnbwd linattn; do
+  seq_reds="$seq_reds second-launch-sees-stale-buffer:$c launch-order-swapped:$c"
+  seq_reds="$seq_reds last-launch-dropped:$c grid-of-later-launch-copied-from-the-first:$c"
+done
+seq_reds="$seq_reds second-launch-sees-stale-buffer:ols launch-order-swapped:ols last-launch-dropped:ols"
 seq_reds="$seq_reds last-launch-dropped:decoupled"
 if [ "$seq_verdict" = pass ]; then
   seq_probe="$(sed -n 's/^probe mutants //p' "$work/seq.out" | tail -n 1)"
-  [ "$seq_probe" = "red=58 $seq_reds" ] ||
-    { printf 'wanted: red=58 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
+  [ "$seq_probe" = "red=72 $seq_reds" ] ||
+    { printf 'wanted: red=72 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
       fail "the sequence mutants' red set moved"; }
-  echo "PASS  mutant: the four sequence mutants red on exactly 58 of the 68 (mutant, sequence) pairs, by name"
+  echo "PASS  mutant: the four sequence mutants red on exactly 72 of the 84 (mutant, sequence) pairs, by name"
   seq_controls="$(grep -c '^control intermediate-round-tripped ' "$work/seq.out" || true)"
   seq_controls_moved="$(grep -c '^control intermediate-round-tripped .* verdict differ:result$' "$work/seq.out" || true)"
-  if [ "$seq_controls" != 17 ] || [ "$seq_controls_moved" != 0 ]; then
+  if [ "$seq_controls" != 21 ] || [ "$seq_controls_moved" != 0 ]; then
     cat "$work/seq.out" >&2
     fail "the round-trip control moved a verdict: $seq_controls_moved of $seq_controls"
   fi
-  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (17 of 17)"
+  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (21 of 21)"
 else
   echo "SKIP  mutant: the sequence mutants are not verifiable on this driver: the clean run is $seq_verdict, before any launch reaches the device"
 fi
