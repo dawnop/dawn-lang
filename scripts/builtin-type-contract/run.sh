@@ -468,8 +468,8 @@ PY
         '    eff1(bsig("io_exit", [TyInt], ["code"], TyUnit), EIo),' \
         '    eff1(bsig("io_exit", [TyInt], ["code"], TyNever), EIo),'
       replace_once "$mutant/selfhost/src/embed/stdsrc.dawn" \
-        'pub fn exit(code: Int) -> Unit !io = io_exit(code)' \
-        'pub fn exit(code: Int) -> Never !io = io_exit(code)'
+        'pub fn exit(code: Int) -> Unit !Exit = exit_now(code)' \
+        'pub fn exit(code: Int) -> Never !Exit = exit_now(code)'
       build_mutant "$1"
       expect_marker "$1" IO_EXIT_UNIT
       ;;

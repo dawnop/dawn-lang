@@ -34,7 +34,7 @@
 # has to round them, and a packing that truncated would show in the round
 # trip of every bf16 set (run.sh's pack-truncates mutant).
 use std/io
-use std/io.{with_fs_real}
+use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, Dtype, F64, BF16, Tensor, with_gpu_fake, with_gpu_real, reference_kernels, alloc,
   upload, download, free, launch, sync, handle_of, dtype_name }
@@ -284,7 +284,7 @@ fn input_set(i: Int) -> (List[Float], List[Float]) =
     (list.map(range(0, 65536), k => narrow.bf16_of_bits(k)), random_floats(13, 65536))
   }
 
-fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
   Ok(b) -> b
   Err(e) -> {
     io.eprintln("vadd_diff: cannot read ${path}: ${e.message}")
@@ -293,51 +293,53 @@ fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_byte
   }
 }
 
-pub fn main() -> Unit !io = {
-  let argv = args()
-  if len(argv) != 2 {
-    io.eprintln("usage: vadd_diff <vadd.cubin> <vadd_bf16.cubin>")
-    io.exit(2)
-  }
-  let kernels = map.from([("vadd", read_cubin(argv[0])), ("vadd_bf16", read_cubin(argv[1]))])
-  var all_identical = true
-  var blocked = ""
-  var any_differ = false
-  for i in range(0, 7) {
-    let (xs, ys) = input_set(i)
-    let n = len(xs)
-    let dt = dtype_of_set(i)
-    let fake = if dt == "f64" {
-      with_gpu_fake(reference_kernels(), () => stages(F64, "vadd", xs, ys))
-    } else {
-      with_gpu_fake(reference_kernels(), () => stages(BF16, "vadd_bf16", xs, ys))
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+    let argv = args()
+    if len(argv) != 2 {
+      io.eprintln("usage: vadd_diff <vadd.cubin> <vadd_bf16.cubin>")
+      io.exit(2)
     }
-    let real = if dt == "f64" {
-      with_gpu_real(kernels, () => stages(F64, "vadd", xs, ys))
-    } else {
-      with_gpu_real(kernels, () => stages(BF16, "vadd_bf16", xs, ys))
+    let kernels = map.from([("vadd", read_cubin(argv[0])), ("vadd_bf16", read_cubin(argv[1]))])
+    var all_identical = true
+    var blocked = ""
+    var any_differ = false
+    for i in range(0, 7) {
+      let (xs, ys) = input_set(i)
+      let n = len(xs)
+      let dt = dtype_of_set(i)
+      let fake = if dt == "f64" {
+        with_gpu_fake(reference_kernels(), () => stages(F64, "vadd", xs, ys))
+      } else {
+        with_gpu_fake(reference_kernels(), () => stages(BF16, "vadd_bf16", xs, ys))
+      }
+      let real = if dt == "f64" {
+        with_gpu_real(kernels, () => stages(F64, "vadd", xs, ys))
+      } else {
+        with_gpu_real(kernels, () => stages(BF16, "vadd_bf16", xs, ys))
+      }
+      let v = verdict(fake, real)
+      io.println("set ${i} ${dt} n=${n} grid=${n / 128}")
+      io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+      io.println("  real  alloc=${real.alloc} upload=${real.upload} roundtrip=${real.roundtrip}"
+          ++ " launch=${real.launch} sync=${real.sync} download=${real.download}"
+          ++ " result=${shown(real.result)}")
+      if real.note != "" { io.println("  note  ${real.note}") }
+      io.println("  verdict ${v}")
+      if v != "identical" { all_identical = false }
+      if v == "differ:roundtrip" || v == "differ:result" { any_differ = true }
+      if blocked == "" && v != "identical" && not any_differ { blocked = v }
     }
-    let v = verdict(fake, real)
-    io.println("set ${i} ${dt} n=${n} grid=${n / 128}")
-    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
-    io.println("  real  alloc=${real.alloc} upload=${real.upload} roundtrip=${real.roundtrip}"
-        ++ " launch=${real.launch} sync=${real.sync} download=${real.download}"
-        ++ " result=${shown(real.result)}")
-    if real.note != "" { io.println("  note  ${real.note}") }
-    io.println("  verdict ${v}")
-    if v != "identical" { all_identical = false }
-    if v == "differ:roundtrip" || v == "differ:result" { any_differ = true }
-    if blocked == "" && v != "identical" && not any_differ { blocked = v }
-  }
-  if all_identical {
-    io.println("tile-gpu-diff: pass")
-  } else if any_differ {
-    io.println("tile-gpu-diff: fail")
-    io.exit(1)
-  } else {
-    io.println("tile-gpu-diff: ${blocked}")
-  }
-}
+    if all_identical {
+      io.println("tile-gpu-diff: pass")
+    } else if any_differ {
+      io.println("tile-gpu-diff: fail")
+      io.exit(1)
+    } else {
+      io.println("tile-gpu-diff: ${blocked}")
+    }
+})
 
 # `io.exit` is typed Unit, so the branch that cannot continue still owes a
 # Bytes; this is never reached.

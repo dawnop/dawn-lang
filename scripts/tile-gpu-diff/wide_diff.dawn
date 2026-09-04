@@ -55,7 +55,7 @@
 # off the binary16 grid, on both the way in (the upload rounds) and after
 # each of the three operations (the tile rounds).
 use std/io
-use std/io.{with_fs_real}
+use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, sum_diff_ref, reverse_ref, invert_ref,
   f16_ops_ref, dot_f16_ref, matmul_ref, batched_matmul_ref }
@@ -451,7 +451,7 @@ fn shown(o: Option[List[List[Float]]]) -> String = match o {
   None -> "-"
 }
 
-fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
   Ok(b) -> b
   Err(e) -> {
     io.eprintln("wide_diff: cannot read ${path}: ${e.message}")
@@ -483,53 +483,55 @@ fn shape_of(i: Int) -> String = {
   "bufs=${formats} reads=${to_string(reads)} in_place=${inplace}"
 }
 
-pub fn main() -> Unit !io = {
-  let argv = args()
-  let count = 8
-  if len(argv) != count {
-    io.eprintln("usage: wide_diff <sum_diff.cubin> <reverse.cubin> <invert.cubin> <f16_ops.cubin>"
-        ++ " <dot_f16.cubin> <matmul_f16.cubin> <batched_matmul_f16.cubin> <matmul_i8.cubin>")
-    io.exit(2)
-  }
-  var cubins: Map[String, Bytes] = map.empty()
-  for i in range(0, count) {
-    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
-  }
-  var all_agreed = true
-  var blocked = ""
-  var any_differ = false
-  var exact_count = 0
-  for i in range(0, count) {
-    let name = case_name(i)
-    let bufs = case_bufs(i)
-    let reads = case_reads(i)
-    let (gx, gy, gz) = case_grid(i)
-    let refs = case_kernels(i)
-    let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, bufs, reads))
-    let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, bufs, reads))
-    let v = verdict(fake, real)
-    io.println("kernel ${name} tier=exact ${shape_of(i)} grid=(${gx}, ${gy}, ${gz})")
-    io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
-    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
-        ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")
-    io.println("  miss  ${misses(real.results, fake.results, reads)}")
-    if real.note != "" { io.println("  note  ${real.note}") }
-    io.println("  verdict ${v}")
-    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
-    if v != "identical:exact" { all_agreed = false } else { () }
-    if v == "differ:result" { any_differ = true } else { () }
-    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
-  }
-  io.println("tiers exact=${exact_count} tolerance=0")
-  if all_agreed {
-    io.println("tile-gpu-diff: pass")
-  } else if any_differ {
-    io.println("tile-gpu-diff: fail")
-    io.exit(1)
-  } else {
-    io.println("tile-gpu-diff: ${blocked}")
-  }
-}
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+    let argv = args()
+    let count = 8
+    if len(argv) != count {
+      io.eprintln("usage: wide_diff <sum_diff.cubin> <reverse.cubin> <invert.cubin> <f16_ops.cubin>"
+          ++ " <dot_f16.cubin> <matmul_f16.cubin> <batched_matmul_f16.cubin> <matmul_i8.cubin>")
+      io.exit(2)
+    }
+    var cubins: Map[String, Bytes] = map.empty()
+    for i in range(0, count) {
+      cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+    }
+    var all_agreed = true
+    var blocked = ""
+    var any_differ = false
+    var exact_count = 0
+    for i in range(0, count) {
+      let name = case_name(i)
+      let bufs = case_bufs(i)
+      let reads = case_reads(i)
+      let (gx, gy, gz) = case_grid(i)
+      let refs = case_kernels(i)
+      let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, bufs, reads))
+      let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, bufs, reads))
+      let v = verdict(fake, real)
+      io.println("kernel ${name} tier=exact ${shape_of(i)} grid=(${gx}, ${gy}, ${gz})")
+      io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
+      io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+          ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")
+      io.println("  miss  ${misses(real.results, fake.results, reads)}")
+      if real.note != "" { io.println("  note  ${real.note}") }
+      io.println("  verdict ${v}")
+      if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+      if v != "identical:exact" { all_agreed = false } else { () }
+      if v == "differ:result" { any_differ = true } else { () }
+      if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+    }
+    io.println("tiers exact=${exact_count} tolerance=0")
+    if all_agreed {
+      io.println("tile-gpu-diff: pass")
+    } else if any_differ {
+      io.println("tile-gpu-diff: fail")
+      io.exit(1)
+    } else {
+      io.println("tile-gpu-diff: ${blocked}")
+    }
+})
 
 # `io.exit` is typed Unit, so the branch that cannot continue still owes a
 # Bytes; this is never reached.

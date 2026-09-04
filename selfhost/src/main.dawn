@@ -15,7 +15,7 @@
 #                                         class-path packages in (standalone)
 
 use std/io
-use std/io.{Fs, Proc, Env}
+use std/io.{Fs, Proc, Env, Exit}
 use std/str
 use std/bytes
 use std/map
@@ -261,7 +261,7 @@ fn collect_program(
   opts: CtOpts,
   closure: Bool,
   std_tests: Bool
-) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !Fs !Proc !Env !io = {
+) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !Fs !Proc !Env !Exit !io = {
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
   var mods: List[CheckedMod] = []
@@ -723,7 +723,7 @@ fn usage() -> String = join([
 
 ## `--comptime-fuel N` / `--comptime-fuel=N` and `--comptime-ffi`;
 ## (options, args without the flags).
-fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !io = {
+fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !Exit !io = {
   var fuel = DEFAULT_FUEL
   var ffi = false
   var out: List[String] = []
@@ -757,7 +757,7 @@ fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !io = {
 
 ## `--cp <jars>` / `--cp=jars`; repeatable, `:`-separated, every entry must
 ## exist; (jars, args without the flag).
-fn extract_cp(rest: List[String]) -> (List[String], List[String]) !Fs !io = {
+fn extract_cp(rest: List[String]) -> (List[String], List[String]) !Fs !Exit !io = {
   var jars: List[String] = []
   var out: List[String] = []
   var i = 0
@@ -803,7 +803,7 @@ fn run_usage() -> String =
   "usage: dawn run [compiler-options] <target> [-- <program-args>...]"
 
 ## Parse compiler options through the target, then preserve program argv raw.
-fn parse_run_args(rest: List[String]) -> RunArgs !Fs !io = {
+fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !io = {
   var cpjars: List[String] = []
   var fuel = DEFAULT_FUEL
   var ffi = false
@@ -884,7 +884,7 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !io = {
 
 ## Render compile diagnostics, the count line, and exit 1 (the Kotlin
 ## compileProject failure shape).
-fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !io = {
+fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !Exit !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
   io.eprint(diag.render_all(pairs))
@@ -910,7 +910,7 @@ fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
 ## nothing was written, and exit 1. Separate from `fail_compile` because the
 ## last line is the whole point: the user asked for a rewrite and did not get
 ## one, and a bare diagnostic dump leaves that ambiguous.
-fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !Fs !io = {
+fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !Fs !Exit !io = {
   io.eprint(diag.render_all(pairs))
   io.eprintln(diag.count_line(len(pairs)))
   io.eprintln("these files do not lex and were left unchanged")
@@ -920,7 +920,7 @@ fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !Fs !io = {
 
 ## Render diagnostics without the count line and exit 1 (the Kotlin cmdDoc
 ## failure shape).
-fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !io = {
+fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !Exit !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
   io.eprint(diag.render_all(pairs))
@@ -930,7 +930,7 @@ fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !io = {
 
 ## Maven and lock setup is neither a usage mistake nor a source diagnostic.
 ## It fails the command at status 1 after any target lease has been released.
-fn fail_target_setup(msg: String) -> Unit !io = {
+fn fail_target_setup(msg: String) -> Unit !Exit !io = {
   io.eprintln("error: " ++ msg)
   let _ = io.exit(1)
   ()
@@ -944,7 +944,7 @@ fn fail_target_setup(msg: String) -> Unit !io = {
 ## flag (`dawn build proj -0 out`) built `out` -- a real directory name to the
 ## loop -- and reported success. run instead owns a `--`-delimited program argv
 ## namespace, which is why it is not here.
-fn refuse_second_target(cmd: String, have: String, got: String) -> Unit !io =
+fn refuse_second_target(cmd: String, have: String, got: String) -> Unit !Exit !io =
   if have != "" {
     cli_error(cmd ++ " takes one target, got `" ++ have ++ "` and `" ++ got ++
         "`; a bare word after the target is not a flag this subcommand knows")
@@ -958,12 +958,12 @@ fn require_one_input(
   choices: String,
   usage_text: String,
   selected: Int
-) -> Unit !io = {
+) -> Unit !Exit !io = {
   if selected == 0 { return cli_error(usage_text) }
   if selected > 1 { return cli_error(cmd ++ " accepts exactly one of " ++ choices) }
 }
 
-fn cli_error(msg: String) -> Unit !io = {
+fn cli_error(msg: String) -> Unit !Exit !io = {
   io.eprintln("error: " ++ msg)
   let _ = io.exit(2)
   ()
@@ -973,7 +973,7 @@ fn cli_error(msg: String) -> Unit !io = {
 ## compiler's own fault; a directory is the user's environment, so it gets
 ## `error:` and the CLI exit code instead of a panic. `cli_error` exits, so the
 ## panic under it is the unreachable value this function's type needs.
-fn fail_std(e: StdLoadError) -> StdCtx !Env !io = {
+fn fail_std(e: StdLoadError) -> StdCtx !Env !Exit !io = {
   let text = std_load_error_text(e)
   if std_load_is_bug(e) { panic(text) }
   cli_error(text)
@@ -983,7 +983,7 @@ fn fail_std(e: StdLoadError) -> StdCtx !Env !io = {
 ## `dawn cache verify` — re-hash every entry in the package cache and compare
 ## it with the hash its directory name claims (PKG-02's companion command:
 ## the per-use check catches the entry a build touches, this sweeps them all).
-fn run_cache(rest: List[String]) -> Unit !Fs !Env !io = {
+fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !io = {
   if len(rest) != 1 || rest[0] != "verify" {
     return cli_error("usage: dawn cache verify")
   }
@@ -1017,7 +1017,7 @@ fn run_cache(rest: List[String]) -> Unit !Fs !Env !io = {
 }
 
 ## `selfhost __pkghash <dir>` — the d1 canonical tree hash (dawn __pkghash).
-fn run_pkghash(rest: List[String]) -> Unit !Fs !io = {
+fn run_pkghash(rest: List[String]) -> Unit !Fs !Exit !io = {
   let dir = if len(rest) > 0 { rest[0] } else { "." }
   if not io.is_dir(dir) { return cli_error("not a directory: " ++ dir) }
   match pkgfetch.tree_hash(dir) {
@@ -1026,7 +1026,7 @@ fn run_pkghash(rest: List[String]) -> Unit !Fs !io = {
   }
 }
 
-fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   if len(rest) != 3 || rest[0] != "--base" {
     return cli_error("usage: dawn __source-inputs --base <repo> <project-dir>")
   }
@@ -1082,7 +1082,7 @@ fn peek_target(rest: List[String]) -> String = {
 }
 
 ## The target's resolved java-deps jars, with the Kotlin CLI's progress line.
-fn resolve_java_deps(target: String) -> List[String] !Fs !Proc !Env !io = {
+fn resolve_java_deps(target: String) -> List[String] !Fs !Proc !Env !Exit !io = {
   let none: List[String] = []
   if not io.exists(target) { return none }
   if not io.is_dir(target) && not str.ends_with(target, ".dawn") { return none }
@@ -1172,7 +1172,7 @@ fn lsp_standalone_lease() -> JsigLease !io = jsig_for([])
 ## `dawn lock [--check] [<dir>]` — write (or verify) the resolved [java-deps]
 ## closure. This is the only command that rewrites dawn.lock; every other one
 ## only refuses to disagree with it.
-fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   var check_only = false
   var target = "."
   var seen_target = false
@@ -1259,7 +1259,7 @@ fn maybe_with_known_deps(
   rest: List[String],
   target: String,
   cpjars: List[String]
-) -> Unit !Fs !Proc !Env !io = {
+) -> Unit !Fs !Proc !Env !Exit !io = {
   match io.getenv("DAWN_SELFHOST_CP") {
     Some(_) -> return
     None -> ()
@@ -1283,7 +1283,7 @@ fn maybe_with_known_deps(
 }
 
 ## test/build have no program argv, so their existing filters remain safe here.
-fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   match io.getenv("DAWN_SELFHOST_CP") {
     Some(_) -> return
     None -> ()
@@ -1336,7 +1336,7 @@ fn wait_reaped(child: Process, scratch: String) -> Int !Fs !io = {
 ## `wait_reaped` removes it if the driver is terminated before that. Nothing
 ## else ever would -- the directories used to survive every ordinary run, and
 ## 3384 of them holding 2.9G had piled up in /tmp by the time anyone looked.
-fn write_temp_classes(classes: List[(String, Bytes)]) -> String !Fs !io = {
+fn write_temp_classes(classes: List[(String, Bytes)]) -> String !Fs !Exit !io = {
   let dir =
     match io.temp_dir("", "selfhost-run") {
       Ok(d) -> d
@@ -1370,7 +1370,7 @@ fn spawn_java(cp: String, cls: String, args: List[String], scratch: String) -> I
 ## of `dawn run`,
 ## via a subprocess over freshly emitted classes (the host class path rides
 ## along so `use java` third-party classes stay visible).
-fn run_run(run: RunArgs) -> Unit !Fs !Proc !Env !io = {
+fn run_run(run: RunArgs) -> Unit !Fs !Proc !Env !Exit !io = {
   let (classes, entry, _) =
     collect_program(run.target, run.std_dir, run.opts, run.closure, false)
   if entry == "" {
@@ -1390,7 +1390,7 @@ fn run_run(run: RunArgs) -> Unit !Fs !Proc !Env !io = {
 ## project — its modules see the intrinsics no user module may name, and its
 ## `impl Iter[String]` is an orphan anywhere else — so `dawn test std/str.dawn`
 ## cannot be made to work, and a flag is the whole mechanism.
-fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   let (_, rest1) = extract_cp(rest0)
   let (opts, restb) = extract_ct_opts(rest1)
   let (closure2, restc) = extract_flag(restb, "--closure")
@@ -1438,7 +1438,7 @@ fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !io = {
 
 ## `selfhost emit [<target>] [--std <dir>] -o <dir>`: write every class of the
 ## compiled program under <dir> (`emitrt` is the historical alias).
-fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   var out = ""
   var target = ""
   var std_dir = "std"
@@ -1751,7 +1751,7 @@ fn run_native_image(
   bin_out: String,
   user_cp: List[String],
   entry: String
-) -> Unit !Fs !Env !io = {
+) -> Unit !Fs !Env !Exit !io = {
   let ni = match find_native_image() {
     Some(p) -> p
     None ->
@@ -1802,7 +1802,7 @@ fn run_native_image(
 ## internal package path (e.g. org/objectweb/asm) whose classes are copied in
 ## from java.class.path — building selfhost itself vendors ASM and the
 ## coursier interface, which is what makes the jar standalone.
-fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   let (user_cp, rest1) = extract_cp(rest0)
   let (opts, restb) = extract_ct_opts(rest1)
   let (closure, rest) = extract_flag(restb, "--closure")
@@ -1931,7 +1931,7 @@ fn dawn_files_under(dir: String) -> List[String] !Fs = {
 ##
 ## The lexer refusal is per file: the rest of the batch still formats, and the
 ## diagnostics for every refused file are rendered together at the end.
-fn run_fmt(rest: List[String]) -> Unit !Fs !io = {
+fn run_fmt(rest: List[String]) -> Unit !Fs !Exit !io = {
   var check = false
   var paths: List[String] = []
   for a in rest {
@@ -1981,7 +1981,7 @@ fn run_fmt(rest: List[String]) -> Unit !Fs !io = {
 }
 
 ## `selfhost doc <target>` / `selfhost doc --builtins` — mirror of `dawn doc`.
-fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   var std_dir = "std"
   var builtins_mode = false
   var stdlib_mode = false
@@ -2054,7 +2054,7 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
 ##
 ## Each module is lowered inside catch_panic so one gap does not hide the
 ## rest: a single run lists everything still missing.
-fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   var std_dir = "std"
   var dump_dir = ""
   var targets: List[String] = []
@@ -2200,7 +2200,7 @@ fn lower_size(m: CModule) -> Int = {
 ## the trivial subset instead of class files. Hidden and unsupported --
 ## `emitc.dawn` panics on anything outside that subset, and both are
 ## superseded once Core IR lands.
-fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   var std_dir = "std"
   var out = ""
   var target = ""
@@ -2260,7 +2260,7 @@ fn check_args(rest: List[String]) -> (String, List[String]) = {
   (std_dir, targets)
 }
 
-fn check_std(std_dir: String) -> StdCtx !Fs !Env !io =
+fn check_std(std_dir: String) -> StdCtx !Fs !Env !Exit !io =
   match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
@@ -2277,7 +2277,7 @@ fn check_std(std_dir: String) -> StdCtx !Fs !Env !io =
 ##
 ## Diagnostics from every target are rendered together, so a multi-target run
 ## reports all of them rather than the first target's.
-fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   let (std_dir, targets) = check_args(rest)
   if len(targets) == 0 {
     return cli_error("usage: dawn check [--std <dir>] <target>...")
@@ -2318,7 +2318,7 @@ fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
 ## `dawn __check` — the golden dump (driver/checkdump.dawn), one block per
 ## target, exit 0 either way. Read by scripts/checker-corpus/run.sh and the
 ## N vs N-1 differential.
-fn run_checkdump(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
+fn run_checkdump(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   let (std_dir, targets) = check_args(rest)
   let std = check_std(std_dir)
   for t in targets {
@@ -2329,16 +2329,22 @@ fn run_checkdump(rest: List[String]) -> Unit !Fs !Proc !Env !io = {
   }
 }
 
-## The file system, process and environment handlers are installed here,
-## once, for every subcommand: main is the outermost frame and the one place
-## with nothing above it to answer `Fs`, `Proc` or `Env` (spec §6.5). The
-## dispatch itself runs under all three. `with_fs_real`'s body row is closed,
-## so it has to be the outer one; the other two take `!e`, which is what lets
-## them sit inside.
+## The file system, process, environment and exit handlers are installed
+## here, once, for every subcommand: main is the outermost frame and the one
+## place with nothing above it to answer `Fs`, `Proc`, `Env` or `Exit`
+## (spec §6.5). The dispatch itself runs under all four. `with_fs_real`'s body
+## row is closed, so it has to be the outer one; the other three take `!e`,
+## which is what lets them sit inside.
+##
+## `Exit` is innermost of the four, which is the order std's own nesting test
+## pins. Nothing about the arm needs it there, but every handler between it
+## and the host is one more frame the arm walks past without resuming, and
+## keeping the closed row outermost is the only constraint the rows impose.
 pub fn main() -> Unit !io =
-  io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => dispatch())))
+  io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() =>
+      io.with_exit_real(() => dispatch()))))
 
-fn dispatch() -> Unit !Fs !Proc !Env !io = {
+fn dispatch() -> Unit !Fs !Proc !Env !Exit !io = {
   match args() {
     [] -> {
       print(usage())

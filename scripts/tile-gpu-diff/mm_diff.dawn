@@ -35,7 +35,7 @@
 #     writes with the two strides swapped, and `batch_norm` reads its
 #     per-channel `gamma` with a stride of ZERO.
 use std/io
-use std/io.{with_fs_real}
+use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free, launch3, sync,
   handle_of, matmul_ref, batched_matmul_ref, transpose_ref, layer_norm_ref, batch_norm_ref, group_norm_ref,
@@ -396,7 +396,7 @@ fn miss(fake: Trace, real: Trace) -> String = match (real.result, fake.result) {
   _ -> "-"
 }
 
-fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
   Ok(b) -> b
   Err(e) -> {
     io.eprintln("mm_diff: cannot read ${path}: ${e.message}")
@@ -405,61 +405,63 @@ fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_byte
   }
 }
 
-pub fn main() -> Unit !io = {
-  let argv = args()
-  let count = 7
-  if len(argv) != count {
-    io.eprintln("usage: mm_diff <matmul.cubin> <batched_matmul.cubin> <transpose.cubin> <layer_norm.cubin>"
-        ++ " <batch_norm.cubin> <group_norm.cubin> <fused_rms_norm.cubin>")
-    io.exit(2)
-  }
-  var cubins: Map[String, Bytes] = map.empty()
-  for i in range(0, count) {
-    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
-  }
-  var all_agreed = true
-  var blocked = ""
-  var any_differ = false
-  var exact_count = 0
-  var tolerance_count = 0
-  for i in range(0, count) {
-    let name = case_name(i)
-    let tier = case_tier(i)
-    let data = case_data(i)
-    let (gx, gy, gz) = case_grid(i)
-    let refs = case_kernels(i)
-    let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, data))
-    let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, data))
-    let v = verdict(tier, fake, real)
-    io.println("kernel ${name} tier=${tier} buffers=${len(data)} out_lanes=${len(data[len(data) - 1])}"
-        ++ " grid=(${gx}, ${gy}, ${gz})")
-    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
-    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
-        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
-    io.println("  miss  ${miss(fake, real)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})")
-    if real.note != "" { io.println("  note  ${real.note}") }
-    io.println("  verdict ${v}")
-    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
-    if v == "close:tolerance" || v == "identical:tolerance" { tolerance_count = tolerance_count + 1 } else { () }
-    if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" { all_agreed = false } else { () }
-    if v == "differ:result" { any_differ = true } else { () }
-    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
-      && v != "identical:tolerance" {
-        blocked = v
-      } else {
-        ()
-      }
-  }
-  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
-  if all_agreed {
-    io.println("tile-gpu-diff: pass")
-  } else if any_differ {
-    io.println("tile-gpu-diff: fail")
-    io.exit(1)
-  } else {
-    io.println("tile-gpu-diff: ${blocked}")
-  }
-}
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+    let argv = args()
+    let count = 7
+    if len(argv) != count {
+      io.eprintln("usage: mm_diff <matmul.cubin> <batched_matmul.cubin> <transpose.cubin> <layer_norm.cubin>"
+          ++ " <batch_norm.cubin> <group_norm.cubin> <fused_rms_norm.cubin>")
+      io.exit(2)
+    }
+    var cubins: Map[String, Bytes] = map.empty()
+    for i in range(0, count) {
+      cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+    }
+    var all_agreed = true
+    var blocked = ""
+    var any_differ = false
+    var exact_count = 0
+    var tolerance_count = 0
+    for i in range(0, count) {
+      let name = case_name(i)
+      let tier = case_tier(i)
+      let data = case_data(i)
+      let (gx, gy, gz) = case_grid(i)
+      let refs = case_kernels(i)
+      let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, data))
+      let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, data))
+      let v = verdict(tier, fake, real)
+      io.println("kernel ${name} tier=${tier} buffers=${len(data)} out_lanes=${len(data[len(data) - 1])}"
+          ++ " grid=(${gx}, ${gy}, ${gz})")
+      io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+      io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+          ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+      io.println("  miss  ${miss(fake, real)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})")
+      if real.note != "" { io.println("  note  ${real.note}") }
+      io.println("  verdict ${v}")
+      if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+      if v == "close:tolerance" || v == "identical:tolerance" { tolerance_count = tolerance_count + 1 } else { () }
+      if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" { all_agreed = false } else { () }
+      if v == "differ:result" { any_differ = true } else { () }
+      if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+        && v != "identical:tolerance" {
+          blocked = v
+        } else {
+          ()
+        }
+    }
+    io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+    if all_agreed {
+      io.println("tile-gpu-diff: pass")
+    } else if any_differ {
+      io.println("tile-gpu-diff: fail")
+      io.exit(1)
+    } else {
+      io.println("tile-gpu-diff: ${blocked}")
+    }
+})
 
 # `io.exit` is typed Unit, so the branch that cannot continue still owes a
 # Bytes; this is never reached.

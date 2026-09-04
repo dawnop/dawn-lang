@@ -30,7 +30,7 @@
 # other operand on a NaN and either zero on (-0.0, +0.0), and this release
 # has pinned neither (std/gpu's relu_ref says so as well).
 use std/io
-use std/io.{with_fs_real}
+use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, masked_vadd_ref, masked_copy_ref, relu_ref,
   leaky_relu_ref, clip_ref, alloc, upload, download, free, launch, sync, handle_of }
@@ -336,7 +336,7 @@ fn case_data(i: Int) -> List[List[Float]] = {
   }
 }
 
-fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
   Ok(b) -> b
   Err(e) -> {
     io.eprintln("mask_diff: cannot read ${path}: ${e.message}")
@@ -345,49 +345,51 @@ fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_byte
   }
 }
 
-pub fn main() -> Unit !io = {
-  let argv = args()
-  if len(argv) != 6 {
-    io.eprintln("usage: mask_diff <vadd_tail.cubin> <copy.cubin> <relu.cubin> <leaky_relu.cubin>"
-        ++ " <clip.cubin> <elemops.cubin>")
-    io.exit(2)
-  }
-  var cubins: Map[String, Bytes] = map.empty()
-  for i in range(0, 6) {
-    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
-  }
-  var all_identical = true
-  var blocked = ""
-  var any_differ = false
-  for i in range(0, 6) {
-    let name = case_name(i)
-    let n = case_n(i)
-    let data = case_data(i)
-    let grid = cdiv(n, case_tile(i))
-    let refs = if name == "clip" { clip_kernels_map() } else { kernels_map() }
-    let fake = with_gpu_fake(refs, () => stages(name, grid, data))
-    let real = with_gpu_real(cubins, () => stages(name, grid, data))
-    let v = verdict(fake, real)
-    io.println("kernel ${name} n=${n} tile=${case_tile(i)} padded=${len(data[0])} grid=${grid}")
-    io.println("  fake  launch=${fake.launch} result=${shown(fake.result, n)}")
-    io.println("  real  alloc=${real.alloc} upload=${real.upload} roundtrip=${real.roundtrip}"
-        ++ " launch=${real.launch} sync=${real.sync} download=${real.download}"
-        ++ " result=${shown(real.result, n)}")
-    if real.note != "" { io.println("  note  ${real.note}") }
-    io.println("  verdict ${v}")
-    if v != "identical" { all_identical = false }
-    if v == "differ:roundtrip" || v == "differ:result" { any_differ = true }
-    if blocked == "" && v != "identical" && not any_differ { blocked = v }
-  }
-  if all_identical {
-    io.println("tile-gpu-diff: pass")
-  } else if any_differ {
-    io.println("tile-gpu-diff: fail")
-    io.exit(1)
-  } else {
-    io.println("tile-gpu-diff: ${blocked}")
-  }
-}
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+    let argv = args()
+    if len(argv) != 6 {
+      io.eprintln("usage: mask_diff <vadd_tail.cubin> <copy.cubin> <relu.cubin> <leaky_relu.cubin>"
+          ++ " <clip.cubin> <elemops.cubin>")
+      io.exit(2)
+    }
+    var cubins: Map[String, Bytes] = map.empty()
+    for i in range(0, 6) {
+      cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+    }
+    var all_identical = true
+    var blocked = ""
+    var any_differ = false
+    for i in range(0, 6) {
+      let name = case_name(i)
+      let n = case_n(i)
+      let data = case_data(i)
+      let grid = cdiv(n, case_tile(i))
+      let refs = if name == "clip" { clip_kernels_map() } else { kernels_map() }
+      let fake = with_gpu_fake(refs, () => stages(name, grid, data))
+      let real = with_gpu_real(cubins, () => stages(name, grid, data))
+      let v = verdict(fake, real)
+      io.println("kernel ${name} n=${n} tile=${case_tile(i)} padded=${len(data[0])} grid=${grid}")
+      io.println("  fake  launch=${fake.launch} result=${shown(fake.result, n)}")
+      io.println("  real  alloc=${real.alloc} upload=${real.upload} roundtrip=${real.roundtrip}"
+          ++ " launch=${real.launch} sync=${real.sync} download=${real.download}"
+          ++ " result=${shown(real.result, n)}")
+      if real.note != "" { io.println("  note  ${real.note}") }
+      io.println("  verdict ${v}")
+      if v != "identical" { all_identical = false }
+      if v == "differ:roundtrip" || v == "differ:result" { any_differ = true }
+      if blocked == "" && v != "identical" && not any_differ { blocked = v }
+    }
+    if all_identical {
+      io.println("tile-gpu-diff: pass")
+    } else if any_differ {
+      io.println("tile-gpu-diff: fail")
+      io.exit(1)
+    } else {
+      io.println("tile-gpu-diff: ${blocked}")
+    }
+})
 
 # `io.exit` is typed Unit, so the branch that cannot continue still owes a
 # Bytes; this is never reached.

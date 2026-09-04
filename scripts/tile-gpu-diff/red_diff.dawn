@@ -42,7 +42,7 @@
 # the ledger note, so that a `tileiras` upgrade that changes the tree is
 # seen rather than discovered.
 use std/io
-use std/io.{with_fs_real}
+use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free, launch, sync,
   handle_of, ref_exp, ref_log, ref_sqrt, LN2, reduce_sum_ref, softmax_ref, dot_ref, mse_ref, monte_carlo_ref,
@@ -540,7 +540,7 @@ fn miss(fake: Trace, real: Trace) -> String = match (real.result, fake.result) {
   _ -> "-"
 }
 
-fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
   Ok(b) -> b
   Err(e) -> {
     io.eprintln("red_diff: cannot read ${path}: ${e.message}")
@@ -562,74 +562,76 @@ fn probe_reading(x: Float) -> String =
     "unrecognised"
   }
 
-pub fn main() -> Unit !io = {
-  let argv = args()
-  let count = 13
-  if len(argv) != count {
-    io.eprintln("usage: red_diff <reduce_sum.cubin> <softmax.cubin> <dot.cubin> <mse.cubin>"
-        ++ " <monte_carlo.cubin> <rms_norm.cubin> <silu.cubin> <sigmoid.cubin> <ppo_loss.cubin>"
-        ++ " <dpo_loss.cubin> <mathops.cubin> <foldif.cubin> <argmax.cubin>")
-    io.exit(2)
-  }
-  var cubins: Map[String, Bytes] = map.empty()
-  for i in range(0, count) {
-    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
-  }
-  var all_agreed = true
-  var blocked = ""
-  var any_differ = false
-  var exact_count = 0
-  var tolerance_count = 0
-  for i in range(0, count) {
-    let name = case_name(i)
-    let tier = case_tier(i)
-    let n = if name == "foldif" { FOLD_TILE * FOLD_BLOCKS } else { RED_N }
-    let data = case_data(i)
-    let grid = case_grid(i)
-    let refs = case_kernels(i)
-    let fake = with_gpu_fake(refs, () => stages(name, grid, data))
-    let real = with_gpu_real(cubins, () => stages(name, grid, data))
-    let v = verdict(tier, fake, real)
-    io.println("kernel ${name} tier=${tier} n=${n} buffers=${len(data)} lanes=${len(data[0])} grid=${grid}")
-    io.println("  fake  launch=${fake.launch} result=${shown(fake.result, n)}")
-    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
-        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result, n)}")
-    io.println("  miss  ${miss(fake, real)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})")
-    if real.note != "" { io.println("  note  ${real.note}") }
-    io.println("  verdict ${v}")
-    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
-    if v == "close:tolerance" || v == "identical:tolerance" { tolerance_count = tolerance_count + 1 } else { () }
-    if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" { all_agreed = false } else { () }
-    if v == "differ:result" { any_differ = true } else { () }
-    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
-      && v != "identical:tolerance" {
-        blocked = v
-      } else {
-        ()
-      }
-  }
-  # the order probe, on the reduce_sum cubin, recorded and not asserted
-  let probe_data = [probe_corpus(RED_TILE), sentinel_buffer(RED_TILE)]
-  let probe = with_gpu_real(cubins, () => stages("reduce_sum", 1, probe_data))
-  let answer = match probe.result {
-    Some(v) -> v[0]
-    None -> 0.0 / 0.0
-  }
-  if stopped(probe) == "" {
-    io.println("probe fold-order sum([2^53, 1, 1, -2^53]) = ${answer} (${probe_reading(answer)})")
-  } else {
-    io.println("probe fold-order blocked:${stopped(probe)}")
-  }
-  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
-  if all_agreed {
-    io.println("tile-gpu-diff: pass")
-  } else if any_differ {
-    io.println("tile-gpu-diff: fail")
-    io.exit(1)
-  } else {
-    io.println("tile-gpu-diff: ${blocked}")
-  }
-}
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+    let argv = args()
+    let count = 13
+    if len(argv) != count {
+      io.eprintln("usage: red_diff <reduce_sum.cubin> <softmax.cubin> <dot.cubin> <mse.cubin>"
+          ++ " <monte_carlo.cubin> <rms_norm.cubin> <silu.cubin> <sigmoid.cubin> <ppo_loss.cubin>"
+          ++ " <dpo_loss.cubin> <mathops.cubin> <foldif.cubin> <argmax.cubin>")
+      io.exit(2)
+    }
+    var cubins: Map[String, Bytes] = map.empty()
+    for i in range(0, count) {
+      cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+    }
+    var all_agreed = true
+    var blocked = ""
+    var any_differ = false
+    var exact_count = 0
+    var tolerance_count = 0
+    for i in range(0, count) {
+      let name = case_name(i)
+      let tier = case_tier(i)
+      let n = if name == "foldif" { FOLD_TILE * FOLD_BLOCKS } else { RED_N }
+      let data = case_data(i)
+      let grid = case_grid(i)
+      let refs = case_kernels(i)
+      let fake = with_gpu_fake(refs, () => stages(name, grid, data))
+      let real = with_gpu_real(cubins, () => stages(name, grid, data))
+      let v = verdict(tier, fake, real)
+      io.println("kernel ${name} tier=${tier} n=${n} buffers=${len(data)} lanes=${len(data[0])} grid=${grid}")
+      io.println("  fake  launch=${fake.launch} result=${shown(fake.result, n)}")
+      io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+          ++ " sync=${real.sync} download=${real.download} result=${shown(real.result, n)}")
+      io.println("  miss  ${miss(fake, real)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})")
+      if real.note != "" { io.println("  note  ${real.note}") }
+      io.println("  verdict ${v}")
+      if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+      if v == "close:tolerance" || v == "identical:tolerance" { tolerance_count = tolerance_count + 1 } else { () }
+      if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" { all_agreed = false } else { () }
+      if v == "differ:result" { any_differ = true } else { () }
+      if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+        && v != "identical:tolerance" {
+          blocked = v
+        } else {
+          ()
+        }
+    }
+    # the order probe, on the reduce_sum cubin, recorded and not asserted
+    let probe_data = [probe_corpus(RED_TILE), sentinel_buffer(RED_TILE)]
+    let probe = with_gpu_real(cubins, () => stages("reduce_sum", 1, probe_data))
+    let answer = match probe.result {
+      Some(v) -> v[0]
+      None -> 0.0 / 0.0
+    }
+    if stopped(probe) == "" {
+      io.println("probe fold-order sum([2^53, 1, 1, -2^53]) = ${answer} (${probe_reading(answer)})")
+    } else {
+      io.println("probe fold-order blocked:${stopped(probe)}")
+    }
+    io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+    if all_agreed {
+      io.println("tile-gpu-diff: pass")
+    } else if any_differ {
+      io.println("tile-gpu-diff: fail")
+      io.exit(1)
+    } else {
+      io.println("tile-gpu-diff: ${blocked}")
+    }
+})
 
 # `io.exit` is typed Unit, so the branch that cannot continue still owes a
 # Bytes; this is never reached.

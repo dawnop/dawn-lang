@@ -51,9 +51,12 @@ pub fn eprint(s: String) -> Unit !io = io_eprint(s)
 
 ## End the process with an exit status. Nothing after the call runs.
 ##
-## The result remains `Unit`: `io_exit` is the existing void/Unit intrinsic ABI.
-## Naming return-only `Never` does not change that public contract.
-pub fn exit(code: Int) -> Unit !io = io_exit(code)
+## The result remains `Unit`, as it was when the body was `io_exit` directly:
+## `exit_now` answers `Never`, and `Never` is under every type, so the public
+## contract this function had before the operation existed is the one it still
+## has. What changed is the row -- a caller now owes `!Exit`, and somebody above
+## it has to say what ending the process means.
+pub fn exit(code: Int) -> Unit !Exit = exit_now(code)
 
 ## Read one line from stdin; `None` at end of input.
 ## The intrinsic maps Java's `null`-or-line straight onto `Option`.
@@ -640,9 +643,9 @@ pub fn with_env_real[T, !e](body: fn() -> T !Env !e) -> T !io = {
 # `with_env_real`'s are: only `with_fs_real`'s row is closed, and only a
 # closed row has to be outermost.
 #
-# As with the three effects above, the declaration ships one release before
-# anything moves onto it (docs/bootstrap.md, the seed feature discipline).
-# `io.exit` is unchanged here and still reaches `io_exit` itself.
+# `io.exit` is the one caller: its body is `exit_now(code)`, so every process
+# that ends does it through this effect and the primitive is reachable from
+# nowhere else in the tree.
 
 ## Ending the process, as the one operation a handler answers. The name
 ## carries an `exit_` prefix for the reason the `fs_`, `proc_` and `env_` ones

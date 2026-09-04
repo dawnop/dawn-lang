@@ -221,8 +221,9 @@ def never_context_results(jar):
         "IO_EXIT_UNIT": checker_rejects(
             jar,
             "use std/io\n"
-            "fn io_exit_unit_contract(code: Int) -> Unit !io = io.exit(code)\n"
-            "fn io_exit_never_contract(code: Int) -> Never !io = io.exit(code)\n",
+            "use std/io.{Exit}\n"
+            "fn io_exit_unit_contract(code: Int) -> Unit !Exit = io.exit(code)\n"
+            "fn io_exit_never_contract(code: Int) -> Never !Exit = io.exit(code)\n",
             "function `io_exit_never_contract` declares return type Never but its body is Unit",
             standalone=True,
         ),
