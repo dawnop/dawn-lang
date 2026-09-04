@@ -210,9 +210,6 @@ test "second arity fixture" {
 }
 EOF
 
-pair_expect_error \
-  $'error: usage: dawn check [--std <dir>] <target>...\n' \
-  "check (zero targets)" check
 pair_expect_exit 0 "check (one target)" check "$ARITY_A"
 pair_expect_exit 0 "check (multiple targets)" check "$ARITY_A" "$ARITY_B"
 
@@ -290,9 +287,6 @@ emitc_expect_error \
   "error: dawn emitc takes one target, got \`$ARITY_A\` and \`$ARITY_B\`; a bare word after the target is not a flag this subcommand knows"$'\n' \
   "emitc (multiple targets)" "$ARITY_A" "$ARITY_B"
 
-pair_expect_error \
-  $'error: usage: dawn fmt [--check] <file.dawn | dir>...\n' \
-  "fmt (zero targets)" fmt
 pair_expect_exit 0 "fmt (one target)" fmt --check "$ARITY_A"
 pair_expect_exit 0 "fmt (multiple targets)" fmt --check "$ARITY_A" "$ARITY_B"
 
@@ -395,8 +389,10 @@ pub fn main() -> Unit !io = println("ok")
 EOF
 pair "doc (pub effect)" doc "$OUT/effects_doc.dawn"
 
-# error paths: usage, missing target, compile errors (no count line), and a
-# manifest the loader rejects
+# error paths: compile errors (no count line) and a manifest the loader
+# rejects. The usage and missing-target refusals of these two subcommands are
+# inline tests now (see this file's header); what is left needs a real
+# compile, which is what a table cannot answer.
 cat > "$OUT/broken.dawn" <<'EOF'
 fn f(x: Int) -> String = x + 1
 
@@ -409,12 +405,8 @@ BADMF="$OUT/badmf"
 mkdir -p "$BADMF/src"
 printf 'name = "x"\nschema = 1\nweird = true\n\n[stuff]\na = 1.5\n' > "$BADMF/dawn.toml"
 printf 'pub fn main() -> Unit !io = println("hi")\n' > "$BADMF/src/main.dawn"
-pair "doc (usage)" doc
-pair "doc (missing target)" doc "$OUT/nowhere"
 pair "doc (compile errors)" doc "$OUT/broken.dawn"
 pair "doc (manifest diagnostics)" doc "$BADMF"
-pair "fmt (missing target)" fmt "$OUT/nowhere"
-pair "fmt (usage)" fmt
 
 # fmt's two refusals (#189). Both are in-place-write guards, so the pairing is
 # not only "same message" but "same file afterwards": the check below re-reads
@@ -439,7 +431,6 @@ fi
 # the broken fixture both are.
 pair "check (a clean target)" check packages/sha2
 pair "check (diagnostics)" check "$OUT/broken.dawn"
-pair "check (missing target)" check "$OUT/nowhere"
 
 # ---- leg 3: add, against HEAD's JVM driver ----
 # Both sides edit a fresh copy of the same project, so the summary line and
