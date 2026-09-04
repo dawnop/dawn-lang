@@ -877,6 +877,104 @@ curl / 包缓存。**要一个真进程**：腿 1 与腿 4 要 N-1 那份发布�
 能有的观察。所以脚本会一直在，搬走的用例是给它减负，不是替掉它；这一条预研已经写明，
 这一刀确认。
 
+**刀 2 的搬迁（2026-09-04 落地）：24 条进树。**
+上一段点名的那 24 条一条不多一条不少地搬完了，按判词分是 13 条 `pair_expect_error` 里的
+12 条、2 条退出码为 2 的 `run_expect`、10 条 `pair`。按子命令分：`check` 2 条（零参、
+目标不存在）、`test` 8 条（零参、usage、多目标、与 `--stdlib` 互斥、目标不存在、后缀不对、
+`--cp` 缺路径、`--cp` 条目不存在）、`doc` 7 条（零参、usage、多目标、三种模式互斥、
+目标不存在）、`build` 2 条（零参、多目标）、`fmt` 3 条（零参、usage、目标不存在）、
+`run` 2 条（目标之后的裸词与像旗标的词）。第 13 条 `pair_expect_error`
+（`check (std stamped with another release)`）留在脚本里：它要一棵造好的 std 目录，
+搬过去搬的是 fixture 不是判词。脚本本身 913 行变 904 行：删掉的 57 行是用例，
+加回的 48 行是头注释里那份「搬走了哪些、按类留下了哪些、为什么」的清单。
+
+**判词的形状：一条 assert 读完 `pair_expect_error` 的三条判词。**
+两个驱动各加一个 `cli_read`，签名是
+`fn(entry: fn() -> Unit !Fs !Proc !Env !Exit !Console !io) -> (Option[Int], String, String) !io`，
+三元组按 `(退出码, stderr, stdout)` 排，于是一条用例是两三行，失败时 `assert` 把两侧
+一起打出来（spec §3.1 的拆解），期望字面量本身就说明了是哪一条。`Fs` 用真的，因为这些入口
+问的是「这个路径在不在」，而一个不存在的路径两边答案一样；`Proc` 与 `Env` 用表，
+且**空日志的断言写在 helper 里**，于是「一次用法错误不问宿主任何事」是每一条用例的判词，
+不是单独一条。三条用例例外，走 `cli_read_hosted`（真的 `Proc` 与 `Env`）：
+`doc` 的目标不存在，以及 `nmain` 的 `test` 目标不存在与后缀不对。这三条的驱动会先
+`load_std("std")` 再看目标，而 `--std` 拼的是相对目录，宿主的工作目录就是它们的输入之一，
+理由与 `driver/stdlib` 那五处留在真 handler 上的测试相同。（两个驱动在这里的次序不同：
+JVM 侧先看目标，native 侧先载 std。这是次序的差别不是答案的差别，两边的字节一样。）
+
+**每一条都写两份，因为两个驱动是两套 parser。**`main.dawn` 与 `nmain.dawn` 的参数处理
+是两套独立实现，这是 `nmain.dawn` 头注释写明的刻意选择（「对一个共享函数做差分证明不了
+任何事」），脚本原来提供的正是这份加倍。所以搬进来之后仍然是两份：JVM 驱动的入口
+（`run_check` / `run_test` / `run_doc` / `run_build` / `run_fmt` / `parse_run_args`）一份，
+native 驱动的入口（`cmd_*` / `parse_run_tail`）一份。脚本还剩的那半个判词（「而且两边一样」）
+仍然只有脚本说得出来，它对它留下的每一条用例照旧说。
+
+**native 腿：`scripts/native-selfhost-tests.sh`，`gates.yml` 的第 37 个 job。**
+一条内联测试跑在谁身上，由谁跑 `dawn test` 决定，而 `gates.yml` 的 `test` job 跑的是
+`./bin/dawn test selfhost`，只有 JVM。不补这条腿，搬一条就少一条 native 覆盖（裁决 14）。
+**这条腿的目标是 `selfhost/src/nmain.dawn` 而不是 `selfhost`**：native 后端拒 `use java`，
+而 `main.dawn`、`jvm/emit`、`jvm/codegen`、`jvm/jreflect` 都建在它上面，实测
+`dawnc test selfhost` 是 768 个错误，每一个都是那条拒绝，没有一个是 bug。native 驱动自己的
+模块图是这个后端编得动的那半棵 selfhost，也正是搬进来的用例的 native 那一半所在。
+JVM 那一半仍由 `./bin/dawn test selfhost` 管着，`main.dawn` 的 parser 也只有那里跑得到。
+数字：native 侧 463 条测试（原 454 条加这一刀的 9 条），实测 75.2s 与 75.1s 两次；
+整条腿（emitc 7.4s + cc 42.6s + 跑测试）109.1s，工具链另算约 20s。
+
+**为什么是新 job 而不是 `prev-diff-native` 的一步。** 那个 job 已经有一个 native 二进制，
+按理该往里加。实测不行：搬走 24 条让 `native-cli-diff.sh` 从 152.9s 降到 139.5s
+（同一个 `DAWNC_BIN`，所以变的只有用例），加上这条腿的 75.2s，净增 61.8s；那个 job 的
+两步本地是 252.3s，对着它 526s 的最差观测，runner 系数 2.08，于是它的 budget 会落在
+650s 上，离 660s 的 run-pole 只剩 10 秒。这正是 pole 存在的目的所在的情形，所以拆。
+新 job 的 budget 是 380s 的 planning value（129s 本地 × 2.08 + 39s 的 checkout/toolchain/post，
+往上取整），timeout 19 分钟。job 数 36 → 37，加上 `ci.yml` 的 `secrets` 是 38，
+对着 20 个 runner 的上限：**这一个不会让整条 run 变长，也不打算让它变短**，36 个的时候
+span 就已经由最长的那一条腿决定，不由个数决定。
+
+**负控三条，都实测。**
+
+甲，**期望字节改一个字符**：把 `nmain` 那条 `fmt` 用法期望里的一个 `.` 删掉，
+JVM 上 `./bin/dawn test selfhost` 当场 `1 of 593 test(s) failed`，native 上
+`./scripts/native-selfhost-tests.sh` 当场 `1 of 463 test(s) failed`，两边的失败文本
+一字不差：
+
+```
+FAIL  nmain :: `dawnc fmt` refuses an argv with no path and one that names nothing
+      assertion failed: cli_read(() => cmd_fmt([]))
+          == (Some(2), "error: usage: dawn fmt [--check] <file.dawn | dir>..\n", "")
+```
+
+乙，**生产臂写错流**（刀 1b 负控乙的复测）：把 `std/io` 里 `console_eprintln` 的臂改成
+`io_println`（并重跑 `gen-stdsrc.py`，否则 native 侧读的还是旧的嵌入副本），
+`dawn test --stdlib` 仍是 146 条全过、`dawn test selfhost` 仍是 593 条全过、
+`native-selfhost-tests.sh` 仍是 463 条全过，而 `native-cli-diff.sh` 立刻红。
+**红的条数从 17 降到 3**：留下的是 `check (std stamped with another release)` 与
+两条 `emitc`，也就是判流的用例里没搬走的那三条。这条负控的归属没变，仍是刀 1b 记的那句：
+表 handler 不装真臂，所以它对真臂写错流永远是绿的；这一刀把 17 条里的 14 条换成了
+不判流的内联判词，剩下 3 条仍然由脚本看着。**这是这一刀唯一一处真实的覆盖损失**，
+下面「欠账」再记一次。md5 前后一致（`c6d8a2bf38073c8b5b7d26d4437dc5a2  std/io.dawn`）。
+
+丙，**把搬走的那条路径改坏**：让 `nmain.cmd_check` 的零目标分支用 3 退出而不是 2。
+内联测试当场红（`assertion failed: status == Some(2)`），而**今天的脚本整跑一遍是绿的**
+（`NATIVE_CLI_ARITY_ONLY=1` 零条红，全跑也零条红）。阳性对照：同一个变异体喂给分支点
+`fa974420` 那份脚本，`FAIL: check (zero targets) did not match stdout-empty +
+stderr-bytes + exit-2`。所以覆盖是**搬走了**，不是复制了一份。
+
+**这一刀对 emit 逐字节不可见。** 量法与刀 1b 同：拿分支点（`fa974420`）的一份本地 clone
+编出一套工具链，与 HEAD 的工具链**编同一棵树**，跑 prev-diff 那十个 `emit` 目标加
+`doc --builtins`，十一个全部逐字节相等，Emit-Change 一条都不用声明。阳性对照做了两次，
+因为一次盖不住十一个目标：把 clone 的 `jvm/rtclasses.PANIC_CLASS` 改一个字母，十个 emit
+目标当场全红而 `doc --builtins` 不动；再把 clone 的 `doc.builtins_json` 里 `"types"` 这个
+键改一个字母，`doc --builtins` 当场红。所以这个「全等」不是没看。
+Core golden 是另一回事：**测试块不进这份 dump**（实测 `main.core` 里找不到任何一条 test 的
+标题或它独有的字面量），但内联测试调用的那几个普通函数进。真变的三个模块是 `main`、
+`nmain`（各多了 `cli_read` 与 `cli_read_hosted`）与 `compiler_plan.exitmem`
+（多了 `main.dawn` 对 capture 的实例化），`consolemem` 只挪了 id。已重录。
+
+**欠账三条。**（1）负控乙那 3 条：判流的用例还有三条留在脚本里，它们是「生产臂写错流」
+今天唯一的看护，脚本因此仍是这条缝的承重件，不能因为「用例少了」就把它当成可选。
+（2）`check (std stamped with another release)` 搬得动但要先造一棵 std 树，没做。
+（3）native 腿只跑 `nmain.dawn` 的模块图，`main.dawn` 的那一半在 native 上永远跑不了，
+理由是 `use java`，这不是这一刀能还的账。
+
 **裁决：六原子行落地，别名仍不裁，重开的判据换一条。**
 上一段说「等六原子的 29 条真的落地，再连同 `Console` 的安装点数一起重裁」。数到了：
 六原子 29 条，安装点 3 处。重裁的结论是不裁，理由是这两个数一起看才成立：29 条**全部**
