@@ -672,19 +672,19 @@ runs」写成类型的样子。操作的返回类型是 `Never`，这在这里�
 `let _ = io.exit(c)` 一个字未改，只有行动了；`cli_error` 与六个 `fail_*` 同理保持 `Unit`，
 它们后面那句 `panic` 因此还得留着。
 
-84 条签名行加了一个原子：`selfhost/src` 69 条（`main` 33、`nmain` 26、`jvm/emit` 5、
-`jvm/codegen` 4、`lsp/server` 1）、`scripts/` 14 条、`io.exit` 自己 1 条。
+86 条签名行加了一个原子：`selfhost/src` 69 条（`main` 33、`nmain` 26、`jvm/emit` 5、
+`jvm/codegen` 4、`lsp/server` 1）、`scripts/` 16 条、`io.exit` 自己 1 条。
 `selfhost/src` 加 `compiler-plan/src` 的四原子行 `!Fs !Proc !Env !io` 从 43 条降到 14 条，
 另外 29 条成了五原子 `!Fs !Proc !Env !Exit !io`；这 29 条就是 `Console` 会推到六原子的那一批，
 与预研预测的 29 一致。
 
-安装点 14 处，全是本来就拥有一整个工作单元的帧：
+安装点 15 处，全是本来就拥有一整个工作单元的帧：
 
 | 安装点 | 理由 |
 |---|---|
 | `selfhost/src/main.dawn` 的 `main` | JVM 驱动的最外层帧 |
 | `selfhost/src/nmain.dawn` 的 `main` | native 驱动的最外层帧 |
-| `scripts/tile-gpu-diff/*_diff.dawn` 十个 `main` | 每个都是自己的进程根 |
+| `scripts/tile-gpu-diff/*_diff.dawn` 十一个 `main` | 每个都是自己的进程根 |
 | `scripts/spike-native/io_cli.dawn` | 装在已有的 `with_fs_real` 里 |
 | `scripts/bootstrap-input-manifest-contract/fixtures/producer/src/main.dawn` | 装在已有的三层里 |
 
