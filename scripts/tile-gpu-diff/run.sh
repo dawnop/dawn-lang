@@ -39,12 +39,12 @@
 #             the two atomic kernels of knife 14 (the first in which two
 #             lanes may name ONE element, which every scatter here is
 #             forbidden to do) and erf_diff.dawn the two error function
-#             kernels of knife 15 and seq_diff.dawn the five multi-launch
-#             problems of knife 16 (the first whose unit of comparison is a
-#             SEQUENCE of launches over shared device buffers rather than a
-#             kernel: one allocation, one upload, up to sixteen launches,
-#             one download, one verdict, and intermediates that never leave
-#             the device),
+#             kernels of knife 15 and seq_diff.dawn the eleven multi-launch
+#             problems of knives 16 and 17 (the first whose unit of
+#             comparison is a SEQUENCE of launches over shared device buffers
+#             rather than a kernel: one allocation, one upload, up to sixteen
+#             launches, one download, one verdict, and intermediates that
+#             never leave the device),
 #             under `with_gpu_real` and `with_gpu_fake` and prints a transcript
 #             (its header says the format). The last line is the verdict:
 #             `pass` (every set bit-identical), `blocked:<kind>@<stage>`
@@ -511,14 +511,18 @@ atomic=(histogram cas_swap)
 # every mutant twice instead.
 erfs=(erf_sweep geglu)
 
-# The multi-launch kernels of knife 16, in the order seq_diff takes them on
-# the command line. These are not eight independent kernels the way every
-# list above is: they are the STEPS of five sequences, and what seq_diff
-# compares is one buffer at the end of a sequence, not one buffer per
-# kernel. `matpow_step` belongs to two sequences (leetgpu 37 and the
-# decoupled control) and `swiglu_proj` is launched twice inside one.
+# The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
+# them on the command line. These are not eighteen independent kernels the
+# way every list above is: they are the STEPS of eleven sequences, and what
+# seq_diff compares is one buffer at the end of a sequence, not one buffer
+# per kernel. `matpow_step` belongs to two sequences (leetgpu 37 and the
+# decoupled control), `swiglu_proj` is launched twice inside one, and
+# `attn_softmax` and `attn_context` are steps of five and six of them: knife
+# 17's four masked-score problems reuse both, and its decayed one reuses the
+# context product. That reuse is why six more problems cost seven kernels.
 sequenced=(lora_base lora_hidden lora_out attn_scores attn_softmax attn_context
-  matpow_step swiglu_proj swiglu_act swiglu_down apsp_step)
+  matpow_step swiglu_proj swiglu_act swiglu_down apsp_step
+  attn_causal attn_alibi attn_window attn_sinks attn_decay cce_row cce_mean)
 
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
@@ -807,7 +811,7 @@ cat "$work/seq.out"
 seq_verdict="$(verdict_of "$work/seq.out")"
 case "$seq_verdict" in
   pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
-        echo "PASS  native: the five multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
+        echo "PASS  native: the eleven multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
   blocked:*) [ "$rc" = 0 ] || fail "verdict $seq_verdict with exit $rc"
         echo "BLOCKED  native: the driver refused before a result could be compared: $seq_verdict" ;;
   fail) cat "$work/seq.err" >&2; fail "the device answered and disagreed with the fake device on a sequence (see the transcript above)" ;;
@@ -884,11 +888,11 @@ done
 # with -- both sides the fake device, so this is a property of the corpus
 # and the references and not of the GPU.
 #
-# The five problems must be above zero. `decoupled` must be exactly zero:
+# The eleven problems must be above zero. `decoupled` must be exactly zero:
 # it is two launches whose second does not read the first's output, and it
 # is the control that says the counter can print a zero at all. Without
 # it, "has never printed zero" and "cannot print zero" look the same.
-for s in lora attention matpow swiglu apsp; do
+for s in lora attention matpow swiglu apsp causal alibi window sinks decay cce; do
   seq_shape="$(awk -v want="$s" '$1 == "sequence" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/seq.out")"
   case "$seq_shape" in
     *changed_by_first=0) fail "$s's answer does not depend on its earlier launches, so it is not a sequence: $seq_shape" ;;
@@ -935,14 +939,19 @@ echo "PASS  repeat: one round is the single-round sequence and zero rounds leave
 #       the final launch never happens -> everything reds, the control
 #       included. This is the one that says the launches all happen.
 #   grid-of-later-launch-copied-from-the-first
-#       every launch is given the first one's grid -> only `attention` and
-#       `swiglu` red. `matpow`, `apsp` and `decoupled` launch on one grid
-#       throughout, so the mutant is not a change there at all; `lora`'s
-#       middle launch IGNORES the second grid axis, so the extra blocks
-#       recompute the same tile and store the same bytes. That last one is
-#       worth the line: a grid mutant is invisible wherever the blocks it
-#       adds are idempotent, which is not a fact about this harness but
-#       about what a grid means.
+#       every launch is given the first one's grid -> `attention` and
+#       `swiglu` red, and so do knife 17's four masked-score problems, whose
+#       second launch is `attn_softmax` at a grid of ATT_M blocks. `matpow`,
+#       `apsp` and `decoupled` launch on one grid throughout, so the mutant
+#       is not a change there at all; `lora`'s middle launch IGNORES the
+#       second grid axis, so the extra blocks recompute the same tile and
+#       store the same bytes. Knife 17 added two more of that last kind:
+#       `decay`'s second launch is `attn_context`, which reads only the
+#       first grid axis, and `cce`'s second is `cce_mean`, which reads NO
+#       block id at all -- sixty-four blocks all compute and store the one
+#       answer. A grid mutant is invisible wherever the blocks it adds are
+#       idempotent, which is not a fact about this harness but about what a
+#       grid means; three of the twelve sequences here are now that case.
 seq_reds="second-launch-sees-stale-buffer:lora launch-order-swapped:lora last-launch-dropped:lora"
 seq_reds="$seq_reds second-launch-sees-stale-buffer:attention launch-order-swapped:attention"
 seq_reds="$seq_reds last-launch-dropped:attention grid-of-later-launch-copied-from-the-first:attention"
@@ -950,20 +959,27 @@ seq_reds="$seq_reds second-launch-sees-stale-buffer:matpow launch-order-swapped:
 seq_reds="$seq_reds second-launch-sees-stale-buffer:swiglu launch-order-swapped:swiglu"
 seq_reds="$seq_reds last-launch-dropped:swiglu grid-of-later-launch-copied-from-the-first:swiglu"
 seq_reds="$seq_reds second-launch-sees-stale-buffer:apsp last-launch-dropped:apsp"
+for c in causal alibi window sinks; do
+  seq_reds="$seq_reds second-launch-sees-stale-buffer:$c launch-order-swapped:$c"
+  seq_reds="$seq_reds last-launch-dropped:$c grid-of-later-launch-copied-from-the-first:$c"
+done
+for c in decay cce; do
+  seq_reds="$seq_reds second-launch-sees-stale-buffer:$c launch-order-swapped:$c last-launch-dropped:$c"
+done
 seq_reds="$seq_reds last-launch-dropped:decoupled"
 if [ "$seq_verdict" = pass ]; then
   seq_probe="$(sed -n 's/^probe mutants //p' "$work/seq.out" | tail -n 1)"
-  [ "$seq_probe" = "red=17 $seq_reds" ] ||
-    { printf 'wanted: red=17 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
+  [ "$seq_probe" = "red=39 $seq_reds" ] ||
+    { printf 'wanted: red=39 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
       fail "the sequence mutants' red set moved"; }
-  echo "PASS  mutant: the four sequence mutants red on exactly 17 of the 24 (mutant, sequence) pairs, by name"
+  echo "PASS  mutant: the four sequence mutants red on exactly 39 of the 48 (mutant, sequence) pairs, by name"
   seq_controls="$(grep -c '^control intermediate-round-tripped ' "$work/seq.out" || true)"
   seq_controls_moved="$(grep -c '^control intermediate-round-tripped .* verdict differ:result$' "$work/seq.out" || true)"
-  if [ "$seq_controls" != 6 ] || [ "$seq_controls_moved" != 0 ]; then
+  if [ "$seq_controls" != 12 ] || [ "$seq_controls_moved" != 0 ]; then
     cat "$work/seq.out" >&2
     fail "the round-trip control moved a verdict: $seq_controls_moved of $seq_controls"
   fi
-  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (6 of 6)"
+  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (12 of 12)"
 else
   echo "SKIP  mutant: the sequence mutants are not verifiable on this driver: the clean run is $seq_verdict, before any launch reaches the device"
 fi

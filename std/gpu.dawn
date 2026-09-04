@@ -1843,7 +1843,7 @@ pub fn matmul_bt_ref(m: Int, k: Int, n: Int, scale: Float, dtypes: List[String],
   list.map(range(0, m * n), idx => {
     let i = idx / n
     let j = idx % n
-    round_to(dt, scale * list.fold(range(0, k), 0.0, (acc, p) => acc + a[i * k + p] * b[j * k + p]))
+    round_to(dt, scale * bt_dot(a, b, k, i, j))
   })
 }
 
@@ -1920,6 +1920,146 @@ pub fn apsp_step_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> Li
     let through = d[i * n + k] + d[k * n + j]
     round_to(dt, if through < d[idx] { through } else { d[idx] })
   })
+}
+
+# ---- references for the attention rules and the loss (knife 17) ----
+#
+# Six more problems over seven kernels, and five of the seven differ from
+# leetgpu 6's score launch in one thing only: what they do with the score
+# at position (i, j). So what they share is a private helper and what each
+# of them says is a line.
+#
+# The `-inf` three of them write is not a flourish. `attn_softmax` reads
+# these scores, and the softmax of a row with a `-inf` in it gives that lane
+# weight exactly zero on the device and here, which is what "masked" means
+# in the problems' own reference implementations.
+
+## `sum_p a[i, p] * b[j, p]`: one element of the transposed product, folded
+## LEFT and not rounded. `matmul_bt_ref` is this over every element; the
+## five score references want it one element at a time, because each of them
+## decides what to do with it from `i` and `j`.
+fn bt_dot(a: List[Float], b: List[Float], k: Int, i: Int, j: Int) -> Float =
+  list.fold(range(0, k), 0.0, (acc, p) => acc + a[i * k + p] * b[j * k + p])
+
+fn ref_neg_inf() -> Float = 0.0 - 1.0 / 0.0
+
+## leetgpu 53 (Causal Self-Attention): `scale * (q k^T)` where the key is
+## not in the query's future, `-inf` where it is. `ins` is `[q, k, old s]`.
+pub fn causal_scores_ref(m: Int, k: Int, n: Int, scale: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, m * n), idx => {
+    let i = idx / n
+    let j = idx % n
+    if j <= i { round_to(dt, scale * bt_dot(a, b, k, i, j)) } else { ref_neg_inf() }
+  })
+}
+
+## leetgpu 55 (Attention with Linear Biases): ALiBi adds `alpha * (i - j)`
+## to every score and masks nothing, so every lane here is finite.
+## `ins` is `[q, k, old s]`.
+pub fn alibi_scores_ref(m: Int, k: Int, n: Int, scale: Float, alpha: Float,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, m * n), idx => {
+    let i = idx / n
+    let j = idx % n
+    round_to(dt, scale * bt_dot(a, b, k, i, j) + alpha * to_float(i - j))
+  })
+}
+
+## leetgpu 59 (Sliding Window Self-Attention): a band of half-width `w`
+## about the diagonal, in both directions, and `-inf` outside it. The one
+## rule of this family that is not causal. `ins` is `[q, k, old s]`.
+pub fn window_scores_ref(m: Int, k: Int, n: Int, scale: Float, w: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, m * n), idx => {
+    let i = idx / n
+    let j = idx % n
+    let d = if i > j { i - j } else { j - i }
+    if d <= w { round_to(dt, scale * bt_dot(a, b, k, i, j)) } else { ref_neg_inf() }
+  })
+}
+
+## leetgpu 112 (Attention with Sinks): causal, and within that either one
+## of the first `sinks` keys or inside the trailing window of `w`.
+## `ins` is `[q, k, old s]`.
+pub fn sink_scores_ref(m: Int, k: Int, n: Int, scale: Float, sinks: Int, w: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, m * n), idx => {
+    let i = idx / n
+    let j = idx % n
+    let allowed = j <= i && (j < sinks || j >= i - w + 1)
+    if allowed { round_to(dt, scale * bt_dot(a, b, k, i, j)) } else { ref_neg_inf() }
+  })
+}
+
+## leetgpu 92 (Decaying Causal Attention): the score times `gamma^(i - j)`
+## where the key is not in the future, and zero where it is. There is no
+## softmax in this problem at all, so these weights are what the context
+## product reads. `ins` is `[q, k, old s]`.
+##
+## `gamma^d` is `exp(d * ln gamma)` here because that is what the kernel
+## computes: `ln gamma` is a host constant of the recording, and a `pow` on
+## each side would be two approximations of one power rather than one
+## formula computed twice.
+pub fn decay_scores_ref(m: Int, k: Int, n: Int, scale: Float, ln_gamma: Float,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, m * n), idx => {
+    let i = idx / n
+    let j = idx % n
+    if i >= j {
+      round_to(dt, scale * bt_dot(a, b, k, i, j) * ref_exp(to_float(i - j) * ln_gamma))
+    } else {
+      0.0
+    }
+  })
+}
+
+## leetgpu 25's first launch: `logsumexp(row) - row[label]` for each of
+## `rows` rows of `cols` logits. The maximum is subtracted per row, as the
+## kernel does. `ins` is `[logits, labels, old out]`, and `labels` is an
+## i32 buffer, so its elements are whole numbers carried as Floats.
+pub fn cce_row_ref(rows: Int, cols: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let labels = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), i =>
+      if i < rows {
+        let mx = list.fold(range(1, cols), x[i * cols], (acc, j) =>
+            if x[i * cols + j] > acc { x[i * cols + j] } else { acc })
+        let total = list.fold(range(0, cols), 0.0, (acc, j) => acc + ref_exp(x[i * cols + j] - mx))
+        round_to(dt, mx + ref_log(total) - x[i * cols + to_int(labels[i])])
+      } else {
+        kept(old, i)
+      })
+}
+
+## The mean of the first `n` lanes into element 0: leetgpu 25's second
+## launch, and the reason its answer is a scalar rather than a row.
+## `ins` is `[x, old out]`.
+pub fn mean_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  let total = list.fold(range(0, n), 0.0, (acc, i) => acc + x[i])
+  list.map(range(0, len(old)), i =>
+      if i == 0 { round_to(dt, total / to_float(n)) } else { kept(old, i) })
 }
 
 # ---- what a reference writes back (knife 11) ----

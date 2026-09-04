@@ -45,7 +45,7 @@
 # buffer's format, so it is the second opinion for an f16 product and an i8
 # one as much as for an f64 one. The KERNELS differ, and the corpora do.
 #
-# 59 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
+# 65 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
 # and out of range). The plan that orders the rest is the cuTile coverage
 # memo; knife 7a is the boundary knife, 7b the reduction one, 8 the
 # two-dimensional one, 9 the strided one, 10 the integer one, 11 the wide
@@ -61,8 +61,12 @@
 # arithmetic already there, and 65 is the one problem that asks for one, and
 # 16 the multi-launch one: it adds no operation either, only a way for the
 # HOST to say "these launches, in this order, over these buffers" and a
-# verdict that holds one. That is what the last five rows below are, and
-# what the twenty-two problems still out of range for that reason need.
+# verdict that holds one, and 17 the second multi-launch one, which adds no
+# operation either: what it adds is the observation that an attention
+# variant is a RULE ON A SCORE, so four of its six problems are one kernel
+# each and hand their scores to the softmax and the context product knife 16
+# recorded. That is what the last eleven rows below are, and what the
+# sixteen problems still out of range for that reason need.
 #
 # A kernel is recorded for one shape and a row names the problem it solves
 # at that shape, which for the knife-12 rows means small ones: `sort_rank`
@@ -129,3 +133,9 @@
 84 | SwiGLU MLP Block | swiglu_proj+swiglu_act+swiglu_down | std/gpu.matmul_ref+std/gpu.swiglu_act_ref+std/gpu.matmul_ref | seq_diff:swiglu | tolerance
 37 | Matrix Power | matpow_step | std/gpu.matmul_ref | seq_diff:matpow | tolerance
 73 | All-Pairs Shortest Paths | apsp_step | std/gpu.apsp_step_ref | seq_diff:apsp | exact
+53 | Causal Self-Attention | attn_causal+attn_softmax+attn_context | std/gpu.causal_scores_ref+std/gpu.row_softmax_ref+std/gpu.matmul_ref | seq_diff:causal | tolerance
+55 | Attention with Linear Biases | attn_alibi+attn_softmax+attn_context | std/gpu.alibi_scores_ref+std/gpu.row_softmax_ref+std/gpu.matmul_ref | seq_diff:alibi | tolerance
+59 | Sliding Window Self-Attention | attn_window+attn_softmax+attn_context | std/gpu.window_scores_ref+std/gpu.row_softmax_ref+std/gpu.matmul_ref | seq_diff:window | tolerance
+112 | Attention with Sinks | attn_sinks+attn_softmax+attn_context | std/gpu.sink_scores_ref+std/gpu.row_softmax_ref+std/gpu.matmul_ref | seq_diff:sinks | tolerance
+92 | Decaying Causal Attention | attn_decay+attn_context | std/gpu.decay_scores_ref+std/gpu.matmul_ref | seq_diff:decay | tolerance
+25 | Categorical Cross Entropy Loss | cce_row+cce_mean | std/gpu.cce_row_ref+std/gpu.mean_ref | seq_diff:cce | tolerance
