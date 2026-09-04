@@ -1,12 +1,20 @@
 # Layer 2 for the strided kernels (knife 9), the fifth of these programs
 # after vadd_diff, mask_diff, red_diff and mm_diff: one `!Gpu` program runs
-# each of the nine kernels scripts/tile-golden pins under `with_gpu_real`
+# each of the ten kernels scripts/tile-golden pins under `with_gpu_real`
 # against the machine's GPU and under `with_gpu_fake` against hand-written
 # host references, and prints what each device answered.
 #
 #   stride_diff <transpose_tail.cubin> <conv1d.cubin> <conv2d.cubin>
 #               <max_pool.cubin> <interleave.cubin> <rgb_gray.cubin>
 #               <jacobi.cubin> <depthwise_conv1d.cubin> <gaussian_blur.cubin>
+#               <conv3d.cubin>
+#
+# KNIFE 18 added the tenth, `conv3d` (leetgpu 11). It is `conv2d` with the
+# third dimension on the GRID: one block a plane of the output, and the
+# tap's depth offset a constant times the plane. Its tile is SQUARE and its
+# two masks are not, which is what makes it the second kernel here that
+# run.sh's ladder-strides-reversed can reach (the table there says why the
+# first was alone).
 #
 # What is new here and nowhere else:
 #
@@ -30,7 +38,8 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free, launch3, sync,
-  handle_of, transpose_ref, conv1d_ref, conv2d_ref, max_pool_ref, interleave_ref, rgb_gray_ref, jacobi_ref,
+  handle_of, transpose_ref, conv1d_ref, conv2d_ref, conv3d_ref, max_pool_ref, interleave_ref, rgb_gray_ref,
+  jacobi_ref,
   depthwise_conv1d_ref, gaussian_blur_ref }
 use std/list
 use std/map
@@ -80,6 +89,13 @@ pub const DW_L: Int = 100
 pub const DW_K: Int = 3
 pub const DW_TC: Int = 4
 pub const DW_TL: Int = 32
+
+pub const C3_D: Int = 8
+pub const C3_H: Int = 12
+pub const C3_W: Int = 16
+pub const C3_KD: Int = 2
+pub const C3_KH: Int = 3
+pub const C3_KW: Int = 3
 
 pub const GB_H: Int = 20
 pub const GB_W: Int = 24
@@ -271,7 +287,7 @@ fn tenths(n: Int, step: Int, span: Int) -> List[Float] =
 ## The kernels this program runs, in the order their cubins are given.
 fn case_name(i: Int) -> String =
   ["transpose_tail", "conv1d", "conv2d", "max_pool", "interleave", "rgb_gray", "jacobi", "depthwise_conv1d",
-    "gaussian_blur"][i]
+    "gaussian_blur", "conv3d"][i]
 
 ## The kernels of the tolerance tier: NONE. Every kernel here computes with
 ## `mulf`, `addf` and `maxf` in an order its reference repeats exactly, so
@@ -284,7 +300,9 @@ pub fn tolerance_tier() -> List[String] = []
 ## The grid each kernel was recorded for, as (gx, gy, gz).
 fn case_grid(i: Int) -> (Int, Int, Int) = {
   let name = case_name(i)
-  if name == "transpose_tail" {
+  if name == "conv3d" {
+    (C3_D - C3_KD + 1, 1, 1)
+  } else if name == "transpose_tail" {
     (blocks(TT_ROWS, TT_TILE), blocks(TT_COLS, TT_TILE), 1)
   } else if name == "conv1d" {
     (blocks(C1_N - C1_K + 1, C1_TILE), 1, 1)
@@ -311,7 +329,9 @@ fn case_grid(i: Int) -> (Int, Int, Int) = {
 ## should not have; the transpose covers its output exactly.
 fn case_data(i: Int) -> List[List[Float]] = {
   let name = case_name(i)
-  if name == "transpose_tail" {
+  if name == "conv3d" {
+    [tenths(C3_D * C3_H * C3_W, 5, 29), tenths(C3_KD * C3_KH * C3_KW, 3, 13), sentinel_buffer(1024)]
+  } else if name == "transpose_tail" {
     [distinct(TT_ROWS * TT_COLS), sentinel_buffer(TT_ROWS * TT_COLS)]
   } else if name == "conv1d" {
     [tenths(C1_N, 7, 41), tenths(C1_K, 3, 11), sentinel_buffer(1024)]
@@ -335,7 +355,10 @@ fn case_data(i: Int) -> List[List[Float]] = {
 ## The reference table the fake device answers with, for one case.
 fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   let name = case_name(i)
-  if name == "transpose_tail" {
+  if name == "conv3d" {
+    map.from([("conv3d",
+      (3, last_out((dts, ins) => conv3d_ref(C3_D, C3_H, C3_W, C3_KD, C3_KH, C3_KW, dts, ins))))])
+  } else if name == "transpose_tail" {
     map.from([("transpose_tail", (2, last_out((dts, ins) => transpose_ref(TT_ROWS, TT_COLS, dts, ins))))])
   } else if name == "conv1d" {
     map.from([("conv1d", (3, last_out((dts, ins) => conv1d_ref(C1_N - C1_K + 1, C1_K, dts, ins))))])
@@ -384,10 +407,11 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
     let argv = args()
-    let count = 9
+    let count = 10
     if len(argv) != count {
       io.eprintln("usage: stride_diff <transpose_tail.cubin> <conv1d.cubin> <conv2d.cubin> <max_pool.cubin>"
-          ++ " <interleave.cubin> <rgb_gray.cubin> <jacobi.cubin> <depthwise_conv1d.cubin> <gaussian_blur.cubin>")
+          ++ " <interleave.cubin> <rgb_gray.cubin> <jacobi.cubin> <depthwise_conv1d.cubin>"
+          ++ " <gaussian_blur.cubin> <conv3d.cubin>")
       io.exit(2)
     }
     var cubins: Map[String, Bytes] = map.empty()

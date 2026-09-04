@@ -6,7 +6,15 @@
 # answered.
 #
 #   int_diff <count_eq.cubin> <subarray_sum.cubin> <rainbow.cubin>
-#            <int_ops.cubin>
+#            <int_ops.cubin> <subarray_sum2d.cubin> <subarray_sum3d.cubin>
+#
+# KNIFE 18 added the last two (leetgpu 48 and 49): the same wrapping i32
+# sum over a RECTANGLE and over a BOX. What they add is that the rank of
+# the array and the rank of the tile are independent. Both tiles are rank
+# 1 and both recover their two or three coordinates from the lane number
+# with a `divi` and a `remi`, because `d_reduce_i` answers a scalar and so
+# reduces exactly one dimension. An array with more axes costs arithmetic
+# here, not tile rank, and these two are where that is measured.
 #
 # What is new here and nowhere else:
 #
@@ -54,7 +62,8 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, I32, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free, launch3, sync,
-  handle_of, wrap_i32, count_eq_ref, subarray_sum_ref, rainbow_ref, int_ops_ref }
+  handle_of, wrap_i32, count_eq_ref, subarray_sum_ref, subarray_sum2d_ref, subarray_sum3d_ref, rainbow_ref,
+  int_ops_ref }
 use std/list
 use std/map
 
@@ -74,6 +83,23 @@ pub const SUB_HI: Int = 902
 
 pub const IOP_N: Int = 1000
 pub const IOP_TILE: Int = 128
+
+pub const S2_ROWS: Int = 32
+pub const S2_COLS: Int = 64
+pub const S2_R0: Int = 5
+pub const S2_R1: Int = 27
+pub const S2_C0: Int = 9
+pub const S2_C1: Int = 52
+
+pub const S3_DEP: Int = 4
+pub const S3_ROWS: Int = 8
+pub const S3_COLS: Int = 32
+pub const S3_D0: Int = 1
+pub const S3_D1: Int = 2
+pub const S3_R0: Int = 2
+pub const S3_R1: Int = 6
+pub const S3_C0: Int = 3
+pub const S3_C1: Int = 29
 
 pub const RB_ROUNDS: Int = 3
 pub const RB_K1: Int = 0x9E3779B1
@@ -260,7 +286,8 @@ fn count_corpus(n: Int) -> List[Float] =
 # ---- the cases ----
 
 ## The kernels this program runs, in the order their cubins are given.
-fn case_name(i: Int) -> String = ["count_eq", "subarray_sum", "rainbow", "int_ops"][i]
+fn case_name(i: Int) -> String =
+  ["count_eq", "subarray_sum", "rainbow", "int_ops", "subarray_sum2d", "subarray_sum3d"][i]
 
 ## The kernels of the tolerance tier: NONE, and here for a stronger reason
 ## than in the other programs (see the header).
@@ -276,7 +303,7 @@ fn case_grid(i: Int) -> (Int, Int, Int) = {
   let name = case_name(i)
   if name == "count_eq" {
     (1, 1, 1)
-  } else if name == "subarray_sum" {
+  } else if name == "subarray_sum" || name == "subarray_sum2d" || name == "subarray_sum3d" {
     (1, 1, 1)
   } else {
     (blocks(IOP_N, IOP_TILE), 1, 1)
@@ -292,6 +319,10 @@ fn case_data(i: Int) -> List[List[Float]] = {
     [count_corpus(CNT_N), sentinel_buffer(8)]
   } else if name == "subarray_sum" {
     [i32s(CNT_N, 7654321, 0 - 1234567), sentinel_buffer(8)]
+  } else if name == "subarray_sum2d" {
+    [i32s(S2_ROWS * S2_COLS, 7654321, 0 - 1234567), sentinel_buffer(8)]
+  } else if name == "subarray_sum3d" {
+    [i32s(S3_DEP * S3_ROWS * S3_COLS, 7654321, 0 - 1234567), sentinel_buffer(8)]
   } else if name == "rainbow" {
     [i32s(IOP_N, 1103515245, 12345), sentinel_buffer(1024)]
   } else {
@@ -306,6 +337,13 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
     map.from([("count_eq", (2, last_out((dts, ins) => count_eq_ref(CNT_N, CNT_TARGET, dts, ins))))])
   } else if name == "subarray_sum" {
     map.from([("subarray_sum", (2, last_out((dts, ins) => subarray_sum_ref(SUB_LO, SUB_HI, dts, ins))))])
+  } else if name == "subarray_sum2d" {
+    map.from([("subarray_sum2d",
+      (2, last_out((dts, ins) => subarray_sum2d_ref(S2_COLS, S2_R0, S2_R1, S2_C0, S2_C1, dts, ins))))])
+  } else if name == "subarray_sum3d" {
+    map.from([("subarray_sum3d",
+      (2, last_out((dts, ins) => subarray_sum3d_ref(S3_ROWS, S3_COLS, S3_D0, S3_D1, S3_R0, S3_R1,
+          S3_C0, S3_C1, dts, ins))))])
   } else if name == "rainbow" {
     map.from([("rainbow", (2, last_out((dts, ins) => rainbow_ref(IOP_N, RB_ROUNDS, RB_K1, RB_K2, RB_K3, dts, ins))))])
   } else {
@@ -349,9 +387,10 @@ fn corpus_shape(v: List[Float]) -> String = {
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
     let argv = args()
-    let count = 4
+    let count = 6
     if len(argv) != count {
-      io.eprintln("usage: int_diff <count_eq.cubin> <subarray_sum.cubin> <rainbow.cubin> <int_ops.cubin>")
+      io.eprintln("usage: int_diff <count_eq.cubin> <subarray_sum.cubin> <rainbow.cubin> <int_ops.cubin>"
+          ++ " <subarray_sum2d.cubin> <subarray_sum3d.cubin>")
       io.exit(2)
     }
     var cubins: Map[String, Bytes] = map.empty()

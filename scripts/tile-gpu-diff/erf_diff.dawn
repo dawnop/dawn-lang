@@ -7,6 +7,16 @@
 # answered.
 #
 #   erf_diff [--corpus positive] <erf_sweep.cubin> <geglu.cubin>
+#            <swiglu_half.cubin>
+#
+# KNIFE 18 added the third, `swiglu_half` (leetgpu 54). It shares `geglu`'s
+# SHAPE and not its composition: one buffer whose two halves are the values
+# and the gates, one tail mask serving both loads, and a gate that is a
+# swish rather than an error function. So it is what this family did not
+# have and its header used to say so: a KERNEL-LEVEL CONTROL. Both mutants
+# below rewrite `tileir/dev.erf`, both used to move both kernels, and
+# neither can reach this one. Until now the only control here was a second
+# CORPUS.
 #
 # What is new here and nowhere else: the kernel computes something the
 # DIALECT DOES NOT HAVE. Every other kernel in this tree spells an
@@ -41,10 +51,15 @@
 #     says the negative lanes and not something else are what make it bite.
 #     The tanh mutant must red on both, because a wrong approximation is
 #     wrong on either half.
+#
+# `swiglu_half` is outside both of those claims: run.sh's corpus lines name
+# `erf_sweep` and `geglu` rather than every kernel here, because the three
+# counts they hold above zero are counts of what 7.1.26 sees and this
+# kernel does not call it.
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, erf_sweep_ref, geglu_ref}
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, erf_sweep_ref, geglu_ref, swiglu_half_ref}
 use std/list
 use std/map
 
@@ -65,6 +80,8 @@ pub const ERF_N: Int = 500
 pub const ERF_TILE: Int = 128
 pub const GEGLU_HALF: Int = 300
 pub const GEGLU_TILE: Int = 128
+pub const SWH_HALF: Int = 500
+pub const SWH_TILE: Int = 128
 
 type Trace = {
   alloc: String,
@@ -285,6 +302,14 @@ fn geglu_values() -> List[Float] =
   list.map(range(0, GEGLU_HALF), j => 1.25 - to_float(j % 7) * 0.5)
   ++ list.map(range(0, GEGLU_HALF), j => to_float(j - 150) * 0.05)
 
+## `swiglu_half`'s input: the values to gate first, then the gates. The
+## gates sweep -12.5 to 12.45, which reaches both saturated ends of the
+## swish (a sigmoid at -12 is 6e-6 and at 12 is 1 - 6e-6), and the
+## multipliers cycle through seven small values of both signs.
+fn swiglu_values() -> List[Float] =
+  list.map(range(0, SWH_HALF), j => to_float(j - 250) * 0.05)
+  ++ list.map(range(0, SWH_HALF), j => 1.25 - to_float(j % 7) * 0.5)
+
 ## The lanes of a corpus that matter to 7.1.26, counted: how many are
 ## negative (the odd symmetry's half, and the only thing the sign `select`
 ## is for), how many are past `|x| = 4` (the tail, where `t` goes to zero
@@ -301,17 +326,24 @@ fn shape_of(xs: List[Float]) -> String = {
 # ---- the cases ----
 
 ## The kernels this program runs, in the order their cubins are given.
-fn case_name(i: Int) -> String = ["erf_sweep", "geglu"][i]
+fn case_name(i: Int) -> String = ["erf_sweep", "geglu", "swiglu_half"][i]
 
-## Both kernels are tolerance tier, and by construction rather than by
-## corpus: 7.1.26 is an approximation.
+## Every kernel here is tolerance tier. The first two by construction
+## rather than by corpus (7.1.26 is an approximation); the third because
+## its `exp` is one, the way every `exp` client in red_diff is.
 ##
 ## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier`
 ## column of scripts/leetgpu-diff/problems.txt against it.
-pub fn tolerance_tier() -> List[String] = ["erf_sweep", "geglu"]
+pub fn tolerance_tier() -> List[String] = ["erf_sweep", "geglu", "swiglu_half"]
 
 fn case_grid(i: Int) -> Int =
-  if case_name(i) == "erf_sweep" { ERF_N / ERF_TILE + 1 } else { GEGLU_HALF / GEGLU_TILE + 1 }
+  if case_name(i) == "erf_sweep" {
+    ERF_N / ERF_TILE + 1
+  } else if case_name(i) == "swiglu_half" {
+    SWH_HALF / SWH_TILE + 1
+  } else {
+    GEGLU_HALF / GEGLU_TILE + 1
+  }
 
 ## The arguments the erf-shaped lanes of each case are: the sweep itself
 ## for `erf_sweep`, and the gate half for `geglu` (scaled by `1/sqrt(2)`
@@ -320,6 +352,8 @@ fn case_grid(i: Int) -> Int =
 fn case_argument(i: Int, pos: Bool) -> List[Float] =
   if case_name(i) == "erf_sweep" {
     positive(sweep_values(), pos)
+  } else if case_name(i) == "swiglu_half" {
+    list.take(positive(swiglu_values(), pos), SWH_HALF)
   } else {
     list.map(list.drop(positive(geglu_values(), pos), GEGLU_HALF), x => x * gpu.INV_SQRT2)
   }
@@ -330,6 +364,8 @@ fn case_argument(i: Int, pos: Bool) -> List[Float] =
 fn case_bufs(i: Int, pos: Bool) -> List[(String, List[Float])] =
   if case_name(i) == "erf_sweep" {
     [("f64", positive(sweep_values(), pos)), ("f64", sentinel_buffer(ERF_N + 8))]
+  } else if case_name(i) == "swiglu_half" {
+    [("f64", positive(swiglu_values(), pos)), ("f64", sentinel_buffer(SWH_HALF + 8))]
   } else {
     [("f64", positive(geglu_values(), pos)), ("f64", sentinel_buffer(GEGLU_HALF + 8))]
   }
@@ -338,6 +374,8 @@ fn case_bufs(i: Int, pos: Bool) -> List[(String, List[Float])] =
 fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
   if case_name(i) == "erf_sweep" {
     map.from([("erf_sweep", (2, last_out((dts, ins) => erf_sweep_ref(ERF_N, dts, ins))))])
+  } else if case_name(i) == "swiglu_half" {
+    map.from([("swiglu_half", (2, last_out((dts, ins) => swiglu_half_ref(SWH_HALF, dts, ins))))])
   } else {
     map.from([("geglu", (2, last_out((dts, ins) => geglu_ref(GEGLU_HALF, dts, ins))))])
   }
@@ -374,7 +412,7 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
 }
 
 fn usage() -> Unit !Exit !io = {
-  io.eprintln("usage: erf_diff [--corpus positive] <erf_sweep.cubin> <geglu.cubin>")
+  io.eprintln("usage: erf_diff [--corpus positive] <erf_sweep.cubin> <geglu.cubin> <swiglu_half.cubin>")
   io.exit(2)
 }
 
@@ -382,7 +420,7 @@ fn usage() -> Unit !Exit !io = {
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
     let argv = args()
-    let count = 2
+    let count = 3
     let pos = len(argv) == count + 2 && argv[0] == "--corpus" && argv[1] == "positive"
     let paths = if pos { list.drop(argv, 2) } else { argv }
     if len(paths) != count { usage() } else { () }

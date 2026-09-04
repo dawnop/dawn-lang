@@ -1,12 +1,20 @@
 # Layer 2 for the gather and scatter kernels (knife 12), the eighth of
 # these programs after vadd_diff, mask_diff, red_diff, mm_diff,
 # stride_diff, int_diff and wide_diff: one `!Gpu` program runs each of the
-# four kernels scripts/tile-golden pins under `with_gpu_real` against the
+# five kernels scripts/tile-golden pins under `with_gpu_real` against the
 # machine's GPU and under `with_gpu_fake` against hand-written host
 # references, and prints what each device answered.
 #
 #   gath_diff <token_embed.cubin> <sort_rank.cubin> <merge_rank.cubin>
-#             <scatter_perm.cubin>
+#             <scatter_perm.cubin> <dequant.cubin>
+#
+# KNIFE 18 added the fifth, `dequant` (leetgpu 64). Its index comes out of
+# ARITHMETIC ON THE LANE'S OWN COORDINATES and out of no buffer at all,
+# which is the half of data-dependent addressing the other four do not
+# show: `token_embed` and `scatter_perm` read theirs, and the two rank
+# kernels compute theirs from a comparison. Every index it forms is inside
+# `S` by construction, so its gather is UNMASKED and it is the third
+# control run.sh's gather-mask-dropped has.
 #
 # What is new here and nowhere else: the ADDRESS a lane reads or writes is
 # a number the kernel computed, and in two of these four it is a number
@@ -55,7 +63,7 @@
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, token_embed_ref, sort_ref, merge_ref,
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, token_embed_ref, dequant_ref, sort_ref, merge_ref,
   scatter_perm_ref }
 use std/list
 use std/map
@@ -80,6 +88,10 @@ pub const TOK_LANES: Int = 104
 
 pub const SORT_N: Int = 32
 pub const MG_N: Int = 32
+
+pub const DQ_M: Int = 64
+pub const DQ_N: Int = 64
+pub const DQ_TS: Int = 16
 
 pub const SC_N: Int = 256
 pub const SC_TILE: Int = 128
@@ -332,10 +344,18 @@ fn destinations(n: Int) -> List[Float] =
 # moves, so that a lane that landed in the wrong place is visible.
 fn halves(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i) + 0.5)
 
+# Quarters cycling through 41 values of both signs: what `dequant`
+# multiplies. Every value is on the binary grid and the product of two of
+# them is exact, so a difference there is the ADDRESS the scale came from
+# and not the arithmetic.
+fn quarters(n: Int, step: Int) -> List[Float] =
+  list.map(range(0, n), i => (to_float((i * step) % 41) - 20.0) * 0.25)
+
 # ---- the cases ----
 
 ## The kernels this program runs, in the order their cubins are given.
-fn case_name(i: Int) -> String = ["token_embed", "sort_rank", "merge_rank", "scatter_perm"][i]
+fn case_name(i: Int) -> String =
+  ["token_embed", "sort_rank", "merge_rank", "scatter_perm", "dequant"][i]
 
 ## The kernels of the tolerance tier: NONE, for the reason the header
 ## gives (nothing here is rounded).
@@ -349,7 +369,9 @@ pub fn tolerance_tier() -> List[String] = []
 ## this backend does.
 fn case_grid(i: Int) -> (Int, Int, Int) = {
   let name = case_name(i)
-  if name == "token_embed" {
+  if name == "dequant" {
+    (1, 1, 1)
+  } else if name == "token_embed" {
     (blocks(TOK_LANES, TOK_TILE), 1, 1)
   } else if name == "sort_rank" {
     (1, 1, 1)
@@ -365,7 +387,10 @@ fn case_grid(i: Int) -> (Int, Int, Int) = {
 ## sentinel in its tail says whether a store went past the end.
 fn case_bufs(i: Int) -> List[(String, List[Float])] = {
   let name = case_name(i)
-  if name == "token_embed" {
+  if name == "dequant" {
+    [("f64", quarters(DQ_M * DQ_N, 7)), ("f64", quarters((DQ_M / DQ_TS) * (DQ_N / DQ_TS), 3)),
+      ("f64", sentinel_buffer(DQ_M * DQ_N + 8))]
+  } else if name == "token_embed" {
     [("i32", token_ids(TOK_LANES)), ("f64", embedding_table(EMB_ROWS, EMB_DIM)),
       ("f64", sentinel_buffer(TOK_LANES * EMB_DIM + 8))]
   } else if name == "sort_rank" {
@@ -385,7 +410,9 @@ fn case_reads(i: Int) -> List[Int] = if case_name(i) == "sort_rank" { [1] } else
 ## The reference table the fake device answers with, for one case.
 fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   let name = case_name(i)
-  if name == "token_embed" {
+  if name == "dequant" {
+    map.from([("dequant", (3, last_out((dts, ins) => dequant_ref(DQ_M, DQ_N, DQ_TS, dts, ins))))])
+  } else if name == "token_embed" {
     map.from([("token_embed",
       (3, last_out((dts, ins) => token_embed_ref(TOK_LANES, EMB_ROWS, EMB_DIM, EMB_MISS, dts, ins))))])
   } else if name == "sort_rank" {
@@ -466,10 +493,10 @@ fn shape_of(i: Int) -> String = {
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
     let argv = args()
-    let count = 4
+    let count = 5
     if len(argv) != count {
       io.eprintln("usage: gath_diff <token_embed.cubin> <sort_rank.cubin> <merge_rank.cubin>"
-          ++ " <scatter_perm.cubin>")
+          ++ " <scatter_perm.cubin> <dequant.cubin>")
       io.exit(2)
     }
     var cubins: Map[String, Bytes] = map.empty()

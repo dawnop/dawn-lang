@@ -463,18 +463,19 @@ reduced=(reduce_sum softmax dot mse monte_carlo rms_norm silu sigmoid ppo_loss d
 
 # The two-dimensional kernels of knife 8, in the order mm_diff takes them.
 # The first three run over a grid with more than one axis.
-twod=(matmul batched_matmul transpose layer_norm batch_norm group_norm fused_rms_norm)
+twod=(matmul batched_matmul transpose layer_norm batch_norm group_norm fused_rms_norm matvec)
 
 # The strided kernels of knife 9, in the order stride_diff takes them. Six
 # read or write a rank-2 layout and three are rank-1 ladders, which is the
 # split stride-row-major-swapped below is held to.
-strided=(transpose_tail conv1d conv2d max_pool interleave rgb_gray jacobi depthwise_conv1d gaussian_blur)
+strided=(transpose_tail conv1d conv2d max_pool interleave rgb_gray jacobi depthwise_conv1d gaussian_blur
+  conv3d)
 
 # The integer kernels of knife 10, in the order int_diff takes them. The
 # first two reduce over one block; the last two are element-wise over eight.
 # Only the last two shift right arithmetically, and only the last converts,
 # which is the split the two mutants below are held to.
-integers=(count_eq subarray_sum rainbow int_ops)
+integers=(count_eq subarray_sum rainbow int_ops subarray_sum2d subarray_sum3d)
 
 # The wide kernels of knife 11, in the order wide_diff takes them. Two are
 # in place (reverse, invert), one fills two buffers (sum_diff), four upload
@@ -487,7 +488,7 @@ wide=(sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matm
 # them. Only `token_embed` gathers, only `scatter_perm` scatters through a
 # mask, and the two rank kernels scatter without one, which is the split the
 # three mutants below are held to.
-gathered=(token_embed sort_rank merge_rank scatter_perm)
+gathered=(token_embed sort_rank merge_rank scatter_perm dequant)
 
 # The scan kernels of knife 13, in the order scan_diff takes them. Only
 # `gae` scans in reverse and only `compact` turns an inclusive scan into an
@@ -509,7 +510,16 @@ atomic=(histogram cas_swap)
 # move both of them: what separates the two mutants is the CORPUS, not the
 # kernel, which is why this family has no kernel-level control and runs
 # every mutant twice instead.
-erfs=(erf_sweep geglu)
+erfs=(erf_sweep geglu swiglu_half)
+
+# Of those three, the two that go through the package's `erf` composition
+# and the one that does not: knife 18's `swiglu_half` has `geglu`'s shape
+# (one buffer, two halves, a gate) and a swish where the gate is, so it is
+# the family's kernel-level control -- neither erf mutant may move it, at
+# layer 0 or on the device -- and the corpus lines below, which count what
+# 7.1.26 sees, are held over `erf_red` and not over all three.
+erf_red=(erf_sweep geglu)
+erf_green=(swiglu_half)
 
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
@@ -522,7 +532,8 @@ erfs=(erf_sweep geglu)
 # context product. That reuse is why six more problems cost seven kernels.
 sequenced=(lora_base lora_hidden lora_out attn_scores attn_softmax attn_context
   matpow_step swiglu_proj swiglu_act swiglu_down apsp_step
-  attn_causal attn_alibi attn_window attn_sinks attn_decay cce_row cce_mean)
+  attn_causal attn_alibi attn_window attn_sinks attn_decay cce_row cce_mean
+  mha_scores mha_context)
 
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
@@ -811,7 +822,7 @@ cat "$work/seq.out"
 seq_verdict="$(verdict_of "$work/seq.out")"
 case "$seq_verdict" in
   pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
-        echo "PASS  native: the eleven multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
+        echo "PASS  native: the twelve multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
   blocked:*) [ "$rc" = 0 ] || fail "verdict $seq_verdict with exit $rc"
         echo "BLOCKED  native: the driver refused before a result could be compared: $seq_verdict" ;;
   fail) cat "$work/seq.err" >&2; fail "the device answered and disagreed with the fake device on a sequence (see the transcript above)" ;;
@@ -864,7 +875,7 @@ esac
 # and `exp(-x^2)` underflows) and the lanes near zero. Both kernels carry
 # all three; `geglu`'s are counted on what its gate hands the composition,
 # after the 1/sqrt(2).
-for k in "${erfs[@]}"; do
+for k in "${erf_red[@]}"; do
   erf_shape="$(awk -v want="$k" '$1 == "kernel" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/erf.out")"
   case "$erf_shape" in
     *negative=0\ *) fail "$k's corpus has no negative lane, so the odd symmetry is not being tested: $erf_shape" ;;
@@ -888,11 +899,11 @@ done
 # with -- both sides the fake device, so this is a property of the corpus
 # and the references and not of the GPU.
 #
-# The eleven problems must be above zero. `decoupled` must be exactly zero:
+# The twelve problems must be above zero. `decoupled` must be exactly zero:
 # it is two launches whose second does not read the first's output, and it
 # is the control that says the counter can print a zero at all. Without
 # it, "has never printed zero" and "cannot print zero" look the same.
-for s in lora attention matpow swiglu apsp causal alibi window sinks decay cce; do
+for s in lora attention matpow swiglu apsp causal alibi window sinks decay cce mha; do
   seq_shape="$(awk -v want="$s" '$1 == "sequence" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/seq.out")"
   case "$seq_shape" in
     *changed_by_first=0) fail "$s's answer does not depend on its earlier launches, so it is not a sequence: $seq_shape" ;;
@@ -951,7 +962,10 @@ echo "PASS  repeat: one round is the single-round sequence and zero rounds leave
 #       block id at all -- sixty-four blocks all compute and store the one
 #       answer. A grid mutant is invisible wherever the blocks it adds are
 #       idempotent, which is not a fact about this harness but about what a
-#       grid means; three of the twelve sequences here are now that case.
+#       grid means; three of the thirteen sequences here are that case.
+#       Knife 18's `mha` is not one of them: its second launch is
+#       `attn_softmax` over MHA_H * MHA_N rows, so copying the first launch's
+#       2x2x2 grid onto it leaves all but two of those rows unwritten.
 seq_reds="second-launch-sees-stale-buffer:lora launch-order-swapped:lora last-launch-dropped:lora"
 seq_reds="$seq_reds second-launch-sees-stale-buffer:attention launch-order-swapped:attention"
 seq_reds="$seq_reds last-launch-dropped:attention grid-of-later-launch-copied-from-the-first:attention"
@@ -966,20 +980,22 @@ done
 for c in decay cce; do
   seq_reds="$seq_reds second-launch-sees-stale-buffer:$c launch-order-swapped:$c last-launch-dropped:$c"
 done
+seq_reds="$seq_reds second-launch-sees-stale-buffer:mha launch-order-swapped:mha"
+seq_reds="$seq_reds last-launch-dropped:mha grid-of-later-launch-copied-from-the-first:mha"
 seq_reds="$seq_reds last-launch-dropped:decoupled"
 if [ "$seq_verdict" = pass ]; then
   seq_probe="$(sed -n 's/^probe mutants //p' "$work/seq.out" | tail -n 1)"
-  [ "$seq_probe" = "red=39 $seq_reds" ] ||
+  [ "$seq_probe" = "red=43 $seq_reds" ] ||
     { printf 'wanted: red=39 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
       fail "the sequence mutants' red set moved"; }
-  echo "PASS  mutant: the four sequence mutants red on exactly 39 of the 48 (mutant, sequence) pairs, by name"
+  echo "PASS  mutant: the four sequence mutants red on exactly 43 of the 52 (mutant, sequence) pairs, by name"
   seq_controls="$(grep -c '^control intermediate-round-tripped ' "$work/seq.out" || true)"
   seq_controls_moved="$(grep -c '^control intermediate-round-tripped .* verdict differ:result$' "$work/seq.out" || true)"
-  if [ "$seq_controls" != 12 ] || [ "$seq_controls_moved" != 0 ]; then
+  if [ "$seq_controls" != 13 ] || [ "$seq_controls_moved" != 0 ]; then
     cat "$work/seq.out" >&2
     fail "the round-trip control moved a verdict: $seq_controls_moved of $seq_controls"
   fi
-  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (12 of 12)"
+  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (13 of 13)"
 else
   echo "SKIP  mutant: the sequence mutants are not verifiable on this driver: the clean run is $seq_verdict, before any launch reaches the device"
 fi
@@ -1384,7 +1400,7 @@ rc=0
 mverdict="$(verdict_of "$work/m-grid-y.out")"
 # the four kernels whose grid has a second axis, and the three that do not
 gridy_red=(matmul batched_matmul transpose group_norm)
-gridy_green=(layer_norm batch_norm fused_rms_norm)
+gridy_green=(layer_norm batch_norm fused_rms_norm matvec)
 if [ "$twod_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-grid-y.out" || true)
   if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#gridy_red[@]}" ]; then
@@ -1525,20 +1541,29 @@ fi
 #     swapped at once. Six of the nine kernels' bytecode moves and tileiras
 #     accepts every one of them.
 #
-#     On the device only ONE of the six goes red, and the reason is worth
+#     On the device only TWO of the seven go red, and the reason is worth
 #     the line: reversing EVERY layout in a kernel is a relabelling of the
 #     tile's own two axes, and a relabelling cancels when the TILE is
-#     square. transpose_tail reads a 32 by 32 tile transposed and writes it
-#     transposed, and the two swaps compose back to the transpose; the same
-#     holds for conv2d, max_pool, jacobi and gaussian_blur, masks included,
-#     because each of their masks is built from the same reversed ladder.
-#     depthwise_conv1d's tile is 4 by 32, so there is no relabelling to
-#     hide behind and it answers the wrong channel.
+#     square AND the masks are relabelled with it. transpose_tail reads a
+#     32 by 32 tile transposed and writes it transposed, and the two swaps
+#     compose back to the transpose; the same holds for conv2d, max_pool,
+#     jacobi and gaussian_blur, masks included, because each of their masks
+#     is built from the same reversed ladder. depthwise_conv1d's tile is 4
+#     by 32, so there is no relabelling to hide behind and it answers the
+#     wrong channel.
+#
+#     Knife 18's conv3d is the second, and it sharpens the rule rather than
+#     breaking it. Its tile IS square (16 by 16) and it still reds, because
+#     its two `axis_mask` limits are not equal (10 output rows against 14
+#     output columns) and a mask limit is a host constant the reversal does
+#     not touch. So the cancellation needs a square tile and a mask that is
+#     square with it; conv3d has the first and not the second.
 #
 #     So this mutant is not the strong one it looks like, and that is the
-#     point of recording it: a stride swap in the lowering is INVISIBLE on
-#     square tiles, which is most of them. The kernel-level swap above is
-#     the one that carries the claim.
+#     point of recording it: a stride swap in the lowering is INVISIBLE
+#     wherever a kernel's tile and its mask are both symmetric, which is
+#     most of them. The kernel-level swap above is the one that carries the
+#     claim.
 mutant_pkg_st="$work/pkg-ladder-strides-reversed"
 rm -rf "$mutant_pkg_st"
 cp -r "$root/packages/tileir" "$mutant_pkg_st"
@@ -1553,30 +1578,37 @@ after=$(digest "$mutant_pkg_st/src/lower.dawn")
 echo "      ladder-strides-reversed: packages/tileir/src/lower.dawn md5 $before -> $after"
 
 mutant_kernels ladder-strides-reversed "$mutant_pkg_st" "${strided[@]}"
-# the six kernels with a rank-2 layout move at layer 0; the three rank-1
+# the seven kernels with a rank-2 layout move at layer 0; the three rank-1
 # ladders cannot, and that is the mutant's own control at layer 0
 moved=0
 for k in "${strided[@]}"; do
   if cmp -s "$golden/$k.tilebc" "$work/ladder-strides-reversed-$k.tilebc"; then :; else moved=$((moved + 1)); fi
 done
-[ "$moved" = 6 ] ||
-  fail "ladder-strides-reversed: expected exactly 6 of the ${#strided[@]} kernels' bytecode to move, got $moved"
-echo "      ladder-strides-reversed: 6 of ${#strided[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+[ "$moved" = 7 ] ||
+  fail "ladder-strides-reversed: expected exactly 7 of the ${#strided[@]} kernels' bytecode to move, got $moved"
+echo "      ladder-strides-reversed: 7 of ${#strided[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
 rev_cubins=()
 for k in "${strided[@]}"; do rev_cubins+=("$work/ladder-strides-reversed-$k.cubin"); done
 rc=0
 "$work/strided.bin" "${rev_cubins[@]}" > "$work/m-ladder-reversed.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-ladder-reversed.out")"
+ladder_red=(depthwise_conv1d conv3d)
 if [ "$strided_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-ladder-reversed.out" || true)
-  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#ladder_red[@]}" ]; then
     cat "$work/m-ladder-reversed.out" >&2
-    fail "ladder-strides-reversed mutant stayed green: expected verdict fail (exit 1) with depthwise_conv1d alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+    fail "ladder-strides-reversed mutant stayed green: expected verdict fail (exit 1) with exactly ${#ladder_red[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
   fi
-  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "depthwise_conv1d" {bad=1} END {exit bad}' \
+  for k in "${ladder_red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-ladder-reversed.out" ||
+      { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: $k should differ"; }
+  done
+  awk 'BEGIN{split("depthwise_conv1d conv3d", r, " "); for (i in r) red[r[i]]=1}
+       /^kernel /{cur=$2} /^  verdict differ:result$/ && !(cur in red) {bad=1} END {exit bad}' \
     "$work/m-ladder-reversed.out" ||
-    { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: a kernel other than depthwise_conv1d moved; a square tile should have hidden it"; }
-  echo "PASS  mutant: ladder-strides-reversed (six kernels' bytes move, and only depthwise_conv1d's 4 by 32 tile can see it)"
+    { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: a kernel outside the red set moved; a square tile with square masks should have hidden it"; }
+  echo "PASS  mutant: ladder-strides-reversed (seven kernels' bytes move, and only ${ladder_red[*]} can see it on the device)"
 else
   [ "$mverdict" = "$strided_verdict" ] ||
     { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: the clean run is $strided_verdict but the mutant is $mverdict"; }
@@ -1654,9 +1686,10 @@ fi
 #     i32 range is half of this claim and the mutant would be invisible
 #     without it.
 #
-#     Two of the four kernels shift right arithmetically and go red;
-#     count_eq and subarray_sum shift nothing and are the control, at layer
-#     0 (their bytes do not move) and on the device both.
+#     Two of the six kernels shift right arithmetically and go red;
+#     count_eq and the three subarray sums shift nothing and are the
+#     control, at layer 0 (their bytes do not move) and on the device
+#     both.
 mutant_pkg_shr="$work/pkg-shri-always-logical"
 rm -rf "$mutant_pkg_shr"
 cp -r "$root/packages/tileir" "$mutant_pkg_shr"
@@ -1694,12 +1727,12 @@ if [ "$int_verdict" = pass ]; then
       "$work/m-shri-logical.out" ||
       { cat "$work/m-shri-logical.out" >&2; fail "shri-always-logical: $k shifts right arithmetically over negative lanes and should differ"; }
   done
-  for k in count_eq subarray_sum; do
+  for k in count_eq subarray_sum subarray_sum2d subarray_sum3d; do
     awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
       "$work/m-shri-logical.out" ||
       { cat "$work/m-shri-logical.out" >&2; fail "shri-always-logical: $k shifts nothing and should be untouched"; }
   done
-  echo "PASS  mutant: shri-always-logical (layer 0 blind, layer 1 accepts; on the device ${shri_red[*]} differ and the other two do not)"
+  echo "PASS  mutant: shri-always-logical (layer 0 blind, layer 1 accepts; on the device ${shri_red[*]} differ and the other four do not)"
 else
   [ "$mverdict" = "$int_verdict" ] ||
     { cat "$work/m-shri-logical.out" >&2; fail "shri-always-logical: the clean run is $int_verdict but the mutant is $mverdict"; }
@@ -1712,9 +1745,9 @@ fi
 #     table) and layer 1 accepts it -- a signed widening is a legal
 #     operation, just not this one's -- so the device is again the only
 #     place the difference exists: `count_eq` answers the negated count and
-#     `int_ops`'s parity term flips sign on every odd lane. `subarray_sum`
-#     and `rainbow` widen no mask and are the control, at layer 0 (their
-#     bytes do not move) and on the device both.
+#     `int_ops`'s parity term flips sign on every odd lane. The three
+#     subarray sums and `rainbow` widen no mask and are the control, at
+#     layer 0 (their bytes do not move) and on the device both.
 #
 #     The conversion mutant the coverage memo named first,
 #     ftoi-rounds-instead-of-truncates, is a LAYER 1 mutant rather than a
@@ -1757,12 +1790,12 @@ if [ "$int_verdict" = pass ]; then
       "$work/m-exti-signed.out" ||
       { cat "$work/m-exti-signed.out" >&2; fail "exti-sign-extends: $k widens a mask and should differ"; }
   done
-  for k in subarray_sum rainbow; do
+  for k in subarray_sum subarray_sum2d subarray_sum3d rainbow; do
     awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
       "$work/m-exti-signed.out" ||
       { cat "$work/m-exti-signed.out" >&2; fail "exti-sign-extends: $k widens nothing and should be untouched"; }
   done
-  echo "PASS  mutant: exti-sign-extends (layer 0 blind, layer 1 accepts; on the device ${exti_red[*]} differ and the other two do not)"
+  echo "PASS  mutant: exti-sign-extends (layer 0 blind, layer 1 accepts; on the device ${exti_red[*]} differ and the other four do not)"
 else
   [ "$mverdict" = "$int_verdict" ] ||
     { cat "$work/m-exti-signed.out" >&2; fail "exti-sign-extends: the clean run is $int_verdict but the mutant is $mverdict"; }
@@ -1908,8 +1941,13 @@ fi
 #     and not a crash: a gather that read past the allocation would be
 #     reported here as `blocked`, which is not a difference.
 #
-#     The other three kernels gather nothing; their bytes do not move and
-#     they are the control on the device too.
+#     The other four kernels gather nothing THROUGH A MASK; their bytes do
+#     not move and they are the control on the device too. Knife 18's
+#     `dequant` is the sharpest of the four: it DOES gather, with an index
+#     it computes from each lane's own coordinates, and the mutant cannot
+#     reach it because every index it forms is inside the buffer and its
+#     gather is therefore unmasked. A control that gathers says more than
+#     three that do not.
 mutant_pkg_gm="$work/pkg-gather-mask-dropped"
 rm -rf "$mutant_pkg_gm"
 cp -r "$root/packages/tileir" "$mutant_pkg_gm"
@@ -1945,12 +1983,12 @@ if [ "$gath_verdict" = pass ]; then
       "$work/m-gather-mask.out" ||
       { cat "$work/m-gather-mask.out" >&2; fail "gather-mask-dropped: $k gathers out-of-range ids and should differ"; }
   done
-  for k in sort_rank merge_rank scatter_perm; do
+  for k in sort_rank merge_rank scatter_perm dequant; do
     awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
       "$work/m-gather-mask.out" ||
-      { cat "$work/m-gather-mask.out" >&2; fail "gather-mask-dropped: $k gathers nothing and should be untouched"; }
+      { cat "$work/m-gather-mask.out" >&2; fail "gather-mask-dropped: $k gathers through no mask and should be untouched"; }
   done
-  echo "PASS  mutant: gather-mask-dropped (layer 1 accepts it; on the device ${gather_red[*]} differs and the other three do not)"
+  echo "PASS  mutant: gather-mask-dropped (layer 1 accepts it; on the device ${gather_red[*]} differs and the other four do not)"
 else
   [ "$mverdict" = "$gath_verdict" ] ||
     { cat "$work/m-gather-mask.out" >&2; fail "gather-mask-dropped: the clean run is $gath_verdict but the mutant is $mverdict"; }
@@ -2302,9 +2340,16 @@ atom_kernel_mutant cas-compare-ignored cas_swap \
 atom_kernel_check cas-compare-ignored cas_swap
 
 # The two mutants of the error function family (knife 15). Both live in the
-# PACKAGE's `erf` and therefore move both kernels; what tells them apart is
-# the corpus, so each is run twice, once on erf_diff's main corpus and once
-# on its `--corpus positive` control, and the pair of verdicts is the claim.
+# PACKAGE's `erf` and therefore move the two kernels that call it; what
+# tells them apart is the corpus, so each is run twice, once on erf_diff's
+# main corpus and once on its `--corpus positive` control, and the pair of
+# verdicts is the claim.
+#
+# Knife 18 put a third kernel in that program, `swiglu_half`, which has
+# `geglu`'s shape and a swish gate instead of an error function. It is this
+# family's first KERNEL-LEVEL control: neither mutant may move it, at layer
+# 0 or on the device. Until now the only control here was a second corpus,
+# which is why the old spelling of these checks was "all of them move".
 #
 # `want_main` and `want_positive` are `fail` or `pass`.
 erf_pkg_mutant() { # name, old, new, want_main, want_positive
@@ -2318,12 +2363,16 @@ erf_pkg_mutant() { # name, old, new, want_main, want_positive
   echo "      $name: packages/tileir/src/dev.dawn md5 $before -> $after"
 
   mutant_kernels "$name" "$pkg" "${erfs[@]}"
-  for k in "${erfs[@]}"; do
+  for k in "${erf_red[@]}"; do
     if cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc"; then :; else moved=$((moved + 1)); fi
   done
-  [ "$moved" = "${#erfs[@]}" ] ||
-    fail "$name: every kernel here goes through the composition, so all ${#erfs[@]} should move at layer 0, got $moved"
-  echo "      $name: all ${#erfs[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+  [ "$moved" = "${#erf_red[@]}" ] ||
+    fail "$name: the ${#erf_red[@]} kernels that go through the composition should move at layer 0, got $moved"
+  for k in "${erf_green[@]}"; do
+    cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+      fail "$name: $k calls no erf, so its bytecode must not move"
+  done
+  echo "      $name: ${#erf_red[@]} of ${#erfs[@]} .tilebc files differ from the goldens (${erf_green[*]} does not) and tileiras still accepts every one"
 
   for k in "${erfs[@]}"; do cubs+=("$work/$name-$k.cubin"); done
   if [ "$erf_verdict" != pass ]; then
@@ -2339,16 +2388,17 @@ erf_pkg_mutant() { # name, old, new, want_main, want_positive
   erf_mutant_corpus "$name" main "$want_main" "${cubs[@]}"
   erf_mutant_corpus "$name" positive "$want_positive" "${cubs[@]}"
   if [ "$want_main" = fail ] && [ "$want_positive" = pass ]; then
-    echo "PASS  mutant: $name (layer 1 accepts it; on the device ${erfs[*]} differ, and the corpus with no negative lane forgives it entirely)"
+    echo "PASS  mutant: $name (layer 1 accepts it; on the device ${erf_red[*]} differ and ${erf_green[*]} does not, and the corpus with no negative lane forgives it entirely)"
   else
-    echo "PASS  mutant: $name (layer 1 accepts it; on the device ${erfs[*]} differ on both corpora, so the tolerance tier is not what is forgiving it)"
+    echo "PASS  mutant: $name (layer 1 accepts it; on the device ${erf_red[*]} differ on both corpora and ${erf_green[*]} on neither, so the tolerance tier is not what is forgiving it)"
   fi
 }
 
 # One mutant against one corpus: `want` is the verdict the run must reach,
-# and when it is `fail` EVERY kernel of the family must be the one that
-# reds -- both go through the composition, so a mutant that moved only one
-# of them would be a mutant of something else.
+# and when it is `fail` exactly the kernels of `erf_red` must be the ones
+# that red -- both go through the composition, so a mutant that moved only
+# one of them would be a mutant of something else, and one that moved
+# `swiglu_half` too would be a mutant of something wider than `erf`.
 erf_mutant_corpus() { # name, corpus, want, cubins...
   local name="$1" corpus="$2" want="$3"
   shift 3
@@ -2361,10 +2411,14 @@ erf_mutant_corpus() { # name, corpus, want, cubins...
   mverdict="$(verdict_of "$out")"
   differ=$(grep -c '^  verdict differ:result$' "$out" || true)
   if [ "$want" = fail ]; then
-    if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#erfs[@]}" ]; then
+    if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#erf_red[@]}" ]; then
       cat "$out" >&2
-      fail "$name on the $corpus corpus stayed green: expected fail (exit 1) with all ${#erfs[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+      fail "$name on the $corpus corpus stayed green: expected fail (exit 1) with ${#erf_red[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
     fi
+    for k in "${erf_green[@]}"; do
+      awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+        "$out" || { cat "$out" >&2; fail "$name: $k calls no erf and should be untouched"; }
+    done
   else
     if [ "$mverdict" != pass ] || [ "$rc" != 0 ]; then
       cat "$out" >&2

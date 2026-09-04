@@ -8,6 +8,18 @@
 #            <swiglu_down.cubin> <apsp_step.cubin> <attn_causal.cubin>
 #            <attn_alibi.cubin> <attn_window.cubin> <attn_sinks.cubin>
 #            <attn_decay.cubin> <cce_row.cubin> <cce_mean.cubin>
+#            <mha_scores.cubin> <mha_context.cubin>
+#
+# KNIFE 18 added leetgpu 12 (Multi-Head Attention) and its two kernels.
+# Knife 17's six problems differ from leetgpu 6 in a RULE ON A SCORE; this
+# one differs in an AXIS. A head is a column slice of one N by d_model
+# matrix, so `mha_scores` and `mha_context` are `attn_scores` and
+# `attn_context` with the head on the grid's third axis and a row stride
+# of d_model rather than of the head width. The middle launch is knife
+# 16's `attn_softmax` unchanged: the heads' score blocks lie one after
+# another, so the whole buffer is `heads * N` rows of `N` and a softmax by
+# row does not need to know which head a row belongs to. Two kernels, and
+# the reuse is on the GRID rather than on a mask.
 #
 # KNIFE 17 added six problems and seven kernels to it. Five of the six are
 # the attention family, and four of those five are one kernel each: an
@@ -69,7 +81,7 @@ use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, matmul_ref, matmul_bt_ref, lora_out_ref,
   row_softmax_ref, swiglu_act_ref, apsp_step_ref, causal_scores_ref, alibi_scores_ref, window_scores_ref,
-  sink_scores_ref, decay_scores_ref, cce_row_ref, mean_ref }
+  sink_scores_ref, decay_scores_ref, cce_row_ref, mean_ref, mha_scores_ref, mha_context_ref }
 use std/list
 use std/map
 
@@ -116,6 +128,15 @@ pub const ATT_LN_GAMMA: Float = 0.0 - 0.10536051565782628
 ## leetgpu 25's shape: CCE_N rows of CCE_C logits.
 pub const CCE_N: Int = 64
 pub const CCE_C: Int = 32
+
+## leetgpu 12's shape: MHA_N tokens of MHA_DMODEL features in MHA_H heads,
+## so each head is MHA_DK = MHA_DMODEL / MHA_H columns wide.
+pub const MHA_N: Int = 64
+pub const MHA_DMODEL: Int = 64
+pub const MHA_H: Int = 2
+pub const MHA_DK: Int = 32
+pub const MHA_T: Int = 32
+pub const MHA_INV_SQRT_DK: Float = 0.17677669529663687
 
 ## The unit-weight step of the distance corpus, and the weight of every
 ## edge that is not one of them.
@@ -651,6 +672,33 @@ fn cce_seq() -> Seq = Seq {
   stale_at: 1
 }
 
+## leetgpu 12 (Multi-Head Attention): MHA_H independent attentions over
+## column slices of one matrix each, the answers written back into the
+## slices they came from. Three launches, and the middle one is knife 16's
+## `attn_softmax` at a grid of MHA_H * MHA_N rows: the scores of head `h`
+## are its own MHA_N by MHA_N block, so all the heads together are a taller
+## matrix of the same rows and the softmax does not have to know.
+fn mha_seq() -> Seq = Seq {
+  name: "mha",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "q", dtype: "f64", data: wave(3, MHA_N * MHA_DMODEL, 0.1) },
+    Buf { name: "k", dtype: "f64", data: wave(5, MHA_N * MHA_DMODEL, 0.1) },
+    Buf { name: "v", dtype: "f64", data: wave(7, MHA_N * MHA_DMODEL, 0.1) },
+    Buf { name: "s", dtype: "f64", data: sentinels(MHA_H * MHA_N * MHA_N) },
+    Buf { name: "p", dtype: "f64", data: sentinels(MHA_H * MHA_N * MHA_N) },
+    Buf { name: "o", dtype: "f64", data: sentinels(MHA_N * MHA_DMODEL) }
+  ],
+  steps: [
+    step("mha_scores", MHA_N / MHA_T, MHA_N / MHA_T, MHA_H, ["q", "k", "s"]),
+    step("attn_softmax", MHA_H * MHA_N, 1, 1, ["s", "p"]),
+    step("mha_context", MHA_N / MHA_T, 1, MHA_H, ["p", "v", "o"])
+  ],
+  read: "o",
+  via: "s",
+  stale_at: 1
+}
+
 ## THE CONTROL SEQUENCE, and the reason the counter below is a measurement
 ## and not a decoration: two launches whose second does NOT read what the
 ## first wrote. `changed_by_first` must be zero here and the stale-buffer
@@ -675,7 +723,7 @@ fn decoupled_seq() -> Seq = Seq {
 
 fn sequences() -> List[Seq] =
   [lora_seq(), attn_seq(), matpow_seq(), swiglu_seq(), apsp_seq(),
-    causal_seq(), alibi_seq(), window_seq(), sinks_seq(), decay_seq(), cce_seq(),
+    causal_seq(), alibi_seq(), window_seq(), sinks_seq(), decay_seq(), cce_seq(), mha_seq(),
     decoupled_seq()]
 
 ## The kernels each sequence launches, as a set: what
@@ -694,6 +742,7 @@ pub fn sequence_kernels() -> List[(String, List[String])] =
     ("sinks", ["attn_sinks", "attn_softmax", "attn_context"]),
     ("decay", ["attn_decay", "attn_context"]),
     ("cce", ["cce_row", "cce_mean"]),
+    ("mha", ["mha_scores", "attn_softmax", "mha_context"]),
     ("decoupled", ["matpow_step"])]
 
 ## The sequences compared under the tolerance tier. `apsp` is not here:
@@ -702,7 +751,7 @@ pub fn sequence_kernels() -> List[(String, List[String])] =
 ## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier`
 ## column of scripts/leetgpu-diff/problems.txt against it.
 pub fn tolerance_tier() -> List[String] =
-  ["lora", "attention", "matpow", "swiglu", "causal", "alibi", "window", "sinks", "decay", "cce",
+  ["lora", "attention", "matpow", "swiglu", "causal", "alibi", "window", "sinks", "decay", "cce", "mha",
     "decoupled"]
 
 # ---- the reference tables ----
@@ -757,6 +806,12 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
     map.from([
       ("cce_row", (3, last_out((dts, ins) => cce_row_ref(CCE_N, CCE_C, dts, ins)))),
       ("cce_mean", (2, last_out((dts, ins) => mean_ref(CCE_N, dts, ins))))])
+  } else if name == "mha" {
+    map.from([
+      ("mha_scores", (3, last_out((dts, ins) =>
+          mha_scores_ref(MHA_N, MHA_DMODEL, MHA_H, MHA_INV_SQRT_DK, dts, ins)))),
+      ("attn_softmax", (2, last_out((dts, ins) => row_softmax_ref(MHA_H * MHA_N, MHA_N, dts, ins)))),
+      ("mha_context", (3, last_out((dts, ins) => mha_context_ref(MHA_N, MHA_DMODEL, MHA_H, dts, ins))))])
   } else if name == "apsp" {
     map.from([("apsp_step", (2, (dts, ins) => [(0, apsp_step_ref(APSP_N, dts, ins))]))])
   } else {
@@ -875,7 +930,8 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
 fn cubin_names() -> List[String] =
   ["lora_base", "lora_hidden", "lora_out", "attn_scores", "attn_softmax", "attn_context",
     "matpow_step", "swiglu_proj", "swiglu_act", "swiglu_down", "apsp_step",
-    "attn_causal", "attn_alibi", "attn_window", "attn_sinks", "attn_decay", "cce_row", "cce_mean"]
+    "attn_causal", "attn_alibi", "attn_window", "attn_sinks", "attn_decay", "cce_row", "cce_mean",
+    "mha_scores", "mha_context"]
 
 fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: seq_diff " ++ list.fold(cubin_names(), "", (a, n) =>

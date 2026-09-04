@@ -2062,6 +2062,152 @@ pub fn mean_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Fl
       if i == 0 { round_to(dt, total / to_float(n)) } else { kept(old, i) })
 }
 
+# ---- references for knife 18's problems ----
+#
+# Eight kernels, seven references: `attn_softmax`'s is knife 16's
+# `row_softmax_ref` at a different number of rows, which is the whole of
+# why leetgpu 12 costs two kernels rather than three.
+
+## `y = A x` for a DENSE `m` by `n` matrix and an `n`-vector: leetgpu 18
+## (Sparse Matrix-Vector Multiplication), whose own reference is
+## `torch.matmul` over a buffer with zeroes in it. `ins` is `[a, x, old y]`.
+pub fn matvec_ref(m: Int, n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let x = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), i =>
+      if i < m {
+        round_to(dt, list.fold(range(0, n), 0.0, (acc, j) => acc + a[i * n + j] * x[j]))
+      } else {
+        kept(old, i)
+      })
+}
+
+## The wrapping i32 sum of the rectangle `[r0, r1] x [c0, c1]` of a matrix
+## `cols` wide, at element 0 of the second buffer: leetgpu 48 (2D Subarray
+## Sum). Both bounds are INCLUSIVE, as the problem states them.
+pub fn subarray_sum2d_ref(cols: Int, r0: Int, r1: Int, c0: Int, c1: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let total = list.fold(range(r0, r1 + 1), 0, (acc, i) =>
+      list.fold(range(c0, c1 + 1), acc, (inner, j) => wrap_i32(inner + as_i32(x, i * cols + j))))
+  one_answer(ins[1], dtypes[1], to_float(total))
+}
+
+## The same over the box `[d0, d1] x [r0, r1] x [c0, c1]` of an array whose
+## planes are `rows` by `cols`: leetgpu 49 (3D Subarray Sum).
+pub fn subarray_sum3d_ref(rows: Int, cols: Int, d0: Int, d1: Int, r0: Int, r1: Int,
+  c0: Int, c1: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let total = list.fold(range(d0, d1 + 1), 0, (acc, d) =>
+      list.fold(range(r0, r1 + 1), acc, (mid, i) =>
+          list.fold(range(c0, c1 + 1), mid, (inner, j) =>
+              wrap_i32(inner + as_i32(x, (d * rows + i) * cols + j)))))
+  one_answer(ins[1], dtypes[1], to_float(total))
+}
+
+## `silu(x1) * x2` with `x1` and `x2` the two halves of ONE buffer of `n`
+## lanes each: leetgpu 54 (Swish-Gated Linear Unit). `ins` is
+## `[x, old out]`. `geglu_ref`'s shape with the swish gate in place of the
+## error function one, and NOT `swiglu_act_ref`, which is handed two
+## buffers a projection wrote.
+pub fn swiglu_half_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        round_to(dt, x[i] / (1.0 + ref_exp(0.0 - x[i])) * x[n + i])
+      } else {
+        kept(old, i)
+      })
+}
+
+## `Y = X * S` where one element of `S` scales a `ts` by `ts` block of an
+## `m` by `n` matrix: leetgpu 64 (Weight Dequantization). `S` is
+## `ceil(m / ts)` by `ceil(n / ts)`, which is the problem's
+## `repeat_interleave` then truncate read from the other side.
+## `ins` is `[x, s, old y]`.
+pub fn dequant_ref(m: Int, n: Int, ts: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let s = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  let scols = (n + ts - 1) / ts
+  list.map(range(0, len(old)), idx =>
+      if idx < m * n {
+        round_to(dt, x[idx] * s[(idx / n / ts) * scols + (idx % n) / ts])
+      } else {
+        kept(old, idx)
+      })
+}
+
+## The valid-mode convolution of a `d` by `h` by `w` volume with a `kd` by
+## `kh` by `kw` kernel: leetgpu 11 (3D Convolution). The output is
+## `(d - kd + 1)` by `(h - kh + 1)` by `(w - kw + 1)` and the taps are
+## folded in the order the kernel's three host loops unroll them.
+## `ins` is `[x, w, old out]`.
+pub fn conv3d_ref(d: Int, h: Int, w: Int, kd: Int, kh: Int, kw: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let f = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  let oh = h - kh + 1
+  let ow = w - kw + 1
+  let lanes = (d - kd + 1) * oh * ow
+  list.map(range(0, len(old)), idx =>
+      if idx < lanes {
+        let pd = idx / (oh * ow)
+        let r = (idx / ow) % oh
+        let c = idx % ow
+        list.fold(range(0, kd * kh * kw), 0.0, (acc, t) =>
+            round_to(dt, acc + round_to(dt,
+                x[((pd + t / (kh * kw)) * h + r + (t / kw) % kh) * w + c + t % kw] * f[t])))
+      } else {
+        kept(old, idx)
+      })
+}
+
+## `Q_head K_head^T * scale` for every head of an `n` by `dmodel` pair,
+## laid out one head's `n` by `n` block after another: leetgpu 12's first
+## launch. Head `hh` owns the columns `[hh * dk, (hh + 1) * dk)` of both
+## matrices, `dk = dmodel / heads`. `ins` is `[q, k, old s]`.
+pub fn mha_scores_ref(n: Int, dmodel: Int, heads: Int, scale: Float,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let q = ins[0]
+  let k = ins[1]
+  let dt = dtypes[2]
+  let dk = dmodel / heads
+  list.map(range(0, heads * n * n), idx => {
+    let hh = idx / (n * n)
+    let i = (idx / n) % n
+    let j = idx % n
+    round_to(dt, scale * list.fold(range(0, dk), 0.0, (acc, c) =>
+        acc + q[i * dmodel + hh * dk + c] * k[j * dmodel + hh * dk + c]))
+  })
+}
+
+## `P_head V_head` for every head, the answer written into the head's own
+## columns of an `n` by `dmodel` output: leetgpu 12's third launch.
+## `ins` is `[p, v, old o]`.
+pub fn mha_context_ref(n: Int, dmodel: Int, heads: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let p = ins[0]
+  let v = ins[1]
+  let dt = dtypes[2]
+  let dk = dmodel / heads
+  list.map(range(0, n * dmodel), idx => {
+    let i = idx / dmodel
+    let hh = (idx % dmodel) / dk
+    let c = (idx % dmodel) % dk
+    round_to(dt, list.fold(range(0, n), 0.0, (acc, j) =>
+        acc + p[hh * n * n + i * n + j] * v[j * dmodel + hh * dk + c]))
+  })
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
