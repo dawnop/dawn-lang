@@ -56,7 +56,7 @@
 # so the miss reported below is the composed error of the whole sequence
 # and not any one launch's.
 use std/io
-use std/io.{with_fs_real}
+use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, matmul_ref, matmul_bt_ref, lora_out_ref,
   row_softmax_ref, swiglu_act_ref, apsp_step_ref }
@@ -707,7 +707,7 @@ fn run_fake(s: Seq, at: Int, reset: String, trip: String) -> Trace =
 fn run_real(cubins: Map[String, Bytes], s: Seq, at: Int, reset: String, trip: String) -> Trace !io =
   with_gpu_real(cubins, () => stages(s.bufs, s.steps, s.read, at, reset, trip))
 
-fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
   Ok(b) -> b
   Err(e) -> {
     io.eprintln("seq_diff: cannot read ${path}: ${e.message}")
@@ -721,13 +721,15 @@ fn cubin_names() -> List[String] =
   ["lora_base", "lora_hidden", "lora_out", "attn_scores", "attn_softmax", "attn_context",
     "matpow_step", "swiglu_proj", "swiglu_act", "swiglu_down", "apsp_step"]
 
-fn usage() -> Unit !io = {
+fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: seq_diff " ++ list.fold(cubin_names(), "", (a, n) =>
       if a == "" { "<" ++ n ++ ".cubin>" } else { a ++ " <" ++ n ++ ".cubin>" }))
   io.exit(2)
 }
 
-pub fn main() -> Unit !io = {
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
   let argv = args()
   let names = cubin_names()
   if len(argv) != len(names) { usage() } else { () }
@@ -836,7 +838,7 @@ pub fn main() -> Unit !io = {
   } else {
     io.println("tile-gpu-diff: ${blocked}")
   }
-}
+})
 
 # `io.exit` is typed Unit, so the branch that cannot continue still owes a
 # Bytes; this is never reached.
