@@ -9,7 +9,7 @@
 
 use std/char
 use std/io
-use std/io.{Fs, Proc, Env, Exit}
+use std/io.{Fs, Proc, Env, Exit, Console}
 use std/str
 use std/map
 use std/list
@@ -561,15 +561,15 @@ type LspState = {
 }
 
 ## Close one lease without allowing its failure to skip the remaining leases.
-fn close_lease(lease: JsigLease) -> Unit !io =
+fn close_lease(lease: JsigLease) -> Unit !Console !io =
   match catch_panic(() => lease.close()) {
     Ok(_) -> ()
-    Err(e) -> io.eprintln("lsp: failed to close a Java signature lease: " ++ e.message)
+    Err(e) -> console_eprintln("lsp: failed to close a Java signature lease: " ++ e.message)
   }
 
 ## Release every host resource exactly once. Clearing ownership in the
 ## returned state makes shutdown followed by exit harmless.
-fn close_all_leases(st0: LspState) -> LspState !io = {
+fn close_all_leases(st0: LspState) -> LspState !Console !io = {
   var st = st0
   for workspace_key in sort(map.keys(st.workspaces)) {
     match map.get(st.workspaces, workspace_key).expect("workspace") {
@@ -685,7 +685,7 @@ pub fn lsp_std_dir(flag: Option[String], from_env: Option[String]) -> String =
 ## The driver supplies resource factories rather than one process-global Java
 ## oracle. The JVM host creates a platform-only standalone lease and one lease
 ## per target; the native host creates lifecycle-compatible refusals.
-pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !Proc !Env !Exit !io = {
+pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let std_dir = lsp_std_dir(std_flag, io.getenv("DAWN_STD"))
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
@@ -822,7 +822,7 @@ pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !Proc !
 const DEBOUNCE_MS: Int = 150
 
 ## Run the analysis a document sync deferred, if there is one.
-fn flush(st: LspState, pending: Option[(String, String, Int)]) -> LspState !Fs !Proc !Env !io =
+fn flush(st: LspState, pending: Option[(String, String, Int)]) -> LspState !Fs !Proc !Env !Console !io =
   match pending {
     Some(p) -> {
       let (uri, text, version) = p
@@ -1124,9 +1124,10 @@ fn notify(method: String, params: Json) -> Unit !io =
 ## dependency, and `Env` through the same plan's `canon`.
 fn handle(st0: LspState, msg: Json) -> LspState !io =
   io.with_fs_real(() =>
-      io.with_proc_real(() => io.with_env_real(() => handle_fs(st0, msg))))
+      io.with_proc_real(() => io.with_env_real(() =>
+          io.with_console_real(() => handle_fs(st0, msg)))))
 
-fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !io = {
+fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io = {
   var st = st0
   let method = ostr(msg, "method")
   let id = match oget(msg, "id") {
@@ -1376,7 +1377,7 @@ fn activate_workspace(
   st: LspState,
   plan: ProjectPlan,
   path_by_uri: Map[String, String]
-) -> WorkspaceSlot !Fs !Env !io =
+) -> WorkspaceSlot !Fs !Env !Console !io =
   match st.host.project(plan.source) {
     Ok(lease) -> {
       let no_prog: Option[Program] = None
@@ -1518,7 +1519,7 @@ fn standalone_doc(
   }
 }
 
-fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !Env !io =
+fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !Env !Console !io =
   match uri_to_path(uri) {
     None -> {
       let no_path: Option[String] = None
@@ -1629,7 +1630,7 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
     }
   }
 
-fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !Env !io =
+fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !Env !Console !io =
   match map.get(st.docs, uri) {
     Some(old) -> update_existing_doc(st, old, text, version)
     None -> open_new_doc(st, uri, text, version)
@@ -1638,7 +1639,7 @@ fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState
 ## An unavailable root retries only at an explicit low-frequency boundary.
 ## didChange never reaches this function; new members use `activate_workspace`
 ## directly, and a fully closed root is newly planned when reopened.
-fn retry_unavailable(st: LspState, uri: String) -> LspState !Fs !Env !io =
+fn retry_unavailable(st: LspState, uri: String) -> LspState !Fs !Env !Console !io =
   match map.get(st.docs, uri) {
     Some(d) ->
       match d.analysis {
@@ -1656,7 +1657,7 @@ fn retry_unavailable(st: LspState, uri: String) -> LspState !Fs !Env !io =
     None -> st
   }
 
-fn close_doc(st0: LspState, uri: String) -> LspState !Fs !Env !io =
+fn close_doc(st0: LspState, uri: String) -> LspState !Fs !Env !Console !io =
   match map.get(st0.docs, uri) {
     None -> {
       publish_uris(st0, set.from([uri]))

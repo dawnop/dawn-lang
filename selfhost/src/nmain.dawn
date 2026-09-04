@@ -25,7 +25,7 @@
 # DAWN_SELF and runs the whole scripted session against this binary.
 
 use std/io
-use std/io.{Fs, Proc, Env, Exit}
+use std/io.{Fs, Proc, Env, Exit, Console}
 use std/str
 use std/bytes
 use front/token.{Diag}
@@ -85,8 +85,8 @@ fn usage() -> String =
     "Packaging a jar, `lock` and `cache` need a JVM too and are not subcommands here."
   ], "\n") ++ "\n"
 
-fn fail_usage() -> Unit !Exit !io = {
-  io.eprint(usage())
+fn fail_usage() -> Unit !Exit !Console !io = {
+  console_eprint(usage())
   let _ = io.exit(2)
   ()
 }
@@ -129,11 +129,11 @@ fn subcommand_help(cmd: String) -> String = {
   join(out, "\n") ++ "\n"
 }
 
-fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !Exit !io = {
+fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
-  io.eprint(diag.render_all(pairs))
-  io.eprintln(diag.count_line(len(diags)))
+  console_eprint(diag.render_all(pairs))
+  console_eprintln(diag.count_line(len(diags)))
   let _ = io.exit(1)
   ()
 }
@@ -142,8 +142,8 @@ fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !Exit !io = {
 ## while `main.dawn` exited 2 for the same class of mistake (a missing target,
 ## a file with the wrong suffix). Nothing compared the two drivers, so the
 ## divergence sat there; `scripts/native-cli-diff.sh` compares them now.
-fn cli_error(msg: String) -> Unit !Exit !io = {
-  io.eprintln("error: " ++ msg)
+fn cli_error(msg: String) -> Unit !Exit !Console !io = {
+  console_eprintln("error: " ++ msg)
   let _ = io.exit(2)
   ()
 }
@@ -153,7 +153,7 @@ fn cli_error(msg: String) -> Unit !Exit !io = {
 ## so it gets `error:` and the CLI exit code rather than a panic reading as
 ## "reinstall the toolchain". `cli_error` exits, so the panic under it is the
 ## unreachable value this function's type needs.
-fn fail_std(e: StdLoadError) -> StdCtx !Env !Exit !io = {
+fn fail_std(e: StdLoadError) -> StdCtx !Env !Exit !Console !io = {
   let text = std_load_error_text(e)
   if std_load_is_bug(e) { panic(text) }
   cli_error(text)
@@ -163,7 +163,7 @@ fn fail_std(e: StdLoadError) -> StdCtx !Env !Exit !io = {
 ## Refuse a second positional for commands whose contract has one target.
 ## The wording matches main.dawn: the native driver is a second parser for the
 ## same command contract, not a second place to invent diagnostics.
-fn refuse_second_target(cmd: String, have: String, got: String) -> Unit !Exit !io =
+fn refuse_second_target(cmd: String, have: String, got: String) -> Unit !Exit !Console !io =
   if have != "" {
     cli_error(cmd ++ " takes one target, got `" ++ have ++ "` and `" ++ got ++
         "`; a bare word after the target is not a flag this subcommand knows")
@@ -176,26 +176,26 @@ fn require_one_input(
   choices: String,
   usage_text: String,
   selected: Int
-) -> Unit !Exit !io = {
+) -> Unit !Exit !Console !io = {
   if selected == 0 { return cli_error(usage_text) }
   if selected > 1 { return cli_error(cmd ++ " accepts exactly one of " ++ choices) }
 }
 
 ## `fmt`'s refusal shape: the lexer diagnostics, the count line, and the fact
 ## that nothing was written. Same words as `main.dawn`'s `fail_fmt`.
-fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !Fs !Exit !io = {
-  io.eprint(diag.render_all(pairs))
-  io.eprintln(diag.count_line(len(pairs)))
-  io.eprintln("these files do not lex and were left unchanged")
+fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !Fs !Exit !Console !io = {
+  console_eprint(diag.render_all(pairs))
+  console_eprintln(diag.count_line(len(pairs)))
+  console_eprintln("these files do not lex and were left unchanged")
   let _ = io.exit(1)
   ()
 }
 
 ## Diagnostics without the count line, exit 1 -- `doc`'s failure shape.
-fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !Exit !io = {
+fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
-  io.eprint(diag.render_all(pairs))
+  console_eprint(diag.render_all(pairs))
   let _ = io.exit(1)
   ()
 }
@@ -206,7 +206,7 @@ fn run_usage() -> String =
   "usage: dawn run [compiler-options] <target> [-- <program-args>...]"
 
 ## Independent native parser: compiler options end at the target.
-fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !io = {
+fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !Console !io = {
   var std_dir = "std"
   var target = ""
   var seen_target = false
@@ -243,7 +243,7 @@ fn parse_compile_tail(
   cmd: String,
   usage_text: String,
   rest: List[String]
-) -> (String, String, String) !Exit !io = {
+) -> (String, String, String) !Exit !Console !io = {
   var std_dir = "std"
   var out = ""
   var target = ""
@@ -280,7 +280,7 @@ fn parse_compile_tail(
 fn parse_build_tail(
   usage_text: String,
   rest: List[String],
-) -> (String, String, String, Bool, Bool) !Exit !io = {
+) -> (String, String, String, Bool, Bool) !Exit !Console !io = {
   var std_dir = "std"
   var out = ""
   var target = ""
@@ -333,13 +333,13 @@ fn check_args(rest: List[String]) -> (String, List[String]) = {
   (std_dir, targets)
 }
 
-fn load_or_die(std_dir: String) -> StdCtx !Fs !Env !Exit !io =
+fn load_or_die(std_dir: String) -> StdCtx !Fs !Env !Exit !Console !io =
   match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
   }
 
-fn analyzed(std: StdCtx, target: String) -> Program !Fs !Proc !Env !Exit !io = {
+fn analyzed(std: StdCtx, target: String) -> Program !Fs !Proc !Env !Exit !Console !io = {
   if not io.exists(target) {
     cli_error("no such file or directory: " ++ target)
   }
@@ -352,7 +352,7 @@ fn analyzed(std: StdCtx, target: String) -> Program !Fs !Proc !Env !Exit !io = {
   prog
 }
 
-fn emitted(std_dir: String, target: String) -> String !Fs !Proc !Env !Exit !io = {
+fn emitted(std_dir: String, target: String) -> String !Fs !Proc !Env !Exit !Console !io = {
   let std = load_or_die(std_dir)
   let prog = analyzed(std, target)
   match cdriver.c_text(std, prog) {
@@ -378,7 +378,7 @@ fn default_out(target: String) -> String = {
 ## leave the binary at `out`. The cc diagnostics stream to this process's
 ## stderr -- an empty err_path means "inherit", and cc failing is the user's
 ## compile error to read.
-fn cc_build(ctext: String, out: String) -> Unit !Fs !Proc !Env !Exit !io = cc_build_for(ctext, out, false, false)
+fn cc_build(ctext: String, out: String) -> Unit !Fs !Proc !Env !Exit !Console !io = cc_build_for(ctext, out, false, false)
 
 ## The reactor's only export, appended to the emitted C.
 ##
@@ -473,7 +473,7 @@ fn cc_command(wasm: Bool) -> String !Env =
     }
   }
 
-fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !Fs !Proc !Env !Exit !io =
+fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !Fs !Proc !Env !Exit !Console !io =
   cc_build_with(cc_command(wasm), ctext, out, wasm, reactor)
 
 ## Stage the C sources and drive `cc` over them.
@@ -489,7 +489,7 @@ fn cc_build_with(
   out: String,
   wasm: Bool,
   reactor: Bool
-) -> Unit !Fs !Proc !Exit !io = {
+) -> Unit !Fs !Proc !Exit !Console !io = {
   let work = match io.temp_dir("", "dawnc") {
     Ok(d) -> d
     Err(e) -> {
@@ -537,12 +537,12 @@ fn cc_build_with(
     match io.run(shim, "", "") {
       Ok(0) -> ()
       Ok(code) -> {
-        io.eprintln(wasm_toolchain_hint())
+        console_eprintln(wasm_toolchain_hint())
         cli_error(cc ++ " failed (exit code " ++ "${code}" ++ ")")
         return ()
       }
       Err(e) -> {
-        io.eprintln(wasm_toolchain_hint())
+        console_eprintln(wasm_toolchain_hint())
         cli_error("cannot run " ++ cc ++ ": " ++ e.message)
         return ()
       }
@@ -554,12 +554,12 @@ fn cc_build_with(
     match io.run(tag, "", "") {
       Ok(0) -> ()
       Ok(code) -> {
-        io.eprintln(wasm_toolchain_hint())
+        console_eprintln(wasm_toolchain_hint())
         cli_error(cc ++ " failed (exit code " ++ "${code}" ++ ")")
         return ()
       }
       Err(e) -> {
-        io.eprintln(wasm_toolchain_hint())
+        console_eprintln(wasm_toolchain_hint())
         cli_error("cannot run " ++ cc ++ ": " ++ e.message)
         return ()
       }
@@ -598,18 +598,18 @@ fn cc_build_with(
   match io.run(argv, "", "") {
     Ok(0) -> pkgfetch.delete_tree(work)
     Ok(code) -> {
-      if wasm { io.eprintln(wasm_toolchain_hint()) }
+      if wasm { console_eprintln(wasm_toolchain_hint()) }
       cli_error(cc ++ " failed (exit code " ++ "${code}" ++ ")")
     }
     Err(e) -> {
-      if wasm { io.eprintln(wasm_toolchain_hint()) }
+      if wasm { console_eprintln(wasm_toolchain_hint()) }
       cli_error("cannot run " ++ cc ++ ": " ++ e.message)
     }
   }
 }
 
-fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
-  if wants_help(rest) { return print(subcommand_help("check")) }
+fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
+  if wants_help(rest) { return console_print(subcommand_help("check")) }
   let (std_dir, targets) = check_args(rest)
   if len(targets) == 0 {
     return cli_error("usage: dawn check [--std <dir>] <target>...")
@@ -630,10 +630,10 @@ fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
     all = all ++ prog.diags
   }
   if len(all) > 0 { return fail_compile(all) }
-  println("ok")
+  console_println("ok")
 }
 
-fn cmd_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn cmd_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (std_dir, out, target) = parse_compile_tail(
     "dawn emitc",
     "usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]",
@@ -641,7 +641,7 @@ fn cmd_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   )
   let text = emitted(std_dir, target)
   if out == "" {
-    print(text)
+    console_print(text)
   } else {
     match io.write_file(out, text) {
       Ok(_) -> ()
@@ -650,12 +650,12 @@ fn cmd_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   }
 }
 
-fn cmd_build(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn cmd_build(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   # Ahead of the parser, not inside it: `--help` is a request for the contract,
   # so it must not be able to fail on the argv it is asking about. The parser
   # would take it for the target and report a missing file (which is what it
   # did until 2026-08-26).
-  if wants_help(rest) { return print(subcommand_help("build")) }
+  if wants_help(rest) { return console_print(subcommand_help("build")) }
   let (std_dir, out0, target, wasm, reactor) = parse_build_tail(
     "usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]",
     rest
@@ -683,7 +683,7 @@ fn build_and_exec(
   bin_name: String,
   what: String,
   program_args: List[String]
-) -> Unit !Fs !Proc !Env !Exit !io = {
+) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let work = match io.temp_dir("", dir_prefix) {
     Ok(d) -> d
     Err(e) -> {
@@ -710,7 +710,7 @@ fn build_and_exec(
   }
 }
 
-fn cmd_run(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn cmd_run(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let run = parse_run_tail(rest)
   build_and_exec(
     emitted(run.std_dir, run.target),
@@ -749,7 +749,7 @@ fn dawn_files_under(dir: String) -> List[String] !Fs = {
 ## file the lexer cannot read whole) are documented at `main.dawn`'s `run_fmt`;
 ## the two drivers' output is compared byte for byte by
 ## `scripts/native-cli-diff.sh`, so they refuse in the same words.
-fn cmd_fmt(rest: List[String]) -> Unit !Fs !Exit !io = {
+fn cmd_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
   var check = false
   var paths: List[String] = []
   for a in rest {
@@ -780,11 +780,11 @@ fn cmd_fmt(rest: List[String]) -> Unit !Fs !Exit !io = {
           Ok(formatted) ->
             if formatted != original {
               if check {
-                println(f)
+                console_println(f)
                 unformatted = unformatted + 1
               } else {
                 match io.write_file(f, formatted) {
-                  Ok(_) -> println("formatted " ++ f)
+                  Ok(_) -> console_println("formatted " ++ f)
                   Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
                 }
               }
@@ -804,7 +804,7 @@ fn cmd_fmt(rest: List[String]) -> Unit !Fs !Exit !io = {
 ## one hands it the refusing hook, as every other native subcommand does. For a
 ## target without `use java` the two produce the same JSON, and a target with
 ## it is not a program this backend compiles at all.
-fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_dir = "std"
   var builtins_mode = false
   var stdlib_mode = false
@@ -839,11 +839,11 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
     Err(e) -> fail_std(e)
   }
   if stdlib_mode {
-    print(doc.stdlib_json(std))
+    console_print(doc.stdlib_json(std))
     return
   }
   if builtins_mode {
-    print(doc.builtins_json(std))
+    console_print(doc.builtins_json(std))
     return
   }
   if not io.exists(target) {
@@ -852,7 +852,7 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   let loaded = load_target(std, target)
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
   if len(prog.diags) > 0 { fail_doc(prog.diags) }
-  print(doc.project_json(prog))
+  console_print(doc.project_json(prog))
 }
 
 ## `dawnc test [--std <dir>] <target> | --stdlib` -- the native mirror of
@@ -879,7 +879,7 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
 ## The comptime flags (`--comptime-fuel`, `--comptime-ffi`, `--closure`) are
 ## not taken here because no subcommand of this driver takes them; that gap is
 ## the driver's, not this subcommand's.
-fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_dir = "std"
   var target = ""
   var std_tests = false
@@ -970,9 +970,9 @@ fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
 ## `Exit` is innermost, in the order std's nesting test pins.
 pub fn main() -> Unit !io =
   io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() =>
-      io.with_exit_real(() => dispatch()))))
+      io.with_exit_real(() => io.with_console_real(() => dispatch())))))
 
-fn dispatch() -> Unit !Fs !Proc !Env !Exit !io = {
+fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
   match args() {
     [] -> fail_usage()
     [mode, ..rest] ->
@@ -992,7 +992,7 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !io = {
         cmd_doc(rest)
       } else if mode == "add" {
         match add.run_add(rest) {
-          Ok(s) -> println(s)
+          Ok(s) -> console_println(s)
           Err(e) -> cli_error(e)
         }
       } else if mode == "lsp" {
@@ -1001,7 +1001,7 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !io = {
           project: native_lsp_target_lease
         })
       } else if mode == "version" || mode == "--version" {
-        println("dawnc " ++ VERSION ++ " (native)")
+        console_println("dawnc " ++ VERSION ++ " (native)")
       } else {
         fail_usage()
       }
@@ -1187,11 +1187,15 @@ test "the native build is one command line, and this is every flag in it" {
       () => {
         # `cc_build_with` ends the process on every failure path, so the test
         # installs an arm that panics instead: a wrong turn is still a failing
-        # test, and the runner is still here to report it.
+        # test, and the runner is still here to report it. Its console is the
+        # real one: unlike `Exit`, answering `Console` for real costs the test
+        # nothing, and a hint printed on the way to a panic is a hint the
+        # reader of a failing run wants.
         with handle Exit {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
-        cc_build_with("fake-cc", "int main(void) { return 0; }\n", out, false, false)
+        io.with_console_real(() =>
+            cc_build_with("fake-cc", "int main(void) { return 0; }\n", out, false, false))
       }
     )
     # no probe: nothing here is cross-compiled, so nothing is asked
@@ -1249,7 +1253,8 @@ test "the wasm build is four command lines, and these are every flag in them" {
         with handle Exit {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
-        cc_build_with("fake-clang", "int main(void) { return 0; }\n", out, true, false)
+        io.with_console_real(() =>
+            cc_build_with("fake-clang", "int main(void) { return 0; }\n", out, true, false))
       }
     )
     # the probe, the C++ shim, the exception tag, the compile-and-link
@@ -1346,7 +1351,8 @@ test "a reactor build is the same link plus one flag" {
         with handle Exit {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
-        cc_build_with("fake-clang", "int main(void) { return 0; }\n", out, true, true)
+        io.with_console_real(() =>
+            cc_build_with("fake-clang", "int main(void) { return 0; }\n", out, true, true))
       }
     )
     assert len(log) == 4

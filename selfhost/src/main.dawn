@@ -15,7 +15,7 @@
 #                                         class-path packages in (standalone)
 
 use std/io
-use std/io.{Fs, Proc, Env, Exit}
+use std/io.{Fs, Proc, Env, Exit, Console}
 use std/str
 use std/bytes
 use std/map
@@ -261,7 +261,7 @@ fn collect_program(
   opts: CtOpts,
   closure: Bool,
   std_tests: Bool
-) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !Fs !Proc !Env !Exit !io = {
+) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !Fs !Proc !Env !Exit !Console !io = {
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
   var mods: List[CheckedMod] = []
@@ -723,7 +723,7 @@ fn usage() -> String = join([
 
 ## `--comptime-fuel N` / `--comptime-fuel=N` and `--comptime-ffi`;
 ## (options, args without the flags).
-fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !Exit !io = {
+fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !Exit !Console !io = {
   var fuel = DEFAULT_FUEL
   var ffi = false
   var out: List[String] = []
@@ -757,7 +757,7 @@ fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !Exit !io = {
 
 ## `--cp <jars>` / `--cp=jars`; repeatable, `:`-separated, every entry must
 ## exist; (jars, args without the flag).
-fn extract_cp(rest: List[String]) -> (List[String], List[String]) !Fs !Exit !io = {
+fn extract_cp(rest: List[String]) -> (List[String], List[String]) !Fs !Exit !Console !io = {
   var jars: List[String] = []
   var out: List[String] = []
   var i = 0
@@ -803,7 +803,7 @@ fn run_usage() -> String =
   "usage: dawn run [compiler-options] <target> [-- <program-args>...]"
 
 ## Parse compiler options through the target, then preserve program argv raw.
-fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !io = {
+fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
   var cpjars: List[String] = []
   var fuel = DEFAULT_FUEL
   var ffi = false
@@ -884,11 +884,11 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !io = {
 
 ## Render compile diagnostics, the count line, and exit 1 (the Kotlin
 ## compileProject failure shape).
-fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !Exit !io = {
+fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
-  io.eprint(diag.render_all(pairs))
-  io.eprintln(diag.count_line(len(diags)))
+  console_eprint(diag.render_all(pairs))
+  console_eprintln(diag.count_line(len(diags)))
   let _ = io.exit(1)
   ()
 }
@@ -910,28 +910,28 @@ fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
 ## nothing was written, and exit 1. Separate from `fail_compile` because the
 ## last line is the whole point: the user asked for a rewrite and did not get
 ## one, and a bare diagnostic dump leaves that ambiguous.
-fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !Fs !Exit !io = {
-  io.eprint(diag.render_all(pairs))
-  io.eprintln(diag.count_line(len(pairs)))
-  io.eprintln("these files do not lex and were left unchanged")
+fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !Fs !Exit !Console !io = {
+  console_eprint(diag.render_all(pairs))
+  console_eprintln(diag.count_line(len(pairs)))
+  console_eprintln("these files do not lex and were left unchanged")
   let _ = io.exit(1)
   ()
 }
 
 ## Render diagnostics without the count line and exit 1 (the Kotlin cmdDoc
 ## failure shape).
-fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !Exit !io = {
+fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
-  io.eprint(diag.render_all(pairs))
+  console_eprint(diag.render_all(pairs))
   let _ = io.exit(1)
   ()
 }
 
 ## Maven and lock setup is neither a usage mistake nor a source diagnostic.
 ## It fails the command at status 1 after any target lease has been released.
-fn fail_target_setup(msg: String) -> Unit !Exit !io = {
-  io.eprintln("error: " ++ msg)
+fn fail_target_setup(msg: String) -> Unit !Exit !Console !io = {
+  console_eprintln("error: " ++ msg)
   let _ = io.exit(1)
   ()
 }
@@ -944,7 +944,7 @@ fn fail_target_setup(msg: String) -> Unit !Exit !io = {
 ## flag (`dawn build proj -0 out`) built `out` -- a real directory name to the
 ## loop -- and reported success. run instead owns a `--`-delimited program argv
 ## namespace, which is why it is not here.
-fn refuse_second_target(cmd: String, have: String, got: String) -> Unit !Exit !io =
+fn refuse_second_target(cmd: String, have: String, got: String) -> Unit !Exit !Console !io =
   if have != "" {
     cli_error(cmd ++ " takes one target, got `" ++ have ++ "` and `" ++ got ++
         "`; a bare word after the target is not a flag this subcommand knows")
@@ -958,13 +958,13 @@ fn require_one_input(
   choices: String,
   usage_text: String,
   selected: Int
-) -> Unit !Exit !io = {
+) -> Unit !Exit !Console !io = {
   if selected == 0 { return cli_error(usage_text) }
   if selected > 1 { return cli_error(cmd ++ " accepts exactly one of " ++ choices) }
 }
 
-fn cli_error(msg: String) -> Unit !Exit !io = {
-  io.eprintln("error: " ++ msg)
+fn cli_error(msg: String) -> Unit !Exit !Console !io = {
+  console_eprintln("error: " ++ msg)
   let _ = io.exit(2)
   ()
 }
@@ -973,7 +973,7 @@ fn cli_error(msg: String) -> Unit !Exit !io = {
 ## compiler's own fault; a directory is the user's environment, so it gets
 ## `error:` and the CLI exit code instead of a panic. `cli_error` exits, so the
 ## panic under it is the unreachable value this function's type needs.
-fn fail_std(e: StdLoadError) -> StdCtx !Env !Exit !io = {
+fn fail_std(e: StdLoadError) -> StdCtx !Env !Exit !Console !io = {
   let text = std_load_error_text(e)
   if std_load_is_bug(e) { panic(text) }
   cli_error(text)
@@ -983,7 +983,7 @@ fn fail_std(e: StdLoadError) -> StdCtx !Env !Exit !io = {
 ## `dawn cache verify` — re-hash every entry in the package cache and compare
 ## it with the hash its directory name claims (PKG-02's companion command:
 ## the per-use check catches the entry a build touches, this sweeps them all).
-fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !io = {
+fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !Console !io = {
   if len(rest) != 1 || rest[0] != "verify" {
     return cli_error("usage: dawn cache verify")
   }
@@ -991,7 +991,7 @@ fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !io = {
   let names = match io.list_dir(root) {
     Ok(ns) -> ns
     Err(_) -> {
-      println("cache is empty (" ++ root ++ ")")
+      console_println("cache is empty (" ++ root ++ ")")
       return ()
     }
   }
@@ -1002,31 +1002,31 @@ fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !io = {
       let hash = str.replace(n, "d1-", "d1:")
       checked = checked + 1
       match pkgfetch.verify_cached(root ++ "/" ++ n, hash) {
-        Ok(_) -> println("ok   " ++ n)
+        Ok(_) -> console_println("ok   " ++ n)
         Err(e) -> {
-          println("BAD  " ++ n)
-          io.eprintln(e)
+          console_println("BAD  " ++ n)
+          console_eprintln(e)
           bad = bad + 1
         }
       }
     }
   }
-  println(to_string(checked) ++ " entr" ++ (if checked == 1 { "y" } else { "ies" }) ++
+  console_println(to_string(checked) ++ " entr" ++ (if checked == 1 { "y" } else { "ies" }) ++
       " checked, " ++ to_string(bad) ++ " bad")
   if bad > 0 { let _ = io.exit(1) }
 }
 
 ## `selfhost __pkghash <dir>` — the d1 canonical tree hash (dawn __pkghash).
-fn run_pkghash(rest: List[String]) -> Unit !Fs !Exit !io = {
+fn run_pkghash(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
   let dir = if len(rest) > 0 { rest[0] } else { "." }
   if not io.is_dir(dir) { return cli_error("not a directory: " ++ dir) }
   match pkgfetch.tree_hash(dir) {
-    Ok(h) -> println(h)
+    Ok(h) -> console_println(h)
     Err(e) -> cli_error(e)
   }
 }
 
-fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   if len(rest) != 3 || rest[0] != "--base" {
     return cli_error("usage: dawn __source-inputs --base <repo> <project-dir>")
   }
@@ -1042,9 +1042,9 @@ fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
   let pdiags = planner_diags(plan.diags)
   if len(pdiags) > 0 { return fail_compile(pdiags) }
   match source.bootstrap_source_input_manifest(plan, base) {
-    Ok(text) -> print(text)
+    Ok(text) -> console_print(text)
     Err(e) -> {
-      io.eprintln("error: " ++ e)
+      console_eprintln("error: " ++ e)
       let _ = io.exit(1)
       ()
     }
@@ -1082,7 +1082,7 @@ fn peek_target(rest: List[String]) -> String = {
 }
 
 ## The target's resolved java-deps jars, with the Kotlin CLI's progress line.
-fn resolve_java_deps(target: String) -> List[String] !Fs !Proc !Env !Exit !io = {
+fn resolve_java_deps(target: String) -> List[String] !Fs !Proc !Env !Exit !Console !io = {
   let none: List[String] = []
   if not io.exists(target) { return none }
   if not io.is_dir(target) && not str.ends_with(target, ".dawn") { return none }
@@ -1093,7 +1093,7 @@ fn resolve_java_deps(target: String) -> List[String] !Fs !Proc !Env !Exit !io = 
   if len(pdiags) > 0 { fail_compile(pdiags) }
   let coords = plan.java_coords
   if len(coords) > 0 {
-    io.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
+    console_eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
         plan.project ++ "/dawn.toml...")
   }
   match maven.fetch_checked(plan.project, coords) {
@@ -1172,7 +1172,7 @@ fn lsp_standalone_lease() -> JsigLease !io = jsig_for([])
 ## `dawn lock [--check] [<dir>]` — write (or verify) the resolved [java-deps]
 ## closure. This is the only command that rewrites dawn.lock; every other one
 ## only refuses to disagree with it.
-fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var check_only = false
   var target = "."
   var seen_target = false
@@ -1197,10 +1197,10 @@ fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
       return cli_error(path ++ " exists but " ++ plan.project ++
           "/dawn.toml declares no [java-deps]\n  delete the lock, or add the dependency back")
     }
-    println("no [java-deps] to lock")
+    console_println("no [java-deps] to lock")
     return ()
   }
-  io.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps...")
+  console_eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps...")
   let jars = match maven.fetch(coords) {
     Ok(js) -> js
     Err(e) -> {
@@ -1224,7 +1224,7 @@ fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
           Ok(locked) ->
             match maven.check_lock(locked, fresh) {
               Err(e) -> cli_error(e)
-              Ok(_) -> println(path ++ " is up to date (" ++
+              Ok(_) -> console_println(path ++ " is up to date (" ++
                   to_string(len(fresh.arts)) ++ " artifacts)")
             }
         }
@@ -1234,7 +1234,7 @@ fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
     # dawn.lock and every other command refuses to disagree with it, so a
     # half-written lock would fail all of them rather than just this one.
     match io.atomic_write_file(path, maven.render_lock(fresh)) {
-      Ok(_) -> println("wrote " ++ path ++ " (" ++ to_string(len(fresh.arts)) ++
+      Ok(_) -> console_println("wrote " ++ path ++ " (" ++ to_string(len(fresh.arts)) ++
           " artifacts from " ++ to_string(len(coords)) ++ " direct)")
       Err(e) -> cli_error("cannot write " ++ path ++ ": " ++ e.message)
     }
@@ -1259,7 +1259,7 @@ fn maybe_with_known_deps(
   rest: List[String],
   target: String,
   cpjars: List[String]
-) -> Unit !Fs !Proc !Env !Exit !io = {
+) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   match io.getenv("DAWN_SELFHOST_CP") {
     Some(_) -> return
     None -> ()
@@ -1283,7 +1283,7 @@ fn maybe_with_known_deps(
 }
 
 ## test/build have no program argv, so their existing filters remain safe here.
-fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   match io.getenv("DAWN_SELFHOST_CP") {
     Some(_) -> return
     None -> ()
@@ -1336,7 +1336,7 @@ fn wait_reaped(child: Process, scratch: String) -> Int !Fs !io = {
 ## `wait_reaped` removes it if the driver is terminated before that. Nothing
 ## else ever would -- the directories used to survive every ordinary run, and
 ## 3384 of them holding 2.9G had piled up in /tmp by the time anyone looked.
-fn write_temp_classes(classes: List[(String, Bytes)]) -> String !Fs !Exit !io = {
+fn write_temp_classes(classes: List[(String, Bytes)]) -> String !Fs !Exit !Console !io = {
   let dir =
     match io.temp_dir("", "selfhost-run") {
       Ok(d) -> d
@@ -1370,7 +1370,7 @@ fn spawn_java(cp: String, cls: String, args: List[String], scratch: String) -> I
 ## of `dawn run`,
 ## via a subprocess over freshly emitted classes (the host class path rides
 ## along so `use java` third-party classes stay visible).
-fn run_run(run: RunArgs) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_run(run: RunArgs) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (classes, entry, _) =
     collect_program(run.target, run.std_dir, run.opts, run.closure, false)
   if entry == "" {
@@ -1390,7 +1390,7 @@ fn run_run(run: RunArgs) -> Unit !Fs !Proc !Env !Exit !io = {
 ## project — its modules see the intrinsics no user module may name, and its
 ## `impl Iter[String]` is an orphan anywhere else — so `dawn test std/str.dawn`
 ## cannot be made to work, and a flag is the whole mechanism.
-fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (_, rest1) = extract_cp(rest0)
   let (opts, restb) = extract_ct_opts(rest1)
   let (closure2, restc) = extract_flag(restb, "--closure")
@@ -1438,7 +1438,7 @@ fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
 
 ## `selfhost emit [<target>] [--std <dir>] -o <dir>`: write every class of the
 ## compiled program under <dir> (`emitrt` is the historical alias).
-fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var out = ""
   var target = ""
   var std_dir = "std"
@@ -1473,7 +1473,7 @@ fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
       n = n + 1
     }
   }
-  println(to_string(n) ++ " classes -> " ++ out)
+  console_println(to_string(n) ++ " classes -> " ++ out)
 }
 
 ## The target's basename, `.dawn` stripped — what `-o` defaults derive from.
@@ -1751,14 +1751,14 @@ fn run_native_image(
   bin_out: String,
   user_cp: List[String],
   entry: String
-) -> Unit !Fs !Env !Exit !io = {
+) -> Unit !Fs !Env !Exit !Console !io = {
   let ni = match find_native_image() {
     Some(p) -> p
     None ->
       return cli_error(
         "native-image not found. Install GraalVM and add it to PATH, or set GRAALVM_HOME")
   }
-  println("invoking native-image (takes a minute or two the first time)...")
+  console_println("invoking native-image (takes a minute or two the first time)...")
   # with --cp jars the -jar form would ignore them: explicit class path + main
   var cmd: List[String] = [ni, "-jar", jar_path, "-o", bin_out, "--no-fallback"]
   if len(user_cp) > 0 {
@@ -1780,7 +1780,7 @@ fn run_native_image(
   let outs = proc.getInputStream().expect("stream")
   let all = outs.readAllBytes().expect("output")
   for line in str.split(bytes.decode_utf8_lossy(all), "\n") {
-    if line != "" { println("  " ++ line) }
+    if line != "" { console_println("  " ++ line) }
   }
   let code = proc.waitFor()
   # the jar and the temp directory `run_build` staged it in -- there is no
@@ -1793,7 +1793,7 @@ fn run_native_image(
   if code != 0 {
     return cli_error("native-image failed (exit code " ++ to_string(code) ++ ")")
   }
-  println("wrote " ++ bin_out ++ " (standalone binary, run it directly: ./" ++ bin_out ++ ")")
+  console_println("wrote " ++ bin_out ++ " (standalone binary, run it directly: ./" ++ bin_out ++ ")")
 }
 
 ## `selfhost build <target> [-o out] [--native] [--std <dir>] [--vendor <pkg>]...`:
@@ -1802,7 +1802,7 @@ fn run_native_image(
 ## internal package path (e.g. org/objectweb/asm) whose classes are copied in
 ## from java.class.path — building selfhost itself vendors ASM and the
 ## coursier interface, which is what makes the jar standalone.
-fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (user_cp, rest1) = extract_cp(rest0)
   let (opts, restb) = extract_ct_opts(rest1)
   let (closure, rest) = extract_flag(restb, "--closure")
@@ -1885,12 +1885,12 @@ fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
     return run_native_image(jar_path, bin_out, user_cp, entry)
   }
   if len(cp_entries) == 0 {
-    println("wrote " ++ jar_path ++ " (run it with: java -jar " ++ jar_path ++ ")")
+    console_println("wrote " ++ jar_path ++ " (run it with: java -jar " ++ jar_path ++ ")")
   } else if len(deps) == 0 {
-    println("wrote " ++ jar_path ++ " (run it with: java -jar " ++ jar_path ++
+    console_println("wrote " ++ jar_path ++ " (run it with: java -jar " ++ jar_path ++
         "; manifest Class-Path points at the --cp jars, keep them in place)")
   } else {
-    println("wrote " ++ jar_path ++ " and " ++ to_string(len(deps)) ++ " jar(s) into " ++
+    console_println("wrote " ++ jar_path ++ " and " ++ to_string(len(deps)) ++ " jar(s) into " ++
         abs_parent(jar_path) ++ "/lib (run it with: java -jar " ++ jar_path ++
         "; keep lib/ next to the jar)")
   }
@@ -1931,7 +1931,7 @@ fn dawn_files_under(dir: String) -> List[String] !Fs = {
 ##
 ## The lexer refusal is per file: the rest of the batch still formats, and the
 ## diagnostics for every refused file are rendered together at the end.
-fn run_fmt(rest: List[String]) -> Unit !Fs !Exit !io = {
+fn run_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
   var check = false
   var paths: List[String] = []
   for a in rest {
@@ -1962,11 +1962,11 @@ fn run_fmt(rest: List[String]) -> Unit !Fs !Exit !io = {
           Ok(formatted) ->
             if formatted != original {
               if check {
-                println(f)
+                console_println(f)
                 unformatted = unformatted + 1
               } else {
                 match io.write_file(f, formatted) {
-                  Ok(_) -> println("formatted " ++ f)
+                  Ok(_) -> console_println("formatted " ++ f)
                   Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
                 }
               }
@@ -1981,7 +1981,7 @@ fn run_fmt(rest: List[String]) -> Unit !Fs !Exit !io = {
 }
 
 ## `selfhost doc <target>` / `selfhost doc --builtins` — mirror of `dawn doc`.
-fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_dir = "std"
   var builtins_mode = false
   var stdlib_mode = false
@@ -2018,11 +2018,11 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
     Err(e) -> fail_std(e)
   }
   if stdlib_mode {
-    print(doc.stdlib_json(std))
+    console_print(doc.stdlib_json(std))
     return
   }
   if builtins_mode {
-    print(doc.builtins_json(std))
+    console_print(doc.builtins_json(std))
     return
   }
   if not io.exists(target) {
@@ -2044,7 +2044,7 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
     }
   }
   if len(prog.diags) > 0 { fail_doc(prog.diags) }
-  print(doc.project_json(prog))
+  console_print(doc.project_json(prog))
 }
 
 ## Lowering coverage gate (docs/native-backend-plan.md Phase 0): lower every
@@ -2054,7 +2054,7 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
 ##
 ## Each module is lowered inside catch_panic so one gap does not hide the
 ## rest: a single run lists everything still missing.
-fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_dir = "std"
   var dump_dir = ""
   var targets: List[String] = []
@@ -2129,7 +2129,7 @@ fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
         bad = bad + 1
         if not set.has(seen, e.message) {
           seen = set.insert(seen, e.message)
-          println("GAP  " ++ cls ++ ": " ++ e.message)
+          console_println("GAP  " ++ cls ++ ": " ++ e.message)
         }
       }
     }
@@ -2141,7 +2141,7 @@ fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
         bad = bad + 1
         if not set.has(seen, e.message) {
           seen = set.insert(seen, e.message)
-          println("GAP  " ++ cm.class_name ++ ": " ++ e.message)
+          console_println("GAP  " ++ cm.class_name ++ ": " ++ e.message)
         }
       }
     }
@@ -2171,13 +2171,13 @@ fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
         bad = bad + 1
         if not set.has(seen, e.message) {
           seen = set.insert(seen, e.message)
-          println("GAP  " ++ cls ++ ": " ++ e.message)
+          console_println("GAP  " ++ cls ++ ": " ++ e.message)
         }
       }
     }
   }
-  println("")
-  println("lowered " ++ to_string(ok) ++ " module(s), " ++ to_string(bad) ++ " failed")
+  console_println("")
+  console_println("lowered " ++ to_string(ok) ++ " module(s), " ++ to_string(bad) ++ " failed")
   if bad > 0 {
     let _ = io.exit(1)
     ()
@@ -2200,7 +2200,7 @@ fn lower_size(m: CModule) -> Int = {
 ## the trivial subset instead of class files. Hidden and unsupported --
 ## `emitc.dawn` panics on anything outside that subset, and both are
 ## superseded once Core IR lands.
-fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_dir = "std"
   var out = ""
   var target = ""
@@ -2234,7 +2234,7 @@ fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
     Err(e) -> return cli_error(e ++ " in " ++ t)
   }
   if out == "" {
-    print(text)
+    console_print(text)
   } else {
     match io.write_file(out, text) {
       Ok(_) -> ()
@@ -2260,7 +2260,7 @@ fn check_args(rest: List[String]) -> (String, List[String]) = {
   (std_dir, targets)
 }
 
-fn check_std(std_dir: String) -> StdCtx !Fs !Env !Exit !io =
+fn check_std(std_dir: String) -> StdCtx !Fs !Env !Exit !Console !io =
   match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
@@ -2277,7 +2277,7 @@ fn check_std(std_dir: String) -> StdCtx !Fs !Env !Exit !io =
 ##
 ## Diagnostics from every target are rendered together, so a multi-target run
 ## reports all of them rather than the first target's.
-fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (std_dir, targets) = check_args(rest)
   if len(targets) == 0 {
     return cli_error("usage: dawn check [--std <dir>] <target>...")
@@ -2312,20 +2312,20 @@ fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
     }
   }
   if len(all) > 0 { return fail_compile(all) }
-  println("ok")
+  console_println("ok")
 }
 
 ## `dawn __check` — the golden dump (driver/checkdump.dawn), one block per
 ## target, exit 0 either way. Read by scripts/checker-corpus/run.sh and the
 ## N vs N-1 differential.
-fn run_checkdump(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
+fn run_checkdump(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (std_dir, targets) = check_args(rest)
   let std = check_std(std_dir)
   for t in targets {
-    println("== " ++ t ++ " ==")
+    console_println("== " ++ t ++ " ==")
     let loaded = load_target(std, t)
     let prog = analyze_program(loaded, std, ct_default(), jsig_real())
-    print(checkdump.render(prog))
+    console_print(checkdump.render(prog))
   }
 }
 
@@ -2342,12 +2342,12 @@ fn run_checkdump(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !io = {
 ## keeping the closed row outermost is the only constraint the rows impose.
 pub fn main() -> Unit !io =
   io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() =>
-      io.with_exit_real(() => dispatch()))))
+      io.with_exit_real(() => io.with_console_real(() => dispatch())))))
 
-fn dispatch() -> Unit !Fs !Proc !Env !Exit !io = {
+fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
   match args() {
     [] -> {
-      print(usage())
+      console_print(usage())
       let _ = io.exit(2)
       ()
     }
@@ -2378,7 +2378,7 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !io = {
         run_doc(rest)
       } else if mode == "add" {
         match add.run_add(rest) {
-          Ok(s) -> println(s)
+          Ok(s) -> console_println(s)
           Err(e) -> cli_error(e)
         }
       } else if mode == "lsp" {
@@ -2396,26 +2396,26 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !io = {
         run_pkghash(rest)
       } else if mode == "lex" || mode == "__lex" || mode == "parse" || mode == "__parse" {
         for pth in rest {
-          println("== " ++ pth ++ " ==")
+          console_println("== " ++ pth ++ " ==")
           match io.read_file(pth) {
             Ok(text) ->
               if mode == "lex" || mode == "__lex" {
                 let (toks, diags) = lexer.lex(text)
-                println(lexdump.render(toks, diags))
+                console_println(lexdump.render(toks, diags))
               } else {
                 let (m, diags) = parser.parse_module(text)
-                println(astdump.render_module(m, diags))
+                console_println(astdump.render_module(m, diags))
               }
             Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e.message)
           }
         }
       } else if mode == "--version" || mode == "-V" || mode == "version" {
-        println("dawn " ++ VERSION ++ " (selfhost)")
+        console_println("dawn " ++ VERSION ++ " (selfhost)")
       } else if mode == "--help" || mode == "-h" || mode == "help" {
-        print(usage())
+        console_print(usage())
       } else {
-        io.eprintln("unknown command: " ++ mode ++ "\n")
-        print(usage())
+        console_eprintln("unknown command: " ++ mode ++ "\n")
+        console_print(usage())
         let _ = io.exit(2)
         ()
       }
