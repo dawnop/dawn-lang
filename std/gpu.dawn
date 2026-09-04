@@ -664,6 +664,40 @@ pub fn ref_sqrt(x: Float) -> Float =
     y * pow2(k)
   }
 
+## The hyperbolic tangent of `x`. Small arguments go through the series for
+## `exp(y) - 1` rather than through `ref_exp`, because `(e - 1) / (e + 1)`
+## loses every significant digit of a small answer to the subtraction; past
+## `|x| = 20` the answer is 1 to the last bit of a Float. This is the second
+## opinion for the device's `tanh`, which is a hardware function, and for
+## the tanh approximation of the gelu that leetgpu 74's feed-forward asks
+## for.
+pub fn ref_tanh(x: Float) -> Float =
+  if x != x {
+    x
+  } else {
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let m = if ax > 20.0 {
+      1.0
+    } else if ax < 0.25 {
+      # sum y^n / n! from n = 1, which is exp(y) - 1 with no cancellation;
+      # |y| <= 0.5 here, so twenty terms are far past the last bit
+      let y = 2.0 * ax
+      var term = 1.0
+      var sum = 0.0
+      var i = 1
+      while i <= 20 {
+        term = term * y / to_float(i)
+        sum = sum + term
+        i = i + 1
+      }
+      sum / (sum + 2.0)
+    } else {
+      let e = ref_exp(2.0 * ax)
+      (e - 1.0) / (e + 1.0)
+    }
+    if x < 0.0 { 0.0 - m } else { m }
+  }
+
 ## Two over the square root of pi, to the nearest Float: the series below
 ## and Abramowitz-Stegun 7.1.26 both carry it.
 pub const TWO_OVER_SQRT_PI: Float = 1.1283791670955126
@@ -2677,6 +2711,208 @@ pub fn ols_beta_ref(f: Int, w: Int, dtypes: List[String],
   let a = ins[0]
   let dt = dtypes[1]
   list.map(range(0, f), r => round_to(dt, a[r * w + f]))
+}
+
+# ---- references for the two transformer blocks (knife 21) ----
+#
+# Nine references for fifteen kernels, because four of leetgpu 74's twelve
+# launches are one linear layer with a bias at four shapes, and six of the
+# twenty-nine launches of the two blocks are kernels earlier knives
+# recorded and answer to the references they already had:
+# `layer_norm_ref` (leetgpu 74's two normalisations), `row_softmax_ref`,
+# `gqa_context_ref`, `swiglu_act_ref`, `matmul_bt_ref` (leetgpu 93's two
+# feed-forward projections) and `vadd_ref` (both residual adds, whose
+# length is the launch's grid and not the kernel's recording).
+
+## `a * W + b`, an `m` by `k` matrix against a `k` by `n` weight stored IN
+## by OUT with one bias per output column: the shape every linear layer of
+## leetgpu 74 has, at four different `(k, n)`. `ins` is
+## `[a, w, bias, old out]`.
+##
+## Folded LEFT over `k`, so a TOLERANCE-tier oracle for `matmul_ref`'s
+## reason: `mmaf` promises a product and nothing about the order of its sum.
+pub fn linear_bias_ref(m: Int, k: Int, n: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let w = ins[1]
+  let bias = ins[2]
+  let dt = dtypes[3]
+  list.map(range(0, m * n), idx => {
+    let i = idx / n
+    let j = idx % n
+    round_to(dt, bias[j] + list.fold(range(0, k), 0.0, (acc, c) => acc + a[i * k + c] * w[c * n + j]))
+  })
+}
+
+## `Q_h K_h^T * scale` for every head of leetgpu 74, both operands read out
+## of the PACKED projection buffer: `s` rows of `3 * d` values, Q in the
+## first `d` columns and K in the next `d`, head `h` owning columns
+## `h * d / heads` of each. `ins` is `[qkv, old s]`.
+pub fn gpt_scores_ref(s: Int, d: Int, heads: Int, scale: Float,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let qkv = ins[0]
+  let dt = dtypes[1]
+  let dh = d / heads
+  let wide = 3 * d
+  list.map(range(0, heads * s * s), idx => {
+    let h = idx / (s * s)
+    let i = (idx / s) % s
+    let j = idx % s
+    let qb = i * wide + h * dh
+    let kb = j * wide + d + h * dh
+    round_to(dt, scale * list.fold(range(0, dh), 0.0, (acc, c) => acc + qkv[qb + c] * qkv[kb + c]))
+  })
+}
+
+## `P_h V_h` for every head of leetgpu 74, V read from the LAST third of
+## the same packed buffer and the answer written into head `h`'s columns of
+## an `s` by `d` output. `ins` is `[p, qkv, old o]`.
+pub fn gpt_context_ref(s: Int, d: Int, heads: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let p = ins[0]
+  let qkv = ins[1]
+  let dt = dtypes[2]
+  let dh = d / heads
+  let wide = 3 * d
+  list.map(range(0, s * d), idx => {
+    let i = idx / d
+    let c = idx % d
+    let h = c / dh
+    let vb = 2 * d + h * dh + c % dh
+    round_to(dt, list.fold(range(0, s), 0.0, (acc, j) =>
+        acc + p[(h * s + i) * s + j] * qkv[j * wide + vb]))
+  })
+}
+
+## `0.5 * x * (1 + tanh(c * (x + kk * x^3)))` over the first `n` lanes: the
+## TANH approximation of the gaussian error linear unit, which is what
+## leetgpu 74's feed-forward asks for (`F.gelu(x, approximate="tanh")`) and
+## not the erf form of leetgpu 65. `ins` is `[x, old out]`.
+pub fn gelu_tanh_ref(n: Int, c: Float, kk: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        let v = x[i]
+        round_to(dt, 0.5 * v * (1.0 + ref_tanh(c * (v + kk * v * v * v))))
+      } else {
+        kept(old, i)
+      })
+}
+
+## `x * rsqrt(mean(x^2) + eps) * w` per ROW of a `rows` by `d` matrix: the
+## root-mean-square normalisation of leetgpu 93, which has a learned weight
+## and no residual (leetgpu 83's has both, leetgpu 50's has neither).
+## `ins` is `[x, w, old]`, with `w` `d` long.
+pub fn llama_rms_ref(rows: Int, d: Int, eps: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let w = ins[1]
+  let dt = dtypes[2]
+  let scale = list.map(range(0, rows), r =>
+      1.0 / ref_sqrt(list.fold(range(0, d), 0.0, (acc, i) => acc + x[r * d + i] * x[r * d + i])
+        / to_float(d) + eps))
+  list.map(range(0, rows * d), idx => round_to(dt, x[idx] * scale[idx / d] * w[idx % d]))
+}
+
+## The head COUNT is read off the output buffer rather than fixed here,
+## the way the kernel reads it off the grid: leetgpu 93 launches the same
+## projection at four query heads and at two key heads, and the buffer's
+## total width enters neither.
+##
+## One projection of leetgpu 93 written HEAD-MAJOR: `out[h][i][c] = sum_j
+## x[i][j] * W[h * hd + c][j]` for a weight stored OUT by IN. The same
+## numbers `matmul_bt_ref` computes, laid out head by head instead of token
+## by token, which is the layout knife 19's grouped-query kernels read.
+## `ins` is `[x, w, old out]`.
+pub fn head_major_bt_ref(s: Int, din: Int, hd: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let w = ins[1]
+  let dt = dtypes[2]
+  let heads = len(ins[2]) / (s * hd)
+  list.map(range(0, heads * s * hd), idx => {
+    let h = idx / (s * hd)
+    let i = (idx / hd) % s
+    let c = idx % hd
+    let row = (h * hd + c) * din
+    round_to(dt, list.fold(range(0, din), 0.0, (acc, j) => acc + x[i * din + j] * w[row + j]))
+  })
+}
+
+## The head count is read off the output buffer, for `head_major_bt_ref`'s
+## reason: the same rotation runs over four heads and over two.
+##
+## The rotary position embedding of a head-major `heads` by `s` by `hd`
+## buffer: the two halves of each head's row rotated by the angle of that
+## POSITION, `[x1 * cos - x2 * sin, x1 * sin + x2 * cos]`. `cos` and `sin`
+## are `s` by `hd / 2` tables every head shares, and leetgpu 93 hands them
+## in as buffers, so nothing here computes a trigonometric function.
+## `ins` is `[x, cos, sin, old out]`.
+pub fn rope_ref(s: Int, hd: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let cs = ins[1]
+  let sn = ins[2]
+  let dt = dtypes[3]
+  let half = hd / 2
+  let heads = len(ins[3]) / (s * hd)
+  list.map(range(0, heads * s * hd), idx => {
+    let i = (idx / hd) % s
+    let c = idx % hd
+    let base = idx - c
+    let t = if c < half { c } else { c - half }
+    let x1 = x[base + t]
+    let x2 = x[base + half + t]
+    let cv = cs[i * half + t]
+    let sv = sn[i * half + t]
+    round_to(dt, if c < half { x1 * cv - x2 * sv } else { x1 * sv + x2 * cv })
+  })
+}
+
+## `gqa_scores_ref` with a CAUSAL mask: the score at a key in the query's
+## future is -inf, so leetgpu 93's softmax gives it weight exactly zero.
+## `ins` is `[q, k, old s]`.
+pub fn gqa_causal_scores_ref(hq: Int, hkv: Int, s: Int, d: Int, scale: Float,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let q = ins[0]
+  let k = ins[1]
+  let dt = dtypes[2]
+  let groups = hq / hkv
+  list.map(range(0, hq * s * s), idx => {
+    let h = idx / (s * s)
+    let i = (idx / s) % s
+    let j = idx % s
+    let kv = h / groups
+    if j > i {
+      ref_neg_inf()
+    } else {
+      round_to(dt, scale * list.fold(range(0, d), 0.0, (acc, c) =>
+          acc + q[(h * s + i) * d + c] * k[(kv * s + j) * d + c]))
+    }
+  })
+}
+
+## Leetgpu 93's output projection: the head-major attention output read as
+## one `s` by `d` matrix and multiplied by a weight stored OUT by IN,
+## `out[i][o] = sum_h sum_t a[h][i][t] * W[o][h * hd + t]`. The merge of
+## the heads is this indexing and no launch of its own.
+## `ins` is `[a, w, old out]`.
+pub fn llama_out_ref(s: Int, d: Int, hd: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let w = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, s * d), idx => {
+    let i = idx / d
+    let o = idx % d
+    round_to(dt, list.fold(range(0, d), 0.0, (acc, c) => {
+      let h = c / hd
+      acc + a[(h * s + i) * hd + c % hd] * w[o * d + c]
+    }))
+  })
 }
 
 # ---- what a reference writes back (knife 11) ----

@@ -135,7 +135,9 @@ use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, matmul_ref,
   sink_scores_ref, decay_scores_ref, cce_row_ref, mean_ref, mha_scores_ref, mha_context_ref,
   xattn_scores_ref, xattn_context_ref, gqa_scores_ref, gqa_context_ref, grpo_adv_ref, grpo_row_ref,
   kmeans_assign_ref, kmeans_centroid_ref, kv_scores_ref, kv_context_ref, attn_bwd_mmt_ref,
-  attn_bwd_ds_ref, lin_attn_s_ref, lin_attn_out_ref, ols_gram_ref, ols_elim_ref, ols_beta_ref }
+  attn_bwd_ds_ref, lin_attn_s_ref, lin_attn_out_ref, ols_gram_ref, ols_elim_ref, ols_beta_ref,
+  vadd_ref, layer_norm_ref, linear_bias_ref, gpt_scores_ref, gpt_context_ref, gelu_tanh_ref,
+  llama_rms_ref, head_major_bt_ref, rope_ref, gqa_causal_scores_ref, llama_out_ref }
 use std/list
 use std/map
 
@@ -250,6 +252,37 @@ pub const LA_D: Int = 32
 pub const OLS_N: Int = 64
 pub const OLS_F: Int = 8
 pub const OLS_W: Int = 16
+
+## leetgpu 74's shape and constants, a REDUCED GPT-2 block: GP_S tokens of
+## GP_D features in GP_H heads, a GP_F-wide feed-forward. The published
+## model is D = 768, H = 12, FFN = 3072; scripts/tile-golden/kernels.dawn
+## says why the recording is smaller (the second opinion is a host
+## reference over a List[Float], and GPT-2's weights alone are seven
+## million of them).
+pub const GP_S: Int = 64
+pub const GP_D: Int = 64
+pub const GP_H: Int = 2
+pub const GP_F: Int = 128
+pub const GP_EPS: Float = 1.0e-5
+pub const GP_ACT_TILE: Int = 128
+
+## sqrt(2 / pi) and the cubic coefficient of the TANH approximation of the
+## gelu, which is the one leetgpu 74 asks for.
+pub const GP_GELU_C: Float = 0.7978845608028654
+pub const GP_GELU_K: Float = 0.044715
+
+## leetgpu 93's shape, a REDUCED Llama block: LM_HQ query heads over
+## LM_HKV key heads of LM_HD features each, so the model is LM_D wide, and
+## an LM_F-wide SwiGLU. LM_S, LM_HQ, LM_HKV and LM_HD are knife 19's
+## grouped-query numbers exactly, which is what lets two of this block's
+## seventeen launches be kernels it does not touch.
+pub const LM_S: Int = 64
+pub const LM_HQ: Int = 4
+pub const LM_HKV: Int = 2
+pub const LM_HD: Int = 32
+pub const LM_D: Int = 128
+pub const LM_F: Int = 64
+pub const LM_EPS: Float = 1.0e-5
 
 ## The unit-weight step of the distance corpus, and the weight of every
 ## edge that is not one of them.
@@ -557,6 +590,13 @@ fn sentinels(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
 ## buffer is constant, and a reader can check any lane by arithmetic.
 fn wave(seed: Int, n: Int, scale: Float) -> List[Float] =
   list.map(range(0, n), i => (to_float((i * seed + 7) % 19) - 9.0) * scale)
+
+## A normalisation gain: `wave` about ONE rather than about zero, the way
+## both blocks' norm weights are drawn (leetgpu 74 draws them uniformly in
+## [0.8, 1.2]). A gain that could be zero would erase a column and hide
+## whatever wrote it.
+fn gain(seed: Int, n: Int, scale: Float) -> List[Float] =
+  list.map(range(0, n), i => 1.0 + (to_float((i * seed + 7) % 19) - 9.0) * scale)
 
 ## The distance matrix of a directed 16-cycle of step APSP_STEP with unit
 ## edges, every other pair APSP_FAR apart and the diagonal zero.
@@ -1106,6 +1146,143 @@ fn ols_seq() -> Seq = Seq {
   stale_at: 1
 }
 
+## leetgpu 74 (GPT-2 Transformer Block): twelve launches over eight new
+## kernels and two the earlier knives recorded. Layer norm, the packed QKV
+## projection, per-head scores, the softmax, the context product, the output
+## projection, a residual, the second layer norm, the two feed-forward
+## projections with a gelu between them, and the second residual.
+##
+## The weights are named buffers rather than one packed array because a
+## launch takes buffers and a solve takes `weights + O_WFC`: a base pointer
+## plus a constant offset is what the sequence spells as a name. The one
+## place the packing DOES matter is inside the QKV buffer, whose three
+## thirds are read by two later launches at a row stride of 3 * GP_D, and
+## that buffer is packed here exactly as the problem packs it.
+##
+## `via` is the first normalisation's output, read by the launch after it.
+fn gpt2_seq() -> Seq = Seq {
+  name: "gpt2",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "x", dtype: "f64", data: wave(3, GP_S * GP_D, 0.1) },
+    Buf { name: "ln1w", dtype: "f64", data: gain(5, GP_D, 0.02) },
+    Buf { name: "ln1b", dtype: "f64", data: wave(7, GP_D, 0.01) },
+    Buf { name: "wqkv", dtype: "f64", data: wave(11, GP_D * 3 * GP_D, 0.05) },
+    Buf { name: "bqkv", dtype: "f64", data: wave(13, 3 * GP_D, 0.02) },
+    Buf { name: "wo", dtype: "f64", data: wave(17, GP_D * GP_D, 0.05) },
+    Buf { name: "bo", dtype: "f64", data: wave(23, GP_D, 0.02) },
+    Buf { name: "ln2w", dtype: "f64", data: gain(29, GP_D, 0.02) },
+    Buf { name: "ln2b", dtype: "f64", data: wave(31, GP_D, 0.01) },
+    Buf { name: "wfc", dtype: "f64", data: wave(37, GP_D * GP_F, 0.05) },
+    Buf { name: "bfc", dtype: "f64", data: wave(41, GP_F, 0.02) },
+    Buf { name: "wproj", dtype: "f64", data: wave(43, GP_F * GP_D, 0.05) },
+    Buf { name: "bproj", dtype: "f64", data: wave(47, GP_D, 0.02) },
+    Buf { name: "xn", dtype: "f64", data: sentinels(GP_S * GP_D) },
+    Buf { name: "qkv", dtype: "f64", data: sentinels(GP_S * 3 * GP_D) },
+    Buf { name: "s", dtype: "f64", data: sentinels(GP_H * GP_S * GP_S) },
+    Buf { name: "p", dtype: "f64", data: sentinels(GP_H * GP_S * GP_S) },
+    Buf { name: "ctx", dtype: "f64", data: sentinels(GP_S * GP_D) },
+    Buf { name: "ap", dtype: "f64", data: sentinels(GP_S * GP_D) },
+    Buf { name: "hid", dtype: "f64", data: sentinels(GP_S * GP_D) },
+    Buf { name: "hn", dtype: "f64", data: sentinels(GP_S * GP_D) },
+    Buf { name: "fc", dtype: "f64", data: sentinels(GP_S * GP_F) },
+    Buf { name: "act", dtype: "f64", data: sentinels(GP_S * GP_F) },
+    Buf { name: "pr", dtype: "f64", data: sentinels(GP_S * GP_D) },
+    Buf { name: "out", dtype: "f64", data: sentinels(GP_S * GP_D) }
+  ],
+  steps: [
+    step("gpt_ln", GP_S, 1, 1, ["x", "ln1w", "ln1b", "xn"]),
+    step("gpt_qkv", 1, 3 * GP_D / 32, 1, ["xn", "wqkv", "bqkv", "qkv"]),
+    step("gpt_scores", 1, 1, GP_H, ["qkv", "s"]),
+    step("attn_softmax", GP_H * GP_S, 1, 1, ["s", "p"]),
+    step("gpt_context", 1, 1, GP_H, ["p", "qkv", "ctx"]),
+    step("gpt_dense", 1, GP_D / 32, 1, ["ctx", "wo", "bo", "ap"]),
+    step("vadd", GP_S * GP_D / 128, 1, 1, ["x", "ap", "hid"]),
+    step("gpt_ln", GP_S, 1, 1, ["hid", "ln2w", "ln2b", "hn"]),
+    step("gpt_fc", 1, GP_F / 32, 1, ["hn", "wfc", "bfc", "fc"]),
+    step("gpt_gelu", GP_S * GP_F / GP_ACT_TILE, 1, 1, ["fc", "act"]),
+    step("gpt_down", 1, GP_D / 32, 1, ["act", "wproj", "bproj", "pr"]),
+    step("vadd", GP_S * GP_D / 128, 1, 1, ["hid", "pr", "out"])
+  ],
+  reads: ["out"],
+  via: "xn",
+  stale_at: 1
+}
+
+## leetgpu 93 (Llama Transformer Block): seventeen launches, the longest
+## sequence here. Root-mean-square normalisation, three head-major
+## projections from one kernel, the rotary embedding of Q and K, causal
+## grouped-query attention, the merged output projection, a residual, the
+## second normalisation, the two SwiGLU projections with knife 16's
+## activation between them, the down projection and the second residual.
+##
+## `cos` and `sin` are INPUT buffers, which is what the problem's own
+## signature says, and the reason this block needs no trigonometry. The two
+## tables here are different waves rather than a real angle table: the
+## rotation is linear in them, so what a corpus owes is that the two are
+## told apart, and two equal tables would forgive a kernel that read one
+## where the other belongs.
+##
+## V is deliberately NOT rotated: RoPE applies to Q and K, and the ninth
+## launch reads `v` and not a rotated copy of it.
+fn llama_seq() -> Seq = Seq {
+  name: "llama",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "x", dtype: "f64", data: wave(3, LM_S * LM_D, 0.1) },
+    Buf { name: "rw1", dtype: "f64", data: gain(5, LM_D, 0.02) },
+    Buf { name: "wq", dtype: "f64", data: wave(7, LM_HQ * LM_HD * LM_D, 0.05) },
+    Buf { name: "wk", dtype: "f64", data: wave(11, LM_HKV * LM_HD * LM_D, 0.05) },
+    Buf { name: "wv", dtype: "f64", data: wave(13, LM_HKV * LM_HD * LM_D, 0.05) },
+    Buf { name: "cs", dtype: "f64", data: wave(17, LM_S * LM_HD / 2, 0.1) },
+    Buf { name: "sn", dtype: "f64", data: wave(23, LM_S * LM_HD / 2, 0.1) },
+    Buf { name: "wo", dtype: "f64", data: wave(29, LM_D * LM_D, 0.05) },
+    Buf { name: "rw2", dtype: "f64", data: gain(31, LM_D, 0.02) },
+    Buf { name: "wg", dtype: "f64", data: wave(37, LM_F * LM_D, 0.05) },
+    Buf { name: "wu", dtype: "f64", data: wave(41, LM_F * LM_D, 0.05) },
+    Buf { name: "wd", dtype: "f64", data: wave(43, LM_D * LM_F, 0.05) },
+    Buf { name: "xn", dtype: "f64", data: sentinels(LM_S * LM_D) },
+    Buf { name: "q", dtype: "f64", data: sentinels(LM_HQ * LM_S * LM_HD) },
+    Buf { name: "k", dtype: "f64", data: sentinels(LM_HKV * LM_S * LM_HD) },
+    Buf { name: "v", dtype: "f64", data: sentinels(LM_HKV * LM_S * LM_HD) },
+    Buf { name: "qr", dtype: "f64", data: sentinels(LM_HQ * LM_S * LM_HD) },
+    Buf { name: "kr", dtype: "f64", data: sentinels(LM_HKV * LM_S * LM_HD) },
+    Buf { name: "s", dtype: "f64", data: sentinels(LM_HQ * LM_S * LM_S) },
+    Buf { name: "p", dtype: "f64", data: sentinels(LM_HQ * LM_S * LM_S) },
+    Buf { name: "ctx", dtype: "f64", data: sentinels(LM_HQ * LM_S * LM_HD) },
+    Buf { name: "ap", dtype: "f64", data: sentinels(LM_S * LM_D) },
+    Buf { name: "hid", dtype: "f64", data: sentinels(LM_S * LM_D) },
+    Buf { name: "hn", dtype: "f64", data: sentinels(LM_S * LM_D) },
+    Buf { name: "gate", dtype: "f64", data: sentinels(LM_S * LM_F) },
+    Buf { name: "up", dtype: "f64", data: sentinels(LM_S * LM_F) },
+    Buf { name: "act", dtype: "f64", data: sentinels(LM_S * LM_F) },
+    Buf { name: "dn", dtype: "f64", data: sentinels(LM_S * LM_D) },
+    Buf { name: "out", dtype: "f64", data: sentinels(LM_S * LM_D) }
+  ],
+  steps: [
+    step("llama_rms", LM_S, 1, 1, ["x", "rw1", "xn"]),
+    step("llama_qkv", 1, LM_HQ, 1, ["xn", "wq", "q"]),
+    step("llama_qkv", 1, LM_HKV, 1, ["xn", "wk", "k"]),
+    step("llama_qkv", 1, LM_HKV, 1, ["xn", "wv", "v"]),
+    step("llama_rope", 1, LM_HQ, 1, ["q", "cs", "sn", "qr"]),
+    step("llama_rope", 1, LM_HKV, 1, ["k", "cs", "sn", "kr"]),
+    step("llama_scores", LM_HQ / LM_HKV, 1, LM_HKV, ["qr", "kr", "s"]),
+    step("attn_softmax", LM_HQ * LM_S, 1, 1, ["s", "p"]),
+    step("gqa_context", LM_HQ / LM_HKV, 1, LM_HKV, ["p", "v", "ctx"]),
+    step("llama_out", 1, LM_D / 32, 1, ["ctx", "wo", "ap"]),
+    step("vadd", LM_S * LM_D / 128, 1, 1, ["x", "ap", "hid"]),
+    step("llama_rms", LM_S, 1, 1, ["hid", "rw2", "hn"]),
+    step("llama_ffn", 1, LM_F / 32, 1, ["hn", "wg", "gate"]),
+    step("llama_ffn", 1, LM_F / 32, 1, ["hn", "wu", "up"]),
+    step("swiglu_act", LM_S * LM_F / SW_ACT_TILE, 1, 1, ["gate", "up", "act"]),
+    step("llama_down", 1, LM_D / 32, 1, ["act", "wd", "dn"]),
+    step("vadd", LM_S * LM_D / 128, 1, 1, ["hid", "dn", "out"])
+  ],
+  reads: ["out"],
+  via: "xn",
+  stale_at: 1
+}
+
 ## THE CONTROL SEQUENCE, and the reason the counter below is a measurement
 ## and not a decoration: two launches whose second does NOT read what the
 ## first wrote. `changed_by_first` must be zero here and the stale-buffer
@@ -1133,6 +1310,7 @@ fn sequences() -> List[Seq] =
     causal_seq(), alibi_seq(), window_seq(), sinks_seq(), decay_seq(), cce_seq(), mha_seq(),
     xattn_seq(), gqa_seq(), grpo_seq(), kmeans_seq(),
     kv_seq(), attn_bwd_seq(), lin_attn_seq(), ols_seq(),
+    gpt2_seq(), llama_seq(),
     decoupled_seq()]
 
 ## The kernels each sequence launches, as a set: what
@@ -1160,6 +1338,10 @@ pub fn sequence_kernels() -> List[(String, List[String])] =
     ("attnbwd", ["attn_scores", "attn_softmax", "attn_bwd_mmt", "attn_bwd_ds", "attn_context"]),
     ("linattn", ["lin_attn_s", "lin_attn_out"]),
     ("ols", ["ols_gram", "ols_elim", "ols_beta"]),
+    ("gpt2", ["gpt_ln", "gpt_qkv", "gpt_scores", "attn_softmax", "gpt_context", "gpt_dense",
+      "vadd", "gpt_fc", "gpt_gelu", "gpt_down"]),
+    ("llama", ["llama_rms", "llama_qkv", "llama_rope", "llama_scores", "attn_softmax",
+      "gqa_context", "llama_out", "vadd", "llama_ffn", "swiglu_act", "llama_down"]),
     ("decoupled", ["matpow_step"])]
 
 ## The sequences compared under the tolerance tier. `apsp` is not here:
@@ -1169,7 +1351,7 @@ pub fn sequence_kernels() -> List[(String, List[String])] =
 ## column of scripts/leetgpu-diff/problems.txt against it.
 pub fn tolerance_tier() -> List[String] =
   ["lora", "attention", "matpow", "swiglu", "causal", "alibi", "window", "sinks", "decay", "cce", "mha",
-    "xattn", "gqa", "grpo", "kv", "attnbwd", "linattn",
+    "xattn", "gqa", "grpo", "kv", "attnbwd", "linattn", "gpt2", "llama",
     "decoupled"]
 
 # ---- the reference tables ----
@@ -1278,6 +1460,35 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
       ("ols_gram", (3, last_out((dts, ins) => ols_gram_ref(OLS_N, OLS_F, OLS_W, dts, ins)))),
       ("ols_elim", (2, (dts, ins) => ols_elim_ref(OLS_F, OLS_W, dts, ins))),
       ("ols_beta", (2, last_out((dts, ins) => ols_beta_ref(OLS_F, OLS_W, dts, ins))))])
+  } else if name == "gpt2" {
+    map.from([
+      ("gpt_ln", (4, last_out((dts, ins) => layer_norm_ref(GP_S, GP_D, GP_EPS, dts, ins)))),
+      ("gpt_qkv", (4, last_out((dts, ins) => linear_bias_ref(GP_S, GP_D, 3 * GP_D, dts, ins)))),
+      ("gpt_scores", (2, last_out((dts, ins) =>
+          gpt_scores_ref(GP_S, GP_D, GP_H, ATT_INV_SQRT_D, dts, ins)))),
+      ("attn_softmax", (2, last_out((dts, ins) => row_softmax_ref(GP_H * GP_S, GP_S, dts, ins)))),
+      ("gpt_context", (3, last_out((dts, ins) => gpt_context_ref(GP_S, GP_D, GP_H, dts, ins)))),
+      ("gpt_dense", (4, last_out((dts, ins) => linear_bias_ref(GP_S, GP_D, GP_D, dts, ins)))),
+      ("vadd", (3, last_out(vadd_ref))),
+      ("gpt_fc", (4, last_out((dts, ins) => linear_bias_ref(GP_S, GP_D, GP_F, dts, ins)))),
+      ("gpt_gelu", (2, last_out((dts, ins) =>
+          gelu_tanh_ref(GP_S * GP_F, GP_GELU_C, GP_GELU_K, dts, ins)))),
+      ("gpt_down", (4, last_out((dts, ins) => linear_bias_ref(GP_S, GP_F, GP_D, dts, ins))))])
+  } else if name == "llama" {
+    map.from([
+      ("llama_rms", (3, last_out((dts, ins) => llama_rms_ref(LM_S, LM_D, LM_EPS, dts, ins)))),
+      ("llama_qkv", (3, last_out((dts, ins) => head_major_bt_ref(LM_S, LM_D, LM_HD, dts, ins)))),
+      ("llama_rope", (4, last_out((dts, ins) => rope_ref(LM_S, LM_HD, dts, ins)))),
+      ("llama_scores", (3, last_out((dts, ins) =>
+          gqa_causal_scores_ref(LM_HQ, LM_HKV, LM_S, LM_HD, ATT_INV_SQRT_D, dts, ins)))),
+      ("attn_softmax", (2, last_out((dts, ins) => row_softmax_ref(LM_HQ * LM_S, LM_S, dts, ins)))),
+      ("gqa_context", (3, last_out((dts, ins) =>
+          gqa_context_ref(LM_HQ, LM_HKV, LM_S, LM_HD, dts, ins)))),
+      ("llama_out", (3, last_out((dts, ins) => llama_out_ref(LM_S, LM_D, LM_HD, dts, ins)))),
+      ("vadd", (3, last_out(vadd_ref))),
+      ("llama_ffn", (3, last_out((dts, ins) => matmul_bt_ref(LM_S, LM_D, LM_F, 1.0, dts, ins)))),
+      ("swiglu_act", (3, last_out((dts, ins) => swiglu_act_ref(LM_S * LM_F, dts, ins)))),
+      ("llama_down", (3, last_out((dts, ins) => matmul_bt_ref(LM_S, LM_F, LM_D, 1.0, dts, ins))))])
   } else if name == "apsp" {
     map.from([("apsp_step", (2, (dts, ins) => [(0, apsp_step_ref(APSP_N, dts, ins))]))])
   } else {
@@ -1401,7 +1612,10 @@ fn cubin_names() -> List[String] =
     "xattn_scores", "xattn_context", "gqa_scores", "gqa_context", "grpo_adv", "grpo_row",
     "kmeans_assign", "kmeans_centroid",
     "kv_scores", "kv_context", "attn_bwd_mmt", "attn_bwd_ds", "lin_attn_s", "lin_attn_out",
-    "ols_gram", "ols_elim", "ols_beta"]
+    "ols_gram", "ols_elim", "ols_beta",
+    "gpt_ln", "gpt_qkv", "gpt_scores", "gpt_context", "gpt_dense", "gpt_fc", "gpt_gelu", "gpt_down",
+    "llama_rms", "llama_qkv", "llama_rope", "llama_scores", "llama_out", "llama_ffn", "llama_down",
+    "vadd"]
 
 fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: seq_diff " ++ list.fold(cubin_names(), "", (a, n) =>

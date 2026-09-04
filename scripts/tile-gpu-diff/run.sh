@@ -535,6 +535,12 @@ erf_green=(swiglu_half)
 # sequences after it (leetgpu 111 launches it twice inside one sequence, on
 # different operands), `attn_softmax` of ten, and leetgpu 56's two launches
 # of `lin_attn_s` differ only in which buffer is its second argument.
+# Knife 21 spends it hardest of all: its two transformer blocks are twelve
+# and seventeen launches, and six of those twenty-nine are kernels it does
+# not record -- `attn_softmax` (a thirteenth and fourteenth sequence for
+# it), `gqa_context`, `swiglu_act`, and `vadd`, the first milestone's
+# kernel, whose length is its GRID and so is a residual add over four
+# thousand lanes as readily as over one twenty-eighth.
 sequenced=(lora_base lora_hidden lora_out attn_scores attn_softmax attn_context
   matpow_step swiglu_proj swiglu_act swiglu_down apsp_step
   attn_causal attn_alibi attn_window attn_sinks attn_decay cce_row cce_mean
@@ -542,7 +548,15 @@ sequenced=(lora_base lora_hidden lora_out attn_scores attn_softmax attn_context
   xattn_scores xattn_context gqa_scores gqa_context grpo_adv grpo_row
   kmeans_assign kmeans_centroid
   kv_scores kv_context attn_bwd_mmt attn_bwd_ds lin_attn_s lin_attn_out
-  ols_gram ols_elim ols_beta)
+  ols_gram ols_elim ols_beta
+  gpt_ln gpt_qkv gpt_scores gpt_context gpt_dense gpt_fc gpt_gelu gpt_down
+  llama_rms llama_qkv llama_rope llama_scores llama_out llama_ffn llama_down)
+
+# `vadd` is assembled with the first milestone's pair above, so it is not in
+# `sequenced` (that list is what the assemble loop walks) but it IS the
+# last cubin seq_diff takes on the command line: knife 21's two residual
+# adds launch it.
+seq_order=("${sequenced[@]}" vadd)
 
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
@@ -583,7 +597,7 @@ for k in "${atomic[@]}"; do atom_cubins+=("$work/$k.cubin"); done
 erf_cubins=()
 for k in "${erfs[@]}"; do erf_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
-for k in "${sequenced[@]}"; do seq_cubins+=("$work/$k.cubin"); done
+for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
@@ -831,7 +845,7 @@ cat "$work/seq.out"
 seq_verdict="$(verdict_of "$work/seq.out")"
 case "$seq_verdict" in
   pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
-        echo "PASS  native: the twenty multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
+        echo "PASS  native: the twenty-two multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
   blocked:*) [ "$rc" = 0 ] || fail "verdict $seq_verdict with exit $rc"
         echo "BLOCKED  native: the driver refused before a result could be compared: $seq_verdict" ;;
   fail) cat "$work/seq.err" >&2; fail "the device answered and disagreed with the fake device on a sequence (see the transcript above)" ;;
@@ -935,7 +949,7 @@ esac
 # is the control that says the counter can print a zero at all. Without
 # it, "has never printed zero" and "cannot print zero" look the same.
 for s in lora attention matpow swiglu apsp causal alibi window sinks decay cce mha xattn gqa grpo kmeans \
-  kv attnbwd linattn ols; do
+  kv attnbwd linattn ols gpt2 llama; do
   seq_shape="$(awk -v want="$s" '$1 == "sequence" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/seq.out")"
   case "$seq_shape" in
     *changed_by_first=0) fail "$s's answer does not depend on its earlier launches, so it is not a sequence: $seq_shape" ;;
@@ -1036,20 +1050,31 @@ for c in attnbwd linattn; do
   seq_reds="$seq_reds last-launch-dropped:$c grid-of-later-launch-copied-from-the-first:$c"
 done
 seq_reds="$seq_reds second-launch-sees-stale-buffer:ols launch-order-swapped:ols last-launch-dropped:ols"
+# Knife 21's two blocks take all four. Both begin with a normalisation over
+# one row a block and follow it with a projection whose grid's SECOND axis
+# is the output's column tiles (six of them for GPT-2's packed QKV, four
+# heads for Llama's Q), so copying the first launch's Nx1x1 grid onto the
+# second leaves all but one of those tiles unwritten: the mutant that three
+# of the twenty-one sequences before them are immune to is not idempotent
+# here.
+for c in gpt2 llama; do
+  seq_reds="$seq_reds second-launch-sees-stale-buffer:$c launch-order-swapped:$c"
+  seq_reds="$seq_reds last-launch-dropped:$c grid-of-later-launch-copied-from-the-first:$c"
+done
 seq_reds="$seq_reds last-launch-dropped:decoupled"
 if [ "$seq_verdict" = pass ]; then
   seq_probe="$(sed -n 's/^probe mutants //p' "$work/seq.out" | tail -n 1)"
-  [ "$seq_probe" = "red=72 $seq_reds" ] ||
-    { printf 'wanted: red=72 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
+  [ "$seq_probe" = "red=80 $seq_reds" ] ||
+    { printf 'wanted: red=80 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
       fail "the sequence mutants' red set moved"; }
-  echo "PASS  mutant: the four sequence mutants red on exactly 72 of the 84 (mutant, sequence) pairs, by name"
+  echo "PASS  mutant: the four sequence mutants red on exactly 80 of the 92 (mutant, sequence) pairs, by name"
   seq_controls="$(grep -c '^control intermediate-round-tripped ' "$work/seq.out" || true)"
   seq_controls_moved="$(grep -c '^control intermediate-round-tripped .* verdict differ:result$' "$work/seq.out" || true)"
-  if [ "$seq_controls" != 21 ] || [ "$seq_controls_moved" != 0 ]; then
+  if [ "$seq_controls" != 23 ] || [ "$seq_controls_moved" != 0 ]; then
     cat "$work/seq.out" >&2
     fail "the round-trip control moved a verdict: $seq_controls_moved of $seq_controls"
   fi
-  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (21 of 21)"
+  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (23 of 23)"
 else
   echo "SKIP  mutant: the sequence mutants are not verifiable on this driver: the clean run is $seq_verdict, before any launch reaches the device"
 fi
