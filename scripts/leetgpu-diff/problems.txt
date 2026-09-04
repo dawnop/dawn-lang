@@ -45,7 +45,7 @@
 # buffer's format, so it is the second opinion for an f16 product and an i8
 # one as much as for an f64 one. The KERNELS differ, and the corpora do.
 #
-# 65 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
+# 73 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
 # and out of range). The plan that orders the rest is the cuTile coverage
 # memo; knife 7a is the boundary knife, 7b the reduction one, 8 the
 # two-dimensional one, 9 the strided one, 10 the integer one, 11 the wide
@@ -66,7 +66,14 @@
 # variant is a RULE ON A SCORE, so four of its six problems are one kernel
 # each and hand their scores to the softmax and the context product knife 16
 # recorded. That is what the last eleven rows below are, and what the
-# sixteen problems still out of range for that reason need.
+# sixteen problems still out of range for that reason need, and 18 the
+# spending one: it adds no operation, no mutant and no mechanism at all.
+# Seven of its eight problems are single launches that every knife from 7a
+# to 12 had already made possible and nobody had written; the eighth
+# (leetgpu 12) is the attention family with a HEAD, which is a column
+# slice, which is a base offset and a row stride. So the eight rows it adds
+# are what "the mechanism exists" was worth once somebody spent it, and
+# that number is worth having beside the mechanism knives.
 #
 # A kernel is recorded for one shape and a row names the problem it solves
 # at that shape, which for the knife-12 rows means small ones: `sort_rank`
@@ -139,3 +146,11 @@
 112 | Attention with Sinks | attn_sinks+attn_softmax+attn_context | std/gpu.sink_scores_ref+std/gpu.row_softmax_ref+std/gpu.matmul_ref | seq_diff:sinks | tolerance
 92 | Decaying Causal Attention | attn_decay+attn_context | std/gpu.decay_scores_ref+std/gpu.matmul_ref | seq_diff:decay | tolerance
 25 | Categorical Cross Entropy Loss | cce_row+cce_mean | std/gpu.cce_row_ref+std/gpu.mean_ref | seq_diff:cce | tolerance
+11 | 3D Convolution | conv3d | std/gpu.conv3d_ref | stride_diff:conv3d | exact
+18 | Sparse Matrix-Vector Multiplication | matvec | std/gpu.matvec_ref | mm_diff:matvec | exact
+75 | Sparse Matrix-Dense Matrix Multiplication | matmul | std/gpu.matmul_ref | mm_diff:matmul | tolerance
+48 | 2D Subarray Sum | subarray_sum2d | std/gpu.subarray_sum2d_ref | int_diff:subarray_sum2d | exact
+49 | 3D Subarray Sum | subarray_sum3d | std/gpu.subarray_sum3d_ref | int_diff:subarray_sum3d | exact
+64 | Weight Dequantization | dequant | std/gpu.dequant_ref | gath_diff:dequant | exact
+54 | Swish-Gated Linear Unit | swiglu_half | std/gpu.swiglu_half_ref | erf_diff:swiglu_half | tolerance
+12 | Multi-Head Attention | mha_scores+attn_softmax+mha_context | std/gpu.mha_scores_ref+std/gpu.row_softmax_ref+std/gpu.mha_context_ref | seq_diff:mha | tolerance

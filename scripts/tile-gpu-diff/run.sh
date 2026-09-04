@@ -1541,29 +1541,31 @@ fi
 #     swapped at once. Six of the nine kernels' bytecode moves and tileiras
 #     accepts every one of them.
 #
-#     On the device only TWO of the seven go red, and the reason is worth
+#     On the device only ONE of the seven goes red, and the reason is worth
 #     the line: reversing EVERY layout in a kernel is a relabelling of the
 #     tile's own two axes, and a relabelling cancels when the TILE is
-#     square AND the masks are relabelled with it. transpose_tail reads a
-#     32 by 32 tile transposed and writes it transposed, and the two swaps
-#     compose back to the transpose; the same holds for conv2d, max_pool,
-#     jacobi and gaussian_blur, masks included, because each of their masks
-#     is built from the same reversed ladder. depthwise_conv1d's tile is 4
-#     by 32, so there is no relabelling to hide behind and it answers the
-#     wrong channel.
+#     square. transpose_tail reads a 32 by 32 tile transposed and writes it
+#     transposed, and the two swaps compose back to the transpose; the same
+#     holds for conv2d, max_pool, jacobi and gaussian_blur, masks included,
+#     because each of their masks is built from the same reversed ladder.
+#     depthwise_conv1d's tile is 4 by 32, so there is no relabelling to
+#     hide behind and it answers the wrong channel.
 #
-#     Knife 18's conv3d is the second, and it sharpens the rule rather than
-#     breaking it. Its tile IS square (16 by 16) and it still reds, because
-#     its two `axis_mask` limits are not equal (10 output rows against 14
-#     output columns) and a mask limit is a host constant the reversal does
-#     not touch. So the cancellation needs a square tile and a mask that is
-#     square with it; conv3d has the first and not the second.
+#     Knife 18's conv3d was expected to be the second and MEASURED GREEN,
+#     which sharpens "masks included" into something worth writing down.
+#     Its tile is square (16 by 16) and its two `axis_mask` limits are NOT
+#     equal (10 output rows against 14 output columns), so the guess was
+#     that the mask would break the symmetry the tile has. It does not: a
+#     mask limit is attached to an AXIS, and `axis_mask` reaches that axis
+#     through the same `axis_strides` ladder the loads use, so the mutant
+#     swaps which axis each limit applies to along with everything else.
+#     The relabelling is total or it is nothing. What defeats it is an
+#     unequal tile, and only that.
 #
 #     So this mutant is not the strong one it looks like, and that is the
-#     point of recording it: a stride swap in the lowering is INVISIBLE
-#     wherever a kernel's tile and its mask are both symmetric, which is
-#     most of them. The kernel-level swap above is the one that carries the
-#     claim.
+#     point of recording it: a stride swap in the lowering is INVISIBLE on
+#     square tiles, whatever the masks over them say. The kernel-level swap
+#     above is the one that carries the claim.
 mutant_pkg_st="$work/pkg-ladder-strides-reversed"
 rm -rf "$mutant_pkg_st"
 cp -r "$root/packages/tileir" "$mutant_pkg_st"
@@ -1592,7 +1594,7 @@ for k in "${strided[@]}"; do rev_cubins+=("$work/ladder-strides-reversed-$k.cubi
 rc=0
 "$work/strided.bin" "${rev_cubins[@]}" > "$work/m-ladder-reversed.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-ladder-reversed.out")"
-ladder_red=(depthwise_conv1d conv3d)
+ladder_red=(depthwise_conv1d)
 if [ "$strided_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-ladder-reversed.out" || true)
   if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#ladder_red[@]}" ]; then
@@ -1604,11 +1606,11 @@ if [ "$strided_verdict" = pass ]; then
       "$work/m-ladder-reversed.out" ||
       { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: $k should differ"; }
   done
-  awk 'BEGIN{split("depthwise_conv1d conv3d", r, " "); for (i in r) red[r[i]]=1}
+  awk 'BEGIN{split("depthwise_conv1d", r, " "); for (i in r) red[r[i]]=1}
        /^kernel /{cur=$2} /^  verdict differ:result$/ && !(cur in red) {bad=1} END {exit bad}' \
     "$work/m-ladder-reversed.out" ||
-    { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: a kernel outside the red set moved; a square tile with square masks should have hidden it"; }
-  echo "PASS  mutant: ladder-strides-reversed (seven kernels' bytes move, and only ${ladder_red[*]} can see it on the device)"
+    { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: a kernel outside the red set moved; a square tile should have hidden it, masks and all"; }
+  echo "PASS  mutant: ladder-strides-reversed (seven kernels' bytes move, and only ${ladder_red[*]}'s 4 by 32 tile can see it on the device)"
 else
   [ "$mverdict" = "$strided_verdict" ] ||
     { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: the clean run is $strided_verdict but the mutant is $mverdict"; }
