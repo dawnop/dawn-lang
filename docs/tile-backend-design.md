@@ -1088,6 +1088,43 @@ CI 投影：run 33763512 观测到的 CI 与本机之比约 1.73，套到 228 / 
 CI 上仍只有亚秒的 `--check`。`dawn test --stdlib` 与 `dawn test packages/tileir` 一个测试
 都没多（146 → 146、88 → 88）：这一刀往包里加了零个机制，判词全在层 2。
 
+**刀 19 的实测：十个 kernel，三条预算行一条也没重述——因为该重述的那一条撞上了 pole。**
+这一天机器上没有别的 agent（每次都查过 `ps`：只有本刀自己的 java 与 cc1），所以下面两轮是
+这条脚本少见的「只有自己」的读数。117 个工作项（102 个 kernel + 15 个变异体）：
+
+| | 三片 | 不分片 |
+|---|---|---|
+| 第一轮（起跑时还带着刚跑完的 Core golden 重录，负载 4.40） | **249 / 258 / 284 s** | **763 s** |
+| 第二轮（空闲起跑，负载 3.09） | **225 / 240 / 306 s** | 未量 |
+
+**第三片是系统性地最贵的一片，而这是新事实。** 刀 16 与刀 18 各量过一次「round-robin 把工作项
+分得很平」（170 / 171 / 171 与 228 / 227 / 231），本刀两轮的散布是 35 s 与 81 s，而且两轮里
+都是 `shard 3 > shard 2 > shard 1`。两个原因叠在一起：一是 117 恰好被 3 整除，第三片从 35 项
+涨到 39 项（前两片从 36 涨到 39），单这一步就多一项；二是这一片本来就压着 `matmul`、
+`reverse`、`conv3d`、`gaussian_blur` 这几个单价最高的。**「round-robin 分得平」这句话到此
+为止只对项数成立，对秒数不再成立**，下一个要动这张表的人该先量单价再排顺序（`matrix.txt`
+的表头本来就写着「重排会把工作项挪片，是无害的，但要在提交信息里说」）。
+
+**按 `gates.yml` 一直用的算法（本机片值 + 70 s，翻倍给冷 runner），取两轮里每片各自较差的
+读数 249 / 258 / 306 s，三条预算行会是 638 / 656 / 752 s。第三条越过了 660 s 的
+run-pole，越了 92 s。** 抬 pole 正是 pole 存在要拒绝的动作，所以**本刀不重述任何一条预算行**：
+`gates.yml` 里仍然是刀 18 的 596 / 594 / 602 s 与 30 / 30 / 31 分钟，`check-gate-budgets.py`
+仍然绿（它比的是 `timeout-minutes` 与声明值，不是本机秒数）。这一段就是那条没写进 `gates.yml`
+的记录，留给下一个人裁：**（一）**分第四片——但触发线是 CI **观测**过 550 s，而下面的投影是
+431 / 446 / 529 s，还没到；**（二）**照单价重排 `matrix.txt`，把第三片摊平，两轮的和是 791 s
+与 771 s，均摊后是 264 s 与 257 s，预算 668 s 与 654 s——**第一轮仍然差 8 s 才进得来**；
+**（三）**抬 pole。三条都不是一把刀该自己决定的。
+
+CI 投影：run 33763512 观测到的 CI 与本机之比约 1.73，套到 249 / 258 / 306 s 上是
+**431 / 446 / 529 s**。**没有一片投影过 550 s，所以 N 不动**——真正超出的是本机的规划值，
+不是 CI 的观测值，这两件事第一次分了家，也是上面那三个选项谁都不明显的原因。
+
+`tile-gpu-diff/run.sh` 本机 **305 s**（刀 18 记的是 304 s）。多的是十个 kernel 的汇编与真机
+对拍、`reduce-identity-wrong` 与 `gather-mask-dropped` 各多一次汇编，以及**四条变异体乘
+十七条序列共 68 次真机重跑**（刀 18 是 52 次）。它只在本机跑，CI 上仍只有亚秒的 `--check`。
+`dawn test --stdlib` 与 `dawn test packages/tileir` 一个测试都没多（146 → 146、88 → 88）：
+这一刀往包里加了零个机制，判词全在层 2。
+
 ### 6.6 两档判词：逐位与容差（刀 7b）
 
 层 2 从第一天就写着「分逐位与容差两档」（§6.2 的表、§3.2 的 matmul 行），但直到刀 7b 容差档
@@ -1350,6 +1387,7 @@ golden 对拍」。本机没有：pin 的三个 wheel（`nvidia-cuda-tileiras` /
 | **16 多 launch 的判词**（已落地） | 「设备把一串 launch 跑成一个程序：一次上传、N 次 launch、一次下载，中间结果从不离开设备，而它与手写参考的一致不靠任何一次 launch 单独成立；同时这条判词在序列被打乱、被截短、被喂回旧数据时必然红，在中间缓冲经宿主原路返回时必然绿」 | **包一行没改，`std/gpu` 的假设备与真机 handler 一行没改，运行时一行没改**——四层今天就能跑多 launch（假设备的缓冲表跨 launch 存活并把当前内容交给参考实现，真机的 cubin 表本来就按 kernel 名索引，`cuLaunchKernel` 走 null stream 天然有序）。缺的只是**怎么说**一个序列和**怎么判**它。harness：`scripts/tile-gpu-diff/seq_diff.dawn`（第十二支对拍程序）把序列做成数据——具名缓冲 `Buf`、一条 launch 一个 `Step`（kernel、grid、按名字给的实参）、`Seq`（缓冲、步骤、判词读哪个缓冲、哪一步读了更早一步写的哪个中间缓冲），加一个 `repeat(n, body)`，`n` 是宿主值、每一轮可以点不同的缓冲（矩阵幂就是靠它在两个累加器之间乒乓）。宿主：`std/gpu` 五个参考实现（`matmul_bt_ref` / `lora_out_ref` / `row_softmax_ref` / `swiglu_act_ref` / `apsp_step_ref`，其余三处复用 `matmul_ref`）。十一个 kernel 与它们的 golden。门禁：`problems.txt` 的 `kernel` 字段允许 `+` 连接，`check.py` 的 `case != kernel` 改成「case 声明的 kernel 集合等于本行」，权威是层 2 程序自己的 `sequence_kernels()`；`reference` 字段同样按 `+` 一一对应。CI：`tile-golden` 由两片分成**三片** | 层 0/1 十一个新 golden，`FUNC GLOBAL` 十一个；层 2 本机 3080 六条序列全绿（**逐位 1、容差 5**）。**档位是操作的性质不是 launch 数的性质**：`apsp` 十六次 launch 全是 `minf` 与 `addf`，仍然逐位；另外四条含 `mmaf`，容差是**端到端**量的（参考链的第二段吃的是参考自己的第一段输出），最大 miss 1.7e-10，是容差的 1.7e-10 倍。leetgpu **6 / 37 / 73 / 84 / 85** 可解，累计 **59 / 97**。刀 7a…15 的 66 个 golden 一字节没动 | 层 1 **零条**（零新 opcode）。层 2 **四条，全部是序列这份数据的变换**，红集按名字与个数钉死（24 个 (变异体, 序列) 格里 17 红）：`second-launch-sees-stale-buffer`（驱动在读它的那次 launch 前把中间缓冲的上传内容放回去）→ 五道题全红，**对照序列 `decoupled` 必须绿**；`launch-order-swapped`（逆序发出）→ 四道题红，**`apsp` 不红，而且不是运气**：把最短路在「最后被处理的中间点」切开，两半都在那一轮之前完成了，所以 Floyd-Warshall 的轮次**可交换**，一遍跑完全部 k 与顺序无关（代数给的，同刀 10 / 14）；`last-launch-dropped` → 六条全红，这是「每次 launch 都真的发生了」那条；`grid-of-later-launch-copied-from-the-first` → **只有 `attention` 与 `swiglu` 红**，`matpow` / `apsp` / `decoupled` 本来就一个 grid 到底，而 `lora` 的中间那次 launch **不读第二根 grid 轴**，多出来的 block 重算同一块 tile、写同样的字节——grid 变异体在它加出来的 block 幂等的地方是隐形的。控制项：中间缓冲经宿主下载再上传，六条序列的判词一个都不许动。语料：每条序列印 `changed_by_first`，五道题钉在零以上、`decoupled` 钉死为零 | 2（实报 1；见 §6.5：机器有别的活，两轮三片读到 197 / 189 / 177 s 与 170 / 171 / 171 s，不分片那一对自相矛盾（494 s 与 622 s）不采信；三条预算行按较差的那一轮全部重述为 534 / 518 / 494 s，`timeout-minutes` 27 / 26 / 25；`tile-gpu-diff/run.sh` 本机 242 s） |
 | **17 第二刀多 launch：一道题一个 kernel**（已落地） | 「设备把六串新的 launch 跑成六个程序，而其中四串**共用**刀 16 已经录好的两个 kernel：一个注意力变体是一条**关于分数的规则**，不是三个新 kernel；同时刀 16 那四条序列变异体在这十二条序列上的红集是逐条可预言的，包括它们**不**该红的地方」 | 与刀 16 一样：包、假设备、真机 handler、运行时**一行没改**，`tileiras` 与字节码版本没动。kernel：七个，`attn_causal` / `attn_alibi` / `attn_window` / `attn_sinks` / `attn_decay`（各是 `attn_scores` 加一条位置规则）与 `cce_row` / `cce_mean`。**没有第八个**：53 / 55 / 59 / 112 的第二、三次 launch 直接用刀 16 的 `attn_softmax` 与 `attn_context`，92 用它的 `attn_context`，条件是它们跑在刀 16 记录的那个形状上（ATT_M=64、ATT_N=64、ATT_D=32）。宿主：`std/gpu` 七个参考实现加两个私有辅助（`bt_dot` 把转置乘积拆到一个元素，五条规则各写一行）。harness：`seq_diff.dawn` 加六条序列，其中四条是**同一个函数**的四次调用（`masked_attn_seq(名字, kernel)`），因为四份拷贝会把「它们是同一条序列」这句话说四遍、并且总有一遍是错的 | 层 0/1 七个新 golden，`FUNC GLOBAL` 七个；层 2 本机 3080 十二条序列全绿（逐位 1、容差 11），六条新序列最大 miss 2.5e-11（容差的 2.5e-11 倍）。leetgpu **25 / 53 / 55 / 59 / 92 / 112** 可解，累计 **65 / 97**。刀 7a…16 的 77 个 golden 一字节没动 | 层 1 **零条**（零新 opcode）。层 2 仍是刀 16 那四条，矩阵从 24 格长到 **48 格**、红集从 17 长到 **39**，逐格按名字钉死。九个绿全部是**已经在案的三种形状**：`decoupled` 只被 `last-launch-dropped` 红（它没有依赖）；`apsp` 不被 `launch-order-swapped` 红（Floyd-Warshall 可交换）；`grid-of-later-launch-copied-from-the-first` 在后续 launch 幂等的地方隐形——刀 16 的 `matpow` / `apsp` / `decoupled`（一个 grid 到底）与 `lora`（中间那次不读第二根轴）之外，本刀又添两例：`decay` 的第二次 launch 是 `attn_context`，**只读第一根 grid 轴**；`cce` 的第二次是 `cce_mean`，**一根都不读**，六十四个 block 各算各的、写同一个答案。**没有一个新形状**，这本身是判词的结论：这四条变异体在这一族上的行为已经被解释干净了 | 1（实报 1；见 §6.5：三片 196 / 187 / 178 s 与 190 / 176 / 174 s，预算行重述为 532 / 514 / 496 s，`timeout-minutes` 不动；`tile-gpu-diff/run.sh` 本机 259 s） |
 | **18 机制花掉：把已经付过钱的东西写出来**（已落地） | 「已有的机制能解的题，和已经解了的题，不是一回事——七道题一次 launch、一道题三次，全部用刀 7a 到 12 早就有的操作，一个 opcode 也没加」 | 包、假设备、真机 handler、运行时**一行没改**，`tileiras` 与字节码版本没动。kernel：八个。`matvec`（18，一次 `mulf` 加一次沿维度的归约，没有 `mmaf`）、`conv3d`（11，`conv2d` 把第三维放到 grid 上）、`subarray_sum2d` / `subarray_sum3d`（48 / 49，秩 1 的 tile 用 `divi` / `remi` 拆出二维三维坐标）、`swiglu_half`（54，`geglu` 的形状换一个 swish 门）、`dequant`（64，索引由 lane 自己的坐标算出、不从任何缓冲区读）、`mha_scores` / `mha_context`（12，注意力族的**头**是一个列切片，也就是一个基址加一个行 stride）。**没有第九个**：12 的第二次 launch 直接用刀 16 的 `attn_softmax`，因为各头的分数块首尾相接，整块就是 `heads * N` 行 `N` 列，按行做 softmax 不必知道行属于哪个头；75 一个 kernel 也没加，它的 `A` 是稠密缓冲区、参考实现就是 `torch.matmul`，所以它是 `matmul` 在另一个形状上，与 8 之于 1 同理。宿主：`std/gpu` 七个参考实现 | 层 0/1 八个新 golden，`FUNC GLOBAL` 八个；层 2 本机 3080 全绿：`mm_diff` 8 条、`stride_diff` 10 条、`int_diff` 6 条、`gath_diff` 5 条、`erf_diff` 3 条、`seq_diff` 13 条序列。leetgpu **11 / 12 / 18 / 48 / 49 / 54 / 64 / 75** 可解，累计 **73 / 97**。刀 7a…17 的 84 个 golden 一字节没动 | 层 1 **零条**（零新 opcode），层 2 **零条新变异体**——这一刀的负控是把八个 kernel 塞进五个既有族的变异体表里，看哪些该红、哪些该绿。三条结论：`ladder-strides-reversed` **预言会红、实测绿**（见 §6.5 上面的表与 `tile-gpu-diff/run.sh` 里那条注：conv3d 的 tile 是方的、两条 mask 的上限不等，本以为 mask 会破坏对称，实际不会，因为 mask 的坐标也走同一条 stride 梯子、跟着一起换轴——抵消要么全发生要么不发生）；`gather-mask-dropped` 多了一个**会 gather 的控制**（`dequant` 的每个索引都在缓冲区内，所以它的 gather 无 mask，比三个根本不 gather 的控制说得多）；两条 erf 变异体第一次有了**kernel 级的控制**（`swiglu_half` 与 `geglu` 同形不同门，两条变异体都不许动它，层 0 与设备上都不许），在此之前这一族只有语料级的控制。序列那四条：矩阵从 48 格长到 **52 格**、红集从 39 长到 **43**，`mha` 四条全红，一个新形状都没有 | 1（实报 1；见 §6.5：三片 228 / 227 / 231 s，预算行重述为 596 / 594 / 602 s，`timeout-minutes` 抬到 30 / 30 / 31；`tile-gpu-diff/run.sh` 本机 304 s） |
+| **19 最后两道单 launch，与第三刀多 launch**（已落地） | 「射程内每一道**机制齐了只是没写**的题都写完了——那一桶从九题减到二题再减到零；而多 launch 那一桶还在按刀 17 的价钱掉，因为一次 launch 的复用可以架在 mask 上、grid 上，也可以架在**一个平均**上」 | 与刀 16 到 18 一样：包、假设备、真机 handler、运行时**一行没改**，`tileiras` 与字节码版本没动。kernel：十个。`agent_step`（14）与 `nearest_idx`（38）是同一个 N×N 成对形状的两个客户——一个 block 一个 agent / 一个点，一条 lane 是一个**配对**，自己那一对靠「打一个必输的分」去掉；后者是这棵树上唯一一个读 f64 写 i32 的 kernel。`xattn_scores` / `xattn_context`（26）是刀 18 的头布局在**两个序列长度**上，`gqa_scores` / `gqa_context`（80）把 KV 头放到第三根 grid 轴、组内序号放到第一根（`Idx` 上没有除法，所以等式要反过来写），`grpo_adv` / `grpo_row`（109），`kmeans_assign` / `kmeans_centroid`（20）。**没有第十一个**：26 与 80 的第二次 launch 是刀 16 的 `attn_softmax`，109 的第三次是刀 17 的 `cce_mean`（负号折进第二次 launch，因为负号精确，所以取负再平均等于平均再取负）。宿主：`std/gpu` 十个参考实现，其中 `kmeans_centroid_ref` 是这一族第一个**写两个缓冲区**的序列参考。harness：`red_diff` 加 `agent_step`（第一个归约**选出来的子集**的 kernel），`gath_diff` 加 `nearest_idx`（第一个把**算出来的地址本身**当答案写下去的 kernel），`seq_diff` 加四条序列，其中 `kmeans` 的 `repeat` 体是**两次** launch | 层 0/1 十个新 golden，`FUNC GLOBAL` 十个；层 2 本机 3080 全绿：`red_diff` 14 条、`gath_diff` 6 条、`seq_diff` 17 条序列（逐位 2、容差 15）。leetgpu **14 / 20 / 26 / 38 / 80 / 109** 可解，累计 **79 / 97**，「机制齐了只是没写」那一桶**清零**。刀 7a…18 的 92 个 golden 一字节没动 | 层 1 **零条**（零新 opcode），层 2 **零条新变异体**：负控仍是把十个 kernel 塞进既有的变异体表。两条结论，一条是推翻。（一）`reduce-identity-wrong` 的红集**不是**「归约的操作数是不是算出来的」——刀 7b 到 18 一直这样解释那张表，而 `agent_step` 的三次求和折的都是 `select`，字节移动、设备不动，是绿；剩下能把它与那六个分开的只有 tile 的宽度（六个红都是 1024 lane，它是 64），那是观察不是机制，所以那张表继续按名字钉六个、不再宣称规则。（二）序列那四条：矩阵从 52 格长到 **68 格**、红集从 43 长到 **58**，十个绿全在案的三种形状里，其中 `kmeans` 的 grid 绿是**为了让变异体守规矩而制造出来的**——`kmeans_centroid` 的 store 带一条 `c < KM_K` 的 mask（质心缓冲区只有四个元素，而这条变异体会把 64 个 block 抄到它头上，没有 mask 就是越界写，那是崩溃而不是答错），加了 mask 之后多出来的 block 什么都不写，于是隐形 | 1（实报 1；见 §6.5） |
 | 7（期权）混合路线 | 「同一个 kernel 体经编译期发射器与经记录 handler 产出相同的 Tile 程序」 | `selfhost/src/tile/emit_tile.dawn` | 两路 `TileProg` 相等 | 不在本计划内 | 6 到 10 |
 
 合计（不含刀 7）16 到 23 人日。字节码写入器是最大的单块，也是唯一能让 CI 的绿有信息量的
