@@ -91,6 +91,77 @@ GPU 的机器上用假设备跑完并给出相同答案**。后半句是让宿�
 - handler 的状态格不能被 lambda 捕获（`checker.dawn:1978`）：臂里要先 `let s = store`
   再进 `list.map`。假设备与记录 handler 都会反复撞到，是人体工学坑不是设计坑。
 
+### 2.4 目标改判：从「覆盖 leetgpu 题目」到「覆盖 Tile IR 的每一个特性」（用户 2026-09-05 裁决：六条全按推荐）
+
+刀 0 到刀 20 的目标是把 leetgpu.com 的题目做完，今天 83 / 97（刀 21 在途，照常收尾）。2026-09-05 用户把目标换成
+**覆盖 Tile IR 的每一个特性**。预研（本机私有笔记，不入库）从 `NVIDIA/cuda-tile@be0889cd`
+的本地 checkout 逐条数出全量：公开操作码 **100** 条（0x00 到 0x75，中间两段冻结空号
+0x19-0x24 与 0x34-0x39），本仓 `packages/tileir/src/bytecode.dawn` 的 `OP_` 表实现 **63** 条，
+另有标量类型 15 种（本仓 7 种）、类型构造子 8 个（本仓 4 个）、属性标签 12 个（本仓 2 个）、
+段 8 个（本仓 5 个）。
+
+**先说最该先说的一句：两个目标几乎正交。** 预研排的那十五刀最多解锁 2 到 4 道题
+（61 靠三角函数、81 靠 i4 与 `unpack`，39 / 78 补上一格但仍欠多 launch）；反过来，
+剩下 14 题里 29 / 67（top-k）与 60（RNG）**永远不会**被特性覆盖解锁，Tile IR 的 100 条
+操作码里没有任何选择、排序或随机机制。改目标不是换一个方向继续走，是换一条路。
+
+六条裁决：
+
+1. **「覆盖」的判据是层 2**，也就是本机 3080 上有第二意见。层 1（`tileiras` 接受）不够，
+   因为「门的绿没有信息量」；层 3（有会红的变异体）对某些格子物理上不成立，所以做不到
+   层 3 的**逐条具名豁免**，理由写进台账：`assume`（方言自己说错谓词是 UB）、
+   `OptimizationHints`（提示不改答案）、Debug 与 Producer 段、`nsw` / `nuw` / `nw`
+   （它们是编译器的假设不是运算）。
+2. **view 族暂排除**：`make_tensor_view` / `get_tensor_shape` / `load_view_tko` /
+   `store_view_tko` / `make_partition_view` / `get_index_space_shape` /
+   `make_gather_scatter_view` / `make_strided_view` / `atomic_red_view_tko` 九条操作码、
+   四个类型标签与 `PaddingValue` 五值枚举，连同 T11 到 T13 三刀一起挂起。它是与指针梯子
+   并列的第二套取址方式，是全清单里最大的一块，等 T1 到 T10 做完再回头裁。
+3. **`assert` 与 `print_tko` 的两种新判词形状要建**（「这次 launch 应当失败」与「这次
+   launch 应当打印这些字节」），放在 T6 那一刀内部完成，不提前立项。
+4. **Debug 段挂起**，等 CUDA 13.4 的 wheel 带上 `tileirdisasm` 能做文本对拍再做。今天
+   写出来只能被「`tileiras` 仍然接受」验证，那是层 1。
+5. **CI**：特性语料照常进 `scripts/tile-golden` 的分片，接受片数从四涨到五或六；每一刀的
+   报告必须写「不分片跑一次」的墙钟数字与分片后各片的数字。
+6. **立第二本账**：`scripts/tileir-features/features.txt` 逐操作码记「实现于哪一刀、覆盖到
+   哪一层、豁免理由」，门禁 `scripts/tileir-features/check.py` 以 `bytecode.dawn` 的 `OP_`
+   表为期望集合，缺行即红。`scripts/leetgpu-diff/problems.txt` 保留不动。
+
+**两本账是两个承诺，不是一件事的两个视角。** `problems.txt` 说的是「这个后端解得了哪些
+leetgpu 题」，`features.txt` 说的是「这个后端实现了 Tile IR 的哪些特性」；上面那句「几乎
+正交」正是它们不能互相代替的原因。两个 `check.py` 形状相同（逐行解析、字段逐项查得到、
+`--self-test` 带阳性对照），都在 CI 里跑：leetgpu 那本在 `tile-golden-1`，特性这本在
+`tree-policy`（它只读文本文件，不要工具链）。台账的列义与三层门的读法写在
+`features.txt` 的头注里，那儿是权威。
+
+刀序（预研排的，机制最便宜的先，但把版本墙放在它解锁的那一批之前）：
+
+| 刀 | 内容 | 新操作码 |
+|----|------|---------|
+| **T0** | 特性台账与门禁（本刀） | 0 |
+| T1 | 三角与浮点取余：`sin` `cos` `tan` `sinh` `cosh` `atan2` `remf` | 7 |
+| T2 | 形状与指针转换：`extract` `cat` `permute` `join_tokens` `get_num_tile_blocks` `int_to_ptr` `ptr_to_int` `ptr_to_ptr` | 8 |
+| T3 | 其余标量类型：`i16` `i64` `tf32` `f8E4M3FN` `f8E5M2` `f8E8M0FNU` | 0 |
+| T4 | 属性域的其余取值：三种舍入、三种溢出、`unordered`、内存序与内存范围、`flush_to_zero`、`propagate_nan`、`for` 的 `unsignedCmp`、`atomic_rmw` 的 `addf` | 0 |
+| T5 | `loop` 与 `break`（唯一缺的区域形状：出口由区域内算出的条件决定） | 2 |
+| T6 | `assert` `assume` `print_tko`，与它们的四个属性标签；两种新判词形状 | 3 |
+| T7 | 静态全局：`global` `get_global`，与 Global 段（id 6） | 2 |
+| T8 | 13.2 到 13.3 的版本墙，只做这一件事（它会让全部 `.tilebc` golden 进一次 diff） | 0 |
+| T9 | 13.3 亚字节：`i4` `f4E2M1FN` 加 `pack` `unpack` | 2 |
+| T10 | 13.3 其余：`alloca` `mmaf_scaled` | 2 |
+| T15 | `OptimizationHints`（属性标签 11 加 Dictionary 10） | 0 |
+
+T11 到 T13（view 族）按裁决 2 挂起，T14（Debug 段与 Producer 段）按裁决 4 挂起。
+leetgpu 刀 21 照常收尾，之后不再派 leetgpu 刀，剩余题目只作副产品记录。
+
+**版本墙（T8）比想象的便宜，这是预研独立复核过的一条。** 13.2 与 13.3 之间本仓写出去的
+字节只有三处会变：文件头第 10 字节的 `BYTECODE_MINOR`、`exp` 0x17（13.3 起必须内联写
+`rounding_mode`）与 `mmaf` 0x49（13.3 起要写一个 flags varint）。其余 98 个操作逐字节相同。
+`bytecode.dawn` 那句「the bytecode this writes is the same at 13.1, 13.2 and 13.3」在今天
+实现的 63 条里只有这两条是例外，而当年那次三版本对拍用的 vadd 一条都没碰上，所以升版时
+那句注释要跟着改。
+
+
 ## 3. 类型层
 
 ### 3.1 opaque 机制的坐标
@@ -1479,6 +1550,7 @@ golden 对拍」。本机没有：pin 的三个 wheel（`nvidia-cuda-tileiras` /
 一块。每一刀的门禁改动都要报墙钟；没有一刀碰长杆。
 
 | **20 三条注意力序列与一次消元**（已落地） | 「设备把四串新的 launch 跑成四个程序，而九个新 kernel 里没有一个只是把已经录过的东西再写一遍：leetgpu 111 的**七次** launch 里五次用的是既有 kernel，leetgpu 56 的三次 launch 只有两个 kernel。同时判词本身补上一个洞：一道有三个输出的题，不能靠看其中一个下判断」 | 包、假设备、真机 handler、运行时**一行没改**，`tileiras` 与字节码版本没动，**零新 opcode**。kernel：九个。`kv_scores` / `kv_context`（96，int8 缓存加逐位置 f32 scale）、`attn_bwd_mmt` / `attn_bwd_ds`（111，转置乘积与 softmax 的雅可比）、`lin_attn_s` / `lin_attn_out`（56）、`ols_gram` / `ols_elim` / `ols_beta`（33）。**复用的四处**：111 的第一、二次 launch 是刀 16 的 `attn_scores` 与 `attn_softmax`，第四次是 `attn_scores` **第二次**（`dP = dO V^T` 本来不该除 `sqrt(d)`，但消费它的 `dS` 那一行对 `dP` 线性，所以把除法提前到这次 launch、末尾那次删掉，答案一模一样），第六次是 `attn_context`，第三、七次是同一个 `attn_bwd_mmt` 跑两遍；96 的中间一次是 `attn_softmax`；56 的第二次是 `lin_attn_s` 再跑一遍，只把第二个实参换成一个**全 1 的缓冲区**（列和就是与一列 1 的乘积，复用在**操作数**上，前三刀分别在 mask、grid 与 scale 上）。宿主：`std/gpu` 九个参考实现。harness：`Seq` 的 `read: String` 改成 `reads: List[String]`，判词把它们首尾相接后比较 | 层 0/1 九个新 golden，`FUNC GLOBAL` 九个，`tileiras` 一次通过；层 2 本机 3080 二十条序列加对照全绿（**逐位 3、容差 18**）。leetgpu **33 / 56 / 96 / 111** 可解，累计 **83 / 97**。刀 7a…19 的 102 个 golden 一字节没动。**33 是第三条逐位档序列，而它的理由比另外两条强**：`apsp` 与 `kmeans` 的逐位要靠语料，33 只靠代数，它的每一个操作都是 f64 的 `addf` / `subf` / `mulf` / `divf`，IEEE 754 要求这四个都正确舍入，两边的顺序又都由 `d_for` 与下标固定，没有一棵折叠树是自由的（实测 miss 恰好 0.0）；高斯-约当不选主元也是代数给的（Gram 矩阵对称正定，顺序主子式全正） | 层 1 **零条**（零新 opcode）。层 2 **零条新变异体**：负控是把四条序列塞进刀 16 那四条变异体，矩阵从 68 格长到 **84 格**、红集从 58 长到 **72**，逐格按名字钉死。十二个绿仍是在案的三种形状，`kv` 与 `ols` 的 grid 绿落在**第一种**（一个 grid 到底）而不是第二种（幂等）：`kv` 三次 launch 都是一个 block 一个头，`ols` 全程一个 block，因为一次消元步在写每一行的同时要读主元行，两个 block 就是数据竞争。另有一条**自轴负控**：把 `std/gpu.ols_beta_ref` 读的列从 `f` 改成 `f + 1`，只有 `ols` 一条红 |
+| **T0 特性台账与门禁**（已落地，目标改判后的第一刀，§2.4） | 「Tile IR 的 100 条公开操作码里，每一条都说得出实现于哪一刀、覆盖到哪一层、以及做不到那一层时的具名理由」（今天说不出：`problems.txt` 记的是题不是特性，而「还差什么」只存在于预研笔记里） | `scripts/tileir-features/`（`features.txt` 100 行加头注、`check.py` 加 `--self-test`）、`gates.yml` 的 `tree-policy` 加一步、`docs/tile-backend-design.md` §2.4 与本表、`docs/README.md` 一句 | `check.py` 绿并打印计数（实现 63 / 未实现 26 / 挂起 9 / 结构性 2；层 2 有 48 条、层 3 有 17 条）；期望集合是 `bytecode.dawn` 的 `OP_` 表，两个方向都查 | `--self-test` 十五条负控加一条阳性对照，负控含：多一个 `OP_` 而台账无行、台账少一行、码对不上、`implemented` 行声称层 2 但没有任何 golden 含这个操作、声称层 3 但不指名变异体、版本列与 13.2 / 13.3 增量表不符；阳性对照是真实输入必须绿 | 0.5（实报 0.5；门禁本机 0.03 s，自检 0.13 s，落在 `tree-policy`，budget 不动） |
 
 ## 8. 风险
 
