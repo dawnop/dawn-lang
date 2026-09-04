@@ -80,6 +80,16 @@ name: gates
 # observation is now 521s, and the highest remaining planning value is
 # native-diff-1's 391s.
 #
+# 2026-09-04, second audit: the observation window is now post-prune
+# throughout (20 completed main runs, 2026-09-03T17:42Z .. 2026-09-04T12:10Z,
+# every one after e797abb0), so both directions are settled from it. Sixteen
+# lines are restated upwards to their own worst run in that window, and the
+# four native-diff shards downwards to theirs (391/302/288/289s ->
+# 222/175/169/180s), which is the lowering the paragraph above deferred until
+# no pre-prune run was left in the window. The tallest claim in this file
+# after that batch is pipe-contract-2's 611s, 49s under the pole. The pole did
+# not move and no job asked it to.
+#
 # What the pole cannot see is a claim that has quietly stopped being true:
 # check-gate-budgets.py compares the timeout with the claim and the claim with
 # the pole, and both numbers live in this file. On 2026-09-03 twenty-one lines
@@ -154,8 +164,15 @@ jobs:
     runs-on: ubuntu-latest
     # This shard also runs scripts/delete-contract/run.sh, which run.sh gives
     # to shard 1 alone: it is one selfhost rebuild and it does not divide.
-    # budget: 3x 391s planning value (see the note above)
-    timeout-minutes: 20
+    # 2026-09-04: observation replaces the planning value, downwards. The
+    # worst over the 20 completed main runs of 09-03T17:42Z .. 09-04T12:10Z is
+    # 222s (run 33859389747), against the 391s planning value. The lowering
+    # waited for this window: a claim is a claim about the worst run in it,
+    # and while pre-prune runs were still in the window the line could not
+    # follow the pruned tree down. Every run in this one is after the std
+    # pruning knife (e797abb0).
+    # budget: 3x 222s worst observed
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -274,8 +291,12 @@ jobs:
     # which the line may not follow while pre-prune runs are in the window.
     # scripts/gate-observations.py pulled it; scripts/check-gate-budgets.py
     # --observed is the audit that named it.
-    # budget: 3x 302s worst observed
-    timeout-minutes: 16
+    # 2026-09-04, post-prune window: the window is now post-prune
+    # throughout, so the line does follow the pruned tree down -- 175s (run
+    # 33814643444) over the 20 completed main runs of 09-03T17:42Z ..
+    # 09-04T12:10Z. See native-diff-1 for why the lowering waited.
+    # budget: 3x 175s worst observed
+    timeout-minutes: 9
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -298,8 +319,11 @@ jobs:
 
   native-diff-3:
     runs-on: ubuntu-latest
-    # budget: 3x 288s planning value (see the note above)
-    timeout-minutes: 15
+    # 2026-09-04: observation replaces the planning value: 169s (run
+    # 33810671364) over the post-prune window native-diff-1 names, against
+    # the 288s planning value.
+    # budget: 3x 169s worst observed
+    timeout-minutes: 9
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -322,8 +346,11 @@ jobs:
 
   native-diff-4:
     runs-on: ubuntu-latest
-    # budget: 3x 289s planning value (see the note above)
-    timeout-minutes: 15
+    # 2026-09-04: observation replaces the planning value: 180s (run
+    # 33846134581) over the post-prune window native-diff-1 names, against
+    # the 289s planning value.
+    # budget: 3x 180s worst observed
+    timeout-minutes: 9
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -359,8 +386,11 @@ jobs:
     # tag, so it grows with the commits since that tag; at 25 commits past
     # v0.72.0 it took 3m21s (run 33684451459) and the 3-minute bound cancelled
     # the job twice. Sized to that observation; it shrinks again at each tag.
-    # budget: 3x 201s worst observed
-    timeout-minutes: 11
+    # 2026-09-04, post-prune window: 222s (run 33846134581) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 21s over the 201s claim.
+    # budget: 3x 222s worst observed
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:
@@ -416,8 +446,11 @@ jobs:
     # scripts/check-gate-budgets.py --observed is the audit that named it.
     # 2026-09-04: 476s (run 33774195662) over the four completed main runs of
     # 2026-09-03 (15:26Z .. 17:42Z), 4s over the 472s claim.
-    # budget: 3x 476s worst observed
-    timeout-minutes: 24
+    # 2026-09-04, post-prune window: 491s (run 33853792854) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 15s over the 476s claim.
+    # budget: 3x 491s worst observed
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -466,7 +499,10 @@ jobs:
     # completed main runs since 09-02 is 404s (run 33727540404), which the
     # 340s claim was 64s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 404s worst observed
+    # 2026-09-04, post-prune window: 416s (run 33801126953) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 12s over the 404s claim.
+    # budget: 3x 416s worst observed
     timeout-minutes: 21
     steps:
       - uses: actions/checkout@v4
@@ -502,8 +538,11 @@ jobs:
     # completed main runs since 09-02 is 557s (run 33734826386), which the
     # 477s claim was 80s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 557s worst observed
-    timeout-minutes: 28
+    # 2026-09-04, post-prune window: 585s (run 33853792854) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 28s over the 557s claim.
+    # budget: 3x 585s worst observed
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -527,8 +566,11 @@ jobs:
     # completed main runs since 09-02 is 553s (run 33742987376), which the
     # 359s claim was 194s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 553s worst observed
-    timeout-minutes: 28
+    # 2026-09-04, post-prune window: 590s (run 33827988005) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 37s over the 553s claim.
+    # budget: 3x 590s worst observed
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -563,8 +605,11 @@ jobs:
     # completed main runs since 09-02 is 282s (run 33744995496), which the
     # 258s claim was 24s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 282s worst observed
-    timeout-minutes: 15
+    # 2026-09-04, post-prune window: 409s (run 33801126953) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 127s over the 282s claim.
+    # budget: 3x 409s worst observed
+    timeout-minutes: 21
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1038,8 +1083,11 @@ jobs:
     # 2026-09-04: 386s (run 33779014329) over the four completed main runs of
     # 2026-09-03 (15:26Z .. 17:42Z) replaces the planning value, 2s over it.
     # The pruned tree ran 215s, for the reason contracts-1 gives.
-    # budget: 3x 386s worst observed
-    timeout-minutes: 20
+    # 2026-09-04, post-prune window: 447s (run 33801126953) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 61s over the 386s claim.
+    # budget: 3x 447s worst observed
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1130,7 +1178,10 @@ jobs:
     # scripts/check-gate-budgets.py --observed is the audit that named it.
     # 2026-09-04: 306s (run 33774195662) over the four completed main runs of
     # 2026-09-03 (15:26Z .. 17:42Z), 5s over the 301s claim.
-    # budget: 3x 306s worst observed
+    # 2026-09-04, post-prune window: 314s (run 33810671364) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 8s over the 306s claim.
+    # budget: 3x 314s worst observed
     timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
@@ -1212,8 +1263,12 @@ jobs:
     # against 7.0s per build locally), which over-states the per-mutant figure
     # because the gates moved in here are inside the 421s and outside that
     # division. 16s each on the runner, so 421s + 2 x 16s.
-    # budget: 3x 453s planning value (421s observed at eighteen mutants, two added at 16s each)
-    timeout-minutes: 23
+    # 2026-09-04, post-prune window: the runner observation replaces the
+    # planning value -- 482s (run 33827988005) over the 20 completed main
+    # runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std pruning knife
+    # (e797abb0), 29s over the 453s planning value.
+    # budget: 3x 482s worst observed
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1634,8 +1689,11 @@ jobs:
     # completed main runs since 09-02 is 357s (run 33748678694), which the
     # 240s claim was 117s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 357s worst observed
-    timeout-minutes: 18
+    # 2026-09-04, post-prune window: 365s (run 33834991675) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 8s over the 357s claim.
+    # budget: 3x 365s worst observed
+    timeout-minutes: 19
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1682,7 +1740,10 @@ jobs:
     # completed main runs since 09-02 is 284s (run 33727540404), which the
     # 258s claim was 26s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 284s worst observed
+    # 2026-09-04, post-prune window: 292s (run 33793202095) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 8s over the 284s claim.
+    # budget: 3x 292s worst observed
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -1698,8 +1759,14 @@ jobs:
     # completed main runs since 09-02 is 265s (run 33744995496), which the
     # 258s claim was 7s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 265s worst observed
-    timeout-minutes: 14
+    # 2026-09-04, post-prune window: 611s (run 33807243516) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 346s over the 265s claim.
+    # That claim sits 49s under the 660s pole, so a restatement much past it
+    # collides with the pole; the answer then is a third shard, not a taller
+    # pole.
+    # budget: 3x 611s worst observed
+    timeout-minutes: 31
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1775,8 +1842,11 @@ jobs:
     # scripts/check-gate-budgets.py --observed is the audit that named it.
     # 2026-09-04: 312s (run 33779014329) over the four completed main runs of
     # 2026-09-03 (15:26Z .. 17:42Z), 10s over the 302s claim.
-    # budget: 3x 312s worst observed
-    timeout-minutes: 16
+    # 2026-09-04, post-prune window: 589s (run 33846134581) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 277s over the 312s claim.
+    # budget: 3x 589s worst observed
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -1986,7 +2056,10 @@ jobs:
     # scripts/check-gate-budgets.py --observed is the audit that named it.
     # 2026-09-04: 313s (run 33786130335) over the four completed main runs of
     # 2026-09-03 (15:26Z .. 17:42Z), 6s over the 307s claim.
-    # budget: 3x 313s worst observed
+    # 2026-09-04, post-prune window: 317s (run 33827988005) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 4s over the 313s claim.
+    # budget: 3x 317s worst observed
     timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
@@ -2001,7 +2074,10 @@ jobs:
   # observed upper bound. Keep it parallel to the 163s Phase 1 contract.
   dependency-heap-contract:
     runs-on: ubuntu-latest
-    # budget: 3x 90s combined worst observed
+    # 2026-09-04, post-prune window: 94s (run 33871426552) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 4s over the 90s claim.
+    # budget: 3x 94s combined worst observed
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -2080,8 +2156,11 @@ jobs:
     # scripts/check-gate-budgets.py --observed is the audit that named it.
     # 2026-09-04: 215s (run 33779014329) over the four completed main runs of
     # 2026-09-03 (15:26Z .. 17:42Z), 2s over the 213s claim.
-    # budget: 3x 215s worst observed
-    timeout-minutes: 11
+    # 2026-09-04, post-prune window: 255s (run 33788664118) over the 20
+    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
+    # pruning knife (e797abb0), 40s over the 215s claim.
+    # budget: 3x 255s worst observed
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
         with:
