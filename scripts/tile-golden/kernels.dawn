@@ -2756,6 +2756,251 @@ fn kmeans_centroid(dx: Param[F64], dy: Param[F64], lab: Param[I32], cx: Param[F6
     select(F64, one, has, div(F64, one, sy, den), load_masked(cy, at, one, live, keep)))
 }
 
+# ---- knife 20: an int8 cache, a backward pass, a linear attention and a
+# ---- solve ----
+#
+# Four more sequences, nine kernels, and the reuse is heavier here than in
+# any knife before: leetgpu 111 runs SEVEN launches over five kernels and
+# only two of them are new, and leetgpu 56 runs three launches over two.
+#
+# The one thing genuinely new in kind is leetgpu 33: its sequence is a
+# GAUSSIAN ELIMINATION, so the launches are not a pipeline of different
+# computations but the SAME kernel driven `n_features` times over one
+# matrix, with the pivot index in a one-element i32 buffer the way knife
+# 16's Floyd-Warshall rounds carry theirs. It is also this file's third
+# exact-tier sequence: every operation in it is an `addf`, `subf`, `mulf`
+# or `divf` at f64 in an order both sides fix, and IEEE 754 requires all
+# four to be correctly rounded, so there is no fold whose tree could
+# differ.
+
+# leetgpu 96 (INT8 KV-Cache Attention): one query a head against a cache of
+# KV_S keys and values held as int8 with a per-position f32 scale. KV_S is
+# knife 16's ATT_N so that the middle launch can be `attn_softmax`
+# unchanged: the scores are KV_H rows of KV_S, which is what a softmax by
+# row reads whatever the rows mean.
+const KV_H: Int = 8
+const KV_S: Int = 64
+const KV_D: Int = 32
+
+# 1 / sqrt(KV_D), the problem's `1 / math.sqrt(head_dim)`.
+const KV_INV_SQRT_D: Float = 0.17677669529663687
+
+## An i8 tile read SIGNED, at i32. The dialect's `exti` here is unsigned
+## (knife 11's `invert` is why: a u8 image wants the octet as [0, 255]),
+## and the signed widening it does not have is `(u ^ 128) - 128` -- the
+## standard two's-complement fold, exact for every octet and costing two
+## integer operations rather than a new opcode. std/gpu's `I8` format is
+## the host side of the same reading.
+fn i8_signed(shape: List[Int], t: Tile[I8]) -> Tile[I32] !Dev =
+  sub_i(shape, xor_i(shape, ext_u8(shape, t), i_const(shape, 128)), i_const(shape, 128))
+
+## The dequantised cache block of head `h`: `K[h, j, d] * scale[h, j]` as
+## an f64 tile of KV_S rows by KV_D columns, the scale broadcast along the
+## row with a stride of zero.
+fn kv_dequant(c: Param[I8], scale: Param[F64], h: Idx) -> Tile[F64] !Dev = {
+  let sh = [KV_S, KV_D]
+  let raw = load_strided(c, idx_mul(h, idx_const(KV_S * KV_D)), sh, [KV_D, 1])
+  let ts = load_strided(scale, idx_mul(h, idx_const(KV_S)), sh, axis_strides(2, 0, 1))
+  mul(F64, sh, int_to_float(F64, sh, i8_signed(sh, raw)), ts)
+}
+
+# Launch 1 of 3: s[h, j] = (Q[h, :] . dequant(K)[h, j, :]) / sqrt(D). One
+# block a head, and the query row is read with a stride of ZERO down the
+# key axis so that one row of Q serves all KV_S keys.
+fn kv_scores(q: Param[F64], k: Param[I8], ks: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let h = block_id(0)
+  let sh = [KV_S, KV_D]
+  let row = [KV_S]
+  let tq = load_strided(q, idx_mul(h, idx_const(KV_D)), sh, axis_strides(2, 1, 1))
+  let dot = d_reduce_dim(F64, sh, 1, mul(F64, sh, tq, kv_dequant(k, ks, h)), 0.0,
+    (acc, e) => s_addf(F64, acc, e))
+  store(s, idx_mul(h, idx_const(KV_S)), row,
+    mul(F64, row, dot, f_const(F64, row, KV_INV_SQRT_D)))
+}
+
+# Launch 3 of 3: o[h, d] = sum_j p[h, j] * dequant(V)[h, j, d]. The weight
+# is the one read with a stride of zero this time, down the FEATURE axis,
+# and the fold is along the key axis rather than across it.
+fn kv_context(p: Param[F64], v: Param[I8], vs: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let h = block_id(0)
+  let sh = [KV_S, KV_D]
+  let tw = load_strided(p, idx_mul(h, idx_const(KV_S)), sh, axis_strides(2, 0, 1))
+  let col = d_reduce_dim(F64, sh, 0, mul(F64, sh, tw, kv_dequant(v, vs, h)), 0.0,
+    (acc, e) => s_addf(F64, acc, e))
+  store(o, idx_mul(h, idx_const(KV_D)), [KV_D], col)
+}
+
+# leetgpu 111 (Softmax Attention Backward): dQ, dK and dV of the attention
+# knife 16 recorded forwards. Seven launches, THREE outputs, and only two
+# new kernels -- the other five launches are `attn_scores` twice,
+# `attn_softmax` and `attn_context`, all at the shape they were recorded
+# at (ATT_M by ATT_D queries against ATT_N keys).
+#
+# The second `attn_scores` is the reuse worth naming. The gradient wants
+# `dP = dO V^T` with NO scale, and `attn_scores` divides by sqrt(d); but
+# the row that consumes it,
+#
+#   dS = (dP * P - P * rowsum(dP * P)) / sqrt(d)
+#
+# is LINEAR in dP, so dividing dP by sqrt(d) up front and dropping the
+# final division gives the same dS. A scale that factors out of an
+# expression can be moved to whichever launch already applies it, which is
+# the same algebra that let knife 19's leetgpu 109 fold a negation into
+# its row launch and reuse `cce_mean`.
+
+# Launch 3 and 7: C[N, D] = A[M, N]^T * B[M, D], the transposed product
+# both dV = P^T dO and dK = dS^T Q are. One block a row block of C,
+# folding over M in ATT_T-wide chunks; the transpose is in the STRIDES of
+# A's tile and nowhere else.
+fn attn_bwd_mmt(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(0)
+  let sh = [ATT_T, ATT_D]
+  let zero = f_const(F64, sh, 0.0)
+  let acc = d_for(idx_const(0), idx_const(ATT_M / ATT_T), idx_const(1), zero, (k, sofar) => {
+    let ta = load_strided(a, idx_add(idx_mul(k, idx_const(ATT_T * ATT_N)), idx_mul(bn, idx_const(ATT_T))),
+      [ATT_T, ATT_T], permute([ATT_N, 1], [1, 0]))
+    let tb = load_strided(b, idx_mul(k, idx_const(ATT_T * ATT_D)), [ATT_T, ATT_D], [ATT_D, 1])
+    mmaf(F64, ATT_T, ATT_T, ATT_D, ta, tb, sofar)
+  })
+  store_strided(c, idx_mul(bn, idx_const(ATT_T * ATT_D)), sh, [ATT_D, 1], acc)
+}
+
+# Launch 5 of 7: dS = dP * P - P * rowsum(dP * P), one row a block. The
+# softmax Jacobian, and the same row-wide reduction `attn_softmax` does
+# with the maximum replaced by nothing: the row is ATT_N wide and the tile
+# is the whole of it, so there is no mask.
+fn attn_bwd_ds(dp: Param[F64], p: Param[F64], ds: Param[F64]) -> Unit !Dev = {
+  let sh = [ATT_N]
+  let row = tile_at(block_id(0), ATT_N)
+  let tp = load(p, row, sh)
+  let prod = mul(F64, sh, load(dp, row, sh), tp)
+  let total = spread(F64, sh, d_reduce(F64, sh, prod, 0.0, (acc, e) => s_addf(F64, acc, e)))
+  store(ds, row, sh, sub(F64, sh, prod, mul(F64, sh, tp, total)))
+}
+
+# leetgpu 56 (Linear Self-Attention): phi(x) = ELU(x) + 1, S = phi(K)^T V,
+# z = sum_j phi(K)[j], out = (phi(Q) S) / (phi(Q) z). THREE launches over
+# TWO kernels, and the reuse is on an OPERAND rather than on a grid or a
+# mask: a column sum is a product with a column of ones, so `z` is
+# `lin_attn_s` run a second time with a buffer of ones where V was. It
+# costs the D-fold redundancy of computing the same column in every column
+# and saves a kernel, which at this shape is the better trade.
+const LA_M: Int = 64
+const LA_D: Int = 32
+const LA_T: Int = 32
+
+## `phi(x) = ELU(x) + 1`, which is `x + 1` above zero and `exp(x)` at or
+## below it: `ELU(x) = exp(x) - 1` there, so the +1 cancels exactly and no
+## kernel here ever computes `exp(x) - 1 + 1`.
+fn la_phi(shape: List[Int], t: Tile[F64]) -> Tile[F64] !Dev =
+  select(F64, shape, gt(F64, shape, t, f_const(F64, shape, 0.0)),
+    addf(F64, shape, t, f_const(F64, shape, 1.0)), exp(F64, shape, t))
+
+# Launch 1 and 2 of 3: S[a, b] = sum_j phi(K[j, a]) * V[j, b]. One block
+# over the whole D by D answer, folding over the M rows in LA_T chunks.
+fn lin_attn_s(k: Param[F64], v: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let sh = [LA_D, LA_D]
+  let zero = f_const(F64, sh, 0.0)
+  let acc = d_for(idx_const(0), idx_const(LA_M / LA_T), idx_const(1), zero, (j, sofar) => {
+    let tk = load_strided(k, idx_mul(j, idx_const(LA_T * LA_D)), [LA_D, LA_T],
+      permute([LA_D, 1], [1, 0]))
+    let tv = load_strided(v, idx_mul(j, idx_const(LA_T * LA_D)), [LA_T, LA_D], [LA_D, 1])
+    mmaf(F64, LA_D, LA_T, LA_D, la_phi([LA_D, LA_T], tk), tv, sofar)
+  })
+  store(s, idx_const(0), sh, acc)
+}
+
+# Launch 3 of 3: out[i, b] = (phi(Q) S)[i, b] / (phi(Q) z)[i]. The
+# denominator is computed as a SECOND product rather than as a reduction
+# followed by a broadcast, because `z` arrives as the first column of a D
+# by D matrix and reading it with a column stride of zero makes every
+# column of the product the row's denominator. One product, one divide,
+# and no rank-1 tile to spread back out.
+fn lin_attn_out(q: Param[F64], s: Param[F64], z: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let sh = [LA_T, LA_D]
+  let zero = f_const(F64, sh, 0.0)
+  let tq = la_phi(sh, load_strided(q, idx_mul(bm, idx_const(LA_T * LA_D)), sh, [LA_D, 1]))
+  let ts = load(s, idx_const(0), [LA_D, LA_D])
+  let tz = load_strided(z, idx_const(0), [LA_D, LA_D], axis_strides(2, 0, LA_D))
+  let num = mmaf(F64, LA_T, LA_D, LA_D, tq, ts, zero)
+  let den = mmaf(F64, LA_T, LA_D, LA_D, tq, tz, zero)
+  store_strided(out, idx_mul(bm, idx_const(LA_T * LA_D)), sh, [LA_D, 1], div(F64, sh, num, den))
+}
+
+# leetgpu 33 (Ordinary Least Squares): beta solves X^T X beta = X^T y.
+# TWO plus n_features launches -- one to build the augmented normal
+# equations, one Gauss-Jordan step per feature, one to read the answer out
+# -- and the count is a host value the way leetgpu 37's exponent and 73's
+# node count are.
+#
+# The problem's own reference is a Cholesky factorisation with forward and
+# backward substitution, which is a different algorithm; what is compared
+# is beta, and the tolerance the problem states is 1e-2. Gauss-Jordan
+# needs no pivot search here because a Gram matrix is symmetric positive
+# definite, so its leading minors are all positive and no pivot is zero.
+#
+# The augmented matrix is OLS_F rows of OLS_W, where OLS_W is a power of
+# two above n_features + 1: columns 0..F-1 are X^T X, column F is X^T y,
+# and the rest are zero and stay zero (they are divided and subtracted
+# like every other column, which costs nothing and keeps the tile
+# rectangular).
+const OLS_N: Int = 64
+const OLS_F: Int = 8
+const OLS_W: Int = 16
+
+# Launch 1: the augmented normal equations, one block over the whole F by
+# W answer. The fold is a `d_for` over the samples, so both the device and
+# a host reference add them in index order and every partial sum is the
+# same f64 -- which is why this sequence is exact tier and the GEMM
+# sequences beside it are not.
+fn ols_gram(x: Param[F64], y: Param[F64], a: Param[F64]) -> Unit !Dev = {
+  let sh = [OLS_F, OLS_W]
+  let col = coord(idx_const(0), sh, 1, 1)
+  let inside = lt_i(sh, col, i_const(sh, OLS_F))
+  let is_rhs = eq_i(sh, col, i_const(sh, OLS_F))
+  let zero = f_const(F64, sh, 0.0)
+  let acc = d_for(idx_const(0), idx_const(OLS_N), idx_const(1), zero, (i, sofar) => {
+    let base = idx_mul(i, idx_const(OLS_F))
+    let xr = load_strided(x, base, sh, axis_strides(2, 0, 1))
+    let xc = load_strided_masked(x, base, sh, axis_strides(2, 1, 1), inside, zero)
+    let ty = load_strided(y, i, sh, [0, 0])
+    addf(F64, sh, sofar, mul(F64, sh, xr, select(F64, sh, is_rhs, ty, xc)))
+  })
+  store(a, idx_const(0), sh, acc)
+}
+
+# Launch 2 to F+1: one Gauss-Jordan step in place. The pivot index is a
+# one-element i32 buffer and the three things that depend on it -- the
+# pivot row, the pivot column and the pivot itself -- are GATHERED through
+# index tiles, for the reason knife 16's `apsp_step` gathers its round:
+# their offsets are not known when the kernel is recorded.
+#
+# One block over the whole matrix, so every read precedes the store and
+# the step sees the matrix as it was. That is not a preference here but a
+# requirement: a block writing row r reads row k, so two blocks would race.
+fn ols_elim(a: Param[F64], kb: Param[I32]) -> Unit !Dev = {
+  let sh = [OLS_F, OLS_W]
+  let k = gather(kb, i_const(sh, 0), sh)
+  let row = coord(idx_const(0), sh, 0, 1)
+  let col = coord(idx_const(0), sh, 1, 1)
+  let kw = mul_i(sh, k, i_const(sh, OLS_W))
+  let piv = gather(a, add_i(sh, kw, k), sh)
+  let prow = div(F64, sh, gather(a, add_i(sh, kw, col), sh), piv)
+  let colk = gather(a, add_i(sh, mul_i(sh, row, i_const(sh, OLS_W)), k), sh)
+  let elim = sub(F64, sh, load(a, idx_const(0), sh), mul(F64, sh, colk, prow))
+  store(a, idx_const(0), sh, select(F64, sh, eq_i(sh, row, k), prow, elim))
+}
+
+# Launch F+2: beta is the augmented column of the reduced matrix, read
+# with a stride of OLS_W. The whole of the last launch, and the reason the
+# sequence has one at all: what the caller asked for is F numbers and what
+# the elimination leaves is an F by W matrix.
+fn ols_beta(a: Param[F64], beta: Param[F64]) -> Unit !Dev = {
+  let sh = [OLS_F]
+  store(beta, idx_const(0), sh, load_strided(a, idx_const(OLS_F), sh, [OLS_W]))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -3013,6 +3258,31 @@ fn trace(name: String) -> TileProg = match name {
   "kmeans_centroid" ->
     trace_kernel("kmeans_centroid", ["f64", "f64", "i32", "f64", "f64"],
       () => kmeans_centroid(param(F64, 0), param(F64, 1), param(I32, 2), param(F64, 3), param(F64, 4)))
+  "kv_scores" ->
+    trace_kernel("kv_scores", ["f64", "i8", "f64", "f64"],
+      () => kv_scores(param(F64, 0), param(I8, 1), param(F64, 2), param(F64, 3)))
+  "kv_context" ->
+    trace_kernel("kv_context", ["f64", "i8", "f64", "f64"],
+      () => kv_context(param(F64, 0), param(I8, 1), param(F64, 2), param(F64, 3)))
+  "attn_bwd_mmt" ->
+    trace_kernel("attn_bwd_mmt", ["f64", "f64", "f64"],
+      () => attn_bwd_mmt(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attn_bwd_ds" ->
+    trace_kernel("attn_bwd_ds", ["f64", "f64", "f64"],
+      () => attn_bwd_ds(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "lin_attn_s" ->
+    trace_kernel("lin_attn_s", ["f64", "f64", "f64"],
+      () => lin_attn_s(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "lin_attn_out" ->
+    trace_kernel("lin_attn_out", ["f64", "f64", "f64", "f64"],
+      () => lin_attn_out(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "ols_gram" ->
+    trace_kernel("ols_gram", ["f64", "f64", "f64"],
+      () => ols_gram(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "ols_elim" ->
+    trace_kernel("ols_elim", ["f64", "i32"], () => ols_elim(param(F64, 0), param(I32, 1)))
+  "ols_beta" ->
+    trace_kernel("ols_beta", ["f64", "f64"], () => ols_beta(param(F64, 0), param(F64, 1)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -3042,6 +3312,8 @@ pub fn main() -> Unit !io = match args() {
       ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
       ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
       ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
-      ++ "|histogram|cas_swap|erf_sweep|geglu>"
+      ++ "|histogram|cas_swap|erf_sweep|geglu"
+      ++ "|kv_scores|kv_context|attn_bwd_mmt|attn_bwd_ds|lin_attn_s|lin_attn_out"
+      ++ "|ols_gram|ols_elim|ols_beta>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

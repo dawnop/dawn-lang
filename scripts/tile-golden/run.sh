@@ -190,7 +190,9 @@ kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops
   attn_causal attn_alibi attn_window attn_sinks attn_decay cce_row cce_mean
   matvec subarray_sum2d subarray_sum3d swiglu_half dequant conv3d mha_scores mha_context
   agent_step nearest_idx xattn_scores xattn_context gqa_scores gqa_context grpo_adv grpo_row
-  kmeans_assign kmeans_centroid)
+  kmeans_assign kmeans_centroid
+  kv_scores kv_context attn_bwd_mmt attn_bwd_ds lin_attn_s lin_attn_out
+  ols_gram ols_elim ols_beta)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
