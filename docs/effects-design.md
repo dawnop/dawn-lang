@@ -731,7 +731,166 @@ stdout 上，stderr 上一条不剩。全树没有任何门变红。这与刀 0 
 `analyze.dawn` 的三条 `in_mem*` 行与两处 `with_env_real` 锚点都不在 `Exit` 的可达集里。
 
 
-**刀 2（第一个断言客户）**：`compiler-plan/src/` 加 `exitmem.dawn` 与 `consolemem.dawn`
+**刀 1b：裁决改了。`Console` 不搬语料，改做编译器内部的一条缝（2026-09-04 落地）。**
+上一段量出来的 127 个程序不是一笔一次性的迁移成本，是一条永久的税：`io.print*` 只要带上
+`!Console`，此后每一个 `pub fn main() -> Unit !io = println("x")` 都要多写一个原子，
+而写它的人拿不到任何回报：一个程序的 `main` 声明了 `!Console` 也没有人在它上面应答。
+所以裁决是：**`io.print` / `println` / `eprint` / `eprintln` 永久保持 `-> Unit !io`**。
+`Console` 不做「打印这件事的效果」，做**编译器自己的诊断与 CLI 输出这条缝**：编译器的输出路径
+`use std/io.{Console}` 之后直接调那四个操作，行涨到编译器自己的根为止，普通程序、`std` 的
+其余模块、随包分发的 package 与全部语料一个字不动。`std/reactor.serve` 与
+`packages/web.with_logging` 因此原地不动（它们走 `io.println`，而 `io.println` 仍是 `!io`）。
+预研给的三个选项里这是 C，不是它推荐的 A 或 B。
+
+这条裁决把这一族与前四族分开了：`Fs`、`Proc`、`Env`、`Exit` 的操作是**每一个** Dawn 程序
+共用的坐标，`Console` 只是编译器的。代价说明白：一个用户程序今天写不出「这个函数打印了什么」
+这条断言，它得自己声明一个效果，或者把要打的话当成值返回。收益是这一刀不动语料、
+不重录 spike-native 的 89 份对拍，而它要的那条断言（一次 CLI 失败打了什么、用什么码退出）
+本来就只在编译器里。
+
+**搬了哪些路径。** 判据是「`scripts/native-cli-diff.sh` 读的是哪些字节」：
+`selfhost/src/main.dawn` 与 `nmain.dawn` 里**每一处**打印（main 42 处、nmain 19 处），
+也就是 `cli_error` / 七个 `fail_*` / `--version` / `--help` 与 usage 文本 / `check` 的 `ok` /
+`doc` 的 JSON / `fmt` 的文件名清单 / `build` 的 `wrote ...` / `lock` 与 `cache` 的行；
+`jvm/codegen.class_bytes_from` 的 too-large 诊断（`Exit` 刀走过的同一条「打一行再结束进程」
+的路径，两半一起搬才读得回一次失败），连同 `jvm/emit` 里调它的那一串；
+`lsp/server.close_lease` 那条 lease 关闭失败的诊断。
+
+**LSP 的协议帧不搬，`send` 仍是 `io.print`。** 判据不是「谁的输出被脚本对拍」
+（`selfhost-lsp-diff.sh` 与 `lsp-framing.py` 确实在对拍它），是这一族一直在用的那条：
+**一个操作只在它让今天写不出的断言变得写得出时，才值它的标签。** 一帧 LSP 是 `Content-Length`
+框起来的线协议载荷，给客户端的解析器读，不是给人读的诊断；`Console` 的四个操作按「去了哪个流、
+有没有结束这一行」分，而一帧对这两个问题都没有答案（永远是 stdout，永远不带换行）。
+更实在的一条：钉住 LSP 的两个脚本（`lsp-framing.py`、`lsp-liveness.py`）断言的是**真 stdout 上
+的分帧与冲刷时机**，一张表答不了这两个问题，所以搬过去不多一条断言，只多一个安装点。
+于是这条缝有一句能说清的边界：**编译器写给人读的每一个字节是 `Console`，写给机器解析的
+那一个流不是。**
+
+**78 条签名各加一个原子**：`main` 33、`nmain` 26、`lsp/server` 10、`jvm/emit` 5、
+`jvm/codegen` 4。`compiler-plan/src` 一条未加：这条缝不往下走。拼法九种，最长的是六原子
+`!Fs !Proc !Env !Exit !Console !io` **29 条**，与预研和 `Exit` 刀的预测一字不差；其次
+`!Fs !Exit !Console !io` 21 条、`!Exit !Console !io` 12 条、`!Fs !Env !Exit !Console !io` 与
+`!Fs !Proc !Env !Console !io` 各 4 条、`!Fs !Env !Console !io` 3 条、`!Env !Exit !Console !io`
+与 `!Console !io` 各 2 条、`!Fs !Proc !Exit !Console !io` 1 条。
+
+**安装点三处**，判据仍是「行涨到哪里为止」：
+
+| 安装点 | 理由 |
+|---|---|
+| `selfhost/src/main.dawn` 的 `main` | JVM 驱动的最外层帧 |
+| `selfhost/src/nmain.dawn` 的 `main` | native 驱动的最外层帧 |
+| `selfhost/src/lsp/server.dawn` 的 `handle` | `close_lease` 在 `handle_fs` 里，而 `with_fs_real` 的闭合 body 行让 `Console` 穿不出去 |
+
+`Exit` 那一族数出的 15 处，这一族只用得上前两处；第三处是 `Exit` 用不上而这一族用得上的。
+两族的可达集不同：`analyze_document` 底下既不 exit 也不打印，`scripts/` 下那十几个探针程序
+打印走的是 `io.println`，仍然是 `!io`。所以「安装点数 = 已有 `Fs` 边界数」这条规则在第五族
+第三次只给出上界，答案仍然只能由行涨到哪里来定。
+
+`Console` 装在五个真 handler 的最内层，就是 `std/io` 那条「the five real wrappers nest」
+测试钉的顺序。`nmain` 那三条驱动 `cc_build_with` 的测试里另有三处安装点：它们的 body 行被
+`procmem.with_proc_table` 闭合的 `!(Fs|Proc|io)` 挡着，所以在里面套一层 `io.with_console_real`。
+这里装真 handler 而不是像 `Exit` 那样装假臂，因为真的答 `Console` 不花任何代价：它不会结束
+测试进程，而一条打在通往 panic 路上的提示，正是读一次失败的人想看的。
+
+**这一刀对 emit 逐字节不可见。** 量法是拿分支点（`c5ff0b7c`）的一份本地 clone 编出一套工具链，
+与 HEAD 的工具链**编同一棵树**（prev-diff 的形状：两条腿的语料是同一份 HEAD 源码），
+跑 prev-diff 那十个 `emit` 目标加 `doc --builtins`，十一个全部逐字节相等。道理是这一刀
+没有改编译器的行为，只改了编译器自己的签名，而这些签名在两条腿里都出现、互相抵消。
+阳性对照是把 `main.dawn` 的 `"(selfhost)"` 改一个字母，同一把尺子当场看得见，所以这个
+「全等」不是没看。于是 Emit-Change 一条都不用声明。Core golden 是另一回事，它记的是编译器
+自己的 Core：七个模块真变了（两个新表 handler，加上多带一个 `Console` 证据记录的
+`jvm.codegen`、`jvm.emit`、`lsp.server`、`main`、`nmain`），`lsp.lspq` 只跟着挪了 id 与
+panic 行号。
+
+**负控甲（拆掉一个安装点）**：把 `main.main` 那一处 `with_console_real` 去掉，
+`dawn check selfhost` 当场拒绝，诊断是
+`argument type mismatch: expected fn() -> Unit !(Fs|io), got fn() -> Unit !(Console|Fs|io)`，
+指着 `with_fs_real` 那一行。与 `Exit` 那次一字不差，只换了原子名。
+
+**负控乙（生产臂写错流），刀 0 欠的这笔账在这里还上了。** 把 `std/io` 里 `console_eprintln`
+的臂改成 `io_println`：`dawn test --stdlib` 仍然是 146 条全过（表 handler 与真 handler 是两条
+路，表看不见宿主，真 handler 的两行写去了哪里没有观察者），而
+`scripts/native-cli-diff.sh` 立刻红。它的 `pair_expect_error` 与 `run_expect` 判的是
+「stdout 必空 + stderr 逐字节 + 退出码 2」，而诊断现在整条落在 stdout 上。腿 0 与腿 0b
+一共 32 条用例里 **17 条当场变红**（15 条 `pair_expect_error`、2 条 `run_expect`），
+另外 15 条不判流所以照旧绿：
+
+```
+--- JVM stdout
++error: usage: dawn run [compiler-options] <target> [-- <program-args>...]
+--- JVM stderr
+-error: usage: dawn run [compiler-options] <target> [-- <program-args>...]
+exits: jvm=2 native=2 want=2
+FAIL: run argv boundary contract
+```
+
+刀 0 说「全树没有任何门变红」，那是因为 `with_console_real` 当时没有生产消费者；
+现在它承着编译器的全部诊断，写错流就是 CLI 的字节契约被改了。**注意这条判词的归属**：
+红的是脚本，不是新的内联客户测试。表 handler 不装真臂，所以它对真臂写错流**永远**是绿的；
+表钉住的是「一条臂应该是什么意思」（流与换行分开记），真臂对不对仍然只有
+`native-cli-diff.sh` 说了算。两者是两件事，别把一件当成另一件。
+
+**表 handler 与第一个客户（原刀 2 的地基，与这一刀同批，因为它就是开这条缝的理由）**：
+`compiler-plan/src/consolemem.dawn` 的
+`with_console_table[T, !e](body: fn() -> T !Console !e) -> (T, List[ConsoleWrite]) !e`
+把每一次写记成 `ConsoleWrite { stream: Stdout | Stderr, text, ends_line }`，**换行与文本分开记**，
+因为「去了哪个流、有没有结束这一行」正是一条臂要做对的事，也正是一份拼好的记录会藏起来的事；
+要字节的调用者问 `out_text` / `err_text`。`exitmem.dawn` 的
+`with_exit_capture[!e](body: fn() -> Unit !Exit !e) -> Option[Int] !e` 用 `ctl` 臂不恢复，
+把退出码当成整个 `with handle` 块的值交出来。两者的次序不是设置：
+**`with_console_table` 必须在外、`with_exit_capture` 在内**，否则 `Exit` 臂丢掉的块剩余里
+就有那句交还日志的话，两半会一起丢。放在 compiler-plan 而不是 std，理由与 `procmem`、
+`envmem` 同。
+
+第一个客户是 `nmain.dawn` 的一条内联测试，驱动 `scripts/native-cli-diff.sh` 的第一条用例
+（`check (zero targets)`）：
+
+```dawn
+  let (((status, log), envlog), proclog) = io.with_fs_real(() =>
+      procmem.with_proc_table([], () =>
+          envmem.with_env_table(envmem.TABLE_CWD, [], () =>
+              consolemem.with_console_table(() =>
+                  exitmem.with_exit_capture(() => cmd_check([]))))))
+  assert status == Some(2)
+  assert consolemem.err_text(log) == "error: usage: dawn check [--std <dir>] <target>...\n"
+  assert consolemem.out_text(log) == ""
+```
+
+三条判词与脚本的 `pair_expect_error` 逐条对应（退出码 2、stderr 逐字节、stdout 必空），
+外加两条脚本给不了的：`envlog == []` 与 `proclog == []`，也就是「一次用法错误不问宿主任何事」。
+这是这条缝上的第一条真断言。
+
+**原刀 2 的用例清单（哪些还搬得动、哪些搬不动）。** 脚本 913 行，直接的 argv 用例按判词分：
+`pair_expect_error` 13 条、`pair_expect_exit` 9 条、`run_expect` 6 条、`pair` 31 条、
+`pair_report` 6 条、`add_pair` 5 条、`emitc_*` 4 条，另有六条整腿。
+
+搬得动的（内容就是「这串 argv 打了什么、用什么码退出」，三张表加 `fsmem` 答得上）：
+13 条 `pair_expect_error` 里纯 argv 派发的 12 条（第 13 条 `check (std stamped with another
+release)` 要一棵真的 std 目录，搬得动但得先造树）、`run_expect` 里退出码 2 的那 2 条、
+以及 `pair` 里 `usage` / `missing target` / 后缀不对 / `--cp` 缺路径这一类约 10 条，合计约 24 条。
+
+搬不动的，四类。**要两个后端同时在场**：每一条 `pair` 的判词都有一半是「jvm 与 native 相等」，
+内联测试只替得掉绝对期望那一半，4 条 `emitc_*` 整条如此。**要真跑编译产物**：6 条
+`pair_report` 要 spawn java 或现编一个二进制。**要网络与包缓存**：5 条 `add_pair` 走 maven /
+curl / 包缓存。**要一个真进程**：腿 1 与腿 4 要 N-1 那份发布二进制，腿 4b / 5 / 7 / 8 判的是
+真 stdout 上的分帧、会话中途的应答、断言真被求值、报告先于进程结束落盘，这些都不是一张表
+能有的观察。所以脚本会一直在，搬走的用例是给它减负，不是替掉它；这一条预研已经写明，
+这一刀确认。
+
+**裁决：六原子行落地，别名仍不裁，重开的判据换一条。**
+上一段说「等六原子的 29 条真的落地，再连同 `Console` 的安装点数一起重裁」。数到了：
+六原子 29 条，安装点 3 处。重裁的结论是不裁，理由是这两个数一起看才成立：29 条**全部**
+落在编译器驱动层的三个文件里（`main`、`nmain`、`lsp/server`），别名能缩短的就是这三个文件，
+而它要付的代价是全局的：检查器的诊断按原子渲染（本节每一次实测的诊断都是
+`!(Console|Fs|io)` 这种形状），所以一个别名会让源码里的拼写与报错里的拼写从此不是同一个东西，
+这正是 §8.1 开头那几份证词里「效果变量不在源程序里，用户不知如何修」的镜像。
+噪音是真的，但它集中在三个文件、由写编译器的人承担；别名把一次可读性的收益换成一处
+源码与诊断的长期分歧，今天不值。**重开的判据换一条**：不再是「有没有六原子」，而是
+「六原子的行有没有出现在驱动层三个文件之外」，或者「诊断本身能不能按别名渲染」。
+两条里任何一条成立，这笔账重开。
+
+
+**刀 2（第一个断言客户，计划原文；实际与刀 1b 同批落地，见上）**：`compiler-plan/src/` 加 `exitmem.dawn` 与 `consolemem.dawn`
 两个表 handler，形制照 `envmem.with_env_table` 与 `procmem.with_proc_table`：用 handler
 局部状态记下退出码与每一条写出去的行（连同它去的是哪个流、有没有换行），返回 `(T, Log)`。
 放在 compiler-plan 而不是 std，理由与 `procmem`、`envmem` 同。它存在的目的只有一个：把
