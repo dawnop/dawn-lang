@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ d1258beaaebfb944 -->
+<!-- doc-check: translation-of README.md @ 788b48efb4aa7850 -->
 
 # Dawn
 
@@ -122,14 +122,16 @@ handler 的那一帧更久，并且可以被恢复**一次**。恢复两次不�
 于是测试可以用一张表应答一次文件读取。同一个模块还声明了 `Proc`，把「跑另一个程序」写成一个
 操作，生产 handler 是 `with_proc_real`，于是测试可以按住一整条命令行而不启动任何东西。还声明了
 `Env`，把工作目录与环境变量写成两个操作，生产 handler 是 `with_env_real`，于是测试可以自己
-决定程序从周遭读到什么。另有两条只声明、还没有使用者：`Exit` 把「结束进程」写成一个 `ctl`
-操作，生产臂不恢复；`Console` 把四个打印函数写成四个操作，于是一条命令行失败时的退出码与
-诊断行都能被测试读回来。第六个是 `std/gpu`：它声明了 `Gpu`，把设备的宿主侧写成六个操作，
+决定程序从周遭读到什么。它还声明了 `Exit`，把「结束进程」写成一个 `ctl` 操作，生产臂不恢复：
+`io.exit` 的体就是这个操作，于是退出码顺着行走，由拥有这份工作的那一帧决定「结束」是什么意思。
+另有一条只声明、还没有使用者：`Console` 把四个打印函数写成四个操作，于是一条命令行失败时的
+诊断行也能和退出码一起被测试读回来。第六个是 `std/gpu`：它声明了 `Gpu`，把设备的宿主侧写成六个操作，
 测试安装的 handler 是一个纯的假设备，于是 `!Gpu` 程序在没有 GPU 的机器上也能跑。这六条声明
 落在 `std/` 与 `selfhost/src/` 下
 仅有的两个文件里；`doc-check.py` 持有这份清单（`NAMED_EFFECT_EXPECTED`），清单外冒出声明、
 或其中一条消失，它都会把这一段判红。编译器自己就跑在这一档上：它的 `main` 把整个 dispatch 包在
-`with_fs_real` 里，于是工具链读写的每个文件都过 `Fs`，而 driver 的分析测试把同一份代码跑在
+`with_fs_real` 里、里面再包一层 `with_exit_real`，于是工具链读写的每个文件都过 `Fs`、
+结束时的每个退出码都过 `Exit`，而 driver 的分析测试把同一份代码跑在
 一张表装的文件树上（`selfhost/src/driver/fsmem.dawn`）。
 （[docs/spec.md](docs/spec.md) §6.5；[docs/oneshot-design.md](docs/oneshot-design.md)；
 对拍语料 `scripts/spike-native/effect_handler.dawn`；示例集 `examples/effects/`。）

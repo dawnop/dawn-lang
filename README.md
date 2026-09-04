@@ -144,17 +144,20 @@ production installs, so a test can answer a file read from a table. The same mod
 declares `Proc`, running another program as one operation, with `with_proc_real` for
 production, so a test can hold a command line without starting anything, and `Env`, the
 working directory and the environment as two operations, with `with_env_real` for
-production, so a test can decide what a program reads out of its surroundings. Two more
-are declared and not yet spoken for: `Exit`, ending the process as one `ctl` operation
-whose production arm never resumes, and `Console`, the four print functions as four
-operations, so that a test can read back the status and the diagnostic line a command
-failed with. The sixth is `std/gpu`, which declares `Gpu`, the host side of a device as
-six operations, with a pure fake device as the handler a test installs, so a `!Gpu`
-program runs on a machine with no GPU. Those are the six declarations, in the two files
-under `std/` and `selfhost/src/` that carry any; `doc-check.py` keeps the list (`NAMED_EFFECT_EXPECTED`)
-and reds this paragraph when a declaration appears outside it or one of them goes away.
+production, so a test can decide what a program reads out of its surroundings. It also
+declares `Exit`, ending the process as one `ctl` operation whose production arm never
+resumes: `io.exit`'s body is that operation, so a status travels a row and the frame
+that owns the work decides what ending it means. One more is declared and not yet spoken
+for: `Console`, the four print functions as four operations, so that a test can read back
+the diagnostic line a command failed with alongside its status. The sixth is `std/gpu`,
+which declares `Gpu`, the host side of a device as six operations, with a pure fake
+device as the handler a test installs, so a `!Gpu` program runs on a machine with no GPU.
+Those are the six declarations, in the two files under `std/` and `selfhost/src/` that
+carry any; `doc-check.py` keeps the list (`NAMED_EFFECT_EXPECTED`) and reds this
+paragraph when a declaration appears outside it or one of them goes away.
 The compiler itself runs on the tier: its `main` installs `with_fs_real` around the
-whole dispatch, so every file the toolchain reads or writes goes through `Fs`, and the
+whole dispatch and `with_exit_real` inside it, so every file the toolchain reads or
+writes goes through `Fs` and every status it ends on goes through `Exit`, and the
 driver's analysis tests run that same code over a file tree held in a table
 (`selfhost/src/driver/fsmem.dawn`). ([docs/spec.md](docs/spec.md) §6.5;
 [docs/oneshot-design.md](docs/oneshot-design.md); differential corpus

@@ -667,6 +667,70 @@ runs」写成类型的样子。操作的返回类型是 `Never`，这在这里�
 自己（`std/reactor.serve`）与随包分发的 package（`packages/web` 的日志中间件）里就有消费者
 的效果，所以这一刀比 `Fs`、`Proc`、`Env` 的对应刀更宽。
 
+**刀 1 的 Exit 半边（2026-09-04 落地）**：`io.exit` 的体是 `exit_now(code)`，行是 `!Exit`，
+返回类型仍是 `Unit`。`exit_now` 答 `Never`，`Never` 在每个类型之下，所以 23 处调用点
+`let _ = io.exit(c)` 一个字未改，只有行动了；`cli_error` 与六个 `fail_*` 同理保持 `Unit`，
+它们后面那句 `panic` 因此还得留着。
+
+84 条签名行加了一个原子：`selfhost/src` 69 条（`main` 33、`nmain` 26、`jvm/emit` 5、
+`jvm/codegen` 4、`lsp/server` 1）、`scripts/` 14 条、`io.exit` 自己 1 条。
+`selfhost/src` 加 `compiler-plan/src` 的四原子行 `!Fs !Proc !Env !io` 从 43 条降到 14 条，
+另外 29 条成了五原子 `!Fs !Proc !Env !Exit !io`；这 29 条就是 `Console` 会推到六原子的那一批，
+与预研预测的 29 一致。
+
+安装点 14 处，全是本来就拥有一整个工作单元的帧：
+
+| 安装点 | 理由 |
+|---|---|
+| `selfhost/src/main.dawn` 的 `main` | JVM 驱动的最外层帧 |
+| `selfhost/src/nmain.dawn` 的 `main` | native 驱动的最外层帧 |
+| `scripts/tile-gpu-diff/*_diff.dawn` 十个 `main` | 每个都是自己的进程根 |
+| `scripts/spike-native/io_cli.dawn` | 装在已有的 `with_fs_real` 里 |
+| `scripts/bootstrap-input-manifest-contract/fixtures/producer/src/main.dawn` | 装在已有的三层里 |
+
+**「安装点数 = 已有 `Fs` 边界数」这条规则在这一族只对了一半。** 预研按它数出四处
+（`main.main`、`nmain.main`、`lsp/server.handle`、`driver/analyze.analyze_document`），
+实测只有前两处要装：`analyze_document` 底下没有任何东西调 `io.exit`，而 `lsp/server` 里那次
+`io.exit` 在 `run_lsp` 里，行一路涨到 `main.dispatch`，由 `main` 的那一层接住。规则数出的是
+上界，不是答案；真正的判据仍是「行涨到哪里为止」。
+
+`Exit` 装在四个真 handler 的最内层，就是 `std/io` 那条「the five real wrappers nest」
+测试钉的顺序。只有 `with_fs_real` 的闭合 body 行是约束，其余三个都是 `!e`。
+
+`nmain` 有三条测试驱动 `cc_build_with`，而它每一条失败路径都结束进程，所以这三条就地装一条
+`exit_now(c) resume k => panic(...)` 的臂，而不是真 handler：走错了仍然是一条红的测试，
+测试进程还在，报得出来。
+
+负控甲：把 `main.dawn` 那一处 `with_exit_real` 拆掉，`dawn check selfhost` 当场拒绝，
+诊断是 `argument type mismatch: expected fn() -> Unit !(Fs|io), got fn() -> Unit !(Exit|Fs|io)`，
+指着 `with_fs_real` 那一行。行涨到根就没地方去了，这正是这一族要的判词。
+
+**Console 这半边没有落地，因为语料当天就编不过。** 一个程序的 `main` 不能声明具名效果：
+实测 `pub fn main() -> Unit !io = io.println("x")` 在 `io.print*` 改行之后的诊断是
+`` `main` uses the effect `Console`, but its signature does not declare !Console ``，
+提示是 `nothing calls main, so nothing can answer a declared effect`。所以「先动 std、
+语料留到刀 1b」这条分期不成立：std 一动，语料同一秒就得跟。
+
+清点是拿一份改过 `io.print*` 的 std 对 `scripts/` 下 240 个带 `main` 的文件逐个 `dawn check`
+量出来的（`std/reactor.serve` 先按裁决就地装上 `with_console_real`，否则 std 自己都不 load），
+并与同一批文件在今天这棵树上的结果对表：240 个里今天单文件 check 得过的是 193 个，
+**其中 127 个在 `io.print*` 改行之后当场编不过**（`spike-native` 89、`tile-gpu-diff` 10、
+`opaque-twin` 8，其余散在 20 个 contract 目录里），66 个不受影响。另外 47 个今天就 check
+不过（项目 fixture 要 `dawn.toml`，或本身就是负例语料），其中 20 个同时也报出 `Console`，
+它们是量不准的那一部分，不是「不受影响」的那一部分。89 个 spike-native 尤其硬：那是跨后端
+逐字节对拍的语料，每加一个安装点就要重录一次两个后端的输出。
+
+所以这一刀只搬 `Exit`。`Console` 连同它的语料整体推到下一刀，`io.print*` 的行一个字未改。
+
+负控乙（`Console` 那条缝的欠账仍然开着）：把 `console_eprintln` 的生产臂改成 `io_println`，
+`dawn test --stdlib` 仍是 144 条全过；分开两个流看，那两行 `Console reaches ...` 全落在
+stdout 上，stderr 上一条不剩。全树没有任何门变红。这与刀 0 记的那笔账一字不差，
+这一刀没有还它：`Console` 今天还没有客户，第一条真断言仍然要等刀 2 的 `consolemem`。
+
+`scripts/doc-check.py` 的 `check_analyze_env_table` 期望文本一字未改，实测通过：
+`analyze.dawn` 的三条 `in_mem*` 行与两处 `with_env_real` 锚点都不在 `Exit` 的可达集里。
+
+
 **刀 2（第一个断言客户）**：`compiler-plan/src/` 加 `exitmem.dawn` 与 `consolemem.dawn`
 两个表 handler，形制照 `envmem.with_env_table` 与 `procmem.with_proc_table`：用 handler
 局部状态记下退出码与每一条写出去的行（连同它去的是哪个流、有没有换行），返回 `(T, Log)`。
@@ -690,8 +754,14 @@ runs」写成类型的样子。操作的返回类型是 `Never`，这在这里�
 `cwd` 的消费者已经落地：四原子的行（`!Fs !Proc !Env !io`）第一次出现，56 条，
 会在树里待满一整个 release 周期，直到下一轮种子推进把 `!io` 回填掉。别名的账在那之前
 不重裁——要看的是回填之后还剩多少条四原子的行，而不是回填之前有多少条。
-`exit` 已经开族（下面的 `Exit`，今天只到声明），它的消费者会把那批行推到五个原子甚至六个，
+`exit` 已经开族（下面的 `Exit`），它的消费者会把那批行推到五个原子甚至六个，
 所以别名要看的实景是两轮之后的事，不是今天。
+
+**2026-09-04 补一次实数，仍不裁。** 尾款把四原子行从 59 条收到 43 条，`Exit` 的消费者
+又把其中 29 条推到五原子 `!Fs !Proc !Env !Exit !io`（另有 21 条三原子的 `!Fs !Exit !io`），
+四原子只剩 14 条。`Console` 的消费者还没搬，搬完那 29 条就是六原子。所以别名要看的实景
+仍然是下一刀之后：今天读起来最长的一条是五个原子，而它已经比裁决当时预设的「四个原子还能读」
+多了一个。等六原子的 29 条真的落地，再连同 `Console` 的安装点数一起重裁。
 
 ### 8.2 风险二：多 handler 组合的动态语义
 
