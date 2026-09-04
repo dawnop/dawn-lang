@@ -1859,6 +1859,207 @@ fn geglu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store_masked(out, blk, s, m, mul(F64, s, a, gate))
 }
 
+# ---- the multi-launch kernels (knife 16) ----
+#
+# Each of these is one STEP of a host-side sequence, not a whole problem.
+# Nothing about the kernel says so: a step is a kernel like any other, and
+# what makes leetgpu 85 three launches rather than one is that its
+# intermediate results are device buffers no host ever reads.
+# scripts/tile-gpu-diff/seq_diff.dawn is where the sequences live.
+#
+# The shapes here and seq_diff's constants must agree, the way every other
+# family's do.
+
+# leetgpu 85 (LoRA Linear): output = x W^T + scale * (x A^T) B^T over a
+# batch of LORA_M rows. The weights are stored `out` by `in`, which is what
+# makes all three products A times B-TRANSPOSED: the second operand's tile
+# is read with its two strides swapped (`permute`), not moved.
+const LORA_M: Int = 32
+const LORA_DIN: Int = 64
+const LORA_DOUT: Int = 64
+const LORA_RANK: Int = 16
+const LORA_T: Int = 32
+const LORA_SCALE: Float = 0.5
+
+# The base linear, launch 1 of 3: base[M, DOUT] = x[M, DIN] * W[DOUT, DIN]^T.
+fn lora_base(x: Param[F64], w: Param[F64], base: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let zero = f_const(F64, [LORA_M, LORA_T], 0.0)
+  let acc = d_for(idx_const(0), idx_const(LORA_DIN / LORA_T), idx_const(1), zero, (k, sofar) => {
+    let ta = load_strided(x, idx_mul(k, idx_const(LORA_T)), [LORA_M, LORA_T], [LORA_DIN, 1])
+    let tb = load_strided(w, idx_add(idx_mul(bn, idx_const(LORA_T * LORA_DIN)), idx_mul(k, idx_const(LORA_T))),
+      [LORA_T, LORA_T], permute([LORA_DIN, 1], [1, 0]))
+    mmaf(F64, LORA_M, LORA_T, LORA_T, ta, tb, sofar)
+  })
+  store_strided(base, idx_mul(bn, idx_const(LORA_T)), [LORA_M, LORA_T], [LORA_DOUT, 1], acc)
+}
+
+# The low-rank projection, launch 2 of 3: h[M, RANK] = x[M, DIN] * A[RANK, DIN]^T.
+# One block: RANK is narrower than a tile, which is the point of a rank.
+fn lora_hidden(x: Param[F64], a: Param[F64], h: Param[F64]) -> Unit !Dev = {
+  let zero = f_const(F64, [LORA_M, LORA_RANK], 0.0)
+  let acc = d_for(idx_const(0), idx_const(LORA_DIN / LORA_T), idx_const(1), zero, (k, sofar) => {
+    let ta = load_strided(x, idx_mul(k, idx_const(LORA_T)), [LORA_M, LORA_T], [LORA_DIN, 1])
+    let tb = load_strided(a, idx_mul(k, idx_const(LORA_T)), [LORA_T, LORA_RANK], permute([LORA_DIN, 1], [1, 0]))
+    mmaf(F64, LORA_M, LORA_T, LORA_RANK, ta, tb, sofar)
+  })
+  store(h, idx_const(0), [LORA_M, LORA_RANK], acc)
+}
+
+# The sum, launch 3 of 3: out = base + scale * (h[M, RANK] * B[DOUT, RANK]^T).
+# This is the launch that reads what BOTH earlier launches wrote.
+fn lora_out(base: Param[F64], h: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let s = [LORA_M, LORA_T]
+  let zero = f_const(F64, s, 0.0)
+  let th = load(h, idx_const(0), [LORA_M, LORA_RANK])
+  let tb = load_strided(b, idx_mul(bn, idx_const(LORA_T * LORA_RANK)), [LORA_RANK, LORA_T],
+    permute([LORA_RANK, 1], [1, 0]))
+  let delta = mmaf(F64, LORA_M, LORA_RANK, LORA_T, th, tb, zero)
+  let tbase = load_strided(base, idx_mul(bn, idx_const(LORA_T)), s, [LORA_DOUT, 1])
+  store_strided(out, idx_mul(bn, idx_const(LORA_T)), s, [LORA_DOUT, 1],
+    addf(F64, s, tbase, mul(F64, s, f_const(F64, s, LORA_SCALE), delta)))
+}
+
+# leetgpu 6 (Softmax Attention): softmax(Q K^T / sqrt(d)) V, three launches
+# over two intermediate matrices that never leave the device. The standard
+# shape of the whole attention family, which is twelve of the problems this
+# knife's mechanism reaches.
+const ATT_M: Int = 64
+const ATT_N: Int = 64
+const ATT_D: Int = 32
+const ATT_T: Int = 32
+
+# 1 / sqrt(ATT_D), to the nearest Float: the problem's `/ d ** 0.5` as a
+# multiplication, and a constant of the recording the way LORA_SCALE is.
+const ATT_INV_SQRT_D: Float = 0.17677669529663687
+
+# Launch 1 of 3: S[M, N] = Q[M, D] * K[N, D]^T / sqrt(D). K is stored one
+# key a row, so this is the transposed product again.
+fn attn_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let sh = [ATT_T, ATT_T]
+  let tq = load_strided(q, idx_mul(bm, idx_const(ATT_T * ATT_D)), [ATT_T, ATT_D], [ATT_D, 1])
+  let tk = load_strided(k, idx_mul(bn, idx_const(ATT_T * ATT_D)), [ATT_D, ATT_T], permute([ATT_D, 1], [1, 0]))
+  let acc = mmaf(F64, ATT_T, ATT_D, ATT_T, tq, tk, f_const(F64, sh, 0.0))
+  store_strided(s, idx_add(idx_mul(bm, idx_const(ATT_T * ATT_N)), idx_mul(bn, idx_const(ATT_T))), sh, [ATT_N, 1],
+    mul(F64, sh, acc, f_const(F64, sh, ATT_INV_SQRT_D)))
+}
+
+# Launch 2 of 3: the softmax of each row of S, one row a block. Reads the
+# whole row, so no mask: ATT_N is the tile.
+fn attn_softmax(s: Param[F64], p: Param[F64]) -> Unit !Dev = {
+  let sh = [ATT_N]
+  let row = tile_at(block_id(0), ATT_N)
+  let t = load(s, row, sh)
+  let mx = spread(F64, sh, d_reduce(F64, sh, t, neg_inf(), (acc, e) => s_maxf(F64, acc, e)))
+  let ex = exp(F64, sh, sub(F64, sh, t, mx))
+  let total = spread(F64, sh, d_reduce(F64, sh, ex, 0.0, (acc, e) => s_addf(F64, acc, e)))
+  store(p, row, sh, div(F64, sh, ex, total))
+}
+
+# Launch 3 of 3: O[M, D] = P[M, N] * V[N, D], an ordinary row-major product.
+fn attn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let sh = [ATT_T, ATT_D]
+  let zero = f_const(F64, sh, 0.0)
+  let acc = d_for(idx_const(0), idx_const(ATT_N / ATT_T), idx_const(1), zero, (k, sofar) => {
+    let tp = load_strided(p, idx_add(idx_mul(bm, idx_const(ATT_T * ATT_N)), idx_mul(k, idx_const(ATT_T))),
+      [ATT_T, ATT_T], [ATT_N, 1])
+    let tv = load_strided(v, idx_mul(k, idx_const(ATT_T * ATT_D)), [ATT_T, ATT_D], [ATT_D, 1])
+    mmaf(F64, ATT_T, ATT_T, ATT_D, tp, tv, sofar)
+  })
+  store_strided(o, idx_mul(bm, idx_const(ATT_T * ATT_D)), sh, [ATT_D, 1], acc)
+}
+
+# leetgpu 37 (Matrix Power): one square product, launched P-1 times with the
+# host ping-ponging between two accumulators. The only kernel here that is
+# the WHOLE of its problem: the sequence's length is the problem's exponent,
+# a host value, and the kernel does not know how many times it runs.
+const MP_N: Int = 32
+
+fn matpow_step(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+  let sh = [MP_N, MP_N]
+  let ta = load(a, idx_const(0), sh)
+  let tb = load(b, idx_const(0), sh)
+  store(c, idx_const(0), sh, mmaf(F64, MP_N, MP_N, MP_N, ta, tb, f_const(F64, sh, 0.0)))
+}
+
+# leetgpu 84 (SwiGLU MLP Block): (silu(x Wg) * (x Wu)) Wd, four launches
+# over three kernels -- the projection kernel is launched TWICE, on two
+# different weight buffers into two different outputs. That is the case a
+# one-kernel-one-problem ledger cannot spell at all.
+const SW_M: Int = 32
+const SW_DMODEL: Int = 64
+const SW_DFFN: Int = 128
+const SW_T: Int = 32
+
+# Launches 1 and 2 of 4: y[M, DFFN] = x[M, DMODEL] * w[DMODEL, DFFN].
+fn swiglu_proj(x: Param[F64], w: Param[F64], y: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let sh = [SW_M, SW_T]
+  let zero = f_const(F64, sh, 0.0)
+  let acc = d_for(idx_const(0), idx_const(SW_DMODEL / SW_T), idx_const(1), zero, (k, sofar) => {
+    let ta = load_strided(x, idx_mul(k, idx_const(SW_T)), [SW_M, SW_T], [SW_DMODEL, 1])
+    let tb = load_strided(w, idx_add(idx_mul(k, idx_const(SW_T * SW_DFFN)), idx_mul(bn, idx_const(SW_T))),
+      [SW_T, SW_T], [SW_DFFN, 1])
+    mmaf(F64, SW_M, SW_T, SW_T, ta, tb, sofar)
+  })
+  store_strided(y, idx_mul(bn, idx_const(SW_T)), sh, [SW_DFFN, 1], acc)
+}
+
+# Launch 3 of 4: h = silu(gate) * up, element-wise over the whole M by DFFN
+# block. The launch that reads what the two projections wrote.
+const SW_ACT_TILE: Int = 128
+
+fn swiglu_act(gate: Param[F64], up: Param[F64], h: Param[F64]) -> Unit !Dev = {
+  let sh = [SW_ACT_TILE]
+  let blk = tile_at(block_id(0), SW_ACT_TILE)
+  let tg = load(gate, blk, sh)
+  let tu = load(up, blk, sh)
+  let d = addf(F64, sh, f_const(F64, sh, 1.0), exp(F64, sh, neg(F64, sh, tg)))
+  store(h, blk, sh, mul(F64, sh, div(F64, sh, tg, d), tu))
+}
+
+# Launch 4 of 4: out[M, DMODEL] = h[M, DFFN] * Wd[DFFN, DMODEL].
+fn swiglu_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let sh = [SW_M, SW_T]
+  let zero = f_const(F64, sh, 0.0)
+  let acc = d_for(idx_const(0), idx_const(SW_DFFN / SW_T), idx_const(1), zero, (k, sofar) => {
+    let ta = load_strided(h, idx_mul(k, idx_const(SW_T)), [SW_M, SW_T], [SW_DFFN, 1])
+    let tb = load_strided(w, idx_add(idx_mul(k, idx_const(SW_T * SW_DMODEL)), idx_mul(bn, idx_const(SW_T))),
+      [SW_T, SW_T], [SW_DMODEL, 1])
+    mmaf(F64, SW_M, SW_T, SW_T, ta, tb, sofar)
+  })
+  store_strided(out, idx_mul(bn, idx_const(SW_T)), sh, [SW_DMODEL, 1], acc)
+}
+
+# leetgpu 73 (All-Pairs Shortest Paths): one Floyd-Warshall round,
+# `d = min(d, d[:, k] + d[k, :])`, launched APSP_N times IN PLACE on one
+# matrix. The round index `k` is a one-element i32 buffer rather than an
+# argument, because a launch carries a grid and buffers and nothing else;
+# the kernel reads it by gathering it through an all-zero index tile, which
+# broadcasts one element over the whole tile.
+#
+# The pivot row and column are gathered rather than loaded, for the same
+# reason: their offsets depend on a value that is not known when the kernel
+# is recorded. `k * N + j` and `i * N + k` are the two index tiles.
+#
+# One block over one tile, so every gather and the load all precede the
+# store: the round reads the matrix as it was before it.
+const APSP_N: Int = 16
+
+fn apsp_step(d: Param[F64], kb: Param[I32]) -> Unit !Dev = {
+  let sh = [APSP_N, APSP_N]
+  let k = gather(kb, i_const(sh, 0), sh)
+  let row = add_i(sh, mul_i(sh, k, i_const(sh, APSP_N)), coord(idx_const(0), sh, 1, 1))
+  let col = add_i(sh, coord(idx_const(0), sh, 0, APSP_N), k)
+  let through = addf(F64, sh, gather(d, col, sh), gather(d, row, sh))
+  store(d, idx_const(0), sh, minf(F64, sh, load(d, idx_const(0), sh), through))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -2017,6 +2218,37 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("erf_sweep", ["f64", "f64"], () => erf_sweep(param(F64, 0), param(F64, 1)))
   "geglu" ->
     trace_kernel("geglu", ["f64", "f64"], () => geglu(param(F64, 0), param(F64, 1)))
+  "lora_base" ->
+    trace_kernel("lora_base", ["f64", "f64", "f64"],
+      () => lora_base(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "lora_hidden" ->
+    trace_kernel("lora_hidden", ["f64", "f64", "f64"],
+      () => lora_hidden(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "lora_out" ->
+    trace_kernel("lora_out", ["f64", "f64", "f64", "f64"],
+      () => lora_out(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "attn_scores" ->
+    trace_kernel("attn_scores", ["f64", "f64", "f64"],
+      () => attn_scores(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attn_softmax" ->
+    trace_kernel("attn_softmax", ["f64", "f64"], () => attn_softmax(param(F64, 0), param(F64, 1)))
+  "attn_context" ->
+    trace_kernel("attn_context", ["f64", "f64", "f64"],
+      () => attn_context(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "matpow_step" ->
+    trace_kernel("matpow_step", ["f64", "f64", "f64"],
+      () => matpow_step(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "swiglu_proj" ->
+    trace_kernel("swiglu_proj", ["f64", "f64", "f64"],
+      () => swiglu_proj(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "swiglu_act" ->
+    trace_kernel("swiglu_act", ["f64", "f64", "f64"],
+      () => swiglu_act(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "swiglu_down" ->
+    trace_kernel("swiglu_down", ["f64", "f64", "f64"],
+      () => swiglu_down(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "apsp_step" ->
+    trace_kernel("apsp_step", ["f64", "i32"], () => apsp_step(param(F64, 0), param(I32, 1)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 

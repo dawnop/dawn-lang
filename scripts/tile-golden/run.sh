@@ -185,7 +185,8 @@ kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops
   token_embed sort_rank merge_rank scatter_perm
   prefix_sum max_subarray seg_scan compact linrec gae ssm_scan
   histogram cas_swap
-  erf_sweep geglu)
+  erf_sweep geglu
+  lora_base lora_hidden lora_out attn_scores attn_softmax attn_context matpow_step swiglu_proj swiglu_act swiglu_down apsp_step)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

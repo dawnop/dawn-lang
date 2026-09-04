@@ -1811,6 +1811,117 @@ pub fn geglu_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[F
       })
 }
 
+# ---- references for the multi-launch sequences (knife 16) ----
+#
+# These are the references for kernels that are STEPS of a host-side
+# sequence rather than whole problems: a leetgpu problem here is three or
+# four launches over shared device buffers, and each launch has its own
+# second opinion. Nothing about a reference changes for being one step of
+# several -- the fake device hands it the contents every buffer holds AT
+# THAT LAUNCH, so a step that reads what an earlier step wrote reads the
+# earlier step's answer, exactly as the device does.
+#
+# The consequence for the TIER is worth saying once: the reference sequence
+# is end to end. Step two's reference input is step one's reference output
+# and not the device's, so a tolerance claim over a sequence is a claim
+# about the composed error, which is what scripts/tile-gpu-diff measures.
+
+## `scale * (a * b^T)` for an `m` by `k` matrix `a` and an `n` by `k` matrix
+## `b`, both row-major, into an `m` by `n` output: the shape a linear layer
+## has when its weights are stored `out` by `in`, which is how both leetgpu
+## 85 (LoRA Linear) and leetgpu 6 (Softmax Attention) state theirs.
+## `ins` is `[a, b, old out]`.
+##
+## Folded LEFT over `k`, and so a TOLERANCE-tier oracle for the same reason
+## `matmul_ref` is: `mmaf` promises a product and nothing about the order
+## of the sum.
+pub fn matmul_bt_ref(m: Int, k: Int, n: Int, scale: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let dt = dtypes[2]
+  list.map(range(0, m * n), idx => {
+    let i = idx / n
+    let j = idx % n
+    round_to(dt, scale * list.fold(range(0, k), 0.0, (acc, p) => acc + a[i * k + p] * b[j * k + p]))
+  })
+}
+
+## `base + scale * (h * b^T)` for the `m` by `r` hidden product `h` and the
+## `n` by `r` weight `b`: the last of leetgpu 85's three launches, the one
+## that adds the low-rank delta to the base linear it did not compute.
+## `ins` is `[base, h, b, old out]`.
+pub fn lora_out_ref(m: Int, r: Int, n: Int, scale: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let base = ins[0]
+  let h = ins[1]
+  let b = ins[2]
+  let dt = dtypes[3]
+  list.map(range(0, m * n), idx => {
+    let i = idx / n
+    let j = idx % n
+    let delta = list.fold(range(0, r), 0.0, (acc, p) => acc + h[i * r + p] * b[j * r + p])
+    round_to(dt, base[idx] + scale * delta)
+  })
+}
+
+## The softmax of each of `rows` rows of `cols` values: leetgpu 6's middle
+## launch. The maximum is subtracted per row, as the kernel does.
+## `ins` is `[scores, old out]`.
+pub fn row_softmax_ref(rows: Int, cols: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let dt = dtypes[1]
+  list.map(range(0, rows * cols), idx => {
+    let i = idx / cols
+    let mx = list.fold(range(1, cols), x[i * cols], (acc, j) =>
+        if x[i * cols + j] > acc { x[i * cols + j] } else { acc })
+    let total = list.fold(range(0, cols), 0.0, (acc, j) => acc + ref_exp(x[i * cols + j] - mx))
+    round_to(dt, ref_exp(x[idx] - mx) / total)
+  })
+}
+
+## `silu(gate) * up` over the first `n` lanes: the third of leetgpu 84's
+## four launches, the only one of them that is not a matrix product.
+## `ins` is `[gate, up, old out]`.
+pub fn swiglu_act_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let gate = ins[0]
+  let up = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        round_to(dt, gate[i] / (1.0 + ref_exp(0.0 - gate[i])) * up[i])
+      } else {
+        kept(old, i)
+      })
+}
+
+## One Floyd-Warshall round over an `n` by `n` distance matrix:
+## `d = min(d, d[:, k] + d[k, :])`, with `k` read from the SECOND buffer's
+## element 0. leetgpu 73 (All-Pairs Shortest Paths) is `n` of these, and the
+## round index is a buffer rather than an argument because a launch here
+## carries a grid and buffers and nothing else.
+##
+## Writes back to argument 0: the round rewrites the matrix it read.
+## `ins` is `[dist, k]`.
+##
+## Every read is of the matrix as it was BEFORE the round, which is what the
+## problem's reference does as well (it builds a new tensor each round). On
+## the device that is one block over one tile, so the loads all precede the
+## store.
+pub fn apsp_step_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let d = ins[0]
+  let dt = dtypes[0]
+  let k = to_int(ins[1][0])
+  list.map(range(0, n * n), idx => {
+    let i = idx / n
+    let j = idx % n
+    let through = d[i * n + k] + d[k * n + j]
+    round_to(dt, if through < d[idx] { through } else { d[idx] })
+  })
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
