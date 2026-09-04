@@ -1449,8 +1449,9 @@ jobs:
   #
   # Trigger for N=3: split again when either shard's own observation passes
   # 550s, rather than restate the budget -- 550s doubled is already past the
-  # 660s pole. Knives 12 to 15 are projected at roughly +50s per knife per
-  # shard, which puts that two knives out. Against splitting earlier: runs of
+  # 660s pole. Knife 15 leaves shard 1's planning value at 646s, 14s under
+  # the pole, so the next knife that adds a kernel to it forces the split by
+  # the pole rather than by the observation. Against splitting earlier: runs of
   # this workflow hold 36 jobs against an account concurrency limit of 20 (the
   # arithmetic is in this file's header), and tile has never been a run's long
   # pole -- native-diff at 783~1119s over the last fortnight is -- so a third
@@ -1492,8 +1493,23 @@ jobs:
     # shard's own OBSERVATION over 550s) is still not reached, and no
     # resharding is done here; it is now about one knife of this size away
     # for shard 1.
-    # budget: 3x 628s planning value (314s local, doubled)
-    timeout-minutes: 32
+    #
+    # 2026-09-04, knife 15 (`erf` by composition): two kernels, no mutants,
+    # one kernel to each shard by round robin. The LEVELS could not be
+    # measured -- another agent was building on this machine all afternoon
+    # (load average 7 to 11) and the two paired rounds disagree by more than
+    # the increment: unsharded +80.0s in one and +6.5s in the other, and in
+    # both rounds the two shard deltas SUM TO MORE than the unsharded delta
+    # of the same round (139.6s against 80.0s, 153.2s against 6.5s), which is
+    # arithmetically impossible for real growth. What was measurable is the
+    # per-item cost, because `--only` runs one item against a fixed overhead:
+    # erf_sweep 16.70s / 16.62s and geglu 17.03s / 17.33s against silu's
+    # 16.50s / 16.84s, so each new kernel costs what an existing element-wise
+    # kernel costs and there is no anomaly to explain. So the planning value
+    # takes the last measured local levels (244s and 214s) plus this file's
+    # own slope since knife 12, about 9s a kernel: 253s and 223s.
+    # budget: 3x 646s planning value (323s local, doubled)
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1509,7 +1525,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (64 kernels and fifteen mutants, both backends; shard 1)
+      - name: tile IR goldens and tileiras (66 kernels and fifteen mutants, both backends; shard 1)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 1/2
@@ -1535,7 +1551,8 @@ jobs:
     # 214s locally for this shard, plus the same ~70s of checkout, toolchain
     # and wheels, which is 568s doubled: BELOW the 588s this line already
     # claims, so the line does not move. The note above tile-golden-1 carries
-    # the measurements and the reasoning.
+    # the measurements and the reasoning. Knife 15 gives this shard one more
+    # kernel, 223s and so 586s, still below the line: unchanged again.
     # budget: 3x 588s planning value (294s local, doubled)
     timeout-minutes: 30
     steps:
@@ -1551,7 +1568,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (64 kernels and fifteen mutants, both backends; shard 2)
+      - name: tile IR goldens and tileiras (66 kernels and fifteen mutants, both backends; shard 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 2/2
