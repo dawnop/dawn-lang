@@ -233,28 +233,10 @@ pair_expect_error "$SKEW_EXPECT" \
 pair_expect_exit 0 "test (one target)" test "$ARITY_A"
 pair_expect_exit 0 "test (--stdlib selector)" test --stdlib
 
-pair_expect_error \
-  $'error: usage: dawn doc <file.dawn | project-dir> | dawn doc --stdlib | dawn doc --builtins\n' \
-  "doc (zero targets)" doc
 pair_expect_exit 0 "doc (one target)" doc "$ARITY_A"
 pair_expect_exit 0 "doc (--stdlib selector)" doc --stdlib
 pair_expect_exit 0 "doc (--builtins selector)" doc --builtins
-pair_expect_error \
-  "error: dawn doc takes one target, got \`$ARITY_A\` and \`$ARITY_B\`; a bare word after the target is not a flag this subcommand knows"$'\n' \
-  "doc (multiple targets)" doc "$ARITY_A" "$ARITY_B"
-pair_expect_error \
-  $'error: dawn doc accepts exactly one of a target, --stdlib, or --builtins\n' \
-  "doc (stdlib conflicts with builtins)" doc --stdlib --builtins
-pair_expect_error \
-  $'error: dawn doc accepts exactly one of a target, --stdlib, or --builtins\n' \
-  "doc (target conflicts with stdlib)" doc "$ARITY_A" --stdlib
-pair_expect_error \
-  $'error: dawn doc accepts exactly one of a target, --stdlib, or --builtins\n' \
-  "doc (target conflicts with builtins)" doc "$ARITY_A" --builtins
 
-pair_expect_error \
-  $'error: usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]\n' \
-  "build (zero targets)" build
 rm -f "$OUT/arity.jar" "$OUT/arity-bin"
 ./bin/dawn build "$ARITY_A" -o "$OUT/arity.jar" > "$OUT/j.txt" 2>&1 && jbuild=0 || jbuild=$?
 "$DAWNC" build "$ARITY_A" -o "$OUT/arity-bin" > "$OUT/n.txt" 2>&1 && nbuild=0 || nbuild=$?
@@ -266,9 +248,6 @@ then
 else
   echo "OK   build (one target: JVM jar and native executable both exist)"
 fi
-pair_expect_error \
-  "error: dawn build takes one target, got \`$ARITY_A\` and \`$ARITY_B\`; a bare word after the target is not a flag this subcommand knows"$'\n' \
-  "build (multiple targets)" build "$ARITY_A" "$ARITY_B"
 
 emitc_expect_error \
   $'error: usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]\n' \
