@@ -208,7 +208,11 @@ kernels=(
   attn_decay mha_context conv1d attn_causal
   cce_row cce_mean apsp_step mha_scores
   dequant attn_alibi subarray_sum2d attn_sinks
-  swiglu_half subarray_sum3d attn_window)
+  swiglu_half subarray_sum3d attn_window
+  gpt_ln gpt_qkv gpt_scores gpt_context
+  gpt_dense gpt_fc gpt_gelu gpt_down
+  llama_rms llama_qkv llama_rope llama_scores
+  llama_out llama_ffn llama_down)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

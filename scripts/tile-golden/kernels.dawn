@@ -3001,6 +3001,329 @@ fn ols_beta(a: Param[F64], beta: Param[F64]) -> Unit !Dev = {
   store(beta, idx_const(0), sh, load_strided(a, idx_const(OLS_F), sh, [OLS_W]))
 }
 
+# ---- knife 21: the two transformer blocks ----
+#
+# Nothing below adds an operation to the package. What is new in kind is the
+# SIZE of the sequence: leetgpu 74 is twelve launches and 93 is seventeen,
+# where the longest sequence before this knife was leetgpu 33's ten, and
+# both are a whole published block rather than one stage of one. Six of
+# their twenty-nine launches are kernels earlier knives recorded and this
+# one does not touch: `attn_softmax` (knives 16), `gqa_context` (knife 19),
+# `swiglu_act` (knife 16) and `vadd` (the first milestone's kernel, whose
+# length is its GRID and so is a residual add at any width).
+#
+# BOTH ARE RECORDED AT A REDUCED MODEL. Every other row of the ledger names
+# a problem whose dimensions are the caller's; these two fix theirs (GPT-2
+# 124M is D = 768, H = 12, FFN = 3072; the Llama block is D = 512, 8 query
+# heads over 2 key heads, FFN 1408). The kernels below are the same programs
+# at the published constants -- a recording constant is a loop bound and a
+# stride, not a mechanism -- but the SECOND OPINION is a host reference over
+# a `List[Float]`, and GPT-2's weight buffer alone is seven million of them.
+# So the recording is the block's structure at a shape a host reference can
+# answer for, and the ledger's rows say so.
+
+# leetgpu 74 (GPT-2 Transformer Block). Twelve launches: layer norm, the
+# fused QKV projection, per-head scores, the softmax, the context product,
+# the output projection, the residual, the second layer norm, the two feed
+# forward projections with a gelu between them, and the second residual.
+#
+# The QKV projection writes ONE GP_S by 3 * GP_D buffer, the way the problem
+# packs it, so `gpt_scores` and `gpt_context` read Q, K and V out of one
+# buffer at column offsets 0, GP_D and 2 * GP_D with a row stride of
+# 3 * GP_D. That is why they are not knife 18's `mha_scores` and
+# `mha_context`, which read three buffers of GP_D-wide rows.
+const GP_S: Int = 64
+const GP_D: Int = 64
+const GP_H: Int = 2
+const GP_DH: Int = 32
+const GP_F: Int = 128
+const GP_T: Int = 32
+const GP_EPS: Float = 1.0e-5
+
+# 1 / sqrt(GP_DH), to the nearest Float.
+const GP_INV_SQRT_DH: Float = 0.17677669529663687
+
+# The tile the two element-wise launches of this block cover.
+const GP_ACT_TILE: Int = 128
+
+# sqrt(2 / pi) and the cubic coefficient of the TANH approximation of the
+# gaussian error linear unit. The reference implementation asks for
+# `F.gelu(x, approximate="tanh")` and not for the erf form knife 15
+# composed, so `gpt_gelu` is a `tanh` and not an `erf`; the two differ by
+# about 1e-3 at |x| = 2, which is far outside the tolerance this sequence
+# is judged at.
+const GP_GELU_C: Float = 0.7978845608028654
+const GP_GELU_K: Float = 0.044715
+
+# Launches 1 and 8 of 12: layer normalisation with an affine, one row a
+# block. `layer_norm` is this kernel at another shape (64 rows of 256); a
+# recording is one shape, so the block's own 64 by 64 is a recording of its
+# own.
+fn gpt_ln(x: Param[F64], gamma: Param[F64], beta: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let row = tile_at(block_id(0), GP_D)
+  let t = load(x, row, [GP_D])
+  let g = load(gamma, idx_const(0), [GP_D])
+  let b = load(beta, idx_const(0), [GP_D])
+  let r = normalise([GP_D], GP_D, GP_EPS, t)
+  store(out, row, [GP_D], addf(F64, [GP_D], mul(F64, [GP_D], r, g), b))
+}
+
+# Launch 2 of 12: qkv[GP_S, 3 * GP_D] = x[GP_S, GP_D] * W[GP_D, 3 * GP_D]
+# + b[3 * GP_D], the column tile on the grid's second axis. The bias is one
+# row read with a stride of ZERO down the tile's first axis, the way
+# `batch_norm` reads its per-channel scale.
+fn gpt_qkv(x: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let sh = [GP_S, GP_T]
+  let wide = 3 * GP_D
+  let acc = d_for(idx_const(0), idx_const(GP_D / GP_T), idx_const(1), f_const(F64, sh, 0.0), (k, sofar) => {
+    let ta = load_strided(x, idx_mul(k, idx_const(GP_T)), [GP_S, GP_T], [GP_D, 1])
+    let tb = load_strided(w, idx_add(idx_mul(k, idx_const(GP_T * wide)), idx_mul(bn, idx_const(GP_T))),
+      [GP_T, GP_T], [wide, 1])
+    mmaf(F64, GP_S, GP_T, GP_T, ta, tb, sofar)
+  })
+  let tbias = load_strided(bias, idx_mul(bn, idx_const(GP_T)), sh, [0, 1])
+  store_strided(out, idx_mul(bn, idx_const(GP_T)), sh, [wide, 1], addf(F64, sh, acc, tbias))
+}
+
+# Launch 3 of 12: S[h] = Q_h * K_h^T / sqrt(DH), one head a block on the
+# grid's third axis, both operands read out of the packed QKV buffer.
+fn gpt_scores(qkv: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bh = block_id(2)
+  let sh = [GP_S, GP_S]
+  let wide = 3 * GP_D
+  let qh = idx_mul(bh, idx_const(GP_DH))
+  let kh = idx_add(idx_const(GP_D), qh)
+  let tq = load_strided(qkv, qh, [GP_S, GP_DH], [wide, 1])
+  let tk = load_strided(qkv, kh, [GP_DH, GP_S], permute([wide, 1], [1, 0]))
+  let acc = mmaf(F64, GP_S, GP_DH, GP_S, tq, tk, f_const(F64, sh, 0.0))
+  store(s, idx_mul(bh, idx_const(GP_S * GP_S)), sh, mul(F64, sh, acc, f_const(F64, sh, GP_INV_SQRT_DH)))
+}
+
+# Launch 5 of 12: O[:, h] = P_h * V_h, the head's block of the
+# probabilities against V's columns of the packed buffer, into the head's
+# columns of a GP_S by GP_D output.
+fn gpt_context(p: Param[F64], qkv: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let bh = block_id(2)
+  let sh = [GP_S, GP_DH]
+  let wide = 3 * GP_D
+  let vh = idx_add(idx_const(2 * GP_D), idx_mul(bh, idx_const(GP_DH)))
+  let rows = idx_mul(bh, idx_const(GP_S * GP_S))
+  let acc = d_for(idx_const(0), idx_const(GP_S / GP_T), idx_const(1), f_const(F64, sh, 0.0), (k, sofar) => {
+    let tp = load_strided(p, idx_add(rows, idx_mul(k, idx_const(GP_T))), [GP_S, GP_T], [GP_S, 1])
+    let tv = load_strided(qkv, idx_add(vh, idx_mul(k, idx_const(GP_T * wide))), [GP_T, GP_DH], [wide, 1])
+    mmaf(F64, GP_S, GP_T, GP_DH, tp, tv, sofar)
+  })
+  store_strided(o, idx_mul(bh, idx_const(GP_DH)), sh, [GP_D, 1], acc)
+}
+
+# Launch 6 of 12: the attention output projection, y[GP_S, GP_D] =
+# a[GP_S, GP_D] * W[GP_D, GP_D] + b[GP_D].
+fn gpt_dense(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let sh = [GP_S, GP_T]
+  let acc = d_for(idx_const(0), idx_const(GP_D / GP_T), idx_const(1), f_const(F64, sh, 0.0), (k, sofar) => {
+    let ta = load_strided(a, idx_mul(k, idx_const(GP_T)), [GP_S, GP_T], [GP_D, 1])
+    let tb = load_strided(w, idx_add(idx_mul(k, idx_const(GP_T * GP_D)), idx_mul(bn, idx_const(GP_T))),
+      [GP_T, GP_T], [GP_D, 1])
+    mmaf(F64, GP_S, GP_T, GP_T, ta, tb, sofar)
+  })
+  let tbias = load_strided(bias, idx_mul(bn, idx_const(GP_T)), sh, [0, 1])
+  store_strided(out, idx_mul(bn, idx_const(GP_T)), sh, [GP_D, 1], addf(F64, sh, acc, tbias))
+}
+
+# Launch 9 of 12: the first feed-forward projection, y[GP_S, GP_F] =
+# a[GP_S, GP_D] * W[GP_D, GP_F] + b[GP_F]. Not `gpt_dense`: the output is
+# GP_F wide, and a width is a store stride and a weight stride.
+fn gpt_fc(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let sh = [GP_S, GP_T]
+  let acc = d_for(idx_const(0), idx_const(GP_D / GP_T), idx_const(1), f_const(F64, sh, 0.0), (k, sofar) => {
+    let ta = load_strided(a, idx_mul(k, idx_const(GP_T)), [GP_S, GP_T], [GP_D, 1])
+    let tb = load_strided(w, idx_add(idx_mul(k, idx_const(GP_T * GP_F)), idx_mul(bn, idx_const(GP_T))),
+      [GP_T, GP_T], [GP_F, 1])
+    mmaf(F64, GP_S, GP_T, GP_T, ta, tb, sofar)
+  })
+  let tbias = load_strided(bias, idx_mul(bn, idx_const(GP_T)), sh, [0, 1])
+  store_strided(out, idx_mul(bn, idx_const(GP_T)), sh, [GP_F, 1], addf(F64, sh, acc, tbias))
+}
+
+# Launch 10 of 12: `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`
+# element-wise, the tanh approximation of the gelu. The one launch of this
+# block that is a transcendental function, and `tanh` is an operation the
+# package has had since knife 7b.
+fn gpt_gelu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let sh = [GP_ACT_TILE]
+  let blk = tile_at(block_id(0), GP_ACT_TILE)
+  let t = load(x, blk, sh)
+  let cube = mul(F64, sh, t, mul(F64, sh, t, t))
+  let inner = mul(F64, sh, f_const(F64, sh, GP_GELU_C),
+    addf(F64, sh, t, mul(F64, sh, f_const(F64, sh, GP_GELU_K), cube)))
+  let gate = addf(F64, sh, f_const(F64, sh, 1.0), tanh(F64, sh, inner))
+  store(out, blk, sh, mul(F64, sh, mul(F64, sh, f_const(F64, sh, 0.5), t), gate))
+}
+
+# Launch 11 of 12: the second feed-forward projection, out[GP_S, GP_D] =
+# h[GP_S, GP_F] * W[GP_F, GP_D] + b[GP_D]. `gpt_dense`'s shape with GP_F
+# where its inner dimension is, so its loop runs twice as many rounds.
+fn gpt_down(h: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let sh = [GP_S, GP_T]
+  let acc = d_for(idx_const(0), idx_const(GP_F / GP_T), idx_const(1), f_const(F64, sh, 0.0), (k, sofar) => {
+    let ta = load_strided(h, idx_mul(k, idx_const(GP_T)), [GP_S, GP_T], [GP_F, 1])
+    let tb = load_strided(w, idx_add(idx_mul(k, idx_const(GP_T * GP_D)), idx_mul(bn, idx_const(GP_T))),
+      [GP_T, GP_T], [GP_D, 1])
+    mmaf(F64, GP_S, GP_T, GP_T, ta, tb, sofar)
+  })
+  let tbias = load_strided(bias, idx_mul(bn, idx_const(GP_T)), sh, [0, 1])
+  store_strided(out, idx_mul(bn, idx_const(GP_T)), sh, [GP_D, 1], addf(F64, sh, acc, tbias))
+}
+
+# leetgpu 93 (Llama Transformer Block). Seventeen launches, the longest
+# sequence in this file, and three things the GPT-2 block does not have:
+# weights stored OUT by IN (so every projection is a transposed product),
+# grouped query attention with a causal mask, and a rotary position
+# embedding.
+#
+# The rotary embedding needs no trigonometry: the problem's own signature
+# hands `cos` and `sin` in as buffers, seq_len by HEAD_DIM/2 each. That was
+# the open question this knife was told to settle before recording anything,
+# and the answer is in the signature.
+#
+# The projections write HEAD-MAJOR -- head h's LM_S by LM_HD block at
+# h * LM_S * LM_HD -- which is the layout knife 19's `gqa_scores` and
+# `gqa_context` were recorded on, and the reason the middle two launches of
+# the attention are kernels this knife does not touch.
+const LM_S: Int = 64
+const LM_HQ: Int = 4
+const LM_HKV: Int = 2
+const LM_HD: Int = 32
+const LM_D: Int = 128
+const LM_F: Int = 64
+const LM_T: Int = 32
+const LM_HALF: Int = 16
+const LM_EPS: Float = 1.0e-5
+
+# 1 / sqrt(LM_HD), to the nearest Float. The same number `gqa_scores`
+# carries, which is why this block's scores can be its shape.
+const LM_INV_SQRT_HD: Float = 0.17677669529663687
+
+# Launches 1 and 12 of 17: root-mean-square normalisation with a learned
+# weight, one row a block. Not `rms_norm` (leetgpu 50 has no weight and is
+# recorded over a masked 1000-lane vector) and not `fused_rms_norm` (which
+# adds a residual first and is 64 rows of 256).
+fn llama_rms(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let sh = [LM_D]
+  let row = tile_at(block_id(0), LM_D)
+  let t = load(x, row, sh)
+  let g = load(w, idx_const(0), sh)
+  let sq = spread(F64, sh, d_reduce(F64, sh, mul(F64, sh, t, t), 0.0, (acc, e) => s_addf(F64, acc, e)))
+  let ms = div(F64, sh, sq, f_const(F64, sh, to_float(LM_D)))
+  let r = mul(F64, sh, t, rsqrt(F64, sh, addf(F64, sh, ms, f_const(F64, sh, LM_EPS))))
+  store(out, row, sh, mul(F64, sh, r, g))
+}
+
+# Launches 2, 3 and 4 of 17: one HEAD of a projection whose weight is
+# stored OUT by IN, out[h][s][d] = sum_i x[s][i] * W[h * LM_HD + d][i].
+# The head is the grid's second axis and the head's block is written
+# contiguously, so the SAME kernel is Q at a grid of LM_HQ heads and K and
+# V at a grid of LM_HKV: the buffer's total width never enters it.
+fn llama_qkv(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bh = block_id(1)
+  let sh = [LM_S, LM_HD]
+  let acc = d_for(idx_const(0), idx_const(LM_D / LM_T), idx_const(1), f_const(F64, sh, 0.0), (k, sofar) => {
+    let ta = load_strided(x, idx_mul(k, idx_const(LM_T)), [LM_S, LM_T], [LM_D, 1])
+    let tb = load_strided(w, idx_add(idx_mul(bh, idx_const(LM_HD * LM_D)), idx_mul(k, idx_const(LM_T))),
+      [LM_T, LM_HD], permute([LM_D, 1], [1, 0]))
+    mmaf(F64, LM_S, LM_T, LM_HD, ta, tb, sofar)
+  })
+  store(out, idx_mul(bh, idx_const(LM_S * LM_HD)), sh, acc)
+}
+
+# Launches 5 and 6 of 17: the rotary position embedding of one head-major
+# buffer, `[x1 * c - x2 * s, x1 * s + x2 * c]` over the two halves of each
+# head's row. Two stores, one per half, at a stride of LM_HD; `cos` and
+# `sin` are LM_S by LM_HALF and every head reads the same table.
+fn llama_rope(x: Param[F64], cs: Param[F64], sn: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bh = block_id(1)
+  let sh = [LM_S, LM_HALF]
+  let base = idx_mul(bh, idx_const(LM_S * LM_HD))
+  let x1 = load_strided(x, base, sh, [LM_HD, 1])
+  let x2 = load_strided(x, idx_add(base, idx_const(LM_HALF)), sh, [LM_HD, 1])
+  let c = load(cs, idx_const(0), sh)
+  let s = load(sn, idx_const(0), sh)
+  store_strided(out, base, sh, [LM_HD, 1],
+    sub(F64, sh, mul(F64, sh, x1, c), mul(F64, sh, x2, s)))
+  store_strided(out, idx_add(base, idx_const(LM_HALF)), sh, [LM_HD, 1],
+    addf(F64, sh, mul(F64, sh, x1, s), mul(F64, sh, x2, c)))
+}
+
+# Launch 7 of 17: `gqa_scores` with a CAUSAL mask. The query head is
+# `bkv * groups + bg` as it is there, and the score at a key in the query's
+# future is -inf, so `attn_softmax` gives it weight exactly zero. One block
+# a query head over the whole LM_S by LM_S block, so the coordinates are
+# read from the tile's own base.
+fn llama_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bg = block_id(0)
+  let bkv = block_id(2)
+  let qh = idx_add(idx_mul(bkv, idx_const(LM_HQ / LM_HKV)), bg)
+  let sh = [LM_S, LM_S]
+  let tq = load(q, idx_mul(qh, idx_const(LM_S * LM_HD)), [LM_S, LM_HD])
+  let tk = load_strided(k, idx_mul(bkv, idx_const(LM_S * LM_HD)), [LM_HD, LM_S],
+    permute([LM_HD, 1], [1, 0]))
+  let acc = mmaf(F64, LM_S, LM_HD, LM_S, tq, tk, f_const(F64, sh, 0.0))
+  let scaled = mul(F64, sh, acc, f_const(F64, sh, LM_INV_SQRT_HD))
+  let allowed = ge_i(sh, coord(idx_const(0), sh, 0, 1), coord(idx_const(0), sh, 1, 1))
+  store(s, idx_mul(qh, idx_const(LM_S * LM_S)), sh,
+    select(F64, sh, allowed, scaled, f_const(F64, sh, neg_inf())))
+}
+
+# Launch 10 of 17: the heads are merged and projected, out[LM_S, LM_D] =
+# concat_h(A_h) * W^T for a W stored OUT by IN. The merge is the LOOP: round
+# h reads head h's contiguous LM_S by LM_HD block and the weight columns
+# h * LM_HD onward, so no launch ever writes a merged copy.
+fn llama_out(a: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let sh = [LM_S, LM_T]
+  let acc = d_for(idx_const(0), idx_const(LM_D / LM_HD), idx_const(1), f_const(F64, sh, 0.0), (h, sofar) => {
+    let ta = load(a, idx_mul(h, idx_const(LM_S * LM_HD)), [LM_S, LM_HD])
+    let tb = load_strided(w, idx_add(idx_mul(bn, idx_const(LM_T * LM_D)), idx_mul(h, idx_const(LM_HD))),
+      [LM_HD, LM_T], permute([LM_D, 1], [1, 0]))
+    mmaf(F64, LM_S, LM_HD, LM_T, ta, tb, sofar)
+  })
+  store_strided(out, idx_mul(bn, idx_const(LM_T)), sh, [LM_D, 1], acc)
+}
+
+# Launches 13 and 14 of 17: the gate and up projections, y[LM_S, LM_F] =
+# x[LM_S, LM_D] * W^T for W stored LM_F by LM_D. One kernel, two launches,
+# two weight buffers into two outputs: knife 16's `swiglu_proj` spends the
+# same coin on a weight stored IN by OUT.
+fn llama_ffn(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let sh = [LM_S, LM_T]
+  let acc = d_for(idx_const(0), idx_const(LM_D / LM_T), idx_const(1), f_const(F64, sh, 0.0), (k, sofar) => {
+    let ta = load_strided(x, idx_mul(k, idx_const(LM_T)), [LM_S, LM_T], [LM_D, 1])
+    let tb = load_strided(w, idx_add(idx_mul(bn, idx_const(LM_T * LM_D)), idx_mul(k, idx_const(LM_T))),
+      [LM_T, LM_T], permute([LM_D, 1], [1, 0]))
+    mmaf(F64, LM_S, LM_T, LM_T, ta, tb, sofar)
+  })
+  store_strided(out, idx_mul(bn, idx_const(LM_T)), sh, [LM_F, 1], acc)
+}
+
+# Launch 16 of 17: the down projection, out[LM_S, LM_D] = h[LM_S, LM_F] *
+# W^T for W stored LM_D by LM_F. `llama_ffn` with the two widths exchanged.
+fn llama_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let bn = block_id(1)
+  let sh = [LM_S, LM_T]
+  let acc = d_for(idx_const(0), idx_const(LM_F / LM_T), idx_const(1), f_const(F64, sh, 0.0), (k, sofar) => {
+    let ta = load_strided(h, idx_mul(k, idx_const(LM_T)), [LM_S, LM_T], [LM_F, 1])
+    let tb = load_strided(w, idx_add(idx_mul(bn, idx_const(LM_T * LM_F)), idx_mul(k, idx_const(LM_T))),
+      [LM_T, LM_T], permute([LM_F, 1], [1, 0]))
+    mmaf(F64, LM_S, LM_T, LM_T, ta, tb, sofar)
+  })
+  store_strided(out, idx_mul(bn, idx_const(LM_T)), sh, [LM_D, 1], acc)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -3283,6 +3606,49 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("ols_elim", ["f64", "i32"], () => ols_elim(param(F64, 0), param(I32, 1)))
   "ols_beta" ->
     trace_kernel("ols_beta", ["f64", "f64"], () => ols_beta(param(F64, 0), param(F64, 1)))
+  "gpt_ln" ->
+    trace_kernel("gpt_ln", ["f64", "f64", "f64", "f64"],
+      () => gpt_ln(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "gpt_qkv" ->
+    trace_kernel("gpt_qkv", ["f64", "f64", "f64", "f64"],
+      () => gpt_qkv(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "gpt_scores" ->
+    trace_kernel("gpt_scores", ["f64", "f64"], () => gpt_scores(param(F64, 0), param(F64, 1)))
+  "gpt_context" ->
+    trace_kernel("gpt_context", ["f64", "f64", "f64"],
+      () => gpt_context(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "gpt_dense" ->
+    trace_kernel("gpt_dense", ["f64", "f64", "f64", "f64"],
+      () => gpt_dense(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "gpt_fc" ->
+    trace_kernel("gpt_fc", ["f64", "f64", "f64", "f64"],
+      () => gpt_fc(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "gpt_gelu" ->
+    trace_kernel("gpt_gelu", ["f64", "f64"], () => gpt_gelu(param(F64, 0), param(F64, 1)))
+  "gpt_down" ->
+    trace_kernel("gpt_down", ["f64", "f64", "f64", "f64"],
+      () => gpt_down(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "llama_rms" ->
+    trace_kernel("llama_rms", ["f64", "f64", "f64"],
+      () => llama_rms(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "llama_qkv" ->
+    trace_kernel("llama_qkv", ["f64", "f64", "f64"],
+      () => llama_qkv(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "llama_rope" ->
+    trace_kernel("llama_rope", ["f64", "f64", "f64", "f64"],
+      () => llama_rope(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "llama_scores" ->
+    trace_kernel("llama_scores", ["f64", "f64", "f64"],
+      () => llama_scores(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "llama_out" ->
+    trace_kernel("llama_out", ["f64", "f64", "f64"],
+      () => llama_out(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "llama_ffn" ->
+    trace_kernel("llama_ffn", ["f64", "f64", "f64"],
+      () => llama_ffn(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "llama_down" ->
+    trace_kernel("llama_down", ["f64", "f64", "f64"],
+      () => llama_down(param(F64, 0), param(F64, 1), param(F64, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -3314,6 +3680,8 @@ pub fn main() -> Unit !io = match args() {
       ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
       ++ "|histogram|cas_swap|erf_sweep|geglu"
       ++ "|kv_scores|kv_context|attn_bwd_mmt|attn_bwd_ds|lin_attn_s|lin_attn_out"
-      ++ "|ols_gram|ols_elim|ols_beta>"
+      ++ "|ols_gram|ols_elim|ols_beta"
+      ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
+      ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }
