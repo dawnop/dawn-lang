@@ -5,8 +5,12 @@
 # function-membership check.
 #
 #   ./scripts/builtin-type-contract/run.sh                 # everything
-#   ./scripts/builtin-type-contract/run.sh --shard 2/2     # probe + half
+#   ./scripts/builtin-type-contract/run.sh --shard 2/3     # probe + a third
 #   ./scripts/builtin-type-contract/run.sh --only <mutant> # one mutant
+#
+#   ITEM_TIMES=<file> ./scripts/builtin-type-contract/run.sh
+#                                # also append `<mutant> <seconds>` per mutant,
+#                                # for balancing the shards (matrix.txt says how)
 #
 # Sharding exists because a mutant costs one whole compiler build plus a
 # probe. Every shard first runs probe.py against the real compiler, so no
@@ -478,6 +482,22 @@ PY
   esac
 }
 
+# Per-mutant wall clock, when ITEM_TIMES names a file. The round-robin deal in
+# matrix.txt is only as good as the costs it was computed from, and a mutant
+# here is one whole compiler build plus a probe, so the costs are neither equal
+# nor guessable by eye. Off by default and free when off.
+timed_mutant() { # name
+  if [ -z "${ITEM_TIMES:-}" ]; then
+    run_builtin_mutant "$1"
+    return
+  fi
+  local start end
+  start=${EPOCHREALTIME/,/.}
+  run_builtin_mutant "$1"
+  end=${EPOCHREALTIME/,/.}
+  awk -v n="$1" -v a="$start" -v b="$end" 'BEGIN{printf "%s %.2f\n", n, b-a}' >> "$ITEM_TIMES"
+}
+
 "$dawn" --version > /dev/null
 python3 "$probe" "$root/build/dawn-selfhost.jar"
 
@@ -485,7 +505,7 @@ if [ -n "$only" ]; then
   found=0
   for name in "${mutants[@]}"; do
     if [ "$name" = "$only" ]; then
-      run_builtin_mutant "$name"
+      timed_mutant "$name"
       found=1
     fi
   done
@@ -496,7 +516,7 @@ else
   for name in "${mutants[@]}"; do
     if ! shard_skips "$position"; then
       shard_record "$name"
-      run_builtin_mutant "$name"
+      timed_mutant "$name"
     fi
     position=$((position + 1))
   done
