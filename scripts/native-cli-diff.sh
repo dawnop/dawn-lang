@@ -230,17 +230,8 @@ SKEW_EXPECT="$SKEW_EXPECT  Use the $DAWN_VERSION std, or run the 0.0.1-native-cl
 pair_expect_error "$SKEW_EXPECT" \
   "check (std stamped with another release)" check --std "$SKEW_STD" "$ARITY_A"
 
-pair_expect_error \
-  $'error: usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib\n' \
-  "test (zero targets)" test
 pair_expect_exit 0 "test (one target)" test "$ARITY_A"
 pair_expect_exit 0 "test (--stdlib selector)" test --stdlib
-pair_expect_error \
-  "error: dawn test takes one target, got \`$ARITY_A\` and \`$ARITY_B\`; a bare word after the target is not a flag this subcommand knows"$'\n' \
-  "test (multiple targets)" test "$ARITY_A" "$ARITY_B"
-pair_expect_error \
-  $'error: dawn test accepts exactly one of a target or --stdlib\n' \
-  "test (target conflicts with --stdlib)" test --stdlib "$ARITY_A"
 
 pair_expect_error \
   $'error: usage: dawn doc <file.dawn | project-dir> | dawn doc --stdlib | dawn doc --builtins\n' \
@@ -651,12 +642,11 @@ pair_report "test (test-hoisted dictionary symbols)" test packages/tea-core
 pair_report "test (the bundled std)" test --stdlib
 # --cp names host jars. The native driver validates the entries the way the
 # JVM one does and then drops them: they can only matter to a `use java`
-# program, which this backend refuses at `check`. Both spellings, both
-# outcomes — an entry that exists, and one that does not.
+# program, which this backend refuses at `check`. Both spellings of an entry
+# that exists; the two refusals are inline tests now (see this file's header),
+# and these two are what says the accepted spelling still compiles.
 pair "test (--cp, entry exists)" test --cp "$ROOT/runtime/c" packages/sha2
 pair "test (--cp=, entry exists)" test "--cp=$ROOT/runtime/c" packages/sha2
-pair "test (--cp entry not found)" test --cp /nonexistent.jar packages/sha2
-pair "test (--cp needs a path)" test packages/sha2 --cp
 
 # the failing path: report shape, six-space message indentation, the count
 # line and exit 1. `selfhost-run-diff.sh` has the same fixture against N-1.
@@ -711,13 +701,12 @@ test "a message past 512 bytes arrives whole" {
 EOF
 pair_report "test (failure message shapes)" test "$OUT/messages.dawn"
 
-# error paths, the run-diff set restricted to what this backend can be asked
+# the one error path of this subcommand that needs a real compile to reach:
+# the target names a file that is Dawn, is readable, and has nothing to run.
+# The usage, missing-target and wrong-suffix refusals are inline tests now
+# (see this file's header).
 printf 'fn g() -> Int = 2\n' > "$OUT/notest.dawn"
-printf 'hello\n' > "$OUT/plain.txt"
 pair "test (no test blocks)" test "$OUT/notest.dawn"
-pair "test (missing target)" test "$OUT/nowhere"
-pair "test (wrong suffix)" test "$OUT/plain.txt"
-pair "test (usage)" test
 
 # ---- leg 7: the assertions are evaluated, not just reported on ----
 # Every check above reads the runner's own report, and a report is what a
