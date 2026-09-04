@@ -146,9 +146,20 @@ javac -nowarn -cp "$root/build/dawn-selfhost.jar" -d "$work/canary" \
 # `main` is the jar's Main-Class; `-cp` rather than `-jar` because the shadow
 # has to precede the jar, and `-jar` ignores `-cp`. Subject 1 uses no shadow, so
 # it is exactly what bin/dawn ships.
+#
+# `-cp` is also why the export below has to be written out here. The compiler's
+# own `main` installs `io.with_exit_real`, a `ctl` handler, so starting it links
+# dawn/rt/CtlCont, whose superclass jdk.internal.vm.Continuation java.base
+# exports to nobody. A `java -jar` run reads `Add-Exports` out of the manifest
+# every jar carries (selfhost/src/jvm/jarw.dawn, manifest_text) and a `dawn run`
+# child gets the same option on its command line (selfhost/src/main.dawn,
+# child_java_cmd); a `-cp` run has neither and dies of IllegalAccessError before
+# emitting a byte. Same fix, same reason, as 8d825aff in scripts/classfile-verify.
+add_exports=(--add-exports java.base/jdk.internal.vm=ALL-UNNAMED)
+
 emit() { # emit <outdir> <prefix-of-classpath-or-empty>
   mkdir -p "$1"
-  java -Xss512m -cp "${2:+$2:}$root/build/dawn-selfhost.jar" main \
+  java -Xss512m "${add_exports[@]}" -cp "${2:+$2:}$root/build/dawn-selfhost.jar" main \
     __emit selfhost -o "$1" > /dev/null
   for c in Asm AsmWriter; do
     if [ ! -f "$1/dawn/rt/$c.class" ]; then
@@ -164,8 +175,10 @@ emit "$work/canary-emit" "$work/canary"
 javac -cp "$root/build/dawn-selfhost.jar" -d "$work" scripts/asm-adapter-contract/Diff.java
 # The emitted directories are deliberately *not* on the class path: Diff reads
 # those class files as bytes and defines each in its own loader, so there is no
-# question about which `dawn.rt.Asm` a check looked at.
-java -cp "$work:$work/ref:$root/build/dawn-selfhost.jar" Diff \
+# question about which `dawn.rt.Asm` a check looked at. It carries the same
+# export: it defines emitted Dawn classes, and a run that loads emitted classes
+# under conditions no real run has is the thing 8d825aff was about.
+java "${add_exports[@]}" -cp "$work:$work/ref:$root/build/dawn-selfhost.jar" Diff \
   "$work/self/dawn/rt/Asm.class" \
   "$work/ddc/dawn/rt/Asm.class" \
   "$work/canary-emit/dawn/rt/Asm.class" \
