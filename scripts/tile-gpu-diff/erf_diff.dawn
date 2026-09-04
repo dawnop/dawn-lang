@@ -42,7 +42,7 @@
 #     The tanh mutant must red on both, because a wrong approximation is
 #     wrong on either half.
 use std/io
-use std/io.{with_fs_real}
+use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, erf_sweep_ref, geglu_ref}
 use std/list
@@ -364,7 +364,7 @@ fn buffers_of(i: Int, pos: Bool) -> String = {
   })
 }
 
-fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_bytes(path)) {
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
   Ok(b) -> b
   Err(e) -> {
     io.eprintln("erf_diff: cannot read ${path}: ${e.message}")
@@ -373,76 +373,78 @@ fn read_cubin(path: String) -> Bytes !io = match with_fs_real(() => io.read_byte
   }
 }
 
-fn usage() -> Unit !io = {
+fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: erf_diff [--corpus positive] <erf_sweep.cubin> <geglu.cubin>")
   io.exit(2)
 }
 
-pub fn main() -> Unit !io = {
-  let argv = args()
-  let count = 2
-  let pos = len(argv) == count + 2 && argv[0] == "--corpus" && argv[1] == "positive"
-  let paths = if pos { list.drop(argv, 2) } else { argv }
-  if len(paths) != count { usage() } else { () }
-  var cubins: Map[String, Bytes] = map.empty()
-  for i in range(0, count) {
-    cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
-  }
-  var all_agreed = true
-  var blocked = ""
-  var any_differ = false
-  var tolerance_count = 0
-  var errors = ""
-  for i in range(0, count) {
-    let name = case_name(i)
-    let bufs = case_bufs(i, pos)
-    let gx = case_grid(i)
-    let refs = case_kernels(i)
-    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs))
-    let real = with_gpu_real(cubins, () => stages(name, gx, bufs))
-    let v = verdict(fake, real)
-    io.println("kernel ${name} tier=tolerance bufs=${buffers_of(i, pos)} grid=(${gx}, 1, 1)")
-    io.println("  index corpus=${if pos { "positive" } else { "main" }} ${shape_of(case_argument(i, pos))}")
-    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
-    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
-        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
-    io.println("  miss  ${miss_line(real, fake)}")
-    io.println("  error max|device - reference| = ${error_of(real, fake)}")
-    if real.note != "" { io.println("  note  ${real.note}") } else { () }
-    io.println("  verdict ${v}")
-    if stopped(real) == "" {
-      let sep = if errors == "" { "" } else { " " }
-      errors = errors ++ sep ++ name ++ "=" ++ to_string(error_of(real, fake))
-    } else {
-      ()
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+    let argv = args()
+    let count = 2
+    let pos = len(argv) == count + 2 && argv[0] == "--corpus" && argv[1] == "positive"
+    let paths = if pos { list.drop(argv, 2) } else { argv }
+    if len(paths) != count { usage() } else { () }
+    var cubins: Map[String, Bytes] = map.empty()
+    for i in range(0, count) {
+      cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
     }
-    if v == "close:tolerance" || v == "identical:tolerance" {
-      tolerance_count = tolerance_count + 1
-    } else {
-      ()
+    var all_agreed = true
+    var blocked = ""
+    var any_differ = false
+    var tolerance_count = 0
+    var errors = ""
+    for i in range(0, count) {
+      let name = case_name(i)
+      let bufs = case_bufs(i, pos)
+      let gx = case_grid(i)
+      let refs = case_kernels(i)
+      let fake = with_gpu_fake(refs, () => stages(name, gx, bufs))
+      let real = with_gpu_real(cubins, () => stages(name, gx, bufs))
+      let v = verdict(fake, real)
+      io.println("kernel ${name} tier=tolerance bufs=${buffers_of(i, pos)} grid=(${gx}, 1, 1)")
+      io.println("  index corpus=${if pos { "positive" } else { "main" }} ${shape_of(case_argument(i, pos))}")
+      io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+      io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+          ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+      io.println("  miss  ${miss_line(real, fake)}")
+      io.println("  error max|device - reference| = ${error_of(real, fake)}")
+      if real.note != "" { io.println("  note  ${real.note}") } else { () }
+      io.println("  verdict ${v}")
+      if stopped(real) == "" {
+        let sep = if errors == "" { "" } else { " " }
+        errors = errors ++ sep ++ name ++ "=" ++ to_string(error_of(real, fake))
+      } else {
+        ()
+      }
+      if v == "close:tolerance" || v == "identical:tolerance" {
+        tolerance_count = tolerance_count + 1
+      } else {
+        ()
+      }
+      if v != "close:tolerance" && v != "identical:tolerance" { all_agreed = false } else { () }
+      if v == "differ:result" { any_differ = true } else { () }
+      if blocked == "" && not any_differ && v != "close:tolerance" && v != "identical:tolerance" {
+        blocked = v
+      } else {
+        ()
+      }
     }
-    if v != "close:tolerance" && v != "identical:tolerance" { all_agreed = false } else { () }
-    if v == "differ:result" { any_differ = true } else { () }
-    if blocked == "" && not any_differ && v != "close:tolerance" && v != "identical:tolerance" {
-      blocked = v
+    # The measurement, recorded and not asserted: what Abramowitz-Stegun
+    # 7.1.26 costs on this device, on this corpus. Its claimed bound is
+    # 1.5e-7 and run.sh holds the sweep's number under it.
+    io.println("probe as-error ${errors}")
+    io.println("tiers exact=0 tolerance=${tolerance_count}")
+    if all_agreed {
+      io.println("tile-gpu-diff: pass")
+    } else if any_differ {
+      io.println("tile-gpu-diff: fail")
+      io.exit(1)
     } else {
-      ()
+      io.println("tile-gpu-diff: ${blocked}")
     }
-  }
-  # The measurement, recorded and not asserted: what Abramowitz-Stegun
-  # 7.1.26 costs on this device, on this corpus. Its claimed bound is
-  # 1.5e-7 and run.sh holds the sweep's number under it.
-  io.println("probe as-error ${errors}")
-  io.println("tiers exact=0 tolerance=${tolerance_count}")
-  if all_agreed {
-    io.println("tile-gpu-diff: pass")
-  } else if any_differ {
-    io.println("tile-gpu-diff: fail")
-    io.exit(1)
-  } else {
-    io.println("tile-gpu-diff: ${blocked}")
-  }
-}
+})
 
 # `io.exit` is typed Unit, so the branch that cannot continue still owes a
 # Bytes; this is never reached.
