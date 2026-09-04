@@ -484,20 +484,21 @@ run_mutant() {
     skip-assoc-trait)
       mutant_drops "$1" reject_assoc_trait 'projection `Item` trait' ;;
     reject-all-effects)
-      # the witness is in the tree since std declared its first effect:
-      # the `pub effect Fs` in std/io.dawn sits on public operations, on
-      # `with_fs_real`'s public signature and, since the file functions
-      # moved onto it, on every `pub fn ... !Fs` row of io, so a pass that
-      # leaks every effect makes the bundled std itself unloadable, before
-      # `accepted.dawn` and its `pub effect Ask` are ever reached. The
-      # first row the checker reaches is `is_dir`, the first public file
-      # function in source order, and it is named so that the std breaking
-      # for some other reason cannot pass as this mutant
-      grep -q '^pub effect Fs' "$root/std/io.dawn" \
-        || fail "$1: the witness moved; std/io.dawn no longer declares Fs, retarget this mutant"
-      grep -q '^pub fn is_dir(.*!Fs' "$root/std/io.dawn" \
-        || fail "$1: the witness moved; io.is_dir no longer carries !Fs, retarget this mutant"
-      mutant_breaks_std "$1" 'public function `is_dir` exposes private effect `Fs`' ;;
+      # the witness is in the tree since std declared its first effect: the
+      # named effects in std/io.dawn sit on public operations, on the
+      # `with_*_real` signatures and on every `pub fn ... !Fs` / `!Exit` row
+      # of io, so a pass that leaks every effect makes the bundled std itself
+      # unloadable, before `accepted.dawn` and its `pub effect Ask` are ever
+      # reached. The row named here is the one the checker reaches first in
+      # source order, and it is named so that the std breaking for some other
+      # reason cannot pass as this mutant. That used to be `is_dir`, the
+      # first public file function; `io.exit` moved onto `Exit` and sits
+      # above it, so it is the first row now
+      grep -q '^pub ctl effect Exit' "$root/std/io.dawn" \
+        || fail "$1: the witness moved; std/io.dawn no longer declares Exit, retarget this mutant"
+      grep -q '^pub fn exit(.*!Exit' "$root/std/io.dawn" \
+        || fail "$1: the witness moved; io.exit no longer carries !Exit, retarget this mutant"
+      mutant_breaks_std "$1" 'public function `exit` exposes private effect `Exit`' ;;
     pass-all-effects)
       mutant_drops "$1" reject_private_effect 'exposes private effect `Hidden`' ;;
     skip-impl-constraints)
