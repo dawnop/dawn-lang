@@ -1,0 +1,97 @@
+# Ending the process, captured as a value instead.
+#
+# Test support, and the `Exit` counterpart of the tables next to it. A test
+# runs code that ends the process and reads back the status it ended with,
+# from a process that is still running.
+#
+# `Exit` is a `ctl` effect, so an arm may decline to resume and the arm's own
+# value becomes the value of the whole `with handle` block (spec §6.5). That
+# is what makes this a capture rather than a table: there is nothing after an
+# `exit_now` to log, and a body that ends is a body whose remainder never ran.
+#
+# It lives in compiler-plan rather than in std for `procmem`'s reason, and is
+# meant to be used under `consolemem.with_console_table`: a CLI failure is a
+# status and a line, and either alone reads back half of one.
+
+use std/io.{Exit, Console}
+use consolemem
+
+## Run `body` and answer the status it ended the process with, or `None` when
+## it ran to the end.
+##
+## The arm does not resume, exactly as `io.with_exit_real`'s does not: nothing
+## after the `exit_now` call runs, here or anywhere below it, which is the
+## contract `io.exit` has always had. The difference is only where control
+## goes instead -- to the caller here, rather than out of the process.
+##
+## `body` answers `Unit` rather than a type parameter because an exiting body
+## has no value to give: a `T` would have to be conjured for the exiting case,
+## and the only honest conjuring is `panic`.
+##
+## Nested captures answer independently: an inner one takes the exit and the
+## outer one sees a body that ran to the end.
+pub fn with_exit_capture[!e](body: fn() -> Unit !Exit !e) -> Option[Int] !e = {
+  with handle Exit {
+    exit_now(code) resume k => Some(code)
+  }
+  body()
+  None
+}
+
+# ---- tests ----
+#
+# Every one of these pairs the capture with `consolemem.with_console_table`,
+# which is the shape it is for: a CLI failure is a status and a line, and
+# either alone reads back half of one. It is also the only way a test in this
+# file can see what a body did before it ended, since a lambda captures by
+# value and cannot write to a `var` outside itself.
+
+test "the capture answers the status, and the body's remainder does not run" {
+  # a body that runs to the end: `None`, and everything it wrote is there
+  let (clean, log) = consolemem.with_console_table(() =>
+      with_exit_capture(() => console_println("done")))
+  assert clean == None
+  assert consolemem.out_text(log) == "done\n"
+
+  # a body that ends: what it wrote before the call is there, what it would
+  # have written after it is not. This is the whole reason `Exit` is a `ctl`
+  # effect -- a tail-resumptive arm would have come back and written the
+  # second line.
+  let (ended, ending_log) = consolemem.with_console_table(() =>
+      with_exit_capture(() => {
+        console_eprintln("error: usage")
+        exit_now(2)
+        console_println("the remainder of an exiting body ran")
+      }))
+  assert ended == Some(2)
+  assert consolemem.err_text(ending_log) == "error: usage\n"
+  assert consolemem.out_text(ending_log) == ""
+}
+
+test "the first exit wins, and zero is a status like any other" {
+  let (first, log) = consolemem.with_console_table(() =>
+      with_exit_capture(() => {
+        exit_now(1)
+        console_eprintln("second")
+        exit_now(70)
+      }))
+  assert first == Some(1)
+  assert consolemem.err_text(log) == ""
+  # `Some(0)` and `None` are two different answers: a body that exited zero is
+  # not a body that ran to the end
+  let (zero, _) = consolemem.with_console_table(() => with_exit_capture(() => exit_now(0)))
+  assert zero == Some(0)
+  let (none, _) = consolemem.with_console_table(() => with_exit_capture(() => ()))
+  assert none == None
+}
+
+test "a nested capture takes the exit and the outer one sees a clean run" {
+  let (outer, log) = consolemem.with_console_table(() =>
+      with_exit_capture(() => {
+        let inner = with_exit_capture(() => exit_now(3))
+        assert inner == Some(3)
+        console_println("the outer body kept going")
+      }))
+  assert outer == None
+  assert consolemem.out_text(log) == "the outer body kept going\n"
+}

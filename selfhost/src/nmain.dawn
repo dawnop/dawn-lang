@@ -44,6 +44,9 @@ use lsp/server.{LspLeaseHost, run_lsp, lsp_std_flag}
 use compiler_plan/pkgfetch
 use compiler_plan/procmem
 use compiler_plan/envmem
+use compiler_plan/consolemem
+use compiler_plan/consolemem.{ConsoleWrite, Stderr}
+use compiler_plan/exitmem
 use compiler_plan/envmem.{AskedGet}
 use compiler_plan/source
 
@@ -1370,4 +1373,35 @@ test "a reactor build is the same link plus one flag" {
     assert main[11] == "-o"
     assert main[12] == out
   })
+}
+
+test "`dawnc check` with no target is one line on stderr and status 2" {
+  # The first case in scripts/native-cli-diff.sh, brought in process. That
+  # script judges a usage refusal on three things at once -- stdout empty,
+  # stderr byte for byte, exit 2 -- and until `Console` and `Exit` were
+  # effects there was nothing inside the tree that could observe any of them,
+  # which is why 913 lines of CLI contract live out of process. The expected
+  # bytes below are the same literal the script holds both drivers to.
+  #
+  # The `Fs` handler is real and the `Proc` script is empty on purpose: the
+  # two empty logs say that a usage mistake is answered without asking the
+  # host anything, and an empty script would panic if this path did spawn.
+  let (((status, log), envlog), proclog) = io.with_fs_real(() =>
+      procmem.with_proc_table([], () =>
+          envmem.with_env_table(envmem.TABLE_CWD, [], () =>
+              consolemem.with_console_table(() =>
+                  exitmem.with_exit_capture(() => cmd_check([]))))))
+  assert status == Some(2)
+  assert consolemem.err_text(log) == "error: usage: dawn check [--std <dir>] <target>...\n"
+  assert consolemem.out_text(log) == ""
+  # one write, on stderr, ending its line: the shape of every `cli_error`
+  assert log == [
+    ConsoleWrite {
+      stream: Stderr,
+      text: "error: usage: dawn check [--std <dir>] <target>...",
+      ends_line: true
+    }
+  ]
+  assert envlog == []
+  assert proclog == []
 }

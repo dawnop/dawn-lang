@@ -1,0 +1,155 @@
+# The console answered from a table, without a host.
+#
+# Test support, and the `Console` counterpart of `driver/fsmem`'s `Fs` table,
+# of `procmem`'s `Proc` script and of `envmem`'s `Env` table. A test runs the
+# code under test and reads back every write it made: which stream it went to,
+# what it said, and whether the operation ended the line.
+#
+# It answers a question a process cannot ask itself. `Fs` can be checked
+# against itself (write a file, read it back) and so can `Env`
+# (`env_cwd() == cwd()`), but nothing can read back its own console. That is
+# why the four arms of `io.with_console_real` carried no assertion at all
+# until this handler: swap `console_eprintln`'s arm for `io_println` and every
+# test in `std/io` still passes, because the two writes it makes go nowhere a
+# test can look. Here they go into a list.
+#
+# It lives in compiler-plan rather than in std for `procmem`'s and `envmem`'s
+# reason. The bootstrap seed compiles HEAD against the std the seed shipped
+# with, so a std function added in this release cannot be called here until
+# the next one; a table handler in std would be unusable for a whole release.
+# compiler-plan is a dependency of selfhost, so a handler here is reachable
+# from both.
+#
+# The arms touch nothing but their own cell, so the wrapper's row is `!e`:
+# whatever the body already needed and not one atom more. That is what lets
+# one of these sit inside an `Fs` table, inside a `Proc` script, inside an
+# `Env` table, inside all three, or inside none.
+#
+# **The line ending is recorded apart from the text.** `console_println(s)`
+# logs `s` with `ends_line: true` rather than `s ++ "\n"`, because the pair
+# `(stream, ends_line)` is exactly what an arm of the production handler is
+# supposed to get right and exactly what a concatenated transcript hides. A
+# test that wants the bytes asks `out_text` or `err_text` for them.
+
+use std/io
+use std/io.{Console}
+
+## Which of the two host streams a write went to.
+##
+## An ADT rather than a `String` because these are the only two there are, and
+## a table that recorded `"out"` could be asked about `"stdout"` forever.
+pub type Stream =
+  | Stdout
+  | Stderr
+
+## One write, recorded exactly as the arm received it.
+##
+## `text` is the operation's argument and nothing else; `ends_line` is whether
+## the operation the caller chose was the one that ends the line.
+pub type ConsoleWrite = {
+  stream: Stream,
+  text: String,
+  ends_line: Bool
+}
+
+## Run `body` with `Console` answered by a list, and hand back every write in
+## the order it was made.
+##
+## Nothing is printed. Every arm resumes in tail position, so the code under
+## test cannot tell this handler from the real one except by not being able to
+## see its own output -- which it could not do under the real one either.
+##
+## The log is a handler cell (spec §6.5), which is what lets one write be seen
+## by the next one and by the caller here.
+##
+## **Put this outside an `Exit` capture, not inside one.** An `Exit` arm that
+## does not resume discards the rest of its own block, and a `with handle
+## Console` block whose remainder is discarded never reaches the line that
+## hands the log back. `with_console_table(() => with_exit_capture(...))`
+## keeps both halves; the other nesting keeps neither.
+pub fn with_console_table[T, !e](body: fn() -> T !Console !e) -> (T, List[ConsoleWrite]) !e = {
+  with handle Console {
+    var log: List[ConsoleWrite] = []
+    console_print(s) => { log = log ++ [ConsoleWrite { stream: Stdout, text: s, ends_line: false }] }
+    console_println(s) => { log = log ++ [ConsoleWrite { stream: Stdout, text: s, ends_line: true }] }
+    console_eprint(s) => { log = log ++ [ConsoleWrite { stream: Stderr, text: s, ends_line: false }] }
+    console_eprintln(s) => { log = log ++ [ConsoleWrite { stream: Stderr, text: s, ends_line: true }] }
+  }
+  let out = body()
+  (out, log)
+}
+
+## The bytes one stream received, in order, with each `*println` write's
+## newline put back.
+##
+## This is the transcript a caller would have found in a file if the writes
+## had gone to a host, and it is what a test compares against the byte-exact
+## expectations in `scripts/native-cli-diff.sh`.
+pub fn stream_text(log: List[ConsoleWrite], s: Stream) -> String = {
+  var out = ""
+  for w in log {
+    if w.stream == s {
+      out = out ++ w.text
+      if w.ends_line { out = out ++ "\n" }
+    }
+  }
+  out
+}
+
+## The bytes stdout received.
+pub fn out_text(log: List[ConsoleWrite]) -> String = stream_text(log, Stdout)
+
+## The bytes stderr received.
+pub fn err_text(log: List[ConsoleWrite]) -> String = stream_text(log, Stderr)
+
+# ---- tests ----
+
+test "the table records the stream, the text and the line ending of each write" {
+  let (answered, log) = with_console_table(() => {
+    console_print("usage: ")
+    console_println("dawn build <project>")
+    console_eprint("error: ")
+    console_eprintln("no such file")
+    7
+  })
+  # the wrapper is transparent: the body's value comes back beside the log
+  assert answered == 7
+  assert log == [
+    ConsoleWrite { stream: Stdout, text: "usage: ", ends_line: false },
+    ConsoleWrite { stream: Stdout, text: "dawn build <project>", ends_line: true },
+    ConsoleWrite { stream: Stderr, text: "error: ", ends_line: false },
+    ConsoleWrite { stream: Stderr, text: "no such file", ends_line: true }
+  ]
+  # and the two streams are two transcripts, not one interleaved one
+  assert out_text(log) == "usage: dawn build <project>\n"
+  assert err_text(log) == "error: no such file\n"
+}
+
+test "a write to the wrong stream is visible, which is the whole point" {
+  # the negative control for `io.with_console_real`'s arms, written as a test:
+  # a diagnostic that goes to stdout leaves stderr empty, and this is what
+  # says so. Under the real handler both spellings vanish into a terminal.
+  let (_, wrong) = with_console_table(() => io.println("error: no such file"))
+  assert out_text(wrong) == ""
+  assert err_text(wrong) == ""
+  # `io.println` is not a `Console` operation at all: the public print
+  # functions keep `!io` on purpose (docs/effects-design.md §8.1), so a table
+  # sees only what the compiler's own diagnostic paths write through the
+  # operations
+  let (_, right) = with_console_table(() => console_eprintln("error: no such file"))
+  assert err_text(right) == "error: no such file\n"
+  assert out_text(right) == ""
+}
+
+test "an empty body writes nothing and a print without a newline does not end a line" {
+  let (_, none) = with_console_table(() => ())
+  assert none == []
+  assert out_text(none) == ""
+  let (_, partial) = with_console_table(() => {
+    console_print("a")
+    console_print("b")
+  })
+  # two writes, one line, and no newline anywhere: `print` is not `println`
+  assert len(partial) == 2
+  assert out_text(partial) == "ab"
+}
