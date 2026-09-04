@@ -1429,7 +1429,7 @@ jobs:
   # Three jobs of their own because the wheels are 150 MB and nothing else
   # needs them, so a slow package index delays nothing but these. Nothing
   # `needs:` them. They are the three round-robin shards of one matrix
-  # (scripts/tile-golden/matrix.txt: the 66 kernels, then the 15 mutants, in
+  # (scripts/tile-golden/matrix.txt: the 77 kernels, then the 15 mutants, in
   # run order). Sharding by kind was the plan written down at knife 7b and the
   # phase measurement retired it: locally the kernel loop is 204s (102 JVM
   # starts, and nothing else -- the native binary runs all 51 kernels in 0.3s
@@ -1479,22 +1479,29 @@ jobs:
   # are not: only this one reads git. The second is the leetgpu ledger.
   tile-golden-1:
     runs-on: ubuntu-latest
-    # Local wall clock, one machine, one tileiras, three round-robin shards of
-    # the same matrix.txt, measured back to back against the base tree
-    # (9bafffd8, knife 15). The numbers and the reasoning are in the note at
-    # the head of this block and in docs/tile-backend-design.md 6.5.
+    # Local wall clock, one machine, one tileiras, the three round-robin
+    # shards of the same matrix.txt run back to back on the knife 16 tree
+    # (92 items: 77 kernels and 15 mutants): 197s, 189s and 177s, and 563s
+    # unsharded, which the three sum to within noise. The machine was NOT
+    # quiet -- another agent was building all afternoon, load average 6 --
+    # so what these levels are good for is the budget arithmetic and not a
+    # comparison with any earlier reading; docs/tile-backend-design.md 6.5
+    # carries the per-item costs, which is the number that IS measurable
+    # under load.
     #
     # Plus the checkout, the toolchain action and the wheels (~45s and ~25s,
     # the carried estimates), doubled for a cold runner: the rule this file
-    # has used since the first split.
+    # has used since the first split. 197 + 70 = 267, doubled is 534s.
     #
     # The planning value stays deliberately above what CI does. Run 33763512
-    # at fffe98f8 observed 340s and 348s against planning values of 512s and
-    # 490s, a ratio of about 0.66; the last carried CI projection for N=2 was
-    # 408s and 390s. Redistributed over three shards those become about 280s
-    # each, which is where this knife's projection starts from.
-    # budget: 3x 460s planning value (230s local, doubled)
-    timeout-minutes: 23
+    # at fffe98f8 observed 340s and 348s in the two shards against planning
+    # values of 512s and 490s, a ratio of about 0.66; the last carried CI
+    # projection for N=2 was 408s and 390s, so 798s of shard time. This
+    # knife's eleven kernels add about a fifth to it and three shards divide
+    # it, which projects roughly 320s, 310s and 290s here -- well under the
+    # 550s observation that would trigger a fourth shard.
+    # budget: 3x 534s planning value (267s local, doubled)
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1510,7 +1517,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (66 kernels and fifteen mutants, both backends; shard 1)
+      - name: tile IR goldens and tileiras (77 kernels and fifteen mutants, both backends; shard 1)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 1/3
@@ -1533,12 +1540,13 @@ jobs:
 
   tile-golden-2:
     runs-on: ubuntu-latest
-    # The note above tile-golden-1 carries the measurements and the reasoning
-    # for all three shards; each one restates the arithmetic on its own local
-    # reading, because a budget line has to be readable beside the timeout it
-    # bounds.
-    # budget: 3x 460s planning value (230s local, doubled)
-    timeout-minutes: 23
+    # 189s locally for this shard on the knife 16 tree; the note above
+    # tile-golden-1 carries the measurements and the reasoning for all three,
+    # and each restates the arithmetic on its own reading because a budget
+    # line has to be readable beside the timeout it bounds. 189 + 70 = 259,
+    # doubled is 518s.
+    # budget: 3x 518s planning value (259s local, doubled)
+    timeout-minutes: 26
     steps:
       - uses: actions/checkout@v4
 
@@ -1552,7 +1560,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (66 kernels and fifteen mutants, both backends; shard 2)
+      - name: tile IR goldens and tileiras (77 kernels and fifteen mutants, both backends; shard 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 2/3
@@ -1569,9 +1577,10 @@ jobs:
     runs-on: ubuntu-latest
     # The third shard, added with the N=2 -> N=3 split on 2026-09-04. Same
     # matrix, same tileiras, same arithmetic; the note above tile-golden-1
-    # carries the measurements.
-    # budget: 3x 460s planning value (230s local, doubled)
-    timeout-minutes: 23
+    # carries the measurements. 177s locally, 177 + 70 = 247, doubled is
+    # 494s.
+    # budget: 3x 494s planning value (247s local, doubled)
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -1585,7 +1594,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (66 kernels and fifteen mutants, both backends; shard 3)
+      - name: tile IR goldens and tileiras (77 kernels and fifteen mutants, both backends; shard 3)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 3/3
