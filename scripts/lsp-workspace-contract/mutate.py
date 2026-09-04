@@ -213,7 +213,7 @@ def mutate(name, server, main, analyze):
         )
     elif name == "extensionless-project-member":
         analyze_text = analyze.read_text(encoding="utf-8")
-        new = """pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !Env !io = {
+        new = """pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !Env = {
   let mod_path = module_path_of(canon(plan.source.source_root), canon(file))
   if len(bad_segments(mod_path)) == 0 { Some(mod_path) } else { None }
 }"""
