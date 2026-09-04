@@ -2060,6 +2060,161 @@ fn apsp_step(d: Param[F64], kb: Param[I32]) -> Unit !Dev = {
   store(d, idx_const(0), sh, minf(F64, sh, load(d, idx_const(0), sh), through))
 }
 
+# leetgpu 53, 55, 59, 92 and 112 (knife 17): five more score kernels, and
+# nothing else. Every one of them is `attn_scores` plus a rule on the
+# position (i, j) of the score it is about to store, and four of the five
+# hand their result to the SAME `attn_softmax` and `attn_context` knife 16
+# recorded. That reuse is the point: an attention variant is a rule on a
+# score, so the family costs one kernel a problem rather than three.
+#
+# All five run at knife 16's attention shape (ATT_M by ATT_D queries against
+# ATT_N keys), which is what makes the two reused recordings applicable
+# without re-recording them.
+
+## The scaled product both `attn_scores` and the five below start from:
+## `Q[bm] K[bn]^T / sqrt(D)` for one ATT_T by ATT_T block of the score
+## matrix. Written once here rather than five more times; the trace is the
+## same operations in the same order either way.
+fn att_scaled(q: Param[F64], k: Param[F64], bm: Idx, bn: Idx) -> Tile[F64] !Dev = {
+  let sh = [ATT_T, ATT_T]
+  let tq = load_strided(q, idx_mul(bm, idx_const(ATT_T * ATT_D)), [ATT_T, ATT_D], [ATT_D, 1])
+  let tk = load_strided(k, idx_mul(bn, idx_const(ATT_T * ATT_D)), [ATT_D, ATT_T], permute([ATT_D, 1], [1, 0]))
+  let acc = mmaf(F64, ATT_T, ATT_D, ATT_T, tq, tk, f_const(F64, sh, 0.0))
+  mul(F64, sh, acc, f_const(F64, sh, ATT_INV_SQRT_D))
+}
+
+## The block's store, at the same place `attn_scores` writes it.
+fn att_store(s: Param[F64], bm: Idx, bn: Idx, v: Tile[F64]) -> Unit !Dev =
+  store_strided(s, idx_add(idx_mul(bm, idx_const(ATT_T * ATT_N)), idx_mul(bn, idx_const(ATT_T))),
+    [ATT_T, ATT_T], [ATT_N, 1], v)
+
+## The two GLOBAL coordinates every rule below is a function of: the query
+## index `i` and the key index `j` of each lane, counted from the block's
+## own base rather than from the tile's.
+fn att_row(bm: Idx) -> Tile[I32] !Dev = coord(idx_mul(bm, idx_const(ATT_T)), [ATT_T, ATT_T], 0, 1)
+
+fn att_col(bn: Idx) -> Tile[I32] !Dev = coord(idx_mul(bn, idx_const(ATT_T)), [ATT_T, ATT_T], 1, 1)
+
+# leetgpu 53 (Causal Self-Attention): the score at a key in the query's
+# future is -inf, so `attn_softmax` gives it weight exactly zero.
+fn attn_causal(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let sh = [ATT_T, ATT_T]
+  let v = att_scaled(q, k, bm, bn)
+  let allowed = ge_i(sh, att_row(bm), att_col(bn))
+  att_store(s, bm, bn, select(F64, sh, allowed, v, f_const(F64, sh, neg_inf())))
+}
+
+# leetgpu 55 (Attention with Linear Biases): ALiBi. No mask at all -- the
+# rule ADDS `alpha * (i - j)` to every score, so the whole matrix stays
+# finite and the slope is a host constant of the recording.
+const ATT_ALIBI: Float = 0.0 - 0.125
+
+fn attn_alibi(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let sh = [ATT_T, ATT_T]
+  let v = att_scaled(q, k, bm, bn)
+  let bias = mul(F64, sh, f_const(F64, sh, ATT_ALIBI),
+    int_to_float(F64, sh, sub_i(sh, att_row(bm), att_col(bn))))
+  att_store(s, bm, bn, addf(F64, sh, v, bias))
+}
+
+# leetgpu 59 (Sliding Window Self-Attention): a band of half-width
+# ATT_WINDOW about the diagonal, both directions. The only rule here that is
+# not causal.
+const ATT_WINDOW: Int = 8
+
+fn attn_window(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let sh = [ATT_T, ATT_T]
+  let v = att_scaled(q, k, bm, bn)
+  let near = lt_i(sh, abs_i(sh, sub_i(sh, att_row(bm), att_col(bn))), i_const(sh, ATT_WINDOW + 1))
+  att_store(s, bm, bn, select(F64, sh, near, v, f_const(F64, sh, neg_inf())))
+}
+
+# leetgpu 112 (Attention with Sinks): causal, and within that either one of
+# the first ATT_SINKS keys or inside the trailing window. Two masks joined
+# by an `or` under an `and`, which is the widest rule of the five.
+const ATT_SINKS: Int = 4
+const ATT_SINK_WINDOW: Int = 16
+
+fn attn_sinks(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let sh = [ATT_T, ATT_T]
+  let v = att_scaled(q, k, bm, bn)
+  let gi = att_row(bm)
+  let gj = att_col(bn)
+  let causal = ge_i(sh, gi, gj)
+  let sink = lt_i(sh, gj, i_const(sh, ATT_SINKS))
+  let window = ge_i(sh, gj, add_i(sh, gi, i_const(sh, 1 - ATT_SINK_WINDOW)))
+  let allowed = and_mask(sh, causal, or_mask(sh, sink, window))
+  att_store(s, bm, bn, select(F64, sh, allowed, v, f_const(F64, sh, neg_inf())))
+}
+
+# leetgpu 92 (Decaying Causal Attention): the one variant with NO softmax.
+# The weight of key `j` for query `i` is the raw score times `gamma^(i - j)`
+# for `i >= j` and zero otherwise, so this kernel's output goes straight to
+# `attn_context` and the sequence is two launches rather than three.
+#
+# `gamma^d` is `exp(d * ln gamma)` here, with `ln gamma` a host constant of
+# the recording: the same `exp` the rest of this family already runs on the
+# device and the same `ref_exp` the host reference already has, rather than
+# a `pow` whose two sides would be two different approximations.
+const ATT_LN_GAMMA: Float = 0.0 - 0.10536051565782628
+
+fn attn_decay(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let bn = block_id(1)
+  let sh = [ATT_T, ATT_T]
+  let v = att_scaled(q, k, bm, bn)
+  let gi = att_row(bm)
+  let gj = att_col(bn)
+  let ahead = int_to_float(F64, sh, max_i(sh, sub_i(sh, gi, gj), i_const(sh, 0)))
+  let decay = exp(F64, sh, mul(F64, sh, ahead, f_const(F64, sh, ATT_LN_GAMMA)))
+  att_store(s, bm, bn,
+    select(F64, sh, ge_i(sh, gi, gj), mul(F64, sh, v, decay), f_const(F64, sh, 0.0)))
+}
+
+# leetgpu 25 (Categorical Cross Entropy Loss): two launches, a row at a time
+# and then the mean. The only sequence of this knife that is not attention,
+# and the first recorded kernel to read an INDEX out of an integer buffer to
+# pick a column with (the `apsp` rounds gather a scalar, not a choice).
+const CCE_N: Int = 64
+const CCE_C: Int = 32
+
+# Launch 1 of 2: `logsumexp(row) - row[label]`, one row a block. The row
+# index is not an argument, so it is read out of the lane numbers: lane `l`
+# of a 1-wide tile at block `i` is `i`, and `i * C + label[i]` is the
+# element of `logits` the true class sits at.
+fn cce_row(logits: Param[F64], labels: Param[I32], loss: Param[F64]) -> Unit !Dev = {
+  let i = block_id(0)
+  let sh = [CCE_C]
+  let one = [1]
+  let t = load(logits, tile_at(i, CCE_C), sh)
+  let mx = d_reduce(F64, sh, t, neg_inf(), (acc, e) => s_maxf(F64, acc, e))
+  let ex = exp(F64, sh, sub(F64, sh, t, spread(F64, sh, mx)))
+  let total = d_reduce(F64, sh, ex, 0.0, (acc, e) => s_addf(F64, acc, e))
+  let at = lanes(tile_at(i, 1), one)
+  let lab = gather(labels, at, one)
+  let true_logit = gather(logits, add_i(one, mul_i(one, at, i_const(one, CCE_C)), lab), one)
+  let lse = addf(F64, one, spread(F64, one, mx), log(F64, one, spread(F64, one, total)))
+  store_one(loss, i, sub(F64, one, lse, true_logit))
+}
+
+# Launch 2 of 2: the mean of the CCE_N row losses, one block over one tile.
+# It reads no block id at all, which is why the grid mutant is invisible
+# here (run.sh's table says so beside the other two).
+fn cce_mean(l: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let sh = [CCE_N]
+  let t = load(l, idx_const(0), sh)
+  let total = spread(F64, [1], d_reduce(F64, sh, t, 0.0, (acc, e) => s_addf(F64, acc, e)))
+  store(out, idx_const(0), [1], div(F64, [1], total, f_const(F64, [1], to_float(CCE_N))))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -2249,6 +2404,26 @@ fn trace(name: String) -> TileProg = match name {
       () => swiglu_down(param(F64, 0), param(F64, 1), param(F64, 2)))
   "apsp_step" ->
     trace_kernel("apsp_step", ["f64", "i32"], () => apsp_step(param(F64, 0), param(I32, 1)))
+  "attn_causal" ->
+    trace_kernel("attn_causal", ["f64", "f64", "f64"],
+      () => attn_causal(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attn_alibi" ->
+    trace_kernel("attn_alibi", ["f64", "f64", "f64"],
+      () => attn_alibi(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attn_window" ->
+    trace_kernel("attn_window", ["f64", "f64", "f64"],
+      () => attn_window(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attn_sinks" ->
+    trace_kernel("attn_sinks", ["f64", "f64", "f64"],
+      () => attn_sinks(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attn_decay" ->
+    trace_kernel("attn_decay", ["f64", "f64", "f64"],
+      () => attn_decay(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "cce_row" ->
+    trace_kernel("cce_row", ["f64", "i32", "f64"],
+      () => cce_row(param(F64, 0), param(I32, 1), param(F64, 2)))
+  "cce_mean" ->
+    trace_kernel("cce_mean", ["f64", "f64"], () => cce_mean(param(F64, 0), param(F64, 1)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
