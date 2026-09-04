@@ -8,7 +8,7 @@
 #   ./scripts/tile-golden/run.sh --tileiras <bin>    # compare with this assembler
 #   ./scripts/tile-golden/run.sh --without-tileiras  # layers 0 only; every layer-1 line says SKIP
 #   ./scripts/tile-golden/run.sh --record            # re-record the .mlir and .tilebc files
-#   ./scripts/tile-golden/run.sh --shard 1/2         # one round-robin slice of matrix.txt
+#   ./scripts/tile-golden/run.sh --shard 1/3         # one round-robin slice of matrix.txt
 #   ./scripts/tile-golden/run.sh --only <item>       # one kernel or one mutant, nothing else
 #
 # Layers, as docs/tile-backend-design.md 6.2 numbers them:

@@ -685,7 +685,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 | 层 | 每次 push | 工具 | 抓什么 | 抓不到什么 |
 |----|-----------|------|--------|-----------|
 | 0 文本 golden | 是 | 无 | 记录 handler 与渲染器改了没 | 发的对不对 |
-| 1 字节码编译 | 是（刀 3 起；今天是 `tile-golden-1 / tile-golden-2` 两片） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
+| 1 字节码编译 | 是（刀 3 起；今天是 `tile-golden-1 / tile-golden-2 / tile-golden-3` 三片） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
 | 2 执行对拍 | 否，本机 | 3080 加驱动不低于 580 | 算的对不对（逐位与容差两档） | 其它架构 |
 
 层 0 golden 放 `scripts/tile-golden/*.mlir` 与 `*.tilebc`（字节码也钉，两后端逐字节），确定性

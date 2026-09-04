@@ -41,9 +41,11 @@ name: gates
 # creation order roughly tracks definition order: the jobs that queue should
 # be the short tail, which fits in slots the first finishers free. That is a
 # soft nudge, not a contract — GitHub does not promise dispatch order. A run
-# of this workflow holds 35 jobs (2026-09-03), and ci.yml adds its own
-# `secrets`, so 36 against the ceiling of 20: the second wave starts as the
-# first finishes, which is why the four native-diff shards are defined first.
+# of this workflow holds 36 jobs (2026-09-04, tile-golden's third shard), and
+# ci.yml adds its own `secrets`, so 37 against the ceiling of 20: the second
+# wave starts as the first finishes, which is why the four native-diff shards
+# are defined first. The 36th job does not lengthen the run: with 36 already
+# queuing against 20 runners the span is set by the tail, not by the count.
 #
 # The setup they each repeat is ~40s and comes out of
 # .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
@@ -1424,10 +1426,10 @@ jobs:
   # checksum from the same place as the file is not a check); the pin and
   # the bytecode version the writer emits are held together by run.sh.
   #
-  # Two jobs of their own because the wheels are 150 MB and nothing else needs
-  # them, so a slow package index delays nothing but these. Nothing `needs:`
-  # them. They are the two round-robin shards of one matrix
-  # (scripts/tile-golden/matrix.txt: the 64 kernels, then the 15 mutants, in
+  # Three jobs of their own because the wheels are 150 MB and nothing else
+  # needs them, so a slow package index delays nothing but these. Nothing
+  # `needs:` them. They are the three round-robin shards of one matrix
+  # (scripts/tile-golden/matrix.txt: the 66 kernels, then the 15 mutants, in
   # run order). Sharding by kind was the plan written down at knife 7b and the
   # phase measurement retired it: locally the kernel loop is 204s (102 JVM
   # starts, and nothing else -- the native binary runs all 51 kernels in 0.3s
@@ -1441,21 +1443,29 @@ jobs:
   # The split cannot reach the verdicts. A kernel's four runs, its two goldens
   # and its assembly all happen inside one shard, and each mutant compares
   # against the recorded goldens on disk rather than against its own shard's
-  # kernel output -- so the twelve named red sets survive being dealt into two
-  # jobs, one shard at a time. What it does introduce is the shard family's
+  # kernel output -- so the twelve named red sets survive being dealt into
+  # three jobs, one shard at a time. What it does introduce is the shard family's
   # one failure: a shard that silently skips a slice prints the same PASS
   # lines and exits 0. So each records what it ran, and mutant-shards-complete
   # holds the union to matrix.txt.
   #
-  # Trigger for N=3: split again when either shard's own observation passes
-  # 550s, rather than restate the budget -- 550s doubled is already past the
-  # 660s pole. Knife 15 leaves shard 1's planning value at 646s, 14s under
-  # the pole, so the next knife that adds a kernel to it forces the split by
-  # the pole rather than by the observation. Against splitting earlier: runs of
-  # this workflow hold 36 jobs against an account concurrency limit of 20 (the
-  # arithmetic is in this file's header), and tile has never been a run's long
-  # pole -- native-diff at 783~1119s over the last fortnight is -- so a third
-  # shard buys budget headroom and not wall clock.
+  # N=2 -> N=3 on 2026-09-04 (knife 16), by the trigger the two-shard note
+  # left here: shard 1's planning value had reached 646s against a 660s pole,
+  # and the slope is ~18s of planning value per new kernel, so the next knife
+  # that added one kernel to that shard would have had to raise the pole. The
+  # split is what the pole exists to force, and knife 16 adds eleven kernels.
+  #
+  # A third shard buys budget headroom and not wall clock, and that is the
+  # whole of what it buys: runs of this workflow now hold 36 jobs against an
+  # account concurrency limit of 20 (the arithmetic is in this file's header),
+  # so the 36th queues behind the first wave rather than starting beside it,
+  # and tile has never been a run's long pole -- native-diff at 783~1119s over
+  # the last fortnight is. The span does not shorten. What changes is that
+  # every shard is back under the 660s pole with room for the next knife.
+  #
+  # Trigger for N=4: the same one, one level up -- split again when any
+  # shard's own OBSERVATION passes 550s rather than restate its budget, since
+  # 550s doubled is already past the pole.
   #
   # Shard 1 carries two more steps, both well under a second and neither
   # shardable. The first is layer 2's ledger gate (docs 6.4, decision D4):
@@ -1465,51 +1475,26 @@ jobs:
   # blocked, and toolchain.txt's driver line to agree. The GPU run itself
   # happens on a developer machine with a driver (the runner has none);
   # the gate proves it happened at this tree. Its checkout is full depth
-  # because the ancestry test needs the history, which is why shard 2's is
-  # not: only this one reads git. The second is the leetgpu ledger.
+  # because the ancestry test needs the history, which is why shards 2 and 3
+  # are not: only this one reads git. The second is the leetgpu ledger.
   tile-golden-1:
     runs-on: ubuntu-latest
-    # Local wall clock, one machine, 2026-09-04, one tileiras, nothing else
-    # running, six runs back to back over the base tree (a7d2479e, knife 13)
-    # and this one: unsharded 402s -> 474s (+72s, +18%), this shard
-    # 208s -> 244s (+36s, +17%), the other 216s -> 214s (-2s, flat).
-    # Knife 14 took the kernels from 62 to 64 and the mutants from 13 to 15,
-    # and the round robin gives each shard one of each, so ~9s of kernel plus
-    # ~21s of mutant rebuild is what shard 1 shows. Shard 2's reading fell
-    # rather than rose; that is machine noise, which every earlier line here
-    # has measured at wider than one knife's increment, and its budget below
-    # is left where it was rather than lowered -- a budget is a ceiling.
-    # Absolute local numbers swing wide with what else the machine is doing,
-    # so what is carried is the paired difference and not the level.
+    # Local wall clock, one machine, one tileiras, three round-robin shards of
+    # the same matrix.txt, measured back to back against the base tree
+    # (9bafffd8, knife 15). The numbers and the reasoning are in the note at
+    # the head of this block and in docs/tile-backend-design.md 6.5.
     #
     # Plus the checkout, the toolchain action and the wheels (~45s and ~25s,
-    # the carried estimates) this shard is 314s, doubled for a cold runner.
+    # the carried estimates), doubled for a cold runner: the rule this file
+    # has used since the first split.
     #
-    # The planning value stays deliberately above what CI does: run 33763512
-    # at fffe98f8 observed 340s here and 348s in shard 2 against planning
-    # values of 512s and 490s, a ratio of about 0.66. Knife 13 scaled those
-    # to 383s and 404s; scaling again by this knife's local growth puts this
-    # shard near 448s and the other near 400s. The N=3 trigger below (either
-    # shard's own OBSERVATION over 550s) is still not reached, and no
-    # resharding is done here; it is now about one knife of this size away
-    # for shard 1.
-    #
-    # 2026-09-04, knife 15 (`erf` by composition): two kernels, no mutants,
-    # one kernel to each shard by round robin. The LEVELS could not be
-    # measured -- another agent was building on this machine all afternoon
-    # (load average 7 to 11) and the two paired rounds disagree by more than
-    # the increment: unsharded +80.0s in one and +6.5s in the other, and in
-    # both rounds the two shard deltas SUM TO MORE than the unsharded delta
-    # of the same round (139.6s against 80.0s, 153.2s against 6.5s), which is
-    # arithmetically impossible for real growth. What was measurable is the
-    # per-item cost, because `--only` runs one item against a fixed overhead:
-    # erf_sweep 16.70s / 16.62s and geglu 17.03s / 17.33s against silu's
-    # 16.50s / 16.84s, so each new kernel costs what an existing element-wise
-    # kernel costs and there is no anomaly to explain. So the planning value
-    # takes the last measured local levels (244s and 214s) plus this file's
-    # own slope since knife 12, about 9s a kernel: 253s and 223s.
-    # budget: 3x 646s planning value (323s local, doubled)
-    timeout-minutes: 33
+    # The planning value stays deliberately above what CI does. Run 33763512
+    # at fffe98f8 observed 340s and 348s against planning values of 512s and
+    # 490s, a ratio of about 0.66; the last carried CI projection for N=2 was
+    # 408s and 390s. Redistributed over three shards those become about 280s
+    # each, which is where this knife's projection starts from.
+    # budget: 3x 460s planning value (230s local, doubled)
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1528,7 +1513,7 @@ jobs:
       - name: tile IR goldens and tileiras (66 kernels and fifteen mutants, both backends; shard 1)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 1/2
+        run: ./scripts/tile-golden/run.sh --shard 1/3
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1548,13 +1533,12 @@ jobs:
 
   tile-golden-2:
     runs-on: ubuntu-latest
-    # 214s locally for this shard, plus the same ~70s of checkout, toolchain
-    # and wheels, which is 568s doubled: BELOW the 588s this line already
-    # claims, so the line does not move. The note above tile-golden-1 carries
-    # the measurements and the reasoning. Knife 15 gives this shard one more
-    # kernel, 223s and so 586s, still below the line: unchanged again.
-    # budget: 3x 588s planning value (294s local, doubled)
-    timeout-minutes: 30
+    # The note above tile-golden-1 carries the measurements and the reasoning
+    # for all three shards; each one restates the arithmetic on its own local
+    # reading, because a budget line has to be readable beside the timeout it
+    # bounds.
+    # budget: 3x 460s planning value (230s local, doubled)
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v4
 
@@ -1571,12 +1555,45 @@ jobs:
       - name: tile IR goldens and tileiras (66 kernels and fifteen mutants, both backends; shard 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 2/2
+        run: ./scripts/tile-golden/run.sh --shard 2/3
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-tile-golden-2
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-3:
+    runs-on: ubuntu-latest
+    # The third shard, added with the N=2 -> N=3 split on 2026-09-04. Same
+    # matrix, same tileiras, same arithmetic; the note above tile-golden-1
+    # carries the measurements.
+    # budget: 3x 460s planning value (230s local, doubled)
+    timeout-minutes: 23
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (66 kernels and fifteen mutants, both backends; shard 3)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 3/3
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-3
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -2087,6 +2104,7 @@ jobs:
       - builtin-type-2
       - tile-golden-1
       - tile-golden-2
+      - tile-golden-3
     if: ${{ always() }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
