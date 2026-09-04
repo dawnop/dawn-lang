@@ -11,6 +11,10 @@
 #   ./scripts/tile-golden/run.sh --shard 1/3         # one round-robin slice of matrix.txt
 #   ./scripts/tile-golden/run.sh --only <item>       # one kernel or one mutant, nothing else
 #
+#   ITEM_TIMES=<file> ./scripts/tile-golden/run.sh   # also append `<item> <seconds>`
+#                                                    # per work item, for balancing the
+#                                                    # shards (matrix.txt says how)
+#
 # Layers, as docs/tile-backend-design.md 6.2 numbers them:
 #
 #   0  the text and the bytes. They say whether the handler, the lowering,
@@ -176,23 +180,35 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/tile-golden"
-kernels=(vadd vadd_f32 vadd_bf16 sum vadd_tail copy relu leaky_relu clip elemops reduce_sum softmax dot mse
-  monte_carlo rms_norm silu sigmoid ppo_loss dpo_loss mathops foldif argmax
-  matmul batched_matmul transpose layer_norm batch_norm group_norm fused_rms_norm
-  transpose_tail conv1d conv2d max_pool interleave rgb_gray jacobi depthwise_conv1d gaussian_blur
-  count_eq subarray_sum rainbow int_ops
-  sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matmul_i8
-  token_embed sort_rank merge_rank scatter_perm
-  prefix_sum max_subarray seg_scan compact linrec gae ssm_scan
-  histogram cas_swap
-  erf_sweep geglu
-  lora_base lora_hidden lora_out attn_scores attn_softmax attn_context matpow_step swiglu_proj swiglu_act swiglu_down apsp_step
-  attn_causal attn_alibi attn_window attn_sinks attn_decay cce_row cce_mean
-  matvec subarray_sum2d subarray_sum3d swiglu_half dequant conv3d mha_scores mha_context
-  agent_step nearest_idx xattn_scores xattn_context gqa_scores gqa_context grpo_adv grpo_row
-  kmeans_assign kmeans_centroid
-  kv_scores kv_context attn_bwd_mmt attn_bwd_ds lin_attn_s lin_attn_out
-  ols_gram ols_elim ols_beta)
+kernels=(
+  dot_f16 lora_out ssm_scan geglu
+  token_embed attn_scores sum_diff matmul_i8
+  erf_sweep gae seg_scan compact
+  sort_rank histogram scatter_perm f16_ops
+  matmul_f16 lora_base reverse batched_matmul_f16
+  max_subarray prefix_sum merge_rank lin_attn_s
+  attn_bwd_mmt silu lora_hidden mse
+  argmax lin_attn_out cas_swap conv2d
+  reduce_sum softmax linrec vadd_tail
+  xattn_scores matmul xattn_context ppo_loss
+  monte_carlo jacobi rms_norm dot
+  vadd_bf16 elemops dpo_loss copy
+  mathops gqa_context matpow_step swiglu_down
+  sigmoid relu kv_context kv_scores
+  attn_bwd_ds invert grpo_row foldif
+  ols_gram int_ops vadd fused_rms_norm
+  kmeans_assign ols_beta gqa_scores ols_elim
+  max_pool grpo_adv vadd_f32 leaky_relu
+  subarray_sum layer_norm sum count_eq
+  clip rgb_gray kmeans_centroid group_norm
+  gaussian_blur transpose_tail attn_softmax conv3d
+  depthwise_conv1d batched_matmul attn_context nearest_idx
+  swiglu_proj batch_norm transpose rainbow
+  swiglu_act agent_step matvec interleave
+  attn_decay mha_context conv1d attn_causal
+  cce_row cce_mean apsp_step mha_scores
+  dequant attn_alibi subarray_sum2d attn_sinks
+  swiglu_half subarray_sum3d attn_window)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -270,8 +286,26 @@ shard_begin tile-golden
 # moved without the list moving with it would silently change which shard runs
 # it, and no PASS line would look any different.
 item_position=0
+
+# Per-item wall clock, when ITEM_TIMES names a file: the deal in matrix.txt is
+# only as good as the costs it was computed from, and the last two knives
+# balanced that table by eye and got it wrong. One tick per run_item plus one
+# at the end, so each item's line is the time from its own start to the next
+# one's. Off by default and free when off.
+_last_item=""
+_last_time=0
+_item_tick() { # name-just-finished-or-empty
+  [ -n "${ITEM_TIMES:-}" ] || return 0
+  local now=${EPOCHREALTIME/,/.}
+  if [ -n "$_last_item" ]; then
+    awk -v n="$_last_item" -v a="$_last_time" -v b="$now" 'BEGIN{printf "%s %.2f\n", n, b-a}' >> "$ITEM_TIMES"
+  fi
+  _last_item="$1"
+  _last_time=$now
+}
 run_item() { # name
   local name="$1" position=$item_position
+  _item_tick "$name"
   item_position=$(( item_position + 1 ))
   [ "${items[$position]}" = "$name" ] ||
     fail "run order: matrix position $position is ${items[$position]}, the runner reached $name"
@@ -841,5 +875,6 @@ if run_item atomic-cas-writes-an-rmw-mode; then
     "failed to parse function body for function 'cas_swap'"
 fi
 
+_item_tick ""
 shard_report "${#items[@]}"
 echo "tile golden ok"

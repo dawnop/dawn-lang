@@ -1,9 +1,8 @@
 # The persistent work-item matrix for tile-golden, one name per line in run
 # order: the kernels of `kernels=()` first, then the mutants in the order
 # their blocks appear in run.sh. Both kinds live in one list because both cost
-# real time (one local run: 204s of kernels against 175s of mutants), so a
-# split by kind would leave one job carrying the slower half; round-robin over
-# the mixed list spreads them, and the outliers with them.
+# real time, so a split by kind would leave one job carrying the slower half;
+# round-robin over the mixed list spreads them, and the outliers with them.
 #
 # run.sh validates its executable list against this file in both directions at
 # startup, and scripts/mutant-coverage/check.py holds the union of the CI
@@ -11,120 +10,134 @@
 # nothing else, so here read the word as "work item" -- a kernel missing from
 # the union is exactly as unrun as a mutant missing from it.
 #
-# Round-robin sharding reads positions off this order, so reordering lines
-# moves items between shards (harmless, but say so in the commit if you do it
-# on purpose).
-vadd
-vadd_f32
-vadd_bf16
-sum
-vadd_tail
-copy
-relu
-leaky_relu
-clip
-elemops
-reduce_sum
-softmax
-dot
-mse
-monte_carlo
-rms_norm
-silu
-sigmoid
-ppo_loss
-dpo_loss
-mathops
-foldif
-argmax
-matmul
-batched_matmul
-transpose
-layer_norm
-batch_norm
-group_norm
-fused_rms_norm
-transpose_tail
-conv1d
-conv2d
-max_pool
-interleave
-rgb_gray
-jacobi
-depthwise_conv1d
-gaussian_blur
-count_eq
-subarray_sum
-rainbow
-int_ops
-sum_diff
-reverse
-invert
-f16_ops
+# THE KERNEL ORDER IS A COST-BALANCED DEAL, not the order they were written
+# in (knife 20). Round-robin sharding reads positions off this file, so the
+# order decides which shard runs what. Per-item costs were measured with
+# `ITEM_TIMES=<file> ./scripts/tile-golden/run.sh` on one full local run
+# (2026-09-04): 111 kernels at 4.28 to 6.71s, mean 5.26, and 15 mutants at
+# 13.21 to 18.12s, mean 15.34 -- so a mutant is worth about three kernels and
+# the kernels themselves are nearly flat. The mutants keep their block order
+# at the tail (moving those blocks is a large mechanical edit and buys
+# nothing), which hands the four shards 4 / 4 / 3 / 4 of them; the kernels
+# were then dealt dearest-first to whichever shard was lightest, which is
+# what puts the deal back level. Four shards of 208.5 / 208.7 / 196.4 /
+# 200.5s against 203.5 if it divided perfectly.
+#
+# Reordering these lines moves items between shards. That is harmless and the
+# split is checked either way, but say so in the commit, and REMEASURE rather
+# than shuffling by eye: knife 19 recorded four kernels as the dearest items
+# here and the measurement says every mutant costs more than every kernel.
 dot_f16
-matmul_f16
-batched_matmul_f16
-matmul_i8
+lora_out
+ssm_scan
+geglu
 token_embed
-sort_rank
-merge_rank
-scatter_perm
-prefix_sum
-max_subarray
+attn_scores
+sum_diff
+matmul_i8
+erf_sweep
+gae
 seg_scan
 compact
-linrec
-gae
-ssm_scan
+sort_rank
 histogram
-cas_swap
-erf_sweep
-geglu
+scatter_perm
+f16_ops
+matmul_f16
 lora_base
+reverse
+batched_matmul_f16
+max_subarray
+prefix_sum
+merge_rank
+lin_attn_s
+attn_bwd_mmt
+silu
 lora_hidden
-lora_out
-attn_scores
-attn_softmax
-attn_context
+mse
+argmax
+lin_attn_out
+cas_swap
+conv2d
+reduce_sum
+softmax
+linrec
+vadd_tail
+xattn_scores
+matmul
+xattn_context
+ppo_loss
+monte_carlo
+jacobi
+rms_norm
+dot
+vadd_bf16
+elemops
+dpo_loss
+copy
+mathops
+gqa_context
 matpow_step
-swiglu_proj
-swiglu_act
 swiglu_down
-apsp_step
-attn_causal
-attn_alibi
-attn_window
-attn_sinks
+sigmoid
+relu
+kv_context
+kv_scores
+attn_bwd_ds
+invert
+grpo_row
+foldif
+ols_gram
+int_ops
+vadd
+fused_rms_norm
+kmeans_assign
+ols_beta
+gqa_scores
+ols_elim
+max_pool
+grpo_adv
+vadd_f32
+leaky_relu
+subarray_sum
+layer_norm
+sum
+count_eq
+clip
+rgb_gray
+kmeans_centroid
+group_norm
+gaussian_blur
+transpose_tail
+attn_softmax
+conv3d
+depthwise_conv1d
+batched_matmul
+attn_context
+nearest_idx
+swiglu_proj
+batch_norm
+transpose
+rainbow
+swiglu_act
+agent_step
+matvec
+interleave
 attn_decay
+mha_context
+conv1d
+attn_causal
 cce_row
 cce_mean
-matvec
-subarray_sum2d
-subarray_sum3d
-swiglu_half
-dequant
-conv3d
+apsp_step
 mha_scores
-mha_context
-agent_step
-nearest_idx
-xattn_scores
-xattn_context
-gqa_scores
-gqa_context
-grpo_adv
-grpo_row
-kmeans_assign
-kmeans_centroid
-kv_scores
-kv_context
-attn_bwd_mmt
-attn_bwd_ds
-lin_attn_s
-lin_attn_out
-ols_gram
-ols_elim
-ols_beta
+dequant
+attn_alibi
+subarray_sum2d
+attn_sinks
+swiglu_half
+subarray_sum3d
+attn_window
 drop-store-token
 load-dtype-f64
 make-token-as-iota
