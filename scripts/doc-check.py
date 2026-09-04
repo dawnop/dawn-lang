@@ -2412,6 +2412,200 @@ def repository_contract_problems(files: dict[str, str]) -> tuple[list[str], int]
     return bad, seen
 
 
+# ---------------------------------------------------------------------------
+# The export a `java -cp` run of Dawn classes needs, checked rather than
+# remembered
+# ---------------------------------------------------------------------------
+#
+# std declares a `ctl` effect and the compiler's own `main` installs
+# `io.with_exit_real`, so starting any emitted program links dawn/rt/CtlCont,
+# whose superclass jdk.internal.vm.Continuation java.base exports to nobody. A
+# real run always has the export granted: `dawn run` puts
+# `--add-exports java.base/jdk.internal.vm=ALL-UNNAMED` on every JVM it spawns
+# (selfhost/src/main.dawn, child_java_cmd) and every jar carries it as
+# `Add-Exports` in its manifest (selfhost/src/jvm/jarw.dawn, manifest_text), so
+# a `java -jar` invocation is covered for free. A `java -cp` invocation is not:
+# it reads no manifest, and dies of IllegalAccessError before it does anything.
+#
+# That gap has now been closed twice by hand, in two gates, for the same
+# reason: 8d825aff (scripts/classfile-verify) and the commit that added this
+# check (scripts/asm-adapter-contract, which went red on main). Both were found
+# by a red CI job rather than by anything that knew the rule, so the rule is
+# written down here as a machine check.
+#
+# What it can see, exactly. A `java` command is in scope when it passes `-cp`
+# and either names the toolchain jar or runs the compiler's `main` class. Those
+# are the two spellings that certainly load Dawn classes; a command that reaches
+# the same place through a variable the check cannot resolve (`-cp "$JAR"`) is
+# not in scope, and neither is a `java -cp` that loads only javac output
+# (scripts/dtoa-contract's Oracle, scripts/selfhost-bench-contract's HeapTree,
+# scripts/spike-sam's SamGen). Under-approximating on purpose: a check that
+# guessed would either red on those three or need a list of exemptions, and a
+# list of exemptions is a place for the next one to be added silently.
+#
+# The flag may be spelled inline or held in a variable bound to it in the same
+# file, which is how both gates that need it more than once write it.
+ADD_EXPORTS_PACKAGE = "java.base/jdk.internal.vm"
+ADD_EXPORTS_SCRIPT_SUFFIXES = (".sh", ".py", ".yml")
+# A `java` argv word: bare in a shell command, or quoted in a Python list. Not
+# `javac`, not `java.base`, not a `$JAVA_HOME/bin/java` path (those runs go
+# through a `-jar` in this tree, and a path spelling is not evidence of one).
+ADD_EXPORTS_JAVA_TOKEN = re.compile(r"""(?<![\w./$-])(?:"java"|'java'|java)(?![\w.])""")
+ADD_EXPORTS_BINDING = re.compile(
+    r"""(?m)^\s*(\w+)\s*(?:=\(|=\s*\[)[^\n]*?--add-exports""")
+ADD_EXPORTS_TOOLCHAIN_JAR = "build/dawn-selfhost.jar"
+ADD_EXPORTS_MAIN_CLASS = "main"
+
+
+def java_commands(text: str, python_lists: bool) -> list[tuple[int, str]]:
+    """Every `java ...` invocation in one file, continuation lines joined.
+
+    Shell commands continue with a trailing backslash; Python argv lists
+    continue while brackets are open, which for the shapes in this tree also
+    means while a line ends in a comma. Joining is capped at fifteen lines so
+    that an unbalanced bracket in prose cannot swallow the rest of a file and
+    find a flag that belongs to some other command.
+    """
+    out: list[tuple[int, str]] = []
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        for m in ADD_EXPORTS_JAVA_TOKEN.finditer(line):
+            buf = line[m.start():]
+            depth = buf.count("(") + buf.count("[") - buf.count(")") - buf.count("]")
+            j = i
+            while j + 1 < len(lines) and j - i < 15:
+                tail = lines[j].rstrip()
+                more = tail.endswith("\\") or depth > 0 or \
+                    (python_lists and tail.endswith(","))
+                if not more:
+                    break
+                j += 1
+                buf += " " + lines[j].strip()
+                depth += lines[j].count("(") + lines[j].count("[")
+                depth -= lines[j].count(")") + lines[j].count("]")
+            out.append((i + 1, buf))
+    return out
+
+
+def add_exports_problems(files: dict[str, str]) -> tuple[list[str], int]:
+    """Every `java -cp` run of Dawn classes must grant jdk.internal.vm."""
+    bad: list[str] = []
+    seen = 0
+    for rel in sorted(files):
+        text = files[rel]
+        held = set(ADD_EXPORTS_BINDING.findall(text))
+        for line_no, cmd in java_commands(text, rel.endswith(".py")):
+            words = [w for w in re.split(r"""[\s,"']+""", cmd) if w]
+            if "-cp" not in words:
+                continue
+            index = words.index("-cp")
+            runs_compiler = (index + 2 < len(words)
+                             and words[index + 2] == ADD_EXPORTS_MAIN_CLASS)
+            if ADD_EXPORTS_TOOLCHAIN_JAR not in cmd and not runs_compiler:
+                continue
+            granted = ADD_EXPORTS_PACKAGE in cmd or \
+                any(name in cmd for name in held)
+            if granted:
+                seen += 1
+            else:
+                bad.append(
+                    f"{rel}:{line_no}: a `java -cp` run of emitted Dawn classes "
+                    f"without --add-exports {ADD_EXPORTS_PACKAGE}=ALL-UNNAMED; "
+                    f"it links dawn/rt/CtlCont and will die of IllegalAccessError "
+                    f"(a `java -jar` run reads the option out of the manifest, "
+                    f"a `-cp` run has to say it)")
+    return bad, seen
+
+
+# This file, and only this file, is left out of the scan: the self-test below
+# builds its mutants out of literal unguarded `java -cp` commands, so a check
+# that read its own source would be red forever and could not be run at all.
+# The exemption costs nothing real -- doc-check.py starts no JVM by class path,
+# it runs `bin/dawn`, which is a `-jar` launcher.
+ADD_EXPORTS_SELF = "scripts/doc-check.py"
+
+
+def add_exports_files() -> dict[str, str]:
+    files: dict[str, str] = {}
+    for root in ("scripts", ".github"):
+        for path in sorted((ROOT / root).rglob("*")):
+            if not path.is_file() or path.suffix not in ADD_EXPORTS_SCRIPT_SUFFIXES:
+                continue
+            rel = str(path.relative_to(ROOT))
+            if rel != ADD_EXPORTS_SELF:
+                files[rel] = path.read_text(encoding="utf-8")
+    return files
+
+
+def check_add_exports() -> tuple[list[str], int]:
+    return add_exports_problems(add_exports_files())
+
+
+def check_add_exports_selftest() -> tuple[list[str], int]:
+    """Negative controls: each way of losing the export has to go red.
+
+    With a positive control in front of them. Every covered command in the tree
+    today reaches the flag through a variable, so a mutant that deletes an
+    inline spelling changes nothing and passing it would be evidence of
+    nothing -- which is how the first draft of this self-test read green.
+    """
+    files = add_exports_files()
+    baseline, found = add_exports_problems(files)
+    if baseline:
+        return [f"--add-exports self-test baseline is invalid: {baseline[0]}"], 0
+    if found < 2:
+        return ["--add-exports self-test: the check found fewer than two "
+                "covered `java -cp` runs, so a green verdict says nothing"], 0
+
+    victim = sorted(files)[0]
+    inline = "--add-exports " + ADD_EXPORTS_PACKAGE + "=ALL-UNNAMED"
+    guarded = 'java -Xss512m %s -cp "$OUT/boot.jar" main --version\n' % inline
+    naked = 'java -Xss512m -cp "$OUT/boot.jar" main --version\n'
+
+    # Positive control: the same synthetic command *with* the flag must not be
+    # reported, or the three mutants below would red for the wrong reason.
+    control = dict(files)
+    control[victim] = control[victim] + "\n" + guarded
+    problems, control_found = add_exports_problems(control)
+    if problems:
+        return [f"--add-exports self-test: an inline flag did not satisfy the "
+                f"check ({problems[0]})"], 0
+    if control_found != found + 1:
+        return ["--add-exports self-test: the synthetic `-cp` run of the "
+                "compiler was not counted as covered"], 0
+
+    mutants: list[tuple[str, dict[str, str]]] = []
+
+    # 1. the same command with the flag dropped: the shape of both real
+    #    regressions, 8d825aff's and this commit's.
+    dropped = dict(files)
+    dropped[victim] = dropped[victim] + "\n" + naked
+    mutants.append(("a `-cp` run of the compiler with no flag", dropped))
+
+    # 2. the flag rewritten to an unrelated option wherever it appears, which
+    #    empties the variables the covered commands expand. A check that read
+    #    only the words of a command would stay green on this.
+    unbound = {rel: re.sub(r"--add-exports[= ]" + re.escape(ADD_EXPORTS_PACKAGE)
+                           + r"=ALL-UNNAMED", "-Xshare:auto", text)
+               for rel, text in files.items()}
+    if unbound == files:
+        return ["--add-exports self-test: no flag binding to break"], 0
+    mutants.append(("every flag rewritten to an unrelated option", unbound))
+
+    # 3. the toolchain jar named on a `-cp` with no flag, the other half of the
+    #    scope rule (jar rather than main class).
+    by_jar = dict(files)
+    by_jar[victim] = (by_jar[victim]
+                      + '\njava -cp "$root/%s" Probe\n' % ADD_EXPORTS_TOOLCHAIN_JAR)
+    mutants.append(("the toolchain jar on an unguarded `-cp`", by_jar))
+
+    for label, mutated in mutants:
+        problems, _ = add_exports_problems(mutated)
+        if not problems:
+            return [f"--add-exports self-test: {label} stayed green"], 0
+    return [], len(mutants)
+
+
 def check_repository_contracts() -> tuple[list[str], int]:
     files = {rel: (ROOT / rel).read_text(encoding="utf-8")
              for rel in REPOSITORY_POLICY_FILES if (ROOT / rel).exists()}
@@ -4021,6 +4215,12 @@ def main() -> None:
     bad, policies_seen = check_repository_contracts()
     problems += bad
     bad, n = check_repository_contracts_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_add_exports()
+    problems += bad
+    policies_seen += n
+    bad, n = check_add_exports_selftest()
     problems += bad
     selftests_seen += n
     bad, n = check_named_effect_status()
