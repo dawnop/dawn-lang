@@ -115,6 +115,14 @@ paths no gate watches) is a ratchet checked in both directions.
      From: the diagnostic expression in selfhost/src/check/passes.dawn, the
      recorded line in scripts/checker-corpus/cases/imports.expected, and the
      workflow step that runs scripts/checker-corpus/run.sh.
+  G  Rule E for signatures. A mutation harness that rewrites a function has to
+     quote that function's declaration verbatim to find it, so the declaration
+     is a shared string exactly the way a printed sentence is, and moving it
+     reds a script in another directory that names neither the file nor the
+     change. This is what bd664890 needed: an effect row lost `!io` and two
+     harnesses that had quoted the old row went red one push later.
+     From: the signature text of each Dawn declaration, `fn name(` through the
+     `=` that opens its body, against the gate scripts' text.
 
 `--labels` answers the neighbouring question, from the same file: which
 differential owns which declarable label. `scripts/emit-labels.txt` is
@@ -1580,12 +1588,30 @@ class Map:
         for path in self.std_modules:
             self.add(path, module_observation)
 
+    # ---- rule G -------------------------------------------------------
+    def _rule_g(self):
+        for src, script, sig in signature_couplings(self.tree):
+            gate = self.gate_owning(script)
+            one_line = " ".join(sig.split())
+            self.add(
+                src,
+                Observation(
+                    "coupled",
+                    gate.id if gate else f"(no gate runs) {script}",
+                    f"{script} spells out {one_line!r}, which is this file's "
+                    "own declaration. Change the row here and that harness "
+                    "stops finding what it rewrites, from another directory.",
+                    gate.tag_only if gate else False,
+                ),
+            )
+
     def _build(self):
         self._rule_ab()
         self._rule_c()
         self._rule_d()
         self._rule_e()
         self._rule_f()
+        self._rule_g()
 
     # ---- queries ------------------------------------------------------
     def verdict(self, path, additional_std_modules=None):
@@ -1768,6 +1794,84 @@ def interesting_literal(s):
     if len(s) < MIN_LITERAL or "\\" in s:
         return False
     return " " in s or "`" in s
+
+
+# A declaration with an empty parameter list is vocabulary, not an anchor:
+# `pub fn main() -> Unit !io =` is how every harness writes a fixture entry
+# point, and admitting it pairs selfhost/src/main.dawn with eighteen scripts
+# that have never read it. Measured on this tree: 64 pairs without the filter
+# and 30 with it, and the pair rule G exists for (analyze.dawn against
+# java-target-classpath-contract) survives both.
+DAWN_SIGNATURE = re.compile(
+    r"^(?:pub )?fn (?P<name>[a-z_][A-Za-z_0-9]*)(?:\[[^\]]*\])?\(", re.M
+)
+
+# The same name, anywhere in a gate script. A `sig in blob` test walks a
+# multi-megabyte haystack, and this tree declares thousands of functions while
+# the scripts name a few dozen; sieving on the name first turns the scan from
+# every declaration into the handful that could possibly match.
+SCRIPT_FN_NAME = re.compile(r"\bfn ([a-z_][A-Za-z_0-9]*)\s*[(\[]")
+
+
+def signature_text(text, at):
+    """The declaration starting at `at`: `fn name(` through the `=` that opens
+    the body, or None if no such `=` is in reach.
+
+    Bracket depth rather than a line regex, because a signature wraps: the row
+    rule G was written for spans three lines and its `=` is on the third.
+    """
+    depth = 0
+    closed = False
+    for i in range(at, min(len(text), at + 3000)):
+        c = text[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                closed = True
+            elif depth < 0:
+                return None
+        elif c == "=" and depth == 0 and closed:
+            if text[i - 1] in "<>!=" or text[i + 1 : i + 2] == "=":
+                continue
+            return text[at : i + 1]
+    return None
+
+
+def has_parameters(sig):
+    return ":" in sig[sig.find("(") + 1 : sig.find(")")]
+
+
+def signature_couplings(tree):
+    """(source, gate script, signature) for every declaration a gate script
+    spells out in full."""
+    scripts = {}
+    for f in tree.files:
+        if f.startswith("scripts/") and Path(f).suffix in (".sh", ".py"):
+            scripts[f] = tree.read(f)
+    roots = tuple(r + "/" for r in source_roots(tree))
+    blob = "\n".join(scripts.values())
+    named = set(SCRIPT_FN_NAME.findall(blob))
+    out = []
+    for f in tree.files:
+        if not f.endswith(".dawn") or not f.startswith(roots):
+            continue
+        text = tree.read(f)
+        sigs = set()
+        for m in DAWN_SIGNATURE.finditer(text):
+            if m.group("name") not in named:
+                continue
+            sig = signature_text(text, m.start())
+            if sig is not None and has_parameters(sig):
+                sigs.add(sig)
+        for sig in sorted(sigs):
+            if sig not in blob:
+                continue
+            for script, body in scripts.items():
+                if sig in body:
+                    out.append((f, script, sig))
+    return out
 
 
 def couplings(tree):
@@ -2328,6 +2432,7 @@ class Baseline:
         gm = Map(tree)
         self.unwatched = len(gm.unseen())
         self.coupling = choose_coupling(tree)
+        self.signature_coupling = choose_signature_coupling(tree)
         self.package = choose_package(tree)
         self.js_gate = choose_js_gate(gm)
 
@@ -2415,6 +2520,22 @@ def choose_coupling(tree):
     for src, script, literal in sorted(couplings(tree)):
         if tree.read(src).count(literal) == 1:
             return (src, script, literal)
+    return None
+
+
+def choose_signature_coupling(tree):
+    """The rule G pair `rewrite-a-shared-signature` rewrites.
+
+    Read from the tree for the reason `choose_coupling` is read from it: rule
+    G's subject is whichever declarations the sources and the harnesses happen
+    to share, and a hard-coded pair would be a fixture nobody re-measures. The
+    signature has to occur once in its source so the rewrite has an anchor, and
+    once in the script so the mutated tree cannot keep the coupling through a
+    second copy of the same row.
+    """
+    for src, script, sig in sorted(signature_couplings(tree)):
+        if tree.read(src).count(sig) == 1 and tree.read(script).count(sig) == 1:
+            return (src, script, sig)
     return None
 
 
@@ -2556,6 +2677,16 @@ ASSERTIONS = [
         lambda c, b: b.coupling is not None
         and any(
             repr(b.coupling[2]) in obs.why for obs in c.map.verdict(b.coupling[0])
+        ),
+    ),
+    (
+        "signature_probe",
+        "rule G follows the declaration a harness quotes, so an effect row "
+        "that moves is visible from the file that owns it",
+        lambda c, b: b.signature_coupling is not None
+        and any(
+            " ".join(b.signature_coupling[2].split()) in obs.why
+            for obs in c.map.verdict(b.signature_coupling[0])
         ),
     ),
     (
@@ -2714,6 +2845,18 @@ def drop_line(needle):
 def rewrite_coupling(base):
     def apply(text, where):
         return swap(base.coupling[2], "a sentence nobody greps")(text, where)
+
+    return apply
+
+
+def rewrite_signature_coupling(base):
+    """Widen the chosen declaration's effect row, which is bd664890 in one
+    edit: the body is untouched and the harness that quotes the old row can no
+    longer find it."""
+
+    def apply(text, where):
+        sig = base.signature_coupling[2]
+        return swap(sig, sig[:-1] + "!Never =")(text, where)
 
     return apply
 
@@ -3021,6 +3164,13 @@ def mutants(base):
             "rule E run backwards: rewrite the sentence a gate spells out and "
             "the coupling has to go, which is the first of the two failures",
             edits={base.coupling[0]: rewrite_coupling(base)},
+        ),
+        Mutant(
+            "rewrite-a-shared-signature",
+            "rule G run backwards: widen the effect row of the declaration a "
+            "mutation harness quotes and the coupling has to go, which is the "
+            "shape bd664890 shipped and two harnesses paid for",
+            edits={base.signature_coupling[0]: rewrite_signature_coupling(base)},
         ),
         Mutant(
             "drop-the-one-path-join",
