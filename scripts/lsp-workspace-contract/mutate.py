@@ -290,9 +290,14 @@ def mutate(name, server, main, analyze):
         Unavailable(ws) -> Unavailable(unavailable_workspace(
           st, ws.plan, ws.path_by_uri, ws.problem))
       }"""
-        new = """      let slot = match before {
+        # `activate_workspace` closes a lease on failure, and that diagnostic is
+        # `!Console`; this row is not. The mutation answers the effect where it
+        # injects the call, so it stays one function wide.
+        new = """      let snapshot = st
+      let slot = match before {
         Ready(ws) -> Ready(rebuild_workspace(st, ws))
-        Unavailable(ws) -> activate_workspace(st, ws.plan, ws.path_by_uri)
+        Unavailable(ws) -> io.with_console_real(() =>
+          activate_workspace(snapshot, ws.plan, ws.path_by_uri))
       }"""
         server_text = replace_once(server_text, old, new, name)
     elif name == "exit-bypasses-cleanup":
