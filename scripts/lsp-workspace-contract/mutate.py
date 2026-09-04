@@ -274,11 +274,14 @@ def mutate(name, server, main, analyze):
             name,
         )
     elif name == "close-uncaught":
-        old = """fn close_lease(lease: JsigLease) -> Unit !io =
+        old = """fn close_lease(lease: JsigLease) -> Unit !Console !io =
   match catch_panic(() => lease.close()) {
     Ok(_) -> ()
-    Err(e) -> io.eprintln("lsp: failed to close a Java signature lease: " ++ e.message)
+    Err(e) -> console_eprintln("lsp: failed to close a Java signature lease: " ++ e.message)
   }"""
+        # the mutant drops the diagnostic with the catch, so the row loses
+        # `!Console` with it; the callers keep theirs, which is legal because a
+        # row is an upper bound
         new = """fn close_lease(lease: JsigLease) -> Unit !io = lease.close()"""
         server_text = replace_once(server_text, old, new, name)
     elif name == "retry-unavailable-on-change":
