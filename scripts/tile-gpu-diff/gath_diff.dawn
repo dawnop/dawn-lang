@@ -1,12 +1,25 @@
 # Layer 2 for the gather and scatter kernels (knife 12), the eighth of
 # these programs after vadd_diff, mask_diff, red_diff, mm_diff,
 # stride_diff, int_diff and wide_diff: one `!Gpu` program runs each of the
-# five kernels scripts/tile-golden pins under `with_gpu_real` against the
+# six kernels scripts/tile-golden pins under `with_gpu_real` against the
 # machine's GPU and under `with_gpu_fake` against hand-written host
 # references, and prints what each device answered.
 #
 #   gath_diff <token_embed.cubin> <sort_rank.cubin> <merge_rank.cubin>
-#             <scatter_perm.cubin> <dequant.cubin>
+#             <scatter_perm.cubin> <dequant.cubin> <nearest_idx.cubin>
+#
+# KNIFE 19 added the sixth, `nearest_idx` (leetgpu 38). It is here because
+# its ANSWER is an index: the other five read or compute an address and
+# move a value with it, and this one computes an address and WRITES IT
+# DOWN, into the only i32 output buffer in this family. It gathers nothing,
+# so it is run.sh's gather-mask-dropped's fourth control, and it scatters
+# nothing, so it is the two scatter mutants' control as well.
+#
+# Its corpus carries one thing of its own: NO TIES. A reduction's fold
+# order is not specified, so a point with two equally near neighbours has
+# no answer on the device at all, the way a scatter with two lanes on one
+# element has none. The `index` line below counts the ties and run.sh holds
+# the count at zero.
 #
 # KNIFE 18 added the fifth, `dequant` (leetgpu 64). Its index comes out of
 # ARITHMETIC ON THE LANE'S OWN COORDINATES and out of no buffer at all,
@@ -64,7 +77,7 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, token_embed_ref, dequant_ref, sort_ref, merge_ref,
-  scatter_perm_ref }
+  scatter_perm_ref, nearest_idx_ref }
 use std/list
 use std/map
 
@@ -95,6 +108,9 @@ pub const DQ_TS: Int = 16
 
 pub const SC_N: Int = 256
 pub const SC_TILE: Int = 128
+
+## leetgpu 38's shape: NN_N points of three coordinates.
+pub const NN_N: Int = 64
 
 type Trace = {
   alloc: String,
@@ -351,11 +367,33 @@ fn halves(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i) + 0.5)
 fn quarters(n: Int, step: Int) -> List[Float] =
   list.map(range(0, n), i => (to_float((i * step) % 41) - 20.0) * 0.25)
 
+# `n` points of three coordinates whose pairwise distances are all
+# distinct: a walk of 1.5 along x with a quarter of an eleven-cycle on top
+# of it, and two more eleven-cycles on the other axes. Eleven is coprime
+# with every step here, so no two points share a displacement, and the
+# nearest neighbour of every point is nearer than the second nearest by at
+# least 4.6 in the SQUARE of the distance -- which is what makes the answer
+# an answer and not a coin toss (the `index` line counts the ties).
+fn point_cloud(n: Int) -> List[Float] =
+  list.map(range(0, n * 3), idx => {
+    let i = idx / 3
+    match idx % 3 {
+      0 -> to_float(i) * 1.5 + to_float((i * 3) % 11) * 0.5
+      1 -> to_float((i * 7) % 11) * 0.75
+      _ -> to_float((i * 5) % 11) * 0.5
+    }
+  })
+
+# The output `nearest_idx` is handed: leetgpu's own `torch.full((N,), -1)`,
+# which no kernel here computes, so a lane that still holds it is a lane
+# nothing wrote.
+fn unset_indices(n: Int) -> List[Float] = list.map(range(0, n), _i => 0.0 - 1.0)
+
 # ---- the cases ----
 
 ## The kernels this program runs, in the order their cubins are given.
 fn case_name(i: Int) -> String =
-  ["token_embed", "sort_rank", "merge_rank", "scatter_perm", "dequant"][i]
+  ["token_embed", "sort_rank", "merge_rank", "scatter_perm", "dequant", "nearest_idx"][i]
 
 ## The kernels of the tolerance tier: NONE, for the reason the header
 ## gives (nothing here is rounded).
@@ -371,6 +409,8 @@ fn case_grid(i: Int) -> (Int, Int, Int) = {
   let name = case_name(i)
   if name == "dequant" {
     (1, 1, 1)
+  } else if name == "nearest_idx" {
+    (NN_N, 1, 1)
   } else if name == "token_embed" {
     (blocks(TOK_LANES, TOK_TILE), 1, 1)
   } else if name == "sort_rank" {
@@ -393,6 +433,8 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
   } else if name == "token_embed" {
     [("i32", token_ids(TOK_LANES)), ("f64", embedding_table(EMB_ROWS, EMB_DIM)),
       ("f64", sentinel_buffer(TOK_LANES * EMB_DIM + 8))]
+  } else if name == "nearest_idx" {
+    [("f64", point_cloud(NN_N)), ("i32", unset_indices(NN_N + 8))]
   } else if name == "sort_rank" {
     [("f64", with_ties(SORT_N)), ("f64", sentinel_buffer(SORT_N + 8))]
   } else if name == "merge_rank" {
@@ -405,7 +447,8 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
 
 ## The argument positions to download after the launch: the one output
 ## buffer of each, which is the last argument in all four.
-fn case_reads(i: Int) -> List[Int] = if case_name(i) == "sort_rank" { [1] } else { [2] }
+fn case_reads(i: Int) -> List[Int] =
+  if case_name(i) == "sort_rank" || case_name(i) == "nearest_idx" { [1] } else { [2] }
 
 ## The reference table the fake device answers with, for one case.
 fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
@@ -415,6 +458,8 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   } else if name == "token_embed" {
     map.from([("token_embed",
       (3, last_out((dts, ins) => token_embed_ref(TOK_LANES, EMB_ROWS, EMB_DIM, EMB_MISS, dts, ins))))])
+  } else if name == "nearest_idx" {
+    map.from([("nearest_idx", (2, last_out((dts, ins) => nearest_idx_ref(NN_N, dts, ins))))])
   } else if name == "sort_rank" {
     map.from([("sort_rank", (2, last_out((dts, ins) => sort_ref(SORT_N, dts, ins))))])
   } else if name == "merge_rank" {
@@ -473,6 +518,19 @@ fn index_shape(i: Int) -> String = {
     let dup_in = len(list.filter(range(0, len(ix)),
       k => inside(k) && list.any(range(0, k), j => ix[j] == ix[k])))
     "indices=${len(ix)} out_of_range=${out} repeated=${dup} in_range_repeated=${dup_in}"
+  } else if name == "nearest_idx" {
+    let (_dt, p) = bufs[0]
+    let d2 = (a: Int, b: Int) => {
+      let dx = p[a * 3] - p[b * 3]
+      let dy = p[a * 3 + 1] - p[b * 3 + 1]
+      let dz = p[a * 3 + 2] - p[b * 3 + 2]
+      dx * dx + dy * dy + dz * dz
+    }
+    let best = (a: Int) => list.fold(range(0, NN_N), 1.0 / 0.0, (acc, b) =>
+        if b != a && d2(a, b) < acc { d2(a, b) } else { acc })
+    let ties = len(list.filter(range(0, NN_N), a =>
+        len(list.filter(range(0, NN_N), b => b != a && d2(a, b) == best(a))) > 1))
+    "indices=${NN_N} out_of_range=0 repeated=0 nearest_ties=${ties}"
   } else {
     "indices=-"
   }
@@ -493,10 +551,10 @@ fn shape_of(i: Int) -> String = {
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
     let argv = args()
-    let count = 5
+    let count = 6
     if len(argv) != count {
       io.eprintln("usage: gath_diff <token_embed.cubin> <sort_rank.cubin> <merge_rank.cubin>"
-          ++ " <scatter_perm.cubin> <dequant.cubin>")
+          ++ " <scatter_perm.cubin> <dequant.cubin> <nearest_idx.cubin>")
       io.exit(2)
     }
     var cubins: Map[String, Bytes] = map.empty()

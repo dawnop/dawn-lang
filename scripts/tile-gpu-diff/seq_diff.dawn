@@ -9,6 +9,26 @@
 #            <attn_alibi.cubin> <attn_window.cubin> <attn_sinks.cubin>
 #            <attn_decay.cubin> <cce_row.cubin> <cce_mean.cubin>
 #            <mha_scores.cubin> <mha_context.cubin>
+#            <xattn_scores.cubin> <xattn_context.cubin>
+#            <gqa_scores.cubin> <gqa_context.cubin>
+#            <grpo_adv.cubin> <grpo_row.cubin>
+#            <kmeans_assign.cubin> <kmeans_centroid.cubin>
+#
+# KNIFE 19 added four problems and eight kernels. Three of the four spend
+# the same reuse the last two knives did, on a third and a fourth axis:
+# leetgpu 26 is knife 18's head layout at TWO sequence lengths, leetgpu 80
+# reads one key head from several query heads, and both hand their middle
+# launch to knife 16's `attn_softmax` unchanged. Leetgpu 109 reuses knife
+# 17's `cce_mean` instead, which is the first reuse here that is not an
+# attention kernel: a loss is a mean over rows however the rows were
+# computed, and the negation the problem asks for folds into the row
+# launch because negation is exact.
+#
+# Leetgpu 20 is the one that is new in kind. Its `repeat` body is TWO
+# launches rather than one, its intermediate is an i32 buffer of labels,
+# its second kernel writes two buffers in place and reads them both, and
+# it is the second EXACT-tier sequence here: the sums are over integers
+# and the divisions are by counts, so every fold order is the same bits.
 #
 # KNIFE 18 added leetgpu 12 (Multi-Head Attention) and its two kernels.
 # Knife 17's six problems differ from leetgpu 6 in a RULE ON A SCORE; this
@@ -81,7 +101,9 @@ use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, matmul_ref, matmul_bt_ref, lora_out_ref,
   row_softmax_ref, swiglu_act_ref, apsp_step_ref, causal_scores_ref, alibi_scores_ref, window_scores_ref,
-  sink_scores_ref, decay_scores_ref, cce_row_ref, mean_ref, mha_scores_ref, mha_context_ref }
+  sink_scores_ref, decay_scores_ref, cce_row_ref, mean_ref, mha_scores_ref, mha_context_ref,
+  xattn_scores_ref, xattn_context_ref, gqa_scores_ref, gqa_context_ref, grpo_adv_ref, grpo_row_ref,
+  kmeans_assign_ref, kmeans_centroid_ref }
 use std/list
 use std/map
 
@@ -137,6 +159,44 @@ pub const MHA_H: Int = 2
 pub const MHA_DK: Int = 32
 pub const MHA_T: Int = 32
 pub const MHA_INV_SQRT_DK: Float = 0.17677669529663687
+
+## leetgpu 26's shape: XA_M queries against XA_N keys, XA_H heads of XA_D
+## columns each out of a row of XA_DMODEL. The two lengths differ, which is
+## the whole of what CROSS attention is here.
+pub const XA_M: Int = 32
+pub const XA_N: Int = 64
+pub const XA_H: Int = 2
+pub const XA_D: Int = 32
+pub const XA_DMODEL: Int = 64
+pub const XA_T: Int = 32
+pub const XA_INV_SQRT_D: Float = 0.17677669529663687
+
+## leetgpu 80's shape: GQ_HQ query heads sharing GQ_HKV key and value
+## heads, GQ_GROUPS of the first to one of the second. Each head is a
+## contiguous GQ_S by GQ_D matrix.
+pub const GQ_HQ: Int = 4
+pub const GQ_HKV: Int = 2
+pub const GQ_GROUPS: Int = 2
+pub const GQ_S: Int = 64
+pub const GQ_D: Int = 32
+pub const GQ_INV_SQRT_D: Float = 0.17677669529663687
+
+## leetgpu 109's shape and constants: GR_B batches of GR_G rollouts of
+## GR_S tokens, PPO's clipping half-width, the KL penalty's weight and the
+## guard added to the group's standard deviation.
+pub const GR_B: Int = 8
+pub const GR_G: Int = 8
+pub const GR_S: Int = 32
+pub const GR_CLIP: Float = 0.2
+pub const GR_BETA: Float = 0.1
+pub const GR_STD_EPS: Float = 1.0e-8
+
+## leetgpu 20's shape: KM_N samples, KM_K clusters and KM_ITERS rounds of
+## two launches. `max_iterations` is a host value, so the sequence's length
+## is one, the way leetgpu 37's is its exponent.
+pub const KM_N: Int = 64
+pub const KM_K: Int = 4
+pub const KM_ITERS: Int = 3
 
 ## The unit-weight step of the distance corpus, and the weight of every
 ## edge that is not one of them.
@@ -453,6 +513,30 @@ fn apsp_matrix() -> List[Float] =
     }
   })
 
+## leetgpu 20's samples: two coprime cycles over a 20 by 17 box, so no two
+## samples coincide and no sample is equidistant from two centroids in any
+## round (the `index` line's ties would say so). Every coordinate is a
+## whole number, which is what makes the centroid sums exact and this
+## sequence exact tier.
+fn km_x() -> List[Float] = list.map(range(0, KM_N), i => to_float((i * 7) % 20))
+
+fn km_y() -> List[Float] = list.map(range(0, KM_N), i => to_float((i * 11) % 17))
+
+## The initial centroids: three along the x axis inside the data and a
+## fourth 60 away from all of it. The fourth is never assigned a sample, so
+## every round takes the EMPTY-CLUSTER branch that keeps a centroid where
+## it was; the other three are still moving after the last round, which is
+## what `last-launch-dropped` needs in order to be red.
+fn km_cx() -> List[Float] = [0.0, 5.0, 10.0, 60.0]
+
+fn km_cy() -> List[Float] = [0.0, 0.0, 0.0, 60.0]
+
+## The labels before the first round: leetgpu's own `-1`, which is no
+## cluster, so a `kmeans_centroid` that ran on them would find every
+## cluster empty. That is exactly what the stale-buffer mutant makes
+## happen.
+fn km_labels() -> List[Float] = list.map(range(0, KM_N), _i => 0.0 - 1.0)
+
 # ---- the sequences ----
 
 ## leetgpu 85 (LoRA Linear): base = x W^T, h = x A^T, out = base + s h B^T.
@@ -699,6 +783,107 @@ fn mha_seq() -> Seq = Seq {
   stale_at: 1
 }
 
+## leetgpu 26 (Multi-Head Cross-Attention): the same three launches as
+## leetgpu 12 with the query's row count and the key's told apart. The
+## middle one is `attn_softmax` again, over XA_H * XA_M rows of XA_N -- the
+## heads' score blocks lie one after another and a softmax by row does not
+## need to know which head or which query a row belongs to.
+fn xattn_seq() -> Seq = Seq {
+  name: "xattn",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "q", dtype: "f64", data: wave(3, XA_M * XA_DMODEL, 0.1) },
+    Buf { name: "k", dtype: "f64", data: wave(5, XA_N * XA_DMODEL, 0.1) },
+    Buf { name: "v", dtype: "f64", data: wave(7, XA_N * XA_DMODEL, 0.1) },
+    Buf { name: "s", dtype: "f64", data: sentinels(XA_H * XA_M * XA_N) },
+    Buf { name: "p", dtype: "f64", data: sentinels(XA_H * XA_M * XA_N) },
+    Buf { name: "o", dtype: "f64", data: sentinels(XA_M * XA_DMODEL) }
+  ],
+  steps: [
+    step("xattn_scores", XA_M / XA_T, XA_N / XA_T, XA_H, ["q", "k", "s"]),
+    step("attn_softmax", XA_H * XA_M, 1, 1, ["s", "p"]),
+    step("xattn_context", XA_M / XA_T, 1, XA_H, ["p", "v", "o"])
+  ],
+  read: "o",
+  via: "s",
+  stale_at: 1
+}
+
+## leetgpu 80 (Grouped Query Attention): GQ_HQ attentions over GQ_HKV key
+## and value heads. The grid's third axis is the KV head and its first is
+## the query's place inside the group, because a grid has three axes and
+## an `Idx` has no division; the middle launch is `attn_softmax` over
+## GQ_HQ * GQ_S rows.
+fn gqa_seq() -> Seq = Seq {
+  name: "gqa",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "q", dtype: "f64", data: wave(3, GQ_HQ * GQ_S * GQ_D, 0.1) },
+    Buf { name: "k", dtype: "f64", data: wave(5, GQ_HKV * GQ_S * GQ_D, 0.1) },
+    Buf { name: "v", dtype: "f64", data: wave(7, GQ_HKV * GQ_S * GQ_D, 0.1) },
+    Buf { name: "s", dtype: "f64", data: sentinels(GQ_HQ * GQ_S * GQ_S) },
+    Buf { name: "p", dtype: "f64", data: sentinels(GQ_HQ * GQ_S * GQ_S) },
+    Buf { name: "o", dtype: "f64", data: sentinels(GQ_HQ * GQ_S * GQ_D) }
+  ],
+  steps: [
+    step("gqa_scores", GQ_GROUPS, 1, GQ_HKV, ["q", "k", "s"]),
+    step("attn_softmax", GQ_HQ * GQ_S, 1, 1, ["s", "p"]),
+    step("gqa_context", GQ_GROUPS, 1, GQ_HKV, ["p", "v", "o"])
+  ],
+  read: "o",
+  via: "s",
+  stale_at: 1
+}
+
+## leetgpu 109 (GRPO Surrogate Loss): the group-normalised advantages, then
+## one negated row mean a rollout, then knife 17's `cce_mean` over the
+## GR_B * GR_G rows. The third launch is reused byte for byte, which is
+## what makes this the first non-attention reuse here.
+fn grpo_seq() -> Seq = Seq {
+  name: "grpo",
+  tier: "tolerance",
+  bufs: [
+    Buf { name: "rewards", dtype: "f64", data: wave(3, GR_B * GR_G, 0.5) },
+    Buf { name: "log_pi", dtype: "f64", data: wave(5, GR_B * GR_G * GR_S, 0.1) },
+    Buf { name: "log_pi_old", dtype: "f64", data: wave(7, GR_B * GR_G * GR_S, 0.1) },
+    Buf { name: "log_ref", dtype: "f64", data: wave(11, GR_B * GR_G * GR_S, 0.1) },
+    Buf { name: "adv", dtype: "f64", data: sentinels(GR_B * GR_G) },
+    Buf { name: "rows", dtype: "f64", data: sentinels(GR_B * GR_G) },
+    Buf { name: "loss", dtype: "f64", data: sentinels(1) }
+  ],
+  steps: [
+    step("grpo_adv", GR_B, 1, 1, ["rewards", "adv"]),
+    step("grpo_row", GR_B * GR_G, 1, 1, ["log_pi", "log_pi_old", "log_ref", "adv", "rows"]),
+    step("cce_mean", 1, 1, 1, ["rows", "loss"])
+  ],
+  read: "loss",
+  via: "adv",
+  stale_at: 1
+}
+
+## leetgpu 20 (K-Means Clustering): KM_ITERS rounds of assign-then-average,
+## in place on two centroid buffers. The first `repeat` client whose body
+## is TWO launches, the first sequence whose intermediate is a buffer of
+## i32 labels, and the second that is exact tier.
+fn kmeans_seq() -> Seq = Seq {
+  name: "kmeans",
+  tier: "exact",
+  bufs: [
+    Buf { name: "dx", dtype: "f64", data: km_x() },
+    Buf { name: "dy", dtype: "f64", data: km_y() },
+    Buf { name: "lab", dtype: "i32", data: km_labels() },
+    Buf { name: "cx", dtype: "f64", data: km_cx() },
+    Buf { name: "cy", dtype: "f64", data: km_cy() }
+  ],
+  steps: repeat(KM_ITERS, _i => [
+    step("kmeans_assign", KM_N, 1, 1, ["dx", "dy", "cx", "cy", "lab"]),
+    step("kmeans_centroid", KM_K, 1, 1, ["dx", "dy", "lab", "cx", "cy"])
+  ]),
+  read: "cx",
+  via: "lab",
+  stale_at: 1
+}
+
 ## THE CONTROL SEQUENCE, and the reason the counter below is a measurement
 ## and not a decoration: two launches whose second does NOT read what the
 ## first wrote. `changed_by_first` must be zero here and the stale-buffer
@@ -724,6 +909,7 @@ fn decoupled_seq() -> Seq = Seq {
 fn sequences() -> List[Seq] =
   [lora_seq(), attn_seq(), matpow_seq(), swiglu_seq(), apsp_seq(),
     causal_seq(), alibi_seq(), window_seq(), sinks_seq(), decay_seq(), cce_seq(), mha_seq(),
+    xattn_seq(), gqa_seq(), grpo_seq(), kmeans_seq(),
     decoupled_seq()]
 
 ## The kernels each sequence launches, as a set: what
@@ -743,6 +929,10 @@ pub fn sequence_kernels() -> List[(String, List[String])] =
     ("decay", ["attn_decay", "attn_context"]),
     ("cce", ["cce_row", "cce_mean"]),
     ("mha", ["mha_scores", "attn_softmax", "mha_context"]),
+    ("xattn", ["xattn_scores", "attn_softmax", "xattn_context"]),
+    ("gqa", ["gqa_scores", "attn_softmax", "gqa_context"]),
+    ("grpo", ["grpo_adv", "grpo_row", "cce_mean"]),
+    ("kmeans", ["kmeans_assign", "kmeans_centroid"]),
     ("decoupled", ["matpow_step"])]
 
 ## The sequences compared under the tolerance tier. `apsp` is not here:
@@ -752,6 +942,7 @@ pub fn sequence_kernels() -> List[(String, List[String])] =
 ## column of scripts/leetgpu-diff/problems.txt against it.
 pub fn tolerance_tier() -> List[String] =
   ["lora", "attention", "matpow", "swiglu", "causal", "alibi", "window", "sinks", "decay", "cce", "mha",
+    "xattn", "gqa", "grpo",
     "decoupled"]
 
 # ---- the reference tables ----
@@ -812,6 +1003,30 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
           mha_scores_ref(MHA_N, MHA_DMODEL, MHA_H, MHA_INV_SQRT_DK, dts, ins)))),
       ("attn_softmax", (2, last_out((dts, ins) => row_softmax_ref(MHA_H * MHA_N, MHA_N, dts, ins)))),
       ("mha_context", (3, last_out((dts, ins) => mha_context_ref(MHA_N, MHA_DMODEL, MHA_H, dts, ins))))])
+  } else if name == "xattn" {
+    map.from([
+      ("xattn_scores", (3, last_out((dts, ins) =>
+          xattn_scores_ref(XA_M, XA_N, XA_DMODEL, XA_H, XA_INV_SQRT_D, dts, ins)))),
+      ("attn_softmax", (2, last_out((dts, ins) => row_softmax_ref(XA_H * XA_M, XA_N, dts, ins)))),
+      ("xattn_context", (3, last_out((dts, ins) =>
+          xattn_context_ref(XA_M, XA_N, XA_DMODEL, XA_H, dts, ins))))])
+  } else if name == "gqa" {
+    map.from([
+      ("gqa_scores", (3, last_out((dts, ins) =>
+          gqa_scores_ref(GQ_HQ, GQ_HKV, GQ_S, GQ_D, GQ_INV_SQRT_D, dts, ins)))),
+      ("attn_softmax", (2, last_out((dts, ins) => row_softmax_ref(GQ_HQ * GQ_S, GQ_S, dts, ins)))),
+      ("gqa_context", (3, last_out((dts, ins) =>
+          gqa_context_ref(GQ_HQ, GQ_HKV, GQ_S, GQ_D, dts, ins))))])
+  } else if name == "grpo" {
+    map.from([
+      ("grpo_adv", (2, last_out((dts, ins) => grpo_adv_ref(GR_B, GR_G, GR_STD_EPS, dts, ins)))),
+      ("grpo_row", (5, last_out((dts, ins) =>
+          grpo_row_ref(GR_B * GR_G, GR_S, GR_CLIP, GR_BETA, dts, ins)))),
+      ("cce_mean", (2, last_out((dts, ins) => mean_ref(GR_B * GR_G, dts, ins))))])
+  } else if name == "kmeans" {
+    map.from([
+      ("kmeans_assign", (5, last_out((dts, ins) => kmeans_assign_ref(KM_N, KM_K, dts, ins)))),
+      ("kmeans_centroid", (5, (dts, ins) => kmeans_centroid_ref(KM_N, KM_K, dts, ins)))])
   } else if name == "apsp" {
     map.from([("apsp_step", (2, (dts, ins) => [(0, apsp_step_ref(APSP_N, dts, ins))]))])
   } else {
@@ -931,7 +1146,9 @@ fn cubin_names() -> List[String] =
   ["lora_base", "lora_hidden", "lora_out", "attn_scores", "attn_softmax", "attn_context",
     "matpow_step", "swiglu_proj", "swiglu_act", "swiglu_down", "apsp_step",
     "attn_causal", "attn_alibi", "attn_window", "attn_sinks", "attn_decay", "cce_row", "cce_mean",
-    "mha_scores", "mha_context"]
+    "mha_scores", "mha_context",
+    "xattn_scores", "xattn_context", "gqa_scores", "gqa_context", "grpo_adv", "grpo_row",
+    "kmeans_assign", "kmeans_centroid"]
 
 fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: seq_diff " ++ list.fold(cubin_names(), "", (a, n) =>

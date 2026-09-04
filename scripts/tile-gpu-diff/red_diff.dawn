@@ -1,6 +1,6 @@
 # Layer 2 for the reduction, transcendental and region kernels (knife 7b),
 # the third of these programs after vadd_diff and mask_diff: one `!Gpu`
-# program runs each of the thirteen kernels scripts/tile-golden pins under
+# program runs each of the fourteen kernels scripts/tile-golden pins under
 # `with_gpu_real` against the machine's GPU and under `with_gpu_fake`
 # against hand-written host references, and prints what each device
 # answered and under WHICH TIER the two agree.
@@ -8,7 +8,16 @@
 #   red_diff <reduce_sum.cubin> <softmax.cubin> <dot.cubin> <mse.cubin>
 #            <monte_carlo.cubin> <rms_norm.cubin> <silu.cubin>
 #            <sigmoid.cubin> <ppo_loss.cubin> <dpo_loss.cubin>
-#            <mathops.cubin> <foldif.cubin> <argmax.cubin>
+#            <mathops.cubin> <foldif.cubin> <argmax.cubin> <agent_step.cubin>
+#
+# KNIFE 19 added the fourteenth, `agent_step` (leetgpu 14). It is the first
+# kernel here whose reduction runs over a SELECTED SUBSET of its tile: one
+# block an agent, a lane every other agent, and only the lanes inside the
+# radius fold. So it is also the first with a reduction whose OPERAND
+# COUNT is part of the answer -- the neighbour count is a third fold over
+# the same mask, and the mean divides by it -- which is why its corpus has
+# to carry both agents with neighbours and agents with none. The `probe
+# agents` line at the bottom counts them and run.sh holds both above zero.
 #
 # THE TWO TIERS (docs/tile-backend-design.md 6.5) are what this knife is
 # about, and both of them are here rather than in the shell around it,
@@ -46,7 +55,7 @@ use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free, launch, sync,
   handle_of, ref_exp, ref_log, ref_sqrt, LN2, reduce_sum_ref, softmax_ref, dot_ref, mse_ref, monte_carlo_ref,
-  rms_norm_ref, silu_ref, sigmoid_ref, ppo_loss_ref, dpo_loss_ref }
+  rms_norm_ref, silu_ref, sigmoid_ref, ppo_loss_ref, dpo_loss_ref, agent_step_ref }
 use std/list
 use std/map
 
@@ -80,6 +89,13 @@ pub const MC_B: Float = 2.0
 pub const RMS_EPS: Float = 1.0e-5
 pub const PPO_EPS: Float = 0.2
 pub const DPO_BETA: Float = 0.1
+
+## leetgpu 14's shape and rule: AG_N agents of four floats, a neighbour
+## radius whose SQUARE is AG_R2, and the fraction of the way an agent is
+## pulled towards its neighbourhood's mean velocity.
+pub const AG_N: Int = 64
+pub const AG_R2: Float = 25.0
+pub const AG_ALPHA: Float = 0.05
 
 fn mc_scale() -> Float = (MC_B - MC_A) / to_float(RED_N)
 
@@ -415,7 +431,7 @@ fn argmax_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Flo
 ## The kernels this program runs, in the order their cubins are given.
 fn case_name(i: Int) -> String =
   ["reduce_sum", "softmax", "dot", "mse", "monte_carlo", "rms_norm", "silu", "sigmoid",
-    "ppo_loss", "dpo_loss", "mathops", "foldif", "argmax"][i]
+    "ppo_loss", "dpo_loss", "mathops", "foldif", "argmax", "agent_step"][i]
 
 ## The kernels of the tolerance tier: every one holds an `exp`, a `log`, a
 ## `tanh`, a `pow` or an `rsqrt`, except `rms_norm`, which is here because
@@ -441,6 +457,8 @@ fn case_grid(i: Int) -> Int = {
     cdiv(TAIL_N, TAIL_TILE)
   } else if name == "foldif" {
     FOLD_BLOCKS
+  } else if name == "agent_step" {
+    AG_N
   } else {
     1
   }
@@ -481,6 +499,8 @@ fn case_data(i: Int) -> List[List[Float]] = {
     [positive_corpus(RED_TILE), fractional_corpus(RED_TILE), out]
   } else if name == "foldif" {
     [small_ints(RED_TILE, 101, 50, 17), out]
+  } else if name == "agent_step" {
+    [agents_corpus(AG_N), sentinel_buffer(AG_N * 4)]
   } else {
     # argmax: a unique maximum, at a lane the mask keeps
     [list.map(range(0, RED_TILE), k => if k == 617 { 999.0 } else { to_float(k % 91) }), out]
@@ -514,6 +534,9 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
     map.from([("mathops", (3, last_out((dts, ins) => mathops_ref(TAIL_N, dts, ins))))])
   } else if name == "foldif" {
     map.from([("foldif", (2, last_out(foldif_ref)))])
+  } else if name == "agent_step" {
+    map.from([("agent_step",
+      (2, last_out((dts, ins) => agent_step_ref(AG_N, AG_R2, AG_ALPHA, dts, ins))))])
   } else {
     map.from([("argmax", (2, last_out((dts, ins) => argmax_ref(RED_N, dts, ins))))])
   }
@@ -549,6 +572,46 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
   }
 }
 
+## leetgpu 14's corpus: the first AG_N - 4 agents on an eight by eight
+## lattice of side 3, and the last four strung out 20 apart 500 away.
+##
+## Both halves are the claim. On the lattice an agent has between three and
+## eight neighbours inside the radius (3 and 3 * sqrt(2) are under 5, 6 is
+## not), so the mean divides by counts that are not powers of two; the four
+## far agents have NONE, which is the branch that keeps an agent's own
+## velocity and the only place a division by zero could appear. Every
+## coordinate is a multiple of 3 and every velocity a multiple of a
+## quarter, so the neighbour sums are exact whatever order the device folds
+## them in, and this kernel is EXACT tier by the same argument `dot`'s
+## corpus makes.
+fn agents_corpus(n: Int) -> List[Float] =
+  list.map(range(0, n * 4), idx => {
+    let i = idx / 4
+    let far = i >= n - 4
+    match idx % 4 {
+      0 -> if far { 500.0 + to_float(i) * 20.0 } else { to_float(i % 8) * 3.0 }
+      1 -> if far { 0.0 } else { to_float(i / 8) * 3.0 }
+      2 -> (to_float((i * 7) % 13) - 6.0) * 0.25
+      _ -> (to_float((i * 5) % 11) - 5.0) * 0.25
+    }
+  })
+
+## How many of the corpus's agents have no neighbour and how many have one,
+## as a line. run.sh holds both above zero: a corpus of only crowded agents
+## would forgive a kernel that never took the empty branch, and one of only
+## isolated agents would leave every reduction with nothing to fold.
+fn agents_shape() -> String = {
+  let a = agents_corpus(AG_N)
+  let near = (i: Int, j: Int) => {
+    let dx = a[i * 4] - a[j * 4]
+    let dy = a[i * 4 + 1] - a[j * 4 + 1]
+    i != j && dx * dx + dy * dy < AG_R2
+  }
+  let count = (i: Int) => len(list.filter(range(0, AG_N), j => near(i, j)))
+  let isolated = len(list.filter(range(0, AG_N), i => count(i) == 0))
+  "agents=${AG_N} isolated=${isolated} crowded=${AG_N - isolated}"
+}
+
 ## The order probe: `reduce_sum` over `[2^53, 1, 1, -2^53]` and zeros. Not
 ## an assertion; the answer is printed and goes into the ledger note.
 fn probe_reading(x: Float) -> String =
@@ -566,11 +629,11 @@ fn probe_reading(x: Float) -> String =
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
     let argv = args()
-    let count = 13
+    let count = 14
     if len(argv) != count {
       io.eprintln("usage: red_diff <reduce_sum.cubin> <softmax.cubin> <dot.cubin> <mse.cubin>"
           ++ " <monte_carlo.cubin> <rms_norm.cubin> <silu.cubin> <sigmoid.cubin> <ppo_loss.cubin>"
-          ++ " <dpo_loss.cubin> <mathops.cubin> <foldif.cubin> <argmax.cubin>")
+          ++ " <dpo_loss.cubin> <mathops.cubin> <foldif.cubin> <argmax.cubin> <agent_step.cubin>")
       io.exit(2)
     }
     var cubins: Map[String, Bytes] = map.empty()
@@ -585,7 +648,13 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     for i in range(0, count) {
       let name = case_name(i)
       let tier = case_tier(i)
-      let n = if name == "foldif" { FOLD_TILE * FOLD_BLOCKS } else { RED_N }
+      let n = if name == "foldif" {
+        FOLD_TILE * FOLD_BLOCKS
+      } else if name == "agent_step" {
+        AG_N * 4
+      } else {
+        RED_N
+      }
       let data = case_data(i)
       let grid = case_grid(i)
       let refs = case_kernels(i)
@@ -622,6 +691,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     } else {
       io.println("probe fold-order blocked:${stopped(probe)}")
     }
+    io.println("probe agents ${agents_shape()}")
     io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
     if all_agreed {
       io.println("tile-gpu-diff: pass")

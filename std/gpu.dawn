@@ -2208,6 +2208,290 @@ pub fn mha_context_ref(n: Int, dmodel: Int, heads: Int,
   })
 }
 
+# ---- references for knife 19's problems ----
+#
+# Ten kernels and ten references. The three launches these six problems
+# reuse (`attn_softmax` twice and `cce_mean` once) keep the references they
+# were recorded with, at the row counts their new callers hand them.
+
+## The squared distance between agents `i` and `j` of a buffer of four
+## floats an agent: position, then velocity.
+fn agent_d2(a: List[Float], i: Int, j: Int) -> Float = {
+  let dx = a[i * 4] - a[j * 4]
+  let dy = a[i * 4 + 1] - a[j * 4 + 1]
+  dx * dx + dy * dy
+}
+
+## The sum of column `col` over the neighbours of agent `i`: the agents
+## within `r2` of it, itself excluded. `col` 2 and 3 are the two velocity
+## components, and `col` 4 is the count, which is why it is spelled as a
+## column and not as three folds.
+fn agent_neighbour_sum(a: List[Float], n: Int, i: Int, r2: Float, col: Int) -> Float =
+  list.fold(range(0, n), 0.0, (acc, j) =>
+      if j != i && agent_d2(a, i, j) < r2 {
+        if col == 4 { acc + 1.0 } else { acc + a[j * 4 + col] }
+      } else {
+        acc
+      })
+
+## One step of the flocking rule of leetgpu 14 (Multi-Agent Simulation):
+## every agent moves by its velocity after being pulled `alpha` of the way
+## towards the mean velocity of the agents within `sqrt(r2)` of it, and an
+## agent with no neighbour keeps its own. `ins` is `[agents, old out]`, and
+## both are `n` agents of four floats.
+pub fn agent_step_ref(n: Int, r2: Float, alpha: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), idx =>
+      if idx < n * 4 {
+        let i = idx / 4
+        let vx = a[i * 4 + 2]
+        let vy = a[i * 4 + 3]
+        let count = agent_neighbour_sum(a, n, i, r2, 4)
+        let avx = if count > 0.0 { agent_neighbour_sum(a, n, i, r2, 2) / count } else { vx }
+        let avy = if count > 0.0 { agent_neighbour_sum(a, n, i, r2, 3) / count } else { vy }
+        let nvx = vx + alpha * (avx - vx)
+        let nvy = vy + alpha * (avy - vy)
+        match idx % 4 {
+          0 -> round_to(dt, a[i * 4] + nvx)
+          1 -> round_to(dt, a[i * 4 + 1] + nvy)
+          2 -> round_to(dt, nvx)
+          _ -> round_to(dt, nvy)
+        }
+      } else {
+        kept(old, idx)
+      })
+}
+
+## The squared distance between points `i` and `j` of a buffer of three
+## floats a point.
+fn nearest_d2(p: List[Float], i: Int, j: Int) -> Float = {
+  let dx = p[i * 3] - p[j * 3]
+  let dy = p[i * 3 + 1] - p[j * 3 + 1]
+  let dz = p[i * 3 + 2] - p[j * 3 + 2]
+  dx * dx + dy * dy + dz * dz
+}
+
+## The index of the point nearest `i`, itself excluded. A tie has no answer
+## on the device (the fold order of a reduction is not specified), so the
+## corpus is required to have none and gath_diff counts that it does not;
+## this fold keeps the LOWER index, which is what a tie-free corpus makes
+## irrelevant.
+fn nearest_of(p: List[Float], n: Int, i: Int) -> Int = {
+  let start = if i == 0 { 1 } else { 0 }
+  list.fold(range(0, n), start, (acc, j) =>
+      if j == i {
+        acc
+      } else if nearest_d2(p, i, j) < nearest_d2(p, i, acc) {
+        j
+      } else {
+        acc
+      })
+}
+
+## The nearest other point of each of `n` three-dimensional points, as an
+## i32 index: leetgpu 38 (Nearest Neighbor). `ins` is `[points, old out]`.
+pub fn nearest_idx_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let p = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i =>
+      if i < n { round_to(dt, to_float(nearest_of(p, n, i))) } else { kept(old, i) })
+}
+
+## `Q_head K_head^T * scale` where the query has `m` rows and the key `n`,
+## laid out one head's `m` by `n` block after another: leetgpu 26's first
+## launch. Head `hh` owns the columns `[hh * dk, (hh + 1) * dk)` of a row of
+## `dmodel`, `dk = dmodel / heads`, which is leetgpu 12's layout at two
+## sequence lengths. `ins` is `[q, k, old s]`.
+pub fn xattn_scores_ref(m: Int, n: Int, dmodel: Int, heads: Int, scale: Float,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let q = ins[0]
+  let k = ins[1]
+  let dt = dtypes[2]
+  let dk = dmodel / heads
+  list.map(range(0, heads * m * n), idx => {
+    let hh = idx / (m * n)
+    let i = (idx / n) % m
+    let j = idx % n
+    round_to(dt, scale * list.fold(range(0, dk), 0.0, (acc, c) =>
+        acc + q[i * dmodel + hh * dk + c] * k[j * dmodel + hh * dk + c]))
+  })
+}
+
+## `P_head V_head` for every head of leetgpu 26: `m` query rows over `n`
+## key rows, the answer written into the head's own columns of an `m` by
+## `dmodel` output. `ins` is `[p, v, old o]`.
+pub fn xattn_context_ref(m: Int, n: Int, dmodel: Int, heads: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let p = ins[0]
+  let v = ins[1]
+  let dt = dtypes[2]
+  let dk = dmodel / heads
+  list.map(range(0, m * dmodel), idx => {
+    let i = idx / dmodel
+    let hh = (idx % dmodel) / dk
+    let c = (idx % dmodel) % dk
+    round_to(dt, list.fold(range(0, n), 0.0, (acc, j) =>
+        acc + p[hh * m * n + i * n + j] * v[j * dmodel + hh * dk + c]))
+  })
+}
+
+## `Q_h K_kv^T * scale` for every query head of leetgpu 80 (Grouped Query
+## Attention), where head `h` reads key head `h / (hq / hkv)`. Every head
+## is a CONTIGUOUS `s` by `d` matrix here, so the group is a division and
+## not a column offset. `ins` is `[q, k, old s]`.
+pub fn gqa_scores_ref(hq: Int, hkv: Int, s: Int, d: Int, scale: Float,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let q = ins[0]
+  let k = ins[1]
+  let dt = dtypes[2]
+  let groups = hq / hkv
+  list.map(range(0, hq * s * s), idx => {
+    let h = idx / (s * s)
+    let i = (idx / s) % s
+    let j = idx % s
+    let kv = h / groups
+    round_to(dt, scale * list.fold(range(0, d), 0.0, (acc, c) =>
+        acc + q[(h * s + i) * d + c] * k[(kv * s + j) * d + c]))
+  })
+}
+
+## `P_h V_kv` for every query head of leetgpu 80, with the same grouping.
+## `ins` is `[p, v, old o]`.
+pub fn gqa_context_ref(hq: Int, hkv: Int, s: Int, d: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let p = ins[0]
+  let v = ins[1]
+  let dt = dtypes[2]
+  let groups = hq / hkv
+  list.map(range(0, hq * s * d), idx => {
+    let h = idx / (s * d)
+    let i = (idx / d) % s
+    let c = idx % d
+    let kv = h / groups
+    round_to(dt, list.fold(range(0, s), 0.0, (acc, j) =>
+        acc + p[(h * s + i) * s + j] * v[(kv * s + j) * d + c]))
+  })
+}
+
+## The group-normalised advantage of every reward of leetgpu 109 (GRPO
+## Surrogate Loss): `b` groups of `g` rewards, each centred on its group's
+## mean and divided by its group's BIASED standard deviation plus `eps`.
+## `ins` is `[rewards, old adv]`.
+pub fn grpo_adv_ref(b: Int, g: Int, eps: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let r = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), idx =>
+      if idx < b * g {
+        let base = (idx / g) * g
+        let mean = list.fold(range(0, g), 0.0, (acc, j) => acc + r[base + j]) / to_float(g)
+        let variance = list.fold(range(0, g), 0.0, (acc, j) => {
+          let d = r[base + j] - mean
+          acc + d * d
+        }) / to_float(g)
+        round_to(dt, (r[idx] - mean) / (ref_sqrt(variance) + eps))
+      } else {
+        kept(old, idx)
+      })
+}
+
+fn lesser(a: Float, b: Float) -> Float = if a < b { a } else { b }
+
+fn greater(a: Float, b: Float) -> Float = if a > b { a } else { b }
+
+## Minus the mean over `s` tokens of the clipped surrogate less `beta`
+## times the k3 KL penalty, one row a lane: leetgpu 109's second launch.
+## The negation is here and not after the mean because negation is exact,
+## so the mean of the negated rows is the negated mean and the third launch
+## can be a plain average. `ins` is
+## `[log_pi, log_pi_old, log_ref, adv, old rows]`.
+pub fn grpo_row_ref(rows: Int, s: Int, clip: Float, beta: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let lp = ins[0]
+  let lo = ins[1]
+  let lr = ins[2]
+  let adv = ins[3]
+  let old = ins[4]
+  let dt = dtypes[4]
+  list.map(range(0, len(old)), i =>
+      if i < rows {
+        let a = adv[i]
+        let total = list.fold(range(0, s), 0.0, (acc, t) => {
+          let ratio = ref_exp(lp[i * s + t] - lo[i * s + t])
+          let clipped = lesser(greater(ratio, 1.0 - clip), 1.0 + clip)
+          let surrogate = lesser(ratio * a, clipped * a)
+          let kd = lr[i * s + t] - lp[i * s + t]
+          acc + (surrogate - beta * (ref_exp(kd) - kd - 1.0))
+        })
+        round_to(dt, 0.0 - total / to_float(s))
+      } else {
+        kept(old, i)
+      })
+}
+
+## The nearest centroid of each of `n` two-dimensional samples, as an i32
+## label: leetgpu 20's first launch, run once a round. `ins` is
+## `[data_x, data_y, centroid_x, centroid_y, old labels]`.
+pub fn kmeans_assign_ref(n: Int, k: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let dx = ins[0]
+  let dy = ins[1]
+  let cx = ins[2]
+  let cy = ins[3]
+  let old = ins[4]
+  let dt = dtypes[4]
+  list.map(range(0, len(old)), i =>
+      if i < n {
+        let best = list.fold(range(1, k), 0, (acc, c) => {
+          let ex = dx[i] - cx[c]
+          let ey = dy[i] - cy[c]
+          let ax = dx[i] - cx[acc]
+          let ay = dy[i] - cy[acc]
+          if ex * ex + ey * ey < ax * ax + ay * ay { c } else { acc }
+        })
+        round_to(dt, to_float(best))
+      } else {
+        kept(old, i)
+      })
+}
+
+## The mean of one coordinate over the samples labelled `c`, or the old
+## centroid where the cluster is empty or the block owns no cluster.
+fn kmeans_mean(v: List[Float], lab: List[Float], old: List[Float], n: Int, k: Int,
+  c: Int, dt: String) -> Float =
+  if c >= k {
+    kept(old, c)
+  } else {
+    let count = list.fold(range(0, n), 0, (acc, i) => if to_int(lab[i]) == c { acc + 1 } else { acc })
+    if count == 0 {
+      kept(old, c)
+    } else {
+      round_to(dt, list.fold(range(0, n), 0.0, (acc, i) =>
+          if to_int(lab[i]) == c { acc + v[i] } else { acc }) / to_float(count))
+    }
+  }
+
+## Both centroid buffers of leetgpu 20 after one round, IN PLACE: the two
+## coordinates are two output buffers, and a cluster nothing was assigned
+## to keeps the centroid it had. `ins` is
+## `[data_x, data_y, labels, centroid_x, centroid_y]`, and the answer names
+## the last two argument positions.
+pub fn kmeans_centroid_ref(n: Int, k: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[(Int, List[Float])] = {
+  let dx = ins[0]
+  let dy = ins[1]
+  let lab = ins[2]
+  let cx = ins[3]
+  let cy = ins[4]
+  [(3, list.map(range(0, len(cx)), c => kmeans_mean(dx, lab, cx, n, k, c, dtypes[3]))),
+    (4, list.map(range(0, len(cy)), c => kmeans_mean(dy, lab, cy, n, k, c, dtypes[4])))]
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the

@@ -459,7 +459,8 @@ masked=(vadd_tail copy relu leaky_relu clip elemops)
 
 # The reduction, transcendental and region kernels of knife 7b, in the order
 # red_diff takes them.
-reduced=(reduce_sum softmax dot mse monte_carlo rms_norm silu sigmoid ppo_loss dpo_loss mathops foldif argmax)
+reduced=(reduce_sum softmax dot mse monte_carlo rms_norm silu sigmoid ppo_loss dpo_loss mathops foldif argmax
+  agent_step)
 
 # The two-dimensional kernels of knife 8, in the order mm_diff takes them.
 # The first three run over a grid with more than one axis.
@@ -488,7 +489,7 @@ wide=(sum_diff reverse invert f16_ops dot_f16 matmul_f16 batched_matmul_f16 matm
 # them. Only `token_embed` gathers, only `scatter_perm` scatters through a
 # mask, and the two rank kernels scatter without one, which is the split the
 # three mutants below are held to.
-gathered=(token_embed sort_rank merge_rank scatter_perm dequant)
+gathered=(token_embed sort_rank merge_rank scatter_perm dequant nearest_idx)
 
 # The scan kernels of knife 13, in the order scan_diff takes them. Only
 # `gae` scans in reverse and only `compact` turns an inclusive scan into an
@@ -533,7 +534,9 @@ erf_green=(swiglu_half)
 sequenced=(lora_base lora_hidden lora_out attn_scores attn_softmax attn_context
   matpow_step swiglu_proj swiglu_act swiglu_down apsp_step
   attn_causal attn_alibi attn_window attn_sinks attn_decay cce_row cce_mean
-  mha_scores mha_context)
+  mha_scores mha_context
+  xattn_scores xattn_context gqa_scores gqa_context grpo_adv grpo_row
+  kmeans_assign kmeans_centroid)
 
 # tileiras can exit 0 and still print a diagnostic (scripts/tile-golden's
 # `assemble` says which one), so the empty error stream is part of the
@@ -822,7 +825,7 @@ cat "$work/seq.out"
 seq_verdict="$(verdict_of "$work/seq.out")"
 case "$seq_verdict" in
   pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
-        echo "PASS  native: the twelve multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
+        echo "PASS  native: the sixteen multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
   blocked:*) [ "$rc" = 0 ] || fail "verdict $seq_verdict with exit $rc"
         echo "BLOCKED  native: the driver refused before a result could be compared: $seq_verdict" ;;
   fail) cat "$work/seq.err" >&2; fail "the device answered and disagreed with the fake device on a sequence (see the transcript above)" ;;
@@ -890,6 +893,28 @@ for k in "${erf_red[@]}"; do
   esac
 done
 
+# leetgpu 14's corpus is two claims in one line. A flock where every agent
+# has a neighbour would never take the branch that keeps an agent's own
+# velocity, and one where none does would leave all three reductions with
+# nothing to fold; both counts are held above zero.
+agents_shape="$(sed -n 's/^probe agents //p' "$work/reduced.out" | tail -n 1)"
+case "$agents_shape" in
+  *isolated=0\ *) fail "no agent in the flocking corpus is alone, so the empty-neighbourhood branch is not being tested: $agents_shape" ;;
+  *crowded=0) fail "every agent in the flocking corpus is alone, so nothing is ever averaged: $agents_shape" ;;
+  *) echo "PASS  corpus: the flock has isolated agents and crowded ones ($agents_shape)" ;;
+esac
+
+# A nearest neighbour is only an answer where it is unique: the fold order
+# of a reduction is not specified, so a point with two equally near
+# neighbours is the same undefined case as a scatter with two lanes on one
+# element. gath_diff counts the ties and this is where the count is held to
+# zero.
+nearest_ties="$(awk '/^kernel nearest_idx /{f=1} f && /^  index /{print; exit}' "$work/gath.out")"
+case "$nearest_ties" in
+  *nearest_ties=0) echo "PASS  corpus: no point has two equally near neighbours ($nearest_ties)" ;;
+  *) fail "the point cloud has a tie, so nearest_idx's answer is not defined there: $nearest_ties" ;;
+esac
+
 # THE SEQUENCE FAMILY'S CORPUS, and it is a measurement rather than a
 # sentence. A sequence of launches is only a sequence if a later launch
 # reads what an earlier one wrote; a corpus where it does not is a corpus
@@ -903,7 +928,7 @@ done
 # it is two launches whose second does not read the first's output, and it
 # is the control that says the counter can print a zero at all. Without
 # it, "has never printed zero" and "cannot print zero" look the same.
-for s in lora attention matpow swiglu apsp causal alibi window sinks decay cce mha; do
+for s in lora attention matpow swiglu apsp causal alibi window sinks decay cce mha xattn gqa grpo kmeans; do
   seq_shape="$(awk -v want="$s" '$1 == "sequence" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/seq.out")"
   case "$seq_shape" in
     *changed_by_first=0) fail "$s's answer does not depend on its earlier launches, so it is not a sequence: $seq_shape" ;;
@@ -982,20 +1007,26 @@ for c in decay cce; do
 done
 seq_reds="$seq_reds second-launch-sees-stale-buffer:mha launch-order-swapped:mha"
 seq_reds="$seq_reds last-launch-dropped:mha grid-of-later-launch-copied-from-the-first:mha"
+for c in xattn gqa grpo; do
+  seq_reds="$seq_reds second-launch-sees-stale-buffer:$c launch-order-swapped:$c"
+  seq_reds="$seq_reds last-launch-dropped:$c grid-of-later-launch-copied-from-the-first:$c"
+done
+seq_reds="$seq_reds second-launch-sees-stale-buffer:kmeans launch-order-swapped:kmeans"
+seq_reds="$seq_reds last-launch-dropped:kmeans"
 seq_reds="$seq_reds last-launch-dropped:decoupled"
 if [ "$seq_verdict" = pass ]; then
   seq_probe="$(sed -n 's/^probe mutants //p' "$work/seq.out" | tail -n 1)"
-  [ "$seq_probe" = "red=43 $seq_reds" ] ||
-    { printf 'wanted: red=39 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
+  [ "$seq_probe" = "red=58 $seq_reds" ] ||
+    { printf 'wanted: red=58 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
       fail "the sequence mutants' red set moved"; }
-  echo "PASS  mutant: the four sequence mutants red on exactly 43 of the 52 (mutant, sequence) pairs, by name"
+  echo "PASS  mutant: the four sequence mutants red on exactly 58 of the 68 (mutant, sequence) pairs, by name"
   seq_controls="$(grep -c '^control intermediate-round-tripped ' "$work/seq.out" || true)"
   seq_controls_moved="$(grep -c '^control intermediate-round-tripped .* verdict differ:result$' "$work/seq.out" || true)"
-  if [ "$seq_controls" != 13 ] || [ "$seq_controls_moved" != 0 ]; then
+  if [ "$seq_controls" != 17 ] || [ "$seq_controls_moved" != 0 ]; then
     cat "$work/seq.out" >&2
     fail "the round-trip control moved a verdict: $seq_controls_moved of $seq_controls"
   fi
-  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (13 of 13)"
+  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (17 of 17)"
 else
   echo "SKIP  mutant: the sequence mutants are not verifiable on this driver: the clean run is $seq_verdict, before any launch reaches the device"
 fi
@@ -1228,17 +1259,24 @@ fi
 #    answer is wrong. This is the claim of knife 7b, and the reason a
 #    reduction knife needs a device.
 #
-#    Eight of the thirteen kernels hold a sum reduction, and SIX of those
-#    eight go red. `reduce_sum` and `monte_carlo` do not, and that is a
-#    measurement rather than an oversight: with a wrong identity they still
-#    answer exactly what the clean kernels answer, so on this assembler
-#    their reduction never folds the identity in at all. The six that move
-#    are the six whose reduction operand is a COMPUTED tile (a product, a
-#    square, a select); the two that do not are the two that reduce the
-#    loaded tile itself. Why the lowering differs is not established here;
-#    what is established is that a semantically wrong identity is invisible
-#    on some kernels even at layer 2, which is worth knowing before anyone
-#    reads "layer 2 catches it" as "layer 2 catches it everywhere".
+#    Nine of the fourteen kernels hold a sum reduction, and SIX of those
+#    nine go red. `reduce_sum`, `monte_carlo` and knife 19's `agent_step`
+#    do not, and that is a measurement rather than an oversight: with a
+#    wrong identity they still answer exactly what the clean kernels
+#    answer, so on this assembler their reduction never folds the identity
+#    in at all.
+#
+#    Knife 18's reading of this table was that the six that move are the
+#    six whose reduction operand is a COMPUTED tile and the two that do not
+#    are the two that reduce the loaded tile itself. `agent_step` REFUTES
+#    that: all three of its sums fold a `select`, which is as computed as a
+#    product, and it is green. What still separates it from the six is the
+#    tile's WIDTH -- every red reduces 1024 lanes and its reductions are 64
+#    -- and that is an observation and not a mechanism. So the gate names
+#    the six and nothing else does; the standing claim is only that a
+#    semantically wrong identity is invisible on some kernels even at layer
+#    2, which is worth knowing before anyone reads "layer 2 catches it" as
+#    "layer 2 catches it everywhere".
 #
 #    So the gate names the six, and requires the other seven to be
 #    untouched. A tileiras upgrade that changes which kernels fold the
@@ -1282,16 +1320,16 @@ moved=0
 for k in "${reduced[@]}"; do
   if cmp -s "$golden/$k.tilebc" "$work/reduce-identity-wrong-$k.tilebc"; then :; else moved=$((moved + 1)); fi
 done
-[ "$moved" = 8 ] ||
-  fail "reduce-identity-wrong: expected exactly 8 of the ${#reduced[@]} kernels' bytecode to move, got $moved"
-echo "      reduce-identity-wrong: 8 of ${#reduced[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
+[ "$moved" = 9 ] ||
+  fail "reduce-identity-wrong: expected exactly 9 of the ${#reduced[@]} kernels' bytecode to move, got $moved"
+echo "      reduce-identity-wrong: 9 of ${#reduced[@]} .tilebc files differ from the goldens and tileiras still accepts every one"
 id_cubins=()
 for k in "${reduced[@]}"; do id_cubins+=("$work/reduce-identity-wrong-$k.cubin"); done
 rc=0
 "$work/reduced.bin" "${id_cubins[@]}" > "$work/m-reduce-identity-wrong.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-reduce-identity-wrong.out")"
 identity_red=(softmax dot mse rms_norm ppo_loss dpo_loss)
-identity_green=(reduce_sum monte_carlo silu sigmoid mathops foldif argmax)
+identity_green=(reduce_sum monte_carlo silu sigmoid mathops foldif argmax agent_step)
 if [ "$reduced_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-reduce-identity-wrong.out" || true)
   if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#identity_red[@]}" ]; then
@@ -1985,12 +2023,12 @@ if [ "$gath_verdict" = pass ]; then
       "$work/m-gather-mask.out" ||
       { cat "$work/m-gather-mask.out" >&2; fail "gather-mask-dropped: $k gathers out-of-range ids and should differ"; }
   done
-  for k in sort_rank merge_rank scatter_perm dequant; do
+  for k in sort_rank merge_rank scatter_perm dequant nearest_idx; do
     awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
       "$work/m-gather-mask.out" ||
       { cat "$work/m-gather-mask.out" >&2; fail "gather-mask-dropped: $k gathers through no mask and should be untouched"; }
   done
-  echo "PASS  mutant: gather-mask-dropped (layer 1 accepts it; on the device ${gather_red[*]} differs and the other four do not)"
+  echo "PASS  mutant: gather-mask-dropped (layer 1 accepts it; on the device ${gather_red[*]} differs and the other five do not)"
 else
   [ "$mverdict" = "$gath_verdict" ] ||
     { cat "$work/m-gather-mask.out" >&2; fail "gather-mask-dropped: the clean run is $gath_verdict but the mutant is $mverdict"; }
