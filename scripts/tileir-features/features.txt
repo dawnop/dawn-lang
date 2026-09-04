@@ -1,0 +1,185 @@
+# The Tile IR feature ledger: one row per PUBLIC OPCODE of the frozen table,
+# and what this backend has done about it. Knife T0; ruling 6 of the full
+# coverage prestudy (2026-09-05), which is recorded in
+# docs/tile-backend-design.md 2.4.
+#
+# This is the SECOND ledger. scripts/leetgpu-diff/problems.txt is the first
+# and says which leetgpu problems the backend solves; this one says which
+# Tile IR features it implements. The two are nearly orthogonal (the prestudy
+# measured the overlap at two to four problems), so they are two promises and
+# not two views of one. Neither replaces the other.
+#
+# The authority for the name, the code and the version is
+# NVIDIA/cuda-tile@be0889cd,
+# include/cuda_tile/Dialect/CudaTile/IR/BytecodeOpcodes.td (100 public
+# opcodes, 0x00 to 0x75 with the two frozen gaps 0x19-0x24 and 0x34-0x39) and
+# Ops.td's second string argument for the version. The authority for what is
+# IMPLEMENTED is the OP_ table in packages/tileir/src/bytecode.dawn: check.py
+# holds this file to it in both directions, so a knife that adds an opcode
+# without adding its row is red, and so is a row that claims one the writer
+# does not emit.
+#
+# COLUMNS
+#
+#   name        the dialect's mnemonic
+#   code        its frozen opcode
+#   since       the bytecode version it entered: 13.1, 13.2 or 13.3
+#   status      implemented | unimplemented | deferred | structural
+#   knife       the knife that implemented it, or the knife the prestudy
+#               plans it for (T1 to T10, T15; a T prefix means "not yet")
+#   layer       the highest layer that covers it, 0 to 3
+#   evidence    golden:<kernel>  a scripts/tile-golden kernel whose .mlir
+#                                contains the op and which a layer-2 program
+#                                launches on the device
+#               mutant:<family>  a mutant family that reddens on it
+#               writer:<fn>      the function in bytecode.dawn that emits it
+#   exemption   a named reason where a layer is impossible rather than
+#               merely absent, or `-`
+#
+# THE THREE LAYERS are docs/tile-backend-design.md 6.2:
+#
+#   1  the text and bytecode goldens, and `tileiras` accepting the bytecode
+#   2  a second opinion from the local 3080 against a hand-written host
+#      reference, through scripts/tile-gpu-diff
+#   3  a mutant that has to go red
+#
+# Ruling 1 of the prestudy sets the BAR AT LAYER 2, not layer 3: every
+# implemented opcode here reaches it, so no implemented row carries a layer-2
+# exemption today. Layer 3 is recorded where it exists and is not owed. The
+# rule for reading it, which is stricter than "a mutant reddens on a kernel
+# that contains the op": a mutant counts for an opcode when its anchor
+# changes how THAT opcode is written or what it computes (its opcode byte, an
+# attribute, a flag, an operand, or whether it is emitted at all). A mutant
+# that rewrites a kernel's algorithm, a host handler or an address ladder is
+# layer-2 evidence about a kernel and not layer-3 evidence about an opcode,
+# so ops covered only that way are recorded at layer 2. Two judgement calls
+# are written down rather than hidden: `grid-y-ignored` counts for
+# get_tile_block_id although its anchor is in runtime/c/dawn_rt.c, because it
+# is exactly the claim that the op's second result means something; and
+# `erf-sign-not-flipped` counts for `select` and `cmpf`, because what it
+# removes is that select and that compare.
+#
+# WHAT IS NOT AN OPCODE, and therefore has no row here:
+#
+#   sections    Debug (id 3), Global (id 6) and Producer (id 7, 13.3) are
+#               bytecode SECTIONS. `global` 0x31 and `get_global` 0x2C have
+#               rows because they are opcodes in the text dialect, but what
+#               knife T7 has to build is the Global section; the Debug
+#               section is deferred by ruling 4 until a toolchain ships
+#               `tileirdisasm`, and the Producer section is optional and not
+#               written.
+#   type tags   the scalar formats and the type constructors
+#               (BytecodeTypeOpcodes.td) are a separate table. Eight scalar
+#               formats and four constructors are missing; knives T3 and T9
+#               own them. The mutants `f64-tag-as-i64` and `bf16-tag-as-i16`
+#               are theirs, not any opcode's.
+#   attributes  the enum values and unit attributes (AttrDefs.td) are a
+#               third table. Knife T4 owns it, and T15 owns
+#               OptimizationHints.
+#
+# `entry` 0x16 and `module` 0x4B are STRUCTURAL: the writer never puts either
+# in the instruction stream. `module` is the file and `entry` is a record in
+# the Func section, both emitted by bytecode.encode_kernel, which is what
+# their evidence names. They are covered by every kernel here.
+#
+# name | code | since | status | knife | layer | evidence | exemption
+absf                     | 0x00 | 13.1 | implemented   | 7a  | 2 | golden:erf_sweep,golden:elemops                                                                                           | -
+absi                     | 0x01 | 13.1 | implemented   | 10  | 2 | golden:int_ops,golden:attn_window                                                                                         | -
+addf                     | 0x02 | 13.1 | implemented   | 3   | 3 | golden:prefix_sum,golden:vadd,mutant:addf-no-rounding                                                                     | -
+addi                     | 0x03 | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
+andi                     | 0x04 | 13.1 | implemented   | 10  | 2 | golden:scatter_perm,golden:histogram                                                                                      | -
+assert                   | 0x05 | 13.1 | unimplemented | T6  | 0 | -                                                                                                                         | -
+assume                   | 0x06 | 13.1 | unimplemented | T6  | 0 | -                                                                                                                         | -
+atomic_cas_tko           | 0x07 | 13.1 | implemented   | 14  | 3 | golden:cas_swap,mutant:atomic-cas-writes-an-rmw-mode,mutant:cas-compare-ignored                                           | -
+atomic_rmw_tko           | 0x08 | 13.1 | implemented   | 14  | 3 | golden:histogram,mutant:atomic-rmw-claims-weak-ordering,mutant:atomic-as-plain-store                                      | -
+bitcast                  | 0x09 | 13.1 | implemented   | 10  | 2 | golden:int_ops                                                                                                            | -
+break                    | 0x0A | 13.1 | unimplemented | T5  | 0 | -                                                                                                                         | -
+broadcast                | 0x0B | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
+cat                      | 0x0C | 13.1 | unimplemented | T2  | 0 | -                                                                                                                         | -
+ceil                     | 0x0D | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
+cmpf                     | 0x0E | 13.1 | implemented   | 7a  | 3 | golden:leaky_relu,golden:compact,mutant:erf-sign-not-flipped                                                              | -
+cmpi                     | 0x0F | 13.1 | implemented   | 7a  | 3 | golden:invert,golden:copy,mutant:mask-all-true                                                                            | -
+constant                 | 0x10 | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
+continue                 | 0x11 | 13.1 | implemented   | 5   | 2 | golden:foldif,golden:lora_hidden                                                                                          | -
+cos                      | 0x12 | 13.1 | unimplemented | T1  | 0 | -                                                                                                                         | -
+cosh                     | 0x13 | 13.1 | unimplemented | T1  | 0 | -                                                                                                                         | -
+divf                     | 0x14 | 13.1 | implemented   | 7a  | 2 | golden:silu,golden:sigmoid                                                                                                | -
+divi                     | 0x15 | 13.1 | implemented   | 10  | 2 | golden:subarray_sum2d,golden:subarray_sum3d                                                                               | -
+entry                    | 0x16 | 13.1 | structural    | 3   | 2 | golden:ols_beta,writer:encode_kernel                                                                                      | -
+exp                      | 0x17 | 13.1 | implemented   | 7b  | 2 | golden:silu,golden:sigmoid                                                                                                | -
+exp2                     | 0x18 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
+exti                     | 0x25 | 13.1 | implemented   | 10  | 3 | golden:invert,golden:count_eq,mutant:exti-sign-extends                                                                    | -
+extract                  | 0x26 | 13.1 | unimplemented | T2  | 0 | -                                                                                                                         | -
+floor                    | 0x27 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
+fma                      | 0x28 | 13.1 | implemented   | 7a  | 2 | golden:linrec,golden:erf_sweep                                                                                            | -
+for                      | 0x29 | 13.1 | implemented   | 5   | 3 | golden:foldif,golden:lora_hidden,mutant:for-results-not-rolled-back,mutant:loop-token-not-carried,mutant:region-stack-pop | -
+ftof                     | 0x2A | 13.1 | implemented   | 11  | 2 | golden:dot_f16                                                                                                            | -
+ftoi                     | 0x2B | 13.1 | implemented   | 10  | 3 | golden:int_ops,golden:sort_rank,mutant:ftoi-rounds-instead-of-truncates                                                   | -
+get_global               | 0x2C | 13.1 | unimplemented | T7  | 0 | -                                                                                                                         | -
+get_index_space_shape    | 0x2D | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+get_num_tile_blocks      | 0x2E | 13.1 | unimplemented | T2  | 0 | -                                                                                                                         | -
+get_tensor_shape         | 0x2F | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+get_tile_block_id        | 0x30 | 13.1 | implemented   | 3   | 3 | golden:invert,golden:copy,mutant:grid-y-ignored                                                                           | -
+global                   | 0x31 | 13.1 | unimplemented | T7  | 0 | -                                                                                                                         | -
+if                       | 0x32 | 13.1 | implemented   | 7b  | 2 | golden:foldif                                                                                                             | -
+int_to_ptr               | 0x33 | 13.1 | unimplemented | T2  | 0 | -                                                                                                                         | -
+iota                     | 0x3A | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
+itof                     | 0x3B | 13.1 | implemented   | 10  | 2 | golden:seg_scan,golden:int_ops                                                                                            | -
+join_tokens              | 0x3C | 13.1 | unimplemented | T2  | 0 | -                                                                                                                         | -
+load_ptr_tko             | 0x3D | 13.1 | implemented   | 3   | 3 | golden:ols_beta,golden:invert,mutant:load-dtype-f64,mutant:load-pad-flag-as-token,mutant:gather-mask-dropped              | -
+load_view_tko            | 0x3E | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+log                      | 0x3F | 13.1 | implemented   | 7b  | 2 | golden:mathops,golden:cce_row                                                                                             | -
+log2                     | 0x40 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
+loop                     | 0x41 | 13.1 | unimplemented | T5  | 0 | -                                                                                                                         | -
+make_partition_view      | 0x42 | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+make_tensor_view         | 0x43 | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+make_token               | 0x44 | 13.1 | implemented   | 3   | 3 | golden:ols_beta,golden:invert,mutant:make-token-as-iota                                                                   | -
+maxf                     | 0x45 | 13.1 | implemented   | 7a  | 2 | golden:relu,golden:clip                                                                                                   | -
+maxi                     | 0x46 | 13.1 | implemented   | 10  | 2 | golden:max_subarray,golden:int_ops                                                                                        | -
+minf                     | 0x47 | 13.1 | implemented   | 7a  | 2 | golden:clip,golden:foldif                                                                                                 | -
+mini                     | 0x48 | 13.1 | implemented   | 10  | 2 | golden:int_ops                                                                                                            | -
+mmaf                     | 0x49 | 13.1 | implemented   | 8   | 3 | golden:matpow_step,golden:lora_hidden,mutant:mma-acc-not-carried                                                          | -
+mmai                     | 0x4A | 13.1 | implemented   | 11  | 2 | golden:matmul_i8                                                                                                          | -
+module                   | 0x4B | 13.1 | structural    | 3   | 2 | golden:ols_beta,writer:encode_kernel                                                                                      | -
+mulf                     | 0x4C | 13.1 | implemented   | 7a  | 2 | golden:leaky_relu,golden:swiglu_act                                                                                       | -
+mulhii                   | 0x4D | 13.1 | implemented   | 10  | 2 | golden:int_ops                                                                                                            | -
+muli                     | 0x4E | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
+negf                     | 0x4F | 13.1 | implemented   | 7a  | 2 | golden:silu,golden:sigmoid                                                                                                | -
+negi                     | 0x50 | 13.1 | implemented   | 10  | 2 | golden:int_ops                                                                                                            | -
+offset                   | 0x51 | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
+ori                      | 0x52 | 13.1 | implemented   | 10  | 2 | golden:int_ops                                                                                                            | -
+permute                  | 0x53 | 13.1 | unimplemented | T2  | 0 | -                                                                                                                         | -
+pow                      | 0x54 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
+print_tko                | 0x55 | 13.1 | unimplemented | T6  | 0 | -                                                                                                                         | -
+ptr_to_int               | 0x56 | 13.1 | unimplemented | T2  | 0 | -                                                                                                                         | -
+ptr_to_ptr               | 0x57 | 13.1 | unimplemented | T2  | 0 | -                                                                                                                         | -
+reduce                   | 0x58 | 13.1 | implemented   | 7b  | 3 | golden:cce_mean,golden:attn_softmax,mutant:reduce-identity-wrong                                                          | -
+remf                     | 0x59 | 13.1 | unimplemented | T1  | 0 | -                                                                                                                         | -
+remi                     | 0x5A | 13.1 | implemented   | 10  | 2 | golden:subarray_sum2d,golden:subarray_sum3d                                                                               | -
+reshape                  | 0x5B | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
+return                   | 0x5C | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
+rsqrt                    | 0x5D | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
+scan                     | 0x5E | 13.1 | implemented   | 13  | 3 | golden:prefix_sum,golden:linrec,mutant:scan-result-drops-the-dim,mutant:scan-reverse-ignored                              | -
+select                   | 0x5F | 13.1 | implemented   | 7a  | 3 | golden:leaky_relu,golden:compact,mutant:erf-sign-not-flipped                                                              | -
+shli                     | 0x60 | 13.1 | implemented   | 10  | 2 | golden:int_ops                                                                                                            | -
+shri                     | 0x61 | 13.1 | implemented   | 10  | 3 | golden:rainbow,golden:int_ops,mutant:shri-always-logical                                                                  | -
+sin                      | 0x62 | 13.1 | unimplemented | T1  | 0 | -                                                                                                                         | -
+sinh                     | 0x63 | 13.1 | unimplemented | T1  | 0 | -                                                                                                                         | -
+sqrt                     | 0x64 | 13.1 | implemented   | 7b  | 2 | golden:rms_norm,golden:grpo_adv                                                                                           | -
+store_ptr_tko            | 0x65 | 13.1 | implemented   | 3   | 3 | golden:ols_beta,golden:invert,mutant:drop-store-token,mutant:store-token-unwritten                                        | -
+store_view_tko           | 0x66 | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+subf                     | 0x67 | 13.1 | implemented   | 7a  | 2 | golden:attn_softmax,golden:f16_ops                                                                                        | -
+subi                     | 0x68 | 13.1 | implemented   | 10  | 2 | golden:invert,golden:compact                                                                                              | -
+tan                      | 0x69 | 13.1 | unimplemented | T1  | 0 | -                                                                                                                         | -
+tanh                     | 0x6A | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
+trunci                   | 0x6B | 13.1 | implemented   | 10  | 2 | golden:invert,golden:int_ops                                                                                              | -
+xori                     | 0x6C | 13.1 | implemented   | 10  | 2 | golden:rainbow,golden:int_ops                                                                                             | -
+yield                    | 0x6D | 13.1 | implemented   | 7b  | 2 | golden:prefix_sum,golden:cce_mean                                                                                         | -
+atan2                    | 0x6E | 13.2 | unimplemented | T1  | 0 | -                                                                                                                         | -
+pack                     | 0x6F | 13.3 | unimplemented | T9  | 0 | -                                                                                                                         | -
+unpack                   | 0x70 | 13.3 | unimplemented | T9  | 0 | -                                                                                                                         | -
+alloca                   | 0x71 | 13.3 | unimplemented | T10 | 0 | -                                                                                                                         | -
+mmaf_scaled              | 0x72 | 13.3 | unimplemented | T10 | 0 | -                                                                                                                         | -
+make_gather_scatter_view | 0x73 | 13.3 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+make_strided_view        | 0x74 | 13.3 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+atomic_red_view_tko      | 0x75 | 13.3 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
