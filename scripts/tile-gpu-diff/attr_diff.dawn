@@ -1,0 +1,671 @@
+# Layer 2 for the attribute kernels (knife T4), the fourteenth of these
+# programs: one `!Gpu` program runs each of the eight kernels
+# scripts/tile-golden pins under `with_gpu_real` against the machine's GPU
+# and under `with_gpu_fake` against hand-written host references, and
+# prints what each device answered.
+#
+#   attr_diff <attr_round.cubin> <attr_nan.cubin> <attr_ftz.cubin>
+#             <attr_approx.cubin> <attr_overflow.cubin> <attr_memsem.cubin>
+#             <attr_addf.cubin> <attr_ucmp.cubin>
+#
+# The subject is the ATTRIBUTE DOMAINS rather than the opcode table: knife
+# T4 adds no opcode at all and writes, for the first time, the rest of
+# every enum and every unit attribute the operations here carry
+# (docs/tile-backend-design.md 2.4 and 6.8, and the ledger in
+# scripts/tileir-features/attrs.txt).
+#
+# What is new here and nowhere else:
+#
+#   * every kernel is SEGMENTED, and the segments are the same operation
+#     under different attribute values. The comparison against the host
+#     reference is the usual one; what is new is the second measurement,
+#     the `probe` line, which counts the lanes on which a PAIR of segments
+#     disagrees ON THE DEVICE. That number is the corpus half of the
+#     judgement: an attribute that reached the assembler and did nothing
+#     would leave every pair equal, and a mutant that writes the default
+#     value in its place would too.
+#   * f32 arithmetic in f64 BUFFERS. `flush_to_zero` and `approx` are
+#     refused on anything but an f32 tile, and std/gpu's real device has
+#     no f32 buffer format, so those kernels narrow inside and widen on
+#     the way out; binary64 holds every binary32 value, so the corpus
+#     crosses exactly.
+#   * a corpus of NaNs. Nothing before this compared a NaN to anything:
+#     the tolerance tier calls a NaN a failure on either side, and the
+#     exact tier compares rendered text, which is what makes `NaN` a
+#     value here rather than an absence.
+#   * an answer that is a LANE COUNT. `attr_ucmp` runs the same loop twice
+#     over a range that straddles 2^31 and counts its own iterations, so
+#     the difference between a signed and an unsigned bound comparison is
+#     0 against 32 and not a rounding.
+#
+# What the corpora have to carry, and why:
+#
+#   * results OFF the binary32 grid in `attr_round`. Two directed
+#     roundings of a result that is already representable are the same
+#     number, so the corpus puts the exact sum, product and quotient
+#     strictly between two neighbours: the second operand carries bits
+#     seven places below the first's last place, and the divisors are
+#     small odd integers, which is also what keeps the host's binary64
+#     quotient on the same side of the grid as the exact one.
+#   * NaNs on BOTH sides and on ONE side in `attr_nan`. `maxf` without
+#     `propagate_nan` answers a canonical NaN only when both operands are
+#     NaN, so a corpus with NaNs on one side only could not tell the two
+#     policies apart from `maxf` being wrong.
+#   * SUBNORMALS in `attr_ftz`, as operands and as results. Half the lanes
+#     add two subnormals (a subnormal sum, which the attribute flushes)
+#     and half multiply a subnormal by a normal (a subnormal product);
+#     with ordinary operands the four segments would be two pairs of
+#     equals and the kernel would say nothing.
+#   * a corpus that does NOT overflow in `attr_overflow`. An operation
+#     that wraps under `no_signed_wrap` is undefined, so a corpus that
+#     wrapped would be asking a question the dialect refuses to answer.
+#   * COLLIDING lanes in `attr_addf` and none in `attr_memsem`. The float
+#     atomic has four blocks adding into the same 128 slots, which is what
+#     makes it an atomic rather than a load and a store; the memory
+#     ordering kernel gives every lane its own slot, which is why its five
+#     attribute values are recorded at layer 1 and not at layer 2.
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, wrap_i32, attr_round_ref, attr_nan_ref,
+  attr_ftz_ref, attr_approx_ref, attr_overflow_ref, attr_memsem_ref, attr_addf_ref, attr_ucmp_ref }
+use std/list
+use std/map
+use std/narrow
+
+## leetgpu's own agreement criterion, and the tolerance tier's, the same
+## two numbers every family here uses.
+pub const ATOL: Float = 1.0e-5
+pub const RTOL: Float = 1.0e-5
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const ATTR_BLOCKS: Int = 4
+pub const ATTR_TILE: Int = 128
+
+## How many ATTR_TILE segments each kernel writes per block.
+pub const ROUND_SEGS: Int = 6
+pub const NAN_SEGS: Int = 16
+pub const FTZ_SEGS: Int = 4
+pub const APPROX_SEGS: Int = 2
+pub const OVERFLOW_SEGS: Int = 3
+pub const MEMSEM_SEGS: Int = 3
+pub const UCMP_SEGS: Int = 2
+
+## The loop bounds attr_ucmp was recorded with: a range that straddles
+## 2^31, so the signed comparison sees an upper bound below the lower one
+## and the unsigned one sees it thirty-two above.
+pub const UCMP_LO: Int = 0x7FFFFFF0
+pub const UCMP_HI: Int = 0x80000010
+
+## The tail every output buffer carries past its answer: lanes no kernel
+## here should write, so an operation that ran wide is visible.
+pub const TAIL: Int = 8
+
+## The sentinel an output buffer holds before a launch, where the kernel
+## does not read it back.
+pub const SENTINEL: Float = 0.0 - 12345.0
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, for the reason
+# gath_diff gives (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a
+## `gx` by 1 by 1 grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. The LAST buffer is the output, and the
+## one this reads back; two of these kernels write into a buffer they also
+## read, which is what an atomic does and which the reference answers the
+## same way.
+fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = gpu.gpu_download(hs[len(hs) - 1])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+# ---- the tier ----
+
+## Whether `got` is within the tolerance tier's distance of `want`, by
+## leetgpu's own criterion. A NaN on either side is never within.
+pub fn within(got: Float, want: Float) -> Bool =
+  if got != got || want != want {
+    false
+  } else if got == want {
+    true
+  } else if got - got != 0.0 || want - want != 0.0 {
+    false
+  } else {
+    let d = if got > want { got - want } else { want - got }
+    let m = if want > 0.0 { want } else { 0.0 - want }
+    d <= ATOL + RTOL * m
+  }
+
+fn all_within(got: List[Float], want: List[Float]) -> Bool =
+  len(got) == len(want) && list.all(range(0, len(want)), i => within(got[i], want[i]))
+
+fn scaled_miss(got: List[Float], want: List[Float]) -> Float =
+  list.fold(range(0, len(want)), 0.0, (acc, i) => {
+    let a = got[i]
+    let b = want[i]
+    let d = if a > b { a - b } else { b - a }
+    let m = if b > 0.0 { b } else { 0.0 - b }
+    let s = d / (ATOL + RTOL * m)
+    if s > acc { s } else { acc }
+  })
+
+fn pair(real: Trace, fake: Trace) -> Option[(List[Float], List[Float])] =
+  match (real.result, fake.result) {
+    (Some(a), Some(b)) -> if len(a) == len(b) { Some((a, b)) } else { None }
+    _ -> None
+  }
+
+## The lanes of the exact tier that disagree, named. `to_string` renders
+## `-0.0` and `NaN` as themselves, so this is a bit-for-bit comparison.
+fn miss_line(tier: String, real: Trace, fake: Trace) -> String = match pair(real, fake) {
+  Some((a, b)) ->
+    if tier == "tolerance" {
+      "${scaled_miss(a, b)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})"
+    } else {
+      let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+      if len(bad) == 0 {
+        "none"
+      } else {
+        "${len(bad)} of ${len(a)} lanes, first at ${bad[0]}: ${a[bad[0]]} vs ${b[bad[0]]}"
+      }
+    }
+  None -> "-"
+}
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one kernel under its tier.
+fn verdict(tier: String, fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:" ++ tier
+  } else if tier == "exact" {
+    "differ:result"
+  } else {
+    match pair(real, fake) {
+      Some((a, b)) -> if all_within(a, b) { "close:tolerance" } else { "differ:result" }
+      None -> "differ:result"
+    }
+  }
+}
+
+# ---- the probe: what the attribute did on the device ----
+
+# Lane `lane` of segment `j` of block `b`, in a buffer of `segs` segments
+# of ATTR_TILE lanes per block.
+fn at(segs: Int, b: Int, j: Int, lane: Int) -> Int = b * segs * ATTR_TILE + j * ATTR_TILE + lane
+
+## How many lanes of segment `ja` differ from the matching lane of segment
+## `jb`, across every block. This is the number an attribute has to move:
+## the two segments are the same operation on the same operands under two
+## different attribute values, so a zero here says the value did not reach
+## the device, whatever the reference agreed about.
+fn differing(v: List[Float], segs: Int, ja: Int, jb: Int) -> Int =
+  len(list.filter(range(0, ATTR_BLOCKS * ATTR_TILE), k => {
+    let b = k / ATTR_TILE
+    let lane = k % ATTR_TILE
+    to_string(v[at(segs, b, ja, lane)]) != to_string(v[at(segs, b, jb, lane)])
+  }))
+
+## The largest RELATIVE distance between two segments, which is what the
+## approximate square root is measured by: it has no host definition, so
+## the number recorded is how far the architecture's approximation is from
+## the correctly rounded root it sits beside.
+fn segment_distance(v: List[Float], segs: Int, ja: Int, jb: Int) -> Float =
+  list.fold(range(0, ATTR_BLOCKS * ATTR_TILE), 0.0, (acc, k) => {
+    let b = k / ATTR_TILE
+    let lane = k % ATTR_TILE
+    let a = v[at(segs, b, ja, lane)]
+    let c = v[at(segs, b, jb, lane)]
+    let d = if a > c { a - c } else { c - a }
+    let m = if a > 0.0 { a } else { 0.0 - a }
+    let s = if m == 0.0 { d } else { d / m }
+    if s > acc { s } else { acc }
+  })
+
+## The probe line for one kernel: what the segments say about each other.
+## run.sh pins every count on it above zero.
+fn probe_line(name: String, o: Option[List[Float]]) -> String = match o {
+  None -> "-"
+  Some(v) ->
+    if name == "attr_round" {
+      "add=${differing(v, ROUND_SEGS, 0, 1)} mul=${differing(v, ROUND_SEGS, 2, 3)}"
+        ++ " div=${differing(v, ROUND_SEGS, 4, 5)}"
+    } else if name == "attr_nan" {
+      let ordering = list.fold(range(0, 6), 0, (acc, j) => acc + differing(v, NAN_SEGS, j, j + 6))
+      "ordering=${ordering} maxf=${differing(v, NAN_SEGS, 12, 13)}"
+        ++ " minf=${differing(v, NAN_SEGS, 14, 15)}"
+    } else if name == "attr_ftz" {
+      "add=${differing(v, FTZ_SEGS, 0, 1)} mul=${differing(v, FTZ_SEGS, 2, 3)}"
+    } else if name == "attr_approx" {
+      "lanes=${differing(v, APPROX_SEGS, 0, 1)}"
+        ++ " distance=${segment_distance(v, APPROX_SEGS, 0, 1)}"
+    } else if name == "attr_ucmp" {
+      "signed=${v[at(UCMP_SEGS, 0, 0, 0)]} unsigned=${v[at(UCMP_SEGS, 0, 1, 0)]}"
+    } else {
+      "-"
+    }
+}
+
+# ---- the corpora ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+fn magnitude(v: Float) -> Float = if v < 0.0 { 0.0 - v } else { v }
+
+## The first operand of attr_round: binary32 values just above 1, whose
+## last place is 2^-23.
+fn round_x() -> List[Float] =
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i => narrow.round_f32(1.0 + to_float(i) * POW_M23))
+
+## The second: a small ODD integer scaled by 2^-30, so that
+##
+##   * the exact sum carries bits seven places below the first operand's
+##     last place and is therefore strictly between two binary32
+##     neighbours, which is what makes the two directions differ;
+##   * the exact product has about twenty-nine significant bits, the same
+##     way;
+##   * the exact quotient is a ratio whose denominator is under 32, so it
+##     is never within 2^-29 of a binary32 grid point and the host's
+##     binary64 division lands on the same side of the grid as the exact
+##     quotient would. That is the whole argument for the two division
+##     segments being exact tier.
+fn round_y() -> List[Float] =
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i => narrow.round_f32(to_float(2 * (i % 15) + 3) * POW_M30))
+
+const POW_M23: Float = 1.0 / 8388608.0
+const POW_M30: Float = 1.0 / 1073741824.0
+
+## The smallest binary32 subnormal, 2^-149, and the smallest normal one.
+const F32_MIN_SUBNORMAL: Float = 1.401298464324817e-45
+const F32_MIN_NORMAL: Float = 1.1754943508222875e-38
+
+## attr_nan's two operands. Eight values cycle on each side and the two
+## cycles have different lengths, so the pairs cover NaN against a number,
+## a number against a NaN, NaN against NaN, the two infinities, the two
+## zeros and ordinary pairs of both orders.
+fn nan_values(shift: Int) -> List[Float] = {
+  let nan = 0.0 / 0.0
+  let inf = 1.0 / 0.0
+  let table = [nan, 1.0, 0.0 - 1.0, 0.0, 0.0 - 0.0, inf, 0.0 - inf, 2.5]
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i => table[(i + shift) % 8])
+}
+
+## attr_ftz's operands: on the even lanes two subnormals, whose sum is
+## subnormal, and on the odd lanes a subnormal against a normal, whose
+## product is subnormal. Both halves are needed, because the addition
+## shows the attribute on the first and the multiplication on the second.
+fn ftz_x() -> List[Float] =
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i =>
+      F32_MIN_SUBNORMAL * to_float(1 + i % 7))
+
+fn ftz_y() -> List[Float] =
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i =>
+      if i % 2 == 0 { F32_MIN_SUBNORMAL * to_float(1 + i % 5) } else { 1.0 })
+
+## attr_approx's argument: positive binary32 values spread over six binary
+## exponents, none of them a perfect square except by accident.
+fn approx_x() -> List[Float] =
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i =>
+      narrow.round_f32(0.5 + to_float(i) * 0.37) * to_float(1 << (i % 6)))
+
+## attr_overflow's operands: small enough that none of the three
+## operations leaves the 32-bit range on any lane.
+fn overflow_x() -> List[Float] =
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i => to_float(i % 211 - 105))
+
+fn overflow_y() -> List[Float] =
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i => to_float(i % 97 - 48))
+
+## attr_memsem's addend, and the contents its output buffer starts with:
+## every lane owns its own slot, so what comes back is the sum of the two.
+fn memsem_x() -> List[Float] =
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i => to_float(i % 53 + 1))
+
+fn memsem_out() -> List[Float] =
+  list.map(range(0, ATTR_BLOCKS * MEMSEM_SEGS * ATTR_TILE + TAIL), i => to_float(i % 17))
+
+## attr_addf's four chunks, and the contents of the 128 slots every block
+## adds into. The values are small integers, exact in binary64 under any
+## order, which is what makes a kernel whose lanes collide an exact-tier
+## kernel.
+fn addf_x() -> List[Float] =
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i => to_float(i % 31 + 1))
+
+fn addf_out() -> List[Float] =
+  list.map(range(0, ATTR_TILE + TAIL), i => to_float(i % 7) * 4.0)
+
+## How many lanes of a corpus carry the property the kernel needs. run.sh
+## holds each of these above zero.
+fn corpus_line(name: String) -> String =
+  if name == "attr_round" {
+    let x = round_x()
+    let y = round_y()
+    let idx = range(0, ATTR_BLOCKS * ATTR_TILE)
+    let off_grid = list.filter(idx, i => narrow.round_f32(x[i] + y[i]) != x[i] + y[i])
+    let odd = list.filter(idx, i => to_int(y[i] * 1073741824.0) % 2 == 1)
+    "lanes=${len(idx)} sum_off_grid=${len(off_grid)} odd_divisors=${len(odd)}"
+  } else if name == "attr_nan" {
+    let x = nan_values(0)
+    let y = nan_values(3)
+    let idx = range(0, ATTR_BLOCKS * ATTR_TILE)
+    let one = list.filter(idx, i => (x[i] != x[i]) != (y[i] != y[i]))
+    let both = list.filter(idx, i => x[i] != x[i] && y[i] != y[i])
+    let neither = list.filter(idx, i => x[i] == x[i] && y[i] == y[i])
+    "lanes=${len(idx)} nan_one_side=${len(one)} nan_both=${len(both)} nan_neither=${len(neither)}"
+  } else if name == "attr_ftz" {
+    let x = ftz_x()
+    let y = ftz_y()
+    let idx = range(0, ATTR_BLOCKS * ATTR_TILE)
+    let sub_sum = list.filter(idx, i => magnitude(x[i] + y[i]) < F32_MIN_NORMAL)
+    let sub_product = list.filter(idx, i => magnitude(narrow.round_f32(x[i] * y[i])) < F32_MIN_NORMAL
+        && narrow.round_f32(x[i] * y[i]) != 0.0)
+    "lanes=${len(idx)} subnormal_sum=${len(sub_sum)} subnormal_product=${len(sub_product)}"
+  } else if name == "attr_overflow" {
+    let x = overflow_x()
+    let y = overflow_y()
+    let idx = range(0, ATTR_BLOCKS * ATTR_TILE)
+    let safe = list.filter(idx, i => magnitude(x[i] * y[i]) < 2147483648.0)
+    "lanes=${len(idx)} within_range=${len(safe)}"
+  } else if name == "attr_addf" {
+    "slots=${ATTR_TILE} adders_per_slot=${ATTR_BLOCKS}"
+  } else {
+    "lanes=${ATTR_BLOCKS * ATTR_TILE}"
+  }
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String =
+  ["attr_round", "attr_nan", "attr_ftz", "attr_approx", "attr_overflow", "attr_memsem",
+    "attr_addf", "attr_ucmp"][i]
+
+## The one tolerance-tier kernel here: the approximate square root has no
+## host definition, so its two segments are held to the tolerance and what
+## the attribute did is the distance between them (the `probe` line).
+## Every other kernel is exact, and each for a stated reason: the directed
+## roundings are the format's own answers, the comparisons and the NaN
+## policies are exact by definition, the flush is a substitution, the
+## integer operations are exact, and the float atomic's collisions are
+## exact by algebra (small integers sum the same in any order).
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier`
+## column of scripts/leetgpu-diff/problems.txt against it. No kernel here
+## is a leetgpu problem, so what it contributes is only this name.
+pub fn tolerance_tier() -> List[String] = ["attr_approx"]
+
+fn tier_of(i: Int) -> String =
+  if list.any(tolerance_tier(), n => n == case_name(i)) { "tolerance" } else { "exact" }
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order.
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let name = case_name(i)
+  if name == "attr_round" {
+    [("f64", round_x()), ("f64", round_y()),
+      ("f64", sentinel_buffer(ATTR_BLOCKS * ROUND_SEGS * ATTR_TILE + TAIL))]
+  } else if name == "attr_nan" {
+    [("f64", nan_values(0)), ("f64", nan_values(3)),
+      ("f64", sentinel_buffer(ATTR_BLOCKS * NAN_SEGS * ATTR_TILE + TAIL))]
+  } else if name == "attr_ftz" {
+    [("f64", ftz_x()), ("f64", ftz_y()),
+      ("f64", sentinel_buffer(ATTR_BLOCKS * FTZ_SEGS * ATTR_TILE + TAIL))]
+  } else if name == "attr_approx" {
+    [("f64", approx_x()), ("f64", sentinel_buffer(ATTR_BLOCKS * APPROX_SEGS * ATTR_TILE + TAIL))]
+  } else if name == "attr_overflow" {
+    [("i32", overflow_x()), ("i32", overflow_y()),
+      ("i32", list.map(range(0, ATTR_BLOCKS * OVERFLOW_SEGS * ATTR_TILE + TAIL), _i => 0.0))]
+  } else if name == "attr_memsem" {
+    [("i32", memsem_x()), ("i32", memsem_out())]
+  } else if name == "attr_addf" {
+    [("f64", addf_x()), ("f64", addf_out())]
+  } else {
+    [("i32", sentinel_buffer(ATTR_BLOCKS * UCMP_SEGS * ATTR_TILE + TAIL))]
+  }
+}
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
+  let name = case_name(i)
+  if name == "attr_round" {
+    map.from([("attr_round", (3, last_out((dts, ins) => attr_round_ref(ATTR_BLOCKS, dts, ins))))])
+  } else if name == "attr_nan" {
+    map.from([("attr_nan", (3, last_out((dts, ins) => attr_nan_ref(ATTR_BLOCKS, dts, ins))))])
+  } else if name == "attr_ftz" {
+    map.from([("attr_ftz", (3, last_out((dts, ins) => attr_ftz_ref(ATTR_BLOCKS, dts, ins))))])
+  } else if name == "attr_approx" {
+    map.from([("attr_approx", (2, last_out((dts, ins) => attr_approx_ref(ATTR_BLOCKS, dts, ins))))])
+  } else if name == "attr_overflow" {
+    map.from([("attr_overflow", (3, last_out((dts, ins) => attr_overflow_ref(ATTR_BLOCKS, dts, ins))))])
+  } else if name == "attr_memsem" {
+    map.from([("attr_memsem", (2, last_out((dts, ins) => attr_memsem_ref(ATTR_BLOCKS, dts, ins))))])
+  } else if name == "attr_addf" {
+    map.from([("attr_addf", (2, last_out((dts, ins) => attr_addf_ref(ATTR_BLOCKS, dts, ins))))])
+  } else {
+    map.from([("attr_ucmp",
+      (1, last_out((dts, ins) => attr_ucmp_ref(ATTR_BLOCKS, UCMP_LO, UCMP_HI, dts, ins))))])
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones. The
+## tail is where a write that ran wide shows.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn buffers_of(i: Int) -> String =
+  list.fold(case_bufs(i), "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("attr_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !Exit !io = {
+  io.eprintln("usage: attr_diff <attr_round.cubin> <attr_nan.cubin> <attr_ftz.cubin>"
+      ++ " <attr_approx.cubin> <attr_overflow.cubin> <attr_memsem.cubin> <attr_addf.cubin>"
+      ++ " <attr_ucmp.cubin>")
+  io.exit(2)
+}
+
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  let count = 8
+  if len(paths) != count { usage() } else { () }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var tolerance_count = 0
+  var probes = ""
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, ATTR_BLOCKS, bufs))
+    let real = with_gpu_real(cubins, () => stages(name, ATTR_BLOCKS, bufs))
+    let tier = tier_of(i)
+    let v = verdict(tier, fake, real)
+    io.println("kernel ${name} tier=${tier} bufs=${buffers_of(i)} grid=(${ATTR_BLOCKS}, 1, 1)")
+    io.println("  index ${corpus_line(name)}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  miss  ${miss_line(tier, real, fake)}")
+    let p = if stopped(real) == "" { probe_line(name, real.result) } else { "-" }
+    if p != "-" {
+      io.println("  probe ${p}")
+      probes = probes ++ (if probes == "" { "" } else { " " }) ++ name ++ ":" ++ p
+    } else {
+      ()
+    }
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v == "close:tolerance" || v == "identical:tolerance" {
+      tolerance_count = tolerance_count + 1
+    } else {
+      ()
+    }
+    if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" {
+      all_agreed = false
+    } else {
+      ()
+    }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+      && v != "identical:tolerance" {
+        blocked = v
+      } else {
+        ()
+      }
+  }
+  # The measurement, recorded and not asserted: what each attribute did to
+  # the segment beside it on this device. run.sh pins the counts above
+  # zero; the distance is the one number here nothing constrains, because
+  # nothing on the host defines the approximate square root.
+  io.println("probe attrs ${probes}")
+  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
