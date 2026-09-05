@@ -1,0 +1,159 @@
+# The Tile IR ATTRIBUTE ledger: one row per value of every attribute domain
+# the dialect defines, and what this backend has done about it. Knife T4;
+# ruling 6 of the full coverage prestudy (2026-09-05), which is recorded in
+# docs/tile-backend-design.md 2.4, and the measurements in 6.8.
+#
+# This is the THIRD ledger in this directory. features.txt says which of the
+# hundred public OPCODES this backend implements, types.txt which of the 23
+# TYPE TAGS, and this one which values of the attribute domains it writes.
+# They are three separate promises. An opcode can be implemented while the
+# enum it carries has six values nobody has ever written, which is exactly
+# the state knife T4 found and the reason this file exists. One check.py
+# reads all three: the parser, the status / knife / layer rules and the
+# evidence splitter are shared, and only the expected set and the evidence
+# kinds are this table's own.
+#
+# The authority for the name, the code and the version is
+# NVIDIA/cuda-tile@be0889cd:
+# include/cuda_tile/Dialect/CudaTile/IR/AttrDefs.td for the six enum
+# families and Ops.td for the unit attributes. A UnitAttr has no enum: it is
+# present or absent, and its presence is a BIT in the flags word, so its
+# `code` here is that bit and not an enum value.
+#
+# WHAT IS NOT HERE. `ComparisonPredicate` (six values, all six written since
+# knife 7a) and `Signedness` (two, both since knife 10) are enums whose
+# value is chosen by the operation the caller asked for rather than by an
+# attribute the caller could have set otherwise; they are the operation's
+# name spelled twice and carry no coverage question, so ruling 6's list
+# leaves them out and so does this file. `OptimizationHints` is a dictionary
+# and not a domain of values; knife T15 owns it.
+#
+# COLUMNS
+#
+#   feature     `<family>.<value>`, the dialect's own spelling of both
+#   code        the enum value, or for a unit attribute the flags BIT it
+#               sets in the operations that carry it
+#   since       the bytecode version the VALUE entered: 13.1, 13.2 or 13.3
+#   status      implemented | unimplemented | deferred, read as the other
+#               two ledgers read them. `deferred` covers two situations
+#               here and the exemption says which: `ruling 2` is the view
+#               family, and `no-client-kernel` is a value the writer's own
+#               table can already spell while no kernel asks for it (eight
+#               of the ten atomic modes are in that state, and calling them
+#               implemented would claim a coverage that does not exist)
+#   knife       the knife that wrote the value first, or the knife the
+#               prestudy plans it for; check.py's LANDED_KNIVES holds the
+#               two directions, as it does for the other two ledgers
+#   layer       the highest layer that covers it, 0 to 3
+#   evidence    const:<NAME>    the constant in packages/tileir/src/bytecode.dawn
+#                               that holds this value; its value is checked
+#                               against the `code` column, which is what
+#                               binds this file to the writer the way the
+#                               OP_ table binds features.txt
+#               writer:<fn>     the function in bytecode.dawn that writes
+#                               the value, where it is a literal in a table
+#                               rather than a named constant
+#               golden:<kernel> a scripts/tile-golden kernel that carries
+#                               the value. Unlike the type ledger's
+#                               `golden:`, this is NOT held to the .mlir
+#                               spelling it: most attribute values are the
+#                               dialect's defaults and its printer leaves
+#                               them out, so the text is silent about them
+#                               by design
+#               device:<kernel> a kernel a scripts/tile-gpu-diff program
+#                               launches, whose answer DEPENDS on the value
+#               mutant:<family> a mutant family that reddens on it
+#   exemption   a named reason, where the bar of layer 2 is impossible
+#               rather than merely absent, and `-` at or above the bar.
+#               check.py holds both directions, as it does for types.txt
+#
+# THE THREE LAYERS are docs/tile-backend-design.md 6.2, and layer 3 is read
+# here as features.txt reads it: a mutant counts for a value when its anchor
+# changes HOW THAT VALUE IS WRITTEN, not when it happens to go red on a
+# device. That reading matters more here than for the opcodes, because an
+# attribute value written wrong is usually still a legal program:
+# `overflow<none>` where `no_signed_wrap` belongs assembles, runs and
+# computes the same answer.
+#
+# A `device:` token is therefore a stronger claim than "the device ran this
+# kernel". It says the ANSWER depends on the value: `attr_memsem` runs on
+# the device and agrees, and none of its five ordering and scope values
+# names it, because every ordering computes the same sums on a corpus with
+# no race in it.
+#
+# THE NAMED EXEMPTIONS, in full:
+#
+#   assumption-not-arithmetic
+#       `nsw`, `nuw` and `nw` tell the compiler what it may assume, and a
+#       program that overflows under one of them is undefined. A corpus
+#       that keeps the promise computes the same thing with the attribute
+#       and without it; one that breaks it has no defined answer to compare
+#       against. Ruling 1 of the prestudy names these three.
+#       scripts/tile-golden's overflow-attr-not-written is the mutant, and
+#       it goes red at layer 1: the assembler cannot parse a stream with
+#       the attribute missing.
+#   no-race-in-corpus
+#       A memory ordering and a memory scope constrain CONCURRENT accesses.
+#       attr_memsem gives every lane its own slot and every block its own
+#       384, so nothing races and every ordering computes the same sums. A
+#       judgement about the ordering itself needs two blocks observing each
+#       other and a comparison shape this repository does not have (the
+#       exact tier compares one buffer after one launch). The mutant is
+#       scripts/tile-golden's atomic-memory-attrs-swapped, red at layer 1.
+#       `scope.device` is NOT exempt: leetgpu 13's histogram collides
+#       across tile blocks, so a narrower scope would be a wrong answer,
+#       and that is a device judgement.
+#   no-client-kernel
+#       The writer's `rmw_mode_value` spells all ten atomic modes and only
+#       two of them have a kernel. The table is right and nothing exercises
+#       it, so the eight others are deferred rather than implemented.
+#   ruling 2
+#       The view family, deferred with the nine view opcodes until knives
+#       T11 to T13 (docs 2.4). `PaddingValue` is a parameter of the view
+#       TYPES (Types.td), not of any operation this backend emits.
+#
+# feature | code | since | status | knife | layer | evidence | exemption
+rounding.nearest_even        | 0 | 13.1 | implemented   | 3   | 3 | const:ROUND_NEAREST_EVEN,golden:vadd,device:vadd,mutant:addf-no-rounding                              | -
+rounding.zero                | 1 | 13.1 | implemented   | 10  | 2 | const:ROUND_ZERO,golden:int_ops,device:int_ops                                                        | -
+rounding.negative_inf        | 2 | 13.1 | implemented   | T4  | 3 | const:ROUND_NEGATIVE_INF,golden:attr_round,device:attr_round,mutant:directed-rounding-as-nearest-even | -
+rounding.positive_inf        | 3 | 13.1 | implemented   | T4  | 3 | const:ROUND_POSITIVE_INF,golden:attr_round,device:attr_round,mutant:directed-rounding-as-nearest-even | -
+rounding.approx              | 4 | 13.1 | implemented   | T4  | 3 | const:ROUND_APPROX,golden:attr_approx,device:attr_approx,mutant:sqrt-approx-as-nearest-even           | -
+rounding.full                | 5 | 13.1 | implemented   | 7b  | 2 | const:ROUND_FULL,golden:mathops,device:mathops                                                        | -
+rounding.nearest_int_to_zero | 6 | 13.1 | implemented   | 10  | 3 | const:ROUND_INT_TO_ZERO,golden:int_ops,device:int_ops,mutant:ftoi-rounds-instead-of-truncates         | -
+overflow.none                | 0 | 13.1 | implemented   | 10  | 2 | const:OVERFLOW_NONE,golden:int_ops,device:int_ops                                                     | -
+overflow.nsw                 | 1 | 13.1 | implemented   | T4  | 1 | const:OVERFLOW_NSW,golden:attr_overflow,mutant:overflow-attr-not-written                              | assumption-not-arithmetic
+overflow.nuw                 | 2 | 13.1 | implemented   | T4  | 1 | const:OVERFLOW_NUW,golden:attr_overflow,mutant:overflow-attr-not-written                              | assumption-not-arithmetic
+overflow.nw                  | 3 | 13.1 | implemented   | T4  | 1 | const:OVERFLOW_NW,golden:attr_overflow,mutant:overflow-attr-not-written                               | assumption-not-arithmetic
+ordering.unordered           | 0 | 13.1 | implemented   | T4  | 3 | const:CMP_UNORDERED,golden:attr_nan,device:attr_nan,mutant:cmpf-always-ordered                        | -
+ordering.ordered             | 1 | 13.1 | implemented   | 7a  | 2 | const:CMP_ORDERED,golden:leaky_relu,device:leaky_relu                                                 | -
+scope.tl_blk                 | 0 | 13.1 | implemented   | T4  | 1 | const:SCOPE_TL_BLK,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                              | no-race-in-corpus
+scope.device                 | 1 | 13.1 | implemented   | 14  | 2 | const:SCOPE_DEVICE,golden:histogram,device:histogram                                                  | -
+scope.sys                    | 2 | 13.1 | implemented   | T4  | 1 | const:SCOPE_SYS,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                                 | no-race-in-corpus
+memsem.weak                  | 0 | 13.1 | implemented   | 3   | 3 | const:ORDER_WEAK,golden:vadd,device:vadd,mutant:atomic-rmw-claims-weak-ordering                       | -
+memsem.relaxed               | 1 | 13.1 | implemented   | 14  | 3 | const:ORDER_RELAXED,golden:histogram,device:histogram,mutant:atomic-rmw-claims-weak-ordering          | -
+memsem.acquire               | 2 | 13.1 | implemented   | T4  | 1 | const:ORDER_ACQUIRE,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                             | no-race-in-corpus
+memsem.release               | 3 | 13.1 | implemented   | T4  | 1 | const:ORDER_RELEASE,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                             | no-race-in-corpus
+memsem.acq_rel               | 4 | 13.1 | implemented   | T4  | 1 | const:ORDER_ACQ_REL,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                             | no-race-in-corpus
+rmw.and                      | 0 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.or                       | 1 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.xor                      | 2 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.add                      | 3 | 13.1 | implemented   | 14  | 3 | writer:rmw_mode_value,golden:histogram,device:histogram,mutant:atomic-as-plain-store                  | -
+rmw.addf                     | 4 | 13.1 | implemented   | T4  | 3 | writer:rmw_mode_value,golden:attr_addf,device:attr_addf,mutant:rmw-addf-as-add                        | -
+rmw.max                      | 5 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.min                      | 6 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.umax                     | 7 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.umin                     | 8 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.xchg                     | 9 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+unit.flush_to_zero           | 1 | 13.1 | implemented   | T4  | 3 | const:FLOAT_FLAG_FTZ,golden:attr_ftz,device:attr_ftz,mutant:ftz-bit-dropped                           | -
+unit.propagate_nan           | 1 | 13.1 | implemented   | T4  | 3 | const:MINMAX_FLAG_PROPAGATE_NAN,golden:attr_nan,device:attr_nan,mutant:propagate-nan-bit-dropped      | -
+unit.unsignedCmp             | 1 | 13.2 | implemented   | T4  | 3 | const:FOR_FLAG_UNSIGNED,golden:attr_ucmp,device:attr_ucmp,mutant:for-unsigned-bit-dropped             | -
+unit.fast_acc                | 1 | 13.3 | unimplemented | T8  | 0 | -                                                                                                     | -
+unit.constant                | 1 | 13.3 | unimplemented | T7  | 0 | -                                                                                                     | -
+unit.global                  | 1 | 13.3 | unimplemented | T10 | 0 | -                                                                                                     | -
+padding.zero                 | 0 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+padding.neg_zero             | 1 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+padding.nan                  | 2 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+padding.pos_inf              | 3 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+padding.neg_inf              | 4 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+visibility.public            | 0 | 13.1 | unimplemented | T7  | 0 | -                                                                                                     | -
+visibility.private           | 1 | 13.1 | unimplemented | T7  | 0 | -                                                                                                     | -
