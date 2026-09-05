@@ -211,6 +211,35 @@
 #                            location", which is the negation of what an
 #                            atomic is for, and the dialect refuses to let a
 #                            kernel say both
+#     overflow-attr-not-written
+#                            the writer stops writing the `overflow`
+#                            attribute of the three assumptions knife T4
+#                            added, so the reader takes the first operand
+#                            index for the enum -> attr_overflow's text is
+#                            untouched, its Func section is three bytes
+#                            short, and tileiras answers `invalid integer
+#                            value for enum type: 18`. The three values
+#                            are assumptions the COMPILER may make and no
+#                            corpus can see them, so this is where they
+#                            are covered and the ledger says so
+#     atomic-memory-attrs-swapped
+#                            the writer swaps the memory ordering and the
+#                            memory scope of the three suffixed atomic
+#                            modes, which is the copy-paste error a table
+#                            of triples invites -> attr_memsem's text is
+#                            untouched (the renderer has its own table),
+#                            its bytes are the same length and differ, and
+#                            tileiras refuses them: 3 is not a memory
+#                            scope. The same anchor carries all six values
+#                            (three orderings, three scopes)
+#     rmw-addf-as-add        the writer gives the `addf` atomic mode the
+#                            integer `add`'s enum value -> attr_addf's
+#                            text is untouched, its bytes are the same
+#                            length and differ, and tileiras refuses them:
+#                            `add` works only with i32 and i64. The two
+#                            modes are one enum and neighbours in it, so
+#                            this is the one byte between an integer sum
+#                            and a float one
 #     atomic-cas-writes-an-rmw-mode
 #                            the writer gives `atomic_cas_tko` a `mode`
 #                            byte, which is the copy of the read-modify-write
@@ -288,7 +317,9 @@ kernels=(
   token_join ptr_roundtrip ptr_recast
   dtype_i16 dtype_i64 dtype_tf32 dtype_e4m3
   dtype_e5m2 dtype_e8m0
-  loop_count loop_bound loop_until loop_none)
+  loop_count loop_bound loop_until loop_none
+  attr_round attr_nan attr_ftz attr_approx
+  attr_overflow attr_memsem attr_addf attr_ucmp)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -352,6 +383,9 @@ mutants=(
   e8m0-tag-as-f8e5m2
   loop-carried-not-rolled-back
   break-values-missing
+  overflow-attr-not-written
+  atomic-memory-attrs-swapped
+  rmw-addf-as-add
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -716,11 +750,28 @@ if run_item load-dtype-f64; then
   echo "PASS  mutant: load-dtype-f64 (vadd_f32 refused at trace time on both backends; vadd untouched)"
 fi
 
-# The length varint of the Func section: byte 13, after the 12-byte header
-# and the section id. One byte while the section is under 128 bytes, which
-# the two kernels' are; a bigger kernel would need the varint decoded.
+# The length varint of the Func section: it starts at byte 13, after the
+# 12-byte header and the section id, and it is LEB128. One byte while the
+# section is under 128 bytes, which the first kernels to use this were;
+# knife T4's attr_overflow is 200 bytes of function, so the varint is
+# decoded properly rather than read as one byte.
 func_len() { # tilebc
-  od -An -tu1 -j 13 -N 1 "$1" | tr -d ' \n'
+  python3 - "$1" <<'PY'
+import sys
+
+data = open(sys.argv[1], "rb").read()
+value = 0
+shift = 0
+i = 13
+while True:
+    byte = data[i]
+    value |= (byte & 0x7F) << shift
+    if byte < 0x80:
+        break
+    shift += 7
+    i += 1
+print(value)
+PY
 }
 
 # A writer mutant: the text of <kernel> is untouched on both backends (the
@@ -729,14 +780,14 @@ func_len() { # tilebc
 # fragment in its output. <shape> says how the mutant's file relates to the
 # golden's: `same-size` (the file is the same length: a value changed in
 # place, or a Func section that lost bytes the padding after it took back),
-# `func-one-short` (the
-# function section lost one byte), `func-one-long` (it gained one; the file
-# itself need not change size either way, the next section's alignment
-# padding absorbs it) or `file-shorter` (the whole file lost bytes, which is
-# what a constant BLOB written too narrow does: its section shrinks and no
-# padding puts it back).
+# `func-<n>-short` / `func-<n>-long` (the function section lost or gained
+# exactly n bytes; the file itself need not change by the same amount
+# either way, the next section's alignment padding absorbs part of it) or
+# `file-shorter` (the whole file lost bytes, which is what a constant BLOB
+# written too narrow does: its section shrinks and no padding puts it
+# back).
 writer_mutant_checks() { # name, kernel, shape, fragment
-  local name="$1" k="$2" shape="$3" fragment="$4" backend out golden_size mutant_size golden_func
+  local name="$1" k="$2" shape="$3" fragment="$4" backend out golden_size mutant_size golden_func delta want
   mutant_run "$name" "$k"
   mutant_run_bytecode "$name" "$k"
   golden_size=$(wc -c < "$here/$k.tilebc")
@@ -755,12 +806,22 @@ writer_mutant_checks() { # name, kernel, shape, fragment
       same-size)
         [ "$mutant_size" = "$golden_size" ] ||
           fail "$name: $k.tilebc is $golden_size bytes and the mutant's is $mutant_size on $backend; expected the same size" ;;
-      func-one-short)
-        [ "$(func_len "$out")" = "$((golden_func - 1))" ] ||
-          fail "$name: the golden's Func section is $golden_func bytes and the mutant's is $(func_len "$out") on $backend; expected one byte fewer" ;;
-      func-one-long)
-        [ "$(func_len "$out")" = "$((golden_func + 1))" ] ||
-          fail "$name: the golden's Func section is $golden_func bytes and the mutant's is $(func_len "$out") on $backend; expected one byte more" ;;
+      func-*-short | func-*-long)
+        delta="${shape#func-}"
+        delta="${delta%-short}"
+        delta="${delta%-long}"
+        case "$delta" in
+          one) delta=1 ;;
+          two) delta=2 ;;
+          three) delta=3 ;;
+          *) fail "writer_mutant_checks: unknown byte count $delta in shape $shape" ;;
+        esac
+        case "$shape" in
+          *-short) want=$((golden_func - delta)) ;;
+          *) want=$((golden_func + delta)) ;;
+        esac
+        [ "$(func_len "$out")" = "$want" ] ||
+          fail "$name: the golden's Func section is $golden_func bytes and the mutant's is $(func_len "$out") on $backend; expected $want" ;;
       file-shorter)
         [ "$mutant_size" -lt "$golden_size" ] ||
           fail "$name: $k.tilebc is $golden_size bytes and the mutant's is $mutant_size on $backend; expected a shorter file" ;;
@@ -1212,6 +1273,71 @@ if run_item break-values-missing; then
     '  BreakVals(_values, _tys) -> emit(emit(emit(w0, OP_BREAK), 0), 0)'
   writer_mutant_checks break-values-missing loop_count same-size \
     "'cuda_tile.break' op operand types must correspond to the parent loop result types"
+fi
+
+# 29. The writer stops writing the `overflow` attribute of the three
+#     assumptions. The three integer operations of attr_overflow then have
+#     nothing between their result type and their operands, so the reader
+#     takes the first operand index for the enum; the function section is
+#     three bytes short and the assembler names the attribute it could not
+#     parse.
+#
+#     This is where `nsw`, `nuw` and `nw` are covered, and it has to be:
+#     they are assumptions the compiler MAY use, not arithmetic, so a
+#     program that keeps its promise computes the same thing with them and
+#     without them and no corpus can tell them apart.
+#     scripts/tileir-features/attrs.txt records the three at layer 1 with
+#     that reason spelled out.
+if run_item overflow-attr-not-written; then
+  mutant_project overflow-attr-not-written bytecode.dawn \
+    '  "addi_nsw" -> [OVERFLOW_NSW]
+  "subi_nuw" -> [OVERFLOW_NUW]
+  "muli_nw" -> [OVERFLOW_NW]' \
+    '  "addi_nsw" -> []
+  "subi_nuw" -> []
+  "muli_nw" -> []'
+  writer_mutant_checks overflow-attr-not-written attr_overflow func-three-short \
+    "error at offset 72: invalid integer value for enum type: 18"
+fi
+
+# 30. The writer swaps the memory ordering and the memory scope of the
+#     three suffixed atomic modes. Both are required inline enums written
+#     in declaration order, so the swap is same-size and invisible at
+#     layer 0 (the renderer spells them from its own table); the assembler
+#     refuses it because 3 is not a memory scope.
+#
+#     One anchor carries six values -- `acquire`, `release`, `acq_rel`,
+#     `tl_blk`, `sys` and `device` -- and that is the whole of what any
+#     judgement here can be. An ordering constrains CONCURRENT accesses,
+#     the corpus that reaches the device gives every lane its own slot, and
+#     a judgement about the ordering itself would need two blocks racing
+#     and a comparison shape this repository does not have.
+if run_item atomic-memory-attrs-swapped; then
+  mutant_project atomic-memory-attrs-swapped bytecode.dawn \
+    '  "add_acquire_tl_blk" -> ("add", ORDER_ACQUIRE, SCOPE_TL_BLK)
+  "add_release_sys" -> ("add", ORDER_RELEASE, SCOPE_SYS)
+  "add_acq_rel_device" -> ("add", ORDER_ACQ_REL, SCOPE_DEVICE)' \
+    '  "add_acquire_tl_blk" -> ("add", SCOPE_TL_BLK, ORDER_ACQUIRE)
+  "add_release_sys" -> ("add", SCOPE_SYS, ORDER_RELEASE)
+  "add_acq_rel_device" -> ("add", SCOPE_DEVICE, ORDER_ACQ_REL)'
+  writer_mutant_checks atomic-memory-attrs-swapped attr_memsem same-size \
+    "error at offset 109: invalid integer value for enum type: 3"
+fi
+
+# 31. The writer gives the float atomic mode the integer one's enum value.
+#     `add` is 3 and `addf` is 4, neighbours in one enum over both, so this
+#     is one byte and the same length; the dialect refuses it because the
+#     buffer is f64 and `add` is defined for i32 and i64 only.
+#
+#     The device could not have caught this one: `add` on an f64 pointer
+#     tile is not a wrong answer, it is a program the assembler will not
+#     build.
+if run_item rmw-addf-as-add; then
+  mutant_project rmw-addf-as-add bytecode.dawn \
+    '  "addf" -> 4' \
+    '  "addf" -> 3'
+  writer_mutant_checks rmw-addf-as-add attr_addf same-size \
+    "'cuda_tile.atomic_rmw_tko' op 'add' works only with integers i32 and i64"
 fi
 
 _item_tick ""
