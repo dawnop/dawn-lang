@@ -97,12 +97,62 @@ pub type I8 = | I8
 ## nothing has to be told twice.
 pub type U8 = | U8
 
-## PROBE-ONLY markers (knife T3, work in progress).
+# ---- the formats knife T3 added ----
+#
+# Six more of the frozen table's fifteen scalar types
+# (scripts/tileir-features/types.txt is the ledger). Three of them a device
+# this tree can reach will run and three it will not: `tileiras` refuses
+# every fp8 type at sm_86 AND at sm_89 and takes it only from sm_100, so
+# the host side below is complete for all six and the second opinion stops
+# at three.
+
+## The 16-bit signed integer format: two bytes an element, holding a
+## two's-complement value in [-32768, 32767]. `upload` truncates each Float
+## toward zero and wraps it into that range, `download` answers each
+## exactly. The `List[Float]` channel is lossless for it, as it is for
+## `I32`, so an i16 kernel is a bit-exact claim and the wrap at 2^15 is part
+## of what is being claimed.
 pub type I16 = | I16
+
+## The 64-bit signed integer format: eight bytes an element.
+##
+## The `List[Float]` channel is NOT lossless for it. A binary64 significand
+## holds 53 bits and an i64 holds 64, so a corpus for this format has to
+## stay inside +/-2^52 for the host to say anything bit-exact about it, and
+## the wrap at 2^63 has no evidence here at all. That is a corpus's debt and
+## it is named where the corpus is (scripts/tile-gpu-diff/dtype_diff.dawn),
+## not paid by widening the channel: `upload` and `download` traffic in
+## Float under every format and changing that is a different knife.
 pub type I64 = | I64
+
+## TensorFloat-32: binary32's eight exponent bits with ten significand bits
+## instead of twenty-three, in a 32-bit slot whose bottom thirteen bits are
+## zero (`narrow.tf32_bits`). Four bytes an element, and `upload` rounds
+## each Float to the nearest one.
+##
+## It is the input format of the tensor cores rather than a format
+## arithmetic is done in: the dialect gives `tf32` to `ftof` and to memory
+## and keeps it out of `addf` (Ops.td's BaseFloatTileType is f16, bf16, f32
+## and f64), so a kernel over this format loads it, widens it, computes, and
+## narrows again.
 pub type TF32 = | TF32
+
+## The OCP fp8 format with four exponent bits and three significand bits,
+## and no infinity: one byte an element, values up to 448, and the two
+## all-ones encodings are its only NaNs (`narrow.round_f8e4m3fn` says what
+## an overflow answers and why that answer is a choice).
 pub type F8E4M3FN = | F8E4M3FN
+
+## The OCP fp8 format with five exponent bits and two significand bits: one
+## byte an element, an ordinary IEEE binary format at eight bits, infinities
+## and all, values up to 57344.
 pub type F8E5M2 = | F8E5M2
+
+## The fp8 exponent format: one byte an element holding `2^(b - 127)`, with
+## `0xFF` for NaN. No sign, no significand, no zero and no infinity, so a
+## buffer of it holds 255 distinct positive powers of two and nothing else.
+## `ftof` into it takes only the `zero` and `positive_inf` rounding modes,
+## never `nearest_even`; this tree writes `zero`.
 pub type F8E8M0FNU = | F8E8M0FNU
 
 ## What a device needs to know about an element format. The marker value is
@@ -185,11 +235,17 @@ impl Dtype[F8E8M0FNU] {
 ## formats with `gpu.unsupported_dtype`.
 pub fn element_bytes(dtype: String) -> Option[Int] = match dtype {
   "f64" -> Some(8)
+  "i64" -> Some(8)
   "i32" -> Some(4)
+  "tf32" -> Some(4)
   "bf16" -> Some(2)
   "f16" -> Some(2)
+  "i16" -> Some(2)
   "i8" -> Some(1)
   "u8" -> Some(1)
+  "f8E4M3FN" -> Some(1)
+  "f8E5M2" -> Some(1)
+  "f8E8M0FNU" -> Some(1)
   _ -> None
 }
 
@@ -209,7 +265,13 @@ pub fn round_to(dtype: String, x: Float) -> Float = match dtype {
   "bf16" -> narrow.round_bf16(x)
   "f16" -> narrow.round_fp16(x)
   "f32" -> narrow.round_f32(x)
+  "tf32" -> narrow.round_tf32(x)
+  "f8E4M3FN" -> narrow.round_f8e4m3fn(x)
+  "f8E5M2" -> narrow.round_f8e5m2(x)
+  "f8E8M0FNU" -> narrow.round_f8e8m0(x)
   "i32" -> to_float(wrap_i32(to_int(x)))
+  "i16" -> to_float(wrap_i16(to_int(x)))
+  "i64" -> to_float(to_int(x))
   "i8" -> to_float(wrap_i8(to_int(x)))
   "u8" -> to_float(wrap_u8(to_int(x)))
   _ -> x
@@ -222,6 +284,14 @@ pub fn round_to(dtype: String, x: Float) -> Float = match dtype {
 pub fn wrap_i32(n: Int) -> Int = {
   let low = n & 0xFFFFFFFF
   if low >= 0x80000000 { low - 0x100000000 } else { low }
+}
+
+## `n` as a two's-complement 16-bit signed integer: the low sixteen bits,
+## read as a signed value, in [-32768, 32767]. `wrap_i32`'s shape two octets
+## wide, and what the device's `addi` and `muli` over an i16 tile do.
+pub fn wrap_i16(n: Int) -> Int = {
+  let low = n & 0xFFFF
+  if low >= 0x8000 { low - 0x10000 } else { low }
 }
 
 ## `n` as a two's-complement 8-bit SIGNED integer: the low eight bits read
@@ -343,6 +413,130 @@ pub fn pack_u8(xs: List[Float]) -> Bytes = {
 ## unsigned.
 pub fn unpack_u8(b: Bytes) -> List[Float] =
   list.map(range(0, bytes.len(b)), i => to_float(bytes.at(b, i)))
+
+# ---- the wire formats knife T3 added ----
+#
+# Each is the `pack_bf16` / `unpack_bf16` pair at its own width and codec.
+# The rounding is the packer's in every float case, for `pack_bf16`'s
+# reason: the codecs below truncate a value off their grid, and a truncating
+# upload would put a different number on the device than the fake device
+# holds.
+
+## `xs` as the bytes an i16 buffer holds: each value truncated toward zero
+## and wrapped into [-32768, 32767], then its 16-bit two's-complement
+## pattern, low byte first.
+pub fn pack_i16(xs: List[Float]) -> Bytes = {
+  var b = bytes.buf()
+  for x in xs {
+    let v = wrap_i16(to_int(x))
+    b = bytes.put(bytes.put(b, v & 0xFF), (v >>> 8) & 0xFF)
+  }
+  bytes.freeze(b)
+}
+
+## The values an i16 buffer holds, from its bytes: one per two bytes, each
+## the exact Float of its two's-complement pattern.
+pub fn unpack_i16(b: Bytes) -> List[Float] =
+  list.map(range(0, bytes.len(b) / 2), i =>
+      to_float(wrap_i16(bytes.at(b, 2 * i) | (bytes.at(b, 2 * i + 1) << 8))))
+
+## `xs` as the bytes an i64 buffer holds: each value truncated toward zero,
+## then its 64-bit two's-complement pattern, low byte first.
+##
+## LOSSY ABOVE 2^53, in this direction and the other: the channel is
+## `List[Float]` and a binary64 significand does not reach the top of an
+## i64. `to_int` of a Float above 2^53 is some value, and nothing here can
+## tell which of the neighbouring integers was meant. A caller that wants
+## bit-exactness owes a corpus inside +/-2^52; `TF32`'s and `I64`'s doc
+## comments say so and scripts/tile-gpu-diff/dtype_diff.dawn is where the
+## debt is paid.
+pub fn pack_i64(xs: List[Float]) -> Bytes = {
+  var b = bytes.buf()
+  for x in xs {
+    var v = to_int(x)
+    for _k in range(0, 8) {
+      b = bytes.put(b, v & 0xFF)
+      v = v >>> 8
+    }
+  }
+  bytes.freeze(b)
+}
+
+## The values an i64 buffer holds, from its bytes: one per eight bytes, each
+## the Float of its two's-complement pattern, exactly where the value fits
+## in a binary64 significand and rounded where it does not.
+pub fn unpack_i64(b: Bytes) -> List[Float] =
+  list.map(range(0, bytes.len(b) / 8), i => {
+    var v = 0
+    for k in range(0, 8) {
+      v = v | (bytes.at(b, 8 * i + k) << (8 * k))
+    }
+    to_float(v)
+  })
+
+## `xs` as the bytes a tf32 buffer holds: each value rounded to the nearest
+## TensorFloat-32, then its 32-bit pattern (thirteen zero bits at the
+## bottom), low byte first.
+pub fn pack_tf32(xs: List[Float]) -> Bytes = {
+  var b = bytes.buf()
+  for x in xs {
+    let bits = narrow.tf32_bits(narrow.round_tf32(x))
+    b = bytes.put(bytes.put(bytes.put(bytes.put(b, bits & 0xFF), (bits >>> 8) & 0xFF),
+        (bits >>> 16) & 0xFF), (bits >>> 24) & 0xFF)
+  }
+  bytes.freeze(b)
+}
+
+## The values a tf32 buffer holds, from its bytes: one per four bytes, each
+## the exact Float of its pattern.
+pub fn unpack_tf32(b: Bytes) -> List[Float] =
+  list.map(range(0, bytes.len(b) / 4), i =>
+      narrow.tf32_of_bits(bytes.at(b, 4 * i) | (bytes.at(b, 4 * i + 1) << 8)
+          | (bytes.at(b, 4 * i + 2) << 16) | (bytes.at(b, 4 * i + 3) << 24)))
+
+## `xs` as the bytes an f8E4M3FN buffer holds: each value rounded to the
+## nearest one, then its octet.
+pub fn pack_f8e4m3fn(xs: List[Float]) -> Bytes = {
+  var b = bytes.buf()
+  for x in xs {
+    b = bytes.put(b, narrow.f8e4m3fn_bits(narrow.round_f8e4m3fn(x)))
+  }
+  bytes.freeze(b)
+}
+
+## The values an f8E4M3FN buffer holds, from its bytes: one per byte.
+pub fn unpack_f8e4m3fn(b: Bytes) -> List[Float] =
+  list.map(range(0, bytes.len(b)), i => narrow.f8e4m3fn_of_bits(bytes.at(b, i)))
+
+## `xs` as the bytes an f8E5M2 buffer holds: each value rounded to the
+## nearest one, then its octet.
+pub fn pack_f8e5m2(xs: List[Float]) -> Bytes = {
+  var b = bytes.buf()
+  for x in xs {
+    b = bytes.put(b, narrow.f8e5m2_bits(narrow.round_f8e5m2(x)))
+  }
+  bytes.freeze(b)
+}
+
+## The values an f8E5M2 buffer holds, from its bytes: one per byte.
+pub fn unpack_f8e5m2(b: Bytes) -> List[Float] =
+  list.map(range(0, bytes.len(b)), i => narrow.f8e5m2_of_bits(bytes.at(b, i)))
+
+## `xs` as the bytes an f8E8M0FNU buffer holds: each value rounded TOWARD
+## ZERO to a power of two (the one rounding this format's conversion takes),
+## then its octet.
+pub fn pack_f8e8m0(xs: List[Float]) -> Bytes = {
+  var b = bytes.buf()
+  for x in xs {
+    b = bytes.put(b, narrow.f8e8m0_bits(narrow.round_f8e8m0(x)))
+  }
+  bytes.freeze(b)
+}
+
+## The values an f8E8M0FNU buffer holds, from its bytes: one per byte, each
+## a power of two, or NaN for `0xFF`.
+pub fn unpack_f8e8m0(b: Bytes) -> List[Float] =
+  list.map(range(0, bytes.len(b)), i => narrow.f8e8m0_of_bits(bytes.at(b, i)))
 
 # ---- tensors ----
 
@@ -3511,7 +3705,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
     var next: Int = 1
     var store: Map[Int, (String, List[Float])] = map.empty()
     gpu_alloc(dtype, len) => match element_bytes(dtype) {
-      None -> Err(refuse("gpu.unsupported_dtype", "fake device: buffers are f64, i32, i8, u8, bf16 or f16, got ${dtype}"))
+      None -> Err(refuse("gpu.unsupported_dtype", "fake device: buffers are f64, i64, i32, tf32, bf16, f16, i16, i8, u8, f8E4M3FN, f8E5M2 or f8E8M0FNU, got ${dtype}"))
       Some(_w) -> {
         let h = next
         next = next + 1
@@ -3609,7 +3803,13 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
 pub fn pack_to(dtype: String, data: List[Float]) -> Bytes = match dtype {
   "bf16" -> pack_bf16(data)
   "f16" -> pack_f16(data)
+  "tf32" -> pack_tf32(data)
+  "f8E4M3FN" -> pack_f8e4m3fn(data)
+  "f8E5M2" -> pack_f8e5m2(data)
+  "f8E8M0FNU" -> pack_f8e8m0(data)
   "i32" -> pack_i32(data)
+  "i16" -> pack_i16(data)
+  "i64" -> pack_i64(data)
   "i8" -> pack_i8(data)
   "u8" -> pack_u8(data)
   _ -> panic("gpu.pack_to: `${dtype}` has no byte packing")
@@ -3620,7 +3820,13 @@ pub fn pack_to(dtype: String, data: List[Float]) -> Bytes = match dtype {
 pub fn unpack_from(dtype: String, raw: Bytes) -> List[Float] = match dtype {
   "bf16" -> unpack_bf16(raw)
   "f16" -> unpack_f16(raw)
+  "tf32" -> unpack_tf32(raw)
+  "f8E4M3FN" -> unpack_f8e4m3fn(raw)
+  "f8E5M2" -> unpack_f8e5m2(raw)
+  "f8E8M0FNU" -> unpack_f8e8m0(raw)
   "i32" -> unpack_i32(raw)
+  "i16" -> unpack_i16(raw)
+  "i64" -> unpack_i64(raw)
   "i8" -> unpack_i8(raw)
   "u8" -> unpack_u8(raw)
   _ -> panic("gpu.unpack_from: `${dtype}` has no byte packing")
@@ -3692,7 +3898,7 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
     var bufs: Map[Int, (Int, Int, String)] = map.empty()
     var mods: Map[String, Int] = map.empty()
     gpu_alloc(dtype, len) => match element_bytes(dtype) {
-      None -> Err(refuse("gpu.unsupported_dtype", "real device: this release moves f64, i32, i8, u8, bf16 and f16, got ${dtype}"))
+      None -> Err(refuse("gpu.unsupported_dtype", "real device: this release moves f64, i64, i32, tf32, bf16, f16, i16, i8, u8, f8E4M3FN, f8E5M2 and f8E8M0FNU, got ${dtype}"))
       Some(w) -> match gpu_alloc_host(len * w) {
         Ok(p) -> {
           let h = next
@@ -4472,10 +4678,58 @@ test "an i8 and a u8 buffer hold the same octet and read it two ways" {
 
 test "pack_to and unpack_from are the round trip of every format the handlers move but f64" {
   let xs = [0.0, 1.0, 2.0, 3.0]
-  for dt in ["bf16", "f16", "i32", "i8", "u8"] {
+  # every format but f8E8M0FNU, which has no zero: 0.0 is not one of its
+  # values and it says so with a NaN, which is never equal to anything
+  for dt in ["bf16", "f16", "tf32", "i32", "i16", "i64", "i8", "u8", "f8E4M3FN", "f8E5M2"] {
     assert unpack_from(dt, pack_to(dt, xs)) == xs
     assert bytes.len(pack_to(dt, xs)) == 4 * unwrap_or(element_bytes(dt), 0)
   }
+  let powers = [0.25, 1.0, 2.0, 1024.0]
+  assert unpack_from("f8E8M0FNU", pack_to("f8E8M0FNU", powers)) == powers
+  assert bytes.len(pack_to("f8E8M0FNU", powers)) == 4
+}
+
+test "the formats knife T3 added hold what memory of them holds, low byte first" {
+  # i16 wraps at 2^15 and keeps the octets in the device's order
+  assert unpack_i16(pack_i16([1.0, -1.0, 32767.0, -32768.0])) == [1.0, -1.0, 32767.0, -32768.0]
+  assert bytes.at(pack_i16([-2.0]), 0) == 0xFE
+  assert bytes.at(pack_i16([-2.0]), 1) == 0xFF
+  assert round_to("i16", 32768.0) == 0.0 - 32768.0
+  assert round_to("i16", -32769.0) == 32767.0
+  assert wrap_i16(0x1FFFF) == -1
+  # i64 crosses eight octets and is exact inside a binary64 significand
+  let big = [4503599627370495.0, 0.0 - 4503599627370495.0, 8589934592.0]
+  assert unpack_i64(pack_i64(big)) == big
+  assert bytes.at(pack_i64([-1.0]), 7) == 0xFF
+  assert bytes.at(pack_i64([256.0]), 1) == 1
+  # tf32 is four bytes with thirteen zero bits, and the packer rounds
+  assert unpack_tf32(pack_tf32([1.0 + pow_two(-30)])) == [1.0]
+  assert bytes.at(pack_tf32([1.0]), 0) == 0
+  assert bytes.at(pack_tf32([1.0]), 3) == 0x3F
+  # the three fp8 formats are one octet and the packer rounds each its own
+  # way: e4m3 keeps four significand bits, e5m2 two, and e8m0 keeps none at
+  # all and truncates the exponent
+  assert unpack_f8e4m3fn(pack_f8e4m3fn([1.0 + 1.0 / 32.0])) == [1.0]
+  assert unpack_f8e5m2(pack_f8e5m2([1.0 + 1.0 / 32.0])) == [1.0]
+  assert unpack_f8e8m0(pack_f8e8m0([1.99])) == [1.0]
+  assert bytes.len(pack_f8e4m3fn([1.0, 2.0, 3.0])) == 3
+  # what a value outside a format answers, in the two directions this pair
+  # of formats differs: e5m2 overflows to an infinity, e4m3 has none
+  assert unpack_f8e5m2(pack_f8e5m2([1.0e30])) == [1.0 / 0.0]
+  let over = unpack_f8e4m3fn(pack_f8e4m3fn([1.0e30]))
+  assert over[0] != over[0]
+}
+
+# 2^k, so the test above can name a value off the tf32 grid without a
+# literal nobody can read.
+fn pow_two(k: Int) -> Float = {
+  var q = 1.0
+  var i = k
+  while i > 0 { q = q * 2.0
+    i = i - 1 }
+  while i < 0 { q = q * 0.5
+    i = i + 1 }
+  q
 }
 
 # A kernel that fills two buffers and one that rewrites the buffer it read,

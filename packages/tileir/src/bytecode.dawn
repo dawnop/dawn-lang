@@ -367,14 +367,29 @@ fn cast_op(op: String) -> Int = match op {
 # tileiras cannot tell a spurious flags word from it -- exactly the shape
 # that cost a wrong answer on `divi`, and the reason the device is the judge
 # here as well.
-fn cast_attrs(op: String) -> List[Int] = match op {
+fn cast_attrs(op: String, to: String) -> List[Int] = match op {
   "itof" -> [SIGNED, ROUND_NEAREST_EVEN]
   "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]
-  "ftof" -> [ROUND_NEAREST_EVEN]
+  "ftof" -> [ftof_rounding(to)]
   "exti" -> [UNSIGNED]
   "trunci" -> [OVERFLOW_NONE]
   _ -> []
 }
+
+# `ftof`'s rounding mode, which is the ONE place in this writer where the
+# TARGET FORMAT decides an attribute byte rather than a type tag.
+#
+# Ops.td's FToFOp: "For conversion to f8E8M0FNU, only ZERO and POSITIVE_INF
+# rounding modes are supported. Otherwise, only NEAREST_EVEN rounding mode
+# is supported." So the default value of the attribute is illegal for that
+# one target and legal for every other, and a writer that ignores the
+# sentence is refused at layer 1 in both directions (the mutants
+# e8m0-rounding-as-nearest-even and e8m0-tag-as-f8e5m2 in
+# scripts/tile-golden/run.sh are those two directions). `zero` is the mode
+# written here, and std/gpu's `round_f8e8m0` is the host reading of it: the
+# largest power of two at or below the value.
+fn ftof_rounding(to: String) -> Int =
+  if to == "f8E8M0FNU" { ROUND_ZERO } else { ROUND_NEAREST_EVEN }
 
 # The opcode of an element-wise float operation, and whether it carries a
 # rounding mode. `maxf` and `minf` take `propagate_nan` and `flush_to_zero`
@@ -578,6 +593,7 @@ fn float_payload(dtype: String, value: Float) -> Bytes = match dtype {
 # The raw bytes of an integer constant tile of `n` lanes of `dtype`.
 fn int_payload(dtype: String, n: Int, value: Int) -> Bytes = match dtype {
   "i32" -> bytes.freeze(put_le(bytes.buf(), value, 4))
+  "i16" -> bytes.freeze(put_le(bytes.buf(), value, 2))
   "i8" -> bytes.freeze(put_le(bytes.buf(), value, 1))
   "i64" -> bytes.freeze(put_le(bytes.buf(), value, 8))
   "i1" -> {
@@ -638,6 +654,7 @@ fn float_bits(dtype: String, value: Float) -> Int = match dtype {
 # unlike a float's pattern).
 fn int_zext(dtype: String, value: Int) -> Int = match dtype {
   "i32" -> value & 0xFFFFFFFF
+  "i16" -> value & 0xFFFF
   "i64" -> value
   _ -> panic("tileir: an integer identity of format `${dtype}` has no encoding")
 }
@@ -938,7 +955,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   }
   Cast(_dst, op, _from, to, src) -> {
     # the result is the TARGET type, then the attributes, then the operand.
-    emit_ref(list.fold(cast_attrs(op), emit_op(w0, cast_op(op), to), emit), src)
+    emit_ref(list.fold(cast_attrs(op, elem_name(to)), emit_op(w0, cast_op(op), to), emit), src)
   }
   SelectTile(_dst, _cond_ty, t, cond, lhs, rhs) ->
     emit_ref(emit_ref(emit_ref(emit_op(w0, OP_SELECT, t), cond), lhs), rhs)
@@ -1527,11 +1544,11 @@ test "the integer and conversion opcodes are the frozen table's, and each writes
   assert int_attrs("xori") == []
   assert int_attrs("absi") == []
   # `ftoi` takes nearest_int_to_zero (6), not the integer division's zero (1)
-  assert cast_attrs("itof") == [SIGNED, ROUND_NEAREST_EVEN]
-  assert cast_attrs("ftoi") == [SIGNED, ROUND_INT_TO_ZERO]
-  assert cast_attrs("exti") == [UNSIGNED]
-  assert cast_attrs("trunci") == [OVERFLOW_NONE]
-  assert cast_attrs("bitcast") == []
+  assert cast_attrs("itof", "f64") == [SIGNED, ROUND_NEAREST_EVEN]
+  assert cast_attrs("ftoi", "i32") == [SIGNED, ROUND_INT_TO_ZERO]
+  assert cast_attrs("exti", "i32") == [UNSIGNED]
+  assert cast_attrs("trunci", "i8") == [OVERFLOW_NONE]
+  assert cast_attrs("bitcast", "f32") == []
   assert ROUND_ZERO != ROUND_INT_TO_ZERO
 }
 
@@ -1546,8 +1563,8 @@ test "ftof and mmai are the frozen table's opcodes, with the attribute lists the
   # DefaultValuedAttr whose default is NEAREST_EVEN (0) -- written inline
   # on the required path, with no flags varint in front of it. Only
   # `nearest_even` is supported for a target that is not f8E8M0FNU.
-  assert cast_attrs("ftof") == [ROUND_NEAREST_EVEN]
-  assert len(cast_attrs("ftof")) == 1
+  assert cast_attrs("ftof", "f64") == [ROUND_NEAREST_EVEN]
+  assert len(cast_attrs("ftof", "f64")) == 1
   # MmaIOp: lhs and rhs are i8, acc and result are i32, and the two
   # signedness attributes are REQUIRED (CudaTileArg<CudaTile_SignednessAttr,
   # .., "13.1">), so they are inline too and in declaration order. Both are

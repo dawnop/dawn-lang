@@ -1072,7 +1072,7 @@ fn int_ops(x: Param[I32], y: Param[I32], out: Param[I32]) -> Unit !Dev = {
   # the reference's `a / 2` truncates toward zero as well. On an odd `a` the
   # two disagree with every other rounding mode, which is what
   # scripts/tile-gpu-diff's ftoi-rounds-instead-of-truncates rests on.
-  let hf = float_to_int(F64, s, mul(F64, s, int_to_float(F64, s, a), f_const(F64, s, 0.5)))
+  let hf = float_to_int(F64, I32, s, mul(F64, s, int_to_float(I32, F64, s, a), f_const(F64, s, 0.5)))
   # trunci to i1 and exti back: the low bit of `a`
   let bit = mask_to_int(s, int_to_mask(s, a))
   # bitcast there and back: the value itself, bit for bit
@@ -1392,7 +1392,7 @@ fn sort_rank(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let before = or_mask(s2, lt(F64, s2, col, row), tie)
   let hit = select(F64, s2, before, f_const(F64, s2, 1.0), f_const(F64, s2, 0.0))
   let rank = d_reduce_dim(F64, s2, 1, hit, 0.0, (acc, e) => s_addf(F64, acc, e))
-  scatter(out, float_to_int(F64, s1, rank), s1, load(x, zero, s1))
+  scatter(out, float_to_int(F64, I32, s1, rank), s1, load(x, zero, s1))
 }
 
 # The merge's shape: two sorted runs of MG_N in one block.
@@ -1418,8 +1418,8 @@ fn merge_rank(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let ca = d_reduce_dim(F64, s2, 1, below, 0.0, (acc, e) => s_addf(F64, acc, e))
   let cb = d_reduce_dim(F64, s2, 0, atmost, 0.0, (acc, e) => s_addf(F64, acc, e))
   let lane = lanes(zero, s1)
-  scatter(out, add_i(s1, lane, float_to_int(F64, s1, ca)), s1, load(a, zero, s1))
-  scatter(out, add_i(s1, lane, float_to_int(F64, s1, cb)), s1, load(b, zero, s1))
+  scatter(out, add_i(s1, lane, float_to_int(F64, I32, s1, ca)), s1, load(a, zero, s1))
+  scatter(out, add_i(s1, lane, float_to_int(F64, I32, s1, cb)), s1, load(b, zero, s1))
 }
 
 # The permutation scatter's shape: SC_N destinations, SC_TILE lanes a
@@ -1559,7 +1559,7 @@ fn seg_scan(values: Param[F64], flags: Param[I32], out: Param[F64]) -> Unit !Dev
   let z = idx_const(0)
   let m = tail_mask(z, s, SCAN_N)
   let v = load_masked(values, z, s, m, f_const(F64, s, 0.0))
-  let f = int_to_float(F64, s, load_masked(flags, z, s, m, i_const(s, 0)))
+  let f = int_to_float(I32, F64, s, load_masked(flags, z, s, m, i_const(s, 0)))
   let incl = d_scan(F64, s, 0, false, v, 0.0, (acc, e) => s_addf(F64, acc, e))
   let excl = sub(F64, s, incl, v)
   let (_open, carry) = d_scan2(F64, s, 0, false, f, excl, 0.0, 0.0, (af, av, ef, ev) => {
@@ -2210,7 +2210,7 @@ fn attn_alibi(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
   let sh = [ATT_T, ATT_T]
   let v = att_scaled(q, k, bm, bn)
   let bias = mul(F64, sh, f_const(F64, sh, ATT_ALIBI),
-    int_to_float(F64, sh, sub_i(sh, att_row(bm), att_col(bn))))
+    int_to_float(I32, F64, sh, sub_i(sh, att_row(bm), att_col(bn))))
   att_store(s, bm, bn, addf(F64, sh, v, bias))
 }
 
@@ -2266,7 +2266,7 @@ fn attn_decay(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
   let v = att_scaled(q, k, bm, bn)
   let gi = att_row(bm)
   let gj = att_col(bn)
-  let ahead = int_to_float(F64, sh, max_i(sh, sub_i(sh, gi, gj), i_const(sh, 0)))
+  let ahead = int_to_float(I32, F64, sh, max_i(sh, sub_i(sh, gi, gj), i_const(sh, 0)))
   let decay = exp(F64, sh, mul(F64, sh, ahead, f_const(F64, sh, ATT_LN_GAMMA)))
   att_store(s, bm, bn,
     select(F64, sh, ge_i(sh, gi, gj), mul(F64, sh, v, decay), f_const(F64, sh, 0.0)))
@@ -2890,7 +2890,7 @@ fn kv_dequant(c: Param[I8], scale: Param[F64], h: Idx) -> Tile[F64] !Dev = {
   let sh = [KV_S, KV_D]
   let raw = load_strided(c, idx_mul(h, idx_const(KV_S * KV_D)), sh, [KV_D, 1])
   let ts = load_strided(scale, idx_mul(h, idx_const(KV_S)), sh, axis_strides(2, 0, 1))
-  mul(F64, sh, int_to_float(F64, sh, i8_signed(sh, raw)), ts)
+  mul(F64, sh, int_to_float(I32, F64, sh, i8_signed(sh, raw)), ts)
 }
 
 # Launch 1 of 3: s[h, j] = (Q[h, :] . dequant(K)[h, j, :]) / sqrt(D). One
