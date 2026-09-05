@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""The Tile IR feature ledger's gate: every opcode is accounted for.
+"""The Tile IR coverage ledgers' gate: every opcode and every type tag is
+accounted for.
 
-    scripts/tileir-features/check.py              # check features.txt
+    scripts/tileir-features/check.py              # check both ledgers
     scripts/tileir-features/check.py --self-test  # negative control
 
 `features.txt` says, for each of the 100 public opcodes of the frozen table,
 whether this backend implements it, which knife did it, and how far the
-evidence goes. Its own header explains the columns and the three layers;
-this turns each row into things a machine can look up.
+evidence goes. `types.txt` says the same for each of the 23 type tags. Their
+own headers explain the columns and the three layers; this turns each row
+into things a machine can look up.
+
+ONE PARSER, TWO TABLES. Both files have the same eight columns and the same
+rules about statuses, knives and layers (`parse_rows` and `common_checks`
+below); what differs is the expected set each is held to and what a piece of
+evidence looks like. Knife T4 is expected to add a third table, for the
+attribute values, and it should need neither of those two functions changed.
 
 The expected set is the OP_ table in packages/tileir/src/bytecode.dawn, held
 in both directions: an OP_ constant with no `implemented` row is red, and so
@@ -30,6 +38,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TABLE = ROOT / "scripts" / "tileir-features" / "features.txt"
+TYPES = ROOT / "scripts" / "tileir-features" / "types.txt"
 BYTECODE = ROOT / "packages" / "tileir" / "src" / "bytecode.dawn"
 GOLDEN = ROOT / "scripts" / "tile-golden"
 DIFF = ROOT / "scripts" / "tile-gpu-diff"
@@ -44,7 +53,26 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # it). T0 built the ledger itself and added no opcode, so it names no row
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
-LANDED_KNIVES = {"T0", "T1", "T2"}
+LANDED_KNIVES = {"T0", "T1", "T2", "T3"}
+
+
+class Ledger:
+    """One coverage ledger: where it lives, what its rows count, the
+    function that holds it to the writer, and its self-test's cases.
+
+    Adding a table is one entry in TABLES below. What a table cannot share
+    is its RULES -- an opcode's evidence and a type tag's are different
+    shapes -- so each brings its own `check` and its own `cases`; what they
+    do share is the parser (`parse_rows`), the status / knife / layer rules
+    (`common_checks`) and the evidence splitter (`evidence_of`).
+    """
+
+    def __init__(self, name, path, unit, check, cases):
+        self.name = name
+        self.path = path
+        self.unit = unit
+        self.check = check
+        self.cases = cases
 
 # The frozen public range and its two frozen gaps (BytecodeOpcodes.td), which
 # together are the 100 opcodes this file has to carry a row for.
@@ -56,6 +84,103 @@ EXPECTED_CODES = {c for c in range(0x00, 0x76) if c not in GAPS}
 SINCE_13_2 = {"atan2"}
 SINCE_13_3 = {"pack", "unpack", "alloca", "mmaf_scaled", "make_gather_scatter_view",
               "make_strided_view", "atomic_red_view_tko"}
+
+
+# The frozen TYPE tags (BytecodeTypeOpcodes.td): 0 to 22, and unlike the
+# opcode table there are no gaps in it.
+EXPECTED_TAGS = set(range(0, 23))
+
+# The type versions, read the same way the opcode ones are.
+TYPES_SINCE_13_2 = {"f8E8M0FNU"}
+TYPES_SINCE_13_3 = {"f4E2M1FN", "GatherScatterView", "StridedViewType", "i4"}
+
+
+def parse_rows(text):
+    """The eight fields of every data line, and what is malformed about one.
+
+    Shared by both ledgers: they have the same columns, and a third table
+    (knife T4's attribute values) is expected to have them too.
+    """
+    out = []
+    problems = []
+    for n, line in enumerate(text.splitlines(), 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        fields = [f.strip() for f in s.split("|")]
+        if len(fields) != 8:
+            problems.append(f"line {n}: {len(fields)} fields, not 8")
+            continue
+        out.append((n, fields))
+    return out, problems
+
+
+def common_checks(n, name, status, knife, layer, seen):
+    """The rules both ledgers share: no duplicate name, a known status, a
+    layer in range, and a knife that is either landed or planned to match
+    the status. Answers the problems and whether the knife is a planned one.
+    """
+    problems = []
+    if name in seen:
+        problems.append(f"line {n}: {name} is already listed on line {seen[name]}")
+        return problems, False, None
+    seen[name] = n
+    if status not in STATUSES:
+        problems.append(f"line {n}: status {status!r} is not one of {', '.join(STATUSES)}")
+        return problems, False, None
+    if not layer.isdigit() or int(layer) > 3:
+        problems.append(f"line {n}: layer {layer!r} is not 0, 1, 2 or 3")
+        return problems, False, None
+    if not knife:
+        problems.append(f"line {n}: {name} names no knife")
+    planned = knife.startswith("T") and knife not in LANDED_KNIVES
+    if status == "implemented" and planned:
+        problems.append(
+            f"line {n}: {name} is implemented, so knife {knife!r} cannot be a planned one")
+    if status == "unimplemented" and not planned:
+        problems.append(
+            f"line {n}: {name} is unimplemented, so its knife is a planned one (T...), "
+            f"not {knife!r}")
+    return problems, planned, int(layer)
+
+
+def evidence_of(n, name, evidence, kinds):
+    """The evidence tokens by kind, and a complaint for a kind this table
+    does not have."""
+    problems = []
+    found = {k: [] for k in kinds}
+    for token in [t for t in evidence.split(",") if t]:
+        kind, _, rest = token.partition(":")
+        if kind in found and rest:
+            found[kind].append(rest)
+        else:
+            problems.append(f"line {n}: {name} names evidence {token!r}, which is not "
+                            + " or ".join(k + ":" for k in kinds))
+    return found, problems
+
+
+def tag_table(bytecode_text):
+    """The writer's type tags: spelling -> tag. `num_tag`'s arms give the
+    scalar formats and the `TAG_` constants give the constructors, and the
+    constants are named after the C++ type (TAG_FUNC is FunctionType), so
+    the ledger's own spelling for those four is what maps them."""
+    body = re.search(r"^fn num_tag\(.*?\{\n(.*?)^\}", bytecode_text, re.M | re.S)
+    if not body:
+        return {}
+    tags = {name: int(value) for name, value in
+            re.findall(r'^\s*"([A-Za-z0-9]+)" -> (\d+)$', body.group(1), re.M)}
+    for name, value in re.findall(r"^const TAG_([A-Z]+): Int = (\d+)", bytecode_text, re.M):
+        tags[CONSTRUCTOR_SPELLING[name]] = int(value)
+    return tags
+
+
+# The ledger's spelling of each constructor the writer names with a `TAG_`
+# constant. `ptr`, `tile` and `token` are how a .mlir prints them;
+# FunctionType has no textual spelling here (the entry's signature is a
+# type-section entry and never appears in the text), so it keeps the
+# dialect's C++ name, as the view types do.
+CONSTRUCTOR_SPELLING = {"PTR": "ptr", "TILE": "tile", "FUNC": "FunctionType",
+                        "TOKEN": "token"}
 
 
 def op_table(bytecode_text):
@@ -249,6 +374,170 @@ def check(table_text, bytecode_text, files, ledger_text):
     return counts, layers, problems
 
 
+def check_types(table_text, bytecode_text, files, ledger_text):
+    """The type tags the table lists, and what is wrong with it.
+
+    The same shape as `check` above and the same inputs, so the self-test
+    can hand it a tree nobody would commit. What is different is the
+    expected set (the writer's tag table rather than its OP_ table) and the
+    evidence kinds: a type has a `device:` token where an opcode's
+    `golden:` carries both jobs at once, because a type can be spelled in a
+    kernel the device cannot run -- which is exactly the fp8 case this
+    ledger exists to record.
+    """
+    problems = []
+    tags = tag_table(bytecode_text)
+    if not tags:
+        problems.append("packages/tileir/src/bytecode.dawn has no type tag table at all")
+
+    mutants = files.get("scripts/tile-golden/run.sh", "") + \
+        files.get("scripts/tile-gpu-diff/run.sh", "")
+    devices = "\n".join(v for k, v in files.items() if k.startswith("scripts/tile-gpu-diff/")
+                        and k.endswith(".dawn"))
+
+    rows_, problems_ = parse_rows(table_text)
+    problems += problems_
+    seen = {}
+    codes = {}
+    counts = {s: 0 for s in STATUSES}
+    layers = {}
+    for n, fields in rows_:
+        name, tag, since, status, knife, layer, evidence, exemption = fields
+
+        shared, planned, layer = common_checks(n, name, status, knife, layer, seen)
+        problems += shared
+        if layer is None:
+            continue
+        counts[status] += 1
+        layers[layer] = layers.get(layer, 0) + 1
+
+        if not re.fullmatch(r"\d{1,2}", tag):
+            problems.append(f"line {n}: tag {tag!r} is not a one or two digit decimal number")
+            continue
+        value = int(tag)
+        if value in codes:
+            problems.append(f"line {n}: tag {tag} is already {codes[value]}'s")
+        else:
+            codes[value] = name
+
+        want = "13.2" if name in TYPES_SINCE_13_2 else \
+            "13.3" if name in TYPES_SINCE_13_3 else "13.1"
+        if since != want:
+            problems.append(f"line {n}: {name} entered at {want}, not {since}")
+
+        # The two directions against the writer's own tag table.
+        if status == "implemented":
+            if name not in tags:
+                problems.append(
+                    f"line {n}: {name} is marked implemented but packages/tileir/src/"
+                    f"bytecode.dawn writes no tag for it")
+            elif tags[name] != value:
+                problems.append(
+                    f"line {n}: {name} is tag {value} here and {tags[name]} in bytecode.dawn")
+        elif name in tags:
+            problems.append(
+                f"line {n}: {name} is marked {status} but bytecode.dawn writes its tag")
+
+        if status in ("unimplemented", "deferred"):
+            if layer != 0:
+                problems.append(f"line {n}: {name} is {status}, so its layer is 0, not {layer}")
+            if evidence != "-":
+                problems.append(f"line {n}: {name} is {status} but names evidence {evidence!r}")
+        if status == "deferred" and exemption == "-":
+            problems.append(f"line {n}: {name} is deferred with no named reason")
+        if status not in ("implemented", "structural"):
+            continue
+
+        if layer < 1:
+            problems.append(f"line {n}: {name} is {status}, so it is covered at layer 1 at least")
+        # The bar is layer 2 (ruling 1), so a row below it owes a reason and
+        # a row at or above it may not carry one.
+        if layer < 2 and exemption == "-":
+            problems.append(
+                f"line {n}: {name} stops at layer {layer} and names no reason. The bar is layer 2, "
+                f"so anything short of it is an exemption and not a gap")
+        if layer >= 2 and exemption != "-":
+            problems.append(
+                f"line {n}: {name} reaches layer {layer} and still claims the exemption "
+                f"{exemption!r}")
+
+        found, ev_problems = evidence_of(n, name, evidence,
+                                         ("golden", "device", "mutant", "writer"))
+        problems += ev_problems
+        goldens, launched, named, writers = (found["golden"], found["device"],
+                                             found["mutant"], found["writer"])
+
+        if not goldens and not writers:
+            problems.append(
+                f"line {n}: {name} names neither a golden nor a writer. A type with a textual "
+                f"spelling names the kernel that spells it; one without names the function that "
+                f"emits its tag")
+        for g in goldens:
+            path = f"scripts/tile-golden/{g}.mlir"
+            if path not in files:
+                problems.append(f"line {n}: {name} names golden {g}, which has no .mlir")
+            elif not spelled(files[path], name):
+                problems.append(
+                    f"line {n}: {name} names golden {g}, whose .mlir does not spell the type")
+
+        if layer >= 2 and not launched:
+            problems.append(
+                f"line {n}: {name} claims layer {layer} and names no device kernel. Layer 2 is a "
+                f"device answer, and a device only ran the kernels a tile-gpu-diff program "
+                f"launches")
+        if layer < 2 and launched:
+            problems.append(
+                f"line {n}: {name} stops at layer {layer} and yet names the device kernel "
+                f"{launched[0]}")
+        for d in launched:
+            if f'"{d}"' not in devices:
+                problems.append(
+                    f"line {n}: {name} names device kernel {d}, which no scripts/tile-gpu-diff "
+                    f"program launches")
+
+        if layer == 3 and not named:
+            problems.append(
+                f"line {n}: {name} claims layer 3 and names no mutant. Layer 3 IS the mutant")
+        for m in named:
+            if m not in mutants:
+                problems.append(
+                    f"line {n}: {name} names mutant {m}, which neither scripts/tile-golden/run.sh "
+                    f"nor scripts/tile-gpu-diff/run.sh defines")
+        for fn in writers:
+            if not re.search(r"^(pub )?fn %s\b" % re.escape(fn), bytecode_text, re.M):
+                problems.append(f"line {n}: {name} names writer {fn}, which bytecode.dawn does "
+                                f"not define")
+
+    for c in sorted(EXPECTED_TAGS - set(codes)):
+        problems.append(f"type tag {c} of the frozen table has no row")
+    for c in sorted(set(codes) - EXPECTED_TAGS):
+        problems.append(f"{c} ({codes[c]}) is not a type tag of the frozen table")
+    for name in sorted(tags):
+        if name not in seen:
+            problems.append(
+                f"bytecode.dawn writes a tag for {name} ({tags[name]}) and the ledger has no row "
+                f"for it")
+
+    entries = [ln.split("#", 1)[0].split() for ln in ledger_text.splitlines()
+               if ln.strip() and not ln.lstrip().startswith("#")]
+    if any(layer >= 2 for layer in layers if layers[layer]):
+        if not entries:
+            problems.append("scripts/tile-gpu-diff/ledger.txt has no entry: nothing has run on a "
+                            "device, so no row here may claim layer 2")
+        elif entries[-1][5:6] != ["pass"]:
+            problems.append(
+                "the last layer-2 run in scripts/tile-gpu-diff/ledger.txt did not pass: a type "
+                "is covered at layer 2 only while a device has agreed")
+    return counts, layers, problems
+
+
+def spelled(mlir, name):
+    """Whether a .mlir spells the type. Not a word boundary: a tile's
+    element format is written against the extent (`tile<128xi16>`), so the
+    character before it is a word character on purpose."""
+    return re.search(r"(?:^|[<x,:( ])%s(?![A-Za-z0-9_])" % re.escape(name), mlir, re.M) is not None
+
+
 def gather():
     files = {}
     for golden in GOLDEN.glob("*.mlir"):
@@ -261,24 +550,55 @@ def gather():
 
 
 def self_test():
-    """Every verdict above, on a ledger built to trip it, and a clean control."""
+    """Every verdict above, on a ledger built to trip it, and a clean control.
+
+    One loop over TABLES. A case is (name, table text, bytecode text, ledger
+    text, the fragment the checker must answer with); a `want` of None is a
+    positive control, which must come back clean.
+    """
     files = gather()
-    good = TABLE.read_text()
     bytecode = BYTECODE.read_text()
     ledger = read(LEDGER)
-    _counts, _layers, problems = check(good, bytecode, files, ledger)
-    if problems:
-        print("FAIL: --self-test needs the real ledger to be clean first:")
-        for p in problems:
+    dirty = []
+    for table in TABLES:
+        _c, _l, problems = table.check(table.path.read_text(), bytecode, files, ledger)
+        dirty += [f"{table.name}: {p}" for p in problems]
+    if dirty:
+        print("FAIL: --self-test needs the real ledgers to be clean first:")
+        for p in dirty:
             print("  " + p)
         return 1
 
-    # An opcode no golden holds, for the layer-2 control below. It has to be
-    # one no knife has implemented (knife T2 took the one T0 used here) and
-    # whose mnemonic does not occur in vadd's text.
-    absent = "assume"
+    bad = 0
+    for table in TABLES:
+        good = table.path.read_text()
+        for name, text, bc, led, want in table.cases(good, bytecode, files, ledger):
+            label = f"{table.name}: {name}"
+            if want is not None and (text, bc, led) == (good, bytecode, ledger):
+                print(f"FAIL  self-test: {label} did not change anything (the anchor moved)")
+                bad += 1
+                continue
+            _c, _l, found = table.check(text, bc, files, led)
+            if want is None:
+                if found:
+                    print(f"FAIL  self-test: {label} should be clean, got {found}")
+                    bad += 1
+                else:
+                    print(f"PASS  self-test: {label}")
+            elif any(want in p for p in found):
+                print(f"PASS  self-test: {label}")
+            else:
+                print(f"FAIL  self-test: {label} was accepted (wanted {want!r}, got {found})")
+                bad += 1
+    return 1 if bad else 0
 
-    cases = [
+
+def feature_cases(good, bytecode, files, ledger):
+    """The opcode ledger's verdicts, each on a table built to trip it."""
+    # An opcode no golden holds, for the layer-2 control below.
+    absent = "assume"
+    plain = [
+
         ("a row with too few fields",
          good + "\nnope | 0x76 | 13.1 | unimplemented | T1 | 0\n", "fields, not 8"),
         ("the same opcode twice",
@@ -337,44 +657,105 @@ def self_test():
          "so its knife is a planned one"),
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
-    bad = 0
-    for name, text, want in cases:
-        if text == good:
-            print(f"FAIL  self-test: {name} did not change the ledger (the anchor moved)")
-            bad += 1
-            continue
-        _c, _l, found = check(text, bytecode, files, ledger)
-        if any(want in p for p in found):
-            print(f"PASS  self-test: {name}")
-        else:
-            print(f"FAIL  self-test: {name} was accepted (wanted {want!r}, got {found})")
-            bad += 1
-
+    cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
     # The other input: an OP_ the writer grew and nobody wrote down.
     grown = bytecode.replace("const OP_TANH: Int = 0x6A",
-                             "const OP_TANH: Int = 0x6A\nconst OP_ASSUME: Int = 0x06")
-    _c, _l, found = check(good, grown, files, ledger)
-    if any("OP_ASSUME (0x06) and the ledger has no row" in p or "marked unimplemented but" in p
-           for p in found):
-        print("PASS  self-test: an OP_ constant the ledger does not call implemented")
-    else:
-        print(f"FAIL  self-test: an unrecorded OP_ was accepted (got {found})")
-        bad += 1
+                             "const OP_TANH: Int = 0x6A\nconst OP_BREAK: Int = 0x0A")
+    cases.append(("an OP_ constant the ledger does not call implemented", good, grown, ledger,
+                  "is marked unimplemented but bytecode.dawn emits OP_BREAK"))
+    invented = bytecode.replace("const OP_TANH: Int = 0x6A",
+                                "const OP_TANH: Int = 0x6A\nconst OP_BOGUS: Int = 0x0A")
+    cases.append(("an OP_ constant the ledger has no row for", good, invented, ledger,
+                  "and the ledger has no row for it"))
+    cases.append(("an empty layer-2 ledger under layer-2 claims", good, bytecode,
+                  "# only a comment\n", "has no entry"))
+    cases.append(("the real ledger is clean (the positive control)", good, bytecode, ledger, None))
+    return cases
 
-    _c, _l, found = check(good, bytecode, files, "# only a comment\n")
-    if any("has no entry" in p for p in found):
-        print("PASS  self-test: an empty layer-2 ledger under layer-2 claims")
-    else:
-        print(f"FAIL  self-test: an empty device ledger was accepted (got {found})")
-        bad += 1
 
-    _c, _l, found = check(good, bytecode, files, ledger)
-    if found:
-        print(f"FAIL  self-test: the real ledger stopped being clean: {found}")
-        bad += 1
-    else:
-        print("PASS  self-test: the real ledger is clean (the positive control)")
-    return 1 if bad else 0
+def type_cases(good, bytecode, files, ledger):
+    """The type ledger's verdicts, each on a table built to trip it."""
+    plain = [
+
+        ("a row with too few fields",
+         good + "\nnope | 23 | 13.1 | unimplemented | T9 | 0\n", "fields, not 8"),
+        ("the same type twice",
+         good + "\ni16 | 2 | 13.1 | unimplemented | T9 | 0 | - | -\n", "is already listed"),
+        ("a ledger with one row missing",
+         "\n".join(ln for ln in good.splitlines() if not ln.startswith("tf32 ")) + "\n",
+         "type tag 8 of the frozen table has no row"),
+        ("a tag that disagrees with bytecode.dawn",
+         good.replace("i16                |  2 |", "i16                |  6 |"),
+         "i16 is tag 6 here and 2 in bytecode.dawn"),
+        ("a tag the writer writes and the ledger calls unimplemented",
+         good.replace("tf32               |  8 | 13.1 | implemented   | T3  | 3 |",
+                      "tf32               |  8 | 13.1 | unimplemented | T9  | 0 |"),
+         "bytecode.dawn writes its tag"),
+        ("a row claiming a tag the writer does not write",
+         good.replace("i4                 | 22 | 13.3 | unimplemented | T9  | 0 | -",
+                      "i4                 | 22 | 13.3 | implemented   | T3  | 2 | golden:vadd"),
+         "writes no tag for it"),
+        ("a version the deltas contradict",
+         good.replace("f8E8M0FNU          | 18 | 13.2", "f8E8M0FNU          | 18 | 13.1"),
+         "f8E8M0FNU entered at 13.2, not 13.1"),
+        ("a layer-2 claim with no device kernel",
+         good.replace("| 2 | golden:int_ops,device:int_ops", "| 2 | golden:int_ops          "),
+         "claims layer 2 and names no device kernel"),
+        ("a golden whose .mlir does not spell the type",
+         good.replace("golden:dtype_tf32,device:dtype_tf32", "golden:vadd,device:dtype_tf32     "),
+         "whose .mlir does not spell the type"),
+        ("a layer-3 claim with no mutant",
+         good.replace(",mutant:f64-tag-as-i64", "                      "),
+         "claims layer 3 and names no mutant"),
+        ("a mutant nobody defines",
+         good.replace("mutant:tf32-tag-as-f32", "mutant:tf32-tag-as-f16"),
+         "names mutant tf32-tag-as-f16"),
+        ("a row below the bar with no reason for it",
+         good.replace("golden:vadd_f32                                                      | "
+                      "no host channel",
+                      "golden:vadd_f32                                                      | -"),
+         "stops at layer 1 and names no reason"),
+        ("a row at the bar that still claims an exemption",
+         good.replace("golden:int_ops,device:int_ops                                        | -",
+                      "golden:int_ops,device:int_ops                                        | "
+                      "architecture"),
+         "reaches layer 2 and still claims the exemption"),
+        ("an implemented row under a knife nobody has cut",
+         good.replace("i16                |  2 | 13.1 | implemented   | T3 ",
+                      "i16                |  2 | 13.1 | implemented   | T9 "),
+         "knife 'T9' cannot be a planned one"),
+        ("an unimplemented row under a knife that has landed",
+         good.replace("i4                 | 22 | 13.3 | unimplemented | T9 ",
+                      "i4                 | 22 | 13.3 | unimplemented | T3 "),
+         "so its knife is a planned one"),
+        ("a deferred row with no reason",
+         good.replace("TensorViewType     | 14 | 13.1 | deferred      | -   | 0 | -"
+                      "                                                                    | "
+                      "ruling 2",
+                      "TensorViewType     | 14 | 13.1 | deferred      | -   | 0 | -"
+                      "                                                                    | -"),
+         "is deferred with no named reason"),
+        ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
+    ]
+    cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
+    grown = bytecode.replace('  "f8E8M0FNU" -> 18', '  "f8E8M0FNU" -> 18\n  "i4" -> 22')
+    cases.append(("a type tag the ledger does not call implemented", good, grown, ledger,
+                  "is marked unimplemented but bytecode.dawn writes its tag"))
+    # and the other direction of the same input: a tag with no row at all
+    invented = bytecode.replace('  "f8E8M0FNU" -> 18', '  "f8E8M0FNU" -> 18\n  "bogus" -> 5')
+    cases.append(("a type tag the ledger has no row for", good, invented, ledger,
+                  "and the ledger has no row for it"))
+    cases.append(("an empty layer-2 ledger under layer-2 claims", good, bytecode,
+                  "# only a comment\n", "has no entry"))
+    cases.append(("the real ledger is clean (the positive control)", good, bytecode, ledger, None))
+    return cases
+
+
+
+TABLES = (
+    Ledger("features", TABLE, "opcode", lambda *a: check(*a), lambda *a: feature_cases(*a)),
+    Ledger("types", TYPES, "type tag", lambda *a: check_types(*a), lambda *a: type_cases(*a)),
+)
 
 
 def main(argv):
@@ -383,16 +764,23 @@ def main(argv):
     if argv[1:]:
         print(__doc__, file=sys.stderr)
         return 2
-    counts, layers, problems = check(TABLE.read_text(), BYTECODE.read_text(), gather(),
-                                     read(LEDGER))
-    for p in problems:
-        print("FAIL: " + p)
-    if problems:
+    files = gather()
+    bytecode = BYTECODE.read_text()
+    ledger = read(LEDGER)
+    results = [(table, table.check(table.path.read_text(), bytecode, files, ledger))
+               for table in TABLES]
+    bad = False
+    for table, (_counts, _layers, problems) in results:
+        for p in problems:
+            print(f"FAIL: {table.name}: " + p)
+            bad = True
+    if bad:
         return 1
-    hist = " ".join(f"layer{k}={layers[k]}" for k in sorted(layers))
-    print(f"PASS  tileir features: {sum(counts.values())} opcode(s): "
-          f"implemented={counts['implemented']} unimplemented={counts['unimplemented']} "
-          f"deferred={counts['deferred']} structural={counts['structural']}; {hist}")
+    for table, (counts, layers, _p) in results:
+        hist = " ".join(f"layer{k}={layers[k]}" for k in sorted(layers))
+        kinds = " ".join(f"{s}={counts[s]}" for s in STATUSES if counts[s])
+        print(f"PASS  tileir {table.name}: {sum(counts.values())} {table.unit}(s): "
+              f"{kinds}; {hist}")
     return 0
 
 
