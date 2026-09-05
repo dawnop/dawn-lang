@@ -4180,6 +4180,63 @@ fn raise_until(x: List[Float], threshold: Float, step: Float, fuel: Int) -> List
     raise_until(list.map(x, v => v + step), threshold, step, fuel - 1)
   }
 
+## Knife T6's references. All four are one line of arithmetic each, and
+## that is the point: what these kernels are FOR is an operation that does
+## not change the answer (`assume`), one that stops the launch
+## (`assert`) or one that writes to the process's standard output
+## (`print_tko`), so the buffer they leave behind has to be something a
+## host can restate without effort. Anything harder would move the
+## comparison off the operation under test.
+##
+## `assert_pass`: the first `n` lanes plus one. The kernel's assertion holds
+## on every lane of the corpus it is run with, so this is what a launch that
+## does not fire answers. There is no reference for `assert_fail`: a launch
+## that fires has no answer to compare, and its verdict is the error the
+## host is given.
+pub fn assert_pass_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] =
+  segments(ins[1], n, 1, (_seg, i) => round_to(dtypes[1], to_float(as_i32(ins[0], i) + 1)))
+
+## `assume_divby`: the first `n` lanes divided by `divisor`. The kernel
+## assumes every lane is a multiple of it, and the corpus makes that true,
+## so the quotient is exact on both sides and the assumption is a claim
+## about code generation and not about the answer.
+pub fn assume_divby_ref(n: Int, divisor: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] =
+  segments(ins[1], n, 1, (_seg, i) => round_to(dtypes[1], to_float(as_i32(ins[0], i) / divisor)))
+
+## `assume_same`: the first `n` lanes times three.
+pub fn assume_same_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] =
+  segments(ins[1], n, 1, (_seg, i) => round_to(dtypes[1], to_float(wrap_i32(as_i32(ins[0], i) * 3))))
+
+## `assume_bounded`: the first `n` lanes plus five.
+pub fn assume_bounded_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] =
+  segments(ins[1], n, 1, (_seg, i) => round_to(dtypes[1], to_float(wrap_i32(as_i32(ins[0], i) + 5))))
+
+## `print_tile`: three segments of `n` lanes -- the input unchanged, then
+## the sum and the maximum of the first `n` lanes repeated across the other
+## two. The same two numbers the kernel PRINTS, which is what lets the bytes
+## on standard output and the bytes in the buffer be two readings of one
+## answer.
+pub fn print_tile_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let total = print_tile_sum(x, n)
+  let biggest = print_tile_max(x, n)
+  segments(ins[1], n, 3, (seg, i) =>
+    round_to(dtypes[1], to_float(if seg == 0 { as_i32(x, i) } else if seg == 1 { total } else { biggest })))
+}
+
+## The sum of the first `n` lanes, modulo 2^32 as an i32 `addi` folds it.
+## Public because scripts/tile-gpu-diff computes the line `print_tile`
+## prints from it, and that line is a judgement of its own.
+pub fn print_tile_sum(x: List[Float], n: Int) -> Int =
+  list.fold(range(0, n), 0, (acc, i) => wrap_i32(acc + as_i32(x, i)))
+
+## The largest of the first `n` lanes, as a signed i32 `maxi` folds it.
+pub fn print_tile_max(x: List[Float], n: Int) -> Int =
+  list.fold(range(0, n), 0, (acc, i) => {
+    let v = as_i32(x, i)
+    if v > acc { v } else { acc }
+  })
+
 pub alias RefFn = fn(List[String], List[List[Float]]) -> List[Float]
 
 ## A host reference as the fake device runs it: the same two arguments, and
@@ -5622,6 +5679,30 @@ test "the strided references answer what a reader can check by hand" {
   # and what falls outside contributes zero
   assert gaussian_blur_ref(2, 2, 3, f3, [[1.0, 2.0, 3.0, 4.0],
     [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]) == [3.0, 3.0, 7.0, 7.0]
+}
+
+test "the debugging references answer what a reader can check by hand, and the printed pair is the stored pair" {
+  let i2 = ["i32", "i32"]
+  let x = [3.0, 7.0, 5.0]
+  let out4 = [0.0, 0.0, 0.0, 0.0 - 1.0]
+  assert assert_pass_ref(3, i2, [x, out4]) == [4.0, 8.0, 6.0, 0.0 - 1.0]
+  assert assume_divby_ref(3, 32, i2, [[64.0, 96.0, 0.0], out4]) == [2.0, 3.0, 0.0, 0.0 - 1.0]
+  assert assume_same_ref(3, i2, [x, out4]) == [9.0, 21.0, 15.0, 0.0 - 1.0]
+  assert assume_bounded_ref(3, i2, [x, out4]) == [8.0, 12.0, 10.0, 0.0 - 1.0]
+  # the sum and the maximum are the two numbers the kernel prints, and they
+  # are the second and third segments of what it stores: the byte judgement
+  # and the buffer judgement read one answer
+  assert print_tile_sum(x, 3) == 15
+  assert print_tile_max(x, 3) == 7
+  let out10 = list.map(range(0, 10), _i => 0.0 - 1.0)
+  let tiles = print_tile_ref(3, i2, [x, out10])
+  assert list.take(tiles, 3) == x
+  assert list.slice(tiles, 3, 6) == [15.0, 15.0, 15.0]
+  assert list.slice(tiles, 6, 9) == [7.0, 7.0, 7.0]
+  assert list.drop(tiles, 9) == [0.0 - 1.0]
+  # the fold is i32 arithmetic, so the sum wraps where the device's `addi`
+  # does rather than growing into a wider host integer
+  assert print_tile_sum([2147483647.0, 1.0], 2) == 0 - 2147483648
 }
 
 test "the loop references answer what a reader can check by hand, trip counts included" {

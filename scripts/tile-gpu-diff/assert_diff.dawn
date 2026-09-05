@@ -1,0 +1,530 @@
+# Layer 2 for the three debugging opcodes (knife T6), the seventeenth of
+# these programs: one `!Gpu` program runs each kernel scripts/tile-golden
+# pins under `with_gpu_real` against the machine's GPU and under
+# `with_gpu_fake` against hand-written host references, and prints what each
+# device answered.
+#
+#   assert_diff <assume_divby.cubin> <assume_same.cubin> <assume_bounded.cubin> <assert_pass.cubin>
+#   assert_diff --case fail  <assert_fail.cubin>
+#   assert_diff --case print <print_tile.cubin>
+#
+# THREE CASES, THREE PROCESSES, and that is a measurement and not a style.
+# Two of the three opcodes here do something no other opcode in this
+# directory does, and each costs a process of its own:
+#
+#   * A FIRED ASSERTION POISONS THE CONTEXT. Measured on this machine
+#     (driver 616.56): `cuLaunchKernel` returns success, the message reaches
+#     the host, and `cuCtxSynchronize` answers CUresult 719
+#     (CUDA_ERROR_LAUNCH_FAILED). After that EVERY call in the process
+#     fails the same way -- the download, the next launch, the next
+#     synchronise. So `assert_fail` cannot share a process with any kernel
+#     whose answer is to be compared, and the `fail` case runs it alone.
+#   * THE DEVICE OWNS STANDARD OUTPUT. `assert`'s message and `print_tko`'s
+#     formatted line are both written to the PROCESS's standard output by
+#     the driver when the context is synchronised. So this program writes
+#     its whole transcript, verdict line included, to standard ERROR, and
+#     what is left on standard output is exactly what the device put there.
+#     run.sh reads the verdict from the error stream and judges the output
+#     stream by its bytes.
+#
+# WHAT ONLY A DEVICE CAN SAY, and what this program was written to ask:
+#
+#   * THAT A LAUNCH CAN FAIL ON PURPOSE. `assert_fail`'s judgement is not a
+#     comparison at all: it is that the host is TOLD. Nothing below layer 2
+#     can see it -- `tileiras` assembles a firing assertion and a holding
+#     one into equally valid cubins, and the .mlir goldens differ only in a
+#     constant -- and no other kernel in this tree has ever been expected to
+#     fail.
+#   * THAT THE MESSAGE IS THE MESSAGE. The string this repository wrote into
+#     the bytecode's String section comes back out of the driver, once per
+#     failing lane and with that lane's index. run.sh holds the count and
+#     the text.
+#   * THAT print_tko PUTS THOSE BYTES THERE. The kernel reduces its own tile
+#     to a sum and a maximum, prints them, and STORES them as well, so the
+#     line on standard output and the buffer coming back are two readings of
+#     one answer. The bytes are the judgement no buffer comparison can make:
+#     the print-format-wrong mutant leaves the buffer right and the line
+#     wrong.
+#   * THAT AN ASSUMPTION IS NOT AN ANSWER. The three `assume` kernels carry
+#     predicates that are TRUE of their corpora, and the device has to give
+#     the same answer it would without them. A false predicate is undefined
+#     behaviour by the dialect's own words (Ops.td's AssumeOp), so there is
+#     no such thing as a wrong answer to compare against, and that is why
+#     `assume` carries a named layer-3 exemption in
+#     scripts/tileir-features/features.txt rather than a mutant.
+#
+# THE TIER IS EXACT throughout: every kernel here is i32 arithmetic on
+# independent lanes, and `print_tile`'s two reductions are an integer sum
+# modulo 2^32 (associative and commutative) and a maximum.
+#
+# THE CONTROL IS A KERNEL, twice over. The three `assume` kernels hold
+# neither `assert` nor `print_tko`, so no mutant of those two may move
+# their bytes or their verdicts; and `assert_pass` runs LAST in the default
+# case for the sticky-error reason above, so a mutant that makes it fire
+# cannot take the three assumptions down with it.
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/bytes
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out,
+  assert_pass_ref, assume_divby_ref, assume_same_ref, assume_bounded_ref,
+  print_tile_ref, print_tile_sum, print_tile_max }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a whole number,
+## because every buffer here is an i32 one and a sentinel that moved on
+## upload would not be one.
+pub const SENTINEL_I32: Float = 0.0 - 12345.0
+
+## The tolerance tier's numbers. Nothing here uses them (every kernel is
+## exact tier), and they are kept so that `verdict` reads the same as every
+## other program in this directory.
+pub const ATOL: Float = 1.0e-5
+pub const RTOL: Float = 1.0e-5
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const DBG_TILE: Int = 128
+pub const ASSUME_DIVISOR: Int = 32
+pub const ASSUME_GROUP: Int = 4
+
+## What the driver answers when an assertion fires, as `stopped` spells it.
+## Measured on this machine, driver 616.56: `cuLaunchKernel` succeeds and
+## `cuCtxSynchronize` answers CUresult 719. It is written down as a constant
+## because it IS the judgement of the `fail` case.
+pub const ASSERT_STOP: String = "cuda.CUDA_ERROR_LAUNCH_FAILED@sync"
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, for the reason
+# gath_diff gives (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a
+## `gx` by 1 by 1 grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. The LAST buffer is the output, and the
+## one this reads back.
+fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = gpu.gpu_download(hs[len(hs) - 1])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+# ---- the tier ----
+
+## Whether `got` is within the tolerance tier's distance of `want`, by
+## leetgpu's own criterion. A NaN on either side is never within: two NaNs
+## are not agreement, they are two failures.
+pub fn within(got: Float, want: Float) -> Bool =
+  if got != got || want != want {
+    false
+  } else if got == want {
+    true
+  } else if got - got != 0.0 || want - want != 0.0 {
+    false
+  } else {
+    let d = if got > want { got - want } else { want - got }
+    let m = if want > 0.0 { want } else { 0.0 - want }
+    d <= ATOL + RTOL * m
+  }
+
+fn all_within(got: List[Float], want: List[Float]) -> Bool =
+  len(got) == len(want) && list.all(range(0, len(want)), i => within(got[i], want[i]))
+
+## The largest miss as the tolerance criterion measures it: 1.0 is exactly
+## the tolerance, 0.0 is bit-identical.
+fn scaled_miss(got: List[Float], want: List[Float]) -> Float =
+  list.fold(range(0, len(want)), 0.0, (acc, i) => {
+    let a = got[i]
+    let b = want[i]
+    let d = if a > b { a - b } else { b - a }
+    let m = if b > 0.0 { b } else { 0.0 - b }
+    let s = d / (ATOL + RTOL * m)
+    if s > acc { s } else { acc }
+  })
+
+fn pair(real: Trace, fake: Trace) -> Option[(List[Float], List[Float])] =
+  match (real.result, fake.result) {
+    (Some(a), Some(b)) -> if len(a) == len(b) { Some((a, b)) } else { None }
+    _ -> None
+  }
+
+fn miss_line(real: Trace, fake: Trace) -> String = match pair(real, fake) {
+  Some((a, b)) -> "${scaled_miss(a, b)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})"
+  None -> "-"
+}
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one kernel under its tier: `identical:exact` (bit for
+## bit), `close:tolerance`, `identical:tolerance` (a tolerance-tier kernel
+## that happened to agree bit for bit as well), `differ:result`, or
+## `blocked:..`.
+fn verdict(tier: String, fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:" ++ tier
+  } else if tier == "exact" {
+    "differ:result"
+  } else {
+    match pair(real, fake) {
+      Some((a, b)) -> if all_within(a, b) { "close:tolerance" } else { "differ:result" }
+      None -> "differ:result"
+    }
+  }
+}
+
+# ---- the corpus ----
+
+fn sentinel_i32_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL_I32)
+
+## `assert_pass`, `assert_fail` and `print_tile`'s input: the integers 1 to
+## 128, one per lane. Every lane is under `assert_pass`'s limit (1000) and
+## none is under `assert_fail`'s (0), which is what makes the two kernels
+## the two SIDES of one condition rather than two corpora.
+fn plain_values() -> List[Float] = list.map(range(0, DBG_TILE), i => to_float(i + 1))
+
+## `assume_divby`'s input: multiples of 32, which is what its predicate
+## claims. A corpus that broke the claim would not be a wrong answer, it
+## would be an undefined program, so this is the one corpus the kernel has.
+fn divby_values() -> List[Float] = list.map(range(0, DBG_TILE), i => to_float(i * ASSUME_DIVISOR))
+
+## `assume_same`'s input: one value repeated in every group of four, which
+## is what `same_elements<[4]>` claims.
+fn same_values() -> List[Float] = list.map(range(0, DBG_TILE), i => to_float((i / ASSUME_GROUP) * 7))
+
+## `assume_bounded`'s input: values inside [0, 100000], which is what
+## `bounded<0, 100000>` claims. The corpus reaches both ends of the range it
+## is allowed rather than sitting in the middle of it.
+fn bounded_values() -> List[Float] = list.map(range(0, DBG_TILE), i => to_float(i * 787))
+
+## The lanes of each corpus that matter, counted. run.sh holds every one of
+## these, which is what makes the claims above measurements rather than
+## sentences: a `divby` corpus with a lane that is not a multiple would make
+## the program undefined instead of wrong, a `same` corpus whose groups
+## differed likewise, and an `assert` corpus that straddled either limit
+## would make one of the two kernels half-fire and the inverted mutant
+## unreadable.
+fn shape_of() -> String = {
+  let idx = range(0, DBG_TILE)
+  let d = divby_values()
+  let s = same_values()
+  let b = bounded_values()
+  let p = plain_values()
+  let off_grid = list.filter(idx, i => to_int(d[i]) % ASSUME_DIVISOR != 0)
+  let broken_group = list.filter(idx, i => s[i] != s[(i / ASSUME_GROUP) * ASSUME_GROUP])
+  let out_of_range = list.filter(idx, i => b[i] < 0.0 || b[i] > 100000.0)
+  let under_pass = list.filter(idx, i => p[i] < 1000.0)
+  let under_fail = list.filter(idx, i => p[i] < 0.0)
+  "lanes=${DBG_TILE} divby_off_grid=${len(off_grid)} same_broken_group=${len(broken_group)}"
+    ++ " bounded_out_of_range=${len(out_of_range)} under_pass_limit=${len(under_pass)}"
+    ++ " under_fail_limit=${len(under_fail)} bounded_span=${b[DBG_TILE - 1] - b[0]}"
+}
+
+# ---- the cases ----
+
+## The kernels the DEFAULT case runs, in the order their cubins are given.
+## `assert_pass` is last on purpose: a fired assertion poisons the context
+## for the whole process, so a mutant that makes it fire must not be able to
+## take the three assumption kernels with it.
+fn case_name(i: Int) -> String = ["assume_divby", "assume_same", "assume_bounded", "assert_pass"][i]
+
+## Every kernel here is exact tier, so the list is empty and `tier_of`
+## always answers `exact`. It is written out because
+## scripts/leetgpu-diff/check.py READS THIS LIST in every program in this
+## directory.
+pub fn tolerance_tier() -> List[String] = []
+
+fn tier_of(i: Int) -> String =
+  if list.any(tolerance_tier(), n => n == case_name(i)) { "tolerance" } else { "exact" }
+
+## The buffers a named kernel is handed: a FORMAT and the initial contents,
+## in argument order. Every output buffer is LONGER than the answer, so the
+## sentinel in its tail says whether a write went past the end.
+fn bufs_of(name: String) -> List[(String, List[Float])] =
+  if name == "assume_divby" {
+    [("i32", divby_values()), ("i32", sentinel_i32_buffer(DBG_TILE + 8))]
+  } else if name == "assume_same" {
+    [("i32", same_values()), ("i32", sentinel_i32_buffer(DBG_TILE + 8))]
+  } else if name == "assume_bounded" {
+    [("i32", bounded_values()), ("i32", sentinel_i32_buffer(DBG_TILE + 8))]
+  } else if name == "print_tile" {
+    [("i32", plain_values()), ("i32", sentinel_i32_buffer(3 * DBG_TILE + 8))]
+  } else {
+    [("i32", plain_values()), ("i32", sentinel_i32_buffer(DBG_TILE + 8))]
+  }
+
+## The reference table the fake device answers with, for one kernel.
+fn refs_of(name: String) -> Map[String, (Int, WideRefFn)] =
+  if name == "assume_divby" {
+    map.from([("assume_divby", (2, last_out((dts, ins) => assume_divby_ref(DBG_TILE, ASSUME_DIVISOR, dts, ins))))])
+  } else if name == "assume_same" {
+    map.from([("assume_same", (2, last_out((dts, ins) => assume_same_ref(DBG_TILE, dts, ins))))])
+  } else if name == "assume_bounded" {
+    map.from([("assume_bounded", (2, last_out((dts, ins) => assume_bounded_ref(DBG_TILE, dts, ins))))])
+  } else if name == "print_tile" {
+    map.from([("print_tile", (2, last_out((dts, ins) => print_tile_ref(DBG_TILE, dts, ins))))])
+  } else {
+    map.from([(name, (2, last_out((dts, ins) => assert_pass_ref(DBG_TILE, dts, ins))))])
+  }
+
+## A vector as a line: its length, its first lanes and its last ones.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn buffers_of(name: String) -> String =
+  list.fold(bufs_of(name), "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+
+## The line `print_tile` is expected to put on standard output, computed
+## here from the corpus by the HOST references and not copied from what the
+## device printed. run.sh compares this, byte for byte, with what it
+## captured.
+fn expected_print_line() -> String = {
+  let x = plain_values()
+  "print_tile sum=${print_tile_sum(x, DBG_TILE)} max=${print_tile_max(x, DBG_TILE)}\n"
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("assert_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !Exit !io = {
+  io.eprintln("usage: assert_diff <assume_divby.cubin> <assume_same.cubin> <assume_bounded.cubin> <assert_pass.cubin>")
+  io.eprintln("       assert_diff --case fail <assert_fail.cubin>")
+  io.eprintln("       assert_diff --case print <print_tile.cubin>")
+  io.exit(2)
+}
+
+# One kernel under both devices, its transcript on standard error, and its
+# verdict.
+fn compare(name: String, cubins: Map[String, Bytes]) -> String !io = {
+  let bufs = bufs_of(name)
+  let fake = with_gpu_fake(refs_of(name), () => stages(name, 1, bufs))
+  let real = with_gpu_real(cubins, () => stages(name, 1, bufs))
+  let tier = tier_of(0)
+  let v = verdict(tier, fake, real)
+  io.eprintln("kernel ${name} tier=${tier} bufs=${buffers_of(name)} grid=(1, 1, 1)")
+  io.eprintln("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+  io.eprintln("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+      ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+  io.eprintln("  miss  ${miss_line(real, fake)}")
+  if real.note != "" { io.eprintln("  note  ${real.note}") } else { () }
+  io.eprintln("  verdict ${v}")
+  v
+}
+
+# The default case: the three assumption kernels, then the assertion that
+# holds.
+fn run_default(cubins: Map[String, Bytes]) -> Unit !Exit !io = {
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  for i in range(0, 4) {
+    let name = case_name(i)
+    if i == 0 { io.eprintln("index ${shape_of()}") } else { () }
+    let v = compare(name, cubins)
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  io.eprintln("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.eprintln("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.eprintln("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.eprintln("tile-gpu-diff: ${blocked}")
+  }
+}
+
+# The `fail` case: one kernel, alone in this process, whose judgement is
+# that the host is told. Nothing is compared: after the assertion fires the
+# download fails too, so there is no buffer to read.
+fn run_fail(cubins: Map[String, Bytes]) -> Unit !Exit !io = {
+  let name = "assert_fail"
+  let bufs = bufs_of(name)
+  let real = with_gpu_real(cubins, () => stages(name, 1, bufs))
+  let stop = stopped(real)
+  io.eprintln("kernel ${name} case=fail bufs=${buffers_of(name)} grid=(1, 1, 1)")
+  io.eprintln("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+      ++ " sync=${real.sync} download=${real.download}")
+  io.eprintln("  expect ${ASSERT_STOP}")
+  io.eprintln("  stopped ${if stop == "" { "-" } else { stop }}")
+  if real.note != "" { io.eprintln("  note  ${real.note}") } else { () }
+  if stop == ASSERT_STOP {
+    io.eprintln("  verdict expected-failure")
+    io.eprintln("tile-gpu-diff: pass")
+  } else if stop == "" {
+    io.eprintln("  verdict assert-did-not-fire")
+    io.eprintln("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.eprintln("  verdict stopped-elsewhere")
+    io.eprintln("tile-gpu-diff: blocked:${stop}")
+  }
+}
+
+# The `print` case: one kernel, alone in this process so that standard
+# output holds its line and nothing else. Two judgements: the buffer, which
+# every other kernel here also has, and the BYTES, which only this one has.
+fn run_print(cubins: Map[String, Bytes]) -> Unit !Exit !io = {
+  let want = expected_print_line()
+  io.eprintln("index ${shape_of()}")
+  let v = compare("print_tile", cubins)
+  io.eprintln("print-expect-hex ${bytes.to_hex(bytes.utf8(want))}")
+  if v == "identical:exact" {
+    io.eprintln("tiers exact=1 tolerance=0")
+    io.eprintln("tile-gpu-diff: pass")
+  } else if v == "differ:result" {
+    io.eprintln("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.eprintln("tile-gpu-diff: ${v}")
+  }
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let argv = args()
+  match argv {
+    ["--case", "fail", path] -> run_fail(map.from([("assert_fail", read_cubin(path))]))
+    ["--case", "print", path] -> run_print(map.from([("print_tile", read_cubin(path))]))
+    [a, b, c, d] -> {
+      var cubins: Map[String, Bytes] = map.empty()
+      let paths = [a, b, c, d]
+      for i in range(0, 4) {
+        cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
+      }
+      run_default(cubins)
+    }
+    _ -> usage()
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
