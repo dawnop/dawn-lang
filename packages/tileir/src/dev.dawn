@@ -715,6 +715,73 @@ pub fn ceil[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev = unar
 ## The element-wise `a` raised to the power `b`. Tolerance tier.
 pub fn pow[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "pow", shape, a, b)
 
+# ---- the trigonometric family and the float remainder (knife T1) ----
+#
+# Seven operations of the FloatingPoint group that carry NO attribute at
+# all: their Ops.td records declare a source (or an lhs and an rhs) and
+# nothing else, so the writer emits an opcode, a result type and the
+# operands, and not one flags byte. That absence is invisible at layer 0
+# and at layer 1 it is read as an operand index, which is why the mutant
+# that writes the byte anyway is a layer-1 mutant.
+#
+# All five unary ones are libdevice approximations, so every kernel built
+# on them is a tolerance-tier kernel. `remf` is exact by construction (see
+# its own comment) and `atan2` is an approximation like the rest.
+
+## The element-wise sine. The device runs the CUDA Math API's, an
+## APPROXIMATION, and the host second opinion is `std/gpu.ref_sin`, an
+## independent range reduction and Taylor series. Tolerance tier.
+pub fn sin[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev = unary(d, "sin", shape, a)
+
+## The element-wise cosine. Tolerance tier.
+pub fn cos[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev = unary(d, "cos", shape, a)
+
+## The element-wise tangent. Tolerance tier, and the one of the five with
+## poles: near an odd multiple of pi / 2 the answer is enormous and the
+## relative part of the tolerance is what carries the comparison, so a
+## corpus must not sit on a pole.
+pub fn tan[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev = unary(d, "tan", shape, a)
+
+## The element-wise hyperbolic sine. Tolerance tier. It grows like `e^|x|`,
+## so a corpus reaching |x| = 700 in f64 is at the edge of the format.
+pub fn sinh[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev = unary(d, "sinh", shape, a)
+
+## The element-wise hyperbolic cosine. Tolerance tier.
+pub fn cosh[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev = unary(d, "cosh", shape, a)
+
+## The element-wise `atan2` of `a` over `b`, with the quadrant taken from
+## the signs of both.
+##
+## THE ARGUMENT ORDER IS THE NUMERATOR FIRST, which is C's `atan2(y, x)`
+## with the names swapped: the dialect calls its first operand `x` and its
+## second `y` and defines the operation as "the arc tangent of the ratio of
+## first and second input arguments x / y" (Ops.td, Atan2Op). So the
+## dialect's `x` is C's `y`. Reading the operand names instead of the
+## sentence gets the two backwards on every lane off the positive axis,
+## which is what the layer-2 mutant atan2-operands-swapped is. The quadrant
+## behaviour is measured rather than assumed, in scripts/tile-gpu-diff.
+##
+## Tolerance tier.
+pub fn atan2[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "atan2", shape, a, b)
+
+## The element-wise floating-point remainder of `a` by `b`.
+##
+## TRUNCATED division, not IEEE `remainder`: the dialect states it as
+## `a - trunc(a / b) * b`, so the answer takes the sign of the DIVIDEND and
+## its magnitude is below `|b|` (Ops.td, RemFOp). That is C's `fmod` and
+## not C's `remainder`, and the two differ on every lane where the true
+## quotient is more than half a step from its truncation, so a corpus of
+## negative dividends and of `|a| < |b|` is what tells them apart. The
+## device is what settles it and scripts/tile-gpu-diff is where it was
+## settled.
+##
+## The value is EXACT wherever it is defined: the remainder of two
+## representable numbers is itself representable. So a kernel whose only
+## operation is this one could be held to the bit-exact tier; the sweep
+## that covers it here is a tolerance-tier kernel because its neighbours
+## are.
+pub fn remf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "remf", shape, a, b)
+
 ## The element-wise fused multiply-add `a * b + c`, rounded ONCE (the product
 ## is not rounded before the sum). A host reference that multiplies and then
 ## adds agrees with this only where the product is exact.
@@ -2059,7 +2126,9 @@ fn every_transcendental() -> Unit !Dev = {
   let x = load(a, tile_at(i, 8), [8])
   let _r = [
     exp(F64, [8], x), exp2(F64, [8], x), log(F64, [8], x), log2(F64, [8], x), sqrt(F64, [8], x),
-    rsqrt(F64, [8], x), tanh(F64, [8], x), floor(F64, [8], x), ceil(F64, [8], x), pow(F64, [8], x, x)
+    rsqrt(F64, [8], x), tanh(F64, [8], x), floor(F64, [8], x), ceil(F64, [8], x), pow(F64, [8], x, x),
+    sin(F64, [8], x), cos(F64, [8], x), tan(F64, [8], x), sinh(F64, [8], x), cosh(F64, [8], x),
+    atan2(F64, [8], x, x), remf(F64, [8], x, x)
   ]
   ()
 }
@@ -2072,7 +2141,9 @@ test "the typed surface spells every transcendental's name the way Tile IR does"
   assert seen == [
     "unaryf exp f64 [8] 1", "unaryf exp2 f64 [8] 1", "unaryf log f64 [8] 1", "unaryf log2 f64 [8] 1",
     "unaryf sqrt f64 [8] 1", "unaryf rsqrt f64 [8] 1", "unaryf tanh f64 [8] 1", "unaryf floor f64 [8] 1",
-    "unaryf ceil f64 [8] 1", "binaryf pow f64 [8] 1 1"
+    "unaryf ceil f64 [8] 1", "binaryf pow f64 [8] 1 1",
+    "unaryf sin f64 [8] 1", "unaryf cos f64 [8] 1", "unaryf tan f64 [8] 1", "unaryf sinh f64 [8] 1",
+    "unaryf cosh f64 [8] 1", "binaryf atan2 f64 [8] 1 1", "binaryf remf f64 [8] 1 1"
   ]
 }
 

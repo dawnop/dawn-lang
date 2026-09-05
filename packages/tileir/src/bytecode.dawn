@@ -87,6 +87,8 @@ const OP_CMPF: Int = 0x0E
 const OP_CMPI: Int = 0x0F
 const OP_CONSTANT: Int = 0x10
 const OP_CONTINUE: Int = 0x11
+const OP_COS: Int = 0x12
+const OP_COSH: Int = 0x13
 const OP_DIVF: Int = 0x14
 const OP_DIVI: Int = 0x15
 const OP_EXP: Int = 0x17
@@ -120,6 +122,7 @@ const OP_OFFSET: Int = 0x51
 const OP_ORI: Int = 0x52
 const OP_POW: Int = 0x54
 const OP_REDUCE: Int = 0x58
+const OP_REMF: Int = 0x59
 const OP_REMI: Int = 0x5A
 const OP_RESHAPE: Int = 0x5B
 const OP_RETURN: Int = 0x5C
@@ -128,14 +131,18 @@ const OP_SCAN: Int = 0x5E
 const OP_SELECT: Int = 0x5F
 const OP_SHLI: Int = 0x60
 const OP_SHRI: Int = 0x61
+const OP_SIN: Int = 0x62
+const OP_SINH: Int = 0x63
 const OP_SQRT: Int = 0x64
 const OP_STORE_PTR_TKO: Int = 0x65
 const OP_SUBF: Int = 0x67
 const OP_SUBI: Int = 0x68
+const OP_TAN: Int = 0x69
 const OP_TANH: Int = 0x6A
 const OP_TRUNCI: Int = 0x6B
 const OP_XORI: Int = 0x6C
 const OP_YIELD: Int = 0x6D
+const OP_ATAN2: Int = 0x6E
 
 # The flag bits of a memory operation, in the order the reader assigns them:
 # the optional attributes of the operation in declaration order first
@@ -365,6 +372,13 @@ fn float_op(op: String) -> Int = match op {
   "tanh" -> OP_TANH
   "floor" -> OP_FLOOR
   "ceil" -> OP_CEIL
+  "sin" -> OP_SIN
+  "cos" -> OP_COS
+  "tan" -> OP_TAN
+  "sinh" -> OP_SINH
+  "cosh" -> OP_COSH
+  "atan2" -> OP_ATAN2
+  "remf" -> OP_REMF
   _ -> panic("tileir: `${op}` is not a float operation")
 }
 
@@ -379,7 +393,17 @@ fn float_op_rounds(op: String) -> Bool = op == "addf" || op == "subf" || op == "
 # `rounding_mode` that is REQUIRED at 13.2 and so is not a flag either.
 # Every measurement behind this table is scripts/tile-golden's layer 1: each
 # wrong shape was handed to `tileiras` and refused.
-fn float_op_has_flags(op: String) -> Bool = not (op == "pow" || one_of_op(op, ["exp", "log", "log2", "floor", "ceil", "tanh", "negf", "absf"]))
+#
+# Knife T1's seven are all on this list and for one reason: their Ops.td
+# records declare a `source` (or an `lhs` and an `rhs`) and NOTHING else,
+# no `OptionalAttr` and no optional operand, so
+# getVersionOrderedBitAssignments returns an empty map and
+# generateFlagsFieldSerialization writes nothing at all. A flags 0 written
+# anyway is invisible at layer 0 and layer 1 reads it as the next operand
+# index, which is the layer-1 mutant trig-extra-flags.
+fn float_op_has_flags(op: String) -> Bool =
+  not (op == "pow" || one_of_op(op, ["exp", "log", "log2", "floor", "ceil", "tanh", "negf", "absf",
+    "sin", "cos", "tan", "sinh", "cosh", "atan2", "remf"]))
 
 # The rounding mode a unary operation writes after its flags, or `None`.
 fn unary_rounding(op: String) -> Option[Int] =
@@ -1363,6 +1387,23 @@ test "a unary float operation writes flags only where it has an optional field, 
   assert (float_op("exp"), float_op("exp2"), float_op("log"), float_op("log2")) == (0x17, 0x18, 0x3F, 0x40)
   assert (float_op("sqrt"), float_op("rsqrt"), float_op("tanh"), float_op("pow")) == (0x64, 0x5D, 0x6A, 0x54)
   assert (float_op("floor"), float_op("ceil")) == (0x27, 0x0D)
+  # knife T1's seven, read off BytecodeOpcodes.td at the same commit. None
+  # of them has an optional field, so none writes a flags varint and none
+  # writes a rounding mode.
+  assert (float_op("sin"), float_op("cos"), float_op("tan")) == (0x62, 0x12, 0x69)
+  assert (float_op("sinh"), float_op("cosh")) == (0x63, 0x13)
+  assert (float_op("atan2"), float_op("remf")) == (0x6E, 0x59)
+  assert not float_op_has_flags("sin")
+  assert not float_op_has_flags("cos")
+  assert not float_op_has_flags("tan")
+  assert not float_op_has_flags("sinh")
+  assert not float_op_has_flags("cosh")
+  assert not float_op_has_flags("atan2")
+  assert not float_op_has_flags("remf")
+  assert unary_rounding("sin") == None
+  assert unary_rounding("cos") == None
+  assert not float_op_rounds("atan2")
+  assert not float_op_rounds("remf")
 }
 
 test "the integer and conversion opcodes are the frozen table's, and each writes its attributes inline" {
