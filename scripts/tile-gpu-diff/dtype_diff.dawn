@@ -1,0 +1,485 @@
+# Layer 2 for the element format kernels (knife T3), the fourteenth of these
+# programs: one `!Gpu` program runs each kernel scripts/tile-golden pins
+# under `with_gpu_real` against the machine's GPU and under `with_gpu_fake`
+# against hand-written host references, and prints what each device
+# answered.
+#
+#   dtype_diff <dtype_i16.cubin> <dtype_i64.cubin> <dtype_tf32.cubin>
+#
+# THREE OF THE KNIFE'S SIX FORMATS ARE HERE. The other three are the fp8
+# ones, and they are absent for a reason that is a measurement rather than a
+# choice: `tileiras` 13.3.36 refuses `f8E4M3FN`, `f8E5M2` and `f8E8M0FNU` at
+# `--gpu-name sm_86` AND at `sm_89` (`Incompatibility with architecture
+# 'sm_86': unsupported type 'f8E4M3FN'`) and takes them from `sm_100`. This
+# machine's GPU is an RTX 3080, which is sm_86, so no cubin of those three
+# can be loaded here at all. They stop at layer 1, their exemption is named
+# in scripts/tileir-features/types.txt, and scripts/tile-golden assembles
+# them for sm_100 so that layer is real.
+#
+# WHAT ONLY A DEVICE CAN SAY, and what this program was written to ask:
+#
+#   * WHETHER A TYPE TAG IS A WIDTH. `i16` and `i64` are two bytes and eight
+#     bytes an element, and nothing below layer 2 knows it: `tileiras`
+#     accepts a well formed program over either, and the host packer lays
+#     down whatever `element_bytes` says. The tf32 kernel asks the same
+#     question of a 32-bit slot with thirteen zero bits at the bottom, which
+#     is the layout `narrow.tf32_bits` picks and which nothing in the
+#     dialect writes down.
+#   * WHETHER i16 WRAPS AT 2^15. The corpus makes the sum, the difference
+#     and the product leave the range on most lanes; an i32 `addi` would
+#     agree with the host on every lane where nothing wrapped and on no
+#     other, which is what the `index` counts below are for.
+#   * WHETHER i64 IS WIDER THAN i32. The products leave the i32 range on
+#     purpose and the count is held above zero, so a tag that quietly became
+#     i32 is a different answer and not a slower one.
+#   * WHAT tf32's ROUNDING IS. Eleven significand bits, ties to even, and
+#     the same exponent range as binary32; the corpus carries the ties on
+#     both sides, the subnormals, the largest finite value and the overflow
+#     above it.
+#
+# THE TIER IS EXACT for all three, and by ALGEBRA rather than by corpus:
+# integer arithmetic modulo a power of two is exact and associative, and a
+# conversion between two floating formats is a single correctly rounded
+# operation with no fold order in it. There is no reduction anywhere in this
+# family.
+#
+# THE CONTROL IS A KERNEL, twice over: the two mutants below each name ONE
+# of the three, and the other two must not move.
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, dtype_i16_ref, dtype_i64_ref,
+  dtype_convert_ref, wrap_i16 }
+use std/list
+use std/map
+use std/narrow
+
+## The sentinel every output buffer holds before a launch: a value no kernel
+## here computes, so a lane that still has it is a lane nothing wrote. It is
+## an integer because two of the three output buffers are integer ones and
+## the buffer's own format has to be able to hold it.
+pub const SENTINEL: Float = 0.0 - 12345.0
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const DT_N: Int = 512
+pub const DT_TILE: Int = 128
+
+## The lanes past the answer in every output buffer: a write past the end
+## leaves the sentinel behind and is seen.
+const TAIL: Int = 8
+
+## The two lanes of the i16 corpus that are pinned rather than swept, so
+## that both ends of the format are in it: the value with no positive
+## negation and the largest one.
+const I16_MIN_LANE: Int = 3
+const I16_MAX_LANE: Int = 7
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, for the reason
+# gath_diff gives (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a
+## `gx` by 1 by 1 grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. The LAST buffer is the output, and the
+## one this reads back.
+fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = gpu.gpu_download(hs[len(hs) - 1])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one kernel. Every kernel here is EXACT tier, so there is
+## no tolerance arm: the two renderings are equal or they are not.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+## The first lane on which the two answers differ, and what each says, or
+## "-" if they agree. The segment is what makes this readable: with five
+## segments of 512 lanes, lane 1600 means nothing and `seg 3 lane 64` means
+## the shift.
+fn first_difference(real: Trace, fake: Trace) -> String =
+  match (real.result, fake.result) {
+    (Some(a), Some(b)) ->
+      if len(a) != len(b) {
+        "lengths ${len(a)} and ${len(b)}"
+      } else {
+        match list.find(range(0, len(a)), i => to_string(a[i]) != to_string(b[i])) {
+          Some(i) -> "seg ${i / DT_N} lane ${i % DT_N}: device ${a[i]} host ${b[i]}"
+          None -> "-"
+        }
+      }
+    _ -> "-"
+  }
+
+# ---- the corpus ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+## The i16 corpus: `a` steps by 127 across the whole range from -32768 up,
+## `b` cycles across the whole range with a wider stride, so the sum, the
+## difference and the product leave the range on most lanes and the two
+## pinned lanes hold the format's two extreme values.
+fn i16_a() -> List[Float] =
+  list.map(range(0, DT_N), i =>
+      if i == I16_MIN_LANE {
+        0.0 - 32768.0
+      } else if i == I16_MAX_LANE {
+        32767.0
+      } else {
+        to_float(i * 127 - 32768)
+      })
+
+fn i16_b() -> List[Float] =
+  list.map(range(0, DT_N), i => to_float((i * 1013 + 7919) % 65536 - 32768))
+
+## The i64 corpus: `a` steps by a stride wide enough that most lanes are
+## already outside the i32 range, `b` is small so that every product stays
+## inside +/-2^52, which is where the `List[Float]` channel is exact.
+fn i64_a() -> List[Float] =
+  list.map(range(0, DT_N), i => to_float((i - 256) * 8589935))
+
+fn i64_b() -> List[Float] =
+  list.map(range(0, DT_N), i => to_float((i * 37) % 1021 - 510))
+
+## The tf32 buffer's contents: a sweep off the tf32 grid (the packer rounds
+## it, so what the buffer holds is the nearest tf32) with the format's own
+## boundaries pinned in, so that segment 0 reads a zero, a negative zero, a
+## subnormal, the largest finite value and an infinity as well as ordinary
+## numbers.
+fn tf32_x() -> List[Float] = {
+  let max_tf32 = (2.0 - pow2(-10)) * pow2(127)
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        0.0
+      } else if i == 1 {
+        0.0 - 0.0
+      } else if i == 2 {
+        pow2(-136)
+      } else if i == 3 {
+        max_tf32
+      } else if i == 4 {
+        1.0 / 0.0
+      } else if i == 5 {
+        0.0 - 1.0 / 0.0
+      } else {
+        to_float(i - 256) * 0.0123456789
+      })
+}
+
+## The f64 the second segment converts and converts back: values off the
+## tf32 grid, with the two ties and the overflow pinned. A corpus on the
+## grid would let a `ftof` that truncated pass for one that rounds.
+fn tf32_y() -> List[Float] = {
+  let max_tf32 = (2.0 - pow2(-10)) * pow2(127)
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        1.0 + pow2(-11)
+      } else if i == 1 {
+        1.0 + 3.0 * pow2(-11)
+      } else if i == 2 {
+        max_tf32
+      } else if i == 3 {
+        (2.0 - pow2(-11)) * pow2(127)
+      } else if i == 4 {
+        pow2(-136)
+      } else if i == 5 {
+        pow2(-140)
+      } else {
+        to_float(i - 256) * 0.1 + 1.0 / 3.0
+      })
+}
+
+fn pow2(k: Int) -> Float = {
+  var q = 1.0
+  var i = k
+  while i > 0 {
+    q = q * 2.0
+    i = i - 1
+  }
+  while i < 0 {
+    q = q * 0.5
+    i = i + 1
+  }
+  q
+}
+
+fn magnitude(v: Float) -> Float = if v < 0.0 { 0.0 - v } else { v }
+
+## The lanes of each corpus that matter, counted. run.sh holds every one of
+## these above zero, which is what makes the claims in the header
+## measurements: a corpus where nothing wrapped would let an i32 `addi` pass
+## for an i16 one, and a corpus on the tf32 grid would let a truncating
+## conversion pass for a rounding one.
+fn shape_of(name: String) -> String =
+  if name == "dtype_i16" {
+    let a = i16_a()
+    let b = i16_b()
+    let idx = range(0, DT_N)
+    let neg = list.filter(idx, i => a[i] < 0.0)
+    let add_wrap = list.filter(idx, i => to_int(a[i]) + to_int(b[i]) != wrap_i16(to_int(a[i]) + to_int(b[i])))
+    let mul_wrap = list.filter(idx, i => to_int(a[i]) * to_int(b[i]) != wrap_i16(to_int(a[i]) * to_int(b[i])))
+    let shift_wrap = list.filter(idx, i => wrap_i16(to_int(a[i]) << 3) != to_int(a[i]) << 3)
+    let ends = list.filter(idx, i => a[i] == 0.0 - 32768.0 || a[i] == 32767.0)
+    "lanes=${DT_N} negative=${len(neg)} add_wrapped=${len(add_wrap)} mul_wrapped=${len(mul_wrap)}"
+      ++ " shift_wrapped=${len(shift_wrap)} extremes=${len(ends)}"
+  } else if name == "dtype_i64" {
+    let a = i64_a()
+    let b = i64_b()
+    let idx = range(0, DT_N)
+    let neg = list.filter(idx, i => a[i] < 0.0)
+    let wide = list.filter(idx, i => magnitude(a[i]) > 2147483647.0)
+    let wide_prod = list.filter(idx, i => magnitude(a[i] * b[i]) > 2147483647.0)
+    let in_reach = list.filter(idx, i => magnitude(a[i] * b[i]) < 4503599627370496.0)
+    "lanes=${DT_N} negative=${len(neg)} beyond_i32=${len(wide)} products_beyond_i32=${len(wide_prod)}"
+      ++ " products_inside_2p52=${len(in_reach)}"
+  } else {
+    let x = tf32_x()
+    let y = tf32_y()
+    let idx = range(0, DT_N)
+    let off = list.filter(idx, i => narrow.round_tf32(y[i]) != y[i])
+    # an exact midpoint: nudging the value either way rounds it to two
+    # different neighbours, which is the only place ties-to-even is visible
+    let ties = list.filter(idx, i => {
+      let up = narrow.round_tf32(y[i] * (1.0 + pow2(-40)))
+      let down = narrow.round_tf32(y[i] * (1.0 - pow2(-40)))
+      up != down && narrow.round_tf32(y[i]) != y[i]
+    })
+    let subnormal = list.filter(idx, i => x[i] != 0.0 && magnitude(x[i]) < pow2(-126))
+    let infinite = list.filter(idx, i => x[i] - x[i] != 0.0)
+    let stored_off_f32 = list.filter(idx, i => narrow.round_tf32(x[i]) != x[i])
+    "lanes=${DT_N} off_grid=${len(off)} near_ties=${len(ties)} subnormal=${len(subnormal)}"
+      ++ " infinite=${len(infinite)} rounded_on_upload=${len(stored_off_f32)}"
+  }
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String = ["dtype_i16", "dtype_i64", "dtype_tf32"][i]
+
+## The number of output segments each kernel writes.
+fn case_segments(i: Int) -> Int = [5, 5, 2][i]
+
+fn case_grid(_i: Int) -> Int = DT_N / DT_TILE
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order. Every output buffer is LONGER than the answer, so the
+## sentinel in its tail says whether a write went past the end.
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let out = sentinel_buffer(case_segments(i) * DT_N + TAIL)
+  if case_name(i) == "dtype_i16" {
+    [("i16", i16_a()), ("i16", i16_b()), ("i16", out)]
+  } else if case_name(i) == "dtype_i64" {
+    [("i64", i64_a()), ("i64", i64_b()), ("i64", out)]
+  } else {
+    [("tf32", tf32_x()), ("f64", tf32_y()), ("f64", out)]
+  }
+}
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
+  if case_name(i) == "dtype_i16" {
+    map.from([("dtype_i16", (3, last_out((dts, ins) => dtype_i16_ref(DT_N, dts, ins))))])
+  } else if case_name(i) == "dtype_i64" {
+    map.from([("dtype_i64", (3, last_out((dts, ins) => dtype_i64_ref(DT_N, dts, ins))))])
+  } else {
+    map.from([("dtype_tf32", (3, last_out((dts, ins) => dtype_convert_ref(DT_N, "tf32", dts, ins))))])
+  }
+
+## A vector as a line: its length, its first lanes and its last ones.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn buffers_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("dtype_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !Exit !io = {
+  io.eprintln("usage: dtype_diff <dtype_i16.cubin> <dtype_i64.cubin> <dtype_tf32.cubin>")
+  io.exit(2)
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  let count = 3
+  if len(paths) != count { usage() } else { () }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let gx = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs))
+    let real = with_gpu_real(cubins, () => stages(name, gx, bufs))
+    let v = verdict(fake, real)
+    io.println("kernel ${name} tier=exact bufs=${buffers_of(i)} grid=(${gx}, 1, 1)"
+        ++ " segments=${case_segments(i)}")
+    io.println("  index ${shape_of(name)}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  first ${first_difference(real, fake)}")
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")

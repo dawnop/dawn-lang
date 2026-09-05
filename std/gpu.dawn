@@ -3638,6 +3638,107 @@ fn f32_of_bits(pattern: Int) -> Float = {
 ## argument buffer in order, the contents of every argument buffer in order,
 ## and the contents the LAST of them has afterwards. Every reference in this
 ## module has this shape.
+# ---- the element format references (knife T3) ----
+#
+# One reference a kernel, all four of the same shape: `segs` segments of `n`
+# lanes in the last buffer, and everything past them left as it was found
+# (the sentinel, which is how a write past the end is seen).
+
+# The value of lane `i` as an Int, with no wrap: the i64 reference's reading
+# of its corpus, which stays inside +/-2^52 so that this is exact.
+fn as_int(xs: List[Float], i: Int) -> Int = to_int(xs[i])
+
+# `f(i)` over the `segs * n` lanes of the output, and `old` past them.
+fn segments(old: List[Float], n: Int, segs: Int, f: fn(Int, Int) -> Float) -> List[Float] =
+  list.map(range(0, len(old)), k =>
+      if k < segs * n { f(k / n, k % n) } else { old[k] })
+
+## The five segments of `dtype_i16`: the sum, the difference, the product,
+## `(a << 3) >> 2` and the itof / ftoi round trip, each wrapped into
+## [-32768, 32767] as the device's i16 arithmetic wraps. `ins` is
+## `[a, b, out]`.
+##
+## The round trip is the IDENTITY and is here for that reason: every i16 is
+## a binary64 exactly, so widening and truncating back cannot lose anything,
+## and a segment that is not the input is a conversion at the wrong width.
+pub fn dtype_i16_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let xa = ins[0]
+  let xb = ins[1]
+  segments(ins[2], n, 5, (seg, i) => {
+    let a = wrap_i16(to_int(xa[i]))
+    let b = wrap_i16(to_int(xb[i]))
+    let v = if seg == 0 {
+      wrap_i16(a + b)
+    } else if seg == 1 {
+      wrap_i16(a - b)
+    } else if seg == 2 {
+      wrap_i16(a * b)
+    } else if seg == 3 {
+      wrap_i16(wrap_i16(a << 3) >> 2)
+    } else {
+      a
+    }
+    to_float(v)
+  })
+}
+
+## The five segments of `dtype_i64`: the sum, the difference, the product,
+## the sum with the constant 2^32 and the itof / ftoi round trip. `ins` is
+## `[a, b, out]`.
+##
+## NO WRAPPING HERE, which is the difference from the i16 reference and a
+## statement about the corpus rather than about the format: the device wraps
+## at 2^64 and this cannot follow it there, so the corpus stays inside
+## +/-2^52 (`dtype_diff.dawn` counts the products that leave the i32 range,
+## which is what makes the width itself visible).
+pub fn dtype_i64_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let xa = ins[0]
+  let xb = ins[1]
+  segments(ins[2], n, 5, (seg, i) => {
+    let a = as_int(xa, i)
+    let b = as_int(xb, i)
+    let v = if seg == 0 {
+      a + b
+    } else if seg == 1 {
+      a - b
+    } else if seg == 2 {
+      a * b
+    } else if seg == 3 {
+      a + 4294967296
+    } else {
+      a
+    }
+    to_float(v)
+  })
+}
+
+## The two segments of `dtype_tf32`, `dtype_e4m3`, `dtype_e5m2` and
+## `dtype_e8m0`: the buffer of the format widened to f64, and an f64 taken
+## into the format and back. `ins` is `[x, y, out]` and `dtype` names the
+## format.
+##
+## Segment 0 is not a rounding: the buffer already holds values of the
+## format (`upload` rounded them, `pack_to` laid them down) and widening is
+## exact, so the reference is the buffer. That is the whole of what a device
+## can be wrong about there, and it is exactly the storage layout.
+##
+## Segment 1 for f8E8M0FNU goes through binary32, because the KERNEL does:
+## `ftof` from f64 straight into that format kills tileiras 13.3.36, so
+## scripts/tile-golden's kernel detours and this rounds twice to match. For
+## the other three it is one rounding.
+pub fn dtype_convert_ref(n: Int, dtype: String, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let y = ins[1]
+  segments(ins[2], n, 2, (seg, i) =>
+      if seg == 0 {
+        x[i]
+      } else if dtype == "f8E8M0FNU" {
+        round_to(dtype, narrow.round_f32(y[i]))
+      } else {
+        round_to(dtype, y[i])
+      })
+}
+
 pub alias RefFn = fn(List[String], List[List[Float]]) -> List[Float]
 
 ## A host reference as the fake device runs it: the same two arguments, and
@@ -5013,4 +5114,47 @@ test "the strided references answer what a reader can check by hand" {
   # and what falls outside contributes zero
   assert gaussian_blur_ref(2, 2, 3, f3, [[1.0, 2.0, 3.0, 4.0],
     [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]) == [3.0, 3.0, 7.0, 7.0]
+}
+
+test "the element format references answer what a reader can check by hand" {
+  let i3 = ["i16", "i16", "i16"]
+  # two lanes, five segments, and two lanes of tail the reference must
+  # leave as it found them
+  let out = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0, 0.0 - 1.0]
+  let got = dtype_i16_ref(2, i3, [[32000.0, 0.0 - 3.0], [1000.0, 5.0], out])
+  # sum: 32000 + 1000 is 33000, which wraps to -32536 in i16
+  assert list.take(got, 2) == [0.0 - 32536.0, 2.0]
+  # difference, then the product, which wraps on the first lane
+  assert list.slice(got, 2, 4) == [31000.0, 0.0 - 8.0]
+  assert list.slice(got, 4, 6) == [18432.0, 0.0 - 15.0]
+  # (a << 3) >> 2: the shift left wraps and the arithmetic shift right
+  # keeps the sign it left behind
+  assert list.slice(got, 6, 8) == [0.0 - 1536.0, 0.0 - 6.0]
+  # the itof / ftoi round trip is the identity, and the tail is untouched
+  assert list.slice(got, 8, 10) == [32000.0, 0.0 - 3.0]
+  assert list.drop(got, 10) == [0.0 - 1.0, 0.0 - 1.0]
+
+  # i64: no wrapping, and a product well past the i32 range
+  let big = 3000000000.0
+  let out64 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0]
+  let got64 = dtype_i64_ref(1, ["i64", "i64", "i64"], [[big], [7.0], out64])
+  assert got64 == [big + 7.0, big - 7.0, big * 7.0, big + 4294967296.0, big, 0.0 - 1.0]
+
+  # a conversion reference: segment 0 is the buffer as it stands, segment 1
+  # is the format's rounding of the second buffer
+  let outc = [0.0, 0.0, 0.0, 0.0, 0.0 - 1.0]
+  let x = [1.0, 0.5]
+  let y = [1.0 + 1.0 / 4096.0, 3.0]
+  let tf = dtype_convert_ref(2, "tf32", ["tf32", "f64", "f64"], [x, y, outc])
+  assert list.take(tf, 2) == x
+  assert list.slice(tf, 2, 4) == [1.0, 3.0]
+  assert list.drop(tf, 4) == [0.0 - 1.0]
+  # f8E8M0FNU rounds toward zero and through binary32, as its kernel does
+  let e8 = dtype_convert_ref(2, "f8E8M0FNU", ["f8E8M0FNU", "f64", "f64"], [x, [1.99, 3.0], outc])
+  assert list.slice(e8, 2, 4) == [1.0, 2.0]
+  # f8E4M3FN keeps four significand bits; f8E5M2 keeps two
+  let e4 = dtype_convert_ref(1, "f8E4M3FN", ["f8E4M3FN", "f64", "f64"], [[1.0], [1.1], outc])
+  let e5 = dtype_convert_ref(1, "f8E5M2", ["f8E5M2", "f64", "f64"], [[1.0], [1.1], outc])
+  assert e4[1] == 1.125
+  assert e5[1] == 1.0
 }

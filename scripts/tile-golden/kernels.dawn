@@ -8,7 +8,7 @@
 # which run.sh holds against toolchain.txt).
 use std/io
 use std/io.{with_fs_real, write_bytes}
-use std/gpu.{F64, F32, BF16, F16, I32, I8}
+use std/gpu.{F64, F32, BF16, F16, I32, I8, I16, I64, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU}
 use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
   store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, or_mask, in_range, axis_mask,
   gather, gather_masked, scatter, scatter_masked, axis_strides,
@@ -24,7 +24,8 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_mask
   d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const, erf,
   sin, cos, tan, sinh, cosh, atan2, remf,
   extract, cat, permute_tile, num_blocks, d_fork2,
-  ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, i64_const, add_i64 }
+  ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, i64_const, add_i64,
+  addi, subi, muli, shli, shri, consti }
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -1952,6 +1953,137 @@ fn rope(q: Param[F64], cs: Param[F64], sn: Param[F64], out: Param[F64]) -> Unit 
     addf(F64, sh, mul(F64, sh, x2, c), mul(F64, sh, x1, s)))
 }
 
+# ---- the element format kernels (knife T3) ----
+#
+# One kernel a format, and every one of them the same shape: `DT_SEG`
+# segments of `DT_N` lanes in one output buffer, so a lane of one operation
+# is its own comparison and a mutant that moves one segment leaves the
+# others alone (`trig_sweep`'s shape, and for its reason).
+#
+# The four float ones are ROUND TRIPS and not arithmetic. The dialect gives
+# `tf32` and the three fp8 formats to `ftof` and to memory and keeps them
+# out of `addf` (Ops.td's BaseFloatTileType is f16, bf16, f32 and f64), so
+# what there is to say about them is what a conversion does and what a
+# buffer holds, said twice: once reading a buffer OF the format and once
+# converting an f64 into it and back.
+#
+# The lengths are multiples of the tile width on purpose: these kernels
+# carry no mask, because a masked load would need a padding CONSTANT of the
+# format and a constant of tf32 or of an fp8 format has no encoding in this
+# writer (bytecode.dawn's float_payload says so by refusing). Nothing here
+# needs one.
+const DT_N: Int = 512
+const DT_TILE: Int = 128
+
+# The i16 kernel: five segments, the four arithmetic operations this width
+# has a spelling for and the itof / ftoi round trip.
+#
+# The wrap at 2^15 is the point of the first three. i16 is the narrowest
+# format whose whole range fits in a Float exactly, so the device's wrap and
+# std/gpu's `wrap_i16` are a bit-exact comparison and the corpus can reach
+# both ends of the range (scripts/tile-gpu-diff/dtype_diff.dawn counts how
+# often it does).
+fn dtype_i16(a: Param[I16], b: Param[I16], out: Param[I16]) -> Unit !Dev = {
+  let s = [DT_TILE]
+  let blk = tile_at(block_id(0), DT_TILE)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * DT_N))
+  let ta = load(a, blk, s)
+  let tb = load(b, blk, s)
+  store(out, seg(0), s, addi(I16, s, ta, tb))
+  store(out, seg(1), s, subi(I16, s, ta, tb))
+  store(out, seg(2), s, muli(I16, s, ta, tb))
+  store(out, seg(3), s, shri(I16, s, shli(I16, s, ta, consti(I16, s, 3)), consti(I16, s, 2)))
+  store(out, seg(4), s, float_to_int(F64, I16, s, int_to_float(I16, F64, s, ta)))
+}
+
+# The i64 kernel: four segments, the three arithmetic operations and the
+# itof / ftoi round trip.
+#
+# The PRODUCTS are what says this is 64-bit arithmetic and not i32's: the
+# corpus multiplies operands whose product leaves the i32 range, and an i32
+# `muli` would wrap where this one does not. What the corpus cannot say
+# anything about is the wrap at 2^63, because the host channel is
+# `List[Float]` and a binary64 significand stops at 2^53; that debt is named
+# in std/gpu's `I64` and in scripts/tileir-features/types.txt.
+fn dtype_i64(a: Param[I64], b: Param[I64], out: Param[I64]) -> Unit !Dev = {
+  let s = [DT_TILE]
+  let blk = tile_at(block_id(0), DT_TILE)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * DT_N))
+  let ta = load(a, blk, s)
+  let tb = load(b, blk, s)
+  store(out, seg(0), s, addi(I64, s, ta, tb))
+  store(out, seg(1), s, subi(I64, s, ta, tb))
+  store(out, seg(2), s, muli(I64, s, ta, tb))
+  # the one CONSTANT of this width in the tree: 2^32 needs five of its
+  # eight bytes, so a payload written four bytes wide is a blob the reader
+  # measures against the type and refuses (the mutant
+  # i64-payload-four-bytes)
+  store(out, seg(3), s, addi(I64, s, ta, consti(I64, s, I64_STEP)))
+  store(out, seg(4), s, float_to_int(F64, I64, s, int_to_float(I64, F64, s, ta)))
+}
+
+# 2^32: a constant no i32 tile could hold, and the smallest round number
+# that says so.
+const I64_STEP: Int = 4294967296
+
+# The four narrow float formats, one kernel each and one body: segment 0
+# reads a buffer OF the format and widens it to f64, segment 1 takes an f64
+# and goes there and back. The first is the storage form and the second is
+# the conversion, and a format that had only one of them would still have a
+# kernel here.
+fn dtype_tf32(x: Param[TF32], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [DT_TILE]
+  let blk = tile_at(block_id(0), DT_TILE)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * DT_N))
+  store(out, seg(0), s, float_to_float(TF32, F64, s, load(x, blk, s)))
+  store(out, seg(1), s,
+    float_to_float(TF32, F64, s, float_to_float(F64, TF32, s, load(y, blk, s))))
+}
+
+fn dtype_e4m3(x: Param[F8E4M3FN], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [DT_TILE]
+  let blk = tile_at(block_id(0), DT_TILE)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * DT_N))
+  store(out, seg(0), s, float_to_float(F8E4M3FN, F64, s, load(x, blk, s)))
+  store(out, seg(1), s,
+    float_to_float(F8E4M3FN, F64, s, float_to_float(F64, F8E4M3FN, s, load(y, blk, s))))
+}
+
+fn dtype_e5m2(x: Param[F8E5M2], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [DT_TILE]
+  let blk = tile_at(block_id(0), DT_TILE)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * DT_N))
+  store(out, seg(0), s, float_to_float(F8E5M2, F64, s, load(x, blk, s)))
+  store(out, seg(1), s,
+    float_to_float(F8E5M2, F64, s, float_to_float(F64, F8E5M2, s, load(y, blk, s))))
+}
+
+# The one kernel whose SECOND conversion carries a rounding mode nothing
+# else here does: `ftof` into f8E8M0FNU takes only `zero` or `positive_inf`,
+# never the `nearest_even` every other conversion in this file writes
+# (bytecode.dawn's ftof_rounding). The mutant
+# e8m0-rounding-as-nearest-even is that sentence turned into a refusal.
+#
+# AND IT IS THE ONE KERNEL THAT DETOURS THROUGH f32. `ftof` from f64
+# straight into f8E8M0FNU makes tileiras 13.3.36 die of SIGILL with nothing
+# on either stream (measured 2026-09-05, exit 132, at every --gpu-name);
+# from f32 it is accepted. So this goes f64 -> f32 -> f8E8M0FNU -> f32 ->
+# f64 and the host reference rounds the same way twice
+# (std/gpu.dtype_e8m0_ref). The detour is a WORKAROUND FOR AN ASSEMBLER BUG
+# and not a property of the format: docs/tile-backend-design.md 6.6 records
+# it, because a later tileiras that fixes it should let this kernel lose
+# two conversions.
+fn dtype_e8m0(x: Param[F8E8M0FNU], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [DT_TILE]
+  let blk = tile_at(block_id(0), DT_TILE)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * DT_N))
+  store(out, seg(0), s, float_to_float(F8E8M0FNU, F64, s, load(x, blk, s)))
+  let narrowed = float_to_float(F64, F32, s, load(y, blk, s))
+  let exponent = float_to_float(F32, F8E8M0FNU, s, narrowed)
+  store(out, seg(1), s,
+    float_to_float(F32, F64, s, float_to_float(F8E8M0FNU, F32, s, exponent)))
+}
+
 # ---- the multi-launch kernels (knife 16) ----
 #
 # Each of these is one STEP of a host-side sequence, not a whole problem.
@@ -3853,6 +3985,24 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("ptr_roundtrip", ["f64", "f64"], () => ptr_roundtrip(param(F64, 0), param(F64, 1), 3))
   "ptr_recast" ->
     trace_kernel("ptr_recast", ["i32", "f64"], () => ptr_recast(param(I32, 0), param(F64, 1)))
+  "dtype_i16" ->
+    trace_kernel("dtype_i16", ["i16", "i16", "i16"],
+      () => dtype_i16(param(I16, 0), param(I16, 1), param(I16, 2)))
+  "dtype_i64" ->
+    trace_kernel("dtype_i64", ["i64", "i64", "i64"],
+      () => dtype_i64(param(I64, 0), param(I64, 1), param(I64, 2)))
+  "dtype_tf32" ->
+    trace_kernel("dtype_tf32", ["tf32", "f64", "f64"],
+      () => dtype_tf32(param(TF32, 0), param(F64, 1), param(F64, 2)))
+  "dtype_e4m3" ->
+    trace_kernel("dtype_e4m3", ["f8E4M3FN", "f64", "f64"],
+      () => dtype_e4m3(param(F8E4M3FN, 0), param(F64, 1), param(F64, 2)))
+  "dtype_e5m2" ->
+    trace_kernel("dtype_e5m2", ["f8E5M2", "f64", "f64"],
+      () => dtype_e5m2(param(F8E5M2, 0), param(F64, 1), param(F64, 2)))
+  "dtype_e8m0" ->
+    trace_kernel("dtype_e8m0", ["f8E8M0FNU", "f64", "f64"],
+      () => dtype_e8m0(param(F8E8M0FNU, 0), param(F64, 1), param(F64, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -3883,6 +4033,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
       ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
       ++ "|histogram|cas_swap|erf_sweep|geglu|trig_sweep|rope"
+      ++ "|dtype_i16|dtype_i64|dtype_tf32|dtype_e4m3|dtype_e5m2|dtype_e8m0"
       ++ "|kv_scores|kv_context|attn_bwd_mmt|attn_bwd_ds|lin_attn_s|lin_attn_out"
       ++ "|ols_gram|ols_elim|ols_beta"
       ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
