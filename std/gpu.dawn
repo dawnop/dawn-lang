@@ -3600,19 +3600,15 @@ pub fn ptr_recast_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]])
 #
 # A pattern whose exponent field is all ones is refused rather than answered:
 # the corpus that reaches this has none, and a NaN would compare equal to
-# nothing anyway.
+# nothing anyway. Everything else is `narrow.f32_of_bits`, which knife T3
+# wrote for the tf32 codec; this wrapper is the refusal and nothing more.
 fn f32_of_bits(pattern: Int) -> Float = {
   let bits = pattern & 0xFFFFFFFF
-  let exponent = (bits >>> 23) & 0xFF
-  let fraction = bits & 0x7FFFFF
-  let magnitude = if exponent == 0xFF {
+  if ((bits >>> 23) & 0xFF) == 0xFF {
     panic("gpu: the binary32 pattern ${bits} is a NaN or an infinity")
-  } else if exponent == 0 {
-    to_float(fraction) * pow2(0 - 149)
   } else {
-    (1.0 + to_float(fraction) * pow2(0 - 23)) * pow2(exponent - 127)
+    narrow.f32_of_bits(bits)
   }
-  if (bits >>> 31) == 1 { 0.0 - magnitude } else { magnitude }
 }
 
 # ---- what a reference writes back (knife 11) ----

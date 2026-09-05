@@ -55,6 +55,25 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # and not only of which ones a row may cite.
 LANDED_KNIVES = {"T0", "T1", "T2", "T3"}
 
+
+class Ledger:
+    """One coverage ledger: where it lives, what its rows count, the
+    function that holds it to the writer, and its self-test's cases.
+
+    Adding a table is one entry in TABLES below. What a table cannot share
+    is its RULES -- an opcode's evidence and a type tag's are different
+    shapes -- so each brings its own `check` and its own `cases`; what they
+    do share is the parser (`parse_rows`), the status / knife / layer rules
+    (`common_checks`) and the evidence splitter (`evidence_of`).
+    """
+
+    def __init__(self, name, path, unit, check, cases):
+        self.name = name
+        self.path = path
+        self.unit = unit
+        self.check = check
+        self.cases = cases
+
 # The frozen public range and its two frozen gaps (BytecodeOpcodes.td), which
 # together are the 100 opcodes this file has to carry a row for.
 GAPS = set(range(0x19, 0x25)) | set(range(0x34, 0x3A))
@@ -531,25 +550,55 @@ def gather():
 
 
 def self_test():
-    """Every verdict above, on a ledger built to trip it, and a clean control."""
+    """Every verdict above, on a ledger built to trip it, and a clean control.
+
+    One loop over TABLES. A case is (name, table text, bytecode text, ledger
+    text, the fragment the checker must answer with); a `want` of None is a
+    positive control, which must come back clean.
+    """
     files = gather()
-    good = TABLE.read_text()
     bytecode = BYTECODE.read_text()
     ledger = read(LEDGER)
-    _counts, _layers, problems = check(good, bytecode, files, ledger)
-    _tc, _tl, tproblems = check_types(TYPES.read_text(), bytecode, files, ledger)
-    if problems or tproblems:
+    dirty = []
+    for table in TABLES:
+        _c, _l, problems = table.check(table.path.read_text(), bytecode, files, ledger)
+        dirty += [f"{table.name}: {p}" for p in problems]
+    if dirty:
         print("FAIL: --self-test needs the real ledgers to be clean first:")
-        for p in problems + tproblems:
+        for p in dirty:
             print("  " + p)
         return 1
 
-    # An opcode no golden holds, for the layer-2 control below. It has to be
-    # one no knife has implemented (knife T2 took the one T0 used here) and
-    # whose mnemonic does not occur in vadd's text.
-    absent = "assume"
+    bad = 0
+    for table in TABLES:
+        good = table.path.read_text()
+        for name, text, bc, led, want in table.cases(good, bytecode, files, ledger):
+            label = f"{table.name}: {name}"
+            if want is not None and (text, bc, led) == (good, bytecode, ledger):
+                print(f"FAIL  self-test: {label} did not change anything (the anchor moved)")
+                bad += 1
+                continue
+            _c, _l, found = table.check(text, bc, files, led)
+            if want is None:
+                if found:
+                    print(f"FAIL  self-test: {label} should be clean, got {found}")
+                    bad += 1
+                else:
+                    print(f"PASS  self-test: {label}")
+            elif any(want in p for p in found):
+                print(f"PASS  self-test: {label}")
+            else:
+                print(f"FAIL  self-test: {label} was accepted (wanted {want!r}, got {found})")
+                bad += 1
+    return 1 if bad else 0
 
-    cases = [
+
+def feature_cases(good, bytecode, files, ledger):
+    """The opcode ledger's verdicts, each on a table built to trip it."""
+    # An opcode no golden holds, for the layer-2 control below.
+    absent = "assume"
+    plain = [
+
         ("a row with too few fields",
          good + "\nnope | 0x76 | 13.1 | unimplemented | T1 | 0\n", "fields, not 8"),
         ("the same opcode twice",
@@ -608,150 +657,105 @@ def self_test():
          "so its knife is a planned one"),
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
-    bad = 0
-    for name, text, want in cases:
-        if text == good:
-            print(f"FAIL  self-test: {name} did not change the ledger (the anchor moved)")
-            bad += 1
-            continue
-        _c, _l, found = check(text, bytecode, files, ledger)
-        if any(want in p for p in found):
-            print(f"PASS  self-test: {name}")
-        else:
-            print(f"FAIL  self-test: {name} was accepted (wanted {want!r}, got {found})")
-            bad += 1
-
+    cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
     # The other input: an OP_ the writer grew and nobody wrote down.
     grown = bytecode.replace("const OP_TANH: Int = 0x6A",
-                             "const OP_TANH: Int = 0x6A\nconst OP_ASSUME: Int = 0x06")
-    _c, _l, found = check(good, grown, files, ledger)
-    if any("OP_ASSUME (0x06) and the ledger has no row" in p or "marked unimplemented but" in p
-           for p in found):
-        print("PASS  self-test: an OP_ constant the ledger does not call implemented")
-    else:
-        print(f"FAIL  self-test: an unrecorded OP_ was accepted (got {found})")
-        bad += 1
-
-    _c, _l, found = check(good, bytecode, files, "# only a comment\n")
-    if any("has no entry" in p for p in found):
-        print("PASS  self-test: an empty layer-2 ledger under layer-2 claims")
-    else:
-        print(f"FAIL  self-test: an empty device ledger was accepted (got {found})")
-        bad += 1
-
-    _c, _l, found = check(good, bytecode, files, ledger)
-    if found:
-        print(f"FAIL  self-test: the real ledger stopped being clean: {found}")
-        bad += 1
-    else:
-        print("PASS  self-test: the real ledger is clean (the positive control)")
-
-    bad += types_self_test(bytecode, files, ledger)
-    return 1 if bad else 0
+                             "const OP_TANH: Int = 0x6A\nconst OP_BREAK: Int = 0x0A")
+    cases.append(("an OP_ constant the ledger does not call implemented", good, grown, ledger,
+                  "is marked unimplemented but bytecode.dawn emits OP_BREAK"))
+    invented = bytecode.replace("const OP_TANH: Int = 0x6A",
+                                "const OP_TANH: Int = 0x6A\nconst OP_BOGUS: Int = 0x0A")
+    cases.append(("an OP_ constant the ledger has no row for", good, invented, ledger,
+                  "and the ledger has no row for it"))
+    cases.append(("an empty layer-2 ledger under layer-2 claims", good, bytecode,
+                  "# only a comment\n", "has no entry"))
+    cases.append(("the real ledger is clean (the positive control)", good, bytecode, ledger, None))
+    return cases
 
 
-def types_self_test(bytecode, files, ledger):
-    """The type ledger's verdicts, on a table built to trip each one."""
-    good = TYPES.read_text()
-    tags = tag_table(bytecode)
-    cases = [
-        ("types: a row with too few fields",
+def type_cases(good, bytecode, files, ledger):
+    """The type ledger's verdicts, each on a table built to trip it."""
+    plain = [
+
+        ("a row with too few fields",
          good + "\nnope | 23 | 13.1 | unimplemented | T9 | 0\n", "fields, not 8"),
-        ("types: the same type twice",
+        ("the same type twice",
          good + "\ni16 | 2 | 13.1 | unimplemented | T9 | 0 | - | -\n", "is already listed"),
-        ("types: a ledger with one row missing",
+        ("a ledger with one row missing",
          "\n".join(ln for ln in good.splitlines() if not ln.startswith("tf32 ")) + "\n",
          "type tag 8 of the frozen table has no row"),
-        ("types: a tag that disagrees with bytecode.dawn",
+        ("a tag that disagrees with bytecode.dawn",
          good.replace("i16                |  2 |", "i16                |  6 |"),
          "i16 is tag 6 here and 2 in bytecode.dawn"),
-        ("types: a tag the writer writes and the ledger calls unimplemented",
+        ("a tag the writer writes and the ledger calls unimplemented",
          good.replace("tf32               |  8 | 13.1 | implemented   | T3  | 3 |",
                       "tf32               |  8 | 13.1 | unimplemented | T9  | 0 |"),
          "bytecode.dawn writes its tag"),
-        ("types: a row claiming a tag the writer does not write",
+        ("a row claiming a tag the writer does not write",
          good.replace("i4                 | 22 | 13.3 | unimplemented | T9  | 0 | -",
                       "i4                 | 22 | 13.3 | implemented   | T3  | 2 | golden:vadd"),
          "writes no tag for it"),
-        ("types: a version the deltas contradict",
+        ("a version the deltas contradict",
          good.replace("f8E8M0FNU          | 18 | 13.2", "f8E8M0FNU          | 18 | 13.1"),
          "f8E8M0FNU entered at 13.2, not 13.1"),
-        ("types: a layer-2 claim with no device kernel",
+        ("a layer-2 claim with no device kernel",
          good.replace("| 2 | golden:int_ops,device:int_ops", "| 2 | golden:int_ops          "),
          "claims layer 2 and names no device kernel"),
-        ("types: a golden whose .mlir does not spell the type",
+        ("a golden whose .mlir does not spell the type",
          good.replace("golden:dtype_tf32,device:dtype_tf32", "golden:vadd,device:dtype_tf32     "),
          "whose .mlir does not spell the type"),
-        ("types: a layer-3 claim with no mutant",
+        ("a layer-3 claim with no mutant",
          good.replace(",mutant:f64-tag-as-i64", "                      "),
          "claims layer 3 and names no mutant"),
-        ("types: a mutant nobody defines",
+        ("a mutant nobody defines",
          good.replace("mutant:tf32-tag-as-f32", "mutant:tf32-tag-as-f16"),
          "names mutant tf32-tag-as-f16"),
-        ("types: a row below the bar with no reason for it",
+        ("a row below the bar with no reason for it",
          good.replace("golden:vadd_f32                                                      | "
                       "no host channel",
                       "golden:vadd_f32                                                      | -"),
          "stops at layer 1 and names no reason"),
-        ("types: a row at the bar that still claims an exemption",
+        ("a row at the bar that still claims an exemption",
          good.replace("golden:int_ops,device:int_ops                                        | -",
                       "golden:int_ops,device:int_ops                                        | "
                       "architecture"),
          "reaches layer 2 and still claims the exemption"),
-        ("types: an implemented row under a knife nobody has cut",
+        ("an implemented row under a knife nobody has cut",
          good.replace("i16                |  2 | 13.1 | implemented   | T3 ",
                       "i16                |  2 | 13.1 | implemented   | T9 "),
          "knife 'T9' cannot be a planned one"),
-        ("types: an unimplemented row under a knife that has landed",
+        ("an unimplemented row under a knife that has landed",
          good.replace("i4                 | 22 | 13.3 | unimplemented | T9 ",
                       "i4                 | 22 | 13.3 | unimplemented | T3 "),
          "so its knife is a planned one"),
-        ("types: a deferred row with no reason",
+        ("a deferred row with no reason",
          good.replace("TensorViewType     | 14 | 13.1 | deferred      | -   | 0 | -"
                       "                                                                    | "
                       "ruling 2",
                       "TensorViewType     | 14 | 13.1 | deferred      | -   | 0 | -"
                       "                                                                    | -"),
          "is deferred with no named reason"),
-        ("types: an empty ledger", "# nothing\n", "of the frozen table has no row"),
+        ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
-    bad = 0
-    for name, text, want in cases:
-        if text == good:
-            print(f"FAIL  self-test: {name} did not change the ledger (the anchor moved)")
-            bad += 1
-            continue
-        _c, _l, found = check_types(text, bytecode, files, ledger)
-        if any(want in p for p in found):
-            print(f"PASS  self-test: {name}")
-        else:
-            print(f"FAIL  self-test: {name} was accepted (wanted {want!r}, got {found})")
-            bad += 1
-
-    # The other input: a tag the writer grew and nobody wrote down.
-    assert "i4" not in tags
+    cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
     grown = bytecode.replace('  "f8E8M0FNU" -> 18', '  "f8E8M0FNU" -> 18\n  "i4" -> 22')
-    _c, _l, found = check_types(good, grown, files, ledger)
-    if any("writes a tag for i4" in p or "marked unimplemented but" in p for p in found):
-        print("PASS  self-test: types: a type tag the ledger does not call implemented")
-    else:
-        print(f"FAIL  self-test: types: an unrecorded tag was accepted (got {found})")
-        bad += 1
+    cases.append(("a type tag the ledger does not call implemented", good, grown, ledger,
+                  "is marked unimplemented but bytecode.dawn writes its tag"))
+    # and the other direction of the same input: a tag with no row at all
+    invented = bytecode.replace('  "f8E8M0FNU" -> 18', '  "f8E8M0FNU" -> 18\n  "bogus" -> 5')
+    cases.append(("a type tag the ledger has no row for", good, invented, ledger,
+                  "and the ledger has no row for it"))
+    cases.append(("an empty layer-2 ledger under layer-2 claims", good, bytecode,
+                  "# only a comment\n", "has no entry"))
+    cases.append(("the real ledger is clean (the positive control)", good, bytecode, ledger, None))
+    return cases
 
-    _c, _l, found = check_types(good, bytecode, files, "# only a comment\n")
-    if any("has no entry" in p for p in found):
-        print("PASS  self-test: types: an empty layer-2 ledger under layer-2 claims")
-    else:
-        print(f"FAIL  self-test: types: an empty device ledger was accepted (got {found})")
-        bad += 1
 
-    _c, _l, found = check_types(good, bytecode, files, ledger)
-    if found:
-        print(f"FAIL  self-test: the real type ledger stopped being clean: {found}")
-        bad += 1
-    else:
-        print("PASS  self-test: the real type ledger is clean (the positive control)")
-    return bad
+
+TABLES = (
+    Ledger("features", TABLE, "opcode", lambda *a: check(*a), lambda *a: feature_cases(*a)),
+    Ledger("types", TYPES, "type tag", lambda *a: check_types(*a), lambda *a: type_cases(*a)),
+)
 
 
 def main(argv):
@@ -763,20 +767,20 @@ def main(argv):
     files = gather()
     bytecode = BYTECODE.read_text()
     ledger = read(LEDGER)
-    counts, layers, problems = check(TABLE.read_text(), bytecode, files, ledger)
-    tcounts, tlayers, tproblems = check_types(TYPES.read_text(), bytecode, files, ledger)
-    for p in problems + tproblems:
-        print("FAIL: " + p)
-    if problems or tproblems:
+    results = [(table, table.check(table.path.read_text(), bytecode, files, ledger))
+               for table in TABLES]
+    bad = False
+    for table, (_counts, _layers, problems) in results:
+        for p in problems:
+            print(f"FAIL: {table.name}: " + p)
+            bad = True
+    if bad:
         return 1
-    hist = " ".join(f"layer{k}={layers[k]}" for k in sorted(layers))
-    print(f"PASS  tileir features: {sum(counts.values())} opcode(s): "
-          f"implemented={counts['implemented']} unimplemented={counts['unimplemented']} "
-          f"deferred={counts['deferred']} structural={counts['structural']}; {hist}")
-    thist = " ".join(f"layer{k}={tlayers[k]}" for k in sorted(tlayers))
-    print(f"PASS  tileir types: {sum(tcounts.values())} type tag(s): "
-          f"implemented={tcounts['implemented']} unimplemented={tcounts['unimplemented']} "
-          f"deferred={tcounts['deferred']}; {thist}")
+    for table, (counts, layers, _p) in results:
+        hist = " ".join(f"layer{k}={layers[k]}" for k in sorted(layers))
+        kinds = " ".join(f"{s}={counts[s]}" for s in STATUSES if counts[s])
+        print(f"PASS  tileir {table.name}: {sum(counts.values())} {table.unit}(s): "
+              f"{kinds}; {hist}")
     return 0
 
 

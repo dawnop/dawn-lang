@@ -31,7 +31,7 @@
 # refused by the checker.
 use std/list
 use std/str
-use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, I32, I8}
+use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, I32, I8, I64}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it.
 ## `D` is a phantom (spec 2.7): `Tile[F64]` and `Tile[F32]` are two types over
@@ -87,18 +87,13 @@ impl Dtype[I1] {
   fn dtype_bytes(d: I1) -> Int = 1
 }
 
-## The 64-bit integer tile format: what `ptr_to_int` answers and what
-## `int_to_ptr` reads back. A tile element format and not a buffer format,
-## as `I1` is: nothing here allocates an i64 buffer, and the only values of
-## this type a kernel builds are addresses and the constants it offsets them
-## by. The dialect's other scalar formats that this backend has no client
-## for are knife T3's.
-pub type I64 = | I64
-
-impl Dtype[I64] {
-  fn dtype_name(d: I64) -> String = "i64"
-  fn dtype_bytes(d: I64) -> Int = 8
-}
+# The 64-bit integer format is std/gpu's `I64` and not one of this
+# module's own. Knife T2 declared it here, beside `I1`, on the grounds that
+# it was a tile element format and not a buffer format: `ptr_to_int` answers
+# one and nothing allocated a buffer of it. Knife T3 allocates buffers of
+# it, so the grounds are gone and there is one `I64` again. `I1` stays here,
+# because the dialect has no i1 buffer at all and std/gpu has no marker for
+# one.
 
 ## A tile of POINTERS inside a kernel. `D` is a phantom as `Tile[D]`'s is:
 ## the element format the pointers point AT, so a `Ptrs[F64]` where a
@@ -1911,20 +1906,13 @@ pub fn load_ptrs[D: Dtype](d: D, shape: List[Int], ps: Ptrs[D]) -> Tile[D] !Dev 
 }
 
 ## The i64 tile of `shape` every lane of which holds `value`. What an
-## address is offset by, in bytes.
-pub fn i64_const(shape: List[Int], value: Int) -> Tile[I64] !Dev = {
-  let h: Tile[I64] = t_consti("i64", shape, value)
-  h
-}
+## address is offset by, in bytes; the i64 spelling of `consti`.
+pub fn i64_const(shape: List[Int], value: Int) -> Tile[I64] !Dev = consti(I64, shape, value)
 
-## The element-wise i64 sum `a + b`. The one arithmetic operation this
-## surface has over i64, because address arithmetic is the one client.
-pub fn add_i64(shape: List[Int], a: Tile[I64], b: Tile[I64]) -> Tile[I64] !Dev = {
-  let x: Int = a
-  let y: Int = b
-  let h: Tile[I64] = t_binaryi("addi", "i64", shape, x, y)
-  h
-}
+## The element-wise i64 sum `a + b`, the spelling address arithmetic uses.
+## `addi(I64, ..)` is the same instruction and the same bytes.
+pub fn add_i64(shape: List[Int], a: Tile[I64], b: Tile[I64]) -> Tile[I64] !Dev =
+  addi(I64, shape, a, b)
 
 # ---- tests ----
 #
