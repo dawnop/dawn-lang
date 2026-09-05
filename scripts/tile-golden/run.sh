@@ -125,6 +125,46 @@
 #                            is the whole reason those seven are on
 #                            `float_op_has_flags`'s exclusion list, and
 #                            nothing below layer 1 can see the difference
+#     i16-tag-as-bf16        the writer's type table gives i16 the bf16 tag
+#                            -> dtype_i16's text is untouched, its bytes are
+#                            the same length and differ, and tileiras
+#                            refuses them: addi wants an integer tile. The
+#                            i16 twin of f64-tag-as-i64 and bf16-tag-as-i16,
+#                            and the tag it takes is the OTHER two-byte one,
+#                            so the file cannot be refused for its length
+#     i64-payload-four-bytes the writer lays an i64 constant down four bytes
+#                            wide instead of eight -> dtype_i64's text is
+#                            untouched (the renderer prints the value, not
+#                            the blob) and the constant section is SHORT, so
+#                            the reader measures the blob against the type
+#                            and refuses it. This is the type table's other
+#                            half: a tag says what a tile holds and a
+#                            payload has to be that wide
+#     e4m3-tag-as-i8         the writer's type table gives f8E4M3FN the i8
+#                            tag, which is the same one byte -> dtype_e4m3's
+#                            text is untouched, its bytes are the same
+#                            length and differ, and tileiras refuses them:
+#                            ftof wants a float tile. It is the one mutant
+#                            of the three fp8 tags, and what it shows is
+#                            that the tag table is load-bearing for them at
+#                            all; f8E5M2's own tag cannot be told from
+#                            f8E4M3FN's below layer 2 (measured: swapping
+#                            the two assembles clean), and no device this
+#                            tree can reach accepts either
+#     e8m0-rounding-as-nearest-even
+#                            the writer stops keying ftof's rounding mode on
+#                            its target and writes nearest_even everywhere
+#                            -> dtype_e8m0's bytes are the same length and
+#                            differ, and tileiras names the format: only
+#                            `zero` and `positive_inf` are supported for
+#                            f8E8M0FNU
+#     e8m0-tag-as-f8e5m2     the same sentence from the other side: the
+#                            writer gives f8E8M0FNU the f8E5M2 tag, so a
+#                            `rounding<zero>` that was legal for the one
+#                            target is illegal for the other and tileiras
+#                            says `Only 'nearest_even' is supported`. The
+#                            two together are what makes ftof_rounding a
+#                            claim rather than a table
 #     scan-result-drops-the-dim
 #                            the writer gives a `scan` the result types a
 #                            `reduce` would have, the scanned dimension
@@ -223,7 +263,9 @@ kernels=(
   llama_rms llama_qkv llama_rope llama_scores
   llama_out llama_ffn llama_down
   trig_sweep rope shape_ops grid_stride
-  token_join ptr_roundtrip ptr_recast)
+  token_join ptr_roundtrip ptr_recast
+  dtype_i16 dtype_i64 dtype_tf32 dtype_e4m3
+  dtype_e5m2 dtype_e8m0)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -280,6 +322,11 @@ mutants=(
   int-to-ptr-as-ptr-to-int
   ptr-to-int-as-int-to-ptr
   ptr-to-ptr-as-bitcast
+  i16-tag-as-bf16
+  i64-payload-four-bytes
+  e4m3-tag-as-i8
+  e8m0-rounding-as-nearest-even
+  e8m0-tag-as-f8e5m2
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -461,6 +508,33 @@ raise SystemExit(1)
 PY
 }
 
+# The --gpu-name a kernel is assembled for. toolchain.txt's `gpu-name` is
+# the machine's own (sm_86) and every kernel but three uses it.
+#
+# The three are knife T3's fp8 kernels, and the number here is a
+# MEASUREMENT: tileiras 13.3.36 refuses all three fp8 types at sm_86 AND at
+# sm_89 with
+#
+#   error: Incompatibility with architecture 'sm_86': unsupported type
+#     'f8E4M3FN'
+#   error: failed to compile Tile IR program
+#
+# and takes them from sm_100. So layer 1 for those three is
+#
+#   tileiras --gpu-name sm_100 -o <out> scripts/tile-golden/dtype_e4m3.tilebc
+#
+# which is what runs below, and layer 2 for them is impossible on this
+# machine's RTX 3080 (scripts/tileir-features/types.txt carries the named
+# exemption). Nothing about the BYTES differs: the .tilebc goldens are
+# recorded and compared exactly as every other kernel's are, and only the
+# assembler's target changes.
+kernel_arch() { # kernel
+  case "$1" in
+    dtype_e4m3|dtype_e5m2|dtype_e8m0) echo sm_100 ;;
+    *) echo "$gpu_name" ;;
+  esac
+}
+
 # Assemble one bytecode file; its output is in <out>.log and the cubin (if
 # any) in <out>.
 #
@@ -470,8 +544,8 @@ PY
 # cubin, exits 0 and prints `'cuda_tile.tanh' op invalid rounding mode
 # specified, expect one of [approx, full]`. Reading only the exit code would
 # have let that through, and layer 1 is the only place it could be seen.
-assemble() { # tilebc, out
-  "$tileiras" --gpu-name "$gpu_name" -o "$2" "$1" > "$2.log" 2>&1 || return 1
+assemble() { # tilebc, out, gpu-name
+  "$tileiras" --gpu-name "$3" -o "$2" "$1" > "$2.log" 2>&1 || return 1
   ! grep -q '^error:' "$2.log"
 }
 
@@ -521,13 +595,14 @@ for k in "${kernels[@]}"; do
   echo "PASS  bytecode: $k.tilebc matches on the JVM and natively ($(wc -c < "$bc_golden") bytes)"
 
   if [ -n "$tileiras" ]; then
-    assemble "$bc_golden" "$work/$k.cubin" ||
-      { cat "$work/$k.cubin.log" >&2; fail "$k: tileiras refused $k.tilebc"; }
+    arch="$(kernel_arch "$k")"
+    assemble "$bc_golden" "$work/$k.cubin" "$arch" ||
+      { cat "$work/$k.cubin.log" >&2; fail "$k: tileiras refused $k.tilebc at $arch"; }
     if ! [ -s "$work/$k.cubin" ] || ! is_elf "$work/$k.cubin"; then
       fail "$k: tileiras exited 0 but wrote no ELF cubin"
     fi
     has_global_func "$work/$k.cubin" "$k" || fail "$k: the cubin has no GLOBAL FUNC named $k"
-    echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, FUNC GLOBAL $k, tileiras V$want_tileiras, $gpu_name)"
+    echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, FUNC GLOBAL $k, tileiras V$want_tileiras, $arch)"
   else
     echo "SKIP  assemble: $k.tilebc not handed to tileiras (--without-tileiras)"
   fi
@@ -628,9 +703,11 @@ func_len() { # tilebc
 # and agree with each other, and tileiras refuses them with the given
 # fragment in its output. <shape> says how the mutant's file relates to the
 # golden's: `same-size` (a value changed in place), `func-one-short` (the
-# function section lost one byte) or `func-one-long` (it gained one; the
-# file itself need not change size either way, the next section's alignment
-# padding absorbs it).
+# function section lost one byte), `func-one-long` (it gained one; the file
+# itself need not change size either way, the next section's alignment
+# padding absorbs it) or `file-shorter` (the whole file lost bytes, which is
+# what a constant BLOB written too narrow does: its section shrinks and no
+# padding puts it back).
 writer_mutant_checks() { # name, kernel, shape, fragment
   local name="$1" k="$2" shape="$3" fragment="$4" backend out golden_size mutant_size golden_func
   mutant_run "$name" "$k"
@@ -657,13 +734,16 @@ writer_mutant_checks() { # name, kernel, shape, fragment
       func-one-long)
         [ "$(func_len "$out")" = "$((golden_func + 1))" ] ||
           fail "$name: the golden's Func section is $golden_func bytes and the mutant's is $(func_len "$out") on $backend; expected one byte more" ;;
+      file-shorter)
+        [ "$mutant_size" -lt "$golden_size" ] ||
+          fail "$name: $k.tilebc is $golden_size bytes and the mutant's is $mutant_size on $backend; expected a shorter file" ;;
       *) fail "writer_mutant_checks: unknown shape $shape" ;;
     esac
   done
   cmp -s "$work/m-$name.$k.jvm.tilebc" "$work/m-$name.$k.native.tilebc" ||
     fail "$name: the two backends disagree on the mutant's bytes"
   if [ -n "$tileiras" ]; then
-    if assemble "$work/m-$name.$k.jvm.tilebc" "$work/m-$name.cubin"; then
+    if assemble "$work/m-$name.$k.jvm.tilebc" "$work/m-$name.cubin" "$(kernel_arch "$k")"; then
       fail "$name mutant stayed green: tileiras accepted the mutant's bytecode"
     fi
     grep -Fq "$fragment" "$work/m-$name.cubin.log" ||
@@ -997,6 +1077,89 @@ if run_item ptr-to-ptr-as-bitcast; then
     'PtrToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_BITCAST, to), src)'
   writer_mutant_checks ptr-to-ptr-as-bitcast ptr_recast same-size \
     "'cuda_tile.bitcast' op operand #0 must be tile of i1"
+fi
+
+# 22. The writer's type table gives i16 the bf16 tag. Both are two bytes,
+#     so nothing about the file's shape is wrong and the reader gets as far
+#     as the verifier, which says what `addi` wants. A tag of another WIDTH
+#     could be refused for its length instead; this one cannot, which is
+#     why it is the one taken: the twin of f64-tag-as-i64 (eight bytes for
+#     eight) and bf16-tag-as-i16 (two for two).
+if run_item i16-tag-as-bf16; then
+  mutant_project i16-tag-as-bf16 bytecode.dawn \
+    '  "i16" -> 2
+' \
+    '  "i16" -> 6
+'
+  writer_mutant_checks i16-tag-as-bf16 dtype_i16 same-size \
+    "'cuda_tile.addi' op operand #0 must be tile of i1 or i8 or i16 or i32 or i64 values, but got '!cuda_tile.tile<128xbf16>'"
+fi
+
+# 23. The writer lays an i64 constant down four bytes wide. The type table
+#     still says i64 and the renderer still prints the value, so this is
+#     the OTHER half of what a type tag means: a tag says how wide a lane
+#     is, and the constant section's blob has to be that wide or the reader
+#     cannot tell how many lanes it holds. dtype_i64 is the only kernel
+#     here with a constant of this width (2^32, which needs five bytes),
+#     and it is in that kernel for this mutant.
+if run_item i64-payload-four-bytes; then
+  mutant_project i64-payload-four-bytes bytecode.dawn \
+    '  "i64" -> bytes.freeze(put_le(bytes.buf(), value, 8))' \
+    '  "i64" -> bytes.freeze(put_le(bytes.buf(), value, 4))'
+  writer_mutant_checks i64-payload-four-bytes dtype_i64 file-shorter \
+    "error at offset 5: failed to validate buffer size and format"
+fi
+
+# 24. The writer's type table gives f8E4M3FN the i8 tag. One byte for one
+#     byte, so the file is the same length and the verifier is what
+#     refuses it: `ftof` takes a float tile and an i8 tile is not one.
+#
+#     It is the ONLY fp8 tag mutant, and the reason is measured rather than
+#     chosen: giving f8E5M2 the f8E4M3FN tag produces a program tileiras
+#     accepts without a word (both are float formats of one byte and every
+#     operation over them is legal), so below layer 2 those two are the
+#     same type, and layer 2 for either is unreachable here since sm_86
+#     refuses both. What this mutant shows is that the fp8 tags are
+#     load-bearing at all.
+if run_item e4m3-tag-as-i8; then
+  mutant_project e4m3-tag-as-i8 bytecode.dawn \
+    '  "f8E4M3FN" -> 10
+' \
+    '  "f8E4M3FN" -> 1
+'
+  writer_mutant_checks e4m3-tag-as-i8 dtype_e4m3 same-size \
+    "'cuda_tile.ftof' op operand #0 must be tile of f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN values, but got '!cuda_tile.tile<128xi8>'"
+fi
+
+# 25. The writer stops keying `ftof`'s rounding mode on its target and
+#     writes `nearest_even` for every conversion, which is the DEFAULT the
+#     attribute would carry if nobody thought about it. f8E8M0FNU is the
+#     one target that refuses it (Ops.td's FToFOp), so the file is the same
+#     length, one enum value for another, and the verifier names both the
+#     format and the two modes it does take.
+if run_item e8m0-rounding-as-nearest-even; then
+  mutant_project e8m0-rounding-as-nearest-even bytecode.dawn \
+    '  if to == "f8E8M0FNU" { ROUND_ZERO } else { ROUND_NEAREST_EVEN }' \
+    '  ROUND_NEAREST_EVEN'
+  writer_mutant_checks e8m0-rounding-as-nearest-even dtype_e8m0 same-size \
+    "'cuda_tile.ftof' op invalid rounding mode specified for conversion to f8E8M0FNU. Only 'zero' and 'positive_inf' are supported"
+fi
+
+# 26. The same sentence from the other side: the writer's type table gives
+#     f8E8M0FNU the f8E5M2 tag, so the `rounding<zero>` written for that
+#     target lands on a target that takes only `nearest_even`, and the
+#     verifier says so. The two mutants together are what makes
+#     ftof_rounding a claim: one says the mode has to be `zero` HERE, the
+#     other says it has to be `nearest_even` EVERYWHERE ELSE, and either
+#     alone would leave a writer that hard-codes the other mode green.
+if run_item e8m0-tag-as-f8e5m2; then
+  mutant_project e8m0-tag-as-f8e5m2 bytecode.dawn \
+    '  "f8E8M0FNU" -> 18
+' \
+    '  "f8E8M0FNU" -> 11
+'
+  writer_mutant_checks e8m0-tag-as-f8e5m2 dtype_e8m0 same-size \
+    "'cuda_tile.ftof' op invalid rounding mode specified. Only 'nearest_even' is supported"
 fi
 
 _item_tick ""
