@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred}
-use prog.{TileOp, TileProg, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use prog.{TileOp, TileProg, Global, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -105,6 +105,12 @@ derive Show
 ## answer is dimension `perm[k]` of the source. `BlockCounts` is the grid's
 ## extent, `get_tile_block_id`'s companion and its exact shape.
 ## `JoinTokens` merges two or more ordering tokens into one.
+##
+## `GetGlobalPtr` is `get_global` (knife T7): the address of the module's
+## global named `sym`, as the rank-0 `tile<ptr<D>>` the dialect's verifier
+## demands. The spread to a full tile is `Reshape` and `Broadcast` after
+## it, the same two the parameter ladder emits, so this instruction has one
+## result and no operands.
 ##
 ## `PtrToIntTile`, `IntToPtrTile` and `PtrToPtrTile` are the three pointer
 ## conversions: a pointer tile as i64, an i64 tile as pointers, and a
@@ -181,15 +187,22 @@ pub type Instr =
   | AssertTile(cond: Ref, cond_ty: Ty, message: String)
   | AssumeTile(dst: Int, src: Ref, pred: AssumePred, ty: Ty)
   | PrintTile(tok_out: Int, fmt: String, args: List[Ref], arg_ty: Ty, tok_in: Ref)
+  | GetGlobalPtr(dst: Int, sym: String, ty: Ty)
   | Ret
 derive Show
 
 ## A lowered kernel: its entry name, the dtype name of each parameter in
-## order (every parameter is a scalar `tile<ptr<dtype>>`), and its body,
-## `Ret` last.
+## order (every parameter is a scalar `tile<ptr<dtype>>`), the module's
+## globals in declaration order, and its body, `Ret` last.
+##
+## The globals ride through the lowering untouched: they are records of the
+## module and not instructions of the entry, so nothing here numbers them
+## or names them by value. `render_kernel` prints one line each above the
+## entry and `encode_kernel` writes them as the Global section.
 pub type Kernel = {
   name: String,
   params: List[String],
+  globals: List[Global],
   body: List[Instr],
 } derive Show
 
@@ -726,6 +739,25 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l1, tv) = define(l0, tok_out, Token)
     emit(l1, PrintTile(tv, fmt, refs, num_tile(shape, dtype), tin))
   }
+  StoreAt(tok_out, dtype, shape, ptrs, value, mask, tok_in) -> {
+    let tin = ref_of(l0, tok_in, "store token")
+    let m = opt_ref(l0, mask, "store mask")
+    let ps = ref_of(l0, ptrs, "store pointers")
+    let v = ref_of(l0, value, "store value")
+    let val_ty = num_tile(shape, dtype)
+    let (l1, tv) = define(l0, tok_out, Token)
+    emit(l1, StorePtr(tv, ps, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
+  }
+  GetGlobal(dst, sym, dtype, shape) -> {
+    # `get_global` answers a rank-0 pointer tile (its result is a
+    # ScalarTileOf<PointerType>), so the tile a body asked for is the same
+    # reshape and broadcast MakePtrs performs on a parameter.
+    let e = PtrTo(dtype)
+    let (l1, g) = fresh(l0)
+    let l2 = emit(l1, GetGlobalPtr(g, sym, Tile([], e)))
+    let (l3, pn) = spread_rank0(l2, Val(g), Tile([], e), shape, e)
+    bind(l3, dst, pn, Tile(shape, e))
+  }
   Yield(values) -> {
     let refs = list.map(values, h => ref_of(l0, h, "yield value"))
     let tys = list.map(values, h => ty_of(l0, h))
@@ -934,7 +966,7 @@ pub fn lower(prog: TileProg) -> Kernel = {
   for op in prog.ops {
     l = lower_op(l, op)
   }
-  Kernel { name: prog.name, params: prog.params, body: l.body ++ [Ret] }
+  Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret] }
 }
 
 ## The values an instruction defines, in definition order.
@@ -983,6 +1015,7 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   AssertTile(_cond, _cond_ty, _message) -> []
   AssumeTile(dst, _src, _pred, _ty) -> [dst]
   PrintTile(tok_out, _fmt, _args, _arg_ty, _tok_in) -> [tok_out]
+  GetGlobalPtr(dst, _sym, _ty) -> [dst]
   Ret -> []
 }
 
@@ -1016,6 +1049,7 @@ pub fn defines_inside(body: List[Instr]) -> List[Int] = {
 fn two_loads_one_param() -> TileProg = TileProg {
   name: "twice",
   params: ["f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1058,6 +1092,7 @@ test "the pointer ladder for one parameter at one index is emitted once, not onc
 fn gather_then_scatter() -> TileProg = TileProg {
   name: "indexed",
   params: ["i32", "f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     IdxConst(1, 0),
@@ -1124,6 +1159,7 @@ test "block ids along the three axes bind the matching result of one get_tile_bl
   let p = TileProg {
     name: "axes",
     params: ["f64"],
+    globals: [],
     ops: [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
       Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0)]
   }
@@ -1140,6 +1176,7 @@ test "lowering the same program twice gives the same table" {
 fn sum_prog() -> TileProg = TileProg {
   name: "sum",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1169,6 +1206,7 @@ fn sum_prog() -> TileProg = TileProg {
 fn spin_prog() -> TileProg = TileProg {
   name: "spin",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1270,6 +1308,7 @@ test "after a loop the store consumes the loop's results, not values from inside
 fn total_prog() -> TileProg = TileProg {
   name: "total",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1327,6 +1366,7 @@ test "spread lowers to a reshape to one lane and a broadcast to the width" {
 fn branch_prog() -> TileProg = TileProg {
   name: "branch",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),

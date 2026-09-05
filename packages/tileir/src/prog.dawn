@@ -55,13 +55,20 @@ use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, AssumePred, DivBy, SameE
 ## the token chain a GRAPH: every other memory operation takes the token
 ## before it and answers the next, so the record's order is a line.
 ##
-## `MakePtrs`, `PtrAdd`, `PtrInt`, `IntPtr`, `PtrCast` and `LoadAt` are the
-## pointer surface. A `Load` builds its own address ladder in the lowering
-## and never names it; these six name it: `MakePtrs` is the parameter
-## spread over a tile, `PtrAdd` an `offset` by an i32 tile the body
-## computed, and the three conversions are the dialect's `ptr_to_int`,
-## `int_to_ptr` and `ptr_to_ptr`. `LoadAt` is `Load` through such a tile,
-## and it sits in the token chain exactly as `Load` does.
+## `MakePtrs`, `PtrAdd`, `PtrInt`, `IntPtr`, `PtrCast`, `LoadAt` and
+## `StoreAt` are the pointer surface. A `Load` builds its own address
+## ladder in the lowering and never names it; these seven name it:
+## `MakePtrs` is the parameter spread over a tile, `PtrAdd` an `offset` by
+## an i32 tile the body computed, and the three conversions are the
+## dialect's `ptr_to_int`, `int_to_ptr` and `ptr_to_ptr`. `LoadAt` and
+## `StoreAt` are `Load` and `Store` through such a tile, and both sit in
+## the token chain exactly as `Load` and `Store` do.
+##
+## `GetGlobal` is the other producer of a pointer tile (knife T7): the
+## address of a module-level `Global`, spread over `shape` the way
+## `MakePtrs` spreads a parameter's. What it names is a `Global` of the
+## same `TileProg` and not an operation, which is why it carries a symbol
+## and not a handle.
 ##
 ## `Assert`, `Assume` and `Print` are knife T6's three. `Assert` defines
 ## nothing and is not in the token chain: it is the one operation here that
@@ -131,6 +138,8 @@ pub type TileOp =
   | Assert(shape: List[Int], cond: Int, message: String)
   | Assume(dst: Int, pred: AssumePred, dtype: String, shape: List[Int], src: Int)
   | Print(tok_out: Int, fmt: String, dtype: String, shape: List[Int], args: List[Int], tok_in: Int)
+  | StoreAt(tok_out: Int, dtype: String, shape: List[Int], ptrs: Int, value: Int, mask: Option[Int], tok_in: Int)
+  | GetGlobal(dst: Int, sym: String, dtype: String, shape: List[Int])
 derive Show
 
 ## How deep loops may nest. A kernel body that recurses through `d_for`
@@ -143,12 +152,38 @@ pub const MAX_LOOP_DEPTH: Int = 16
 ## stops that.
 pub const MAX_HANDLES: Int = 65536
 
+## One statically allocated global of the module (knife T7): its symbol
+## name, the element format, the values it is initialized with (one per
+## element, so the tile type is `tile<len(values) x dtype>` and its rank is
+## 1, which GlobalOp's verifier requires) and the alignment in bytes, `0`
+## for the dialect's default.
+##
+## A global is NOT part of the entry: it sits beside it in the module, and
+## its lifetime is the module's. What the bytecode carries is a record in
+## the Global section (id 6) rather than an instruction in the function
+## body, which is why `global` 0x31 is `structural` in
+## scripts/tileir-features/features.txt the way `entry` and `module` are.
+##
+## `symbol_visibility` and `constant` are NOT here: both entered the Global
+## section's record at bytecode 13.3 (Ops.td versions those two arguments
+## "13.3", and BytecodeWriter.cpp's writeGlobalSection writes four varints
+## per global below that version and six at or above it), and this writer
+## pins 13.2. Knife T8 is the version wall and owns them.
+pub type Global = {
+  sym: String,
+  dtype: String,
+  values: List[Float],
+  align: Int,
+} derive Show
+
 ## A kernel as recorded: its entry name, the dtype name of each parameter in
-## order (every parameter is a pointer to that format), and its operations in
-## issue order, `MakeToken(0)` first.
+## order (every parameter is a pointer to that format), the globals its
+## module declares in declaration order, and its operations in issue order,
+## `MakeToken(0)` first.
 pub type TileProg = {
   name: String,
   params: List[String],
+  globals: List[Global],
   ops: List[TileOp],
 } derive Show
 
@@ -460,11 +495,12 @@ fn but_last(xs: List[Int]) -> List[Int] = list.take(xs, len(xs) - 1)
 ## loop or with the wrong number of values, or a body that ends with a loop
 ## still open, is refused.
 pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev) -> TileProg = {
-  let ops = {
+  let (globals, ops) = {
     with handle Dev {
       var next: Int = 1
       var tok: Int = 0
       var ops: List[TileOp] = []
+      var globals: List[Global] = []
       var frames: List[Frame] = []
       t_block_id(axis) => {
         if axis < 0 || axis > 2 { refuse(name, "block_id axis is 0, 1 or 2, got ${axis}") } else { () }
@@ -1021,6 +1057,67 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         tok = tv
         ()
       }
+      t_store_ptrs(dtype, shape, ptrs, value, mask) => {
+        let open = frames
+        if list.any(open, is_pure_region) {
+          refuse(name, "a store inside a reduce, scan or if region has no memory order")
+        } else {
+          ()
+        }
+        check_shape(name, shape)
+        let t = next
+        next = mint(name, next, 1)
+        ops = ops ++ [StoreAt(t, dtype, shape, ptrs, value, mask, tok)]
+        tok = t
+        ()
+      }
+      t_global(sym, dtype, values, align) => {
+        # A global belongs to the module, not to a region of the entry, and
+        # the Global section has no place to say otherwise.
+        if len(frames) != 0 {
+          refuse(name, "the global `${sym}` is declared inside a region; a global belongs to the module")
+        } else {
+          ()
+        }
+        if sym == "" { refuse(name, "a global has a name") } else { () }
+        let seen = globals
+        if list.any(seen, g => g.sym == sym) {
+          refuse(name, "the global `${sym}` is declared twice")
+        } else {
+          ()
+        }
+        # GlobalOp's verifier requires rank 1, so the initializer decides
+        # the extent and an empty one has no type to give.
+        if len(values) == 0 {
+          refuse(name, "the global `${sym}` is initialized with no values; its type is tile<Nxdtype> and N comes from them")
+        } else {
+          ()
+        }
+        if align < 0 {
+          refuse(name, "the global `${sym}` asks for alignment ${align}")
+        } else {
+          ()
+        }
+        globals = globals ++ [Global { sym: sym, dtype: dtype, values: values, align: align }]
+        ()
+      }
+      t_get_global(sym, dtype, shape) => {
+        check_shape(name, shape)
+        let seen = globals
+        match list.find(seen, g => g.sym == sym) {
+          None -> refuse(name, "get_global names `${sym}`, which no global declares")
+          Some(g) ->
+            if g.dtype != dtype {
+              refuse(name, "the global `${sym}` holds ${g.dtype}, and get_global reads it as ${dtype}")
+            } else {
+              ()
+            }
+        }
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [GetGlobal(d, sym, dtype, shape)]
+        d
+      }
       t_if_begin(cond) => {
         if len(frames) >= MAX_LOOP_DEPTH {
           refuse(name, "regions nest deeper than ${MAX_LOOP_DEPTH}")
@@ -1066,9 +1163,9 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
     }
     body()
     if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} region(s) still open") } else { () }
-    ops
+    (globals, ops)
   }
-  TileProg { name: name, params: params, ops: [MakeToken(0)] ++ ops }
+  TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops }
 }
 
 ## The handles an operation defines in the region it sits in, in definition
@@ -1125,6 +1222,8 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   Assert(_shape, _cond, _message) -> []
   Assume(dst, _pred, _dtype, _shape, _src) -> [dst]
   Print(tok_out, _fmt, _dtype, _shape, _args, _tok_in) -> [tok_out]
+  StoreAt(tok_out, _dtype, _shape, _ptrs, _value, _mask, _tok_in) -> [tok_out]
+  GetGlobal(dst, _sym, _dtype, _shape) -> [dst]
 }
 
 ## Every handle `ops` define, at any depth, in issue order: for a `For`, its

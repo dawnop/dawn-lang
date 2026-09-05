@@ -375,6 +375,18 @@ pub opaque type Ptrs[D] = Int
 ## next), and what it does is not visible in any buffer: it writes to the
 ## process's standard output when the context is synchronised.
 ##
+## `t_store_ptrs` is `t_load_ptrs`'s other direction, and `t_global` /
+## `t_get_global` are the static globals (knife T7).
+## `t_global(sym, dtype, values, align)` DECLARES one: it adds a record to
+## the module beside the entry rather than an instruction to the body, so
+## it answers nothing and may not be issued inside a region.
+## `t_get_global(sym, dtype, shape)` answers a tile of `shape` every lane
+## of which holds the global's own address, the same reshape and broadcast
+## `t_ptrs` performs on a parameter; from there the pointer surface above
+## reads and writes it. A `t_get_global` naming a symbol no `t_global`
+## declared, or declaring the same symbol twice, is refused when the kernel
+## is recorded.
+##
 ## A load or a store inside a reduction or an `if` is REFUSED: the dialect
 ## requires a reduction's body to be pure, and neither region carries the
 ## memory ordering token, so a memory operation inside one would have no
@@ -440,6 +452,9 @@ pub effect Dev {
   fn t_assert(shape: List[Int], cond: Int, message: String) -> Unit
   fn t_assume(pred: AssumePred, dtype: String, shape: List[Int], src: Int) -> Int
   fn t_print(fmt: String, dtype: String, shape: List[Int], args: List[Int]) -> Unit
+  fn t_store_ptrs(dtype: String, shape: List[Int], ptrs: Int, value: Int, mask: Option[Int]) -> Unit
+  fn t_global(sym: String, dtype: String, values: List[Float], align: Int) -> Unit
+  fn t_get_global(sym: String, dtype: String, shape: List[Int]) -> Int
 }
 
 ## Parameter `pos` of the entry, of format `d`. Positions count from zero and
@@ -2180,6 +2195,36 @@ pub fn ptr_to_ptr[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], ps: 
   r
 }
 
+## Declare a statically allocated global named `sym` holding `values`, one
+## element of `d` each, aligned to `align` bytes (`0` is the dialect's
+## default and the only value this tree writes). The allocation lives as
+## long as the loaded module does and is initialized at module load time,
+## so what one launch writes the next launch of the same module reads;
+## `scripts/tile-gpu-diff/global_diff.dawn` is the measurement of that
+## sentence.
+##
+## This is a MODULE-LEVEL declaration and not an instruction: it answers
+## nothing, and issuing it inside a `d_for`, a `d_loop`, a `d_if` or a
+## reduction is refused. Declare each global once, before the
+## `get_global` that names it.
+##
+## The visibility and the `constant` flag the dialect also gives `global`
+## are not here: both are bytecode 13.3 and this writer pins 13.2
+## (prog.dawn's `Global` says where that was measured).
+pub fn d_global[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
+  t_global(sym, dtype_name(d), values, 0)
+
+## The tile of `shape` every lane of which holds the address of the global
+## named `sym`: `get_global` answers a rank-0 `tile<ptr<D>>`, and this is
+## the same reshape and broadcast `ptrs` performs on a parameter. The
+## element at position `x` of the global is `ptr_offset`'s `x` from here,
+## which is what the dialect means by "the initial values are stored in
+## memory in linear order".
+pub fn global_ptrs[D: Dtype](sym: String, d: D, shape: List[Int]) -> Ptrs[D] !Dev = {
+  let r: Ptrs[D] = t_get_global(sym, dtype_name(d), shape)
+  r
+}
+
 ## The tile the pointers in `ps` point at, unmasked. In the token chain
 ## where `load` is, and ordered against every other memory operation the
 ## same way.
@@ -2188,6 +2233,16 @@ pub fn load_ptrs[D: Dtype](d: D, shape: List[Int], ps: Ptrs[D]) -> Tile[D] !Dev 
   let none: Option[Int] = None
   let r: Tile[D] = t_load_ptrs(dtype_name(d), shape, x, none, none)
   r
+}
+
+## Write `v` through the pointers in `ps`, unmasked: `load_ptrs`'s other
+## direction, and the same `store_ptr_tko` a `store` through a parameter
+## emits. In the token chain where `store` is.
+pub fn store_ptrs[D: Dtype](d: D, shape: List[Int], ps: Ptrs[D], v: Tile[D]) -> Unit !Dev = {
+  let x: Int = ps
+  let y: Int = v
+  let none: Option[Int] = None
+  t_store_ptrs(dtype_name(d), shape, x, y, none)
 }
 
 ## The i64 tile of `shape` every lane of which holds `value`. What an
@@ -2514,6 +2569,13 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       h
     }
     t_print(_fmt, _dtype, _shape, _args) => ()
+    t_store_ptrs(_dtype, _shape, _ptrs, _value, _mask) => ()
+    t_global(_sym, _dtype, _values, _align) => ()
+    t_get_global(_sym, _dtype, _shape) => {
+      let h = next
+      next = next + 1
+      h
+    }
   }
   body()
 }
@@ -2771,6 +2833,16 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_print(fmt, dtype, shape, args) => {
       log = log ++ ["print ${fmt} ${dtype} ${show(shape)} ${show(args)}"]
       ()
+    }
+    t_store_ptrs(dtype, shape, ptrs, value, mask) => {
+      log = log ++ ["store_ptrs ${dtype} ${show(shape)} ${ptrs} ${value} ${opt(mask)}"]
+    }
+    t_global(sym, dtype, values, align) => {
+      log = log ++ ["global ${sym} ${dtype} ${show(values)} ${align}"]
+    }
+    t_get_global(sym, dtype, shape) => {
+      log = log ++ ["get_global ${sym} ${dtype} ${show(shape)}"]
+      77
     }
   }
   body()
@@ -3127,6 +3199,9 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_assert(_shape, _cond, _message) => ()
       t_assume(_pred, _dtype, _shape, _src) => 76
       t_print(_fmt, _dtype, _shape, _args) => ()
+      t_store_ptrs(_dtype, _shape, _ptrs, _value, _mask) => ()
+      t_global(_sym, _dtype, _values, _align) => ()
+      t_get_global(_sym, _dtype, _shape) => 77
     }
     let _r = loop_seen()
     log

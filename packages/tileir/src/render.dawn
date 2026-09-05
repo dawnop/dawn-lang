@@ -17,8 +17,8 @@
 use std/list
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded}
-use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, Ret}
+use prog.{TileProg, TileOp, Global, GetGlobal, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -358,6 +358,7 @@ fn line(i: Instr) -> String = match i {
   PrintTile(tok_out, fmt, args, arg_ty, tok_in) ->
     "${v(tok_out)} = print_tko ${quoted(fmt)}, ${commas(list.map(args, name))}"
     ++ " token=${name(tok_in)} : ${commas(list.map(args, _a => ty(arg_ty)))} -> token"
+  GetGlobalPtr(dst, sym, t) -> "${v(dst)} = get_global @${sym} : ${ty(t)}"
   Ret -> "return"
 }
 
@@ -386,9 +387,28 @@ fn block(indent: String, body: List[Instr]) -> List[String] = {
 
 fn join(lines: List[String]) -> String = list.fold(lines, "", (acc, l) => acc ++ l ++ "\n")
 
-## `k` as one `cuda_tile.module @m` holding one `entry @<name>`. Every
-## parameter is a scalar pointer tile of its dtype; the body is `k.body` in
-## order, one line each. The text ends with a newline.
+# One `global` declaration, the way GlobalOp's assembly format spells it:
+# the visibility keyword is omitted (the printer omits `public`, which is
+# the default and the only one bytecode 13.2 can carry), `alignment = n`
+# only when it is not the dialect's default 0, then the name, then the
+# initializer and its type. The element values are spelled the way
+# `ConstFloat` spells a splat, which is this renderer's own spelling and
+# not MLIR's printer's (`1.5` where it would print `1.500000e+00`);
+# `tileiras` reads bytecode and never this text, so the text's job is to be
+# read by a person.
+fn global_line(g: Global) -> String = {
+  let t = Tile([len(g.values)], Num(g.dtype))
+  let align = if g.align == 0 { "" } else { "alignment = ${g.align} " }
+  let vals = list.fold(range(0, len(g.values)), "", (acc, k) =>
+      if acc == "" { "${g.values[k]}" } else { acc ++ ", ${g.values[k]}" })
+  "  global @${g.sym} ${align}<${g.dtype}: [${vals}]> : ${ty(t)}"
+}
+
+## `k` as one `cuda_tile.module @m` holding its globals and one
+## `entry @<name>`. Every parameter is a scalar pointer tile of its dtype;
+## the body is `k.body` in order, one line each. The globals come first,
+## because `global` operations are directly nested in the module and the
+## `get_global` in the entry names them. The text ends with a newline.
 pub fn render_kernel(k: Kernel) -> String = {
   var args: List[String] = []
   var i = 0
@@ -397,7 +417,8 @@ pub fn render_kernel(k: Kernel) -> String = {
     i = i + 1
   }
   let head = commas(args)
-  join(["cuda_tile.module @m {", "  entry @${k.name}(${head}) {"] ++ block("    ", k.body) ++ ["  }", "}"])
+  join(["cuda_tile.module @m {"] ++ list.map(k.globals, global_line)
+      ++ ["  entry @${k.name}(${head}) {"] ++ block("    ", k.body) ++ ["  }", "}"])
 }
 
 ## `prog` lowered and rendered.
@@ -413,6 +434,7 @@ pub fn render(prog: TileProg) -> String = render_kernel(lower(prog))
 fn two_loads_one_param() -> TileProg = TileProg {
   name: "twice",
   params: ["f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -448,6 +470,7 @@ test "an atomic spells its ordering, its scope and (for the rmw) its mode, and a
   let p = TileProg {
     name: "atomics",
     params: ["i32", "i32"],
+    globals: [],
     ops: [
       MakeToken(0),
       IdxConst(1, 0),
@@ -474,7 +497,7 @@ test "an atomic spells its ordering, its scope and (for the rmw) its mode, and a
 }
 
 test "the entry signature lists every parameter as a scalar pointer tile of its format" {
-  let p = TileProg { name: "k", params: ["f32", "f64"], ops: [MakeToken(0)] }
+  let p = TileProg { name: "k", params: ["f32", "f64"], globals: [], ops: [MakeToken(0)] }
   let text = render(p)
   assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<ptr<f64>>) {\n")
   assert str.ends_with(text, "    return\n  }\n}\n")
@@ -484,6 +507,7 @@ test "block ids along the three axes bind the matching result of one get_tile_bl
   let p = TileProg {
     name: "axes",
     params: ["f64"],
+    globals: [],
     ops: [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
       Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0)]
   }
@@ -505,6 +529,7 @@ test "rendering the same program twice gives the same text" {
 fn sum_prog() -> TileProg = TileProg {
   name: "sum",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -543,6 +568,7 @@ test "a loop is its header with the carried values, a body two columns in, and a
 fn spin_prog() -> TileProg = TileProg {
   name: "spin",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -573,6 +599,7 @@ test "a loop is its header with the carried values, an if that breaks, and the c
 fn total_prog() -> TileProg = TileProg {
   name: "total",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -602,6 +629,7 @@ test "a reduction is its header with the dimension, the identities and the regio
 fn branch_prog() -> TileProg = TileProg {
   name: "branch",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -634,6 +662,7 @@ test "the transcendentals spell the modifiers they carry and no others" {
   let p = TileProg {
     name: "m",
     params: ["f64"],
+    globals: [],
     ops: [
       MakeToken(0),
       BlockId(1, 0),
@@ -666,6 +695,7 @@ test "assert, assume and print_tko spell the dialect's own assembly, predicate p
   let p = TileProg {
     name: "dbg",
     params: ["i32", "i32"],
+    globals: [],
     ops: [
       MakeToken(0),
       BlockId(1, 0),
@@ -723,6 +753,7 @@ test "the shape operations spell the dialect's own assembly: brackets on extract
   let p = TileProg {
     name: "shapes",
     params: ["f64", "f64"],
+    globals: [],
     ops: [
       MakeToken(0),
       BlockId(1, 0),
@@ -752,6 +783,7 @@ test "the pointer surface spells the ladder a body built, its three conversions 
   let p = TileProg {
     name: "ptrs",
     params: ["f64", "i32"],
+    globals: [],
     ops: [
       MakeToken(0),
       BlockId(1, 0),
@@ -783,6 +815,7 @@ test "a fork issues two stores from one token and joins them before the load tha
   let p = TileProg {
     name: "fork",
     params: ["f64", "f64"],
+    globals: [],
     ops: [
       MakeToken(0),
       BlockId(1, 0),

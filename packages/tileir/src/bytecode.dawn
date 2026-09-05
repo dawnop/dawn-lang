@@ -59,8 +59,8 @@ use std/map
 use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded}
-use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, Ret}
+use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
@@ -102,6 +102,7 @@ const OP_FTOF: Int = 0x2A
 const OP_FTOI: Int = 0x2B
 const OP_FMA: Int = 0x28
 const OP_FOR: Int = 0x29
+const OP_GET_GLOBAL: Int = 0x2C
 const OP_GET_NUM_TILE_BLOCKS: Int = 0x2E
 const OP_GET_TILE_BLOCK_ID: Int = 0x30
 const OP_IF: Int = 0x32
@@ -680,6 +681,7 @@ const SEC_STRING: Int = 1
 const SEC_FUNC: Int = 2
 const SEC_CONSTANT: Int = 4
 const SEC_TYPE: Int = 5
+const SEC_GLOBAL: Int = 6
 
 const PAD_BYTE: Int = 0xCB
 const FLAG_KERNEL: Int = 0x02
@@ -1361,6 +1363,19 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let (w2, si) = str_of(w1, fmt)
     emit_ref(list.fold(args, emit(emit(w2, si), len(args)), emit_ref), tok_in)
   }
+  GetGlobalPtr(_dst, sym, t) -> {
+    # opcode, result type, then the symbol: a FlatSymbolRefAttr is a plain
+    # STRING TABLE INDEX in the stream. tblgen sends it through
+    # writeOpAttribute's StringRef arm (the ODS getter of a
+    # FlatSymbolRefAttr argument answers a StringRef), which writes
+    # `strMgr.getStringIndex(name)`, and the reader's FlatSymbolRefAttr arm
+    # reads it back with `readAndGetString`. No tag and no type index.
+    # `get_global` has no operands and neither a variadic operand nor a
+    # variadic result, so no count is written either.
+    let w1 = emit_op(w0, OP_GET_GLOBAL, t)
+    let (w2, si) = str_of(w1, sym)
+    emit(w2, si)
+  }
   Ret -> emit(emit(emit(w0, OP_RETURN), 0), 0)
 }
 
@@ -1387,6 +1402,70 @@ fn section(out: bytes.Buf, id: Int, content: Bytes, align: Int) -> bytes.Buf = {
   let o1 = put_varint(bytes.put(out, if align > 1 { id | 0x80 } else { id }), bytes.len(content))
   let o2 = if align > 1 { pad_to(put_varint(o1, align), align) } else { o1 }
   bytes.put_bytes(o2, content)
+}
+
+# ---- the Global section (id 6, knife T7)
+#
+# The one section here that is not a table of offsets: a count and then one
+# fixed record per global, read in order. BytecodeWriter.cpp's
+# writeGlobalSection and BytecodeReader.cpp's parseGlobalSection are the two
+# halves, and the record is FOUR varints at bytecode 13.1 and 13.2 ---
+# the symbol's string index, the type index of the initializer's tile type,
+# the constant index of the initializer, and the alignment in bytes:
+#
+#   global-section =: numGlobals[varint] global-entry*
+#   global-entry   =: symbolNameIndex[varint] valueTypeIndex[varint]
+#                     constantValueIndex[varint] alignment[varint]
+#
+# At 13.3 and above the record grows two more varints, `symbol_visibility`
+# (0 public, 1 private) and `constant` (0 or 1), and the reader's
+# `kMinGlobalInfoSize` switches from 4 to 6 with the file's version. This
+# writer pins 13.2, so it writes four and NOT six: writing the extra pair
+# at 13.2 is not a bigger record a reader would skip, it is two varints the
+# NEXT global's record is then read from. The mutant
+# `global-visibility-written-at-13-2` in scripts/tile-golden/run.sh is that
+# sentence, which is why the corpus declares two globals in one module.
+# The C++ writer refuses the same thing from the other side, by name:
+# `global \`x\` uses non-public symbol visibility, which cannot be encoded
+# in bytecode version 13.2 (requires bytecode 13.3+)`.
+#
+# The section writes only varints and never aligns, so its header carries
+# no alignment flag (the reader skips alignment validation for this
+# section id on purpose). It goes FIRST in the file, before Func, which is
+# the order writeBytecode uses; the reader collects payloads by id and then
+# parses in its own order, so the position is a convention and not a
+# requirement.
+
+# The raw memory of one element of `dtype` holding `value`: what
+# `DenseElementsAttr::getFromRawBuffer` reads back. A global's initializer
+# is the whole buffer rather than the one-element splat every constant this
+# package emits so far, so the elements are concatenated here.
+fn global_elem(dtype: String, value: Float) -> Bytes = match dtype {
+  "f64" | "f32" | "bf16" | "f16" -> float_payload(dtype, value)
+  "i64" -> bytes.freeze(put_le(bytes.buf(), to_int(value), 8))
+  "i32" -> bytes.freeze(put_le(bytes.buf(), to_int(value), 4))
+  "i16" -> bytes.freeze(put_le(bytes.buf(), to_int(value), 2))
+  "i8" -> bytes.freeze(put_le(bytes.buf(), to_int(value), 1))
+  _ -> panic("tileir: a global of format `${dtype}` has no encoding")
+}
+
+## The initializer blob of a global: every element's bytes in order, which
+## is the layout `get_global`'s pointer then walks (the dialect: "the
+## initial values are stored in memory in linear order").
+pub fn global_payload(dtype: String, values: List[Float]) -> Bytes =
+  bytes.freeze(list.fold(values, bytes.buf(), (b, x) => bytes.put_bytes(b, global_elem(dtype, x))))
+
+# The Global section's content, and the writer with the strings, types and
+# constants the records name interned into it.
+fn global_section(w0: W, gs: List[Global]) -> (W, Bytes) = {
+  let (w1, b1) = list.fold(gs, (w0, put_varint(bytes.buf(), len(gs))), (acc, g) => {
+    let (w, b) = acc
+    let (wa, si) = str_of(w, g.sym)
+    let (wb, ti) = ty(wa, Tile([len(g.values)], Num(g.dtype)))
+    let (wc, ci) = const_of(wb, global_payload(g.dtype, g.values))
+    (wc, put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align))
+  })
+  (w1, bytes.freeze(b1))
 }
 
 # count, padding to the index width, one offset per item, the items.
@@ -1420,9 +1499,15 @@ pub fn encode_kernel(k: Kernel) -> Bytes = {
   let func = bytes.freeze(bytes.put_bytes(
     put_varint(put_varint(bytes.put(put_varint(put_varint(put_varint(bytes.buf(), 1), name), sig), FLAG_KERNEL), 0), bytes.len(body)),
     body))
+  # After the body, so that the strings, types and constants the globals
+  # name take the indices left over; the records only hold indices, and the
+  # three tables below are written from the finished writer.
+  let (w4, globals) = global_section(w, k.globals)
+  w = w4
 
   let h = put_le(bytes.put(bytes.put(magic(), BYTECODE_MAJOR), BYTECODE_MINOR), 0, 2)
-  let s1 = section(h, SEC_FUNC, func, 8)
+  let s0 = if len(k.globals) == 0 { h } else { section(h, SEC_GLOBAL, globals, 1) }
+  let s1 = section(s0, SEC_FUNC, func, 8)
   let s2 = if len(w.consts.items) == 0 { s1 } else { section(s1, SEC_CONSTANT, table_section(w.consts.items, 8), 8) }
   let s3 = section(s2, SEC_TYPE, table_section(w.types.items, 4), 4)
   let s4 = section(s3, SEC_STRING, table_section(w.strs.items, 4), 4)
@@ -1518,6 +1603,7 @@ test "a tile type names its element type first, so the element's index is lower"
 fn vadd() -> TileProg = TileProg {
   name: "vadd",
   params: ["f64", "f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1554,6 +1640,7 @@ test "encoding the same program twice gives the same bytes" {
 fn sum_prog() -> TileProg = TileProg {
   name: "sum",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1624,6 +1711,7 @@ test "a for is its opcode, result count and types, the flags, the operand count 
 fn spin_prog() -> TileProg = TileProg {
   name: "spin",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1708,6 +1796,7 @@ test "a reduction identity is a self-contained attribute: its tag, the index of 
 fn total_prog() -> TileProg = TileProg {
   name: "total",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1750,6 +1839,7 @@ test "a reduce is its opcode, result count and types, dim, the identities array,
 fn branch_prog() -> TileProg = TileProg {
   name: "branch",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1954,6 +2044,7 @@ test "encoding a loop twice gives the same bytes, and the file still opens and c
 fn shapes_prog() -> TileProg = TileProg {
   name: "shapes",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1973,6 +2064,7 @@ fn shapes_prog() -> TileProg = TileProg {
 fn ptrs_prog() -> TileProg = TileProg {
   name: "ptrs",
   params: ["f64", "i32"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1993,6 +2085,7 @@ fn ptrs_prog() -> TileProg = TileProg {
 fn fork_prog() -> TileProg = TileProg {
   name: "fork",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
