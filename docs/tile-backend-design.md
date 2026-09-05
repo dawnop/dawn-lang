@@ -2059,7 +2059,17 @@ tf32 的字当 f32 的字读就是同一个数，所以读缓冲区那一段一�
    分界线的两侧：那四条的 layer 记 3，是因为那些格子层 3 要的「有一条会红的、改它自己写法的
    变异体」成立；`assume` 这一格不成立的不是变异体，是**判词**：设备上没有一个「错的 assume」
    可言。
-9. **两条层 2 变异体，一条钉方向、一条钉字节。** `assert-condition-inverted` 是
+9. **哪些 emit label 真的动了，是量出来的而不是照抄上一刀的。** `std/gpu` 多了七个公开函数，
+   全局 ADT id 空间跟着挪，于是每一个链进 std 的语料的字节都可能变。上一刀（T5）声明了九个
+   label，本刀一开始照抄了那九个；`selfhost-prev-diff.sh` 却报出**十个** label 有差异，多的两个是
+   `examples/interop/interop.dawn` 与 `examples/text/chars.dawn`。多出来的那两个是不是本刀造成的，
+   门禁答不了：它比的是 HEAD 与 N-1 种子，窗口里每一笔改动的效果都混在一起。所以本刀做了一次
+   对照：**同一棵树的编译器，把每个语料编两遍，一遍用今天的 `std/gpu.dawn` 与嵌入 std，一遍用
+   `origin/main` 那一版**。结果是九个动、两个不动，与最初照抄的那九个恰好相同：
+   `interop.dawn` 与 `chars.dawn` 本刀一个字节也没动，门禁报它们是窗口里别人的账。
+   「多声明比漏更坏」，而分清这两者的唯一办法是自己编一遍。
+
+10. **两条层 2 变异体，一条钉方向、一条钉字节。** `assert-condition-inverted` 是
    kernel 源变异体（`scripts/tile-golden/kernels.dawn` 的 `assert_guard`，`lt_i` 换 `ge_i`），
    而 `assert_guard` 被实例化在两个极限上，1000（语料全在其下）与 0（语料全在其上），所以
    取反把两个 kernel 的命运**对调**：本来通过的 `assert_pass` 现在失败，本来失败的
