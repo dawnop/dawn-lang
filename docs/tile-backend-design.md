@@ -2207,6 +2207,83 @@ kernel。台账给它们一个自己的状态 `spelled`（写入器的表能拼�
 这是这本账与写入器之间的机器绑定（操作码那本用的是 `OP_` 表）。`--self-test` 给它十五条
 负控加一条阳性对照。
 
+### 6.9 Global 段的字节形状与静态全局的生命期（刀 T7 实测）
+
+刀 T7 加的是 `global` 0x31、`get_global` 0x2C 与 **Global 段（id 6）**。六条结论，前四条
+是**读写入器源码**量出来的，后两条只有本机 3080 答得了。
+
+**一、`global` 不在指令流里，它是段里的一条记录。** 它在冻结的操作码表里有编号，
+`BytecodeWriter.cpp` 却从不把它写进函数体：`writeGlobalSection` 把模块里的 `GlobalOp`
+收集起来单独成段，`writeFunctionTableSection` 那一侧的 `isa<FunctionOpInterface, GlobalOp>`
+把它跳过。所以本仓没有 `OP_GLOBAL` 常量，台账 `features.txt` 给它的状态是
+**`structural`**，与 `entry` 0x16、`module` 0x4B 同类，证据是写入器的函数名
+（`writer:global_section`）而不是一条指令。`get_global` 相反，它是 entry 里的一条普通指令，
+状态是 `implemented`。
+
+**二、一条记录是四个 varint，不是六个。** 布局（`writeGlobalSection` 与 `parseGlobalSection`
+两半对读）：
+
+```
+global-section =: numGlobals[varint] global-entry*
+global-entry   =: symbolNameIndex[varint] valueTypeIndex[varint]
+                  constantValueIndex[varint] alignment[varint]
+```
+
+初始值本身**不在这一段里**，它走 Constant 段，记录里只有下标；类型是初始值的 tile 类型
+（`GlobalOp::verify` 要求 rank 为 1，所以是 `tile<Nxf64>` 而不是 `tile<f64>`），
+`alignment` 是 13.1 就有的 `I64Attr`，默认 0。这一段只写 varint、从不对齐，所以段头不带
+对齐位；读者对这个段号**特意跳过对齐校验**（`Section::Global` 那一条 case 的注释就是这么写的）。
+它在文件里排**第一**，在 Func 之前，与 `writeBytecode` 的顺序一致；读者按 id 收集 payload
+再按自己的顺序解析，所以位置是惯例不是要求。
+
+**三、13.3 才加的两个字段一律不写，而这不是「少写一点」。** `symbol_visibility` 与
+`constant` 在 Ops.td 里被标成 `"13.3"`，写入器在 13.3 以下写四个 varint、在 13.3 及以上写
+六个，读者的 `kMinGlobalInfoSize` 在同一个边界上从 4 变 6。于是在本仓钉的 13.2 上，多写
+那两个 varint 不是「一条读者会跳过的长记录」，而是**下一条记录被从那两个字节开始读**。
+变异体 `global-visibility-written-at-13-2` 就是这句话，`tileiras` 答
+`expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'`；这也是语料要在一个模块里
+声明**两个**全局的原因（只有一个的话，多出来的字节落在段尾、读者根本不看）。C++ 写入器从
+另一侧说同一件事，而且指名道姓：
+`global \`x\` uses non-public symbol visibility, which cannot be encoded in bytecode version 13.2 (requires bytecode 13.3+)`。
+**所以 `visibility.public` / `visibility.private` / `unit.constant` 三行从 T7 改判给 T8**，
+理由具名写在 `attrs.txt` 的 `13.3-record-field`。注意 `since` 列仍是 13.1：
+SymbolVisibility **枚举**的两个取值确实是 13.1（AttrDefs.td），13.3 的是 GlobalOp 上那个
+**参数**和段里那两个字段。「值存在」与「有地方写它」是两件事，台账的两列分别说这两件事。
+
+**四、`get_global` 的符号是一个纯字符串表下标。** 它的 `name` 是 `FlatSymbolRefAttr`，
+tblgen 生成的 getter 答 `StringRef`，于是走 `writeOpAttribute` 的 `std::is_same_v<..., StringRef>`
+那一支，写 `strMgr.getStringIndex(name)`；读者的 `FlatSymbolRefAttr` 分支用
+`readAndGetString` 读回来。流里**没有 tag、没有类型下标**。它既无变长操作数也无变长结果，
+所以不写个数；它没有可选字段，所以不写 flags。整条指令就是
+`opcode, resultTypeIndex, symbolStringIndex` 三个 varint。结果类型是 **rank-0 的
+`tile<ptr<T>>`**（ODS 写的是 `ScalarTileOf<PointerType>`），所以本包的降低把它接上
+`MakePtrs` 用的同一对 `reshape` + `broadcast`，一个字都不用新写。
+
+**五、`tileiras` 读不了文本，所以 .mlir 这一层没有对拍。** `tileiras --help` 的
+USAGE 行写的是 `<tile bytecode file>`，把渲染出的 `.mlir` 喂给它答
+`input does not correspond to Tile IR bytecode`（退出码 3，实测）。于是 `global` 那行的
+文本形状只被层 0 的 golden 钉住，字节形状被层 1 钉住，两者互不校对；这与本目录里每一条
+操作一样，写在这里是因为刀单问了。渲染出的初始值用的是本渲染器自己的浮点拼法
+（`1.5`，MLIR 的打印器会写 `1.500000e+00`），与 `ConstFloat` 一致。
+
+**六、静态存储确实跨 launch 保值，本机量到了。** `global_scratch` 的 kernel 把输入加到一个
+可写全局上，把和同时写回全局和输出；`std/gpu` 的真 handler 按 kernel 名缓存已装载的模块
+（`with_gpu_real` 的 `mods`），所以**同一个模块连发两次 launch**，第二次读到的是第一次写的。
+实测输出是输入的两倍（前三条车道 `6.25, 6.5, 6.75`，输入是 `3.125, 3.25, 3.375`），与宿主
+参考逐位相同。宿主参考把同一个累加量放在**输出缓冲区**里，那是宿主唯一看得见它的地方，
+所以两边只在「全局保住了值」这一条成立时才对得上。刀单预留的「若真机每次 launch 重新装载
+模块就改成同一 launch 内先写后读」这条退路**没有用上**。
+变异体 `module-reloaded-per-launch` 是这句话的反面：把 handler 的模块缓存拿掉、每次 launch
+重新 `cuModuleLoadData`，于是全局每次回到初始值，`global_scratch` 红而 `global_table` /
+`global_ctl` 不动。它**一个字节都不动**，层 0 与层 1 看不见它，因为字节码里根本没有一句话
+说模块活多久；这是本目录里第二条这种形状的变异体（第一条是 `grid-y-ignored`）。
+
+**可见性够不着的那一格，欠的是什么。** 就算升到 13.3，「宿主能看见 public 而看不见 private」
+这个判词还需要一条本仓没有的 FFI：`cuModuleGetGlobal`。`std/gpu` 的 `Gpu` 效果里没有它，
+本刀也不为它扩 handler 面（那是别的账）。所以 T8 把两个取值写出去之后，它们最多到层 1
+（`tileiras` 收下），要到层 2 得先加那条 FFI。这条欠账写在 `attrs.txt` 的
+`13.3-record-field` 里。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
