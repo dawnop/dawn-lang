@@ -59,7 +59,13 @@
 #             context for the whole process; and `print_tko` alone, because
 #             the bytes it puts on standard output are the judgement --
 #             that program writes its own transcript to standard ERROR so
-#             that standard output belongs to the device) and seq_diff.dawn the eleven multi-launch
+#             that standard output belongs to the device) and hint_diff.dawn
+#             the two `optimization_hints` kernels of knife T15 with `vadd`
+#             beside them as the family's kernel-level control (the first
+#             family whose judgement is an equality between KERNELS: a hint
+#             does not change what a kernel computes, so the question is
+#             whether the hinted kernels answer the unhinted one's bytes)
+#             and seq_diff.dawn the eleven multi-launch
 #             problems of knives 16 and 17 (the first whose unit of
 #             comparison is a SEQUENCE of launches over shared device buffers
 #             rather than a kernel: one allocation, one upload, up to sixteen
@@ -698,6 +704,17 @@ dbg_alone=(assert_fail print_tile)
 # visible from outside the device.
 globals_=(global_table global_ctl global_scratch)
 
+# The `optimization_hints` kernels of knife T15, in the order hint_diff
+# takes them. `vadd` is the family's KERNEL-LEVEL CONTROL and is what makes
+# the family a judgement at all: a hint does not change what a kernel
+# computes, so the question this family asks the device is not "is the
+# answer right" but "is it the same answer the kernel with no hints gives",
+# and that needs the unhinted kernel in the same process on the same corpus.
+# vadd's cubin is assembled already; naming it here is what puts it on
+# hint_diff's command line.
+hints=(hint_entry hint_memory)
+hint_order=("${hints[@]}" vadd)
+
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
 # way every list above is: they are the STEPS of eleven sequences, and what
@@ -748,7 +765,7 @@ assemble_golden() { # kernel, tilebc, cubin
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" \
+  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${hints[@]}" \
   "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
@@ -785,6 +802,8 @@ loop_cubins=()
 for k in "${loops[@]}"; do loop_cubins+=("$work/$k.cubin"); done
 attr_cubins=()
 for k in "${attrs[@]}"; do attr_cubins+=("$work/$k.cubin"); done
+hint_cubins=()
+for k in "${hint_order[@]}"; do hint_cubins+=("$work/$k.cubin"); done
 dbg_cubins=()
 for k in "${dbg[@]}"; do dbg_cubins+=("$work/$k.cubin"); done
 global_cubins=()
@@ -1254,6 +1273,52 @@ launches="$(printf '%s\n' "$global_shape" | tr ' ' '\n' | sed -n 's/^scratch_lau
   fail "global_scratch is launched ${launches:-0} time(s), so nothing observes the global's lifetime: $global_shape"
 echo "PASS  corpus: the two tables differ on every lane, neither is a mirror or a splat, every input lane is non-zero, and global_scratch is launched $launches times ($global_shape)"
 
+# ---- native, the optimization hint kernels (knife T15)
+#
+# The verdict is the usual one (every kernel agrees with its reference),
+# and the family's own claim is the `agree` count below it: a hint is a
+# suggestion, so what a device can be asked about one is whether the
+# hinted kernels answer the bytes the UNHINTED kernel answers, and that is
+# a comparison between three cubins in one process rather than three
+# comparisons against a reference.
+build_native "$root/std" "$work/hint.bin" "$here/hint_diff.dawn"
+rc=0
+device "$work/hint.bin" "${hint_cubins[@]}" > "$work/hint.out" 2> "$work/hint.err" || rc=$?
+cat "$work/hint.out"
+hint_verdict="$(verdict_of "$work/hint.out")"
+case "$hint_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#hints[@]} hint kernels and their control agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $hint_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $hint_verdict" ;;
+  fail) cat "$work/hint.err" >&2; fail "the device answered and disagreed with the fake device on a knife T15 kernel (see the transcript above)" ;;
+  *) cat "$work/hint.err" >&2; fail "hint_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/hint.out" | head -n 1)"
+
+# The claim, held here and not only inside the program: all three kernels
+# answered the control's bytes, and the corpus really did carry hints. A
+# writer that dropped the attribute would keep the first count at 3 of 3
+# and is caught in scripts/tile-golden instead; a corpus that carried no
+# hint would keep it at 3 of 3 too, and nothing but these counts would say
+# so.
+if [ "$hint_verdict" = pass ]; then
+  hint_probe="$(sed -n 's/^probe hints //p' "$work/hint.out" | tail -n 1)"
+  hint_agree="$(printf '%s\n' "$hint_probe" | tr ' ' '\n' | sed -n 's/^agree=//p' | head -n 1)"
+  [ "$hint_agree" = "3/3" ] ||
+    { printf '%s\n' "$hint_probe" >&2; fail "the hinted kernels and the control did not answer the same bytes: agree=$hint_agree"; }
+  for claim in entry_archs entry_keys memory_hinted memory_plain; do
+    value="$(printf '%s\n' "$hint_probe" | tr ' ' '\n' | sed -n "s/^${claim}=//p" | head -n 1)"
+    [ -n "$value" ] ||
+      { printf '%s\n' "$hint_probe" >&2; fail "the hint probe line has no $claim count"; }
+    [ "$value" -gt 0 ] 2> /dev/null ||
+      { printf '%s\n' "$hint_probe" >&2; fail "$claim is $value: the corpus carries no hint there, so nothing here is evidence about it"; }
+  done
+  echo "PASS  probe: hint_entry and hint_memory answered vadd's bytes ($hint_probe)"
+else
+  echo "SKIP  probe: the hint counts are not verifiable on this driver ($hint_verdict)"
+fi
+
 # Each of these counts is a pair of segments that the attribute has to move
 # APART on the device. A zero would mean the value reached the assembler and
 # did nothing, and the reference would still have agreed, because the
@@ -1694,6 +1759,7 @@ tiers="$tiers dtype:$(sed -n 's/^tiers //p' "$work/dtype.out" | tail -n 1)"
 tiers="$tiers shape:$(sed -n 's/^tiers //p' "$work/shape.out" | tail -n 1)"
 tiers="$tiers loop:$(sed -n 's/^tiers //p' "$work/loop.out" | tail -n 1)"
 tiers="$tiers attr:$(sed -n 's/^tiers //p' "$work/attr.out" | tail -n 1)"
+tiers="$tiers hint:$(sed -n 's/^tiers //p' "$work/hint.out" | tail -n 1)"
 tiers="$tiers dbg:$(sed -n 's/^tiers //p' "$work/assert.out" | tail -n 1)"
 tiers="$tiers global:$(sed -n 's/^tiers //p' "$work/global.out" | tail -n 1)"
 tiers="$tiers seq:$(sed -n 's/^tiers //p' "$work/seq.out" | tail -n 1)"
@@ -1702,6 +1768,7 @@ scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.o
 erf_probe="$(sed -n 's/^probe as-error //p' "$work/erf.out" | tail -n 1)"
 trig_probe="$(sed -n 's/^probe per-op //p' "$work/trig.out" | tail -n 1)"
 attr_probe="$(sed -n 's/^probe attrs //p' "$work/attr.out" | tail -n 1)"
+hint_probe_line="$(sed -n 's/^probe hints //p' "$work/hint.out" | tail -n 1)"
 seq_launch_probe="$(sed -n 's/^probe launches //p' "$work/seq.out" | tail -n 1)"
 loop_probe="$(sed -n 's/^probe rounds //p' "$work/loop.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe; erf error: $erf_probe;"\
@@ -3940,7 +4007,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
   scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
   scripts/tile-gpu-diff/attr_diff.dawn scripts/tile-gpu-diff/assert_diff.dawn \
-  scripts/tile-gpu-diff/global_diff.dawn \
+  scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
@@ -3949,7 +4016,8 @@ commit="$(git rev-parse --short=12 HEAD)"
 today="$(date -u +%F)"
 line="$commit $today $driver $want_tileiras $gpu_name $verdict"
 summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per-op=$trig_probe"
-summary="$summary attrs=$attr_probe seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
+summary="$summary attrs=$attr_probe hints=$hint_probe_line"
+summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"
