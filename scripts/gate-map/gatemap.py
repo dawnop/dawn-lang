@@ -123,6 +123,11 @@ paths no gate watches) is a ratchet checked in both directions.
      harnesses that had quoted the old row went red one push later.
      From: the signature text of each Dawn declaration, `fn name(` through the
      `=` that opens its body, against the gate scripts' text.
+  H  A gate that compiles an example project also compiles its local package
+     dependencies. Follow the example's dawn.toml string dependencies, including
+     transitive ones, and attribute their manifests and src trees to the gates
+     already watching the example manifest. A missing or invalid closure voids
+     this attribution rather than guessing that all packages are inputs.
 
 `--labels` answers the neighbouring question, from the same file: which
 differential owns which declarable label. `scripts/emit-labels.txt` is
@@ -214,6 +219,13 @@ BUNDLED_MODULE_GOLDEN_TEXT = "\tbundled modules: "
 SELFHOST_PROJECT = "selfhost"
 SELFHOST_MANIFEST = "selfhost/dawn.toml"
 SELFHOST_LOCK = "selfhost/dawn.lock"
+# These are executable premises, not a package-to-gate roster. A script that
+# merely reads example files (formatting, docs) does not compile their deps.
+EXAMPLE_COMPILERS = {
+    "scripts/example-tests.sh": './bin/dawn test "$u"',
+    "scripts/example-main-contract/run.py":
+        'command = [str(ROOT / "bin" / "dawn"), "run", target]',
+}
 SOURCE_INPUTS_HEADER = "dawn-source-inputs-v1"
 COMPILER_CLOSURE_PROBLEM = "selfhost compiler input closure is void"
 VALID_DAWN_NAME = re.compile(r"[a-z_][a-z0-9_]*")
@@ -517,7 +529,8 @@ def shell_words(line):
         return ()
 
 
-def compiler_project_closure(tree, root=SELFHOST_PROJECT):
+def compiler_project_closure(tree, root=SELFHOST_PROJECT,
+                             problem_prefix=COMPILER_CLOSURE_PROBLEM):
     """Repo-local SourcePlan projects reachable through string `[deps]` paths.
 
     This is lexical and tree-backed so historical fixture Trees and in-memory
@@ -533,7 +546,7 @@ def compiler_project_closure(tree, root=SELFHOST_PROJECT):
     names = {}
 
     def problem(detail):
-        problems.append(f"{COMPILER_CLOSURE_PROBLEM}: {detail}")
+        problems.append(f"{problem_prefix}: {detail}")
 
     def dependency_path(project, alias, raw):
         if not raw or any(ord(char) < 32 for char in raw):
@@ -1612,6 +1625,58 @@ class Map:
         self._rule_e()
         self._rule_f()
         self._rule_g()
+        self._rule_h()
+
+    def _rule_h(self):
+        """Propagate observed example inputs through their manifest closure.
+
+        Only manifest/src are compiled inputs of a dependency; attributing its
+        whole directory would falsely claim its own tests and docs are run.
+        Read from Tree so mutants and historical fixtures see their own deps.
+        """
+        compiling = set()
+        for script, invocation in EXAMPLE_COMPILERS.items():
+            gate = self.gate_running(script)
+            if gate is None:
+                continue
+            if invocation not in strip_comments(self.tree.read(script)):
+                self.problems.append(
+                    f"example input closure is void: {script} no longer "
+                    f"contains its compilation premise {invocation!r}"
+                )
+                continue
+            compiling.add(gate.id)
+        for manifest in self.tree.files:
+            parts = manifest.split("/")
+            if (len(parts) != 4 or parts[0] != "examples"
+                    or parts[-1] != "dawn.toml"):
+                continue
+            observed = {
+                (obs.gate_id, obs.tag_only)
+                for obs in self.by_path.get(manifest, ())
+                if obs.level == "coarse" and obs.gate_id in compiling
+            }
+            if not observed:
+                continue
+            root = posixpath.dirname(manifest)
+            projects, problems = compiler_project_closure(
+                self.tree, root, f"example input closure is void for {root}"
+            )
+            self.problems.extend(problems)
+            if problems:
+                continue
+            for project in projects:
+                if project == root:
+                    continue
+                for gate_id, tag_only in sorted(observed):
+                    obs = Observation(
+                        "coarse", gate_id,
+                        f"{manifest} reaches {project} through local `[deps]`; "
+                        "the example gate compiles its manifest and src inputs",
+                        tag_only,
+                    )
+                    self.add(f"{project}/dawn.toml", obs)
+                    self.add_under(f"{project}/src", obs)
 
     # ---- queries ------------------------------------------------------
     def verdict(self, path, additional_std_modules=None):
@@ -3716,9 +3781,81 @@ MUTANTS_HEADER = """\
 """
 
 
+def selftest_example_dependencies():
+    """A new example must bring its deps into the map without editing a list.
+
+    Both the example and package names are synthetic. Removal of either edge
+    must remove just that reachability; unrelated package tests stay unwatched.
+    """
+    example = "examples/probe/client"
+    package = "packages/probe_direct"
+    leaf = "packages/probe_leaf"
+    manifest = f"{example}/dawn.toml"
+    source = f"{package}/src/value.dawn"
+    leaf_source = f"{leaf}/src/value.dawn"
+    text = {
+        ".github/workflows/gates.yml": (
+            "jobs:\n  probe:\n    steps:\n"
+            "      - name: compile an example\n"
+            "        run: ./scripts/example-tests.sh\n"
+        ),
+        "scripts/example-tests.sh": (
+            f"units+=({example})\n" + './bin/dawn test "$u"\n'
+        ),
+        "bin/dawn": "#!/bin/sh\n",
+        manifest: ('schema = 1\nname = "probe_client"\n[deps]\n'
+                   'different_alias = "../../../packages/./probe_direct"\n'),
+        f"{example}/src/main.dawn": "pub fn main() -> Unit = ()\n",
+        f"{package}/dawn.toml": ('schema = 1\nname = "probe_direct"\n'
+                                  '[deps]\nleaf = "../probe_leaf"\n'),
+        source: "pub fn value() -> Int = 1\n",
+        f"{package}/tests/separate.dawn": "test { assert(true) }\n",
+        f"{leaf}/dawn.toml": 'schema = 1\nname = "probe_leaf"\n',
+        leaf_source: "pub fn value() -> Int = 2\n",
+    }
+    tree = Tree(ROOT, files=list(text), overrides=text)
+    problems = []
+
+    def watched(gm, path):
+        return any(o.level == "coarse" and o.gate_id == "probe / compile an example"
+                   for o in gm.verdict(path))
+
+    good = Map(tree)
+    for path in (source, leaf_source, f"{package}/dawn.toml", f"{leaf}/dawn.toml"):
+        if not watched(good, path):
+            problems.append(f"example dependency probe: missing coverage for {path}")
+    if watched(good, f"{package}/tests/separate.dawn"):
+        problems.append("example dependency probe: unrelated tests claimed as inputs")
+    removed = Map(tree.mutate(overrides={
+        manifest: 'schema = 1\nname = "probe_client"\n',
+    }))
+    if watched(removed, source) or watched(removed, leaf_source):
+        problems.append("example dependency probe: removed dependency still watched")
+    shallow = Map(tree.mutate(overrides={
+        f"{package}/dawn.toml": 'schema = 1\nname = "probe_direct"\n',
+    }))
+    if not watched(shallow, source) or watched(shallow, leaf_source):
+        problems.append("example dependency probe: transitive edge removal misattributed")
+    invalid = Map(tree.mutate(overrides={manifest: text[manifest] + 'missing = "../absent"\n'}))
+    if (watched(invalid, source) or not any(
+            "example input closure is void" in p for p in invalid.problems)):
+        problems.append("example dependency probe: broken closure did not fail closed")
+    no_compiler = Map(tree.mutate(overrides={
+        "scripts/example-tests.sh": f"units+=({example})\n",
+    }))
+    if (watched(no_compiler, source) or not any(
+            "compilation premise" in p for p in no_compiler.problems)):
+        problems.append("example dependency probe: removed compilation still propagated")
+    for problem in problems:
+        print(f"SELFTEST FAIL: {problem}", file=sys.stderr)
+    if not problems:
+        print("  example dependencies: direct/transitive inputs, removal, isolation, fail-closed OK")
+    return problems
+
+
 def selftest(record_path=None, record_mode=False):
     record_path = record_path or (HERE / "mutants.txt")
-    failures = selftest_matrix()
+    failures = selftest_matrix() + selftest_example_dependencies()
     if failures:
         return 1
 
