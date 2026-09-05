@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF}
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -1127,6 +1127,61 @@ fn sum_prog() -> TileProg = TileProg {
     IdxMul(22, 1, 21),
     Store(23, 1, "f64", 22, [128], [1], 19, None, 20)
   ]
+}
+
+# The loop knife T5 added, in the table's own vocabulary: a `Loop` with no
+# bounds whose body ends in the exit `if` and a `continue`.
+fn spin_prog() -> TileProg = TileProg {
+  name: "spin",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    IdxConst(2, 8),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Loop([4, 5], [6, 7], [8, 9], [
+      ConstI(10, "i1", [], 1),
+      BinaryF(11, "addf", "f64", [8], 6, 6),
+      If([], 10, [Break([6, 7])], [Yield([])]),
+      Continue([11, 7])
+    ]),
+    Store(12, 1, "f64", 3, [8], [1], 8, None, 9)
+  ]
+}
+
+fn is_while(i: Instr) -> Bool = match i {
+  WhileLoop(_results, _tys, _inits, _carried, _body) -> true
+  _ -> false
+}
+
+test "a loop lowers to one WhileLoop numbered results first, then its block arguments, then its body" {
+  let k = lower(spin_prog())
+  let loops = list.filter(k.body, is_while)
+  assert len(loops) == 1
+  match loops[0] {
+    WhileLoop(results, tys, inits, carried, body) -> {
+      # the reading order: the results, then the two block arguments
+      assert carried == [results[1] + 1, results[1] + 2]
+      assert len(tys) == 2 && tys[1] == Token
+      assert len(inits) == 2
+      # the body's last two instructions are the exit and the continue,
+      # and the branch that breaks yields nothing to its `if`
+      match body[len(body) - 2] {
+        IfElse(res, ifs, _cond, _cond_ty, on_true, on_false) -> {
+          assert res == [] && ifs == []
+          assert on_true == [BreakVals([Val(carried[0]), Val(carried[1])], tys)]
+          assert on_false == [YieldVals([], [])]
+        }
+        _ -> { assert false }
+      }
+      match body[len(body) - 1] {
+        Cont(values, _tys) -> { assert len(values) == 2 }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
 }
 
 fn is_for(i: Instr) -> Bool = match i {

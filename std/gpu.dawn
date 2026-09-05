@@ -3843,6 +3843,12 @@ pub fn loop_until_ref(n: Int, eps: Float, fuel: Int, dtypes: List[String], ins: 
 ## It is written as the general loop rather than as "the input" so that it
 ## is a reference and not a restatement of the corpus: hand it a tile over
 ## the threshold and it iterates, exactly as the kernel does.
+##
+## The step moves the tile AWAY from the exit, so a tile that starts over
+## the threshold never reaches it and `fuel` is what stops this function.
+## That asymmetry is the kernel's and it is deliberate: it is what makes
+## the `loop-break-condition-inverted` mutant stop after one iteration
+## rather than never (scripts/tile-gpu-diff/run.sh says so at the mutant).
 pub fn loop_none_ref(n: Int, threshold: Float, step: Float, fuel: Int,
   dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let x0 = list.map(range(0, n), i => ins[0][i])
@@ -5233,6 +5239,41 @@ test "the strided references answer what a reader can check by hand" {
   # and what falls outside contributes zero
   assert gaussian_blur_ref(2, 2, 3, f3, [[1.0, 2.0, 3.0, 4.0],
     [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]) == [3.0, 3.0, 7.0, 7.0]
+}
+
+test "the loop references answer what a reader can check by hand, trip counts included" {
+  let i2 = ["i32", "i32"]
+  # 6 -> 3 -> 10 -> 5 -> 16 -> 8 -> 4 -> 2 -> 1 is eight steps, 4 -> 2 -> 1
+  # is two, and 1 is already there. The round count is the largest of them,
+  # which is what the kernel's second reduction answers.
+  let out = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0]
+  let counts = loop_count_ref(3, 64, 2, i2, [[6.0, 4.0, 1.0], out])
+  assert list.take(counts, 3) == [8.0, 2.0, 0.0]
+  assert list.slice(counts, 3, 6) == [8.0, 8.0, 8.0]
+  assert list.drop(counts, 6) == [0.0 - 1.0]
+  # `loop_bound`'s reference is the same one with one segment
+  assert loop_count_ref(3, 64, 1, i2, [[6.0, 4.0, 1.0], [0.0, 0.0, 0.0]]) == [8.0, 2.0, 0.0]
+  # fuel is not decoration: cut it to three rounds and the long lane is
+  # counted short, which is the reference disagreeing rather than agreeing
+  assert list.take(loop_count_ref(3, 3, 1, i2, [[6.0, 4.0, 1.0], [0.0, 0.0, 0.0]]), 1) == [3.0]
+
+  # Newton from 1.0 on 4 and 9: both settle exactly (4 is a power of two
+  # and 3.0 is the exact root of 9), and the loop runs until the SLOWEST
+  # lane is under the bound, so both lanes report the same round count
+  let f2 = ["f64", "f64"]
+  let roots = loop_until_ref(2, 1.0e-12, 64, f2, [[4.0, 9.0], [0.0, 0.0, 0.0, 0.0, 0.0 - 1.0]])
+  assert list.take(roots, 2) == [2.0, 3.0]
+  assert roots[2] == roots[3]
+  assert roots[2] > 0.0
+  assert list.drop(roots, 4) == [0.0 - 1.0]
+
+  # `loop_none`: every lane under the threshold, so the loop stops before
+  # its first step and the answer is the input
+  assert loop_none_ref(2, 1.0, 1000.0, 64, f2, [[0.25, 0.5], [0.0, 0.0]]) == [0.25, 0.5]
+  # and it really is the loop and not a copy: under a threshold the lanes
+  # already exceed, the step runs and only `fuel` stops it, because this
+  # step moves away from the exit rather than towards it
+  assert loop_none_ref(2, 0.1, 1000.0, 2, f2, [[0.25, 0.5], [0.0, 0.0]]) == [2000.25, 2000.5]
 }
 
 test "the element format references answer what a reader can check by hand" {

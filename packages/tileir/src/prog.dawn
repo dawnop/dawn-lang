@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32, I32}
-use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select}
+use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -635,7 +635,12 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
             } else {
               ()
             }
-            let (outer, inner) = (saved, ops)
+            # spelled as two bindings rather than one tuple, and the token
+            # through a name: `for`'s arm above is what two of run.sh's
+            # mutants anchor on, and an anchor that matched here as well
+            # would stop being unique
+            let inner = ops
+            let outer = saved
             let base = next
             next = mint(name, next, len(inits))
             let results = list.map(range(0, len(inits)), k => base + k)
@@ -645,7 +650,8 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
             let body = inner ++ [exit, Continue(outs ++ [tok])]
             frames = list.take(frames, len(frames) - 1)
             ops = outer ++ [Loop(inits, carried, results, body)]
-            tok = last(results)
+            let after_loop = last(results)
+            tok = after_loop
             but_last(results)
           }
           _ -> refuse(name, "while_end closes a region that is not a loop")
@@ -1158,6 +1164,48 @@ test "loops nest: the inner For sits in the outer body and the outer continue pa
     _ -> { assert false }
   }
   assert p == trace_kernel("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
+}
+
+# A loop whose trip count is a value the body computes: knife T5's shape.
+# What it computes is beside the point (it doubles the tile until the
+# largest lane is not under one); what the test is about is the record.
+fn spin(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let v0 = load(x, b, [8])
+  let v = d_loop(v0, t => {
+    let m = d_reduce(F64, [8], t, 0.0, (acc, e) => s_maxf(F64, acc, e))
+    (s_gt(F64, s_const(F64, 1.0), m), addf(F64, [8], t, t))
+  })
+  store(out, b, [8], v)
+}
+
+test "a loop records a Loop whose body ends in the exit if and a continue, and the break carries what entered" {
+  let p = trace_kernel("spin", ["f64", "f64"], () => spin(param(F64, 0), param(F64, 1)))
+  match p.ops[len(p.ops) - 2] {
+    Loop(inits, carried, results, body) -> {
+      # the token rides as the last carried value, as a `for`'s does
+      assert len(inits) == 2 && len(carried) == 2 && len(results) == 2
+      # the exit is an `if` with NO results: one branch breaks and the
+      # other yields nothing, so the operation defines nothing
+      match body[len(body) - 2] {
+        If(rs, _cond, on_true, on_false) -> {
+          assert rs == []
+          # what the break hands back is what ENTERED this iteration,
+          # token included: nothing in this body moves the token
+          assert on_true == [Break(carried)]
+          assert on_false == [Yield([])]
+        }
+        _ -> { assert false }
+      }
+      # and the continue hands the next iteration what the body computed
+      match body[len(body) - 1] {
+        Continue(values) -> { assert len(values) == 2 && values != carried }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  assert p == trace_kernel("spin", ["f64", "f64"], () => spin(param(F64, 0), param(F64, 1)))
 }
 
 # A gather through an index tile read out of one buffer, and a scatter of

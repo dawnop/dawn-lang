@@ -41,12 +41,13 @@ name: gates
 # creation order roughly tracks definition order: the jobs that queue should
 # be the short tail, which fits in slots the first finishers free. That is a
 # soft nudge, not a contract — GitHub does not promise dispatch order. A run
-# of this workflow holds 41 jobs (2026-09-05, tile-golden's fifth shard on
-# top of builtin-type's third and fourth), and ci.yml adds its own
-# `secrets`, so 42 against the ceiling of 20: the second wave starts as the
-# first finishes, which is why the four native-diff shards are defined first.
-# The 40th and 41st jobs do not lengthen the run: with 39 already queuing
-# against 20 runners the span is set by the tail, not by the count.
+# of this workflow holds 42 jobs (2026-09-05, tile-golden's sixth shard on
+# top of the fifth and of builtin-type's third and fourth), and ci.yml adds
+# its own `secrets`, so 43 against the ceiling of 20: the second wave starts
+# as the first finishes, which is why the four native-diff shards are
+# defined first. The 41st and 42nd jobs do not lengthen the run: with 40
+# already queuing against 20 runners the span is set by the tail, not by the
+# count.
 #
 # The setup they each repeat is ~40s and comes out of
 # .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
@@ -1767,8 +1768,8 @@ jobs:
     # should observe near 330 to 360s.
     #
     # The fifth shard buys BUDGET HEADROOM and not wall clock, which is what
-    # every split here has bought since knife 16: a run of this workflow now
-    # holds 41 jobs against an account ceiling of 20, so the 41st queues
+      # every split here has bought since knife 16: a run of this workflow now
+    # holds 42 jobs against an account ceiling of 20, so the 42nd queues
     # behind the first wave, and tile has never been the run's long pole.
     # budget: 3x 631s planning value (315s local, doubled)
     timeout-minutes: 32
@@ -1787,10 +1788,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (139 kernels and twenty-six mutants, both backends; shard 1)
+      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 1)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 1/5
+        run: ./scripts/tile-golden/run.sh --shard 1/6
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1834,10 +1835,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (139 kernels and twenty-six mutants, both backends; shard 2)
+      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 2/5
+        run: ./scripts/tile-golden/run.sh --shard 2/6
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1876,10 +1877,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (139 kernels and twenty-six mutants, both backends; shard 3)
+      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 3)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 3/5
+        run: ./scripts/tile-golden/run.sh --shard 3/6
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1916,10 +1917,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (139 kernels and twenty-six mutants, both backends; shard 4)
+      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 4)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 4/5
+        run: ./scripts/tile-golden/run.sh --shard 4/6
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1957,15 +1958,51 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (139 kernels and twenty-six mutants, both backends; shard 5)
+      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 5)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 5/5
+        run: ./scripts/tile-golden/run.sh --shard 5/6
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-tile-golden-5
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-6:
+    runs-on: ubuntu-latest
+    # The sixth shard, added with the N=5 -> N=6 split on 2026-09-05 (knife
+    # T5), and the trigger is the POLE again rather than a CI observation --
+    # the third split in a row for that reason. Knife T3 left shard 5 at a
+    # 644s planning value with 16s of room, and this knife adds six items
+    # (four kernels and two mutants; 171 in all). Same matrix, same
+    # tileiras, same arithmetic as tile-golden-1's note.
+    # budget: 3x 582s planning value (291s local, doubled)
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 6)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 6/6
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-6
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -2578,6 +2615,7 @@ jobs:
       - tile-golden-3
       - tile-golden-4
       - tile-golden-5
+      - tile-golden-6
     if: ${{ always() }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)

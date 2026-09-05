@@ -59,7 +59,7 @@ use std/map
 use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI}
-use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
@@ -1379,6 +1379,56 @@ test "a for is its opcode, result count and types, the flags, the operand count 
   assert str.contains(whole, hex(tail) ++ "03")
   assert bytecode_version() == "13.2"
   assert for_has_flags()
+}
+
+fn spin_prog() -> TileProg = TileProg {
+  name: "spin",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    IdxConst(2, 8),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Loop([4, 5], [6, 7], [8, 9], [
+      ConstI(10, "i1", [], 1),
+      BinaryF(11, "addf", "f64", [8], 6, 6),
+      If([], 10, [Break([6, 7])], [Yield([])]),
+      Continue([11, 7])
+    ]),
+    Store(12, 1, "f64", 3, [8], [1], 8, None, 9)
+  ]
+}
+
+test "a loop writes no flags varint, and a break writes a result count of zero then its operands" {
+  let k = lower(spin_prog())
+  let (w, whole) = body_of(k)
+  # `for` carries an optional attribute (`unsignedCmp`, 13.2) and therefore
+  # a flags field; `loop` carries no optional attribute and no optional
+  # operand, so tblgen writes none. The bytes here say so: opcode, 2
+  # results, their two type indices, then the OPERAND COUNT (2) with no
+  # byte between, the two operands, 1 region, 1 block, 2 block arguments,
+  # the same two types.
+  # t9 is tile<8xf64> and t0 is token; %15 and %16 are the load's two
+  # results and %17 / %18 the block arguments, which the four body
+  # instructions follow.
+  let whole_loop = bytes.freeze(list.fold(
+    [OP_LOOP, 2, 9, 0, 2, 15, 16, 1, 1, 2, 9, 0, 4], bytes.buf(), put_varint))
+  assert str.contains(whole, hex(whole_loop))
+  # the break: opcode, a result count of 0 (`continue` and `return` write
+  # the same one), an operand count of 2, and the two block arguments by the
+  # indices they hold inside the region
+  assert str.contains(whole, hex(bytes.freeze(list.fold([OP_BREAK, 0, 2, 17, 18], bytes.buf(), put_varint))))
+  # the loop's results take the indices the block arguments had: the block
+  # rolled back
+  # the loop's two results are the lowering's %15 and %16, and they take
+  # the stream indices 17 and 18 the block arguments held: the block rolled
+  # back. The block arguments themselves (%17, %18) and what the body
+  # defined (%19, %20) have no index afterwards.
+  assert map.get(w.index, 15) == Some(17)
+  assert map.get(w.index, 16) == Some(18)
+  assert not map.has(w.index, 17)
+  assert not map.has(w.index, 19)
 }
 
 test "zigzag is the reader's signed varint, and a pattern with its top bit set still encodes" {

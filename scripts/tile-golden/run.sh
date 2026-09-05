@@ -165,6 +165,28 @@
 #                            says `Only 'nearest_even' is supported`. The
 #                            two together are what makes ftof_rounding a
 #                            claim rather than a table
+#     loop-carried-not-rolled-back
+#                            the writer keeps counting after a `loop`'s
+#                            block instead of rolling the value index back
+#                            before numbering the loop's results ->
+#                            loop_count's text is untouched, its bytes are
+#                            the same length and differ, and tileiras
+#                            refuses them: the store after the loop names
+#                            an index past the last value. The `loop` twin
+#                            of for-results-not-rolled-back, and a SEPARATE
+#                            anchor rather than the same one: the two
+#                            regions are written by two arms, and a reader
+#                            who copied `for`'s arm without its last line
+#                            would pass that mutant and fail this one
+#     break-values-missing   the writer gives `break` an operand count of
+#                            zero and writes none -> loop_count's text is
+#                            untouched, the file is the same length (the
+#                            Func section lost two operand indices and the
+#                            padding after it took them back) and tileiras
+#                            refuses it by TYPE: a break's operands must
+#                            correspond to the parent loop's results. What
+#                            `break` carries IS the loop's answer, and this
+#                            is the layer at which that is checkable
 #     scan-result-drops-the-dim
 #                            the writer gives a `scan` the result types a
 #                            `reduce` would have, the scanned dimension
@@ -265,7 +287,8 @@ kernels=(
   trig_sweep rope shape_ops grid_stride
   token_join ptr_roundtrip ptr_recast
   dtype_i16 dtype_i64 dtype_tf32 dtype_e4m3
-  dtype_e5m2 dtype_e8m0)
+  dtype_e5m2 dtype_e8m0
+  loop_count loop_bound loop_until loop_none)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -327,6 +350,8 @@ mutants=(
   e4m3-tag-as-i8
   e8m0-rounding-as-nearest-even
   e8m0-tag-as-f8e5m2
+  loop-carried-not-rolled-back
+  break-values-missing
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -702,7 +727,9 @@ func_len() { # tilebc
 # renderer was not edited), the bytes differ from <kernel>.tilebc on both
 # and agree with each other, and tileiras refuses them with the given
 # fragment in its output. <shape> says how the mutant's file relates to the
-# golden's: `same-size` (a value changed in place), `func-one-short` (the
+# golden's: `same-size` (the file is the same length: a value changed in
+# place, or a Func section that lost bytes the padding after it took back),
+# `func-one-short` (the
 # function section lost one byte), `func-one-long` (it gained one; the file
 # itself need not change size either way, the next section's alignment
 # padding absorbs it) or `file-shorter` (the whole file lost bytes, which is
@@ -1160,6 +1187,31 @@ if run_item e8m0-tag-as-f8e5m2; then
 '
   writer_mutant_checks e8m0-tag-as-f8e5m2 dtype_e8m0 same-size \
     "'cuda_tile.ftof' op invalid rounding mode specified. Only 'nearest_even' is supported"
+fi
+
+# 27. The `loop` region's own rollback. `for`'s is a mutant of the shared
+#     `roll_back` function (for-results-not-rolled-back, above); this one
+#     is the CALL in the loop arm, because the two regions are written by
+#     two arms of the same match and only one of them is `for`'s.
+if run_item loop-carried-not-rolled-back; then
+  mutant_project loop-carried-not-rolled-back bytecode.dawn \
+    '    roll_back(w_block, w_body)' \
+    '    w_body'
+  writer_mutant_checks loop-carried-not-rolled-back loop_count same-size \
+    "operand index 37 out of bounds (size=19) for operand 0"
+fi
+
+# 28. `break` with no operands. The loop's results are the values the break
+#     hands back, so dropping them is not a stream error but a TYPE error,
+#     and the verifier prints both sides. The file does not shrink: the two
+#     operand indices come out of the Func section and the alignment
+#     padding after it takes the same two bytes back.
+if run_item break-values-missing; then
+  mutant_project break-values-missing bytecode.dawn \
+    '  BreakVals(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_BREAK), 0), len(values)), emit_ref)' \
+    '  BreakVals(_values, _tys) -> emit(emit(emit(w0, OP_BREAK), 0), 0)'
+  writer_mutant_checks break-values-missing loop_count same-size \
+    "'cuda_tile.break' op operand types must correspond to the parent loop result types"
 fi
 
 _item_tick ""

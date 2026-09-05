@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use dev.{RedId, IdF, IdI}
-use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
 
 fn elem(e: Elem) -> String = match e {
@@ -425,6 +425,36 @@ test "a loop is its header with the carried values, a body two columns in, and a
   # after the loop, the store takes the loop's results
   assert str.contains(text, "store_ptr_tko weak %45, %20 token=%21 :")
   assert str.ends_with(text, "    return\n  }\n}\n")
+}
+
+fn spin_prog() -> TileProg = TileProg {
+  name: "spin",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    IdxConst(2, 8),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Loop([4, 5], [6, 7], [8, 9], [
+      ConstI(10, "i1", [], 1),
+      BinaryF(11, "addf", "f64", [8], 6, 6),
+      If([], 10, [Break([6, 7])], [Yield([])]),
+      Continue([11, 7])
+    ]),
+    Store(12, 1, "f64", 3, [8], [1], 8, None, 9)
+  ]
+}
+
+test "a loop is its header with the carried values, an if that breaks, and the continue after it" {
+  let text = render(spin_prog())
+  assert str.contains(text, "\n    %15, %16 = loop iter_values(%17 = %13, %18 = %14) : tile<8xf64>, token -> (tile<8xf64>, token) {\n")
+  # the exit: an `if` with no results, a break in one branch and an empty
+  # yield in the other. The dialect's own spelling for both.
+  assert str.contains(text, "\n      if %19 {\n        break %17, %18 : tile<8xf64>, token\n      } else {\n        yield\n      }\n")
+  assert str.contains(text, "\n      continue %20, %18 : tile<8xf64>, token\n    }\n")
+  # after the loop, the store takes the loop's results
+  assert str.contains(text, "store_ptr_tko weak %23, %15 token=%16 :")
 }
 
 fn total_prog() -> TileProg = TileProg {

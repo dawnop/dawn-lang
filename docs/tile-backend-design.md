@@ -1861,6 +1861,51 @@ miss 恰好 0.0。
 tf32 的字当 f32 的字读就是同一个数，所以读缓冲区那一段一动不动，动的是转换那一段（该留 11
 位有效数字的地方留了 24 位）。`run.sh` 因此不只检查「有一个 kernel 红了」，还检查红在第几段。
 
+**刀 T5 的实测（`loop` 0x41 与 `break` 0x0A，唯一缺的区域形状）。** 三个语义问题在动工前
+就问了写入器源码与 `tileiras`，答案写在这里、也写在 `packages/tileir/src/dev.dawn` 的
+`t_while_begin` / `t_while_end` 注释里：
+
+1. **`break` 可以在 `loop` 体内嵌套的 `if` 里，这是 C 风格的出口成立的原因。**
+   `Ops.td` 给 BreakOp 的是 `ParentOneOf<["IfOp", "LoopOp"]>`，而 `LoopOp` 带
+   `SingleBlockImplicitTerminator`：`loop` 的区域只有一个块，块的终结子只能是 `continue`
+   或 `break`，所以一个「有时退出、有时继续」的循环**必须**把 `break` 放进体内的 `if`。
+   方言自己的 `mlirExample` 印的就是这个形状。于是公开面是一段式的
+   `d_loop(init, body)`，`body` 答一个 rank-0 的 `Scalar[I1]` 与下一个值，写入器发
+   `if cond { break 进来的值 } else { yield }` 再发 `continue 下一个值`；计划稿里那个
+   两段式的 `d_loop_until(init, step, cond)` 不必做。
+2. **`break` 与 `continue` 各带几个值：都与循环的携带值一样多，但带的不是同一批。**
+   `continue` 带下一轮收到的值，`break` 带循环**结束后的结果**，而 LoopOp 的结果类型可以
+   与 iter_values 的类型不同（方言的第四个例子就是 i32 进 f32 出）。本包不用那条自由：
+   两边都是携带值的类型。记录 handler 让 `break` 带**进入这一轮的**携带值，所以
+   `d_loop` 读作「当 `cond` 为假时把值换成 `next`」，body 在停下来那一轮算出的东西被丢掉。
+   写错这一条是**类型错**而不是数值错，`tileiras` 当场拒：把 `break` 的操作数删光，它答
+   `'cuda_tile.break' op operand types must correspond to the parent loop result types:
+   () vs (...)`，这就是层 1 变异体 `break-values-missing`。
+3. **值编号在区域结束时回滚，规则与 `for` 完全一致，而且是同一段代码。**
+   `BytecodeWriter.cpp` 的 `writeBlock` 在块开始时记下 `nextValueIndex`，块结束时把
+   `valueIndexMap` 弹回去并把计数复位；这与操作是哪一个无关，`for`、`if`、`reduce` 和
+   `loop` 都走它。所以 `loop` 的结果编号从块参数占用的那一格重新开始。层 1 变异体
+   `loop-carried-not-rolled-back` 删掉本包 `loop` 那一臂的回滚调用（**不是** `for` 那一臂
+   共用的 `roll_back` 函数，两条是两个锚点），`tileiras` 答
+   `error at offset 196: operand index 37 out of bounds (size=19) for operand 0`。
+
+`loop` 的字节布局比 `for` 少三样、也少一样看不见的：没有归纳变量、没有三个边界操作数，
+**也没有 flags varint**。`for` 的 flags 是它的可选属性 `unsignedCmp` 在 13.2 加进来的，
+`loop` 一个可选属性和可选操作数都没有，于是 tblgen 的
+`getVersionOrderedBitAssignments` 答空表、`generateFlagsFieldSerialization` 直接返回。
+剩下的与 `for` 同形：结果个数、结果类型、操作数个数与初值、区域数 1、块数 1、块参数个数
+与类型、块内操作数与操作。
+
+**这一刀的层 2 变异体是本目录里唯一一条可能把设备挂住的**，所以它的语料是设计出来的而不是
+挑出来的。`loop-break-condition-inverted` 把 handler 建出口时的两个分支对调，于是循环在
+条件的**反面**停下。三个带循环的 kernel 都必须在取反之后**更早**停，而不是永不停：
+`loop_count` 与 `loop_until` 的条件在进入时为假，取反后第一次测试就 break；`loop_none` 的
+条件在进入时为真（它就是「零轮」的那个 kernel），取反后不 break，但它一步跨过阈值，第二次
+测试就 break。步长如果小一点，这条变异体就会是一个不返回的 kernel，而
+`scripts/tile-gpu-diff/run.sh` 的 `device`（就是 `timeout`）是这件事的机器兜底：任何设备
+程序跑过 `DEVICE_TIMEOUT` 秒就被杀掉、判 `launch:timeout` 并中止整轮，不会有哪条变异体
+靠「等下去」拿到它想要的判词。杀进程才能释放上下文，等 CUDA 不会。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`

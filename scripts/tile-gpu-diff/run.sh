@@ -47,7 +47,12 @@
 #             of knife T3 that a device this tree can reach will run (i16,
 #             i64 and tf32; the three fp8 formats stop at layer 1, because
 #             tileiras refuses them at sm_86 and at sm_89 and this machine
-#             is sm_86) and seq_diff.dawn the eleven multi-launch
+#             is sm_86) and loop_diff.dawn the four kernels of knife T5
+#             (the first whose TRIP COUNT is data: two of them iterate
+#             until a value they computed says stop, one stops before its
+#             first step, and the fourth computes the first one's answer
+#             with a `for` over a host constant and is the family's
+#             kernel-level control) and seq_diff.dawn the eleven multi-launch
 #             problems of knives 16 and 17 (the first whose unit of
 #             comparison is a SEQUENCE of launches over shared device buffers
 #             rather than a kernel: one allocation, one upload, up to sixteen
@@ -62,6 +67,19 @@
 #             a driver's loader answers INVALID_IMAGE or crashes depending on
 #             the heap layout) or `fail` (the device answered and the numbers
 #             differ, or the memory round trip did).
+#
+#   Every device program above and below runs under `device`, which is
+#   `timeout` and nothing else. Knife T5 is why: a `loop` whose exit
+#   condition never holds does not fail, it runs forever, and a kernel that
+#   runs forever holds the GPU until something kills the process (the
+#   driver's watchdog does not fire on a headless device). No corpus here
+#   can reach that -- every loop mutant below is built so that reading the
+#   condition backwards makes the loop stop SOONER, and run.sh's comments
+#   say so kernel by kernel -- but "no corpus can" is an argument and this
+#   is a machine. A program killed at DEVICE_TIMEOUT seconds (300 by
+#   default) is reported as `launch:timeout` and stops the run; it is never
+#   a verdict a mutant can be satisfied by.
+#
 #   mutant    one rule removed from a copy of std/gpu.dawn's real handler,
 #             the program rebuilt against that copy, and the verdict
 #             required to move. Knife 16's four are the exception and are
@@ -286,6 +304,22 @@
 #                      that corpus too and must still RED, which is what
 #                      separates "the corpus caught it" from "anything
 #                      would have"
+#     loop-break-condition-inverted
+#                      the recording handler puts the loop's `break` in the
+#                      `if`'s ELSE branch and the empty `yield` in its
+#                      THEN, so the loop stops on the negation of the
+#                      condition its body computed -> layer 0 moves (the
+#                      .mlir shows the two branches exchanged) and
+#                      `tileiras` accepts it, because a loop that stops
+#                      somewhere else is a legal loop. Only the device says
+#                      the three kernels with a `loop` answer something
+#                      else. It is the one mutant here that could HANG a
+#                      device, and it does not: each of the three is built
+#                      so that the negated condition is true within one
+#                      iteration (loop_count and loop_until stop on their
+#                      first test, loop_none on its second, because its
+#                      single step takes the tile over the threshold), and
+#                      loop_bound, which has no loop, is the control
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -572,6 +606,16 @@ dtypes=(dtype_i16 dtype_i64 dtype_tf32)
 dtype_red=(dtype_tf32)
 dtype_green=(dtype_i16 dtype_i64)
 
+# The loop kernels of knife T5, in the order loop_diff takes them. Three of
+# them hold a `loop` and a `break`; `loop_bound` computes `loop_count`'s
+# answer with a `for` over a host constant instead, so it holds neither
+# opcode and is this family's KERNEL-LEVEL CONTROL. It is also a second
+# opinion on the counts: the two kernels answer the same tile or the run is
+# red.
+loops=(loop_count loop_bound loop_until loop_none)
+loop_red=(loop_count loop_until loop_none)
+loop_green=(loop_bound)
+
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
 # way every list above is: they are the STEPS of eleven sequences, and what
@@ -622,7 +666,7 @@ assemble_golden() { # kernel, tilebc, cubin
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${dtypes[@]}" "${sequenced[@]}"; do
+  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -654,6 +698,8 @@ for k in "${shaped[@]}"; do shape_cubins+=("$work/$k.cubin"); done
 
 dtype_cubins=()
 for k in "${dtypes[@]}"; do dtype_cubins+=("$work/$k.cubin"); done
+loop_cubins=()
+for k in "${loops[@]}"; do loop_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -682,6 +728,35 @@ verdict_of() { # transcript
   sed -n 's/^tile-gpu-diff: //p' "$1" | tail -n 1
 }
 
+# How long one device program may run before it is killed. Nothing here
+# should come near it: the longest of these programs is seconds of GPU work
+# and a few seconds of host reference. It is a bound on the ONE failure mode
+# a Tile IR `loop` introduced (knife T5): a kernel whose exit condition
+# never holds does not answer wrongly, it does not answer, and it keeps the
+# device until the process dies. Killing the process is what releases the
+# context; waiting on CUDA does not.
+device_timeout="${DEVICE_TIMEOUT:-300}"
+
+# The original stderr, so that a timeout can say so on the terminal even
+# though every call below has its output redirected into the transcript.
+exec 9>&2
+
+# Run one device program under that bound. On a timeout the transcript gets
+# a `launch:timeout` verdict line -- so a caller that reads the verdict sees
+# a named refusal rather than an empty file -- and the whole run stops:
+# there is no situation in which a program that would not stop is the
+# answer a mutant wanted.
+device() { # program, args...
+  local rc=0
+  timeout -k 5 "$device_timeout" "$@" || rc=$?
+  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    echo "tile-gpu-diff: launch:timeout"
+    echo "FAIL: $1 ran past ${device_timeout}s and was killed; the device was not asked again" >&9
+    exit 1
+  fi
+  return "$rc"
+}
+
 # ---- jvm
 rc=0
 "$root/bin/dawn" run "$here/vadd_diff.dawn" -- "${cubins[@]}" > "$work/jvm.out" 2> "$work/jvm.err" || rc=$?
@@ -693,7 +768,7 @@ echo "PASS  jvm: the real handler refuses every operation with gpu.unsupported_b
 # ---- native, clean std
 build_native "$root/std" "$work/clean.bin"
 rc=0
-"$work/clean.bin" "${cubins[@]}" > "$work/clean.out" 2> "$work/clean.err" || rc=$?
+device "$work/clean.bin" "${cubins[@]}" > "$work/clean.out" 2> "$work/clean.err" || rc=$?
 cat "$work/clean.out"
 verdict="$(verdict_of "$work/clean.out")"
 case "$verdict" in
@@ -709,7 +784,7 @@ note="$(sed -n 's/^  note  //p' "$work/clean.out" | head -n 1)"
 # ---- native, the boundary kernels (knife 7a)
 build_native "$root/std" "$work/masked.bin" "$here/mask_diff.dawn"
 rc=0
-"$work/masked.bin" "${masked_cubins[@]}" > "$work/masked.out" 2> "$work/masked.err" || rc=$?
+device "$work/masked.bin" "${masked_cubins[@]}" > "$work/masked.out" 2> "$work/masked.err" || rc=$?
 cat "$work/masked.out"
 masked_verdict="$(verdict_of "$work/masked.out")"
 case "$masked_verdict" in
@@ -725,7 +800,7 @@ esac
 # ---- native, the reduction and transcendental kernels (knife 7b)
 build_native "$root/std" "$work/reduced.bin" "$here/red_diff.dawn"
 rc=0
-"$work/reduced.bin" "${reduced_cubins[@]}" > "$work/reduced.out" 2> "$work/reduced.err" || rc=$?
+device "$work/reduced.bin" "${reduced_cubins[@]}" > "$work/reduced.out" 2> "$work/reduced.err" || rc=$?
 cat "$work/reduced.out"
 reduced_verdict="$(verdict_of "$work/reduced.out")"
 case "$reduced_verdict" in
@@ -741,7 +816,7 @@ esac
 # ---- native, the two-dimensional kernels (knife 8)
 build_native "$root/std" "$work/twod.bin" "$here/mm_diff.dawn"
 rc=0
-"$work/twod.bin" "${twod_cubins[@]}" > "$work/twod.out" 2> "$work/twod.err" || rc=$?
+device "$work/twod.bin" "${twod_cubins[@]}" > "$work/twod.out" 2> "$work/twod.err" || rc=$?
 cat "$work/twod.out"
 twod_verdict="$(verdict_of "$work/twod.out")"
 case "$twod_verdict" in
@@ -757,7 +832,7 @@ esac
 # ---- native, the strided kernels (knife 9)
 build_native "$root/std" "$work/strided.bin" "$here/stride_diff.dawn"
 rc=0
-"$work/strided.bin" "${strided_cubins[@]}" > "$work/strided.out" 2> "$work/strided.err" || rc=$?
+device "$work/strided.bin" "${strided_cubins[@]}" > "$work/strided.out" 2> "$work/strided.err" || rc=$?
 cat "$work/strided.out"
 strided_verdict="$(verdict_of "$work/strided.out")"
 case "$strided_verdict" in
@@ -773,7 +848,7 @@ esac
 # ---- native, the integer kernels (knife 10)
 build_native "$root/std" "$work/ints.bin" "$here/int_diff.dawn"
 rc=0
-"$work/ints.bin" "${int_cubins[@]}" > "$work/ints.out" 2> "$work/ints.err" || rc=$?
+device "$work/ints.bin" "${int_cubins[@]}" > "$work/ints.out" 2> "$work/ints.err" || rc=$?
 cat "$work/ints.out"
 int_verdict="$(verdict_of "$work/ints.out")"
 case "$int_verdict" in
@@ -789,7 +864,7 @@ esac
 # ---- native, the wide kernels (knife 11)
 build_native "$root/std" "$work/wide.bin" "$here/wide_diff.dawn"
 rc=0
-"$work/wide.bin" "${wide_cubins[@]}" > "$work/wide.out" 2> "$work/wide.err" || rc=$?
+device "$work/wide.bin" "${wide_cubins[@]}" > "$work/wide.out" 2> "$work/wide.err" || rc=$?
 cat "$work/wide.out"
 wide_verdict="$(verdict_of "$work/wide.out")"
 case "$wide_verdict" in
@@ -805,7 +880,7 @@ esac
 # ---- native, the gather and scatter kernels (knife 12)
 build_native "$root/std" "$work/gath.bin" "$here/gath_diff.dawn"
 rc=0
-"$work/gath.bin" "${gath_cubins[@]}" > "$work/gath.out" 2> "$work/gath.err" || rc=$?
+device "$work/gath.bin" "${gath_cubins[@]}" > "$work/gath.out" 2> "$work/gath.err" || rc=$?
 cat "$work/gath.out"
 gath_verdict="$(verdict_of "$work/gath.out")"
 case "$gath_verdict" in
@@ -821,7 +896,7 @@ esac
 # ---- native, the scan kernels (knife 13)
 build_native "$root/std" "$work/scan.bin" "$here/scan_diff.dawn"
 rc=0
-"$work/scan.bin" "${scan_cubins[@]}" > "$work/scan.out" 2> "$work/scan.err" || rc=$?
+device "$work/scan.bin" "${scan_cubins[@]}" > "$work/scan.out" 2> "$work/scan.err" || rc=$?
 cat "$work/scan.out"
 scan_verdict="$(verdict_of "$work/scan.out")"
 case "$scan_verdict" in
@@ -837,7 +912,7 @@ esac
 # ---- native, the atomic kernels (knife 14)
 build_native "$root/std" "$work/atom.bin" "$here/atom_diff.dawn"
 rc=0
-"$work/atom.bin" "${atom_cubins[@]}" > "$work/atom.out" 2> "$work/atom.err" || rc=$?
+device "$work/atom.bin" "${atom_cubins[@]}" > "$work/atom.out" 2> "$work/atom.err" || rc=$?
 cat "$work/atom.out"
 atom_verdict="$(verdict_of "$work/atom.out")"
 case "$atom_verdict" in
@@ -853,7 +928,7 @@ esac
 # ---- native, the error function kernels (knife 15)
 build_native "$root/std" "$work/erf.bin" "$here/erf_diff.dawn"
 rc=0
-"$work/erf.bin" "${erf_cubins[@]}" > "$work/erf.out" 2> "$work/erf.err" || rc=$?
+device "$work/erf.bin" "${erf_cubins[@]}" > "$work/erf.out" 2> "$work/erf.err" || rc=$?
 cat "$work/erf.out"
 erf_verdict="$(verdict_of "$work/erf.out")"
 case "$erf_verdict" in
@@ -869,7 +944,7 @@ esac
 # ---- native, the trigonometric kernels (knife T1)
 build_native "$root/std" "$work/trig.bin" "$here/trig_diff.dawn"
 rc=0
-"$work/trig.bin" "${trig_cubins[@]}" > "$work/trig.out" 2> "$work/trig.err" || rc=$?
+device "$work/trig.bin" "${trig_cubins[@]}" > "$work/trig.out" 2> "$work/trig.err" || rc=$?
 cat "$work/trig.out"
 trig_verdict="$(verdict_of "$work/trig.out")"
 case "$trig_verdict" in
@@ -885,7 +960,7 @@ esac
 # ---- native, the element format kernels (knife T3)
 build_native "$root/std" "$work/dtype.bin" "$here/dtype_diff.dawn"
 rc=0
-"$work/dtype.bin" "${dtype_cubins[@]}" > "$work/dtype.out" 2> "$work/dtype.err" || rc=$?
+device "$work/dtype.bin" "${dtype_cubins[@]}" > "$work/dtype.out" 2> "$work/dtype.err" || rc=$?
 cat "$work/dtype.out"
 dtype_verdict="$(verdict_of "$work/dtype.out")"
 case "$dtype_verdict" in
@@ -898,13 +973,29 @@ case "$dtype_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/dtype.out" | head -n 1)"
 
+# ---- native, the loop kernels (knife T5)
+build_native "$root/std" "$work/loop.bin" "$here/loop_diff.dawn"
+rc=0
+device "$work/loop.bin" "${loop_cubins[@]}" > "$work/loop.out" 2> "$work/loop.err" || rc=$?
+cat "$work/loop.out"
+loop_verdict="$(verdict_of "$work/loop.out")"
+case "$loop_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#loops[@]} loop kernels agree with the fake device bit for bit, trip counts included" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $loop_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $loop_verdict" ;;
+  fail) cat "$work/loop.err" >&2; fail "the device answered and disagreed with the fake device on a loop kernel (see the transcript above)" ;;
+  *) cat "$work/loop.err" >&2; fail "loop_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/loop.out" | head -n 1)"
+
 # The same two kernels on the CONTROL corpus, where no lane is negative and
 # the odd symmetry's `select` never chooses its negated arm. The clean run
 # must pass there as well -- it is the same kernel -- and what matters is
 # the negative count on the index lines, which the erf-sign-not-flipped
 # mutant needs to be zero here and nonzero above.
 rc=0
-"$work/erf.bin" --corpus positive "${erf_cubins[@]}" > "$work/erf-positive.out" 2> "$work/erf-positive.err" || rc=$?
+device "$work/erf.bin" --corpus positive "${erf_cubins[@]}" > "$work/erf-positive.out" 2> "$work/erf-positive.err" || rc=$?
 erf_positive_verdict="$(verdict_of "$work/erf-positive.out")"
 [ "$erf_positive_verdict" = "$erf_verdict" ] ||
   { cat "$work/erf-positive.out" >&2; fail "the control corpus answers $erf_positive_verdict where the main one answers $erf_verdict"; }
@@ -914,7 +1005,7 @@ erf_positive_verdict="$(verdict_of "$work/erf-positive.out")"
 # the number that matters is the collision count on the line below, which
 # the atomic-as-plain-store mutant needs to be zero here and nonzero above.
 rc=0
-"$work/atom.bin" --corpus unique "${atom_cubins[@]}" > "$work/atom-unique.out" 2> "$work/atom-unique.err" || rc=$?
+device "$work/atom.bin" --corpus unique "${atom_cubins[@]}" > "$work/atom-unique.out" 2> "$work/atom-unique.err" || rc=$?
 atom_unique_verdict="$(verdict_of "$work/atom-unique.out")"
 [ "$atom_unique_verdict" = "$atom_verdict" ] ||
   { cat "$work/atom-unique.out" >&2; fail "the control corpus answers $atom_unique_verdict where the main one answers $atom_verdict"; }
@@ -922,7 +1013,7 @@ atom_unique_verdict="$(verdict_of "$work/atom-unique.out")"
 # ---- native, the shape, grid, token and pointer kernels (knife T2)
 build_native "$root/std" "$work/shape.bin" "$here/shape_diff.dawn"
 rc=0
-"$work/shape.bin" "${shape_cubins[@]}" > "$work/shape.out" 2> "$work/shape.err" || rc=$?
+device "$work/shape.bin" "${shape_cubins[@]}" > "$work/shape.out" 2> "$work/shape.err" || rc=$?
 cat "$work/shape.out"
 shape_verdict="$(verdict_of "$work/shape.out")"
 case "$shape_verdict" in
@@ -946,7 +1037,7 @@ esac
 # program prints.
 build_native "$root/std" "$work/seq.bin" "$here/seq_diff.dawn"
 rc=0
-"$work/seq.bin" "${seq_cubins[@]}" > "$work/seq.out" 2> "$work/seq.err" || rc=$?
+device "$work/seq.bin" "${seq_cubins[@]}" > "$work/seq.out" 2> "$work/seq.err" || rc=$?
 cat "$work/seq.out"
 seq_verdict="$(verdict_of "$work/seq.out")"
 case "$seq_verdict" in
@@ -996,6 +1087,30 @@ case "$scatter_repeats" in
   *in_range_repeated=0) echo "PASS  corpus: scatter_perm's destinations are a permutation ($scatter_repeats)" ;;
   *) fail "scatter_perm's corpus is not a permutation, so its verdict means nothing: $scatter_repeats" ;;
 esac
+
+# The loop corpus, held field by field. Every one of these is what makes a
+# claim above a measurement: a corpus whose longest chain were one step
+# would not tell a data-dependent trip count from a constant one; a corpus
+# with no lane already at 1 would leave the saturation untested, and the
+# exit condition is a maximum, so an unsaturated lane would run the tile
+# forever; a corpus with no odd lane would never take the `3n + 1` branch;
+# and `loop_none`'s corpus has to be UNDER its threshold or the kernel is
+# not the zero-iteration case at all.
+loop_shape="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/loop.out")"
+[ -n "$loop_shape" ] || fail "loop_diff printed no index line"
+for field in at_one odd; do
+  value="$(printf '%s\n' "$loop_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the loop index line names no $field: $loop_shape"
+  [ "$value" != 0 ] ||
+    fail "the loop corpus has $field=0, so that claim is not being tested: $loop_shape"
+done
+longest="$(printf '%s\n' "$loop_shape" | tr ' ' '\n' | sed -n 's/^longest_chain=//p')"
+[ "${longest:-0}" -gt 1 ] ||
+  fail "the loop corpus's longest chain is ${longest:-none}, so its trip count is not data: $loop_shape"
+over="$(printf '%s\n' "$loop_shape" | tr ' ' '\n' | sed -n 's/^loop_none_over_threshold=//p')"
+[ "$over" = 0 ] ||
+  fail "loop_none's corpus has $over lane(s) over its threshold, so it is not the zero-iteration case: $loop_shape"
+echo "PASS  corpus: the loop corpus decides its own trip count, saturates and stays under loop_none's threshold ($loop_shape)"
 
 # Abramowitz-Stegun 7.1.26 is an approximation, so the corpus is what says
 # WHERE it was checked. Three counts, all of them held above zero: the
@@ -1290,14 +1405,16 @@ tiers="$tiers erf:$(sed -n 's/^tiers //p' "$work/erf.out" | tail -n 1)"
 tiers="$tiers trig:$(sed -n 's/^tiers //p' "$work/trig.out" | tail -n 1)"
 tiers="$tiers dtype:$(sed -n 's/^tiers //p' "$work/dtype.out" | tail -n 1)"
 tiers="$tiers shape:$(sed -n 's/^tiers //p' "$work/shape.out" | tail -n 1)"
+tiers="$tiers loop:$(sed -n 's/^tiers //p' "$work/loop.out" | tail -n 1)"
 tiers="$tiers seq:$(sed -n 's/^tiers //p' "$work/seq.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.out")"
 erf_probe="$(sed -n 's/^probe as-error //p' "$work/erf.out" | tail -n 1)"
 trig_probe="$(sed -n 's/^probe per-op //p' "$work/trig.out" | tail -n 1)"
 seq_launch_probe="$(sed -n 's/^probe launches //p' "$work/seq.out" | tail -n 1)"
+loop_probe="$(sed -n 's/^probe rounds //p' "$work/loop.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe; erf error: $erf_probe;"\
-  " per-op miss: $trig_probe; sequence launches: $seq_launch_probe"
+  " per-op miss: $trig_probe; sequence launches: $seq_launch_probe; loop rounds: $loop_probe"
 
 # The ledger records one verdict for the tree: both programs pass, or the
 # first thing that stopped one of them.
@@ -1413,7 +1530,7 @@ std_gz="$(mutant_std grid-zero \
   '                  gpu_launch_host(m, kernel, 0, gy, gz, device_pointers(table, args))')"
 build_native "$std_gz" "$work/m-grid-zero.bin"
 rc=0
-"$work/m-grid-zero.bin" "${cubins[@]}" > "$work/m-grid-zero.out" 2>&1 || rc=$?
+device "$work/m-grid-zero.bin" "${cubins[@]}" > "$work/m-grid-zero.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-grid-zero.out")"
 if [ "$verdict" = pass ]; then
   [ "$mverdict" != pass ] ||
@@ -1464,7 +1581,7 @@ for k in "${masked[@]}"; do
 done
 echo "      mask-all-true: the six .tilebc files differ from the goldens and tileiras still accepts them"
 rc=0
-"$work/masked.bin" "${mutant_cubins[@]}" > "$work/m-mask-all-true.out" 2>&1 || rc=$?
+device "$work/masked.bin" "${mutant_cubins[@]}" > "$work/m-mask-all-true.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-mask-all-true.out")"
 if [ "$masked_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-mask-all-true.out" || true)
@@ -1556,7 +1673,7 @@ echo "      reduce-identity-wrong: 9 of ${#reduced[@]} .tilebc files differ from
 id_cubins=()
 for k in "${reduced[@]}"; do id_cubins+=("$work/reduce-identity-wrong-$k.cubin"); done
 rc=0
-"$work/reduced.bin" "${id_cubins[@]}" > "$work/m-reduce-identity-wrong.out" 2>&1 || rc=$?
+device "$work/reduced.bin" "${id_cubins[@]}" > "$work/m-reduce-identity-wrong.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-reduce-identity-wrong.out")"
 identity_red=(softmax dot mse rms_norm ppo_loss dpo_loss)
 identity_green=(reduce_sum monte_carlo silu sigmoid mathops foldif argmax agent_step)
@@ -1619,7 +1736,7 @@ for k in "${reduced[@]}"; do
   if [ "$k" = softmax ]; then nomax_cubins+=("$work/softmax-nomax.cubin"); else nomax_cubins+=("$work/$k.cubin"); fi
 done
 rc=0
-"$work/reduced.bin" "${nomax_cubins[@]}" > "$work/m-softmax-no-max.out" 2>&1 || rc=$?
+device "$work/reduced.bin" "${nomax_cubins[@]}" > "$work/m-softmax-no-max.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-softmax-no-max.out")"
 if [ "$reduced_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-softmax-no-max.out" || true)
@@ -1664,7 +1781,7 @@ echo "      grid-y-ignored: runtime/c/dawn_rt.c md5 $before -> $after"
   -I "$mutant_rt" -o "$work/m-grid-y.bin" "$work/twod.bin.c" "$work/m-grid-y.o" -lm ||
   fail "grid-y-ignored: mm_diff does not link against the mutated runtime"
 rc=0
-"$work/m-grid-y.bin" "${twod_cubins[@]}" > "$work/m-grid-y.out" 2>&1 || rc=$?
+device "$work/m-grid-y.bin" "${twod_cubins[@]}" > "$work/m-grid-y.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-grid-y.out")"
 # the four kernels whose grid has a second axis, and the three that do not
 gridy_red=(matmul batched_matmul transpose group_norm)
@@ -1727,7 +1844,7 @@ for k in "${twod[@]}"; do
   if [ "$k" = matmul ]; then noacc_cubins+=("$work/matmul-noacc.cubin"); else noacc_cubins+=("$work/$k.cubin"); fi
 done
 rc=0
-"$work/twod.bin" "${noacc_cubins[@]}" > "$work/m-mma-noacc.out" 2>&1 || rc=$?
+device "$work/twod.bin" "${noacc_cubins[@]}" > "$work/m-mma-noacc.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-mma-noacc.out")"
 if [ "$twod_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-mma-noacc.out" || true)
@@ -1786,7 +1903,7 @@ for k in "${strided[@]}"; do
   if [ "$k" = transpose_tail ]; then swap_cubins+=("$work/tt-swapped.cubin"); else swap_cubins+=("$work/$k.cubin"); fi
 done
 rc=0
-"$work/strided.bin" "${swap_cubins[@]}" > "$work/m-stride-swapped.out" 2>&1 || rc=$?
+device "$work/strided.bin" "${swap_cubins[@]}" > "$work/m-stride-swapped.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-stride-swapped.out")"
 if [ "$strided_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-stride-swapped.out" || true)
@@ -1860,7 +1977,7 @@ echo "      ladder-strides-reversed: 7 of ${#strided[@]} .tilebc files differ fr
 rev_cubins=()
 for k in "${strided[@]}"; do rev_cubins+=("$work/ladder-strides-reversed-$k.cubin"); done
 rc=0
-"$work/strided.bin" "${rev_cubins[@]}" > "$work/m-ladder-reversed.out" 2>&1 || rc=$?
+device "$work/strided.bin" "${rev_cubins[@]}" > "$work/m-ladder-reversed.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-ladder-reversed.out")"
 ladder_red=(depthwise_conv1d)
 if [ "$strided_verdict" = pass ]; then
@@ -1925,7 +2042,7 @@ for k in "${strided[@]}"; do
   if [ "$k" = gaussian_blur ]; then short_cubins+=("$work/blur-short.cubin"); else short_cubins+=("$work/$k.cubin"); fi
 done
 rc=0
-"$work/strided.bin" "${short_cubins[@]}" > "$work/m-halo-short.out" 2>&1 || rc=$?
+device "$work/strided.bin" "${short_cubins[@]}" > "$work/m-halo-short.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-halo-short.out")"
 if [ "$strided_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-halo-short.out" || true)
@@ -1984,7 +2101,7 @@ echo "      shri-always-logical: ${#shri_red[@]} of ${#integers[@]} .tilebc file
 shri_cubins=()
 for k in "${integers[@]}"; do shri_cubins+=("$work/shri-always-logical-$k.cubin"); done
 rc=0
-"$work/ints.bin" "${shri_cubins[@]}" > "$work/m-shri-logical.out" 2>&1 || rc=$?
+device "$work/ints.bin" "${shri_cubins[@]}" > "$work/m-shri-logical.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-shri-logical.out")"
 if [ "$int_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-shri-logical.out" || true)
@@ -2047,7 +2164,7 @@ echo "      exti-sign-extends: ${#exti_red[@]} of ${#integers[@]} .tilebc files 
 exti_cubins=()
 for k in "${integers[@]}"; do exti_cubins+=("$work/exti-sign-extends-$k.cubin"); done
 rc=0
-"$work/ints.bin" "${exti_cubins[@]}" > "$work/m-exti-signed.out" 2>&1 || rc=$?
+device "$work/ints.bin" "${exti_cubins[@]}" > "$work/m-exti-signed.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-exti-signed.out")"
 if [ "$int_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-exti-signed.out" || true)
@@ -2094,7 +2211,7 @@ std_iw="$(mutant_std inplace-writes-copy \
   '                    store = map.insert(store, 0 - 1 - pos, (dt, list.map(v, x => round_to(dt, x))))')"
 build_native "$std_iw" "$work/m-inplace-writes-copy.bin" "$here/wide_diff.dawn"
 rc=0
-"$work/m-inplace-writes-copy.bin" "${wide_cubins[@]}" > "$work/m-inplace.out" 2>&1 || rc=$?
+device "$work/m-inplace-writes-copy.bin" "${wide_cubins[@]}" > "$work/m-inplace.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-inplace.out")"
 if [ "$wide_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-inplace.out" || true)
@@ -2240,7 +2357,7 @@ echo "      gather-mask-dropped: ${#gather_red[@]} of ${#gathered[@]} .tilebc fi
 gm_cubins=()
 for k in "${gathered[@]}"; do gm_cubins+=("$work/gather-mask-dropped-$k.cubin"); done
 rc=0
-"$work/gath.bin" "${gm_cubins[@]}" > "$work/m-gather-mask.out" 2>&1 || rc=$?
+device "$work/gath.bin" "${gm_cubins[@]}" > "$work/m-gather-mask.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-gather-mask.out")"
 if [ "$gath_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-gather-mask.out" || true)
@@ -2301,7 +2418,7 @@ gath_kernel_check() { # name, kernel
   for one in "${gathered[@]}"; do
     if [ "$one" = "$k" ]; then cubs+=("$work/$name.cubin"); else cubs+=("$work/$one.cubin"); fi
   done
-  "$work/gath.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/gath.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   if [ "$gath_verdict" = pass ]; then
     differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
@@ -2378,7 +2495,7 @@ scan_kernel_check() { # name, kernel
   for one in "${scanned[@]}"; do
     if [ "$one" = "$k" ]; then cubs+=("$work/$name.cubin"); else cubs+=("$work/$one.cubin"); fi
   done
-  "$work/scan.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/scan.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   if [ "$scan_verdict" = pass ]; then
     differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
@@ -2430,7 +2547,7 @@ echo "      scan-reverse-ignored: ${#reverse_red[@]} of ${#scanned[@]} .tilebc f
 rev_cubins=()
 for k in "${scanned[@]}"; do rev_cubins+=("$work/scan-reverse-ignored-$k.cubin"); done
 rc=0
-"$work/scan.bin" "${rev_cubins[@]}" > "$work/m-scan-reverse.out" 2>&1 || rc=$?
+device "$work/scan.bin" "${rev_cubins[@]}" > "$work/m-scan-reverse.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-scan-reverse.out")"
 if [ "$scan_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-scan-reverse.out" || true)
@@ -2508,7 +2625,7 @@ echo "      atomic-as-plain-store: ${#atom_red[@]} of ${#atomic[@]} .tilebc file
 atom_mut_cubins=()
 for k in "${atomic[@]}"; do atom_mut_cubins+=("$work/atomic-as-plain-store-$k.cubin"); done
 rc=0
-"$work/atom.bin" "${atom_mut_cubins[@]}" > "$work/m-atomic-as-plain-store.out" 2>&1 || rc=$?
+device "$work/atom.bin" "${atom_mut_cubins[@]}" > "$work/m-atomic-as-plain-store.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-atomic-as-plain-store.out")"
 if [ "$atom_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-atomic-as-plain-store.out" || true)
@@ -2529,7 +2646,7 @@ if [ "$atom_verdict" = pass ]; then
   # green. This is what says the mutant is caught by the collisions and
   # not by anything else the kernel does.
   rc=0
-  "$work/atom.bin" --corpus unique "${atom_mut_cubins[@]}" > "$work/m-atomic-as-plain-store-unique.out" 2>&1 || rc=$?
+  device "$work/atom.bin" --corpus unique "${atom_mut_cubins[@]}" > "$work/m-atomic-as-plain-store-unique.out" 2>&1 || rc=$?
   cverdict="$(verdict_of "$work/m-atomic-as-plain-store-unique.out")"
   if [ "$cverdict" != pass ] || [ "$rc" != 0 ]; then
     cat "$work/m-atomic-as-plain-store-unique.out" >&2
@@ -2576,7 +2693,7 @@ atom_kernel_check() { # name, kernel
   for one in "${atomic[@]}"; do
     if [ "$one" = "$k" ]; then cubs+=("$work/$name.cubin"); else cubs+=("$work/$one.cubin"); fi
   done
-  "$work/atom.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/atom.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   if [ "$atom_verdict" = pass ]; then
     differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
@@ -2647,7 +2764,7 @@ erf_pkg_mutant() { # name, old, new, want_main, want_positive
   for k in "${erfs[@]}"; do cubs+=("$work/$name-$k.cubin"); done
   if [ "$erf_verdict" != pass ]; then
     rc=0
-    "$work/erf.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    device "$work/erf.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
     mverdict="$(verdict_of "$work/m-$name.out")"
     [ "$mverdict" = "$erf_verdict" ] ||
       { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $erf_verdict but the mutant is $mverdict"; }
@@ -2674,9 +2791,9 @@ erf_mutant_corpus() { # name, corpus, want, cubins...
   shift 3
   local out="$work/m-$name-$corpus.out" rc=0 mverdict differ
   if [ "$corpus" = positive ]; then
-    "$work/erf.bin" --corpus positive "$@" > "$out" 2>&1 || rc=$?
+    device "$work/erf.bin" --corpus positive "$@" > "$out" 2>&1 || rc=$?
   else
-    "$work/erf.bin" "$@" > "$out" 2>&1 || rc=$?
+    device "$work/erf.bin" "$@" > "$out" 2>&1 || rc=$?
   fi
   mverdict="$(verdict_of "$out")"
   differ=$(grep -c '^  verdict differ:result$' "$out" || true)
@@ -2788,7 +2905,7 @@ trig_writer_mutant() { # name, old, new
   for k in "${trigs[@]}"; do cubs+=("$work/$name-$k.cubin"); done
   if [ "$trig_verdict" != pass ]; then
     rc=0
-    "$work/trig.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    device "$work/trig.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
     mverdict="$(verdict_of "$work/m-$name.out")"
     [ "$mverdict" = "$trig_verdict" ] ||
       { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $trig_verdict but the mutant is $mverdict"; }
@@ -2796,7 +2913,7 @@ trig_writer_mutant() { # name, old, new
     return 0
   fi
   rc=0
-  "$work/trig.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/trig.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
   if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#trig_red[@]}" ]; then
@@ -2872,7 +2989,7 @@ shape_pkg_mutant() { # name, module, old, new, red-kernels...
   local cubins=()
   for k in "${shaped[@]}"; do cubins+=("$work/$name-$k.cubin"); done
   rc=0
-  "$work/shape.bin" "${cubins[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/shape.bin" "${cubins[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   if [ "$shape_verdict" = pass ]; then
     differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
@@ -2975,7 +3092,7 @@ dtype_writer_mutant() { # name, old, new
   for k in "${dtypes[@]}"; do cubs+=("$work/$name-$k.cubin"); done
   if [ "$dtype_verdict" != pass ]; then
     rc=0
-    "$work/dtype.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    device "$work/dtype.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
     mverdict="$(verdict_of "$work/m-$name.out")"
     [ "$mverdict" = "$dtype_verdict" ] ||
       { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $dtype_verdict but the mutant is $mverdict"; }
@@ -2983,7 +3100,7 @@ dtype_writer_mutant() { # name, old, new
     return 0
   fi
   rc=0
-  "$work/dtype.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/dtype.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
   if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#dtype_red[@]}" ]; then
@@ -3021,6 +3138,93 @@ dtype_writer_mutant tf32-tag-as-f32 \
   '  "tf32" -> 8' \
   '  "tf32" -> 7'
 
+# ---- knife T5's mutant: which side of the condition breaks
+#
+# It lives in the RECORDING HANDLER (packages/tileir/src/prog.dawn), which
+# is where the loop's exit is built: the handler writes
+# `if cond { break <entering> } else { yield }` in front of the `continue`,
+# and the mutant exchanges the two branches. Layer 0 moves (the .mlir shows
+# them the other way round) and `tileiras` accepts it, because a loop that
+# stops on the other condition is a perfectly well formed loop. Only the
+# device can say the answer is wrong.
+#
+# WHY IT TERMINATES, kernel by kernel, which is the thing that had to be
+# designed rather than checked afterwards. Negated, the loop stops on the
+# first iteration whose condition is FALSE.
+#
+#   loop_count  its condition ("every lane is 1") is false on entry, so the
+#               mutant breaks on the first test and answers zero steps
+#   loop_until  its condition ("the largest residual is under eps") is
+#               false on entry, same
+#   loop_none   its condition is TRUE on entry -- that is the whole point
+#               of the kernel -- so the mutant does not break there. It
+#               takes one step, and the step is 1000 against a threshold of
+#               1, so the condition is false on the second test and it
+#               stops there. A smaller step would have made this mutant a
+#               kernel that never returns, and the corpus is what rules
+#               that out
+#
+# `loop_bound` has no `loop`, so its bytes and its verdict are untouched:
+# it is the control that separates "the mutant broke the loop" from "the
+# mutant broke the tree".
+loop_pkg_mutant() { # name, module, old, new
+  local name="$1" module="$2" old="$3" new="$4"
+  local pkg="$work/pkg-$name" before after k moved=0 rc=0 mverdict differ cubs=()
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${loops[@]}"
+  for k in "${loop_red[@]}"; do
+    if cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+  done
+  [ "$moved" = "${#loop_red[@]}" ] ||
+    fail "$name: the ${#loop_red[@]} kernels with a loop should move at layer 0, got $moved"
+  for k in "${loop_green[@]}"; do
+    cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+      fail "$name: $k has no loop, so its bytecode must not move"
+  done
+  # the same length, which is what says this is a different program and not
+  # a malformed one: two regions exchanged, byte for byte
+  for k in "${loop_red[@]}"; do
+    [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$name-$k.tilebc")" ] ||
+      fail "$name: $k.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+  done
+  echo "      $name: ${#loop_red[@]} of ${#loops[@]} .tilebc files differ from the goldens at the same length (${loop_green[*]} does not) and tileiras still accepts every one"
+
+  for k in "${loops[@]}"; do cubs+=("$work/$name-$k.cubin"); done
+  if [ "$loop_verdict" != pass ]; then
+    rc=0
+    device "$work/loop.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$loop_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $loop_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $loop_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  device "$work/loop.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#loop_red[@]}" ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with ${#loop_red[@]} kernel(s) saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${loop_green[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $k has no loop and should be untouched"; }
+  done
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${loop_red[*]} differs and ${loop_green[*]} does not)"
+}
+
+# 28. loop-break-condition-inverted.
+loop_pkg_mutant loop-break-condition-inverted prog.dawn \
+  '            let exit = If([], cond, [Break(but_last(carried) ++ [tok])], [Yield([])])' \
+  '            let exit = If([], cond, [Yield([])], [Break(but_last(carried) ++ [tok])])'
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -3036,7 +3240,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/scan_diff.dawn \
   scripts/tile-gpu-diff/atom_diff.dawn scripts/tile-gpu-diff/erf_diff.dawn \
   scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
-  scripts/tile-gpu-diff/dtype_diff.dawn \
+  scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
@@ -3045,7 +3249,7 @@ commit="$(git rev-parse --short=12 HEAD)"
 today="$(date -u +%F)"
 line="$commit $today $driver $want_tileiras $gpu_name $verdict"
 summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per-op=$trig_probe"
-summary="$summary seq-launches=$seq_launch_probe"
+summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"

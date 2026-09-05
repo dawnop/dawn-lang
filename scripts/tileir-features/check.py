@@ -53,7 +53,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # it). T0 built the ledger itself and added no opcode, so it names no row
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
-LANDED_KNIVES = {"T0", "T1", "T2", "T3"}
+LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T5"}
 
 
 class Ledger:
