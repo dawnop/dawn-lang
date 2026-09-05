@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32, I32}
-use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, d_assume, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const}
+use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, d_assume, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -1852,4 +1852,109 @@ test "a loop body answering the wrong number of carried values, a loop never clo
   assert str.contains(refusal(wrong_arity), "a loop body carrying 1 value(s) answered 0")
   assert str.contains(refusal(never_closed), "the body ended with 1 region(s) still open")
   assert str.contains(refusal(never_opened), "loop_end with no loop open")
+}
+
+# ---- knife T7: the module's static globals
+
+fn two_globals() -> TileProg = trace_kernel("globals", ["f64"], () => {
+  let out = param(F64, 0)
+  d_global("a", F64, [1.0, 2.0, 4.0])
+  d_global_aligned("b", F64, [8.0, 16.0, 32.0], 256)
+  let base = idx_const(0)
+  let ps = ptr_offset(F64, [4], global_ptrs("b", F64, [4]), lanes(base, [4]))
+  store(out, base, [4], load_ptrs(F64, [4], ps))
+})
+
+test "a global is recorded beside the entry and not in it, and get_global names it by symbol" {
+  let p = two_globals()
+  assert len(p.globals) == 2
+  assert p.globals[0] == Global { sym: "a", dtype: "f64", values: [1.0, 2.0, 4.0], align: 0 }
+  assert p.globals[1] == Global { sym: "b", dtype: "f64", values: [8.0, 16.0, 32.0], align: 256 }
+  # the declarations issue no operation: the ops are make_token, get_global,
+  # the ladder for the offset, the load through the pointers and the store
+  assert list.any(p.ops, o => match o {
+    GetGlobal(_dst, sym, dtype, shape) -> sym == "b" && dtype == "f64" && shape == [4]
+    _ -> false
+  })
+  assert not list.any(p.ops, o => match o {
+    GetGlobal(_dst, sym, _dtype, _shape) -> sym == "a"
+    _ -> false
+  })
+}
+
+test "a store through a pointer tile sits in the token chain where a store through a parameter does" {
+  let p = trace_kernel("scratch", ["f64"], () => {
+    let out = param(F64, 0)
+    d_global("g", F64, [0.0, 0.0])
+    let base = idx_const(0)
+    let ps = ptr_offset(F64, [2], global_ptrs("g", F64, [2]), lanes(base, [2]))
+    let v = load_ptrs(F64, [2], ps)
+    store_ptrs(F64, [2], ps, v)
+    store(out, base, [2], v)
+  })
+  # the load answers a token, the store through the pointers takes it and
+  # answers the next, and the store through the parameter takes that one
+  let none: List[(Int, Int)] = []
+  let toks = list.fold(p.ops, none, (acc, o) => match o {
+    LoadAt(_d, tok_out, _dt, _sh, _ps, _m, _pd, tok_in) -> acc ++ [(tok_in, tok_out)]
+    StoreAt(tok_out, _dt, _sh, _ps, _v, _m, tok_in) -> acc ++ [(tok_in, tok_out)]
+    Store(tok_out, _pm, _dt, _b, _sh, _st, _v, _m, tok_in) -> acc ++ [(tok_in, tok_out)]
+    _ -> acc
+  })
+  assert len(toks) == 3
+  let (in0, out0) = toks[0]
+  let (in1, out1) = toks[1]
+  let (in2, _out2) = toks[2]
+  assert in0 == 0
+  assert in1 == out0
+  assert in2 == out1
+}
+
+test "a global declared twice, one declared inside a region, an empty one, and a get_global naming none are all refused" {
+  let twice = catch_panic(() => trace_kernel("twice", ["f64"], () => {
+    d_global("a", F64, [1.0])
+    d_global("a", F64, [2.0])
+  }))
+  match twice {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "the global `a` is declared twice") }
+  }
+  let inside = catch_panic(() => trace_kernel("inside", ["f64"], () => {
+    let x = param(F64, 0)
+    let zero = idx_const(0)
+    let one = idx_const(1)
+    let _t = d_for(zero, one, one, load(x, zero, [8]), (_i, acc) => {
+      d_global("a", F64, [1.0])
+      acc
+    })
+    ()
+  }))
+  match inside {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "is declared inside a region; a global belongs to the module") }
+  }
+  let empty = catch_panic(() => trace_kernel("empty", ["f64"], () => {
+    d_global("a", F64, [])
+  }))
+  match empty {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "is initialized with no values") }
+  }
+  let unknown = catch_panic(() => trace_kernel("unknown", ["f64"], () => {
+    let _p = global_ptrs("nope", F64, [4])
+    ()
+  }))
+  match unknown {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "get_global names `nope`, which no global declares") }
+  }
+  let wrong = catch_panic(() => trace_kernel("wrong", ["f64"], () => {
+    d_global("a", F64, [1.0])
+    let _p = global_ptrs("a", I32, [4])
+    ()
+  }))
+  match wrong {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "the global `a` holds f64, and get_global reads it as i32") }
+  }
 }

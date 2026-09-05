@@ -2226,3 +2226,53 @@ test "join_tokens takes the tokens of two stores and the load after it takes the
   assert str.contains(whole, hex(varint(OP_JOIN_TOKENS)))
   assert OP_JOIN_TOKENS == 0x3C
 }
+
+fn globals_prog() -> TileProg = TileProg {
+  name: "g",
+  params: ["f64"],
+  globals: [
+    Global { sym: "tbl", dtype: "f64", values: [1.0, 2.0], align: 0 },
+    Global { sym: "pad", dtype: "f64", values: [4.0], align: 256 }
+  ],
+  ops: [MakeToken(0), GetGlobal(1, "pad", "f64", [8])]
+}
+
+test "a global's initializer is the whole buffer and not the one-element splat every other constant here is" {
+  # 1.0 and 2.0 as binary64, low byte first, one after the other
+  assert hex(global_payload("f64", [1.0, 2.0])) == "000000000000f03f" ++ "0000000000000040"
+  assert hex(global_payload("i32", [1.0, 0.0 - 1.0])) == "01000000" ++ "ffffffff"
+}
+
+test "the Global section is a count and four varints a record, unaligned, and it comes before Func" {
+  let h = hex(encode(globals_prog()))
+  # the header is twelve bytes: magic, major, minor and the two-byte tag
+  assert str.starts_with(h, "7f54696c65495200" ++ "0d02" ++ "0000")
+  # section id 6 with NO alignment bit (0x06 and not 0x86: this section
+  # writes only varints and never aligns), then its length, then the count
+  # of globals. Two records of four varints, one of which is the 256 that
+  # takes two bytes, so the section is ten bytes long
+  assert str.take(str.drop(h, 24), 6) == "06" ++ "0a" ++ "02"
+  # tbl: string 2, type 7, constant 0, alignment 0. pad: string 1 (the
+  # get_global in the body interned it first), type 8, constant 1,
+  # alignment 256, which is 8002 as a varint. Four fields a record and not
+  # six: the two the record grew at 13.3 are not written here
+  assert str.take(str.drop(h, 30), 18) == "02" ++ "07" ++ "00" ++ "00" ++ "01" ++ "08" ++ "01" ++ "8002"
+  # and the section that follows is Func, id 2 with the alignment bit
+  assert str.take(str.drop(h, 48), 2) == "82"
+}
+
+test "get_global writes its opcode, its result type and the symbol's string index, and nothing else" {
+  let k = lower(globals_prog())
+  let (w, whole) = body_of(k)
+  assert OP_GET_GLOBAL == 0x2C
+  # the instruction is three varints: no operand count (it has neither a
+  # variadic operand nor a variadic result), no flags (it has no optional
+  # field) and no attribute tag (a FlatSymbolRefAttr is a bare string index)
+  let (w1, ti) = ty(w, Tile([], PtrTo("f64")))
+  let (_w2, si) = str_of(w1, "pad")
+  assert str.contains(whole, hex(varint(OP_GET_GLOBAL)) ++ hex(varint(ti)) ++ hex(varint(si)))
+  # and the result really is the rank-0 pointer tile, not the tile the body
+  # asked for: the reshape and the broadcast after it are what widens it
+  assert str.contains(whole, hex(varint(OP_RESHAPE)))
+  assert str.contains(whole, hex(varint(OP_BROADCAST)))
+}

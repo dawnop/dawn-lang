@@ -833,3 +833,28 @@ test "a fork issues two stores from one token and joins them before the load tha
   assert str.contains(text, " = join_tokens %12, %13 : token\n")
   assert str.contains(text, "token=%14 :")
 }
+
+fn globals_prog() -> TileProg = TileProg {
+  name: "g",
+  params: ["f64"],
+  globals: [
+    Global { sym: "tbl", dtype: "f64", values: [1.0, 2.5], align: 0 },
+    Global { sym: "pad", dtype: "i32", values: [7.0], align: 128 }
+  ],
+  ops: [MakeToken(0), GetGlobal(1, "tbl", "f64", [8])]
+}
+
+test "a global prints above the entry, its alignment only when it is not the dialect's default, and get_global names the symbol" {
+  let text = render(globals_prog())
+  # the visibility keyword is absent: the dialect's printer omits `public`,
+  # which is the default and the only one bytecode 13.2 can carry
+  assert str.contains(text, "cuda_tile.module @m {\n  global @tbl <f64: [1.0, 2.5]> : tile<2xf64>\n")
+  assert str.contains(text, "  global @pad alignment = 128 <i32: [7.0]> : tile<1xi32>\n")
+  assert not str.contains(text, "public")
+  assert not str.contains(text, "constant @")
+  # get_global answers a rank-0 pointer tile; the reshape and broadcast
+  # after it are the same two the parameter ladder emits
+  assert str.contains(text, "%1 = get_global @tbl : tile<ptr<f64>>\n")
+  assert str.contains(text, "%2 = reshape %1 : tile<ptr<f64>> -> tile<1xptr<f64>>\n")
+  assert str.contains(text, "%3 = broadcast %2 : tile<1xptr<f64>> -> tile<8xptr<f64>>\n")
+}
