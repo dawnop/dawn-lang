@@ -1043,8 +1043,8 @@ fi
 #     every ordering but that one.
 if run_item atomic-rmw-claims-weak-ordering; then
   mutant_project atomic-rmw-claims-weak-ordering bytecode.dawn \
-    '    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE), rmw_mode_value(mode))' \
-    '    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_WEAK), SCOPE_DEVICE), rmw_mode_value(mode))'
+    '  _ -> (mode, ORDER_RELAXED, SCOPE_DEVICE)' \
+    '  _ -> (mode, ORDER_WEAK, SCOPE_DEVICE)'
   writer_mutant_checks atomic-rmw-claims-weak-ordering histogram same-size \
     "'cuda_tile.atomic_rmw_tko' op memory ordering semantics must be one of: relaxed, acquire, release, acq_rel"
 fi
