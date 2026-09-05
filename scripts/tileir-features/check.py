@@ -57,7 +57,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # it). T0 built the ledger itself and added no opcode, so it names no row
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
-LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5"}
+LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6"}
 
 
 class Ledger:
@@ -776,8 +776,11 @@ def self_test():
 
 def feature_cases(good, bytecode, files, ledger):
     """The opcode ledger's verdicts, each on a table built to trip it."""
-    # An opcode no golden holds, for the layer-2 control below.
-    absent = "assume"
+    # An opcode no golden holds, for the layer-2 control below. It has to be
+    # an UNIMPLEMENTED one, so it moves knife by knife: knife T5 took it off
+    # `break`, knife T6 takes it off `assume`, and the next one to implement
+    # `global` moves it again.
+    absent = "global"
     plain = [
 
         ("a row with too few fields",
@@ -795,24 +798,24 @@ def feature_cases(good, bytecode, files, ledger):
                       "tanh                     | 0x6A | 13.1 | unimplemented | T1 "),
          "bytecode.dawn emits OP_TANH"),
         ("a row claiming an opcode the writer does not emit",
-         good.replace("print_tko                | 0x55 | 13.1 | unimplemented | T6  | 0 | -",
-                      "print_tko                | 0x55 | 13.1 | implemented   | 7b  | 2 | "
+         good.replace("alloca                   | 0x71 | 13.3 | unimplemented | T10 | 0 | -",
+                      "alloca                   | 0x71 | 13.3 | implemented   | 7b  | 2 | "
                       "golden:mathops"),
-         "has no OP_PRINT_TKO"),
+         "has no OP_ALLOCA"),
         ("a version the deltas contradict",
          good.replace("atan2                    | 0x6E | 13.2", "atan2                    | 0x6E | 13.1"),
          "atan2 entered at 13.2, not 13.1"),
         ("a layer-2 claim for an op no golden contains",
-         good.replace(f"{absent:24s} | 0x06 | 13.1 | unimplemented | T6  | 0 | -",
-                      f"{absent:24s} | 0x06 | 13.1 | implemented   | 3   | 2 | golden:vadd"),
+         good.replace(f"{absent:24s} | 0x31 | 13.1 | unimplemented | T7  | 0 | -",
+                      f"{absent:24s} | 0x31 | 13.1 | implemented   | 3   | 2 | golden:vadd"),
          "whose .mlir does not contain the op"),
         ("an implemented row whose knife has not landed",
          good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b ",
                       "tanh                     | 0x6A | 13.1 | implemented   | T9 "),
          "cannot be a planned one"),
         ("an unimplemented row whose knife is not a planned one",
-         good.replace(f"{absent:24s} | 0x06 | 13.1 | unimplemented | T6 ",
-                      f"{absent:24s} | 0x06 | 13.1 | unimplemented | 3  "),
+         good.replace(f"{absent:24s} | 0x31 | 13.1 | unimplemented | T7 ",
+                      f"{absent:24s} | 0x31 | 13.1 | unimplemented | 3  "),
          "so its knife is a planned one"),
         ("a layer-3 claim with no mutant named",
          good.replace("| 3 | golden:histogram,mutant:atomic-rmw-claims-weak-ordering,"
@@ -830,20 +833,20 @@ def feature_cases(good, bytecode, files, ledger):
          "is deferred with no named reason"),
         ("an implemented row under a knife nobody has cut",
          good.replace("sin                      | 0x62 | 13.1 | implemented   | T1 ",
-                      "sin                      | 0x62 | 13.1 | implemented   | T6 "),
-         "knife 'T6' cannot be a planned one"),
+                      "sin                      | 0x62 | 13.1 | implemented   | T7 "),
+         "knife 'T7' cannot be a planned one"),
         ("an unimplemented row under a knife that has landed",
-         good.replace("print_tko                | 0x55 | 13.1 | unimplemented | T6 ",
-                      "print_tko                | 0x55 | 13.1 | unimplemented | T1 "),
+         good.replace("global                   | 0x31 | 13.1 | unimplemented | T7 ",
+                      "global                   | 0x31 | 13.1 | unimplemented | T6 "),
          "so its knife is a planned one"),
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
     cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
     # The other input: an OP_ the writer grew and nobody wrote down.
     grown = bytecode.replace("const OP_TANH: Int = 0x6A",
-                             "const OP_TANH: Int = 0x6A\nconst OP_PRINT_TKO: Int = 0x55")
+                             "const OP_TANH: Int = 0x6A\nconst OP_GLOBAL: Int = 0x31")
     cases.append(("an OP_ constant the ledger does not call implemented", good, grown, ledger,
-                  "is marked unimplemented but bytecode.dawn emits OP_PRINT_TKO"))
+                  "is marked unimplemented but bytecode.dawn emits OP_GLOBAL"))
     invented = bytecode.replace("const OP_TANH: Int = 0x6A",
                                 "const OP_TANH: Int = 0x6A\nconst OP_BOGUS: Int = 0x76")
     cases.append(("an OP_ constant the ledger has no row for", good, invented, ledger,

@@ -1990,6 +1990,84 @@ tf32 的字当 f32 的字读就是同一个数，所以读缓冲区那一段一�
 程序跑过 `DEVICE_TIMEOUT` 秒就被杀掉、判 `launch:timeout` 并中止整轮，不会有哪条变异体
 靠「等下去」拿到它想要的判词。杀进程才能释放上下文，等 CUDA 不会。
 
+**刀 T6 的实测（`assert` 0x05 / `assume` 0x06 / `print_tko` 0x55，与两种新判词形状）。**
+这一刀问的第一个问题是「属性标签什么时候写、什么时候不写」，答案与刀单里的两个候选都不一样，
+所以先写它。
+
+1. **属性写不写标签，判据是 ODS 声明的类型是具体类型还是接口，不是它必需还是可选。**
+   刀单问的是「`assert` 的 message 是 StringAttr 怎么编码：标签 5 后面是长度加字节，还是
+   String 段的索引？」实测是**第三种答案：标签根本不写**。`message` 与 `print_tko` 的 `str`
+   在 Ops.td 里都是 `StrAttr`，ODS 的 getter 答 `StringRef`，于是走
+   `BytecodeWriter.cpp` `writeOpAttribute` 里 `std::is_same_v<StringRef>` 那一支，
+   只写一个 String 段下标的 varint。而 `assume` 的 `predicate` 声明成**接口类型**
+   `CudaTile_AssumePredicateAttrInterface`，落到 `std::is_base_of_v<Attribute, T>` 那一支，
+   而那一支把 `isSelfContained` 取成 `mlir::detail::IsInterface<T>::value` —— 于是标签写。
+   同一个函数、同一种「必需属性」，两种字节，分开它们的是 tblgen 看到的 C++ 类型。
+   层 1 变异体 `assert-message-tagged` 就是把标签 5 补进去：文件同长（Func 段多一个字节，
+   后面的对齐填充把它吃回去），`tileiras` 答 `error: string index 5 out of bounds` 与
+   `failed to parse attribute 'message'`。**标签 5 因此在本仓是「实现了、但从不发」**，
+   这句话是台账里那条具名豁免的全部内容。
+2. **三个谓词属性的载荷各是一种形状，而两个 flags 是裸字节不是 varint。**
+   `div_by` = 标签 8、`divisor` varint、**一个裸字节**的 flags（1 = every，2 = along）、
+   然后按声明顺序的 `every` / `along` 各一个 **zigzag** varint；`same_elements` = 标签 9
+   加一个 `DenseI64ArrayAttr`（个数 varint + 每元素**八个**裸小端字节，与 `permute` 的
+   `DenseI32ArrayAttr` 同形而宽一倍），**没有 flags**；`bounded` = 标签 12、一个裸字节的
+   flags（1 = lb，2 = ub）、然后 lb、ub 各一个 zigzag varint。裸字节这件事在写端是
+   `writer.writeByte`、读端是 `reader.readLE(uint8_t)`：值小于 128 时它与 varint 逐字节相同，
+   所以只有读源码能分开，写错了要到某个大于 127 的取值才炸。三条写错都被 `tileiras` 拒，
+   **没有一条是层 1 盲的**：标签 8 写成 9 → `failed to read DenseI64ArrayAttr for
+   SameElementsAttr`；八字节写成四字节 → `operand index 78 out of bounds (size=17) for
+   operand 0`；lb 与 ub 对调 → `'cuda_tile.bounded' expects lower bound to be less than or
+   equal to upper bound`。最后那一条钉的是**顺序**：流里没有任何东西标记哪个数是哪个界。
+3. **`print_tko` 写结果个数，也写 flags。** 结果个数是刀 T2 那条规则的又一个实例
+   （`Operator::isVariadic()` 对参数或结果任一变长都答真，`args` 变长于是结果个数照写）；
+   flags 是因为它有一个**可选操作数** `token`，而 `token` 是 13.2 加进来的，操作本身是 13.1,
+   所以 `generateFlagsFieldSerialization` 的版本检查会触发：13.1 不写 flags，13.2 起写。
+   本仓写 13.2，于是总是写，token 占 bit 0。`AttrSizedOperandSegments` 让每个操作数组各走一次
+   `writeOperands`：变长的 `args` 自带个数，可选的 `token` 不带。层 1 变异体
+   `print-tko-token-unwritten` 是 `store-token-unwritten` 的孪生兄弟，隔了一个操作数组：
+   `tileiras` 答 `operand index 91 out of bounds (size=19) for token segment, element 0`。
+4. **「这次 launch 应当失败」：设备答的是 CUresult 719，而且是粘的。** 本机驱动 616.56 实测：
+   `cuLaunchKernel` **成功**（assert 不在启动时报错），消息到达宿主，`cuCtxSynchronize` 答
+   `CUDA_ERROR_LAUNCH_FAILED`（719）。**之后同进程内每一次调用都答同一个错**——下载、下一次
+   launch、下一次同步，全部 719。所以 `assert_fail` 不能与任何要比答案的 kernel 同进程，
+   `scripts/tile-gpu-diff/run.sh` 给它一个自己的进程（`assert_diff --case fail`）。
+   这与刀 T5 的 `launch:timeout` 是两件事，判词也不同：assert 是**快速失败并具名报错**，
+   `device`（`timeout`）那条兜底根本不参与；一个跑过 `DEVICE_TIMEOUT` 的 `assert_fail`
+   会被判 `launch:timeout` 并中止整轮，而不是被当成「失败得对」。
+5. **assert 的消息也是判词的一半。** 写进字节码 String 段的那句话原样回到宿主的**标准输出**，
+   每个为假的 lane 一行，带 `tile block: [0, 0, 0], position: [k]:` 前缀。run.sh 因此除了
+   错误码还数行数（128 行）并要求 lane 0 与 lane 127 各出现一次。这是 String 段第一次有
+   层 2 证据：段里的字节是设备印出来的字节。
+6. **「这次 launch 应当打印这些字节」：怎么截。** 设备的 printf 由驱动在同步时刷到**进程的
+   标准输出**，与 harness 自己的输出混在一起。三条路（子进程单独捕获 / harness 改走标准错误 /
+   前后打哨兵行）里选的是第二条，理由是它最少假设：`assert_diff.dawn` 把**整份记录、判词行在内**
+   都写到标准错误，于是标准输出里剩下的就**恰好**是设备放进去的东西，不需要任何分隔约定。
+   期望的字节由**宿主参考**从语料算出来（`print_tile_sum` / `print_tile_max`），程序把它以
+   十六进制打在标准错误上（`print-expect-hex`），run.sh 把捕获到的标准输出 `od` 成同样的形状
+   逐字节比。实测两边都是
+   `7072696e745f74696c652073756d3d38323536206d61783d3132380a`，也就是
+   `print_tile sum=8256 max=128\n`。
+7. **打印的 tile 是 rank-0 的，而这是判词能成立的前提。** 方言自己说打印「不保证原子」、
+   同时执行的打印「可能交错」，所以一块宽 tile 印出去的字节不是一个能比的值。一个 rank-0 tile、
+   一个 tile block，就是一行，字节确定。`d_print` 的公开面因此只收 `Scalar[D]`；底下的效果操作
+   仍带 shape，宽的那一档等哪一刀想出判词再说。
+8. **`assume` 的层 3 是具名豁免，而三条属性变异体不改这一格。** 裁决 1 已经定了理由
+   （谓词说错是 UB，不是错答案），这里补一句它的机器形态：三条属性变异体改的是
+   `assume` 的**写法**，被 `tileiras` 在设备之前拒掉，所以它们是**层 1 证据**，记进 evidence
+   列，layer 列仍按严格判据填 2。这与刀 T2 那四条「只能在层 1 红」的指针/形状变异体是同一条
+   分界线的两侧：那四条的 layer 记 3，是因为那些格子层 3 要的「有一条会红的、改它自己写法的
+   变异体」成立；`assume` 这一格不成立的不是变异体，是**判词**——设备上没有一个「错的 assume」
+   可言。
+9. **两条层 2 变异体，一条钉方向、一条钉字节。** `assert-condition-inverted` 是
+   kernel 源变异体（`scripts/tile-golden/kernels.dawn` 的 `assert_guard`，`lt_i` 换 `ge_i`），
+   而 `assert_guard` 被实例化在两个极限上——1000（语料全在其下）与 0（语料全在其上）——所以
+   取反把两个 kernel 的命运**对调**：本来通过的 `assert_pass` 现在失败，本来失败的
+   `assert_fail` 现在通过，**两个方向都在红集里**。只认一个方向的门会被「永远触发」或
+   「永远不触发」的实现骗过去。`print-format-wrong` 是包变异体（`d_print` 把操作数反过来交），
+   它的价值全在于**缓冲区一个字节没变**：程序自己的判词仍是 `pass`，动的只有标准输出那一行。
+   这是本目录里唯一一条任何缓冲区比对都看不见的变异体。
+
 ### 6.8 属性域的实测（刀 T4）
 
 刀 T4 零新操作码，做的是把六个枚举族与三个单位属性里**本仓从没写过的取值**写出来，
