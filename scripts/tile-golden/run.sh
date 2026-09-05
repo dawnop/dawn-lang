@@ -748,10 +748,16 @@ mutant_run_bytecode() { # name, kernel
 # 1. The renderer drops the store's token operand. The kernel still traces
 #    and renders (exit 0), and vadd's text differs from its golden on both
 #    backends, in the store line and nowhere else.
+#
+#    The anchor moved once, at knife T15: `optimization_hints` is printed
+#    between the token and the colon, so the store line now carries a
+#    `${hints_attr(hints)}` the load line carries too. What keeps this
+#    anchor unique is the `, ${ty(val_ty)}` after the pointer type, which
+#    only a store has.
 if run_item drop-store-token; then
   mutant_project drop-store-token render.dawn \
-    ' token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token' \
-    ' : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token'
+    ' token=${name(tok_in)}${hints_attr(hints)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token' \
+    '${hints_attr(hints)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token'
   mutant_run drop-store-token vadd
   for backend in jvm native; do
     out="$work/m-drop-store-token.vadd.$backend"
@@ -771,8 +777,8 @@ fi
 #    rendered. vadd, whose parameters are f64, is untouched on both backends.
 if run_item load-dtype-f64; then
   mutant_project load-dtype-f64 dev.dawn \
-    't_load(position(p), param_dtype(p), i, shape, strides, none, none)' \
-    't_load(position(p), "f64", i, shape, strides, none, none)'
+    't_load(position(p), param_dtype(p), i, shape, strides, none, none, [])' \
+    't_load(position(p), "f64", i, shape, strides, none, none, [])'
   mutant_run load-dtype-f64 vadd_f32
   mutant_run load-dtype-f64 vadd
   refusal='tileir: kernel `vadd_f32`: parameter 0 is declared f32, but a load reads it as f64'
