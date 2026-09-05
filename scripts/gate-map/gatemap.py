@@ -170,6 +170,7 @@ and the residue is written down in unseen.txt where somebody can read it.
 """
 
 import argparse
+from functools import lru_cache
 import json
 import posixpath
 import re
@@ -770,12 +771,31 @@ def python_inputs(text, tree):
     no gate reads. Parsed rather than pattern-matched, because a regular
     expression over `/` operators cannot tell a path join from a division.
     """
+    found = set()
+    for kind, prefix, pattern in python_input_patterns(text):
+        if kind == "rglob":
+            found |= {
+                f for f in tree.files if f.startswith(prefix)
+                and fnmatch_path(f.rsplit("/", 1)[-1], pattern)
+            }
+        else:
+            found |= resolve(prefix, tree)
+    return found
+
+
+@lru_cache(maxsize=256)
+def python_input_patterns(text):
+    """Parse once per script body; resolve paths against each Tree separately.
+
+    A mutant may add or remove files without editing the glob's source. Only
+    syntax is reusable across those trees, never the expanded input paths.
+    """
     import ast
 
     try:
         tree_ast = ast.parse(text)
     except SyntaxError:
-        return set()
+        return ()
 
     def joined(node):
         """`ROOT / "a" / "b"` -> "a/b"; a bare ROOT-like name -> "".
@@ -814,14 +834,14 @@ def python_inputs(text, tree):
             if node.func.attr in ("glob", "rglob"):
                 inner.discard(id(node.func.value))
 
-    found = set()
+    patterns = set()
     for node in ast.walk(tree_ast):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             if id(node) in inner:
                 continue
             base = joined(node)
             if base and base[0]:
-                found |= resolve(base[0], tree)
+                patterns.add(("path", base[0], ""))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             if node.func.attr not in ("glob", "rglob"):
                 continue
@@ -838,15 +858,10 @@ def python_inputs(text, tree):
             pattern = arg.value
             prefix = base[0] + "/" if base[0] else ""
             if node.func.attr == "rglob":
-                found |= {
-                    f
-                    for f in tree.files
-                    if f.startswith(prefix)
-                    and fnmatch_path(f.rsplit("/", 1)[-1], pattern)
-                }
+                patterns.add(("rglob", prefix, pattern))
             else:
-                found |= resolve(prefix + pattern, tree)
-    return found
+                patterns.add(("path", prefix + pattern, ""))
+    return tuple(sorted(patterns))
 
 
 # A gate is written in one of three languages, and the third one arrived as a
@@ -1939,6 +1954,17 @@ def signature_couplings(tree):
     return out
 
 
+@lru_cache(maxsize=1024)
+def literal_matches(body, literals):
+    """Reuse a script's matches across sibling mutant trees by content.
+
+    Paths alone are not cache keys: a mutant changes the body at the same
+    path, and a source edit changes the candidate literals. Neither may reuse
+    the clean answer. The bounded cache lives only for this checker process.
+    """
+    return frozenset(lit for lit in literals if lit in body)
+
+
 def couplings(tree):
     """(source, gate script, literal) for every string constant a Dawn module
     builds that a gate script also spells out."""
@@ -1947,23 +1973,23 @@ def couplings(tree):
         if f.startswith("scripts/") and Path(f).suffix in (".sh", ".py"):
             scripts[f] = tree.read(f)
     roots = tuple(r + "/" for r in source_roots(tree))
-    # One haystack first. The pairwise scan is literals times scripts, which is
-    # most of a run of this file; almost every literal is in no script at all,
-    # so the join answers that in one pass and the loop below only runs for the
-    # handful that survive.
-    blob = "\n".join(scripts.values())
-    out = []
+    sources = {}
     for f in tree.files:
         if not f.endswith(".dawn") or not f.startswith(roots):
             continue
         text = tree.read(f)
-        lits = {m.group(1) for m in DAWN_LITERAL.finditer(text)}
-        for lit in sorted(lits):
-            if not interesting_literal(lit) or lit not in blob:
-                continue
-            for script, body in scripts.items():
-                if lit in body:
-                    out.append((f, script, lit))
+        sources[f] = sorted({m.group(1) for m in DAWN_LITERAL.finditer(text)
+                             if interesting_literal(m.group(1))})
+    literals = tuple(sorted({lit for lits in sources.values() for lit in lits}))
+    owners = {}
+    for script, body in scripts.items():
+        for lit in literal_matches(body, literals):
+            owners.setdefault(lit, []).append(script)
+    out = []
+    for f, lits in sources.items():
+        for lit in lits:
+            for script in owners.get(lit, ()):
+                out.append((f, script, lit))
     return out
 
 
@@ -3781,6 +3807,32 @@ MUTANTS_HEADER = """\
 """
 
 
+def selftest_content_caches():
+    """Warm answers must not survive script, candidate or file-list changes."""
+    failures = []
+    candidates = ("a watched sentence", "another watched sentence")
+    if literal_matches(candidates[0], candidates) != frozenset(candidates[:1]):
+        failures.append("clean literal cache probe failed")
+    if literal_matches(candidates[1], candidates) != frozenset(candidates[1:]):
+        failures.append("literal cache reused a different script body")
+    if literal_matches(candidates[0], candidates[1:]):
+        failures.append("literal cache reused removed source candidates")
+    script = '(ROOT / "probe").rglob("*.dawn")'
+    before = Tree(ROOT, files=["probe/old.dawn", "elsewhere/value.dawn"])
+    after = before.mutate(files=["probe/new.dawn", "elsewhere/value.dawn"])
+    if python_inputs(script, before) != {"probe", "probe/old.dawn"}:
+        failures.append("clean Python pattern cache probe failed")
+    if python_inputs(script, after) != {"probe", "probe/new.dawn"}:
+        failures.append("Python pattern cache reused another tree's file list")
+    if python_inputs(script.replace('"probe"', '"elsewhere"'), after) != {"elsewhere", "elsewhere/value.dawn"}:
+        failures.append("Python pattern cache reused a different script body")
+    for failure in failures:
+        print(f"SELFTEST FAIL: {failure}", file=sys.stderr)
+    if not failures:
+        print("  content caches: script, candidate and file-list changes remain visible")
+    return failures
+
+
 def selftest_example_dependencies():
     """A new example must bring its deps into the map without editing a list.
 
@@ -3855,7 +3907,8 @@ def selftest_example_dependencies():
 
 def selftest(record_path=None, record_mode=False):
     record_path = record_path or (HERE / "mutants.txt")
-    failures = selftest_matrix() + selftest_example_dependencies()
+    failures = (selftest_matrix() + selftest_content_caches()
+                + selftest_example_dependencies())
     if failures:
         return 1
 
