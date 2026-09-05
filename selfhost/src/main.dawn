@@ -67,7 +67,7 @@ use check/types.{
   prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
   FOREIGN_ERROR_ID, EV_PACK_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, ORD_ID,
   prelude_trait_ids, bounds_of,
-  Ty, Sig, Traits, ImplI, Adts, Impls
+  Ty, TyFn, TyUnit, Sig, Traits, ImplI, Adts, Impls, sig_abi_eff
 }
 use jvm/emit.{emit_module, gen_trait_interface}
 use ir/core.{CModule, CValue, CMode}
@@ -182,7 +182,8 @@ fn program_has_asm(std_mods: List[(String, Cx, TModule, CtOut)], mods: List[Chec
   false
 }
 
-## Whether the program can suspend: does any module declare a `ctl` effect?
+## Fallback for whole-runtime emission, where there is no program to trace:
+## does any module declare a `ctl` effect?
 ##
 ## Conditional for the reason ASM is (above), and the reason is sharper here.
 ## `dawn/rt/Ctl` names `jdk/internal/vm/Continuation`, which is in `java.base`
@@ -193,10 +194,8 @@ fn program_has_asm(std_mods: List[(String, Cx, TModule, CtOut)], mods: List[Chec
 ## would then name an internal API it has no use for, and every tool that reads
 ## a jar's references would have to be told why.
 ##
-## The declaration is the signal rather than the arms, because that is what §11.6
-## S1 made suspendability a property of: a `ctl` effect whose handlers all
-## happen to be tail-resumptive emits three classes it never enters, which costs
-## a jar entry and nothing else.
+## A target program uses reach.Live.ctl below instead. Declaration is only the
+## conservative answer when that reachability result is deliberately absent.
 fn program_has_ctl(std_mods: List[(String, Cx, TModule, CtOut)], mods: List[CheckedMod]) -> Bool = {
   for sm in std_mods {
     let (_cls, cx0, _tm, _ct) = sm
@@ -359,13 +358,6 @@ fn collect_program(
     # scripts/asm-adapter-contract for the differential against the reference.
     classes = classes ++ [(ASM_WRITER_CLASS, gen_asm_writer_class())]
   }
-  # The driving loop for one-shot resumption, for a program that declares a
-  # `ctl` effect (docs/oneshot-design.md §11.3, and program_has_ctl above).
-  if program_has_ctl(std_mods, mods) {
-    classes = classes ++ [(CTL_CLASS, gen_ctl_class(sup))]
-    classes = classes ++ [(CTL_CONT_CLASS, gen_ctl_cont_class(sup))]
-    classes = classes ++ [(CTL_K_CLASS, gen_ctl_k_class(sup))]
-  }
   classes = classes ++ [(tr_iface(None, "Ord"), gen_ord_interface(sup))]
   classes = classes ++ [(FN_CMP_CLASS, gen_fn_comparator(sup))]
   # the evidence pack joins the three: it is program-wide, owned by no module,
@@ -487,7 +479,27 @@ fn collect_program(
     }
     var extra: List[(String, String)] = []
     for n in emitc.emitter_named_pvec_fns() { extra = extra ++ [("std/pvec", n)] }
-    live = Some(reach.live_set(cmods, reach_roots, extra))
+    # Ordinary ADTs and trait interfaces are emitted even with no live
+    # constructor/call. Their descriptors can name Java classes or evidence
+    # records, so those types are roots of the same freight walk as bodies.
+    var extra_types: List[Ty] = []
+    for pr in map.entries(adts) {
+      let (_, a) = pr
+      if not str.starts_with(a.name, "ev\$") {
+        for c in a.ctors {
+          for field in c.fields { extra_types = extra_types ++ [field.ty] }
+        }
+      }
+    }
+    for pr in map.entries(traits) {
+      let (_, tr) = pr
+      for method in tr.methods {
+        let (_, ms) = method
+        extra_types = extra_types ++ ms.sig.param_tys ++ [ms.sig.ret,
+          TyFn([], TyUnit, sig_abi_eff(ms.sig))]
+      }
+    }
+    live = Some(reach.live_set(cmods, reach_roots, extra, extra_types))
   }
   let tuse =
     match live {
@@ -495,6 +507,17 @@ fn collect_program(
       Some(l) -> l.tables
     }
   classes = classes ++ [(STRINGS_CLASS, gen_strings_class(sup, tuse))]
+  # Runtime freight follows the same live bodies as std method pruning.
+  # Merely importing an unused ctl declaration cannot suspend this program.
+  let needs_ctl = match live {
+    None -> program_has_ctl(std_mods, mods)
+    Some(l) -> l.ctl
+  }
+  if needs_ctl {
+    classes = classes ++ [(CTL_CLASS, gen_ctl_class(sup))]
+    classes = classes ++ [(CTL_CONT_CLASS, gen_ctl_cont_class(sup))]
+    classes = classes ++ [(CTL_K_CLASS, gen_ctl_k_class(sup))]
+  }
 
   # const values by declaring module, so importers can materialize them
   var const_vals: Map[String, Map[String, CValue]] = map.empty()

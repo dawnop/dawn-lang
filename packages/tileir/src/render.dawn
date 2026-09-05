@@ -141,10 +141,10 @@ fn int_signedness(op: String) -> String = match op {
 # is not written down is a rounding mode a reader has to look up, and the
 # bytes carry it either way (`DefaultValuedAttr` is written inline);
 # `trunci` and `bitcast` take nothing.
-fn cast_attrs(op: String) -> String = match op {
+fn cast_attrs(op: String, to: String) -> String = match op {
   "itof" -> " signed rounding<nearest_even>"
   "ftoi" -> " signed rounding<nearest_int_to_zero>"
-  "ftof" -> " rounding<nearest_even>"
+  "ftof" -> if to == "f8E8M0FNU" { " rounding<zero>" } else { " rounding<nearest_even>" }
   "exti" -> " unsigned"
   _ -> ""
 }
@@ -194,7 +194,7 @@ fn line(i: Instr) -> String = match i {
   IntBin(dst, op, t, lhs, rhs) ->
     "${v(dst)} = ${int_spelling(op)} ${name(lhs)}, ${name(rhs)}${int_signedness(op)} : ${ty(t)}"
   Cast(dst, op, from, to, src) ->
-    "${v(dst)} = ${op} ${name(src)}${cast_attrs(op)} : ${ty(from)} -> ${ty(to)}"
+    "${v(dst)} = ${op} ${name(src)}${cast_attrs(op, elem_of(to))} : ${ty(from)} -> ${ty(to)}"
   SelectTile(dst, cond_ty, t, cond, lhs, rhs) ->
     "${v(dst)} = select ${name(cond)}, ${name(lhs)}, ${name(rhs)} : ${ty(cond_ty)}, ${ty(t)}"
   ForLoop(res, tys, iv, lower, upper, step, inits, carried, _body) -> {

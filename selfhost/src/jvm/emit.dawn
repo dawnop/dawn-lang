@@ -1784,8 +1784,19 @@ pub fn emit_module(
 ) -> List[(String, Bytes)] !Fs !Exit !Console !io = {
   var out: List[(String, Bytes)] = []
   for aid in own_adt_ids {
-    out = out ++ gen_adt(supers, adts, adt_of(adts, aid),
-      eq_override(impl_table, class_name, TyAdt(aid, adt_of(adts, aid).tparams)))
+    let a = adt_of(adts, aid)
+    # Effect records have an unspellable compiler-reserved name. Ordinary
+    # ADTs remain emitted whole; evidence follows both live bodies and typed
+    # signatures, so receiving a record keeps its descriptor resolvable too.
+    let keep = match live {
+      None -> true
+      Some(l) -> not str.starts_with(a.name, "ev\$") || reach.adt_live(l, aid) ||
+        reach.java_class_live(l, adt_jvm_name(a))
+    }
+    if keep {
+      out = out ++ gen_adt(supers, adts, a,
+        eq_override(impl_table, class_name, TyAdt(aid, a.tparams)))
+    }
   }
   for tid in own_trait_ids {
     let tr = trait_of(traits, tid)

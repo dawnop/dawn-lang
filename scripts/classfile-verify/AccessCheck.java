@@ -95,6 +95,14 @@ final class AccessCheck {
    * wrong.
    */
   static List<Ref> refs(byte[] b) {
+    return refs(b, false);
+  }
+
+  // Freight also observes declaration descriptors: a parameter/field can
+  // name a runtime type without any instruction carrying a CONSTANT_Class.
+  // Keep the existing access check's scope unchanged; only its freight
+  // reader opts into these additional type references.
+  static List<Ref> refs(byte[] b, boolean declarationTypes) {
     if (b.length < 10 || u1(b, 0) != 0xca || u1(b, 1) != 0xfe || u1(b, 2) != 0xba
         || u1(b, 3) != 0xbe) {
       throw new IllegalArgumentException("not a class file");
@@ -106,6 +114,7 @@ final class AccessCheck {
     int[] natDesc = new int[count];
     int[] refClass = new int[count];
     int[] refNat = new int[count];
+    int[] methodType = new int[count];
     int[] tag = new int[count];
     int off = 10;
     for (int i = 1; i < count; i++) {
@@ -127,6 +136,7 @@ final class AccessCheck {
           if (t == 7) {
             classNameIx[i] = u2(b, off);
           }
+          if (t == 16) methodType[i] = u2(b, off);
           off += 2;
         }
         case 9, 10, 11 -> {
@@ -154,7 +164,41 @@ final class AccessCheck {
         out.add(new Ref(tag[i], utf8[classNameIx[c]], utf8[natName[nt]], utf8[natDesc[nt]]));
       }
     }
+    if (declarationTypes) {
+      for (int i = 1; i < count; i++) {
+        if (methodType[i] != 0) descriptorRefs(utf8[methodType[i]], out);
+      }
+      // access_flags, this_class, super_class, then interfaces.
+      off += 6;
+      int interfaces = u2(b, off);
+      off += 2 + 2 * interfaces;
+      // The field and method tables have the same member_info layout.
+      for (int table = 0; table < 2; table++) {
+        int members = u2(b, off);
+        off += 2;
+        for (int i = 0; i < members; i++) {
+          descriptorRefs(utf8[u2(b, off + 4)], out);
+          int attrs = u2(b, off + 6);
+          off += 8;
+          for (int j = 0; j < attrs; j++) {
+            int size = (u2(b, off + 2) << 16) | u2(b, off + 4);
+            off += 6 + size;
+          }
+        }
+      }
+    }
     return out;
+  }
+
+  private static void descriptorRefs(String desc, List<Ref> out) {
+    for (int i = 0; i < desc.length(); i++) {
+      if (desc.charAt(i) == 'L') {
+        int end = desc.indexOf(';', i);
+        if (end < 0) throw new IllegalArgumentException("invalid descriptor " + desc);
+        out.add(new Ref(7, desc.substring(i + 1, end), null, null));
+        i = end;
+      }
+    }
   }
 
   // ------------------------------------------------------------ resolution
