@@ -15,6 +15,8 @@
 # `list_names` answer what the real file system would answer for the same tree.
 # Paths are normalized against the base directory the caller names at
 # construction: nothing here reads the host, not even for the current directory.
+# Files hold bytes so binary writes survive unchanged. Only text-facing
+# operations encode or decode UTF-8; reading text never changes the stored bytes.
 
 use std/io
 use std/io.{Fs, Deleted, NotFound}
@@ -30,7 +32,7 @@ use fspath/fspath
 ## counter `temp_dir` / `temp_file` hand out names from.
 pub type MemFs = {
   base: String,
-  files: Map[String, String],
+  files: Map[String, Bytes],
   dirs: Map[String, Bool],
   seq: Int
 }
@@ -92,7 +94,7 @@ fn child_names(st: MemFs, k: String) -> List[String] = {
   sort(names)
 }
 
-fn mem_read(st: MemFs, p: String) -> Result[String, ForeignError] = {
+fn mem_read(st: MemFs, p: String) -> Result[Bytes, ForeignError] = {
   let k = key(st, p)
   match map.get(st.files, k) {
     Some(t) -> Ok(t)
@@ -113,7 +115,7 @@ fn mem_mkdirs(st: MemFs, p: String) -> (MemFs, Result[Unit, ForeignError]) = {
   (MemFs { ..st, dirs: map.insert(with_ancestors(st.dirs, k), k, true) }, Ok(()))
 }
 
-fn mem_write(st: MemFs, p: String, content: String) -> (MemFs, Result[Unit, ForeignError]) = {
+fn mem_write(st: MemFs, p: String, content: Bytes) -> (MemFs, Result[Unit, ForeignError]) = {
   let k = key(st, p)
   if is_dir_key(st, k) {
     return (st, Err(ferr("is_a_directory", "a directory is in the way", k)))
@@ -145,10 +147,10 @@ fn mem_rename(st: MemFs, src: String, dst: String) -> (MemFs, Result[Unit, Forei
   let s = key(st, src)
   let d = key(st, dst)
   match map.get(st.files, s) {
-    Some(text) ->
+    Some(content) ->
       return (MemFs {
         ..st,
-        files: map.insert(map.remove(st.files, s), d, text),
+        files: map.insert(map.remove(st.files, s), d, content),
         dirs: with_ancestors(st.dirs, d)
       }, Ok(()))
     None -> ()
@@ -161,8 +163,8 @@ fn mem_rename(st: MemFs, src: String, dst: String) -> (MemFs, Result[Unit, Forei
   var dirs = st.dirs
   for f in map.keys(st.files) {
     if str.starts_with(f, prefix) {
-      let text = map.get(st.files, f).expect("moved file")
-      files = map.insert(map.remove(files, f), d ++ str.drop(f, str.len(s)), text)
+      let content = map.get(st.files, f).expect("moved file")
+      files = map.insert(map.remove(files, f), d ++ str.drop(f, str.len(s)), content)
     }
   }
   for g in map.keys(st.dirs) {
@@ -185,7 +187,7 @@ fn mem_temp(
   let path = dir ++ "/" ++ prefix ++ to_string(st.seq)
   let bumped = MemFs { ..st, seq: st.seq + 1 }
   let (next, made) =
-    if as_dir { mem_mkdirs(bumped, path) } else { mem_write(bumped, path, "") }
+    if as_dir { mem_mkdirs(bumped, path) } else { mem_write(bumped, path, bytes.utf8("")) }
   match made {
     Ok(_) -> (next, Ok(path))
     Err(e) -> (st, Err(e))
@@ -214,13 +216,17 @@ pub fn mem_empty(base: String) -> MemFs =
 
 ## `st` with one more file in it; the directories above it come along.
 pub fn mem_put(st: MemFs, path: String, content: String) -> MemFs = {
-  let (next, _) = mem_write(st, path, content)
+  let (next, _) = mem_write(st, path, bytes.utf8(content))
   next
 }
 
-## What the table holds at `path`, or `None` when nothing is there.
+## The file at `path` as UTF-8 text, or `None` when nothing is there.
+## Malformed sequences are replaced, just as in the text-reading handler arm.
 pub fn mem_content(st: MemFs, path: String) -> Option[String] =
-  map.get(st.files, key(st, path))
+  match map.get(st.files, key(st, path)) {
+    Some(content) -> Some(bytes.decode_utf8_lossy(content))
+    None -> None
+  }
 
 ## Every file path in the table, sorted. Directories are not listed: they are
 ## implied by these.
@@ -281,18 +287,18 @@ pub fn with_fs_mem[T](seed: MemFs, body: fn() -> T !Fs !io) -> (T, MemFs) !io = 
       st = next
       r
     }
-    fs_read_file(path) => mem_read(st, path)
+    fs_read_file(path) => match mem_read(st, path) {
+      Ok(content) -> Ok(bytes.decode_utf8_lossy(content))
+      Err(e) -> Err(e)
+    }
     fs_write_file(path, content) => {
-      let (next, r) = mem_write(st, path, content)
+      let (next, r) = mem_write(st, path, bytes.utf8(content))
       st = next
       r
     }
-    fs_read_bytes(path) => match mem_read(st, path) {
-      Ok(t) -> Ok(bytes.utf8(t))
-      Err(e) -> Err(e)
-    }
+    fs_read_bytes(path) => mem_read(st, path)
     fs_write_bytes(path, content) => {
-      let (next, r) = mem_write(st, path, bytes.decode_utf8_lossy(content))
+      let (next, r) = mem_write(st, path, content)
       st = next
       r
     }
@@ -383,6 +389,33 @@ test "the table answers the operations the way the tree implies" {
   assert mem_content(table, "/t/sub/a.txt") == Some("alpha")
   let gone: Option[String] = None
   assert mem_content(table, "/t/c.txt") == gone
+}
+
+test "binary files survive writes, renames, and a new handler" {
+  let payload = bytes.from_hex("fffe0080c080f09f8c85").expect("binary fixture")
+  let (_, table) = with_fs_mem(mem_empty(MEM_BASE), () => {
+    assert ok(io.write_bytes("bin/payload", payload))
+    assert io.read_bytes("bin/payload") == Ok(payload)
+    assert ok(io.rename("bin/payload", "bin/moved"))
+    assert ok(io.rename("bin", "archive"))
+    assert io.read_bytes("archive/moved") == Ok(payload)
+  })
+  let (_, _) = with_fs_mem(table, () => {
+    assert io.read_bytes("archive/moved") == Ok(payload)
+  })
+}
+
+test "text and byte operations share one UTF-8 file" {
+  let text = "hello \u{4e16}\u{754c}\u{0}"
+  let seed = mem_put(mem_empty(MEM_BASE), "seed", text)
+  let (_, table) = with_fs_mem(seed, () => {
+    assert io.read_bytes("seed") == Ok(bytes.utf8(text))
+    assert ok(io.write_bytes("text", bytes.utf8(text)))
+    assert io.read_file("text") == Ok(text)
+    assert ok(io.write_file("text", text ++ "!"))
+    assert io.read_bytes("text") == Ok(bytes.utf8(text ++ "!"))
+  })
+  assert mem_content(table, "text") == Some(text ++ "!")
 }
 
 test "the mounted std is the embedded std, and nothing else is there" {
