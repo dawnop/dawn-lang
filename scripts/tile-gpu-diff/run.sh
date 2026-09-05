@@ -43,7 +43,11 @@
 #             kernels of knife T1 (the seven operations of the frozen
 #             table's trigonometric corner, plus leetgpu 61, which computes
 #             none of them and is therefore that family's kernel-level
-#             control) and seq_diff.dawn the eleven multi-launch
+#             control) and dtype_diff.dawn the three element format kernels
+#             of knife T3 that a device this tree can reach will run (i16,
+#             i64 and tf32; the three fp8 formats stop at layer 1, because
+#             tileiras refuses them at sm_86 and at sm_89 and this machine
+#             is sm_86) and seq_diff.dawn the eleven multi-launch
 #             problems of knives 16 and 17 (the first whose unit of
 #             comparison is a SEQUENCE of launches over shared device buffers
 #             rather than a kernel: one allocation, one upload, up to sixteen
@@ -550,6 +554,24 @@ trig_green=(rope)
 # are held to.
 shaped=(shape_ops grid_stride token_join ptr_roundtrip ptr_recast)
 
+# The element format kernels of knife T3, in the order dtype_diff takes
+# them. Each is five or two segments of one output buffer, so a lane of one
+# operation is its own comparison, and each names a different FORMAT: what
+# separates them is the type tag and nothing else.
+#
+# The knife's other three kernels (dtype_e4m3, dtype_e5m2, dtype_e8m0) are
+# not here and cannot be: `tileiras` refuses the three fp8 types at
+# --gpu-name sm_86 and at sm_89, so no cubin of them can be loaded on this
+# machine's RTX 3080. They stop at layer 1 with a named exemption in
+# scripts/tileir-features/types.txt.
+dtypes=(dtype_i16 dtype_i64 dtype_tf32)
+
+# The tf32 mutant below names one of the three; the other two are its
+# kernel-level control, and a tag mutant that moved them would be changing
+# something other than the tag it names.
+dtype_red=(dtype_tf32)
+dtype_green=(dtype_i16 dtype_i64)
+
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
 # way every list above is: they are the STEPS of eleven sequences, and what
@@ -600,7 +622,7 @@ assemble_golden() { # kernel, tilebc, cubin
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${sequenced[@]}"; do
+  "${shaped[@]}" "${dtypes[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -629,6 +651,9 @@ trig_cubins=()
 for k in "${trigs[@]}"; do trig_cubins+=("$work/$k.cubin"); done
 shape_cubins=()
 for k in "${shaped[@]}"; do shape_cubins+=("$work/$k.cubin"); done
+
+dtype_cubins=()
+for k in "${dtypes[@]}"; do dtype_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -857,6 +882,22 @@ case "$trig_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/trig.out" | head -n 1)"
 
+# ---- native, the element format kernels (knife T3)
+build_native "$root/std" "$work/dtype.bin" "$here/dtype_diff.dawn"
+rc=0
+"$work/dtype.bin" "${dtype_cubins[@]}" > "$work/dtype.out" 2> "$work/dtype.err" || rc=$?
+cat "$work/dtype.out"
+dtype_verdict="$(verdict_of "$work/dtype.out")"
+case "$dtype_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#dtypes[@]} element format kernels agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $dtype_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $dtype_verdict" ;;
+  fail) cat "$work/dtype.err" >&2; fail "the device answered and disagreed with the fake device on an element format kernel (see the transcript above)" ;;
+  *) cat "$work/dtype.err" >&2; fail "dtype_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/dtype.out" | head -n 1)"
+
 # The same two kernels on the CONTROL corpus, where no lane is negative and
 # the odd symmetry's `select` never chooses its negated arm. The clean run
 # must pass there as well -- it is the same kernel -- and what matters is
@@ -1005,6 +1046,50 @@ for field in negative past_pi big q2 q3 axis origin rem_negative rem_smaller rem
     fail "the trigonometric corpus has $field=0, so that claim is not being tested: $trig_shape"
 done
 echo "PASS  corpus: trig_sweep covers every lane class the seven operations need ($trig_shape)"
+
+# The element format corpora, one `index` line a kernel. Each count is a
+# claim the corpus makes and run.sh holds above zero:
+#
+#   i16   negative, add_wrapped, mul_wrapped, shift_wrapped, extremes
+#         Without the three wrap counts an i32 `addi` would agree on every
+#         lane, and the tag would be saying nothing; `extremes` is the two
+#         pinned lanes that hold -32768 and 32767.
+#   i64   beyond_i32, products_beyond_i32
+#         Without these an i32 `muli` would agree everywhere, and the
+#         width would be a spelling rather than an answer.
+#         products_inside_2p52 is the other side of the same coin: it must
+#         be every lane, because past 2^52 the `List[Float]` channel stops
+#         being exact and nothing here would be a bit-exact claim.
+#   tf32  off_grid, near_ties, subnormal, infinite, rounded_on_upload
+#         A corpus on the tf32 grid would let a truncating conversion pass
+#         for a rounding one, and one without ties would not see
+#         ties-to-even at all.
+for kernel in dtype_i16 dtype_i64 dtype_tf32; do
+  dtype_shape="$(awk -v want="$kernel" '/^kernel /{cur=$2} cur == want && /^  index /{sub(/^  index /, ""); print; exit}' "$work/dtype.out")"
+  [ -n "$dtype_shape" ] || fail "dtype_diff printed no index line for $kernel"
+  case "$kernel" in
+    dtype_i16) fields="negative add_wrapped mul_wrapped shift_wrapped extremes" ;;
+    dtype_i64) fields="negative beyond_i32 products_beyond_i32 products_inside_2p52" ;;
+    *) fields="off_grid near_ties subnormal infinite rounded_on_upload" ;;
+  esac
+  for field in $fields; do
+    value="$(printf '%s\n' "$dtype_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+    [ -n "$value" ] || fail "$kernel's index line names no $field: $dtype_shape"
+    [ "$value" -gt 0 ] ||
+      fail "$kernel has $field=0, so that claim is not being tested: $dtype_shape"
+  done
+  echo "PASS  corpus: $kernel covers every lane class its format needs ($dtype_shape)"
+done
+
+# Every i64 product has to be inside 2^52, not merely some of them: that is
+# where the host channel stops being exact, and one lane past it would make
+# the whole kernel's bit-exact verdict meaningless.
+i64_shape="$(awk '/^kernel dtype_i64 /{f=1} f && /^  index /{sub(/^  index /, ""); print; exit}' "$work/dtype.out")"
+i64_lanes="$(printf '%s\n' "$i64_shape" | tr ' ' '\n' | sed -n 's/^lanes=//p')"
+i64_inside="$(printf '%s\n' "$i64_shape" | tr ' ' '\n' | sed -n 's/^products_inside_2p52=//p')"
+[ "$i64_inside" = "$i64_lanes" ] ||
+  fail "the i64 corpus has $i64_inside of $i64_lanes products inside 2^52; past that the List[Float] channel is not exact: $i64_shape"
+echo "PASS  corpus: every i64 product is inside 2^52, so the host channel is exact ($i64_inside of $i64_lanes)"
 
 # leetgpu 14's corpus is two claims in one line. A flock where every agent
 # has a neighbour would never take the branch that keeps an agent's own
@@ -1203,6 +1288,7 @@ tiers="$tiers scan:$(sed -n 's/^tiers //p' "$work/scan.out" | tail -n 1)"
 tiers="$tiers atom:$(sed -n 's/^tiers //p' "$work/atom.out" | tail -n 1)"
 tiers="$tiers erf:$(sed -n 's/^tiers //p' "$work/erf.out" | tail -n 1)"
 tiers="$tiers trig:$(sed -n 's/^tiers //p' "$work/trig.out" | tail -n 1)"
+tiers="$tiers dtype:$(sed -n 's/^tiers //p' "$work/dtype.out" | tail -n 1)"
 tiers="$tiers shape:$(sed -n 's/^tiers //p' "$work/shape.out" | tail -n 1)"
 tiers="$tiers seq:$(sed -n 's/^tiers //p' "$work/seq.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
@@ -2252,7 +2338,7 @@ gath_kernel_check scatter-unpermuted scatter_perm
 #     that turns a rank into a sort. The scatter here carries NO mask, which
 #     is the half of the surface scatter-unpermuted does not reach.
 gath_kernel_mutant rank-scatter-in-lane-order sort_rank \
-  '  scatter(out, float_to_int(F64, s1, rank), s1, load(x, zero, s1))' \
+  '  scatter(out, float_to_int(F64, I32, s1, rank), s1, load(x, zero, s1))' \
   '  store(out, zero, s1, load(x, zero, s1))'
 gath_kernel_check rank-scatter-in-lane-order sort_rank
 
@@ -2853,6 +2939,88 @@ shape_pkg_mutant num-tile-blocks-as-block-id bytecode.dawn \
   'emit(emit(emit(emit(w1, OP_GET_TILE_BLOCK_ID), ti), ti), ti)' \
   grid_stride
 
+# The element format family's one mutant (knife T3). It lives in the WRITER
+# (packages/tileir/src/bytecode.dawn), because what this knife added is a
+# way of spelling six element formats and the writer's type table is where
+# they are spelled. It is not visible at layer 0 (the renderer prints a
+# format's name from the lowered type, and the lowering takes it from the
+# kernel) and `tileiras` accepts it, because a tile of f32 is as well formed
+# as a tile of tf32. Only the device can tell.
+dtype_writer_mutant() { # name, old, new
+  local name="$1" old="$2" new="$3"
+  local pkg="$work/pkg-$name" before after k moved=0 rc=0 mverdict differ cubs=()
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/bytecode.dawn")
+  python3 "$here/mutate.py" "$pkg/src/bytecode.dawn" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/bytecode.dawn")
+  echo "      $name: packages/tileir/src/bytecode.dawn md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${dtypes[@]}"
+  for k in "${dtype_red[@]}"; do
+    if cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+  done
+  [ "$moved" = "${#dtype_red[@]}" ] ||
+    fail "$name: the ${#dtype_red[@]} kernel(s) of that format should move at layer 0, got $moved"
+  for k in "${dtype_green[@]}"; do
+    cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+      fail "$name: $k names another format, so its bytecode must not move"
+  done
+  for k in "${dtype_red[@]}"; do
+    [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$name-$k.tilebc")" ] ||
+      fail "$name: $k.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+  done
+  echo "      $name: ${#dtype_red[@]} of ${#dtypes[@]} .tilebc files differ from the goldens at the same length (${dtype_green[*]} does not) and tileiras still accepts every one"
+
+  for k in "${dtypes[@]}"; do cubs+=("$work/$name-$k.cubin"); done
+  if [ "$dtype_verdict" != pass ]; then
+    rc=0
+    "$work/dtype.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$dtype_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $dtype_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $dtype_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  "$work/dtype.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#dtype_red[@]}" ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with ${#dtype_red[@]} kernel(s) saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${dtype_green[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $k names another format and should be untouched"; }
+  done
+  # The FIRST difference is the measurement, and it is not where a reader
+  # would guess. Segment 0 reads the tf32 BUFFER and widens it, and a tf32
+  # word read as an f32 word is the same number, so that segment does not
+  # move at all; what moves is segment 1, where an f64 goes into the format
+  # and back and twenty-four significand bits survive where eleven should.
+  grep -q '^  first seg 1 ' "$work/m-$name.out" ||
+    { cat "$work/m-$name.out" >&2; fail "$name: expected the first difference in segment 1 (the conversion), not in segment 0 (the buffer)"; }
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${dtype_red[*]} differs in its conversion segment and ${dtype_green[*]} does not)"
+}
+
+# 27. tf32-tag-as-f32: the writer's type table gives tf32 the f32 tag. Four
+#     bytes for four, so the file is the same length; the renderer prints
+#     the format the lowering handed it, so dtype_tf32.mlir still says
+#     `tf32`; and every operation in the kernel is as legal over f32 as
+#     over tf32, so tileiras has nothing to object to.
+#
+#     What the device says is the whole of what tf32 IS: eleven significand
+#     bits where f32 has twenty-four. The corpus is off the tf32 grid on
+#     510 of its 512 lanes, so the conversion segment differs almost
+#     everywhere, and the buffer segment does not differ at all -- a tf32
+#     word is a binary32 word with thirteen zero bits, and reading one as
+#     the other is the same number. That asymmetry is why this mutant
+#     checks WHICH segment moved and not only that one did.
+dtype_writer_mutant tf32-tag-as-f32 \
+  '  "tf32" -> 8' \
+  '  "tf32" -> 7'
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -2868,6 +3036,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/scan_diff.dawn \
   scripts/tile-gpu-diff/atom_diff.dawn scripts/tile-gpu-diff/erf_diff.dawn \
   scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
+  scripts/tile-gpu-diff/dtype_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||

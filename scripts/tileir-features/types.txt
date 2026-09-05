@@ -1,0 +1,105 @@
+# The Tile IR TYPE ledger: one row per type tag of the frozen table, and
+# what this backend has done about it. Knife T3, which is the knife that
+# needed a second table: T0 built features.txt against the OPCODES and said
+# in its own header that the type tags were "a separate table", owned by
+# knives T3 and T9. This is that table.
+#
+# It is the SECOND of the coverage ledgers and the THIRD in the tree
+# (scripts/leetgpu-diff/problems.txt says which leetgpu problems the backend
+# solves). scripts/tileir-features/check.py reads this file and features.txt
+# with one parser and one set of rules about statuses, knives and layers;
+# what differs between the two tables is only what the expected set is and
+# what a piece of evidence looks like.
+#
+# The authority for the name, the tag and the version is
+# NVIDIA/cuda-tile@be0889cd,
+# include/cuda_tile/Dialect/CudaTile/IR/BytecodeTypeOpcodes.td: twenty-three
+# tags, 0 to 22, with NO gaps (unlike the opcode table, which has two frozen
+# ones). Fifteen of them are scalar formats and eight are constructors. The
+# authority for what is IMPLEMENTED is packages/tileir/src/bytecode.dawn:
+# `num_tag`'s arms for the scalar formats and the `TAG_` constants for the
+# constructors. check.py holds this file to that table in both directions.
+#
+# COLUMNS
+#
+#   name        the dialect's spelling of the type, as a .mlir prints it
+#               (`i16`, `f8E4M3FN`, `ptr`, `tile`), or the C++ type name for
+#               a constructor that has no textual spelling here
+#   tag         its frozen type tag, in decimal (the bytecode writes one
+#               byte, and BytecodeTypeOpcodes.td gives them in decimal)
+#   since       the bytecode version it entered: 13.1, 13.2 or 13.3
+#   status      implemented | unimplemented | deferred. `structural` is a
+#               status features.txt needs and this table does not: every tag
+#               the writer emits goes into the Type section, so there is no
+#               type that is emitted without being written down
+#   knife       the knife that implemented it, or the knife the prestudy
+#               plans it for. Held against check.py's LANDED_KNIVES in both
+#               directions, exactly as features.txt is
+#   layer       the highest layer that covers it, 0 to 3
+#   evidence    golden:<kernel>  a scripts/tile-golden kernel whose .mlir
+#                                spells the type, and whose .tilebc the
+#                                assembler took (layer 1)
+#               device:<kernel>  a kernel a scripts/tile-gpu-diff program
+#                                launches, so a device has answered for the
+#                                type (layer 2)
+#               mutant:<family>  a mutant that reddens on how THIS TYPE is
+#                                written (layer 3)
+#               writer:<fn>      the function in bytecode.dawn that emits
+#                                the tag, for a constructor with no textual
+#                                spelling
+#   exemption   why the row stops below layer 2, or `-`
+#
+# THE THREE LAYERS are docs/tile-backend-design.md 6.2 and mean here what
+# they mean there. The one rule worth writing down, because it is what
+# separates this table from features.txt: a mutant counts for a TYPE when
+# its anchor changes how that type is WRITTEN -- its tag byte, its constant
+# payload's width, or an attribute the writer keys on it. A mutant that
+# rewrites a kernel's arithmetic, a host packer or an address ladder is
+# evidence about a kernel and not about a type. That is why
+# `f16-rounds-like-bf16` is not f16's layer-3 mutant (it is std/gpu's
+# packer) and `bf16-tag-as-i16` is bf16's (it is the tag).
+#
+# THE BAR IS LAYER 2, as ruling 1 of the prestudy sets it, so every
+# implemented row below layer 2 carries a named exemption and every one at
+# layer 2 or 3 carries none. Three kinds of exemption appear:
+#
+#   no host channel     std/gpu's `element_bytes` does not move the format,
+#                       so no buffer of it can be allocated and no device
+#                       can be handed one. f32 is the only case: it is a
+#                       tile type here, never a buffer type
+#   architecture        `tileiras` refuses the type for this machine's GPU.
+#                       The three fp8 formats: measured 2026-09-05, they are
+#                       refused at --gpu-name sm_86 AND sm_89 (`error:
+#                       Incompatibility with architecture 'sm_86':
+#                       unsupported type 'f8E4M3FN'`) and accepted at
+#                       sm_100. scripts/tile-golden assembles those three
+#                       for sm_100, so their layer 1 is real; this machine
+#                       is an RTX 3080 and their layer 2 is not reachable
+#                       at all
+#   ruling 2            the view family, suspended with knives T11 to T13
+#                       (docs/tile-backend-design.md 2.4)
+#
+# name | tag | since | status | knife | layer | evidence | exemption
+i1                 |  0 | 13.1 | implemented   | 3   | 2 | golden:invert,device:invert                                          | -
+i8                 |  1 | 13.1 | implemented   | 11  | 2 | golden:matmul_i8,device:matmul_i8                                    | -
+i16                |  2 | 13.1 | implemented   | T3  | 3 | golden:dtype_i16,device:dtype_i16,mutant:i16-tag-as-bf16             | -
+i32                |  3 | 13.1 | implemented   | 3   | 2 | golden:int_ops,device:int_ops                                        | -
+i64                |  4 | 13.1 | implemented   | T3  | 3 | golden:dtype_i64,device:dtype_i64,mutant:i64-payload-four-bytes      | -
+f16                |  5 | 13.1 | implemented   | 11  | 2 | golden:f16_ops,device:f16_ops                                        | -
+bf16               |  6 | 13.1 | implemented   | 1   | 3 | golden:vadd_bf16,device:vadd_bf16,mutant:bf16-tag-as-i16             | -
+f32                |  7 | 13.1 | implemented   | 2   | 1 | golden:vadd_f32                                                      | no host channel
+tf32               |  8 | 13.1 | implemented   | T3  | 3 | golden:dtype_tf32,device:dtype_tf32,mutant:tf32-tag-as-f32           | -
+f64                |  9 | 13.1 | implemented   | 2   | 3 | golden:vadd,device:vadd,mutant:f64-tag-as-i64                        | -
+f8E4M3FN           | 10 | 13.1 | implemented   | T3  | 1 | golden:dtype_e4m3,mutant:e4m3-tag-as-i8                              | architecture
+f8E5M2             | 11 | 13.1 | implemented   | T3  | 1 | golden:dtype_e5m2                                                    | architecture
+ptr                | 12 | 13.1 | implemented   | 3   | 2 | golden:vadd,device:vadd,writer:elem_ty                               | -
+tile               | 13 | 13.1 | implemented   | 3   | 2 | golden:vadd,device:vadd,writer:ty                                    | -
+TensorViewType     | 14 | 13.1 | deferred      | -   | 0 | -                                                                    | ruling 2
+PartitionViewType  | 15 | 13.1 | deferred      | -   | 0 | -                                                                    | ruling 2
+FunctionType       | 16 | 13.1 | implemented   | 3   | 2 | device:vadd,writer:func_ty                                           | -
+token              | 17 | 13.1 | implemented   | 3   | 2 | golden:vadd,device:vadd,writer:ty                                    | -
+f8E8M0FNU          | 18 | 13.2 | implemented   | T3  | 1 | golden:dtype_e8m0,mutant:e8m0-rounding-as-nearest-even,mutant:e8m0-tag-as-f8e5m2 | architecture
+f4E2M1FN           | 19 | 13.3 | unimplemented | T9  | 0 | -                                                                    | -
+GatherScatterView  | 20 | 13.3 | deferred      | -   | 0 | -                                                                    | ruling 2
+StridedViewType    | 21 | 13.3 | deferred      | -   | 0 | -                                                                    | ruling 2
+i4                 | 22 | 13.3 | unimplemented | T9  | 0 | -                                                                    | -
