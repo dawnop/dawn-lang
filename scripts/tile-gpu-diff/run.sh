@@ -39,7 +39,11 @@
 #             the two atomic kernels of knife 14 (the first in which two
 #             lanes may name ONE element, which every scatter here is
 #             forbidden to do) and erf_diff.dawn the two error function
-#             kernels of knife 15 and seq_diff.dawn the eleven multi-launch
+#             kernels of knife 15 and trig_diff.dawn the two trigonometric
+#             kernels of knife T1 (the seven operations of the frozen
+#             table's trigonometric corner, plus leetgpu 61, which computes
+#             none of them and is therefore that family's kernel-level
+#             control) and seq_diff.dawn the eleven multi-launch
 #             problems of knives 16 and 17 (the first whose unit of
 #             comparison is a SEQUENCE of launches over shared device buffers
 #             rather than a kernel: one allocation, one upload, up to sixteen
@@ -522,6 +526,30 @@ erfs=(erf_sweep geglu swiglu_half)
 erf_red=(erf_sweep geglu)
 erf_green=(swiglu_half)
 
+# The trigonometric kernels of knife T1, in the order trig_diff takes them.
+# `trig_sweep` applies each of the seven new operations to the same block of
+# lanes and writes each to its own segment of one output buffer, so every
+# lane of every operation is its own comparison and nothing is summed.
+trigs=(trig_sweep rope)
+
+# `rope` is leetgpu 61 and computes NO trigonometric function: the problem
+# hands `cos` and `sin` in as buffers, exactly as leetgpu 93 does. So it
+# goes through none of the seven and is this family's KERNEL-LEVEL CONTROL,
+# the way `swiglu_half` is the error function family's: no mutant below may
+# move it, at layer 0 or on the device.
+trig_red=(trig_sweep)
+trig_green=(rope)
+
+# The shape, grid, token and pointer kernels of knife T2, in the order
+# shape_diff takes them. This is the first family here whose subject is the
+# opcode table rather than a leetgpu problem
+# (docs/tile-backend-design.md 2.4). Only `shape_ops` carries the three
+# shape operations, only `grid_stride` reads the grid's extent, only
+# `token_join` joins tokens and only the last two address memory through a
+# pointer tile the body built, which is the split the four mutants below
+# are held to.
+shaped=(shape_ops grid_stride token_join ptr_roundtrip ptr_recast)
+
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
 # way every list above is: they are the STEPS of eleven sequences, and what
@@ -571,7 +599,8 @@ assemble_golden() { # kernel, tilebc, cubin
 }
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
-  "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${sequenced[@]}"; do
+  "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
+  "${shaped[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -596,6 +625,10 @@ atom_cubins=()
 for k in "${atomic[@]}"; do atom_cubins+=("$work/$k.cubin"); done
 erf_cubins=()
 for k in "${erfs[@]}"; do erf_cubins+=("$work/$k.cubin"); done
+trig_cubins=()
+for k in "${trigs[@]}"; do trig_cubins+=("$work/$k.cubin"); done
+shape_cubins=()
+for k in "${shaped[@]}"; do shape_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -808,6 +841,22 @@ case "$erf_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/erf.out" | head -n 1)"
 
+# ---- native, the trigonometric kernels (knife T1)
+build_native "$root/std" "$work/trig.bin" "$here/trig_diff.dawn"
+rc=0
+"$work/trig.bin" "${trig_cubins[@]}" > "$work/trig.out" 2> "$work/trig.err" || rc=$?
+cat "$work/trig.out"
+trig_verdict="$(verdict_of "$work/trig.out")"
+case "$trig_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#trigs[@]} trigonometric kernels agree with the fake device inside the tolerance tier" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $trig_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $trig_verdict" ;;
+  fail) cat "$work/trig.err" >&2; fail "the device answered and disagreed with the fake device on a trigonometric kernel (see the transcript above)" ;;
+  *) cat "$work/trig.err" >&2; fail "trig_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/trig.out" | head -n 1)"
+
 # The same two kernels on the CONTROL corpus, where no lane is negative and
 # the odd symmetry's `select` never chooses its negated arm. The clean run
 # must pass there as well -- it is the same kernel -- and what matters is
@@ -828,6 +877,22 @@ rc=0
 atom_unique_verdict="$(verdict_of "$work/atom-unique.out")"
 [ "$atom_unique_verdict" = "$atom_verdict" ] ||
   { cat "$work/atom-unique.out" >&2; fail "the control corpus answers $atom_unique_verdict where the main one answers $atom_verdict"; }
+
+# ---- native, the shape, grid, token and pointer kernels (knife T2)
+build_native "$root/std" "$work/shape.bin" "$here/shape_diff.dawn"
+rc=0
+"$work/shape.bin" "${shape_cubins[@]}" > "$work/shape.out" 2> "$work/shape.err" || rc=$?
+cat "$work/shape.out"
+shape_verdict="$(verdict_of "$work/shape.out")"
+case "$shape_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#shaped[@]} shape, grid, token and pointer kernels agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $shape_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $shape_verdict" ;;
+  fail) cat "$work/shape.err" >&2; fail "the device answered and disagreed with the fake device on a knife T2 kernel (see the transcript above)" ;;
+  *) cat "$work/shape.err" >&2; fail "shape_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/shape.out" | head -n 1)"
 
 # ---- native, the multi-launch sequences (knife 16)
 #
@@ -912,6 +977,34 @@ for k in "${erf_red[@]}"; do
     *) fail "$k's control corpus has negative lanes, so it is not a control: $erf_positive_shape" ;;
   esac
 done
+
+# The trigonometric corpus, held the same way. Each of these counts is a
+# claim the family's comments make, and holding it above zero is what turns
+# the claim into a measurement:
+#
+#   negative      the odd functions have a half the even ones do not
+#   past_pi       the range reduction is doing work, not just a polynomial
+#   big           the reach of sinh and cosh (|x| = 30 is 5.3e12)
+#   q2, q3        the two quadrants where atan2 is a whole `pi` away from
+#                 `atan(a / b)`, which is what the sign logic is for
+#   axis          the `y = 0` lanes, both signs of the numerator
+#   origin        `atan2(0, 0)`, the one lane of the sweep that is pinned
+#   rem_negative  a negative dividend, which is where truncated division
+#                 and floored division part company
+#   rem_smaller   `|a| < |b|`, where the answer is the dividend
+#   rem_over_half the lanes where IEEE `remainder` would answer something
+#                 else. Without these, `fmod` and `remainder` would be the
+#                 same function on this corpus and `remf`'s semantics would
+#                 be a sentence rather than a measurement
+trig_shape="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/trig.out")"
+[ -n "$trig_shape" ] || fail "trig_diff printed no index line"
+for field in negative past_pi big q2 q3 axis origin rem_negative rem_smaller rem_over_half; do
+  value="$(printf '%s\n' "$trig_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the trigonometric index line names no $field: $trig_shape"
+  [ "$value" -gt 0 ] ||
+    fail "the trigonometric corpus has $field=0, so that claim is not being tested: $trig_shape"
+done
+echo "PASS  corpus: trig_sweep covers every lane class the seven operations need ($trig_shape)"
 
 # leetgpu 14's corpus is two claims in one line. A flock where every agent
 # has a neighbour would never take the branch that keeps an agent's own
@@ -1109,13 +1202,16 @@ tiers="$tiers gath:$(sed -n 's/^tiers //p' "$work/gath.out" | tail -n 1)"
 tiers="$tiers scan:$(sed -n 's/^tiers //p' "$work/scan.out" | tail -n 1)"
 tiers="$tiers atom:$(sed -n 's/^tiers //p' "$work/atom.out" | tail -n 1)"
 tiers="$tiers erf:$(sed -n 's/^tiers //p' "$work/erf.out" | tail -n 1)"
+tiers="$tiers trig:$(sed -n 's/^tiers //p' "$work/trig.out" | tail -n 1)"
+tiers="$tiers shape:$(sed -n 's/^tiers //p' "$work/shape.out" | tail -n 1)"
 tiers="$tiers seq:$(sed -n 's/^tiers //p' "$work/seq.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.out")"
 erf_probe="$(sed -n 's/^probe as-error //p' "$work/erf.out" | tail -n 1)"
+trig_probe="$(sed -n 's/^probe per-op //p' "$work/trig.out" | tail -n 1)"
 seq_launch_probe="$(sed -n 's/^probe launches //p' "$work/seq.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe; erf error: $erf_probe;"\
-  " sequence launches: $seq_launch_probe"
+  " per-op miss: $trig_probe; sequence launches: $seq_launch_probe"
 
 # The ledger records one verdict for the tree: both programs pass, or the
 # first thing that stopped one of them.
@@ -2562,6 +2658,201 @@ erf_pkg_mutant erf-sign-not-flipped \
   '  m' \
   fail pass
 
+# The two mutants of the trigonometric family (knife T1). Both live in the
+# WRITER (packages/tileir/src/bytecode.dawn) rather than in a kernel or in
+# the package's arithmetic, because what this knife added is a way of
+# spelling seven operations and the writer is where they are spelled.
+# Neither is visible at layer 0 -- the renderer prints an operation's name
+# from its own table and its operands from the lowered instruction -- and
+# `tileiras` accepts both, because both produce a well formed program that
+# computes something else. Only the device can tell.
+#
+# `rope` is the kernel-level control and takes no argument: it is in the
+# family, it is not in `trig_red`, and both mutants have to leave its
+# bytecode and its verdict alone.
+trig_writer_mutant() { # name, old, new
+  local name="$1" old="$2" new="$3"
+  local pkg="$work/pkg-$name" before after k moved=0 rc=0 mverdict differ cubs=()
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/bytecode.dawn")
+  python3 "$here/mutate.py" "$pkg/src/bytecode.dawn" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/bytecode.dawn")
+  echo "      $name: packages/tileir/src/bytecode.dawn md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${trigs[@]}"
+  for k in "${trig_red[@]}"; do
+    if cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+  done
+  [ "$moved" = "${#trig_red[@]}" ] ||
+    fail "$name: the ${#trig_red[@]} kernels that spell the operation should move at layer 0, got $moved"
+  for k in "${trig_green[@]}"; do
+    cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+      fail "$name: $k spells no trigonometric operation, so its bytecode must not move"
+  done
+  # the same length, which is what says this is a wrong spelling and not a
+  # malformed one: an opcode byte for an opcode byte, an operand index for
+  # an operand index
+  for k in "${trig_red[@]}"; do
+    [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$name-$k.tilebc")" ] ||
+      fail "$name: $k.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+  done
+  echo "      $name: ${#trig_red[@]} of ${#trigs[@]} .tilebc files differ from the goldens at the same length (${trig_green[*]} does not) and tileiras still accepts every one"
+
+  for k in "${trigs[@]}"; do cubs+=("$work/$name-$k.cubin"); done
+  if [ "$trig_verdict" != pass ]; then
+    rc=0
+    "$work/trig.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$trig_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $trig_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $trig_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  "$work/trig.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#trig_red[@]}" ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with ${#trig_red[@]} kernel(s) saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${trig_green[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $k spells none of the seven and should be untouched"; }
+  done
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${trig_red[*]} differs and ${trig_green[*]} does not)"
+}
+
+# 25. sin-as-cos: the writer gives `sin` the opcode of `cos`. One byte for
+#     another, so the file is the same length; the renderer has its own
+#     spelling table, so trig_sweep.mlir still says `sin`; and `cos` is a
+#     unary operation over a float tile answering a float tile of the same
+#     type, so `tileiras` has nothing to object to. The device answers the
+#     cosine in the segment that should hold the sine, and only the first
+#     of the seven segments moves.
+trig_writer_mutant sin-as-cos \
+  '  "sin" -> OP_SIN' \
+  '  "sin" -> OP_COS'
+
+# 26. atan2-operands-swapped: the writer emits `atan2`'s two operands the
+#     other way round. This is not a straw man, it is the reading of the
+#     dialect a careful person reaches by looking at the OPERAND NAMES: the
+#     record calls them `x` and `y`, in that order, and C's `atan2` takes
+#     `y` first. What settles it is the sentence next to them, "the arc
+#     tangent of the ratio of first and second input arguments x / y", so
+#     the numerator is first and the names are the trap.
+#
+#     `atan2(a, b)` and `atan2(b, a)` agree only where `|a| = |b|` and both
+#     are on the same side, so the corpus reddens this everywhere else. The
+#     file is the same length: two operand indices exchanged.
+trig_writer_mutant atan2-operands-swapped \
+  '    emit_ref(emit_ref(w2, lhs), rhs)' \
+  '    if op == "atan2" { emit_ref(emit_ref(w2, rhs), lhs) } else { emit_ref(emit_ref(w2, lhs), rhs) }'
+
+# ---- knife T2's four writer mutants
+#
+# Every one of them rewrites HOW ONE OPCODE IS WRITTEN and nothing else,
+# which is what the feature ledger (scripts/tileir-features/features.txt)
+# counts as layer-3 evidence for that opcode. All four are accepted by
+# `tileiras`, so layer 1 sees nothing; the device is the only judge.
+#
+# The four opcodes that are NOT here are `cat`'s dimension and the three
+# pointer conversions, and the reason is the same in every case: what those
+# say is a TYPE. `cat`'s `dim` decides the result shape, and `ptr_to_int`,
+# `int_to_ptr` and `ptr_to_ptr` decide the element format, so any wrong
+# writing of one is refused by the assembler before a device sees it. Their
+# mutants are in scripts/tile-golden/run.sh, where a refusal is the verdict.
+shape_pkg_mutant() { # name, module, old, new, red-kernels...
+  local name="$1" module="$2" old="$3" new="$4"
+  shift 4
+  local pkg="$work/pkg-$name" before after k rc mverdict differ moved
+  local want=$#
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+  mutant_kernels "$name" "$pkg" "${shaped[@]}"
+  moved=0
+  for k in "${shaped[@]}"; do
+    cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" || moved=$((moved + 1))
+  done
+  # each of these four opcodes is emitted by exactly the kernels that go
+  # red, so the bytes that move and the answers that move are one set
+  [ "$moved" = "$want" ] ||
+    fail "$name: expected exactly $want of the ${#shaped[@]} kernels' bytecode to move, got $moved"
+  local cubins=()
+  for k in "${shaped[@]}"; do cubins+=("$work/$name-$k.cubin"); done
+  rc=0
+  "$work/shape.bin" "${cubins[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  if [ "$shape_verdict" = pass ]; then
+    differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+    if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "$want" ]; then
+      cat "$work/m-$name.out" >&2
+      fail "$name mutant stayed green: expected verdict fail (exit 1) with exactly $want kernel(s) saying differ:result, got $mverdict (exit $rc, $differ differing)"
+    fi
+    for k in "$@"; do
+      awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+        "$work/m-$name.out" ||
+        { cat "$work/m-$name.out" >&2; fail "$name: $k carries the mutated opcode and should differ"; }
+    done
+    echo "PASS  mutant: $name (layer 1 accepts it; on the device $* differ and the other kernels do not)"
+  else
+    [ "$mverdict" = "$shape_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $shape_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $shape_verdict, before any launch reaches the device"
+  fi
+}
+
+# 25. permute-identity: the writer sends the identity permutation instead of
+#     the kernel's own. `shape_ops` permutes a 4 by 4 by 8 tile by
+#     [1, 0, 2], whose first two dimensions are EQUAL, so the identity
+#     gives the same result TYPE and the assembler has nothing to object
+#     to. On a tile whose dimensions differed this would be a shape error
+#     and never reach the device, which is why the kernel's shape is what
+#     it is (kernels.dawn says so beside it).
+shape_pkg_mutant permute-identity bytecode.dawn \
+  'let w1 = emit_i32_array(emit_op(w0, OP_PERMUTE, to), perm)' \
+  'let w1 = emit_i32_array(emit_op(w0, OP_PERMUTE, to), list.map(range(0, len(perm)), k => k))' \
+  shape_ops
+
+# 26. cat-operands-swapped: the writer concatenates the two operands the
+#     other way round. Both have the same type, so the result type is
+#     unchanged and layer 1 is happy; `shape_ops` puts the tile's lower
+#     half above its upper one, so swapping them puts it back and the
+#     answer is the source tile rather than the exchange.
+shape_pkg_mutant cat-operands-swapped bytecode.dawn \
+  'emit_ref(emit_ref(emit(emit_op(w0, OP_CAT, to), dim), lhs), rhs)' \
+  'emit_ref(emit_ref(emit(emit_op(w0, OP_CAT, to), dim), rhs), lhs)' \
+  shape_ops
+
+# 27. extract-indices-reversed: the writer emits `extract`'s slice indices
+#     in the opposite order. Every index is a rank-0 i32 tile, so the types
+#     are the same and layer 1 accepts it; `shape_ops` extracts with
+#     [1, 0] from a tile that has two slices along BOTH dimensions, so [0, 1]
+#     names a different quarter and is still in bounds. A source whose
+#     second dimension had one slice would make the reversed pair
+#     out of bounds, and out of bounds is undefined rather than wrong.
+shape_pkg_mutant extract-indices-reversed bytecode.dawn \
+  'list.fold(indices, emit_ref(w1, src), emit_ref)' \
+  'list.fold(list.reverse(indices), emit_ref(w1, src), emit_ref)' \
+  shape_ops
+
+# 28. num-tile-blocks-as-block-id: the writer emits `get_tile_block_id`
+#     where `get_num_tile_blocks` belongs. The two operations have exactly
+#     the same shape -- three rank-0 i32 results, no operands, no
+#     attributes -- so the file is the same length and every layer below
+#     the device reads a legal program. `grid_stride` then strides by its
+#     own block index instead of the grid's extent, so three blocks cover
+#     seven of the twelve tiles and five keep the sentinel.
+shape_pkg_mutant num-tile-blocks-as-block-id bytecode.dawn \
+  'emit(emit(emit(emit(w1, OP_GET_NUM_TILE_BLOCKS), ti), ti), ti)' \
+  'emit(emit(emit(emit(w1, OP_GET_TILE_BLOCK_ID), ti), ti), ti)' \
+  grid_stride
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -2576,6 +2867,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/int_diff.dawn scripts/tile-gpu-diff/wide_diff.dawn \
   scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/scan_diff.dawn \
   scripts/tile-gpu-diff/atom_diff.dawn scripts/tile-gpu-diff/erf_diff.dawn \
+  scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
@@ -2583,7 +2875,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
 commit="$(git rev-parse --short=12 HEAD)"
 today="$(date -u +%F)"
 line="$commit $today $driver $want_tileiras $gpu_name $verdict"
-summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe"
+summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per-op=$trig_probe"
 summary="$summary seq-launches=$seq_launch_probe"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
