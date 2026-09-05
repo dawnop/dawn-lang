@@ -3634,6 +3634,11 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
         None -> false
       }
     }
+    EFieldAcc(target, name, _, _, _, _) ->
+      match qual_fn(cx, target, name) {
+        Some(s) -> len(s.tparams) > 0
+        None -> false
+      }
     ECtor(cname, cargs, spread, has_parens, _, _, _, _) ->
       match map.get(cx.ctors_by_name, cname) {
         None -> false
@@ -6937,10 +6942,11 @@ fn check_local_fn(
 
 # ---- calls ----
 
-fn is_lambda_or_var(e: Expr) -> Bool =
+fn accepts_partial_expected(cx: Cx, e: Expr) -> Bool =
   match e {
     ELambda(_, _, _, _, _) -> true
     EVar(_, _, _) -> true
+    EFieldAcc(target, name, _, _, _, _) -> qual_fn(cx, target, name) != None
     _ -> false
   }
 
@@ -7297,7 +7303,7 @@ fn check_call(
         # lambdas only need their parameter types, and function values unify
         # piecewise — a partially concrete expected type still helps
         let exp2: Option[Ty] =
-          if is_concrete(cx1, substd) || is_lambda_or_var(a) { Some(substd) } else { None }
+          if is_concrete(cx1, substd) || accepts_partial_expected(cx1, a) { Some(substd) } else { None }
         let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
         cx1 = cxa
         at_i = Some(at)
@@ -12924,7 +12930,11 @@ test "qualified exported functions are values with contextual generic inference"
   let env = map.from([("helper", exports_of(provider, m, "helper", "helper"))])
   let (user, ud) = parser.parse_module("use helper as h\n" ++
       "fn apply(f: fn(Int) -> Int, x: Int) -> Int = f(x)\n" ++
+      "fn apply_same[T](f: fn(T) -> T, x: T) -> T = f(x)\n" ++
+      "fn apply_generic[T, U](f: fn(T) -> U, x: T) -> U = f(x)\n" ++
       "fn go() -> Int = apply(h.double, 4) + apply(h.identity, 3)\n" ++
+      "fn inferred() -> Int = { let n = apply_same(h.identity, 3)\n" ++
+      " let m = apply_generic(h.identity, 4)\n n + m }\n" ++
       "fn stored() -> Int = { let f = h.double\n f(5) }\n")
   assert len(ud) == 0
   let (checked, _) = check_module(cx_new(Some("main"), None), user, env)
