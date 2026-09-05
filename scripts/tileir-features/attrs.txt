@@ -75,7 +75,10 @@
 #               mutant:<family> a mutant family that reddens on it
 #   exemption   a named reason, where the bar of layer 2 is impossible
 #               rather than merely absent, and `-` at or above the bar.
-#               check.py holds both directions, as it does for types.txt
+#               check.py holds both directions, as it does for types.txt.
+#               An `unimplemented` row carries one only where the knife
+#               column was REASSIGNED and the reason is not the plan's:
+#               `13.3-record-field` is knife T7's three, handed to T8
 #
 # THE THREE LAYERS are docs/tile-backend-design.md 6.2, and layer 3 is read
 # here as features.txt reads it: a mutant counts for a value when its anchor
@@ -138,6 +141,25 @@
 #       The view family, deferred with the nine view opcodes until knives
 #       T11 to T13 (docs 2.4). `PaddingValue` is a parameter of the view
 #       TYPES (Types.td), not of any operation this backend emits.
+#   13.3-record-field
+#       `visibility.public`, `visibility.private` and `unit.constant` were
+#       knife T7's on the prestudy's plan, and T7 measured them out of it.
+#       The SymbolVisibility enum is 13.1 (AttrDefs.td gives both cases
+#       that version, which is what the `since` column says), but the two
+#       places a writer could put either value are not: Ops.td versions
+#       GlobalOp's `symbol_visibility` and `constant` arguments "13.3", and
+#       BytecodeWriter.cpp's writeGlobalSection writes four varints per
+#       global below 13.3 and six at or above it, while
+#       BytecodeReader.cpp's parseGlobalSection switches its
+#       `kMinGlobalInfoSize` from 4 to 6 on the same boundary. So at the
+#       13.2 this tree pins there is no byte to write them in: `public` is
+#       the value the reader defaults to and writes nothing for, and
+#       `private` the C++ writer refuses outright ("uses non-public symbol
+#       visibility, which cannot be encoded in bytecode version 13.2").
+#       scripts/tile-golden's global-visibility-written-at-13-2 is the
+#       measurement from this side: emitting the two extra varints at 13.2
+#       makes the assembler read the next global's record out of them.
+#       Knife T8 is the version wall and owns all three.
 #
 # feature | code | since | status | knife | layer | evidence | exemption
 rounding.nearest_even        | 0 | 13.1 | implemented   | 3   | 3 | const:ROUND_NEAREST_EVEN,golden:vadd,device:vadd,mutant:addf-no-rounding                              | -
@@ -175,15 +197,15 @@ unit.flush_to_zero           | 1 | 13.1 | implemented   | T4  | 3 | const:FLOAT_
 unit.propagate_nan           | 1 | 13.1 | implemented   | T4  | 3 | const:MINMAX_FLAG_PROPAGATE_NAN,golden:attr_nan,device:attr_nan,mutant:propagate-nan-bit-dropped      | -
 unit.unsignedCmp             | 1 | 13.2 | implemented   | T4  | 3 | const:FOR_FLAG_UNSIGNED,golden:attr_ucmp,device:attr_ucmp,mutant:for-unsigned-bit-dropped             | -
 unit.fast_acc                | 1 | 13.3 | unimplemented | T8  | 0 | -                                                                                                     | -
-unit.constant                | 1 | 13.3 | unimplemented | T7  | 0 | -                                                                                                     | -
+unit.constant                | 1 | 13.3 | unimplemented | T8  | 0 | -                                                                                                     | 13.3-record-field
 unit.global                  | 1 | 13.3 | unimplemented | T10 | 0 | -                                                                                                     | -
 padding.zero                 | 0 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.neg_zero             | 1 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.nan                  | 2 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.pos_inf              | 3 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.neg_inf              | 4 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
-visibility.public            | 0 | 13.1 | unimplemented | T7  | 0 | -                                                                                                     | -
-visibility.private           | 1 | 13.1 | unimplemented | T7  | 0 | -                                                                                                     | -
+visibility.public            | 0 | 13.1 | unimplemented | T8  | 0 | -                                                                                                     | 13.3-record-field
+visibility.private           | 1 | 13.1 | unimplemented | T8  | 0 | -                                                                                                     | 13.3-record-field
 tag.String                   |  5 | 13.1 | implemented   | T6  | 1 | writer:str_of,golden:assert_pass,golden:print_tile,mutant:assert-message-tagged                       | tag-not-emitted
 tag.DivBy                    |  8 | 13.1 | implemented   | T6  | 1 | const:ATTR_DIV_BY,golden:assume_divby,mutant:assume-divby-tag-as-same-elements                        | assumption-not-arithmetic
 tag.SameElements             |  9 | 13.1 | implemented   | T6  | 1 | const:ATTR_SAME_ELEMENTS,golden:assume_same,mutant:assume-divby-tag-as-same-elements,mutant:assume-same-elements-payload-four-bytes | assumption-not-arithmetic

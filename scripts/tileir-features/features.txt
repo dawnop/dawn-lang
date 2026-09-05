@@ -69,11 +69,16 @@
 #
 #   sections    Debug (id 3), Global (id 6) and Producer (id 7, 13.3) are
 #               bytecode SECTIONS. `global` 0x31 and `get_global` 0x2C have
-#               rows because they are opcodes in the text dialect, but what
-#               knife T7 has to build is the Global section; the Debug
-#               section is deferred by ruling 4 until a toolchain ships
-#               `tileirdisasm`, and the Producer section is optional and not
-#               written.
+#               rows because they are opcodes in the text dialect, and what
+#               knife T7 built is the Global section: `get_global` is an
+#               instruction of the entry and is `implemented`, `global` is
+#               a record of the module and is `structural`, for the same
+#               reason `entry` and `module` are (the writer never puts it
+#               in the instruction stream; BytecodeWriter.cpp collects the
+#               module's GlobalOps into writeGlobalSection instead). The
+#               Debug section is deferred by ruling 4 until a toolchain
+#               ships `tileirdisasm`, and the Producer section is optional
+#               and not written.
 #   type tags   the scalar formats and the type constructors
 #               (BytecodeTypeOpcodes.td) are a separate table. Eight scalar
 #               formats and four constructors are missing; knives T3 and T9
@@ -85,10 +90,13 @@
 #               OptimizationHints, which is a dictionary rather than a
 #               domain of values and is in neither.
 #
-# `entry` 0x16 and `module` 0x4B are STRUCTURAL: the writer never puts either
-# in the instruction stream. `module` is the file and `entry` is a record in
-# the Func section, both emitted by bytecode.encode_kernel, which is what
-# their evidence names. They are covered by every kernel here.
+# `entry` 0x16, `module` 0x4B and `global` 0x31 are STRUCTURAL: the writer
+# never puts any of them in the instruction stream. `module` is the file and
+# `entry` is a record in the Func section, both emitted by
+# bytecode.encode_kernel; `global` is a record in the Global section,
+# emitted by bytecode.global_section. That is what their evidence names.
+# The first two are covered by every kernel here; `global` by the two that
+# declare one.
 #
 # name | code | since | status | knife | layer | evidence | exemption
 absf                     | 0x00 | 13.1 | implemented   | 7a  | 2 | golden:erf_sweep,golden:elemops                                                                                           | -
@@ -123,12 +131,12 @@ fma                      | 0x28 | 13.1 | implemented   | 7a  | 2 | golden:linrec
 for                      | 0x29 | 13.1 | implemented   | 5   | 3 | golden:foldif,golden:lora_hidden,mutant:for-results-not-rolled-back,mutant:loop-token-not-carried,mutant:region-stack-pop | -
 ftof                     | 0x2A | 13.1 | implemented   | 11  | 2 | golden:dot_f16                                                                                                            | -
 ftoi                     | 0x2B | 13.1 | implemented   | 10  | 3 | golden:int_ops,golden:sort_rank,mutant:ftoi-rounds-instead-of-truncates                                                   | -
-get_global               | 0x2C | 13.1 | unimplemented | T7  | 0 | -                                                                                                                         | -
+get_global               | 0x2C | 13.1 | implemented   | T7  | 3 | golden:global_table,mutant:get-global-symbol-not-written,mutant:get-global-wrong-symbol                                   | -
 get_index_space_shape    | 0x2D | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
 get_num_tile_blocks      | 0x2E | 13.1 | implemented   | T2  | 3 | golden:grid_stride,mutant:num-tile-blocks-as-block-id                                                                     | -
 get_tensor_shape         | 0x2F | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
 get_tile_block_id        | 0x30 | 13.1 | implemented   | 3   | 3 | golden:invert,golden:copy,mutant:grid-y-ignored                                                                           | -
-global                   | 0x31 | 13.1 | unimplemented | T7  | 0 | -                                                                                                                         | -
+global                   | 0x31 | 13.1 | structural    | T7  | 3 | golden:global_table,writer:global_section,mutant:global-record-alignment-dropped,mutant:global-initializer-reversed       | -
 if                       | 0x32 | 13.1 | implemented   | 7b  | 2 | golden:foldif                                                                                                             | -
 int_to_ptr               | 0x33 | 13.1 | implemented   | T2  | 3 | golden:ptr_roundtrip,mutant:int-to-ptr-as-ptr-to-int                                                                      | -
 iota                     | 0x3A | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
