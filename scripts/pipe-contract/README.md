@@ -95,7 +95,7 @@ side was checked the same way: re-aiming `wrap-nested-call` at every `EApply`
 | `parse-rhs-one-level-tighter` | and a whole one, not the tighter `and_expr` | `or_rhs` says `cannot call a value of type Bool` |
 | `hoist-left-before-callee` | the left side is an argument, evaluated after the target | `eval_order`'s first line is `eval callee` |
 | `allow-record-apply` | a record is built with braces however the call was spelled | `record_apply` reports both refusals |
-| `route-qualified-name-into-call` | a bare `m.f` is a value the pipe applies | `module_member` says `has no exported value` |
+| `route-qualified-name-into-call` | a bare `m.f` is a value the pipe applies | `module_member` reports function-value arity, without a declaration name |
 | `drop-lsp-qualified-call-children` | the editor maps a qualified call's typed children | hover `qualified call, written` |
 | `drop-lsp-qualified-ctor` | and a qualified construction's, which is an `XCtor` | hover `qualified ctor, written` |
 

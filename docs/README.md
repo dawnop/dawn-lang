@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` 下现有 101 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 103 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
@@ -61,9 +61,11 @@
 | [native-driver-plan.md](native-driver-plan.md) | current | **B 线**：native 驱动补全 + 把后端契约摆到明面上——K-B 刀表、「5,373 行零 `use java`」的核对、以及那条最重要的更正：几条差分脚本的被测方原本写死 `./bin/dawn`，**接上线不会自动覆盖 native**（已由 `native-cli-diff.sh` 修掉）。**七刀已结**：K-B1–K-B5 与 K-B7 落地（逐刀带红演示与阴性对照），K-B6（`use c` FFI）明确推迟。 |
 | [jvm-base-plan.md](jvm-base-plan.md) | current | **A 线**：收缩 JVM 后端的可信底座——V49（classfile major 61 → 49）可行性审计的结论与三个代价数、九条被推翻的预设、K-A 刀表。**已 done**：K-A0/K-A0.5/K-A1/K-A3/K-A5/K-A4/K-A6 与 K-A7 期 1/2/3 全部落地，K-A2 取消，`dawn/tool` 已退出 jar 与可信底座（`b66f1d7`）；K-A8.1/K-A8.2 把帧 oracle 装回来并升到 major 52（§5.10、§5.11），K-A8.3 把 52 买回来的接口静态方法登成语料与门禁（§5.12）——K-A 刀表至此全部结清。 |
 | [std-pruning-design.md](std-pruning-design.md) | current | 按程序裁剪 std：一次可达性走图，两个后端的 emit 边界上按模块 + 按函数裁；根是用户模块与发射器直呼的十个 `std/pvec` 名字，`--stdlib` 与无 target 两条全留；顺手把字典副本的归属从「先遇到的」改成确定性的最小 owner（issue #69）。check 与 lowering 一字未动，所以 Core golden 不动。 |
+| [qualified-function-value-design.md](qualified-function-value-design.md) | current | 模块限定函数值的解析、两轮泛型推断与包依赖回归（#66）。 |
 | [perceus-design.md](perceus-design.md) | current | native 的内存管理（精确 RC + 复用分析）。五刀已全部落地，关账在其 §8；仍是该子系统的权威说明。 |
 | [slab-residency-design.md](slab-residency-design.md) | **current** | #10 的 measurement-first 调研与落地：把 lexer 小活集的 RSS 拆成 eager 64 KiB layout、空 current、每类 empty cache、rounding 与 `madvise` 五份；以 lexer/compiler/持久红黑树矩阵裁定 fresh slab 按 32 KiB 增量 materialize，保留 hot path、empty cache 与退役策略。 |
 | [native-loop-control-design.md](native-loop-control-design.md) | current | native RC 的 `unloop` 只拆 match 一次性循环，保留仍被源码 `break`/`continue` 指向的循环与 C 标签。 |
+| [rc-operand-unwind-design.md](rc-operand-unwind-design.md) | current | #68：后续操作数提前返回时释放先前提升的引用，保留自引用赋值的最后使用转移。 |
 | [range-bound-order-design.md](range-bound-order-design.md) | current | SEM-18 的 range `for` 边界求值顺序、共享 Core 修复与 compiling mutant 契约。 |
 | [for-pattern-design.md](for-pattern-design.md) | current | SYN-13 的定稿：`for` 复用完整不可反驳 pattern、隐藏 loop locals、空 alternative 的 token recovery、限定 constructor completion、Core placement 与 28 条独立负控。 |
 | [compiler-weight-baseline-design.md](compiler-weight-baseline-design.md) | current | #230 的严格重量基线与 dependency re-exec 堆继承：Phase 1 固定 release 产物、递归进程树 RSS、逐角色堆与 VAS、启动时间和 JSON schema，Phase 2 让子编译器继承父 JVM 的实际最大堆并由真实 `jcmd` 负控固定。 |
