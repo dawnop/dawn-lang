@@ -252,6 +252,31 @@
 #                            attribute and in the operand count, and this is
 #                            the half of that a byte golden would simply be
 #                            re-recorded over
+#     global-record-alignment-dropped
+#                            the Global section's record loses its fourth
+#                            varint (the alignment) -> global_table's text
+#                            is untouched, its bytes are the same length
+#                            and differ, and the reader refuses the section
+#                            before reading a record: two globals do not
+#                            fit in a payload that holds one
+#     global-visibility-written-at-13-2
+#                            the writer emits the two fields the record
+#                            grew at 13.3, `symbol_visibility` and
+#                            `constant`, into a 13.2 file -> global_table's
+#                            text is untouched, its bytes are the same
+#                            length and differ, and the reader takes the
+#                            second global's fields from the first
+#                            record's extra pair and answers NULL TYPE.
+#                            This is the version wall from the inside, and
+#                            the reason attrs.txt hands the two visibility
+#                            values and `constant` to knife T8
+#     get-global-symbol-not-written
+#                            `get_global` stops writing its symbol, which
+#                            is one varint (a FlatSymbolRefAttr is a string
+#                            table index and nothing else) -> global_table's
+#                            text is untouched, its bytes are the same
+#                            length and differ, and the reader takes
+#                            `reshape`'s opcode for the string index
 #
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time -- one local run measured
@@ -321,7 +346,8 @@ kernels=(
   attr_round attr_nan attr_ftz attr_approx
   attr_overflow attr_memsem attr_addf attr_ucmp
   assert_pass assert_fail print_tile assume_divby
-  assume_same assume_bounded)
+  assume_same assume_bounded
+  global_table global_ctl global_scratch)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -393,6 +419,9 @@ mutants=(
   assume-divby-tag-as-same-elements
   assume-same-elements-payload-four-bytes
   assume-bounded-bounds-swapped
+  global-record-alignment-dropped
+  global-visibility-written-at-13-2
+  get-global-symbol-not-written
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -1418,6 +1447,51 @@ if run_item assume-bounded-bounds-swapped; then
     '    emit_opt_signed(emit_opt_signed(w1, ub), lb)'
   writer_mutant_checks assume-bounded-bounds-swapped assume_bounded same-size \
     "'cuda_tile.bounded' expects lower bound to be less than or equal to upper bound"
+fi
+
+# 37. The Global section's record loses its last field. The record is four
+#     varints (name, type, constant, alignment) and this writes three, so
+#     the reader takes the SECOND global's name index from the first
+#     record's leftover and reads the rest of the section off by one field.
+#     `global_table` declares two globals for this reason: with one global
+#     the three varints would be followed by nothing and the trailing byte
+#     the reader never looks at would hide the mutant.
+if run_item global-record-alignment-dropped; then
+  mutant_project global-record-alignment-dropped bytecode.dawn \
+    '    (wc, put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align))' \
+    '    (wc, put_varint(put_varint(put_varint(b, si), ti), ci))'
+  writer_mutant_checks global-record-alignment-dropped global_table same-size \
+    "number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 6 bytes"
+fi
+
+# 38. The writer emits the two fields the Global section grew at 13.3
+#     (`symbol_visibility` and `constant`) into a 13.2 file. This is the
+#     version wall from the inside: the reader's kMinGlobalInfoSize is 4
+#     below 13.3 and 6 at or above it, so the extra pair is not a longer
+#     record a reader skips, it is where the NEXT global's record is read
+#     from. It is also why attrs.txt hands visibility.public,
+#     visibility.private and unit.constant to knife T8 rather than to this
+#     one: at 13.2 there is no byte to put them in.
+if run_item global-visibility-written-at-13-2; then
+  mutant_project global-visibility-written-at-13-2 bytecode.dawn \
+    '    (wc, put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align))' \
+    '    (wc, put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align), 0), 0))'
+  writer_mutant_checks global-visibility-written-at-13-2 global_table same-size \
+    "expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'"
+fi
+
+# 39. `get_global` stops writing its symbol. A FlatSymbolRefAttr is one
+#     varint, the string table index, and without it the reader takes the
+#     next byte of the instruction stream for the symbol: 91, which is
+#     `reshape`'s opcode 0x5B, and the string table has three entries.
+if run_item get-global-symbol-not-written; then
+  mutant_project get-global-symbol-not-written bytecode.dawn \
+    '    let (w2, si) = str_of(w1, sym)
+    emit(w2, si)' \
+    '    let (w2, _si) = str_of(w1, sym)
+    w2'
+  writer_mutant_checks get-global-symbol-not-written global_table same-size \
+    "failed to read string for FlatSymbolRefAttr"
 fi
 
 _item_tick ""

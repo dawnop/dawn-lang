@@ -4236,6 +4236,69 @@ pub fn print_tile_max(x: List[Float], n: Int) -> Int =
     let v = as_i32(x, i)
     if v > acc { v } else { acc }
   })
+# ---- knife T7: the module's static globals ----
+
+## The two tables `global_table`'s module declares as static globals, and
+## the values the host says they hold. They are here rather than in the
+## kernel source because BOTH sides need them: the kernel bakes them into
+## the Global section's initializer and the reference below answers with
+## them, and the whole judgement is that the device reads back what the
+## host declared.
+##
+## Neither table is a palindrome and neither is a splat, which is what the
+## two writer mutants need: an initializer written backwards and one
+## written as a one-element splat are both legal Tile IR, and only a
+## corpus that can tell them from the truth says so.
+pub fn global_table_a(n: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float(i) * 0.5 + 1.0)
+
+pub fn global_table_b(n: Int) -> List[Float] =
+  list.map(range(0, n), i => 0.0 - to_float(i * i) - 0.25)
+
+## `global_table`: two segments of `n` lanes, each the corresponding table
+## plus the input, and the rest of the output buffer left alone. `ins` is
+## `[x, out]`.
+##
+## EXACT TIER BY ALGEBRA: one `addf` per lane with `rounding<nearest_even>`,
+## which is what a binary64 `+` is.
+pub fn global_table_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let a = global_table_a(n)
+  let b = global_table_b(n)
+  let dt = dtypes[1]
+  segments(ins[1], n, 2, (seg, i) => round_to(dt, (if seg == 0 { a[i] } else { b[i] }) + x[i]))
+}
+
+## `global_ctl`: the same two segments computed from two BUFFERS instead of
+## two globals. `ins` is `[a, b, x, out]`. The kernel it answers for holds
+## neither `global` nor `get_global`, so it is the T7 family's kernel-level
+## control and a second opinion on the tables at the same time.
+pub fn global_ctl_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let x = ins[2]
+  let dt = dtypes[3]
+  segments(ins[3], n, 2, (seg, i) => round_to(dt, (if seg == 0 { a[i] } else { b[i] }) + x[i]))
+}
+
+## `global_scratch`: the output buffer plus the input, lane by lane. `ins`
+## is `[x, out]`.
+##
+## THIS ONE IS NOT THE KERNEL'S ALGORITHM, and that is the point. The
+## kernel adds its input to a mutable GLOBAL and writes the sum to both;
+## the reference adds it to the OUTPUT BUFFER, which is where the host can
+## see the same running total. The two agree only while the global keeps
+## its value from one launch to the next, so a sequence of launches of the
+## same module is a judgement about the lifetime of a static allocation and
+## not about arithmetic. The global's initializer is zeros and so is the
+## output buffer's first `n` lanes, which is what starts the two totals
+## together.
+pub fn global_scratch_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let out = ins[1]
+  let dt = dtypes[1]
+  segments(out, n, 1, (_seg, i) => round_to(dt, out[i] + x[i]))
+}
 
 pub alias RefFn = fn(List[String], List[List[Float]]) -> List[Float]
 
