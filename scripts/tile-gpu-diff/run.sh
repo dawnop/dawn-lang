@@ -1187,7 +1187,7 @@ esac
 if [ "$attr_verdict" = pass ]; then
   attr_probe_line="$(sed -n 's/^probe attrs //p' "$work/attr.out" | tail -n 1)"
   for claim in attr_round:add attr_round:mul attr_round:div attr_nan:ordering attr_nan:maxf \
-    attr_nan:minf attr_ftz:add attr_ftz:mul attr_approx:lanes; do
+    attr_nan:minf attr_ftz:add attr_ftz:mul attr_ftz:normal_sum attr_approx:lanes; do
     field="${claim#*:}"
     kernel="${claim%%:*}"
     value="$(printf '%s\n' "$attr_probe_line" | tr ' ' '\n' | sed -n "s/^${kernel}:${field}=//p" | head -n 1)"
@@ -1196,6 +1196,17 @@ if [ "$attr_verdict" = pass ]; then
     [ "$value" -gt 0 ] 2> /dev/null ||
       { printf '%s\n' "$attr_probe_line" >&2; fail "$claim is $value: the attribute moved no lane, so nothing here is evidence about it"; }
   done
+  # The CORPUS half of attr_ftz's third lane shape, held where the probe
+  # cannot: the probe says the device moved those lanes, this says the
+  # corpus still has lanes for it to move. Two failures that would read
+  # the same on one pin (the shape gone, or the device no longer flushing
+  # operands) read differently on two.
+  ftz_shape="$(awk '$1 == "kernel" && $2 == "attr_ftz" {f=1} f && /^  index /{print; exit}' "$work/attr.out")"
+  normal_sum="$(printf '%s\n' "$ftz_shape" | tr ' ' '\n' | sed -n 's/^normal_sum_from_subnormal=//p')"
+  [ -n "$normal_sum" ] && [ "$normal_sum" -gt 0 ] 2> /dev/null ||
+    { printf '%s\n' "$ftz_shape" >&2; fail "attr_ftz's corpus has no lane whose sum is normal and whose operand is subnormal, so only the result flush is being tested"; }
+  echo "PASS  corpus: attr_ftz has a lane shape only the operand flush can move ($ftz_shape)"
+
   # The loop bound comparison is not a lane count but two numbers, and both
   # of them are the claim: a signed comparison of this range runs the loop
   # no times and an unsigned one runs it thirty-two times.

@@ -51,11 +51,19 @@
 #     `propagate_nan` answers a canonical NaN only when both operands are
 #     NaN, so a corpus with NaNs on one side only could not tell the two
 #     policies apart from `maxf` being wrong.
-#   * SUBNORMALS in `attr_ftz`, as operands and as results. Half the lanes
-#     add two subnormals (a subnormal sum, which the attribute flushes)
-#     and half multiply a subnormal by a normal (a subnormal product);
-#     with ordinary operands the four segments would be two pairs of
-#     equals and the kernel would say nothing.
+#   * SUBNORMALS in `attr_ftz`, as operands and as results, in THREE lane
+#     shapes: a subnormal sum, a subnormal product, and a NORMAL sum built
+#     from a subnormal operand (2^-126 + k * 2^-149). The first two were
+#     the whole corpus until knife T6, and both produce a subnormal
+#     RESULT, so flushing the result alone accounts for every lane of them
+#     -- measured, by removing only the two operand flushes from
+#     std/gpu.attr_ftz_ref and watching all eight attribute kernels stay
+#     green. `flush_to_zero` flushes operands too, and the third shape is
+#     the only one here that says so: its sum is normal, so the result
+#     flush cannot reach it, and the answer is exactly 2^-126 when the
+#     subnormal operand is flushed and k ulps above it when it is not.
+#     The probe field `attr_ftz:normal_sum` counts those lanes and run.sh
+#     holds it above zero.
 #   * a corpus that does NOT overflow in `attr_overflow`. An operation
 #     that wraps under `no_signed_wrap` is undefined, so a corpus that
 #     wrapped would be asking a question the dialect refuses to answer.
@@ -315,6 +323,23 @@ fn differing(v: List[Float], segs: Int, ja: Int, jb: Int) -> Int =
     to_string(v[at(segs, b, ja, lane)]) != to_string(v[at(segs, b, jb, lane)])
   }))
 
+## How many lanes of segment `ja` differ from `jb` while segment `ja`'s own
+## value is NORMAL. That extra clause is the whole of the difference
+## between this and `differing`: a lane whose plain result is normal cannot
+## have been moved by flushing the RESULT, so what moved it is the operand
+## flush. Knife T6 added it with the third lane shape, because the corpus
+## before that one made `add` and `mul` explainable by the result flush
+## alone (measured: dropping only the two operand flushes from
+## std/gpu.attr_ftz_ref left every attribute kernel green).
+fn differing_normal(v: List[Float], segs: Int, ja: Int, jb: Int) -> Int =
+  len(list.filter(range(0, ATTR_BLOCKS * ATTR_TILE), k => {
+    let b = k / ATTR_TILE
+    let lane = k % ATTR_TILE
+    let a = v[at(segs, b, ja, lane)]
+    magnitude(a) >= F32_MIN_NORMAL
+      && to_string(a) != to_string(v[at(segs, b, jb, lane)])
+  }))
+
 ## The largest RELATIVE distance between two segments, which is what the
 ## approximate square root is measured by: it has no host definition, so
 ## the number recorded is how far the architecture's approximation is from
@@ -346,7 +371,8 @@ fn probe_fields(name: String, v: List[Float]) -> List[String] =
     ["ordering=${ordering}", "maxf=${differing(v, NAN_SEGS, 12, 13)}",
       "minf=${differing(v, NAN_SEGS, 14, 15)}"]
   } else if name == "attr_ftz" {
-    ["add=${differing(v, FTZ_SEGS, 0, 1)}", "mul=${differing(v, FTZ_SEGS, 2, 3)}"]
+    ["add=${differing(v, FTZ_SEGS, 0, 1)}", "mul=${differing(v, FTZ_SEGS, 2, 3)}",
+      "normal_sum=${differing_normal(v, FTZ_SEGS, 0, 1)}"]
   } else if name == "attr_approx" {
     ["lanes=${differing(v, APPROX_SEGS, 0, 1)}",
       "distance=${segment_distance(v, APPROX_SEGS, 0, 1)}"]
@@ -418,17 +444,36 @@ fn nan_values(shift: Int) -> List[Float] = {
   list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i => table[(i + shift) % 8])
 }
 
-## attr_ftz's operands: on the even lanes two subnormals, whose sum is
-## subnormal, and on the odd lanes a subnormal against a normal, whose
-## product is subnormal. Both halves are needed, because the addition
-## shows the attribute on the first and the multiplication on the second.
+## attr_ftz's operands, in THREE lane shapes, and the third one is the
+## reason the other two are not enough.
+##
+##   i % 3 == 0  two subnormals, whose SUM is subnormal
+##   i % 3 == 1  a subnormal against 1.0, whose PRODUCT is subnormal
+##   i % 3 == 2  the smallest normal against a subnormal, whose sum is
+##               NORMAL: 2^-126 + k * 2^-149 for k in 1..7
+##
+## The first two were the whole corpus until this knife, and every result
+## they produce is itself subnormal, so FLUSHING THE RESULT explains all of
+## it: measured by removing only the two operand flushes from
+## std/gpu.attr_ftz_ref, which left all eight attribute kernels green.
+## `flush_to_zero` flushes operands as well (the dialect says so), and the
+## third shape is the only one here that can see it: 2^-126 + k * 2^-149 is
+## a normal number, so the result flush cannot touch it, and the answer is
+## exactly 2^-126 when the subnormal operand is flushed and k ulps above it
+## when it is not.
 fn ftz_x() -> List[Float] =
   list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i =>
-      F32_MIN_SUBNORMAL * to_float(1 + i % 7))
+      if i % 3 == 2 { F32_MIN_NORMAL } else { F32_MIN_SUBNORMAL * to_float(1 + i % 7) })
 
 fn ftz_y() -> List[Float] =
   list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i =>
-      if i % 2 == 0 { F32_MIN_SUBNORMAL * to_float(1 + i % 5) } else { 1.0 })
+      if i % 3 == 0 {
+        F32_MIN_SUBNORMAL * to_float(1 + i % 5)
+      } else if i % 3 == 1 {
+        1.0
+      } else {
+        F32_MIN_SUBNORMAL * to_float(1 + i % 7)
+      })
 
 ## attr_approx's argument: positive binary32 values spread over six binary
 ## exponents, none of them a perfect square except by accident.
@@ -487,7 +532,17 @@ fn corpus_line(name: String) -> String =
     let sub_sum = list.filter(idx, i => magnitude(x[i] + y[i]) < F32_MIN_NORMAL)
     let sub_product = list.filter(idx, i => magnitude(narrow.round_f32(x[i] * y[i])) < F32_MIN_NORMAL
         && narrow.round_f32(x[i] * y[i]) != 0.0)
+    # the third shape: the sum is normal and one operand is subnormal, so
+    # only an OPERAND flush can move it
+    let normal_sum = list.filter(idx, i => {
+      let s = narrow.round_f32(x[i] + y[i])
+      let flushed = narrow.round_f32(if magnitude(x[i]) < F32_MIN_NORMAL { y[i] } else { x[i] })
+      magnitude(s) >= F32_MIN_NORMAL
+        && (magnitude(x[i]) < F32_MIN_NORMAL || magnitude(y[i]) < F32_MIN_NORMAL)
+        && s != flushed
+    })
     "lanes=${len(idx)} subnormal_sum=${len(sub_sum)} subnormal_product=${len(sub_product)}"
+      ++ " normal_sum_from_subnormal=${len(normal_sum)}"
   } else if name == "attr_overflow" {
     let x = overflow_x()
     let y = overflow_y()
