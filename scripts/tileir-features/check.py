@@ -149,9 +149,6 @@ def check(table_text, bytecode_text, files, ledger_text):
             elif ops[name] != value:
                 problems.append(
                     f"line {n}: {name} is {code} here and 0x{ops[name]:02X} in bytecode.dawn")
-            if planned:
-                problems.append(
-                    f"line {n}: {name} is implemented, so knife {knife!r} cannot be a planned one")
         else:
             if name in ops:
                 problems.append(
@@ -273,8 +270,10 @@ def self_test():
             print("  " + p)
         return 1
 
-    # A kernel no golden holds, for the layer-2 control below.
-    absent = "get_num_tile_blocks"
+    # An opcode no golden holds, for the layer-2 control below. It has to be
+    # one no knife has implemented (knife T2 took the one T0 used here) and
+    # whose mnemonic does not occur in vadd's text.
+    absent = "assume"
 
     cases = [
         ("a row with too few fields",
@@ -300,9 +299,13 @@ def self_test():
          good.replace("atan2                    | 0x6E | 13.2", "atan2                    | 0x6E | 13.1"),
          "atan2 entered at 13.2, not 13.1"),
         ("a layer-2 claim for an op no golden contains",
-         good.replace(f"{absent:24s} | 0x2E | 13.1 | unimplemented | T2  | 0 | -",
-                      f"{absent:24s} | 0x2E | 13.1 | implemented   | 3   | 2 | golden:vadd"),
+         good.replace(f"{absent:24s} | 0x06 | 13.1 | unimplemented | T6  | 0 | -",
+                      f"{absent:24s} | 0x06 | 13.1 | implemented   | 3   | 2 | golden:vadd"),
          "whose .mlir does not contain the op"),
+        ("an unimplemented row whose knife is not a planned one",
+         good.replace(f"{absent:24s} | 0x06 | 13.1 | unimplemented | T6 ",
+                      f"{absent:24s} | 0x06 | 13.1 | unimplemented | 3  "),
+         "so its knife is a planned one"),
         ("a layer-3 claim with no mutant named",
          good.replace("| 3 | golden:histogram,mutant:atomic-rmw-claims-weak-ordering,"
                       "mutant:atomic-as-plain-store",
