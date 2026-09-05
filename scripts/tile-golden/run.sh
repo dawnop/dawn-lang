@@ -952,8 +952,8 @@ fi
 #    and nowhere else, on both backends.
 if run_item addf-no-rounding; then
   mutant_project addf-no-rounding render.dawn \
-    'fn rounding(op: String) -> String = if rounds(op) { " rounding<nearest_even>" } else { "" }' \
-    'fn rounding(op: String) -> String = if rounds(op) { "" } else { "" }'
+    '  "addf" | "subf" | "mulf" | "divf" | "addf_ftz" | "mulf_ftz" -> " rounding<nearest_even>"' \
+    '  "addf" | "subf" | "mulf" | "divf" | "addf_ftz" | "mulf_ftz" -> ""'
   mutant_run addf-no-rounding vadd_bf16
   for backend in jvm native; do
     out="$work/m-addf-no-rounding.vadd_bf16.$backend"
