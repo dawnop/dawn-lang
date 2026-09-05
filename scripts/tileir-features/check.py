@@ -614,10 +614,10 @@ def feature_cases(good, bytecode, files, ledger):
                       "tanh                     | 0x6A | 13.1 | unimplemented | T1 "),
          "bytecode.dawn emits OP_TANH"),
         ("a row claiming an opcode the writer does not emit",
-         good.replace("break                    | 0x0A | 13.1 | unimplemented | T5  | 0 | -",
-                      "break                    | 0x0A | 13.1 | implemented   | 7b  | 2 | "
+         good.replace("print_tko                | 0x55 | 13.1 | unimplemented | T6  | 0 | -",
+                      "print_tko                | 0x55 | 13.1 | implemented   | 7b  | 2 | "
                       "golden:mathops"),
-         "has no OP_BREAK"),
+         "has no OP_PRINT_TKO"),
         ("a version the deltas contradict",
          good.replace("atan2                    | 0x6E | 13.2", "atan2                    | 0x6E | 13.1"),
          "atan2 entered at 13.2, not 13.1"),
@@ -649,22 +649,22 @@ def feature_cases(good, bytecode, files, ledger):
          "is deferred with no named reason"),
         ("an implemented row under a knife nobody has cut",
          good.replace("sin                      | 0x62 | 13.1 | implemented   | T1 ",
-                      "sin                      | 0x62 | 13.1 | implemented   | T5 "),
-         "knife 'T5' cannot be a planned one"),
+                      "sin                      | 0x62 | 13.1 | implemented   | T6 "),
+         "knife 'T6' cannot be a planned one"),
         ("an unimplemented row under a knife that has landed",
-         good.replace("break                    | 0x0A | 13.1 | unimplemented | T5 ",
-                      "break                    | 0x0A | 13.1 | unimplemented | T1 "),
+         good.replace("print_tko                | 0x55 | 13.1 | unimplemented | T6 ",
+                      "print_tko                | 0x55 | 13.1 | unimplemented | T1 "),
          "so its knife is a planned one"),
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
     cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
     # The other input: an OP_ the writer grew and nobody wrote down.
     grown = bytecode.replace("const OP_TANH: Int = 0x6A",
-                             "const OP_TANH: Int = 0x6A\nconst OP_BREAK: Int = 0x0A")
+                             "const OP_TANH: Int = 0x6A\nconst OP_PRINT_TKO: Int = 0x55")
     cases.append(("an OP_ constant the ledger does not call implemented", good, grown, ledger,
-                  "is marked unimplemented but bytecode.dawn emits OP_BREAK"))
+                  "is marked unimplemented but bytecode.dawn emits OP_PRINT_TKO"))
     invented = bytecode.replace("const OP_TANH: Int = 0x6A",
-                                "const OP_TANH: Int = 0x6A\nconst OP_BOGUS: Int = 0x0A")
+                                "const OP_TANH: Int = 0x6A\nconst OP_BOGUS: Int = 0x76")
     cases.append(("an OP_ constant the ledger has no row for", good, invented, ledger,
                   "and the ledger has no row for it"))
     cases.append(("an empty layer-2 ledger under layer-2 claims", good, bytecode,
