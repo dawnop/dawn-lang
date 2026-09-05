@@ -1904,6 +1904,30 @@ test "a reduction identity is a self-contained attribute: its tag, the index of 
   assert list.map(w3.types.items, hex) == ["03"]
 }
 
+test "a hint dictionary is a count, then per architecture a string index, the Dictionary tag and its own count, then per hint a string index and a self-contained i64" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let (w1, out1) = put_hints(w0, bytes.buf(), [("sm_86", [("latency", 4)])])
+  # one architecture, string 0; tag 10 because a dictionary VALUE is written
+  # self-contained; one hint, string 1; tag 1 with the index of `i64` and the
+  # value. The keys are String section INDICES and not inline bytes.
+  assert hex(bytes.freeze(out1)) == "01" ++ "00" ++ "0a" ++ "01" ++ "01" ++ "01" ++ "00" ++ "04"
+  assert list.map(w1.strs.items, hex) == [hex(bytes.utf8("sm_86")), hex(bytes.utf8("latency"))]
+  assert list.map(w1.types.items, hex) == ["04"]
+
+  # Two architectures and two hints under the second: the counts are the
+  # only thing that says where one ends, which is what
+  # scripts/tile-golden's hint-dictionary-count-wrong mutant rewrites.
+  let (_w2, out2) = put_hints(w0, bytes.buf(),
+    [("default", [("occupancy", 4)]), ("sm_86", [("num_cta_in_cga", 1), ("occupancy", 2)])])
+  assert hex(bytes.freeze(out2)) == "02"
+    ++ "00" ++ "0a" ++ "01" ++ "01" ++ "01" ++ "00" ++ "04"
+    ++ "02" ++ "0a" ++ "02" ++ "03" ++ "01" ++ "00" ++ "01" ++ "01" ++ "01" ++ "00" ++ "02"
+
+  # No hints is no bytes at all, which is why every kernel before knife T15
+  # is unchanged: the flag bit is clear and the reader never looks.
+  assert hex(bytes.freeze(emit_hints(w0, []).body)) == ""
+}
+
 fn total_prog() -> TileProg = TileProg {
   hints: [],
   name: "total",
