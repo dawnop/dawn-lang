@@ -319,7 +319,9 @@ kernels=(
   dtype_e5m2 dtype_e8m0
   loop_count loop_bound loop_until loop_none
   attr_round attr_nan attr_ftz attr_approx
-  attr_overflow attr_memsem attr_addf attr_ucmp)
+  attr_overflow attr_memsem attr_addf attr_ucmp
+  assert_pass assert_fail print_tile assume_divby
+  assume_same assume_bounded)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -386,6 +388,11 @@ mutants=(
   overflow-attr-not-written
   atomic-memory-attrs-swapped
   rmw-addf-as-add
+  assert-message-tagged
+  print-tko-token-unwritten
+  assume-divby-tag-as-same-elements
+  assume-same-elements-payload-four-bytes
+  assume-bounded-bounds-swapped
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -1338,6 +1345,79 @@ if run_item rmw-addf-as-add; then
     '  "addf" -> 3'
   writer_mutant_checks rmw-addf-as-add attr_addf same-size \
     "'cuda_tile.atomic_rmw_tko' op 'add' works only with integers i32 and i64"
+fi
+
+# 32. `assert`'s message written SELF-CONTAINED, which is the shape every
+#     other attribute in this writer has and the one this one must not.
+#     `message` is a `StrAttr`, so the ODS getter answers a `StringRef` and
+#     `writeOpAttribute` takes its own StringRef branch: the String section
+#     index and no tag. Writing tag 5 in front of it is one byte more in
+#     the Func section, and the reader takes the 5 for the index itself.
+#     This is the mutant that makes "tag 5 is never emitted here" a claim
+#     rather than an omission.
+if run_item assert-message-tagged; then
+  mutant_project assert-message-tagged bytecode.dawn \
+    '    emit_ref(emit(emit(w1, OP_ASSERT), si), cond)' \
+    '    emit_ref(emit(emit(emit(w1, OP_ASSERT), 5), si), cond)'
+  writer_mutant_checks assert-message-tagged assert_pass func-one-long \
+    "failed to parse attribute 'message'"
+fi
+
+# 33. `print_tko`'s token operand flagged and not written, which is
+#     store-token-unwritten's twin one operand group over: the flags word
+#     says the token is carried, the args are written with their own count,
+#     and then nothing follows. The reader takes the next byte of the
+#     stream for the token's value index.
+if run_item print-tko-token-unwritten; then
+  mutant_project print-tko-token-unwritten bytecode.dawn \
+    '    emit_ref(list.fold(args, emit(emit(w2, si), len(args)), emit_ref), tok_in)' \
+    '    list.fold(args, emit(emit(w2, si), len(args)), emit_ref)'
+  writer_mutant_checks print-tko-token-unwritten print_tile func-one-short \
+    "operand index 91 out of bounds (size=19) for token segment, element 0"
+fi
+
+# 34. `div_by`'s tag given to `same_elements`. One byte for one, so the file
+#     is the same length, and the reader gets as far as parsing the payload
+#     the OTHER attribute would have: it takes the divisor (32) for an
+#     element count and runs off the end of the section. This is the first
+#     of three that make the three predicate tags load-bearing.
+if run_item assume-divby-tag-as-same-elements; then
+  mutant_project assume-divby-tag-as-same-elements bytecode.dawn \
+    'const ATTR_DIV_BY: Int = 8' \
+    'const ATTR_DIV_BY: Int = 9'
+  writer_mutant_checks assume-divby-tag-as-same-elements assume_divby same-size \
+    "failed to read DenseI64ArrayAttr for SameElementsAttr"
+fi
+
+# 35. `same_elements`'s values laid down four bytes wide instead of eight.
+#     A `DenseI64ArrayAttr` is the same `writeLEVarSize` shape as
+#     `permute`'s `DenseI32ArrayAttr` one element WIDER, and nothing but
+#     the width says so: the count is written the same way and the reader
+#     takes it on trust. The Func section loses four bytes and the
+#     alignment padding after it takes them back, so the FILE is the same
+#     length; what the reader then reads for the operand is four bytes of
+#     the next instruction.
+if run_item assume-same-elements-payload-four-bytes; then
+  mutant_project assume-same-elements-payload-four-bytes bytecode.dawn \
+    '  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 8)) }' \
+    '  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 4)) }'
+  writer_mutant_checks assume-same-elements-payload-four-bytes assume_same same-size \
+    "operand index 78 out of bounds (size=17) for operand 0"
+fi
+
+# 36. `bounded`'s two bounds written the other way round. The presence byte
+#     is unchanged (both bounds are there), so this is a legal file that
+#     says a different predicate -- and the one the dialect refuses,
+#     because a lower bound above an upper one is not a predicate anything
+#     satisfies. It is the ORDER that this pins: the two payloads follow
+#     the flag byte in declaration order and nothing in the stream labels
+#     them.
+if run_item assume-bounded-bounds-swapped; then
+  mutant_project assume-bounded-bounds-swapped bytecode.dawn \
+    '    emit_opt_signed(emit_opt_signed(w1, lb), ub)' \
+    '    emit_opt_signed(emit_opt_signed(w1, ub), lb)'
+  writer_mutant_checks assume-bounded-bounds-swapped assume_bounded same-size \
+    "'cuda_tile.bounded' expects lower bound to be less than or equal to upper bound"
 fi
 
 _item_tick ""
