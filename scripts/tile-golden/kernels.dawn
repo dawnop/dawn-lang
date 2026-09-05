@@ -21,7 +21,8 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_mask
   shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
   float_to_float, ext_u8, trunc_u8, mmai,
   d_reduce_i, s_addi, s_maxi,
-  d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const, erf }
+  d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const, erf,
+  sin, cos, tan, sinh, cosh, atan2, remf }
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -1863,6 +1864,92 @@ fn geglu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store_masked(out, blk, s, m, mul(F64, s, a, gate))
 }
 
+# ---- the trigonometric kernels (knife T1) ----
+
+# The sweep's shape: TRIG_N arguments over TRIG_TILE lanes a block, and an
+# output buffer SEVEN segments long. 500 is not a multiple of 128, so the
+# last of the four blocks runs 12 lanes past the end of every segment and
+# the tail mask is doing real work at seven base offsets rather than one.
+const TRIG_N: Int = 500
+const TRIG_TILE: Int = 128
+
+# The seven operations knife T1 adds, each over the same block of lanes and
+# each written to its OWN segment of the output rather than summed into a
+# total. `mathops` sums its ten, which is enough to catch an opcode copied
+# from the wrong row of the frozen table but not enough to say WHICH lane
+# of which function moved; here every lane of every function is its own
+# comparison, and the layer-2 mutant that writes `sin`'s opcode as `cos`
+# reddens the first segment and leaves the other six alone.
+#
+# Three buffers in: `x` is the argument of the five unary operations and
+# the numerator of the `atan2`, `y` is that `atan2`'s denominator (its
+# zeros are the axes), and `z` is the remainder's divisor (never zero: a
+# remainder by zero is a NaN, and a NaN is not within a tolerance of
+# anything). Masked-off lanes take 0 for `x` and 1 for the two divisors, so
+# nothing outside the corpus divides by zero even in a lane no store keeps.
+#
+# Tolerance tier: five of the seven are libdevice approximations and the
+# `atan2` is one too. `remf` alone is exact, and it is exact here as well;
+# it rides in this kernel because its corpus and its shape are the same.
+fn trig_sweep(x: Param[F64], y: Param[F64], z: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [TRIG_TILE]
+  let blk = tile_at(block_id(0), TRIG_TILE)
+  let m = tail_mask(blk, s, TRIG_N)
+  let zero = f_const(F64, s, 0.0)
+  let one = f_const(F64, s, 1.0)
+  let a = load_masked(x, blk, s, m, zero)
+  let b = load_masked(y, blk, s, m, one)
+  let c = load_masked(z, blk, s, m, one)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * TRIG_N))
+  store_masked(out, seg(0), s, m, sin(F64, s, a))
+  store_masked(out, seg(1), s, m, cos(F64, s, a))
+  store_masked(out, seg(2), s, m, tan(F64, s, a))
+  store_masked(out, seg(3), s, m, sinh(F64, s, a))
+  store_masked(out, seg(4), s, m, cosh(F64, s, a))
+  store_masked(out, seg(5), s, m, atan2(F64, s, a, b))
+  store_masked(out, seg(6), s, m, remf(F64, s, a, c))
+}
+
+# leetgpu 61's shape: ROPE_M rows of ROPE_D, one block a row block.
+const ROPE_M: Int = 96
+const ROPE_D: Int = 32
+const ROPE_HALF: Int = 16
+const ROPE_ROWS: Int = 32
+
+# `Q * cos + rotate_half(Q) * sin` over an M by D buffer: leetgpu 61
+# (Rotary Positional Embedding). `rotate_half` swaps a row's two halves and
+# negates what lands first, so the answer is
+# `[x1 c - x2 s, x2 c + x1 s]` with `x1` and `x2` the halves.
+#
+# IT COMPUTES NO TRIGONOMETRIC FUNCTION. The problem hands `cos` and `sin`
+# in as buffers, exactly as leetgpu 93 does, so this kernel is the same
+# arithmetic `llama_rope` is and needs nothing knife T1 adds. That makes it
+# this family's KERNEL-LEVEL CONTROL: the three trigonometric mutants may
+# not move it, at layer 0 or on the device. Its row in the leetgpu ledger
+# is a knife-18 style spending of mechanism already paid for, and the
+# reason it lands in this knife rather than another is written in
+# docs/tile-backend-design.md.
+#
+# The two tables are read at the FIRST HALF's columns only, with the row
+# stride ROPE_D, because the problem guarantees them half-split (column `j`
+# and column `j + D/2` hold the same value). `std/gpu.rope61_ref` reads
+# them at the full column instead, so the two are one shortcut apart and a
+# corpus whose tables were not half-split would separate them.
+fn rope(q: Param[F64], cs: Param[F64], sn: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let sh = [ROPE_ROWS, ROPE_HALF]
+  let st = [ROPE_D, 1]
+  let base = idx_mul(block_id(0), idx_const(ROPE_ROWS * ROPE_D))
+  let top = idx_add(base, idx_const(ROPE_HALF))
+  let x1 = load_strided(q, base, sh, st)
+  let x2 = load_strided(q, top, sh, st)
+  let c = load_strided(cs, base, sh, st)
+  let s = load_strided(sn, base, sh, st)
+  store_strided(out, base, sh, st,
+    sub(F64, sh, mul(F64, sh, x1, c), mul(F64, sh, x2, s)))
+  store_strided(out, top, sh, st,
+    addf(F64, sh, mul(F64, sh, x2, c), mul(F64, sh, x1, s)))
+}
+
 # ---- the multi-launch kernels (knife 16) ----
 #
 # Each of these is one STEP of a host-side sequence, not a whole problem.
@@ -3649,6 +3736,12 @@ fn trace(name: String) -> TileProg = match name {
   "llama_down" ->
     trace_kernel("llama_down", ["f64", "f64", "f64"],
       () => llama_down(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "trig_sweep" ->
+    trace_kernel("trig_sweep", ["f64", "f64", "f64", "f64"],
+      () => trig_sweep(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "rope" ->
+    trace_kernel("rope", ["f64", "f64", "f64", "f64"],
+      () => rope(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -3678,7 +3771,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
       ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
       ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
-      ++ "|histogram|cas_swap|erf_sweep|geglu"
+      ++ "|histogram|cas_swap|erf_sweep|geglu|trig_sweep|rope"
       ++ "|kv_scores|kv_context|attn_bwd_mmt|attn_bwd_ds|lin_attn_s|lin_attn_out"
       ++ "|ols_gram|ols_elim|ols_beta"
       ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"

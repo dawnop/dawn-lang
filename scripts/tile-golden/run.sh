@@ -116,6 +116,15 @@
 #                            f64-tag-as-i64; a tag one off the other way
 #                            (f16, 5) would assemble and only the device
 #                            could tell
+#     trig-extra-flags       the writer gives `sin` a flags varint, which is
+#                            one byte none of knife T1's seven operations
+#                            has -> trig_sweep's text is untouched, its
+#                            bytes are one byte LONGER, and tileiras cannot
+#                            parse the body: every operand index after the
+#                            extra byte is read one place out of step. This
+#                            is the whole reason those seven are on
+#                            `float_op_has_flags`'s exclusion list, and
+#                            nothing below layer 1 can see the difference
 #     scan-result-drops-the-dim
 #                            the writer gives a `scan` the result types a
 #                            `reduce` would have, the scanned dimension
@@ -212,7 +221,8 @@ kernels=(
   gpt_ln gpt_qkv gpt_scores gpt_context
   gpt_dense gpt_fc gpt_gelu gpt_down
   llama_rms llama_qkv llama_rope llama_scores
-  llama_out llama_ffn llama_down)
+  llama_out llama_ffn llama_down
+  trig_sweep rope)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -263,6 +273,7 @@ mutants=(
   scan-result-drops-the-dim
   atomic-rmw-claims-weak-ordering
   atomic-cas-writes-an-rmw-mode
+  trig-extra-flags
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -877,6 +888,37 @@ if run_item atomic-cas-writes-an-rmw-mode; then
     emit_ref(emit_opt_ref(emit_ref(emit_ref(emit_ref(w3, ptrs), cmp), val), mask), tok_in)'
   writer_mutant_checks atomic-cas-writes-an-rmw-mode cas_swap func-one-long \
     "failed to parse function body for function 'cas_swap'"
+fi
+
+# 16. The writer gives `sin` a flags varint. None of knife T1's seven
+#     operations has an optional field, so none of them writes one
+#     (BytecodeGen.cpp only emits the varint where
+#     getVersionOrderedBitAssignments found a bit to assign), and a byte
+#     written anyway is one byte the reader takes for the operand index.
+#     So the file is one byte LONGER and everything after the extra byte is
+#     read one place out of step. Neither layer 0 nor the type checker can
+#     see it: the renderer never prints a flags word, and a flags 0 is what
+#     an operation WITH an optional field would legitimately write.
+#
+#     tileiras loses the stream one operation later and says so in four
+#     lines, of which the first is the informative one:
+#
+#       error: error at offset 112: failed to get result type 0 for DivIOp
+#       error: error at offset 751: failed to parse function body for
+#         function 'trig_sweep'
+#       error: error at offset 751: failed to create function from bytecode
+#       error: input does not correspond to Tile IR bytecode
+#
+#     There is no `divi` in this kernel: `DivIOp` is what the byte after the
+#     extra one decodes to once the reader is one place out of step, which
+#     is the same shape as the measurement `exp`'s doc comment records
+#     (`failed to get result type 0 for CmpIOp`).
+if run_item trig-extra-flags; then
+  mutant_project trig-extra-flags bytecode.dawn \
+    '    "sin", "cos", "tan", "sinh", "cosh", "atan2", "remf"]))' \
+    '    "cos", "tan", "sinh", "cosh", "atan2", "remf"]))'
+  writer_mutant_checks trig-extra-flags trig_sweep func-one-long \
+    "error at offset 112: failed to get result type 0 for DivIOp"
 fi
 
 _item_tick ""
