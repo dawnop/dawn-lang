@@ -37,6 +37,15 @@ LEDGER = DIFF / "ledger.txt"
 
 STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 
+# The coverage plan's knives that have LANDED. Every other `T` name is a
+# knife the prestudy planned and nobody has cut, so the two directions are:
+# an `implemented` row may not name an unlanded knife, and an
+# `unimplemented` row may not name a landed one (the knife would have owed
+# it). T0 built the ledger itself and added no opcode, so it names no row
+# here; it is listed because the set is the record of which knives are done
+# and not only of which ones a row may cite.
+LANDED_KNIVES = {"T0", "T1"}
+
 # The frozen public range and its two frozen gaps (BytecodeOpcodes.td), which
 # together are the 100 opcodes this file has to carry a row for.
 GAPS = set(range(0x19, 0x25)) | set(range(0x34, 0x3A))
@@ -129,7 +138,7 @@ def check(table_text, bytecode_text, files, ledger_text):
 
         if not knife:
             problems.append(f"line {n}: {name} names no knife")
-        planned = knife.startswith("T")
+        planned = knife.startswith("T") and knife not in LANDED_KNIVES
 
         # The two directions against the writer's own table.
         if status == "implemented":
@@ -283,10 +292,10 @@ def self_test():
                       "tanh                     | 0x6A | 13.1 | unimplemented | T1 "),
          "bytecode.dawn emits OP_TANH"),
         ("a row claiming an opcode the writer does not emit",
-         good.replace("sin                      | 0x62 | 13.1 | unimplemented | T1  | 0 | -",
-                      "sin                      | 0x62 | 13.1 | implemented   | 7b  | 2 | "
+         good.replace("cat                      | 0x0C | 13.1 | unimplemented | T2  | 0 | -",
+                      "cat                      | 0x0C | 13.1 | implemented   | 7b  | 2 | "
                       "golden:mathops"),
-         "has no OP_SIN"),
+         "has no OP_CAT"),
         ("a version the deltas contradict",
          good.replace("atan2                    | 0x6E | 13.2", "atan2                    | 0x6E | 13.1"),
          "atan2 entered at 13.2, not 13.1"),
@@ -308,6 +317,14 @@ def self_test():
         ("a deferred row with no reason",
          re.sub(r"^(\S+ +\| .* \| deferred .*\| )ruling 2$", r"\1-", good, count=1, flags=re.M),
          "is deferred with no named reason"),
+        ("an implemented row under a knife nobody has cut",
+         good.replace("sin                      | 0x62 | 13.1 | implemented   | T1 ",
+                      "sin                      | 0x62 | 13.1 | implemented   | T5 "),
+         "knife 'T5' cannot be a planned one"),
+        ("an unimplemented row under a knife that has landed",
+         good.replace("break                    | 0x0A | 13.1 | unimplemented | T5 ",
+                      "break                    | 0x0A | 13.1 | unimplemented | T1 "),
+         "so its knife is a planned one"),
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
     bad = 0
@@ -325,9 +342,9 @@ def self_test():
 
     # The other input: an OP_ the writer grew and nobody wrote down.
     grown = bytecode.replace("const OP_TANH: Int = 0x6A",
-                             "const OP_TANH: Int = 0x6A\nconst OP_SIN: Int = 0x62")
+                             "const OP_TANH: Int = 0x6A\nconst OP_CAT: Int = 0x0C")
     _c, _l, found = check(good, grown, files, ledger)
-    if any("OP_SIN (0x62) and the ledger has no row" in p or "marked unimplemented but" in p
+    if any("OP_CAT (0x0C) and the ledger has no row" in p or "marked unimplemented but" in p
            for p in found):
         print("PASS  self-test: an OP_ constant the ledger does not call implemented")
     else:

@@ -45,7 +45,7 @@
 # buffer's format, so it is the second opinion for an f16 product and an i8
 # one as much as for an f64 one. The KERNELS differ, and the corpora do.
 #
-# 85 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
+# 86 of the 97 reachable problems (41 Simple Inference is a PyTorch exercise
 # and out of range). The plan that orders the rest is the cuTile coverage
 # memo; knife 7a is the boundary knife, 7b the reduction one, 8 the
 # two-dimensional one, 9 the strided one, 10 the integer one, 11 the wide
@@ -81,6 +81,29 @@
 # 32 the same way. Both are O(n^2) in comparisons, which is what a machine
 # with tiles and no shuffle does in ONE launch; the O(n log n) shapes need
 # several launches and a host loop between them.
+# THE LAST ROW BELOW IS A KNIFE T1 ROW AND KNIFE T1 DID NOT UNLOCK IT.
+# 2026-09-05 changed the goal from "solve leetgpu problems" to "cover every
+# Tile IR feature" (docs/tile-backend-design.md 2.4), and the coverage
+# prestudy expected the trigonometric knife to unlock 61 (Rotary Positional
+# Embedding). It does not: 61's signature is
+# `solve(Q, cos, sin, output, M, D)` and its statement guarantees the two
+# tables half-split, so `cos` and `sin` are INPUT BUFFERS and the kernel
+# computes no trigonometric function at all. That is the second time this
+# reversal has been recorded on a RoPE problem; knife 21 recorded the first,
+# on 93, for the same reason and after the same check of the signature.
+#
+# So the row is a spending of mechanism knife 9 and knife 11 had already
+# paid for, in the shape knife 18's eight rows have, and the reason it is
+# in this knife rather than another is that its kernel is the
+# trigonometric family's CONTROL: `trig_diff` runs it beside `trig_sweep`
+# precisely because it goes through none of the seven.
+#
+# Two problems really are gated on trigonometry and neither is taken here:
+# 76 (Adder Transformer) computes its rotary angles inside `solve` from
+# `2 pi / 19` and the position, and is also an eleven-step autoregressive
+# sequence with an argmax in each step; 39 (Fast Fourier Transform) needs
+# the twiddle factors and, on top of them, a per-stage host loop.
+#
 # ONE ROW CAN BE RECORDED SMALLER THAN THE PROBLEM. Every row above names
 # a problem whose dimensions its caller chooses, so the shape a kernel was
 # recorded at is a shape the problem has. Knife 21's two rows are the first
@@ -182,3 +205,4 @@
 33 | Ordinary Least Squares | ols_gram+ols_elim+ols_beta | std/gpu.ols_gram_ref+std/gpu.ols_elim_ref+std/gpu.ols_beta_ref | seq_diff:ols | exact
 74 | GPT-2 Transformer Block | gpt_ln+gpt_qkv+gpt_scores+attn_softmax+gpt_context+gpt_dense+vadd+gpt_fc+gpt_gelu+gpt_down | std/gpu.layer_norm_ref+std/gpu.linear_bias_ref+std/gpu.gpt_scores_ref+std/gpu.row_softmax_ref+std/gpu.gpt_context_ref+std/gpu.linear_bias_ref+std/gpu.vadd_ref+std/gpu.linear_bias_ref+std/gpu.gelu_tanh_ref+std/gpu.linear_bias_ref | seq_diff:gpt2 | tolerance
 93 | Llama Transformer Block | llama_rms+llama_qkv+llama_rope+llama_scores+attn_softmax+gqa_context+llama_out+vadd+llama_ffn+swiglu_act+llama_down | std/gpu.llama_rms_ref+std/gpu.head_major_bt_ref+std/gpu.rope_ref+std/gpu.gqa_causal_scores_ref+std/gpu.row_softmax_ref+std/gpu.gqa_context_ref+std/gpu.llama_out_ref+std/gpu.vadd_ref+std/gpu.matmul_bt_ref+std/gpu.swiglu_act_ref+std/gpu.matmul_bt_ref | seq_diff:llama | tolerance
+61 | Rotary Positional Embedding | rope | std/gpu.rope61_ref | trig_diff:rope | exact
