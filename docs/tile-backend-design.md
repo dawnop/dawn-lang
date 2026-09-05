@@ -2343,6 +2343,116 @@ md5 `bddd559544b055ecbf7cd8458ae16eab`）。本机没有 `cuobjdump` / `nvdisasm
 `hint_entry`、`hint_memory` 与**不带任何 hint 的 `vadd`** 在同一份语料上跑，三个设备答案
 **逐字节相同**（`agree=3/3`，run.sh 钉住）。那是方言的承诺被守住，不是某个取值被观测到。
 
+### 6.11 版本墙：13.2 到 13.3 逐处量了一遍（刀 T8）
+
+刀 T8 零新操作码，做的只有一件事：把 `BYTECODE_MINOR` 从 2 挪到 3。预研说这一步只动三处
+字节，刀 T7 量出第四处，本刀**没有沿用那份清单，而是把写入器重新枚举了一遍**，因为
+「只动三处」这种话正是过一年就不再为真的那一类。
+
+**一、清单是枚举出来的，不是抄来的。** 在 `NVIDIA/cuda-tile@be0889cd` 上，一个操作在
+13.2 与 13.3 之间改变形状只有两条途径，两条都由 tblgen 生成：`BytecodeGen.cpp` 的
+`generateFlagsFieldSerialization`（某个操作的**第一个**可选字段落在 13.3，于是 flags varint
+从 13.3 起才写）与同文件的必需属性那一支（`DefaultValuedAttr` 标成 13.3，于是那个值从 13.3
+起内联写、低于 13.3 时若不等于默认值就报错）。所以把 `Ops.td` 里每一条 `"13.3"` 的参数逐行
+列出来，再去掉本身就是 13.3 才有的操作（`alloca` / `atomic_red_view_tko` / `mmaf_scaled` /
+`pack` / `unpack` / `make_strided_view` / `make_gather_scatter_view`，本仓一条都不发），
+剩下的只有四行，落在三个操作上：
+
+| 操作 | 13.3 的字段 | ODS 里的种类 | 字节上的后果 |
+|------|-------------|--------------|--------------|
+| `exp` 0x17 | `rounding_mode` | `DefaultValuedAttr`（必需，默认 `full`） | 13.3 起内联多一个 varint |
+| `mmaf` 0x49 | `fast_acc` | `UnitAttr`（可选，且是它唯一的可选字段） | 13.3 起多一个 flags varint |
+| `global` 0x31 | `constant` 与 `symbol_visibility` | 一个 `UnitAttr` 一个 `DefaultValuedAttr` | 不在指令流里，见下 |
+| `module` 0x4B | `producer` | `OptionalAttr<StrAttr>` | Producer 段，见下 |
+
+`BytecodeWriter.cpp` 里另有两处**手写**的版本分支，与 tblgen 无关：`writeGlobalSection`
+（`kMinGlobalExtendedFields` = 13.3，低于它一条记录写四个 varint、到了它写六个，多出来的正是
+上表 `global` 那两个字段）与 `writeProducerSection`（13.3 起才有的段）。加上文件头的
+major / minor / tag 三个字节，写入器里**全部**的版本相关处就是这些；其余的版本判断
+（`isOpcodeAvailableInVersion`、`isAttrTagAvailableInVersion`、`isEnumValueAvailableInVersion`）
+都只决定**拒不拒**，不决定形状，而往高版本走从不失去任何东西。
+
+**二、六处里有两处对本仓恰好是空的，而这也是量出来的。**
+
+- **Producer 段**：`writeProducerSection` 在 13.3 以下直接返回，在 13.3 及以上**也**直接返回，
+  只要模块没有 `producer` 属性。本仓从不设它，所以这个段一个字节都不写。
+- **类型的统一位域**：`BytecodeTypeCodeGen.cpp` 有第三个 13.3 边界，
+  `kUnifiedBitfieldVersion`，带 `OptionalParameter` 的**类型**从 13.3 起改写一个统一的位域
+  varint。这一处预研与 T7 都没有提到，本刀是第一次记它。它对本仓为空的理由是可查的：
+  `Types.td` 里带 `OptionalParameter` 的类型恰好只有三个，`TensorView`、
+  `GatherScatterView` 与 `StridedView`，全是 view 族，按裁决 2 与 T11 到 T13 一起挂起；
+  `ptr` / `tile` / `token` / `func` 一个可选参数都没有。**这条要记下来，因为 view 族一旦解禁
+  它就不再是空的**，那时字节形状会跟着版本变，而不是只跟着类型变。
+
+于是真正会动的是四处：文件头第 10 字节、`exp` 的内联 `rounding_mode`、`mmaf` 的 flags varint、
+Global 段记录的两个 varint。写入器把这四处写成四个谓词（`for_has_flags` 的形状，共用一个
+`at_least`），所以下一次挪钉子改的是常量而不是四段代码。
+
+**三、「其余的逐字节相同」是量出来的，两个方向各量了一次。**
+
+正向是**账**：162 个 kernel 逐个把 13.2 与 13.3 的 `.tilebc` 拆成段，Func 段应当涨
+「`exp` 条数加 `mmaf` 条数」个字节、Global 段应当涨「全局条数乘二」个字节，两个数都从
+`.mlir` 上数出来。**162 个 kernel 全部对上，没有一个例外**：Func 段总共涨 56 字节、
+Global 段总共涨 6 字节，与预测逐字相等。109 个 kernel 一条 `exp`、一条 `mmaf`、一个全局都
+没有，它们与 13.2 的差别**只有第 10 个字节**。文件总长这一格另说：159 个文件长度不变
+（段的对齐填充把涨的那点吃掉了），3 个正好长 8 字节（`attn_scores` / `gqa_scores` /
+`lin_attn_s`，它们的 Func 段跨过了一个 8 字节对齐边界，所以填充整整多了一步）。**所以
+「同样大小」不是这一族变异体的判据，段长才是**，`exp-rounding-unwritten` 与
+`mmaf-flags-unwritten` 因此用 `func-one-short` 而不是 `same-size`。
+
+反向是**复现**：把本刀这棵树的写入器的 `BYTECODE_MINOR` 改回 2（只改这一个常量，三个谓词
+随之全部为假），重新生成每一个 kernel 的字节码，与 `origin/main` 上 T7 那一代录下的 golden
+逐字节比。**162 个全部相同。** 这一条比正向那一条强：正向说「差的地方是我预测的那些」，
+反向说「除了这些谓词，写入器一个字节也没有别的改动」，两句话合起来才是「版本墙只是版本墙」。
+
+**四、这堵墙不改设备答案，而这是本节最该记的一句。** 用钉版本的 `tileiras` 13.3.36 把每个
+kernel 的 13.2 字节与 13.3 字节各汇编一次（三个 fp8 kernel 照旧走 `--gpu-name sm_100`，
+其余 `sm_86`），**162 个 cubin 逐字节相同，一个都不差**。所以升版买到的是 13.3 才有的操作码
+（`pack` / `unpack` / `alloca` / `mmaf_scaled`，归 T9 与 T10）与 Global 记录的两个字段，
+付出的是零：既有 kernel 在设备上算的东西一个位都没动。`toolchain.txt` 里原来那句
+「13.2 is the lowest version Tile IR runs on Ampere and Ada」也随本刀改掉了——那句话把
+**架构的下限**说成了**字节码版本的性质**，架构下限是 r580 驱动与 `sm_86` 目标，由
+`driver` 与 `gpu-name` 两行各自承担。
+
+**五、`fast_acc` 到不了设备，这一格也是量的不是推的。** `mmaf` 的 flags varint 从 13.3 起
+存在，本仓写 0。把写入器那个字改成 1 之后，`.tilebc` 恰好动一个字节，而
+`tileiras --gpu-name sm_86` 出的 cubin **逐字节不变**——四个 `mmaf` kernel 都试过
+（`matmul` / `batched_matmul_f16` / `attn_scores` / `lora_hidden`），f16 那个与 f64 那些
+一样不变。一个到不了设备的位不可能让设备答出别的数，所以 `attrs.txt` 的 `unit.fast_acc`
+封在层 1，豁免叫 `fast-acc-not-in-the-cubin`，那是一句实测而不是一句「没写客户 kernel」。
+
+**六、头里的版本号确实约束读者，而这需要一条变异体才知道。** `header-minor-still-2` 让头
+写 13.2、正文照 13.3 的形状写。读者本可以不理会那个字节（后面的字节是一个合法的 13.3 程序），
+实测它理会：`tileiras` 答
+`expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'`，**与 T7 的
+`global-visibility-written-at-13-2` 一模一样的报文**，因为读者正是拿头里的版本去选
+`kMinGlobalInfoSize`，选了 4 就把第二条记录从多出来的那两个 varint 读起。同一堵墙，
+T7 从 13.2 那侧撞过一次，本刀从 13.3 这侧撞回去（`global-visibility-omitted-at-13-3`），
+而这一条从头顶上撞下来。
+
+**七、四条层 1 变异体的报文，逐条钉在 `run.sh` 里。**
+
+| 变异体 | 改哪 | `tileiras` 的原话 |
+|--------|------|-------------------|
+| `exp-rounding-unwritten` | `exp` 不写 13.3 的 `rounding_mode` | `error at offset 67: invalid integer value for enum type: 21` 加 `failed to parse attribute 'rounding_mode'`（21 是紧跟着的操作数下标） |
+| `mmaf-flags-unwritten` | `mmaf` 不写 13.3 的 flags varint | `invalid block structure: block is expected to have a terminator operation, but the last operation 'cuda_tile.absf' is not a terminator.` |
+| `global-visibility-omitted-at-13-3` | Global 记录在 13.3 上只写四个 varint | `number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 9 bytes.` |
+| `header-minor-still-2` | 头写 13.2，正文写 13.3 形状 | `expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'` |
+
+T7 的 `global-record-alignment-dropped` 还在，但它的**报文换了数字**：记录从四个 varint 长成
+六个，剩余载荷从 6 字节变成 10 字节，所以那句话现在是
+`... that can fit in the remaining payload of 10 bytes`。这是「变异体的判词是报文原文，
+不是退出码」的又一个实例：光看退出码的话，这条变异体在版本挪动之后仍然是绿的。
+
+**八、可见性与 `constant` 只买到层 1，欠的那条 FFI 写在台账里。** 新 kernel `global_flags`
+声明一个 `private` 全局与一个 `constant` 全局并读它们，`tileiras` 在 sm_86 上一次通过
+（10496 字节 cubin，`FUNC GLOBAL global_flags`），Global 段的两条记录末尾分别是
+`01 00` 与 `00 01`。这就是这两个取值能拿到的全部：分得清 public 与 private 的判词是
+「宿主查得到前者、查不到后者」，要 `cuModuleGetGlobal`，而 `std/gpu` 的 `Gpu` 效果里没有这条
+操作，本刀也不为它扩 handler 面。`attrs.txt` 上三行的豁免因此从 `13.3-record-field`
+（「没有字节可写」，本刀已解决）换成 `no-module-symbol-ffi`（「没有 FFI 可问」，仍然欠着）。
+
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
