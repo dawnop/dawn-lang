@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF}
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield}
+use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -97,6 +97,22 @@ derive Show
 ## rank-0 `i1`, `on_true` and `on_false` are its regions and each ends in
 ## its own `YieldVals`, and `results` are the values it defines after both.
 ##
+## `ExtractTile`, `CatTile` and `PermuteTile` are the shape operations
+## (knife T2). `ExtractTile`'s `indices` are the SLICE numbers along each
+## dimension of `from`, one per dimension and each a rank-0 i32 operand, not
+## element offsets; `CatTile`'s `dim` is the dimension the two operands are
+## joined along; `PermuteTile`'s `perm` says that dimension `k` of the
+## answer is dimension `perm[k]` of the source. `BlockCounts` is the grid's
+## extent, `get_tile_block_id`'s companion and its exact shape.
+## `JoinTokens` merges two or more ordering tokens into one.
+##
+## `PtrToIntTile`, `IntToPtrTile` and `PtrToPtrTile` are the three pointer
+## conversions: a pointer tile as i64, an i64 tile as pointers, and a
+## pointer tile reinterpreted at another element format. All three are pure
+## type changes -- the address is the same number in every one of them --
+## which is why each carries both its operand type and its result type and
+## nothing else.
+##
 ## `ForLoop` is the loop: `results` are the values it defines after itself,
 ## typed `tys` (one per carried value); `iv` (a scalar i32) and `carried`
 ## (typed `tys` again) are the block arguments its `body` sees; `lower`,
@@ -134,6 +150,14 @@ pub type Instr =
   | ScanTile(results: List[Int], tys: List[Ty], dim: Int, reverse: Bool, identities: List[RedId], operands: List[Ref], operand_tys: List[Ty], args: List[Int], body: List[Instr])
   | IfElse(results: List[Int], tys: List[Ty], cond: Ref, cond_ty: Ty, on_true: List[Instr], on_false: List[Instr])
   | YieldVals(values: List[Ref], tys: List[Ty])
+  | ExtractTile(dst: Int, src: Ref, from: Ty, to: Ty, indices: List[Ref])
+  | CatTile(dst: Int, dim: Int, lhs: Ref, rhs: Ref, lhs_ty: Ty, rhs_ty: Ty, to: Ty)
+  | PermuteTile(dst: Int, src: Ref, perm: List[Int], from: Ty, to: Ty)
+  | BlockCounts(x: Int, y: Int, z: Int)
+  | JoinTokens(dst: Int, toks: List[Ref])
+  | PtrToIntTile(dst: Int, src: Ref, from: Ty, to: Ty)
+  | IntToPtrTile(dst: Int, src: Ref, from: Ty, to: Ty)
+  | PtrToPtrTile(dst: Int, src: Ref, from: Ty, to: Ty)
   | Ret
 derive Show
 
@@ -179,6 +203,22 @@ fn without_dim(t: Ty, dim: Int) -> Ty = match t {
   Token -> panic("tileir: a token has no dimensions")
   Tile(shape, e) -> Tile(list.map(list.filter(range(0, len(shape)), k => k != dim), k => shape[k]), e)
 }
+
+# `lhs` with dimension `dim` grown by `rhs`'s: the shape a `cat` answers.
+# Every other dimension is the operands' own, which the recording handler
+# has already held them to.
+fn cat_shape(lhs: List[Int], rhs: List[Int], dim: Int) -> List[Int] =
+  list.map(range(0, len(lhs)), k => if k == dim { lhs[k] + rhs[k] } else { lhs[k] })
+
+# `shape` reordered by `perm`: dimension `k` of the answer is dimension
+# `perm[k]` of the source. That is the rule PermuteOp's own verifier
+# states (`resultShape[idx] == srcShape[permutation[idx]]`), and it is the
+# reason a wrong permutation is a TYPE error and not a wrong answer --
+# except where two permuted dimensions have the same size, which is the
+# shape scripts/tile-golden's shape_ops carries so that permute-identity
+# can be a device-level mutant rather than an assembler-level one.
+fn permuted_shape(shape: List[Int], perm: List[Int]) -> List[Int] =
+  list.map(range(0, len(perm)), k => shape[perm[k]])
 
 # The lowering's state, threaded through pure helpers rather than held in
 # `var`s, because the helpers are called from inside a `for` and a closure may
@@ -570,6 +610,81 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
   Reduce(results, dim, shape, identities, operands, args, body) -> lower_reduce(l0, results, dim, shape, identities, operands, args, body)
   Scan(results, dim, reverse, shape, identities, operands, args, body) -> lower_scan(l0, results, dim, reverse, shape, identities, operands, args, body)
   If(results, cond, on_true, on_false) -> lower_if(l0, results, cond, on_true, on_false)
+  Extract(dst, dtype, from, to, src, indices) -> {
+    let s = ref_of(l0, src, "extract source")
+    let ix = list.map(indices, h => ref_of(l0, h, "extract slice index"))
+    let to_ty = num_tile(to, dtype)
+    let (l1, v) = define(l0, dst, to_ty)
+    emit(l1, ExtractTile(v, s, num_tile(from, dtype), to_ty, ix))
+  }
+  Cat(dst, dtype, dim, lhs_shape, rhs_shape, lhs, rhs) -> {
+    let a = ref_of(l0, lhs, "cat left operand")
+    let b = ref_of(l0, rhs, "cat right operand")
+    let out = num_tile(cat_shape(lhs_shape, rhs_shape, dim), dtype)
+    let (l1, v) = define(l0, dst, out)
+    emit(l1, CatTile(v, dim, a, b, num_tile(lhs_shape, dtype), num_tile(rhs_shape, dtype), out))
+  }
+  Permute(dst, dtype, shape, perm, src) -> {
+    let s = ref_of(l0, src, "permute source")
+    let out = num_tile(permuted_shape(shape, perm), dtype)
+    let (l1, v) = define(l0, dst, out)
+    emit(l1, PermuteTile(v, s, perm, num_tile(shape, dtype), out))
+  }
+  NumBlocks(dst, axis) -> {
+    let (l1, x) = fresh(l0)
+    let (l2, y) = fresh(l1)
+    let (l3, z) = fresh(l2)
+    let l4 = emit(l3, BlockCounts(x, y, z))
+    bind(l4, dst, Val(if axis == 0 { x } else if axis == 1 { y } else { z }), i32_scalar())
+  }
+  JoinToks(dst, toks) -> {
+    let rs = list.map(toks, h => ref_of(l0, h, "join_tokens operand"))
+    let (l1, tv) = define(l0, dst, Token)
+    emit(l1, JoinTokens(tv, rs))
+  }
+  MakePtrs(dst, param, dtype, shape) -> {
+    # the entry parameter is a rank-0 pointer tile; this is the same
+    # reshape-and-broadcast the strided ladder opens with, kept as a value
+    # the body can name instead of a step it cannot.
+    let e = PtrTo(dtype)
+    let (l1, pn) = spread_rank0(l0, Arg(param), Tile([], e), shape, e)
+    bind(l1, dst, pn, Tile(shape, e))
+  }
+  PtrAdd(dst, dtype, shape, ptrs, offs) -> {
+    let ps = ref_of(l0, ptrs, "pointer offset base")
+    let os = ref_of(l0, offs, "pointer offset")
+    let pt = Tile(shape, PtrTo(dtype))
+    let (l1, v) = define(l0, dst, pt)
+    emit(l1, Offset(v, ps, os, pt, i32_tile(shape)))
+  }
+  PtrInt(dst, dtype, shape, ptrs) -> {
+    let ps = ref_of(l0, ptrs, "ptr_to_int source")
+    let out = num_tile(shape, "i64")
+    let (l1, v) = define(l0, dst, out)
+    emit(l1, PtrToIntTile(v, ps, Tile(shape, PtrTo(dtype)), out))
+  }
+  IntPtr(dst, dtype, shape, ints) -> {
+    let s = ref_of(l0, ints, "int_to_ptr source")
+    let out = Tile(shape, PtrTo(dtype))
+    let (l1, v) = define(l0, dst, out)
+    emit(l1, IntToPtrTile(v, s, num_tile(shape, "i64"), out))
+  }
+  PtrCast(dst, from, to, shape, ptrs) -> {
+    let ps = ref_of(l0, ptrs, "ptr_to_ptr source")
+    let out = Tile(shape, PtrTo(to))
+    let (l1, v) = define(l0, dst, out)
+    emit(l1, PtrToPtrTile(v, ps, Tile(shape, PtrTo(from)), out))
+  }
+  LoadAt(dst, tok_out, dtype, shape, ptrs, mask, pad, tok_in) -> {
+    let tin = ref_of(l0, tok_in, "load token")
+    let m = opt_ref(l0, mask, "load mask")
+    let pd = opt_ref(l0, pad, "load padding value")
+    let ps = ref_of(l0, ptrs, "load pointers")
+    let val_ty = num_tile(shape, dtype)
+    let (l1, v) = define(l0, dst, val_ty)
+    let (l2, tv) = define(l1, tok_out, Token)
+    emit(l2, LoadPtr(v, tv, ps, m, pd, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
+  }
   Yield(values) -> {
     let refs = list.map(values, h => ref_of(l0, h, "yield value"))
     let tys = list.map(values, h => ty_of(l0, h))
@@ -770,6 +885,14 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   ScanTile(results, _tys, _dim, _reverse, _identities, _operands, _operand_tys, _args, _body) -> results
   IfElse(results, _tys, _cond, _cond_ty, _on_true, _on_false) -> results
   YieldVals(_values, _tys) -> []
+  ExtractTile(dst, _src, _from, _to, _indices) -> [dst]
+  CatTile(dst, _dim, _lhs, _rhs, _lhs_ty, _rhs_ty, _to) -> [dst]
+  PermuteTile(dst, _src, _perm, _from, _to) -> [dst]
+  BlockCounts(x, y, z) -> [x, y, z]
+  JoinTokens(dst, _toks) -> [dst]
+  PtrToIntTile(dst, _src, _from, _to) -> [dst]
+  IntToPtrTile(dst, _src, _from, _to) -> [dst]
+  PtrToPtrTile(dst, _src, _from, _to) -> [dst]
   Ret -> []
 }
 
