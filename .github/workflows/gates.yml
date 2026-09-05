@@ -41,11 +41,11 @@ name: gates
 # creation order roughly tracks definition order: the jobs that queue should
 # be the short tail, which fits in slots the first finishers free. That is a
 # soft nudge, not a contract — GitHub does not promise dispatch order. A run
-# of this workflow holds 42 jobs (2026-09-05, tile-golden's sixth shard on
-# top of the fifth and of builtin-type's third and fourth), and ci.yml adds
-# its own `secrets`, so 43 against the ceiling of 20: the second wave starts
+# of this workflow holds 43 jobs (2026-09-06, tile-golden's seventh shard on
+# top of the sixth and of builtin-type's third and fourth), and ci.yml adds
+# its own `secrets`, so 44 against the ceiling of 20: the second wave starts
 # as the first finishes, which is why the four native-diff shards are
-# defined first. The 41st and 42nd jobs do not lengthen the run: with 40
+# defined first. The 42nd and 43rd jobs do not lengthen the run: with 41
 # already queuing against 20 runners the span is set by the tail, not by the
 # count.
 #
@@ -164,7 +164,7 @@ jobs:
   # Trigger for N=8: split again when a shard's own observation passes 550s
   # rather than restate a line, because 550s is where the next restatement
   # collides with the pole. Against splitting further today: a run of this
-  # workflow already holds 40 jobs against an account ceiling of 20, so shards
+  # workflow already holds 43 jobs against an account ceiling of 20, so shards
   # five through eight would queue behind the first wave and buy budget
   # headroom rather than wall clock.
 
@@ -588,7 +588,7 @@ jobs:
   # Trigger for N=5: split again when a shard's own OBSERVATION passes 550s
   # rather than restate a line, because 550s doubled is already past the
   # pole. Against splitting further today: a run of this workflow already
-  # holds 40 jobs against an account ceiling of 20, so a fifth shard would
+  # holds 43 jobs against an account ceiling of 20, so a fifth shard would
   # queue behind the first wave and buy budget headroom rather than wall
   # clock.
   builtin-type-1:
@@ -1636,7 +1636,7 @@ jobs:
   # OBSERVED over 550s, and the projection is ~395 / 393 / 400s.
   #
   # A third shard buys budget headroom and not wall clock, and that is the
-  # whole of what it buys: runs of this workflow now hold 40 jobs against an
+  # whole of what it buys: runs of this workflow now hold 43 jobs against an
   # account concurrency limit of 20 (the arithmetic is in this file's header),
   # so the 38th queued behind the first wave rather than starting beside it,
   # and tile has never been a run's long pole -- native-diff at 783~1119s over
@@ -1795,19 +1795,54 @@ jobs:
     # scripts/mutant-coverage/check.py answers
     # `tile-golden: 171 mutant(s) covered across 6 shard(s)` on their union.
     #
-    # 641s leaves 19s against the pole, so the next knife to add an item to
-    # shard 1 splits again; seven shards of this same matrix are 551 to 575s
-    # of planning value. What the tightness does NOT mean is that CI is
-    # close: the four-shard observations were 427 / 414 / 385 / 371s against
-    # 628 / 638 / 607 / 627s of budget, about 0.66 of it, so six shards
-    # should observe near 260 to 290s.
+    # 641s left 19s against the pole, so knife T5 wrote that the next knife
+    # to add an item to shard 1 splits again. Knife T4 adds eleven (eight
+    # kernels, three mutants; 182 in all: 151 kernels and 31 mutants) and is
+    # that knife.
     #
-    # The sixth shard buys BUDGET HEADROOM and not wall clock, which is what
-    # every split here has bought since knife 16: a run of this workflow now
-    # holds 42 jobs against an account ceiling of 20, so the 42nd queues
-    # behind the first wave, and tile has never been the run's long pole.
-    # budget: 3x 641s planning value (321s local, doubled)
-    timeout-minutes: 33
+    # N=6 -> N=7 on 2026-09-06 (knife T4, rebased onto T5), the POLE for the
+    # fourth split in a row -- but this one needs a paragraph, because the
+    # two measurements DISAGREE about whether six still fits.
+    #
+    # An unsharded ITEM_TIMES round on the merged tree, on a QUIET machine
+    # (load 2.0 to 3.5, 1265s wall, 1250s of items), gives 151 kernels 4.45
+    # to 5.83s (mean 4.76) and 31 mutants 13.90 to 18.66s (mean 17.14).
+    # Those means are BELOW knife T5's (5.12 and 18.88), which were taken at
+    # load 4.1 to 7.5, and above knife T3's quiet ones (4.67 and 16.15). So
+    # on this round six shards are 208.0 / 221.1 / 204.8 / 204.0 / 207.3 /
+    # 204.7s and 618 / 644 / 612 / 610 / 617 / 611s of planning value: under
+    # the pole, with 16s to spare on the worst.
+    #
+    # On knife T5's per-item means the same six-way deal is 227.5 / 241.3 /
+    # 222.4 / 222.4 / 222.4 / 222.4s and 657 / 685 / 647 / 647 / 647 / 647s:
+    # the second shard OVER the pole. Comparing a quiet reading against a
+    # loaded one is the mistake this note has warned about since knife 21,
+    # and the resolution is the rule that has always applied here: a budget
+    # is a ceiling, so the WORSE of the two models is the one to plan
+    # against. That model says six does not fit.
+    #
+    # Seven fits under both. Measured here it is 172.2 / 174.5 / 175.9 /
+    # 175.8 / 183.3 / 183.6 / 184.6s (546 to 571s of planning value); under
+    # T5's means it is 188.2 four times and 201.9 three times (578 and
+    # 606s), and the seven lines below are the per-shard MAX of the two,
+    # which is T5's throughout. All seven are restated because N changed and
+    # a line computed for another N is void by definition (knife 16's rule).
+    # The split is 151 mod 7 and 31 mod 7: the first four shards carry 22
+    # kernels and four mutants, the last three carry 21 and five, and a
+    # mutant is 3.7 kernels, so the last three are the heavy ones.
+    #
+    # What the tightness does NOT mean is that CI is close: the four-shard
+    # observations were 427 / 414 / 385 / 371s against 628 / 638 / 607 /
+    # 627s of budget, about 0.66 of it, so seven shards should observe near
+    # 230 to 260s.
+    #
+    # The seventh shard buys BUDGET HEADROOM and not wall clock, which is
+    # what every split here has bought since knife 16: a run of this
+    # workflow now holds 43 jobs against an account ceiling of 20, so the
+    # 43rd queues behind the first wave, and tile has never been the run's
+    # long pole.
+    # budget: 3x 578s planning value (219s local, doubled)
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1823,10 +1858,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 1)
+      - name: tile IR goldens and tileiras (151 kernels and thirty-one mutants, both backends; shard 1)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 1/6
+        run: ./scripts/tile-golden/run.sh --shard 1/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1857,8 +1892,8 @@ jobs:
     # observation 414s (2026-09-05 audit, see tile-golden-1). Knife T5's
     # six-way deal reads 215.7s of items here, + 31 + 70 = 316.7, doubled
     # is 633s.
-    # budget: 3x 633s planning value (317s local, doubled)
-    timeout-minutes: 32
+    # budget: 3x 578s planning value (219s local, doubled)
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
 
@@ -1872,10 +1907,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 2)
+      - name: tile IR goldens and tileiras (151 kernels and thirty-one mutants, both backends; shard 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 2/6
+        run: ./scripts/tile-golden/run.sh --shard 2/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1900,8 +1935,8 @@ jobs:
     # leaves open. Worst CI observation 385s (2026-09-05 audit, see
     # tile-golden-1). Knife T5's six-way deal reads 218.9s of items here,
     # + 31 + 70 = 319.9, doubled is 640s.
-    # budget: 3x 640s planning value (320s local, doubled)
-    timeout-minutes: 32
+    # budget: 3x 578s planning value (219s local, doubled)
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
 
@@ -1915,10 +1950,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 3)
+      - name: tile IR goldens and tileiras (151 kernels and thirty-one mutants, both backends; shard 3)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 3/6
+        run: ./scripts/tile-golden/run.sh --shard 3/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1944,8 +1979,8 @@ jobs:
     # this line carried, and it is restated downwards all the same, because
     # N changed: a line computed for a five-way deal says nothing about a
     # six-way one.
-    # budget: 3x 600s planning value (300s local, doubled)
-    timeout-minutes: 30
+    # budget: 3x 578s planning value (219s local, doubled)
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
 
@@ -1959,10 +1994,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 4)
+      - name: tile IR goldens and tileiras (151 kernels and thirty-one mutants, both backends; shard 4)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 4/6
+        run: ./scripts/tile-golden/run.sh --shard 4/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1988,8 +2023,8 @@ jobs:
     # and reads 197.9s of items here, + 31 + 70 = 298.9, doubled is 598s:
     # the lightest of the six, and restated downwards for the reason
     # tile-golden-4 gives.
-    # budget: 3x 598s planning value (299s local, doubled)
-    timeout-minutes: 30
+    # budget: 3x 606s planning value (233s local, doubled)
+    timeout-minutes: 31
     steps:
       - uses: actions/checkout@v4
 
@@ -2003,10 +2038,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 5)
+      - name: tile IR goldens and tileiras (151 kernels and thirty-one mutants, both backends; shard 5)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 5/6
+        run: ./scripts/tile-golden/run.sh --shard 5/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -2027,8 +2062,8 @@ jobs:
     # from that knife's unsharded ITEM_TIMES run, + 31 + 70 = 310.9,
     # doubled is 622s; no CI observation exists yet, and the first real run
     # of it replaces this planning value.
-    # budget: 3x 622s planning value (311s local, doubled)
-    timeout-minutes: 32
+    # budget: 3x 606s planning value (233s local, doubled)
+    timeout-minutes: 31
     steps:
       - uses: actions/checkout@v4
 
@@ -2042,15 +2077,53 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (143 kernels and twenty-eight mutants, both backends; shard 6)
+      - name: tile IR goldens and tileiras (151 kernels and thirty-one mutants, both backends; shard 6)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 6/6
+        run: ./scripts/tile-golden/run.sh --shard 6/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-tile-golden-6
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-7:
+    runs-on: ubuntu-latest
+    # The seventh shard, added with the N=6 -> N=7 split on 2026-09-06
+    # (knife T4, rebased onto T5). Same matrix, same tileiras, same
+    # arithmetic as tile-golden-1's note, and why seven rather than six is
+    # there too: this shard carries five of the 31 mutants where the first
+    # four carry four, and a mutant is 3.7 kernels. 201.9s of items by knife
+    # T5's per-item model, + 31 + 70 = 302.9, doubled is 606s. No CI
+    # observation exists yet, and the first real run of it replaces this
+    # planning value.
+    # budget: 3x 606s planning value (233s local, doubled)
+    timeout-minutes: 31
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (151 kernels and thirty-one mutants, both backends; shard 7)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 7/7
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-7
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -2664,6 +2737,7 @@ jobs:
       - tile-golden-4
       - tile-golden-5
       - tile-golden-6
+      - tile-golden-7
     if: ${{ always() }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
