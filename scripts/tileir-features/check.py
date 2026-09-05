@@ -57,7 +57,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # it). T0 built the ledger itself and added no opcode, so it names no row
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
-LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T15"}
+LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T15"}
 
 
 class Ledger:
@@ -978,12 +978,15 @@ def attr_cases(good, bytecode, files, ledger):
          good.replace("golden:attr_approx", "golden:attr_nonesuch"),
          "names golden attr_nonesuch, which has no .mlir"),
         ("a layer-2 claim with no device kernel",
-         good.replace("const:ROUND_FULL,golden:mathops,device:mathops",
-                      "const:ROUND_FULL,golden:mathops             "),
+         good.replace("const:CMP_ORDERED,golden:leaky_relu,device:leaky_relu",
+                      "const:CMP_ORDERED,golden:leaky_relu"),
          "claims layer 2 and names no device kernel"),
         ("a device kernel no program launches",
          good.replace("device:mathops", "device:vadd_f32"),
          "names device kernel vadd_f32, which no scripts/tile-gpu-diff program launches"),
+        ("a landed knife's row that stops below the bar with no reason",
+         good.replace("| no-module-symbol-ffi", "| -                   "),
+         "stops at layer 1 and names no reason"),
         ("a row below the bar that names a device kernel",
          good.replace("const:SCOPE_SYS,golden:attr_memsem,mutant:atomic-memory-attrs-swapped",
                       "const:SCOPE_SYS,device:attr_memsem,mutant:atomic-memory-attrs-swapped"),
@@ -1005,8 +1008,8 @@ def attr_cases(good, bytecode, files, ledger):
                       "rounding.approx              | 4 | 13.1 | implemented   | T9 "),
          "knife 'T9' cannot be a planned one"),
         ("an unimplemented row under a knife that has landed",
-         good.replace("unit.fast_acc                | 1 | 13.3 | unimplemented | T8 ",
-                      "unit.fast_acc                | 1 | 13.3 | unimplemented | T4 "),
+         good.replace("unit.global                  | 1 | 13.3 | unimplemented | T10",
+                      "unit.global                  | 1 | 13.3 | unimplemented | T8 "),
          "so its knife is a planned one"),
         ("a deferred row with no reason",
          good.replace("| no-client-kernel", "| -"),

@@ -154,12 +154,13 @@ leetgpu 题」，`features.txt` 说的是「这个后端实现了 Tile IR 的哪
 T11 到 T13（view 族）按裁决 2 挂起，T14（Debug 段与 Producer 段）按裁决 4 挂起。
 leetgpu 刀 21 照常收尾，之后不再派 leetgpu 刀，剩余题目只作副产品记录。
 
-**版本墙（T8）比想象的便宜，这是预研独立复核过的一条。** 13.2 与 13.3 之间本仓写出去的
-字节只有三处会变：文件头第 10 字节的 `BYTECODE_MINOR`、`exp` 0x17（13.3 起必须内联写
-`rounding_mode`）与 `mmaf` 0x49（13.3 起要写一个 flags varint）。其余 98 个操作逐字节相同。
-`bytecode.dawn` 那句「the bytecode this writes is the same at 13.1, 13.2 and 13.3」在今天
-实现的 63 条里只有这两条是例外，而当年那次三版本对拍用的 vadd 一条都没碰上，所以升版时
-那句注释要跟着改。
+**版本墙（T8）比想象的便宜，这条预研独立复核过，刀 T8 落地时又逐处重量了一遍。**
+预研说 13.2 与 13.3 之间本仓写出去的字节只有三处会变：文件头第 10 字节的
+`BYTECODE_MINOR`、`exp` 0x17（13.3 起内联写 `rounding_mode`）与 `mmaf` 0x49（13.3 起写一个
+flags varint）。刀 T7 量出第四处（Global 段的记录多两个 varint），刀 T8 把清单重新枚举了一次，
+**四处成立、另有两处版本分支对本仓恰好是空的**，逐条见 §6.11。其余操作逐字节相同，
+这不是估计而是 `cmp -l` 出来的。`bytecode.dawn` 那句「the bytecode this writes is the same
+at 13.1, 13.2 and 13.3」已随刀 T8 改写。
 
 
 ## 3. 类型层
@@ -617,7 +618,8 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   **仍然没有**：`scan`（0x5E，归刀 13）、`permute`（0x53）与 `cat`（0x0C）：转置用两个
   对调的 stride 就够了，零新 opcode，见下。也没有整数与窄浮点缓冲（归刀 10 / 11）、
   gather / scatter（归刀 12）、原子操作（归刀 14）、`erf`（归刀 15）、view 类型族与 TMA、
-  `mmaf` 的 `fast_acc`（13.3 的 flag，我们钉 13.2，不写）、`mmai`（整数 MMA，等整数缓冲）。
+  `mmai`（整数 MMA，等整数缓冲）。`mmaf` 的 `fast_acc` 从刀 T8 起有地方写（13.3 的 flag，
+  写入器发的 flags varint 里那一位恒为 0，见 §6.11）。
 - **`n: Int` → `shape: List[Int]` 是纯重构，有机器判词**：改完之后 `--record` 重录，
   刀 7a / 7b 的 **23 个 `.mlir` 与 23 个 `.tilebc` 一字节没动**。两件事让它成立：rank-1
   的梯子发的还是原来那几条指令（rank-0 的 base 与指针总是「reshape 到全 1 形状、broadcast
@@ -644,8 +646,9 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   所以里面的 load / store / `d_for` 一律在记录时按名拒绝（`a load inside a reduce or if
   region has no memory order`）。这是本包自己立的规矩，不是方言的。
 - **各操作的属性形状是量出来的，不是猜的**：`exp` 在 13.2 **一个属性都不写**（它的
-  `rounding_mode` 是 13.3 才加的；写了会让读取器把下一个字节当别的东西，实测报
-  `failed to get result type 0 for CmpIOp`）；`exp2 / rsqrt` 只写 flags（`flush_to_zero`
+  `rounding_mode` 是 13.3 才加的；在 13.2 上写了会让读取器把下一个字节当别的东西，实测报
+  `failed to get result type 0 for CmpIOp`），刀 T8 把钉子挪到 13.3 之后它**必须**写这一格，
+  不写同样被拒（§6.11）；`exp2 / rsqrt` 只写 flags（`flush_to_zero`
   是 UnitAttr，只占一个 flag 位、没有载荷）；`sqrt` 写 flags 再写 `rounding<nearest_even>`；
   `tanh` **不写 flags、只写 rounding**，而且 f64 只接受 `full`（写 `nearest_even` 会被拒，
   写 `approx` 报 f32-only，都实测）；`log / log2 / floor / ceil / pow` 什么都不写。
@@ -706,7 +709,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   LoadPtr / StorePtr / AddFloat / Ret`），值按定义序从 0 密集编号，操作数是 `Arg(pos)`（入口参数）
   或 `Val(id)`。指针梯子、去重、SSA 重编全在这里，渲染器与写入器各只是「一条 `Instr` 一种拼法」，
   不再各自决定发什么。抽出这一层时文本 golden 逐字节未动，这是纯重构的证据。
-- `encode(prog) -> Bytes` 写 `cuda-tile` 字节码：头（magic + 13.2）、Func / Constant / Type /
+- `encode(prog) -> Bytes` 写 `cuda-tile` 字节码：头（magic + 13.3，刀 T8 之前是 13.2）、Func / Constant / Type /
   String 四个 section、结束字节。只编码指令表装得下的东西：内存操作 `weak`、无 mask、带 token
   操作数；`addf` 为 `rounding<nearest_even>`、不 flush-to-zero；整数操作 `overflow` none；tile 为
   0 或 1 阶。不写 debug section（函数位置索引 0 = unknown）。**entry 的 optimization_hints
@@ -742,8 +745,10 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   二进制只链 libc / libm / libpthread（`ldd`），无 CUDA 驱动依赖，`nvidia-smi` 不存在也能跑。
 - **版本区间实测**：`tileiras --list-versions` 答 13.1 / 13.2 / 13.3；同一 vadd 写成三个版本号，
   三份都被 `--gpu-name sm_86` 接受且 cubin 逐字节相同（8320 字节，ELF 内 `FUNC GLOBAL vadd`
-  512 字节 SASS）；13.4 被拒 `unsupported Tile IR bytecode version: 13.4`。钉 13.2：cuTile.jl 的
-  兼容表说 Ampere / Ada 的最低字节码是 13.2（`launch.jl` 的 `tile_ir_requirement`）。
+  512 字节 SASS）；13.4 被拒 `unsupported Tile IR bytecode version: 13.4`。刀 3 钉 13.2，理由是
+  cuTile.jl 的兼容表说 Ampere / Ada 的最低字节码是 13.2（`launch.jl` 的 `tile_ir_requirement`）；
+  那是**下限**不是上限，而刀 T8 把钉子挪到了 13.3，因为 13.3 才有的操作码要它。挪之后
+  sm_86 的 cubin 逐字节没变，§6.11 记的就是这次测量。
 - **许可已读**（wheel 内 `License.txt`，NVIDIA SLA）：授权是「安装并使用 SDK」，开发者工具
   「仅供内部使用」除非另标可分发；CI 上是从 PyPI 安装使用、不再分发，落在授权内。这是本文的判断，
   不是律师的；若日后不许，层 1 退回本机，见 §8。
@@ -773,7 +778,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 
 阳性对照先于接受：接受之前先证明它会拒（坏 magic → `input does not correspond to Tile IR
 bytecode`；截断 → `section length 4 exceeds remaining bytecode data`；未分配 opcode 0x7F →
-`unsupported opcode 127 for bytecode version 13.2`）。刀 5 又加三个（`sum` 上）：
+`unsupported opcode 127 for bytecode version 13.2`，刀 T8 之后同一条答的是 13.3）。刀 5 又加三个（`sum` 上）：
 `loop-token-not-carried` 与 `region-stack-pop` 是 handler 变异体，降低时按名拒绝、不出文本；
 `for-results-not-rolled-back` 是写入器变异体，文本不动、字节同长、`tileiras` 答
 `operand index 39 out of bounds (size=25) for operand 1`。层 1 还多查每个 cubin 的符号表里有
@@ -810,7 +815,7 @@ opcode 而 `get_num_tile_blocks` 与 `get_tile_block_id` 逐字节同形。台�
 
 三个数同批改：`tileiras` 的版本与三个 wheel 的 sha256、字节码版本（`packages/tileir/src/bytecode.dawn`
 的 `BYTECODE_MAJOR / BYTECODE_MINOR`，写入头）、本机台账里的驱动版本。全部记在
-`scripts/tile-golden/toolchain.txt`（`bytecode 13.2` / `tileiras 13.3.36` / `gpu-name sm_86` /
+`scripts/tile-golden/toolchain.txt`（`bytecode 13.3`，刀 T8 之前是 13.2 / `tileiras 13.3.36` / `gpu-name sm_86` /
 三行 `wheel … sha256=…` / `driver 560.94`），而且不是散文：`install-tileiras.sh` 只认它的 `wheel` 行，
 `run.sh` 拿 `kernels --bytecode-version` 对 `bytecode` 行、拿 `tileiras --version` 对 `tileiras` 行，
 任一不符直接红；刀 4 起 `driver` 行也是机器读的：`tile-gpu-diff/run.sh` 在它与 `nvidia-smi` 不符时
@@ -2175,11 +2180,11 @@ global-entry   =: symbolNameIndex[varint] valueTypeIndex[varint]
 它在文件里排**第一**，在 Func 之前，与 `writeBytecode` 的顺序一致；读者按 id 收集 payload
 再按自己的顺序解析，所以位置是惯例不是要求。
 
-**三、13.3 才加的两个字段一律不写，而这不是「少写一点」。** `symbol_visibility` 与
-`constant` 在 Ops.td 里被标成 `"13.3"`，写入器在 13.3 以下写四个 varint、在 13.3 及以上写
-六个，读者的 `kMinGlobalInfoSize` 在同一个边界上从 4 变 6。于是在本仓钉的 13.2 上，多写
-那两个 varint 不是「一条读者会跳过的长记录」，而是**下一条记录被从那两个字节开始读**。
-变异体 `global-visibility-written-at-13-2` 就是这句话，`tileiras` 答
+**三、13.3 才加的两个字段，在 13.2 上一律不写，而这不是「少写一点」。**
+`symbol_visibility` 与 `constant` 在 Ops.td 里被标成 `"13.3"`，写入器在 13.3 以下写四个
+varint、在 13.3 及以上写六个，读者的 `kMinGlobalInfoSize` 在同一个边界上从 4 变 6。于是在
+T7 当时钉的 13.2 上，多写那两个 varint 不是「一条读者会跳过的长记录」，而是**下一条记录被从
+那两个字节开始读**。变异体 `global-visibility-written-at-13-2` 就是这句话，`tileiras` 答
 `expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'`；这也是语料要在一个模块里
 声明**两个**全局的原因（只有一个的话，多出来的字节落在段尾、读者根本不看）。C++ 写入器从
 另一侧说同一件事，而且指名道姓：
@@ -2188,6 +2193,11 @@ global-entry   =: symbolNameIndex[varint] valueTypeIndex[varint]
 理由具名写在 `attrs.txt` 的 `13.3-record-field`。注意 `since` 列仍是 13.1：
 SymbolVisibility **枚举**的两个取值确实是 13.1（AttrDefs.td），13.3 的是 GlobalOp 上那个
 **参数**和段里那两个字段。「值存在」与「有地方写它」是两件事，台账的两列分别说这两件事。
+
+**刀 T8 把这一段兑现了，也把它的变异体翻了过来。** 钉子挪到 13.3 之后写入器写六个 varint，
+`global-visibility-written-at-13-2` 于是变成一句合法的写法、被同一把刀退役，取而代之的是
+反向的 `global-visibility-omitted-at-13-3`（在 13.3 的文件里只写四个）。同一堵墙的两侧，
+两次都由 `global_table` 的两个全局钉住，报文见 §6.11。
 
 **四、`get_global` 的符号是一个纯字符串表下标。** 它的 `name` 是 `FlatSymbolRefAttr`，
 tblgen 生成的 getter 答 `StringRef`，于是走 `writeOpAttribute` 的 `std::is_same_v<..., StringRef>`
@@ -2219,9 +2229,10 @@ USAGE 行写的是 `<tile bytecode file>`，把渲染出的 `.mlir` 喂给它答
 
 **可见性够不着的那一格，欠的是什么。** 就算升到 13.3，「宿主能看见 public 而看不见 private」
 这个判词还需要一条本仓没有的 FFI：`cuModuleGetGlobal`。`std/gpu` 的 `Gpu` 效果里没有它，
-本刀也不为它扩 handler 面（那是别的账）。所以 T8 把两个取值写出去之后，它们最多到层 1
-（`tileiras` 收下），要到层 2 得先加那条 FFI。这条欠账写在 `attrs.txt` 的
-`13.3-record-field` 里。
+T7 与 T8 都不为它扩 handler 面（那是别的账）。所以 T8 把两个取值写出去之后，它们最多到层 1
+（`tileiras` 收下），要到层 2 得先加那条 FFI。**这条欠账在 T8 落地后换了名字**：
+`13.3-record-field` 说的是「没有字节可写」，那件事 T8 已经解决，现在欠的只剩这条 FFI，
+所以 `attrs.txt` 上那三行的豁免叫 `no-module-symbol-ffi`。
 
 ### 6.10 `OptimizationHints` 的字节形状与它到达了哪里（刀 T15）
 

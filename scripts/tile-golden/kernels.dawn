@@ -28,7 +28,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   sin, cos, tan, sinh, cosh, atan2, remf,
   extract, cat, permute_tile, num_blocks, d_fork2,
   ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64,
-  d_global, d_global_aligned, global_ptrs,
+  d_global, d_global_aligned, d_global_private, d_global_const, global_ptrs,
   addi, subi, muli, shli, shri, consti,
   addf_down, addf_up, mul_down, mul_up, div_down, div_up, addf_ftz, mul_ftz, maxf_nan, minf_nan,
   sqrt_approx, eq_u, ne_u, lt_u, le_u, gt_u, ge_u, add_i_nsw, sub_i_nuw, mul_i_nw,
@@ -4130,11 +4130,19 @@ fn assume_bounded(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
 #   global_ctl      the same answer as global_table out of two buffers, so
 #                   it holds neither opcode: the family's kernel-level
 #                   control, and a second opinion on the tables.
-#
-# `symbol_visibility` and `constant` are not written by any of them: both
-# entered the Global section's record at bytecode 13.3 and this tree pins
-# 13.2 (packages/tileir/src/bytecode.dawn says where that was measured,
-# and scripts/tileir-features/attrs.txt hands the three rows to knife T8).
+#   global_flags    global_table's two segments again, out of a `private`
+#                   global and a `constant` one. Knife T8: those two words
+#                   are the fields the Global section's record grew at
+#                   bytecode 13.3, and this is the only kernel here that
+#                   writes either. It answers what global_table answers,
+#                   which is the point -- neither word changes what a
+#                   kernel computes, so what this kernel buys is layer 1,
+#                   the assembler accepting them. What it CANNOT buy is
+#                   named in scripts/tileir-features/attrs.txt: telling a
+#                   private symbol from a public one from the host needs
+#                   `cuModuleGetGlobal`, and the `Gpu` effect has no such
+#                   operation, so the family stops there and this kernel is
+#                   not in scripts/tile-gpu-diff.
 #
 # `@tbl_b` asks for a 256-byte alignment and `@tbl_a` takes the dialect's
 # default of 0, so the record's alignment varint carries two different
@@ -4164,6 +4172,23 @@ fn global_ctl(a: Param[F64], b: Param[F64], x: Param[F64], out: Param[F64]) -> U
   let tx = load(x, blk, s)
   store(out, blk, s, addf(F64, s, load(a, blk, s), tx))
   store(out, idx_add(blk, idx_const(GLOBAL_TILE)), s, addf(F64, s, load(b, blk, s), tx))
+}
+
+# The same two segments as global_table, out of globals that carry the two
+# words the record grew room for at 13.3: `@hidden` is private and `@frozen`
+# is constant. It reads them and never stores through either, which the
+# second one requires and the dialect does not enforce.
+fn global_flags(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [GLOBAL_TILE]
+  d_global_private("hidden", F64, global_table_a(GLOBAL_TILE))
+  d_global_const("frozen", F64, global_table_b(GLOBAL_TILE))
+  let blk = tile_at(block_id(0), GLOBAL_TILE)
+  let off = lanes(blk, s)
+  let pa = ptr_offset(F64, s, global_ptrs("hidden", F64, s), off)
+  let pb = ptr_offset(F64, s, global_ptrs("frozen", F64, s), off)
+  let tx = load(x, blk, s)
+  store(out, blk, s, addf(F64, s, load_ptrs(F64, s, pa), tx))
+  store(out, idx_add(blk, idx_const(GLOBAL_TILE)), s, addf(F64, s, load_ptrs(F64, s, pb), tx))
 }
 
 # One mutable global, read then written, and the sum written to the output
@@ -4633,6 +4658,8 @@ fn trace(name: String) -> TileProg = match name {
       () => global_ctl(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
   "global_scratch" ->
     trace_kernel("global_scratch", ["f64", "f64"], () => global_scratch(param(F64, 0), param(F64, 1)))
+  "global_flags" ->
+    trace_kernel("global_flags", ["f64", "f64"], () => global_flags(param(F64, 0), param(F64, 1)))
   "hint_entry" ->
     trace_kernel_hinted("hint_entry", ["f64", "f64", "f64"], hint_entry_hints(),
       () => hint_entry(param(F64, 0), param(F64, 1), param(F64, 2)))

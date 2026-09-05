@@ -141,6 +141,21 @@
 #       `scope.device` is NOT exempt: leetgpu 13's histogram collides
 #       across tile blocks, so a narrower scope would be a wrong answer,
 #       and that is a device judgement.
+#   fast-acc-not-in-the-cubin
+#       `mmaf`'s `fast_acc` asks the hardware to accumulate at a lower
+#       precision than the accumulator's format. It is the reason `mmaf`
+#       writes a flags varint at all from 13.3 on, and knife T8 measured
+#       what setting the bit buys on this machine: with the writer's word
+#       changed from 0 to 1, ONE bytecode byte moves and the cubin
+#       `tileiras --gpu-name sm_86` produces is BYTE FOR BYTE the same, on
+#       all four `mmaf` kernels tried and on the f16 one as readily as on
+#       the f64 ones (`matmul`, `batched_matmul_f16`, `attn_scores`,
+#       `lora_hidden`). A device cannot answer differently for a bit that
+#       does not reach it, so there is no layer-2 judgement here to be had
+#       on this target rather than one nobody has written yet. What the
+#       row does own is the flags word the bit lives in, and
+#       scripts/tile-golden's mmaf-flags-unwritten is that: drop the word
+#       and the assembler reads the first operand for it.
 #   no-client-kernel
 #       The writer's `rmw_mode_value` spells all ten atomic modes and only
 #       two of them have a kernel. The table is right and nothing exercises
@@ -149,25 +164,34 @@
 #       The view family, deferred with the nine view opcodes until knives
 #       T11 to T13 (docs 2.4). `PaddingValue` is a parameter of the view
 #       TYPES (Types.td), not of any operation this backend emits.
-#   13.3-record-field
-#       `visibility.public`, `visibility.private` and `unit.constant` were
-#       knife T7's on the prestudy's plan, and T7 measured them out of it.
-#       The SymbolVisibility enum is 13.1 (AttrDefs.td gives both cases
-#       that version, which is what the `since` column says), but the two
-#       places a writer could put either value are not: Ops.td versions
-#       GlobalOp's `symbol_visibility` and `constant` arguments "13.3", and
-#       BytecodeWriter.cpp's writeGlobalSection writes four varints per
-#       global below 13.3 and six at or above it, while
+#   no-module-symbol-ffi
+#       `visibility.public`, `visibility.private` and `unit.constant` are
+#       written and accepted, and the judgement they are short of needs one
+#       FFI operation this repository does not have: `cuModuleGetGlobal`.
+#       What each of them MEANS is a fact about a symbol as seen from the
+#       host -- a private symbol cannot be looked up in a loaded module, a
+#       constant one is read-only -- and every layer-2 judgement here is a
+#       comparison of one downloaded buffer, so none of them can ask it.
+#       The `Gpu` effect in std/gpu.dawn has no module-symbol operation and
+#       knife T8 did not add one (that is another ledger's account), so the
+#       three stop at layer 1 with the assembler's acceptance.
+#
+#       This exemption REPLACED `13.3-record-field`, which said something
+#       else and is now settled: until knife T8 these three had no byte to
+#       be written in at all. The SymbolVisibility enum is 13.1 (AttrDefs.td
+#       gives both cases that version, which is what the `since` column
+#       says) but the places a writer could put either value are 13.3:
+#       Ops.td versions GlobalOp's `symbol_visibility` and `constant`
+#       arguments "13.3", BytecodeWriter.cpp's writeGlobalSection writes
+#       four varints per global below 13.3 and six at or above it, and
 #       BytecodeReader.cpp's parseGlobalSection switches its
-#       `kMinGlobalInfoSize` from 4 to 6 on the same boundary. So at the
-#       13.2 this tree pins there is no byte to write them in: `public` is
-#       the value the reader defaults to and writes nothing for, and
-#       `private` the C++ writer refuses outright ("uses non-public symbol
-#       visibility, which cannot be encoded in bytecode version 13.2").
-#       scripts/tile-golden's global-visibility-written-at-13-2 is the
-#       measurement from this side: emitting the two extra varints at 13.2
-#       makes the assembler read the next global's record out of them.
-#       Knife T8 is the version wall and owns all three.
+#       `kMinGlobalInfoSize` from 4 to 6 on the same boundary. Knife T8
+#       moved the pin to 13.3, so the record now has six fields and the
+#       writer fills all of them. Both sides of that wall have been
+#       measured against `tileiras`: T7's global-visibility-written-at-13-2
+#       wrote six varints into a 13.2 file (retired by T8, since that is now
+#       the correct shape) and T8's global-visibility-omitted-at-13-3 writes
+#       four into a 13.3 one.
 #   hints-do-not-change-answers
 #       `optimization_hints` is a SUGGESTION, and ruling 1 of the prestudy
 #       names it beside `assume` for exactly this reason: the dialect
@@ -196,7 +220,7 @@ rounding.zero                | 1 | 13.1 | implemented   | 10  | 2 | const:ROUND_
 rounding.negative_inf        | 2 | 13.1 | implemented   | T4  | 3 | const:ROUND_NEGATIVE_INF,golden:attr_round,device:attr_round,mutant:directed-rounding-as-nearest-even | -
 rounding.positive_inf        | 3 | 13.1 | implemented   | T4  | 3 | const:ROUND_POSITIVE_INF,golden:attr_round,device:attr_round,mutant:directed-rounding-as-nearest-even | -
 rounding.approx              | 4 | 13.1 | implemented   | T4  | 3 | const:ROUND_APPROX,golden:attr_approx,device:attr_approx,mutant:sqrt-approx-as-nearest-even           | -
-rounding.full                | 5 | 13.1 | implemented   | 7b  | 2 | const:ROUND_FULL,golden:mathops,device:mathops                                                        | -
+rounding.full                | 5 | 13.1 | implemented   | 7b  | 3 | const:ROUND_FULL,golden:mathops,golden:sigmoid,device:mathops,mutant:exp-rounding-unwritten           | -
 rounding.nearest_int_to_zero | 6 | 13.1 | implemented   | 10  | 3 | const:ROUND_INT_TO_ZERO,golden:int_ops,device:int_ops,mutant:ftoi-rounds-instead-of-truncates         | -
 overflow.none                | 0 | 13.1 | implemented   | 10  | 2 | const:OVERFLOW_NONE,golden:int_ops,device:int_ops                                                     | -
 overflow.nsw                 | 1 | 13.1 | implemented   | T4  | 1 | const:OVERFLOW_NSW,golden:attr_overflow,mutant:overflow-attr-not-written                              | assumption-not-arithmetic
@@ -225,16 +249,16 @@ rmw.xchg                     | 9 | 13.1 | deferred      | -   | 0 | -           
 unit.flush_to_zero           | 1 | 13.1 | implemented   | T4  | 3 | const:FLOAT_FLAG_FTZ,golden:attr_ftz,device:attr_ftz,mutant:ftz-bit-dropped                           | -
 unit.propagate_nan           | 1 | 13.1 | implemented   | T4  | 3 | const:MINMAX_FLAG_PROPAGATE_NAN,golden:attr_nan,device:attr_nan,mutant:propagate-nan-bit-dropped      | -
 unit.unsignedCmp             | 1 | 13.2 | implemented   | T4  | 3 | const:FOR_FLAG_UNSIGNED,golden:attr_ucmp,device:attr_ucmp,mutant:for-unsigned-bit-dropped             | -
-unit.fast_acc                | 1 | 13.3 | unimplemented | T8  | 0 | -                                                                                                     | -
-unit.constant                | 1 | 13.3 | unimplemented | T8  | 0 | -                                                                                                     | 13.3-record-field
+unit.fast_acc                | 1 | 13.3 | implemented   | T8  | 1 | const:MMAF_FLAG_FAST_ACC,golden:matmul,mutant:mmaf-flags-unwritten                                    | fast-acc-not-in-the-cubin
+unit.constant                | 1 | 13.3 | implemented   | T8  | 1 | writer:global_section,golden:global_flags,mutant:global-visibility-omitted-at-13-3                    | no-module-symbol-ffi
 unit.global                  | 1 | 13.3 | unimplemented | T10 | 0 | -                                                                                                     | -
 padding.zero                 | 0 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.neg_zero             | 1 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.nan                  | 2 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.pos_inf              | 3 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.neg_inf              | 4 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
-visibility.public            | 0 | 13.1 | unimplemented | T8  | 0 | -                                                                                                     | 13.3-record-field
-visibility.private           | 1 | 13.1 | unimplemented | T8  | 0 | -                                                                                                     | 13.3-record-field
+visibility.public            | 0 | 13.1 | implemented   | T8  | 1 | const:VIS_PUBLIC,golden:global_table,mutant:global-visibility-omitted-at-13-3                         | no-module-symbol-ffi
+visibility.private           | 1 | 13.1 | implemented   | T8  | 1 | const:VIS_PRIVATE,golden:global_flags,mutant:global-visibility-omitted-at-13-3                        | no-module-symbol-ffi
 tag.String                   |  5 | 13.1 | implemented   | T6  | 1 | writer:str_of,golden:assert_pass,golden:print_tile,mutant:assert-message-tagged                       | tag-not-emitted
 tag.DivBy                    |  8 | 13.1 | implemented   | T6  | 1 | const:ATTR_DIV_BY,golden:assume_divby,mutant:assume-divby-tag-as-same-elements                        | assumption-not-arithmetic
 tag.SameElements             |  9 | 13.1 | implemented   | T6  | 1 | const:ATTR_SAME_ELEMENTS,golden:assume_same,mutant:assume-divby-tag-as-same-elements,mutant:assume-same-elements-payload-four-bytes | assumption-not-arithmetic

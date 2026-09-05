@@ -259,17 +259,39 @@
 #                            and differ, and the reader refuses the section
 #                            before reading a record: two globals do not
 #                            fit in a payload that holds one
-#     global-visibility-written-at-13-2
-#                            the writer emits the two fields the record
-#                            grew at 13.3, `symbol_visibility` and
-#                            `constant`, into a 13.2 file -> global_table's
+#     global-visibility-omitted-at-13-3
+#                            the writer stops emitting the two fields the
+#                            record grew at 13.3, `symbol_visibility` and
+#                            `constant`, from a 13.3 file -> global_table's
 #                            text is untouched, its bytes are the same
-#                            length and differ, and the reader takes the
-#                            second global's fields from the first
-#                            record's extra pair and answers NULL TYPE.
-#                            This is the version wall from the inside, and
-#                            the reason attrs.txt hands the two visibility
-#                            values and `constant` to knife T8
+#                            length (the Func section's padding absorbs the
+#                            four the record loses) and differ, and the
+#                            reader runs off the end of the section.
+#                            This is knife T7's
+#                            global-visibility-written-at-13-2 mirrored:
+#                            that one wrote six varints into a 13.2 file and
+#                            became the correct shape when knife T8 moved
+#                            the pin, so T8 retired it and put this in its
+#                            place. Both are the same wall, from the two
+#                            sides
+#     exp-rounding-unwritten `exp` stops writing the `rounding_mode` that
+#                            became a required attribute at 13.3 -> sigmoid's
+#                            text is untouched, its Func section is one byte
+#                            shorter, and the reader takes the source
+#                            operand's index for the rounding mode
+#     mmaf-flags-unwritten   `mmaf` stops writing the flags varint that
+#                            exists from 13.3 on (its `fast_acc` bit) ->
+#                            matmul's text is untouched, its Func section is
+#                            one byte shorter, and the reader takes the first
+#                            operand for the flags word
+#     header-minor-still-2   the header says 13.2 while the body is written
+#                            in the 13.3 shapes -> global_table's text is
+#                            untouched, its bytes are the same length and
+#                            differ in ONE byte, the tenth. It is the only
+#                            mutant here that changes the reader's mind
+#                            about the whole file rather than about one
+#                            operation, and what it measures is that the
+#                            version in the header is load bearing
 #     get-global-symbol-not-written
 #                            `get_global` stops writing its symbol, which
 #                            is one varint (a FlatSymbolRefAttr is a string
@@ -347,7 +369,7 @@ kernels=(
   attr_overflow attr_memsem attr_addf attr_ucmp
   assert_pass assert_fail print_tile assume_divby
   assume_same assume_bounded
-  global_table global_ctl global_scratch
+  global_table global_ctl global_scratch global_flags
   hint_entry hint_memory)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
@@ -421,12 +443,15 @@ mutants=(
   assume-same-elements-payload-four-bytes
   assume-bounded-bounds-swapped
   global-record-alignment-dropped
-  global-visibility-written-at-13-2
+  global-visibility-omitted-at-13-3
   get-global-symbol-not-written
   hint-dictionary-count-wrong
   hint-tag-as-dictionary
   hint-flag-bit-misplaced
   hint-entry-flag-dropped
+  exp-rounding-unwritten
+  mmaf-flags-unwritten
+  header-minor-still-2
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -1460,35 +1485,43 @@ if run_item assume-bounded-bounds-swapped; then
     "'cuda_tile.bounded' expects lower bound to be less than or equal to upper bound"
 fi
 
-# 37. The Global section's record loses its last field. The record is four
-#     varints (name, type, constant, alignment) and this writes three, so
-#     the reader takes the SECOND global's name index from the first
-#     record's leftover and reads the rest of the section off by one field.
+# 37. The Global section's record loses its alignment field. The record is
+#     six varints at 13.3 (name, type, constant, alignment, visibility,
+#     constant flag) and this writes five, so the reader takes the SECOND
+#     global's name index from the first record's leftover and reads the
+#     rest of the section off by one field. The byte count in the message
+#     moved when knife T8 grew the record: it was 6 at 13.2 and is 10 now.
 #     `global_table` declares two globals for this reason: with one global
 #     the three varints would be followed by nothing and the trailing byte
 #     the reader never looks at would hide the mutant.
 if run_item global-record-alignment-dropped; then
   mutant_project global-record-alignment-dropped bytecode.dawn \
-    '    (wc, put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align))' \
-    '    (wc, put_varint(put_varint(put_varint(b, si), ti), ci))'
+    '    let b4 = put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align)' \
+    '    let b4 = put_varint(put_varint(put_varint(b, si), ti), ci)'
   writer_mutant_checks global-record-alignment-dropped global_table same-size \
-    "number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 6 bytes"
+    "number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 10 bytes"
 fi
 
-# 38. The writer emits the two fields the Global section grew at 13.3
-#     (`symbol_visibility` and `constant`) into a 13.2 file. This is the
-#     version wall from the inside: the reader's kMinGlobalInfoSize is 4
-#     below 13.3 and 6 at or above it, so the extra pair is not a longer
-#     record a reader skips, it is where the NEXT global's record is read
-#     from. It is also why attrs.txt hands visibility.public,
-#     visibility.private and unit.constant to knife T8 rather than to this
-#     one: at 13.2 there is no byte to put them in.
-if run_item global-visibility-written-at-13-2; then
-  mutant_project global-visibility-written-at-13-2 bytecode.dawn \
-    '    (wc, put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align))' \
-    '    (wc, put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align), 0), 0))'
-  writer_mutant_checks global-visibility-written-at-13-2 global_table same-size \
-    "expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'"
+# 38. The writer stops emitting the two fields the Global section grew at
+#     13.3 (`symbol_visibility` and `constant`) from a 13.3 file. This is
+#     the version wall from the inside, and it is knife T7's
+#     `global-visibility-written-at-13-2` mirrored: the reader's
+#     kMinGlobalInfoSize is 4 below 13.3 and 6 at or above it, so at 13.3
+#     four varints are not a shorter record the reader tolerates, they are
+#     four varints short of what it will read. T7 wrote the pair into a 13.2
+#     file and got NULL TYPE out of the second record; knife T8 moved the
+#     pin to 13.3, which made that spelling the CORRECT one, so the mutant
+#     it retires comes back as its own mirror.
+#
+#     `global_table` declares two globals here for the same reason it does
+#     above: the shortfall has to land inside a record the reader still
+#     wants to parse.
+if run_item global-visibility-omitted-at-13-3; then
+  mutant_project global-visibility-omitted-at-13-3 bytecode.dawn \
+    '      put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), if g.constant { 1 } else { 0 })' \
+    '      b4'
+  writer_mutant_checks global-visibility-omitted-at-13-3 global_table same-size \
+    "number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 9 bytes"
 fi
 
 # 39. `get_global` stops writing its symbol. A FlatSymbolRefAttr is one
@@ -1577,6 +1610,59 @@ if run_item hint-entry-flag-dropped; then
     'const FLAG_HAS_HINTS: Int = 0x00'
   writer_mutant_checks hint-entry-flag-dropped hint_entry same-size \
     "operand index 10 out of bounds (size=4) for operand 0"
+fi
+
+# 44. `exp` stops writing the `rounding_mode` it must carry from 13.3 on.
+#     The attribute is a DefaultValuedAttr and therefore REQUIRED rather
+#     than optional, so BytecodeGen.cpp writes it inline behind a version
+#     check and writes no flag for it; a reader at 13.3 expects the byte and,
+#     not finding it, takes the source operand's index for the mode. This is
+#     one of the four shapes knife T8 moved, and it is the one that would
+#     have been invisible without layer 1: `exp` renders the same text at
+#     both versions, because `full` is the default the printer omits.
+if run_item exp-rounding-unwritten; then
+  mutant_project exp-rounding-unwritten bytecode.dawn \
+    '  } else if op == "exp" && exp_has_rounding() {
+    Some(ROUND_FULL)' \
+    '  } else if op == "exp" && false {
+    Some(ROUND_FULL)'
+  writer_mutant_checks exp-rounding-unwritten sigmoid func-one-short \
+    "failed to parse attribute 'rounding_mode'"
+fi
+
+# 45. `mmaf` stops writing the flags varint that exists from 13.3 on. Its
+#     `fast_acc` is the operation's ONLY optional field and it arrived at
+#     13.3 while `mmaf` itself is 13.1, so getVersionOrderedBitAssignments
+#     answers a minimum version later than the operation's and
+#     generateFlagsFieldSerialization guards the word with it. Without the
+#     word the reader takes the first operand for the flags and then runs
+#     one operand short. `mmai`, which has no optional field at any version,
+#     writes no such word and is untouched.
+if run_item mmaf-flags-unwritten; then
+  mutant_project mmaf-flags-unwritten bytecode.dawn \
+    '    let w2 = if mmaf_has_flags() { emit(w1, MMAF_FLAG_FAST_ACC_UNSET) } else { w1 }' \
+    '    let w2 = w1'
+  writer_mutant_checks mmaf-flags-unwritten matmul func-one-short \
+    "block is expected to have a terminator operation, but the last operation 'cuda_tile.absf' is not a terminator"
+fi
+
+# 46. The header says 13.2 while the body is written in the 13.3 shapes.
+#     Every other mutant in this file changes one operation; this one
+#     changes what the reader believes about the whole file, and it is the
+#     only way to ask whether the version byte is load bearing at all. A
+#     reader that ignored it would accept the file, because the bytes after
+#     the header are a well formed 13.3 program.
+#
+#     The anchor is the header expression and not BYTECODE_MINOR itself: the
+#     constant also drives `exp_has_rounding`, `mmaf_has_flags` and
+#     `global_has_extended_fields`, so lowering it would produce an honest
+#     13.2 file rather than the disagreement this is about.
+if run_item header-minor-still-2; then
+  mutant_project header-minor-still-2 bytecode.dawn \
+    'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), BYTECODE_MINOR)' \
+    'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), 2)'
+  writer_mutant_checks header-minor-still-2 global_table same-size \
+    "expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'"
 fi
 
 _item_tick ""
