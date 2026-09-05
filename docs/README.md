@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` 下现有 103 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 104 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
@@ -63,6 +63,7 @@
 | [std-pruning-design.md](std-pruning-design.md) | current | 按程序裁剪 std：一次可达性走图，两个后端的 emit 边界上按模块 + 按函数裁；根是用户模块与发射器直呼的十个 `std/pvec` 名字，`--stdlib` 与无 target 两条全留；顺手把字典副本的归属从「先遇到的」改成确定性的最小 owner（issue #69）。check 与 lowering 一字未动，所以 Core golden 不动。 |
 | [qualified-function-value-design.md](qualified-function-value-design.md) | current | 模块限定函数值的解析、两轮泛型推断与包依赖回归（#66）。 |
 | [perceus-design.md](perceus-design.md) | current | native 的内存管理（精确 RC + 复用分析）。五刀已全部落地，关账在其 §8；仍是该子系统的权威说明。 |
+| [control-freight-design.md](control-freight-design.md) | current | #71：控制运行时与效果证据跟随已有的函数可达性遍历，未使用的声明不增加类文件。 |
 | [slab-residency-design.md](slab-residency-design.md) | **current** | #10 的 measurement-first 调研与落地：把 lexer 小活集的 RSS 拆成 eager 64 KiB layout、空 current、每类 empty cache、rounding 与 `madvise` 五份；以 lexer/compiler/持久红黑树矩阵裁定 fresh slab 按 32 KiB 增量 materialize，保留 hot path、empty cache 与退役策略。 |
 | [native-loop-control-design.md](native-loop-control-design.md) | current | native RC 的 `unloop` 只拆 match 一次性循环，保留仍被源码 `break`/`continue` 指向的循环与 C 标签。 |
 | [rc-operand-unwind-design.md](rc-operand-unwind-design.md) | current | #68：后续操作数提前返回时释放先前提升的引用，保留自引用赋值的最后使用转移。 |
