@@ -22,7 +22,9 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_mask
   float_to_float, ext_u8, trunc_u8, mmai,
   d_reduce_i, s_addi, s_maxi,
   d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const, erf,
-  sin, cos, tan, sinh, cosh, atan2, remf }
+  sin, cos, tan, sinh, cosh, atan2, remf,
+  extract, cat, permute_tile, num_blocks, d_fork2,
+  ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, i64_const, add_i64 }
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -3411,6 +3413,104 @@ fn llama_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store_strided(out, idx_mul(bn, idx_const(LM_T)), sh, [LM_D, 1], acc)
 }
 
+# ---- knife T2: shapes, the grid's extent, token joins and pointers ----
+
+# The three shape operations on ONE block of 128 f64, read twice: once as a
+# 16 by 8 tile (which `extract` halves and `cat` puts back the other way
+# round) and once as a 4 by 4 by 8 one (which `permute` transposes across
+# its first two axes).
+#
+# Two things about the shapes are deliberate and neither is decoration.
+# `extract`'s source is 16 by 8 and its result 8 by 4, so BOTH dimensions
+# have two slices and the pair of slice indices `[1, 0]` names a different
+# quarter from `[0, 1]`: that is what makes extract-indices-reversed a
+# wrong answer rather than an out-of-bounds read. And `permute`'s first two
+# dimensions are EQUAL, so the identity permutation and `[1, 0, 2]` give
+# the same result TYPE: every other permutation of a tile whose dimensions
+# differ is refused by the assembler (PermuteOp's verifier derives the
+# result shape from the attribute), and a mutant that never reaches the
+# device says nothing about what the device does.
+fn shape_ops(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let base = tile_at(b, 128)
+  let obase = tile_at(b, 192)
+  let t2 = load(x, base, [16, 8])
+  let lower = extract(F64, [16, 8], [8, 4], t2, [idx_const(1), idx_const(0)])
+  let upper = extract(F64, [16, 8], [8, 4], t2, [idx_const(0), idx_const(0)])
+  store(out, obase, [16, 4], cat(F64, 0, [8, 4], [8, 4], lower, upper))
+  let t3 = load(x, base, [4, 4, 8])
+  store(out, idx_add(obase, idx_const(64)), [4, 4, 8], permute_tile(F64, [4, 4, 8], [1, 0, 2], t3))
+}
+
+# A grid-stride loop: the grid is SMALLER than the work, and block `b`
+# takes tiles `b`, `b + nblocks`, `b + 2 * nblocks` and so on. `rounds` is
+# a host constant, so the loop steps by one and multiplies by the grid's
+# extent rather than stepping by it -- a loop whose STEP came from
+# `get_num_tile_blocks` would not terminate under a mutant that answered
+# the block id instead (block 0 would step by zero), and a mutant that
+# hangs the device is not a verdict.
+#
+# This is the only shape in which `get_num_tile_blocks` is visible at
+# layer 2: a kernel that merely stored the number would be testing the
+# store.
+fn grid_stride(x: Param[F64], out: Param[F64], rounds: Int) -> Unit !Dev = {
+  let b = block_id(0)
+  let nb = num_blocks(0)
+  let seed = f_const(F64, [128], 0.0)
+  let _last = d_for(idx_const(0), idx_const(rounds), idx_const(1), seed, (k, acc) => {
+    let base = tile_at(idx_add(b, idx_mul(k, nb)), 128)
+    store(out, base, [128], mul(F64, [128], load(x, base, [128]), f_const(F64, [128], 2.0)))
+    acc
+  })
+  ()
+}
+
+# Two stores issued from ONE token, joined, and a load that depends on the
+# join. Without `join_tokens` the two stores would be a chain and the load
+# would take the second one's token; here neither store is ordered against
+# the other and the load is ordered after both.
+#
+# The judgement is that the load reads what the two stores wrote, so the
+# scratch buffer's own contents before the launch are the sentinel and
+# nothing here reproduces them.
+fn token_join(x: Param[F64], mid: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let base = tile_at(b, 128)
+  let high = idx_add(base, idx_const(64))
+  let lo = load(x, base, [64])
+  let hi = load(x, high, [64])
+  d_fork2(() => store(mid, base, [64], addf(F64, [64], lo, lo)),
+    () => store(mid, high, [64], mul(F64, [64], hi, f_const(F64, [64], 3.0))))
+  store(out, base, [128], load(mid, base, [128]))
+}
+
+# An address taken apart and put back: the pointer tile of a block's own
+# chunk becomes i64, an offset of `delta` ELEMENTS is added as `8 * delta`
+# BYTES, and the answer is read back as pointers and loaded through. The
+# judgement is that this reads exactly what a load at `base + delta` would,
+# so the input buffer carries `delta` elements past the last block's chunk.
+fn ptr_roundtrip(x: Param[F64], out: Param[F64], delta: Int) -> Unit !Dev = {
+  let b = block_id(0)
+  let base = tile_at(b, 128)
+  let here = ptr_offset(F64, [128], ptrs(x, [128]), lanes(base, [128]))
+  let moved = add_i64([128], ptr_to_int(F64, [128], here), i64_const([128], 8 * delta))
+  store(out, base, [128], load_ptrs(F64, [128], int_to_ptr(F64, [128], moved)))
+}
+
+# The same bytes read as another format: an i32 buffer holding binary32
+# patterns, its pointer tile reinterpreted as pointers to f32, and the f32
+# values widened to f64 on the way out. i32 and f32 are four bytes each, so
+# the addresses are the same numbers and only the READING changes; that is
+# the whole of what `ptr_to_ptr` does, and the reason the two formats here
+# have one width.
+fn ptr_recast(x: Param[I32], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let base = tile_at(b, 128)
+  let words = ptr_offset(I32, [128], ptrs(x, [128]), lanes(base, [128]))
+  let reals = ptr_to_ptr(I32, F32, [128], words)
+  store(out, base, [128], float_to_float(F32, F64, [128], load_ptrs(F32, [128], reals)))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -3742,6 +3842,17 @@ fn trace(name: String) -> TileProg = match name {
   "rope" ->
     trace_kernel("rope", ["f64", "f64", "f64", "f64"],
       () => rope(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "shape_ops" ->
+    trace_kernel("shape_ops", ["f64", "f64"], () => shape_ops(param(F64, 0), param(F64, 1)))
+  "grid_stride" ->
+    trace_kernel("grid_stride", ["f64", "f64"], () => grid_stride(param(F64, 0), param(F64, 1), 4))
+  "token_join" ->
+    trace_kernel("token_join", ["f64", "f64", "f64"],
+      () => token_join(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "ptr_roundtrip" ->
+    trace_kernel("ptr_roundtrip", ["f64", "f64"], () => ptr_roundtrip(param(F64, 0), param(F64, 1), 3))
+  "ptr_recast" ->
+    trace_kernel("ptr_recast", ["i32", "f64"], () => ptr_recast(param(I32, 0), param(F64, 1)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -3775,6 +3886,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|kv_scores|kv_context|attn_bwd_mmt|attn_bwd_ds|lin_attn_s|lin_attn_out"
       ++ "|ols_gram|ols_elim|ols_beta"
       ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
-      ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down>"
+      ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
+      ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

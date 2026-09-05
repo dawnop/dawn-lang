@@ -799,6 +799,16 @@ fn emit_op(w: W, opcode: Int, result: Ty) -> W = {
   emit(emit(w1, opcode), ti)
 }
 
+# opcode, a RESULT COUNT of one, then the result type index. tblgen's
+# `Operator::isVariadic()` is true when any argument OR result is variadic,
+# and `generateSimpleResultSerialization` writes the count under it, so an
+# operation with one fixed result and a variadic OPERAND list writes the 1
+# all the same. `extract` and `join_tokens` are the two of those here.
+fn emit_op_counted(w: W, opcode: Int, result: Ty) -> W = {
+  let (w1, ti) = ty(w, result)
+  emit(emit(emit(w1, opcode), 1), ti)
+}
+
 fn encode_instr(w0: W, i: Instr) -> W = match i {
   MakeTok(_dst) -> emit_op(w0, OP_MAKE_TOKEN, Token)
   BlockIds(_x, _y, _z) -> {
@@ -1020,10 +1030,18 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   YieldVals(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_YIELD), 0), len(values)), emit_ref)
   Cont(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_CONTINUE), 0), len(values)), emit_ref)
   ExtractTile(_dst, src, _from, to, indices) -> {
-    # NO attributes: the slice numbers are OPERANDS (rank-0 i32 tiles), and
-    # because `indices` is variadic the operand count is written -- the
-    # source counts in it, so it is one more than there are indices.
-    let w1 = emit(emit_op(w0, OP_EXTRACT, to), 1 + len(indices))
+    # A RESULT COUNT first. tblgen's `Operator::isVariadic()` is true when
+    # ANY argument or result is variadic, and `generateSimpleResultSerialization`
+    # writes the result count under it -- so an operation with one fixed
+    # result and a variadic OPERAND list still writes the 1. Measured:
+    # without it `tileiras` answers `error at offset 98: failed to get
+    # result type 10 for ExtractOp`, having taken the type index for the
+    # count. `join_tokens` is the same shape and was the same measurement.
+    #
+    # Then NO attributes -- the slice numbers are OPERANDS (rank-0 i32
+    # tiles) -- and the operand count, which counts the source as well, so
+    # it is one more than there are indices.
+    let w1 = emit(emit_op_counted(w0, OP_EXTRACT, to), 1 + len(indices))
     list.fold(indices, emit_ref(w1, src), emit_ref)
   }
   CatTile(_dst, dim, lhs, rhs, _lhs_ty, _rhs_ty, to) -> {
@@ -1038,9 +1056,10 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     emit_ref(w1, src)
   }
   JoinTokens(_dst, toks) -> {
-    # one token result, then the operand count (the operands are variadic)
-    # and the tokens. The dialect's verifier wants two or more of them.
-    let w1 = emit(emit_op(w0, OP_JOIN_TOKENS, Token), len(toks))
+    # the result count (1: see `extract` above -- the variadic operands are
+    # what make this operation write one), the token result type, then the
+    # operand count and the tokens. The verifier wants two or more.
+    let w1 = emit(emit_op_counted(w0, OP_JOIN_TOKENS, Token), len(toks))
     list.fold(toks, w1, emit_ref)
   }
   BlockCounts(_x, _y, _z) -> {
@@ -1680,9 +1699,9 @@ test "the shape operations are the frozen table's opcodes, with the permutation 
 test "extract writes its operand count, cat its dim inline, and neither writes a flags word" {
   let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3)]), nvals: 4 }
   let ex = encode_instr(w0, ExtractTile(9, Val(0), Tile([4, 4, 8], Num("f64")), Tile([2, 4, 8], Num("f64")), [Val(1), Val(2), Val(3)]))
-  # opcode, result type index (f64 is registered first, the tile second),
-  # operand count 4, then %0 %1 %2 %3
-  assert hex(bytes.freeze(ex.body)) == "26" ++ "01" ++ "04" ++ "00" ++ "01" ++ "02" ++ "03"
+  # opcode, result COUNT 1, result type index (f64 is registered first,
+  # the tile second), operand count 4, then %0 %1 %2 %3
+  assert hex(bytes.freeze(ex.body)) == "26" ++ "01" ++ "01" ++ "04" ++ "00" ++ "01" ++ "02" ++ "03"
   let ct = encode_instr(w0, CatTile(9, 1, Val(0), Val(1), Tile([2, 4], Num("f64")), Tile([2, 4], Num("f64")), Tile([2, 8], Num("f64"))))
   # opcode, result type index, dim 1, then the two operands: no operand
   # count (neither operand is variadic or optional) and no flags word
@@ -1690,7 +1709,7 @@ test "extract writes its operand count, cat its dim inline, and neither writes a
   let pm = encode_instr(w0, PermuteTile(9, Val(0), [1, 0, 2], Tile([4, 4, 8], Num("f64")), Tile([4, 4, 8], Num("f64"))))
   assert hex(bytes.freeze(pm.body)) == "53" ++ "01" ++ "03" ++ "01000000" ++ "00000000" ++ "02000000" ++ "00"
   let jt = encode_instr(w0, JoinTokens(9, [Val(0), Val(1), Val(2)]))
-  assert hex(bytes.freeze(jt.body)) == "3c" ++ "00" ++ "03" ++ "00" ++ "01" ++ "02"
+  assert hex(bytes.freeze(jt.body)) == "3c" ++ "01" ++ "00" ++ "03" ++ "00" ++ "01" ++ "02"
   # get_num_tile_blocks is get_tile_block_id's shape: three rank-0 i32
   # results, no operands, no attributes, no flags
   let nb = encode_instr(w0, BlockCounts(9, 10, 11))
