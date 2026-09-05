@@ -9,7 +9,7 @@
 use std/io
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32, BF16, F16, I32, I8, I16, I64, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU}
-use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
+use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
   store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, or_mask, in_range, axis_mask,
   gather, gather_masked, scatter, scatter_masked, axis_strides,
   atomic_add_masked, atomic_cas_masked, ge_i,
@@ -25,7 +25,10 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_mask
   sin, cos, tan, sinh, cosh, atan2, remf,
   extract, cat, permute_tile, num_blocks, d_fork2,
   ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, i64_const, add_i64,
-  addi, subi, muli, shli, shri, consti }
+  addi, subi, muli, shli, shri, consti,
+  addf_down, addf_up, mul_down, mul_up, div_down, div_up, addf_ftz, mul_ftz, maxf_nan, minf_nan,
+  sqrt_approx, eq_u, ne_u, lt_u, le_u, gt_u, ge_u, add_i_nsw, sub_i_nuw, mul_i_nw,
+  d_for_unsigned, atomic_rmw }
 use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -3790,6 +3793,225 @@ fn loop_none(x: Param[F64], out: Param[F64], threshold: Float, step: Float) -> U
   store(out, blk, shape, v)
 }
 
+# ---- knife T4: the rest of each attribute domain ----
+#
+# These eight kernels have no leetgpu problem behind them and compute
+# nothing anyone wants. Each one asks ONE question about an attribute
+# value the writer had never written: what does the device do with it?
+# docs/tile-backend-design.md 6.8 records the answers, and
+# scripts/tileir-features/attrs.txt is the ledger they fill in.
+#
+# The recurring shape is SEGMENTS: one input tile, the same operation
+# under two or more attribute values, and each answer in its own stretch
+# of the output buffer. That is deliberate. A kernel that computed one
+# thing under one attribute could only be compared against a reference
+# that already believed what the attribute means; a kernel that computes
+# it under both puts the difference in one buffer, where a mutant that
+# collapses the two is a lane count and not an argument.
+#
+# The f32 kernels take f64 BUFFERS and convert on the way in and out:
+# `flush_to_zero` and `approx` are refused by the assembler on anything
+# but an f32 tile (SharedVerifiers.h's verifyFtz and verifyApprox), and
+# std/gpu's real device has no f32 buffer format at all
+# (`element_bytes`). Binary64 holds every binary32 value exactly, the
+# subnormals attr_ftz is about included, so the narrowing on the way in is
+# exact on these corpora and the widening on the way out is exact for
+# every f32.
+
+# The shape every attr_ kernel uses: four blocks of 128 lanes.
+const ATTR_TILE: Int = 128
+
+# How many ATTR_TILE segments each of them writes per block.
+const ATTR_ROUND_SEGS: Int = 6
+const ATTR_NAN_SEGS: Int = 16
+const ATTR_FTZ_SEGS: Int = 4
+const ATTR_APPROX_SEGS: Int = 2
+const ATTR_OVERFLOW_SEGS: Int = 3
+const ATTR_MEMSEM_SEGS: Int = 3
+
+# Six ways of rounding the same two operands: the sum, the product and the
+# quotient, each towards negative and towards positive infinity. The
+# operands are f32 values carried in an f64 buffer and the arithmetic is
+# f32, so a host reference can do the sum and the product EXACTLY in
+# binary64 and round the exact answer itself.
+#
+# The two directions differ on every lane whose exact result is off the
+# f32 grid and agree on every lane whose result is on it, which is what
+# makes the corpus half of the judgement: attr_diff counts the lanes where
+# a pair differs and run.sh pins that count above zero.
+fn attr_round(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_ROUND_SEGS * ATTR_TILE)
+  let a = float_to_float(F64, F32, s, load(x, base, s))
+  let c = float_to_float(F64, F32, s, load(y, base, s))
+  store(out, obase, s, float_to_float(F32, F64, s, addf_down(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s,
+    float_to_float(F32, F64, s, addf_up(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, mul_down(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(3 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, mul_up(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(4 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, div_down(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(5 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, div_up(F32, s, a, c)))
+}
+
+# The two comparison orderings and the two NaN policies, on a corpus with
+# NaNs in it. Sixteen segments: the six predicates ordered, the same six
+# unordered, then `maxf` and `minf` with and without `propagate_nan`.
+#
+# The comparison answers are stored as 0.0 and 1.0 rather than as a mask,
+# because a device buffer of i1 is not a thing this backend allocates and
+# because a reader wants to see WHICH lane disagreed. Everything here is
+# f64: `propagate_nan` is not one of the f32-only modifiers, and the
+# comparison attribute is a property of `cmpf` at every width.
+fn attr_nan(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_NAN_SEGS * ATTR_TILE)
+  let a = load(x, base, s)
+  let c = load(y, base, s)
+  store(out, obase, s, as_float(s, eq(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s, as_float(s, ne(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s, as_float(s, lt(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(3 * ATTR_TILE)), s, as_float(s, le(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(4 * ATTR_TILE)), s, as_float(s, gt(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(5 * ATTR_TILE)), s, as_float(s, ge(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(6 * ATTR_TILE)), s, as_float(s, eq_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(7 * ATTR_TILE)), s, as_float(s, ne_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(8 * ATTR_TILE)), s, as_float(s, lt_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(9 * ATTR_TILE)), s, as_float(s, le_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(10 * ATTR_TILE)), s, as_float(s, gt_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(11 * ATTR_TILE)), s, as_float(s, ge_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(12 * ATTR_TILE)), s, maxf(F64, s, a, c))
+  store(out, idx_add(obase, idx_const(13 * ATTR_TILE)), s, maxf_nan(F64, s, a, c))
+  store(out, idx_add(obase, idx_const(14 * ATTR_TILE)), s, minf(F64, s, a, c))
+  store(out, idx_add(obase, idx_const(15 * ATTR_TILE)), s, minf_nan(F64, s, a, c))
+}
+
+# A mask as 1.0 and 0.0, which is how attr_nan stores a comparison.
+fn as_float(s: List[Int], m: Tile[I1]) -> Tile[F64] !Dev = int_to_float(I32, F64, s, mask_to_int(s, m))
+
+# `flush_to_zero` on the sum and the product, against the same two
+# operations without it. The corpus is f32 subnormals and pairs whose
+# exact f32 result is subnormal, so the attribute has something to flush;
+# on ordinary operands the four segments would be two pairs of equals and
+# the kernel would say nothing.
+fn attr_ftz(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_FTZ_SEGS * ATTR_TILE)
+  let a = float_to_float(F64, F32, s, load(x, base, s))
+  let c = float_to_float(F64, F32, s, load(y, base, s))
+  store(out, obase, s, float_to_float(F32, F64, s, addf(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s,
+    float_to_float(F32, F64, s, addf_ftz(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, mul(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(3 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, mul_ftz(F32, s, a, c)))
+}
+
+# The approximate square root beside the correctly rounded one. Both
+# segments are the root of the same lanes, so what the pair says is how
+# far `rounding<approx>` is from `rounding<nearest_even>` on this device,
+# and attr_diff prints that distance rather than asserting a bound on it.
+# The tier is tolerance for the same reason every transcendental kernel is
+# (docs 6.6): the device's approximation is not the host's.
+fn attr_approx(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_APPROX_SEGS * ATTR_TILE)
+  let a = float_to_float(F64, F32, s, load(x, base, s))
+  store(out, obase, s, float_to_float(F32, F64, s, sqrt(F32, s, a)))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s,
+    float_to_float(F32, F64, s, sqrt_approx(F32, s, a)))
+}
+
+# The three integer overflow assumptions, one per segment. The corpus does
+# NOT overflow: a program that wraps under `no_signed_wrap` is undefined,
+# so a kernel that asked what happens then would be asking a question with
+# no answer. What this kernel is for is that the assumption reaches the
+# assembler and the device still computes the sum, the difference and the
+# product a reader expects, which is a smoke test and is recorded as one
+# (attrs.txt exempts the three from layer 2 by name).
+fn attr_overflow(x: Param[I32], y: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_OVERFLOW_SEGS * ATTR_TILE)
+  let a = load(x, base, s)
+  let c = load(y, base, s)
+  store(out, obase, s, add_i_nsw(s, a, c))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s, sub_i_nuw(s, a, c))
+  store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s, mul_i_nw(s, a, c))
+}
+
+# The three memory orderings and the two scopes an atomic can carry beside
+# `relaxed device`, one segment each: `acquire tl_blk`, `release sys` and
+# `acq_rel device`. Each lane owns its own slot, so there is no race and
+# the answer does not depend on the ordering at all -- which is the point.
+# An ordering is a constraint on CONCURRENT accesses, and this corpus has
+# none, so what a device could tell a reader here is only that the atomic
+# still ran. attrs.txt records the five values at layer 1 with that reason
+# written out; a judgement about the ordering itself needs two blocks
+# racing and a judgement shape this repository does not have.
+fn attr_memsem(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_MEMSEM_SEGS * ATTR_TILE)
+  let v = load(x, base, s)
+  let slot = lanes(obase, s)
+  let _a = atomic_rmw(out, "add_acquire_tl_blk", slot, s, v)
+  let _b = atomic_rmw(out, "add_release_sys", add_i(s, slot, i_const(s, ATTR_TILE)), s, v)
+  let _c = atomic_rmw(out, "add_acq_rel_device", add_i(s, slot, i_const(s, 2 * ATTR_TILE)), s, v)
+  ()
+}
+
+# The float read-modify-write mode. Every block adds its own chunk of the
+# input into the SAME 128 slots, so four additions land on each slot and
+# the lanes collide across blocks the way leetgpu 13's histogram does --
+# and the values are small integers, exact in binary32 under any order, so
+# the tier is exact by algebra and not by luck (the same argument knife
+# 14 wrote down for the integer histogram).
+fn attr_addf(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let _old = atomic_rmw(out, "addf", lanes(idx_const(0), s), s, load(x, base, s))
+  ()
+}
+
+# The loop bound comparison, signed and unsigned, over a range that
+# straddles 2^31: from 0x7FFFFFF0 to 0x80000010 by one. Read as signed the
+# upper bound is negative and the loop does not run; read as unsigned it
+# is sixteen above the lower bound and the loop runs sixteen times. The
+# kernel counts its own iterations into the two halves of the output, so
+# the attribute's effect is an integer a reader can check by hand and not
+# a rounding.
+const ATTR_UCMP_LO: Int = 0x7FFFFFF0
+const ATTR_UCMP_HI: Int = 0x80000010
+
+fn attr_ucmp(out: Param[I32]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let obase = tile_at(b, 2 * ATTR_TILE)
+  let zero = i_const(s, 0)
+  let signed = d_for(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), idx_const(1), zero,
+    (_i, acc) => add_i(s, acc, i_const(s, 1)))
+  let unsigned = d_for_unsigned(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), idx_const(1), zero,
+    (_i, acc) => add_i(s, acc, i_const(s, 1)))
+  store(out, obase, s, signed)
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s, unsigned)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -4159,6 +4381,26 @@ fn trace(name: String) -> TileProg = match name {
   "loop_none" ->
     trace_kernel("loop_none", ["f64", "f64"],
       () => loop_none(param(F64, 0), param(F64, 1), LOOP_NONE_THRESHOLD, LOOP_NONE_STEP))
+  "attr_round" ->
+    trace_kernel("attr_round", ["f64", "f64", "f64"],
+      () => attr_round(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attr_nan" ->
+    trace_kernel("attr_nan", ["f64", "f64", "f64"],
+      () => attr_nan(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attr_ftz" ->
+    trace_kernel("attr_ftz", ["f64", "f64", "f64"],
+      () => attr_ftz(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attr_approx" ->
+    trace_kernel("attr_approx", ["f64", "f64"], () => attr_approx(param(F64, 0), param(F64, 1)))
+  "attr_overflow" ->
+    trace_kernel("attr_overflow", ["i32", "i32", "i32"],
+      () => attr_overflow(param(I32, 0), param(I32, 1), param(I32, 2)))
+  "attr_memsem" ->
+    trace_kernel("attr_memsem", ["i32", "i32"], () => attr_memsem(param(I32, 0), param(I32, 1)))
+  "attr_addf" ->
+    trace_kernel("attr_addf", ["f64", "f64"], () => attr_addf(param(F64, 0), param(F64, 1)))
+  "attr_ucmp" ->
+    trace_kernel("attr_ucmp", ["i32"], () => attr_ucmp(param(I32, 0)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -4195,6 +4437,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
       ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
       ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast"
-      ++ "|loop_count|loop_bound|loop_until|loop_none>"
+      ++ "|loop_count|loop_bound|loop_until|loop_none"
+      ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

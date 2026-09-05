@@ -163,6 +163,14 @@ fn check_strides(name: String, shape: List[Int], strides: List[Int]) -> Unit =
     ()
   }
 
+# The suffixed names knife T4 added are the same operations under another
+# ATTRIBUTE value, spelled the way `shru` already was: one dialect opcode,
+# two names, and the attribute is the whole difference. bytecode.dawn's
+# `float_op` / `int_op` / `predicate_value` map them back to the opcode
+# and `float_rounding` / `float_flags` / `int_attrs` / `cmp_ordering` say
+# what the suffix asked for. `cmpi` has no ordering attribute, so
+# `check_int_pred` below keeps the six unprefixed ones.
+#
 # The operation names and predicates the typed surface spells. An effect
 # operation cannot be generic (spec 6.5), so `t_binaryf` and its neighbours
 # take the name as a string; this is where a name that is not one of them is
@@ -172,24 +180,38 @@ fn one_of(names: List[String], op: String) -> Bool = list.any(names, n => n == o
 
 fn check_unary(name: String, op: String) -> Unit =
   if one_of(["negf", "absf", "exp", "exp2", "log", "log2", "sqrt", "rsqrt", "tanh", "floor", "ceil",
-    "sin", "cos", "tan", "sinh", "cosh"], op) {
+    "sin", "cos", "tan", "sinh", "cosh", "sqrt_approx"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a unary float operation")
   }
 
 fn check_binary(name: String, op: String) -> Unit =
-  if one_of(["addf", "subf", "mulf", "divf", "maxf", "minf", "pow", "atan2", "remf"], op) {
+  if one_of(["addf", "subf", "mulf", "divf", "maxf", "minf", "pow", "atan2", "remf",
+    "addf_neg_inf", "addf_pos_inf", "addf_ftz", "mulf_neg_inf", "mulf_pos_inf", "mulf_ftz",
+    "divf_neg_inf", "divf_pos_inf", "maxf_nan", "minf_nan"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a binary float operation")
   }
 
 fn check_pred(name: String, pred: String) -> Unit =
-  if one_of(["eq", "ne", "lt", "le", "gt", "ge"], pred) {
+  if one_of(["eq", "ne", "lt", "le", "gt", "ge", "ueq", "une", "ult", "ule", "ugt", "uge"], pred) {
     ()
   } else {
     refuse(name, "`${pred}` is not a comparison predicate")
+  }
+
+# `cmpi` has no `comparison_ordering`: integers are totally ordered and
+# there is no NaN, so the six unordered names have no meaning there and
+# are refused rather than quietly taken for the ordered ones (they would
+# encode to the same predicate byte, and nothing below layer 2 would say
+# the kernel had asked for something the operation cannot do).
+fn check_int_pred(name: String, pred: String) -> Unit =
+  if one_of(["eq", "ne", "lt", "le", "gt", "ge"], pred) {
+    ()
+  } else {
+    refuse(name, "`${pred}` is not an integer comparison predicate")
   }
 
 # The integer operation names the typed surface spells. `shri` and `shru`
@@ -204,7 +226,7 @@ fn check_unary_int(name: String, op: String) -> Unit =
 
 fn check_binary_int(name: String, op: String) -> Unit =
   if one_of(["addi", "subi", "muli", "divi", "remi", "maxi", "mini", "mulhii",
-    "andi", "ori", "xori", "shli", "shri", "shru"], op) {
+    "andi", "ori", "xori", "shli", "shri", "shru", "addi_nsw", "subi_nuw", "muli_nw"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a binary integer operation")
@@ -514,7 +536,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
       }
       t_cmpi(pred, shape, a, b) => {
         check_shape(name, shape)
-        check_pred(name, pred)
+        check_int_pred(name, pred)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [CmpI(d, pred, shape, a, b)]
