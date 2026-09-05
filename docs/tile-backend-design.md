@@ -1570,8 +1570,9 @@ list-elems-contract），本刀不动它们。
 这条规矩继续存在的理由。搬家后的 store 锚点靠 `, ${ty(val_ty)}` 保持唯一（只有 store 有），
 理由写在 `run.sh` 那一段里。
 
-`tile-gpu-diff/run.sh` 这一刀多一个族（两个 kernel 加一个已有的 `vadd` 当控制），
-本机读数见 §6.4 的台账行。`dawn test packages/tileir` 多一个测试（113 → 114），
+`tile-gpu-diff/run.sh` 在最终树上 **622.6 s**（刀 T7 之后这一族多了三个 global kernel 与六条
+变异体，本刀又加两个 kernel 与一个复用的控制 `vadd`；机器安静，load 约 2.3）。它只在本机跑，
+CI 上仍只有亚秒的 `--check`。`dawn test packages/tileir` 多一个测试（113 → 114），
 `dawn test --stdlib` 一个没多：**这一刀不碰 std**，`scripts/gen-stdsrc.py` 跑完 `git status` 是干净的。
 
 ### 6.6 两档判词：逐位与容差（刀 7b）
