@@ -20,6 +20,16 @@
 # present or absent, and its presence is a BIT in the flags word, so its
 # `code` here is that bit and not an enum value.
 #
+# The `tag.*` family (knife T6) has a THIRD authority,
+# include/cuda_tile/Dialect/CudaTile/IR/BytecodeAttrOpcodes.td: the twelve
+# frozen ATTRIBUTE TAGS. AttrDefs.td says what an attribute means and that
+# file says which byte announces it where one is written self-contained, so
+# a `tag.*` row's `code` is the tag byte. Four of the twelve are here;
+# `Integer` (1) and `Float` (2) are knife 3's reduction identities, which
+# ruling 6's list leaves out for the reason it leaves out
+# `ComparisonPredicate`, and the rest belong to attributes this backend
+# does not write.
+#
 # WHAT IS NOT HERE. `ComparisonPredicate` (six values, all six written since
 # knife 7a) and `Signedness` (two, both since knife 10) are enums whose
 # value is chosen by the operation the caller asked for rather than by an
@@ -92,6 +102,23 @@
 #       scripts/tile-golden's overflow-attr-not-written is the mutant, and
 #       it goes red at layer 1: the assembler cannot parse a stream with
 #       the attribute missing.
+#       Ruling 1 names `assume` in the same breath, so knife T6's three
+#       predicate tags (`div_by`, `same_elements`, `bounded`) are that same
+#       argument in another family: with a true predicate the device
+#       computes what it computed without it, and with a false one there is
+#       no defined answer to compare. Their layer-1 mutants are
+#       assume-divby-tag-as-same-elements,
+#       assume-same-elements-payload-four-bytes and
+#       assume-bounded-bounds-swapped.
+#   tag-not-emitted
+#       `String` (5) is the one tag this writer implements and never emits.
+#       `assert`'s `message` and `print_tko`'s `str` are both `StrAttr`, so
+#       the ODS getter answers a `StringRef` and `writeOpAttribute` takes
+#       its own StringRef branch: the String section INDEX and no tag. A tag
+#       byte only appears where an attribute is written self-contained, and
+#       no operation here puts a string there. scripts/tile-golden's
+#       assert-message-tagged is that sentence as a machine: write the 5 in
+#       and `tileiras` answers `failed to parse attribute 'message'`.
 #   no-race-in-corpus
 #       A memory ordering and a memory scope constrain CONCURRENT accesses.
 #       attr_memsem gives every lane its own slot and every block its own
@@ -157,3 +184,7 @@ padding.pos_inf              | 3 | 13.1 | deferred      | -   | 0 | -           
 padding.neg_inf              | 4 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 visibility.public            | 0 | 13.1 | unimplemented | T7  | 0 | -                                                                                                     | -
 visibility.private           | 1 | 13.1 | unimplemented | T7  | 0 | -                                                                                                     | -
+tag.String                   |  5 | 13.1 | implemented   | T6  | 1 | writer:str_of,golden:assert_pass,golden:print_tile,mutant:assert-message-tagged                       | tag-not-emitted
+tag.DivBy                    |  8 | 13.1 | implemented   | T6  | 1 | const:ATTR_DIV_BY,golden:assume_divby,mutant:assume-divby-tag-as-same-elements                        | assumption-not-arithmetic
+tag.SameElements             |  9 | 13.1 | implemented   | T6  | 1 | const:ATTR_SAME_ELEMENTS,golden:assume_same,mutant:assume-divby-tag-as-same-elements,mutant:assume-same-elements-payload-four-bytes | assumption-not-arithmetic
+tag.Bounded                  | 12 | 13.1 | implemented   | T6  | 1 | const:ATTR_BOUNDED,golden:assume_bounded,mutant:assume-bounded-bounds-swapped                         | assumption-not-arithmetic

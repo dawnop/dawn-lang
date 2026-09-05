@@ -129,6 +129,13 @@ _attr_family("unit", "13.3", [("fast_acc", 1), ("constant", 1), ("global", 1)])
 _attr_family("padding", "13.1", [("zero", 0), ("neg_zero", 1), ("nan", 2), ("pos_inf", 3),
                                  ("neg_inf", 4)])
 _attr_family("visibility", "13.1", [("public", 0), ("private", 1)])
+# The bytecode ATTRIBUTE TAGS (BytecodeAttrOpcodes.td), which are a third
+# authority: AttrDefs.td says what an attribute MEANS and this says which byte
+# announces it where one is written self-contained. Knife T6 writes four of
+# the twelve; `Integer` (1) and `Float` (2) are knife 3's reduction identities
+# and are not in ruling 6's list.
+_attr_family("tag", "13.1", [("String", 5), ("DivBy", 8), ("SameElements", 9),
+                             ("Bounded", 12)])
 
 
 def parse_rows(text):
