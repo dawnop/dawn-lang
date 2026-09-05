@@ -193,6 +193,71 @@ const SIGNED: Int = 1
 const UNSIGNED: Int = 0
 const ROUND_NEAREST_EVEN: Int = 0
 
+# ---- knife T4: the rest of each attribute domain ----
+#
+# The values below are the ones no operation in this writer had asked for
+# before knife T4. Each is one row of scripts/tileir-features/attrs.txt,
+# and the enum values are AttrDefs.td's own (the same file the three
+# tables above were read from).
+
+# `memory_ordering_semantics`, the three the atomics accept beyond
+# `relaxed`. Which operation may say which is not the same list for all of
+# them: a load takes weak / relaxed / acquire, a store weak / relaxed /
+# release, and the two atomics relaxed / acquire / release / acq_rel
+# (Ops.td's `OnlyVariants`). Only the atomics are written here.
+const ORDER_ACQUIRE: Int = 2
+const ORDER_RELEASE: Int = 3
+const ORDER_ACQ_REL: Int = 4
+
+# `memory_scope`, the two beside `device`. Narrower than a device
+# (`tl_blk`, one tile block) and wider (`sys`, every device in the system).
+const SCOPE_TL_BLK: Int = 0
+const SCOPE_SYS: Int = 2
+
+# `comparison_ordering`: unordered, so every predicate answers 1 when
+# either operand is a NaN. `ordered` (1) is the other value and the one
+# every comparison before knife T4 carried.
+const CMP_UNORDERED: Int = 0
+
+# `rounding_mode`, the three directed modes and the approximate one.
+# `negative_inf` and `positive_inf` are IEEE 754's round-toward-minus and
+# round-toward-plus and are accepted by addf / subf / mulf / divf / fma /
+# sqrt; `approx` is the architecture's fast approximation and is accepted
+# by divf / sqrt / rsqrt / exp / tanh, and ONLY on an f32 tile
+# (`verifyApprox` in SharedVerifiers.h).
+const ROUND_NEGATIVE_INF: Int = 2
+const ROUND_POSITIVE_INF: Int = 3
+const ROUND_APPROX: Int = 4
+
+# `overflow`, the three assumptions beside `none`. They are what the
+# COMPILER may assume, not what the hardware does: a program that wraps
+# under one of them is undefined, so no corpus can tell them apart from
+# `none` by looking at an answer. That is why attrs.txt records them at
+# layer 1 with a named exemption rather than owing a device verdict.
+const OVERFLOW_NSW: Int = 1
+const OVERFLOW_NUW: Int = 2
+const OVERFLOW_NW: Int = 3
+
+# The flag bits of the unit attributes, which is the whole of what a unit
+# attribute is in the stream: `generateFlagsFieldSerialization` writes the
+# bit and `generateAttributeSerialization` skips the payload
+# (BytecodeGen.cpp says so in as many words: "UnitAttr presence is ONLY
+# encoded in the flags field"). The bit numbers are the version-ordered
+# assignment: within one version the optional ATTRIBUTES come first in
+# declaration order, then the optional operands.
+#
+#   addf / subf / mulf / divf   `flush_to_zero` is the only optional field
+#                               at all, so it is bit 0
+#   maxf / minf                 `propagate_nan` is declared before
+#                               `flush_to_zero`, so they are bits 0 and 1
+#   for                         `unsignedCmp` is the only one, bit 0; it
+#                               arrived in 13.2, which is why `for` writes
+#                               a flags varint at all (`for_has_flags`)
+const FLOAT_FLAG_FTZ: Int = 1
+const MINMAX_FLAG_PROPAGATE_NAN: Int = 1
+const MINMAX_FLAG_FTZ: Int = 2
+const FOR_FLAG_UNSIGNED: Int = 1
+
 # `rounding`: zero, integer division truncating toward zero. The dialect's
 # own default for `divi`, and `to_int`'s rounding on the host.
 const ROUND_ZERO: Int = 1
@@ -239,6 +304,24 @@ fn emit_i32_array(w: W, xs: List[Int]) -> W =
 # The `rmw_mode` values (AttrDefs.td's AtomicRMWMode, an i32 enum). The
 # order is the enum's own and not alphabetical: `add` is 3 and `addf` 4,
 # with the three bitwise modes before them.
+# The memory ordering and scope a mode name asks for, with the base mode
+# it is a name of. An `atomic_rmw_tko` carries three required enum
+# attributes and this writer wrote two of them as constants until knife
+# T4; a name with a suffix moves those two, the way a rounding suffix
+# moves a float operation's.
+#
+# The unsuffixed names are `relaxed device`, which is what every atomic
+# before knife T4 wrote and what leetgpu 13's histogram needs (its
+# colliding lanes are in different tile blocks, so `tl_blk` would be too
+# narrow). `weak` is the one ordering the atomics refuse and is never
+# named here; the layer-1 mutant is what says so.
+fn rmw_attrs(mode: String) -> (String, Int, Int) = match mode {
+  "add_acquire_tl_blk" -> ("add", ORDER_ACQUIRE, SCOPE_TL_BLK)
+  "add_release_sys" -> ("add", ORDER_RELEASE, SCOPE_SYS)
+  "add_acq_rel_device" -> ("add", ORDER_ACQ_REL, SCOPE_DEVICE)
+  _ -> (mode, ORDER_RELAXED, SCOPE_DEVICE)
+}
+
 fn rmw_mode_value(mode: String) -> Int = match mode {
   "and" -> 0
   "or" -> 1
@@ -253,16 +336,27 @@ fn rmw_mode_value(mode: String) -> Int = match mode {
   _ -> panic("tileir: `${mode}` is not an atomic read-modify-write mode")
 }
 
-# The `comparison_predicate` values (AttrDefs.td, an i32 enum).
+# The `comparison_predicate` values (AttrDefs.td, an i32 enum). A `u`
+# prefix is the same predicate under the OTHER `comparison_ordering`, the
+# way `shru` is `shri` under the other signedness: `cmpf` carries the two
+# attributes side by side, so one name has to say both. `cmpi` has no
+# ordering attribute and its predicates are the six unprefixed ones.
 fn predicate_value(pred: String) -> Int = match pred {
-  "eq" -> 0
-  "ne" -> 1
-  "lt" -> 2
-  "le" -> 3
-  "gt" -> 4
-  "ge" -> 5
+  "eq" | "ueq" -> 0
+  "ne" | "une" -> 1
+  "lt" | "ult" -> 2
+  "le" | "ule" -> 3
+  "gt" | "ugt" -> 4
+  "ge" | "uge" -> 5
   _ -> panic("tileir: `${pred}` is not a comparison predicate")
 }
+
+# The `comparison_ordering` a float comparison writes after its predicate.
+# `ordered` answers 0 whenever either operand is a NaN; `unordered`
+# answers 1. The two agree on every pair of numbers, so only a corpus with
+# a NaN in it can tell them apart -- which is what the attr_nan kernel is.
+fn cmp_ordering(pred: String) -> Int =
+  if one_of_op(pred, ["ueq", "une", "ult", "ule", "ugt", "uge"]) { CMP_UNORDERED } else { CMP_ORDERED }
 
 # ---- the integer family (knife 10) ----
 #
@@ -294,9 +388,9 @@ fn predicate_value(pred: String) -> Int = match pred {
 # The opcode of an integer operation. `shri` and `shru` are one opcode; the
 # signedness attribute below is what separates them.
 fn int_op(op: String) -> Int = match op {
-  "addi" -> OP_ADDI
-  "subi" -> OP_SUBI
-  "muli" -> OP_MULI
+  "addi" | "addi_nsw" -> OP_ADDI
+  "subi" | "subi_nuw" -> OP_SUBI
+  "muli" | "muli_nw" -> OP_MULI
   "divi" -> OP_DIVI
   "remi" -> OP_REMI
   "maxi" -> OP_MAXI
@@ -333,6 +427,12 @@ fn int_attrs(op: String) -> List[Int] = match op {
   "addi" -> [OVERFLOW_NONE]
   "subi" -> [OVERFLOW_NONE]
   "muli" -> [OVERFLOW_NONE]
+  # the three assumptions, one per operation, knife T4. They are the same
+  # attribute in the same position; only the value changes, which is what
+  # makes them invisible below layer 1
+  "addi_nsw" -> [OVERFLOW_NSW]
+  "subi_nuw" -> [OVERFLOW_NUW]
+  "muli_nw" -> [OVERFLOW_NW]
   "shli" -> [OVERFLOW_NONE]
   "negi" -> [OVERFLOW_NONE]
   "divi" -> [SIGNED, ROUND_ZERO]
@@ -397,13 +497,20 @@ fn ftof_rounding(to: String) -> Int =
 # rounding mode. `maxf` and `minf` take `propagate_nan` and `flush_to_zero`
 # instead, both of which are unit attributes and so are flag bits with no
 # payload; `negf` and `absf` take nothing at all.
+# An operation NAME here is the opcode together with the attributes it
+# carries, not the mnemonic alone. `shri` and `shru` have been one opcode
+# under two signedness attributes since knife 10; knife T4 spends the same
+# coin on the rest of the attribute domains, so `addf_neg_inf` is `addf`
+# with `rounding<negative_inf>` and `maxf_nan` is `maxf` with
+# `propagate_nan`. The three tables below split a name into its opcode, its
+# flags word and its inline rounding mode, and render.dawn spells it.
 fn float_op(op: String) -> Int = match op {
-  "addf" -> OP_ADDF
+  "addf" | "addf_neg_inf" | "addf_pos_inf" | "addf_ftz" -> OP_ADDF
   "subf" -> OP_SUBF
-  "mulf" -> OP_MULF
-  "divf" -> OP_DIVF
-  "maxf" -> OP_MAXF
-  "minf" -> OP_MINF
+  "mulf" | "mulf_neg_inf" | "mulf_pos_inf" | "mulf_ftz" -> OP_MULF
+  "divf" | "divf_neg_inf" | "divf_pos_inf" -> OP_DIVF
+  "maxf" | "maxf_nan" -> OP_MAXF
+  "minf" | "minf_nan" -> OP_MINF
   "pow" -> OP_POW
   "negf" -> OP_NEGF
   "absf" -> OP_ABSF
@@ -411,7 +518,7 @@ fn float_op(op: String) -> Int = match op {
   "exp2" -> OP_EXP2
   "log" -> OP_LOG
   "log2" -> OP_LOG2
-  "sqrt" -> OP_SQRT
+  "sqrt" | "sqrt_approx" -> OP_SQRT
   "rsqrt" -> OP_RSQRT
   "tanh" -> OP_TANH
   "floor" -> OP_FLOOR
@@ -426,7 +533,29 @@ fn float_op(op: String) -> Int = match op {
   _ -> panic("tileir: `${op}` is not a float operation")
 }
 
-fn float_op_rounds(op: String) -> Bool = op == "addf" || op == "subf" || op == "mulf" || op == "divf"
+# The rounding mode a BINARY float operation writes inline after its flags,
+# or `None` where the operation has no such attribute. `nearest_even` is
+# the default and what every operation carried before knife T4; the two
+# directed modes are the dialect's `negative_inf` and `positive_inf`, and
+# `verifyIEEERoundingModes` (CudaTile.cpp) accepts them on an f64 tile as
+# readily as on an f32 one, unlike `approx`.
+fn float_rounding(op: String) -> Option[Int] = match op {
+  "addf" | "subf" | "mulf" | "divf" | "addf_ftz" | "mulf_ftz" -> Some(ROUND_NEAREST_EVEN)
+  "addf_neg_inf" | "mulf_neg_inf" | "divf_neg_inf" -> Some(ROUND_NEGATIVE_INF)
+  "addf_pos_inf" | "mulf_pos_inf" | "divf_pos_inf" -> Some(ROUND_POSITIVE_INF)
+  _ -> None
+}
+
+# The flags word of a float operation: the unit attributes it sets, and
+# nothing else (no float operation here has an optional operand). The
+# operations with no optional field at all write no flags word, which is
+# `float_op_has_flags` below; this table says what goes in it when there
+# is one.
+fn float_flags(op: String) -> Int = match op {
+  "addf_ftz" | "mulf_ftz" -> FLOAT_FLAG_FTZ
+  "maxf_nan" | "minf_nan" -> MINMAX_FLAG_PROPAGATE_NAN
+  _ -> 0
+}
 
 # Whether an operation writes a flags varint: it does exactly when it has an
 # optional field the targeted bytecode version knows (BytecodeGen.cpp
@@ -453,6 +582,8 @@ fn float_op_has_flags(op: String) -> Bool =
 fn unary_rounding(op: String) -> Option[Int] =
   if op == "sqrt" {
     Some(ROUND_NEAREST_EVEN)
+  } else if op == "sqrt_approx" {
+    Some(ROUND_APPROX)
   } else if op == "tanh" {
     Some(ROUND_FULL)
   } else {
@@ -881,7 +1012,8 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w1 = emit_op(w0, OP_ATOMIC_RMW_TKO, val_ty)
     let (w2, tok) = ty(w1, Token)
     let flags = ATOMIC_FLAG_TOKEN | opt_flag(mask, ATOMIC_FLAG_MASK)
-    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE), rmw_mode_value(mode))
+    let (base, order, scope) = rmw_attrs(mode)
+    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), order), scope), rmw_mode_value(base))
     emit_ref(emit_opt_ref(emit_ref(emit_ref(w3, ptrs), arg), mask), tok_in)
   }
   AtomicCASPtr(_dst, _tok_out, ptrs, cmp, val, mask, tok_in, _ptr_ty, _mask_ty, val_ty) -> {
@@ -900,7 +1032,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # flags where the operation has an optional field (never set here), then
     # the rounding mode where it has a required one
     let w1 = emit_op(w0, float_op(op), t)
-    let w2 = if float_op_has_flags(op) { emit(w1, 0) } else { w1 }
+    let w2 = if float_op_has_flags(op) { emit(w1, float_flags(op)) } else { w1 }
     let w3 = match unary_rounding(op) {
       Some(mode) -> emit(w2, mode)
       None -> w2
@@ -911,8 +1043,15 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # flags: neither flush_to_zero nor propagate_nan, both unit attributes
     # and so bits with no payload; then the rounding mode, on the four
     # operations that take one. `pow` has neither.
-    let w1 = if float_op_has_flags(op) { emit(emit_op(w0, float_op(op), t), 0) } else { emit_op(w0, float_op(op), t) }
-    let w2 = if float_op_rounds(op) { emit(w1, ROUND_NEAREST_EVEN) } else { w1 }
+    let w1 = if float_op_has_flags(op) {
+      emit(emit_op(w0, float_op(op), t), float_flags(op))
+    } else {
+      emit_op(w0, float_op(op), t)
+    }
+    let w2 = match float_rounding(op) {
+      Some(mode) -> emit(w1, mode)
+      None -> w1
+    }
     emit_ref(emit_ref(w2, lhs), rhs)
   }
   FloatFma(_dst, t, lhs, rhs, acc) -> {
@@ -939,7 +1078,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   CmpFloat(_dst, pred, _t, res_ty, lhs, rhs) -> {
     # the result is the i1 tile; the predicate and the ordering are required
     # enum attributes, so they are read inline and there is no flags field.
-    let w1 = emit(emit(emit_op(w0, OP_CMPF, res_ty), predicate_value(pred)), CMP_ORDERED)
+    let w1 = emit(emit(emit_op(w0, OP_CMPF, res_ty), predicate_value(pred)), cmp_ordering(pred))
     emit_ref(emit_ref(w1, lhs), rhs)
   }
   CmpInt(_dst, pred, _t, res_ty, lhs, rhs) -> {
@@ -961,9 +1100,9 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   }
   SelectTile(_dst, _cond_ty, t, cond, lhs, rhs) ->
     emit_ref(emit_ref(emit_ref(emit_op(w0, OP_SELECT, t), cond), lhs), rhs)
-  ForLoop(_results, tys, iv, lower, upper, step, inits, carried, body) -> {
-    # results: their count, then a type each; flags: `unsigned` absent
-    # (13.2 and later know the field); operands: their count, then the
+  ForLoop(_results, tys, iv, lower, upper, step, unsigned, inits, carried, body) -> {
+    # results: their count, then a type each; flags: `unsignedCmp`, the
+    # loop's one optional field (13.2 and later know it); operands: their count, then the
     # bounds, the step and the initial values; one region of one block
     # whose arguments are the induction variable (i32) and the carried
     # values, then the body's instructions.
@@ -972,7 +1111,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
       let (wt, ti) = ty(w, t)
       emit(wt, ti)
     })
-    let w3 = if for_has_flags() { emit(w2, 0) } else { w2 }
+    let w3 = if for_has_flags() { emit(w2, if unsigned { FOR_FLAG_UNSIGNED } else { 0 }) } else { w2 }
     let w4 = list.fold([lower, upper, step] ++ inits, emit(w3, 3 + len(inits)), emit_ref)
     let w5 = emit(emit(emit(w4, 1), 1), 1 + len(carried))
     let (w6, i32i) = ty(w5, Tile([], Num("i32")))
@@ -1325,7 +1464,7 @@ fn sum_prog() -> TileProg = TileProg {
     IdxConst(8, 1),
     IdxAdd(9, 3, 8),
     IdxAdd(10, 3, 2),
-    For(11, 9, 10, 8, [6, 7], [12, 13], [19, 20], [
+    For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [
       IdxConst(14, 128),
       IdxMul(15, 11, 14),
       Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
@@ -1581,8 +1720,8 @@ test "a unary float operation writes flags only where it has an optional field, 
   assert not float_op_has_flags("remf")
   assert unary_rounding("sin") == None
   assert unary_rounding("cos") == None
-  assert not float_op_rounds("atan2")
-  assert not float_op_rounds("remf")
+  assert float_rounding("atan2") == None
+  assert float_rounding("remf") == None
 }
 
 test "the integer and conversion opcodes are the frozen table's, and each writes its attributes inline" {

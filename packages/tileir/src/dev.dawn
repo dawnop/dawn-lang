@@ -216,15 +216,19 @@ pub opaque type Ptrs[D] = Int
 ## host constant, and the sum and product of two index handles.
 ##
 ## `t_loop_begin` / `t_loop_end` bracket a region (tile-backend-design 5.2).
-## `t_loop_begin(lower, upper, step, inits)` opens a `for` over the index
+## `t_loop_begin(lower, upper, step, unsigned, inits)` opens a `for` over the index
 ## handles `[lower, upper)` by `step`, with `inits` as the loop-carried
 ## values entering it, and answers the induction variable's handle and one
 ## handle per carried value as the body sees them; the operations issued
 ## until the matching `t_loop_end` fall inside the region. `t_loop_end(outs)`
 ## closes it with `outs` as the values the body hands to the next iteration
 ## (one per carried value, in order) and answers one handle per carried
-## value as they stand after the loop. The handler carries the memory
-## ordering token through the loop on its own; a body never sees it. Only
+## value as they stand after the loop. `unsigned` is the loop's
+## `unsignedCmp` attribute: false compares the induction variable against
+## the bound as a SIGNED i32 and true as an unsigned one, which is a
+## different loop whenever the range straddles 2^31. The handler carries
+## the memory ordering token through the loop on its own; a body never
+## sees it. Only
 ## the `d_for` family calls the pair; a body calls those.
 ##
 ## `t_while_begin` / `t_while_end` bracket the OTHER loop region, the one
@@ -365,7 +369,7 @@ pub effect Dev {
   fn t_idx_const(value: Int) -> Int
   fn t_idx_add(a: Int, b: Int) -> Int
   fn t_idx_mul(a: Int, b: Int) -> Int
-  fn t_loop_begin(lower: Int, upper: Int, step: Int, inits: List[Int]) -> (Int, List[Int])
+  fn t_loop_begin(lower: Int, upper: Int, step: Int, unsigned: Bool, inits: List[Int]) -> (Int, List[Int])
   fn t_loop_end(outs: List[Int]) -> List[Int]
   fn t_while_begin(inits: List[Int]) -> List[Int]
   fn t_while_end(cond: Int, outs: List[Int]) -> List[Int]
@@ -751,6 +755,75 @@ pub fn maxf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D]
 ## The element-wise smaller of `a` and `b`.
 pub fn minf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "minf", shape, a, b)
 
+# ---- the same operations under another attribute (knife T4) ----
+#
+# Tile IR's arithmetic carries attributes, and until knife T4 this module
+# named only one value of each: `rounding<nearest_even>`, `overflow<none>`,
+# `ordered`, `relaxed device`, and no unit attribute set anywhere. The
+# functions below are the same operations under the other values. They are
+# separate names rather than a mode argument for the reason `shr_i` and
+# `shr_u` are: the attribute is part of what the operation IS, a caller
+# picks one at the point of use, and a name can be grepped for.
+#
+# Which values each operation accepts is not uniform and is not guessable:
+# `approx` and `flush_to_zero` are refused on anything but an f32 tile
+# (SharedVerifiers.h's `verifyApprox` and `verifyFtz`), `approx` is not a
+# mode addf takes at all, and the two directed modes are accepted at every
+# float width. docs/tile-backend-design.md 6.8 records what the device
+# then does with them.
+
+## The element-wise sum rounded TOWARDS NEGATIVE INFINITY: the largest
+## value of the format that is not above the exact sum.
+pub fn addf_down[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "addf_neg_inf", shape, a, b)
+
+## The element-wise sum rounded TOWARDS POSITIVE INFINITY.
+pub fn addf_up[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "addf_pos_inf", shape, a, b)
+
+## The element-wise product rounded towards negative infinity.
+pub fn mul_down[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "mulf_neg_inf", shape, a, b)
+
+## The element-wise product rounded towards positive infinity.
+pub fn mul_up[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "mulf_pos_inf", shape, a, b)
+
+## The element-wise quotient rounded towards negative infinity.
+pub fn div_down[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "divf_neg_inf", shape, a, b)
+
+## The element-wise quotient rounded towards positive infinity.
+pub fn div_up[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "divf_pos_inf", shape, a, b)
+
+## The element-wise sum with `flush_to_zero`: a subnormal operand or a
+## subnormal result becomes the zero of its sign. f32 ONLY, and refused by
+## the assembler at any other width.
+pub fn addf_ftz[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "addf_ftz", shape, a, b)
+
+## The element-wise product with `flush_to_zero`. f32 only.
+pub fn mul_ftz[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "mulf_ftz", shape, a, b)
+
+## The element-wise larger with `propagate_nan`: a NaN operand answers a
+## canonical NaN rather than the other operand, which is what `maxf`
+## without the attribute answers.
+pub fn maxf_nan[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "maxf_nan", shape, a, b)
+
+## The element-wise smaller with `propagate_nan`.
+pub fn minf_nan[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "minf_nan", shape, a, b)
+
+## The element-wise square root under the APPROXIMATE rounding mode: the
+## architecture's fast reciprocal-square-root path rather than the
+## correctly rounded root. f32 only. A tolerance-tier operation by
+## construction, and the tolerance is the hardware's, not a series'.
+pub fn sqrt_approx[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev =
+  unary(d, "sqrt_approx", shape, a)
+
 ## The element-wise negation `-a`: a sign flip, exact for every value.
 pub fn neg[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev = unary(d, "negf", shape, a)
 
@@ -1042,6 +1115,30 @@ pub fn gt[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] 
 
 pub fn ge[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ge", shape, a, b)
 
+# The same six predicates UNORDERED (knife T4). `cmpf` carries a
+# `comparison_ordering` beside its predicate: `ordered` answers false
+# whenever either operand is a NaN, `unordered` answers true. The two
+# agree on every pair of numbers, so these six are the six above on any
+# corpus without a NaN in it, and something else entirely on one with.
+
+## `a == b` or either operand a NaN.
+pub fn eq_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ueq", shape, a, b)
+
+## `a != b` or either operand a NaN.
+pub fn ne_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "une", shape, a, b)
+
+## `a < b` or either operand a NaN.
+pub fn lt_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ult", shape, a, b)
+
+## `a <= b` or either operand a NaN.
+pub fn le_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ule", shape, a, b)
+
+## `a > b` or either operand a NaN.
+pub fn gt_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ugt", shape, a, b)
+
+## `a >= b` or either operand a NaN.
+pub fn ge_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "uge", shape, a, b)
+
 ## The same six over two i32 tiles of `shape`, signed.
 pub fn eq_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = compare_int("eq", shape, a, b)
 
@@ -1145,6 +1242,24 @@ pub fn neg_i(shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = unary_int("negi
 ## The element-wise absolute value `|a|`, wrapping (so `|-2^31|` is
 ## `-2^31`).
 pub fn abs_i(shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = unary_int("absi", shape, a)
+
+# The three integer OVERFLOW assumptions (knife T4). `overflow<none>` is
+# what every integer operation above carries: the compiler assumes nothing
+# and the device wraps. These three tell it to assume the operation does
+# not wrap, as a signed operation (`nsw`), as an unsigned one (`nuw`) or
+# as either (`nw`). They are assumptions and not arithmetic: a program
+# that wraps under one of them is undefined, so a caller uses them only
+# where it can prove the range, and no corpus can distinguish them from
+# `none` on a program that keeps its promise.
+
+## `a + b` under `overflow<no_signed_wrap>`.
+pub fn add_i_nsw(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("addi_nsw", shape, a, b)
+
+## `a - b` under `overflow<no_unsigned_wrap>`.
+pub fn sub_i_nuw(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("subi_nuw", shape, a, b)
+
+## `a * b` under `overflow<no_wrap>`.
+pub fn mul_i_nw(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("muli_nw", shape, a, b)
 
 # ---- integer arithmetic at a named width (knife T3) ----
 #
@@ -1348,12 +1463,12 @@ pub fn idx_mul(a: Idx, b: Idx) -> Idx !Dev = {
 # it issues in between falls inside the loop's region. The answer is the
 # carried handles after the loop. Private: handles are opaque outside this
 # module, so a body can only reach this through the typed `d_for` / `d_for2`.
-fn loop_handles(lower: Idx, upper: Idx, step: Idx, carried: List[Int],
+fn loop_handles(lower: Idx, upper: Idx, step: Idx, unsigned: Bool, carried: List[Int],
   body: fn(Idx, List[Int]) -> List[Int] !Dev) -> List[Int] !Dev = {
   let lo: Int = lower
   let up: Int = upper
   let st: Int = step
-  let (iv, inside) = t_loop_begin(lo, up, st, carried)
+  let (iv, inside) = t_loop_begin(lo, up, st, unsigned, carried)
   let i: Idx = iv
   t_loop_end(body(i, inside))
 }
@@ -1372,7 +1487,26 @@ fn loop_handles(lower: Idx, upper: Idx, step: Idx, carried: List[Int],
 pub fn d_for[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
   body: fn(Idx, Tile[D]) -> Tile[D] !Dev) -> Tile[D] !Dev = {
   let h: Int = init
-  let outs = loop_handles(lower, upper, step, [h], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, false, [h], (i, inside) => {
+    let t: Tile[D] = inside[0]
+    let r: Int = body(i, t)
+    [r]
+  })
+  let out: Tile[D] = outs[0]
+  out
+}
+
+## `d_for` with the loop's `unsignedCmp` attribute set: the induction
+## variable is compared against the upper bound as an UNSIGNED 32-bit
+## integer, so a range whose bounds straddle 2^31 runs forward instead of
+## not running at all. Its own kernel is scripts/tile-golden's attr_ucmp,
+## and the difference between the two is a lane count and not a rounding,
+## which is why this attribute is the one unit attribute of knife T4 with
+## an unmistakable device answer.
+pub fn d_for_unsigned[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
+  body: fn(Idx, Tile[D]) -> Tile[D] !Dev) -> Tile[D] !Dev = {
+  let h: Int = init
+  let outs = loop_handles(lower, upper, step, true, [h], (i, inside) => {
     let t: Tile[D] = inside[0]
     let r: Int = body(i, t)
     [r]
@@ -1386,7 +1520,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   body: fn(Idx, Tile[A], Tile[B]) -> (Tile[A], Tile[B]) !Dev) -> (Tile[A], Tile[B]) !Dev = {
   let ha: Int = a
   let hb: Int = b
-  let outs = loop_handles(lower, upper, step, [ha, hb], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, false, [ha, hb], (i, inside) => {
     let ta: Tile[A] = inside[0]
     let tb: Tile[B] = inside[1]
     let (ra, rb) = body(i, ta, tb)
@@ -1407,7 +1541,7 @@ pub fn d_for3[A, B, C](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B]
   let ha: Int = a
   let hb: Int = b
   let hc: Int = c
-  let outs = loop_handles(lower, upper, step, [ha, hb, hc], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, false, [ha, hb, hc], (i, inside) => {
     let ta: Tile[A] = inside[0]
     let tb: Tile[B] = inside[1]
     let tc: Tile[C] = inside[2]
@@ -1430,7 +1564,7 @@ pub fn d_for4[A, B, C, E](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile
   let hb: Int = b
   let hc: Int = c
   let he: Int = e
-  let outs = loop_handles(lower, upper, step, [ha, hb, hc, he], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, false, [ha, hb, hc, he], (i, inside) => {
     let ta: Tile[A] = inside[0]
     let tb: Tile[B] = inside[1]
     let tc: Tile[C] = inside[2]
@@ -2146,7 +2280,7 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
-    t_loop_begin(_lower, _upper, _step, inits) => {
+    t_loop_begin(_lower, _upper, _step, _unsigned, inits) => {
       let iv = next
       let base = next + 1
       next = next + 1 + len(inits)
@@ -2417,7 +2551,7 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_idx_const(_value) => 12
     t_idx_add(_a, _b) => 13
     t_idx_mul(_a, _b) => 14
-    t_loop_begin(_lower, _upper, _step, inits) => (15, inits)
+    t_loop_begin(_lower, _upper, _step, _unsigned, inits) => (15, inits)
     t_loop_end(outs) => outs
     t_while_begin(inits) => inits
     t_while_end(_cond, outs) => outs
@@ -2817,7 +2951,7 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_idx_const(value) => value + 10
       t_idx_add(_a, _b) => 4
       t_idx_mul(_a, _b) => 5
-      t_loop_begin(lower, upper, step, inits) => {
+      t_loop_begin(lower, upper, step, _unsigned, inits) => {
         log = log ++ ["loop_begin ${lower} ${upper} ${step} ${show(inits)}"]
         (30, [31])
       }

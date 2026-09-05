@@ -65,24 +65,71 @@ fn opt_ty(r: Option[Ref], t: Ty) -> String = match r {
   None -> ""
 }
 
-# The predicate, as `custom<ComparisonPredicate>` prints it.
+# The predicate, as `custom<ComparisonPredicate>` prints it. A `u` prefix
+# is the same predicate under the other `comparison_ordering` (knife T4),
+# so it spells the same word and `cmp_ordering` spells the difference.
 fn predicate(pred: String) -> String = match pred {
-  "eq" -> "equal"
-  "ne" -> "not_equal"
-  "lt" -> "less_than"
-  "le" -> "less_than_or_equal"
-  "gt" -> "greater_than"
-  "ge" -> "greater_than_or_equal"
+  "eq" | "ueq" -> "equal"
+  "ne" | "une" -> "not_equal"
+  "lt" | "ult" -> "less_than"
+  "le" | "ule" -> "less_than_or_equal"
+  "gt" | "ugt" -> "greater_than"
+  "ge" | "uge" -> "greater_than_or_equal"
   _ -> panic("tileir: `${pred}` is not a comparison predicate")
+}
+
+# The `comparison_ordering` a float comparison prints after its predicate.
+fn cmp_ordering(pred: String) -> String =
+  if list.any(["ueq", "une", "ult", "ule", "ugt", "uge"], u => u == pred) { "unordered" } else { "ordered" }
+
+# The mnemonic of a float operation. A name with an attribute suffix (knife
+# T4) is the same mnemonic; `float_rounding` and `float_units` spell what
+# the suffix said.
+fn float_spelling(op: String) -> String = match op {
+  "addf_neg_inf" | "addf_pos_inf" | "addf_ftz" -> "addf"
+  "mulf_neg_inf" | "mulf_pos_inf" | "mulf_ftz" -> "mulf"
+  "divf_neg_inf" | "divf_pos_inf" -> "divf"
+  "maxf_nan" -> "maxf"
+  "minf_nan" -> "minf"
+  "sqrt_approx" -> "sqrt"
+  _ -> op
+}
+
+# The unit attributes a float operation prints after its operands, as the
+# `oilist` in Ops.td spells them. Nothing before knife T4 set one.
+fn float_units(op: String) -> String = match op {
+  "addf_ftz" | "mulf_ftz" -> " flush_to_zero"
+  "maxf_nan" | "minf_nan" -> " propagate_nan"
+  _ -> ""
+}
+
+# The memory ordering and scope an `atomic_rmw_tko` prints before its
+# operands. Every atomic before knife T4 was `relaxed device`, and the
+# renderer spelled those two words inline; the three suffixed mode names
+# are the other orderings and scopes.
+fn rmw_memory(mode: String) -> String = match mode {
+  "add_acquire_tl_blk" -> "acquire tl_blk"
+  "add_release_sys" -> "release sys"
+  "add_acq_rel_device" -> "acq_rel device"
+  _ -> "relaxed device"
+}
+
+# The mode itself, with any memory suffix taken off.
+fn rmw_spelling(mode: String) -> String = match mode {
+  "add_acquire_tl_blk" | "add_release_sys" | "add_acq_rel_device" -> "add"
+  _ -> mode
 }
 
 # The rounding mode is spelled by the operations that take one, and by no
 # other: `maxf` and `minf` have `flush_to_zero` and `propagate_nan` and no
 # rounding mode at all, and this is the list the bytecode writer encodes
 # from as well.
-fn rounds(op: String) -> Bool = op == "addf" || op == "subf" || op == "mulf" || op == "divf"
-
-fn rounding(op: String) -> String = if rounds(op) { " rounding<nearest_even>" } else { "" }
+fn rounding(op: String) -> String = match op {
+  "addf" | "subf" | "mulf" | "divf" | "addf_ftz" | "mulf_ftz" -> " rounding<nearest_even>"
+  "addf_neg_inf" | "mulf_neg_inf" | "divf_neg_inf" -> " rounding<negative_inf>"
+  "addf_pos_inf" | "mulf_pos_inf" | "divf_pos_inf" -> " rounding<positive_inf>"
+  _ -> ""
+}
 
 # The unary operations that print a rounding mode. `sqrt` takes one and
 # `nearest_even` is what makes it the correctly rounded square root; `tanh`
@@ -91,7 +138,11 @@ fn rounding(op: String) -> String = if rounds(op) { " rounding<nearest_even>" } 
 # spell the default `tanh %in : tile<4xf32>`); `exp`'s field does not exist
 # before bytecode 13.3 at all. `exp2` and `rsqrt` take `flush_to_zero`,
 # which is never set here and so is never printed.
-fn un_rounding(op: String) -> String = if op == "sqrt" { " rounding<nearest_even>" } else { "" }
+fn un_rounding(op: String) -> String = match op {
+  "sqrt" -> " rounding<nearest_even>"
+  "sqrt_approx" -> " rounding<approx>"
+  _ -> ""
+}
 
 # One reduction identity, as the assembly spells an element of the
 # `identities` array: the value and the format it is a value of.
@@ -117,7 +168,23 @@ fn int_literal(elem: String, value: Int) -> Int =
 # `shri` and `shru` are one opcode under two signedness attributes; the
 # dialect's mnemonic is `shri` for both and the attribute is what says which
 # (Ops.td, ShRIOp). Every other name here is its own mnemonic.
-fn int_spelling(op: String) -> String = if op == "shru" { "shri" } else { op }
+fn int_spelling(op: String) -> String = match op {
+  "shru" -> "shri"
+  "addi_nsw" -> "addi"
+  "subi_nuw" -> "subi"
+  "muli_nw" -> "muli"
+  _ -> op
+}
+
+# The overflow assumption an integer operation prints, where it is not the
+# default. `overflow<none>` is the default and the dialect's printer leaves
+# it out, which is why every integer line before knife T4 has nothing here.
+fn int_overflow(op: String) -> String = match op {
+  "addi_nsw" -> " overflow<no_signed_wrap>"
+  "subi_nuw" -> " overflow<no_unsigned_wrap>"
+  "muli_nw" -> " overflow<no_wrap>"
+  _ -> ""
+}
 
 # The signedness attribute an integer operation prints, as
 # `custom<Signedness>` spells it: a leading space and the word, no comma
@@ -169,15 +236,17 @@ fn line(i: Instr) -> String = match i {
     "${v(tok_out)} = store_ptr_tko weak ${name(ptrs)}, ${name(value)}${opt_operand(mask)}"
     ++ " token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token"
   AtomicRMWPtr(dst, tok_out, ptrs, mode, arg, mask, tok_in, ptr_ty, mask_ty, val_ty) ->
-    "${v(dst)}, ${v(tok_out)} = atomic_rmw_tko relaxed device ${name(ptrs)}, ${mode}, ${name(arg)}"
+    "${v(dst)}, ${v(tok_out)} = atomic_rmw_tko ${rmw_memory(mode)} ${name(ptrs)}, ${rmw_spelling(mode)}, ${name(arg)}"
     ++ "${opt_operand(mask)} token=${name(tok_in)}"
     ++ " : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> ${ty(val_ty)}, token"
   AtomicCASPtr(dst, tok_out, ptrs, cmp, val, mask, tok_in, ptr_ty, mask_ty, val_ty) ->
     "${v(dst)}, ${v(tok_out)} = atomic_cas_tko relaxed device ${name(ptrs)}, ${name(cmp)}, ${name(val)}"
     ++ "${opt_operand(mask)} token=${name(tok_in)}"
     ++ " : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> ${ty(val_ty)}, token"
-  FloatUn(dst, op, t, src) -> "${v(dst)} = ${op} ${name(src)}${un_rounding(op)} : ${ty(t)}"
-  FloatBin(dst, op, t, lhs, rhs) -> "${v(dst)} = ${op} ${name(lhs)}, ${name(rhs)}${rounding(op)} : ${ty(t)}"
+  FloatUn(dst, op, t, src) ->
+    "${v(dst)} = ${float_spelling(op)} ${name(src)}${un_rounding(op)}${float_units(op)} : ${ty(t)}"
+  FloatBin(dst, op, t, lhs, rhs) ->
+    "${v(dst)} = ${float_spelling(op)} ${name(lhs)}, ${name(rhs)}${rounding(op)}${float_units(op)} : ${ty(t)}"
   FloatFma(dst, t, lhs, rhs, acc) ->
     "${v(dst)} = fma ${name(lhs)}, ${name(rhs)}, ${name(acc)} rounding<nearest_even> : ${ty(t)}"
   FloatMma(dst, t, lhs_ty, rhs_ty, lhs, rhs, acc) ->
@@ -187,24 +256,27 @@ fn line(i: Instr) -> String = match i {
     "${v(dst)} = mmai ${name(lhs)}, ${name(rhs)}, ${name(acc)} signed signed"
     ++ " : ${ty(lhs_ty)}, ${ty(rhs_ty)}, ${ty(t)}"
   CmpFloat(dst, pred, t, res_ty, lhs, rhs) ->
-    "${v(dst)} = cmpf ${predicate(pred)} ordered ${name(lhs)}, ${name(rhs)} : ${ty(t)} -> ${ty(res_ty)}"
+    "${v(dst)} = cmpf ${predicate(pred)} ${cmp_ordering(pred)} ${name(lhs)}, ${name(rhs)}"
+    ++ " : ${ty(t)} -> ${ty(res_ty)}"
   CmpInt(dst, pred, t, res_ty, lhs, rhs) ->
     "${v(dst)} = cmpi ${predicate(pred)} ${name(lhs)}, ${name(rhs)}, signed : ${ty(t)} -> ${ty(res_ty)}"
   IntUn(dst, op, t, src) -> "${v(dst)} = ${op} ${name(src)} : ${ty(t)}"
   IntBin(dst, op, t, lhs, rhs) ->
-    "${v(dst)} = ${int_spelling(op)} ${name(lhs)}, ${name(rhs)}${int_signedness(op)} : ${ty(t)}"
+    "${v(dst)} = ${int_spelling(op)} ${name(lhs)}, ${name(rhs)}${int_signedness(op)}${int_overflow(op)}"
+    ++ " : ${ty(t)}"
   Cast(dst, op, from, to, src) ->
     "${v(dst)} = ${op} ${name(src)}${cast_attrs(op, elem_of(to))} : ${ty(from)} -> ${ty(to)}"
   SelectTile(dst, cond_ty, t, cond, lhs, rhs) ->
     "${v(dst)} = select ${name(cond)}, ${name(lhs)}, ${name(rhs)} : ${ty(cond_ty)}, ${ty(t)}"
-  ForLoop(res, tys, iv, lower, upper, step, inits, carried, _body) -> {
+  ForLoop(res, tys, iv, lower, upper, step, unsigned, inits, carried, _body) -> {
     let iters = if len(inits) == 0 {
       ""
     } else {
       let pairs = list.map(range(0, len(inits)), k => "${v(carried[k])} = ${name(inits[k])}")
       " iter_values(${commas(pairs)}) -> (${commas(list.map(tys, ty))})"
     }
-    "${results(res)}for ${v(iv)} in (${name(lower)} to ${name(upper)}, step ${name(step)}) : tile<i32>${iters} {"
+    "${results(res)}for ${v(iv)} in (${name(lower)} to ${name(upper)}, step ${name(step)})"
+      ++ "${if unsigned { " unsigned" } else { "" }} : tile<i32>${iters} {"
   }
   WhileLoop(res, tys, inits, carried, _body) -> {
     let pairs = list.map(range(0, len(inits)), k => "${v(carried[k])} = ${name(inits[k])}")
@@ -252,7 +324,7 @@ fn line(i: Instr) -> String = match i {
 # its body two columns further in, and the closing brace; an `if` is two
 # regions and the brace between them says which is which.
 fn lines(indent: String, i: Instr) -> List[String] = match i {
-  ForLoop(_res, _tys, _iv, _lower, _upper, _step, _inits, _carried, body) ->
+  ForLoop(_res, _tys, _iv, _lower, _upper, _step, _unsigned, _inits, _carried, body) ->
     [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
   WhileLoop(_res, _tys, _inits, _carried, body) ->
     [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
@@ -403,7 +475,7 @@ fn sum_prog() -> TileProg = TileProg {
     IdxConst(8, 1),
     IdxAdd(9, 3, 8),
     IdxAdd(10, 3, 2),
-    For(11, 9, 10, 8, [6, 7], [12, 13], [19, 20], [
+    For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [
       IdxConst(14, 128),
       IdxMul(15, 11, 14),
       Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),

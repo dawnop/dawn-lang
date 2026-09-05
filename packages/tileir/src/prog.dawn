@@ -100,7 +100,7 @@ pub type TileOp =
   | IdxConst(dst: Int, value: Int)
   | IdxAdd(dst: Int, lhs: Int, rhs: Int)
   | IdxMul(dst: Int, lhs: Int, rhs: Int)
-  | For(iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
+  | For(iv: Int, lower: Int, upper: Int, step: Int, unsigned: Bool, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
   | Loop(inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
   | Break(values: List[Int])
   | Continue(values: List[Int])
@@ -223,8 +223,14 @@ fn check_convert(name: String, op: String) -> Unit =
 # the caller has to say which. A mode outside this list is a caller's
 # misspelling and is refused when the kernel is recorded, the way an
 # operation name is.
+# The three names below the ten are one mode under another MEMORY ORDERING
+# and MEMORY SCOPE (knife T4): an `atomic_rmw_tko` carries three required
+# enum attributes and the writer wrote two of them as constants until then.
+# `weak` is the one ordering the two atomics refuse and is not a name here;
+# scripts/tile-golden's atomic-rmw-claims-weak-ordering is what says so.
 fn check_rmw_mode(name: String, mode: String) -> Unit =
-  if one_of(["and", "or", "xor", "add", "addf", "max", "min", "umax", "umin", "xchg"], mode) {
+  if one_of(["and", "or", "xor", "add", "addf", "max", "min", "umax", "umin", "xchg",
+      "add_acquire_tl_blk", "add_release_sys", "add_acq_rel_device"], mode) {
     ()
   } else {
     refuse(name, "`${mode}` is not an atomic read-modify-write mode")
@@ -298,7 +304,7 @@ fn check_param(name: String, params: List[String], pos: Int, dtype: String, verb
 # around them. One variant per kind of region, because an `if` is two of
 # them in a row and a reduction carries what a loop does not.
 type Frame =
-  | LoopFrame(outer: List[TileOp], iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int])
+  | LoopFrame(outer: List[TileOp], iv: Int, lower: Int, upper: Int, step: Int, unsigned: Bool, inits: List[Int], carried: List[Int])
   | WhileFrame(outer: List[TileOp], inits: List[Int], carried: List[Int])
   | ReduceFrame(outer: List[TileOp], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int])
   | ScanFrame(outer: List[TileOp], dim: Int, reverse: Bool, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int])
@@ -311,7 +317,7 @@ type Frame =
 # itself) inside one has no order to be in. This is what says so: every
 # frame but the loop's.
 fn is_pure_region(f: Frame) -> Bool = match f {
-  LoopFrame(_outer, _iv, _lower, _upper, _step, _inits, _carried) -> false
+  LoopFrame(_outer, _iv, _lower, _upper, _step, _unsigned, _inits, _carried) -> false
   WhileFrame(_outer, _inits, _carried) -> false
   _ -> true
 }
@@ -565,7 +571,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         ops = ops ++ [IdxMul(d, a, b)]
         d
       }
-      t_loop_begin(lower, upper, step, inits) => {
+      t_loop_begin(lower, upper, step, unsigned, inits) => {
         let open = frames
         if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce, scan or if region has no memory order") } else { () }
         if len(frames) >= MAX_LOOP_DEPTH {
@@ -579,7 +585,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         let base = next + 1
         next = mint(name, next, 1 + len(all))
         let carried = list.map(range(0, len(all)), k => base + k)
-        frames = frames ++ [LoopFrame(ops, iv, lower, upper, step, all, carried)]
+        frames = frames ++ [LoopFrame(ops, iv, lower, upper, step, unsigned, all, carried)]
         ops = []
         tok = last(carried)
         (iv, but_last(carried))
@@ -587,7 +593,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
       t_loop_end(outs) => {
         if len(frames) == 0 { refuse(name, "loop_end with no loop open") } else { () }
         match frames[len(frames) - 1] {
-          LoopFrame(saved, iv, lower, upper, step, inits, carried) -> {
+          LoopFrame(saved, iv, lower, upper, step, unsigned, inits, carried) -> {
             let want = len(inits) - 1
             if len(outs) != want {
               refuse(name, "a loop body carrying ${want} value(s) answered ${len(outs)}")
@@ -600,7 +606,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
             let results = list.map(range(0, len(inits)), k => base + k)
             let body = inner ++ [Continue(outs ++ [tok])]
             frames = list.take(frames, len(frames) - 1)
-            ops = outer ++ [For(iv, lower, upper, step, inits, carried, results, body)]
+            ops = outer ++ [For(iv, lower, upper, step, unsigned, inits, carried, results, body)]
             tok = last(results)
             but_last(results)
           }
@@ -953,7 +959,7 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   IdxConst(dst, _value) -> [dst]
   IdxAdd(dst, _lhs, _rhs) -> [dst]
   IdxMul(dst, _lhs, _rhs) -> [dst]
-  For(_iv, _lower, _upper, _step, _inits, _carried, results, _body) -> results
+  For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, results, _body) -> results
   Loop(_inits, _carried, results, _body) -> results
   Break(_values) -> []
   Continue(_values) -> []
@@ -983,7 +989,7 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
 pub fn defined_inside(ops: List[TileOp]) -> List[Int] = {
   let none: List[Int] = []
   list.fold(ops, none, (acc, op) => match op {
-    For(iv, _lower, _upper, _step, _inits, carried, results, body) ->
+    For(iv, _lower, _upper, _step, _unsigned, _inits, carried, results, body) ->
       acc ++ results ++ [iv] ++ carried ++ defined_inside(body)
     Loop(_inits, carried, results, body) ->
       acc ++ results ++ carried ++ defined_inside(body)
@@ -1090,7 +1096,7 @@ test "a loop records as one For holding the body's operations, with the token ca
     # iv 11; carried: the tile 12 and the token 13 (entering as 6 and 7);
     # inside: the base 14 and 15, load 16 with token 17, addf 18;
     # results: tile 19, token 20
-    For(11, 9, 10, 8, [6, 7], [12, 13], [19, 20], [
+    For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [
       IdxConst(14, 128),
       IdxMul(15, 11, 14),
       Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
@@ -1124,8 +1130,9 @@ test "a loop carrying two tiles answers two results in order, the token behind t
   let p = trace_kernel("two", ["f64", "f64", "f64"], () => two_carried(param(F64, 0), param(F64, 1), param(F64, 2)))
   let loop = p.ops[len(p.ops) - 3]
   match loop {
-    For(iv, lower, upper, step, inits, carried, results, body) -> {
+    For(iv, lower, upper, step, unsigned, inits, carried, results, body) -> {
       assert (iv, lower, upper, step) == (9, 2, 3, 8)
+      assert not unsigned
       assert inits == [4, 6, 7]
       assert carried == [10, 11, 12]
       assert results == [19, 20, 21]
@@ -1151,10 +1158,10 @@ fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 test "loops nest: the inner For sits in the outer body and the outer continue passes the inner result" {
   let p = trace_kernel("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
   match p.ops[len(p.ops) - 2] {
-    For(_iv, _lo, _up, _st, _inits, _carried, results, body) -> {
+    For(_iv, _lo, _up, _st, _unsigned, _inits, _carried, results, body) -> {
       assert len(body) == 2
       match body[0] {
-        For(_iv2, _lo2, _up2, _st2, _inits2, _carried2, results2, _body2) -> {
+        For(_iv2, _lo2, _up2, _st2, _unsigned2, _inits2, _carried2, results2, _body2) -> {
           assert body[1] == Continue(results2)
         }
         _ -> { assert false }
@@ -1456,13 +1463,13 @@ test "a region opened and closed wrongly is refused when the kernel is recorded,
 
 # Below the typed surface: the operations themselves, misused.
 fn wrong_arity() -> Unit !Dev = {
-  let (_iv, _inside) = t_loop_begin(0, 0, 0, [1])
+  let (_iv, _inside) = t_loop_begin(0, 0, 0, false, [1])
   let _outs = t_loop_end([])
   ()
 }
 
 fn never_closed() -> Unit !Dev = {
-  let (_iv, _inside) = t_loop_begin(0, 0, 0, [])
+  let (_iv, _inside) = t_loop_begin(0, 0, 0, false, [])
   ()
 }
 

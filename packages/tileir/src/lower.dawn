@@ -116,8 +116,11 @@ derive Show
 ## `ForLoop` is the loop: `results` are the values it defines after itself,
 ## typed `tys` (one per carried value); `iv` (a scalar i32) and `carried`
 ## (typed `tys` again) are the block arguments its `body` sees; `lower`,
-## `upper`, `step` and `inits` are operands from outside. `body` ends in
-## `Cont(values, tys)`, the values handed to the next iteration.
+## `upper`, `step` and `inits` are operands from outside; `unsigned` is the
+## loop's `unsignedCmp` attribute, which decides whether the induction
+## variable is compared against the bound as a signed or an unsigned
+## 32-bit integer. `body` ends in `Cont(values, tys)`, the values handed to
+## the next iteration.
 ##
 ## `WhileLoop` is the other loop (knife T5): `ForLoop` without an induction
 ## variable or bounds, because it runs until a `break`. Its `body` ends in
@@ -151,7 +154,7 @@ pub type Instr =
   | IntBin(dst: Int, op: String, ty: Ty, lhs: Ref, rhs: Ref)
   | Cast(dst: Int, op: String, from: Ty, to: Ty, src: Ref)
   | SelectTile(dst: Int, cond_ty: Ty, ty: Ty, cond: Ref, lhs: Ref, rhs: Ref)
-  | ForLoop(results: List[Int], tys: List[Ty], iv: Int, lower: Ref, upper: Ref, step: Ref, inits: List[Ref], carried: List[Int], body: List[Instr])
+  | ForLoop(results: List[Int], tys: List[Ty], iv: Int, lower: Ref, upper: Ref, step: Ref, unsigned: Bool, inits: List[Ref], carried: List[Int], body: List[Instr])
   | WhileLoop(results: List[Int], tys: List[Ty], inits: List[Ref], carried: List[Int], body: List[Instr])
   | BreakVals(values: List[Ref], tys: List[Ty])
   | Cont(values: List[Ref], tys: List[Ty])
@@ -615,7 +618,8 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l3, d) = define(l2, dst, num_tile(shape, dtype))
     emit(l3, Broadcast(d, Val(r), ones, num_tile(shape, dtype)))
   }
-  For(iv, lower, upper, step, inits, carried, results, body) -> lower_for(l0, iv, lower, upper, step, inits, carried, results, body)
+  For(iv, lower, upper, step, unsigned, inits, carried, results, body) ->
+    lower_for(l0, iv, lower, upper, step, unsigned, inits, carried, results, body)
   Loop(inits, carried, results, body) -> lower_loop(l0, inits, carried, results, body)
   Reduce(results, dim, shape, identities, operands, args, body) -> lower_reduce(l0, results, dim, shape, identities, operands, args, body)
   Scan(results, dim, reverse, shape, identities, operands, args, body) -> lower_scan(l0, results, dim, reverse, shape, identities, operands, args, body)
@@ -718,7 +722,8 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
 # then the body in its own instruction list with the enclosing names and
 # ladders visible. On the way out everything the body bound is closed: the
 # names and ladders revert to the enclosing scope's plus the results.
-fn lower_for(l0: L, iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp]) -> L = {
+fn lower_for(l0: L, iv: Int, lower: Int, upper: Int, step: Int, unsigned: Bool, inits: List[Int],
+  carried: List[Int], results: List[Int], body: List[TileOp]) -> L = {
   if len(carried) != len(inits) || len(results) != len(inits) {
     panic("tileir: a loop carrying ${len(inits)} value(s) names ${len(carried)} inside and ${len(results)} after")
   } else {
@@ -745,7 +750,7 @@ fn lower_for(l0: L, iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int]
   }
   # close the body's scope: what it bound is gone, its numbers stay spent
   let l4 = close_scope(l1, inner)
-  emit(l4, ForLoop(res, tys, ivn, lo, up, st, init_refs, args, inner.body))
+  emit(l4, ForLoop(res, tys, ivn, lo, up, st, unsigned, init_refs, args, inner.body))
 }
 
 # Lower a `loop`. `lower_for` without the induction variable and the three
@@ -932,7 +937,7 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   IntBin(dst, _op, _ty, _lhs, _rhs) -> [dst]
   Cast(dst, _op, _from, _to, _src) -> [dst]
   SelectTile(dst, _cond_ty, _ty, _cond, _lhs, _rhs) -> [dst]
-  ForLoop(results, _tys, _iv, _lower, _upper, _step, _inits, _carried, _body) -> results
+  ForLoop(results, _tys, _iv, _lower, _upper, _step, _unsigned, _inits, _carried, _body) -> results
   WhileLoop(results, _tys, _inits, _carried, _body) -> results
   BreakVals(_values, _tys) -> []
   Cont(_values, _tys) -> []
@@ -957,7 +962,7 @@ pub fn defines(i: Instr) -> List[Int] = match i {
 pub fn defines_inside(body: List[Instr]) -> List[Int] = {
   let none: List[Int] = []
   list.fold(body, none, (acc, i) => match i {
-    ForLoop(results, _tys, iv, _lower, _upper, _step, _inits, carried, inner) ->
+    ForLoop(results, _tys, iv, _lower, _upper, _step, _unsigned, _inits, carried, inner) ->
       acc ++ results ++ [iv] ++ carried ++ defines_inside(inner)
     WhileLoop(results, _tys, _inits, carried, inner) ->
       acc ++ results ++ carried ++ defines_inside(inner)
@@ -1116,7 +1121,7 @@ fn sum_prog() -> TileProg = TileProg {
     IdxConst(8, 1),
     IdxAdd(9, 3, 8),
     IdxAdd(10, 3, 2),
-    For(11, 9, 10, 8, [6, 7], [12, 13], [19, 20], [
+    For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [
       IdxConst(14, 128),
       IdxMul(15, 11, 14),
       Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
@@ -1185,7 +1190,7 @@ test "a loop lowers to one WhileLoop numbered results first, then its block argu
 }
 
 fn is_for(i: Instr) -> Bool = match i {
-  ForLoop(_results, _tys, _iv, _lower, _upper, _step, _inits, _carried, _body) -> true
+  ForLoop(_results, _tys, _iv, _lower, _upper, _step, _unsigned, _inits, _carried, _body) -> true
   _ -> false
 }
 
@@ -1195,7 +1200,7 @@ test "a loop lowers to one For whose results, block arguments and body are numbe
   let loops = list.filter(k.body, is_for)
   assert len(loops) == 1
   match loops[0] {
-    ForLoop(results, tys, iv, lower, upper, step, inits, carried, body) -> {
+    ForLoop(results, tys, iv, lower, upper, step, _unsigned, inits, carried, body) -> {
       # results 20 and 21, then iv 22, then carried 23 and 24; the body starts at 25
       assert results == [20, 21]
       assert tys == [f64_128, Token]
@@ -1355,13 +1360,13 @@ test "a value a loop body defined is refused by name after the loop" {
 
 test "a loop whose carried lists disagree, or whose body does not end in continue, is refused" {
   let short = TileProg { ..sum_prog(),
-    ops: list.take(sum_prog().ops, 10) ++ [For(11, 9, 10, 8, [6, 7], [12], [19, 20], [Continue([12, 13])])] }
+    ops: list.take(sum_prog().ops, 10) ++ [For(11, 9, 10, 8, false, [6, 7], [12], [19, 20], [Continue([12, 13])])] }
   match catch_panic(() => lower(short)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "a loop carrying 2 value(s) names 1 inside and 2 after") }
   }
   let open = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 10)
-      ++ [For(11, 9, 10, 8, [6, 7], [12, 13], [19, 20], [BinaryF(14, "addf", "f64", [128], 12, 12)])] }
+      ++ [For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [BinaryF(14, "addf", "f64", [128], 12, 12)])] }
   match catch_panic(() => lower(open)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "a loop body ends in something other than continue") }
