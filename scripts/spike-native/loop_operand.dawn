@@ -1,0 +1,97 @@
+# Loop exits inside an operand must abandon pending operand values, not
+# transport them to the loop label. Nonempty lists also exercise RC's
+# hoisted-reference cleanup; scalar and constructor cases vary JVM widths.
+use std/io
+
+type Pair = { left: Int, right: Int }
+
+fn collect(hs: List[Int], seed: List[Int]) -> List[Int] = {
+  var out = seed
+  for h in hs {
+    out = out ++ [if h < 0 { continue } else if h == 0 { break } else { h }]
+  }
+  out
+}
+
+fn decimal(a: Int, b: Int) -> Int = a * 10 + b
+
+fn scalar() -> Int = {
+  var out = 0
+  for h in [1, -2, 3, 0, 4] {
+    out = out + (if h < 0 { continue } else if h == 0 { break } else { h })
+  }
+  out
+}
+
+fn floating() -> Float = {
+  var out = 0.5
+  for h in [1, -2, 3, 0, 4] {
+    out = out + (if h < 0 { continue } else if h == 0 { break } else { 1.25 })
+  }
+  out
+}
+
+fn dynamic(f: fn(Int, Int) -> Int) -> Int = {
+  var out = 0
+  for h in [1, -2, 3, 0, 4] {
+    out = out + f(2, if h < 0 { continue } else if h == 0 { break } else { h })
+  }
+  out
+}
+
+fn constructors() -> Int = {
+  var out = 0
+  for h in [1, -2, 3, 0, 4] {
+    let p = Pair { left: 10, right: if h < 0 { continue } else if h == 0 { break } else { h } }
+    let t = (p.left, if h == 3 { continue } else { p.right })
+    let (left, right) = t
+    out = out + left + right
+  }
+  out
+}
+
+fn nested() -> Int = {
+  var out = 0
+  for h in [1, -2, 3, 0, 4] {
+    out = out + {
+      var local = 0
+      for i in [1, 2, 3] {
+        local = local + (if i == 2 { break } else { i })
+      }
+      match h {
+        n if n < 0 -> continue
+        0 -> break
+        _ -> local
+      }
+    }
+  }
+  out
+}
+
+fn short_circuit() -> Int = {
+  var count = 0
+  for h in [-1, 0, 1] {
+    let no = false && (if h < 0 { continue } else { true })
+    let yes = true || (if h == 0 { break } else { false })
+    if not no && yes { count = count + 1 }
+  }
+  count
+}
+
+fn returns(h: Int) -> Int = 1 + (if h < 0 { return 9 } else { h })
+
+fn tail_sum(n: Int, acc: Int) -> Int =
+  if n == 0 { acc } else { tail_sum(n - 1, acc + n) }
+
+pub fn main() -> Unit !io = {
+  println("${collect([1, -2, 3, 0, 4], [])}")
+  println("${collect([1, -2, 3, 0, 4], [4])}")
+  println("${scalar()}")
+  println("${floating()}")
+  println("${dynamic(decimal)}")
+  println("${constructors()}")
+  println("${nested()}")
+  println("${short_circuit()}")
+  println("${returns(-1)},${returns(3)}")
+  println("${tail_sum(100, 0)}")
+}

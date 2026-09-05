@@ -75,6 +75,7 @@ use ir/lower.{LMod}
 use ir/reach
 use ir/reach.{Live}
 use jvm/jreflect
+use jvm/operand as operands
 use java "dawn.rt.Asm"
 use java "dawn.rt.AsmWriter"
 use java "org.objectweb.asm.ClassWriter"
@@ -180,6 +181,8 @@ pub type ConstF = { fname: String, v: CValue, ty: Ty }
 ## the mutable half further would not have that property -- two threaded halves
 ## means two of them in every result tuple.
 pub type GenCtx = {
+  # Lowering's unabridged symbol ceiling, for JVM-only operand temporaries.
+  next_sym: Int,
   class_name: String,
   # The class whose JVM wrapper receives this program's argv. `args()` is a
   # process input, not state owned by the module containing the call, so every
@@ -924,6 +927,10 @@ fn emit_sam_conversion(
   g2.mv.visitInsn(OP_SWAP)
   # then the snapshot, which is an ordinary Core expression evaluated here --
   # the second `<init>` argument, so it goes on top of the function value.
+  # checker.sam_snapshot builds it with evidence_pack: local/evidence reads,
+  # pure ev_append and pack constructors, never a user control-flow operand.
+  # That invariant also lets the escaping-argument path adapt a SAM before
+  # spilling it without hiding a loop jump inside this NEW/DUP sequence.
   # A conversion the checker built no pack for cannot happen (`finalize_sams`
   # takes one wherever it records a conversion), and the null it would push
   # instead is what `ev_get` already tolerates rather than a silent wrong
@@ -1061,10 +1068,88 @@ fn gen_java_args(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, Bool) !io = {
   }
 }
 
+## Save the Java representation, AFTER conversion (an int/float may now be
+## narrow). JVM local load/store opcode families have the same type order.
+fn spill_java_value(g: Gen, desc: String) -> (Gen, (Int, Int)) !io = {
+  let (load, width) = jload_of(desc)
+  let (g1, slot) = alloc(g, width)
+  g1.mv.visitVarInsn(load + (OP_ASTORE - OP_ALOAD), slot)
+  (g1, (load, slot))
+}
+
+fn reload_java_values(g: Gen, slots: List[(Int, Int)]) -> Unit !io = {
+  for entry in slots {
+    let (op, slot) = entry
+    g.mv.visitVarInsn(op, slot)
+  }
+}
+
+## Keep bridge creation and SAM evidence snapshots in their original
+## left-to-right positions. Numeric adaptation currently narrows directly;
+## storing its Java representation avoids widening it a second time on reload.
+fn gen_java_spilled_args(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, List[(Int, Int)], Bool) !io = {
+  let call = jc.call
+  let fixed = match call.varargs_pack {
+    Some(p) -> p
+    None -> len(jc.args)
+  }
+  var g1 = g
+  var slots: List[(Int, Int)] = []
+  for i in 0..fixed {
+    let (g2, falls) = gen_cexpr(gx, g1, jc.args[i], false)
+    g1 = g2
+    if not falls { return (g1, slots, false) }
+    g1 = adapt_one_java_arg(gx, g1, jc, i, jc.arg_tys[i], call.param_cls[i])
+    let (g3, saved) = spill_java_value(g1, jdesc(call.param_cls[i]))
+    g1 = g3
+    slots = slots ++ [saved]
+  }
+  match call.varargs_pack {
+    None -> ()
+    Some(pack) -> {
+      let last = call.param_cls[len(call.param_cls) - 1]
+      let component = jreflect.component_of(last).expect("variadic parameter is not an array")
+      push_int(g1.mv, len(jc.args) - pack)
+      new_array(g1.mv, component)
+      let (g2, arr) = spill_java_value(g1, jdesc(last))
+      g1 = g2
+      for k in pack..len(jc.args) {
+        let (g3, falls) = gen_cexpr(gx, g1, jc.args[k], false)
+        g1 = g3
+        if not falls { return (g1, slots, false) }
+        g1 = adapt_one_java_arg(gx, g1, jc, k, jc.arg_tys[k], component)
+        let (g4, value) = spill_java_value(g1, jdesc(component))
+        g1 = g4
+        reload_java_values(g1, [arr])
+        push_int(g1.mv, k - pack)
+        reload_java_values(g1, [value])
+        g1.mv.visitInsn(array_store_op(component))
+      }
+      slots = slots ++ [arr]
+    }
+  }
+  (g1, slots, true)
+}
+
 ## Type.new(args): direct construction — never null, no Option wrap.
 fn gen_java_new(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, Bool) !io = {
   let call = jc.call
   let owner = internal_of(call.fqcn)
+  if operands.foreign_jumps(jc) {
+    # NEW triggers Java class initialization before argument effects. Keep
+    # that position, but park its uninitialized reference in a local: a loop
+    # exit abandons the local instead of carrying it on the operand stack.
+    g.mv.visitTypeInsn(OP_NEW, owner)
+    let (g0, receiver) = spill_java_value(g, "Ljava/lang/Object;")
+    let (g1, slots, falls) = gen_java_spilled_args(gx, g0, jc)
+    if not falls { return (g1, false) }
+    reload_java_values(g1, [receiver])
+    g1.mv.visitInsn(OP_DUP)
+    reload_java_values(g1, slots)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, owner, "<init>",
+      jmethod_desc(call.param_cls, "void"), false)
+    return (g1, true)
+  }
   g.mv.visitTypeInsn(OP_NEW, owner)
   g.mv.visitInsn(OP_DUP)
   let (g1, falls) = gen_java_args(gx, g, jc)
@@ -1123,19 +1208,33 @@ fn gen_java_call(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io = {
     None -> false
   }
   var g1 = g
+  let spill = operands.foreign_jumps(jc)
+  var receiver: List[(Int, Int)] = []
   if not call.is_static {
     match jc.target {
       Some(t) -> {
         let (g2, falls) = gen_cexpr(gx, g1, t, false)
         g1 = g2
         if not falls { return (g1, false) }
+        if spill {
+          let (g3, saved) = spill_java_value(g1, "Ljava/lang/Object;")
+          g1 = g3
+          receiver = [saved]
+        }
       }
       None -> ()
     }
   }
-  let (g3, falls2) = gen_java_args(gx, g1, jc)
-  g1 = g3
-  if not falls2 { return (g1, false) }
+  if spill {
+    let (g3, slots, falls2) = gen_java_spilled_args(gx, g1, jc)
+    g1 = g3
+    if not falls2 { return (g1, false) }
+    reload_java_values(g1, receiver ++ slots)
+  } else {
+    let (g3, falls2) = gen_java_args(gx, g1, jc)
+    g1 = g3
+    if not falls2 { return (g1, false) }
+  }
   let opcode = if call.is_static { OP_INVOKESTATIC }
   else if itf { OP_INVOKEINTERFACE } else { OP_INVOKEVIRTUAL }
   g1.mv.visitMethodInsn(opcode, owner, call.method,
@@ -1435,7 +1534,7 @@ fn gen_cbody(
     let (g2, slot) = alloc(g1, slots_of(e.ty))
     g1 = cbind(g2, e.sym, e.ty, slot)
   }
-  let (g3, falls) = gen_cexpr(gx, g1, cf.body, false)
+  let (g3, falls) = gen_cexpr(gx, g1, operands.prepare(cf.body, gx.next_sym), false)
   if falls { emit_method_return(g3) }
   close_mv(m)
   g3
@@ -1784,8 +1883,19 @@ pub fn emit_module(
 ) -> List[(String, Bytes)] !Fs !Exit !Console !io = {
   var out: List[(String, Bytes)] = []
   for aid in own_adt_ids {
-    out = out ++ gen_adt(supers, adts, adt_of(adts, aid),
-      eq_override(impl_table, class_name, TyAdt(aid, adt_of(adts, aid).tparams)))
+    let a = adt_of(adts, aid)
+    # Effect records have an unspellable compiler-reserved name. Ordinary
+    # ADTs remain emitted whole; evidence follows both live bodies and typed
+    # signatures, so receiving a record keeps its descriptor resolvable too.
+    let keep = match live {
+      None -> true
+      Some(l) -> not str.starts_with(a.name, "ev\$") || reach.adt_live(l, aid) ||
+        reach.java_class_live(l, adt_jvm_name(a))
+    }
+    if keep {
+      out = out ++ gen_adt(supers, adts, a,
+        eq_override(impl_table, class_name, TyAdt(aid, a.tparams)))
+    }
   }
   for tid in own_trait_ids {
     let tr = trait_of(traits, tid)
@@ -1797,6 +1907,7 @@ pub fn emit_module(
   let no_slots: Map[Int, Int] = map.empty()
   let no_ckey: Map[String, String] = map.empty()
   let gx = GenCtx {
+    next_sym: lm.next_sym,
     class_name: class_name,
     args_owner: args_owner,
     adts: adts,

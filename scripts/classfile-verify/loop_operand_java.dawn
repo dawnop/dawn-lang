@@ -1,0 +1,56 @@
+# Foreign operands are saved after adaptation: receivers, NEW/DUP, narrow
+# primitives, varargs arrays and SAM adapters each add different JVM freight.
+use java "java.lang.Math"
+use java "java.lang.Integer"
+use java "java.lang.Thread"
+use java "java.util.Objects"
+use java "java.util.concurrent.atomic.AtomicInteger"
+
+fn decimal(a: Int, b: Int) -> Int = a * 10 + b
+
+test "an earlier local operand is read before a later operand mutates it" {
+  var value = 2
+  var out = 0
+  for h in [1, -2, 3, 0, 4] {
+    out = out + decimal(value, {
+      value = value + 1
+      if h < 0 { continue } else if h == 0 { break } else { h }
+    })
+  }
+  assert out == 64
+}
+
+test "Java static arguments preserve wide and narrow slots across loop exits" {
+  var narrow = 0
+  var wide = 0.0
+  for h in [1, -2, 3, 0, 4] {
+    narrow = narrow + Integer.sum(2, if h < 0 { continue } else if h == 0 { break } else { h })
+    wide = wide + Math.max(2.5, if h == 3 { continue } else { 3.5 })
+  }
+  assert narrow == 8
+  assert wide == 3.5
+}
+
+test "Java constructors and receivers do not cross escaping argument evaluation" {
+  var count = 0
+  for h in [1, -2, 3, 0, 4] {
+    let a = AtomicInteger.new(if h < 0 { continue } else if h == 0 { break } else { h })
+    let changed = a.compareAndSet(h, if h == 3 { continue } else { h + 1 })
+    assert changed
+    count = count + a.get()
+  }
+  assert count == 2
+}
+
+test "Java varargs and SAM creation retain conversion order and stack shape" {
+  var hash = 0
+  var count = 0
+  for h in [1, -2, 3, 0, 4] {
+    hash = hash + Objects.hash("x", if h < 0 { continue } else if h == 0 { break } else { "y" })
+    let t = Thread.new(if h == 3 { continue } else { () => () })
+    t.run()
+    count = count + 1
+  }
+  assert hash == 9604
+  assert count == 1
+}

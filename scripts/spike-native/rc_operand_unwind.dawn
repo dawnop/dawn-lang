@@ -1,0 +1,25 @@
+# A hoisted old heap value must stay owned until all later operands finish.
+# Returning from a later operand must release it even before the assignment.
+use std/io
+
+fn get(h: Int) -> Result[Int, String] =
+  if h < 0 { Err("negative " ++ to_string(h)) } else { Ok(h) }
+
+fn collect(hs: List[Int]) -> Result[List[Int], String] = {
+  var out: List[Int] = [hs[0]]
+  out = out ++ [get(hs[1])?]
+  Ok(out)
+}
+
+fn collect_loop(hs: List[Int]) -> Result[List[Int], String] = {
+  var out: List[Int] = []
+  for h in hs { out = out ++ [get(h)?] }
+  Ok(out)
+}
+
+pub fn main() -> Unit !io = {
+  println("${collect([1, 2])}")
+  println("${collect([1, -2])}")
+  println("${collect_loop([1, 2, 3])}")
+  println("${collect_loop([1, 2, -3])}")
+}

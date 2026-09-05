@@ -31,7 +31,7 @@
 # refused by the checker.
 use std/list
 use std/str
-use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, I32, I8}
+use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, I32, I8, I64}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it.
 ## `D` is a phantom (spec 2.7): `Tile[F64]` and `Tile[F32]` are two types over
@@ -87,18 +87,13 @@ impl Dtype[I1] {
   fn dtype_bytes(d: I1) -> Int = 1
 }
 
-## The 64-bit integer tile format: what `ptr_to_int` answers and what
-## `int_to_ptr` reads back. A tile element format and not a buffer format,
-## as `I1` is: nothing here allocates an i64 buffer, and the only values of
-## this type a kernel builds are addresses and the constants it offsets them
-## by. The dialect's other scalar formats that this backend has no client
-## for are knife T3's.
-pub type I64 = I64
-
-impl Dtype[I64] {
-  fn dtype_name(d: I64) -> String = "i64"
-  fn dtype_bytes(d: I64) -> Int = 8
-}
+# The 64-bit integer format is std/gpu's `I64` and not one of this
+# module's own. Knife T2 declared it here, beside `I1`, on the grounds that
+# it was a tile element format and not a buffer format: `ptr_to_int` answers
+# one and nothing allocated a buffer of it. Knife T3 allocates buffers of
+# it, so the grounds are gone and there is one `I64` again. `I1` stays here,
+# because the dialect has no i1 buffer at all and std/gpu has no marker for
+# one.
 
 ## A tile of POINTERS inside a kernel. `D` is a phantom as `Tile[D]`'s is:
 ## the element format the pointers point AT, so a `Ptrs[F64]` where a
@@ -1053,16 +1048,19 @@ pub fn ge_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = com
 # the device wraps modulo 2^32 and a host reference must wrap too
 # (std/gpu's `wrap_i32`).
 
-fn binary_int(op: String, shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = {
-  let x: Int = a
-  let y: Int = b
-  let h: Tile[I32] = t_binaryi(op, "i32", shape, x, y)
-  h
-}
+fn binary_int(op: String, shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev =
+  binary_int_at(I32, op, shape, a, b)
 
 fn unary_int(op: String, shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = {
   let x: Int = a
   let h: Tile[I32] = t_unaryi(op, "i32", shape, x)
+  h
+}
+
+fn binary_int_at[D: Dtype](d: D, op: String, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Tile[D] = t_binaryi(op, dtype_name(d), shape, x, y)
   h
 }
 
@@ -1130,25 +1128,80 @@ pub fn neg_i(shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = unary_int("negi
 ## `-2^31`).
 pub fn abs_i(shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = unary_int("absi", shape, a)
 
-# ---- conversions (knife 10) ----
+# ---- integer arithmetic at a named width (knife T3) ----
+#
+# The family above is i32's and nothing else's: it predates every other
+# integer width and a hundred kernels spell it that way. The five below take
+# the width as a marker, the way every float operation here does, because a
+# tile of `i16` or `i64` has no spelling in that family at all. There is ONE
+# implementation -- `add_i` and `addi(I32, ..)` go through `binary_int_at`
+# and emit the same instruction and the same bytes -- so this is two
+# spellings of one operation and not two operations.
+#
+# Wrapping is the format's, not i32's: `addi` over an i16 tile wraps modulo
+# 2^16, which std/gpu's `wrap_i16` is the host reading of, and over an i64
+# tile modulo 2^64, which nothing in the `List[Float]` channel can see (a
+# corpus for i64 stays inside +/-2^52; std/gpu's `I64` says why).
+#
+# `cmpi` is NOT here. The effect's `t_cmpi` carries no format -- the
+# lowering gives its operands `i32` types -- so a comparison at another
+# width would need the operation's signature to change, which is a knife of
+# its own and not this one's. Everything else an integer tile does is either
+# here or in the i32 family.
 
-## The float tile of format `d` holding each lane of the signed integer tile
-## `a`, rounded to nearest even. Exact for every i32 into an f64 tile (a
-## binary64 significand covers the whole range) and not always exact into an
-## f32 one.
-pub fn int_to_float[D: Dtype](d: D, shape: List[Int], a: Tile[I32]) -> Tile[D] !Dev = {
-  let x: Int = a
-  let h: Tile[D] = t_convert("itof", "i32", dtype_name(d), shape, x)
+## The element-wise sum `a + b` over two tiles of format `d`, wrapping.
+pub fn addi[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary_int_at(d, "addi", shape, a, b)
+
+## The element-wise difference `a - b`, wrapping.
+pub fn subi[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary_int_at(d, "subi", shape, a, b)
+
+## The element-wise product `a * b`, wrapping: the low bits of the exact
+## product, as many as the format holds.
+pub fn muli[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary_int_at(d, "muli", shape, a, b)
+
+## The element-wise left shift `a << b`, wrapping. A shift count outside
+## `[0, width)` is undefined on the device.
+pub fn shli[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary_int_at(d, "shli", shape, a, b)
+
+## The element-wise ARITHMETIC right shift `a >> b`: the sign bit is copied
+## into the vacated positions.
+pub fn shri[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary_int_at(d, "shri", shape, a, b)
+
+## The tile of `shape` and format `d` every lane of which holds `value`,
+## truncated to the format's width. `i_const` is the i32 spelling.
+pub fn consti[D: Dtype](d: D, shape: List[Int], value: Int) -> Tile[D] !Dev = {
+  let h: Tile[D] = t_consti(dtype_name(d), shape, value)
   h
 }
 
-## The signed integer tile holding each lane of the float tile `a`,
-## TRUNCATED TOWARD ZERO. A lane that is infinite, NaN or outside the i32
-## range is undefined on the device (the dialect says so), so a kernel that
-## uses this owes a bound on its input.
-pub fn float_to_int[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[I32] !Dev = {
+# ---- conversions (knife 10) ----
+
+## The float tile of format `to_d` holding each lane of the signed integer
+## tile `a` of format `from_d`, rounded to nearest even. Exact for every i32
+## into an f64 tile (a binary64 significand covers the whole range) and not
+## always exact into an f32 one, nor from an i64 tile.
+##
+## Knife T3 gave it the SOURCE format as well, so that `i16` and `i64` tiles
+## can be widened; `float_to_float` had that shape from the start and this
+## now reads the same way.
+pub fn int_to_float[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
   let x: Int = a
-  let h: Tile[I32] = t_convert("ftoi", dtype_name(d), "i32", shape, x)
+  let h: Tile[B] = t_convert("itof", dtype_name(from_d), dtype_name(to_d), shape, x)
+  h
+}
+
+## The integer tile of format `to_d` holding each lane of the float tile `a`
+## of format `from_d`, TRUNCATED TOWARD ZERO. A lane that is infinite, NaN
+## or outside the target's range is undefined on the device (the dialect
+## says so), so a kernel that uses this owes a bound on its input.
+pub fn float_to_int[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
+  let x: Int = a
+  let h: Tile[B] = t_convert("ftoi", dtype_name(from_d), dtype_name(to_d), shape, x)
   h
 }
 
@@ -1853,20 +1906,13 @@ pub fn load_ptrs[D: Dtype](d: D, shape: List[Int], ps: Ptrs[D]) -> Tile[D] !Dev 
 }
 
 ## The i64 tile of `shape` every lane of which holds `value`. What an
-## address is offset by, in bytes.
-pub fn i64_const(shape: List[Int], value: Int) -> Tile[I64] !Dev = {
-  let h: Tile[I64] = t_consti("i64", shape, value)
-  h
-}
+## address is offset by, in bytes; the i64 spelling of `consti`.
+pub fn i64_const(shape: List[Int], value: Int) -> Tile[I64] !Dev = consti(I64, shape, value)
 
-## The element-wise i64 sum `a + b`. The one arithmetic operation this
-## surface has over i64, because address arithmetic is the one client.
-pub fn add_i64(shape: List[Int], a: Tile[I64], b: Tile[I64]) -> Tile[I64] !Dev = {
-  let x: Int = a
-  let y: Int = b
-  let h: Tile[I64] = t_binaryi("addi", "i64", shape, x, y)
-  h
-}
+## The element-wise i64 sum `a + b`, the spelling address arithmetic uses.
+## `addi(I64, ..)` is the same instruction and the same bytes.
+pub fn add_i64(shape: List[Int], a: Tile[I64], b: Tile[I64]) -> Tile[I64] !Dev =
+  addi(I64, shape, a, b)
 
 # ---- tests ----
 #
