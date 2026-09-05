@@ -20,11 +20,11 @@
 # present or absent, and its presence is a BIT in the flags word, so its
 # `code` here is that bit and not an enum value.
 #
-# The `tag.*` family (knife T6) has a THIRD authority,
+# The `tag.*` family (knives T6 and T15) has a THIRD authority,
 # include/cuda_tile/Dialect/CudaTile/IR/BytecodeAttrOpcodes.td: the twelve
 # frozen ATTRIBUTE TAGS. AttrDefs.td says what an attribute means and that
 # file says which byte announces it where one is written self-contained, so
-# a `tag.*` row's `code` is the tag byte. Four of the twelve are here;
+# a `tag.*` row's `code` is the tag byte. Six of the twelve are here;
 # `Integer` (1) and `Float` (2) are knife 3's reduction identities, which
 # ruling 6's list leaves out for the reason it leaves out
 # `ComparisonPredicate`, and the rest belong to attributes this backend
@@ -36,7 +36,15 @@
 # attribute the caller could have set otherwise; they are the operation's
 # name spelled twice and carry no coverage question, so ruling 6's list
 # leaves them out and so does this file. `OptimizationHints` is a dictionary
-# and not a domain of values; knife T15 owns it.
+# and not a domain of values, so knife T15 records it as its TAG and the tag
+# of the `Dictionary` it wraps, and nothing else: the hint KEYS
+# (`num_cta_in_cga`, `num_worker_warps_per_cta`, `occupancy`, `latency`,
+# `allow_tma`) are not a domain either. Their values are ranges rather than
+# an enum -- 1 to 32 for `occupancy`, 1 to 10 for `latency` -- so a row per
+# value is not a thing this table could hold, and a row per KEY would claim
+# a coverage no ledger here means: nothing checks a key (see
+# `hints-do-not-change-answers` below), so "implemented" and
+# "unimplemented" would name the same state.
 #
 # COLUMNS
 #
@@ -160,6 +168,27 @@
 #       measurement from this side: emitting the two extra varints at 13.2
 #       makes the assembler read the next global's record out of them.
 #       Knife T8 is the version wall and owns all three.
+#   hints-do-not-change-answers
+#       `optimization_hints` is a SUGGESTION, and ruling 1 of the prestudy
+#       names it beside `assume` for exactly this reason: the dialect
+#       promises that a hint does not change what a kernel computes, so no
+#       corpus could tell one value of one from another by looking at a
+#       buffer, and a `device:` token here would be a claim about the
+#       ANSWER that no hint can support. Knife T15's hint_diff asks the
+#       device the one question it can be asked -- do the hinted kernels
+#       answer the bytes the unhinted `vadd` answers -- and it answers
+#       yes, which is the promise kept rather than a dependence on a
+#       value.
+#
+#       Layer 1 reaches the SHAPE and stops there, and that is measured
+#       and not assumed. `OptimizationHintsAttr::verifyParamWithContext`
+#       returns early unless `-Wunsupported-hints` is on, and it is off by
+#       default: an unknown key (`occupancy_qqq`), an unknown architecture
+#       (`sm_86a`) and an out-of-range value (`latency = 904`) each
+#       assemble, exit 0 and print nothing. What IS refused is a count
+#       that disagrees with what follows it, a tag that is not the one the
+#       function table wants, and a flag bit in the wrong place, which is
+#       what scripts/tile-golden's four hint mutants hold.
 #
 # feature | code | since | status | knife | layer | evidence | exemption
 rounding.nearest_even        | 0 | 13.1 | implemented   | 3   | 3 | const:ROUND_NEAREST_EVEN,golden:vadd,device:vadd,mutant:addf-no-rounding                              | -
@@ -210,3 +239,5 @@ tag.String                   |  5 | 13.1 | implemented   | T6  | 1 | writer:str_
 tag.DivBy                    |  8 | 13.1 | implemented   | T6  | 1 | const:ATTR_DIV_BY,golden:assume_divby,mutant:assume-divby-tag-as-same-elements                        | assumption-not-arithmetic
 tag.SameElements             |  9 | 13.1 | implemented   | T6  | 1 | const:ATTR_SAME_ELEMENTS,golden:assume_same,mutant:assume-divby-tag-as-same-elements,mutant:assume-same-elements-payload-four-bytes | assumption-not-arithmetic
 tag.Bounded                  | 12 | 13.1 | implemented   | T6  | 1 | const:ATTR_BOUNDED,golden:assume_bounded,mutant:assume-bounded-bounds-swapped                         | assumption-not-arithmetic
+tag.Dictionary               | 10 | 13.1 | implemented   | T15 | 1 | const:ATTR_DICTIONARY,golden:hint_entry,golden:hint_memory,mutant:hint-dictionary-count-wrong         | hints-do-not-change-answers
+tag.OptimizationHints        | 11 | 13.1 | implemented   | T15 | 1 | const:ATTR_OPTIMIZATION_HINTS,golden:hint_entry,mutant:hint-tag-as-dictionary,mutant:hint-entry-flag-dropped,mutant:hint-flag-bit-misplaced | hints-do-not-change-answers

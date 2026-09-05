@@ -57,7 +57,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # it). T0 built the ledger itself and added no opcode, so it names no row
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
-LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7"}
+LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T15"}
 
 
 class Ledger:
@@ -131,10 +131,11 @@ _attr_family("padding", "13.1", [("zero", 0), ("neg_zero", 1), ("nan", 2), ("pos
 _attr_family("visibility", "13.1", [("public", 0), ("private", 1)])
 # The bytecode ATTRIBUTE TAGS (BytecodeAttrOpcodes.td), which are a third
 # authority: AttrDefs.td says what an attribute MEANS and this says which byte
-# announces it where one is written self-contained. Knife T6 writes four of
-# the twelve; `Integer` (1) and `Float` (2) are knife 3's reduction identities
-# and are not in ruling 6's list.
+# announces it where one is written self-contained. Knives T6 and T15 write
+# six of the twelve; `Integer` (1) and `Float` (2) are knife 3's reduction
+# identities and are not in ruling 6's list.
 _attr_family("tag", "13.1", [("String", 5), ("DivBy", 8), ("SameElements", 9),
+                             ("Dictionary", 10), ("OptimizationHints", 11),
                              ("Bounded", 12)])
 
 
