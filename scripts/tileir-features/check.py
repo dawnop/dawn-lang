@@ -44,19 +44,12 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # it). T0 built the ledger itself and added no opcode, so it names no row
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
-LANDED_KNIVES = {"T0", "T1"}
+LANDED_KNIVES = {"T0", "T1", "T2"}
 
 # The frozen public range and its two frozen gaps (BytecodeOpcodes.td), which
 # together are the 100 opcodes this file has to carry a row for.
 GAPS = set(range(0x19, 0x25)) | set(range(0x34, 0x3A))
 EXPECTED_CODES = {c for c in range(0x00, 0x76) if c not in GAPS}
-
-# The coverage knives that have LANDED. A T name is the coverage series
-# (docs/tile-backend-design.md 2.4) and not a promise; what says "not yet" is
-# the status column, and the two are held together here: a row that is still
-# `unimplemented` must name a knife nobody has run, and an `implemented` row
-# must name one somebody has. Add a knife's name the day it lands.
-LANDED_KNIVES = {"T0", "T2"}
 
 # The version deltas, so that a row cannot quietly claim 13.1 for an opcode
 # that needs a newer assembler. Everything not named here entered at 13.1.
@@ -301,10 +294,10 @@ def self_test():
                       "tanh                     | 0x6A | 13.1 | unimplemented | T1 "),
          "bytecode.dawn emits OP_TANH"),
         ("a row claiming an opcode the writer does not emit",
-         good.replace("cat                      | 0x0C | 13.1 | unimplemented | T2  | 0 | -",
-                      "cat                      | 0x0C | 13.1 | implemented   | 7b  | 2 | "
+         good.replace("break                    | 0x0A | 13.1 | unimplemented | T5  | 0 | -",
+                      "break                    | 0x0A | 13.1 | implemented   | 7b  | 2 | "
                       "golden:mathops"),
-         "has no OP_CAT"),
+         "has no OP_BREAK"),
         ("a version the deltas contradict",
          good.replace("atan2                    | 0x6E | 13.2", "atan2                    | 0x6E | 13.1"),
          "atan2 entered at 13.2, not 13.1"),
@@ -359,9 +352,9 @@ def self_test():
 
     # The other input: an OP_ the writer grew and nobody wrote down.
     grown = bytecode.replace("const OP_TANH: Int = 0x6A",
-                             "const OP_TANH: Int = 0x6A\nconst OP_CAT: Int = 0x0C")
+                             "const OP_TANH: Int = 0x6A\nconst OP_ASSUME: Int = 0x06")
     _c, _l, found = check(good, grown, files, ledger)
-    if any("OP_CAT (0x0C) and the ledger has no row" in p or "marked unimplemented but" in p
+    if any("OP_ASSUME (0x06) and the ledger has no row" in p or "marked unimplemented but" in p
            for p in found):
         print("PASS  self-test: an OP_ constant the ledger does not call implemented")
     else:
