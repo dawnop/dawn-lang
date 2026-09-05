@@ -1,0 +1,537 @@
+# Layer 2 for the trigonometric kernels (knife T1), the thirteenth of these
+# programs after vadd_diff, mask_diff, red_diff, mm_diff, stride_diff,
+# int_diff, wide_diff, gath_diff, scan_diff, atom_diff, erf_diff and
+# seq_diff: one `!Gpu` program runs each kernel scripts/tile-golden pins
+# under `with_gpu_real` against the machine's GPU and under `with_gpu_fake`
+# against hand-written host references, and prints what each device
+# answered.
+#
+#   trig_diff <trig_sweep.cubin> <rope.cubin>
+#
+# WHAT ONLY A DEVICE CAN SAY, and what this program was written to ask:
+#
+#   * `remf` is TRUNCATED division and not IEEE `remainder`. Ops.td states
+#     it as `a - trunc(a / b) * b` and the two operations differ on every
+#     lane where the true quotient is more than half a step from its
+#     truncation, which is most of them. `std/gpu.ref_remf` computes the
+#     truncated one exactly, and the `index` line below counts the lanes
+#     where the other answer would be different, so a green run is a
+#     measurement of the semantics and not a repetition of the sentence.
+#   * `atan2`'s ARGUMENT ORDER. The dialect names its operands `x` and `y`
+#     and then defines the result as the arc tangent of `x / y`, so its `x`
+#     is C's `y` and the numerator comes first. Reading the names instead
+#     of the sentence swaps them, which is right on the diagonal and wrong
+#     everywhere else; the mutant atan2-operands-swapped is that reading.
+#   * `atan2`'s QUADRANTS. Everything off the right half plane is a whole
+#     `pi` away from `atan(a / b)`, and the axes are their own cases. The
+#     corpus carries both left quadrants, both signs on the `y = 0` axis
+#     and the origin.
+#
+# THE TIERS ARE SPLIT. The sweep is tolerance, by the nature of the
+# operations rather than of the corpus: five of the seven are libdevice
+# approximations, `atan2` is one too, and the host references are series
+# written for this file. `remf` alone is exact on both sides, and it rides
+# in the same kernel, so its lanes are held to the same tolerance as its
+# neighbours even though they agree bit for bit -- the `ops` line records
+# each of the seven separately, so that is visible rather than lost in the
+# maximum. `rope` is EXACT, by algebra: two correctly rounded products and
+# one correctly rounded sum, in an order the indices fix on both sides.
+#
+# THE CONTROL IS A KERNEL. `rope` is leetgpu 61, and leetgpu 61 computes no
+# trigonometric function at all: it is handed `cos` and `sin` as buffers,
+# exactly as leetgpu 93 is. So it goes through none of the seven, none of
+# the mutants below may move it at layer 0 or on the device, and it is what
+# tells "the mutant broke the trigonometry" from "the mutant broke the
+# tree".
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, trig_sweep_ref, rope61_ref,
+  ref_remf }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a value no
+## kernel here computes, so a lane that still has it is a lane nothing
+## wrote.
+pub const SENTINEL: Float = 0.0 - 12345.678
+
+## leetgpu's own agreement criterion, and the tolerance tier's. leetgpu 61
+## itself compares under 1e-4; this is the stricter number the rest of this
+## tree uses.
+pub const ATOL: Float = 1.0e-5
+pub const RTOL: Float = 1.0e-5
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const TRIG_N: Int = 500
+pub const TRIG_TILE: Int = 128
+pub const ROPE_M: Int = 96
+pub const ROPE_D: Int = 32
+pub const ROPE_ROWS: Int = 32
+
+## The seven segments of the sweep's output buffer, in the order the kernel
+## writes them.
+pub const TRIG_SEGMENTS: Int = 7
+
+## The one lane of the sweep that is pinned rather than swept: 252 is set
+## to exact zero so that the origin `atan2(0, 0)` is in the corpus. Lane
+## 250 is already an exact zero by arithmetic and its denominator is
+## negative, which is the other axis case.
+const ORIGIN_LANE: Int = 252
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, for the reason
+# gath_diff gives (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a
+## `gx` by 1 by 1 grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. The LAST buffer is the output, and the
+## one this reads back.
+fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = gpu.gpu_download(hs[len(hs) - 1])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+# ---- the tier ----
+
+## Whether `got` is within the tolerance tier's distance of `want`, by
+## leetgpu's own criterion. A NaN on either side is never within: two NaNs
+## are not agreement, they are two failures.
+pub fn within(got: Float, want: Float) -> Bool =
+  if got != got || want != want {
+    false
+  } else if got == want {
+    true
+  } else if got - got != 0.0 || want - want != 0.0 {
+    false
+  } else {
+    let d = if got > want { got - want } else { want - got }
+    let m = if want > 0.0 { want } else { 0.0 - want }
+    d <= ATOL + RTOL * m
+  }
+
+fn all_within(got: List[Float], want: List[Float]) -> Bool =
+  len(got) == len(want) && list.all(range(0, len(want)), i => within(got[i], want[i]))
+
+## The largest miss as the tolerance criterion measures it: 1.0 is exactly
+## the tolerance, 0.0 is bit-identical.
+fn scaled_miss(got: List[Float], want: List[Float]) -> Float =
+  list.fold(range(0, len(want)), 0.0, (acc, i) => {
+    let a = got[i]
+    let b = want[i]
+    let d = if a > b { a - b } else { b - a }
+    let m = if b > 0.0 { b } else { 0.0 - b }
+    let s = d / (ATOL + RTOL * m)
+    if s > acc { s } else { acc }
+  })
+
+## The largest scaled miss inside ONE segment of the sweep's output, so
+## that the transcript says which of the seven operations the device is
+## furthest from the reference on. Segment `j` runs from `j * TRIG_N`.
+fn segment_miss(got: List[Float], want: List[Float], j: Int) -> Float =
+  list.fold(range(j * TRIG_N, (j + 1) * TRIG_N), 0.0, (acc, i) => {
+    let a = got[i]
+    let b = want[i]
+    let d = if a > b { a - b } else { b - a }
+    let m = if b > 0.0 { b } else { 0.0 - b }
+    let s = d / (ATOL + RTOL * m)
+    if s > acc { s } else { acc }
+  })
+
+fn pair(real: Trace, fake: Trace) -> Option[(List[Float], List[Float])] =
+  match (real.result, fake.result) {
+    (Some(a), Some(b)) -> if len(a) == len(b) { Some((a, b)) } else { None }
+    _ -> None
+  }
+
+fn miss_line(real: Trace, fake: Trace) -> String = match pair(real, fake) {
+  Some((a, b)) -> "${scaled_miss(a, b)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})"
+  None -> "-"
+}
+
+## The seven segment misses as one line, named. This is the measurement the
+## ledger carries: an operation whose libdevice implementation drifts shows
+## up here as a number and not as a red run.
+fn per_op_line(real: Trace, fake: Trace) -> String = match pair(real, fake) {
+  Some((a, b)) ->
+    list.fold(range(0, TRIG_SEGMENTS), "", (acc, j) => {
+      let sep = if acc == "" { "" } else { " " }
+      acc ++ sep ++ segment_name(j) ++ "=" ++ to_string(segment_miss(a, b, j))
+    })
+  None -> "-"
+}
+
+fn segment_name(j: Int) -> String = ["sin", "cos", "tan", "sinh", "cosh", "atan2", "remf"][j]
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one kernel under its tier: `identical:exact` (bit for
+## bit), `close:tolerance`, `identical:tolerance` (a tolerance-tier kernel
+## that happened to agree bit for bit as well), `differ:result`, or
+## `blocked:..`.
+fn verdict(tier: String, fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:" ++ tier
+  } else if tier == "exact" {
+    "differ:result"
+  } else {
+    match pair(real, fake) {
+      Some((a, b)) -> if all_within(a, b) { "close:tolerance" } else { "differ:result" }
+      None -> "differ:result"
+    }
+  }
+}
+
+# ---- the corpus ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+## The argument of the five unary operations and the numerator of the
+## `atan2`: `(i - 250) * 0.12`, which runs from -30 to 29.88 in even steps
+## through exact zero, with lane 252 pinned to zero as well so that the
+## origin is in the corpus.
+##
+## Why -30 and not -700: `cosh(30)` is 5.3e12 and `cosh(710)` is an
+## infinity, and an infinity is not within a tolerance of anything (the
+## `within` above says so), so the overflow edge is deliberately outside.
+## Why a step of 0.12: it crosses pi nineteen times, it never lands closer
+## than 1.24e-3 to a pole of the tangent (measured; the largest tangent in
+## the corpus is 806), and a reader can check every count on the `index`
+## line by arithmetic.
+fn sweep_values() -> List[Float] =
+  list.map(range(0, TRIG_N), i => if i == ORIGIN_LANE { 0.0 } else { to_float(i - 250) * 0.12 })
+
+## The `atan2`'s denominator: five values cycling, one of them exactly
+## zero. Every lane of the sweep has a sign and every fifth denominator is
+## zero, so all four quadrants, both directions of the `y = 0` axis and the
+## origin are in the corpus at once.
+fn denominator_values() -> List[Float] =
+  list.map(range(0, TRIG_N), i => to_float(i % 5 - 2) * 1.25)
+
+## The remainder's divisor: seven values cycling, NONE of them zero (a
+## remainder by zero is a NaN and a NaN is never within a tolerance of
+## anything), of both signs, and small enough that the sweep's large
+## arguments wrap many times and its small ones do not wrap at all.
+fn divisor_values() -> List[Float] =
+  list.map(range(0, TRIG_N), i => to_float(i % 7) * 1.5 - 4.75)
+
+## `q` for the rotary embedding: 3072 values that cycle without repeating
+## the tables' period, so no row is a multiple of another.
+fn rope_q() -> List[Float] =
+  list.map(range(0, ROPE_M * ROPE_D), k => to_float((k * 37) % 101 - 50) * 0.03)
+
+## The two tables, HALF-SPLIT by construction: column `j` reads the same
+## entry as column `j + D/2`, which is the layout leetgpu 61 guarantees and
+## the kernel takes its shortcut from. They are not actual cosines and
+## sines, and the problem's own tests do not use actual cosines and sines
+## either: it generates them with `randn` and then copies the first half
+## over the second.
+fn rope_table(seed: Int, step: Int, span: Int, scale: Float) -> List[Float] =
+  list.map(range(0, ROPE_M * ROPE_D), k => {
+    let row = k / ROPE_D
+    let col = k % ROPE_D
+    let t = col % (ROPE_D / 2)
+    to_float((row * seed + t * step) % span - span / 2) * scale
+  })
+
+## The lanes of the corpus that matter, counted. run.sh holds every one of
+## these above zero, which is what makes the claims above measurements: a
+## corpus with no left quadrant would let a reference that forgot the `pi`
+## agree, and a corpus where the remainder never exceeds half the divisor
+## would let IEEE `remainder` pass for `fmod`.
+fn shape_of() -> String = {
+  let x = sweep_values()
+  let y = denominator_values()
+  let z = divisor_values()
+  let idx = range(0, TRIG_N)
+  let neg = list.filter(idx, i => x[i] < 0.0)
+  let big = list.filter(idx, i => x[i] > 20.0 || x[i] < 0.0 - 20.0)
+  let past_pi = list.filter(idx, i => x[i] > gpu.PI || x[i] < 0.0 - gpu.PI)
+  let q2 = list.filter(idx, i => x[i] > 0.0 && y[i] < 0.0)
+  let q3 = list.filter(idx, i => x[i] < 0.0 && y[i] < 0.0)
+  let axis = list.filter(idx, i => y[i] == 0.0 && x[i] != 0.0)
+  let origin = list.filter(idx, i => y[i] == 0.0 && x[i] == 0.0)
+  let rem_neg = list.filter(idx, i => x[i] < 0.0 && z[i] > 0.0)
+  let rem_small = list.filter(idx, i => magnitude(x[i]) < magnitude(z[i]))
+  # the lanes where IEEE `remainder` would answer something else: the
+  # truncated remainder is more than half the divisor away from zero
+  let rem_half = list.filter(idx, i => magnitude(ref_remf(x[i], z[i])) * 2.0 > magnitude(z[i]))
+  "lanes=${TRIG_N} negative=${len(neg)} past_pi=${len(past_pi)} big=${len(big)}"
+    ++ " q2=${len(q2)} q3=${len(q3)} axis=${len(axis)} origin=${len(origin)}"
+    ++ " rem_negative=${len(rem_neg)} rem_smaller=${len(rem_small)} rem_over_half=${len(rem_half)}"
+}
+
+fn magnitude(v: Float) -> Float = if v < 0.0 { 0.0 - v } else { v }
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String = ["trig_sweep", "rope"][i]
+
+## The sweep is tolerance tier and cannot be anything else: six of its
+## seven operations are approximations on one side or the other, and no
+## corpus changes that.
+##
+## `rope` is NOT, and like leetgpu 33 it is exact by ALGEBRA rather than by
+## corpus: every operation in it is one IEEE 754 requires to be correctly
+## rounded (two products and one sum or difference), the order is fixed by
+## the indices on both sides rather than by a reduction, and the
+## reference's `+ (-x2) * s` is the kernel's `- x2 * s` to the last bit
+## because negation is exact. The device agrees bit for bit, which is the
+## measurement and not the argument.
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier`
+## column of scripts/leetgpu-diff/problems.txt against it.
+pub fn tolerance_tier() -> List[String] = ["trig_sweep"]
+
+fn tier_of(i: Int) -> String =
+  if list.any(tolerance_tier(), n => n == case_name(i)) { "tolerance" } else { "exact" }
+
+fn case_grid(i: Int) -> Int =
+  if case_name(i) == "trig_sweep" {
+    TRIG_N / TRIG_TILE + 1
+  } else {
+    ROPE_M / ROPE_ROWS
+  }
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order. Every output buffer is LONGER than the answer, so the
+## sentinel in its tail says whether a write went past the end.
+fn case_bufs(i: Int) -> List[(String, List[Float])] =
+  if case_name(i) == "trig_sweep" {
+    [("f64", sweep_values()), ("f64", denominator_values()), ("f64", divisor_values()),
+      ("f64", sentinel_buffer(TRIG_SEGMENTS * TRIG_N + 8))]
+  } else {
+    [("f64", rope_q()), ("f64", rope_table(5, 3, 41, 0.05)), ("f64", rope_table(7, 11, 37, 0.055)),
+      ("f64", sentinel_buffer(ROPE_M * ROPE_D + 8))]
+  }
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
+  if case_name(i) == "trig_sweep" {
+    map.from([("trig_sweep", (4, last_out((dts, ins) => trig_sweep_ref(TRIG_N, dts, ins))))])
+  } else {
+    map.from([("rope", (4, last_out((dts, ins) => rope61_ref(ROPE_M, ROPE_D, dts, ins))))])
+  }
+
+## A vector as a line: its length, its first lanes and its last ones.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn buffers_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("trig_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !Exit !io = {
+  io.eprintln("usage: trig_diff <trig_sweep.cubin> <rope.cubin>")
+  io.exit(2)
+}
+
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  let count = 2
+  if len(paths) != count { usage() } else { () }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var tolerance_count = 0
+  var ops = "-"
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let gx = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs))
+    let real = with_gpu_real(cubins, () => stages(name, gx, bufs))
+    let tier = tier_of(i)
+    let v = verdict(tier, fake, real)
+    io.println("kernel ${name} tier=${tier} bufs=${buffers_of(i)} grid=(${gx}, 1, 1)")
+    if name == "trig_sweep" { io.println("  index ${shape_of()}") } else { () }
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  miss  ${miss_line(real, fake)}")
+    if name == "trig_sweep" && stopped(real) == "" {
+      ops = per_op_line(real, fake)
+      io.println("  ops   ${ops}")
+    } else {
+      ()
+    }
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v == "close:tolerance" || v == "identical:tolerance" {
+      tolerance_count = tolerance_count + 1
+    } else {
+      ()
+    }
+    if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" {
+      all_agreed = false
+    } else {
+      ()
+    }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+      && v != "identical:tolerance" {
+        blocked = v
+      } else {
+        ()
+      }
+  }
+  # The measurement, recorded and not asserted: how far each of the seven
+  # libdevice implementations is from a host series, in units of the
+  # tolerance. A tileiras or driver upgrade that changes one of them
+  # shows up here rather than in a red run.
+  io.println("probe per-op ${ops}")
+  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")

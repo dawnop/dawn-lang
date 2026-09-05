@@ -790,6 +790,21 @@ kernel 的文本与字节码 golden，两后端逐字节；层 1 CI 每 push（�
 （刀 4 到刀 6 期间这里写的是「本机驱动 560.94 装不进 cubin，台账第一行记的是 `blocked`」；
 那两行 `blocked` 留在台账的历史里，是那个装载器答过的话。）
 
+**刀 T2 把层 1 与层 3 的边界量清楚了一次**，因为它的八条操作码里有四条**只能**在层 1 红。
+判据是「这个属性说的是一个值，还是一个类型」：`permute` 的 `permutation` 与 `cat` 的 `dim`
+决定**结果的形状**（两个操作的 verifier 都是从属性推出结果类型再比对），三条指针转换决定
+**结果的元素格式**，所以把它们写错一律是类型错，`tileiras` 在设备之前就拒掉。于是刀 T2 的
+五条层 1 变异体（`join-tokens-operand-count-wrong` / `cat-dim-swapped` /
+`int-to-ptr-as-ptr-to-int` / `ptr-to-int-as-int-to-ptr` / `ptr-to-ptr-as-bitcast`）各自钉住一句
+报文，而设备上那四条（`permute-identity` / `cat-operands-swapped` /
+`extract-indices-reversed` / `num-tile-blocks-as-block-id`）**必须**绕开这条判据才立得住：
+`permute-identity` 靠的是 `shape_ops` 那个 4x4x8 的 tile 前两维**相等**（换了它就是形状错，
+到不了设备），`cat-operands-swapped` 换的是操作数而不是 `dim`，`extract-indices-reversed`
+换的是操作数的顺序而两个维度都恰好有两个 slice，`num-tile-blocks-as-block-id` 换的是
+opcode 而 `get_num_tile_blocks` 与 `get_tile_block_id` 逐字节同形。台账（`features.txt`）
+按 T0 的读法把这两类都记成层 3，理由与 `for` 那一行一样：层 3 要的是「有一条会红的变异体，
+且它改的是那条操作码的写法」，不是「它必须在设备上红」。
+
 ### 6.3 版本钉法（刀 3 实况）
 
 三个数同批改：`tileiras` 的版本与三个 wheel 的 sha256、字节码版本（`packages/tileir/src/bytecode.dawn`
@@ -1299,6 +1314,74 @@ rebase 到后者。** 冲突仍然是老三样加两处：`scripts/core-golden/s
 一条就有十七次 launch。它只在本机跑，CI 上仍只有亚秒的 `--check`。`dawn test --stdlib` 与
 `dawn test packages/tileir` 一个测试都没多：这一刀往包里加了零个机制。
 
+**刀 T1 的墙钟与分片（一次不能重述预算的测量）**。这一刀给 `tile-golden` 加两个 kernel
+（`trig_sweep` / `rope`）与一个变异体（`trig-extra-flags`），矩阵 141 项长到 **144 项**。
+于是分片的算术**头一次除得尽**：128 个 kernel 与 16 个变异体，每片 32 个加 4 个，四片的活
+一模一样，剩下的差都是机器的。
+
+**本机这次的绝对秒数不能用来重述预算，理由写在这儿而不是藏着**：跑的时候机器上还有另外
+五个 agent（`uptime` 的 load average 在 31 到 37 之间），刀 21 已经量过同一棵树在这种情况下
+全量从 746 s 拉到 881 s。所以四条预算行是这样重述的：各自拿刀 21 那次安静测量的读数，加上
+刀 21 的单项均值（一个 kernel 4.30 s、一个变异体 13.65 s，这个模型把刀 21 实测的四片和预测
+到 1.5 s 以内），**只往上走**。四片各加的东西不一样：第 1 片什么也没加（它本来就是 32 + 4），
+第 2 片加的是一个**变异体**，第 3、4 片各加一个 kernel。于是
+planning value 552 / 530 / 518 / 534 变成 **552 / 558 / 527 / 535**，`timeout-minutes`
+28 / 28 / 27 / 27。
+
+**分片的均衡是量出来的，绝对值不是**。最终树上不分片跑一次全量：**1303 s**（144 项，531 条
+PASS，退出 0），期间 load 从 7.2 涨到 12.7。按 `ITEM_TIMES` 把 144 项摊回四片是
+**317.3 / 330.9 / 319.9 / 320.2 s**，彼此相差不到 4.3%，第 2 片多出来的那点是一个偏重的
+变异体，这正是「除得尽」应有的样子。而单项均值 kernel 5.99 s、变异体 32.57 s，对照刀 21
+安静时的 4.30 s 与 13.65 s，分别是 1.4 倍与 2.4 倍（变异体每个要一次 native 构建，抢 CPU 时
+吃亏最大）。所以这次的绝对秒数换算成 planning value 是 775 / 802 / 780 / 780，**远在 660 s
+的 run pole 之上，而那是负载的产物不是回归**：刀 21 早就记过同一棵树全量能从 746 s 拉到
+881 s。四条预算行因此按上面的推导走，不按这次的秒数走。
+
+重述前按规矩跑了审计（`scripts/gate-observations.py` 拉 09-03 与 09-04 的 25 次 run，
+`scripts/check-gate-budgets.py --observed`）：四片 CI 实测最差 **427 / 414 / 385 / 371 s**，
+一条都没被点名，离「某一片实测过 550 s 就分第五片」的触发条件最近的也还有 120 s；把本刀的
+活加上去的投影是 ~427 / 443 / 394 / 380 s，**不分第五片**。审计顺带点了九条与 tile 无关的
+欠债行（native-diff-1/2、syntax-mutants-1/3、builtin-type-1/2、checker-corpus、
+pipe-contract-1、list-elems-contract），本刀不动它们。**欠一次安静的本机重测**，而重测只会把
+这四个上限往下压，那是这份文件不据以动作的方向。
+
+**刀 T2 的实测：十个新项（五个 kernel 五条变异体），四条预算行全部上调，而且这一次是把刀 T1
+欠下的「空闲机器上重测一次」付掉之后上调的。** 三轮 `ITEM_TIMES`，前两轮在 T1 落地之前的
+151 项上，第三轮在 rebase 之后的 154 项上：
+
+| | 项数 | 最小 | 最大 | 均值 | 合计 |
+|---|---|---|---|---|---|
+| 第一轮 kernel（另一个 agent 在跑，负载 7 到 26） | 131 | 4.98 s | 27.10 s | 8.40 s | 1100.3 s |
+| 第一轮变异体 | 20 | 15.44 s | 24.53 s | 18.36 s | 367.3 s |
+| 第二轮 kernel（同一棵树，负载约 5.5） | 131 | 4.23 s | 5.66 s | 4.85 s | 635.6 s |
+| 第二轮变异体 | 20 | 15.36 s | 19.42 s | 17.42 s | 348.3 s |
+| 第三轮 kernel（rebase 后，机器空闲，负载 0.18 到 4.09） | 133 | 4.30 s | 5.54 s | 4.64 s | 616.7 s |
+| 第三轮变异体 | 21 | 13.11 s | 21.77 s | 16.82 s | 353.2 s |
+
+不分片整跑三轮分别 **1484 s / 1000 s / 984 s**。前两轮把刀 21 的结论又说了一遍，而且说得更响：
+kernel 的极差从 **5.4 倍**收到 **1.3 倍**，变异体几乎没动。没有哪个 kernel 本身是贵的。
+
+**第三轮说出了一件不是负载的事：变异体比刀 21 读的贵。** 16.82 s 对 13.65 s，而一条变异体是
+一次**包的原生重建**，所以它正是那个「成本随包一起长」的项。四条预算行因此不是被负载抬上去的，
+是被这件事抬上去的。按项求和的四片是 **244.1 / 249.0 / 233.4 / 243.4 s**（均分 242.5 s），
+`(本机 + 70) × 2` 得 **628 / 638 / 607 / 627 s**。四条**全部高于**它们原来写着的
+552 / 558 / 527 / 535 s，所以四条全部重述，`timeout-minutes` 是 **32 / 32 / 31 / 32**。
+最紧的一条离 660 s 的 pole 只剩 **22 s**，于是第五片成了下一刀的问题，而不是一个投影：
+触发条件没变（CI 观测过 550 s，或规划值过 pole），只是第二条已经在一刀的射程内了。
+同一份 `ITEM_TIMES` 按五片求和是 **191.5 / 189.3 / 194.1 / 205.3 / 189.7 s**，
+规划值 **523 / 519 / 528 / 551 / 519 s**，所以分第五片确实解得开，只是不该在触发之前分。
+
+**第二片重的原因是一条变异体，不是任何一个 kernel。** 154 项里 21 条变异体，21 mod 4 = 1，
+所以第二片拿六条而另外三片各拿五条；一条变异体 16.8 s，四片之间的最大差是 15.6 s。
+刀 T1 那次「分片算术头一次除得尽」因此只持续了一刀。
+
+`scripts/gate-observations.py` 这一天拉下的四片 CI 最差是 **427 / 414 / 385 / 371 s**，
+四条新预算行都在它之上，本刀因此没有一条落进那份「声称低于实测」的名单
+（那名单上另有十二条是既有欠账，与本刀无关）。
+
+`tile-gpu-diff/run.sh` 的本机读数见 §6.4 的台账行；这一刀往它里面加了一个族（五个 kernel）
+与四条变异体，每条变异体重编五个 kernel、重汇编五次、真机重跑五次。
+
 ### 6.6 两档判词：逐位与容差（刀 7b）
 
 层 2 从第一天就写着「分逐位与容差两档」（§6.2 的表、§3.2 的 matmul 行），但直到刀 7b 容差档
@@ -1596,6 +1679,92 @@ golden 对拍」。本机没有：pin 的三个 wheel（`nvidia-cuda-tileiras` /
 之后就没人改过：83 行的表上写着 73，跨了两把刀没人发现，因为**没有任何程序读它**。
 `check.py` 现在读它，并且自检里有一条负控。这是「注释里的数字不是判词」的又一个实例。
 
+**刀 T1 的实测（三角与浮点取余，目标改判后的第一把加操作码的刀）**。七条新操作码
+`sin` 0x62 / `cos` 0x12 / `tan` 0x69 / `sinh` 0x63 / `cosh` 0x13（13.1）、`atan2` 0x6E（13.2）、
+`remf` 0x59（13.1），全是 FloatingPoint 组的逐元素浮点指令。五条结论：
+
+1. **七条一个可选字段都没有，所以一个 flags varint 也不写。** 逐条核过 `Ops.td`：每条记录的
+   `arguments` 只有 `source`（或 `lhs` 与 `rhs`），既没有 `OptionalAttr` 也没有可选操作数，
+   于是 `getVersionOrderedBitAssignments` 返回空表、`generateFlagsFieldSerialization` 什么也不
+   发。`bytecode.dawn` 的 `float_op_has_flags` 是黑名单形态，七条全部进黑名单。**多写一个
+   flags 0 在层 0 与层 1 都是隐形的**：渲染器根本不打印 flags，而 flags 0 正是一条**有**可选
+   字段的操作会合法写出的值；但字节流会长一个字节，读者从此错开一位。变异体
+   `trig-extra-flags` 只给 `sin` 多写这一个字节，`tileiras` 的原话是
+   `error at offset 112: failed to get result type 0 for DivIOp`（这个 kernel 里没有 `divi`：
+   `DivIOp` 是错开一位之后下一个字节解出来的东西，和 `exp` 那条注释记的
+   `failed to get result type 0 for CmpIOp` 是同一种形状）。
+2. **`remf` 是截断取余（C 的 `fmod`），不是 IEEE `remainder`，而这是量出来的不是抄来的。**
+   方言的散文写着 `a - trunc(a / b) * b`、符号随被除数，本仓的 `std/gpu.ref_remf` 用移位相减
+   把截断取余算**精确**（两个可表示数的余数本身可表示，所以这条参考实现不是意见而是答案）。
+   语料 500 条 lane 里有 **248 条**「余数的绝对值超过除数的一半」，那正是 IEEE `remainder`
+   会给出另一个答案的地方；另有 106 条负被除数、44 条 `|a| < |b|`。本机 3080 上
+   `remf` 那一段的 scaled miss 是 **0.0**，逐位相同。所以设备确实跑截断取余，且这句话有
+   语料撑着：换成 IEEE 语义会在 248 条 lane 上红。
+3. **`atan2` 的操作数是分子在前，而操作数的名字会把人带沟里。** `Ops.td` 把两个操作数叫
+   `x` 和 `y`（按这个顺序），而 C 的 `atan2` 是 `y` 在前；真正说了算的是紧挨着的那句散文
+   「the arc tangent of the ratio of first and second input arguments x / y」，所以方言的 `x`
+   是 C 的 `y`。**按名字读会把两个操作数读反**，这就是层 2 变异体
+   `atan2-operands-swapped`（它不是稻草人，是一个仔细的人真会走的那条路）。语料把四个象限
+   与两条轴都放进去：99 条第二象限、100 条第三象限、99 条 `y = 0`（分子两种符号都有）、
+   1 条原点 `atan2(0, 0)`，全部与 C 的约定一致（原点答 0）。**负零不进语料**：这棵树上的
+   `Float` 造不出负零，而 `atan2(±0, ±0)` 的四种答案要靠负零才分得开。
+4. **本机 3080 的逐操作误差**（scaled miss，1.0 就是 `atol = rtol = 1e-5`）：
+   `sin=1.37e-11 cos=1.42e-11 tan=2.71e-11 sinh=2.50e-10 cosh=2.50e-10 atan2=1.48e-11
+   remf=0.0`。`sinh` / `cosh` 大一个量级不是设备差，是宿主参考走 `(e ± 1/e) / 2`、而语料到
+   `|x| = 30`（`cosh(30) = 5.3e12`）时 `ref_exp` 自己的几个 ulp 被放大了。语料**不到**
+   溢出边（`cosh(710)` 是无穷，而无穷不在任何容差之内，`within` 就是这么写的）。
+   `tan` 的语料离极点最近 1.24e-3，最大 tan 值 806，靠的是容差的相对那一半。
+5. **`trig_sweep` 不求和。** `mathops`（刀 7b）把十个超越函数加成一个总数，够抓「操作码抄错
+   一行」但说不出是哪个函数的哪条 lane 动了；`trig_sweep` 把七个函数各写进输出缓冲区自己的
+   一段（七段各 500 lane，同一条 tail mask 在七个基址上各用一次），于是每个函数的每条 lane
+   都是一次独立比较，转录里还有一行 `ops` 分别记七个 miss。`sin-as-cos` 只红第一段，这是
+   分段的直接好处。
+
+**刀 T1 的第二件事：leetgpu 61 不需要三角函数，而这是同一个反转的第二例。** §2.4 的预研写着
+「61 靠三角函数」，开工按刀 9 与刀 21 的规矩逐条核签名，答案又在签名里：
+`solve(Q, cos, sin, output, M, D)`，题面还额外保证两张表是 half-split（第 `j` 列与第 `j + D/2`
+列相等），**`cos` 与 `sin` 是输入缓冲区**。刀 21 在 93 上记过一模一样的反转，理由也一样。
+于是 61 这一行是刀 18 那种「把已经付过钱的机制花掉」的行，而它落在这把刀里是因为它的 kernel
+正好是这一族的**kernel 级控制**：`rope` 一条三角函数都不走，三条变异体一条都不许动它。
+真正卡在三角函数上的是 **76**（角度由 `2π/19` 与位置在 solve 内部算出，另外还是 11 步自回归
+带 argmax 的序列）与 **39**（FFT 的旋转因子，另外还要每级一次 launch），本刀都不取。
+`rope` 是**逐位档**，而且和 leetgpu 33 一样靠代数不靠语料：两个乘、一个加减，IEEE 754 全要求
+正确舍入，两边的顺序都由下标固定，宿主参考的 `+ (-x2) * s` 就是 kernel 的 `- x2 * s`；实测
+miss 恰好 0.0。
+
+**台账那本账的一处约定要改。** `features.txt` 的表头原来写着「`T` 前缀表示还没做」，因为 T0
+落地时一条操作码也没加。T1 是第一把真加操作码的覆盖刀，于是这句不再成立：现在
+`check.py` 里有一个 `LANDED_KNIVES` 集合，两个方向都查：`implemented` 的行不许指向一把没人
+动过的刀，`unimplemented` 的行也不许指向一把已经落地的刀（那把刀本该欠着它）。自检里各有
+一条负控。
+
+### 6.7 写入器的三个字节形状（刀 T2 实测）
+
+从 `BytecodeGen.cpp` 与 `BytecodeWriter.cpp` 逐条量出来的，三条都是「读源码比读文档准」的
+实例。只有第二条是**先写错、被 `tileiras` 纠正**的（那次的报文钉在写入器的注释里），另外两条
+在源码里就分得清；写在一起是因为三条都长得像已经在案的某个形状，而字节不是：
+
+1. **`DenseI32ArrayAttr` 不是 `ArrayAttr`。** 归约的 `identities` 是 `mlir::ArrayAttr`，写法是
+   「个数 + 每个元素自包含（tag、元素类型下标、载荷）」；`permute` 的 `permutation` 是
+   `DenseI32ArrayAttr`，它的 ODS getter 答的是 `ArrayRef<int32_t>`，于是走
+   `writeOpAttribute` 的 `writeLEVarSize` 那一支：**个数 varint，然后每个元素四个裸的小端
+   字节**，没有 tag 也没有类型下标。两者都是「一串小整数」，读起来一模一样，字节完全不同。
+   写入器里 `emit_i32_array` 与 `identity_attr` 相邻放着，包测试把两种形状并排钉死。
+2. **变长操作数的操作也写结果个数。** tblgen 的 `Operator::isVariadic()` 对**参数或结果**
+   任一为变长都答真，而 `generateSimpleResultSerialization` 是在这个谓词下写结果个数的。
+   所以 `extract`（一个固定结果 + 变长的 `indices`）与 `join_tokens`（一个固定结果 + 变长的
+   `tokens`）都要在结果类型**之前**写一个 1。先写漏了，`tileiras` 答
+   `error at offset 98: failed to get result type 10 for ExtractOp`（它把类型下标当成了个数）。
+   写入器里这条走 `emit_op_counted`，与 `emit_op` 分开，注释写着这句报文。
+3. **`I64Attr` 是裸的内联 varint。** `cat` 的 `dim` 走 `writeOpAttribute` 的 `std::is_integral_v`
+   那一支（`writeVarInt`），读端由生成代码把位宽递给 `parseScalarAttributeInline`，所以流里
+   **没有类型下标**、也不是 zigzag 的。与刀 3 起 `reduce` 的 `dim` 同形，这次是确认而不是发现。
+
+另外两条与语义有关、写在 `packages/tileir/src/dev.dawn` 的接口注释里而不是这里：`extract`
+的 `indices` 是**切片编号**不是元素偏移（源 tile 的每一维有 `from[k] / to[k]` 个切片），
+`permute` 的 `perm[k]` 说的是「答案的第 k 维是源的第 `perm[k]` 维」（PermuteOp 的 verifier
+就是拿这条推结果形状的）。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
@@ -1632,6 +1801,8 @@ golden 对拍」。本机没有：pin 的三个 wheel（`nvidia-cuda-tileiras` /
 
 | **20 三条注意力序列与一次消元**（已落地） | 「设备把四串新的 launch 跑成四个程序，而九个新 kernel 里没有一个只是把已经录过的东西再写一遍：leetgpu 111 的**七次** launch 里五次用的是既有 kernel，leetgpu 56 的三次 launch 只有两个 kernel。同时判词本身补上一个洞：一道有三个输出的题，不能靠看其中一个下判断」 | 包、假设备、真机 handler、运行时**一行没改**，`tileiras` 与字节码版本没动，**零新 opcode**。kernel：九个。`kv_scores` / `kv_context`（96，int8 缓存加逐位置 f32 scale）、`attn_bwd_mmt` / `attn_bwd_ds`（111，转置乘积与 softmax 的雅可比）、`lin_attn_s` / `lin_attn_out`（56）、`ols_gram` / `ols_elim` / `ols_beta`（33）。**复用的四处**：111 的第一、二次 launch 是刀 16 的 `attn_scores` 与 `attn_softmax`，第四次是 `attn_scores` **第二次**（`dP = dO V^T` 本来不该除 `sqrt(d)`，但消费它的 `dS` 那一行对 `dP` 线性，所以把除法提前到这次 launch、末尾那次删掉，答案一模一样），第六次是 `attn_context`，第三、七次是同一个 `attn_bwd_mmt` 跑两遍；96 的中间一次是 `attn_softmax`；56 的第二次是 `lin_attn_s` 再跑一遍，只把第二个实参换成一个**全 1 的缓冲区**（列和就是与一列 1 的乘积，复用在**操作数**上，前三刀分别在 mask、grid 与 scale 上）。宿主：`std/gpu` 九个参考实现。harness：`Seq` 的 `read: String` 改成 `reads: List[String]`，判词把它们首尾相接后比较 | 层 0/1 九个新 golden，`FUNC GLOBAL` 九个，`tileiras` 一次通过；层 2 本机 3080 二十条序列加对照全绿（**逐位 3、容差 18**）。leetgpu **33 / 56 / 96 / 111** 可解，累计 **83 / 97**。刀 7a…19 的 102 个 golden 一字节没动。**33 是第三条逐位档序列，而它的理由比另外两条强**：`apsp` 与 `kmeans` 的逐位要靠语料，33 只靠代数，它的每一个操作都是 f64 的 `addf` / `subf` / `mulf` / `divf`，IEEE 754 要求这四个都正确舍入，两边的顺序又都由 `d_for` 与下标固定，没有一棵折叠树是自由的（实测 miss 恰好 0.0）；高斯-约当不选主元也是代数给的（Gram 矩阵对称正定，顺序主子式全正） | 层 1 **零条**（零新 opcode）。层 2 **零条新变异体**：负控是把四条序列塞进刀 16 那四条变异体，矩阵从 68 格长到 **84 格**、红集从 58 长到 **72**，逐格按名字钉死。十二个绿仍是在案的三种形状，`kv` 与 `ols` 的 grid 绿落在**第一种**（一个 grid 到底）而不是第二种（幂等）：`kv` 三次 launch 都是一个 block 一个头，`ols` 全程一个 block，因为一次消元步在写每一行的同时要读主元行，两个 block 就是数据竞争。另有一条**自轴负控**：把 `std/gpu.ols_beta_ref` 读的列从 `f` 改成 `f + 1`，只有 `ols` 一条红 |
 | **T0 特性台账与门禁**（已落地，目标改判后的第一刀，§2.4） | 「Tile IR 的 100 条公开操作码里，每一条都说得出实现于哪一刀、覆盖到哪一层、以及做不到那一层时的具名理由」（今天说不出：`problems.txt` 记的是题不是特性，而「还差什么」只存在于预研笔记里） | `scripts/tileir-features/`（`features.txt` 100 行加头注、`check.py` 加 `--self-test`）、`gates.yml` 的 `tree-policy` 加一步、`docs/tile-backend-design.md` §2.4 与本表、`docs/README.md` 一句 | `check.py` 绿并打印计数（实现 63 / 未实现 26 / 挂起 9 / 结构性 2；层 2 有 48 条、层 3 有 17 条）；期望集合是 `bytecode.dawn` 的 `OP_` 表，两个方向都查 | `--self-test` 十五条负控加一条阳性对照，负控含：多一个 `OP_` 而台账无行、台账少一行、码对不上、`implemented` 行声称层 2 但没有任何 golden 含这个操作、声称层 3 但不指名变异体、版本列与 13.2 / 13.3 增量表不符；阳性对照是真实输入必须绿 | 0.5（实报 0.5；门禁本机 0.03 s，自检 0.13 s，落在 `tree-policy`，budget 不动） |
+| **T1 三角与浮点取余**（已落地，覆盖刀里第一把加操作码的） | 「Tile IR 的 `sin` / `cos` / `tan` / `sinh` / `cosh` / `atan2` / `remf` 这七条逐元素浮点指令，本机 3080 上每一个 lane 都与一份独立写的宿主参考对得上；而 `remf` 到底是截断取余还是 IEEE `remainder`、`atan2` 的两个操作数谁是分子，都是量出来的而不是抄散文抄来的」 | `packages/tileir`：`bytecode.dawn` 七个 `OP_` 常量加 `float_op` 七行，七条全进 `float_op_has_flags` 的黑名单（它们一个可选字段都没有）；`dev.dawn` 七个公开函数；`prog.dawn` 的名字表。`render.dawn` **一行没改**（op 名从头到尾是字符串，rounding 表里没有它们）。`std/gpu.dawn`：七个 `ref_*` 二次意见（`ref_sin` / `ref_cos` 是 Cody-Waite 分段常量加泰勒级数，`ref_atan` 是两级参数归约加级数，`ref_remf` 是移位相减的**精确**算法）加 `trig_sweep_ref` / `rope61_ref`，四个测试块。kernel 两个：`trig_sweep`（七段输出，每个函数一段）与 `rope`（leetgpu 61）。新族 `scripts/tile-gpu-diff/trig_diff.dawn` | 层 0/1 两个新 golden，`FUNC GLOBAL` 两个，`tileiras` 一次通过；层 2 本机 3080 `trig_sweep` `close:tolerance`（最大 miss 2.50e-10）、`rope` `identical:exact`（miss 0.0）。逐操作 miss：`sin=1.37e-11 cos=1.42e-11 tan=2.71e-11 sinh=2.50e-10 cosh=2.50e-10 atan2=1.48e-11 remf=0.0`。语料的十项计数由 `run.sh` 逐项钉在零以上。台账七行从 `unimplemented` 改成 `implemented`（实现 63 → **70**、未实现 26 → **19**；层 2 有 53 条、层 3 有 19 条）。leetgpu **61** 可解，累计 **86 / 97**，但 **61 一条三角函数都不需要**（`cos` 与 `sin` 是输入缓冲区，是刀 21 在 93 上记过的同一个反转），所以它是「花掉机制」而不是「本刀解锁」，真正卡在三角函数上的是 76 与 39 | 层 1 一条：`trig-extra-flags`（给 `sin` 多写一个 flags 0 → 文本不动、字节长一个、`tileiras` 答 `error at offset 112: failed to get result type 0 for DivIOp`）。层 2 两条写入器变异体，都同长、层 0 盲、`tileiras` 收下：`sin-as-cos`（`sin` 写成 `cos` 的操作码）与 `atan2-operands-swapped`（两个操作数对调，即按操作数名字而不是散文去读方言）；两条都只红 `trig_sweep`，`rope` 是 kernel 级控制（它一条三角函数都不走）一次都不动 | 1（实报 1；`tile-golden/run.sh` 本机全量见 §6.5，`tile-gpu-diff/run.sh` 加一个 native 构建、两个 kernel 的真机对拍与两个变异体） |
+| **T2 形状与指针转换**（已落地，特性覆盖的第二刀，§2.4） | 「Tile IR 的三个形状操作、grid 的范围、token 的合流与三条指针转换，各有一个 kernel 在本机 3080 上跑过，而且各有一条**改它自己写法**的变异体会红」（今天写不出：包里的 `permute` 是 stride 的排列而不是方言的 0x53，token 链是一条线不是一张图，grid 的范围没人读过，地址只是梯子的中间值而不是一个能算的数） | **八条新 opcode**（全 13.1）：`extract` 0x26 / `cat` 0x0C / `permute` 0x53 / `join_tokens` 0x3C / `get_num_tile_blocks` 0x2E / `int_to_ptr` 0x33 / `ptr_to_int` 0x56 / `ptr_to_ptr` 0x57。包：`dev` 加十三个效果操作、`I64` 与 `Ptrs[D]` 两个类型、十二个公开函数（`extract` / `cat` / `permute_tile` / `num_blocks` / `d_fork2` / `ptrs` / `ptr_offset` / `ptr_to_int` / `int_to_ptr` / `ptr_to_ptr` / `load_ptrs` / `i64_const` 与 `add_i64`），`prog` 加十一种 `TileOp` 与三个校验、`lower` 加八条 `Instr`、`render` 与 `bytecode` 各八行。`d_fork2` 是 `t_tok_get` / `t_tok_set` / `t_tok_join` 的唯一客户，它们是记录 handler 的排序单元被暴露出来的样子，与 `t_loop_begin` / `t_loop_end` 之于 `d_for` 同理。kernel：五个（`shape_ops` / `grid_stride` / `token_join` / `ptr_roundtrip` / `ptr_recast`）。宿主：`std/gpu` 五个参考实现加一个私有的 `f32_of_bits`（没有 bits-to-float 原语，按 `narrow.bf16_bits` 的反方向用精确算术拼）。层 2 新族 `scripts/tile-gpu-diff/shape_diff.dawn` | 层 0/1 五个新 golden，`FUNC GLOBAL` 五个，`tileiras` 全过；层 2 本机 3080 五个 kernel 全绿（**逐位 5、容差 0**）；台账八行从 `unimplemented` 改成 `implemented`，实现 70 → 78 条、未实现 19 → 11 条、层 3 从 19 条到 **27 条**，而且**八条全部到层 3**。刀 3…T1 的 128 个 golden 一字节没动 | **九条，分成两半，而分法本身是本刀最值钱的结论**（§6.2）：层 1 五条（`join-tokens-operand-count-wrong` / `cat-dim-swapped` / `int-to-ptr-as-ptr-to-int` / `ptr-to-int-as-int-to-ptr` / `ptr-to-ptr-as-bitcast`，各钉一句 `tileiras` 报文），层 2 四条（`permute-identity` / `cat-operands-swapped` / `extract-indices-reversed` / `num-tile-blocks-as-block-id`，红集逐条按名字钉死，每条只红它自己那一个 kernel）。判据是「这个字段说的是值还是类型」：`permute` 的 `permutation`、`cat` 的 `dim` 与三条指针转换的元素格式**都决定结果类型**，写错就是类型错、到不了设备，所以它们的层 3 证据只能长在层 1 上；四条设备变异体各自绕开了这条判据，`permute-identity` 靠的是 `shape_ops` 的 4x4x8 前两维相等 | 1.5（实报 1.5；`dawn test packages/tileir` 97 个测试全绿（本刀加九个）、`dawn test --stdlib` 152 全绿（加一个）、`dawn test selfhost` 595 全绿；`tile-golden` 不分片整跑三轮 1484 / 1000 / 984 s，空闲机器上四片 244.1 / 249.0 / 233.4 / 243.4 s，四条预算行全部上调到 628 / 638 / 607 / 627 s，`timeout-minutes` 32 / 32 / 31 / 32，pole 未动；`tile-gpu-diff` 多一个族与四条变异体。数字与两轮的负载见 §6.5） |
 
 | **21 两块 transformer**（已落地） | 「设备把两串**整块**的 launch 跑成两个程序：leetgpu 74 十二次、93 十七次，比此前最长的序列还长七次，而二十九次 launch 里有六次用的是既有 kernel。同时台账第一次承认一件事：一行可以录在比题目小的形状上，而那是宿主参考实现的限制，不是后端的」 | 包、假设备、真机 handler、运行时**一行没改**，`tileiras` 与字节码版本没动，**零新 opcode**（74 的 gelu 是 `tanh` 近似而不是刀 15 的 `erf`，`tanh` 从刀 7b 起就在包里）。kernel：十五个。`gpt_ln` / `gpt_qkv` / `gpt_scores` / `gpt_context` / `gpt_dense` / `gpt_fc` / `gpt_gelu` / `gpt_down`（74），`llama_rms` / `llama_qkv` / `llama_rope` / `llama_scores` / `llama_out` / `llama_ffn` / `llama_down`（93）。**复用的六处**：74 的第四次 launch 是刀 16 的 `attn_softmax`、第七与第十二次是第一个里程碑的 `vadd`（它的长度是 grid 不是录制，所以任何宽度的残差加都是它）；93 的第八次是 `attn_softmax`、第九次是刀 19 的 `gqa_context` 一字节没改（投影直接写成头优先的布局，正好是它录制时读的那个布局）、第十五次是刀 16 的 `swiglu_act`、第十一与第十七次是 `vadd`。一个 kernel 跑多次的也有三处：`gpt_ln` 两次、`llama_rms` 两次、`llama_qkv` **三次**（Q 四个头、K 与 V 各两个头，头数是 grid 给的，缓冲区的总宽度根本不进这个 kernel）、`llama_rope` 两次、`llama_ffn` 两次。宿主：`std/gpu` 九个参考实现加一个 `ref_tanh`；`linear_bias_ref` 一个供 74 的四次线性层用 | 层 0/1 十五个新 golden，`FUNC GLOBAL` 十五个，`tileiras` 一次通过；层 2 本机 3080 二十二条序列加对照全绿（**逐位 3、容差 20**），`gpt2` 的 miss 1.80e-9、`llama` 5.01e-8。leetgpu **74 / 93** 可解，累计 **85 / 97**。刀 7a…20 的 111 个 golden 一字节没动。**93 的 RoPE 不需要三角函数**：题目签名把 `cos` 与 `sin` 当输入缓冲区传进来（前研的怀疑反过来了，需要三角函数的是 **76**，它的角度在 solve 内部算，本刀因此不取它） | 层 1 **零条**（零新 opcode）。层 2 **零条新变异体**：负控是把两条序列塞进刀 16 那四条变异体，矩阵从 84 格长到 **92 格**、红集从 72 长到 **80**，两条新序列四条全红（grid 那条在这里红而在 `kv` / `ols` 上绿，因为它们的第二次 launch 把输出列块放在 grid 的第二根轴上）。另有一条**自轴负控**：把 `std/gpu.rope_ref` 的 cos 与 sin 对调，只有 `llama` 一条红（miss 5.01e-8 → 1.13e7）。顺手补一个门：`problems.txt` 表头的题数从刀 18 起就没人改过（83 行的表上写着 73），`check.py` 现在读它 |
 

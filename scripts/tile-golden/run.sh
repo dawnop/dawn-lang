@@ -116,6 +116,15 @@
 #                            f64-tag-as-i64; a tag one off the other way
 #                            (f16, 5) would assemble and only the device
 #                            could tell
+#     trig-extra-flags       the writer gives `sin` a flags varint, which is
+#                            one byte none of knife T1's seven operations
+#                            has -> trig_sweep's text is untouched, its
+#                            bytes are one byte LONGER, and tileiras cannot
+#                            parse the body: every operand index after the
+#                            extra byte is read one place out of step. This
+#                            is the whole reason those seven are on
+#                            `float_op_has_flags`'s exclusion list, and
+#                            nothing below layer 1 can see the difference
 #     scan-result-drops-the-dim
 #                            the writer gives a `scan` the result types a
 #                            `reduce` would have, the scanned dimension
@@ -212,7 +221,9 @@ kernels=(
   gpt_ln gpt_qkv gpt_scores gpt_context
   gpt_dense gpt_fc gpt_gelu gpt_down
   llama_rms llama_qkv llama_rope llama_scores
-  llama_out llama_ffn llama_down)
+  llama_out llama_ffn llama_down
+  trig_sweep rope shape_ops grid_stride
+  token_join ptr_roundtrip ptr_recast)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -263,6 +274,12 @@ mutants=(
   scan-result-drops-the-dim
   atomic-rmw-claims-weak-ordering
   atomic-cas-writes-an-rmw-mode
+  trig-extra-flags
+  join-tokens-operand-count-wrong
+  cat-dim-swapped
+  int-to-ptr-as-ptr-to-int
+  ptr-to-int-as-int-to-ptr
+  ptr-to-ptr-as-bitcast
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -877,6 +894,109 @@ if run_item atomic-cas-writes-an-rmw-mode; then
     emit_ref(emit_opt_ref(emit_ref(emit_ref(emit_ref(w3, ptrs), cmp), val), mask), tok_in)'
   writer_mutant_checks atomic-cas-writes-an-rmw-mode cas_swap func-one-long \
     "failed to parse function body for function 'cas_swap'"
+fi
+
+# 16. The writer gives `sin` a flags varint. None of knife T1's seven
+#     operations has an optional field, so none of them writes one
+#     (BytecodeGen.cpp only emits the varint where
+#     getVersionOrderedBitAssignments found a bit to assign), and a byte
+#     written anyway is one byte the reader takes for the operand index.
+#     So the file is one byte LONGER and everything after the extra byte is
+#     read one place out of step. Neither layer 0 nor the type checker can
+#     see it: the renderer never prints a flags word, and a flags 0 is what
+#     an operation WITH an optional field would legitimately write.
+#
+#     tileiras loses the stream one operation later and says so in four
+#     lines, of which the first is the informative one:
+#
+#       error: error at offset 112: failed to get result type 0 for DivIOp
+#       error: error at offset 751: failed to parse function body for
+#         function 'trig_sweep'
+#       error: error at offset 751: failed to create function from bytecode
+#       error: input does not correspond to Tile IR bytecode
+#
+#     There is no `divi` in this kernel: `DivIOp` is what the byte after the
+#     extra one decodes to once the reader is one place out of step, which
+#     is the same shape as the measurement `exp`'s doc comment records
+#     (`failed to get result type 0 for CmpIOp`).
+if run_item trig-extra-flags; then
+  mutant_project trig-extra-flags bytecode.dawn \
+    '    "sin", "cos", "tan", "sinh", "cosh", "atan2", "remf"]))' \
+    '    "cos", "tan", "sinh", "cosh", "atan2", "remf"]))'
+  writer_mutant_checks trig-extra-flags trig_sweep func-one-long \
+    "error at offset 112: failed to get result type 0 for DivIOp"
+fi
+
+# 17. The writer says a `join_tokens` has one operand more than it wrote.
+#     The count is a one-byte varint either way, so the file is the same
+#     length and the text cannot see it; the reader walks past the end of
+#     the operand list for that instruction.
+#
+#     This is knife T2's layer-3 evidence for `join_tokens` 0x3C. Its
+#     operand list is the one thing about the operation that can be wrong
+#     without being a type error: every token is a token, so a joined set
+#     that is too large or too small is caught here and nowhere below.
+if run_item join-tokens-operand-count-wrong; then
+  mutant_project join-tokens-operand-count-wrong bytecode.dawn \
+    'let w1 = emit(emit_op_counted(w0, OP_JOIN_TOKENS, Token), len(toks))' \
+    'let w1 = emit(emit_op_counted(w0, OP_JOIN_TOKENS, Token), len(toks) + 1)'
+  writer_mutant_checks join-tokens-operand-count-wrong token_join same-size \
+    "operand index 91 out of bounds (size=40) for operand 2"
+fi
+
+# 18. The writer concatenates along the other dimension. `dim` is an inline
+#     varint and 0 and 1 are both one byte, so the file is the same length.
+#
+#     `cat`'s `dim` decides the RESULT SHAPE (CatOp's verifier derives it),
+#     so a wrong dimension can never reach the device: it is a type error,
+#     always, whatever the operands. That is why this is a layer-1 mutant
+#     and why `cat`'s device-level evidence is a different one --
+#     cat-operands-swapped in scripts/tile-gpu-diff, which keeps the shape
+#     and moves the answer.
+if run_item cat-dim-swapped; then
+  mutant_project cat-dim-swapped bytecode.dawn \
+    'emit_ref(emit_ref(emit(emit_op(w0, OP_CAT, to), dim), lhs), rhs)' \
+    'emit_ref(emit_ref(emit(emit_op(w0, OP_CAT, to), 1 - dim), lhs), rhs)'
+  writer_mutant_checks cat-dim-swapped shape_ops same-size \
+    "'cuda_tile.cat' op invalid concat at position 1, expected: 8 but got: 4"
+fi
+
+# 19, 20, 21. The three pointer conversions, each written as one of the
+#     others. All three are one-byte opcodes, so the file is the same
+#     length in every case, and all three are refused by the assembler
+#     rather than by the device.
+#
+#     That is not a weakness of the corpus, it is what these operations
+#     are: `ptr_to_int`, `int_to_ptr` and `ptr_to_ptr` change a TYPE and
+#     leave the address alone, so there is no value for a writer to get
+#     wrong. Any wrong writing of one is a type error, and a type error
+#     never reaches a GPU. The three kernels behind them still carry the
+#     ops at layer 2 (scripts/tile-gpu-diff runs ptr_roundtrip and
+#     ptr_recast on the device against a host reference that decodes the
+#     bit pattern itself); these three say that the byte written is the
+#     byte meant.
+if run_item int-to-ptr-as-ptr-to-int; then
+  mutant_project int-to-ptr-as-ptr-to-int bytecode.dawn \
+    'IntToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_INT_TO_PTR, to), src)' \
+    'IntToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_INT, to), src)'
+  writer_mutant_checks int-to-ptr-as-ptr-to-int ptr_roundtrip same-size \
+    "'cuda_tile.ptr_to_int' op operand #0 must be tile of Pointer type values"
+fi
+
+if run_item ptr-to-int-as-int-to-ptr; then
+  mutant_project ptr-to-int-as-int-to-ptr bytecode.dawn \
+    'PtrToIntTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_INT, to), src)' \
+    'PtrToIntTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_INT_TO_PTR, to), src)'
+  writer_mutant_checks ptr-to-int-as-int-to-ptr ptr_roundtrip same-size \
+    "'cuda_tile.int_to_ptr' op operand #0 must be tile of i64 values"
+fi
+
+if run_item ptr-to-ptr-as-bitcast; then
+  mutant_project ptr-to-ptr-as-bitcast bytecode.dawn \
+    'PtrToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_PTR, to), src)' \
+    'PtrToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_BITCAST, to), src)'
+  writer_mutant_checks ptr-to-ptr-as-bitcast ptr_recast same-size \
+    "'cuda_tile.bitcast' op operand #0 must be tile of i1"
 fi
 
 _item_tick ""
